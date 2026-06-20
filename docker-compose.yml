@@ -1,0 +1,12 @@
+services:
+  docscan:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      ROKID_DATA_DIR: /data
+    volumes:
+      - docscan-data:/data
+
+volumes:
+  docscan-data:

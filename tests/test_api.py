@@ -1,0 +1,113 @@
+import importlib
+
+import pytest
+from fastapi.testclient import TestClient
+
+from tests.conftest import image_bytes, make_image
+
+
+@pytest.fixture
+def client(tmp_path, monkeypatch):
+    # Point all storage at a temp dir, then reload modules that captured paths.
+    monkeypatch.setenv("ROKID_DATA_DIR", str(tmp_path))
+    import app.config as config
+    importlib.reload(config)
+    import app.db as db
+    importlib.reload(db)
+    import app.main as main
+    importlib.reload(main)
+    main.ensure_dirs()
+    main.db.init_db()
+    return TestClient(main.app)
+
+
+def _create_doc(client, title="Spec v1"):
+    r = client.post("/v1/documents", json={"title": title, "capture_device": "CXR-S"})
+    assert r.status_code == 201
+    return r.json()["document_id"]
+
+
+def _add_page(client, doc_id, idx, seed, ocr_text=None):
+    files = {"image": (f"p{idx}.png", image_bytes(make_image(seed=seed)), "image/png")}
+    data = {"page_index": str(idx)}
+    if ocr_text is not None:
+        data["ocr_text"] = ocr_text
+    return client.post(f"/v1/documents/{doc_id}/pages", data=data, files=files)
+
+
+def test_health(client):
+    body = client.get("/health").json()
+    assert body["status"] == "ok"
+    assert "versions" in body
+    assert "api_version" in body["versions"]
+
+
+def test_version_endpoint(client):
+    body = client.get("/v1/version").json()
+    assert "matcher_version" in body
+    assert "hud_contract_version" in body
+    assert any(a["name"] == "local" for a in body["analyzers"])
+
+
+def test_match_response_carries_versions_and_hints(client):
+    doc_id = _create_doc(client)
+    _add_page(client, doc_id, 0, seed=10, ocr_text="page one")
+    client.post(f"/v1/documents/{doc_id}/finalize")
+    files = {"image": ("q.png", image_bytes(make_image(seed=10)), "image/png")}
+    r = client.post(
+        "/v1/match",
+        data={
+            "document_id": str(doc_id),
+            "client_version": "android-0.9.1",
+            "sdk_hint": "cxr-l",
+        },
+        files=files,
+    )
+    body = r.json()
+    assert body["versions"]["hud_contract_version"]
+    assert body["client_version"] == "android-0.9.1"
+    assert body["sdk_hint"] == "cxr-l"
+
+
+def test_full_flow_hit(client):
+    doc_id = _create_doc(client)
+    assert _add_page(client, doc_id, 0, seed=10, ocr_text="page one").status_code == 201
+    assert _add_page(client, doc_id, 1, seed=200, ocr_text="page two").status_code == 201
+
+    fin = client.post(f"/v1/documents/{doc_id}/finalize").json()
+    assert fin["status"] == "ready"
+    assert fin["page_count"] == 2
+    assert len(fin["summaries"]) == 2
+
+    # query with the same image as page 0 -> HIT on page_index 0
+    files = {"image": ("q.png", image_bytes(make_image(seed=10)), "image/png")}
+    r = client.post("/v1/match", data={"document_id": str(doc_id)}, files=files)
+    body = r.json()
+    assert body["verdict"] == "HIT"
+    assert body["best_page"]["page_index"] == 0
+    assert len(body["hud"]["lines"]) == 3
+    assert body["hud"]["lines"][0].startswith("PAGE")
+
+
+def test_match_no_page(client):
+    doc_id = _create_doc(client)
+    _add_page(client, doc_id, 0, seed=10)
+    client.post(f"/v1/documents/{doc_id}/finalize")
+
+    files = {"image": ("q.png", image_bytes(make_image(seed=777)), "image/png")}
+    r = client.post("/v1/match", data={"document_id": str(doc_id)}, files=files)
+    body = r.json()
+    assert body["verdict"] in {"NO_PAGE", "LOW_CONF"}
+    assert len(body["hud"]["lines"]) == 3
+
+
+def test_duplicate_page_index_conflict(client):
+    doc_id = _create_doc(client)
+    _add_page(client, doc_id, 0, seed=10)
+    assert _add_page(client, doc_id, 0, seed=11).status_code == 409
+
+
+def test_missing_document_404(client):
+    files = {"image": ("q.png", image_bytes(make_image(seed=1)), "image/png")}
+    r = client.post("/v1/match", data={"document_id": "9999"}, files=files)
+    assert r.status_code == 404
