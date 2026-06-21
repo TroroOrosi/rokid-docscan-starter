@@ -25,8 +25,14 @@
 | **輝度** | 10段階調光の**低位**を既定に。 |
 | **行数** | HUD は**最大3行・短文**（日本語 ~24字/行）。長文は**ページ送り**（テレプロンプター式）。 |
 
-> サーバ側の担保: `glasses_view` ペイロードは `sound`/`flash`/`animation`/`blink` 等の指示フィールドを**持たず**、
-> `lines` を**最大3行**に制限。`GET /v1/settings` の `hud` で `silent:true, animations:false, blinking:false, max_lines:3` を公示。
+> サーバ側の担保:
+> - `glasses_view` ペイロードは `sound`/`flash`/`animation`/`blink` 等の指示フィールドを**持たず**、`lines` を**最大3行**に制限。
+> - `GET /v1/settings` の `hud` を**機械可読の描画契約**として公示：
+>   `silent:true, white_flash:false, transition:"instant", brightness:"low", animations:false, blinking:false, max_lines:3`。
+>   クライアントは起動時にこれを唯一の権威ソースとして読む。
+> - 撮影成功は**無音・無白フラッシュ**の `capture_ack`（HUD1行・`ttl_sec:2`、音/フラッシュ指示なし）で通知。シャッター音や白フラッシュの代替。
+> - `GET /v1/settings` の `capture` で `shutter_sound:false`（独自カメラ経路 `cxr-s/camera2`）を公示。
+> - **プライバシーLEDは不可侵**：`capture.privacy_led` を `state:"always_on", tamper:"forbidden"` として公示し、**サーバはLEDを制御・無効化する機能を一切持たない**（撮影中は常時点灯のまま）。
 
 ## 音声操作トグル（設定 ON/OFF）
 

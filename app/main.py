@@ -21,7 +21,14 @@ from pydantic import BaseModel
 from . import config, db
 from .analyzers import get_analyzer
 from .config import IMAGE_DIR, ensure_dirs
-from .glasses_view import STAGES, build_glasses_view, build_locked_view
+from .glasses_view import (
+    CAPTURE_CONTRACT,
+    RENDER_CONTRACT,
+    STAGES,
+    build_capture_ack,
+    build_glasses_view,
+    build_locked_view,
+)
 from .hud import build_hud
 from .layout import parse_layout, primary_question
 from .matching import Candidate, match, normalize_ocr_text, ocr_md5, phash_hex
@@ -111,18 +118,18 @@ def get_settings() -> dict:
     """Client-facing flags. Drives the silent / voice-toggle UX on the glasses.
 
     The glasses client must render with NO shutter sound, NO white flash, NO
-    blinking and NO large animation; this endpoint exposes the toggles the
-    server is authoritative for.
+    blinking and NO large animation; this endpoint is the single authoritative
+    source for those render/capture constraints.
+
+    Note: `capture.privacy_led` is advertised as always_on / tamper:forbidden.
+    The recording-indicator LED is hardware-enforced and this server has no
+    capability to disable it; that is intentional and not configurable.
     """
     return {
         "voice_enabled_default": False,  # silent button/touch operation by default
         "allow_real_exam_solve": config.ALLOW_REAL_EXAM_SOLVE,
-        "hud": {
-            "max_lines": 3,
-            "silent": True,
-            "animations": False,
-            "blinking": False,
-        },
+        "hud": dict(RENDER_CONTRACT),
+        "capture": dict(CAPTURE_CONTRACT),
         "versions": version_info(),
     }
 
@@ -441,6 +448,11 @@ async def add_question(
             "read_confidence": read_conf,
             "answer_box": answer_box,
             "page_number": parsed.get("page_number"),
+            # Silent, no-flash capture confirmation (instead of a shutter sound /
+            # white flash). The privacy LED is unaffected and stays on.
+            "capture_ack": build_capture_ack(
+                page_number=parsed.get("page_number"), question_id=cur.lastrowid
+            ),
         }
         if read_conf < 0.3:
             result["hint"] = {

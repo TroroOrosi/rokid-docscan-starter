@@ -20,7 +20,10 @@ APP_VERSION = "0.2.0"
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.
 # 1.3.0: added exam-solving endpoints (/v1/exam-sessions, /v1/settings).
-API_VERSION = "1.3.0"
+# 1.4.0: /v1/settings advertises the full render+capture contract (white_flash,
+#        transition, brightness, capture.shutter_sound, capture.privacy_led) and
+#        add_question returns a silent `capture_ack`.
+API_VERSION = "1.4.0"
 
 # Matching algorithm identity. Bump when thresholds or hashing change so a
 # re-index/eval is triggered. Mirrors thresholds in app/matching.py.
@@ -37,7 +40,8 @@ ANALYZER_API_VERSION = "1.0.0"
 SOLVER_API_VERSION = "1.0.0"
 
 # On-glasses staged view payload (silent, <=3 lines, paginated stages).
-GLASSES_VIEW_CONTRACT_VERSION = "1.0.0"
+# 1.1.0: added the silent `capture_ack` payload (no sound/flash on capture).
+GLASSES_VIEW_CONTRACT_VERSION = "1.1.0"
 
 # Answer-area overlay payload (box + short answer; 2D image-anchored).
 OVERLAY_CONTRACT_VERSION = "1.0.0"

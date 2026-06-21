@@ -41,10 +41,29 @@ def _add_question(client, sid, ocr_text="問2 次の計算\n① 12\n② 13\n③ 
 
 def test_settings_advertise_silent_contract(client):
     body = client.get("/v1/settings").json()
-    assert body["hud"]["silent"] is True
-    assert body["hud"]["animations"] is False
-    assert body["hud"]["max_lines"] == 3
+    hud = body["hud"]
+    assert hud["silent"] is True
+    assert hud["animations"] is False
+    assert hud["max_lines"] == 3
+    # White-flash suppression / instant transition / low brightness are now
+    # advertised as machine-readable render constraints.
+    assert hud["white_flash"] is False
+    assert hud["transition"] == "instant"
+    assert hud["brightness"] == "low"
     assert body["voice_enabled_default"] is False
+    # Silent shutter, and the privacy LED is explicitly NON-disable-able.
+    capture = body["capture"]
+    assert capture["shutter_sound"] is False
+    assert capture["privacy_led"] == {"state": "always_on", "tamper": "forbidden"}
+
+
+def test_capture_ack_is_silent_and_short(client):
+    sid = _new_session(client)
+    ack = _add_question(client, sid).json()["capture_ack"]
+    assert len(ack["lines"]) <= 3
+    # The confirmation must not carry any sound/flash directive.
+    for forbidden in ("sound", "audio", "flash", "beep"):
+        assert forbidden not in ack
 
 
 def test_version_lists_solvers(client):

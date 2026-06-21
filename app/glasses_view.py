@@ -22,6 +22,48 @@ STAGES = ("answer", "solution", "rationale", "caution")
 _MAX_LINES = 3
 _MAX_LINE_CHARS = 24  # ~Japanese chars that fit one HUD line
 
+# Server-authoritative render contract for the on-glasses display. This governs
+# the HUD DISPLAY ONLY (text rendering). The client must honor these when
+# drawing: silent, no white flash on update, fade-free instant text replace, no
+# large animation, status via static symbols (not blinking), low brightness.
+RENDER_CONTRACT = {
+    "max_lines": _MAX_LINES,
+    "silent": True,          # no shutter / notification / beep sounds
+    "white_flash": False,    # the HUD must not flash white when text changes
+    "animations": False,     # no large animation
+    "transition": "instant", # fade-free instant text replace
+    "blinking": False,       # convey state with static symbols (✓ ! ★)
+    "brightness": "low",     # default to a low rung of the 10-level dimming
+}
+
+# Capture-path contract. IMPORTANT: the camera privacy LED is hardware-enforced
+# and MUST stay on whenever the camera is active; the server neither exposes nor
+# supports any way to disable it. `privacy_led` is advertised as always_on /
+# tamper:forbidden precisely to make that non-negotiable in the contract.
+CAPTURE_CONTRACT = {
+    "shutter_sound": False,           # silent capture via the custom camera path
+    "camera_path": "cxr-s/camera2",   # custom path used for soundless capture
+    "privacy_led": {"state": "always_on", "tamper": "forbidden"},
+}
+
+
+def build_capture_ack(
+    *, page_number: int | None = None, question_id: int | None = None
+) -> dict:
+    """A silent, no-flash capture confirmation: one short HUD line, ~2s.
+
+    Replaces an audible shutter / white flash with a quiet on-glass line. Like
+    the rest of the HUD payloads it carries NO sound/flash/animation fields.
+    """
+    if page_number is not None:
+        label = f"P{page_number:02d}"
+    elif question_id is not None:
+        label = f"#{question_id}"
+    else:
+        label = ""
+    line = f"{label} 保存済み".strip()
+    return {"lines": [line][:_MAX_LINES], "ttl_sec": 2}
+
 
 def _confidence_symbol(conf: float) -> str:
     if conf >= 0.66:

@@ -26,6 +26,13 @@ def test_version_info_has_all_contracts():
         assert key in info and isinstance(info[key], str)
 
 
+def test_contract_versions_reflect_silent_capture_contract():
+    # Bumped when /v1/settings gained the render+capture contract and
+    # add_question gained the silent capture_ack payload.
+    assert version.API_VERSION == "1.4.0"
+    assert version.GLASSES_VIEW_CONTRACT_VERSION == "1.1.0"
+
+
 # --- analyzer registry ------------------------------------------------------
 
 def test_local_analyzer_registered_and_offline():
