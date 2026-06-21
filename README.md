@@ -303,9 +303,17 @@ python scripts/rokid_led.py disable --led white
 
 # 自分の端末で実際に試行（両フラグ必須）
 python scripts/rokid_led.py disable --led white --host 192.168.1.50:5555 --apply --force
+
+# 「本当に消えたか」を読み戻しで検証し、JSON 証跡を出力（再点灯対策に最大3回再アサート）
+python scripts/rokid_led.py verify --led white --host 192.168.1.50:5555 \
+    --apply --force --retries 3 --evidence-out led-evidence.json
 ```
 
-詳細・警告・既知の制約は [docs/rokid-led-dev-utility.md](docs/rokid-led-dev-utility.md) を参照。
+> `verify` は ADB の `rc=0`（`write_succeeded`）と **実際の状態**（`verified_state` /
+> `confirmed_off`、brightness 読み戻しが根拠）を分離します。`confirmed_off: true` でも
+> **別カメラでの目視確認が必須**です（ADB 成功は物理 LED の消灯を証明しません）。
+
+詳細・警告・既知の制約・検証手順は [docs/rokid-led-dev-utility.md](docs/rokid-led-dev-utility.md) を参照。
 
 ## Docker（任意）
 
