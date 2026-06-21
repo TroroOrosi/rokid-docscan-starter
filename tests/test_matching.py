@@ -70,8 +70,14 @@ def test_ocr_md5_differs_for_different_text():
 
 # --- scoring ----------------------------------------------------------------
 
-def _cand(idx, ph, ocr_md5=None):
-    return Candidate(page_id=idx + 1, page_index=idx, phash=ph, ocr_md5=ocr_md5)
+def _cand(idx, ph, ocr_md5=None, ocr_text=None):
+    return Candidate(
+        page_id=idx + 1,
+        page_index=idx,
+        phash=ph,
+        ocr_md5=ocr_md5,
+        ocr_text=ocr_text,
+    )
 
 
 def test_exact_phash_match_high_confidence():
@@ -90,6 +96,52 @@ def test_ocr_bonus_applied_on_md5_match():
     assert bonus.ocr_match is True
     assert bonus.confidence >= no_bonus.confidence + matching.OCR_MD5_BONUS - 1e-9 \
         or bonus.confidence == 1.0
+
+
+# --- graded OCR similarity --------------------------------------------------
+
+def test_ocr_exact_text_gives_full_bonus():
+    ph_a = phash_hex(make_image(seed=8))
+    ph_b = phash_hex(make_image(seed=42))  # visually different
+    text = "invoice 2026 total"
+    sc = score_candidate(
+        ph_a, ocr_md5(text), _cand(0, ph_b, ocr_md5=ocr_md5(text), ocr_text=text),
+        query_ocr_text=text,
+    )
+    assert sc.ocr_match is True
+    assert sc.ocr_similarity == 1.0
+
+
+def test_ocr_near_text_gives_partial_bonus():
+    # Visually different so the OCR signal is what moves confidence.
+    ph_a = phash_hex(make_image(seed=8))
+    ph_b = phash_hex(make_image(seed=42))
+    stored = "invoice 2026 total amount"
+    noisy = "invoice 2026 total arnount"  # OCR-style noise (m->rn)
+    no_text = score_candidate(ph_a, None, _cand(0, ph_b))
+    partial = score_candidate(
+        ph_a, ocr_md5(noisy),
+        _cand(0, ph_b, ocr_md5=ocr_md5(stored), ocr_text=stored),
+        query_ocr_text=noisy,
+    )
+    # similarity strictly between 0 and 1, and it lifts confidence over no-text
+    assert 0.0 < partial.ocr_similarity < 1.0
+    assert partial.confidence > no_text.confidence
+    # but less than a full exact-match bonus
+    assert partial.confidence < no_text.confidence + matching.OCR_MD5_BONUS
+
+
+def test_ocr_unrelated_text_gives_no_bonus():
+    ph_a = phash_hex(make_image(seed=8))
+    ph_b = phash_hex(make_image(seed=42))
+    no_text = score_candidate(ph_a, None, _cand(0, ph_b))
+    unrelated = score_candidate(
+        ph_a, ocr_md5("completely different words here"),
+        _cand(0, ph_b, ocr_md5=ocr_md5("invoice 2026"), ocr_text="invoice 2026"),
+        query_ocr_text="completely different words here",
+    )
+    assert unrelated.confidence == no_text.confidence
+    assert unrelated.ocr_match is False
 
 
 def test_match_picks_best_and_hits():

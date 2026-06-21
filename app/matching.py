@@ -12,6 +12,7 @@ numpy / imagehash. Provides:
 
 from __future__ import annotations
 
+import difflib
 import hashlib
 import math
 import re
@@ -29,7 +30,14 @@ HASH_BIT_LEN = PHASH_BITS * PHASH_BITS  # 64
 HAMMING_STRONG = 6       # <= this is a confident visual match
 HAMMING_WEAK = 16        # > this means visually unrelated
 
-OCR_MD5_BONUS = 0.35     # confidence added when normalized OCR MD5 matches
+OCR_MD5_BONUS = 0.35     # max confidence added from the OCR text signal
+
+# OCR text similarity (graded). Real OCR output is noisy, so an exact MD5 match
+# rarely fires in production. We therefore award a *graded* bonus based on how
+# similar the query text is to the candidate text (0..1 ratio), scaled by
+# OCR_MD5_BONUS. The exact-MD5 path is kept as a fast full-bonus shortcut.
+OCR_SIM_FLOOR = 0.6      # below this similarity, award no bonus (too different)
+OCR_MATCH_RATIO = 0.9    # at/above this, treat as a strong textual agreement
 
 # Confidence verdict thresholds (after combining signals).
 CONF_OK = 0.62           # >= -> HIT
@@ -64,7 +72,12 @@ def phash(image: Image.Image) -> int:
     img = ImageOps.grayscale(image).resize(
         (PHASH_SIZE, PHASH_SIZE), Image.Resampling.LANCZOS
     )
-    pixels = list(img.getdata())  # noqa: small image, fine for MVP
+    # Pillow >= 12.1 deprecates Image.getdata() in favor of
+    # get_flattened_data(); fall back for older Pillow.
+    try:
+        pixels = list(img.get_flattened_data())
+    except AttributeError:
+        pixels = list(img.getdata())  # noqa: small image, fine for MVP
     matrix = [
         [float(pixels[r * PHASH_SIZE + c]) for c in range(PHASH_SIZE)]
         for r in range(PHASH_SIZE)
@@ -125,6 +138,9 @@ class Candidate:
     page_index: int
     phash: str
     ocr_md5: str | None
+    # Normalized OCR text, when available, for graded similarity matching.
+    # Optional/last so existing positional construction keeps working.
+    ocr_text: str | None = None
 
 
 @dataclass
@@ -134,6 +150,8 @@ class ScoredCandidate:
     hamming: int
     ocr_match: bool
     confidence: float
+    # 0..1 text similarity (1.0 == exact match, 0.0 == no usable text).
+    ocr_similarity: float = 0.0
 
 
 def _phash_confidence(distance: int) -> float:
@@ -146,24 +164,51 @@ def _phash_confidence(distance: int) -> float:
     return 1.0 - (distance - HAMMING_STRONG) / span
 
 
+def _ocr_signal(
+    query_ocr_md5: str | None,
+    query_ocr_text: str | None,
+    candidate: Candidate,
+) -> tuple[float, bool, float]:
+    """Return (bonus, ocr_match, similarity) from the OCR text signal.
+
+    1. Exact MD5 match -> full bonus (also covers the image-bytes fallback).
+    2. Otherwise, if both sides have normalized text, award a graded bonus
+       proportional to their similarity (above OCR_SIM_FLOOR).
+    3. No usable text -> no bonus.
+    """
+    if query_ocr_md5 and candidate.ocr_md5 and query_ocr_md5 == candidate.ocr_md5:
+        return OCR_MD5_BONUS, True, 1.0
+
+    q = normalize_ocr_text(query_ocr_text)
+    c = normalize_ocr_text(candidate.ocr_text)
+    if not q or not c:
+        return 0.0, False, 0.0
+
+    ratio = difflib.SequenceMatcher(None, q, c).ratio()
+    if ratio < OCR_SIM_FLOOR:
+        return 0.0, False, round(ratio, 4)
+    return OCR_MD5_BONUS * ratio, ratio >= OCR_MATCH_RATIO, round(ratio, 4)
+
+
 def score_candidate(
     query_phash: int | str,
     query_ocr_md5: str | None,
     candidate: Candidate,
+    query_ocr_text: str | None = None,
 ) -> ScoredCandidate:
     distance = hamming(query_phash, candidate.phash)
     visual = _phash_confidence(distance)
-    ocr_match = bool(
-        query_ocr_md5 and candidate.ocr_md5 and query_ocr_md5 == candidate.ocr_md5
+    bonus, ocr_match, similarity = _ocr_signal(
+        query_ocr_md5, query_ocr_text, candidate
     )
-    confidence = visual + (OCR_MD5_BONUS if ocr_match else 0.0)
-    confidence = max(0.0, min(1.0, confidence))
+    confidence = max(0.0, min(1.0, visual + bonus))
     return ScoredCandidate(
         page_id=candidate.page_id,
         page_index=candidate.page_index,
         hamming=distance,
         ocr_match=ocr_match,
         confidence=round(confidence, 4),
+        ocr_similarity=similarity,
     )
 
 
@@ -182,10 +227,12 @@ def match(
     query_phash: int | str,
     query_ocr_md5: str | None,
     candidates: list[Candidate],
+    query_ocr_text: str | None = None,
 ) -> tuple[ScoredCandidate | None, str, list[ScoredCandidate]]:
     """Score all candidates and return (best, verdict, sorted_candidates)."""
     scored = [
-        score_candidate(query_phash, query_ocr_md5, c) for c in candidates
+        score_candidate(query_phash, query_ocr_md5, c, query_ocr_text)
+        for c in candidates
     ]
     scored.sort(key=lambda s: (-s.confidence, s.hamming))
     best = scored[0] if scored else None

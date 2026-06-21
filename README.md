@@ -166,7 +166,7 @@ curl -s -X POST http://127.0.0.1:8000/v1/match \
 {
   "document_id": 1,
   "verdict": "HIT",
-  "best_page": {"page_id":1,"page_index":0,"hamming":0,"ocr_match":true,"confidence":1.0},
+  "best_page": {"page_id":1,"page_index":0,"hamming":0,"ocr_match":true,"ocr_similarity":1.0,"confidence":1.0},
   "confidence": 1.0,
   "hud": {"verdict":"HIT","confidence":1.0,"lines":["PAGE 1/2","1ページ目の本文テキスト","conf 1.00  hd 0"]},
   "candidates": [ {"page_index":0,...}, {"page_index":1,...} ]
@@ -193,8 +193,15 @@ curl -s -X POST http://127.0.0.1:8000/v1/match \
   - `<= HAMMING_STRONG (6)` … 視覚的に確実な一致（視覚信頼度 1.0）
   - `>= HAMMING_WEAK (16)` … 無関係（視覚信頼度 0.0）
   - 間は線形補間。
-- **OCR-MD5 ボーナス**: クエリと候補の正規化 OCR テキスト MD5 が完全一致したら
-  `+OCR_MD5_BONUS (0.35)`。正規化は「前後空白除去・連続空白を単一化・小文字化」。
+- **OCR テキスト類似度ボーナス**: クエリと候補の OCR テキストがどれだけ似ているかで
+  最大 `OCR_MD5_BONUS (0.35)` まで **段階的に** 加点します（実 OCR はノイズで揺れるため、
+  完全一致のみだと現場でほぼ加点されないため）。
+  - 正規化 MD5 が完全一致 → 満点ボーナス（最速パス。OCR 無し時の画像 MD5 一致もここ）。
+  - そうでなければ正規化テキストの類似度 `ratio`（`difflib`、0..1）を見て、
+    `ratio >= OCR_SIM_FLOOR (0.6)` のとき `OCR_MD5_BONUS * ratio` を加点。
+    `ratio >= OCR_MATCH_RATIO (0.9)` なら `ocr_match=true`。
+  - 正規化は「前後空白除去・連続空白を単一化・小文字化」。
+  - レスポンスには `ocr_similarity`（0..1）が含まれます（追加フィールド・後方互換）。
 - **判定**: 合成信頼度（0..1 にクリップ）が
   `>= CONF_OK (0.62)` → `HIT` / `>= CONF_LOW (0.40)` → `LOW_CONF` / それ未満 → `NO_PAGE`。
 
@@ -242,6 +249,8 @@ docker compose up --build
 
 ## 制限事項
 
-- OCR は未実装（テキストはクライアントから受け取るプレースホルダ）。
+- OCR は未実装（テキストはクライアントから受け取るプレースホルダ）。テキスト照合は
+  完全一致ではなく類似度（`difflib`）で段階加点するため、多少の OCR ノイズには強い。
 - pHash は純 Python 実装（numpy/imagehash 非依存）で、大量ページでは低速。
+  高速化は scipy/imagehash 等への置換が定石（依存を増やすため本 MVP では未採用）。
 - 認証・マルチテナント・並行書き込み制御は未実装（MVP のため）。

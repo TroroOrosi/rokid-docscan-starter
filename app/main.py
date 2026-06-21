@@ -20,7 +20,7 @@ from . import db
 from .analyzers import get_analyzer
 from .config import IMAGE_DIR, ensure_dirs
 from .hud import build_hud
-from .matching import Candidate, match, ocr_md5, phash_hex
+from .matching import Candidate, match, normalize_ocr_text, ocr_md5, phash_hex
 from .version import APP_VERSION, HUD_CONTRACT_VERSION, version_info
 
 
@@ -218,7 +218,7 @@ async def match_page(
             q_md5 = hashlib.md5(raw).hexdigest()
 
         rows = conn.execute(
-            "SELECT id, page_index, phash, ocr_md5, summary FROM pages "
+            "SELECT id, page_index, phash, ocr_md5, ocr_text, summary FROM pages "
             "WHERE document_id = ? ORDER BY page_index",
             (document_id,),
         ).fetchall()
@@ -228,12 +228,15 @@ async def match_page(
                 page_index=r["page_index"],
                 phash=r["phash"],
                 ocr_md5=r["ocr_md5"],
+                ocr_text=normalize_ocr_text(r["ocr_text"]),
             )
             for r in rows
         ]
         summaries = {r["id"]: r["summary"] for r in rows}
 
-        best, verdict, scored = match(q_phash, q_md5, candidates)
+        best, verdict, scored = match(
+            q_phash, q_md5, candidates, query_ocr_text=fast_ocr_text
+        )
         hud = build_hud(
             verdict,
             best,
@@ -257,6 +260,7 @@ async def match_page(
                     "page_index": best.page_index,
                     "hamming": best.hamming,
                     "ocr_match": best.ocr_match,
+                    "ocr_similarity": best.ocr_similarity,
                     "confidence": best.confidence,
                 }
                 if best and verdict != "NO_PAGE"
@@ -270,6 +274,7 @@ async def match_page(
                     "page_index": s.page_index,
                     "hamming": s.hamming,
                     "ocr_match": s.ocr_match,
+                    "ocr_similarity": s.ocr_similarity,
                     "confidence": s.confidence,
                 }
                 for s in scored
