@@ -128,6 +128,10 @@ object DeviceRegistry {                // 端末を差し替える点
 | 照合アルゴリズム | `MATCHER_VERSION` | pHash/しきい値/スコアリング |
 | HUD ペイロード | `HUD_CONTRACT_VERSION` | 行数・フィールド |
 | Analyzer 契約 | `ANALYZER_API_VERSION` | `Analyzer`/`AnalyzerResult` 形 |
+| Solver 契約 | `SOLVER_API_VERSION` | `Solver`/`SolveResult` 形 |
+| Extractor 契約 | `EXTRACTOR_API_VERSION` | `MediaExtractor`/`ExtractorResult` 形 |
+| HUD ステージview | `GLASSES_VIEW_CONTRACT_VERSION` | 段階view/`capture_ack` 形 |
+| Overlay | `OVERLAY_CONTRACT_VERSION` | 解答欄box/tracking metadata 形 |
 
 - パスは破壊的変更まで `/v1` を維持。破壊的変更は `/v2` を **並走** させる
   （`/v1` を残したまま追加）。
@@ -144,8 +148,12 @@ object DeviceRegistry {                // 端末を差し替える点
 | フラグ | 既定 | 役割 |
 |--------|------|------|
 | `ROKID_ANALYZER` | `local` | モデルルーティング（§2） |
+| `ROKID_SOLVER` | `local` | ソルバールーティング（解答モード） |
+| `ROKID_SOLVER_TIERS` | （単一） | 二段フォールバックの tier 順（csv、末尾に local を自動付与） |
+| `ROKID_EXTRACTOR` | `local` | メディア抽出ルーティング（数式/図/表/グラフ） |
+| `ROKID_ALLOW_REAL_EXAM_SOLVE` | `0` | 本番試験モードの解答ロック解除（不正防止） |
 | `ROKID_DATA_DIR` | `data` | ストレージ先（プライバシー/隔離） |
-| `ROKID_ENABLE_EMBEDDING` | `0` | 将来の意味照合（embedding）を有効化 |
+| `ROKID_ENABLE_EMBEDDING` | `0` | RAG の意味検索（embedding）を有効化 |
 | `ROKID_HUD_LANG` | `ja` | HUD 文言の言語（D4） |
 
 ```python
@@ -182,6 +190,24 @@ HUD_LANG = os.environ.get("ROKID_HUD_LANG", "ja")
 1. `HUD_CONTRACT_VERSION` を上げる。
 2. 旧クライアントは旧契約のまま動かしたい場合、`build_hud` を契約バージョンで
    分岐（`hud_v1` / `hud_v2`）させ、リクエストの希望バージョンで選択。
+
+---
+
+### (e) 解答モードの高度化（Solver / メディア抽出 / RAG）
+解答モード（Phase 1〜4）も Analyzer と同じポート方式なので、**実アダプタ登録だけ**で高度化できる：
+1. **Solver**: `app/solvers/<vendor>.py` に実装し `register_solver(...)`。`ROKID_SOLVER`/`ROKID_SOLVER_TIERS` で
+   ルーティング。`solve_with_fallback` がクラウド→ローカルの**二段フォールバック**を担保（圏外/失敗でも HUD は返る）。
+2. **メディア抽出（案6）**: 数式OCR/表/チャートモデルを `app/extractors/<vendor>.py` に実装し `register_extractor(...)`。
+   `add_question` の `media` がそのまま高精度化（エンドポイント不変）。
+3. **RAG（案10）**: `app/retrieval.py` は今は依存なしの lexical scorer。`ROKID_ENABLE_EMBEDDING=1` ＋
+   embedding を返す analyzer を組み合わせれば**意味検索**へ差替（未接続時は lexical にフォールバック）。
+   `context`/`evidence` は solver と HUD まで配線済みなので、検索器の差替だけで根拠提示が向上する。
+4. **推論ログ（案9）**: `solutions.raw_reasoning` に保存し `GET …/reasoning` で参照。HUD は短縮版のまま。
+
+### 境界（このリポジトリに入れないもの）
+- **クラウド実接続・creds・実CV/実OCRモデル**: ポートの先（アダプタ）に隔離。リポジトリは offline・credential-free を維持。
+- **6DoF 固定 AR**: 49g グラスはハード的に 6DoF/SLAM 非対応。`overlay` は `tracking:"2d_image_anchor"`・`fixed_ar:false`
+  を公示し、真の紙面固定は将来のハード/トラッキングが整ってからの拡張とする（契約は前方互換で追加）。
 
 ---
 

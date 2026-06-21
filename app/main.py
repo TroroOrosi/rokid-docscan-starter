@@ -7,7 +7,9 @@ where real Rokid CXR integration plugs in.
 
 from __future__ import annotations
 
+import hashlib
 import io
+import json
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -16,12 +18,47 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from PIL import Image, UnidentifiedImageError
 from pydantic import BaseModel
 
-from . import db
+from . import config, db
 from .analyzers import get_analyzer
 from .config import IMAGE_DIR, ensure_dirs
+from .extractors import detect_media, get_extractor
+from .glasses_view import (
+    CAPTURE_CONTRACT,
+    RENDER_CONTRACT,
+    STAGES,
+    build_capture_ack,
+    build_glasses_view,
+    build_locked_view,
+)
 from .hud import build_hud
+from .layout import parse_layout, primary_question
 from .matching import Candidate, match, normalize_ocr_text, ocr_md5, phash_hex
+from .overlay import build_overlay
+from .retrieval import retrieve_context
+from .solvers import Question
+from .solvers.registry import solve_with_fallback
+from .subjects import detect_subject
 from .version import APP_VERSION, HUD_CONTRACT_VERSION, version_info
+
+
+def _extract_media(ocr_text: str | None, image_path: str) -> list[dict]:
+    """Run the active media extractor over any figure/table/graph/formula cues.
+
+    Returns a list of {kind, content, confidence} items (empty when no media is
+    detected). Real extraction is a registry swap (ROKID_EXTRACTOR); the offline
+    default returns clearly-marked placeholders.
+    """
+    kinds = detect_media(ocr_text)
+    if not kinds:
+        return []
+    extractor = get_extractor()
+    items: list[dict] = []
+    for kind in kinds:
+        res = extractor.extract(kind=kind, ocr_text=ocr_text, image_path=image_path)
+        items.append(
+            {"kind": res.kind, "content": res.content, "confidence": res.confidence}
+        )
+    return items
 
 
 @asynccontextmanager
@@ -65,6 +102,20 @@ def _doc_or_404(conn, document_id: int):
     return row
 
 
+def _fallback_md5(omd5: str | None, raw: bytes) -> str:
+    """When no OCR text is available, identify content by image-bytes MD5."""
+    return omd5 if omd5 is not None else hashlib.md5(raw).hexdigest()
+
+
+def _row_or_404(conn, table: str, row_id: int, detail: str):
+    row = conn.execute(
+        f"SELECT * FROM {table} WHERE id = ?", (row_id,)
+    ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail=detail)
+    return row
+
+
 # --- endpoints --------------------------------------------------------------
 
 @app.get("/health")
@@ -76,8 +127,36 @@ def health() -> dict:
 def get_version() -> dict:
     """Discovery endpoint: clients negotiate contracts against this block."""
     from .analyzers import list_analyzers
+    from .extractors import list_extractors
+    from .solvers import list_solvers
 
-    return {**version_info(), "analyzers": list_analyzers()}
+    return {
+        **version_info(),
+        "analyzers": list_analyzers(),
+        "solvers": list_solvers(),
+        "extractors": list_extractors(),
+    }
+
+
+@app.get("/v1/settings")
+def get_settings() -> dict:
+    """Client-facing flags. Drives the silent / voice-toggle UX on the glasses.
+
+    The glasses client must render with NO shutter sound, NO white flash, NO
+    blinking and NO large animation; this endpoint is the single authoritative
+    source for those render/capture constraints.
+
+    Note: `capture.privacy_led` is advertised as always_on / tamper:forbidden.
+    The recording-indicator LED is hardware-enforced and this server has no
+    capability to disable it; that is intentional and not configurable.
+    """
+    return {
+        "voice_enabled_default": False,  # silent button/touch operation by default
+        "allow_real_exam_solve": config.ALLOW_REAL_EXAM_SOLVE,
+        "hud": dict(RENDER_CONTRACT),
+        "capture": dict(CAPTURE_CONTRACT),
+        "versions": version_info(),
+    }
 
 
 @app.post("/v1/documents", status_code=201)
@@ -116,12 +195,8 @@ async def add_page(
         img = _load_image(raw)
 
         ph = phash_hex(img)
-        omd5 = ocr_md5(ocr_text)
         # Placeholder when no OCR text: identify page by image content MD5.
-        if omd5 is None:
-            import hashlib
-
-            omd5 = hashlib.md5(raw).hexdigest()
+        omd5 = _fallback_md5(ocr_md5(ocr_text), raw)
 
         fname = f"{document_id}_{page_index}_{uuid.uuid4().hex[:8]}.png"
         fpath: Path = IMAGE_DIR / fname
@@ -211,11 +286,7 @@ async def match_page(
         img = _load_image(raw)
 
         q_phash = phash_hex(img)
-        q_md5 = ocr_md5(fast_ocr_text)
-        if q_md5 is None:
-            import hashlib
-
-            q_md5 = hashlib.md5(raw).hexdigest()
+        q_md5 = _fallback_md5(ocr_md5(fast_ocr_text), raw)
 
         rows = conn.execute(
             "SELECT id, page_index, phash, ocr_md5, ocr_text, summary FROM pages "
@@ -278,6 +349,340 @@ async def match_page(
                     "confidence": s.confidence,
                 }
                 for s in scored
+            ],
+        }
+    finally:
+        conn.close()
+
+
+# --- exam-solving mode (案1: separate from page matching) -------------------
+
+class CreateExamSession(BaseModel):
+    mode: str = "study"  # study | mock | real
+    voice_enabled: bool = False
+    subject_hint: str | None = None
+
+
+def _exam_session_or_404(conn, session_id: int):
+    return _row_or_404(conn, "exam_sessions", session_id, "exam session not found")
+
+
+def _question_or_404(conn, session_id: int, question_id: int):
+    row = conn.execute(
+        "SELECT * FROM questions WHERE id = ? AND session_id = ?",
+        (question_id, session_id),
+    ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="question not found")
+    return row
+
+
+def _solution_from_row(row) -> "object":
+    """Rebuild a SolveResult-like object from a stored solutions row."""
+    from .solvers import SolveResult
+
+    return SolveResult(
+        answer=row["answer"] or "",
+        solution_steps=json.loads(row["solution_steps_json"] or "[]"),
+        rationale=row["rationale"] or "",
+        cautions=row["cautions"] or "",
+        answer_confidence=row["answer_conf"] or 0.0,
+        rationale_confidence=row["rationale_conf"] or 0.0,
+        evidence_pages=json.loads(row["evidence_pages_json"] or "[]"),
+        raw_reasoning=row["raw_reasoning"] or "",
+    )
+
+
+@app.post("/v1/exam-sessions", status_code=201)
+def create_exam_session(payload: CreateExamSession) -> dict:
+    if payload.mode not in {"study", "mock", "real"}:
+        raise HTTPException(status_code=400, detail="invalid mode")
+    conn = db.connect()
+    try:
+        cur = conn.execute(
+            "INSERT INTO exam_sessions (mode, voice_enabled, subject_hint) "
+            "VALUES (?, ?, ?)",
+            (payload.mode, int(payload.voice_enabled), payload.subject_hint),
+        )
+        conn.commit()
+        return {
+            "session_id": cur.lastrowid,
+            "mode": payload.mode,
+            "voice_enabled": payload.voice_enabled,
+            "subject_hint": payload.subject_hint,
+            "status": "open",
+            "api_version": version_info()["api_version"],
+        }
+    finally:
+        conn.close()
+
+
+@app.post("/v1/exam-sessions/{session_id}/questions", status_code=201)
+async def add_question(
+    session_id: int,
+    image: UploadFile = File(...),
+    ocr_text: str | None = Form(None),
+    bbox_hints: str | None = Form(None),
+) -> dict:
+    conn = db.connect()
+    try:
+        _exam_session_or_404(conn, session_id)
+        raw = await image.read()
+        img = _load_image(raw)
+
+        hints = json.loads(bbox_hints) if bbox_hints else None
+        parsed = parse_layout(ocr_text, bbox_hints=hints)
+        q = primary_question(parsed)
+        subject, subj_conf = detect_subject(ocr_text)
+
+        # Read confidence: low when we recovered no usable text -> "近づけて再撮影".
+        read_conf = 0.0 if not normalize_ocr_text(ocr_text) else round(min(1.0, 0.5 + subj_conf / 2), 3)
+
+        fname = f"q_{session_id}_{uuid.uuid4().hex[:8]}.png"
+        fpath: Path = IMAGE_DIR / fname
+        img.convert("RGB").save(fpath, format="PNG")
+
+        answer_box = q.answer_box if q else parsed.get("answer_box")
+        media = _extract_media(ocr_text, str(fpath))
+        cur = conn.execute(
+            """INSERT INTO questions
+               (session_id, question_no, body_text, choices_json, figure_refs,
+                answer_box_json, structure_json, subject, read_conf,
+                page_number, image_path, media_json)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                session_id,
+                q.question_no if q else None,
+                q.body_text if q else (ocr_text or ""),
+                json.dumps(q.choices if q else [], ensure_ascii=False),
+                json.dumps(q.figure_refs if q else [], ensure_ascii=False),
+                json.dumps(answer_box, ensure_ascii=False) if answer_box else None,
+                json.dumps(parsed.get("headings", []), ensure_ascii=False),
+                subject,
+                read_conf,
+                parsed.get("page_number"),
+                str(fpath),
+                json.dumps(media, ensure_ascii=False) if media else None,
+            ),
+        )
+        conn.commit()
+
+        result = {
+            "question_id": cur.lastrowid,
+            "session_id": session_id,
+            "question_no": q.question_no if q else None,
+            "subject": subject,
+            "read_confidence": read_conf,
+            "answer_box": answer_box,
+            "page_number": parsed.get("page_number"),
+            "media": media,
+            # Silent, no-flash capture confirmation (instead of a shutter sound /
+            # white flash). The privacy LED is unaffected and stays on.
+            "capture_ack": build_capture_ack(
+                page_number=parsed.get("page_number"), question_id=cur.lastrowid
+            ),
+        }
+        if read_conf < 0.3:
+            result["hint"] = {
+                "lines": ["読み取り不十分", "近づけて再撮影", "してください"],
+            }
+        return result
+    finally:
+        conn.close()
+
+
+@app.post("/v1/exam-sessions/{session_id}/questions/{question_id}/solve")
+def solve_question(session_id: int, question_id: int) -> dict:
+    conn = db.connect()
+    try:
+        session = _exam_session_or_404(conn, session_id)
+        q = _question_or_404(conn, session_id, question_id)
+
+        # Safety guardrail (案16): never answer in real-exam mode unless the
+        # operator has explicitly opted in for learning/mock/research use.
+        if session["mode"] == "real" and not config.ALLOW_REAL_EXAM_SOLVE:
+            return {
+                "session_id": session_id,
+                "question_id": question_id,
+                "locked": True,
+                "glasses_view": build_locked_view(),
+                "versions": version_info(),
+            }
+
+        # RAG (Phase 3): ground the solver in the user's own scanned materials.
+        retrieved = retrieve_context(conn, q["body_text"])
+        question = Question(
+            question_no=q["question_no"],
+            body_text=q["body_text"],
+            choices=json.loads(q["choices_json"] or "[]"),
+            subject=q["subject"],
+            context=retrieved["context"] or None,
+        )
+        # Two-tier fallback (Phase 3): preferred solver tiers -> offline local.
+        result, solver = solve_with_fallback(question=question)
+        served_by = result.extras.get("served_by", solver.name)
+        # Retrieval supplies evidence pages when the solver itself didn't.
+        evidence_pages = result.evidence_pages or retrieved["evidence_pages"]
+        result.evidence_pages = evidence_pages
+
+        conn.execute(
+            """INSERT INTO solutions
+               (question_id, solver_name, answer, solution_steps_json, rationale,
+                cautions, answer_conf, rationale_conf, evidence_pages_json,
+                raw_reasoning, served_by)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                question_id,
+                solver.name,
+                result.answer,
+                json.dumps(result.solution_steps, ensure_ascii=False),
+                result.rationale,
+                result.cautions,
+                result.answer_confidence,
+                result.rationale_confidence,
+                json.dumps(evidence_pages),
+                result.raw_reasoning,
+                served_by,
+            ),
+        )
+        conn.commit()
+
+        answer_box = json.loads(q["answer_box_json"]) if q["answer_box_json"] else None
+        view = build_glasses_view(
+            result,
+            stage="answer",
+            question_no=q["question_no"],
+            page_number=q["page_number"],
+            answer_box=answer_box,
+            voice_enabled=bool(session["voice_enabled"]),
+        )
+        return {
+            "session_id": session_id,
+            "question_id": question_id,
+            "subject": result.subject or q["subject"],
+            "solver": solver.info(),
+            "served_by": served_by,
+            "locked": False,
+            "glasses_view": view,
+            "overlay": build_overlay(
+                result, answer_box=answer_box, page_number=q["page_number"]
+            ),
+            "evidence": retrieved["hits"],
+            "versions": version_info(),
+        }
+    finally:
+        conn.close()
+
+
+@app.get("/v1/exam-sessions/{session_id}/questions/{question_id}/view")
+def get_question_view(
+    session_id: int,
+    question_id: int,
+    stage: str = "answer",
+    page: int = 0,
+) -> dict:
+    if stage not in STAGES:
+        raise HTTPException(status_code=400, detail=f"stage must be one of {STAGES}")
+    conn = db.connect()
+    try:
+        session = _exam_session_or_404(conn, session_id)
+        q = _question_or_404(conn, session_id, question_id)
+        sol = conn.execute(
+            "SELECT * FROM solutions WHERE question_id = ? ORDER BY id DESC LIMIT 1",
+            (question_id,),
+        ).fetchone()
+        if sol is None:
+            raise HTTPException(status_code=409, detail="question not solved yet")
+        if session["mode"] == "real" and not config.ALLOW_REAL_EXAM_SOLVE:
+            return {"glasses_view": build_locked_view(stage), "locked": True}
+
+        answer_box = json.loads(q["answer_box_json"]) if q["answer_box_json"] else None
+        return {
+            "glasses_view": build_glasses_view(
+                _solution_from_row(sol),
+                stage=stage,
+                page=page,
+                question_no=q["question_no"],
+                page_number=q["page_number"],
+                answer_box=answer_box,
+                voice_enabled=bool(session["voice_enabled"]),
+            ),
+            "locked": False,
+        }
+    finally:
+        conn.close()
+
+
+@app.get("/v1/exam-sessions/{session_id}/questions/{question_id}/reasoning")
+def get_question_reasoning(session_id: int, question_id: int) -> dict:
+    """Full solver reasoning log (案9): kept server-side, NOT on the HUD.
+
+    The HUD only ever shows the short staged view; this endpoint exposes the
+    long `raw_reasoning`, evidence pages and the serving tier for review/audit.
+    Respects the same real-exam lock as solving.
+    """
+    conn = db.connect()
+    try:
+        session = _exam_session_or_404(conn, session_id)
+        _question_or_404(conn, session_id, question_id)
+        if session["mode"] == "real" and not config.ALLOW_REAL_EXAM_SOLVE:
+            return {"question_id": question_id, "locked": True}
+        sol = conn.execute(
+            "SELECT * FROM solutions WHERE question_id = ? ORDER BY id DESC LIMIT 1",
+            (question_id,),
+        ).fetchone()
+        if sol is None:
+            raise HTTPException(status_code=409, detail="question not solved yet")
+        return {
+            "session_id": session_id,
+            "question_id": question_id,
+            "locked": False,
+            "solver_name": sol["solver_name"],
+            "served_by": sol["served_by"],
+            "raw_reasoning": sol["raw_reasoning"] or "",
+            "solution_steps": json.loads(sol["solution_steps_json"] or "[]"),
+            "rationale": sol["rationale"] or "",
+            "evidence_pages": json.loads(sol["evidence_pages_json"] or "[]"),
+            "versions": version_info(),
+        }
+    finally:
+        conn.close()
+
+
+@app.get("/v1/exam-sessions/{session_id}")
+def get_exam_session(session_id: int) -> dict:
+    conn = db.connect()
+    try:
+        session = _exam_session_or_404(conn, session_id)
+        rows = conn.execute(
+            "SELECT id, question_no, subject, read_conf, page_number "
+            "FROM questions WHERE session_id = ? ORDER BY id",
+            (session_id,),
+        ).fetchall()
+        solved = {
+            r["question_id"]
+            for r in conn.execute(
+                "SELECT DISTINCT question_id FROM solutions "
+                "WHERE question_id IN "
+                "(SELECT id FROM questions WHERE session_id = ?)",
+                (session_id,),
+            ).fetchall()
+        }
+        return {
+            "session_id": session_id,
+            "mode": session["mode"],
+            "voice_enabled": bool(session["voice_enabled"]),
+            "status": session["status"],
+            "questions": [
+                {
+                    "question_id": r["id"],
+                    "question_no": r["question_no"],
+                    "subject": r["subject"],
+                    "read_confidence": r["read_conf"],
+                    "page_number": r["page_number"],
+                    "solved": r["id"] in solved,
+                }
+                for r in rows
             ],
         }
     finally:

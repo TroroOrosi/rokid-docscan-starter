@@ -19,7 +19,13 @@ APP_VERSION = "0.2.0"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.
-API_VERSION = "1.2.0"
+# 1.3.0: added exam-solving endpoints (/v1/exam-sessions, /v1/settings).
+# 1.4.0: /v1/settings advertises the full render+capture contract (white_flash,
+#        transition, brightness, capture.shutter_sound, capture.privacy_led) and
+#        add_question returns a silent `capture_ack`.
+# 1.5.0: add_question returns extracted `media`; solve returns `evidence` and
+#        `served_by`; new …/reasoning endpoint; overlay gains tracking metadata.
+API_VERSION = "1.5.0"
 
 # Matching algorithm identity. Bump when thresholds or hashing change so a
 # re-index/eval is triggered. Mirrors thresholds in app/matching.py.
@@ -32,6 +38,20 @@ HUD_CONTRACT_VERSION = "1.0.0"
 # Analyzer plugin interface (provider-agnostic OCR/summary/embedding).
 ANALYZER_API_VERSION = "1.0.0"
 
+# Solver plugin interface (provider-agnostic question answering).
+SOLVER_API_VERSION = "1.0.0"
+
+# Media-extractor plugin interface (formula/figure/graph/table; 案6).
+EXTRACTOR_API_VERSION = "1.0.0"
+
+# On-glasses staged view payload (silent, <=3 lines, paginated stages).
+# 1.1.0: added the silent `capture_ack` payload (no sound/flash on capture).
+GLASSES_VIEW_CONTRACT_VERSION = "1.1.0"
+
+# Answer-area overlay payload (box + short answer; 2D image-anchored).
+# 1.1.0: added tracking metadata (tracking/fixed_ar/anchor_hint).
+OVERLAY_CONTRACT_VERSION = "1.1.0"
+
 
 def version_info() -> dict:
     """Machine-readable version block embedded in API responses."""
@@ -41,4 +61,8 @@ def version_info() -> dict:
         "matcher_version": MATCHER_VERSION,
         "hud_contract_version": HUD_CONTRACT_VERSION,
         "analyzer_api_version": ANALYZER_API_VERSION,
+        "solver_api_version": SOLVER_API_VERSION,
+        "extractor_api_version": EXTRACTOR_API_VERSION,
+        "glasses_view_contract_version": GLASSES_VIEW_CONTRACT_VERSION,
+        "overlay_contract_version": OVERLAY_CONTRACT_VERSION,
     }

@@ -30,6 +30,51 @@ CREATE TABLE IF NOT EXISTS pages (
     created_at  TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE(document_id, page_index)
 );
+
+-- Exam-solving mode (案11): a temporary session holding captured questions,
+-- extracted structure, model answers and separated confidences.
+CREATE TABLE IF NOT EXISTS exam_sessions (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    mode          TEXT NOT NULL DEFAULT 'study',   -- study | mock | real
+    voice_enabled INTEGER NOT NULL DEFAULT 0,
+    subject_hint  TEXT,
+    status        TEXT NOT NULL DEFAULT 'open',
+    created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS questions (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id      INTEGER NOT NULL REFERENCES exam_sessions(id) ON DELETE CASCADE,
+    question_no     TEXT,
+    body_text       TEXT,
+    choices_json    TEXT,
+    figure_refs     TEXT,
+    answer_box_json TEXT,
+    structure_json  TEXT,
+    subject         TEXT,
+    read_conf       REAL,
+    page_number     INTEGER,
+    image_path      TEXT,
+    media_json      TEXT,            -- extracted media items (案6, Phase 2)
+    created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS solutions (
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    question_id        INTEGER NOT NULL REFERENCES questions(id) ON DELETE CASCADE,
+    solver_name        TEXT,
+    answer             TEXT,
+    solution_steps_json TEXT,
+    rationale          TEXT,
+    cautions           TEXT,
+    answer_conf        REAL,
+    rationale_conf     REAL,
+    evidence_pages_json TEXT,
+    raw_reasoning      TEXT,
+    served_by          TEXT,         -- solver tier that produced this (Phase 3)
+    user_confirmed     INTEGER NOT NULL DEFAULT 0,
+    created_at         TEXT NOT NULL DEFAULT (datetime('now'))
+);
 """
 
 

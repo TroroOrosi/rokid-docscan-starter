@@ -238,6 +238,39 @@ curl -s -X POST http://127.0.0.1:8000/v1/match \
 
 ---
 
+## 解答モード（入試問題ソルバー / グラス単体・無音 UX）
+
+ページ照合モードに加え、**未登録の入試問題を撮影 → 構造化・科目推定 → 解答・解法・根拠を
+グラス内の3行 HUD（段階・ページ送り）で表示**する解答モードを追加しました（`/v1/exam-sessions`）。
+
+- ユーザーが操作・閲覧するのは**眼鏡だけ**（スマホは通信・AI処理を担う裏方）。
+- **無音・無フラッシュ・無アニメ・無点滅**を契約化（`GET /v1/settings` で公示、HUD は最大3行）。
+- **音声操作は設定で ON/OFF**（既定 OFF＝ボタン/タッチ操作）。
+- 解答ソルバーは既定で**オフラインのプレースホルダ**（実際には解かない＝不正利用ガード）。
+  実モデル（Gemini/OpenAI/Claude/オンデバイス VLM）は `register_solver()` で差し込み、`ROKID_SOLVER` で切替。
+  クラウド→ローカルの**二段フォールバック**（`ROKID_SOLVER_TIERS`、`solve_with_fallback`）で圏外/失敗でも HUD は返ります。
+- **メディア抽出**（数式/図/表/グラフ＝案6）は `app/extractors/`（`ROKID_EXTRACTOR` で差替）。`add_question` 応答の `media` に載ります。
+- **RAG 根拠提示**：`app/retrieval.py` が既存の `documents/pages` を横断検索し、`solve` 応答の `evidence` と HUD の根拠に反映（`ROKID_ENABLE_EMBEDDING` で意味検索へ差替可）。
+- **推論ログ**（案9）は `GET …/questions/{qid}/reasoning` で参照（HUD は短縮版・`real` ロック準拠）。
+- 本番試験モード（`mode=real`）は既定でロック（`ROKID_ALLOW_REAL_EXAM_SOLVE=1` が無い限り解答非表示）。学習・模試・研究用途向けです。
+
+```bash
+# セッション作成 → 設問追加 → 解答 → 段階表示 → 推論ログ
+curl -s -X POST http://127.0.0.1:8000/v1/exam-sessions \
+  -H 'Content-Type: application/json' -d '{"mode":"study","voice_enabled":false}'
+curl -s -X POST http://127.0.0.1:8000/v1/exam-sessions/1/questions \
+  -F image=@page0.png -F ocr_text=$'問2 次の計算\n① 12\n② 13\n③ 14\n④ 15'
+curl -s -X POST http://127.0.0.1:8000/v1/exam-sessions/1/questions/1/solve
+curl -s 'http://127.0.0.1:8000/v1/exam-sessions/1/questions/1/view?stage=rationale&page=0'
+curl -s http://127.0.0.1:8000/v1/exam-sessions/1/questions/1/reasoning
+
+# 解答精度の評価ベンチ（合成サンプル）
+python scripts/eval_exam.py --synthetic 5 --out /tmp/exam_eval.json
+```
+
+設計は [docs/exam-solver-architecture.md](docs/exam-solver-architecture.md)、
+グラス表示・操作の規約は [docs/glasses-ux-contract.md](docs/glasses-ux-contract.md) を参照。
+
 ## Docker（任意）
 
 ```bash
