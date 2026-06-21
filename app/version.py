@@ -18,11 +18,13 @@ from __future__ import annotations
 APP_VERSION = "0.2.0"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
-API_VERSION = "1.1.0"
+# 1.2.0: /match responses gained the additive `ocr_similarity` field.
+API_VERSION = "1.2.0"
 
 # Matching algorithm identity. Bump when thresholds or hashing change so a
 # re-index/eval is triggered. Mirrors thresholds in app/matching.py.
-MATCHER_VERSION = "1.0.0"
+# 1.1.0: OCR signal is now graded text similarity, not exact MD5 only.
+MATCHER_VERSION = "1.1.0"
 
 # HUD payload shape: {verdict, confidence, lines:[3]}.
 HUD_CONTRACT_VERSION = "1.0.0"

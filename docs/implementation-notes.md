@@ -14,7 +14,7 @@
 ```
 [Rokid Glasses]──BLE/Wi-Fi──[Android/iOS コンパニオン]──HTTPS──[本サーバ(MVP)]
    カメラ/HUD          撮影・端末OCR・接続管理・UI          登録/照合/要約
-   (CXR-S/CXR-M)        (CXR-L SDK / Glimmer 等)            (本リポジトリ)
+   (CXR-S: 機上)        (CXR-M SDK / Glimmer 等)            (本リポジトリ)
 ```
 
 本 MVP が担うのは右端のサーバのみ。左2層を実機に置き換える際の対応表:
@@ -36,15 +36,18 @@
 
 ## 2. 公式 Rokid Glasses SDK（2026-06 時点）
 
-- **CXR-L SDK（Android / iOS）**: 現行の公式 SDK ライン。`ar.rokid.com/sdk`
-  で配布。**iOS パス**もここに含まれるため、コンパニオンを iOS で作る場合の
-  入口になる。MVP の画像アップロード／HUD 返却は、この SDK の
-  カメラフレーム取得・ディスプレイ描画コールバックに置き換える。
-- **CXR-S / CXR-M**: グラス側のキャプチャ／表示デバイス層。MVP では
-  `capture_device` フィールド（例 `"CXR-S"`）としてメタデータに記録するのみ。
-  実機では、この層からフレームを取り出して端末 OCR → `/match` に流す。
-- **差し込み手順（Android 例）**:
-  1. CXR-L SDK でカメラフレーム取得コールバックを登録。
+CXR（Connected XR）SDK スイートは役割別に分かれている（末尾「出典」で確認）:
+
+- **CXR-M SDK（Android / iOS）**: スマホ側コンパニオンアプリ用 SDK。グラスと通信し、
+  撮影フレームの受け取りや UI を担う。**iOS パス**もここに含まれるため、
+  コンパニオンを iOS で作る場合の入口になる。MVP の画像アップロード／HUD 返却は、
+  この SDK のフレーム取得・表示連携に置き換える。
+- **CXR-S SDK**: グラス本体（YodaOS-Sprite）上で動くアプリ用 SDK。CXR-M とデータ
+  チャネルで双方向通信する。MVP では `capture_device` フィールド（例 `"CXR-S"`）
+  としてメタデータに記録するのみ。実機ではこの層からフレームを取り出す。
+- **CXR-L SDK**: グラス単体で動く独立アプリ（標準アプリを置き換える）用 SDK。
+- **差し込み手順（Android コンパニオン例）**:
+  1. CXR-M SDK でカメラフレーム取得コールバックを登録。
   2. フレームを端末 OCR（ML Kit）に通し、短いテキストを得る。
   3. フレーム JPEG/PNG + OCR テキストを `POST /v1/match` に送信。
   4. レスポンスの `hud.lines`（3行）を SDK のディスプレイ API で描画。
@@ -120,7 +123,8 @@
 
 ## 出典
 
-- [CXR-L SDK（Android/iOS） — Rokid AR Platform](https://ar.rokid.com/sdk?lang=en)
+- [CXR SDK（CXR-M / CXR-S / CXR-L） — Rokid AR Platform](https://ar.rokid.com/sdk?lang=en)
+- [rokid-docs（コミュニティ版 CXR SDK スイート解説）](https://github.com/buildwithfenna/rokid-docs)
 - [awesome-rokid（コミュニティ SDK / ツール集、RokidBrew 等）](https://github.com/Anezium/awesome-rokid)
 - [Rokid Glasses 製品ページ](https://global.rokid.com/products/rokid-glasses)
 - [Rokid Glass 開発ドキュメント](https://rokid.github.io/glass-docs/)

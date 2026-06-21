@@ -62,8 +62,8 @@
 ```json
 {
   "app_version": "0.2.0",
-  "api_version": "1.1.0",
-  "matcher_version": "1.0.0",
+  "api_version": "1.2.0",
+  "matcher_version": "1.1.0",
   "hud_contract_version": "1.0.0",
   "analyzer_api_version": "1.0.0"
 }
