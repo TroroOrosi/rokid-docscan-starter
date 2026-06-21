@@ -18,15 +18,35 @@ from .solvers import SolveResult
 _MAX_FULL = 64
 
 
+# How this payload should be anchored on the client. Today the 49g glasses have
+# no 6DoF/SLAM, so we target a 2D image-anchored rendering; true paper-locked AR
+# is a future item gated on 6DoF and is advertised here as not-yet-available.
+_TRACKING = "2d_image_anchor"
+
+
 def build_overlay(
     solution: SolveResult,
     *,
     answer_box: dict | None,
     locked: bool = False,
+    page_number: int | None = None,
 ) -> dict:
-    """Return {items:[{kind, text, box, anchor}], locked}."""
+    """Return {items, locked, tracking, fixed_ar, anchor_hint}.
+
+    `tracking`/`fixed_ar`/`anchor_hint` let the client know the overlay is
+    2D image-anchored (not 6DoF paper-locked) and which page/box to anchor to.
+    """
+    base = {
+        "locked": locked,
+        "tracking": _TRACKING,
+        "fixed_ar": False,  # 6DoF paper-locked AR not yet supported (hardware).
+        "anchor_hint": {
+            "page_number": page_number,
+            "box": dict(answer_box) if answer_box else None,
+        },
+    }
     if locked or answer_box is None:
-        return {"items": [], "locked": locked}
+        return {"items": [], **base}
 
     answer = (solution.answer or "").strip()
     # Short token (answer number / choice label) for the cramped answer cell.
@@ -48,4 +68,4 @@ def build_overlay(
                 "anchor": "answer_area",
             }
         )
-    return {"items": items, "locked": False}
+    return {"items": items, **base}

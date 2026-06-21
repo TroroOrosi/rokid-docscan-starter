@@ -53,5 +53,73 @@ def get_solver(prefer: str | None = None) -> Solver:
     return solver
 
 
+def _tier_names(tiers: list[str] | None) -> list[str]:
+    """Ordered solver tiers, with the offline default guaranteed as the last
+    safety net. Source: explicit `tiers`, else ROKID_SOLVER_TIERS (csv), else
+    the single routed solver."""
+    if tiers is not None:
+        names = list(tiers)
+    else:
+        env = os.environ.get("ROKID_SOLVER_TIERS")
+        names = (
+            [t.strip() for t in env.split(",") if t.strip()]
+            if env
+            else [_select_name(None)]
+        )
+    if DEFAULT_SOLVER not in names:
+        names.append(DEFAULT_SOLVER)
+    return names
+
+
+def _acceptable(result) -> bool:
+    """An answer is usable if the tier didn't flag an error and produced text."""
+    if result is None or result.extras.get("error"):
+        return False
+    return bool((result.answer or "").strip())
+
+
+def solve_with_fallback(
+    question, *, tiers: list[str] | None = None, max_answer_len: int = 64
+):
+    """Two-tier (multi-tier) fallback: try solver tiers in order and return
+    `(result, solver)` for the first that yields an acceptable answer, always
+    falling back to the offline local solver as a final safety net.
+
+    A tier "fails" if `solve` raises, flags `extras['error']`, or returns an
+    empty answer. The winning tier is recorded in `result.extras['served_by']`
+    and any skipped tiers in `result.extras['fallback_from']`.
+    """
+    names = _tier_names(tiers)
+    skipped: list[str] = []
+    last_result = None
+    last_solver = None
+    for name in names:
+        solver = get_solver(name)
+        last_solver = solver
+        try:
+            result = solver.solve(question=question, max_answer_len=max_answer_len)
+        except Exception:  # noqa: BLE001 - one tier failing must not 500
+            skipped.append(f"{name}:error")
+            continue
+        last_result = result
+        if _acceptable(result):
+            result.extras["served_by"] = solver.name
+            if skipped:
+                result.extras["fallback_from"] = skipped
+            return result, solver
+        skipped.append(f"{name}:empty")
+
+    # Nothing acceptable; return the last result (the local default never
+    # returns an empty answer, so this is effectively the placeholder).
+    if last_result is not None:
+        last_result.extras["served_by"] = last_solver.name
+        last_result.extras["fallback_from"] = skipped
+        return last_result, last_solver
+    solver = get_solver(DEFAULT_SOLVER)
+    result = solver.solve(question=question, max_answer_len=max_answer_len)
+    result.extras["served_by"] = solver.name
+    return result, solver
+
+
 # Register the offline default at import time so the server always has one.
 register_solver(LocalPlaceholderSolver(), replace=True)

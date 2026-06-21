@@ -21,6 +21,7 @@ from pydantic import BaseModel
 from . import config, db
 from .analyzers import get_analyzer
 from .config import IMAGE_DIR, ensure_dirs
+from .extractors import detect_media, get_extractor
 from .glasses_view import (
     CAPTURE_CONTRACT,
     RENDER_CONTRACT,
@@ -33,9 +34,31 @@ from .hud import build_hud
 from .layout import parse_layout, primary_question
 from .matching import Candidate, match, normalize_ocr_text, ocr_md5, phash_hex
 from .overlay import build_overlay
-from .solvers import Question, get_solver
+from .retrieval import retrieve_context
+from .solvers import Question
+from .solvers.registry import solve_with_fallback
 from .subjects import detect_subject
 from .version import APP_VERSION, HUD_CONTRACT_VERSION, version_info
+
+
+def _extract_media(ocr_text: str | None, image_path: str) -> list[dict]:
+    """Run the active media extractor over any figure/table/graph/formula cues.
+
+    Returns a list of {kind, content, confidence} items (empty when no media is
+    detected). Real extraction is a registry swap (ROKID_EXTRACTOR); the offline
+    default returns clearly-marked placeholders.
+    """
+    kinds = detect_media(ocr_text)
+    if not kinds:
+        return []
+    extractor = get_extractor()
+    items: list[dict] = []
+    for kind in kinds:
+        res = extractor.extract(kind=kind, ocr_text=ocr_text, image_path=image_path)
+        items.append(
+            {"kind": res.kind, "content": res.content, "confidence": res.confidence}
+        )
+    return items
 
 
 @asynccontextmanager
@@ -104,12 +127,14 @@ def health() -> dict:
 def get_version() -> dict:
     """Discovery endpoint: clients negotiate contracts against this block."""
     from .analyzers import list_analyzers
+    from .extractors import list_extractors
     from .solvers import list_solvers
 
     return {
         **version_info(),
         "analyzers": list_analyzers(),
         "solvers": list_solvers(),
+        "extractors": list_extractors(),
     }
 
 
@@ -418,12 +443,13 @@ async def add_question(
         img.convert("RGB").save(fpath, format="PNG")
 
         answer_box = q.answer_box if q else parsed.get("answer_box")
+        media = _extract_media(ocr_text, str(fpath))
         cur = conn.execute(
             """INSERT INTO questions
                (session_id, question_no, body_text, choices_json, figure_refs,
                 answer_box_json, structure_json, subject, read_conf,
-                page_number, image_path)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                page_number, image_path, media_json)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 session_id,
                 q.question_no if q else None,
@@ -436,6 +462,7 @@ async def add_question(
                 read_conf,
                 parsed.get("page_number"),
                 str(fpath),
+                json.dumps(media, ensure_ascii=False) if media else None,
             ),
         )
         conn.commit()
@@ -448,6 +475,7 @@ async def add_question(
             "read_confidence": read_conf,
             "answer_box": answer_box,
             "page_number": parsed.get("page_number"),
+            "media": media,
             # Silent, no-flash capture confirmation (instead of a shutter sound /
             # white flash). The privacy LED is unaffected and stays on.
             "capture_ack": build_capture_ack(
@@ -481,21 +509,28 @@ def solve_question(session_id: int, question_id: int) -> dict:
                 "versions": version_info(),
             }
 
+        # RAG (Phase 3): ground the solver in the user's own scanned materials.
+        retrieved = retrieve_context(conn, q["body_text"])
         question = Question(
             question_no=q["question_no"],
             body_text=q["body_text"],
             choices=json.loads(q["choices_json"] or "[]"),
             subject=q["subject"],
+            context=retrieved["context"] or None,
         )
-        solver = get_solver()
-        result = solver.solve(question=question)
+        # Two-tier fallback (Phase 3): preferred solver tiers -> offline local.
+        result, solver = solve_with_fallback(question=question)
+        served_by = result.extras.get("served_by", solver.name)
+        # Retrieval supplies evidence pages when the solver itself didn't.
+        evidence_pages = result.evidence_pages or retrieved["evidence_pages"]
+        result.evidence_pages = evidence_pages
 
         conn.execute(
             """INSERT INTO solutions
                (question_id, solver_name, answer, solution_steps_json, rationale,
                 cautions, answer_conf, rationale_conf, evidence_pages_json,
-                raw_reasoning)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                raw_reasoning, served_by)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 question_id,
                 solver.name,
@@ -505,8 +540,9 @@ def solve_question(session_id: int, question_id: int) -> dict:
                 result.cautions,
                 result.answer_confidence,
                 result.rationale_confidence,
-                json.dumps(result.evidence_pages),
+                json.dumps(evidence_pages),
                 result.raw_reasoning,
+                served_by,
             ),
         )
         conn.commit()
@@ -525,9 +561,13 @@ def solve_question(session_id: int, question_id: int) -> dict:
             "question_id": question_id,
             "subject": result.subject or q["subject"],
             "solver": solver.info(),
+            "served_by": served_by,
             "locked": False,
             "glasses_view": view,
-            "overlay": build_overlay(result, answer_box=answer_box),
+            "overlay": build_overlay(
+                result, answer_box=answer_box, page_number=q["page_number"]
+            ),
+            "evidence": retrieved["hits"],
             "versions": version_info(),
         }
     finally:
@@ -568,6 +608,42 @@ def get_question_view(
                 voice_enabled=bool(session["voice_enabled"]),
             ),
             "locked": False,
+        }
+    finally:
+        conn.close()
+
+
+@app.get("/v1/exam-sessions/{session_id}/questions/{question_id}/reasoning")
+def get_question_reasoning(session_id: int, question_id: int) -> dict:
+    """Full solver reasoning log (案9): kept server-side, NOT on the HUD.
+
+    The HUD only ever shows the short staged view; this endpoint exposes the
+    long `raw_reasoning`, evidence pages and the serving tier for review/audit.
+    Respects the same real-exam lock as solving.
+    """
+    conn = db.connect()
+    try:
+        session = _exam_session_or_404(conn, session_id)
+        _question_or_404(conn, session_id, question_id)
+        if session["mode"] == "real" and not config.ALLOW_REAL_EXAM_SOLVE:
+            return {"question_id": question_id, "locked": True}
+        sol = conn.execute(
+            "SELECT * FROM solutions WHERE question_id = ? ORDER BY id DESC LIMIT 1",
+            (question_id,),
+        ).fetchone()
+        if sol is None:
+            raise HTTPException(status_code=409, detail="question not solved yet")
+        return {
+            "session_id": session_id,
+            "question_id": question_id,
+            "locked": False,
+            "solver_name": sol["solver_name"],
+            "served_by": sol["served_by"],
+            "raw_reasoning": sol["raw_reasoning"] or "",
+            "solution_steps": json.loads(sol["solution_steps_json"] or "[]"),
+            "rationale": sol["rationale"] or "",
+            "evidence_pages": json.loads(sol["evidence_pages_json"] or "[]"),
+            "versions": version_info(),
         }
     finally:
         conn.close()

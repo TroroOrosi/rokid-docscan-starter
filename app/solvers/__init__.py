@@ -7,7 +7,13 @@ VLM is a registry change, not an endpoint change. See app/solvers/base.py.
 """
 
 from .base import Question, SolveResult, Solver
-from .registry import DEFAULT_SOLVER, get_solver, list_solvers, register_solver
+from .registry import (
+    DEFAULT_SOLVER,
+    get_solver,
+    list_solvers,
+    register_solver,
+    solve_with_fallback,
+)
 
 __all__ = [
     "Question",
@@ -17,4 +23,5 @@ __all__ = [
     "get_solver",
     "list_solvers",
     "register_solver",
+    "solve_with_fallback",
 ]

@@ -55,6 +55,7 @@ CREATE TABLE IF NOT EXISTS questions (
     read_conf       REAL,
     page_number     INTEGER,
     image_path      TEXT,
+    media_json      TEXT,            -- extracted media items (案6, Phase 2)
     created_at      TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -70,6 +71,7 @@ CREATE TABLE IF NOT EXISTS solutions (
     rationale_conf     REAL,
     evidence_pages_json TEXT,
     raw_reasoning      TEXT,
+    served_by          TEXT,         -- solver tier that produced this (Phase 3)
     user_confirmed     INTEGER NOT NULL DEFAULT 0,
     created_at         TEXT NOT NULL DEFAULT (datetime('now'))
 );

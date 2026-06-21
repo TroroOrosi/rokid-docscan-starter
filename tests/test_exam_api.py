@@ -79,6 +79,8 @@ def test_full_exam_flow_study(client):
     qid = r.json()["question_id"]
     assert r.json()["question_no"] == "問2"
     assert r.json()["subject"]
+    # No figure/table/graph/formula cue in this OCR -> media is empty.
+    assert r.json()["media"] == []
 
     solved = client.post(
         f"/v1/exam-sessions/{sid}/questions/{qid}/solve"
@@ -87,8 +89,65 @@ def test_full_exam_flow_study(client):
     view = solved["glasses_view"]
     assert len(view["lines"]) <= 3
     assert view["stage"] == "answer"
-    # overlay targets the answer box
+    # overlay targets the answer box and advertises 2D (non-6DoF) tracking
     assert "items" in solved["overlay"]
+    assert solved["overlay"]["tracking"] == "2d_image_anchor"
+    assert solved["overlay"]["fixed_ar"] is False
+    # Phase 3: the serving solver tier and (possibly empty) evidence are exposed.
+    assert solved["served_by"] == "local"
+    assert "evidence" in solved
+
+
+def test_add_question_extracts_media_when_present(client):
+    sid = _new_session(client)
+    r = _add_question(client, sid, ocr_text="問3 図1を参照し、表2の値を求めよ")
+    media = r.json()["media"]
+    kinds = {m["kind"] for m in media}
+    assert "figure" in kinds and "table" in kinds
+
+
+def test_evidence_is_populated_from_prior_materials(client):
+    # Seed a scanned page, then solve a question whose body overlaps it.
+    import app.main as main
+
+    conn = main.db.connect()
+    try:
+        cur = conn.execute("INSERT INTO documents (title) VALUES ('study')")
+        doc_id = cur.lastrowid
+        conn.execute(
+            "INSERT INTO pages (document_id, page_index, image_path, phash, ocr_text, summary)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            (doc_id, 0, "p.png", "0" * 16,
+             "光合成は植物が光のエネルギーででんぷんを作る反応である", "光合成"),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    sid = _new_session(client)
+    qid = _add_question(client, sid, ocr_text="問1 光合成について説明せよ").json()["question_id"]
+    solved = client.post(f"/v1/exam-sessions/{sid}/questions/{qid}/solve").json()
+    assert solved["evidence"], "expected retrieval to surface the photosynthesis page"
+
+
+def test_reasoning_endpoint_returns_log(client):
+    sid = _new_session(client)
+    qid = _add_question(client, sid).json()["question_id"]
+    client.post(f"/v1/exam-sessions/{sid}/questions/{qid}/solve")
+    r = client.get(f"/v1/exam-sessions/{sid}/questions/{qid}/reasoning")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["locked"] is False
+    assert body["served_by"] == "local"
+    assert "raw_reasoning" in body
+
+
+def test_reasoning_real_mode_is_locked(client):
+    sid = _new_session(client, mode="real")
+    qid = _add_question(client, sid).json()["question_id"]
+    client.post(f"/v1/exam-sessions/{sid}/questions/{qid}/solve")
+    r = client.get(f"/v1/exam-sessions/{sid}/questions/{qid}/reasoning")
+    assert r.json()["locked"] is True
 
 
 def test_view_stage_navigation(client):

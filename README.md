@@ -248,16 +248,24 @@ curl -s -X POST http://127.0.0.1:8000/v1/match \
 - **音声操作は設定で ON/OFF**（既定 OFF＝ボタン/タッチ操作）。
 - 解答ソルバーは既定で**オフラインのプレースホルダ**（実際には解かない＝不正利用ガード）。
   実モデル（Gemini/OpenAI/Claude/オンデバイス VLM）は `register_solver()` で差し込み、`ROKID_SOLVER` で切替。
+  クラウド→ローカルの**二段フォールバック**（`ROKID_SOLVER_TIERS`、`solve_with_fallback`）で圏外/失敗でも HUD は返ります。
+- **メディア抽出**（数式/図/表/グラフ＝案6）は `app/extractors/`（`ROKID_EXTRACTOR` で差替）。`add_question` 応答の `media` に載ります。
+- **RAG 根拠提示**：`app/retrieval.py` が既存の `documents/pages` を横断検索し、`solve` 応答の `evidence` と HUD の根拠に反映（`ROKID_ENABLE_EMBEDDING` で意味検索へ差替可）。
+- **推論ログ**（案9）は `GET …/questions/{qid}/reasoning` で参照（HUD は短縮版・`real` ロック準拠）。
 - 本番試験モード（`mode=real`）は既定でロック（`ROKID_ALLOW_REAL_EXAM_SOLVE=1` が無い限り解答非表示）。学習・模試・研究用途向けです。
 
 ```bash
-# セッション作成 → 設問追加 → 解答 → 段階表示
+# セッション作成 → 設問追加 → 解答 → 段階表示 → 推論ログ
 curl -s -X POST http://127.0.0.1:8000/v1/exam-sessions \
   -H 'Content-Type: application/json' -d '{"mode":"study","voice_enabled":false}'
 curl -s -X POST http://127.0.0.1:8000/v1/exam-sessions/1/questions \
   -F image=@page0.png -F ocr_text=$'問2 次の計算\n① 12\n② 13\n③ 14\n④ 15'
 curl -s -X POST http://127.0.0.1:8000/v1/exam-sessions/1/questions/1/solve
 curl -s 'http://127.0.0.1:8000/v1/exam-sessions/1/questions/1/view?stage=rationale&page=0'
+curl -s http://127.0.0.1:8000/v1/exam-sessions/1/questions/1/reasoning
+
+# 解答精度の評価ベンチ（合成サンプル）
+python scripts/eval_exam.py --synthetic 5 --out /tmp/exam_eval.json
 ```
 
 設計は [docs/exam-solver-architecture.md](docs/exam-solver-architecture.md)、

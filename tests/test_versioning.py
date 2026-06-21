@@ -20,6 +20,7 @@ def test_version_info_has_all_contracts():
         "hud_contract_version",
         "analyzer_api_version",
         "solver_api_version",
+        "extractor_api_version",
         "glasses_view_contract_version",
         "overlay_contract_version",
     ):
@@ -29,8 +30,15 @@ def test_version_info_has_all_contracts():
 def test_contract_versions_reflect_silent_capture_contract():
     # Bumped when /v1/settings gained the render+capture contract and
     # add_question gained the silent capture_ack payload.
-    assert version.API_VERSION == "1.4.0"
     assert version.GLASSES_VIEW_CONTRACT_VERSION == "1.1.0"
+
+
+def test_contract_versions_reflect_phase234():
+    # Phase 2/3/4: media extraction, RAG evidence/served_by, reasoning endpoint,
+    # and overlay tracking metadata.
+    assert version.API_VERSION == "1.5.0"
+    assert version.EXTRACTOR_API_VERSION == "1.0.0"
+    assert version.OVERLAY_CONTRACT_VERSION == "1.1.0"
 
 
 # --- analyzer registry ------------------------------------------------------
