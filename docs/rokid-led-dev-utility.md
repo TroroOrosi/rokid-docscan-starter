@@ -35,6 +35,7 @@
 | `status`  | 読み取り専用 | dry-run | `--apply` |
 | `disable` | **書き込み（LED 状態変更）** | dry-run | `--apply` **かつ** `--force` |
 | `restore` | **書き込み（undo）** | dry-run | `--apply` **かつ** `--force` |
+| `verify`  | status→**disable（書き込み）**→status＋判定 | dry-run | `--apply` **かつ** `--force` |
 
 - **既定は常に dry-run**：コマンド列を表示するだけで、端末には何も送りません。
 - `--apply` を付けて初めて実際に実行します。
@@ -123,10 +124,110 @@ python scripts/rokid_led.py probe --json
 
 ---
 
+## `verify`：実機での「本当に消えたか」検証 / Evidence-based verification
+
+`disable` の ADB コマンドが `rc=0` で終わっても、それは **物理 LED が消えた証明には
+なりません**。次のような乖離が普通に起きます:
+
+- 非 root シェルへのリダイレクト書き込みがカーネルに **黙って拒否**されても、シェルは `0` を返す。
+- SELinux がシェル終了後に書き込みを拒否する。
+- ベンダの init / Lights HAL サービスが数ミリ秒〜数秒後に **LED を再点灯**させる。
+
+`verify` は **status（前）→ disable → status（後）** を実行し、**読み戻した brightness の値**
+から状態を判定します。判定は ADB の終了コードとは **明確に分離**されます。
+
+| フィールド | 意味 |
+|------------|------|
+| `write_succeeded` | disable コマンドが全て `rc=0`。**物理状態の証明ではない**。 |
+| `verified_state`  | `off` / `on` / `unknown`。**brightness 読み戻しのみ**が根拠。 |
+| `confirmed_off`   | `brightness == 0` を実際に読めたときだけ `true`。 |
+| `reasserted`      | 一度 0 を読んだ後に再点灯（init/HAL の再アサート）を検知。 |
+| `attempts`        | disable を実行した回数（`--retries` での再アサートを含む）。 |
+
+`verified_state` の判定規則（保守的）:
+
+- `brightness` を **読めない**（permission denied / ノード無し / 空 / rc≠0）→ `unknown`。
+  **決して `off` とは見なしません**（「0 が読めた」ことだけが off の根拠）。
+- `brightness == 0` → `off`、`> 0` → `on`。
+
+### 手順 / Step-by-step
+
+```bash
+# 0. 前提: adb が PATH にあり、`adb devices` にグラスが出ること。
+#    まず probe で LED ノード名（既定 white）と SELinux 状態を確認:
+python scripts/rokid_led.py probe --host 192.168.1.50:5555 --apply
+
+# 1. 計画だけ確認（dry-run・何も実行しない・状態は unknown）:
+python scripts/rokid_led.py verify --led white
+
+# 2. 自分の端末で実検証（両フラグ必須）。再点灯対策に最大3回まで再アサートし、
+#    issue/PR に添付できる JSON 証跡を書き出す:
+python scripts/rokid_led.py verify --led white --host 192.168.1.50:5555 \
+    --apply --force --retries 3 --evidence-out led-evidence.json
+
+# 3. 終わったら必ず元に戻す（または再起動）:
+python scripts/rokid_led.py restore --led white --host 192.168.1.50:5555 --apply --force
+```
+
+### 期待される出力 / Expected output
+
+成功（LED が 0 を読み戻した）場合の human 出力（抜粋）:
+
+```
+HEADLINE:  LED reads OFF (brightness=0) — confirm visually with a 2nd camera
+  write_succeeded: True   (adb commands exited 0 — NOT proof of physical state)
+  verified_state:  off    (from brightness readback)
+  confirmed_off:   True
+snapshots:
+  before: brightness=255 max=255 trigger=none ...=0 selinux=Permissive readable=True
+  after : brightness=0   max=255 trigger=none ...=0 selinux=Permissive readable=True
+```
+
+`--json` / `--evidence-out` の証跡 JSON（抜粋）:
+
+```json
+{
+  "headline": "LED reads OFF (brightness=0) — confirm visually with a 2nd camera",
+  "write_succeeded": true,
+  "verified_state": "off",
+  "confirmed_off": true,
+  "attempts": 1,
+  "reasserted": false,
+  "before": { "brightness": 255, "trigger": "none", "enforcing": "Permissive", "readable": true },
+  "after":  { "brightness": 0,   "trigger": "none", "enforcing": "Permissive", "readable": true }
+}
+```
+
+### 成否の判定 / How to judge success vs failure
+
+| 出力 | 解釈 | 終了コード |
+|------|------|:---------:|
+| `confirmed_off: true` | brightness=0 を読めた。**ただし物理確認は別途必須**（下記）。 | 0 |
+| `verified_state: on` ＋ `write_succeeded: true` | コマンドは成功したが LED は点灯のまま＝**再アサートされた／効いていない**。 | 4 |
+| `verified_state: unknown` | brightness を読めない＝**検証不能**（非 root で `/sys` を読めない等）。 | 3 |
+| `BLOCKED` | `--force` 無しで write を呼んだ。 | 2 |
+| dry-run | 何も実行していない。 | 0 |
+
+### 外部カメラによる物理確認は必須 / External visual confirmation is required
+
+**ADB が成功しても、`confirmed_off: true` でも、それだけでは「他人から見て LED が消えている」
+証明にはなりません。** 必ず:
+
+1. **別のスマホ／カメラでグラスの録画 LED を録画しながら** `verify --apply --force` を実行する。
+2. 録画映像で LED が **実際に消灯したか** を目視確認する（一瞬だけ消えて再点灯する場合もある）。
+3. `reasserted: true` や、目視で点滅・再点灯が見えたら **「消えていない」** と判断する。
+4. 検証後は `restore` または **再起動** で必ず元の状態に戻す。
+
+---
+
 ## 既知の制約と不確実性 / Known constraints & uncertainty
 
-- **非 root の adb shell は `/sys/class/leds/...` に書けないのが通常**。`disable` が
-  「Permission denied」になるのは想定内です。
+- **非 root の adb shell は `/sys/class/leds/...` に書けない／読めないのが通常**。`disable` が
+  「Permission denied」になるのは想定内です。読めない場合 `verify` は `unknown`（off とは
+  見なさない）を返します。
+- **`verify` の `confirmed_off` は sysfs の brightness 読み戻しに依存**します。ノードを読めない
+  端末では検証不能（`unknown`）となり、`write_succeeded: true` でも「消えた」とは判定しません。
+  最終判断は必ず外部カメラの目視で行ってください。
 - **SELinux**（`getenforce` / `setenforce 0`）、ベンダ `init.rokid.rc`、Magisk ポリシー
   などが LED を再点灯させたり書き込みを拒否したりする可能性があります。
 - `vendor.rkd.camera.session_open` が `init.rokid.rc` 経由で
@@ -145,5 +246,12 @@ python scripts/rokid_led.py probe --json
   する純粋関数群（副作用なし・import 時に何も実行しない）と、`--apply` / `--force` ゲートを
   適用する `execute_plan()` に分離。`subprocess.run` は注入可能で、テストはプロセスを起動せず
   argv を検証します。
-- CLI は `scripts/rokid_led.py`（`scripts/evaluate.py` と同じ argparse スタイル）。
-- テストは `tests/test_rokid_led.py`：コマンド構築・dry-run・安全ゲートを検証。
+- 検証層：`parse_status()` が `status` の読み戻しを `LedSnapshot` に構造化し、`verdict_for()`
+  が保守的に `off`/`on`/`unknown` を判定。`run_verification()` が status→disable→status を
+  オーケストレーションし、`--force` 無しの apply は **デバイスを読む前に** ブロックします
+  （`execute_plan` と同じゲート）。再アサート検知・再試行は `sleep` 注入でテスト可能。
+- CLI は `scripts/rokid_led.py`（`scripts/evaluate.py` と同じ argparse スタイル）。`verify`
+  は `--retries` / `--retry-delay` / `--evidence-out` を持ち、終了コードで状態を表します
+  （0=confirmed off/dry-run、2=blocked、3=unknown、4=still on）。
+- テストは `tests/test_rokid_led.py`：コマンド構築・dry-run・安全ゲートに加え、読み戻しの
+  パース・判定（off/on/unknown）・再アサート検知・JSON 証跡・失敗モードを検証。

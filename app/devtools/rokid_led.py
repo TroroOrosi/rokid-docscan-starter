@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import shlex
 import subprocess
+import time
 from dataclasses import dataclass, field
 
 # The hypothesized hardware path: the custom camera session open property is
@@ -172,6 +173,8 @@ def build_status_plan(
                     "current LED trigger binding"),
             Command((*adb, "shell", "getprop", SESSION_OPEN_PROP),
                     f"current {SESSION_OPEN_PROP}"),
+            Command((*adb, "shell", "getenforce"),
+                    "current SELinux enforcing state"),
         ),
         needs_force=False,
         notes=("Read-only. Use this to capture state before and after a change.",),
@@ -373,3 +376,277 @@ def execute_plan(
         applied=apply,
         steps=steps,
     )
+
+
+# ---------------------------------------------------------------------------
+# Verification layer
+#
+# Running a command and getting `rc=0` does NOT prove the physical LED is off.
+# A non-root shell may report success on a redirect that the kernel silently
+# rejects, SELinux may deny the write after the shell exited 0, or a vendor
+# init/HAL service may re-assert brightness milliseconds later. This layer
+# parses the *readback* values from a `status` plan into structured evidence
+# and renders a conservative verdict that is explicitly separate from the
+# command exit codes.
+# ---------------------------------------------------------------------------
+
+# Sentinel string for a value we could not read (permission denied, missing
+# node, adb absent, dry-run, ...). Kept distinct from a real "0".
+UNKNOWN = "?"
+
+
+def _classify_readback(stdout: str, stderr: str, returncode: int | None) -> str | None:
+    """Extract the meaningful value from a `cat`/`getprop` step.
+
+    Returns the trimmed first line on success, or ``None`` when the value is
+    unknowable (non-zero rc, permission denied, no such file, empty output).
+    A returned ``None`` is later surfaced as :data:`UNKNOWN` — never confused
+    with a literal ``"0"``.
+    """
+    if returncode not in (0, None):
+        return None
+    blob = (stdout or "").strip()
+    if not blob:
+        return None
+    first = blob.splitlines()[0].strip()
+    low = first.lower()
+    # adb/toybox error text sometimes arrives on stdout with rc=0.
+    if any(t in low for t in ("permission denied", "no such file", "not found")):
+        return None
+    return first
+
+
+def _parse_brightness(value: str | None) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value.strip())
+    except (TypeError, ValueError):
+        return None
+
+
+@dataclass
+class LedSnapshot:
+    """Parsed, structured readback of a single ``status`` capture.
+
+    Every field is either the observed value or :data:`UNKNOWN`/``None`` — we
+    never invent a default that could be mistaken for a real reading.
+    """
+
+    brightness: int | None = None
+    max_brightness: int | None = None
+    trigger: str = UNKNOWN
+    session_prop: str = UNKNOWN
+    enforcing: str = UNKNOWN  # filled in only when a probe is folded in
+    readable: bool = False  # did we manage to read brightness at all?
+
+    def to_dict(self) -> dict:
+        return {
+            "brightness": self.brightness,
+            "max_brightness": self.max_brightness,
+            "trigger": self.trigger,
+            "session_prop": self.session_prop,
+            "enforcing": self.enforcing,
+            "readable": self.readable,
+        }
+
+
+def parse_status(report: RunReport) -> LedSnapshot:
+    """Turn an executed ``status`` :class:`RunReport` into a :class:`LedSnapshot`.
+
+    Matches steps by their command purpose so it is robust to ordering. Steps
+    that did not execute (dry-run, adb missing) yield UNKNOWN fields.
+    """
+    snap = LedSnapshot()
+    for step in report.steps:
+        val = _classify_readback(step.stdout, step.stderr, step.returncode) \
+            if step.executed else None
+        purpose = step.command.purpose
+        if purpose == "current LED brightness":
+            snap.brightness = _parse_brightness(val)
+            snap.readable = snap.brightness is not None
+        elif purpose == "max LED brightness":
+            snap.max_brightness = _parse_brightness(val)
+        elif purpose == "current LED trigger binding":
+            snap.trigger = val if val is not None else UNKNOWN
+        elif purpose == "current SELinux enforcing state":
+            snap.enforcing = val if val is not None else UNKNOWN
+        elif purpose.startswith("current ") and SESSION_OPEN_PROP in purpose:
+            snap.session_prop = val if val is not None else UNKNOWN
+    return snap
+
+
+# Verdict vocabulary, kept deliberately small and conservative.
+VERDICT_OFF = "off"          # brightness readable AND 0
+VERDICT_ON = "on"            # brightness readable AND > 0
+VERDICT_UNKNOWN = "unknown"  # could not read brightness — claim nothing
+
+
+def verdict_for(snapshot: LedSnapshot) -> str:
+    """Conservative state from a snapshot. Unreadable brightness => UNKNOWN.
+
+    We never report ``off`` from a non-zero exit code or a missing readback —
+    only from an actual ``brightness == 0`` reading.
+    """
+    if snapshot.brightness is None:
+        return VERDICT_UNKNOWN
+    return VERDICT_OFF if snapshot.brightness == 0 else VERDICT_ON
+
+
+@dataclass
+class VerificationReport:
+    """Evidence bundle for one disable-and-verify attempt.
+
+    Separates three things that are easy to conflate:
+      * ``write_succeeded`` — did the disable commands exit 0,
+      * ``verified_state``  — what the *readback* actually shows,
+      * ``confirmed_off``   — only true when the readback proves brightness 0.
+    """
+
+    led_name: str
+    dry_run: bool
+    applied: bool
+    blocked_reason: str | None = None
+    before: LedSnapshot = field(default_factory=LedSnapshot)
+    after: LedSnapshot = field(default_factory=LedSnapshot)
+    attempts: int = 0
+    reasserted: bool = False
+    write_report: RunReport | None = None
+    status_reports: list[RunReport] = field(default_factory=list)
+
+    @property
+    def write_succeeded(self) -> bool:
+        wr = self.write_report
+        if wr is None or not wr.applied:
+            return False
+        return all(
+            (s.executed and s.returncode == 0) for s in wr.steps if s.command.writes
+        )
+
+    @property
+    def verified_state(self) -> str:
+        return verdict_for(self.after)
+
+    @property
+    def confirmed_off(self) -> bool:
+        return self.verified_state == VERDICT_OFF
+
+    @property
+    def headline(self) -> str:
+        if self.blocked_reason:
+            return "blocked"
+        if self.dry_run:
+            return "dry-run (no device state changed)"
+        if self.confirmed_off:
+            return "LED reads OFF (brightness=0) — confirm visually with a 2nd camera"
+        if self.verified_state == VERDICT_ON:
+            if self.write_succeeded:
+                return "commands succeeded BUT LED still reads ON (likely re-asserted)"
+            return "LED reads ON"
+        # unknown
+        if self.write_succeeded:
+            return "commands exited 0 but state UNVERIFIABLE (brightness unreadable)"
+        return "state UNVERIFIABLE (brightness unreadable; writes may have failed)"
+
+    def to_dict(self) -> dict:
+        return {
+            "led_name": self.led_name,
+            "dry_run": self.dry_run,
+            "applied": self.applied,
+            "blocked_reason": self.blocked_reason,
+            "headline": self.headline,
+            "write_succeeded": self.write_succeeded,
+            "verified_state": self.verified_state,
+            "confirmed_off": self.confirmed_off,
+            "attempts": self.attempts,
+            "reasserted": self.reasserted,
+            "before": self.before.to_dict(),
+            "after": self.after.to_dict(),
+            "write_report": self.write_report.to_dict() if self.write_report else None,
+            "status_reports": [r.to_dict() for r in self.status_reports],
+        }
+
+
+def run_verification(
+    *,
+    serial: str | None = None,
+    host: str | None = None,
+    led_name: str = DEFAULT_LED_NAME,
+    apply: bool = False,
+    force: bool = False,
+    retries: int = 0,
+    retry_delay: float = 1.0,
+    runner=subprocess.run,
+    sleep=time.sleep,
+) -> VerificationReport:
+    """Capture status, attempt a disable, then re-capture and judge.
+
+    Flow (only when ``apply and force``):
+      1. ``status`` before  -> :attr:`before`
+      2. ``disable`` write  -> :attr:`write_report`
+      3. ``status`` after   -> :attr:`after`
+      4. while the LED is *not* confirmed off and retries remain, wait
+         ``retry_delay`` seconds, re-assert the disable, and re-read. This
+         catches the case where a vendor init/HAL service turns the LED back
+         on shortly after the write (``reasserted`` is then True).
+
+    Without ``apply`` it is a pure dry-run: no commands execute, both snapshots
+    are UNKNOWN, and the verdict is ``unknown``. Without ``force`` (but with
+    ``apply``) the write is blocked exactly like :func:`execute_plan`, and the
+    ``blocked_reason`` is propagated — no status is captured, nothing runs.
+    """
+    rep = VerificationReport(
+        led_name=led_name, dry_run=not apply, applied=apply,
+    )
+
+    # Mirror the execute_plan safety gate up front so a non-forced apply does
+    # not even read the device. Keeps the privacy/tamper contract intact.
+    disable_plan = build_disable_plan(serial=serial, host=host, led_name=led_name)
+    if apply and disable_plan.needs_force and not force:
+        rep.blocked_reason = (
+            f"operation 'disable' changes device state and requires an explicit "
+            f"force flag; refusing to run"
+        )
+        rep.applied = False
+        return rep
+
+    status_plan = build_status_plan(serial=serial, host=host, led_name=led_name)
+
+    def capture() -> LedSnapshot:
+        r = execute_plan(status_plan, apply=apply, force=False, runner=runner)
+        rep.status_reports.append(r)
+        return parse_status(r)
+
+    rep.before = capture()
+
+    rep.write_report = execute_plan(
+        disable_plan, apply=apply, force=force, runner=runner
+    )
+    rep.attempts = 1 if apply else 0
+    rep.after = capture()
+
+    # Re-check loop. Each pass waits, re-reads, and — if the LED is back on —
+    # re-asserts the disable. This catches a vendor init/HAL service that turns
+    # the LED back on shortly after the first write. We keep re-checking even
+    # after an apparent "off" so a *delayed* re-assert is still detected; the
+    # loop stops early only once a check confirms off AND the prior check also
+    # confirmed off (state is stable).
+    prev_off = verdict_for(rep.after) == VERDICT_OFF
+    for _ in range(max(0, retries)) if (apply and force) else ():
+        sleep(retry_delay)
+        if verdict_for(rep.after) != VERDICT_OFF:
+            # LED is on/unknown: actively re-assert the disable.
+            rep.write_report = execute_plan(
+                disable_plan, apply=apply, force=force, runner=runner
+            )
+            rep.attempts += 1
+        new_after = capture()
+        if prev_off and verdict_for(new_after) == VERDICT_ON:
+            rep.reasserted = True
+        now_off = verdict_for(new_after) == VERDICT_OFF
+        rep.after = new_after
+        if prev_off and now_off:
+            break  # two consecutive off reads -> stable, stop early
+        prev_off = now_off
+
+    return rep

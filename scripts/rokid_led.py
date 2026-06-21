@@ -12,6 +12,9 @@ Subcommands:
   status         read-only report of current LED brightness / trigger / prop
   disable        UNCONFIRMED attempt to turn the recording LED off  (gated)
   restore        best-effort undo of `disable`                       (gated)
+  verify         status -> disable -> status, then judge the VERIFIED state
+                 (separates "command exit 0" from "LED actually reads off");
+                 supports --retries to catch a re-asserting init/HAL  (gated)
 
 SAFETY:
   * DRY RUN by default — nothing touches the device. Add --apply to execute.
@@ -39,6 +42,12 @@ Examples:
 
   # JSON output (e.g. for tooling):
   python scripts/rokid_led.py probe --json
+
+  # Verify on your own device: capture before/after and judge actual state.
+  # Re-assert up to 3 times if a vendor service turns the LED back on, and
+  # write a JSON evidence log you can attach to an issue/PR:
+  python scripts/rokid_led.py verify --led white --host 192.168.1.50:5555 \
+      --apply --force --retries 3 --evidence-out led-evidence.json
 """
 
 from __future__ import annotations
@@ -52,7 +61,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.devtools import rokid_led  # noqa: E402
-from app.devtools.rokid_led import DEFAULT_LED_NAME, execute_plan  # noqa: E402
+from app.devtools.rokid_led import (  # noqa: E402
+    DEFAULT_LED_NAME,
+    VERDICT_OFF,
+    VERDICT_UNKNOWN,
+    execute_plan,
+    run_verification,
+)
 
 WARNING_BANNER = (
     "!! Rokid recording-LED dev tool — own-device use only. Disabling a "
@@ -98,7 +113,85 @@ def _print_human(plan, report) -> None:
             print(f"        (skipped: {step.skipped_reason})")
 
 
+_VERIFY_CHECKLIST = (
+    "外部確認チェックリスト / external visual confirmation:",
+    "  1. 別のスマホ/カメラでグラスの録画 LED を録画しながら apply してください。",
+    "  2. ADB が rc=0 でも『物理 LED が消えた』証明にはなりません。必ず目視＋他カメラで確認。",
+    "  3. confirmed_off=true は brightness=0 の読み戻しのみが根拠。点灯が見えたら ON と判断。",
+    "  4. restore（または再起動）で必ず元の状態に戻し、録画は引き続き見える形で行うこと。",
+)
+
+
+def _print_verify_human(rep) -> None:
+    print(WARNING_BANNER)
+    print(f"\noperation: verify (led={rep.led_name})")
+    if rep.blocked_reason:
+        print("mode:      BLOCKED")
+        print(f"BLOCKED:   {rep.blocked_reason}")
+        return
+    print(f"mode:      {'DRY-RUN' if rep.dry_run else 'APPLY (writes device state)'}")
+    print(f"\nHEADLINE:  {rep.headline}")
+    print(f"  write_succeeded: {rep.write_succeeded}  "
+          f"(adb commands exited 0 — NOT proof of physical state)")
+    print(f"  verified_state:  {rep.verified_state}  "
+          f"(from brightness readback)")
+    print(f"  confirmed_off:   {rep.confirmed_off}")
+    print(f"  attempts:        {rep.attempts}"
+          f"{'  (LED re-asserted by device)' if rep.reasserted else ''}")
+
+    def _snap(label, s):
+        print(f"  {label}: brightness={s.brightness} max={s.max_brightness} "
+              f"trigger={s.trigger} {rokid_led.SESSION_OPEN_PROP}={s.session_prop} "
+              f"selinux={s.enforcing} readable={s.readable}")
+
+    print("\nsnapshots:")
+    _snap("before", rep.before)
+    _snap("after ", rep.after)
+    print("")
+    for line in _VERIFY_CHECKLIST:
+        print(line)
+
+
+def _verify_exit_code(rep) -> int:
+    """0 confirmed off, 2 blocked, 3 unknown/unverifiable, 4 still on."""
+    if rep.blocked_reason:
+        return 2
+    if rep.dry_run:
+        return 0
+    if rep.confirmed_off:
+        return 0
+    if rep.verified_state == VERDICT_UNKNOWN:
+        return 3
+    return 4  # VERDICT_ON
+
+
+def run_verify(args: argparse.Namespace) -> int:
+    rep = run_verification(
+        serial=args.serial,
+        host=args.host,
+        led_name=args.led,
+        apply=args.apply,
+        force=args.force,
+        retries=args.retries,
+        retry_delay=args.retry_delay,
+    )
+    payload = rep.to_dict()
+    if args.json:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    else:
+        _print_verify_human(rep)
+    if args.evidence_out:
+        Path(args.evidence_out).write_text(
+            json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        if not args.json:
+            print(f"\nevidence written: {args.evidence_out}")
+    return _verify_exit_code(rep)
+
+
 def run(args: argparse.Namespace) -> int:
+    if args.command == "verify":
+        return run_verify(args)
     plan = build_plan(args)
     report = execute_plan(plan, apply=args.apply, force=args.force)
     if args.json:
@@ -143,6 +236,17 @@ def build_parser() -> argparse.ArgumentParser:
     add_common(sub.add_parser("status", help="read-only current LED state"))
     add_common(sub.add_parser("disable", help="UNCONFIRMED LED-off attempt (gated)"))
     add_common(sub.add_parser("restore", help="best-effort undo of disable (gated)"))
+
+    pv = sub.add_parser("verify",
+                        help="disable + readback-based verification (gated)")
+    add_common(pv)
+    pv.add_argument("--retries", type=int, default=0,
+                    help="re-assert the disable up to N times if the LED reads "
+                         "on again (catches a re-asserting init/HAL service)")
+    pv.add_argument("--retry-delay", type=float, default=1.0,
+                    help="seconds to wait before each re-assert (default 1.0)")
+    pv.add_argument("--evidence-out",
+                    help="write the JSON evidence bundle to this file path")
     return ap
 
 
