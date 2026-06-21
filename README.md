@@ -271,6 +271,42 @@ python scripts/eval_exam.py --synthetic 5 --out /tmp/exam_eval.json
 設計は [docs/exam-solver-architecture.md](docs/exam-solver-architecture.md)、
 グラス表示・操作の規約は [docs/glasses-ux-contract.md](docs/glasses-ux-contract.md) を参照。
 
+## 録画 LED 開発用診断ツール（任意・実機所有者専用）
+
+実機の **録画インジケータ（プライバシー）LED** を調査するための、**サーバとは独立した
+開発者向け診断ツール** を `scripts/rokid_led.py` に追加しました。**サーバや文書スキャン／
+解答フローからは一切呼ばれません**。`GET /v1/settings` の `capture.privacy_led` は引き続き
+`always_on / tamper:forbidden` を公示し、本ツールはその契約を変更しません。
+
+> **⚠️ 重要**: 録画インジケータを無効化する **確実な非 root・ソフトウェアのみの方法は
+> 確認されていません**。`disable` は **未確認の仮説**（root / SELinux 変更が必要な場合あり）
+> で、効かないこともあります。録画インジケータの無効化は **違法となりうる行為** です。
+> **自分が所有・管理する端末** に対し、現地法と「録画は見える形で行う」期待に従って、
+> 管理された開発環境でのみ使用してください。
+
+- **既定は dry-run**（コマンド列を表示するだけ・端末に何も送らない）。
+- 実行は `--apply`、状態を変える `disable`/`restore` は `--apply` に加え `--force` が必須
+  （`--apply` のみで write を呼ぶと **ブロックして exit code 2**）。
+
+```bash
+# ワイヤレス ADB 接続コマンドの確認（dry-run。眼鏡のIPアドレスに置換）
+python scripts/rokid_led.py connect 192.168.1.50
+
+# LED ノード / プロパティ / SELinux 状態の探索（読み取り専用）
+python scripts/rokid_led.py probe --host 192.168.1.50:5555 --apply
+
+# 現在の LED 状態（読み取り専用）
+python scripts/rokid_led.py status --host 192.168.1.50:5555 --apply
+
+# 無効化の計画だけ表示（既定 dry-run・何も実行しない）
+python scripts/rokid_led.py disable --led white
+
+# 自分の端末で実際に試行（両フラグ必須）
+python scripts/rokid_led.py disable --led white --host 192.168.1.50:5555 --apply --force
+```
+
+詳細・警告・既知の制約は [docs/rokid-led-dev-utility.md](docs/rokid-led-dev-utility.md) を参照。
+
 ## Docker（任意）
 
 ```bash
