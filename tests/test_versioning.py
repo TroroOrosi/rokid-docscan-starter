@@ -19,6 +19,9 @@ def test_version_info_has_all_contracts():
         "matcher_version",
         "hud_contract_version",
         "analyzer_api_version",
+        "solver_api_version",
+        "glasses_view_contract_version",
+        "overlay_contract_version",
     ):
         assert key in info and isinstance(info[key], str)
 

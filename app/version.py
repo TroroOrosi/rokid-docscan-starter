@@ -19,7 +19,8 @@ APP_VERSION = "0.2.0"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.
-API_VERSION = "1.2.0"
+# 1.3.0: added exam-solving endpoints (/v1/exam-sessions, /v1/settings).
+API_VERSION = "1.3.0"
 
 # Matching algorithm identity. Bump when thresholds or hashing change so a
 # re-index/eval is triggered. Mirrors thresholds in app/matching.py.
@@ -32,6 +33,15 @@ HUD_CONTRACT_VERSION = "1.0.0"
 # Analyzer plugin interface (provider-agnostic OCR/summary/embedding).
 ANALYZER_API_VERSION = "1.0.0"
 
+# Solver plugin interface (provider-agnostic question answering).
+SOLVER_API_VERSION = "1.0.0"
+
+# On-glasses staged view payload (silent, <=3 lines, paginated stages).
+GLASSES_VIEW_CONTRACT_VERSION = "1.0.0"
+
+# Answer-area overlay payload (box + short answer; 2D image-anchored).
+OVERLAY_CONTRACT_VERSION = "1.0.0"
+
 
 def version_info() -> dict:
     """Machine-readable version block embedded in API responses."""
@@ -41,4 +51,7 @@ def version_info() -> dict:
         "matcher_version": MATCHER_VERSION,
         "hud_contract_version": HUD_CONTRACT_VERSION,
         "analyzer_api_version": ANALYZER_API_VERSION,
+        "solver_api_version": SOLVER_API_VERSION,
+        "glasses_view_contract_version": GLASSES_VIEW_CONTRACT_VERSION,
+        "overlay_contract_version": OVERLAY_CONTRACT_VERSION,
     }
