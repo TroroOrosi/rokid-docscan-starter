@@ -11,14 +11,15 @@ SILENT-FRIENDLY:
 - a `locator` text hint to the answer area (we do NOT world-lock to paper).
 
 Stages:
-  exam mode:    answer -> solution -> rationale -> caution
-  explain mode: overview -> detail -> evidence
+  exam mode:     answer -> solution -> rationale -> caution
+  explain mode:  overview -> detail -> evidence
 
 Navigation is always button/touch/swipe — voice is opt-in only.
-Swipe left/right  : move between view_page offsets (teleprompter scroll)
-Swipe up/down     : move between explain stages
-Double long-press : commit scan phase (scanning -> ready)
-Single tap        : show explanation for current page
+In explain-sessions NO camera image is used for page navigation.
+  swipe_left / swipe_right  : teleprompter scroll (within a page)
+  long-press                : next explain stage (overview->detail->evidence)
+  fast_swipe_left           : next document page (triggers POST /next-page)
+  fast_swipe_right          : prev document page (triggers POST /prev-page)
 """
 
 from __future__ import annotations
@@ -50,18 +51,21 @@ CAPTURE_CONTRACT = {
     "privacy_led": {"state": "always_on", "tamper": "forbidden"},
 }
 
-# Operation mapping advertised to the client (voice_enabled=false branch).
-# Matches Rokid touchpad: tap / swipe-left / swipe-right / long-press /
-# double-long-press as documented in the official Academy hardware guide.
+# Operation mapping for explain-sessions (scan-free, button-only).
+# Camera is NOT used during explain-sessions; page navigation is button-only.
 OPERATION_CONTRACT = {
-    "scan_page": "button_press",           # 1-press: scan current page
-    "commit_scan": "double_long_press",    # finish scanning, enter ready state
-    "show_explain": "tap",                 # show explanation for matched page
-    "next_view_page": "swipe_left",        # teleprompter: next 3-line slice
-    "prev_view_page": "swipe_right",       # teleprompter: prev 3-line slice
-    "next_stage": "swipe_down",            # overview -> detail -> evidence
-    "prev_stage": "swipe_up",
-    "voice_hint": None,                    # voice disabled by default
+    # Exam-mode operations (unchanged)
+    "scan_page": "button_press",
+    # Explain-mode page navigation (no camera)
+    "explain_next_doc_page": "fast_swipe_left",   # KEYCODE_DPAD_UP (19)  — next page
+    "explain_prev_doc_page": "fast_swipe_right",  # KEYCODE_DPAD_DOWN (20) — prev page
+    # Explain-mode within-page navigation
+    "explain_next_stage": "long_press",           # KEYCODE_TV (170)
+    "explain_show": "tap",                        # KEYCODE_DPAD_CENTER (23)
+    # Teleprompter scroll (within a stage)
+    "next_view_page": "swipe_left",
+    "prev_view_page": "swipe_right",
+    "voice_hint": None,
 }
 
 
@@ -77,6 +81,29 @@ def build_capture_ack(
         label = ""
     line = f"{label} 保存済み".strip()
     return {"lines": [line][:_MAX_LINES], "ttl_sec": 2}
+
+
+def build_page_nav_ack(
+    *, page_index: int, total_pages: int, direction: str
+) -> dict:
+    """HUD feedback shown when next-page or prev-page is triggered.
+
+    No camera capture occurred.  Shows current position and a directional hint.
+    ttl_sec=1.5 so it clears quickly before the explain view loads.
+    """
+    arrow = "→" if direction == "next" else "←"
+    label = f"{arrow} P{page_index + 1:02d}/{total_pages}"
+    at_edge = (
+        "最終ページ" if page_index >= total_pages - 1
+        else ("先頭ページ" if page_index == 0 else "")
+    )
+    lines = [label] + ([at_edge] if at_edge else []) + ["タップで解説"]
+    return {
+        "lines": lines[:_MAX_LINES],
+        "ttl_sec": 1.5,
+        "page_index": page_index,
+        "total_pages": total_pages,
+    }
 
 
 def _confidence_symbol(conf: float) -> str:
@@ -208,16 +235,8 @@ def _explain_stage_lines(
     result: ExplainResult,
     page_label: str,
 ) -> list[str]:
-    """Build logical lines for the requested explain stage.
-
-    overview : HUD lines from ExplainResult (already <=24 chars each)
-    detail   : full detail text split into lines
-    evidence : evidence page list
-    """
     label = _EXPLAIN_STAGE_LABELS.get(stage, stage)
     if stage == "overview":
-        # result.lines is already 3 short lines from the Explainer adapter.
-        # Prepend the page label on line-0 only when it fits.
         head = f"{page_label} {_confidence_symbol(result.confidence)}".strip()
         return [head] + (result.lines or [])
     if stage == "detail":
@@ -246,21 +265,16 @@ def build_explain_view(
       - Physical lines are chunked into slices of 3 (view pages).
       - Client navigates with swipe_left (next) / swipe_right (prev).
 
-    Stage navigation (swipe_down / swipe_up):
-      overview -> detail -> evidence
+    Stage navigation (long-press cycles forward; wraps at evidence->overview):
+      overview -> detail -> evidence -> (wrap) -> overview
 
-    Args:
-        result:          ExplainResult from the Explainer adapter.
-        stage:           One of EXPLAIN_STAGES.
-        view_page:       0-based index of the 3-line teleprompter page.
-        page_index:      0-based document page index (for the HUD label).
-        total_doc_pages: total pages in the document (for P02/10 label).
-        voice_enabled:   If True, hint text uses voice phrasing.
+    Page navigation (no camera):
+      fast_swipe_left  → POST /next-page
+      fast_swipe_right → POST /prev-page
     """
     if stage not in EXPLAIN_STAGES:
         stage = "overview"
 
-    # Build page label: "P02/10" or "P02" depending on available info.
     if page_index is not None:
         if total_doc_pages is not None:
             page_label = f"P{page_index + 1:02d}/{total_doc_pages}"
@@ -274,22 +288,17 @@ def build_explain_view(
     total_view_pages = len(pages)
     view_page = max(0, min(view_page, total_view_pages - 1))
 
-    # Stage navigation neighbours.
     stage_idx = EXPLAIN_STAGES.index(stage)
     prev_stage = EXPLAIN_STAGES[stage_idx - 1] if stage_idx > 0 else None
     next_stage = (
-        EXPLAIN_STAGES[stage_idx + 1] if stage_idx < len(EXPLAIN_STAGES) - 1 else None
+        EXPLAIN_STAGES[stage_idx + 1] if stage_idx < len(EXPLAIN_STAGES) - 1
+        else EXPLAIN_STAGES[0]  # wrap around to overview
     )
 
-    # Build operation hint (silent by default).
-    if total_view_pages > 1 and next_stage:
-        hint = "← 次ページ / ↓ 次段階"
-    elif total_view_pages > 1:
-        hint = "← 次ページ / ↑ 前段階"
-    elif next_stage:
-        hint = "↓ 次段階へ"
+    if total_view_pages > 1:
+        hint = "← テキスト送り / 長押し 次段階"
     else:
-        hint = "↑ 概要へ戻る"
+        hint = "長押し 次段階 / 速スワイプ 次ページ"
 
     return {
         "stage": stage,
@@ -304,18 +313,22 @@ def build_explain_view(
             "prev_stage": prev_stage,
             "next_stage": next_stage,
             "stages": list(EXPLAIN_STAGES),
-            "operations": OPERATION_CONTRACT,
+            "operations": {
+                "next_view_page": "swipe_left",
+                "prev_view_page": "swipe_right",
+                "next_stage": "long_press",
+                "next_doc_page": "fast_swipe_left",
+                "prev_doc_page": "fast_swipe_right",
+            },
             "hint": hint,
         },
     }
 
 
 def build_scan_ack(page_index: int, scanned_count: int, total_pages: int) -> dict:
-    """Silent HUD feedback shown immediately after each page scan.
+    """Legacy: retained for exam-mode capture ack only.
 
-    Displayed during the [scanning] phase (before commit).
-    Shows: 'P02 読取済 ✓' and progress fraction.
-    ttl_sec=2 so it clears automatically before the next scan.
+    Not used in explain-sessions (scan-free design).
     """
     label = f"P{page_index + 1:02d} 読取済 ✓"
     progress = f"{scanned_count}/{total_pages}ページ完了"
