@@ -10,25 +10,30 @@ SILENT-FRIENDLY:
 - confidence shown as a static symbol (no blinking),
 - a `locator` text hint to the answer area (we do NOT world-lock to paper).
 
-Stages: answer -> solution -> rationale -> caution, navigated by button/voice.
+Stages: answer -> solution -> rationale -> caution, navigated by button/touch.
 
-Explain-session additions (2-phase document explanation):
-- build_explain_scan_ack(): silent ACK shown while scanning (phase 1).
-- build_explain_view(): paginated explanation view for ExplainResult (phase 2).
-  Operates identically to build_glasses_view() but accepts ExplainResult instead
-  of SolveResult.  nav.hint always uses the silent-button wording.
+Explain stages (explain-sessions mode):
+  scan -> explain, navigated by touch swipe (no voice required).
+
+Operation mapping (silent / button-only, per glasses-ux-contract.md):
+  Single tap     = confirm / next answer
+  Swipe forward  = next HUD page (within a stage)
+  Swipe back     = prev HUD page
+  Long press     = next stage (deeper detail)
+  Double long    = commit scan phase (scanning -> ready)
 """
 
 from __future__ import annotations
 
 from .solvers import SolveResult
 
+# --- Exam-solving stages ----------------------------------------------------
 STAGES = ("answer", "solution", "rationale", "caution")
 
-# Explain-session stages navigated by front-button / touchpad swipe.
-# detail -> context are the two stages; "detail" shows the page explanation,
-# "context" shows the evidence pages (other pages referenced for context).
-EXPLAIN_STAGES = ("detail", "context")
+# --- Explain-session stages -------------------------------------------------
+# scan   : viewer is paging through the document; HUD shows silent ack only.
+# explain: viewer has committed; HUD shows per-page explanation with context.
+EXPLAIN_STAGES = ("scan", "explain")
 
 _MAX_LINES = 3
 _MAX_LINE_CHARS = 24  # ~Japanese chars that fit one HUD line
@@ -44,63 +49,35 @@ RENDER_CONTRACT = {
     "brightness": "low",
 }
 
+# Capture-path contract.
 CAPTURE_CONTRACT = {
     "shutter_sound": False,
     "camera_path": "cxr-s/camera2",
     "privacy_led": {"state": "always_on", "tamper": "forbidden"},
 }
 
-# Button / touchpad operation map (silent mode, no voice).
-# Clients must implement these gestures; the server only encodes hints in nav.
-# Ref: Rokid Academy — input methods: touch gestures on temple + physical button.
-# https://global.rokid.com/pages/academy
-BUTTON_HINT_SILENT = "前面ボタンで次へ"
-BUTTON_HINT_COMMIT = "ダブル長押しで確定"
-BUTTON_HINT_EXPLAIN = "タップで解説開始"
+# Operation hint map (silent/button-only mode, per glasses-ux-contract.md).
+# Values are shown in nav.hint and never contain audio/animation directives.
+_OP_HINTS: dict[str, str] = {
+    "scan_progress": "ボタン1回で撮影",
+    "scan_commit":   "ダブル長押しで完了",
+    "explain_next":  "スワイプで次ページ",
+    "explain_stage": "長押しで詳細へ",
+}
 
 
 def build_capture_ack(
     *, page_number: int | None = None, question_id: int | None = None
 ) -> dict:
-    """A silent, no-flash capture confirmation: one short HUD line, ~2s."""
+    """Silent, no-flash capture confirmation: one short HUD line, ~2s."""
     if page_number is not None:
         label = f"P{page_number:02d}"
     elif question_id is not None:
         label = f"#{question_id}"
     else:
         label = ""
-    line = f"{label} 保存済".strip()
+    line = f"{label} 保存済み".strip()
     return {"lines": [line][:_MAX_LINES], "ttl_sec": 2}
-
-
-def build_explain_scan_ack(
-    *,
-    page_index: int,
-    total_pages: int,
-    scanned_count: int,
-    verdict: str,
-) -> dict:
-    """Silent ACK shown on HUD while the user is scanning pages (phase 1).
-
-    Replaces shutter sound / white flash with a minimal 2-line status.
-    No explanation is shown here — that waits until commit (phase 2).
-
-    Example HUD:
-        P03 読取済 ✓         <- page label + static check symbol
-        3/5 ページ         <- scanned / total progress
-        ダブル長押しで確定    <- commit hint (shown when all pages scanned)
-    """
-    page_label = f"P{page_index + 1:02d}"
-    symbol = "✓" if verdict == "HIT" else ("?" if verdict == "LOW_CONF" else "×")
-    line1 = f"{page_label} 読取済 {symbol}"
-    line2 = f"{scanned_count}/{total_pages} ページ"
-    # Hint line: show commit hint only when all registered pages are scanned.
-    line3 = BUTTON_HINT_COMMIT if scanned_count >= total_pages else ""
-    return {
-        "lines": [line1, line2, line3],
-        "ttl_sec": 2,
-        "phase": "scanning",
-    }
 
 
 def _confidence_symbol(conf: float) -> str:
@@ -211,7 +188,53 @@ def build_glasses_view(
             "prev": page - 1 if page > 0 else None,
             "next": page + 1 if page < total - 1 else None,
             "stages": list(STAGES),
-            "hint": "「次の答え」と言う" if voice_enabled else BUTTON_HINT_SILENT,
+            "hint": "『次の答え』と言う" if voice_enabled else "前面ボタンで次へ",
+        },
+    }
+
+
+# ---------------------------------------------------------------------------
+# Explain-session view builder
+# ---------------------------------------------------------------------------
+
+def build_scan_ack(
+    *,
+    page_index: int,
+    scanned_count: int,
+    total_pages: int,
+    verdict: str,
+) -> dict:
+    """Silent scan acknowledgement shown while the viewer is still scanning.
+
+    Displayed immediately after each frame is matched (scanning phase).
+    Keeps the user informed of progress without sound or flash.
+
+    HUD line examples:
+      P03 ✓  3/10        ← page recognised, N of M scanned
+      ? 未登録  3/10     ← page not in document
+    """
+    if verdict == "HIT":
+        line1 = f"P{page_index + 1:02d} ✓"
+    elif verdict == "LOW_CONF":
+        line1 = f"P{page_index + 1:02d} ?"
+    else:
+        line1 = "? 未登録"
+
+    line2 = f"{scanned_count}/{total_pages} スキャン済"
+    all_done = scanned_count >= total_pages
+    line3 = "ダブル長押しで完了" if all_done else "次ページを向けて"
+
+    return {
+        "stage": "scan",
+        "page": 0,
+        "total_pages": 1,
+        "lines": [line1, line2, line3],
+        "locked": False,
+        "all_scanned": all_done,
+        "nav": {
+            "prev": None,
+            "next": None,
+            "hint": _OP_HINTS["scan_commit"] if all_done else _OP_HINTS["scan_progress"],
         },
     }
 
@@ -220,66 +243,48 @@ def build_explain_view(
     *,
     page_index: int,
     total_doc_pages: int,
-    hud_lines_all: list[str],
+    lines_all: list[str],
     evidence_pages: list[int],
-    stage: str = "detail",
     view_page: int = 0,
+    stage: str = "explain",
 ) -> dict:
-    """Build the paginated HUD view for the explain-session explanation phase.
+    """Build the HUD view for one explain page, with swipe-based pagination.
 
-    Accepts the full flat list of HUD lines from ExplainResult and paginates
-    them into 3-line pages.  The client advances view_page via swipe/button;
-    stage switches between 'detail' (explanation text) and 'context' (evidence).
+    `lines_all` is the full list of logical lines from the Explainer; this
+    function wraps and paginates them into HUD-sized chunks (<=3 lines each)
+    so the client can implement swipe-forward / swipe-back without knowing
+    the full text.
 
-    nav.hint is always the silent-button wording (voice_enabled is not supported
-    in explain-sessions: audio-free by design).
-
-    Example (detail stage, view_page=0):
-        P03 3/5 ★★★          <- page label + doc position + confidence
-        このページは構文を        <- explanation line 1
-        説明しています         <- explanation line 2 (wrapped)
+    Navigation contract (silent / button-only):
+      Swipe forward  -> next view_page  (GestureDetector.onFling LEFT)
+      Swipe back     -> prev view_page  (GestureDetector.onFling RIGHT)
+      Long press     -> deeper stage (future: summary -> detail)
+      Double long    -> back to scan mode
     """
-    if stage not in EXPLAIN_STAGES:
-        stage = "detail"
-
-    page_label = f"P{page_index + 1:02d} {page_index + 1}/{total_doc_pages}"
-
-    if stage == "detail":
-        logical_lines = [page_label] + hud_lines_all
-    else:  # context
-        if evidence_pages:
-            ev_str = "根拠: " + " ".join(f"P{p + 1:02d}" for p in evidence_pages)
-        else:
-            ev_str = "根拠: なし"
-        logical_lines = ["関連ページ", ev_str]
-
-    pages = _paginate(logical_lines)
+    pages = _paginate(lines_all)
     total = len(pages)
     view_page = max(0, min(view_page, total - 1))
 
-    # When we are on the last view_page of 'detail', the next action is
-    # switching to 'context' stage; encode this in next_stage.
-    at_last = view_page >= total - 1
-    next_stage: str | None = None
-    prev_stage: str | None = None
-    if stage == "detail" and at_last:
-        next_stage = "context"
-    if stage == "context":
-        prev_stage = "detail"
+    ev_label = (
+        "参照: " + " ".join(f"P{p + 1:02d}" for p in sorted(evidence_pages))
+        if evidence_pages
+        else ""
+    )
 
     return {
         "stage": stage,
-        "page": view_page,
-        "total_pages": total,
+        "page_index": page_index,
+        "page_label": f"P{page_index + 1:02d}/{total_doc_pages}",
+        "view_page": view_page,
+        "total_view_pages": total,
         "lines": pages[view_page],
-        "phase": "explaining",
+        "evidence_label": ev_label,
+        "locked": False,
         "nav": {
             "prev": view_page - 1 if view_page > 0 else None,
-            "next": view_page + 1 if not at_last else None,
-            "next_stage": next_stage,
-            "prev_stage": prev_stage,
+            "next": view_page + 1 if view_page < total - 1 else None,
+            "hint": _OP_HINTS["explain_next"],
+            "stage_hint": _OP_HINTS["explain_stage"],
             "stages": list(EXPLAIN_STAGES),
-            # Always silent-button wording; no voice in explain-sessions.
-            "hint": BUTTON_HINT_SILENT,
         },
     }
