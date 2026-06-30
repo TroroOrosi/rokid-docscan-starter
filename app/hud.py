@@ -1,8 +1,12 @@
 """Build the 3-line HUD payload shown on the Rokid Glasses display.
 
-The HUD is intentionally tiny: monocular green text, ~3 short lines.
+Used only by POST /v1/match (document page-matching mode).
+Exam-mode and explain-mode views are built in glasses_view.py instead.
+
+The HUD is intentionally minimal: monochrome green Micro-LED overlay.
 We always return exactly 3 lines so the on-glass renderer can lay them out
-deterministically.
+deterministically.  Character-level reflow is the client's responsibility;
+the server does NOT truncate or split text.
 """
 
 from __future__ import annotations
@@ -20,7 +24,8 @@ def build_hud(
     if verdict == "HIT" and best is not None:
         page_no = best.page_index + 1
         line1 = f"PAGE {page_no}/{total_pages}"
-        line2 = (summary or "").strip()[:24] or f"match {best.confidence:.2f}"
+        # No [:24] truncation — the client renderer handles line-wrapping.
+        line2 = (summary or "").strip() or f"match {best.confidence:.2f}"
         line3 = f"conf {best.confidence:.2f}  hd {best.hamming}"
     elif verdict == "LOW_CONF" and best is not None:
         page_no = best.page_index + 1
