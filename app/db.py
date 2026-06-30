@@ -75,6 +75,31 @@ CREATE TABLE IF NOT EXISTS solutions (
     user_confirmed     INTEGER NOT NULL DEFAULT 0,
     created_at         TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+-- Live document explanation mode: viewer scans pages in real-time and the
+-- server explains each matched page with multi-page RAG context.
+-- explain_sessions are bound to a single document (document_id).
+CREATE TABLE IF NOT EXISTS explain_sessions (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    document_id   INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+    voice_enabled INTEGER NOT NULL DEFAULT 0,
+    status        TEXT NOT NULL DEFAULT 'open',
+    created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- One row per page view inside an explain_session.
+-- Stores HUD lines and long-form detail for the history endpoint.
+CREATE TABLE IF NOT EXISTS explain_views (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id          INTEGER NOT NULL REFERENCES explain_sessions(id) ON DELETE CASCADE,
+    page_index          INTEGER NOT NULL,
+    verdict             TEXT NOT NULL,            -- HIT | LOW_CONF | NO_PAGE
+    hud_lines_json      TEXT,                     -- JSON array of 3 strings
+    detail              TEXT,                     -- long-form explanation
+    evidence_pages_json TEXT,                     -- JSON array of page indices
+    confidence          REAL,
+    viewed_at           TEXT NOT NULL DEFAULT (datetime('now'))
+);
 """
 
 
