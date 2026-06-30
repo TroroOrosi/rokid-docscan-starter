@@ -1,14 +1,24 @@
-"""Build the on-glasses view payload (silent, monochrome, 3 short lines).
+"""Build the on-glasses view payload (silent, monochrome, paginated lines).
 
-Hardware reality (Rokid Glasses): monochrome green Micro-LED, 480x398/eye,
-~23deg FOV, 10-level dimming. So the payload is intentionally minimal and
-SILENT-FRIENDLY:
+Hardware reality (Rokid Glasses RV101):
+  Display : JBD JBD4020 Micro-LED (right eye only), monochrome green,
+            480×398 px per eye (some listing sources cite 480×640),
+            FOV ~23–30°, up to 1 500 nits, 10-level dimming.
+  SoC     : Qualcomm Snapdragon AR1 Gen 1, 2 GB RAM / 32 GB ROM.
+  OS      : YodaOS (Android 12, API 32), build SKQ1.240613.001.
+  SDK     : CXR-S (on-device bridge) + CXR-M (mobile companion).
 
-- at most 3 short lines per page (long text is paginated, teleprompter-style),
-- NO audio cues and NO animation directives (the client must render with no
-  shutter sound, no white flash, no blinking, instant text replace),
-- confidence shown as a static symbol (no blinking),
-- a `locator` text hint to the answer area (we do NOT world-lock to paper).
+Design principles (SILENT-FRIENDLY, no-flash):
+  - NO audio cues and NO animation directives.
+  - NO character-per-line limit imposed by the server.  The client renderer
+    is responsible for reflowing text to fit the physical display.
+    (Previous 24-char server-side truncation caused problem text and answer
+    text to be cut off and was therefore removed.)
+  - Lines are paginated server-side into slices of <=_MAX_LINES (3) so the
+    client always receives a manageable chunk; teleprompter-style scrolling
+    lets the user read long explanations line by line.
+  - Confidence shown as a static symbol (no blinking).
+  - A `locator` text hint to the answer area (no world-locking to paper).
 
 Stages:
   exam mode:     answer -> solution -> rationale -> caution
@@ -31,9 +41,10 @@ STAGES = ("answer", "solution", "rationale", "caution")
 EXPLAIN_STAGES = ("overview", "detail", "evidence")
 
 _MAX_LINES = 3
-_MAX_LINE_CHARS = 24  # ~Japanese chars that fit one HUD line
 
 # Server-authoritative render contract for the on-glasses display.
+# NOTE: No max_chars_per_line is specified here — character-level reflow is
+# the client's responsibility.  The server only controls page chunking.
 RENDER_CONTRACT = {
     "max_lines": _MAX_LINES,
     "silent": True,
@@ -125,11 +136,38 @@ def _locator(answer_box: dict | None) -> str:
 
 
 def _wrap(text: str) -> list[str]:
-    """Split a string into <=_MAX_LINE_CHARS chunks (no hyphenation)."""
+    """Return the logical line as-is (no character-based splitting).
+
+    Character-level reflow is the client renderer's responsibility.
+    The server's role is only page-level chunking (_paginate).
+    """
     text = (text or "").strip()
     if not text:
         return []
-    return [text[i : i + _MAX_LINE_CHARS] for i in range(0, len(text), _MAX_LINE_CHARS)]
+    return [text]
+
+
+def _paginate(lines: list[str]) -> list[list[str]]:
+    """Chunk logical lines into pages of <=_MAX_LINES lines each."""
+    flat: list[str] = []
+    for ln in lines:
+        flat.extend(_wrap(ln) or [""])
+    if not flat:
+        flat = [""]
+    return [flat[i : i + _MAX_LINES] for i in range(0, len(flat), _MAX_LINES)]
+
+
+def build_locked_view(stage: str = "answer") -> dict:
+    """Real-exam mode (locked): never reveal an answer."""
+    return {
+        "stage": stage,
+        "page": 0,
+        "total_pages": 1,
+        "lines": ["本番試験モード", "解答は表示しません", "学習/模試で使用してください"],
+        "locator": "",
+        "locked": True,
+        "nav": {"prev": None, "next": None, "stages": list(STAGES)},
+    }
 
 
 def _stage_lines(
@@ -153,29 +191,6 @@ def _stage_lines(
         return ["根拠", solution.rationale or "(なし)"] + ([ev] if ev else [])
     # caution
     return ["注意", solution.cautions or "(なし)"]
-
-
-def _paginate(lines: list[str]) -> list[list[str]]:
-    """Wrap each logical line, then chunk into pages of <=_MAX_LINES lines."""
-    wrapped: list[str] = []
-    for ln in lines:
-        wrapped.extend(_wrap(ln) or [""])
-    if not wrapped:
-        wrapped = [""]
-    return [wrapped[i : i + _MAX_LINES] for i in range(0, len(wrapped), _MAX_LINES)]
-
-
-def build_locked_view(stage: str = "answer") -> dict:
-    """Real-exam mode (locked): never reveal an answer."""
-    return {
-        "stage": stage,
-        "page": 0,
-        "total_pages": 1,
-        "lines": ["本番試験モード", "解答は表示しません", "学習/模試で使用してください"],
-        "locator": "",
-        "locked": True,
-        "nav": {"prev": None, "next": None, "stages": list(STAGES)},
-    }
 
 
 def build_glasses_view(
@@ -261,8 +276,8 @@ def build_explain_view(
     """Return one paginated HUD view for an explain-session page.
 
     Pagination (teleprompter-style):
-      - Each logical line is _wrap()ped into <=24-char physical lines.
-      - Physical lines are chunked into slices of 3 (view pages).
+      - Each logical line is passed through _wrap() unchanged.
+      - Lines are chunked into slices of _MAX_LINES (3) view pages.
       - Client navigates with swipe_left (next) / swipe_right (prev).
 
     Stage navigation (long-press cycles forward; wraps at evidence->overview):
@@ -325,10 +340,17 @@ def build_explain_view(
     }
 
 
-def build_scan_ack(page_index: int, scanned_count: int, total_pages: int) -> dict:
-    """Legacy: retained for exam-mode capture ack only.
+def build_scan_ack(
+    page_index: int,
+    scanned_count: int,
+    total_pages: int,
+) -> dict:
+    """Scan progress / completion HUD shown after each page capture.
 
-    Not used in explain-sessions (scan-free design).
+    Called from POST /v1/documents/{id}/pages (add_page) so the user gets
+    real-time feedback.  When scanned_count >= total_pages the hint changes
+    to the completion message so the user knows to double-long-press to
+    finalize.
     """
     label = f"P{page_index + 1:02d} 読取済 ✓"
     progress = f"{scanned_count}/{total_pages}ページ完了"
