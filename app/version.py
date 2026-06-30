@@ -25,7 +25,7 @@ APP_VERSION = "0.3.0"
 #        transition, brightness, capture.shutter_sound, capture.privacy_led) and
 #        add_question returns a silent `capture_ack`.
 # 1.5.0: add_question returns extracted `media`; solve returns `evidence` and
-#        `served_by`; new …/reasoning endpoint; overlay gains tracking metadata.
+#        `served_by`; new .../reasoning endpoint; overlay gains tracking metadata.
 # 1.6.0: added /v1/explain-sessions — live multi-page document explanation with
 #        per-page RAG context. /v1/version now includes `explainers` list.
 API_VERSION = "1.6.0"
@@ -44,15 +44,18 @@ ANALYZER_API_VERSION = "1.0.0"
 # Solver plugin interface (provider-agnostic question answering).
 SOLVER_API_VERSION = "1.0.0"
 
-# Media-extractor plugin interface (formula/figure/graph/table; 案6).
+# Media-extractor plugin interface (formula/figure/graph/table).
 EXTRACTOR_API_VERSION = "1.0.0"
 
 # Explainer plugin interface (live page explanation with RAG context).
 EXPLAINER_API_VERSION = "1.0.0"
 
-# On-glasses staged view payload (silent, <=3 lines, paginated stages).
+# On-glasses staged view payload (silent, <=3 lines per page, paginated stages).
 # 1.1.0: added the silent `capture_ack` payload (no sound/flash on capture).
-GLASSES_VIEW_CONTRACT_VERSION = "1.1.0"
+# 1.2.0: removed server-side character-per-line truncation (was [:24]).
+#        Client renderer is now solely responsible for text reflow.
+#        _wrap() returns each logical line as-is; pagination is line-count only.
+GLASSES_VIEW_CONTRACT_VERSION = "1.2.0"
 
 # Answer-area overlay payload (box + short answer; 2D image-anchored).
 # 1.1.0: added tracking metadata (tracking/fixed_ar/anchor_hint).

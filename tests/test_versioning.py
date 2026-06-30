@@ -29,9 +29,8 @@ def test_version_info_has_all_contracts():
 
 
 def test_contract_versions_reflect_silent_capture_contract():
-    # Bumped when /v1/settings gained the render+capture contract and
-    # add_question gained the silent capture_ack payload.
-    assert version.GLASSES_VIEW_CONTRACT_VERSION == "1.1.0"
+    # 1.2.0: server-side char truncation removed; client handles text reflow.
+    assert version.GLASSES_VIEW_CONTRACT_VERSION == "1.2.0"
 
 
 def test_contract_versions_reflect_phase234():
