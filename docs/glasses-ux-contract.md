@@ -51,7 +51,7 @@
 | ユーザー操作 | Android KeyCode | 本サーバの用途 |
 |---|---|---|
 | **TP-単击**（タップ） | `KEYCODE_DPAD_CENTER = 23` | 解説表示・確認（explain-sessions / exam-sessions） |
-| **TP-長按** | `KEYCODE_TV = 170` | 解説段階を進める（overview→detail→evidence） |
+| **TP-長押** | `KEYCODE_TV = 170` | 解説段階を進める（overview→detail→evidence） |
 | **TP-双击**（ダブルタップ） | `KEYCODE_ENTER = 66` | 現在のビューを閉じる |
 | **TP-右滑**（スワイプ右） | `KEYCODE_DPAD_RIGHT = 22`（連続） | 前テキストスライス（テレプロンプター戻し） |
 | **TP-左滑**（スワイプ左） | `KEYCODE_DPAD_LEFT = 21`（連続） | 次テキストスライス（テレプロンプター送り） |
@@ -85,7 +85,7 @@
 | explaining | 前ページへ | TP-快速右滑 | `KEYCODE_DPAD_DOWN (20)` 単発 | `POST /prev-page`（撮影なし） |
 | explaining | 次テキストスライス | TP-左滑 | `KEYCODE_DPAD_LEFT (21)` 連続 | `GET /explain?view_page=N+1` |
 | explaining | 前テキストスライス | TP-右滑 | `KEYCODE_DPAD_RIGHT (22)` 連続 | `GET /explain?view_page=N-1` |
-| explaining | 次解説段階（詳細へ） | TP-長按 | `KEYCODE_TV (170)` | `GET /explain?stage=detail` |
+| explaining | 次解説段階（詳細へ） | TP-長押 | `KEYCODE_TV (170)` | `GET /explain?stage=detail` |
 | explaining | 解説を閉じる | TP-双击 | `KEYCODE_ENTER (66)` | — |
 
 #### 廃止されたエンドポイント（v1.6 → v1.7）
@@ -101,7 +101,7 @@
 |------|-----------|----------|
 | 撮影 | Back-単 | 「撮影」 |
 | 解答表示 | TP-単击 | 「答えを表示」 |
-| 次の解説段階 | TP-長按 | 「詳しく」 |
+| 次の解説段階 | TP-長押 | 「詳しく」 |
 | 次テキストページ | TP-左滑 | 「次へ」 |
 | 前テキストページ | TP-右滑 | 「前へ」 |
 | 閉じる | TP-双击 | 「閉じる」 |
