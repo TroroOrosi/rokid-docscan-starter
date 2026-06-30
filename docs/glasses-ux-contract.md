@@ -82,7 +82,7 @@
 |----------|------|-----------|---------|-------------|
 | ready | 現在ページの解説表示 | TP-単击 | `KEYCODE_DPAD_CENTER (23)` | `GET /explain` |
 | explaining | 次ページへ | TP-快速左滑 | `KEYCODE_DPAD_UP (19)` 単発 | `POST /next-page`（撮影なし） |
-| explaining | 前ページへ | TP-快速右滑 | `KEYCODE_DPAD_DOWN (20)` 単発 | `POST /prev-page`（撮影なし） |
+| explaining | 前ページへ | TP-快速左滑 | `KEYCODE_DPAD_DOWN (20)` 単発 | `POST /prev-page`（撮影なし） |
 | explaining | 次テキストスライス | TP-左滑 | `KEYCODE_DPAD_LEFT (21)` 連続 | `GET /explain?view_page=N+1` |
 | explaining | 前テキストスライス | TP-右滑 | `KEYCODE_DPAD_RIGHT (22)` 連続 | `GET /explain?view_page=N-1` |
 | explaining | 次解説段階（詳細へ） | TP-長押 | `KEYCODE_TV (170)` | `GET /explain?stage=detail` |
