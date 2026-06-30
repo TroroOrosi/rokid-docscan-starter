@@ -21,14 +21,20 @@ from pydantic import BaseModel
 from . import config, db
 from .analyzers import get_analyzer
 from .config import IMAGE_DIR, ensure_dirs
+from .explainer import ExplainRequest
+from .explainers import get_explainer, list_explainers
 from .extractors import detect_media, get_extractor
 from .glasses_view import (
     CAPTURE_CONTRACT,
+    EXPLAIN_STAGES,
+    OPERATION_CONTRACT,
     RENDER_CONTRACT,
     STAGES,
     build_capture_ack,
+    build_explain_view,
     build_glasses_view,
     build_locked_view,
+    build_scan_ack,
 )
 from .hud import build_hud
 from .layout import parse_layout, primary_question
@@ -42,12 +48,7 @@ from .version import APP_VERSION, HUD_CONTRACT_VERSION, version_info
 
 
 def _extract_media(ocr_text: str | None, image_path: str) -> list[dict]:
-    """Run the active media extractor over any figure/table/graph/formula cues.
-
-    Returns a list of {kind, content, confidence} items (empty when no media is
-    detected). Real extraction is a registry swap (ROKID_EXTRACTOR); the offline
-    default returns clearly-marked placeholders.
-    """
+    """Run the active media extractor over any figure/table/graph/formula cues."""
     kinds = detect_media(ocr_text)
     if not kinds:
         return []
@@ -71,13 +72,11 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Rokid DocScan MVP", version=APP_VERSION, lifespan=lifespan)
 
 
-# --- request/response models -----------------------------------------------
+# --- request/response models ------------------------------------------------
 
 class CreateDocument(BaseModel):
     title: str
     capture_device: str | None = None
-    # Optional client/device hints for diagnostics & future routing. Stored as
-    # response echoes only; not persisted to keep the schema simple.
     client_version: str | None = None
     sdk_hint: str | None = None
 
@@ -103,7 +102,6 @@ def _doc_or_404(conn, document_id: int):
 
 
 def _fallback_md5(omd5: str | None, raw: bytes) -> str:
-    """When no OCR text is available, identify content by image-bytes MD5."""
     return omd5 if omd5 is not None else hashlib.md5(raw).hexdigest()
 
 
@@ -135,26 +133,19 @@ def get_version() -> dict:
         "analyzers": list_analyzers(),
         "solvers": list_solvers(),
         "extractors": list_extractors(),
+        "explainers": list_explainers(),
     }
 
 
 @app.get("/v1/settings")
 def get_settings() -> dict:
-    """Client-facing flags. Drives the silent / voice-toggle UX on the glasses.
-
-    The glasses client must render with NO shutter sound, NO white flash, NO
-    blinking and NO large animation; this endpoint is the single authoritative
-    source for those render/capture constraints.
-
-    Note: `capture.privacy_led` is advertised as always_on / tamper:forbidden.
-    The recording-indicator LED is hardware-enforced and this server has no
-    capability to disable it; that is intentional and not configurable.
-    """
+    """Client-facing flags."""
     return {
-        "voice_enabled_default": False,  # silent button/touch operation by default
+        "voice_enabled_default": False,
         "allow_real_exam_solve": config.ALLOW_REAL_EXAM_SOLVE,
         "hud": dict(RENDER_CONTRACT),
         "capture": dict(CAPTURE_CONTRACT),
+        "operations": dict(OPERATION_CONTRACT),
         "versions": version_info(),
     }
 
@@ -195,7 +186,6 @@ async def add_page(
         img = _load_image(raw)
 
         ph = phash_hex(img)
-        # Placeholder when no OCR text: identify page by image content MD5.
         omd5 = _fallback_md5(ocr_md5(ocr_text), raw)
 
         fname = f"{document_id}_{page_index}_{uuid.uuid4().hex[:8]}.png"
@@ -355,10 +345,10 @@ async def match_page(
         conn.close()
 
 
-# --- exam-solving mode (案1: separate from page matching) -------------------
+# --- exam-solving mode ------------------------------------------------------
 
 class CreateExamSession(BaseModel):
-    mode: str = "study"  # study | mock | real
+    mode: str = "study"
     voice_enabled: bool = False
     subject_hint: str | None = None
 
@@ -378,7 +368,6 @@ def _question_or_404(conn, session_id: int, question_id: int):
 
 
 def _solution_from_row(row) -> "object":
-    """Rebuild a SolveResult-like object from a stored solutions row."""
     from .solvers import SolveResult
 
     return SolveResult(
@@ -435,7 +424,6 @@ async def add_question(
         q = primary_question(parsed)
         subject, subj_conf = detect_subject(ocr_text)
 
-        # Read confidence: low when we recovered no usable text -> "近づけて再撮影".
         read_conf = 0.0 if not normalize_ocr_text(ocr_text) else round(min(1.0, 0.5 + subj_conf / 2), 3)
 
         fname = f"q_{session_id}_{uuid.uuid4().hex[:8]}.png"
@@ -476,8 +464,6 @@ async def add_question(
             "answer_box": answer_box,
             "page_number": parsed.get("page_number"),
             "media": media,
-            # Silent, no-flash capture confirmation (instead of a shutter sound /
-            # white flash). The privacy LED is unaffected and stays on.
             "capture_ack": build_capture_ack(
                 page_number=parsed.get("page_number"), question_id=cur.lastrowid
             ),
@@ -498,8 +484,6 @@ def solve_question(session_id: int, question_id: int) -> dict:
         session = _exam_session_or_404(conn, session_id)
         q = _question_or_404(conn, session_id, question_id)
 
-        # Safety guardrail (案16): never answer in real-exam mode unless the
-        # operator has explicitly opted in for learning/mock/research use.
         if session["mode"] == "real" and not config.ALLOW_REAL_EXAM_SOLVE:
             return {
                 "session_id": session_id,
@@ -509,7 +493,6 @@ def solve_question(session_id: int, question_id: int) -> dict:
                 "versions": version_info(),
             }
 
-        # RAG (Phase 3): ground the solver in the user's own scanned materials.
         retrieved = retrieve_context(conn, q["body_text"])
         question = Question(
             question_no=q["question_no"],
@@ -518,10 +501,8 @@ def solve_question(session_id: int, question_id: int) -> dict:
             subject=q["subject"],
             context=retrieved["context"] or None,
         )
-        # Two-tier fallback (Phase 3): preferred solver tiers -> offline local.
         result, solver = solve_with_fallback(question=question)
         served_by = result.extras.get("served_by", solver.name)
-        # Retrieval supplies evidence pages when the solver itself didn't.
         evidence_pages = result.evidence_pages or retrieved["evidence_pages"]
         result.evidence_pages = evidence_pages
 
@@ -615,12 +596,6 @@ def get_question_view(
 
 @app.get("/v1/exam-sessions/{session_id}/questions/{question_id}/reasoning")
 def get_question_reasoning(session_id: int, question_id: int) -> dict:
-    """Full solver reasoning log (案9): kept server-side, NOT on the HUD.
-
-    The HUD only ever shows the short staged view; this endpoint exposes the
-    long `raw_reasoning`, evidence pages and the serving tier for review/audit.
-    Respects the same real-exam lock as solving.
-    """
     conn = db.connect()
     try:
         session = _exam_session_or_404(conn, session_id)
@@ -684,6 +659,338 @@ def get_exam_session(session_id: int) -> dict:
                 }
                 for r in rows
             ],
+        }
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Explain-sessions: live multi-page document explanation
+#
+# UX flow (button-only, silent, glasses-standalone):
+#   1. POST /v1/explain-sessions          → create, status=scanning
+#   2. POST …/{id}/scan  (per page)       → pHash match, silent ack (P02 読取済 ✓)
+#   3. POST …/{id}/commit                 → double-long-press; status=ready
+#   4. GET  …/{id}/explain?page_index=N   → explanation HUD, status→explaining
+#      GET  …/{id}/explain?…&stage=detail&view_page=1  → swipe to next slice
+#   5. GET  …/{id}/history                → scanned page list
+# ---------------------------------------------------------------------------
+
+class CreateExplainSession(BaseModel):
+    document_id: int
+    voice_enabled: bool = False
+
+
+def _explain_session_or_404(conn, session_id: int):
+    return _row_or_404(conn, "explain_sessions", session_id, "explain session not found")
+
+
+@app.post("/v1/explain-sessions", status_code=201)
+def create_explain_session(payload: CreateExplainSession) -> dict:
+    """Create an explain session bound to a finalized document.
+
+    The document must already exist (need not be finalized, but finalized
+    documents have summaries which improve explanation quality).
+    Status starts as 'scanning'.
+    """
+    conn = db.connect()
+    try:
+        _doc_or_404(conn, payload.document_id)
+        cur = conn.execute(
+            "INSERT INTO explain_sessions (document_id, voice_enabled) VALUES (?, ?)",
+            (payload.document_id, int(payload.voice_enabled)),
+        )
+        conn.commit()
+        # Total pages in the document (may be 0 for an empty doc).
+        total_pages = conn.execute(
+            "SELECT COUNT(*) FROM pages WHERE document_id = ?",
+            (payload.document_id,),
+        ).fetchone()[0]
+        return {
+            "session_id": cur.lastrowid,
+            "document_id": payload.document_id,
+            "voice_enabled": payload.voice_enabled,
+            "status": "scanning",
+            "scanned_pages": [],
+            "total_pages": total_pages,
+            "operations": OPERATION_CONTRACT,
+            "api_version": version_info()["api_version"],
+        }
+    finally:
+        conn.close()
+
+
+@app.post("/v1/explain-sessions/{session_id}/scan")
+async def explain_scan(
+    session_id: int,
+    image: UploadFile = File(...),
+    fast_ocr_text: str | None = Form(None),
+) -> dict:
+    """Silently match one page frame during the scanning phase.
+
+    The glasses user presses the button once per page while reading through
+    the document. The server records which page was matched; the HUD shows
+    only a quiet 'P02 読取済 ✓' ack (no explanation yet).
+
+    Returns 409 if the session is not in 'scanning' status.
+    """
+    conn = db.connect()
+    try:
+        session = _explain_session_or_404(conn, session_id)
+        if session["status"] != "scanning":
+            raise HTTPException(
+                status_code=409,
+                detail=f"session status is '{session['status']}'; expected 'scanning'",
+            )
+
+        doc_id = session["document_id"]
+        raw = await image.read()
+        img = _load_image(raw)
+        q_phash = phash_hex(img)
+        q_md5 = _fallback_md5(ocr_md5(fast_ocr_text), raw)
+
+        rows = conn.execute(
+            "SELECT id, page_index, phash, ocr_md5, ocr_text FROM pages "
+            "WHERE document_id = ? ORDER BY page_index",
+            (doc_id,),
+        ).fetchall()
+        candidates = [
+            Candidate(
+                page_id=r["id"],
+                page_index=r["page_index"],
+                phash=r["phash"],
+                ocr_md5=r["ocr_md5"],
+                ocr_text=normalize_ocr_text(r["ocr_text"]),
+            )
+            for r in rows
+        ]
+        total_pages = len(candidates)
+
+        best, verdict, _ = match(q_phash, q_md5, candidates, query_ocr_text=fast_ocr_text)
+
+        # Update scanned_pages list (deduplicated, sorted).
+        scanned: list[int] = json.loads(session["scanned_pages_json"] or "[]")
+        if verdict in ("HIT", "LOW_CONF") and best is not None:
+            matched_index = best.page_index
+            if matched_index not in scanned:
+                scanned.append(matched_index)
+                scanned.sort()
+            conn.execute(
+                "UPDATE explain_sessions SET scanned_pages_json = ? WHERE id = ?",
+                (json.dumps(scanned), session_id),
+            )
+            conn.commit()
+        else:
+            matched_index = None
+
+        scan_ack = build_scan_ack(
+            page_index=matched_index if matched_index is not None else 0,
+            scanned_count=len(scanned),
+            total_pages=total_pages,
+        )
+        return {
+            "session_id": session_id,
+            "verdict": verdict,
+            "matched_page_index": matched_index,
+            "scanned_pages": scanned,
+            "total_pages": total_pages,
+            "scan_ack": scan_ack,
+            "versions": version_info(),
+        }
+    finally:
+        conn.close()
+
+
+@app.post("/v1/explain-sessions/{session_id}/commit")
+def explain_commit(session_id: int) -> dict:
+    """Transition session from 'scanning' to 'ready'.
+
+    Triggered by the user's double-long-press gesture after all pages have
+    been scanned. From this point onward, explanation is available via GET
+    /explain. Scanning is no longer accepted (returns 409).
+    """
+    conn = db.connect()
+    try:
+        session = _explain_session_or_404(conn, session_id)
+        if session["status"] not in ("scanning", "ready"):
+            raise HTTPException(
+                status_code=409,
+                detail=f"cannot commit from status '{session['status']}'",
+            )
+        conn.execute(
+            "UPDATE explain_sessions SET status = 'ready' WHERE id = ?",
+            (session_id,),
+        )
+        conn.commit()
+
+        scanned: list[int] = json.loads(session["scanned_pages_json"] or "[]")
+        total_pages = conn.execute(
+            "SELECT COUNT(*) FROM pages WHERE document_id = ?",
+            (session["document_id"],),
+        ).fetchone()[0]
+        return {
+            "session_id": session_id,
+            "status": "ready",
+            "scanned_pages": scanned,
+            "total_pages": total_pages,
+            # HUD confirmation: silent, 2-second display.
+            "commit_ack": {
+                "lines": ["読み取り完了", f"{len(scanned)}/{total_pages}ページ", "タップで解説開始"],
+                "ttl_sec": 3,
+            },
+            "versions": version_info(),
+        }
+    finally:
+        conn.close()
+
+
+@app.get("/v1/explain-sessions/{session_id}/explain")
+def explain_page(
+    session_id: int,
+    page_index: int,
+    stage: str = "overview",
+    view_page: int = 0,
+) -> dict:
+    """Return the explanation HUD for a specific document page.
+
+    Available only when session status is 'ready' or 'explaining'.
+    Triggered by a tap gesture on the glasses after commit.
+
+    Navigation:
+      - stage     : overview | detail | evidence  (swipe_down / swipe_up)
+      - view_page : 0-based teleprompter slice    (swipe_left / swipe_right)
+
+    The response includes `nav` with prev/next pointers so the client knows
+    whether a swipe will produce more content.
+    """
+    if stage not in EXPLAIN_STAGES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"stage must be one of {EXPLAIN_STAGES}",
+        )
+    conn = db.connect()
+    try:
+        session = _explain_session_or_404(conn, session_id)
+        if session["status"] not in ("ready", "explaining"):
+            raise HTTPException(
+                status_code=409,
+                detail=f"session status is '{session['status']}'; commit first",
+            )
+
+        doc_id = session["document_id"]
+
+        # Fetch the matched page row.
+        page_row = conn.execute(
+            "SELECT * FROM pages WHERE document_id = ? AND page_index = ?",
+            (doc_id, page_index),
+        ).fetchone()
+        if page_row is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"page_index {page_index} not found in document",
+            )
+
+        total_doc_pages = conn.execute(
+            "SELECT COUNT(*) FROM pages WHERE document_id = ?", (doc_id,)
+        ).fetchone()[0]
+
+        # RAG: pull context from other pages in the same document.
+        retrieved = retrieve_context(conn, page_row["ocr_text"])
+
+        # Build ExplainRequest and call the active Explainer adapter.
+        req = ExplainRequest(
+            page_index=page_index,
+            page_ocr_text=page_row["ocr_text"],
+            page_summary=page_row["summary"],
+            context_pages=retrieved["hits"],
+            document_title=conn.execute(
+                "SELECT title FROM documents WHERE id = ?", (doc_id,)
+            ).fetchone()["title"],
+        )
+        explainer = get_explainer()
+        result = explainer.explain(req)
+
+        # Persist to explain_views for history.
+        conn.execute(
+            """INSERT INTO explain_views
+               (session_id, page_index, verdict, hud_lines_json,
+                detail, evidence_pages_json, confidence)
+               VALUES (?, ?, 'HIT', ?, ?, ?, ?)""",
+            (
+                session_id,
+                page_index,
+                json.dumps(result.lines, ensure_ascii=False),
+                result.detail,
+                json.dumps(result.evidence_pages),
+                result.confidence,
+            ),
+        )
+        # Advance status to explaining on first tap.
+        if session["status"] == "ready":
+            conn.execute(
+                "UPDATE explain_sessions SET status = 'explaining' WHERE id = ?",
+                (session_id,),
+            )
+        conn.commit()
+
+        view = build_explain_view(
+            result,
+            stage=stage,
+            view_page=view_page,
+            page_index=page_index,
+            total_doc_pages=total_doc_pages,
+            voice_enabled=bool(session["voice_enabled"]),
+        )
+        return {
+            "session_id": session_id,
+            "document_id": doc_id,
+            "page_index": page_index,
+            "total_doc_pages": total_doc_pages,
+            "explainer": explainer.info(),
+            "glasses_view": view,
+            "evidence": retrieved["hits"],
+            "versions": version_info(),
+        }
+    finally:
+        conn.close()
+
+
+@app.get("/v1/explain-sessions/{session_id}/history")
+def explain_history(session_id: int) -> dict:
+    """Return the list of pages viewed during this explain session.
+
+    Each entry includes the page_index, verdict, HUD lines, and timestamp.
+    Useful for review after the session, and for the glasses client to
+    determine which pages have already been explained.
+    """
+    conn = db.connect()
+    try:
+        session = _explain_session_or_404(conn, session_id)
+        scanned: list[int] = json.loads(session["scanned_pages_json"] or "[]")
+        views = conn.execute(
+            "SELECT page_index, verdict, hud_lines_json, detail, "
+            "evidence_pages_json, confidence, viewed_at "
+            "FROM explain_views WHERE session_id = ? ORDER BY viewed_at",
+            (session_id,),
+        ).fetchall()
+        return {
+            "session_id": session_id,
+            "document_id": session["document_id"],
+            "status": session["status"],
+            "voice_enabled": bool(session["voice_enabled"]),
+            "scanned_pages": scanned,
+            "explained_views": [
+                {
+                    "page_index": v["page_index"],
+                    "verdict": v["verdict"],
+                    "hud_lines": json.loads(v["hud_lines_json"] or "[]"),
+                    "evidence_pages": json.loads(v["evidence_pages_json"] or "[]"),
+                    "confidence": v["confidence"],
+                    "viewed_at": v["viewed_at"],
+                }
+                for v in views
+            ],
+            "versions": version_info(),
         }
     finally:
         conn.close()

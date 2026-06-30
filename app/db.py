@@ -55,7 +55,7 @@ CREATE TABLE IF NOT EXISTS questions (
     read_conf       REAL,
     page_number     INTEGER,
     image_path      TEXT,
-    media_json      TEXT,            -- extracted media items (案6, Phase 2)
+    media_json      TEXT,
     created_at      TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -71,9 +71,43 @@ CREATE TABLE IF NOT EXISTS solutions (
     rationale_conf     REAL,
     evidence_pages_json TEXT,
     raw_reasoning      TEXT,
-    served_by          TEXT,         -- solver tier that produced this (Phase 3)
+    served_by          TEXT,
     user_confirmed     INTEGER NOT NULL DEFAULT 0,
     created_at         TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Live document explanation mode.
+--
+-- Status transitions (driven by user button operations on the glasses):
+--   scanning  : user is paging through the document; each frame is silently
+--               matched and recorded.  HUD shows only "P02 読取済 ✓".
+--   ready     : user performed the "commit" gesture (double-long-press);
+--               all pages have been scanned.  Explanation is now available.
+--   explaining: user tapped to request explanation; Explainer results are
+--               served page-by-page with swipe navigation.
+--
+-- scanned_pages_json: JSON array of page_index integers already matched.
+CREATE TABLE IF NOT EXISTS explain_sessions (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    document_id         INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+    voice_enabled       INTEGER NOT NULL DEFAULT 0,
+    status              TEXT NOT NULL DEFAULT 'scanning',
+    scanned_pages_json  TEXT NOT NULL DEFAULT '[]',
+    created_at          TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- One row per page-explanation view inside an explain_session.
+-- Stores HUD lines (paginated) and long-form detail for the history endpoint.
+CREATE TABLE IF NOT EXISTS explain_views (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id          INTEGER NOT NULL REFERENCES explain_sessions(id) ON DELETE CASCADE,
+    page_index          INTEGER NOT NULL,
+    verdict             TEXT NOT NULL,
+    hud_lines_json      TEXT,
+    detail              TEXT,
+    evidence_pages_json TEXT,
+    confidence          REAL,
+    viewed_at           TEXT NOT NULL DEFAULT (datetime('now'))
 );
 """
 
