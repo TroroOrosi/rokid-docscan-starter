@@ -37,7 +37,7 @@ from dataclasses import dataclass, field
 
 # The hypothesized hardware path: the custom camera session open property is
 # what (per prior investigation) makes init.rokid.rc drive the LED node.
-SESSION_OPEN_PROP = "persist.vendor.rkd.camera.session_open"
+SESSION_OPEN_PROP = "vendor.rkd.camera.session_open"
 
 # Default sysfs LED node names (Qualcomm/`/sys/class/leds` convention). The
 # real node name varies by device; `probe` is what discovers the truth.
