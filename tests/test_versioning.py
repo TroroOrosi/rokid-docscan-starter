@@ -21,6 +21,7 @@ def test_version_info_has_all_contracts():
         "analyzer_api_version",
         "solver_api_version",
         "extractor_api_version",
+        "explainer_api_version",
         "glasses_view_contract_version",
         "overlay_contract_version",
     ):
@@ -36,9 +37,14 @@ def test_contract_versions_reflect_silent_capture_contract():
 def test_contract_versions_reflect_phase234():
     # Phase 2/3/4: media extraction, RAG evidence/served_by, reasoning endpoint,
     # and overlay tracking metadata.
-    assert version.API_VERSION == "1.5.0"
     assert version.EXTRACTOR_API_VERSION == "1.0.0"
     assert version.OVERLAY_CONTRACT_VERSION == "1.1.0"
+
+
+def test_contract_versions_reflect_explain_sessions():
+    # 1.6.0: added /v1/explain-sessions (live multi-page document explanation).
+    assert version.API_VERSION == "1.6.0"
+    assert version.EXPLAINER_API_VERSION == "1.0.0"
 
 
 # --- analyzer registry ------------------------------------------------------
