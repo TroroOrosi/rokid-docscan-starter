@@ -10,67 +10,66 @@ SILENT-FRIENDLY:
 - confidence shown as a static symbol (no blinking),
 - a `locator` text hint to the answer area (we do NOT world-lock to paper).
 
-Stages: answer -> solution -> rationale -> caution, navigated by button/voice.
+Exam stages:    answer -> solution -> rationale -> caution  (button/swipe).
+Explain stages: summary -> detail -> evidence               (button/swipe).
+
+Navigation contract (client-side):
+  - Swipe forward / front button tap : move to nav.next page (or next stage).
+  - Long-press                        : advance to next stage.
+  - Double long-press                 : commit scan (scanning -> ready).
+  All operations are SILENT (voice_enabled=false by default).
+
+Public API for the explain-sessions feature:
+  build_explain_scan_ack()  -- silent ACK shown while scanning each page.
+  build_explain_view()      -- staged HUD for a single explained page.
+  build_explain_status()    -- scanning progress (scanned N / total M).
 """
 
 from __future__ import annotations
 
 from .solvers import SolveResult
 
+# --- Exam solver stages (unchanged) ----------------------------------------
 STAGES = ("answer", "solution", "rationale", "caution")
+
+# --- Explain session stages -------------------------------------------------
+# summary : first-line explanation (what this page is about)
+# detail  : expanded explanation (with multi-page context evidence)
+# evidence: which other pages were used as context
+EXPLAIN_STAGES = ("summary", "detail", "evidence")
 
 _MAX_LINES = 3
 _MAX_LINE_CHARS = 24  # ~Japanese chars that fit one HUD line
 
-# Server-authoritative render contract for the on-glasses display. This governs
-# the HUD DISPLAY ONLY (text rendering). The client must honor these when
-# drawing: silent, no white flash on update, fade-free instant text replace, no
-# large animation, status via static symbols (not blinking), low brightness.
+# Server-authoritative render contract for the on-glasses display.
 RENDER_CONTRACT = {
     "max_lines": _MAX_LINES,
-    "silent": True,          # no shutter / notification / beep sounds
-    "white_flash": False,    # the HUD must not flash white when text changes
-    "animations": False,     # no large animation
-    "transition": "instant", # fade-free instant text replace
-    "blinking": False,       # convey state with static symbols (✓ ! ★)
-    "brightness": "low",     # default to a low rung of the 10-level dimming
+    "silent": True,
+    "white_flash": False,
+    "animations": False,
+    "transition": "instant",
+    "blinking": False,
+    "brightness": "low",
 }
 
-# Capture-path contract. IMPORTANT: the camera privacy LED is hardware-enforced
-# and MUST stay on whenever the camera is active; the server neither exposes nor
-# supports any way to disable it. `privacy_led` is advertised as always_on /
-# tamper:forbidden precisely to make that non-negotiable in the contract.
+# Capture-path contract.
 CAPTURE_CONTRACT = {
-    "shutter_sound": False,           # silent capture via the custom camera path
-    "camera_path": "cxr-s/camera2",   # custom path used for soundless capture
+    "shutter_sound": False,
+    "camera_path": "cxr-s/camera2",
     "privacy_led": {"state": "always_on", "tamper": "forbidden"},
 }
 
 
-def build_capture_ack(
-    *, page_number: int | None = None, question_id: int | None = None
-) -> dict:
-    """A silent, no-flash capture confirmation: one short HUD line, ~2s.
-
-    Replaces an audible shutter / white flash with a quiet on-glass line. Like
-    the rest of the HUD payloads it carries NO sound/flash/animation fields.
-    """
-    if page_number is not None:
-        label = f"P{page_number:02d}"
-    elif question_id is not None:
-        label = f"#{question_id}"
-    else:
-        label = ""
-    line = f"{label} 保存済み".strip()
-    return {"lines": [line][:_MAX_LINES], "ttl_sec": 2}
-
+# ---------------------------------------------------------------------------
+# Shared helpers
+# ---------------------------------------------------------------------------
 
 def _confidence_symbol(conf: float) -> str:
     if conf >= 0.66:
-        return "★★★"
+        return "\u2605\u2605\u2605"
     if conf >= 0.33:
-        return "★★☆"
-    return "★☆☆"
+        return "\u2605\u2605\u2606"
+    return "\u2605\u2606\u2606"
 
 
 def _locator(answer_box: dict | None) -> str:
@@ -78,9 +77,9 @@ def _locator(answer_box: dict | None) -> str:
         return ""
     cx = answer_box.get("x", 0) + answer_box.get("w", 0) / 2
     cy = answer_box.get("y", 0) + answer_box.get("h", 0) / 2
-    vert = "上" if cy < 0.4 else ("下" if cy > 0.6 else "中")
-    horiz = "左" if cx < 0.4 else ("右" if cx > 0.6 else "中")
-    return f"解答欄: {vert}{horiz}"
+    vert = "\u4e0a" if cy < 0.4 else ("\u4e0b" if cy > 0.6 else "\u4e2d")
+    horiz = "\u5de6" if cx < 0.4 else ("\u53f3" if cx > 0.6 else "\u4e2d")
+    return f"\u89e3\u7b54\u6b04: {vert}{horiz}"
 
 
 def _wrap(text: str) -> list[str]:
@@ -88,30 +87,7 @@ def _wrap(text: str) -> list[str]:
     text = (text or "").strip()
     if not text:
         return []
-    return [text[i : i + _MAX_LINE_CHARS] for i in range(0, len(text), _MAX_LINE_CHARS)]
-
-
-def _stage_lines(
-    stage: str, solution: SolveResult, page_label: str, locator: str
-) -> list[str]:
-    if stage == "answer":
-        head = f"{page_label} {_confidence_symbol(solution.answer_confidence)}".strip()
-        lines = [head, f"答え: {solution.answer}"]
-        if locator:
-            lines.append(locator)
-        return lines
-    if stage == "solution":
-        steps = solution.solution_steps or ["(解法なし)"]
-        return ["解法"] + [s for s in steps]
-    if stage == "rationale":
-        ev = (
-            "根拠ページ: " + ",".join(f"P{p:02d}" for p in solution.evidence_pages)
-            if solution.evidence_pages
-            else ""
-        )
-        return ["根拠", solution.rationale or "(なし)"] + ([ev] if ev else [])
-    # caution
-    return ["注意", solution.cautions or "(なし)"]
+    return [text[i: i + _MAX_LINE_CHARS] for i in range(0, len(text), _MAX_LINE_CHARS)]
 
 
 def _paginate(lines: list[str]) -> list[list[str]]:
@@ -121,8 +97,153 @@ def _paginate(lines: list[str]) -> list[list[str]]:
         wrapped.extend(_wrap(ln) or [""])
     if not wrapped:
         wrapped = [""]
-    return [wrapped[i : i + _MAX_LINES] for i in range(0, len(wrapped), _MAX_LINES)]
+    return [wrapped[i: i + _MAX_LINES] for i in range(0, len(wrapped), _MAX_LINES)]
 
+
+def _nav(page: int, total: int, hint: str, stages: tuple) -> dict:
+    return {
+        "prev": page - 1 if page > 0 else None,
+        "next": page + 1 if page < total - 1 else None,
+        "stages": list(stages),
+        "hint": hint,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Capture ACK (exam & explain shared)
+# ---------------------------------------------------------------------------
+
+def build_capture_ack(
+    *, page_number: int | None = None, question_id: int | None = None
+) -> dict:
+    """Silent, no-flash capture confirmation: one short HUD line, ~2 s."""
+    if page_number is not None:
+        label = f"P{page_number:02d}"
+    elif question_id is not None:
+        label = f"#{question_id}"
+    else:
+        label = ""
+    line = f"{label} \u4fdd\u5b58\u6e08".strip()
+    return {"lines": [line][:_MAX_LINES], "ttl_sec": 2}
+
+
+# ---------------------------------------------------------------------------
+# Explain-session specific HUD builders
+# ---------------------------------------------------------------------------
+
+def build_explain_scan_ack(
+    *, page_index: int, scanned: int, total: int
+) -> dict:
+    """Silent ACK displayed each time the user scans one page during scanning
+    phase. Shows current progress so the user knows how many pages remain.
+
+    Example HUD::
+
+        P03 \u8aad\u53d6\u6e08 \u2713
+        3 / 5 \u30da\u30fc\u30b8
+        (\u30c0\u30d6\u30eb\u9577\u62bc\u3057\u3067\u5b8c\u4e86)
+    """
+    lines = [
+        f"P{page_index + 1:02d} \u8aad\u53d6\u6e08 \u2713",
+        f"{scanned} / {total} \u30da\u30fc\u30b8",
+        "(\u30c0\u30d6\u30eb\u9577\u62bc\u3057\u3067\u5b8c\u4e86)" if scanned < total else "\u5168\u30da\u30fc\u30b8\u5b8c\u4e86!",
+    ]
+    return {"lines": lines, "ttl_sec": 2, "scanned": scanned, "total": total}
+
+
+def build_explain_status(*, scanned: int, total: int, status: str) -> dict:
+    """Progress banner shown when the client polls session status.
+
+    status values: 'scanning' | 'ready' | 'explaining'
+    """
+    if status == "scanning":
+        remaining = total - scanned
+        lines = [
+            f"\u8aad\u307f\u53d6\u308a\u4e2d {scanned}/{total}",
+            f"\u6b8b\u308a {remaining} \u30da\u30fc\u30b8",
+            "\u30c0\u30d6\u30eb\u9577\u62bc\u3057\u3067\u5b8c\u4e86",
+        ]
+    elif status == "ready":
+        lines = [
+            f"\u5168 {total} \u30da\u30fc\u30b8 \u6e96\u5099OK",
+            "\u30bf\u30c3\u30d7\u3067\u89e3\u8aac\u958b\u59cb",
+            "",
+        ]
+    else:  # explaining
+        lines = [
+            f"\u89e3\u8aac\u30e2\u30fc\u30c9 ({total}P)",
+            "\u30da\u30fc\u30b8\u3092\u6307\u3057\u3066\u30bf\u30c3\u30d7",
+            "",
+        ]
+    return {"lines": lines, "status": status, "scanned": scanned, "total": total}
+
+
+def build_explain_view(
+    *,
+    lines: list[str],        # ExplainResult.lines (the explainer's 3-line output)
+    detail: str,             # ExplainResult.detail (long-form, for pagination)
+    evidence_pages: list[int],
+    page_index: int,
+    total_pages: int,
+    stage: str = "summary",
+    view_page: int = 0,
+    confidence: float = 1.0,
+    voice_enabled: bool = False,
+) -> dict:
+    """Return one page of the staged, silent-friendly on-glasses explain view.
+
+    stage='summary' : 3-line HUD from ExplainResult.lines
+    stage='detail'  : ExplainResult.detail wrapped and paginated
+    stage='evidence': list of evidence page numbers
+
+    Navigation:
+      - Swipe / tap     : view_page +1  (within current stage)
+      - Long-press      : next stage
+      - Server returns nav.next/prev so the client knows when pages run out.
+    """
+    if stage not in EXPLAIN_STAGES:
+        stage = "summary"
+
+    page_label = f"P{page_index + 1:02d}/{total_pages:02d}"
+    hint = "\u300c\u6b21\u306e\u89e3\u8aac\u300d\u3068\u8a00\u3046" if voice_enabled else "\u30dc\u30bf\u30f3\u3067\u6b21\u3078"
+
+    if stage == "summary":
+        # First line always shows page position + confidence symbol
+        header = f"{page_label} {_confidence_symbol(confidence)}"
+        stage_lines = [header] + (lines or ["(\u7121\u30c6\u30ad\u30b9\u30c8)"]) [:2]
+        pages = _paginate(stage_lines)
+
+    elif stage == "detail":
+        header = f"{page_label} \u8a73\u7d30"
+        detail_lines = [header] + _wrap(detail or "(\u8a73\u7d30\u306a\u3057)")
+        pages = _paginate(detail_lines)
+
+    else:  # evidence
+        header = f"{page_label} \u6839\u62e0"
+        if evidence_pages:
+            ev_text = "\u6839\u62e0P: " + ",".join(
+                f"P{p + 1:02d}" for p in evidence_pages
+            )
+        else:
+            ev_text = "(\u6839\u62e0\u30da\u30fc\u30b8\u306a\u3057)"
+        pages = _paginate([header, ev_text])
+
+    total = len(pages)
+    view_page = max(0, min(view_page, total - 1))
+
+    return {
+        "stage": stage,
+        "page": view_page,
+        "total_pages": total,
+        "lines": pages[view_page],
+        "locked": False,
+        "nav": _nav(view_page, total, hint, EXPLAIN_STAGES),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Locked view (real-exam guard, unchanged)
+# ---------------------------------------------------------------------------
 
 def build_locked_view(stage: str = "answer") -> dict:
     """Real-exam mode (locked): never reveal an answer."""
@@ -130,12 +251,37 @@ def build_locked_view(stage: str = "answer") -> dict:
         "stage": stage,
         "page": 0,
         "total_pages": 1,
-        "lines": ["本番試験モード", "解答は表示しません", "学習/模試で使用してください"],
+        "lines": ["\u672c\u756a\u8a66\u9a13\u30e2\u30fc\u30c9", "\u89e3\u7b54\u306f\u8868\u793a\u3057\u307e\u305b\u3093", "\u5b66\u7fd2/\u6a21\u8a66\u3067\u4f7f\u7528\u3057\u3066\u304f\u3060\u3055\u3044"],
         "locator": "",
         "locked": True,
         "nav": {"prev": None, "next": None, "stages": list(STAGES)},
-        # No audio / animation fields by design.
     }
+
+
+# ---------------------------------------------------------------------------
+# Exam solver view (unchanged public API)
+# ---------------------------------------------------------------------------
+
+def _stage_lines(
+    stage: str, solution: SolveResult, page_label: str, locator: str
+) -> list[str]:
+    if stage == "answer":
+        head = f"{page_label} {_confidence_symbol(solution.answer_confidence)}".strip()
+        lines = [head, f"\u7b54\u3048: {solution.answer}"]
+        if locator:
+            lines.append(locator)
+        return lines
+    if stage == "solution":
+        steps = solution.solution_steps or ["(\u89e3\u6cd5\u306a\u3057)"]
+        return ["\u89e3\u6cd5"] + [s for s in steps]
+    if stage == "rationale":
+        ev = (
+            "\u6839\u62e0\u30da\u30fc\u30b8: " + ",".join(f"P{p:02d}" for p in solution.evidence_pages)
+            if solution.evidence_pages
+            else ""
+        )
+        return ["\u6839\u62e0", solution.rationale or "(\u306a\u3057)"] + ([ev] if ev else [])
+    return ["\u6ce8\u610f", solution.cautions or "(\u306a\u3057)"]
 
 
 def build_glasses_view(
@@ -162,6 +308,7 @@ def build_glasses_view(
     pages = _paginate(_stage_lines(stage, solution, page_label, _locator(answer_box)))
     total = len(pages)
     page = max(0, min(page, total - 1))
+    hint = "\u300c\u6b21\u306e\u7b54\u3048\u300d\u3068\u8a00\u3046" if voice_enabled else "\u524d\u9762\u30dc\u30bf\u30f3\u3067\u6b21\u3078"
 
     return {
         "stage": stage,
@@ -170,11 +317,5 @@ def build_glasses_view(
         "lines": pages[page],
         "locator": _locator(answer_box),
         "locked": False,
-        "nav": {
-            "prev": page - 1 if page > 0 else None,
-            "next": page + 1 if page < total - 1 else None,
-            "stages": list(STAGES),
-            # Operation hint adapts to silent (button) vs voice mode.
-            "hint": "『次の答え』と言う" if voice_enabled else "前面ボタンで次へ",
-        },
+        "nav": _nav(page, total, hint, STAGES),
     }
