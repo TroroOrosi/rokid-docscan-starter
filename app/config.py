@@ -19,6 +19,12 @@ ALLOW_REAL_EXAM_SOLVE = os.environ.get("ROKID_ALLOW_REAL_EXAM_SOLVE", "0") == "1
 # falls back to its dependency-free lexical scorer regardless of this flag.
 ENABLE_EMBEDDING = os.environ.get("ROKID_ENABLE_EMBEDDING", "0") == "1"
 
+# Explainer adapter selection (explain-sessions).
+# Default: "local" (LocalPlaceholderExplainer — offline, no credentials).
+# Override with ROKID_EXPLAINER=gemini|openai|claude to swap in an LLM adapter.
+# The value must match an Explainer.name registered in app/explainers/registry.py.
+ROKID_EXPLAINER = os.environ.get("ROKID_EXPLAINER", "local")
+
 
 def ensure_dirs() -> None:
     IMAGE_DIR.mkdir(parents=True, exist_ok=True)
