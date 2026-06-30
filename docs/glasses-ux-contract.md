@@ -45,26 +45,22 @@
 
 ## タッチパッド操作マッピング（公式キーコード準拠）
 
-> 出典: Rokid Glass 公式システムドキュメント v3.1
+> 出典: Rokid Glass 公式システムドキュメント V3.1
 > （[rokid.github.io/glass-docs/1-system](https://rokid.github.io/glass-docs/1-system/)）
 
 | ユーザー操作 | Android KeyCode | 本サーバの用途 |
 |---|---|---|
 | **TP-単击**（タップ） | `KEYCODE_DPAD_CENTER = 23` | 解説表示・確認（explain-sessions / exam-sessions） |
-| **TP-長押** | `KEYCODE_TV = 170` | 解説段階を進める（overview→detail→evidence） |
+| **TP-長按** | `KEYCODE_TV = 170` | 解説段階を進める（overview→detail→evidence） |
 | **TP-双击**（ダブルタップ） | `KEYCODE_ENTER = 66` | 現在のビューを閉じる |
 | **TP-右滑**（スワイプ右） | `KEYCODE_DPAD_RIGHT = 22`（連続） | 前テキストスライス（テレプロンプター戻し） |
 | **TP-左滑**（スワイプ左） | `KEYCODE_DPAD_LEFT = 21`（連続） | 次テキストスライス（テレプロンプター送り） |
-| **TP-快速右滑**（速スワイプ右） | `KEYCODE_DPAD_DOWN = 20`（単発） | 前ページへ（`view_page` -1） |
-| **TP-快速左滑**（速スワイプ左） | `KEYCODE_DPAD_UP = 19`（単発） | 次ページへ（`view_page` +1） |
+| **TP-快速右滑**（速スワイプ右） | `KEYCODE_DPAD_DOWN = 20`（単発） | 前ページへ（`POST /prev-page`） |
+| **TP-快速左滑**（速スワイプ左） | `KEYCODE_DPAD_UP = 19`（単発） | 次ページへ（`POST /next-page`） |
 | **Back-単**（戻るボタン） | `KEYCODE_BACK = 4` | 前の画面へ戻る |
 | **Back-長**（長押し） | Intent `homekey.longpress` | ランチャーへ（アプリ実装依存） |
 
 > ⚠️ **スワイプ方向の注意**: 公式キーコード定義では、TP-快速左滑（速スワイプ左）が `KEYCODE_DPAD_UP`（上）、TP-快速右滑（速スワイプ右）が `KEYCODE_DPAD_DOWN`（下）に割り当てられています。方向名と物理操作が直感と逆に見えることがありますが、Rokid 公式仕様に従っています。クライアント実装時は必ず上記の KeyCode でリッスンしてください。
-
-### ダブル長押し（commit_scan）
-
-`explain-sessions` の読み取り完了操作は **Back ボタンを長押し×2回**（`Back-長` を2回連続）で実装することを推奨します。TP-長押しはアプリ自由カスタムのため、UX の文脈に合わせて `KEYCODE_TV = 170` でも代替可能です。誤操作防止のため、連続2回受信（500ms 以内）を条件とするデバウンス実装を推奨します。
 
 ---
 
@@ -89,14 +85,14 @@
 | explaining | 前ページへ | TP-快速右滑 | `KEYCODE_DPAD_DOWN (20)` 単発 | `POST /prev-page`（撮影なし） |
 | explaining | 次テキストスライス | TP-左滑 | `KEYCODE_DPAD_LEFT (21)` 連続 | `GET /explain?view_page=N+1` |
 | explaining | 前テキストスライス | TP-右滑 | `KEYCODE_DPAD_RIGHT (22)` 連続 | `GET /explain?view_page=N-1` |
-| explaining | 次解説段階（詳細へ） | TP-長押 | `KEYCODE_TV (170)` | `GET /explain?stage=detail` |
+| explaining | 次解説段階（詳細へ） | TP-長按 | `KEYCODE_TV (170)` | `GET /explain?stage=detail` |
 | explaining | 解説を閉じる | TP-双击 | `KEYCODE_ENTER (66)` | — |
 
 #### 廃止されたエンドポイント（v1.6 → v1.7）
 
 | 旧操作 | 旧エンドポイント | 廃止理由 |
 |--------|----------------|----------|
-| ページ撮影スキャン| `POST /scan`（画像アップロード） | 撮影不要設計へ移行 |
+| ページ撮影スキャン | `POST /scan`（画像アップロード） | 撮影不要設計へ移行 |
 | 全ページ読取完了宣言 | `POST /commit`（ダブル長押し） | scanningフェーズ廃止 |
 
 ### 解答モード（exam-sessions）
@@ -105,7 +101,7 @@
 |------|-----------|----------|
 | 撮影 | Back-単 | 「撮影」 |
 | 解答表示 | TP-単击 | 「答えを表示」 |
-| 次の解説段階 | TP-長押 | 「詳しく」 |
+| 次の解説段階 | TP-長按 | 「詳しく」 |
 | 次テキストページ | TP-左滑 | 「次へ」 |
 | 前テキストページ | TP-右滑 | 「前へ」 |
 | 閉じる | TP-双击 | 「閉じる」 |
@@ -122,22 +118,21 @@ PAGE 2/5
 conf 0.93  hd 3
 ```
 
-### 資料解説モード
+### 資料解説モード（v1.7）
 
-スキャン中のスキャン ACK（`ttl_sec:2` で自動消去）:
-
-```
-P02 読取済 ✓
-2/5ページ完了
-ダブル長押しで解説へ
-```
-
-読取完了 ACK（`ttl_sec:3` で自動消去）:
+セッション作成 / ページ移動後のナビ ACK（`ttl_sec:1.5` で自動消去）:
 
 ```
-読み取り完了
-5/5ページ
-タップで解説開始
+→ P02/5
+タップで解説
+```
+
+先頭ページで前へ操作したとき:
+
+```
+← P01/5
+先頭ページ
+タップで解説
 ```
 
 解説 HUD（overview 段階）:
@@ -145,7 +140,23 @@ P02 読取済 ✓
 ```
 P01/5 ★★★
 （概要テキスト1行目）
-← 次ページ  ↓ 詳しく
+長押し 次段階 / 速スワイプ 次ページ
+```
+
+解説 HUD（detail 段階）:
+
+```
+P01/5 詳細
+（詳細テキスト1行目）
+長押し 次段階
+```
+
+解説 HUD（evidence 段階）:
+
+```
+P01/5 根拠
+参照: P03, P05
+長押し → 概要へ戻る
 ```
 
 ### 解答モード
