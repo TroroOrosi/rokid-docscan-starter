@@ -34,7 +34,7 @@ from .glasses_view import (
     build_explain_view,
     build_glasses_view,
     build_locked_view,
-    build_scan_ack,
+    build_page_nav_ack,
 )
 from .hud import build_hud
 from .layout import parse_layout, primary_question
@@ -665,15 +665,20 @@ def get_exam_session(session_id: int) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Explain-sessions: live multi-page document explanation
+# Explain-sessions: scan-free live document explanation
 #
-# UX flow (button-only, silent, glasses-standalone):
-#   1. POST /v1/explain-sessions          → create, status=scanning
-#   2. POST …/{id}/scan  (per page)       → pHash match, silent ack (P02 読取済 ✓)
-#   3. POST …/{id}/commit                 → double-long-press; status=ready
-#   4. GET  …/{id}/explain?page_index=N   → explanation HUD, status→explaining
-#      GET  …/{id}/explain?…&stage=detail&view_page=1  → swipe to next slice
-#   5. GET  …/{id}/history                → scanned page list
+# Design principle: NO camera image is sent during explain-sessions.
+# The glasses user navigates by button only; the server tracks which page
+# is currently being viewed via current_page_index.
+#
+# UX flow (button-only, silent, no-camera, glasses-standalone):
+#   1. POST /v1/explain-sessions           → create, status=ready, page=0
+#   2. GET  …/{id}/explain                 → explanation for current page
+#      POST …/{id}/next-page               → advance page counter (+1)
+#      POST …/{id}/prev-page               → go back one page (-1)
+#      GET  …/{id}/explain?stage=detail    → detail stage for same page
+#      GET  …/{id}/explain?view_page=1     → teleprompter next slice
+#   3. GET  …/{id}/history                 → viewed page list
 # ---------------------------------------------------------------------------
 
 class CreateExplainSession(BaseModel):
@@ -685,13 +690,19 @@ def _explain_session_or_404(conn, session_id: int):
     return _row_or_404(conn, "explain_sessions", session_id, "explain session not found")
 
 
+def _explain_total_pages(conn, doc_id: int) -> int:
+    return conn.execute(
+        "SELECT COUNT(*) FROM pages WHERE document_id = ?", (doc_id,)
+    ).fetchone()[0]
+
+
 @app.post("/v1/explain-sessions", status_code=201)
 def create_explain_session(payload: CreateExplainSession) -> dict:
     """Create an explain session bound to a finalized document.
 
-    The document must already exist (need not be finalized, but finalized
-    documents have summaries which improve explanation quality).
-    Status starts as 'scanning'.
+    No camera image is required at any point in this session.
+    The session starts immediately in 'ready' status at page 0.
+    Use POST /next-page and /prev-page to navigate; GET /explain to view.
     """
     conn = db.connect()
     try:
@@ -701,17 +712,13 @@ def create_explain_session(payload: CreateExplainSession) -> dict:
             (payload.document_id, int(payload.voice_enabled)),
         )
         conn.commit()
-        # Total pages in the document (may be 0 for an empty doc).
-        total_pages = conn.execute(
-            "SELECT COUNT(*) FROM pages WHERE document_id = ?",
-            (payload.document_id,),
-        ).fetchone()[0]
+        total_pages = _explain_total_pages(conn, payload.document_id)
         return {
             "session_id": cur.lastrowid,
             "document_id": payload.document_id,
             "voice_enabled": payload.voice_enabled,
-            "status": "scanning",
-            "scanned_pages": [],
+            "status": "ready",
+            "current_page_index": 0,
             "total_pages": total_pages,
             "operations": OPERATION_CONTRACT,
             "api_version": version_info()["api_version"],
@@ -720,125 +727,59 @@ def create_explain_session(payload: CreateExplainSession) -> dict:
         conn.close()
 
 
-@app.post("/v1/explain-sessions/{session_id}/scan")
-async def explain_scan(
-    session_id: int,
-    image: UploadFile = File(...),
-    fast_ocr_text: str | None = Form(None),
-) -> dict:
-    """Silently match one page frame during the scanning phase.
+@app.post("/v1/explain-sessions/{session_id}/next-page")
+def explain_next_page(session_id: int) -> dict:
+    """Advance the current page index by 1.
 
-    The glasses user presses the button once per page while reading through
-    the document. The server records which page was matched; the HUD shows
-    only a quiet 'P02 読取済 ✓' ack (no explanation yet).
-
-    Returns 409 if the session is not in 'scanning' status.
+    Triggered by the user pressing the 'next page' button (fast_swipe_left /
+    KEYCODE_DPAD_UP) on the glasses.  Clamped at the last page.
+    Returns the new current_page_index and a brief HUD ack.
     """
     conn = db.connect()
     try:
         session = _explain_session_or_404(conn, session_id)
-        if session["status"] != "scanning":
-            raise HTTPException(
-                status_code=409,
-                detail=f"session status is '{session['status']}'; expected 'scanning'",
-            )
-
-        doc_id = session["document_id"]
-        raw = await image.read()
-        img = _load_image(raw)
-        q_phash = phash_hex(img)
-        q_md5 = _fallback_md5(ocr_md5(fast_ocr_text), raw)
-
-        rows = conn.execute(
-            "SELECT id, page_index, phash, ocr_md5, ocr_text FROM pages "
-            "WHERE document_id = ? ORDER BY page_index",
-            (doc_id,),
-        ).fetchall()
-        candidates = [
-            Candidate(
-                page_id=r["id"],
-                page_index=r["page_index"],
-                phash=r["phash"],
-                ocr_md5=r["ocr_md5"],
-                ocr_text=normalize_ocr_text(r["ocr_text"]),
-            )
-            for r in rows
-        ]
-        total_pages = len(candidates)
-
-        best, verdict, _ = match(q_phash, q_md5, candidates, query_ocr_text=fast_ocr_text)
-
-        # Update scanned_pages list (deduplicated, sorted).
-        scanned: list[int] = json.loads(session["scanned_pages_json"] or "[]")
-        if verdict in ("HIT", "LOW_CONF") and best is not None:
-            matched_index = best.page_index
-            if matched_index not in scanned:
-                scanned.append(matched_index)
-                scanned.sort()
-            conn.execute(
-                "UPDATE explain_sessions SET scanned_pages_json = ? WHERE id = ?",
-                (json.dumps(scanned), session_id),
-            )
-            conn.commit()
-        else:
-            matched_index = None
-
-        scan_ack = build_scan_ack(
-            page_index=matched_index if matched_index is not None else 0,
-            scanned_count=len(scanned),
-            total_pages=total_pages,
+        total = _explain_total_pages(conn, session["document_id"])
+        new_idx = min(session["current_page_index"] + 1, max(total - 1, 0))
+        conn.execute(
+            "UPDATE explain_sessions SET current_page_index = ? WHERE id = ?",
+            (new_idx, session_id),
         )
+        conn.commit()
+        ack = build_page_nav_ack(page_index=new_idx, total_pages=total, direction="next")
         return {
             "session_id": session_id,
-            "verdict": verdict,
-            "matched_page_index": matched_index,
-            "scanned_pages": scanned,
-            "total_pages": total_pages,
-            "scan_ack": scan_ack,
-            "versions": version_info(),
+            "current_page_index": new_idx,
+            "total_pages": total,
+            "at_last": new_idx >= total - 1,
+            "nav_ack": ack,
         }
     finally:
         conn.close()
 
 
-@app.post("/v1/explain-sessions/{session_id}/commit")
-def explain_commit(session_id: int) -> dict:
-    """Transition session from 'scanning' to 'ready'.
+@app.post("/v1/explain-sessions/{session_id}/prev-page")
+def explain_prev_page(session_id: int) -> dict:
+    """Move the current page index back by 1.
 
-    Triggered by the user's double-long-press gesture after all pages have
-    been scanned. From this point onward, explanation is available via GET
-    /explain. Scanning is no longer accepted (returns 409).
+    Triggered by fast_swipe_right / KEYCODE_DPAD_DOWN.  Clamped at page 0.
     """
     conn = db.connect()
     try:
         session = _explain_session_or_404(conn, session_id)
-        if session["status"] not in ("scanning", "ready"):
-            raise HTTPException(
-                status_code=409,
-                detail=f"cannot commit from status '{session['status']}'",
-            )
+        total = _explain_total_pages(conn, session["document_id"])
+        new_idx = max(session["current_page_index"] - 1, 0)
         conn.execute(
-            "UPDATE explain_sessions SET status = 'ready' WHERE id = ?",
-            (session_id,),
+            "UPDATE explain_sessions SET current_page_index = ? WHERE id = ?",
+            (new_idx, session_id),
         )
         conn.commit()
-
-        scanned: list[int] = json.loads(session["scanned_pages_json"] or "[]")
-        total_pages = conn.execute(
-            "SELECT COUNT(*) FROM pages WHERE document_id = ?",
-            (session["document_id"],),
-        ).fetchone()[0]
+        ack = build_page_nav_ack(page_index=new_idx, total_pages=total, direction="prev")
         return {
             "session_id": session_id,
-            "status": "ready",
-            "scanned_pages": scanned,
-            "total_pages": total_pages,
-            # HUD confirmation: silent, 2-second display.
-            "commit_ack": {
-                "lines": ["読み取り完了", f"{len(scanned)}/{total_pages}ページ", "タップで解説開始"],
-                "ttl_sec": 3,
-            },
-            "versions": version_info(),
+            "current_page_index": new_idx,
+            "total_pages": total,
+            "at_first": new_idx == 0,
+            "nav_ack": ack,
         }
     finally:
         conn.close()
@@ -847,21 +788,19 @@ def explain_commit(session_id: int) -> dict:
 @app.get("/v1/explain-sessions/{session_id}/explain")
 def explain_page(
     session_id: int,
-    page_index: int,
     stage: str = "overview",
     view_page: int = 0,
 ) -> dict:
-    """Return the explanation HUD for a specific document page.
+    """Return the explanation HUD for the session's current page.
 
-    Available only when session status is 'ready' or 'explaining'.
-    Triggered by a tap gesture on the glasses after commit.
+    No page_index parameter — the server uses current_page_index, which is
+    updated by POST /next-page and /prev-page.  This mirrors the Rokid
+    'object-in-view explanation' pattern: the user sees what is in front of
+    them; the app explains it without a shutter press.
 
-    Navigation:
-      - stage     : overview | detail | evidence  (swipe_down / swipe_up)
+    Navigation within a page:
+      - stage     : overview | detail | evidence  (long-press / double long-press)
       - view_page : 0-based teleprompter slice    (swipe_left / swipe_right)
-
-    The response includes `nav` with prev/next pointers so the client knows
-    whether a swipe will produce more content.
     """
     if stage not in EXPLAIN_STAGES:
         raise HTTPException(
@@ -871,15 +810,9 @@ def explain_page(
     conn = db.connect()
     try:
         session = _explain_session_or_404(conn, session_id)
-        if session["status"] not in ("ready", "explaining"):
-            raise HTTPException(
-                status_code=409,
-                detail=f"session status is '{session['status']}'; commit first",
-            )
-
         doc_id = session["document_id"]
+        page_index = session["current_page_index"]
 
-        # Fetch the matched page row.
         page_row = conn.execute(
             "SELECT * FROM pages WHERE document_id = ? AND page_index = ?",
             (doc_id, page_index),
@@ -890,14 +823,10 @@ def explain_page(
                 detail=f"page_index {page_index} not found in document",
             )
 
-        total_doc_pages = conn.execute(
-            "SELECT COUNT(*) FROM pages WHERE document_id = ?", (doc_id,)
-        ).fetchone()[0]
+        total_doc_pages = _explain_total_pages(conn, doc_id)
 
-        # RAG: pull context from other pages in the same document.
         retrieved = retrieve_context(conn, page_row["ocr_text"])
 
-        # Build ExplainRequest and call the active Explainer adapter.
         req = ExplainRequest(
             page_index=page_index,
             page_ocr_text=page_row["ocr_text"],
@@ -910,7 +839,6 @@ def explain_page(
         explainer = get_explainer()
         result = explainer.explain(req)
 
-        # Persist to explain_views for history.
         conn.execute(
             """INSERT INTO explain_views
                (session_id, page_index, verdict, hud_lines_json,
@@ -925,7 +853,6 @@ def explain_page(
                 result.confidence,
             ),
         )
-        # Advance status to explaining on first tap.
         if session["status"] == "ready":
             conn.execute(
                 "UPDATE explain_sessions SET status = 'explaining' WHERE id = ?",
@@ -944,7 +871,7 @@ def explain_page(
         return {
             "session_id": session_id,
             "document_id": doc_id,
-            "page_index": page_index,
+            "current_page_index": page_index,
             "total_doc_pages": total_doc_pages,
             "explainer": explainer.info(),
             "glasses_view": view,
@@ -957,16 +884,10 @@ def explain_page(
 
 @app.get("/v1/explain-sessions/{session_id}/history")
 def explain_history(session_id: int) -> dict:
-    """Return the list of pages viewed during this explain session.
-
-    Each entry includes the page_index, verdict, HUD lines, and timestamp.
-    Useful for review after the session, and for the glasses client to
-    determine which pages have already been explained.
-    """
+    """Return the list of pages viewed during this explain session."""
     conn = db.connect()
     try:
         session = _explain_session_or_404(conn, session_id)
-        scanned: list[int] = json.loads(session["scanned_pages_json"] or "[]")
         views = conn.execute(
             "SELECT page_index, verdict, hud_lines_json, detail, "
             "evidence_pages_json, confidence, viewed_at "
@@ -978,7 +899,7 @@ def explain_history(session_id: int) -> dict:
             "document_id": session["document_id"],
             "status": session["status"],
             "voice_enabled": bool(session["voice_enabled"]),
-            "scanned_pages": scanned,
+            "current_page_index": session["current_page_index"],
             "explained_views": [
                 {
                     "page_index": v["page_index"],

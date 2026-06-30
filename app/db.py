@@ -76,23 +76,24 @@ CREATE TABLE IF NOT EXISTS solutions (
     created_at         TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
--- Live document explanation mode.
+-- Live document explanation mode (scan-free, button-only navigation).
 --
--- Status transitions (driven by user button operations on the glasses):
---   scanning  : user is paging through the document; each frame is silently
---               matched and recorded.  HUD shows only "P02 読取済 ✓".
---   ready     : user performed the "commit" gesture (double-long-press);
---               all pages have been scanned.  Explanation is now available.
---   explaining: user tapped to request explanation; Explainer results are
---               served page-by-page with swipe navigation.
+-- Design: no camera image is required to navigate pages.  The glasses user
+-- presses next-page / prev-page buttons; the server increments or decrements
+-- current_page_index and immediately serves the explanation HUD.
 --
--- scanned_pages_json: JSON array of page_index integers already matched.
+-- Status transitions:
+--   ready      : session created; explanation available immediately.
+--   explaining : user has requested at least one page explanation.
+--
+-- current_page_index : 0-based index of the page currently being viewed.
+--                      Clamped server-side to [0, total_pages-1].
 CREATE TABLE IF NOT EXISTS explain_sessions (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
     document_id         INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
     voice_enabled       INTEGER NOT NULL DEFAULT 0,
-    status              TEXT NOT NULL DEFAULT 'scanning',
-    scanned_pages_json  TEXT NOT NULL DEFAULT '[]',
+    status              TEXT NOT NULL DEFAULT 'ready',
+    current_page_index  INTEGER NOT NULL DEFAULT 0,
     created_at          TEXT NOT NULL DEFAULT (datetime('now'))
 );
 

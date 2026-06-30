@@ -1,51 +1,54 @@
 # 資料解説モード（explain-sessions）仕様書
 
-API v1.6.0 で追加。登録済み文書を Rokid Glasses **単体で全ページ読み取り→解説を HUD に段階表示**する機能です。
-音声不要・フラッシュなし・スマホ画面なしで完結します。
+API v1.7.0 で再設計。登録済み文書を Rokid Glasses **単体でページナビゲーション→解説を HUD に段階表示**する機能です。
+
+**撮影なし・画像送信なし・音声不要・フラッシュなし・スマホ画面なしで完結します。**
+
+> 設計原則: Rokid ネイティブの「映っている物体の解説」体験と同様に、
+> ユーザーはカメラボタンを押さず、ページ送りボタンだけで資料を読み進めます。
+> サーバーは `current_page_index` カウンターを管理するだけで、画像照合は不要です。
 
 ---
 
 ## 前提条件
 
 1. サーバが起動している（`uvicorn app.main:app --port 8000`）
-2. 文書が登録・finalize 済みであること（`status: ready`）
+2. 文書が登録・finalize 済みであること（各ページに `ocr_text` と `summary` がある状態）
 3. `ROKID_EXPLAINER` 環境変数が未設定の場合、自動的にローカルプレースホルダが使用される
 
 ---
 
-## ユーザーが行う手順（グラス単体・完全無音）
+## ユーザーが行う手順（グラス単体・撮影なし）
 
-### フェーズ 1: スキャン（scanning）
+### フェーズ 1: セッション開始
 
 | ステップ | ユーザーの操作 | グラス HUD の表示 | 補足 |
 |---------|------------|------------------|------|
-| 1 | サーバで解説セッションを作成（スマホ側アプリが自動実行） | `解説モード開始 / スキャン中 / ボタンで読取` | セッション `status = scanning` |
-| 2 | **ページを向けて Back ボタンを1回押す** | `P01 読取済 ✓ / 1/5ページ完了 / 続けて読み取り` | `ttl_sec:2` で自動消去 |
-| 3 | ページを変えて再度1回押す（全ページ分繰り返す） | `P02 読取済 ✓ / 2/5ページ完了 / ...` | 同一ページを複数回スキャンしても上書き（べき等） |
-| 4 | **全ページ読み終えたらダブル長押し（Back ボタン長押し×2回）** | `読み取り完了 / 5/5ページ / タップで解説開始` | `ttl_sec:3` で自動消去・`status = ready` へ遷移 |
+| 1 | スマホ側アプリがセッションを自動作成 | `→ P01/5 / タップで解説` | `status=ready`, `current_page_index=0` |
 
-> **ダブル長押しとは**: Back ボタンを長押し（約1秒）→ 離す → 500ms 以内に再度長押し。
-> 誤操作防止のため2回連続が必要です。
-
-### フェーズ 2: 解説閲覧（explaining）
+### フェーズ 2: 解説閲覧
 
 | ステップ | ユーザーの操作 | グラス HUD の表示 | KeyCode |
 |---------|------------|------------------|---|
-| 5 | **タッチパッドをタップ** | `P01/5 ★★★ / (概要テキスト1行目) / ← 次ページ ↓ 詳しく` | `KEYCODE_DPAD_CENTER` |
-| 6 | テキストが3行を超える場合、**スワイプ左**で続きを読む | 次の3行が表示される | `KEYCODE_DPAD_LEFT`（連続） |
-| 7 | 前に戻りたい場合、**スワイプ右** | 前の3行に戻る | `KEYCODE_DPAD_RIGHT`（連続） |
-| 8 | 次のページへは**速スワイプ左**（素早くスワイプして離す） | `P02/5 ★★★ / ...` | `KEYCODE_DPAD_UP`（単発） |
-| 9 | 前のページへは**速スワイプ右** | `P01/5 ★★★ / ...` | `KEYCODE_DPAD_DOWN`（単発） |
-| 10 | より詳しい解説は**タッチパッド長押し** | `P01/5 詳細 / (詳細テキスト)` | `KEYCODE_TV` |
-| 11 | さらに根拠・証拠は**もう一度長押し** | `P01/5 根拠 / (evidence テキスト)` | `KEYCODE_TV` |
-| 12 | 解説を閉じるには**ダブルタップ** | HUD が消える | `KEYCODE_ENTER` |
+| 2 | **タップ**（タッチパッド中央） | `P01/5 ★★★ / (概要テキスト) / 長押し 次段階` | `KEYCODE_DPAD_CENTER (23)` |
+| 3 | テキストが3行を超える場合 **スワイプ左** で続きを読む | 次の3行が表示 | `KEYCODE_DPAD_LEFT` |
+| 4 | 前に戻りたい場合 **スワイプ右** | 前の3行に戻る | `KEYCODE_DPAD_RIGHT` |
+| 5 | 詳細が欲しい場合 **長押し** | `P01/5 詳細 / (詳細テキスト)` | `KEYCODE_TV (170)` |
+| 6 | さらに根拠・参照ページは **もう一度長押し** | `P01/5 根拠 / 参照: P03,P05` | `KEYCODE_TV (170)` |
+| 7 | **次のページへ**: 速スワイプ左（素早くはじく） | `→ P02/5 / タップで解説` | `KEYCODE_DPAD_UP (19)` |
+| 8 | **前のページへ**: 速スワイプ右 | `← P01/5 / タップで解説` | `KEYCODE_DPAD_DOWN (20)` |
+| 9 | 解説を閉じる場合 **ダブルタップ** | HUD が消える | `KEYCODE_ENTER (66)` |
 
-> **スワイプ左 vs 速スワイプ左の違い**:
-> - 通常スワイプ（ゆっくり）= テキストを1スライス送る（テレプロンプター）
-> - 速スワイプ（素早くはじく）= ページ全体を変える
+> **速スワイプ（ページ送り）と通常スワイプ（テキスト送り）の違い**:
+> - 通常スワイプ（ゆっくり）= 現在ページ内のテキストを1スライス送る
+> - 速スワイプ（素早くはじく）= サーバーに POST /next-page を送り、ページ全体を変える
 >
-> これは Rokid 公式キーコード定義による仕様です（通常スワイプ = `KEYCODE_DPAD_LEFT/RIGHT`
-> 連続、速スワイプ = `KEYCODE_DPAD_UP/DOWN` 単発）。
+> ページ送りは**撮影を伴いません**。サーバー内のカウンターをインクリメントするだけです。
+
+> **速スワイプ方向と KeyCode の対応**（Rokid 公式仕様）:
+> - 速スワイプ左 = `KEYCODE_DPAD_UP (19)` → 次ページ
+> - 速スワイプ右 = `KEYCODE_DPAD_DOWN (20)` → 前ページ
+> 物理操作名とキーコード名が逆になっているのは公式仕様です。
 
 ---
 
@@ -53,7 +56,7 @@ API v1.6.0 で追加。登録済み文書を Rokid Glasses **単体で全ペー�
 
 ### POST `/v1/explain-sessions`
 
-セッションを作成します。文書は `status: ready`（finalize 済み）である必要があります。
+セッションを作成します。作成直後から `status: ready`（撮影フェーズなし）。
 
 ```bash
 curl -s -X POST http://127.0.0.1:8000/v1/explain-sessions \
@@ -67,91 +70,40 @@ curl -s -X POST http://127.0.0.1:8000/v1/explain-sessions \
 {
   "session_id": 1,
   "document_id": 1,
-  "status": "scanning",
-  "scanned_pages": [],
-  "total_pages": 5,
-  "operations": {
-    "scan_page": "button_single_press",
-    "commit_scan": "double_long_press"
-  }
-}
-```
-
-### POST `/v1/explain-sessions/{session_id}/scan`
-
-ページ画像を1枚スキャン登録します（`status: scanning` のときのみ有効）。
-
-```bash
-curl -s -X POST http://127.0.0.1:8000/v1/explain-sessions/1/scan \
-  -F image=@page0.png
-```
-
-レスポンス例（無音・2秒表示のスキャン ACK）:
-
-```json
-{
-  "scanned_pages": [0],
-  "scan_ack": {
-    "lines": ["P01 読取済 ✓", "1/5ページ完了", "続けて読み取り"],
-    "ttl_sec": 2
-  }
-}
-```
-
-- 同一ページを複数回送ってもべき等（スキャン済みリストは重複しない）。
-- `status: ready` 以降に呼ぶと `409 Conflict`。
-
-### POST `/v1/explain-sessions/{session_id}/commit`
-
-スキャン完了を宣言し、`status: ready` に遷移します（ダブル長押しに対応）。
-
-```bash
-curl -s -X POST http://127.0.0.1:8000/v1/explain-sessions/1/commit
-```
-
-レスポンス例:
-
-```json
-{
-  "session_id": 1,
   "status": "ready",
-  "scanned_pages": [0, 1, 2, 3, 4],
-  "commit_ack": {
-    "lines": ["読み取り完了", "5/5ページ", "タップで解説開始"],
-    "ttl_sec": 3
-  }
+  "current_page_index": 0,
+  "total_pages": 5
 }
 ```
-
-- 既に `ready` の場合も同じレスポンスを返します（べき等・ハードウェアバウンス対策）。
 
 ### GET `/v1/explain-sessions/{session_id}/explain`
 
-指定ページの解説 HUD を取得します（`status: ready` または `explaining` のみ有効）。
+**現在のページ**（`current_page_index`）の解説 HUD を取得します。画像送信不要。
 
 **クエリパラメータ:**
 
 | パラメータ | 型 | 既定 | 説明 |
 |---|---|---|---|
-| `page_index` | int | 必須 | 解説するページ番号（0始まり） |
 | `stage` | string | `overview` | 解説段階（`overview` / `detail` / `evidence`） |
 | `view_page` | int | `0` | テキストスライスのページ番号（テレプロンプター用） |
 
 ```bash
-# 概要（既定）
-curl -s 'http://127.0.0.1:8000/v1/explain-sessions/1/explain?page_index=0'
+# 概要（既定）— page_index 指定不要
+curl -s 'http://127.0.0.1:8000/v1/explain-sessions/1/explain'
 
 # 詳細段階
-curl -s 'http://127.0.0.1:8000/v1/explain-sessions/1/explain?page_index=0&stage=detail'
+curl -s 'http://127.0.0.1:8000/v1/explain-sessions/1/explain?stage=detail'
 
 # テキストの2ページ目
-curl -s 'http://127.0.0.1:8000/v1/explain-sessions/1/explain?page_index=0&view_page=1'
+curl -s 'http://127.0.0.1:8000/v1/explain-sessions/1/explain?view_page=1'
 ```
 
 レスポンス例:
 
 ```json
 {
+  "current_page_index": 0,
+  "total_doc_pages": 5,
   "glasses_view": {
     "stage": "overview",
     "lines": ["P01/5 ★★★", "設計書の概要テキスト", "章構成の説明"],
@@ -162,20 +114,44 @@ curl -s 'http://127.0.0.1:8000/v1/explain-sessions/1/explain?page_index=0&view_p
       "operations": {
         "next_view_page": "swipe_left",
         "prev_view_page": "swipe_right",
+        "next_stage": "long_press",
         "next_doc_page": "fast_swipe_left",
-        "prev_doc_page": "fast_swipe_right",
-        "next_stage": "swipe_down",
-        "close": "double_tap"
+        "prev_doc_page": "fast_swipe_right"
       }
     }
   }
 }
 ```
 
-- `status: scanning` のセッションに呼ぶと `409 Conflict`。
-- 存在しない `page_index` は `404 Not Found`。
-- 無効な `stage` 値は `400 Bad Request`。
-- 初回呼び出し時に `status` が `explaining` に遷移します。
+### POST `/v1/explain-sessions/{session_id}/next-page`
+
+`current_page_index` を +1 します（撮影なし）。最終ページでは変化しません。
+
+```bash
+curl -s -X POST http://127.0.0.1:8000/v1/explain-sessions/1/next-page
+```
+
+レスポンス例:
+
+```json
+{
+  "current_page_index": 1,
+  "total_pages": 5,
+  "at_last": false,
+  "nav_ack": {
+    "lines": ["→ P02/5", "タップで解説"],
+    "ttl_sec": 1.5
+  }
+}
+```
+
+### POST `/v1/explain-sessions/{session_id}/prev-page`
+
+`current_page_index` を -1 します（撮影なし）。先頭ページでは変化しません。
+
+```bash
+curl -s -X POST http://127.0.0.1:8000/v1/explain-sessions/1/prev-page
+```
 
 ### GET `/v1/explain-sessions/{session_id}/history`
 
@@ -183,24 +159,6 @@ curl -s 'http://127.0.0.1:8000/v1/explain-sessions/1/explain?page_index=0&view_p
 
 ```bash
 curl -s http://127.0.0.1:8000/v1/explain-sessions/1/history
-```
-
-レスポンス例:
-
-```json
-{
-  "session_id": 1,
-  "document_id": 1,
-  "status": "explaining",
-  "explained_views": [
-    {
-      "page_index": 0,
-      "stage": "overview",
-      "verdict": "HIT",
-      "hud_lines": ["P01/5 ★★★", "...", "..."]
-    }
-  ]
-}
 ```
 
 ---
@@ -211,18 +169,39 @@ curl -s http://127.0.0.1:8000/v1/explain-sessions/1/history
 POST /explain-sessions
         │
         ▼
-   [scanning]  ←── POST /scan（ページごとに繰り返す）
-        │
-   POST /commit（ダブル長押し）
-        │
-        ▼
-     [ready]  ←── POST /commit（べき等：再送しても safe）
+     [ready]  ← 作成直後から解説可能（スキャンフェーズなし）
         │
    GET /explain（タップ）
         │
         ▼
   [explaining]  ←── GET /explain（繰り返し閲覧）
+                ←── POST /next-page / /prev-page（ページ移動、撮影なし）
 ```
+
+---
+
+## ページナビゲーション詳細
+
+```
+[P01]──fast_swipe_left──▶[P02]──fast_swipe_left──▶[P03]  ...  [P05]
+      ◀──fast_swipe_right──     ◀──fast_swipe_right──
+
+各ページ内:
+  tap          → GET /explain?stage=overview
+  long_press   → GET /explain?stage=detail
+  long_press×2 → GET /explain?stage=evidence
+  swipe_left   → GET /explain?view_page=N+1  (テキスト送り)
+  swipe_right  → GET /explain?view_page=N-1  (テキスト戻し)
+```
+
+---
+
+## 廃止されたエンドポイント（v1.6→v1.7）
+
+| 旧エンドポイント | 廃止理由 | 代替 |
+|---|---|---|
+| `POST /scan` | 画像アップロードによるpHash照合が不要に | `POST /next-page` / `POST /prev-page` |
+| `POST /commit` | scaningフェーズ自体がなくなったため | セッション作成直後から `status=ready` |
 
 ---
 
@@ -237,26 +216,22 @@ POST /explain-sessions
 | `openai` | OpenAI GPT-4o（要 API キー `OPENAI_API_KEY`） |
 
 ```bash
-# Gemini に切り替えて起動
 ROKID_EXPLAINER=gemini GOOGLE_API_KEY=your_key uvicorn app.main:app --port 8000
 ```
-
-`GET /v1/version` の `explainers` リストでアクティブなアダプタと `offline` フラグを確認できます。
 
 ---
 
 ## テスト（オフライン・クレデンシャル不要）
 
 ```bash
-pytest tests/test_explain_api.py -v
+pytest tests/test_explain_sessions.py -v
 ```
-
-7クラス・22テストケース。外部 API・クレデンシャル不要でローカル完結。
 
 ---
 
 ## 制限・注意事項
 
-- Explainer がローカルプレースホルダの場合、解説テキストはダミーです（実際のドキュメント内容を解析しません）。実運用では `ROKID_EXPLAINER` を Gemini/OpenAI 等に切り替えてください。
-- スキャンフェーズで送った画像は照合用途です。解説の質はページ登録時の `ocr_text` の精度に依存します。
+- Explainer がローカルプレースホルダの場合、解説テキストはダミーです。実運用では `ROKID_EXPLAINER` を Gemini/OpenAI 等に切り替えてください。
+- 解説の質はページ登録時の `ocr_text` の精度に依存します。
 - 認証・マルチテナント・並行書き込み制御は未実装（MVP のため）。
+- `current_page_index` はサーバー側でクランプ処理されます（0以下・総ページ数以上にはなりません）。
