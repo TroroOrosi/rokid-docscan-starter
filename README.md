@@ -33,22 +33,30 @@ rokid-docscan-starter/
 │   ├── main.py        # FastAPI エンドポイント
 │   ├── matching.py    # pHash / hamming / OCR-MD5 / スコアリング
 │   ├── hud.py         # 3行 HUD ペイロード生成
+│   ├── glasses_view.py# グラス表示ビルダー（explain-sessions 用）
 │   ├── summarize.py   # 要約シム（analyzer に委譲）
-│   ├── version.py     # API/matcher/HUD/analyzer の契約バージョン
+│   ├── explainer.py   # Explainer ポート（ExplainRequest / ExplainResult / ABC）
+│   ├── version.py     # API/matcher/HUD/analyzer/explainer の契約バージョン
 │   ├── analyzers/     # プロバイダ非依存の解析ポート + レジストリ
 │   │   ├── base.py            # Analyzer インターフェース
 │   │   ├── registry.py        # モデルルーティング（local/cloud 差替点）
 │   │   └── local_placeholder.py  # オフライン既定（creds不要）
-│   ├── db.py          # sqlite3 ストレージ
+│   ├── explainers/    # Explainer ポート + レジストリ（explain-sessions 用）
+│   │   ├── local_placeholder.py  # オフラインのローカル実装
+│   │   └── registry.py           # ROKID_EXPLAINER env var による差替
+│   ├── db.py          # sqlite3 ストレージ（explain_sessions / explain_views テーブル含む）
 │   └── config.py      # データ保存先（ROKID_DATA_DIR で上書き可）
-├── tests/             # pytest（照合 + API + バージョン + レジストリ）
+├── tests/             # pytest（照合 + API + バージョン + レジストリ + explain-sessions）
 ├── scripts/
 │   ├── make_sample_pages.py  # curl 用サンプル画像生成
 │   └── evaluate.py           # 照合評価 → JSON レポート
 ├── docs/
 │   ├── implementation-notes.md
-│   ├── user-operation-guide.md     # ユーザー操作 / 自動化 / 設計判断
-│   └── future-proof-architecture.md# 将来対応アーキテクチャ
+│   ├── user-operation-guide.md      # ユーザー操作 / 自動化 / 設計判断
+│   ├── future-proof-architecture.md # 将来対応アーキテクチャ
+│   ├── explain-sessions.md          # explain-sessions 詳細仕様・curl 例 ★新規
+│   ├── glasses-ux-contract.md       # グラス UX 契約（操作・HUD・無音・無フラッシュ）
+│   └── exam-solver-architecture.md  # 解答モードアーキテクチャ
 ├── data/images/       # 画像保存先（実行時に自動生成）
 ├── requirements.txt
 ├── Dockerfile
@@ -85,7 +93,8 @@ pytest -q
 
 照合ロジック（pHash 決定性 / ハミング距離 / OCR-MD5 正規化 / スコアリング /
 HIT・LOW CONF・NO PAGE 判定）、API の登録〜finalize〜照合フロー、
-バージョンメタデータ、analyzer レジストリを、PIL で生成した合成画像で検証します。
+バージョンメタデータ、analyzer レジストリ、explain-sessions フルフローを、
+PIL で生成した合成画像で検証します（外部クレデンシャル不要・オフライン完結）。
 
 ## 評価（実サンプル撮影後の検証に使用）
 
@@ -235,6 +244,33 @@ curl -s -X POST http://127.0.0.1:8000/v1/match \
 実機 SDK（公式 Rokid Glasses SDK / CXR 系 / Rizon / Agent Store など）の
 具体的な差し込み箇所は [`docs/implementation-notes.md`](docs/implementation-notes.md)
 を参照してください。
+
+---
+
+## 資料解説モード（explain-sessions / グラス単体・無音 UX）
+
+API v1.6.0 で追加。登録済み文書を**グラス単体で全ページ読み取り → 解説を HUD に段階表示**する機能です。
+
+```
+[scanning]  各ページをボタン1回で読み取り
+               HUD: 「P02 読取済 ✓  (2/5ページ完了)」（2秒後消去）
+
+  ダブル長押し（Back ボタン長押し×2）
+               HUD: 「読み取り完了 / 5/5ページ / タップで解説開始」
+      ↓
+[ready]     タップ（TP-単击 = KEYCODE_DPAD_CENTER）
+               HUD: 「P01/5 ★★★ / (概要テキスト) / ← 次ページ  ↓ 詳しく」
+      ↓
+[explaining]
+  TP-左滑（スワイプ左）  → 次テキストスライス（テレプロンプター）
+  TP-右滑（スワイプ右）  → 前テキストスライス
+  TP-快速左滑（速スワイプ左）→ 次ページ（view_page+1）
+  TP-快速右滑（速スワイプ右）→ 前ページ（view_page-1）
+  TP-長押し             → 次の解説段階（overview→detail→evidence）
+```
+
+詳細な仕様・curl 例・操作マッピング表は
+[docs/explain-sessions.md](docs/explain-sessions.md) を参照。
 
 ---
 
