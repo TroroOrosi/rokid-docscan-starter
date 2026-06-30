@@ -35,6 +35,7 @@ from .glasses_view import (
     build_glasses_view,
     build_locked_view,
     build_page_nav_ack,
+    build_scan_ack,
 )
 from .hud import build_hud
 from .layout import parse_layout, primary_question
@@ -178,7 +179,15 @@ async def add_page(
     page_index: int = Form(...),
     image: UploadFile = File(...),
     ocr_text: str | None = Form(None),
+    total_pages: int | None = Form(None),
 ) -> dict:
+    """Upload one page of a document.
+
+    Returns a `scan_ack` HUD payload so the glasses can show real-time
+    scan progress (e.g. '3/5ページ完了') after every page capture.
+    Pass `total_pages` (the expected total) from the client to enable
+    the completion hint ('完了: ダブル長押し') on the final page.
+    """
     conn = db.connect()
     try:
         _doc_or_404(conn, document_id)
@@ -206,6 +215,17 @@ async def add_page(
                 detail=f"page_index {page_index} already exists",
             )
 
+        # Count scanned pages so far (including the one just inserted).
+        scanned_count = conn.execute(
+            "SELECT COUNT(*) FROM pages WHERE document_id = ?", (document_id,)
+        ).fetchone()[0]
+        effective_total = total_pages if total_pages and total_pages > 0 else scanned_count
+        ack = build_scan_ack(
+            page_index=page_index,
+            scanned_count=scanned_count,
+            total_pages=effective_total,
+        )
+
         return {
             "page_id": cur.lastrowid,
             "document_id": document_id,
@@ -213,6 +233,7 @@ async def add_page(
             "phash": ph,
             "ocr_md5": omd5,
             "image_path": str(fpath),
+            "scan_ack": ack,
         }
     finally:
         conn.close()
@@ -672,13 +693,13 @@ def get_exam_session(session_id: int) -> dict:
 # is currently being viewed via current_page_index.
 #
 # UX flow (button-only, silent, no-camera, glasses-standalone):
-#   1. POST /v1/explain-sessions           → create, status=ready, page=0
-#   2. GET  …/{id}/explain                 → explanation for current page
-#      POST …/{id}/next-page               → advance page counter (+1)
-#      POST …/{id}/prev-page               → go back one page (-1)
-#      GET  …/{id}/explain?stage=detail    → detail stage for same page
-#      GET  …/{id}/explain?view_page=1     → teleprompter next slice
-#   3. GET  …/{id}/history                 → viewed page list
+#   1. POST /v1/explain-sessions           -> create, status=ready, page=0
+#   2. GET  .../{id}/explain               -> explanation for current page
+#      POST .../{id}/next-page             -> advance page counter (+1)
+#      POST .../{id}/prev-page             -> go back one page (-1)
+#      GET  .../{id}/explain?stage=detail  -> detail stage for same page
+#      GET  .../{id}/explain?view_page=1   -> teleprompter next slice
+#   3. GET  .../{id}/history               -> viewed page list
 # ---------------------------------------------------------------------------
 
 class CreateExplainSession(BaseModel):
@@ -794,12 +815,10 @@ def explain_page(
     """Return the explanation HUD for the session's current page.
 
     No page_index parameter — the server uses current_page_index, which is
-    updated by POST /next-page and /prev-page.  This mirrors the Rokid
-    'object-in-view explanation' pattern: the user sees what is in front of
-    them; the app explains it without a shutter press.
+    updated by POST /next-page and /prev-page.
 
     Navigation within a page:
-      - stage     : overview | detail | evidence  (long-press / double long-press)
+      - stage     : overview | detail | evidence  (long-press)
       - view_page : 0-based teleprompter slice    (swipe_left / swipe_right)
     """
     if stage not in EXPLAIN_STAGES:

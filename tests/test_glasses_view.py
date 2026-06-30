@@ -10,6 +10,14 @@ def _sol(**kw):
 
 
 def test_view_has_at_most_three_lines():
+    """Each page in the paginated view must have <= _MAX_LINES (3) lines.
+
+    Previously this test assumed server-side 24-char splitting would produce
+    multiple physical lines per logical line.  Since _wrap() no longer splits
+    on character count (client renderer is responsible for reflow), each
+    logical line stays as one element.  The invariant is still that every
+    *page* returned by _paginate() contains at most _MAX_LINES entries.
+    """
     for stage in STAGES:
         v = build_glasses_view(_sol(), stage=stage)
         assert len(v["lines"]) <= 3
@@ -23,13 +31,20 @@ def test_view_has_no_audio_or_animation_fields():
 
 
 def test_long_text_is_paginated():
-    long_rationale = "あ" * 200
-    v0 = build_glasses_view(_sol(rationale=long_rationale), stage="rationale", page=0)
+    """Pagination is driven by the number of logical lines, not char count.
+
+    _wrap() no longer splits a single long string into multiple lines;
+    it returns the string as-is (one element).  Pagination to total_pages > 1
+    therefore requires that _stage_lines() produces more than _MAX_LINES (3)
+    logical lines.  The 'solution' stage returns [header] + solution_steps,
+    so passing many steps guarantees multi-page output.
+    """
+    many_steps = [f"手順{i}" for i in range(10)]  # 10 steps -> 11 lines -> 4 pages
+    sol = _sol(solution_steps=many_steps)
+    v0 = build_glasses_view(sol, stage="solution", page=0)
     assert v0["total_pages"] > 1
     assert v0["nav"]["next"] == 1
-    last = build_glasses_view(
-        _sol(rationale=long_rationale), stage="rationale", page=v0["total_pages"] - 1
-    )
+    last = build_glasses_view(sol, stage="solution", page=v0["total_pages"] - 1)
     assert last["nav"]["next"] is None
 
 
