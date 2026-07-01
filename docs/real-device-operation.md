@@ -93,12 +93,17 @@ POST /v1/match (document_id, image, fast_ocr_text) → HUD: PAGE n/N / LOW_CONF 
 ### 4-B. 解答（/v1/exam-sessions）
 ```
 POST /v1/exam-sessions {mode:"study"}                → session_id
-Back-単 で問題撮影 → POST .../questions (image,[ocr_text])
+Back-単 で問題撮影 → POST .../questions (image,[ocr_text])  ← 用紙画像を保存＋科目自動判定
 TP-単击(tap, KEYCODE_DPAD_CENTER 23) → POST .../{qid}/solve → 「答え: X ★★★」
 TP-長按(long_press, KEYCODE_TV 170)  → GET .../view?stage=solution→rationale→caution
 TP-左/右滑(swipe, 21/22)             → テキストページ送り
 ```
-- `mode:"real"` は `ROKID_ALLOW_REAL_EXAM_SOLVE=1` が無い限りロック（解答非表示）。
+- **用紙画像で解く（vision）**：実アダプタ（`claude`/`openai`/`gemini`）を有効化すると、
+  `solve` は保存済みの**ページ画像をモデルへ添付**し、図/数式/表/選択肢を直接読んで解答します
+  （OCR テキストは補助、教科別プロンプト）。**画像はクラウドへ送信**されるため、実 AI・鍵設定時
+  のみ作動（未設定/失敗はローカルへフォールバック）。
+- 科目は撮影時に自動判定（共通テスト準拠フル16教科）。`mode:"real"` は
+  `ROKID_ALLOW_REAL_EXAM_SOLVE=1` が無い限りロック（解答非表示）。
 
 ### 4-C. 資料解説（/v1/explain-sessions、撮影なし）
 ```

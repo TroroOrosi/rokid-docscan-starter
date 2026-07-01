@@ -541,6 +541,7 @@ def solve_question(session_id: int, question_id: int) -> dict:
             choices=json.loads(q["choices_json"] or "[]"),
             subject=q["subject"],
             context=retrieved["context"] or None,
+            image_path=q["image_path"],
         )
         result, solver = solve_with_fallback(question=question)
         served_by = result.extras.get("served_by", solver.name)

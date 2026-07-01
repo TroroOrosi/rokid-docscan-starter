@@ -81,7 +81,7 @@
 | S14 | 解答 HUD（段階×テレプロンプター） | `app/glasses_view.py: build_glasses_view` |
 | S15 | 解説 HUD（overview/detail/evidence×テレプロンプター） | `app/glasses_view.py: build_explain_view` |
 | S16 | 問題構造解析（設問番号/本文/選択肢/解答欄box） | `app/layout.py: parse_layout` |
-| S17 | 科目自動推定 | `app/subjects.py: detect_subject` |
+| S17 | 科目自動推定（共通テスト準拠フル16教科） | `app/subjects.py: detect_subject` |
 | S18 | メディア抽出（数式/図/グラフ/表） | `app/extractors/` |
 | S19 | RAG による根拠ページ検索 | `app/retrieval.py: retrieve_context` |
 

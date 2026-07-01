@@ -25,6 +25,7 @@ has a sensible default; OpenAI/Gemini require it be set to a current model id).
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
@@ -109,19 +110,24 @@ class LLMClient:
         sdk = _build_sdk(provider)
         return cls(sdk, provider=provider, model=model, max_tokens=max_tokens)
 
-    def complete(self, *, system: str, prompt: str) -> str:
-        """Return the model's single-turn text response for the provider."""
+    def complete(self, *, system: str, prompt: str, image: bytes | None = None) -> str:
+        """Return the model's single-turn text response for the provider.
+
+        When ``image`` (raw bytes) is supplied, it is attached so a vision-capable
+        model can read figures / equations / tables directly (used by the exam
+        solver to answer from the scanned page, not just the OCR text).
+        """
         if self.provider == "anthropic":
-            return _text_anthropic(self._sdk, self.model, self.max_tokens, system, prompt)
+            return _text_anthropic(self._sdk, self.model, self.max_tokens, system, prompt, image)
         if self.provider == "openai":
-            return _text_openai(self._sdk, self.model, self.max_tokens, system, prompt)
+            return _text_openai(self._sdk, self.model, self.max_tokens, system, prompt, image)
         if self.provider == "gemini":
-            return _text_gemini(self._sdk, self.model, self.max_tokens, system, prompt)
+            return _text_gemini(self._sdk, self.model, self.max_tokens, system, prompt, image)
         raise LLMConfigError(f"unknown provider: {self.provider}")
 
-    def complete_json(self, *, system: str, prompt: str) -> dict:
+    def complete_json(self, *, system: str, prompt: str, image: bytes | None = None) -> dict:
         """Call the model and parse its reply as a JSON object (tolerant)."""
-        return extract_json(self.complete(system=system, prompt=prompt))
+        return extract_json(self.complete(system=system, prompt=prompt, image=image))
 
 
 # --- provider SDK construction (lazy) ---------------------------------------
@@ -151,12 +157,20 @@ def _build_sdk(provider: str):
 
 # --- provider response extraction -------------------------------------------
 
-def _text_anthropic(sdk, model, max_tokens, system, prompt) -> str:
+def _text_anthropic(sdk, model, max_tokens, system, prompt, image=None) -> str:
+    if image is not None:
+        content = [
+            {"type": "image", "source": {
+                "type": "base64", "media_type": _media_type(image), "data": _b64(image)}},
+            {"type": "text", "text": prompt},
+        ]
+    else:
+        content = prompt
     msg = sdk.messages.create(
         model=model,
         max_tokens=max_tokens,
         system=system,
-        messages=[{"role": "user", "content": prompt}],
+        messages=[{"role": "user", "content": content}],
     )
     parts = [
         getattr(b, "text", "")
@@ -166,28 +180,60 @@ def _text_anthropic(sdk, model, max_tokens, system, prompt) -> str:
     return "".join(parts).strip()
 
 
-def _text_openai(sdk, model, max_tokens, system, prompt) -> str:
+def _text_openai(sdk, model, max_tokens, system, prompt, image=None) -> str:
+    if image is not None:
+        user_content = [
+            {"type": "text", "text": prompt},
+            {"type": "image_url", "image_url": {
+                "url": f"data:{_media_type(image)};base64,{_b64(image)}"}},
+        ]
+    else:
+        user_content = prompt
     resp = sdk.chat.completions.create(
         model=model,
         max_tokens=max_tokens,
         messages=[
             {"role": "system", "content": system},
-            {"role": "user", "content": prompt},
+            {"role": "user", "content": user_content},
         ],
     )
     return (resp.choices[0].message.content or "").strip()
 
 
-def _text_gemini(sdk, model, max_tokens, system, prompt) -> str:
+def _text_gemini(sdk, model, max_tokens, system, prompt, image=None) -> str:
+    if image is not None:
+        contents = [
+            {"inline_data": {"mime_type": _media_type(image), "data": _b64(image)}},
+            {"text": prompt},
+        ]
+    else:
+        contents = prompt
     resp = sdk.models.generate_content(
         model=model,
-        contents=prompt,
+        contents=contents,
         config={"system_instruction": system, "max_output_tokens": max_tokens},
     )
     return (getattr(resp, "text", "") or "").strip()
 
 
 # --- helpers ----------------------------------------------------------------
+
+def _b64(image: bytes) -> str:
+    return base64.standard_b64encode(image).decode("ascii")
+
+
+def _media_type(image: bytes) -> str:
+    """Best-effort image MIME from magic bytes (saved pages are PNG)."""
+    if image[:3] == b"\xff\xd8\xff":
+        return "image/jpeg"
+    if image[:8] == b"\x89PNG\r\n\x1a\n":
+        return "image/png"
+    if image[:6] in (b"GIF87a", b"GIF89a"):
+        return "image/gif"
+    if image[:4] == b"RIFF" and image[8:12] == b"WEBP":
+        return "image/webp"
+    return "image/png"
+
 
 def extract_json(text: str) -> dict:
     """Parse the first JSON object found in ``text`` (tolerant of fences/prose)."""

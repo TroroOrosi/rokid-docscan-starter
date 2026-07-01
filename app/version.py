@@ -25,7 +25,12 @@ from __future__ import annotations
 #        /v1/settings now publishes an `input` KeyCode contract (overridable via
 #        ROKID_KEYMAP); optional bearer auth (ROKID_API_KEY). API_VERSION stays
 #        1.6.0 (envelope unchanged; /v1/settings gains an additive block).
-APP_VERSION = "0.5.0"
+# 0.6.0: exam realism — subject detection expanded to the full 共通テスト-aligned
+#        subject set (app/subjects.py), and the solver answers from the scanned
+#        PAGE IMAGE (vision) with subject-tailored prompts. SOLVER_API_VERSION
+#        -> 1.1.0 (Question gained the optional image_path field). API_VERSION
+#        stays 1.6.0 (solve response shape unchanged).
+APP_VERSION = "0.6.0"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.
@@ -51,7 +56,9 @@ HUD_CONTRACT_VERSION = "1.0.0"
 ANALYZER_API_VERSION = "1.0.0"
 
 # Solver plugin interface (provider-agnostic question answering).
-SOLVER_API_VERSION = "1.0.0"
+# 1.1.0: Question gained the optional `image_path` field so vision-capable
+#        solvers can answer from the scanned page image (additive/back-compat).
+SOLVER_API_VERSION = "1.1.0"
 
 # Media-extractor plugin interface (formula/figure/graph/table).
 EXTRACTOR_API_VERSION = "1.0.0"

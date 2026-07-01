@@ -42,7 +42,7 @@ rokid-docscan-starter/
 │   ├── glasses_view.py# グラス表示ビルダー（exam / explain 用・無音契約）
 │   ├── overlay.py     # 解答欄オーバーレイ（2D画像アンカー）
 │   ├── layout.py      # 設問構造解析（設問番号/本文/選択肢/解答欄box）
-│   ├── subjects.py    # 科目推定（数学/英語/古文/物理/化学/歴史/現代文）
+│   ├── subjects.py    # 科目推定（共通テスト準拠フル16教科：現代文/古文/漢文/数学/英語/物理/化学/生物/地学/世界史/日本史/地理/倫理/政治経済/現代社会/情報）
 │   ├── retrieval.py   # RAG 横断検索（既存 documents/pages → 根拠）
 │   ├── summarize.py   # 要約シム（analyzer に委譲）
 │   ├── explainer.py   # Explainer ポート（ExplainRequest / ExplainResult / ABC）

@@ -132,3 +132,42 @@ def test_default_models():
     assert DEFAULT_MODELS["anthropic"] == "claude-opus-4-8"
     assert DEFAULT_MODELS["openai"] is None
     assert DEFAULT_MODELS["gemini"] is None
+
+
+# --- vision: image attachment per provider ----------------------------------
+
+_PNG = b"\x89PNG\r\n\x1a\n" + b"payload"
+_JPEG = b"\xff\xd8\xff" + b"payload"
+
+
+def test_anthropic_attaches_image():
+    sdk = _anthropic_sdk("ok")
+    LLMClient(sdk, provider="anthropic", model="m").complete(system="s", prompt="p", image=_PNG)
+    content = sdk.calls[0]["messages"][0]["content"]
+    assert isinstance(content, list)
+    kinds = [b["type"] for b in content]
+    assert "image" in kinds and "text" in kinds
+    img = next(b for b in content if b["type"] == "image")
+    assert img["source"]["media_type"] == "image/png"
+
+
+def test_openai_attaches_image_as_data_url():
+    sdk = _openai_sdk("ok")
+    LLMClient(sdk, provider="openai", model="m").complete(system="s", prompt="p", image=_JPEG)
+    content = sdk.calls[0]["messages"][1]["content"]
+    url = next(b for b in content if b["type"] == "image_url")["image_url"]["url"]
+    assert url.startswith("data:image/jpeg;base64,")
+
+
+def test_gemini_attaches_inline_image():
+    sdk = _gemini_sdk("ok")
+    LLMClient(sdk, provider="gemini", model="m").complete(system="s", prompt="p", image=_PNG)
+    contents = sdk.calls[0]["contents"]
+    assert isinstance(contents, list)
+    assert any("inline_data" in part for part in contents)
+
+
+def test_no_image_stays_text_only():
+    sdk = _anthropic_sdk("ok")
+    LLMClient(sdk, provider="anthropic", model="m").complete(system="s", prompt="p")
+    assert sdk.calls[0]["messages"][0]["content"] == "p"

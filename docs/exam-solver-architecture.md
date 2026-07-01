@@ -17,7 +17,8 @@
 ## データフロー（Phase 2/3/4）
 
 - **add_question**: layout 解析後、図/表/グラフ/数式の手掛かりがあれば `extractors`（`get_extractor`）で `media` を生成し `questions.media_json` に保存・応答に同梱。
-- **solve**: `retrieval.retrieve_context(documents/pages)` で根拠 `context`/`evidence_pages` を取得→`Question(context=...)` に注入→`solve_with_fallback`（tier 順に試行し offline local へフォールバック、採用 tier=`served_by`）→`solutions` に `evidence_pages`/`served_by` 保存。応答に `served_by`・`evidence` を追加。
+- **solve**: `retrieval.retrieve_context(documents/pages)` で根拠 `context`/`evidence_pages` を取得→`Question(context=..., image_path=...)` に注入→`solve_with_fallback`（tier 順に試行し offline local へフォールバック、採用 tier=`served_by`）→`solutions` に `evidence_pages`/`served_by` 保存。応答に `served_by`・`evidence` を追加。
+  - **vision（用紙画像で解く）**: 実アダプタ（`claude`/`openai`/`gemini`）は `questions.image_path` の**ページ画像をモデルへ添付**し、図/数式/表/選択肢を直接読んで解答（OCR テキストは補助）。プロンプトは**教科別ガイダンス**付き（`app/solvers/claude.py` の `_SYSTEM` / `_subject_guidance`）。画像はクラウドへ送信されるため実 AI・鍵設定時のみ作動、未設定/失敗は local へフォールバック。`mode=real` ロックは不変。
 - **overlay**: `tracking:"2d_image_anchor"`・`fixed_ar:false`・`anchor_hint{page_number,box}` を機械可読化（6DoF 固定 AR は未対応＝ハード待ち）。
 - **reasoning**: `GET …/questions/{qid}/reasoning` で `raw_reasoning`＋`evidence`＋`served_by` を返す（HUD は短縮版のまま、`real` ロック準拠）。
 
@@ -25,11 +26,11 @@
 
 | モジュール | 役割 | 差込口 |
 |------------|------|--------|
-| `app/solvers/`（base/registry/local_placeholder/**claude**） | 問題解答ポート。既定はオフライン**プレースホルダ**（実際には解かない＝不正利用ガード）。`solve_with_fallback` で**二段フォールバック**。**実アダプタ `claude` 同梱** | `ROKID_SOLVER=claude`＋`ANTHROPIC_API_KEY` で実解答。`register_solver()` で他ベンダも追加可、`ROKID_SOLVER_TIERS` で tier 指定 |
-| `app/extractors/`（base/registry/local_placeholder/**claude**） | メディア抽出ポート（数式/図/グラフ/表）。既定はオフライン placeholder。**実アダプタ `claude` 同梱**（数式→LaTeX 等） | `ROKID_EXTRACTOR=claude` で実抽出。`register_extractor()` で他モデルも追加可 |
+| `app/solvers/`（base/registry/local_placeholder/**claude=LLMSolver**） | 問題解答ポート。既定はオフライン**プレースホルダ**（実際には解かない＝不正利用ガード）。`solve_with_fallback` で**二段フォールバック**。**実アダプタ claude/openai/gemini 同梱**（**vision：用紙画像を添付**＋教科別プロンプト） | `ROKID_SOLVER=claude\|openai\|gemini`＋各社 API キーで実解答。`ROKID_SOLVER_TIERS` で tier 指定 |
+| `app/extractors/`（base/registry/local_placeholder/**claude=LLMExtractor**） | メディア抽出ポート（数式/図/グラフ/表）。既定はオフライン placeholder。**実アダプタ claude/openai/gemini 同梱**（数式→LaTeX 等） | `ROKID_EXTRACTOR=claude\|openai\|gemini` で実抽出 |
 | `app/retrieval.py` | 既存 `documents/pages` を横断検索し根拠 `context`/`evidence` を供給（依存なしの lexical scorer） | `ROKID_ENABLE_EMBEDDING` で実 embedding 検索に差替（未接続時は lexical へフォールバック） |
 | `app/layout.py` | OCRテキスト→設問番号/本文/選択肢/図表/**解答欄box**（正規化座標） | 実レイアウト/ビジョンモデルが同構造を埋める |
-| `app/subjects.py` | 科目推定（数学/英語/古文/物理/化学/歴史/現代文） | 実分類器に差替 |
+| `app/subjects.py` | 科目推定（**共通テスト準拠フル**：現代文/古文/漢文/数学/英語/物理/化学/生物/地学/世界史/日本史/地理/倫理/政治経済/現代社会/情報） | 実分類器/VLM に差替 |
 | `app/glasses_view.py` | **無音・3行・段階×ページ送り**の HUD ペイロード（音/アニメ指示なし） | — |
 | `app/overlay.py` | 解答欄box＋短答/番号（2D画像アンカー、`tracking/fixed_ar/anchor_hint`） | 6DoF が整えば紙固定ARへ |
 
