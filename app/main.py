@@ -197,36 +197,53 @@ def create_document(payload: CreateDocument) -> dict:
 async def add_page(
     document_id: int,
     page_index: int = Form(...),
-    image: UploadFile = File(...),
+    image: UploadFile | None = File(None),
     ocr_text: str | None = Form(None),
     total_pages: int | None = Form(None),
 ) -> dict:
-    """Upload one page of a document.
+    """Record one page of a document — **camera-free by default**.
+
+    The Rokid-native flow does not photograph paper: the on-glass AI reads what
+    is in view and the client sends that page's *text* (``ocr_text``) here, so a
+    document can be remembered page-by-page without any image. Supplying an
+    ``image`` is optional (e.g. the phone companion may attach one); when present
+    it is stored and its pHash computed so legacy ``/v1/match`` still works.
 
     Returns a `scan_ack` HUD payload so the glasses can show real-time
-    scan progress (e.g. '3/5ページ完了') after every page capture.
-    Pass `total_pages` (the expected total) from the client to enable
-    the completion hint ('完了: ダブル長押し') on the final page.
+    progress (e.g. '3/5ページ完了') after every page. Pass `total_pages`
+    (the expected total) to enable the completion hint ('完了: ダブル長押し').
     """
+    has_image = image is not None and getattr(image, "filename", None)
+    if not has_image and not (ocr_text and ocr_text.strip()):
+        raise HTTPException(
+            status_code=400,
+            detail="a page needs an image or ocr_text (camera-free text page)",
+        )
     conn = db.connect()
     try:
         _doc_or_404(conn, document_id)
-        raw = await image.read()
-        img = _load_image(raw)
 
-        ph = phash_hex(img)
-        omd5 = _fallback_md5(ocr_md5(ocr_text), raw)
-
-        fname = f"{document_id}_{page_index}_{uuid.uuid4().hex[:8]}.png"
-        fpath: Path = IMAGE_DIR / fname
-        img.convert("RGB").save(fpath, format="PNG")
+        if has_image:
+            raw = await image.read()
+            img = _load_image(raw)
+            ph = phash_hex(img)
+            omd5 = _fallback_md5(ocr_md5(ocr_text), raw)
+            fname = f"{document_id}_{page_index}_{uuid.uuid4().hex[:8]}.png"
+            fpath: Path | None = IMAGE_DIR / fname
+            img.convert("RGB").save(fpath, format="PNG")
+            image_path = str(fpath)
+        else:
+            # Camera-free text page: no image, no pHash. ocr_md5 dedupes by text.
+            ph = ""
+            omd5 = ocr_md5(ocr_text) or hashlib.md5((ocr_text or "").encode()).hexdigest()
+            image_path = None
 
         try:
             cur = conn.execute(
                 """INSERT INTO pages
                    (document_id, page_index, image_path, phash, ocr_text, ocr_md5)
                    VALUES (?, ?, ?, ?, ?, ?)""",
-                (document_id, page_index, str(fpath), ph, ocr_text, omd5),
+                (document_id, page_index, image_path, ph, ocr_text, omd5),
             )
             conn.commit()
         except db.sqlite3.IntegrityError:
@@ -252,7 +269,7 @@ async def add_page(
             "page_index": page_index,
             "phash": ph,
             "ocr_md5": omd5,
-            "image_path": str(fpath),
+            "image_path": image_path,
             "scan_ack": ack,
         }
     finally:
@@ -392,10 +409,60 @@ class CreateExamSession(BaseModel):
     mode: str = "study"
     voice_enabled: bool = False
     subject_hint: str | None = None
+    # Document page-move型 exam (scan-free): bind to a finalized document and
+    # navigate its pages by button. exam_type 筆記(written) ⇄ リスニング(listening);
+    # answer_format マーク式(mark) ⇄ 記述式(written).
+    document_id: int | None = None
+    exam_type: str = "written"
+    answer_format: str = "mark"
+
+
+# Valid enum values for the document page-move exam.
+_EXAM_TYPES = {"written", "listening"}
+_ANSWER_FORMATS = {"mark", "written"}
+
+# Answer-format instruction folded into the solver context so a real model
+# answers in the format the exam expects (offline placeholder ignores it).
+_ANSWER_FORMAT_HINT = {
+    "mark": "解答はマーク式（選択肢の記号）で選び、根拠を簡潔に示してください。",
+    "written": "解答は記述式で、結論と要点の過程を簡潔に示してください。",
+}
 
 
 def _exam_session_or_404(conn, session_id: int):
     return _row_or_404(conn, "exam_sessions", session_id, "exam session not found")
+
+
+def _exam_total_pages(conn, doc_id: int | None) -> int:
+    if not doc_id:
+        return 0
+    return conn.execute(
+        "SELECT COUNT(*) FROM pages WHERE document_id = ?", (doc_id,)
+    ).fetchone()[0]
+
+
+def _exam_prompt_context(session, retrieved_context: str) -> str | None:
+    """Compose solver context for a document-page exam.
+
+    Folds in the answer-format hint and, in listening mode, the recorded audio's
+    transcript (the setting question itself is read live from the displayed
+    material). The scanned/OCR page text remains the primary body_text.
+    """
+    parts: list[str] = []
+    fmt_hint = _ANSWER_FORMAT_HINT.get(session["answer_format"], "")
+    if fmt_hint:
+        parts.append(fmt_hint)
+    if session["exam_type"] == "listening":
+        parts.append(
+            "これは英語リスニング問題です。設問は目の前の資料から読み取り、"
+            "下記の音声書き起こしを根拠に解答してください。"
+        )
+        transcript = (session["transcript"] or "").strip()
+        if transcript:
+            parts.append("【リスニング音声 書き起こし】\n" + transcript)
+    if retrieved_context:
+        parts.append("【参考資料】\n" + retrieved_context)
+    return "\n\n".join(p for p in parts if p) or None
 
 
 def _question_or_404(conn, session_id: int, question_id: int):
@@ -427,12 +494,28 @@ def _solution_from_row(row) -> "object":
 def create_exam_session(payload: CreateExamSession) -> dict:
     if payload.mode not in {"study", "mock", "real"}:
         raise HTTPException(status_code=400, detail="invalid mode")
+    if payload.exam_type not in _EXAM_TYPES:
+        raise HTTPException(status_code=400, detail=f"exam_type must be one of {_EXAM_TYPES}")
+    if payload.answer_format not in _ANSWER_FORMATS:
+        raise HTTPException(
+            status_code=400, detail=f"answer_format must be one of {_ANSWER_FORMATS}"
+        )
     conn = db.connect()
     try:
+        if payload.document_id is not None:
+            _doc_or_404(conn, payload.document_id)
         cur = conn.execute(
-            "INSERT INTO exam_sessions (mode, voice_enabled, subject_hint) "
-            "VALUES (?, ?, ?)",
-            (payload.mode, int(payload.voice_enabled), payload.subject_hint),
+            "INSERT INTO exam_sessions "
+            "(mode, voice_enabled, subject_hint, document_id, exam_type, answer_format) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                payload.mode,
+                int(payload.voice_enabled),
+                payload.subject_hint,
+                payload.document_id,
+                payload.exam_type,
+                payload.answer_format,
+            ),
         )
         conn.commit()
         return {
@@ -440,7 +523,13 @@ def create_exam_session(payload: CreateExamSession) -> dict:
             "mode": payload.mode,
             "voice_enabled": payload.voice_enabled,
             "subject_hint": payload.subject_hint,
+            "document_id": payload.document_id,
+            "exam_type": payload.exam_type,
+            "answer_format": payload.answer_format,
+            "current_page_index": 0,
+            "total_pages": _exam_total_pages(conn, payload.document_id),
             "status": "open",
+            "operations": OPERATION_CONTRACT,
             "api_version": version_info()["api_version"],
         }
     finally:
@@ -690,6 +779,12 @@ def get_exam_session(session_id: int) -> dict:
             "mode": session["mode"],
             "voice_enabled": bool(session["voice_enabled"]),
             "status": session["status"],
+            "document_id": session["document_id"],
+            "exam_type": session["exam_type"],
+            "answer_format": session["answer_format"],
+            "current_page_index": session["current_page_index"],
+            "total_pages": _exam_total_pages(conn, session["document_id"]),
+            "has_audio": bool(session["audio_path"]),
             "questions": [
                 {
                     "question_id": r["id"],
@@ -701,6 +796,315 @@ def get_exam_session(session_id: int) -> dict:
                 }
                 for r in rows
             ],
+        }
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Document page-move型 exam (scan-free, primary path): bind the session to a
+# finalized document, navigate its pages by button, and solve the CURRENT page.
+# No camera capture happens during interaction — the "全ページ読込完了" state is
+# declared by finalize; the glasses only move the page cursor and ask to solve.
+#   POST .../{id}/next-page | prev-page   move current_page_index (±1, clamped)
+#   GET  .../{id}/current                 inspect current page (no solve)
+#   POST .../{id}/solve-current           solve the current page's material
+#   POST .../{id}/audio                   listening: upload recording (+transcript)
+#   POST .../{id}/mode                    toggle 筆記(written) ⇄ リスニング(listening)
+# ---------------------------------------------------------------------------
+
+def _exam_page_row(conn, doc_id: int, page_index: int):
+    row = conn.execute(
+        "SELECT * FROM pages WHERE document_id = ? AND page_index = ?",
+        (doc_id, page_index),
+    ).fetchone()
+    if row is None:
+        raise HTTPException(
+            status_code=404, detail=f"page_index {page_index} not found in document"
+        )
+    return row
+
+
+def _require_document_exam(session):
+    if not session["document_id"]:
+        raise HTTPException(
+            status_code=400,
+            detail="this exam session is not bound to a document; "
+            "create it with a document_id to use page-move型 endpoints",
+        )
+    return session["document_id"]
+
+
+@app.post("/v1/exam-sessions/{session_id}/next-page")
+def exam_next_page(session_id: int) -> dict:
+    """Advance the current page index by 1 (fast_swipe_left). Clamped at last."""
+    conn = db.connect()
+    try:
+        session = _exam_session_or_404(conn, session_id)
+        doc_id = _require_document_exam(session)
+        total = _exam_total_pages(conn, doc_id)
+        new_idx = min(session["current_page_index"] + 1, max(total - 1, 0))
+        conn.execute(
+            "UPDATE exam_sessions SET current_page_index = ? WHERE id = ?",
+            (new_idx, session_id),
+        )
+        conn.commit()
+        return {
+            "session_id": session_id,
+            "current_page_index": new_idx,
+            "total_pages": total,
+            "at_last": new_idx >= total - 1,
+            "nav_ack": build_page_nav_ack(
+                page_index=new_idx, total_pages=total, direction="next"
+            ),
+        }
+    finally:
+        conn.close()
+
+
+@app.post("/v1/exam-sessions/{session_id}/prev-page")
+def exam_prev_page(session_id: int) -> dict:
+    """Move the current page index back by 1 (fast_swipe_right). Clamped at 0."""
+    conn = db.connect()
+    try:
+        session = _exam_session_or_404(conn, session_id)
+        doc_id = _require_document_exam(session)
+        total = _exam_total_pages(conn, doc_id)
+        new_idx = max(session["current_page_index"] - 1, 0)
+        conn.execute(
+            "UPDATE exam_sessions SET current_page_index = ? WHERE id = ?",
+            (new_idx, session_id),
+        )
+        conn.commit()
+        return {
+            "session_id": session_id,
+            "current_page_index": new_idx,
+            "total_pages": total,
+            "at_first": new_idx == 0,
+            "nav_ack": build_page_nav_ack(
+                page_index=new_idx, total_pages=total, direction="prev"
+            ),
+        }
+    finally:
+        conn.close()
+
+
+@app.get("/v1/exam-sessions/{session_id}/current")
+def exam_current_page(session_id: int) -> dict:
+    """Report the current page (subject + a short preview) without solving."""
+    conn = db.connect()
+    try:
+        session = _exam_session_or_404(conn, session_id)
+        doc_id = _require_document_exam(session)
+        page_index = session["current_page_index"]
+        page_row = _exam_page_row(conn, doc_id, page_index)
+        subject, subj_conf = detect_subject(page_row["ocr_text"])
+        preview = (page_row["ocr_text"] or page_row["summary"] or "").strip()[:80]
+        return {
+            "session_id": session_id,
+            "document_id": doc_id,
+            "current_page_index": page_index,
+            "total_pages": _exam_total_pages(conn, doc_id),
+            "exam_type": session["exam_type"],
+            "answer_format": session["answer_format"],
+            "subject": subject,
+            "subject_confidence": subj_conf,
+            "has_image": bool(page_row["image_path"]),
+            "preview": preview,
+        }
+    finally:
+        conn.close()
+
+
+@app.post("/v1/exam-sessions/{session_id}/solve-current")
+def exam_solve_current(session_id: int) -> dict:
+    """Solve the CURRENT page's material — no camera capture.
+
+    Builds a Question from the current page's text (and image, if the phone
+    companion attached one), the detected subject, RAG context, and — in
+    listening mode — the recorded audio's transcript, then runs the solver
+    fallback chain. Persists a question + solution so the staged /view and
+    /reasoning endpoints work exactly as for the upload flow.
+    """
+    conn = db.connect()
+    try:
+        session = _exam_session_or_404(conn, session_id)
+        doc_id = _require_document_exam(session)
+        page_index = session["current_page_index"]
+        page_row = _exam_page_row(conn, doc_id, page_index)
+
+        if session["mode"] == "real" and not config.ALLOW_REAL_EXAM_SOLVE:
+            return {
+                "session_id": session_id,
+                "current_page_index": page_index,
+                "locked": True,
+                "glasses_view": build_locked_view(),
+                "versions": version_info(),
+            }
+
+        ocr_text = page_row["ocr_text"]
+        subject, subj_conf = detect_subject(ocr_text)
+        retrieved = retrieve_context(conn, ocr_text)
+        context = _exam_prompt_context(session, retrieved["context"])
+
+        # Persist a question row for this page so /view and /reasoning work.
+        page_number = page_index + 1
+        qcur = conn.execute(
+            """INSERT INTO questions
+               (session_id, question_no, body_text, choices_json, subject,
+                read_conf, page_number, image_path)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                session_id,
+                None,
+                ocr_text or "",
+                json.dumps([], ensure_ascii=False),
+                subject,
+                round(min(1.0, 0.5 + subj_conf / 2), 3) if normalize_ocr_text(ocr_text) else 0.0,
+                page_number,
+                page_row["image_path"],
+            ),
+        )
+        question_id = qcur.lastrowid
+
+        question = Question(
+            body_text=ocr_text,
+            subject=subject,
+            context=context,
+            image_path=page_row["image_path"],
+        )
+        result, solver = solve_with_fallback(question=question)
+        served_by = result.extras.get("served_by", solver.name)
+        evidence_pages = result.evidence_pages or retrieved["evidence_pages"]
+        result.evidence_pages = evidence_pages
+
+        conn.execute(
+            """INSERT INTO solutions
+               (question_id, solver_name, answer, solution_steps_json, rationale,
+                cautions, answer_conf, rationale_conf, evidence_pages_json,
+                raw_reasoning, served_by)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                question_id,
+                solver.name,
+                result.answer,
+                json.dumps(result.solution_steps, ensure_ascii=False),
+                result.rationale,
+                result.cautions,
+                result.answer_confidence,
+                result.rationale_confidence,
+                json.dumps(evidence_pages),
+                result.raw_reasoning,
+                served_by,
+            ),
+        )
+        conn.commit()
+
+        view = build_glasses_view(
+            result,
+            stage="answer",
+            page_number=page_number,
+            voice_enabled=bool(session["voice_enabled"]),
+        )
+        return {
+            "session_id": session_id,
+            "question_id": question_id,
+            "document_id": doc_id,
+            "current_page_index": page_index,
+            "exam_type": session["exam_type"],
+            "answer_format": session["answer_format"],
+            "subject": result.subject or subject,
+            "solver": solver.info(),
+            "served_by": served_by,
+            "locked": False,
+            "glasses_view": view,
+            "overlay": build_overlay(result, answer_box=None, page_number=page_number),
+            "evidence": retrieved["hits"],
+            "versions": version_info(),
+        }
+    finally:
+        conn.close()
+
+
+class ExamMode(BaseModel):
+    exam_type: str
+
+
+@app.post("/v1/exam-sessions/{session_id}/mode")
+def exam_set_mode(session_id: int, payload: ExamMode) -> dict:
+    """Switch 筆記(written) ⇄ リスニング(listening). Doable from glasses or phone."""
+    if payload.exam_type not in _EXAM_TYPES:
+        raise HTTPException(status_code=400, detail=f"exam_type must be one of {_EXAM_TYPES}")
+    conn = db.connect()
+    try:
+        session = _exam_session_or_404(conn, session_id)
+        conn.execute(
+            "UPDATE exam_sessions SET exam_type = ? WHERE id = ?",
+            (payload.exam_type, session_id),
+        )
+        conn.commit()
+        return {
+            "session_id": session_id,
+            "exam_type": payload.exam_type,
+            "answer_format": session["answer_format"],
+            "mode_ack": {
+                "lines": [
+                    "モード切替",
+                    "リスニング" if payload.exam_type == "listening" else "筆記",
+                ],
+                "ttl_sec": 1.5,
+            },
+        }
+    finally:
+        conn.close()
+
+
+@app.post("/v1/exam-sessions/{session_id}/audio")
+async def exam_upload_audio(
+    session_id: int,
+    audio: UploadFile | None = File(None),
+    transcript: str | None = Form(None),
+) -> dict:
+    """Listening mode: record the audio on the spot and store its transcript.
+
+    Saves the uploaded recording to data/audio/ and transcribes it via the
+    configured ROKID_TRANSCRIBER (openai|gemini). With no transcriber (or on
+    failure/offline) the client-provided ``transcript`` is stored as-is, so
+    listening works without any ASR credential. Either ``audio`` or
+    ``transcript`` must be supplied.
+    """
+    from .transcribe import transcribe_audio
+
+    if (audio is None or not getattr(audio, "filename", None)) and not (
+        transcript and transcript.strip()
+    ):
+        raise HTTPException(status_code=400, detail="provide audio and/or transcript")
+    conn = db.connect()
+    try:
+        session = _exam_session_or_404(conn, session_id)
+
+        audio_path: str | None = None
+        if audio is not None and getattr(audio, "filename", None):
+            raw = await audio.read()
+            ext = Path(audio.filename).suffix or ".bin"
+            fname = f"audio_{session_id}_{uuid.uuid4().hex[:8]}{ext}"
+            config.AUDIO_DIR.mkdir(parents=True, exist_ok=True)
+            fpath = config.AUDIO_DIR / fname
+            fpath.write_bytes(raw)
+            audio_path = str(fpath)
+
+        text = transcribe_audio(audio_path, provided_transcript=transcript)
+        conn.execute(
+            "UPDATE exam_sessions SET audio_path = ?, transcript = ? WHERE id = ?",
+            (audio_path, text, session_id),
+        )
+        conn.commit()
+        return {
+            "session_id": session_id,
+            "exam_type": session["exam_type"],
+            "audio_stored": audio_path is not None,
+            "transcript": text,
+            "transcript_chars": len(text),
         }
     finally:
         conn.close()

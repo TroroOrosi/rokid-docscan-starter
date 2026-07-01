@@ -55,3 +55,25 @@ def test_input_contract_ignores_bad_keymap(tmp_path, monkeypatch):
     inp = c.get("/v1/settings").json()["input"]
     assert inp["gestures"]["tap"]["keycode"] == 23
     assert inp["overridden"] is False
+
+
+def test_input_contract_has_mode_and_record_gestures(tmp_path, monkeypatch):
+    # v0.7: mode-toggle and listening-record gestures are published so the
+    # glasses can bind them (no standard KeyCode -> delivered as Intent/custom).
+    c = _make_client(tmp_path, monkeypatch, ROKID_KEYMAP=None)
+    g = c.get("/v1/settings").json()["input"]["gestures"]
+    assert "back_long_press" in g
+    assert "two_finger_long_press" in g
+    assert g["back_long_press"]["keycode"] is None
+
+
+def test_operations_cover_document_exam_and_listening(tmp_path, monkeypatch):
+    c = _make_client(tmp_path, monkeypatch, ROKID_KEYMAP=None)
+    ops = c.get("/v1/settings").json()["operations"]
+    # Every scan-free operation is bound to a glasses gesture (phone-free).
+    assert ops["exam_next_page"] == "fast_swipe_left"
+    assert ops["exam_prev_page"] == "fast_swipe_right"
+    assert ops["exam_solve_current"] == "tap"
+    assert ops["exam_next_stage"] == "long_press"
+    assert ops["mode_toggle"] == "back_long_press"
+    assert ops["record_toggle"] == "two_finger_long_press"

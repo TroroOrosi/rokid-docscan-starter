@@ -63,9 +63,12 @@
 | **TP-快速右滑**（速スワイプ右） | `KEYCODE_DPAD_DOWN = 20`（単発） | 前ページへ（`POST /prev-page`） |
 | **TP-快速左滑**（速スワイプ左） | `KEYCODE_DPAD_UP = 19`（単発） | 次ページへ（`POST /next-page`） |
 | **Back-単**（戻るボタン） | `KEYCODE_BACK = 4` | 前の画面へ戻る |
-| **Back-長**（長押し） | Intent `homekey.longpress` | ランチャーへ（アプリ実装依存） |
+| **Back-長**（長押し） | Intent `homekey.longpress`（`back_long_press`） | **筆記 ⇄ リスニング 切替**（`POST /exam-sessions/{id}/mode`） |
+| **TP-双指長按**（二本指長押し） | 独自ジェスチャ（`two_finger_long_press`） | **リスニング録音の開始/停止**（`POST /exam-sessions/{id}/audio`） |
 
 > ⚠️ **スワイプ方向の注意**: 公式キーコード定義では、TP-快速左滑（速スワイプ左）が `KEYCODE_DPAD_UP`（上）、TP-快速右滑（速スワイプ右）が `KEYCODE_DPAD_DOWN`（下）に割り当てられています。方向名と物理操作が直感と逆に見えることがありますが、Rokid 公式仕様に従っています。クライアント実装時は必ず上記の KeyCode でリッスンしてください。
+>
+> `back_long_press` / `two_finger_long_press` は標準 KeyCode を持たないため、`input.gestures` では `keycode:null`（Intent/独自ジェスチャ）として公示します。機種で具体的な KeyCode を割り当てたい場合は `ROKID_KEYMAP` で上書きできます。**全操作がグラスのジェスチャに割当済みで、スマホは HTTP 中継のみ（画面不要）**。
 
 ---
 
@@ -100,7 +103,7 @@
 | ページ撮影スキャン | `POST /scan`（画像アップロード） | 撮影不要設計へ移行 |
 | 全ページ読取完了宣言 | `POST /commit`（ダブル長押し） | scanningフェーズ廃止 |
 
-### 解答モード（exam-sessions）
+### 解答モード（exam-sessions・設問1枚アップロード型）
 
 | 操作 | TP/ボタン | 音声ON時 |
 |------|-----------|----------|
@@ -110,6 +113,25 @@
 | 次テキストページ | TP-左滑 | 「次へ」 |
 | 前テキストページ | TP-右滑 | 「前へ」 |
 | 閉じる | TP-双击 | 「閉じる」 |
+
+### 解答モード（exam-sessions・文書ページ移動型 / 撮影レス・主経路 v1.7）
+
+> 全ページを撮影レスで登録・`finalize`（＝全ページ読込完了）してから、ページを移動して
+> **現在ページを解く**。カメラ撮影は一切発生せず、操作はグラス単独で完結。
+
+| 操作 | TP/ボタン | KeyCode / ジェスチャ | サーバ側処理 |
+|------|-----------|----------------------|-------------|
+| 次ページへ | TP-快速左滑 | `KEYCODE_DPAD_UP (19)` 単発 | `POST /exam-sessions/{id}/next-page` |
+| 前ページへ | TP-快速右滑 | `KEYCODE_DPAD_DOWN (20)` 単発 | `POST /exam-sessions/{id}/prev-page` |
+| 現在ページを解く | TP-単击 | `KEYCODE_DPAD_CENTER (23)` | `POST /exam-sessions/{id}/solve-current` |
+| 次の解説段階 | TP-長按 | `KEYCODE_TV (170)` | `GET …/questions/{qid}/view?stage=…` |
+| テキスト送り/戻し | TP-左/右滑 | `KEYCODE_DPAD_LEFT/RIGHT (21/22)` | `…/view?page=N±1`（テレプロンプター） |
+| 筆記 ⇄ リスニング切替 | Back-長按 | `back_long_press`（Intent） | `POST /exam-sessions/{id}/mode` |
+| リスニング録音 開始/停止 | TP-双指長按 | `two_finger_long_press`（独自） | `POST /exam-sessions/{id}/audio` |
+
+- `exam_type`＝`written`(筆記) / `listening`(リスニング)、`answer_format`＝`mark`(マーク) / `written`(記述)。
+- リスニングは音声を**その場で録音**し、設問は**目の前の資料から読取**（`solve-current` が書き起こしと資料を統合）。
+- これらの操作↔用途対応は `GET /v1/settings` の `operations` ブロック（`app/glasses_view.py` の `OPERATION_CONTRACT`）としても公示。
 
 ---
 

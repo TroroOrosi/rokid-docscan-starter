@@ -22,8 +22,9 @@ CREATE TABLE IF NOT EXISTS pages (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     document_id INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
     page_index  INTEGER NOT NULL,
-    image_path  TEXT NOT NULL,
-    phash       TEXT NOT NULL,
+    -- Nullable: camera-free text pages have no image (image_path/phash empty).
+    image_path  TEXT,
+    phash       TEXT NOT NULL DEFAULT '',
     ocr_text    TEXT,
     ocr_md5     TEXT,
     summary     TEXT,
@@ -39,6 +40,15 @@ CREATE TABLE IF NOT EXISTS exam_sessions (
     voice_enabled INTEGER NOT NULL DEFAULT 0,
     subject_hint  TEXT,
     status        TEXT NOT NULL DEFAULT 'open',
+    -- Scan-free document page-move型 exam (added v0.7): bind to a finalized
+    -- document and navigate pages by button (no camera). exam_type switches
+    -- 筆記(written) ⇄ リスニング(listening); answer_format = mark | written.
+    document_id        INTEGER REFERENCES documents(id) ON DELETE SET NULL,
+    exam_type          TEXT NOT NULL DEFAULT 'written',
+    answer_format      TEXT NOT NULL DEFAULT 'mark',
+    current_page_index INTEGER NOT NULL DEFAULT 0,
+    audio_path         TEXT,      -- listening: recorded audio (その場で録音)
+    transcript         TEXT,      -- listening: transcript (書き起こし or 与値)
     created_at    TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -122,10 +132,31 @@ def connect(db_path: Path | None = None) -> sqlite3.Connection:
     return conn
 
 
+# Columns added to exam_sessions after its initial release. `CREATE TABLE IF
+# NOT EXISTS` won't add columns to a pre-existing DB, so migrate them in.
+_EXAM_SESSION_MIGRATIONS = (
+    ("document_id", "INTEGER"),
+    ("exam_type", "TEXT NOT NULL DEFAULT 'written'"),
+    ("answer_format", "TEXT NOT NULL DEFAULT 'mark'"),
+    ("current_page_index", "INTEGER NOT NULL DEFAULT 0"),
+    ("audio_path", "TEXT"),
+    ("transcript", "TEXT"),
+)
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Add any missing exam_sessions columns on an existing database."""
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(exam_sessions)")}
+    for name, decl in _EXAM_SESSION_MIGRATIONS:
+        if name not in cols:
+            conn.execute(f"ALTER TABLE exam_sessions ADD COLUMN {name} {decl}")
+
+
 def init_db(db_path: Path | None = None) -> None:
     conn = connect(db_path)
     try:
         conn.executescript(_SCHEMA)
+        _migrate(conn)
         conn.commit()
     finally:
         conn.close()

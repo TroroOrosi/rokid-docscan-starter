@@ -1,4 +1,11 @@
-from app.glasses_view import STAGES, build_glasses_view, build_locked_view
+from app.explainer import ExplainResult
+from app.glasses_view import (
+    STAGES,
+    _split_sentences,
+    build_explain_view,
+    build_glasses_view,
+    build_locked_view,
+)
 from app.solvers import SolveResult
 
 
@@ -71,3 +78,34 @@ def test_locked_view_never_reveals_answer():
     v = build_locked_view()
     assert v["locked"] is True
     assert all("青" not in ln for ln in v["lines"])
+
+
+# --- Q1 supplement: long prose splits into sentences and paginates -----------
+
+def test_split_sentences_on_terminators():
+    parts = _split_sentences("第一文。第二文！第三文？")
+    assert parts == ["第一文。", "第二文！", "第三文？"]
+    # No terminator -> single line; empty -> empty list.
+    assert _split_sentences("見出しだけ") == ["見出しだけ"]
+    assert _split_sentences("") == []
+
+
+def test_long_rationale_paginates_by_sentence():
+    """A multi-sentence rationale becomes multiple 3-line teleprompter pages."""
+    rationale = "".join(f"根拠文{i}。" for i in range(8))  # 8 sentences
+    sol = _sol(rationale=rationale)
+    v0 = build_glasses_view(sol, stage="rationale", page=0)
+    assert v0["total_pages"] > 1
+    assert len(v0["lines"]) <= 3
+    last = build_glasses_view(sol, stage="rationale", page=v0["total_pages"] - 1)
+    assert last["nav"]["next"] is None
+
+
+def test_explain_detail_paginates_by_sentence():
+    """explain-mode long detail paginates into >1 view page (max 3 lines each)."""
+    detail = "".join(f"詳細文{i}。" for i in range(8))
+    result = ExplainResult(lines=["a", "b", "c"], detail=detail, confidence=0.7)
+    v0 = build_explain_view(result, stage="detail", view_page=0)
+    assert v0["total_view_pages"] > 1
+    assert len(v0["lines"]) <= 3
+    assert v0["nav"]["next_view_page"] == 1

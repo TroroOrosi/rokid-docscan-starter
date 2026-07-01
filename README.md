@@ -14,7 +14,11 @@ Rokid Glasses で撮影した紙資料を「文書」として登録し、後か
 - **グラス本体アプリ（CXR-L）とグラス本体 AI の接続**は
   [`docs/cxr-l-integration.md`](docs/cxr-l-integration.md)、実機差し込み全般は
   [`docs/implementation-notes.md`](docs/implementation-notes.md) を参照。
-- 現在のバージョン: **APP 0.4.0 / API 1.6.0**。
+- **撮影レス運用**：紙を撮影せず、本体 AI が視認した資料の**テキストをページ単位で登録**でき、
+  照合の代わりに**ページ移動で現在ページを把握**して解答・解説します（画像は任意添付）。
+- **英語リスニング対応**：音声をその場で録音（`/audio`）→書き起こし→資料と統合して解答。
+  筆記（マーク/記述）⇄リスニングを**グラス/スマホから切替**（`/mode`）。
+- 現在のバージョン: **APP 0.7.0 / API 1.7.0**。
 
 ---
 
@@ -47,8 +51,9 @@ rokid-docscan-starter/
 │   ├── summarize.py   # 要約シム（analyzer に委譲）
 │   ├── explainer.py   # Explainer ポート（ExplainRequest / ExplainResult / ABC）
 │   ├── llm.py         # ★実 AI ブリッジ（claude/openai/gemini、遅延import・注入可）
-│   ├── version.py     # 各契約バージョン（app 0.4.0 / api 1.6.0 ほか）
-│   ├── config.py      # 保存先・フィーチャーフラグ（ROKID_* / ANTHROPIC_API_KEY）
+│   ├── version.py     # 各契約バージョン（app 0.7.0 / api 1.7.0 ほか）
+│   ├── config.py      # 保存先・フィーチャーフラグ（ROKID_* / ANTHROPIC_API_KEY / ROKID_TRANSCRIBER）
+│   ├── transcribe.py  # ★リスニング録音の書き起こし（openai/gemini・未設定時は与値）
 │   ├── db.py          # sqlite3（documents/pages/exam/explain テーブル）
 │   ├── analyzers/     # 解析ポート: base / registry / local_placeholder / claude ★
 │   ├── solvers/       # 解答ポート: base / registry / local_placeholder / claude ★
@@ -152,18 +157,25 @@ curl -s -X POST http://127.0.0.1:8000/v1/documents \
 # {"document_id":1,"title":"設計仕様書 v1","capture_device":"CXR-S","status":"open"}
 ```
 
-### 3. ページを追加（画像 + 任意の OCR テキスト）
+### 3. ページを追加（撮影レス：テキストのみ、または画像 + OCR テキスト）
+
+**画像は任意**です。Rokid 通常利用のように**本体 AI が視認した資料テキスト**を
+`ocr_text` として送れば、**撮影せずにページを記憶**できます（`image_path=null`・`phash=""`）。
 
 ```bash
+# 撮影レス（テキストのみ）でページを登録
 curl -s -X POST http://127.0.0.1:8000/v1/documents/1/pages \
   -F page_index=0 \
-  -F image=@page0.png \
-  -F ocr_text='1ページ目の本文テキスト'
-# {"page_id":1,"document_id":1,"page_index":0,"phash":"...","ocr_md5":"...","image_path":"..."}
+  -F ocr_text='1ページ目の本文テキスト（本体AIの視認結果）'
+# {"page_id":1,...,"phash":"","ocr_md5":"...","image_path":null}
+
+# 画像を添付する場合（スマホ登録など）。pHash も算出され /match が使えます
+curl -s -X POST http://127.0.0.1:8000/v1/documents/1/pages \
+  -F page_index=0 -F image=@page0.png -F ocr_text='1ページ目の本文テキスト'
 ```
 
-> `ocr_text` を省略した場合は、画像バイト列の MD5 をプレースホルダとして
-> `ocr_md5` に記録します（OCR 未実装でも完全一致照合の足がかりになります）。
+> 画像も `ocr_text` も無い場合は 400。画像を添付し `ocr_text` を省略した場合は、
+> 画像バイト列の MD5 をプレースホルダとして `ocr_md5` に記録します。
 
 ### 4. 文書を確定（finalize）
 
@@ -323,6 +335,42 @@ python scripts/eval_exam.py --synthetic 5 --out /tmp/exam_eval.json
 設計は [docs/exam-solver-architecture.md](docs/exam-solver-architecture.md)、
 グラス表示・操作の規約は [docs/glasses-ux-contract.md](docs/glasses-ux-contract.md) を参照。
 
+### 文書ページ移動型 exam（撮影レス・主経路 / API 1.7.0）
+
+上の「設問1枚アップロード」型に加え、**登録済み文書に束ねてページ移動で解く**主経路を追加。
+**撮影は一切発生しません**（`/pages` で全ページを読み込み＝`finalize` が「全ページ読込完了」を宣言、
+以降はグラスのジェスチャで**現在ページを移動**して**そのページを解く**）。全操作がグラス単体で完結し、
+スマホは HTTP 中継のみ（画面不要）。
+
+```bash
+# 1) 撮影レスで全ページ登録 → finalize（= 全ページ読込完了）
+curl -s -X POST http://127.0.0.1:8000/v1/documents -d '{"title":"模試"}' -H 'Content-Type: application/json'
+curl -s -X POST http://127.0.0.1:8000/v1/documents/1/pages -F page_index=0 -F ocr_text='問1 ...'
+curl -s -X POST http://127.0.0.1:8000/v1/documents/1/pages -F page_index=1 -F ocr_text='問2 ...'
+curl -s -X POST http://127.0.0.1:8000/v1/documents/1/finalize
+
+# 2) 文書に束ねた exam セッション（exam_type=written|listening / answer_format=mark|written）
+curl -s -X POST http://127.0.0.1:8000/v1/exam-sessions -H 'Content-Type: application/json' \
+  -d '{"mode":"study","document_id":1,"exam_type":"written","answer_format":"mark"}'
+
+# 3) ページ移動（速スワイプ）→ 現在ページ確認 → 現在ページを解く（タップ）
+curl -s -X POST http://127.0.0.1:8000/v1/exam-sessions/1/next-page
+curl -s http://127.0.0.1:8000/v1/exam-sessions/1/current
+curl -s -X POST http://127.0.0.1:8000/v1/exam-sessions/1/solve-current
+```
+
+**英語リスニング**：`mode` で筆記⇄リスニングを切替（グラス=Back 長押し / スマホ）。リスニングは
+音声を**その場で録音**して送信（未書き起こし時は与えた `transcript` をそのまま使用＝オフライン可）。
+`solve-current` は **書き起こし＋現在ページ資料** を統合し、`answer_format`（マーク/記述）に沿って解答します。
+
+```bash
+curl -s -X POST http://127.0.0.1:8000/v1/exam-sessions/1/mode -H 'Content-Type: application/json' -d '{"exam_type":"listening"}'
+# 録音アップロード（+任意の書き起こし）。ROKID_TRANSCRIBER=openai|gemini で実書き起こし
+curl -s -X POST http://127.0.0.1:8000/v1/exam-sessions/1/audio \
+  -F audio=@listening.wav -F transcript='(任意) 手元の書き起こし'
+curl -s -X POST http://127.0.0.1:8000/v1/exam-sessions/1/solve-current
+```
+
 ## 録画 LED 開発用診断ツール（任意・実機所有者専用）
 
 実機の **録画インジケータ（プライバシー）LED** を調査するための、**サーバとは独立した
@@ -394,6 +442,8 @@ uvicorn app.main:app --port 8000
 | `ANTHROPIC_API_KEY`/`OPENAI_API_KEY`/`GOOGLE_API_KEY` | （なし） | 実呼び出しに必須。未設定なら該当ポートはローカルへ |
 | `ROKID_LLM_MODEL` | `claude-opus-4-8` | 使用モデル id（openai/gemini は必須指定） |
 | `ROKID_LLM_MAX_TOKENS` | `1024` | 応答トークン上限 |
+| `ROKID_TRANSCRIBER` | （なし） | リスニング録音の書き起こし `openai\|gemini`（未設定=与えた transcript を使用） |
+| `ROKID_TRANSCRIBE_MODEL` | `gpt-4o-transcribe` | openai の書き起こしモデル（gemini は `ROKID_LLM_MODEL`） |
 | `ROKID_SOLVER_TIERS` | （単一） | 二段フォールバック順（例 `claude,local`） |
 | `ROKID_KEYMAP` | （なし） | gesture→KeyCode の上書き（JSON、`/v1/settings.input`） |
 | `ROKID_API_KEY` | （なし） | 設定時に Bearer 認証（発見系は開放） |

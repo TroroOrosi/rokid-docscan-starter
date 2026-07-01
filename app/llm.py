@@ -129,6 +129,27 @@ class LLMClient:
         """Call the model and parse its reply as a JSON object (tolerant)."""
         return extract_json(self.complete(system=system, prompt=prompt, image=image))
 
+    def transcribe(self, audio: bytes) -> str:
+        """Transcribe recorded audio to text (English-listening mode).
+
+        openai -> Audio API (ROKID_TRANSCRIBE_MODEL, default gpt-4o-transcribe);
+        gemini -> generate_content over inline audio. Anthropic has no ASR.
+        """
+        if self.provider == "openai":
+            model = os.environ.get("ROKID_TRANSCRIBE_MODEL", "gpt-4o-transcribe")
+            resp = self._sdk.audio.transcriptions.create(model=model, file=("audio", audio))
+            return (getattr(resp, "text", "") or "").strip()
+        if self.provider == "gemini":
+            resp = self._sdk.models.generate_content(
+                model=self.model,
+                contents=[
+                    {"inline_data": {"mime_type": _audio_media_type(audio), "data": _b64(audio)}},
+                    {"text": "Transcribe the audio verbatim."},
+                ],
+            )
+            return (getattr(resp, "text", "") or "").strip()
+        raise LLMConfigError(f"provider '{self.provider}' has no audio transcription")
+
 
 # --- provider SDK construction (lazy) ---------------------------------------
 
@@ -233,6 +254,19 @@ def _media_type(image: bytes) -> str:
     if image[:4] == b"RIFF" and image[8:12] == b"WEBP":
         return "image/webp"
     return "image/png"
+
+
+def _audio_media_type(audio: bytes) -> str:
+    """Best-effort audio MIME from magic bytes (default audio/mpeg)."""
+    if audio[:4] == b"RIFF" and audio[8:12] == b"WAVE":
+        return "audio/wav"
+    if audio[:3] == b"ID3" or audio[:2] in (b"\xff\xfb", b"\xff\xf3", b"\xff\xf2"):
+        return "audio/mpeg"
+    if audio[:4] == b"OggS":
+        return "audio/ogg"
+    if audio[:4] == b"fLaC":
+        return "audio/flac"
+    return "audio/mpeg"
 
 
 def extract_json(text: str) -> dict:

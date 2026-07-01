@@ -30,7 +30,14 @@ from __future__ import annotations
 #        PAGE IMAGE (vision) with subject-tailored prompts. SOLVER_API_VERSION
 #        -> 1.1.0 (Question gained the optional image_path field). API_VERSION
 #        stays 1.6.0 (solve response shape unchanged).
-APP_VERSION = "0.6.0"
+# 0.7.0: camera-free operation — pages can be recorded from text alone (image
+#        optional on /pages); new document page-move型 exam (/exam-sessions bound
+#        to a document with next-page/prev-page/current/solve-current); English
+#        listening records audio on the spot (/audio + ROKID_TRANSCRIBER) and
+#        筆記⇄リスニング switches via /mode; long detail/rationale now paginates
+#        by sentence (GLASSES_VIEW_CONTRACT -> 1.3.0). API_VERSION -> 1.7.0
+#        (additive endpoints).
+APP_VERSION = "0.7.0"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.
@@ -42,7 +49,10 @@ APP_VERSION = "0.6.0"
 #        `served_by`; new .../reasoning endpoint; overlay gains tracking metadata.
 # 1.6.0: added /v1/explain-sessions — live multi-page document explanation with
 #        per-page RAG context. /v1/version now includes `explainers` list.
-API_VERSION = "1.6.0"
+# 1.7.0: document page-move型 exam endpoints (/v1/exam-sessions/{id}/next-page,
+#        prev-page, current, solve-current, mode, audio); /pages accepts
+#        camera-free text pages (image optional). Additive — no envelope change.
+API_VERSION = "1.7.0"
 
 # Matching algorithm identity. Bump when thresholds or hashing change so a
 # re-index/eval is triggered. Mirrors thresholds in app/matching.py.
@@ -71,7 +81,11 @@ EXPLAINER_API_VERSION = "1.0.0"
 # 1.2.0: removed server-side character-per-line truncation (was [:24]).
 #        Client renderer is now solely responsible for text reflow.
 #        _wrap() returns each logical line as-is; pagination is line-count only.
-GLASSES_VIEW_CONTRACT_VERSION = "1.2.0"
+# 1.3.0: long detail/rationale/solution/caution prose is split into sentence
+#        logical lines (。！？!?), so it paginates into multiple 3-line
+#        teleprompter view pages instead of one over-long line. Max 3 lines/page
+#        is unchanged; this only affects how many view pages long text produces.
+GLASSES_VIEW_CONTRACT_VERSION = "1.3.0"
 
 # Answer-area overlay payload (box + short answer; 2D image-anchored).
 # 1.1.0: added tracking metadata (tracking/fixed_ar/anchor_hint).

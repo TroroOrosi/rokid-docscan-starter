@@ -9,6 +9,7 @@ from pathlib import Path
 # Project data root. Override with ROKID_DATA_DIR for tests / containers.
 DATA_DIR = Path(os.environ.get("ROKID_DATA_DIR", "data")).resolve()
 IMAGE_DIR = DATA_DIR / "images"
+AUDIO_DIR = DATA_DIR / "audio"   # listening-mode recordings (その場で録音)
 DB_PATH = DATA_DIR / "docscan.db"
 
 # Safety guardrail (案16): real-exam answering is locked off by default. It must
@@ -41,6 +42,14 @@ ROKID_EXPLAINER = os.environ.get("ROKID_EXPLAINER", "local")
 #   ROKID_LLM_MAX_TOKENS   default 1024
 # Optional deps (install only for the provider you use):
 #   pip install anthropic | openai | google-genai
+# Listening transcription (English listening mode). The recorded audio is
+# transcribed by ROKID_TRANSCRIBER (openai|gemini). Anthropic has no ASR, so
+# unset/anthropic → the client-provided transcript is used as-is (offline-safe).
+#   ROKID_TRANSCRIBER       openai | gemini | (unset = use provided transcript)
+#   ROKID_TRANSCRIBE_MODEL  default "gpt-4o-transcribe" (openai); gemini uses
+#                           ROKID_LLM_MODEL (an audio-capable gemini model)
+TRANSCRIBER = os.environ.get("ROKID_TRANSCRIBER") or None
+
 LLM_MODEL = os.environ.get("ROKID_LLM_MODEL", "claude-opus-4-8")
 LLM_ENABLED = bool(
     os.environ.get("ANTHROPIC_API_KEY")
@@ -79,3 +88,4 @@ AUTH_EXEMPT_PATHS = ("/health", "/v1/version", "/v1/settings", "/docs", "/openap
 
 def ensure_dirs() -> None:
     IMAGE_DIR.mkdir(parents=True, exist_ok=True)
+    AUDIO_DIR.mkdir(parents=True, exist_ok=True)

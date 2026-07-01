@@ -39,8 +39,13 @@ In explain-sessions NO camera image is used for page navigation.
 
 from __future__ import annotations
 
+import re
+
 from .explainer import ExplainResult
 from .solvers import SolveResult
+
+# Sentence-ish chunk: run of non-terminator chars plus an optional terminator.
+_SENTENCE_RE = re.compile(r"[^。！？!?\n]+[。！？!?]?")
 
 STAGES = ("answer", "solution", "rationale", "caution")
 EXPLAIN_STAGES = ("overview", "detail", "evidence")
@@ -67,17 +72,25 @@ CAPTURE_CONTRACT = {
     "privacy_led": {"state": "always_on", "tamper": "forbidden"},
 }
 
-# Operation mapping for explain-sessions (scan-free, button-only).
-# Camera is NOT used during explain-sessions; page navigation is button-only.
+# Operation mapping for the scan-free, glasses-only flows. NO camera capture
+# during interaction: pages are navigated by button and the server tracks the
+# current page. Every operation below is doable on the glasses alone (the phone,
+# if present, is a silent HTTP relay). Gestures resolve to KeyCodes via
+# INPUT_CONTRACT / GET /v1/settings.input (overridable with ROKID_KEYMAP).
 OPERATION_CONTRACT = {
-    # Exam-mode operations (unchanged)
-    "scan_page": "button_press",
     # Explain-mode page navigation (no camera)
-    "explain_next_doc_page": "fast_swipe_left",   # KEYCODE_DPAD_UP (19)  — next page
-    "explain_prev_doc_page": "fast_swipe_right",  # KEYCODE_DPAD_DOWN (20) — prev page
-    # Explain-mode within-page navigation
-    "explain_next_stage": "long_press",           # KEYCODE_TV (170)
-    "explain_show": "tap",                        # KEYCODE_DPAD_CENTER (23)
+    "explain_next_doc_page": "fast_swipe_left",   # → POST /explain-sessions/{id}/next-page
+    "explain_prev_doc_page": "fast_swipe_right",  # → POST /explain-sessions/{id}/prev-page
+    "explain_next_stage": "long_press",
+    "explain_show": "tap",
+    # Exam-mode page navigation (document page-move型, no camera)
+    "exam_next_page": "fast_swipe_left",          # → POST /exam-sessions/{id}/next-page
+    "exam_prev_page": "fast_swipe_right",         # → POST /exam-sessions/{id}/prev-page
+    "exam_solve_current": "tap",                  # → POST /exam-sessions/{id}/solve-current
+    "exam_next_stage": "long_press",              # answer→solution→rationale→caution
+    # Written ⇄ listening mode switch, and listening audio recording
+    "mode_toggle": "back_long_press",             # → POST /exam-sessions/{id}/mode
+    "record_toggle": "two_finger_long_press",     # start/stop listening recording
     # Teleprompter scroll (within a stage)
     "next_view_page": "swipe_left",
     "prev_view_page": "swipe_right",
@@ -99,6 +112,10 @@ _DEFAULT_GESTURES = {
     "fast_swipe_left":  {"keycode": 19,  "keyevent": "KEYCODE_DPAD_UP"},
     "fast_swipe_right": {"keycode": 20,  "keyevent": "KEYCODE_DPAD_DOWN"},
     "back":             {"keycode": 4,   "keyevent": "KEYCODE_BACK"},
+    # No standard KeyCode — delivered as an Intent / custom gesture on YodaOS.
+    # Assign a concrete KeyCode for your device via ROKID_KEYMAP if needed.
+    "back_long_press":       {"keycode": None, "keyevent": "homekey.longpress (Intent)"},
+    "two_finger_long_press": {"keycode": None, "keyevent": "two_finger_long_press (custom)"},
 }
 
 
@@ -195,6 +212,20 @@ def _wrap(text: str) -> list[str]:
     return [text]
 
 
+def _split_sentences(text: str) -> list[str]:
+    """Split long prose into sentence-sized logical lines (。！？!? / newlines).
+
+    Each sentence becomes a logical line so _paginate() can chunk long detail /
+    rationale text into multiple 3-line teleprompter pages (swipe to read on).
+    Short text with no terminator returns as a single line.
+    """
+    text = (text or "").strip()
+    if not text:
+        return []
+    parts = [p.strip() for p in _SENTENCE_RE.findall(text)]
+    return [p for p in parts if p] or [text]
+
+
 def _paginate(lines: list[str]) -> list[list[str]]:
     """Chunk logical lines into pages of <=_MAX_LINES lines each."""
     flat: list[str] = []
@@ -229,16 +260,18 @@ def _stage_lines(
         return lines
     if stage == "solution":
         steps = solution.solution_steps or ["(解法なし)"]
-        return ["解法"] + [s for s in steps]
+        # Split any long step into sentence lines so the teleprompter paginates it.
+        return ["解法"] + [s2 for s in steps for s2 in (_split_sentences(s) or [s])]
     if stage == "rationale":
         ev = (
             "根拠ページ: " + ",".join(f"P{p:02d}" for p in solution.evidence_pages)
             if solution.evidence_pages
             else ""
         )
-        return ["根拠", solution.rationale or "(なし)"] + ([ev] if ev else [])
+        body = _split_sentences(solution.rationale) or ["(なし)"]
+        return ["根拠"] + body + ([ev] if ev else [])
     # caution
-    return ["注意", solution.cautions or "(なし)"]
+    return ["注意"] + (_split_sentences(solution.cautions) or ["(なし)"])
 
 
 def build_glasses_view(
@@ -303,8 +336,9 @@ def _explain_stage_lines(
         head = f"{page_label} {_confidence_symbol(result.confidence)}".strip()
         return [head] + (result.lines or [])
     if stage == "detail":
-        detail_text = result.detail or "(詳細なし)"
-        return [label] + [detail_text]
+        # Split long detail into sentence lines so it paginates into multiple
+        # 3-line teleprompter pages (swipe_left/right) instead of one long line.
+        return [label] + (_split_sentences(result.detail) or ["(詳細なし)"])
     # evidence
     if result.evidence_pages:
         ev = ",".join(f"P{p:02d}" for p in result.evidence_pages)

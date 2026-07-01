@@ -29,8 +29,9 @@ def test_version_info_has_all_contracts():
 
 
 def test_contract_versions_reflect_silent_capture_contract():
-    # 1.2.0: server-side char truncation removed; client handles text reflow.
-    assert version.GLASSES_VIEW_CONTRACT_VERSION == "1.2.0"
+    # 1.3.0: long prose split into sentence lines so it paginates into multiple
+    # 3-line teleprompter pages (1.2.0 removed server-side char truncation).
+    assert version.GLASSES_VIEW_CONTRACT_VERSION == "1.3.0"
 
 
 def test_contract_versions_reflect_phase234():
@@ -41,8 +42,9 @@ def test_contract_versions_reflect_phase234():
 
 
 def test_contract_versions_reflect_explain_sessions():
-    # 1.6.0: added /v1/explain-sessions (live multi-page document explanation).
-    assert version.API_VERSION == "1.6.0"
+    # 1.7.0: added document page-move型 exam + camera-free pages + listening audio
+    #        (1.6.0 added /v1/explain-sessions).
+    assert version.API_VERSION == "1.7.0"
     assert version.EXPLAINER_API_VERSION == "1.0.0"
 
 

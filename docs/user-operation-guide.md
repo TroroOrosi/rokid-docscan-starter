@@ -250,6 +250,8 @@ uvicorn app.main:app --port 8000
 | `ANTHROPIC_API_KEY`/`OPENAI_API_KEY`/`GOOGLE_API_KEY` | （なし） | 実アダプタの API キー（未設定→local） |
 | `ROKID_LLM_MODEL` | `claude-opus-4-8` | 使用モデル id（openai/gemini は必須指定） |
 | `ROKID_LLM_MAX_TOKENS` | `1024` | 応答トークン上限 |
+| `ROKID_TRANSCRIBER` | （なし） | 英語リスニング録音の書き起こし（`openai\|gemini`、未設定=与えた transcript を使用） |
+| `ROKID_TRANSCRIBE_MODEL` | `gpt-4o-transcribe` | openai の書き起こしモデル（gemini は `ROKID_LLM_MODEL` を使用） |
 | `ROKID_ALLOW_REAL_EXAM_SOLVE` | `0` | 本番試験モードの解答ロック解除 |
 | `ROKID_ENABLE_EMBEDDING` | `0` | RAG の意味検索（未接続時は lexical） |
 | `ROKID_KEYMAP` | （なし） | gesture→KeyCode の上書き（JSON、`/v1/settings.input`） |

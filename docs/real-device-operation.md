@@ -60,6 +60,17 @@ export ROKID_API_KEY=long-random-secret
 - 以後、`/health`・`/v1/version`・`/v1/settings`（発見系）以外は
   `Authorization: Bearer long-random-secret` が必須。未設定なら認証なし（既定）。
 
+### 2-3. 英語リスニングの書き起こし（任意）
+
+```bash
+export ROKID_TRANSCRIBER=openai         # または gemini
+export OPENAI_API_KEY=sk-...            # gemini なら GOOGLE_API_KEY
+export ROKID_TRANSCRIBE_MODEL=gpt-4o-transcribe   # gemini は ROKID_LLM_MODEL を使用
+```
+
+- 未設定なら、`/audio` に添付した `transcript`（手元の書き起こし）をそのまま使用します
+  （ASR なしでもリスニング解答が成立＝オフライン可）。Anthropic は ASR 非対応。
+
 ---
 
 ## 3. グラス側（CXR-L アプリ）起動時
@@ -81,14 +92,17 @@ export ROKID_API_KEY=long-random-secret
 ### 4-A. 資料照合（/v1/match）
 事前登録 → 現場で照合：
 ```
-# 登録
+# 登録（image は任意。撮影レスなら ocr_text だけでページを記憶）
 POST /v1/documents            → document_id
-POST /v1/documents/{id}/pages (page_index, image, [ocr_text]) ×全ページ
+POST /v1/documents/{id}/pages (page_index, [image], [ocr_text]) ×全ページ
 POST /v1/documents/{id}/finalize   ← 完了宣言（要約生成・status=ready）
 # 現場
 Back-単(KEYCODE_BACK 4) で撮影 → 端末OCR →
 POST /v1/match (document_id, image, fast_ocr_text) → HUD: PAGE n/N / LOW_CONF / NO_PAGE
 ```
+- **撮影レス登録**：`/pages` は `image` 省略可。本体 AI が視認した資料テキストを `ocr_text` に
+  渡せば、写真なしでページを記憶（`image_path=null`・`phash=""`）。照合(`/match`)は画像を使う機能
+  なので、撮影レス標準フローでは下記 **4-D の文書ページ移動型**で現在ページを把握します。
 
 ### 4-B. 解答（/v1/exam-sessions）
 ```
@@ -113,6 +127,26 @@ TP-快速左/右滑(fast_swipe, UP 19 / DOWN 20) → POST .../next-page / prev-p
 TP-長按(long_press 170)               → GET .../explain?stage=detail→evidence
 TP-左/右滑(swipe 21/22)               → GET .../explain?view_page=N±1（テレプロンプター）
 ```
+
+### 4-D. 文書ページ移動型 exam（撮影レス・主経路 / 筆記・リスニング両対応）
+全ページを撮影レスで登録・finalize（＝全ページ読込完了）してから、ページ移動で解く。
+**操作はグラス単独で完結**（スマホは中継のみ・画面不要）。
+```
+# 準備（撮影レス）：/pages (ocr_text) ×全ページ → /finalize
+POST /v1/exam-sessions {mode:"study", document_id, exam_type:"written", answer_format:"mark"} → session_id
+TP-快速左/右滑(fast_swipe, UP 19 / DOWN 20) → POST .../next-page / prev-page   ← 現在ページ移動
+（確認）                                      GET  .../current                 ← 現在ページ把握
+TP-単击(tap 23)                              → POST .../solve-current          ← 現在ページを解く
+TP-長按(long_press 170)                      → GET  .../questions/{qid}/view?stage=solution→rationale→caution
+Back-長按(back_long_press)                   → POST .../mode {exam_type}       ← 筆記 ⇄ リスニング 切替
+# リスニング（音声はその場で録音、設問は目の前の資料から読取）
+TP-双指長按(two_finger_long_press)           → 録音 → POST .../audio (audio,[transcript])
+TP-単击(tap 23)                              → POST .../solve-current          ← 書き起こし＋資料で解答
+```
+- `exam_type`＝`written`(筆記) / `listening`(英語リスニング)、`answer_format`＝`mark`(マーク) / `written`(記述)。
+- **リスニング書き起こし**：`ROKID_TRANSCRIBER=openai|gemini`＋各社鍵で実書き起こし。未設定/失敗/オフラインは
+  アップロード時の `transcript` をそのまま使用（クレデンシャル不要で成立、下記 §2-3）。
+- `mode:"real"` は `ROKID_ALLOW_REAL_EXAM_SOLVE=1` が無い限りロック（解答非表示）。撮影は一切発生しません。
 
 ### 実行フロー（データの流れ）
 ```
