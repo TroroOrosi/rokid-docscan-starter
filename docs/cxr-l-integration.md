@@ -16,7 +16,7 @@
 | 項目 | 値 |
 |------|----|
 | 重量 | 約 49 g |
-| ディスプレイ | **両眼（binocular）** モノクロ緑 Micro-LED＋回折光導波路、**480×398 / 眼**、最大 1500 nits、FOV 約 23–30°（情報源により差） |
+| ディスプレイ | **両眼（binocular）** モノクロ緑 Micro-LED＋回折光導波路、**480×398 / 眼**、最大 1500 nits、FOV 約 23°（一部レビューは 30° と記載） |
 | SoC | Qualcomm Snapdragon **AR1 (Gen 1)** ＋ 副チップ **NXP RT600**（音声認識・低消費電力） |
 | メモリ / ストレージ | **2 GB RAM / 32 GB ROM** |
 | カメラ | **12MP Sony IMX681**（f/2.25、最大 3024×4032、FOV 109°） |
@@ -36,7 +36,11 @@
 |-----|----------|------|---------------------|----------------|
 | **CXR-M** | スマホ（Android/iOS） | コンパニオンアプリ用。デバイス接続（BLE GATT＋Classic BT ソケット＋Wi-Fi Direct）、ハードウェア情報、YodaOS-Sprite の AI 連携、アシストサービス（ファイル転送・録音・写真取得） | `com.rokid.cxr:client-m:1.0.8` | minSdk 28（Android 9） |
 | **CXR-S** | グラス本体（YodaOS-Sprite） | 機上アプリ用ブリッジ。CXR-M と Caps バイナリ形式で双方向メッセージング | `com.rokid.cxr:cxr-service-bridge:1.0-SNAPSHOT` | — |
-| **CXR-L** | グラス本体（YodaOS-Sprite） | **標準アプリを置き換える単体（ランチャー型）アプリ用**。エントリは `ExternalAppClient` を継承し、**Android AIDL で `IMediaStreamService` にバインド**してメディアストリーム＆**AI アプリ連携**を行う。対象 AI サービス＝ **`com.rokid.sprite.aiapp`**（「Hi Rokid」AI アプリ。グローバル版 `com.rokid.sprite.global.aiapp`） | `com.rokid.cxr:client-l:0.0.1` | min/target 28 |
+| **CXR-L** | グラス本体（YodaOS-Sprite） | **標準アプリを置き換える単体（ランチャー型）アプリ用**。エントリ実クラス **`CXRLink(context)`** が `ExternalAppClient` を継承し、**Android AIDL で `IMediaStreamService` にバインド**してメディアストリーム＆**AI アプリ連携**を行う。対象 AI サービス＝ **`com.rokid.sprite.aiapp`**（「Hi Rokid」AI アプリ。グローバル版 `com.rokid.sprite.global.aiapp`） | `com.rokid.cxr:client-l:0.0.1` | min/target 28 |
+
+> Maven リポジトリ: `https://maven.rokid.com/repository/maven-public/`。
+> CXR-L（`client-l:0.0.1`, ~28KB AAR）の主な依存は Kotlin stdlib 2.1.0 / Gson 2.10.1。
+> 座標・依存はバージョン更新されるため、実装前に上記リポジトリで最新を確認してください。
 
 - **Rizon / Agent Store**: Rokid が Coze Studio ベースで独自化した AI オープンプラットフォーム。
   ノーコードで AI ワークフローを作成・共有でき、Agent Store には多数のワークフローが公開。
@@ -112,7 +116,7 @@ CXR-L アプリが AIDL でグラス本体 AI から得た音声認識結果・O
 ## 6. 実装チェックリスト（CXR-L アプリ側）
 
 1. Rokid AR Platform（`ar.rokid.com/sdk`）で開発者登録し、**CXR-L SDK** を入手。
-2. `ExternalAppClient` を継承したエントリを作り、`IMediaStreamService` に AIDL バインド。
+2. `ExternalAppClient` を継承したエントリ（実クラス例 `CXRLink`）を作り、`IMediaStreamService` に AIDL バインド。
 3. グラス本体 AI サービス `com.rokid.sprite.aiapp` へのバインド権限・Intent を設定。
 4. カメラ/音声/OCR 結果を取り出し、本サーバの HTTP API に送信（Wi-Fi 6 直結）。
 5. 応答の `hud.lines` / `glasses_view.lines`（最大3行）を HUD に描画。

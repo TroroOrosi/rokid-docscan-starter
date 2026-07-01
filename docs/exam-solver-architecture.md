@@ -82,8 +82,8 @@ layout→subject→solver→HUD を流し、**設問抽出率/科目判定率/�
 
 ## 実機前提（要点）
 
-実機 Rokid Glasses は**両眼 モノクロ緑 Micro-LED（480×398/眼）・FOV 約23–30°・
-6DoF非対応**の情報表示デバイス（ウェブ検証済み仕様。片眼のみではありません）。
+実機 Rokid Glasses は**両眼 モノクロ緑 Micro-LED（480×398/眼）・FOV 約23°
+（一部レビューは30°）・6DoF非対応**の情報表示デバイス（ウェブ検証済み仕様。片眼のみではありません）。
 よって紙への厳密な固定重畳は不可で、`overlay` は 2D 画像アンカー＋方向ヒントとして提供し、
 解答は `glasses_view` のグラス内テキスト（段階・ページ送り）で読む。詳細は
 [glasses-ux-contract.md](glasses-ux-contract.md)、実機仕様は

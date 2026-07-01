@@ -19,9 +19,14 @@ iOS）が将来新しくなっても、サーバのコア（照合ロジック�
                     │ registry (差し替え点)
    ┌────────────────┼───────────────┬──────────────┐
    ▼                ▼               ▼              ▼
- local(今)        Gemini          OpenAI         Rizon/on-device(将来)
+ local(既定)      claude(実装済)   他ベンダ(例)    Rizon/on-device(将来)
  offline          cloud           cloud          workflow / 端末OCR
 ```
+
+> 図の「他ベンダ」は Gemini/OpenAI 等の拡張例（パターンは汎用）。**現状で同梱済みの
+> 実アダプタは `claude`（Anthropic）** で、`ROKID_*=claude` で全ポートを実 AI 化できます
+> （§5 フラグ表・§6(a)）。追加ベンダは同じ `Analyzer`/`Solver`/… ポートにアダプタを
+> 1つ実装して `register_*()` するだけ。
 
 ---
 

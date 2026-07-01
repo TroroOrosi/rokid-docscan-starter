@@ -3,7 +3,7 @@
 Hardware reality (Rokid Glasses, web-verified 2026-07; see
 docs/cxr-l-integration.md):
   Display : dual-eye (binocular) monochrome-green Micro-LED + diffractive
-            waveguide, 480×398 px per eye, FOV ~23–30° (sources vary),
+            waveguide, 480×398 px per eye, FOV ~23° (some reviews cite 30°),
             up to 1 500 nits, adjustable dimming.
   SoC     : Qualcomm Snapdragon AR1 (Gen 1) + NXP RT600 co-processor,
             2 GB RAM / 32 GB ROM.
