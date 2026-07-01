@@ -239,5 +239,5 @@ pytest tests/test_explain_api.py -v
 
 - Explainer がローカルプレースホルダの場合、解説テキストは要約/OCR の整形にとどまります。実運用では `ROKID_EXPLAINER=claude`＋`ANTHROPIC_API_KEY` で実 AI 解説に切り替えてください（同梱済み）。
 - 解説の質はページ登録時の `ocr_text` の精度に依存します。
-- 認証・マルチテナント・並行書き込み制御は未実装（MVP のため）。
+- 認証・マルチテナント・並行書き込み制御は未実装（現段階では対象外）。
 - `current_page_index` はサーバー側でクランプ処理されます（0以下・総ページ数以上にはなりません）。

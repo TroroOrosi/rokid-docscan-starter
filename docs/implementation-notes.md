@@ -16,12 +16,12 @@
 ## 1. 全体アーキテクチャと差し込み点
 
 ```
-[Rokid Glasses]──BLE/Wi-Fi──[Android/iOS コンパニオン]──HTTPS──[本サーバ(MVP)]
+[Rokid Glasses]──BLE/Wi-Fi──[Android/iOS コンパニオン]──HTTPS──[本サーバ]
    カメラ/HUD          撮影・端末OCR・接続管理・UI          登録/照合/要約
    (CXR-S: 機上)        (CXR-M SDK / Glimmer 等)            (本リポジトリ)
 ```
 
-本 MVP が担うのは右端のサーバのみ。左2層を実機に置き換える際の対応表:
+本リポジトリが担うのは右端のサーバのみ。左2層を実機に置き換える際の対応表:
 
 | 抽象点（サーバ内） | 既定（オフライン） | 実機/実 AI での差し込み先 |
 |------------------|------------------------|---------------------|
@@ -51,7 +51,7 @@ CXR（Connected XR）SDK スイートは役割別に分かれている（末尾�
   Maven `com.rokid.cxr:client-m:1.0.8`、minSdk 28（Android 9）。**iOS パス**も含む。
 - **CXR-S SDK**: グラス本体（YodaOS-Sprite）上で動くアプリ用のブリッジ SDK。
   CXR-M と Caps バイナリ形式で双方向メッセージング。
-  Maven `com.rokid.cxr:cxr-service-bridge:1.0-SNAPSHOT`。MVP では `capture_device`
+  Maven `com.rokid.cxr:cxr-service-bridge:1.0-SNAPSHOT`。本サーバでは `capture_device`
   フィールド（例 `"CXR-S"`）としてメタデータに記録するのみ。
 - **CXR-L SDK**: **標準アプリを置き換える単体（ランチャー型）アプリ用**。
   エントリは `ExternalAppClient` を継承し、**Android AIDL で `IMediaStreamService`
@@ -99,10 +99,10 @@ CXR（Connected XR）SDK スイートは役割別に分かれている（末尾�
 - 目的: CXR-L / RokidBrew / 将来の Android XR など **複数バックエンドを
   差し替え可能**にし、上位の「撮影→OCR→/match→HUD表示」ロジックを
   バックエンド非依存にする。
-- サーバへの影響: なし。サーバは HTTP 契約（本 MVP の API）だけを公開し、
+- サーバへの影響: なし。サーバは HTTP 契約（本サーバの API）だけを公開し、
   どの接続バックエンドから来ても同じに扱う。クライアント側の
   `GlassesConnection` 抽象 → `capture()` / `showHud(lines)` の2メソッドに
-  本 MVP の入出力がそのまま対応する。
+  本サーバの入出力がそのまま対応する。
 
 ---
 
@@ -116,7 +116,7 @@ CXR（Connected XR）SDK スイートは役割別に分かれている（末尾�
   - HUD は引き続き「3行・短文」の `hud.lines` を契約として維持し、
     描画層だけ Compose Glimmer に差し替える。
   - 接続層は §5 の抽象に Android XR バックエンドを追加する形にする。
-- サーバ（本 MVP）は変更不要。出力契約（3行 HUD）が安定しているため、
+- サーバ（本リポジトリ）は変更不要。出力契約（3行 HUD）が安定しているため、
   表示技術の世代交代を吸収できる。
 
 ---

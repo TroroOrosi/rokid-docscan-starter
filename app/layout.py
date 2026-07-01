@@ -3,7 +3,7 @@
 Turns a flat OCR string (and optional client-provided bounding-box hints) into
 structured question units: question number, body, choices, figure references,
 and an estimated answer-area box. This is a deterministic, dependency-free
-heuristic so the MVP runs offline; a real layout/vision model is a drop-in
+heuristic so the server runs offline; a real layout/vision model is a drop-in
 replacement that fills the same structures.
 
 Coordinates are normalized 0..1 (x, y from top-left, plus w, h) so they are

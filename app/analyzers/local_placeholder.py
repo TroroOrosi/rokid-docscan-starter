@@ -1,4 +1,4 @@
-"""Local, offline, credential-free analyzer used by the MVP today.
+"""Local, offline, credential-free analyzer used by default.
 
 It performs no real OCR: it forwards client-provided OCR text and derives a
 short summary the same way the original summarize flow did. This keeps the

@@ -1,4 +1,4 @@
-"""Local, offline, credential-free solver used by the MVP today.
+"""Local, offline, credential-free solver used by default.
 
 It performs NO real problem solving. It returns a clearly-marked placeholder so
 the server runs end-to-end with zero external dependencies while presenting the
@@ -6,8 +6,8 @@ exact interface a real model-backed solver (Gemini/OpenAI/Claude/on-device VLM)
 will later implement. Real answering = register a model adapter under another
 name and route to it (ROKID_SOLVER / prefer).
 
-Keeping the offline default non-solving is also a deliberate guardrail: the MVP
-cannot be used to actually answer a live exam.
+Keeping the offline default non-solving is also a deliberate guardrail: the
+offline default cannot be used to actually answer a live exam.
 """
 
 from __future__ import annotations

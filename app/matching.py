@@ -1,6 +1,6 @@
 """Deterministic page-matching primitives.
 
-Pure-Python implementation (PIL + stdlib only) so the MVP runs without
+Pure-Python implementation (PIL + stdlib only) so it runs without
 numpy / imagehash. Provides:
 
 - pHash: 64-bit DCT-based perceptual hash of an image.
@@ -47,7 +47,7 @@ CONF_LOW = 0.40          # >= but < CONF_OK -> LOW CONF; below -> NO PAGE
 # --- pHash ------------------------------------------------------------------
 
 def _dct_1d(vector: list[float]) -> list[float]:
-    """Naive type-II DCT for a single vector (small N, fine for MVP)."""
+    """Naive type-II DCT for a single vector (small N, fine here)."""
     n = len(vector)
     result = []
     factor = math.pi / n
@@ -77,7 +77,7 @@ def phash(image: Image.Image) -> int:
     try:
         pixels = list(img.get_flattened_data())
     except AttributeError:
-        pixels = list(img.getdata())  # noqa: small image, fine for MVP
+        pixels = list(img.getdata())  # noqa: small image, fine here
     matrix = [
         [float(pixels[r * PHASH_SIZE + c]) for c in range(PHASH_SIZE)]
         for r in range(PHASH_SIZE)

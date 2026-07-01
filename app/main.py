@@ -1,8 +1,9 @@
-"""Rokid DocScan MVP — FastAPI server.
+"""Rokid DocScan — FastAPI server.
 
-Server-side only. Runs locally with SQLite + local filesystem, no Rokid
-hardware and no external credentials. See docs/implementation-notes.md for
-where real Rokid CXR integration plugs in.
+Server-side. Runs locally with SQLite + local filesystem, offline by default
+(no Rokid hardware and no external credentials required). Real cloud models
+(Anthropic Claude) plug in via the provider registries; see
+docs/implementation-notes.md and docs/cxr-l-integration.md.
 """
 
 from __future__ import annotations
@@ -70,7 +71,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="Rokid DocScan MVP", version=APP_VERSION, lifespan=lifespan)
+app = FastAPI(title="Rokid DocScan", version=APP_VERSION, lifespan=lifespan)
 
 
 # --- request/response models ------------------------------------------------

@@ -58,7 +58,7 @@ class AnalyzerResult:
 ### 新しいモデルを足す＝アダプタを1つ書いて登録するだけ
 
 ```python
-# app/analyzers/gemini.py （将来・本MVPには含めない）
+# app/analyzers/gemini.py （追加ベンダ例・本リポジトリには未同梱／claude は同梱済み）
 class GeminiAnalyzer(Analyzer):
     name = "gemini"; provider_version = "gemini-x.y"; offline = False
     def __init__(self, client): self._c = client      # creds は外から注入
@@ -99,7 +99,7 @@ get_analyzer(prefer=None) -> Analyzer        # ルーティング
 ## 3. デバイスバックエンド・レジストリ（クライアント側の将来設計）
 
 サーバは HTTP 契約だけ公開するので端末非依存ですが、**コンパニオン側** も
-同じ発想で抽象化します（jlink-ai 風の接続抽象。本MVPはサーバのみのため擬似コード）。
+同じ発想で抽象化します（jlink-ai 風の接続抽象。本リポジトリはサーバのみのため擬似コード）。
 
 ```kotlin
 // クライアント側ポート（Android/iOS/Rokid/Android XR 共通）
