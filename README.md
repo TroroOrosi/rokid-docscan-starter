@@ -7,8 +7,8 @@ Rokid Glasses で撮影した紙資料を「文書」として登録し、後か
 
 - **既定はオフラインでローカル実行可能**。外部クレデンシャル不要で全機能が動きます。
 - **実 AI もそのまま利用可能**：analyzer / solver / explainer / extractor の各ポートに
-  **Anthropic Claude を使う実アダプタ `claude` を同梱**。環境変数だけで実運用に切り替わり、
-  キー未設定時は自動でローカルにフォールバックします（[実モデル接続](#実モデル接続claude-アダプタ)）。
+  **Claude / OpenAI / Gemini を使う実アダプタを同梱**。環境変数だけで実運用に切り替わり、
+  キー未設定時は自動でローカルにフォールバックします（下記「実モデル接続」）。
 - ストレージは **SQLite + ローカルファイルシステム**（Postgres / MinIO 不要）。
 - 照合は **決定的**（pHash のハミング距離 + OCR テキスト類似度ボーナス）。
 - **グラス本体アプリ（CXR-L）とグラス本体 AI の接続**は
@@ -46,7 +46,7 @@ rokid-docscan-starter/
 │   ├── retrieval.py   # RAG 横断検索（既存 documents/pages → 根拠）
 │   ├── summarize.py   # 要約シム（analyzer に委譲）
 │   ├── explainer.py   # Explainer ポート（ExplainRequest / ExplainResult / ABC）
-│   ├── llm.py         # ★実 AI ブリッジ（Anthropic Claude、遅延import・注入可）
+│   ├── llm.py         # ★実 AI ブリッジ（claude/openai/gemini、遅延import・注入可）
 │   ├── version.py     # 各契約バージョン（app 0.4.0 / api 1.6.0 ほか）
 │   ├── config.py      # 保存先・フィーチャーフラグ（ROKID_* / ANTHROPIC_API_KEY）
 │   ├── db.py          # sqlite3（documents/pages/exam/explain テーブル）
@@ -62,16 +62,18 @@ rokid-docscan-starter/
 │   ├── eval_exam.py          # 解答パイプライン評価 → JSON レポート
 │   └── rokid_led.py          # 録画LED診断 CLI（実機所有者専用・任意）
 ├── docs/
-│   ├── cxr-l-integration.md         # ★CXR-L 単体アプリ ⇄ 本体AI ⇄ 本サーバ
+│   ├── cxr-l-integration.md         # ★CXR-L 単体アプリ ⇄ 本体AI ⇄ 本サーバ + Kotlin 例
+│   ├── real-device-operation.md     # ★実機運用ガイド（準備→起動→操作→実AI/認証/KeyCode）
 │   ├── implementation-notes.md      # 実機/実AI 差し込み点・CXR SDK・実アダプタ
-│   ├── user-operation-guide.md      # ユーザー操作 / 自動化 / 設計判断
+│   ├── user-operation-guide.md      # ユーザー操作 / 自動化 / 設計判断 / 環境変数一覧
 │   ├── future-proof-architecture.md # 将来対応アーキテクチャ
 │   ├── explain-sessions.md          # 資料解説モード詳細・curl 例
 │   ├── glasses-ux-contract.md       # グラス UX 契約（操作・HUD・無音・無フラッシュ）
 │   ├── exam-solver-architecture.md  # 解答モードアーキテクチャ
 │   └── rokid-led-dev-utility.md     # 録画LED診断ツールの詳細・警告
+├── .env.example       # 全環境変数の雛形（コピーして .env に）
 ├── data/images/       # 画像保存先（実行時に自動生成）
-├── requirements.txt   # コア依存（anthropic は任意・コメント参照）
+├── requirements.txt   # コア依存（anthropic/openai/google-genai は任意・コメント参照）
 ├── Dockerfile
 └── docker-compose.yml
 ```
@@ -296,10 +298,10 @@ API v1.6.0 で追加。登録済み文書を**グラス単体で全ページ読�
 - **無音・無フラッシュ・無アニメ・無点滅**を契約化（`GET /v1/settings` で公示、HUD は最大3行）。
 - **音声操作は設定で ON/OFF**（既定 OFF＝ボタン/タッチ操作）。
 - 解答ソルバーは既定で**オフラインのプレースホルダ**（実際には解かない＝不正利用ガード）。
-  **実モデル `claude` を同梱**し、`ROKID_SOLVER=claude`＋`ANTHROPIC_API_KEY` で実解答に切替
-  （[実モデル接続](#実モデル接続claude-アダプタ)）。クラウド→ローカルの**二段フォールバック**
+  **実モデル `claude`/`openai`/`gemini` を同梱**し、`ROKID_SOLVER=claude|openai|gemini`＋各社
+  API キーで実解答に切替（下記「実モデル接続」）。クラウド→ローカルの**二段フォールバック**
   （`ROKID_SOLVER_TIERS`、`solve_with_fallback`）で圏外/失敗でも HUD は返ります。
-- **メディア抽出**（数式/図/表/グラフ）は `app/extractors/`（`ROKID_EXTRACTOR`。`claude` で実抽出）。`add_question` 応答の `media` に載ります。
+- **メディア抽出**（数式/図/表/グラフ）は `app/extractors/`（`ROKID_EXTRACTOR`。`claude`/`openai`/`gemini` で実抽出）。`add_question` 応答の `media` に載ります。
 - **RAG 根拠提示**：`app/retrieval.py` が既存の `documents/pages` を横断検索し、`solve` 応答の `evidence` と HUD の根拠に反映（`ROKID_ENABLE_EMBEDDING` で意味検索へ差替可）。
 - **推論ログ**（案9）は `GET …/questions/{qid}/reasoning` で参照（HUD は短縮版・`real` ロック準拠）。
 - 本番試験モード（`mode=real`）は既定でロック（`ROKID_ALLOW_REAL_EXAM_SOLVE=1` が無い限り解答非表示）。学習・模試・研究用途向けです。
@@ -365,38 +367,47 @@ python scripts/rokid_led.py verify --led white --host 192.168.1.50:5555 \
 
 詳細・警告・既知の制約・検証手順は [docs/rokid-led-dev-utility.md](docs/rokid-led-dev-utility.md) を参照。
 
-## 実モデル接続（Claude アダプタ）
+## 実モデル接続（claude / openai / gemini）
 
-各プロバイダポート（analyzer / solver / explainer / extractor）には、**Anthropic
-Claude を使う実アダプタ `claude` を同梱**しています。これがかつての「ダミー
+各プロバイダポート（analyzer / solver / explainer / extractor）には、**Anthropic Claude /
+OpenAI / Google Gemini を使う実アダプタを同梱**しています。これがかつての「ダミー
 （プレースホルダ）」を**実運用可能**にする部分です。
 
-- 既定は `local`（オフライン・クレデンシャル不要）。`ROKID_*=claude` で実 AI に切替。
-- `ANTHROPIC_API_KEY` が無い／`anthropic` 未インストールなら、**ネットワークに一切
-  触れず自動でローカルにフォールバック**します（solver は二段フォールバック、
-  他は内部フォールバック）。サーバは常に応答します。
-- 共通クライアントは `app/llm.py`（公式 `anthropic` SDK を遅延 import・注入可能）。
+- 既定は `local`（オフライン・クレデンシャル不要）。`ROKID_*=claude|openai|gemini` で切替。
+- 該当プロバイダの API キーが無い／SDK 未インストールなら、**ネットワークに一切触れず
+  自動でローカルにフォールバック**（solver は二段フォールバック、他は内部フォールバック）。
+  サーバは常に応答します。
+- 共通クライアントは `app/llm.py`（公式 SDK を遅延 import・注入可能・プロバイダ非依存）。
 
 ```bash
-# 実 AI を有効化（任意の依存を入れる）
-pip install anthropic
-export ANTHROPIC_API_KEY=sk-ant-...
+pip install anthropic                        # または openai / google-genai
+export ANTHROPIC_API_KEY=sk-ant-...          # OpenAI: OPENAI_API_KEY / Gemini: GOOGLE_API_KEY
 export ROKID_SOLVER=claude ROKID_EXPLAINER=claude \
-       ROKID_ANALYZER=claude ROKID_EXTRACTOR=claude
-export ROKID_LLM_MODEL=claude-opus-4-8   # 任意。安価にするなら claude-haiku-4-5
+       ROKID_ANALYZER=claude ROKID_EXTRACTOR=claude   # または openai / gemini
+export ROKID_LLM_MODEL=claude-opus-4-8       # openai/gemini は現行モデル id を必須指定
 uvicorn app.main:app --port 8000
 ```
 
 | 環境変数 | 既定 | 役割 |
 |----------|------|------|
-| `ANTHROPIC_API_KEY` | （なし） | 実呼び出しに必須。未設定なら全ポートがローカルへ |
-| `ROKID_ANALYZER` / `ROKID_SOLVER` / `ROKID_EXPLAINER` / `ROKID_EXTRACTOR` | `local` | `claude` で実 AI にルーティング |
-| `ROKID_LLM_MODEL` | `claude-opus-4-8` | 使用モデル id |
+| `ROKID_ANALYZER`/`ROKID_SOLVER`/`ROKID_EXPLAINER`/`ROKID_EXTRACTOR` | `local` | `claude\|openai\|gemini` で実 AI にルーティング |
+| `ANTHROPIC_API_KEY`/`OPENAI_API_KEY`/`GOOGLE_API_KEY` | （なし） | 実呼び出しに必須。未設定なら該当ポートはローカルへ |
+| `ROKID_LLM_MODEL` | `claude-opus-4-8` | 使用モデル id（openai/gemini は必須指定） |
 | `ROKID_LLM_MAX_TOKENS` | `1024` | 応答トークン上限 |
 | `ROKID_SOLVER_TIERS` | （単一） | 二段フォールバック順（例 `claude,local`） |
+| `ROKID_KEYMAP` | （なし） | gesture→KeyCode の上書き（JSON、`/v1/settings.input`） |
+| `ROKID_API_KEY` | （なし） | 設定時に Bearer 認証（発見系は開放） |
 
-> グラス本体アプリ（CXR-L）から本体 AI を繋ぐ全体像は
-> [`docs/cxr-l-integration.md`](docs/cxr-l-integration.md) を参照。
+全変数の雛形は [`.env.example`](.env.example)、一覧は
+[user-operation-guide.md](docs/user-operation-guide.md) §7 を参照。
+
+### 実機運用（グラス連携・入力・認証）
+
+- **入力コントラクト**：`GET /v1/settings` の `input` が gesture→KeyCode を公示。機種差は
+  `ROKID_KEYMAP` で上書き（クライアント改修不要）。
+- **認証（任意）**：`ROKID_API_KEY` を設定すると発見系以外は `Authorization: Bearer` 必須。
+- **一連の実機手順**は [docs/real-device-operation.md](docs/real-device-operation.md)、
+  **グラス本体アプリ/本体 AI 連携**は [docs/cxr-l-integration.md](docs/cxr-l-integration.md)。
 
 ## Docker（任意）
 
@@ -415,6 +426,6 @@ docker compose up --build
   実 AI 化できます。
 - pHash は純 Python 実装（numpy/imagehash 非依存）で、大量ページでは低速。
   高速化は scipy/imagehash 等への置換が定石（依存を増やすため既定では未採用）。
-- 認証・マルチテナント・並行書き込み制御は未実装。
-- `claude` アダプタは任意依存 `anthropic` と `ANTHROPIC_API_KEY` が必要。未設定なら
-  ローカル実装で動作（実 AI の出力は得られません）。
+- マルチテナント・並行書き込み制御は未実装（簡易 Bearer 認証は `ROKID_API_KEY` で任意）。
+- 実 AI アダプタは任意依存（`anthropic`/`openai`/`google-genai`）と各社 API キーが必要。
+  未設定なら自動でローカル実装にフォールバック（実 AI 出力は得られません）。

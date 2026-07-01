@@ -152,14 +152,16 @@ object DeviceRegistry {                // 端末を差し替える点
 
 | フラグ | 既定 | 役割 |
 |--------|------|------|
-| `ROKID_ANALYZER` | `local` | 解析ルーティング（`claude` で実 AI 要約） |
-| `ROKID_SOLVER` | `local` | ソルバールーティング（`claude` で実解答） |
+| `ROKID_ANALYZER` | `local` | 解析ルーティング（`claude\|openai\|gemini` で実 AI 要約） |
+| `ROKID_SOLVER` | `local` | ソルバールーティング（`claude\|openai\|gemini` で実解答） |
 | `ROKID_SOLVER_TIERS` | （単一） | 二段フォールバックの tier 順（csv、末尾に local を自動付与） |
-| `ROKID_EXPLAINER` | `local` | 解説ルーティング（`claude` で実解説） |
-| `ROKID_EXTRACTOR` | `local` | メディア抽出ルーティング（`claude` で実抽出） |
-| `ANTHROPIC_API_KEY` | （なし） | `claude` アダプタの実呼び出しに必須（未設定なら local） |
-| `ROKID_LLM_MODEL` | `claude-opus-4-8` | `claude` アダプタのモデル id（安価: `claude-haiku-4-5`） |
-| `ROKID_LLM_MAX_TOKENS` | `1024` | `claude` アダプタの応答トークン上限 |
+| `ROKID_EXPLAINER` | `local` | 解説ルーティング（`claude\|openai\|gemini` で実解説） |
+| `ROKID_EXTRACTOR` | `local` | メディア抽出ルーティング（`claude\|openai\|gemini` で実抽出） |
+| `ANTHROPIC_API_KEY`/`OPENAI_API_KEY`/`GOOGLE_API_KEY` | （なし） | 実アダプタの API キー（未設定なら local） |
+| `ROKID_LLM_MODEL` | `claude-opus-4-8` | モデル id（openai/gemini は必須指定） |
+| `ROKID_LLM_MAX_TOKENS` | `1024` | 実アダプタの応答トークン上限 |
+| `ROKID_KEYMAP` | （なし） | gesture→KeyCode の上書き（JSON、`/v1/settings.input`） |
+| `ROKID_API_KEY` | （なし） | 設定時に Bearer 認証を要求（発見系は開放） |
 | `ROKID_ALLOW_REAL_EXAM_SOLVE` | `0` | 本番試験モードの解答ロック解除（不正防止） |
 | `ROKID_DATA_DIR` | `data` | ストレージ先（プライバシー/隔離） |
 | `ROKID_ENABLE_EMBEDDING` | `0` | RAG の意味検索（embedding）を有効化（未接続時は lexical） |

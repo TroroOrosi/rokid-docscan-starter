@@ -20,7 +20,7 @@ from __future__ import annotations
 import os
 
 from .base import Analyzer
-from .claude import ClaudeAnalyzer
+from .claude import LLMAnalyzer
 from .local_placeholder import LocalPlaceholderAnalyzer
 
 DEFAULT_ANALYZER = "local"
@@ -56,6 +56,7 @@ def get_analyzer(prefer: str | None = None) -> Analyzer:
 
 # Register the offline default at import time so the server always has one.
 register_analyzer(LocalPlaceholderAnalyzer(), replace=True)
-# Register the real cloud analyzer (Anthropic Claude). It defers to local when
-# unconfigured (no ANTHROPIC_API_KEY) or on any error, so finalize never breaks.
-register_analyzer(ClaudeAnalyzer(), replace=True)
+# Register the real cloud analyzers (Anthropic Claude / OpenAI / Google Gemini).
+# Each defers to local when unconfigured or on any error, so finalize never breaks.
+for _name, _provider in (("claude", "anthropic"), ("openai", "openai"), ("gemini", "gemini")):
+    register_analyzer(LLMAnalyzer(name=_name, provider=_provider), replace=True)

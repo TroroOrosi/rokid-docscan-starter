@@ -1,12 +1,13 @@
-"""Claude-backed page explainer (real live document explanation).
+"""Cloud-backed page explainer (real live document explanation).
 
 Production counterpart to ``LocalPlaceholderExplainer``. Given the current page
-(OCR text + summary) plus multi-page RAG context, it produces a genuine 3-line
-HUD explanation and a longer stored detail via the Anthropic Messages API.
+(OCR text + summary) plus multi-page RAG context, produces a genuine 3-line HUD
+explanation and a longer stored detail via a cloud LLM. Provider-agnostic: one
+class, selected by adapter name == provider (``claude`` / ``openai`` / ``gemini``).
 
-Routing: ``ROKID_EXPLAINER=claude``. If unconfigured or the call fails, it
-falls back to the offline local explainer (the Explainer contract forbids
-raising), so the explain-session HUD always renders.
+Routing: ``ROKID_EXPLAINER=claude|openai|gemini``. If unconfigured or the call
+fails, it falls back to the offline local explainer (the Explainer contract
+forbids raising), so the explain-session HUD always renders.
 """
 
 from __future__ import annotations
@@ -24,17 +25,19 @@ _SYSTEM = (
 )
 
 
-class ClaudeExplainer(Explainer):
-    name = "claude"
-    provider_version = "anthropic-messages-1.0.0"
+class LLMExplainer(Explainer):
     offline = False
 
-    def __init__(self, client: LLMClient | None = None):
+    def __init__(self, *, name: str = "claude", provider: str = "anthropic",
+                 client: LLMClient | None = None):
+        self.name = name
+        self.provider = provider
+        self.provider_version = f"{provider}-messages-1.0.0"
         self._client = client
         self._fallback = LocalPlaceholderExplainer()
 
     def explain(self, req: ExplainRequest) -> ExplainResult:
-        client = get_client(self._client)
+        client = get_client(self._client, self.provider)
         source = req.page_summary or req.page_ocr_text or ""
         if client is None or not source.strip():
             return self._fallback.explain(req)
@@ -56,8 +59,15 @@ class ClaudeExplainer(Explainer):
             detail=str(data.get("detail", source[:400])),
             evidence_pages=evidence,
             confidence=_clamp(data.get("confidence"), 1.0),
-            extras={"source": "claude", "model": client.model},
+            extras={"source": self.name, "provider": self.provider, "model": client.model},
         )
+
+
+class ClaudeExplainer(LLMExplainer):
+    """Back-compat alias: the Anthropic-backed explainer registered as ``claude``."""
+
+    def __init__(self, client: LLMClient | None = None):
+        super().__init__(name="claude", provider="anthropic", client=client)
 
 
 def _build_prompt(req: ExplainRequest) -> str:

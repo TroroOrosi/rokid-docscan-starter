@@ -117,7 +117,7 @@
 | # | 判断 | 選択肢 | システム側の受け口 |
 |---|------|--------|---------------------|
 | D1 | OCR をどこで動かすか | 端末側 / サーバ側 / プロバイダ | `ocr_text`・`fast_ocr_text`（端末）/ `app/analyzers`（サーバ） |
-| D2 | モデルルーティング（解析/解答/解説/抽出） | local（既定）/ **claude（同梱）** | `ROKID_ANALYZER` / `ROKID_SOLVER` / `ROKID_EXPLAINER` / `ROKID_EXTRACTOR`＝`claude`＋`ANTHROPIC_API_KEY`（§7） |
+| D2 | モデルルーティング（解析/解答/解説/抽出） | local（既定）/ **claude / openai / gemini（同梱）** | `ROKID_ANALYZER` / `ROKID_SOLVER` / `ROKID_EXPLAINER` / `ROKID_EXTRACTOR`＝`claude\|openai\|gemini`＋各社 API キー（§7） |
 | D3 | ストレージ/プライバシー | ローカルのみ / クラウド / 暗号化 | `app/config.py`（保存先）/ 同意フラグ（要追加） |
 | D4 | HUD 文言・言語 | 日本語/英語、短縮ルール | `app/hud.py`・`app/glasses_view.py`（テレプロンプター式でページ数制限なし） |
 | D5 | 信頼度しきい値 | HIT/LOW/NO の境界 | `app/matching.py` 定数 + `scripts/evaluate.py` の提案値 |
@@ -129,14 +129,13 @@
 
 ---
 
-## 4. グラス操作リファレンス（KeyCode マッピング・要実機検証）
+## 4. グラス操作リファレンス（KeyCode マッピング）
 
-> ⚠️ 下表の KeyCode は初代 Rokid **Glass**（単眼）のシステムドキュメント由来で、
-> 新しい Rokid **Glasses**（YodaOS-Sprite / Android 12 API 32）で同一とは限りません。
-> 実装前に対象端末で Android `KeyEvent`／CXR 入力イベントを実測し、
-> `app/glasses_view.py` の `OPERATION_CONTRACT` と合わせてください。操作契約は
-> レスポンス（`nav.operations`）としてデータで返るため、クライアント側で差し替え可能です。
-> 参考: [cxr-l-integration.md](cxr-l-integration.md) §7。
+> KeyCode は現行の Rokid マッピングです。サーバは `GET /v1/settings` の `input`
+> ブロックとして gesture→KeyCode を機械可読に公示します（`app/glasses_view.py` の
+> `INPUT_CONTRACT`）。機種/ファーム差がある場合はサーバ側の環境変数
+> **`ROKID_KEYMAP`（JSON）** で上書きでき、クライアント改修は不要です。
+> 計測・調整手順は [real-device-operation.md](real-device-operation.md) §5 を参照。
 
 | ユーザー操作 | Android KeyCode | 本サーバの用途 |
 |---|---|---|
@@ -219,26 +218,44 @@
 
 ---
 
-## 7. 実 AI（Claude アダプタ）の有効化
+## 7. 実 AI（claude / openai / gemini）の有効化
 
-「ダミー（プレースホルダ）」だった各ポートは、**同梱の実アダプタ `claude` を
-環境変数で有効化するだけ**で実運用できます。キー未設定時は自動でローカルに
-フォールバックするため、切り替えでサーバが止まることはありません。
+各ポートは **同梱の実アダプタ（`claude` / `openai` / `gemini`）を環境変数で有効化するだけ**
+で実運用できます。キー未設定/失敗時は自動でローカルにフォールバックするため、切り替えで
+サーバが止まることはありません。
 
 ```bash
-pip install anthropic                      # 任意依存
-export ANTHROPIC_API_KEY=sk-ant-...
+pip install anthropic                       # または openai / google-genai
+export ANTHROPIC_API_KEY=sk-ant-...         # OpenAI: OPENAI_API_KEY / Gemini: GOOGLE_API_KEY
 export ROKID_SOLVER=claude ROKID_EXPLAINER=claude \
-       ROKID_ANALYZER=claude ROKID_EXTRACTOR=claude
-export ROKID_LLM_MODEL=claude-opus-4-8     # 任意（安価: claude-haiku-4-5）
+       ROKID_ANALYZER=claude ROKID_EXTRACTOR=claude   # または openai / gemini
+export ROKID_LLM_MODEL=claude-opus-4-8      # openai/gemini は現行モデル id を必須指定
 uvicorn app.main:app --port 8000
 ```
 
-- `GET /v1/version` の `solvers`/`analyzers`/`explainers`/`extractors` に `claude` が
-  並んでいれば登録済みです（既定ルーティングは `local` のまま）。
+- `GET /v1/version` の `solvers`/`analyzers`/`explainers`/`extractors` に
+  `local`/`claude`/`openai`/`gemini` が並びます（既定ルーティングは `local`）。
 - 本番試験ロック（`mode=real` / `ROKID_ALLOW_REAL_EXAM_SOLVE`）は実モデルでも有効。
-- 詳細は [README.md](../README.md) の「実モデル接続」節、および
-  [cxr-l-integration.md](cxr-l-integration.md)（グラス本体 AI との接続）。
+- 公開/実機運用では `ROKID_API_KEY` で Bearer 認証を有効化可能（発見系エンドポイントは開放）。
+- 一連の実機手順は [real-device-operation.md](real-device-operation.md)、本体 AI との接続は
+  [cxr-l-integration.md](cxr-l-integration.md)。
+
+### 環境変数一覧
+
+| 変数 | 既定 | 役割 |
+|------|------|------|
+| `ROKID_DATA_DIR` | `data` | SQLite/画像の保存先 |
+| `ROKID_ANALYZER`/`ROKID_SOLVER`/`ROKID_EXPLAINER`/`ROKID_EXTRACTOR` | `local` | 各ポートのルーティング（`local\|claude\|openai\|gemini`） |
+| `ROKID_SOLVER_TIERS` | （単一） | 解答の二段フォールバック順（csv、末尾に local 自動付与） |
+| `ANTHROPIC_API_KEY`/`OPENAI_API_KEY`/`GOOGLE_API_KEY` | （なし） | 実アダプタの API キー（未設定→local） |
+| `ROKID_LLM_MODEL` | `claude-opus-4-8` | 使用モデル id（openai/gemini は必須指定） |
+| `ROKID_LLM_MAX_TOKENS` | `1024` | 応答トークン上限 |
+| `ROKID_ALLOW_REAL_EXAM_SOLVE` | `0` | 本番試験モードの解答ロック解除 |
+| `ROKID_ENABLE_EMBEDDING` | `0` | RAG の意味検索（未接続時は lexical） |
+| `ROKID_KEYMAP` | （なし） | gesture→KeyCode の上書き（JSON、`/v1/settings.input`） |
+| `ROKID_API_KEY` | （なし） | 設定時に Bearer 認証を要求（発見系は開放） |
+
+雛形は同梱の [`.env.example`](../.env.example) を参照。
 
 ---
 

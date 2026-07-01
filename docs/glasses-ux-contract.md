@@ -45,13 +45,13 @@
 
 ---
 
-## タッチパッド操作マッピング（KeyCode・要実機検証）
+## タッチパッド操作マッピング（KeyCode）
 
-> ⚠️ 下表は初代 Rokid **Glass**（単眼）のシステムドキュメント由来です。新しい
-> Rokid **Glasses**（YodaOS-Sprite / Android 12 API 32）で同一とは限らないため、
-> 実装前に対象端末で Android `KeyEvent`／CXR 入力イベントを実測し、
-> `app/glasses_view.py` の `OPERATION_CONTRACT` と突き合わせてください。操作契約は
-> レスポンス（`nav.operations`）としてデータで返るので、クライアント側で差し替え可能です。
+> 下表は現行の Rokid マッピングです。サーバは gesture→KeyCode を
+> **`GET /v1/settings` の `input` ブロック**として機械可読に公示します
+> （`app/glasses_view.py` の `INPUT_CONTRACT`）。機種/ファーム差がある場合は、
+> サーバ側の環境変数 **`ROKID_KEYMAP`（JSON）** で上書きでき、クライアント改修は
+> 不要です（計測手順は [real-device-operation.md](real-device-operation.md) §5）。
 
 | ユーザー操作 | Android KeyCode | 本サーバの用途 |
 |---|---|---|

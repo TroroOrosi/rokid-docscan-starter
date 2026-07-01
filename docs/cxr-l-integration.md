@@ -75,26 +75,31 @@
 ### 経路 A: サーバ側の実 AI アダプタ（このリポジトリで実装済み）
 
 サーバ内の各プロバイダポート（analyzer / solver / explainer / extractor）に
-**Anthropic Claude を使う実アダプタ `claude`** を同梱した。環境変数で有効化する：
+**実アダプタ `claude`（Anthropic）/ `openai`（OpenAI）/ `gemini`（Google）** を同梱した。
+環境変数で有効化する：
 
 ```bash
 # 例: 解答・解説・要約・メディア抽出をすべて実モデルで
-export ANTHROPIC_API_KEY=sk-ant-...
+export ANTHROPIC_API_KEY=sk-ant-...          # OpenAI: OPENAI_API_KEY / Gemini: GOOGLE_API_KEY
 export ROKID_SOLVER=claude ROKID_EXPLAINER=claude \
-       ROKID_ANALYZER=claude ROKID_EXTRACTOR=claude
-export ROKID_LLM_MODEL=claude-opus-4-8      # 任意（安価にするなら claude-haiku-4-5）
-pip install anthropic
+       ROKID_ANALYZER=claude ROKID_EXTRACTOR=claude   # または openai / gemini
+export ROKID_LLM_MODEL=claude-opus-4-8       # openai/gemini は現行モデル id を必須指定
+pip install anthropic                         # または openai / google-genai
 uvicorn app.main:app --port 8000
 ```
 
-- キー未設定なら自動的にオフラインのローカル実装へフォールバック（サーバは常に応答）。
-- 詳細は [README.md](../README.md) の「実モデル接続」節を参照。
+- キー未設定/失敗なら自動的にオフラインのローカル実装へフォールバック（サーバは常に応答）。
+- 詳細は [README.md](../README.md) の「実モデル接続」節、実機手順は
+  [real-device-operation.md](real-device-operation.md) を参照。
 
-### 経路 B: グラス本体 AI（`com.rokid.sprite.aiapp`）の出力を送る
+### 経路 B: グラス本体 AI（`com.rokid.sprite.aiapp` の AI Interaction）の出力を送る
 
-CXR-L アプリが AIDL でグラス本体 AI から得た音声認識結果・OCR・AI 応答を、
-そのまま本サーバの各エンドポイントに **`ocr_text` / `fast_ocr_text`** などとして渡す。
-サーバは受け取ったテキストを解析・照合・要約し、3行 HUD を返す。
+CXR-L アプリは AIDL で **本体 AI サービスの AI Interaction**（YodaOS-Sprite / Rizon が
+定義する AI・AI ワークフロー。**Gemini / ChatGPT / DeepSeek / Qwen をネイティブ対応**）を
+呼び出せる。そこで得た音声認識結果・OCR・AI 応答を、そのまま本サーバの各エンドポイントに
+**`ocr_text` / `fast_ocr_text`** として渡す。サーバは受け取ったテキストを解析・照合・要約し、
+3行 HUD を返す。**この経路ではサーバ側のクラウド鍵は不要**（本体 AI がモデルを担う）。
+CXR-M（スマホ）の AI Interaction からも同様に利用できる。
 
 ---
 
@@ -124,15 +129,50 @@ CXR-L アプリが AIDL でグラス本体 AI から得た音声認識結果・O
 
 ---
 
-## 7. 入力（タッチパッド/ボタン）に関する注意
+## 7. 入力（タッチパッド/ボタン）の KeyCode
 
-旧 md には Rokid **Glass**（初代・単眼）のシステムドキュメント由来の KeyCode 表
-（例 `KEYCODE_DPAD_CENTER=23`, `KEYCODE_TV=170`）が載っていました。これらは
-**新しい Rokid Glasses（YodaOS-Sprite / API 32）で同一とは限りません**。実装前に、
-対象端末上で Android `KeyEvent` および CXR の入力イベントを実測し、
-`app/glasses_view.py` の `OPERATION_CONTRACT` とマッピングを合わせてください。
-サーバの操作契約はデータ（`OPERATION_CONTRACT` / `nav.operations`）として返るため、
-クライアント側で実測値に差し替えるだけで済みます。
+サーバは gesture→KeyCode を **`GET /v1/settings` の `input` ブロック**として機械可読に
+公示します（`app/glasses_view.py` の `INPUT_CONTRACT`。既定は現行の Rokid マッピング、
+例 `tap`=`KEYCODE_DPAD_CENTER`(23) / `long_press`=`KEYCODE_TV`(170)）。CXR-L クライアントは
+これを唯一の権威として読み込みます。機種/ファーム差がある場合は、サーバ側の環境変数
+**`ROKID_KEYMAP`（JSON）** で該当ジェスチャの KeyCode を上書きでき、クライアント改修は不要です。
+計測手順は [real-device-operation.md](real-device-operation.md) §5。
+
+---
+
+## 8. 参照実装（Kotlin 最小スニペット）
+
+> ビルド可能な APK ではなく、CXR-L 上での連携の骨子を示す参照コードです。実際の SDK
+> API 名は Rokid の CXR-L SDK ドキュメントに合わせてください。
+
+```kotlin
+// 1) CXR-L エントリ: 本体 AI とメディアに AIDL バインド
+class DocScanApp(context: Context) : ExternalAppClient(context) {
+    // ExternalAppClient が IMediaStreamService（AIDL）へのバインドを担う。
+    // 対象 AI サービス: com.rokid.sprite.aiapp（AI Interaction）。
+}
+
+// 2) 起動時に /v1/settings を唯一の権威として読み込む（hud/capture/input）
+val settings = http.get("$SERVER/v1/settings").json()
+val tapKey = settings["input"]["gestures"]["tap"]["keycode"].asInt()   // 例: 23
+
+// 3) 経路B: 本体 AI（AI Interaction）の結果を ocr_text としてサーバへ
+val aiText = aiInteraction.recognize(frame)          // 本体AIのOCR/認識/応答
+val resp = http.postMultipart("$SERVER/v1/match",
+    "document_id" to docId, "image" to frameJpeg, "fast_ocr_text" to aiText)
+
+// 4) 受信した最大3行 HUD を両眼ディスプレイに描画（無音・即時置換）
+hud.render(resp["hud"]["lines"])                     // hud 契約は settings["hud"] に従う
+
+// 5) 入力: settings.input の KeyCode で操作を判定
+override fun onKeyDown(keyCode: Int, e: KeyEvent): Boolean = when (keyCode) {
+    tapKey -> { showAnswerOrExplain(); true }
+    else   -> super.onKeyDown(keyCode, e)
+}
+```
+
+- 認証を有効化したサーバへは `Authorization: Bearer <ROKID_API_KEY>` を付与。
+- `/v1/settings` は認証不要（発見系）なので、鍵取得前に契約をネゴシエートできる。
 
 ---
 

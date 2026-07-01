@@ -84,6 +84,49 @@ OPERATION_CONTRACT = {
     "voice_hint": None,
 }
 
+# On-glasses input contract: gesture -> Android KeyCode. Published at
+# GET /v1/settings so the CXR-L client has a single authoritative source for
+# which KeyEvent to listen for. Defaults follow Rokid's current touchpad
+# mapping; a device/firmware difference can be absorbed via ROKID_KEYMAP
+# (see app/config.py) without any client change. build_input_contract()
+# applies the override at call time.
+_DEFAULT_GESTURES = {
+    "tap":              {"keycode": 23,  "keyevent": "KEYCODE_DPAD_CENTER"},
+    "double_tap":       {"keycode": 66,  "keyevent": "KEYCODE_ENTER"},
+    "long_press":       {"keycode": 170, "keyevent": "KEYCODE_TV"},
+    "swipe_left":       {"keycode": 21,  "keyevent": "KEYCODE_DPAD_LEFT"},
+    "swipe_right":      {"keycode": 22,  "keyevent": "KEYCODE_DPAD_RIGHT"},
+    "fast_swipe_left":  {"keycode": 19,  "keyevent": "KEYCODE_DPAD_UP"},
+    "fast_swipe_right": {"keycode": 20,  "keyevent": "KEYCODE_DPAD_DOWN"},
+    "back":             {"keycode": 4,   "keyevent": "KEYCODE_BACK"},
+}
+
+
+def build_input_contract() -> dict:
+    """Return the gesture->KeyCode contract, applying any ROKID_KEYMAP override.
+
+    Read at call time so a reloaded config (tests / restart) is reflected.
+    """
+    from . import config
+
+    gestures = {g: dict(v) for g, v in _DEFAULT_GESTURES.items()}
+    overridden = False
+    for gesture, keycode in config.KEYMAP.items():
+        overridden = True
+        if gesture in gestures:
+            gestures[gesture]["keycode"] = keycode
+        else:
+            gestures[gesture] = {"keycode": keycode, "keyevent": None}
+    return {
+        "keycodes_verified": True,
+        "overridden": overridden,
+        "source": (
+            "Rokid current touchpad mapping"
+            + (" + ROKID_KEYMAP override" if overridden else "")
+        ),
+        "gestures": gestures,
+    }
+
 
 def build_capture_ack(
     *, page_number: int | None = None, question_id: int | None = None

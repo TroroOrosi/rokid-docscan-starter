@@ -1,23 +1,22 @@
-"""Claude-backed question solver (real, model-connected answering).
+"""Cloud-backed question solver (real, model-connected answering).
 
-This is the production counterpart to ``LocalPlaceholderSolver``. It sends the
-structured question (body, choices, retrieved RAG context) to the Anthropic
-Messages API and parses a structured :class:`SolveResult` back.
+Production counterpart to ``LocalPlaceholderSolver``. Sends the structured
+question (body, choices, retrieved RAG context) to a cloud LLM and parses a
+structured :class:`SolveResult` back. Provider-agnostic: one class, selected by
+adapter name == provider (``claude`` / ``openai`` / ``gemini``).
 
-Routing: register under ``claude`` and select with ``ROKID_SOLVER=claude`` or
-put ``claude`` in ``ROKID_SOLVER_TIERS`` (e.g. ``claude,local``). When the
-adapter is unconfigured (no ``ANTHROPIC_API_KEY``) or the call fails, ``solve``
-raises so :func:`app.solvers.registry.solve_with_fallback` transparently drops
-back to the offline local solver — the HUD always gets an answer, online or off.
+Routing: ``ROKID_SOLVER=claude|openai|gemini`` (or those names in
+``ROKID_SOLVER_TIERS``). When unconfigured (no provider key / model) or the call
+fails, ``solve`` raises so :func:`app.solvers.registry.solve_with_fallback`
+transparently drops back to the offline local solver.
 
-Guardrail note: the real-exam lock (``mode=real`` /
-``ROKID_ALLOW_REAL_EXAM_SOLVE``) is enforced in ``app/main.py`` regardless of
-which solver is active, so wiring a real model here does not weaken it.
+The real-exam lock is enforced in ``app/main.py`` regardless of solver, so
+wiring a real model here does not weaken it.
 """
 
 from __future__ import annotations
 
-from ..llm import LLMClient, get_client
+from ..llm import LLMClient, LLMConfigError, get_client
 from .base import Question, SolveResult, Solver
 
 _SYSTEM = (
@@ -33,21 +32,21 @@ _SYSTEM = (
 )
 
 
-class ClaudeSolver(Solver):
-    name = "claude"
-    provider_version = "anthropic-messages-1.0.0"
+class LLMSolver(Solver):
     offline = False
 
-    def __init__(self, client: LLMClient | None = None):
+    def __init__(self, *, name: str = "claude", provider: str = "anthropic",
+                 client: LLMClient | None = None):
+        self.name = name
+        self.provider = provider
+        self.provider_version = f"{provider}-messages-1.0.0"
         self._client = client
 
     def solve(self, *, question: Question, max_answer_len: int = 64) -> SolveResult:
-        client = get_client(self._client)
+        client = get_client(self._client, self.provider)
         if client is None:
             # Unconfigured -> let solve_with_fallback drop to the local solver.
-            from ..llm import LLMConfigError
-
-            raise LLMConfigError("claude solver requires ANTHROPIC_API_KEY")
+            raise LLMConfigError(f"{self.name} solver requires its provider API key/model")
 
         data = client.complete_json(system=_SYSTEM, prompt=_build_prompt(question))
         answer = str(data.get("answer", "")).strip()[:max_answer_len]
@@ -60,8 +59,15 @@ class ClaudeSolver(Solver):
             answer_confidence=_clamp(data.get("answer_confidence")),
             rationale_confidence=_clamp(data.get("rationale_confidence")),
             raw_reasoning=str(data.get("raw_reasoning", "")),
-            extras={"source": "claude", "model": client.model},
+            extras={"source": self.name, "provider": self.provider, "model": client.model},
         )
+
+
+class ClaudeSolver(LLMSolver):
+    """Back-compat alias: the Anthropic-backed solver registered as ``claude``."""
+
+    def __init__(self, client: LLMClient | None = None):
+        super().__init__(name="claude", provider="anthropic", client=client)
 
 
 def _build_prompt(question: Question) -> str:

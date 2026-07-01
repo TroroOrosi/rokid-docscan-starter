@@ -15,7 +15,8 @@ import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import JSONResponse
 from PIL import Image, UnidentifiedImageError
 from pydantic import BaseModel
 
@@ -34,6 +35,7 @@ from .glasses_view import (
     build_capture_ack,
     build_explain_view,
     build_glasses_view,
+    build_input_contract,
     build_locked_view,
     build_page_nav_ack,
     build_scan_ack,
@@ -72,6 +74,22 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Rokid DocScan", version=APP_VERSION, lifespan=lifespan)
+
+
+# --- optional bearer auth (off unless ROKID_API_KEY is set) ------------------
+
+@app.middleware("http")
+async def _auth_middleware(request: Request, call_next):
+    """Require `Authorization: Bearer <ROKID_API_KEY>` when a key is configured.
+
+    No key configured -> no auth (default; local dev + CI unaffected). Discovery
+    endpoints (config.AUTH_EXEMPT_PATHS) stay open so a client can negotiate
+    contracts before authenticating.
+    """
+    if config.API_KEY and request.url.path not in config.AUTH_EXEMPT_PATHS:
+        if request.headers.get("authorization", "") != f"Bearer {config.API_KEY}":
+            return JSONResponse({"detail": "unauthorized"}, status_code=401)
+    return await call_next(request)
 
 
 # --- request/response models ------------------------------------------------
@@ -148,6 +166,7 @@ def get_settings() -> dict:
         "hud": dict(RENDER_CONTRACT),
         "capture": dict(CAPTURE_CONTRACT),
         "operations": dict(OPERATION_CONTRACT),
+        "input": build_input_contract(),
         "versions": version_info(),
     }
 

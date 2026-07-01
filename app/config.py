@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
@@ -26,20 +27,54 @@ ENABLE_EMBEDDING = os.environ.get("ROKID_ENABLE_EMBEDDING", "0") == "1"
 ROKID_EXPLAINER = os.environ.get("ROKID_EXPLAINER", "local")
 
 # --- Real cloud-model adapters (opt-in, credential-gated) -------------------
-# The placeholder adapters become production-usable by routing to the "claude"
-# adapter in each registry and providing an Anthropic API key. All optional;
-# with none set the server runs fully offline on the local placeholders.
-#   ROKID_ANALYZER=claude   real page summarization (finalize)
-#   ROKID_SOLVER=claude     real question answering (exam-sessions)
-#   ROKID_EXPLAINER=claude  real page explanation (explain-sessions)
-#   ROKID_EXTRACTOR=claude  real formula/table/figure extraction
+# The placeholder adapters become production-usable by routing to a provider
+# adapter (claude|openai|gemini) in each registry and providing that provider's
+# API key. All optional; with none set the server runs fully offline on local.
+#   ROKID_ANALYZER=claude|openai|gemini   real page summarization (finalize)
+#   ROKID_SOLVER=claude|openai|gemini     real question answering (exam-sessions)
+#   ROKID_EXPLAINER=claude|openai|gemini  real page explanation (explain-sessions)
+#   ROKID_EXTRACTOR=claude|openai|gemini  real formula/table/figure extraction
 # Backing model + credentials (read in app/llm.py):
-#   ANTHROPIC_API_KEY       required to actually call the model (else -> local)
-#   ROKID_LLM_MODEL         default "claude-opus-4-8" (e.g. claude-haiku-4-5)
-#   ROKID_LLM_MAX_TOKENS    default 1024
-# Requires the optional dependency: pip install anthropic
+#   ANTHROPIC_API_KEY / OPENAI_API_KEY / GOOGLE_API_KEY  provider API key
+#   ROKID_LLM_MODEL   Anthropic default "claude-opus-4-8"; REQUIRED for
+#                     openai/gemini (set a current model id)
+#   ROKID_LLM_MAX_TOKENS   default 1024
+# Optional deps (install only for the provider you use):
+#   pip install anthropic | openai | google-genai
 LLM_MODEL = os.environ.get("ROKID_LLM_MODEL", "claude-opus-4-8")
-LLM_ENABLED = bool(os.environ.get("ANTHROPIC_API_KEY"))
+LLM_ENABLED = bool(
+    os.environ.get("ANTHROPIC_API_KEY")
+    or os.environ.get("OPENAI_API_KEY")
+    or os.environ.get("GOOGLE_API_KEY")
+    or os.environ.get("GEMINI_API_KEY")
+)
+
+# --- On-glasses input (KeyCode) override ------------------------------------
+# The server publishes a gesture->KeyCode contract at GET /v1/settings (see
+# app/glasses_view.py INPUT_CONTRACT) so the on-glass CXR-L client has one
+# authoritative source. Defaults follow Rokid's current mapping; override any
+# gesture for a specific device/firmware via ROKID_KEYMAP (JSON), e.g.
+#   ROKID_KEYMAP='{"tap": 23, "long_press": 170}'
+def _load_keymap() -> dict:
+    raw = os.environ.get("ROKID_KEYMAP")
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+        return {str(k): int(v) for k, v in data.items()} if isinstance(data, dict) else {}
+    except (ValueError, TypeError):
+        return {}
+
+
+KEYMAP = _load_keymap()
+
+# --- Optional server auth (off by default) ----------------------------------
+# When ROKID_API_KEY is set, mutating/reading endpoints require
+# `Authorization: Bearer <ROKID_API_KEY>`. Unset (default) = no auth, so local
+# dev and CI are unaffected. Discovery endpoints (/health, /v1/version,
+# /v1/settings) stay open so a client can negotiate before authenticating.
+API_KEY = os.environ.get("ROKID_API_KEY") or None
+AUTH_EXEMPT_PATHS = ("/health", "/v1/version", "/v1/settings", "/docs", "/openapi.json", "/redoc")
 
 
 def ensure_dirs() -> None:

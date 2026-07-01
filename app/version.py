@@ -21,7 +21,11 @@ from __future__ import annotations
 #        remain the default; the cloud path is opt-in via ROKID_*=claude +
 #        ANTHROPIC_API_KEY. The HTTP envelope (API_VERSION) is unchanged;
 #        /v1/version now additionally lists the "claude" adapters.
-APP_VERSION = "0.4.0"
+# 0.5.0: multi-vendor adapters (claude/openai/gemini) for every port;
+#        /v1/settings now publishes an `input` KeyCode contract (overridable via
+#        ROKID_KEYMAP); optional bearer auth (ROKID_API_KEY). API_VERSION stays
+#        1.6.0 (envelope unchanged; /v1/settings gains an additive block).
+APP_VERSION = "0.5.0"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.

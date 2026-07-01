@@ -138,21 +138,24 @@ CXR（Connected XR）SDK スイートは役割別に分かれている（末尾�
 
 ## 8. 実 AI アダプタ（このリポジトリに同梱）
 
-「ダミー（プレースホルダ）」だった各ポートに、**Anthropic Claude を使う実アダプタ
-`claude` を同梱**した。オフライン既定を壊さず、環境変数だけで実運用へ切り替わる。
+「ダミー（プレースホルダ）」だった各ポートに、**Anthropic Claude / OpenAI / Google Gemini
+を使う実アダプタ（`claude` / `openai` / `gemini`）を同梱**した。オフライン既定を壊さず、
+環境変数だけで実運用へ切り替わる。
 
 | ポート | 環境変数 | 実装 | 未設定時の挙動 |
 |--------|----------|------|----------------|
-| Analyzer（要約） | `ROKID_ANALYZER=claude` | `app/analyzers/claude.py` | ローカル要約へフォールバック |
-| Solver（解答） | `ROKID_SOLVER=claude` | `app/solvers/claude.py` | 二段フォールバックで local |
-| Explainer（解説） | `ROKID_EXPLAINER=claude` | `app/explainers/claude.py` | ローカル解説へフォールバック |
-| Extractor（数式/表/図） | `ROKID_EXTRACTOR=claude` | `app/extractors/claude.py` | ローカル抽出へフォールバック |
+| Analyzer（要約） | `ROKID_ANALYZER=claude\|openai\|gemini` | `app/analyzers/claude.py`（`LLMAnalyzer`） | ローカル要約へフォールバック |
+| Solver（解答） | `ROKID_SOLVER=claude\|openai\|gemini` | `app/solvers/claude.py`（`LLMSolver`） | 二段フォールバックで local |
+| Explainer（解説） | `ROKID_EXPLAINER=claude\|openai\|gemini` | `app/explainers/claude.py`（`LLMExplainer`） | ローカル解説へフォールバック |
+| Extractor（数式/表/図） | `ROKID_EXTRACTOR=claude\|openai\|gemini` | `app/extractors/claude.py`（`LLMExtractor`） | ローカル抽出へフォールバック |
 
-- 実呼び出しには `ANTHROPIC_API_KEY` と `pip install anthropic` が必要。
+- 実呼び出しには該当プロバイダの API キー（`ANTHROPIC_API_KEY` / `OPENAI_API_KEY` /
+  `GOOGLE_API_KEY`）と SDK（`pip install anthropic|openai|google-genai`）が必要。
   未設定なら**ネットワークに一切触れず**ローカル実装で動く（CI もこの経路）。
-- モデルは `ROKID_LLM_MODEL`（既定 `claude-opus-4-8`。安価にするなら
-  `claude-haiku-4-5`）、出力上限は `ROKID_LLM_MAX_TOKENS`（既定 1024）。
-- 共通クライアントは `app/llm.py`（公式 `anthropic` SDK を遅延 import、注入可能）。
+- モデルは `ROKID_LLM_MODEL`（Anthropic 既定 `claude-opus-4-8`。openai/gemini は現行
+  モデル id を必須指定）、出力上限は `ROKID_LLM_MAX_TOKENS`（既定 1024）。
+- 共通クライアントは `app/llm.py`（公式 SDK を遅延 import・注入可能・プロバイダ非依存）。
+  ルーティングは**アダプタ名＝プロバイダ**（`ROKID_SOLVER=openai` 等）。
 - 本番試験ロック（`mode=real` / `ROKID_ALLOW_REAL_EXAM_SOLVE`）は solver の実装に
   依らず `app/main.py` 側で強制されるため、実モデル接続でも緩まない。
 
