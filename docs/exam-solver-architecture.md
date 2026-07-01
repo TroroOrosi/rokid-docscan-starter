@@ -25,8 +25,8 @@
 
 | モジュール | 役割 | 差込口 |
 |------------|------|--------|
-| `app/solvers/`（base/registry/local_placeholder） | 問題解答ポート。既定はオフライン**プレースホルダ**（実際には解かない＝不正利用ガード）。`solve_with_fallback` で**二段フォールバック** | `register_solver()` で Gemini/OpenAI/Claude/VLM を登録、`ROKID_SOLVER` / `ROKID_SOLVER_TIERS` で切替 |
-| `app/extractors/`（base/registry/local_placeholder） | メディア抽出ポート（数式/図/グラフ/表、案6）。既定はオフライン placeholder | `register_extractor()` で 数式OCR/表/チャートモデルを登録、`ROKID_EXTRACTOR` で切替 |
+| `app/solvers/`（base/registry/local_placeholder/**claude**） | 問題解答ポート。既定はオフライン**プレースホルダ**（実際には解かない＝不正利用ガード）。`solve_with_fallback` で**二段フォールバック**。**実アダプタ `claude` 同梱** | `ROKID_SOLVER=claude`＋`ANTHROPIC_API_KEY` で実解答。`register_solver()` で他ベンダも追加可、`ROKID_SOLVER_TIERS` で tier 指定 |
+| `app/extractors/`（base/registry/local_placeholder/**claude**） | メディア抽出ポート（数式/図/グラフ/表）。既定はオフライン placeholder。**実アダプタ `claude` 同梱**（数式→LaTeX 等） | `ROKID_EXTRACTOR=claude` で実抽出。`register_extractor()` で他モデルも追加可 |
 | `app/retrieval.py` | 既存 `documents/pages` を横断検索し根拠 `context`/`evidence` を供給（依存なしの lexical scorer） | `ROKID_ENABLE_EMBEDDING` で実 embedding 検索に差替（未接続時は lexical へフォールバック） |
 | `app/layout.py` | OCRテキスト→設問番号/本文/選択肢/図表/**解答欄box**（正規化座標） | 実レイアウト/ビジョンモデルが同構造を埋める |
 | `app/subjects.py` | 科目推定（数学/英語/古文/物理/化学/歴史/現代文） | 実分類器に差替 |
@@ -68,9 +68,10 @@
 ## バージョン契約（`app/version.py`）
 
 `SOLVER_API_VERSION` / `EXTRACTOR_API_VERSION` / `GLASSES_VIEW_CONTRACT_VERSION` /
-`OVERLAY_CONTRACT_VERSION` を契約ごとに管理。`API_VERSION` は現在 `1.5.0`
-（Phase 2/3/4: `media`・`evidence`/`served_by`・reasoning エンドポイント・overlay トラッキング）。
-クライアントは `GET /v1/version` でネゴシエート。
+`OVERLAY_CONTRACT_VERSION` を契約ごとに管理。`API_VERSION` は現在 `1.6.0`
+（explain-sessions を含む）、`APP_VERSION` は `0.4.0`（`claude` 実アダプタ同梱）。
+`GLASSES_VIEW_CONTRACT_VERSION` は `1.2.0`（サーバ側の文字数切り詰め廃止）。
+クライアントは `GET /v1/version` でネゴシエート（`solvers`/`extractors` 等に `claude` が並ぶ）。
 
 ## 評価ベンチ（案12）
 
@@ -81,7 +82,9 @@ layout→subject→solver→HUD を流し、**設問抽出率/科目判定率/�
 
 ## 実機前提（要点）
 
-実機 Rokid Glasses は**単色緑 480×398/眼・FOV23°・6DoF非対応**の情報表示デバイス。
+実機 Rokid Glasses は**両眼 モノクロ緑 Micro-LED（480×398/眼）・FOV 約23°
+（一部レビューは30°）・6DoF非対応**の情報表示デバイス（ウェブ検証済み仕様。片眼のみではありません）。
 よって紙への厳密な固定重畳は不可で、`overlay` は 2D 画像アンカー＋方向ヒントとして提供し、
 解答は `glasses_view` のグラス内テキスト（段階・ページ送り）で読む。詳細は
-[glasses-ux-contract.md](glasses-ux-contract.md)。
+[glasses-ux-contract.md](glasses-ux-contract.md)、実機仕様は
+[cxr-l-integration.md](cxr-l-integration.md)。

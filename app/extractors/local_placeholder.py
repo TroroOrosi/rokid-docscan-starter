@@ -1,4 +1,4 @@
-"""Local, offline, credential-free media extractor used by the MVP today.
+"""Local, offline, credential-free media extractor used by default.
 
 It performs NO real computer vision. It inspects the client-provided OCR text
 with the same lightweight heuristics used elsewhere (see app/layout.py) to

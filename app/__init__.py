@@ -1,1 +1,1 @@
-"""Rokid DocScan MVP application package."""
+"""Rokid DocScan application package."""

@@ -19,9 +19,14 @@ iOS）が将来新しくなっても、サーバのコア（照合ロジック�
                     │ registry (差し替え点)
    ┌────────────────┼───────────────┬──────────────┐
    ▼                ▼               ▼              ▼
- local(今)        Gemini          OpenAI         Rizon/on-device(将来)
+ local(既定)      claude(実装済)   他ベンダ(例)    Rizon/on-device(将来)
  offline          cloud           cloud          workflow / 端末OCR
 ```
+
+> 図の「他ベンダ」は Gemini/OpenAI 等の拡張例（パターンは汎用）。**現状で同梱済みの
+> 実アダプタは `claude`（Anthropic）** で、`ROKID_*=claude` で全ポートを実 AI 化できます
+> （§5 フラグ表・§6(a)）。追加ベンダは同じ `Analyzer`/`Solver`/… ポートにアダプタを
+> 1つ実装して `register_*()` するだけ。
 
 ---
 
@@ -53,7 +58,7 @@ class AnalyzerResult:
 ### 新しいモデルを足す＝アダプタを1つ書いて登録するだけ
 
 ```python
-# app/analyzers/gemini.py （将来・本MVPには含めない）
+# app/analyzers/gemini.py （追加ベンダ例・本リポジトリには未同梱／claude は同梱済み）
 class GeminiAnalyzer(Analyzer):
     name = "gemini"; provider_version = "gemini-x.y"; offline = False
     def __init__(self, client): self._c = client      # creds は外から注入
@@ -94,7 +99,7 @@ get_analyzer(prefer=None) -> Analyzer        # ルーティング
 ## 3. デバイスバックエンド・レジストリ（クライアント側の将来設計）
 
 サーバは HTTP 契約だけ公開するので端末非依存ですが、**コンパニオン側** も
-同じ発想で抽象化します（jlink-ai 風の接続抽象。本MVPはサーバのみのため擬似コード）。
+同じ発想で抽象化します（jlink-ai 風の接続抽象。本リポジトリはサーバのみのため擬似コード）。
 
 ```kotlin
 // クライアント側ポート（Android/iOS/Rokid/Android XR 共通）
@@ -147,14 +152,18 @@ object DeviceRegistry {                // 端末を差し替える点
 
 | フラグ | 既定 | 役割 |
 |--------|------|------|
-| `ROKID_ANALYZER` | `local` | モデルルーティング（§2） |
-| `ROKID_SOLVER` | `local` | ソルバールーティング（解答モード） |
+| `ROKID_ANALYZER` | `local` | 解析ルーティング（`claude` で実 AI 要約） |
+| `ROKID_SOLVER` | `local` | ソルバールーティング（`claude` で実解答） |
 | `ROKID_SOLVER_TIERS` | （単一） | 二段フォールバックの tier 順（csv、末尾に local を自動付与） |
-| `ROKID_EXTRACTOR` | `local` | メディア抽出ルーティング（数式/図/表/グラフ） |
+| `ROKID_EXPLAINER` | `local` | 解説ルーティング（`claude` で実解説） |
+| `ROKID_EXTRACTOR` | `local` | メディア抽出ルーティング（`claude` で実抽出） |
+| `ANTHROPIC_API_KEY` | （なし） | `claude` アダプタの実呼び出しに必須（未設定なら local） |
+| `ROKID_LLM_MODEL` | `claude-opus-4-8` | `claude` アダプタのモデル id（安価: `claude-haiku-4-5`） |
+| `ROKID_LLM_MAX_TOKENS` | `1024` | `claude` アダプタの応答トークン上限 |
 | `ROKID_ALLOW_REAL_EXAM_SOLVE` | `0` | 本番試験モードの解答ロック解除（不正防止） |
 | `ROKID_DATA_DIR` | `data` | ストレージ先（プライバシー/隔離） |
-| `ROKID_ENABLE_EMBEDDING` | `0` | RAG の意味検索（embedding）を有効化 |
-| `ROKID_HUD_LANG` | `ja` | HUD 文言の言語（D4） |
+| `ROKID_ENABLE_EMBEDDING` | `0` | RAG の意味検索（embedding）を有効化（未接続時は lexical） |
+| `ROKID_HUD_LANG` | `ja` | HUD 文言の言語（D4、**将来拡張・未実装**） |
 
 ```python
 # 擬似: フラグの読み出しは一箇所に集約（app/config.py を拡張）
@@ -168,11 +177,13 @@ HUD_LANG = os.environ.get("ROKID_HUD_LANG", "ja")
 
 ## 6. 移行戦略（将来の変化シナリオ別）
 
-### (a) ローカル → クラウド OCR/要約（Gemini/OpenAI/Rizon）
-1. `GeminiAnalyzer` 等を `app/analyzers/<vendor>.py` に実装。
-2. 起動時に `register_analyzer(...)`、`ROKID_ANALYZER=gemini` で切替。
-3. creds は環境変数/シークレットマネージャから注入（リポジトリには入れない）。
-4. 圏外/失敗時は registry が `local` に自動フォールバック（§2）。
+### (a) ローカル → クラウド 要約/解答/解説/抽出（実装済み: `claude`）
+1. **実アダプタ `claude` は同梱済み**（`app/{analyzers,solvers,explainers,extractors}/claude.py`、
+   共通クライアント `app/llm.py`）。追加ベンダは同ポートにアダプタを1つ実装するだけ。
+2. `ROKID_ANALYZER/SOLVER/EXPLAINER/EXTRACTOR=claude` で切替。
+3. creds は `ANTHROPIC_API_KEY`（環境変数）から注入（リポジトリには入れない）。
+   任意依存は `pip install anthropic`（遅延 import）。
+4. 圏外/未設定/失敗時は registry が `local` に自動フォールバック（§2、solver は二段）。
 5. API/HUD 契約は不変 → クライアント変更不要。
 
 ### (b) 決定的照合 → 意味照合（embedding）併用
@@ -195,10 +206,11 @@ HUD_LANG = os.environ.get("ROKID_HUD_LANG", "ja")
 
 ### (e) 解答モードの高度化（Solver / メディア抽出 / RAG）
 解答モード（Phase 1〜4）も Analyzer と同じポート方式なので、**実アダプタ登録だけ**で高度化できる：
-1. **Solver**: `app/solvers/<vendor>.py` に実装し `register_solver(...)`。`ROKID_SOLVER`/`ROKID_SOLVER_TIERS` で
-   ルーティング。`solve_with_fallback` がクラウド→ローカルの**二段フォールバック**を担保（圏外/失敗でも HUD は返る）。
-2. **メディア抽出（案6）**: 数式OCR/表/チャートモデルを `app/extractors/<vendor>.py` に実装し `register_extractor(...)`。
-   `add_question` の `media` がそのまま高精度化（エンドポイント不変）。
+1. **Solver**: 実アダプタ `app/solvers/claude.py` を同梱（`ROKID_SOLVER=claude`）。
+   追加ベンダは `app/solvers/<vendor>.py` に実装し `register_solver(...)`。`ROKID_SOLVER_TIERS` で
+   tier 指定。`solve_with_fallback` がクラウド→ローカルの**二段フォールバック**を担保（圏外/失敗でも HUD は返る）。
+2. **メディア抽出**: 実アダプタ `app/extractors/claude.py` を同梱（`ROKID_EXTRACTOR=claude`、数式→LaTeX 等）。
+   追加モデルは `app/extractors/<vendor>.py` に実装し `register_extractor(...)`。`add_question` の `media` がそのまま高精度化。
 3. **RAG（案10）**: `app/retrieval.py` は今は依存なしの lexical scorer。`ROKID_ENABLE_EMBEDDING=1` ＋
    embedding を返す analyzer を組み合わせれば**意味検索**へ差替（未接続時は lexical にフォールバック）。
    `context`/`evidence` は solver と HUD まで配線済みなので、検索器の差替だけで根拠提示が向上する。
@@ -222,8 +234,10 @@ HUD_LANG = os.environ.get("ROKID_HUD_LANG", "ja")
 
 ---
 
-## 参考（出典）
+## 参考（出典・ウェブ検証）
 
-- [CXR-L SDK（Android/iOS） — Rokid AR Platform](https://ar.rokid.com/sdk?lang=en)
-- [awesome-rokid（RokidBrew 等コミュニティ）](https://github.com/Anezium/awesome-rokid)
-- [Rokid agentic AI / Rizon・Agent Store](https://www.globenewswire.com/news-release/2026/05/21/3299397/0/en/rokid-accelerates-agentic-ai-roadmap-for-smart-glasses-following-google-gemini-updates-at-i-o.html)
+- [CXR SDK（CXR-M / CXR-S / CXR-L） — Rokid AR Platform](https://ar.rokid.com/sdk?lang=en)
+- [buildwithfenna/rokid-docs（CXR SDK 詳解・Maven・AIDL）](https://github.com/buildwithfenna/rokid-docs)
+- [awesome-rokid（コミュニティ SDK/ツール集）](https://github.com/Anezium/awesome-rokid)
+- [Rokid、Gemini/ChatGPT をネイティブ統合（Rizon / Agent Store）](https://www.prnewswire.com/news-releases/rokid-integrates-googles-gemini-chatgpt-in-major-update-to-international-smart-glasses-in-open-ecosystem-push-302700875.html)
+- CXR-L 単体アプリ ⇄ 本体 AI ⇄ 本サーバ の接続は [cxr-l-integration.md](cxr-l-integration.md)

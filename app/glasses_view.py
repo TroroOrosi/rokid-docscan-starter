@@ -1,12 +1,17 @@
 """Build the on-glasses view payload (silent, monochrome, paginated lines).
 
-Hardware reality (Rokid Glasses RV101):
-  Display : JBD JBD4020 Micro-LED (right eye only), monochrome green,
-            480×398 px per eye (some listing sources cite 480×640),
-            FOV ~23–30°, up to 1 500 nits, 10-level dimming.
-  SoC     : Qualcomm Snapdragon AR1 Gen 1, 2 GB RAM / 32 GB ROM.
-  OS      : YodaOS (Android 12, API 32), build SKQ1.240613.001.
-  SDK     : CXR-S (on-device bridge) + CXR-M (mobile companion).
+Hardware reality (Rokid Glasses, web-verified 2026-07; see
+docs/cxr-l-integration.md):
+  Display : dual-eye (binocular) monochrome-green Micro-LED + diffractive
+            waveguide, 480×398 px per eye, FOV ~23° (some reviews cite 30°),
+            up to 1 500 nits, adjustable dimming.
+  SoC     : Qualcomm Snapdragon AR1 (Gen 1) + NXP RT600 co-processor,
+            2 GB RAM / 32 GB ROM.
+  Camera  : 12 MP Sony IMX681.  Connectivity: Wi-Fi 6 / Bluetooth 5.3.
+  OS      : YodaOS-Sprite (Android 12, API 32).
+  SDK     : CXR-L (standalone on-glass app; binds IMediaStreamService via AIDL
+            to the AI app com.rokid.sprite.aiapp) + CXR-S (on-device bridge)
+            + CXR-M (mobile companion).
 
 Design principles (SILENT-FRIENDLY, no-flash):
   - NO audio cues and NO animation directives.

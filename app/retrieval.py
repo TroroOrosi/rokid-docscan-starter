@@ -2,7 +2,7 @@
 
 When solving a question we can pull supporting context from the user's own
 captured study materials (the existing `documents`/`pages` store built by the
-matching MVP). This module returns the most relevant pages as `context` text
+page-matching mode). This module returns the most relevant pages as `context` text
 plus `evidence_pages`, which the solver uses as grounding and the HUD surfaces
 as "根拠".
 
