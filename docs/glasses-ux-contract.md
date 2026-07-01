@@ -12,7 +12,9 @@
 ```
 
 - **ユーザーが操作・閲覧するのは眼鏡だけ**。スマホ/PC はポケット・自宅側で通信と AI 処理を担う裏方。
-- 接続は CXR-M 伴走アプリ経由、または CXR-L 単体アプリ＋Wi-Fi 直結のいずれでも可。サーバから見れば同じ HTTP 契約。
+- 接続は CXR-M 伴走アプリ経由、または **CXR-L 単体アプリ＋Wi-Fi 6 直結**のいずれでも可。サーバから見れば同じ HTTP 契約。
+- 実機ハードウェア（**両眼** 480×398 モノクロ緑 Micro-LED 等）と CXR-M/S/L の役割、
+  グラス本体 AI（`com.rokid.sprite.aiapp`）との接続は [cxr-l-integration.md](cxr-l-integration.md) を参照。
 
 ## 必須要件（外せない）
 
@@ -43,10 +45,13 @@
 
 ---
 
-## タッチパッド操作マッピング（公式キーコード準拠）
+## タッチパッド操作マッピング（KeyCode・要実機検証）
 
-> 出典: Rokid Glass 公式システムドキュメント V3.1
-> （[rokid.github.io/glass-docs/1-system](https://rokid.github.io/glass-docs/1-system/)）
+> ⚠️ 下表は初代 Rokid **Glass**（単眼）のシステムドキュメント由来です。新しい
+> Rokid **Glasses**（YodaOS-Sprite / Android 12 API 32）で同一とは限らないため、
+> 実装前に対象端末で Android `KeyEvent`／CXR 入力イベントを実測し、
+> `app/glasses_view.py` の `OPERATION_CONTRACT` と突き合わせてください。操作契約は
+> レスポンス（`nav.operations`）としてデータで返るので、クライアント側で差し替え可能です。
 
 | ユーザー操作 | Android KeyCode | 本サーバの用途 |
 |---|---|---|

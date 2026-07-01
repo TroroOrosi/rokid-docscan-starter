@@ -14,6 +14,7 @@ from __future__ import annotations
 import os
 
 from ..explainer import Explainer
+from .claude import ClaudeExplainer
 from .local_placeholder import LocalPlaceholderExplainer
 
 DEFAULT_EXPLAINER = "local"
@@ -49,3 +50,6 @@ def get_explainer(prefer: str | None = None) -> Explainer:
 
 # Register the offline default at import time so the server always has one.
 register_explainer(LocalPlaceholderExplainer(), replace=True)
+# Register the real cloud explainer (Anthropic Claude). It defers to local when
+# unconfigured (no ANTHROPIC_API_KEY) or on any error, so the HUD always renders.
+register_explainer(ClaudeExplainer(), replace=True)

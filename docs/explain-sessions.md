@@ -1,6 +1,8 @@
 # 資料解説モード（explain-sessions）仕様書
 
-API v1.7.0 で再設計。登録済み文書を Rokid Glasses **単体でページナビゲーション→解説を HUD に段階表示**する機能です。
+**UX 第 v1.7 世代**の撮影なし設計（HTTP エンベロープは `API_VERSION = 1.6.0`、
+`APP_VERSION = 0.4.0`）。登録済み文書を Rokid Glasses
+**単体でページナビゲーション→解説を HUD に段階表示**する機能です。
 
 **撮影なし・画像送信なし・音声不要・フラッシュなし・スマホ画面なしで完結します。**
 
@@ -212,26 +214,30 @@ POST /explain-sessions
 | 値 | 説明 |
 |---|---|
 | `local`（既定） | オフラインのプレースホルダ。外部 API 不要。 |
-| `gemini` | Google Gemini（要 API キー `GOOGLE_API_KEY`） |
-| `openai` | OpenAI GPT-4o（要 API キー `OPENAI_API_KEY`） |
+| `claude`（同梱の実アダプタ） | Anthropic Claude（要 `ANTHROPIC_API_KEY`＋`pip install anthropic`。モデルは `ROKID_LLM_MODEL`、既定 `claude-opus-4-8`） |
 
 ```bash
-ROKID_EXPLAINER=gemini GOOGLE_API_KEY=your_key uvicorn app.main:app --port 8000
+pip install anthropic
+ROKID_EXPLAINER=claude ANTHROPIC_API_KEY=sk-ant-... uvicorn app.main:app --port 8000
 ```
+
+- キー未設定／`anthropic` 未導入なら、**ネットワークに触れず自動でローカルへフォールバック**します。
+- 実装は `app/explainers/claude.py`（共通クライアントは `app/llm.py`）。
+- 他ベンダを足したい場合は `Explainer` ポートにアダプタを1つ実装して `register_explainer()`。
 
 ---
 
 ## テスト（オフライン・クレデンシャル不要）
 
 ```bash
-pytest tests/test_explain_sessions.py -v
+pytest tests/test_explain_api.py -v
 ```
 
 ---
 
 ## 制限・注意事項
 
-- Explainer がローカルプレースホルダの場合、解説テキストはダミーです。実運用では `ROKID_EXPLAINER` を Gemini/OpenAI 等に切り替えてください。
+- Explainer がローカルプレースホルダの場合、解説テキストは要約/OCR の整形にとどまります。実運用では `ROKID_EXPLAINER=claude`＋`ANTHROPIC_API_KEY` で実 AI 解説に切り替えてください（同梱済み）。
 - 解説の質はページ登録時の `ocr_text` の精度に依存します。
 - 認証・マルチテナント・並行書き込み制御は未実装（MVP のため）。
 - `current_page_index` はサーバー側でクランプ処理されます（0以下・総ページ数以上にはなりません）。

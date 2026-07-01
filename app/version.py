@@ -16,7 +16,12 @@ Clients should treat an unknown *major* bump as "ask the user to update".
 
 from __future__ import annotations
 
-APP_VERSION = "0.3.0"
+# 0.4.0: real Anthropic Claude adapters shipped for every provider port
+#        (analyzer/solver/explainer/extractor). Offline local placeholders
+#        remain the default; the cloud path is opt-in via ROKID_*=claude +
+#        ANTHROPIC_API_KEY. The HTTP envelope (API_VERSION) is unchanged;
+#        /v1/version now additionally lists the "claude" adapters.
+APP_VERSION = "0.4.0"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.

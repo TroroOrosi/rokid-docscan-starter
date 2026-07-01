@@ -7,7 +7,9 @@
 - 本リポジトリ（サーバ MVP）は **既に実装済み** で、ローカルで動きます。
 - ここで「ユーザーが行う」と書いた項目は、**コードでは代行できない物理操作や
   アカウント取得・同意取得など** です。それ以外はシステムが自動化します。
-- 現在のバージョン: **APP 0.3.0 / API 1.6.0**
+- 現在のバージョン: **APP 0.4.0 / API 1.6.0**
+- 要約/解答/解説/メディア抽出は既定でローカル実装ですが、**実 AI（Anthropic Claude）
+  アダプタ `claude` を同梱**しており、環境変数で実運用に切り替えられます（§6・§7）。
 
 ---
 
@@ -68,7 +70,7 @@
 | S3 | pHash 計算（64bit, DCT） | `app/matching.py: phash/phash_hex` |
 | S4 | OCR-MD5（OCRなしは画像MD5で代替） | `app/matching.py: ocr_md5` + `add_page` |
 | S5 | finalize（要約生成・ready 化） | `POST /v1/documents/{id}/finalize` |
-| S6 | 要約（プロバイダ非依存） | `app/analyzers/`（現状は local プレースホルダ） |
+| S6 | 要約（プロバイダ非依存） | `app/analyzers/`（local 既定 / `claude` 実アダプタ同梱） |
 | S7 | ページ照合（ハミング+OCR類似度） | `app/matching.py: match`（graded OCR similarity対応） |
 | S8 | HUD 応答（3行固定）| `app/hud.py: build_hud` |
 | S9 | バージョン情報の付与 | `app/version.py` → 各レスポンス |
@@ -89,7 +91,7 @@
 
 ```json
 {
-  "app_version": "0.3.0",
+  "app_version": "0.4.0",
   "api_version": "1.6.0",
   "matcher_version": "1.1.0",
   "hud_contract_version": "1.0.0",
@@ -97,7 +99,7 @@
   "solver_api_version": "1.0.0",
   "extractor_api_version": "1.0.0",
   "explainer_api_version": "1.0.0",
-  "glasses_view_contract_version": "1.1.0",
+  "glasses_view_contract_version": "1.2.0",
   "overlay_contract_version": "1.1.0"
 }
 ```
@@ -115,7 +117,7 @@
 | # | 判断 | 選択肢 | システム側の受け口 |
 |---|------|--------|---------------------|
 | D1 | OCR をどこで動かすか | 端末側 / サーバ側 / プロバイダ | `ocr_text`・`fast_ocr_text`（端末）/ `app/analyzers`（サーバ） |
-| D2 | モデルルーティング（解析/解答/解説） | local / Gemini / OpenAI | `app/analyzers/registry.py`（`ROKID_ANALYZER`）/ `app/solvers/registry.py`（`ROKID_SOLVER`）/ `ROKID_EXPLAINER` |
+| D2 | モデルルーティング（解析/解答/解説/抽出） | local（既定）/ **claude（同梱）** | `ROKID_ANALYZER` / `ROKID_SOLVER` / `ROKID_EXPLAINER` / `ROKID_EXTRACTOR`＝`claude`＋`ANTHROPIC_API_KEY`（§7） |
 | D3 | ストレージ/プライバシー | ローカルのみ / クラウド / 暗号化 | `app/config.py`（保存先）/ 同意フラグ（要追加） |
 | D4 | HUD 文言・言語 | 日本語/英語、短縮ルール | `app/hud.py`・`app/glasses_view.py`（テレプロンプター式でページ数制限なし） |
 | D5 | 信頼度しきい値 | HIT/LOW/NO の境界 | `app/matching.py` 定数 + `scripts/evaluate.py` の提案値 |
@@ -127,9 +129,14 @@
 
 ---
 
-## 4. グラス操作リファレンス（Rokid Glass 公式キーコード準拠）
+## 4. グラス操作リファレンス（KeyCode マッピング・要実機検証）
 
-> 出典: Rokid Glass 公式システムドキュメント V3.1
+> ⚠️ 下表の KeyCode は初代 Rokid **Glass**（単眼）のシステムドキュメント由来で、
+> 新しい Rokid **Glasses**（YodaOS-Sprite / Android 12 API 32）で同一とは限りません。
+> 実装前に対象端末で Android `KeyEvent`／CXR 入力イベントを実測し、
+> `app/glasses_view.py` の `OPERATION_CONTRACT` と合わせてください。操作契約は
+> レスポンス（`nav.operations`）としてデータで返るため、クライアント側で差し替え可能です。
+> 参考: [cxr-l-integration.md](cxr-l-integration.md) §7。
 
 | ユーザー操作 | Android KeyCode | 本サーバの用途 |
 |---|---|---|
@@ -207,8 +214,31 @@
 6. **D1〜D7 を決定**（人間）。`suggested_thresholds` を見て D5 を調整。
 7. 決めた D2（モデル）に合わせて analyzer/solver/explainer を登録（実装差し替えのみ）。
 
-> この MVP の時点では D2 は `local`（オフライン・クレデンシャル不要）固定で
-> 動きます。クラウド/Gemini への切り替えは、アダプタを1つ登録するだけです。
+> 既定の D2 は `local`（オフライン・クレデンシャル不要）で全機能が動きます。
+> 実 AI への切り替えは §7 のとおり環境変数だけで完了します（実アダプタは同梱済み）。
+
+---
+
+## 7. 実 AI（Claude アダプタ）の有効化
+
+「ダミー（プレースホルダ）」だった各ポートは、**同梱の実アダプタ `claude` を
+環境変数で有効化するだけ**で実運用できます。キー未設定時は自動でローカルに
+フォールバックするため、切り替えでサーバが止まることはありません。
+
+```bash
+pip install anthropic                      # 任意依存
+export ANTHROPIC_API_KEY=sk-ant-...
+export ROKID_SOLVER=claude ROKID_EXPLAINER=claude \
+       ROKID_ANALYZER=claude ROKID_EXTRACTOR=claude
+export ROKID_LLM_MODEL=claude-opus-4-8     # 任意（安価: claude-haiku-4-5）
+uvicorn app.main:app --port 8000
+```
+
+- `GET /v1/version` の `solvers`/`analyzers`/`explainers`/`extractors` に `claude` が
+  並んでいれば登録済みです（既定ルーティングは `local` のまま）。
+- 本番試験ロック（`mode=real` / `ROKID_ALLOW_REAL_EXAM_SOLVE`）は実モデルでも有効。
+- 詳細は [README.md](../README.md) の「実モデル接続」節、および
+  [cxr-l-integration.md](cxr-l-integration.md)（グラス本体 AI との接続）。
 
 ---
 

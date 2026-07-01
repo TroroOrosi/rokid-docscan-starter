@@ -20,6 +20,7 @@ from __future__ import annotations
 import os
 
 from .base import Solver
+from .claude import ClaudeSolver
 from .local_placeholder import LocalPlaceholderSolver
 
 DEFAULT_SOLVER = "local"
@@ -123,3 +124,6 @@ def solve_with_fallback(
 
 # Register the offline default at import time so the server always has one.
 register_solver(LocalPlaceholderSolver(), replace=True)
+# Register the real cloud solver (Anthropic Claude). It only touches the network
+# when routed to AND ANTHROPIC_API_KEY is set; otherwise it defers to local.
+register_solver(ClaudeSolver(), replace=True)
