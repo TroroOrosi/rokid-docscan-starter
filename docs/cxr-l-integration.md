@@ -68,43 +68,55 @@
 
 ---
 
-## 4. 「グラス本体 AI」をサーバに繋ぐ2経路
+## 4. 「グラス本体 AI」をサーバに繋ぐ2経路（B が主経路）
 
 本サーバは 2 通りの繋ぎ方を想定している。どちらも同じ HTTP 契約なのでサーバ側は不変。
+**exam の解答は経路 B（本体 AI＝搭載 GPT / Gemini）が主経路**で、経路 A（サーバ側実 AI）は
+より高性能なモデルが必要な場合の任意経路。**Claude はグラス搭載 AI ではない**（搭載ネイティブは
+Gemini / ChatGPT / DeepSeek / Qwen）。
 
-### 経路 A: サーバ側の実 AI アダプタ（このリポジトリで実装済み）
-
-サーバ内の各プロバイダポート（analyzer / solver / explainer / extractor）に
-**実アダプタ `claude`（Anthropic）/ `openai`（OpenAI）/ `gemini`（Google）** を同梱した。
-環境変数で有効化する：
-
-```bash
-# 例: 解答・解説・要約・メディア抽出をすべて実モデルで
-export ANTHROPIC_API_KEY=sk-ant-...          # OpenAI: OPENAI_API_KEY / Gemini: GOOGLE_API_KEY
-export ROKID_SOLVER=claude ROKID_EXPLAINER=claude \
-       ROKID_ANALYZER=claude ROKID_EXTRACTOR=claude   # または openai / gemini
-export ROKID_LLM_MODEL=claude-opus-4-8       # openai/gemini は現行モデル id を必須指定
-pip install anthropic                         # または openai / google-genai
-uvicorn app.main:app --port 8000
-```
-
-- キー未設定/失敗なら自動的にオフラインのローカル実装へフォールバック（サーバは常に応答）。
-- 詳細は [README.md](../README.md) の「実モデル接続」節、実機手順は
-  [real-device-operation.md](real-device-operation.md) を参照。
-
-### 経路 B: グラス本体 AI（`com.rokid.sprite.aiapp` の AI Interaction）の出力を送る
+### 経路 B（主経路）: グラス本体 AI（`com.rokid.sprite.aiapp` の AI Interaction）が読取・解答する
 
 CXR-L アプリは AIDL で **本体 AI サービスの AI Interaction**（YodaOS-Sprite / Rizon が
 定義する AI・AI ワークフロー。**Gemini / ChatGPT / DeepSeek / Qwen をネイティブ対応**）を
-呼び出せる。そこで得た音声認識結果・OCR・AI 応答を、そのまま本サーバの各エンドポイントに
-**`ocr_text` / `fast_ocr_text`** として渡す。サーバは受け取ったテキストを解析・照合・要約し、
-3行 HUD を返す。**この経路ではサーバ側のクラウド鍵は不要**（本体 AI がモデルを担う）。
+呼び出せる。そこで得た認識結果・AI 応答を本サーバへ渡す。
+**この経路ではサーバ側のクラウド鍵は不要**（本体 AI がモデルを担う）。
 CXR-M（スマホ）の AI Interaction からも同様に利用できる。
+
+- **読取**：本体 AI の認識テキストを `POST /v1/documents/{id}/pages` の
+  **`ocr_text` / `vision_text`** として渡す（照合用途は `fast_ocr_text`）。
+- **解答（3 フェーズの主経路）**：`finalize-reading` 後、**本体 GPT が全問を解き**、問題別解答を
+  **`POST /v1/exam-sessions/{id}/solutions`** に ingest する（`served_by="onboard"`）。
+  サーバは分割・整形・状態管理と閲覧 HUD（`GET /review`）を担う。
 
 **撮影しない・図も読む**：本体 AI は**視認＝認識**であり写真を撮らない。図・グラフ・写真の読み取りは
 本体 AI のマルチモーダル認識結果を **`vision_text`**（テキスト）として `POST /v1/documents/{id}/pages` に
 本文 `ocr_text` と一緒に渡す（**画像バイトは送らない**）。サーバは `ocr_text`＋`vision_text` を1つの材料に統合し、
-文書ページ移動型 exam の `solve-current` で**全ページを文脈に**して解く（ページ跨ぎ問題に対応）。
+問題分割（`segment_problems`）と解答文脈（全ページ）に使う（ページ跨ぎ問題に対応）。
+視認＝カメラ稼働＝プライバシー LED 点灯のため、**読取フェーズを最短化**し、`finalize-reading`
+以降はカメラを閉じる（LED 消灯）。
+
+### 経路 A（任意）: サーバ側の実 AI アダプタ（このリポジトリで実装済み）
+
+より高性能なモデルが必要な場合、サーバ内の各プロバイダポート
+（analyzer / solver / explainer / extractor）の
+**実アダプタ `openai`（OpenAI GPT）/ `gemini`（Google）/ `claude`（Anthropic）** を
+環境変数で有効化する：
+
+```bash
+# 例: 解答・解説・要約・メディア抽出をすべて実モデルで
+export OPENAI_API_KEY=sk-...                 # Gemini: GOOGLE_API_KEY / Anthropic: ANTHROPIC_API_KEY
+export ROKID_SOLVER=openai ROKID_EXPLAINER=openai \
+       ROKID_ANALYZER=openai ROKID_EXTRACTOR=openai   # または gemini / claude
+export ROKID_LLM_MODEL=<現行のGPTモデルid>    # openai/gemini は現行モデル id を必須指定
+pip install openai                            # または google-genai / anthropic
+uvicorn app.main:app --port 8000
+```
+
+- キー未設定/失敗なら自動的にオフラインのローカル実装へフォールバック（サーバは常に応答）。
+- `ROKID_SOLVER` を non-local にすると `finalize-reading` がサーバ側で全問一括解答する。
+- 詳細は [README.md](../README.md) の「実モデル接続」節、実機手順は
+  [real-device-operation.md](real-device-operation.md) を参照。
 
 ---
 
@@ -112,10 +124,12 @@ CXR-M（スマホ）の AI Interaction からも同様に利用できる。
 
 | グラス側でやること | 使う SDK / AIDL | 送る先エンドポイント | HUD に返るもの |
 |--------------------|-----------------|----------------------|----------------|
-| カメラ1フレーム取得 | `IMediaStreamService`（AIDL） | `POST /v1/match`（画像＋`fast_ocr_text`） | `hud.lines`（3行） |
-| 端末側 OCR（本体 AI/ML） | `com.rokid.sprite.aiapp` | 上記の `ocr_text` として同梱 | 照合結果 |
-| 問題撮影→解答 | `IMediaStreamService` | `POST /v1/exam-sessions/{id}/questions` → `.../solve` | `glasses_view`（段階×ページ送り） |
-| 資料の解説（撮影なし） | ページ送りボタン | `POST /v1/explain-sessions/{id}/next-page` → `GET .../explain` | `glasses_view`（overview/detail/evidence） |
+| ページ視認＝読取（2本指タップ） | `com.rokid.sprite.aiapp`（AI Interaction） | `POST /v1/documents/{id}/pages`（`ocr_text`/`vision_text`） | `scan_ack`（進捗） |
+| 読取完了宣言（ダブルタップ） | — | `POST /v1/exam-sessions/{id}/finalize-reading` | `reading_ack`（カメラOFF） |
+| 本体 GPT の問題別解答を送る | `com.rokid.sprite.aiapp` | `POST /v1/exam-sessions/{id}/solutions` | `ingest_ack`（N/M問 解答済） |
+| 問題別閲覧（2本指スワイプ） | — | `GET /v1/exam-sessions/{id}/review?index=&view_page=` | `glasses_view`（一括1ストリーム） |
+| カメラ1フレーム取得（照合時のみ） | `IMediaStreamService`（AIDL） | `POST /v1/match`（画像＋`fast_ocr_text`） | `hud.lines`（3行） |
+| 資料の解説（撮影なし） | ページ送りジェスチャ | `POST /v1/explain-sessions/{id}/next-page` → `GET .../explain` | `glasses_view`（overview/detail/evidence） |
 | HUD 描画 | CXR-L ディスプレイ API | — | 受信 `lines` をそのまま描画 |
 
 - サーバの描画契約は `GET /v1/settings` の `hud` を唯一の権威ソースとして読む
@@ -130,17 +144,18 @@ CXR-M（スマホ）の AI Interaction からも同様に利用できる。
 3. グラス本体 AI サービス `com.rokid.sprite.aiapp` へのバインド権限・Intent を設定。
 4. カメラ/音声/OCR 結果を取り出し、本サーバの HTTP API に送信（Wi-Fi 6 直結）。
 5. 応答の `hud.lines` / `glasses_view.lines`（最大3行）を HUD に描画。
-6. 操作は物理ボタン＋タッチパッド（音声は任意トグル）。KeyCode は §7 参照。
+6. 操作は公式ジェスチャ（2本指タップ/タップ/ダブルタップ/2本指スワイプ/長押し。音声は任意トグル）。KeyCode は §7 参照。
 
 ---
 
 ## 7. 入力（タッチパッド/ボタン）の KeyCode
 
 サーバは gesture→KeyCode を **`GET /v1/settings` の `input` ブロック**として機械可読に
-公示します（`app/glasses_view.py` の `INPUT_CONTRACT`。既定は現行の Rokid マッピング、
-例 `tap`=`KEYCODE_DPAD_CENTER`(23) / `long_press`=`KEYCODE_TV`(170)）。CXR-L クライアントは
-これを唯一の権威として読み込みます。機種/ファーム差がある場合は、サーバ側の環境変数
-**`ROKID_KEYMAP`（JSON）** で該当ジェスチャの KeyCode を上書きでき、クライアント改修は不要です。
+公示します（`app/glasses_view.py` の `build_input_contract()`。ジェスチャ名は現行公式、
+例 `single_tap`=`KEYCODE_DPAD_CENTER`(23) / `long_press`=`KEYCODE_TV`(170)）。CXR-L クライアントは
+これを唯一の権威として読み込みます。**ただし KeyCode 値は旧・単眼 Rokid Glass 由来で未実測**
+（`keycodes_verified:false`・`keycode_source` 参照）。実機で計測のうえ、機種/ファーム差はサーバ側の
+環境変数 **`ROKID_KEYMAP`（JSON）** で上書きしてください（クライアント改修不要）。
 計測手順は [real-device-operation.md](real-device-operation.md) §5。
 
 ---
@@ -159,12 +174,17 @@ class DocScanApp(context: Context) : ExternalAppClient(context) {
 
 // 2) 起動時に /v1/settings を唯一の権威として読み込む（hud/capture/input）
 val settings = http.get("$SERVER/v1/settings").json()
-val tapKey = settings["input"]["gestures"]["tap"]["keycode"].asInt()   // 例: 23
+val tapKey = settings["input"]["gestures"]["single_tap"]["keycode"].asInt()   // 例: 23（未実測・要計測）
 
-// 3) 経路B: 本体 AI（AI Interaction）の結果を ocr_text としてサーバへ
-val aiText = aiInteraction.recognize(frame)          // 本体AIのOCR/認識/応答
-val resp = http.postMultipart("$SERVER/v1/match",
-    "document_id" to docId, "image" to frameJpeg, "fast_ocr_text" to aiText)
+// 3) 経路B（主経路）: 本体 AI（AI Interaction）で読取 → 解答を ingest
+val pageText = aiInteraction.recognize(frame)        // 本体AIの認識（視認＝読取。LED点灯中）
+http.postMultipart("$SERVER/v1/documents/$docId/pages",
+    "page_index" to i, "ocr_text" to pageText.body, "vision_text" to pageText.figures)
+// 読取完了（ダブルタップ）→ finalize-reading → 以降カメラOFF（LED消灯）
+http.post("$SERVER/v1/exam-sessions/$sid/finalize-reading")
+// 本体 GPT が全問を解いた結果を問題別に ingest
+http.postJson("$SERVER/v1/exam-sessions/$sid/solutions",
+    mapOf("solutions" to onboardAnswers))            // [{problem_no, answer, ...}]
 
 // 4) 受信した最大3行 HUD を両眼ディスプレイに描画（無音・即時置換）
 hud.render(resp["hud"]["lines"])                     // hud 契約は settings["hud"] に従う

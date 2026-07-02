@@ -1,9 +1,10 @@
 # 実装メモ — 実機 Rokid 連携の差し込み箇所
 
-このリポジトリは **サーバ側** を実装します。既定ではオフライン・クレデンシャル不要で
-動きますが、各プロバイダポート（analyzer / solver / explainer / extractor）には
-**実モデル（Anthropic Claude）アダプタ `claude` を同梱済み**で、環境変数だけで
-実運用に切り替えられます（§8）。本ドキュメントは、実機・実 SDK・実 AI を接続する際に
+このリポジトリは **サーバ側** を実装します。**解答の主経路はグラス搭載 AI（GPT / Gemini）**
+で、その問題別解答を `POST /solutions` で取り込みます（サーバ鍵不要）。サーバは既定で
+オフライン・クレデンシャル不要で動きますが、各プロバイダポート（analyzer / solver /
+explainer / extractor）には**実モデルアダプタ（`openai` / `gemini` / `claude`）を同梱済み**で、
+より高性能なモデルが必要な場合に環境変数だけで切り替えられます（§8）。本ドキュメントは、実機・実 SDK・実 AI を接続する際に
 **どこへ何を差し込むか** を整理したものです。
 
 最終更新時点（2026-07）の Rokid エコシステム調査（**ウェブ検索による公式/コミュニティ
@@ -125,14 +126,18 @@ CXR（Connected XR）SDK スイートは役割別に分かれている（末尾�
 
 - 本物の OCR をどこで動かすか（端末側 vs サーバ側）の確定と、
   `ocr_text` プレースホルダ（無OCR時は画像MD5）からの移行。
-  ※ サーバ側要約/解答/解説/抽出は §8 の `claude` アダプタで既に実 AI 化可能。
+  ※ サーバ側要約/解答/解説/抽出は §8 の `openai`/`gemini`/`claude` アダプタで既に実 AI 化可能。
 - pHash の高速化（現状は純 Python の DCT 実装。numpy / OpenCV / imagehash
   への置換、または事前計算インデックス化）。
 - 文書スコープでの認証・マルチテナント・並行登録制御。
 - しきい値（`HAMMING_STRONG/WEAK`, `CONF_OK/LOW`, `OCR_MD5_BONUS`）の
   実撮影データでのチューニング。
-- CXR-L アプリ側の入力 KeyCode の実測（旧 Glass のキーコード表は要検証、
-  [cxr-l-integration.md](cxr-l-integration.md) §7）。
+- CXR-L アプリ側の入力 KeyCode の実測（**旧 Glass のキーコード表は要検証**＝
+  `keycodes_verified:false`、[cxr-l-integration.md](cxr-l-integration.md) §7）。
+- 3 フェーズ操作割当（ダブルタップ=読取完了/close のフェーズ・モーダル、長押し=モード/録音
+  トグル）の実機 UX 検証（`app/glasses_view.py` `OPERATION_CONTRACT` のコメント参照）。
+- `finalize-reading` のサーバ一括解答（solve-all）の非同期ジョブ化（現状は同期ループ。
+  問題数が多い＋クラウド solver 時の応答時間対策として将来課題）。
 
 ---
 

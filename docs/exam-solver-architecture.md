@@ -22,23 +22,56 @@
 - **overlay**: `tracking:"2d_image_anchor"`・`fixed_ar:false`・`anchor_hint{page_number,box}` を機械可読化（6DoF 固定 AR は未対応＝ハード待ち）。
 - **reasoning**: `GET …/questions/{qid}/reasoning` で `raw_reasoning`＋`evidence`＋`served_by` を返す（HUD は短縮版のまま、`real` ロック準拠）。
 
-## 撮影レス・文書ページ移動型 exam ＋ 英語リスニング（API 1.7.0）
+## 3 フェーズフロー（読取→一括解答→閲覧 / API 1.8.0・主経路）
 
-「設問1枚アップロード」型（上記）に加え、**撮影を一切行わない**主経路を新設した。
-Rokid 通常利用のように**本体 AI が視認した資料テキストをページ単位で登録**し（`/pages` は
-`image` 任意＝テキストだけで記憶）、`finalize` が「全ページ読込完了」を宣言。以降はグラスの
-ジェスチャで**現在ページを移動**し、**そのページの資料を解く**（写真は発生しない）。
+**主経路**。カメラ（＝プライバシー LED 点灯）は読取フェーズのみで、`finalize-reading` 以降は
+カメラを閉じる（LED 消灯）。解答の主体は**グラス搭載 AI（GPT）**で、サーバは分割・取り込み・
+整形・状態管理を担う。
 
 ```
-本体AIの視認テキスト ─▶ POST /pages(image任意, ocr_text) ─▶ pages(image_path=NULL, phash="")
-                                                              │  finalize=全ページ読込完了
-exam-session(document_id, exam_type, answer_format)           ▼
+フェーズ1 読取（カメラON・LED点灯・最短化）
+  本体AIの視認テキスト ─▶ POST /pages(ocr_text, vision_text) ×N ─▶ finalize
+  ダブルタップ ─▶ POST /finalize-reading ─▶ segment_problems(全ページ) ─▶ questions 行 ×問題数
+                                            status: open/reading → reviewing（以降カメラOFF）
+フェーズ2 解答（カメラOFF・一括）
+  主経路: 搭載 GPT が全問解答 ─▶ POST /solutions（ingest, served_by="onboard"）
+  任意:   ROKID_SOLVER=openai|gemini|claude ─▶ finalize-reading 内で全問を solve_with_fallback
+          （各問とも context=_exam_prompt_context: 全ページ＋RAG＋(listening時)書き起こし＋書式指示）
+フェーズ3 閲覧（カメラOFF・LED消灯）
+  GET /solutions（デッキ一覧） ─▶ GET /review?index=k&view_page=n
+  build_review_view: 解答+解法+根拠+注意を一括1ストリーム（3行×テレプロンプター送り）
+リスニング: /audio(録音+任意transcript) ─▶ transcribe(openai/gemini or 与値) ─▶ transcript
+  /mode で 筆記(written) ⇄ リスニング(listening) 切替（グラス=長押し / スマホ）
+```
+
+- **問題分割 `segment_problems`**（`app/layout.py`）：全ページの材料（`_page_material` ＝本文＋図の
+  読み取り）をページごとに `parse_layout`（行単位スキャナ）へかけ、**問N/大問N/第N問/(n)** 境界で
+  分割・ページ跨ぎの継続をマージする（前文は第1問に前置）。境界が 1 つも無ければ**文書全体を
+  1 問題**にフォールバック。同一番号の重複（大問跨ぎの問1等）は `問1(2)` サフィックスで一意化——
+  **デッキ（`GET /solutions`）の問題番号が ingest の正**。決定的・オフライン。
+- **status ライフサイクル**：`open`（既定・読取フェーズの別名）→ `reviewing`（`finalize-reading` で
+  遷移）。`finalize-reading` は**冪等**（ジェスチャ二度撃ちで再分割しない）。応答の `camera` は
+  `{expected_state:"off", privacy_led:"off"}`。
+- **onboard ingest（主経路）**：`POST /solutions` は問題別解答の配列
+  `[{problem_no, answer, subject?, solution_steps?, rationale?, cautions?, answer_confidence?, page_number?}]`
+  を受け、`solver_name="onboard"`・`served_by`（既定 `"onboard"`）で `solutions` 行を追加。
+  **同一 `problem_no` への再 ingest は latest wins**（読取側は `ORDER BY id DESC LIMIT 1`）。
+  未知の `problem_no` は**デッキ末尾に問題を追加**（ヒューリスティックの見逃しを本体 AI が補完）。
+  検証は全或無（空 answer は 400）。`mode=real` は何も保存しない（locked 応答）。
+- **サーバ一括解答（任意）**：`ROKID_SOLVER` が non-local のときだけ `finalize-reading` が同期で
+  全問を解く（local/未設定ではプレースホルダのゴミ行で「解答済み」になるのを防ぐためスキップ）。
+
+## 撮影レス・文書ページ移動型 exam ＋ 英語リスニング（二次経路・互換）
+
+ページ移動で**現在ページを解く**従来経路（挙動不変で維持）。読取と閲覧が分離されないため、
+主経路よりカメラ稼働（LED 点灯）時間が長い。
+
+```
+exam-session(document_id, exam_type, answer_format)
   next-page/prev-page ─▶ current_page_index ─▶ solve-current ─▶ 現在ページ pages 行を解く
-       （速スワイプ）        （現在ページ把握）     （タップ）        │ subject=detect_subject(そのページ)
+   （2本指スワイプ左右）    （現在ページ把握）     （タップ）        │ subject=detect_subject(そのページ)
                                                                    │ context=RAG＋(listening時)書き起こし
                                                                    ▼ solve_with_fallback → glasses_view(3行段階)
-リスニング: /audio(録音+任意transcript) ─▶ transcribe(openai/gemini or 与値) ─▶ transcript
-  /mode で 筆記(written) ⇄ リスニング(listening) 切替（グラス=Back長押し / スマホ）
 ```
 
 - **撮影しない取り込み**：`POST /v1/documents/{id}/pages` は本体 AI の認識結果を**テキスト**で受ける：
@@ -56,8 +89,10 @@ exam-session(document_id, exam_type, answer_format)           ▼
   `app/transcribe.py` が `ROKID_TRANSCRIBER`（openai=`audio.transcriptions.create`、gemini=inline audio）で
   書き起こし。未設定/失敗/オフラインは**与えた `transcript` をそのまま使用**（クレデンシャル不要で成立）。
   Anthropic は ASR 非対応。
-- **グラス単独操作**：`OPERATION_CONTRACT`（`GET /v1/settings.operations`）に `exam_next_page`/
-  `exam_prev_page`/`exam_solve_current`/`exam_next_stage`/`mode_toggle`/`record_toggle` を追加。全操作が
+- **グラス単独操作**：`OPERATION_CONTRACT`（`GET /v1/settings.operations`）が 3 フェーズの全操作
+  （`capture_read`/`finish_reading`/`mode_toggle`/`record_toggle`/`review_next_problem`/
+  `review_prev_problem`/`scroll_next`/`scroll_prev`/`close`）と二次経路（`exam_next_page`/
+  `exam_prev_page`/`exam_solve_current`/`exam_next_stage`）を現行公式ジェスチャで公示。全操作が
   グラスのジェスチャに割当済みで、スマホは HTTP 中継のみ（画面不要）。
 
 ## モジュール（このリポジトリで実装済み）
@@ -94,17 +129,21 @@ exam-session(document_id, exam_type, answer_format)           ▼
 | メソッド | パス | 用途 |
 |----------|------|------|
 | POST | `/v1/exam-sessions` | 一時セッション作成（mode, voice_enabled, **document_id, exam_type, answer_format**） |
-| POST | `/v1/exam-sessions/{id}/questions` | 問題画像＋任意OCR/bbox → 構造化・科目推定・`media`抽出 |
-| POST | `/v1/exam-sessions/{id}/questions/{qid}/solve` | 解答（real は既定ロック）→ `glasses_view`＋`overlay`＋`served_by`＋`evidence` |
-| POST | `/v1/exam-sessions/{id}/next-page` / `prev-page` | **文書ページ移動**（現在ページ ±1・クランプ・撮影なし） |
-| GET | `/v1/exam-sessions/{id}/current` | **現在ページ把握**（科目・プレビュー・画像有無） |
-| POST | `/v1/exam-sessions/{id}/solve-current` | **現在ページの資料を解く**（listening 時は書き起こしを統合）→ `glasses_view` |
+| POST | `/v1/exam-sessions/{id}/finalize-reading` | **読取完了宣言（3フェーズ主経路）**：問題分割→デッキ作成→`reviewing` 遷移→（solver 設定時）一括解答。冪等 |
+| POST | `/v1/exam-sessions/{id}/solutions` | **搭載 GPT の問題別解答を ingest**（`served_by="onboard"`・latest wins・real ロック） |
+| GET | `/v1/exam-sessions/{id}/solutions` | **レビューデッキ一覧**（問題番号・教科・解答済み・確信度。読取中は空デッキ） |
+| GET | `/v1/exam-sessions/{id}/review?index=&view_page=` | **問題別閲覧 HUD**（解答+解法+根拠+注意を一括1ストリーム・クランプ・未解答プレースホルダ） |
 | POST | `/v1/exam-sessions/{id}/mode` | **筆記 ⇄ リスニング** 切替（`{"exam_type":...}`） |
 | POST | `/v1/exam-sessions/{id}/audio` | **リスニング録音**アップロード（`audio`＋任意`transcript`）→ 書き起こし保存 |
-| GET | `/v1/exam-sessions/{id}/questions/{qid}/view?stage=&page=` | 段階×ページ送り取得 |
+| POST | `/v1/exam-sessions/{id}/next-page` / `prev-page` | 文書ページ移動（二次経路。現在ページ ±1・クランプ・撮影なし） |
+| GET | `/v1/exam-sessions/{id}/current` | 現在ページ把握（二次経路。科目・プレビュー・画像有無） |
+| POST | `/v1/exam-sessions/{id}/solve-current` | 現在ページを解く（二次経路。listening 時は書き起こしを統合）→ `glasses_view` |
+| POST | `/v1/exam-sessions/{id}/questions` | 問題画像＋任意OCR/bbox → 構造化・科目推定・`media`抽出（互換） |
+| POST | `/v1/exam-sessions/{id}/questions/{qid}/solve` | 解答（real は既定ロック）→ `glasses_view`＋`overlay`＋`served_by`＋`evidence`（互換） |
+| GET | `/v1/exam-sessions/{id}/questions/{qid}/view?stage=&page=` | 段階×ページ送り取得（互換） |
 | GET | `/v1/exam-sessions/{id}/questions/{qid}/reasoning` | フル推論ログ（案9、HUD非表示・real ロック準拠） |
-| GET | `/v1/exam-sessions/{id}` | セッション状態（`document_id`/`exam_type`/`current_page_index`/`total_pages`＋解答済み一覧） |
-| GET | `/v1/settings` | 無音契約・音声トグル・real ロックの公示 |
+| GET | `/v1/exam-sessions/{id}` | セッション状態（`phase`/`document_id`/`exam_type`/`problem_count`/`solved_count`＋解答済み一覧） |
+| GET | `/v1/settings` | 無音契約・操作/入力/キャプチャ契約・音声トグル・real ロックの公示 |
 | GET | `/v1/version` | 契約バージョン＋ analyzers/solvers/extractors 一覧 |
 
 ## 信頼度の分離（案7）
@@ -116,10 +155,11 @@ exam-session(document_id, exam_type, answer_format)           ▼
 ## バージョン契約（`app/version.py`）
 
 `SOLVER_API_VERSION` / `EXTRACTOR_API_VERSION` / `GLASSES_VIEW_CONTRACT_VERSION` /
-`OVERLAY_CONTRACT_VERSION` を契約ごとに管理。`API_VERSION` は現在 `1.7.0`
-（撮影レス pages・文書ページ移動型 exam・リスニング録音を含む）、`APP_VERSION` は `0.7.0`。
-`GLASSES_VIEW_CONTRACT_VERSION` は `1.3.0`（長文の解説/根拠を文単位に分割して3行ページ送り）。
-クライアントは `GET /v1/version` でネゴシエート（`solvers`/`extractors` 等に `claude` が並ぶ）。
+`OVERLAY_CONTRACT_VERSION` を契約ごとに管理。`API_VERSION` は現在 `1.8.0`
+（3 フェーズ endpoints：finalize-reading / solutions / review を追加）、`APP_VERSION` は `0.8.0`。
+`GLASSES_VIEW_CONTRACT_VERSION` は `1.4.0`（`kind:"review"` の一括ストリーム view・reading_ack・
+公式ジェスチャ語彙）。クライアントは `GET /v1/version` でネゴシエート
+（`solvers`/`extractors` 等に `openai`/`gemini`/`claude` が並ぶ）。
 
 ## 評価ベンチ（案12）
 

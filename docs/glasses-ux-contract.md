@@ -36,7 +36,8 @@
 > - `GET /v1/settings` の `capture` で **撮影しない**方針を機械可読に公示：`shutter_sound:false`・`flash:"off"`
 >   （撮影用フラッシュ/トーチなし）・`capture_tone:false`（無音撮影）・`audio_record:{start_tone:false, stop_tone:false, silent:true}`
 >   （リスニング録音も無音）。独自カメラ経路 `cxr-s/camera2`。**フラッシュ・シャッター音・録音音を出さない**。
-> - **プライバシーLEDは不可侵**：`capture.privacy_led` を `state:"always_on", tamper:"forbidden"` として公示し、**サーバはLEDを制御・無効化する機能を一切持たない**（カメラ動作中のみ点灯するハードのプライバシー表示。フラッシュではない）。
+> - **プライバシーLEDは不可侵**：`capture.privacy_led` を `state:"on_while_camera_active", tamper:"forbidden"` として公示し、**サーバはLEDを制御・無効化する機能を一切持たない**。LED はカメラ稼働中に必ず点灯するハードのプライバシー表示（フラッシュではない）で、**視認＝認識＝カメラON＝LED点灯**（カメラOFFの視認は存在しない）。
+> - **LED 点灯時間の最小化（設計原則）**：`capture.led_off_during_review:true` を公示。3 フェーズフローでは**読取フェーズだけ**カメラON（LED点灯）で、`finalize-reading` 以降の解答・閲覧フェーズはカメラを閉じるため **LED は消灯**。
 
 ## 音声操作トグル（設定 ON/OFF）
 
@@ -47,30 +48,33 @@
 
 ---
 
-## タッチパッド操作マッピング（KeyCode）
+## タッチパッド操作マッピング（公式ジェスチャ / KeyCode）
 
-> 下表は現行の Rokid マッピングです。サーバは gesture→KeyCode を
+> ジェスチャ名は**現行 Rokid Glasses の公式操作**（2本指タップ=AI起動 / 1本指タップ=クリック /
+> ダブルタップ=終了 / 2本指スワイプ上下=スクロール・左右=前後ページ / 長押し=録画⇄録音切替 /
+> 首振り=通話応答。スワイプ方向は Hi Rokid アプリでカスタム可）。サーバは gesture→KeyCode を
 > **`GET /v1/settings` の `input` ブロック**として機械可読に公示します
-> （`app/glasses_view.py` の `INPUT_CONTRACT`）。機種/ファーム差がある場合は、
-> サーバ側の環境変数 **`ROKID_KEYMAP`（JSON）** で上書きでき、クライアント改修は
-> 不要です（計測手順は [real-device-operation.md](real-device-operation.md) §5）。
-
-| ユーザー操作 | Android KeyCode | 本サーバの用途 |
-|---|---|---|
-| **TP-単击**（タップ） | `KEYCODE_DPAD_CENTER = 23` | 解説表示・確認（explain-sessions / exam-sessions） |
-| **TP-長按** | `KEYCODE_TV = 170` | 解説段階を進める（overview→detail→evidence） |
-| **TP-双击**（ダブルタップ） | `KEYCODE_ENTER = 66` | 現在のビューを閉じる |
-| **TP-右滑**（スワイプ右） | `KEYCODE_DPAD_RIGHT = 22`（連続） | 前テキストスライス（テレプロンプター戻し） |
-| **TP-左滑**（スワイプ左） | `KEYCODE_DPAD_LEFT = 21`（連続） | 次テキストスライス（テレプロンプター送り） |
-| **TP-快速右滑**（速スワイプ右） | `KEYCODE_DPAD_DOWN = 20`（単発） | 前ページへ（`POST /prev-page`） |
-| **TP-快速左滑**（速スワイプ左） | `KEYCODE_DPAD_UP = 19`（単発） | 次ページへ（`POST /next-page`） |
-| **Back-単**（戻るボタン） | `KEYCODE_BACK = 4` | 前の画面へ戻る |
-| **Back-長**（長押し） | Intent `homekey.longpress`（`back_long_press`） | **筆記 ⇄ リスニング 切替**（`POST /exam-sessions/{id}/mode`） |
-| **TP-双指長按**（二本指長押し） | 独自ジェスチャ（`two_finger_long_press`） | **リスニング録音の開始/停止**（`POST /exam-sessions/{id}/audio`） |
-
-> ⚠️ **スワイプ方向の注意**: 公式キーコード定義では、TP-快速左滑（速スワイプ左）が `KEYCODE_DPAD_UP`（上）、TP-快速右滑（速スワイプ右）が `KEYCODE_DPAD_DOWN`（下）に割り当てられています。方向名と物理操作が直感と逆に見えることがありますが、Rokid 公式仕様に従っています。クライアント実装時は必ず上記の KeyCode でリッスンしてください。
+> （`app/glasses_view.py` の `build_input_contract()`）。
 >
-> `back_long_press` / `two_finger_long_press` は標準 KeyCode を持たないため、`input.gestures` では `keycode:null`（Intent/独自ジェスチャ）として公示します。機種で具体的な KeyCode を割り当てたい場合は `ROKID_KEYMAP` で上書きできます。**全操作がグラスのジェスチャに割当済みで、スマホは HTTP 中継のみ（画面不要）**。
+> ⚠️ **KeyCode 値は未検証**：下表の KeyCode は**旧・単眼 Rokid Glass 由来のレガシー表**で、
+> 現行の両眼 Rokid Glasses では**実測されていません**（API も `keycodes_verified:false`・
+> `keycode_source` で明示）。実機で `adb shell getevent -l` により計測し
+> （手順は [real-device-operation.md](real-device-operation.md) §5）、機種/ファーム差は
+> サーバ側の環境変数 **`ROKID_KEYMAP`（JSON）** で上書きしてください（クライアント改修不要）。
+
+| ユーザー操作（公式） | gesture 名 | Android KeyCode（旧機由来・未検証） | 本サーバの用途 |
+|---|---|---|---|
+| **2本指タップ**（AI 起動） | `two_finger_tap` | なし（システムジェスチャ・`keycode:null`） | **視認＝ページ読取**（本体 AI → `POST /pages`） |
+| **1本指タップ**（クリック） | `single_tap` | `KEYCODE_DPAD_CENTER = 23` | 表示・確認・段階送り（二次経路） |
+| **ダブルタップ**（終了） | `double_tap` | `KEYCODE_ENTER = 66` | **読取完了宣言**（読取中）／**閉じる**（閲覧中） |
+| **2本指スワイプ左/右**（前後ページ） | `two_finger_swipe_left/right` | `KEYCODE_DPAD_LEFT/RIGHT = 21/22` | **前後の問題**（閲覧）／前後ページ（二次経路） |
+| **2本指スワイプ上/下**（スクロール） | `two_finger_swipe_up/down` | `KEYCODE_DPAD_UP/DOWN = 19/20` | テレプロンプター送り/戻し |
+| **長押し**（録画⇄録音切替） | `long_press` | `KEYCODE_TV = 170` | **筆記 ⇄ リスニング切替・録音開始/停止**（フェーズ・モーダル） |
+| 戻る | `back` | `KEYCODE_BACK = 4` | 前の画面へ戻る |
+
+> `two_finger_tap`（AI 起動）は標準 KeyCode を持たないため `keycode:null` で公示します。
+> ファームが KeyEvent として配送する機種では `ROKID_KEYMAP` で割り当ててください。
+> **全操作がグラスのジェスチャに割当済みで、スマホは HTTP 中継のみ（画面不要）**。
 
 ---
 
@@ -83,57 +87,61 @@
 | 撮影 | Back-単（1回押し） | 「撮影」 |
 | HUD 確認・閉じる | TP-双击 | 「閉じる」 |
 
-### 資料解説モード（explain-sessions）v1.7 撮影なし設計
+### 解答モード（exam-sessions・3 フェーズフロー / 主経路 v1.8・LED 点灯最小）
 
-> **v1.7 の設計原則**: スキャンフェーズ（撮影）なし。セッション作成直後から解説可能（`status=ready`）。
-> ページナビゲーションはボタン操作のみ。カメラ画像は一切送信しない。
+> **読取（カメラON・LED点灯・最短化）→ 一括解答（カメラOFF）→ 閲覧（カメラOFF・LED消灯）**。
+> 読取完了をダブルタップで宣言した瞬間からカメラは閉じ、以降は用紙も視認も不要。
 
-| フェーズ | 操作 | TP/ボタン | KeyCode | サーバ側処理 |
-|----------|------|-----------|---------|-------------|
-| ready | 現在ページの解説表示 | TP-単击 | `KEYCODE_DPAD_CENTER (23)` | `GET /explain` |
-| explaining | 次ページへ | TP-快速左滑 | `KEYCODE_DPAD_UP (19)` 単発 | `POST /next-page`（撮影なし） |
-| explaining | 前ページへ | TP-快速右滑 | `KEYCODE_DPAD_DOWN (20)` 単発 | `POST /prev-page`（撮影なし） |
-| explaining | 次テキストスライス | TP-左滑 | `KEYCODE_DPAD_LEFT (21)` 連続 | `GET /explain?view_page=N+1` |
-| explaining | 前テキストスライス | TP-右滑 | `KEYCODE_DPAD_RIGHT (22)` 連続 | `GET /explain?view_page=N-1` |
-| explaining | 次解説段階（詳細へ） | TP-長按 | `KEYCODE_TV (170)` | `GET /explain?stage=detail` |
-| explaining | 解説を閉じる | TP-双击 | `KEYCODE_ENTER (66)` | — |
+| フェーズ | 操作 | 公式ジェスチャ | operation 名 | サーバ側処理 |
+|----------|------|---------------|--------------|-------------|
+| 1 読取 | ページを視認＝読取 | **2本指タップ**（AI起動） | `capture_read` | 本体 AI → `POST /documents/{id}/pages`（scan_ack） |
+| 1 読取 | **読取完了宣言** | **ダブルタップ** | `finish_reading` | `POST /exam-sessions/{id}/finalize-reading`（→カメラOFF） |
+| 2 解答 | 筆記 ⇄ リスニング切替 | **長押し**（録画⇄録音） | `mode_toggle` | `POST /exam-sessions/{id}/mode` |
+| 2 解答 | リスニング録音 開始/停止 | **長押し**（listening 中） | `record_toggle` | `POST /exam-sessions/{id}/audio` |
+| 2 解答 | （自動）搭載 GPT が全問解答 | — | — | `POST /exam-sessions/{id}/solutions`（ingest） |
+| 3 閲覧 | 次/前の問題 | **2本指スワイプ左/右** | `review_next_problem` / `review_prev_problem` | `GET …/review?index=k±1` |
+| 3 閲覧 | テキスト送り/戻し | **2本指スワイプ下/上** | `scroll_next` / `scroll_prev` | `GET …/review?view_page=n±1` |
+| 3 閲覧 | 閲覧を閉じる | **ダブルタップ** | `close` | — |
 
-#### 廃止されたエンドポイント（v1.6 → v1.7）
-
-| 旧操作 | 旧エンドポイント | 廃止理由 |
-|--------|----------------|----------|
-| ページ撮影スキャン | `POST /scan`（画像アップロード） | 撮影不要設計へ移行 |
-| 全ページ読取完了宣言 | `POST /commit`（ダブル長押し） | scanningフェーズ廃止 |
-
-### 解答モード（exam-sessions・設問1枚アップロード型）
-
-| 操作 | TP/ボタン | 音声ON時 |
-|------|-----------|----------|
-| 撮影 | Back-単 | 「撮影」 |
-| 解答表示 | TP-単击 | 「答えを表示」 |
-| 次の解説段階 | TP-長按 | 「詳しく」 |
-| 次テキストページ | TP-左滑 | 「次へ」 |
-| 前テキストページ | TP-右滑 | 「前へ」 |
-| 閉じる | TP-双击 | 「閉じる」 |
-
-### 解答モード（exam-sessions・文書ページ移動型 / 撮影レス・主経路 v1.7）
-
-> 全ページを撮影レスで登録・`finalize`（＝全ページ読込完了）してから、ページを移動して
-> **現在ページを解く**。カメラ撮影は一切発生せず、操作はグラス単独で完結。
-
-| 操作 | TP/ボタン | KeyCode / ジェスチャ | サーバ側処理 |
-|------|-----------|----------------------|-------------|
-| 次ページへ | TP-快速左滑 | `KEYCODE_DPAD_UP (19)` 単発 | `POST /exam-sessions/{id}/next-page` |
-| 前ページへ | TP-快速右滑 | `KEYCODE_DPAD_DOWN (20)` 単発 | `POST /exam-sessions/{id}/prev-page` |
-| 現在ページを解く | TP-単击 | `KEYCODE_DPAD_CENTER (23)` | `POST /exam-sessions/{id}/solve-current` |
-| 次の解説段階 | TP-長按 | `KEYCODE_TV (170)` | `GET …/questions/{qid}/view?stage=…` |
-| テキスト送り/戻し | TP-左/右滑 | `KEYCODE_DPAD_LEFT/RIGHT (21/22)` | `…/view?page=N±1`（テレプロンプター） |
-| 筆記 ⇄ リスニング切替 | Back-長按 | `back_long_press`（Intent） | `POST /exam-sessions/{id}/mode` |
-| リスニング録音 開始/停止 | TP-双指長按 | `two_finger_long_press`（独自） | `POST /exam-sessions/{id}/audio` |
-
+- **ダブルタップはフェーズ・モーダル**：読取中=読取完了宣言／閲覧中=閉じる（公式の「終了」の転用。
+  実機 UX 検証待ちの割当として `OPERATION_CONTRACT` のコメントにも明記）。
+- **長押しもフェーズ・モーダル**：筆記中=リスニングへ切替／リスニング中=録音開始/停止
+  （公式の録画⇄音声録音トグルに合致）。
 - `exam_type`＝`written`(筆記) / `listening`(リスニング)、`answer_format`＝`mark`(マーク) / `written`(記述)。
-- リスニングは音声を**その場で録音**し、設問は**目の前の資料から読取**（`solve-current` が書き起こしと資料を統合）。
-- これらの操作↔用途対応は `GET /v1/settings` の `operations` ブロック（`app/glasses_view.py` の `OPERATION_CONTRACT`）としても公示。
+- 1 問題を開くと**解答＋解法＋根拠＋注意が一括 1 ストリーム**（段階なし）。3 行 HUD 制約は
+  テレプロンプター送り（2本指スワイプ上下）で送り読み。
+- これらの操作↔用途対応は `GET /v1/settings` の `operations` ブロック（`app/glasses_view.py` の
+  `OPERATION_CONTRACT`）としても公示。
+
+### 資料解説モード（explain-sessions）撮影なし設計
+
+> スキャンフェーズ（撮影）なし。セッション作成直後から解説可能（`status=ready`）。
+> ページナビゲーションはジェスチャ操作のみ。カメラ画像は一切送信しない。
+> （`POST /scan`・`POST /commit` は v1.7 で廃止済み。）
+
+| フェーズ | 操作 | 公式ジェスチャ | サーバ側処理 |
+|----------|------|---------------|-------------|
+| ready | 現在ページの解説表示 | 1本指タップ | `GET /explain` |
+| explaining | 次ページへ | 2本指スワイプ左 | `POST /next-page`（撮影なし） |
+| explaining | 前ページへ | 2本指スワイプ右 | `POST /prev-page`（撮影なし） |
+| explaining | 次テキストスライス | 2本指スワイプ下 | `GET /explain?view_page=N+1` |
+| explaining | 前テキストスライス | 2本指スワイプ上 | `GET /explain?view_page=N-1` |
+| explaining | 次解説段階（詳細へ） | 1本指タップ（解説表示中） | `GET /explain?stage=detail` |
+| explaining | 解説を閉じる | ダブルタップ | — |
+
+### 解答モード（exam-sessions・文書ページ移動型 / 二次経路・互換）
+
+> ページを移動して**現在ページを解く**従来経路（挙動不変で維持）。ページを視認しながら
+> 解くため、主経路（3 フェーズ）より LED 点灯時間が長くなります。
+
+| 操作 | 公式ジェスチャ | サーバ側処理 |
+|------|---------------|-------------|
+| 次/前ページへ | 2本指スワイプ左/右 | `POST /exam-sessions/{id}/next-page`・`/prev-page` |
+| 現在ページを解く | 1本指タップ | `POST /exam-sessions/{id}/solve-current` |
+| 次の解説段階 | 1本指タップ（解答表示中） | `GET …/questions/{qid}/view?stage=…` |
+| テキスト送り/戻し | 2本指スワイプ下/上 | `…/view?page=N±1`（テレプロンプター） |
+
+設問1枚アップロード型（`POST /questions` → `/solve` → `/view`）も同じジェスチャ体系で互換維持。
 
 ---
 
@@ -169,7 +177,7 @@ conf 0.93  hd 3
 ```
 P01/5 ★★★
 （概要テキスト1行目）
-長押し 次段階 / 速スワイプ 次ページ
+タップ 次段階 / 横スワイプ 次ページ
 ```
 
 解説 HUD（detail 段階）:
@@ -177,7 +185,7 @@ P01/5 ★★★
 ```
 P01/5 詳細
 （詳細テキスト1行目）
-長押し 次段階
+タップ 次段階
 ```
 
 解説 HUD（evidence 段階）:
@@ -185,10 +193,48 @@ P01/5 詳細
 ```
 P01/5 根拠
 参照: P03, P05
-長押し → 概要へ戻る
+タップ → 概要へ戻る
 ```
 
-### 解答モード
+### 解答モード（3 フェーズ）
+
+読取フェーズ（各ページの scan_ack、2秒で消去）:
+
+```
+P02 読取済 ✓
+2/5ページ完了
+次ページへ            ← 全ページ完了時は「完了: ダブルタップ」
+```
+
+読取完了（finalize-reading の reading_ack。以降カメラOFF＝LED消灯）:
+
+```
+読取完了 5ページ
+4問を検出
+カメラOFF 解答へ
+```
+
+閲覧フェーズ（review デッキ・**一括 1 ストリーム**、`kind:"review"`）:
+
+```
+問2 2/4 ★★☆        ← 問題番号 デッキ位置 確信度
+答え: ③
+解法                 ← 続きは 2本指スワイプ下で送り読み
+```
+
+送り読みの続き（同じ問題の view_page=1 以降）:
+
+```
+本文の主題を把握する。
+根拠
+第2段落より。
+```
+
+- 1 問題＝**解答＋解法＋根拠＋注意を一括**（段階めくりなし）。空のセクションは省略。
+- 未解答の問題は「未解答 / 本体AIの解答待ち」のプレースホルダ（デッキ巡回は可能）。
+- 問題送り＝2本指スワイプ左右、送り読み＝2本指スワイプ上下、終了＝ダブルタップ。
+
+### 解答モード（二次経路・段階表示）
 
 ```
 P02 問3 ★★★      ← answer: ページ/設問 + 確信度記号
@@ -196,9 +242,9 @@ P02 問3 ★★★      ← answer: ページ/設問 + 確信度記号
 解答欄: 下右       ← 方向ヒント（紙への固定描画はしない）
 ```
 
-- 既定段階は `answer`（まず答え）。`solution → rationale → caution` をスワイプ/音声で遷移。
+- 既定段階は `answer`（まず答え）。`solution → rationale → caution` をタップ/音声で遷移。
 - 長い解答全文は `page` 送りでグラス内スクロール。
-- 一致度・読取信頼度が低いときは断定せず「近づけて再撮影」を表示。
+- 一致度・読取信頼度が低いときは断定せず「近づけて再読取」を表示。
 
 ---
 

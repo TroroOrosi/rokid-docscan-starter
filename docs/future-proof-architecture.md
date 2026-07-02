@@ -19,14 +19,15 @@ iOS）が将来新しくなっても、サーバのコア（照合ロジック�
                     │ registry (差し替え点)
    ┌────────────────┼───────────────┬──────────────┐
    ▼                ▼               ▼              ▼
- local(既定)      claude(実装済)   他ベンダ(例)    Rizon/on-device(将来)
+ local(既定)   openai/gemini/claude(実装済)   Rizon/on-device(将来)
  offline          cloud           cloud          workflow / 端末OCR
 ```
 
-> 図の「他ベンダ」は Gemini/OpenAI 等の拡張例（パターンは汎用）。**現状で同梱済みの
-> 実アダプタは `claude`（Anthropic）** で、`ROKID_*=claude` で全ポートを実 AI 化できます
-> （§5 フラグ表・§6(a)）。追加ベンダは同じ `Analyzer`/`Solver`/… ポートにアダプタを
-> 1つ実装して `register_*()` するだけ。
+> **同梱済みの実アダプタは `openai`（OpenAI GPT）/ `gemini`（Google）/ `claude`（Anthropic）**
+> で、`ROKID_*=openai|gemini|claude` で全ポートを実 AI 化できます（§5 フラグ表・§6(a)）。
+> なお exam の解答主経路はグラス搭載 AI（GPT/Gemini）の ingest（`POST /solutions`）であり、
+> サーバ側アダプタは任意の高性能化経路。追加ベンダは同じ `Analyzer`/`Solver`/… ポートに
+> アダプタを1つ実装して `register_*()` するだけ。
 
 ---
 
@@ -58,7 +59,7 @@ class AnalyzerResult:
 ### 新しいモデルを足す＝アダプタを1つ書いて登録するだけ
 
 ```python
-# app/analyzers/gemini.py （追加ベンダ例・本リポジトリには未同梱／claude は同梱済み）
+# app/analyzers/example_vendor.py （追加ベンダ例。openai/gemini/claude は同梱済み）
 class GeminiAnalyzer(Analyzer):
     name = "gemini"; provider_version = "gemini-x.y"; offline = False
     def __init__(self, client): self._c = client      # creds は外から注入
@@ -158,7 +159,7 @@ object DeviceRegistry {                // 端末を差し替える点
 | `ROKID_EXPLAINER` | `local` | 解説ルーティング（`claude\|openai\|gemini` で実解説） |
 | `ROKID_EXTRACTOR` | `local` | メディア抽出ルーティング（`claude\|openai\|gemini` で実抽出） |
 | `ANTHROPIC_API_KEY`/`OPENAI_API_KEY`/`GOOGLE_API_KEY` | （なし） | 実アダプタの API キー（未設定なら local） |
-| `ROKID_LLM_MODEL` | `claude-opus-4-8` | モデル id（openai/gemini は必須指定） |
+| `ROKID_LLM_MODEL` | （anthropic のみ `claude-opus-4-8`） | モデル id（openai/gemini は必須指定） |
 | `ROKID_LLM_MAX_TOKENS` | `1024` | 実アダプタの応答トークン上限 |
 | `ROKID_KEYMAP` | （なし） | gesture→KeyCode の上書き（JSON、`/v1/settings.input`） |
 | `ROKID_API_KEY` | （なし） | 設定時に Bearer 認証を要求（発見系は開放） |
@@ -179,7 +180,7 @@ HUD_LANG = os.environ.get("ROKID_HUD_LANG", "ja")
 
 ## 6. 移行戦略（将来の変化シナリオ別）
 
-### (a) ローカル → クラウド 要約/解答/解説/抽出（実装済み: `claude`）
+### (a) ローカル → クラウド 要約/解答/解説/抽出（実装済み: `openai`/`gemini`/`claude`）
 1. **実アダプタ `claude` は同梱済み**（`app/{analyzers,solvers,explainers,extractors}/claude.py`、
    共通クライアント `app/llm.py`）。追加ベンダは同ポートにアダプタを1つ実装するだけ。
 2. `ROKID_ANALYZER/SOLVER/EXPLAINER/EXTRACTOR=claude` で切替。

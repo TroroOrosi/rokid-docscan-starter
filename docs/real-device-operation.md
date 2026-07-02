@@ -39,17 +39,21 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000   # 既定＝オフライン・�
 - `GET /health` が `{"status":"ok"}` を返せば稼働中。全環境変数は
   [user-operation-guide.md](user-operation-guide.md) §「環境変数一覧」を参照。
 
-### 2-1. 実 AI を有効化（任意）
+### 2-1. サーバ側の実 AI を有効化（任意 — 主経路は搭載 GPT で鍵不要）
+
+**主経路はグラス搭載 AI（GPT / Gemini）**が解いて `POST /solutions` で取り込む形で、サーバ鍵は
+不要です。より高性能なモデルが必要な場合のみ有効化します：
 
 ```bash
-pip install anthropic          # または openai / google-genai
-export ANTHROPIC_API_KEY=sk-ant-...           # OpenAI/Gemini なら OPENAI_API_KEY / GOOGLE_API_KEY
-export ROKID_SOLVER=claude ROKID_EXPLAINER=claude \
-       ROKID_ANALYZER=claude ROKID_EXTRACTOR=claude   # または openai / gemini
-export ROKID_LLM_MODEL=claude-opus-4-8         # openai/gemini は現行モデル id を必須指定
+pip install openai             # または google-genai / anthropic
+export OPENAI_API_KEY=sk-...                  # Gemini/Anthropic なら GOOGLE_API_KEY / ANTHROPIC_API_KEY
+export ROKID_SOLVER=openai ROKID_EXPLAINER=openai \
+       ROKID_ANALYZER=openai ROKID_EXTRACTOR=openai   # または gemini / claude
+export ROKID_LLM_MODEL=<現行のGPTモデルid>      # openai/gemini は現行モデル id を必須指定
 ```
 
 - 鍵未設定/失敗時は**自動でローカル実装にフォールバック**（サーバは常に応答）。
+- **`ROKID_SOLVER` を non-local にすると `finalize-reading` がサーバ側で全問一括解答**します。
 
 ### 2-2. 認証を掛ける（任意・公開/実機時推奨）
 
@@ -77,8 +81,11 @@ export ROKID_TRANSCRIBE_MODEL=gpt-4o-transcribe   # gemini は ROKID_LLM_MODEL �
 
 1. `GET /v1/settings` を取得し、**唯一の権威**として読み込む：
    - `hud`（無音・無フラッシュ・即時遷移・低輝度・最大3行）
-   - `capture`（無音シャッター・プライバシー LED 不可侵）
-   - `input`（gesture→KeyCode。`ROKID_KEYMAP` で実機差を吸収可）
+   - `capture`（無音シャッター・プライバシー LED 不可侵：`on_while_camera_active`＝読取中のみ点灯、
+     `led_off_during_review:true`＝解答/閲覧フェーズは消灯）
+   - `operations`（3 フェーズの操作↔ジェスチャ対応）
+   - `input`（gesture→KeyCode。**`keycodes_verified:false`＝旧機由来・要実測**。
+     `ROKID_KEYMAP` で実機差を吸収可）
 2. `ExternalAppClient` から AIDL `IMediaStreamService` にバインドし、本体 AI
    `com.rokid.sprite.aiapp`（AI Interaction）と連携（詳細・Kotlin 例は
    [cxr-l-integration.md](cxr-l-integration.md)）。
@@ -121,58 +128,84 @@ TP-左/右滑(swipe, 21/22)             → テキストページ送り
 
 ### 4-C. 資料解説（/v1/explain-sessions、撮影なし）
 ```
-POST /v1/explain-sessions {document_id}              → session_id (status=ready)
-TP-単击(tap 23)                       → GET .../explain（概要）
-TP-快速左/右滑(fast_swipe, UP 19 / DOWN 20) → POST .../next-page / prev-page
-TP-長按(long_press 170)               → GET .../explain?stage=detail→evidence
-TP-左/右滑(swipe 21/22)               → GET .../explain?view_page=N±1（テレプロンプター）
+POST /v1/explain-sessions {document_id}     → session_id (status=ready)
+1本指タップ(single_tap)                     → GET .../explain（概要）
+2本指スワイプ左/右(two_finger_swipe_l/r)     → POST .../next-page / prev-page
+1本指タップ（表示中）                        → GET .../explain?stage=detail→evidence
+2本指スワイプ下/上(two_finger_swipe_d/u)     → GET .../explain?view_page=N±1（テレプロンプター）
 ```
 
-### 4-D. 文書ページ移動型 exam（撮影しない・主経路 / 筆記・リスニング両対応）
-**撮影しない**：本体 AI の認識テキスト（本文＝`ocr_text`＋図の読み取り＝`vision_text`）を全ページ登録・
-finalize（＝全ページ読込完了）してから、ページ移動で解く。**全ページを記憶し、現在ページを全ページの文脈で解く**
-（ページ跨ぎの続き問題に対応）。**操作はグラス単独で完結**（スマホは中継のみ・画面不要）。
+### 4-D. 3 フェーズ実践フロー（主経路 / 筆記・リスニング両対応・LED 点灯最小）
+**読取（カメラON・LED点灯・最短化）→ 一括解答（カメラOFF）→ 閲覧（カメラOFF・LED消灯）**。
+撮影は一切発生しない（写真/フラッシュ/シャッターなし・録音も無音）。**操作はグラス単独で完結**
+（スマホは中継のみ・画面不要）。
+
 ```
-# 準備（撮影しない）：/pages (ocr_text[, vision_text]) ×全ページ → /finalize
-POST /v1/exam-sessions {mode:"study", document_id, exam_type:"written", answer_format:"mark"} → session_id
-TP-快速左/右滑(fast_swipe, UP 19 / DOWN 20) → POST .../next-page / prev-page   ← 現在ページ移動
-（確認）                                      GET  .../current                 ← 現在ページ把握
-TP-単击(tap 23)                              → POST .../solve-current          ← 現在ページを全ページ文脈で解く
-TP-長按(long_press 170)                      → GET  .../questions/{qid}/view?stage=solution→rationale→caution
-Back-長按(back_long_press)                   → POST .../mode {exam_type}       ← 筆記 ⇄ リスニング 切替
-# リスニング（音声はその場で録音＝無音、設問は目の前の資料から読取）
-TP-双指長按(two_finger_long_press)           → 録音 → POST .../audio (audio,[transcript])
-TP-単击(tap 23)                              → POST .../solve-current          ← 書き起こし＋資料で解答
+# フェーズ1 読取（この間だけカメラON＝プライバシーLED点灯）
+POST /v1/documents → 2本指タップ(two_finger_tap=AI起動・視認) ×全ページ
+  → 本体AIの認識を POST .../pages (ocr_text[, vision_text])（scan_ack で進捗表示）
+POST /v1/documents/{id}/finalize
+POST /v1/exam-sessions {mode:"study", document_id, exam_type:"written", answer_format:"mark"}
+ダブルタップ(double_tap=読取完了宣言) → POST .../finalize-reading
+  → 問題分割・デッキ作成・reading_ack「読取完了/N問を検出/カメラOFF 解答へ」
+  → ここでカメラを閉じる＝LED消灯（応答の camera.privacy_led=="off" を確認）
+
+# フェーズ2 解答（カメラOFF）
+主経路: 搭載 GPT が全問を解く → POST .../solutions（問題別解答の配列を ingest）
+任意:   ROKID_SOLVER=openai|gemini|claude ならフェーズ1の finalize-reading が一括解答済み
+長押し(long_press=公式の録画⇄録音トグル)      → POST .../mode {exam_type}   ← 筆記 ⇄ リスニング
+長押し（listening 中）                        → 録音 → POST .../audio (audio,[transcript])
+
+# フェーズ3 閲覧（カメラOFF・LED消灯。用紙も視認も不要）
+GET .../solutions                            ← デッキ一覧（問1..問N・解答済み・確信度）
+GET .../review?index=k&view_page=n           ← 1問題＝解答+解法+根拠+注意を一括表示
+2本指スワイプ左/右 → index±1（前後の問題） / 2本指スワイプ下/上 → view_page±1（送り読み）
+ダブルタップ → 閲覧終了
 ```
 - **図・画像も読む**：図がないと解けない問題は、本体 AI の図の読み取りを `vision_text` として送れば本文と併せて解答材料になる。
 - `exam_type`＝`written`(筆記) / `listening`(英語リスニング)、`answer_format`＝`mark`(マーク) / `written`(記述)。
 - **リスニング書き起こし**：`ROKID_TRANSCRIBER=openai|gemini`＋各社鍵で実書き起こし。未設定/失敗/オフラインは
-  アップロード時の `transcript` をそのまま使用（クレデンシャル不要で成立、下記 §2-3）。
-- **撮影しない**＝写真/フラッシュ/シャッターなし、録音も無音（`GET /v1/settings.capture` の `flash:"off"`・
-  `capture_tone:false`・`audio_record`(無音) を参照）。`mode:"real"` は `ROKID_ALLOW_REAL_EXAM_SOLVE=1` が無い限りロック。
+  アップロード時の `transcript` をそのまま使用（クレデンシャル不要で成立、上記 §2-3）。全問の解答文脈に統合される。
+- **LED 期待値**：フェーズ1のみ点灯・フェーズ2/3は消灯（`GET /v1/settings.capture` の
+  `privacy_led:{state:"on_while_camera_active"}`・`led_off_during_review:true`）。
+- `mode:"real"` は `ROKID_ALLOW_REAL_EXAM_SOLVE=1` が無い限りロック（ingest・デッキ・閲覧もロック）。
+
+### 4-E. 文書ページ移動型 exam（二次経路・互換）
+ページ移動で現在ページを解く従来経路（読取と閲覧が分離されないため LED 点灯時間が長い）。
+```
+2本指スワイプ左/右 → POST .../next-page / prev-page   ← 現在ページ移動
+（確認）             GET  .../current                  ← 現在ページ把握
+1本指タップ         → POST .../solve-current           ← 現在ページを全ページ文脈で解く
+1本指タップ（表示中）→ GET  .../questions/{qid}/view?stage=solution→rationale→caution
+```
 
 ### 実行フロー（データの流れ）
 ```
-[Glasses: カメラ / 本体AI-OCR] ──画像 + ocr_text──▶ [本サーバ]
-   照合(pHash) / 解答 / 解説 / 抽出（local 既定、claude|openai|gemini で実AI）
+[Glasses: 本体AI(GPT/Gemini)=視認・認識・解答] ──ocr_text/vision_text・問題別解答──▶ [本サーバ]
+   分割(segment_problems) / 取り込み(ingest) / 照合(pHash) / 解説 / 抽出
+   （サーバ solver は任意: openai|gemini|claude、local 既定）
 [本サーバ] ──HUD 3行(JSON)──▶ [Glasses: 両眼ディスプレイに描画]
    ※実AIが未設定/失敗ならローカルへ自動フォールバック（常に応答）
 ```
 
 ---
 
-## 5. 実機での入力（KeyCode）調整
+## 5. 実機での入力（KeyCode）計測・調整 — **必須**
 
-`GET /v1/settings.input` の既定は現行マッピング。機種/ファーム差で異なる場合は、
-サーバ側で **`ROKID_KEYMAP`（JSON）** を設定して上書きすれば、クライアント改修なしで反映されます。
+`GET /v1/settings.input` のジェスチャ名は現行公式ですが、**KeyCode 値は旧・単眼 Rokid Glass
+由来のレガシー表で、現行機では未実測**です（API も `keycodes_verified:false`・`keycode_source`
+で明示）。実機では**必ず計測**し、**`ROKID_KEYMAP`（JSON）** で上書きしてください
+（クライアント改修なしで反映されます）。
 
 ```bash
-# 例: tap と long_press の KeyCode を実機値に合わせる
-export ROKID_KEYMAP='{"tap": 23, "long_press": 170}'
+# 例: single_tap と long_press の KeyCode を実機値に合わせる
+export ROKID_KEYMAP='{"single_tap": 23, "long_press": 170}'
 ```
 
 実機での確認は `adb shell getevent -l`（または Android の `KeyEvent` ログ）で
 タッチパッド操作時のキーコードを観測し、差があれば上記で調整します。
+`two_finger_tap`（AI 起動）はシステムジェスチャのため既定 `keycode:null`——ファームが
+KeyEvent として配送する機種のみ `ROKID_KEYMAP` で割り当ててください。
 
 ---
 
@@ -180,6 +213,6 @@ export ROKID_KEYMAP='{"tap": 23, "long_press": 170}'
 
 | 要素 | 状態 |
 |------|------|
-| サーバ（本リポジトリ） | そのまま実行可能・実 AI（claude/openai/gemini）接続可・テスト緑 |
+| サーバ（本リポジトリ） | そのまま実行可能・実 AI（openai/gemini/claude）接続可・テスト緑 |
 | グラス本体アプリ（CXR-L, Kotlin/APK） | 各自でビルド。[cxr-l-integration.md](cxr-l-integration.md) の参照スニペットが出発点（Python リポジトリ内で APK はビルド不可） |
-| 本体 AI（`com.rokid.sprite.aiapp`） | AI Interaction 経由で CXR-L/CXR-M から利用。結果を `ocr_text` として本サーバへ渡せる（経路B） |
+| 本体 AI（`com.rokid.sprite.aiapp`＝GPT/Gemini ネイティブ） | AI Interaction 経由で CXR-L/CXR-M から利用。読取は `ocr_text`/`vision_text`、解答は `POST /solutions` として本サーバへ渡せる（経路B＝主経路） |
