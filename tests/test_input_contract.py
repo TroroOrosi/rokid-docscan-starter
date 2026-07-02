@@ -29,51 +29,67 @@ def test_input_contract_default(tmp_path, monkeypatch):
     c = _make_client(tmp_path, monkeypatch, ROKID_KEYMAP=None)
     inp = c.get("/v1/settings").json()["input"]
     g = inp["gestures"]
-    assert g["tap"] == {"keycode": 23, "keyevent": "KEYCODE_DPAD_CENTER"}
+    # Official gesture names; KeyCode values are the legacy Rokid Glass table.
+    assert g["single_tap"] == {"keycode": 23, "keyevent": "KEYCODE_DPAD_CENTER"}
     assert g["long_press"]["keycode"] == 170
-    assert g["fast_swipe_left"]["keycode"] == 19
+    assert g["two_finger_swipe_up"]["keycode"] == 19
     assert g["back"]["keycode"] == 4
-    assert inp["keycodes_verified"] is True
+    # Honest flag: legacy keycodes are NOT verified on the current hardware.
+    assert inp["keycodes_verified"] is False
+    assert "unverified" in inp["keycode_source"]
     assert inp["overridden"] is False
 
 
 def test_input_contract_override(tmp_path, monkeypatch):
-    c = _make_client(tmp_path, monkeypatch, ROKID_KEYMAP='{"tap": 99, "long_press": 88}')
+    c = _make_client(
+        tmp_path, monkeypatch, ROKID_KEYMAP='{"single_tap": 99, "long_press": 88}'
+    )
     inp = c.get("/v1/settings").json()["input"]
-    assert inp["gestures"]["tap"]["keycode"] == 99
+    assert inp["gestures"]["single_tap"]["keycode"] == 99
     assert inp["gestures"]["long_press"]["keycode"] == 88
     # keyevent name is preserved on override; other gestures keep defaults.
-    assert inp["gestures"]["tap"]["keyevent"] == "KEYCODE_DPAD_CENTER"
-    assert inp["gestures"]["swipe_left"]["keycode"] == 21
+    assert inp["gestures"]["single_tap"]["keyevent"] == "KEYCODE_DPAD_CENTER"
+    assert inp["gestures"]["two_finger_swipe_left"]["keycode"] == 21
     assert inp["overridden"] is True
-    assert inp["keycodes_verified"] is True
+    # An override still doesn't make the defaults "verified".
+    assert inp["keycodes_verified"] is False
 
 
 def test_input_contract_ignores_bad_keymap(tmp_path, monkeypatch):
     # Malformed JSON is ignored (no crash), defaults stand.
     c = _make_client(tmp_path, monkeypatch, ROKID_KEYMAP="not json")
     inp = c.get("/v1/settings").json()["input"]
-    assert inp["gestures"]["tap"]["keycode"] == 23
+    assert inp["gestures"]["single_tap"]["keycode"] == 23
     assert inp["overridden"] is False
 
 
-def test_input_contract_has_mode_and_record_gestures(tmp_path, monkeypatch):
-    # v0.7: mode-toggle and listening-record gestures are published so the
-    # glasses can bind them (no standard KeyCode -> delivered as Intent/custom).
+def test_input_contract_has_ai_activation_gesture(tmp_path, monkeypatch):
+    # two_finger_tap (AI activation = 視認) is a system gesture with no
+    # standard KeyCode; published so the glasses app can bind it if the
+    # firmware delivers it as a KeyEvent (assign via ROKID_KEYMAP).
     c = _make_client(tmp_path, monkeypatch, ROKID_KEYMAP=None)
     g = c.get("/v1/settings").json()["input"]["gestures"]
-    assert "back_long_press" in g
-    assert "two_finger_long_press" in g
-    assert g["back_long_press"]["keycode"] is None
+    assert "two_finger_tap" in g
+    assert g["two_finger_tap"]["keycode"] is None
 
 
-def test_operations_cover_document_exam_and_listening(tmp_path, monkeypatch):
+def test_operations_cover_three_phase_flow(tmp_path, monkeypatch):
     c = _make_client(tmp_path, monkeypatch, ROKID_KEYMAP=None)
     ops = c.get("/v1/settings").json()["operations"]
-    # Every scan-free operation is bound to a glasses gesture (phone-free).
-    assert ops["exam_next_page"] == "fast_swipe_left"
-    assert ops["exam_prev_page"] == "fast_swipe_right"
-    assert ops["exam_solve_current"] == "tap"
-    assert ops["exam_next_stage"] == "long_press"
-    assert ops["mode_toggle"] == "back_long_press"
-    assert ops["record_toggle"] == "two_finger_long_press"
+    # Phase 1 読取 (camera ON, LED lit — keep it short)
+    assert ops["capture_read"] == "two_finger_tap"
+    assert ops["finish_reading"] == "double_tap"
+    # Phase 2 解答 (camera OFF): written⇄listening toggle = official
+    # video⇄audio record toggle (long press)
+    assert ops["mode_toggle"] == "long_press"
+    assert ops["record_toggle"] == "long_press"
+    # Phase 3 閲覧 (camera OFF, LED off): per-problem deck navigation
+    assert ops["review_next_problem"] == "two_finger_swipe_left"
+    assert ops["review_prev_problem"] == "two_finger_swipe_right"
+    assert ops["scroll_next"] == "two_finger_swipe_down"
+    assert ops["scroll_prev"] == "two_finger_swipe_up"
+    assert ops["close"] == "double_tap"
+    # Secondary/compat solve-current型 operations stay published.
+    assert ops["exam_next_page"] == "two_finger_swipe_left"
+    assert ops["exam_prev_page"] == "two_finger_swipe_right"
+    assert ops["exam_solve_current"] == "single_tap"

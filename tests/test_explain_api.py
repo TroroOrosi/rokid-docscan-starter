@@ -142,10 +142,10 @@ class TestExplainPage:
         # navigation operations
         assert "operations" in gv["nav"]
         ops = gv["nav"]["operations"]
-        assert ops["next_view_page"] == "swipe_left"
-        assert ops["next_stage"] == "long_press"
-        assert ops["next_doc_page"] == "fast_swipe_left"
-        assert ops["prev_doc_page"] == "fast_swipe_right"
+        assert ops["next_view_page"] == "two_finger_swipe_down"
+        assert ops["next_stage"] == "single_tap"
+        assert ops["next_doc_page"] == "two_finger_swipe_left"
+        assert ops["prev_doc_page"] == "two_finger_swipe_right"
 
     def test_explain_stage_detail(self, client, doc_1page):
         sid = _create_session(client, doc_1page)

@@ -231,7 +231,7 @@ async def add_page(
 
     Returns a `scan_ack` HUD payload so the glasses can show real-time
     progress (e.g. '3/5ページ完了') after every page. Pass `total_pages`
-    (the expected total) to enable the completion hint ('完了: ダブル長押し').
+    (the expected total) to enable the completion hint ('完了: ダブルタップ').
     """
     has_image = image is not None and getattr(image, "filename", None)
     has_text = (ocr_text and ocr_text.strip()) or (vision_text and vision_text.strip())
@@ -900,7 +900,7 @@ def _require_document_exam(session):
 
 @app.post("/v1/exam-sessions/{session_id}/next-page")
 def exam_next_page(session_id: int) -> dict:
-    """Advance the current page index by 1 (fast_swipe_left). Clamped at last."""
+    """Advance the current page index by 1 (two_finger_swipe_left). Clamped at last."""
     conn = db.connect()
     try:
         session = _exam_session_or_404(conn, session_id)
@@ -927,7 +927,7 @@ def exam_next_page(session_id: int) -> dict:
 
 @app.post("/v1/exam-sessions/{session_id}/prev-page")
 def exam_prev_page(session_id: int) -> dict:
-    """Move the current page index back by 1 (fast_swipe_right). Clamped at 0."""
+    """Move the current page index back by 1 (two_finger_swipe_right). Clamped at 0."""
     conn = db.connect()
     try:
         session = _exam_session_or_404(conn, session_id)
@@ -1245,7 +1245,7 @@ def create_explain_session(payload: CreateExplainSession) -> dict:
 def explain_next_page(session_id: int) -> dict:
     """Advance the current page index by 1.
 
-    Triggered by the user pressing the 'next page' button (fast_swipe_left /
+    Triggered by the user pressing the 'next page' button (two_finger_swipe_left /
     KEYCODE_DPAD_UP) on the glasses.  Clamped at the last page.
     Returns the new current_page_index and a brief HUD ack.
     """
@@ -1275,7 +1275,7 @@ def explain_next_page(session_id: int) -> dict:
 def explain_prev_page(session_id: int) -> dict:
     """Move the current page index back by 1.
 
-    Triggered by fast_swipe_right / KEYCODE_DPAD_DOWN.  Clamped at page 0.
+    Triggered by two_finger_swipe_right / KEYCODE_DPAD_RIGHT (unverified).  Clamped at page 0.
     """
     conn = db.connect()
     try:
@@ -1312,7 +1312,7 @@ def explain_page(
 
     Navigation within a page:
       - stage     : overview | detail | evidence  (long-press)
-      - view_page : 0-based teleprompter slice    (swipe_left / swipe_right)
+      - view_page : 0-based teleprompter slice    (two_finger_swipe_down / up)
     """
     if stage not in EXPLAIN_STAGES:
         raise HTTPException(

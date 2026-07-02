@@ -63,7 +63,7 @@ LLM_ENABLED = bool(
 # app/glasses_view.py INPUT_CONTRACT) so the on-glass CXR-L client has one
 # authoritative source. Defaults follow Rokid's current mapping; override any
 # gesture for a specific device/firmware via ROKID_KEYMAP (JSON), e.g.
-#   ROKID_KEYMAP='{"tap": 23, "long_press": 170}'
+#   ROKID_KEYMAP='{"single_tap": 23, "long_press": 170}'
 def _load_keymap() -> dict:
     raw = os.environ.get("ROKID_KEYMAP")
     if not raw:
