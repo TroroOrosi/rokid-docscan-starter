@@ -26,8 +26,10 @@ Design principles (SILENT-FRIENDLY, no-flash):
   - A `locator` text hint to the answer area (no world-locking to paper).
 
 Stages:
-  exam mode:     answer -> solution -> rationale -> caution
-  explain mode:  overview -> detail -> evidence
+  exam mode (secondary): answer -> solution -> rationale -> caution
+  explain mode:          overview -> detail -> evidence
+  review mode (primary): NO stages — 答え+解法+根拠+注意 merged into one
+                         teleprompter stream per problem (一括表示)
 
 Navigation is always touch-gesture based — voice is opt-in only.
 Official Rokid Glasses gesture vocabulary (current model; see
@@ -467,6 +469,121 @@ def build_explain_view(
             },
             "hint": hint,
         },
+    }
+
+
+# ---------------------------------------------------------------------------
+# Review-deck view builder (3-phase exam flow, phase 3 閲覧: camera OFF, LED off)
+# ---------------------------------------------------------------------------
+
+
+def _review_lines(solution: SolveResult, header: str) -> list[str]:
+    """One merged line stream: 答え → 解法 → 根拠 → 注意 (no stages).
+
+    Unlike the staged _stage_lines, empty sections are omitted entirely (no
+    "(なし)" filler) so the teleprompter stream stays short.
+    """
+    lines = [header, f"答え: {solution.answer}"]
+    steps = [
+        s2 for s in (solution.solution_steps or []) for s2 in (_split_sentences(s) or [s])
+    ]
+    if steps:
+        lines += ["解法"] + steps
+    rationale = _split_sentences(solution.rationale)
+    ev = (
+        "根拠ページ: " + ",".join(f"P{p:02d}" for p in solution.evidence_pages)
+        if solution.evidence_pages
+        else ""
+    )
+    if rationale or ev:
+        lines += ["根拠"] + rationale + ([ev] if ev else [])
+    cautions = _split_sentences(solution.cautions)
+    if cautions:
+        lines += ["注意"] + cautions
+    return lines
+
+
+# Gesture bindings shown inside every review view (subset of OPERATION_CONTRACT).
+_REVIEW_OPERATIONS = {
+    "next_problem": "two_finger_swipe_left",
+    "prev_problem": "two_finger_swipe_right",
+    "scroll_next": "two_finger_swipe_down",
+    "scroll_prev": "two_finger_swipe_up",
+    "close": "double_tap",
+}
+
+
+def build_review_view(
+    solution: SolveResult | None,
+    *,
+    index: int,
+    problem_count: int,
+    problem_no: str | None = None,
+    page_number: int | None = None,
+    view_page: int = 0,
+    solved: bool = True,
+    voice_enabled: bool = False,
+) -> dict:
+    """Return one teleprompter page of the per-problem review view.
+
+    Phase 3 閲覧: the paper and the camera are no longer needed (LED off).
+    Answer, solution steps, rationale and cautions are merged into ONE stream
+    (確定事項: 一括表示) and chunked into <=3-line pages; the user scrolls with
+    two-finger vertical swipes and moves between problems with two-finger
+    horizontal swipes.  An unsolved problem renders a placeholder so the deck
+    is fully navigable before/while the onboard AI's answers are ingested.
+    """
+    position = f"{index + 1}/{problem_count}"
+    label = problem_no or f"#{index + 1}"
+    if solution is not None and solved:
+        header = f"{label} {position} {_confidence_symbol(solution.answer_confidence)}"
+        lines = _review_lines(solution, header)
+    else:
+        header = f"{label} {position}"
+        lines = [header, "未解答", "本体AIの解答待ち"]
+
+    pages = _paginate(lines)
+    total = len(pages)
+    vp = max(0, min(view_page, total - 1))
+
+    return {
+        "kind": "review",
+        "index": index,
+        "problem_count": problem_count,
+        "problem_no": problem_no,
+        "page_number": page_number,
+        "view_page": vp,
+        "total_view_pages": total,
+        "lines": pages[vp],
+        "solved": bool(solved and solution is not None),
+        "locked": False,
+        "nav": {
+            "prev_problem": index - 1 if index > 0 else None,
+            "next_problem": index + 1 if index < problem_count - 1 else None,
+            "prev_view_page": vp - 1 if vp > 0 else None,
+            "next_view_page": vp + 1 if vp < total - 1 else None,
+            "operations": dict(_REVIEW_OPERATIONS),
+            "hint": (
+                "『次の問題』と言う"
+                if voice_enabled
+                else "横スワイプ 前後の問 / 縦スワイプ 送り"
+            ),
+        },
+    }
+
+
+def build_reading_done_ack(problem_count: int, total_pages: int) -> dict:
+    """HUD ack for finalize-reading: reading phase over, camera off, LED off."""
+    return {
+        "lines": [
+            f"読取完了 {total_pages}ページ",
+            f"{problem_count}問を検出",
+            "カメラOFF 解答へ",
+        ][:_MAX_LINES],
+        "ttl_sec": 2,
+        "problem_count": problem_count,
+        "total_pages": total_pages,
+        "camera_off": True,
     }
 
 
