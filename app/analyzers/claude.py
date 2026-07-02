@@ -43,12 +43,15 @@ class LLMAnalyzer(Analyzer):
         ocr_text: str | None = None,
         max_summary_len: int = 48,
     ) -> AnalyzerResult:
-        client = get_client(self._client, self.provider)
-        if client is None or not (ocr_text or "").strip():
-            return self._fallback.analyze(
-                image_path=image_path, ocr_text=ocr_text, max_summary_len=max_summary_len
-            )
         try:
+            # get_client may raise LLMConfigError (key set but SDK missing); keep
+            # it inside the guard so finalize never 500s — the Analyzer contract
+            # forbids raising, so we degrade to the offline local analyzer.
+            client = get_client(self._client, self.provider)
+            if client is None or not (ocr_text or "").strip():
+                return self._fallback.analyze(
+                    image_path=image_path, ocr_text=ocr_text, max_summary_len=max_summary_len
+                )
             data = client.complete_json(
                 system=_SYSTEM.format(max_len=max_summary_len),
                 prompt=f"Page OCR text:\n{ocr_text}",

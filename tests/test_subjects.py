@@ -9,6 +9,12 @@ def test_math():
     assert _subj("2x + 3 = 7 を満たす x を求め、関数 f(x) の微分を計算せよ。") == "数学"
 
 
+def test_math_bare_arithmetic():
+    # Arithmetic-only prompts (+/-) must be detected as math, not default 現代文.
+    assert _subj("12+13 を計算せよ") == "数学"
+    assert _subj("5−2 を求めよ") == "数学"
+
+
 def test_physics():
     assert _subj("質量 m の物体の加速度と運動量を求め、速度 v を m/s で答えよ。") == "物理"
 

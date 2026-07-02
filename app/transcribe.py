@@ -45,10 +45,13 @@ def transcribe_audio(
     audio is present, or the call fails — so listening mode works offline.
     """
     fallback = (provided_transcript or "").strip()
-    transcriber = client or _load_transcriber(config.TRANSCRIBER)
-    if transcriber is None or not audio_path:
-        return fallback
     try:
+        # _load_transcriber may raise LLMConfigError (provider key set but its SDK
+        # not installed); keep it inside the guard so /audio never 500s — listening
+        # degrades to the client-provided transcript.
+        transcriber = client or _load_transcriber(config.TRANSCRIBER)
+        if transcriber is None or not audio_path:
+            return fallback
         with open(audio_path, "rb") as fh:
             audio = fh.read()
         text = transcriber.transcribe(audio)

@@ -80,6 +80,23 @@ def test_exception_falls_back(tmp_path):
     assert out == "safe"
 
 
+def test_transcriber_setup_failure_falls_back(tmp_path, monkeypatch):
+    """Configured provider whose SDK is missing must not 500: use the transcript."""
+    import app.transcribe as tr
+    from app.llm import LLMConfigError
+
+    path = _write_audio(tmp_path)
+    monkeypatch.setattr(tr.config, "TRANSCRIBER", "openai")
+    monkeypatch.setattr(tr, "_provider_key", lambda provider: "key-present")
+
+    def _boom(provider):
+        raise LLMConfigError("openai SDK not installed")
+
+    monkeypatch.setattr(tr, "_build_sdk", _boom)
+    # client=None -> _load_transcriber runs, raises inside the guard -> fallback.
+    assert tr.transcribe_audio(path, provided_transcript="fb", client=None) == "fb"
+
+
 def test_audio_media_type_detection():
     assert _audio_media_type(b"RIFF0000WAVEmore") == "audio/wav"
     assert _audio_media_type(b"ID3xxxxx") == "audio/mpeg"

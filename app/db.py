@@ -150,22 +150,59 @@ _EXAM_SESSION_MIGRATIONS = (
 )
 
 
-# Columns added to pages after its initial release (same reason as above).
-_PAGE_MIGRATIONS = (
-    ("vision_text", "TEXT"),
-)
+# Rebuild `pages` to the current schema. Used to relax the original
+# `image_path TEXT NOT NULL` on databases created before 撮影しない (no
+# photography) text-only pages existed — SQLite can't drop a NOT NULL in place,
+# so we copy into a fresh table. This also introduces the `vision_text` column.
+_PAGES_REBUILD_SQL = """
+CREATE TABLE pages_new (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    document_id INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+    page_index  INTEGER NOT NULL,
+    image_path  TEXT,
+    phash       TEXT NOT NULL DEFAULT '',
+    ocr_text    TEXT,
+    vision_text TEXT,
+    ocr_md5     TEXT,
+    summary     TEXT,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(document_id, page_index)
+);
+INSERT INTO pages_new
+    (id, document_id, page_index, image_path, phash, ocr_text, ocr_md5, summary, created_at)
+    SELECT id, document_id, page_index, image_path, phash, ocr_text, ocr_md5, summary, created_at
+    FROM pages;
+DROP TABLE pages;
+ALTER TABLE pages_new RENAME TO pages;
+"""
+
+
+def _pages_image_path_not_null(conn: sqlite3.Connection) -> bool:
+    """True if `pages.image_path` still carries the legacy NOT NULL constraint."""
+    for _cid, name, _type, notnull, _dflt, _pk in conn.execute(
+        "PRAGMA table_info(pages)"
+    ):
+        if name == "image_path":
+            return bool(notnull)
+    return False
 
 
 def _migrate(conn: sqlite3.Connection) -> None:
-    """Add any missing columns on an existing database (additive ALTER TABLEs)."""
-    for table, migrations in (
-        ("exam_sessions", _EXAM_SESSION_MIGRATIONS),
-        ("pages", _PAGE_MIGRATIONS),
-    ):
-        cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
-        for name, decl in migrations:
-            if name not in cols:
-                conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
+    """Bring an existing database up to the current schema (additive + rebuild)."""
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(exam_sessions)")}
+    for name, decl in _EXAM_SESSION_MIGRATIONS:
+        if name not in cols:
+            conn.execute(f"ALTER TABLE exam_sessions ADD COLUMN {name} {decl}")
+
+    # pages: on a legacy DB, image_path was NOT NULL — rebuild the table so
+    # text-only (撮影しない) pages with image_path=NULL can be recorded. The
+    # rebuild also adds vision_text; otherwise just add the column if missing.
+    if _pages_image_path_not_null(conn):
+        conn.executescript(_PAGES_REBUILD_SQL)
+    else:
+        pcols = {r[1] for r in conn.execute("PRAGMA table_info(pages)")}
+        if "vision_text" not in pcols:
+            conn.execute("ALTER TABLE pages ADD COLUMN vision_text TEXT")
 
 
 def init_db(db_path: Path | None = None) -> None:

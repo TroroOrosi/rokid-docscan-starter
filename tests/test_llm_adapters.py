@@ -187,3 +187,36 @@ def test_default_routing_still_local():
     assert get_analyzer().name == "local"
     assert get_explainer().name == "local"
     assert get_extractor().name == "local"
+
+
+def test_adapters_fall_back_when_sdk_missing(monkeypatch):
+    """Key set but provider SDK not installed: get_client raises LLMConfigError.
+
+    analyzer/explainer/extractor must NOT propagate it (their contracts forbid
+    raising) — finalize/explain/add_question would otherwise 500. They degrade to
+    the offline local placeholder.
+    """
+    from app.llm import LLMConfigError
+
+    def _raise(*a, **k):
+        raise LLMConfigError("provider key set but its SDK is not installed")
+
+    import app.analyzers.claude as an
+    import app.explainers.claude as ex
+    import app.extractors.claude as xt
+
+    monkeypatch.setattr(an, "get_client", _raise)
+    monkeypatch.setattr(ex, "get_client", _raise)
+    monkeypatch.setattr(xt, "get_client", _raise)
+
+    # analyzer -> local summary (first non-empty line)
+    a = an.LLMAnalyzer(name="openai", provider="openai")
+    assert a.analyze(ocr_text="First line\nsecond").summary == "First line"
+    # explainer -> local placeholder still yields exactly 3 HUD lines
+    res = ex.LLMExplainer(name="gemini", provider="gemini").explain(
+        ExplainRequest(page_index=0, page_ocr_text="text", page_summary="s")
+    )
+    assert len(res.lines) == 3
+    # extractor -> local placeholder, no raise
+    r = xt.LLMExtractor(name="openai", provider="openai").extract(ocr_text="2x=4", kind="math")
+    assert r.kind == "math"

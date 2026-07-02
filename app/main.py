@@ -377,6 +377,9 @@ async def match_page(
                 ocr_text=normalize_ocr_text(r["ocr_text"]),
             )
             for r in rows
+            # Skip 撮影しない text-only pages (no image → empty phash); they are
+            # not image-match candidates and would break hamming()'s int(phash,16).
+            if r["phash"]
         ]
         summaries = {r["id"]: r["summary"] for r in rows}
 
@@ -554,7 +557,16 @@ def create_exam_session(payload: CreateExamSession) -> dict:
     conn = db.connect()
     try:
         if payload.document_id is not None:
-            _doc_or_404(conn, payload.document_id)
+            doc = _doc_or_404(conn, payload.document_id)
+            # A page-move exam navigates a finalized document's pages, so it must
+            # already be finalized (status='ready') with at least one page —
+            # otherwise current/solve-current would 404 and nav would show P01/0.
+            if doc["status"] != "ready" or _exam_total_pages(conn, payload.document_id) < 1:
+                raise HTTPException(
+                    status_code=400,
+                    detail="document must be finalized with >=1 page "
+                    "(POST /v1/documents/{id}/finalize) before a page-move exam",
+                )
         cur = conn.execute(
             "INSERT INTO exam_sessions "
             "(mode, voice_enabled, subject_hint, document_id, exam_type, answer_format) "

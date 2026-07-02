@@ -135,6 +135,39 @@ def test_create_rejects_missing_document(client):
     assert r.status_code == 404
 
 
+def test_create_rejects_unfinalized_document(client):
+    # A document with no pages / not finalized must not create a broken exam.
+    doc_id = _new_doc(client)
+    r = client.post("/v1/exam-sessions", json={"document_id": doc_id})
+    assert r.status_code == 400
+    # add a page but do NOT finalize -> still rejected (status != ready)
+    _add_text_page(client, doc_id, 0, "p1")
+    assert client.post(
+        "/v1/exam-sessions", json={"document_id": doc_id}
+    ).status_code == 400
+
+
+def test_match_ignores_camera_free_pages(client):
+    """A document mixing a text-only page and an image page must still match."""
+    doc_id = _new_doc(client)
+    _add_text_page(client, doc_id, 0, "撮影しないテキストページ")  # phash=""
+    files = {"image": ("p.png", image_bytes(make_image(seed=7)), "image/png")}
+    client.post(
+        f"/v1/documents/{doc_id}/pages",
+        data={"page_index": 1, "ocr_text": "画像ページ"},
+        files=files,
+    )
+    client.post(f"/v1/documents/{doc_id}/finalize")
+    # /match must not raise on the phashless page; it returns a verdict.
+    r = client.post(
+        "/v1/match",
+        data={"document_id": doc_id, "fast_ocr_text": "画像ページ"},
+        files={"image": ("q.png", image_bytes(make_image(seed=7)), "image/png")},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["verdict"] in ("HIT", "LOW_CONF", "NO_PAGE")
+
+
 # --- page navigation --------------------------------------------------------
 
 def test_navigation_next_prev_clamped(client):

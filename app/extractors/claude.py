@@ -46,12 +46,15 @@ class LLMExtractor(MediaExtractor):
         kind: str | None = None,
         region: dict | None = None,
     ) -> ExtractorResult:
-        client = get_client(self._client, self.provider)
-        if client is None or not (ocr_text or "").strip():
-            return self._fallback.extract(
-                image_path=image_path, ocr_text=ocr_text, kind=kind, region=region
-            )
         try:
+            # get_client may raise LLMConfigError (key set but SDK missing); keep
+            # it inside the guard so extraction never 500s (MediaExtractor contract
+            # forbids raising) — degrade to the offline local extractor.
+            client = get_client(self._client, self.provider)
+            if client is None or not (ocr_text or "").strip():
+                return self._fallback.extract(
+                    image_path=image_path, ocr_text=ocr_text, kind=kind, region=region
+                )
             data = client.complete_json(
                 system=_SYSTEM,
                 prompt=f"Requested kind: {kind or 'auto-detect'}\nOCR text:\n{ocr_text}",

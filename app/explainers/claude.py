@@ -37,11 +37,14 @@ class LLMExplainer(Explainer):
         self._fallback = LocalPlaceholderExplainer()
 
     def explain(self, req: ExplainRequest) -> ExplainResult:
-        client = get_client(self._client, self.provider)
         source = req.page_summary or req.page_ocr_text or ""
-        if client is None or not source.strip():
-            return self._fallback.explain(req)
         try:
+            # get_client may raise LLMConfigError (key set but SDK missing); keep
+            # it inside the guard so the explain HUD never 500s (Explainer contract
+            # forbids raising) — degrade to the offline local explainer.
+            client = get_client(self._client, self.provider)
+            if client is None or not source.strip():
+                return self._fallback.explain(req)
             data = client.complete_json(system=_SYSTEM, prompt=_build_prompt(req))
         except Exception:  # noqa: BLE001 - never break the HUD; degrade to local
             return self._fallback.explain(req)
