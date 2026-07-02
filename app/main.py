@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import os
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -38,10 +39,12 @@ from .glasses_view import (
     build_input_contract,
     build_locked_view,
     build_page_nav_ack,
+    build_reading_done_ack,
+    build_review_view,
     build_scan_ack,
 )
 from .hud import build_hud
-from .layout import parse_layout, primary_question
+from .layout import parse_layout, primary_question, segment_problems
 from .matching import Candidate, match, normalize_ocr_text, ocr_md5, phash_hex
 from .overlay import build_overlay
 from .retrieval import retrieve_context
@@ -463,6 +466,15 @@ def _exam_session_or_404(conn, session_id: int):
     return _row_or_404(conn, "exam_sessions", session_id, "exam session not found")
 
 
+def _session_phase(session) -> str:
+    """3-phase lifecycle: 'reading' (camera ON, LED lit) → 'reviewing' (camera OFF).
+
+    The legacy default status 'open' is a reading-phase alias, so pre-existing
+    sessions keep working unchanged; finalize-reading sets status='reviewing'.
+    """
+    return "reviewing" if session["status"] == "reviewing" else "reading"
+
+
 def _exam_total_pages(conn, doc_id: int | None) -> int:
     if not doc_id:
         return 0
@@ -592,6 +604,8 @@ def create_exam_session(payload: CreateExamSession) -> dict:
             "current_page_index": 0,
             "total_pages": _exam_total_pages(conn, payload.document_id),
             "status": "open",
+            # 3-phase lifecycle: reading (camera ON) until finalize-reading.
+            "phase": "reading",
             "operations": OPERATION_CONTRACT,
             "api_version": version_info()["api_version"],
         }
@@ -842,12 +856,15 @@ def get_exam_session(session_id: int) -> dict:
             "mode": session["mode"],
             "voice_enabled": bool(session["voice_enabled"]),
             "status": session["status"],
+            "phase": _session_phase(session),
             "document_id": session["document_id"],
             "exam_type": session["exam_type"],
             "answer_format": session["answer_format"],
             "current_page_index": session["current_page_index"],
             "total_pages": _exam_total_pages(conn, session["document_id"]),
             "has_audio": bool(session["audio_path"]),
+            "problem_count": len(rows),
+            "solved_count": len(solved),
             "questions": [
                 {
                     "question_id": r["id"],
@@ -865,13 +882,28 @@ def get_exam_session(session_id: int) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Document page-move型 exam (scan-free, primary path): bind the session to a
-# finalized document, navigate its pages by button, and solve the CURRENT page.
-# No camera capture happens during interaction — the "全ページ読込完了" state is
-# declared by finalize; the glasses only move the page cursor and ask to solve.
+# Document exam — 3-phase flow (primary path), designed to minimize the time
+# the camera is on (= the privacy LED is lit):
+#
+#   Phase 1 読取 (camera ON, LED lit — keep it short):
+#     register every page once (POST /documents/{id}/pages + finalize), then
+#     POST .../{id}/finalize-reading      declare 読取完了 (double tap) →
+#                                         segment into problems, camera OFF
+#   Phase 2 解答 (camera OFF): all problems solved in one batch
+#     POST .../{id}/solutions             ingest the onboard AI's per-problem
+#                                         answers (primary), or — with
+#                                         ROKID_SOLVER=openai|gemini|claude —
+#                                         finalize-reading solves server-side
+#   Phase 3 閲覧 (camera OFF, LED off): per-problem review deck
+#     GET  .../{id}/solutions             deck listing (solved flags)
+#     GET  .../{id}/review?index=k        one problem, 答え+解法+根拠+注意 in
+#                                         one stream (view_page teleprompter)
+#
+# Secondary/compat (solve-current型): navigate pages and solve the current one.
 #   POST .../{id}/next-page | prev-page   move current_page_index (±1, clamped)
 #   GET  .../{id}/current                 inspect current page (no solve)
 #   POST .../{id}/solve-current           solve the current page's material
+# Listening / mode (both flows):
 #   POST .../{id}/audio                   listening: upload recording (+transcript)
 #   POST .../{id}/mode                    toggle 筆記(written) ⇄ リスニング(listening)
 # ---------------------------------------------------------------------------
@@ -983,9 +1015,12 @@ def exam_current_page(session_id: int) -> dict:
 
 @app.post("/v1/exam-sessions/{session_id}/solve-current")
 def exam_solve_current(session_id: int) -> dict:
-    """Solve the CURRENT page — 撮影しない, using ALL remembered pages as context.
+    """Solve the CURRENT page — secondary/compat path (solve-current型).
 
-    The current page's recognized text (OCR + the on-glass AI's figure reading
+    The primary path is the 3-phase flow (finalize-reading → POST/GET
+    /solutions → GET /review), which keeps the camera off after one reading
+    pass.  This endpoint remains for per-page interactive solving: the current
+    page's recognized text (OCR + the on-glass AI's figure reading
     ``vision_text``) is the question; the **whole document** (every remembered
     page) is passed as context so a problem continuing across pages is read
     accurately. In listening mode the recorded audio's transcript is folded in.
@@ -1173,6 +1208,451 @@ async def exam_upload_audio(
             "audio_stored": audio_path is not None,
             "transcript": text,
             "transcript_chars": len(text),
+        }
+    finally:
+        conn.close()
+
+
+# --- 3-phase flow endpoints: finalize-reading / solutions ingest / review ----
+
+def _exam_deck(conn, session_id: int) -> list[dict]:
+    """Review-deck listing: session problems in document order + solved state.
+
+    Deck index k = the k-th questions row (ORDER BY id = insertion order =
+    segmentation/document order); the latest solutions row per question wins
+    (re-ingest of the same problem_no appends a newer row).
+    """
+    rows = conn.execute(
+        "SELECT id, question_no, subject, page_number FROM questions "
+        "WHERE session_id = ? ORDER BY id",
+        (session_id,),
+    ).fetchall()
+    deck: list[dict] = []
+    for i, r in enumerate(rows):
+        sol = conn.execute(
+            "SELECT served_by, answer_conf FROM solutions "
+            "WHERE question_id = ? ORDER BY id DESC LIMIT 1",
+            (r["id"],),
+        ).fetchone()
+        deck.append(
+            {
+                "index": i,
+                "question_id": r["id"],
+                "problem_no": r["question_no"],
+                "subject": r["subject"],
+                "page_number": r["page_number"],
+                "solved": sol is not None,
+                "served_by": sol["served_by"] if sol else None,
+                "answer_confidence": sol["answer_conf"] if sol else None,
+            }
+        )
+    return deck
+
+
+def _review_operations() -> dict:
+    """The review-phase subset of OPERATION_CONTRACT (echoed in responses)."""
+    keys = (
+        "review_next_problem",
+        "review_prev_problem",
+        "scroll_next",
+        "scroll_prev",
+        "close",
+        "mode_toggle",
+    )
+    return {k: OPERATION_CONTRACT[k] for k in keys}
+
+
+def _question_evidence_pages(conn, question_id: int) -> list[int]:
+    """Default evidence pages for an ingested answer: the problem's page span."""
+    row = conn.execute(
+        "SELECT structure_json, page_number FROM questions WHERE id = ?",
+        (question_id,),
+    ).fetchone()
+    if row is None:
+        return []
+    try:
+        span = json.loads(row["structure_json"] or "{}").get("page_indexes") or []
+    except (ValueError, TypeError):
+        span = []
+    if span:
+        return [i + 1 for i in span]
+    return [row["page_number"]] if row["page_number"] else []
+
+
+@app.post("/v1/exam-sessions/{session_id}/finalize-reading")
+def exam_finalize_reading(session_id: int) -> dict:
+    """Declare 読取完了 (finish_reading = double tap): the reading phase is over.
+
+    From here the camera stays closed, so the privacy LED is dark for the
+    whole answer and review phases.  The document is segmented into problems
+    (segment_problems over every remembered page, so page-spanning problems
+    stay whole) and one questions row is created per problem — the review
+    deck.  If a non-local server solver is configured (ROKID_SOLVER=
+    openai|gemini|claude), every problem is solved in one synchronous batch
+    right away; otherwise the deck waits for the onboard AI's answers via
+    POST /solutions (primary path).
+
+    Idempotent: a second call (gesture double-fire) re-segments nothing and
+    returns the current deck with already_finalized=true.  mode=real: the
+    segmentation and phase transition still happen (they reveal nothing), but
+    server-side solving is skipped and the response carries locked=true.
+    """
+    conn = db.connect()
+    try:
+        session = _exam_session_or_404(conn, session_id)
+        doc_id = _require_document_exam(session)
+        total_pages = _exam_total_pages(conn, doc_id)
+        locked = session["mode"] == "real" and not config.ALLOW_REAL_EXAM_SOLVE
+
+        if _session_phase(session) == "reviewing":
+            deck = _exam_deck(conn, session_id)
+            return {
+                "session_id": session_id,
+                "status": "reviewing",
+                "already_finalized": True,
+                "document_id": doc_id,
+                "total_pages": total_pages,
+                "problem_count": len(deck),
+                "server_solved": 0,
+                "locked": locked,
+                "problems": deck,
+                "camera": {"expected_state": "off", "privacy_led": "off"},
+                "operations": _review_operations(),
+                "versions": version_info(),
+            }
+
+        page_rows = conn.execute(
+            "SELECT page_index, ocr_text, vision_text FROM pages "
+            "WHERE document_id = ? ORDER BY page_index",
+            (doc_id,),
+        ).fetchall()
+        problems = segment_problems(
+            [
+                (r["page_index"], _page_material(r["ocr_text"], r["vision_text"]))
+                for r in page_rows
+            ]
+        )
+
+        inserted: list[tuple[int, object, str]] = []  # (question_id, problem, subject)
+        for prob in problems:
+            subject, subj_conf = detect_subject(prob.body_text)
+            qcur = conn.execute(
+                """INSERT INTO questions
+                   (session_id, question_no, body_text, choices_json, subject,
+                    read_conf, page_number, structure_json)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    session_id,
+                    prob.question_no,
+                    prob.body_text,
+                    json.dumps(prob.choices, ensure_ascii=False),
+                    subject,
+                    round(min(1.0, 0.5 + subj_conf / 2), 3)
+                    if normalize_ocr_text(prob.body_text)
+                    else 0.0,
+                    prob.start_page_index + 1,
+                    json.dumps({"page_indexes": prob.page_indexes}),
+                ),
+            )
+            inserted.append((qcur.lastrowid, prob, subject))
+
+        conn.execute(
+            "UPDATE exam_sessions SET status = 'reviewing' WHERE id = ?",
+            (session_id,),
+        )
+        conn.commit()
+
+        # Optional server-side solve-all. Deliberately skipped when ROKID_SOLVER
+        # is unset or 'local': the placeholder does not really solve, and junk
+        # rows would mark problems "solved" and shadow the onboard ingest.
+        server_solved = 0
+        solver_env = (os.environ.get("ROKID_SOLVER") or "").strip()
+        if inserted and not locked and solver_env and solver_env != "local":
+            for question_id, prob, subject in inserted:
+                doc_material = _document_material(conn, doc_id, prob.start_page_index)
+                retrieved = retrieve_context(conn, prob.body_text)
+                context = _exam_prompt_context(session, doc_material, retrieved["context"])
+                question = Question(
+                    question_no=prob.question_no,
+                    body_text=prob.body_text,
+                    choices=prob.choices,
+                    subject=subject,
+                    context=context,
+                )
+                result, solver = solve_with_fallback(question=question)
+                served_by = result.extras.get("served_by", solver.name)
+                evidence_pages = result.evidence_pages or [
+                    i + 1 for i in prob.page_indexes
+                ]
+                conn.execute(
+                    """INSERT INTO solutions
+                       (question_id, solver_name, answer, solution_steps_json,
+                        rationale, cautions, answer_conf, rationale_conf,
+                        evidence_pages_json, raw_reasoning, served_by)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        question_id,
+                        solver.name,
+                        result.answer,
+                        json.dumps(result.solution_steps, ensure_ascii=False),
+                        result.rationale,
+                        result.cautions,
+                        result.answer_confidence,
+                        result.rationale_confidence,
+                        json.dumps(evidence_pages),
+                        result.raw_reasoning,
+                        served_by,
+                    ),
+                )
+                server_solved += 1
+            conn.commit()
+
+        deck = _exam_deck(conn, session_id)
+        return {
+            "session_id": session_id,
+            "status": "reviewing",
+            "already_finalized": False,
+            "document_id": doc_id,
+            "total_pages": total_pages,
+            "problem_count": len(deck),
+            "server_solved": server_solved,
+            "locked": locked,
+            "problems": deck,
+            "reading_ack": build_reading_done_ack(len(deck), total_pages),
+            "camera": {"expected_state": "off", "privacy_led": "off"},
+            "operations": _review_operations(),
+            "versions": version_info(),
+        }
+    finally:
+        conn.close()
+
+
+class IngestSolution(BaseModel):
+    problem_no: str
+    answer: str
+    subject: str | None = None
+    solution_steps: list[str] = []
+    rationale: str = ""
+    cautions: str = ""
+    # Unknown confidence defaults to the middle tier (★★☆ on the HUD).
+    answer_confidence: float = 0.5
+    page_number: int | None = None
+
+
+class IngestSolutions(BaseModel):
+    solutions: list[IngestSolution]
+    served_by: str = "onboard"
+
+
+@app.post("/v1/exam-sessions/{session_id}/solutions")
+def exam_ingest_solutions(session_id: int, payload: IngestSolutions) -> dict:
+    """Ingest the onboard AI's per-problem answers (primary path, phase 2).
+
+    The glasses' onboard GPT solves every problem with the whole document in
+    view; this endpoint stores its results as solutions rows (served_by=
+    "onboard") keyed by problem_no as listed by GET /solutions.  An unknown
+    problem_no appends a new problem to the deck (the heuristic missed it,
+    the onboard AI found it).  Re-ingesting a problem_no adds a newer
+    solutions row — latest wins.  Validation is all-or-nothing.  mode=real:
+    nothing is stored (locked response).
+    """
+    conn = db.connect()
+    try:
+        session = _exam_session_or_404(conn, session_id)
+        _require_document_exam(session)
+        if _session_phase(session) == "reading":
+            raise HTTPException(status_code=409, detail="call finalize-reading first")
+        if session["mode"] == "real" and not config.ALLOW_REAL_EXAM_SOLVE:
+            return {
+                "session_id": session_id,
+                "locked": True,
+                "ingested": 0,
+                "glasses_view": build_locked_view(),
+                "versions": version_info(),
+            }
+        if not payload.solutions:
+            raise HTTPException(status_code=400, detail="solutions must be non-empty")
+        for item in payload.solutions:
+            if not item.answer.strip():
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"empty answer for problem {item.problem_no!r}",
+                )
+
+        created = 0
+        for item in payload.solutions:
+            row = conn.execute(
+                "SELECT id FROM questions WHERE session_id = ? AND question_no = ? "
+                "ORDER BY id LIMIT 1",
+                (session_id, item.problem_no),
+            ).fetchone()
+            if row is None:
+                qcur = conn.execute(
+                    """INSERT INTO questions
+                       (session_id, question_no, body_text, choices_json,
+                        subject, read_conf, page_number)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        session_id,
+                        item.problem_no,
+                        "",
+                        json.dumps([], ensure_ascii=False),
+                        item.subject,
+                        0.0,
+                        item.page_number,
+                    ),
+                )
+                question_id = qcur.lastrowid
+                created += 1
+            else:
+                question_id = row["id"]
+            evidence = (
+                [item.page_number]
+                if item.page_number
+                else _question_evidence_pages(conn, question_id)
+            )
+            conn.execute(
+                """INSERT INTO solutions
+                   (question_id, solver_name, answer, solution_steps_json,
+                    rationale, cautions, answer_conf, rationale_conf,
+                    evidence_pages_json, raw_reasoning, served_by)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    question_id,
+                    "onboard",
+                    item.answer.strip(),
+                    json.dumps(item.solution_steps, ensure_ascii=False),
+                    item.rationale,
+                    item.cautions,
+                    item.answer_confidence,
+                    item.answer_confidence,
+                    json.dumps(evidence),
+                    "",
+                    payload.served_by,
+                ),
+            )
+        conn.commit()
+
+        deck = _exam_deck(conn, session_id)
+        solved_count = sum(1 for d in deck if d["solved"])
+        return {
+            "session_id": session_id,
+            "ingested": len(payload.solutions),
+            "created_problems": created,
+            "problem_count": len(deck),
+            "solved_count": solved_count,
+            "deck": deck,
+            "locked": False,
+            "ingest_ack": {
+                "lines": [
+                    "解答受信",
+                    f"{solved_count}/{len(deck)}問 解答済",
+                    "横スワイプで閲覧",
+                ],
+                "ttl_sec": 2,
+            },
+            "versions": version_info(),
+        }
+    finally:
+        conn.close()
+
+
+@app.get("/v1/exam-sessions/{session_id}/solutions")
+def exam_list_solutions(session_id: int) -> dict:
+    """Review-deck listing (phase 3 閲覧). Camera off, LED off, no paper needed.
+
+    Always 200: during the reading phase it returns an empty deck with
+    status="reading" so a client can poll for readiness.
+    """
+    conn = db.connect()
+    try:
+        session = _exam_session_or_404(conn, session_id)
+        if session["mode"] == "real" and not config.ALLOW_REAL_EXAM_SOLVE:
+            return {
+                "session_id": session_id,
+                "locked": True,
+                "deck": [],
+                "glasses_view": build_locked_view(),
+                "versions": version_info(),
+            }
+        deck = _exam_deck(conn, session_id)
+        return {
+            "session_id": session_id,
+            "status": _session_phase(session),
+            "document_id": session["document_id"],
+            "locked": False,
+            "problem_count": len(deck),
+            "solved_count": sum(1 for d in deck if d["solved"]),
+            "deck": deck,
+            "operations": _review_operations(),
+            "versions": version_info(),
+        }
+    finally:
+        conn.close()
+
+
+@app.get("/v1/exam-sessions/{session_id}/review")
+def exam_review(session_id: int, index: int = 0, view_page: int = 0) -> dict:
+    """One problem of the review deck (phase 3 閲覧): 一括表示 HUD.
+
+    答え+解法+根拠+注意 come merged in one teleprompter stream (no stages);
+    scroll with two-finger vertical swipes (view_page), move between problems
+    with two-finger horizontal swipes (index).  Both parameters clamp.  An
+    unsolved problem renders a 未解答 placeholder (not an error) so the deck
+    is fully navigable before/while the onboard answers arrive.
+    """
+    conn = db.connect()
+    try:
+        session = _exam_session_or_404(conn, session_id)
+        _require_document_exam(session)
+        if _session_phase(session) == "reading":
+            raise HTTPException(status_code=409, detail="call finalize-reading first")
+        if session["mode"] == "real" and not config.ALLOW_REAL_EXAM_SOLVE:
+            return {
+                "session_id": session_id,
+                "locked": True,
+                "glasses_view": build_locked_view(),
+                "versions": version_info(),
+            }
+        rows = conn.execute(
+            "SELECT id, question_no, page_number FROM questions "
+            "WHERE session_id = ? ORDER BY id",
+            (session_id,),
+        ).fetchall()
+        if not rows:
+            raise HTTPException(
+                status_code=409,
+                detail="no problems in this session; call finalize-reading first",
+            )
+        index = max(0, min(index, len(rows) - 1))
+        qrow = rows[index]
+        srow = conn.execute(
+            "SELECT * FROM solutions WHERE question_id = ? ORDER BY id DESC LIMIT 1",
+            (qrow["id"],),
+        ).fetchone()
+        solution = _solution_from_row(srow) if srow else None
+        view = build_review_view(
+            solution,
+            index=index,
+            problem_count=len(rows),
+            problem_no=qrow["question_no"],
+            page_number=qrow["page_number"],
+            view_page=view_page,
+            solved=srow is not None,
+            voice_enabled=bool(session["voice_enabled"]),
+        )
+        return {
+            "session_id": session_id,
+            "index": index,
+            "problem_count": len(rows),
+            "question_id": qrow["id"],
+            "problem_no": qrow["question_no"],
+            "page_number": qrow["page_number"],
+            "solved": srow is not None,
+            "served_by": srow["served_by"] if srow else None,
+            "locked": False,
+            "glasses_view": view,
+            "versions": version_info(),
         }
     finally:
         conn.close()
