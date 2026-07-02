@@ -22,10 +22,16 @@ CREATE TABLE IF NOT EXISTS pages (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     document_id INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
     page_index  INTEGER NOT NULL,
-    -- Nullable: camera-free text pages have no image (image_path/phash empty).
+    -- Nullable: with "撮影しない" (no photography) a page has no image; the
+    -- on-glass AI recognizes it and sends the reading as text (image_path/phash
+    -- stay empty).
     image_path  TEXT,
     phash       TEXT NOT NULL DEFAULT '',
     ocr_text    TEXT,
+    -- On-glass AI's multimodal recognition of figures/diagrams/visual layout
+    -- (TEXT, not an image). Combined with ocr_text when solving so figure-
+    -- dependent and page-spanning problems are answered from the whole material.
+    vision_text TEXT,
     ocr_md5     TEXT,
     summary     TEXT,
     created_at  TEXT NOT NULL DEFAULT (datetime('now')),
@@ -144,12 +150,22 @@ _EXAM_SESSION_MIGRATIONS = (
 )
 
 
+# Columns added to pages after its initial release (same reason as above).
+_PAGE_MIGRATIONS = (
+    ("vision_text", "TEXT"),
+)
+
+
 def _migrate(conn: sqlite3.Connection) -> None:
-    """Add any missing exam_sessions columns on an existing database."""
-    cols = {r[1] for r in conn.execute("PRAGMA table_info(exam_sessions)")}
-    for name, decl in _EXAM_SESSION_MIGRATIONS:
-        if name not in cols:
-            conn.execute(f"ALTER TABLE exam_sessions ADD COLUMN {name} {decl}")
+    """Add any missing columns on an existing database (additive ALTER TABLEs)."""
+    for table, migrations in (
+        ("exam_sessions", _EXAM_SESSION_MIGRATIONS),
+        ("pages", _PAGE_MIGRATIONS),
+    ):
+        cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+        for name, decl in migrations:
+            if name not in cols:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
 
 
 def init_db(db_path: Path | None = None) -> None:

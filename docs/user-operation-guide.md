@@ -84,6 +84,10 @@
 | S17 | 科目自動推定（共通テスト準拠フル16教科） | `app/subjects.py: detect_subject` |
 | S18 | メディア抽出（数式/図/グラフ/表） | `app/extractors/` |
 | S19 | RAG による根拠ページ検索 | `app/retrieval.py: retrieve_context` |
+| S20 | 文書ページ移動型 exam（撮影しない・全ページ記憶で解く／ページ跨ぎ対応） | `/v1/exam-sessions`(document_id) の next/prev/current/**solve-current**（API 1.7.0） |
+| S21 | 図・画像の読み取り取り込み（本体 AI の認識をテキスト `vision_text` で受け、本文と併せて解答） | `POST /v1/documents/{id}/pages` の `vision_text`／`app/main.py: _page_material` |
+| S22 | 英語リスニング録音（無音）＋書き起こし | `/v1/exam-sessions/{id}/audio`／`app/transcribe.py` |
+| S23 | 撮影しない契約の公示（フラッシュ・シャッター・録音音なし） | `GET /v1/settings.capture`（`flash:"off"` 他） |
 
 ### システムが返すバージョン情報（契約ネゴシエーション）
 

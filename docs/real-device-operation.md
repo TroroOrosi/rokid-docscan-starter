@@ -128,25 +128,28 @@ TP-長按(long_press 170)               → GET .../explain?stage=detail→evide
 TP-左/右滑(swipe 21/22)               → GET .../explain?view_page=N±1（テレプロンプター）
 ```
 
-### 4-D. 文書ページ移動型 exam（撮影レス・主経路 / 筆記・リスニング両対応）
-全ページを撮影レスで登録・finalize（＝全ページ読込完了）してから、ページ移動で解く。
-**操作はグラス単独で完結**（スマホは中継のみ・画面不要）。
+### 4-D. 文書ページ移動型 exam（撮影しない・主経路 / 筆記・リスニング両対応）
+**撮影しない**：本体 AI の認識テキスト（本文＝`ocr_text`＋図の読み取り＝`vision_text`）を全ページ登録・
+finalize（＝全ページ読込完了）してから、ページ移動で解く。**全ページを記憶し、現在ページを全ページの文脈で解く**
+（ページ跨ぎの続き問題に対応）。**操作はグラス単独で完結**（スマホは中継のみ・画面不要）。
 ```
-# 準備（撮影レス）：/pages (ocr_text) ×全ページ → /finalize
+# 準備（撮影しない）：/pages (ocr_text[, vision_text]) ×全ページ → /finalize
 POST /v1/exam-sessions {mode:"study", document_id, exam_type:"written", answer_format:"mark"} → session_id
 TP-快速左/右滑(fast_swipe, UP 19 / DOWN 20) → POST .../next-page / prev-page   ← 現在ページ移動
 （確認）                                      GET  .../current                 ← 現在ページ把握
-TP-単击(tap 23)                              → POST .../solve-current          ← 現在ページを解く
+TP-単击(tap 23)                              → POST .../solve-current          ← 現在ページを全ページ文脈で解く
 TP-長按(long_press 170)                      → GET  .../questions/{qid}/view?stage=solution→rationale→caution
 Back-長按(back_long_press)                   → POST .../mode {exam_type}       ← 筆記 ⇄ リスニング 切替
-# リスニング（音声はその場で録音、設問は目の前の資料から読取）
+# リスニング（音声はその場で録音＝無音、設問は目の前の資料から読取）
 TP-双指長按(two_finger_long_press)           → 録音 → POST .../audio (audio,[transcript])
 TP-単击(tap 23)                              → POST .../solve-current          ← 書き起こし＋資料で解答
 ```
+- **図・画像も読む**：図がないと解けない問題は、本体 AI の図の読み取りを `vision_text` として送れば本文と併せて解答材料になる。
 - `exam_type`＝`written`(筆記) / `listening`(英語リスニング)、`answer_format`＝`mark`(マーク) / `written`(記述)。
 - **リスニング書き起こし**：`ROKID_TRANSCRIBER=openai|gemini`＋各社鍵で実書き起こし。未設定/失敗/オフラインは
   アップロード時の `transcript` をそのまま使用（クレデンシャル不要で成立、下記 §2-3）。
-- `mode:"real"` は `ROKID_ALLOW_REAL_EXAM_SOLVE=1` が無い限りロック（解答非表示）。撮影は一切発生しません。
+- **撮影しない**＝写真/フラッシュ/シャッターなし、録音も無音（`GET /v1/settings.capture` の `flash:"off"`・
+  `capture_tone:false`・`audio_record`(無音) を参照）。`mode:"real"` は `ROKID_ALLOW_REAL_EXAM_SOLVE=1` が無い限りロック。
 
 ### 実行フロー（データの流れ）
 ```

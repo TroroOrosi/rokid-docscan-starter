@@ -41,14 +41,17 @@ exam-session(document_id, exam_type, answer_format)           ▼
   /mode で 筆記(written) ⇄ リスニング(listening) 切替（グラス=Back長押し / スマホ）
 ```
 
-- **撮影レス取り込み**：`POST /v1/documents/{id}/pages` は `image` 省略可。画像が無ければ
-  `image_path=NULL`・`phash=""`・`ocr_md5` はテキストから算出。画像添付時は従来通り pHash も算出し
-  `/v1/match` も使える（後方互換）。画像も text も無ければ 400。
-- **solve-current**：現在ページ（`current_page_index`）の `pages` 行から `Question` を構成。
-  `ocr_text`＝本文、`image_path`（あれば vision）、`subject`＝そのページの `detect_subject`、
-  `context`＝RAG。**リスニング時**は `session.transcript`（書き起こし）と資料を `context` に統合し、
-  `answer_format`（マーク/記述）を指示に反映（`_exam_prompt_context`）。解答は `questions`＋`solutions`
-  に保存するので既存の `/view`（段階×ページ送り）・`/reasoning` がそのまま使える。`mode=real` ロック不変。
+- **撮影しない取り込み**：`POST /v1/documents/{id}/pages` は本体 AI の認識結果を**テキスト**で受ける：
+  `ocr_text`（本文）＋`vision_text`（**図・グラフ・写真・見た目の読み取り**）。画像は送らない（`image_path=NULL`・
+  `phash=""`・`ocr_md5` はテキストから算出）。`image` は後方互換の任意項目で、添付時のみ pHash も算出し
+  `/v1/match` に使える。`ocr_text`／`vision_text`／画像のいずれも無ければ 400。
+- **solve-current（全ページ記憶で解く・ページ跨ぎ対応）**：現在ページ（`current_page_index`）を**設問**、
+  **文書の全ページ**を**文脈**にして解く。`Question.body_text` ＝ 現在ページの材料
+  `_page_material(ocr_text, vision_text)`（本文＋「【図・画像の読み取り】…」）、`Question.context` ＝
+  `_document_material()`（全ページを `【P01】…【Pnn◀現在ページ】…` で連結）＋横断 RAG＋（リスニング時）
+  `session.transcript`＋`answer_format`（マーク/記述）指示を `_exam_prompt_context` で統合。`subject`＝現在ページ材料の
+  `detect_subject`。問題が前後ページに跨っても全ページから読み取れる。解答は `questions`＋`solutions` に保存し
+  既存の `/view`（段階×ページ送り）・`/reasoning` がそのまま使える。`mode=real` ロック不変。**画像は送らない**。
 - **リスニング録音**：`POST …/{id}/audio`（`audio` ファイル＋任意 `transcript`）を `data/audio/` に保存。
   `app/transcribe.py` が `ROKID_TRANSCRIBER`（openai=`audio.transcriptions.create`、gemini=inline audio）で
   書き起こし。未設定/失敗/オフラインは**与えた `transcript` をそのまま使用**（クレデンシャル不要で成立）。
@@ -80,7 +83,9 @@ exam-session(document_id, exam_type, answer_format)           ▼
   - 追加列は既存 DB 向けに `init_db` の `_migrate()`（`ALTER TABLE ADD COLUMN`）で移行。
 - `questions`(question_no, body_text, choices_json, figure_refs, answer_box_json, structure_json, subject, read_conf, page_number, image_path, **media_json**)
 - `solutions`(answer, solution_steps_json, rationale, cautions, answer_conf, rationale_conf, evidence_pages_json, raw_reasoning, **served_by**, user_confirmed)
-- `pages.image_path` は **nullable**・`phash` は既定 `""`（撮影レスのテキストページ用）。
+- `pages`：`image_path` は **nullable**・`phash` 既定 `""`（撮影しないテキストページ用）。**`vision_text`**（新規）＝
+  本体 AI の図・画像の読み取り（テキスト）。既存 DB 向けに `_migrate()` が `pages` にも `ALTER TABLE ADD COLUMN` で移行。
+- `questions`(..., **body_text**＝現在ページ材料＝OCR＋図の読み取り)。
 
 既存 `documents`/`pages` はページ照合モード用にそのまま維持。
 

@@ -65,10 +65,18 @@ RENDER_CONTRACT = {
     "brightness": "low",
 }
 
-# Capture-path contract. privacy_led is hardware-enforced; always on.
+# Capture-path contract. 撮影しない (no photography): the on-glass AI recognizes
+# the page and sends its reading as TEXT — no photo is taken, so there is no
+# flash and no shutter. Listening records audio via the microphone, silently.
+# privacy_led is hardware-enforced (steady recording indicator, not a flash) and
+# is never server-controllable; it only lights while a camera session is open.
 CAPTURE_CONTRACT = {
     "shutter_sound": False,
+    "flash": "off",                # no photographic flash/torch on capture
+    "capture_tone": False,         # silent capture (reinforces shutter_sound)
     "camera_path": "cxr-s/camera2",
+    # Listening recording is silent: no start/stop tones (microphone, not camera).
+    "audio_record": {"start_tone": False, "stop_tone": False, "silent": True},
     "privacy_led": {"state": "always_on", "tamper": "forbidden"},
 }
 

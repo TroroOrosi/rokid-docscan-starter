@@ -253,6 +253,111 @@ def test_audio_requires_something(client):
     assert r.status_code == 400
 
 
+# --- vision_text (figure/image reading as text) -----------------------------
+
+def _add_page(client, doc_id, page_index, *, ocr_text=None, vision_text=None):
+    data = {"page_index": page_index}
+    if ocr_text is not None:
+        data["ocr_text"] = ocr_text
+    if vision_text is not None:
+        data["vision_text"] = vision_text
+    return client.post(f"/v1/documents/{doc_id}/pages", data=data)
+
+
+def test_add_page_vision_text_only(client):
+    """A page can be remembered from the on-glass AI's figure reading alone."""
+    doc_id = _new_doc(client)
+    r = _add_page(client, doc_id, 0, vision_text="回路図: 抵抗R1とコンデンサC1の直列")
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["has_vision_text"] is True
+    assert body["image_path"] is None
+    assert body["ocr_md5"]  # derived from the vision text
+
+
+def test_add_page_requires_text_or_image(client):
+    doc_id = _new_doc(client)
+    # No image, no ocr_text, no vision_text -> 400
+    r = client.post(f"/v1/documents/{doc_id}/pages", data={"page_index": 0})
+    assert r.status_code == 400
+
+
+class _RecordingSolver:
+    """Duck-typed solver that records the Question it received (offline)."""
+
+    name = "recording-test"
+    provider_version = "t-1"
+    offline = True
+    last: dict = {}
+
+    def solve(self, *, question, max_answer_len=64):
+        from app.solvers import SolveResult
+
+        _RecordingSolver.last["question"] = question
+        return SolveResult(
+            answer="A", solution_steps=["s"], rationale="r", cautions="c",
+            answer_confidence=0.9, rationale_confidence=0.9,
+        )
+
+    def info(self):
+        return {"name": self.name, "provider_version": self.provider_version,
+                "offline": self.offline}
+
+
+def test_solve_current_passes_whole_document_as_context(client, monkeypatch):
+    """A problem continuing across pages: the solver must see ALL pages."""
+    from app.solvers.registry import register_solver
+
+    _RecordingSolver.last = {}
+    register_solver(_RecordingSolver(), replace=True)
+    monkeypatch.setenv("ROKID_SOLVER", "recording-test")
+
+    doc_id = _doc_with_text_pages(
+        client,
+        [
+            "第1問 長文: メロスは激怒した。必ずかの邪智暴虐の王を除かねばならぬ。",
+            "問1 前ページの本文の主題を、続きを踏まえて答えよ。",
+        ],
+    )
+    sid = _new_doc_exam(client, doc_id)["session_id"]
+    client.post(f"/v1/exam-sessions/{sid}/next-page")  # -> P2 (the question)
+    r = client.post(f"/v1/exam-sessions/{sid}/solve-current")
+    assert r.status_code == 200, r.text
+
+    q = _RecordingSolver.last["question"]
+    # body = current page (P2); context = the WHOLE document incl. P1's passage.
+    assert "問1" in q.body_text
+    assert "メロスは激怒した" in q.context      # continuation from P1 is present
+    assert "【P01" in q.context and "【P02" in q.context
+
+
+def test_solve_current_folds_vision_text_into_material(client, monkeypatch):
+    """Figure reading (vision_text) must reach the solver as material."""
+    from app.solvers.registry import register_solver
+
+    _RecordingSolver.last = {}
+    register_solver(_RecordingSolver(), replace=True)
+    monkeypatch.setenv("ROKID_SOLVER", "recording-test")
+
+    doc_id = _new_doc(client)
+    _add_page(client, doc_id, 0, ocr_text="問1 図の回路の合成抵抗を求めよ",
+              vision_text="回路図: R1=2Ω と R2=3Ω が直列")
+    assert client.post(f"/v1/documents/{doc_id}/finalize").status_code == 200
+    sid = _new_doc_exam(client, doc_id)["session_id"]
+    r = client.post(f"/v1/exam-sessions/{sid}/solve-current")
+    assert r.status_code == 200, r.text
+
+    q = _RecordingSolver.last["question"]
+    assert "【図・画像の読み取り】" in q.body_text
+    assert "R1=2Ω" in q.body_text
+    # persisted question body also carries the figure reading (for /view)
+    qid = r.json()["question_id"]
+    reasoning = client.get(
+        f"/v1/exam-sessions/{sid}/questions/{qid}/reasoning"
+    )
+    assert reasoning.status_code == 200
+
+
 def test_listening_solve_current_folds_in_transcript(client):
     doc_id = _doc_with_text_pages(client, ["Question 1: What did the man buy?"])
     sid = _new_doc_exam(

@@ -33,8 +33,10 @@
 >   `silent:true, white_flash:false, transition:"instant", brightness:"low", animations:false, blinking:false, max_lines:3`。
 >   クライアントは起動時にこれを唯一の権威ソースとして読む。
 > - 撮影成功は**無音・無白フラッシュ**の `capture_ack`（HUD1行・`ttl_sec:2`、音/フラッシュ指示なし）で通知。シャッター音や白フラッシュの代替。
-> - `GET /v1/settings` の `capture` で `shutter_sound:false`（独自カメラ経路 `cxr-s/camera2`）を公示。
-> - **プライバシーLEDは不可侵**：`capture.privacy_led` を `state:"always_on", tamper:"forbidden"` として公示し、**サーバはLEDを制御・無効化する機能を一切持たない**（撮影中は常時点灯のまま）。
+> - `GET /v1/settings` の `capture` で **撮影しない**方針を機械可読に公示：`shutter_sound:false`・`flash:"off"`
+>   （撮影用フラッシュ/トーチなし）・`capture_tone:false`（無音撮影）・`audio_record:{start_tone:false, stop_tone:false, silent:true}`
+>   （リスニング録音も無音）。独自カメラ経路 `cxr-s/camera2`。**フラッシュ・シャッター音・録音音を出さない**。
+> - **プライバシーLEDは不可侵**：`capture.privacy_led` を `state:"always_on", tamper:"forbidden"` として公示し、**サーバはLEDを制御・無効化する機能を一切持たない**（カメラ動作中のみ点灯するハードのプライバシー表示。フラッシュではない）。
 
 ## 音声操作トグル（設定 ON/OFF）
 

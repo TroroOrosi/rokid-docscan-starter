@@ -1,9 +1,22 @@
 # Rokid DocScan（紙資料スキャン・ページ照合・解答・解説サーバ）
 
-Rokid Glasses で撮影した紙資料を「文書」として登録し、後から目の前の紙が
-**どのページか** を端末側 OCR とサーバ側の知覚ハッシュ（pHash）で
-照合して、グラス上の小さな HUD（3行）に結果を返すサーバです。加えて
-**入試問題ソルバー**と**資料解説（撮影なし）**モードを備えます。
+## このリポジトリの目的と要望
+
+Rokid Glasses で紙資料を「文書」として登録し、**目の前の資料を本体 AI が認識**した結果を使って、
+ページ照合・**入試問題の解答**・**資料解説**をグラス上の小さな HUD（最大3行）で返すサーバです。
+模試（学習・練習）利用を主目的とし、以下の要望を満たします：
+
+- **撮影しない**：紙を写真に撮らない。Rokid Glasses 本体 AI が**視認＝認識**し、その読み取りを
+  **テキスト**（本文＝`ocr_text`／図・画像の読み取り＝`vision_text`）でサーバへ送る。写真ファイル・
+  フラッシュ・シャッター音を出さない（録音も無音）。
+- **図・画像も読む**：図・グラフ・写真がないと解けない問題に対応。本体 AI の図の読み取り
+  （`vision_text`）を本文と併せて解答材料にする。
+- **全ページを記憶してから解く**：全ページを登録・記憶し、**問題がページを跨いで続く**場合も
+  文書の全ページを文脈にして正確に解く。
+- **操作は Rokid Glasses 単独**で完結（スマホは HTTP 中継のみ・画面不要）。
+- **英語リスニング対応**：音声をその場で録音（無音）→書き起こし→資料と統合して解答。
+
+### 特徴
 
 - **既定はオフラインでローカル実行可能**。外部クレデンシャル不要で全機能が動きます。
 - **実 AI もそのまま利用可能**：analyzer / solver / explainer / extractor の各ポートに
@@ -14,10 +27,6 @@ Rokid Glasses で撮影した紙資料を「文書」として登録し、後か
 - **グラス本体アプリ（CXR-L）とグラス本体 AI の接続**は
   [`docs/cxr-l-integration.md`](docs/cxr-l-integration.md)、実機差し込み全般は
   [`docs/implementation-notes.md`](docs/implementation-notes.md) を参照。
-- **撮影レス運用**：紙を撮影せず、本体 AI が視認した資料の**テキストをページ単位で登録**でき、
-  照合の代わりに**ページ移動で現在ページを把握**して解答・解説します（画像は任意添付）。
-- **英語リスニング対応**：音声をその場で録音（`/audio`）→書き起こし→資料と統合して解答。
-  筆記（マーク/記述）⇄リスニングを**グラス/スマホから切替**（`/mode`）。
 - 現在のバージョン: **APP 0.7.0 / API 1.7.0**。
 
 ---
@@ -157,25 +166,30 @@ curl -s -X POST http://127.0.0.1:8000/v1/documents \
 # {"document_id":1,"title":"設計仕様書 v1","capture_device":"CXR-S","status":"open"}
 ```
 
-### 3. ページを追加（撮影レス：テキストのみ、または画像 + OCR テキスト）
+### 3. ページを追加（撮影しない：本体 AI の認識テキスト＝本文＋図の読み取り）
 
-**画像は任意**です。Rokid 通常利用のように**本体 AI が視認した資料テキスト**を
-`ocr_text` として送れば、**撮影せずにページを記憶**できます（`image_path=null`・`phash=""`）。
+**撮影しません。画像は不要**です。Rokid 通常利用のように**本体 AI が視認＝認識**した結果を
+テキストで送ります（`image_path=null`・`phash=""`）：
+
+- `ocr_text` … ページの本文（認識テキスト）
+- `vision_text` … **図・グラフ・写真・見た目の読み取り**（画像ではなくテキスト）。図がないと解けない
+  問題のために、本文と併せて解答材料になります。
 
 ```bash
-# 撮影レス（テキストのみ）でページを登録
+# 撮影しない：本文＋図の読み取りをテキストで登録
 curl -s -X POST http://127.0.0.1:8000/v1/documents/1/pages \
   -F page_index=0 \
-  -F ocr_text='1ページ目の本文テキスト（本体AIの視認結果）'
-# {"page_id":1,...,"phash":"","ocr_md5":"...","image_path":null}
+  -F ocr_text='問1 図の回路の合成抵抗を求めよ' \
+  -F vision_text='回路図: R1=2Ω と R2=3Ω が直列'
+# {"page_id":1,...,"phash":"","image_path":null,"has_vision_text":true}
 
-# 画像を添付する場合（スマホ登録など）。pHash も算出され /match が使えます
+# （任意・後方互換）画像を添付すると pHash も算出され /match に使えます
 curl -s -X POST http://127.0.0.1:8000/v1/documents/1/pages \
   -F page_index=0 -F image=@page0.png -F ocr_text='1ページ目の本文テキスト'
 ```
 
-> 画像も `ocr_text` も無い場合は 400。画像を添付し `ocr_text` を省略した場合は、
-> 画像バイト列の MD5 をプレースホルダとして `ocr_md5` に記録します。
+> `ocr_text`／`vision_text`／画像のいずれも無い場合は 400。標準フローは撮影せずテキストのみで、
+> 画像は後方互換の任意項目です。
 
 ### 4. 文書を確定（finalize）
 
@@ -335,25 +349,31 @@ python scripts/eval_exam.py --synthetic 5 --out /tmp/exam_eval.json
 設計は [docs/exam-solver-architecture.md](docs/exam-solver-architecture.md)、
 グラス表示・操作の規約は [docs/glasses-ux-contract.md](docs/glasses-ux-contract.md) を参照。
 
-### 文書ページ移動型 exam（撮影レス・主経路 / API 1.7.0）
+### 文書ページ移動型 exam（撮影しない・主経路 / API 1.7.0）
 
 上の「設問1枚アップロード」型に加え、**登録済み文書に束ねてページ移動で解く**主経路を追加。
-**撮影は一切発生しません**（`/pages` で全ページを読み込み＝`finalize` が「全ページ読込完了」を宣言、
-以降はグラスのジェスチャで**現在ページを移動**して**そのページを解く**）。全操作がグラス単体で完結し、
-スマホは HTTP 中継のみ（画面不要）。
+**撮影は一切発生しません**（本体 AI の認識テキストを `/pages` に1ページずつ登録＝`finalize` が
+「全ページ読込完了」を宣言、以降はグラスのジェスチャで**現在ページを移動**して**そのページを解く**）。
+全操作がグラス単体で完結し、スマホは HTTP 中継のみ（画面不要）。
+
+**全ページ記憶で解く（ページ跨ぎ対応）**：`solve-current` は**現在ページを設問**とし、**文書の全ページ**を
+文脈として解きます。問題が前後のページに跨って続く場合も、記憶済みの全ページから正確に読み取ります。
+図・グラフは `vision_text`（本体 AI の読み取り）として本文と一緒に材料になります。
 
 ```bash
-# 1) 撮影レスで全ページ登録 → finalize（= 全ページ読込完了）
+# 1) 撮影せず、本文＋図の読み取りを全ページ登録 → finalize（= 全ページ読込完了）
 curl -s -X POST http://127.0.0.1:8000/v1/documents -d '{"title":"模試"}' -H 'Content-Type: application/json'
-curl -s -X POST http://127.0.0.1:8000/v1/documents/1/pages -F page_index=0 -F ocr_text='問1 ...'
-curl -s -X POST http://127.0.0.1:8000/v1/documents/1/pages -F page_index=1 -F ocr_text='問2 ...'
+curl -s -X POST http://127.0.0.1:8000/v1/documents/1/pages -F page_index=0 \
+  -F ocr_text='第1問 長文…' -F vision_text='図1: グラフの概形…'
+curl -s -X POST http://127.0.0.1:8000/v1/documents/1/pages -F page_index=1 \
+  -F ocr_text='問1 前ページの本文を踏まえて答えよ'
 curl -s -X POST http://127.0.0.1:8000/v1/documents/1/finalize
 
 # 2) 文書に束ねた exam セッション（exam_type=written|listening / answer_format=mark|written）
 curl -s -X POST http://127.0.0.1:8000/v1/exam-sessions -H 'Content-Type: application/json' \
   -d '{"mode":"study","document_id":1,"exam_type":"written","answer_format":"mark"}'
 
-# 3) ページ移動（速スワイプ）→ 現在ページ確認 → 現在ページを解く（タップ）
+# 3) ページ移動（速スワイプ）→ 現在ページ確認 → 現在ページを解く（タップ、全ページを文脈に）
 curl -s -X POST http://127.0.0.1:8000/v1/exam-sessions/1/next-page
 curl -s http://127.0.0.1:8000/v1/exam-sessions/1/current
 curl -s -X POST http://127.0.0.1:8000/v1/exam-sessions/1/solve-current

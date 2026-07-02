@@ -55,6 +55,11 @@ def test_settings_advertise_silent_contract(client):
     capture = body["capture"]
     assert capture["shutter_sound"] is False
     assert capture["privacy_led"] == {"state": "always_on", "tamper": "forbidden"}
+    # 撮影しない: no photographic flash, silent capture, and silent audio recording.
+    assert capture["flash"] == "off"
+    assert capture["capture_tone"] is False
+    assert capture["audio_record"]["start_tone"] is False
+    assert capture["audio_record"]["stop_tone"] is False
 
 
 def test_capture_ack_is_silent_and_short(client):

@@ -37,6 +37,11 @@ from __future__ import annotations
 #        筆記⇄リスニング switches via /mode; long detail/rationale now paginates
 #        by sentence (GLASSES_VIEW_CONTRACT -> 1.3.0). API_VERSION -> 1.7.0
 #        (additive endpoints).
+#        Later 0.7.0 additions (all additive, API/contract versions unchanged):
+#        pages.vision_text (on-glass AI's figure/image reading as TEXT, 撮影しない);
+#        solve-current now passes the WHOLE document (every remembered page) as
+#        context so page-spanning problems are read accurately; capture contract
+#        publishes flash:off / capture_tone:false / silent audio_record.
 APP_VERSION = "0.7.0"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.

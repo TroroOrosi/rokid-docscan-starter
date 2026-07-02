@@ -134,6 +134,21 @@ def _row_or_404(conn, table: str, row_id: int, detail: str):
     return row
 
 
+def _page_material(ocr_text: str | None, vision_text: str | None) -> str:
+    """Combine a page's recognized text and the on-glass AI's figure/image reading.
+
+    撮影しない: the page image is never sent; the on-glass AI recognizes both the
+    text (``ocr_text``) and the figures/diagrams (``vision_text``) and we solve
+    from the two together, so figure-dependent questions are answered correctly.
+    """
+    parts: list[str] = []
+    if ocr_text and ocr_text.strip():
+        parts.append(ocr_text.strip())
+    if vision_text and vision_text.strip():
+        parts.append("【図・画像の読み取り】\n" + vision_text.strip())
+    return "\n\n".join(parts)
+
+
 # --- endpoints --------------------------------------------------------------
 
 @app.get("/health")
@@ -199,25 +214,31 @@ async def add_page(
     page_index: int = Form(...),
     image: UploadFile | None = File(None),
     ocr_text: str | None = Form(None),
+    vision_text: str | None = Form(None),
     total_pages: int | None = Form(None),
 ) -> dict:
-    """Record one page of a document — **camera-free by default**.
+    """Record one page of a document — **撮影しない (no photography)**.
 
-    The Rokid-native flow does not photograph paper: the on-glass AI reads what
-    is in view and the client sends that page's *text* (``ocr_text``) here, so a
-    document can be remembered page-by-page without any image. Supplying an
-    ``image`` is optional (e.g. the phone companion may attach one); when present
-    it is stored and its pHash computed so legacy ``/v1/match`` still works.
+    The Rokid-native flow does not photograph paper. The on-glass AI *recognizes*
+    what is in view and the client sends that page's reading as text:
+      - ``ocr_text``    : the recognized text of the page,
+      - ``vision_text`` : the AI's reading of figures/diagrams/visual layout
+                          (still TEXT, not an image), so figure-dependent problems
+                          can be solved without sending or saving a photo.
+    A document is remembered page-by-page from this text alone. Supplying an
+    ``image`` is optional and only kept for backward-compatible ``/v1/match``;
+    the standard flow needs no image.
 
     Returns a `scan_ack` HUD payload so the glasses can show real-time
     progress (e.g. '3/5ページ完了') after every page. Pass `total_pages`
     (the expected total) to enable the completion hint ('完了: ダブル長押し').
     """
     has_image = image is not None and getattr(image, "filename", None)
-    if not has_image and not (ocr_text and ocr_text.strip()):
+    has_text = (ocr_text and ocr_text.strip()) or (vision_text and vision_text.strip())
+    if not has_image and not has_text:
         raise HTTPException(
             status_code=400,
-            detail="a page needs an image or ocr_text (camera-free text page)",
+            detail="a page needs ocr_text/vision_text (recognized text) or an image",
         )
     conn = db.connect()
     try:
@@ -233,17 +254,20 @@ async def add_page(
             img.convert("RGB").save(fpath, format="PNG")
             image_path = str(fpath)
         else:
-            # Camera-free text page: no image, no pHash. ocr_md5 dedupes by text.
+            # 撮影しない: no image, no pHash. ocr_md5 dedupes by recognized text
+            # (fall back to vision_text when only figures were recognized).
             ph = ""
-            omd5 = ocr_md5(ocr_text) or hashlib.md5((ocr_text or "").encode()).hexdigest()
+            dedupe_src = ocr_text if (ocr_text and ocr_text.strip()) else (vision_text or "")
+            omd5 = ocr_md5(dedupe_src) or hashlib.md5(dedupe_src.encode()).hexdigest()
             image_path = None
 
         try:
             cur = conn.execute(
                 """INSERT INTO pages
-                   (document_id, page_index, image_path, phash, ocr_text, ocr_md5)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
-                (document_id, page_index, image_path, ph, ocr_text, omd5),
+                   (document_id, page_index, image_path, phash, ocr_text,
+                    vision_text, ocr_md5)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (document_id, page_index, image_path, ph, ocr_text, vision_text, omd5),
             )
             conn.commit()
         except db.sqlite3.IntegrityError:
@@ -270,6 +294,7 @@ async def add_page(
             "phash": ph,
             "ocr_md5": omd5,
             "image_path": image_path,
+            "has_vision_text": bool(vision_text and vision_text.strip()),
             "scan_ack": ack,
         }
     finally:
@@ -282,7 +307,8 @@ def finalize_document(document_id: int) -> dict:
     try:
         _doc_or_404(conn, document_id)
         pages = conn.execute(
-            "SELECT id, image_path, ocr_text FROM pages WHERE document_id = ?",
+            "SELECT id, image_path, ocr_text, vision_text FROM pages "
+            "WHERE document_id = ?",
             (document_id,),
         ).fetchall()
         if not pages:
@@ -291,7 +317,8 @@ def finalize_document(document_id: int) -> dict:
         analyzer = get_analyzer()
         for p in pages:
             result = analyzer.analyze(
-                image_path=p["image_path"], ocr_text=p["ocr_text"]
+                image_path=p["image_path"],
+                ocr_text=_page_material(p["ocr_text"], p["vision_text"]) or p["ocr_text"],
             )
             conn.execute(
                 "UPDATE pages SET summary = ? WHERE id = ?",
@@ -441,12 +468,34 @@ def _exam_total_pages(conn, doc_id: int | None) -> int:
     ).fetchone()[0]
 
 
-def _exam_prompt_context(session, retrieved_context: str) -> str | None:
+def _document_material(conn, doc_id: int, current_index: int) -> str:
+    """Return ALL pages of the document as labeled text, current page marked.
+
+    A problem may continue across pages (e.g. a passage on one page, its
+    questions on the next), so the solver is given every remembered page — not
+    just the current one — as context, and can read the continuation accurately.
+    """
+    rows = conn.execute(
+        "SELECT page_index, ocr_text, vision_text FROM pages "
+        "WHERE document_id = ? ORDER BY page_index",
+        (doc_id,),
+    ).fetchall()
+    blocks: list[str] = []
+    for r in rows:
+        mark = "◀現在ページ" if r["page_index"] == current_index else ""
+        body = _page_material(r["ocr_text"], r["vision_text"]) or "(なし)"
+        blocks.append(f"【P{r['page_index'] + 1:02d}{mark}】\n{body}")
+    return "\n\n".join(blocks)
+
+
+def _exam_prompt_context(
+    session, document_material: str, retrieved_context: str = ""
+) -> str | None:
     """Compose solver context for a document-page exam.
 
-    Folds in the answer-format hint and, in listening mode, the recorded audio's
-    transcript (the setting question itself is read live from the displayed
-    material). The scanned/OCR page text remains the primary body_text.
+    Folds in the answer-format hint, the **whole document** (all remembered
+    pages, so page-spanning problems are read correctly), and — in listening
+    mode — the recorded audio's transcript. The current page stays the body_text.
     """
     parts: list[str] = []
     fmt_hint = _ANSWER_FORMAT_HINT.get(session["answer_format"], "")
@@ -460,8 +509,10 @@ def _exam_prompt_context(session, retrieved_context: str) -> str | None:
         transcript = (session["transcript"] or "").strip()
         if transcript:
             parts.append("【リスニング音声 書き起こし】\n" + transcript)
+    if document_material:
+        parts.append("【文書の全ページ（現在ページを含む）】\n" + document_material)
     if retrieved_context:
-        parts.append("【参考資料】\n" + retrieved_context)
+        parts.append("【参考資料（過去の学習資料）】\n" + retrieved_context)
     return "\n\n".join(p for p in parts if p) or None
 
 
@@ -898,8 +949,9 @@ def exam_current_page(session_id: int) -> dict:
         doc_id = _require_document_exam(session)
         page_index = session["current_page_index"]
         page_row = _exam_page_row(conn, doc_id, page_index)
-        subject, subj_conf = detect_subject(page_row["ocr_text"])
-        preview = (page_row["ocr_text"] or page_row["summary"] or "").strip()[:80]
+        material = _page_material(page_row["ocr_text"], page_row["vision_text"])
+        subject, subj_conf = detect_subject(material or page_row["ocr_text"])
+        preview = (material or page_row["summary"] or "").strip()[:80]
         return {
             "session_id": session_id,
             "document_id": doc_id,
@@ -910,6 +962,7 @@ def exam_current_page(session_id: int) -> dict:
             "subject": subject,
             "subject_confidence": subj_conf,
             "has_image": bool(page_row["image_path"]),
+            "has_vision_text": bool(page_row["vision_text"] and page_row["vision_text"].strip()),
             "preview": preview,
         }
     finally:
@@ -918,13 +971,14 @@ def exam_current_page(session_id: int) -> dict:
 
 @app.post("/v1/exam-sessions/{session_id}/solve-current")
 def exam_solve_current(session_id: int) -> dict:
-    """Solve the CURRENT page's material — no camera capture.
+    """Solve the CURRENT page — 撮影しない, using ALL remembered pages as context.
 
-    Builds a Question from the current page's text (and image, if the phone
-    companion attached one), the detected subject, RAG context, and — in
-    listening mode — the recorded audio's transcript, then runs the solver
-    fallback chain. Persists a question + solution so the staged /view and
-    /reasoning endpoints work exactly as for the upload flow.
+    The current page's recognized text (OCR + the on-glass AI's figure reading
+    ``vision_text``) is the question; the **whole document** (every remembered
+    page) is passed as context so a problem continuing across pages is read
+    accurately. In listening mode the recorded audio's transcript is folded in.
+    Persists a question + solution so the staged /view and /reasoning endpoints
+    work exactly as for the upload flow. No image is sent or required.
     """
     conn = db.connect()
     try:
@@ -942,10 +996,12 @@ def exam_solve_current(session_id: int) -> dict:
                 "versions": version_info(),
             }
 
-        ocr_text = page_row["ocr_text"]
-        subject, subj_conf = detect_subject(ocr_text)
-        retrieved = retrieve_context(conn, ocr_text)
-        context = _exam_prompt_context(session, retrieved["context"])
+        # Current page = the question; whole document = context (page-spanning).
+        material = _page_material(page_row["ocr_text"], page_row["vision_text"])
+        subject, subj_conf = detect_subject(material or page_row["ocr_text"])
+        doc_material = _document_material(conn, doc_id, page_index)
+        retrieved = retrieve_context(conn, material or page_row["ocr_text"])
+        context = _exam_prompt_context(session, doc_material, retrieved["context"])
 
         # Persist a question row for this page so /view and /reasoning work.
         page_number = page_index + 1
@@ -957,10 +1013,10 @@ def exam_solve_current(session_id: int) -> dict:
             (
                 session_id,
                 None,
-                ocr_text or "",
+                material,
                 json.dumps([], ensure_ascii=False),
                 subject,
-                round(min(1.0, 0.5 + subj_conf / 2), 3) if normalize_ocr_text(ocr_text) else 0.0,
+                round(min(1.0, 0.5 + subj_conf / 2), 3) if normalize_ocr_text(material) else 0.0,
                 page_number,
                 page_row["image_path"],
             ),
@@ -968,7 +1024,7 @@ def exam_solve_current(session_id: int) -> dict:
         question_id = qcur.lastrowid
 
         question = Question(
-            body_text=ocr_text,
+            body_text=material,
             subject=subject,
             context=context,
             image_path=page_row["image_path"],
@@ -1269,11 +1325,14 @@ def explain_page(
 
         total_doc_pages = _explain_total_pages(conn, doc_id)
 
-        retrieved = retrieve_context(conn, page_row["ocr_text"])
+        # Include the on-glass AI's figure/image reading (vision_text) so the
+        # explanation covers diagrams, not just the OCR text.
+        page_material = _page_material(page_row["ocr_text"], page_row["vision_text"])
+        retrieved = retrieve_context(conn, page_material or page_row["ocr_text"])
 
         req = ExplainRequest(
             page_index=page_index,
-            page_ocr_text=page_row["ocr_text"],
+            page_ocr_text=page_material or page_row["ocr_text"],
             page_summary=page_row["summary"],
             context_pages=retrieved["hits"],
             document_title=conn.execute(
