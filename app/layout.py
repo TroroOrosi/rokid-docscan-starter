@@ -144,3 +144,108 @@ def primary_question(parsed: dict) -> QuestionUnit | None:
         if q.question_no:
             return q
     return questions[0]
+
+
+# ---------------------------------------------------------------------------
+# Whole-document problem segmentation (3-phase exam flow, phase 2)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ProblemUnit:
+    """One problem of a whole document, possibly spanning multiple pages."""
+
+    question_no: str | None
+    body_text: str
+    choices: list[str] = field(default_factory=list)
+    start_page_index: int = 0
+    page_indexes: list[int] = field(default_factory=list)  # every page it spans
+
+
+def segment_problems(page_materials: list[tuple[int, str]]) -> list[ProblemUnit]:
+    """Split a whole document into problems on 問N/大問N/第N問/(n) boundaries.
+
+    ``page_materials`` is ``[(page_index, material_text), ...]`` in page order
+    (material = the page's recognized text incl. the figure reading).  Each
+    page is scanned with :func:`parse_layout` — a pure per-line scanner — so
+    the boundaries are identical to scanning the joined text, while page
+    attribution is preserved.  Merge rules:
+
+    - a numbered unit starts a new problem (``start_page_index`` = that page);
+    - a page-leading unnumbered unit is a cross-page CONTINUATION of the
+      previous problem (a problem starting on page N and running into N+1);
+    - unnumbered content before the first numbered problem (cover sheet,
+      instructions) is folded into the first problem's body;
+    - duplicate question numbers (e.g. 問1 under two 大問) are made unique
+      with a suffix (問1(2)) so the review deck / ingest can address them.
+
+    Fallback: a document with no numbered boundary at all becomes ONE problem
+    spanning every non-empty page, so the caller always gets >=1 problem for
+    a non-empty document.  Deterministic and dependency-free (offline).
+    """
+    problems: list[ProblemUnit] = []
+    preamble_parts: list[str] = []
+    preamble_pages: list[int] = []
+
+    for page_index, material in page_materials:
+        for unit in parse_layout(material)["questions"]:
+            if unit.question_no is not None:
+                problems.append(
+                    ProblemUnit(
+                        question_no=unit.question_no,
+                        body_text=unit.body_text,
+                        choices=list(unit.choices),
+                        start_page_index=page_index,
+                        page_indexes=[page_index],
+                    )
+                )
+            elif problems:
+                # Only the first unit of a page can be unnumbered -> this is
+                # the continuation of the last problem onto this page.
+                last = problems[-1]
+                if unit.body_text:
+                    last.body_text = (
+                        f"{last.body_text}\n{unit.body_text}"
+                        if last.body_text
+                        else unit.body_text
+                    )
+                last.choices.extend(unit.choices)
+                if page_index not in last.page_indexes:
+                    last.page_indexes.append(page_index)
+            else:
+                if unit.body_text:
+                    preamble_parts.append(unit.body_text)
+                if unit.choices:
+                    preamble_parts.extend(unit.choices)
+                preamble_pages.append(page_index)
+
+    if not problems:
+        # No numbered boundary anywhere: the whole document is one problem.
+        non_empty = [(i, m) for i, m in page_materials if (m or "").strip()]
+        if not non_empty:
+            return []
+        return [
+            ProblemUnit(
+                question_no=None,
+                body_text="\n\n".join(m.strip() for _, m in non_empty),
+                start_page_index=non_empty[0][0],
+                page_indexes=[i for i, _ in non_empty],
+            )
+        ]
+
+    if preamble_parts:
+        first = problems[0]
+        first.body_text = "\n".join(preamble_parts + [first.body_text]).strip()
+        first.page_indexes = sorted(set(preamble_pages) | set(first.page_indexes))
+
+    # Disambiguate duplicate numbers: the deck / ingest address problems by
+    # this string, so it must be unique within the document.
+    seen: dict[str, int] = {}
+    for p in problems:
+        if p.question_no is None:
+            continue
+        n = seen.get(p.question_no, 0) + 1
+        seen[p.question_no] = n
+        if n > 1:
+            p.question_no = f"{p.question_no}({n})"
+
+    return problems
