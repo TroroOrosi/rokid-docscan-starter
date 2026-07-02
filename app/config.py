@@ -28,20 +28,25 @@ ENABLE_EMBEDDING = os.environ.get("ROKID_ENABLE_EMBEDDING", "0") == "1"
 ROKID_EXPLAINER = os.environ.get("ROKID_EXPLAINER", "local")
 
 # --- Real cloud-model adapters (opt-in, credential-gated) -------------------
-# The placeholder adapters become production-usable by routing to a provider
-# adapter (claude|openai|gemini) in each registry and providing that provider's
+# PRIMARY solving path: the glasses' onboard AI (natively GPT/Gemini) solves and
+# its answers are ingested via POST /v1/exam-sessions/{id}/solutions — no server
+# adapter needed. The adapters below are the OPTIONAL upgrade path for a more
+# capable model, routed per port (openai|gemini|claude) with that provider's
 # API key. All optional; with none set the server runs fully offline on local.
-#   ROKID_ANALYZER=claude|openai|gemini   real page summarization (finalize)
-#   ROKID_SOLVER=claude|openai|gemini     real question answering (exam-sessions)
-#   ROKID_EXPLAINER=claude|openai|gemini  real page explanation (explain-sessions)
-#   ROKID_EXTRACTOR=claude|openai|gemini  real formula/table/figure extraction
+#   ROKID_ANALYZER=openai|gemini|claude   real page summarization (finalize)
+#   ROKID_SOLVER=openai|gemini|claude     real exam solving; a non-local value
+#                                         also makes finalize-reading solve ALL
+#                                         problems server-side in one batch
+#   ROKID_EXPLAINER=openai|gemini|claude  real page explanation (explain-sessions)
+#   ROKID_EXTRACTOR=openai|gemini|claude  real formula/table/figure extraction
 # Backing model + credentials (read in app/llm.py):
-#   ANTHROPIC_API_KEY / OPENAI_API_KEY / GOOGLE_API_KEY  provider API key
-#   ROKID_LLM_MODEL   Anthropic default "claude-opus-4-8"; REQUIRED for
-#                     openai/gemini (set a current model id)
+#   OPENAI_API_KEY / GOOGLE_API_KEY / ANTHROPIC_API_KEY  provider API key
+#   ROKID_LLM_MODEL   REQUIRED for openai/gemini (set a current model id, e.g.
+#                     a current GPT model); Anthropic defaults to
+#                     "claude-opus-4-8"
 #   ROKID_LLM_MAX_TOKENS   default 1024
 # Optional deps (install only for the provider you use):
-#   pip install anthropic | openai | google-genai
+#   pip install openai | google-genai | anthropic
 # Listening transcription (English listening mode). The recorded audio is
 # transcribed by ROKID_TRANSCRIBER (openai|gemini). Anthropic has no ASR, so
 # unset/anthropic → the client-provided transcript is used as-is (offline-safe).

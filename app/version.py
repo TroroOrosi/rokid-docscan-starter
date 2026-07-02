@@ -42,7 +42,18 @@ from __future__ import annotations
 #        solve-current now passes the WHOLE document (every remembered page) as
 #        context so page-spanning problems are read accurately; capture contract
 #        publishes flash:off / capture_tone:false / silent audio_record.
-APP_VERSION = "0.7.0"
+# 0.8.0: 3-phase exam flow (読取→一括解答→閲覧), designed to minimize the time
+#        the camera is on (= privacy LED lit): finalize-reading segments the
+#        whole document into problems and closes the camera; the onboard GPT's
+#        per-problem answers are ingested via POST /solutions (primary path;
+#        ROKID_SOLVER=openai|gemini|claude adds an optional server solve-all);
+#        GET /solutions + /review serve a per-problem deck with 答え+解法+根拠+
+#        注意 merged in one teleprompter stream. Operation contract moved to
+#        the current official gesture vocabulary; keycodes_verified is now
+#        honestly false (legacy table, unmeasured); privacy_led corrected to
+#        on_while_camera_active + led_off_during_review. API -> 1.8.0,
+#        GLASSES_VIEW_CONTRACT -> 1.4.0.
+APP_VERSION = "0.8.0"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.
@@ -57,7 +68,13 @@ APP_VERSION = "0.7.0"
 # 1.7.0: document page-move型 exam endpoints (/v1/exam-sessions/{id}/next-page,
 #        prev-page, current, solve-current, mode, audio); /pages accepts
 #        camera-free text pages (image optional). Additive — no envelope change.
-API_VERSION = "1.7.0"
+# 1.8.0: 3-phase exam endpoints (POST .../finalize-reading, POST+GET
+#        .../solutions, GET .../review) — additive. /v1/settings corrections:
+#        operations use the official gesture vocabulary, input reports
+#        keycodes_verified:false + keycode_source (the old true was wrong),
+#        capture reports privacy_led.state=on_while_camera_active and
+#        led_off_during_review. Session responses gain phase/problem counts.
+API_VERSION = "1.8.0"
 
 # Matching algorithm identity. Bump when thresholds or hashing change so a
 # re-index/eval is triggered. Mirrors thresholds in app/matching.py.
@@ -90,7 +107,12 @@ EXPLAINER_API_VERSION = "1.0.0"
 #        logical lines (。！？!?), so it paginates into multiple 3-line
 #        teleprompter view pages instead of one over-long line. Max 3 lines/page
 #        is unchanged; this only affects how many view pages long text produces.
-GLASSES_VIEW_CONTRACT_VERSION = "1.3.0"
+# 1.4.0: review-deck view (kind:"review") — 答え+解法+根拠+注意 merged into ONE
+#        teleprompter stream per problem (一括表示, no stages) with deck
+#        navigation; reading_done ack (camera_off). Operation/gesture names
+#        moved to the official vocabulary (two_finger_*, single/double tap,
+#        long_press). Max 3 lines/page unchanged.
+GLASSES_VIEW_CONTRACT_VERSION = "1.4.0"
 
 # Answer-area overlay payload (box + short answer; 2D image-anchored).
 # 1.1.0: added tracking metadata (tracking/fixed_ar/anchor_hint).
