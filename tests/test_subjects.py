@@ -80,3 +80,20 @@ def test_confidence_in_range_and_subject_valid():
     subj, conf = detect_subject("関数の微分と積分を計算せよ。")
     assert subj in SUBJECTS
     assert 0.0 <= conf <= 1.0
+
+
+def test_single_incidental_keyword_is_not_full_confidence():
+    # One keyword (「細胞」 once) must not saturate to 1.0 — it may be an
+    # incidental mention inside a 現代文 passage.
+    _, conf = detect_subject("細胞")
+    assert conf < 0.6
+
+
+def test_latin_formula_is_not_english():
+    # A formula has latin letters but is not English prose.
+    assert _subj("f(x)=ax^2+bx+c solve for x") == "数学"
+
+
+def test_japanese_with_incidental_ascii_is_not_english():
+    # Japanese text containing units/identifiers must not flip to 英語.
+    assert _subj("速度 v を m/s で表し、加速度 a との関係式を示せ。") == "物理"

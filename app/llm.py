@@ -46,7 +46,9 @@ _KEY_ENV = {
     "gemini": ("GOOGLE_API_KEY", "GEMINI_API_KEY"),
 }
 
-_JSON_OBJECT_RE = re.compile(r"\{.*\}", re.DOTALL)
+# NOTE: JSON extraction uses a brace-balanced scan (see extract_json), not a
+# regex — a greedy regex captures to the LAST brace and breaks whenever the
+# model appends prose containing braces after the JSON object.
 
 
 class LLMConfigError(RuntimeError):
@@ -270,7 +272,12 @@ def _audio_media_type(audio: bytes) -> str:
 
 
 def extract_json(text: str) -> dict:
-    """Parse the first JSON object found in ``text`` (tolerant of fences/prose)."""
+    """Parse the FIRST complete JSON object found in ``text``.
+
+    Tolerant of code fences and surrounding prose — including prose that
+    itself contains braces after the object (e.g. ``{"answer":"A"} note: {m}``)
+    — via a brace-balanced scan over every candidate start position.
+    """
     text = (text or "").strip()
     if not text:
         raise ValueError("empty model response")
@@ -278,9 +285,34 @@ def extract_json(text: str) -> dict:
         return json.loads(text)
     except json.JSONDecodeError:
         pass
-    match = _JSON_OBJECT_RE.search(text)
-    if match:
-        return json.loads(match.group(0))
+    for start, ch in enumerate(text):
+        if ch != "{":
+            continue
+        depth = 0
+        in_string = False
+        escaped = False
+        for end in range(start, len(text)):
+            c = text[end]
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif c == "\\":
+                    escaped = True
+                elif c == '"':
+                    in_string = False
+                continue
+            if c == '"':
+                in_string = True
+            elif c == "{":
+                depth += 1
+            elif c == "}":
+                depth -= 1
+                if depth == 0:
+                    try:
+                        return json.loads(text[start : end + 1])
+                    except json.JSONDecodeError:
+                        break  # not valid JSON; try the next '{'
+        # unbalanced from this start; try the next '{'
     raise ValueError("no JSON object in model response")
 
 

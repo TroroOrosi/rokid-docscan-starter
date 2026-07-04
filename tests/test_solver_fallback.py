@@ -63,3 +63,15 @@ def test_local_is_appended_as_final_safety_net():
     register_solver(_Raises(), replace=True)
     result, solver = solve_with_fallback(Question(body_text="x"), tiers=["raises-tier"])
     assert (result.answer or "").strip()
+
+
+def test_unknown_tier_does_not_shadow_later_tiers():
+    # A mistyped tier name (e.g. "claud") must be skipped, not silently
+    # coerced to the local placeholder — the real later tier must still serve.
+    register_solver(_Good(), replace=True)
+    result, solver = solve_with_fallback(
+        Question(body_text="x"), tiers=["no-such-solver", "good-tier"]
+    )
+    assert solver.name == "good-tier"
+    assert result.answer == "正解X"
+    assert any("no-such-solver:unknown" in s for s in result.extras["fallback_from"])

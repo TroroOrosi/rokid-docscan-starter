@@ -49,6 +49,10 @@ _PATTERNS: dict[str, re.Pattern] = {
 }
 
 _ENGLISH_RE = re.compile(r"[A-Za-z]")
+_CJK_RE = re.compile(r"[ぁ-んァ-ヶ一-龯]")
+# Running English prose = three consecutive latin words (2+ letters each).
+# A formula like f(x)=ax^2+bx+c has latin letters but no such run.
+_ENGLISH_WORDS_RE = re.compile(r"[A-Za-z]{2,}(?:\s+[A-Za-z']{2,}){2,}")
 
 
 def detect_subject(text: str | None) -> tuple[str, float]:
@@ -63,12 +67,15 @@ def detect_subject(text: str | None) -> tuple[str, float]:
         if n:
             scores[subject] = n
 
-    # English: share of ASCII letters. Latin script rarely appears in other
-    # Japanese-exam subjects, so a high ratio is a strong English signal.
+    # English: share of ASCII letters — but only when the text is actually
+    # English PROSE. Japanese text with incidental ASCII (formulas, units,
+    # pseudocode identifiers) must not flip to 英語, so the branch additionally
+    # requires a near-zero CJK count and a run of consecutive English words.
     norm = normalize_ocr_text(raw)
     if norm:
         ascii_ratio = len(_ENGLISH_RE.findall(raw)) / max(1, len(norm))
-        if ascii_ratio > 0.5:
+        cjk = len(_CJK_RE.findall(raw))
+        if ascii_ratio > 0.5 and cjk <= 2 and _ENGLISH_WORDS_RE.search(raw):
             scores["英語"] = max(scores.get("英語", 0), int(ascii_ratio * 10))
 
     if not scores:
@@ -78,5 +85,9 @@ def detect_subject(text: str | None) -> tuple[str, float]:
     # then English last. max() over dict keys is stable to insertion order.
     best = max(scores, key=lambda s: scores[s])
     total = sum(scores.values())
-    confidence = round(min(1.0, scores[best] / total + 0.2), 3)
+    # A single incidental keyword (e.g. 「細胞」 once in a 現代文 passage) must
+    # not read as full confidence: damp by absolute hit count (1 hit ≈ 0.4,
+    # 3+ hits undamped).
+    damp = min(1.0, scores[best] / 3)
+    confidence = round(min(1.0, (scores[best] / total + 0.2) * damp), 3)
     return best, confidence

@@ -95,6 +95,13 @@ def solve_with_fallback(
     last_result = None
     last_solver = None
     for name in names:
+        # An unknown/mistyped tier name (e.g. ROKID_SOLVER_TIERS="claud,claude")
+        # must not silently coerce to the local placeholder mid-list — that
+        # would "answer" before the real later tiers get a chance. Skip it and
+        # record it; local stays available as the guaranteed final tier.
+        if name not in _REGISTRY and name != DEFAULT_SOLVER:
+            skipped.append(f"{name}:unknown")
+            continue
         solver = get_solver(name)
         last_solver = solver
         try:

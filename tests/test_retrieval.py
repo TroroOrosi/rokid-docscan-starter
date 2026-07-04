@@ -63,3 +63,16 @@ def test_returns_most_similar_page(conn):
     assert 0 in r["evidence_pages"]
     assert "光合成" in r["context"]
     assert r["retriever"] == "lexical"
+
+
+def test_short_query_still_recalls(conn):
+    # 1-2 char queries have (almost) no bigrams, so overlap used to collapse
+    # to zero; the containment path must keep recall alive.
+    from app.retrieval import retrieve_context
+
+    _add_page(conn, 1, 0, "酵素は生体内の化学反応を触媒するタンパク質である")
+    _add_page(conn, 1, 1, "江戸幕府は1603年に徳川家康が開いた")
+    for query in ("酵素", "酵"):  # 2-char and the harder 1-char case
+        r = retrieve_context(conn, query)
+        assert r["hits"], f"expected the enzyme page to be recalled for {query!r}"
+        assert r["hits"][0]["page_index"] == 0

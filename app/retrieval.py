@@ -40,10 +40,17 @@ def _score(query_norm: str, query_tokens: set[str], page_text: str) -> float:
     if not page_norm:
         return 0.0
     ratio = SequenceMatcher(None, query_norm, page_norm).ratio()
-    page_tokens = _tokens(page_norm)
-    overlap = (
-        len(query_tokens & page_tokens) / len(query_tokens) if query_tokens else 0.0
-    )
+    query_compact = query_norm.replace(" ", "")
+    if len(query_compact) < 3:
+        # A 1-2 char query has (almost) no bigrams, so token overlap collapses
+        # to zero against every page. Use direct containment instead —
+        # otherwise a single-kanji keyword query can never recall anything.
+        overlap = 1.0 if query_compact and query_compact in page_norm.replace(" ", "") else 0.0
+    else:
+        page_tokens = _tokens(page_norm)
+        overlap = (
+            len(query_tokens & page_tokens) / len(query_tokens) if query_tokens else 0.0
+        )
     # Weight token overlap a bit higher; it is more robust for long pages.
     return round(0.4 * ratio + 0.6 * overlap, 4)
 

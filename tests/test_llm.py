@@ -103,6 +103,18 @@ def test_extract_json_raises_on_garbage():
         extract_json("")
 
 
+def test_extract_json_takes_first_object_despite_trailing_braces():
+    # Prose containing braces AFTER the object must not break parsing (a
+    # greedy regex captured to the last brace and raised here).
+    assert extract_json('{"answer": "A"} note: units in {m}') == {"answer": "A"}
+    # Two objects -> the first one wins.
+    assert extract_json('{"a": 1} then {"b": 2}') == {"a": 1}
+    # Nested objects stay intact.
+    assert extract_json('prefix {"a": {"b": 1}} suffix') == {"a": {"b": 1}}
+    # Braces inside strings don't confuse the scan.
+    assert extract_json('{"t": "curly } inside"} rest') == {"t": "curly } inside"}
+
+
 # --- load() gating (no network / no creds) ----------------------------------
 
 def test_load_returns_none_without_key(monkeypatch):
