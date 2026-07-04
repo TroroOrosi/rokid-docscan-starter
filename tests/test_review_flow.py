@@ -185,6 +185,64 @@ def test_finalize_reading_solve_all_folds_in_listening_transcript(client, monkey
     assert "The man bought two apples." in _RecordingSolver.seen[0].context
 
 
+def test_finalize_reading_synthesizes_id_for_boundaryless_document(client):
+    # No 問N boundary anywhere -> single fallback problem. It must carry a
+    # stable synthesized id so the onboard ingest can address it by name.
+    sid, body = _finalized_session(client, texts=["境界のない本文だけの資料である"])
+    assert body["problem_count"] == 1
+    assert body["problems"][0]["problem_no"] == "全体"
+
+    r = client.post(
+        f"/v1/exam-sessions/{sid}/solutions",
+        json={"solutions": [{"problem_no": "全体", "answer": "要旨は…"}]},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["created_problems"] == 0  # matched, no duplicate row
+    assert r.json()["problem_count"] == 1
+    view = client.get(f"/v1/exam-sessions/{sid}/review").json()
+    assert view["solved"] is True
+    assert any("要旨は…" in ln for ln in view["glasses_view"]["lines"])
+
+
+def test_finalize_reading_keyless_cloud_solver_leaves_deck_unsolved(client, monkeypatch):
+    # ROKID_SOLVER=openai with no key: solve_with_fallback lands on the local
+    # placeholder — that junk must NOT be stored as "solved" (it would shadow
+    # the onboard ingest with (要モデル接続) answers).
+    from app.solvers.claude import LLMSolver
+    from app.solvers.registry import register_solver
+
+    # Restore a pristine (client-less) adapter: other test modules may have
+    # replaced the registry entry with a fake-client instance.
+    register_solver(LLMSolver(name="openai", provider="openai"), replace=True)
+    monkeypatch.setenv("ROKID_SOLVER", "openai")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    doc_id = _doc_with_text_pages(client, _TWO_PROBLEM_PAGES)
+    sid = _new_doc_exam(client, doc_id)["session_id"]
+    r = client.post(f"/v1/exam-sessions/{sid}/finalize-reading")
+    assert r.status_code == 200, r.text
+    assert r.json()["server_solved"] == 0
+    assert all(p["solved"] is False for p in r.json()["problems"])
+
+
+def test_finalize_reading_resumes_unsolved_problems(client, monkeypatch):
+    # First finalize without a solver (deck stays unsolved); configuring a
+    # solver and double-tapping again must solve the REMAINING problems
+    # instead of returning a dead already_finalized deck.
+    sid, first = _finalized_session(client)
+    assert first["server_solved"] == 0
+
+    _use_recording_solver(monkeypatch)
+    r = client.post(f"/v1/exam-sessions/{sid}/finalize-reading")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["already_finalized"] is True
+    assert body["server_solved"] == body["problem_count"] == 2
+    assert all(p["solved"] for p in body["problems"])
+    # A further call has nothing left to solve (no duplicate solutions spam).
+    again = client.post(f"/v1/exam-sessions/{sid}/finalize-reading").json()
+    assert again["server_solved"] == 0
+
+
 # --- phase 2: onboard ingest (primary path) ----------------------------------
 
 def test_ingest_onboard_solutions(client):
@@ -249,6 +307,57 @@ def test_ingest_duplicate_problem_no_latest_wins(client):
     view = client.get(f"/v1/exam-sessions/{sid}/review", params={"index": 0}).json()
     lines = view["glasses_view"]["lines"]
     assert any("訂正後の答え" in ln for ln in lines)
+
+
+def test_ingest_by_problem_index_resolves_duplicate_numbers(client):
+    # 問1 appears under two 大問; the server deck disambiguates as 問1/問1(2),
+    # which the onboard AI cannot know — problem_index addresses them exactly.
+    sid, body = _finalized_session(
+        client, texts=["大問1 前半\n問1 一つ目", "大問2 後半\n問1 二つ目"]
+    )
+    nos = [p["problem_no"] for p in body["problems"]]
+    assert nos == ["大問1", "問1", "大問2", "問1(2)"]
+
+    r = client.post(
+        f"/v1/exam-sessions/{sid}/solutions",
+        json={
+            "solutions": [
+                {"problem_no": "問1", "problem_index": 1, "answer": "答えA"},
+                {"problem_no": "問1", "problem_index": 3, "answer": "答えB"},
+            ]
+        },
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["created_problems"] == 0
+    v1 = client.get(f"/v1/exam-sessions/{sid}/review", params={"index": 1}).json()
+    v3 = client.get(f"/v1/exam-sessions/{sid}/review", params={"index": 3}).json()
+    assert any("答えA" in ln for ln in v1["glasses_view"]["lines"])
+    assert any("答えB" in ln for ln in v3["glasses_view"]["lines"])
+    # Out-of-range index is rejected before anything is stored.
+    bad = client.post(
+        f"/v1/exam-sessions/{sid}/solutions",
+        json={"solutions": [{"problem_no": "x", "problem_index": 99, "answer": "y"}]},
+    )
+    assert bad.status_code == 400
+
+
+def test_compat_paths_do_not_pollute_review_deck(client):
+    # After finalize-reading, using the compat solve-current path must not
+    # append its per-page question rows to the review deck.
+    sid, body = _finalized_session(client)
+    assert body["problem_count"] == 2
+    assert client.post(f"/v1/exam-sessions/{sid}/solve-current").status_code == 200
+
+    deck = client.get(f"/v1/exam-sessions/{sid}/solutions").json()
+    assert deck["problem_count"] == 2
+    assert [d["problem_no"] for d in deck["deck"]] == ["問1", "問2"]
+    view = client.get(f"/v1/exam-sessions/{sid}/review", params={"index": 1}).json()
+    assert view["problem_no"] == "問2"
+    # get_exam_session: deck-scoped counts, but the compat row still appears
+    # in the full questions listing.
+    s = client.get(f"/v1/exam-sessions/{sid}").json()
+    assert s["problem_count"] == 2
+    assert len(s["questions"]) == 3
 
 
 def test_ingest_rejects_empty_payload_and_blank_answer(client):

@@ -851,6 +851,7 @@ def get_exam_session(session_id: int) -> dict:
                 (session_id,),
             ).fetchall()
         }
+        deck_ids = {r["id"] for r in _deck_question_rows(conn, session_id)}
         return {
             "session_id": session_id,
             "mode": session["mode"],
@@ -863,8 +864,10 @@ def get_exam_session(session_id: int) -> dict:
             "current_page_index": session["current_page_index"],
             "total_pages": _exam_total_pages(conn, session["document_id"]),
             "has_audio": bool(session["audio_path"]),
-            "problem_count": len(rows),
-            "solved_count": len(solved),
+            # Deck-scoped counts: compat rows (solve-current / uploads) are
+            # listed under "questions" but are not review-deck problems.
+            "problem_count": len(deck_ids),
+            "solved_count": len(solved & deck_ids),
             "questions": [
                 {
                     "question_id": r["id"],
@@ -1215,25 +1218,46 @@ async def exam_upload_audio(
 
 # --- 3-phase flow endpoints: finalize-reading / solutions ingest / review ----
 
-def _exam_deck(conn, session_id: int) -> list[dict]:
-    """Review-deck listing: session problems in document order + solved state.
+def _deck_question_rows(conn, session_id: int) -> list:
+    """The session's review-deck problem rows, in insertion (document) order.
 
-    Deck index k = the k-th questions row (ORDER BY id = insertion order =
-    segmentation/document order); the latest solutions row per question wins
-    (re-ingest of the same problem_no appends a newer row).
+    Deck membership is marked in ``structure_json``: finalize-reading rows
+    carry ``{"page_indexes": [...], "deck": true}`` and ingest-created rows
+    ``{"deck": true}``.  Compat rows — solve-current (structure_json NULL) and
+    the upload flow (a JSON *list* of headings) — are excluded so per-page or
+    uploaded questions never pollute the deck counts/navigation.
     """
     rows = conn.execute(
-        "SELECT id, question_no, subject, page_number FROM questions "
-        "WHERE session_id = ? ORDER BY id",
+        "SELECT * FROM questions WHERE session_id = ? ORDER BY id",
         (session_id,),
     ).fetchall()
+    deck_rows = []
+    for r in rows:
+        try:
+            meta = json.loads(r["structure_json"] or "null")
+        except (ValueError, TypeError):
+            meta = None
+        if isinstance(meta, dict) and (meta.get("deck") or "page_indexes" in meta):
+            deck_rows.append(r)
+    return deck_rows
+
+
+def _latest_solution_row(conn, question_id: int):
+    return conn.execute(
+        "SELECT * FROM solutions WHERE question_id = ? ORDER BY id DESC LIMIT 1",
+        (question_id,),
+    ).fetchone()
+
+
+def _exam_deck(conn, session_id: int) -> list[dict]:
+    """Review-deck listing: deck problems in document order + solved state.
+
+    Deck index k = the k-th deck row (see _deck_question_rows); the latest
+    solutions row per question wins (re-ingest appends a newer row).
+    """
     deck: list[dict] = []
-    for i, r in enumerate(rows):
-        sol = conn.execute(
-            "SELECT served_by, answer_conf FROM solutions "
-            "WHERE question_id = ? ORDER BY id DESC LIMIT 1",
-            (r["id"],),
-        ).fetchone()
+    for i, r in enumerate(_deck_question_rows(conn, session_id)):
+        sol = _latest_solution_row(conn, r["id"])
         deck.append(
             {
                 "index": i,
@@ -1292,10 +1316,14 @@ def exam_finalize_reading(session_id: int) -> dict:
     right away; otherwise the deck waits for the onboard AI's answers via
     POST /solutions (primary path).
 
-    Idempotent: a second call (gesture double-fire) re-segments nothing and
-    returns the current deck with already_finalized=true.  mode=real: the
-    segmentation and phase transition still happen (they reveal nothing), but
-    server-side solving is skipped and the response carries locked=true.
+    Idempotent AND race-safe: the reading→reviewing transition is claimed
+    with a guarded UPDATE (serialized by SQLite's write lock), so a gesture
+    double-fire — even two near-simultaneous requests — segments exactly
+    once.  Server-side solving is RESUMABLE: every call solves whichever deck
+    problems still lack a solution, so a transient failure mid-batch can be
+    retried by double-tapping again.  mode=real: the segmentation and phase
+    transition still happen (they reveal nothing), but server-side solving is
+    skipped and the response carries locked=true.
     """
     conn = db.connect()
     try:
@@ -1304,86 +1332,94 @@ def exam_finalize_reading(session_id: int) -> dict:
         total_pages = _exam_total_pages(conn, doc_id)
         locked = session["mode"] == "real" and not config.ALLOW_REAL_EXAM_SOLVE
 
-        if _session_phase(session) == "reviewing":
-            deck = _exam_deck(conn, session_id)
-            return {
-                "session_id": session_id,
-                "status": "reviewing",
-                "already_finalized": True,
-                "document_id": doc_id,
-                "total_pages": total_pages,
-                "problem_count": len(deck),
-                "server_solved": 0,
-                "locked": locked,
-                "problems": deck,
-                "camera": {"expected_state": "off", "privacy_led": "off"},
-                "operations": _review_operations(),
-                "versions": version_info(),
-            }
-
-        page_rows = conn.execute(
-            "SELECT page_index, ocr_text, vision_text FROM pages "
-            "WHERE document_id = ? ORDER BY page_index",
-            (doc_id,),
-        ).fetchall()
-        problems = segment_problems(
-            [
-                (r["page_index"], _page_material(r["ocr_text"], r["vision_text"]))
-                for r in page_rows
-            ]
-        )
-
-        inserted: list[tuple[int, object, str]] = []  # (question_id, problem, subject)
-        for prob in problems:
-            subject, subj_conf = detect_subject(prob.body_text)
-            qcur = conn.execute(
-                """INSERT INTO questions
-                   (session_id, question_no, body_text, choices_json, subject,
-                    read_conf, page_number, structure_json)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    session_id,
-                    prob.question_no,
-                    prob.body_text,
-                    json.dumps(prob.choices, ensure_ascii=False),
-                    subject,
-                    round(min(1.0, 0.5 + subj_conf / 2), 3)
-                    if normalize_ocr_text(prob.body_text)
-                    else 0.0,
-                    prob.start_page_index + 1,
-                    json.dumps({"page_indexes": prob.page_indexes}),
-                ),
-            )
-            inserted.append((qcur.lastrowid, prob, subject))
-
-        conn.execute(
-            "UPDATE exam_sessions SET status = 'reviewing' WHERE id = ?",
+        # Atomically claim the transition: the guarded UPDATE takes SQLite's
+        # write lock, so of two racing requests exactly one sees rowcount==1
+        # and segments; the other lands in the already-finalized branch.
+        claim = conn.execute(
+            "UPDATE exam_sessions SET status = 'reviewing' "
+            "WHERE id = ? AND status != 'reviewing'",
             (session_id,),
         )
-        conn.commit()
+        already_finalized = claim.rowcount == 0
 
-        # Optional server-side solve-all. Deliberately skipped when ROKID_SOLVER
-        # is unset or 'local': the placeholder does not really solve, and junk
+        if already_finalized:
+            conn.rollback()  # nothing claimed; end the implicit transaction
+        else:
+            # Segment and insert the deck in the SAME transaction as the claim.
+            page_rows = conn.execute(
+                "SELECT page_index, ocr_text, vision_text FROM pages "
+                "WHERE document_id = ? ORDER BY page_index",
+                (doc_id,),
+            ).fetchall()
+            problems = segment_problems(
+                [
+                    (r["page_index"], _page_material(r["ocr_text"], r["vision_text"]))
+                    for r in page_rows
+                ]
+            )
+            for prob in problems:
+                subject, subj_conf = detect_subject(prob.body_text)
+                conn.execute(
+                    """INSERT INTO questions
+                       (session_id, question_no, body_text, choices_json, subject,
+                        read_conf, page_number, structure_json)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        session_id,
+                        # The boundary-less fallback problem gets a stable
+                        # synthesized id so the onboard ingest can address it
+                        # (a NULL problem_no would be unreachable by name).
+                        prob.question_no or "全体",
+                        prob.body_text,
+                        json.dumps(prob.choices, ensure_ascii=False),
+                        subject,
+                        round(min(1.0, 0.5 + subj_conf / 2), 3)
+                        if normalize_ocr_text(prob.body_text)
+                        else 0.0,
+                        prob.start_page_index + 1,
+                        json.dumps(
+                            {"page_indexes": prob.page_indexes, "deck": True}
+                        ),
+                    ),
+                )
+            conn.commit()
+
+        # Optional server-side solve-all — resumable: solve every deck problem
+        # that has no solution yet (covers both the first call and retries
+        # after a mid-batch failure). Deliberately skipped when ROKID_SOLVER is
+        # unset or 'local': the placeholder does not really solve, and junk
         # rows would mark problems "solved" and shadow the onboard ingest.
         server_solved = 0
         solver_env = (os.environ.get("ROKID_SOLVER") or "").strip()
-        if inserted and not locked and solver_env and solver_env != "local":
-            for question_id, prob, subject in inserted:
-                doc_material = _document_material(conn, doc_id, prob.start_page_index)
-                retrieved = retrieve_context(conn, prob.body_text)
+        if not locked and solver_env and solver_env != "local":
+            for row in _deck_question_rows(conn, session_id):
+                if _latest_solution_row(conn, row["id"]) is not None:
+                    continue
+                try:
+                    span = json.loads(row["structure_json"] or "{}").get(
+                        "page_indexes"
+                    ) or []
+                except (ValueError, TypeError):
+                    span = []
+                start_index = (row["page_number"] or 1) - 1
+                doc_material = _document_material(conn, doc_id, start_index)
+                retrieved = retrieve_context(conn, row["body_text"])
                 context = _exam_prompt_context(session, doc_material, retrieved["context"])
                 question = Question(
-                    question_no=prob.question_no,
-                    body_text=prob.body_text,
-                    choices=prob.choices,
-                    subject=subject,
+                    question_no=row["question_no"],
+                    body_text=row["body_text"],
+                    choices=json.loads(row["choices_json"] or "[]"),
+                    subject=row["subject"],
                     context=context,
                 )
                 result, solver = solve_with_fallback(question=question)
                 served_by = result.extras.get("served_by", solver.name)
-                evidence_pages = result.evidence_pages or [
-                    i + 1 for i in prob.page_indexes
-                ]
+                if served_by == "local":
+                    # The configured cloud solver fell back to the placeholder
+                    # (missing key/SDK or failure): storing that would mark the
+                    # problem "solved" with junk and shadow the onboard ingest.
+                    continue
+                evidence_pages = result.evidence_pages or [i + 1 for i in span]
                 conn.execute(
                     """INSERT INTO solutions
                        (question_id, solver_name, answer, solution_steps_json,
@@ -1391,7 +1427,7 @@ def exam_finalize_reading(session_id: int) -> dict:
                         evidence_pages_json, raw_reasoning, served_by)
                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
-                        question_id,
+                        row["id"],
                         solver.name,
                         result.answer,
                         json.dumps(result.solution_steps, ensure_ascii=False),
@@ -1404,25 +1440,29 @@ def exam_finalize_reading(session_id: int) -> dict:
                         served_by,
                     ),
                 )
+                # Commit per problem so a mid-batch crash loses at most one
+                # answer and a retry resumes from the remaining problems.
+                conn.commit()
                 server_solved += 1
-            conn.commit()
 
         deck = _exam_deck(conn, session_id)
-        return {
+        body = {
             "session_id": session_id,
             "status": "reviewing",
-            "already_finalized": False,
+            "already_finalized": already_finalized,
             "document_id": doc_id,
             "total_pages": total_pages,
             "problem_count": len(deck),
             "server_solved": server_solved,
             "locked": locked,
             "problems": deck,
-            "reading_ack": build_reading_done_ack(len(deck), total_pages),
             "camera": {"expected_state": "off", "privacy_led": "off"},
             "operations": _review_operations(),
             "versions": version_info(),
         }
+        if not already_finalized:
+            body["reading_ack"] = build_reading_done_ack(len(deck), total_pages)
+        return body
     finally:
         conn.close()
 
@@ -1437,6 +1477,11 @@ class IngestSolution(BaseModel):
     # Unknown confidence defaults to the middle tier (★★☆ on the HUD).
     answer_confidence: float = 0.5
     page_number: int | None = None
+    # Optional deck index (GET /solutions "index"). Takes precedence over
+    # problem_no matching — the unambiguous way to address problems whose
+    # base numbers repeat across 大問 (the server disambiguates those as
+    # 問1(2), which the onboard AI cannot know).
+    problem_index: int | None = None
 
 
 class IngestSolutions(BaseModel):
@@ -1450,11 +1495,12 @@ def exam_ingest_solutions(session_id: int, payload: IngestSolutions) -> dict:
 
     The glasses' onboard GPT solves every problem with the whole document in
     view; this endpoint stores its results as solutions rows (served_by=
-    "onboard") keyed by problem_no as listed by GET /solutions.  An unknown
-    problem_no appends a new problem to the deck (the heuristic missed it,
-    the onboard AI found it).  Re-ingesting a problem_no adds a newer
-    solutions row — latest wins.  Validation is all-or-nothing.  mode=real:
-    nothing is stored (locked response).
+    "onboard") addressed by deck index (``problem_index``, unambiguous) or by
+    ``problem_no`` as listed by GET /solutions.  An unknown problem_no appends
+    a new problem to the deck (the heuristic missed it, the onboard AI found
+    it).  Re-ingesting a problem adds a newer solutions row — latest wins.
+    Validation is all-or-nothing.  mode=real: nothing is stored (locked
+    response).
     """
     conn = db.connect()
     try:
@@ -1470,6 +1516,7 @@ def exam_ingest_solutions(session_id: int, payload: IngestSolutions) -> dict:
                 "glasses_view": build_locked_view(),
                 "versions": version_info(),
             }
+        deck_rows = _deck_question_rows(conn, session_id)
         if not payload.solutions:
             raise HTTPException(status_code=400, detail="solutions must be non-empty")
         for item in payload.solutions:
@@ -1478,20 +1525,32 @@ def exam_ingest_solutions(session_id: int, payload: IngestSolutions) -> dict:
                     status_code=400,
                     detail=f"empty answer for problem {item.problem_no!r}",
                 )
+            if item.problem_index is not None and not (
+                0 <= item.problem_index < len(deck_rows)
+            ):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"problem_index {item.problem_index} out of range "
+                    f"(deck has {len(deck_rows)} problems)",
+                )
 
         created = 0
+        created_ids: dict[str, int] = {}  # problem_no -> question_id (this payload)
         for item in payload.solutions:
-            row = conn.execute(
-                "SELECT id FROM questions WHERE session_id = ? AND question_no = ? "
-                "ORDER BY id LIMIT 1",
-                (session_id, item.problem_no),
-            ).fetchone()
-            if row is None:
+            if item.problem_index is not None:
+                question_id = deck_rows[item.problem_index]["id"]
+            else:
+                row = next(
+                    (r for r in deck_rows if r["question_no"] == item.problem_no),
+                    None,
+                )
+                question_id = row["id"] if row else created_ids.get(item.problem_no)
+            if question_id is None:
                 qcur = conn.execute(
                     """INSERT INTO questions
                        (session_id, question_no, body_text, choices_json,
-                        subject, read_conf, page_number)
-                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                        subject, read_conf, page_number, structure_json)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         session_id,
                         item.problem_no,
@@ -1500,12 +1559,12 @@ def exam_ingest_solutions(session_id: int, payload: IngestSolutions) -> dict:
                         item.subject,
                         0.0,
                         item.page_number,
+                        json.dumps({"deck": True}),
                     ),
                 )
                 question_id = qcur.lastrowid
+                created_ids[item.problem_no] = question_id
                 created += 1
-            else:
-                question_id = row["id"]
             evidence = (
                 [item.page_number]
                 if item.page_number
@@ -1614,11 +1673,7 @@ def exam_review(session_id: int, index: int = 0, view_page: int = 0) -> dict:
                 "glasses_view": build_locked_view(),
                 "versions": version_info(),
             }
-        rows = conn.execute(
-            "SELECT id, question_no, page_number FROM questions "
-            "WHERE session_id = ? ORDER BY id",
-            (session_id,),
-        ).fetchall()
+        rows = _deck_question_rows(conn, session_id)
         if not rows:
             raise HTTPException(
                 status_code=409,
@@ -1626,10 +1681,7 @@ def exam_review(session_id: int, index: int = 0, view_page: int = 0) -> dict:
             )
         index = max(0, min(index, len(rows) - 1))
         qrow = rows[index]
-        srow = conn.execute(
-            "SELECT * FROM solutions WHERE question_id = ? ORDER BY id DESC LIMIT 1",
-            (qrow["id"],),
-        ).fetchone()
+        srow = _latest_solution_row(conn, qrow["id"])
         solution = _solution_from_row(srow) if srow else None
         view = build_review_view(
             solution,
