@@ -47,3 +47,5 @@ def test_auth_required_when_key_set(tmp_path, monkeypatch):
     assert c.get("/health").status_code == 200
     assert c.get("/v1/version").status_code == 200
     assert c.get("/v1/settings").status_code == 200
+    # A trailing slash on a discovery URL must not lock the client out.
+    assert c.get("/v1/settings/", follow_redirects=True).status_code == 200

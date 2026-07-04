@@ -32,6 +32,7 @@ from .glasses_view import (
     EXPLAIN_STAGES,
     OPERATION_CONTRACT,
     RENDER_CONTRACT,
+    REVIEW_OPERATIONS,
     STAGES,
     build_capture_ack,
     build_explain_view,
@@ -89,7 +90,11 @@ async def _auth_middleware(request: Request, call_next):
     endpoints (config.AUTH_EXEMPT_PATHS) stay open so a client can negotiate
     contracts before authenticating.
     """
-    if config.API_KEY and request.url.path not in config.AUTH_EXEMPT_PATHS:
+    # Normalize a trailing slash so /v1/settings/ is as exempt as /v1/settings
+    # (a client appending a slash to a discovery URL must not be locked out
+    # before it can negotiate contracts).
+    path = request.url.path.rstrip("/") or "/"
+    if config.API_KEY and path not in config.AUTH_EXEMPT_PATHS:
         if request.headers.get("authorization", "") != f"Bearer {config.API_KEY}":
             return JSONResponse({"detail": "unauthorized"}, status_code=401)
     return await call_next(request)
@@ -105,6 +110,17 @@ class CreateDocument(BaseModel):
 
 
 # --- helpers ----------------------------------------------------------------
+
+_MAX_UPLOAD_BYTES = 15 * 1024 * 1024  # generous for page photos / recordings
+
+
+async def _read_upload_limited(upload: UploadFile) -> bytes:
+    """Read an UploadFile with a hard size cap (memory-exhaustion guard)."""
+    raw = await upload.read(_MAX_UPLOAD_BYTES + 1)
+    if len(raw) > _MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="upload too large (max 15MB)")
+    return raw
+
 
 def _load_image(raw: bytes) -> Image.Image:
     try:
@@ -243,12 +259,14 @@ async def add_page(
             status_code=400,
             detail="a page needs ocr_text/vision_text (recognized text) or an image",
         )
+    if page_index < 0:
+        raise HTTPException(status_code=400, detail="page_index must be >= 0")
     conn = db.connect()
     try:
         _doc_or_404(conn, document_id)
 
         if has_image:
-            raw = await image.read()
+            raw = await _read_upload_limited(image)
             img = _load_image(raw)
             ph = phash_hex(img)
             omd5 = _fallback_md5(ocr_md5(ocr_text), raw)
@@ -283,7 +301,12 @@ async def add_page(
         scanned_count = conn.execute(
             "SELECT COUNT(*) FROM pages WHERE document_id = ?", (document_id,)
         ).fetchone()[0]
-        effective_total = total_pages if total_pages and total_pages > 0 else scanned_count
+        # No declared total -> the ack must not claim completion (None keeps
+        # all_scanned false); an understated total is corrected upward so the
+        # HUD never shows 5/3ページ完了.
+        effective_total = (
+            max(total_pages, scanned_count) if total_pages and total_pages > 0 else None
+        )
         ack = build_scan_ack(
             page_index=page_index,
             scanned_count=scanned_count,
@@ -360,7 +383,7 @@ async def match_page(
     conn = db.connect()
     try:
         _doc_or_404(conn, document_id)
-        raw = await image.read()
+        raw = await _read_upload_limited(image)
         img = _load_image(raw)
 
         q_phash = phash_hex(img)
@@ -623,7 +646,7 @@ async def add_question(
     conn = db.connect()
     try:
         _exam_session_or_404(conn, session_id)
-        raw = await image.read()
+        raw = await _read_upload_limited(image)
         img = _load_image(raw)
 
         hints = json.loads(bbox_hints) if bbox_hints else None
@@ -776,14 +799,16 @@ def get_question_view(
     try:
         session = _exam_session_or_404(conn, session_id)
         q = _question_or_404(conn, session_id, question_id)
+        # Lock gate FIRST: a locked session must answer uniformly regardless
+        # of solve state (the 409 would otherwise reveal it via status code).
+        if session["mode"] == "real" and not config.ALLOW_REAL_EXAM_SOLVE:
+            return {"glasses_view": build_locked_view(stage), "locked": True}
         sol = conn.execute(
             "SELECT * FROM solutions WHERE question_id = ? ORDER BY id DESC LIMIT 1",
             (question_id,),
         ).fetchone()
         if sol is None:
             raise HTTPException(status_code=409, detail="question not solved yet")
-        if session["mode"] == "real" and not config.ALLOW_REAL_EXAM_SOLVE:
-            return {"glasses_view": build_locked_view(stage), "locked": True}
 
         answer_box = json.loads(q["answer_box_json"]) if q["answer_box_json"] else None
         return {
@@ -1191,7 +1216,7 @@ async def exam_upload_audio(
 
         audio_path: str | None = None
         if audio is not None and getattr(audio, "filename", None):
-            raw = await audio.read()
+            raw = await _read_upload_limited(audio)
             ext = Path(audio.filename).suffix or ".bin"
             fname = f"audio_{session_id}_{uuid.uuid4().hex[:8]}{ext}"
             config.AUDIO_DIR.mkdir(parents=True, exist_ok=True)
@@ -1228,7 +1253,10 @@ def _deck_question_rows(conn, session_id: int) -> list:
     uploaded questions never pollute the deck counts/navigation.
     """
     rows = conn.execute(
-        "SELECT * FROM questions WHERE session_id = ? ORDER BY id",
+        # Document order: problems appended later by ingest still slot in by
+        # their page; unknown pages sort last, id breaks ties.
+        "SELECT * FROM questions WHERE session_id = ? "
+        "ORDER BY (page_number IS NULL), page_number, id",
         (session_id,),
     ).fetchall()
     deck_rows = []
@@ -1274,16 +1302,8 @@ def _exam_deck(conn, session_id: int) -> list[dict]:
 
 
 def _review_operations() -> dict:
-    """The review-phase subset of OPERATION_CONTRACT (echoed in responses)."""
-    keys = (
-        "review_next_problem",
-        "review_prev_problem",
-        "scroll_next",
-        "scroll_prev",
-        "close",
-        "mode_toggle",
-    )
-    return {k: OPERATION_CONTRACT[k] for k in keys}
+    """The review-phase gesture bindings (same source as the view payloads)."""
+    return dict(REVIEW_OPERATIONS)
 
 
 def _question_evidence_pages(conn, question_id: int) -> list[int]:
@@ -1446,6 +1466,14 @@ def exam_finalize_reading(session_id: int) -> dict:
                 server_solved += 1
 
         deck = _exam_deck(conn, session_id)
+        if locked:
+            # Consistent with GET /solutions: a locked session must not leak
+            # solution-derived fields (e.g. answers stored while the unlock
+            # flag was temporarily on).
+            deck = [
+                {**d, "solved": False, "served_by": None, "answer_confidence": None}
+                for d in deck
+            ]
         body = {
             "session_id": session_id,
             "status": "reviewing",
@@ -1570,6 +1598,9 @@ def exam_ingest_solutions(session_id: int, payload: IngestSolutions) -> dict:
                 if item.page_number
                 else _question_evidence_pages(conn, question_id)
             )
+            # Clamp: an out-of-scale confidence (e.g. a 0-100 client) must not
+            # inflate the deck values or the HUD ★ symbols.
+            confidence = max(0.0, min(1.0, item.answer_confidence))
             conn.execute(
                 """INSERT INTO solutions
                    (question_id, solver_name, answer, solution_steps_json,
@@ -1583,8 +1614,8 @@ def exam_ingest_solutions(session_id: int, payload: IngestSolutions) -> dict:
                     json.dumps(item.solution_steps, ensure_ascii=False),
                     item.rationale,
                     item.cautions,
-                    item.answer_confidence,
-                    item.answer_confidence,
+                    confidence,
+                    confidence,
                     json.dumps(evidence),
                     "",
                     payload.served_by,
@@ -1663,7 +1694,6 @@ def exam_review(session_id: int, index: int = 0, view_page: int = 0) -> dict:
     conn = db.connect()
     try:
         session = _exam_session_or_404(conn, session_id)
-        _require_document_exam(session)
         if _session_phase(session) == "reading":
             raise HTTPException(status_code=409, detail="call finalize-reading first")
         if session["mode"] == "real" and not config.ALLOW_REAL_EXAM_SOLVE:
@@ -1677,7 +1707,8 @@ def exam_review(session_id: int, index: int = 0, view_page: int = 0) -> dict:
         if not rows:
             raise HTTPException(
                 status_code=409,
-                detail="no problems in this session; call finalize-reading first",
+                detail="no problems were detected in this document; "
+                "re-run the reading phase (再読取)",
             )
         index = max(0, min(index, len(rows) - 1))
         qrow = rows[index]
@@ -1699,6 +1730,7 @@ def exam_review(session_id: int, index: int = 0, view_page: int = 0) -> dict:
             "problem_count": len(rows),
             "question_id": qrow["id"],
             "problem_no": qrow["question_no"],
+            "subject": qrow["subject"],
             "page_number": qrow["page_number"],
             "solved": srow is not None,
             "served_by": srow["served_by"] if srow else None,

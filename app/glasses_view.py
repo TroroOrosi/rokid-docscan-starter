@@ -503,13 +503,16 @@ def _review_lines(solution: SolveResult, header: str) -> list[str]:
     return lines
 
 
-# Gesture bindings shown inside every review view (subset of OPERATION_CONTRACT).
-_REVIEW_OPERATIONS = {
+# Gesture bindings for the review phase (subset of OPERATION_CONTRACT). The
+# single source used both inside every review view (nav.operations) and by the
+# endpoint envelopes (main._review_operations), so a client sees one set.
+REVIEW_OPERATIONS = {
     "next_problem": "two_finger_swipe_left",
     "prev_problem": "two_finger_swipe_right",
     "scroll_next": "two_finger_swipe_down",
     "scroll_prev": "two_finger_swipe_up",
     "close": "double_tap",
+    "mode_toggle": "long_press",
 }
 
 
@@ -562,7 +565,7 @@ def build_review_view(
             "next_problem": index + 1 if index < problem_count - 1 else None,
             "prev_view_page": vp - 1 if vp > 0 else None,
             "next_view_page": vp + 1 if vp < total - 1 else None,
-            "operations": dict(_REVIEW_OPERATIONS),
+            "operations": dict(REVIEW_OPERATIONS),
             "hint": (
                 "『次の問題』と言う"
                 if voice_enabled
@@ -573,13 +576,26 @@ def build_review_view(
 
 
 def build_reading_done_ack(problem_count: int, total_pages: int) -> dict:
-    """HUD ack for finalize-reading: reading phase over, camera off, LED off."""
-    return {
-        "lines": [
+    """HUD ack for finalize-reading: reading phase over, camera off, LED off.
+
+    A 0-problem outcome (e.g. every page was figure-only with no recognized
+    text) gets explicit guidance instead of dropping the user into an empty
+    review deck with no explanation.
+    """
+    if problem_count == 0:
+        lines = [
+            f"読取完了 {total_pages}ページ",
+            "問題を検出できません",
+            "再読取してください",
+        ]
+    else:
+        lines = [
             f"読取完了 {total_pages}ページ",
             f"{problem_count}問を検出",
             "カメラOFF 解答へ",
-        ][:_MAX_LINES],
+        ]
+    return {
+        "lines": lines[:_MAX_LINES],
         "ttl_sec": 2,
         "problem_count": problem_count,
         "total_pages": total_pages,
@@ -590,17 +606,29 @@ def build_reading_done_ack(problem_count: int, total_pages: int) -> dict:
 def build_scan_ack(
     page_index: int,
     scanned_count: int,
-    total_pages: int,
+    total_pages: int | None,
 ) -> dict:
     """Scan progress / completion HUD shown after each page capture.
 
     Called from POST /v1/documents/{id}/pages (add_page) so the user gets
-    real-time feedback.  When scanned_count >= total_pages the hint changes
-    to the completion message so the user knows to double-tap
+    real-time feedback.  When the expected total is known and reached, the
+    hint changes to the completion message so the user knows to double-tap
     (finish_reading → POST /v1/exam-sessions/{id}/finalize-reading, which
     closes the camera and turns the privacy LED off).
+
+    ``total_pages=None`` = the client never declared an expected count: the
+    ack must NOT claim completion (previously it asserted all_scanned after
+    the very first page), so it reports plain progress with a neutral hint.
     """
     label = f"P{page_index + 1:02d} 読取済 ✓"
+    if total_pages is None:
+        return {
+            "lines": [label, f"{scanned_count}ページ読取済", "次ページ / 完了はダブルタップ"],
+            "ttl_sec": 2,
+            "scanned_count": scanned_count,
+            "total_pages": None,
+            "all_scanned": False,
+        }
     progress = f"{scanned_count}/{total_pages}ページ完了"
     hint = "完了: ダブルタップ" if scanned_count >= total_pages else "次ページへ"
     return {

@@ -22,6 +22,8 @@ import importlib
 import pytest
 from fastapi.testclient import TestClient
 
+from tests.conftest import image_bytes, make_image
+
 
 @pytest.fixture
 def client(tmp_path, monkeypatch):
@@ -374,6 +376,81 @@ def test_ingest_rejects_empty_payload_and_blank_answer(client):
     assert r.status_code == 400
     # All-or-nothing: nothing was stored.
     assert client.get(f"/v1/exam-sessions/{sid}/solutions").json()["solved_count"] == 0
+
+
+def test_scan_ack_without_total_pages_never_claims_completion(client):
+    # The completion signal gates the whole 3-phase flow: with no declared
+    # total it must not tell the user to finish after the very first page.
+    r = client.post("/v1/documents", json={"title": "模試"})
+    doc_id = r.json()["document_id"]
+    ack = client.post(
+        f"/v1/documents/{doc_id}/pages", data={"page_index": 0, "ocr_text": "問1 a"}
+    ).json()["scan_ack"]
+    assert ack["all_scanned"] is False
+    assert ack["total_pages"] is None
+    assert "完了: ダブルタップ" not in ack["lines"]
+    # An understated total is corrected upward (no 2/1ページ完了).
+    ack2 = client.post(
+        f"/v1/documents/{doc_id}/pages",
+        data={"page_index": 1, "ocr_text": "問2 b", "total_pages": 1},
+    ).json()["scan_ack"]
+    assert ack2["total_pages"] == 2
+    # Negative page_index is rejected.
+    bad = client.post(
+        f"/v1/documents/{doc_id}/pages", data={"page_index": -1, "ocr_text": "x"}
+    )
+    assert bad.status_code == 400
+
+
+def test_ingest_confidence_is_clamped(client):
+    sid, _ = _finalized_session(client)
+    client.post(
+        f"/v1/exam-sessions/{sid}/solutions",
+        json={
+            "solutions": [
+                {"problem_no": "問1", "answer": "a", "answer_confidence": 80.0},
+                {"problem_no": "問2", "answer": "b", "answer_confidence": -1.0},
+            ]
+        },
+    )
+    deck = client.get(f"/v1/exam-sessions/{sid}/solutions").json()["deck"]
+    assert deck[0]["answer_confidence"] == 1.0
+    assert deck[1]["answer_confidence"] == 0.0
+
+
+def test_finalize_reading_with_unreadable_pages_gives_guidance(client):
+    # Image-only pages (no recognized text) -> 0 problems: the ack must say so
+    # instead of dropping the user into an empty deck without explanation.
+    r = client.post("/v1/documents", json={"title": "模試"})
+    doc_id = r.json()["document_id"]
+    files = {"image": ("p.png", image_bytes(make_image(seed=7)), "image/png")}
+    assert (
+        client.post(
+            f"/v1/documents/{doc_id}/pages", data={"page_index": 0}, files=files
+        ).status_code
+        == 201
+    )
+    assert client.post(f"/v1/documents/{doc_id}/finalize").status_code == 200
+    sid = _new_doc_exam(client, doc_id)["session_id"]
+    body = client.post(f"/v1/exam-sessions/{sid}/finalize-reading").json()
+    assert body["problem_count"] == 0
+    assert "問題を検出できません" in body["reading_ack"]["lines"]
+    r = client.get(f"/v1/exam-sessions/{sid}/review")
+    assert r.status_code == 409
+    assert "再読取" in r.json()["detail"]
+
+
+def test_upload_size_limit(client, monkeypatch):
+    import app.main as main
+
+    monkeypatch.setattr(main, "_MAX_UPLOAD_BYTES", 16)
+    r = client.post("/v1/documents", json={"title": "模試"})
+    doc_id = r.json()["document_id"]
+    files = {"image": ("p.png", image_bytes(make_image(seed=3)), "image/png")}
+    resp = client.post(
+        f"/v1/documents/{doc_id}/pages", data={"page_index": 0}, files=files
+    )
+    assert resp.status_code == 413
 
 
 # --- phase 3: review deck -----------------------------------------------------

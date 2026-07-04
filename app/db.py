@@ -126,6 +126,13 @@ CREATE TABLE IF NOT EXISTS explain_views (
     confidence          REAL,
     viewed_at           TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+-- Hot-path lookups: latest solution per question (deck/review/view), a
+-- session's questions, and a document's pages. Runs on every init_db, so
+-- existing DBs pick these up too.
+CREATE INDEX IF NOT EXISTS idx_solutions_question ON solutions(question_id);
+CREATE INDEX IF NOT EXISTS idx_questions_session  ON questions(session_id);
+CREATE INDEX IF NOT EXISTS idx_pages_document     ON pages(document_id);
 """
 
 
