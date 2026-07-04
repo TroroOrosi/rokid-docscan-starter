@@ -135,7 +135,7 @@ def _load_samples(directory: str) -> list[dict]:
 
 
 def _synthetic(n: int) -> list[dict]:
-    subjects = ["数学", "英語", "物理", "化学", "歴史"]
+    subjects = ["数学", "英語", "物理", "化学", "生物", "世界史", "日本史", "地理", "情報"]
     media = ["", "図1を参照", "次のグラフ", "下の表より"]
     samples = []
     for i in range(n):

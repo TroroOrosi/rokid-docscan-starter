@@ -22,9 +22,16 @@ CREATE TABLE IF NOT EXISTS pages (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     document_id INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
     page_index  INTEGER NOT NULL,
-    image_path  TEXT NOT NULL,
-    phash       TEXT NOT NULL,
+    -- Nullable: with "撮影しない" (no photography) a page has no image; the
+    -- on-glass AI recognizes it and sends the reading as text (image_path/phash
+    -- stay empty).
+    image_path  TEXT,
+    phash       TEXT NOT NULL DEFAULT '',
     ocr_text    TEXT,
+    -- On-glass AI's multimodal recognition of figures/diagrams/visual layout
+    -- (TEXT, not an image). Combined with ocr_text when solving so figure-
+    -- dependent and page-spanning problems are answered from the whole material.
+    vision_text TEXT,
     ocr_md5     TEXT,
     summary     TEXT,
     created_at  TEXT NOT NULL DEFAULT (datetime('now')),
@@ -39,6 +46,15 @@ CREATE TABLE IF NOT EXISTS exam_sessions (
     voice_enabled INTEGER NOT NULL DEFAULT 0,
     subject_hint  TEXT,
     status        TEXT NOT NULL DEFAULT 'open',
+    -- Scan-free document page-move型 exam (added v0.7): bind to a finalized
+    -- document and navigate pages by button (no camera). exam_type switches
+    -- 筆記(written) ⇄ リスニング(listening); answer_format = mark | written.
+    document_id        INTEGER REFERENCES documents(id) ON DELETE SET NULL,
+    exam_type          TEXT NOT NULL DEFAULT 'written',
+    answer_format      TEXT NOT NULL DEFAULT 'mark',
+    current_page_index INTEGER NOT NULL DEFAULT 0,
+    audio_path         TEXT,      -- listening: recorded audio (その場で録音)
+    transcript         TEXT,      -- listening: transcript (書き起こし or 与値)
     created_at    TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -110,6 +126,13 @@ CREATE TABLE IF NOT EXISTS explain_views (
     confidence          REAL,
     viewed_at           TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+-- Hot-path lookups: latest solution per question (deck/review/view), a
+-- session's questions, and a document's pages. Runs on every init_db, so
+-- existing DBs pick these up too.
+CREATE INDEX IF NOT EXISTS idx_solutions_question ON solutions(question_id);
+CREATE INDEX IF NOT EXISTS idx_questions_session  ON questions(session_id);
+CREATE INDEX IF NOT EXISTS idx_pages_document     ON pages(document_id);
 """
 
 
@@ -122,10 +145,78 @@ def connect(db_path: Path | None = None) -> sqlite3.Connection:
     return conn
 
 
+# Columns added to exam_sessions after its initial release. `CREATE TABLE IF
+# NOT EXISTS` won't add columns to a pre-existing DB, so migrate them in.
+_EXAM_SESSION_MIGRATIONS = (
+    ("document_id", "INTEGER"),
+    ("exam_type", "TEXT NOT NULL DEFAULT 'written'"),
+    ("answer_format", "TEXT NOT NULL DEFAULT 'mark'"),
+    ("current_page_index", "INTEGER NOT NULL DEFAULT 0"),
+    ("audio_path", "TEXT"),
+    ("transcript", "TEXT"),
+)
+
+
+# Rebuild `pages` to the current schema. Used to relax the original
+# `image_path TEXT NOT NULL` on databases created before 撮影しない (no
+# photography) text-only pages existed — SQLite can't drop a NOT NULL in place,
+# so we copy into a fresh table. This also introduces the `vision_text` column.
+_PAGES_REBUILD_SQL = """
+CREATE TABLE pages_new (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    document_id INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+    page_index  INTEGER NOT NULL,
+    image_path  TEXT,
+    phash       TEXT NOT NULL DEFAULT '',
+    ocr_text    TEXT,
+    vision_text TEXT,
+    ocr_md5     TEXT,
+    summary     TEXT,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(document_id, page_index)
+);
+INSERT INTO pages_new
+    (id, document_id, page_index, image_path, phash, ocr_text, ocr_md5, summary, created_at)
+    SELECT id, document_id, page_index, image_path, phash, ocr_text, ocr_md5, summary, created_at
+    FROM pages;
+DROP TABLE pages;
+ALTER TABLE pages_new RENAME TO pages;
+"""
+
+
+def _pages_image_path_not_null(conn: sqlite3.Connection) -> bool:
+    """True if `pages.image_path` still carries the legacy NOT NULL constraint."""
+    for _cid, name, _type, notnull, _dflt, _pk in conn.execute(
+        "PRAGMA table_info(pages)"
+    ):
+        if name == "image_path":
+            return bool(notnull)
+    return False
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Bring an existing database up to the current schema (additive + rebuild)."""
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(exam_sessions)")}
+    for name, decl in _EXAM_SESSION_MIGRATIONS:
+        if name not in cols:
+            conn.execute(f"ALTER TABLE exam_sessions ADD COLUMN {name} {decl}")
+
+    # pages: on a legacy DB, image_path was NOT NULL — rebuild the table so
+    # text-only (撮影しない) pages with image_path=NULL can be recorded. The
+    # rebuild also adds vision_text; otherwise just add the column if missing.
+    if _pages_image_path_not_null(conn):
+        conn.executescript(_PAGES_REBUILD_SQL)
+    else:
+        pcols = {r[1] for r in conn.execute("PRAGMA table_info(pages)")}
+        if "vision_text" not in pcols:
+            conn.execute("ALTER TABLE pages ADD COLUMN vision_text TEXT")
+
+
 def init_db(db_path: Path | None = None) -> None:
     conn = connect(db_path)
     try:
         conn.executescript(_SCHEMA)
+        _migrate(conn)
         conn.commit()
     finally:
         conn.close()

@@ -20,7 +20,7 @@ from __future__ import annotations
 import os
 
 from .base import Solver
-from .claude import ClaudeSolver
+from .claude import LLMSolver
 from .local_placeholder import LocalPlaceholderSolver
 
 DEFAULT_SOLVER = "local"
@@ -95,6 +95,13 @@ def solve_with_fallback(
     last_result = None
     last_solver = None
     for name in names:
+        # An unknown/mistyped tier name (e.g. ROKID_SOLVER_TIERS="claud,claude")
+        # must not silently coerce to the local placeholder mid-list — that
+        # would "answer" before the real later tiers get a chance. Skip it and
+        # record it; local stays available as the guaranteed final tier.
+        if name not in _REGISTRY and name != DEFAULT_SOLVER:
+            skipped.append(f"{name}:unknown")
+            continue
         solver = get_solver(name)
         last_solver = solver
         try:
@@ -124,6 +131,8 @@ def solve_with_fallback(
 
 # Register the offline default at import time so the server always has one.
 register_solver(LocalPlaceholderSolver(), replace=True)
-# Register the real cloud solver (Anthropic Claude). It only touches the network
-# when routed to AND ANTHROPIC_API_KEY is set; otherwise it defers to local.
-register_solver(ClaudeSolver(), replace=True)
+# Register the real cloud solvers (Anthropic Claude / OpenAI / Google Gemini).
+# Each only touches the network when routed to AND its provider API key is set;
+# otherwise solve() raises and solve_with_fallback drops back to local.
+for _name, _provider in (("claude", "anthropic"), ("openai", "openai"), ("gemini", "gemini")):
+    register_solver(LLMSolver(name=_name, provider=_provider), replace=True)

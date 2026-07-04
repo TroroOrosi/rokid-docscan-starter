@@ -52,9 +52,20 @@ def test_settings_advertise_silent_contract(client):
     assert hud["brightness"] == "low"
     assert body["voice_enabled_default"] is False
     # Silent shutter, and the privacy LED is explicitly NON-disable-able.
+    # It lights while the camera is active (reading phase) and is dark during
+    # the answer/review phases, when the camera is closed.
     capture = body["capture"]
     assert capture["shutter_sound"] is False
-    assert capture["privacy_led"] == {"state": "always_on", "tamper": "forbidden"}
+    assert capture["privacy_led"] == {
+        "state": "on_while_camera_active",
+        "tamper": "forbidden",
+    }
+    assert capture["led_off_during_review"] is True
+    # 撮影しない: no photographic flash, silent capture, and silent audio recording.
+    assert capture["flash"] == "off"
+    assert capture["capture_tone"] is False
+    assert capture["audio_record"]["start_tone"] is False
+    assert capture["audio_record"]["stop_tone"] is False
 
 
 def test_capture_ack_is_silent_and_short(client):

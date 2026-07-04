@@ -103,7 +103,13 @@ def phash_hex(image: Image.Image) -> str:
 
 
 def hamming(a: int | str, b: int | str) -> int:
-    """Hamming distance between two hashes given as ints or hex strings."""
+    """Hamming distance between two hashes given as ints or hex strings.
+
+    Defense-in-depth: empty/None inputs raise a clear ValueError instead of a
+    confusing int()/TypeError (all in-repo callers already filter these out).
+    """
+    if a is None or a == "" or b is None or b == "":
+        raise ValueError("hamming() requires two non-empty hashes")
     ia = int(a, 16) if isinstance(a, str) else a
     ib = int(b, 16) if isinstance(b, str) else b
     return bin(ia ^ ib).count("1")

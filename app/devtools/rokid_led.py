@@ -23,7 +23,7 @@ SAFETY / LEGAL — READ THIS:
     can be **illegal** and is an ethical breach. Only use this on a device you
     own, in a controlled development setting, in compliance with local law and
     with visible-recording expectations. This tool will not relax that stance:
-    the server contract still advertises the LED as always_on / tamper:forbidden.
+    the server contract still advertises the LED as on_while_camera_active / tamper:forbidden.
 
 Nothing here runs on import. The server never imports this module.
 """

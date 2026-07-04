@@ -18,16 +18,25 @@ from dataclasses import dataclass, field
 
 # Question-number patterns (Japanese exam conventions). Order matters: try the
 # most specific first.
+# 問N carries a lookbehind so 熟語 (学問1/質問3/疑問2/設問…) inside prose never
+# fabricates a question boundary — a real boundary is 問 used as a label, not
+# as the tail of a compound word.
 _Q_PATTERNS = [
     re.compile(r"大問\s*([0-9０-９]+)"),
     re.compile(r"第\s*([0-9０-９]+)\s*問"),
-    re.compile(r"問\s*([0-9０-９]+)"),
-    re.compile(r"[（(]\s*([0-9０-９]+)\s*[)）]"),
+    re.compile(r"(?<![学質疑設訪顧諮])問\s*([0-9０-９]+)"),
 ]
+# (n)-style numbering counts only when it LEADS the line — mid-text
+# parentheses like 「大戦（1914）」 are years/inline notes, not boundaries —
+# and question numbers realistically have 1-3 digits.
+_PAREN_Q_RE = re.compile(r"^\s*[（(]\s*([0-9０-９]{1,3})\s*[)）]")
 
 # Choice markers: circled digits, katakana enumerals, and A-D / 1-4 list items.
+# The 1-4 marker must not be followed by a digit so a decimal-leading line
+# (「1.5メートルの棒」) stays in the body instead of becoming a fake choice.
 _CHOICE_RE = re.compile(
-    r"^\s*(?:[①-⑩]|[ア-オ]|[A-Da-d][.)、]|[1-4][.)、])\s*(.*\S)?", re.UNICODE
+    r"^\s*(?:[①-⑩]|[ア-オ]|[A-Da-d][.)、]|[1-4][.)、](?![0-9０-９]))\s*(.*\S)?",
+    re.UNICODE,
 )
 _PAGE_RE = re.compile(r"(?:P\.?|ページ|頁)\s*([0-9０-９]+)", re.IGNORECASE)
 _FIGURE_RE = re.compile(r"(図\s*[0-9０-９]+|表\s*[0-9０-９]+|グラフ)")
@@ -61,9 +70,10 @@ def _detect_question_no(line: str) -> str | None:
                 return f"大問{num}"
             if "第" in pat.pattern:
                 return f"第{num}問"
-            if "問" in pat.pattern:
-                return f"問{num}"
-            return f"({num})"
+            return f"問{num}"
+    m = _PAREN_Q_RE.match(line)
+    if m:
+        return f"({_zen_to_han(m.group(1))})"
     return None
 
 
@@ -144,3 +154,126 @@ def primary_question(parsed: dict) -> QuestionUnit | None:
         if q.question_no:
             return q
     return questions[0]
+
+
+# ---------------------------------------------------------------------------
+# Whole-document problem segmentation (3-phase exam flow, phase 2)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ProblemUnit:
+    """One problem of a whole document, possibly spanning multiple pages."""
+
+    question_no: str | None
+    body_text: str
+    choices: list[str] = field(default_factory=list)
+    start_page_index: int = 0
+    page_indexes: list[int] = field(default_factory=list)  # every page it spans
+
+
+def segment_problems(page_materials: list[tuple[int, str]]) -> list[ProblemUnit]:
+    """Split a whole document into problems on 問N/大問N/第N問/(n) boundaries.
+
+    ``page_materials`` is ``[(page_index, material_text), ...]`` in page order
+    (material = the page's recognized text incl. the figure reading).  Each
+    page is scanned with :func:`parse_layout` — a pure per-line scanner — so
+    the boundaries are identical to scanning the joined text, while page
+    attribution is preserved.  Merge rules:
+
+    - a numbered unit starts a new problem (``start_page_index`` = that page);
+    - a page-leading unnumbered unit has SHARED attribution: it is appended to
+      the previous problem (cross-page continuation of its passage) AND, when
+      a numbered unit follows on the same page, prepended to that problem's
+      body (it may equally be the next problem's prompt/passage — e.g.
+      「次の文章を読んで答えよ」 right before 問2; text alone cannot tell the
+      two cases apart, and the duplication is harmless because solving always
+      receives the whole document as context);
+    - unnumbered content before the first numbered problem (cover sheet,
+      instructions) is folded into the first problem's body;
+    - duplicate question numbers (e.g. 問1 under two 大問) are made unique
+      with a suffix (問1(2)) so the review deck / ingest can address them.
+
+    Fallback: a document with no numbered boundary at all becomes ONE problem
+    spanning every non-empty page, so the caller always gets >=1 problem for
+    a non-empty document.  Deterministic and dependency-free (offline).
+    """
+    problems: list[ProblemUnit] = []
+    preamble_parts: list[str] = []
+    preamble_pages: list[int] = []
+
+    for page_index, material in page_materials:
+        units = parse_layout(material)["questions"]
+        # Only the first unit of a page can be unnumbered (parse_layout folds
+        # later unnumbered lines into the current numbered unit).
+        leading = units[0] if units and units[0].question_no is None else None
+        numbered = [u for u in units if u.question_no is not None]
+
+        if leading is not None:
+            if problems:
+                # Continuation of the previous problem onto this page.
+                last = problems[-1]
+                if leading.body_text:
+                    last.body_text = (
+                        f"{last.body_text}\n{leading.body_text}"
+                        if last.body_text
+                        else leading.body_text
+                    )
+                last.choices.extend(leading.choices)
+                if page_index not in last.page_indexes:
+                    last.page_indexes.append(page_index)
+            else:
+                if leading.body_text:
+                    preamble_parts.append(leading.body_text)
+                if leading.choices:
+                    preamble_parts.extend(leading.choices)
+                preamble_pages.append(page_index)
+
+        for pos, unit in enumerate(numbered):
+            body = unit.body_text
+            # Shared attribution (see docstring): the page-leading block may be
+            # the prompt/passage of THIS problem, so the first numbered problem
+            # of the page also receives it. (Skipped when it went to the
+            # preamble — the preamble is prepended to problems[0] at the end.)
+            if pos == 0 and leading is not None and problems and leading.body_text:
+                body = f"{leading.body_text}\n{body}" if body else leading.body_text
+            problems.append(
+                ProblemUnit(
+                    question_no=unit.question_no,
+                    body_text=body,
+                    choices=list(unit.choices),
+                    start_page_index=page_index,
+                    page_indexes=[page_index],
+                )
+            )
+
+    if not problems:
+        # No numbered boundary anywhere: the whole document is one problem.
+        non_empty = [(i, m) for i, m in page_materials if (m or "").strip()]
+        if not non_empty:
+            return []
+        return [
+            ProblemUnit(
+                question_no=None,
+                body_text="\n\n".join(m.strip() for _, m in non_empty),
+                start_page_index=non_empty[0][0],
+                page_indexes=[i for i, _ in non_empty],
+            )
+        ]
+
+    if preamble_parts:
+        first = problems[0]
+        first.body_text = "\n".join(preamble_parts + [first.body_text]).strip()
+        first.page_indexes = sorted(set(preamble_pages) | set(first.page_indexes))
+
+    # Disambiguate duplicate numbers: the deck / ingest address problems by
+    # this string, so it must be unique within the document.
+    seen: dict[str, int] = {}
+    for p in problems:
+        if p.question_no is None:
+            continue
+        n = seen.get(p.question_no, 0) + 1
+        seen[p.question_no] = n
+        if n > 1:
+            p.question_no = f"{p.question_no}({n})"
+
+    return problems

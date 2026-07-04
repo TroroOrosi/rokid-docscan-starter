@@ -1,13 +1,14 @@
-"""Claude-backed media extractor (real formula / figure / table extraction).
+"""Cloud-backed media extractor (real formula / figure / table extraction).
 
-Production counterpart to ``LocalPlaceholderExtractor``. Given the OCR text (and
-a media kind) it produces a genuine structured representation via the Anthropic
-Messages API: LaTeX for math, a flattened cell list for tables, a short
-description for figures/graphs.
+Production counterpart to ``LocalPlaceholderExtractor``. Given OCR text (and a
+media kind) it produces a structured representation via a cloud LLM: LaTeX for
+math, a flattened cell list for tables, a short description for figures/graphs.
+Provider-agnostic: one class, selected by adapter name == provider
+(``claude`` / ``openai`` / ``gemini``).
 
-Routing: ``ROKID_EXTRACTOR=claude``. If unconfigured or the call fails, it falls
-back to the offline local placeholder (the MediaExtractor contract forbids
-raising).
+Routing: ``ROKID_EXTRACTOR=claude|openai|gemini``. If unconfigured or the call
+fails, it falls back to the offline local placeholder (the MediaExtractor
+contract forbids raising).
 """
 
 from __future__ import annotations
@@ -25,13 +26,15 @@ _SYSTEM = (
 )
 
 
-class ClaudeExtractor(MediaExtractor):
-    name = "claude"
-    provider_version = "anthropic-messages-1.0.0"
+class LLMExtractor(MediaExtractor):
     offline = False
     kinds = KINDS
 
-    def __init__(self, client: LLMClient | None = None):
+    def __init__(self, *, name: str = "claude", provider: str = "anthropic",
+                 client: LLMClient | None = None):
+        self.name = name
+        self.provider = provider
+        self.provider_version = f"{provider}-messages-1.0.0"
         self._client = client
         self._fallback = LocalPlaceholderExtractor()
 
@@ -43,12 +46,15 @@ class ClaudeExtractor(MediaExtractor):
         kind: str | None = None,
         region: dict | None = None,
     ) -> ExtractorResult:
-        client = get_client(self._client)
-        if client is None or not (ocr_text or "").strip():
-            return self._fallback.extract(
-                image_path=image_path, ocr_text=ocr_text, kind=kind, region=region
-            )
         try:
+            # get_client may raise LLMConfigError (key set but SDK missing); keep
+            # it inside the guard so extraction never 500s (MediaExtractor contract
+            # forbids raising) — degrade to the offline local extractor.
+            client = get_client(self._client, self.provider)
+            if client is None or not (ocr_text or "").strip():
+                return self._fallback.extract(
+                    image_path=image_path, ocr_text=ocr_text, kind=kind, region=region
+                )
             data = client.complete_json(
                 system=_SYSTEM,
                 prompt=f"Requested kind: {kind or 'auto-detect'}\nOCR text:\n{ocr_text}",
@@ -62,8 +68,15 @@ class ClaudeExtractor(MediaExtractor):
             kind=result_kind,
             content=str(data.get("content", "")).strip() or "(no media)",
             confidence=_clamp(data.get("confidence")),
-            extras={"source": "claude", "model": client.model},
+            extras={"source": self.name, "provider": self.provider, "model": client.model},
         )
+
+
+class ClaudeExtractor(LLMExtractor):
+    """Back-compat alias: the Anthropic-backed extractor registered as ``claude``."""
+
+    def __init__(self, client: LLMClient | None = None):
+        super().__init__(name="claude", provider="anthropic", client=client)
 
 
 def _clamp(value, default: float = 0.0) -> float:

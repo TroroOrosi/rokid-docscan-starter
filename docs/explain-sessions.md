@@ -1,7 +1,7 @@
 # 資料解説モード（explain-sessions）仕様書
 
-**UX 第 v1.7 世代**の撮影なし設計（HTTP エンベロープは `API_VERSION = 1.6.0`、
-`APP_VERSION = 0.4.0`）。登録済み文書を Rokid Glasses
+**UX 第 v1.7 世代**の撮影なし設計（HTTP エンベロープは現在 `API_VERSION = 1.8.0`、
+`APP_VERSION = 0.8.0`）。登録済み文書を Rokid Glasses
 **単体でページナビゲーション→解説を HUD に段階表示**する機能です。
 
 **撮影なし・画像送信なし・音声不要・フラッシュなし・スマホ画面なしで完結します。**
@@ -32,25 +32,24 @@
 
 | ステップ | ユーザーの操作 | グラス HUD の表示 | KeyCode |
 |---------|------------|------------------|---|
-| 2 | **タップ**（タッチパッド中央） | `P01/5 ★★★ / (概要テキスト) / 長押し 次段階` | `KEYCODE_DPAD_CENTER (23)` |
-| 3 | テキストが3行を超える場合 **スワイプ左** で続きを読む | 次の3行が表示 | `KEYCODE_DPAD_LEFT` |
-| 4 | 前に戻りたい場合 **スワイプ右** | 前の3行に戻る | `KEYCODE_DPAD_RIGHT` |
-| 5 | 詳細が欲しい場合 **長押し** | `P01/5 詳細 / (詳細テキスト)` | `KEYCODE_TV (170)` |
-| 6 | さらに根拠・参照ページは **もう一度長押し** | `P01/5 根拠 / 参照: P03,P05` | `KEYCODE_TV (170)` |
-| 7 | **次のページへ**: 速スワイプ左（素早くはじく） | `→ P02/5 / タップで解説` | `KEYCODE_DPAD_UP (19)` |
-| 8 | **前のページへ**: 速スワイプ右 | `← P01/5 / タップで解説` | `KEYCODE_DPAD_DOWN (20)` |
-| 9 | 解説を閉じる場合 **ダブルタップ** | HUD が消える | `KEYCODE_ENTER (66)` |
+| 2 | **タップ**（1本指） | `P01/5 ★★★ / (概要テキスト) / タップ 次段階` | `single_tap`（KeyCode 23・未検証） |
+| 3 | テキストが3行を超える場合 **2本指スワイプ下** で続きを読む | 次の3行が表示 | `two_finger_swipe_down` |
+| 4 | 前に戻りたい場合 **2本指スワイプ上** | 前の3行に戻る | `two_finger_swipe_up` |
+| 5 | 詳細が欲しい場合 **もう一度タップ** | `P01/5 詳細 / (詳細テキスト)` | `single_tap` |
+| 6 | さらに根拠・参照ページは **さらにタップ** | `P01/5 根拠 / 参照: P03,P05` | `single_tap` |
+| 7 | **次のページへ**: 2本指スワイプ左 | `→ P02/5 / タップで解説` | `two_finger_swipe_left` |
+| 8 | **前のページへ**: 2本指スワイプ右 | `← P01/5 / タップで解説` | `two_finger_swipe_right` |
+| 9 | 解説を閉じる場合 **ダブルタップ** | HUD が消える | `double_tap` |
 
-> **速スワイプ（ページ送り）と通常スワイプ（テキスト送り）の違い**:
-> - 通常スワイプ（ゆっくり）= 現在ページ内のテキストを1スライス送る
-> - 速スワイプ（素早くはじく）= サーバーに POST /next-page を送り、ページ全体を変える
+> **2本指スワイプ左右（ページ送り）と上下（テキスト送り）の違い**（公式の
+> 「左右=前後ページ・上下=スクロール」に対応）:
+> - 上下スワイプ = 現在ページ内のテキストを1スライス送る/戻す
+> - 左右スワイプ = サーバーに POST /next-page・/prev-page を送り、ページ全体を変える
 >
 > ページ送りは**撮影を伴いません**。サーバー内のカウンターをインクリメントするだけです。
-
-> **速スワイプ方向と KeyCode の対応**（Rokid 公式仕様）:
-> - 速スワイプ左 = `KEYCODE_DPAD_UP (19)` → 次ページ
-> - 速スワイプ右 = `KEYCODE_DPAD_DOWN (20)` → 前ページ
-> 物理操作名とキーコード名が逆になっているのは公式仕様です。
+>
+> ⚠️ KeyCode 値は旧・単眼 Rokid Glass 由来で**未実測**（`keycodes_verified:false`）。
+> 実機計測と `ROKID_KEYMAP` 上書きは [real-device-operation.md](real-device-operation.md) §5。
 
 ---
 
@@ -114,11 +113,11 @@ curl -s 'http://127.0.0.1:8000/v1/explain-sessions/1/explain?view_page=1'
     "total_view_pages": 3,
     "nav": {
       "operations": {
-        "next_view_page": "swipe_left",
-        "prev_view_page": "swipe_right",
-        "next_stage": "long_press",
-        "next_doc_page": "fast_swipe_left",
-        "prev_doc_page": "fast_swipe_right"
+        "next_view_page": "two_finger_swipe_down",
+        "prev_view_page": "two_finger_swipe_up",
+        "next_stage": "single_tap",
+        "next_doc_page": "two_finger_swipe_left",
+        "prev_doc_page": "two_finger_swipe_right"
       }
     }
   }
@@ -185,15 +184,15 @@ POST /explain-sessions
 ## ページナビゲーション詳細
 
 ```
-[P01]──fast_swipe_left──▶[P02]──fast_swipe_left──▶[P03]  ...  [P05]
-      ◀──fast_swipe_right──     ◀──fast_swipe_right──
+[P01]──two_finger_swipe_left──▶[P02]──two_finger_swipe_left──▶[P03]  ...  [P05]
+      ◀──two_finger_swipe_right──     ◀──two_finger_swipe_right──
 
 各ページ内:
-  tap          → GET /explain?stage=overview
-  long_press   → GET /explain?stage=detail
-  long_press×2 → GET /explain?stage=evidence
-  swipe_left   → GET /explain?view_page=N+1  (テキスト送り)
-  swipe_right  → GET /explain?view_page=N-1  (テキスト戻し)
+  single_tap             → GET /explain?stage=overview
+  single_tap（表示中）    → GET /explain?stage=detail
+  single_tap（さらに）    → GET /explain?stage=evidence
+  two_finger_swipe_down  → GET /explain?view_page=N+1  (テキスト送り)
+  two_finger_swipe_up    → GET /explain?view_page=N-1  (テキスト戻し)
 ```
 
 ---
@@ -214,15 +213,18 @@ POST /explain-sessions
 | 値 | 説明 |
 |---|---|
 | `local`（既定） | オフラインのプレースホルダ。外部 API 不要。 |
-| `claude`（同梱の実アダプタ） | Anthropic Claude（要 `ANTHROPIC_API_KEY`＋`pip install anthropic`。モデルは `ROKID_LLM_MODEL`、既定 `claude-opus-4-8`） |
+| `openai`（同梱の実アダプタ） | OpenAI GPT（要 `OPENAI_API_KEY`＋`pip install openai`。モデルは `ROKID_LLM_MODEL` 必須指定） |
+| `gemini`（同梱の実アダプタ） | Google Gemini（要 `GOOGLE_API_KEY`＋`pip install google-genai`。モデルは `ROKID_LLM_MODEL` 必須指定） |
+| `claude`（同梱の実アダプタ） | Anthropic Claude（要 `ANTHROPIC_API_KEY`＋`pip install anthropic`。モデル既定 `claude-opus-4-8`） |
 
 ```bash
-pip install anthropic
-ROKID_EXPLAINER=claude ANTHROPIC_API_KEY=sk-ant-... uvicorn app.main:app --port 8000
+pip install openai
+ROKID_EXPLAINER=openai OPENAI_API_KEY=sk-... ROKID_LLM_MODEL=<現行のGPTモデルid> \
+  uvicorn app.main:app --port 8000
 ```
 
-- キー未設定／`anthropic` 未導入なら、**ネットワークに触れず自動でローカルへフォールバック**します。
-- 実装は `app/explainers/claude.py`（共通クライアントは `app/llm.py`）。
+- キー未設定／SDK 未導入なら、**ネットワークに触れず自動でローカルへフォールバック**します。
+- 実装は `app/explainers/claude.py` の `LLMExplainer`（プロバイダ非依存・共通クライアントは `app/llm.py`）。
 - 他ベンダを足したい場合は `Explainer` ポートにアダプタを1つ実装して `register_explainer()`。
 
 ---
@@ -237,7 +239,7 @@ pytest tests/test_explain_api.py -v
 
 ## 制限・注意事項
 
-- Explainer がローカルプレースホルダの場合、解説テキストは要約/OCR の整形にとどまります。実運用では `ROKID_EXPLAINER=claude`＋`ANTHROPIC_API_KEY` で実 AI 解説に切り替えてください（同梱済み）。
+- Explainer がローカルプレースホルダの場合、解説テキストは要約/OCR の整形にとどまります。実運用では `ROKID_EXPLAINER=openai|gemini|claude`＋各社 API キーで実 AI 解説に切り替えてください（同梱済み）。
 - 解説の質はページ登録時の `ocr_text` の精度に依存します。
 - 認証・マルチテナント・並行書き込み制御は未実装（現段階では対象外）。
 - `current_page_index` はサーバー側でクランプ処理されます（0以下・総ページ数以上にはなりません）。

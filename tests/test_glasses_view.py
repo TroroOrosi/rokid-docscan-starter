@@ -1,4 +1,13 @@
-from app.glasses_view import STAGES, build_glasses_view, build_locked_view
+from app.explainer import ExplainResult
+from app.glasses_view import (
+    STAGES,
+    _split_sentences,
+    build_explain_view,
+    build_glasses_view,
+    build_locked_view,
+    build_reading_done_ack,
+    build_review_view,
+)
 from app.solvers import SolveResult
 
 
@@ -71,3 +80,117 @@ def test_locked_view_never_reveals_answer():
     v = build_locked_view()
     assert v["locked"] is True
     assert all("青" not in ln for ln in v["lines"])
+
+
+# --- Q1 supplement: long prose splits into sentences and paginates -----------
+
+def test_split_sentences_on_terminators():
+    parts = _split_sentences("第一文。第二文！第三文？")
+    assert parts == ["第一文。", "第二文！", "第三文？"]
+    # No terminator -> single line; empty -> empty list.
+    assert _split_sentences("見出しだけ") == ["見出しだけ"]
+    assert _split_sentences("") == []
+
+
+def test_long_rationale_paginates_by_sentence():
+    """A multi-sentence rationale becomes multiple 3-line teleprompter pages."""
+    rationale = "".join(f"根拠文{i}。" for i in range(8))  # 8 sentences
+    sol = _sol(rationale=rationale)
+    v0 = build_glasses_view(sol, stage="rationale", page=0)
+    assert v0["total_pages"] > 1
+    assert len(v0["lines"]) <= 3
+    last = build_glasses_view(sol, stage="rationale", page=v0["total_pages"] - 1)
+    assert last["nav"]["next"] is None
+
+
+def test_explain_detail_paginates_by_sentence():
+    """explain-mode long detail paginates into >1 view page (max 3 lines each)."""
+    detail = "".join(f"詳細文{i}。" for i in range(8))
+    result = ExplainResult(lines=["a", "b", "c"], detail=detail, confidence=0.7)
+    v0 = build_explain_view(result, stage="detail", view_page=0)
+    assert v0["total_view_pages"] > 1
+    assert len(v0["lines"]) <= 3
+    assert v0["nav"]["next_view_page"] == 1
+
+
+# --- review deck view (phase 3 閲覧: merged single stream, no stages) ---------
+
+
+def _all_review_lines(sol, **kw):
+    first = build_review_view(sol, index=0, problem_count=1, **kw)
+    lines = []
+    for vp in range(first["total_view_pages"]):
+        lines += build_review_view(sol, index=0, problem_count=1, view_page=vp, **kw)[
+            "lines"
+        ]
+    return lines
+
+
+def test_review_view_merges_all_sections_in_one_stream():
+    joined = "\n".join(_all_review_lines(_sol(), problem_no="問2"))
+    # One stream, ordered: 答え → 解法 → 根拠 → 注意 (no stage cycling).
+    for part in ("答え: B: 青", "解法", "手順1", "根拠", "条件②より", "注意", "参考値"):
+        assert part in joined
+    assert joined.index("答え") < joined.index("解法") < joined.index("根拠") < joined.index("注意")
+
+
+def test_review_view_pages_have_at_most_three_lines_and_clamp():
+    sol = _sol(solution_steps=[f"手順{i}" for i in range(10)])
+    v = build_review_view(sol, index=0, problem_count=1)
+    assert v["total_view_pages"] > 1
+    for vp in range(v["total_view_pages"]):
+        page = build_review_view(sol, index=0, problem_count=1, view_page=vp)
+        assert len(page["lines"]) <= 3
+    # Out-of-range view_page clamps instead of erroring.
+    over = build_review_view(sol, index=0, problem_count=1, view_page=999)
+    assert over["view_page"] == over["total_view_pages"] - 1
+    assert over["nav"]["next_view_page"] is None
+
+
+def test_review_view_header_shows_deck_position():
+    v = build_review_view(_sol(), index=1, problem_count=4, problem_no="問2")
+    assert "問2 2/4" in v["lines"][0]
+
+
+def test_review_view_problem_nav_edges():
+    first = build_review_view(_sol(), index=0, problem_count=3)
+    assert first["nav"]["prev_problem"] is None
+    assert first["nav"]["next_problem"] == 1
+    last = build_review_view(_sol(), index=2, problem_count=3)
+    assert last["nav"]["prev_problem"] == 1
+    assert last["nav"]["next_problem"] is None
+    ops = first["nav"]["operations"]
+    assert ops["next_problem"] == "two_finger_swipe_left"
+    assert ops["scroll_next"] == "two_finger_swipe_down"
+    assert ops["close"] == "double_tap"
+
+
+def test_review_view_omits_empty_sections():
+    sol = _sol(rationale="", cautions="", solution_steps=[])
+    joined = "\n".join(_all_review_lines(sol))
+    for absent in ("解法", "根拠", "注意", "(なし)", "(解法なし)"):
+        assert absent not in joined
+    assert "答え: B: 青" in joined
+
+
+def test_review_view_unsolved_placeholder():
+    v = build_review_view(
+        None, index=2, problem_count=4, problem_no="問3", solved=False
+    )
+    assert v["solved"] is False
+    assert "未解答" in v["lines"]
+    assert "問3 3/4" in v["lines"][0]
+
+
+def test_review_view_is_silent():
+    v = build_review_view(_sol(), index=0, problem_count=1)
+    for forbidden in ("sound", "audio", "flash", "animation", "blink"):
+        assert forbidden not in v
+
+
+def test_reading_done_ack_reports_camera_off():
+    ack = build_reading_done_ack(problem_count=4, total_pages=5)
+    assert len(ack["lines"]) <= 3
+    assert ack["camera_off"] is True
+    assert "読取完了 5ページ" in ack["lines"][0]
+    assert "4問" in ack["lines"][1]
