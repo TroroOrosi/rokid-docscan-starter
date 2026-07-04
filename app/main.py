@@ -803,10 +803,7 @@ def get_question_view(
         # of solve state (the 409 would otherwise reveal it via status code).
         if session["mode"] == "real" and not config.ALLOW_REAL_EXAM_SOLVE:
             return {"glasses_view": build_locked_view(stage), "locked": True}
-        sol = conn.execute(
-            "SELECT * FROM solutions WHERE question_id = ? ORDER BY id DESC LIMIT 1",
-            (question_id,),
-        ).fetchone()
+        sol = _latest_solution_row(conn, question_id)
         if sol is None:
             raise HTTPException(status_code=409, detail="question not solved yet")
 
@@ -835,10 +832,7 @@ def get_question_reasoning(session_id: int, question_id: int) -> dict:
         _question_or_404(conn, session_id, question_id)
         if session["mode"] == "real" and not config.ALLOW_REAL_EXAM_SOLVE:
             return {"question_id": question_id, "locked": True}
-        sol = conn.execute(
-            "SELECT * FROM solutions WHERE question_id = ? ORDER BY id DESC LIMIT 1",
-            (question_id,),
-        ).fetchone()
+        sol = _latest_solution_row(conn, question_id)
         if sol is None:
             raise HTTPException(status_code=409, detail="question not solved yet")
         return {
@@ -1253,10 +1247,12 @@ def _deck_question_rows(conn, session_id: int) -> list:
     uploaded questions never pollute the deck counts/navigation.
     """
     rows = conn.execute(
-        # Document order: problems appended later by ingest still slot in by
-        # their page; unknown pages sort last, id breaks ties.
-        "SELECT * FROM questions WHERE session_id = ? "
-        "ORDER BY (page_number IS NULL), page_number, id",
+        # Insertion order (= segmentation/document order), deliberately NOT
+        # re-sorted by page: a problem's deck index must stay stable once
+        # assigned, or problem_index addressing would silently shift when the
+        # onboard ingest appends a problem the heuristic missed. Late
+        # additions therefore go to the end of the deck.
+        "SELECT * FROM questions WHERE session_id = ? ORDER BY id",
         (session_id,),
     ).fetchall()
     deck_rows = []
@@ -1415,12 +1411,6 @@ def exam_finalize_reading(session_id: int) -> dict:
             for row in _deck_question_rows(conn, session_id):
                 if _latest_solution_row(conn, row["id"]) is not None:
                     continue
-                try:
-                    span = json.loads(row["structure_json"] or "{}").get(
-                        "page_indexes"
-                    ) or []
-                except (ValueError, TypeError):
-                    span = []
                 start_index = (row["page_number"] or 1) - 1
                 doc_material = _document_material(conn, doc_id, start_index)
                 retrieved = retrieve_context(conn, row["body_text"])
@@ -1439,7 +1429,9 @@ def exam_finalize_reading(session_id: int) -> dict:
                     # (missing key/SDK or failure): storing that would mark the
                     # problem "solved" with junk and shadow the onboard ingest.
                     continue
-                evidence_pages = result.evidence_pages or [i + 1 for i in span]
+                evidence_pages = result.evidence_pages or _question_evidence_pages(
+                    conn, row["id"]
+                )
                 conn.execute(
                     """INSERT INTO solutions
                        (question_id, solver_name, answer, solution_steps_json,
@@ -1695,6 +1687,11 @@ def exam_review(session_id: int, index: int = 0, view_page: int = 0) -> dict:
     try:
         session = _exam_session_or_404(conn, session_id)
         if _session_phase(session) == "reading":
+            # A document-less (upload/solve-current型) session can never leave
+            # the reading phase, so give it the actionable "bind a document"
+            # 400 instead of an unsatisfiable "finalize first" 409.
+            if not session["document_id"]:
+                _require_document_exam(session)
             raise HTTPException(status_code=409, detail="call finalize-reading first")
         if session["mode"] == "real" and not config.ALLOW_REAL_EXAM_SOLVE:
             return {

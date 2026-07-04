@@ -58,7 +58,8 @@
   照合は **`problem_index`（デッキ index）優先**・なければ `problem_no` 完全一致——大問跨ぎで
   基底番号が重複する場合（サーバは `問1(2)` と一意化）は index 指定が正。**再 ingest は latest
   wins**（読取側は `ORDER BY id DESC LIMIT 1`）。未知の `problem_no` は**デッキに問題を追加**
-  （ヒューリスティックの見逃しを本体 AI が補完。デッキはページ順に整列）。検証は全或無
+  （ヒューリスティックの見逃しを本体 AI が補完。デッキ index は一度割り当てたら不変＝
+  後から追加された問題は末尾に付く。index 照合の安定性を優先）。検証は全或無
   （空 answer・範囲外 index は 400）、`answer_confidence` は [0,1] にクランプ。
   `mode=real` は何も保存しない（locked 応答）。
 - **サーバ一括解答（任意・再開可能）**：`ROKID_SOLVER` が non-local のときだけ `finalize-reading` が
