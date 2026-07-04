@@ -12,7 +12,7 @@
 ```
 
 - **ユーザーが操作・閲覧するのは眼鏡だけ**。スマホ/PC はポケット・自宅側で通信と AI 処理を担う裏方。
-- 接続は CXR-M 伴走アプリ経由、または **CXR-L 単体アプリ＋Wi-Fi 6 直結**のいずれでも可。サーバから見れば同じ HTTP 契約。
+- 接続は CXR-M 伴走アプリ経由、または **CXR-L プラグイン（スマホの Hi Rokid 経由・Bluetooth）**のいずれでも可。サーバから見れば同じ HTTP 契約。
 - 実機ハードウェア（**両眼** 480×398 モノクロ緑 Micro-LED 等）と CXR-M/S/L の役割、
   グラス本体 AI（`com.rokid.sprite.aiapp`）との接続は [cxr-l-integration.md](cxr-l-integration.md) を参照。
 

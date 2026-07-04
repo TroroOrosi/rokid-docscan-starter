@@ -1,8 +1,9 @@
-# CXR-L グラス単体ネイティブアプリ ⇄ 本サーバ 連携ガイド
+# CXR-L（スマホ側プラグイン）⇄ グラス本体 AI ⇄ 本サーバ 連携ガイド
 
-このドキュメントは、**Rokid Glasses 本体で動く CXR-L ネイティブアプリ**を作り、
-**グラス本体の AI（YodaOS-Sprite の AI アプリサービス）** を本リポジトリのサーバに
-接続するための設計をまとめたものです。
+このドキュメントは、**CXR-L SDK（スマホ上で Hi Rokid アプリにバインドするプラグイン型 SDK）**
+を使って **グラス本体の AI（YodaOS-Sprite の AI アプリサービス＝搭載 GPT / Gemini）** を
+本リポジトリのサーバに接続するための設計と、リモート操作・画面共有の実態（§9）をまとめた
+ものです。
 
 > ⚠️ 本ドキュメントの公式仕様は、md 内の記述ではなく **ウェブ検索で確認した Rokid 公式
 > / コミュニティ最新情報** に基づいています（末尾「出典」）。Maven 座標・AIDL・パッケージ名・
@@ -36,11 +37,17 @@
 |-----|----------|------|---------------------|----------------|
 | **CXR-M** | スマホ（Android/iOS） | コンパニオンアプリ用。デバイス接続（BLE GATT＋Classic BT ソケット＋Wi-Fi Direct）、ハードウェア情報、YodaOS-Sprite の AI 連携、アシストサービス（ファイル転送・録音・写真取得） | `com.rokid.cxr:client-m:1.0.8` | minSdk 28（Android 9） |
 | **CXR-S** | グラス本体（YodaOS-Sprite） | 機上アプリ用ブリッジ。CXR-M と Caps バイナリ形式で双方向メッセージング | `com.rokid.cxr:cxr-service-bridge:1.0-SNAPSHOT` | — |
-| **CXR-L** | グラス本体（YodaOS-Sprite） | **標準アプリを置き換える単体（ランチャー型）アプリ用**。エントリ実クラス **`CXRLink(context)`** が `ExternalAppClient` を継承し、**Android AIDL で `IMediaStreamService` にバインド**してメディアストリーム＆**AI アプリ連携**を行う。対象 AI サービス＝ **`com.rokid.sprite.aiapp`**（「Hi Rokid」AI アプリ。グローバル版 `com.rokid.sprite.global.aiapp`） | `com.rokid.cxr:client-l:0.0.1` | min/target 28 |
+| **CXR-L** | **スマホ（Hi Rokid アプリのプラグイン型 SDK）** | **実機検証済みの実態**（CxrGlobal / claude-mobile-hud、2026）: エントリ実クラス **`CXRLink(context)`** は**スマホ側**で動き、**同一スマホ内の AIDL** で Hi Rokid アプリ（中国版 `com.rokid.sprite.aiapp`／グローバル版 **`com.rokid.sprite.global.aiapp`**・同一 AIDL 面）の `IMediaStreamService` にバインド。Hi Rokid がグラスとは **CXR-L wire protocol（Caps シリアライズ・Bluetooth 制御プレーン**、native `cxr-sock-proto-jni`）で通信する。セッション種別は **CUSTOMVIEW**（グラス側アプリ不要で HUD 表示: `customViewOpen/Update/Close/SetIcons`）と **CUSTOMAPP**（`appUploadAndInstall`/`appOpen` でグラス側アプリを配布・起動）。ほか `startAudioStream`（マイク PCM 16kHz mono・`IAudioStreamCbk.onAudioReceived`）・`takePhoto`（本リポジトリでは撮影しない方針により不使用）・`sendCustomCmd`・AI キーイベント `onAiKeyDown/onAiKeyUp/onAiExit` | `com.rokid.cxr:client-l:1.0.1` | minSdk 31（実測: Pixel 8 / Hi Rokid global G1.5.9 / YodaOS SPRITE 1.18） |
 
 > Maven リポジトリ: `https://maven.rokid.com/repository/maven-public/`。
-> CXR-L（`client-l:0.0.1`, ~28KB AAR）の主な依存は Kotlin stdlib 2.1.0 / Gson 2.10.1。
 > 座標・依存はバージョン更新されるため、実装前に上記リポジトリで最新を確認してください。
+>
+> ⚠️ **旧記述の是正**: 本 doc の旧版（および一部コミュニティ資料）は CXR-L を「グラス本体で動く
+> 単体アプリ SDK（Wi-Fi 6 でサーバ直結・スマホ不要）」と記述していましたが、**公開されている
+> 実機動作実績（CxrGlobal / claude-mobile-hud）が示す構成はスマホ側プラグイン**です。グラス側で
+> 動くのは CUSTOMAPP モードで配布されるアプリのみで、**Hi Rokid（スマホ）を経由しない CXR-L
+> 構成は未確認**です。本サーバの「スマホは HTTP 中継のみ・画面不要」という原則はこの実態と
+> 完全に整合します（中継役がスマホの Hi Rokid + プラグインアプリになるだけ）。
 
 - **Rizon / Agent Store**: Rokid が Coze Studio ベースで独自化した AI オープンプラットフォーム。
   ノーコードで AI ワークフローを作成・共有でき、Agent Store には多数のワークフローが公開。
@@ -48,22 +55,25 @@
 
 ---
 
-## 3. 本リポジトリでの位置づけ（3層構成）
+## 3. 本リポジトリでの位置づけ（実機検証済みの 4 層構成）
 
 ```
-[Rokid Glasses 本体]                                   [本サーバ (このリポジトリ)]
-  ┌───────────────────────────────┐                     ┌──────────────────────────┐
-  │ CXR-L ネイティブアプリ         │                     │ FastAPI (/v1/...)         │
-  │  - ExternalAppClient           │                     │  - 文書/ページ照合        │
-  │  - IMediaStreamService(AIDL)   │  ── HTTPS ──▶       │  - 解答/解説              │
-  │  - com.rokid.sprite.aiapp 連携 │  (Wi-Fi 6 直結)     │  - claude アダプタで実AI  │
-  │  - HUD 描画（最大3行）         │  ◀── JSON ──        │    へ橋渡し(任意)          │
-  └───────────────────────────────┘                     └──────────────────────────┘
+[Rokid Glasses 本体]      [スマホ]                                  [本サーバ (このリポジトリ)]
+ ┌──────────────┐  Caps/BT ┌─────────────────────────────┐          ┌──────────────────────────┐
+ │ 搭載 AI(GPT/  │◀───────▶│ Hi Rokid ｱﾌﾟﾘ                │          │ FastAPI (/v1/...)         │
+ │ Gemini)・HUD  │  wire    │  (com.rokid.sprite.global.   │          │  - 文書/問題分割/デッキ    │
+ │ ・ｶﾒﾗ・ﾏｲｸ    │  protocol│   aiapp, IMediaStreamService)│          │  - 解答 ingest/解説/照合  │
+ └──────────────┘          │      ▲ AIDL(同一端末内)      │  HTTPS   │  - openai|gemini|claude   │
+                           │ CXR-L ﾌﾟﾗｸﾞｲﾝｱﾌﾟﾘ(CXRLink)   │ ───────▶ │    ｱﾀﾞﾌﾟﾀ(任意)           │
+                           │  = HTTP 中継・画面不要        │ ◀─ JSON  └──────────────────────────┘
+                           └─────────────────────────────┘
 ```
 
-- CXR-L アプリは **グラス単体で完結**（スマホのコンパニオン不要。Wi-Fi 6 でサーバへ直結）。
-- **グラス本体の AI（`com.rokid.sprite.aiapp`）** は AIDL 経由で音声・カメラ・AI 応答を扱う。
-  CXR-L アプリはそのサービスにバインドしつつ、**構造化された解析/解答/解説はこのサーバに委譲**する。
+- **スマホは HTTP 中継のみ（画面不要）**: CXR-L プラグインアプリが Hi Rokid 経由でグラスの
+  HUD 表示（CUSTOMVIEW）・ジェスチャ/AI キーイベント・マイク音声を扱い、本サーバの HTTP 契約に
+  橋渡しする。ユーザーが見る・操作するのはグラスだけ。
+- **グラス搭載 AI（GPT / Gemini ネイティブ）** が視認＝認識と解答を担い（経路 B・主経路）、
+  **構造化された分割・取り込み・整形・状態管理はこのサーバに委譲**する。
 - サーバは表示技術・SDK 世代に依存しない **HTTP 契約**（最大3行 HUD）だけを公開する。
 
 ---
@@ -139,16 +149,19 @@ uvicorn app.main:app --port 8000
 
 ## 6. 実装チェックリスト（CXR-L アプリ側）
 
-1. Rokid AR Platform（`ar.rokid.com/sdk`）で開発者登録し、**CXR-L SDK** を入手。
-2. `ExternalAppClient` を継承したエントリ（実クラス例 `CXRLink`）を作り、`IMediaStreamService` に AIDL バインド。
-3. グラス本体 AI サービス `com.rokid.sprite.aiapp` へのバインド権限・Intent を設定。
-4. カメラ/音声/OCR 結果を取り出し、本サーバの HTTP API に送信（Wi-Fi 6 直結）。
+1. Rokid AR Platform（`ar.rokid.com/sdk`）で開発者登録し、**CXR-L SDK** を入手
+   （グローバル利用は CxrGlobal ラッパーが実機実績あり）。
+2. スマホ側プラグインアプリで `CXRLink(context)` を作り、Hi Rokid の認可
+   （`AuthorizationHelper` → token → `connect(token)`）を経て `IMediaStreamService` に AIDL バインド。
+3. Hi Rokid（グローバル版 `com.rokid.sprite.global.aiapp`）へのバインド権限・Intent を設定し、
+   CUSTOMVIEW セッションを開く（グラス側アプリは不要。必要なら CUSTOMAPP で配布）。
+4. カメラ/音声/OCR 結果を取り出し、スマホ側プラグインから本サーバの HTTP API に送信。
 5. 応答の `hud.lines` / `glasses_view.lines`（最大3行）を HUD に描画。
 6. 操作は公式ジェスチャ（2本指タップ/タップ/ダブルタップ/2本指スワイプ/長押し。音声は任意トグル）。KeyCode は §7 参照。
 
 ---
 
-## 7. 入力（タッチパッド/ボタン）の KeyCode
+## 7. 入力（タッチパッド/ボタン）の KeyCode と実イベント経路
 
 サーバは gesture→KeyCode を **`GET /v1/settings` の `input` ブロック**として機械可読に
 公示します（`app/glasses_view.py` の `build_input_contract()`。ジェスチャ名は現行公式、
@@ -158,42 +171,46 @@ uvicorn app.main:app --port 8000
 環境変数 **`ROKID_KEYMAP`（JSON）** で上書きしてください（クライアント改修不要）。
 計測手順は [real-device-operation.md](real-device-operation.md) §5。
 
+> **実イベント経路（実機検証済みの補強情報）**: スマホ側プラグイン構成では、AI 起動
+> （2本指タップ）はグラス→Hi Rokid→AIDL コールバック **`onAiKeyDown` / `onAiKeyUp` /
+> `onAiExit`**（CxrGlobal は `onGlassAiAssistStart/Stop` に集約）としてスマホに届き、
+> タッチジェスチャも CXR-L プラグインのイベントとして受けます——**Android KeyCode では
+> ありません**。旧 KeyCode 表が関係し得るのは **CUSTOMAPP（グラス側アプリ）を書く場合のみ**で、
+> それも未検証です（`keycodes_verified:false` の実証的裏付け）。
+
 ---
 
-## 8. 参照実装（Kotlin 最小スニペット）
+## 8. 参照実装（Kotlin 最小スニペット・スマホ側プラグイン）
 
-> ビルド可能な APK ではなく、CXR-L 上での連携の骨子を示す参照コードです。実際の SDK
-> API 名は Rokid の CXR-L SDK ドキュメントに合わせてください。
+> ビルド可能な APK ではなく、連携の骨子を示す参照コードです。実際の API 名は
+> CxrGlobal（実機検証済みラッパー）と Rokid の最新 SDK ドキュメントに合わせてください。
 
 ```kotlin
-// 1) CXR-L エントリ: 本体 AI とメディアに AIDL バインド
-class DocScanApp(context: Context) : ExternalAppClient(context) {
-    // ExternalAppClient が IMediaStreamService（AIDL）へのバインドを担う。
-    // 対象 AI サービス: com.rokid.sprite.aiapp（AI Interaction）。
-}
+// 1) スマホ側: Hi Rokid の認可を取り、CXR-L（AIDL）に接続（CxrGlobal パターン）
+val auth = AuthorizationHelper.requestAuthorization(activity)   // Hi Rokid の AuthorizationActivity
+val link = CXRLink(context)
+link.connect(auth.token)                 // bindService + コールバック登録
+link.openCustomView()                    // CUSTOMVIEW: グラス側アプリ不要で HUD 表示
 
-// 2) 起動時に /v1/settings を唯一の権威として読み込む（hud/capture/input）
+// 2) 起動時に /v1/settings を唯一の権威として読み込む（hud/capture/operations/input）
 val settings = http.get("$SERVER/v1/settings").json()
-val tapKey = settings["input"]["gestures"]["single_tap"]["keycode"].asInt()   // 例: 23（未実測・要計測）
 
-// 3) 経路B（主経路）: 本体 AI（AI Interaction）で読取 → 解答を ingest
-val pageText = aiInteraction.recognize(frame)        // 本体AIの認識（視認＝読取。LED点灯中）
+// 3) 経路B（主経路）: 本体 AI の認識で読取 → 解答を ingest
+//    AI 起動（2本指タップ）は onAiKeyDown/Up（onGlassAiAssistStart/Stop）で届く
+val pageText = onboardAi.latestRecognition()         // 本体AIの認識（視認＝読取。LED点灯中）
 http.postMultipart("$SERVER/v1/documents/$docId/pages",
     "page_index" to i, "ocr_text" to pageText.body, "vision_text" to pageText.figures)
 // 読取完了（ダブルタップ）→ finalize-reading → 以降カメラOFF（LED消灯）
 http.post("$SERVER/v1/exam-sessions/$sid/finalize-reading")
-// 本体 GPT が全問を解いた結果を問題別に ingest
+// 本体 GPT が全問を解いた結果を問題別に ingest（デッキ index 指名が確実）
 http.postJson("$SERVER/v1/exam-sessions/$sid/solutions",
-    mapOf("solutions" to onboardAnswers))            // [{problem_no, answer, ...}]
+    mapOf("solutions" to onboardAnswers))            // [{problem_no, problem_index?, answer, ...}]
 
-// 4) 受信した最大3行 HUD を両眼ディスプレイに描画（無音・即時置換）
-hud.render(resp["hud"]["lines"])                     // hud 契約は settings["hud"] に従う
+// 4) 受信した最大3行 HUD を CUSTOMVIEW でグラスに描画（無音・即時置換）
+link.customViewUpdate(render(resp["glasses_view"]["lines"]))   // hud 契約は settings["hud"] に従う
 
-// 5) 入力: settings.input の KeyCode で操作を判定
-override fun onKeyDown(keyCode: Int, e: KeyEvent): Boolean = when (keyCode) {
-    tapKey -> { showAnswerOrExplain(); true }
-    else   -> super.onKeyDown(keyCode, e)
-}
+// 5) リスニング: グラスのマイクを PCM 16kHz mono でストリーム受信 → /audio へ
+link.startAudioStream { data, offset, length -> recorder.append(data, offset, length) }
 ```
 
 - 認証を有効化したサーバへは `Authorization: Bearer <ROKID_API_KEY>` を付与。
@@ -201,12 +218,71 @@ override fun onKeyDown(keyCode: Int, e: KeyEvent): Boolean = when (keyCode) {
 
 ---
 
+## 9. リモート操作・画面共有の実態と応用（ウェブ調査 2026-07）
+
+### 9-1. 実機で動いている先行事例（リモート操作）
+
+- **claude-mobile-hud**（Qiita 記事「Claude Code を Phone と Glass からリモート操作」の実装）:
+  PC（Ubuntu）の Claude Code を Phone＋Rokid Glasses から操作する構成。PC 側に
+  **Hub**（常駐デーモン・Phone へ単一の HTTP/SSE エンドポイント）と **Bridge**（Claude
+  セッション毎に 1 つの MCP サーバ・双方向プッシュは MCP の Channels）を置き、
+  **Glass は必ず Phone 経由（CXR-L・Bluetooth）**で接続。返信・承認要求は両端末へ同時配信され、
+  承認/追加指示はテキスト・音声で送れる。**グラスのマイク音声は Phone 経由で OpenAI Realtime
+  API (WSS) に流れ、リアルタイム文字起こし**される。SDK は中国市場向け CXR-L を国際利用向けに
+  切り出した **CxrGlobal** を使用。
+- **Rokid_Claude**: 自宅 Mac の Claude Code をグラスから音声操作（whisper.cpp・WebSocket
+  リレー・進捗を HUD にストリーム・グラス上で許可確認）。
+- **rokid-browser**: スマホをトラックパッドにして、グラス上のブラウザを Bluetooth 操作。
+- **rokid-glasses-control**: ADB + scrcpy で PC から**グラス側画面**を表示・操作（開発用）。
+- グラス側にはシステムアプリ **`RokidScreenRecord`（`com.rokid.os.master.screenstream`）**＝
+  broadcast intent による画面録画/配信が存在（グラス→外部の画面ストリーム）。
+
+### 9-2. 「画面共有」の実態整理
+
+- 公式の**ピクセル・ミラーリング**（スマホ/PC 画面をグラスに映す）は **Rokid Max 系
+  （USB-C DisplayPort 接続のビューアグラス）の機能**。カメラ型 AI グラス（本対象機）の HUD は
+  **480×398 モノクロ緑**であり、スマホ画面のピクセル共有は視認性の面で実用外。
+- AI グラスで実用になる「共有」は**テキスト・リレー**（公式テレプロンプター機能と同型）:
+  スマホ側 AI の回答**テキスト**を HUD に送る（コミュニティ実装 **AssistBridge** = スマホの
+  Gemini/Google アシスタント回答を Rokid HUD にリレー、が同パターン）。
+  **本サーバの 3 行テレプロンプター契約（`glasses_view.lines`）はまさにこの形式**であり、
+  CUSTOMVIEW（`customViewUpdate`）にそのまま流せる。
+
+### 9-3. 応用評価: 「スマホを遠隔操作して AI を使わせ、結果をグラスに共有」
+
+ユーザー案（遠隔操作したスマホ上の AI アプリに解かせ、その画面/結果をグラスへ共有）は、
+**本サーバの既存契約に完全適合する「第 3 の解答経路」**として成立する:
+
+```
+[遠隔 PC/自動化] ──(scrcpy/ADB or AccessibilityService)──▶ [スマホの AI アプリ(GPT 等)]
+       │  回答テキストを抽出（画面のピクセルではなくテキストを運ぶ）
+       ▼
+POST /v1/exam-sessions/{id}/solutions（ingest・served_by は任意の識別子）
+       ▼
+GET /solutions → GET /review → CUSTOMVIEW で HUD 閲覧（テキスト・リレー）
+```
+
+- 搭載 AI の出力を直接取り出せない場合の**代替経路**として有効。claude-mobile-hud の
+  Hub/Bridge（HTTP/SSE リレー）構成が、そのまま「遠隔操作側と本サーバをつなぐ足場」になる。
+- **注意**: 遠隔操作は**自分が所有・管理する端末**に限る（scrcpy/AccessibilityService の利用
+  規約・法令順守）。用途は**学習・模試のみ**——`mode=real` ロックは ingest・デッキ・閲覧にも
+  適用され、この経路でも不変。**LED 原則も不変**（読取フェーズ以外はカメラ OFF）。
+- 画面ピクセルの共有（ミラーリング）は上記のとおり実用外のため実装しない。
+
+---
+
 ## 出典（ウェブ検証）
 
 - [Rokid Open Platform（CXR SDK / YodaOS）](https://ar.rokid.com/sdk?lang=en)
 - [About YodaOS-Sprite — Rokid AR Platform](https://ar.rokid.com/sprite?lang=en)
-- [buildwithfenna/rokid-docs（CXR-M/S/L 詳解・Maven 座標・AIDL・`com.rokid.sprite.aiapp`）](https://github.com/buildwithfenna/rokid-docs)
+- [buildwithfenna/rokid-docs（CXR-M/S/L 詳解・Maven 座標・AIDL・`RokidScreenRecord`）](https://github.com/buildwithfenna/rokid-docs)
+- [TakanariShimbo/CxrGlobal（CXR-L のグローバル化ラッパー・実機検証済み・AIDL/認可/CUSTOMVIEW 詳細）](https://github.com/TakanariShimbo/CxrGlobal)
+- [TakanariShimbo/claude-mobile-hud（Phone+Glass から Claude Code をリモート操作・Hub/Bridge/Realtime 転写）](https://github.com/TakanariShimbo/claude-mobile-hud)
+- [Qiita: Claude Code を Phone と Glass からリモート操作（hmkc1220）](https://qiita.com/hmkc1220/items/e47ecd3ab60dded030cf)
+- [williamlzz/Rokid_Claude（グラスから Claude Code を音声操作）](https://github.com/williamlzz/Rokid_Claude)
+- [Anezium/AssistBridge（スマホ AI の回答を Rokid HUD へテキスト・リレー）](https://github.com/Anezium/AssistBridge)
 - [Anezium/awesome-rokid（コミュニティ SDK/ツール集）](https://github.com/Anezium/awesome-rokid)
 - [Rokid Glasses 製品ページ（両眼 Micro-LED / 49g 等）](https://global.rokid.com/products/rokid-glasses)
+- [Rokid Japan（テレプロンプター等の公式機能）](https://jp.rokid.com/)
 - [NotebookCheck: Rokid Glasses specs（AR1 + NXP RT600 / IMX681 / 210mAh 等）](https://www.notebookcheck.net/Rokid-Glasses-are-lightweight-AR-smart-glasses-with-Micro-LED-displays-and-a-499-price-tag.1098756.0.html)
 - [Rokid、Gemini/ChatGPT をネイティブ統合（Rizon / Agent Store）](https://www.prnewswire.com/news-releases/rokid-integrates-googles-gemini-chatgpt-in-major-update-to-international-smart-glasses-in-open-ecosystem-push-302700875.html)

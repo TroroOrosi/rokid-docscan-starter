@@ -63,7 +63,7 @@ CXR（Connected XR）SDK スイートは役割別に分かれている（末尾�
 - **差し込み手順（CXR-L 単体アプリ例）**:
   1. `ExternalAppClient` を継承し `IMediaStreamService` に AIDL バインド。
   2. カメラフレーム／本体 AI（`com.rokid.sprite.aiapp`）の OCR/認識結果を取得。
-  3. フレーム JPEG/PNG + OCR テキストを `POST /v1/match` 等に送信（Wi-Fi 6 直結）。
+  3. フレーム JPEG/PNG + OCR テキストを `POST /v1/match` 等に送信（スマホの CXR-L/CXR-M 中継経由）。
   4. レスポンスの `hud.lines`（3行）をディスプレイ API で描画。
 
 ---

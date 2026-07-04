@@ -34,7 +34,7 @@ Rokid Glasses で紙資料を「文書」として登録し、**目の前の資�
   切り替わり、キー未設定時は自動でローカルにフォールバックします（下記「実モデル接続」）。
 - ストレージは **SQLite + ローカルファイルシステム**（Postgres / MinIO 不要）。
 - 照合は **決定的**（pHash のハミング距離 + OCR テキスト類似度ボーナス）。
-- **グラス本体アプリ（CXR-L）とグラス本体 AI の接続**は
+- **CXR-L プラグイン（スマホ側）とグラス本体 AI の接続**は
   [`docs/cxr-l-integration.md`](docs/cxr-l-integration.md)、実機差し込み全般は
   [`docs/implementation-notes.md`](docs/implementation-notes.md) を参照。
 - 現在のバージョン: **APP 0.8.0 / API 1.8.0**。
@@ -86,7 +86,7 @@ rokid-docscan-starter/
 │   ├── eval_exam.py          # 解答パイプライン評価 → JSON レポート
 │   └── rokid_led.py          # 録画LED診断 CLI（実機所有者専用・任意）
 ├── docs/
-│   ├── cxr-l-integration.md         # ★CXR-L 単体アプリ ⇄ 本体AI ⇄ 本サーバ + Kotlin 例
+│   ├── cxr-l-integration.md         # ★CXR-L(ｽﾏﾎ側ﾌﾟﾗｸﾞｲﾝ) ⇄ 本体AI ⇄ 本サーバ + Kotlin 例・遠隔操作/画面共有
 │   ├── real-device-operation.md     # ★実機運用ガイド（準備→起動→操作→実AI/認証/KeyCode）
 │   ├── implementation-notes.md      # 実機/実AI 差し込み点・CXR SDK・実アダプタ
 │   ├── user-operation-guide.md      # ユーザー操作 / 自動化 / 設計判断 / 環境変数一覧
@@ -275,11 +275,15 @@ curl -s -X POST http://127.0.0.1:8000/v1/match \
 （サーバから見ればどちらも同じ HTTP 契約）。
 
 ```
-[Rokid Glasses]  ─Wi-Fi 6 直結─  [本サーバ]              （CXR-L 単体アプリ構成）
-  カメラ / 本体AI / HUD表示         登録/照合/解答/解説
+[Rokid Glasses] ─Bluetooth(CXR-L wire/Caps)─ [スマホ: Hi Rokid + CXR-L ﾌﾟﾗｸﾞｲﾝ] ─HTTPS─ [本サーバ]
+  カメラ / 搭載AI(GPT/Gemini) / HUD      HTTP 中継のみ（画面不要）           登録/分割/取込/照合/解説
 
-[Rokid Glasses] ─BLE/Wi-Fi─ [スマホ CXR-M コンパニオン] ─HTTPS─ [本サーバ]（従来構成）
+[Rokid Glasses] ─BLE/Wi-Fi─ [スマホ CXR-M コンパニオン] ─HTTPS─ [本サーバ]（CXR-M 構成）
 ```
+
+> 実機動作実績のある CXR-L 構成は**スマホ側プラグイン**（Hi Rokid 経由・Bluetooth 制御プレーン）
+> です。いずれの構成でもユーザーが見る・操作するのはグラスだけで、スマホは HTTP 中継のみ
+> （詳細と是正の経緯は [`docs/cxr-l-integration.md`](docs/cxr-l-integration.md) §2-§3・§9）。
 
 | 役割 | 実機での担当 | 本サーバでの受け口 |
 |------|--------------|-----------------|

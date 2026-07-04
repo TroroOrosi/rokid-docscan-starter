@@ -10,9 +10,12 @@
 ## 0. 構成（2経路。サーバから見れば同じ HTTP 契約）
 
 ```
-[A] CXR-L 単体アプリ ── Wi-Fi 6 直結 ──▶ [本サーバ]        （スマホ不要）
-[B] Glasses ─BLE/Wi-Fi─ [スマホ CXR-M] ─HTTPS─▶ [本サーバ]  （従来のコンパニオン）
+[A] Glasses ─BT(CXR-L wire/Caps)─ [スマホ: Hi Rokid + CXR-L ﾌﾟﾗｸﾞｲﾝ] ─HTTPS─▶ [本サーバ]
+[B] Glasses ─BLE/Wi-Fi─ [スマホ CXR-M コンパニオン] ─HTTPS─▶ [本サーバ]
 ```
+
+> 実機動作実績のある CXR-L 構成は**スマホ側プラグイン**（Hi Rokid 経由）。どちらの経路でも
+> スマホは HTTP 中継のみ（画面不要）で、ユーザーが見る・操作するのはグラスだけ。
 
 - グラスが撮影/本体 AI で得た画像・テキストを本サーバへ送り、サーバが照合・解答・解説して
   **最大3行の HUD** を返す。表示・操作はグラス側、解析はサーバ側という役割分担。
@@ -86,9 +89,10 @@ export ROKID_TRANSCRIBE_MODEL=gpt-4o-transcribe   # gemini は ROKID_LLM_MODEL �
    - `operations`（3 フェーズの操作↔ジェスチャ対応）
    - `input`（gesture→KeyCode。**`keycodes_verified:false`＝旧機由来・要実測**。
      `ROKID_KEYMAP` で実機差を吸収可）
-2. `ExternalAppClient` から AIDL `IMediaStreamService` にバインドし、本体 AI
-   `com.rokid.sprite.aiapp`（AI Interaction）と連携（詳細・Kotlin 例は
-   [cxr-l-integration.md](cxr-l-integration.md)）。
+2. スマホ側の CXR-L プラグイン（`CXRLink`）が Hi Rokid（global 版
+   `com.rokid.sprite.global.aiapp`）の `IMediaStreamService` に AIDL バインドし、
+   CUSTOMVIEW で HUD 表示・`startAudioStream` でマイク音声・AI キーイベントを扱う
+   （詳細・Kotlin 例は [cxr-l-integration.md](cxr-l-integration.md) §2/§8）。
 
 ---
 
