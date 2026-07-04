@@ -33,8 +33,10 @@
    **ダブルタップ=読取完了宣言** → `POST /finalize-reading`（問題分割・デッキ作成・
    status open/reading→reviewing・冪等・カメラ OFF）。
 2. **解答**（カメラ OFF）: 文書を問題単位に分割（`segment_problems`: 問N/大問 境界・
-   ページ跨ぎマージ・境界なしは全体 1 問題）。主経路=搭載 GPT の ingest。任意=非 local な
-   `ROKID_SOLVER` 設定時に finalize-reading 内で全問一括解答（全ページ+RAG+transcript を文脈に）。
+   ページ跨ぎマージ・境界なしは全体 1 問題＝安定 id **「全体」** を合成）。主経路=搭載 GPT の
+   ingest（照合は `problem_index`（デッキ index）優先・なければ `problem_no`。再 ingest は
+   latest wins）。任意=非 local な `ROKID_SOLVER` 設定時に finalize-reading 内で未解答分を
+   一括解答（全ページ+RAG+transcript を文脈に。再開可能・local フォールバック結果は保存しない）。
 3. **閲覧**（カメラ OFF・LED 消灯）: `GET /solutions`（デッキ）→ `GET /review?index=k&view_page=n`。
    **1 問題=解答+解法+根拠+注意を一括 1 ストリーム**（段階めくりなし・確定事項）。
    問題送り=2本指スワイプ左右 / 送り読み=2本指スワイプ上下 / 終了=ダブルタップ。

@@ -45,7 +45,7 @@ Rokid Glasses で紙資料を「文書」として登録し、**目の前の資�
 
 | 区分 | 概要 | 詳細ドキュメント |
 |------|------|------------------|
-| **ユーザーがやること**（人間の物理操作） | SDK 取得・ADB/ケーブル・ペアリング・サンプル撮影・照明/角度チェック・プライバシー同意・クラウド/ローカル選択・検証実行 | [docs/user-operation-guide.md](docs/user-operation-guide.md) §1 |
+| **ユーザーがやること**（人間の物理操作） | SDK 取得・ADB/ケーブル・ペアリング・全ページ視認読取（撮影しない）・読取品質チェック・プライバシー同意・クラウド/ローカル選択・検証実行 | [docs/user-operation-guide.md](docs/user-operation-guide.md) §1 |
 | **システムがやること**（実装済み・自動） | 文書作成 / ページ取込 / pHash・OCR-MD5 / finalize / 照合 / HUD 応答 / バージョン付与 / ログ / しきい値フック | [docs/user-operation-guide.md](docs/user-operation-guide.md) §2 |
 | **次に判断すること**（操作後の設計判断） | OCR 配置 / モデルルーティング / ストレージ・プライバシー / HUD 文言 / 信頼度しきい値 / オフライン挙動 / 対象端末(Android/iOS/Rokid/Android XR) | [docs/user-operation-guide.md](docs/user-operation-guide.md) §3 |
 
@@ -135,9 +135,9 @@ HIT・LOW CONF・NO PAGE 判定）、API の登録〜finalize〜照合フロー�
 バージョンメタデータ、analyzer レジストリ、explain-sessions フルフローを、
 PIL で生成した合成画像で検証します（外部クレデンシャル不要・オフライン完結）。
 
-## 評価（実サンプル撮影後の検証に使用）
+## 評価（実サンプル読取後の検証に使用）
 
-ユーザーが実機でサンプルを撮影・登録した後、照合品質としきい値提案を JSON で出力:
+ユーザーが実機でサンプルを読取・登録した後（照合評価は画像を使う任意経路 `/match` 用）、照合品質としきい値提案を JSON で出力:
 
 ```bash
 # 既存DBに対して評価
@@ -164,7 +164,7 @@ python scripts/make_sample_pages.py
 
 ```bash
 curl -s http://127.0.0.1:8000/health
-# {"status":"ok"}
+# {"status":"ok","versions":{...}}
 ```
 
 ### 2. 文書を作成

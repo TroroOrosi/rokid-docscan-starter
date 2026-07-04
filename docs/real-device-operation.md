@@ -36,7 +36,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000   # 既定＝オフライン・�
 ```
 
 - 起動時に `data/images/` と `data/docscan.db` が自動生成。
-- `GET /health` が `{"status":"ok"}` を返せば稼働中。全環境変数は
+- `GET /health` が `{"status":"ok", "versions":{…}}` を返せば稼働中。全環境変数は
   [user-operation-guide.md](user-operation-guide.md) §「環境変数一覧」を参照。
 
 ### 2-1. サーバ側の実 AI を有効化（任意 — 主経路は搭載 GPT で鍵不要）
@@ -103,27 +103,27 @@ export ROKID_TRANSCRIBE_MODEL=gpt-4o-transcribe   # gemini は ROKID_LLM_MODEL �
 POST /v1/documents            → document_id
 POST /v1/documents/{id}/pages (page_index, [image], [ocr_text]) ×全ページ
 POST /v1/documents/{id}/finalize   ← 完了宣言（要約生成・status=ready）
-# 現場
-Back-単(KEYCODE_BACK 4) で撮影 → 端末OCR →
+# 現場（照合は画像を使う任意経路）
+カメラ1フレーム取得 → 端末OCR →
 POST /v1/match (document_id, image, fast_ocr_text) → HUD: PAGE n/N / LOW_CONF / NO_PAGE
 ```
 - **撮影レス登録**：`/pages` は `image` 省略可。本体 AI が視認した資料テキストを `ocr_text` に
   渡せば、写真なしでページを記憶（`image_path=null`・`phash=""`）。照合(`/match`)は画像を使う機能
   なので、撮影レス標準フローでは下記 **4-D の文書ページ移動型**で現在ページを把握します。
 
-### 4-B. 解答（/v1/exam-sessions）
+### 4-B. 解答（/v1/exam-sessions・設問1枚アップロード型＝互換）
 ```
 POST /v1/exam-sessions {mode:"study"}                → session_id
-Back-単 で問題撮影 → POST .../questions (image,[ocr_text])  ← 用紙画像を保存＋科目自動判定
-TP-単击(tap, KEYCODE_DPAD_CENTER 23) → POST .../{qid}/solve → 「答え: X ★★★」
-TP-長按(long_press, KEYCODE_TV 170)  → GET .../view?stage=solution→rationale→caution
-TP-左/右滑(swipe, 21/22)             → テキストページ送り
+問題画像を送信 → POST .../questions (image,[ocr_text])  ← 用紙画像を保存＋科目自動判定（互換経路のみ画像使用）
+1本指タップ(single_tap)              → POST .../{qid}/solve → 「答え: X ★★★」
+1本指タップ（解答表示中）             → GET .../view?stage=solution→rationale→caution
+2本指スワイプ下/上                   → テキストページ送り（view?page=N±1）
 ```
-- **用紙画像で解く（vision）**：実アダプタ（`claude`/`openai`/`gemini`）を有効化すると、
+- **用紙画像で解く（vision）**：実アダプタ（`openai`/`gemini`/`claude`）を有効化すると、
   `solve` は保存済みの**ページ画像をモデルへ添付**し、図/数式/表/選択肢を直接読んで解答します
   （OCR テキストは補助、教科別プロンプト）。**画像はクラウドへ送信**されるため、実 AI・鍵設定時
   のみ作動（未設定/失敗はローカルへフォールバック）。
-- 科目は撮影時に自動判定（共通テスト準拠フル16教科）。`mode:"real"` は
+- 科目は読取時に自動判定（共通テスト準拠フル16教科）。`mode:"real"` は
   `ROKID_ALLOW_REAL_EXAM_SOLVE=1` が無い限りロック（解答非表示）。
 
 ### 4-C. 資料解説（/v1/explain-sessions、撮影なし）

@@ -44,7 +44,7 @@
 
 - **Rizon / Agent Store**: Rokid が Coze Studio ベースで独自化した AI オープンプラットフォーム。
   ノーコードで AI ワークフローを作成・共有でき、Agent Store には多数のワークフローが公開。
-  Rokid Glasses は **Google Gemini（Flash 3.5）／ChatGPT／DeepSeek／Qwen** をネイティブ対応。
+  Rokid Glasses は **Google Gemini／ChatGPT／DeepSeek／Qwen** をネイティブ対応。
 
 ---
 

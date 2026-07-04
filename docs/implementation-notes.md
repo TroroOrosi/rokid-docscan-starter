@@ -143,16 +143,16 @@ CXR（Connected XR）SDK スイートは役割別に分かれている（末尾�
 
 ## 8. 実 AI アダプタ（このリポジトリに同梱）
 
-「ダミー（プレースホルダ）」だった各ポートに、**Anthropic Claude / OpenAI / Google Gemini
-を使う実アダプタ（`claude` / `openai` / `gemini`）を同梱**した。オフライン既定を壊さず、
+「ダミー（プレースホルダ）」だった各ポートに、**OpenAI (GPT) / Google Gemini / Anthropic Claude
+を使う実アダプタ（`openai` / `gemini` / `claude`）を同梱**した。オフライン既定を壊さず、
 環境変数だけで実運用へ切り替わる。
 
 | ポート | 環境変数 | 実装 | 未設定時の挙動 |
 |--------|----------|------|----------------|
-| Analyzer（要約） | `ROKID_ANALYZER=claude\|openai\|gemini` | `app/analyzers/claude.py`（`LLMAnalyzer`） | ローカル要約へフォールバック |
-| Solver（解答） | `ROKID_SOLVER=claude\|openai\|gemini` | `app/solvers/claude.py`（`LLMSolver`） | 二段フォールバックで local |
-| Explainer（解説） | `ROKID_EXPLAINER=claude\|openai\|gemini` | `app/explainers/claude.py`（`LLMExplainer`） | ローカル解説へフォールバック |
-| Extractor（数式/表/図） | `ROKID_EXTRACTOR=claude\|openai\|gemini` | `app/extractors/claude.py`（`LLMExtractor`） | ローカル抽出へフォールバック |
+| Analyzer（要約） | `ROKID_ANALYZER=openai\|gemini\|claude` | `app/analyzers/claude.py`（`LLMAnalyzer`） | ローカル要約へフォールバック |
+| Solver（解答） | `ROKID_SOLVER=openai\|gemini\|claude` | `app/solvers/claude.py`（`LLMSolver`） | 二段フォールバックで local |
+| Explainer（解説） | `ROKID_EXPLAINER=openai\|gemini\|claude` | `app/explainers/claude.py`（`LLMExplainer`） | ローカル解説へフォールバック |
+| Extractor（数式/表/図） | `ROKID_EXTRACTOR=openai\|gemini\|claude` | `app/extractors/claude.py`（`LLMExtractor`） | ローカル抽出へフォールバック |
 
 - 実呼び出しには該当プロバイダの API キー（`ANTHROPIC_API_KEY` / `OPENAI_API_KEY` /
   `GOOGLE_API_KEY`）と SDK（`pip install anthropic|openai|google-genai`）が必要。
