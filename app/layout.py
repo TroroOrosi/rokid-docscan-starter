@@ -18,16 +18,25 @@ from dataclasses import dataclass, field
 
 # Question-number patterns (Japanese exam conventions). Order matters: try the
 # most specific first.
+# 問N carries a lookbehind so 熟語 (学問1/質問3/疑問2/設問…) inside prose never
+# fabricates a question boundary — a real boundary is 問 used as a label, not
+# as the tail of a compound word.
 _Q_PATTERNS = [
     re.compile(r"大問\s*([0-9０-９]+)"),
     re.compile(r"第\s*([0-9０-９]+)\s*問"),
-    re.compile(r"問\s*([0-9０-９]+)"),
-    re.compile(r"[（(]\s*([0-9０-９]+)\s*[)）]"),
+    re.compile(r"(?<![学質疑設訪顧諮])問\s*([0-9０-９]+)"),
 ]
+# (n)-style numbering counts only when it LEADS the line — mid-text
+# parentheses like 「大戦（1914）」 are years/inline notes, not boundaries —
+# and question numbers realistically have 1-3 digits.
+_PAREN_Q_RE = re.compile(r"^\s*[（(]\s*([0-9０-９]{1,3})\s*[)）]")
 
 # Choice markers: circled digits, katakana enumerals, and A-D / 1-4 list items.
+# The 1-4 marker must not be followed by a digit so a decimal-leading line
+# (「1.5メートルの棒」) stays in the body instead of becoming a fake choice.
 _CHOICE_RE = re.compile(
-    r"^\s*(?:[①-⑩]|[ア-オ]|[A-Da-d][.)、]|[1-4][.)、])\s*(.*\S)?", re.UNICODE
+    r"^\s*(?:[①-⑩]|[ア-オ]|[A-Da-d][.)、]|[1-4][.)、](?![0-9０-９]))\s*(.*\S)?",
+    re.UNICODE,
 )
 _PAGE_RE = re.compile(r"(?:P\.?|ページ|頁)\s*([0-9０-９]+)", re.IGNORECASE)
 _FIGURE_RE = re.compile(r"(図\s*[0-9０-９]+|表\s*[0-9０-９]+|グラフ)")
@@ -61,9 +70,10 @@ def _detect_question_no(line: str) -> str | None:
                 return f"大問{num}"
             if "第" in pat.pattern:
                 return f"第{num}問"
-            if "問" in pat.pattern:
-                return f"問{num}"
-            return f"({num})"
+            return f"問{num}"
+    m = _PAREN_Q_RE.match(line)
+    if m:
+        return f"({_zen_to_han(m.group(1))})"
     return None
 
 
@@ -171,8 +181,13 @@ def segment_problems(page_materials: list[tuple[int, str]]) -> list[ProblemUnit]
     attribution is preserved.  Merge rules:
 
     - a numbered unit starts a new problem (``start_page_index`` = that page);
-    - a page-leading unnumbered unit is a cross-page CONTINUATION of the
-      previous problem (a problem starting on page N and running into N+1);
+    - a page-leading unnumbered unit has SHARED attribution: it is appended to
+      the previous problem (cross-page continuation of its passage) AND, when
+      a numbered unit follows on the same page, prepended to that problem's
+      body (it may equally be the next problem's prompt/passage — e.g.
+      「次の文章を読んで答えよ」 right before 問2; text alone cannot tell the
+      two cases apart, and the duplication is harmless because solving always
+      receives the whole document as context);
     - unnumbered content before the first numbered problem (cover sheet,
       instructions) is folded into the first problem's body;
     - duplicate question numbers (e.g. 問1 under two 大問) are made unique
@@ -187,36 +202,49 @@ def segment_problems(page_materials: list[tuple[int, str]]) -> list[ProblemUnit]
     preamble_pages: list[int] = []
 
     for page_index, material in page_materials:
-        for unit in parse_layout(material)["questions"]:
-            if unit.question_no is not None:
-                problems.append(
-                    ProblemUnit(
-                        question_no=unit.question_no,
-                        body_text=unit.body_text,
-                        choices=list(unit.choices),
-                        start_page_index=page_index,
-                        page_indexes=[page_index],
-                    )
-                )
-            elif problems:
-                # Only the first unit of a page can be unnumbered -> this is
-                # the continuation of the last problem onto this page.
+        units = parse_layout(material)["questions"]
+        # Only the first unit of a page can be unnumbered (parse_layout folds
+        # later unnumbered lines into the current numbered unit).
+        leading = units[0] if units and units[0].question_no is None else None
+        numbered = [u for u in units if u.question_no is not None]
+
+        if leading is not None:
+            if problems:
+                # Continuation of the previous problem onto this page.
                 last = problems[-1]
-                if unit.body_text:
+                if leading.body_text:
                     last.body_text = (
-                        f"{last.body_text}\n{unit.body_text}"
+                        f"{last.body_text}\n{leading.body_text}"
                         if last.body_text
-                        else unit.body_text
+                        else leading.body_text
                     )
-                last.choices.extend(unit.choices)
+                last.choices.extend(leading.choices)
                 if page_index not in last.page_indexes:
                     last.page_indexes.append(page_index)
             else:
-                if unit.body_text:
-                    preamble_parts.append(unit.body_text)
-                if unit.choices:
-                    preamble_parts.extend(unit.choices)
+                if leading.body_text:
+                    preamble_parts.append(leading.body_text)
+                if leading.choices:
+                    preamble_parts.extend(leading.choices)
                 preamble_pages.append(page_index)
+
+        for pos, unit in enumerate(numbered):
+            body = unit.body_text
+            # Shared attribution (see docstring): the page-leading block may be
+            # the prompt/passage of THIS problem, so the first numbered problem
+            # of the page also receives it. (Skipped when it went to the
+            # preamble — the preamble is prepended to problems[0] at the end.)
+            if pos == 0 and leading is not None and problems and leading.body_text:
+                body = f"{leading.body_text}\n{body}" if body else leading.body_text
+            problems.append(
+                ProblemUnit(
+                    question_no=unit.question_no,
+                    body_text=body,
+                    choices=list(unit.choices),
+                    start_page_index=page_index,
+                    page_indexes=[page_index],
+                )
+            )
 
     if not problems:
         # No numbered boundary anywhere: the whole document is one problem.

@@ -42,6 +42,32 @@ def test_empty_text_is_safe():
     assert primary_question(parsed) is None
 
 
+def test_compound_words_do_not_create_question_boundaries():
+    # 学問/質問/疑問… inside prose must not fabricate numbered problems.
+    text = "学問1について論じよ\n筆者の疑問2は次の通り\nこの質問3に答えよ"
+    parsed = parse_layout(text)
+    assert parsed["headings"] == []
+    # Everything stays in one unnumbered body unit.
+    assert len(parsed["questions"]) == 1
+    assert parsed["questions"][0].question_no is None
+
+
+def test_paren_numbers_only_count_at_line_start():
+    # Mid-line parentheses (years, inline notes) are not boundaries...
+    parsed = parse_layout("第一次世界大戦（1914）が勃発した")
+    assert parsed["headings"] == []
+    # ...but a line-leading （2） is a genuine sub-question marker.
+    parsed = parse_layout("（2） 下線部の理由を答えよ")
+    assert parsed["headings"] == ["(2)"]
+
+
+def test_decimal_leading_line_is_not_a_choice():
+    parsed = parse_layout("問1 長さを求めよ\n1.5メートルの棒がある")
+    q = primary_question(parsed)
+    assert q.choices == []
+    assert "1.5メートルの棒" in q.body_text
+
+
 # ---------------------------------------------------------------------------
 # segment_problems (whole-document segmentation for the 3-phase exam flow)
 # ---------------------------------------------------------------------------
@@ -71,6 +97,22 @@ def test_segment_problems_merges_cross_page_continuation():
     assert "続きの本文" in problems[0].body_text
     assert problems[0].page_indexes == [0, 1]
     assert problems[0].start_page_index == 0
+
+
+def test_segment_problems_shares_page_leading_prompt_with_next_problem():
+    # A page that opens with a prompt/passage before the next numbered problem:
+    # text alone cannot tell continuation from prompt, so the block goes to
+    # BOTH the previous problem (continuation) and the next one (prompt).
+    pages = [
+        (0, "問1 前半の本文"),
+        (1, "次の文章を読んで答えよ\n問2 下線部について述べよ"),
+    ]
+    problems = segment_problems(pages)
+    assert [p.question_no for p in problems] == ["問1", "問2"]
+    assert "次の文章を読んで答えよ" in problems[0].body_text  # continuation
+    assert problems[0].page_indexes == [0, 1]
+    assert problems[1].body_text.startswith("次の文章を読んで答えよ")  # prompt
+    assert problems[1].start_page_index == 1
 
 
 def test_segment_problems_falls_back_to_single_problem():
