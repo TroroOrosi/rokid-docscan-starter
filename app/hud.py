@@ -26,16 +26,20 @@ def build_hud(
         line1 = f"PAGE {page_no}/{total_pages}"
         # No [:24] truncation — the client renderer handles line-wrapping.
         line2 = (summary or "").strip() or f"match {best.confidence:.2f}"
-        line3 = f"conf {best.confidence:.2f}  hd {best.hamming}"
+        line3 = (
+            f"conf {best.confidence:.2f}  txt {best.ocr_similarity:.2f}"
+            if best.hamming is None
+            else f"conf {best.confidence:.2f}  hd {best.hamming}"
+        )
     elif verdict == "LOW_CONF" and best is not None:
         page_no = best.page_index + 1
         line1 = "LOW CONF"
         line2 = f"maybe p{page_no} ({best.confidence:.2f})"
-        line3 = "hold steady / retry"
+        line3 = "read text again"
     else:  # NO_PAGE
         line1 = "NO PAGE"
         line2 = "not in this doc"
-        line3 = "rescan or check title"
+        line3 = "read again or check title"
 
     return {
         "verdict": verdict,

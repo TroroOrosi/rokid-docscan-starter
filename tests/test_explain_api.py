@@ -15,11 +15,8 @@ Uses the same conftest.py fixtures as the main test suite.
 
 from __future__ import annotations
 
-import io
-
 import pytest
 from fastapi.testclient import TestClient
-from PIL import Image
 
 from app.main import app
 from app.db import init_db
@@ -29,21 +26,11 @@ from app.db import init_db
 # helpers
 # ---------------------------------------------------------------------------
 
-def _png_bytes(color: tuple = (128, 128, 128), size: tuple = (64, 64)) -> bytes:
-    img = Image.new("RGB", size, color=color)
-    buf = io.BytesIO()
-    img.save(buf, format="PNG")
-    return buf.getvalue()
-
-
 @pytest.fixture()
 def client(tmp_path, monkeypatch):
-    """Isolated client with a fresh temp DB and image dir."""
+    """Isolated client with a fresh temp DB."""
     db_file = tmp_path / "test.db"
-    img_dir = tmp_path / "images"
-    img_dir.mkdir()
     monkeypatch.setattr("app.config.DB_PATH", db_file)
-    monkeypatch.setattr("app.config.IMAGE_DIR", img_dir)
     init_db(db_file)
     with TestClient(app) as c:
         yield c
@@ -59,13 +46,10 @@ def _create_doc_with_pages(client, n_pages: int = 1) -> int:
     assert r.status_code == 201
     doc_id = r.json()["document_id"]
 
-    colors = [(200, 100, 50), (50, 200, 100), (100, 50, 200), (200, 200, 50), (50, 200, 200)]
     for i in range(n_pages):
-        color = colors[i % len(colors)]
         r = client.post(
             f"/v1/documents/{doc_id}/pages",
-            data={"page_index": i, "ocr_text": f"第{i+1}ページ テスト問題 解説内容"},
-            files={"image": (f"p{i}.png", _png_bytes(color=color), "image/png")},
+            json={"page_index": i, "ocr_text": f"第{i+1}ページ テスト問題 解説内容"},
         )
         assert r.status_code == 201, f"page {i} upload failed: {r.text}"
 

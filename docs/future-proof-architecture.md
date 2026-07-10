@@ -107,7 +107,9 @@ get_analyzer(prefer=None) -> Analyzer        # ルーティング
 interface GlassesBackend {
     val name: String                 // "cxr-l" | "rokidbrew" | "android-xr"
     val sdkVersion: String
-    suspend fun capture(): Frame     // カメラ1フレーム
+    // 写真・動画・生フレームを返さない。公式SDKで非記録認識を
+    // 確認できなければ例外で終了し、撮影へフォールバックしない。
+    suspend fun recognizeTextEphemerallyOrFail(): RecognizedPage
     suspend fun showHud(lines: List<String>)  // 3行HUD描画
     fun capabilities(): Set<Capability>        // ocrOnDevice, etc.
 }
@@ -120,7 +122,7 @@ object DeviceRegistry {                // 端末を差し替える点
 ```
 
 新端末（例: Android XR）対応＝ `GlassesBackend` を1つ実装して `register` する
-だけ。上位の「capture → 端末OCR → POST /v1/match → showHud(hud.lines)」は不変。
+だけ。上位の「非記録認識 → POST /v1/match → showHud(hud.lines)」は不変。
 
 ---
 
@@ -131,19 +133,18 @@ object DeviceRegistry {                // 端末を差し替える点
 | 契約 | 定数 | 何が変わったら上げる |
 |------|------|----------------------|
 | API envelope | `API_VERSION` | レスポンス JSON 形 / パス |
-| 照合アルゴリズム | `MATCHER_VERSION` | pHash/しきい値/スコアリング |
+| 照合アルゴリズム | `MATCHER_VERSION` | テキスト正規化/類似度/しきい値 |
 | HUD ペイロード | `HUD_CONTRACT_VERSION` | 行数・フィールド |
 | Analyzer 契約 | `ANALYZER_API_VERSION` | `Analyzer`/`AnalyzerResult` 形 |
 | Solver 契約 | `SOLVER_API_VERSION` | `Solver`/`SolveResult` 形 |
 | Extractor 契約 | `EXTRACTOR_API_VERSION` | `MediaExtractor`/`ExtractorResult` 形 |
-| HUD ステージview | `GLASSES_VIEW_CONTRACT_VERSION` | 段階view/`capture_ack` 形 |
+| HUD ステージview | `GLASSES_VIEW_CONTRACT_VERSION` | 段階view/`recognition_ack` 形 |
 | Overlay | `OVERLAY_CONTRACT_VERSION` | 解答欄box/tracking metadata 形 |
 
 - パスは破壊的変更まで `/v1` を維持。破壊的変更は `/v2` を **並走** させる
   （`/v1` を残したまま追加）。
 - クライアントは `versions` のメジャー差を見て「更新を促す」分岐が可能。
-- `MATCHER_VERSION` を上げたら **再インデックス/再評価**（`scripts/evaluate.py`）を
-  実施するルールにする（保存済み pHash と非互換になり得るため）。
+- `MATCHER_VERSION` を上げたら、認識テキストの評価セットで再評価する。
 
 ---
 
@@ -192,7 +193,7 @@ HUD_LANG = os.environ.get("ROKID_HUD_LANG", "ja")
 ### (b) 決定的照合 → 意味照合（embedding）併用
 1. アダプタが `AnalyzerResult.embedding` を返す。
 2. `ROKID_ENABLE_EMBEDDING=1` の時のみ、`matching` に embedding 距離項を **加点**
-   として足す（pHash 主・embedding 従でフォールバック維持）。
+   として足す（文字列類似度を決定的フォールバックとして維持）。
 3. `MATCHER_VERSION` を上げ、`scripts/evaluate.py` で再評価。
 
 ### (c) Rokid SDK 更新 / 新デバイス（Android XR 等）

@@ -1,17 +1,10 @@
 """Build the on-glasses view payload (silent, monochrome, paginated lines).
 
-Hardware reality (Rokid Glasses, web-verified 2026-07; see
-docs/cxr-l-integration.md):
-  Display : dual-eye (binocular) monochrome-green Micro-LED + diffractive
-            waveguide, 480×398 px per eye, FOV ~23° (some reviews cite 30°),
-            up to 1 500 nits, adjustable dimming.
-  SoC     : Qualcomm Snapdragon AR1 (Gen 1) + NXP RT600 co-processor,
-            2 GB RAM / 32 GB ROM.
-  Camera  : 12 MP Sony IMX681.  Connectivity: Wi-Fi 6 / Bluetooth 5.3.
-  OS      : YodaOS-Sprite (Android 12, API 32).
-  SDK     : CXR-L (standalone on-glass app; binds IMediaStreamService via AIDL
-            to the AI app com.rokid.sprite.aiapp) + CXR-S (on-device bridge)
-            + CXR-M (mobile companion).
+Public hardware facts and SDK assumptions are tracked separately in
+docs/cxr-l-integration.md. In particular, the official guide describes the
+steady white indicator as "camera in use"; server code must not infer or
+override physical indicator state. Non-public SDK method names remain subject
+to verification after obtaining the target SDK and firmware.
 
 Design principles (SILENT-FRIENDLY, no-flash):
   - NO audio cues and NO animation directives.
@@ -40,10 +33,10 @@ docs/glasses-ux-contract.md):
                                 review=close
   two_finger_swipe_up/down    : teleprompter scroll (within a view)
   two_finger_swipe_left/right : prev/next document page or review problem
-  long_press                  : video⇄audio record toggle → written⇄listening
-No camera image is used for page/problem navigation: after finalize-reading
-the camera stays closed, so the privacy LED is dark for the whole answer and
-review phases (LED lit time is minimized by design).
+  long_press                  : app-handled mode / microphone-audio action
+No camera image is used for page/problem navigation. ``finalize-reading`` tells
+the client to close any visual-recognition session; the server cannot observe
+or claim the physical camera/indicator state itself.
 """
 
 from __future__ import annotations
@@ -74,51 +67,73 @@ RENDER_CONTRACT = {
     "brightness": "low",
 }
 
-# Capture-path contract. 撮影しない (no photography): the on-glass AI recognizes
-# the page and sends its reading as TEXT — no photo is taken, so there is no
-# flash and no shutter. Listening records audio via the microphone, silently.
-# privacy_led is hardware-enforced (steady recording indicator, not a flash) and
-# is never server-controllable; it lights whenever the camera is active — i.e.
-# 視認＝認識＝カメラON＝LED点灯. The 3-phase flow therefore keeps the reading
-# phase short; after finalize-reading the camera is closed, so the LED is dark
-# for the whole answer and review phases (led_off_during_review).
+# Visual-input contract. The server accepts only recognized TEXT and rejects
+# raw images before reading their bytes. A client may use an ephemeral on-device
+# recognition session, but must not invoke photo/video capture APIs or persist
+# frames. Rokid's official guide describes steady white as "camera in use";
+# therefore this contract never promises that visual recognition keeps the
+# device indicator dark. The indicator remains firmware-controlled.
 CAPTURE_CONTRACT = {
     "shutter_sound": False,
-    "flash": "off",                # no photographic flash/torch on capture
-    "capture_tone": False,         # silent capture (reinforces shutter_sound)
-    "camera_path": "cxr-s/camera2",
-    # Listening recording is silent: no start/stop tones (microphone, not camera).
-    "audio_record": {"start_tone": False, "stop_tone": False, "silent": True},
-    "privacy_led": {"state": "on_while_camera_active", "tamper": "forbidden"},
-    # Review/answer phases run with the camera closed → LED off (点灯時間最小化).
-    "led_off_during_review": True,
+    "flash": "off",
+    "capture_tone": False,
+    "visual_input": {
+        "mode": "on_device_ephemeral_recognition",
+        "server_accepts": ["ocr_text", "vision_text", "fast_ocr_text"],
+        "photo_capture": False,
+        "video_recording": False,
+        "raw_image_upload": False,
+        "raw_frame_upload": False,
+        "server_media_persistence": False,
+    },
+    # Listening uses the microphone only. The client must consume the gesture
+    # in-app and must not dispatch a system photo/video command.
+    "audio_record": {
+        "microphone_only": True,
+        "video_recording": False,
+        "start_tone": False,
+        "stop_tone": False,
+        "silent": True,
+    },
+    "privacy_led": {
+        "state": "on_while_camera_active",
+        "authority": "device_firmware",
+        "server_control": False,
+        "tamper": "forbidden",
+        "guaranteed_off_during_visual_recognition": False,
+    },
+    # The client is required to close the visual sensor before answer/review;
+    # physical state is not observable by this server.
+    "close_visual_sensor_before_review": True,
+    "server_observes_camera_state": False,
 }
 
 # Operation mapping for the glasses-only 3-phase exam flow (and the secondary
 # flows), using the CURRENT Rokid Glasses official gesture vocabulary:
 # two-finger tap = AI activation / single tap = click / double tap = exit /
 # two-finger swipe up・down = scroll, left・right = prev/next page /
-# long press = video⇄audio record toggle. Every operation below is doable on
-# the glasses alone (the phone, if present, is a silent HTTP relay). Gestures
+# long press is handled by this app as a mode/microphone action; clients must
+# not forward it to any system video-record command. Every operation below is
+# doable on the glasses alone (the phone, if present, is a silent HTTP relay). Gestures
 # resolve to KeyCodes via GET /v1/settings.input (overridable with ROKID_KEYMAP).
 #
 # Design notes (pending on-device UX validation):
 #   - finish_reading = double_tap reuses the official "exit" gesture and is
 #     phase-modal: during reading it declares 読取完了 (finalize-reading);
-#     during review it closes the deck. 読取フェーズの終了＝カメラOFF＝LED消灯.
-#   - mode_toggle/record_toggle share long_press (the official video⇄audio
-#     record toggle) and are phase-modal: written → switch to listening;
-#     listening → start/stop the silent recording.
+#     during review it closes the deck. The client must close the visual sensor;
+#     the server does not assert that the physical LED changed state.
+#   - mode_toggle/audio_record_toggle share long_press and are phase-modal:
+#     written → switch to listening; listening → start/stop microphone audio.
 #   - Swipe direction keeps the existing left=next (page-flip) convention;
 #     clients may mirror it per user preference.
 OPERATION_CONTRACT = {
-    # --- Phase 1 読取 (camera ON → privacy LED lit; keep this phase short) ---
-    "capture_read": "two_finger_tap",             # AI起動=視認 → POST /documents/{id}/pages
+    # --- Phase 1 読取 (ephemeral on-device recognition; no photo/video) ---
+    "recognize_page": "two_finger_tap",           # → POST /documents/{id}/pages
     "finish_reading": "double_tap",               # → POST /exam-sessions/{id}/finalize-reading
-    # --- Phase 2 解答 (camera OFF): onboard GPT solves → POST /solutions ---
+    # --- Phase 2 解答 (visual sensor not needed): onboard GPT → POST /solutions ---
     "mode_toggle": "long_press",                  # 筆記⇄リスニング → POST /exam-sessions/{id}/mode
-    "record_toggle": "long_press",                # listening中: 録音開始/停止 (phase-modal)
-    # --- Phase 3 閲覧 (camera OFF, LED off): per-problem review deck ---
+    "audio_record_toggle": "long_press",          # listening中: マイク録音開始/停止
+    # --- Phase 3 閲覧 (visual sensor not needed): per-problem review deck ---
     "review_next_problem": "two_finger_swipe_left",   # → GET /review?index=k+1
     "review_prev_problem": "two_finger_swipe_right",  # → GET /review?index=k-1
     "scroll_next": "two_finger_swipe_down",       # teleprompter 送り (view_page+1)
@@ -473,7 +488,7 @@ def build_explain_view(
 
 
 # ---------------------------------------------------------------------------
-# Review-deck view builder (3-phase exam flow, phase 3 閲覧: camera OFF, LED off)
+# Review-deck view builder (phase 3: no visual input required)
 # ---------------------------------------------------------------------------
 
 
@@ -529,7 +544,7 @@ def build_review_view(
 ) -> dict:
     """Return one teleprompter page of the per-problem review view.
 
-    Phase 3 閲覧: the paper and the camera are no longer needed (LED off).
+    Phase 3 閲覧: the paper and visual input are no longer needed.
     Answer, solution steps, rationale and cautions are merged into ONE stream
     (確定事項: 一括表示) and chunked into <=3-line pages; the user scrolls with
     two-finger vertical swipes and moves between problems with two-finger
@@ -576,7 +591,7 @@ def build_review_view(
 
 
 def build_reading_done_ack(problem_count: int, total_pages: int) -> dict:
-    """HUD ack for finalize-reading: reading phase over, camera off, LED off.
+    """HUD ack that requires the client to end visual recognition.
 
     A 0-problem outcome (e.g. every page was figure-only with no recognized
     text) gets explicit guidance instead of dropping the user into an empty
@@ -592,14 +607,15 @@ def build_reading_done_ack(problem_count: int, total_pages: int) -> dict:
         lines = [
             f"読取完了 {total_pages}ページ",
             f"{problem_count}問を検出",
-            "カメラOFF 解答へ",
+            "センサー停止後 解答へ",
         ]
     return {
         "lines": lines[:_MAX_LINES],
         "ttl_sec": 2,
         "problem_count": problem_count,
         "total_pages": total_pages,
-        "camera_off": True,
+        "camera_close_required": True,
+        "camera_off_confirmed": False,
     }
 
 
@@ -608,13 +624,13 @@ def build_scan_ack(
     scanned_count: int,
     total_pages: int | None,
 ) -> dict:
-    """Scan progress / completion HUD shown after each page capture.
+    """Recognition progress HUD shown after each text-only page intake.
 
     Called from POST /v1/documents/{id}/pages (add_page) so the user gets
     real-time feedback.  When the expected total is known and reached, the
     hint changes to the completion message so the user knows to double-tap
-    (finish_reading → POST /v1/exam-sessions/{id}/finalize-reading, which
-    closes the camera and turns the privacy LED off).
+    (finish_reading → close the client's visual-recognition session, then
+    POST /v1/exam-sessions/{id}/finalize-reading).
 
     ``total_pages=None`` = the client never declared an expected count: the
     ack must NOT claim completion (previously it asserted all_scanned after

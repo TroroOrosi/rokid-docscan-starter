@@ -1,7 +1,7 @@
 """Stable media-extractor interface (a 'port' in ports-and-adapters terms).
 
-A MediaExtractor turns a media region of an exam page (a formula, figure,
-graph or table) — referenced by OCR text and/or an image region — into a
+A MediaExtractor turns a formula, figure, graph, or table described in
+recognized text into a
 structured, HUD/solver-friendly representation:
 - kind:    one of "math" | "figure" | "graph" | "table",
 - content: a best-effort textual representation (LaTeX-ish for math, a short
@@ -58,8 +58,11 @@ class MediaExtractor(abc.ABC):
         kind: str | None = None,
         region: dict | None = None,
     ) -> ExtractorResult:
-        """Return an ExtractorResult. Implementations must not raise on empty
-        input; return a best-effort placeholder instead."""
+        """Return an ExtractorResult from text only.
+
+        ``image_path`` and ``region`` are legacy compatibility fields and must
+        not cause media reads. Implementations must not raise on empty input.
+        """
 
     def info(self) -> dict:
         return {

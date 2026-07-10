@@ -20,10 +20,9 @@ from ..llm import LLMClient, LLMConfigError, get_client
 from .base import Question, SolveResult, Solver
 
 _SYSTEM = (
-    "You are an exam tutor solving a single question captured from a paper exam "
-    "for a Rokid Glasses heads-up display. When a page image is attached, treat "
-    "the IMAGE as the primary source (read figures, equations, tables, graphs "
-    "and choices directly); any provided OCR text is a possibly-imperfect aid. "
+    "You are an exam tutor solving a single recognized-text question for a "
+    "Rokid Glasses heads-up display. Use only the supplied OCR and visual "
+    "description text; no page image is attached. "
     "Work the problem out fully, then give the final answer. "
     "Reply with a SINGLE minified JSON object, no markdown, no prose outside it. "
     "Keys: "
@@ -64,16 +63,6 @@ def _subject_guidance(subject: str | None) -> str:
     return _SUBJECT_GUIDANCE.get(subject or "", "")
 
 
-def _read_image(path: str | None) -> bytes | None:
-    if not path:
-        return None
-    try:
-        with open(path, "rb") as fh:
-            return fh.read()
-    except OSError:
-        return None
-
-
 class LLMSolver(Solver):
     offline = False
 
@@ -90,12 +79,9 @@ class LLMSolver(Solver):
             # Unconfigured -> let solve_with_fallback drop to the local solver.
             raise LLMConfigError(f"{self.name} solver requires its provider API key/model")
 
-        # Vision: attach the captured page image so the model reads figures /
-        # equations / tables directly. Falls back to text-only when absent.
-        image = _read_image(question.image_path)
-        data = client.complete_json(
-            system=_SYSTEM, prompt=_build_prompt(question), image=image
-        )
+        # Deliberately ignore the legacy Question.image_path field. The runtime
+        # privacy boundary permits recognized text only.
+        data = client.complete_json(system=_SYSTEM, prompt=_build_prompt(question))
         answer = str(data.get("answer", "")).strip()[:max_answer_len]
         return SolveResult(
             answer=answer,
@@ -124,7 +110,7 @@ def _build_prompt(question: Question) -> str:
         guidance = _subject_guidance(question.subject)
         if guidance:
             lines.append(f"解き方/Guidance: {guidance}")
-    lines.append("問題(OCR、画像がある場合は画像を優先)/Question (OCR; prefer the image if attached):")
+    lines.append("問題（認識テキスト）/Question (recognized text only):")
     lines.append(question.body_text or "(no text)")
     if question.choices:
         lines.append("選択肢/Choices:")

@@ -3,9 +3,6 @@ import importlib
 import pytest
 from fastapi.testclient import TestClient
 
-from tests.conftest import image_bytes, make_image
-
-
 @pytest.fixture
 def client(tmp_path, monkeypatch):
     monkeypatch.setenv("ROKID_DATA_DIR", str(tmp_path))
@@ -31,11 +28,9 @@ def _new_session(client, mode="study", voice=False):
 
 
 def _add_question(client, sid, ocr_text="問2 次の計算\n① 12\n② 13\n③ 14\n④ 15"):
-    files = {"image": ("q.png", image_bytes(make_image(seed=5)), "image/png")}
     return client.post(
         f"/v1/exam-sessions/{sid}/questions",
-        data={"ocr_text": ocr_text},
-        files=files,
+        json={"ocr_text": ocr_text},
     )
 
 
@@ -51,26 +46,35 @@ def test_settings_advertise_silent_contract(client):
     assert hud["transition"] == "instant"
     assert hud["brightness"] == "low"
     assert body["voice_enabled_default"] is False
-    # Silent shutter, and the privacy LED is explicitly NON-disable-able.
-    # It lights while the camera is active (reading phase) and is dark during
-    # the answer/review phases, when the camera is closed.
+    # Raw visual media is forbidden; the device remains authoritative for its
+    # camera indicator and the server never claims to observe it.
     capture = body["capture"]
     assert capture["shutter_sound"] is False
-    assert capture["privacy_led"] == {
-        "state": "on_while_camera_active",
-        "tamper": "forbidden",
-    }
-    assert capture["led_off_during_review"] is True
+    assert capture["visual_input"]["photo_capture"] is False
+    assert capture["visual_input"]["video_recording"] is False
+    assert capture["visual_input"]["raw_image_upload"] is False
+    assert capture["visual_input"]["server_media_persistence"] is False
+    assert capture["privacy_led"]["state"] == "on_while_camera_active"
+    assert capture["privacy_led"]["authority"] == "device_firmware"
+    assert capture["privacy_led"]["server_control"] is False
+    assert capture["privacy_led"]["tamper"] == "forbidden"
+    assert capture["privacy_led"]["guaranteed_off_during_visual_recognition"] is False
+    assert capture["close_visual_sensor_before_review"] is True
+    assert capture["server_observes_camera_state"] is False
     # 撮影しない: no photographic flash, silent capture, and silent audio recording.
     assert capture["flash"] == "off"
     assert capture["capture_tone"] is False
     assert capture["audio_record"]["start_tone"] is False
     assert capture["audio_record"]["stop_tone"] is False
+    assert capture["audio_record"]["microphone_only"] is True
+    assert capture["audio_record"]["video_recording"] is False
 
 
-def test_capture_ack_is_silent_and_short(client):
+def test_recognition_ack_is_silent_and_short(client):
     sid = _new_session(client)
-    ack = _add_question(client, sid).json()["capture_ack"]
+    body = _add_question(client, sid).json()
+    ack = body["recognition_ack"]
+    assert body["capture_ack"] == ack  # deprecated compatibility alias
     assert len(ack["lines"]) <= 3
     # The confirmation must not carry any sound/flash directive.
     for forbidden in ("sound", "audio", "flash", "beep"):
@@ -200,15 +204,21 @@ def test_real_mode_is_locked_by_default(client):
     assert all("①" not in ln for ln in solved["glasses_view"]["lines"])
 
 
-def test_low_read_confidence_asks_for_retake(client):
+def test_question_requires_recognized_text(client):
     sid = _new_session(client)
-    # no OCR text -> low read confidence -> retake hint
-    files = {"image": ("q.png", image_bytes(make_image(seed=5)), "image/png")}
+    r = client.post(f"/v1/exam-sessions/{sid}/questions", json={})
+    assert r.status_code == 400
+    assert "ocr_text or vision_text" in r.json()["detail"]
+
+
+def test_question_rejects_raw_image(client):
+    sid = _new_session(client)
     r = client.post(
-        f"/v1/exam-sessions/{sid}/questions", files=files
-    ).json()
-    assert r["read_confidence"] < 0.3
-    assert "hint" in r
+        f"/v1/exam-sessions/{sid}/questions",
+        data={"ocr_text": "問1"},
+        files={"image": ("q.png", b"not-read", "image/png")},
+    )
+    assert r.status_code == 415
 
 
 def test_session_detail_lists_questions(client):

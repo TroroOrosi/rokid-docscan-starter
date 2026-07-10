@@ -18,9 +18,6 @@ import importlib
 import pytest
 from fastapi.testclient import TestClient
 
-from tests.conftest import image_bytes, make_image
-
-
 @pytest.fixture
 def client(tmp_path, monkeypatch):
     monkeypatch.setenv("ROKID_DATA_DIR", str(tmp_path))
@@ -49,7 +46,7 @@ def _add_text_page(client, doc_id, page_index, ocr_text):
     """Camera-free page: no image, only ocr_text."""
     return client.post(
         f"/v1/documents/{doc_id}/pages",
-        data={"page_index": page_index, "ocr_text": ocr_text},
+        json={"page_index": page_index, "ocr_text": ocr_text},
     )
 
 
@@ -63,24 +60,45 @@ def test_add_page_without_image_records_text_only(client):
     assert body["ocr_md5"]  # derived from text
 
 
-def test_add_page_requires_image_or_text(client):
+def test_add_page_requires_text(client):
     doc_id = _new_doc(client)
     # No image AND no ocr_text -> 400
-    r = client.post(f"/v1/documents/{doc_id}/pages", data={"page_index": 0})
+    r = client.post(f"/v1/documents/{doc_id}/pages", json={"page_index": 0})
     assert r.status_code == 400
 
 
-def test_add_page_with_image_still_works(client):
+def test_add_page_rejects_raw_image_before_persistence(client):
     doc_id = _new_doc(client)
-    files = {"image": ("p.png", image_bytes(make_image(seed=3)), "image/png")}
+    files = {"image": ("p.png", b"not-read-by-server", "image/png")}
     r = client.post(
         f"/v1/documents/{doc_id}/pages",
         data={"page_index": 0, "ocr_text": "画像あり"},
         files=files,
     )
-    assert r.status_code == 201
-    assert r.json()["image_path"] is not None
-    assert r.json()["phash"]  # pHash computed for the image
+    assert r.status_code == 415
+    assert "JSON text-only" in r.json()["detail"]
+
+
+def test_add_page_rejects_media_field_in_json(client):
+    doc_id = _new_doc(client)
+    r = client.post(
+        f"/v1/documents/{doc_id}/pages",
+        json={
+            "page_index": 0,
+            "ocr_text": "問1",
+            "image": "data:image/png;base64,AAAA",
+        },
+    )
+    assert r.status_code == 422
+    assert client.post(f"/v1/documents/{doc_id}/finalize").status_code == 400
+
+
+def test_media_guard_cannot_be_bypassed_with_invalid_document_id(client):
+    r = client.post(
+        "/v1/documents/-1/pages",
+        files={"image": ("p.png", b"must-not-be-read", "image/png")},
+    )
+    assert r.status_code == 415
 
 
 def _doc_with_text_pages(client, texts):
@@ -147,25 +165,20 @@ def test_create_rejects_unfinalized_document(client):
     ).status_code == 400
 
 
-def test_match_ignores_camera_free_pages(client):
-    """A document mixing a text-only page and an image page must still match."""
+def test_match_uses_text_only_pages(client):
+    """Text-only page matching requires no raw image/frame upload."""
     doc_id = _new_doc(client)
     _add_text_page(client, doc_id, 0, "撮影しないテキストページ")  # phash=""
-    files = {"image": ("p.png", image_bytes(make_image(seed=7)), "image/png")}
-    client.post(
-        f"/v1/documents/{doc_id}/pages",
-        data={"page_index": 1, "ocr_text": "画像ページ"},
-        files=files,
-    )
+    _add_text_page(client, doc_id, 1, "二枚目の資料ページ")
     client.post(f"/v1/documents/{doc_id}/finalize")
-    # /match must not raise on the phashless page; it returns a verdict.
     r = client.post(
         "/v1/match",
-        data={"document_id": doc_id, "fast_ocr_text": "画像ページ"},
-        files={"image": ("q.png", image_bytes(make_image(seed=7)), "image/png")},
+        json={"document_id": doc_id, "fast_ocr_text": "二枚目の資料ページ"},
     )
     assert r.status_code == 200, r.text
-    assert r.json()["verdict"] in ("HIT", "LOW_CONF", "NO_PAGE")
+    assert r.json()["verdict"] == "HIT"
+    assert r.json()["best_page"]["page_index"] == 1
+    assert r.json()["raw_media_received"] is False
 
 
 # --- page navigation --------------------------------------------------------
@@ -294,7 +307,7 @@ def _add_page(client, doc_id, page_index, *, ocr_text=None, vision_text=None):
         data["ocr_text"] = ocr_text
     if vision_text is not None:
         data["vision_text"] = vision_text
-    return client.post(f"/v1/documents/{doc_id}/pages", data=data)
+    return client.post(f"/v1/documents/{doc_id}/pages", json=data)
 
 
 def test_add_page_vision_text_only(client):
@@ -308,10 +321,10 @@ def test_add_page_vision_text_only(client):
     assert body["ocr_md5"]  # derived from the vision text
 
 
-def test_add_page_requires_text_or_image(client):
+def test_add_page_requires_recognized_text(client):
     doc_id = _new_doc(client)
     # No image, no ocr_text, no vision_text -> 400
-    r = client.post(f"/v1/documents/{doc_id}/pages", data={"page_index": 0})
+    r = client.post(f"/v1/documents/{doc_id}/pages", json={"page_index": 0})
     assert r.status_code == 400
 
 

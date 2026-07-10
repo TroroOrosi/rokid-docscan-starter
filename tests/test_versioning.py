@@ -29,9 +29,8 @@ def test_version_info_has_all_contracts():
 
 
 def test_contract_versions_reflect_silent_capture_contract():
-    # 1.4.0: review-deck view (merged single stream per problem) + reading_done
-    # ack + official gesture vocabulary (1.3.0 added sentence pagination).
-    assert version.GLASSES_VIEW_CONTRACT_VERSION == "1.4.0"
+    # 1.5.0: text-only visual input and non-assertive camera/indicator state.
+    assert version.GLASSES_VIEW_CONTRACT_VERSION == "1.5.0"
 
 
 def test_contract_versions_reflect_phase234():
@@ -42,10 +41,8 @@ def test_contract_versions_reflect_phase234():
 
 
 def test_contract_versions_reflect_explain_sessions():
-    # 1.8.0: 3-phase exam endpoints (finalize-reading / solutions / review) +
-    #        honest input/capture contract corrections (1.7.0 added the
-    #        document page-move型 exam + camera-free pages + listening audio).
-    assert version.API_VERSION == "1.8.0"
+    # 1.9.0: raw visual media is rejected and /match is recognized-text-only.
+    assert version.API_VERSION == "1.9.0"
     assert version.EXPLAINER_API_VERSION == "1.0.0"
 
 

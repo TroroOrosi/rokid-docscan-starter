@@ -29,9 +29,8 @@ class Question:
     subject: str | None = None
     # Reference context retrieved from prior documents (RAG, Phase 3). Optional.
     context: str | None = None
-    # Path to the captured page image. A vision-capable solver reads it so the
-    # model sees figures / equations / tables directly (OCR text is imperfect).
-    # Optional/last so existing positional construction keeps working.
+    # Legacy schema field retained for old database rows and callers. Runtime
+    # adapters must ignore it; visual information arrives as recognized text.
     image_path: str | None = None
 
 

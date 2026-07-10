@@ -17,7 +17,7 @@
 > 実機動作実績のある CXR-L 構成は**スマホ側プラグイン**（Hi Rokid 経由）。どちらの経路でも
 > スマホは HTTP 中継のみ（画面不要）で、ユーザーが見る・操作するのはグラスだけ。
 
-- グラスが撮影/本体 AI で得た画像・テキストを本サーバへ送り、サーバが照合・解答・解説して
+- クライアントが非記録認識で得たテキストだけを本サーバへ送り、サーバが照合・解答・解説して
   **最大3行の HUD** を返す。表示・操作はグラス側、解析はサーバ側という役割分担。
 
 ---
@@ -38,7 +38,7 @@ pip install -r requirements.txt
 uvicorn app.main:app --host 0.0.0.0 --port 8000   # 既定＝オフライン・全機能
 ```
 
-- 起動時に `data/images/` と `data/docscan.db` が自動生成。
+- 起動時に `data/audio/` と `data/docscan.db` が自動生成。画像保存先は作成しません。
 - `GET /health` が `{"status":"ok", "versions":{…}}` を返せば稼働中。全環境変数は
   [user-operation-guide.md](user-operation-guide.md) §「環境変数一覧」を参照。
 
@@ -84,8 +84,8 @@ export ROKID_TRANSCRIBE_MODEL=gpt-4o-transcribe   # gemini は ROKID_LLM_MODEL �
 
 1. `GET /v1/settings` を取得し、**唯一の権威**として読み込む：
    - `hud`（無音・無フラッシュ・即時遷移・低輝度・最大3行）
-   - `capture`（無音シャッター・プライバシー LED 不可侵：`on_while_camera_active`＝読取中のみ点灯、
-     `led_off_during_review:true`＝解答/閲覧フェーズは消灯）
+   - `capture`（写真・動画・生フレーム禁止、サーバ保存なし、LEDは端末管理、
+     `close_visual_sensor_before_review:true`）
    - `operations`（3 フェーズの操作↔ジェスチャ対応）
    - `input`（gesture→KeyCode。**`keycodes_verified:false`＝旧機由来・要実測**。
      `ROKID_KEYMAP` で実機差を吸収可）
@@ -100,33 +100,28 @@ export ROKID_TRANSCRIBE_MODEL=gpt-4o-transcribe   # gemini は ROKID_LLM_MODEL �
 
 > KeyCode は `GET /v1/settings.input.gestures` の値に従う（下記は既定値）。
 
-### 4-A. 資料照合（/v1/match）
+### 4-A. 資料照合（/v1/match・テキストのみ）
 事前登録 → 現場で照合：
 ```
-# 登録（image は任意。撮影レスなら ocr_text だけでページを記憶）
+# 登録（画像は受け付けない）
 POST /v1/documents            → document_id
-POST /v1/documents/{id}/pages (page_index, [image], [ocr_text]) ×全ページ
+POST /v1/documents/{id}/pages JSON {page_index, ocr_text[, vision_text]} ×全ページ
 POST /v1/documents/{id}/finalize   ← 完了宣言（要約生成・status=ready）
-# 現場（照合は画像を使う任意経路）
-カメラ1フレーム取得 → 端末OCR →
-POST /v1/match (document_id, image, fast_ocr_text) → HUD: PAGE n/N / LOW_CONF / NO_PAGE
+# 現場
+公式SDKで確認済みの非記録認識 →
+POST /v1/match JSON {document_id, fast_ocr_text} → HUD: PAGE n/N / LOW_CONF / NO_PAGE
 ```
-- **撮影レス登録**：`/pages` は `image` 省略可。本体 AI が視認した資料テキストを `ocr_text` に
-  渡せば、写真なしでページを記憶（`image_path=null`・`phash=""`）。照合(`/match`)は画像を使う機能
-  なので、撮影レス標準フローでは下記 **4-D の文書ページ移動型**で現在ページを把握します。
+- `/pages`・`/match`・`/questions` に画像を添付すると、サーバはバイト列を読む前に `415` を返します。
 
-### 4-B. 解答（/v1/exam-sessions・設問1枚アップロード型＝互換）
+### 4-B. 解答（/v1/exam-sessions・設問テキスト登録型）
 ```
 POST /v1/exam-sessions {mode:"study"}                → session_id
-問題画像を送信 → POST .../questions (image,[ocr_text])  ← 用紙画像を保存＋科目自動判定（互換経路のみ画像使用）
+認識テキストを送信 → POST .../questions JSON {ocr_text[,vision_text]}
 1本指タップ(single_tap)              → POST .../{qid}/solve → 「答え: X ★★★」
 1本指タップ（解答表示中）             → GET .../view?stage=solution→rationale→caution
 2本指スワイプ下/上                   → テキストページ送り（view?page=N±1）
 ```
-- **用紙画像で解く（vision）**：実アダプタ（`openai`/`gemini`/`claude`）を有効化すると、
-  `solve` は保存済みの**ページ画像をモデルへ添付**し、図/数式/表/選択肢を直接読んで解答します
-  （OCR テキストは補助、教科別プロンプト）。**画像はクラウドへ送信**されるため、実 AI・鍵設定時
-  のみ作動（未設定/失敗はローカルへフォールバック）。
+- 図・数式・表は `vision_text` として渡します。API経路は既存DBに画像パスがあってもモデルへ渡しません。
 - 科目は読取時に自動判定（共通テスト準拠フル16教科）。`mode:"real"` は
   `ROKID_ALLOW_REAL_EXAM_SOLVE=1` が無い限りロック（解答非表示）。
 
@@ -139,28 +134,27 @@ POST /v1/explain-sessions {document_id}     → session_id (status=ready)
 2本指スワイプ下/上(two_finger_swipe_d/u)     → GET .../explain?view_page=N±1（テレプロンプター）
 ```
 
-### 4-D. 3 フェーズ実践フロー（主経路 / 筆記・リスニング両対応・LED 点灯最小）
-**読取（カメラON・LED点灯・最短化）→ 一括解答（カメラOFF）→ 閲覧（カメラOFF・LED消灯）**。
-撮影は一切発生しない（写真/フラッシュ/シャッターなし・録音も無音）。**操作はグラス単独で完結**
+### 4-D. 3 フェーズ実践フロー（主経路 / 筆記・リスニング両対応・メディア非保存）
+**非記録認識 → 一括解答 → 閲覧**。写真・動画・生フレームは保存・送信せず、**操作はグラス単独で完結**
 （スマホは中継のみ・画面不要）。
 
 ```
-# フェーズ1 読取（この間だけカメラON＝プライバシーLED点灯）
-POST /v1/documents → 2本指タップ(two_finger_tap=AI起動・視認) ×全ページ
+# フェーズ1 読取（公式SDKで非記録認識を確認できた場合のみ）
+POST /v1/documents → 2本指タップ(two_finger_tap=AI起動) ×全ページ
   → 本体AIの認識を POST .../pages (ocr_text[, vision_text])（scan_ack で進捗表示）
 POST /v1/documents/{id}/finalize
 POST /v1/exam-sessions {mode:"study", document_id, exam_type:"written", answer_format:"mark"}
-ダブルタップ(double_tap=読取完了宣言) → POST .../finalize-reading
-  → 問題分割・デッキ作成・reading_ack「読取完了/N問を検出/カメラOFF 解答へ」
-  → ここでカメラを閉じる＝LED消灯（応答の camera.privacy_led=="off" を確認）
+ダブルタップ(double_tap=読取完了宣言)
+  → クライアントが認識セッションを閉じる → POST .../finalize-reading
+  → 問題分割・デッキ作成・reading_ack「読取完了/N問を検出/センサー停止後 解答へ」
 
-# フェーズ2 解答（カメラOFF）
+# フェーズ2 解答（視覚センサー不要）
 主経路: 搭載 GPT が全問を解く → POST .../solutions（問題別解答の配列を ingest）
 任意:   ROKID_SOLVER=openai|gemini|claude ならフェーズ1の finalize-reading が一括解答済み
-長押し(long_press=公式の録画⇄録音トグル)      → POST .../mode {exam_type}   ← 筆記 ⇄ リスニング
-長押し（listening 中）                        → 録音 → POST .../audio (audio,[transcript])
+長押し（アプリ内で処理し、動画操作へ転送しない） → POST .../mode {exam_type} ← 筆記 ⇄ リスニング
+長押し（listening 中）                        → マイク録音 → POST .../audio (audio,[transcript])
 
-# フェーズ3 閲覧（カメラOFF・LED消灯。用紙も視認も不要）
+# フェーズ3 閲覧（視覚センサー不要）
 GET .../solutions                            ← デッキ一覧（問1..問N・解答済み・確信度）
 GET .../review?index=k&view_page=n           ← 1問題＝解答+解法+根拠+注意を一括表示
 2本指スワイプ左/右 → index±1（前後の問題） / 2本指スワイプ下/上 → view_page±1（送り読み）
@@ -170,12 +164,12 @@ GET .../review?index=k&view_page=n           ← 1問題＝解答+解法+根拠+
 - `exam_type`＝`written`(筆記) / `listening`(英語リスニング)、`answer_format`＝`mark`(マーク) / `written`(記述)。
 - **リスニング書き起こし**：`ROKID_TRANSCRIBER=openai|gemini`＋各社鍵で実書き起こし。未設定/失敗/オフラインは
   アップロード時の `transcript` をそのまま使用（クレデンシャル不要で成立、上記 §2-3）。全問の解答文脈に統合される。
-- **LED 期待値**：フェーズ1のみ点灯・フェーズ2/3は消灯（`GET /v1/settings.capture` の
-  `privacy_led:{state:"on_while_camera_active"}`・`led_off_during_review:true`）。
+- **LED**：端末ファームウェアの管理対象。公式ガイドは白色点灯を「カメラ使用中」と説明します。
+  サーバは状態を観測せず、消灯済みの応答や迂回機能を持ちません。
 - `mode:"real"` は `ROKID_ALLOW_REAL_EXAM_SOLVE=1` が無い限りロック（ingest・デッキ・閲覧もロック）。
 
 ### 4-E. 文書ページ移動型 exam（二次経路・互換）
-ページ移動で現在ページを解く従来経路（読取と閲覧が分離されないため LED 点灯時間が長い）。
+ページ移動で現在ページを解く従来経路。登録済み認識テキストだけを使います。
 ```
 2本指スワイプ左/右 → POST .../next-page / prev-page   ← 現在ページ移動
 （確認）             GET  .../current                  ← 現在ページ把握
@@ -185,8 +179,8 @@ GET .../review?index=k&view_page=n           ← 1問題＝解答+解法+根拠+
 
 ### 実行フロー（データの流れ）
 ```
-[Glasses: 本体AI(GPT/Gemini)=視認・認識・解答] ──ocr_text/vision_text・問題別解答──▶ [本サーバ]
-   分割(segment_problems) / 取り込み(ingest) / 照合(pHash) / 解説 / 抽出
+[Glasses: 非記録認識・解答] ──ocr_text/vision_text・問題別解答──▶ [本サーバ]
+   分割(segment_problems) / 取り込み(ingest) / 照合(テキスト類似度) / 解説 / 抽出
    （サーバ solver は任意: openai|gemini|claude、local 既定）
 [本サーバ] ──HUD 3行(JSON)──▶ [Glasses: 両眼ディスプレイに描画]
    ※実AIが未設定/失敗ならローカルへ自動フォールバック（常に応答）

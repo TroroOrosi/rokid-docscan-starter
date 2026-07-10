@@ -76,14 +76,15 @@ def test_input_contract_has_ai_activation_gesture(tmp_path, monkeypatch):
 def test_operations_cover_three_phase_flow(tmp_path, monkeypatch):
     c = _make_client(tmp_path, monkeypatch, ROKID_KEYMAP=None)
     ops = c.get("/v1/settings").json()["operations"]
-    # Phase 1 読取 (camera ON, LED lit — keep it short)
-    assert ops["capture_read"] == "two_finger_tap"
+    # Phase 1 読取: ephemeral recognition; device firmware owns camera/LED state.
+    assert ops["recognize_page"] == "two_finger_tap"
+    assert "capture_read" not in ops
     assert ops["finish_reading"] == "double_tap"
-    # Phase 2 解答 (camera OFF): written⇄listening toggle = official
-    # video⇄audio record toggle (long press)
+    # Phase 2 解答: the client handles long-press as mode/microphone audio only.
     assert ops["mode_toggle"] == "long_press"
-    assert ops["record_toggle"] == "long_press"
-    # Phase 3 閲覧 (camera OFF, LED off): per-problem deck navigation
+    assert ops["audio_record_toggle"] == "long_press"
+    assert "record_toggle" not in ops
+    # Phase 3 閲覧 (visual sensor not needed): per-problem deck navigation
     assert ops["review_next_problem"] == "two_finger_swipe_left"
     assert ops["review_prev_problem"] == "two_finger_swipe_right"
     assert ops["scroll_next"] == "two_finger_swipe_down"

@@ -53,7 +53,14 @@ from __future__ import annotations
 #        honestly false (legacy table, unmeasured); privacy_led corrected to
 #        on_while_camera_active + led_off_during_review. API -> 1.8.0,
 #        GLASSES_VIEW_CONTRACT -> 1.4.0.
-APP_VERSION = "0.8.0"
+# 0.9.0: raw visual media is rejected by /pages, /match, and /questions before
+#        bytes are read. Runtime matching is recognized-text-only; legacy image
+#        paths in existing databases are ignored by analyzer/solver calls. The
+#        executable LED-bypass utility was removed. The capture contract now
+#        distinguishes "no media persistence" from device camera/indicator
+#        state, which the server cannot observe or override. API -> 1.9.0,
+#        MATCHER -> 1.2.0, HUD -> 1.1.0, GLASSES_VIEW -> 1.5.0.
+APP_VERSION = "0.9.0"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.
@@ -74,15 +81,19 @@ APP_VERSION = "0.8.0"
 #        keycodes_verified:false + keycode_source (the old true was wrong),
 #        capture reports privacy_led.state=on_while_camera_active and
 #        led_off_during_review. Session responses gain phase/problem counts.
-API_VERSION = "1.8.0"
+# 1.9.0: /pages, /match, and /questions are strict JSON text-only inputs;
+#        non-JSON media bodies are rejected by headers with 415 before parsing.
+#        /match requires fast_ocr_text and uses text similarity; capture and
+#        finalize-reading responses no longer claim server-observed LED state.
+API_VERSION = "1.9.0"
 
 # Matching algorithm identity. Bump when thresholds or hashing change so a
 # re-index/eval is triggered. Mirrors thresholds in app/matching.py.
 # 1.1.0: OCR signal is now graded text similarity, not exact MD5 only.
-MATCHER_VERSION = "1.1.0"
+MATCHER_VERSION = "1.2.0"
 
 # HUD payload shape: {verdict, confidence, lines:[3]}.
-HUD_CONTRACT_VERSION = "1.0.0"
+HUD_CONTRACT_VERSION = "1.1.0"
 
 # Analyzer plugin interface (provider-agnostic OCR/summary/embedding).
 ANALYZER_API_VERSION = "1.0.0"
@@ -90,7 +101,9 @@ ANALYZER_API_VERSION = "1.0.0"
 # Solver plugin interface (provider-agnostic question answering).
 # 1.1.0: Question gained the optional `image_path` field so vision-capable
 #        solvers can answer from the scanned page image (additive/back-compat).
-SOLVER_API_VERSION = "1.1.0"
+# 1.2.0: image_path remains for schema compatibility but runtime adapters ignore
+#        it; the solver boundary accepts recognized text only.
+SOLVER_API_VERSION = "1.2.0"
 
 # Media-extractor plugin interface (formula/figure/graph/table).
 EXTRACTOR_API_VERSION = "1.0.0"
@@ -112,7 +125,7 @@ EXPLAINER_API_VERSION = "1.0.0"
 #        navigation; reading_done ack (camera_off). Operation/gesture names
 #        moved to the official vocabulary (two_finger_*, single/double tap,
 #        long_press). Max 3 lines/page unchanged.
-GLASSES_VIEW_CONTRACT_VERSION = "1.4.0"
+GLASSES_VIEW_CONTRACT_VERSION = "1.5.0"
 
 # Answer-area overlay payload (box + short answer; 2D image-anchored).
 # 1.1.0: added tracking metadata (tracking/fixed_ar/anchor_hint).

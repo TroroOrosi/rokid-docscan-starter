@@ -50,7 +50,7 @@ class LLMAnalyzer(Analyzer):
             client = get_client(self._client, self.provider)
             if client is None or not (ocr_text or "").strip():
                 return self._fallback.analyze(
-                    image_path=image_path, ocr_text=ocr_text, max_summary_len=max_summary_len
+                    image_path=None, ocr_text=ocr_text, max_summary_len=max_summary_len
                 )
             data = client.complete_json(
                 system=_SYSTEM.format(max_len=max_summary_len),
@@ -58,7 +58,7 @@ class LLMAnalyzer(Analyzer):
             )
         except Exception:  # noqa: BLE001 - never break finalize; degrade to local
             return self._fallback.analyze(
-                image_path=image_path, ocr_text=ocr_text, max_summary_len=max_summary_len
+                image_path=None, ocr_text=ocr_text, max_summary_len=max_summary_len
             )
         summary = str(data.get("summary", "")).strip()[:max_summary_len] or "(no text)"
         return AnalyzerResult(

@@ -3,9 +3,6 @@ import importlib
 import pytest
 from fastapi.testclient import TestClient
 
-from tests.conftest import image_bytes, make_image
-
-
 @pytest.fixture
 def client(tmp_path, monkeypatch):
     # Point all storage at a temp dir, then reload modules that captured paths.
@@ -28,11 +25,8 @@ def _create_doc(client, title="Spec v1"):
 
 
 def _add_page(client, doc_id, idx, seed, ocr_text=None):
-    files = {"image": (f"p{idx}.png", image_bytes(make_image(seed=seed)), "image/png")}
-    data = {"page_index": str(idx)}
-    if ocr_text is not None:
-        data["ocr_text"] = ocr_text
-    return client.post(f"/v1/documents/{doc_id}/pages", data=data, files=files)
+    data = {"page_index": str(idx), "ocr_text": ocr_text or f"page {idx}"}
+    return client.post(f"/v1/documents/{doc_id}/pages", json=data)
 
 
 def test_health(client):
@@ -53,15 +47,14 @@ def test_match_response_carries_versions_and_hints(client):
     doc_id = _create_doc(client)
     _add_page(client, doc_id, 0, seed=10, ocr_text="page one")
     client.post(f"/v1/documents/{doc_id}/finalize")
-    files = {"image": ("q.png", image_bytes(make_image(seed=10)), "image/png")}
     r = client.post(
         "/v1/match",
-        data={
+        json={
             "document_id": str(doc_id),
+            "fast_ocr_text": "page one",
             "client_version": "android-0.9.1",
             "sdk_hint": "cxr-l",
         },
-        files=files,
     )
     body = r.json()
     assert body["versions"]["hud_contract_version"]
@@ -79,9 +72,10 @@ def test_full_flow_hit(client):
     assert fin["page_count"] == 2
     assert len(fin["summaries"]) == 2
 
-    # query with the same image as page 0 -> HIT on page_index 0
-    files = {"image": ("q.png", image_bytes(make_image(seed=10)), "image/png")}
-    r = client.post("/v1/match", data={"document_id": str(doc_id)}, files=files)
+    # recognized text for page 0 -> HIT on page_index 0
+    r = client.post(
+        "/v1/match", json={"document_id": doc_id, "fast_ocr_text": "page one"}
+    )
     body = r.json()
     assert body["verdict"] == "HIT"
     assert body["best_page"]["page_index"] == 0
@@ -94,11 +88,32 @@ def test_match_no_page(client):
     _add_page(client, doc_id, 0, seed=10)
     client.post(f"/v1/documents/{doc_id}/finalize")
 
-    files = {"image": ("q.png", image_bytes(make_image(seed=777)), "image/png")}
-    r = client.post("/v1/match", data={"document_id": str(doc_id)}, files=files)
+    r = client.post(
+        "/v1/match",
+        json={"document_id": doc_id, "fast_ocr_text": "unrelated material"},
+    )
     body = r.json()
     assert body["verdict"] in {"NO_PAGE", "LOW_CONF"}
     assert len(body["hud"]["lines"]) == 3
+
+
+def test_match_rejects_raw_image(client):
+    doc_id = _create_doc(client)
+    _add_page(client, doc_id, 0, seed=10, ocr_text="page one")
+    client.post(f"/v1/documents/{doc_id}/finalize")
+    r = client.post(
+        "/v1/match",
+        data={"document_id": str(doc_id), "fast_ocr_text": "page one"},
+        files={"image": ("q.png", b"not-read", "image/png")},
+    )
+    assert r.status_code == 415
+
+
+def test_match_requires_recognized_text(client):
+    doc_id = _create_doc(client)
+    _add_page(client, doc_id, 0, seed=10, ocr_text="page one")
+    r = client.post("/v1/match", json={"document_id": doc_id})
+    assert r.status_code == 400
 
 
 def test_duplicate_page_index_conflict(client):
@@ -108,6 +123,7 @@ def test_duplicate_page_index_conflict(client):
 
 
 def test_missing_document_404(client):
-    files = {"image": ("q.png", image_bytes(make_image(seed=1)), "image/png")}
-    r = client.post("/v1/match", data={"document_id": "9999"}, files=files)
+    r = client.post(
+        "/v1/match", json={"document_id": 9999, "fast_ocr_text": "query"}
+    )
     assert r.status_code == 404

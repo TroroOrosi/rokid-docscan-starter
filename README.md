@@ -6,13 +6,13 @@ Rokid Glasses で紙資料を「文書」として登録し、**目の前の資�
 ページ照合・**入試問題の解答**・**資料解説**をグラス上の小さな HUD（最大3行）で返すサーバです。
 模試（学習・練習）利用を主目的とし、以下の要望を満たします：
 
-- **LED 点灯時間の最小化（設計原則）**：Rokid Glasses のプライバシー LED は**カメラ稼働中は必ず点灯**
-  します（視認＝認識＝カメラ ON＝LED 点灯。ハード強制・無効化不可）。そこで**読取フェーズだけ**を
-  カメラ ON で最短に済ませ、解答・閲覧フェーズはカメラ OFF（LED 消灯）で行う **3 フェーズフロー**
-  （読取 → 一括解答 → 閲覧）を主経路とします。
-- **撮影しない**：紙を写真に撮らない。Rokid Glasses 本体 AI が**視認＝認識**し、その読み取りを
-  **テキスト**（本文＝`ocr_text`／図・画像の読み取り＝`vision_text`）でサーバへ送る。写真ファイル・
-  フラッシュ・シャッター音を出さない（録音も無音）。
+- **写真・動画を作らない**：サーバは `ocr_text` / `vision_text` / `fast_ocr_text` だけを受け取り、
+  `/pages`・`/match`・`/questions` に送られた画像は、バイト列を読む前に `415` で拒否します。
+  画像・動画・生フレームを保存せず、既存 DB の画像パスも解析・解答モデルへ渡しません。
+- **LEDを迂回しない**：Rokid 公式ガイドは、Rokid Glasses のリアルタイム翻訳をマイク音声の翻訳、
+  白色点灯を「カメラ使用中」と説明しています。したがって音声翻訳は、視覚認識中もLEDが消える根拠に
+  なりません。視覚センサーを使う場合のLEDは端末ファームウェアに従い、サーバは制御・消灯保証を
+  行いません。読取終了時はクライアントへセンサー終了を要求します。
 - **図・画像も読む**：図・グラフ・写真がないと解けない問題に対応。本体 AI の図の読み取り
   （`vision_text`）を本文と併せて解答材料にする。
 - **全ページを記憶してから解く**：全ページを一度だけ登録・記憶し、文書を**問題単位に分割して全問を
@@ -33,11 +33,11 @@ Rokid Glasses で紙資料を「文書」として登録し、**目の前の資�
   extractor の各ポートに **OpenAI (GPT) / Gemini / Claude の実アダプタを同梱**。環境変数だけで
   切り替わり、キー未設定時は自動でローカルにフォールバックします（下記「実モデル接続」）。
 - ストレージは **SQLite + ローカルファイルシステム**（Postgres / MinIO 不要）。
-- 照合は **決定的**（pHash のハミング距離 + OCR テキスト類似度ボーナス）。
+- 実行時の照合は **決定的な認識テキスト類似度**。pHash は既存DBの検証用プリミティブとしてのみ残します。
 - **CXR-L プラグイン（スマホ側）とグラス本体 AI の接続**は
   [`docs/cxr-l-integration.md`](docs/cxr-l-integration.md)、実機差し込み全般は
   [`docs/implementation-notes.md`](docs/implementation-notes.md) を参照。
-- 現在のバージョン: **APP 0.8.0 / API 1.8.0**。
+- 現在のバージョン: **APP 0.9.0 / API 1.9.0**。
 
 ---
 
@@ -46,7 +46,7 @@ Rokid Glasses で紙資料を「文書」として登録し、**目の前の資�
 | 区分 | 概要 | 詳細ドキュメント |
 |------|------|------------------|
 | **ユーザーがやること**（人間の物理操作） | SDK 取得・ADB/ケーブル・ペアリング・全ページ視認読取（撮影しない）・読取品質チェック・プライバシー同意・クラウド/ローカル選択・検証実行 | [docs/user-operation-guide.md](docs/user-operation-guide.md) §1 |
-| **システムがやること**（実装済み・自動） | 文書作成 / ページ取込 / pHash・OCR-MD5 / finalize / 照合 / HUD 応答 / バージョン付与 / ログ / しきい値フック | [docs/user-operation-guide.md](docs/user-operation-guide.md) §2 |
+| **システムがやること**（実装済み・自動） | 文書作成 / テキストページ取込 / 画像拒否 / OCR-MD5・テキスト照合 / finalize / HUD 応答 / バージョン付与 / ログ | [docs/user-operation-guide.md](docs/user-operation-guide.md) §2 |
 | **次に判断すること**（操作後の設計判断） | OCR 配置 / モデルルーティング / ストレージ・プライバシー / HUD 文言 / 信頼度しきい値 / オフライン挙動 / 対象端末(Android/iOS/Rokid/Android XR) | [docs/user-operation-guide.md](docs/user-operation-guide.md) §3 |
 
 将来モデル/SDK が新しくなっても壊れない設計（ポート&アダプタ、レジストリ、契約
@@ -60,7 +60,7 @@ Rokid Glasses で紙資料を「文書」として登録し、**目の前の資�
 rokid-docscan-starter/
 ├── app/
 │   ├── main.py        # FastAPI エンドポイント（match / exam / explain）
-│   ├── matching.py    # pHash / hamming / OCR 類似度 / スコアリング
+│   ├── matching.py    # 実行時テキスト照合 + 既存DB評価用 pHash
 │   ├── hud.py         # 3行 HUD ペイロード生成（/match 用）
 │   ├── glasses_view.py# グラス表示ビルダー（exam / explain 用・無音契約）
 │   ├── overlay.py     # 解答欄オーバーレイ（2D画像アンカー）
@@ -70,21 +70,18 @@ rokid-docscan-starter/
 │   ├── summarize.py   # 要約シム（analyzer に委譲）
 │   ├── explainer.py   # Explainer ポート（ExplainRequest / ExplainResult / ABC）
 │   ├── llm.py         # ★実 AI ブリッジ（openai/gemini/claude、遅延import・注入可）
-│   ├── version.py     # 各契約バージョン（app 0.8.0 / api 1.8.0 ほか）
+│   ├── version.py     # 各契約バージョン（app 0.9.0 / api 1.9.0 ほか）
 │   ├── config.py      # 保存先・フィーチャーフラグ（ROKID_* / ANTHROPIC_API_KEY / ROKID_TRANSCRIBER）
 │   ├── transcribe.py  # ★リスニング録音の書き起こし（openai/gemini・未設定時は与値）
 │   ├── db.py          # sqlite3（documents/pages/exam/explain テーブル）
 │   ├── analyzers/     # 解析ポート: base / registry / local_placeholder / claude ★
 │   ├── solvers/       # 解答ポート: base / registry / local_placeholder / claude ★
 │   ├── explainers/    # 解説ポート: registry / local_placeholder / claude ★
-│   ├── extractors/    # メディア抽出: base / registry / local_placeholder / claude ★
-│   └── devtools/      # rokid_led.py（録画LED診断・サーバ非依存）
+│   └── extractors/    # 認識テキストからの構造抽出: base / registry / local_placeholder / claude ★
 ├── tests/             # pytest（照合/API/バージョン/レジストリ/exam/explain/LLM）
 ├── scripts/
-│   ├── make_sample_pages.py  # curl 用サンプル画像生成
-│   ├── evaluate.py           # 照合評価 → JSON レポート
-│   ├── eval_exam.py          # 解答パイプライン評価 → JSON レポート
-│   └── rokid_led.py          # 録画LED診断 CLI（実機所有者専用・任意）
+│   ├── evaluate.py           # 認識テキスト照合評価 → JSON レポート
+│   └── eval_exam.py          # 解答パイプライン評価 → JSON レポート
 ├── docs/
 │   ├── cxr-l-integration.md         # ★CXR-L(ｽﾏﾎ側ﾌﾟﾗｸﾞｲﾝ) ⇄ 本体AI ⇄ 本サーバ + Kotlin 例・遠隔操作/画面共有
 │   ├── real-device-operation.md     # ★実機運用ガイド（準備→起動→操作→実AI/認証/KeyCode）
@@ -92,11 +89,10 @@ rokid-docscan-starter/
 │   ├── user-operation-guide.md      # ユーザー操作 / 自動化 / 設計判断 / 環境変数一覧
 │   ├── future-proof-architecture.md # 将来対応アーキテクチャ
 │   ├── explain-sessions.md          # 資料解説モード詳細・curl 例
-│   ├── glasses-ux-contract.md       # グラス UX 契約（操作・HUD・無音・無フラッシュ）
-│   ├── exam-solver-architecture.md  # 解答モードアーキテクチャ
-│   └── rokid-led-dev-utility.md     # 録画LED診断ツールの詳細・警告
+│   ├── glasses-ux-contract.md       # グラス UX 契約（操作・HUD・入力プライバシー）
+│   └── exam-solver-architecture.md  # 解答モードアーキテクチャ
 ├── .env.example       # 全環境変数の雛形（コピーして .env に）
-├── data/images/       # 画像保存先（実行時に自動生成）
+├── data/audio/        # リスニング音声を送った場合の保存先
 ├── requirements.txt   # コア依存（anthropic/openai/google-genai は任意・コメント参照）
 ├── Dockerfile
 └── docker-compose.yml
@@ -122,7 +118,7 @@ uvicorn app.main:app --reload --port 8000
 
 - データ保存先を変えたい場合は環境変数 `ROKID_DATA_DIR` を設定:
   `ROKID_DATA_DIR=/tmp/rokid uvicorn app.main:app --port 8000`
-- 起動時に `data/images/` と `data/docscan.db` が自動生成されます。
+- 起動時に `data/audio/` と `data/docscan.db` が自動生成されます。画像保存ディレクトリは作りません。
 
 ## テスト
 
@@ -130,35 +126,31 @@ uvicorn app.main:app --reload --port 8000
 pytest -q
 ```
 
-照合ロジック（pHash 決定性 / ハミング距離 / OCR-MD5 正規化 / スコアリング /
+照合ロジック（認識テキスト類似度 / OCR-MD5 正規化 / 既存DB評価用pHash /
 HIT・LOW CONF・NO PAGE 判定）、API の登録〜finalize〜照合フロー、
-バージョンメタデータ、analyzer レジストリ、explain-sessions フルフローを、
-PIL で生成した合成画像で検証します（外部クレデンシャル不要・オフライン完結）。
+バージョンメタデータ、analyzer レジストリ、explain-sessions フルフローを検証します。
+pHash単体テストの合成画像はカメラ入力ではなく、HTTP実行経路には入りません。
 
 ## 評価（実サンプル読取後の検証に使用）
 
-ユーザーが実機でサンプルを読取・登録した後（照合評価は画像を使う任意経路 `/match` 用）、照合品質としきい値提案を JSON で出力:
+ユーザーが実機でサンプルを認識・登録した後、保存済み認識テキストに対する完全一致・擬似OCRノイズ
+照合をJSONで評価します。画像は使用しません。
 
 ```bash
 # 既存DBに対して評価
 ROKID_DATA_DIR=data python scripts/evaluate.py --db data/docscan.db --out report.json
-# 合成画像で素早く確認
+# 合成テキストで素早く確認
 python scripts/evaluate.py --synthetic 5
 ```
 
-`self_match_accuracy` と `suggested_thresholds` を見て `app/matching.py` の
-しきい値（D5）を調整します。
+`self_match_accuracy`・`noisy_match_accuracy`・`noisy_similarity` を見て、実機の誤一致も確認した上で
+`TEXT_CONF_OK/LOW` を調整します。
 
 ---
 
 ## API と curl 例
 
-サーバが `http://127.0.0.1:8000` で動いている前提です。
-サンプル画像（`page0.png` / `page1.png` / `query.png`）は次で生成できます:
-
-```bash
-python scripts/make_sample_pages.py
-```
+サーバが `http://127.0.0.1:8000` で動いている前提です。全例はテキストだけを送ります。
 
 ### 1. ヘルスチェック
 
@@ -178,28 +170,23 @@ curl -s -X POST http://127.0.0.1:8000/v1/documents \
 
 ### 3. ページを追加（撮影しない：本体 AI の認識テキスト＝本文＋図の読み取り）
 
-**撮影しません。画像は不要**です。Rokid 通常利用のように**本体 AI が視認＝認識**した結果を
-テキストで送ります（`image_path=null`・`phash=""`）：
+**画像は受け付けません。** クライアント側で一時的に得た認識結果をテキストで送ります
+（`image_path=null`・`phash=""`）。写真・動画の撮影APIやファイル保存は呼び出さないでください：
 
 - `ocr_text` … ページの本文（認識テキスト）
 - `vision_text` … **図・グラフ・写真・見た目の読み取り**（画像ではなくテキスト）。図がないと解けない
   問題のために、本文と併せて解答材料になります。
 
 ```bash
-# 撮影しない：本文＋図の読み取りをテキストで登録
+# 本文＋図の読み取りをテキストだけで登録
 curl -s -X POST http://127.0.0.1:8000/v1/documents/1/pages \
-  -F page_index=0 \
-  -F ocr_text='問1 図の回路の合成抵抗を求めよ' \
-  -F vision_text='回路図: R1=2Ω と R2=3Ω が直列'
-# {"page_id":1,...,"phash":"","image_path":null,"has_vision_text":true}
-
-# （任意・後方互換）画像を添付すると pHash も算出され /match に使えます
-curl -s -X POST http://127.0.0.1:8000/v1/documents/1/pages \
-  -F page_index=0 -F image=@page0.png -F ocr_text='1ページ目の本文テキスト'
+  -H 'Content-Type: application/json' \
+  -d '{"page_index":0,"ocr_text":"問1 図の回路の合成抵抗を求めよ","vision_text":"回路図: R1=2Ω と R2=3Ω が直列"}'
+# {"page_id":1,...,"phash":"","image_path":null,
+#  "raw_media_received":false,"media_persisted":false}
 ```
 
-> `ocr_text`／`vision_text`／画像のいずれも無い場合は 400。標準フローは撮影せずテキストのみで、
-> 画像は後方互換の任意項目です。
+> `ocr_text` と `vision_text` が両方空なら `400`。`image` を添付すると、内容を読み取る前に `415`。
 
 ### 4. 文書を確定（finalize）
 
@@ -215,9 +202,8 @@ curl -s -X POST http://127.0.0.1:8000/v1/documents/1/finalize
 
 ```bash
 curl -s -X POST http://127.0.0.1:8000/v1/match \
-  -F document_id=1 \
-  -F image=@query.png \
-  -F fast_ocr_text='1ページ目の本文テキスト'
+  -H 'Content-Type: application/json' \
+  -d '{"document_id":1,"fast_ocr_text":"1ページ目の本文テキスト"}'
 ```
 
 レスポンス例（HIT）:
@@ -226,9 +212,12 @@ curl -s -X POST http://127.0.0.1:8000/v1/match \
 {
   "document_id": 1,
   "verdict": "HIT",
-  "best_page": {"page_id":1,"page_index":0,"hamming":0,"ocr_match":true,"ocr_similarity":1.0,"confidence":1.0},
+  "matching_mode": "recognized_text",
+  "raw_media_received": false,
+  "media_persisted": false,
+  "best_page": {"page_id":1,"page_index":0,"hamming":null,"ocr_match":true,"ocr_similarity":1.0,"confidence":1.0},
   "confidence": 1.0,
-  "hud": {"verdict":"HIT","confidence":1.0,"lines":["PAGE 1/2","1ページ目の本文テキスト","conf 1.00  hd 0"]},
+  "hud": {"verdict":"HIT","confidence":1.0,"lines":["PAGE 1/2","1ページ目の本文テキスト","conf 1.00  txt 1.00"]},
   "candidates": [ {"page_index":0,...}, {"page_index":1,...} ]
 }
 ```
@@ -243,29 +232,19 @@ curl -s -X POST http://127.0.0.1:8000/v1/match \
 
 ---
 
-## 照合ロジック（決定的）
+## 照合ロジック（実行時はテキストのみ）
 
 `app/matching.py` 内のしきい値で挙動を制御します。
 
-- **pHash**: 画像を 32×32 グレースケール化 → 2次元 DCT → 低周波 8×8 ブロックを
-  中央値で2値化した **64bit** ハッシュ。
-- **ハミング距離**:
-  - `<= HAMMING_STRONG (6)` … 視覚的に確実な一致（視覚信頼度 1.0）
-  - `>= HAMMING_WEAK (16)` … 無関係（視覚信頼度 0.0）
-  - 間は線形補間。
-- **OCR テキスト類似度ボーナス**: クエリと候補の OCR テキストがどれだけ似ているかで
-  最大 `OCR_MD5_BONUS (0.35)` まで **段階的に** 加点します（実 OCR はノイズで揺れるため、
-  完全一致のみだと現場でほぼ加点されないため）。
-  - 正規化 MD5 が完全一致 → 満点ボーナス（最速パス。OCR 無し時の画像 MD5 一致もここ）。
-  - そうでなければ正規化テキストの類似度 `ratio`（`difflib`、0..1）を見て、
-    `ratio >= OCR_SIM_FLOOR (0.6)` のとき `OCR_MD5_BONUS * ratio` を加点。
-    `ratio >= OCR_MATCH_RATIO (0.9)` なら `ocr_match=true`。
+- **完全一致**：正規化テキストの MD5 が一致すれば `confidence=1.0`。
+- **近似一致**：それ以外は `difflib.SequenceMatcher` の類似度（0..1）をそのまま信頼度にします。
   - 正規化は「前後空白除去・連続空白を単一化・小文字化」。
-  - レスポンスには `ocr_similarity`（0..1）が含まれます（追加フィールド・後方互換）。
-- **判定**: 合成信頼度（0..1 にクリップ）が
-  `>= CONF_OK (0.62)` → `HIT` / `>= CONF_LOW (0.40)` → `LOW_CONF` / それ未満 → `NO_PAGE`。
+- **判定**：`>= TEXT_CONF_OK (0.82)` → `HIT`、`>= TEXT_CONF_LOW (0.55)` → `LOW_CONF`、
+  それ未満 → `NO_PAGE`。
+- pHash / ハミング距離は、古いDBや合成評価の互換プリミティブとして残っていますが、HTTP実行経路は
+  呼び出しません。
 
-しきい値は撮影環境（照明・ブレ・解像度）に応じてチューニングしてください。
+しきい値は端末側認識テキストの誤り方に応じてチューニングしてください。
 
 ---
 
@@ -287,17 +266,16 @@ curl -s -X POST http://127.0.0.1:8000/v1/match \
 
 | 役割 | 実機での担当 | 本サーバでの受け口 |
 |------|--------------|-----------------|
-| 撮影 | Glasses カメラ（CXR-L `IMediaStreamService`／CXR-M） | クライアントがアップロードする画像 |
-| 端末側 OCR / 認識 | 本体 AI（`com.rokid.sprite.aiapp`）／ML Kit／Vision | `ocr_text` / `vision_text` / `fast_ocr_text` フォーム値 |
-| ページ照合 | 本サーバ（pHash + OCR 類似度） | 同左（そのまま） |
+| 視覚認識 | クライアント側の一時認識セッション（SDKで実機検証が必要） | 生画像は送らず、結果テキストだけを送信 |
+| 端末側 OCR / 認識 | 本体 AI／端末OCR（利用可能な公式APIに合わせる） | `ocr_text` / `vision_text` / `fast_ocr_text` |
+| ページ照合 | 本サーバ（認識テキスト類似度） | `POST /v1/match`（画像添付不可） |
 | **解答（主経路）** | **本体 AI（搭載 GPT / Gemini）が全問を解く** | `POST /v1/exam-sessions/{id}/solutions`（ingest） |
 | 要約/解答/解説/抽出（任意） | 本サーバ（既定ローカル、任意で `openai`/`gemini`/`claude` 実AI） | 各 registry のアダプタ |
 | HUD 表示 | Glasses の**両眼**ディスプレイ（3行） | `hud.lines` / `glasses_view.lines`（3行） |
 | 文書登録ワークフロー | グラス/コンパニオン UI | `/v1/documents` → `/pages` → `/finalize` |
 
-- 実機ハードウェア仕様（**両眼** 480×398 Micro-LED、AR1+NXP RT600、IMX681 12MP、
-  YodaOS/Android 12 API32 など）と CXR-M/S/L の役割は、ウェブ検証済みの値を
-  [`docs/cxr-l-integration.md`](docs/cxr-l-integration.md) にまとめています。
+- 実機機能と、公式公開情報で確認できる範囲／SDK入手後に実機確認が必要な範囲は
+  [`docs/cxr-l-integration.md`](docs/cxr-l-integration.md) に分けてまとめています。
 - **グラス本体 AI とサーバの接続**は 2 経路（同 doc §4）：**(B) 本体 AI（搭載 GPT / Gemini）が
   読取（`ocr_text`/`vision_text`）と解答（`POST /solutions`）を担う＝主経路（サーバ鍵不要）**、
   (A) サーバ側の `openai`/`gemini`/`claude` 実アダプタ＝より高性能なモデルが必要な場合の任意経路。
@@ -349,7 +327,8 @@ curl -s -X POST http://127.0.0.1:8000/v1/match \
 curl -s -X POST http://127.0.0.1:8000/v1/exam-sessions \
   -H 'Content-Type: application/json' -d '{"mode":"study","voice_enabled":false}'
 curl -s -X POST http://127.0.0.1:8000/v1/exam-sessions/1/questions \
-  -F image=@page0.png -F ocr_text=$'問2 次の計算\n① 12\n② 13\n③ 14\n④ 15'
+  -H 'Content-Type: application/json' \
+  -d '{"ocr_text":"問2 次の計算\n① 12\n② 13\n③ 14\n④ 15"}'
 curl -s -X POST http://127.0.0.1:8000/v1/exam-sessions/1/questions/1/solve
 curl -s 'http://127.0.0.1:8000/v1/exam-sessions/1/questions/1/view?stage=rationale&page=0'
 curl -s http://127.0.0.1:8000/v1/exam-sessions/1/questions/1/reasoning
@@ -361,21 +340,21 @@ python scripts/eval_exam.py --synthetic 5 --out /tmp/exam_eval.json
 設計は [docs/exam-solver-architecture.md](docs/exam-solver-architecture.md)、
 グラス表示・操作の規約は [docs/glasses-ux-contract.md](docs/glasses-ux-contract.md) を参照。
 
-### 3 フェーズ実践フロー（主経路 / API 1.8.0・LED 点灯最小）
+### 3 フェーズ実践フロー（主経路 / API 1.9.0・メディア非保存）
 
-**読取 → 一括解答 → 閲覧** の 3 フェーズが主経路です。カメラ（＝プライバシー LED 点灯）は
-**フェーズ 1 の読取中だけ**。読取完了をグラスのジェスチャで宣言した瞬間からカメラは閉じ、
-解答・閲覧は LED 消灯のまま行えます（用紙も視認も不要）。撮影は一切発生しません。
+**読取 → 一括解答 → 閲覧** の 3 フェーズが主経路です。フェーズ1でもサーバへ送るのは認識テキスト
+だけです。読取完了時、クライアントは視覚認識セッションを停止してから `finalize-reading` を呼びます。
+サーバは物理カメラやLEDを観測できないため、応答は停止要求と期待状態を返し、消灯済みとは断定しません。
 
 ```
-フェーズ1 読取（カメラON・LED点灯・最短化）
-  2本指タップ（AI起動=視認）×ページ数 → /pages に ocr_text+vision_text を登録（scan_ack で進捗）
-  ダブルタップ（読取完了宣言）        → POST /finalize-reading（以降カメラOFF＝LED消灯）
-フェーズ2 解答（カメラOFF・自動）
+フェーズ1 読取（端末内の一時認識。写真・動画・フレーム保存なし）
+  2本指タップ×ページ数 → /pages に ocr_text+vision_text のみ登録（scan_ack で進捗）
+  ダブルタップ → クライアントが視覚センサーを停止 → POST /finalize-reading
+フェーズ2 解答（視覚センサー不要・自動）
   文書を問題単位に分割（問N/大問 境界・ページ跨ぎ対応・全ページを文脈に）
   主経路: 搭載 GPT が全問を解き POST /solutions で取り込み（served_by="onboard"）
   任意:   ROKID_SOLVER=openai|gemini|claude ならサーバが finalize-reading 内で全問一括解答
-フェーズ3 閲覧（カメラOFF・LED消灯）
+フェーズ3 閲覧（視覚センサー不要）
   GET /solutions … 問題別レビューデッキ（問番号・教科・解答済み・確信度）
   GET /review?index=k&view_page=n … 1問題＝解答+解法+根拠+注意を一括1ストリーム表示
   2本指スワイプ左右=前後の問題 / 2本指スワイプ上下=テレプロンプター送り / ダブルタップ=終了
@@ -384,15 +363,17 @@ python scripts/eval_exam.py --synthetic 5 --out /tmp/exam_eval.json
 ```bash
 # フェーズ1) 撮影せず、本文＋図の読み取りを全ページ登録 → finalize → exam セッション
 curl -s -X POST http://127.0.0.1:8000/v1/documents -d '{"title":"模試"}' -H 'Content-Type: application/json'
-curl -s -X POST http://127.0.0.1:8000/v1/documents/1/pages -F page_index=0 \
-  -F ocr_text='第1問 長文…' -F vision_text='図1: グラフの概形…'
-curl -s -X POST http://127.0.0.1:8000/v1/documents/1/pages -F page_index=1 \
-  -F ocr_text='問1 前ページの本文を踏まえて答えよ'
+curl -s -X POST http://127.0.0.1:8000/v1/documents/1/pages \
+  -H 'Content-Type: application/json' \
+  -d '{"page_index":0,"ocr_text":"第1問 長文…","vision_text":"図1: グラフの概形…"}'
+curl -s -X POST http://127.0.0.1:8000/v1/documents/1/pages \
+  -H 'Content-Type: application/json' \
+  -d '{"page_index":1,"ocr_text":"問1 前ページの本文を踏まえて答えよ"}'
 curl -s -X POST http://127.0.0.1:8000/v1/documents/1/finalize
 curl -s -X POST http://127.0.0.1:8000/v1/exam-sessions -H 'Content-Type: application/json' \
   -d '{"mode":"study","document_id":1,"exam_type":"written","answer_format":"mark"}'
 
-# 読取完了宣言（ダブルタップ）→ 問題分割・カメラOFF（LED消灯）
+# 読取完了宣言（ダブルタップ）→ クライアント側センサー停止後に問題分割
 curl -s -X POST http://127.0.0.1:8000/v1/exam-sessions/1/finalize-reading
 
 # フェーズ2) 搭載 GPT の問題別解答を取り込み（主経路）
@@ -407,7 +388,8 @@ curl -s http://127.0.0.1:8000/v1/exam-sessions/1/solutions
 curl -s 'http://127.0.0.1:8000/v1/exam-sessions/1/review?index=0&view_page=0'
 ```
 
-**英語リスニング**：長押し（公式の録画⇄録音トグル）で筆記⇄リスニングを切替（`POST /mode`）。
+**英語リスニング**：長押しをアプリ内で処理して筆記⇄リスニングを切替（`POST /mode`）。
+システムの写真・動画操作へは転送せず、リスニング中はマイク音声だけを扱います。
 リスニングは音声を**その場で無音録音**して送信（未書き起こし時は与えた `transcript` をそのまま
 使用＝オフライン可）。書き起こしは全問の解答文脈に統合され、`answer_format`（マーク/記述）に
 沿って解答されます。
@@ -421,60 +403,14 @@ curl -s -X POST http://127.0.0.1:8000/v1/exam-sessions/1/audio \
 
 #### 互換: 文書ページ移動型（solve-current 型・二次経路）
 
-ページ移動で現在ページを解く従来経路も残しています（挙動不変）。ページを視認しながら解くため
-読取と閲覧が分離されず、主経路より LED 点灯時間が長くなります。
+ページ移動で現在ページを解く従来経路も残しています。登録済みの認識テキストだけを参照するため、
+このサーバ側経路はカメラ画像を要求しません。
 
 ```bash
 curl -s -X POST http://127.0.0.1:8000/v1/exam-sessions/1/next-page   # 2本指スワイプ左右
 curl -s http://127.0.0.1:8000/v1/exam-sessions/1/current
 curl -s -X POST http://127.0.0.1:8000/v1/exam-sessions/1/solve-current  # タップ（全ページを文脈に）
 ```
-
-## 録画 LED 開発用診断ツール（任意・実機所有者専用）
-
-実機の **録画インジケータ（プライバシー）LED** を調査するための、**サーバとは独立した
-開発者向け診断ツール** を `scripts/rokid_led.py` に追加しました。**サーバや文書スキャン／
-解答フローからは一切呼ばれません**。`GET /v1/settings` の `capture.privacy_led` は
-`on_while_camera_active / tamper:forbidden`（カメラ稼働中は必ず点灯・改変不可）を公示し、
-本ツールはその契約を変更しません。点灯時間を短くする正攻法は本 README の 3 フェーズフロー
-（読取フェーズの最短化）であり、LED の無効化ではありません。
-
-> **⚠️ 重要**: 録画インジケータを無効化する **確実な非 root・ソフトウェアのみの方法は
-> 確認されていません**。`disable` は **未確認の仮説**（root / SELinux 変更が必要な場合あり）
-> で、効かないこともあります。録画インジケータの無効化は **違法となりうる行為** です。
-> **自分が所有・管理する端末** に対し、現地法と「録画は見える形で行う」期待に従って、
-> 管理された開発環境でのみ使用してください。
-
-- **既定は dry-run**（コマンド列を表示するだけ・端末に何も送らない）。
-- 実行は `--apply`、状態を変える `disable`/`restore` は `--apply` に加え `--force` が必須
-  （`--apply` のみで write を呼ぶと **ブロックして exit code 2**）。
-
-```bash
-# ワイヤレス ADB 接続コマンドの確認（dry-run。眼鏡のIPアドレスに置換）
-python scripts/rokid_led.py connect 192.168.1.50
-
-# LED ノード / プロパティ / SELinux 状態の探索（読み取り専用）
-python scripts/rokid_led.py probe --host 192.168.1.50:5555 --apply
-
-# 現在の LED 状態（読み取り専用）
-python scripts/rokid_led.py status --host 192.168.1.50:5555 --apply
-
-# 無効化の計画だけ表示（既定 dry-run・何も実行しない）
-python scripts/rokid_led.py disable --led white
-
-# 自分の端末で実際に試行（両フラグ必須）
-python scripts/rokid_led.py disable --led white --host 192.168.1.50:5555 --apply --force
-
-# 「本当に消えたか」を読み戻しで検証し、JSON 証跡を出力（再点灯対策に最大3回再アサート）
-python scripts/rokid_led.py verify --led white --host 192.168.1.50:5555 \
-    --apply --force --retries 3 --evidence-out led-evidence.json
-```
-
-> `verify` は ADB の `rc=0`（`write_succeeded`）と **実際の状態**（`verified_state` /
-> `confirmed_off`、brightness 読み戻しが根拠）を分離します。`confirmed_off: true` でも
-> **別カメラでの目視確認が必須**です（ADB 成功は物理 LED の消灯を証明しません）。
-
-詳細・警告・既知の制約・検証手順は [docs/rokid-led-dev-utility.md](docs/rokid-led-dev-utility.md) を参照。
 
 ## 実モデル接続（openai / gemini / claude — 任意の高性能化経路）
 
@@ -518,7 +454,7 @@ uvicorn app.main:app --port 8000
 ### 実機運用（グラス連携・入力・認証）
 
 - **入力コントラクト**：`GET /v1/settings` の `input` が gesture→KeyCode を公示。ジェスチャ名は
-  現行公式（2本指タップ=AI起動 / タップ / ダブルタップ / 2本指スワイプ上下左右 / 長押し=録画⇄録音）、
+  現行のジェスチャ（2本指タップ / タップ / ダブルタップ / 2本指スワイプ上下左右 / 長押し）、
   **KeyCode 値は旧・単眼 Rokid Glass 由来で未実測**（`keycodes_verified:false`）。実機で
   `adb shell getevent -l` により計測し、機種差は `ROKID_KEYMAP` で上書き（クライアント改修不要）。
 - **認証（任意）**：`ROKID_API_KEY` を設定すると発見系以外は `Authorization: Bearer` 必須。
@@ -540,8 +476,7 @@ docker compose up --build
   `ocr_text` として受け取る三層構成）。テキスト照合は完全一致ではなく類似度（`difflib`）で
   段階加点するため、多少の OCR ノイズには強い。要約/解答/解説/抽出は `claude` アダプタで
   実 AI 化できます。
-- pHash は純 Python 実装（numpy/imagehash 非依存）で、大量ページでは低速。
-  高速化は scipy/imagehash 等への置換が定石（依存を増やすため既定では未採用）。
+- 文字列類似度はページ全文を比較するため、大規模文書では候補の事前絞り込みが将来課題です。
 - マルチテナント・並行書き込み制御は未実装（簡易 Bearer 認証は `ROKID_API_KEY` で任意）。
 - 実 AI アダプタは任意依存（`anthropic`/`openai`/`google-genai`）と各社 API キーが必要。
   未設定なら自動でローカル実装にフォールバック（実 AI 出力は得られません）。

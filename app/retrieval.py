@@ -1,7 +1,7 @@
-"""Lightweight cross-document retrieval (RAG) over previously scanned pages.
+"""Lightweight cross-document retrieval (RAG) over registered text pages.
 
 When solving a question we can pull supporting context from the user's own
-captured study materials (the existing `documents`/`pages` store built by the
+recognized study materials (the existing `documents`/`pages` store built by the
 page-matching mode). This module returns the most relevant pages as `context` text
 plus `evidence_pages`, which the solver uses as grounding and the HUD surfaces
 as "根拠".

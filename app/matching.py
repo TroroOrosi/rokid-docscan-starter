@@ -6,8 +6,10 @@ numpy / imagehash. Provides:
 - pHash: 64-bit DCT-based perceptual hash of an image.
 - hamming: bit difference between two hashes.
 - normalize_ocr_text + ocr_md5: stable MD5 of normalized OCR text.
-- score_candidate / match: combine pHash distance and OCR MD5 bonus into a
-  confidence score and a HUD verdict.
+- score_candidate / match: legacy pHash matching primitives kept for offline
+  evaluation and existing databases.
+- score_text_candidate / match_text: the runtime page matcher. It compares only
+  recognized text, so the HTTP API never needs a raw image or recorded frame.
 """
 
 from __future__ import annotations
@@ -42,6 +44,11 @@ OCR_MATCH_RATIO = 0.9    # at/above this, treat as a strong textual agreement
 # Confidence verdict thresholds (after combining signals).
 CONF_OK = 0.62           # >= -> HIT
 CONF_LOW = 0.40          # >= but < CONF_OK -> LOW CONF; below -> NO PAGE
+
+# Text-only runtime matching thresholds. Unlike OCR_MD5_BONUS (which augments a
+# visual score), text matching uses normalized similarity as the whole signal.
+TEXT_CONF_OK = 0.82
+TEXT_CONF_LOW = 0.55
 
 
 # --- pHash ------------------------------------------------------------------
@@ -153,7 +160,8 @@ class Candidate:
 class ScoredCandidate:
     page_id: int
     page_index: int
-    hamming: int
+    # None for text-only runtime matching; an integer for legacy pHash scoring.
+    hamming: int | None
     ocr_match: bool
     confidence: float
     # 0..1 text similarity (1.0 == exact match, 0.0 == no usable text).
@@ -177,7 +185,7 @@ def _ocr_signal(
 ) -> tuple[float, bool, float]:
     """Return (bonus, ocr_match, similarity) from the OCR text signal.
 
-    1. Exact MD5 match -> full bonus (also covers the image-bytes fallback).
+    1. Exact MD5 match -> full bonus for legacy indexed text.
     2. Otherwise, if both sides have normalized text, award a graded bonus
        proportional to their similarity (above OCR_SIM_FLOOR).
     3. No usable text -> no bonus.
@@ -244,3 +252,52 @@ def match(
     best = scored[0] if scored else None
     v = verdict(best.confidence if best else 0.0, bool(scored))
     return best, v, scored
+
+
+# --- Text-only runtime matching --------------------------------------------
+
+def score_text_candidate(
+    query_ocr_text: str | None,
+    candidate: Candidate,
+) -> ScoredCandidate:
+    """Score a page from recognized text without receiving visual media."""
+    query = normalize_ocr_text(query_ocr_text)
+    stored = normalize_ocr_text(candidate.ocr_text)
+    if not query or not stored:
+        similarity = 0.0
+    elif ocr_md5(query) == candidate.ocr_md5:
+        similarity = 1.0
+    else:
+        similarity = difflib.SequenceMatcher(None, query, stored).ratio()
+    similarity = round(similarity, 4)
+    return ScoredCandidate(
+        page_id=candidate.page_id,
+        page_index=candidate.page_index,
+        hamming=None,
+        ocr_match=similarity >= OCR_MATCH_RATIO,
+        confidence=similarity,
+        ocr_similarity=similarity,
+    )
+
+
+def text_verdict(confidence: float, has_candidates: bool) -> str:
+    if not has_candidates:
+        return "NO_PAGE"
+    if confidence >= TEXT_CONF_OK:
+        return "HIT"
+    if confidence >= TEXT_CONF_LOW:
+        return "LOW_CONF"
+    return "NO_PAGE"
+
+
+def match_text(
+    query_ocr_text: str | None,
+    candidates: list[Candidate],
+) -> tuple[ScoredCandidate | None, str, list[ScoredCandidate]]:
+    """Return the best page using recognized text and no image/frame input."""
+    if not normalize_ocr_text(query_ocr_text):
+        return None, "NO_PAGE", []
+    scored = [score_text_candidate(query_ocr_text, c) for c in candidates]
+    scored.sort(key=lambda s: (-s.confidence, s.page_index))
+    best = scored[0] if scored else None
+    return best, text_verdict(best.confidence if best else 0.0, bool(scored)), scored

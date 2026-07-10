@@ -115,9 +115,8 @@ class LLMClient:
     def complete(self, *, system: str, prompt: str, image: bytes | None = None) -> str:
         """Return the model's single-turn text response for the provider.
 
-        When ``image`` (raw bytes) is supplied, it is attached so a vision-capable
-        model can read figures / equations / tables directly (used by the exam
-        solver to answer from the scanned page, not just the OCR text).
+        ``image`` is a generic bridge compatibility parameter. Rokid DocScan's
+        HTTP/runtime paths never supply it: they use recognized text only.
         """
         if self.provider == "anthropic":
             return _text_anthropic(self._sdk, self.model, self.max_tokens, system, prompt, image)

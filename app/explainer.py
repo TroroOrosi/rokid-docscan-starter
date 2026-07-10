@@ -4,7 +4,7 @@ An Explainer turns a matched page (OCR text + summary) plus multi-page
 RAG context into a short, HUD-friendly explanation.
 
 This is intentionally separate from the Analyzer port:
-- Analyzer: page image -> text / summary / embedding  (ingestion time)
+- Analyzer: recognized text -> summary / embedding  (ingestion time)
 - Explainer: matched page + context -> live HUD explanation  (query time)
 
 Concrete adapters (local placeholder today; Gemini/OpenAI/Claude later)

@@ -3,11 +3,13 @@ from app.matching import (
     Candidate,
     hamming,
     match,
+    match_text,
     normalize_ocr_text,
     ocr_md5,
     phash,
     phash_hex,
     score_candidate,
+    score_text_candidate,
 )
 from tests.conftest import make_image
 
@@ -166,3 +168,30 @@ def test_match_unrelated_query_is_no_page_or_low():
     ph_query = phash_hex(make_image(seed=123))
     best, verdict, _ = match(ph_query, None, [_cand(0, ph_stored)])
     assert verdict in {"NO_PAGE", "LOW_CONF"}
+
+
+# --- text-only runtime path -------------------------------------------------
+
+def test_text_match_hits_without_phash():
+    candidates = [
+        _cand(0, "", ocr_md5("first page text"), "first page text"),
+        _cand(1, "", ocr_md5("second page text"), "second page text"),
+    ]
+    best, result, scored = match_text("second page text", candidates)
+    assert result == "HIT"
+    assert best.page_index == 1
+    assert best.hamming is None
+    assert scored[0].ocr_similarity == 1.0
+
+
+def test_text_match_empty_query_is_no_page():
+    best, result, scored = match_text("  ", [_cand(0, "", None, "text")])
+    assert (best, result, scored) == (None, "NO_PAGE", [])
+
+
+def test_text_score_uses_similarity_as_full_confidence():
+    candidate = _cand(0, "", ocr_md5("invoice total amount"), "invoice total amount")
+    scored = score_text_candidate("invoice total arnount", candidate)
+    assert scored.hamming is None
+    assert scored.confidence == scored.ocr_similarity
+    assert 0.8 < scored.confidence < 1.0

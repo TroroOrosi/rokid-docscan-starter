@@ -7,7 +7,7 @@
 - 本リポジトリ（サーバ実装）は **既に実装済み** で、ローカルで動きます。
 - ここで「ユーザーが行う」と書いた項目は、**コードでは代行できない物理操作や
   アカウント取得・同意取得など** です。それ以外はシステムが自動化します。
-- 現在のバージョン: **APP 0.8.0 / API 1.8.0**
+- 現在のバージョン: **APP 0.9.0 / API 1.9.0**
 - **解答の主経路はグラス搭載 AI（GPT / Gemini）**で、その問題別解答をサーバへ取り込みます
   （`POST /solutions`・サーバ鍵不要）。要約/解答/解説/メディア抽出のサーバ側は既定でローカル
   実装ですが、**実 AI アダプタ（`openai` / `gemini` / `claude`）を同梱**しており、より高性能な
@@ -21,12 +21,12 @@
 |---|------|------|------------|
 | U1 | 開発者アカウント / SDK アクセス取得 | Rokid AR Platform（`ar.rokid.com/sdk`）で開発者登録し、CXR-L SDK（Android/iOS）を入手 | SDK が DL でき、サンプルがビルドできる |
 | U2 | デバッグ環境（ADB / ケーブル） | Android コンパニオン端末を USB デバッグ可能にし、`adb devices` で認識 | `adb devices` に端末が出る |
-| U3 | グラスのペアリング | Rokid Glasses と端末を BLE/Wi-Fi でペアリング、ファーム/アプリ更新 | グラスにカメラ映像/HUD が出る |
-| U4 | 資料の全ページ視認読取（読取フェーズ・**撮影しない**） | 2本指タップ（AI起動）で各ページを視認し、本体 AI の認識テキスト（`ocr_text`＋図の読み取り `vision_text`）を1ページずつ登録（写真は撮らない）。**全ページ登録し終えたら `/finalize` を呼んで完了を宣言する** | 各ページのテキストが登録され、`status=ready` になる |
+| U3 | グラスのペアリング | Rokid Glasses と端末を BLE/Wi-Fi でペアリング、ファーム/アプリ更新 | HUD・入力イベントの接続を確認 |
+| U4 | 資料の全ページ認識（**写真・動画なし**） | 公式SDKの非記録認識APIを確認できた場合だけ、各ページの `ocr_text`＋`vision_text` を登録。写真・動画・生フレームへフォールバックしない。**全ページ後に `/finalize`** | 各ページのテキストが登録され、`status=ready` になる |
 | U5 | 読取品質チェック | 認識テキストに本文・設問・図表の説明が過不足なく含まれるかを scan_ack / `/current` で確認 | §「読取チェックリスト」を満たす |
-| U6 | プライバシー同意 | 読取中のカメラ稼働（LED 点灯）・認識テキストの保存・（クラウド送信する場合）外部送信について利用者同意を取得 | 同意ログ/同意UIが用意されている |
+| U6 | プライバシー同意 | 視覚センサーが使われる可能性、LEDは端末管理であること、認識テキスト保存、クラウド利用時の外部送信について同意を取得 | 同意ログ/同意UIが用意されている |
 | U7 | クラウド vs ローカルモデルの選択 | サーバ側 AI を使う場合のプロバイダ（openai / gemini / claude）かローカルかを決める（主経路の搭載 GPT はサーバ鍵不要） | §「操作後に必要な設計判断」D2 を決定 |
-| U8 | 検証（バリデーション）実行 | 読取サンプルで精度を確認（照合の評価は画像を使う任意経路 `/match` 用） | `scripts/evaluate.py` の accuracy を確認 |
+| U8 | 検証（バリデーション）実行 | 認識テキストの揺れを含むサンプルで `/match` 精度を確認 | HIT / LOW_CONF / NO_PAGE を確認 |
 
 > U1〜U6 と U8 の一部は **物理操作・アカウント・同意** に関わるため、
 > コードでは代行できません。U7 の「決定」も人間の判断です（実装の差し込み口は
@@ -38,8 +38,7 @@
 - 図・グラフ・写真の内容が `vision_text`（本体 AI の図の読み取り）として言語化されている。
 - ページ番号・問題番号（問N/大問N）が読み取れている（問題分割の境界になる）。
 - scan_ack の進捗（N/Mページ完了）が実際のページ数と一致している。
-- （画像を併用する任意の `/match` 経路のみ）反射・影がなく、ページごとに見た目が
-  十分に異なる（pHash が分離できる）。
+- ページごとの認識テキストに、照合できるだけの固有部分が含まれる。
 
 ### 全ページ登録〜完了の手順（読取フェーズ・撮影しない）
 
@@ -47,9 +46,9 @@
 
 ```
 1. POST /v1/documents          → document_id を取得
-2. POST /v1/documents/{id}/pages  (page_index=0, ocr_text[, vision_text])
-3. POST /v1/documents/{id}/pages  (page_index=1, ocr_text[, vision_text])
-   ...全ページ分繰り返す（image は /match 用の任意・後方互換項目）...
+2. POST /v1/documents/{id}/pages  JSON {page_index:0, ocr_text[, vision_text]}
+3. POST /v1/documents/{id}/pages  JSON {page_index:1, ocr_text[, vision_text]}
+   ...全ページ分繰り返す（image は全実行経路で拒否）...
 4. POST /v1/documents/{id}/finalize   ← ★「全ページ完了」の宣言
    → status が "open" から "ready" に変わる
    → 各ページの summary が生成される
@@ -71,12 +70,12 @@
 | # | 自動処理 | 実装箇所 |
 |---|----------|----------|
 | S1 | 文書作成 | `POST /v1/documents`（`app/main.py`） |
-| S2 | ページ取り込み・画像保存 | `POST /v1/documents/{id}/pages` → `data/images/` |
-| S3 | pHash 計算（64bit, DCT） | `app/matching.py: phash/phash_hex` |
-| S4 | OCR-MD5（OCRなしは画像MD5で代替） | `app/matching.py: ocr_md5` + `add_page` |
+| S2 | 認識テキスト取り込み・生画像拒否 | `POST /v1/documents/{id}/pages`（画像は読取前に415） |
+| S3 | テキスト照合 | `app/matching.py: match_text` |
+| S4 | OCR-MD5・近似類似度 | `app/matching.py: ocr_md5/score_text_candidate` |
 | S5 | finalize（要約生成・ready 化） | `POST /v1/documents/{id}/finalize` |
 | S6 | 要約（プロバイダ非依存） | `app/analyzers/`（local 既定 / `claude` 実アダプタ同梱） |
-| S7 | ページ照合（ハミング+OCR類似度） | `app/matching.py: match`（graded OCR similarity対応） |
+| S7 | ページ照合（認識テキスト類似度） | `app/matching.py: match_text` |
 | S8 | HUD 応答（3行固定）| `app/hud.py: build_hud` |
 | S9 | バージョン情報の付与 | `app/version.py` → 各レスポンス |
 | S10 | しきい値チューニング用フック | `app/matching.py` 定数 + `scripts/evaluate.py` |
@@ -92,7 +91,7 @@
 | S20 | 文書ページ移動型 exam（二次経路・互換） | `/v1/exam-sessions`(document_id) の next/prev/current/solve-current |
 | S21 | 図・画像の読み取り取り込み（本体 AI の認識をテキスト `vision_text` で受け、本文と併せて解答） | `POST /v1/documents/{id}/pages` の `vision_text`／`app/main.py: _page_material` |
 | S22 | 英語リスニング録音（無音）＋書き起こし | `/v1/exam-sessions/{id}/audio`／`app/transcribe.py` |
-| S23 | 撮影しない契約の公示（フラッシュ・シャッター・録音音なし・LED は読取中のみ点灯） | `GET /v1/settings.capture`（`flash:"off"`・`privacy_led`・`led_off_during_review`） |
+| S23 | メディア非保存・LED端末管理契約の公示 | `GET /v1/settings.capture`（`visual_input`・`privacy_led`・`server_observes_camera_state:false`） |
 | S24 | **読取完了→問題分割→デッキ作成（3フェーズ主経路）** | `POST /v1/exam-sessions/{id}/finalize-reading`／`app/layout.py: segment_problems` |
 | S25 | **搭載 GPT の問題別解答の取り込み（ingest）** | `POST /v1/exam-sessions/{id}/solutions`（`served_by="onboard"`・latest wins） |
 | S26 | **問題別レビューデッキ＋一括表示 HUD** | `GET …/solutions`・`GET …/review`／`app/glasses_view.py: build_review_view` |
@@ -103,15 +102,15 @@
 
 ```json
 {
-  "app_version": "0.8.0",
-  "api_version": "1.8.0",
-  "matcher_version": "1.1.0",
-  "hud_contract_version": "1.0.0",
+  "app_version": "0.9.0",
+  "api_version": "1.9.0",
+  "matcher_version": "1.2.0",
+  "hud_contract_version": "1.1.0",
   "analyzer_api_version": "1.0.0",
-  "solver_api_version": "1.1.0",
+  "solver_api_version": "1.2.0",
   "extractor_api_version": "1.0.0",
   "explainer_api_version": "1.0.0",
-  "glasses_view_contract_version": "1.4.0",
+  "glasses_view_contract_version": "1.5.0",
   "overlay_contract_version": "1.1.0"
 }
 ```
@@ -154,12 +153,12 @@
 
 | ユーザー操作（公式） | gesture 名 | KeyCode（旧機由来・未検証） | 本サーバの用途 |
 |---|---|---|---|
-| **2本指タップ**（AI 起動） | `two_finger_tap` | なし（`keycode:null`） | 視認＝ページ読取（`POST /pages`） |
+| **2本指タップ**（AI 起動） | `two_finger_tap` | なし（`keycode:null`） | 非記録ページ認識（`POST /pages`） |
 | **1本指タップ** | `single_tap` | `KEYCODE_DPAD_CENTER = 23` | 表示・確認・段階送り |
 | **ダブルタップ** | `double_tap` | `KEYCODE_ENTER = 66` | 読取完了宣言（読取中）／閉じる（閲覧中） |
 | **2本指スワイプ左/右** | `two_finger_swipe_left/right` | `KEYCODE_DPAD_LEFT/RIGHT = 21/22` | 前後の問題（閲覧）／前後ページ |
 | **2本指スワイプ上/下** | `two_finger_swipe_up/down` | `KEYCODE_DPAD_UP/DOWN = 19/20` | テレプロンプター送り/戻し |
-| **長押し**（録画⇄録音切替） | `long_press` | `KEYCODE_TV = 170` | 筆記⇄リスニング切替・録音開始/停止 |
+| **長押し** | `long_press` | `KEYCODE_TV = 170` | 筆記⇄リスニング切替・マイク録音開始/停止（動画操作へ転送しない） |
 | 戻る | `back` | `KEYCODE_BACK = 4` | 前の画面へ戻る |
 
 ---
@@ -171,7 +170,7 @@
 ```
 1. POST /v1/documents + 全ページ POST /v1/documents/{id}/pages
 2. POST /v1/documents/{id}/finalize  ← 完了宣言（忘れずに）
-3. （任意・画像経路）カメラ1フレーム＋端末OCR → POST /v1/match → HUD に PAGE/LOW_CONF/NO_PAGE 表示
+3. 端末内の非記録認識テキスト → `POST /v1/match`（`fast_ocr_text`のみ）→ HUD に PAGE/LOW_CONF/NO_PAGE
 ```
 
 ### 5-B. 資料解説モード（explain-sessions）
@@ -194,24 +193,24 @@
 > 2本指スワイプ上下でスライスを送り読みできます。**文字数・行数の上限はなく**、
 > すべてのテキストが HUD に表示されます（3行×Nスライス）。
 
-### 5-C. 解答モード（3 フェーズ実践フロー・主経路 / LED 点灯最小）
+### 5-C. 解答モード（3 フェーズ実践フロー・主経路 / メディア非保存）
 
-> カメラ（＝LED 点灯）は**手順 1〜3 の読取フェーズだけ**。手順 3 のダブルタップ以降は
-> カメラ OFF（LED 消灯）で、用紙も視認も不要。
+> 読取中もサーバへ送るのはテキストだけ。手順3ではクライアントが認識セッションを停止してから
+> `finalize-reading` を呼ぶ。サーバはカメラ・LED状態を観測せず、消灯済みとは断定しない。
 
 ```
-フェーズ1 読取（カメラON・LED点灯・最短化）
+フェーズ1 読取（端末内の非記録認識。写真・動画・フレーム保存なし）
 1. POST /v1/documents → 2本指タップ（AI起動=視認）×全ページ → POST /pages（scan_ack で進捗）
 2. POST /v1/documents/{id}/finalize → POST /v1/exam-sessions {"mode":"study","document_id":N,...}
-3. ダブルタップ（読取完了宣言）→ POST /finalize-reading
-   → 問題分割・デッキ作成・「読取完了 / N問を検出 / カメラOFF 解答へ」→ 以降 LED 消灯
+3. ダブルタップ（読取完了宣言）→ クライアント側認識セッション停止 → POST /finalize-reading
+   → 問題分割・デッキ作成・「読取完了 / N問を検出 / センサー停止後 解答へ」
 
-フェーズ2 解答（カメラOFF・自動）
+フェーズ2 解答（視覚センサー不要・自動）
 4. 主経路: 搭載 GPT が全問解答 → POST /solutions で取り込み（served_by="onboard"）
    任意:   ROKID_SOLVER=openai|gemini|claude なら手順3の finalize-reading が一括解答済み
    リスニング: 長押しで切替（POST /mode）→ 長押しで録音 → POST /audio（書き起こし統合）
 
-フェーズ3 閲覧（カメラOFF・LED消灯）
+フェーズ3 閲覧（視覚センサー不要）
 5. GET /solutions → デッキ（問1..問N・解答済み・確信度）
 6. GET /review?index=k → 1問題＝解答+解法+根拠+注意を一括表示
    2本指スワイプ左右=前後の問題 / 2本指スワイプ上下=送り読み / ダブルタップ=終了
@@ -235,7 +234,7 @@ POST /next-page / /prev-page → GET /current → POST /solve-current
 ## 6. 推奨フロー（操作 → 検証 → 判断）
 
 1. **U1〜U3**: SDK 取得・端末準備・ペアリング（人間）。
-2. **U4〜U6**: サンプル文書を**全ページ**視認読取（撮影しない）し同意取得（人間）。
+2. **U4〜U6**: サンプル文書を非記録認識し、プライバシー同意を取得（人間）。
 3. サーバを起動（システム）:
    `uvicorn app.main:app --port 8000`
 4. 認識テキストを登録（システムが自動処理）:
@@ -280,7 +279,7 @@ uvicorn app.main:app --port 8000
 
 | 変数 | 既定 | 役割 |
 |------|------|------|
-| `ROKID_DATA_DIR` | `data` | SQLite/画像の保存先 |
+| `ROKID_DATA_DIR` | `data` | SQLiteとリスニング音声の保存先（画像は保存しない） |
 | `ROKID_ANALYZER`/`ROKID_SOLVER`/`ROKID_EXPLAINER`/`ROKID_EXTRACTOR` | `local` | 各ポートのルーティング（`local\|openai\|gemini\|claude`。solver は non-local で finalize-reading の一括解答も有効化） |
 | `ROKID_SOLVER_TIERS` | （単一） | 解答の二段フォールバック順（csv、末尾に local 自動付与） |
 | `OPENAI_API_KEY`/`GOOGLE_API_KEY`/`ANTHROPIC_API_KEY` | （なし） | 実アダプタの API キー（未設定→local） |

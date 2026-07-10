@@ -16,32 +16,33 @@
   は**より高性能なモデルが必要な場合の任意経路**。既定は `local`（オフライン・鍵不要）で、
   鍵/SDK 欠落時は必ずローカルへフォールバック（500 にしない）。例示は GPT（openai）を第一に。
 
-## 撮影しない・LED（設計原則）
+## メディア非保存・LED（設計原則）
 
-- **撮影しない**: 写真ファイル・フラッシュ・シャッター音を一切発生させない。本体 AI の
-  認識テキスト（本文=`ocr_text`＋図の読み取り=`vision_text`）のみ受ける。録音も無音。
-- **プライバシー LED はカメラ稼働中は必ず点灯**（視認＝認識＝カメラ ON＝LED 点灯。
-  ハード強制・改変不可 `tamper:forbidden`。カメラ OFF の視認は存在しない）。
-- **設計原則: LED 点灯時間の最小化**。読取フェーズのみカメラ ON とし、`finalize-reading`
-  以降（解答・閲覧）はカメラを閉じる＝LED 消灯（`led_off_during_review:true`）。
-  LED の無効化・迂回は実装しない（`scripts/rokid_led.py` は独立診断ツールで契約不変）。
+- **画像を受けない**: `/pages`・`/match`・`/questions` は画像をバイト列の読取前に415で拒否。
+  `ocr_text` / `vision_text` / `fast_ocr_text` のみ受け、既存DBの画像もモデルへ渡さない。
+- クライアントは、公式SDKで写真・動画・保存を伴わない認識APIを確認できた場合だけ利用する。
+  無ければ失敗終了し、`takePhoto`、録画、生フレーム送信へフォールバックしない。
+- Rokid公式ガイドでは白色点灯は「カメラ使用中」。リアルタイム翻訳はマイク音声の翻訳なので、
+  視覚認識中のLED消灯の根拠にしない。
+- LEDは端末ファームウェア管理。サーバは状態を観測・制御・迂回・消灯保証しない。LED制御コードを
+  リポジトリへ追加しない。
 
 ## 3 フェーズフロー（主経路）
 
-1. **読取**（カメラ ON・最短化）: `POST /v1/documents` → 2本指タップ（AI 起動=視認）×全ページ
+1. **読取**（非記録認識）: `POST /v1/documents` → 2本指タップ×全ページ
    → `POST /pages`（scan_ack）→ `/finalize` → exam セッション作成（`document_id` 必須）→
    **ダブルタップ=読取完了宣言** → `POST /finalize-reading`（問題分割・デッキ作成・
-   status open/reading→reviewing・冪等・カメラ OFF）。
-2. **解答**（カメラ OFF）: 文書を問題単位に分割（`segment_problems`: 問N/大問 境界・
+   クライアントが認識セッション停止 → status open/reading→reviewing・冪等）。
+2. **解答**（視覚センサー不要）: 文書を問題単位に分割（`segment_problems`: 問N/大問 境界・
    ページ跨ぎマージ・境界なしは全体 1 問題＝安定 id **「全体」** を合成）。主経路=搭載 GPT の
    ingest（照合は `problem_index`（デッキ index）優先・なければ `problem_no`。再 ingest は
    latest wins）。任意=非 local な `ROKID_SOLVER` 設定時に finalize-reading 内で未解答分を
    一括解答（全ページ+RAG+transcript を文脈に。再開可能・local フォールバック結果は保存しない）。
-3. **閲覧**（カメラ OFF・LED 消灯）: `GET /solutions`（デッキ）→ `GET /review?index=k&view_page=n`。
+3. **閲覧**（視覚センサー不要）: `GET /solutions`（デッキ）→ `GET /review?index=k&view_page=n`。
    **1 問題=解答+解法+根拠+注意を一括 1 ストリーム**（段階めくりなし・確定事項）。
    問題送り=2本指スワイプ左右 / 送り読み=2本指スワイプ上下 / 終了=ダブルタップ。
 
-`solve-current` / ページ移動 / 設問アップロードは互換の二次経路（挙動を壊さない）。
+`solve-current` / ページ移動 / 設問テキスト登録は互換の二次経路。
 
 ## 操作（グラス単独で完結）
 
@@ -51,7 +52,8 @@
   （`customViewUpdate`）にテキスト・リレーする。「グラス単体 Wi-Fi 直結」構成は未確認と扱う。
 - 現行公式ジェスチャ: 2本指タップ=AI 起動 / 1本指タップ=クリック / ダブルタップ=終了
   （フェーズ・モーダル: 読取中=finish_reading・閲覧中=close）/ 2本指スワイプ上下=スクロール・
-  左右=前後ページ / **長押し=録画⇄音声録音トグル**（筆記⇄リスニング切替・録音開始/停止に割当）。
+  左右=前後ページ / **長押し**（筆記⇄リスニング切替・マイク録音開始/停止に割当し、
+  システムの写真・動画操作へ転送しない）。
 - **KeyCode 表は旧・単眼 Rokid Glass 由来で未実測**。`keycodes_verified:false` を維持し、
   「検証済み」と偽らない。実機計測（`adb shell getevent -l`）と `ROKID_KEYMAP`(JSON) 上書きで吸収。
 

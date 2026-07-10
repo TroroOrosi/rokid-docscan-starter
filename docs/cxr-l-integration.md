@@ -5,10 +5,28 @@
 本リポジトリのサーバに接続するための設計と、リモート操作・画面共有の実態（§9）をまとめた
 ものです。
 
-> ⚠️ 本ドキュメントの公式仕様は、md 内の記述ではなく **ウェブ検索で確認した Rokid 公式
-> / コミュニティ最新情報** に基づいています（末尾「出典」）。Maven 座標・AIDL・パッケージ名・
-> 端末仕様は情報源に基づく最新値ですが、SDK バージョンは更新されるため、実装前に
-> `ar.rokid.com/sdk` の最新版で必ず突き合わせてください。
+> 本文では **Rokid公式公開情報** と **コミュニティ実装からの推定** を区別します。Maven座標、
+> AIDL、非公開SDKのメソッド名は、SDK入手後に実機と公式契約で再確認するまで確定事項ではありません。
+
+## 0. 写真・動画を残さない入力契約とLEDの扱い
+
+Rokid公式Academyの現行説明では、Rokid Glassesのリアルタイム翻訳は**マイクが会話音声を取得し、
+翻訳文を表示する機能**です。同じ公式ページのLED表は、白色点灯を「Camera in use」と説明しています。
+したがって、音声翻訳でLEDが点かないことを、資料の視覚認識でもLEDが消える根拠にはできません。
+
+このリポジトリが保証する範囲は次のとおりです。
+
+- クライアントは写真撮影API、動画録画API、画面録画APIを呼ばない。
+- 利用可能なら、公式SDKの**非記録・一時的な端末内認識**だけを使い、結果の
+  `ocr_text` / `vision_text` を送る。生画像・生フレームは送らない。
+- 非記録認識APIが公式SDKで確認できない場合は**失敗終了**し、`takePhoto`、録画、ファイル保存へ
+  自動フォールバックしない。
+- サーバは `/pages`・`/match`・`/questions` の画像を読み取り前に `415` で拒否し、既存DBの画像も
+  モデルへ転送しない。
+- LEDは端末ファームウェアの管理対象。サーバは消灯操作、迂回、視覚認識中の消灯保証を行わない。
+
+つまり「リアルタイム翻訳のように」は、**記録媒体を作らず処理結果だけを扱う**というデータ処理上の
+類似に限定します。カメラとLEDのハードウェア挙動まで同一とは扱いません。
 
 ---
 
@@ -17,13 +35,13 @@
 | 項目 | 値 |
 |------|----|
 | 重量 | 約 49 g |
-| ディスプレイ | **両眼（binocular）** モノクロ緑 Micro-LED＋回折光導波路、**480×398 / 眼**、最大 1500 nits、FOV 約 23°（一部レビューは 30° と記載） |
-| SoC | Qualcomm Snapdragon **AR1 (Gen 1)** ＋ 副チップ **NXP RT600**（音声認識・低消費電力） |
+| ディスプレイ | **両眼（binocular）** モノクロ緑 Micro-LED、公式Academy記載は **480×640 / 眼**、最大1500 nits、FOV 30° |
+| SoC | Qualcomm Snapdragon **AR1** |
 | メモリ / ストレージ | **2 GB RAM / 32 GB ROM** |
-| カメラ | **12MP Sony IMX681**（f/2.25、最大 3024×4032、FOV 109°） |
+| カメラ | **12MP**（センサー型番などは公式公開ページだけでは確定しない） |
 | バッテリ | 本体 210 mAh（ケース 3000 mAh・約10回充電、80% 20分の急速充電） |
 | 接続 | **Wi-Fi 6 / Bluetooth 5.3** |
-| OS | **YodaOS（YodaOS-Sprite）**＝ Android 12 ベース、**API level 32**、Qualcomm QSSI 構成 |
+| OS / SDK内部 | 開発者ポータルで入手した対象SDK・実機ファームで要確認 |
 
 > リポジトリ内の一部旧 md には「右眼のみ」等の記述がありましたが、公式・複数レビューで
 > **両眼ディスプレイ**であることを確認済みです。本サーバは表示技術に依存しない
@@ -31,7 +49,7 @@
 
 ---
 
-## 2. CXR（Connected XR）SDK スイート（ウェブ検証済み）
+## 2. CXR（Connected XR）SDK スイート（コミュニティ情報を含む・要SDK照合）
 
 | SDK | 動作場所 | 役割 | Maven（要最新確認） | min/target SDK |
 |-----|----------|------|---------------------|----------------|
@@ -55,7 +73,7 @@
 
 ---
 
-## 3. 本リポジトリでの位置づけ（実機検証済みの 4 層構成）
+## 3. 本リポジトリでの位置づけ（コミュニティ実例に基づく4層構成）
 
 ```
 [Rokid Glasses 本体]      [スマホ]                                  [本サーバ (このリポジトリ)]
@@ -72,7 +90,7 @@
 - **スマホは HTTP 中継のみ（画面不要）**: CXR-L プラグインアプリが Hi Rokid 経由でグラスの
   HUD 表示（CUSTOMVIEW）・ジェスチャ/AI キーイベント・マイク音声を扱い、本サーバの HTTP 契約に
   橋渡しする。ユーザーが見る・操作するのはグラスだけ。
-- **グラス搭載 AI（GPT / Gemini ネイティブ）** が視認＝認識と解答を担い（経路 B・主経路）、
+- **グラス搭載 AI** の認識結果を取得できる公式契約が確認できた場合に限り、読取と解答を担わせ、
   **構造化された分割・取り込み・整形・状態管理はこのサーバに委譲**する。
 - サーバは表示技術・SDK 世代に依存しない **HTTP 契約**（最大3行 HUD）だけを公開する。
 
@@ -99,12 +117,11 @@ CXR-M（スマホ）の AI Interaction からも同様に利用できる。
   **`POST /v1/exam-sessions/{id}/solutions`** に ingest する（`served_by="onboard"`）。
   サーバは分割・整形・状態管理と閲覧 HUD（`GET /review`）を担う。
 
-**撮影しない・図も読む**：本体 AI は**視認＝認識**であり写真を撮らない。図・グラフ・写真の読み取りは
-本体 AI のマルチモーダル認識結果を **`vision_text`**（テキスト）として `POST /v1/documents/{id}/pages` に
-本文 `ocr_text` と一緒に渡す（**画像バイトは送らない**）。サーバは `ocr_text`＋`vision_text` を1つの材料に統合し、
-問題分割（`segment_problems`）と解答文脈（全ページ）に使う（ページ跨ぎ問題に対応）。
-視認＝カメラ稼働＝プライバシー LED 点灯のため、**読取フェーズを最短化**し、`finalize-reading`
-以降はカメラを閉じる（LED 消灯）。
+**非記録の認識結果だけを受ける**：クライアントが公式SDKで非記録・一時認識を確認できた場合に限り、
+結果を **`ocr_text` / `vision_text`** として送る（画像バイトは送らない）。サーバは両テキストを統合し、
+問題分割と解答文脈に使う。SDKが写真取得や録画しか提供しない場合、この経路は利用不可として停止する。
+`finalize-reading` はクライアントへ視覚センサー終了を要求するが、サーバ自身はカメラやLEDの状態を
+観測できないため、LED消灯済みとは返さない。
 
 ### 経路 A（任意）: サーバ側の実 AI アダプタ（このリポジトリで実装済み）
 
@@ -134,11 +151,11 @@ uvicorn app.main:app --port 8000
 
 | グラス側でやること | 使う SDK / AIDL | 送る先エンドポイント | HUD に返るもの |
 |--------------------|-----------------|----------------------|----------------|
-| ページ視認＝読取（2本指タップ） | `com.rokid.sprite.aiapp`（AI Interaction） | `POST /v1/documents/{id}/pages`（`ocr_text`/`vision_text`） | `scan_ack`（進捗） |
-| 読取完了宣言（ダブルタップ） | — | `POST /v1/exam-sessions/{id}/finalize-reading` | `reading_ack`（カメラOFF） |
+| ページ認識（2本指タップ） | SDK入手後に確認した非記録認識API | `POST /v1/documents/{id}/pages`（`ocr_text`/`vision_text`のみ） | `scan_ack`（進捗） |
+| 読取完了宣言（ダブルタップ） | クライアントが認識セッションを停止 | `POST /v1/exam-sessions/{id}/finalize-reading` | `reading_ack`（停止要求。状態未観測） |
 | 本体 GPT の問題別解答を送る | `com.rokid.sprite.aiapp` | `POST /v1/exam-sessions/{id}/solutions` | `ingest_ack`（N/M問 解答済） |
 | 問題別閲覧（2本指スワイプ） | — | `GET /v1/exam-sessions/{id}/review?index=&view_page=` | `glasses_view`（一括1ストリーム） |
-| カメラ1フレーム取得（照合時のみ） | `IMediaStreamService`（AIDL） | `POST /v1/match`（画像＋`fast_ocr_text`） | `hud.lines`（3行） |
+| ページ照合 | 端末内認識テキスト | `POST /v1/match`（`fast_ocr_text`のみ） | `hud.lines`（3行） |
 | 資料の解説（撮影なし） | ページ送りジェスチャ | `POST /v1/explain-sessions/{id}/next-page` → `GET .../explain` | `glasses_view`（overview/detail/evidence） |
 | HUD 描画 | CXR-L ディスプレイ API | — | 受信 `lines` をそのまま描画 |
 
@@ -155,7 +172,8 @@ uvicorn app.main:app --port 8000
    （`AuthorizationHelper` → token → `connect(token)`）を経て `IMediaStreamService` に AIDL バインド。
 3. Hi Rokid（グローバル版 `com.rokid.sprite.global.aiapp`）へのバインド権限・Intent を設定し、
    CUSTOMVIEW セッションを開く（グラス側アプリは不要。必要なら CUSTOMAPP で配布）。
-4. カメラ/音声/OCR 結果を取り出し、スマホ側プラグインから本サーバの HTTP API に送信。
+4. 公式SDKに非記録・一時認識APIがあることを確認。結果テキストだけをHTTP APIへ送信し、
+   写真・動画・生フレームのAPIしか無い場合は処理を中止。
 5. 応答の `hud.lines` / `glasses_view.lines`（最大3行）を HUD に描画。
 6. 操作は公式ジェスチャ（2本指タップ/タップ/ダブルタップ/2本指スワイプ/長押し。音声は任意トグル）。KeyCode は §7 参照。
 
@@ -195,12 +213,17 @@ link.openCustomView()                    // CUSTOMVIEW: グラス側アプリ不
 // 2) 起動時に /v1/settings を唯一の権威として読み込む（hud/capture/operations/input）
 val settings = http.get("$SERVER/v1/settings").json()
 
-// 3) 経路B（主経路）: 本体 AI の認識で読取 → 解答を ingest
-//    AI 起動（2本指タップ）は onAiKeyDown/Up（onGlassAiAssistStart/Stop）で届く
-val pageText = onboardAi.latestRecognition()         // 本体AIの認識（視認＝読取。LED点灯中）
-http.postMultipart("$SERVER/v1/documents/$docId/pages",
-    "page_index" to i, "ocr_text" to pageText.body, "vision_text" to pageText.figures)
-// 読取完了（ダブルタップ）→ finalize-reading → 以降カメラOFF（LED消灯）
+// 3) 経路B（主経路）: 非記録認識で読取 → 解答を ingest
+// PageRecognitionSource は本プロジェクト側の境界インターフェース。
+// SDK入手後、写真/動画/保存を伴わない公式APIだけで実装する。無ければ例外で終了する。
+val pageText = pageRecognitionSource.recognizeEphemerallyOrFail()
+http.postJson("$SERVER/v1/documents/$docId/pages", mapOf(
+    "page_index" to i,
+    "ocr_text" to pageText.body,
+    "vision_text" to pageText.figures,
+))
+// 読取完了: 先にクライアント側認識セッションを閉じる。LEDは端末管理。
+pageRecognitionSource.close()
 http.post("$SERVER/v1/exam-sessions/$sid/finalize-reading")
 // 本体 GPT が全問を解いた結果を問題別に ingest（デッキ index 指名が確実）
 http.postJson("$SERVER/v1/exam-sessions/$sid/solutions",
@@ -241,7 +264,7 @@ link.startAudioStream { data, offset, length -> recorder.append(data, offset, le
 
 - 公式の**ピクセル・ミラーリング**（スマホ/PC 画面をグラスに映す）は **Rokid Max 系
   （USB-C DisplayPort 接続のビューアグラス）の機能**。カメラ型 AI グラス（本対象機）の HUD は
-  **480×398 モノクロ緑**であり、スマホ画面のピクセル共有は視認性の面で実用外。
+  小型モノクロ緑HUDであり、スマホ画面のピクセル共有は視認性の面で実用外。
 - AI グラスで実用になる「共有」は**テキスト・リレー**（公式テレプロンプター機能と同型）:
   スマホ側 AI の回答**テキスト**を HUD に送る（コミュニティ実装 **AssistBridge** = スマホの
   Gemini/Google アシスタント回答を Rokid HUD にリレー、が同パターン）。
@@ -274,6 +297,7 @@ GET /solutions → GET /review → CUSTOMVIEW で HUD 閲覧（テキスト・�
 ## 出典（ウェブ検証）
 
 - [Rokid Open Platform（CXR SDK / YodaOS）](https://ar.rokid.com/sdk?lang=en)
+- [Rokid Academy（リアルタイム翻訳、LED表示、公式仕様）](https://global.rokid.com/pages/academy)
 - [About YodaOS-Sprite — Rokid AR Platform](https://ar.rokid.com/sprite?lang=en)
 - [buildwithfenna/rokid-docs（CXR-M/S/L 詳解・Maven 座標・AIDL・`RokidScreenRecord`）](https://github.com/buildwithfenna/rokid-docs)
 - [TakanariShimbo/CxrGlobal（CXR-L のグローバル化ラッパー・実機検証済み・AIDL/認可/CUSTOMVIEW 詳細）](https://github.com/TakanariShimbo/CxrGlobal)

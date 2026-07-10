@@ -1,21 +1,10 @@
 #!/usr/bin/env python3
-"""Matching evaluation -> JSON report.
+"""Recognized-text page-matching evaluation -> JSON report.
 
-Run AFTER the user captures real sample pages (or against generated samples)
-to sanity-check matching quality and get threshold suggestions before tuning.
-
-Two modes:
-  1. --db PATH     : evaluate against pages already stored in a SQLite DB.
-                     For each stored page, re-match its own image and check
-                     that it returns itself (self-match accuracy).
-  2. --synthetic N : generate N synthetic pages, then match each -> expect HIT.
-
-Output: a JSON report (stdout or --out FILE) with version stamps, per-page
-results, hamming distribution, and suggested thresholds. No network, no creds.
-
-Examples:
-  python scripts/evaluate.py --synthetic 5 --out report.json
-  ROKID_DATA_DIR=data python scripts/evaluate.py --db data/docscan.db
+The runtime API never accepts images. This evaluator therefore reads stored
+``ocr_text``/``vision_text`` or creates synthetic text pages, then measures
+exact and OCR-noise-like matching with :func:`app.matching.match_text`.
+No network, credentials, camera input, or visual-media files are used.
 """
 
 from __future__ import annotations
@@ -26,81 +15,108 @@ import sqlite3
 import sys
 from pathlib import Path
 
-# allow running as a plain script
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app import matching  # noqa: E402
-from app.matching import Candidate, match, phash, phash_hex  # noqa: E402
+from app.matching import Candidate, match_text, ocr_md5  # noqa: E402
 from app.version import version_info  # noqa: E402
 
 
-def _percentile(values: list[int], pct: float) -> float:
+def _material(ocr_text: str | None, vision_text: str | None) -> str:
+    parts = []
+    if ocr_text and ocr_text.strip():
+        parts.append(ocr_text.strip())
+    if vision_text and vision_text.strip():
+        parts.append("【図・画像の読み取り】\n" + vision_text.strip())
+    return "\n\n".join(parts)
+
+
+def _add_ocr_noise(text: str) -> str:
+    """Deterministic light corruption resembling OCR omission/substitution."""
+    if len(text) < 8:
+        return text
+    chars = list(text)
+    positions = range(7, len(chars), 17)
+    for index in positions:
+        chars[index] = " " if chars[index] != " " else "・"
+    return "".join(chars)
+
+
+def _percentile(values: list[float], pct: float) -> float:
     if not values:
         return 0.0
-    s = sorted(values)
-    k = (len(s) - 1) * pct
-    lo = int(k)
-    hi = min(lo + 1, len(s) - 1)
-    return s[lo] + (s[hi] - s[lo]) * (k - lo)
-
-
-def _suggest_thresholds(self_hammings: list[int]) -> dict:
-    """Suggest HAMMING_STRONG/WEAK from the spread of correct self-matches."""
-    if not self_hammings:
-        return {
-            "hamming_strong": matching.HAMMING_STRONG,
-            "hamming_weak": matching.HAMMING_WEAK,
-            "note": "no data; keeping current defaults",
-        }
-    p95 = _percentile(self_hammings, 0.95)
-    strong = max(2, int(round(p95)) + 2)
-    weak = max(strong + 6, int(round(p95)) + 10)
-    return {
-        "hamming_strong": strong,
-        "hamming_weak": weak,
-        "based_on_p95_self_hamming": round(p95, 2),
-        "note": "self-matches should sit below hamming_strong",
-    }
+    ordered = sorted(values)
+    position = (len(ordered) - 1) * pct
+    lower = int(position)
+    upper = min(lower + 1, len(ordered) - 1)
+    return ordered[lower] + (ordered[upper] - ordered[lower]) * (position - lower)
 
 
 def _eval_candidates(items: list[tuple[int, int, str]]) -> dict:
-    """items: list of (page_id, page_index, phash_hex). Self-match each."""
     candidates = [
-        Candidate(page_id=pid, page_index=idx, phash=ph, ocr_md5=None)
-        for pid, idx, ph in items
+        Candidate(
+            page_id=page_id,
+            page_index=page_index,
+            phash="",
+            ocr_md5=ocr_md5(text),
+            ocr_text=text,
+        )
+        for page_id, page_index, text in items
     ]
     results = []
-    self_hammings = []
-    hits = 0
-    for pid, idx, ph in items:
-        best, verdict, _ = match(ph, None, candidates)
-        correct = best is not None and best.page_id == pid
-        hits += int(correct and verdict == "HIT")
-        if best is not None:
-            self_hammings.append(best.hamming)
+    exact_hits = 0
+    noisy_hits = 0
+    noisy_similarities: list[float] = []
+    for page_id, page_index, text in items:
+        exact_best, exact_verdict, _ = match_text(text, candidates)
+        noisy_query = _add_ocr_noise(text)
+        noisy_best, noisy_verdict, _ = match_text(noisy_query, candidates)
+        exact_correct = bool(
+            exact_best and exact_best.page_id == page_id and exact_verdict == "HIT"
+        )
+        noisy_correct = bool(
+            noisy_best and noisy_best.page_id == page_id and noisy_verdict == "HIT"
+        )
+        exact_hits += int(exact_correct)
+        noisy_hits += int(noisy_correct)
+        if noisy_best:
+            noisy_similarities.append(noisy_best.ocr_similarity)
         results.append(
             {
-                "page_id": pid,
-                "page_index": idx,
-                "verdict": verdict,
-                "matched_page_id": best.page_id if best else None,
-                "hamming": best.hamming if best else None,
-                "confidence": best.confidence if best else 0.0,
-                "correct": correct,
+                "page_id": page_id,
+                "page_index": page_index,
+                "exact": {
+                    "verdict": exact_verdict,
+                    "matched_page_id": exact_best.page_id if exact_best else None,
+                    "similarity": exact_best.ocr_similarity if exact_best else 0.0,
+                    "correct": exact_correct,
+                },
+                "noisy": {
+                    "verdict": noisy_verdict,
+                    "matched_page_id": noisy_best.page_id if noisy_best else None,
+                    "similarity": noisy_best.ocr_similarity if noisy_best else 0.0,
+                    "correct": noisy_correct,
+                },
             }
         )
     total = len(items)
+    p05 = _percentile(noisy_similarities, 0.05)
     return {
         "page_count": total,
-        "self_match_hits": hits,
-        "self_match_accuracy": round(hits / total, 4) if total else 0.0,
-        "hamming_distribution": {
-            "min": min(self_hammings) if self_hammings else None,
-            "p50": _percentile(self_hammings, 0.5),
-            "p95": _percentile(self_hammings, 0.95),
-            "max": max(self_hammings) if self_hammings else None,
+        "self_match_hits": exact_hits,
+        "self_match_accuracy": round(exact_hits / total, 4) if total else 0.0,
+        "noisy_match_hits": noisy_hits,
+        "noisy_match_accuracy": round(noisy_hits / total, 4) if total else 0.0,
+        "noisy_similarity": {
+            "min": min(noisy_similarities) if noisy_similarities else None,
+            "p05": round(p05, 4),
+            "p50": round(_percentile(noisy_similarities, 0.5), 4),
+            "max": max(noisy_similarities) if noisy_similarities else None,
         },
-        "suggested_thresholds": _suggest_thresholds(self_hammings),
+        "threshold_note": (
+            "Review real-device false positives before lowering TEXT_CONF_OK; "
+            f"the synthetic noisy p05 is {p05:.4f}."
+        ),
         "results": results,
     }
 
@@ -110,71 +126,63 @@ def from_db(db_path: str) -> dict:
     conn.row_factory = sqlite3.Row
     try:
         rows = conn.execute(
-            "SELECT id, page_index, phash FROM pages ORDER BY document_id, page_index"
+            "SELECT id, page_index, ocr_text, vision_text "
+            "FROM pages ORDER BY document_id, page_index"
         ).fetchall()
     finally:
         conn.close()
-    items = [(r["id"], r["page_index"], r["phash"]) for r in rows]
+    items = [
+        (row["id"], row["page_index"], text)
+        for row in rows
+        if (text := _material(row["ocr_text"], row["vision_text"]))
+    ]
     report = _eval_candidates(items)
     report["source"] = {"mode": "db", "path": db_path}
     return report
 
 
-def from_synthetic(n: int) -> dict:
-    from PIL import Image, ImageDraw
-
-    def make(seed: int):
-        size = 256
-        img = Image.new("RGB", (size, size), "white")
-        d = ImageDraw.Draw(img)
-        for i in range(6):
-            x0 = (seed * 13 + i * 29) % size
-            y0 = (seed * 17 + i * 31) % size
-            x1 = (x0 + 40 + i * 7) % size
-            y1 = (y0 + 30 + i * 11) % size
-            d.rectangle(
-                [min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)],
-                fill=(seed * 20 % 256, i * 40 % 256, 60),
-            )
-        return img
-
-    items = []
-    for i in range(n):
-        img = make(seed=10 + i * 17)
-        items.append((i + 1, i, phash_hex(img)))
-        _ = phash(img)  # exercise int path too
+def from_synthetic(count: int) -> dict:
+    items = [
+        (
+            index + 1,
+            index,
+            f"第{index + 1}ページ 固有資料コード DOC-{1000 + index} "
+            f"問{index + 1} 本文中の条件と数値 {index * 7 + 3} を用いて答えよ。",
+        )
+        for index in range(count)
+    ]
     report = _eval_candidates(items)
-    report["source"] = {"mode": "synthetic", "n": n}
+    report["source"] = {"mode": "synthetic-text", "count": count}
     return report
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Matching evaluation report")
-    g = ap.add_mutually_exclusive_group(required=True)
-    g.add_argument("--db", help="path to docscan.db")
-    g.add_argument("--synthetic", type=int, help="number of synthetic pages")
-    ap.add_argument("--out", help="write JSON here instead of stdout")
-    args = ap.parse_args()
+    parser = argparse.ArgumentParser(description="Recognized-text matching evaluation")
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("--db", help="path to docscan.db")
+    group.add_argument("--synthetic", type=int, help="number of synthetic text pages")
+    parser.add_argument("--out", help="write JSON here instead of stdout")
+    args = parser.parse_args()
 
     report = from_db(args.db) if args.db else from_synthetic(args.synthetic)
     report = {
-        "report_kind": "rokid-docscan-eval",
+        "report_kind": "rokid-docscan-text-eval",
         "versions": version_info(),
         "current_thresholds": {
-            "hamming_strong": matching.HAMMING_STRONG,
-            "hamming_weak": matching.HAMMING_WEAK,
-            "conf_ok": matching.CONF_OK,
-            "conf_low": matching.CONF_LOW,
-            "ocr_md5_bonus": matching.OCR_MD5_BONUS,
+            "text_conf_ok": matching.TEXT_CONF_OK,
+            "text_conf_low": matching.TEXT_CONF_LOW,
         },
         **report,
     }
-    text = json.dumps(report, indent=2, ensure_ascii=False)
+    rendered = json.dumps(report, indent=2, ensure_ascii=False)
     if args.out:
-        Path(args.out).write_text(text, encoding="utf-8")
-        print(f"wrote {args.out} (accuracy={report['self_match_accuracy']})")
+        Path(args.out).write_text(rendered, encoding="utf-8")
+        print(
+            f"wrote {args.out} (exact={report['self_match_accuracy']}, "
+            f"noisy={report['noisy_match_accuracy']})"
+        )
     else:
-        print(text)
+        print(rendered)
     return 0
 
 

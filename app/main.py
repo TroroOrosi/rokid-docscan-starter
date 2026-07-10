@@ -9,21 +9,20 @@ docs/implementation-notes.md and docs/cxr-l-integration.md.
 from __future__ import annotations
 
 import hashlib
-import io
 import json
 import os
+import re
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse
-from PIL import Image, UnidentifiedImageError
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from . import config, db
 from .analyzers import get_analyzer
-from .config import IMAGE_DIR, ensure_dirs
+from .config import ensure_dirs
 from .explainer import ExplainRequest
 from .explainers import get_explainer, list_explainers
 from .extractors import detect_media, get_extractor
@@ -46,7 +45,7 @@ from .glasses_view import (
 )
 from .hud import build_hud
 from .layout import parse_layout, primary_question, segment_problems
-from .matching import Candidate, match, normalize_ocr_text, ocr_md5, phash_hex
+from .matching import Candidate, match_text, normalize_ocr_text, ocr_md5
 from .overlay import build_overlay
 from .retrieval import retrieve_context
 from .solvers import Question
@@ -55,15 +54,15 @@ from .subjects import detect_subject
 from .version import APP_VERSION, HUD_CONTRACT_VERSION, version_info
 
 
-def _extract_media(ocr_text: str | None, image_path: str) -> list[dict]:
-    """Run the active media extractor over any figure/table/graph/formula cues."""
+def _extract_media(ocr_text: str | None) -> list[dict]:
+    """Extract structured cues from recognized text without reading media."""
     kinds = detect_media(ocr_text)
     if not kinds:
         return []
     extractor = get_extractor()
     items: list[dict] = []
     for kind in kinds:
-        res = extractor.extract(kind=kind, ocr_text=ocr_text, image_path=image_path)
+        res = extractor.extract(kind=kind, ocr_text=ocr_text, image_path=None)
         items.append(
             {"kind": res.kind, "content": res.content, "confidence": res.confidence}
         )
@@ -78,6 +77,38 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Rokid DocScan", version=APP_VERSION, lifespan=lifespan)
+
+
+# Reject non-JSON bodies for every visual-recognition intake route by headers
+# alone, before Starlette parses multipart data or creates an UploadFile/tempfile.
+_TEXT_ONLY_JSON_PATHS = (
+    # Match any path parameter spelling so an invalid/negative ID cannot bypass
+    # the media guard and reach framework body parsing first.
+    re.compile(r"^/v1/documents/[^/]+/pages/?$"),
+    re.compile(r"^/v1/match/?$"),
+    re.compile(r"^/v1/exam-sessions/[^/]+/questions/?$"),
+)
+
+
+@app.middleware("http")
+async def _reject_visual_media_bodies(request: Request, call_next):
+    path = request.url.path
+    is_text_intake = request.method == "POST" and any(
+        pattern.fullmatch(path) for pattern in _TEXT_ONLY_JSON_PATHS
+    )
+    if is_text_intake:
+        content_type = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+        if content_type != "application/json":
+            return JSONResponse(
+                {
+                    "detail": (
+                        "visual intake is JSON text-only; multipart, image, "
+                        "video, and raw-frame bodies are rejected"
+                    )
+                },
+                status_code=415,
+            )
+    return await call_next(request)
 
 
 # --- optional bearer auth (off unless ROKID_API_KEY is set) ------------------
@@ -109,9 +140,35 @@ class CreateDocument(BaseModel):
     sdk_hint: str | None = None
 
 
+class TextOnlyRequest(BaseModel):
+    """Strict schema for visual-recognition results; media fields are invalid."""
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class AddPageRequest(TextOnlyRequest):
+    page_index: int
+    ocr_text: str | None = None
+    vision_text: str | None = None
+    total_pages: int | None = None
+
+
+class MatchPageRequest(TextOnlyRequest):
+    document_id: int
+    fast_ocr_text: str | None = None
+    client_version: str | None = None
+    sdk_hint: str | None = None
+
+
+class AddQuestionRequest(TextOnlyRequest):
+    ocr_text: str | None = None
+    vision_text: str | None = None
+    bbox_hints: list[dict] | None = None
+
+
 # --- helpers ----------------------------------------------------------------
 
-_MAX_UPLOAD_BYTES = 15 * 1024 * 1024  # generous for page photos / recordings
+_MAX_UPLOAD_BYTES = 15 * 1024 * 1024  # listening-audio upload guard
 
 
 async def _read_upload_limited(upload: UploadFile) -> bytes:
@@ -122,15 +179,6 @@ async def _read_upload_limited(upload: UploadFile) -> bytes:
     return raw
 
 
-def _load_image(raw: bytes) -> Image.Image:
-    try:
-        img = Image.open(io.BytesIO(raw))
-        img.load()
-        return img
-    except (UnidentifiedImageError, OSError):
-        raise HTTPException(status_code=400, detail="invalid image upload")
-
-
 def _doc_or_404(conn, document_id: int):
     row = conn.execute(
         "SELECT * FROM documents WHERE id = ?", (document_id,)
@@ -138,10 +186,6 @@ def _doc_or_404(conn, document_id: int):
     if row is None:
         raise HTTPException(status_code=404, detail="document not found")
     return row
-
-
-def _fallback_md5(omd5: str | None, raw: bytes) -> str:
-    return omd5 if omd5 is not None else hashlib.md5(raw).hexdigest()
 
 
 def _row_or_404(conn, table: str, row_id: int, detail: str):
@@ -230,11 +274,7 @@ def create_document(payload: CreateDocument) -> dict:
 @app.post("/v1/documents/{document_id}/pages", status_code=201)
 async def add_page(
     document_id: int,
-    page_index: int = Form(...),
-    image: UploadFile | None = File(None),
-    ocr_text: str | None = Form(None),
-    vision_text: str | None = Form(None),
-    total_pages: int | None = Form(None),
+    payload: AddPageRequest,
 ) -> dict:
     """Record one page of a document — **撮影しない (no photography)**.
 
@@ -244,20 +284,22 @@ async def add_page(
       - ``vision_text`` : the AI's reading of figures/diagrams/visual layout
                           (still TEXT, not an image), so figure-dependent problems
                           can be solved without sending or saving a photo.
-    A document is remembered page-by-page from this text alone. Supplying an
-    ``image`` is optional and only kept for backward-compatible ``/v1/match``;
-    the standard flow needs no image.
+    A document is remembered page-by-page from this text alone. Only JSON is
+    accepted; multipart/image bodies are rejected before form/file parsing.
 
     Returns a `scan_ack` HUD payload so the glasses can show real-time
     progress (e.g. '3/5ページ完了') after every page. Pass `total_pages`
     (the expected total) to enable the completion hint ('完了: ダブルタップ').
     """
-    has_image = image is not None and getattr(image, "filename", None)
+    page_index = payload.page_index
+    ocr_text = payload.ocr_text
+    vision_text = payload.vision_text
+    total_pages = payload.total_pages
     has_text = (ocr_text and ocr_text.strip()) or (vision_text and vision_text.strip())
-    if not has_image and not has_text:
+    if not has_text:
         raise HTTPException(
             status_code=400,
-            detail="a page needs ocr_text/vision_text (recognized text) or an image",
+            detail="a page needs ocr_text or vision_text from on-device recognition",
         )
     if page_index < 0:
         raise HTTPException(status_code=400, detail="page_index must be >= 0")
@@ -265,22 +307,11 @@ async def add_page(
     try:
         _doc_or_404(conn, document_id)
 
-        if has_image:
-            raw = await _read_upload_limited(image)
-            img = _load_image(raw)
-            ph = phash_hex(img)
-            omd5 = _fallback_md5(ocr_md5(ocr_text), raw)
-            fname = f"{document_id}_{page_index}_{uuid.uuid4().hex[:8]}.png"
-            fpath: Path | None = IMAGE_DIR / fname
-            img.convert("RGB").save(fpath, format="PNG")
-            image_path = str(fpath)
-        else:
-            # 撮影しない: no image, no pHash. ocr_md5 dedupes by recognized text
-            # (fall back to vision_text when only figures were recognized).
-            ph = ""
-            dedupe_src = ocr_text if (ocr_text and ocr_text.strip()) else (vision_text or "")
-            omd5 = ocr_md5(dedupe_src) or hashlib.md5(dedupe_src.encode()).hexdigest()
-            image_path = None
+        # Text-only: no image bytes are accepted, decoded, saved, or forwarded.
+        ph = ""
+        dedupe_src = _page_material(ocr_text, vision_text)
+        omd5 = ocr_md5(dedupe_src) or hashlib.md5(dedupe_src.encode()).hexdigest()
+        image_path = None
 
         try:
             cur = conn.execute(
@@ -320,6 +351,9 @@ async def add_page(
             "phash": ph,
             "ocr_md5": omd5,
             "image_path": image_path,
+            "input_mode": "recognized_text",
+            "raw_media_received": False,
+            "media_persisted": False,
             "has_vision_text": bool(vision_text and vision_text.strip()),
             "scan_ack": ack,
         }
@@ -343,7 +377,8 @@ def finalize_document(document_id: int) -> dict:
         analyzer = get_analyzer()
         for p in pages:
             result = analyzer.analyze(
-                image_path=p["image_path"],
+                # Legacy DB rows may reference images; runtime ignores them.
+                image_path=None,
                 ocr_text=_page_material(p["ocr_text"], p["vision_text"]) or p["ocr_text"],
             )
             conn.execute(
@@ -374,23 +409,22 @@ def finalize_document(document_id: int) -> dict:
 
 @app.post("/v1/match")
 async def match_page(
-    document_id: int = Form(...),
-    image: UploadFile = File(...),
-    fast_ocr_text: str | None = Form(None),
-    client_version: str | None = Form(None),
-    sdk_hint: str | None = Form(None),
+    payload: MatchPageRequest,
 ) -> dict:
+    """Match a page from recognized text; raw image/frame input is forbidden."""
     conn = db.connect()
     try:
+        document_id = payload.document_id
+        fast_ocr_text = payload.fast_ocr_text
         _doc_or_404(conn, document_id)
-        raw = await _read_upload_limited(image)
-        img = _load_image(raw)
-
-        q_phash = phash_hex(img)
-        q_md5 = _fallback_md5(ocr_md5(fast_ocr_text), raw)
+        if not normalize_ocr_text(fast_ocr_text):
+            raise HTTPException(
+                status_code=400,
+                detail="fast_ocr_text is required for text-only page matching",
+            )
 
         rows = conn.execute(
-            "SELECT id, page_index, phash, ocr_md5, ocr_text, summary FROM pages "
+            "SELECT id, page_index, ocr_md5, ocr_text, vision_text, summary FROM pages "
             "WHERE document_id = ? ORDER BY page_index",
             (document_id,),
         ).fetchall()
@@ -398,20 +432,16 @@ async def match_page(
             Candidate(
                 page_id=r["id"],
                 page_index=r["page_index"],
-                phash=r["phash"],
+                phash="",
                 ocr_md5=r["ocr_md5"],
-                ocr_text=normalize_ocr_text(r["ocr_text"]),
+                ocr_text=_page_material(r["ocr_text"], r["vision_text"]),
             )
             for r in rows
-            # Skip 撮影しない text-only pages (no image → empty phash); they are
-            # not image-match candidates and would break hamming()'s int(phash,16).
-            if r["phash"]
+            if normalize_ocr_text(_page_material(r["ocr_text"], r["vision_text"]))
         ]
         summaries = {r["id"]: r["summary"] for r in rows}
 
-        best, verdict, scored = match(
-            q_phash, q_md5, candidates, query_ocr_text=fast_ocr_text
-        )
+        best, verdict, scored = match_text(fast_ocr_text, candidates)
         hud = build_hud(
             verdict,
             best,
@@ -421,14 +451,17 @@ async def match_page(
 
         return {
             "document_id": document_id,
-            "query_phash": q_phash,
+            "query_phash": None,
+            "matching_mode": "recognized_text",
+            "raw_media_received": False,
+            "media_persisted": False,
             "verdict": verdict,
             "versions": {
                 **version_info(),
                 "hud_contract_version": HUD_CONTRACT_VERSION,
             },
-            "client_version": client_version,
-            "sdk_hint": sdk_hint,
+            "client_version": payload.client_version,
+            "sdk_hint": payload.sdk_hint,
             "best_page": (
                 {
                     "page_id": best.page_id,
@@ -490,10 +523,12 @@ def _exam_session_or_404(conn, session_id: int):
 
 
 def _session_phase(session) -> str:
-    """3-phase lifecycle: 'reading' (camera ON, LED lit) → 'reviewing' (camera OFF).
+    """Return reading/reviewing state without asserting physical sensor state.
 
     The legacy default status 'open' is a reading-phase alias, so pre-existing
     sessions keep working unchanged; finalize-reading sets status='reviewing'.
+    The client must close visual recognition before that transition, but this
+    server cannot observe the device camera or privacy indicator.
     """
     return "reviewing" if session["status"] == "reviewing" else "reading"
 
@@ -627,7 +662,7 @@ def create_exam_session(payload: CreateExamSession) -> dict:
             "current_page_index": 0,
             "total_pages": _exam_total_pages(conn, payload.document_id),
             "status": "open",
-            # 3-phase lifecycle: reading (camera ON) until finalize-reading.
+            # 3-phase lifecycle: text-recognition intake until finalize-reading.
             "phase": "reading",
             "operations": OPERATION_CONTRACT,
             "api_version": version_info()["api_version"],
@@ -639,29 +674,29 @@ def create_exam_session(payload: CreateExamSession) -> dict:
 @app.post("/v1/exam-sessions/{session_id}/questions", status_code=201)
 async def add_question(
     session_id: int,
-    image: UploadFile = File(...),
-    ocr_text: str | None = Form(None),
-    bbox_hints: str | None = Form(None),
+    payload: AddQuestionRequest,
 ) -> dict:
     conn = db.connect()
     try:
         _exam_session_or_404(conn, session_id)
-        raw = await _read_upload_limited(image)
-        img = _load_image(raw)
+        ocr_text = payload.ocr_text
+        vision_text = payload.vision_text
+        material = _page_material(ocr_text, vision_text)
+        if not normalize_ocr_text(material):
+            raise HTTPException(
+                status_code=400,
+                detail="ocr_text or vision_text is required for text-only question input",
+            )
 
-        hints = json.loads(bbox_hints) if bbox_hints else None
-        parsed = parse_layout(ocr_text, bbox_hints=hints)
+        hints = payload.bbox_hints
+        parsed = parse_layout(material, bbox_hints=hints)
         q = primary_question(parsed)
-        subject, subj_conf = detect_subject(ocr_text)
+        subject, subj_conf = detect_subject(material)
 
-        read_conf = 0.0 if not normalize_ocr_text(ocr_text) else round(min(1.0, 0.5 + subj_conf / 2), 3)
-
-        fname = f"q_{session_id}_{uuid.uuid4().hex[:8]}.png"
-        fpath: Path = IMAGE_DIR / fname
-        img.convert("RGB").save(fpath, format="PNG")
+        read_conf = round(min(1.0, 0.5 + subj_conf / 2), 3)
 
         answer_box = q.answer_box if q else parsed.get("answer_box")
-        media = _extract_media(ocr_text, str(fpath))
+        media = _extract_media(material)
         cur = conn.execute(
             """INSERT INTO questions
                (session_id, question_no, body_text, choices_json, figure_refs,
@@ -671,7 +706,7 @@ async def add_question(
             (
                 session_id,
                 q.question_no if q else None,
-                q.body_text if q else (ocr_text or ""),
+                q.body_text if q else material,
                 json.dumps(q.choices if q else [], ensure_ascii=False),
                 json.dumps(q.figure_refs if q else [], ensure_ascii=False),
                 json.dumps(answer_box, ensure_ascii=False) if answer_box else None,
@@ -679,12 +714,15 @@ async def add_question(
                 subject,
                 read_conf,
                 parsed.get("page_number"),
-                str(fpath),
+                None,
                 json.dumps(media, ensure_ascii=False) if media else None,
             ),
         )
         conn.commit()
 
+        recognition_ack = build_capture_ack(
+            page_number=parsed.get("page_number"), question_id=cur.lastrowid
+        )
         result = {
             "question_id": cur.lastrowid,
             "session_id": session_id,
@@ -694,13 +732,16 @@ async def add_question(
             "answer_box": answer_box,
             "page_number": parsed.get("page_number"),
             "media": media,
-            "capture_ack": build_capture_ack(
-                page_number=parsed.get("page_number"), question_id=cur.lastrowid
-            ),
+            "input_mode": "recognized_text",
+            "raw_media_received": False,
+            "media_persisted": False,
+            "recognition_ack": recognition_ack,
+            # Deprecated response alias: an acknowledgment, not a photo event.
+            "capture_ack": recognition_ack,
         }
         if read_conf < 0.3:
             result["hint"] = {
-                "lines": ["読み取り不十分", "近づけて再撮影", "してください"],
+                "lines": ["読み取り不十分", "もう一度読み取って", "ください"],
             }
         return result
     finally:
@@ -730,7 +771,8 @@ def solve_question(session_id: int, question_id: int) -> dict:
             choices=json.loads(q["choices_json"] or "[]"),
             subject=q["subject"],
             context=retrieved["context"] or None,
-            image_path=q["image_path"],
+            # Never forward legacy stored media to a model.
+            image_path=None,
         )
         result, solver = solve_with_fallback(question=question)
         served_by = result.extras.get("served_by", solver.name)
@@ -904,19 +946,19 @@ def get_exam_session(session_id: int) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Document exam — 3-phase flow (primary path), designed to minimize the time
-# the camera is on (= the privacy LED is lit):
+# Document exam — 3-phase flow (primary path). The server accepts recognized
+# text only and cannot observe the client camera or privacy indicator:
 #
-#   Phase 1 読取 (camera ON, LED lit — keep it short):
+#   Phase 1 読取 (client-side ephemeral recognition, no media upload):
 #     register every page once (POST /documents/{id}/pages + finalize), then
 #     POST .../{id}/finalize-reading      declare 読取完了 (double tap) →
-#                                         segment into problems, camera OFF
-#   Phase 2 解答 (camera OFF): all problems solved in one batch
+#                                         require client sensor closure
+#   Phase 2 解答 (visual sensor not needed): all problems solved in one batch
 #     POST .../{id}/solutions             ingest the onboard AI's per-problem
 #                                         answers (primary), or — with
 #                                         ROKID_SOLVER=openai|gemini|claude —
 #                                         finalize-reading solves server-side
-#   Phase 3 閲覧 (camera OFF, LED off): per-problem review deck
+#   Phase 3 閲覧 (visual sensor not needed): per-problem review deck
 #     GET  .../{id}/solutions             deck listing (solved flags)
 #     GET  .../{id}/review?index=k        one problem, 答え+解法+根拠+注意 in
 #                                         one stream (view_page teleprompter)
@@ -1027,7 +1069,8 @@ def exam_current_page(session_id: int) -> dict:
             "answer_format": session["answer_format"],
             "subject": subject,
             "subject_confidence": subj_conf,
-            "has_image": bool(page_row["image_path"]),
+            "has_image": False,
+            "legacy_image_ignored": bool(page_row["image_path"]),
             "has_vision_text": bool(page_row["vision_text"] and page_row["vision_text"].strip()),
             "preview": preview,
         }
@@ -1040,8 +1083,9 @@ def exam_solve_current(session_id: int) -> dict:
     """Solve the CURRENT page — secondary/compat path (solve-current型).
 
     The primary path is the 3-phase flow (finalize-reading → POST/GET
-    /solutions → GET /review), which keeps the camera off after one reading
-    pass.  This endpoint remains for per-page interactive solving: the current
+    /solutions → GET /review). The client is required to close visual
+    recognition before entering review. This endpoint remains for per-page
+    interactive solving: the current
     page's recognized text (OCR + the on-glass AI's figure reading
     ``vision_text``) is the question; the **whole document** (every remembered
     page) is passed as context so a problem continuing across pages is read
@@ -1087,7 +1131,7 @@ def exam_solve_current(session_id: int) -> dict:
                 subject,
                 round(min(1.0, 0.5 + subj_conf / 2), 3) if normalize_ocr_text(material) else 0.0,
                 page_number,
-                page_row["image_path"],
+                None,
             ),
         )
         question_id = qcur.lastrowid
@@ -1096,7 +1140,7 @@ def exam_solve_current(session_id: int) -> dict:
             body_text=material,
             subject=subject,
             context=context,
-            image_path=page_row["image_path"],
+            image_path=None,
         )
         result, solver = solve_with_fallback(question=question)
         served_by = result.extras.get("served_by", solver.name)
@@ -1323,8 +1367,9 @@ def _question_evidence_pages(conn, question_id: int) -> list[int]:
 def exam_finalize_reading(session_id: int) -> dict:
     """Declare 読取完了 (finish_reading = double tap): the reading phase is over.
 
-    From here the camera stays closed, so the privacy LED is dark for the
-    whole answer and review phases.  The document is segmented into problems
+    The client must close its visual-recognition session before calling this
+    endpoint. The server cannot observe or assert camera/LED hardware state.
+    The document is segmented into problems
     (segment_problems over every remembered page, so page-spanning problems
     stay whole) and one questions row is created per problem — the review
     deck.  If a non-local server solver is configured (ROKID_SOLVER=
@@ -1476,7 +1521,12 @@ def exam_finalize_reading(session_id: int) -> dict:
             "server_solved": server_solved,
             "locked": locked,
             "problems": deck,
-            "camera": {"expected_state": "off", "privacy_led": "off"},
+            "camera": {
+                "client_action": "close_visual_sensor",
+                "expected_state": "off_after_client_closes",
+                "observed_state": "not_observed_by_server",
+                "privacy_led": "device_controlled",
+            },
             "operations": _review_operations(),
             "versions": version_info(),
         }
@@ -1641,7 +1691,7 @@ def exam_ingest_solutions(session_id: int, payload: IngestSolutions) -> dict:
 
 @app.get("/v1/exam-sessions/{session_id}/solutions")
 def exam_list_solutions(session_id: int) -> dict:
-    """Review-deck listing (phase 3 閲覧). Camera off, LED off, no paper needed.
+    """Review-deck listing (phase 3 閲覧). No visual input or paper is needed.
 
     Always 200: during the reading phase it returns an empty deck with
     status="reading" so a client can poll for readiness.

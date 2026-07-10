@@ -2,7 +2,7 @@
 
 Covers:
   * POST /finalize-reading — segmentation into problems, status open→reviewing,
-    reading ack (camera off / LED off), idempotency, document requirement,
+    reading ack (client sensor-close requirement), idempotency, document requirement,
   * server-side solve-all only when a non-local ROKID_SOLVER is configured
     (whole document as context; listening transcript folded in),
   * POST /solutions — onboard AI ingest (primary path): deck solved flags,
@@ -48,7 +48,7 @@ def _doc_with_text_pages(client, texts):
     doc_id = r.json()["document_id"]
     for i, t in enumerate(texts):
         r = client.post(
-            f"/v1/documents/{doc_id}/pages", data={"page_index": i, "ocr_text": t}
+            f"/v1/documents/{doc_id}/pages", json={"page_index": i, "ocr_text": t}
         )
         assert r.status_code == 201, r.text
     assert client.post(f"/v1/documents/{doc_id}/finalize").status_code == 200
@@ -118,11 +118,17 @@ def test_finalize_reading_segments_and_transitions(client):
     assert body["already_finalized"] is False
     assert body["problem_count"] == 2
     assert [p["problem_no"] for p in body["problems"]] == ["問1", "問2"]
-    # Camera is off from here: LED dark for the whole answer/review phases.
-    assert body["camera"] == {"expected_state": "off", "privacy_led": "off"}
+    # The server requires client closure but cannot observe camera/LED hardware.
+    assert body["camera"] == {
+        "client_action": "close_visual_sensor",
+        "expected_state": "off_after_client_closes",
+        "observed_state": "not_observed_by_server",
+        "privacy_led": "device_controlled",
+    }
     ack = body["reading_ack"]
     assert len(ack["lines"]) <= 3
-    assert ack["camera_off"] is True
+    assert ack["camera_close_required"] is True
+    assert ack["camera_off_confirmed"] is False
     # Session now reports the reviewing phase.
     s = client.get(f"/v1/exam-sessions/{sid}").json()
     assert s["phase"] == "reviewing"
@@ -384,7 +390,7 @@ def test_scan_ack_without_total_pages_never_claims_completion(client):
     r = client.post("/v1/documents", json={"title": "模試"})
     doc_id = r.json()["document_id"]
     ack = client.post(
-        f"/v1/documents/{doc_id}/pages", data={"page_index": 0, "ocr_text": "問1 a"}
+        f"/v1/documents/{doc_id}/pages", json={"page_index": 0, "ocr_text": "問1 a"}
     ).json()["scan_ack"]
     assert ack["all_scanned"] is False
     assert ack["total_pages"] is None
@@ -392,12 +398,12 @@ def test_scan_ack_without_total_pages_never_claims_completion(client):
     # An understated total is corrected upward (no 2/1ページ完了).
     ack2 = client.post(
         f"/v1/documents/{doc_id}/pages",
-        data={"page_index": 1, "ocr_text": "問2 b", "total_pages": 1},
+        json={"page_index": 1, "ocr_text": "問2 b", "total_pages": 1},
     ).json()["scan_ack"]
     assert ack2["total_pages"] == 2
     # Negative page_index is rejected.
     bad = client.post(
-        f"/v1/documents/{doc_id}/pages", data={"page_index": -1, "ocr_text": "x"}
+        f"/v1/documents/{doc_id}/pages", json={"page_index": -1, "ocr_text": "x"}
     )
     assert bad.status_code == 400
 
@@ -418,39 +424,25 @@ def test_ingest_confidence_is_clamped(client):
     assert deck[1]["answer_confidence"] == 0.0
 
 
-def test_finalize_reading_with_unreadable_pages_gives_guidance(client):
-    # Image-only pages (no recognized text) -> 0 problems: the ack must say so
-    # instead of dropping the user into an empty deck without explanation.
+def test_image_only_page_is_rejected_before_finalize(client):
     r = client.post("/v1/documents", json={"title": "模試"})
     doc_id = r.json()["document_id"]
     files = {"image": ("p.png", image_bytes(make_image(seed=7)), "image/png")}
-    assert (
-        client.post(
-            f"/v1/documents/{doc_id}/pages", data={"page_index": 0}, files=files
-        ).status_code
-        == 201
+    response = client.post(
+        f"/v1/documents/{doc_id}/pages", data={"page_index": 0}, files=files
     )
-    assert client.post(f"/v1/documents/{doc_id}/finalize").status_code == 200
-    sid = _new_doc_exam(client, doc_id)["session_id"]
-    body = client.post(f"/v1/exam-sessions/{sid}/finalize-reading").json()
-    assert body["problem_count"] == 0
-    assert "問題を検出できません" in body["reading_ack"]["lines"]
-    r = client.get(f"/v1/exam-sessions/{sid}/review")
-    assert r.status_code == 409
-    assert "再読取" in r.json()["detail"]
+    assert response.status_code == 415
+    assert client.post(f"/v1/documents/{doc_id}/finalize").status_code == 400
 
 
-def test_upload_size_limit(client, monkeypatch):
-    import app.main as main
-
-    monkeypatch.setattr(main, "_MAX_UPLOAD_BYTES", 16)
+def test_visual_upload_is_rejected_before_bytes_are_read(client):
     r = client.post("/v1/documents", json={"title": "模試"})
     doc_id = r.json()["document_id"]
     files = {"image": ("p.png", image_bytes(make_image(seed=3)), "image/png")}
     resp = client.post(
         f"/v1/documents/{doc_id}/pages", data={"page_index": 0}, files=files
     )
-    assert resp.status_code == 413
+    assert resp.status_code == 415
 
 
 # --- phase 3: review deck -----------------------------------------------------

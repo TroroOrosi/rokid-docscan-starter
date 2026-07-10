@@ -8,7 +8,6 @@ from pathlib import Path
 
 # Project data root. Override with ROKID_DATA_DIR for tests / containers.
 DATA_DIR = Path(os.environ.get("ROKID_DATA_DIR", "data")).resolve()
-IMAGE_DIR = DATA_DIR / "images"
 AUDIO_DIR = DATA_DIR / "audio"   # listening-mode recordings (その場で録音)
 DB_PATH = DATA_DIR / "docscan.db"
 
@@ -92,5 +91,4 @@ AUTH_EXEMPT_PATHS = ("/health", "/v1/version", "/v1/settings", "/docs", "/openap
 
 
 def ensure_dirs() -> None:
-    IMAGE_DIR.mkdir(parents=True, exist_ok=True)
     AUDIO_DIR.mkdir(parents=True, exist_ok=True)

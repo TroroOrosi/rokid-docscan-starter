@@ -18,7 +18,7 @@ explainer / extractor）には**実モデルアダプタ（`openai` / `gemini` /
 
 ```
 [Rokid Glasses]──BLE/Wi-Fi──[Android/iOS コンパニオン]──HTTPS──[本サーバ]
-   カメラ/HUD          撮影・端末OCR・接続管理・UI          登録/照合/要約
+   認識/HUD            非記録認識・接続管理・UI              登録/照合/要約
    (CXR-S: 機上)        (CXR-M SDK / Glimmer 等)            (本リポジトリ)
 ```
 
@@ -26,8 +26,8 @@ explainer / extractor）には**実モデルアダプタ（`openai` / `gemini` /
 
 | 抽象点（サーバ内） | 既定（オフライン） | 実機/実 AI での差し込み先 |
 |------------------|------------------------|---------------------|
-| 画像入力 | `/pages`・`/match` の multipart 画像 | グラスのカメラフレーム（CXR-L の `IMediaStreamService`・AIDL） |
-| 端末 OCR | `ocr_text` / `fast_ocr_text` フォーム値 | 本体 AI（`com.rokid.sprite.aiapp`）/ Android ML Kit / iOS Vision |
+| 視覚入力 | 生画像は415で拒否。`ocr_text`/`vision_text`/`fast_ocr_text`のみ | 公式SDKで確認済みの非記録認識。無ければ失敗終了 |
+| 端末 OCR | JSON の `ocr_text` / `fast_ocr_text` | 本体 AI（`com.rokid.sprite.aiapp`）/ Android ML Kit / iOS Vision |
 | HUD 出力 | `app/hud.py`・`app/glasses_view.py` の3行ペイロード | グラス両眼ディスプレイ描画（CXR-L） |
 | 接続管理 | なし（HTTP のみ） | CXR-L 単体＋Wi-Fi 直結、または CXR-M コンパニオン経由 |
 | 要約 | `app/analyzers/local_placeholder.py`（先頭行） | **`ROKID_ANALYZER=claude`（同梱の実アダプタ）** / Rizon ワークフロー |
@@ -35,7 +35,7 @@ explainer / extractor）には**実モデルアダプタ（`openai` / `gemini` /
 | 解説 | `app/explainers/local_placeholder.py` | **`ROKID_EXPLAINER=claude`（同梱の実アダプタ）** |
 | メディア抽出 | `app/extractors/local_placeholder.py` | **`ROKID_EXTRACTOR=claude`（同梱の実アダプタ）** |
 
-サーバ側で実機を意識する必要があるのは、**画像とOCRテキストの入口**
+サーバ側で実機を意識する必要があるのは、**認識テキストの入口**
 （`app/main.py` の `add_page` / `match_page`）と、**HUD の出口**
 （`app/hud.py`）の2箇所だけです。照合ロジック（`app/matching.py`）は
 ハードウェア非依存のまま再利用できます。
@@ -60,10 +60,10 @@ CXR（Connected XR）SDK スイートは役割別に分かれている（末尾�
   **`com.rokid.sprite.aiapp`**（「Hi Rokid」AI アプリ）。Maven
   `com.rokid.cxr:client-l:0.0.1`、min/target SDK 28。**グラス本体 AI を本サーバに
   繋ぐ主経路**であり、詳細は [cxr-l-integration.md](cxr-l-integration.md) を参照。
-- **差し込み手順（CXR-L 単体アプリ例）**:
+- **差し込み手順（SDK入手後に確定する境界）**:
   1. `ExternalAppClient` を継承し `IMediaStreamService` に AIDL バインド。
-  2. カメラフレーム／本体 AI（`com.rokid.sprite.aiapp`）の OCR/認識結果を取得。
-  3. フレーム JPEG/PNG + OCR テキストを `POST /v1/match` 等に送信（スマホの CXR-L/CXR-M 中継経由）。
+  2. 写真・動画・ファイル保存を伴わない公式認識APIがあることを確認。無ければ処理を中止。
+  3. 認識結果テキストだけを `POST /v1/match` 等に送信。生画像・フレームは送らない。
   4. レスポンスの `hud.lines`（3行）をディスプレイ API で描画。
 
 ---
@@ -94,15 +94,15 @@ CXR（Connected XR）SDK スイートは役割別に分かれている（末尾�
 
 ## 5. jlink-ai 風の接続抽象
 
-- コンパニオンアプリ側で、グラスとの接続（BLE/Wi-Fi、再接続、フレーム
-  ストリーム、HUD 書き込み）を **1つのインターフェースに抽象化**する設計
+- コンパニオンアプリ側で、グラスとの接続（BLE/Wi-Fi、再接続、非記録認識、
+  HUD 書き込み）を **1つのインターフェースに抽象化**する設計
   （jlink-ai 系の「接続抽象レイヤ」発想）。
 - 目的: CXR-L / RokidBrew / 将来の Android XR など **複数バックエンドを
-  差し替え可能**にし、上位の「撮影→OCR→/match→HUD表示」ロジックを
+  差し替え可能**にし、上位の「非記録認識→/match→HUD表示」ロジックを
   バックエンド非依存にする。
 - サーバへの影響: なし。サーバは HTTP 契約（本サーバの API）だけを公開し、
   どの接続バックエンドから来ても同じに扱う。クライアント側の
-  `GlassesConnection` 抽象 → `capture()` / `showHud(lines)` の2メソッドに
+  `GlassesConnection` 抽象 → `recognizeTextEphemerallyOrFail()` / `showHud(lines)` に
   本サーバの入出力がそのまま対応する。
 
 ---
@@ -124,18 +124,16 @@ CXR（Connected XR）SDK スイートは役割別に分かれている（末尾�
 
 ## 7. サーバ側で実機化に向けて残るタスク
 
-- 本物の OCR をどこで動かすか（端末側 vs サーバ側）の確定と、
-  `ocr_text` プレースホルダ（無OCR時は画像MD5）からの移行。
+- 公式SDKで非記録認識APIが利用可能かの確認と、利用不可時に写真・録画へフォールバックしない
+  fail-closedクライアントの実装。
   ※ サーバ側要約/解答/解説/抽出は §8 の `openai`/`gemini`/`claude` アダプタで既に実 AI 化可能。
-- pHash の高速化（現状は純 Python の DCT 実装。numpy / OpenCV / imagehash
-  への置換、または事前計算インデックス化）。
+- `match_text` の日本語OCRノイズ評価と、必要に応じた文字・語単位スコアの改善。
 - 文書スコープでの認証・マルチテナント・並行登録制御。
-- しきい値（`HAMMING_STRONG/WEAK`, `CONF_OK/LOW`, `OCR_MD5_BONUS`）の
-  実撮影データでのチューニング。
+- しきい値（`TEXT_CONF_OK/LOW`）の実認識テキストでのチューニング。
 - CXR-L アプリ側の入力 KeyCode の実測（**旧 Glass のキーコード表は要検証**＝
   `keycodes_verified:false`、[cxr-l-integration.md](cxr-l-integration.md) §7）。
-- 3 フェーズ操作割当（ダブルタップ=読取完了/close のフェーズ・モーダル、長押し=モード/録音
-  トグル）の実機 UX 検証（`app/glasses_view.py` `OPERATION_CONTRACT` のコメント参照）。
+- 3 フェーズ操作割当（ダブルタップ=読取完了/close、長押し=モード/マイク録音）の
+  実機 UX 検証。長押しはアプリ内で消費し、システムの写真・動画操作へ転送しない。
 - `finalize-reading` のサーバ一括解答（solve-all）の非同期ジョブ化（現状は同期ループ。
   問題数が多い＋クラウド solver 時の応答時間対策として将来課題）。
 

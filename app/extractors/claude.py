@@ -53,7 +53,7 @@ class LLMExtractor(MediaExtractor):
             client = get_client(self._client, self.provider)
             if client is None or not (ocr_text or "").strip():
                 return self._fallback.extract(
-                    image_path=image_path, ocr_text=ocr_text, kind=kind, region=region
+                    image_path=None, ocr_text=ocr_text, kind=kind, region=None
                 )
             data = client.complete_json(
                 system=_SYSTEM,
@@ -61,7 +61,7 @@ class LLMExtractor(MediaExtractor):
             )
         except Exception:  # noqa: BLE001 - never break add_question; degrade to local
             return self._fallback.extract(
-                image_path=image_path, ocr_text=ocr_text, kind=kind, region=region
+                image_path=None, ocr_text=ocr_text, kind=kind, region=None
             )
         result_kind = data.get("kind") if data.get("kind") in KINDS else (kind or "figure")
         return ExtractorResult(

@@ -73,9 +73,7 @@ def test_openai_and_gemini_solvers_parse():
         assert r.extras["provider"] == provider
 
 
-def test_solver_sends_page_image_when_present(tmp_path):
-    png = tmp_path / "q.png"
-    png.write_bytes(b"\x89PNG\r\n\x1a\n" + b"payload")
+def test_solver_ignores_legacy_page_image_path():
     calls = []
 
     def create(**kw):
@@ -87,13 +85,13 @@ def test_solver_sends_page_image_when_present(tmp_path):
         name="claude", provider="anthropic",
         client=LLMClient(sdk, provider="anthropic", model="m"),
     )
-    r = solver.solve(question=Question(body_text="q", subject="数学", image_path=str(png)))
+    r = solver.solve(
+        question=Question(body_text="q", subject="数学", image_path="/must/not/be/read.png")
+    )
     assert r.answer == "A"
     content = calls[0]["messages"][0]["content"]
-    assert isinstance(content, list)  # vision: image block + text block
-    assert any(b.get("type") == "image" for b in content)
-    text_block = next(b for b in content if b.get("type") == "text")["text"]
-    assert "解き方" in text_block  # subject-tailored guidance is included
+    assert isinstance(content, str)
+    assert "解き方" in content  # subject-tailored guidance is included
 
 
 def test_solver_text_only_when_no_image():

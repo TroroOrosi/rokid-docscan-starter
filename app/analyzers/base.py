@@ -1,6 +1,6 @@
 """Stable analyzer interface (a 'port' in ports-and-adapters terms).
 
-An Analyzer turns a page image (and any client-provided OCR text) into:
+An Analyzer turns client-provided recognized text into:
 - text:    extracted/forwarded OCR text (may be None if the provider is
            summary-only or unavailable),
 - summary: a short, HUD-friendly one-liner,
@@ -47,8 +47,12 @@ class Analyzer(abc.ABC):
         ocr_text: str | None = None,
         max_summary_len: int = 48,
     ) -> AnalyzerResult:
-        """Return an AnalyzerResult. Implementations must not raise on empty
-        input; return a best-effort placeholder instead."""
+        """Return an AnalyzerResult from text only.
+
+        ``image_path`` is retained for schema compatibility and must be ignored.
+        Implementations must not raise on empty input; return a best-effort
+        placeholder instead.
+        """
 
     def info(self) -> dict:
         return {
