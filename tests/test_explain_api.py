@@ -347,6 +347,29 @@ class TestExplainHistory:
         assert body["current_page_index"] == 1
         assert body["explained_views"][0]["page_index"] == 1
 
+    def test_history_dedupes_same_page_rereads(self, client, doc_1page):
+        # Scroll/stage churn on one page is one visit, not three.
+        sid = _create_session(client, doc_1page)
+        client.get(f"/v1/explain-sessions/{sid}/explain")
+        client.get(f"/v1/explain-sessions/{sid}/explain", params={"view_page": 1})
+        client.get(f"/v1/explain-sessions/{sid}/explain", params={"stage": "detail"})
+
+        r = client.get(f"/v1/explain-sessions/{sid}/history")
+        assert len(r.json()["explained_views"]) == 1
+
+    def test_history_keeps_revisits_as_new_entries(self, client, doc_3pages):
+        # p0 -> p1 -> back to p0: the return visit is a NEW history entry.
+        sid = _create_session(client, doc_3pages)
+        client.get(f"/v1/explain-sessions/{sid}/explain")
+        client.post(f"/v1/explain-sessions/{sid}/next-page")
+        client.get(f"/v1/explain-sessions/{sid}/explain")
+        client.post(f"/v1/explain-sessions/{sid}/prev-page")
+        client.get(f"/v1/explain-sessions/{sid}/explain")
+
+        r = client.get(f"/v1/explain-sessions/{sid}/history")
+        indices = [v["page_index"] for v in r.json()["explained_views"]]
+        assert indices.count(0) == 2 and indices.count(1) == 1
+
 
 # ---------------------------------------------------------------------------
 # 7. /v1/version includes explainers list

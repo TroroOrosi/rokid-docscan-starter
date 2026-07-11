@@ -111,3 +111,31 @@ def test_missing_document_404(client):
     files = {"image": ("q.png", image_bytes(make_image(seed=1)), "image/png")}
     r = client.post("/v1/match", data={"document_id": "9999"}, files=files)
     assert r.status_code == 404
+
+
+def test_finalize_is_idempotent_per_page(client, monkeypatch):
+    # Re-finalizing (gesture double-fire / resume) must not re-run the analyzer
+    # over already-summarized pages — with a cloud ROKID_ANALYZER that would be
+    # a full re-bill of the document.
+    from app.analyzers import Analyzer, AnalyzerResult, register_analyzer
+
+    calls = []
+
+    class CountingAnalyzer(Analyzer):
+        name = "counting-test"
+        provider_version = "t-1"
+        offline = True
+
+        def analyze(self, *, image_path=None, ocr_text=None, max_summary_len=48):
+            calls.append(ocr_text)
+            return AnalyzerResult(text=ocr_text, summary="COUNTED")
+
+    register_analyzer(CountingAnalyzer(), replace=True)
+    monkeypatch.setenv("ROKID_ANALYZER", "counting-test")
+
+    doc_id = _create_doc(client)
+    _add_page(client, doc_id, 0, seed=10, ocr_text="page one")
+    _add_page(client, doc_id, 1, seed=11, ocr_text="page two")
+    assert client.post(f"/v1/documents/{doc_id}/finalize").status_code == 200
+    assert client.post(f"/v1/documents/{doc_id}/finalize").status_code == 200
+    assert len(calls) == 2

@@ -49,3 +49,16 @@ def test_auth_required_when_key_set(tmp_path, monkeypatch):
     assert c.get("/v1/settings").status_code == 200
     # A trailing slash on a discovery URL must not lock the client out.
     assert c.get("/v1/settings/", follow_redirects=True).status_code == 200
+
+
+def test_auth_non_ascii_header_is_401_not_500(tmp_path, monkeypatch):
+    # A non-ASCII bearer value must be rejected cleanly (the constant-time
+    # compare works over bytes; a str compare_digest would raise TypeError).
+    c = _make_client(tmp_path, monkeypatch, api_key="secret")
+    r = c.post(
+        "/v1/documents",
+        json={"title": "x"},
+        # bytes: httpx refuses to encode non-ASCII str header values itself.
+        headers={"Authorization": "Bearer sécrét".encode("latin-1")},
+    )
+    assert r.status_code == 401

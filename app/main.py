@@ -9,6 +9,7 @@ docs/implementation-notes.md and docs/cxr-l-integration.md.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import io
 import json
 import os
@@ -95,7 +96,11 @@ async def _auth_middleware(request: Request, call_next):
     # before it can negotiate contracts).
     path = request.url.path.rstrip("/") or "/"
     if config.API_KEY and path not in config.AUTH_EXEMPT_PATHS:
-        if request.headers.get("authorization", "") != f"Bearer {config.API_KEY}":
+        # Constant-time compare over bytes: str-compare leaks length/prefix
+        # timing, and compare_digest rejects non-ASCII str inputs.
+        expected = f"Bearer {config.API_KEY}".encode("utf-8")
+        provided = request.headers.get("authorization", "").encode("utf-8")
+        if not hmac.compare_digest(provided, expected):
             return JSONResponse({"detail": "unauthorized"}, status_code=401)
     return await call_next(request)
 
@@ -333,7 +338,7 @@ def finalize_document(document_id: int) -> dict:
     try:
         _doc_or_404(conn, document_id)
         pages = conn.execute(
-            "SELECT id, image_path, ocr_text, vision_text FROM pages "
+            "SELECT id, image_path, ocr_text, vision_text, summary FROM pages "
             "WHERE document_id = ?",
             (document_id,),
         ).fetchall()
@@ -342,6 +347,12 @@ def finalize_document(document_id: int) -> dict:
 
         analyzer = get_analyzer()
         for p in pages:
+            # Idempotent: already-summarized pages are skipped, so re-calling
+            # finalize (double-fire, resume after a crash) never re-runs a
+            # possibly-cloud analyzer over the whole document. A page replaced
+            # via re-scan has summary=NULL again and gets re-summarized here.
+            if p["summary"] is not None:
+                continue
             result = analyzer.analyze(
                 image_path=p["image_path"],
                 ocr_text=_page_material(p["ocr_text"], p["vision_text"]) or p["ocr_text"],
@@ -1915,20 +1926,29 @@ def explain_page(
         explainer = get_explainer()
         result = explainer.explain(req)
 
-        conn.execute(
-            """INSERT INTO explain_views
-               (session_id, page_index, verdict, hud_lines_json,
-                detail, evidence_pages_json, confidence)
-               VALUES (?, ?, 'HIT', ?, ?, ?, ?)""",
-            (
-                session_id,
-                page_index,
-                json.dumps(result.lines, ensure_ascii=False),
-                result.detail,
-                json.dumps(result.evidence_pages),
-                result.confidence,
-            ),
-        )
+        # History records page VISITS, not every scroll: re-fetching the same
+        # page (stage/view_page churn while reading) must not duplicate rows,
+        # while returning to a page after navigating away is a new visit.
+        last = conn.execute(
+            "SELECT page_index FROM explain_views WHERE session_id = ? "
+            "ORDER BY id DESC LIMIT 1",
+            (session_id,),
+        ).fetchone()
+        if last is None or last["page_index"] != page_index:
+            conn.execute(
+                """INSERT INTO explain_views
+                   (session_id, page_index, verdict, hud_lines_json,
+                    detail, evidence_pages_json, confidence)
+                   VALUES (?, ?, 'HIT', ?, ?, ?, ?)""",
+                (
+                    session_id,
+                    page_index,
+                    json.dumps(result.lines, ensure_ascii=False),
+                    result.detail,
+                    json.dumps(result.evidence_pages),
+                    result.confidence,
+                ),
+            )
         if session["status"] == "ready":
             conn.execute(
                 "UPDATE explain_sessions SET status = 'explaining' WHERE id = ?",
