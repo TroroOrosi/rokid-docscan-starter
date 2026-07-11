@@ -23,7 +23,7 @@ ENABLE_EMBEDDING = os.environ.get("ROKID_ENABLE_EMBEDDING", "0") == "1"
 
 # Explainer adapter selection (explain-sessions).
 # Default: "local" (LocalPlaceholderExplainer — offline, no credentials).
-# Override with ROKID_EXPLAINER=claude to swap in the real Anthropic adapter.
+# Override with ROKID_EXPLAINER=openai|gemini|claude to swap in a real adapter.
 # The value must match an Explainer.name registered in app/explainers/registry.py.
 ROKID_EXPLAINER = os.environ.get("ROKID_EXPLAINER", "local")
 
@@ -41,9 +41,9 @@ ROKID_EXPLAINER = os.environ.get("ROKID_EXPLAINER", "local")
 #   ROKID_EXTRACTOR=openai|gemini|claude  real formula/table/figure extraction
 # Backing model + credentials (read in app/llm.py):
 #   OPENAI_API_KEY / GOOGLE_API_KEY / ANTHROPIC_API_KEY  provider API key
-#   ROKID_LLM_MODEL   REQUIRED for openai/gemini (set a current model id, e.g.
-#                     a current GPT model); Anthropic defaults to
-#                     "claude-opus-4-8"
+#   ROKID_LLM_MODEL   optional override; every provider has a default
+#                     (openai "gpt-4o" / gemini "gemini-2.5-flash" /
+#                     anthropic "claude-opus-4-8" — see app/llm.py)
 #   ROKID_LLM_MAX_TOKENS   default 1024
 # Optional deps (install only for the provider you use):
 #   pip install openai | google-genai | anthropic
@@ -54,14 +54,6 @@ ROKID_EXPLAINER = os.environ.get("ROKID_EXPLAINER", "local")
 #   ROKID_TRANSCRIBE_MODEL  default "gpt-4o-transcribe" (openai); gemini uses
 #                           ROKID_LLM_MODEL (an audio-capable gemini model)
 TRANSCRIBER = os.environ.get("ROKID_TRANSCRIBER") or None
-
-LLM_MODEL = os.environ.get("ROKID_LLM_MODEL", "claude-opus-4-8")
-LLM_ENABLED = bool(
-    os.environ.get("ANTHROPIC_API_KEY")
-    or os.environ.get("OPENAI_API_KEY")
-    or os.environ.get("GOOGLE_API_KEY")
-    or os.environ.get("GEMINI_API_KEY")
-)
 
 # --- On-glasses input (KeyCode) override ------------------------------------
 # The server publishes a gesture->KeyCode contract at GET /v1/settings (see

@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.llm import DEFAULT_MODELS, LLMClient, extract_json, get_client
+from app.llm import DEFAULT_MODELS, LLMClient, LLMConfigError, extract_json, get_client
 
 
 # --- fakes per provider shape -----------------------------------------------
@@ -122,13 +122,16 @@ def test_load_returns_none_without_key(monkeypatch):
     assert LLMClient.load("anthropic") is None
 
 
-def test_load_openai_requires_key_and_model(monkeypatch):
+def test_load_openai_keyless_is_none_key_without_sdk_is_loud(monkeypatch):
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     assert LLMClient.load("openai") is None
-    # Key present but no explicit model -> still None (no safe default id).
+    # Key present, default model applies, but the SDK is not installed in the
+    # offline test env -> a LOUD LLMConfigError (callers catch and degrade),
+    # never a silent None that hides the misconfiguration.
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     monkeypatch.delenv("ROKID_LLM_MODEL", raising=False)
-    assert LLMClient.load("openai") is None
+    with pytest.raises(LLMConfigError):
+        LLMClient.load("openai")
 
 
 def test_load_unknown_provider_is_none():
@@ -140,10 +143,12 @@ def test_get_client_prefers_injected():
     assert get_client(injected, "anthropic") is injected
 
 
-def test_default_models():
+def test_default_models_are_gpt_first_and_complete():
+    # CLAUDE.md: GPT (openai) is cited first; every provider works key-only.
+    assert list(DEFAULT_MODELS) == ["openai", "gemini", "anthropic"]
+    assert DEFAULT_MODELS["openai"] == "gpt-4o"
+    assert DEFAULT_MODELS["gemini"] == "gemini-2.5-flash"
     assert DEFAULT_MODELS["anthropic"] == "claude-opus-4-8"
-    assert DEFAULT_MODELS["openai"] is None
-    assert DEFAULT_MODELS["gemini"] is None
 
 
 # --- vision: image attachment per provider ----------------------------------

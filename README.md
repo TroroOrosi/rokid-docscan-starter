@@ -495,8 +495,8 @@ pip install openai                           # または google-genai / anthropi
 export OPENAI_API_KEY=sk-...                 # Gemini: GOOGLE_API_KEY / Anthropic: ANTHROPIC_API_KEY
 export ROKID_SOLVER=openai ROKID_EXPLAINER=openai \
        ROKID_ANALYZER=openai ROKID_EXTRACTOR=openai   # または gemini / claude
-export ROKID_LLM_MODEL=<現行のGPTモデルid>    # openai/gemini は現行モデル id を必須指定
-                                             # （anthropic のみ claude-opus-4-8 が既定）
+# export ROKID_LLM_MODEL=gpt-4o             # 任意上書き（既定: openai gpt-4o /
+                                             #  gemini gemini-2.5-flash / anthropic claude-opus-4-8）
 uvicorn app.main:app --port 8000
 ```
 
@@ -504,7 +504,7 @@ uvicorn app.main:app --port 8000
 |----------|------|------|
 | `ROKID_ANALYZER`/`ROKID_SOLVER`/`ROKID_EXPLAINER`/`ROKID_EXTRACTOR` | `local` | `openai\|gemini\|claude` で実 AI にルーティング（solver は finalize-reading の一括解答も有効化） |
 | `OPENAI_API_KEY`/`GOOGLE_API_KEY`/`ANTHROPIC_API_KEY` | （なし） | 実呼び出しに必須。未設定なら該当ポートはローカルへ |
-| `ROKID_LLM_MODEL` | （anthropic のみ `claude-opus-4-8`） | 使用モデル id（openai/gemini は必須指定） |
+| `ROKID_LLM_MODEL` | openai `gpt-4o` / gemini `gemini-2.5-flash` / anthropic `claude-opus-4-8` | 使用モデル id（任意上書き） |
 | `ROKID_LLM_MAX_TOKENS` | `1024` | 応答トークン上限 |
 | `ROKID_TRANSCRIBER` | （なし） | リスニング録音の書き起こし `openai\|gemini`（未設定=与えた transcript を使用） |
 | `ROKID_TRANSCRIBE_MODEL` | `gpt-4o-transcribe` | openai の書き起こしモデル（gemini は `ROKID_LLM_MODEL`） |

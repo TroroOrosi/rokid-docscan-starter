@@ -1,4 +1,4 @@
-"""Real cloud-model bridge — provider-agnostic (Anthropic / OpenAI / Gemini).
+"""Real cloud-model bridge — provider-agnostic (OpenAI / Gemini / Anthropic).
 
 This module turns the offline *placeholder* adapters into working,
 production-usable ones.  It is isolated so the rest of the server keeps
@@ -11,16 +11,16 @@ Design constraints (identical to the rest of the repo):
     imported, unless a caller routes to a cloud adapter AND that provider's API
     key is present.  With no key the server runs fully offline on the local
     placeholders.
-  * **No new hard dependency.**  The official provider SDKs (`anthropic`,
-    `openai`, `google-genai`) are *optional* extras, imported lazily; their
+  * **No new hard dependency.**  The official provider SDKs (`openai`,
+    `google-genai`, `anthropic`) are *optional* extras, imported lazily; their
     absence only matters once you opt in to that provider.
   * **Injectable.**  Adapters accept an `LLMClient`, and `LLMClient` wraps any
     object exposing the selected provider's call surface.  Tests pass a fake,
     so the whole real path is exercised offline with no network and no creds.
 
 Routing is by adapter name == provider: `ROKID_SOLVER=openai` selects the
-OpenAI-backed solver, etc.  The backing model is `ROKID_LLM_MODEL` (Anthropic
-has a sensible default; OpenAI/Gemini require it be set to a current model id).
+OpenAI-backed solver (GPT — the same family as the glasses' onboard AI), etc.
+Every provider has a working default model; `ROKID_LLM_MODEL` overrides it.
 """
 
 from __future__ import annotations
@@ -30,20 +30,31 @@ import json
 import os
 import re
 
-PROVIDERS = ("anthropic", "openai", "gemini")
+PROVIDERS = ("openai", "gemini", "anthropic")
 
-# Per-provider model defaults. Anthropic has a verified current default; for
-# OpenAI/Gemini the operator must set ROKID_LLM_MODEL to a current id (a wrong
-# id just fails the call and the adapter falls back to local, but we prefer to
-# not ship a likely-stale guess).
-DEFAULT_MODELS = {"anthropic": "claude-opus-4-8", "openai": None, "gemini": None}
+# Per-provider model defaults, GPT (openai) first — the onboard AI's family.
+# A stale id degrades safely: the call fails and the adapter falls back to
+# local; ROKID_LLM_MODEL overrides without a code change.
+DEFAULT_MODELS = {
+    "openai": "gpt-4o",  # family-consistent with the gpt-4o-transcribe default
+    "gemini": "gemini-2.5-flash",  # matches the transcriber default
+    "anthropic": "claude-opus-4-8",
+}
 DEFAULT_MAX_TOKENS = 1024
+
+# (adapter registration name, llm provider) pairs shared by all four adapter
+# families (solvers/analyzers/explainers/extractors) — GPT (openai) first.
+ADAPTER_PROVIDERS = (
+    ("openai", "openai"),
+    ("gemini", "gemini"),
+    ("claude", "anthropic"),
+)
 
 # Env var holding each provider's API key.
 _KEY_ENV = {
-    "anthropic": ("ANTHROPIC_API_KEY",),
     "openai": ("OPENAI_API_KEY",),
     "gemini": ("GOOGLE_API_KEY", "GEMINI_API_KEY"),
+    "anthropic": ("ANTHROPIC_API_KEY",),
 }
 
 # NOTE: JSON extraction uses a brace-balanced scan (see extract_json), not a
@@ -92,19 +103,17 @@ class LLMClient:
     def load(cls, provider: str = "anthropic") -> "LLMClient | None":
         """Build a client for ``provider`` from the env, or ``None`` if unconfigured.
 
-        Returns ``None`` when the provider's API key is absent, or (for
-        OpenAI/Gemini) when ``ROKID_LLM_MODEL`` is unset. Raises
-        :class:`LLMConfigError` when a key IS present but the provider SDK is
-        missing, so the misconfiguration is loud rather than silent.
+        Returns ``None`` when the provider's API key is absent (the offline
+        default). Raises :class:`LLMConfigError` when a key IS present but the
+        provider SDK is missing, so the misconfiguration is loud rather than
+        silent. Every provider has a default model; ``ROKID_LLM_MODEL``
+        overrides it.
         """
         if provider not in PROVIDERS:
             return None
         if not _provider_key(provider):
             return None
         model = os.environ.get("ROKID_LLM_MODEL") or DEFAULT_MODELS[provider]
-        if not model:
-            # OpenAI/Gemini have no safe default id — require an explicit one.
-            return None
         try:
             max_tokens = int(os.environ.get("ROKID_LLM_MAX_TOKENS", str(DEFAULT_MAX_TOKENS)))
         except ValueError:

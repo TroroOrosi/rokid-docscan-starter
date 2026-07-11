@@ -210,7 +210,7 @@ def test_finalize_reading_keyless_cloud_solver_leaves_deck_unsolved(client, monk
     # ROKID_SOLVER=openai with no key: solve_with_fallback lands on the local
     # placeholder — that junk must NOT be stored as "solved" (it would shadow
     # the onboard ingest with (要モデル接続) answers).
-    from app.solvers.claude import LLMSolver
+    from app.solvers.llm_adapter import LLMSolver
     from app.solvers.registry import register_solver
 
     # Restore a pristine (client-less) adapter: other test modules may have

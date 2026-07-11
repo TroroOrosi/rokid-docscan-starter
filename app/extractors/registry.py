@@ -20,7 +20,8 @@ from __future__ import annotations
 import os
 
 from .base import MediaExtractor
-from .claude import LLMExtractor
+from ..llm import ADAPTER_PROVIDERS
+from .llm_adapter import LLMExtractor
 from .local_placeholder import LocalPlaceholderExtractor
 
 DEFAULT_EXTRACTOR = "local"
@@ -56,7 +57,7 @@ def get_extractor(prefer: str | None = None) -> MediaExtractor:
 
 # Register the offline default at import time so the server always has one.
 register_extractor(LocalPlaceholderExtractor(), replace=True)
-# Register the real cloud extractors (Anthropic Claude / OpenAI / Google Gemini).
+# Register the real cloud extractors (OpenAI GPT / Google Gemini / Anthropic Claude).
 # Each defers to local when unconfigured or on any error, so add_question is safe.
-for _name, _provider in (("claude", "anthropic"), ("openai", "openai"), ("gemini", "gemini")):
+for _name, _provider in ADAPTER_PROVIDERS:
     register_extractor(LLMExtractor(name=_name, provider=_provider), replace=True)

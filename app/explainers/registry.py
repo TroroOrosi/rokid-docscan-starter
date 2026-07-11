@@ -14,7 +14,8 @@ from __future__ import annotations
 import os
 
 from ..explainer import Explainer
-from .claude import LLMExplainer
+from ..llm import ADAPTER_PROVIDERS
+from .llm_adapter import LLMExplainer
 from .local_placeholder import LocalPlaceholderExplainer
 
 DEFAULT_EXPLAINER = "local"
@@ -50,7 +51,7 @@ def get_explainer(prefer: str | None = None) -> Explainer:
 
 # Register the offline default at import time so the server always has one.
 register_explainer(LocalPlaceholderExplainer(), replace=True)
-# Register the real cloud explainers (Anthropic Claude / OpenAI / Google Gemini).
+# Register the real cloud explainers (OpenAI GPT / Google Gemini / Anthropic Claude).
 # Each defers to local when unconfigured or on any error, so the HUD always renders.
-for _name, _provider in (("claude", "anthropic"), ("openai", "openai"), ("gemini", "gemini")):
+for _name, _provider in ADAPTER_PROVIDERS:
     register_explainer(LLMExplainer(name=_name, provider=_provider), replace=True)

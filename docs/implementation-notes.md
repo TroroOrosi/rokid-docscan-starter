@@ -149,16 +149,17 @@ CXR（Connected XR）SDK スイートは役割別に分かれている（末尾�
 
 | ポート | 環境変数 | 実装 | 未設定時の挙動 |
 |--------|----------|------|----------------|
-| Analyzer（要約） | `ROKID_ANALYZER=openai\|gemini\|claude` | `app/analyzers/claude.py`（`LLMAnalyzer`） | ローカル要約へフォールバック |
-| Solver（解答） | `ROKID_SOLVER=openai\|gemini\|claude` | `app/solvers/claude.py`（`LLMSolver`） | 二段フォールバックで local |
-| Explainer（解説） | `ROKID_EXPLAINER=openai\|gemini\|claude` | `app/explainers/claude.py`（`LLMExplainer`） | ローカル解説へフォールバック |
-| Extractor（数式/表/図） | `ROKID_EXTRACTOR=openai\|gemini\|claude` | `app/extractors/claude.py`（`LLMExtractor`） | ローカル抽出へフォールバック |
+| Analyzer（要約） | `ROKID_ANALYZER=openai\|gemini\|claude` | `app/analyzers/llm_adapter.py`（`LLMAnalyzer`） | ローカル要約へフォールバック |
+| Solver（解答） | `ROKID_SOLVER=openai\|gemini\|claude` | `app/solvers/llm_adapter.py`（`LLMSolver`） | 二段フォールバックで local |
+| Explainer（解説） | `ROKID_EXPLAINER=openai\|gemini\|claude` | `app/explainers/llm_adapter.py`（`LLMExplainer`） | ローカル解説へフォールバック |
+| Extractor（数式/表/図） | `ROKID_EXTRACTOR=openai\|gemini\|claude` | `app/extractors/llm_adapter.py`（`LLMExtractor`） | ローカル抽出へフォールバック |
 
 - 実呼び出しには該当プロバイダの API キー（`ANTHROPIC_API_KEY` / `OPENAI_API_KEY` /
   `GOOGLE_API_KEY`）と SDK（`pip install anthropic|openai|google-genai`）が必要。
   未設定なら**ネットワークに一切触れず**ローカル実装で動く（CI もこの経路）。
-- モデルは `ROKID_LLM_MODEL`（Anthropic 既定 `claude-opus-4-8`。openai/gemini は現行
-  モデル id を必須指定）、出力上限は `ROKID_LLM_MAX_TOKENS`（既定 1024）。
+- モデルは `ROKID_LLM_MODEL` で上書き（既定: openai `gpt-4o` / gemini
+  `gemini-2.5-flash` / anthropic `claude-opus-4-8`）、出力上限は
+  `ROKID_LLM_MAX_TOKENS`（既定 1024）。
 - 共通クライアントは `app/llm.py`（公式 SDK を遅延 import・注入可能・プロバイダ非依存）。
   ルーティングは**アダプタ名＝プロバイダ**（`ROKID_SOLVER=openai` 等）。
 - 本番試験ロック（`mode=real` / `ROKID_ALLOW_REAL_EXAM_SOLVE`）は solver の実装に

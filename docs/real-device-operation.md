@@ -52,7 +52,7 @@ pip install openai             # または google-genai / anthropic
 export OPENAI_API_KEY=sk-...                  # Gemini/Anthropic なら GOOGLE_API_KEY / ANTHROPIC_API_KEY
 export ROKID_SOLVER=openai ROKID_EXPLAINER=openai \
        ROKID_ANALYZER=openai ROKID_EXTRACTOR=openai   # または gemini / claude
-export ROKID_LLM_MODEL=<現行のGPTモデルid>      # openai/gemini は現行モデル id を必須指定
+# export ROKID_LLM_MODEL=gpt-4o               # 任意上書き（各プロバイダに既定あり）
 ```
 
 - 鍵未設定/失敗時は**自動でローカル実装にフォールバック**（サーバは常に応答）。
