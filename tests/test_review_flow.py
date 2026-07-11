@@ -553,6 +553,36 @@ def test_real_mode_finalize_skips_server_solve(client, monkeypatch):
     assert _RecordingSolver.seen == []
 
 
+def test_real_mode_locks_session_detail_view(client, monkeypatch):
+    # GET /v1/exam-sessions/{id} must honor the lock like GET /solutions does:
+    # answers stored during a temporary unlock must not leak once re-locked.
+    import app.main as main
+
+    sid, _ = _finalized_session(client, mode="real")
+    monkeypatch.setattr(main.config, "ALLOW_REAL_EXAM_SOLVE", True)
+    r = client.post(
+        f"/v1/exam-sessions/{sid}/solutions",
+        json={"solutions": [{"problem_no": "問1", "answer": "3個"}]},
+    )
+    assert r.status_code == 200 and r.json()["ingested"] == 1
+    monkeypatch.setattr(main.config, "ALLOW_REAL_EXAM_SOLVE", False)
+
+    body = client.get(f"/v1/exam-sessions/{sid}").json()
+    assert body["locked"] is True
+    assert body["solved_count"] == 0
+    assert all(q["solved"] is False for q in body["questions"])
+
+    # Study sessions keep reporting solved state (additive field, no lock).
+    sid2, _ = _finalized_session(client)
+    client.post(
+        f"/v1/exam-sessions/{sid2}/solutions",
+        json={"solutions": [{"problem_no": "問1", "answer": "3個"}]},
+    )
+    body2 = client.get(f"/v1/exam-sessions/{sid2}").json()
+    assert body2["locked"] is False
+    assert body2["solved_count"] == 1
+
+
 # --- regression: compat path stays usable --------------------------------------
 
 def test_solve_current_still_works_after_finalize_reading(client):

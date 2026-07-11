@@ -872,18 +872,28 @@ def get_exam_session(session_id: int) -> dict:
             "FROM questions WHERE session_id = ? ORDER BY id",
             (session_id,),
         ).fetchall()
-        solved = {
-            r["question_id"]
-            for r in conn.execute(
-                "SELECT DISTINCT question_id FROM solutions "
-                "WHERE question_id IN "
-                "(SELECT id FROM questions WHERE session_id = ?)",
-                (session_id,),
-            ).fetchall()
-        }
+        # Same invariant as GET /solutions and finalize-reading: a locked
+        # real-mode session must not leak solution-derived signals (answers
+        # may exist from a temporary unlock). An empty solved set masks
+        # solved_count and every questions[].solved below.
+        locked = session["mode"] == "real" and not config.ALLOW_REAL_EXAM_SOLVE
+        solved = (
+            set()
+            if locked
+            else {
+                r["question_id"]
+                for r in conn.execute(
+                    "SELECT DISTINCT question_id FROM solutions "
+                    "WHERE question_id IN "
+                    "(SELECT id FROM questions WHERE session_id = ?)",
+                    (session_id,),
+                ).fetchall()
+            }
+        )
         deck_ids = {r["id"] for r in _deck_question_rows(conn, session_id)}
         return {
             "session_id": session_id,
+            "locked": locked,
             "mode": session["mode"],
             "voice_enabled": bool(session["voice_enabled"]),
             "status": session["status"],
