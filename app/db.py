@@ -206,6 +206,12 @@ def _migrate(conn: sqlite3.Connection) -> None:
     # rebuild also adds vision_text; otherwise just add the column if missing.
     if _pages_image_path_not_null(conn):
         conn.executescript(_PAGES_REBUILD_SQL)
+        # `_SCHEMA` created this index on the legacy table before the rebuild;
+        # DROP TABLE removes it with that table. Recreate it now rather than
+        # leaving the migrated DB unindexed until the *next* process start.
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_pages_document ON pages(document_id)"
+        )
     else:
         pcols = {r[1] for r in conn.execute("PRAGMA table_info(pages)")}
         if "vision_text" not in pcols:

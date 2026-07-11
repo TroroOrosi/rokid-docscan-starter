@@ -595,6 +595,21 @@ def test_page_rescan_locked_once_reading_finished(client):
     assert "new document" in r.json()["detail"]
 
 
+def test_rejected_image_rescan_does_not_leave_orphan(client, tmp_path):
+    sid, _body = _finalized_session(client, texts=["問1 りんごは何個か"])
+    doc_id = client.get(f"/v1/exam-sessions/{sid}").json()["document_id"]
+    files = {
+        "image": ("rejected.png", image_bytes(make_image(seed=77)), "image/png")
+    }
+    r = client.post(
+        f"/v1/documents/{doc_id}/pages",
+        data={"page_index": 0, "ocr_text": "問1 差し替え"},
+        files=files,
+    )
+    assert r.status_code == 409
+    assert list((tmp_path / "images").iterdir()) == []
+
+
 def test_new_page_index_rejected_after_finalize(client):
     # New pages after /finalize would silently miss summaries and the deck.
     doc_id = _doc_with_text_pages(client, _TWO_PROBLEM_PAGES)

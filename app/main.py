@@ -49,6 +49,7 @@ from .glasses_view import (
 )
 from .hud import build_hud
 from .layout import parse_layout, primary_question, segment_problems
+from .llm import clamp01
 from .matching import Candidate, match, normalize_ocr_text, ocr_md5, phash_hex
 from .overlay import build_overlay
 from .retrieval import retrieve_context
@@ -149,6 +150,16 @@ def _doc_or_404(conn, document_id: int):
 
 def _fallback_md5(omd5: str | None, raw: bytes) -> str:
     return omd5 if omd5 is not None else hashlib.md5(raw).hexdigest()
+
+
+def _unlink_best_effort(path: str | Path | None) -> None:
+    """Remove a superseded/rejected media file without masking the API result."""
+    if not path:
+        return
+    try:
+        Path(path).unlink()
+    except OSError:
+        pass
 
 
 def _row_or_404(conn, table: str, row_id: int, detail: str):
@@ -276,6 +287,8 @@ async def add_page(
         )
     if page_index < 0:
         raise HTTPException(status_code=400, detail="page_index must be >= 0")
+    pending_image_path: Path | None = None
+    image_persisted = False
     conn = db.connect()
     try:
         doc = _doc_or_404(conn, document_id)
@@ -287,6 +300,7 @@ async def add_page(
             omd5 = _fallback_md5(ocr_md5(ocr_text), raw)
             fname = f"{document_id}_{page_index}_{uuid.uuid4().hex[:8]}.png"
             fpath: Path | None = IMAGE_DIR / fname
+            pending_image_path = fpath
             img.convert("RGB").save(fpath, format="PNG")
             image_path = str(fpath)
         else:
@@ -326,11 +340,10 @@ async def add_page(
                 (image_path, ph, ocr_text, vision_text, omd5, existing["id"]),
             )
             conn.commit()
+            image_persisted = pending_image_path is not None
             if existing["image_path"] and existing["image_path"] != image_path:
-                try:  # best-effort: the replaced photo must not linger on disk
-                    os.remove(existing["image_path"])
-                except OSError:
-                    pass
+                # The replaced photo must not linger on disk.
+                _unlink_best_effort(existing["image_path"])
             page_id, replaced = existing["id"], True
         else:
             if doc["status"] != "open":
@@ -353,6 +366,7 @@ async def add_page(
                      vision_text, omd5),
                 )
                 conn.commit()
+                image_persisted = pending_image_path is not None
             except db.sqlite3.IntegrityError:
                 # Two racing first-time adds of the same index: the loser keeps
                 # the old (pre-upsert) conflict answer.
@@ -391,6 +405,11 @@ async def add_page(
         }
     finally:
         conn.close()
+        # Image validation necessarily happens before the DB write. If a later
+        # guard rejects the request (finalized document/reviewing session/race),
+        # do not retain a photo that no database row owns.
+        if pending_image_path is not None and not image_persisted:
+            _unlink_best_effort(pending_image_path)
 
 
 @app.post("/v1/documents/{document_id}/finalize")
@@ -487,7 +506,10 @@ async def match_page(
         hud = build_hud(
             verdict,
             best,
-            total_pages=len(candidates),
+            # Text-only pages are not image-match candidates, but they still
+            # belong to the document. Using candidate count could render an
+            # impossible label such as PAGE 2/1 in a mixed document.
+            total_pages=len(rows),
             summary=summaries.get(best.page_id) if best else None,
         )
 
@@ -1286,10 +1308,13 @@ async def exam_upload_audio(
         transcript and transcript.strip()
     ):
         raise HTTPException(status_code=400, detail="provide audio and/or transcript")
+    pending_audio_path: Path | None = None
+    audio_persisted = False
     conn = db.connect()
     try:
         session = _exam_session_or_404(conn, session_id)
 
+        old_audio_path: str | None = session["audio_path"]
         audio_path: str | None = None
         if audio is not None and getattr(audio, "filename", None):
             raw = await _read_upload_limited(audio)
@@ -1297,6 +1322,7 @@ async def exam_upload_audio(
             fname = f"audio_{session_id}_{uuid.uuid4().hex[:8]}{ext}"
             config.AUDIO_DIR.mkdir(parents=True, exist_ok=True)
             fpath = config.AUDIO_DIR / fname
+            pending_audio_path = fpath
             fpath.write_bytes(raw)
             audio_path = str(fpath)
 
@@ -1306,6 +1332,11 @@ async def exam_upload_audio(
             (audio_path, text, session_id),
         )
         conn.commit()
+        audio_persisted = pending_audio_path is not None
+        if old_audio_path and old_audio_path != audio_path:
+            # A new recording (or transcript-only replacement) supersedes the
+            # old DB reference; remove the now-unreachable recording as well.
+            _unlink_best_effort(old_audio_path)
         return {
             "session_id": session_id,
             "exam_type": session["exam_type"],
@@ -1315,6 +1346,8 @@ async def exam_upload_audio(
         }
     finally:
         conn.close()
+        if pending_audio_path is not None and not audio_persisted:
+            _unlink_best_effort(pending_audio_path)
 
 
 # --- 3-phase flow endpoints: finalize-reading / solutions ingest / review ----
@@ -1760,7 +1793,7 @@ def exam_ingest_solutions(session_id: int, payload: IngestSolutions) -> dict:
             )
             # Clamp: an out-of-scale confidence (e.g. a 0-100 client) must not
             # inflate the deck values or the HUD ★ symbols.
-            confidence = max(0.0, min(1.0, item.answer_confidence))
+            confidence = clamp01(item.answer_confidence, default=0.5)
             conn.execute(
                 """INSERT INTO solutions
                    (question_id, solver_name, answer, solution_steps_json,
@@ -1949,13 +1982,19 @@ def create_explain_session(payload: CreateExplainSession) -> dict:
     """
     conn = db.connect()
     try:
-        _doc_or_404(conn, payload.document_id)
+        doc = _doc_or_404(conn, payload.document_id)
+        total_pages = _explain_total_pages(conn, payload.document_id)
+        if doc["status"] != "ready" or total_pages < 1:
+            raise HTTPException(
+                status_code=400,
+                detail="document must be finalized with >=1 page "
+                "(POST /v1/documents/{id}/finalize) before explanation",
+            )
         cur = conn.execute(
             "INSERT INTO explain_sessions (document_id, voice_enabled) VALUES (?, ?)",
             (payload.document_id, int(payload.voice_enabled)),
         )
         conn.commit()
-        total_pages = _explain_total_pages(conn, payload.document_id)
         return {
             "session_id": cur.lastrowid,
             "document_id": payload.document_id,

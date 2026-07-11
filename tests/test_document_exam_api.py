@@ -279,6 +279,31 @@ def test_audio_uses_provided_transcript_offline(client):
     assert client.get(f"/v1/exam-sessions/{sid}").json()["has_audio"] is True
 
 
+def test_replacing_audio_removes_superseded_recording(client, tmp_path):
+    doc_id = _doc_with_text_pages(client, ["Listening Part 1 Question 1"])
+    sid = _new_doc_exam(client, doc_id, exam_type="listening")["session_id"]
+    endpoint = f"/v1/exam-sessions/{sid}/audio"
+
+    first = client.post(
+        endpoint,
+        data={"transcript": "first"},
+        files={"audio": ("first.wav", b"RIFFfirstWAVE", "audio/wav")},
+    )
+    assert first.status_code == 200
+    first_path = next((tmp_path / "audio").iterdir())
+
+    second = client.post(
+        endpoint,
+        data={"transcript": "second"},
+        files={"audio": ("second.wav", b"RIFFsecondWAVE", "audio/wav")},
+    )
+    assert second.status_code == 200
+    remaining = list((tmp_path / "audio").iterdir())
+    assert len(remaining) == 1
+    assert not first_path.exists()
+    assert remaining[0].read_bytes() == b"RIFFsecondWAVE"
+
+
 def test_audio_requires_something(client):
     doc_id = _doc_with_text_pages(client, ["p1"])
     sid = _new_doc_exam(client, doc_id, exam_type="listening")["session_id"]

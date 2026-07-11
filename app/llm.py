@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import base64
 import json
+import math
 import os
 import re
 
@@ -287,9 +288,15 @@ def clamp01(value, default: float = 0.0) -> float:
     strings, 0-100 scales, null — and must never inflate HUD ★ symbols.
     """
     try:
-        return max(0.0, min(1.0, float(value)))
+        number = float(value)
     except (TypeError, ValueError):
         return default
+    # Python's min/max do not sanitize NaN: min(1.0, nan) yields 1.0, which
+    # would turn an invalid model/client confidence into a maximum-confidence
+    # HUD result. Infinity is not a meaningful confidence either.
+    if not math.isfinite(number):
+        return default
+    return max(0.0, min(1.0, number))
 
 
 def extract_json(text: str) -> dict:

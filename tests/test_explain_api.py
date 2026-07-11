@@ -119,6 +119,13 @@ class TestCreateExplainSession:
         r = client.post("/v1/explain-sessions", json={"document_id": 9999})
         assert r.status_code == 404
 
+    def test_create_rejects_unfinalized_document(self, client):
+        r = client.post("/v1/documents", json={"title": "未確定資料"})
+        doc_id = r.json()["document_id"]
+        r = client.post("/v1/explain-sessions", json={"document_id": doc_id})
+        assert r.status_code == 400
+        assert "finalized" in r.json()["detail"]
+
 
 # ---------------------------------------------------------------------------
 # 2. explain (tap -> HUD display, no page_index param)
