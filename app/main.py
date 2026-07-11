@@ -13,6 +13,7 @@ import hmac
 import io
 import json
 import os
+import re
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -1623,6 +1624,15 @@ class IngestSolutions(BaseModel):
     served_by: str = "onboard"
 
 
+# layout.segment_problems disambiguates repeated numbers as 問1(2), 問1(3)…;
+# stripping that suffix recovers the base name the onboard AI actually sees.
+_PROBLEM_NO_SUFFIX_RE = re.compile(r"\(\d+\)$")
+
+
+def _base_problem_no(no: str | None) -> str:
+    return _PROBLEM_NO_SUFFIX_RE.sub("", no or "")
+
+
 @app.post("/v1/exam-sessions/{session_id}/solutions")
 def exam_ingest_solutions(session_id: int, payload: IngestSolutions) -> dict:
     """Ingest the onboard AI's per-problem answers (primary path, phase 2).
@@ -1635,6 +1645,15 @@ def exam_ingest_solutions(session_id: int, payload: IngestSolutions) -> dict:
     it).  Re-ingesting a problem adds a newer solutions row — latest wins.
     Validation is all-or-nothing.  mode=real: nothing is stored (locked
     response).
+
+    problem_no guardrails (the onboard AI cannot know server-synthesized
+    names): a name whose base collides with several disambiguated deck rows
+    (問1 vs 問1/問1(2)) is a 400 pointing at problem_index — silently routing
+    both answers onto the first 問1 would misplace one. And a SINGLE-item
+    payload against a SINGLE-problem deck (e.g. the synthesized 全体) maps to
+    that problem instead of appending a duplicate; multi-item payloads keep
+    the append semantics (collapsing them onto one problem would destroy all
+    but the last answer via latest-wins).
     """
     conn = db.connect()
     try:
@@ -1667,6 +1686,21 @@ def exam_ingest_solutions(session_id: int, payload: IngestSolutions) -> dict:
                     detail=f"problem_index {item.problem_index} out of range "
                     f"(deck has {len(deck_rows)} problems)",
                 )
+            if item.problem_index is None:
+                hits = [
+                    i
+                    for i, r in enumerate(deck_rows)
+                    if _base_problem_no(r["question_no"]) == item.problem_no
+                ]
+                if len(hits) > 1:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"problem_no {item.problem_no!r} matches multiple deck "
+                            f"problems (deck indexes {hits}); address it with "
+                            "problem_index (see GET /solutions)"
+                        ),
+                    )
 
         created = 0
         created_ids: dict[str, int] = {}  # problem_no -> question_id (this payload)
@@ -1678,6 +1712,15 @@ def exam_ingest_solutions(session_id: int, payload: IngestSolutions) -> dict:
                     (r for r in deck_rows if r["question_no"] == item.problem_no),
                     None,
                 )
+                if (
+                    row is None
+                    and len(deck_rows) == 1
+                    and len(payload.solutions) == 1
+                ):
+                    # Single-problem deck (e.g. the synthesized 全体, unknowable
+                    # to the onboard AI): a lone answer under any name means
+                    # this problem. Single-item payloads only — see docstring.
+                    row = deck_rows[0]
                 question_id = row["id"] if row else created_ids.get(item.problem_no)
             if question_id is None:
                 qcur = conn.execute(

@@ -343,6 +343,65 @@ def test_ingest_by_problem_index_resolves_duplicate_numbers(client):
     assert bad.status_code == 400
 
 
+def test_ingest_ambiguous_problem_no_is_actionable_400(client):
+    # 問1 collides with the disambiguated 問1/問1(2) pair: silently routing
+    # both onto the first row would misplace an answer — reject with a pointer
+    # at problem_index, all-or-nothing (nothing stored).
+    sid, body = _finalized_session(
+        client, texts=["大問1 前半\n問1 一つ目", "大問2 後半\n問1 二つ目"]
+    )
+    r = client.post(
+        f"/v1/exam-sessions/{sid}/solutions",
+        json={
+            "solutions": [
+                {"problem_no": "問1", "answer": "答えA"},
+                {"problem_no": "問1", "answer": "答えB"},
+            ]
+        },
+    )
+    assert r.status_code == 400
+    assert "problem_index" in r.json()["detail"]
+    deck = client.get(f"/v1/exam-sessions/{sid}/solutions").json()
+    assert deck["solved_count"] == 0
+    assert deck["problem_count"] == 4  # nothing appended either
+
+
+def test_ingest_single_item_maps_to_single_problem_deck(client):
+    # 全体 is server-synthesized; the onboard AI answers under its own name.
+    # A lone answer against a one-problem deck means that problem.
+    sid, body = _finalized_session(client, texts=["境界のない本文だけの資料である"])
+    assert [p["problem_no"] for p in body["problems"]] == ["全体"]
+    r = client.post(
+        f"/v1/exam-sessions/{sid}/solutions",
+        json={"solutions": [{"problem_no": "問9", "answer": "要旨は…"}]},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["created_problems"] == 0
+    assert r.json()["problem_count"] == 1
+    view = client.get(f"/v1/exam-sessions/{sid}/review").json()
+    assert view["solved"] is True
+    assert any("要旨は…" in ln for ln in view["glasses_view"]["lines"])
+
+
+def test_ingest_multi_item_payload_keeps_append_semantics(client):
+    # Two items against the one-problem deck must NOT both collapse onto 全体
+    # (latest-wins would destroy the first answer) — they append as before.
+    sid, _ = _finalized_session(client, texts=["境界のない本文だけの資料である"])
+    r = client.post(
+        f"/v1/exam-sessions/{sid}/solutions",
+        json={
+            "solutions": [
+                {"problem_no": "問1", "answer": "a"},
+                {"problem_no": "問2", "answer": "b"},
+            ]
+        },
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["created_problems"] == 2
+    deck = client.get(f"/v1/exam-sessions/{sid}/solutions").json()["deck"]
+    assert [d["problem_no"] for d in deck] == ["全体", "問1", "問2"]
+
+
 def test_compat_paths_do_not_pollute_review_deck(client):
     # After finalize-reading, using the compat solve-current path must not
     # append its per-page question rows to the review deck.
