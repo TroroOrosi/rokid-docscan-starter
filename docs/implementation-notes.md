@@ -17,23 +17,23 @@ explainer / extractor）には**実モデルアダプタ（`openai` / `gemini` /
 ## 1. 全体アーキテクチャと差し込み点
 
 ```
-[Rokid Glasses]──BLE/Wi-Fi──[Android/iOS コンパニオン]──HTTPS──[本サーバ]
-   カメラ/HUD          撮影・端末OCR・接続管理・UI          登録/照合/要約
-   (CXR-S: 機上)        (CXR-M SDK / Glimmer 等)            (本リポジトリ)
+[Rokid Glasses]──CXR-L wire (Caps/BT)──[スマホ: Hi Rokid + CXR-L プラグイン]──HTTPS──[本サーバ]
+   認識/HUD                              本体AI連携・HTTP 中継（画面不要）        登録/照合/要約
+   (YodaOS-Sprite)                        (CXR-L SDK / CXR-M SDK)               (本リポジトリ)
 ```
 
 本リポジトリが担うのは右端のサーバのみ。左2層を実機に置き換える際の対応表:
 
 | 抽象点（サーバ内） | 既定（オフライン） | 実機/実 AI での差し込み先 |
 |------------------|------------------------|---------------------|
-| 画像入力 | `/pages`・`/match` の multipart 画像 | グラスのカメラフレーム（CXR-L の `IMediaStreamService`・AIDL） |
-| 端末 OCR | `ocr_text` / `fast_ocr_text` フォーム値 | 本体 AI（`com.rokid.sprite.aiapp`）/ Android ML Kit / iOS Vision |
-| HUD 出力 | `app/hud.py`・`app/glasses_view.py` の3行ペイロード | グラス両眼ディスプレイ描画（CXR-L） |
-| 接続管理 | なし（HTTP のみ） | CXR-L 単体＋Wi-Fi 直結、または CXR-M コンパニオン経由 |
-| 要約 | `app/analyzers/local_placeholder.py`（先頭行） | **`ROKID_ANALYZER=claude`（同梱の実アダプタ）** / Rizon ワークフロー |
-| 解答 | `app/solvers/local_placeholder.py`（非解答） | **`ROKID_SOLVER=claude`（同梱の実アダプタ）** |
-| 解説 | `app/explainers/local_placeholder.py` | **`ROKID_EXPLAINER=claude`（同梱の実アダプタ）** |
-| メディア抽出 | `app/extractors/local_placeholder.py` | **`ROKID_EXTRACTOR=claude`（同梱の実アダプタ）** |
+| 認識テキスト入力 | `/pages` の `ocr_text`/`vision_text`（画像は互換用） | 本体 AI の認識結果（Hi Rokid＋CXR-L プラグイン経由・撮影しない） |
+| 端末 OCR | `ocr_text` / `fast_ocr_text` フォーム値 | 本体 AI（Hi Rokid: `com.rokid.sprite(.global).aiapp`）/ Android ML Kit / iOS Vision |
+| HUD 出力 | `app/hud.py`・`app/glasses_view.py` の3行ペイロード | CXR-L CUSTOMVIEW（`customViewUpdate` でテキスト・リレー） |
+| 接続管理 | なし（HTTP のみ） | **スマホ中継必須**: Hi Rokid＋CXR-L プラグイン（グラス単体 Wi-Fi 直結は未確認）、または CXR-M コンパニオン経由 |
+| 要約 | `app/analyzers/local_placeholder.py`（先頭行） | **`ROKID_ANALYZER=openai|gemini|claude`（同梱の実アダプタ）** / Rizon ワークフロー |
+| 解答 | `app/solvers/local_placeholder.py`（非解答） | **`ROKID_SOLVER=openai|gemini|claude`（同梱の実アダプタ）** |
+| 解説 | `app/explainers/local_placeholder.py` | **`ROKID_EXPLAINER=openai|gemini|claude`（同梱の実アダプタ）** |
+| メディア抽出 | `app/extractors/local_placeholder.py` | **`ROKID_EXTRACTOR=openai|gemini|claude`（同梱の実アダプタ）** |
 
 サーバ側で実機を意識する必要があるのは、**画像とOCRテキストの入口**
 （`app/main.py` の `add_page` / `match_page`）と、**HUD の出口**
@@ -54,17 +54,21 @@ CXR（Connected XR）SDK スイートは役割別に分かれている（末尾�
   CXR-M と Caps バイナリ形式で双方向メッセージング。
   Maven `com.rokid.cxr:cxr-service-bridge:1.0-SNAPSHOT`。本サーバでは `capture_device`
   フィールド（例 `"CXR-S"`）としてメタデータに記録するのみ。
-- **CXR-L SDK**: **標準アプリを置き換える単体（ランチャー型）アプリ用**。
-  エントリは `ExternalAppClient` を継承し、**Android AIDL で `IMediaStreamService`
-  にバインド**してメディアストリーム＆**AI アプリ連携**を行う。対象 AI サービスは
-  **`com.rokid.sprite.aiapp`**（「Hi Rokid」AI アプリ）。Maven
-  `com.rokid.cxr:client-l:0.0.1`、min/target SDK 28。**グラス本体 AI を本サーバに
-  繋ぐ主経路**であり、詳細は [cxr-l-integration.md](cxr-l-integration.md) を参照。
-- **差し込み手順（CXR-L 単体アプリ例）**:
-  1. `ExternalAppClient` を継承し `IMediaStreamService` に AIDL バインド。
-  2. カメラフレーム／本体 AI（`com.rokid.sprite.aiapp`）の OCR/認識結果を取得。
-  3. フレーム JPEG/PNG + OCR テキストを `POST /v1/match` 等に送信（スマホの CXR-L/CXR-M 中継経由）。
-  4. レスポンスの `hud.lines`（3行）をディスプレイ API で描画。
+- **CXR-L SDK**: **スマホ側プラグイン型 SDK**（実機実績: CxrGlobal /
+  claude-mobile-hud）。エントリ **`CXRLink(context)`** はスマホ上で動き、**同一スマホ内の
+  AIDL** で Hi Rokid アプリ（中国版 `com.rokid.sprite.aiapp`／グローバル版
+  `com.rokid.sprite.global.aiapp`）の `IMediaStreamService` にバインド。Hi Rokid が
+  グラスとは CXR-L wire protocol（Caps シリアライズ・Bluetooth）で通信する。HUD は
+  **CUSTOMVIEW**（`customViewUpdate`・グラス側アプリ不要）へテキスト・リレー。Maven
+  `com.rokid.cxr:client-l:1.0.1`、minSdk 31。**グラス本体 AI を本サーバに繋ぐ主経路**
+  であり、詳細は [cxr-l-integration.md](cxr-l-integration.md) を参照（旧版の
+  「グラス単体ランチャー型・Wi-Fi 直結」記述は同 doc §2 で是正済み。スマホ中継必須）。
+- **差し込み手順（CXR-L スマホプラグイン例）**:
+  1. スマホ側プラグインアプリで `CXRLink(context)` を生成し、Hi Rokid に AIDL バインド
+     （`AuthorizationHelper` → トークン → `connect` → `openCustomView`）。
+  2. 本体 AI の認識結果（本文=`ocr_text`＋図読取=`vision_text`。撮影しない）を取得。
+  3. 認識テキストを `POST /v1/documents/{id}/pages` 等に HTTP 送信（スマホが中継）。
+  4. レスポンスの 3 行ペイロードを `customViewUpdate` でグラス HUD に描画。
 
 ---
 
@@ -75,7 +79,7 @@ CXR（Connected XR）SDK スイートは役割別に分かれている（末尾�
 - **Agent Store** には多数のエージェントワークフローが公開されており、
   国際展開も進行中。
 - **差し込み先**: `app/analyzers/`（`summarize.py` は互換シム）。既定はローカルの
-  先頭行要約だが、**`ROKID_ANALYZER=claude`（同梱の実アダプタ、§8）** で実モデル要約に
+  先頭行要約だが、**`ROKID_ANALYZER=openai|gemini|claude`（同梱の実アダプタ、§8）** で実モデル要約に
   切り替わる。Rizon ワークフロー（または Gemini / GPT / Qwen / DeepSeek）を使いたい
   場合も、同じ `Analyzer` ポートにアダプタを1つ足すだけ（エンドポイント不変）。
 
@@ -154,8 +158,8 @@ CXR（Connected XR）SDK スイートは役割別に分かれている（末尾�
 | Explainer（解説） | `ROKID_EXPLAINER=openai\|gemini\|claude` | `app/explainers/llm_adapter.py`（`LLMExplainer`） | ローカル解説へフォールバック |
 | Extractor（数式/表/図） | `ROKID_EXTRACTOR=openai\|gemini\|claude` | `app/extractors/llm_adapter.py`（`LLMExtractor`） | ローカル抽出へフォールバック |
 
-- 実呼び出しには該当プロバイダの API キー（`ANTHROPIC_API_KEY` / `OPENAI_API_KEY` /
-  `GOOGLE_API_KEY`）と SDK（`pip install anthropic|openai|google-genai`）が必要。
+- 実呼び出しには該当プロバイダの API キー（`OPENAI_API_KEY` / `GOOGLE_API_KEY` /
+  `ANTHROPIC_API_KEY`）と SDK（`pip install openai|google-genai|anthropic`）が必要。
   未設定なら**ネットワークに一切触れず**ローカル実装で動く（CI もこの経路）。
 - モデルは `ROKID_LLM_MODEL` で上書き（既定: openai `gpt-4o` / gemini
   `gemini-2.5-flash` / anthropic `claude-opus-4-8`）、出力上限は

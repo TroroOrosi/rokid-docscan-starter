@@ -88,6 +88,7 @@ rokid-docscan-starter/
 ├── docs/
 │   ├── cxr-l-integration.md         # ★CXR-L(ｽﾏﾎ側ﾌﾟﾗｸﾞｲﾝ) ⇄ 本体AI ⇄ 本サーバ + Kotlin 例・遠隔操作/画面共有
 │   ├── real-device-operation.md     # ★実機運用ガイド（準備→起動→操作→実AI/認証/KeyCode）
+│   ├── device-verification-checklist.md # ★実機検証チェックリスト（KeyCode/CXR-L/LED/読取品質/閾値）
 │   ├── implementation-notes.md      # 実機/実AI 差し込み点・CXR SDK・実アダプタ
 │   ├── user-operation-guide.md      # ユーザー操作 / 自動化 / 設計判断 / 環境変数一覧
 │   ├── future-proof-architecture.md # 将来対応アーキテクチャ

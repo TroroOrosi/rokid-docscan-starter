@@ -9,9 +9,10 @@ docs/cxr-l-integration.md):
             2 GB RAM / 32 GB ROM.
   Camera  : 12 MP Sony IMX681.  Connectivity: Wi-Fi 6 / Bluetooth 5.3.
   OS      : YodaOS-Sprite (Android 12, API 32).
-  SDK     : CXR-L (standalone on-glass app; binds IMediaStreamService via AIDL
-            to the AI app com.rokid.sprite.aiapp) + CXR-S (on-device bridge)
-            + CXR-M (mobile companion).
+  SDK     : CXR-L (phone-side plugin SDK: CXRLink(context) binds the Hi Rokid
+            app via same-device AIDL and relays HUD text to the glasses over
+            the Caps/Bluetooth wire as a CUSTOMVIEW — phone relay required)
+            + CXR-S (on-device bridge) + CXR-M (mobile companion).
 
 Design principles (SILENT-FRIENDLY, no-flash):
   - NO audio cues and NO animation directives.
