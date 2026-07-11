@@ -9,9 +9,10 @@ docs/cxr-l-integration.md):
             2 GB RAM / 32 GB ROM.
   Camera  : 12 MP Sony IMX681.  Connectivity: Wi-Fi 6 / Bluetooth 5.3.
   OS      : YodaOS-Sprite (Android 12, API 32).
-  SDK     : CXR-L (standalone on-glass app; binds IMediaStreamService via AIDL
-            to the AI app com.rokid.sprite.aiapp) + CXR-S (on-device bridge)
-            + CXR-M (mobile companion).
+  SDK     : CXR-L (phone-side plugin SDK: CXRLink(context) binds the Hi Rokid
+            app via same-device AIDL and relays HUD text to the glasses over
+            the Caps/Bluetooth wire as a CUSTOMVIEW — phone relay required)
+            + CXR-S (on-device bridge) + CXR-M (mobile companion).
 
 Design principles (SILENT-FRIENDLY, no-flash):
   - NO audio cues and NO animation directives.
@@ -502,6 +503,16 @@ def _review_lines(solution: SolveResult, header: str) -> list[str]:
         lines += ["注意"] + cautions
     return lines
 
+
+# Gesture bindings for the reading phase (subset of OPERATION_CONTRACT).
+# Returned by finalize-reading when a 0-problem outcome reverts the session to
+# the reading phase: the client must keep showing re-scan controls — with the
+# review bindings, double_tap would read as "close" exactly when the user
+# needs it to mean "finish_reading" again after re-scanning.
+READING_OPERATIONS = {
+    key: OPERATION_CONTRACT[key]
+    for key in ("capture_read", "finish_reading", "mode_toggle")
+}
 
 # Gesture bindings for the review phase (subset of OPERATION_CONTRACT). The
 # single source used both inside every review view (nav.operations) and by the

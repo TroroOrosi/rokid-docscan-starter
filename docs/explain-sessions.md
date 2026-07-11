@@ -1,7 +1,7 @@
 # 資料解説モード（explain-sessions）仕様書
 
-**UX 第 v1.7 世代**の撮影なし設計（HTTP エンベロープは現在 `API_VERSION = 1.8.0`、
-`APP_VERSION = 0.8.0`）。登録済み文書を Rokid Glasses
+**UX 第 v1.7 世代**の撮影なし設計（HTTP エンベロープは現在 `API_VERSION = 1.9.0`、
+`APP_VERSION = 0.9.0`）。登録済み文書を Rokid Glasses
 **単体でページナビゲーション→解説を HUD に段階表示**する機能です。
 
 **撮影なし・画像送信なし・音声不要・フラッシュなし・スマホ画面なしで完結します。**
@@ -213,18 +213,18 @@ POST /explain-sessions
 | 値 | 説明 |
 |---|---|
 | `local`（既定） | オフラインのプレースホルダ。外部 API 不要。 |
-| `openai`（同梱の実アダプタ） | OpenAI GPT（要 `OPENAI_API_KEY`＋`pip install openai`。モデルは `ROKID_LLM_MODEL` 必須指定） |
-| `gemini`（同梱の実アダプタ） | Google Gemini（要 `GOOGLE_API_KEY`＋`pip install google-genai`。モデルは `ROKID_LLM_MODEL` 必須指定） |
+| `openai`（同梱の実アダプタ） | OpenAI GPT（要 `OPENAI_API_KEY`＋`pip install openai`。モデル既定 `gpt-4o`、`ROKID_LLM_MODEL` で上書き） |
+| `gemini`（同梱の実アダプタ） | Google Gemini（要 `GOOGLE_API_KEY`＋`pip install google-genai`。モデル既定 `gemini-2.5-flash`、`ROKID_LLM_MODEL` で上書き） |
 | `claude`（同梱の実アダプタ） | Anthropic Claude（要 `ANTHROPIC_API_KEY`＋`pip install anthropic`。モデル既定 `claude-opus-4-8`） |
 
 ```bash
 pip install openai
-ROKID_EXPLAINER=openai OPENAI_API_KEY=sk-... ROKID_LLM_MODEL=<現行のGPTモデルid> \
+ROKID_EXPLAINER=openai OPENAI_API_KEY=sk-... \
   uvicorn app.main:app --port 8000
 ```
 
 - キー未設定／SDK 未導入なら、**ネットワークに触れず自動でローカルへフォールバック**します。
-- 実装は `app/explainers/claude.py` の `LLMExplainer`（プロバイダ非依存・共通クライアントは `app/llm.py`）。
+- 実装は `app/explainers/llm_adapter.py` の `LLMExplainer`（プロバイダ非依存・共通クライアントは `app/llm.py`。旧 `claude.py` は互換 shim）。
 - 他ベンダを足したい場合は `Explainer` ポートにアダプタを1つ実装して `register_explainer()`。
 
 ---

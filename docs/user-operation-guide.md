@@ -7,7 +7,7 @@
 - 本リポジトリ（サーバ実装）は **既に実装済み** で、ローカルで動きます。
 - ここで「ユーザーが行う」と書いた項目は、**コードでは代行できない物理操作や
   アカウント取得・同意取得など** です。それ以外はシステムが自動化します。
-- 現在のバージョン: **APP 0.8.0 / API 1.8.0**
+- 現在のバージョン: **APP 0.9.0 / API 1.9.0**
 - **解答の主経路はグラス搭載 AI（GPT / Gemini）**で、その問題別解答をサーバへ取り込みます
   （`POST /solutions`・サーバ鍵不要）。要約/解答/解説/メディア抽出のサーバ側は既定でローカル
   実装ですが、**実 AI アダプタ（`openai` / `gemini` / `claude`）を同梱**しており、より高性能な
@@ -103,8 +103,8 @@
 
 ```json
 {
-  "app_version": "0.8.0",
-  "api_version": "1.8.0",
+  "app_version": "0.9.0",
+  "api_version": "1.9.0",
   "matcher_version": "1.1.0",
   "hud_contract_version": "1.0.0",
   "analyzer_api_version": "1.0.0",
@@ -264,7 +264,7 @@ pip install openai                          # または google-genai / anthropic
 export OPENAI_API_KEY=sk-...                # Gemini: GOOGLE_API_KEY / Anthropic: ANTHROPIC_API_KEY
 export ROKID_SOLVER=openai ROKID_EXPLAINER=openai \
        ROKID_ANALYZER=openai ROKID_EXTRACTOR=openai   # または gemini / claude
-export ROKID_LLM_MODEL=<現行のGPTモデルid>   # openai/gemini は現行モデル id を必須指定
+# export ROKID_LLM_MODEL=gpt-4o            # 任意上書き（各プロバイダに既定あり）
                                             # （anthropic のみ claude-opus-4-8 が既定）
 uvicorn app.main:app --port 8000
 ```
@@ -284,7 +284,7 @@ uvicorn app.main:app --port 8000
 | `ROKID_ANALYZER`/`ROKID_SOLVER`/`ROKID_EXPLAINER`/`ROKID_EXTRACTOR` | `local` | 各ポートのルーティング（`local\|openai\|gemini\|claude`。solver は non-local で finalize-reading の一括解答も有効化） |
 | `ROKID_SOLVER_TIERS` | （単一） | 解答の二段フォールバック順（csv、末尾に local 自動付与） |
 | `OPENAI_API_KEY`/`GOOGLE_API_KEY`/`ANTHROPIC_API_KEY` | （なし） | 実アダプタの API キー（未設定→local） |
-| `ROKID_LLM_MODEL` | （anthropic のみ `claude-opus-4-8`） | 使用モデル id（openai/gemini は必須指定） |
+| `ROKID_LLM_MODEL` | openai `gpt-4o` / gemini `gemini-2.5-flash` / anthropic `claude-opus-4-8` | 使用モデル id（任意上書き） |
 | `ROKID_LLM_MAX_TOKENS` | `1024` | 応答トークン上限 |
 | `ROKID_TRANSCRIBER` | （なし） | 英語リスニング録音の書き起こし（`openai\|gemini`、未設定=与えた transcript を使用） |
 | `ROKID_TRANSCRIBE_MODEL` | `gpt-4o-transcribe` | openai の書き起こしモデル（gemini は `ROKID_LLM_MODEL` を使用） |

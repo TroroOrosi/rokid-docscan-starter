@@ -37,7 +37,7 @@ Rokid Glasses で紙資料を「文書」として登録し、**目の前の資�
 - **CXR-L プラグイン（スマホ側）とグラス本体 AI の接続**は
   [`docs/cxr-l-integration.md`](docs/cxr-l-integration.md)、実機差し込み全般は
   [`docs/implementation-notes.md`](docs/implementation-notes.md) を参照。
-- 現在のバージョン: **APP 0.8.0 / API 1.8.0**。
+- 現在のバージョン: **APP 0.9.0 / API 1.9.0**。
 
 ---
 
@@ -70,7 +70,7 @@ rokid-docscan-starter/
 │   ├── summarize.py   # 要約シム（analyzer に委譲）
 │   ├── explainer.py   # Explainer ポート（ExplainRequest / ExplainResult / ABC）
 │   ├── llm.py         # ★実 AI ブリッジ（openai/gemini/claude、遅延import・注入可）
-│   ├── version.py     # 各契約バージョン（app 0.8.0 / api 1.8.0 ほか）
+│   ├── version.py     # 各契約バージョン（app 0.9.0 / api 1.9.0 ほか）
 │   ├── config.py      # 保存先・フィーチャーフラグ（ROKID_* / ANTHROPIC_API_KEY / ROKID_TRANSCRIBER）
 │   ├── transcribe.py  # ★リスニング録音の書き起こし（openai/gemini・未設定時は与値）
 │   ├── db.py          # sqlite3（documents/pages/exam/explain テーブル）
@@ -88,6 +88,7 @@ rokid-docscan-starter/
 ├── docs/
 │   ├── cxr-l-integration.md         # ★CXR-L(ｽﾏﾎ側ﾌﾟﾗｸﾞｲﾝ) ⇄ 本体AI ⇄ 本サーバ + Kotlin 例・遠隔操作/画面共有
 │   ├── real-device-operation.md     # ★実機運用ガイド（準備→起動→操作→実AI/認証/KeyCode）
+│   ├── device-verification-checklist.md # ★実機検証チェックリスト（KeyCode/CXR-L/LED/読取品質/閾値）
 │   ├── implementation-notes.md      # 実機/実AI 差し込み点・CXR SDK・実アダプタ
 │   ├── user-operation-guide.md      # ユーザー操作 / 自動化 / 設計判断 / 環境変数一覧
 │   ├── future-proof-architecture.md # 将来対応アーキテクチャ
@@ -361,7 +362,7 @@ python scripts/eval_exam.py --synthetic 5 --out /tmp/exam_eval.json
 設計は [docs/exam-solver-architecture.md](docs/exam-solver-architecture.md)、
 グラス表示・操作の規約は [docs/glasses-ux-contract.md](docs/glasses-ux-contract.md) を参照。
 
-### 3 フェーズ実践フロー（主経路 / API 1.8.0・LED 点灯最小）
+### 3 フェーズ実践フロー（主経路 / API 1.9.0・LED 点灯最小）
 
 **読取 → 一括解答 → 閲覧** の 3 フェーズが主経路です。カメラ（＝プライバシー LED 点灯）は
 **フェーズ 1 の読取中だけ**。読取完了をグラスのジェスチャで宣言した瞬間からカメラは閉じ、
@@ -495,8 +496,8 @@ pip install openai                           # または google-genai / anthropi
 export OPENAI_API_KEY=sk-...                 # Gemini: GOOGLE_API_KEY / Anthropic: ANTHROPIC_API_KEY
 export ROKID_SOLVER=openai ROKID_EXPLAINER=openai \
        ROKID_ANALYZER=openai ROKID_EXTRACTOR=openai   # または gemini / claude
-export ROKID_LLM_MODEL=<現行のGPTモデルid>    # openai/gemini は現行モデル id を必須指定
-                                             # （anthropic のみ claude-opus-4-8 が既定）
+# export ROKID_LLM_MODEL=gpt-4o             # 任意上書き（既定: openai gpt-4o /
+                                             #  gemini gemini-2.5-flash / anthropic claude-opus-4-8）
 uvicorn app.main:app --port 8000
 ```
 
@@ -504,7 +505,7 @@ uvicorn app.main:app --port 8000
 |----------|------|------|
 | `ROKID_ANALYZER`/`ROKID_SOLVER`/`ROKID_EXPLAINER`/`ROKID_EXTRACTOR` | `local` | `openai\|gemini\|claude` で実 AI にルーティング（solver は finalize-reading の一括解答も有効化） |
 | `OPENAI_API_KEY`/`GOOGLE_API_KEY`/`ANTHROPIC_API_KEY` | （なし） | 実呼び出しに必須。未設定なら該当ポートはローカルへ |
-| `ROKID_LLM_MODEL` | （anthropic のみ `claude-opus-4-8`） | 使用モデル id（openai/gemini は必須指定） |
+| `ROKID_LLM_MODEL` | openai `gpt-4o` / gemini `gemini-2.5-flash` / anthropic `claude-opus-4-8` | 使用モデル id（任意上書き） |
 | `ROKID_LLM_MAX_TOKENS` | `1024` | 応答トークン上限 |
 | `ROKID_TRANSCRIBER` | （なし） | リスニング録音の書き起こし `openai\|gemini`（未設定=与えた transcript を使用） |
 | `ROKID_TRANSCRIBE_MODEL` | `gpt-4o-transcribe` | openai の書き起こしモデル（gemini は `ROKID_LLM_MODEL`） |

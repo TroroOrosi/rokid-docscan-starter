@@ -101,13 +101,53 @@ def test_match_no_page(client):
     assert len(body["hud"]["lines"]) == 3
 
 
-def test_duplicate_page_index_conflict(client):
+def test_resending_page_index_replaces_the_page(client):
+    # 再読取: re-sending an index replaces the page (fix a bad read), it does
+    # not 409 and does not grow the document.
     doc_id = _create_doc(client)
-    _add_page(client, doc_id, 0, seed=10)
-    assert _add_page(client, doc_id, 0, seed=11).status_code == 409
+    first = _add_page(client, doc_id, 0, seed=10, ocr_text="bad read")
+    assert first.status_code == 201 and first.json()["replaced"] is False
+    second = _add_page(client, doc_id, 0, seed=11, ocr_text="good read")
+    assert second.status_code == 201
+    body = second.json()
+    assert body["replaced"] is True
+    assert body["page_id"] == first.json()["page_id"]
+    assert body["phash"] != first.json()["phash"]
+
+    fin = client.post(f"/v1/documents/{doc_id}/finalize").json()
+    assert fin["page_count"] == 1
+    assert fin["summaries"][0]["summary"] == "good read"
 
 
 def test_missing_document_404(client):
     files = {"image": ("q.png", image_bytes(make_image(seed=1)), "image/png")}
     r = client.post("/v1/match", data={"document_id": "9999"}, files=files)
     assert r.status_code == 404
+
+
+def test_finalize_is_idempotent_per_page(client, monkeypatch):
+    # Re-finalizing (gesture double-fire / resume) must not re-run the analyzer
+    # over already-summarized pages — with a cloud ROKID_ANALYZER that would be
+    # a full re-bill of the document.
+    from app.analyzers import Analyzer, AnalyzerResult, register_analyzer
+
+    calls = []
+
+    class CountingAnalyzer(Analyzer):
+        name = "counting-test"
+        provider_version = "t-1"
+        offline = True
+
+        def analyze(self, *, image_path=None, ocr_text=None, max_summary_len=48):
+            calls.append(ocr_text)
+            return AnalyzerResult(text=ocr_text, summary="COUNTED")
+
+    register_analyzer(CountingAnalyzer(), replace=True)
+    monkeypatch.setenv("ROKID_ANALYZER", "counting-test")
+
+    doc_id = _create_doc(client)
+    _add_page(client, doc_id, 0, seed=10, ocr_text="page one")
+    _add_page(client, doc_id, 1, seed=11, ocr_text="page two")
+    assert client.post(f"/v1/documents/{doc_id}/finalize").status_code == 200
+    assert client.post(f"/v1/documents/{doc_id}/finalize").status_code == 200
+    assert len(calls) == 2

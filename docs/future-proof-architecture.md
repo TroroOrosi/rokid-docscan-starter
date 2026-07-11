@@ -159,7 +159,7 @@ object DeviceRegistry {                // 端末を差し替える点
 | `ROKID_EXPLAINER` | `local` | 解説ルーティング（`openai\|gemini\|claude` で実解説） |
 | `ROKID_EXTRACTOR` | `local` | メディア抽出ルーティング（`openai\|gemini\|claude` で実抽出） |
 | `ANTHROPIC_API_KEY`/`OPENAI_API_KEY`/`GOOGLE_API_KEY` | （なし） | 実アダプタの API キー（未設定なら local） |
-| `ROKID_LLM_MODEL` | （anthropic のみ `claude-opus-4-8`） | モデル id（openai/gemini は必須指定） |
+| `ROKID_LLM_MODEL` | openai `gpt-4o` / gemini `gemini-2.5-flash` / anthropic `claude-opus-4-8` | モデル id（任意上書き） |
 | `ROKID_LLM_MAX_TOKENS` | `1024` | 実アダプタの応答トークン上限 |
 | `ROKID_KEYMAP` | （なし） | gesture→KeyCode の上書き（JSON、`/v1/settings.input`） |
 | `ROKID_API_KEY` | （なし） | 設定時に Bearer 認証を要求（発見系は開放） |
@@ -181,7 +181,7 @@ HUD_LANG = os.environ.get("ROKID_HUD_LANG", "ja")
 ## 6. 移行戦略（将来の変化シナリオ別）
 
 ### (a) ローカル → クラウド 要約/解答/解説/抽出（実装済み: `openai`/`gemini`/`claude`）
-1. **実アダプタ `openai`/`gemini`/`claude` は同梱済み**（`app/{analyzers,solvers,explainers,extractors}/claude.py` の `LLM*` がプロバイダ非依存で担う、
+1. **実アダプタ `openai`/`gemini`/`claude` は同梱済み**（`app/{analyzers,solvers,explainers,extractors}/llm_adapter.py` の `LLM*` がプロバイダ非依存で担う、
    共通クライアント `app/llm.py`）。追加ベンダは同ポートにアダプタを1つ実装するだけ。
 2. `ROKID_ANALYZER/SOLVER/EXPLAINER/EXTRACTOR=openai|gemini|claude` で切替。
 3. creds は `ANTHROPIC_API_KEY`（環境変数）から注入（リポジトリには入れない）。
@@ -209,10 +209,10 @@ HUD_LANG = os.environ.get("ROKID_HUD_LANG", "ja")
 
 ### (e) 解答モードの高度化（Solver / メディア抽出 / RAG）
 解答モード（Phase 1〜4）も Analyzer と同じポート方式なので、**実アダプタ登録だけ**で高度化できる：
-1. **Solver**: 実アダプタ `app/solvers/claude.py`（`LLMSolver`・プロバイダ非依存）を同梱（`ROKID_SOLVER=openai|gemini|claude`）。
+1. **Solver**: 実アダプタ `app/solvers/llm_adapter.py`（`LLMSolver`・プロバイダ非依存）を同梱（`ROKID_SOLVER=openai|gemini|claude`）。
    追加ベンダは `app/solvers/<vendor>.py` に実装し `register_solver(...)`。`ROKID_SOLVER_TIERS` で
    tier 指定。`solve_with_fallback` がクラウド→ローカルの**二段フォールバック**を担保（圏外/失敗でも HUD は返る）。
-2. **メディア抽出**: 実アダプタ `app/extractors/claude.py`（`LLMExtractor`）を同梱（`ROKID_EXTRACTOR=openai|gemini|claude`、数式→LaTeX 等）。
+2. **メディア抽出**: 実アダプタ `app/extractors/llm_adapter.py`（`LLMExtractor`）を同梱（`ROKID_EXTRACTOR=openai|gemini|claude`、数式→LaTeX 等）。
    追加モデルは `app/extractors/<vendor>.py` に実装し `register_extractor(...)`。`add_question` の `media` がそのまま高精度化。
 3. **RAG（案10）**: `app/retrieval.py` は今は依存なしの lexical scorer。`ROKID_ENABLE_EMBEDDING=1` ＋
    embedding を返す analyzer を組み合わせれば**意味検索**へ差替（未接続時は lexical にフォールバック）。

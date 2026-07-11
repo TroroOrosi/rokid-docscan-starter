@@ -210,7 +210,7 @@ def test_finalize_reading_keyless_cloud_solver_leaves_deck_unsolved(client, monk
     # ROKID_SOLVER=openai with no key: solve_with_fallback lands on the local
     # placeholder — that junk must NOT be stored as "solved" (it would shadow
     # the onboard ingest with (要モデル接続) answers).
-    from app.solvers.claude import LLMSolver
+    from app.solvers.llm_adapter import LLMSolver
     from app.solvers.registry import register_solver
 
     # Restore a pristine (client-less) adapter: other test modules may have
@@ -343,6 +343,65 @@ def test_ingest_by_problem_index_resolves_duplicate_numbers(client):
     assert bad.status_code == 400
 
 
+def test_ingest_ambiguous_problem_no_is_actionable_400(client):
+    # 問1 collides with the disambiguated 問1/問1(2) pair: silently routing
+    # both onto the first row would misplace an answer — reject with a pointer
+    # at problem_index, all-or-nothing (nothing stored).
+    sid, body = _finalized_session(
+        client, texts=["大問1 前半\n問1 一つ目", "大問2 後半\n問1 二つ目"]
+    )
+    r = client.post(
+        f"/v1/exam-sessions/{sid}/solutions",
+        json={
+            "solutions": [
+                {"problem_no": "問1", "answer": "答えA"},
+                {"problem_no": "問1", "answer": "答えB"},
+            ]
+        },
+    )
+    assert r.status_code == 400
+    assert "problem_index" in r.json()["detail"]
+    deck = client.get(f"/v1/exam-sessions/{sid}/solutions").json()
+    assert deck["solved_count"] == 0
+    assert deck["problem_count"] == 4  # nothing appended either
+
+
+def test_ingest_single_item_maps_to_single_problem_deck(client):
+    # 全体 is server-synthesized; the onboard AI answers under its own name.
+    # A lone answer against a one-problem deck means that problem.
+    sid, body = _finalized_session(client, texts=["境界のない本文だけの資料である"])
+    assert [p["problem_no"] for p in body["problems"]] == ["全体"]
+    r = client.post(
+        f"/v1/exam-sessions/{sid}/solutions",
+        json={"solutions": [{"problem_no": "問9", "answer": "要旨は…"}]},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["created_problems"] == 0
+    assert r.json()["problem_count"] == 1
+    view = client.get(f"/v1/exam-sessions/{sid}/review").json()
+    assert view["solved"] is True
+    assert any("要旨は…" in ln for ln in view["glasses_view"]["lines"])
+
+
+def test_ingest_multi_item_payload_keeps_append_semantics(client):
+    # Two items against the one-problem deck must NOT both collapse onto 全体
+    # (latest-wins would destroy the first answer) — they append as before.
+    sid, _ = _finalized_session(client, texts=["境界のない本文だけの資料である"])
+    r = client.post(
+        f"/v1/exam-sessions/{sid}/solutions",
+        json={
+            "solutions": [
+                {"problem_no": "問1", "answer": "a"},
+                {"problem_no": "問2", "answer": "b"},
+            ]
+        },
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["created_problems"] == 2
+    deck = client.get(f"/v1/exam-sessions/{sid}/solutions").json()["deck"]
+    assert [d["problem_no"] for d in deck] == ["全体", "問1", "問2"]
+
+
 def test_compat_paths_do_not_pollute_review_deck(client):
     # After finalize-reading, using the compat solve-current path must not
     # append its per-page question rows to the review deck.
@@ -418,9 +477,8 @@ def test_ingest_confidence_is_clamped(client):
     assert deck[1]["answer_confidence"] == 0.0
 
 
-def test_finalize_reading_with_unreadable_pages_gives_guidance(client):
-    # Image-only pages (no recognized text) -> 0 problems: the ack must say so
-    # instead of dropping the user into an empty deck without explanation.
+def _unreadable_session(client):
+    """Session over a document whose only page has no recognizable text."""
     r = client.post("/v1/documents", json={"title": "模試"})
     doc_id = r.json()["document_id"]
     files = {"image": ("p.png", image_bytes(make_image(seed=7)), "image/png")}
@@ -432,12 +490,124 @@ def test_finalize_reading_with_unreadable_pages_gives_guidance(client):
     )
     assert client.post(f"/v1/documents/{doc_id}/finalize").status_code == 200
     sid = _new_doc_exam(client, doc_id)["session_id"]
+    return sid, doc_id
+
+
+def test_finalize_reading_with_unreadable_pages_gives_guidance(client):
+    # Image-only pages (no recognized text) -> 0 problems: the ack must say so,
+    # and the session must STAY in the reading phase so 再読取 is possible.
+    sid, _doc_id = _unreadable_session(client)
     body = client.post(f"/v1/exam-sessions/{sid}/finalize-reading").json()
     assert body["problem_count"] == 0
+    assert body["status"] == "reading"
     assert "問題を検出できません" in body["reading_ack"]["lines"]
+    assert any("再読取" in ln for ln in body["reading_ack"]["lines"])
     r = client.get(f"/v1/exam-sessions/{sid}/review")
     assert r.status_code == 409
-    assert "再読取" in r.json()["detail"]
+    assert "finalize-reading" in r.json()["detail"]
+    session = client.get(f"/v1/exam-sessions/{sid}").json()
+    assert session["phase"] == "reading"
+
+
+def test_zero_problem_finalize_reading_is_repeatable(client):
+    # The reverted claim makes a second double-tap segment again (idempotent,
+    # no deck rows accrete) instead of dead-ending in already_finalized.
+    sid, _doc_id = _unreadable_session(client)
+    for _ in range(2):
+        body = client.post(f"/v1/exam-sessions/{sid}/finalize-reading").json()
+        assert body["problem_count"] == 0
+        assert body["already_finalized"] is False
+    assert client.get(f"/v1/exam-sessions/{sid}").json()["problem_count"] == 0
+
+
+def test_zero_problem_response_keeps_reading_controls(client):
+    # Reverted -> the operations block must be the READING bindings (double
+    # tap = finish_reading again), not the review bindings where the same
+    # gesture means close — that would strand the advertised re-scan loop.
+    sid, _doc_id = _unreadable_session(client)
+    body = client.post(f"/v1/exam-sessions/{sid}/finalize-reading").json()
+    assert body["status"] == "reading"
+    assert body["operations"]["finish_reading"] == "double_tap"
+    assert body["operations"]["capture_read"] == "two_finger_tap"
+    assert "close" not in body["operations"]
+    # A successful finalize keeps advertising the review bindings.
+    sid2, ok = _finalized_session(client)
+    assert ok["operations"]["close"] == "double_tap"
+    assert "finish_reading" not in ok["operations"]
+
+
+def test_legacy_deck_rows_without_deck_key_stay_finalized(client):
+    # Decks written by the initial 3-phase flow carry only {"page_indexes":
+    # ...} (no "deck" key) and _deck_question_rows still counts them. The
+    # recovery claim must use the same predicate, or a double tap on such a
+    # session would re-segment and duplicate every problem (and re-bill a
+    # configured cloud solver).
+    import app.main as main
+
+    sid, body = _finalized_session(client)
+    assert body["problem_count"] == 2
+    conn = main.db.connect()
+    try:
+        conn.execute(
+            "UPDATE questions SET structure_json = "
+            "json_remove(structure_json, '$.deck') WHERE session_id = ?",
+            (sid,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    again = client.post(f"/v1/exam-sessions/{sid}/finalize-reading").json()
+    assert again["already_finalized"] is True
+    assert again["problem_count"] == 2  # no duplicated deck rows
+
+
+def test_zero_problem_recovery_via_page_rescan(client):
+    # The full 再読取 loop: unreadable page -> 0 problems -> replace the page
+    # with a good read -> finalize-reading again -> working review deck.
+    sid, doc_id = _unreadable_session(client)
+    body = client.post(f"/v1/exam-sessions/{sid}/finalize-reading").json()
+    assert body["problem_count"] == 0 and body["status"] == "reading"
+
+    r = client.post(
+        f"/v1/documents/{doc_id}/pages",
+        data={"page_index": 0, "ocr_text": "問1 りんごは何個か"},
+    )
+    assert r.status_code == 201 and r.json()["replaced"] is True
+
+    body = client.post(f"/v1/exam-sessions/{sid}/finalize-reading").json()
+    assert body["status"] == "reviewing"
+    assert body["problem_count"] == 1
+    assert body["problems"][0]["problem_no"] == "問1"
+    assert client.get(f"/v1/exam-sessions/{sid}/review").status_code == 200
+
+
+def test_page_rescan_locked_once_reading_finished(client):
+    # After finalize-reading the deck was segmented from the old text; a
+    # replace underneath it must 409 with actionable guidance.
+    sid, _ = _finalized_session(client)
+    doc_id = client.get(f"/v1/exam-sessions/{sid}").json()["document_id"]
+    r = client.post(
+        f"/v1/documents/{doc_id}/pages",
+        data={"page_index": 0, "ocr_text": "問1 書き直し"},
+    )
+    assert r.status_code == 409
+    assert "new document" in r.json()["detail"]
+
+
+def test_new_page_index_rejected_after_finalize(client):
+    # New pages after /finalize would silently miss summaries and the deck.
+    doc_id = _doc_with_text_pages(client, _TWO_PROBLEM_PAGES)
+    r = client.post(
+        f"/v1/documents/{doc_id}/pages", data={"page_index": 5, "ocr_text": "問9 x"}
+    )
+    assert r.status_code == 409
+    assert "replace" in r.json()["detail"]
+    # ...but replacing an existing index is still allowed pre-finalize-reading.
+    r = client.post(
+        f"/v1/documents/{doc_id}/pages", data={"page_index": 0, "ocr_text": "問1 改"}
+    )
+    assert r.status_code == 201 and r.json()["replaced"] is True
 
 
 def test_upload_size_limit(client, monkeypatch):
@@ -551,6 +721,95 @@ def test_real_mode_finalize_skips_server_solve(client, monkeypatch):
     _sid, body = _finalized_session(client, mode="real")
     assert body["server_solved"] == 0
     assert _RecordingSolver.seen == []
+
+
+def test_server_solve_discards_result_when_answer_landed_meanwhile(client, monkeypatch):
+    # The unsolved check spans the (slow) solver call; an onboard answer that
+    # lands mid-call must win — the late server result is discarded, not
+    # inserted as a shadowing second row.
+    from app.solvers import SolveResult
+    from app.solvers.registry import register_solver
+
+    class RacingSolver:
+        name = "racing-test"
+        provider_version = "t-1"
+        offline = True
+
+        def solve(self, *, question, max_answer_len=64):
+            import app.main as main
+
+            conn = main.db.connect()
+            try:
+                qid = conn.execute(
+                    "SELECT id FROM questions WHERE question_no = ?",
+                    (question.question_no,),
+                ).fetchone()["id"]
+                conn.execute(
+                    "INSERT INTO solutions (question_id, solver_name, answer, "
+                    "served_by) VALUES (?, 'onboard', '先着', 'onboard')",
+                    (qid,),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+            return SolveResult(
+                answer="遅着", solution_steps=[], rationale="", cautions="",
+                answer_confidence=0.9, rationale_confidence=0.9,
+            )
+
+        def info(self):
+            return {"name": self.name, "provider_version": self.provider_version,
+                    "offline": self.offline}
+
+    register_solver(RacingSolver(), replace=True)
+    monkeypatch.setenv("ROKID_SOLVER", "racing-test")
+
+    sid, body = _finalized_session(client)
+    assert body["server_solved"] == 0
+    deck = client.get(f"/v1/exam-sessions/{sid}/solutions").json()["deck"]
+    assert all(p["served_by"] == "onboard" for p in deck)
+    import app.main as main
+
+    conn = main.db.connect()
+    try:
+        rows = conn.execute(
+            "SELECT COUNT(*) FROM solutions "
+            "WHERE question_id IN (SELECT id FROM questions WHERE session_id = ?)",
+            (sid,),
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    assert rows == body["problem_count"]
+
+
+def test_real_mode_locks_session_detail_view(client, monkeypatch):
+    # GET /v1/exam-sessions/{id} must honor the lock like GET /solutions does:
+    # answers stored during a temporary unlock must not leak once re-locked.
+    import app.main as main
+
+    sid, _ = _finalized_session(client, mode="real")
+    monkeypatch.setattr(main.config, "ALLOW_REAL_EXAM_SOLVE", True)
+    r = client.post(
+        f"/v1/exam-sessions/{sid}/solutions",
+        json={"solutions": [{"problem_no": "問1", "answer": "3個"}]},
+    )
+    assert r.status_code == 200 and r.json()["ingested"] == 1
+    monkeypatch.setattr(main.config, "ALLOW_REAL_EXAM_SOLVE", False)
+
+    body = client.get(f"/v1/exam-sessions/{sid}").json()
+    assert body["locked"] is True
+    assert body["solved_count"] == 0
+    assert all(q["solved"] is False for q in body["questions"])
+
+    # Study sessions keep reporting solved state (additive field, no lock).
+    sid2, _ = _finalized_session(client)
+    client.post(
+        f"/v1/exam-sessions/{sid2}/solutions",
+        json={"solutions": [{"problem_no": "問1", "answer": "3個"}]},
+    )
+    body2 = client.get(f"/v1/exam-sessions/{sid2}").json()
+    assert body2["locked"] is False
+    assert body2["solved_count"] == 1
 
 
 # --- regression: compat path stays usable --------------------------------------

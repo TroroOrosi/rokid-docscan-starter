@@ -118,7 +118,7 @@ CXR-M（スマホ）の AI Interaction からも同様に利用できる。
 export OPENAI_API_KEY=sk-...                 # Gemini: GOOGLE_API_KEY / Anthropic: ANTHROPIC_API_KEY
 export ROKID_SOLVER=openai ROKID_EXPLAINER=openai \
        ROKID_ANALYZER=openai ROKID_EXTRACTOR=openai   # または gemini / claude
-export ROKID_LLM_MODEL=<現行のGPTモデルid>    # openai/gemini は現行モデル id を必須指定
+# export ROKID_LLM_MODEL=gpt-4o             # 任意上書き（各プロバイダに既定あり）
 pip install openai                            # または google-genai / anthropic
 uvicorn app.main:app --port 8000
 ```

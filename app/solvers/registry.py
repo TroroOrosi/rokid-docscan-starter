@@ -1,57 +1,49 @@
 """Solver registry + model routing (mirrors app/analyzers/registry.py).
 
 A tiny provider registry so the active solver is chosen by name/feature flag,
-not hard-coded. Future Gemini/OpenAI/Claude/on-device adapters register here
-under their own key; routing picks one based on config without touching
-endpoints.
-
-Routing precedence:
-  1. explicit `prefer` argument (e.g. per-request hint),
-  2. ROKID_SOLVER env var,
-  3. DEFAULT_SOLVER.
-
-If the requested solver is missing (e.g. cloud adapter not installed / no
-creds), we fall back to the offline local placeholder so the server keeps
-working (offline-first / two-tier fallback).
+not hard-coded (routing rules: app/provider_registry.py — prefer arg >
+ROKID_SOLVER > local). On top of the shared registry, solvers add the
+multi-tier `solve_with_fallback`: if the requested solver is missing or fails
+(e.g. cloud adapter not installed / no creds), it falls back to the offline
+local placeholder so the server keeps working (offline-first / two-tier
+fallback).
 """
 
 from __future__ import annotations
 
 import os
 
+from ..llm import ADAPTER_PROVIDERS
+from ..provider_registry import ProviderRegistry
 from .base import Solver
-from .claude import LLMSolver
+from .llm_adapter import LLMSolver
 from .local_placeholder import LocalPlaceholderSolver
 
 DEFAULT_SOLVER = "local"
 
-_REGISTRY: dict[str, Solver] = {}
+_registry = ProviderRegistry(
+    kind="solver",
+    env_var="ROKID_SOLVER",
+    default_factory=LocalPlaceholderSolver,
+    default_name=DEFAULT_SOLVER,
+)
 
 
 def register_solver(solver: Solver, *, replace: bool = False) -> None:
-    if solver.name in _REGISTRY and not replace:
-        raise ValueError(f"solver '{solver.name}' already registered")
-    _REGISTRY[solver.name] = solver
+    _registry.register(solver, replace=replace)
 
 
 def list_solvers() -> list[dict]:
-    return [s.info() for s in _REGISTRY.values()]
+    return _registry.list()
 
 
 def _select_name(prefer: str | None) -> str:
-    return prefer or os.environ.get("ROKID_SOLVER") or DEFAULT_SOLVER
+    return _registry.select_name(prefer)
 
 
 def get_solver(prefer: str | None = None) -> Solver:
     """Return a solver by routing rules, falling back to the local one."""
-    name = _select_name(prefer)
-    solver = _REGISTRY.get(name)
-    if solver is None:
-        solver = _REGISTRY.get(DEFAULT_SOLVER)
-    if solver is None:  # registry empty -> lazily install the local default
-        solver = LocalPlaceholderSolver()
-        register_solver(solver, replace=True)
-    return solver
+    return _registry.get(prefer)
 
 
 def _tier_names(tiers: list[str] | None) -> list[str]:
@@ -99,7 +91,7 @@ def solve_with_fallback(
         # must not silently coerce to the local placeholder mid-list — that
         # would "answer" before the real later tiers get a chance. Skip it and
         # record it; local stays available as the guaranteed final tier.
-        if name not in _REGISTRY and name != DEFAULT_SOLVER:
+        if name not in _registry and name != DEFAULT_SOLVER:
             skipped.append(f"{name}:unknown")
             continue
         solver = get_solver(name)
@@ -131,8 +123,8 @@ def solve_with_fallback(
 
 # Register the offline default at import time so the server always has one.
 register_solver(LocalPlaceholderSolver(), replace=True)
-# Register the real cloud solvers (Anthropic Claude / OpenAI / Google Gemini).
-# Each only touches the network when routed to AND its provider API key is set;
-# otherwise solve() raises and solve_with_fallback drops back to local.
-for _name, _provider in (("claude", "anthropic"), ("openai", "openai"), ("gemini", "gemini")):
+# Register the real cloud solvers (OpenAI GPT / Google Gemini / Anthropic
+# Claude). Each only touches the network when routed to AND its provider API
+# key is set; otherwise solve() raises and solve_with_fallback drops to local.
+for _name, _provider in ADAPTER_PROVIDERS:
     register_solver(LLMSolver(name=_name, provider=_provider), replace=True)

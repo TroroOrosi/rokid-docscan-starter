@@ -52,7 +52,7 @@ pip install openai             # または google-genai / anthropic
 export OPENAI_API_KEY=sk-...                  # Gemini/Anthropic なら GOOGLE_API_KEY / ANTHROPIC_API_KEY
 export ROKID_SOLVER=openai ROKID_EXPLAINER=openai \
        ROKID_ANALYZER=openai ROKID_EXTRACTOR=openai   # または gemini / claude
-export ROKID_LLM_MODEL=<現行のGPTモデルid>      # openai/gemini は現行モデル id を必須指定
+# export ROKID_LLM_MODEL=gpt-4o               # 任意上書き（各プロバイダに既定あり）
 ```
 
 - 鍵未設定/失敗時は**自動でローカル実装にフォールバック**（サーバは常に応答）。
@@ -210,6 +210,10 @@ export ROKID_KEYMAP='{"single_tap": 23, "long_press": 170}'
 タッチパッド操作時のキーコードを観測し、差があれば上記で調整します。
 `two_finger_tap`（AI 起動）はシステムジェスチャのため既定 `keycode:null`——ファームが
 KeyEvent として配送する機種のみ `ROKID_KEYMAP` で割り当ててください。
+
+KeyCode を含む**実機検証の全項目**（イベント経路の判定・LED 消灯の物理確認・読取品質・
+閾値チューニング等）は [device-verification-checklist.md](device-verification-checklist.md)
+に手順付きで集約しています。
 
 ---
 

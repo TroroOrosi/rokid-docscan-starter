@@ -9,16 +9,16 @@ internally.
 
 from types import SimpleNamespace
 
-from app.analyzers.claude import ClaudeAnalyzer, LLMAnalyzer
+from app.analyzers.llm_adapter import ClaudeAnalyzer, LLMAnalyzer
 from app.analyzers import get_analyzer, list_analyzers
 from app.explainer import ExplainRequest
-from app.explainers.claude import ClaudeExplainer, LLMExplainer
+from app.explainers.llm_adapter import ClaudeExplainer, LLMExplainer
 from app.explainers import get_explainer, list_explainers
-from app.extractors.claude import ClaudeExtractor, LLMExtractor
+from app.extractors.llm_adapter import ClaudeExtractor, LLMExtractor
 from app.extractors import get_extractor, list_extractors
 from app.llm import LLMClient
 from app.solvers import Question, get_solver, list_solvers, solve_with_fallback
-from app.solvers.claude import ClaudeSolver, LLMSolver
+from app.solvers.llm_adapter import ClaudeSolver, LLMSolver
 
 
 def _client(reply: str, provider: str = "anthropic") -> LLMClient:
@@ -189,6 +189,20 @@ def test_default_routing_still_local():
     assert get_extractor().name == "local"
 
 
+def test_claude_modules_are_backcompat_shims():
+    # app/*/claude.py re-export the same objects as llm_adapter.py, so code
+    # written against the old module paths keeps working.
+    import app.analyzers.claude as an_shim
+    import app.explainers.claude as ex_shim
+    import app.extractors.claude as xt_shim
+    import app.solvers.claude as so_shim
+
+    assert so_shim.LLMSolver is LLMSolver and so_shim.ClaudeSolver is ClaudeSolver
+    assert an_shim.LLMAnalyzer is LLMAnalyzer and an_shim.ClaudeAnalyzer is ClaudeAnalyzer
+    assert ex_shim.LLMExplainer is LLMExplainer and ex_shim.ClaudeExplainer is ClaudeExplainer
+    assert xt_shim.LLMExtractor is LLMExtractor and xt_shim.ClaudeExtractor is ClaudeExtractor
+
+
 def test_adapters_fall_back_when_sdk_missing(monkeypatch):
     """Key set but provider SDK not installed: get_client raises LLMConfigError.
 
@@ -201,9 +215,11 @@ def test_adapters_fall_back_when_sdk_missing(monkeypatch):
     def _raise(*a, **k):
         raise LLMConfigError("provider key set but its SDK is not installed")
 
-    import app.analyzers.claude as an
-    import app.explainers.claude as ex
-    import app.extractors.claude as xt
+    # Patch the REAL adapter modules — patching the claude.py shims would land
+    # on the shim namespace and leave the adapters' get_client untouched.
+    import app.analyzers.llm_adapter as an
+    import app.explainers.llm_adapter as ex
+    import app.extractors.llm_adapter as xt
 
     monkeypatch.setattr(an, "get_client", _raise)
     monkeypatch.setattr(ex, "get_client", _raise)

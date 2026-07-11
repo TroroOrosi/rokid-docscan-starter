@@ -18,11 +18,11 @@
 
 - **add_question**: layout 解析後、図/表/グラフ/数式の手掛かりがあれば `extractors`（`get_extractor`）で `media` を生成し `questions.media_json` に保存・応答に同梱。
 - **solve**: `retrieval.retrieve_context(documents/pages)` で根拠 `context`/`evidence_pages` を取得→`Question(context=..., image_path=...)` に注入→`solve_with_fallback`（tier 順に試行し offline local へフォールバック、採用 tier=`served_by`）→`solutions` に `evidence_pages`/`served_by` 保存。応答に `served_by`・`evidence` を追加。
-  - **vision（用紙画像で解く）**: 実アダプタ（`openai`/`gemini`/`claude`）は `questions.image_path` の**ページ画像をモデルへ添付**し、図/数式/表/選択肢を直接読んで解答（OCR テキストは補助）。プロンプトは**教科別ガイダンス**付き（`app/solvers/claude.py` の `_SYSTEM` / `_subject_guidance`）。画像はクラウドへ送信されるため実 AI・鍵設定時のみ作動、未設定/失敗は local へフォールバック。`mode=real` ロックは不変。
+  - **vision（用紙画像で解く）**: 実アダプタ（`openai`/`gemini`/`claude`）は `questions.image_path` の**ページ画像をモデルへ添付**し、図/数式/表/選択肢を直接読んで解答（OCR テキストは補助）。プロンプトは**教科別ガイダンス**付き（`app/solvers/llm_adapter.py` の `_SYSTEM` / `_subject_guidance`）。画像はクラウドへ送信されるため実 AI・鍵設定時のみ作動、未設定/失敗は local へフォールバック。`mode=real` ロックは不変。
 - **overlay**: `tracking:"2d_image_anchor"`・`fixed_ar:false`・`anchor_hint{page_number,box}` を機械可読化（6DoF 固定 AR は未対応＝ハード待ち）。
 - **reasoning**: `GET …/questions/{qid}/reasoning` で `raw_reasoning`＋`evidence`＋`served_by` を返す（HUD は短縮版のまま、`real` ロック準拠）。
 
-## 3 フェーズフロー（読取→一括解答→閲覧 / API 1.8.0・主経路）
+## 3 フェーズフロー（読取→一括解答→閲覧 / API 1.9.0・主経路）
 
 **主経路**。カメラ（＝プライバシー LED 点灯）は読取フェーズのみで、`finalize-reading` 以降は
 カメラを閉じる（LED 消灯）。解答の主体は**グラス搭載 AI（GPT）**で、サーバは分割・取り込み・
@@ -163,8 +163,8 @@ exam-session(document_id, exam_type, answer_format)
 ## バージョン契約（`app/version.py`）
 
 `SOLVER_API_VERSION` / `EXTRACTOR_API_VERSION` / `GLASSES_VIEW_CONTRACT_VERSION` /
-`OVERLAY_CONTRACT_VERSION` を契約ごとに管理。`API_VERSION` は現在 `1.8.0`
-（3 フェーズ endpoints：finalize-reading / solutions / review を追加）、`APP_VERSION` は `0.8.0`。
+`OVERLAY_CONTRACT_VERSION` を契約ごとに管理。`API_VERSION` は現在 `1.9.0`
+（再読取＝ページ置換・0問題時の読取フェーズ復帰・セッション GET のロック整合を追加）、`APP_VERSION` は `0.9.0`。
 `GLASSES_VIEW_CONTRACT_VERSION` は `1.4.0`（`kind:"review"` の一括ストリーム view・reading_ack・
 公式ジェスチャ語彙）。クライアントは `GET /v1/version` でネゴシエート
 （`solvers`/`extractors` 等に `openai`/`gemini`/`claude` が並ぶ）。

@@ -11,21 +11,22 @@ from app.analyzers.local_placeholder import LocalPlaceholderAnalyzer
 
 # --- version module ---------------------------------------------------------
 
-def test_version_info_has_all_contracts():
-    info = version.version_info()
-    for key in (
-        "app_version",
-        "api_version",
-        "matcher_version",
-        "hud_contract_version",
-        "analyzer_api_version",
-        "solver_api_version",
-        "extractor_api_version",
-        "explainer_api_version",
-        "glasses_view_contract_version",
-        "overlay_contract_version",
-    ):
-        assert key in info and isinstance(info[key], str)
+def test_version_info_pins_every_contract():
+    # FULL pin of all 10 fields: any bump anywhere must fail here, forcing the
+    # simultaneous doc/pin update CLAUDE.md requires (no silent version drift —
+    # docs hardcode several of these, e.g. user-operation-guide's JSON block).
+    assert version.version_info() == {
+        "app_version": "0.9.0",
+        "api_version": "1.9.0",
+        "matcher_version": "1.1.0",
+        "hud_contract_version": "1.0.0",
+        "analyzer_api_version": "1.0.0",
+        "solver_api_version": "1.1.0",
+        "extractor_api_version": "1.0.0",
+        "explainer_api_version": "1.0.0",
+        "glasses_view_contract_version": "1.4.0",
+        "overlay_contract_version": "1.1.0",
+    }
 
 
 def test_contract_versions_reflect_silent_capture_contract():
@@ -42,10 +43,10 @@ def test_contract_versions_reflect_phase234():
 
 
 def test_contract_versions_reflect_explain_sessions():
-    # 1.8.0: 3-phase exam endpoints (finalize-reading / solutions / review) +
-    #        honest input/capture contract corrections (1.7.0 added the
-    #        document page-move型 exam + camera-free pages + listening audio).
-    assert version.API_VERSION == "1.8.0"
+    # 1.9.0: reading-phase recovery (page upsert + 0-problem revert) and
+    #        real-mode lock consistency on session GET (1.8.0 added the
+    #        3-phase exam endpoints + honest input/capture corrections).
+    assert version.API_VERSION == "1.9.0"
     assert version.EXPLAINER_API_VERSION == "1.0.0"
 
 
