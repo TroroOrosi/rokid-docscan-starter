@@ -504,6 +504,16 @@ def _review_lines(solution: SolveResult, header: str) -> list[str]:
     return lines
 
 
+# Gesture bindings for the reading phase (subset of OPERATION_CONTRACT).
+# Returned by finalize-reading when a 0-problem outcome reverts the session to
+# the reading phase: the client must keep showing re-scan controls — with the
+# review bindings, double_tap would read as "close" exactly when the user
+# needs it to mean "finish_reading" again after re-scanning.
+READING_OPERATIONS = {
+    key: OPERATION_CONTRACT[key]
+    for key in ("capture_read", "finish_reading", "mode_toggle")
+}
+
 # Gesture bindings for the review phase (subset of OPERATION_CONTRACT). The
 # single source used both inside every review view (nav.operations) and by the
 # endpoint envelopes (main._review_operations), so a client sees one set.

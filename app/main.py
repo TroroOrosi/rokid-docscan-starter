@@ -33,6 +33,7 @@ from .glasses_view import (
     CAPTURE_CONTRACT,
     EXPLAIN_STAGES,
     OPERATION_CONTRACT,
+    READING_OPERATIONS,
     RENDER_CONTRACT,
     REVIEW_OPERATIONS,
     STAGES,
@@ -1440,12 +1441,16 @@ def exam_finalize_reading(session_id: int) -> dict:
         # A reviewing session WITHOUT deck rows is claimable again: that is
         # the recoverable 0-problem state (nothing was segmented), including
         # legacy DBs that got stuck there before the revert below existed.
+        # The deck predicate must mirror _deck_question_rows: legacy deck rows
+        # carry only {"page_indexes": ...} (no "deck" key) and still count —
+        # missing them here would re-segment a finalized session's deck.
         claim = conn.execute(
             "UPDATE exam_sessions SET status = 'reviewing' "
             "WHERE id = ? AND (status != 'reviewing' "
             "  OR NOT EXISTS (SELECT 1 FROM questions q "
             "                 WHERE q.session_id = exam_sessions.id "
-            "                 AND q.structure_json LIKE '%\"deck\"%'))",
+            "                 AND (q.structure_json LIKE '%\"deck\"%' "
+            "                      OR q.structure_json LIKE '%\"page_indexes\"%')))",
             (session_id,),
         )
         already_finalized = claim.rowcount == 0
@@ -1591,8 +1596,14 @@ def exam_finalize_reading(session_id: int) -> dict:
             "server_solved": server_solved,
             "locked": locked,
             "problems": deck,
+            # The camera is off either way at this instant (the double tap
+            # closed it); after a revert it only re-opens on the user's next
+            # two-finger tap (capture_read), keeping LED time minimal.
             "camera": {"expected_state": "off", "privacy_led": "off"},
-            "operations": _review_operations(),
+            # Reverted -> the client must keep READING controls (double_tap =
+            # finish_reading again), not the review bindings where the same
+            # gesture means close — that would strand the re-scan loop.
+            "operations": dict(READING_OPERATIONS) if reverted else _review_operations(),
             "versions": version_info(),
         }
         if not already_finalized:

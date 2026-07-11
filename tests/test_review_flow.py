@@ -520,6 +520,48 @@ def test_zero_problem_finalize_reading_is_repeatable(client):
     assert client.get(f"/v1/exam-sessions/{sid}").json()["problem_count"] == 0
 
 
+def test_zero_problem_response_keeps_reading_controls(client):
+    # Reverted -> the operations block must be the READING bindings (double
+    # tap = finish_reading again), not the review bindings where the same
+    # gesture means close — that would strand the advertised re-scan loop.
+    sid, _doc_id = _unreadable_session(client)
+    body = client.post(f"/v1/exam-sessions/{sid}/finalize-reading").json()
+    assert body["status"] == "reading"
+    assert body["operations"]["finish_reading"] == "double_tap"
+    assert body["operations"]["capture_read"] == "two_finger_tap"
+    assert "close" not in body["operations"]
+    # A successful finalize keeps advertising the review bindings.
+    sid2, ok = _finalized_session(client)
+    assert ok["operations"]["close"] == "double_tap"
+    assert "finish_reading" not in ok["operations"]
+
+
+def test_legacy_deck_rows_without_deck_key_stay_finalized(client):
+    # Decks written by the initial 3-phase flow carry only {"page_indexes":
+    # ...} (no "deck" key) and _deck_question_rows still counts them. The
+    # recovery claim must use the same predicate, or a double tap on such a
+    # session would re-segment and duplicate every problem (and re-bill a
+    # configured cloud solver).
+    import app.main as main
+
+    sid, body = _finalized_session(client)
+    assert body["problem_count"] == 2
+    conn = main.db.connect()
+    try:
+        conn.execute(
+            "UPDATE questions SET structure_json = "
+            "json_remove(structure_json, '$.deck') WHERE session_id = ?",
+            (sid,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    again = client.post(f"/v1/exam-sessions/{sid}/finalize-reading").json()
+    assert again["already_finalized"] is True
+    assert again["problem_count"] == 2  # no duplicated deck rows
+
+
 def test_zero_problem_recovery_via_page_rescan(client):
     # The full 再読取 loop: unreadable page -> 0 problems -> replace the page
     # with a good read -> finalize-reading again -> working review deck.
