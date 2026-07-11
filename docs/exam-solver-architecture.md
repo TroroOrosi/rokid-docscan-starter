@@ -22,7 +22,7 @@
 - **overlay**: `tracking:"2d_image_anchor"`・`fixed_ar:false`・`anchor_hint{page_number,box}` を機械可読化（6DoF 固定 AR は未対応＝ハード待ち）。
 - **reasoning**: `GET …/questions/{qid}/reasoning` で `raw_reasoning`＋`evidence`＋`served_by` を返す（HUD は短縮版のまま、`real` ロック準拠）。
 
-## 3 フェーズフロー（読取→一括解答→閲覧 / API 1.8.0・主経路）
+## 3 フェーズフロー（読取→一括解答→閲覧 / API 1.9.0・主経路）
 
 **主経路**。カメラ（＝プライバシー LED 点灯）は読取フェーズのみで、`finalize-reading` 以降は
 カメラを閉じる（LED 消灯）。解答の主体は**グラス搭載 AI（GPT）**で、サーバは分割・取り込み・
@@ -163,8 +163,8 @@ exam-session(document_id, exam_type, answer_format)
 ## バージョン契約（`app/version.py`）
 
 `SOLVER_API_VERSION` / `EXTRACTOR_API_VERSION` / `GLASSES_VIEW_CONTRACT_VERSION` /
-`OVERLAY_CONTRACT_VERSION` を契約ごとに管理。`API_VERSION` は現在 `1.8.0`
-（3 フェーズ endpoints：finalize-reading / solutions / review を追加）、`APP_VERSION` は `0.8.0`。
+`OVERLAY_CONTRACT_VERSION` を契約ごとに管理。`API_VERSION` は現在 `1.9.0`
+（再読取＝ページ置換・0問題時の読取フェーズ復帰・セッション GET のロック整合を追加）、`APP_VERSION` は `0.9.0`。
 `GLASSES_VIEW_CONTRACT_VERSION` は `1.4.0`（`kind:"review"` の一括ストリーム view・reading_ack・
 公式ジェスチャ語彙）。クライアントは `GET /v1/version` でネゴシエート
 （`solvers`/`extractors` 等に `openai`/`gemini`/`claude` が並ぶ）。

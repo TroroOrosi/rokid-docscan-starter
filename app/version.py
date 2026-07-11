@@ -53,7 +53,23 @@ from __future__ import annotations
 #        honestly false (legacy table, unmeasured); privacy_led corrected to
 #        on_while_camera_active + led_off_during_review. API -> 1.8.0,
 #        GLASSES_VIEW_CONTRACT -> 1.4.0.
-APP_VERSION = "0.8.0"
+# 0.9.0: reading-phase recovery + honest-lock consistency + GPT-first code.
+#        再読取: POST /pages now REPLACES an existing page_index (response
+#        gains `replaced`; frozen once a bound session finished reading), and
+#        a 0-problem finalize-reading reverts to the reading phase (response
+#        status "reading") so re-scan + finalize again actually recovers.
+#        GET /v1/exam-sessions/{id} now honors the mode=real lock (masked
+#        solved signals + additive `locked`). Onboard ingest guardrails:
+#        ambiguous problem_no (問1 vs 問1/問1(2)) is an actionable 400, and a
+#        single-item payload maps onto a single-problem deck (全体) instead of
+#        appending a duplicate. Document finalize is idempotent per page; the
+#        finalize-reading solve-all closes its check-then-insert race; explain
+#        history dedupes same-page rereads; bearer auth compares in constant
+#        time. GPT-first alignment: openai/gemini gained DEFAULT_MODELS
+#        (key-only setup works for all providers), the multi-provider adapters
+#        moved to app/*/llm_adapter.py (claude.py stays as an import shim),
+#        and the four registries share one ProviderRegistry. API -> 1.9.0.
+APP_VERSION = "0.9.0"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.
@@ -74,7 +90,15 @@ APP_VERSION = "0.8.0"
 #        keycodes_verified:false + keycode_source (the old true was wrong),
 #        capture reports privacy_led.state=on_while_camera_active and
 #        led_off_during_review. Session responses gain phase/problem counts.
-API_VERSION = "1.8.0"
+# 1.9.0: reading-phase recovery + lock consistency (behavioral, in-envelope):
+#        /pages upserts an existing page_index (409 only once a bound session
+#        is reviewing, or for NEW indexes after finalize) and returns
+#        `replaced`; finalize-reading may return status "reading" when 0
+#        problems were segmented (session stays recoverable); session GET
+#        gains `locked` and masks solved fields when locked; ingest returns
+#        400 for ambiguous problem_no and maps single-item payloads onto a
+#        single-problem deck. Path shapes unchanged — no envelope change.
+API_VERSION = "1.9.0"
 
 # Matching algorithm identity. Bump when thresholds or hashing change so a
 # re-index/eval is triggered. Mirrors thresholds in app/matching.py.
