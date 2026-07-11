@@ -256,6 +256,14 @@ async def add_page(
     Returns a `scan_ack` HUD payload so the glasses can show real-time
     progress (e.g. '3/5ページ完了') after every page. Pass `total_pages`
     (the expected total) to enable the completion hint ('完了: ダブルタップ').
+
+    再読取 (re-scan): re-sending an existing ``page_index`` REPLACES that
+    page's recognition (response carries ``replaced: true``) so a bad read
+    can be fixed by looking at the page again — until a bound exam session
+    has finished reading (its review deck was segmented from the old text);
+    from then on a re-scan needs a new document. New page indexes are only
+    accepted while the document is still open: after /finalize they would
+    silently miss the summaries and the review deck.
     """
     has_image = image is not None and getattr(image, "filename", None)
     has_text = (ocr_text and ocr_text.strip()) or (vision_text and vision_text.strip())
@@ -268,7 +276,7 @@ async def add_page(
         raise HTTPException(status_code=400, detail="page_index must be >= 0")
     conn = db.connect()
     try:
-        _doc_or_404(conn, document_id)
+        doc = _doc_or_404(conn, document_id)
 
         if has_image:
             raw = await _read_upload_limited(image)
@@ -287,20 +295,70 @@ async def add_page(
             omd5 = ocr_md5(dedupe_src) or hashlib.md5(dedupe_src.encode()).hexdigest()
             image_path = None
 
-        try:
-            cur = conn.execute(
-                """INSERT INTO pages
-                   (document_id, page_index, image_path, phash, ocr_text,
-                    vision_text, ocr_md5)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (document_id, page_index, image_path, ph, ocr_text, vision_text, omd5),
+        existing = conn.execute(
+            "SELECT id, image_path FROM pages "
+            "WHERE document_id = ? AND page_index = ?",
+            (document_id, page_index),
+        ).fetchone()
+        if existing is not None:
+            # 再読取: replace this page's recognition. Frozen once a bound
+            # exam session finished reading — its deck was segmented from
+            # the OLD text and replacing underneath it would diverge them.
+            reviewing = conn.execute(
+                "SELECT COUNT(*) FROM exam_sessions "
+                "WHERE document_id = ? AND status = 'reviewing'",
+                (document_id,),
+            ).fetchone()[0]
+            if reviewing:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"page_index {page_index} belongs to an exam session that "
+                        "already finished reading; re-scan into a new document "
+                        "(POST /v1/documents)"
+                    ),
+                )
+            conn.execute(
+                "UPDATE pages SET image_path = ?, phash = ?, ocr_text = ?, "
+                "vision_text = ?, ocr_md5 = ?, summary = NULL WHERE id = ?",
+                (image_path, ph, ocr_text, vision_text, omd5, existing["id"]),
             )
             conn.commit()
-        except db.sqlite3.IntegrityError:
-            raise HTTPException(
-                status_code=409,
-                detail=f"page_index {page_index} already exists",
-            )
+            if existing["image_path"] and existing["image_path"] != image_path:
+                try:  # best-effort: the replaced photo must not linger on disk
+                    os.remove(existing["image_path"])
+                except OSError:
+                    pass
+            page_id, replaced = existing["id"], True
+        else:
+            if doc["status"] != "open":
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"document {document_id} is finalized "
+                        f"(status={doc['status']}); new pages cannot be added — "
+                        "re-send an existing page_index to replace it, or create "
+                        "a new document"
+                    ),
+                )
+            try:
+                cur = conn.execute(
+                    """INSERT INTO pages
+                       (document_id, page_index, image_path, phash, ocr_text,
+                        vision_text, ocr_md5)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    (document_id, page_index, image_path, ph, ocr_text,
+                     vision_text, omd5),
+                )
+                conn.commit()
+            except db.sqlite3.IntegrityError:
+                # Two racing first-time adds of the same index: the loser keeps
+                # the old (pre-upsert) conflict answer.
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"page_index {page_index} already exists",
+                )
+            page_id, replaced = cur.lastrowid, False
 
         # Count scanned pages so far (including the one just inserted).
         scanned_count = conn.execute(
@@ -319,9 +377,10 @@ async def add_page(
         )
 
         return {
-            "page_id": cur.lastrowid,
+            "page_id": page_id,
             "document_id": document_id,
             "page_index": page_index,
+            "replaced": replaced,
             "phash": ph,
             "ocr_md5": omd5,
             "image_path": image_path,
@@ -1361,6 +1420,11 @@ def exam_finalize_reading(session_id: int) -> dict:
     retried by double-tapping again.  mode=real: the segmentation and phase
     transition still happen (they reveal nothing), but server-side solving is
     skipped and the response carries locked=true.
+
+    0 problems (nothing readable on any page): the claim is reverted in the
+    same transaction and the session stays in the reading phase (response
+    status "reading"), so the ack's 再読取 guidance is actionable — replace
+    the badly-read pages via POST /pages and double-tap again.
     """
     conn = db.connect()
     try:
@@ -1372,12 +1436,19 @@ def exam_finalize_reading(session_id: int) -> dict:
         # Atomically claim the transition: the guarded UPDATE takes SQLite's
         # write lock, so of two racing requests exactly one sees rowcount==1
         # and segments; the other lands in the already-finalized branch.
+        # A reviewing session WITHOUT deck rows is claimable again: that is
+        # the recoverable 0-problem state (nothing was segmented), including
+        # legacy DBs that got stuck there before the revert below existed.
         claim = conn.execute(
             "UPDATE exam_sessions SET status = 'reviewing' "
-            "WHERE id = ? AND status != 'reviewing'",
+            "WHERE id = ? AND (status != 'reviewing' "
+            "  OR NOT EXISTS (SELECT 1 FROM questions q "
+            "                 WHERE q.session_id = exam_sessions.id "
+            "                 AND q.structure_json LIKE '%\"deck\"%'))",
             (session_id,),
         )
         already_finalized = claim.rowcount == 0
+        reverted = False
 
         if already_finalized:
             conn.rollback()  # nothing claimed; end the implicit transaction
@@ -1394,6 +1465,17 @@ def exam_finalize_reading(session_id: int) -> dict:
                     for r in page_rows
                 ]
             )
+            if not problems:
+                # Nothing recognizable was read: give the claim back in the
+                # SAME transaction so the session stays in the reading phase —
+                # the ack's 再読取 guidance is then actually possible (re-scan
+                # the pages, double-tap again). Racing double-fires serialize
+                # on the write lock and revert identically (idempotent).
+                conn.execute(
+                    "UPDATE exam_sessions SET status = 'open' WHERE id = ?",
+                    (session_id,),
+                )
+                reverted = True
             for prob in problems:
                 subject, subj_conf = detect_subject(prob.body_text)
                 conn.execute(
@@ -1453,12 +1535,19 @@ def exam_finalize_reading(session_id: int) -> dict:
                 evidence_pages = result.evidence_pages or _question_evidence_pages(
                     conn, row["id"]
                 )
-                conn.execute(
+                # Conditional insert: the unsolved check at the loop top spans
+                # a slow cloud call, so a racing finalize-reading or an onboard
+                # ingest may have answered meanwhile. WHERE NOT EXISTS closes
+                # that window atomically — the late server result is discarded
+                # instead of shadowing the earlier answer (or double-billing).
+                cur = conn.execute(
                     """INSERT INTO solutions
                        (question_id, solver_name, answer, solution_steps_json,
                         rationale, cautions, answer_conf, rationale_conf,
                         evidence_pages_json, raw_reasoning, served_by)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                       SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                       WHERE NOT EXISTS
+                           (SELECT 1 FROM solutions WHERE question_id = ?)""",
                     (
                         row["id"],
                         solver.name,
@@ -1471,12 +1560,14 @@ def exam_finalize_reading(session_id: int) -> dict:
                         json.dumps(evidence_pages),
                         result.raw_reasoning,
                         served_by,
+                        row["id"],
                     ),
                 )
                 # Commit per problem so a mid-batch crash loses at most one
                 # answer and a retry resumes from the remaining problems.
                 conn.commit()
-                server_solved += 1
+                if cur.rowcount:
+                    server_solved += 1
 
         deck = _exam_deck(conn, session_id)
         if locked:
@@ -1489,7 +1580,9 @@ def exam_finalize_reading(session_id: int) -> dict:
             ]
         body = {
             "session_id": session_id,
-            "status": "reviewing",
+            # 0 problems segmented -> the claim was reverted and the session
+            # is still in the reading phase (re-scan + finalize again works).
+            "status": "reading" if reverted else "reviewing",
             "already_finalized": already_finalized,
             "document_id": doc_id,
             "total_pages": total_pages,

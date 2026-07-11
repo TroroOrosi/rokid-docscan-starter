@@ -101,10 +101,22 @@ def test_match_no_page(client):
     assert len(body["hud"]["lines"]) == 3
 
 
-def test_duplicate_page_index_conflict(client):
+def test_resending_page_index_replaces_the_page(client):
+    # 再読取: re-sending an index replaces the page (fix a bad read), it does
+    # not 409 and does not grow the document.
     doc_id = _create_doc(client)
-    _add_page(client, doc_id, 0, seed=10)
-    assert _add_page(client, doc_id, 0, seed=11).status_code == 409
+    first = _add_page(client, doc_id, 0, seed=10, ocr_text="bad read")
+    assert first.status_code == 201 and first.json()["replaced"] is False
+    second = _add_page(client, doc_id, 0, seed=11, ocr_text="good read")
+    assert second.status_code == 201
+    body = second.json()
+    assert body["replaced"] is True
+    assert body["page_id"] == first.json()["page_id"]
+    assert body["phash"] != first.json()["phash"]
+
+    fin = client.post(f"/v1/documents/{doc_id}/finalize").json()
+    assert fin["page_count"] == 1
+    assert fin["summaries"][0]["summary"] == "good read"
 
 
 def test_missing_document_404(client):
