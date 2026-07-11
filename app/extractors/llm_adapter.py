@@ -13,7 +13,7 @@ contract forbids raising).
 
 from __future__ import annotations
 
-from ..llm import LLMClient, get_client
+from ..llm import LLMClient, clamp01, get_client
 from .base import KINDS, ExtractorResult, MediaExtractor
 from .local_placeholder import LocalPlaceholderExtractor
 
@@ -67,7 +67,7 @@ class LLMExtractor(MediaExtractor):
         return ExtractorResult(
             kind=result_kind,
             content=str(data.get("content", "")).strip() or "(no media)",
-            confidence=_clamp(data.get("confidence")),
+            confidence=clamp01(data.get("confidence")),
             extras={"source": self.name, "provider": self.provider, "model": client.model},
         )
 
@@ -78,9 +78,3 @@ class ClaudeExtractor(LLMExtractor):
     def __init__(self, client: LLMClient | None = None):
         super().__init__(name="claude", provider="anthropic", client=client)
 
-
-def _clamp(value, default: float = 0.0) -> float:
-    try:
-        return max(0.0, min(1.0, float(value)))
-    except (TypeError, ValueError):
-        return default

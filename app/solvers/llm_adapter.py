@@ -16,7 +16,7 @@ wiring a real model here does not weaken it.
 
 from __future__ import annotations
 
-from ..llm import LLMClient, LLMConfigError, get_client
+from ..llm import LLMClient, LLMConfigError, clamp01, get_client
 from .base import Question, SolveResult, Solver
 
 _SYSTEM = (
@@ -103,8 +103,8 @@ class LLMSolver(Solver):
             rationale=str(data.get("rationale", "")),
             cautions=str(data.get("cautions", "")),
             subject=question.subject,
-            answer_confidence=_clamp(data.get("answer_confidence")),
-            rationale_confidence=_clamp(data.get("rationale_confidence")),
+            answer_confidence=clamp01(data.get("answer_confidence")),
+            rationale_confidence=clamp01(data.get("rationale_confidence")),
             raw_reasoning=str(data.get("raw_reasoning", "")),
             extras={"source": self.name, "provider": self.provider, "model": client.model},
         )
@@ -136,9 +136,3 @@ def _build_prompt(question: Question) -> str:
         lines.append(question.context)
     return "\n".join(lines)
 
-
-def _clamp(value, default: float = 0.0) -> float:
-    try:
-        return max(0.0, min(1.0, float(value)))
-    except (TypeError, ValueError):
-        return default

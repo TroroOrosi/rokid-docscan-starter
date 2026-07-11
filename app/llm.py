@@ -280,6 +280,18 @@ def _audio_media_type(audio: bytes) -> str:
     return "audio/mpeg"
 
 
+def clamp01(value, default: float = 0.0) -> float:
+    """Coerce ``value`` to float and clamp into [0, 1]; ``default`` on junk.
+
+    Model-reported confidences (and client-supplied ones) arrive as anything —
+    strings, 0-100 scales, null — and must never inflate HUD ★ symbols.
+    """
+    try:
+        return max(0.0, min(1.0, float(value)))
+    except (TypeError, ValueError):
+        return default
+
+
 def extract_json(text: str) -> dict:
     """Parse the FIRST complete JSON object found in ``text``.
 

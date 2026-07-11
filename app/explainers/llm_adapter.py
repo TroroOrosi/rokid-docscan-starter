@@ -13,7 +13,7 @@ forbids raising), so the explain-session HUD always renders.
 from __future__ import annotations
 
 from ..explainer import ExplainRequest, ExplainResult, Explainer
-from ..llm import LLMClient, get_client
+from ..llm import LLMClient, clamp01, get_client
 from .local_placeholder import LocalPlaceholderExplainer
 
 _SYSTEM = (
@@ -61,7 +61,7 @@ class LLMExplainer(Explainer):
             lines=lines,
             detail=str(data.get("detail", source[:400])),
             evidence_pages=evidence,
-            confidence=_clamp(data.get("confidence"), 1.0),
+            confidence=clamp01(data.get("confidence"), 1.0),
             extras={"source": self.name, "provider": self.provider, "model": client.model},
         )
 
@@ -88,9 +88,3 @@ def _build_prompt(req: ExplainRequest) -> str:
                 lines.append(f"- P{page.get('page_index')}: {snippet}")
     return "\n".join(lines)
 
-
-def _clamp(value, default: float) -> float:
-    try:
-        return max(0.0, min(1.0, float(value)))
-    except (TypeError, ValueError):
-        return default
