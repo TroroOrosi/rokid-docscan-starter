@@ -101,6 +101,26 @@ def test_match_no_page(client):
     assert len(body["hud"]["lines"]) == 3
 
 
+def test_match_hud_counts_text_only_pages_in_mixed_document(client):
+    doc_id = _create_doc(client)
+    # Page 0 follows the primary no-photography path and is not a /match
+    # candidate. Page 1 keeps the optional compatibility image.
+    assert client.post(
+        f"/v1/documents/{doc_id}/pages",
+        data={"page_index": 0, "ocr_text": "text-only page"},
+    ).status_code == 201
+    assert _add_page(client, doc_id, 1, seed=20, ocr_text="image page").status_code == 201
+    assert client.post(f"/v1/documents/{doc_id}/finalize").status_code == 200
+
+    files = {"image": ("q.png", image_bytes(make_image(seed=20)), "image/png")}
+    body = client.post(
+        "/v1/match", data={"document_id": str(doc_id)}, files=files
+    ).json()
+    assert body["verdict"] == "HIT"
+    assert body["best_page"]["page_index"] == 1
+    assert body["hud"]["lines"][0] == "PAGE 2/2"
+
+
 def test_resending_page_index_replaces_the_page(client):
     # 再読取: re-sending an index replaces the page (fix a bad read), it does
     # not 409 and does not grow the document.

@@ -9,7 +9,14 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.llm import DEFAULT_MODELS, LLMClient, LLMConfigError, extract_json, get_client
+from app.llm import (
+    DEFAULT_MODELS,
+    LLMClient,
+    LLMConfigError,
+    clamp01,
+    extract_json,
+    get_client,
+)
 
 
 # --- fakes per provider shape -----------------------------------------------
@@ -113,6 +120,14 @@ def test_extract_json_takes_first_object_despite_trailing_braces():
     assert extract_json('prefix {"a": {"b": 1}} suffix') == {"a": {"b": 1}}
     # Braces inside strings don't confuse the scan.
     assert extract_json('{"t": "curly } inside"} rest') == {"t": "curly } inside"}
+
+
+def test_clamp01_rejects_non_finite_confidence():
+    assert clamp01(float("nan"), default=0.5) == 0.5
+    assert clamp01(float("inf"), default=0.25) == 0.25
+    assert clamp01(float("-inf"), default=0.75) == 0.75
+    assert clamp01(2.0) == 1.0
+    assert clamp01(-1.0) == 0.0
 
 
 # --- load() gating (no network / no creds) ----------------------------------

@@ -57,6 +57,10 @@ def test_legacy_pages_image_path_becomes_nullable(tmp_path, monkeypatch):
     # image_path NOT NULL relaxed; vision_text added.
     assert cols["image_path"][3] == 0  # notnull flag cleared
     assert "vision_text" in cols
+    # The legacy-table rebuild drops indexes attached to the old table; the
+    # migration must recreate the hot-path document lookup immediately.
+    indexes = {r[1] for r in conn.execute("PRAGMA index_list(pages)")}
+    assert "idx_pages_document" in indexes
     # legacy row preserved
     row = conn.execute("SELECT image_path, ocr_text FROM pages WHERE id=1").fetchone()
     assert row["image_path"] == "old.png" and row["ocr_text"] == "legacy page"
