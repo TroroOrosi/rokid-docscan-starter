@@ -75,6 +75,10 @@
 > `two_finger_tap`（AI 起動）は標準 KeyCode を持たないため `keycode:null` で公示します。
 > ファームが KeyEvent として配送する機種では `ROKID_KEYMAP` で割り当ててください。
 > **全操作がグラスのジェスチャに割当済みで、スマホは HTTP 中継のみ（画面不要）**。
+> ただし**文書作成・`/finalize`・exam セッション作成の 3 呼び出しはジェスチャ未割当**で、
+> 読取開始（初回 2本指タップ）／読取完了宣言（ダブルタップ）に連動して**中継アプリが
+> 自動発行**します（[cxr-l-integration.md](cxr-l-integration.md) §5）。ユーザーの入力が
+> ジェスチャのみで完結するのは、この中継責務まで実装されている前提です。
 
 ---
 
@@ -94,8 +98,9 @@
 
 | フェーズ | 操作 | 公式ジェスチャ | operation 名 | サーバ側処理 |
 |----------|------|---------------|--------------|-------------|
+| 1 読取 | 読取開始（文書作成） | （初回 2本指タップに連動・中継が自動発行） | — | `POST /v1/documents` |
 | 1 読取 | ページを視認＝読取 | **2本指タップ**（AI起動） | `capture_read` | 本体 AI → `POST /documents/{id}/pages`（scan_ack） |
-| 1 読取 | **読取完了宣言** | **ダブルタップ** | `finish_reading` | `POST /exam-sessions/{id}/finalize-reading`（→カメラOFF） |
+| 1 読取 | **読取完了宣言** | **ダブルタップ** | `finish_reading` | 中継の自動チェーン: `POST /documents/{id}/finalize` → `POST /exam-sessions` → `POST /exam-sessions/{id}/finalize-reading`（→カメラOFF） |
 | 2 解答 | 筆記 ⇄ リスニング切替 | **長押し**（録画⇄録音） | `mode_toggle` | `POST /exam-sessions/{id}/mode` |
 | 2 解答 | リスニング録音 開始/停止 | **長押し**（listening 中） | `record_toggle` | `POST /exam-sessions/{id}/audio` |
 | 2 解答 | （自動）搭載 GPT が全問解答 | — | — | `POST /exam-sessions/{id}/solutions`（ingest） |
@@ -111,7 +116,10 @@
 - 1 問題を開くと**解答＋解法＋根拠＋注意が一括 1 ストリーム**（段階なし）。3 行 HUD 制約は
   テレプロンプター送り（2本指スワイプ上下）で送り読み。
 - これらの操作↔用途対応は `GET /v1/settings` の `operations` ブロック（`app/glasses_view.py` の
-  `OPERATION_CONTRACT`）としても公示。
+  `OPERATION_CONTRACT`）としても公示。契約上の `finish_reading` が指すのは
+  `finalize-reading` のみ——同じダブルタップで先行する `/finalize`・セッション作成は
+  **中継アプリの自動チェーン責務**（契約外・クライアント実装）であり、意図的に
+  `OPERATION_CONTRACT` に載せていない。
 
 ### 資料解説モード（explain-sessions）撮影なし設計
 

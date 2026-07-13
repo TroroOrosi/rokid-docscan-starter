@@ -142,15 +142,19 @@ POST /v1/explain-sessions {document_id}     → session_id (status=ready)
 ### 4-D. 3 フェーズ実践フロー（主経路 / 筆記・リスニング両対応・LED 点灯最小）
 **読取（カメラON・LED点灯・最短化）→ 一括解答（カメラOFF）→ 閲覧（カメラOFF・LED消灯）**。
 撮影は一切発生しない（写真/フラッシュ/シャッターなし・録音も無音）。**操作はグラス単独で完結**
-（スマホは中継のみ・画面不要）。
+（スマホは中継のみ・画面不要。文書作成・finalize・セッション作成のようにジェスチャ未割当の
+HTTP は、読取開始/読取完了宣言に連動して**中継アプリが自動発行**する——
+[cxr-l-integration.md](cxr-l-integration.md) §5）。
 
 ```
 # フェーズ1 読取（この間だけカメラON＝プライバシーLED点灯）
-POST /v1/documents → 2本指タップ(two_finger_tap=AI起動・視認) ×全ページ
+POST /v1/documents（読取開始＝初回2本指タップで中継が自動作成）
+2本指タップ(two_finger_tap=AI起動・視認) ×全ページ
   → 本体AIの認識を POST .../pages (ocr_text[, vision_text])（scan_ack で進捗表示）
-POST /v1/documents/{id}/finalize
-POST /v1/exam-sessions {mode:"study", document_id, exam_type:"written", answer_format:"mark"}
-ダブルタップ(double_tap=読取完了宣言) → POST .../finalize-reading
+ダブルタップ(double_tap=読取完了宣言) → 中継の自動チェーン:
+  POST /v1/documents/{id}/finalize
+  → POST /v1/exam-sessions {mode:"study", document_id, exam_type:"written", answer_format:"mark"}
+  → POST .../finalize-reading
   → 問題分割・デッキ作成・reading_ack「読取完了/N問を検出/カメラOFF 解答へ」
   → ここでカメラを閉じる＝LED消灯（応答の camera.privacy_led=="off" を確認）
 

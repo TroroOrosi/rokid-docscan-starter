@@ -134,8 +134,9 @@ uvicorn app.main:app --port 8000
 
 | グラス側でやること | 使う SDK / AIDL | 送る先エンドポイント | HUD に返るもの |
 |--------------------|-----------------|----------------------|----------------|
+| 読取開始（最初の2本指タップに連動・**中継が自動発行**） | — | `POST /v1/documents`（文書作成） | — |
 | ページ視認＝読取（2本指タップ） | `com.rokid.sprite.aiapp`（AI Interaction） | `POST /v1/documents/{id}/pages`（`ocr_text`/`vision_text`） | `scan_ack`（進捗） |
-| 読取完了宣言（ダブルタップ） | — | `POST /v1/exam-sessions/{id}/finalize-reading` | `reading_ack`（カメラOFF） |
+| 読取完了宣言（ダブルタップ・**中継が自動チェーン**） | — | `POST /v1/documents/{id}/finalize` → `POST /v1/exam-sessions` → `POST /v1/exam-sessions/{id}/finalize-reading` | `reading_ack`（カメラOFF） |
 | 本体 GPT の問題別解答を送る | `com.rokid.sprite.aiapp` | `POST /v1/exam-sessions/{id}/solutions` | `ingest_ack`（N/M問 解答済） |
 | 問題別閲覧（2本指スワイプ） | — | `GET /v1/exam-sessions/{id}/review?index=&view_page=` | `glasses_view`（一括1ストリーム） |
 | カメラ1フレーム取得（照合時のみ） | `IMediaStreamService`（AIDL） | `POST /v1/match`（画像＋`fast_ocr_text`） | `hud.lines`（3行） |
@@ -144,6 +145,10 @@ uvicorn app.main:app --port 8000
 
 - サーバの描画契約は `GET /v1/settings` の `hud` を唯一の権威ソースとして読む
   （無音・無フラッシュ・即時遷移・低輝度・最大3行）。
+- **中継アプリの自動チェーン責務**: 文書作成・`/finalize`・exam セッション作成の 3 呼び出しは
+  ジェスチャ未割当（`OPERATION_CONTRACT` に載らない）で、上表のとおり読取開始/読取完了宣言に
+  連動して**中継アプリが自動発行**する。ユーザーの入力はグラスのジェスチャのみ——
+  「操作はグラス単独で完結」はこの中継責務まで実装して成立する（サーバ契約は不変）。
 
 ---
 
@@ -197,10 +202,16 @@ val settings = http.get("$SERVER/v1/settings").json()
 
 // 3) 経路B（主経路）: 本体 AI の認識で読取 → 解答を ingest
 //    AI 起動（2本指タップ）は onAiKeyDown/Up（onGlassAiAssistStart/Stop）で届く
+//    ※文書作成・finalize・セッション作成はジェスチャ未割当＝この中継アプリの自動発行責務
+val docId = http.post("$SERVER/v1/documents").json()["document_id"]  // 読取開始（初回タップ）で自動作成
 val pageText = onboardAi.latestRecognition()         // 本体AIの認識（視認＝読取。LED点灯中）
 http.postMultipart("$SERVER/v1/documents/$docId/pages",
     "page_index" to i, "ocr_text" to pageText.body, "vision_text" to pageText.figures)
-// 読取完了（ダブルタップ）→ finalize-reading → 以降カメラOFF（LED消灯）
+// 読取完了（ダブルタップ）→ 自動チェーン: finalize → セッション作成 → finalize-reading
+// → 以降カメラOFF（LED消灯）
+http.post("$SERVER/v1/documents/$docId/finalize")
+val sid = http.postJson("$SERVER/v1/exam-sessions",
+    mapOf("mode" to "study", "document_id" to docId)).json()["session_id"]
 http.post("$SERVER/v1/exam-sessions/$sid/finalize-reading")
 // 本体 GPT が全問を解いた結果を問題別に ingest（デッキ index 指名が確実）
 http.postJson("$SERVER/v1/exam-sessions/$sid/solutions",
