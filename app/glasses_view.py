@@ -243,7 +243,6 @@ def build_page_nav_ack(
         else ("先頭ページ" if page_index == 0 else "")
     )
     lines = [label] + ([at_edge] if at_edge else []) + ["タップで解説"]
-    needs_recapture = problem_count == 0
     return {
         "lines": lines[:_MAX_LINES],
         "ttl_sec": 1.5,
@@ -624,6 +623,7 @@ def build_reading_done_ack(problem_count: int, total_pages: int) -> dict:
             f"{problem_count}問を検出",
             "撮影完了 解答へ",
         ]
+    needs_recapture = problem_count == 0
     return {
         "lines": lines[:_MAX_LINES],
         "ttl_sec": 2,
