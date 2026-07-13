@@ -209,6 +209,10 @@ curl -s 'http://127.0.0.1:8000/v1/documents/1/scan-status?expected_total_pages=3
 撮り直さず、不足分だけを再スキャンできます。物理的な総ページ数はサーバから推測できないため、
 `expected_total_pages` 未指定時の完了判定は `null` です。
 
+`recommended_action` は状態に応じて `start_scan`、`capture_missing_pages`、
+`review_page_indexes`、`capture_page_images`、`add_page_recognition`、`finalize`、`continue` の
+いずれかを返します。登録数が想定を超えた場合は再撮影を促さず `review_page_indexes` を返します。
+
 ### 4. 文書を確定（finalize）
 
 ```bash
