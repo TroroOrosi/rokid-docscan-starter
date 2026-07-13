@@ -83,6 +83,11 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Rokid DocScan", version=APP_VERSION, lifespan=lifespan)
 
+# A physical document page count must not be allowed to expand an unbounded
+# range in scan-status responses. 10,000 is deliberately generous while
+# keeping the worst-case missing-index payload and allocation bounded.
+MAX_EXPECTED_TOTAL_PAGES = 10_000
+
 
 # --- optional bearer auth (off unless ROKID_API_KEY is set) ------------------
 
@@ -265,6 +270,8 @@ async def add_page(
 
     A text-only request remains accepted as a supplemental/backward-compatible
     path, but it has no pHash and therefore cannot participate in ``/v1/match``.
+    When updating an existing image page, omitting ``image`` updates only its
+    recognition metadata and preserves the stored image and pHash.
 
     Returns a `scan_ack` HUD payload so the glasses can show real-time
     progress (e.g. '3/5ページ完了') after every page. Pass `total_pages`
@@ -313,7 +320,7 @@ async def add_page(
             image_path = None
 
         existing = conn.execute(
-            "SELECT id, image_path FROM pages "
+            "SELECT id, image_path, phash FROM pages "
             "WHERE document_id = ? AND page_index = ?",
             (document_id, page_index),
         ).fetchone()
@@ -335,6 +342,11 @@ async def add_page(
                         "(POST /v1/documents)"
                     ),
                 )
+            if not has_image:
+                # Recognition-only recovery must not downgrade a matchable
+                # page to text-only or unlink its already captured image.
+                image_path = existing["image_path"]
+                ph = existing["phash"]
             conn.execute(
                 "UPDATE pages SET image_path = ?, phash = ?, ocr_text = ?, "
                 "vision_text = ?, ocr_md5 = ?, summary = NULL WHERE id = ?",
@@ -432,6 +444,17 @@ def get_document_scan_status(
         raise HTTPException(
             status_code=400,
             detail="expected_total_pages must be >= 1",
+        )
+    if (
+        expected_total_pages is not None
+        and expected_total_pages > MAX_EXPECTED_TOTAL_PAGES
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "expected_total_pages must be <= "
+                f"{MAX_EXPECTED_TOTAL_PAGES}"
+            ),
         )
 
     conn = db.connect()
@@ -1775,7 +1798,7 @@ def exam_finalize_reading(session_id: int) -> dict:
             "camera": {
                 "expected_state": "off",
                 "privacy_led": "off",
-                "new_capture_required": False,
+                "new_capture_required": reverted,
                 "server_controls_camera": False,
                 "state_verified": False,
             },
