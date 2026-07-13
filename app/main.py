@@ -139,6 +139,16 @@ def _load_image(raw: bytes) -> Image.Image:
         raise HTTPException(status_code=400, detail="invalid image upload")
 
 
+def _match_text(ocr_text: str | None, vision_text: str | None) -> str:
+    """Combine body text and figure reading into one /match similarity string.
+
+    Both signals matter: pages sharing identical printed text are told apart
+    by their diagram readings (vision_text is a component, not a fallback).
+    """
+    parts = [t.strip() for t in (ocr_text, vision_text) if t and t.strip()]
+    return normalize_ocr_text(" ".join(parts))
+
+
 def _doc_or_404(conn, document_id: int):
     row = conn.execute(
         "SELECT * FROM documents WHERE id = ?", (document_id,)
@@ -304,10 +314,11 @@ async def add_page(
             img.convert("RGB").save(fpath, format="PNG")
             image_path = str(fpath)
         else:
-            # 撮影しない: no image, no pHash. ocr_md5 dedupes by recognized text
-            # (fall back to vision_text when only figures were recognized).
+            # 撮影しない: no image, no pHash. ocr_md5 hashes the FULL
+            # recognition (body + figure reading) so /match's exact shortcut
+            # distinguishes pages that differ only in their figures.
             ph = ""
-            dedupe_src = ocr_text if (ocr_text and ocr_text.strip()) else (vision_text or "")
+            dedupe_src = _match_text(ocr_text, vision_text)
             omd5 = ocr_md5(dedupe_src) or hashlib.md5(dedupe_src.encode()).hexdigest()
             image_path = None
 
@@ -506,13 +517,24 @@ def get_document_scan_status(
     if not pages:
         recommended = "start_reading"
     elif missing:
-        recommended = "reread_missing_pages"
+        # NEW page indexes are rejected with 409 once the document is
+        # finalized (add_page), so 再読取 of a missing index can only
+        # succeed on a still-open document.
+        recommended = (
+            "reread_missing_pages" if doc["status"] != "ready"
+            else "start_new_document"
+        )
     elif unexpected:
         # All expected indexes are present but extras exist — asking for
         # another read would be wrong; the indexes need review instead.
         recommended = "review_page_indexes"
     elif pages_without_text:
-        recommended = "reread_pages_without_text"
+        # Replacing an EXISTING index stays possible after finalize, but is
+        # frozen once a bound session finished reading.
+        recommended = (
+            "reread_pages_without_text" if reread_allowed
+            else "start_new_document"
+        )
     elif doc["status"] != "ready" or not all(p["summary_generated"] for p in pages):
         recommended = "finalize"
     else:
@@ -632,13 +654,11 @@ async def match_page(
             q_phash: str | None = phash_hex(img)
             q_md5 = _fallback_md5(ocr_md5(query_text), raw)
         else:
-            # 撮影しない: no image, no pHash. Mirror add_page's dedupe rule so
-            # the exact-MD5 shortcut fires against stored text pages.
+            # 撮影しない: no image, no pHash. Mirror add_page's rule (MD5 of
+            # the full recognition) so the exact shortcut fires against
+            # stored text pages — and only when the figures also agree.
             q_phash = None
-            dedupe_src = (
-                query_text if (query_text and query_text.strip())
-                else (vision_text or "")
-            )
+            dedupe_src = _match_text(query_text, vision_text)
             q_md5 = ocr_md5(dedupe_src) or hashlib.md5(dedupe_src.encode()).hexdigest()
 
         rows = conn.execute(
@@ -653,19 +673,18 @@ async def match_page(
                 page_index=r["page_index"],
                 phash=r["phash"],
                 ocr_md5=r["ocr_md5"],
-                # Mirror the stored-md5 source rule: figure-only pages carry
-                # their recognition in vision_text.
-                ocr_text=(
-                    normalize_ocr_text(r["ocr_text"])
-                    or normalize_ocr_text(r["vision_text"])
-                ),
+                # Similarity compares the WHOLE recognition (body + figure
+                # reading): two pages with identical printed text but
+                # different diagrams must stay distinguishable.
+                ocr_text=_match_text(r["ocr_text"], r["vision_text"]),
             )
             for r in rows
         ]
         summaries = {r["id"]: r["summary"] for r in rows}
 
         best, verdict, scored = match(
-            q_phash, q_md5, candidates, query_ocr_text=query_text or vision_text
+            q_phash, q_md5, candidates,
+            query_ocr_text=_match_text(query_text, vision_text) or None,
         )
         hud = build_hud(
             verdict,
@@ -914,6 +933,21 @@ async def add_question(
     conn = db.connect()
     try:
         _exam_session_or_404(conn, session_id)
+        try:
+            hints = json.loads(bbox_hints) if bbox_hints else None
+        except ValueError:
+            raise HTTPException(
+                status_code=400, detail="bbox_hints must be valid JSON"
+            )
+        parsed = parse_layout(ocr_text, bbox_hints=hints)
+        q = primary_question(parsed)
+        subject, subj_conf = detect_subject(ocr_text)
+
+        read_conf = 0.0 if not normalize_ocr_text(ocr_text) else round(min(1.0, 0.5 + subj_conf / 2), 3)
+
+        # Persist the compat image only after every parse step that can
+        # reject the request — a failed request must not orphan a file in
+        # IMAGE_DIR (no questions row would ever own it).
         fpath: Path | None = None
         if has_image:
             raw = await _read_upload_limited(image)
@@ -921,13 +955,6 @@ async def add_question(
             fname = f"q_{session_id}_{uuid.uuid4().hex[:8]}.png"
             fpath = IMAGE_DIR / fname
             img.convert("RGB").save(fpath, format="PNG")
-
-        hints = json.loads(bbox_hints) if bbox_hints else None
-        parsed = parse_layout(ocr_text, bbox_hints=hints)
-        q = primary_question(parsed)
-        subject, subj_conf = detect_subject(ocr_text)
-
-        read_conf = 0.0 if not normalize_ocr_text(ocr_text) else round(min(1.0, 0.5 + subj_conf / 2), 3)
 
         answer_box = q.answer_box if q else parsed.get("answer_box")
         media = _extract_media(ocr_text, str(fpath) if fpath else None)

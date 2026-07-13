@@ -122,7 +122,11 @@ API_VERSION = "1.10.0"
 #        (撮影しない pages are first-class candidates): exact normalized-text
 #        MD5 -> TEXT_EXACT_CONF (0.95), graded similarity mapped onto the
 #        OCR_SIM_FLOOR/OCR_MATCH_RATIO anchors; ScoredCandidate.hamming is
-#        None for text-only comparisons. Image-vs-image scoring unchanged.
+#        None for text-only comparisons. Text comparisons (similarity AND the
+#        stored/query MD5) use the combined body+figure recognition
+#        (ocr_text + vision_text), so pages differing only in figures stay
+#        distinguishable; equal scores tie-break by similarity.
+#        Image-vs-image scoring unchanged.
 MATCHER_VERSION = "1.2.0"
 
 # HUD payload shape: {verdict, confidence, lines:[3]}.

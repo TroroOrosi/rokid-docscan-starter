@@ -250,6 +250,23 @@ def test_add_question_text_only_extracts_media(client):
     assert all(m["kind"] for m in media)
 
 
+def test_add_question_malformed_bbox_hints_400_and_no_orphan_image(client):
+    # A rejected request must not leave a file in IMAGE_DIR that no
+    # questions row owns.
+    import app.main as main
+
+    sid = _new_session(client)
+    files = {"image": ("q.png", image_bytes(make_image(seed=5)), "image/png")}
+    r = client.post(
+        f"/v1/exam-sessions/{sid}/questions",
+        data={"ocr_text": "問1 計算せよ", "bbox_hints": "{not json"},
+        files=files,
+    )
+    assert r.status_code == 400
+    assert "bbox_hints" in r.json()["detail"]
+    assert list(main.IMAGE_DIR.glob("q_*")) == []
+
+
 def test_retake_hint_says_reread_not_rephotograph(client):
     # 撮影しない: recovery guidance must ask for re-recognition, never for a
     # new photograph.

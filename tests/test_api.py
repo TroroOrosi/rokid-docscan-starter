@@ -246,6 +246,34 @@ def test_match_image_compat_path_unchanged(client):
     assert body["query_signals"] == {"phash": True, "text": False}
 
 
+def test_match_vision_text_distinguishes_same_body_pages(client):
+    # Two pages share identical printed text and differ only in their
+    # figures: the figure reading must pick the right page.
+    doc_id = _create_doc(client)
+    body = "問3 グラフから読み取れる値を答えよ"
+    _add_text_only_page(
+        client, doc_id, 0, ocr_text=body,
+        vision_text="折れ線グラフ 気温の推移 夏に最大",
+    )
+    _add_text_only_page(
+        client, doc_id, 1, ocr_text=body,
+        vision_text="棒グラフ 降水量の比較 6月に最大",
+    )
+    client.post(f"/v1/documents/{doc_id}/finalize")
+
+    r = client.post(
+        "/v1/match",
+        data={
+            "document_id": str(doc_id),
+            "ocr_text": body,
+            "vision_text": "棒グラフ 降水量の比較 6月に最大",
+        },
+    )
+    body_json = r.json()
+    assert body_json["verdict"] == "HIT"
+    assert body_json["best_page"]["page_index"] == 1
+
+
 def test_match_vision_text_fallback_matches_figure_only_page(client):
     # A page whose recognition is only the figure reading (vision_text) must
     # be matchable by the same figure reading.

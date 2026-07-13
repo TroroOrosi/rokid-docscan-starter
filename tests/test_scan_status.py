@@ -120,6 +120,18 @@ def test_scan_status_finalize_then_continue_actions(client):
     assert body["recommended_action"] == "continue"
 
 
+def test_scan_status_missing_after_finalize_recommends_new_document(client):
+    # add_page rejects NEW page indexes once the document is finalized, so
+    # rereading a missing index cannot succeed there — the only recovery is
+    # a fresh document.
+    doc_id = _new_doc(client)
+    _add_text_page(client, doc_id, 0, "問1 本文")
+    assert client.post(f"/v1/documents/{doc_id}/finalize").status_code == 200
+    body = _status(client, doc_id, expected=2).json()
+    assert body["missing_page_indexes"] == [1]
+    assert body["recommended_action"] == "start_new_document"
+
+
 def test_scan_status_reread_allowed_false_when_session_reviewing(client):
     doc_id = _new_doc(client)
     _add_text_page(client, doc_id, 0, "問1 二次方程式を解け")

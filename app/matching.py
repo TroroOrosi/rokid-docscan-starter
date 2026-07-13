@@ -282,12 +282,15 @@ def match(
         for c in candidates
     ]
     # On equal confidence a visual match outranks a text-only one (hamming
-    # None sorts behind every real distance); stable sort keeps page order
-    # among equal text-only scores.
+    # None sorts behind every real distance); equal text-only scores (e.g.
+    # two exact body-MD5 hits) are broken by the combined-text similarity so
+    # a matching figure reading picks the right page; stable sort keeps page
+    # order after that.
     scored.sort(
         key=lambda s: (
             -s.confidence,
             s.hamming if s.hamming is not None else HASH_BIT_LEN + 1,
+            -s.ocr_similarity,
         )
     )
     best = scored[0] if scored else None
