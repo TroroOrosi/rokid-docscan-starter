@@ -243,6 +243,7 @@ def build_page_nav_ack(
         else ("先頭ページ" if page_index == 0 else "")
     )
     lines = [label] + ([at_edge] if at_edge else []) + ["タップで解説"]
+    needs_recapture = problem_count == 0
     return {
         "lines": lines[:_MAX_LINES],
         "ttl_sec": 1.5,
@@ -605,7 +606,7 @@ def build_review_view(
 
 
 def build_reading_done_ack(problem_count: int, total_pages: int) -> dict:
-    """HUD ack for finalize-reading: scan complete; no new capture is required.
+    """HUD ack for finalize-reading, including whether re-capture is required.
 
     A 0-problem outcome (e.g. every page was figure-only with no recognized
     text) gets explicit guidance instead of dropping the user into an empty
@@ -628,8 +629,8 @@ def build_reading_done_ack(problem_count: int, total_pages: int) -> dict:
         "ttl_sec": 2,
         "problem_count": problem_count,
         "total_pages": total_pages,
-        "capture_complete": True,
-        "new_capture_required": False,
+        "capture_complete": not needs_recapture,
+        "new_capture_required": needs_recapture,
         # Backward-compatible client instruction, not a physical camera-state report.
         "camera_off": True,
         "camera_state_verified_by_server": False,
