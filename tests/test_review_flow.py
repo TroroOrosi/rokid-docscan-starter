@@ -118,11 +118,19 @@ def test_finalize_reading_segments_and_transitions(client):
     assert body["already_finalized"] is False
     assert body["problem_count"] == 2
     assert [p["problem_no"] for p in body["problems"]] == ["問1", "問2"]
-    # Camera is off from here: LED dark for the whole answer/review phases.
-    assert body["camera"] == {"expected_state": "off", "privacy_led": "off"}
+    # This is client intent; the server cannot verify the physical camera/LED.
+    assert body["camera"] == {
+        "expected_state": "off",
+        "privacy_led": "off",
+        "new_capture_required": False,
+        "server_controls_camera": False,
+        "state_verified": False,
+    }
     ack = body["reading_ack"]
     assert len(ack["lines"]) <= 3
-    assert ack["camera_off"] is True
+    assert ack["capture_complete"] is True
+    assert ack["new_capture_required"] is False
+    assert ack["camera_state_verified_by_server"] is False
     # Session now reports the reviewing phase.
     s = client.get(f"/v1/exam-sessions/{sid}").json()
     assert s["phase"] == "reviewing"
