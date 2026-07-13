@@ -282,5 +282,37 @@ def test_scan_status_rejects_invalid_expected_page_count(client, expected):
     assert response.json()["detail"] == "expected_total_pages must be >= 1"
 
 
+def test_scan_status_empty_document_starts_scan(client):
+    doc_id = _create_doc(client)
+    body = client.get(
+        f"/v1/documents/{doc_id}/scan-status",
+        params={"expected_total_pages": 2},
+    ).json()
+    assert body["page_count"] == 0
+    assert body["missing_page_indexes"] == [0, 1]
+    assert body["recommended_action"] == "start_scan"
+
+
+def test_scan_status_unexpected_index_does_not_request_recapture(client):
+    doc_id = _create_doc(client)
+    for page_index in range(3):
+        assert _add_page(
+            client,
+            doc_id,
+            page_index,
+            seed=30 + page_index,
+            ocr_text=f"page {page_index}",
+        ).status_code == 201
+
+    body = client.get(
+        f"/v1/documents/{doc_id}/scan-status",
+        params={"expected_total_pages": 2},
+    ).json()
+    assert body["missing_page_indexes"] == []
+    assert body["unexpected_page_indexes"] == [2]
+    assert body["expected_pages_complete"] is False
+    assert body["recommended_action"] == "review_page_indexes"
+
+
 def test_scan_status_missing_document_404(client):
     assert client.get("/v1/documents/9999/scan-status").status_code == 404
