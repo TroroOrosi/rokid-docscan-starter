@@ -7,7 +7,7 @@
 - 本リポジトリ（サーバ実装）は **既に実装済み** で、ローカルで動きます。
 - ここで「ユーザーが行う」と書いた項目は、**コードでは代行できない物理操作や
   アカウント取得・同意取得など** です。それ以外はシステムが自動化します。
-- 現在のバージョン: **APP 0.9.0 / API 1.9.0**
+- 現在のバージョン: **APP 0.10.0 / API 1.10.0**
 - **解答の主経路はグラス搭載 AI（GPT / Gemini）**で、その問題別解答をサーバへ取り込みます
   （`POST /solutions`・サーバ鍵不要）。要約/解答/解説/メディア抽出のサーバ側は既定でローカル
   実装ですが、**実 AI アダプタ（`openai` / `gemini` / `claude`）を同梱**しており、より高性能な
@@ -22,11 +22,11 @@
 | U1 | 開発者アカウント / SDK アクセス取得 | Rokid AR Platform（`ar.rokid.com/sdk`）で開発者登録し、CXR-L SDK（Android/iOS）を入手 | SDK が DL でき、サンプルがビルドできる |
 | U2 | デバッグ環境（ADB / ケーブル） | Android コンパニオン端末を USB デバッグ可能にし、`adb devices` で認識 | `adb devices` に端末が出る |
 | U3 | グラスのペアリング | Rokid Glasses と端末を BLE/Wi-Fi でペアリング、ファーム/アプリ更新 | グラスにカメラ映像/HUD が出る |
-| U4 | 資料の全ページ視認読取（読取フェーズ・**撮影しない**） | 2本指タップ（AI起動）で各ページを視認し、本体 AI の認識テキスト（`ocr_text`＋図の読み取り `vision_text`）を1ページずつ登録（写真は撮らない）。**全ページを見終えたらダブルタップ（読取完了宣言）**——これを受けた中継アプリが `/finalize` を自動発行する（人間が HTTP を直接呼ぶのはサーバ単体検証のときだけ） | 各ページのテキストが登録され、`status=ready` になる |
-| U5 | 読取品質チェック | 認識テキストに本文・設問・図表の説明が過不足なく含まれるかを scan_ack と**中継アプリ手元の認識テキスト**（送信した `ocr_text`/`vision_text`）で確認（**ダブルタップ=読取完了宣言の前に**行う——宣言後のページ差し替えは新文書での再読取が必要。`/current` はセッション作成後＝宣言後にしか呼べないため事前チェックには使えない） | §「読取チェックリスト」を満たす |
-| U6 | プライバシー同意 | 読取中のカメラ稼働（LED 点灯）・認識テキストの保存・（クラウド送信する場合）外部送信について利用者同意を取得 | 同意ログ/同意UIが用意されている |
+| U4 | 資料の全ページ画像スキャン | 2本指タップで各ページを撮影し、画像＋本体 AI の `ocr_text`＋必要に応じ `vision_text` を登録する | 各ページに画像/pHashがあり、認識テキストも登録される |
+| U5 | スキャン品質・復旧チェック | `GET /v1/documents/{id}/scan-status?expected_total_pages=N` で欠番・画像/pHash・OCR・図読み取り・サマリ状態を確認し、不足ページだけ再スキャンする | 欠番、画像不足、認識不足がすべて解消 |
+| U6 | プライバシー同意 | ページ画像・認識テキストの保存、カメラ利用時の端末インジケータ、クラウド利用時の外部送信について同意を取得 | 同意ログ/同意UIが用意されている |
 | U7 | クラウド vs ローカルモデルの選択 | サーバ側 AI を使う場合のプロバイダ（openai / gemini / claude）かローカルかを決める（主経路の搭載 GPT はサーバ鍵不要） | §「操作後に必要な設計判断」D2 を決定 |
-| U8 | 検証（バリデーション）実行 | 読取サンプルで精度を確認（照合の評価は画像を使う任意経路 `/match` 用） | `scripts/evaluate.py` の accuracy を確認 |
+| U8 | 検証（バリデーション）実行 | 撮影サンプルでpHash＋OCR照合精度を確認 | `scripts/evaluate.py` の accuracy を確認 |
 
 > U1〜U6 と U8 の一部は **物理操作・アカウント・同意** に関わるため、
 > コードでは代行できません。U7 の「決定」も人間の判断です（実装の差し込み口は
@@ -37,20 +37,22 @@
 - 本文（設問文・選択肢）が認識テキスト `ocr_text` に含まれている。
 - 図・グラフ・写真の内容が `vision_text`（本体 AI の図の読み取り）として言語化されている。
 - ページ番号・問題番号（問N/大問N）が読み取れている（問題分割の境界になる）。
-- scan_ack の進捗（N/Mページ完了）が実際のページ数と一致している。
-- （画像を併用する任意の `/match` 経路のみ）反射・影がなく、ページごとに見た目が
-  十分に異なる（pHash が分離できる）。
+- `scan-status` の欠番、`missing_image_page_indexes`、
+  `missing_recognition_page_indexes` が空である。
+- ページ画像に強い反射・影・ブレ・切れがなく、ページごとにpHashが分離できる。
 
-### 全ページ登録〜完了の手順（読取フェーズ・撮影しない）
+### 全ページ画像スキャン〜完了の手順
 
 文書を解答・解説・照合モードで使う前に、**全ページの登録→finalize** が必要です。
 
 ```
 1. POST /v1/documents          → document_id を取得
-2. POST /v1/documents/{id}/pages  (page_index=0, ocr_text[, vision_text])
-3. POST /v1/documents/{id}/pages  (page_index=1, ocr_text[, vision_text])
-   ...全ページ分繰り返す（image は /match 用の任意・後方互換項目）...
-4. POST /v1/documents/{id}/finalize   ← ★「全ページ完了」の宣言
+2. POST /v1/documents/{id}/pages  (page_index=0, image, ocr_text[, vision_text])
+3. POST /v1/documents/{id}/pages  (page_index=1, image, ocr_text[, vision_text])
+   ...全ページ分繰り返す（画像保存＋pHash生成）...
+4. GET /v1/documents/{id}/scan-status?expected_total_pages=N
+   → 欠番・画像不足・認識不足があれば該当ページだけ再送
+5. POST /v1/documents/{id}/finalize   ← ★「全ページ完了」の宣言
    → status が "open" から "ready" に変わる
    → 各ページの summary が生成される
 ```
@@ -59,11 +61,11 @@
 （explain-sessions）や照合（/v1/match）で使えません。**全ページを登録し終えたら必ず
 `/finalize` を呼んでください。**
 
-> **呼び出し主体**: 上記 1〜4 の HTTP はすべて**中継アプリ（CXR-L プラグイン）が発行**します
+> **呼び出し主体**: 上記 1〜5 の HTTP はすべて**中継アプリ（CXR-L プラグイン）が発行**します
 > （サーバ単体検証では curl 等で代行）。ユーザーの入力はグラスのジェスチャのみ——手順 1 は
 > 読取開始（最初の 2本指タップ）で自動作成（`title` 必須。続けて同じタップの認識を
-> page_index=0 として登録——1ページ目を落とさない）、手順 2〜3 は 2本指タップごと、手順 4 は
-> ダブルタップ（読取完了宣言）に連動して呼ばれます
+> page_index=0 の画像＋認識結果として登録——1ページ目を落とさない）、手順 2〜3 は
+> 2本指タップごと、手順 4 は完了前の自動検査、手順 5 はダブルタップに連動して呼ばれます
 > （[cxr-l-integration.md](cxr-l-integration.md) §5）。この中継責務まで含めて
 > 「操作はグラス単独で完結」が成立します。
 >
@@ -96,7 +98,7 @@
 | S10 | しきい値チューニング用フック | `app/matching.py` 定数 + `scripts/evaluate.py` |
 | S11 | ログ/診断（client_version / sdk_hint エコー） | `/v1/documents`・`/v1/match` レスポンス |
 | S12 | 解答モード（exam-sessions） | `/v1/exam-sessions` 以下（API 1.3.0+） |
-| S13 | 資料解説モード（explain-sessions）撮影なし | `/v1/explain-sessions` 以下 |
+| S13 | 資料解説モード（登録済みページを利用し、新規撮影なし） | `/v1/explain-sessions` 以下 |
 | S14 | 解答 HUD（段階×テレプロンプター） | `app/glasses_view.py: build_glasses_view` |
 | S15 | 解説 HUD（overview/detail/evidence×テレプロンプター） | `app/glasses_view.py: build_explain_view` |
 | S16 | 問題構造解析（設問番号/本文/選択肢/解答欄box） | `app/layout.py: parse_layout` |
@@ -106,10 +108,11 @@
 | S20 | 文書ページ移動型 exam（二次経路・互換） | `/v1/exam-sessions`(document_id) の next/prev/current/solve-current |
 | S21 | 図・画像の読み取り取り込み（本体 AI の認識をテキスト `vision_text` で受け、本文と併せて解答） | `POST /v1/documents/{id}/pages` の `vision_text`／`app/main.py: _page_material` |
 | S22 | 英語リスニング録音（無音）＋書き起こし | `/v1/exam-sessions/{id}/audio`／`app/transcribe.py` |
-| S23 | 撮影しない契約の公示（フラッシュ・シャッター・録音音なし・LED は読取中のみ点灯） | `GET /v1/settings.capture`（`flash:"off"`・`privacy_led`・`led_off_during_review`） |
+| S23 | 画像撮影契約の公示（画像が主経路、テキストのみは補助、音/光の保証可否、privacy LED） | `GET /v1/settings.capture` |
 | S24 | **読取完了→問題分割→デッキ作成（3フェーズ主経路）** | `POST /v1/exam-sessions/{id}/finalize-reading`／`app/layout.py: segment_problems` |
 | S25 | **搭載 GPT の問題別解答の取り込み（ingest）** | `POST /v1/exam-sessions/{id}/solutions`（`served_by="onboard"`・latest wins） |
 | S26 | **問題別レビューデッキ＋一括表示 HUD** | `GET …/solutions`・`GET …/review`／`app/glasses_view.py: build_review_view` |
+| S27 | **画像対応スキャン状態復元** | `GET /v1/documents/{id}/scan-status`（欠番・画像/pHash・OCR/図読み取り・サマリ） |
 
 ### システムが返すバージョン情報（契約ネゴシエーション）
 
@@ -117,15 +120,15 @@
 
 ```json
 {
-  "app_version": "0.9.0",
-  "api_version": "1.9.0",
+  "app_version": "0.10.0",
+  "api_version": "1.10.0",
   "matcher_version": "1.1.0",
   "hud_contract_version": "1.0.0",
   "analyzer_api_version": "1.0.0",
   "solver_api_version": "1.1.0",
   "extractor_api_version": "1.0.0",
   "explainer_api_version": "1.0.0",
-  "glasses_view_contract_version": "1.4.0",
+  "glasses_view_contract_version": "1.5.0",
   "overlay_contract_version": "1.1.0"
 }
 ```
@@ -208,23 +211,24 @@
 > 2本指スワイプ上下でスライスを送り読みできます。**文字数・行数の上限はなく**、
 > すべてのテキストが HUD に表示されます（3行×Nスライス）。
 
-### 5-C. 解答モード（3 フェーズ実践フロー・主経路 / LED 点灯最小）
+### 5-C. 解答モード（画像スキャン→解答→閲覧・主経路）
 
-> カメラ（＝LED 点灯）は**手順 1〜3 の読取フェーズだけ**。手順 3 のダブルタップ以降は
-> カメラ OFF（LED 消灯）で、用紙も視認も不要。
+> 手順1〜3でページ画像を取得します。以降は保存済み画像と認識テキストを使うため、
+> 解答・閲覧で新しい撮影は必要ありません。端末LED・音・フラッシュはサーバ制御外です。
 
 ```
-フェーズ1 読取（カメラON・LED点灯・最短化。HTTP は全て中継アプリが発行——人間はジェスチャのみ）
+フェーズ1 画像スキャン（HTTP は中継アプリが発行——人間はジェスチャのみ）
 1. 読取開始（最初の2本指タップ）: 中継が POST /v1/documents {"title": ...}（title 必須）を
-   自動作成し、**同じタップの認識結果を page_index=0 として続けて POST /pages**
+   自動作成し、**同じタップの画像＋認識結果を page_index=0 として POST /pages**
    （1ページ目を落とさない）
-2. 2本指タップ（AI起動=視認）×2ページ目以降 → POST /pages（scan_ack で進捗）
-3. ダブルタップ（読取完了宣言）→ 即カメラを閉じる（LED消灯）→ 中継の自動チェーン:
-   POST /v1/documents/{document_id}/finalize
+2. 2本指タップ×2ページ目以降 → POST /pages（image+ocr_text+vision_text、scan_ackで進捗）
+3. GET /v1/documents/{document_id}/scan-status?expected_total_pages=N
+   → 欠番/画像不足/認識不足があれば該当ページだけ再スキャン
+   → 完了後に POST /v1/documents/{document_id}/finalize
    → POST /v1/exam-sessions {"mode":"study","document_id":N,...}（応答の session_id を取得）
    → POST /v1/exam-sessions/{session_id}/finalize-reading
    → 問題分割・デッキ作成・「読取完了 / N問を検出 / カメラOFF 解答へ」
-   （チェーンはカメラOFF後に実行——non-local ROKID_SOLVER の一括解答中も LED は点かない）
+   （finalize以降は保存済み画像とテキストを使用し、新規撮影は行わない）
 
 フェーズ2 解答（カメラOFF・自動）
 4. 主経路: 搭載 GPT が全問解答 → POST /solutions で取り込み（served_by="onboard"）
@@ -240,12 +244,9 @@
 > **real モード**: `ROKID_ALLOW_REAL_EXAM_SOLVE=1` が未設定の場合、解答は表示・保存されません
 > （ingest・デッキ・閲覧もロック。不正利用防止）。
 
-> **読取品質チェック（U5）は手順 3 のダブルタップ前に行うこと**。`finalize-reading` で
-> セッションが reviewing になった後は、同一文書のページ差し替え（同一 `page_index` の再送）も
-> 409 で拒否されます（デッキは旧テキストから分割済みのため）。ダブルタップ後に読取不良に
-> 気づいた場合の是正は、**新しい文書を作って再読取**（`POST /v1/documents` からやり直し）です。
-> 例外は 0 問分割のとき——セッションが読取フェーズへ自動差し戻しされ、同一文書のまま
-> 再読取→再ダブルタップできます。
+> **スキャン品質チェックは `finalize-reading` 前に行います**。`scan-status` で
+> 欠番・画像不足・認識不足を検出し、必要なページだけ再送します。セッションが reviewing に
+> なった後は、既存デッキとの不整合を防ぐため同一文書のページ差し替えは409です。
 
 ### 5-D. 解答モード（互換・二次経路）
 
@@ -262,11 +263,11 @@ POST /next-page / /prev-page → GET /current → POST /solve-current
 ## 6. 推奨フロー（操作 → 検証 → 判断）
 
 1. **U1〜U3**: SDK 取得・端末準備・ペアリング（人間）。
-2. **U4〜U6**: サンプル文書を**全ページ**視認読取（撮影しない）し同意取得（人間）。
+2. **U4〜U6**: サンプル文書を全ページ画像スキャンし、画像保存・端末表示について同意取得（人間）。
 3. サーバを起動（システム）:
    `uvicorn app.main:app --port 8000`
-4. 認識テキストを登録（システムが自動処理。実機では中継アプリがジェスチャに連動して発行）:
-   `/v1/documents` → `/pages` ×全ページ数 → `/finalize`（**全ページ完了後に必須**）。
+4. ページ画像と認識テキストを登録（中継アプリがジェスチャに連動）:
+   `/v1/documents` → `/pages` ×全ページ → `/scan-status` → `/finalize`。
 5. **U8 検証**（人間が実行 → システムが集計）:
    `ROKID_DATA_DIR=data python scripts/evaluate.py --db data/docscan.db --out report.json`
    → `self_match_accuracy` と `suggested_thresholds` を確認。
@@ -286,13 +287,10 @@ POST /next-page / /prev-page → GET /current → POST /solve-current
 ため、切り替えでサーバが止まることはありません。`ROKID_SOLVER` を non-local にすると
 `finalize-reading` がサーバ側で全問一括解答します。
 
-> **範囲の注意（読取だけは高性能化できない）**: 「撮影しない」原則により画像はサーバに
-> 届かないため、サーバ側アダプタで肩代わりできるのは**解答・解説・要約・書き起こし**です。
-> 読取（`ocr_text`/`vision_text` の認識品質）は本体 AI に固定され、読取不良の救済は
-> 同一 `page_index` の再視認（置換・`replaced:true`。`finalize-reading` 後は新文書で再読取）
-> のみです。解答は `POST /solutions` の再 ingest（latest wins）で、より高性能なモデルの結果に
-> 後から上書きできます。なお **`ROKID_EXTRACTOR`（メディア抽出）が使われるのは設問画像
-> アップロード互換経路（`POST /questions`）だけ**で、撮影しない主経路では呼ばれません。
+> **画像と認識の役割**: ページ画像はサーバに保存され、pHash照合と画像対応AIアダプタに
+> 渡せます。ただし現在の `finalize-reading` の問題分割は `ocr_text`/`vision_text` を使うため、
+> 画像だけを登録しても試験デッキは正しく作れません。画像＋認識テキストを同時に送ってください。
+> `ROKID_EXTRACTOR` は画像必須の設問アップロード経路（`POST /questions`）で使用されます。
 
 ```bash
 pip install openai                          # または google-genai / anthropic
