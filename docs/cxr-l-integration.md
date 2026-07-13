@@ -134,7 +134,7 @@ uvicorn app.main:app --port 8000
 
 | グラス側でやること | 使う SDK / AIDL | 送る先エンドポイント | HUD に返るもの |
 |--------------------|-----------------|----------------------|----------------|
-| 読取開始（最初の2本指タップに連動・**中継が自動発行**） | — | `POST /v1/documents`（文書作成・`title` 必須） | — |
+| 読取開始（最初の2本指タップに連動・**中継が自動発行**） | — | `POST /v1/documents`（文書作成・`title` 必須）→ **同じタップの認識を page_index=0 として続けて `POST /pages`**（1ページ目を落とさない） | `scan_ack`（進捗） |
 | ページ視認＝読取（2本指タップ） | `com.rokid.sprite.aiapp`（AI Interaction） | `POST /v1/documents/{id}/pages`（`ocr_text`/`vision_text`） | `scan_ack`（進捗） |
 | 読取完了宣言（ダブルタップ・**中継が自動チェーン**） | — | `POST /v1/documents/{document_id}/finalize` → `POST /v1/exam-sessions`（応答の `session_id` を取得）→ `POST /v1/exam-sessions/{session_id}/finalize-reading` | `reading_ack`（カメラOFF） |
 | 本体 GPT の問題別解答を送る | `com.rokid.sprite.aiapp` | `POST /v1/exam-sessions/{id}/solutions` | `ingest_ack`（N/M問 解答済） |
@@ -209,6 +209,7 @@ val settings = http.get("$SERVER/v1/settings").json()
 //    ※文書作成・finalize・セッション作成はジェスチャ未割当＝この中継アプリの自動発行責務
 val docId = http.postJson("$SERVER/v1/documents",                    // 読取開始（初回タップ）で自動作成
     mapOf("title" to "exam-" + now())).json()["document_id"]         // title は必須（無いと 422）
+// 初回タップは文書作成に続けて、その同じ認識を page 0 として登録する（1ページ目を落とさない）
 val pageText = onboardAi.latestRecognition()         // 本体AIの認識（視認＝読取。LED点灯中）
 http.postMultipart("$SERVER/v1/documents/$docId/pages",
     "page_index" to i, "ocr_text" to pageText.body, "vision_text" to pageText.figures)

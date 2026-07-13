@@ -108,7 +108,8 @@ CAPTURE_CONTRACT = {
 #     (POST /v1/documents), the all-pages declaration (POST /v1/documents/
 #     {id}/finalize) and exam-session creation (POST /v1/exam-sessions).
 #     They are the RELAY APP's auto-chain duty — the first two_finger_tap of
-#     a reading session creates the document, and finish_reading (double_tap)
+#     a reading session creates the document (title required) and posts that
+#     same tap's recognition as page 0, and finish_reading (double_tap)
 #     fires finalize → session create → finalize-reading as one chain (see
 #     docs/cxr-l-integration.md §5). The user's input is gestures only;
 #     "glasses-only operation" holds through that relay duty, which is why

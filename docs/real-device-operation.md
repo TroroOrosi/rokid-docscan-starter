@@ -148,7 +148,8 @@ HTTP は、読取開始/読取完了宣言に連動して**中継アプリが自
 
 ```
 # フェーズ1 読取（この間だけカメラON＝プライバシーLED点灯）
-POST /v1/documents（読取開始＝初回2本指タップで中継が自動作成）
+POST /v1/documents {title: ...}（読取開始＝初回2本指タップで中継が自動作成。title 必須。
+  同じタップの認識は page_index=0 として続けて POST /pages——1ページ目を落とさない）
 2本指タップ(two_finger_tap=AI起動・視認) ×全ページ
   → 本体AIの認識を POST .../pages (ocr_text[, vision_text])（scan_ack で進捗表示）
 ダブルタップ(double_tap=読取完了宣言) → **即カメラを閉じる＝LED消灯** → 中継の自動チェーン:
