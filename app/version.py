@@ -69,7 +69,13 @@ from __future__ import annotations
 #        (key-only setup works for all providers), the multi-provider adapters
 #        moved to app/*/llm_adapter.py (claude.py stays as an import shim),
 #        and the four registries share one ProviderRegistry. API -> 1.9.0.
-APP_VERSION = "0.9.0"
+# 0.10.0: camera-free reading-state recovery. GET
+#         /v1/documents/{id}/reading-status reports persisted page indexes,
+#         text-only/image-backed storage, OCR/vision/summary presence, safe
+#         previews, and deterministic missing indexes when the physical page
+#         count is supplied. Relays can recover after reconnect and request
+#         only missing pages while the camera stays off. API -> 1.10.0.
+APP_VERSION = "0.10.0"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.
@@ -98,7 +104,9 @@ APP_VERSION = "0.9.0"
 #        gains `locked` and masks solved fields when locked; ingest returns
 #        400 for ambiguous problem_no and maps single-item payloads onto a
 #        single-problem deck. Path shapes unchanged — no envelope change.
-API_VERSION = "1.9.0"
+# 1.10.0: additive GET /v1/documents/{id}/reading-status endpoint for
+#         camera-free relay recovery and pre-finalize page/recognition checks.
+API_VERSION = "1.10.0"
 
 # Matching algorithm identity. Bump when thresholds or hashing change so a
 # re-index/eval is triggered. Mirrors thresholds in app/matching.py.
