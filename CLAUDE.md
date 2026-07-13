@@ -46,6 +46,9 @@
 ## 操作（グラス単独で完結）
 
 - 全操作はグラスのジェスチャのみで完結（スマホは HTTP 中継のみ・画面不要）。
+- ジェスチャ未割当の必須 HTTP（`POST /v1/documents`・`/finalize`・exam セッション作成）は
+  **中継アプリの自動チェーン責務**（読取開始=初回2本指タップ、読取完了宣言=ダブルタップに連動。
+  cxr-l-integration.md §5）。人間の入力はジェスチャのみ——この責務まで含めて上の主張が成立する。
 - **CXR-L はスマホ側プラグイン SDK**（Hi Rokid アプリ経由・グラスとは Bluetooth/Caps wire。
   実機実績: CxrGlobal/claude-mobile-hud）。スマホ経由は必須で、HUD は CUSTOMVIEW
   （`customViewUpdate`）にテキスト・リレーする。「グラス単体 Wi-Fi 直結」構成は未確認と扱う。

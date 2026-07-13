@@ -104,6 +104,16 @@ CAPTURE_CONTRACT = {
 # resolve to KeyCodes via GET /v1/settings.input (overridable with ROKID_KEYMAP).
 #
 # Design notes (pending on-device UX validation):
+#   - Three REQUIRED calls have no gesture of their own: document creation
+#     (POST /v1/documents), the all-pages declaration (POST /v1/documents/
+#     {id}/finalize) and exam-session creation (POST /v1/exam-sessions).
+#     They are the RELAY APP's auto-chain duty — the first two_finger_tap of
+#     a reading session creates the document (title required) and posts that
+#     same tap's recognition as page 0, and finish_reading (double_tap)
+#     fires finalize → session create → finalize-reading as one chain (see
+#     docs/cxr-l-integration.md §5). The user's input is gestures only;
+#     "glasses-only operation" holds through that relay duty, which is why
+#     these calls are deliberately absent from OPERATION_CONTRACT.
 #   - finish_reading = double_tap reuses the official "exit" gesture and is
 #     phase-modal: during reading it declares 読取完了 (finalize-reading);
 #     during review it closes the deck. 読取フェーズの終了＝カメラOFF＝LED消灯.
