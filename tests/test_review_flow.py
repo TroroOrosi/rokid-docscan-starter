@@ -510,6 +510,9 @@ def test_finalize_reading_with_unreadable_pages_gives_guidance(client):
     assert body["status"] == "reading"
     assert "問題を検出できません" in body["reading_ack"]["lines"]
     assert any("再読取" in ln for ln in body["reading_ack"]["lines"])
+    assert body["reading_ack"]["capture_complete"] is False
+    assert body["reading_ack"]["new_capture_required"] is True
+    assert body["camera"]["new_capture_required"] is True
     r = client.get(f"/v1/exam-sessions/{sid}/review")
     assert r.status_code == 409
     assert "finalize-reading" in r.json()["detail"]
@@ -582,6 +585,8 @@ def test_zero_problem_recovery_via_page_rescan(client):
         data={"page_index": 0, "ocr_text": "問1 りんごは何個か"},
     )
     assert r.status_code == 201 and r.json()["replaced"] is True
+    assert r.json()["phash"]
+    assert r.json()["image_path"]
 
     body = client.post(f"/v1/exam-sessions/{sid}/finalize-reading").json()
     assert body["status"] == "reviewing"
