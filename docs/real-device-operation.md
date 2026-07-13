@@ -83,7 +83,7 @@ export ROKID_TRANSCRIBE_MODEL=gpt-4o-transcribe   # gemini は ROKID_LLM_MODEL �
 ## 3. グラス側（CXR-L アプリ）起動時
 
 1. `GET /v1/settings` を取得し、**唯一の権威**として読み込む：
-   - `hud`（無音・無フラッシュ・即時遷移・低輝度・最大3行）
+   - `hud`（音/白フラッシュ指示なし・即時遷移・低輝度・最大3行）
    - `capture`（無音シャッター・プライバシー LED 不可侵：`on_while_camera_active`＝読取中のみ点灯、
      `led_off_during_review:true`＝解答/閲覧フェーズは消灯）
    - `operations`（3 フェーズの操作↔ジェスチャ対応）
