@@ -2,7 +2,7 @@
 
 ## このリポジトリの目的と要望
 
-Rokid Glasses で紙資料を「文書」として登録し、**目の前の資料を本体 AI が認識**した結果を使って、
+Rokid Glasses で紙資料の各ページを画像としてスキャン・登録し、pHash と認識テキストを使って
 ページ照合・**入試問題の解答**・**資料解説**をグラス上の小さな HUD（最大3行）で返すサーバです。
 模試（学習・練習）利用を主目的とし、以下の要望を満たします：
 
@@ -10,11 +10,11 @@ Rokid Glasses で紙資料を「文書」として登録し、**目の前の資�
   します（視認＝認識＝カメラ ON＝LED 点灯。ハード強制・無効化不可）。そこで**読取フェーズだけ**を
   カメラ ON で最短に済ませ、解答・閲覧フェーズはカメラ OFF（LED 消灯）で行う **3 フェーズフロー**
   （読取 → 一括解答 → 閲覧）を主経路とします。
-- **撮影しない**：紙を写真に撮らない。Rokid Glasses 本体 AI が**視認＝認識**し、その読み取りを
-  **テキスト**（本文＝`ocr_text`／図・画像の読み取り＝`vision_text`）でサーバへ送る。写真ファイル・
-  フラッシュ・シャッター音を出さない（録音も無音）。
-- **図・画像も読む**：図・グラフ・写真がないと解けない問題に対応。本体 AI の図の読み取り
-  （`vision_text`）を本文と併せて解答材料にする。
+- **ページ画像をスキャン**：画像を保存して pHash を計算し、再び目の前に示されたページを
+  画像のハミング距離と OCR 類似度で照合する。画像は `/v1/match` と設問画像解析の中核入力です。
+- **認識テキストで補強**：本文の `ocr_text` と図・グラフの説明 `vision_text` を画像に併記し、
+  問題分割・検索・解答・解説へ使う。テキストのみの登録も互換目的で受け付けますが、pHash がないため
+  画像照合には利用できません。
 - **全ページを記憶してから解く**：全ページを一度だけ登録・記憶し、文書を**問題単位に分割して全問を
   一括で解く**。**問題がページを跨いで続く**場合も文書の全ページを文脈にして正確に解く。
 - **主 AI はグラス搭載 AI（GPT）**：解答の主経路はグラス本体の搭載 AI（公式ネイティブは
@@ -30,8 +30,8 @@ Rokid Glasses で紙資料を「文書」として登録し、**目の前の資�
 ### 特徴
 
 - **既定はオフラインでローカル実行可能**。外部クレデンシャル不要で全機能が動きます。
-- **主経路は搭載 GPT**：グラス本体 AI が読取（`ocr_text`/`vision_text`）も解答も担い、サーバは
-  取り込み・整形・状態管理を行います。**サーバ側実 AI は任意**：analyzer / solver / explainer /
+- **画像スキャン＋搭載 GPT**：グラス/中継がページ画像を送信し、本体 AI が `ocr_text`/
+  `vision_text` と解答を生成します。サーバは画像保存・pHash照合・取り込み・状態管理を行います。**サーバ側実 AI は任意**：analyzer / solver / explainer /
   extractor の各ポートに **OpenAI (GPT) / Gemini / Claude の実アダプタを同梱**。環境変数だけで
   切り替わり、キー未設定時は自動でローカルにフォールバックします（下記「実モデル接続」）。
 - ストレージは **SQLite + ローカルファイルシステム**（Postgres / MinIO 不要）。
@@ -39,7 +39,7 @@ Rokid Glasses で紙資料を「文書」として登録し、**目の前の資�
 - **CXR-L プラグイン（スマホ側）とグラス本体 AI の接続**は
   [`docs/cxr-l-integration.md`](docs/cxr-l-integration.md)、実機差し込み全般は
   [`docs/implementation-notes.md`](docs/implementation-notes.md) を参照。
-- 現在のバージョン: **APP 0.9.0 / API 1.9.0**。
+- 現在のバージョン: **APP 0.10.0 / API 1.10.0**。
 
 ---
 
@@ -47,7 +47,7 @@ Rokid Glasses で紙資料を「文書」として登録し、**目の前の資�
 
 | 区分 | 概要 | 詳細ドキュメント |
 |------|------|------------------|
-| **ユーザーがやること**（人間の物理操作） | SDK 取得・ADB/ケーブル・ペアリング・全ページ視認読取（撮影しない）・読取品質チェック・プライバシー同意・クラウド/ローカル選択・検証実行 | [docs/user-operation-guide.md](docs/user-operation-guide.md) §1 |
+| **ユーザーがやること**（人間の物理操作） | SDK 取得・ADB/ケーブル・ペアリング・全ページ画像スキャン・認識テキスト確認・読取品質チェック・プライバシー同意・クラウド/ローカル選択・検証実行 | [docs/user-operation-guide.md](docs/user-operation-guide.md) §1 |
 | **システムがやること**（実装済み・自動） | 文書作成 / ページ取込 / pHash・OCR-MD5 / finalize / 照合 / HUD 応答 / バージョン付与 / ログ / しきい値フック | [docs/user-operation-guide.md](docs/user-operation-guide.md) §2 |
 | **次に判断すること**（操作後の設計判断） | OCR 配置 / モデルルーティング / ストレージ・プライバシー / HUD 文言 / 信頼度しきい値 / オフライン挙動 / 対象端末(Android/iOS/Rokid/Android XR) | [docs/user-operation-guide.md](docs/user-operation-guide.md) §3 |
 
@@ -179,30 +179,36 @@ curl -s -X POST http://127.0.0.1:8000/v1/documents \
 # {"document_id":1,"title":"設計仕様書 v1","capture_device":"CXR-S","status":"open"}
 ```
 
-### 3. ページを追加（撮影しない：本体 AI の認識テキスト＝本文＋図の読み取り）
+### 3. ページ画像と認識テキストを追加
 
-**撮影しません。画像は不要**です。Rokid 通常利用のように**本体 AI が視認＝認識**した結果を
-テキストで送ります（`image_path=null`・`phash=""`）：
-
-- `ocr_text` … ページの本文（認識テキスト）
-- `vision_text` … **図・グラフ・写真・見た目の読み取り**（画像ではなくテキスト）。図がないと解けない
-  問題のために、本文と併せて解答材料になります。
+主経路では各ページ画像を送信します。サーバは画像を保存し、64bit pHash を生成します。
+`ocr_text` と `vision_text` は画像を補強し、問題分割・解答・解説に使われます。
 
 ```bash
-# 撮影しない：本文＋図の読み取りをテキストで登録
 curl -s -X POST http://127.0.0.1:8000/v1/documents/1/pages \
   -F page_index=0 \
+  -F image=@page0.png \
   -F ocr_text='問1 図の回路の合成抵抗を求めよ' \
   -F vision_text='回路図: R1=2Ω と R2=3Ω が直列'
-# {"page_id":1,...,"phash":"","image_path":null,"has_vision_text":true}
-
-# （任意・後方互換）画像を添付すると pHash も算出され /match に使えます
-curl -s -X POST http://127.0.0.1:8000/v1/documents/1/pages \
-  -F page_index=0 -F image=@page0.png -F ocr_text='1ページ目の本文テキスト'
+# {"page_id":1,...,"phash":"...","image_path":"...","has_vision_text":true}
 ```
 
-> `ocr_text`／`vision_text`／画像のいずれも無い場合は 400。標準フローは撮影せずテキストのみで、
-> 画像は後方互換の任意項目です。
+> テキストのみの登録も補助・互換経路として受け付けますが、`phash=""` となり
+> `/v1/match` の画像照合候補にはなりません。画像だけでは文書試験の問題分割に使う認識テキストが
+> 不足するため、解答・解説用途では `ocr_text`（図がある場合は `vision_text`）も送信します。
+
+### 3.5. スキャン状態を復元
+
+再接続時や `/finalize` 前に、既に保存された画像・pHash・OCR・図読み取り・サマリ状態を確認できます。
+
+```bash
+curl -s 'http://127.0.0.1:8000/v1/documents/1/scan-status?expected_total_pages=3'
+```
+
+`missing_page_indexes` は未登録ページ、`missing_image_page_indexes` は画像不足、
+`missing_recognition_page_indexes` は OCR/図読み取り不足を示します。これにより、保存済みページを
+撮り直さず、不足分だけを再スキャンできます。物理的な総ページ数はサーバから推測できないため、
+`expected_total_pages` 未指定時の完了判定は `null` です。
 
 ### 4. 文書を確定（finalize）
 
@@ -364,15 +370,16 @@ python scripts/eval_exam.py --synthetic 5 --out /tmp/exam_eval.json
 設計は [docs/exam-solver-architecture.md](docs/exam-solver-architecture.md)、
 グラス表示・操作の規約は [docs/glasses-ux-contract.md](docs/glasses-ux-contract.md) を参照。
 
-### 3 フェーズ実践フロー（主経路 / API 1.9.0・LED 点灯最小）
+### 3 フェーズ実践フロー（主経路 / API 1.10.0）
 
-**読取 → 一括解答 → 閲覧** の 3 フェーズが主経路です。カメラ（＝プライバシー LED 点灯）は
-**フェーズ 1 の読取中だけ**。読取完了をグラスのジェスチャで宣言した瞬間からカメラは閉じ、
-解答・閲覧は LED 消灯のまま行えます（用紙も視認も不要）。撮影は一切発生しません。
+**画像スキャン → 一括解答 → 閲覧** の 3 フェーズが主経路です。フェーズ1でページ画像を
+保存して pHash を作り、OCR/図読み取りも登録します。全ページ取得後は新しい撮影を行わず、
+保存済み画像とテキストを使って解答・閲覧します。プライバシーLEDやシャッター音などの物理挙動は
+端末管理であり、このサーバは無効化・非表示を保証しません。
 
 ```
-フェーズ1 読取（カメラON・LED点灯・最短化）
-  2本指タップ（AI起動=視認）×ページ数 → /pages に ocr_text+vision_text を登録（scan_ack で進捗）
+フェーズ1 画像スキャン
+  2本指タップ×ページ数 → /pages に image+ocr_text+vision_text を登録（画像保存・pHash生成）
   ダブルタップ（読取完了宣言）        → POST /finalize-reading（以降カメラOFF＝LED消灯）
 フェーズ2 解答（カメラOFF・自動）
   文書を問題単位に分割（問N/大問 境界・ページ跨ぎ対応・全ページを文脈に）
@@ -385,12 +392,12 @@ python scripts/eval_exam.py --synthetic 5 --out /tmp/exam_eval.json
 ```
 
 ```bash
-# フェーズ1) 撮影せず、本文＋図の読み取りを全ページ登録 → finalize → exam セッション
+# フェーズ1) ページ画像＋本文＋図の読み取りを全ページ登録 → finalize → exam セッション
 curl -s -X POST http://127.0.0.1:8000/v1/documents -d '{"title":"模試"}' -H 'Content-Type: application/json'
 curl -s -X POST http://127.0.0.1:8000/v1/documents/1/pages -F page_index=0 \
-  -F ocr_text='第1問 長文…' -F vision_text='図1: グラフの概形…'
+  -F image=@page0.png -F ocr_text='第1問 長文…' -F vision_text='図1: グラフの概形…'
 curl -s -X POST http://127.0.0.1:8000/v1/documents/1/pages -F page_index=1 \
-  -F ocr_text='問1 前ページの本文を踏まえて答えよ'
+  -F image=@page1.png -F ocr_text='問1 前ページの本文を踏まえて答えよ'
 curl -s -X POST http://127.0.0.1:8000/v1/documents/1/finalize
 curl -s -X POST http://127.0.0.1:8000/v1/exam-sessions -H 'Content-Type: application/json' \
   -d '{"mode":"study","document_id":1,"exam_type":"written","answer_format":"mark"}'
@@ -539,6 +546,8 @@ docker compose up --build
 
 ## 制限事項
 
+- ページ画像の撮影・LED・シャッター音・フラッシュは Rokid 端末とクライアント実装の責務です。
+  本サーバは受信後の画像保存・解析を担当し、物理インジケータや音の無効化を保証しません。
 - **サーバ側 OCR は行いません**（設計上、OCR はグラス本体/端末側が担当し、テキストは
   `ocr_text` として受け取る三層構成）。テキスト照合は完全一致ではなく類似度（`difflib`）で
   段階加点するため、多少の OCR ノイズには強い。要約/解答/解説/抽出は `claude` アダプタで
