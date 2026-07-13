@@ -50,7 +50,15 @@ from .glasses_view import (
 from .hud import build_hud
 from .layout import parse_layout, primary_question, segment_problems
 from .llm import clamp01
-from .matching import Candidate, match, normalize_ocr_text, ocr_md5, phash_hex
+from .matching import (
+    Candidate,
+    normalize_ocr_text,
+    ocr_md5,
+    phash_hex,
+    rank,
+    score_candidate,
+)
+from .matching import verdict as match_verdict
 from .overlay import build_overlay
 from .retrieval import retrieve_context
 from .solvers import Question
@@ -645,21 +653,36 @@ async def match_page(
             detail="match needs ocr_text/vision_text (recognized text) "
             "or a legacy image",
         )
+    query_has_vision = bool(vision_text and vision_text.strip())
     conn = db.connect()
     try:
         _doc_or_404(conn, document_id)
+        raw_q_md5: str | None = None
         if has_image:
             raw = await _read_upload_limited(image)
             img = _load_image(raw)
             q_phash: str | None = phash_hex(img)
-            q_md5 = _fallback_md5(ocr_md5(query_text), raw)
+            # Historical compat rule: body text MD5, falling back to the
+            # image bytes.
+            raw_q_md5 = _fallback_md5(ocr_md5(query_text), raw)
         else:
-            # 撮影しない: no image, no pHash. Mirror add_page's rule (MD5 of
-            # the full recognition) so the exact shortcut fires against
-            # stored text pages — and only when the figures also agree.
             q_phash = None
-            dedupe_src = _match_text(query_text, vision_text)
-            q_md5 = ocr_md5(dedupe_src) or hashlib.md5(dedupe_src.encode()).hexdigest()
+
+        # 撮影しない text comparison. The shape is aligned PER CANDIDATE so
+        # neither side is penalized for information the other lacks:
+        #   - both sides carry a figure reading -> compare the combined
+        #     body+figure recognition (pages identical in print but different
+        #     in figures stay distinguishable),
+        #   - otherwise -> body-first comparison (vision_text only as the
+        #     fallback for figure-only input), so a body-only query still
+        #     exactly matches a page registered with body + figures.
+        q_body = normalize_ocr_text(query_text) or normalize_ocr_text(vision_text)
+        q_combined = _match_text(query_text, vision_text)
+
+        def _q_md5_for(src: str) -> str | None:
+            if raw_q_md5 is not None:
+                return raw_q_md5
+            return ocr_md5(src) or hashlib.md5(src.encode()).hexdigest()
 
         rows = conn.execute(
             "SELECT id, page_index, phash, ocr_md5, ocr_text, vision_text, "
@@ -667,25 +690,44 @@ async def match_page(
             "WHERE document_id = ? ORDER BY page_index",
             (document_id,),
         ).fetchall()
-        candidates = [
-            Candidate(
-                page_id=r["id"],
-                page_index=r["page_index"],
-                phash=r["phash"],
-                ocr_md5=r["ocr_md5"],
-                # Similarity compares the WHOLE recognition (body + figure
-                # reading): two pages with identical printed text but
-                # different diagrams must stay distinguishable.
-                ocr_text=_match_text(r["ocr_text"], r["vision_text"]),
+        scored = []
+        for r in rows:
+            cand_has_vision = bool(
+                r["vision_text"] and str(r["vision_text"]).strip()
             )
-            for r in rows
-        ]
+            if query_has_vision and cand_has_vision:
+                cand_text = _match_text(r["ocr_text"], r["vision_text"])
+                q_text_cmp: str | None = q_combined or None
+            else:
+                cand_text = (
+                    normalize_ocr_text(r["ocr_text"])
+                    or normalize_ocr_text(r["vision_text"])
+                )
+                q_text_cmp = q_body or None
+            scored.append(
+                score_candidate(
+                    q_phash,
+                    _q_md5_for(q_text_cmp or ""),
+                    Candidate(
+                        page_id=r["id"],
+                        page_index=r["page_index"],
+                        phash=r["phash"],
+                        # Image pages keep their stored MD5 (raw-bytes compat
+                        # fallback); text pages hash the material actually
+                        # being compared.
+                        ocr_md5=(
+                            r["ocr_md5"] if r["phash"] else ocr_md5(cand_text)
+                        ),
+                        ocr_text=cand_text,
+                    ),
+                    query_ocr_text=q_text_cmp,
+                )
+            )
         summaries = {r["id"]: r["summary"] for r in rows}
 
-        best, verdict, scored = match(
-            q_phash, q_md5, candidates,
-            query_ocr_text=_match_text(query_text, vision_text) or None,
-        )
+        scored = rank(scored)
+        best = scored[0] if scored else None
+        verdict = match_verdict(best.confidence if best else 0.0, bool(scored))
         hud = build_hud(
             verdict,
             best,

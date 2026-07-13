@@ -282,6 +282,15 @@ def test_both_phash_scoring_unchanged():
     assert sc.confidence == round(expected, 4)
 
 
+def test_zero_valued_phash_still_compares_visually():
+    # A dark/blank page can hash to 0 — presence checks must be explicit,
+    # not truthiness, or the visual comparison silently degrades to text.
+    zero_hex = "0" * (matching.HASH_BIT_LEN // 4)
+    sc = score_candidate(0, None, _cand(0, zero_hex))
+    assert sc.hamming == 0
+    assert sc.confidence == 1.0
+
+
 def test_visual_match_outranks_equal_text_match():
     # Same confidence -> the candidate with a real hamming sorts first.
     ph = phash_hex(make_image(seed=15))

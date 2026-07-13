@@ -274,6 +274,53 @@ def test_match_vision_text_distinguishes_same_body_pages(client):
     assert body_json["best_page"]["page_index"] == 1
 
 
+def test_match_body_only_query_matches_page_with_vision_text(client):
+    # A page registered with body + a long figure reading must still be an
+    # exact match for a query that supplies only the body text — the figure
+    # reading must not dilute the comparison when the query has none.
+    doc_id = _create_doc(client)
+    body = "問5 表の値を用いて平均を求めよ"
+    _add_text_only_page(
+        client, doc_id, 0, ocr_text=body,
+        vision_text=(
+            "表: 1月 12.3 / 2月 14.1 / 3月 15.8 / 4月 18.2 / 5月 21.0 / "
+            "6月 24.5 / 7月 28.1 / 8月 29.3 / 9月 26.0 / 10月 20.4"
+        ),
+    )
+    client.post(f"/v1/documents/{doc_id}/finalize")
+
+    body_json = client.post(
+        "/v1/match", data={"document_id": str(doc_id), "ocr_text": body}
+    ).json()
+    assert body_json["verdict"] == "HIT"
+    assert body_json["best_page"]["page_index"] == 0
+    assert body_json["best_page"]["ocr_match"] is True
+
+
+def test_match_vision_rich_query_matches_body_only_page(client):
+    # Reverse shape: the registration missed the figure but the live query
+    # includes a long figure reading — the body must still match exactly.
+    doc_id = _create_doc(client)
+    body = "問6 グラフの傾きを求めよ"
+    _add_text_only_page(client, doc_id, 0, ocr_text=body)
+    client.post(f"/v1/documents/{doc_id}/finalize")
+
+    body_json = client.post(
+        "/v1/match",
+        data={
+            "document_id": str(doc_id),
+            "ocr_text": body,
+            "vision_text": (
+                "散布図: x軸は時間 y軸は距離 原点から右上へ直線的に増加 "
+                "近似直線は(0,0)と(10,50)を通る"
+            ),
+        },
+    ).json()
+    assert body_json["verdict"] == "HIT"
+    assert body_json["best_page"]["page_index"] == 0
+    assert body_json["best_page"]["ocr_match"] is True
+
+
 def test_match_vision_text_fallback_matches_figure_only_page(client):
     # A page whose recognition is only the figure reading (vision_text) must
     # be matchable by the same figure reading.

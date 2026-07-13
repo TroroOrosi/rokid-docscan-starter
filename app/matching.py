@@ -225,6 +225,11 @@ def _text_only_confidence(exact: bool, similarity: float) -> float:
     return CONF_OK + (similarity - OCR_MATCH_RATIO) / span * (TEXT_EXACT_CONF - CONF_OK)
 
 
+def _has_hash(h: int | str | None) -> bool:
+    """Explicit presence check: a valid all-zero hash (int 0) is present."""
+    return h is not None and h != ""
+
+
 def score_candidate(
     query_phash: int | str | None,
     query_ocr_md5: str | None,
@@ -234,7 +239,7 @@ def score_candidate(
     bonus, ocr_match, similarity = _ocr_signal(
         query_ocr_md5, query_ocr_text, candidate
     )
-    if query_phash and candidate.phash:
+    if _has_hash(query_phash) and _has_hash(candidate.phash):
         # Visual comparison (both sides carry a pHash): unchanged formula.
         distance: int | None = hamming(query_phash, candidate.phash)
         visual = _phash_confidence(distance)
@@ -270,6 +275,25 @@ def verdict(confidence: float, has_candidates: bool) -> str:
     return "NO_PAGE"
 
 
+def rank(scored: list[ScoredCandidate]) -> list[ScoredCandidate]:
+    """Sort candidates by the canonical /match ordering.
+
+    On equal confidence a visual match outranks a text-only one (hamming
+    None sorts behind every real distance); equal text-only scores (e.g.
+    two exact body-MD5 hits) are broken by the text similarity so a matching
+    figure reading picks the right page; stable sort keeps page order after
+    that.
+    """
+    return sorted(
+        scored,
+        key=lambda s: (
+            -s.confidence,
+            s.hamming if s.hamming is not None else HASH_BIT_LEN + 1,
+            -s.ocr_similarity,
+        ),
+    )
+
+
 def match(
     query_phash: int | str | None,
     query_ocr_md5: str | None,
@@ -277,22 +301,10 @@ def match(
     query_ocr_text: str | None = None,
 ) -> tuple[ScoredCandidate | None, str, list[ScoredCandidate]]:
     """Score all candidates and return (best, verdict, sorted_candidates)."""
-    scored = [
+    scored = rank([
         score_candidate(query_phash, query_ocr_md5, c, query_ocr_text)
         for c in candidates
-    ]
-    # On equal confidence a visual match outranks a text-only one (hamming
-    # None sorts behind every real distance); equal text-only scores (e.g.
-    # two exact body-MD5 hits) are broken by the combined-text similarity so
-    # a matching figure reading picks the right page; stable sort keeps page
-    # order after that.
-    scored.sort(
-        key=lambda s: (
-            -s.confidence,
-            s.hamming if s.hamming is not None else HASH_BIT_LEN + 1,
-            -s.ocr_similarity,
-        )
-    )
+    ])
     best = scored[0] if scored else None
     v = verdict(best.confidence if best else 0.0, bool(scored))
     return best, v, scored
