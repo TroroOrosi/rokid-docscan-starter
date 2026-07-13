@@ -22,7 +22,7 @@
 - **overlay**: `tracking:"2d_image_anchor"`・`fixed_ar:false`・`anchor_hint{page_number,box}` を機械可読化（6DoF 固定 AR は未対応＝ハード待ち）。
 - **reasoning**: `GET …/questions/{qid}/reasoning` で `raw_reasoning`＋`evidence`＋`served_by` を返す（HUD は短縮版のまま、`real` ロック準拠）。
 
-## 3 フェーズフロー（読取→一括解答→閲覧 / API 1.9.0・主経路）
+## 3 フェーズフロー（読取→一括解答→閲覧 / API 1.10.0・主経路）
 
 **主経路**。カメラ（＝プライバシー LED 点灯）は読取フェーズのみで、`finalize-reading` 以降は
 カメラを閉じる（LED 消灯）。解答の主体は**グラス搭載 AI（GPT）**で、サーバは分割・取り込み・
@@ -84,8 +84,10 @@ exam-session(document_id, exam_type, answer_format)
 
 - **撮影しない取り込み**：`POST /v1/documents/{id}/pages` は本体 AI の認識結果を**テキスト**で受ける：
   `ocr_text`（本文）＋`vision_text`（**図・グラフ・写真・見た目の読み取り**）。画像は送らない（`image_path=NULL`・
-  `phash=""`・`ocr_md5` はテキストから算出）。`image` は後方互換の任意項目で、添付時のみ pHash も算出し
-  `/v1/match` に使える。`ocr_text`／`vision_text`／画像のいずれも無ければ 400。
+  `phash=""`・`ocr_md5` はテキストから算出）。照合（`/v1/match`）も**テキスト照合が主**で、
+  テキストのみページはテキスト類似度でスコアされる（`hamming` は null）。`image` は後方互換の
+  任意項目で、添付時のみ pHash も算出し画像同士の照合に使える（非推奨）。
+  `ocr_text`／`vision_text`／画像のいずれも無ければ 400。
 - **solve-current（全ページ記憶で解く・ページ跨ぎ対応）**：現在ページ（`current_page_index`）を**設問**、
   **文書の全ページ**を**文脈**にして解く。`Question.body_text` ＝ 現在ページの材料
   `_page_material(ocr_text, vision_text)`（本文＋「【図・画像の読み取り】…」）、`Question.context` ＝
@@ -146,7 +148,7 @@ exam-session(document_id, exam_type, answer_format)
 | POST | `/v1/exam-sessions/{id}/next-page` / `prev-page` | 文書ページ移動（二次経路。現在ページ ±1・クランプ・撮影なし） |
 | GET | `/v1/exam-sessions/{id}/current` | 現在ページ把握（二次経路。科目・プレビュー・画像有無） |
 | POST | `/v1/exam-sessions/{id}/solve-current` | 現在ページを解く（二次経路。listening 時は書き起こしを統合）→ `glasses_view` |
-| POST | `/v1/exam-sessions/{id}/questions` | 問題画像＋任意OCR/bbox → 構造化・科目推定・`media`抽出（互換） |
+| POST | `/v1/exam-sessions/{id}/questions` | 認識テキスト（`ocr_text`）＋任意bbox → 構造化・科目推定・`media`抽出（互換。画像は互換の任意入力・非推奨） |
 | POST | `/v1/exam-sessions/{id}/questions/{qid}/solve` | 解答（real は既定ロック）→ `glasses_view`＋`overlay`＋`served_by`＋`evidence`（互換） |
 | GET | `/v1/exam-sessions/{id}/questions/{qid}/view?stage=&page=` | 段階×ページ送り取得（互換） |
 | GET | `/v1/exam-sessions/{id}/questions/{qid}/reasoning` | フル推論ログ（案9、HUD非表示・real ロック準拠） |
@@ -163,8 +165,9 @@ exam-session(document_id, exam_type, answer_format)
 ## バージョン契約（`app/version.py`）
 
 `SOLVER_API_VERSION` / `EXTRACTOR_API_VERSION` / `GLASSES_VIEW_CONTRACT_VERSION` /
-`OVERLAY_CONTRACT_VERSION` を契約ごとに管理。`API_VERSION` は現在 `1.9.0`
-（再読取＝ページ置換・0問題時の読取フェーズ復帰・セッション GET のロック整合を追加）、`APP_VERSION` は `0.9.0`。
+`OVERLAY_CONTRACT_VERSION` を契約ごとに管理。`API_VERSION` は現在 `1.10.0`
+（テキスト主の /match・/questions、GET /scan-status を追加。1.9.0 は再読取＝ページ置換・
+0問題時の読取フェーズ復帰・セッション GET のロック整合）、`APP_VERSION` は `0.10.0`。
 `GLASSES_VIEW_CONTRACT_VERSION` は `1.4.0`（`kind:"review"` の一括ストリーム view・reading_ack・
 公式ジェスチャ語彙）。クライアントは `GET /v1/version` でネゴシエート
 （`solvers`/`extractors` 等に `openai`/`gemini`/`claude` が並ぶ）。

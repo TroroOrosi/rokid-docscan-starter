@@ -142,7 +142,8 @@
   finalize-reading → solutions（搭載 GPT の解答 ingest）→ review を一巡。
 - **期待結果**: 各ステップの HUD ack（scan_ack / reading_ack / ingest_ack）が実機 HUD に出る。
 - **反映**: つまずいた箇所を issue 化。読取ミスがあれば**同じ page_index に再送＝置換**
-  （API 1.9.0 の再読取）で復旧できることも確認。
+  （API 1.9.0 で追加された再読取）で復旧できることも確認。復旧前の欠番確認は
+  `GET /v1/documents/{id}/scan-status?expected_total_pages=N`（API 1.10.0）を使う。
 
 ### D-2. 搭載 AI の読取品質（U5 チェックリスト）
 
@@ -157,7 +158,7 @@
 - **反映**: 読取が弱いパターン（手書き・小さい図版など）を user-operation-guide.md の
   U5 に追記。境界検出漏れが系統的なら `app/layout.py` の境界パターンを改善。
 
-### D-3. マッチング閾値チューニング（任意の画像 `/match` 経路のみ）
+### D-3. マッチング閾値チューニング（互換の画像照合経路のみ。主経路のテキスト照合は対象外）
 
 - **現状の前提**: `HAMMING_STRONG/WEAK`・`CONF_OK/LOW`・`OCR_MD5_BONUS` は合成画像で調整した
   既定値（implementation-notes.md §7）。

@@ -39,7 +39,7 @@ Rokid Glasses で紙資料を「文書」として登録し、**目の前の資�
 - **CXR-L プラグイン（スマホ側）とグラス本体 AI の接続**は
   [`docs/cxr-l-integration.md`](docs/cxr-l-integration.md)、実機差し込み全般は
   [`docs/implementation-notes.md`](docs/implementation-notes.md) を参照。
-- 現在のバージョン: **APP 0.9.0 / API 1.9.0**。
+- 現在のバージョン: **APP 0.10.0 / API 1.10.0**。
 
 ---
 
@@ -72,7 +72,7 @@ rokid-docscan-starter/
 │   ├── summarize.py   # 要約シム（analyzer に委譲）
 │   ├── explainer.py   # Explainer ポート（ExplainRequest / ExplainResult / ABC）
 │   ├── llm.py         # ★実 AI ブリッジ（openai/gemini/claude、遅延import・注入可）
-│   ├── version.py     # 各契約バージョン（app 0.9.0 / api 1.9.0 ほか）
+│   ├── version.py     # 各契約バージョン（app 0.10.0 / api 1.10.0 ほか）
 │   ├── config.py      # 保存先・フィーチャーフラグ（ROKID_* / ANTHROPIC_API_KEY / ROKID_TRANSCRIBER）
 │   ├── transcribe.py  # ★リスニング録音の書き起こし（openai/gemini・未設定時は与値）
 │   ├── db.py          # sqlite3（documents/pages/exam/explain テーブル）
@@ -204,6 +204,15 @@ curl -s -X POST http://127.0.0.1:8000/v1/documents/1/pages \
 > `ocr_text`／`vision_text`／画像のいずれも無い場合は 400。標準フローは撮影せずテキストのみで、
 > 画像は後方互換の任意項目です。
 
+読取が中断したら **`GET /scan-status`** で欠番を確認し、欠番だけ再読取します（読み取り専用・
+撮影は発生しません）:
+
+```bash
+curl -s 'http://127.0.0.1:8000/v1/documents/1/scan-status?expected_total_pages=4'
+# {"page_indexes":[0,2],"missing_page_indexes":[1,3],
+#  "recommended_action":"reread_missing_pages","reread_allowed":true,...}
+```
+
 ### 4. 文書を確定（finalize）
 
 ```bash
@@ -216,25 +225,36 @@ curl -s -X POST http://127.0.0.1:8000/v1/documents/1/finalize
 
 ### 5. 目の前の紙を照合（match）
 
+**撮影しません**。視認中ページの認識テキスト（その場認識）で照合します:
+
 ```bash
 curl -s -X POST http://127.0.0.1:8000/v1/match \
   -F document_id=1 \
-  -F image=@query.png \
-  -F fast_ocr_text='1ページ目の本文テキスト'
+  -F ocr_text='1ページ目の本文テキスト'
+
+# （任意・後方互換／非推奨）画像を添付すると画像登録ページとは pHash で照合されます
+curl -s -X POST http://127.0.0.1:8000/v1/match \
+  -F document_id=1 -F image=@query.png -F fast_ocr_text='1ページ目の本文テキスト'
 ```
+
+> 同一テキストのページが複数ある場合は判別できず、若い `page_index` が選ばれます。
+> テキスト照合の `hamming` は `null` になります（`query_signals` で経路を確認可能）。
 
 レスポンス例（HIT）:
 
 ```json
 {
   "document_id": 1,
+  "query_signals": {"phash": false, "text": true},
   "verdict": "HIT",
-  "best_page": {"page_id":1,"page_index":0,"hamming":0,"ocr_match":true,"ocr_similarity":1.0,"confidence":1.0},
-  "confidence": 1.0,
-  "hud": {"verdict":"HIT","confidence":1.0,"lines":["PAGE 1/2","1ページ目の本文テキスト","conf 1.00  hd 0"]},
+  "best_page": {"page_id":1,"page_index":0,"hamming":null,"ocr_match":true,"ocr_similarity":1.0,"confidence":0.95},
+  "confidence": 0.95,
+  "hud": {"verdict":"HIT","confidence":0.95,"lines":["PAGE 1/2","1ページ目の本文テキスト","conf 0.95  txt 1.00"]},
   "candidates": [ {"page_index":0,...}, {"page_index":1,...} ]
 }
 ```
+
+（画像同士の照合では `hamming` に整数距離が入り、HUD 3行目は `conf 1.00  hd 0` の形になります）
 
 `verdict` は以下の3値:
 
@@ -364,7 +384,7 @@ python scripts/eval_exam.py --synthetic 5 --out /tmp/exam_eval.json
 設計は [docs/exam-solver-architecture.md](docs/exam-solver-architecture.md)、
 グラス表示・操作の規約は [docs/glasses-ux-contract.md](docs/glasses-ux-contract.md) を参照。
 
-### 3 フェーズ実践フロー（主経路 / API 1.9.0・LED 点灯最小）
+### 3 フェーズ実践フロー（主経路 / API 1.10.0・LED 点灯最小）
 
 **読取 → 一括解答 → 閲覧** の 3 フェーズが主経路です。カメラ（＝プライバシー LED 点灯）は
 **フェーズ 1 の読取中だけ**。読取完了をグラスのジェスチャで宣言した瞬間からカメラは閉じ、

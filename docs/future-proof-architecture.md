@@ -120,7 +120,7 @@ object DeviceRegistry {                // 端末を差し替える点
 ```
 
 新端末（例: Android XR）対応＝ `GlassesBackend` を1つ実装して `register` する
-だけ。上位の「capture → 端末OCR → POST /v1/match → showHud(hud.lines)」は不変。
+だけ。上位の「視認＝その場認識 → POST /v1/match（テキスト） → showHud(hud.lines)」は不変。
 
 ---
 

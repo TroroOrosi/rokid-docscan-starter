@@ -69,7 +69,15 @@ from __future__ import annotations
 #        (key-only setup works for all providers), the multi-provider adapters
 #        moved to app/*/llm_adapter.py (claude.py stays as an import shim),
 #        and the four registries share one ProviderRegistry. API -> 1.9.0.
-APP_VERSION = "0.9.0"
+# 0.10.0: text-first consistency — カメラに映った資料は撮影せずその場で認識
+#        (視認=認識) が全経路で成立。/v1/match と /questions は認識テキストを
+#        主入力とし、image は互換の任意入力（非推奨）へ降格。照合は pHash の
+#        無い側があればテキスト専用モードでスコア（MATCHER -> 1.2.0）。新設
+#        GET /v1/documents/{id}/scan-status が読取状態と欠番を報告し中断復帰を
+#        支援（画像/pHash 語彙なし）。復旧文言は 再撮影→再読取、取り込み ack は
+#        保存済み→読取済み（payload 形状不変のため GLASSES_VIEW は 1.4.0 の
+#        まま）。API -> 1.10.0.
+APP_VERSION = "0.10.0"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.
@@ -98,12 +106,24 @@ APP_VERSION = "0.9.0"
 #        gains `locked` and masks solved fields when locked; ingest returns
 #        400 for ambiguous problem_no and maps single-item payloads onto a
 #        single-problem deck. Path shapes unchanged — no envelope change.
-API_VERSION = "1.9.0"
+# 1.10.0: text-first /match and /questions (additive): image became optional
+#        on both; /match gained ocr_text/vision_text form fields
+#        (fast_ocr_text stays as the legacy alias) and its responses gained
+#        query_signals while query_phash/hamming may now be null for
+#        text-only comparisons; neither text nor image -> 400. New additive
+#        endpoint GET /v1/documents/{id}/scan-status (読取状態の確認・復旧).
+#        Path shapes unchanged — no envelope change.
+API_VERSION = "1.10.0"
 
 # Matching algorithm identity. Bump when thresholds or hashing change so a
 # re-index/eval is triggered. Mirrors thresholds in app/matching.py.
 # 1.1.0: OCR signal is now graded text similarity, not exact MD5 only.
-MATCHER_VERSION = "1.1.0"
+# 1.2.0: text-only scoring mode when the query and/or candidate has no pHash
+#        (撮影しない pages are first-class candidates): exact normalized-text
+#        MD5 -> TEXT_EXACT_CONF (0.95), graded similarity mapped onto the
+#        OCR_SIM_FLOOR/OCR_MATCH_RATIO anchors; ScoredCandidate.hamming is
+#        None for text-only comparisons. Image-vs-image scoring unchanged.
+MATCHER_VERSION = "1.2.0"
 
 # HUD payload shape: {verdict, confidence, lines:[3]}.
 HUD_CONTRACT_VERSION = "1.0.0"
