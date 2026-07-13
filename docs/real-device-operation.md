@@ -142,8 +142,8 @@ POST /v1/explain-sessions {document_id}     → session_id (status=ready)
 ### 4-D. 3 フェーズ実践フロー（主経路 / 筆記・リスニング両対応・LED 点灯最小）
 **読取（カメラON・LED点灯・最短化）→ 一括解答（カメラOFF）→ 閲覧（カメラOFF・LED消灯）**。
 撮影は一切発生しない（写真/フラッシュ/シャッターなし・録音も無音）。**操作はグラス単独で完結**
-（スマホは中継のみ・画面不要。文書作成・finalize・セッション作成のようにジェスチャ未割当の
-HTTP は、読取開始/読取完了宣言に連動して**中継アプリが自動発行**する——
+（スマホは中継のみ・画面不要。文書作成・読取状態確認・finalize・セッション作成のように
+ジェスチャ未割当の HTTP は、読取開始/読取完了宣言に連動して**中継アプリが自動発行**する——
 [cxr-l-integration.md](cxr-l-integration.md) §5）。
 
 ```
@@ -152,13 +152,14 @@ POST /v1/documents {title: ...}（読取開始＝初回2本指タップで中継
   同じタップの認識は page_index=0 として続けて POST /pages——1ページ目を落とさない）
 2本指タップ(two_finger_tap=AI起動・視認) ×全ページ
   → 本体AIの認識を POST .../pages (ocr_text[, vision_text])（scan_ack で進捗表示）
-ダブルタップ(double_tap=読取完了宣言) → **即カメラを閉じる＝LED消灯** → 中継の自動チェーン:
-  POST /v1/documents/{document_id}/finalize
-  → POST /v1/exam-sessions {mode:"study", document_id, ...}（応答の session_id を取得）
-  → POST /v1/exam-sessions/{session_id}/finalize-reading
-  → 問題分割・デッキ作成・reading_ack「読取完了/N問を検出/カメラOFF 解答へ」
-  （チェーンはカメラOFF後に実行——non-local ROKID_SOLVER の一括解答が長引いても LED は
-   点かない。応答の camera.privacy_led=="off" を確認）
+ダブルタップ(double_tap=読取完了宣言) → **即カメラを閉じる＝LED消灯** → 中継が:
+  GET /v1/documents/{document_id}/reading-status?expected_total_pages=N
+  → 欠番あり: HUD で不足ページを示し、選択されたページだけカメラを再開して再読取
+  → 欠番なし: POST /v1/documents/{document_id}/finalize
+    → POST /v1/exam-sessions {mode:"study", document_id, ...}（応答の session_id を取得）
+    → POST /v1/exam-sessions/{session_id}/finalize-reading
+    → 問題分割・デッキ作成・reading_ack「読取完了/N問を検出/カメラOFF 解答へ」
+  （状態確認と後段チェーンはカメラOFF——non-local ROKID_SOLVER の解答中も LED は点かない）
 
 # フェーズ2 解答（カメラOFF）
 主経路: 搭載 GPT が全問を解く → POST .../solutions（問題別解答の配列を ingest）
