@@ -1,7 +1,7 @@
 # CLAUDE.md — 本リポジトリの前提条件（変更時は必ず維持すること）
 
-非公開リポジトリ。Rokid Glasses で視認した問題用紙を全ページ記憶し、解答・解説を
-両眼 3 行 HUD に出す**サーバ側**実証実装（FastAPI + SQLite、Python のみ。グラス本体
+非公開リポジトリ。Rokid Glasses で問題用紙をページ画像としてスキャン・保存し、pHashで照合、
+認識テキストを使って解答・解説を両眼 3 行 HUD に出す**サーバ側**実証実装（FastAPI + SQLite、Python のみ。グラス本体
 アプリ CXR-L/Kotlin は対象外）。以下は依頼の前提条件であり、設計・実装・ドキュメントの
 すべてがこれに従う。
 
@@ -16,21 +16,24 @@
   は**より高性能なモデルが必要な場合の任意経路**。既定は `local`（オフライン・鍵不要）で、
   鍵/SDK 欠落時は必ずローカルへフォールバック（500 にしない）。例示は GPT（openai）を第一に。
 
-## 撮影しない・LED（設計原則）
+## 画像スキャン・端末インジケータ（設計原則）
 
-- **撮影しない**: 写真ファイル・フラッシュ・シャッター音を一切発生させない。本体 AI の
-  認識テキスト（本文=`ocr_text`＋図の読み取り=`vision_text`）のみ受ける。録音も無音。
-- **プライバシー LED はカメラ稼働中は必ず点灯**（視認＝認識＝カメラ ON＝LED 点灯。
-  ハード強制・改変不可 `tamper:forbidden`。カメラ OFF の視認は存在しない）。
-- **設計原則: LED 点灯時間の最小化**。読取フェーズのみカメラ ON とし、`finalize-reading`
-  以降（解答・閲覧）はカメラを閉じる＝LED 消灯（`led_off_during_review:true`）。
-  LED の無効化・迂回は実装しない（`scripts/rokid_led.py` は独立診断ツールで契約不変）。
+- **ページ画像が主入力**: `POST /v1/documents/{id}/pages` へ画像を送り、保存・pHash生成・
+  `/v1/match` の照合に使う。`ocr_text` と `vision_text` は問題分割・検索・解答・解説を
+  補強する。テキストのみは補助・互換経路で、pHash照合には使えない。
+- **設問画像も中核**: `POST /v1/exam-sessions/{id}/questions` は画像必須で、構造解析・
+  メディア抽出・2D画像アンカー表示へ使う。
+- **端末挙動を偽らない**: LED・シャッター音・フラッシュ/トーチは端末/クライアント管理であり、
+  サーバは無効化や消音を保証しない。`GET /v1/settings.capture` は希望設定と保証可否を分離する。
+- 全ページ取得後の解答・閲覧では新しい撮影を必要としない。保存済み画像とテキストを使う。
+  LED の無効化・迂回は実装しない（`scripts/rokid_led.py` は独立診断ツール）。
 
 ## 3 フェーズフロー（主経路）
 
-1. **読取**（カメラ ON・最短化）: `POST /v1/documents` → 2本指タップ（AI 起動=視認）×全ページ
-   → `POST /pages`（scan_ack）→ `/finalize` → exam セッション作成（`document_id` 必須）→
-   **ダブルタップ=読取完了宣言** → `POST /finalize-reading`（問題分割・デッキ作成・
+1. **画像スキャン**: `POST /v1/documents` → 2本指タップ×全ページ →
+   `POST /pages`（`image`＋`ocr_text`＋必要に応じ `vision_text`、画像保存・pHash生成）→
+   `GET /scan-status` で欠番/画像/OCR状態を確認 → `/finalize` → exam セッション作成
+   （`document_id` 必須）→ **ダブルタップ=読取完了宣言** → `POST /finalize-reading`（問題分割・デッキ作成・
    status open/reading→reviewing・冪等・カメラ OFF）。
 2. **解答**（カメラ OFF）: 文書を問題単位に分割（`segment_problems`: 問N/大問 境界・
    ページ跨ぎマージ・境界なしは全体 1 問題＝安定 id **「全体」** を合成）。主経路=搭載 GPT の
@@ -49,7 +52,7 @@
 - ジェスチャ未割当の必須 HTTP（`POST /v1/documents`・`/finalize`・exam セッション作成）は
   **中継アプリの自動チェーン責務**（読取開始=初回2本指タップ、読取完了宣言=ダブルタップに連動。
   cxr-l-integration.md §5）。人間の入力はジェスチャのみ——この責務まで含めて上の主張が成立する。
-- **CXR-L はスマホ側プラグイン SDK**（Hi Rokid アプリ経由・グラスとは Bluetooth/Caps wire。
+- 画像撮影・送信と物理的な音/LED制御は CXR-L クライアント側の責務。**CXR-L はスマホ側プラグイン SDK**（Hi Rokid アプリ経由・グラスとは Bluetooth/Caps wire。
   実機実績: CxrGlobal/claude-mobile-hud）。スマホ経由は必須で、HUD は CUSTOMVIEW
   （`customViewUpdate`）にテキスト・リレーする。「グラス単体 Wi-Fi 直結」構成は未確認と扱う。
 - 現行公式ジェスチャ: 2本指タップ=AI 起動 / 1本指タップ=クリック / ダブルタップ=終了
