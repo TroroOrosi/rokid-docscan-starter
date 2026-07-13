@@ -103,8 +103,8 @@ def test_match_no_page(client):
 
 def test_match_hud_counts_text_only_pages_in_mixed_document(client):
     doc_id = _create_doc(client)
-    # Page 0 follows the primary no-photography path and is not a /match
-    # candidate. Page 1 keeps the optional compatibility image.
+    # Page 0 is the text-only compatibility path and is not a /match
+    # candidate. Page 1 follows the primary image+pHash path.
     assert client.post(
         f"/v1/documents/{doc_id}/pages",
         data={"page_index": 0, "ocr_text": "text-only page"},
