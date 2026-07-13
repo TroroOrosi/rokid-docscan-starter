@@ -1,6 +1,6 @@
 """Migrations on an existing (legacy) database.
 
-Covers the upgrade path Codex flagged: a DB created by the pre-撮影しない schema
+Covers migration from the older image-required schema to limited text-only compatibility
 had `pages.image_path TEXT NOT NULL` and no `vision_text`. After init_db the
 table must accept text-only pages (image_path=NULL) and have vision_text.
 """
@@ -64,7 +64,7 @@ def test_legacy_pages_image_path_becomes_nullable(tmp_path, monkeypatch):
     # legacy row preserved
     row = conn.execute("SELECT image_path, ocr_text FROM pages WHERE id=1").fetchone()
     assert row["image_path"] == "old.png" and row["ocr_text"] == "legacy page"
-    # a text-only (撮影しない) page can now be inserted with image_path=NULL
+    # a compatibility text-only page can be inserted with image_path=NULL
     conn.execute(
         "INSERT INTO pages (document_id, page_index, image_path, phash, ocr_text, vision_text)"
         " VALUES (1, 1, NULL, '', 'text page', '図の読み取り')"
