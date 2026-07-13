@@ -1,7 +1,7 @@
-"""Tests for the camera-free document page-move型 exam (v0.7 / api 1.7.0).
+"""Tests for the document page-move型 exam and text-only compatibility input.
 
 Covers:
-  * camera-free page ingestion (POST /pages with ocr_text and NO image),
+  * text-only compatibility ingestion (POST /pages with ocr_text and no pHash),
   * document-bound exam session (create with document_id/exam_type/answer_format),
   * page navigation (next-page/prev-page/current, clamped),
   * solve-current (solves the current page's material; persists question+solution
@@ -37,7 +37,7 @@ def client(tmp_path, monkeypatch):
     return TestClient(main.app)
 
 
-# --- camera-free page ingestion ---------------------------------------------
+# --- text-only compatibility ingestion --------------------------------------
 
 def _new_doc(client, title="模試"):
     r = client.post("/v1/documents", json={"title": title})
@@ -46,7 +46,7 @@ def _new_doc(client, title="模試"):
 
 
 def _add_text_page(client, doc_id, page_index, ocr_text):
-    """Camera-free page: no image, only ocr_text."""
+    """Compatibility page: no image/pHash, only ocr_text."""
     return client.post(
         f"/v1/documents/{doc_id}/pages",
         data={"page_index": page_index, "ocr_text": ocr_text},
@@ -197,7 +197,7 @@ def test_current_reports_subject_and_preview(client):
     body = client.get(f"/v1/exam-sessions/{sid}/current").json()
     assert body["current_page_index"] == 1
     assert body["subject"]
-    assert body["has_image"] is False  # camera-free page
+    assert body["has_image"] is False  # text-only compatibility page
     assert "光合成" in body["preview"]
 
 
