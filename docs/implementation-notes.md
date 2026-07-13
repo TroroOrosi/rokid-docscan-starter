@@ -26,7 +26,7 @@ explainer / extractor）には**実モデルアダプタ（`openai` / `gemini` /
 
 | 抽象点（サーバ内） | 既定（オフライン） | 実機/実 AI での差し込み先 |
 |------------------|------------------------|---------------------|
-| 認識テキスト入力 | `/pages` の `ocr_text`/`vision_text`（画像は互換用） | 本体 AI の認識結果（Hi Rokid＋CXR-L プラグイン経由・撮影しない） |
+| ページ読取入力 | `/pages` の `image`（主）＋`ocr_text`/`vision_text`（補助） | CXR-L の撮影画像＋本体 AI の認識結果（Hi Rokid 経由） |
 | 端末 OCR | `ocr_text` / `fast_ocr_text` フォーム値 | 本体 AI（Hi Rokid: `com.rokid.sprite(.global).aiapp`）/ Android ML Kit / iOS Vision |
 | HUD 出力 | `app/hud.py`・`app/glasses_view.py` の3行ペイロード | CXR-L CUSTOMVIEW（`customViewUpdate` でテキスト・リレー） |
 | 接続管理 | なし（HTTP のみ） | **スマホ中継必須**: Hi Rokid＋CXR-L プラグイン（グラス単体 Wi-Fi 直結は未確認）、または CXR-M コンパニオン経由 |
@@ -66,8 +66,9 @@ CXR（Connected XR）SDK スイートは役割別に分かれている（末尾�
 - **差し込み手順（CXR-L スマホプラグイン例）**:
   1. スマホ側プラグインアプリで `CXRLink(context)` を生成し、Hi Rokid に AIDL バインド
      （`AuthorizationHelper` → トークン → `connect` → `openCustomView`）。
-  2. 本体 AI の認識結果（本文=`ocr_text`＋図読取=`vision_text`。撮影しない）を取得。
-  3. 認識テキストを `POST /v1/documents/{id}/pages` 等に HTTP 送信（スマホが中継）。
+  2. `takePhoto` / `IMediaStreamService` でページ画像を取得し、本体 AI の認識結果（本文=`ocr_text`＋図読取=`vision_text`）を添える。
+  3. 画像と認識テキストを `POST /v1/documents/{id}/pages` 等に HTTP 送信（スマホが中継）。
+  4. 完了前や再接続時は `GET /v1/documents/{id}/scan-status` で欠番・画像なし・認識なしを確認し、不足ページだけ再取得する。
   4. レスポンスの 3 行ペイロードを `customViewUpdate` でグラス HUD に描画。
 
 ---
