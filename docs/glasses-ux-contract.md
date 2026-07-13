@@ -20,8 +20,8 @@
 
 | 項目 | 規約 |
 |------|------|
-| **音** | シャッター音・通知音・ビープを**一切鳴らさない**。独自カメラ経路（CXR-S/Camera2）で無音撮影。 |
-| **フラッシュ** | 写真用フラッシュなし（光るのは消去不可のプライバシーLEDのみ）。HUD の**白フラッシュ禁止**。 |
+| **音** | サーバの HUD 応答は音を要求しない。撮影音・通知音の実挙動は端末/クライアント設定で確認する。 |
+| **フラッシュ** | サーバは撮影用フラッシュ/トーチや HUD の白フラッシュを要求しない。実挙動は端末側で確認する。 |
 | **アニメーション** | 大きいアニメ禁止。テキスト切替は**フェード無しの即時置換**。 |
 | **点滅** | 強い点滅禁止。状態は点滅でなく**静的記号**（✓ / ! / ★）で表す。 |
 | **輝度** | 10段階調光の**低位**を既定に。 |
@@ -32,12 +32,14 @@
 > - `GET /v1/settings` の `hud` を**機械可読の描画契約**として公示：
 >   `silent:true, white_flash:false, transition:"instant", brightness:"low", animations:false, blinking:false, max_lines:3`。
 >   クライアントは起動時にこれを唯一の権威ソースとして読む。
-> - 撮影成功は**無音・無白フラッシュ**の `capture_ack`（HUD1行・`ttl_sec:2`、音/フラッシュ指示なし）で通知。シャッター音や白フラッシュの代替。
-> - `GET /v1/settings` の `capture` で **撮影しない**方針を機械可読に公示：`shutter_sound:false`・`flash:"off"`
->   （撮影用フラッシュ/トーチなし）・`capture_tone:false`（無音撮影）・`audio_record:{start_tone:false, stop_tone:false, silent:true}`
->   （リスニング録音も無音）。独自カメラ経路 `cxr-s/camera2`。**フラッシュ・シャッター音・録音音を出さない**。
-> - **プライバシーLEDは不可侵**：`capture.privacy_led` を `state:"on_while_camera_active", tamper:"forbidden"` として公示し、**サーバはLEDを制御・無効化する機能を一切持たない**。LED はカメラ稼働中に必ず点灯するハードのプライバシー表示（フラッシュではない）で、**視認＝認識＝カメラON＝LED点灯**（カメラOFFの視認は存在しない）。
-> - **LED 点灯時間の最小化（設計原則）**：`capture.led_off_during_review:true` を公示。3 フェーズフローでは**読取フェーズだけ**カメラON（LED点灯）で、`finalize-reading` 以降の解答・閲覧フェーズはカメラを閉じるため **LED は消灯**。
+> - 撮影成功は `capture_ack`（HUD1行・`ttl_sec:2`）で通知する。サーバ応答は音・白フラッシュを指示しない。
+> - `GET /v1/settings.capture` は `image_upload:"primary"`、`text_only_input:"supplemental_no_phash"` を公示する。
+>   `shutter_sound:false`、`flash:"off"`、`capture_tone:false`、録音の `silent:true` はクライアントへの
+>   要求値であり、対応する `*_guaranteed:false` が示すとおり、端末の実音・発光をサーバは保証できない。
+> - **プライバシーLEDは端末管理**：`capture.privacy_led` は `state:"on_while_camera_active", tamper:"forbidden"`。
+>   サーバは LED を制御・無効化せず、撮影時の表示は実機仕様に従う。
+> - `capture.led_off_during_review:true` は、登録後の解答・閲覧で**新規撮影を要求しない**という契約。
+>   物理 LED の状態そのものをサーバが保証する値ではない。
 
 ## 音声操作トグル（設定 ON/OFF）
 
@@ -64,7 +66,7 @@
 
 | ユーザー操作（公式） | gesture 名 | Android KeyCode（旧機由来・未検証） | 本サーバの用途 |
 |---|---|---|---|
-| **2本指タップ**（AI 起動） | `two_finger_tap` | なし（システムジェスチャ・`keycode:null`） | **視認＝ページ読取**（本体 AI → `POST /pages`） |
+| **2本指タップ**（AI 起動） | `two_finger_tap` | なし（システムジェスチャ・`keycode:null`） | **ページ画像を撮影・読取**（画像＋本体 AI 認識 → `POST /pages`） |
 | **1本指タップ**（クリック） | `single_tap` | `KEYCODE_DPAD_CENTER = 23` | 表示・確認・段階送り（二次経路） |
 | **ダブルタップ**（終了） | `double_tap` | `KEYCODE_ENTER = 66` | **読取完了宣言**（読取中）／**閉じる**（閲覧中） |
 | **2本指スワイプ左/右**（前後ページ） | `two_finger_swipe_left/right` | `KEYCODE_DPAD_LEFT/RIGHT = 21/22` | **前後の問題**（閲覧）／前後ページ（二次経路） |
@@ -88,19 +90,19 @@
 
 | 操作 | ジェスチャ | 音声ON時 |
 |------|-----------|----------|
-| 照合用フレーム取得（任意・画像経路） | クライアント実装に依存 | 「照合」 |
+| 照合用フレーム取得 | クライアント実装に依存 | 「照合」 |
 | HUD 確認・閉じる | ダブルタップ | 「閉じる」 |
 
-### 解答モード（exam-sessions・3 フェーズフロー / 主経路 v1.8・LED 点灯最小）
+### 解答モード（exam-sessions・3 フェーズフロー / 主経路 API 1.10）
 
-> **読取（カメラON・LED点灯・最短化）→ 一括解答（カメラOFF）→ 閲覧（カメラOFF・LED消灯）**。
-> 読取完了をダブルタップで宣言した瞬間からカメラは閉じ、以降は用紙も視認も不要。
+> **ページ画像の撮影・認識 → 一括解答 → 登録済み内容の閲覧**。
+> 完了前に scan-status で欠番・画像なし・認識なしを確認し、不足だけ再撮影する。登録後の解答・閲覧は新規撮影を要求しない。
 
 | フェーズ | 操作 | 公式ジェスチャ | operation 名 | サーバ側処理 |
 |----------|------|---------------|--------------|-------------|
-| 1 読取 | 読取開始（文書作成） | （初回 2本指タップに連動・中継が自動発行） | — | `POST /v1/documents`（`title` 必須。同じタップの認識は page_index=0 として続けて pages へ） |
-| 1 読取 | ページを視認＝読取 | **2本指タップ**（AI起動） | `capture_read` | 本体 AI → `POST /v1/documents/{id}/pages`（scan_ack） |
-| 1 読取 | **読取完了宣言** | **ダブルタップ** | `finish_reading` | 即カメラOFF → 中継の自動チェーン: `POST /v1/documents/{document_id}/finalize` → `POST /v1/exam-sessions`（`session_id` を取得）→ `POST /v1/exam-sessions/{session_id}/finalize-reading` |
+| 1 読取 | 読取開始（文書作成） | （初回 2本指タップに連動・中継が自動発行） | — | `POST /v1/documents`（`title` 必須。同じ操作で得た画像＋認識を page_index=0 として pages へ） |
+| 1 読取 | ページ画像を撮影・認識 | **2本指タップ**（AI起動） | `capture_read` | `image`＋本体 AI 認識 → `POST /v1/documents/{id}/pages`（scan_ack） |
+| 1 読取 | **読取完了宣言** | **ダブルタップ** | `finish_reading` | `GET .../scan-status?expected_total_pages=N` → 不足だけ再撮影 → `/finalize` → exam セッション作成 → `/finalize-reading` |
 | 2 解答 | 筆記 ⇄ リスニング切替 | **長押し**（録画⇄録音） | `mode_toggle` | `POST /v1/exam-sessions/{id}/mode` |
 | 2 解答 | リスニング録音 開始/停止 | **長押し**（listening 中） | `record_toggle` | `POST /v1/exam-sessions/{id}/audio` |
 | 2 解答 | （自動）搭載 GPT が全問解答 | — | — | `POST /v1/exam-sessions/{id}/solutions`（ingest） |
@@ -121,17 +123,17 @@
   **中継アプリの自動チェーン責務**（契約外・クライアント実装）であり、意図的に
   `OPERATION_CONTRACT` に載せていない。
 
-### 資料解説モード（explain-sessions）撮影なし設計
+### 資料解説モード（explain-sessions）登録済み文書の閲覧
 
-> スキャンフェーズ（撮影）なし。セッション作成直後から解説可能（`status=ready`）。
-> ページナビゲーションはジェスチャ操作のみ。カメラ画像は一切送信しない。
+> 文書登録時に撮影済みのページ画像・認識結果を利用する。セッション作成直後から解説可能（`status=ready`）。
+> ページナビゲーション中は新規画像を送信せず、サーバ内の登録済みページを移動する。
 > （`POST /scan`・`POST /commit` は v1.7 で廃止済み。）
 
 | フェーズ | 操作 | 公式ジェスチャ | サーバ側処理 |
 |----------|------|---------------|-------------|
 | ready | 現在ページの解説表示 | 1本指タップ | `GET /explain` |
-| explaining | 次ページへ | 2本指スワイプ左 | `POST /next-page`（撮影なし） |
-| explaining | 前ページへ | 2本指スワイプ右 | `POST /prev-page`（撮影なし） |
+| explaining | 次ページへ | 2本指スワイプ左 | `POST /next-page`（新規撮影なし） |
+| explaining | 前ページへ | 2本指スワイプ右 | `POST /prev-page`（新規撮影なし） |
 | explaining | 次テキストスライス | 2本指スワイプ下 | `GET /explain?view_page=N+1` |
 | explaining | 前テキストスライス | 2本指スワイプ上 | `GET /explain?view_page=N-1` |
 | explaining | 次解説段階（詳細へ） | 1本指タップ（解説表示中） | `GET /explain?stage=detail` |
