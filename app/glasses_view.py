@@ -124,7 +124,7 @@ CAPTURE_CONTRACT = {
 #     these calls are deliberately absent from OPERATION_CONTRACT.
 #   - finish_reading = double_tap reuses the official "exit" gesture and is
 #     phase-modal: during reading it declares 読取完了 (finalize-reading);
-#     during review it closes the deck. 読取フェーズの終了＝カメラOFF＝LED消灯.
+#     during review it closes the deck. 読取完了後は登録済みデータを使い、新規撮影は不要.
 #   - mode_toggle/record_toggle share long_press (the official video⇄audio
 #     record toggle) and are phase-modal: written → switch to listening;
 #     listening → start/stop the silent recording.
@@ -134,10 +134,10 @@ OPERATION_CONTRACT = {
     # --- Phase 1 scan (camera ON → page image + recognition metadata) ---
     "capture_read": "two_finger_tap",             # capture/recognize → POST /documents/{id}/pages
     "finish_reading": "double_tap",               # → POST /exam-sessions/{id}/finalize-reading
-    # --- Phase 2 解答 (camera OFF): onboard GPT solves → POST /solutions ---
+    # --- Phase 2 解答 (registered data; no new capture): onboard GPT → /solutions ---
     "mode_toggle": "long_press",                  # 筆記⇄リスニング → POST /exam-sessions/{id}/mode
     "record_toggle": "long_press",                # listening中: 録音開始/停止 (phase-modal)
-    # --- Phase 3 閲覧 (camera OFF, LED off): per-problem review deck ---
+    # --- Phase 3 閲覧 (registered data; no new capture): per-problem review deck ---
     "review_next_problem": "two_finger_swipe_left",   # → GET /review?index=k+1
     "review_prev_problem": "two_finger_swipe_right",  # → GET /review?index=k-1
     "scroll_next": "two_finger_swipe_down",       # teleprompter 送り (view_page+1)
@@ -605,7 +605,7 @@ def build_review_view(
 
 
 def build_reading_done_ack(problem_count: int, total_pages: int) -> dict:
-    """HUD ack for finalize-reading: reading phase over, camera off, LED off.
+    """HUD ack for finalize-reading: scan complete; no new capture is required.
 
     A 0-problem outcome (e.g. every page was figure-only with no recognized
     text) gets explicit guidance instead of dropping the user into an empty
@@ -621,14 +621,18 @@ def build_reading_done_ack(problem_count: int, total_pages: int) -> dict:
         lines = [
             f"読取完了 {total_pages}ページ",
             f"{problem_count}問を検出",
-            "カメラOFF 解答へ",
+            "撮影完了 解答へ",
         ]
     return {
         "lines": lines[:_MAX_LINES],
         "ttl_sec": 2,
         "problem_count": problem_count,
         "total_pages": total_pages,
+        "capture_complete": True,
+        "new_capture_required": False,
+        # Backward-compatible client instruction, not a physical camera-state report.
         "camera_off": True,
+        "camera_state_verified_by_server": False,
     }
 
 
