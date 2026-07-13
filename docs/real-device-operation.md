@@ -151,12 +151,13 @@ HTTP は、読取開始/読取完了宣言に連動して**中継アプリが自
 POST /v1/documents（読取開始＝初回2本指タップで中継が自動作成）
 2本指タップ(two_finger_tap=AI起動・視認) ×全ページ
   → 本体AIの認識を POST .../pages (ocr_text[, vision_text])（scan_ack で進捗表示）
-ダブルタップ(double_tap=読取完了宣言) → 中継の自動チェーン:
+ダブルタップ(double_tap=読取完了宣言) → **即カメラを閉じる＝LED消灯** → 中継の自動チェーン:
   POST /v1/documents/{document_id}/finalize
   → POST /v1/exam-sessions {mode:"study", document_id, ...}（応答の session_id を取得）
   → POST /v1/exam-sessions/{session_id}/finalize-reading
   → 問題分割・デッキ作成・reading_ack「読取完了/N問を検出/カメラOFF 解答へ」
-  → ここでカメラを閉じる＝LED消灯（応答の camera.privacy_led=="off" を確認）
+  （チェーンはカメラOFF後に実行——non-local ROKID_SOLVER の一括解答が長引いても LED は
+   点かない。応答の camera.privacy_led=="off" を確認）
 
 # フェーズ2 解答（カメラOFF）
 主経路: 搭載 GPT が全問を解く → POST .../solutions（問題別解答の配列を ingest）
