@@ -139,6 +139,30 @@ def test_resending_page_index_replaces_the_page(client):
     assert fin["summaries"][0]["summary"] == "good read"
 
 
+def test_recognition_only_update_preserves_existing_image(client):
+    doc_id = _create_doc(client)
+    first = _add_page(client, doc_id, 0, seed=15)
+    assert first.status_code == 201
+    captured = first.json()
+    assert captured["phash"]
+    assert captured["image_path"]
+
+    updated = client.post(
+        f"/v1/documents/{doc_id}/pages",
+        data={"page_index": 0, "ocr_text": "問1 認識を追加"},
+    )
+    assert updated.status_code == 201
+    body = updated.json()
+    assert body["replaced"] is True
+    assert body["phash"] == captured["phash"]
+    assert body["image_path"] == captured["image_path"]
+
+    status = client.get(f"/v1/documents/{doc_id}/scan-status").json()
+    assert status["missing_image_page_indexes"] == []
+    assert status["missing_recognition_page_indexes"] == []
+    assert status["pages"][0]["match_ready"] is True
+
+
 def test_missing_document_404(client):
     files = {"image": ("q.png", image_bytes(make_image(seed=1)), "image/png")}
     r = client.post("/v1/match", data={"document_id": "9999"}, files=files)
@@ -280,6 +304,18 @@ def test_scan_status_rejects_invalid_expected_page_count(client, expected):
     )
     assert response.status_code == 400
     assert response.json()["detail"] == "expected_total_pages must be >= 1"
+
+
+def test_scan_status_caps_expected_page_count(client):
+    doc_id = _create_doc(client)
+    response = client.get(
+        f"/v1/documents/{doc_id}/scan-status",
+        params={"expected_total_pages": 10_001},
+    )
+    assert response.status_code == 400
+    assert response.json()["detail"] == (
+        "expected_total_pages must be <= 10000"
+    )
 
 
 def test_scan_status_empty_document_starts_scan(client):
