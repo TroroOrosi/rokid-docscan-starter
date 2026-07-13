@@ -94,7 +94,7 @@ rokid-docscan-starter/
 │   ├── user-operation-guide.md      # ユーザー操作 / 自動化 / 設計判断 / 環境変数一覧
 │   ├── future-proof-architecture.md # 将来対応アーキテクチャ
 │   ├── explain-sessions.md          # 資料解説モード詳細・curl 例
-│   ├── glasses-ux-contract.md       # グラス UX 契約（操作・HUD・無音・無フラッシュ）
+│   ├── glasses-ux-contract.md       # グラス UX 契約（操作・撮影・HUD・端末管理項目）
 │   ├── exam-solver-architecture.md  # 解答モードアーキテクチャ
 │   └── rokid-led-dev-utility.md     # 録画LED診断ツールの詳細・警告
 ├── .env.example       # 全環境変数の雛形（コピーして .env に）
