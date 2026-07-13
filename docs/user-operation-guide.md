@@ -248,12 +248,11 @@
 > **real モード**: `ROKID_ALLOW_REAL_EXAM_SOLVE=1` が未設定の場合、解答は表示・保存されません
 > （ingest・デッキ・閲覧もロック。不正利用防止）。
 
-> **読取品質チェック（U5）は手順 3 のダブルタップ前に行うこと**。`finalize-reading` で
-> セッションが reviewing になった後は、同一文書のページ差し替え（同一 `page_index` の再送）も
-> 409 で拒否されます（デッキは旧テキストから分割済みのため）。ダブルタップ後に読取不良に
-> 気づいた場合の是正は、**新しい文書を作って再読取**（`POST /v1/documents` からやり直し）です。
-> 例外は 0 問分割のとき——セッションが読取フェーズへ自動差し戻しされ、同一文書のまま
-> 再読取→再ダブルタップできます。
+> **読取品質チェック（U5）は、ダブルタップでカメラを閉じた後・`/finalize` 前に行えます**。
+> `reading-status` 自体はカメラ不要です。欠番や読取不足があれば、中継は不足ページを示し、
+> ユーザーがそのページの再読取を選んだときだけカメラを再開します。`finalize-reading` で
+> セッションが reviewing になった後は、デッキが旧テキストから分割済みのためページ差し替えは
+> 409 です。その段階で不足に気づいた場合は新しい文書として再読取します。
 
 ### 5-D. 解答モード（互換・二次経路）
 
@@ -274,7 +273,8 @@ POST /next-page / /prev-page → GET /current → POST /solve-current
 3. サーバを起動（システム）:
    `uvicorn app.main:app --port 8000`
 4. 認識テキストを登録（システムが自動処理。実機では中継アプリがジェスチャに連動して発行）:
-   `/v1/documents` → `/pages` ×全ページ数 → `/finalize`（**全ページ完了後に必須**）。
+   `/v1/documents` → `/pages` ×全ページ数 → カメラ OFF → `/reading-status` で欠番確認
+   → `/finalize`（**全ページ完了後に必須**）。
 5. **U8 検証**（人間が実行 → システムが集計）:
    `ROKID_DATA_DIR=data python scripts/evaluate.py --db data/docscan.db --out report.json`
    → `self_match_accuracy` と `suggested_thresholds` を確認。
