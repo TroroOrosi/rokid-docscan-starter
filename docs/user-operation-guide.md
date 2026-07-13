@@ -227,15 +227,15 @@
    → 完了後に POST /v1/documents/{document_id}/finalize
    → POST /v1/exam-sessions {"mode":"study","document_id":N,...}（応答の session_id を取得）
    → POST /v1/exam-sessions/{session_id}/finalize-reading
-   → 問題分割・デッキ作成・「読取完了 / N問を検出 / カメラOFF 解答へ」
+   → 問題分割・デッキ作成・「読取完了 / N問を検出 / 撮影完了 解答へ」
    （finalize以降は保存済み画像とテキストを使用し、新規撮影は行わない）
 
-フェーズ2 解答（カメラOFF・自動）
+フェーズ2 解答（登録済みデータ・自動）
 4. 主経路: 搭載 GPT が全問解答 → POST /solutions で取り込み（served_by="onboard"）
    任意:   ROKID_SOLVER=openai|gemini|claude なら手順3の finalize-reading が一括解答済み
    リスニング: 長押しで切替（POST /mode）→ 長押しで録音 → POST /audio（書き起こし統合）
 
-フェーズ3 閲覧（カメラOFF・LED消灯）
+フェーズ3 閲覧（登録済みデータ・新規撮影不要）
 5. GET /solutions → デッキ（問1..問N・解答済み・確信度）
 6. GET /review?index=k → 1問題＝解答+解法+根拠+注意を一括表示
    2本指スワイプ左右=前後の問題 / 2本指スワイプ上下=送り読み / ダブルタップ=終了
