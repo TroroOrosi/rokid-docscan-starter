@@ -147,10 +147,10 @@ def test_create_rejects_unfinalized_document(client):
     ).status_code == 400
 
 
-def test_match_ignores_camera_free_pages(client):
-    """A document mixing a text-only page and an image page must still match."""
+def test_match_ignores_text_only_compat_pages(client):
+    """A document mixing a compatibility text page and image page still matches."""
     doc_id = _new_doc(client)
-    _add_text_page(client, doc_id, 0, "撮影しないテキストページ")  # phash=""
+    _add_text_page(client, doc_id, 0, "テキスト-only互換ページ")  # phash=""
     files = {"image": ("p.png", image_bytes(make_image(seed=7)), "image/png")}
     client.post(
         f"/v1/documents/{doc_id}/pages",
