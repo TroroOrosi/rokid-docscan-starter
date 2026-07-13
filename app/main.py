@@ -412,6 +412,137 @@ async def add_page(
             _unlink_best_effort(pending_image_path)
 
 
+# Physical exams do not exceed this; the cap bounds the missing-index range
+# expansion below (and the response payload) against absurd inputs.
+MAX_EXPECTED_TOTAL_PAGES = 10_000
+
+
+@app.get("/v1/documents/{document_id}/scan-status")
+def get_document_scan_status(
+    document_id: int, expected_total_pages: int | None = None
+) -> dict:
+    """Read-only 読取状態 report for resuming an interrupted reading phase.
+
+    撮影しない: this reports which page *readings* (recognized text) are
+    registered — nothing here captures, stores or references any image. The
+    client compares against the paper's real page count
+    (``expected_total_pages``) and re-reads only what is missing; 再読取 of
+    an existing index replaces that page (see add_page).
+    """
+    if expected_total_pages is not None:
+        # Validate before any range expansion (unbounded set(range(N)) would
+        # burn CPU/memory long before a sanity check downstream).
+        if expected_total_pages <= 0:
+            raise HTTPException(
+                status_code=400, detail="expected_total_pages must be >= 1"
+            )
+        if expected_total_pages > MAX_EXPECTED_TOTAL_PAGES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"expected_total_pages must be <= {MAX_EXPECTED_TOTAL_PAGES}",
+            )
+    conn = db.connect()
+    try:
+        doc = _doc_or_404(conn, document_id)
+        rows = conn.execute(
+            "SELECT id, page_index, ocr_text, vision_text, summary FROM pages "
+            "WHERE document_id = ? ORDER BY page_index",
+            (document_id,),
+        ).fetchall()
+        sessions = conn.execute(
+            "SELECT id, status FROM exam_sessions WHERE document_id = ? "
+            "ORDER BY id",
+            (document_id,),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    def _has(value) -> bool:
+        return bool(value and str(value).strip())
+
+    pages = [
+        {
+            "page_id": r["id"],
+            "page_index": r["page_index"],
+            "has_ocr_text": _has(r["ocr_text"]),
+            "has_vision_text": _has(r["vision_text"]),
+            "summary_generated": _has(r["summary"]),
+        }
+        for r in rows
+    ]
+    registered = [p["page_index"] for p in pages]
+    # Compat image-only pages carry no recognition; the primary text path
+    # cannot create them (add_page rejects text-less, image-less input).
+    pages_without_text = [
+        p["page_index"] for p in pages
+        if not (p["has_ocr_text"] or p["has_vision_text"])
+    ]
+
+    if expected_total_pages is not None:
+        expected = set(range(expected_total_pages))
+        got = set(registered)
+        missing = sorted(expected - got)
+        unexpected = sorted(got - expected)
+        complete: bool | None = not missing and not unexpected
+    else:
+        # Never claim completeness without a declared total (same honesty
+        # rule as build_scan_ack with total_pages=None).
+        missing = None
+        unexpected = None
+        complete = None
+
+    session_summaries = [
+        {
+            "session_id": s["id"],
+            "status": s["status"],
+            "phase": _session_phase(s),
+        }
+        for s in sessions
+    ]
+    # Mirrors add_page's freeze: once a bound session finished reading,
+    # replacing a page underneath its deck is rejected with 409.
+    reread_allowed = not any(s["status"] == "reviewing" for s in sessions)
+
+    if not pages:
+        recommended = "start_reading"
+    elif missing:
+        recommended = "reread_missing_pages"
+    elif unexpected:
+        # All expected indexes are present but extras exist — asking for
+        # another read would be wrong; the indexes need review instead.
+        recommended = "review_page_indexes"
+    elif pages_without_text:
+        recommended = "reread_pages_without_text"
+    elif doc["status"] != "ready" or not all(p["summary_generated"] for p in pages):
+        recommended = "finalize"
+    else:
+        recommended = "continue"
+
+    return {
+        "document_id": document_id,
+        "title": doc["title"],
+        "status": doc["status"],
+        "page_count": len(pages),
+        "page_indexes": registered,
+        "pages": pages,
+        "expected_total_pages": expected_total_pages,
+        "missing_page_indexes": missing,
+        "unexpected_page_indexes": unexpected,
+        "expected_pages_complete": complete,
+        "pages_without_text": pages_without_text,
+        "summaries_complete": bool(pages)
+        and all(p["summary_generated"] for p in pages),
+        "exam_sessions": session_summaries,
+        "reread_allowed": reread_allowed,
+        "reread": {
+            "method": "POST /v1/documents/{document_id}/pages",
+            "replaces_existing_page_index": True,
+        },
+        "recommended_action": recommended,
+        "versions": version_info(),
+    }
+
+
 @app.post("/v1/documents/{document_id}/finalize")
 def finalize_document(document_id: int) -> dict:
     conn = db.connect()
