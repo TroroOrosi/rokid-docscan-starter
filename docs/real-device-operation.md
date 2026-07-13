@@ -219,7 +219,7 @@ export ROKID_KEYMAP='{"single_tap": 23, "long_press": 170}'
 `two_finger_tap`（AI 起動）はシステムジェスチャのため既定 `keycode:null`——ファームが
 KeyEvent として配送する機種のみ `ROKID_KEYMAP` で割り当ててください。
 
-KeyCode を含む**実機検証の全項目**（イベント経路の判定・LED 消灯の物理確認・読取品質・
+KeyCode を含む**実機検証の全項目**（イベント経路の判定・カメラ/LED実状態・読取品質・
 閾値チューニング等）は [device-verification-checklist.md](device-verification-checklist.md)
 に手順付きで集約しています。
 
