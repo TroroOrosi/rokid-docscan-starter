@@ -172,11 +172,11 @@ def _row_or_404(conn, table: str, row_id: int, detail: str):
 
 
 def _page_material(ocr_text: str | None, vision_text: str | None) -> str:
-    """Combine a page's recognized text and the on-glass AI's figure/image reading.
+    """Combine OCR text and the on-glass AI's figure/image description.
 
-    撮影しない: the page image is never sent; the on-glass AI recognizes both the
-    text (``ocr_text``) and the figures/diagrams (``vision_text``) and we solve
-    from the two together, so figure-dependent questions are answered correctly.
+    The scanned page image remains the primary document record for pHash matching.
+    These text fields supplement the image for problem segmentation, search,
+    solving, and explanation.
     """
     parts: list[str] = []
     if ocr_text and ocr_text.strip():
@@ -254,17 +254,17 @@ async def add_page(
     vision_text: str | None = Form(None),
     total_pages: int | None = Form(None),
 ) -> dict:
-    """Record one page of a document — **撮影しない (no photography)**.
+    """Store one scanned page and its optional recognition metadata.
 
-    The Rokid-native flow does not photograph paper. The on-glass AI *recognizes*
-    what is in view and the client sends that page's reading as text:
-      - ``ocr_text``    : the recognized text of the page,
-      - ``vision_text`` : the AI's reading of figures/diagrams/visual layout
-                          (still TEXT, not an image), so figure-dependent problems
-                          can be solved without sending or saving a photo.
-    A document is remembered page-by-page from this text alone. Supplying an
-    ``image`` is optional and only kept for backward-compatible ``/v1/match``;
-    the standard flow needs no image.
+    Primary path: the Rokid client captures the page image and uploads it here.
+    The server stores the image, calculates its pHash, and later uses it for
+    deterministic page matching. OCR and figure descriptions supplement that
+    image for segmentation, search, solving, and explanation:
+      - ``ocr_text``    : recognized page text,
+      - ``vision_text`` : text describing figures/diagrams/visual layout.
+
+    A text-only request remains accepted as a supplemental/backward-compatible
+    path, but it has no pHash and therefore cannot participate in ``/v1/match``.
 
     Returns a `scan_ack` HUD payload so the glasses can show real-time
     progress (e.g. '3/5ページ完了') after every page. Pass `total_pages`
@@ -304,8 +304,9 @@ async def add_page(
             img.convert("RGB").save(fpath, format="PNG")
             image_path = str(fpath)
         else:
-            # 撮影しない: no image, no pHash. ocr_md5 dedupes by recognized text
-            # (fall back to vision_text when only figures were recognized).
+            # Supplemental text-only input: no image means no pHash, so this
+            # page cannot participate in /v1/match. OCR-MD5 still provides
+            # deterministic text deduplication.
             ph = ""
             dedupe_src = ocr_text if (ocr_text and ocr_text.strip()) else (vision_text or "")
             omd5 = ocr_md5(dedupe_src) or hashlib.md5(dedupe_src.encode()).hexdigest()
@@ -412,6 +413,142 @@ async def add_page(
             _unlink_best_effort(pending_image_path)
 
 
+@app.get("/v1/documents/{document_id}/scan-status")
+def get_document_scan_status(
+    document_id: int,
+    expected_total_pages: int | None = None,
+) -> dict:
+    """Restore persisted scan state after reconnect or before finalization.
+
+    This endpoint does not capture a new frame. It reports which page images and
+    recognition fields are already stored so a client can avoid re-capturing
+    completed pages and request only the missing image/OCR work.
+
+    The physical page count cannot be inferred from the database. Pass
+    expected_total_pages for deterministic missing-index and document-complete
+    checks; otherwise those fields stay None instead of claiming completeness.
+    """
+    if expected_total_pages is not None and expected_total_pages <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail="expected_total_pages must be >= 1",
+        )
+
+    conn = db.connect()
+    try:
+        doc = _doc_or_404(conn, document_id)
+        rows = conn.execute(
+            "SELECT id, page_index, image_path, phash, ocr_text, vision_text, "
+            "summary FROM pages WHERE document_id = ? ORDER BY page_index",
+            (document_id,),
+        ).fetchall()
+
+        page_indexes = [r["page_index"] for r in rows]
+        index_set = set(page_indexes)
+        if expected_total_pages is None:
+            missing_page_indexes = None
+            unexpected_page_indexes = None
+            expected_pages_complete = None
+        else:
+            expected_indexes = set(range(expected_total_pages))
+            missing_page_indexes = sorted(expected_indexes - index_set)
+            unexpected_page_indexes = sorted(index_set - expected_indexes)
+            expected_pages_complete = not (
+                missing_page_indexes or unexpected_page_indexes
+            )
+
+        pages: list[dict] = []
+        missing_image_page_indexes: list[int] = []
+        missing_recognition_page_indexes: list[int] = []
+        summary_generated_count = 0
+        for r in rows:
+            has_image = bool(r["image_path"])
+            has_phash = bool(r["phash"])
+            ocr = (r["ocr_text"] or "").strip()
+            vision = (r["vision_text"] or "").strip()
+            has_recognition = bool(ocr or vision)
+            if not (has_image and has_phash):
+                missing_image_page_indexes.append(r["page_index"])
+            if not has_recognition:
+                missing_recognition_page_indexes.append(r["page_index"])
+            summary_generated = r["summary"] is not None
+            summary_generated_count += int(summary_generated)
+            pages.append(
+                {
+                    "page_id": r["id"],
+                    "page_index": r["page_index"],
+                    "input_kind": "image" if has_image else "text_only",
+                    "has_image": has_image,
+                    "has_phash": has_phash,
+                    "match_ready": has_image and has_phash,
+                    "has_ocr_text": bool(ocr),
+                    "has_vision_text": bool(vision),
+                    "recognition_ready": has_recognition,
+                    "summary_generated": summary_generated,
+                }
+            )
+
+        page_count = len(rows)
+        registered_pages_matchable = (
+            page_count > 0 and not missing_image_page_indexes
+        )
+        registered_pages_recognized = (
+            page_count > 0 and not missing_recognition_page_indexes
+        )
+        summaries_complete = (
+            page_count > 0 and summary_generated_count == page_count
+        )
+
+        if page_count == 0:
+            recommended_action = "start_scan"
+        elif expected_pages_complete is False:
+            recommended_action = "capture_missing_pages"
+        elif missing_image_page_indexes:
+            recommended_action = "capture_page_images"
+        elif missing_recognition_page_indexes:
+            recommended_action = "add_page_recognition"
+        elif doc["status"] != "ready" or not summaries_complete:
+            recommended_action = "finalize"
+        else:
+            recommended_action = "continue"
+
+        return {
+            "document_id": document_id,
+            "title": doc["title"],
+            "status": doc["status"],
+            "page_count": page_count,
+            "page_indexes": page_indexes,
+            "expected_total_pages": expected_total_pages,
+            "expected_pages_complete": expected_pages_complete,
+            "missing_page_indexes": missing_page_indexes,
+            "unexpected_page_indexes": unexpected_page_indexes,
+            "image_page_count": sum(1 for p in pages if p["has_image"]),
+            "text_only_page_count": sum(
+                1 for p in pages if p["input_kind"] == "text_only"
+            ),
+            "recognition_page_count": sum(
+                1 for p in pages if p["recognition_ready"]
+            ),
+            "summary_generated_count": summary_generated_count,
+            "missing_image_page_indexes": missing_image_page_indexes,
+            "missing_recognition_page_indexes": (
+                missing_recognition_page_indexes
+            ),
+            "registered_pages_matchable": registered_pages_matchable,
+            "registered_pages_recognized": registered_pages_recognized,
+            "summaries_complete": summaries_complete,
+            "recommended_action": recommended_action,
+            "pages": pages,
+            "capture": {
+                "performed": False,
+                "note": "status query only; no new frame is captured",
+            },
+            "versions": version_info(),
+        }
+    finally:
+        conn.close()
+
+
 @app.post("/v1/documents/{document_id}/finalize")
 def finalize_document(document_id: int) -> dict:
     conn = db.connect()
@@ -494,8 +631,8 @@ async def match_page(
                 ocr_text=normalize_ocr_text(r["ocr_text"]),
             )
             for r in rows
-            # Skip 撮影しない text-only pages (no image → empty phash); they are
-            # not image-match candidates and would break hamming()'s int(phash,16).
+            # Text-only supplemental rows have no pHash and cannot be image
+            # match candidates; passing them to hamming() would also fail.
             if r["phash"]
         ]
         summaries = {r["id"]: r["summary"] for r in rows}
