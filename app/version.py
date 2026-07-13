@@ -30,15 +30,16 @@ from __future__ import annotations
 #        PAGE IMAGE (vision) with subject-tailored prompts. SOLVER_API_VERSION
 #        -> 1.1.0 (Question gained the optional image_path field). API_VERSION
 #        stays 1.6.0 (solve response shape unchanged).
-# 0.7.0: camera-free operation — pages can be recorded from text alone (image
-#        optional on /pages); new document page-move型 exam (/exam-sessions bound
+# 0.7.0: supplemental text-only page input was added (image became optional
+#        on /pages, while image+pHash remained the matching path); new
+#        document page-move型 exam (/exam-sessions bound
 #        to a document with next-page/prev-page/current/solve-current); English
 #        listening records audio on the spot (/audio + ROKID_TRANSCRIBER) and
 #        筆記⇄リスニング switches via /mode; long detail/rationale now paginates
 #        by sentence (GLASSES_VIEW_CONTRACT -> 1.3.0). API_VERSION -> 1.7.0
 #        (additive endpoints).
 #        Later 0.7.0 additions (all additive, API/contract versions unchanged):
-#        pages.vision_text (on-glass AI's figure/image reading as TEXT, 撮影しない);
+#        pages.vision_text (on-glass AI's figure/image description as text);
 #        solve-current now passes the WHOLE document (every remembered page) as
 #        context so page-spanning problems are read accurately; capture contract
 #        publishes flash:off / capture_tone:false / silent audio_record.
@@ -69,7 +70,14 @@ from __future__ import annotations
 #        (key-only setup works for all providers), the multi-provider adapters
 #        moved to app/*/llm_adapter.py (claude.py stays as an import shim),
 #        and the four registries share one ProviderRegistry. API -> 1.9.0.
-APP_VERSION = "0.9.0"
+# 0.10.0: restored the code-defined image-scan purpose as the primary contract.
+#         GET /v1/documents/{id}/scan-status reports persisted page images,
+#         pHash readiness, OCR/vision metadata, summaries, and missing indexes
+#         after reconnect. Text-only input remains supplemental and is reported
+#         as non-matchable. Capture settings now state that sound/flash behavior
+#         is device-managed rather than guaranteed by this server. API -> 1.10.0,
+#         GLASSES_VIEW_CONTRACT -> 1.5.0.
+APP_VERSION = "0.10.0"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.
@@ -98,7 +106,9 @@ APP_VERSION = "0.9.0"
 #        gains `locked` and masks solved fields when locked; ingest returns
 #        400 for ambiguous problem_no and maps single-item payloads onto a
 #        single-problem deck. Path shapes unchanged — no envelope change.
-API_VERSION = "1.9.0"
+# 1.10.0: additive document scan-status endpoint plus image-first capture
+#         capability metadata in /v1/settings.capture.
+API_VERSION = "1.10.0"
 
 # Matching algorithm identity. Bump when thresholds or hashing change so a
 # re-index/eval is triggered. Mirrors thresholds in app/matching.py.
@@ -136,7 +146,10 @@ EXPLAINER_API_VERSION = "1.0.0"
 #        navigation; reading_done ack (camera_off). Operation/gesture names
 #        moved to the official vocabulary (two_finger_*, single/double tap,
 #        long_press). Max 3 lines/page unchanged.
-GLASSES_VIEW_CONTRACT_VERSION = "1.4.0"
+# 1.5.0: capture contract identifies still-image upload as the primary scan
+#        path, text-only as supplemental/no-pHash, and device-managed sound/
+#        flash behavior as not guaranteed by the server.
+GLASSES_VIEW_CONTRACT_VERSION = "1.5.0"
 
 # Answer-area overlay payload (box + short answer; 2D image-anchored).
 # 1.1.0: added tracking metadata (tracking/fixed_ar/anchor_hint).
