@@ -198,3 +198,11 @@ def test_reading_done_ack_reports_capture_complete():
     assert "読取完了 5ページ" in ack["lines"][0]
     assert "4問" in ack["lines"][1]
     assert "撮影完了" in ack["lines"][2]
+
+
+def test_reading_done_ack_requests_recapture_when_no_problem_is_found():
+    ack = build_reading_done_ack(problem_count=0, total_pages=2)
+    assert ack["capture_complete"] is False
+    assert ack["new_capture_required"] is True
+    assert ack["camera_off"] is True  # current-state instruction remains compatible
+    assert any("再読取" in line for line in ack["lines"])
