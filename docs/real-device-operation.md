@@ -103,22 +103,23 @@ export ROKID_TRANSCRIBE_MODEL=gpt-4o-transcribe   # gemini は ROKID_LLM_MODEL �
 ### 4-A. 資料照合（/v1/match）
 事前登録 → 現場で照合：
 ```
-# 登録（image は任意。撮影レスなら ocr_text だけでページを記憶）
+# 登録（ページ画像が主入力。OCR/図認識は補助）
 POST /v1/documents            → document_id
-POST /v1/documents/{id}/pages (page_index, [image], [ocr_text]) ×全ページ
+POST /v1/documents/{id}/pages (page_index, image, [ocr_text], [vision_text]) ×全ページ
+GET /v1/documents/{id}/scan-status?expected_total_pages=N ← 欠番・画像なし・認識なしを確認
 POST /v1/documents/{id}/finalize   ← 完了宣言（要約生成・status=ready）
-# 現場（照合は画像を使う任意経路）
+# 現場（登録画像の pHash と現在の画像で照合）
 カメラ1フレーム取得 → 端末OCR →
 POST /v1/match (document_id, image, fast_ocr_text) → HUD: PAGE n/N / LOW_CONF / NO_PAGE
 ```
-- **撮影レス登録**：`/pages` は `image` 省略可。本体 AI が視認した資料テキストを `ocr_text` に
-  渡せば、写真なしでページを記憶（`image_path=null`・`phash=""`）。照合(`/match`)は画像を使う機能
-  なので、撮影レス標準フローでは下記 **4-D の文書ページ移動型**で現在ページを把握します。
+- **テキスト-only互換入力**：`/pages` は既存クライアント向けに `image` 省略も受理しますが、
+  `image_path=null`・`phash=""` となり `/match` の対象にはできません。通常運用ではページ画像を登録し、
+  scan-status の `missing_image_page_indexes` に残ったページだけ再撮影します。
 
 ### 4-B. 解答（/v1/exam-sessions・設問1枚アップロード型＝互換）
 ```
 POST /v1/exam-sessions {mode:"study"}                → session_id
-問題画像を送信 → POST .../questions (image,[ocr_text])  ← 用紙画像を保存＋科目自動判定（互換経路のみ画像使用）
+問題画像を送信 → POST .../questions (image,[ocr_text])  ← 用紙画像を保存＋科目自動判定
 1本指タップ(single_tap)              → POST .../{qid}/solve → 「答え: X ★★★」
 1本指タップ（解答表示中）             → GET .../view?stage=solution→rationale→caution
 2本指スワイプ下/上                   → テキストページ送り（view?page=N±1）
@@ -130,7 +131,7 @@ POST /v1/exam-sessions {mode:"study"}                → session_id
 - 科目は読取時に自動判定（共通テスト準拠フル16教科）。`mode:"real"` は
   `ROKID_ALLOW_REAL_EXAM_SOLVE=1` が無い限りロック（解答非表示）。
 
-### 4-C. 資料解説（/v1/explain-sessions、撮影なし）
+### 4-C. 資料解説（/v1/explain-sessions、登録後の新規撮影なし）
 ```
 POST /v1/explain-sessions {document_id}     → session_id (status=ready)
 1本指タップ(single_tap)                     → GET .../explain（概要）
@@ -139,34 +140,35 @@ POST /v1/explain-sessions {document_id}     → session_id (status=ready)
 2本指スワイプ下/上(two_finger_swipe_d/u)     → GET .../explain?view_page=N±1（テレプロンプター）
 ```
 
-### 4-D. 3 フェーズ実践フロー（主経路 / 筆記・リスニング両対応・LED 点灯最小）
-**読取（カメラON・LED点灯・最短化）→ 一括解答（カメラOFF）→ 閲覧（カメラOFF・LED消灯）**。
-撮影は一切発生しない（写真/フラッシュ/シャッターなし・録音も無音）。**操作はグラス単独で完結**
+### 4-D. 3 フェーズ実践フロー（主経路 / 筆記・リスニング両対応）
+**ページ画像の撮影・認識 → 不足ページだけ再撮影 → 一括解答 → 登録済み内容の閲覧**。
+撮影は文書スキャンの中核です。撮影音・フラッシュ・プライバシー LED の実挙動は端末管理であり、
+サーバは保証しません。**操作はグラス単独で完結**
 （スマホは中継のみ・画面不要。文書作成・finalize・セッション作成のようにジェスチャ未割当の
 HTTP は、読取開始/読取完了宣言に連動して**中継アプリが自動発行**する——
 [cxr-l-integration.md](cxr-l-integration.md) §5）。
 
 ```
-# フェーズ1 読取（この間だけカメラON＝プライバシーLED点灯）
-POST /v1/documents {title: ...}（読取開始＝初回2本指タップで中継が自動作成。title 必須。
-  同じタップの認識は page_index=0 として続けて POST /pages——1ページ目を落とさない）
-2本指タップ(two_finger_tap=AI起動・視認) ×全ページ
-  → 本体AIの認識を POST .../pages (ocr_text[, vision_text])（scan_ack で進捗表示）
-ダブルタップ(double_tap=読取完了宣言) → **即カメラを閉じる＝LED消灯** → 中継の自動チェーン:
-  POST /v1/documents/{document_id}/finalize
-  → POST /v1/exam-sessions {mode:"study", document_id, ...}（応答の session_id を取得）
+# フェーズ1 画像読取
+POST /v1/documents {title: ...}（初回2本指タップで中継が自動作成。title 必須。
+  同じ操作で得た画像＋認識は page_index=0 として続けて POST /pages——1ページ目を落とさない）
+2本指タップ(two_finger_tap=AI起動・撮影) ×全ページ
+  → POST .../pages (image[, ocr_text, vision_text])（scan_ack で進捗表示）
+ダブルタップ(double_tap=読取完了宣言) → 中継が自動確認:
+  GET /v1/documents/{document_id}/scan-status?expected_total_pages=N
+  → missing_page_indexes / missing_image_page_indexes / missing_recognition_page_indexes だけ再取得
+  → recommended_action=="finalize" を確認して POST /v1/documents/{document_id}/finalize
+  → POST /v1/exam-sessions {mode:"study", document_id, ...}（session_id を取得）
   → POST /v1/exam-sessions/{session_id}/finalize-reading
-  → 問題分割・デッキ作成・reading_ack「読取完了/N問を検出/カメラOFF 解答へ」
-  （チェーンはカメラOFF後に実行——non-local ROKID_SOLVER の一括解答が長引いても LED は
-   点かない。応答の camera.privacy_led=="off" を確認）
+  → 問題分割・デッキ作成。以降は登録済みデータを使い、新規撮影を要求しない
 
-# フェーズ2 解答（カメラOFF）
+# フェーズ2 解答（登録済みデータ）
 主経路: 搭載 GPT が全問を解く → POST .../solutions（問題別解答の配列を ingest）
 任意:   ROKID_SOLVER=openai|gemini|claude ならフェーズ1の finalize-reading が一括解答済み
 長押し(long_press=公式の録画⇄録音トグル)      → POST .../mode {exam_type}   ← 筆記 ⇄ リスニング
 長押し（listening 中）                        → 録音 → POST .../audio (audio,[transcript])
 
-# フェーズ3 閲覧（カメラOFF・LED消灯。用紙も視認も不要）
+# フェーズ3 閲覧（登録済みデータ。新規撮影不要）
 GET .../solutions                            ← デッキ一覧（問1..問N・解答済み・確信度）
 GET .../review?index=k&view_page=n           ← 1問題＝解答+解法+根拠+注意を一括表示
 2本指スワイプ左/右 → index±1（前後の問題） / 2本指スワイプ下/上 → view_page±1（送り読み）
@@ -176,12 +178,12 @@ GET .../review?index=k&view_page=n           ← 1問題＝解答+解法+根拠+
 - `exam_type`＝`written`(筆記) / `listening`(英語リスニング)、`answer_format`＝`mark`(マーク) / `written`(記述)。
 - **リスニング書き起こし**：`ROKID_TRANSCRIBER=openai|gemini`＋各社鍵で実書き起こし。未設定/失敗/オフラインは
   アップロード時の `transcript` をそのまま使用（クレデンシャル不要で成立、上記 §2-3）。全問の解答文脈に統合される。
-- **LED 期待値**：フェーズ1のみ点灯・フェーズ2/3は消灯（`GET /v1/settings.capture` の
-  `privacy_led:{state:"on_while_camera_active"}`・`led_off_during_review:true`）。
+- **端末状態**：`GET /v1/settings.capture` の `privacy_led` は端末管理、`led_off_during_review:true` は
+  解答・閲覧で新規撮影を要求しないことを表す。LED・撮影音・フラッシュは実機で別途確認する。
 - `mode:"real"` は `ROKID_ALLOW_REAL_EXAM_SOLVE=1` が無い限りロック（ingest・デッキ・閲覧もロック）。
 
 ### 4-E. 文書ページ移動型 exam（二次経路・互換）
-ページ移動で現在ページを解く従来経路（読取と閲覧が分離されないため LED 点灯時間が長い）。
+登録済みページを移動して現在ページを解く従来経路。移動・解答呼び出し自体は新しい画像を要求しない。
 ```
 2本指スワイプ左/右 → POST .../next-page / prev-page   ← 現在ページ移動
 （確認）             GET  .../current                  ← 現在ページ把握
@@ -191,8 +193,8 @@ GET .../review?index=k&view_page=n           ← 1問題＝解答+解法+根拠+
 
 ### 実行フロー（データの流れ）
 ```
-[Glasses: 本体AI(GPT/Gemini)=視認・認識・解答] ──ocr_text/vision_text・問題別解答──▶ [本サーバ]
-   分割(segment_problems) / 取り込み(ingest) / 照合(pHash) / 解説 / 抽出
+[Glasses: カメラ＋本体AI(GPT/Gemini)] ──ページ画像＋ocr_text/vision_text・問題別解答──▶ [本サーバ]
+   画像保存・pHash / 分割(segment_problems) / 取り込み(ingest) / 照合 / 解説 / 抽出
    （サーバ solver は任意: openai|gemini|claude、local 既定）
 [本サーバ] ──HUD 3行(JSON)──▶ [Glasses: 両眼ディスプレイに描画]
    ※実AIが未設定/失敗ならローカルへ自動フォールバック（常に応答）
