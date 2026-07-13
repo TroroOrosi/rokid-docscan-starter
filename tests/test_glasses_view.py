@@ -188,9 +188,13 @@ def test_review_view_is_silent():
         assert forbidden not in v
 
 
-def test_reading_done_ack_reports_camera_off():
+def test_reading_done_ack_reports_capture_complete():
     ack = build_reading_done_ack(problem_count=4, total_pages=5)
     assert len(ack["lines"]) <= 3
-    assert ack["camera_off"] is True
+    assert ack["capture_complete"] is True
+    assert ack["new_capture_required"] is False
+    assert ack["camera_state_verified_by_server"] is False
+    assert ack["camera_off"] is True  # backward-compatible client instruction
     assert "読取完了 5ページ" in ack["lines"][0]
     assert "4問" in ack["lines"][1]
+    assert "撮影完了" in ack["lines"][2]
