@@ -216,12 +216,12 @@ P02 読取済 ✓
 次ページへ            ← 全ページ完了時は「完了: ダブルタップ」
 ```
 
-読取完了（finalize-reading の reading_ack。以降カメラOFF＝LED消灯）:
+読取完了（finalize-reading の reading_ack。以降は登録済みデータを利用）:
 
 ```
 読取完了 5ページ
 4問を検出
-カメラOFF 解答へ
+撮影完了 解答へ
 ```
 
 閲覧フェーズ（review デッキ・**一括 1 ストリーム**、`kind:"review"`）:
