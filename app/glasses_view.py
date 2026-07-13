@@ -35,16 +35,16 @@ Stages:
 Navigation is always touch-gesture based — voice is opt-in only.
 Official Rokid Glasses gesture vocabulary (current model; see
 docs/glasses-ux-contract.md):
-  two_finger_tap              : AI activation → page 視認 (reading phase only)
+  two_finger_tap              : AI activation → capture/recognize page (reading phase only)
   single_tap                  : click / show / next stage (secondary flows)
   double_tap                  : exit — phase-modal: reading=finish_reading,
                                 review=close
   two_finger_swipe_up/down    : teleprompter scroll (within a view)
   two_finger_swipe_left/right : prev/next document page or review problem
   long_press                  : video⇄audio record toggle → written⇄listening
-No camera image is used for page/problem navigation: after finalize-reading
-the camera stays closed, so the privacy LED is dark for the whole answer and
-review phases (LED lit time is minimized by design).
+Page images are captured during the scan phase and persisted for pHash matching.
+After finalize-reading no new frame is needed for page/problem navigation, so the
+camera can stay closed throughout the answer and review phases.
 """
 
 from __future__ import annotations
@@ -75,23 +75,31 @@ RENDER_CONTRACT = {
     "brightness": "low",
 }
 
-# Capture-path contract. 撮影しない (no photography): the on-glass AI recognizes
-# the page and sends its reading as TEXT — no photo is taken, so there is no
-# flash and no shutter. Listening records audio via the microphone, silently.
-# privacy_led is hardware-enforced (steady recording indicator, not a flash) and
-# is never server-controllable; it lights whenever the camera is active — i.e.
-# 視認＝認識＝カメラON＝LED点灯. The 3-phase flow therefore keeps the reading
-# phase short; after finalize-reading the camera is closed, so the LED is dark
-# for the whole answer and review phases (led_off_during_review).
+# Capture-path contract. Page-image capture is the primary scan path because
+# pHash matching and image-based question analysis require an image. OCR and
+# vision_text supplement that image; text-only input is retained as a limited
+# compatibility path and cannot participate in /v1/match.
+#
+# Sound, flash/torch, and privacy indicators are device/client managed. The
+# server publishes preferred client settings but cannot guarantee or suppress
+# physical device behavior. The privacy indicator is never server-controllable.
 CAPTURE_CONTRACT = {
-    "shutter_sound": False,
-    "flash": "off",                # no photographic flash/torch on capture
-    "capture_tone": False,         # silent capture (reinforces shutter_sound)
+    "mode": "still_image",
+    "image_upload": "primary",
+    "text_only_input": "supplemental_no_phash",
     "camera_path": "cxr-s/camera2",
-    # Listening recording is silent: no start/stop tones (microphone, not camera).
+    "server_controls_camera": False,
+    # Requested client settings, not a hardware guarantee.
+    "shutter_sound": False,
+    "shutter_sound_guaranteed": False,
+    "flash": "off",
+    "flash_guaranteed": False,
+    "capture_tone": False,
+    "capture_tone_guaranteed": False,
+    # Listening audio is separate from still-image capture.
     "audio_record": {"start_tone": False, "stop_tone": False, "silent": True},
     "privacy_led": {"state": "on_while_camera_active", "tamper": "forbidden"},
-    # Review/answer phases run with the camera closed → LED off (点灯時間最小化).
+    # No new capture is required during answer/review after scanning.
     "led_off_during_review": True,
 }
 
@@ -123,8 +131,8 @@ CAPTURE_CONTRACT = {
 #   - Swipe direction keeps the existing left=next (page-flip) convention;
 #     clients may mirror it per user preference.
 OPERATION_CONTRACT = {
-    # --- Phase 1 読取 (camera ON → privacy LED lit; keep this phase short) ---
-    "capture_read": "two_finger_tap",             # AI起動=視認 → POST /documents/{id}/pages
+    # --- Phase 1 scan (camera ON → page image + recognition metadata) ---
+    "capture_read": "two_finger_tap",             # capture/recognize → POST /documents/{id}/pages
     "finish_reading": "double_tap",               # → POST /exam-sessions/{id}/finalize-reading
     # --- Phase 2 解答 (camera OFF): onboard GPT solves → POST /solutions ---
     "mode_toggle": "long_press",                  # 筆記⇄リスニング → POST /exam-sessions/{id}/mode
