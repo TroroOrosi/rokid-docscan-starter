@@ -34,13 +34,13 @@
    `POST /pages`（`image`＋`ocr_text`＋必要に応じ `vision_text`、画像保存・pHash生成）→
    `GET /scan-status` で欠番/画像/OCR状態を確認 → `/finalize` → exam セッション作成
    （`document_id` 必須）→ **ダブルタップ=読取完了宣言** → `POST /finalize-reading`（問題分割・デッキ作成・
-   status open/reading→reviewing・冪等・カメラ OFF）。
-2. **解答**（カメラ OFF）: 文書を問題単位に分割（`segment_problems`: 問N/大問 境界・
+   status open/reading→reviewing・冪等。以降は登録済みデータを使用）。
+2. **解答**（登録済みデータ・新規撮影不要）: 文書を問題単位に分割（`segment_problems`: 問N/大問 境界・
    ページ跨ぎマージ・境界なしは全体 1 問題＝安定 id **「全体」** を合成）。主経路=搭載 GPT の
    ingest（照合は `problem_index`（デッキ index）優先・なければ `problem_no`。再 ingest は
    latest wins）。任意=非 local な `ROKID_SOLVER` 設定時に finalize-reading 内で未解答分を
    一括解答（全ページ+RAG+transcript を文脈に。再開可能・local フォールバック結果は保存しない）。
-3. **閲覧**（カメラ OFF・LED 消灯）: `GET /solutions`（デッキ）→ `GET /review?index=k&view_page=n`。
+3. **閲覧**（登録済みデータ・新規撮影不要）: `GET /solutions`（デッキ）→ `GET /review?index=k&view_page=n`。
    **1 問題=解答+解法+根拠+注意を一括 1 ストリーム**（段階めくりなし・確定事項）。
    問題送り=2本指スワイプ左右 / 送り読み=2本指スワイプ上下 / 終了=ダブルタップ。
 
@@ -64,11 +64,11 @@
 ## 対応形式・安全
 
 - 筆記/リスニング（`exam_type=written|listening`）、マーク式/記述式（`answer_format=mark|written`）。
-  リスニングは無音録音 → `POST /audio`（transcript フォールバック・Anthropic は ASR 非対応）→
+  リスニングは端末録音 → `POST /audio`（transcript フォールバック・Anthropic は ASR 非対応）→
   書き起こしを解答文脈に統合。
 - **`mode=real` は既定ロック**（`ROKID_ALLOW_REAL_EXAM_SOLVE=1` が無い限り、solve・ingest・
   デッキ・閲覧のいずれも解答を保存/表示しない）。学習・模試用途。
-- HUD 契約: 最大 3 行・無音・無フラッシュ・無アニメ・無点滅。文字数制限はクライアント責務。
+- HUD 契約: 最大3行で、音・白フラッシュ・アニメ・点滅の指示フィールドを持たない。物理的な音・発光は端末管理。
 
 ## 開発規約
 
