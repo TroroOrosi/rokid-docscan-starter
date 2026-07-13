@@ -156,7 +156,7 @@ exam-session(document_id, exam_type, answer_format)
 
 ## 信頼度の分離（案7）
 
-- 読取信頼度（`read_conf`）＝ OCR が読めたか → 低ければ「近づけて再撮影」。
+- 読取信頼度（`read_conf`）＝ OCR が読めたか → 低ければ「近づけて再読取」。
 - 解答信頼度（`answer_conf`）／根拠信頼度（`rationale_conf`）＝ ソルバー出力。
 - プレースホルダは `answer_conf ≤ 0.2`（★☆☆）で、断定しないことを担保。
 

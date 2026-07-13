@@ -211,6 +211,56 @@ def test_low_read_confidence_asks_for_retake(client):
     assert "hint" in r
 
 
+# --- text-first question ingestion (撮影しない主経路) -------------------------
+
+def test_add_question_text_only_no_image(client):
+    sid = _new_session(client)
+    r = client.post(
+        f"/v1/exam-sessions/{sid}/questions",
+        data={"ocr_text": "問2 次の計算\n① 12\n② 13\n③ 14\n④ 15"},
+    )
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["question_no"] == "問2"
+    assert body["read_confidence"] > 0
+    assert "capture_ack" in body
+    # the ingested question is solvable without any stored image
+    qid = body["question_id"]
+    solved = client.post(f"/v1/exam-sessions/{sid}/questions/{qid}/solve").json()
+    assert solved["locked"] is False
+    assert solved["glasses_view"]["lines"]
+
+
+def test_add_question_requires_text_or_image_400(client):
+    sid = _new_session(client)
+    r = client.post(f"/v1/exam-sessions/{sid}/questions")
+    assert r.status_code == 400
+    assert "recognized text" in r.json()["detail"]
+
+
+def test_add_question_text_only_extracts_media(client):
+    sid = _new_session(client)
+    r = client.post(
+        f"/v1/exam-sessions/{sid}/questions",
+        data={"ocr_text": "問1 下の図1のグラフを読み、値を求めよ"},
+    )
+    assert r.status_code == 201
+    media = r.json()["media"]
+    assert media, "text cues alone must drive media extraction"
+    assert all(m["kind"] for m in media)
+
+
+def test_retake_hint_says_reread_not_rephotograph(client):
+    # 撮影しない: recovery guidance must ask for re-recognition, never for a
+    # new photograph.
+    sid = _new_session(client)
+    files = {"image": ("q.png", image_bytes(make_image(seed=5)), "image/png")}
+    r = client.post(f"/v1/exam-sessions/{sid}/questions", files=files).json()
+    lines = " ".join(r["hint"]["lines"])
+    assert "再読取" in lines
+    assert "再撮影" not in lines
+
+
 def test_session_detail_lists_questions(client):
     sid = _new_session(client)
     qid = _add_question(client, sid).json()["question_id"]

@@ -59,7 +59,7 @@ from .subjects import detect_subject
 from .version import APP_VERSION, HUD_CONTRACT_VERSION, version_info
 
 
-def _extract_media(ocr_text: str | None, image_path: str) -> list[dict]:
+def _extract_media(ocr_text: str | None, image_path: str | None) -> list[dict]:
     """Run the active media extractor over any figure/table/graph/formula cues."""
     kinds = detect_media(ocr_text)
     if not kinds:
@@ -764,15 +764,32 @@ def create_exam_session(payload: CreateExamSession) -> dict:
 @app.post("/v1/exam-sessions/{session_id}/questions", status_code=201)
 async def add_question(
     session_id: int,
-    image: UploadFile = File(...),
     ocr_text: str | None = Form(None),
+    image: UploadFile | None = File(None),
     bbox_hints: str | None = Form(None),
 ) -> dict:
+    """Ingest one question. 撮影しない: the primary input is the on-glass
+    AI's on-the-spot recognition (``ocr_text``) — structure, subject, media
+    and anchors are all derived from text. ``image`` is an optional
+    backward-compat input (非推奨) kept for the legacy upload flow.
+    """
+    has_image = image is not None and getattr(image, "filename", None)
+    has_text = ocr_text and ocr_text.strip()
+    if not has_image and not has_text:
+        raise HTTPException(
+            status_code=400,
+            detail="a question needs ocr_text (recognized text) or an image",
+        )
     conn = db.connect()
     try:
         _exam_session_or_404(conn, session_id)
-        raw = await _read_upload_limited(image)
-        img = _load_image(raw)
+        fpath: Path | None = None
+        if has_image:
+            raw = await _read_upload_limited(image)
+            img = _load_image(raw)
+            fname = f"q_{session_id}_{uuid.uuid4().hex[:8]}.png"
+            fpath = IMAGE_DIR / fname
+            img.convert("RGB").save(fpath, format="PNG")
 
         hints = json.loads(bbox_hints) if bbox_hints else None
         parsed = parse_layout(ocr_text, bbox_hints=hints)
@@ -781,12 +798,8 @@ async def add_question(
 
         read_conf = 0.0 if not normalize_ocr_text(ocr_text) else round(min(1.0, 0.5 + subj_conf / 2), 3)
 
-        fname = f"q_{session_id}_{uuid.uuid4().hex[:8]}.png"
-        fpath: Path = IMAGE_DIR / fname
-        img.convert("RGB").save(fpath, format="PNG")
-
         answer_box = q.answer_box if q else parsed.get("answer_box")
-        media = _extract_media(ocr_text, str(fpath))
+        media = _extract_media(ocr_text, str(fpath) if fpath else None)
         cur = conn.execute(
             """INSERT INTO questions
                (session_id, question_no, body_text, choices_json, figure_refs,
@@ -804,7 +817,7 @@ async def add_question(
                 subject,
                 read_conf,
                 parsed.get("page_number"),
-                str(fpath),
+                str(fpath) if fpath else None,
                 json.dumps(media, ensure_ascii=False) if media else None,
             ),
         )
@@ -825,7 +838,7 @@ async def add_question(
         }
         if read_conf < 0.3:
             result["hint"] = {
-                "lines": ["読み取り不十分", "近づけて再撮影", "してください"],
+                "lines": ["読み取り不十分", "近づけて再読取", "してください"],
             }
         return result
     finally:
