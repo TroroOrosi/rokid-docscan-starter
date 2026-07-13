@@ -1766,10 +1766,15 @@ def exam_finalize_reading(session_id: int) -> dict:
             "server_solved": server_solved,
             "locked": locked,
             "problems": deck,
-            # The camera is off either way at this instant (the double tap
-            # closed it); after a revert it only re-opens on the user's next
-            # two-finger tap (capture_read), keeping LED time minimal.
-            "camera": {"expected_state": "off", "privacy_led": "off"},
+            # Client intent after page registration. The server neither
+            # controls nor verifies the physical camera/LED state.
+            "camera": {
+                "expected_state": "off",
+                "privacy_led": "off",
+                "new_capture_required": False,
+                "server_controls_camera": False,
+                "state_verified": False,
+            },
             # Reverted -> the client must keep READING controls (double_tap =
             # finish_reading again), not the review bindings where the same
             # gesture means close — that would strand the re-scan loop.
