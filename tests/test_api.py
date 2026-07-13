@@ -171,3 +171,98 @@ def test_finalize_is_idempotent_per_page(client, monkeypatch):
     assert client.post(f"/v1/documents/{doc_id}/finalize").status_code == 200
     assert client.post(f"/v1/documents/{doc_id}/finalize").status_code == 200
     assert len(calls) == 2
+
+
+def test_reading_status_restores_persisted_pages_without_camera(client):
+    doc_id = _create_doc(client)
+
+    # Primary path: recognized text only, including the on-glass figure reading.
+    text_page = client.post(
+        f"/v1/documents/{doc_id}/pages",
+        data={
+            "page_index": "0",
+            "ocr_text": "問1  次の図を説明せよ",
+            "vision_text": "図1: 右上がりのグラフ",
+        },
+    )
+    assert text_page.status_code == 201
+
+    # Compatibility path: an image-backed page can coexist in the same document.
+    assert _add_page(
+        client, doc_id, 2, seed=30, ocr_text="問3 最後の問題"
+    ).status_code == 201
+
+    response = client.get(
+        f"/v1/documents/{doc_id}/reading-status",
+        params={"expected_total_pages": 3},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "open"
+    assert body["page_indexes"] == [0, 2]
+    assert body["expected_pages_complete"] is False
+    assert body["missing_page_indexes"] == [1]
+    assert body["unexpected_page_indexes"] == []
+    assert body["recommended_action"] == "read_missing_pages"
+    assert body["finalize_required"] is True
+    assert body["ready_for_use"] is False
+    assert body["camera"] == {"required": False, "expected_state": "off"}
+
+    first, third = body["pages"]
+    assert first["storage_kind"] == "text_only"
+    assert first["has_image"] is False
+    assert first["has_ocr_text"] is True
+    assert first["has_vision_text"] is True
+    assert first["summary_generated"] is False
+    assert "図1: 右上がりのグラフ" in first["preview"]
+    assert third["storage_kind"] == "image_backed"
+    assert third["has_image"] is True
+    assert third["has_ocr_text"] is True
+    assert third["has_vision_text"] is False
+
+
+def test_reading_status_distinguishes_unknown_count_and_finalized_state(client):
+    doc_id = _create_doc(client)
+    assert client.post(
+        f"/v1/documents/{doc_id}/pages",
+        data={"page_index": "0", "ocr_text": "問1 本文"},
+    ).status_code == 201
+
+    # Without the physical page count the API must not claim completeness.
+    unknown = client.get(
+        f"/v1/documents/{doc_id}/reading-status"
+    ).json()
+    assert unknown["expected_total_pages"] is None
+    assert unknown["expected_pages_complete"] is None
+    assert unknown["missing_page_indexes"] is None
+    assert unknown["recommended_action"] == "finalize"
+
+    assert client.post(f"/v1/documents/{doc_id}/finalize").status_code == 200
+    finalized = client.get(
+        f"/v1/documents/{doc_id}/reading-status",
+        params={"expected_total_pages": 1},
+    ).json()
+    assert finalized["status"] == "ready"
+    assert finalized["expected_pages_complete"] is True
+    assert finalized["summary_generated_count"] == 1
+    assert finalized["summaries_complete"] is True
+    assert finalized["finalize_required"] is False
+    assert finalized["ready_for_use"] is True
+    assert finalized["recommended_action"] == "continue"
+    assert finalized["pages"][0]["summary_generated"] is True
+
+
+@pytest.mark.parametrize("expected", [0, -1])
+def test_reading_status_rejects_invalid_expected_page_count(client, expected):
+    doc_id = _create_doc(client)
+    response = client.get(
+        f"/v1/documents/{doc_id}/reading-status",
+        params={"expected_total_pages": expected},
+    )
+    assert response.status_code == 400
+    assert response.json()["detail"] == "expected_total_pages must be >= 1"
+
+
+def test_reading_status_missing_document_404(client):
+    response = client.get("/v1/documents/9999/reading-status")
+    assert response.status_code == 404
