@@ -22,9 +22,8 @@ CREATE TABLE IF NOT EXISTS pages (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     document_id INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
     page_index  INTEGER NOT NULL,
-    -- Nullable: with "撮影しない" (no photography) a page has no image; the
-    -- on-glass AI recognizes it and sends the reading as text (image_path/phash
-    -- stay empty).
+    -- Primary scans store an image and pHash. Nullable preserves the limited
+    -- text-only compatibility path; those rows cannot participate in /v1/match.
     image_path  TEXT,
     phash       TEXT NOT NULL DEFAULT '',
     ocr_text    TEXT,
@@ -158,8 +157,8 @@ _EXAM_SESSION_MIGRATIONS = (
 
 
 # Rebuild `pages` to the current schema. Used to relax the original
-# `image_path TEXT NOT NULL` on databases created before 撮影しない (no
-# photography) text-only pages existed — SQLite can't drop a NOT NULL in place,
+# `image_path TEXT NOT NULL` on databases created before the supplemental
+# text-only compatibility path existed — SQLite can't drop a NOT NULL in place,
 # so we copy into a fresh table. This also introduces the `vision_text` column.
 _PAGES_REBUILD_SQL = """
 CREATE TABLE pages_new (
@@ -202,7 +201,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
             conn.execute(f"ALTER TABLE exam_sessions ADD COLUMN {name} {decl}")
 
     # pages: on a legacy DB, image_path was NOT NULL — rebuild the table so
-    # text-only (撮影しない) pages with image_path=NULL can be recorded. The
+    # supplemental text-only rows with image_path=NULL can be recorded. The
     # rebuild also adds vision_text; otherwise just add the column if missing.
     if _pages_image_path_not_null(conn):
         conn.executescript(_PAGES_REBUILD_SQL)
