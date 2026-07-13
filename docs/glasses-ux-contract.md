@@ -224,6 +224,9 @@ P02 読取済 ✓
 撮影完了 解答へ
 ```
 
+0問の場合はセッションを読取状態へ戻し、`capture_complete:false`・
+`new_capture_required:true` と「再読取してください」を返します。
+
 閲覧フェーズ（review デッキ・**一括 1 ストリーム**、`kind:"review"`）:
 
 ```
