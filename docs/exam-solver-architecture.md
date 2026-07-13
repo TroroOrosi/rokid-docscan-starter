@@ -22,22 +22,23 @@
 - **overlay**: `tracking:"2d_image_anchor"`・`fixed_ar:false`・`anchor_hint{page_number,box}` を機械可読化（6DoF 固定 AR は未対応＝ハード待ち）。
 - **reasoning**: `GET …/questions/{qid}/reasoning` で `raw_reasoning`＋`evidence`＋`served_by` を返す（HUD は短縮版のまま、`real` ロック準拠）。
 
-## 3 フェーズフロー（読取→一括解答→閲覧 / API 1.9.0・主経路）
+## 3 フェーズフロー（画像読取→一括解答→閲覧 / API 1.10.0・主経路）
 
-**主経路**。カメラ（＝プライバシー LED 点灯）は読取フェーズのみで、`finalize-reading` 以降は
-カメラを閉じる（LED 消灯）。解答の主体は**グラス搭載 AI（GPT）**で、サーバは分割・取り込み・
-整形・状態管理を担う。
+**主経路**。ページ画像を登録して pHash 照合可能な文書を作り、本体 AI の OCR・図認識結果を
+解答材料として添える。`finalize-reading` 以降は登録済みデータを使うため新規撮影を要求しない。
+解答の主体は**グラス搭載 AI（GPT）**で、サーバは分割・取り込み・整形・状態管理を担う。
 
 ```
-フェーズ1 読取（カメラON・LED点灯・最短化）
-  本体AIの視認テキスト ─▶ POST /pages(ocr_text, vision_text) ×N ─▶ finalize
+フェーズ1 画像読取
+  ページ画像＋本体AI認識 ─▶ POST /pages(image, ocr_text, vision_text) ×N
+  GET /scan-status ─▶ 欠番・画像なし・認識なしだけ再撮影 ─▶ finalize
   ダブルタップ ─▶ POST /finalize-reading ─▶ segment_problems(全ページ) ─▶ questions 行 ×問題数
-                                            status: open/reading → reviewing（以降カメラOFF）
-フェーズ2 解答（カメラOFF・一括）
+                                            status: open/reading → reviewing（新規撮影不要）
+フェーズ2 解答（登録済みデータ・一括）
   主経路: 搭載 GPT が全問解答 ─▶ POST /solutions（ingest, served_by="onboard"）
   任意:   ROKID_SOLVER=openai|gemini|claude ─▶ finalize-reading 内で全問を solve_with_fallback
           （各問とも context=_exam_prompt_context: 全ページ＋RAG＋(listening時)書き起こし＋書式指示）
-フェーズ3 閲覧（カメラOFF・LED消灯）
+フェーズ3 閲覧（登録済みデータ・新規撮影不要）
   GET /solutions（デッキ一覧） ─▶ GET /review?index=k&view_page=n
   build_review_view: 解答+解法+根拠+注意を一括1ストリーム（3行×テレプロンプター送り）
 リスニング: /audio(録音+任意transcript) ─▶ transcribe(openai/gemini or 与値) ─▶ transcript
@@ -51,7 +52,8 @@
   **デッキ（`GET /solutions`）の問題番号が ingest の正**。決定的・オフライン。
 - **status ライフサイクル**：`open`（既定・読取フェーズの別名）→ `reviewing`（`finalize-reading` で
   遷移）。`finalize-reading` は**冪等**（ジェスチャ二度撃ちで再分割しない）。応答の `camera` は
-  `{expected_state:"off", privacy_led:"off"}`。
+  クライアントへの期待状態 `{expected_state:"off", privacy_led:"off"}` であり、サーバが端末の物理状態を
+  制御・検証した結果ではない。
 - **onboard ingest（主経路）**：`POST /solutions` は問題別解答の配列
   `[{problem_no, problem_index?, answer, subject?, solution_steps?, rationale?, cautions?, answer_confidence?, page_number?}]`
   を受け、`solver_name="onboard"`・`served_by`（既定 `"onboard"`）で `solutions` 行を追加。
@@ -69,7 +71,7 @@
   読取完了宣言は guarded UPDATE で**競合安全**（二度撃ちでもデッキは 1 回だけ生成）。
   境界なし文書のフォールバック 1 問題には安定 id **「全体」** を合成（ingest から指名可能）。
 
-## 撮影レス・文書ページ移動型 exam ＋ 英語リスニング（二次経路・互換）
+## 文書ページ移動型 exam ＋ 英語リスニング（二次経路・互換）
 
 ページ移動で**現在ページを解く**従来経路（挙動不変で維持）。読取と閲覧が分離されないため、
 主経路よりカメラ稼働（LED 点灯）時間が長い。
@@ -82,17 +84,18 @@ exam-session(document_id, exam_type, answer_format)
                                                                    ▼ solve_with_fallback → glasses_view(3行段階)
 ```
 
-- **撮影しない取り込み**：`POST /v1/documents/{id}/pages` は本体 AI の認識結果を**テキスト**で受ける：
-  `ocr_text`（本文）＋`vision_text`（**図・グラフ・写真・見た目の読み取り**）。画像は送らない（`image_path=NULL`・
-  `phash=""`・`ocr_md5` はテキストから算出）。`image` は後方互換の任意項目で、添付時のみ pHash も算出し
-  `/v1/match` に使える。`ocr_text`／`vision_text`／画像のいずれも無ければ 400。
+- **画像を主とする取り込み**：`POST /v1/documents/{id}/pages` は `image` を保存して pHash を算出し、
+  本体 AI の `ocr_text`（本文）＋`vision_text`（図・グラフ・写真の読み取り）を補助情報として受ける。
+  テキストだけの入力は互換用に受理するが `image_path=NULL`・`phash=""` となり `/v1/match` には使えない。
+  `ocr_text`／`vision_text`／画像のいずれも無ければ 400。
 - **solve-current（全ページ記憶で解く・ページ跨ぎ対応）**：現在ページ（`current_page_index`）を**設問**、
   **文書の全ページ**を**文脈**にして解く。`Question.body_text` ＝ 現在ページの材料
   `_page_material(ocr_text, vision_text)`（本文＋「【図・画像の読み取り】…」）、`Question.context` ＝
   `_document_material()`（全ページを `【P01】…【Pnn◀現在ページ】…` で連結）＋横断 RAG＋（リスニング時）
   `session.transcript`＋`answer_format`（マーク/記述）指示を `_exam_prompt_context` で統合。`subject`＝現在ページ材料の
   `detect_subject`。問題が前後ページに跨っても全ページから読み取れる。解答は `questions`＋`solutions` に保存し
-  既存の `/view`（段階×ページ送り）・`/reasoning` がそのまま使える。`mode=real` ロック不変。**画像は送らない**。
+  既存の `/view`（段階×ページ送り）・`/reasoning` がそのまま使える。`mode=real` ロック不変。
+  `solve-current` の呼び出し時には新しい画像を送らず、登録済みページを使う。
 - **リスニング録音**：`POST …/{id}/audio`（`audio` ファイル＋任意 `transcript`）を `data/audio/` に保存。
   `app/transcribe.py` が `ROKID_TRANSCRIBER`（openai=`audio.transcriptions.create`、gemini=inline audio）で
   書き起こし。未設定/失敗/オフラインは**与えた `transcript` をそのまま使用**（クレデンシャル不要で成立）。
@@ -126,8 +129,9 @@ exam-session(document_id, exam_type, answer_format)
   - 追加列は既存 DB 向けに `init_db` の `_migrate()`（`ALTER TABLE ADD COLUMN`）で移行。
 - `questions`(question_no, body_text, choices_json, figure_refs, answer_box_json, structure_json, subject, read_conf, page_number, image_path, **media_json**)
 - `solutions`(answer, solution_steps_json, rationale, cautions, answer_conf, rationale_conf, evidence_pages_json, raw_reasoning, **served_by**, user_confirmed)
-- `pages`：`image_path` は **nullable**・`phash` 既定 `""`（撮影しないテキストページ用）。**`vision_text`**（新規）＝
-  本体 AI の図・画像の読み取り（テキスト）。既存 DB 向けに `_migrate()` が `pages` にも `ALTER TABLE ADD COLUMN` で移行。
+- `pages`：`image_path` と `phash` が画像読取・照合の主データ。`image_path` は限定的なテキスト-only互換入力のため
+  **nullable**、`phash` 既定 `""`。`vision_text` は本体 AI の図・画像の読み取り（テキスト）。既存 DB 向けに
+  `_migrate()` が `pages` にも `ALTER TABLE ADD COLUMN` で移行。
 - `questions`(..., **body_text**＝現在ページ材料＝OCR＋図の読み取り)。
 
 既存 `documents`/`pages` はページ照合モード用にそのまま維持。
@@ -143,7 +147,7 @@ exam-session(document_id, exam_type, answer_format)
 | GET | `/v1/exam-sessions/{id}/review?index=&view_page=` | **問題別閲覧 HUD**（解答+解法+根拠+注意を一括1ストリーム・クランプ・未解答プレースホルダ） |
 | POST | `/v1/exam-sessions/{id}/mode` | **筆記 ⇄ リスニング** 切替（`{"exam_type":...}`） |
 | POST | `/v1/exam-sessions/{id}/audio` | **リスニング録音**アップロード（`audio`＋任意`transcript`）→ 書き起こし保存 |
-| POST | `/v1/exam-sessions/{id}/next-page` / `prev-page` | 文書ページ移動（二次経路。現在ページ ±1・クランプ・撮影なし） |
+| POST | `/v1/exam-sessions/{id}/next-page` / `prev-page` | 登録済み文書のページ移動（二次経路。現在ページ ±1・クランプ・新規撮影なし） |
 | GET | `/v1/exam-sessions/{id}/current` | 現在ページ把握（二次経路。科目・プレビュー・画像有無） |
 | POST | `/v1/exam-sessions/{id}/solve-current` | 現在ページを解く（二次経路。listening 時は書き起こしを統合）→ `glasses_view` |
 | POST | `/v1/exam-sessions/{id}/questions` | 問題画像＋任意OCR/bbox → 構造化・科目推定・`media`抽出（互換） |
@@ -151,7 +155,7 @@ exam-session(document_id, exam_type, answer_format)
 | GET | `/v1/exam-sessions/{id}/questions/{qid}/view?stage=&page=` | 段階×ページ送り取得（互換） |
 | GET | `/v1/exam-sessions/{id}/questions/{qid}/reasoning` | フル推論ログ（案9、HUD非表示・real ロック準拠） |
 | GET | `/v1/exam-sessions/{id}` | セッション状態（`phase`/`document_id`/`exam_type`/`problem_count`/`solved_count`＋解答済み一覧） |
-| GET | `/v1/settings` | 無音契約・操作/入力/キャプチャ契約・音声トグル・real ロックの公示 |
+| GET | `/v1/settings` | HUD・操作/入力・画像優先キャプチャ契約・端末管理項目・real ロックの公示 |
 | GET | `/v1/version` | 契約バージョン＋ analyzers/solvers/extractors 一覧 |
 
 ## 信頼度の分離（案7）
@@ -163,10 +167,10 @@ exam-session(document_id, exam_type, answer_format)
 ## バージョン契約（`app/version.py`）
 
 `SOLVER_API_VERSION` / `EXTRACTOR_API_VERSION` / `GLASSES_VIEW_CONTRACT_VERSION` /
-`OVERLAY_CONTRACT_VERSION` を契約ごとに管理。`API_VERSION` は現在 `1.9.0`
-（再読取＝ページ置換・0問題時の読取フェーズ復帰・セッション GET のロック整合を追加）、`APP_VERSION` は `0.9.0`。
-`GLASSES_VIEW_CONTRACT_VERSION` は `1.4.0`（`kind:"review"` の一括ストリーム view・reading_ack・
-公式ジェスチャ語彙）。クライアントは `GET /v1/version` でネゴシエート
+`OVERLAY_CONTRACT_VERSION` を契約ごとに管理。`API_VERSION` は現在 `1.10.0`、`APP_VERSION` は `0.10.0`。
+画像読取を主経路として明示し、`scan-status` で再接続時・finalize 前の不足ページを確認できる。
+`GLASSES_VIEW_CONTRACT_VERSION` は `1.5.0`（画像優先キャプチャ契約と端末管理項目を追加）。
+クライアントは `GET /v1/version` でネゴシエート
 （`solvers`/`extractors` 等に `openai`/`gemini`/`claude` が並ぶ）。
 
 ## 評価ベンチ（案12）
