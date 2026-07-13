@@ -412,6 +412,121 @@ async def add_page(
             _unlink_best_effort(pending_image_path)
 
 
+@app.get("/v1/documents/{document_id}/reading-status")
+def get_document_reading_status(
+    document_id: int,
+    expected_total_pages: int | None = None,
+) -> dict:
+    """Restore server-side reading progress without opening the camera.
+
+    The CXR-L relay can call this after reconnecting or immediately after the
+    user closes the camera, before /finalize. It reports exactly what the
+    server has persisted for every page: text-only vs compatibility image,
+    OCR/figure-reading presence, recognition preview, and summary state.
+
+    expected_total_pages is optional because the server cannot infer the
+    physical document's page count. When supplied, missing/unexpected indexes
+    and expected_pages_complete are deterministic; when omitted those fields
+    are None rather than falsely claiming that reading is complete.
+    """
+    if expected_total_pages is not None and expected_total_pages <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail="expected_total_pages must be >= 1",
+        )
+
+    conn = db.connect()
+    try:
+        doc = _doc_or_404(conn, document_id)
+        rows = conn.execute(
+            "SELECT id, page_index, image_path, ocr_text, vision_text, summary "
+            "FROM pages WHERE document_id = ? ORDER BY page_index",
+            (document_id,),
+        ).fetchall()
+
+        page_indexes = [r["page_index"] for r in rows]
+        page_index_set = set(page_indexes)
+        if expected_total_pages is None:
+            missing_page_indexes = None
+            unexpected_page_indexes = None
+            expected_pages_complete = None
+        else:
+            expected_indexes = set(range(expected_total_pages))
+            missing_page_indexes = sorted(expected_indexes - page_index_set)
+            unexpected_page_indexes = sorted(page_index_set - expected_indexes)
+            expected_pages_complete = not (
+                missing_page_indexes or unexpected_page_indexes
+            )
+
+        pages: list[dict] = []
+        summary_generated_count = 0
+        for r in rows:
+            ocr = (r["ocr_text"] or "").strip()
+            vision = (r["vision_text"] or "").strip()
+            material = _page_material(ocr, vision)
+            preview = re.sub(r"\s+", " ", material).strip()[:120]
+            summary_generated = r["summary"] is not None
+            summary_generated_count += int(summary_generated)
+            pages.append(
+                {
+                    "page_id": r["id"],
+                    "page_index": r["page_index"],
+                    "storage_kind": (
+                        "image_backed" if r["image_path"] else "text_only"
+                    ),
+                    "has_image": bool(r["image_path"]),
+                    "has_ocr_text": bool(ocr),
+                    "has_vision_text": bool(vision),
+                    "recognized_chars": len(ocr) + len(vision),
+                    "preview": preview,
+                    "summary_generated": summary_generated,
+                }
+            )
+
+        page_count = len(rows)
+        summaries_complete = (
+            page_count > 0 and summary_generated_count == page_count
+        )
+        finalized = doc["status"] == "ready"
+        if page_count == 0:
+            recommended_action = "resume_reading"
+        elif expected_pages_complete is False:
+            recommended_action = "read_missing_pages"
+        elif not finalized or not summaries_complete:
+            recommended_action = "finalize"
+        else:
+            recommended_action = "continue"
+
+        return {
+            "document_id": document_id,
+            "title": doc["title"],
+            "status": doc["status"],
+            "page_count": page_count,
+            "page_indexes": page_indexes,
+            "expected_total_pages": expected_total_pages,
+            "expected_pages_complete": expected_pages_complete,
+            "missing_page_indexes": missing_page_indexes,
+            "unexpected_page_indexes": unexpected_page_indexes,
+            "summary_generated_count": summary_generated_count,
+            "summaries_complete": summaries_complete,
+            "finalize_required": bool(rows) and (
+                not finalized or not summaries_complete
+            ),
+            "ready_for_use": (
+                finalized
+                and summaries_complete
+                and expected_pages_complete is not False
+            ),
+            "recommended_action": recommended_action,
+            "pages": pages,
+            "camera": {"required": False, "expected_state": "off"},
+            "operations": dict(READING_OPERATIONS),
+            "versions": version_info(),
+        }
+    finally:
+        conn.close()
+
+
 @app.post("/v1/documents/{document_id}/finalize")
 def finalize_document(document_id: int) -> dict:
     conn = db.connect()
