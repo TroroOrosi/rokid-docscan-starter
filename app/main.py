@@ -466,22 +466,53 @@ def finalize_document(document_id: int) -> dict:
 @app.post("/v1/match")
 async def match_page(
     document_id: int = Form(...),
-    image: UploadFile = File(...),
+    ocr_text: str | None = Form(None),
+    vision_text: str | None = Form(None),
     fast_ocr_text: str | None = Form(None),
+    image: UploadFile | None = File(None),
     client_version: str | None = Form(None),
     sdk_hint: str | None = Form(None),
 ) -> dict:
+    """Match the page currently in view against the registered pages.
+
+    撮影しない: the primary query is the on-glass AI's on-the-spot recognition
+    (``ocr_text``, plus ``vision_text`` when only figures were readable) — no
+    photo is taken. ``fast_ocr_text`` is the legacy alias for ``ocr_text``.
+    ``image`` is an optional backward-compat input (非推奨): when attached, the
+    historical pHash comparison is used for image-registered pages.
+    """
+    query_text = ocr_text if (ocr_text and ocr_text.strip()) else fast_ocr_text
+    has_text = bool(query_text and query_text.strip()) or bool(
+        vision_text and vision_text.strip()
+    )
+    has_image = image is not None and getattr(image, "filename", None)
+    if not has_image and not has_text:
+        raise HTTPException(
+            status_code=400,
+            detail="match needs ocr_text/vision_text (recognized text) "
+            "or a legacy image",
+        )
     conn = db.connect()
     try:
         _doc_or_404(conn, document_id)
-        raw = await _read_upload_limited(image)
-        img = _load_image(raw)
-
-        q_phash = phash_hex(img)
-        q_md5 = _fallback_md5(ocr_md5(fast_ocr_text), raw)
+        if has_image:
+            raw = await _read_upload_limited(image)
+            img = _load_image(raw)
+            q_phash: str | None = phash_hex(img)
+            q_md5 = _fallback_md5(ocr_md5(query_text), raw)
+        else:
+            # 撮影しない: no image, no pHash. Mirror add_page's dedupe rule so
+            # the exact-MD5 shortcut fires against stored text pages.
+            q_phash = None
+            dedupe_src = (
+                query_text if (query_text and query_text.strip())
+                else (vision_text or "")
+            )
+            q_md5 = ocr_md5(dedupe_src) or hashlib.md5(dedupe_src.encode()).hexdigest()
 
         rows = conn.execute(
-            "SELECT id, page_index, phash, ocr_md5, ocr_text, summary FROM pages "
+            "SELECT id, page_index, phash, ocr_md5, ocr_text, vision_text, "
+            "summary FROM pages "
             "WHERE document_id = ? ORDER BY page_index",
             (document_id,),
         ).fetchall()
@@ -491,24 +522,23 @@ async def match_page(
                 page_index=r["page_index"],
                 phash=r["phash"],
                 ocr_md5=r["ocr_md5"],
-                ocr_text=normalize_ocr_text(r["ocr_text"]),
+                # Mirror the stored-md5 source rule: figure-only pages carry
+                # their recognition in vision_text.
+                ocr_text=(
+                    normalize_ocr_text(r["ocr_text"])
+                    or normalize_ocr_text(r["vision_text"])
+                ),
             )
             for r in rows
-            # Skip 撮影しない text-only pages (no image → empty phash); they are
-            # not image-match candidates and would break hamming()'s int(phash,16).
-            if r["phash"]
         ]
         summaries = {r["id"]: r["summary"] for r in rows}
 
         best, verdict, scored = match(
-            q_phash, q_md5, candidates, query_ocr_text=fast_ocr_text
+            q_phash, q_md5, candidates, query_ocr_text=query_text or vision_text
         )
         hud = build_hud(
             verdict,
             best,
-            # Text-only pages are not image-match candidates, but they still
-            # belong to the document. Using candidate count could render an
-            # impossible label such as PAGE 2/1 in a mixed document.
             total_pages=len(rows),
             summary=summaries.get(best.page_id) if best else None,
         )
@@ -516,6 +546,7 @@ async def match_page(
         return {
             "document_id": document_id,
             "query_phash": q_phash,
+            "query_signals": {"phash": q_phash is not None, "text": has_text},
             "verdict": verdict,
             "versions": {
                 **version_info(),

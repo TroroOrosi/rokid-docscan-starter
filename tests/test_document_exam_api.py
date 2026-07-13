@@ -147,8 +147,13 @@ def test_create_rejects_unfinalized_document(client):
     ).status_code == 400
 
 
-def test_match_ignores_camera_free_pages(client):
-    """A document mixing a text-only page and an image page must still match."""
+def test_match_scores_camera_free_pages_by_text(client):
+    """A document mixing a text-only page and an image page must still match.
+
+    撮影しない text-only pages are first-class /match candidates now (scored
+    by their recognized text); the pHash comparison only applies between two
+    image-backed sides.
+    """
     doc_id = _new_doc(client)
     _add_text_page(client, doc_id, 0, "撮影しないテキストページ")  # phash=""
     files = {"image": ("p.png", image_bytes(make_image(seed=7)), "image/png")}
@@ -165,7 +170,13 @@ def test_match_ignores_camera_free_pages(client):
         files={"image": ("q.png", image_bytes(make_image(seed=7)), "image/png")},
     )
     assert r.status_code == 200, r.text
-    assert r.json()["verdict"] in ("HIT", "LOW_CONF", "NO_PAGE")
+    body = r.json()
+    assert body["verdict"] in ("HIT", "LOW_CONF", "NO_PAGE")
+    # both pages were scored — the text-only one with hamming: null
+    assert len(body["candidates"]) == 2
+    hammings = {c["page_index"]: c["hamming"] for c in body["candidates"]}
+    assert hammings[0] is None
+    assert isinstance(hammings[1], int)
 
 
 # --- page navigation --------------------------------------------------------

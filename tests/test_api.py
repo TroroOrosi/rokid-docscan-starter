@@ -103,8 +103,8 @@ def test_match_no_page(client):
 
 def test_match_hud_counts_text_only_pages_in_mixed_document(client):
     doc_id = _create_doc(client)
-    # Page 0 follows the primary no-photography path and is not a /match
-    # candidate. Page 1 keeps the optional compatibility image.
+    # Page 0 follows the primary no-photography path (scored by text only).
+    # Page 1 keeps the optional compatibility image.
     assert client.post(
         f"/v1/documents/{doc_id}/pages",
         data={"page_index": 0, "ocr_text": "text-only page"},
@@ -143,6 +143,127 @@ def test_missing_document_404(client):
     files = {"image": ("q.png", image_bytes(make_image(seed=1)), "image/png")}
     r = client.post("/v1/match", data={"document_id": "9999"}, files=files)
     assert r.status_code == 404
+
+
+# --- text-first /match (撮影しない主経路) ------------------------------------
+
+def _add_text_only_page(client, doc_id, idx, ocr_text=None, vision_text=None):
+    data = {"page_index": str(idx)}
+    if ocr_text is not None:
+        data["ocr_text"] = ocr_text
+    if vision_text is not None:
+        data["vision_text"] = vision_text
+    return client.post(f"/v1/documents/{doc_id}/pages", data=data)
+
+
+def test_match_text_only_hits_registered_text_page(client):
+    doc_id = _create_doc(client)
+    _add_text_only_page(client, doc_id, 0, ocr_text="問1 二次方程式を解け")
+    _add_text_only_page(client, doc_id, 1, ocr_text="問2 図形の面積を求めよ")
+    client.post(f"/v1/documents/{doc_id}/finalize")
+
+    r = client.post(
+        "/v1/match",
+        data={"document_id": str(doc_id), "ocr_text": "問2 図形の面積を求めよ"},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["verdict"] == "HIT"
+    assert body["best_page"]["page_index"] == 1
+    assert body["best_page"]["hamming"] is None
+    assert body["query_phash"] is None
+    assert body["query_signals"] == {"phash": False, "text": True}
+    assert body["hud"]["lines"][0] == "PAGE 2/2"
+
+
+def test_match_text_only_partial_text_is_low_conf(client):
+    doc_id = _create_doc(client)
+    _add_text_only_page(
+        client, doc_id, 0, ocr_text="alpha beta gamma delta epsilon zeta"
+    )
+    client.post(f"/v1/documents/{doc_id}/finalize")
+
+    body = client.post(
+        "/v1/match",
+        data={
+            "document_id": str(doc_id),
+            "ocr_text": "alpha beta gamma delta unknown tail",
+        },
+    ).json()
+    assert body["verdict"] == "LOW_CONF"
+    assert body["best_page"] is None or body["verdict"] != "NO_PAGE"
+
+
+def test_match_text_only_unrelated_text_no_page(client):
+    doc_id = _create_doc(client)
+    _add_text_only_page(client, doc_id, 0, ocr_text="invoice 2026 total")
+    client.post(f"/v1/documents/{doc_id}/finalize")
+
+    body = client.post(
+        "/v1/match",
+        data={
+            "document_id": str(doc_id),
+            "ocr_text": "zzz qqq unrelated words entirely",
+        },
+    ).json()
+    assert body["verdict"] == "NO_PAGE"
+
+
+def test_match_requires_text_or_image_400(client):
+    doc_id = _create_doc(client)
+    r = client.post("/v1/match", data={"document_id": str(doc_id)})
+    assert r.status_code == 400
+    assert "recognized text" in r.json()["detail"]
+
+
+def test_match_fast_ocr_text_alias_still_works(client):
+    # Legacy field name, now usable without an image.
+    doc_id = _create_doc(client)
+    _add_text_only_page(client, doc_id, 0, ocr_text="the only page here")
+    client.post(f"/v1/documents/{doc_id}/finalize")
+
+    body = client.post(
+        "/v1/match",
+        data={"document_id": str(doc_id), "fast_ocr_text": "the only page here"},
+    ).json()
+    assert body["verdict"] == "HIT"
+    assert body["best_page"]["page_index"] == 0
+
+
+def test_match_image_compat_path_unchanged(client):
+    # The optional legacy image input must keep matching image-registered
+    # pages by pHash exactly as before.
+    doc_id = _create_doc(client)
+    _add_page(client, doc_id, 0, seed=10, ocr_text="page one")
+    client.post(f"/v1/documents/{doc_id}/finalize")
+
+    files = {"image": ("q.png", image_bytes(make_image(seed=10)), "image/png")}
+    body = client.post(
+        "/v1/match", data={"document_id": str(doc_id)}, files=files
+    ).json()
+    assert body["verdict"] == "HIT"
+    assert body["best_page"]["hamming"] == 0
+    assert body["query_signals"] == {"phash": True, "text": False}
+
+
+def test_match_vision_text_fallback_matches_figure_only_page(client):
+    # A page whose recognition is only the figure reading (vision_text) must
+    # be matchable by the same figure reading.
+    doc_id = _create_doc(client)
+    _add_text_only_page(
+        client, doc_id, 0, vision_text="棒グラフ 縦軸は人口 横軸は年度"
+    )
+    client.post(f"/v1/documents/{doc_id}/finalize")
+
+    body = client.post(
+        "/v1/match",
+        data={
+            "document_id": str(doc_id),
+            "vision_text": "棒グラフ 縦軸は人口 横軸は年度",
+        },
+    ).json()
+    assert body["verdict"] == "HIT"
+    assert body["best_page"]["page_index"] == 0
 
 
 def test_finalize_is_idempotent_per_page(client, monkeypatch):
