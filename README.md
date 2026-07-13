@@ -72,7 +72,7 @@ rokid-docscan-starter/
 │   ├── summarize.py   # 要約シム（analyzer に委譲）
 │   ├── explainer.py   # Explainer ポート（ExplainRequest / ExplainResult / ABC）
 │   ├── llm.py         # ★実 AI ブリッジ（openai/gemini/claude、遅延import・注入可）
-│   ├── version.py     # 各契約バージョン（app 0.9.0 / api 1.9.0 ほか）
+│   ├── version.py     # 各契約バージョン（app 0.10.0 / api 1.10.0 ほか）
 │   ├── config.py      # 保存先・フィーチャーフラグ（ROKID_* / ANTHROPIC_API_KEY / ROKID_TRANSCRIBER）
 │   ├── transcribe.py  # ★リスニング録音の書き起こし（openai/gemini・未設定時は与値）
 │   ├── db.py          # sqlite3（documents/pages/exam/explain テーブル）
@@ -380,12 +380,12 @@ python scripts/eval_exam.py --synthetic 5 --out /tmp/exam_eval.json
 ```
 フェーズ1 画像スキャン
   2本指タップ×ページ数 → /pages に image+ocr_text+vision_text を登録（画像保存・pHash生成）
-  ダブルタップ（読取完了宣言）        → POST /finalize-reading（以降カメラOFF＝LED消灯）
-フェーズ2 解答（カメラOFF・自動）
+  /scan-statusで不足だけ再撮影 → ダブルタップ → POST /finalize-reading
+フェーズ2 解答（登録済みデータ・自動）
   文書を問題単位に分割（問N/大問 境界・ページ跨ぎ対応・全ページを文脈に）
   主経路: 搭載 GPT が全問を解き POST /solutions で取り込み（served_by="onboard"）
   任意:   ROKID_SOLVER=openai|gemini|claude ならサーバが finalize-reading 内で全問一括解答
-フェーズ3 閲覧（カメラOFF・LED消灯）
+フェーズ3 閲覧（登録済みデータ・新規撮影不要）
   GET /solutions … 問題別レビューデッキ（問番号・教科・解答済み・確信度）
   GET /review?index=k&view_page=n … 1問題＝解答+解法+根拠+注意を一括1ストリーム表示
   2本指スワイプ左右=前後の問題 / 2本指スワイプ上下=テレプロンプター送り / ダブルタップ=終了
@@ -402,7 +402,7 @@ curl -s -X POST http://127.0.0.1:8000/v1/documents/1/finalize
 curl -s -X POST http://127.0.0.1:8000/v1/exam-sessions -H 'Content-Type: application/json' \
   -d '{"mode":"study","document_id":1,"exam_type":"written","answer_format":"mark"}'
 
-# 読取完了宣言（ダブルタップ）→ 問題分割・カメラOFF（LED消灯）
+# 読取完了宣言（ダブルタップ）→ 問題分割（以降は登録済みデータを利用）
 curl -s -X POST http://127.0.0.1:8000/v1/exam-sessions/1/finalize-reading
 
 # フェーズ2) 搭載 GPT の問題別解答を取り込み（主経路）
