@@ -100,7 +100,7 @@
 |----------|------|---------------|--------------|-------------|
 | 1 読取 | 読取開始（文書作成） | （初回 2本指タップに連動・中継が自動発行） | — | `POST /v1/documents` |
 | 1 読取 | ページを視認＝読取 | **2本指タップ**（AI起動） | `capture_read` | 本体 AI → `POST /documents/{id}/pages`（scan_ack） |
-| 1 読取 | **読取完了宣言** | **ダブルタップ** | `finish_reading` | 中継の自動チェーン: `POST /documents/{id}/finalize` → `POST /exam-sessions` → `POST /exam-sessions/{id}/finalize-reading`（→カメラOFF） |
+| 1 読取 | **読取完了宣言** | **ダブルタップ** | `finish_reading` | 中継の自動チェーン: `POST /documents/{document_id}/finalize` → `POST /exam-sessions`（`session_id` を取得）→ `POST /exam-sessions/{session_id}/finalize-reading`（→カメラOFF） |
 | 2 解答 | 筆記 ⇄ リスニング切替 | **長押し**（録画⇄録音） | `mode_toggle` | `POST /exam-sessions/{id}/mode` |
 | 2 解答 | リスニング録音 開始/停止 | **長押し**（listening 中） | `record_toggle` | `POST /exam-sessions/{id}/audio` |
 | 2 解答 | （自動）搭載 GPT が全問解答 | — | — | `POST /exam-sessions/{id}/solutions`（ingest） |

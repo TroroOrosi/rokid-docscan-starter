@@ -136,7 +136,7 @@ uvicorn app.main:app --port 8000
 |--------------------|-----------------|----------------------|----------------|
 | 読取開始（最初の2本指タップに連動・**中継が自動発行**） | — | `POST /v1/documents`（文書作成） | — |
 | ページ視認＝読取（2本指タップ） | `com.rokid.sprite.aiapp`（AI Interaction） | `POST /v1/documents/{id}/pages`（`ocr_text`/`vision_text`） | `scan_ack`（進捗） |
-| 読取完了宣言（ダブルタップ・**中継が自動チェーン**） | — | `POST /v1/documents/{id}/finalize` → `POST /v1/exam-sessions` → `POST /v1/exam-sessions/{id}/finalize-reading` | `reading_ack`（カメラOFF） |
+| 読取完了宣言（ダブルタップ・**中継が自動チェーン**） | — | `POST /v1/documents/{document_id}/finalize` → `POST /v1/exam-sessions`（応答の `session_id` を取得）→ `POST /v1/exam-sessions/{session_id}/finalize-reading` | `reading_ack`（カメラOFF） |
 | 本体 GPT の問題別解答を送る | `com.rokid.sprite.aiapp` | `POST /v1/exam-sessions/{id}/solutions` | `ingest_ack`（N/M問 解答済） |
 | 問題別閲覧（2本指スワイプ） | — | `GET /v1/exam-sessions/{id}/review?index=&view_page=` | `glasses_view`（一括1ストリーム） |
 | カメラ1フレーム取得（照合時のみ） | `IMediaStreamService`（AIDL） | `POST /v1/match`（画像＋`fast_ocr_text`） | `hud.lines`（3行） |
@@ -149,6 +149,10 @@ uvicorn app.main:app --port 8000
   ジェスチャ未割当（`OPERATION_CONTRACT` に載らない）で、上表のとおり読取開始/読取完了宣言に
   連動して**中継アプリが自動発行**する。ユーザーの入力はグラスのジェスチャのみ——
   「操作はグラス単独で完結」はこの中継責務まで実装して成立する（サーバ契約は不変）。
+  **チェーンの後段（exam セッション作成 → finalize-reading）は解答モードに入るときだけ**続け、
+  解説（explain-sessions）・照合（/v1/match）用の文書登録は `/finalize` で止める
+  （non-local `ROKID_SOLVER` 設定時、finalize-reading は全問題をサーバ解答するため、
+  非 exam 用途に想定外のモデル呼び出しが走る）。
 
 ---
 

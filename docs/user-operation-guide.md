@@ -23,7 +23,7 @@
 | U2 | デバッグ環境（ADB / ケーブル） | Android コンパニオン端末を USB デバッグ可能にし、`adb devices` で認識 | `adb devices` に端末が出る |
 | U3 | グラスのペアリング | Rokid Glasses と端末を BLE/Wi-Fi でペアリング、ファーム/アプリ更新 | グラスにカメラ映像/HUD が出る |
 | U4 | 資料の全ページ視認読取（読取フェーズ・**撮影しない**） | 2本指タップ（AI起動）で各ページを視認し、本体 AI の認識テキスト（`ocr_text`＋図の読み取り `vision_text`）を1ページずつ登録（写真は撮らない）。**全ページを見終えたらダブルタップ（読取完了宣言）**——これを受けた中継アプリが `/finalize` を自動発行する（人間が HTTP を直接呼ぶのはサーバ単体検証のときだけ） | 各ページのテキストが登録され、`status=ready` になる |
-| U5 | 読取品質チェック | 認識テキストに本文・設問・図表の説明が過不足なく含まれるかを scan_ack / `/current` で確認 | §「読取チェックリスト」を満たす |
+| U5 | 読取品質チェック | 認識テキストに本文・設問・図表の説明が過不足なく含まれるかを scan_ack / `/current` で確認（**ダブルタップ=読取完了宣言の前に**行う——宣言後のページ差し替えは新文書での再読取が必要） | §「読取チェックリスト」を満たす |
 | U6 | プライバシー同意 | 読取中のカメラ稼働（LED 点灯）・認識テキストの保存・（クラウド送信する場合）外部送信について利用者同意を取得 | 同意ログ/同意UIが用意されている |
 | U7 | クラウド vs ローカルモデルの選択 | サーバ側 AI を使う場合のプロバイダ（openai / gemini / claude）かローカルかを決める（主経路の搭載 GPT はサーバ鍵不要） | §「操作後に必要な設計判断」D2 を決定 |
 | U8 | 検証（バリデーション）実行 | 読取サンプルで精度を確認（照合の評価は画像を使う任意経路 `/match` 用） | `scripts/evaluate.py` の accuracy を確認 |
@@ -62,10 +62,15 @@
 > **呼び出し主体**: 上記 1〜4 の HTTP はすべて**中継アプリ（CXR-L プラグイン）が発行**します
 > （サーバ単体検証では curl 等で代行）。ユーザーの入力はグラスのジェスチャのみ——手順 1 は
 > 読取開始（最初の 2本指タップ）で自動作成、手順 2〜3 は 2本指タップごと、手順 4 は
-> **ダブルタップ（読取完了宣言）を受けた中継アプリの自動チェーン**
-> （`/finalize` → exam セッション作成 → `/finalize-reading`）の先頭として呼ばれます
+> ダブルタップ（読取完了宣言）に連動して呼ばれます
 > （[cxr-l-integration.md](cxr-l-integration.md) §5）。この中継責務まで含めて
 > 「操作はグラス単独で完結」が成立します。
+>
+> **チェーンの後段は解答モード限定**: ダブルタップの自動チェーンで `/finalize` の後に
+> exam セッション作成 → `/finalize-reading` まで続けるのは**解答モード（§5-C）に入るときだけ**。
+> 解説（explain-sessions）・照合（/v1/match）用の登録では **`/finalize` で止める**こと——
+> 不要な exam セッションを作るうえ、non-local `ROKID_SOLVER` 設定時は `finalize-reading` が
+> 全問題をサーバ解答し、非 exam 用途に想定外のモデル呼び出し・遅延・課金が発生します。
 
 > **完了確認**: `/finalize` のレスポンスに `page_count` と各ページの `summaries` が返ります。
 > 期待するページ数と一致していることを確認してから次のフェーズに進んでください。
@@ -212,8 +217,9 @@
 1. 読取開始（最初の2本指タップ）: 中継が POST /v1/documents を自動作成
 2. 2本指タップ（AI起動=視認）×全ページ → POST /pages（scan_ack で進捗）
 3. ダブルタップ（読取完了宣言）→ 中継の自動チェーン:
-   POST /v1/documents/{id}/finalize → POST /v1/exam-sessions {"mode":"study","document_id":N,...}
-   → POST /finalize-reading
+   POST /v1/documents/{document_id}/finalize
+   → POST /v1/exam-sessions {"mode":"study","document_id":N,...}（応答の session_id を取得）
+   → POST /v1/exam-sessions/{session_id}/finalize-reading
    → 問題分割・デッキ作成・「読取完了 / N問を検出 / カメラOFF 解答へ」→ 以降 LED 消灯
 
 フェーズ2 解答（カメラOFF・自動）
@@ -229,6 +235,13 @@
 
 > **real モード**: `ROKID_ALLOW_REAL_EXAM_SOLVE=1` が未設定の場合、解答は表示・保存されません
 > （ingest・デッキ・閲覧もロック。不正利用防止）。
+
+> **読取品質チェック（U5）は手順 3 のダブルタップ前に行うこと**。`finalize-reading` で
+> セッションが reviewing になった後は、同一文書のページ差し替え（同一 `page_index` の再送）も
+> 409 で拒否されます（デッキは旧テキストから分割済みのため）。ダブルタップ後に読取不良に
+> 気づいた場合の是正は、**新しい文書を作って再読取**（`POST /v1/documents` からやり直し）です。
+> 例外は 0 問分割のとき——セッションが読取フェーズへ自動差し戻しされ、同一文書のまま
+> 再読取→再ダブルタップできます。
 
 ### 5-D. 解答モード（互換・二次経路）
 
@@ -270,10 +283,12 @@ POST /next-page / /prev-page → GET /current → POST /solve-current
 `finalize-reading` がサーバ側で全問一括解答します。
 
 > **範囲の注意（読取だけは高性能化できない）**: 「撮影しない」原則により画像はサーバに
-> 届かないため、サーバ側アダプタで肩代わりできるのは**解答・解説・要約・抽出・書き起こし**
-> です。読取（`ocr_text`/`vision_text` の認識品質）は本体 AI に固定され、読取不良の救済は
-> 同一 `page_index` の再視認（置換・`replaced:true`）のみです。解答は `POST /solutions` の
-> 再 ingest（latest wins）で、より高性能なモデルの結果に後から上書きできます。
+> 届かないため、サーバ側アダプタで肩代わりできるのは**解答・解説・要約・書き起こし**です。
+> 読取（`ocr_text`/`vision_text` の認識品質）は本体 AI に固定され、読取不良の救済は
+> 同一 `page_index` の再視認（置換・`replaced:true`。`finalize-reading` 後は新文書で再読取）
+> のみです。解答は `POST /solutions` の再 ingest（latest wins）で、より高性能なモデルの結果に
+> 後から上書きできます。なお **`ROKID_EXTRACTOR`（メディア抽出）が使われるのは設問画像
+> アップロード互換経路（`POST /questions`）だけ**で、撮影しない主経路では呼ばれません。
 
 ```bash
 pip install openai                          # または google-genai / anthropic

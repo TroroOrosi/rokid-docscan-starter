@@ -152,9 +152,9 @@ POST /v1/documents（読取開始＝初回2本指タップで中継が自動作�
 2本指タップ(two_finger_tap=AI起動・視認) ×全ページ
   → 本体AIの認識を POST .../pages (ocr_text[, vision_text])（scan_ack で進捗表示）
 ダブルタップ(double_tap=読取完了宣言) → 中継の自動チェーン:
-  POST /v1/documents/{id}/finalize
-  → POST /v1/exam-sessions {mode:"study", document_id, exam_type:"written", answer_format:"mark"}
-  → POST .../finalize-reading
+  POST /v1/documents/{document_id}/finalize
+  → POST /v1/exam-sessions {mode:"study", document_id, ...}（応答の session_id を取得）
+  → POST /v1/exam-sessions/{session_id}/finalize-reading
   → 問題分割・デッキ作成・reading_ack「読取完了/N問を検出/カメラOFF 解答へ」
   → ここでカメラを閉じる＝LED消灯（応答の camera.privacy_led=="off" を確認）
 
