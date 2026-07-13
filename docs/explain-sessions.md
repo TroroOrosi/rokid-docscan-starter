@@ -1,26 +1,24 @@
 # 資料解説モード（explain-sessions）仕様書
 
-**UX 第 v1.7 世代**の撮影なし設計（HTTP エンベロープは現在 `API_VERSION = 1.9.0`、
-`APP_VERSION = 0.9.0`）。登録済み文書を Rokid Glasses
+**API 1.10.0 / APP 0.10.0**。事前にページ画像を撮影・登録して finalize した文書を、Rokid Glasses
 **単体でページナビゲーション→解説を HUD に段階表示**する機能です。
 
-**撮影なし・画像送信なし・音声不要・フラッシュなし・スマホ画面なしで完結します。**
+解説セッション中は登録済み画像・OCR・要約を再利用するため、**新規撮影や新しい画像送信を要求しません**。
 
-> 設計原則: Rokid ネイティブの「映っている物体の解説」体験と同様に、
-> ユーザーはカメラボタンを押さず、ページ送りボタンだけで資料を読み進めます。
-> サーバーは `current_page_index` カウンターを管理するだけで、画像照合は不要です。
+> 設計原則: 文書登録は画像スキャンを主経路とし、解説のページ送りでは登録済みページを参照する。
+> サーバーは `current_page_index` カウンターを管理し、セッション中の再照合は不要です。
 
 ---
 
 ## 前提条件
 
 1. サーバが起動している（`uvicorn app.main:app --port 8000`）
-2. 文書が登録・finalize 済みであること（各ページに `ocr_text` と `summary` がある状態）
+2. 文書が画像付きで登録・finalize 済みであること（`scan-status` で欠番・画像・認識・summary を確認）
 3. `ROKID_EXPLAINER` 環境変数が未設定の場合、自動的にローカルプレースホルダが使用される
 
 ---
 
-## ユーザーが行う手順（グラス単体・撮影なし）
+## ユーザーが行う手順（グラス単体・登録後の新規撮影なし）
 
 ### フェーズ 1: セッション開始
 
@@ -46,7 +44,7 @@
 > - 上下スワイプ = 現在ページ内のテキストを1スライス送る/戻す
 > - 左右スワイプ = サーバーに POST /next-page・/prev-page を送り、ページ全体を変える
 >
-> ページ送りは**撮影を伴いません**。サーバー内のカウンターをインクリメントするだけです。
+> ページ送りは**新規撮影を伴いません**。サーバー内の登録済みページ番号を移動するだけです。
 >
 > ⚠️ KeyCode 値は旧・単眼 Rokid Glass 由来で**未実測**（`keycodes_verified:false`）。
 > 実機計測と `ROKID_KEYMAP` 上書きは [real-device-operation.md](real-device-operation.md) §5。
@@ -57,7 +55,7 @@
 
 ### POST `/v1/explain-sessions`
 
-セッションを作成します。作成直後から `status: ready`（撮影フェーズなし）。
+登録・finalize 済み文書からセッションを作成します。作成直後から `status: ready`（追加スキャンなし）。
 
 ```bash
 curl -s -X POST http://127.0.0.1:8000/v1/explain-sessions \
@@ -79,7 +77,7 @@ curl -s -X POST http://127.0.0.1:8000/v1/explain-sessions \
 
 ### GET `/v1/explain-sessions/{session_id}/explain`
 
-**現在のページ**（`current_page_index`）の解説 HUD を取得します。画像送信不要。
+**現在の登録済みページ**（`current_page_index`）の解説 HUD を取得します。新しい画像送信は不要です。
 
 **クエリパラメータ:**
 
@@ -126,7 +124,7 @@ curl -s 'http://127.0.0.1:8000/v1/explain-sessions/1/explain?view_page=1'
 
 ### POST `/v1/explain-sessions/{session_id}/next-page`
 
-`current_page_index` を +1 します（撮影なし）。最終ページでは変化しません。
+`current_page_index` を +1 します（新規撮影なし）。最終ページでは変化しません。
 
 ```bash
 curl -s -X POST http://127.0.0.1:8000/v1/explain-sessions/1/next-page
@@ -148,7 +146,7 @@ curl -s -X POST http://127.0.0.1:8000/v1/explain-sessions/1/next-page
 
 ### POST `/v1/explain-sessions/{session_id}/prev-page`
 
-`current_page_index` を -1 します（撮影なし）。先頭ページでは変化しません。
+`current_page_index` を -1 します（新規撮影なし）。先頭ページでは変化しません。
 
 ```bash
 curl -s -X POST http://127.0.0.1:8000/v1/explain-sessions/1/prev-page
@@ -170,13 +168,13 @@ curl -s http://127.0.0.1:8000/v1/explain-sessions/1/history
 POST /explain-sessions
         │
         ▼
-     [ready]  ← 作成直後から解説可能（スキャンフェーズなし）
+     [ready]  ← 登録済み文書から作成直後に解説可能
         │
    GET /explain（タップ）
         │
         ▼
   [explaining]  ←── GET /explain（繰り返し閲覧）
-                ←── POST /next-page / /prev-page（ページ移動、撮影なし）
+                ←── POST /next-page / /prev-page（登録済みページ移動、新規撮影なし）
 ```
 
 ---
@@ -201,8 +199,8 @@ POST /explain-sessions
 
 | 旧エンドポイント | 廃止理由 | 代替 |
 |---|---|---|
-| `POST /scan` | 画像アップロードによるpHash照合が不要に | `POST /next-page` / `POST /prev-page` |
-| `POST /commit` | scaningフェーズ自体がなくなったため | セッション作成直後から `status=ready` |
+| `POST /scan` | explain セッションは登録済み文書を再利用するため | `POST /next-page` / `POST /prev-page` |
+| `POST /commit` | explain セッション内に重複スキャン工程を持たないため | 文書側で finalize 後、セッション作成直後から `status=ready` |
 
 ---
 
