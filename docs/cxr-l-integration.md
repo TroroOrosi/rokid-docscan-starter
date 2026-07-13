@@ -136,7 +136,7 @@ uvicorn app.main:app --port 8000
 |--------------------|-----------------|----------------------|----------------|
 | 読取開始（最初の2本指タップに連動・**中継が自動発行**） | — | `POST /v1/documents`（文書作成・`title` 必須）→ **同じタップの認識を page_index=0 として続けて `POST /pages`**（1ページ目を落とさない） | `scan_ack`（進捗） |
 | ページ視認＝読取（2本指タップ） | `com.rokid.sprite.aiapp`（AI Interaction） | `POST /v1/documents/{id}/pages`（`ocr_text`/`vision_text`） | `scan_ack`（進捗） |
-| 読取完了宣言（ダブルタップ・**中継が自動チェーン**） | — | `POST /v1/documents/{document_id}/finalize` → `POST /v1/exam-sessions`（応答の `session_id` を取得）→ `POST /v1/exam-sessions/{session_id}/finalize-reading` | `reading_ack`（カメラOFF） |
+| 読取完了宣言（ダブルタップ・**先にカメラOFF**） | — | `GET /v1/documents/{document_id}/reading-status?expected_total_pages=N` → 欠番なしなら `/finalize` → exam セッション作成 → `/finalize-reading` | 欠番または `reading_ack` |
 | 本体 GPT の問題別解答を送る | `com.rokid.sprite.aiapp` | `POST /v1/exam-sessions/{id}/solutions` | `ingest_ack`（N/M問 解答済） |
 | 問題別閲覧（2本指スワイプ） | — | `GET /v1/exam-sessions/{id}/review?index=&view_page=` | `glasses_view`（一括1ストリーム） |
 | カメラ1フレーム取得（照合時のみ） | `IMediaStreamService`（AIDL） | `POST /v1/match`（画像＋`fast_ocr_text`） | `hud.lines`（3行） |
@@ -145,10 +145,11 @@ uvicorn app.main:app --port 8000
 
 - サーバの描画契約は `GET /v1/settings` の `hud` を唯一の権威ソースとして読む
   （無音・無フラッシュ・即時遷移・低輝度・最大3行）。
-- **中継アプリの自動チェーン責務**: 文書作成・`/finalize`・exam セッション作成の 3 呼び出しは
-  ジェスチャ未割当（`OPERATION_CONTRACT` に載らない）で、上表のとおり読取開始/読取完了宣言に
-  連動して**中継アプリが自動発行**する。ユーザーの入力はグラスのジェスチャのみ——
-  「操作はグラス単独で完結」はこの中継責務まで実装して成立する（サーバ契約は不変）。
+- **中継アプリの自動チェーン責務**: 文書作成・読取状態確認・`/finalize`・exam セッション作成は
+  ジェスチャ未割当（`OPERATION_CONTRACT` に載らない）です。ダブルタップでは最初にカメラを閉じ、
+  `reading-status` でサーバ状態を復元します。欠番があればそのページだけ再読取し、揃っている場合だけ
+  後段へ進みます。ユーザーの入力はグラスのジェスチャのみ——「操作はグラス単独で完結」は
+  この中継責務まで実装して成立します。
   **チェーンの後段（exam セッション作成 → finalize-reading）は解答モードに入るときだけ**続け、
   解説（explain-sessions）・照合（/v1/match）用の文書登録は `/finalize` で止める
   （non-local `ROKID_SOLVER` 設定時、finalize-reading は全問題をサーバ解答するため、
@@ -165,8 +166,9 @@ uvicorn app.main:app --port 8000
 3. Hi Rokid（グローバル版 `com.rokid.sprite.global.aiapp`）へのバインド権限・Intent を設定し、
    CUSTOMVIEW セッションを開く（グラス側アプリは不要。必要なら CUSTOMAPP で配布）。
 4. カメラ/音声/OCR 結果を取り出し、スマホ側プラグインから本サーバの HTTP API に送信。
-5. 応答の `hud.lines` / `glasses_view.lines`（最大3行）を HUD に描画。
-6. 操作は公式ジェスチャ（2本指タップ/タップ/ダブルタップ/2本指スワイプ/長押し。音声は任意トグル）。KeyCode は §7 参照。
+5. 再接続時と読取完了時に `GET /v1/documents/{id}/reading-status` を呼び、サーバ上の登録ページ・欠番・認識状態を復元。
+6. 応答の `hud.lines` / `glasses_view.lines`（最大3行）を HUD に描画。
+7. 操作は公式ジェスチャ（2本指タップ/タップ/ダブルタップ/2本指スワイプ/長押し。音声は任意トグル）。KeyCode は §7 参照。
 
 ---
 
@@ -213,8 +215,15 @@ val docId = http.postJson("$SERVER/v1/documents",                    // 読取�
 val pageText = onboardAi.latestRecognition()         // 本体AIの認識（視認＝読取。LED点灯中）
 http.postMultipart("$SERVER/v1/documents/$docId/pages",
     "page_index" to i, "ocr_text" to pageText.body, "vision_text" to pageText.figures)
-// 読取完了（ダブルタップ）→ 即カメラclose（LED消灯）→ 自動チェーン:
-// finalize → セッション作成 → finalize-reading（クラウド solver の解答中も LED は点かない）
+// 読取完了（ダブルタップ）→ 即カメラclose（LED消灯）→ サーバ状態を復元
+val status = http.get(
+    "$SERVER/v1/documents/$docId/reading-status?expected_total_pages=$expectedPages"
+).json()
+if (status["expected_pages_complete"] != true) {
+    showMissingPages(status["missing_page_indexes"]) // 選ばれた不足ページだけカメラを再開して再読取
+    return
+}
+// 欠番なし: finalize → セッション作成 → finalize-reading（以降もカメラOFF）
 http.post("$SERVER/v1/documents/$docId/finalize")
 val sid = http.postJson("$SERVER/v1/exam-sessions",
     mapOf("mode" to "study", "document_id" to docId)).json()["session_id"]
