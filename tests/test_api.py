@@ -171,3 +171,116 @@ def test_finalize_is_idempotent_per_page(client, monkeypatch):
     assert client.post(f"/v1/documents/{doc_id}/finalize").status_code == 200
     assert client.post(f"/v1/documents/{doc_id}/finalize").status_code == 200
     assert len(calls) == 2
+
+
+def test_scan_status_restores_image_and_recognition_capabilities(client):
+    doc_id = _create_doc(client)
+
+    # Primary scan path: image + OCR -> pHash matching and exam text are ready.
+    assert _add_page(
+        client, doc_id, 0, seed=10, ocr_text="問1 本文"
+    ).status_code == 201
+    # Supplemental path remains accepted but is not image-matchable.
+    assert client.post(
+        f"/v1/documents/{doc_id}/pages",
+        data={"page_index": "2", "ocr_text": "問3 本文"},
+    ).status_code == 201
+
+    status = client.get(
+        f"/v1/documents/{doc_id}/scan-status",
+        params={"expected_total_pages": 3},
+    )
+    assert status.status_code == 200
+    body = status.json()
+    assert body["page_indexes"] == [0, 2]
+    assert body["missing_page_indexes"] == [1]
+    assert body["expected_pages_complete"] is False
+    assert body["image_page_count"] == 1
+    assert body["text_only_page_count"] == 1
+    assert body["missing_image_page_indexes"] == [2]
+    assert body["registered_pages_matchable"] is False
+    assert body["recommended_action"] == "capture_missing_pages"
+    assert body["capture"]["performed"] is False
+
+    image_page, text_page = body["pages"]
+    assert image_page["input_kind"] == "image"
+    assert image_page["has_phash"] is True
+    assert image_page["match_ready"] is True
+    assert image_page["recognition_ready"] is True
+    assert text_page["input_kind"] == "text_only"
+    assert text_page["match_ready"] is False
+    assert text_page["recognition_ready"] is True
+
+    # Page 1 captured without OCR: physical scan is present but exam
+    # segmentation still needs recognition metadata.
+    assert _add_page(client, doc_id, 1, seed=11).status_code == 201
+    body = client.get(
+        f"/v1/documents/{doc_id}/scan-status",
+        params={"expected_total_pages": 3},
+    ).json()
+    assert body["expected_pages_complete"] is True
+    assert body["missing_image_page_indexes"] == [2]
+    assert body["missing_recognition_page_indexes"] == [1]
+    assert body["recommended_action"] == "capture_page_images"
+
+    # Re-capture only the text-only page, then add OCR to the image-only page.
+    assert _add_page(
+        client, doc_id, 2, seed=12, ocr_text="問3 本文"
+    ).status_code == 201
+    body = client.get(
+        f"/v1/documents/{doc_id}/scan-status",
+        params={"expected_total_pages": 3},
+    ).json()
+    assert body["missing_image_page_indexes"] == []
+    assert body["missing_recognition_page_indexes"] == [1]
+    assert body["registered_pages_matchable"] is True
+    assert body["recommended_action"] == "add_page_recognition"
+
+    assert _add_page(
+        client, doc_id, 1, seed=11, ocr_text="問2 本文"
+    ).status_code == 201
+    body = client.get(
+        f"/v1/documents/{doc_id}/scan-status",
+        params={"expected_total_pages": 3},
+    ).json()
+    assert body["registered_pages_matchable"] is True
+    assert body["registered_pages_recognized"] is True
+    assert body["recommended_action"] == "finalize"
+
+    assert client.post(f"/v1/documents/{doc_id}/finalize").status_code == 200
+    body = client.get(
+        f"/v1/documents/{doc_id}/scan-status",
+        params={"expected_total_pages": 3},
+    ).json()
+    assert body["summary_generated_count"] == 3
+    assert body["summaries_complete"] is True
+    assert body["recommended_action"] == "continue"
+
+
+def test_scan_status_does_not_infer_the_physical_page_count(client):
+    doc_id = _create_doc(client)
+    assert _add_page(
+        client, doc_id, 0, seed=20, ocr_text="page one"
+    ).status_code == 201
+
+    body = client.get(f"/v1/documents/{doc_id}/scan-status").json()
+    assert body["expected_total_pages"] is None
+    assert body["expected_pages_complete"] is None
+    assert body["missing_page_indexes"] is None
+    assert body["unexpected_page_indexes"] is None
+    assert body["registered_pages_matchable"] is True
+
+
+@pytest.mark.parametrize("expected", [0, -1])
+def test_scan_status_rejects_invalid_expected_page_count(client, expected):
+    doc_id = _create_doc(client)
+    response = client.get(
+        f"/v1/documents/{doc_id}/scan-status",
+        params={"expected_total_pages": expected},
+    )
+    assert response.status_code == 400
+    assert response.json()["detail"] == "expected_total_pages must be >= 1"
+
+
+def test_scan_status_missing_document_404(client):
+    assert client.get("/v1/documents/9999/scan-status").status_code == 404
