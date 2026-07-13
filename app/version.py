@@ -91,7 +91,7 @@ APP_VERSION = "0.10.0"
 #        per-page RAG context. /v1/version now includes `explainers` list.
 # 1.7.0: document page-move型 exam endpoints (/v1/exam-sessions/{id}/next-page,
 #        prev-page, current, solve-current, mode, audio); /pages accepts
-#        camera-free text pages (image optional). Additive — no envelope change.
+#        limited text-only compatibility pages (image omitted, no pHash). Additive.
 # 1.8.0: 3-phase exam endpoints (POST .../finalize-reading, POST+GET
 #        .../solutions, GET .../review) — additive. /v1/settings corrections:
 #        operations use the official gesture vocabulary, input reports
