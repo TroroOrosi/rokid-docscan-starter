@@ -100,7 +100,7 @@
 |----------|------|---------------|--------------|-------------|
 | 1 読取 | 読取開始（文書作成） | （初回 2本指タップに連動・中継が自動発行） | — | `POST /v1/documents`（`title` 必須。同じタップの認識は page_index=0 として続けて pages へ） |
 | 1 読取 | ページを視認＝読取 | **2本指タップ**（AI起動） | `capture_read` | 本体 AI → `POST /v1/documents/{id}/pages`（scan_ack） |
-| 1 読取 | **読取完了宣言** | **ダブルタップ** | `finish_reading` | 即カメラOFF → 中継の自動チェーン: `POST /v1/documents/{document_id}/finalize` → `POST /v1/exam-sessions`（`session_id` を取得）→ `POST /v1/exam-sessions/{session_id}/finalize-reading` |
+| 1 読取 | **読取完了宣言** | **ダブルタップ** | `finish_reading` | 即カメラOFF → `GET /v1/documents/{document_id}/reading-status?expected_total_pages=N`。欠番時は不足ページだけ再読取、揃っていれば `/finalize` → exam セッション作成 → `/finalize-reading` |
 | 2 解答 | 筆記 ⇄ リスニング切替 | **長押し**（録画⇄録音） | `mode_toggle` | `POST /v1/exam-sessions/{id}/mode` |
 | 2 解答 | リスニング録音 開始/停止 | **長押し**（listening 中） | `record_toggle` | `POST /v1/exam-sessions/{id}/audio` |
 | 2 解答 | （自動）搭載 GPT が全問解答 | — | — | `POST /v1/exam-sessions/{id}/solutions`（ingest） |
@@ -117,9 +117,9 @@
   テレプロンプター送り（2本指スワイプ上下）で送り読み。
 - これらの操作↔用途対応は `GET /v1/settings` の `operations` ブロック（`app/glasses_view.py` の
   `OPERATION_CONTRACT`）としても公示。契約上の `finish_reading` が指すのは
-  `finalize-reading` のみ——同じダブルタップで先行する `/finalize`・セッション作成は
-  **中継アプリの自動チェーン責務**（契約外・クライアント実装）であり、意図的に
-  `OPERATION_CONTRACT` に載せていない。
+  `finalize-reading` のみ——同じダブルタップで先行するカメラ終了・`reading-status`・
+  `/finalize`・セッション作成は**中継アプリの自動チェーン責務**（契約外・クライアント実装）
+  であり、意図的に `OPERATION_CONTRACT` に載せていない。
 
 ### 資料解説モード（explain-sessions）撮影なし設計
 
