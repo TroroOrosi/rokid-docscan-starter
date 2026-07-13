@@ -138,11 +138,11 @@
 - **現状の前提**: サーバ側は `pytest` で検証済み。実機経由の一巡は未実施。
 - **実機手順**: サーバを起動し（`uvicorn app.main:app --port 8000`）、
   [user-operation-guide.md](user-operation-guide.md) の手順どおり
-  documents → pages（本体 AI の認識テキスト）→ finalize → exam-sessions →
+  documents → pages（ページ画像＋本体 AI の認識テキスト）→ scan-status → finalize → exam-sessions →
   finalize-reading → solutions（搭載 GPT の解答 ingest）→ review を一巡。
 - **期待結果**: 各ステップの HUD ack（scan_ack / reading_ack / ingest_ack）が実機 HUD に出る。
 - **反映**: つまずいた箇所を issue 化。読取ミスがあれば**同じ page_index に再送＝置換**
-  （API 1.9.0 の再読取）で復旧できることも確認。
+  （API 1.10.0 の scan-status が示す不足ページだけ再読取）で復旧できることも確認。
 
 ### D-2. 搭載 AI の読取品質（U5 チェックリスト）
 
