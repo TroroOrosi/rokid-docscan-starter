@@ -43,6 +43,11 @@ OCR_MATCH_RATIO = 0.9    # at/above this, treat as a strong textual agreement
 CONF_OK = 0.62           # >= -> HIT
 CONF_LOW = 0.40          # >= but < CONF_OK -> LOW CONF; below -> NO PAGE
 
+# Text-only confidence ceiling (query and/or candidate has no pHash — the
+# 撮影しない primary path). Deliberately < 1.0: a text match must never claim
+# more certainty than a pixel-identical visual match.
+TEXT_EXACT_CONF = 0.95
+
 
 # --- pHash ------------------------------------------------------------------
 
@@ -153,7 +158,9 @@ class Candidate:
 class ScoredCandidate:
     page_id: int
     page_index: int
-    hamming: int
+    # Hamming distance when both sides have a pHash; None when the comparison
+    # was text-only (no visual comparison happened at all).
+    hamming: int | None
     ocr_match: bool
     confidence: float
     # 0..1 text similarity (1.0 == exact match, 0.0 == no usable text).
@@ -196,18 +203,52 @@ def _ocr_signal(
     return OCR_MD5_BONUS * ratio, ratio >= OCR_MATCH_RATIO, round(ratio, 4)
 
 
+def _text_only_confidence(exact: bool, similarity: float) -> float:
+    """Map the text signal to a confidence when no visual comparison exists.
+
+    Piecewise-linear over the existing semantic anchors so the verdict bands
+    stay meaningful without new tunables:
+      exact normalized-text MD5 match      -> TEXT_EXACT_CONF (HIT)
+      similarity <  OCR_SIM_FLOOR   (0.6)  -> 0.0             (NO_PAGE)
+      similarity == OCR_SIM_FLOOR          -> CONF_LOW        (LOW_CONF starts)
+      similarity == OCR_MATCH_RATIO (0.9)  -> CONF_OK         (HIT starts)
+      similarity == 1.0                    -> TEXT_EXACT_CONF
+    """
+    if exact:
+        return TEXT_EXACT_CONF
+    if similarity < OCR_SIM_FLOOR:
+        return 0.0
+    if similarity < OCR_MATCH_RATIO:
+        span = OCR_MATCH_RATIO - OCR_SIM_FLOOR
+        return CONF_LOW + (similarity - OCR_SIM_FLOOR) / span * (CONF_OK - CONF_LOW)
+    span = 1.0 - OCR_MATCH_RATIO
+    return CONF_OK + (similarity - OCR_MATCH_RATIO) / span * (TEXT_EXACT_CONF - CONF_OK)
+
+
 def score_candidate(
-    query_phash: int | str,
+    query_phash: int | str | None,
     query_ocr_md5: str | None,
     candidate: Candidate,
     query_ocr_text: str | None = None,
 ) -> ScoredCandidate:
-    distance = hamming(query_phash, candidate.phash)
-    visual = _phash_confidence(distance)
     bonus, ocr_match, similarity = _ocr_signal(
         query_ocr_md5, query_ocr_text, candidate
     )
-    confidence = max(0.0, min(1.0, visual + bonus))
+    if query_phash and candidate.phash:
+        # Visual comparison (both sides carry a pHash): unchanged formula.
+        distance: int | None = hamming(query_phash, candidate.phash)
+        visual = _phash_confidence(distance)
+        confidence = max(0.0, min(1.0, visual + bonus))
+    else:
+        # 撮影しない text-only comparison: confidence comes from the text
+        # signal alone; exact MD5 outranks graded similarity.
+        distance = None
+        exact = bool(
+            query_ocr_md5
+            and candidate.ocr_md5
+            and query_ocr_md5 == candidate.ocr_md5
+        )
+        confidence = _text_only_confidence(exact, similarity)
     return ScoredCandidate(
         page_id=candidate.page_id,
         page_index=candidate.page_index,
@@ -230,7 +271,7 @@ def verdict(confidence: float, has_candidates: bool) -> str:
 
 
 def match(
-    query_phash: int | str,
+    query_phash: int | str | None,
     query_ocr_md5: str | None,
     candidates: list[Candidate],
     query_ocr_text: str | None = None,
@@ -240,7 +281,15 @@ def match(
         score_candidate(query_phash, query_ocr_md5, c, query_ocr_text)
         for c in candidates
     ]
-    scored.sort(key=lambda s: (-s.confidence, s.hamming))
+    # On equal confidence a visual match outranks a text-only one (hamming
+    # None sorts behind every real distance); stable sort keeps page order
+    # among equal text-only scores.
+    scored.sort(
+        key=lambda s: (
+            -s.confidence,
+            s.hamming if s.hamming is not None else HASH_BIT_LEN + 1,
+        )
+    )
     best = scored[0] if scored else None
     v = verdict(best.confidence if best else 0.0, bool(scored))
     return best, v, scored

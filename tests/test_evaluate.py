@@ -81,13 +81,21 @@ def test_from_db_self_matches_stored_pages(tmp_path):
             "INSERT INTO pages (id, document_id, page_index, phash) VALUES (?, 1, ?, ?)",
             (i + 1, i, phash_hex(make_image(seed=seed))),
         )
+    # 撮影しない text-only page: no visual signal — skipped, not evaluated.
+    conn.execute(
+        "INSERT INTO pages (id, document_id, page_index, phash) VALUES (3, 1, 2, '')"
+    )
     conn.commit()
     conn.close()
 
     report = from_db(str(db_path))
     assert report["page_count"] == 2
     assert report["self_match_accuracy"] == 1.0
-    assert report["source"] == {"mode": "db", "path": str(db_path)}
+    assert report["source"] == {
+        "mode": "db",
+        "path": str(db_path),
+        "skipped_text_only_pages": 1,
+    }
 
 
 # --- CLI ------------------------------------------------------------------------

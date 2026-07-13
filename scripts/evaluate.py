@@ -109,14 +109,24 @@ def from_db(db_path: str) -> dict:
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     try:
+        # This tool tunes the image-compat pHash thresholds; 撮影しない
+        # text-only pages (phash='') carry no visual signal to evaluate.
         rows = conn.execute(
-            "SELECT id, page_index, phash FROM pages ORDER BY document_id, page_index"
+            "SELECT id, page_index, phash FROM pages WHERE phash != '' "
+            "ORDER BY document_id, page_index"
         ).fetchall()
+        skipped = conn.execute(
+            "SELECT COUNT(*) FROM pages WHERE phash = ''"
+        ).fetchone()[0]
     finally:
         conn.close()
     items = [(r["id"], r["page_index"], r["phash"]) for r in rows]
     report = _eval_candidates(items)
-    report["source"] = {"mode": "db", "path": db_path}
+    report["source"] = {
+        "mode": "db",
+        "path": db_path,
+        "skipped_text_only_pages": skipped,
+    }
     return report
 
 

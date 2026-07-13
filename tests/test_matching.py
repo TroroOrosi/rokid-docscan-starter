@@ -166,3 +166,131 @@ def test_match_unrelated_query_is_no_page_or_low():
     ph_query = phash_hex(make_image(seed=123))
     best, verdict, _ = match(ph_query, None, [_cand(0, ph_stored)])
     assert verdict in {"NO_PAGE", "LOW_CONF"}
+
+
+# --- text-only matching (撮影しない主経路: どちらかに pHash が無い) ------------
+
+def _ratio(query: str, stored: str) -> float:
+    # Same argument order as _ocr_signal (query first) — difflib ratios are
+    # not symmetric, so the premise checks must mirror production order.
+    import difflib
+
+    return difflib.SequenceMatcher(
+        None, normalize_ocr_text(query), normalize_ocr_text(stored)
+    ).ratio()
+
+
+def test_text_only_exact_md5_is_hit():
+    text = "問1 次の式を展開せよ (x+1)(x-1)"
+    sc = score_candidate(
+        None, ocr_md5(text),
+        _cand(0, "", ocr_md5=ocr_md5(text), ocr_text=normalize_ocr_text(text)),
+        query_ocr_text=text,
+    )
+    assert sc.hamming is None
+    assert sc.confidence == matching.TEXT_EXACT_CONF
+    best, verdict, _ = match(None, ocr_md5(text), [
+        _cand(0, "", ocr_md5=ocr_md5(text), ocr_text=normalize_ocr_text(text)),
+    ], query_ocr_text=text)
+    assert verdict == "HIT"
+
+
+def test_text_only_strong_similarity_hits():
+    stored = "invoice 2026 total amount due tomorrow"
+    noisy = "invoice 2026 total arnount due tomorrow"  # OCR noise m->rn
+    assert _ratio(noisy, stored) >= matching.OCR_MATCH_RATIO  # test premise
+    sc = score_candidate(
+        None, ocr_md5(noisy),
+        _cand(0, "", ocr_md5=ocr_md5(stored), ocr_text=normalize_ocr_text(stored)),
+        query_ocr_text=noisy,
+    )
+    assert sc.hamming is None
+    assert sc.confidence >= matching.CONF_OK  # HIT band
+
+
+def test_text_only_mid_similarity_is_low_conf():
+    stored = "alpha beta gamma delta epsilon zeta"
+    partial = "alpha beta gamma delta unknown tail"
+    r = _ratio(partial, stored)
+    assert matching.OCR_SIM_FLOOR <= r < matching.OCR_MATCH_RATIO  # premise
+    sc = score_candidate(
+        None, ocr_md5(partial),
+        _cand(0, "", ocr_md5=ocr_md5(stored), ocr_text=normalize_ocr_text(stored)),
+        query_ocr_text=partial,
+    )
+    assert matching.CONF_LOW <= sc.confidence < matching.CONF_OK  # LOW_CONF band
+
+
+def test_text_only_unrelated_text_is_no_page():
+    stored = "invoice 2026 total"
+    unrelated = "zzz qqq unrelated words entirely"
+    assert _ratio(unrelated, stored) < matching.OCR_SIM_FLOOR  # premise
+    sc = score_candidate(
+        None, ocr_md5(unrelated),
+        _cand(0, "", ocr_md5=ocr_md5(stored), ocr_text=normalize_ocr_text(stored)),
+        query_ocr_text=unrelated,
+    )
+    assert sc.confidence == 0.0
+    best, verdict, _ = match(None, ocr_md5(unrelated), [
+        _cand(0, "", ocr_md5=ocr_md5(stored), ocr_text=normalize_ocr_text(stored)),
+    ], query_ocr_text=unrelated)
+    assert verdict == "NO_PAGE"
+
+
+def test_text_query_vs_image_candidate_uses_text_signal():
+    # Query has no pHash; the candidate does — must not crash in hamming().
+    ph = phash_hex(make_image(seed=13))
+    text = "page with a chart"
+    sc = score_candidate(
+        None, ocr_md5(text),
+        _cand(0, ph, ocr_md5=ocr_md5(text), ocr_text=normalize_ocr_text(text)),
+        query_ocr_text=text,
+    )
+    assert sc.hamming is None
+    assert sc.confidence == matching.TEXT_EXACT_CONF
+
+
+def test_image_query_vs_textonly_candidate_uses_text_signal():
+    # Reverse direction: image query against a 撮影しない text-only page.
+    ph = phash_hex(make_image(seed=14))
+    text = "page with a table"
+    sc = score_candidate(
+        ph, ocr_md5(text),
+        _cand(0, "", ocr_md5=ocr_md5(text), ocr_text=normalize_ocr_text(text)),
+        query_ocr_text=text,
+    )
+    assert sc.hamming is None
+    assert sc.confidence == matching.TEXT_EXACT_CONF
+
+
+def test_both_phash_scoring_unchanged():
+    # Regression: with both pHashes present, confidence must equal the
+    # historical formula _phash_confidence(hamming) + graded OCR bonus.
+    ph_a = phash_hex(make_image(seed=8))
+    ph_b = phash_hex(make_image(seed=42))
+    text = "invoice 2026 total"
+    sc = score_candidate(
+        ph_a, ocr_md5(text),
+        _cand(0, ph_b, ocr_md5=ocr_md5(text), ocr_text=normalize_ocr_text(text)),
+        query_ocr_text=text,
+    )
+    d = hamming(ph_a, ph_b)
+    expected = max(
+        0.0, min(1.0, matching._phash_confidence(d) + matching.OCR_MD5_BONUS)
+    )
+    assert sc.hamming == d
+    assert sc.confidence == round(expected, 4)
+
+
+def test_visual_match_outranks_equal_text_match():
+    # Same confidence -> the candidate with a real hamming sorts first.
+    ph = phash_hex(make_image(seed=15))
+    visual = _cand(0, ph)
+    text = "identical confidence is contrived here"
+    text_only = _cand(1, "", ocr_md5=ocr_md5(text), ocr_text=normalize_ocr_text(text))
+    best, _, scored = match(ph, ocr_md5(text), [text_only, visual],
+                            query_ocr_text=text)
+    # visual self-match confidence 1.0 > text ceiling, and it must sort first
+    assert scored[0].page_id == visual.page_id
+    assert scored[0].hamming == 0
+    assert scored[1].hamming is None
