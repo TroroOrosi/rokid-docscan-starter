@@ -195,6 +195,8 @@ curl -s -X POST http://127.0.0.1:8000/v1/documents/1/pages \
 > テキストのみの登録も補助・互換経路として受け付けますが、`phash=""` となり
 > `/v1/match` の画像照合候補にはなりません。画像だけでは文書試験の問題分割に使う認識テキストが
 > 不足するため、解答・解説用途では `ocr_text`（図がある場合は `vision_text`）も送信します。
+> すでに画像付きで登録された `page_index` へ認識テキストだけを再送した場合は、既存画像と
+> pHashを保持したままOCR・図認識情報だけを更新します。
 
 ### 3.5. スキャン状態を復元
 
@@ -207,7 +209,8 @@ curl -s 'http://127.0.0.1:8000/v1/documents/1/scan-status?expected_total_pages=3
 `missing_page_indexes` は未登録ページ、`missing_image_page_indexes` は画像不足、
 `missing_recognition_page_indexes` は OCR/図読み取り不足を示します。これにより、保存済みページを
 撮り直さず、不足分だけを再スキャンできます。物理的な総ページ数はサーバから推測できないため、
-`expected_total_pages` 未指定時の完了判定は `null` です。
+`expected_total_pages` 未指定時の完了判定は `null` です。応答で欠番配列を返すため、
+過大なメモリ消費を防ぐ上限は10,000ページです。
 
 `recommended_action` は状態に応じて `start_scan`、`capture_missing_pages`、
 `review_page_indexes`、`capture_page_images`、`add_page_recognition`、`finalize`、`continue` の
