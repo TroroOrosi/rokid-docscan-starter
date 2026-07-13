@@ -16,23 +16,23 @@ def test_version_info_pins_every_contract():
     # simultaneous doc/pin update CLAUDE.md requires (no silent version drift —
     # docs hardcode several of these, e.g. user-operation-guide's JSON block).
     assert version.version_info() == {
-        "app_version": "0.9.0",
-        "api_version": "1.9.0",
+        "app_version": "0.10.0",
+        "api_version": "1.10.0",
         "matcher_version": "1.1.0",
         "hud_contract_version": "1.0.0",
         "analyzer_api_version": "1.0.0",
         "solver_api_version": "1.1.0",
         "extractor_api_version": "1.0.0",
         "explainer_api_version": "1.0.0",
-        "glasses_view_contract_version": "1.4.0",
+        "glasses_view_contract_version": "1.5.0",
         "overlay_contract_version": "1.1.0",
     }
 
 
 def test_contract_versions_reflect_silent_capture_contract():
-    # 1.4.0: review-deck view (merged single stream per problem) + reading_done
-    # ack + official gesture vocabulary (1.3.0 added sentence pagination).
-    assert version.GLASSES_VIEW_CONTRACT_VERSION == "1.4.0"
+    # 1.5.0: image-first capture capability metadata and honest device-managed
+    # sound/flash guarantees (1.4.0 added the review-deck view).
+    assert version.GLASSES_VIEW_CONTRACT_VERSION == "1.5.0"
 
 
 def test_contract_versions_reflect_phase234():
@@ -43,10 +43,9 @@ def test_contract_versions_reflect_phase234():
 
 
 def test_contract_versions_reflect_explain_sessions():
-    # 1.9.0: reading-phase recovery (page upsert + 0-problem revert) and
-    #        real-mode lock consistency on session GET (1.8.0 added the
-    #        3-phase exam endpoints + honest input/capture corrections).
-    assert version.API_VERSION == "1.9.0"
+    # 1.10.0: image-aware scan-status recovery and additive capture
+    #         capability metadata.
+    assert version.API_VERSION == "1.10.0"
     assert version.EXPLAINER_API_VERSION == "1.0.0"
 
 
