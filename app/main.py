@@ -501,8 +501,12 @@ def get_document_scan_status(
 
         if page_count == 0:
             recommended_action = "start_scan"
-        elif expected_pages_complete is False:
+        elif missing_page_indexes:
             recommended_action = "capture_missing_pages"
+        elif unexpected_page_indexes:
+            # Do not ask for another capture when all expected indexes exist.
+            # The client/operator should reconcile its declared page count.
+            recommended_action = "review_page_indexes"
         elif missing_image_page_indexes:
             recommended_action = "capture_page_images"
         elif missing_recognition_page_indexes:
