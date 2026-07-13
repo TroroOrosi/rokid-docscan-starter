@@ -51,19 +51,24 @@ def test_settings_advertise_silent_contract(client):
     assert hud["transition"] == "instant"
     assert hud["brightness"] == "low"
     assert body["voice_enabled_default"] is False
-    # Silent shutter, and the privacy LED is explicitly NON-disable-able.
-    # It lights while the camera is active (reading phase) and is dark during
-    # the answer/review phases, when the camera is closed.
+    # Image capture is the primary scan path. Sound/flash values are client
+    # preferences only: the server cannot guarantee physical device behavior.
     capture = body["capture"]
+    assert capture["mode"] == "still_image"
+    assert capture["image_upload"] == "primary"
+    assert capture["text_only_input"] == "supplemental_no_phash"
+    assert capture["server_controls_camera"] is False
     assert capture["shutter_sound"] is False
+    assert capture["shutter_sound_guaranteed"] is False
+    assert capture["flash"] == "off"
+    assert capture["flash_guaranteed"] is False
+    assert capture["capture_tone"] is False
+    assert capture["capture_tone_guaranteed"] is False
     assert capture["privacy_led"] == {
         "state": "on_while_camera_active",
         "tamper": "forbidden",
     }
     assert capture["led_off_during_review"] is True
-    # 撮影しない: no photographic flash, silent capture, and silent audio recording.
-    assert capture["flash"] == "off"
-    assert capture["capture_tone"] is False
     assert capture["audio_record"]["start_tone"] is False
     assert capture["audio_record"]["stop_tone"] is False
 
