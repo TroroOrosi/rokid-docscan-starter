@@ -37,7 +37,7 @@
 |-----|----------|------|---------------------|----------------|
 | **CXR-M** | スマホ（Android/iOS） | コンパニオンアプリ用。デバイス接続（BLE GATT＋Classic BT ソケット＋Wi-Fi Direct）、ハードウェア情報、YodaOS-Sprite の AI 連携、アシストサービス（ファイル転送・録音・写真取得） | `com.rokid.cxr:client-m:1.0.8` | minSdk 28（Android 9） |
 | **CXR-S** | グラス本体（YodaOS-Sprite） | 機上アプリ用ブリッジ。CXR-M と Caps バイナリ形式で双方向メッセージング | `com.rokid.cxr:cxr-service-bridge:1.0-SNAPSHOT` | — |
-| **CXR-L** | **スマホ（Hi Rokid アプリのプラグイン型 SDK）** | **実機検証済みの実態**（CxrGlobal / claude-mobile-hud、2026）: エントリ実クラス **`CXRLink(context)`** は**スマホ側**で動き、**同一スマホ内の AIDL** で Hi Rokid アプリ（中国版 `com.rokid.sprite.aiapp`／グローバル版 **`com.rokid.sprite.global.aiapp`**・同一 AIDL 面）の `IMediaStreamService` にバインド。Hi Rokid がグラスとは **CXR-L wire protocol（Caps シリアライズ・Bluetooth 制御プレーン**、native `cxr-sock-proto-jni`）で通信する。セッション種別は **CUSTOMVIEW**（グラス側アプリ不要で HUD 表示: `customViewOpen/Update/Close/SetIcons`）と **CUSTOMAPP**（`appUploadAndInstall`/`appOpen` でグラス側アプリを配布・起動）。ほか `startAudioStream`（マイク PCM 16kHz mono・`IAudioStreamCbk.onAudioReceived`）・`takePhoto`（本リポジトリでは撮影しない方針により不使用）・`sendCustomCmd`・AI キーイベント `onAiKeyDown/onAiKeyUp/onAiExit` | `com.rokid.cxr:client-l:1.0.1` | minSdk 31（実測: Pixel 8 / Hi Rokid global G1.5.9 / YodaOS SPRITE 1.18） |
+| **CXR-L** | **スマホ（Hi Rokid アプリのプラグイン型 SDK）** | **実機検証済みの実態**（CxrGlobal / claude-mobile-hud、2026）: エントリ実クラス **`CXRLink(context)`** は**スマホ側**で動き、**同一スマホ内の AIDL** で Hi Rokid アプリ（中国版 `com.rokid.sprite.aiapp`／グローバル版 **`com.rokid.sprite.global.aiapp`**・同一 AIDL 面）の `IMediaStreamService` にバインド。Hi Rokid がグラスとは **CXR-L wire protocol（Caps シリアライズ・Bluetooth 制御プレーン**、native `cxr-sock-proto-jni`）で通信する。セッション種別は **CUSTOMVIEW**（グラス側アプリ不要で HUD 表示: `customViewOpen/Update/Close/SetIcons`）と **CUSTOMAPP**（`appUploadAndInstall`/`appOpen` でグラス側アプリを配布・起動）。ほか `startAudioStream`（マイク PCM 16kHz mono・`IAudioStreamCbk.onAudioReceived`）・`takePhoto`（ページ画像の取得・登録と照合フレームの取得に使用）・`sendCustomCmd`・AI キーイベント `onAiKeyDown/onAiKeyUp/onAiExit` | `com.rokid.cxr:client-l:1.0.1` | minSdk 31（実測: Pixel 8 / Hi Rokid global G1.5.9 / YodaOS SPRITE 1.18） |
 
 > Maven リポジトリ: `https://maven.rokid.com/repository/maven-public/`。
 > 座標・依存はバージョン更新されるため、実装前に上記リポジトリで最新を確認してください。
@@ -72,8 +72,9 @@
 - **スマホは HTTP 中継のみ（画面不要）**: CXR-L プラグインアプリが Hi Rokid 経由でグラスの
   HUD 表示（CUSTOMVIEW）・ジェスチャ/AI キーイベント・マイク音声を扱い、本サーバの HTTP 契約に
   橋渡しする。ユーザーが見る・操作するのはグラスだけ。
-- **グラス搭載 AI（GPT / Gemini ネイティブ）** が視認＝認識と解答を担い（経路 B・主経路）、
-  **構造化された分割・取り込み・整形・状態管理はこのサーバに委譲**する。
+- **グラスのカメラで取得したページ画像**を登録し、グラス搭載 AI（GPT / Gemini ネイティブ）の
+  OCR・図認識結果を添えて読取精度を補う（経路 B・主経路）。画像は pHash 照合、認識テキストは
+  分割・検索・解答文脈に使い、**構造化された取り込み・整形・状態管理はこのサーバに委譲**する。
 - サーバは表示技術・SDK 世代に依存しない **HTTP 契約**（最大3行 HUD）だけを公開する。
 
 ---
@@ -93,18 +94,19 @@ CXR-L アプリは AIDL で **本体 AI サービスの AI Interaction**（YodaO
 **この経路ではサーバ側のクラウド鍵は不要**（本体 AI がモデルを担う）。
 CXR-M（スマホ）の AI Interaction からも同様に利用できる。
 
-- **読取**：本体 AI の認識テキストを `POST /v1/documents/{id}/pages` の
-  **`ocr_text` / `vision_text`** として渡す（照合用途は `fast_ocr_text`）。
+- **読取**：`takePhoto` または `IMediaStreamService` で取得したページ画像を
+  `POST /v1/documents/{id}/pages` の **`image`** として送り、本体 AI の認識結果を
+  **`ocr_text` / `vision_text`** として添える（照合時の補助認識は `fast_ocr_text`）。
 - **解答（3 フェーズの主経路）**：`finalize-reading` 後、**本体 GPT が全問を解き**、問題別解答を
   **`POST /v1/exam-sessions/{id}/solutions`** に ingest する（`served_by="onboard"`）。
   サーバは分割・整形・状態管理と閲覧 HUD（`GET /review`）を担う。
 
-**撮影しない・図も読む**：本体 AI は**視認＝認識**であり写真を撮らない。図・グラフ・写真の読み取りは
-本体 AI のマルチモーダル認識結果を **`vision_text`**（テキスト）として `POST /v1/documents/{id}/pages` に
-本文 `ocr_text` と一緒に渡す（**画像バイトは送らない**）。サーバは `ocr_text`＋`vision_text` を1つの材料に統合し、
-問題分割（`segment_problems`）と解答文脈（全ページ）に使う（ページ跨ぎ問題に対応）。
-視認＝カメラ稼働＝プライバシー LED 点灯のため、**読取フェーズを最短化**し、`finalize-reading`
-以降はカメラを閉じる（LED 消灯）。
+**画像を登録し、図も読む**：各ページの画像バイトを送ると、サーバは pHash を保存して
+`/v1/match` のページ照合に使える。図・グラフ・写真の読み取りは、本体 AI のマルチモーダル認識結果を
+**`vision_text`** として本文 **`ocr_text`** と一緒に添える。サーバは両テキストを統合し、問題分割
+（`segment_problems`）と全ページの解答文脈に使う（ページ跨ぎ問題にも対応）。テキストだけの登録も
+互換入力として受け付けるが pHash が無いため照合対象にはならない。撮影音・フラッシュ・プライバシー LED は
+端末とクライアントの管理下にあり、サーバは状態を保証しない。登録完了後の解答・閲覧では新規撮影を要求しない。
 
 ### 経路 A（任意）: サーバ側の実 AI アダプタ（このリポジトリで実装済み）
 
@@ -134,17 +136,17 @@ uvicorn app.main:app --port 8000
 
 | グラス側でやること | 使う SDK / AIDL | 送る先エンドポイント | HUD に返るもの |
 |--------------------|-----------------|----------------------|----------------|
-| 読取開始（最初の2本指タップに連動・**中継が自動発行**） | — | `POST /v1/documents`（文書作成・`title` 必須）→ **同じタップの認識を page_index=0 として続けて `POST /pages`**（1ページ目を落とさない） | `scan_ack`（進捗） |
-| ページ視認＝読取（2本指タップ） | `com.rokid.sprite.aiapp`（AI Interaction） | `POST /v1/documents/{id}/pages`（`ocr_text`/`vision_text`） | `scan_ack`（進捗） |
-| 読取完了宣言（ダブルタップ・**中継が自動チェーン**） | — | `POST /v1/documents/{document_id}/finalize` → `POST /v1/exam-sessions`（応答の `session_id` を取得）→ `POST /v1/exam-sessions/{session_id}/finalize-reading` | `reading_ack`（カメラOFF） |
+| 読取開始（最初の2本指タップに連動・**中継が自動発行**） | `takePhoto` + AI Interaction | `POST /v1/documents`（文書作成・`title` 必須）→ **同じタップで取得した画像と認識を page_index=0 として `POST /pages`**（1ページ目を落とさない） | `scan_ack`（進捗） |
+| ページ撮影・読取（2本指タップ） | `takePhoto` / `IMediaStreamService` + AI Interaction | `POST /v1/documents/{id}/pages`（`image` + `ocr_text`/`vision_text`） | `scan_ack`（進捗） |
+| 読取完了宣言（ダブルタップ・**中継が自動チェーン**） | — | `GET /v1/documents/{document_id}/scan-status?expected_total_pages=N` で不足だけ再撮影 → `POST /finalize` → exam セッション作成 → `POST /finalize-reading` | `reading_ack` |
 | 本体 GPT の問題別解答を送る | `com.rokid.sprite.aiapp` | `POST /v1/exam-sessions/{id}/solutions` | `ingest_ack`（N/M問 解答済） |
 | 問題別閲覧（2本指スワイプ） | — | `GET /v1/exam-sessions/{id}/review?index=&view_page=` | `glasses_view`（一括1ストリーム） |
-| カメラ1フレーム取得（照合時のみ） | `IMediaStreamService`（AIDL） | `POST /v1/match`（画像＋`fast_ocr_text`） | `hud.lines`（3行） |
-| 資料の解説（撮影なし） | ページ送りジェスチャ | `POST /v1/explain-sessions/{id}/next-page` → `GET .../explain` | `glasses_view`（overview/detail/evidence） |
+| 現在ページを撮影して照合 | `takePhoto` / `IMediaStreamService`（AIDL） | `POST /v1/match`（画像＋`fast_ocr_text`） | `hud.lines`（3行） |
+| 資料の解説（登録後の新規撮影なし） | ページ送りジェスチャ | `POST /v1/explain-sessions/{id}/next-page` → `GET .../explain` | `glasses_view`（overview/detail/evidence） |
 | HUD 描画 | CXR-L ディスプレイ API | — | 受信 `lines` をそのまま描画 |
 
 - サーバの描画契約は `GET /v1/settings` の `hud` を唯一の権威ソースとして読む
-  （無音・無フラッシュ・即時遷移・低輝度・最大3行）。
+  （即時遷移・低輝度・最大3行）。撮影音・フラッシュ・LED の実状態は端末側で確認する。
 - **中継アプリの自動チェーン責務**: 文書作成・`/finalize`・exam セッション作成の 3 呼び出しは
   ジェスチャ未割当（`OPERATION_CONTRACT` に載らない）で、上表のとおり読取開始/読取完了宣言に
   連動して**中継アプリが自動発行**する。ユーザーの入力はグラスのジェスチャのみ——
@@ -164,7 +166,7 @@ uvicorn app.main:app --port 8000
    （`AuthorizationHelper` → token → `connect(token)`）を経て `IMediaStreamService` に AIDL バインド。
 3. Hi Rokid（グローバル版 `com.rokid.sprite.global.aiapp`）へのバインド権限・Intent を設定し、
    CUSTOMVIEW セッションを開く（グラス側アプリは不要。必要なら CUSTOMAPP で配布）。
-4. カメラ/音声/OCR 結果を取り出し、スマホ側プラグインから本サーバの HTTP API に送信。
+4. ページ画像を `takePhoto` / `IMediaStreamService` で取得し、OCR・図認識結果とともにスマホ側プラグインから本サーバへ送信。
 5. 応答の `hud.lines` / `glasses_view.lines`（最大3行）を HUD に描画。
 6. 操作は公式ジェスチャ（2本指タップ/タップ/ダブルタップ/2本指スワイプ/長押し。音声は任意トグル）。KeyCode は §7 参照。
 
@@ -209,12 +211,20 @@ val settings = http.get("$SERVER/v1/settings").json()
 //    ※文書作成・finalize・セッション作成はジェスチャ未割当＝この中継アプリの自動発行責務
 val docId = http.postJson("$SERVER/v1/documents",                    // 読取開始（初回タップ）で自動作成
     mapOf("title" to "exam-" + now())).json()["document_id"]         // title は必須（無いと 422）
-// 初回タップは文書作成に続けて、その同じ認識を page 0 として登録する（1ページ目を落とさない）
-val pageText = onboardAi.latestRecognition()         // 本体AIの認識（視認＝読取。LED点灯中）
+// 初回タップは文書作成に続け、同じ操作で得た画像と認識を page 0 として登録する
+// takePhoto の実際の戻り値・非同期コールバック名は使用する CXR-L ラッパーに合わせる
+val pageImage = link.takePhoto()
+val pageText = onboardAi.latestRecognition()
 http.postMultipart("$SERVER/v1/documents/$docId/pages",
-    "page_index" to i, "ocr_text" to pageText.body, "vision_text" to pageText.figures)
-// 読取完了（ダブルタップ）→ 即カメラclose（LED消灯）→ 自動チェーン:
-// finalize → セッション作成 → finalize-reading（クラウド solver の解答中も LED は点かない）
+    "page_index" to i, "image" to pageImage,
+    "ocr_text" to pageText.body, "vision_text" to pageText.figures)
+// 完了前に、欠番・画像なし・認識なしを確認し、不足ページだけを再取得する
+val scanStatus = http.get(
+    "$SERVER/v1/documents/$docId/scan-status?expected_total_pages=$pageCount").json()
+if (scanStatus["recommended_action"] != "finalize") {
+    recaptureOnlyMissing(scanStatus)
+}
+// ダブルタップ後は finalize → セッション作成 → finalize-reading を自動実行
 http.post("$SERVER/v1/documents/$docId/finalize")
 val sid = http.postJson("$SERVER/v1/exam-sessions",
     mapOf("mode" to "study", "document_id" to docId)).json()["session_id"]
