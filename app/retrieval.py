@@ -26,19 +26,56 @@ _MIN_SCORE = 0.06
 _SNIPPET_LEN = 120
 
 
-def _page_material(ocr_text: str | None, vision_text: str | None) -> str:
-    """Combine a page's body text and figure reading for scoring/snippets.
+def _scored_material(ocr_text: str | None, vision_text: str | None) -> str:
+    """Raw body + figure reading for SCORING (no display boilerplate).
 
-    Mirrors app.main._page_material's combination (kept local to avoid an
-    import cycle): the figure/table reading may hold the values a
-    figure-dependent question needs.
+    The 【図・画像の読み取り】 header used for display is deliberately left OUT
+    here: `_score` tokenizes character bigrams, so a fixed header would give
+    every vision-bearing page the same overlap and let unrelated figure/table
+    pages fill or displace real RAG context. Score on the raw recognized text.
     """
-    parts = []
-    if ocr_text and ocr_text.strip():
-        parts.append(ocr_text.strip())
-    if vision_text and vision_text.strip():
-        parts.append("【図・画像の読み取り】\n" + vision_text.strip())
+    parts = [t.strip() for t in (ocr_text, vision_text) if t and t.strip()]
     return "\n".join(parts)
+
+
+def _window(text: str, query_tokens: set[str], budget: int) -> str:
+    """A <=budget slice of text anchored on the earliest query-term match.
+
+    Prefer longer query terms as anchors, falling back to the head when none
+    match, so the returned excerpt actually contains the matched value.
+    """
+    text = text.strip()
+    if len(text) <= budget:
+        return text
+    anchor = None
+    for term in sorted(
+        (t for t in query_tokens if len(t) >= 2), key=len, reverse=True
+    ):
+        idx = text.find(term)
+        if idx != -1 and (anchor is None or idx < anchor):
+            anchor = idx
+    if anchor is None:
+        anchor = 0
+    start = max(0, anchor - budget // 4)
+    return text[start : start + budget].strip()
+
+
+def _snippet(body: str, vision: str, query_tokens: set[str]) -> str:
+    """Build a snippet that keeps the matched value across body + figure text.
+
+    Truncating the combined text from the start drops a figure/table value in
+    the appended `vision_text` when the OCR body alone exceeds the budget.
+    When both are present the figure reading is always given part of the
+    budget (it holds the values a figure question needs); otherwise the single
+    side is windowed on the match.
+    """
+    body = body.strip()
+    vision = vision.strip()
+    if body and vision:
+        v = _window(vision, query_tokens, _SNIPPET_LEN // 2)
+        b = _window(body, query_tokens, _SNIPPET_LEN - len(v) - 1)
+        return f"{b}\n{v}".strip()
+    return _window(body or vision, query_tokens, _SNIPPET_LEN)
 
 
 def _tokens(text: str) -> set[str]:
@@ -92,16 +129,20 @@ def retrieve_context(
     query_tokens = _tokens(query_norm)
     scored = []
     for r in rows:
-        # Score against the full recognition (body + figure reading): a
-        # figure/table question's supporting values may live only in
-        # vision_text.
-        text = _page_material(r["ocr_text"], r["vision_text"]) or r["summary"] or ""
-        score = _score(query_norm, query_tokens, text)
+        body = (r["ocr_text"] or "").strip()
+        vision = (r["vision_text"] or "").strip()
+        # Score against the raw body + figure reading: a figure/table
+        # question's supporting values may live only in vision_text.
+        score_text = _scored_material(body, vision) or (r["summary"] or "")
+        score = _score(query_norm, query_tokens, score_text)
         if score >= _MIN_SCORE:
-            # Build the snippet from the same combined material we scored, so
-            # a figure/table value that lives only in vision_text is not lost
-            # behind a short OCR summary (e.g. summary "参考資料").
-            snippet = (text or r["summary"] or "").strip()[:_SNIPPET_LEN]
+            # Window the snippet around the match so a value in vision_text
+            # (appended after a long body) is not truncated away; fall back to
+            # the summary only when there is no recognized text at all.
+            if body or vision:
+                snippet = _snippet(body, vision, query_tokens)
+            else:
+                snippet = (r["summary"] or "").strip()[:_SNIPPET_LEN]
             scored.append(
                 {
                     "page_id": r["id"],

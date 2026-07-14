@@ -137,15 +137,18 @@ API_VERSION = "1.10.0"
 #        the HIT band reached) outrank partial-coverage matches even at
 #        higher partial confidence; a STRONG pHash match (hamming <=
 #        HAMMING_STRONG) counts as full information (a near pHash match still
-#        carries the text-coverage penalty); remaining ties break by
-#        similarity, then signal_coverage. pHash presence checks are explicit
-#        (a valid all-zero hash still compares visually). Image-vs-image
-#        scoring unchanged. RAG retrieval scores pages on body + figure
-#        reading (pages.vision_text) and builds snippets from the same
-#        combined material, so figure-only supporting values are recallable
-#        AND surfaced in context. segment_problems detects deck boundaries
-#        from the body only and appends the figure reading to the owning
-#        problem, so figure labels never split a question.
+#        carries the text-coverage penalty, and a candidate that shares NO
+#        signal type with the query has 0 coverage — nothing was verified);
+#        remaining ties break by similarity, then signal_coverage. pHash
+#        presence checks are explicit (a valid all-zero hash still compares
+#        visually). Image-vs-image scoring unchanged. RAG retrieval scores
+#        pages on the RAW body + figure reading (pages.vision_text, no display
+#        header) and windows the snippet around the matched term, so
+#        figure-only supporting values are recallable AND surfaced in context
+#        without boilerplate overlap. segment_problems detects deck boundaries
+#        from the body only and appends the figure reading to EVERY same-page
+#        problem, so figure labels never split a question and the
+#        figure-dependent problem always gets its values.
 MATCHER_VERSION = "1.2.0"
 
 # HUD payload shape: {verdict, confidence, lines:[3]}.

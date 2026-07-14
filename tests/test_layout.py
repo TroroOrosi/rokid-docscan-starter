@@ -128,6 +128,21 @@ def test_segment_problems_figure_labels_do_not_split_question():
     assert "【図・画像の読み取り】" in problems[0].body_text
 
 
+def test_segment_problems_page_figure_reaches_every_same_page_problem():
+    # One page with two numbered problems and a single page-level figure
+    # reading: we cannot tell which problem references the figure, so the
+    # figure block must reach BOTH — the figure-dependent problem is never
+    # solved without its values, rather than the figure landing only on the
+    # last problem on the page.
+    pages = [
+        (0, "問1 次の図のピークを答えよ\n問2 別の設問に答えよ", "図: グラフのピークは3である"),
+    ]
+    problems = segment_problems(pages)
+    assert [p.question_no for p in problems] == ["問1", "問2"]
+    assert "グラフのピークは3である" in problems[0].body_text
+    assert "グラフのピークは3である" in problems[1].body_text
+
+
 def test_segment_problems_figure_only_fallback_keeps_values():
     # No numbered boundary, values only in the figure reading: the single
     # fallback problem must still carry them.

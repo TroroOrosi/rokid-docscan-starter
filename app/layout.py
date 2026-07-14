@@ -260,12 +260,23 @@ def segment_problems(
             )
 
         # Attach the page's figure reading AFTER boundary detection so its
-        # labels never split a question. It joins the problem that owns this
-        # page (the last one touching it), or the preamble when no numbered
-        # problem has started yet.
+        # labels never split a question. A page's vision_text is a PAGE-level
+        # signal — we cannot reliably tell WHICH same-page problem references
+        # the figure — so it is duplicated across EVERY problem this page
+        # contributes to. The figure-dependent problem is then guaranteed the
+        # values (a sibling problem may get some extra context, which is
+        # harmless) instead of the figure landing only on the last problem.
         fig = _figure_block(vision)
         if fig:
-            if problems:
+            owning = [p for p in problems if page_index in p.page_indexes]
+            if owning:
+                for target in owning:
+                    target.body_text = (
+                        f"{target.body_text}\n{fig}" if target.body_text else fig
+                    )
+            elif problems:
+                # Figure-only page (no text units of its own): a trailing
+                # figure usually belongs to the most recent problem.
                 target = problems[-1]
                 target.body_text = (
                     f"{target.body_text}\n{fig}" if target.body_text else fig

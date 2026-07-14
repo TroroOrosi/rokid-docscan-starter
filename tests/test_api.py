@@ -3,6 +3,7 @@ import importlib
 import pytest
 from fastapi.testclient import TestClient
 
+from app.matching import HAMMING_STRONG, HAMMING_WEAK
 from tests.conftest import image_bytes, make_image
 
 
@@ -407,6 +408,44 @@ def test_match_full_signal_hit_outranks_partial_exact_body(client):
         data={"document_id": str(doc_id), "ocr_text": body, "vision_text": vision},
     ).json()
     assert body_json["verdict"] == "HIT"
+    assert body_json["best_page"]["page_index"] == 1
+
+
+def test_match_no_common_signal_page_does_not_outrank_true_vision(client):
+    # Image+vision-only query. An image-backed page with a NEAR (not strong)
+    # pHash match and a body but NO stored vision shares no signal TYPE with
+    # the query, so no supplied signal was actually verified — its coverage is
+    # 0 and it must not sit in the full-information tier. The page whose figure
+    # reading actually matches (a full-coverage HIT) must win even though the
+    # near-visual page carries the higher raw confidence.
+    doc_id = _create_doc(client)
+    vision_q = "折れ線グラフ 気温は夏に最大値をとり冬に最小となる傾向を示す"
+    vision_b = "折れ線グラフ 気温は夏に最大値をとり冬に最小となる傾向がある"
+    # Page 0: image (near pHash to the query frame) + body, NO vision.
+    client.post(
+        f"/v1/documents/{doc_id}/pages",
+        data={"page_index": 0, "ocr_text": "問5 別紙の図を見て気温の傾向を答えよ"},
+        files={"image": ("p0.png", image_bytes(make_image(seed=64)), "image/png")},
+    )
+    # Page 1: the true figure page — body + the matching figure reading.
+    _add_text_only_page(
+        client, doc_id, 1,
+        ocr_text="問6 グラフの傾向を述べよ", vision_text=vision_b,
+    )
+    client.post(f"/v1/documents/{doc_id}/finalize")
+
+    # Query frame (seed 4) is a NEAR match to page 0 (visual < 1.0, not strong).
+    files_q = {"image": ("q.png", image_bytes(make_image(seed=4)), "image/png")}
+    body_json = client.post(
+        "/v1/match",
+        data={"document_id": str(doc_id), "vision_text": vision_q},
+        files=files_q,
+    ).json()
+    by_index = {c["page_index"]: c for c in body_json["candidates"]}
+    # The near-visual page really does carry the higher raw confidence...
+    assert by_index[0]["confidence"] > by_index[1]["confidence"]
+    assert HAMMING_STRONG < by_index[0]["hamming"] < HAMMING_WEAK  # near, not strong
+    # ...yet the page whose figure reading matches the supplied one wins.
     assert body_json["best_page"]["page_index"] == 1
 
 

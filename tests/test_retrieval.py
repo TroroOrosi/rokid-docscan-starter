@@ -101,3 +101,48 @@ def test_vision_text_values_are_retrievable(conn):
     assert r["hits"][0]["page_index"] == 0
     assert "1520" in r["context"]
     assert "1520" in r["hits"][0]["snippet"]
+
+
+def test_snippet_keeps_vision_value_after_long_body(conn):
+    # A page with a long OCR body whose matching value lives only in the
+    # appended figure reading: truncating from the start would drop the value,
+    # so the snippet must window it in.
+    from app.retrieval import retrieve_context
+
+    long_body = "重要な数値に関する前置きの説明がここに延々と続きます" + "あ" * 130
+    conn.execute("INSERT OR IGNORE INTO documents (id, title) VALUES (1, 'doc1')")
+    conn.execute(
+        "INSERT INTO pages (document_id, page_index, image_path, phash, "
+        "ocr_text, vision_text, summary) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (1, 0, None, "", long_body, "図: 全長は42.195キロメートル", None),
+    )
+    conn.commit()
+
+    r = retrieve_context(conn, "全長は何キロメートルか")
+    assert r["hits"], "page must be recalled"
+    assert "42.195" in r["hits"][0]["snippet"], "figure value must survive truncation"
+    assert "42.195" in r["context"]
+
+
+def test_boilerplate_header_does_not_recall_unrelated_vision_page(conn):
+    # The 【図・画像の読み取り】 display header must NOT be part of the scored
+    # text: otherwise a figure-vocabulary query overlaps the boilerplate of
+    # every vision page and recalls unrelated figure/table pages.
+    from app.retrieval import retrieve_context
+
+    conn.execute("INSERT OR IGNORE INTO documents (id, title) VALUES (1, 'doc1')")
+    conn.executemany(
+        "INSERT INTO pages (document_id, page_index, image_path, phash, "
+        "ocr_text, vision_text, summary) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        [
+            (1, 0, None, "", "", "光合成では光エネルギーででんぷんを作る反応", None),
+            (1, 1, None, "", "", "徳川家康が江戸幕府を開いた出来事", None),
+        ],
+    )
+    conn.commit()
+
+    r = retrieve_context(conn, "光合成の図から読み取れることは何か")
+    assert r["hits"] and r["hits"][0]["page_index"] == 0
+    assert 1 not in r["evidence_pages"], (
+        "an unrelated vision page must not be recalled via header overlap alone"
+    )

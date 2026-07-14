@@ -743,7 +743,12 @@ async def match_page(
                     else _text_md5(q_text_cmp or "")
                 )
                 cand_md5 = r["ocr_md5"] if r["phash"] else ocr_md5(cand_text)
-                used_signals = 1
+                # No signal type in common (e.g. a vision-only query vs a
+                # body-only page): any comparison here is cross-type, so NO
+                # supplied query signal was actually verified. Coverage is 0
+                # so a merely-near pHash HIT cannot sit in the full-information
+                # tier on the strength of an unmatched figure/body signal.
+                used_signals = 0
             sc = score_candidate(
                 q_phash,
                 q_md5_cmp,
