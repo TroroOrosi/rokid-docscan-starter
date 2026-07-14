@@ -124,6 +124,23 @@ def test_snippet_keeps_vision_value_after_long_body(conn):
     assert "42.195" in r["context"]
 
 
+def test_snippet_anchor_is_case_insensitive(conn):
+    # Retrieval normalizes English case before scoring; snippet anchoring must
+    # use the same rule or an uppercase match beyond the head is omitted.
+    from app.retrieval import retrieve_context
+
+    long_body = (
+        "Background material unrelated to the requested indicator. " * 4
+        + "GDP reached 3.2 percent growth in the latest period."
+    )
+    _add_page(conn, 1, 0, long_body)
+
+    r = retrieve_context(conn, "gdp")
+    assert r["hits"], "the normalized query must recall the page"
+    assert "GDP" in r["hits"][0]["snippet"]
+    assert "3.2" in r["hits"][0]["snippet"]
+
+
 def test_boilerplate_header_does_not_recall_unrelated_vision_page(conn):
     # The 【図・画像の読み取り】 display header must NOT be part of the scored
     # text: otherwise a figure-vocabulary query overlaps the boilerplate of
