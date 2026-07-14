@@ -449,6 +449,24 @@ def test_match_no_common_signal_page_does_not_outrank_true_vision(client):
     assert body_json["best_page"]["page_index"] == 1
 
 
+def test_match_cross_type_text_equality_is_not_a_hit(client):
+    # Equal strings do not constitute a match when their signal types differ:
+    # a figure-only query must not HIT a body-only page via cross-type MD5.
+    doc_id = _create_doc(client)
+    text = "shared words that happen to be identical"
+    _add_text_only_page(client, doc_id, 0, ocr_text=text)
+    client.post(f"/v1/documents/{doc_id}/finalize")
+
+    body_json = client.post(
+        "/v1/match",
+        data={"document_id": str(doc_id), "vision_text": text},
+    ).json()
+    assert body_json["verdict"] == "NO_PAGE"
+    assert body_json["best_page"] is None
+    assert body_json["confidence"] == 0.0
+    assert body_json["candidates"][0]["ocr_similarity"] == 0.0
+
+
 def test_match_exact_visual_match_outranks_text_coverage_tier(client):
     # Legacy image+vision query: a pixel-identical page whose figure reading
     # was never registered must still win — the coverage tier tracks text
