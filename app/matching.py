@@ -152,6 +152,11 @@ class Candidate:
     # Normalized OCR text, when available, for graded similarity matching.
     # Optional/last so existing positional construction keeps working.
     ocr_text: str | None = None
+    # Optional second comparison component (the figure reading). When both
+    # the query and the candidate provide one, the graded similarity is the
+    # equal-weight mean of the two components, so a long shared body cannot
+    # mask a mismatched figure reading.
+    vision_text: str | None = None
 
 
 @dataclass
@@ -186,12 +191,16 @@ def _ocr_signal(
     query_ocr_md5: str | None,
     query_ocr_text: str | None,
     candidate: Candidate,
+    query_vision_text: str | None = None,
 ) -> tuple[float, bool, float]:
     """Return (bonus, ocr_match, similarity) from the OCR text signal.
 
     1. Exact MD5 match -> full bonus (also covers the image-bytes fallback).
     2. Otherwise, if both sides have normalized text, award a graded bonus
-       proportional to their similarity (above OCR_SIM_FLOOR).
+       proportional to their similarity (above OCR_SIM_FLOOR). When both
+       sides also provide a figure-reading component, the similarity is the
+       equal-weight mean of the body and figure ratios — a long shared body
+       must not mask a mismatched figure reading.
     3. No usable text -> no bonus.
     """
     if query_ocr_md5 and candidate.ocr_md5 and query_ocr_md5 == candidate.ocr_md5:
@@ -203,6 +212,11 @@ def _ocr_signal(
         return 0.0, False, 0.0
 
     ratio = difflib.SequenceMatcher(None, q, c).ratio()
+    qv = normalize_ocr_text(query_vision_text)
+    cv = normalize_ocr_text(candidate.vision_text)
+    if qv and cv:
+        vision_ratio = difflib.SequenceMatcher(None, qv, cv).ratio()
+        ratio = (ratio + vision_ratio) / 2
     if ratio < OCR_SIM_FLOOR:
         return 0.0, False, round(ratio, 4)
     return OCR_MD5_BONUS * ratio, ratio >= OCR_MATCH_RATIO, round(ratio, 4)
@@ -240,9 +254,10 @@ def score_candidate(
     query_ocr_md5: str | None,
     candidate: Candidate,
     query_ocr_text: str | None = None,
+    query_vision_text: str | None = None,
 ) -> ScoredCandidate:
     bonus, ocr_match, similarity = _ocr_signal(
-        query_ocr_md5, query_ocr_text, candidate
+        query_ocr_md5, query_ocr_text, candidate, query_vision_text
     )
     if _has_hash(query_phash) and _has_hash(candidate.phash):
         # Visual comparison (both sides carry a pHash): unchanged formula.

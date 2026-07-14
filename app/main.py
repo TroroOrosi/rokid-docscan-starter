@@ -524,6 +524,12 @@ def get_document_scan_status(
 
     if not pages:
         recommended = "start_reading"
+    elif unexpected:
+        # Extras exist — checked BEFORE missing indexes: when both coexist
+        # the stray index is likely the missing page mis-indexed, and blindly
+        # rereading would leave the stray page in the document. The indexes
+        # need review first.
+        recommended = "review_page_indexes"
     elif missing:
         # NEW page indexes are rejected with 409 once the document is
         # finalized (add_page), so 再読取 of a missing index can only
@@ -532,10 +538,6 @@ def get_document_scan_status(
             "reread_missing_pages" if doc["status"] != "ready"
             else "start_new_document"
         )
-    elif unexpected:
-        # All expected indexes are present but extras exist — asking for
-        # another read would be wrong; the indexes need review instead.
-        recommended = "review_page_indexes"
     elif pages_without_text:
         # Replacing an EXISTING index stays possible after finalize, but is
         # frozen once a bound session finished reading.
@@ -670,13 +672,16 @@ async def match_page(
         # 撮影しない text comparison. The shape is aligned PER CANDIDATE on
         # the signals BOTH sides actually carry, so neither side is penalized
         # for information the other lacks:
-        #   - body and figure reading on both sides -> compare the combined
-        #     recognition (pages identical in print but different in figures
-        #     stay distinguishable),
+        #   - body and figure reading on both sides -> the components are
+        #     compared separately (equal weight — a long shared body cannot
+        #     mask a mismatched figure reading) and the exact-MD5 shortcut
+        #     hashes the FULL combined material on both sides, even for
+        #     legacy image queries,
         #   - figure reading on both but a body missing on either -> compare
         #     the figure readings alone,
         #   - body on both but a figure reading missing on either -> compare
-        #     the bodies alone,
+        #     the bodies alone (image queries/pages keep their historical
+        #     body/raw-bytes MD5 compat),
         #   - no common signal -> best-effort body-first fallback.
         # Comparisons that had to ignore one of the query's signals get a
         # lower signal_coverage, so a full body+figure match outranks a
@@ -686,9 +691,7 @@ async def match_page(
         q_combined = _match_text(query_text, vision_text)
         q_signals = int(bool(q_body)) + int(bool(q_vision))
 
-        def _q_md5_for(src: str) -> str | None:
-            if raw_q_md5 is not None:
-                return raw_q_md5
+        def _text_md5(src: str) -> str:
             return ocr_md5(src) or hashlib.md5(src.encode()).hexdigest()
 
         rows = conn.execute(
@@ -703,38 +706,52 @@ async def match_page(
             c_vision = normalize_ocr_text(r["vision_text"])
             common_body = bool(q_body and c_body)
             common_vision = bool(q_vision and c_vision)
+            cand_vision: str | None = None
+            q_vision_cmp: str | None = None
             if common_body and common_vision:
-                cand_text = _match_text(r["ocr_text"], r["vision_text"])
-                q_text_cmp: str | None = q_combined or None
+                cand_text: str | None = c_body
+                cand_vision = c_vision
+                q_text_cmp: str | None = q_body
+                q_vision_cmp = q_vision
+                q_md5_cmp = _text_md5(q_combined)
+                cand_md5 = ocr_md5(_match_text(r["ocr_text"], r["vision_text"]))
                 used_signals = 2
             elif common_vision:
                 cand_text = c_vision
-                q_text_cmp = q_vision or None
+                q_text_cmp = q_vision
+                q_md5_cmp = _text_md5(q_vision)
+                cand_md5 = ocr_md5(c_vision)
                 used_signals = 1
             elif common_body:
                 cand_text = c_body
-                q_text_cmp = q_body or None
+                q_text_cmp = q_body
+                q_md5_cmp = (
+                    raw_q_md5 if raw_q_md5 is not None else _text_md5(q_body)
+                )
+                cand_md5 = r["ocr_md5"] if r["phash"] else ocr_md5(c_body)
                 used_signals = 1
             else:
                 cand_text = c_body or c_vision
                 q_text_cmp = (q_body or q_vision) or None
+                q_md5_cmp = (
+                    raw_q_md5 if raw_q_md5 is not None
+                    else _text_md5(q_text_cmp or "")
+                )
+                cand_md5 = r["ocr_md5"] if r["phash"] else ocr_md5(cand_text)
                 used_signals = 1
             sc = score_candidate(
                 q_phash,
-                _q_md5_for(q_text_cmp or ""),
+                q_md5_cmp,
                 Candidate(
                     page_id=r["id"],
                     page_index=r["page_index"],
                     phash=r["phash"],
-                    # Image pages keep their stored MD5 (raw-bytes compat
-                    # fallback); text pages hash the material actually
-                    # being compared.
-                    ocr_md5=(
-                        r["ocr_md5"] if r["phash"] else ocr_md5(cand_text)
-                    ),
+                    ocr_md5=cand_md5,
                     ocr_text=cand_text,
+                    vision_text=cand_vision,
                 ),
                 query_ocr_text=q_text_cmp,
+                query_vision_text=q_vision_cmp,
             )
             sc.signal_coverage = (
                 used_signals / q_signals if q_signals else 1.0

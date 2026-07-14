@@ -125,10 +125,13 @@ API_VERSION = "1.10.0"
 #        OCR_SIM_FLOOR/OCR_MATCH_RATIO anchors; ScoredCandidate.hamming is
 #        None for text-only comparisons. Text comparison shape is aligned per
 #        candidate on the signals BOTH sides carry: body+figure on both ->
-#        combined recognition (pages differing only in figures stay
-#        distinguishable — similarity AND the exact-MD5 shortcut); figure on
-#        both but a body missing -> figure readings alone; body on both ->
-#        bodies alone; no common signal -> body-first fallback. So a partial
+#        the components are compared separately and averaged with equal
+#        weight (a long shared body cannot mask a mismatched figure reading)
+#        while the exact-MD5 shortcut hashes the FULL combined material on
+#        both sides, even for legacy image queries; figure on both but a
+#        body missing -> figure readings alone; body on both -> bodies alone
+#        (image sides keep the historical body/raw-bytes MD5 compat); no
+#        common signal -> body-first fallback. So a partial
 #        query/registration still exactly matches on the shared signal.
 #        Equal scores tie-break by similarity, then by signal_coverage (a
 #        full body+figure match outranks a body-only fallback). pHash

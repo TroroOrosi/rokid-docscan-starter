@@ -321,6 +321,75 @@ def test_match_vision_rich_query_matches_body_only_page(client):
     assert body_json["best_page"]["ocr_match"] is True
 
 
+def test_match_long_shared_body_with_mismatched_figure_not_hit(client):
+    # A long identical prompt must not drag a mismatched figure reading into
+    # the HIT band: the components are scored separately (equal weight).
+    doc_id = _create_doc(client)
+    body = (
+        "問9 次の資料を読み、以下の設問に答えよ。この調査は全国の中学生を"
+        "対象に実施され、回答者数は一万二千人、回収率は八十二パーセントで"
+        "あった。調査項目は生活習慣、学習時間、余暇の過ごし方に及ぶ。"
+    )
+    _add_text_only_page(
+        client, doc_id, 0, ocr_text=body,
+        vision_text="円グラフ 内訳 A 40% B 35% C 25%",
+    )
+    client.post(f"/v1/documents/{doc_id}/finalize")
+
+    body_json = client.post(
+        "/v1/match",
+        data={
+            "document_id": str(doc_id),
+            "ocr_text": body,
+            "vision_text": "散布図 x軸は学習時間 y軸は得点 右上がりの相関",
+        },
+    ).json()
+    assert body_json["verdict"] in {"LOW_CONF", "NO_PAGE"}
+
+
+def test_match_image_query_vision_mismatch_gets_no_exact_bonus(client):
+    # Legacy image query carrying vision_text: the exact-MD5 shortcut must
+    # hash the combined material, not the stored body/raw MD5 — a page whose
+    # figure reading differs must not be boosted as if it matched.
+    doc_id = _create_doc(client)
+    body = "問10 図から読み取れることを答えよ"
+    files0 = {"image": ("p0.png", image_bytes(make_image(seed=30)), "image/png")}
+    client.post(
+        f"/v1/documents/{doc_id}/pages",
+        data={"page_index": 0, "ocr_text": body,
+              "vision_text": "折れ線グラフ 気温 夏に最大"},
+        files=files0,
+    )
+    files1 = {"image": ("p1.png", image_bytes(make_image(seed=30)), "image/png")}
+    client.post(
+        f"/v1/documents/{doc_id}/pages",
+        data={"page_index": 1, "ocr_text": body,
+              "vision_text": "棒グラフ 降水量 6月に最大"},
+        files=files1,
+    )
+    client.post(f"/v1/documents/{doc_id}/finalize")
+
+    # Visually unrelated frame + body + page 1's figure reading.
+    files_q = {"image": ("q.png", image_bytes(make_image(seed=99)), "image/png")}
+    body_json = client.post(
+        "/v1/match",
+        data={
+            "document_id": str(doc_id),
+            "ocr_text": body,
+            "vision_text": "棒グラフ 降水量 6月に最大",
+        },
+        files=files_q,
+    ).json()
+    by_index = {c["page_index"]: c for c in body_json["candidates"]}
+    assert by_index[1]["ocr_match"] is True
+    assert by_index[0]["ocr_match"] is False
+    # The full-text bonus goes only to the page whose figure agrees...
+    assert by_index[1]["confidence"] > by_index[0]["confidence"]
+    # ...while the visually unrelated frame still keeps the compat image
+    # path from claiming a HIT (text is a bonus, not a verdict, there).
+    assert body_json["verdict"] != "HIT"
+
+
 def test_match_vision_only_query_matches_page_with_body_and_vision(client):
     # Live recognition may catch only the figure. The figure reading must be
     # compared against the page's figure reading alone — the registered body
