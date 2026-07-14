@@ -653,7 +653,6 @@ async def match_page(
             detail="match needs ocr_text/vision_text (recognized text) "
             "or a legacy image",
         )
-    query_has_vision = bool(vision_text and vision_text.strip())
     conn = db.connect()
     try:
         _doc_or_404(conn, document_id)
@@ -668,16 +667,24 @@ async def match_page(
         else:
             q_phash = None
 
-        # 撮影しない text comparison. The shape is aligned PER CANDIDATE so
-        # neither side is penalized for information the other lacks:
-        #   - both sides carry a figure reading -> compare the combined
-        #     body+figure recognition (pages identical in print but different
-        #     in figures stay distinguishable),
-        #   - otherwise -> body-first comparison (vision_text only as the
-        #     fallback for figure-only input), so a body-only query still
-        #     exactly matches a page registered with body + figures.
-        q_body = normalize_ocr_text(query_text) or normalize_ocr_text(vision_text)
+        # 撮影しない text comparison. The shape is aligned PER CANDIDATE on
+        # the signals BOTH sides actually carry, so neither side is penalized
+        # for information the other lacks:
+        #   - body and figure reading on both sides -> compare the combined
+        #     recognition (pages identical in print but different in figures
+        #     stay distinguishable),
+        #   - figure reading on both but a body missing on either -> compare
+        #     the figure readings alone,
+        #   - body on both but a figure reading missing on either -> compare
+        #     the bodies alone,
+        #   - no common signal -> best-effort body-first fallback.
+        # Comparisons that had to ignore one of the query's signals get a
+        # lower signal_coverage, so a full body+figure match outranks a
+        # body-only fallback at equal confidence.
+        q_body = normalize_ocr_text(query_text)
+        q_vision = normalize_ocr_text(vision_text)
         q_combined = _match_text(query_text, vision_text)
+        q_signals = int(bool(q_body)) + int(bool(q_vision))
 
         def _q_md5_for(src: str) -> str | None:
             if raw_q_md5 is not None:
@@ -692,37 +699,47 @@ async def match_page(
         ).fetchall()
         scored = []
         for r in rows:
-            cand_has_vision = bool(
-                r["vision_text"] and str(r["vision_text"]).strip()
-            )
-            if query_has_vision and cand_has_vision:
+            c_body = normalize_ocr_text(r["ocr_text"])
+            c_vision = normalize_ocr_text(r["vision_text"])
+            common_body = bool(q_body and c_body)
+            common_vision = bool(q_vision and c_vision)
+            if common_body and common_vision:
                 cand_text = _match_text(r["ocr_text"], r["vision_text"])
                 q_text_cmp: str | None = q_combined or None
-            else:
-                cand_text = (
-                    normalize_ocr_text(r["ocr_text"])
-                    or normalize_ocr_text(r["vision_text"])
-                )
+                used_signals = 2
+            elif common_vision:
+                cand_text = c_vision
+                q_text_cmp = q_vision or None
+                used_signals = 1
+            elif common_body:
+                cand_text = c_body
                 q_text_cmp = q_body or None
-            scored.append(
-                score_candidate(
-                    q_phash,
-                    _q_md5_for(q_text_cmp or ""),
-                    Candidate(
-                        page_id=r["id"],
-                        page_index=r["page_index"],
-                        phash=r["phash"],
-                        # Image pages keep their stored MD5 (raw-bytes compat
-                        # fallback); text pages hash the material actually
-                        # being compared.
-                        ocr_md5=(
-                            r["ocr_md5"] if r["phash"] else ocr_md5(cand_text)
-                        ),
-                        ocr_text=cand_text,
+                used_signals = 1
+            else:
+                cand_text = c_body or c_vision
+                q_text_cmp = (q_body or q_vision) or None
+                used_signals = 1
+            sc = score_candidate(
+                q_phash,
+                _q_md5_for(q_text_cmp or ""),
+                Candidate(
+                    page_id=r["id"],
+                    page_index=r["page_index"],
+                    phash=r["phash"],
+                    # Image pages keep their stored MD5 (raw-bytes compat
+                    # fallback); text pages hash the material actually
+                    # being compared.
+                    ocr_md5=(
+                        r["ocr_md5"] if r["phash"] else ocr_md5(cand_text)
                     ),
-                    query_ocr_text=q_text_cmp,
-                )
+                    ocr_text=cand_text,
+                ),
+                query_ocr_text=q_text_cmp,
             )
+            sc.signal_coverage = (
+                used_signals / q_signals if q_signals else 1.0
+            )
+            scored.append(sc)
         summaries = {r["id"]: r["summary"] for r in rows}
 
         scored = rank(scored)
@@ -957,20 +974,24 @@ def create_exam_session(payload: CreateExamSession) -> dict:
 async def add_question(
     session_id: int,
     ocr_text: str | None = Form(None),
+    vision_text: str | None = Form(None),
     image: UploadFile | None = File(None),
     bbox_hints: str | None = Form(None),
 ) -> dict:
     """Ingest one question. 撮影しない: the primary input is the on-glass
-    AI's on-the-spot recognition (``ocr_text``) — structure, subject, media
-    and anchors are all derived from text. ``image`` is an optional
-    backward-compat input (非推奨) kept for the legacy upload flow.
+    AI's on-the-spot recognition — body text (``ocr_text``) plus the figure/
+    diagram reading (``vision_text``); structure, subject, media and anchors
+    are all derived from text. ``image`` is an optional backward-compat
+    input (非推奨) kept for the legacy upload flow.
     """
     has_image = image is not None and getattr(image, "filename", None)
-    has_text = ocr_text and ocr_text.strip()
-    if not has_image and not has_text:
+    # Same combination rule as page ingestion: body + 【図・画像の読み取り】.
+    recognized = _page_material(ocr_text, vision_text) or None
+    if not has_image and not recognized:
         raise HTTPException(
             status_code=400,
-            detail="a question needs ocr_text (recognized text) or an image",
+            detail="a question needs ocr_text/vision_text (recognized text) "
+            "or an image",
         )
     conn = db.connect()
     try:
@@ -981,11 +1002,11 @@ async def add_question(
             raise HTTPException(
                 status_code=400, detail="bbox_hints must be valid JSON"
             )
-        parsed = parse_layout(ocr_text, bbox_hints=hints)
+        parsed = parse_layout(recognized, bbox_hints=hints)
         q = primary_question(parsed)
-        subject, subj_conf = detect_subject(ocr_text)
+        subject, subj_conf = detect_subject(recognized)
 
-        read_conf = 0.0 if not normalize_ocr_text(ocr_text) else round(min(1.0, 0.5 + subj_conf / 2), 3)
+        read_conf = 0.0 if not normalize_ocr_text(recognized) else round(min(1.0, 0.5 + subj_conf / 2), 3)
 
         # Persist the compat image only after every parse step that can
         # reject the request — a failed request must not orphan a file in
@@ -999,7 +1020,7 @@ async def add_question(
             img.convert("RGB").save(fpath, format="PNG")
 
         answer_box = q.answer_box if q else parsed.get("answer_box")
-        media = _extract_media(ocr_text, str(fpath) if fpath else None)
+        media = _extract_media(recognized, str(fpath) if fpath else None)
         cur = conn.execute(
             """INSERT INTO questions
                (session_id, question_no, body_text, choices_json, figure_refs,
@@ -1009,7 +1030,7 @@ async def add_question(
             (
                 session_id,
                 q.question_no if q else None,
-                q.body_text if q else (ocr_text or ""),
+                q.body_text if q else (recognized or ""),
                 json.dumps(q.choices if q else [], ensure_ascii=False),
                 json.dumps(q.figure_refs if q else [], ensure_ascii=False),
                 json.dumps(answer_box, ensure_ascii=False) if answer_box else None,

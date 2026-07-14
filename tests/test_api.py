@@ -321,6 +321,49 @@ def test_match_vision_rich_query_matches_body_only_page(client):
     assert body_json["best_page"]["ocr_match"] is True
 
 
+def test_match_vision_only_query_matches_page_with_body_and_vision(client):
+    # Live recognition may catch only the figure. The figure reading must be
+    # compared against the page's figure reading alone — the registered body
+    # must not dilute it.
+    doc_id = _create_doc(client)
+    vision = "円グラフ 内訳は A 40% B 35% C 25%"
+    _add_text_only_page(
+        client, doc_id, 0,
+        ocr_text=(
+            "問7 次の資料を読み、以下の設問に答えよ。資料には調査の背景と"
+            "方法、対象者の内訳、集計方針が長く記述されている。"
+        ),
+        vision_text=vision,
+    )
+    client.post(f"/v1/documents/{doc_id}/finalize")
+
+    body_json = client.post(
+        "/v1/match", data={"document_id": str(doc_id), "vision_text": vision}
+    ).json()
+    assert body_json["verdict"] == "HIT"
+    assert body_json["best_page"]["page_index"] == 0
+    assert body_json["best_page"]["ocr_match"] is True
+
+
+def test_match_prefers_figure_aware_match_over_body_only_fallback(client):
+    # Mixed coverage: an earlier page whose figure read was missed shares the
+    # body with a later fully-read page. A query carrying the matching figure
+    # reading must pick the fully-matched page, not the earlier fallback.
+    doc_id = _create_doc(client)
+    body = "問8 図を参照して答えよ"
+    vision = "ヒストグラム 度数は 3 7 12 9 4"
+    _add_text_only_page(client, doc_id, 0, ocr_text=body)  # figure read missed
+    _add_text_only_page(client, doc_id, 1, ocr_text=body, vision_text=vision)
+    client.post(f"/v1/documents/{doc_id}/finalize")
+
+    body_json = client.post(
+        "/v1/match",
+        data={"document_id": str(doc_id), "ocr_text": body, "vision_text": vision},
+    ).json()
+    assert body_json["verdict"] == "HIT"
+    assert body_json["best_page"]["page_index"] == 1
+
+
 def test_match_vision_text_fallback_matches_figure_only_page(client):
     # A page whose recognition is only the figure reading (vision_text) must
     # be matchable by the same figure reading.

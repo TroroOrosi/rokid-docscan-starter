@@ -165,6 +165,11 @@ class ScoredCandidate:
     confidence: float
     # 0..1 text similarity (1.0 == exact match, 0.0 == no usable text).
     ocr_similarity: float = 0.0
+    # Fraction of the query's text signals (body / figure reading) the
+    # comparison actually used. 1.0 = full-information match; lower = a
+    # fallback that had to ignore a supplied signal because the candidate
+    # lacked it. rank() prefers fuller matches on otherwise-equal scores.
+    signal_coverage: float = 1.0
 
 
 def _phash_confidence(distance: int) -> float:
@@ -280,9 +285,9 @@ def rank(scored: list[ScoredCandidate]) -> list[ScoredCandidate]:
 
     On equal confidence a visual match outranks a text-only one (hamming
     None sorts behind every real distance); equal text-only scores (e.g.
-    two exact body-MD5 hits) are broken by the text similarity so a matching
-    figure reading picks the right page; stable sort keeps page order after
-    that.
+    two exact body-MD5 hits) are broken by the text similarity, then by
+    signal coverage so a full body+figure match outranks a body-only
+    fallback; stable sort keeps page order after that.
     """
     return sorted(
         scored,
@@ -290,6 +295,7 @@ def rank(scored: list[ScoredCandidate]) -> list[ScoredCandidate]:
             -s.confidence,
             s.hamming if s.hamming is not None else HASH_BIT_LEN + 1,
             -s.ocr_similarity,
+            -s.signal_coverage,
         ),
     )
 

@@ -107,12 +107,13 @@ APP_VERSION = "0.10.0"
 #        400 for ambiguous problem_no and maps single-item payloads onto a
 #        single-problem deck. Path shapes unchanged — no envelope change.
 # 1.10.0: text-first /match and /questions (additive): image became optional
-#        on both; /match gained ocr_text/vision_text form fields
-#        (fast_ocr_text stays as the legacy alias) and its responses gained
-#        query_signals while query_phash/hamming may now be null for
-#        text-only comparisons; neither text nor image -> 400. New additive
-#        endpoint GET /v1/documents/{id}/scan-status (読取状態の確認・復旧).
-#        Path shapes unchanged — no envelope change.
+#        on both; /match and /questions gained ocr_text/vision_text form
+#        fields (fast_ocr_text stays as the legacy /match alias; /questions
+#        folds the figure reading into the question material) and /match
+#        responses gained query_signals while query_phash/hamming may now be
+#        null for text-only comparisons; neither text nor image -> 400. New
+#        additive endpoint GET /v1/documents/{id}/scan-status
+#        (読取状態の確認・復旧). Path shapes unchanged — no envelope change.
 API_VERSION = "1.10.0"
 
 # Matching algorithm identity. Bump when thresholds or hashing change so a
@@ -123,14 +124,16 @@ API_VERSION = "1.10.0"
 #        MD5 -> TEXT_EXACT_CONF (0.95), graded similarity mapped onto the
 #        OCR_SIM_FLOOR/OCR_MATCH_RATIO anchors; ScoredCandidate.hamming is
 #        None for text-only comparisons. Text comparison shape is aligned per
-#        candidate: when BOTH sides carry a figure reading the combined
-#        body+figure recognition is compared (pages differing only in figures
-#        stay distinguishable — similarity AND the exact-MD5 shortcut);
-#        otherwise the original body-first rule applies, so a body-only query
-#        still exactly matches a page registered with body + figures. Equal
-#        scores tie-break by similarity. pHash presence checks are explicit
-#        (a valid all-zero hash still compares visually).
-#        Image-vs-image scoring unchanged.
+#        candidate on the signals BOTH sides carry: body+figure on both ->
+#        combined recognition (pages differing only in figures stay
+#        distinguishable — similarity AND the exact-MD5 shortcut); figure on
+#        both but a body missing -> figure readings alone; body on both ->
+#        bodies alone; no common signal -> body-first fallback. So a partial
+#        query/registration still exactly matches on the shared signal.
+#        Equal scores tie-break by similarity, then by signal_coverage (a
+#        full body+figure match outranks a body-only fallback). pHash
+#        presence checks are explicit (a valid all-zero hash still compares
+#        visually). Image-vs-image scoring unchanged.
 MATCHER_VERSION = "1.2.0"
 
 # HUD payload shape: {verdict, confidence, lines:[3]}.

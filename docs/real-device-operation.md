@@ -120,7 +120,7 @@ POST /v1/match (document_id, ocr_text) → HUD: PAGE n/N / LOW_CONF / NO_PAGE
 ### 4-B. 解答（/v1/exam-sessions・設問1枚アップロード型＝互換）
 ```
 POST /v1/exam-sessions {mode:"study"}                → session_id
-認識テキストを送信 → POST .../questions (ocr_text,[image])  ← 構造化＋科目自動判定（撮影しない。image は互換・非推奨）
+認識テキストを送信 → POST .../questions (ocr_text,[vision_text],[image])  ← 構造化＋科目自動判定（撮影しない。image は互換・非推奨）
 1本指タップ(single_tap)              → POST .../{qid}/solve → 「答え: X ★★★」
 1本指タップ（解答表示中）             → GET .../view?stage=solution→rationale→caution
 2本指スワイプ下/上                   → テキストページ送り（view?page=N±1）

@@ -148,7 +148,7 @@ exam-session(document_id, exam_type, answer_format)
 | POST | `/v1/exam-sessions/{id}/next-page` / `prev-page` | 文書ページ移動（二次経路。現在ページ ±1・クランプ・撮影なし） |
 | GET | `/v1/exam-sessions/{id}/current` | 現在ページ把握（二次経路。科目・プレビュー・画像有無） |
 | POST | `/v1/exam-sessions/{id}/solve-current` | 現在ページを解く（二次経路。listening 時は書き起こしを統合）→ `glasses_view` |
-| POST | `/v1/exam-sessions/{id}/questions` | 認識テキスト（`ocr_text`）＋任意bbox → 構造化・科目推定・`media`抽出（互換。画像は互換の任意入力・非推奨） |
+| POST | `/v1/exam-sessions/{id}/questions` | 認識テキスト（`ocr_text`＋図の読み取り `vision_text`）＋任意bbox → 構造化・科目推定・`media`抽出（互換。画像は互換の任意入力・非推奨） |
 | POST | `/v1/exam-sessions/{id}/questions/{qid}/solve` | 解答（real は既定ロック）→ `glasses_view`＋`overlay`＋`served_by`＋`evidence`（互換） |
 | GET | `/v1/exam-sessions/{id}/questions/{qid}/view?stage=&page=` | 段階×ページ送り取得（互換） |
 | GET | `/v1/exam-sessions/{id}/questions/{qid}/reasoning` | フル推論ログ（案9、HUD非表示・real ロック準拠） |

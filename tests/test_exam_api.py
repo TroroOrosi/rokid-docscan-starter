@@ -231,6 +231,23 @@ def test_add_question_text_only_no_image(client):
     assert solved["glasses_view"]["lines"]
 
 
+def test_add_question_vision_text_only(client):
+    # A figure-only question: the on-glass AI's figure reading alone must be
+    # ingestable, drive media extraction, and be solvable.
+    sid = _new_session(client)
+    r = client.post(
+        f"/v1/exam-sessions/{sid}/questions",
+        data={"vision_text": "棒グラフ 各月の販売数 4月が最大の120"},
+    )
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["read_confidence"] > 0
+    assert body["media"], "figure cues in vision_text must drive extraction"
+    qid = body["question_id"]
+    solved = client.post(f"/v1/exam-sessions/{sid}/questions/{qid}/solve").json()
+    assert solved["locked"] is False
+
+
 def test_add_question_requires_text_or_image_400(client):
     sid = _new_session(client)
     r = client.post(f"/v1/exam-sessions/{sid}/questions")
