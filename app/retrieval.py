@@ -41,17 +41,19 @@ def _scored_material(ocr_text: str | None, vision_text: str | None) -> str:
 def _window(text: str, query_tokens: set[str], budget: int) -> str:
     """A <=budget slice of text anchored on the earliest query-term match.
 
-    Prefer longer query terms as anchors, falling back to the head when none
-    match, so the returned excerpt actually contains the matched value.
+    Prefer longer query terms as case-insensitive anchors, falling back to the
+    head when none match, so the returned excerpt actually contains the value
+    used by normalized retrieval scoring.
     """
     text = text.strip()
     if len(text) <= budget:
         return text
+    search_text = text.lower()
     anchor = None
     for term in sorted(
         (t for t in query_tokens if len(t) >= 2), key=len, reverse=True
     ):
-        idx = text.find(term)
+        idx = search_text.find(term.lower())
         if idx != -1 and (anchor is None or idx < anchor):
             anchor = idx
     if anchor is None:
