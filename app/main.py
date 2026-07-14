@@ -1793,7 +1793,9 @@ def exam_finalize_reading(session_id: int) -> dict:
             ).fetchall()
             problems = segment_problems(
                 [
-                    (r["page_index"], _page_material(r["ocr_text"], r["vision_text"]))
+                    # Body drives boundaries; the figure reading is appended
+                    # to the owning problem so its labels don't split it.
+                    (r["page_index"], r["ocr_text"] or "", r["vision_text"])
                     for r in page_rows
                 ]
             )

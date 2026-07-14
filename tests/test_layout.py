@@ -115,6 +115,28 @@ def test_segment_problems_shares_page_leading_prompt_with_next_problem():
     assert problems[1].start_page_index == 1
 
 
+def test_segment_problems_figure_labels_do_not_split_question():
+    # A single OCR question with a labelled table in vision_text: the (1)/(2)
+    # figure labels must NOT create extra deck problems, and the row values
+    # must stay in the problem body for solving.
+    pages = [
+        (0, "問1 次の表から最大の月を答えよ", "表:\n(1) 4月 100\n(2) 5月 200\n(3) 6月 150"),
+    ]
+    problems = segment_problems(pages)
+    assert [p.question_no for p in problems] == ["問1"]
+    assert "(2) 5月 200" in problems[0].body_text
+    assert "【図・画像の読み取り】" in problems[0].body_text
+
+
+def test_segment_problems_figure_only_fallback_keeps_values():
+    # No numbered boundary, values only in the figure reading: the single
+    # fallback problem must still carry them.
+    pages = [(0, "参考資料", "グラフ: 最高気温は35度")]
+    problems = segment_problems(pages)
+    assert len(problems) == 1
+    assert "35度" in problems[0].body_text
+
+
 def test_segment_problems_falls_back_to_single_problem():
     pages = [(0, "境界のない本文だけ"), (1, "二ページ目の本文"), (2, "")]
     problems = segment_problems(pages)

@@ -98,7 +98,10 @@ def retrieve_context(
         text = _page_material(r["ocr_text"], r["vision_text"]) or r["summary"] or ""
         score = _score(query_norm, query_tokens, text)
         if score >= _MIN_SCORE:
-            snippet = (r["summary"] or text).strip()[:_SNIPPET_LEN]
+            # Build the snippet from the same combined material we scored, so
+            # a figure/table value that lives only in vision_text is not lost
+            # behind a short OCR summary (e.g. summary "参考資料").
+            snippet = (text or r["summary"] or "").strip()[:_SNIPPET_LEN]
             scored.append(
                 {
                     "page_id": r["id"],

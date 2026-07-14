@@ -87,10 +87,12 @@ def test_vision_text_values_are_retrievable(conn):
     conn.execute(
         "INSERT OR IGNORE INTO documents (id, title) VALUES (1, 'doc1')"
     )
+    # Finalized page: a short OCR summary ("参考資料") must NOT hide the
+    # figure value that lives only in vision_text.
     conn.execute(
         "INSERT INTO pages (document_id, page_index, image_path, phash, "
         "ocr_text, vision_text, summary) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (1, 0, None, "", "参考資料", "表: 東京の年間降水量は1520ミリメートル", None),
+        (1, 0, None, "", "参考資料", "表: 東京の年間降水量は1520ミリメートル", "参考資料"),
     )
     conn.commit()
 
@@ -98,3 +100,4 @@ def test_vision_text_values_are_retrievable(conn):
     assert r["hits"], "figure-only page must be recalled via vision_text"
     assert r["hits"][0]["page_index"] == 0
     assert "1520" in r["context"]
+    assert "1520" in r["hits"][0]["snippet"]

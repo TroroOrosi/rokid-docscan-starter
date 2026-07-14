@@ -141,8 +141,11 @@ API_VERSION = "1.10.0"
 #        similarity, then signal_coverage. pHash presence checks are explicit
 #        (a valid all-zero hash still compares visually). Image-vs-image
 #        scoring unchanged. RAG retrieval scores pages on body + figure
-#        reading (pages.vision_text), so figure-only supporting values are
-#        recallable.
+#        reading (pages.vision_text) and builds snippets from the same
+#        combined material, so figure-only supporting values are recallable
+#        AND surfaced in context. segment_problems detects deck boundaries
+#        from the body only and appends the figure reading to the owning
+#        problem, so figure labels never split a question.
 MATCHER_VERSION = "1.2.0"
 
 # HUD payload shape: {verdict, confidence, lines:[3]}.
