@@ -133,10 +133,12 @@ API_VERSION = "1.10.0"
 #        (image sides keep the historical body/raw-bytes MD5 compat); no
 #        common signal -> body-first fallback. So a partial
 #        query/registration still exactly matches on the shared signal.
-#        Equal scores tie-break by similarity, then by signal_coverage (a
-#        full body+figure match outranks a body-only fallback). pHash
-#        presence checks are explicit (a valid all-zero hash still compares
-#        visually). Image-vs-image scoring unchanged.
+#        Ranking: full-information HITs (every supplied signal checked and
+#        the HIT band reached) outrank partial-coverage matches even at
+#        higher partial confidence; remaining ties break by similarity, then
+#        signal_coverage. pHash presence checks are explicit (a valid
+#        all-zero hash still compares visually). Image-vs-image scoring
+#        unchanged.
 MATCHER_VERSION = "1.2.0"
 
 # HUD payload shape: {verdict, confidence, lines:[3]}.

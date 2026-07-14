@@ -390,6 +390,26 @@ def test_match_image_query_vision_mismatch_gets_no_exact_bonus(client):
     assert body_json["verdict"] != "HIT"
 
 
+def test_match_full_signal_hit_outranks_partial_exact_body(client):
+    # A body-only page (figure read missed) exactly matches the query body;
+    # the true page has one OCR typo in its body but the matching figure.
+    # The full-signal HIT must win over the unverifiable exact body.
+    doc_id = _create_doc(client)
+    body = "問11 グラフの値を読み取り最大値を答えよ"
+    noisy_body = "間11 グラフの値を読み取り最大値を答えよ"  # 問→間 OCR typo
+    vision = "棒グラフ 4月 80 5月 95 6月 120 7月 110"
+    _add_text_only_page(client, doc_id, 0, ocr_text=body)  # figure missed
+    _add_text_only_page(client, doc_id, 1, ocr_text=noisy_body, vision_text=vision)
+    client.post(f"/v1/documents/{doc_id}/finalize")
+
+    body_json = client.post(
+        "/v1/match",
+        data={"document_id": str(doc_id), "ocr_text": body, "vision_text": vision},
+    ).json()
+    assert body_json["verdict"] == "HIT"
+    assert body_json["best_page"]["page_index"] == 1
+
+
 def test_match_vision_only_query_matches_page_with_body_and_vision(client):
     # Live recognition may catch only the figure. The figure reading must be
     # compared against the page's figure reading alone — the registered body

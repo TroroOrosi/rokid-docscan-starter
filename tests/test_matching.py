@@ -291,6 +291,30 @@ def test_zero_valued_phash_still_compares_visually():
     assert sc.confidence == 1.0
 
 
+def test_rank_prefers_full_signal_hit_over_partial_exact():
+    # A candidate that reached the HIT band on EVERY supplied signal must
+    # outrank a higher-confidence match that could not be checked against
+    # one of the query's signals (e.g. exact body, no figure to compare).
+    partial_exact = matching.ScoredCandidate(
+        page_id=1, page_index=0, hamming=None, ocr_match=True,
+        confidence=matching.TEXT_EXACT_CONF, ocr_similarity=1.0,
+        signal_coverage=0.5,
+    )
+    full_hit = matching.ScoredCandidate(
+        page_id=2, page_index=1, hamming=None, ocr_match=False,
+        confidence=0.90, ocr_similarity=0.98, signal_coverage=1.0,
+    )
+    ranked = matching.rank([partial_exact, full_hit])
+    assert [s.page_id for s in ranked] == [2, 1]
+    # ...but a full-coverage candidate BELOW the HIT band must not.
+    full_low = matching.ScoredCandidate(
+        page_id=3, page_index=2, hamming=None, ocr_match=False,
+        confidence=0.5, ocr_similarity=0.75, signal_coverage=1.0,
+    )
+    ranked = matching.rank([partial_exact, full_low])
+    assert [s.page_id for s in ranked] == [1, 3]
+
+
 def test_visual_match_outranks_equal_text_match():
     # Same confidence -> the candidate with a real hamming sorts first.
     ph = phash_hex(make_image(seed=15))
