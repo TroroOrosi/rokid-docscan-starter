@@ -301,22 +301,28 @@ def rank(scored: list[ScoredCandidate]) -> list[ScoredCandidate]:
     Full-information HITs come first: when the query supplied a signal a
     candidate could not be checked against (signal_coverage < 1), an exact
     match on the remaining signal must not outrank a candidate that reached
-    the HIT band on EVERY supplied signal. A completed visual comparison
-    (hamming is not None) counts as full information too — the coverage
-    field tracks TEXT signals only, and an exact pHash match must not lose
-    merely because the page's figure reading was never registered. When
-    every candidate has full coverage the tier boundary coincides with the
-    confidence ordering, so pure-visual/legacy rankings are unchanged.
-    Within a tier: confidence, then a visual match outranks a text-only one
-    (hamming None sorts behind every real distance), then text similarity,
-    then coverage; stable sort keeps page order after that.
+    the HIT band on EVERY supplied signal. A STRONG visual match (hamming
+    <= HAMMING_STRONG) counts as full information too — that alone puts the
+    page's confidence at 1.0 regardless of any unread figure signal, so an
+    exact/near-exact pHash match must not lose merely because the page's
+    figure reading was never registered. A merely-near pHash match
+    (visual < 1.0) still carries the text-coverage penalty, so it cannot
+    ignore a supplied figure signal. When every candidate has full coverage
+    the tier boundary coincides with the confidence ordering, so
+    pure-visual/legacy rankings are unchanged. Within a tier: confidence,
+    then a visual match outranks a text-only one (hamming None sorts behind
+    every real distance), then text similarity, then coverage; stable sort
+    keeps page order after that.
     """
     return sorted(
         scored,
         key=lambda s: (
             not (
                 s.confidence >= CONF_OK
-                and (s.signal_coverage >= 1.0 or s.hamming is not None)
+                and (
+                    s.signal_coverage >= 1.0
+                    or (s.hamming is not None and s.hamming <= HAMMING_STRONG)
+                )
             ),
             -s.confidence,
             s.hamming if s.hamming is not None else HASH_BIT_LEN + 1,

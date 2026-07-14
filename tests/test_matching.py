@@ -326,6 +326,20 @@ def test_rank_prefers_full_signal_hit_over_partial_exact():
     )
     ranked = matching.rank([full_hit, visual_exact])
     assert [s.page_id for s in ranked] == [4, 2]
+    # ...but a merely-NEAR pHash match (visual < 1.0) that dropped a supplied
+    # figure signal keeps the coverage penalty, so a full body+figure HIT
+    # still wins even at slightly lower confidence.
+    near_visual = matching.ScoredCandidate(
+        page_id=5, page_index=4, hamming=matching.HAMMING_STRONG + 4,
+        ocr_match=False, confidence=0.93, ocr_similarity=1.0,
+        signal_coverage=0.5,
+    )
+    full_hit2 = matching.ScoredCandidate(
+        page_id=6, page_index=5, hamming=None, ocr_match=False,
+        confidence=0.88, ocr_similarity=0.95, signal_coverage=1.0,
+    )
+    ranked = matching.rank([near_visual, full_hit2])
+    assert [s.page_id for s in ranked] == [6, 5]
 
 
 def test_visual_match_outranks_equal_text_match():

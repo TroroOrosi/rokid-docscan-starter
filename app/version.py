@@ -135,10 +135,14 @@ API_VERSION = "1.10.0"
 #        query/registration still exactly matches on the shared signal.
 #        Ranking: full-information HITs (every supplied signal checked and
 #        the HIT band reached) outrank partial-coverage matches even at
-#        higher partial confidence; remaining ties break by similarity, then
-#        signal_coverage. pHash presence checks are explicit (a valid
-#        all-zero hash still compares visually). Image-vs-image scoring
-#        unchanged.
+#        higher partial confidence; a STRONG pHash match (hamming <=
+#        HAMMING_STRONG) counts as full information (a near pHash match still
+#        carries the text-coverage penalty); remaining ties break by
+#        similarity, then signal_coverage. pHash presence checks are explicit
+#        (a valid all-zero hash still compares visually). Image-vs-image
+#        scoring unchanged. RAG retrieval scores pages on body + figure
+#        reading (pages.vision_text), so figure-only supporting values are
+#        recallable.
 MATCHER_VERSION = "1.2.0"
 
 # HUD payload shape: {verdict, confidence, lines:[3]}.

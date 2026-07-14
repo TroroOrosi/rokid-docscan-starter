@@ -76,3 +76,25 @@ def test_short_query_still_recalls(conn):
         r = retrieve_context(conn, query)
         assert r["hits"], f"expected the enzyme page to be recalled for {query!r}"
         assert r["hits"][0]["page_index"] == 0
+
+
+def test_vision_text_values_are_retrievable(conn):
+    # A supporting study page whose relevant values live only in vision_text
+    # (the figure/table reading) must still be recalled and contribute its
+    # values to the context snippet.
+    from app.retrieval import retrieve_context
+
+    conn.execute(
+        "INSERT OR IGNORE INTO documents (id, title) VALUES (1, 'doc1')"
+    )
+    conn.execute(
+        "INSERT INTO pages (document_id, page_index, image_path, phash, "
+        "ocr_text, vision_text, summary) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (1, 0, None, "", "参考資料", "表: 東京の年間降水量は1520ミリメートル", None),
+    )
+    conn.commit()
+
+    r = retrieve_context(conn, "東京の年間降水量は何ミリメートルか")
+    assert r["hits"], "figure-only page must be recalled via vision_text"
+    assert r["hits"][0]["page_index"] == 0
+    assert "1520" in r["context"]

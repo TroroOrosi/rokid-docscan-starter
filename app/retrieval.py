@@ -26,6 +26,21 @@ _MIN_SCORE = 0.06
 _SNIPPET_LEN = 120
 
 
+def _page_material(ocr_text: str | None, vision_text: str | None) -> str:
+    """Combine a page's body text and figure reading for scoring/snippets.
+
+    Mirrors app.main._page_material's combination (kept local to avoid an
+    import cycle): the figure/table reading may hold the values a
+    figure-dependent question needs.
+    """
+    parts = []
+    if ocr_text and ocr_text.strip():
+        parts.append(ocr_text.strip())
+    if vision_text and vision_text.strip():
+        parts.append("【図・画像の読み取り】\n" + vision_text.strip())
+    return "\n".join(parts)
+
+
 def _tokens(text: str) -> set[str]:
     # Whitespace words PLUS character bigrams of the compacted text. Bigrams make
     # overlap meaningful for Japanese, which is not reliably space-separated.
@@ -68,7 +83,8 @@ def retrieve_context(
         return empty
 
     rows = conn.execute(
-        "SELECT id, document_id, page_index, ocr_text, summary FROM pages"
+        "SELECT id, document_id, page_index, ocr_text, vision_text, summary "
+        "FROM pages"
     ).fetchall()
     if not rows:
         return empty
@@ -76,7 +92,10 @@ def retrieve_context(
     query_tokens = _tokens(query_norm)
     scored = []
     for r in rows:
-        text = r["ocr_text"] or r["summary"] or ""
+        # Score against the full recognition (body + figure reading): a
+        # figure/table question's supporting values may live only in
+        # vision_text.
+        text = _page_material(r["ocr_text"], r["vision_text"]) or r["summary"] or ""
         score = _score(query_norm, query_tokens, text)
         if score >= _MIN_SCORE:
             snippet = (r["summary"] or text).strip()[:_SNIPPET_LEN]
