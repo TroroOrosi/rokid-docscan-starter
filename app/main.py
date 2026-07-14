@@ -687,7 +687,8 @@ async def match_page(
         #   - body on both but a figure reading missing on either -> compare
         #     the bodies alone (image queries/pages keep their historical
         #     body/raw-bytes MD5 compat),
-        #   - no common signal -> best-effort body-first fallback.
+        #   - no common text signal -> do not compare body text with a figure
+        #     reading; only a shared visual signal, when present, may score.
         # Comparisons that had to ignore one of the query's signals get a
         # lower signal_coverage, so a full body+figure match outranks a
         # body-only fallback at equal confidence.
@@ -736,13 +737,15 @@ async def match_page(
                 cand_md5 = r["ocr_md5"] if r["phash"] else ocr_md5(c_body)
                 used_signals = 1
             else:
-                cand_text = c_body or c_vision
-                q_text_cmp = (q_body or q_vision) or None
-                q_md5_cmp = (
-                    raw_q_md5 if raw_q_md5 is not None
-                    else _text_md5(q_text_cmp or "")
-                )
-                cand_md5 = r["ocr_md5"] if r["phash"] else ocr_md5(cand_text)
+                # Body OCR and figure readings describe different signal
+                # types. Comparing them cross-type can turn an accidental
+                # equal string into an exact text-only HIT even though no
+                # supplied signal was verified. Leave the text inputs empty;
+                # score_candidate may still use a shared legacy pHash.
+                cand_text = None
+                q_text_cmp = None
+                q_md5_cmp = None
+                cand_md5 = None
                 # No signal type in common (e.g. a vision-only query vs a
                 # body-only page): any comparison here is cross-type, so NO
                 # supplied query signal was actually verified. Coverage is 0
