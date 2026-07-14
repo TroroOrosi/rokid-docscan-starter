@@ -248,6 +248,35 @@ def test_add_question_vision_text_only(client):
     assert solved["locked"] is False
 
 
+def test_add_question_vision_labels_do_not_split_question(client):
+    # Figure readings may contain (1)/問N-shaped labels; they must not be
+    # parsed as question boundaries, and the figure lines must stay with the
+    # stored question body for solving.
+    import app.main as main
+
+    sid = _new_session(client)
+    r = client.post(
+        f"/v1/exam-sessions/{sid}/questions",
+        data={
+            "ocr_text": "問1 次の表を読み取り、最大の月を答えよ",
+            "vision_text": "表:\n(1) 4月 100\n(2) 5月 200\n(3) 6月 150",
+        },
+    )
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["question_no"] == "問1"
+    conn = main.db.connect()
+    try:
+        row = conn.execute(
+            "SELECT body_text FROM questions WHERE id = ?",
+            (body["question_id"],),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert "(2) 5月 200" in row["body_text"]
+    assert "【図・画像の読み取り】" in row["body_text"]
+
+
 def test_add_question_requires_text_or_image_400(client):
     sid = _new_session(client)
     r = client.post(f"/v1/exam-sessions/{sid}/questions")

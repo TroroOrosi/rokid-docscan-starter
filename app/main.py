@@ -528,8 +528,13 @@ def get_document_scan_status(
         # Extras exist — checked BEFORE missing indexes: when both coexist
         # the stray index is likely the missing page mis-indexed, and blindly
         # rereading would leave the stray page in the document. The indexes
-        # need review first.
-        recommended = "review_page_indexes"
+        # need review first — but index corrections are impossible once the
+        # document is finalized (new indexes 409, strays cannot be removed),
+        # so a ready document needs a fresh one.
+        recommended = (
+            "review_page_indexes" if doc["status"] != "ready"
+            else "start_new_document"
+        )
     elif missing:
         # NEW page indexes are rejected with 409 once the document is
         # finalized (add_page), so 再読取 of a missing index can only
@@ -1019,7 +1024,10 @@ async def add_question(
             raise HTTPException(
                 status_code=400, detail="bbox_hints must be valid JSON"
             )
-        parsed = parse_layout(recognized, bbox_hints=hints)
+        # Question boundaries come from the BODY text only — figure readings
+        # can contain (1)/問N-shaped labels that must not split the question.
+        # The vision block is appended to the stored body afterwards.
+        parsed = parse_layout(ocr_text, bbox_hints=hints)
         q = primary_question(parsed)
         subject, subj_conf = detect_subject(recognized)
 
@@ -1047,7 +1055,10 @@ async def add_question(
             (
                 session_id,
                 q.question_no if q else None,
-                q.body_text if q else (recognized or ""),
+                # Keep the figure reading with the question body (appended
+                # after boundary detection, same combination rule as pages).
+                _page_material(q.body_text if q else ocr_text, vision_text)
+                or "",
                 json.dumps(q.choices if q else [], ensure_ascii=False),
                 json.dumps(q.figure_refs if q else [], ensure_ascii=False),
                 json.dumps(answer_box, ensure_ascii=False) if answer_box else None,

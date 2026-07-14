@@ -410,6 +410,39 @@ def test_match_full_signal_hit_outranks_partial_exact_body(client):
     assert body_json["best_page"]["page_index"] == 1
 
 
+def test_match_exact_visual_match_outranks_text_coverage_tier(client):
+    # Legacy image+vision query: a pixel-identical page whose figure reading
+    # was never registered must still win — the coverage tier tracks text
+    # signals and must not demote a completed visual comparison.
+    doc_id = _create_doc(client)
+    files0 = {"image": ("p0.png", image_bytes(make_image(seed=41)), "image/png")}
+    client.post(
+        f"/v1/documents/{doc_id}/pages",
+        data={"page_index": 0, "ocr_text": "問12 別紙の図を見て答えよ"},
+        files=files0,
+    )
+    _add_text_only_page(
+        client, doc_id, 1,
+        ocr_text="問13 グラフの傾向を述べよ",
+        vision_text="折れ線グラフ 上昇傾向",
+    )
+    client.post(f"/v1/documents/{doc_id}/finalize")
+
+    files_q = {"image": ("q.png", image_bytes(make_image(seed=41)), "image/png")}
+    body_json = client.post(
+        "/v1/match",
+        data={
+            "document_id": str(doc_id),
+            "ocr_text": "問13 グラフの傾向を述べよ",
+            "vision_text": "折れ線グラフ 上昇傾向",
+        },
+        files=files_q,
+    ).json()
+    assert body_json["verdict"] == "HIT"
+    assert body_json["best_page"]["page_index"] == 0
+    assert body_json["best_page"]["hamming"] == 0
+
+
 def test_match_vision_only_query_matches_page_with_body_and_vision(client):
     # Live recognition may catch only the figure. The figure reading must be
     # compared against the page's figure reading alone — the registered body

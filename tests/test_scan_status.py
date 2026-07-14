@@ -134,6 +134,21 @@ def test_scan_status_misindexed_page_prioritizes_index_review(client):
     assert body["recommended_action"] == "review_page_indexes"
 
 
+def test_scan_status_gap_and_extra_after_finalize_recommends_new_document(client):
+    # Index corrections are impossible on a finalized document (new indexes
+    # 409, strays cannot be removed) — even with extras present the honest
+    # recovery is a fresh document.
+    doc_id = _new_doc(client)
+    _add_text_page(client, doc_id, 0, "p1")
+    _add_text_page(client, doc_id, 2, "p3")
+    _add_text_page(client, doc_id, 3, "p2 誤ってindex 3で登録")
+    assert client.post(f"/v1/documents/{doc_id}/finalize").status_code == 200
+    body = _status(client, doc_id, expected=3).json()
+    assert body["missing_page_indexes"] == [1]
+    assert body["unexpected_page_indexes"] == [3]
+    assert body["recommended_action"] == "start_new_document"
+
+
 def test_scan_status_missing_after_finalize_recommends_new_document(client):
     # add_page rejects NEW page indexes once the document is finalized, so
     # rereading a missing index cannot succeed there — the only recovery is

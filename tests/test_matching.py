@@ -313,6 +313,19 @@ def test_rank_prefers_full_signal_hit_over_partial_exact():
     )
     ranked = matching.rank([partial_exact, full_low])
     assert [s.page_id for s in ranked] == [1, 3]
+    # A completed visual comparison counts as full information: an exact
+    # pHash match must not lose the tier merely because the page's figure
+    # reading was never registered (coverage tracks text signals only).
+    visual_exact = matching.ScoredCandidate(
+        page_id=4, page_index=3, hamming=0, ocr_match=False,
+        confidence=1.0, ocr_similarity=0.0, signal_coverage=0.5,
+    )
+    full_hit = matching.ScoredCandidate(
+        page_id=2, page_index=1, hamming=None, ocr_match=False,
+        confidence=0.9, ocr_similarity=0.98, signal_coverage=1.0,
+    )
+    ranked = matching.rank([full_hit, visual_exact])
+    assert [s.page_id for s in ranked] == [4, 2]
 
 
 def test_visual_match_outranks_equal_text_match():
