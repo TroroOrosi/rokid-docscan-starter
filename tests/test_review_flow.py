@@ -274,6 +274,100 @@ def test_release_server_solve_only_deletes_own_claim(client):
         conn.close()
 
 
+def test_server_solve_heartbeat_prevents_live_ttl_reclaim(client, monkeypatch):
+    import time
+
+    import app.main as main
+
+    monkeypatch.setattr(main, "_CLAIM_HEARTBEAT_SECONDS", 0.01)
+    conn = main.db.connect()
+    try:
+        conn.execute("INSERT INTO documents (title) VALUES ('d')")
+        doc_id = conn.execute("SELECT id FROM documents").fetchone()[0]
+        conn.execute(
+            "INSERT INTO exam_sessions (mode, document_id) VALUES ('study', ?)",
+            (doc_id,),
+        )
+        sid = conn.execute("SELECT id FROM exam_sessions").fetchone()[0]
+        conn.execute(
+            "INSERT INTO questions (session_id, question_no, body_text) "
+            "VALUES (?, '問1', 'x')",
+            (sid,),
+        )
+        qid = conn.execute("SELECT id FROM questions").fetchone()[0]
+        conn.commit()
+
+        token = main._claim_server_solve(conn, qid)
+        assert token
+        conn.execute(
+            "UPDATE solution_claims SET claimed_at = datetime('now', '-30 minutes') "
+            "WHERE question_id = ?",
+            (qid,),
+        )
+        conn.commit()
+
+        with main._claim_heartbeat(
+            lambda: main._renew_server_solve_claim(qid, token),
+            name="test-solve-heartbeat",
+        ):
+            deadline = time.monotonic() + 1.0
+            while time.monotonic() < deadline:
+                fresh = conn.execute(
+                    "SELECT claimed_at > datetime('now', '-15 minutes') "
+                    "FROM solution_claims WHERE question_id = ?",
+                    (qid,),
+                ).fetchone()[0]
+                if fresh:
+                    break
+                time.sleep(0.01)
+            assert fresh
+            assert main._claim_server_solve(conn, qid) is None
+        main._release_server_solve(conn, qid, token)
+    finally:
+        conn.close()
+
+
+def test_legacy_solution_evidence_base_is_inferred_per_writer(client):
+    import json
+
+    from app.main import _solution_from_row
+
+    common = {
+        "answer": "A",
+        "solution_steps_json": "[]",
+        "rationale": "r",
+        "cautions": "",
+        "answer_conf": 0.9,
+        "rationale_conf": 0.9,
+        "evidence_refs_json": None,
+        "raw_reasoning": "",
+    }
+    retrieval_row = {
+        **common,
+        "solver_name": "openai",
+        "served_by": "openai",
+        "evidence_pages_json": "[0, 2]",
+    }
+    compat_question = {"structure_json": None, "page_number": None}
+    retrieval = _solution_from_row(retrieval_row, compat_question)
+    assert retrieval.extras["_evidence_pages_base"] == 0
+    assert retrieval.evidence_pages == [0, 2]
+
+    onboard_row = {
+        **common,
+        "solver_name": "onboard",
+        "served_by": "onboard",
+        "evidence_pages_json": "[1, 3]",
+    }
+    deck_question = {
+        "structure_json": json.dumps({"deck": True, "page_indexes": [0, 2]}),
+        "page_number": 1,
+    }
+    onboard = _solution_from_row(onboard_row, deck_question)
+    assert onboard.extras["_evidence_pages_base"] == 1
+    assert onboard.evidence_pages == [1, 3]
+
+
 def test_finalize_reading_without_solver_leaves_deck_unsolved(client):
     # ROKID_SOLVER unset: the onboard AI is the solver (primary path); the
     # local placeholder must NOT fill the deck with junk "solved" rows.
