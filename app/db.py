@@ -99,9 +99,9 @@ CREATE TABLE IF NOT EXISTS solutions (
 -- Stale rows are reclaimed by the application after a crash/timeout.
 CREATE TABLE IF NOT EXISTS solution_claims (
     question_id INTEGER PRIMARY KEY REFERENCES questions(id) ON DELETE CASCADE,
-    -- Per-claim owner token: after the TTL reclaim hands the slot to a retry,
-    -- the original request must release only ITS claim, not the retry's.
-    owner_token TEXT,
+    -- Per-claim owner token: a live owner renews claimed_at, and after a true
+    -- stale reclaim the original request can release only ITS claim.
+    owner_token TEXT NOT NULL,
     claimed_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -152,6 +152,7 @@ CREATE TABLE IF NOT EXISTS explain_claims (
     session_id     INTEGER NOT NULL REFERENCES explain_sessions(id) ON DELETE CASCADE,
     page_index     INTEGER NOT NULL,
     page_signature TEXT NOT NULL,
+    owner_token    TEXT NOT NULL,
     claimed_at     TEXT NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY (session_id, page_index, page_signature)
 );
@@ -200,6 +201,9 @@ _TABLE_COLUMN_MIGRATIONS = {
         ("explainer_json", "TEXT"),
         ("result_extras_json", "TEXT"),
         ("page_signature", "TEXT"),
+    ),
+    "explain_claims": (
+        ("owner_token", "TEXT"),
     ),
 }
 
