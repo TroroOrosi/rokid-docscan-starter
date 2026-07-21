@@ -571,14 +571,14 @@ def test_explain_claim_waiter_reuses_winner_result(tmp_path):
     sid = winner.execute("SELECT id FROM explain_sessions").fetchone()["id"]
     winner.commit()
 
-    owns, row = _acquire_or_wait_for_explain(
+    owner_token, row = _acquire_or_wait_for_explain(
         winner,
         session_id=sid,
         page_index=0,
         page_signature="sig-A",
         after_id=0,
     )
-    assert owns is True and row is None
+    assert owner_token and row is None
 
     observed = {}
 
@@ -624,15 +624,33 @@ def test_explain_claim_waiter_reuses_winner_result(tmp_path):
         session_id=sid,
         page_index=0,
         page_signature="sig-A",
+        owner_token=owner_token,
     )
 
     thread.join(timeout=3)
     assert not thread.is_alive()
     assert "error" not in observed
-    waiter_owns, waiter_row = observed["value"]
-    assert waiter_owns is False
+    waiter_token, waiter_row = observed["value"]
+    assert waiter_token is None
     assert waiter_row["detail"] == "winner"
     winner.close()
+
+
+def test_legacy_explain_row_marks_zero_based_evidence_for_display():
+    from app.main import _explain_result_from_row
+
+    result = _explain_result_from_row(
+        {
+            "hud_lines_json": '["a", "b", "c"]',
+            "detail": "legacy",
+            "evidence_pages_json": "[0, 2]",
+            "evidence_refs_json": None,
+            "confidence": 0.8,
+            "result_extras_json": None,
+        }
+    )
+    assert result.evidence_pages == [0, 2]
+    assert result.extras["_evidence_pages_base"] == 0
 
 # ---------------------------------------------------------------------------
 # 7. /v1/version includes explainers list
