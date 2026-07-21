@@ -216,16 +216,20 @@ ALTER TABLE pages_new RENAME TO pages;
 
 
 def _bump_evidence_pages_to_one_based(conn: sqlite3.Connection, table: str) -> None:
-    """Convert a legacy table's 0-based `evidence_pages_json` to 1-based.
+    """Lift a uniformly-0-based `evidence_pages_json` column to 1-based.
 
-    Rows written before structured `evidence_refs` existed stored the raw
-    0-based `page_index` in `evidence_pages_json`. The current display path
-    (glasses_view) treats that list as user-facing/1-based when no
+    Legacy `explain_views` rows stored the explainer's raw 0-based `page_index`
+    in `evidence_pages_json` (no structured `evidence_refs` existed yet). The
+    display path (glasses_view) treats that list as user-facing/1-based when no
     `evidence_refs` are present, so a legacy page-0 evidence would render as
-    `P00` and point one page off. This runs exactly once — at the moment the
-    `evidence_refs_json` column is first added — because every row that already
-    exists at that boundary predates the 1-based convention. Empty lists and
-    non-integer entries are left untouched.
+    `P00` and point one page off. Runs exactly once — when `evidence_refs_json`
+    is first added — because every row at that boundary predates the 1-based
+    convention. Empty lists and non-integer entries are left untouched.
+
+    The caller restricts this to tables whose legacy rows are ALL 0-based. It
+    must NOT touch `solutions`: its legacy evidence is a mix — the onboard
+    ingest and the question-span fallback already wrote 1-based `page_number`,
+    so a blanket +1 would corrupt the primary onboard path (P01 -> P02).
     """
     rows = conn.execute(
         f"SELECT id, evidence_pages_json FROM {table} "
@@ -269,9 +273,18 @@ def _migrate(conn: sqlite3.Connection) -> None:
             if name not in existing:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
                 # Adding evidence_refs_json is the upgrade boundary from the
-                # 0-based evidence world; every pre-existing evidence_pages row
-                # is legacy 0-based and must move to the 1-based display convention.
-                if name == "evidence_refs_json" and "evidence_pages_json" in existing:
+                # pre-structured-evidence world. Only explain_views is lifted:
+                # every legacy explain row stored the explainer's 0-based
+                # page_index. solutions is deliberately left as stored — its
+                # legacy rows are a mix (onboard ingest / question-span
+                # fallbacks already wrote 1-based page_number), and there is no
+                # per-row signal to tell those from the 0-based /solve rows, so
+                # a blanket +1 would corrupt the primary onboard path.
+                if (
+                    name == "evidence_refs_json"
+                    and table == "explain_views"
+                    and "evidence_pages_json" in existing
+                ):
                     _bump_evidence_pages_to_one_based(conn, table)
 
     # pages: on a legacy DB, image_path was NOT NULL — rebuild the table so

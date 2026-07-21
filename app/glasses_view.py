@@ -255,9 +255,11 @@ def _evidence_labels(result: SolveResult | ExplainResult) -> list[str]:
     """Human-facing, unambiguous evidence labels.
 
     Structured cross-document refs win. Older stored rows may only carry the
-    bare page-number list; those are migrated to the 1-based convention on
-    upgrade (db._bump_evidence_pages_to_one_based), so rendering them directly
-    as ``P{n}`` stays correct.
+    bare page-number list. Legacy explain evidence is lifted to 1-based on
+    upgrade (db._bump_evidence_pages_to_one_based); legacy solution evidence is
+    left as stored, because onboard/question-span rows were already 1-based and
+    cannot be told apart from old 0-based /solve rows — so a few old
+    server-solved rows may read one page off until re-solved.
     """
     labels: list[str] = []
     for ref in getattr(result, "evidence_refs", []) or []:
