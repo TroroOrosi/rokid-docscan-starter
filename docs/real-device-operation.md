@@ -101,31 +101,34 @@ export ROKID_TRANSCRIBE_MODEL=gpt-4o-transcribe   # gemini は ROKID_LLM_MODEL �
 > KeyCode は `GET /v1/settings.input.gestures` の値に従う（下記は既定値）。
 
 ### 4-A. 資料照合（/v1/match）
-事前登録 → 現場で照合：
+事前登録 → 現場で照合（**撮影しない**：どちらも認識テキストで完結）：
 ```
-# 登録（image は任意。撮影レスなら ocr_text だけでページを記憶）
+# 登録（撮影しない：ocr_text／vision_text だけでページを記憶）
 POST /v1/documents            → document_id
-POST /v1/documents/{id}/pages (page_index, [image], [ocr_text]) ×全ページ
+POST /v1/documents/{id}/pages (page_index, ocr_text, [vision_text]) ×全ページ
+GET  /v1/documents/{id}/scan-status?expected_total_pages=N   ← 中断復帰（欠番のみ再読取）
 POST /v1/documents/{id}/finalize   ← 完了宣言（要約生成・status=ready）
-# 現場（照合は画像を使う任意経路）
-カメラ1フレーム取得 → 端末OCR →
-POST /v1/match (document_id, image, fast_ocr_text) → HUD: PAGE n/N / LOW_CONF / NO_PAGE
+# 現場（照合もその場認識のテキストで）
+視認＝本体 AI がその場で認識 →
+POST /v1/match (document_id, ocr_text) → HUD: PAGE n/N / LOW_CONF / NO_PAGE
 ```
-- **撮影レス登録**：`/pages` は `image` 省略可。本体 AI が視認した資料テキストを `ocr_text` に
-  渡せば、写真なしでページを記憶（`image_path=null`・`phash=""`）。照合(`/match`)は画像を使う機能
-  なので、撮影レス標準フローでは下記 **4-D の文書ページ移動型**で現在ページを把握します。
+- **撮影しない登録**：本体 AI が視認した資料テキストを `ocr_text` に渡せば、写真なしで
+  ページを記憶（`image_path=null`・`phash=""`）。照合(`/match`)も**テキスト照合が主**で、
+  テキストのみページ同士がそのまま照合できる（`hamming` は null）。`image` は互換の
+  任意入力（非推奨）で、添付時のみ画像登録ページと pHash 照合される。
 
 ### 4-B. 解答（/v1/exam-sessions・設問1枚アップロード型＝互換）
 ```
 POST /v1/exam-sessions {mode:"study"}                → session_id
-問題画像を送信 → POST .../questions (image,[ocr_text])  ← 用紙画像を保存＋科目自動判定（互換経路のみ画像使用）
+認識テキストを送信 → POST .../questions (ocr_text,[vision_text],[image])  ← 構造化＋科目自動判定（撮影しない。image は互換・非推奨）
 1本指タップ(single_tap)              → POST .../{qid}/solve → 「答え: X ★★★」
 1本指タップ（解答表示中）             → GET .../view?stage=solution→rationale→caution
 2本指スワイプ下/上                   → テキストページ送り（view?page=N±1）
 ```
-- **用紙画像で解く（vision）**：実アダプタ（`openai`/`gemini`/`claude`）を有効化すると、
-  `solve` は保存済みの**ページ画像をモデルへ添付**し、図/数式/表/選択肢を直接読んで解答します
-  （OCR テキストは補助、教科別プロンプト）。**画像はクラウドへ送信**されるため、実 AI・鍵設定時
+- **用紙画像で解く（vision・互換画像がある場合のみ）**：実アダプタ（`openai`/`gemini`/`claude`）を
+  有効化し、かつ互換経路で画像が保存されている場合、`solve` はその画像をモデルへ添付し、
+  図/数式/表/選択肢を直接読んで解答します（OCR テキストは補助、教科別プロンプト。
+  撮影しない主経路では画像が無く、テキストのみで解答します）。**画像はクラウドへ送信**されるため、実 AI・鍵設定時
   のみ作動（未設定/失敗はローカルへフォールバック）。
 - 科目は読取時に自動判定（共通テスト準拠フル16教科）。`mode:"real"` は
   `ROKID_ALLOW_REAL_EXAM_SOLVE=1` が無い限りロック（解答非表示）。

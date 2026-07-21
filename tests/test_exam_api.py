@@ -211,6 +211,119 @@ def test_low_read_confidence_asks_for_retake(client):
     assert "hint" in r
 
 
+# --- text-first question ingestion (撮影しない主経路) -------------------------
+
+def test_add_question_text_only_no_image(client):
+    sid = _new_session(client)
+    r = client.post(
+        f"/v1/exam-sessions/{sid}/questions",
+        data={"ocr_text": "問2 次の計算\n① 12\n② 13\n③ 14\n④ 15"},
+    )
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["question_no"] == "問2"
+    assert body["read_confidence"] > 0
+    assert "capture_ack" in body
+    # the ingested question is solvable without any stored image
+    qid = body["question_id"]
+    solved = client.post(f"/v1/exam-sessions/{sid}/questions/{qid}/solve").json()
+    assert solved["locked"] is False
+    assert solved["glasses_view"]["lines"]
+
+
+def test_add_question_vision_text_only(client):
+    # A figure-only question: the on-glass AI's figure reading alone must be
+    # ingestable, drive media extraction, and be solvable.
+    sid = _new_session(client)
+    r = client.post(
+        f"/v1/exam-sessions/{sid}/questions",
+        data={"vision_text": "棒グラフ 各月の販売数 4月が最大の120"},
+    )
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["read_confidence"] > 0
+    assert body["media"], "figure cues in vision_text must drive extraction"
+    qid = body["question_id"]
+    solved = client.post(f"/v1/exam-sessions/{sid}/questions/{qid}/solve").json()
+    assert solved["locked"] is False
+
+
+def test_add_question_vision_labels_do_not_split_question(client):
+    # Figure readings may contain (1)/問N-shaped labels; they must not be
+    # parsed as question boundaries, and the figure lines must stay with the
+    # stored question body for solving.
+    import app.main as main
+
+    sid = _new_session(client)
+    r = client.post(
+        f"/v1/exam-sessions/{sid}/questions",
+        data={
+            "ocr_text": "問1 次の表を読み取り、最大の月を答えよ",
+            "vision_text": "表:\n(1) 4月 100\n(2) 5月 200\n(3) 6月 150",
+        },
+    )
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["question_no"] == "問1"
+    conn = main.db.connect()
+    try:
+        row = conn.execute(
+            "SELECT body_text FROM questions WHERE id = ?",
+            (body["question_id"],),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert "(2) 5月 200" in row["body_text"]
+    assert "【図・画像の読み取り】" in row["body_text"]
+
+
+def test_add_question_requires_text_or_image_400(client):
+    sid = _new_session(client)
+    r = client.post(f"/v1/exam-sessions/{sid}/questions")
+    assert r.status_code == 400
+    assert "recognized text" in r.json()["detail"]
+
+
+def test_add_question_text_only_extracts_media(client):
+    sid = _new_session(client)
+    r = client.post(
+        f"/v1/exam-sessions/{sid}/questions",
+        data={"ocr_text": "問1 下の図1のグラフを読み、値を求めよ"},
+    )
+    assert r.status_code == 201
+    media = r.json()["media"]
+    assert media, "text cues alone must drive media extraction"
+    assert all(m["kind"] for m in media)
+
+
+def test_add_question_malformed_bbox_hints_400_and_no_orphan_image(client):
+    # A rejected request must not leave a file in IMAGE_DIR that no
+    # questions row owns.
+    import app.main as main
+
+    sid = _new_session(client)
+    files = {"image": ("q.png", image_bytes(make_image(seed=5)), "image/png")}
+    r = client.post(
+        f"/v1/exam-sessions/{sid}/questions",
+        data={"ocr_text": "問1 計算せよ", "bbox_hints": "{not json"},
+        files=files,
+    )
+    assert r.status_code == 400
+    assert "bbox_hints" in r.json()["detail"]
+    assert list(main.IMAGE_DIR.glob("q_*")) == []
+
+
+def test_retake_hint_says_reread_not_rephotograph(client):
+    # 撮影しない: recovery guidance must ask for re-recognition, never for a
+    # new photograph.
+    sid = _new_session(client)
+    files = {"image": ("q.png", image_bytes(make_image(seed=5)), "image/png")}
+    r = client.post(f"/v1/exam-sessions/{sid}/questions", files=files).json()
+    lines = " ".join(r["hint"]["lines"])
+    assert "再読取" in lines
+    assert "再撮影" not in lines
+
+
 def test_session_detail_lists_questions(client):
     sid = _new_session(client)
     qid = _add_question(client, sid).json()["question_id"]

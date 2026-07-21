@@ -43,6 +43,11 @@ OCR_MATCH_RATIO = 0.9    # at/above this, treat as a strong textual agreement
 CONF_OK = 0.62           # >= -> HIT
 CONF_LOW = 0.40          # >= but < CONF_OK -> LOW CONF; below -> NO PAGE
 
+# Text-only confidence ceiling (query and/or candidate has no pHash — the
+# 撮影しない primary path). Deliberately < 1.0: a text match must never claim
+# more certainty than a pixel-identical visual match.
+TEXT_EXACT_CONF = 0.95
+
 
 # --- pHash ------------------------------------------------------------------
 
@@ -147,17 +152,29 @@ class Candidate:
     # Normalized OCR text, when available, for graded similarity matching.
     # Optional/last so existing positional construction keeps working.
     ocr_text: str | None = None
+    # Optional second comparison component (the figure reading). When both
+    # the query and the candidate provide one, the graded similarity is the
+    # equal-weight mean of the two components, so a long shared body cannot
+    # mask a mismatched figure reading.
+    vision_text: str | None = None
 
 
 @dataclass
 class ScoredCandidate:
     page_id: int
     page_index: int
-    hamming: int
+    # Hamming distance when both sides have a pHash; None when the comparison
+    # was text-only (no visual comparison happened at all).
+    hamming: int | None
     ocr_match: bool
     confidence: float
     # 0..1 text similarity (1.0 == exact match, 0.0 == no usable text).
     ocr_similarity: float = 0.0
+    # Fraction of the query's text signals (body / figure reading) the
+    # comparison actually used. 1.0 = full-information match; lower = a
+    # fallback that had to ignore a supplied signal because the candidate
+    # lacked it. rank() prefers fuller matches on otherwise-equal scores.
+    signal_coverage: float = 1.0
 
 
 def _phash_confidence(distance: int) -> float:
@@ -174,12 +191,16 @@ def _ocr_signal(
     query_ocr_md5: str | None,
     query_ocr_text: str | None,
     candidate: Candidate,
+    query_vision_text: str | None = None,
 ) -> tuple[float, bool, float]:
     """Return (bonus, ocr_match, similarity) from the OCR text signal.
 
     1. Exact MD5 match -> full bonus (also covers the image-bytes fallback).
     2. Otherwise, if both sides have normalized text, award a graded bonus
-       proportional to their similarity (above OCR_SIM_FLOOR).
+       proportional to their similarity (above OCR_SIM_FLOOR). When both
+       sides also provide a figure-reading component, the similarity is the
+       equal-weight mean of the body and figure ratios — a long shared body
+       must not mask a mismatched figure reading.
     3. No usable text -> no bonus.
     """
     if query_ocr_md5 and candidate.ocr_md5 and query_ocr_md5 == candidate.ocr_md5:
@@ -191,23 +212,78 @@ def _ocr_signal(
         return 0.0, False, 0.0
 
     ratio = difflib.SequenceMatcher(None, q, c).ratio()
+    qv = normalize_ocr_text(query_vision_text)
+    cv = normalize_ocr_text(candidate.vision_text)
+    if qv and cv:
+        vision_ratio = difflib.SequenceMatcher(None, qv, cv).ratio()
+        ratio = (ratio + vision_ratio) / 2
     if ratio < OCR_SIM_FLOOR:
         return 0.0, False, round(ratio, 4)
     return OCR_MD5_BONUS * ratio, ratio >= OCR_MATCH_RATIO, round(ratio, 4)
 
 
+def _text_only_confidence(exact: bool, similarity: float) -> float:
+    """Map the text signal to a confidence when no visual comparison exists.
+
+    Piecewise-linear over the existing semantic anchors so the verdict bands
+    stay meaningful without new tunables:
+      exact normalized-text MD5 match      -> TEXT_EXACT_CONF (HIT)
+      similarity <  OCR_SIM_FLOOR   (0.6)  -> 0.0             (NO_PAGE)
+      similarity == OCR_SIM_FLOOR          -> CONF_LOW        (LOW_CONF starts)
+      similarity == OCR_MATCH_RATIO (0.9)  -> CONF_OK         (HIT starts)
+      similarity == 1.0                    -> TEXT_EXACT_CONF
+    """
+    if exact:
+        return TEXT_EXACT_CONF
+    if similarity < OCR_SIM_FLOOR:
+        return 0.0
+    if similarity < OCR_MATCH_RATIO:
+        span = OCR_MATCH_RATIO - OCR_SIM_FLOOR
+        return CONF_LOW + (similarity - OCR_SIM_FLOOR) / span * (CONF_OK - CONF_LOW)
+    span = 1.0 - OCR_MATCH_RATIO
+    return CONF_OK + (similarity - OCR_MATCH_RATIO) / span * (TEXT_EXACT_CONF - CONF_OK)
+
+
+def _has_hash(h: int | str | None) -> bool:
+    """Explicit presence check: a valid all-zero hash (int 0) is present."""
+    return h is not None and h != ""
+
+
 def score_candidate(
-    query_phash: int | str,
+    query_phash: int | str | None,
     query_ocr_md5: str | None,
     candidate: Candidate,
     query_ocr_text: str | None = None,
+    query_vision_text: str | None = None,
 ) -> ScoredCandidate:
-    distance = hamming(query_phash, candidate.phash)
-    visual = _phash_confidence(distance)
     bonus, ocr_match, similarity = _ocr_signal(
-        query_ocr_md5, query_ocr_text, candidate
+        query_ocr_md5, query_ocr_text, candidate, query_vision_text
     )
-    confidence = max(0.0, min(1.0, visual + bonus))
+    exact = bool(
+        query_ocr_md5
+        and candidate.ocr_md5
+        and query_ocr_md5 == candidate.ocr_md5
+    )
+    if _has_hash(query_phash) and _has_hash(candidate.phash):
+        # Visual comparison (both sides carry a pHash): unchanged graded
+        # formula. The pHash is a *compat* input, though, and the recognized
+        # text is primary — so a weak/stale optional frame must not drag a
+        # usable recognized-text match (exact MD5 OR strong graded similarity)
+        # below the verdict that same text earns on its own text-only path.
+        # The image can only ADD confidence, never subtract it. Pure
+        # image-vs-image has no usable text (text floor 0.0), so image scores
+        # stay numerically identical.
+        distance: int | None = hamming(query_phash, candidate.phash)
+        visual = _phash_confidence(distance)
+        confidence = max(
+            min(1.0, visual + bonus),
+            _text_only_confidence(exact, similarity),
+        )
+    else:
+        # 撮影しない text-only comparison: confidence comes from the text
+        # signal alone; exact MD5 outranks graded similarity.
+        distance = None
+        confidence = _text_only_confidence(exact, similarity)
     return ScoredCandidate(
         page_id=candidate.page_id,
         page_index=candidate.page_index,
@@ -229,18 +305,54 @@ def verdict(confidence: float, has_candidates: bool) -> str:
     return "NO_PAGE"
 
 
+def rank(scored: list[ScoredCandidate]) -> list[ScoredCandidate]:
+    """Sort candidates by the canonical /match ordering.
+
+    Full-information HITs come first: when the query supplied a signal a
+    candidate could not be checked against (signal_coverage < 1), an exact
+    match on the remaining signal must not outrank a candidate that reached
+    the HIT band on EVERY supplied signal. A STRONG visual match (hamming
+    <= HAMMING_STRONG) counts as full information too — that alone puts the
+    page's confidence at 1.0 regardless of any unread figure signal, so an
+    exact/near-exact pHash match must not lose merely because the page's
+    figure reading was never registered. A merely-near pHash match
+    (visual < 1.0) still carries the text-coverage penalty, so it cannot
+    ignore a supplied figure signal. When every candidate has full coverage
+    the tier boundary coincides with the confidence ordering, so
+    pure-visual/legacy rankings are unchanged. Within a tier: confidence,
+    then a visual match outranks a text-only one (hamming None sorts behind
+    every real distance), then text similarity, then coverage; stable sort
+    keeps page order after that.
+    """
+    return sorted(
+        scored,
+        key=lambda s: (
+            not (
+                s.confidence >= CONF_OK
+                and (
+                    s.signal_coverage >= 1.0
+                    or (s.hamming is not None and s.hamming <= HAMMING_STRONG)
+                )
+            ),
+            -s.confidence,
+            s.hamming if s.hamming is not None else HASH_BIT_LEN + 1,
+            -s.ocr_similarity,
+            -s.signal_coverage,
+        ),
+    )
+
+
 def match(
-    query_phash: int | str,
+    query_phash: int | str | None,
     query_ocr_md5: str | None,
     candidates: list[Candidate],
     query_ocr_text: str | None = None,
 ) -> tuple[ScoredCandidate | None, str, list[ScoredCandidate]]:
     """Score all candidates and return (best, verdict, sorted_candidates)."""
-    scored = [
+    scored = rank([
         score_candidate(query_phash, query_ocr_md5, c, query_ocr_text)
         for c in candidates
-    ]
-    scored.sort(key=lambda s: (-s.confidence, s.hamming))
+    ])
     best = scored[0] if scored else None
     v = verdict(best.confidence if best else 0.0, bool(scored))
     return best, v, scored

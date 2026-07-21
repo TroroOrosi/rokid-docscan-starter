@@ -171,14 +171,25 @@ class ProblemUnit:
     page_indexes: list[int] = field(default_factory=list)  # every page it spans
 
 
-def segment_problems(page_materials: list[tuple[int, str]]) -> list[ProblemUnit]:
+def _figure_block(vision_text: str | None) -> str:
+    """Format a page's figure reading for inclusion in a problem body."""
+    v = (vision_text or "").strip()
+    return f"【図・画像の読み取り】\n{v}" if v else ""
+
+
+def segment_problems(
+    page_materials: list[tuple[int, str] | tuple[int, str, str | None]],
+) -> list[ProblemUnit]:
     """Split a whole document into problems on 問N/大問N/第N問/(n) boundaries.
 
-    ``page_materials`` is ``[(page_index, material_text), ...]`` in page order
-    (material = the page's recognized text incl. the figure reading).  Each
-    page is scanned with :func:`parse_layout` — a pure per-line scanner — so
-    the boundaries are identical to scanning the joined text, while page
-    attribution is preserved.  Merge rules:
+    ``page_materials`` is ``[(page_index, body_text[, vision_text]), ...]`` in
+    page order.  **Boundaries are detected from the BODY text only** — a page's
+    figure reading (``vision_text``) is appended to the owning problem AFTER
+    segmentation, so figure/table labels like ``(1)`` or ``問1`` inside the
+    figure reading can never split one question into several deck problems.
+    Each body is scanned with :func:`parse_layout` — a pure per-line scanner —
+    so the boundaries are identical to scanning the joined body text, while
+    page attribution is preserved.  Merge rules:
 
     - a numbered unit starts a new problem (``start_page_index`` = that page);
     - a page-leading unnumbered unit has SHARED attribution: it is appended to
@@ -201,7 +212,9 @@ def segment_problems(page_materials: list[tuple[int, str]]) -> list[ProblemUnit]
     preamble_parts: list[str] = []
     preamble_pages: list[int] = []
 
-    for page_index, material in page_materials:
+    for entry in page_materials:
+        page_index, material = entry[0], entry[1]
+        vision = entry[2] if len(entry) > 2 else None
         units = parse_layout(material)["questions"]
         # Only the first unit of a page can be unnumbered (parse_layout folds
         # later unnumbered lines into the current numbered unit).
@@ -246,9 +259,45 @@ def segment_problems(page_materials: list[tuple[int, str]]) -> list[ProblemUnit]
                 )
             )
 
+        # Attach the page's figure reading AFTER boundary detection so its
+        # labels never split a question. A page's vision_text is a PAGE-level
+        # signal — we cannot reliably tell WHICH same-page problem references
+        # the figure — so it is duplicated across EVERY problem this page
+        # contributes to. The figure-dependent problem is then guaranteed the
+        # values (a sibling problem may get some extra context, which is
+        # harmless) instead of the figure landing only on the last problem.
+        fig = _figure_block(vision)
+        if fig:
+            owning = [p for p in problems if page_index in p.page_indexes]
+            if owning:
+                for target in owning:
+                    target.body_text = (
+                        f"{target.body_text}\n{fig}" if target.body_text else fig
+                    )
+            elif problems:
+                # Figure-only page (no text units of its own): a trailing
+                # figure usually belongs to the most recent problem.
+                target = problems[-1]
+                target.body_text = (
+                    f"{target.body_text}\n{fig}" if target.body_text else fig
+                )
+                if page_index not in target.page_indexes:
+                    target.page_indexes.append(page_index)
+            else:
+                preamble_parts.append(fig)
+                if page_index not in preamble_pages:
+                    preamble_pages.append(page_index)
+
     if not problems:
         # No numbered boundary anywhere: the whole document is one problem.
-        non_empty = [(i, m) for i, m in page_materials if (m or "").strip()]
+        # Combine each page's body with its figure reading for the body.
+        non_empty: list[tuple[int, str]] = []
+        for entry in page_materials:
+            pidx, body = entry[0], entry[1]
+            vision = entry[2] if len(entry) > 2 else None
+            parts = [p for p in ((body or "").strip(), _figure_block(vision)) if p]
+            if parts:
+                non_empty.append((pidx, "\n".join(parts)))
         if not non_empty:
             return []
         return [

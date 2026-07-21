@@ -26,7 +26,11 @@ def build_hud(
         line1 = f"PAGE {page_no}/{total_pages}"
         # No [:24] truncation — the client renderer handles line-wrapping.
         line2 = (summary or "").strip() or f"match {best.confidence:.2f}"
-        line3 = f"conf {best.confidence:.2f}  hd {best.hamming}"
+        if best.hamming is not None:
+            line3 = f"conf {best.confidence:.2f}  hd {best.hamming}"
+        else:
+            # Text-only comparison (撮影しない): no visual distance to show.
+            line3 = f"conf {best.confidence:.2f}  txt {best.ocr_similarity:.2f}"
     elif verdict == "LOW_CONF" and best is not None:
         page_no = best.page_index + 1
         line1 = "LOW CONF"

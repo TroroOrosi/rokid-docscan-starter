@@ -26,7 +26,7 @@ explainer / extractor）には**実モデルアダプタ（`openai` / `gemini` /
 
 | 抽象点（サーバ内） | 既定（オフライン） | 実機/実 AI での差し込み先 |
 |------------------|------------------------|---------------------|
-| 認識テキスト入力 | `/pages` の `ocr_text`/`vision_text`（画像は互換用） | 本体 AI の認識結果（Hi Rokid＋CXR-L プラグイン経由・撮影しない） |
+| 認識テキスト入力 | `/pages`・`/match`・`/questions` の `ocr_text`/`vision_text`（`fast_ocr_text` は `/match` の互換別名。画像は互換用・非推奨） | 本体 AI の認識結果（Hi Rokid＋CXR-L プラグイン経由・撮影しない） |
 | 端末 OCR | `ocr_text` / `fast_ocr_text` フォーム値 | 本体 AI（Hi Rokid: `com.rokid.sprite(.global).aiapp`）/ Android ML Kit / iOS Vision |
 | HUD 出力 | `app/hud.py`・`app/glasses_view.py` の3行ペイロード | CXR-L CUSTOMVIEW（`customViewUpdate` でテキスト・リレー） |
 | 接続管理 | なし（HTTP のみ） | **スマホ中継必須**: Hi Rokid＋CXR-L プラグイン（グラス単体 Wi-Fi 直結は未確認）、または CXR-M コンパニオン経由 |

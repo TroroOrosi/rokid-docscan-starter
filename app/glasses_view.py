@@ -216,7 +216,7 @@ def build_capture_ack(
         label = f"#{question_id}"
     else:
         label = ""
-    line = f"{label} 保存済み".strip()
+    line = f"{label} 読取済み".strip()
     return {"lines": [line][:_MAX_LINES], "ttl_sec": 2}
 
 

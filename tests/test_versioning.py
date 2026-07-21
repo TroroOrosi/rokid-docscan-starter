@@ -16,9 +16,9 @@ def test_version_info_pins_every_contract():
     # simultaneous doc/pin update CLAUDE.md requires (no silent version drift —
     # docs hardcode several of these, e.g. user-operation-guide's JSON block).
     assert version.version_info() == {
-        "app_version": "0.9.0",
-        "api_version": "1.9.0",
-        "matcher_version": "1.1.0",
+        "app_version": "0.10.0",
+        "api_version": "1.10.0",
+        "matcher_version": "1.2.0",
         "hud_contract_version": "1.0.0",
         "analyzer_api_version": "1.0.0",
         "solver_api_version": "1.1.0",
@@ -43,10 +43,10 @@ def test_contract_versions_reflect_phase234():
 
 
 def test_contract_versions_reflect_explain_sessions():
-    # 1.9.0: reading-phase recovery (page upsert + 0-problem revert) and
-    #        real-mode lock consistency on session GET (1.8.0 added the
-    #        3-phase exam endpoints + honest input/capture corrections).
-    assert version.API_VERSION == "1.9.0"
+    # 1.10.0: text-first /match and /questions (image optional/compat) plus
+    #         GET /scan-status (1.9.0 added reading-phase recovery and the
+    #         real-mode lock consistency on session GET).
+    assert version.API_VERSION == "1.10.0"
     assert version.EXPLAINER_API_VERSION == "1.0.0"
 
 

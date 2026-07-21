@@ -29,7 +29,7 @@ class LocalPlaceholderSolver(Solver):
             return SolveResult(
                 answer="(未解答)",
                 rationale="問題文を読み取れませんでした",
-                cautions="近づけて再撮影してください",
+                cautions="近づけて再読取してください",
                 subject=question.subject,
                 answer_confidence=0.0,
                 rationale_confidence=0.0,

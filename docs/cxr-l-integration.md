@@ -139,7 +139,7 @@ uvicorn app.main:app --port 8000
 | 読取完了宣言（ダブルタップ・**中継が自動チェーン**） | — | `POST /v1/documents/{document_id}/finalize` → `POST /v1/exam-sessions`（応答の `session_id` を取得）→ `POST /v1/exam-sessions/{session_id}/finalize-reading` | `reading_ack`（カメラOFF） |
 | 本体 GPT の問題別解答を送る | `com.rokid.sprite.aiapp` | `POST /v1/exam-sessions/{id}/solutions` | `ingest_ack`（N/M問 解答済） |
 | 問題別閲覧（2本指スワイプ） | — | `GET /v1/exam-sessions/{id}/review?index=&view_page=` | `glasses_view`（一括1ストリーム） |
-| カメラ1フレーム取得（照合時のみ） | `IMediaStreamService`（AIDL） | `POST /v1/match`（画像＋`fast_ocr_text`） | `hud.lines`（3行） |
+| 資料の照合（その場認識・撮影しない） | `com.rokid.sprite.aiapp`（AI Interaction） | `POST /v1/match`（`ocr_text`。画像は互換・非推奨） | `hud.lines`（3行） |
 | 資料の解説（撮影なし） | ページ送りジェスチャ | `POST /v1/explain-sessions/{id}/next-page` → `GET .../explain` | `glasses_view`（overview/detail/evidence） |
 | HUD 描画 | CXR-L ディスプレイ API | — | 受信 `lines` をそのまま描画 |
 

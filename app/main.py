@@ -50,7 +50,15 @@ from .glasses_view import (
 from .hud import build_hud
 from .layout import parse_layout, primary_question, segment_problems
 from .llm import clamp01
-from .matching import Candidate, match, normalize_ocr_text, ocr_md5, phash_hex
+from .matching import (
+    Candidate,
+    normalize_ocr_text,
+    ocr_md5,
+    phash_hex,
+    rank,
+    score_candidate,
+)
+from .matching import verdict as match_verdict
 from .overlay import build_overlay
 from .retrieval import retrieve_context
 from .solvers import Question
@@ -59,7 +67,7 @@ from .subjects import detect_subject
 from .version import APP_VERSION, HUD_CONTRACT_VERSION, version_info
 
 
-def _extract_media(ocr_text: str | None, image_path: str) -> list[dict]:
+def _extract_media(ocr_text: str | None, image_path: str | None) -> list[dict]:
     """Run the active media extractor over any figure/table/graph/formula cues."""
     kinds = detect_media(ocr_text)
     if not kinds:
@@ -137,6 +145,16 @@ def _load_image(raw: bytes) -> Image.Image:
         return img
     except (UnidentifiedImageError, OSError):
         raise HTTPException(status_code=400, detail="invalid image upload")
+
+
+def _match_text(ocr_text: str | None, vision_text: str | None) -> str:
+    """Combine body text and figure reading into one /match similarity string.
+
+    Both signals matter: pages sharing identical printed text are told apart
+    by their diagram readings (vision_text is a component, not a fallback).
+    """
+    parts = [t.strip() for t in (ocr_text, vision_text) if t and t.strip()]
+    return normalize_ocr_text(" ".join(parts))
 
 
 def _doc_or_404(conn, document_id: int):
@@ -304,10 +322,11 @@ async def add_page(
             img.convert("RGB").save(fpath, format="PNG")
             image_path = str(fpath)
         else:
-            # 撮影しない: no image, no pHash. ocr_md5 dedupes by recognized text
-            # (fall back to vision_text when only figures were recognized).
+            # 撮影しない: no image, no pHash. ocr_md5 hashes the FULL
+            # recognition (body + figure reading) so /match's exact shortcut
+            # distinguishes pages that differ only in their figures.
             ph = ""
-            dedupe_src = ocr_text if (ocr_text and ocr_text.strip()) else (vision_text or "")
+            dedupe_src = _match_text(ocr_text, vision_text)
             omd5 = ocr_md5(dedupe_src) or hashlib.md5(dedupe_src.encode()).hexdigest()
             image_path = None
 
@@ -412,6 +431,155 @@ async def add_page(
             _unlink_best_effort(pending_image_path)
 
 
+# Physical exams do not exceed this; the cap bounds the missing-index range
+# expansion below (and the response payload) against absurd inputs.
+MAX_EXPECTED_TOTAL_PAGES = 10_000
+
+
+@app.get("/v1/documents/{document_id}/scan-status")
+def get_document_scan_status(
+    document_id: int, expected_total_pages: int | None = None
+) -> dict:
+    """Read-only 読取状態 report for resuming an interrupted reading phase.
+
+    撮影しない: this reports which page *readings* (recognized text) are
+    registered — nothing here captures, stores or references any image. The
+    client compares against the paper's real page count
+    (``expected_total_pages``) and re-reads only what is missing; 再読取 of
+    an existing index replaces that page (see add_page).
+    """
+    if expected_total_pages is not None:
+        # Validate before any range expansion (unbounded set(range(N)) would
+        # burn CPU/memory long before a sanity check downstream).
+        if expected_total_pages <= 0:
+            raise HTTPException(
+                status_code=400, detail="expected_total_pages must be >= 1"
+            )
+        if expected_total_pages > MAX_EXPECTED_TOTAL_PAGES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"expected_total_pages must be <= {MAX_EXPECTED_TOTAL_PAGES}",
+            )
+    conn = db.connect()
+    try:
+        doc = _doc_or_404(conn, document_id)
+        rows = conn.execute(
+            "SELECT id, page_index, ocr_text, vision_text, summary FROM pages "
+            "WHERE document_id = ? ORDER BY page_index",
+            (document_id,),
+        ).fetchall()
+        sessions = conn.execute(
+            "SELECT id, status FROM exam_sessions WHERE document_id = ? "
+            "ORDER BY id",
+            (document_id,),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    def _has(value) -> bool:
+        return bool(value and str(value).strip())
+
+    pages = [
+        {
+            "page_id": r["id"],
+            "page_index": r["page_index"],
+            "has_ocr_text": _has(r["ocr_text"]),
+            "has_vision_text": _has(r["vision_text"]),
+            "summary_generated": _has(r["summary"]),
+        }
+        for r in rows
+    ]
+    registered = [p["page_index"] for p in pages]
+    # Compat image-only pages carry no recognition; the primary text path
+    # cannot create them (add_page rejects text-less, image-less input).
+    pages_without_text = [
+        p["page_index"] for p in pages
+        if not (p["has_ocr_text"] or p["has_vision_text"])
+    ]
+
+    if expected_total_pages is not None:
+        expected = set(range(expected_total_pages))
+        got = set(registered)
+        missing = sorted(expected - got)
+        unexpected = sorted(got - expected)
+        complete: bool | None = not missing and not unexpected
+    else:
+        # Never claim completeness without a declared total (same honesty
+        # rule as build_scan_ack with total_pages=None).
+        missing = None
+        unexpected = None
+        complete = None
+
+    session_summaries = [
+        {
+            "session_id": s["id"],
+            "status": s["status"],
+            "phase": _session_phase(s),
+        }
+        for s in sessions
+    ]
+    # Mirrors add_page's freeze: once a bound session finished reading,
+    # replacing a page underneath its deck is rejected with 409.
+    reread_allowed = not any(s["status"] == "reviewing" for s in sessions)
+
+    if not pages:
+        recommended = "start_reading"
+    elif unexpected:
+        # Extras exist — checked BEFORE missing indexes: when both coexist
+        # the stray index is likely the missing page mis-indexed, and blindly
+        # rereading would leave the stray page in the document. The indexes
+        # need review first — but index corrections are impossible once the
+        # document is finalized (new indexes 409, strays cannot be removed),
+        # so a ready document needs a fresh one.
+        recommended = (
+            "review_page_indexes" if doc["status"] != "ready"
+            else "start_new_document"
+        )
+    elif missing:
+        # NEW page indexes are rejected with 409 once the document is
+        # finalized (add_page), so 再読取 of a missing index can only
+        # succeed on a still-open document.
+        recommended = (
+            "reread_missing_pages" if doc["status"] != "ready"
+            else "start_new_document"
+        )
+    elif pages_without_text:
+        # Replacing an EXISTING index stays possible after finalize, but is
+        # frozen once a bound session finished reading.
+        recommended = (
+            "reread_pages_without_text" if reread_allowed
+            else "start_new_document"
+        )
+    elif doc["status"] != "ready" or not all(p["summary_generated"] for p in pages):
+        recommended = "finalize"
+    else:
+        recommended = "continue"
+
+    return {
+        "document_id": document_id,
+        "title": doc["title"],
+        "status": doc["status"],
+        "page_count": len(pages),
+        "page_indexes": registered,
+        "pages": pages,
+        "expected_total_pages": expected_total_pages,
+        "missing_page_indexes": missing,
+        "unexpected_page_indexes": unexpected,
+        "expected_pages_complete": complete,
+        "pages_without_text": pages_without_text,
+        "summaries_complete": bool(pages)
+        and all(p["summary_generated"] for p in pages),
+        "exam_sessions": session_summaries,
+        "reread_allowed": reread_allowed,
+        "reread": {
+            "method": "POST /v1/documents/{document_id}/pages",
+            "replaces_existing_page_index": True,
+        },
+        "recommended_action": recommended,
+        "versions": version_info(),
+    }
+
+
 @app.post("/v1/documents/{document_id}/finalize")
 def finalize_document(document_id: int) -> dict:
     conn = db.connect()
@@ -466,49 +634,150 @@ def finalize_document(document_id: int) -> dict:
 @app.post("/v1/match")
 async def match_page(
     document_id: int = Form(...),
-    image: UploadFile = File(...),
+    ocr_text: str | None = Form(None),
+    vision_text: str | None = Form(None),
     fast_ocr_text: str | None = Form(None),
+    image: UploadFile | None = File(None),
     client_version: str | None = Form(None),
     sdk_hint: str | None = Form(None),
 ) -> dict:
+    """Match the page currently in view against the registered pages.
+
+    撮影しない: the primary query is the on-glass AI's on-the-spot recognition
+    (``ocr_text``, plus ``vision_text`` when only figures were readable) — no
+    photo is taken. ``fast_ocr_text`` is the legacy alias for ``ocr_text``.
+    ``image`` is an optional backward-compat input (非推奨): when attached, the
+    historical pHash comparison is used for image-registered pages.
+    """
+    query_text = ocr_text if (ocr_text and ocr_text.strip()) else fast_ocr_text
+    has_text = bool(query_text and query_text.strip()) or bool(
+        vision_text and vision_text.strip()
+    )
+    has_image = image is not None and getattr(image, "filename", None)
+    if not has_image and not has_text:
+        raise HTTPException(
+            status_code=400,
+            detail="match needs ocr_text/vision_text (recognized text) "
+            "or a legacy image",
+        )
     conn = db.connect()
     try:
         _doc_or_404(conn, document_id)
-        raw = await _read_upload_limited(image)
-        img = _load_image(raw)
+        raw_q_md5: str | None = None
+        if has_image:
+            raw = await _read_upload_limited(image)
+            img = _load_image(raw)
+            q_phash: str | None = phash_hex(img)
+            # Historical compat rule: body text MD5, falling back to the
+            # image bytes.
+            raw_q_md5 = _fallback_md5(ocr_md5(query_text), raw)
+        else:
+            q_phash = None
 
-        q_phash = phash_hex(img)
-        q_md5 = _fallback_md5(ocr_md5(fast_ocr_text), raw)
+        # 撮影しない text comparison. The shape is aligned PER CANDIDATE on
+        # the signals BOTH sides actually carry, so neither side is penalized
+        # for information the other lacks:
+        #   - body and figure reading on both sides -> the components are
+        #     compared separately (equal weight — a long shared body cannot
+        #     mask a mismatched figure reading) and the exact-MD5 shortcut
+        #     hashes the FULL combined material on both sides, even for
+        #     legacy image queries,
+        #   - figure reading on both but a body missing on either -> compare
+        #     the figure readings alone,
+        #   - body on both but a figure reading missing on either -> compare
+        #     the bodies alone (image queries/pages keep their historical
+        #     body/raw-bytes MD5 compat),
+        #   - no common text signal -> do not compare body text with a figure
+        #     reading; only a shared visual signal, when present, may score.
+        # Comparisons that had to ignore one of the query's signals get a
+        # lower signal_coverage, so a full body+figure match outranks a
+        # body-only fallback at equal confidence.
+        q_body = normalize_ocr_text(query_text)
+        q_vision = normalize_ocr_text(vision_text)
+        q_combined = _match_text(query_text, vision_text)
+        q_signals = int(bool(q_body)) + int(bool(q_vision))
+
+        def _text_md5(src: str) -> str:
+            return ocr_md5(src) or hashlib.md5(src.encode()).hexdigest()
 
         rows = conn.execute(
-            "SELECT id, page_index, phash, ocr_md5, ocr_text, summary FROM pages "
+            "SELECT id, page_index, phash, ocr_md5, ocr_text, vision_text, "
+            "summary FROM pages "
             "WHERE document_id = ? ORDER BY page_index",
             (document_id,),
         ).fetchall()
-        candidates = [
-            Candidate(
-                page_id=r["id"],
-                page_index=r["page_index"],
-                phash=r["phash"],
-                ocr_md5=r["ocr_md5"],
-                ocr_text=normalize_ocr_text(r["ocr_text"]),
+        scored = []
+        for r in rows:
+            c_body = normalize_ocr_text(r["ocr_text"])
+            c_vision = normalize_ocr_text(r["vision_text"])
+            common_body = bool(q_body and c_body)
+            common_vision = bool(q_vision and c_vision)
+            cand_vision: str | None = None
+            q_vision_cmp: str | None = None
+            if common_body and common_vision:
+                cand_text: str | None = c_body
+                cand_vision = c_vision
+                q_text_cmp: str | None = q_body
+                q_vision_cmp = q_vision
+                q_md5_cmp = _text_md5(q_combined)
+                cand_md5 = ocr_md5(_match_text(r["ocr_text"], r["vision_text"]))
+                used_signals = 2
+            elif common_vision:
+                cand_text = c_vision
+                q_text_cmp = q_vision
+                q_md5_cmp = _text_md5(q_vision)
+                cand_md5 = ocr_md5(c_vision)
+                used_signals = 1
+            elif common_body:
+                cand_text = c_body
+                q_text_cmp = q_body
+                q_md5_cmp = (
+                    raw_q_md5 if raw_q_md5 is not None else _text_md5(q_body)
+                )
+                cand_md5 = r["ocr_md5"] if r["phash"] else ocr_md5(c_body)
+                used_signals = 1
+            else:
+                # Body OCR and figure readings describe different signal
+                # types. Comparing them cross-type can turn an accidental
+                # equal string into an exact text-only HIT even though no
+                # supplied signal was verified. Leave the text inputs empty;
+                # score_candidate may still use a shared legacy pHash.
+                cand_text = None
+                q_text_cmp = None
+                q_md5_cmp = None
+                cand_md5 = None
+                # No signal type in common (e.g. a vision-only query vs a
+                # body-only page): any comparison here is cross-type, so NO
+                # supplied query signal was actually verified. Coverage is 0
+                # so a merely-near pHash HIT cannot sit in the full-information
+                # tier on the strength of an unmatched figure/body signal.
+                used_signals = 0
+            sc = score_candidate(
+                q_phash,
+                q_md5_cmp,
+                Candidate(
+                    page_id=r["id"],
+                    page_index=r["page_index"],
+                    phash=r["phash"],
+                    ocr_md5=cand_md5,
+                    ocr_text=cand_text,
+                    vision_text=cand_vision,
+                ),
+                query_ocr_text=q_text_cmp,
+                query_vision_text=q_vision_cmp,
             )
-            for r in rows
-            # Skip 撮影しない text-only pages (no image → empty phash); they are
-            # not image-match candidates and would break hamming()'s int(phash,16).
-            if r["phash"]
-        ]
+            sc.signal_coverage = (
+                used_signals / q_signals if q_signals else 1.0
+            )
+            scored.append(sc)
         summaries = {r["id"]: r["summary"] for r in rows}
 
-        best, verdict, scored = match(
-            q_phash, q_md5, candidates, query_ocr_text=fast_ocr_text
-        )
+        scored = rank(scored)
+        best = scored[0] if scored else None
+        verdict = match_verdict(best.confidence if best else 0.0, bool(scored))
         hud = build_hud(
             verdict,
             best,
-            # Text-only pages are not image-match candidates, but they still
-            # belong to the document. Using candidate count could render an
-            # impossible label such as PAGE 2/1 in a mixed document.
             total_pages=len(rows),
             summary=summaries.get(best.page_id) if best else None,
         )
@@ -516,6 +785,7 @@ async def match_page(
         return {
             "document_id": document_id,
             "query_phash": q_phash,
+            "query_signals": {"phash": q_phash is not None, "text": has_text},
             "verdict": verdict,
             "versions": {
                 **version_info(),
@@ -733,29 +1003,57 @@ def create_exam_session(payload: CreateExamSession) -> dict:
 @app.post("/v1/exam-sessions/{session_id}/questions", status_code=201)
 async def add_question(
     session_id: int,
-    image: UploadFile = File(...),
     ocr_text: str | None = Form(None),
+    vision_text: str | None = Form(None),
+    image: UploadFile | None = File(None),
     bbox_hints: str | None = Form(None),
 ) -> dict:
+    """Ingest one question. 撮影しない: the primary input is the on-glass
+    AI's on-the-spot recognition — body text (``ocr_text``) plus the figure/
+    diagram reading (``vision_text``); structure, subject, media and anchors
+    are all derived from text. ``image`` is an optional backward-compat
+    input (非推奨) kept for the legacy upload flow.
+    """
+    has_image = image is not None and getattr(image, "filename", None)
+    # Same combination rule as page ingestion: body + 【図・画像の読み取り】.
+    recognized = _page_material(ocr_text, vision_text) or None
+    if not has_image and not recognized:
+        raise HTTPException(
+            status_code=400,
+            detail="a question needs ocr_text/vision_text (recognized text) "
+            "or an image",
+        )
     conn = db.connect()
     try:
         _exam_session_or_404(conn, session_id)
-        raw = await _read_upload_limited(image)
-        img = _load_image(raw)
-
-        hints = json.loads(bbox_hints) if bbox_hints else None
+        try:
+            hints = json.loads(bbox_hints) if bbox_hints else None
+        except ValueError:
+            raise HTTPException(
+                status_code=400, detail="bbox_hints must be valid JSON"
+            )
+        # Question boundaries come from the BODY text only — figure readings
+        # can contain (1)/問N-shaped labels that must not split the question.
+        # The vision block is appended to the stored body afterwards.
         parsed = parse_layout(ocr_text, bbox_hints=hints)
         q = primary_question(parsed)
-        subject, subj_conf = detect_subject(ocr_text)
+        subject, subj_conf = detect_subject(recognized)
 
-        read_conf = 0.0 if not normalize_ocr_text(ocr_text) else round(min(1.0, 0.5 + subj_conf / 2), 3)
+        read_conf = 0.0 if not normalize_ocr_text(recognized) else round(min(1.0, 0.5 + subj_conf / 2), 3)
 
-        fname = f"q_{session_id}_{uuid.uuid4().hex[:8]}.png"
-        fpath: Path = IMAGE_DIR / fname
-        img.convert("RGB").save(fpath, format="PNG")
+        # Persist the compat image only after every parse step that can
+        # reject the request — a failed request must not orphan a file in
+        # IMAGE_DIR (no questions row would ever own it).
+        fpath: Path | None = None
+        if has_image:
+            raw = await _read_upload_limited(image)
+            img = _load_image(raw)
+            fname = f"q_{session_id}_{uuid.uuid4().hex[:8]}.png"
+            fpath = IMAGE_DIR / fname
+            img.convert("RGB").save(fpath, format="PNG")
 
         answer_box = q.answer_box if q else parsed.get("answer_box")
-        media = _extract_media(ocr_text, str(fpath))
+        media = _extract_media(recognized, str(fpath) if fpath else None)
         cur = conn.execute(
             """INSERT INTO questions
                (session_id, question_no, body_text, choices_json, figure_refs,
@@ -765,7 +1063,10 @@ async def add_question(
             (
                 session_id,
                 q.question_no if q else None,
-                q.body_text if q else (ocr_text or ""),
+                # Keep the figure reading with the question body (appended
+                # after boundary detection, same combination rule as pages).
+                _page_material(q.body_text if q else ocr_text, vision_text)
+                or "",
                 json.dumps(q.choices if q else [], ensure_ascii=False),
                 json.dumps(q.figure_refs if q else [], ensure_ascii=False),
                 json.dumps(answer_box, ensure_ascii=False) if answer_box else None,
@@ -773,7 +1074,7 @@ async def add_question(
                 subject,
                 read_conf,
                 parsed.get("page_number"),
-                str(fpath),
+                str(fpath) if fpath else None,
                 json.dumps(media, ensure_ascii=False) if media else None,
             ),
         )
@@ -794,7 +1095,7 @@ async def add_question(
         }
         if read_conf < 0.3:
             result["hint"] = {
-                "lines": ["読み取り不十分", "近づけて再撮影", "してください"],
+                "lines": ["読み取り不十分", "近づけて再読取", "してください"],
             }
         return result
     finally:
@@ -1500,7 +1801,9 @@ def exam_finalize_reading(session_id: int) -> dict:
             ).fetchall()
             problems = segment_problems(
                 [
-                    (r["page_index"], _page_material(r["ocr_text"], r["vision_text"]))
+                    # Body drives boundaries; the figure reading is appended
+                    # to the owning problem so its labels don't split it.
+                    (r["page_index"], r["ocr_text"] or "", r["vision_text"])
                     for r in page_rows
                 ]
             )
