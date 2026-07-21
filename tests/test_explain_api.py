@@ -244,6 +244,60 @@ class TestExplainPage:
         assert visit["result_extras"] == {"call": 1}
         assert visit["explainer"]["name"] == "counting-test"
 
+    def test_page_reread_refreshes_the_visit_cache(
+        self, client, doc_1page, monkeypatch
+    ):
+        """Re-reading a page (same index, new text) must re-explain, not serve
+        the pre-correction cache."""
+        from app.explainer import ExplainResult, Explainer
+        from app.explainers import register_explainer
+
+        class CountingExplainer(Explainer):
+            name = "reread-count-test"
+            provider_version = "test-1"
+            offline = False
+            calls = 0
+
+            def explain(self, req):
+                type(self).calls += 1
+                n = type(self).calls
+                return ExplainResult(
+                    lines=[f"overview-{n}", "", ""],
+                    detail=f"detail-{n}",
+                    confidence=0.8,
+                    extras={"call": n},
+                )
+
+        CountingExplainer.calls = 0
+        register_explainer(CountingExplainer(), replace=True)
+        monkeypatch.setenv("ROKID_EXPLAINER", "reread-count-test")
+        sid = _create_session(client, doc_1page)
+
+        first = client.get(f"/v1/explain-sessions/{sid}/explain").json()
+        assert first["cached"] is False and CountingExplainer.calls == 1
+
+        # Correct the page in place (finalized doc, no reviewing exam session).
+        r = client.post(
+            f"/v1/documents/{doc_1page}/pages",
+            data={"page_index": 0, "ocr_text": "訂正後の本文 まったく違う内容"},
+            files={"image": ("p0.png", _png_bytes(color=(9, 9, 9)), "image/png")},
+        )
+        assert r.status_code == 201 and r.json()["replaced"] is True
+
+        # Same page index, but its content changed -> refresh once.
+        after = client.get(f"/v1/explain-sessions/{sid}/explain").json()
+        assert after["cached"] is False
+        assert CountingExplainer.calls == 2
+
+        # Unchanged re-request of the corrected page is cached again (no churn).
+        again = client.get(f"/v1/explain-sessions/{sid}/explain").json()
+        assert again["cached"] is True
+        assert CountingExplainer.calls == 2
+
+        # The served/stored result is the post-correction one, not the stale row.
+        history = client.get(f"/v1/explain-sessions/{sid}/history").json()
+        assert history["explained_views"][-1]["detail"] == "detail-2"
+
 
 # ---------------------------------------------------------------------------
 # 3. next-page / prev-page navigation

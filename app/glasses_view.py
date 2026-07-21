@@ -254,8 +254,10 @@ def _confidence_symbol(conf: float) -> str:
 def _evidence_labels(result: SolveResult | ExplainResult) -> list[str]:
     """Human-facing, unambiguous evidence labels.
 
-    Structured cross-document refs win. Older stored rows/results may only
-    carry the legacy one-based integer list, which remains displayable.
+    Structured cross-document refs win. Older stored rows may only carry the
+    bare page-number list; those are migrated to the 1-based convention on
+    upgrade (db._bump_evidence_pages_to_one_based), so rendering them directly
+    as ``P{n}`` stays correct.
     """
     labels: list[str] = []
     for ref in getattr(result, "evidence_refs", []) or []:

@@ -41,6 +41,13 @@ def _make_legacy_db(path):
         INSERT INTO documents (title) VALUES ('legacy');
         INSERT INTO pages (document_id, page_index, image_path, phash, ocr_text)
             VALUES (1, 0, 'old.png', 'abc123', 'legacy page');
+        -- Evidence written before structured refs existed is raw 0-based
+        -- page_index; the migration must lift it to the 1-based display world.
+        INSERT INTO solutions (id, question_id, evidence_pages_json)
+            VALUES (1, 1, '[0, 2]');
+        INSERT INTO explain_views
+            (id, session_id, page_index, verdict, evidence_pages_json)
+            VALUES (1, 1, 0, 'HIT', '[0]');
         """
     )
     conn.commit()
@@ -98,4 +105,40 @@ def test_legacy_pages_image_path_becomes_nullable(tmp_path, monkeypatch):
     conn.commit()
     got = conn.execute("SELECT image_path, vision_text FROM pages WHERE page_index=1").fetchone()
     assert got["image_path"] is None and got["vision_text"] == "図の読み取り"
+    conn.close()
+
+
+def test_legacy_evidence_pages_migrate_to_one_based(tmp_path, monkeypatch):
+    import json
+
+    db_file = tmp_path / "legacy.db"
+    _make_legacy_db(db_file)
+
+    monkeypatch.setenv("ROKID_DATA_DIR", str(tmp_path))
+    import app.config as config
+    importlib.reload(config)
+    import app.db as db
+    importlib.reload(db)
+
+    db.init_db(db_path=db_file)
+
+    conn = sqlite3.connect(str(db_file))
+    conn.row_factory = sqlite3.Row
+    # 0-based legacy evidence is bumped to the 1-based display convention.
+    sol = conn.execute(
+        "SELECT evidence_pages_json FROM solutions WHERE id = 1"
+    ).fetchone()
+    assert json.loads(sol["evidence_pages_json"]) == [1, 3]
+    view = conn.execute(
+        "SELECT evidence_pages_json FROM explain_views WHERE id = 1"
+    ).fetchone()
+    assert json.loads(view["evidence_pages_json"]) == [1]
+
+    # Idempotent: the bump runs only when evidence_refs_json is first added, so
+    # re-initializing an already-migrated DB must not shift the pages again.
+    db.init_db(db_path=db_file)
+    sol2 = conn.execute(
+        "SELECT evidence_pages_json FROM solutions WHERE id = 1"
+    ).fetchone()
+    assert json.loads(sol2["evidence_pages_json"]) == [1, 3]
     conn.close()

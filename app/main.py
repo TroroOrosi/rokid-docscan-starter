@@ -2480,6 +2480,27 @@ def explain_prev_page(session_id: int) -> dict:
         conn.close()
 
 
+def _page_signature(page_row) -> str:
+    """Content fingerprint of the page material an explanation is built from.
+
+    A finalized page can be re-read (POST /pages replaces it in place, keeping
+    the same page_index) while an explain session is live. The visit cache keys
+    on page_index alone, so without this a corrected page keeps serving the
+    stale provider result and evidence until the user navigates away and back.
+    Hashing the exact inputs the explainer consumes — body OCR, figure reading,
+    and summary — refreshes the cache only when the page actually changed, while
+    stage/scroll churn on unchanged content still reuses the one stored result.
+    """
+    payload = "\x00".join(
+        (
+            page_row["ocr_text"] or "",
+            page_row["vision_text"] or "",
+            page_row["summary"] or "",
+        )
+    )
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()
+
+
 @app.get("/v1/explain-sessions/{session_id}/explain")
 def explain_page(
     session_id: int,
@@ -2517,17 +2538,26 @@ def explain_page(
             )
 
         total_doc_pages = _explain_total_pages(conn, doc_id)
+        page_signature = _page_signature(page_row)
 
         # History records page VISITS, not every scroll. The saved result is
         # also the visit cache: stage/view_page churn must render the exact same
         # explanation without another paid/provider request. Returning after a
         # different page was explained creates a new visit and refreshes once.
+        # The cache also keys on the page content signature, so re-reading (and
+        # replacing) the page mid-session refreshes the explanation instead of
+        # serving the pre-correction result. Legacy rows have no signature and
+        # therefore refresh once on next view.
         last = conn.execute(
             "SELECT * FROM explain_views WHERE session_id = ? "
             "ORDER BY id DESC LIMIT 1",
             (session_id,),
         ).fetchone()
-        cached = last is not None and last["page_index"] == page_index
+        cached = (
+            last is not None
+            and last["page_index"] == page_index
+            and last["page_signature"] == page_signature
+        )
         if cached:
             result = ExplainResult(
                 lines=json.loads(last["hud_lines_json"] or "[]"),
@@ -2578,8 +2608,8 @@ def explain_page(
                    (session_id, page_index, verdict, hud_lines_json,
                     detail, evidence_pages_json, evidence_refs_json,
                     context_hits_json, explainer_json, result_extras_json,
-                    confidence)
-                   VALUES (?, ?, 'HIT', ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    confidence, page_signature)
+                   VALUES (?, ?, 'HIT', ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     session_id,
                     page_index,
@@ -2591,6 +2621,7 @@ def explain_page(
                     json.dumps(explainer_info, ensure_ascii=False),
                     json.dumps(result.extras, ensure_ascii=False, default=str),
                     result.confidence,
+                    page_signature,
                 ),
             )
         if session["status"] == "ready":

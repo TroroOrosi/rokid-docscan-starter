@@ -62,10 +62,22 @@ def test_from_synthetic_matches_perturbed_queries():
     report = from_synthetic(5)
     assert report["page_count"] == 5
     assert report["query_count"] == 15
-    assert report["variant_match_accuracy"] == 1.0
+    # Every variant's expected page ranks first — that is the ranking-only
+    # diagnostic, not the headline accuracy.
+    assert report["variant_top1_accuracy"] == 1.0
+    assert all(r["ranked_first"] for r in report["results"])
+    # Headline accuracy counts only usable HITs (what the live matcher would
+    # actually return), so it equals the hit rate and never exceeds top1. A
+    # perturbed variant that ranks first but only earns LOW_CONF must not be
+    # counted as a match.
+    assert report["variant_match_accuracy"] == report["variant_hit_rate"]
+    assert report["variant_match_accuracy"] <= report["variant_top1_accuracy"]
+    assert all(
+        r["usable"] == (r["ranked_first"] and r["verdict"] == "HIT")
+        for r in report["results"]
+    )
     assert report["hamming_distribution"]["max"] > 0
     assert any(r["expected_hamming"] > 0 for r in report["results"])
-    assert all(r["correct"] for r in report["results"])
     assert report["source"] == {
         "mode": "synthetic",
         "n": 5,
@@ -104,6 +116,7 @@ def test_from_db_matches_variants_of_stored_page_images(tmp_path):
     assert report["page_count"] == 2
     assert report["query_count"] == 6
     assert report["variant_match_accuracy"] == 1.0
+    assert report["variant_top1_accuracy"] == 1.0
     assert report["hamming_distribution"]["max"] > 0
     assert report["source"] == {
         "mode": "db",
@@ -112,6 +125,42 @@ def test_from_db_matches_variants_of_stored_page_images(tmp_path):
         "skipped_text_only_pages": 1,
         "skipped_missing_images": 0,
     }
+
+
+def test_from_db_keeps_missing_image_pages_as_candidates(tmp_path):
+    # A stored page with a pHash but a missing image file is still ranked by the
+    # live /v1/match path, so the evaluator must keep it as a candidate (only
+    # skipping query generation) instead of dropping it entirely.
+    db_path = tmp_path / "eval.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "CREATE TABLE pages (id INTEGER PRIMARY KEY, document_id INTEGER, "
+        "page_index INTEGER, phash TEXT, image_path TEXT)"
+    )
+    present = tmp_path / "page-0.png"
+    image = make_image(seed=11)
+    image.save(present)
+    conn.execute(
+        "INSERT INTO pages (id, document_id, page_index, phash, image_path) "
+        "VALUES (1, 1, 0, ?, ?)",
+        (phash_hex(image), str(present)),
+    )
+    # pHash present, but the image file was never written / was removed.
+    conn.execute(
+        "INSERT INTO pages (id, document_id, page_index, phash, image_path) "
+        "VALUES (2, 1, 1, ?, ?)",
+        (phash_hex(make_image(seed=42)), str(tmp_path / "gone.png")),
+    )
+    conn.commit()
+    conn.close()
+
+    report = from_db(str(db_path))
+    # Both pages are candidates even though only one produced queries.
+    assert report["page_count"] == 2
+    assert report["query_count"] == 3
+    assert report["source"]["skipped_missing_images"] == 1
+    # The surviving page's variants still match it as a usable HIT.
+    assert report["variant_match_accuracy"] == 1.0
 
 
 # --- CLI ------------------------------------------------------------------------

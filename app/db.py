@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
 
@@ -138,6 +139,7 @@ CREATE TABLE IF NOT EXISTS explain_views (
     explainer_json      TEXT,
     result_extras_json  TEXT,
     confidence          REAL,
+    page_signature      TEXT,
     viewed_at           TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -181,6 +183,7 @@ _TABLE_COLUMN_MIGRATIONS = {
         ("context_hits_json", "TEXT"),
         ("explainer_json", "TEXT"),
         ("result_extras_json", "TEXT"),
+        ("page_signature", "TEXT"),
     ),
 }
 
@@ -212,6 +215,37 @@ ALTER TABLE pages_new RENAME TO pages;
 """
 
 
+def _bump_evidence_pages_to_one_based(conn: sqlite3.Connection, table: str) -> None:
+    """Convert a legacy table's 0-based `evidence_pages_json` to 1-based.
+
+    Rows written before structured `evidence_refs` existed stored the raw
+    0-based `page_index` in `evidence_pages_json`. The current display path
+    (glasses_view) treats that list as user-facing/1-based when no
+    `evidence_refs` are present, so a legacy page-0 evidence would render as
+    `P00` and point one page off. This runs exactly once — at the moment the
+    `evidence_refs_json` column is first added — because every row that already
+    exists at that boundary predates the 1-based convention. Empty lists and
+    non-integer entries are left untouched.
+    """
+    rows = conn.execute(
+        f"SELECT id, evidence_pages_json FROM {table} "
+        "WHERE evidence_pages_json IS NOT NULL"
+    ).fetchall()
+    for row in rows:
+        try:
+            pages = json.loads(row["evidence_pages_json"])
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(pages, list) or not pages:
+            continue
+        bumped = [p + 1 if isinstance(p, int) else p for p in pages]
+        if bumped != pages:
+            conn.execute(
+                f"UPDATE {table} SET evidence_pages_json = ? WHERE id = ?",
+                (json.dumps(bumped), row["id"]),
+            )
+
+
 def _pages_image_path_not_null(conn: sqlite3.Connection) -> bool:
     """True if `pages.image_path` still carries the legacy NOT NULL constraint."""
     for _cid, name, _type, notnull, _dflt, _pk in conn.execute(
@@ -234,6 +268,11 @@ def _migrate(conn: sqlite3.Connection) -> None:
         for name, decl in migrations:
             if name not in existing:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
+                # Adding evidence_refs_json is the upgrade boundary from the
+                # 0-based evidence world; every pre-existing evidence_pages row
+                # is legacy 0-based and must move to the 1-based display convention.
+                if name == "evidence_refs_json" and "evidence_pages_json" in existing:
+                    _bump_evidence_pages_to_one_based(conn, table)
 
     # pages: on a legacy DB, image_path was NOT NULL — rebuild the table so
     # text-only (撮影しない) pages with image_path=NULL can be recorded. The

@@ -116,13 +116,20 @@ def _eval_candidates(
     candidate_indexes = {pid: idx for pid, idx, _ph in items}
     results = []
     variant_hammings = []
-    matches = 0
-    hits = 0
+    hits = 0    # expected page ranked first AND the app would accept it (HIT)
+    top1 = 0    # expected page ranked first, regardless of verdict
     for expected_pid, variant, query_hash in queries:
         best, verdict, _ = match(query_hash, None, candidates)
-        correct = best is not None and best.page_id == expected_pid
-        matches += int(correct)
-        hits += int(correct and verdict == "HIT")
+        ranked_first = best is not None and best.page_id == expected_pid
+        # The live /v1/match path only surfaces a page the app acts on when the
+        # verdict clears the confidence bar (HIT). A variant whose expected page
+        # merely ranks first while the verdict is LOW_CONF/NO_PAGE is NOT a
+        # usable match — the headline accuracy counts HITs only, otherwise a
+        # dataset of consistently low-confidence variants could report
+        # accuracy=1.0 while the app would reject every query.
+        usable = ranked_first and verdict == "HIT"
+        top1 += int(ranked_first)
+        hits += int(usable)
         expected_hamming = matching.hamming(
             query_hash, candidate_hashes[expected_pid]
         )
@@ -137,19 +144,28 @@ def _eval_candidates(
                 "matched_hamming": best.hamming if best else None,
                 "expected_hamming": expected_hamming,
                 "confidence": best.confidence if best else 0.0,
-                "correct": correct,
+                "ranked_first": ranked_first,
+                "usable": usable,
             }
         )
     total = len(queries)
-    accuracy = round(matches / total, 4) if total else 0.0
     hit_rate = round(hits / total, 4) if total else 0.0
+    top1_accuracy = round(top1 / total, 4) if total else 0.0
     return {
         "page_count": len(items),
         "query_count": total,
-        "variant_match_count": matches,
-        "variant_match_accuracy": accuracy,
+        # Headline accuracy = usable matches only (expected page ranked first
+        # AND verdict==HIT), i.e. what the live matcher would actually return
+        # to the app. This is also the value printed by the CLI.
+        "variant_match_count": hits,
+        "variant_match_accuracy": hit_rate,
         "variant_hit_count": hits,
         "variant_hit_rate": hit_rate,
+        # Ranking-only diagnostic: expected page ranked first even when the
+        # verdict is below HIT (the app would low-confidence or reject it). Sits
+        # at or above variant_match_accuracy; a gap flags threshold headroom.
+        "variant_top1_count": top1,
+        "variant_top1_accuracy": top1_accuracy,
         # Kept as compatibility aliases for existing report consumers. These
         # now refer to perturbed variants, never exact source hashes.
         "self_match_hits": hits,
@@ -184,6 +200,13 @@ def from_db(db_path: str) -> dict:
     queries = []
     skipped_missing_images = 0
     for row in rows:
+        # The live /v1/match path ranks EVERY stored pHash row, so a page whose
+        # image is gone is still a candidate other pages' variants can collide
+        # with. Register it as a candidate regardless; only skip generating
+        # queries for it (no source image to perturb). Dropping it entirely
+        # would hide false matches and make threshold tuning look safer than
+        # production.
+        items.append((row["id"], row["page_index"], row["phash"]))
         path = Path(row["image_path"] or "")
         if not path.is_file():
             skipped_missing_images += 1
@@ -194,7 +217,6 @@ def from_db(db_path: str) -> dict:
         except (OSError, ValueError):
             skipped_missing_images += 1
             continue
-        items.append((row["id"], row["page_index"], row["phash"]))
         queries.extend(
             (row["id"], name, phash_hex(variant))
             for name, variant in _query_variants(image)
@@ -271,7 +293,13 @@ def main() -> int:
     text = json.dumps(report, indent=2, ensure_ascii=False)
     if args.out:
         Path(args.out).write_text(text, encoding="utf-8")
-        print(f"wrote {args.out} (accuracy={report['variant_match_accuracy']})")
+        # Headline is the usable/HIT accuracy (what the app would accept); top1
+        # is ranking-only, so a gap between them flags confidence headroom.
+        print(
+            f"wrote {args.out} "
+            f"(match_accuracy={report['variant_match_accuracy']} "
+            f"top1={report['variant_top1_accuracy']})"
+        )
     else:
         print(text)
     return 0
