@@ -497,6 +497,61 @@ class TestExplainHistory:
 
 
 # ---------------------------------------------------------------------------
+# 6b. concurrency guard on the visit insert (unit-level, deterministic)
+# ---------------------------------------------------------------------------
+
+def test_persist_explain_visit_dedups_race_keeps_revisits(tmp_path, monkeypatch):
+    from app.explainer import ExplainResult
+    from app.main import _persist_explain_visit
+    import app.db as db
+
+    db_file = tmp_path / "visits.db"
+    monkeypatch.setattr("app.db.DB_PATH", db_file)
+    db.init_db(db_file)
+    conn = db.connect(db_file)
+    conn.execute("INSERT INTO documents (title) VALUES ('d')")
+    doc_id = conn.execute("SELECT id FROM documents").fetchone()["id"]
+    conn.execute("INSERT INTO explain_sessions (document_id) VALUES (?)", (doc_id,))
+    sid = conn.execute("SELECT id FROM explain_sessions").fetchone()["id"]
+    conn.commit()
+
+    def _res(tag):
+        return ExplainResult(lines=[tag, "", ""], detail=tag, confidence=0.9, extras={})
+
+    sig = "sig-A"
+    # Winner records the fresh-page visit (snapshot last_id=0).
+    inserted, row = _persist_explain_visit(
+        conn, session_id=sid, page_index=0, page_signature=sig, last_id=0,
+        result=_res("first"), retrieved_hits=[], explainer_info={"name": "x"},
+    )
+    conn.commit()
+    assert inserted is True and row["detail"] == "first"
+    first_id = row["id"]
+
+    # Concurrent loser: same pre-compute snapshot -> guard sees the winner row,
+    # inserts nothing, and returns the winner's row to serve.
+    inserted2, row2 = _persist_explain_visit(
+        conn, session_id=sid, page_index=0, page_signature=sig, last_id=0,
+        result=_res("dup"), retrieved_hits=[], explainer_info={"name": "x"},
+    )
+    conn.commit()
+    assert inserted2 is False
+    assert row2["id"] == first_id and row2["detail"] == "first"
+    assert conn.execute("SELECT COUNT(*) c FROM explain_views").fetchone()["c"] == 1
+
+    # Genuine revisit (snapshot taken after the prior same-page row) still
+    # records a new visit — the guard must not collapse history.
+    inserted3, row3 = _persist_explain_visit(
+        conn, session_id=sid, page_index=0, page_signature=sig, last_id=first_id,
+        result=_res("revisit"), retrieved_hits=[], explainer_info={"name": "x"},
+    )
+    conn.commit()
+    assert inserted3 is True and row3["detail"] == "revisit" and row3["id"] != first_id
+    assert conn.execute("SELECT COUNT(*) c FROM explain_views").fetchone()["c"] == 2
+    conn.close()
+
+
+# ---------------------------------------------------------------------------
 # 7. /v1/version includes explainers list
 # ---------------------------------------------------------------------------
 

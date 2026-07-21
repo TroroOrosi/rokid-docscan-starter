@@ -2513,6 +2513,71 @@ def _page_signature(page_row) -> str:
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()
 
 
+def _persist_explain_visit(
+    conn,
+    *,
+    session_id: int,
+    page_index: int,
+    page_signature: str,
+    last_id: int,
+    result: ExplainResult,
+    retrieved_hits: list,
+    explainer_info: dict,
+) -> tuple[bool, object]:
+    """Record this page visit, guarded against a concurrent duplicate.
+
+    Two simultaneous first-views of the same page both miss the visit cache and
+    compute in parallel. SQLite serializes the writes, and this INSERT is
+    guarded so only the first commit persists a row for the visit. ``id >
+    last_id`` scopes the guard to rows created AFTER the snapshot the caller
+    read, so a genuine page REVISIT (its prior same-page row predates
+    ``last_id``) still records a new visit — the same reason the repo cannot use
+    a plain UNIQUE(session, page, signature) index here.
+
+    Returns ``(inserted, row)``: ``inserted`` is False for the loser of a race,
+    and ``row`` is the canonical (winner's) row to serve so the response matches
+    history. The loser's provider call is wasted — the only residual of the race
+    — which is acceptable here: /explain is a single-user, sequential
+    gesture-driven path and the default explainer is local/offline/free.
+    """
+    cur = conn.execute(
+        """INSERT INTO explain_views
+           (session_id, page_index, verdict, hud_lines_json, detail,
+            evidence_pages_json, evidence_refs_json, context_hits_json,
+            explainer_json, result_extras_json, confidence, page_signature)
+           SELECT ?, ?, 'HIT', ?, ?, ?, ?, ?, ?, ?, ?, ?
+           WHERE NOT EXISTS (
+               SELECT 1 FROM explain_views
+               WHERE session_id = ? AND page_index = ? AND page_signature = ?
+                 AND id > ?
+           )""",
+        (
+            session_id,
+            page_index,
+            json.dumps(result.lines, ensure_ascii=False),
+            result.detail,
+            json.dumps(result.evidence_pages),
+            json.dumps(result.evidence_refs, ensure_ascii=False),
+            json.dumps(retrieved_hits, ensure_ascii=False),
+            json.dumps(explainer_info, ensure_ascii=False),
+            json.dumps(result.extras, ensure_ascii=False, default=str),
+            result.confidence,
+            page_signature,
+            session_id,
+            page_index,
+            page_signature,
+            last_id,
+        ),
+    )
+    inserted = cur.rowcount == 1
+    row = conn.execute(
+        "SELECT * FROM explain_views WHERE session_id = ? AND page_index = ? "
+        "AND page_signature = ? AND id > ? ORDER BY id DESC LIMIT 1",
+        (session_id, page_index, page_signature, last_id),
+    ).fetchone()
+    return inserted, row
+
+
 @app.get("/v1/explain-sessions/{session_id}/explain")
 def explain_page(
     session_id: int,
@@ -2565,6 +2630,7 @@ def explain_page(
             "ORDER BY id DESC LIMIT 1",
             (session_id,),
         ).fetchone()
+        last_id = last["id"] if last is not None else 0
         cached = (
             last is not None
             and last["page_index"] == page_index
@@ -2615,27 +2681,29 @@ def explain_page(
                 result.evidence_pages = retrieved["evidence_pages"]
             retrieved_hits = retrieved["hits"]
             explainer_info = explainer.info()
-            conn.execute(
-                """INSERT INTO explain_views
-                   (session_id, page_index, verdict, hud_lines_json,
-                    detail, evidence_pages_json, evidence_refs_json,
-                    context_hits_json, explainer_json, result_extras_json,
-                    confidence, page_signature)
-                   VALUES (?, ?, 'HIT', ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    session_id,
-                    page_index,
-                    json.dumps(result.lines, ensure_ascii=False),
-                    result.detail,
-                    json.dumps(result.evidence_pages),
-                    json.dumps(result.evidence_refs, ensure_ascii=False),
-                    json.dumps(retrieved_hits, ensure_ascii=False),
-                    json.dumps(explainer_info, ensure_ascii=False),
-                    json.dumps(result.extras, ensure_ascii=False, default=str),
-                    result.confidence,
-                    page_signature,
-                ),
+            inserted, won_row = _persist_explain_visit(
+                conn,
+                session_id=session_id,
+                page_index=page_index,
+                page_signature=page_signature,
+                last_id=last_id,
+                result=result,
+                retrieved_hits=retrieved_hits,
+                explainer_info=explainer_info,
             )
+            if not inserted and won_row is not None:
+                # A concurrent request won this visit; adopt its stored result so
+                # the response matches history (our provider call is discarded).
+                result = ExplainResult(
+                    lines=json.loads(won_row["hud_lines_json"] or "[]"),
+                    detail=won_row["detail"] or "",
+                    evidence_pages=json.loads(won_row["evidence_pages_json"] or "[]"),
+                    evidence_refs=json.loads(won_row["evidence_refs_json"] or "[]"),
+                    confidence=won_row["confidence"] if won_row["confidence"] is not None else 1.0,
+                    extras=json.loads(won_row["result_extras_json"] or "{}"),
+                )
+                retrieved_hits = json.loads(won_row["context_hits_json"] or "[]")
+                explainer_info = json.loads(won_row["explainer_json"] or "{}") or explainer_info
         if session["status"] == "ready":
             conn.execute(
                 "UPDATE explain_sessions SET status = 'explaining' WHERE id = ?",
