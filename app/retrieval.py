@@ -155,7 +155,7 @@ def _score(query_norm: str, query_tokens: set[str], page_text: str) -> float:
 def retrieve_context(
     conn: sqlite3.Connection, query_text: str | None, *, top_k: int = 3
 ) -> dict:
-    """Return {context, evidence_pages, hits} for the most relevant pages.
+    """Return context, 1-based evidence pages/refs, and internal page hits.
 
     Safe on an empty store or empty query (returns empty results).
     """
@@ -163,7 +163,12 @@ def retrieve_context(
     # display label; drop it before scoring so it mirrors the header-free page
     # material and a short figure query is not inflated by boilerplate.
     query_norm = normalize_ocr_text(_strip_display_header(query_text))
-    empty = {"context": "", "evidence_pages": [], "hits": []}
+    empty = {
+        "context": "",
+        "evidence_pages": [],
+        "evidence_refs": [],
+        "hits": [],
+    }
     if not query_norm:
         return empty
 
@@ -204,9 +209,22 @@ def retrieve_context(
     scored.sort(key=lambda h: h["score"], reverse=True)
     hits = scored[:top_k]
     context = "\n".join(h["snippet"] for h in hits)
+    # `page_index` is the storage/navigation key (0-based), while every
+    # user-facing Pxx label is 1-based. Preserve the document id as well:
+    # retrieval is cross-document, so a bare page number is ambiguous.
+    evidence_refs = [
+        {
+            "document_id": h["document_id"],
+            "page_number": h["page_index"] + 1,
+        }
+        for h in hits
+    ]
     return {
         "context": context,
-        "evidence_pages": [h["page_index"] for h in hits],
+        # Backward-compatible numeric list, now correctly 1-based for HUD/API
+        # display. New consumers should prefer the structured references.
+        "evidence_pages": [ref["page_number"] for ref in evidence_refs],
+        "evidence_refs": evidence_refs,
         "hits": hits,
         "retriever": "embedding" if config.ENABLE_EMBEDDING else "lexical",
     }

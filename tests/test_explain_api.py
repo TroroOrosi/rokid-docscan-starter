@@ -44,6 +44,10 @@ def client(tmp_path, monkeypatch):
     img_dir.mkdir()
     monkeypatch.setattr("app.config.DB_PATH", db_file)
     monkeypatch.setattr("app.config.IMAGE_DIR", img_dir)
+    # db/main import these constants by value; patch the actual endpoint
+    # references too so this module is isolated and order-independent.
+    monkeypatch.setattr("app.db.DB_PATH", db_file)
+    monkeypatch.setattr("app.main.IMAGE_DIR", img_dir)
     init_db(db_file)
     with TestClient(app) as c:
         yield c
@@ -180,6 +184,65 @@ class TestExplainPage:
     def test_explain_session_not_found_returns_404(self, client):
         r = client.get("/v1/explain-sessions/9999/explain")
         assert r.status_code == 404
+
+    def test_stage_and_scroll_reuse_one_provider_result(
+        self, client, doc_1page, monkeypatch
+    ):
+        from app.explainer import ExplainResult, Explainer
+        from app.explainers import register_explainer
+
+        class CountingExplainer(Explainer):
+            name = "counting-test"
+            provider_version = "test-1"
+            offline = False
+            calls = 0
+
+            def explain(self, req):
+                type(self).calls += 1
+                n = type(self).calls
+                return ExplainResult(
+                    lines=[f"overview-{n}", "", ""],
+                    detail=f"detail-{n}",
+                    confidence=0.8,
+                    extras={"call": n},
+                )
+
+        CountingExplainer.calls = 0
+        register_explainer(CountingExplainer(), replace=True)
+        monkeypatch.setenv("ROKID_EXPLAINER", "counting-test")
+        sid = _create_session(client, doc_1page)
+
+        first = client.get(f"/v1/explain-sessions/{sid}/explain").json()
+        scrolled = client.get(
+            f"/v1/explain-sessions/{sid}/explain", params={"view_page": 999}
+        ).json()
+        detail = client.get(
+            f"/v1/explain-sessions/{sid}/explain", params={"stage": "detail"}
+        ).json()
+
+        assert CountingExplainer.calls == 1
+        assert first["cached"] is False
+        assert scrolled["cached"] is detail["cached"] is True
+        assert first["explainer"] == scrolled["explainer"] == detail["explainer"]
+        assert first["evidence_pages"] and all(
+            page == 1 for page in first["evidence_pages"]
+        )
+        assert all(
+            set(ref) == {"document_id", "page_number"}
+            and ref["page_number"] == 1
+            for ref in first["evidence_refs"]
+        )
+        assert len({
+            (ref["document_id"], ref["page_number"])
+            for ref in first["evidence_refs"]
+        }) == len(first["evidence_refs"])
+
+        history = client.get(f"/v1/explain-sessions/{sid}/history").json()
+        assert len(history["explained_views"]) == 1
+        visit = history["explained_views"][0]
+        assert visit["detail"] == "detail-1"
+        assert visit["result_extras"] == {"call": 1}
+        assert visit["explainer"]["name"] == "counting-test"
 
 
 # ---------------------------------------------------------------------------
@@ -342,6 +405,7 @@ class TestExplainHistory:
         view = body["explained_views"][0]
         assert view["page_index"] == 0
         assert isinstance(view["hud_lines"], list)
+        assert isinstance(view["detail"], str)
 
     def test_history_includes_current_page_index(self, client, doc_3pages):
         sid = _create_session(client, doc_3pages)

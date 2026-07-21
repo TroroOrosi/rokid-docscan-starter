@@ -29,6 +29,15 @@ def _make_legacy_db(path):
             UNIQUE(document_id, page_index)
         );
         CREATE TABLE exam_sessions (id INTEGER PRIMARY KEY, mode TEXT);
+        CREATE TABLE solutions (
+            id INTEGER PRIMARY KEY, question_id INTEGER,
+            evidence_pages_json TEXT
+        );
+        CREATE TABLE explain_views (
+            id INTEGER PRIMARY KEY, session_id INTEGER, page_index INTEGER,
+            verdict TEXT, hud_lines_json TEXT, detail TEXT,
+            evidence_pages_json TEXT, confidence REAL, viewed_at TEXT
+        );
         INSERT INTO documents (title) VALUES ('legacy');
         INSERT INTO pages (document_id, page_index, image_path, phash, ocr_text)
             VALUES (1, 0, 'old.png', 'abc123', 'legacy page');
@@ -57,6 +66,23 @@ def test_legacy_pages_image_path_becomes_nullable(tmp_path, monkeypatch):
     # image_path NOT NULL relaxed; vision_text added.
     assert cols["image_path"][3] == 0  # notnull flag cleared
     assert "vision_text" in cols
+    solution_cols = {
+        r[1] for r in conn.execute("PRAGMA table_info(solutions)")
+    }
+    assert "evidence_refs_json" in solution_cols
+    explain_cols = {
+        r[1] for r in conn.execute("PRAGMA table_info(explain_views)")
+    }
+    assert {
+        "evidence_refs_json",
+        "context_hits_json",
+        "explainer_json",
+        "result_extras_json",
+    } <= explain_cols
+    assert conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' "
+        "AND name = 'solution_claims'"
+    ).fetchone()
     # The legacy-table rebuild drops indexes attached to the old table; the
     # migration must recreate the hot-path document lookup immediately.
     indexes = {r[1] for r in conn.execute("PRAGMA index_list(pages)")}

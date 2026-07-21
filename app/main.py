@@ -26,7 +26,7 @@ from pydantic import BaseModel
 from . import config, db
 from .analyzers import get_analyzer
 from .config import IMAGE_DIR, ensure_dirs
-from .explainer import ExplainRequest
+from .explainer import ExplainRequest, ExplainResult
 from .explainers import get_explainer, list_explainers
 from .extractors import detect_media, get_extractor
 from .glasses_view import (
@@ -202,6 +202,34 @@ def _page_material(ocr_text: str | None, vision_text: str | None) -> str:
     if vision_text and vision_text.strip():
         parts.append("【図・画像の読み取り】\n" + vision_text.strip())
     return "\n\n".join(parts)
+
+
+def _require_dense_page_indexes(conn, document_id: int) -> int:
+    """Require the navigation invariant page_index == 0..N-1.
+
+    Exam/explain navigation stores an integer cursor and performs exact page
+    lookups, so a finalized document with a leading index or an internal gap
+    would create a valid-looking session whose first/current page is 404.
+    """
+    indexes = [
+        r["page_index"]
+        for r in conn.execute(
+            "SELECT page_index FROM pages WHERE document_id = ? ORDER BY page_index",
+            (document_id,),
+        ).fetchall()
+    ]
+    expected = list(range(len(indexes)))
+    if indexes != expected:
+        missing = sorted(set(expected) - set(indexes))
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "page indexes must be contiguous from 0 before finalizing or "
+                f"starting navigation (registered={indexes}, missing={missing}); "
+                "review /scan-status and create a corrected document"
+            ),
+        )
+    return len(indexes)
 
 
 # --- endpoints --------------------------------------------------------------
@@ -586,12 +614,13 @@ def finalize_document(document_id: int) -> dict:
     try:
         _doc_or_404(conn, document_id)
         pages = conn.execute(
-            "SELECT id, image_path, ocr_text, vision_text, summary FROM pages "
+            "SELECT id, page_index, image_path, ocr_text, vision_text, summary FROM pages "
             "WHERE document_id = ?",
             (document_id,),
         ).fetchall()
         if not pages:
             raise HTTPException(status_code=400, detail="document has no pages")
+        _require_dense_page_indexes(conn, document_id)
 
         analyzer = get_analyzer()
         for p in pages:
@@ -939,6 +968,7 @@ def _solution_from_row(row) -> "object":
         answer_confidence=row["answer_conf"] or 0.0,
         rationale_confidence=row["rationale_conf"] or 0.0,
         evidence_pages=json.loads(row["evidence_pages_json"] or "[]"),
+        evidence_refs=json.loads(row["evidence_refs_json"] or "[]"),
         raw_reasoning=row["raw_reasoning"] or "",
     )
 
@@ -966,6 +996,7 @@ def create_exam_session(payload: CreateExamSession) -> dict:
                     detail="document must be finalized with >=1 page "
                     "(POST /v1/documents/{id}/finalize) before a page-move exam",
                 )
+            _require_dense_page_indexes(conn, payload.document_id)
         cur = conn.execute(
             "INSERT INTO exam_sessions "
             "(mode, voice_enabled, subject_hint, document_id, exam_type, answer_format) "
@@ -1129,15 +1160,21 @@ def solve_question(session_id: int, question_id: int) -> dict:
         )
         result, solver = solve_with_fallback(question=question)
         served_by = result.extras.get("served_by", solver.name)
-        evidence_pages = result.evidence_pages or retrieved["evidence_pages"]
+        evidence_refs = result.evidence_refs or retrieved["evidence_refs"]
+        evidence_pages = (
+            [ref["page_number"] for ref in evidence_refs]
+            if evidence_refs
+            else (result.evidence_pages or retrieved["evidence_pages"])
+        )
         result.evidence_pages = evidence_pages
+        result.evidence_refs = evidence_refs
 
         conn.execute(
             """INSERT INTO solutions
                (question_id, solver_name, answer, solution_steps_json, rationale,
                 cautions, answer_conf, rationale_conf, evidence_pages_json,
-                raw_reasoning, served_by)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                evidence_refs_json, raw_reasoning, served_by)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 question_id,
                 solver.name,
@@ -1148,6 +1185,7 @@ def solve_question(session_id: int, question_id: int) -> dict:
                 result.answer_confidence,
                 result.rationale_confidence,
                 json.dumps(evidence_pages),
+                json.dumps(evidence_refs),
                 result.raw_reasoning,
                 served_by,
             ),
@@ -1175,6 +1213,8 @@ def solve_question(session_id: int, question_id: int) -> dict:
                 result, answer_box=answer_box, page_number=q["page_number"]
             ),
             "evidence": retrieved["hits"],
+            "evidence_pages": result.evidence_pages,
+            "evidence_refs": result.evidence_refs,
             "versions": version_info(),
         }
     finally:
@@ -1240,6 +1280,7 @@ def get_question_reasoning(session_id: int, question_id: int) -> dict:
             "solution_steps": json.loads(sol["solution_steps_json"] or "[]"),
             "rationale": sol["rationale"] or "",
             "evidence_pages": json.loads(sol["evidence_pages_json"] or "[]"),
+            "evidence_refs": json.loads(sol["evidence_refs_json"] or "[]"),
             "versions": version_info(),
         }
     finally:
@@ -1505,15 +1546,21 @@ def exam_solve_current(session_id: int) -> dict:
         )
         result, solver = solve_with_fallback(question=question)
         served_by = result.extras.get("served_by", solver.name)
-        evidence_pages = result.evidence_pages or retrieved["evidence_pages"]
+        evidence_refs = result.evidence_refs or retrieved["evidence_refs"]
+        evidence_pages = (
+            [ref["page_number"] for ref in evidence_refs]
+            if evidence_refs
+            else (result.evidence_pages or retrieved["evidence_pages"])
+        )
         result.evidence_pages = evidence_pages
+        result.evidence_refs = evidence_refs
 
         conn.execute(
             """INSERT INTO solutions
                (question_id, solver_name, answer, solution_steps_json, rationale,
                 cautions, answer_conf, rationale_conf, evidence_pages_json,
-                raw_reasoning, served_by)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                evidence_refs_json, raw_reasoning, served_by)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 question_id,
                 solver.name,
@@ -1524,6 +1571,7 @@ def exam_solve_current(session_id: int) -> dict:
                 result.answer_confidence,
                 result.rationale_confidence,
                 json.dumps(evidence_pages),
+                json.dumps(evidence_refs),
                 result.raw_reasoning,
                 served_by,
             ),
@@ -1550,6 +1598,8 @@ def exam_solve_current(session_id: int) -> dict:
             "glasses_view": view,
             "overlay": build_overlay(result, answer_box=None, page_number=page_number),
             "evidence": retrieved["hits"],
+            "evidence_pages": result.evidence_pages,
+            "evidence_refs": result.evidence_refs,
             "versions": version_info(),
         }
     finally:
@@ -1718,21 +1768,58 @@ def _review_operations() -> dict:
     return dict(REVIEW_OPERATIONS)
 
 
-def _question_evidence_pages(conn, question_id: int) -> list[int]:
-    """Default evidence pages for an ingested answer: the problem's page span."""
+def _question_evidence_refs(conn, question_id: int) -> list[dict]:
+    """Structured default evidence for a deck problem's document/page span."""
     row = conn.execute(
-        "SELECT structure_json, page_number FROM questions WHERE id = ?",
+        "SELECT q.structure_json, q.page_number, s.document_id "
+        "FROM questions q JOIN exam_sessions s ON s.id = q.session_id "
+        "WHERE q.id = ?",
         (question_id,),
     ).fetchone()
-    if row is None:
+    if row is None or row["document_id"] is None:
         return []
     try:
         span = json.loads(row["structure_json"] or "{}").get("page_indexes") or []
     except (ValueError, TypeError):
         span = []
     if span:
-        return [i + 1 for i in span]
-    return [row["page_number"]] if row["page_number"] else []
+        pages = [i + 1 for i in span]
+    else:
+        pages = [row["page_number"]] if row["page_number"] else []
+    return [
+        {"document_id": row["document_id"], "page_number": page}
+        for page in pages
+    ]
+
+
+def _question_evidence_pages(conn, question_id: int) -> list[int]:
+    """Backward-compatible 1-based page-number list."""
+    return [r["page_number"] for r in _question_evidence_refs(conn, question_id)]
+
+
+_SERVER_SOLVE_CLAIM_TTL = "-15 minutes"
+
+
+def _claim_server_solve(conn, question_id: int) -> bool:
+    """Atomically claim one paid server solve, reclaiming a stale crash row."""
+    conn.execute(
+        "DELETE FROM solution_claims "
+        "WHERE question_id = ? AND claimed_at < datetime('now', ?)",
+        (question_id, _SERVER_SOLVE_CLAIM_TTL),
+    )
+    cur = conn.execute(
+        "INSERT OR IGNORE INTO solution_claims (question_id) "
+        "SELECT ? WHERE NOT EXISTS "
+        "(SELECT 1 FROM solutions WHERE question_id = ?)",
+        (question_id, question_id),
+    )
+    conn.commit()  # publish the claim before any slow/paid network request
+    return cur.rowcount == 1
+
+
+def _release_server_solve(conn, question_id: int) -> None:
+    conn.execute("DELETE FROM solution_claims WHERE question_id = ?", (question_id,))
+    conn.commit()
 
 
 @app.post("/v1/exam-sessions/{session_id}/finalize-reading")
@@ -1856,60 +1943,72 @@ def exam_finalize_reading(session_id: int) -> dict:
             for row in _deck_question_rows(conn, session_id):
                 if _latest_solution_row(conn, row["id"]) is not None:
                     continue
-                start_index = (row["page_number"] or 1) - 1
-                doc_material = _document_material(conn, doc_id, start_index)
-                retrieved = retrieve_context(conn, row["body_text"])
-                context = _exam_prompt_context(session, doc_material, retrieved["context"])
-                question = Question(
-                    question_no=row["question_no"],
-                    body_text=row["body_text"],
-                    choices=json.loads(row["choices_json"] or "[]"),
-                    subject=row["subject"],
-                    context=context,
-                )
-                result, solver = solve_with_fallback(question=question)
-                served_by = result.extras.get("served_by", solver.name)
-                if served_by == "local":
-                    # The configured cloud solver fell back to the placeholder
-                    # (missing key/SDK or failure): storing that would mark the
-                    # problem "solved" with junk and shadow the onboard ingest.
+                if not _claim_server_solve(conn, row["id"]):
                     continue
-                evidence_pages = result.evidence_pages or _question_evidence_pages(
-                    conn, row["id"]
-                )
-                # Conditional insert: the unsolved check at the loop top spans
-                # a slow cloud call, so a racing finalize-reading or an onboard
-                # ingest may have answered meanwhile. WHERE NOT EXISTS closes
-                # that window atomically — the late server result is discarded
-                # instead of shadowing the earlier answer (or double-billing).
-                cur = conn.execute(
-                    """INSERT INTO solutions
-                       (question_id, solver_name, answer, solution_steps_json,
-                        rationale, cautions, answer_conf, rationale_conf,
-                        evidence_pages_json, raw_reasoning, served_by)
-                       SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-                       WHERE NOT EXISTS
-                           (SELECT 1 FROM solutions WHERE question_id = ?)""",
-                    (
-                        row["id"],
-                        solver.name,
-                        result.answer,
-                        json.dumps(result.solution_steps, ensure_ascii=False),
-                        result.rationale,
-                        result.cautions,
-                        result.answer_confidence,
-                        result.rationale_confidence,
-                        json.dumps(evidence_pages),
-                        result.raw_reasoning,
-                        served_by,
-                        row["id"],
-                    ),
-                )
-                # Commit per problem so a mid-batch crash loses at most one
-                # answer and a retry resumes from the remaining problems.
-                conn.commit()
-                if cur.rowcount:
-                    server_solved += 1
+                try:
+                    start_index = (row["page_number"] or 1) - 1
+                    doc_material = _document_material(conn, doc_id, start_index)
+                    retrieved = retrieve_context(conn, row["body_text"])
+                    context = _exam_prompt_context(
+                        session, doc_material, retrieved["context"]
+                    )
+                    question = Question(
+                        question_no=row["question_no"],
+                        body_text=row["body_text"],
+                        choices=json.loads(row["choices_json"] or "[]"),
+                        subject=row["subject"],
+                        context=context,
+                    )
+                    result, solver = solve_with_fallback(question=question)
+                    served_by = result.extras.get("served_by", solver.name)
+                    if served_by == "local":
+                        # A failed/missing cloud adapter fell back to the
+                        # placeholder. Release the claim for a future retry,
+                        # but never mark placeholder output as solved.
+                        continue
+                    evidence_refs = (
+                        result.evidence_refs
+                        or _question_evidence_refs(conn, row["id"])
+                    )
+                    evidence_pages = (
+                        [ref["page_number"] for ref in evidence_refs]
+                        if evidence_refs
+                        else result.evidence_pages
+                    )
+                    # Onboard ingest may answer while the paid call is in
+                    # flight. The conditional insert preserves that earlier
+                    # answer; the DB claim above already prevented a second
+                    # server request (and its duplicate charge).
+                    cur = conn.execute(
+                        """INSERT INTO solutions
+                           (question_id, solver_name, answer, solution_steps_json,
+                            rationale, cautions, answer_conf, rationale_conf,
+                            evidence_pages_json, evidence_refs_json,
+                            raw_reasoning, served_by)
+                           SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                           WHERE NOT EXISTS
+                               (SELECT 1 FROM solutions WHERE question_id = ?)""",
+                        (
+                            row["id"],
+                            solver.name,
+                            result.answer,
+                            json.dumps(result.solution_steps, ensure_ascii=False),
+                            result.rationale,
+                            result.cautions,
+                            result.answer_confidence,
+                            result.rationale_confidence,
+                            json.dumps(evidence_pages),
+                            json.dumps(evidence_refs),
+                            result.raw_reasoning,
+                            served_by,
+                            row["id"],
+                        ),
+                    )
+                    conn.commit()
+                    if cur.rowcount:
+                        server_solved += 1
+                finally:
+                    _release_server_solve(conn, row["id"])
 
         deck = _exam_deck(conn, session_id)
         if locked:
@@ -2089,11 +2188,17 @@ def exam_ingest_solutions(session_id: int, payload: IngestSolutions) -> dict:
                 question_id = qcur.lastrowid
                 created_ids[item.problem_no] = question_id
                 created += 1
-            evidence = (
-                [item.page_number]
-                if item.page_number
-                else _question_evidence_pages(conn, question_id)
+            evidence_refs = (
+                [
+                    {
+                        "document_id": session["document_id"],
+                        "page_number": item.page_number,
+                    }
+                ]
+                if item.page_number and session["document_id"] is not None
+                else _question_evidence_refs(conn, question_id)
             )
+            evidence = [ref["page_number"] for ref in evidence_refs]
             # Clamp: an out-of-scale confidence (e.g. a 0-100 client) must not
             # inflate the deck values or the HUD ★ symbols.
             confidence = clamp01(item.answer_confidence, default=0.5)
@@ -2101,8 +2206,9 @@ def exam_ingest_solutions(session_id: int, payload: IngestSolutions) -> dict:
                 """INSERT INTO solutions
                    (question_id, solver_name, answer, solution_steps_json,
                     rationale, cautions, answer_conf, rationale_conf,
-                    evidence_pages_json, raw_reasoning, served_by)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    evidence_pages_json, evidence_refs_json, raw_reasoning,
+                    served_by)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     question_id,
                     "onboard",
@@ -2113,6 +2219,7 @@ def exam_ingest_solutions(session_id: int, payload: IngestSolutions) -> dict:
                     confidence,
                     confidence,
                     json.dumps(evidence),
+                    json.dumps(evidence_refs),
                     "",
                     payload.served_by,
                 ),
@@ -2235,6 +2342,8 @@ def exam_review(session_id: int, index: int = 0, view_page: int = 0) -> dict:
             "page_number": qrow["page_number"],
             "solved": srow is not None,
             "served_by": srow["served_by"] if srow else None,
+            "evidence_pages": solution.evidence_pages if solution else [],
+            "evidence_refs": solution.evidence_refs if solution else [],
             "locked": False,
             "glasses_view": view,
             "versions": version_info(),
@@ -2293,6 +2402,7 @@ def create_explain_session(payload: CreateExplainSession) -> dict:
                 detail="document must be finalized with >=1 page "
                 "(POST /v1/documents/{id}/finalize) before explanation",
             )
+        _require_dense_page_indexes(conn, payload.document_id)
         cur = conn.execute(
             "INSERT INTO explain_sessions (document_id, voice_enabled) VALUES (?, ?)",
             (payload.document_id, int(payload.voice_enabled)),
@@ -2408,43 +2518,78 @@ def explain_page(
 
         total_doc_pages = _explain_total_pages(conn, doc_id)
 
-        # Include the on-glass AI's figure/image reading (vision_text) so the
-        # explanation covers diagrams, not just the OCR text.
-        page_material = _page_material(page_row["ocr_text"], page_row["vision_text"])
-        retrieved = retrieve_context(conn, page_material or page_row["ocr_text"])
-
-        req = ExplainRequest(
-            page_index=page_index,
-            page_ocr_text=page_material or page_row["ocr_text"],
-            page_summary=page_row["summary"],
-            context_pages=retrieved["hits"],
-            document_title=conn.execute(
-                "SELECT title FROM documents WHERE id = ?", (doc_id,)
-            ).fetchone()["title"],
-        )
-        explainer = get_explainer()
-        result = explainer.explain(req)
-
-        # History records page VISITS, not every scroll: re-fetching the same
-        # page (stage/view_page churn while reading) must not duplicate rows,
-        # while returning to a page after navigating away is a new visit.
+        # History records page VISITS, not every scroll. The saved result is
+        # also the visit cache: stage/view_page churn must render the exact same
+        # explanation without another paid/provider request. Returning after a
+        # different page was explained creates a new visit and refreshes once.
         last = conn.execute(
-            "SELECT page_index FROM explain_views WHERE session_id = ? "
+            "SELECT * FROM explain_views WHERE session_id = ? "
             "ORDER BY id DESC LIMIT 1",
             (session_id,),
         ).fetchone()
-        if last is None or last["page_index"] != page_index:
+        cached = last is not None and last["page_index"] == page_index
+        if cached:
+            result = ExplainResult(
+                lines=json.loads(last["hud_lines_json"] or "[]"),
+                detail=last["detail"] or "",
+                evidence_pages=json.loads(last["evidence_pages_json"] or "[]"),
+                evidence_refs=json.loads(last["evidence_refs_json"] or "[]"),
+                confidence=last["confidence"] if last["confidence"] is not None else 1.0,
+                extras=json.loads(last["result_extras_json"] or "{}"),
+            )
+            retrieved_hits = json.loads(last["context_hits_json"] or "[]")
+            explainer_info = json.loads(last["explainer_json"] or "{}")
+            if not explainer_info:
+                # Legacy rows predate provider metadata. This only reads the
+                # active adapter identity; it does not invoke the provider.
+                explainer_info = get_explainer().info()
+        else:
+            # Include the on-glass AI's figure/image reading (vision_text) so
+            # the explanation covers diagrams, not just the OCR text.
+            page_material = _page_material(
+                page_row["ocr_text"], page_row["vision_text"]
+            )
+            retrieved = retrieve_context(
+                conn, page_material or page_row["ocr_text"]
+            )
+            req = ExplainRequest(
+                page_index=page_index,
+                page_ocr_text=page_material or page_row["ocr_text"],
+                page_summary=page_row["summary"],
+                context_pages=retrieved["hits"],
+                document_title=conn.execute(
+                    "SELECT title FROM documents WHERE id = ?", (doc_id,)
+                ).fetchone()["title"],
+            )
+            explainer = get_explainer()
+            result = explainer.explain(req)
+            if not result.evidence_refs:
+                result.evidence_refs = retrieved["evidence_refs"]
+            if result.evidence_refs:
+                result.evidence_pages = [
+                    ref["page_number"] for ref in result.evidence_refs
+                ]
+            elif not result.evidence_pages:
+                result.evidence_pages = retrieved["evidence_pages"]
+            retrieved_hits = retrieved["hits"]
+            explainer_info = explainer.info()
             conn.execute(
                 """INSERT INTO explain_views
                    (session_id, page_index, verdict, hud_lines_json,
-                    detail, evidence_pages_json, confidence)
-                   VALUES (?, ?, 'HIT', ?, ?, ?, ?)""",
+                    detail, evidence_pages_json, evidence_refs_json,
+                    context_hits_json, explainer_json, result_extras_json,
+                    confidence)
+                   VALUES (?, ?, 'HIT', ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     session_id,
                     page_index,
                     json.dumps(result.lines, ensure_ascii=False),
                     result.detail,
                     json.dumps(result.evidence_pages),
+                    json.dumps(result.evidence_refs, ensure_ascii=False),
+                    json.dumps(retrieved_hits, ensure_ascii=False),
+                    json.dumps(explainer_info, ensure_ascii=False),
+                    json.dumps(result.extras, ensure_ascii=False, default=str),
                     result.confidence,
                 ),
             )
@@ -2468,9 +2613,12 @@ def explain_page(
             "document_id": doc_id,
             "current_page_index": page_index,
             "total_doc_pages": total_doc_pages,
-            "explainer": explainer.info(),
+            "explainer": explainer_info,
+            "cached": cached,
             "glasses_view": view,
-            "evidence": retrieved["hits"],
+            "evidence": retrieved_hits,
+            "evidence_pages": result.evidence_pages,
+            "evidence_refs": result.evidence_refs,
             "versions": version_info(),
         }
     finally:
@@ -2485,8 +2633,9 @@ def explain_history(session_id: int) -> dict:
         session = _explain_session_or_404(conn, session_id)
         views = conn.execute(
             "SELECT page_index, verdict, hud_lines_json, detail, "
-            "evidence_pages_json, confidence, viewed_at "
-            "FROM explain_views WHERE session_id = ? ORDER BY viewed_at",
+            "evidence_pages_json, evidence_refs_json, context_hits_json, "
+            "explainer_json, result_extras_json, confidence, viewed_at "
+            "FROM explain_views WHERE session_id = ? ORDER BY id",
             (session_id,),
         ).fetchall()
         return {
@@ -2500,7 +2649,12 @@ def explain_history(session_id: int) -> dict:
                     "page_index": v["page_index"],
                     "verdict": v["verdict"],
                     "hud_lines": json.loads(v["hud_lines_json"] or "[]"),
+                    "detail": v["detail"] or "",
                     "evidence_pages": json.loads(v["evidence_pages_json"] or "[]"),
+                    "evidence_refs": json.loads(v["evidence_refs_json"] or "[]"),
+                    "evidence": json.loads(v["context_hits_json"] or "[]"),
+                    "explainer": json.loads(v["explainer_json"] or "{}"),
+                    "result_extras": json.loads(v["result_extras_json"] or "{}"),
                     "confidence": v["confidence"],
                     "viewed_at": v["viewed_at"],
                 }

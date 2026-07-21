@@ -77,7 +77,15 @@ from __future__ import annotations
 #        支援（画像/pHash 語彙なし）。復旧文言は 再撮影→再読取、取り込み ack は
 #        保存済み→読取済み（payload 形状不変のため GLASSES_VIEW は 1.4.0 の
 #        まま）。API -> 1.10.0.
-APP_VERSION = "0.10.0"
+# 0.11.0: review hardening — reject sparse page indexes before finalize or
+#        navigation, claim server-side solve work before paid calls, and cache
+#        one explainer result per page visit. Evidence is now 1-based and
+#        document-qualified; explain history returns its stored detail and
+#        provider context. Docker defaults to loopback and passes `.env`
+#        settings explicitly. The matching evaluator uses perturbed image
+#        queries instead of exact pHash self-matches. API -> 1.11.0, solver
+#        port -> 1.2.0, explainer port -> 1.1.0, glasses view -> 1.5.0.
+APP_VERSION = "0.11.0"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.
@@ -114,7 +122,12 @@ APP_VERSION = "0.10.0"
 #        null for text-only comparisons; neither text nor image -> 400. New
 #        additive endpoint GET /v1/documents/{id}/scan-status
 #        (読取状態の確認・復旧). Path shapes unchanged — no envelope change.
-API_VERSION = "1.10.0"
+# 1.11.0: solution/explain evidence gains structured `evidence_refs`
+#        ({document_id, page_number}); legacy `evidence_pages` is consistently
+#        user-facing/1-based. Explain responses gain `cached`, and history now
+#        returns detail, evidence/provider metadata and result extras. Sparse
+#        page indexes are rejected with 409 before finalize/navigation.
+API_VERSION = "1.11.0"
 
 # Matching algorithm identity. Bump when thresholds or hashing change so a
 # re-index/eval is triggered. Mirrors thresholds in app/matching.py.
@@ -160,13 +173,17 @@ ANALYZER_API_VERSION = "1.0.0"
 # Solver plugin interface (provider-agnostic question answering).
 # 1.1.0: Question gained the optional `image_path` field so vision-capable
 #        solvers can answer from the scanned page image (additive/back-compat).
-SOLVER_API_VERSION = "1.1.0"
+# 1.2.0: SolveResult gained structured, 1-based `evidence_refs`; the legacy
+#        `evidence_pages` list is now explicitly user-facing/1-based.
+SOLVER_API_VERSION = "1.2.0"
 
 # Media-extractor plugin interface (formula/figure/graph/table).
 EXTRACTOR_API_VERSION = "1.0.0"
 
 # Explainer plugin interface (live page explanation with RAG context).
-EXPLAINER_API_VERSION = "1.0.0"
+# 1.1.0: ExplainResult gained structured, 1-based `evidence_refs`; the legacy
+#        `evidence_pages` list is now explicitly user-facing/1-based.
+EXPLAINER_API_VERSION = "1.1.0"
 
 # On-glasses staged view payload (silent, <=3 lines per page, paginated stages).
 # 1.1.0: added the silent `capture_ack` payload (no sound/flash on capture).
@@ -182,7 +199,9 @@ EXPLAINER_API_VERSION = "1.0.0"
 #        navigation; reading_done ack (camera_off). Operation/gesture names
 #        moved to the official vocabulary (two_finger_*, single/double tap,
 #        long_press). Max 3 lines/page unchanged.
-GLASSES_VIEW_CONTRACT_VERSION = "1.4.0"
+# 1.5.0: evidence labels are document-qualified and user-facing/1-based
+#        (`D{document_id}:P{page_number}`) when structured refs are available.
+GLASSES_VIEW_CONTRACT_VERSION = "1.5.0"
 
 # Answer-area overlay payload (box + short answer; 2D image-anchored).
 # 1.1.0: added tracking metadata (tracking/fixed_ar/anchor_hint).

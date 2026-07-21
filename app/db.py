@@ -86,10 +86,20 @@ CREATE TABLE IF NOT EXISTS solutions (
     answer_conf        REAL,
     rationale_conf     REAL,
     evidence_pages_json TEXT,
+    evidence_refs_json  TEXT,
     raw_reasoning      TEXT,
     served_by          TEXT,
     user_confirmed     INTEGER NOT NULL DEFAULT 0,
     created_at         TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- One short-lived claim per question while a server-side cloud solver is in
+-- flight. The claim is committed BEFORE the paid call, preventing concurrent
+-- finalize-reading requests from invoking the provider for the same problem.
+-- Stale rows are reclaimed by the application after a crash/timeout.
+CREATE TABLE IF NOT EXISTS solution_claims (
+    question_id INTEGER PRIMARY KEY REFERENCES questions(id) ON DELETE CASCADE,
+    claimed_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 -- Live document explanation mode (scan-free, button-only navigation).
@@ -123,6 +133,10 @@ CREATE TABLE IF NOT EXISTS explain_views (
     hud_lines_json      TEXT,
     detail              TEXT,
     evidence_pages_json TEXT,
+    evidence_refs_json  TEXT,
+    context_hits_json   TEXT,
+    explainer_json      TEXT,
+    result_extras_json  TEXT,
     confidence          REAL,
     viewed_at           TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -155,6 +169,20 @@ _EXAM_SESSION_MIGRATIONS = (
     ("audio_path", "TEXT"),
     ("transcript", "TEXT"),
 )
+
+# Additive result/cache metadata introduced after the original tables. Keeping
+# these in a table map makes old persistent volumes upgrade in place.
+_TABLE_COLUMN_MIGRATIONS = {
+    "solutions": (
+        ("evidence_refs_json", "TEXT"),
+    ),
+    "explain_views": (
+        ("evidence_refs_json", "TEXT"),
+        ("context_hits_json", "TEXT"),
+        ("explainer_json", "TEXT"),
+        ("result_extras_json", "TEXT"),
+    ),
+}
 
 
 # Rebuild `pages` to the current schema. Used to relax the original
@@ -200,6 +228,12 @@ def _migrate(conn: sqlite3.Connection) -> None:
     for name, decl in _EXAM_SESSION_MIGRATIONS:
         if name not in cols:
             conn.execute(f"ALTER TABLE exam_sessions ADD COLUMN {name} {decl}")
+
+    for table, migrations in _TABLE_COLUMN_MIGRATIONS.items():
+        existing = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+        for name, decl in migrations:
+            if name not in existing:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
 
     # pages: on a legacy DB, image_path was NOT NULL — rebuild the table so
     # text-only (撮影しない) pages with image_path=NULL can be recorded. The

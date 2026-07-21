@@ -134,19 +134,50 @@ def test_scan_status_misindexed_page_prioritizes_index_review(client):
     assert body["recommended_action"] == "review_page_indexes"
 
 
-def test_scan_status_gap_and_extra_after_finalize_recommends_new_document(client):
-    # Index corrections are impossible on a finalized document (new indexes
-    # 409, strays cannot be removed) — even with extras present the honest
-    # recovery is a fresh document.
+def test_finalize_rejects_gap_and_extra_before_document_is_frozen(client):
+    # Navigation uses exact 0..N-1 indexes. A sparse document must remain open
+    # and actionable instead of finalizing successfully and later returning a
+    # 404 from current/explain.
     doc_id = _new_doc(client)
     _add_text_page(client, doc_id, 0, "p1")
     _add_text_page(client, doc_id, 2, "p3")
     _add_text_page(client, doc_id, 3, "p2 誤ってindex 3で登録")
-    assert client.post(f"/v1/documents/{doc_id}/finalize").status_code == 200
+    finalize = client.post(f"/v1/documents/{doc_id}/finalize")
+    assert finalize.status_code == 409
+    assert "contiguous from 0" in finalize.json()["detail"]
     body = _status(client, doc_id, expected=3).json()
+    assert body["status"] == "open"
     assert body["missing_page_indexes"] == [1]
     assert body["unexpected_page_indexes"] == [3]
-    assert body["recommended_action"] == "start_new_document"
+    assert body["recommended_action"] == "review_page_indexes"
+
+
+def test_finalize_rejects_leading_sparse_index(client):
+    doc_id = _new_doc(client)
+    _add_text_page(client, doc_id, 2, "誤って3ページ目から登録")
+    r = client.post(f"/v1/documents/{doc_id}/finalize")
+    assert r.status_code == 409
+    assert "registered=[2]" in r.json()["detail"]
+
+
+def test_legacy_ready_sparse_document_cannot_start_navigation(client):
+    # Defense in depth for databases created before finalize enforced this
+    # invariant: new sessions fail early with 409 instead of current/explain
+    # returning a surprising page-0 404.
+    import app.main as main
+
+    doc_id = _new_doc(client)
+    _add_text_page(client, doc_id, 2, "旧DBの疎なページ")
+    conn = main.db.connect()
+    try:
+        conn.execute("UPDATE documents SET status = 'ready' WHERE id = ?", (doc_id,))
+        conn.commit()
+    finally:
+        conn.close()
+
+    exam = client.post("/v1/exam-sessions", json={"document_id": doc_id})
+    explain = client.post("/v1/explain-sessions", json={"document_id": doc_id})
+    assert exam.status_code == explain.status_code == 409
 
 
 def test_scan_status_missing_after_finalize_recommends_new_document(client):

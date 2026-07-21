@@ -139,6 +139,83 @@ def test_finalize_reading_is_idempotent(client):
     assert again["problem_count"] == first["problem_count"] == 2
 
 
+def test_concurrent_finalize_claims_paid_solve_once(client, monkeypatch):
+    """A double-fired finalize must not double-charge the configured solver."""
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    from app.solvers import SolveResult
+    from app.solvers.registry import register_solver
+
+    entered = threading.Event()
+    release = threading.Event()
+    count_lock = threading.Lock()
+
+    class BlockingSolver:
+        name = "blocking-test"
+        provider_version = "test-1"
+        offline = False
+        calls = 0
+
+        def solve(self, *, question, max_answer_len=64):
+            with count_lock:
+                type(self).calls += 1
+            entered.set()
+            assert release.wait(5), "test did not release the fake provider"
+            return SolveResult(
+                answer="A",
+                solution_steps=["s"],
+                rationale="r",
+                cautions="",
+                answer_confidence=0.9,
+                rationale_confidence=0.9,
+            )
+
+        def info(self):
+            return {
+                "name": self.name,
+                "provider_version": self.provider_version,
+                "offline": self.offline,
+            }
+
+    BlockingSolver.calls = 0
+    register_solver(BlockingSolver(), replace=True)
+    monkeypatch.setenv("ROKID_SOLVER", "blocking-test")
+    doc_id = _doc_with_text_pages(client, ["問1 りんごは何個か"])
+    sid = _new_doc_exam(client, doc_id)["session_id"]
+    url = f"/v1/exam-sessions/{sid}/finalize-reading"
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first_future = pool.submit(client.post, url)
+        assert entered.wait(3), "first request never reached the fake provider"
+        second_future = pool.submit(client.post, url)
+        try:
+            second = second_future.result(timeout=3)
+        finally:
+            release.set()
+        first = first_future.result(timeout=3)
+
+    assert first.status_code == second.status_code == 200
+    assert BlockingSolver.calls == 1
+    assert sorted([first.json()["server_solved"], second.json()["server_solved"]]) == [
+        0,
+        1,
+    ]
+
+    import app.main as main
+
+    conn = main.db.connect()
+    try:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM solutions WHERE question_id IN "
+            "(SELECT id FROM questions WHERE session_id = ?)",
+            (sid,),
+        ).fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM solution_claims").fetchone()[0] == 0
+    finally:
+        conn.close()
+
+
 def test_finalize_reading_requires_document_session(client):
     r = client.post("/v1/exam-sessions", json={"mode": "study"})
     sid = r.json()["session_id"]
@@ -663,7 +740,13 @@ def test_review_merged_stream_and_pagination(client):
     )
     r = client.get(f"/v1/exam-sessions/{sid}/review", params={"index": 0})
     assert r.status_code == 200
-    gv = r.json()["glasses_view"]
+    body = r.json()
+    gv = body["glasses_view"]
+    doc_id = client.get(f"/v1/exam-sessions/{sid}").json()["document_id"]
+    assert body["evidence_pages"] == [1]
+    assert body["evidence_refs"] == [
+        {"document_id": doc_id, "page_number": 1}
+    ]
     assert gv["kind"] == "review"
     assert "問1 1/2" in gv["lines"][0]
     assert gv["total_view_pages"] > 1  # long stream paginates
@@ -678,6 +761,8 @@ def test_review_merged_stream_and_pagination(client):
     joined = "\n".join(lines)
     for part in ("答え: 3個", "解法", "根拠", "注意"):
         assert part in joined
+    assert f"D{doc_id}:P01" in joined
+    assert "P00" not in joined
     # index/view_page clamp instead of erroring.
     over = client.get(
         f"/v1/exam-sessions/{sid}/review", params={"index": 99, "view_page": 99}

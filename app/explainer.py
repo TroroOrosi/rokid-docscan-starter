@@ -39,8 +39,11 @@ class ExplainResult:
     lines: list[str]
     # Long-form explanation stored server-side (history endpoint, not HUD).
     detail: str = ""
-    # Page indices used as context evidence.
+    # User-facing, 1-based page numbers used as context evidence.
     evidence_pages: list[int] = field(default_factory=list)
+    # Structured cross-document references ({document_id, page_number}), with
+    # page_number user-facing/1-based.
+    evidence_refs: list[dict] = field(default_factory=list)
     # 0..1 confidence (1.0 for placeholder, real LLM may vary).
     confidence: float = 1.0
     # Free-form provider diagnostics; never relied on by the server.

@@ -6,6 +6,14 @@ import json
 import os
 from pathlib import Path
 
+from dotenv import load_dotenv
+
+# `.env.example` is advertised as a copyable local configuration template.
+# Load it before reading any settings so plain `uvicorn app.main:app` behaves
+# the same as an explicitly exported environment. Existing process variables
+# keep precedence (`override=False` is python-dotenv's safe default).
+load_dotenv()
+
 # Project data root. Override with ROKID_DATA_DIR for tests / containers.
 DATA_DIR = Path(os.environ.get("ROKID_DATA_DIR", "data")).resolve()
 IMAGE_DIR = DATA_DIR / "images"

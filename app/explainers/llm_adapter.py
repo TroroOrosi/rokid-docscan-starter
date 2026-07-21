@@ -52,15 +52,20 @@ class LLMExplainer(Explainer):
         lines = [str(x) for x in data.get("lines", []) if str(x).strip()][:3]
         while len(lines) < 3:
             lines.append("")
-        evidence = [
-            p["page_index"]
+        evidence_refs = [
+            {
+                "document_id": p["document_id"],
+                "page_number": p["page_index"] + 1,
+            }
             for p in req.context_pages
-            if isinstance(p.get("page_index"), int)
+            if isinstance(p.get("document_id"), int)
+            and isinstance(p.get("page_index"), int)
         ]
         return ExplainResult(
             lines=lines,
             detail=str(data.get("detail", source[:400])),
-            evidence_pages=evidence,
+            evidence_pages=[r["page_number"] for r in evidence_refs],
+            evidence_refs=evidence_refs,
             confidence=clamp01(data.get("confidence"), 1.0),
             extras={"source": self.name, "provider": self.provider, "model": client.model},
         )
@@ -85,6 +90,8 @@ def _build_prompt(req: ExplainRequest) -> str:
         for page in req.context_pages:
             snippet = str(page.get("snippet", "")).strip()
             if snippet:
-                lines.append(f"- P{page.get('page_index')}: {snippet}")
+                page_number = page.get("page_index", 0) + 1
+                lines.append(
+                    f"- D{page.get('document_id')}:P{page_number}: {snippet}"
+                )
     return "\n".join(lines)
-

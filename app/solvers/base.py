@@ -47,8 +47,12 @@ class SolveResult:
     # 0..1 confidences, intentionally distinct so the HUD can show them apart.
     answer_confidence: float = 0.0
     rationale_confidence: float = 0.0
-    # Page indices used as evidence (filled when RAG / matching supply them).
+    # User-facing, 1-based page numbers used as evidence. Prefer evidence_refs
+    # whenever document identity matters.
     evidence_pages: list[int] = field(default_factory=list)
+    # Cross-document evidence identity. `page_number` is user-facing/1-based;
+    # `document_id` prevents two different P01 pages being conflated.
+    evidence_refs: list[dict] = field(default_factory=list)
     # Long internal reasoning kept off the HUD (shown only in detail/logs).
     raw_reasoning: str = ""
     # Free-form provider diagnostics; never relied on by the server.

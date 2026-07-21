@@ -39,7 +39,7 @@ Rokid Glasses で紙資料を「文書」として登録し、**目の前の資�
 - **CXR-L プラグイン（スマホ側）とグラス本体 AI の接続**は
   [`docs/cxr-l-integration.md`](docs/cxr-l-integration.md)、実機差し込み全般は
   [`docs/implementation-notes.md`](docs/implementation-notes.md) を参照。
-- 現在のバージョン: **APP 0.10.0 / API 1.10.0**。
+- 現在のバージョン: **APP 0.11.0 / API 1.11.0**。
 
 ---
 
@@ -72,7 +72,7 @@ rokid-docscan-starter/
 │   ├── summarize.py   # 要約シム（analyzer に委譲）
 │   ├── explainer.py   # Explainer ポート（ExplainRequest / ExplainResult / ABC）
 │   ├── llm.py         # ★実 AI ブリッジ（openai/gemini/claude、遅延import・注入可）
-│   ├── version.py     # 各契約バージョン（app 0.10.0 / api 1.10.0 ほか）
+│   ├── version.py     # 各契約バージョン（app 0.11.0 / api 1.11.0 ほか）
 │   ├── config.py      # 保存先・フィーチャーフラグ（ROKID_* / ANTHROPIC_API_KEY / ROKID_TRANSCRIBER）
 │   ├── transcribe.py  # ★リスニング録音の書き起こし（openai/gemini・未設定時は与値）
 │   ├── db.py          # sqlite3（documents/pages/exam/explain テーブル）
@@ -120,6 +120,7 @@ pip install -r requirements.txt
 ## 起動
 
 ```bash
+cp .env.example .env  # 必要な設定だけ編集（任意）
 uvicorn app.main:app --reload --port 8000
 ```
 
@@ -149,8 +150,10 @@ ROKID_DATA_DIR=data python scripts/evaluate.py --db data/docscan.db --out report
 python scripts/evaluate.py --synthetic 5
 ```
 
-`self_match_accuracy` と `suggested_thresholds` を見て `app/matching.py` の
-しきい値（D5）を調整します。
+保存画像からクロップ・微回転・JPEG圧縮の非同一クエリを生成して照合するため、
+`variant_match_accuracy` と `hamming_distribution`、`suggested_thresholds` を見て
+`app/matching.py` のしきい値（D5）を調整します。これはオフラインの頑健性推定であり、
+最終的なしきい値は可能であれば実機で独立に再読取した画像でも検証してください。
 
 ---
 
@@ -384,7 +387,7 @@ python scripts/eval_exam.py --synthetic 5 --out /tmp/exam_eval.json
 設計は [docs/exam-solver-architecture.md](docs/exam-solver-architecture.md)、
 グラス表示・操作の規約は [docs/glasses-ux-contract.md](docs/glasses-ux-contract.md) を参照。
 
-### 3 フェーズ実践フロー（主経路 / API 1.10.0・LED 点灯最小）
+### 3 フェーズ実践フロー（主経路 / API 1.11.0・LED 点灯最小）
 
 **読取 → 一括解答 → 閲覧** の 3 フェーズが主経路です。カメラ（＝プライバシー LED 点灯）は
 **フェーズ 1 の読取中だけ**。読取完了をグラスのジェスチャで宣言した瞬間からカメラは閉じ、
@@ -554,6 +557,11 @@ uvicorn app.main:app --port 8000
 docker compose up --build
 # http://127.0.0.1:8000/health
 ```
+
+Compose の既定ポートは安全のためホストの `127.0.0.1` だけに公開されます。
+LAN・インターネットへ公開する場合はポート割当を明示的に変更し、必ず
+`ROKID_API_KEY` と TLS 対応のリバースプロキシを設定してください。Compose は
+`.env` の全 `ROKID_*`／プロバイダ変数をコンテナへ渡します。
 
 ローカル Python 実行を優先してください。Docker は任意です。
 

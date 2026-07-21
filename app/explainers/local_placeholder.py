@@ -25,16 +25,21 @@ class LocalPlaceholderExplainer(Explainer):
         detail = source[:400] if source else "(no text)"
 
         # Build evidence from context_pages supplied by retrieval.py
-        evidence = [
-            p["page_index"]
+        evidence_refs = [
+            {
+                "document_id": p["document_id"],
+                "page_number": p["page_index"] + 1,
+            }
             for p in req.context_pages
-            if isinstance(p.get("page_index"), int)
+            if isinstance(p.get("document_id"), int)
+            and isinstance(p.get("page_index"), int)
         ]
 
         return ExplainResult(
             lines=lines,
             detail=detail,
-            evidence_pages=evidence,
+            evidence_pages=[r["page_number"] for r in evidence_refs],
+            evidence_refs=evidence_refs,
             confidence=1.0,
             extras={"source": "local_placeholder"},
         )

@@ -60,7 +60,8 @@ def test_returns_most_similar_page(conn):
     assert r["hits"], "expected at least one hit"
     # The photosynthesis page (index 0) should rank first.
     assert r["hits"][0]["page_index"] == 0
-    assert 0 in r["evidence_pages"]
+    assert 1 in r["evidence_pages"]
+    assert r["evidence_refs"][0] == {"document_id": 1, "page_number": 1}
     assert "光合成" in r["context"]
     assert r["retriever"] == "lexical"
 
@@ -225,6 +226,6 @@ def test_boilerplate_header_does_not_recall_unrelated_vision_page(conn):
 
     r = retrieve_context(conn, "光合成の図から読み取れることは何か")
     assert r["hits"] and r["hits"][0]["page_index"] == 0
-    assert 1 not in r["evidence_pages"], (
+    assert 2 not in r["evidence_pages"], (
         "an unrelated vision page must not be recalled via header overlap alone"
     )

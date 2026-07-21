@@ -103,6 +103,19 @@ def test_long_rationale_paginates_by_sentence():
     assert last["nav"]["next"] is None
 
 
+def test_evidence_labels_are_one_based_and_document_qualified():
+    sol = _sol(
+        evidence_pages=[1, 3],
+        evidence_refs=[
+            {"document_id": 7, "page_number": 1},
+            {"document_id": 9, "page_number": 3},
+        ],
+    )
+    joined = "\n".join(build_glasses_view(sol, stage="rationale")["lines"])
+    assert "D7:P01,D9:P03" in joined
+    assert "P00" not in joined
+
+
 def test_explain_detail_paginates_by_sentence():
     """explain-mode long detail paginates into >1 view page (max 3 lines each)."""
     detail = "".join(f"詳細文{i}。" for i in range(8))

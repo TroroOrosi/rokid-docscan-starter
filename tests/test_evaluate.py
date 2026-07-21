@@ -53,48 +53,64 @@ def test_suggest_thresholds_from_spread():
     s = _suggest_thresholds([0, 0, 1, 2])
     assert s["hamming_strong"] >= 2
     assert s["hamming_weak"] > s["hamming_strong"]
-    assert "based_on_p95_self_hamming" in s
+    assert "based_on_p95_variant_hamming" in s
 
 
 # --- synthetic source -----------------------------------------------------------
 
-def test_from_synthetic_self_matches_perfectly():
+def test_from_synthetic_matches_perturbed_queries():
     report = from_synthetic(5)
     assert report["page_count"] == 5
-    assert report["self_match_accuracy"] == 1.0
+    assert report["query_count"] == 15
+    assert report["variant_match_accuracy"] == 1.0
+    assert report["hamming_distribution"]["max"] > 0
+    assert any(r["expected_hamming"] > 0 for r in report["results"])
     assert all(r["correct"] for r in report["results"])
-    assert report["source"] == {"mode": "synthetic", "n": 5}
+    assert report["source"] == {
+        "mode": "synthetic",
+        "n": 5,
+        "query_kind": "derived_image_variants",
+    }
     assert "suggested_thresholds" in report
 
 
 # --- db source (the on-device tuning path) ---------------------------------------
 
-def test_from_db_self_matches_stored_pages(tmp_path):
+def test_from_db_matches_variants_of_stored_page_images(tmp_path):
     db_path = tmp_path / "eval.db"
     conn = sqlite3.connect(db_path)
     conn.execute(
         "CREATE TABLE pages (id INTEGER PRIMARY KEY, document_id INTEGER, "
-        "page_index INTEGER, phash TEXT)"
+        "page_index INTEGER, phash TEXT, image_path TEXT)"
     )
     for i, seed in enumerate((11, 42)):
+        path = tmp_path / f"page-{i}.png"
+        image = make_image(seed=seed)
+        image.save(path)
         conn.execute(
-            "INSERT INTO pages (id, document_id, page_index, phash) VALUES (?, 1, ?, ?)",
-            (i + 1, i, phash_hex(make_image(seed=seed))),
+            "INSERT INTO pages (id, document_id, page_index, phash, image_path) "
+            "VALUES (?, 1, ?, ?, ?)",
+            (i + 1, i, phash_hex(image), str(path)),
         )
     # 撮影しない text-only page: no visual signal — skipped, not evaluated.
     conn.execute(
-        "INSERT INTO pages (id, document_id, page_index, phash) VALUES (3, 1, 2, '')"
+        "INSERT INTO pages (id, document_id, page_index, phash, image_path) "
+        "VALUES (3, 1, 2, '', NULL)"
     )
     conn.commit()
     conn.close()
 
     report = from_db(str(db_path))
     assert report["page_count"] == 2
-    assert report["self_match_accuracy"] == 1.0
+    assert report["query_count"] == 6
+    assert report["variant_match_accuracy"] == 1.0
+    assert report["hamming_distribution"]["max"] > 0
     assert report["source"] == {
         "mode": "db",
         "path": str(db_path),
+        "query_kind": "derived_image_variants",
         "skipped_text_only_pages": 1,
+        "skipped_missing_images": 0,
     }
 
 

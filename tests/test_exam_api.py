@@ -139,6 +139,10 @@ def test_evidence_is_populated_from_prior_materials(client):
     qid = _add_question(client, sid, ocr_text="問1 光合成について説明せよ").json()["question_id"]
     solved = client.post(f"/v1/exam-sessions/{sid}/questions/{qid}/solve").json()
     assert solved["evidence"], "expected retrieval to surface the photosynthesis page"
+    assert solved["evidence_pages"] == [1]
+    assert solved["evidence_refs"] == [
+        {"document_id": doc_id, "page_number": 1}
+    ]
 
 
 def test_reasoning_endpoint_returns_log(client):
