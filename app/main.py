@@ -411,10 +411,37 @@ async def add_page(
                     """INSERT INTO pages
                        (document_id, page_index, image_path, phash, ocr_text,
                         vision_text, ocr_md5)
-                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                    (document_id, page_index, image_path, ph, ocr_text,
-                     vision_text, omd5),
+                       SELECT ?, ?, ?, ?, ?, ?, ?
+                       WHERE EXISTS (
+                           SELECT 1 FROM documents
+                           WHERE id = ? AND status = 'open'
+                       )""",
+                    (
+                        document_id,
+                        page_index,
+                        image_path,
+                        ph,
+                        ocr_text,
+                        vision_text,
+                        omd5,
+                        document_id,
+                    ),
                 )
+                if cur.rowcount != 1:
+                    # The document may have finalized after the optimistic
+                    # status read above while this INSERT waited for SQLite's
+                    # writer lock. Re-check in the write statement itself so a
+                    # new page can never land in a ready document.
+                    current_doc = _doc_or_404(conn, document_id)
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            f"document {document_id} is finalized "
+                            f"(status={current_doc['status']}); new pages cannot "
+                            "be added — re-send an existing page_index to replace "
+                            "it, or create a new document"
+                        ),
+                    )
                 conn.commit()
                 image_persisted = pending_image_path is not None
             except db.sqlite3.IntegrityError:
@@ -630,7 +657,7 @@ def finalize_document(document_id: int) -> dict:
         _doc_or_404(conn, document_id)
         pages = conn.execute(
             "SELECT id, page_index, image_path, ocr_text, vision_text, summary FROM pages "
-            "WHERE document_id = ?",
+            "WHERE document_id = ? ORDER BY page_index",
             (document_id,),
         ).fetchall()
         if not pages:
@@ -652,6 +679,35 @@ def finalize_document(document_id: int) -> dict:
             conn.execute(
                 "UPDATE pages SET summary = ? WHERE id = ?",
                 (result.summary, p["id"]),
+            )
+        # The analyzer can be slow or remote. A page may have been added or
+        # replaced after the first density check but before the first summary
+        # write. Hold a write transaction for the final check/update, then
+        # verify both the navigation invariant and the exact analyzed snapshot.
+        # A queued new-page INSERT also re-checks document.status atomically in
+        # add_page, so it cannot slip in after this transaction commits ready.
+        if not conn.in_transaction:
+            conn.execute("BEGIN IMMEDIATE")
+        _require_dense_page_indexes(conn, document_id)
+        current_pages = conn.execute(
+            "SELECT id, page_index, image_path, ocr_text, vision_text FROM pages "
+            "WHERE document_id = ? ORDER BY page_index",
+            (document_id,),
+        ).fetchall()
+        snapshot_fields = ("id", "page_index", "image_path", "ocr_text", "vision_text")
+        analyzed_snapshot = [
+            tuple(page[field] for field in snapshot_fields) for page in pages
+        ]
+        current_snapshot = [
+            tuple(page[field] for field in snapshot_fields) for page in current_pages
+        ]
+        if current_snapshot != analyzed_snapshot:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "document pages changed during finalization; retry finalize "
+                    "after reviewing /scan-status"
+                ),
             )
         conn.execute(
             "UPDATE documents SET status = 'ready' WHERE id = ?", (document_id,)
@@ -1028,6 +1084,52 @@ def _solution_from_row(row, question_row=None) -> "object":
     )
 
 
+def _prepare_result_evidence(
+    result,
+    *,
+    fallback_pages: list[int],
+    fallback_refs: list[dict],
+) -> tuple[list[int], list[dict]]:
+    """Keep page-only legacy evidence separate from structured references.
+
+    Solver API <1.2 and Explainer API <1.1 could select evidence only through
+    the legacy 0-based evidence_pages list. Replacing that selection with every
+    retriever ref changes its meaning; persisting [] as evidence_refs_json also
+    makes later readers mistake P00 for a user-facing label. Preserve the
+    selected list, mark its display base, and store SQL NULL for refs so cached
+    readers can recover the same semantics. Only use retrieval fallback when
+    the provider supplied neither evidence field.
+    """
+    if result.evidence_refs:
+        evidence_pages = list(result.evidence_pages or [])
+        evidence_refs = list(result.evidence_refs)
+    elif result.evidence_pages:
+        evidence_pages = list(result.evidence_pages)
+        evidence_refs = []
+        if not isinstance(result.extras, dict):
+            result.extras = {}
+        result.extras["_evidence_pages_base"] = 0
+    else:
+        evidence_pages = list(fallback_pages)
+        evidence_refs = list(fallback_refs)
+
+    result.evidence_pages = evidence_pages
+    result.evidence_refs = evidence_refs
+    return evidence_pages, evidence_refs
+
+
+def _evidence_refs_storage_value(result) -> str | None:
+    """Serialize refs while retaining the page-only legacy base marker."""
+    extras = result.extras if isinstance(result.extras, dict) else {}
+    if (
+        result.evidence_pages
+        and not result.evidence_refs
+        and extras.get("_evidence_pages_base") == 0
+    ):
+        return None
+    return json.dumps(result.evidence_refs, ensure_ascii=False)
+
+
 @app.post("/v1/exam-sessions", status_code=201)
 def create_exam_session(payload: CreateExamSession) -> dict:
     if payload.mode not in {"study", "mock", "real"}:
@@ -1215,19 +1317,11 @@ def solve_question(session_id: int, question_id: int) -> dict:
         )
         result, solver = solve_with_fallback(question=question)
         served_by = result.extras.get("served_by", solver.name)
-        # Keep the solver's own grounding together. A pre-1.2 solver may return
-        # only evidence_pages (no structured refs); since glasses_view prefers
-        # refs, mixing in the retriever's refs would display unrelated pages
-        # instead of the solver-selected ones. Fall back to the retriever only
-        # when the solver supplied neither field.
-        if result.evidence_refs or result.evidence_pages:
-            evidence_refs = result.evidence_refs
-            evidence_pages = result.evidence_pages
-        else:
-            evidence_refs = retrieved["evidence_refs"]
-            evidence_pages = retrieved["evidence_pages"]
-        result.evidence_pages = evidence_pages
-        result.evidence_refs = evidence_refs
+        evidence_pages, evidence_refs = _prepare_result_evidence(
+            result,
+            fallback_pages=retrieved["evidence_pages"],
+            fallback_refs=retrieved["evidence_refs"],
+        )
 
         conn.execute(
             """INSERT INTO solutions
@@ -1245,7 +1339,7 @@ def solve_question(session_id: int, question_id: int) -> dict:
                 result.answer_confidence,
                 result.rationale_confidence,
                 json.dumps(evidence_pages),
-                json.dumps(evidence_refs),
+                _evidence_refs_storage_value(result),
                 result.raw_reasoning,
                 served_by,
             ),
@@ -1606,19 +1700,11 @@ def exam_solve_current(session_id: int) -> dict:
         )
         result, solver = solve_with_fallback(question=question)
         served_by = result.extras.get("served_by", solver.name)
-        # Keep the solver's own grounding together. A pre-1.2 solver may return
-        # only evidence_pages (no structured refs); since glasses_view prefers
-        # refs, mixing in the retriever's refs would display unrelated pages
-        # instead of the solver-selected ones. Fall back to the retriever only
-        # when the solver supplied neither field.
-        if result.evidence_refs or result.evidence_pages:
-            evidence_refs = result.evidence_refs
-            evidence_pages = result.evidence_pages
-        else:
-            evidence_refs = retrieved["evidence_refs"]
-            evidence_pages = retrieved["evidence_pages"]
-        result.evidence_pages = evidence_pages
-        result.evidence_refs = evidence_refs
+        evidence_pages, evidence_refs = _prepare_result_evidence(
+            result,
+            fallback_pages=retrieved["evidence_pages"],
+            fallback_refs=retrieved["evidence_refs"],
+        )
 
         conn.execute(
             """INSERT INTO solutions
@@ -1636,7 +1722,7 @@ def exam_solve_current(session_id: int) -> dict:
                 result.answer_confidence,
                 result.rationale_confidence,
                 json.dumps(evidence_pages),
-                json.dumps(evidence_refs),
+                _evidence_refs_storage_value(result),
                 result.raw_reasoning,
                 served_by,
             ),
@@ -2088,17 +2174,11 @@ def exam_finalize_reading(session_id: int) -> dict:
                         # placeholder. Release the claim for a future retry,
                         # but never mark placeholder output as solved.
                         continue
-                    # Keep the solver's own grounding together (see solve_question):
-                    # a pages-only pre-1.2 result must not have its refs filled from
-                    # the problem span, or glasses_view would show the whole span
-                    # instead of the solver-selected pages. Fall back only when the
-                    # solver supplied neither field.
-                    if result.evidence_refs or result.evidence_pages:
-                        evidence_refs = result.evidence_refs
-                        evidence_pages = result.evidence_pages
-                    else:
-                        evidence_refs = _question_evidence_refs(conn, row["id"])
-                        evidence_pages = _question_evidence_pages(conn, row["id"])
+                    evidence_pages, evidence_refs = _prepare_result_evidence(
+                        result,
+                        fallback_pages=_question_evidence_pages(conn, row["id"]),
+                        fallback_refs=_question_evidence_refs(conn, row["id"]),
+                    )
                     # Onboard ingest may answer while the paid call is in
                     # flight. The conditional insert preserves that earlier
                     # answer; the DB claim above already prevented a second
@@ -2122,7 +2202,7 @@ def exam_finalize_reading(session_id: int) -> dict:
                             result.answer_confidence,
                             result.rationale_confidence,
                             json.dumps(evidence_pages),
-                            json.dumps(evidence_refs),
+                            _evidence_refs_storage_value(result),
                             result.raw_reasoning,
                             served_by,
                             row["id"],
@@ -2840,7 +2920,7 @@ def _persist_explain_visit(
             json.dumps(result.lines, ensure_ascii=False),
             result.detail,
             json.dumps(result.evidence_pages),
-            json.dumps(result.evidence_refs, ensure_ascii=False),
+            _evidence_refs_storage_value(result),
             json.dumps(retrieved_hits, ensure_ascii=False),
             json.dumps(explainer_info, ensure_ascii=False),
             json.dumps(result.extras, ensure_ascii=False, default=str),
@@ -2972,10 +3052,11 @@ def explain_page(
                         name=f"explain-claim-{session_id}-{page_index}",
                     ):
                         result = explainer.explain(req)
-                    if not result.evidence_refs:
-                        result.evidence_refs = retrieved["evidence_refs"]
-                    if not result.evidence_pages:
-                        result.evidence_pages = retrieved["evidence_pages"]
+                    _prepare_result_evidence(
+                        result,
+                        fallback_pages=retrieved["evidence_pages"],
+                        fallback_refs=retrieved["evidence_refs"],
+                    )
                     explainer_info = explainer.info()
                     inserted, won_row = _persist_explain_visit(
                         conn,
