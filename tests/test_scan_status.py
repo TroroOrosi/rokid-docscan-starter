@@ -234,7 +234,7 @@ def test_finalize_rechecks_pages_after_slow_analysis(client, monkeypatch):
     assert not worker.is_alive()
     response = outcome["response"]
     assert response.status_code == 409
-    assert "changed during finalization" in response.json()["detail"]
+    assert "contiguous from 0" in response.json()["detail"]
 
     body = _status(client, doc_id).json()
     assert body["status"] == "open"
