@@ -146,10 +146,10 @@ def test_evidence_is_populated_from_prior_materials(client):
 
 
 def test_solver_selected_pages_not_overridden_by_retriever(client, monkeypatch):
-    # A pre-1.2 solver returns only evidence_pages (no structured refs). The
-    # retriever would surface an (unrelated) ref, but glasses_view prefers refs
-    # over pages — so filling refs from the retriever would display the wrong
-    # page. The solver's own selection must survive untouched.
+    # A pre-1.2 solver returns only 0-based evidence_pages (no structured refs).
+    # The retriever would surface an unrelated ref, but glasses_view prefers
+    # refs over pages. Preserve the solver selection and its legacy display
+    # base: page index 0 must render P01, never P00.
     import app.main as main
     from app.solvers import SolveResult
     from app.solvers.registry import register_solver
@@ -174,25 +174,53 @@ def test_solver_selected_pages_not_overridden_by_retriever(client, monkeypatch):
 
         def solve(self, *, question, max_answer_len=64):
             return SolveResult(
-                answer="A", solution_steps=["s"], rationale="r", cautions="c",
-                answer_confidence=0.9, rationale_confidence=0.9,
-                evidence_pages=[7],
+                answer="A",
+                solution_steps=["s"],
+                rationale="r",
+                cautions="c",
+                answer_confidence=0.9,
+                rationale_confidence=0.9,
+                evidence_pages=[0],
             )
 
         def info(self):
-            return {"name": self.name, "provider_version": self.provider_version,
-                    "offline": self.offline}
+            return {
+                "name": self.name,
+                "provider_version": self.provider_version,
+                "offline": self.offline,
+            }
 
     register_solver(PagesOnlySolver(), replace=True)
     monkeypatch.setenv("ROKID_SOLVER", "pages-only-test")
 
     sid = _new_session(client)
-    qid = _add_question(client, sid, ocr_text="問1 光合成について説明せよ").json()["question_id"]
-    solved = client.post(f"/v1/exam-sessions/{sid}/questions/{qid}/solve").json()
+    qid = _add_question(
+        client, sid, ocr_text="問1 光合成について説明せよ"
+    ).json()["question_id"]
+    solved = client.post(
+        f"/v1/exam-sessions/{sid}/questions/{qid}/solve"
+    ).json()
     assert solved["served_by"] == "pages-only-test"
-    assert solved["evidence_pages"] == [7]   # solver selection preserved
-    assert solved["evidence_refs"] == []     # retriever refs did NOT leak in
+    assert solved["evidence_pages"] == [0]
+    assert solved["evidence_refs"] == []
 
+    rationale = client.get(
+        f"/v1/exam-sessions/{sid}/questions/{qid}/view",
+        params={"stage": "rationale"},
+    ).json()["glasses_view"]
+    rendered = "\n".join(rationale["lines"])
+    assert "P01" in rendered
+    assert "P00" not in rendered
+
+    conn = main.db.connect()
+    try:
+        stored = conn.execute(
+            "SELECT evidence_refs_json FROM solutions WHERE question_id = ?",
+            (qid,),
+        ).fetchone()
+        assert stored["evidence_refs_json"] is None
+    finally:
+        conn.close()
 
 def test_reasoning_endpoint_returns_log(client):
     sid = _new_session(client)
