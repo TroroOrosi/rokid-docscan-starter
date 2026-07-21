@@ -120,9 +120,13 @@ pip install -r requirements.txt
 ## 起動
 
 ```bash
-cp .env.example .env  # 必要な設定だけ編集（任意）
-uvicorn app.main:app --reload --port 8000
+cp .env.example .env  # .env を使う場合。必要な設定だけ編集
+uvicorn app.main:app --env-file .env --reload --port 8000
 ```
+
+`.env` を使わない場合は `cp` と `--env-file .env` を省略してください。
+設定ファイルは起動コマンドが明示的に読み込むため、pytestやライブラリから
+`app.config` をimportしてもローカルの認証情報は混入しません。
 
 - データ保存先を変えたい場合は環境変数 `ROKID_DATA_DIR` を設定:
   `ROKID_DATA_DIR=/tmp/rokid uvicorn app.main:app --port 8000`
