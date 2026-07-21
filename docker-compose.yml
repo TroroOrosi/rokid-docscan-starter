@@ -11,28 +11,30 @@ services:
       # those values into the container. Map every supported setting so the
       # documented `.env.example` workflow actually configures the service.
       #
-      # Every interpolation is single-quoted so the substituted value is always
-      # a YAML scalar string. A JSON-valued override such as
-      # ROKID_KEYMAP='{"single_tap": 23}' must survive as a string; single
-      # quotes wrap its embedded double quotes cleanly (double-quoting would
-      # collide with them), keeping `docker compose config/up` happy.
-      ROKID_ANALYZER: '${ROKID_ANALYZER:-local}'
-      ROKID_SOLVER: '${ROKID_SOLVER:-local}'
-      ROKID_EXPLAINER: '${ROKID_EXPLAINER:-local}'
-      ROKID_EXTRACTOR: '${ROKID_EXTRACTOR:-local}'
-      ROKID_SOLVER_TIERS: '${ROKID_SOLVER_TIERS:-}'
-      OPENAI_API_KEY: '${OPENAI_API_KEY:-}'
-      GOOGLE_API_KEY: '${GOOGLE_API_KEY:-}'
-      GEMINI_API_KEY: '${GEMINI_API_KEY:-}'
-      ANTHROPIC_API_KEY: '${ANTHROPIC_API_KEY:-}'
-      ROKID_LLM_MODEL: '${ROKID_LLM_MODEL:-}'
-      ROKID_LLM_MAX_TOKENS: '${ROKID_LLM_MAX_TOKENS:-1024}'
-      ROKID_TRANSCRIBER: '${ROKID_TRANSCRIBER:-}'
-      ROKID_TRANSCRIBE_MODEL: '${ROKID_TRANSCRIBE_MODEL:-gpt-4o-transcribe}'
-      ROKID_ALLOW_REAL_EXAM_SOLVE: '${ROKID_ALLOW_REAL_EXAM_SOLVE:-0}'
-      ROKID_ENABLE_EMBEDDING: '${ROKID_ENABLE_EMBEDDING:-0}'
-      ROKID_KEYMAP: '${ROKID_KEYMAP:-}'
-      ROKID_API_KEY: '${ROKID_API_KEY:-}'
+      # Every interpolation is double-quoted. Compose applies ${VAR} substitution
+      # to UNQUOTED and DOUBLE-QUOTED values only; a single-quoted value is taken
+      # literally, so 'ROKID_API_KEY: ${ROKID_API_KEY:-}' single-quoted would put
+      # the literal string "${ROKID_API_KEY:-}" into the container and the auth
+      # middleware would demand that literal bearer token. Double quotes keep a
+      # JSON-valued ROKID_KEYMAP a scalar too (interpolation is value-level, so
+      # its embedded double quotes do not need escaping).
+      ROKID_ANALYZER: "${ROKID_ANALYZER:-local}"
+      ROKID_SOLVER: "${ROKID_SOLVER:-local}"
+      ROKID_EXPLAINER: "${ROKID_EXPLAINER:-local}"
+      ROKID_EXTRACTOR: "${ROKID_EXTRACTOR:-local}"
+      ROKID_SOLVER_TIERS: "${ROKID_SOLVER_TIERS:-}"
+      OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
+      GOOGLE_API_KEY: "${GOOGLE_API_KEY:-}"
+      GEMINI_API_KEY: "${GEMINI_API_KEY:-}"
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
+      ROKID_LLM_MODEL: "${ROKID_LLM_MODEL:-}"
+      ROKID_LLM_MAX_TOKENS: "${ROKID_LLM_MAX_TOKENS:-1024}"
+      ROKID_TRANSCRIBER: "${ROKID_TRANSCRIBER:-}"
+      ROKID_TRANSCRIBE_MODEL: "${ROKID_TRANSCRIBE_MODEL:-gpt-4o-transcribe}"
+      ROKID_ALLOW_REAL_EXAM_SOLVE: "${ROKID_ALLOW_REAL_EXAM_SOLVE:-0}"
+      ROKID_ENABLE_EMBEDDING: "${ROKID_ENABLE_EMBEDDING:-0}"
+      ROKID_KEYMAP: "${ROKID_KEYMAP:-}"
+      ROKID_API_KEY: "${ROKID_API_KEY:-}"
     volumes:
       - docscan-data:/data
 

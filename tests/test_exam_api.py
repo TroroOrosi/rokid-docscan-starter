@@ -145,6 +145,55 @@ def test_evidence_is_populated_from_prior_materials(client):
     ]
 
 
+def test_solver_selected_pages_not_overridden_by_retriever(client, monkeypatch):
+    # A pre-1.2 solver returns only evidence_pages (no structured refs). The
+    # retriever would surface an (unrelated) ref, but glasses_view prefers refs
+    # over pages — so filling refs from the retriever would display the wrong
+    # page. The solver's own selection must survive untouched.
+    import app.main as main
+    from app.solvers import SolveResult
+    from app.solvers.registry import register_solver
+
+    conn = main.db.connect()
+    try:
+        cur = conn.execute("INSERT INTO documents (title) VALUES ('study')")
+        doc_id = cur.lastrowid
+        conn.execute(
+            "INSERT INTO pages (document_id, page_index, image_path, phash, ocr_text, summary)"
+            " VALUES (?, 0, 'p.png', ?, ?, ?)",
+            (doc_id, "0" * 16, "光合成は植物が光で養分を作る反応", "光合成"),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    class PagesOnlySolver:
+        name = "pages-only-test"
+        provider_version = "t-1"
+        offline = True
+
+        def solve(self, *, question, max_answer_len=64):
+            return SolveResult(
+                answer="A", solution_steps=["s"], rationale="r", cautions="c",
+                answer_confidence=0.9, rationale_confidence=0.9,
+                evidence_pages=[7],
+            )
+
+        def info(self):
+            return {"name": self.name, "provider_version": self.provider_version,
+                    "offline": self.offline}
+
+    register_solver(PagesOnlySolver(), replace=True)
+    monkeypatch.setenv("ROKID_SOLVER", "pages-only-test")
+
+    sid = _new_session(client)
+    qid = _add_question(client, sid, ocr_text="問1 光合成について説明せよ").json()["question_id"]
+    solved = client.post(f"/v1/exam-sessions/{sid}/questions/{qid}/solve").json()
+    assert solved["served_by"] == "pages-only-test"
+    assert solved["evidence_pages"] == [7]   # solver selection preserved
+    assert solved["evidence_refs"] == []     # retriever refs did NOT leak in
+
+
 def test_reasoning_endpoint_returns_log(client):
     sid = _new_session(client)
     qid = _add_question(client, sid).json()["question_id"]

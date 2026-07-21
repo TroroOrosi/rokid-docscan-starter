@@ -1173,8 +1173,17 @@ def solve_question(session_id: int, question_id: int) -> dict:
         )
         result, solver = solve_with_fallback(question=question)
         served_by = result.extras.get("served_by", solver.name)
-        evidence_refs = result.evidence_refs or retrieved["evidence_refs"]
-        evidence_pages = result.evidence_pages or retrieved["evidence_pages"]
+        # Keep the solver's own grounding together. A pre-1.2 solver may return
+        # only evidence_pages (no structured refs); since glasses_view prefers
+        # refs, mixing in the retriever's refs would display unrelated pages
+        # instead of the solver-selected ones. Fall back to the retriever only
+        # when the solver supplied neither field.
+        if result.evidence_refs or result.evidence_pages:
+            evidence_refs = result.evidence_refs
+            evidence_pages = result.evidence_pages
+        else:
+            evidence_refs = retrieved["evidence_refs"]
+            evidence_pages = retrieved["evidence_pages"]
         result.evidence_pages = evidence_pages
         result.evidence_refs = evidence_refs
 
@@ -1555,8 +1564,17 @@ def exam_solve_current(session_id: int) -> dict:
         )
         result, solver = solve_with_fallback(question=question)
         served_by = result.extras.get("served_by", solver.name)
-        evidence_refs = result.evidence_refs or retrieved["evidence_refs"]
-        evidence_pages = result.evidence_pages or retrieved["evidence_pages"]
+        # Keep the solver's own grounding together. A pre-1.2 solver may return
+        # only evidence_pages (no structured refs); since glasses_view prefers
+        # refs, mixing in the retriever's refs would display unrelated pages
+        # instead of the solver-selected ones. Fall back to the retriever only
+        # when the solver supplied neither field.
+        if result.evidence_refs or result.evidence_pages:
+            evidence_refs = result.evidence_refs
+            evidence_pages = result.evidence_pages
+        else:
+            evidence_refs = retrieved["evidence_refs"]
+            evidence_pages = retrieved["evidence_pages"]
         result.evidence_pages = evidence_pages
         result.evidence_refs = evidence_refs
 
@@ -1971,14 +1989,17 @@ def exam_finalize_reading(session_id: int) -> dict:
                         # placeholder. Release the claim for a future retry,
                         # but never mark placeholder output as solved.
                         continue
-                    evidence_refs = (
-                        result.evidence_refs
-                        or _question_evidence_refs(conn, row["id"])
-                    )
-                    evidence_pages = (
-                        result.evidence_pages
-                        or _question_evidence_pages(conn, row["id"])
-                    )
+                    # Keep the solver's own grounding together (see solve_question):
+                    # a pages-only pre-1.2 result must not have its refs filled from
+                    # the problem span, or glasses_view would show the whole span
+                    # instead of the solver-selected pages. Fall back only when the
+                    # solver supplied neither field.
+                    if result.evidence_refs or result.evidence_pages:
+                        evidence_refs = result.evidence_refs
+                        evidence_pages = result.evidence_pages
+                    else:
+                        evidence_refs = _question_evidence_refs(conn, row["id"])
+                        evidence_pages = _question_evidence_pages(conn, row["id"])
                     # Onboard ingest may answer while the paid call is in
                     # flight. The conditional insert preserves that earlier
                     # answer; the DB claim above already prevented a second
