@@ -246,6 +246,58 @@ class TestExplainPage:
         assert visit["result_extras"] == {"call": 1}
         assert visit["explainer"]["name"] == "counting-test"
 
+    def test_page_only_legacy_explainer_keeps_selection_and_display_base(
+        self, client, doc_1page, monkeypatch
+    ):
+        """A pre-1.1 explainer's selected page index must not be replaced by
+        every retriever ref, and page index 0 must render as P01."""
+        import app.main as main
+        from app.explainer import ExplainResult, Explainer
+        from app.explainers import register_explainer
+
+        class PagesOnlyExplainer(Explainer):
+            name = "pages-only-explain-test"
+            provider_version = "test-1"
+            offline = True
+
+            def explain(self, req):
+                return ExplainResult(
+                    lines=["legacy", "", ""],
+                    detail="legacy detail",
+                    evidence_pages=[0],
+                    confidence=0.8,
+                )
+
+        register_explainer(PagesOnlyExplainer(), replace=True)
+        monkeypatch.setenv("ROKID_EXPLAINER", "pages-only-explain-test")
+        sid = _create_session(client, doc_1page)
+
+        body = client.get(
+            f"/v1/explain-sessions/{sid}/explain",
+            params={"stage": "evidence"},
+        ).json()
+        assert body["evidence_pages"] == [0]
+        assert body["evidence_refs"] == []
+        rendered = "\n".join(body["glasses_view"]["lines"])
+        assert "P01" in rendered
+        assert "P00" not in rendered
+
+        history = client.get(f"/v1/explain-sessions/{sid}/history").json()
+        visit = history["explained_views"][0]
+        assert visit["evidence_pages"] == [0]
+        assert visit["evidence_refs"] == []
+
+        conn = main.db.connect()
+        try:
+            stored = conn.execute(
+                "SELECT evidence_refs_json FROM explain_views "
+                "WHERE session_id = ?",
+                (sid,),
+            ).fetchone()
+            assert stored["evidence_refs_json"] is None
+        finally:
+            conn.close()
+
     def test_page_reread_refreshes_the_visit_cache(
         self, client, doc_1page, monkeypatch
     ):
