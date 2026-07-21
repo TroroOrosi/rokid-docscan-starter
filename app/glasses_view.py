@@ -255,9 +255,10 @@ def _evidence_labels(result: SolveResult | ExplainResult) -> list[str]:
     """Human-facing, unambiguous evidence labels.
 
     Structured cross-document refs win and are always user-facing/1-based.
-    Older rows may only carry the legacy bare list; render those values exactly
-    as stored because API v1 routes historically used mixed indexing and no
-    reliable migration signal exists. New writes include evidence_refs.
+    Older rows may only carry the legacy bare list. Database readers attach an
+    internal ``_evidence_pages_base`` marker after identifying the historical
+    write path, so a 0-based page index is shifted for display without mutating
+    the opaque API v1 ``evidence_pages`` value. New writes include refs.
     """
     labels: list[str] = []
     for ref in getattr(result, "evidence_refs", []) or []:
@@ -269,7 +270,13 @@ def _evidence_labels(result: SolveResult | ExplainResult) -> list[str]:
             labels.append(f"D{document_id}:P{page_number:02d}")
     if labels:
         return labels
-    return [f"P{p:02d}" for p in (result.evidence_pages or [])]
+    extras = getattr(result, "extras", {}) or {}
+    display_offset = 1 if extras.get("_evidence_pages_base") == 0 else 0
+    return [
+        f"P{p + display_offset:02d}"
+        for p in (result.evidence_pages or [])
+        if isinstance(p, int)
+    ]
 
 
 def _locator(answer_box: dict | None) -> str:
