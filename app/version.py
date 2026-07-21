@@ -78,13 +78,14 @@ from __future__ import annotations
 #        保存済み→読取済み（payload 形状不変のため GLASSES_VIEW は 1.4.0 の
 #        まま）。API -> 1.10.0.
 # 0.11.0: review hardening — reject sparse page indexes before finalize or
-#        navigation, claim server-side solve work before paid calls, and cache
-#        one explainer result per page visit. Evidence is now 1-based and
-#        document-qualified; explain history returns its stored detail and
-#        provider context. Docker defaults to loopback and passes `.env`
-#        settings explicitly. The matching evaluator uses perturbed image
-#        queries instead of exact pHash self-matches. API -> 1.11.0, solver
-#        port -> 1.2.0, explainer port -> 1.1.0, glasses view -> 1.5.0.
+#        navigation, claim solve/explain work before optional paid calls, and
+#        cache one explainer result per page visit. Canonical evidence_refs are
+#        document-qualified/1-based while legacy evidence_pages semantics stay
+#        compatible. Explain history returns stored detail/provider context.
+#        Docker defaults to loopback and passes `.env` settings explicitly. The
+#        matching evaluator uses perturbed image queries instead of exact pHash
+#        self-matches. API -> 1.11.0, solver -> 1.2.0, explainer -> 1.1.0,
+#        glasses view -> 1.5.0.
 APP_VERSION = "0.11.0"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
@@ -122,11 +123,11 @@ APP_VERSION = "0.11.0"
 #        null for text-only comparisons; neither text nor image -> 400. New
 #        additive endpoint GET /v1/documents/{id}/scan-status
 #        (読取状態の確認・復旧). Path shapes unchanged — no envelope change.
-# 1.11.0: solution/explain evidence gains structured `evidence_refs`
-#        ({document_id, page_number}); legacy `evidence_pages` is consistently
-#        user-facing/1-based. Explain responses gain `cached`, and history now
-#        returns detail, evidence/provider metadata and result extras. Sparse
-#        page indexes are rejected with 409 before finalize/navigation.
+# 1.11.0: solution/explain evidence gains canonical `evidence_refs`
+#        ({document_id, 1-based page_number}); legacy `evidence_pages` keeps
+#        its API v1 route semantics. Explain responses gain `cached`, and
+#        history returns detail, evidence/provider metadata and result extras.
+#        Sparse page indexes are rejected with 409 before finalize/navigation.
 API_VERSION = "1.11.0"
 
 # Matching algorithm identity. Bump when thresholds or hashing change so a
@@ -173,16 +174,16 @@ ANALYZER_API_VERSION = "1.0.0"
 # Solver plugin interface (provider-agnostic question answering).
 # 1.1.0: Question gained the optional `image_path` field so vision-capable
 #        solvers can answer from the scanned page image (additive/back-compat).
-# 1.2.0: SolveResult gained structured, 1-based `evidence_refs`; the legacy
-#        `evidence_pages` list is now explicitly user-facing/1-based.
+# 1.2.0: SolveResult gained canonical, document-qualified, 1-based
+#        `evidence_refs`; legacy `evidence_pages` semantics stay unchanged.
 SOLVER_API_VERSION = "1.2.0"
 
 # Media-extractor plugin interface (formula/figure/graph/table).
 EXTRACTOR_API_VERSION = "1.0.0"
 
 # Explainer plugin interface (live page explanation with RAG context).
-# 1.1.0: ExplainResult gained structured, 1-based `evidence_refs`; the legacy
-#        `evidence_pages` list is now explicitly user-facing/1-based.
+# 1.1.0: ExplainResult gained canonical, document-qualified, 1-based
+#        `evidence_refs`; legacy `evidence_pages` semantics stay unchanged.
 EXPLAINER_API_VERSION = "1.1.0"
 
 # On-glasses staged view payload (silent, <=3 lines per page, paginated stages).

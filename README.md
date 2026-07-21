@@ -559,9 +559,16 @@ docker compose up --build
 ```
 
 Compose の既定ポートは安全のためホストの `127.0.0.1` だけに公開されます。
-LAN・インターネットへ公開する場合はポート割当を明示的に変更し、必ず
-`ROKID_API_KEY` と TLS 対応のリバースプロキシを設定してください。Compose は
-`.env` の全 `ROKID_*`／プロバイダ変数をコンテナへ渡します。
+グラスから同一 LAN 経由で接続する場合は、明示的に公開先を切り替えます:
+
+```bash
+ROKID_BIND_HOST=0.0.0.0 ROKID_API_KEY='十分に長いランダム値' \
+  docker compose up --build
+```
+
+LAN・インターネット公開では `ROKID_API_KEY` に加え、必ず TLS 対応の
+リバースプロキシを設定してください。Compose は `.env` のサービス向け `ROKID_*`／
+プロバイダ変数をコンテナへ渡し、`ROKID_BIND_HOST` はポート公開先の補間に使います。
 
 ローカル Python 実行を優先してください。Docker は任意です。
 
@@ -573,6 +580,8 @@ LAN・インターネットへ公開する場合はポート割当を明示的�
   実 AI 化できます。
 - pHash は純 Python 実装（numpy/imagehash 非依存）で、大量ページでは低速。
   高速化は scipy/imagehash 等への置換が定石（依存を増やすため既定では未採用）。
-- マルチテナント・並行書き込み制御は未実装（簡易 Bearer 認証は `ROKID_API_KEY` で任意）。
+- マルチテナントと一般的な多重書き込み制御は未実装（簡易 Bearer 認証は
+  `ROKID_API_KEY` で任意）。同一問題の solver と同一ページ訪問の explainer は
+  DB claim により、同時要求でも有料プロバイダを重複呼び出ししません。
 - 実 AI アダプタは任意依存（`anthropic`/`openai`/`google-genai`）と各社 API キーが必要。
   未設定なら自動でローカル実装にフォールバック（実 AI 出力は得られません）。

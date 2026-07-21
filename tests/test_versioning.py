@@ -43,8 +43,9 @@ def test_contract_versions_reflect_phase234():
 
 
 def test_contract_versions_reflect_review_hardening():
-    # 1.11.0: structured evidence, visit-cached explanation metadata/history,
-    # and sparse-index rejection. Provider results gained evidence_refs.
+    # 1.11.0: additive structured evidence, claimed/cached explanation
+    # metadata/history, and sparse-index rejection. Legacy field semantics
+    # remain unchanged.
     assert version.API_VERSION == "1.11.0"
     assert version.SOLVER_API_VERSION == "1.2.0"
     assert version.EXPLAINER_API_VERSION == "1.1.0"

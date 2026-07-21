@@ -254,12 +254,10 @@ def _confidence_symbol(conf: float) -> str:
 def _evidence_labels(result: SolveResult | ExplainResult) -> list[str]:
     """Human-facing, unambiguous evidence labels.
 
-    Structured cross-document refs win. Older stored rows may only carry the
-    bare page-number list. Legacy explain evidence is lifted to 1-based on
-    upgrade (db._bump_evidence_pages_to_one_based); legacy solution evidence is
-    left as stored, because onboard/question-span rows were already 1-based and
-    cannot be told apart from old 0-based /solve rows — so a few old
-    server-solved rows may read one page off until re-solved.
+    Structured cross-document refs win and are always user-facing/1-based.
+    Older rows may only carry the legacy bare list; render those values exactly
+    as stored because API v1 routes historically used mixed indexing and no
+    reliable migration signal exists. New writes include evidence_refs.
     """
     labels: list[str] = []
     for ref in getattr(result, "evidence_refs", []) or []:

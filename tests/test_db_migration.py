@@ -41,8 +41,8 @@ def _make_legacy_db(path):
         INSERT INTO documents (title) VALUES ('legacy');
         INSERT INTO pages (document_id, page_index, image_path, phash, ocr_text)
             VALUES (1, 0, 'old.png', 'abc123', 'legacy page');
-        -- Legacy explain evidence is the explainer's raw 0-based page_index and
-        -- must be lifted to the 1-based display world on upgrade.
+        -- Legacy explain evidence is the explainer's raw 0-based page_index.
+        -- API v1 compatibility requires preserving it exactly on upgrade.
         INSERT INTO explain_views
             (id, session_id, page_index, verdict, evidence_pages_json)
             VALUES (1, 1, 0, 'HIT', '[0]');
@@ -89,10 +89,11 @@ def test_legacy_pages_image_path_becomes_nullable(tmp_path, monkeypatch):
         "explainer_json",
         "result_extras_json",
     } <= explain_cols
-    assert conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type = 'table' "
-        "AND name = 'solution_claims'"
-    ).fetchone()
+    for claim_table in ("solution_claims", "explain_claims"):
+        assert conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (claim_table,),
+        ).fetchone()
     # The legacy-table rebuild drops indexes attached to the old table; the
     # migration must recreate the hot-path document lookup immediately.
     indexes = {r[1] for r in conn.execute("PRAGMA index_list(pages)")}
@@ -111,7 +112,7 @@ def test_legacy_pages_image_path_becomes_nullable(tmp_path, monkeypatch):
     conn.close()
 
 
-def test_legacy_explain_evidence_migrates_solutions_preserved(tmp_path, monkeypatch):
+def test_legacy_evidence_semantics_are_preserved(tmp_path, monkeypatch):
     import json
 
     db_file = tmp_path / "legacy.db"
@@ -127,25 +128,26 @@ def test_legacy_explain_evidence_migrates_solutions_preserved(tmp_path, monkeypa
 
     conn = sqlite3.connect(str(db_file))
     conn.row_factory = sqlite3.Row
-    # explain_views legacy rows are uniformly 0-based -> lifted to 1-based.
+    # API v1 values are opaque compatibility data: neither the legacy
+    # 0-based explain row nor the already-1-based onboard row may be shifted.
     view = conn.execute(
         "SELECT evidence_pages_json FROM explain_views WHERE id = 1"
     ).fetchone()
-    assert json.loads(view["evidence_pages_json"]) == [1]
+    assert json.loads(view["evidence_pages_json"]) == [0]
     # solutions is a mixed table: the already-1-based onboard/question-span
-    # evidence must NOT be bumped (that would corrupt P01 -> P02).
+    # evidence must also remain exactly as stored.
     sol = conn.execute(
         "SELECT evidence_pages_json FROM solutions WHERE id = 1"
     ).fetchone()
     assert json.loads(sol["evidence_pages_json"]) == [1, 2]
 
-    # Idempotent: the bump runs only when evidence_refs_json is first added, so
-    # re-initializing an already-migrated DB must not shift the pages again.
+    # Idempotent: re-initializing an already-migrated DB must not reinterpret
+    # either legacy value.
     db.init_db(db_path=db_file)
     view2 = conn.execute(
         "SELECT evidence_pages_json FROM explain_views WHERE id = 1"
     ).fetchone()
-    assert json.loads(view2["evidence_pages_json"]) == [1]
+    assert json.loads(view2["evidence_pages_json"]) == [0]
     sol2 = conn.execute(
         "SELECT evidence_pages_json FROM solutions WHERE id = 1"
     ).fetchone()

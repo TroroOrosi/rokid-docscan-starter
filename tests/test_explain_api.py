@@ -16,6 +16,8 @@ Uses the same conftest.py fixtures as the main test suite.
 from __future__ import annotations
 
 import io
+import threading
+import time
 
 import pytest
 from fastapi.testclient import TestClient
@@ -225,7 +227,7 @@ class TestExplainPage:
         assert scrolled["cached"] is detail["cached"] is True
         assert first["explainer"] == scrolled["explainer"] == detail["explainer"]
         assert first["evidence_pages"] and all(
-            page == 1 for page in first["evidence_pages"]
+            page == 0 for page in first["evidence_pages"]
         )
         assert all(
             set(ref) == {"document_id", "page_number"}
@@ -550,6 +552,87 @@ def test_persist_explain_visit_dedups_race_keeps_revisits(tmp_path, monkeypatch)
     assert conn.execute("SELECT COUNT(*) c FROM explain_views").fetchone()["c"] == 2
     conn.close()
 
+
+def test_explain_claim_waiter_reuses_winner_result(tmp_path):
+    from app.explainer import ExplainResult
+    from app.main import (
+        _acquire_or_wait_for_explain,
+        _persist_explain_visit,
+        _release_explain_claim,
+    )
+    import app.db as db
+
+    db_file = tmp_path / "claim-wait.db"
+    db.init_db(db_file)
+    winner = db.connect(db_file)
+    winner.execute("INSERT INTO documents (title) VALUES ('d')")
+    doc_id = winner.execute("SELECT id FROM documents").fetchone()["id"]
+    winner.execute("INSERT INTO explain_sessions (document_id) VALUES (?)", (doc_id,))
+    sid = winner.execute("SELECT id FROM explain_sessions").fetchone()["id"]
+    winner.commit()
+
+    owns, row = _acquire_or_wait_for_explain(
+        winner,
+        session_id=sid,
+        page_index=0,
+        page_signature="sig-A",
+        after_id=0,
+    )
+    assert owns is True and row is None
+
+    observed = {}
+
+    def wait_for_winner():
+        waiter = db.connect(db_file)
+        try:
+            observed["value"] = _acquire_or_wait_for_explain(
+                waiter,
+                session_id=sid,
+                page_index=0,
+                page_signature="sig-A",
+                after_id=0,
+                timeout_seconds=2.0,
+            )
+        except BaseException as exc:
+            observed["error"] = exc
+        finally:
+            waiter.close()
+
+    thread = threading.Thread(target=wait_for_winner)
+    thread.start()
+    time.sleep(0.1)
+
+    result = ExplainResult(
+        lines=["winner", "", ""],
+        detail="winner",
+        confidence=0.9,
+        extras={},
+    )
+    inserted, saved = _persist_explain_visit(
+        winner,
+        session_id=sid,
+        page_index=0,
+        page_signature="sig-A",
+        last_id=0,
+        result=result,
+        retrieved_hits=[],
+        explainer_info={"name": "x"},
+    )
+    assert inserted is True and saved is not None
+    _release_explain_claim(
+        winner,
+        session_id=sid,
+        page_index=0,
+        page_signature="sig-A",
+    )
+
+    thread.join(timeout=3)
+    assert not thread.is_alive()
+    assert "error" not in observed
+    waiter_owns, waiter_row = observed["value"]
+    assert waiter_owns is False
+    assert waiter_row["detail"] == "winner"
+    winner.close()
 
 # ---------------------------------------------------------------------------
 # 7. /v1/version includes explainers list

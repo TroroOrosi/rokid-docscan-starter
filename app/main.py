@@ -14,6 +14,7 @@ import io
 import json
 import os
 import re
+import time
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -1173,11 +1174,7 @@ def solve_question(session_id: int, question_id: int) -> dict:
         result, solver = solve_with_fallback(question=question)
         served_by = result.extras.get("served_by", solver.name)
         evidence_refs = result.evidence_refs or retrieved["evidence_refs"]
-        evidence_pages = (
-            [ref["page_number"] for ref in evidence_refs]
-            if evidence_refs
-            else (result.evidence_pages or retrieved["evidence_pages"])
-        )
+        evidence_pages = result.evidence_pages or retrieved["evidence_pages"]
         result.evidence_pages = evidence_pages
         result.evidence_refs = evidence_refs
 
@@ -1559,11 +1556,7 @@ def exam_solve_current(session_id: int) -> dict:
         result, solver = solve_with_fallback(question=question)
         served_by = result.extras.get("served_by", solver.name)
         evidence_refs = result.evidence_refs or retrieved["evidence_refs"]
-        evidence_pages = (
-            [ref["page_number"] for ref in evidence_refs]
-            if evidence_refs
-            else (result.evidence_pages or retrieved["evidence_pages"])
-        )
+        evidence_pages = result.evidence_pages or retrieved["evidence_pages"]
         result.evidence_pages = evidence_pages
         result.evidence_refs = evidence_refs
 
@@ -1983,9 +1976,8 @@ def exam_finalize_reading(session_id: int) -> dict:
                         or _question_evidence_refs(conn, row["id"])
                     )
                     evidence_pages = (
-                        [ref["page_number"] for ref in evidence_refs]
-                        if evidence_refs
-                        else result.evidence_pages
+                        result.evidence_pages
+                        or _question_evidence_pages(conn, row["id"])
                     )
                     # Onboard ingest may answer while the paid call is in
                     # flight. The conditional insert preserves that earlier
@@ -2513,6 +2505,151 @@ def _page_signature(page_row) -> str:
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()
 
 
+_EXPLAIN_CLAIM_TTL = "-15 minutes"
+_EXPLAIN_WAIT_SECONDS = 30.0
+_EXPLAIN_POLL_SECONDS = 0.05
+
+
+def _find_explain_visit(
+    conn,
+    *,
+    session_id: int,
+    page_index: int,
+    page_signature: str,
+    after_id: int,
+):
+    return conn.execute(
+        "SELECT * FROM explain_views WHERE session_id = ? AND page_index = ? "
+        "AND page_signature = ? AND id > ? ORDER BY id DESC LIMIT 1",
+        (session_id, page_index, page_signature, after_id),
+    ).fetchone()
+
+
+def _claim_explain(
+    conn, *, session_id: int, page_index: int, page_signature: str
+) -> bool:
+    # A crashed worker must not block this page forever.
+    conn.execute(
+        "DELETE FROM explain_claims WHERE session_id = ? AND page_index = ? "
+        "AND page_signature = ? AND claimed_at < datetime('now', ?)",
+        (session_id, page_index, page_signature, _EXPLAIN_CLAIM_TTL),
+    )
+    cur = conn.execute(
+        "INSERT OR IGNORE INTO explain_claims "
+        "(session_id, page_index, page_signature) VALUES (?, ?, ?)",
+        (session_id, page_index, page_signature),
+    )
+    # Publish ownership before an optional paid provider is invoked.
+    conn.commit()
+    return cur.rowcount == 1
+
+
+def _release_explain_claim(
+    conn, *, session_id: int, page_index: int, page_signature: str
+) -> None:
+    conn.execute(
+        "DELETE FROM explain_claims WHERE session_id = ? AND page_index = ? "
+        "AND page_signature = ?",
+        (session_id, page_index, page_signature),
+    )
+    # Also publishes the winner's explain_views row.
+    conn.commit()
+
+
+def _explain_wait_timeout() -> HTTPException:
+    return HTTPException(
+        status_code=503,
+        detail="explanation is still being generated; retry shortly",
+        headers={"Retry-After": "1"},
+    )
+
+
+def _acquire_or_wait_for_explain(
+    conn,
+    *,
+    session_id: int,
+    page_index: int,
+    page_signature: str,
+    after_id: int,
+    timeout_seconds: float = _EXPLAIN_WAIT_SECONDS,
+) -> tuple[bool, object | None]:
+    """Return ownership, or wait for and return the current winner's row."""
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        # Check the result before claiming. A winner may have committed and
+        # released between the caller's cache snapshot and this function.
+        row = _find_explain_visit(
+            conn,
+            session_id=session_id,
+            page_index=page_index,
+            page_signature=page_signature,
+            after_id=after_id,
+        )
+        if row is not None:
+            return False, row
+        if time.monotonic() >= deadline:
+            raise _explain_wait_timeout()
+
+        if _claim_explain(
+            conn,
+            session_id=session_id,
+            page_index=page_index,
+            page_signature=page_signature,
+        ):
+            # Close the race where a previous winner committed/released after
+            # our first result lookup but before this claim was acquired.
+            row = _find_explain_visit(
+                conn,
+                session_id=session_id,
+                page_index=page_index,
+                page_signature=page_signature,
+                after_id=after_id,
+            )
+            if row is not None:
+                _release_explain_claim(
+                    conn,
+                    session_id=session_id,
+                    page_index=page_index,
+                    page_signature=page_signature,
+                )
+                return False, row
+            return True, None
+
+        while True:
+            row = _find_explain_visit(
+                conn,
+                session_id=session_id,
+                page_index=page_index,
+                page_signature=page_signature,
+                after_id=after_id,
+            )
+            if row is not None:
+                return False, row
+            if time.monotonic() >= deadline:
+                raise _explain_wait_timeout()
+            claim = conn.execute(
+                "SELECT 1 FROM explain_claims WHERE session_id = ? "
+                "AND page_index = ? AND page_signature = ?",
+                (session_id, page_index, page_signature),
+            ).fetchone()
+            if claim is None:
+                # The owner failed and released without a result. Loop and
+                # compete for ownership so this request can retry the call.
+                break
+            time.sleep(_EXPLAIN_POLL_SECONDS)
+
+
+def _explain_result_from_row(row) -> ExplainResult:
+    return ExplainResult(
+        lines=json.loads(row["hud_lines_json"] or "[]"),
+        detail=row["detail"] or "",
+        evidence_pages=json.loads(row["evidence_pages_json"] or "[]"),
+        evidence_refs=json.loads(row["evidence_refs_json"] or "[]"),
+        confidence=row["confidence"] if row["confidence"] is not None else 1.0,
+        extras=json.loads(row["result_extras_json"] or "{}"),
+    )
+
+
 def _persist_explain_visit(
     conn,
     *,
@@ -2524,21 +2661,16 @@ def _persist_explain_visit(
     retrieved_hits: list,
     explainer_info: dict,
 ) -> tuple[bool, object]:
-    """Record this page visit, guarded against a concurrent duplicate.
+    """Record this page visit after the caller has claimed provider work.
 
-    Two simultaneous first-views of the same page both miss the visit cache and
-    compute in parallel. SQLite serializes the writes, and this INSERT is
-    guarded so only the first commit persists a row for the visit. ``id >
-    last_id`` scopes the guard to rows created AFTER the snapshot the caller
-    read, so a genuine page REVISIT (its prior same-page row predates
-    ``last_id``) still records a new visit — the same reason the repo cannot use
-    a plain UNIQUE(session, page, signature) index here.
+    The committed explain_claim is acquired before the optional paid call, so
+    normal concurrent callers wait for this row instead of invoking a second
+    provider. The conditional INSERT remains defense-in-depth. ``id > last_id``
+    scopes the guard to rows created after the caller's visit snapshot, so a
+    genuine revisit still records a new history entry.
 
-    Returns ``(inserted, row)``: ``inserted`` is False for the loser of a race,
-    and ``row`` is the canonical (winner's) row to serve so the response matches
-    history. The loser's provider call is wasted — the only residual of the race
-    — which is acceptable here: /explain is a single-user, sequential
-    gesture-driven path and the default explainer is local/offline/free.
+    Returns ``(inserted, row)``; when ``inserted`` is False, ``row`` is the
+    canonical winner result to serve.
     """
     cur = conn.execute(
         """INSERT INTO explain_views
@@ -2669,41 +2801,56 @@ def explain_page(
                     "SELECT title FROM documents WHERE id = ?", (doc_id,)
                 ).fetchone()["title"],
             )
-            explainer = get_explainer()
-            result = explainer.explain(req)
-            if not result.evidence_refs:
-                result.evidence_refs = retrieved["evidence_refs"]
-            if result.evidence_refs:
-                result.evidence_pages = [
-                    ref["page_number"] for ref in result.evidence_refs
-                ]
-            elif not result.evidence_pages:
-                result.evidence_pages = retrieved["evidence_pages"]
             retrieved_hits = retrieved["hits"]
-            explainer_info = explainer.info()
-            inserted, won_row = _persist_explain_visit(
+            explainer_info = {}
+            owns_call, won_row = _acquire_or_wait_for_explain(
                 conn,
                 session_id=session_id,
                 page_index=page_index,
                 page_signature=page_signature,
-                last_id=last_id,
-                result=result,
-                retrieved_hits=retrieved_hits,
-                explainer_info=explainer_info,
+                after_id=last_id,
             )
-            if not inserted and won_row is not None:
-                # A concurrent request won this visit; adopt its stored result so
-                # the response matches history (our provider call is discarded).
-                result = ExplainResult(
-                    lines=json.loads(won_row["hud_lines_json"] or "[]"),
-                    detail=won_row["detail"] or "",
-                    evidence_pages=json.loads(won_row["evidence_pages_json"] or "[]"),
-                    evidence_refs=json.loads(won_row["evidence_refs_json"] or "[]"),
-                    confidence=won_row["confidence"] if won_row["confidence"] is not None else 1.0,
-                    extras=json.loads(won_row["result_extras_json"] or "{}"),
-                )
+            if not owns_call:
+                result = _explain_result_from_row(won_row)
                 retrieved_hits = json.loads(won_row["context_hits_json"] or "[]")
-                explainer_info = json.loads(won_row["explainer_json"] or "{}") or explainer_info
+                explainer_info = json.loads(won_row["explainer_json"] or "{}")
+                if not explainer_info:
+                    # Metadata-only adapter lookup; it does not call a provider.
+                    explainer_info = get_explainer().info()
+                cached = True
+            else:
+                try:
+                    explainer = get_explainer()
+                    result = explainer.explain(req)
+                    if not result.evidence_refs:
+                        result.evidence_refs = retrieved["evidence_refs"]
+                    if not result.evidence_pages:
+                        result.evidence_pages = retrieved["evidence_pages"]
+                    explainer_info = explainer.info()
+                    inserted, won_row = _persist_explain_visit(
+                        conn,
+                        session_id=session_id,
+                        page_index=page_index,
+                        page_signature=page_signature,
+                        last_id=last_id,
+                        result=result,
+                        retrieved_hits=retrieved_hits,
+                        explainer_info=explainer_info,
+                    )
+                    if not inserted:
+                        if won_row is None:
+                            raise _explain_wait_timeout()
+                        result = _explain_result_from_row(won_row)
+                        retrieved_hits = json.loads(won_row["context_hits_json"] or "[]")
+                        explainer_info = json.loads(won_row["explainer_json"] or "{}") or explainer_info
+                        cached = True
+                finally:
+                    _release_explain_claim(
+                        conn,
+                        session_id=session_id,
+                        page_index=page_index,
+                        page_signature=page_signature,
+                    )
         if session["status"] == "ready":
             conn.execute(
                 "UPDATE explain_sessions SET status = 'explaining' WHERE id = ?",

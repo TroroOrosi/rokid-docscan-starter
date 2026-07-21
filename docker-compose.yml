@@ -2,9 +2,9 @@ services:
   docscan:
     build: .
     ports:
-      # Safe local default. External deployments should deliberately replace
-      # this binding and must set ROKID_API_KEY behind TLS/reverse proxying.
-      - "127.0.0.1:8000:8000"
+      # Safe local default. Set ROKID_BIND_HOST=0.0.0.0 only for deliberate
+      # LAN access, together with ROKID_API_KEY and TLS/reverse proxying.
+      - "${ROKID_BIND_HOST:-127.0.0.1}:8000:8000"
     environment:
       ROKID_DATA_DIR: /data
       # Compose uses `.env` for interpolation but does not automatically pass

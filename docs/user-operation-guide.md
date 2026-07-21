@@ -7,7 +7,7 @@
 - 本リポジトリ（サーバ実装）は **既に実装済み** で、ローカルで動きます。
 - ここで「ユーザーが行う」と書いた項目は、**コードでは代行できない物理操作や
   アカウント取得・同意取得など** です。それ以外はシステムが自動化します。
-- 現在のバージョン: **APP 0.10.0 / API 1.10.0**
+- 現在のバージョン: **APP 0.11.0 / API 1.11.0**
 - **解答の主経路はグラス搭載 AI（GPT / Gemini）**で、その問題別解答をサーバへ取り込みます
   （`POST /solutions`・サーバ鍵不要）。要約/解答/解説/メディア抽出のサーバ側は既定でローカル
   実装ですが、**実 AI アダプタ（`openai` / `gemini` / `claude`）を同梱**しており、より高性能な
@@ -110,6 +110,8 @@
 | S24 | **読取完了→問題分割→デッキ作成（3フェーズ主経路）** | `POST /v1/exam-sessions/{id}/finalize-reading`／`app/layout.py: segment_problems` |
 | S25 | **搭載 GPT の問題別解答の取り込み（ingest）** | `POST /v1/exam-sessions/{id}/solutions`（`served_by="onboard"`・latest wins） |
 | S26 | **問題別レビューデッキ＋一括表示 HUD** | `GET …/solutions`・`GET …/review`／`app/glasses_view.py: build_review_view` |
+| S27 | ページ index の連続性検証（疎な文書を 409 で早期拒否） | `finalize`／exam・explain session 作成 |
+| S28 | solver/explainer の処理権 claim、解説の訪問キャッシュ・履歴メタデータ | `solution_claims`／`explain_claims`／`explain_views` |
 
 ### システムが返すバージョン情報（契約ネゴシエーション）
 
@@ -117,18 +119,21 @@
 
 ```json
 {
-  "app_version": "0.10.0",
-  "api_version": "1.10.0",
+  "app_version": "0.11.0",
+  "api_version": "1.11.0",
   "matcher_version": "1.2.0",
   "hud_contract_version": "1.0.0",
   "analyzer_api_version": "1.0.0",
-  "solver_api_version": "1.1.0",
+  "solver_api_version": "1.2.0",
   "extractor_api_version": "1.0.0",
-  "explainer_api_version": "1.0.0",
-  "glasses_view_contract_version": "1.4.0",
+  "explainer_api_version": "1.1.0",
+  "glasses_view_contract_version": "1.5.0",
   "overlay_contract_version": "1.1.0"
 }
 ```
+
+`evidence_refs` の `page_number` は文書ID付き・1始まりです。旧 `evidence_pages` は
+API v1 互換のため従来の経路別の意味を保持するので、新規実装は `evidence_refs` を使います。
 
 クライアント（Android/iOS/Rokid/Android XR）は、`hud_contract_version` や
 `api_version` の **メジャー変化** を検知したら「アプリ更新を促す」挙動にできます。
@@ -271,7 +276,8 @@ POST /next-page / /prev-page → GET /current → POST /solve-current
    `/v1/documents` → `/pages` ×全ページ数 → `/finalize`（**全ページ完了後に必須**）。
 5. **U8 検証**（人間が実行 → システムが集計）:
    `ROKID_DATA_DIR=data python scripts/evaluate.py --db data/docscan.db --out report.json`
-   → `self_match_accuracy` と `suggested_thresholds` を確認。
+   → `variant_match_accuracy`、`variant_top1_accuracy`、`hamming_distribution` と
+   `suggested_thresholds` を確認（変形画像は頑健性の事前評価で、実機再撮影とは別に検証）。
 6. **D1〜D7 を決定**（人間）。`suggested_thresholds` を見て D5 を調整。
 7. 決めた D2（モデル）に合わせて analyzer/solver/explainer を登録（実装差し替えのみ）。
 
@@ -329,6 +335,7 @@ uvicorn app.main:app --port 8000
 | `ROKID_ENABLE_EMBEDDING` | `0` | RAG の意味検索（未接続時は lexical） |
 | `ROKID_KEYMAP` | （なし） | gesture→KeyCode の上書き（JSON、`/v1/settings.input`。既定 KeyCode は旧機由来・未実測） |
 | `ROKID_API_KEY` | （なし） | 設定時に Bearer 認証を要求（発見系は開放） |
+| `ROKID_BIND_HOST` | `127.0.0.1` | Docker Compose のホスト公開先。LAN 接続時のみ `0.0.0.0`（APIキー＋TLS必須） |
 
 雛形は同梱の [`.env.example`](../.env.example) を参照。
 

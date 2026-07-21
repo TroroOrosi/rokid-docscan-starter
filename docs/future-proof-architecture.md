@@ -135,11 +135,14 @@ object DeviceRegistry {                // 端末を差し替える点
 | HUD ペイロード | `HUD_CONTRACT_VERSION` | 行数・フィールド |
 | Analyzer 契約 | `ANALYZER_API_VERSION` | `Analyzer`/`AnalyzerResult` 形 |
 | Solver 契約 | `SOLVER_API_VERSION` | `Solver`/`SolveResult` 形 |
+| Explainer 契約 | `EXPLAINER_API_VERSION` | `Explainer`/`ExplainResult` 形 |
 | Extractor 契約 | `EXTRACTOR_API_VERSION` | `MediaExtractor`/`ExtractorResult` 形 |
 | HUD ステージview | `GLASSES_VIEW_CONTRACT_VERSION` | 段階view/`capture_ack` 形 |
 | Overlay | `OVERLAY_CONTRACT_VERSION` | 解答欄box/tracking metadata 形 |
 
-- パスは破壊的変更まで `/v1` を維持。破壊的変更は `/v2` を **並走** させる
+- 同じ API メジャーでは既存フィールドの意味を再解釈しない。新しい意味は新フィールドを
+  加算してクライアントを移行する。
+- パスや既存フィールドの意味の破壊的変更は `/v2` を **並走** させる
   （`/v1` を残したまま追加）。
 - クライアントは `versions` のメジャー差を見て「更新を促す」分岐が可能。
 - `MATCHER_VERSION` を上げたら **再インデックス/再評価**（`scripts/evaluate.py`）を
@@ -232,6 +235,7 @@ HUD_LANG = os.environ.get("ROKID_HUD_LANG", "ja")
 - `/match` は HIT/LOW_CONF/NO_PAGE のいずれかを必ず返す（沈黙しない）。
 - analyzer は空入力でも例外を出さず、ベストエフォートで返す。
 - 新規プロバイダ/デバイスの追加は **registry への登録のみ**（コア無変更）。
+- 同じ API メジャーでは既存フィールドを再解釈せず、新フィールドを加算する。
 - 破壊的変更は新バージョンを並走させ、旧契約を即削除しない。
 - アルゴリズム変更時は `MATCHER_VERSION` 更新＋`scripts/evaluate.py` 再評価。
 

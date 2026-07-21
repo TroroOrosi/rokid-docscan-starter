@@ -39,9 +39,10 @@ class ExplainResult:
     lines: list[str]
     # Long-form explanation stored server-side (history endpoint, not HUD).
     detail: str = ""
-    # User-facing, 1-based page numbers used as context evidence.
+    # Legacy API v1 list. Keep each route/provider's pre-existing indexing
+    # semantics; new consumers should use evidence_refs.
     evidence_pages: list[int] = field(default_factory=list)
-    # Structured cross-document references ({document_id, page_number}), with
+    # Canonical cross-document references ({document_id, page_number}), with
     # page_number user-facing/1-based.
     evidence_refs: list[dict] = field(default_factory=list)
     # 0..1 confidence (1.0 for placeholder, real LLM may vary).

@@ -17,12 +17,12 @@
 ## データフロー（Phase 2/3/4）
 
 - **add_question**: layout 解析後、図/表/グラフ/数式の手掛かりがあれば `extractors`（`get_extractor`）で `media` を生成し `questions.media_json` に保存・応答に同梱。
-- **solve**: `retrieval.retrieve_context(documents/pages)` で根拠 `context`/`evidence_pages` を取得→`Question(context=..., image_path=...)` に注入→`solve_with_fallback`（tier 順に試行し offline local へフォールバック、採用 tier=`served_by`）→`solutions` に `evidence_pages`/`served_by` 保存。応答に `served_by`・`evidence` を追加。
+- **solve**: `retrieval.retrieve_context(documents/pages)` で根拠 `context`/`evidence_pages`/`evidence_refs` を取得→`Question(context=..., image_path=...)` に注入→`solve_with_fallback`（tier 順に試行し offline local へフォールバック、採用 tier=`served_by`）→`solutions` に根拠と `served_by` を保存。`evidence_refs` は文書ID付き・1始まりの正規形式で、旧 `evidence_pages` は API v1 の従来の意味を保持。応答に `served_by`・`evidence` を追加。
   - **vision（用紙画像で解く）**: 実アダプタ（`openai`/`gemini`/`claude`）は `questions.image_path` の**ページ画像をモデルへ添付**し、図/数式/表/選択肢を直接読んで解答（OCR テキストは補助）。プロンプトは**教科別ガイダンス**付き（`app/solvers/llm_adapter.py` の `_SYSTEM` / `_subject_guidance`）。画像はクラウドへ送信されるため実 AI・鍵設定時のみ作動、未設定/失敗は local へフォールバック。`mode=real` ロックは不変。
 - **overlay**: `tracking:"2d_image_anchor"`・`fixed_ar:false`・`anchor_hint{page_number,box}` を機械可読化（6DoF 固定 AR は未対応＝ハード待ち）。
 - **reasoning**: `GET …/questions/{qid}/reasoning` で `raw_reasoning`＋`evidence`＋`served_by` を返す（HUD は短縮版のまま、`real` ロック準拠）。
 
-## 3 フェーズフロー（読取→一括解答→閲覧 / API 1.10.0・主経路）
+## 3 フェーズフロー（読取→一括解答→閲覧 / API 1.11.0・主経路）
 
 **主経路**。カメラ（＝プライバシー LED 点灯）は読取フェーズのみで、`finalize-reading` 以降は
 カメラを閉じる（LED 消灯）。解答の主体は**グラス搭載 AI（GPT）**で、サーバは分割・取り込み・
@@ -37,6 +37,7 @@
   主経路: 搭載 GPT が全問解答 ─▶ POST /solutions（ingest, served_by="onboard"）
   任意:   ROKID_SOLVER=openai|gemini|claude ─▶ finalize-reading 内で全問を solve_with_fallback
           （各問とも context=_exam_prompt_context: 全ページ＋RAG＋(listening時)書き起こし＋書式指示）
+          solution_claims を provider 呼出前に取得し、同時 finalize の二重課金を防止
 フェーズ3 閲覧（カメラOFF・LED消灯）
   GET /solutions（デッキ一覧） ─▶ GET /review?index=k&view_page=n
   build_review_view: 解答+解法+根拠+注意を一括1ストリーム（3行×テレプロンプター送り）
@@ -127,7 +128,8 @@ exam-session(document_id, exam_type, answer_format)
 - `exam_sessions`(mode, voice_enabled, subject_hint, status, **document_id**, **exam_type**（written|listening）, **answer_format**（mark|written）, **current_page_index**, **audio_path**, **transcript**)
   - 追加列は既存 DB 向けに `init_db` の `_migrate()`（`ALTER TABLE ADD COLUMN`）で移行。
 - `questions`(question_no, body_text, choices_json, figure_refs, answer_box_json, structure_json, subject, read_conf, page_number, image_path, **media_json**)
-- `solutions`(answer, solution_steps_json, rationale, cautions, answer_conf, rationale_conf, evidence_pages_json, raw_reasoning, **served_by**, user_confirmed)
+- `solutions`(answer, solution_steps_json, rationale, cautions, answer_conf, rationale_conf, evidence_pages_json, **evidence_refs_json**, raw_reasoning, **served_by**, user_confirmed)
+- `solution_claims`(question_id, claimed_at)：任意の有料 solver 呼び出し前に取得する短期 claim。
 - `pages`：`image_path` は **nullable**・`phash` 既定 `""`（撮影しないテキストページ用）。**`vision_text`**（新規）＝
   本体 AI の図・画像の読み取り（テキスト）。既存 DB 向けに `_migrate()` が `pages` にも `ALTER TABLE ADD COLUMN` で移行。
 - `questions`(..., **body_text**＝現在ページ材料＝OCR＋図の読み取り)。
@@ -164,13 +166,12 @@ exam-session(document_id, exam_type, answer_format)
 
 ## バージョン契約（`app/version.py`）
 
-`SOLVER_API_VERSION` / `EXTRACTOR_API_VERSION` / `GLASSES_VIEW_CONTRACT_VERSION` /
-`OVERLAY_CONTRACT_VERSION` を契約ごとに管理。`API_VERSION` は現在 `1.10.0`
-（テキスト主の /match・/questions、GET /scan-status を追加。1.9.0 は再読取＝ページ置換・
-0問題時の読取フェーズ復帰・セッション GET のロック整合）、`APP_VERSION` は `0.10.0`。
-`GLASSES_VIEW_CONTRACT_VERSION` は `1.4.0`（`kind:"review"` の一括ストリーム view・reading_ack・
-公式ジェスチャ語彙）。クライアントは `GET /v1/version` でネゴシエート
-（`solvers`/`extractors` 等に `openai`/`gemini`/`claude` が並ぶ）。
+`SOLVER_API_VERSION` / `EXPLAINER_API_VERSION` / `EXTRACTOR_API_VERSION` /
+`GLASSES_VIEW_CONTRACT_VERSION` / `OVERLAY_CONTRACT_VERSION` を契約ごとに管理。
+現在は APP `0.11.0` / API `1.11.0` / Solver `1.2.0` / Explainer `1.1.0` /
+Glasses View `1.5.0`。構造化 `evidence_refs`、解説キャッシュ・履歴メタデータ、
+疎な page index の早期拒否を加算的に追加し、旧 `evidence_pages` の意味は変更しません。
+クライアントは `GET /v1/version` でネゴシエートします。
 
 ## 評価ベンチ（案12）
 

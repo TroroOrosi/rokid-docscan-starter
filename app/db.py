@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import sqlite3
 from pathlib import Path
 
@@ -143,6 +142,17 @@ CREATE TABLE IF NOT EXISTS explain_views (
     viewed_at           TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- One short-lived claim per page visit while an optional paid explainer is
+-- in flight. The winner commits this row before the provider call; concurrent
+-- stage/scroll requests wait for the persisted explain_views result.
+CREATE TABLE IF NOT EXISTS explain_claims (
+    session_id     INTEGER NOT NULL REFERENCES explain_sessions(id) ON DELETE CASCADE,
+    page_index     INTEGER NOT NULL,
+    page_signature TEXT NOT NULL,
+    claimed_at     TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (session_id, page_index, page_signature)
+);
+
 -- Hot-path lookups: latest solution per question (deck/review/view), a
 -- session's questions, and a document's pages. Runs on every init_db, so
 -- existing DBs pick these up too.
@@ -215,41 +225,6 @@ ALTER TABLE pages_new RENAME TO pages;
 """
 
 
-def _bump_evidence_pages_to_one_based(conn: sqlite3.Connection, table: str) -> None:
-    """Lift a uniformly-0-based `evidence_pages_json` column to 1-based.
-
-    Legacy `explain_views` rows stored the explainer's raw 0-based `page_index`
-    in `evidence_pages_json` (no structured `evidence_refs` existed yet). The
-    display path (glasses_view) treats that list as user-facing/1-based when no
-    `evidence_refs` are present, so a legacy page-0 evidence would render as
-    `P00` and point one page off. Runs exactly once — when `evidence_refs_json`
-    is first added — because every row at that boundary predates the 1-based
-    convention. Empty lists and non-integer entries are left untouched.
-
-    The caller restricts this to tables whose legacy rows are ALL 0-based. It
-    must NOT touch `solutions`: its legacy evidence is a mix — the onboard
-    ingest and the question-span fallback already wrote 1-based `page_number`,
-    so a blanket +1 would corrupt the primary onboard path (P01 -> P02).
-    """
-    rows = conn.execute(
-        f"SELECT id, evidence_pages_json FROM {table} "
-        "WHERE evidence_pages_json IS NOT NULL"
-    ).fetchall()
-    for row in rows:
-        try:
-            pages = json.loads(row["evidence_pages_json"])
-        except (TypeError, ValueError):
-            continue
-        if not isinstance(pages, list) or not pages:
-            continue
-        bumped = [p + 1 if isinstance(p, int) else p for p in pages]
-        if bumped != pages:
-            conn.execute(
-                f"UPDATE {table} SET evidence_pages_json = ? WHERE id = ?",
-                (json.dumps(bumped), row["id"]),
-            )
-
-
 def _pages_image_path_not_null(conn: sqlite3.Connection) -> bool:
     """True if `pages.image_path` still carries the legacy NOT NULL constraint."""
     for _cid, name, _type, notnull, _dflt, _pk in conn.execute(
@@ -272,20 +247,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
         for name, decl in migrations:
             if name not in existing:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
-                # Adding evidence_refs_json is the upgrade boundary from the
-                # pre-structured-evidence world. Only explain_views is lifted:
-                # every legacy explain row stored the explainer's 0-based
-                # page_index. solutions is deliberately left as stored — its
-                # legacy rows are a mix (onboard ingest / question-span
-                # fallbacks already wrote 1-based page_number), and there is no
-                # per-row signal to tell those from the 0-based /solve rows, so
-                # a blanket +1 would corrupt the primary onboard path.
-                if (
-                    name == "evidence_refs_json"
-                    and table == "explain_views"
-                    and "evidence_pages_json" in existing
-                ):
-                    _bump_evidence_pages_to_one_based(conn, table)
+
 
     # pages: on a legacy DB, image_path was NOT NULL — rebuild the table so
     # text-only (撮影しない) pages with image_path=NULL can be recorded. The

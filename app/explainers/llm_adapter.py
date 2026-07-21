@@ -64,7 +64,9 @@ class LLMExplainer(Explainer):
         return ExplainResult(
             lines=lines,
             detail=str(data.get("detail", source[:400])),
-            evidence_pages=[r["page_number"] for r in evidence_refs],
+            # Preserve the API v1 retrieval-index list (0-based). Structured
+            # refs are the canonical, user-facing 1-based representation.
+            evidence_pages=[r["page_number"] - 1 for r in evidence_refs],
             evidence_refs=evidence_refs,
             confidence=clamp01(data.get("confidence"), 1.0),
             extras={"source": self.name, "provider": self.provider, "model": client.model},

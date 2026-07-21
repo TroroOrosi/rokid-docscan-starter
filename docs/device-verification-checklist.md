@@ -143,7 +143,7 @@
 - **期待結果**: 各ステップの HUD ack（scan_ack / reading_ack / ingest_ack）が実機 HUD に出る。
 - **反映**: つまずいた箇所を issue 化。読取ミスがあれば**同じ page_index に再送＝置換**
   （API 1.9.0 で追加された再読取）で復旧できることも確認。復旧前の欠番確認は
-  `GET /v1/documents/{id}/scan-status?expected_total_pages=N`（API 1.10.0）を使う。
+  `GET /v1/documents/{id}/scan-status?expected_total_pages=N`（API 1.11.0 でも維持）を使う。
 
 ### D-2. 搭載 AI の読取品質（U5 チェックリスト）
 
@@ -166,8 +166,11 @@
   ```bash
   ROKID_DATA_DIR=data python scripts/evaluate.py --db data/docscan.db --out report.json
   ```
-  実機で登録したページに対する `self_match_accuracy` と `suggested_thresholds` を確認。
-- **期待結果**: accuracy 1.0 近傍。乖離があれば suggested_thresholds が出る。
+  登録画像から生成したクロップ・微回転・JPEG圧縮クエリに対する
+  `variant_match_accuracy`、`variant_top1_accuracy`、`hamming_distribution`、
+  `suggested_thresholds` を確認。
+- **期待結果**: 変形クエリの HIT/Top-1 が運用目標を満たす。これは頑健性の事前評価であり、
+  実機再撮影サンプルでも独立に確認する。
 - **反映**: 閾値を `app/matching.py` に反映する場合は **`MATCHER_VERSION` を加算**
   （version.py の bump ルール）。
 
