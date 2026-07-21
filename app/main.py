@@ -1823,25 +1823,37 @@ def _question_evidence_pages(conn, question_id: int) -> list[int]:
 _SERVER_SOLVE_CLAIM_TTL = "-15 minutes"
 
 
-def _claim_server_solve(conn, question_id: int) -> bool:
-    """Atomically claim one paid server solve, reclaiming a stale crash row."""
+def _claim_server_solve(conn, question_id: int) -> str | None:
+    """Atomically claim one paid server solve, reclaiming a stale crash row.
+
+    Returns a per-claim owner token on success, else None. The token lets the
+    winner release only ITS OWN claim: once the TTL reclaim below hands the slot
+    to a retry, an original request that is still legitimately running must not
+    delete the retry's fresh claim when it finally finishes (release-by-token,
+    not by question_id).
+    """
     conn.execute(
         "DELETE FROM solution_claims "
         "WHERE question_id = ? AND claimed_at < datetime('now', ?)",
         (question_id, _SERVER_SOLVE_CLAIM_TTL),
     )
+    token = uuid.uuid4().hex
     cur = conn.execute(
-        "INSERT OR IGNORE INTO solution_claims (question_id) "
-        "SELECT ? WHERE NOT EXISTS "
+        "INSERT OR IGNORE INTO solution_claims (question_id, owner_token) "
+        "SELECT ?, ? WHERE NOT EXISTS "
         "(SELECT 1 FROM solutions WHERE question_id = ?)",
-        (question_id, question_id),
+        (question_id, token, question_id),
     )
     conn.commit()  # publish the claim before any slow/paid network request
-    return cur.rowcount == 1
+    return token if cur.rowcount == 1 else None
 
 
-def _release_server_solve(conn, question_id: int) -> None:
-    conn.execute("DELETE FROM solution_claims WHERE question_id = ?", (question_id,))
+def _release_server_solve(conn, question_id: int, owner_token: str) -> None:
+    """Release only this owner's claim (a TTL reclaim may have reassigned it)."""
+    conn.execute(
+        "DELETE FROM solution_claims WHERE question_id = ? AND owner_token = ?",
+        (question_id, owner_token),
+    )
     conn.commit()
 
 
@@ -1966,7 +1978,8 @@ def exam_finalize_reading(session_id: int) -> dict:
             for row in _deck_question_rows(conn, session_id):
                 if _latest_solution_row(conn, row["id"]) is not None:
                     continue
-                if not _claim_server_solve(conn, row["id"]):
+                claim_token = _claim_server_solve(conn, row["id"])
+                if not claim_token:
                     continue
                 try:
                     start_index = (row["page_number"] or 1) - 1
@@ -2033,7 +2046,7 @@ def exam_finalize_reading(session_id: int) -> dict:
                     if cur.rowcount:
                         server_solved += 1
                 finally:
-                    _release_server_solve(conn, row["id"])
+                    _release_server_solve(conn, row["id"], claim_token)
 
         deck = _exam_deck(conn, session_id)
         if locked:

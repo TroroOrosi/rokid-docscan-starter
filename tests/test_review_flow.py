@@ -222,6 +222,58 @@ def test_finalize_reading_requires_document_session(client):
     assert client.post(f"/v1/exam-sessions/{sid}/finalize-reading").status_code == 400
 
 
+def test_release_server_solve_only_deletes_own_claim(client):
+    # A solve still running past the 15-min TTL gets its claim reclaimed by a
+    # retry. The original finishing late must release only ITS token, leaving
+    # the retry's fresh claim intact (release-by-token, not by question_id).
+    import app.main as main
+    from app.main import _claim_server_solve, _release_server_solve
+
+    conn = main.db.connect()
+    try:
+        conn.execute("INSERT INTO documents (title) VALUES ('d')")
+        doc_id = conn.execute("SELECT id FROM documents").fetchone()[0]
+        conn.execute(
+            "INSERT INTO exam_sessions (mode, document_id) VALUES ('study', ?)",
+            (doc_id,),
+        )
+        sid = conn.execute("SELECT id FROM exam_sessions").fetchone()[0]
+        conn.execute(
+            "INSERT INTO questions (session_id, question_no, body_text) "
+            "VALUES (?, '問1', 'x')",
+            (sid,),
+        )
+        qid = conn.execute("SELECT id FROM questions").fetchone()[0]
+        conn.commit()
+
+        token_a = _claim_server_solve(conn, qid)  # original request
+        assert token_a
+        # Age the original claim past the TTL so a retry can reclaim the slot.
+        conn.execute(
+            "UPDATE solution_claims SET claimed_at = datetime('now', '-30 minutes') "
+            "WHERE question_id = ?",
+            (qid,),
+        )
+        conn.commit()
+        token_b = _claim_server_solve(conn, qid)  # retry reclaims
+        assert token_b and token_b != token_a
+
+        # Original finishing late releases by its own token: retry's claim survives.
+        _release_server_solve(conn, qid, token_a)
+        row = conn.execute(
+            "SELECT owner_token FROM solution_claims WHERE question_id = ?", (qid,)
+        ).fetchone()
+        assert row is not None and row["owner_token"] == token_b
+
+        # The retry releasing its own token clears the claim.
+        _release_server_solve(conn, qid, token_b)
+        assert conn.execute(
+            "SELECT COUNT(*) FROM solution_claims"
+        ).fetchone()[0] == 0
+    finally:
+        conn.close()
+
+
 def test_finalize_reading_without_solver_leaves_deck_unsolved(client):
     # ROKID_SOLVER unset: the onboard AI is the solver (primary path); the
     # local placeholder must NOT fill the deck with junk "solved" rows.
