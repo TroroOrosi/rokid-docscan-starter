@@ -8,6 +8,7 @@ declared expected_total_pages.
 """
 
 import importlib
+import threading
 
 import pytest
 from fastapi.testclient import TestClient
@@ -184,6 +185,61 @@ def test_finalize_rejects_leading_sparse_index(client):
     r = client.post(f"/v1/documents/{doc_id}/finalize")
     assert r.status_code == 409
     assert "registered=[2]" in r.json()["detail"]
+
+
+def test_finalize_rechecks_pages_after_slow_analysis(client, monkeypatch):
+    """A page added while a slow analyzer runs must prevent ready status."""
+    import app.main as main
+    from app.analyzers.base import AnalyzerResult
+
+    started = threading.Event()
+    release = threading.Event()
+
+    class BlockingAnalyzer:
+        name = "blocking-test"
+        provider_version = "test-1"
+        offline = True
+
+        def analyze(self, *, image_path=None, ocr_text=None, max_summary_len=48):
+            started.set()
+            if not release.wait(timeout=5):
+                raise AssertionError("test analyzer was not released")
+            return AnalyzerResult(text=ocr_text, summary="summary")
+
+        def info(self):
+            return {
+                "name": self.name,
+                "provider_version": self.provider_version,
+                "offline": self.offline,
+            }
+
+    monkeypatch.setattr(main, "get_analyzer", lambda: BlockingAnalyzer())
+    doc_id = _new_doc(client)
+    _add_text_page(client, doc_id, 0, "解析前のページ")
+
+    outcome = {}
+
+    def run_finalize():
+        outcome["response"] = client.post(f"/v1/documents/{doc_id}/finalize")
+
+    worker = threading.Thread(target=run_finalize)
+    worker.start()
+    try:
+        assert started.wait(timeout=2)
+        _add_text_page(client, doc_id, 2, "解析中に追加された疎なページ")
+    finally:
+        release.set()
+        worker.join(timeout=5)
+
+    assert not worker.is_alive()
+    response = outcome["response"]
+    assert response.status_code == 409
+    assert "changed during finalization" in response.json()["detail"]
+
+    body = _status(client, doc_id).json()
+    assert body["status"] == "open"
+    assert body["page_indexes"] == [0, 2]
+    assert body["recommended_action"] == "review_page_indexes"
 
 
 def test_legacy_ready_sparse_document_cannot_start_navigation(client):
