@@ -263,9 +263,13 @@ def test_image_query_vs_textonly_candidate_uses_text_signal():
     assert sc.confidence == matching.TEXT_EXACT_CONF
 
 
-def test_both_phash_scoring_unchanged():
-    # Regression: with both pHashes present, confidence must equal the
-    # historical formula _phash_confidence(hamming) + graded OCR bonus.
+def test_both_phash_scoring_floors_at_text_verdict():
+    # With both pHashes present the visual formula still governs, but the
+    # recognized text is the primary signal: confidence is floored at the
+    # text-only verdict so a weak/stale optional frame cannot suppress an
+    # exact recognized-text match. Here seed 8 vs 42 is a weak frame (visual
+    # 0.0), so the historical formula would have scored 0.35 (NO_PAGE); the
+    # exact text keeps it a HIT at TEXT_EXACT_CONF.
     ph_a = phash_hex(make_image(seed=8))
     ph_b = phash_hex(make_image(seed=42))
     text = "invoice 2026 total"
@@ -275,11 +279,44 @@ def test_both_phash_scoring_unchanged():
         query_ocr_text=text,
     )
     d = hamming(ph_a, ph_b)
-    expected = max(
-        0.0, min(1.0, matching._phash_confidence(d) + matching.OCR_MD5_BONUS)
-    )
+    visual_formula = min(1.0, matching._phash_confidence(d) + matching.OCR_MD5_BONUS)
+    expected = max(visual_formula, matching.TEXT_EXACT_CONF)
     assert sc.hamming == d
     assert sc.confidence == round(expected, 4)
+    assert sc.confidence >= matching.CONF_OK  # HIT, not NO_PAGE
+
+
+def test_pure_image_scoring_unchanged():
+    # 画像同士のスコアは数値不変: with no recognized text the text floor is 0.0,
+    # so even a weak frame scores by the visual formula alone (no perturbation
+    # from the text-primary floor).
+    ph_a = phash_hex(make_image(seed=8))
+    ph_b = phash_hex(make_image(seed=42))  # visually different -> weak
+    sc = score_candidate(ph_a, None, _cand(0, ph_b))
+    d = hamming(ph_a, ph_b)
+    assert sc.confidence == round(matching._phash_confidence(d), 4)
+
+
+def test_weak_optional_frame_does_not_suppress_exact_text():
+    # Codex review: an optional legacy image that is stale/weak
+    # (hamming >= HAMMING_WEAK) must not turn an EXACT recognized-text match
+    # into a NO_PAGE. Sending the same text WITHOUT the image HITs at
+    # TEXT_EXACT_CONF; attaching a bad frame must not change that verdict.
+    ph_a = phash_hex(make_image(seed=8))
+    ph_b = phash_hex(make_image(seed=42))
+    assert hamming(ph_a, ph_b) >= matching.HAMMING_WEAK  # premise: weak frame
+    text = "問1 次の式を展開せよ (x+1)(x-1)"
+    with_image = score_candidate(
+        ph_a, ocr_md5(text),
+        _cand(0, ph_b, ocr_md5=ocr_md5(text), ocr_text=normalize_ocr_text(text)),
+        query_ocr_text=text,
+    )
+    text_only = score_candidate(
+        None, ocr_md5(text),
+        _cand(0, "", ocr_md5=ocr_md5(text), ocr_text=normalize_ocr_text(text)),
+        query_ocr_text=text,
+    )
+    assert with_image.confidence == text_only.confidence == matching.TEXT_EXACT_CONF
 
 
 def test_zero_valued_phash_still_compares_visually():

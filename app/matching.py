@@ -259,20 +259,27 @@ def score_candidate(
     bonus, ocr_match, similarity = _ocr_signal(
         query_ocr_md5, query_ocr_text, candidate, query_vision_text
     )
+    exact = bool(
+        query_ocr_md5
+        and candidate.ocr_md5
+        and query_ocr_md5 == candidate.ocr_md5
+    )
     if _has_hash(query_phash) and _has_hash(candidate.phash):
-        # Visual comparison (both sides carry a pHash): unchanged formula.
+        # Visual comparison (both sides carry a pHash): unchanged graded
+        # formula. The pHash is a *compat* input, though, and the recognized
+        # text is primary — so a weak/stale optional frame must not drag an
+        # EXACT recognized-text match below the verdict that same text earns on
+        # its own (sending the text without the image HITs at TEXT_EXACT_CONF).
+        # No usable text (pure image-vs-image) leaves the score untouched.
         distance: int | None = hamming(query_phash, candidate.phash)
         visual = _phash_confidence(distance)
-        confidence = max(0.0, min(1.0, visual + bonus))
+        confidence = min(1.0, visual + bonus)
+        if exact:
+            confidence = max(confidence, _text_only_confidence(True, similarity))
     else:
         # 撮影しない text-only comparison: confidence comes from the text
         # signal alone; exact MD5 outranks graded similarity.
         distance = None
-        exact = bool(
-            query_ocr_md5
-            and candidate.ocr_md5
-            and query_ocr_md5 == candidate.ocr_md5
-        )
         confidence = _text_only_confidence(exact, similarity)
     return ScoredCandidate(
         page_id=candidate.page_id,

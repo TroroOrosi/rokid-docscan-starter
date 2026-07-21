@@ -141,6 +141,55 @@ def test_snippet_anchor_is_case_insensitive(conn):
     assert "3.2" in r["hits"][0]["snippet"]
 
 
+def test_snippet_keeps_body_value_when_vision_unrelated(conn):
+    # Codex review: when the query matched only the OCR body, the snippet must
+    # not spend half its budget on unrelated vision text and drop a body value
+    # that sits past the first ~60 characters (it previously fit the 120-char
+    # body window).
+    from app.retrieval import retrieve_context
+
+    body = "設問について。" + "あ" * 60 + "答えは東京都である。" + "い" * 60
+    unrelated_vision = (
+        "図: 富士山の標高に関する詳細な解説がここに延々と記載されています" + "う" * 40
+    )
+    conn.execute("INSERT OR IGNORE INTO documents (id, title) VALUES (1, 'doc1')")
+    conn.execute(
+        "INSERT INTO pages (document_id, page_index, image_path, phash, "
+        "ocr_text, vision_text, summary) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (1, 0, None, "", body, unrelated_vision, None),
+    )
+    conn.commit()
+
+    r = retrieve_context(conn, "設問の答えは何か")
+    assert r["hits"], "page must be recalled by its body"
+    assert "東京都" in r["hits"][0]["snippet"], (
+        "a body value must not be crowded out by an unmatched vision reserve"
+    )
+    assert "東京都" in r["context"]
+
+
+def test_short_figure_query_strips_display_header(conn):
+    # Codex review: a figure-only question is stored with the
+    # 【図・画像の読み取り】 display header in its body; retrieval must strip that
+    # header from the query so a short value ("42") still takes the short-query
+    # containment path and recalls its supporting vision page instead of being
+    # bloated below _MIN_SCORE by the header's bigrams.
+    from app.retrieval import retrieve_context
+
+    conn.execute("INSERT OR IGNORE INTO documents (id, title) VALUES (1, 'doc1')")
+    conn.execute(
+        "INSERT INTO pages (document_id, page_index, image_path, phash, "
+        "ocr_text, vision_text, summary) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (1, 0, None, "", "", "図: 全長は42.195キロメートル", None),
+    )
+    conn.commit()
+
+    r = retrieve_context(conn, "【図・画像の読み取り】\n42")
+    assert r["hits"], "the short figure query must recall the vision page"
+    assert r["hits"][0]["page_index"] == 0
+    assert "42" in r["context"]
+
+
 def test_boilerplate_header_does_not_recall_unrelated_vision_page(conn):
     # The 【図・画像の読み取り】 display header must NOT be part of the scored
     # text: otherwise a figure-vocabulary query overlaps the boilerplate of

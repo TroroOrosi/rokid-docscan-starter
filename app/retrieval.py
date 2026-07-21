@@ -25,6 +25,23 @@ from .matching import normalize_ocr_text
 _MIN_SCORE = 0.06
 _SNIPPET_LEN = 120
 
+# The display label _page_material / layout prepend to a figure reading. It is
+# display-only boilerplate: it must never participate in retrieval scoring, on
+# the page side (_scored_material drops it) OR the query side — a question body
+# stored via _page_material still carries it, so _strip_display_header removes
+# it from the query before scoring (otherwise a short figure query like "42"
+# looks long, skips the short-query containment path, and its token denominator
+# is inflated by the header's bigrams).
+_FIGURE_HEADER = "【図・画像の読み取り】"
+
+
+def _strip_display_header(text: str | None) -> str:
+    """Drop the 【図・画像の読み取り】 display label lines, keep the content."""
+    if not text:
+        return ""
+    kept = [ln for ln in text.splitlines() if ln.strip() != _FIGURE_HEADER]
+    return "\n".join(kept).strip()
+
 
 def _scored_material(ocr_text: str | None, vision_text: str | None) -> str:
     """Raw body + figure reading for SCORING (no display boilerplate).
@@ -36,6 +53,12 @@ def _scored_material(ocr_text: str | None, vision_text: str | None) -> str:
     """
     parts = [t.strip() for t in (ocr_text, vision_text) if t and t.strip()]
     return "\n".join(parts)
+
+
+def _contains_anchor(text: str, query_tokens: set[str]) -> bool:
+    """True when a query term (>=2 chars) occurs in text (case-insensitive)."""
+    low = text.lower()
+    return any(len(t) >= 2 and t.lower() in low for t in query_tokens)
 
 
 def _window(text: str, query_tokens: set[str], budget: int) -> str:
@@ -65,15 +88,25 @@ def _window(text: str, query_tokens: set[str], budget: int) -> str:
 def _snippet(body: str, vision: str, query_tokens: set[str]) -> str:
     """Build a snippet that keeps the matched value across body + figure text.
 
-    Truncating the combined text from the start drops a figure/table value in
-    the appended `vision_text` when the OCR body alone exceeds the budget.
-    When both are present the figure reading is always given part of the
-    budget (it holds the values a figure question needs); otherwise the single
-    side is windowed on the match.
+    The budget goes to the component the query actually matched, so evidence is
+    never crowded out by the other side:
+      - only the body matched  -> the whole budget windows the body (a value
+        past the first ~60 chars is no longer dropped to reserve room for
+        unrelated vision text),
+      - only the figure reading matched -> the whole budget windows it (a value
+        in `vision_text` appended after a long body still survives),
+      - both (or neither directly — recalled by fuzzy overlap) -> split so each
+        side keeps part of the budget.
     """
     body = body.strip()
     vision = vision.strip()
     if body and vision:
+        body_hit = _contains_anchor(body, query_tokens)
+        vision_hit = _contains_anchor(vision, query_tokens)
+        if body_hit and not vision_hit:
+            return _window(body, query_tokens, _SNIPPET_LEN)
+        if vision_hit and not body_hit:
+            return _window(vision, query_tokens, _SNIPPET_LEN)
         v = _window(vision, query_tokens, _SNIPPET_LEN // 2)
         b = _window(body, query_tokens, _SNIPPET_LEN - len(v) - 1)
         return f"{b}\n{v}".strip()
@@ -116,7 +149,10 @@ def retrieve_context(
 
     Safe on an empty store or empty query (returns empty results).
     """
-    query_norm = normalize_ocr_text(query_text) if query_text else ""
+    # A question body stored via _page_material carries the 【図・画像の読み取り】
+    # display label; drop it before scoring so it mirrors the header-free page
+    # material and a short figure query is not inflated by boilerplate.
+    query_norm = normalize_ocr_text(_strip_display_header(query_text))
     empty = {"context": "", "evidence_pages": [], "hits": []}
     if not query_norm:
         return empty

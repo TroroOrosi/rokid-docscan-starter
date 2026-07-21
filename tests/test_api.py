@@ -3,7 +3,7 @@ import importlib
 import pytest
 from fastapi.testclient import TestClient
 
-from app.matching import HAMMING_STRONG, HAMMING_WEAK
+from app.matching import CONF_OK, HAMMING_STRONG, HAMMING_WEAK
 from tests.conftest import image_bytes, make_image
 
 
@@ -386,9 +386,14 @@ def test_match_image_query_vision_mismatch_gets_no_exact_bonus(client):
     assert by_index[0]["ocr_match"] is False
     # The full-text bonus goes only to the page whose figure agrees...
     assert by_index[1]["confidence"] > by_index[0]["confidence"]
-    # ...while the visually unrelated frame still keeps the compat image
-    # path from claiming a HIT (text is a bonus, not a verdict, there).
-    assert body_json["verdict"] != "HIT"
+    # ...so the mismatched-figure page never reaches a HIT on the body alone.
+    assert by_index[0]["confidence"] < CONF_OK
+    # The page whose body AND figure reading exactly match is a legitimate HIT
+    # even though the optional legacy frame is visually unrelated: image is a
+    # compat input and the recognized text is primary, so a bad optional frame
+    # must not suppress an exact recognized-text match.
+    assert body_json["verdict"] == "HIT"
+    assert body_json["candidates"][0]["page_index"] == 1
 
 
 def test_match_full_signal_hit_outranks_partial_exact_body(client):
