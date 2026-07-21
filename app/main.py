@@ -14,9 +14,11 @@ import io
 import json
 import os
 import re
+import sqlite3
+import threading
 import time
 import uuid
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
@@ -970,9 +972,48 @@ def _question_or_404(conn, session_id: int, question_id: int):
     return row
 
 
-def _solution_from_row(row) -> "object":
+def _legacy_solution_evidence_page_base(row, question_row) -> int | None:
+    """Identify legacy bare-page semantics without rewriting API v1 data.
+
+    Before ``evidence_refs_json`` existed, solve/retrieval routes stored raw
+    0-based retrieval indexes, while the onboard/deck paths stored user-facing
+    1-based page numbers. The question metadata and the exact deck span let us
+    distinguish the repository's historical writers at display time. Unknown
+    custom non-deck solver rows follow the old SolveResult contract (indexes).
+    """
+    if row["evidence_refs_json"] is not None:
+        return None
+    try:
+        pages = json.loads(row["evidence_pages_json"] or "[]")
+    except (TypeError, ValueError):
+        return None
+    if not pages:
+        return None
+    if row["solver_name"] == "onboard" or row["served_by"] == "onboard":
+        return 1
+    try:
+        meta = json.loads(question_row["structure_json"] or "null")
+    except (TypeError, ValueError):
+        meta = None
+    if isinstance(meta, dict) and (meta.get("deck") or "page_indexes" in meta):
+        span = meta.get("page_indexes") or []
+        one_based_span = [index + 1 for index in span if isinstance(index, int)]
+        if one_based_span and pages == one_based_span:
+            return 1
+        page_number = question_row["page_number"]
+        if not one_based_span and page_number and pages == [page_number]:
+            return 1
+    return 0
+
+
+def _solution_from_row(row, question_row=None) -> "object":
     from .solvers import SolveResult
 
+    extras = {}
+    if question_row is not None:
+        page_base = _legacy_solution_evidence_page_base(row, question_row)
+        if page_base is not None:
+            extras["_evidence_pages_base"] = page_base
     return SolveResult(
         answer=row["answer"] or "",
         solution_steps=json.loads(row["solution_steps_json"] or "[]"),
@@ -983,6 +1024,7 @@ def _solution_from_row(row) -> "object":
         evidence_pages=json.loads(row["evidence_pages_json"] or "[]"),
         evidence_refs=json.loads(row["evidence_refs_json"] or "[]"),
         raw_reasoning=row["raw_reasoning"] or "",
+        extras=extras,
     )
 
 
@@ -1263,7 +1305,7 @@ def get_question_view(
         answer_box = json.loads(q["answer_box_json"]) if q["answer_box_json"] else None
         return {
             "glasses_view": build_glasses_view(
-                _solution_from_row(sol),
+                _solution_from_row(sol, q),
                 stage=stage,
                 page=page,
                 question_no=q["question_no"],
@@ -1821,6 +1863,45 @@ def _question_evidence_pages(conn, question_id: int) -> list[int]:
 
 
 _SERVER_SOLVE_CLAIM_TTL = "-15 minutes"
+_CLAIM_HEARTBEAT_SECONDS = 30.0
+
+
+@contextmanager
+def _claim_heartbeat(renew, *, name: str):
+    """Renew a SQLite claim while its optional paid provider call is live."""
+    stopped = threading.Event()
+
+    def _run() -> None:
+        while not stopped.wait(_CLAIM_HEARTBEAT_SECONDS):
+            try:
+                if not renew():
+                    return
+            except sqlite3.OperationalError:
+                # A transient SQLite writer lock is safe to retry on the next
+                # heartbeat; one missed renewal is far shorter than the TTL.
+                continue
+
+    thread = threading.Thread(target=_run, name=name, daemon=True)
+    thread.start()
+    try:
+        yield
+    finally:
+        stopped.set()
+        thread.join(timeout=1.0)
+
+
+def _renew_server_solve_claim(question_id: int, owner_token: str) -> bool:
+    heartbeat_conn = db.connect()
+    try:
+        cur = heartbeat_conn.execute(
+            "UPDATE solution_claims SET claimed_at = datetime('now') "
+            "WHERE question_id = ? AND owner_token = ?",
+            (question_id, owner_token),
+        )
+        heartbeat_conn.commit()
+        return cur.rowcount == 1
+    finally:
+        heartbeat_conn.close()
 
 
 def _claim_server_solve(conn, question_id: int) -> str | None:
@@ -1834,7 +1915,8 @@ def _claim_server_solve(conn, question_id: int) -> str | None:
     """
     conn.execute(
         "DELETE FROM solution_claims "
-        "WHERE question_id = ? AND claimed_at < datetime('now', ?)",
+        "WHERE question_id = ? AND (owner_token IS NULL "
+        "OR claimed_at < datetime('now', ?))",
         (question_id, _SERVER_SOLVE_CLAIM_TTL),
     )
     token = uuid.uuid4().hex
@@ -1982,20 +2064,24 @@ def exam_finalize_reading(session_id: int) -> dict:
                 if not claim_token:
                     continue
                 try:
-                    start_index = (row["page_number"] or 1) - 1
-                    doc_material = _document_material(conn, doc_id, start_index)
-                    retrieved = retrieve_context(conn, row["body_text"])
-                    context = _exam_prompt_context(
-                        session, doc_material, retrieved["context"]
-                    )
-                    question = Question(
-                        question_no=row["question_no"],
-                        body_text=row["body_text"],
-                        choices=json.loads(row["choices_json"] or "[]"),
-                        subject=row["subject"],
-                        context=context,
-                    )
-                    result, solver = solve_with_fallback(question=question)
+                    with _claim_heartbeat(
+                        lambda: _renew_server_solve_claim(row["id"], claim_token),
+                        name=f"solve-claim-{row['id']}",
+                    ):
+                        start_index = (row["page_number"] or 1) - 1
+                        doc_material = _document_material(conn, doc_id, start_index)
+                        retrieved = retrieve_context(conn, row["body_text"])
+                        context = _exam_prompt_context(
+                            session, doc_material, retrieved["context"]
+                        )
+                        question = Question(
+                            question_no=row["question_no"],
+                            body_text=row["body_text"],
+                            choices=json.loads(row["choices_json"] or "[]"),
+                            subject=row["subject"],
+                            context=context,
+                        )
+                        result, solver = solve_with_fallback(question=question)
                     served_by = result.extras.get("served_by", solver.name)
                     if served_by == "local":
                         # A failed/missing cloud adapter fell back to the
@@ -2359,7 +2445,7 @@ def exam_review(session_id: int, index: int = 0, view_page: int = 0) -> dict:
         index = max(0, min(index, len(rows) - 1))
         qrow = rows[index]
         srow = _latest_solution_row(conn, qrow["id"])
-        solution = _solution_from_row(srow) if srow else None
+        solution = _solution_from_row(srow, qrow) if srow else None
         view = build_review_view(
             solution,
             index=index,
@@ -2561,33 +2647,54 @@ def _find_explain_visit(
 
 def _claim_explain(
     conn, *, session_id: int, page_index: int, page_signature: str
-) -> bool:
+) -> str | None:
     # A crashed worker must not block this page forever.
     conn.execute(
         "DELETE FROM explain_claims WHERE session_id = ? AND page_index = ? "
-        "AND page_signature = ? AND claimed_at < datetime('now', ?)",
+        "AND page_signature = ? AND (owner_token IS NULL "
+        "OR claimed_at < datetime('now', ?))",
         (session_id, page_index, page_signature, _EXPLAIN_CLAIM_TTL),
     )
+    token = uuid.uuid4().hex
     cur = conn.execute(
         "INSERT OR IGNORE INTO explain_claims "
-        "(session_id, page_index, page_signature) VALUES (?, ?, ?)",
-        (session_id, page_index, page_signature),
+        "(session_id, page_index, page_signature, owner_token) "
+        "VALUES (?, ?, ?, ?)",
+        (session_id, page_index, page_signature, token),
     )
     # Publish ownership before an optional paid provider is invoked.
     conn.commit()
-    return cur.rowcount == 1
+    return token if cur.rowcount == 1 else None
 
 
 def _release_explain_claim(
-    conn, *, session_id: int, page_index: int, page_signature: str
+    conn, *, session_id: int, page_index: int, page_signature: str,
+    owner_token: str,
 ) -> None:
     conn.execute(
         "DELETE FROM explain_claims WHERE session_id = ? AND page_index = ? "
-        "AND page_signature = ?",
-        (session_id, page_index, page_signature),
+        "AND page_signature = ? AND owner_token = ?",
+        (session_id, page_index, page_signature, owner_token),
     )
     # Also publishes the winner's explain_views row.
     conn.commit()
+
+
+def _renew_explain_claim(
+    session_id: int, page_index: int, page_signature: str, owner_token: str
+) -> bool:
+    heartbeat_conn = db.connect()
+    try:
+        cur = heartbeat_conn.execute(
+            "UPDATE explain_claims SET claimed_at = datetime('now') "
+            "WHERE session_id = ? AND page_index = ? AND page_signature = ? "
+            "AND owner_token = ?",
+            (session_id, page_index, page_signature, owner_token),
+        )
+        heartbeat_conn.commit()
+        return cur.rowcount == 1
+    finally:
+        heartbeat_conn.close()
 
 
 def _explain_wait_timeout() -> HTTPException:
@@ -2606,8 +2713,8 @@ def _acquire_or_wait_for_explain(
     page_signature: str,
     after_id: int,
     timeout_seconds: float = _EXPLAIN_WAIT_SECONDS,
-) -> tuple[bool, object | None]:
-    """Return ownership, or wait for and return the current winner's row."""
+) -> tuple[str | None, object | None]:
+    """Return an owner token, or wait for and return the winner's row."""
     deadline = time.monotonic() + timeout_seconds
     while True:
         # Check the result before claiming. A winner may have committed and
@@ -2620,16 +2727,17 @@ def _acquire_or_wait_for_explain(
             after_id=after_id,
         )
         if row is not None:
-            return False, row
+            return None, row
         if time.monotonic() >= deadline:
             raise _explain_wait_timeout()
 
-        if _claim_explain(
+        claim_token = _claim_explain(
             conn,
             session_id=session_id,
             page_index=page_index,
             page_signature=page_signature,
-        ):
+        )
+        if claim_token is not None:
             # Close the race where a previous winner committed/released after
             # our first result lookup but before this claim was acquired.
             row = _find_explain_visit(
@@ -2645,9 +2753,10 @@ def _acquire_or_wait_for_explain(
                     session_id=session_id,
                     page_index=page_index,
                     page_signature=page_signature,
+                    owner_token=claim_token,
                 )
-                return False, row
-            return True, None
+                return None, row
+            return claim_token, None
 
         while True:
             row = _find_explain_visit(
@@ -2658,7 +2767,7 @@ def _acquire_or_wait_for_explain(
                 after_id=after_id,
             )
             if row is not None:
-                return False, row
+                return None, row
             if time.monotonic() >= deadline:
                 raise _explain_wait_timeout()
             claim = conn.execute(
@@ -2674,13 +2783,21 @@ def _acquire_or_wait_for_explain(
 
 
 def _explain_result_from_row(row) -> ExplainResult:
+    extras = json.loads(row["result_extras_json"] or "{}")
+    if not isinstance(extras, dict):
+        extras = {}
+    evidence_pages = json.loads(row["evidence_pages_json"] or "[]")
+    if row["evidence_refs_json"] is None and evidence_pages:
+        # Pre-1.11 explainers persisted raw retrieval page_index values. Mark
+        # the display base without changing the legacy API v1 list itself.
+        extras["_evidence_pages_base"] = 0
     return ExplainResult(
         lines=json.loads(row["hud_lines_json"] or "[]"),
         detail=row["detail"] or "",
-        evidence_pages=json.loads(row["evidence_pages_json"] or "[]"),
+        evidence_pages=evidence_pages,
         evidence_refs=json.loads(row["evidence_refs_json"] or "[]"),
         confidence=row["confidence"] if row["confidence"] is not None else 1.0,
-        extras=json.loads(row["result_extras_json"] or "{}"),
+        extras=extras,
     )
 
 
@@ -2803,14 +2920,7 @@ def explain_page(
             and last["page_signature"] == page_signature
         )
         if cached:
-            result = ExplainResult(
-                lines=json.loads(last["hud_lines_json"] or "[]"),
-                detail=last["detail"] or "",
-                evidence_pages=json.loads(last["evidence_pages_json"] or "[]"),
-                evidence_refs=json.loads(last["evidence_refs_json"] or "[]"),
-                confidence=last["confidence"] if last["confidence"] is not None else 1.0,
-                extras=json.loads(last["result_extras_json"] or "{}"),
-            )
+            result = _explain_result_from_row(last)
             retrieved_hits = json.loads(last["context_hits_json"] or "[]")
             explainer_info = json.loads(last["explainer_json"] or "{}")
             if not explainer_info:
@@ -2837,14 +2947,14 @@ def explain_page(
             )
             retrieved_hits = retrieved["hits"]
             explainer_info = {}
-            owns_call, won_row = _acquire_or_wait_for_explain(
+            claim_token, won_row = _acquire_or_wait_for_explain(
                 conn,
                 session_id=session_id,
                 page_index=page_index,
                 page_signature=page_signature,
                 after_id=last_id,
             )
-            if not owns_call:
+            if claim_token is None:
                 result = _explain_result_from_row(won_row)
                 retrieved_hits = json.loads(won_row["context_hits_json"] or "[]")
                 explainer_info = json.loads(won_row["explainer_json"] or "{}")
@@ -2855,7 +2965,13 @@ def explain_page(
             else:
                 try:
                     explainer = get_explainer()
-                    result = explainer.explain(req)
+                    with _claim_heartbeat(
+                        lambda: _renew_explain_claim(
+                            session_id, page_index, page_signature, claim_token
+                        ),
+                        name=f"explain-claim-{session_id}-{page_index}",
+                    ):
+                        result = explainer.explain(req)
                     if not result.evidence_refs:
                         result.evidence_refs = retrieved["evidence_refs"]
                     if not result.evidence_pages:
@@ -2884,6 +3000,7 @@ def explain_page(
                         session_id=session_id,
                         page_index=page_index,
                         page_signature=page_signature,
+                        owner_token=claim_token,
                     )
         if session["status"] == "ready":
             conn.execute(
