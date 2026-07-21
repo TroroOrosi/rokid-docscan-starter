@@ -97,6 +97,32 @@ def test_scan_status_without_expected_total_reports_null_completeness(client):
     assert body["recommended_action"] == "finalize"
 
 
+def test_scan_status_sparse_without_expected_total_avoids_dead_finalize(client):
+    # Registered indexes [0, 2] break the 0..N-1 invariant that finalize
+    # enforces. Without a declared total we can't name the missing page, but we
+    # must not recommend a finalize that would immediately 409.
+    doc_id = _new_doc(client)
+    _add_text_page(client, doc_id, 0, "問1 本文")
+    _add_text_page(client, doc_id, 2, "問3 本文")  # gap at index 1
+    body = _status(client, doc_id).json()
+    assert body["expected_total_pages"] is None
+    assert body["page_indexes"] == [0, 2]
+    assert body["recommended_action"] == "review_page_indexes"
+    # The advice is honest: the finalize it steered away from really does 409.
+    assert client.post(f"/v1/documents/{doc_id}/finalize").status_code == 409
+
+
+def test_scan_status_dense_without_expected_total_still_finalizes(client):
+    # A contiguous 0..N-1 document without a declared total is finalize-able,
+    # so the sparse guard must not hijack the normal recommendation.
+    doc_id = _new_doc(client)
+    _add_text_page(client, doc_id, 0, "問1")
+    _add_text_page(client, doc_id, 1, "問2")
+    body = _status(client, doc_id).json()
+    assert body["page_indexes"] == [0, 1]
+    assert body["recommended_action"] == "finalize"
+
+
 def test_scan_status_expected_total_pages_bounds(client):
     doc_id = _new_doc(client)
     for bad in (0, -1, 10_001):

@@ -571,6 +571,18 @@ def get_document_scan_status(
             "reread_missing_pages" if doc["status"] != "ready"
             else "start_new_document"
         )
+    elif expected_total_pages is None and sorted(registered) != list(
+        range(len(registered))
+    ):
+        # No declared total, so we can't name specific missing pages — but the
+        # registered indexes alone already break the 0..N-1 navigation invariant
+        # that finalize and session creation enforce (_require_dense_page_indexes
+        # would 409). Don't point at a dead finalize; send the user to index
+        # review, or a fresh document once the doc is finalized.
+        recommended = (
+            "review_page_indexes" if doc["status"] != "ready"
+            else "start_new_document"
+        )
     elif pages_without_text:
         # Replacing an EXISTING index stays possible after finalize, but is
         # frozen once a bound session finished reading.
