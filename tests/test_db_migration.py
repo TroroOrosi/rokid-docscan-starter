@@ -38,6 +38,14 @@ def _make_legacy_db(path):
             verdict TEXT, hud_lines_json TEXT, detail TEXT,
             evidence_pages_json TEXT, confidence REAL, viewed_at TEXT
         );
+        CREATE TABLE solution_claims (
+            question_id INTEGER PRIMARY KEY, claimed_at TEXT
+        );
+        CREATE TABLE explain_claims (
+            session_id INTEGER, page_index INTEGER, page_signature TEXT,
+            claimed_at TEXT,
+            PRIMARY KEY (session_id, page_index, page_signature)
+        );
         INSERT INTO documents (title) VALUES ('legacy');
         INSERT INTO pages (document_id, page_index, image_path, phash, ocr_text)
             VALUES (1, 0, 'old.png', 'abc123', 'legacy page');
@@ -94,6 +102,10 @@ def test_legacy_pages_image_path_becomes_nullable(tmp_path, monkeypatch):
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
             (claim_table,),
         ).fetchone()
+        claim_cols = {
+            r[1] for r in conn.execute(f"PRAGMA table_info({claim_table})")
+        }
+        assert "owner_token" in claim_cols
     # The legacy-table rebuild drops indexes attached to the old table; the
     # migration must recreate the hot-path document lookup immediately.
     indexes = {r[1] for r in conn.execute("PRAGMA index_list(pages)")}
