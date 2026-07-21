@@ -61,24 +61,34 @@ def _contains_anchor(text: str, query_tokens: set[str]) -> bool:
     return any(len(t) >= 2 and t.lower() in low for t in query_tokens)
 
 
+def _earliest_anchor(search_text: str, query_tokens: set[str], min_len: int) -> int | None:
+    """Earliest index at which any query term of >= min_len chars occurs."""
+    anchor = None
+    for term in sorted(
+        (t for t in query_tokens if len(t) >= min_len), key=len, reverse=True
+    ):
+        idx = search_text.find(term.lower())
+        if idx != -1 and (anchor is None or idx < anchor):
+            anchor = idx
+    return anchor
+
+
 def _window(text: str, query_tokens: set[str], budget: int) -> str:
     """A <=budget slice of text anchored on the earliest query-term match.
 
-    Prefer longer query terms as case-insensitive anchors, falling back to the
-    head when none match, so the returned excerpt actually contains the value
-    used by normalized retrieval scoring.
+    Prefer longer (>=2 char) query terms as case-insensitive anchors — single
+    chars are noise for a normal query. But when a genuinely single-character
+    query is what the containment scoring path matched, fall back to a
+    single-char anchor rather than defaulting to the head, so the matched value
+    is not dropped when it sits past the budget in a long page.
     """
     text = text.strip()
     if len(text) <= budget:
         return text
     search_text = text.lower()
-    anchor = None
-    for term in sorted(
-        (t for t in query_tokens if len(t) >= 2), key=len, reverse=True
-    ):
-        idx = search_text.find(term.lower())
-        if idx != -1 and (anchor is None or idx < anchor):
-            anchor = idx
+    anchor = _earliest_anchor(search_text, query_tokens, 2)
+    if anchor is None:
+        anchor = _earliest_anchor(search_text, query_tokens, 1)
     if anchor is None:
         anchor = 0
     start = max(0, anchor - budget // 4)

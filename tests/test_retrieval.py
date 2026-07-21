@@ -168,6 +168,22 @@ def test_snippet_keeps_body_value_when_vision_unrelated(conn):
     assert "東京都" in r["context"]
 
 
+def test_single_char_query_snippet_keeps_far_value(conn):
+    # Codex review: a single-character query recalls via the containment path,
+    # but single chars are filtered from the multi-char snippet anchors. The
+    # snippet must fall back to a single-char anchor so a matched value past the
+    # first 120 chars is not dropped in favour of the page head.
+    from app.retrieval import retrieve_context
+
+    lead_in = "この文章は非常に長い前置きであり特定の語を含まない説明が延々と続きます" * 4
+    _add_page(conn, 1, 0, lead_in + "酵素の働き")  # only "酵" occurrence is past 120
+
+    r = retrieve_context(conn, "酵")
+    assert r["hits"], "single-char query must recall the page"
+    assert "酵" in r["hits"][0]["snippet"], "the matched char's context must survive"
+    assert "酵" in r["context"]
+
+
 def test_short_figure_query_strips_display_header(conn):
     # Codex review: a figure-only question is stored with the
     # 【図・画像の読み取り】 display header in its body; retrieval must strip that

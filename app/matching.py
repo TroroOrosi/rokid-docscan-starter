@@ -267,15 +267,18 @@ def score_candidate(
     if _has_hash(query_phash) and _has_hash(candidate.phash):
         # Visual comparison (both sides carry a pHash): unchanged graded
         # formula. The pHash is a *compat* input, though, and the recognized
-        # text is primary — so a weak/stale optional frame must not drag an
-        # EXACT recognized-text match below the verdict that same text earns on
-        # its own (sending the text without the image HITs at TEXT_EXACT_CONF).
-        # No usable text (pure image-vs-image) leaves the score untouched.
+        # text is primary — so a weak/stale optional frame must not drag a
+        # usable recognized-text match (exact MD5 OR strong graded similarity)
+        # below the verdict that same text earns on its own text-only path.
+        # The image can only ADD confidence, never subtract it. Pure
+        # image-vs-image has no usable text (text floor 0.0), so image scores
+        # stay numerically identical.
         distance: int | None = hamming(query_phash, candidate.phash)
         visual = _phash_confidence(distance)
-        confidence = min(1.0, visual + bonus)
-        if exact:
-            confidence = max(confidence, _text_only_confidence(True, similarity))
+        confidence = max(
+            min(1.0, visual + bonus),
+            _text_only_confidence(exact, similarity),
+        )
     else:
         # 撮影しない text-only comparison: confidence comes from the text
         # signal alone; exact MD5 outranks graded similarity.

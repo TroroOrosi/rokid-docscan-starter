@@ -112,23 +112,31 @@ def test_ocr_exact_text_gives_full_bonus():
     assert sc.ocr_similarity == 1.0
 
 
-def test_ocr_near_text_gives_partial_bonus():
-    # Visually different so the OCR signal is what moves confidence.
+def test_weak_frame_floors_graded_text_too():
+    # Codex review: the text-primary floor must protect strong GRADED matches,
+    # not only exact MD5. A weak optional frame (visual 0.0) + a near-exact
+    # recognized text (one OCR typo, similarity >= OCR_MATCH_RATIO) must floor
+    # at the graded text verdict instead of collapsing to visual+bonus and
+    # returning NO_PAGE — sending the same text without the image would HIT.
     ph_a = phash_hex(make_image(seed=8))
-    ph_b = phash_hex(make_image(seed=42))
+    ph_b = phash_hex(make_image(seed=42))  # visually different -> weak frame
     stored = "invoice 2026 total amount"
     noisy = "invoice 2026 total arnount"  # OCR-style noise (m->rn)
-    no_text = score_candidate(ph_a, None, _cand(0, ph_b))
-    partial = score_candidate(
+    assert _ratio(noisy, stored) >= matching.OCR_MATCH_RATIO  # strong, not exact
+    with_image = score_candidate(
         ph_a, ocr_md5(noisy),
         _cand(0, ph_b, ocr_md5=ocr_md5(stored), ocr_text=stored),
         query_ocr_text=noisy,
     )
-    # similarity strictly between 0 and 1, and it lifts confidence over no-text
-    assert 0.0 < partial.ocr_similarity < 1.0
-    assert partial.confidence > no_text.confidence
-    # but less than a full exact-match bonus
-    assert partial.confidence < no_text.confidence + matching.OCR_MD5_BONUS
+    text_only = score_candidate(
+        None, ocr_md5(noisy),
+        _cand(0, "", ocr_md5=ocr_md5(stored), ocr_text=stored),
+        query_ocr_text=noisy,
+    )
+    assert 0.0 < with_image.ocr_similarity < 1.0             # graded, not exact
+    assert with_image.confidence == text_only.confidence     # floored to text verdict
+    assert with_image.confidence >= matching.CONF_OK          # HIT, not NO_PAGE
+    assert with_image.confidence < matching.TEXT_EXACT_CONF    # below an exact match
 
 
 def test_ocr_unrelated_text_gives_no_bonus():
