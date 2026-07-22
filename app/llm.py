@@ -148,7 +148,10 @@ class LLMClient:
         gemini -> generate_content over inline audio. Anthropic has no ASR.
         """
         if self.provider == "openai":
-            model = os.environ.get("ROKID_TRANSCRIBE_MODEL", "gpt-4o-transcribe")
+            # `or` (not get's default arg) so an explicitly empty env value —
+            # e.g. docker-compose passing `ROKID_TRANSCRIBE_MODEL=` when unset —
+            # still falls back to the default instead of requesting model="".
+            model = os.environ.get("ROKID_TRANSCRIBE_MODEL") or "gpt-4o-transcribe"
             resp = self._sdk.audio.transcriptions.create(model=model, file=("audio", audio))
             return (getattr(resp, "text", "") or "").strip()
         if self.provider == "gemini":

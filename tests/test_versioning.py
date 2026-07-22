@@ -16,23 +16,23 @@ def test_version_info_pins_every_contract():
     # simultaneous doc/pin update CLAUDE.md requires (no silent version drift —
     # docs hardcode several of these, e.g. user-operation-guide's JSON block).
     assert version.version_info() == {
-        "app_version": "0.10.0",
-        "api_version": "1.10.0",
+        "app_version": "0.11.0",
+        "api_version": "1.11.0",
         "matcher_version": "1.2.0",
         "hud_contract_version": "1.0.0",
         "analyzer_api_version": "1.0.0",
-        "solver_api_version": "1.1.0",
+        "solver_api_version": "1.2.0",
         "extractor_api_version": "1.0.0",
-        "explainer_api_version": "1.0.0",
-        "glasses_view_contract_version": "1.4.0",
+        "explainer_api_version": "1.1.0",
+        "glasses_view_contract_version": "1.5.0",
         "overlay_contract_version": "1.1.0",
     }
 
 
-def test_contract_versions_reflect_silent_capture_contract():
-    # 1.4.0: review-deck view (merged single stream per problem) + reading_done
-    # ack + official gesture vocabulary (1.3.0 added sentence pagination).
-    assert version.GLASSES_VIEW_CONTRACT_VERSION == "1.4.0"
+def test_contract_versions_reflect_document_qualified_evidence():
+    # 1.5.0: evidence labels carry document id + 1-based page number (1.4.0
+    # added the review deck and official gesture vocabulary).
+    assert version.GLASSES_VIEW_CONTRACT_VERSION == "1.5.0"
 
 
 def test_contract_versions_reflect_phase234():
@@ -42,12 +42,13 @@ def test_contract_versions_reflect_phase234():
     assert version.OVERLAY_CONTRACT_VERSION == "1.1.0"
 
 
-def test_contract_versions_reflect_explain_sessions():
-    # 1.10.0: text-first /match and /questions (image optional/compat) plus
-    #         GET /scan-status (1.9.0 added reading-phase recovery and the
-    #         real-mode lock consistency on session GET).
-    assert version.API_VERSION == "1.10.0"
-    assert version.EXPLAINER_API_VERSION == "1.0.0"
+def test_contract_versions_reflect_review_hardening():
+    # 1.11.0: additive structured evidence, claimed/cached explanation
+    # metadata/history, and sparse-index rejection. Legacy field semantics
+    # remain unchanged.
+    assert version.API_VERSION == "1.11.0"
+    assert version.SOLVER_API_VERSION == "1.2.0"
+    assert version.EXPLAINER_API_VERSION == "1.1.0"
 
 
 # --- analyzer registry ------------------------------------------------------

@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
-"""Matching evaluation -> JSON report.
+"""Matching robustness evaluation -> JSON report.
 
 Run AFTER the user captures real sample pages (or against generated samples)
 to sanity-check matching quality and get threshold suggestions before tuning.
 
 Two modes:
-  1. --db PATH     : evaluate against pages already stored in a SQLite DB.
-                     For each stored page, re-match its own image and check
-                     that it returns itself (self-match accuracy).
-  2. --synthetic N : generate N synthetic pages, then match each -> expect HIT.
+  1. --db PATH     : load each stored page image, derive deterministic
+                     crop/rotation/compression variants, and match those
+                     variants against the stored pHash index.
+  2. --synthetic N : generate N synthetic pages and evaluate the same variants.
+
+The variants are an offline robustness proxy, not a substitute for independent
+real-device recaptures. Unlike the old exact self-match, however, they exercise
+non-identical query images and produce a usable Hamming-distance spread.
 
 Output: a JSON report (stdout or --out FILE) with version stamps, per-page
 results, hamming distribution, and suggested thresholds. No network, no creds.
@@ -21,10 +25,13 @@ Examples:
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import sqlite3
 import sys
 from pathlib import Path
+
+from PIL import Image
 
 # allow running as a plain script
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -44,63 +51,132 @@ def _percentile(values: list[int], pct: float) -> float:
     return s[lo] + (s[hi] - s[lo]) * (k - lo)
 
 
-def _suggest_thresholds(self_hammings: list[int]) -> dict:
-    """Suggest HAMMING_STRONG/WEAK from the spread of correct self-matches."""
-    if not self_hammings:
+def _suggest_thresholds(variant_hammings: list[int]) -> dict:
+    """Suggest HAMMING_STRONG/WEAK from expected-page variant distances."""
+    if not variant_hammings:
         return {
             "hamming_strong": matching.HAMMING_STRONG,
             "hamming_weak": matching.HAMMING_WEAK,
             "note": "no data; keeping current defaults",
         }
-    p95 = _percentile(self_hammings, 0.95)
+    p95 = _percentile(variant_hammings, 0.95)
     strong = max(2, int(round(p95)) + 2)
     weak = max(strong + 6, int(round(p95)) + 10)
     return {
         "hamming_strong": strong,
         "hamming_weak": weak,
-        "based_on_p95_self_hamming": round(p95, 2),
-        "note": "self-matches should sit below hamming_strong",
+        "based_on_p95_variant_hamming": round(p95, 2),
+        "note": "derived variants should sit below hamming_strong",
     }
 
 
-def _eval_candidates(items: list[tuple[int, int, str]]) -> dict:
-    """items: list of (page_id, page_index, phash_hex). Self-match each."""
+def _query_variants(image: Image.Image) -> list[tuple[str, Image.Image]]:
+    """Return deterministic, non-identical recapture approximations."""
+    image = image.convert("RGB")
+    width, height = image.size
+    margin = min(
+        max(1, round(min(width, height) * 0.02)),
+        max(0, (min(width, height) - 1) // 2),
+    )
+    cropped = (
+        image.crop((margin, margin, width - margin, height - margin)).resize(
+            (width, height), Image.Resampling.LANCZOS
+        )
+        if margin
+        else image.copy()
+    )
+    rotated = image.rotate(
+        1.25,
+        resample=Image.Resampling.BICUBIC,
+        expand=False,
+        fillcolor="white",
+    )
+    buf = io.BytesIO()
+    image.save(buf, format="JPEG", quality=70, optimize=False)
+    buf.seek(0)
+    with Image.open(buf) as jpeg:
+        compressed = jpeg.convert("RGB").copy()
+    return [
+        ("center_crop_2pct", cropped),
+        ("rotate_1_25deg", rotated),
+        ("jpeg_quality_70", compressed),
+    ]
+
+
+def _eval_candidates(
+    items: list[tuple[int, int, str]],
+    queries: list[tuple[int, str, str]],
+) -> dict:
+    """Match (expected_page_id, variant_name, pHash) queries to candidates."""
     candidates = [
         Candidate(page_id=pid, page_index=idx, phash=ph, ocr_md5=None)
         for pid, idx, ph in items
     ]
+    candidate_hashes = {pid: ph for pid, _idx, ph in items}
+    candidate_indexes = {pid: idx for pid, idx, _ph in items}
     results = []
-    self_hammings = []
-    hits = 0
-    for pid, idx, ph in items:
-        best, verdict, _ = match(ph, None, candidates)
-        correct = best is not None and best.page_id == pid
-        hits += int(correct and verdict == "HIT")
-        if best is not None:
-            self_hammings.append(best.hamming)
+    variant_hammings = []
+    hits = 0    # expected page ranked first AND the app would accept it (HIT)
+    top1 = 0    # expected page ranked first, regardless of verdict
+    for expected_pid, variant, query_hash in queries:
+        best, verdict, _ = match(query_hash, None, candidates)
+        ranked_first = best is not None and best.page_id == expected_pid
+        # The live /v1/match path only surfaces a page the app acts on when the
+        # verdict clears the confidence bar (HIT). A variant whose expected page
+        # merely ranks first while the verdict is LOW_CONF/NO_PAGE is NOT a
+        # usable match — the headline accuracy counts HITs only, otherwise a
+        # dataset of consistently low-confidence variants could report
+        # accuracy=1.0 while the app would reject every query.
+        usable = ranked_first and verdict == "HIT"
+        top1 += int(ranked_first)
+        hits += int(usable)
+        expected_hamming = matching.hamming(
+            query_hash, candidate_hashes[expected_pid]
+        )
+        variant_hammings.append(expected_hamming)
         results.append(
             {
-                "page_id": pid,
-                "page_index": idx,
+                "expected_page_id": expected_pid,
+                "page_index": candidate_indexes[expected_pid],
+                "variant": variant,
                 "verdict": verdict,
                 "matched_page_id": best.page_id if best else None,
-                "hamming": best.hamming if best else None,
+                "matched_hamming": best.hamming if best else None,
+                "expected_hamming": expected_hamming,
                 "confidence": best.confidence if best else 0.0,
-                "correct": correct,
+                "ranked_first": ranked_first,
+                "usable": usable,
             }
         )
-    total = len(items)
+    total = len(queries)
+    hit_rate = round(hits / total, 4) if total else 0.0
+    top1_accuracy = round(top1 / total, 4) if total else 0.0
     return {
-        "page_count": total,
+        "page_count": len(items),
+        "query_count": total,
+        # Headline accuracy = usable matches only (expected page ranked first
+        # AND verdict==HIT), i.e. what the live matcher would actually return
+        # to the app. This is also the value printed by the CLI.
+        "variant_match_count": hits,
+        "variant_match_accuracy": hit_rate,
+        "variant_hit_count": hits,
+        "variant_hit_rate": hit_rate,
+        # Ranking-only diagnostic: expected page ranked first even when the
+        # verdict is below HIT (the app would low-confidence or reject it). Sits
+        # at or above variant_match_accuracy; a gap flags threshold headroom.
+        "variant_top1_count": top1,
+        "variant_top1_accuracy": top1_accuracy,
+        # Kept as compatibility aliases for existing report consumers. These
+        # now refer to perturbed variants, never exact source hashes.
         "self_match_hits": hits,
-        "self_match_accuracy": round(hits / total, 4) if total else 0.0,
+        "self_match_accuracy": hit_rate,
         "hamming_distribution": {
-            "min": min(self_hammings) if self_hammings else None,
-            "p50": _percentile(self_hammings, 0.5),
-            "p95": _percentile(self_hammings, 0.95),
-            "max": max(self_hammings) if self_hammings else None,
+            "min": min(variant_hammings) if variant_hammings else None,
+            "p50": _percentile(variant_hammings, 0.5),
+            "p95": _percentile(variant_hammings, 0.95),
+            "max": max(variant_hammings) if variant_hammings else None,
         },
-        "suggested_thresholds": _suggest_thresholds(self_hammings),
+        "suggested_thresholds": _suggest_thresholds(variant_hammings),
         "results": results,
     }
 
@@ -112,7 +188,7 @@ def from_db(db_path: str) -> dict:
         # This tool tunes the image-compat pHash thresholds; 撮影しない
         # text-only pages (phash='') carry no visual signal to evaluate.
         rows = conn.execute(
-            "SELECT id, page_index, phash FROM pages WHERE phash != '' "
+            "SELECT id, page_index, phash, image_path FROM pages WHERE phash != '' "
             "ORDER BY document_id, page_index"
         ).fetchall()
         skipped = conn.execute(
@@ -120,12 +196,38 @@ def from_db(db_path: str) -> dict:
         ).fetchone()[0]
     finally:
         conn.close()
-    items = [(r["id"], r["page_index"], r["phash"]) for r in rows]
-    report = _eval_candidates(items)
+    items = []
+    queries = []
+    skipped_missing_images = 0
+    for row in rows:
+        # The live /v1/match path ranks EVERY stored pHash row, so a page whose
+        # image is gone is still a candidate other pages' variants can collide
+        # with. Register it as a candidate regardless; only skip generating
+        # queries for it (no source image to perturb). Dropping it entirely
+        # would hide false matches and make threshold tuning look safer than
+        # production.
+        items.append((row["id"], row["page_index"], row["phash"]))
+        path = Path(row["image_path"] or "")
+        if not path.is_file():
+            skipped_missing_images += 1
+            continue
+        try:
+            with Image.open(path) as source:
+                image = source.convert("RGB").copy()
+        except (OSError, ValueError):
+            skipped_missing_images += 1
+            continue
+        queries.extend(
+            (row["id"], name, phash_hex(variant))
+            for name, variant in _query_variants(image)
+        )
+    report = _eval_candidates(items, queries)
     report["source"] = {
         "mode": "db",
         "path": db_path,
+        "query_kind": "derived_image_variants",
         "skipped_text_only_pages": skipped,
+        "skipped_missing_images": skipped_missing_images,
     }
     return report
 
@@ -149,12 +251,21 @@ def from_synthetic(n: int) -> dict:
         return img
 
     items = []
+    queries = []
     for i in range(n):
         img = make(seed=10 + i * 17)
         items.append((i + 1, i, phash_hex(img)))
+        queries.extend(
+            (i + 1, name, phash_hex(variant))
+            for name, variant in _query_variants(img)
+        )
         _ = phash(img)  # exercise int path too
-    report = _eval_candidates(items)
-    report["source"] = {"mode": "synthetic", "n": n}
+    report = _eval_candidates(items, queries)
+    report["source"] = {
+        "mode": "synthetic",
+        "n": n,
+        "query_kind": "derived_image_variants",
+    }
     return report
 
 
@@ -182,7 +293,13 @@ def main() -> int:
     text = json.dumps(report, indent=2, ensure_ascii=False)
     if args.out:
         Path(args.out).write_text(text, encoding="utf-8")
-        print(f"wrote {args.out} (accuracy={report['self_match_accuracy']})")
+        # Headline is the usable/HIT accuracy (what the app would accept); top1
+        # is ranking-only, so a gap between them flags confidence headroom.
+        print(
+            f"wrote {args.out} "
+            f"(match_accuracy={report['variant_match_accuracy']} "
+            f"top1={report['variant_top1_accuracy']})"
+        )
     else:
         print(text)
     return 0

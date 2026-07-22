@@ -97,6 +97,41 @@ def test_transcriber_setup_failure_falls_back(tmp_path, monkeypatch):
     assert tr.transcribe_audio(path, provided_transcript="fb", client=None) == "fb"
 
 
+def test_empty_transcribe_model_env_falls_back_to_default(tmp_path, monkeypatch):
+    # docker-compose passes ROKID_TRANSCRIBE_MODEL="" when unset; the OpenAI
+    # request must still use the default model, not an empty model="".
+    monkeypatch.setenv("ROKID_TRANSCRIBE_MODEL", "")
+    captured: dict = {}
+
+    def _create(**kw):
+        captured.update(kw)
+        return SimpleNamespace(text="ok")
+
+    sdk = SimpleNamespace(
+        audio=SimpleNamespace(transcriptions=SimpleNamespace(create=_create))
+    )
+    client = LLMClient(sdk, provider="openai", model="unused")
+    out = transcribe_audio(_write_audio(tmp_path), client=client)
+    assert out == "ok"
+    assert captured["model"] == "gpt-4o-transcribe"
+
+
+def test_transcribe_model_env_overrides_default(tmp_path, monkeypatch):
+    monkeypatch.setenv("ROKID_TRANSCRIBE_MODEL", "whisper-x")
+    captured: dict = {}
+
+    def _create(**kw):
+        captured.update(kw)
+        return SimpleNamespace(text="ok")
+
+    sdk = SimpleNamespace(
+        audio=SimpleNamespace(transcriptions=SimpleNamespace(create=_create))
+    )
+    client = LLMClient(sdk, provider="openai", model="unused")
+    transcribe_audio(_write_audio(tmp_path), client=client)
+    assert captured["model"] == "whisper-x"
+
+
 def test_audio_media_type_detection():
     assert _audio_media_type(b"RIFF0000WAVEmore") == "audio/wav"
     assert _audio_media_type(b"ID3xxxxx") == "audio/mpeg"

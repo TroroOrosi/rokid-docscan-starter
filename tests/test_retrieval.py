@@ -61,6 +61,7 @@ def test_returns_most_similar_page(conn):
     # The photosynthesis page (index 0) should rank first.
     assert r["hits"][0]["page_index"] == 0
     assert 0 in r["evidence_pages"]
+    assert r["evidence_refs"][0] == {"document_id": 1, "page_number": 1}
     assert "光合成" in r["context"]
     assert r["retriever"] == "lexical"
 

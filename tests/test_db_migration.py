@@ -29,9 +29,36 @@ def _make_legacy_db(path):
             UNIQUE(document_id, page_index)
         );
         CREATE TABLE exam_sessions (id INTEGER PRIMARY KEY, mode TEXT);
+        CREATE TABLE solutions (
+            id INTEGER PRIMARY KEY, question_id INTEGER,
+            evidence_pages_json TEXT
+        );
+        CREATE TABLE explain_views (
+            id INTEGER PRIMARY KEY, session_id INTEGER, page_index INTEGER,
+            verdict TEXT, hud_lines_json TEXT, detail TEXT,
+            evidence_pages_json TEXT, confidence REAL, viewed_at TEXT
+        );
+        CREATE TABLE solution_claims (
+            question_id INTEGER PRIMARY KEY, claimed_at TEXT
+        );
+        CREATE TABLE explain_claims (
+            session_id INTEGER, page_index INTEGER, page_signature TEXT,
+            claimed_at TEXT,
+            PRIMARY KEY (session_id, page_index, page_signature)
+        );
         INSERT INTO documents (title) VALUES ('legacy');
         INSERT INTO pages (document_id, page_index, image_path, phash, ocr_text)
             VALUES (1, 0, 'old.png', 'abc123', 'legacy page');
+        -- Legacy explain evidence is the explainer's raw 0-based page_index.
+        -- API v1 compatibility requires preserving it exactly on upgrade.
+        INSERT INTO explain_views
+            (id, session_id, page_index, verdict, evidence_pages_json)
+            VALUES (1, 1, 0, 'HIT', '[0]');
+        -- Legacy solution evidence is a MIX: onboard ingest / question-span
+        -- rows already wrote 1-based page_number. This row stands in for that
+        -- already-correct case and must survive the upgrade unchanged.
+        INSERT INTO solutions (id, question_id, evidence_pages_json)
+            VALUES (1, 1, '[1, 2]');
         """
     )
     conn.commit()
@@ -57,6 +84,28 @@ def test_legacy_pages_image_path_becomes_nullable(tmp_path, monkeypatch):
     # image_path NOT NULL relaxed; vision_text added.
     assert cols["image_path"][3] == 0  # notnull flag cleared
     assert "vision_text" in cols
+    solution_cols = {
+        r[1] for r in conn.execute("PRAGMA table_info(solutions)")
+    }
+    assert "evidence_refs_json" in solution_cols
+    explain_cols = {
+        r[1] for r in conn.execute("PRAGMA table_info(explain_views)")
+    }
+    assert {
+        "evidence_refs_json",
+        "context_hits_json",
+        "explainer_json",
+        "result_extras_json",
+    } <= explain_cols
+    for claim_table in ("solution_claims", "explain_claims"):
+        assert conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (claim_table,),
+        ).fetchone()
+        claim_cols = {
+            r[1] for r in conn.execute(f"PRAGMA table_info({claim_table})")
+        }
+        assert "owner_token" in claim_cols
     # The legacy-table rebuild drops indexes attached to the old table; the
     # migration must recreate the hot-path document lookup immediately.
     indexes = {r[1] for r in conn.execute("PRAGMA index_list(pages)")}
@@ -72,4 +121,47 @@ def test_legacy_pages_image_path_becomes_nullable(tmp_path, monkeypatch):
     conn.commit()
     got = conn.execute("SELECT image_path, vision_text FROM pages WHERE page_index=1").fetchone()
     assert got["image_path"] is None and got["vision_text"] == "図の読み取り"
+    conn.close()
+
+
+def test_legacy_evidence_semantics_are_preserved(tmp_path, monkeypatch):
+    import json
+
+    db_file = tmp_path / "legacy.db"
+    _make_legacy_db(db_file)
+
+    monkeypatch.setenv("ROKID_DATA_DIR", str(tmp_path))
+    import app.config as config
+    importlib.reload(config)
+    import app.db as db
+    importlib.reload(db)
+
+    db.init_db(db_path=db_file)
+
+    conn = sqlite3.connect(str(db_file))
+    conn.row_factory = sqlite3.Row
+    # API v1 values are opaque compatibility data: neither the legacy
+    # 0-based explain row nor the already-1-based onboard row may be shifted.
+    view = conn.execute(
+        "SELECT evidence_pages_json FROM explain_views WHERE id = 1"
+    ).fetchone()
+    assert json.loads(view["evidence_pages_json"]) == [0]
+    # solutions is a mixed table: the already-1-based onboard/question-span
+    # evidence must also remain exactly as stored.
+    sol = conn.execute(
+        "SELECT evidence_pages_json FROM solutions WHERE id = 1"
+    ).fetchone()
+    assert json.loads(sol["evidence_pages_json"]) == [1, 2]
+
+    # Idempotent: re-initializing an already-migrated DB must not reinterpret
+    # either legacy value.
+    db.init_db(db_path=db_file)
+    view2 = conn.execute(
+        "SELECT evidence_pages_json FROM explain_views WHERE id = 1"
+    ).fetchone()
+    assert json.loads(view2["evidence_pages_json"]) == [0]
+    sol2 = conn.execute(
+        "SELECT evidence_pages_json FROM solutions WHERE id = 1"
+    ).fetchone()
+    assert json.loads(sol2["evidence_pages_json"]) == [1, 2]
     conn.close()

@@ -103,6 +103,31 @@ def test_long_rationale_paginates_by_sentence():
     assert last["nav"]["next"] is None
 
 
+def test_evidence_labels_are_one_based_and_document_qualified():
+    sol = _sol(
+        evidence_pages=[1, 3],
+        evidence_refs=[
+            {"document_id": 7, "page_number": 1},
+            {"document_id": 9, "page_number": 3},
+        ],
+    )
+    joined = "\n".join(build_glasses_view(sol, stage="rationale")["lines"])
+    assert "D7:P01,D9:P03" in joined
+    assert "P00" not in joined
+
+
+def test_legacy_zero_based_evidence_is_shifted_only_for_display():
+    sol = _sol(
+        evidence_pages=[0, 2],
+        extras={"_evidence_pages_base": 0},
+    )
+    joined = "\n".join(build_glasses_view(sol, stage="rationale")["lines"])
+    assert "P01,P03" in joined
+    assert "P00" not in joined
+    # The API v1 compatibility value remains untouched.
+    assert sol.evidence_pages == [0, 2]
+
+
 def test_explain_detail_paginates_by_sentence():
     """explain-mode long detail paginates into >1 view page (max 3 lines each)."""
     detail = "".join(f"詳細文{i}。" for i in range(8))

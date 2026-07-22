@@ -8,6 +8,7 @@ declared expected_total_pages.
 """
 
 import importlib
+import threading
 
 import pytest
 from fastapi.testclient import TestClient
@@ -97,6 +98,32 @@ def test_scan_status_without_expected_total_reports_null_completeness(client):
     assert body["recommended_action"] == "finalize"
 
 
+def test_scan_status_sparse_without_expected_total_avoids_dead_finalize(client):
+    # Registered indexes [0, 2] break the 0..N-1 invariant that finalize
+    # enforces. Without a declared total we can't name the missing page, but we
+    # must not recommend a finalize that would immediately 409.
+    doc_id = _new_doc(client)
+    _add_text_page(client, doc_id, 0, "問1 本文")
+    _add_text_page(client, doc_id, 2, "問3 本文")  # gap at index 1
+    body = _status(client, doc_id).json()
+    assert body["expected_total_pages"] is None
+    assert body["page_indexes"] == [0, 2]
+    assert body["recommended_action"] == "review_page_indexes"
+    # The advice is honest: the finalize it steered away from really does 409.
+    assert client.post(f"/v1/documents/{doc_id}/finalize").status_code == 409
+
+
+def test_scan_status_dense_without_expected_total_still_finalizes(client):
+    # A contiguous 0..N-1 document without a declared total is finalize-able,
+    # so the sparse guard must not hijack the normal recommendation.
+    doc_id = _new_doc(client)
+    _add_text_page(client, doc_id, 0, "問1")
+    _add_text_page(client, doc_id, 1, "問2")
+    body = _status(client, doc_id).json()
+    assert body["page_indexes"] == [0, 1]
+    assert body["recommended_action"] == "finalize"
+
+
 def test_scan_status_expected_total_pages_bounds(client):
     doc_id = _new_doc(client)
     for bad in (0, -1, 10_001):
@@ -134,19 +161,105 @@ def test_scan_status_misindexed_page_prioritizes_index_review(client):
     assert body["recommended_action"] == "review_page_indexes"
 
 
-def test_scan_status_gap_and_extra_after_finalize_recommends_new_document(client):
-    # Index corrections are impossible on a finalized document (new indexes
-    # 409, strays cannot be removed) — even with extras present the honest
-    # recovery is a fresh document.
+def test_finalize_rejects_gap_and_extra_before_document_is_frozen(client):
+    # Navigation uses exact 0..N-1 indexes. A sparse document must remain open
+    # and actionable instead of finalizing successfully and later returning a
+    # 404 from current/explain.
     doc_id = _new_doc(client)
     _add_text_page(client, doc_id, 0, "p1")
     _add_text_page(client, doc_id, 2, "p3")
     _add_text_page(client, doc_id, 3, "p2 誤ってindex 3で登録")
-    assert client.post(f"/v1/documents/{doc_id}/finalize").status_code == 200
+    finalize = client.post(f"/v1/documents/{doc_id}/finalize")
+    assert finalize.status_code == 409
+    assert "contiguous from 0" in finalize.json()["detail"]
     body = _status(client, doc_id, expected=3).json()
+    assert body["status"] == "open"
     assert body["missing_page_indexes"] == [1]
     assert body["unexpected_page_indexes"] == [3]
-    assert body["recommended_action"] == "start_new_document"
+    assert body["recommended_action"] == "review_page_indexes"
+
+
+def test_finalize_rejects_leading_sparse_index(client):
+    doc_id = _new_doc(client)
+    _add_text_page(client, doc_id, 2, "誤って3ページ目から登録")
+    r = client.post(f"/v1/documents/{doc_id}/finalize")
+    assert r.status_code == 409
+    assert "registered=[2]" in r.json()["detail"]
+
+
+def test_finalize_rechecks_pages_after_slow_analysis(client, monkeypatch):
+    """A page added while a slow analyzer runs must prevent ready status."""
+    import app.main as main
+    from app.analyzers.base import AnalyzerResult
+
+    started = threading.Event()
+    release = threading.Event()
+
+    class BlockingAnalyzer:
+        name = "blocking-test"
+        provider_version = "test-1"
+        offline = True
+
+        def analyze(self, *, image_path=None, ocr_text=None, max_summary_len=48):
+            started.set()
+            if not release.wait(timeout=5):
+                raise AssertionError("test analyzer was not released")
+            return AnalyzerResult(text=ocr_text, summary="summary")
+
+        def info(self):
+            return {
+                "name": self.name,
+                "provider_version": self.provider_version,
+                "offline": self.offline,
+            }
+
+    monkeypatch.setattr(main, "get_analyzer", lambda: BlockingAnalyzer())
+    doc_id = _new_doc(client)
+    _add_text_page(client, doc_id, 0, "解析前のページ")
+
+    outcome = {}
+
+    def run_finalize():
+        outcome["response"] = client.post(f"/v1/documents/{doc_id}/finalize")
+
+    worker = threading.Thread(target=run_finalize)
+    worker.start()
+    try:
+        assert started.wait(timeout=2)
+        _add_text_page(client, doc_id, 2, "解析中に追加された疎なページ")
+    finally:
+        release.set()
+        worker.join(timeout=5)
+
+    assert not worker.is_alive()
+    response = outcome["response"]
+    assert response.status_code == 409
+    assert "contiguous from 0" in response.json()["detail"]
+
+    body = _status(client, doc_id).json()
+    assert body["status"] == "open"
+    assert body["page_indexes"] == [0, 2]
+    assert body["recommended_action"] == "review_page_indexes"
+
+
+def test_legacy_ready_sparse_document_cannot_start_navigation(client):
+    # Defense in depth for databases created before finalize enforced this
+    # invariant: new sessions fail early with 409 instead of current/explain
+    # returning a surprising page-0 404.
+    import app.main as main
+
+    doc_id = _new_doc(client)
+    _add_text_page(client, doc_id, 2, "旧DBの疎なページ")
+    conn = main.db.connect()
+    try:
+        conn.execute("UPDATE documents SET status = 'ready' WHERE id = ?", (doc_id,))
+        conn.commit()
+    finally:
+        conn.close()
+
+    exam = client.post("/v1/exam-sessions", json={"document_id": doc_id})
+    explain = client.post("/v1/explain-sessions", json={"document_id": doc_id})
+    assert exam.status_code == explain.status_code == 409
 
 
 def test_scan_status_missing_after_finalize_recommends_new_document(client):

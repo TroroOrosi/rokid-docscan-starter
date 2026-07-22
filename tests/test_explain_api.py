@@ -16,6 +16,8 @@ Uses the same conftest.py fixtures as the main test suite.
 from __future__ import annotations
 
 import io
+import threading
+import time
 
 import pytest
 from fastapi.testclient import TestClient
@@ -44,6 +46,10 @@ def client(tmp_path, monkeypatch):
     img_dir.mkdir()
     monkeypatch.setattr("app.config.DB_PATH", db_file)
     monkeypatch.setattr("app.config.IMAGE_DIR", img_dir)
+    # db/main import these constants by value; patch the actual endpoint
+    # references too so this module is isolated and order-independent.
+    monkeypatch.setattr("app.db.DB_PATH", db_file)
+    monkeypatch.setattr("app.main.IMAGE_DIR", img_dir)
     init_db(db_file)
     with TestClient(app) as c:
         yield c
@@ -180,6 +186,171 @@ class TestExplainPage:
     def test_explain_session_not_found_returns_404(self, client):
         r = client.get("/v1/explain-sessions/9999/explain")
         assert r.status_code == 404
+
+    def test_stage_and_scroll_reuse_one_provider_result(
+        self, client, doc_1page, monkeypatch
+    ):
+        from app.explainer import ExplainResult, Explainer
+        from app.explainers import register_explainer
+
+        class CountingExplainer(Explainer):
+            name = "counting-test"
+            provider_version = "test-1"
+            offline = False
+            calls = 0
+
+            def explain(self, req):
+                type(self).calls += 1
+                n = type(self).calls
+                return ExplainResult(
+                    lines=[f"overview-{n}", "", ""],
+                    detail=f"detail-{n}",
+                    confidence=0.8,
+                    extras={"call": n},
+                )
+
+        CountingExplainer.calls = 0
+        register_explainer(CountingExplainer(), replace=True)
+        monkeypatch.setenv("ROKID_EXPLAINER", "counting-test")
+        sid = _create_session(client, doc_1page)
+
+        first = client.get(f"/v1/explain-sessions/{sid}/explain").json()
+        scrolled = client.get(
+            f"/v1/explain-sessions/{sid}/explain", params={"view_page": 999}
+        ).json()
+        detail = client.get(
+            f"/v1/explain-sessions/{sid}/explain", params={"stage": "detail"}
+        ).json()
+
+        assert CountingExplainer.calls == 1
+        assert first["cached"] is False
+        assert scrolled["cached"] is detail["cached"] is True
+        assert first["explainer"] == scrolled["explainer"] == detail["explainer"]
+        assert first["evidence_pages"] and all(
+            page == 0 for page in first["evidence_pages"]
+        )
+        assert all(
+            set(ref) == {"document_id", "page_number"}
+            and ref["page_number"] == 1
+            for ref in first["evidence_refs"]
+        )
+        assert len({
+            (ref["document_id"], ref["page_number"])
+            for ref in first["evidence_refs"]
+        }) == len(first["evidence_refs"])
+
+        history = client.get(f"/v1/explain-sessions/{sid}/history").json()
+        assert len(history["explained_views"]) == 1
+        visit = history["explained_views"][0]
+        assert visit["detail"] == "detail-1"
+        assert visit["result_extras"] == {"call": 1}
+        assert visit["explainer"]["name"] == "counting-test"
+
+    def test_page_only_legacy_explainer_keeps_selection_and_display_base(
+        self, client, doc_1page, monkeypatch
+    ):
+        """A pre-1.1 explainer's selected page index must not be replaced by
+        every retriever ref, and page index 0 must render as P01."""
+        import app.main as main
+        from app.explainer import ExplainResult, Explainer
+        from app.explainers import register_explainer
+
+        class PagesOnlyExplainer(Explainer):
+            name = "pages-only-explain-test"
+            provider_version = "test-1"
+            offline = True
+
+            def explain(self, req):
+                return ExplainResult(
+                    lines=["legacy", "", ""],
+                    detail="legacy detail",
+                    evidence_pages=[0],
+                    confidence=0.8,
+                )
+
+        register_explainer(PagesOnlyExplainer(), replace=True)
+        monkeypatch.setenv("ROKID_EXPLAINER", "pages-only-explain-test")
+        sid = _create_session(client, doc_1page)
+
+        body = client.get(
+            f"/v1/explain-sessions/{sid}/explain",
+            params={"stage": "evidence"},
+        ).json()
+        assert body["evidence_pages"] == [0]
+        assert body["evidence_refs"] == []
+        rendered = "\n".join(body["glasses_view"]["lines"])
+        assert "P01" in rendered
+        assert "P00" not in rendered
+
+        history = client.get(f"/v1/explain-sessions/{sid}/history").json()
+        visit = history["explained_views"][0]
+        assert visit["evidence_pages"] == [0]
+        assert visit["evidence_refs"] == []
+
+        conn = main.db.connect()
+        try:
+            stored = conn.execute(
+                "SELECT evidence_refs_json FROM explain_views "
+                "WHERE session_id = ?",
+                (sid,),
+            ).fetchone()
+            assert stored["evidence_refs_json"] is None
+        finally:
+            conn.close()
+
+    def test_page_reread_refreshes_the_visit_cache(
+        self, client, doc_1page, monkeypatch
+    ):
+        """Re-reading a page (same index, new text) must re-explain, not serve
+        the pre-correction cache."""
+        from app.explainer import ExplainResult, Explainer
+        from app.explainers import register_explainer
+
+        class CountingExplainer(Explainer):
+            name = "reread-count-test"
+            provider_version = "test-1"
+            offline = False
+            calls = 0
+
+            def explain(self, req):
+                type(self).calls += 1
+                n = type(self).calls
+                return ExplainResult(
+                    lines=[f"overview-{n}", "", ""],
+                    detail=f"detail-{n}",
+                    confidence=0.8,
+                    extras={"call": n},
+                )
+
+        CountingExplainer.calls = 0
+        register_explainer(CountingExplainer(), replace=True)
+        monkeypatch.setenv("ROKID_EXPLAINER", "reread-count-test")
+        sid = _create_session(client, doc_1page)
+
+        first = client.get(f"/v1/explain-sessions/{sid}/explain").json()
+        assert first["cached"] is False and CountingExplainer.calls == 1
+
+        # Correct the page in place (finalized doc, no reviewing exam session).
+        r = client.post(
+            f"/v1/documents/{doc_1page}/pages",
+            data={"page_index": 0, "ocr_text": "訂正後の本文 まったく違う内容"},
+            files={"image": ("p0.png", _png_bytes(color=(9, 9, 9)), "image/png")},
+        )
+        assert r.status_code == 201 and r.json()["replaced"] is True
+
+        # Same page index, but its content changed -> refresh once.
+        after = client.get(f"/v1/explain-sessions/{sid}/explain").json()
+        assert after["cached"] is False
+        assert CountingExplainer.calls == 2
+
+        # Unchanged re-request of the corrected page is cached again (no churn).
+        again = client.get(f"/v1/explain-sessions/{sid}/explain").json()
+        assert again["cached"] is True
+        assert CountingExplainer.calls == 2
+
+        # The served/stored result is the post-correction one, not the stale row.
+        history = client.get(f"/v1/explain-sessions/{sid}/history").json()
+        assert history["explained_views"][-1]["detail"] == "detail-2"
 
 
 # ---------------------------------------------------------------------------
@@ -342,6 +513,7 @@ class TestExplainHistory:
         view = body["explained_views"][0]
         assert view["page_index"] == 0
         assert isinstance(view["hud_lines"], list)
+        assert isinstance(view["detail"], str)
 
     def test_history_includes_current_page_index(self, client, doc_3pages):
         sid = _create_session(client, doc_3pages)
@@ -377,6 +549,160 @@ class TestExplainHistory:
         indices = [v["page_index"] for v in r.json()["explained_views"]]
         assert indices.count(0) == 2 and indices.count(1) == 1
 
+
+# ---------------------------------------------------------------------------
+# 6b. concurrency guard on the visit insert (unit-level, deterministic)
+# ---------------------------------------------------------------------------
+
+def test_persist_explain_visit_dedups_race_keeps_revisits(tmp_path, monkeypatch):
+    from app.explainer import ExplainResult
+    from app.main import _persist_explain_visit
+    import app.db as db
+
+    db_file = tmp_path / "visits.db"
+    monkeypatch.setattr("app.db.DB_PATH", db_file)
+    db.init_db(db_file)
+    conn = db.connect(db_file)
+    conn.execute("INSERT INTO documents (title) VALUES ('d')")
+    doc_id = conn.execute("SELECT id FROM documents").fetchone()["id"]
+    conn.execute("INSERT INTO explain_sessions (document_id) VALUES (?)", (doc_id,))
+    sid = conn.execute("SELECT id FROM explain_sessions").fetchone()["id"]
+    conn.commit()
+
+    def _res(tag):
+        return ExplainResult(lines=[tag, "", ""], detail=tag, confidence=0.9, extras={})
+
+    sig = "sig-A"
+    # Winner records the fresh-page visit (snapshot last_id=0).
+    inserted, row = _persist_explain_visit(
+        conn, session_id=sid, page_index=0, page_signature=sig, last_id=0,
+        result=_res("first"), retrieved_hits=[], explainer_info={"name": "x"},
+    )
+    conn.commit()
+    assert inserted is True and row["detail"] == "first"
+    first_id = row["id"]
+
+    # Concurrent loser: same pre-compute snapshot -> guard sees the winner row,
+    # inserts nothing, and returns the winner's row to serve.
+    inserted2, row2 = _persist_explain_visit(
+        conn, session_id=sid, page_index=0, page_signature=sig, last_id=0,
+        result=_res("dup"), retrieved_hits=[], explainer_info={"name": "x"},
+    )
+    conn.commit()
+    assert inserted2 is False
+    assert row2["id"] == first_id and row2["detail"] == "first"
+    assert conn.execute("SELECT COUNT(*) c FROM explain_views").fetchone()["c"] == 1
+
+    # Genuine revisit (snapshot taken after the prior same-page row) still
+    # records a new visit — the guard must not collapse history.
+    inserted3, row3 = _persist_explain_visit(
+        conn, session_id=sid, page_index=0, page_signature=sig, last_id=first_id,
+        result=_res("revisit"), retrieved_hits=[], explainer_info={"name": "x"},
+    )
+    conn.commit()
+    assert inserted3 is True and row3["detail"] == "revisit" and row3["id"] != first_id
+    assert conn.execute("SELECT COUNT(*) c FROM explain_views").fetchone()["c"] == 2
+    conn.close()
+
+
+def test_explain_claim_waiter_reuses_winner_result(tmp_path):
+    from app.explainer import ExplainResult
+    from app.main import (
+        _acquire_or_wait_for_explain,
+        _persist_explain_visit,
+        _release_explain_claim,
+    )
+    import app.db as db
+
+    db_file = tmp_path / "claim-wait.db"
+    db.init_db(db_file)
+    winner = db.connect(db_file)
+    winner.execute("INSERT INTO documents (title) VALUES ('d')")
+    doc_id = winner.execute("SELECT id FROM documents").fetchone()["id"]
+    winner.execute("INSERT INTO explain_sessions (document_id) VALUES (?)", (doc_id,))
+    sid = winner.execute("SELECT id FROM explain_sessions").fetchone()["id"]
+    winner.commit()
+
+    owner_token, row = _acquire_or_wait_for_explain(
+        winner,
+        session_id=sid,
+        page_index=0,
+        page_signature="sig-A",
+        after_id=0,
+    )
+    assert owner_token and row is None
+
+    observed = {}
+
+    def wait_for_winner():
+        waiter = db.connect(db_file)
+        try:
+            observed["value"] = _acquire_or_wait_for_explain(
+                waiter,
+                session_id=sid,
+                page_index=0,
+                page_signature="sig-A",
+                after_id=0,
+                timeout_seconds=2.0,
+            )
+        except BaseException as exc:
+            observed["error"] = exc
+        finally:
+            waiter.close()
+
+    thread = threading.Thread(target=wait_for_winner)
+    thread.start()
+    time.sleep(0.1)
+
+    result = ExplainResult(
+        lines=["winner", "", ""],
+        detail="winner",
+        confidence=0.9,
+        extras={},
+    )
+    inserted, saved = _persist_explain_visit(
+        winner,
+        session_id=sid,
+        page_index=0,
+        page_signature="sig-A",
+        last_id=0,
+        result=result,
+        retrieved_hits=[],
+        explainer_info={"name": "x"},
+    )
+    assert inserted is True and saved is not None
+    _release_explain_claim(
+        winner,
+        session_id=sid,
+        page_index=0,
+        page_signature="sig-A",
+        owner_token=owner_token,
+    )
+
+    thread.join(timeout=3)
+    assert not thread.is_alive()
+    assert "error" not in observed
+    waiter_token, waiter_row = observed["value"]
+    assert waiter_token is None
+    assert waiter_row["detail"] == "winner"
+    winner.close()
+
+
+def test_legacy_explain_row_marks_zero_based_evidence_for_display():
+    from app.main import _explain_result_from_row
+
+    result = _explain_result_from_row(
+        {
+            "hud_lines_json": '["a", "b", "c"]',
+            "detail": "legacy",
+            "evidence_pages_json": "[0, 2]",
+            "evidence_refs_json": None,
+            "confidence": 0.8,
+            "result_extras_json": None,
+        }
+    )
+    assert result.evidence_pages == [0, 2]
+    assert result.extras["_evidence_pages_base"] == 0
 
 # ---------------------------------------------------------------------------
 # 7. /v1/version includes explainers list

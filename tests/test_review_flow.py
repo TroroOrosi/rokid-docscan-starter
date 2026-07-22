@@ -139,10 +139,233 @@ def test_finalize_reading_is_idempotent(client):
     assert again["problem_count"] == first["problem_count"] == 2
 
 
+def test_concurrent_finalize_claims_paid_solve_once(client, monkeypatch):
+    """A double-fired finalize must not double-charge the configured solver."""
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    from app.solvers import SolveResult
+    from app.solvers.registry import register_solver
+
+    entered = threading.Event()
+    release = threading.Event()
+    count_lock = threading.Lock()
+
+    class BlockingSolver:
+        name = "blocking-test"
+        provider_version = "test-1"
+        offline = False
+        calls = 0
+
+        def solve(self, *, question, max_answer_len=64):
+            with count_lock:
+                type(self).calls += 1
+            entered.set()
+            assert release.wait(5), "test did not release the fake provider"
+            return SolveResult(
+                answer="A",
+                solution_steps=["s"],
+                rationale="r",
+                cautions="",
+                answer_confidence=0.9,
+                rationale_confidence=0.9,
+            )
+
+        def info(self):
+            return {
+                "name": self.name,
+                "provider_version": self.provider_version,
+                "offline": self.offline,
+            }
+
+    BlockingSolver.calls = 0
+    register_solver(BlockingSolver(), replace=True)
+    monkeypatch.setenv("ROKID_SOLVER", "blocking-test")
+    doc_id = _doc_with_text_pages(client, ["問1 りんごは何個か"])
+    sid = _new_doc_exam(client, doc_id)["session_id"]
+    url = f"/v1/exam-sessions/{sid}/finalize-reading"
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first_future = pool.submit(client.post, url)
+        assert entered.wait(3), "first request never reached the fake provider"
+        second_future = pool.submit(client.post, url)
+        try:
+            second = second_future.result(timeout=3)
+        finally:
+            release.set()
+        first = first_future.result(timeout=3)
+
+    assert first.status_code == second.status_code == 200
+    assert BlockingSolver.calls == 1
+    assert sorted([first.json()["server_solved"], second.json()["server_solved"]]) == [
+        0,
+        1,
+    ]
+
+    import app.main as main
+
+    conn = main.db.connect()
+    try:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM solutions WHERE question_id IN "
+            "(SELECT id FROM questions WHERE session_id = ?)",
+            (sid,),
+        ).fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM solution_claims").fetchone()[0] == 0
+    finally:
+        conn.close()
+
+
 def test_finalize_reading_requires_document_session(client):
     r = client.post("/v1/exam-sessions", json={"mode": "study"})
     sid = r.json()["session_id"]
     assert client.post(f"/v1/exam-sessions/{sid}/finalize-reading").status_code == 400
+
+
+def test_release_server_solve_only_deletes_own_claim(client):
+    # A solve still running past the 15-min TTL gets its claim reclaimed by a
+    # retry. The original finishing late must release only ITS token, leaving
+    # the retry's fresh claim intact (release-by-token, not by question_id).
+    import app.main as main
+    from app.main import _claim_server_solve, _release_server_solve
+
+    conn = main.db.connect()
+    try:
+        conn.execute("INSERT INTO documents (title) VALUES ('d')")
+        doc_id = conn.execute("SELECT id FROM documents").fetchone()[0]
+        conn.execute(
+            "INSERT INTO exam_sessions (mode, document_id) VALUES ('study', ?)",
+            (doc_id,),
+        )
+        sid = conn.execute("SELECT id FROM exam_sessions").fetchone()[0]
+        conn.execute(
+            "INSERT INTO questions (session_id, question_no, body_text) "
+            "VALUES (?, '問1', 'x')",
+            (sid,),
+        )
+        qid = conn.execute("SELECT id FROM questions").fetchone()[0]
+        conn.commit()
+
+        token_a = _claim_server_solve(conn, qid)  # original request
+        assert token_a
+        # Age the original claim past the TTL so a retry can reclaim the slot.
+        conn.execute(
+            "UPDATE solution_claims SET claimed_at = datetime('now', '-30 minutes') "
+            "WHERE question_id = ?",
+            (qid,),
+        )
+        conn.commit()
+        token_b = _claim_server_solve(conn, qid)  # retry reclaims
+        assert token_b and token_b != token_a
+
+        # Original finishing late releases by its own token: retry's claim survives.
+        _release_server_solve(conn, qid, token_a)
+        row = conn.execute(
+            "SELECT owner_token FROM solution_claims WHERE question_id = ?", (qid,)
+        ).fetchone()
+        assert row is not None and row["owner_token"] == token_b
+
+        # The retry releasing its own token clears the claim.
+        _release_server_solve(conn, qid, token_b)
+        assert conn.execute(
+            "SELECT COUNT(*) FROM solution_claims"
+        ).fetchone()[0] == 0
+    finally:
+        conn.close()
+
+
+def test_server_solve_heartbeat_prevents_live_ttl_reclaim(client, monkeypatch):
+    import time
+
+    import app.main as main
+
+    monkeypatch.setattr(main, "_CLAIM_HEARTBEAT_SECONDS", 0.01)
+    conn = main.db.connect()
+    try:
+        conn.execute("INSERT INTO documents (title) VALUES ('d')")
+        doc_id = conn.execute("SELECT id FROM documents").fetchone()[0]
+        conn.execute(
+            "INSERT INTO exam_sessions (mode, document_id) VALUES ('study', ?)",
+            (doc_id,),
+        )
+        sid = conn.execute("SELECT id FROM exam_sessions").fetchone()[0]
+        conn.execute(
+            "INSERT INTO questions (session_id, question_no, body_text) "
+            "VALUES (?, '問1', 'x')",
+            (sid,),
+        )
+        qid = conn.execute("SELECT id FROM questions").fetchone()[0]
+        conn.commit()
+
+        token = main._claim_server_solve(conn, qid)
+        assert token
+        conn.execute(
+            "UPDATE solution_claims SET claimed_at = datetime('now', '-30 minutes') "
+            "WHERE question_id = ?",
+            (qid,),
+        )
+        conn.commit()
+
+        with main._claim_heartbeat(
+            lambda: main._renew_server_solve_claim(qid, token),
+            name="test-solve-heartbeat",
+        ):
+            deadline = time.monotonic() + 1.0
+            while time.monotonic() < deadline:
+                fresh = conn.execute(
+                    "SELECT claimed_at > datetime('now', '-15 minutes') "
+                    "FROM solution_claims WHERE question_id = ?",
+                    (qid,),
+                ).fetchone()[0]
+                if fresh:
+                    break
+                time.sleep(0.01)
+            assert fresh
+            assert main._claim_server_solve(conn, qid) is None
+        main._release_server_solve(conn, qid, token)
+    finally:
+        conn.close()
+
+
+def test_legacy_solution_evidence_base_is_inferred_per_writer(client):
+    import json
+
+    from app.main import _solution_from_row
+
+    common = {
+        "answer": "A",
+        "solution_steps_json": "[]",
+        "rationale": "r",
+        "cautions": "",
+        "answer_conf": 0.9,
+        "rationale_conf": 0.9,
+        "evidence_refs_json": None,
+        "raw_reasoning": "",
+    }
+    retrieval_row = {
+        **common,
+        "solver_name": "openai",
+        "served_by": "openai",
+        "evidence_pages_json": "[0, 2]",
+    }
+    compat_question = {"structure_json": None, "page_number": None}
+    retrieval = _solution_from_row(retrieval_row, compat_question)
+    assert retrieval.extras["_evidence_pages_base"] == 0
+    assert retrieval.evidence_pages == [0, 2]
+
+    onboard_row = {
+        **common,
+        "solver_name": "onboard",
+        "served_by": "onboard",
+        "evidence_pages_json": "[1, 3]",
+    }
+    deck_question = {
+        "structure_json": json.dumps({"deck": True, "page_indexes": [0, 2]}),
+        "page_number": 1,
+    }
+    onboard = _solution_from_row(onboard_row, deck_question)
+    assert onboard.extras["_evidence_pages_base"] == 1
+    assert onboard.evidence_pages == [1, 3]
 
 
 def test_finalize_reading_without_solver_leaves_deck_unsolved(client):
@@ -663,7 +886,13 @@ def test_review_merged_stream_and_pagination(client):
     )
     r = client.get(f"/v1/exam-sessions/{sid}/review", params={"index": 0})
     assert r.status_code == 200
-    gv = r.json()["glasses_view"]
+    body = r.json()
+    gv = body["glasses_view"]
+    doc_id = client.get(f"/v1/exam-sessions/{sid}").json()["document_id"]
+    assert body["evidence_pages"] == [1]
+    assert body["evidence_refs"] == [
+        {"document_id": doc_id, "page_number": 1}
+    ]
     assert gv["kind"] == "review"
     assert "問1 1/2" in gv["lines"][0]
     assert gv["total_view_pages"] > 1  # long stream paginates
@@ -678,6 +907,8 @@ def test_review_merged_stream_and_pagination(client):
     joined = "\n".join(lines)
     for part in ("答え: 3個", "解法", "根拠", "注意"):
         assert part in joined
+    assert f"D{doc_id}:P01" in joined
+    assert "P00" not in joined
     # index/view_page clamp instead of erroring.
     over = client.get(
         f"/v1/exam-sessions/{sid}/review", params={"index": 99, "view_page": 99}

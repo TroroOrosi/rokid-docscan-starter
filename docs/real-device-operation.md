@@ -38,6 +38,16 @@ pip install -r requirements.txt
 uvicorn app.main:app --host 0.0.0.0 --port 8000   # 既定＝オフライン・全機能
 ```
 
+Docker を使う場合、既定は loopback のためグラスからは接続できません。同一 LAN
+へ明示的に公開するときだけ、認証を同時に有効化します:
+
+```bash
+ROKID_BIND_HOST=0.0.0.0 ROKID_API_KEY='十分に長いランダム値' \
+  docker compose up --build
+```
+
+LAN・インターネット公開では TLS 対応リバースプロキシも必須です。
+
 - 起動時に `data/images/` と `data/docscan.db` が自動生成。
 - `GET /health` が `{"status":"ok", "versions":{…}}` を返せば稼働中。全環境変数は
   [user-operation-guide.md](user-operation-guide.md) §「環境変数一覧」を参照。

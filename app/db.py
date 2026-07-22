@@ -86,10 +86,23 @@ CREATE TABLE IF NOT EXISTS solutions (
     answer_conf        REAL,
     rationale_conf     REAL,
     evidence_pages_json TEXT,
+    evidence_refs_json  TEXT,
     raw_reasoning      TEXT,
     served_by          TEXT,
     user_confirmed     INTEGER NOT NULL DEFAULT 0,
     created_at         TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- One short-lived claim per question while a server-side cloud solver is in
+-- flight. The claim is committed BEFORE the paid call, preventing concurrent
+-- finalize-reading requests from invoking the provider for the same problem.
+-- Stale rows are reclaimed by the application after a crash/timeout.
+CREATE TABLE IF NOT EXISTS solution_claims (
+    question_id INTEGER PRIMARY KEY REFERENCES questions(id) ON DELETE CASCADE,
+    -- Per-claim owner token: a live owner renews claimed_at, and after a true
+    -- stale reclaim the original request can release only ITS claim.
+    owner_token TEXT NOT NULL,
+    claimed_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 -- Live document explanation mode (scan-free, button-only navigation).
@@ -123,8 +136,25 @@ CREATE TABLE IF NOT EXISTS explain_views (
     hud_lines_json      TEXT,
     detail              TEXT,
     evidence_pages_json TEXT,
+    evidence_refs_json  TEXT,
+    context_hits_json   TEXT,
+    explainer_json      TEXT,
+    result_extras_json  TEXT,
     confidence          REAL,
+    page_signature      TEXT,
     viewed_at           TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- One short-lived claim per page visit while an optional paid explainer is
+-- in flight. The winner commits this row before the provider call; concurrent
+-- stage/scroll requests wait for the persisted explain_views result.
+CREATE TABLE IF NOT EXISTS explain_claims (
+    session_id     INTEGER NOT NULL REFERENCES explain_sessions(id) ON DELETE CASCADE,
+    page_index     INTEGER NOT NULL,
+    page_signature TEXT NOT NULL,
+    owner_token    TEXT NOT NULL,
+    claimed_at     TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (session_id, page_index, page_signature)
 );
 
 -- Hot-path lookups: latest solution per question (deck/review/view), a
@@ -155,6 +185,27 @@ _EXAM_SESSION_MIGRATIONS = (
     ("audio_path", "TEXT"),
     ("transcript", "TEXT"),
 )
+
+# Additive result/cache metadata introduced after the original tables. Keeping
+# these in a table map makes old persistent volumes upgrade in place.
+_TABLE_COLUMN_MIGRATIONS = {
+    "solutions": (
+        ("evidence_refs_json", "TEXT"),
+    ),
+    "solution_claims": (
+        ("owner_token", "TEXT"),
+    ),
+    "explain_views": (
+        ("evidence_refs_json", "TEXT"),
+        ("context_hits_json", "TEXT"),
+        ("explainer_json", "TEXT"),
+        ("result_extras_json", "TEXT"),
+        ("page_signature", "TEXT"),
+    ),
+    "explain_claims": (
+        ("owner_token", "TEXT"),
+    ),
+}
 
 
 # Rebuild `pages` to the current schema. Used to relax the original
@@ -200,6 +251,13 @@ def _migrate(conn: sqlite3.Connection) -> None:
     for name, decl in _EXAM_SESSION_MIGRATIONS:
         if name not in cols:
             conn.execute(f"ALTER TABLE exam_sessions ADD COLUMN {name} {decl}")
+
+    for table, migrations in _TABLE_COLUMN_MIGRATIONS.items():
+        existing = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+        for name, decl in migrations:
+            if name not in existing:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
+
 
     # pages: on a legacy DB, image_path was NOT NULL — rebuild the table so
     # text-only (撮影しない) pages with image_path=NULL can be recorded. The

@@ -1,7 +1,7 @@
 # 資料解説モード（explain-sessions）仕様書
 
-**UX 第 v1.7 世代**の撮影なし設計（HTTP エンベロープは現在 `API_VERSION = 1.10.0`、
-`APP_VERSION = 0.10.0`）。登録済み文書を Rokid Glasses
+**UX 第 v1.7 世代**の撮影なし設計（HTTP エンベロープは現在 `API_VERSION = 1.11.0`、
+`APP_VERSION = 0.11.0`）。登録済み文書を Rokid Glasses
 **単体でページナビゲーション→解説を HUD に段階表示**する機能です。
 
 **撮影なし・画像送信なし・音声不要・フラッシュなし・スマホ画面なしで完結します。**
@@ -36,7 +36,7 @@
 | 3 | テキストが3行を超える場合 **2本指スワイプ下** で続きを読む | 次の3行が表示 | `two_finger_swipe_down` |
 | 4 | 前に戻りたい場合 **2本指スワイプ上** | 前の3行に戻る | `two_finger_swipe_up` |
 | 5 | 詳細が欲しい場合 **もう一度タップ** | `P01/5 詳細 / (詳細テキスト)` | `single_tap` |
-| 6 | さらに根拠・参照ページは **さらにタップ** | `P01/5 根拠 / 参照: P03,P05` | `single_tap` |
+| 6 | さらに根拠・参照ページは **さらにタップ** | `P01/5 根拠 / 参照: D1:P03,D2:P05` | `single_tap` |
 | 7 | **次のページへ**: 2本指スワイプ左 | `→ P02/5 / タップで解説` | `two_finger_swipe_left` |
 | 8 | **前のページへ**: 2本指スワイプ右 | `← P01/5 / タップで解説` | `two_finger_swipe_right` |
 | 9 | 解説を閉じる場合 **ダブルタップ** | HUD が消える | `double_tap` |
@@ -105,6 +105,7 @@ curl -s 'http://127.0.0.1:8000/v1/explain-sessions/1/explain?view_page=1'
 {
   "current_page_index": 0,
   "total_doc_pages": 5,
+  "cached": false,
   "glasses_view": {
     "stage": "overview",
     "lines": ["P01/5 ★★★", "設計書の概要テキスト", "章構成の説明"],
@@ -120,9 +121,19 @@ curl -s 'http://127.0.0.1:8000/v1/explain-sessions/1/explain?view_page=1'
         "prev_doc_page": "two_finger_swipe_right"
       }
     }
-  }
+  },
+  "evidence_pages": [0, 2],
+  "evidence_refs": [
+    {"document_id": 1, "page_number": 1},
+    {"document_id": 2, "page_number": 3}
+  ]
 }
 ```
+
+`cached: true` は同じページ訪問で保存済み結果を再利用したことを示します。最初の
+要求が同時に届いた場合も、一方だけが provider を呼び、他方はその保存結果を待ちます。
+`evidence_refs` は文書ID付き・1始まりの正規形式です。`evidence_pages` は API v1
+互換の旧フィールドで経路ごとの従来値を保持するため、新規クライアントは解釈に使わないでください。
 
 ### POST `/v1/explain-sessions/{session_id}/next-page`
 
@@ -156,7 +167,8 @@ curl -s -X POST http://127.0.0.1:8000/v1/explain-sessions/1/prev-page
 
 ### GET `/v1/explain-sessions/{session_id}/history`
 
-閲覧履歴（解説済みビュー一覧）を取得します。
+閲覧履歴（解説済みビュー一覧）を取得します。各行には保存済みの `detail`、
+`evidence_pages`、`evidence_refs`、取得時の根拠、explainer 情報、result extras が含まれます。
 
 ```bash
 curl -s http://127.0.0.1:8000/v1/explain-sessions/1/history
@@ -241,5 +253,6 @@ pytest tests/test_explain_api.py -v
 
 - Explainer がローカルプレースホルダの場合、解説テキストは要約/OCR の整形にとどまります。実運用では `ROKID_EXPLAINER=openai|gemini|claude`＋各社 API キーで実 AI 解説に切り替えてください（同梱済み）。
 - 解説の質はページ登録時の `ocr_text` の精度に依存します。
-- 認証・マルチテナント・並行書き込み制御は未実装（現段階では対象外）。
+- Bearer 認証は `ROKID_API_KEY` で任意。マルチテナントと一般的な多重書き込み制御は未実装です。
+  同一ページ訪問の explainer 呼び出しだけは DB claim で直列化され、同時要求の二重課金を防ぎます。
 - `current_page_index` はサーバー側でクランプ処理されます（0以下・総ページ数以上にはなりません）。

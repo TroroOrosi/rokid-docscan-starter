@@ -3,8 +3,8 @@
 When solving a question we can pull supporting context from the user's own
 captured study materials (the existing `documents`/`pages` store built by the
 page-matching mode). This module returns the most relevant pages as `context` text
-plus `evidence_pages`, which the solver uses as grounding and the HUD surfaces
-as "根拠".
+plus legacy `evidence_pages` and canonical `evidence_refs`; solvers use them for
+grounding and the HUD surfaces the structured refs as "根拠".
 
 It is deliberately dependency-free: similarity is `difflib.SequenceMatcher`
 ratio over normalized OCR text plus a keyword-overlap bonus (the same
@@ -155,15 +155,22 @@ def _score(query_norm: str, query_tokens: set[str], page_text: str) -> float:
 def retrieve_context(
     conn: sqlite3.Connection, query_text: str | None, *, top_k: int = 3
 ) -> dict:
-    """Return {context, evidence_pages, hits} for the most relevant pages.
+    """Return context, evidence metadata, and internal page hits.
 
+    ``evidence_pages`` retains the legacy API v1 0-based retrieval indexes.
+    ``evidence_refs`` is canonical and uses 1-based, document-qualified pages.
     Safe on an empty store or empty query (returns empty results).
     """
     # A question body stored via _page_material carries the 【図・画像の読み取り】
     # display label; drop it before scoring so it mirrors the header-free page
     # material and a short figure query is not inflated by boilerplate.
     query_norm = normalize_ocr_text(_strip_display_header(query_text))
-    empty = {"context": "", "evidence_pages": [], "hits": []}
+    empty = {
+        "context": "",
+        "evidence_pages": [],
+        "evidence_refs": [],
+        "hits": [],
+    }
     if not query_norm:
         return empty
 
@@ -204,9 +211,22 @@ def retrieve_context(
     scored.sort(key=lambda h: h["score"], reverse=True)
     hits = scored[:top_k]
     context = "\n".join(h["snippet"] for h in hits)
+    # `page_index` is the storage/navigation key (0-based), while every
+    # user-facing Pxx label is 1-based. Preserve the document id as well:
+    # retrieval is cross-document, so a bare page number is ambiguous.
+    evidence_refs = [
+        {
+            "document_id": h["document_id"],
+            "page_number": h["page_index"] + 1,
+        }
+        for h in hits
+    ]
     return {
         "context": context,
+        # Preserve the original API v1 retrieval indexes. New consumers and
+        # all user-facing labels should use the structured references.
         "evidence_pages": [h["page_index"] for h in hits],
+        "evidence_refs": evidence_refs,
         "hits": hits,
         "retriever": "embedding" if config.ENABLE_EMBEDDING else "lexical",
     }

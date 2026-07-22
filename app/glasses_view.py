@@ -251,6 +251,34 @@ def _confidence_symbol(conf: float) -> str:
     return "★☆☆"
 
 
+def _evidence_labels(result: SolveResult | ExplainResult) -> list[str]:
+    """Human-facing, unambiguous evidence labels.
+
+    Structured cross-document refs win and are always user-facing/1-based.
+    Older rows may only carry the legacy bare list. Database readers attach an
+    internal ``_evidence_pages_base`` marker after identifying the historical
+    write path, so a 0-based page index is shifted for display without mutating
+    the opaque API v1 ``evidence_pages`` value. New writes include refs.
+    """
+    labels: list[str] = []
+    for ref in getattr(result, "evidence_refs", []) or []:
+        if not isinstance(ref, dict):
+            continue
+        document_id = ref.get("document_id")
+        page_number = ref.get("page_number")
+        if isinstance(document_id, int) and isinstance(page_number, int):
+            labels.append(f"D{document_id}:P{page_number:02d}")
+    if labels:
+        return labels
+    extras = getattr(result, "extras", {}) or {}
+    display_offset = 1 if extras.get("_evidence_pages_base") == 0 else 0
+    return [
+        f"P{p + display_offset:02d}"
+        for p in (result.evidence_pages or [])
+        if isinstance(p, int)
+    ]
+
+
 def _locator(answer_box: dict | None) -> str:
     if not answer_box:
         return ""
@@ -324,11 +352,8 @@ def _stage_lines(
         # Split any long step into sentence lines so the teleprompter paginates it.
         return ["解法"] + [s2 for s in steps for s2 in (_split_sentences(s) or [s])]
     if stage == "rationale":
-        ev = (
-            "根拠ページ: " + ",".join(f"P{p:02d}" for p in solution.evidence_pages)
-            if solution.evidence_pages
-            else ""
-        )
+        labels = _evidence_labels(solution)
+        ev = "根拠ページ: " + ",".join(labels) if labels else ""
         body = _split_sentences(solution.rationale) or ["(なし)"]
         return ["根拠"] + body + ([ev] if ev else [])
     # caution
@@ -401,8 +426,9 @@ def _explain_stage_lines(
         # 3-line teleprompter pages (two_finger_swipe_down/up) instead of one long line.
         return [label] + (_split_sentences(result.detail) or ["(詳細なし)"])
     # evidence
-    if result.evidence_pages:
-        ev = ",".join(f"P{p:02d}" for p in result.evidence_pages)
+    labels = _evidence_labels(result)
+    if labels:
+        ev = ",".join(labels)
         return [label, f"参照: {ev}"]
     return [label, "(根拠ページなし)"]
 
@@ -501,11 +527,8 @@ def _review_lines(solution: SolveResult, header: str) -> list[str]:
     if steps:
         lines += ["解法"] + steps
     rationale = _split_sentences(solution.rationale)
-    ev = (
-        "根拠ページ: " + ",".join(f"P{p:02d}" for p in solution.evidence_pages)
-        if solution.evidence_pages
-        else ""
-    )
+    labels = _evidence_labels(solution)
+    ev = "根拠ページ: " + ",".join(labels) if labels else ""
     if rationale or ev:
         lines += ["根拠"] + rationale + ([ev] if ev else [])
     cautions = _split_sentences(solution.cautions)

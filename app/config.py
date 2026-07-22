@@ -6,6 +6,11 @@ import json
 import os
 from pathlib import Path
 
+# Environment files are loaded explicitly by the process launcher
+# (README: uvicorn --env-file .env), never as a side effect of importing this
+# module. This keeps pytest and library imports isolated from a developer's
+# local credentials while exported environment variables retain precedence.
+
 # Project data root. Override with ROKID_DATA_DIR for tests / containers.
 DATA_DIR = Path(os.environ.get("ROKID_DATA_DIR", "data")).resolve()
 IMAGE_DIR = DATA_DIR / "images"
