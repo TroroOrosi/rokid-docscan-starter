@@ -1,10 +1,7 @@
-"""GET /v1/documents/{id}/scan-status — 読取状態の確認・復旧（撮影しない）.
+"""GET /v1/documents/{id}/scan-status — page-state and recovery report.
 
-The report answers "which page readings are registered, which are missing,
-and what should the client do next" so an interrupted reading phase can be
-resumed by re-reading only the missing pages. It is read-only, text-vocabulary
-only (no image/pHash/capture fields), and never claims completeness without a
-declared expected_total_pages.
+The report is read-only. It exposes whether the authoritative page image and
+recognized text are present so a phone relay can resume safely.
 """
 
 import importlib
@@ -297,8 +294,8 @@ def test_scan_status_reread_allowed_false_when_session_reviewing(client):
 
 
 def test_scan_status_image_only_page_reports_pages_without_text(client):
-    # Only the legacy image-compat path can register a page without any
-    # recognized text; the report flags it for 再読取.
+    # A real photo may arrive before any OCR. An open document is allowed to
+    # proceed to finalization where an image-capable analyzer can recover it.
     doc_id = _new_doc(client)
     files = {"image": ("p.png", image_bytes(make_image(seed=3)), "image/png")}
     r = client.post(
@@ -307,28 +304,24 @@ def test_scan_status_image_only_page_reports_pages_without_text(client):
     assert r.status_code == 201
     body = _status(client, doc_id, expected=1).json()
     assert body["pages_without_text"] == [0]
-    assert body["recommended_action"] == "reread_pages_without_text"
+    assert body["pages"][0]["has_image"] is True
+    assert body["recommended_action"] == "finalize"
 
 
 def test_scan_status_404_unknown_document(client):
     assert _status(client, 9999).status_code == 404
 
 
-def test_scan_status_vocabulary_has_no_image_phash_capture_keys(client):
-    # 撮影しない: the recovery report must not speak in capture terms at all.
+def test_scan_status_reports_image_presence_without_leaking_a_path(client):
     doc_id = _new_doc(client)
-    _add_text_page(client, doc_id, 0, "p1")
-    body = _status(client, doc_id, expected=2).json()
+    files = {"image": ("p.png", image_bytes(make_image(seed=4)), "image/png")}
+    assert client.post(
+        f"/v1/documents/{doc_id}/pages",
+        data={"page_index": 0, "ocr_text": "問1"},
+        files=files,
+    ).status_code == 201
 
-    banned = ("image", "phash", "capture", "photo")
-
-    def walk(node):
-        if isinstance(node, dict):
-            for k, v in node.items():
-                assert not any(b in k.lower() for b in banned), k
-                walk(v)
-        elif isinstance(node, list):
-            for v in node:
-                walk(v)
-
-    walk(body)
+    body = _status(client, doc_id, expected=1).json()
+    assert body["pages"][0]["has_image"] is True
+    assert "image_path" not in body["pages"][0]
+    assert "phash" not in body["pages"][0]

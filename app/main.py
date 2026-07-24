@@ -193,11 +193,10 @@ def _row_or_404(conn, table: str, row_id: int, detail: str):
 
 
 def _page_material(ocr_text: str | None, vision_text: str | None) -> str:
-    """Combine a page's recognized text and the on-glass AI's figure/image reading.
+    """Combine body transcription and a textual description of visual material.
 
-    撮影しない: the page image is never sent; the on-glass AI recognizes both the
-    text (``ocr_text``) and the figures/diagrams (``vision_text``) and we solve
-    from the two together, so figure-dependent questions are answered correctly.
+    The phone normally supplies ``ocr_text``; an image-capable analyzer may
+    correct it and add ``vision_text`` for figures, diagrams and tables.
     """
     parts: list[str] = []
     if ocr_text and ocr_text.strip():
@@ -303,29 +302,17 @@ async def add_page(
     vision_text: str | None = Form(None),
     total_pages: int | None = Form(None),
 ) -> dict:
-    """Record one page of a document — **撮影しない (no photography)**.
+    """Record one photographed page or a text-only compatibility page.
 
-    The Rokid-native flow does not photograph paper. The on-glass AI *recognizes*
-    what is in view and the client sends that page's reading as text:
-      - ``ocr_text``    : the recognized text of the page,
-      - ``vision_text`` : the AI's reading of figures/diagrams/visual layout
-                          (still TEXT, not an image), so figure-dependent problems
-                          can be solved without sending or saving a photo.
-    A document is remembered page-by-page from this text alone. Supplying an
-    ``image`` is optional and only kept for backward-compatible ``/v1/match``;
-    the standard flow needs no image.
+    The real-device Android relay sends the original Rokid JPEG plus bundled
+    Japanese ML Kit OCR. A configured image-capable analyzer may correct that
+    transcription and add a figure/table description during finalization.
+    Text-only ``ocr_text`` / ``vision_text`` remains supported for API
+    compatibility and imported documents.
 
-    Returns a `scan_ack` HUD payload so the glasses can show real-time
-    progress (e.g. '3/5ページ完了') after every page. Pass `total_pages`
-    (the expected total) to enable the completion hint ('完了: ダブルタップ').
-
-    再読取 (re-scan): re-sending an existing ``page_index`` REPLACES that
-    page's recognition (response carries ``replaced: true``) so a bad read
-    can be fixed by looking at the page again — until a bound exam session
-    has finished reading (its review deck was segmented from the old text);
-    from then on a re-scan needs a new document. New page indexes are only
-    accepted while the document is still open: after /finalize they would
-    silently miss the summaries and the review deck.
+    Returns a `scan_ack` HUD payload after every page. Re-sending an existing
+    ``page_index`` replaces that page until a bound exam session has entered
+    review. New page indexes are accepted only while the document is open.
     """
     has_image = image is not None and getattr(image, "filename", None)
     has_text = (ocr_text and ocr_text.strip()) or (vision_text and vision_text.strip())
@@ -353,9 +340,8 @@ async def add_page(
             img.convert("RGB").save(fpath, format="PNG")
             image_path = str(fpath)
         else:
-            # 撮影しない: no image, no pHash. ocr_md5 hashes the FULL
-            # recognition (body + figure reading) so /match's exact shortcut
-            # distinguishes pages that differ only in their figures.
+            # Text-only compatibility input has no image/pHash. OCR-MD5 hashes
+            # the full body + figure description for exact matching.
             ph = ""
             dedupe_src = _match_text(ocr_text, vision_text)
             omd5 = ocr_md5(dedupe_src) or hashlib.md5(dedupe_src.encode()).hexdigest()
@@ -498,13 +484,10 @@ MAX_EXPECTED_TOTAL_PAGES = 10_000
 def get_document_scan_status(
     document_id: int, expected_total_pages: int | None = None
 ) -> dict:
-    """Read-only 読取状態 report for resuming an interrupted reading phase.
+    """Read-only page report used to resume an interrupted reading phase.
 
-    撮影しない: this reports which page *readings* (recognized text) are
-    registered — nothing here captures, stores or references any image. The
-    client compares against the paper's real page count
-    (``expected_total_pages``) and re-reads only what is missing; 再読取 of
-    an existing index replaces that page (see add_page).
+    The response reports registered indexes, recognition state and whether an
+    authoritative page image exists. It never reads the camera or mutates data.
     """
     if expected_total_pages is not None:
         # Validate before any range expansion (unbounded set(range(N)) would
@@ -522,7 +505,7 @@ def get_document_scan_status(
     try:
         doc = _doc_or_404(conn, document_id)
         rows = conn.execute(
-            "SELECT id, page_index, ocr_text, vision_text, summary FROM pages "
+            "SELECT id, page_index, image_path, ocr_text, vision_text, summary FROM pages "
             "WHERE document_id = ? ORDER BY page_index",
             (document_id,),
         ).fetchall()
@@ -543,13 +526,14 @@ def get_document_scan_status(
             "page_index": r["page_index"],
             "has_ocr_text": _has(r["ocr_text"]),
             "has_vision_text": _has(r["vision_text"]),
+            "has_image": _has(r["image_path"]),
             "summary_generated": _has(r["summary"]),
         }
         for r in rows
     ]
     registered = [p["page_index"] for p in pages]
-    # Compat image-only pages carry no recognition; the primary text path
-    # cannot create them (add_page rejects text-less, image-less input).
+    # A just-uploaded photo can have no phone OCR yet; finalization may still
+    # recover it through a configured image-capable analyzer.
     pages_without_text = [
         p["page_index"] for p in pages
         if not (p["has_ocr_text"] or p["has_vision_text"])
@@ -613,9 +597,9 @@ def get_document_scan_status(
             "review_page_indexes" if doc["status"] != "ready"
             else "start_new_document"
         )
-    elif pages_without_text:
-        # Replacing an EXISTING index stays possible after finalize, but is
-        # frozen once a bound session finished reading.
+    elif pages_without_text and doc["status"] == "ready":
+        # Legacy ready documents may predate image OCR persistence. Replacing an
+        # existing index remains possible until a bound session enters review.
         recommended = (
             "reread_pages_without_text" if reread_allowed
             else "start_new_document"
@@ -665,21 +649,64 @@ def finalize_document(document_id: int) -> dict:
         _require_dense_page_indexes(conn, document_id)
 
         analyzer = get_analyzer()
+        snapshot_fields = ("id", "page_index", "image_path", "ocr_text", "vision_text")
+        analyzed_snapshot = []
+        unreadable_pages = []
         for p in pages:
-            # Idempotent: already-summarized pages are skipped, so re-calling
-            # finalize (double-fire, resume after a crash) never re-runs a
-            # possibly-cloud analyzer over the whole document. A page replaced
-            # via re-scan has summary=NULL again and gets re-summarized here.
-            if p["summary"] is not None:
+            next_ocr = p["ocr_text"]
+            next_vision = p["vision_text"]
+
+            # Idempotent: a complete, already-summarized page needs no repeated
+            # cloud call. Replaced pages have summary=NULL and are analyzed again.
+            if p["summary"] is not None and _page_material(next_ocr, next_vision):
+                analyzed_snapshot.append(
+                    tuple(p[field] for field in snapshot_fields)
+                )
                 continue
+
             result = analyzer.analyze(
                 image_path=p["image_path"],
-                ocr_text=_page_material(p["ocr_text"], p["vision_text"]) or p["ocr_text"],
+                ocr_text=_page_material(next_ocr, next_vision) or next_ocr,
             )
+            extras = result.extras if isinstance(result.extras, dict) else {}
+            analyzed_text = (result.text or "").strip()
+            if analyzed_text and (
+                not (next_ocr and next_ocr.strip()) or extras.get("image_analyzed")
+            ):
+                # A successful image analyzer is authoritative over provisional
+                # phone OCR; a text-only/local analyzer preserves supplied OCR.
+                next_ocr = analyzed_text
+            analyzed_vision = str(extras.get("vision_text") or "").strip()
+            if analyzed_vision and not (next_vision and next_vision.strip()):
+                next_vision = analyzed_vision
+
+            if not _page_material(next_ocr, next_vision):
+                unreadable_pages.append(p["page_index"])
+                continue
+
+            next_summary = (
+                result.summary or next_ocr or next_vision or ""
+            )[:48]
             conn.execute(
-                "UPDATE pages SET summary = ? WHERE id = ?",
-                (result.summary, p["id"]),
+                "UPDATE pages SET ocr_text = ?, vision_text = ?, summary = ? "
+                "WHERE id = ?",
+                (next_ocr, next_vision, next_summary, p["id"]),
             )
+            analyzed_snapshot.append(
+                (p["id"], p["page_index"], p["image_path"], next_ocr, next_vision)
+            )
+
+        if unreadable_pages:
+            conn.rollback()
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "photo OCR is empty for page indexes "
+                    f"{unreadable_pages}; configure ROKID_ANALYZER="
+                    "openai|gemini|claude or re-photograph those pages"
+                ),
+            )
+
         # The analyzer can be slow or remote. A page may have been added or
         # replaced after the first density check but before the first summary
         # write. Hold a write transaction for the final check/update, then
@@ -694,10 +721,6 @@ def finalize_document(document_id: int) -> dict:
             "WHERE document_id = ? ORDER BY page_index",
             (document_id,),
         ).fetchall()
-        snapshot_fields = ("id", "page_index", "image_path", "ocr_text", "vision_text")
-        analyzed_snapshot = [
-            tuple(page[field] for field in snapshot_fields) for page in pages
-        ]
         current_snapshot = [
             tuple(page[field] for field in snapshot_fields) for page in current_pages
         ]
@@ -2110,11 +2133,19 @@ def exam_finalize_reading(session_id: int) -> dict:
                 reverted = True
             for prob in problems:
                 subject, subj_conf = detect_subject(prob.body_text)
+                primary_page = conn.execute(
+                    "SELECT image_path FROM pages "
+                    "WHERE document_id = ? AND page_index = ?",
+                    (doc_id, prob.start_page_index),
+                ).fetchone()
+                primary_image_path = (
+                    primary_page["image_path"] if primary_page is not None else None
+                )
                 conn.execute(
                     """INSERT INTO questions
                        (session_id, question_no, body_text, choices_json, subject,
-                        read_conf, page_number, structure_json)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                        read_conf, page_number, structure_json, image_path)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         session_id,
                         # The boundary-less fallback problem gets a stable
@@ -2131,6 +2162,7 @@ def exam_finalize_reading(session_id: int) -> dict:
                         json.dumps(
                             {"page_indexes": prob.page_indexes, "deck": True}
                         ),
+                        primary_image_path,
                     ),
                 )
             conn.commit()
@@ -2166,6 +2198,7 @@ def exam_finalize_reading(session_id: int) -> dict:
                             choices=json.loads(row["choices_json"] or "[]"),
                             subject=row["subject"],
                             context=context,
+                            image_path=row["image_path"],
                         )
                         result, solver = solve_with_fallback(question=question)
                     served_by = result.extras.get("served_by", solver.name)

@@ -86,7 +86,12 @@ from __future__ import annotations
 #        matching evaluator uses perturbed image queries instead of exact pHash
 #        self-matches. API -> 1.11.0, solver -> 1.2.0, explainer -> 1.1.0,
 #        glasses view -> 1.5.0.
-APP_VERSION = "0.11.0"
+# 0.12.0: real-device Android relay for Global Hi Rokid. Photography is the
+#        primary input; cloud analyzers can transcribe the saved image and the
+#        resulting text is persisted before segmentation. scan-status reports
+#        has_image, and deck solvers receive the originating page image.
+#        API -> 1.12.0, glasses view -> 1.6.0.
+APP_VERSION = "0.12.0"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.
@@ -128,7 +133,10 @@ APP_VERSION = "0.11.0"
 #        its API v1 route semantics. Explain responses gain `cached`, and
 #        history returns detail, evidence/provider metadata and result extras.
 #        Sparse page indexes are rejected with 409 before finalize/navigation.
-API_VERSION = "1.11.0"
+# 1.12.0: scan-status pages gain has_image; document finalization persists
+#        image-analyzer OCR/vision text and rejects unreadable photo-only pages;
+#        finalize-reading attaches the problem's starting-page image to solvers.
+API_VERSION = "1.12.0"
 
 # Matching algorithm identity. Bump when thresholds or hashing change so a
 # re-index/eval is triggered. Mirrors thresholds in app/matching.py.
@@ -202,7 +210,9 @@ EXPLAINER_API_VERSION = "1.1.0"
 #        long_press). Max 3 lines/page unchanged.
 # 1.5.0: evidence labels are document-qualified and user-facing/1-based
 #        (`D{document_id}:P{page_number}`) when structured refs are available.
-GLASSES_VIEW_CONTRACT_VERSION = "1.5.0"
+# 1.6.0: capture contract describes real CXR-L photography and reports shutter,
+#        flash and capture cues as device-controlled instead of promising silence.
+GLASSES_VIEW_CONTRACT_VERSION = "1.6.0"
 
 # Answer-area overlay payload (box + short answer; 2D image-anchored).
 # 1.1.0: added tracking metadata (tracking/fixed_ar/anchor_hint).

@@ -1,45 +1,43 @@
 # Rokid DocScan（紙資料スキャン・ページ照合・解答・解説サーバ）
 
-## このリポジトリの目的と要望
+## このリポジトリの目的
 
-Rokid Glasses で紙資料を「文書」として登録し、**目の前の資料を本体 AI が認識**した結果を使って、
-ページ照合・**入試問題の解答**・**資料解説**をグラス上の小さな HUD（最大3行）で返すサーバです。
-模試（学習・練習）利用を主目的とし、以下の要望を満たします：
+Rokid Glasses で紙資料を撮影し、Android スマホを中継して問題を解析・解答し、
+グラスの小さな HUD（最大3行）へ返すシステムです。Windows PC をサーバーとして使う
+実機経路をリポジトリ内に含みます。
 
-- **LED 点灯時間の最小化（設計原則）**：Rokid Glasses のプライバシー LED は**カメラ稼働中は必ず点灯**
-  します（視認＝認識＝カメラ ON＝LED 点灯。ハード強制・無効化不可）。そこで**読取フェーズだけ**を
-  カメラ ON で最短に済ませ、解答・閲覧フェーズはカメラ OFF（LED 消灯）で行う **3 フェーズフロー**
-  （読取 → 一括解答 → 閲覧）を主経路とします。
-- **撮影しない**：紙を写真に撮らない。Rokid Glasses 本体 AI が**視認＝認識**し、その読み取りを
-  **テキスト**（本文＝`ocr_text`／図・画像の読み取り＝`vision_text`）でサーバへ送る。写真ファイル・
-  フラッシュ・シャッター音を出さない（録音も無音）。
-- **図・画像も読む**：図・グラフ・写真がないと解けない問題に対応。本体 AI の図の読み取り
-  （`vision_text`）を本文と併せて解答材料にする。
-- **全ページを記憶してから解く**：全ページを一度だけ登録・記憶し、文書を**問題単位に分割して全問を
-  一括で解く**。**問題がページを跨いで続く**場合も文書の全ページを文脈にして正確に解く。
-- **主 AI はグラス搭載 AI（GPT）**：解答の主経路はグラス本体の搭載 AI（公式ネイティブは
-  GPT / Gemini）。その問題別解答をサーバへ取り込む（`POST /solutions`）。サーバ側の
-  openai / gemini / claude アダプタは、より高性能なモデルが必要な場合の**任意**経路。
-- **操作は Rokid Glasses 単独**で完結（読取完了宣言・筆記⇄リスニング切替・問題別閲覧まで全て
-  ジェスチャ。スマホは HTTP 中継のみ・画面不要。ジェスチャ未割当の文書作成・`/finalize`・
-  セッション作成は読取開始/読取完了宣言に連動して**中継アプリが自動発行**——
-  [docs/cxr-l-integration.md](docs/cxr-l-integration.md) §5）。
-- **英語リスニング対応**：音声をその場で録音（無音）→書き起こし→資料と統合して解答。
-  記述式・マーク式（`answer_format`）にも対応。
+実機の主経路は次の通りです。
 
-### 特徴
+1. CXR-L `takePhoto` でページを実際に撮影する。
+2. Android の bundled Japanese ML Kit で OCR する。
+3. 元 JPEG と OCR を FastAPI へ送る。
+4. 画像対応 Analyzer が転記・図表説明を補い、Solver が問題を解く。
+5. Android リレーが CUSTOMVIEW へ最大3行ずつ表示する。
 
-- **既定はオフラインでローカル実行可能**。外部クレデンシャル不要で全機能が動きます。
-- **主経路は搭載 GPT**：グラス本体 AI が読取（`ocr_text`/`vision_text`）も解答も担い、サーバは
-  取り込み・整形・状態管理を行います。**サーバ側実 AI は任意**：analyzer / solver / explainer /
-  extractor の各ポートに **OpenAI (GPT) / Gemini / Claude の実アダプタを同梱**。環境変数だけで
-  切り替わり、キー未設定時は自動でローカルにフォールバックします（下記「実モデル接続」）。
-- ストレージは **SQLite + ローカルファイルシステム**（Postgres / MinIO 不要）。
-- 照合は **決定的**（pHash のハミング距離 + OCR テキスト類似度ボーナス）。
-- **CXR-L プラグイン（スマホ側）とグラス本体 AI の接続**は
-  [`docs/cxr-l-integration.md`](docs/cxr-l-integration.md)、実機差し込み全般は
-  [`docs/implementation-notes.md`](docs/implementation-notes.md) を参照。
-- 現在のバージョン: **APP 0.11.0 / API 1.11.0**。
+`android-relay/RokidGlobalLink` は、公式
+`com.rokid.cxr:client-l:1.0.1` AAR を使い、Global Hi Rokid
+`com.rokid.sprite.global.aiapp` へ接続します。
+[TakanariShimbo/CxrGlobal](https://github.com/TakanariShimbo/CxrGlobal) の clone、
+submodule、AARコピーは不要です。
+
+公開 CXR-L で確認できない「グラス搭載 AI の任意認識文・回答を外部アプリへ返す
+コールバック」には依存しません。テキストだけのページ登録と `POST /solutions` は API
+互換として残していますが、実機の成立条件には数えません。
+
+- **プライバシー LED**：ハードウェア/ファームウェア制御です。アプリは無効化・迂回しません。
+  撮影中の点灯、写真 callback 後の消灯、解答閲覧中の消灯維持を実機で物理確認します。
+- **撮影通知**：シャッター音、フラッシュ、撮影表示は端末制御です。無音・無フラッシュを
+  ソフトウェア契約として約束しません。
+- **中断復帰**：文書IDと次ページ番号をスマホに保存し、`/scan-status` から再開します。
+- **安全な公開**：実機利用では Bearer 認証を有効にし、信頼できる LAN 内で動かします。
+- **学習用途**：`mode="real"` の解答は既定でロックされます。
+
+導入の正本は
+[Windows + Androidスマホ中継による実機運用](docs/windows-android-real-device-setup.md)、
+CXR-L の実装境界は
+[CXR-L / Global Hi Rokid integration](docs/cxr-l-integration.md)です。
+
+現在のバージョン: **APP 0.12.0 / API 1.12.0**。
 
 ---
 
@@ -47,7 +45,7 @@ Rokid Glasses で紙資料を「文書」として登録し、**目の前の資�
 
 | 区分 | 概要 | 詳細ドキュメント |
 |------|------|------------------|
-| **ユーザーがやること**（人間の物理操作） | SDK 取得・ADB/ケーブル・ペアリング・全ページ視認読取（撮影しない）・読取品質チェック・プライバシー同意・クラウド/ローカル選択・検証実行 | [docs/user-operation-guide.md](docs/user-operation-guide.md) §1 |
+| **ユーザーがやること**（人間の物理操作） | Windows/Android環境準備・Hi Rokidペアリング・APK導入・全ページ撮影・OCR/LED/HUDの実機確認 | [docs/windows-android-real-device-setup.md](docs/windows-android-real-device-setup.md) |
 | **システムがやること**（実装済み・自動） | 文書作成 / ページ取込 / pHash・OCR-MD5 / finalize / 照合 / HUD 応答 / バージョン付与 / ログ / しきい値フック | [docs/user-operation-guide.md](docs/user-operation-guide.md) §2 |
 | **次に判断すること**（操作後の設計判断） | OCR 配置 / モデルルーティング / ストレージ・プライバシー / HUD 文言 / 信頼度しきい値 / オフライン挙動 / 対象端末(Android/iOS/Rokid/Android XR) | [docs/user-operation-guide.md](docs/user-operation-guide.md) §3 |
 
@@ -60,11 +58,14 @@ Rokid Glasses で紙資料を「文書」として登録し、**目の前の資�
 
 ```
 rokid-docscan-starter/
+├── android-relay/       # ★Global Hi Rokid対応スマホ中継APK（Java/Gradle）
+│   ├── app/             # CXR-L撮影・ML Kit OCR・HTTP・CUSTOMVIEW
+│   └── build-windows.ps1
 ├── app/
 │   ├── main.py        # FastAPI エンドポイント（match / exam / explain）
 │   ├── matching.py    # pHash / hamming / OCR 類似度 / スコアリング
 │   ├── hud.py         # 3行 HUD ペイロード生成（/match 用）
-│   ├── glasses_view.py# グラス表示ビルダー（exam / explain 用・無音契約）
+│   ├── glasses_view.py# グラス表示ビルダー（exam / explain 用・HUD契約）
 │   ├── overlay.py     # 解答欄オーバーレイ（2D画像アンカー）
 │   ├── layout.py      # 設問構造解析（設問番号/本文/選択肢/解答欄box）
 │   ├── subjects.py    # 科目推定（共通テスト準拠フル16教科：現代文/古文/漢文/数学/英語/物理/化学/生物/地学/世界史/日本史/地理/倫理/政治経済/現代社会/情報）
@@ -72,7 +73,7 @@ rokid-docscan-starter/
 │   ├── summarize.py   # 要約シム（analyzer に委譲）
 │   ├── explainer.py   # Explainer ポート（ExplainRequest / ExplainResult / ABC）
 │   ├── llm.py         # ★実 AI ブリッジ（openai/gemini/claude、遅延import・注入可）
-│   ├── version.py     # 各契約バージョン（app 0.11.0 / api 1.11.0 ほか）
+│   ├── version.py     # 各契約バージョン（app 0.12.0 / api 1.12.0 ほか）
 │   ├── config.py      # 保存先・フィーチャーフラグ（ROKID_* / ANTHROPIC_API_KEY / ROKID_TRANSCRIBER）
 │   ├── transcribe.py  # ★リスニング録音の書き起こし（openai/gemini・未設定時は与値）
 │   ├── db.py          # sqlite3（documents/pages/exam/explain テーブル）
@@ -88,14 +89,15 @@ rokid-docscan-starter/
 │   ├── eval_exam.py          # 解答パイプライン評価 → JSON レポート
 │   └── rokid_led.py          # 録画LED診断 CLI（実機所有者専用・任意）
 ├── docs/
-│   ├── cxr-l-integration.md         # ★CXR-L(ｽﾏﾎ側ﾌﾟﾗｸﾞｲﾝ) ⇄ 本体AI ⇄ 本サーバ + Kotlin 例・遠隔操作/画面共有
-│   ├── real-device-operation.md     # ★実機運用ガイド（準備→起動→操作→実AI/認証/KeyCode）
+│   ├── windows-android-real-device-setup.md # ★Windows+Android実機手順（正本）
+│   ├── cxr-l-integration.md         # ★CXR-L / Global Hi Rokid実装境界
+│   ├── real-device-operation.md     # 実機運用の索引・合格条件
 │   ├── device-verification-checklist.md # ★実機検証チェックリスト（KeyCode/CXR-L/LED/読取品質/閾値）
 │   ├── implementation-notes.md      # 実機/実AI 差し込み点・CXR SDK・実アダプタ
 │   ├── user-operation-guide.md      # ユーザー操作 / 自動化 / 設計判断 / 環境変数一覧
 │   ├── future-proof-architecture.md # 将来対応アーキテクチャ
 │   ├── explain-sessions.md          # 資料解説モード詳細・curl 例
-│   ├── glasses-ux-contract.md       # グラス UX 契約（操作・HUD・無音・無フラッシュ）
+│   ├── glasses-ux-contract.md       # 旧操作を含むグラス UX 参考資料
 │   ├── exam-solver-architecture.md  # 解答モードアーキテクチャ
 │   └── rokid-led-dev-utility.md     # 録画LED診断ツールの詳細・警告
 ├── .env.example       # 全環境変数の雛形（コピーして .env に）
@@ -186,30 +188,32 @@ curl -s -X POST http://127.0.0.1:8000/v1/documents \
 # {"document_id":1,"title":"設計仕様書 v1","capture_device":"CXR-S","status":"open"}
 ```
 
-### 3. ページを追加（撮影しない：本体 AI の認識テキスト＝本文＋図の読み取り）
+### 3. ページを追加（実機主経路：写真 + スマホOCR）
 
-**撮影しません。画像は不要**です。Rokid 通常利用のように**本体 AI が視認＝認識**した結果を
-テキストで送ります（`image_path=null`・`phash=""`）：
-
-- `ocr_text` … ページの本文（認識テキスト）
-- `vision_text` … **図・グラフ・写真・見た目の読み取り**（画像ではなくテキスト）。図がないと解けない
-  問題のために、本文と併せて解答材料になります。
+Android リレーは元 JPEG と端末 OCR を同時に送ります。画像はサーバーに保存され、
+設定済みの画像対応 Analyzer が必要に応じて OCR を補正します。
 
 ```bash
-# 撮影しない：本文＋図の読み取りをテキストで登録
+curl -s -X POST http://127.0.0.1:8000/v1/documents/1/pages \
+  -F page_index=0 \
+  -F image=@page0.png \
+  -F ocr_text='問1 図の回路の合成抵抗を求めよ'
+# {"page_id":1,...,"image_path":"...","scan_ack":{...}}
+```
+
+端末 OCR が空でも写真だけを受理します。ただし画像対応 Analyzer が設定されておらず、
+文書確定時にも文字を得られなければ 409 で停止します。
+
+テキストだけの登録も互換入力として残っています。
+
+```bash
 curl -s -X POST http://127.0.0.1:8000/v1/documents/1/pages \
   -F page_index=0 \
   -F ocr_text='問1 図の回路の合成抵抗を求めよ' \
   -F vision_text='回路図: R1=2Ω と R2=3Ω が直列'
-# {"page_id":1,...,"phash":"","image_path":null,"has_vision_text":true}
-
-# （任意・後方互換）画像を添付すると pHash も算出され /match に使えます
-curl -s -X POST http://127.0.0.1:8000/v1/documents/1/pages \
-  -F page_index=0 -F image=@page0.png -F ocr_text='1ページ目の本文テキスト'
 ```
 
-> `ocr_text`／`vision_text`／画像のいずれも無い場合は 400。標準フローは撮影せずテキストのみで、
-> 画像は後方互換の任意項目です。
+`ocr_text`、`vision_text`、`image` のいずれも無い場合は 400 です。
 
 読取が中断したら **`GET /scan-status`** で欠番を確認し、欠番だけ再読取します（読み取り専用・
 撮影は発生しません）:
@@ -301,164 +305,81 @@ curl -s -X POST http://127.0.0.1:8000/v1/match \
 
 ## Rokid Glasses への実機マッピング
 
-このリポジトリは **サーバ側** です。実運用は以下のいずれかの構成を想定します
-（サーバから見ればどちらも同じ HTTP 契約）。
+実機でサポートする経路は一つです。
 
+```text
+Rokid Glasses
+  └─ CXR-L / Bluetooth
+      └─ Android: Global Hi Rokid + android-relay
+          └─ LAN / HTTP(S)
+              └─ FastAPI: Analyzer + Solver
 ```
-[Rokid Glasses] ─Bluetooth(CXR-L wire/Caps)─ [スマホ: Hi Rokid + CXR-L ﾌﾟﾗｸﾞｲﾝ] ─HTTPS─ [本サーバ]
-  カメラ / 搭載AI(GPT/Gemini) / HUD      HTTP 中継のみ（画面不要）           登録/分割/取込/照合/解説
 
-[Rokid Glasses] ─BLE/Wi-Fi─ [スマホ CXR-M コンパニオン] ─HTTPS─ [本サーバ]（CXR-M 構成）
-```
+| 役割 | 担当 |
+|---|---|
+| 撮影 | Glasses / CXR-L `takePhoto` |
+| 端末 OCR | Android bundled Japanese ML Kit |
+| Vision OCR・図表説明 | `ROKID_ANALYZER=openai\|gemini\|claude` |
+| 問題分割・解答 | FastAPI + `ROKID_SOLVER=openai\|gemini\|claude` |
+| HUD | Android relay → Global Hi Rokid CUSTOMVIEW |
+| 中断復帰 | Android保存ID + `GET /scan-status` |
 
-> 実機動作実績のある CXR-L 構成は**スマホ側プラグイン**（Hi Rokid 経由・Bluetooth 制御プレーン）
-> です。いずれの構成でもユーザーが見る・操作するのはグラスだけで、スマホは HTTP 中継のみ
-> （詳細と是正の経緯は [`docs/cxr-l-integration.md`](docs/cxr-l-integration.md) §2-§3・§9）。
+スマホは初期設定画面を持ち、セッション中も画面を表示したままにします。これは現行
+Hi Rokid の写真 callback が画面消灯後に止まる場合へ備えるためです。通常の撮影・閲覧は
+AIキーだけで進められ、スマホボタンは診断と復旧にも使えます。
 
-| 役割 | 実機での担当 | 本サーバでの受け口 |
-|------|--------------|-----------------|
-| 撮影 | Glasses カメラ（CXR-L `IMediaStreamService`／CXR-M） | クライアントがアップロードする画像 |
-| 端末側 OCR / 認識 | 本体 AI（`com.rokid.sprite.aiapp`）／ML Kit／Vision | `ocr_text` / `vision_text` / `fast_ocr_text` フォーム値 |
-| ページ照合 | 本サーバ（pHash + OCR 類似度） | 同左（そのまま） |
-| **解答（主経路）** | **本体 AI（搭載 GPT / Gemini）が全問を解く** | `POST /v1/exam-sessions/{id}/solutions`（ingest） |
-| 要約/解答/解説/抽出（任意） | 本サーバ（既定ローカル、任意で `openai`/`gemini`/`claude` 実AI） | 各 registry のアダプタ |
-| HUD 表示 | Glasses の**両眼**ディスプレイ（3行） | `hud.lines` / `glasses_view.lines`（3行） |
-| 文書登録ワークフロー | グラス/コンパニオン UI | `/v1/documents` → `/pages` → `/finalize` |
-
-- 実機ハードウェア仕様（**両眼** 480×398 Micro-LED、AR1+NXP RT600、IMX681 12MP、
-  YodaOS/Android 12 API32 など）と CXR-M/S/L の役割は、ウェブ検証済みの値を
-  [`docs/cxr-l-integration.md`](docs/cxr-l-integration.md) にまとめています。
-- **グラス本体 AI とサーバの接続**は 2 経路（同 doc §4）：**(B) 本体 AI（搭載 GPT / Gemini）が
-  読取（`ocr_text`/`vision_text`）と解答（`POST /solutions`）を担う＝主経路（サーバ鍵不要）**、
-  (A) サーバ側の `openai`/`gemini`/`claude` 実アダプタ＝より高性能なモデルが必要な場合の任意経路。
-  なお **Claude はグラス搭載 AI ではありません**（搭載ネイティブは GPT / Gemini 等）。
+詳細は [実機手順](docs/windows-android-real-device-setup.md) を参照してください。
 
 ---
 
-## 資料解説モード（explain-sessions / グラス単体・無音 UX）
+## 資料解説モード（登録後・カメラOFF）
 
-登録済み文書（`finalize` 済み）を**カメラなしでページ移動しながら解説を HUD に段階表示**する
-機能です。スキャンフェーズはありません（v1.7 で `POST /scan`・`POST /commit` は廃止）：
-セッション作成と同時に `ready` になり、ページ移動はサーバのカウンタのみで行います。
-
-```
-[ready]     セッション作成（document_id を指定）→ 即 ready・P01
-      ↓
-[explaining]  タップ（single_tap）→ 現在ページの解説を表示
-  2本指スワイプ上下   → テキスト送り/戻し（テレプロンプター）
-  2本指スワイプ左右   → 次ページ / 前ページ（POST /next-page・/prev-page）
-  タップ             → 次の解説段階（overview→detail→evidence）
-  ダブルタップ        → 終了
-```
-
-詳細な仕様・curl 例・操作マッピング表は
-[docs/explain-sessions.md](docs/explain-sessions.md) を参照。
+`/v1/explain-sessions` は、確定済み文書をページ単位で解説する既存 API です。
+現行 `android-relay` の主 UI は問題の一括解答と `/review` に接続しており、
+explain-sessions のグラス操作はまだ組み込んでいません。サーバー API の使用例は
+[docs/explain-sessions.md](docs/explain-sessions.md) を参照してください。
 
 ---
 
-## 解答モード（入試問題ソルバー / グラス単体・無音 UX）
+## 解答モード（実機主経路）
 
-登録済み文書の問題を解いて **解答・解法・根拠・注意をグラス内の3行 HUD で表示**する解答モード
-です（`/v1/exam-sessions`）。**主経路は上記の 3 フェーズフロー**（読取→一括解答→閲覧）。
+Android リレーが次のチェーンを自動実行します。
 
-- ユーザーが操作・閲覧するのは**眼鏡だけ**（スマホは通信・中継を担う裏方）。
-- **無音・無フラッシュ・無アニメ・無点滅**を契約化（`GET /v1/settings` で公示、HUD は最大3行）。
-- **音声操作は設定で ON/OFF**（既定 OFF＝ジェスチャ操作）。
-- **解答の主経路は搭載 GPT**（本体 AI が解き `POST /solutions` で取り込み）。サーバ側ソルバーは
-  既定で**オフラインのプレースホルダ**（実際には解かない＝不正利用ガード）。より高性能なモデルが
-  必要な場合は **`openai`/`gemini`/`claude` の実アダプタ**を `ROKID_SOLVER=openai|gemini|claude`＋
-  各社 API キーで有効化（下記「実モデル接続」）。クラウド→ローカルの**二段フォールバック**
-  （`ROKID_SOLVER_TIERS`、`solve_with_fallback`）で圏外/失敗でも HUD は返ります。
-- **メディア抽出**（数式/図/表/グラフ）は `app/extractors/`（`ROKID_EXTRACTOR`。`openai`/`gemini`/`claude` で実抽出）。`add_question` 応答の `media` に載ります。
-- **RAG 根拠提示**：`app/retrieval.py` が既存の `documents/pages` を横断検索し、`solve` 応答の `evidence` と HUD の根拠に反映（`ROKID_ENABLE_EMBEDDING` で意味検索へ差替可）。
-- **推論ログ**（案9）は `GET …/questions/{qid}/reasoning` で参照（HUD は短縮版・`real` ロック準拠）。
-- 本番試験モード（`mode=real`）は既定でロック（`ROKID_ALLOW_REAL_EXAM_SOLVE=1` が無い限り解答非表示）。学習・模試・研究用途向けです。
+1. 初回撮影時に `POST /v1/documents`。
+2. 各写真を `POST /v1/documents/{id}/pages` へ JPEG + OCR で送信。
+3. AIキー長押しで `/scan-status` → `/finalize`。
+4. `POST /v1/exam-sessions` → `/finalize-reading`。
+5. `GET /review` を CUSTOMVIEW へ表示。
 
-```bash
-# セッション作成 → 設問追加 → 解答 → 段階表示 → 推論ログ
-curl -s -X POST http://127.0.0.1:8000/v1/exam-sessions \
-  -H 'Content-Type: application/json' -d '{"mode":"study","voice_enabled":false}'
-curl -s -X POST http://127.0.0.1:8000/v1/exam-sessions/1/questions \
-  -F image=@page0.png -F ocr_text=$'問2 次の計算\n① 12\n② 13\n③ 14\n④ 15'
-curl -s -X POST http://127.0.0.1:8000/v1/exam-sessions/1/questions/1/solve
-curl -s 'http://127.0.0.1:8000/v1/exam-sessions/1/questions/1/view?stage=rationale&page=0'
-curl -s http://127.0.0.1:8000/v1/exam-sessions/1/questions/1/reasoning
+`/finalize` は画像 Analyzer の転記をページへ保存してから問題を分割します。
+`/finalize-reading` は各問題の開始ページ画像を画像対応 Solver へ渡します。
+端末 OCR とクラウド OCR の両方が空なら 409 で停止し、再撮影または Analyzer 設定を
+促します。
 
-# 解答精度の評価ベンチ（合成サンプル）
-python scripts/eval_exam.py --synthetic 5 --out /tmp/exam_eval.json
-```
+| AIキー | 読取中 | 閲覧中 |
+|---|---|---|
+| 短押し | 次ページを撮影 | 次の表示 |
+| 短押し2回 | 直前ページを再撮影 | 前の表示 |
+| 長押し | 読取完了・解答開始 | 終了・新規文書 |
 
-設計は [docs/exam-solver-architecture.md](docs/exam-solver-architecture.md)、
-グラス表示・操作の規約は [docs/glasses-ux-contract.md](docs/glasses-ux-contract.md) を参照。
-
-### 3 フェーズ実践フロー（主経路 / API 1.11.0・LED 点灯最小）
-
-**読取 → 一括解答 → 閲覧** の 3 フェーズが主経路です。カメラ（＝プライバシー LED 点灯）は
-**フェーズ 1 の読取中だけ**。読取完了をグラスのジェスチャで宣言した瞬間からカメラは閉じ、
-解答・閲覧は LED 消灯のまま行えます（用紙も視認も不要）。撮影は一切発生しません。
-
-```
-フェーズ1 読取（カメラON・LED点灯・最短化）
-  2本指タップ（AI起動=視認）×ページ数 → /pages に ocr_text+vision_text を登録（scan_ack で進捗）
-  ダブルタップ（読取完了宣言）        → POST /finalize-reading（以降カメラOFF＝LED消灯）
-フェーズ2 解答（カメラOFF・自動）
-  文書を問題単位に分割（問N/大問 境界・ページ跨ぎ対応・全ページを文脈に）
-  主経路: 搭載 GPT が全問を解き POST /solutions で取り込み（served_by="onboard"）
-  任意:   ROKID_SOLVER=openai|gemini|claude ならサーバが finalize-reading 内で全問一括解答
-フェーズ3 閲覧（カメラOFF・LED消灯）
-  GET /solutions … 問題別レビューデッキ（問番号・教科・解答済み・確信度）
-  GET /review?index=k&view_page=n … 1問題＝解答+解法+根拠+注意を一括1ストリーム表示
-  2本指スワイプ左右=前後の問題 / 2本指スワイプ上下=テレプロンプター送り / ダブルタップ=終了
-```
+サーバーだけを確認する場合の最小 API 例:
 
 ```bash
-# フェーズ1) 撮影せず、本文＋図の読み取りを全ページ登録 → finalize → exam セッション
-curl -s -X POST http://127.0.0.1:8000/v1/documents -d '{"title":"模試"}' -H 'Content-Type: application/json'
-curl -s -X POST http://127.0.0.1:8000/v1/documents/1/pages -F page_index=0 \
-  -F ocr_text='第1問 長文…' -F vision_text='図1: グラフの概形…'
-curl -s -X POST http://127.0.0.1:8000/v1/documents/1/pages -F page_index=1 \
-  -F ocr_text='問1 前ページの本文を踏まえて答えよ'
+curl -s -X POST http://127.0.0.1:8000/v1/documents \
+  -H 'Content-Type: application/json' -d '{"title":"模試"}'
+curl -s -X POST http://127.0.0.1:8000/v1/documents/1/pages \
+  -F page_index=0 -F image=@page0.png -F ocr_text='問1 1+1を答えよ'
 curl -s -X POST http://127.0.0.1:8000/v1/documents/1/finalize
-curl -s -X POST http://127.0.0.1:8000/v1/exam-sessions -H 'Content-Type: application/json' \
+curl -s -X POST http://127.0.0.1:8000/v1/exam-sessions \
+  -H 'Content-Type: application/json' \
   -d '{"mode":"study","document_id":1,"exam_type":"written","answer_format":"mark"}'
-
-# 読取完了宣言（ダブルタップ）→ 問題分割・カメラOFF（LED消灯）
 curl -s -X POST http://127.0.0.1:8000/v1/exam-sessions/1/finalize-reading
-
-# フェーズ2) 搭載 GPT の問題別解答を取り込み（主経路）
-curl -s -X POST http://127.0.0.1:8000/v1/exam-sessions/1/solutions \
-  -H 'Content-Type: application/json' -d '{"solutions":[
-    {"problem_no":"第1問","answer":"③","solution_steps":["本文の主題を把握"],
-     "rationale":"第2段落より","answer_confidence":0.8},
-    {"problem_no":"問1","answer":"ウ"}]}'
-
-# フェーズ3) デッキ一覧 → 問題別閲覧（一括表示・テレプロンプター送り）
-curl -s http://127.0.0.1:8000/v1/exam-sessions/1/solutions
 curl -s 'http://127.0.0.1:8000/v1/exam-sessions/1/review?index=0&view_page=0'
 ```
 
-**英語リスニング**：長押し（公式の録画⇄録音トグル）で筆記⇄リスニングを切替（`POST /mode`）。
-リスニングは音声を**その場で無音録音**して送信（未書き起こし時は与えた `transcript` をそのまま
-使用＝オフライン可）。書き起こしは全問の解答文脈に統合され、`answer_format`（マーク/記述）に
-沿って解答されます。
+`mode="real"` は `ROKID_ALLOW_REAL_EXAM_SOLVE=1` がない限りロックされます。
 
-```bash
-curl -s -X POST http://127.0.0.1:8000/v1/exam-sessions/1/mode -H 'Content-Type: application/json' -d '{"exam_type":"listening"}'
-# 録音アップロード（+任意の書き起こし）。ROKID_TRANSCRIBER=openai|gemini で実書き起こし
-curl -s -X POST http://127.0.0.1:8000/v1/exam-sessions/1/audio \
-  -F audio=@listening.wav -F transcript='(任意) 手元の書き起こし'
-```
-
-#### 互換: 文書ページ移動型（solve-current 型・二次経路）
-
-ページ移動で現在ページを解く従来経路も残しています（挙動不変）。ページを視認しながら解くため
-読取と閲覧が分離されず、主経路より LED 点灯時間が長くなります。
-
-```bash
-curl -s -X POST http://127.0.0.1:8000/v1/exam-sessions/1/next-page   # 2本指スワイプ左右
-curl -s http://127.0.0.1:8000/v1/exam-sessions/1/current
-curl -s -X POST http://127.0.0.1:8000/v1/exam-sessions/1/solve-current  # タップ（全ページを文脈に）
-```
+---
 
 ## 録画 LED 開発用診断ツール（任意・実機所有者専用）
 
@@ -506,18 +427,16 @@ python scripts/rokid_led.py verify --led white --host 192.168.1.50:5555 \
 
 詳細・警告・既知の制約・検証手順は [docs/rokid-led-dev-utility.md](docs/rokid-led-dev-utility.md) を参照。
 
-## 実モデル接続（openai / gemini / claude — 任意の高性能化経路）
+## 実モデル接続（実機の写真解析・解答には必須）
 
-**主経路はグラス搭載 AI（GPT / Gemini）**であり、サーバ鍵は不要です（解答は
-`POST /solutions` で取り込み）。それでも**より高性能なモデルが必要な場合**のために、各プロバイダ
-ポート（analyzer / solver / explainer / extractor）へ **OpenAI (GPT) / Google Gemini /
-Anthropic Claude を使う実アダプタを同梱**しています。
+実機の主経路はサーバー側の画像対応 Analyzer/Solver です。各プロバイダポート
+（analyzer / solver / explainer / extractor）へ OpenAI、Google Gemini、Anthropic
+Claude の実アダプタを同梱しています。使用する1社の SDK と API キーを用意してください。
 
-- 既定は `local`（オフライン・クレデンシャル不要）。`ROKID_*=openai|gemini|claude` で切替。
+- 既定の `local` は開発用プレースホルダーです。実機では `ROKID_ANALYZER` と `ROKID_SOLVER` を `openai|gemini|claude` に設定します。
 - **`ROKID_SOLVER` を non-local にすると `finalize-reading` がサーバ側で全問一括解答**します。
-- 該当プロバイダの API キーが無い／SDK 未インストールなら、**ネットワークに一切触れず
-  自動でローカルにフォールバック**（solver は二段フォールバック、他は内部フォールバック）。
-  サーバは常に応答します。
+- APIキーが無い、SDKが無い、プロバイダ呼び出しに失敗した場合はローカル実装へ
+  フォールバックします。ただし写真にも端末OCRにも文字が無ければ、文書確定は409で停止します。
 - 共通クライアントは `app/llm.py`（公式 SDK を遅延 import・注入可能・プロバイダ非依存）。
 
 ```bash
@@ -547,13 +466,10 @@ uvicorn app.main:app --port 8000
 
 ### 実機運用（グラス連携・入力・認証）
 
-- **入力コントラクト**：`GET /v1/settings` の `input` が gesture→KeyCode を公示。ジェスチャ名は
-  現行公式（2本指タップ=AI起動 / タップ / ダブルタップ / 2本指スワイプ上下左右 / 長押し=録画⇄録音）、
-  **KeyCode 値は旧・単眼 Rokid Glass 由来で未実測**（`keycodes_verified:false`）。実機で
-  `adb shell getevent -l` により計測し、機種差は `ROKID_KEYMAP` で上書き（クライアント改修不要）。
-- **認証（任意）**：`ROKID_API_KEY` を設定すると発見系以外は `Authorization: Bearer` 必須。
-- **一連の実機手順**は [docs/real-device-operation.md](docs/real-device-operation.md)、
-  **グラス本体アプリ/本体 AI 連携**は [docs/cxr-l-integration.md](docs/cxr-l-integration.md)。
+実機では `android-relay` の AIキー down/up コールバックを使います。旧 KeyCode/
+タッチジェスチャ表は現行リレーの入力契約ではありません。認証、Windows Firewall、
+APK導入、回転調整、LED/HUD合格条件は
+[Windows + Android 実機手順](docs/windows-android-real-device-setup.md) に集約しています。
 
 ## Docker（任意）
 
