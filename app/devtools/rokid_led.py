@@ -604,8 +604,8 @@ def run_verification(
     disable_plan = build_disable_plan(serial=serial, host=host, led_name=led_name)
     if apply and disable_plan.needs_force and not force:
         rep.blocked_reason = (
-            f"operation 'disable' changes device state and requires an explicit "
-            f"force flag; refusing to run"
+            "operation 'disable' changes device state and requires an explicit "
+            "force flag; refusing to run"
         )
         rep.applied = False
         return rep

@@ -315,6 +315,28 @@ def test_replacing_audio_removes_superseded_recording(client, tmp_path):
     assert remaining[0].read_bytes() == b"RIFFsecondWAVE"
 
 
+def test_audio_filename_is_not_used_as_a_filesystem_suffix(client, tmp_path):
+    doc_id = _doc_with_text_pages(client, ["Listening Part 1 Question 1"])
+    sid = _new_doc_exam(client, doc_id, exam_type="listening")["session_id"]
+    response = client.post(
+        f"/v1/exam-sessions/{sid}/audio",
+        data={"transcript": "safe filename"},
+        files={
+            "audio": (
+                "recording.wav:alternate-stream",
+                b"RIFFsafeWAVE",
+                "audio/wav",
+            )
+        },
+    )
+    assert response.status_code == 200
+    stored = list((tmp_path / "audio").iterdir())
+    assert len(stored) == 1
+    assert stored[0].suffix == ".wav"
+    assert ":" not in stored[0].name
+    assert stored[0].read_bytes() == b"RIFFsafeWAVE"
+
+
 def test_audio_requires_something(client):
     doc_id = _doc_with_text_pages(client, ["p1"])
     sid = _new_doc_exam(client, doc_id, exam_type="listening")["session_id"]

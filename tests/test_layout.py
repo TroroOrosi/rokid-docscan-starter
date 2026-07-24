@@ -22,7 +22,6 @@ def test_page_number_and_figures_extracted():
 
 
 def test_answer_box_from_keyword_is_normalized():
-    parsed = parse_layout("問1 解答欄に記入せよ")
     box = parse_layout("問1 解答欄に記入せよ")["answer_box"]
     assert box is not None
     for k in ("x", "y", "w", "h"):

@@ -63,7 +63,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from app.devtools import rokid_led  # noqa: E402
 from app.devtools.rokid_led import (  # noqa: E402
     DEFAULT_LED_NAME,
-    VERDICT_OFF,
     VERDICT_UNKNOWN,
     execute_plan,
     run_verification,

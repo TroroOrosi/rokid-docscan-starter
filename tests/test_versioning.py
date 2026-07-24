@@ -6,7 +6,6 @@ from app.analyzers import (
     list_analyzers,
     register_analyzer,
 )
-from app.analyzers.local_placeholder import LocalPlaceholderAnalyzer
 
 
 # --- version module ---------------------------------------------------------

@@ -131,6 +131,31 @@ class CreateDocument(BaseModel):
 # --- helpers ----------------------------------------------------------------
 
 _MAX_UPLOAD_BYTES = 15 * 1024 * 1024  # generous for page photos / recordings
+# The relay camera is 12 MP. Keep enough headroom for imported scans while
+# bounding decoded memory independently of the compressed upload byte limit.
+_MAX_IMAGE_PIXELS = 25_000_000
+_SAFE_AUDIO_SUFFIXES = {
+    ".aac",
+    ".flac",
+    ".m4a",
+    ".mp3",
+    ".mp4",
+    ".mpeg",
+    ".mpga",
+    ".ogg",
+    ".wav",
+    ".webm",
+}
+_AUDIO_MIME_SUFFIXES = {
+    "audio/aac": ".aac",
+    "audio/flac": ".flac",
+    "audio/mp4": ".m4a",
+    "audio/mpeg": ".mp3",
+    "audio/ogg": ".ogg",
+    "audio/wav": ".wav",
+    "audio/x-wav": ".wav",
+    "audio/webm": ".webm",
+}
 
 
 async def _read_upload_limited(upload: UploadFile) -> bytes:
@@ -141,12 +166,32 @@ async def _read_upload_limited(upload: UploadFile) -> bytes:
     return raw
 
 
+def _safe_audio_suffix(upload: UploadFile) -> str:
+    """Keep user-supplied filenames out of persisted filesystem paths."""
+    suffix = Path(upload.filename or "").suffix.lower()
+    if suffix in _SAFE_AUDIO_SUFFIXES:
+        return suffix
+    content_type = (upload.content_type or "").partition(";")[0].strip().lower()
+    return _AUDIO_MIME_SUFFIXES.get(content_type, ".bin")
+
+
 def _load_image(raw: bytes) -> Image.Image:
+    img: Image.Image | None = None
     try:
         img = Image.open(io.BytesIO(raw))
+        if img.width * img.height > _MAX_IMAGE_PIXELS:
+            img.close()
+            raise HTTPException(
+                status_code=413,
+                detail="image dimensions too large (max 25 megapixels)",
+            )
         img.load()
         return img
-    except (UnidentifiedImageError, OSError):
+    except HTTPException:
+        raise
+    except (UnidentifiedImageError, OSError, Image.DecompressionBombError):
+        if img is not None:
+            img.close()
         raise HTTPException(status_code=400, detail="invalid image upload")
 
 
@@ -452,6 +497,11 @@ async def add_page(
             # 再読取: replace this page's recognition. Frozen once a bound
             # exam session finished reading — its deck was segmented from
             # the OLD text and replacing underneath it would diverge them.
+            review_conflict_detail = (
+                f"page_index {page_index} belongs to an exam session that "
+                "already finished reading; re-scan into a new document "
+                "(POST /v1/documents)"
+            )
             reviewing = conn.execute(
                 "SELECT COUNT(*) FROM exam_sessions "
                 "WHERE document_id = ? AND status = 'reviewing'",
@@ -460,17 +510,35 @@ async def add_page(
             if reviewing:
                 raise HTTPException(
                     status_code=409,
-                    detail=(
-                        f"page_index {page_index} belongs to an exam session that "
-                        "already finished reading; re-scan into a new document "
-                        "(POST /v1/documents)"
-                    ),
+                    detail=review_conflict_detail,
                 )
-            conn.execute(
+            updated = conn.execute(
                 "UPDATE pages SET image_path = ?, phash = ?, ocr_text = ?, "
-                "vision_text = ?, ocr_md5 = ?, summary = NULL WHERE id = ?",
-                (image_path, ph, ocr_text, vision_text, omd5, existing["id"]),
+                "vision_text = ?, ocr_md5 = ?, summary = NULL WHERE id = ? "
+                "AND NOT EXISTS ("
+                "  SELECT 1 FROM exam_sessions "
+                "  WHERE document_id = ? AND status = 'reviewing'"
+                ")",
+                (
+                    image_path,
+                    ph,
+                    ocr_text,
+                    vision_text,
+                    omd5,
+                    existing["id"],
+                    document_id,
+                ),
             )
+            if updated.rowcount != 1:
+                # The session may have transitioned to reviewing after the
+                # optimistic check above. Evaluate this predicate again in the
+                # UPDATE itself, under SQLite's write lock, so either the new
+                # page wins before segmentation or the finished deck wins.
+                conn.rollback()
+                raise HTTPException(
+                    status_code=409,
+                    detail=review_conflict_detail,
+                )
             conn.commit()
             image_persisted = pending_image_path is not None
             if existing["image_path"] and existing["image_path"] != image_path:
@@ -1970,7 +2038,7 @@ async def exam_upload_audio(
         audio_path: str | None = None
         if audio is not None and getattr(audio, "filename", None):
             raw = await _read_upload_limited(audio)
-            ext = Path(audio.filename).suffix or ".bin"
+            ext = _safe_audio_suffix(audio)
             fname = f"audio_{session_id}_{uuid.uuid4().hex[:8]}{ext}"
             config.AUDIO_DIR.mkdir(parents=True, exist_ok=True)
             fpath = config.AUDIO_DIR / fname

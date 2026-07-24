@@ -6,7 +6,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from app.devtools import rokid_led  # noqa: E402
 from app.devtools.rokid_led import (  # noqa: E402
     SESSION_OPEN_PROP,
-    UNKNOWN,
     VERDICT_OFF,
     VERDICT_ON,
     VERDICT_UNKNOWN,

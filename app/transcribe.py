@@ -27,9 +27,9 @@ def _load_transcriber(provider: str | None) -> "LLMClient | None":
     # openai's model is the transcription model; gemini needs an audio-capable
     # chat model (reuse ROKID_LLM_MODEL, else a sensible default).
     if provider == "openai":
-        model = os.environ.get("ROKID_TRANSCRIBE_MODEL", "gpt-4o-transcribe")
+        model = os.environ.get("ROKID_TRANSCRIBE_MODEL") or "gpt-4o-transcribe"
     else:
-        model = os.environ.get("ROKID_LLM_MODEL", "gemini-2.5-flash")
+        model = os.environ.get("ROKID_LLM_MODEL") or "gemini-2.5-flash"
     return LLMClient(_build_sdk(provider), provider=provider, model=model)
 
 

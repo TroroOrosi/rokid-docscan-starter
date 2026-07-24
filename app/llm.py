@@ -29,7 +29,6 @@ import base64
 import json
 import math
 import os
-import re
 
 PROVIDERS = ("openai", "gemini", "anthropic")
 
@@ -42,6 +41,15 @@ DEFAULT_MODELS = {
     "anthropic": "claude-opus-4-8",
 }
 DEFAULT_MAX_TOKENS = 1024
+_AUDIO_UPLOAD_NAMES = {
+    "audio/wav": "audio.wav",
+    "audio/mpeg": "audio.mp3",
+    "audio/ogg": "audio.ogg",
+    "audio/flac": "audio.flac",
+    "audio/aac": "audio.aac",
+    "audio/mp4": "audio.m4a",
+    "audio/webm": "audio.webm",
+}
 
 # (adapter registration name, llm provider) pairs shared by all four adapter
 # families (solvers/analyzers/explainers/extractors) — GPT (openai) first.
@@ -152,7 +160,11 @@ class LLMClient:
             # e.g. docker-compose passing `ROKID_TRANSCRIBE_MODEL=` when unset —
             # still falls back to the default instead of requesting model="".
             model = os.environ.get("ROKID_TRANSCRIBE_MODEL") or "gpt-4o-transcribe"
-            resp = self._sdk.audio.transcriptions.create(model=model, file=("audio", audio))
+            media_type = _audio_media_type(audio)
+            resp = self._sdk.audio.transcriptions.create(
+                model=model,
+                file=(_AUDIO_UPLOAD_NAMES[media_type], audio, media_type),
+            )
             return (getattr(resp, "text", "") or "").strip()
         if self.provider == "gemini":
             resp = self._sdk.models.generate_content(
@@ -281,6 +293,12 @@ def _audio_media_type(audio: bytes) -> str:
         return "audio/ogg"
     if audio[:4] == b"fLaC":
         return "audio/flac"
+    if audio[:2] in (b"\xff\xf1", b"\xff\xf9"):
+        return "audio/aac"
+    if audio[4:8] == b"ftyp":
+        return "audio/mp4"
+    if audio[:4] == b"\x1aE\xdf\xa3":
+        return "audio/webm"
     return "audio/mpeg"
 
 

@@ -5,6 +5,7 @@ Fake provider-shaped SDKs stand in for anthropic.Anthropic() / openai.OpenAI()
 extraction, JSON parsing, per-provider dispatch) runs without a key or network.
 """
 
+import builtins
 from types import SimpleNamespace
 
 import pytest
@@ -140,9 +141,20 @@ def test_load_returns_none_without_key(monkeypatch):
 def test_load_openai_keyless_is_none_key_without_sdk_is_loud(monkeypatch):
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     assert LLMClient.load("openai") is None
-    # Key present, default model applies, but the SDK is not installed in the
-    # offline test env -> a LOUD LLMConfigError (callers catch and degrade),
-    # never a silent None that hides the misconfiguration.
+    # Simulate the optional SDK being absent even when a developer happens to
+    # have it installed globally. The test must describe application behavior,
+    # not depend on the package set of the machine running pytest.
+    real_import = builtins.__import__
+
+    def import_without_openai(name, *args, **kwargs):
+        if name == "openai":
+            raise ImportError("simulated missing optional OpenAI SDK")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", import_without_openai)
+    # Key present, default model applies, but the SDK is unavailable -> a LOUD
+    # LLMConfigError (callers catch and degrade), never a silent None that hides
+    # the misconfiguration.
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     monkeypatch.delenv("ROKID_LLM_MODEL", raising=False)
     with pytest.raises(LLMConfigError):
