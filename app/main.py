@@ -675,7 +675,10 @@ def finalize_document(document_id: int) -> dict:
             "vision_text",
             "summary",
         )
-        analyzed_snapshot = []
+        original_snapshot = [
+            tuple(page[field] for field in snapshot_fields) for page in pages
+        ]
+        pending_updates = []
         for p in pages:
             next_ocr = p["ocr_text"]
             next_vision = p["vision_text"]
@@ -683,9 +686,6 @@ def finalize_document(document_id: int) -> dict:
             # Idempotent: an already-finalized page needs no repeated cloud call.
             # Replaced pages have summary=NULL and are analyzed again.
             if p["summary"] is not None:
-                analyzed_snapshot.append(
-                    tuple(p[field] for field in snapshot_fields)
-                )
                 continue
 
             result = analyzer.analyze(
@@ -707,11 +707,7 @@ def finalize_document(document_id: int) -> dict:
             next_summary = (
                 result.summary or next_ocr or next_vision or ""
             )[:48]
-            updated = conn.execute(
-                "UPDATE pages SET ocr_text = ?, vision_text = ?, summary = ? "
-                "WHERE id = ? AND page_index = ? "
-                "AND image_path IS ? AND ocr_text IS ? "
-                "AND vision_text IS ? AND summary IS ?",
+            pending_updates.append(
                 (
                     next_ocr,
                     next_vision,
@@ -722,33 +718,14 @@ def finalize_document(document_id: int) -> dict:
                     p["ocr_text"],
                     p["vision_text"],
                     p["summary"],
-                ),
-            )
-            if updated.rowcount != 1:
-                raise HTTPException(
-                    status_code=409,
-                    detail=(
-                        "document pages changed during finalization; retry finalize "
-                        "after reviewing /scan-status"
-                    ),
-                )
-            analyzed_snapshot.append(
-                (
-                    p["id"],
-                    p["page_index"],
-                    p["image_path"],
-                    next_ocr,
-                    next_vision,
-                    next_summary,
                 )
             )
 
-        # The analyzer can be slow or remote. A page may have been added or
-        # replaced after the first density check but before the first summary
-        # write. Hold a write transaction for the final check/update, then
-        # verify both the navigation invariant and the exact analyzed snapshot.
-        # A queued new-page INSERT also re-checks document.status atomically in
-        # add_page, so it cannot slip in after this transaction commits ready.
+        # The analyzer can be slow or remote, so every call and result
+        # transformation above runs before the write transaction. Acquire the
+        # writer lock only for the final snapshot check and atomic page/status
+        # update. A queued new-page INSERT also re-checks document.status in its
+        # write statement, so it cannot slip in after this commits ready.
         if not conn.in_transaction:
             conn.execute("BEGIN IMMEDIATE")
         _require_dense_page_indexes(conn, document_id)
@@ -761,7 +738,7 @@ def finalize_document(document_id: int) -> dict:
         current_snapshot = [
             tuple(page[field] for field in snapshot_fields) for page in current_pages
         ]
-        if current_snapshot != analyzed_snapshot:
+        if current_snapshot != original_snapshot:
             raise HTTPException(
                 status_code=409,
                 detail=(
@@ -769,6 +746,22 @@ def finalize_document(document_id: int) -> dict:
                     "after reviewing /scan-status"
                 ),
             )
+        for update_values in pending_updates:
+            updated = conn.execute(
+                "UPDATE pages SET ocr_text = ?, vision_text = ?, summary = ? "
+                "WHERE id = ? AND page_index = ? "
+                "AND image_path IS ? AND ocr_text IS ? "
+                "AND vision_text IS ? AND summary IS ?",
+                update_values,
+            )
+            if updated.rowcount != 1:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "document pages changed during finalization; retry finalize "
+                        "after reviewing /scan-status"
+                    ),
+                )
         conn.execute(
             "UPDATE documents SET status = 'ready' WHERE id = ?", (document_id,)
         )

@@ -1,8 +1,15 @@
-# グラス UX 契約（無音・無フラッシュ・無点滅・音声トグル）
+# グラス UX 参考資料（旧操作を含むレガシー契約）
 
-本サーバは**サーバ側**実装です。眼鏡（Rokid Glasses）と伴走アプリ（スマホ＝裏方）が
-**必ず守るべき表示・操作の規約**をここに定義します。サーバは守れる範囲を強制し
-（HUD は最大3行・音/アニメ指示を持たない・本番モードはロック）、残りはクライアント責務です。
+> **適用範囲:** この文書は旧操作を含む参考資料であり、現行実機の撮影経路や SDK 境界の
+> 権威ソースではありません。real-device capture については [CLAUDE.md](../CLAUDE.md)、
+> [cxr-l-integration.md](cxr-l-integration.md)、
+> [windows-android-real-device-setup.md](windows-android-real-device-setup.md)、
+> [device-verification-checklist.md](device-verification-checklist.md) を優先してください。
+
+本サーバは**サーバ側**実装です。ここでは眼鏡（Rokid Glasses）と伴走アプリ
+（スマホ＝裏方）の表示・操作に関するレガシー規約を記録します。サーバは守れる範囲を
+強制し（HUD は最大3行・音/アニメ指示を持たない・本番モードはロック）、物理撮影 cue
+の挙動はアプリから保証せず、正確な機種・ファームウェアで確認します。
 
 ## 役割分担
 
@@ -20,8 +27,8 @@
 
 | 項目 | 規約 |
 |------|------|
-| **音** | シャッター音・通知音・ビープを**一切鳴らさない**。独自カメラ経路（CXR-S/Camera2）で無音撮影。 |
-| **フラッシュ** | 写真用フラッシュなし（光るのは消去不可のプライバシーLEDのみ）。HUD の**白フラッシュ禁止**。 |
+| **音** | HUD ペイロードは音の指示を出さない。物理シャッター音・capture indicator は device-controlled であり、アプリから抑止を保証しない。 |
+| **フラッシュ** | HUD の**白フラッシュ指示は禁止**。物理フラッシュは device-controlled、プライバシーLEDは不可侵であり、実機挙動は checklist で確認する。 |
 | **アニメーション** | 大きいアニメ禁止。テキスト切替は**フェード無しの即時置換**。 |
 | **点滅** | 強い点滅禁止。状態は点滅でなく**静的記号**（✓ / ! / ★）で表す。 |
 | **輝度** | 10段階調光の**低位**を既定に。 |
@@ -32,12 +39,24 @@
 > - `GET /v1/settings` の `hud` を**機械可読の描画契約**として公示：
 >   `silent:true, white_flash:false, transition:"instant", brightness:"low", animations:false, blinking:false, max_lines:3`。
 >   クライアントは起動時にこれを唯一の権威ソースとして読む。
-> - 撮影成功は**無音・無白フラッシュ**の `capture_ack`（HUD1行・`ttl_sec:2`、音/フラッシュ指示なし）で通知。シャッター音や白フラッシュの代替。
-> - `GET /v1/settings` の `capture` で **撮影しない**方針を機械可読に公示：`shutter_sound:false`・`flash:"off"`
->   （撮影用フラッシュ/トーチなし）・`capture_tone:false`（無音撮影）・`audio_record:{start_tone:false, stop_tone:false, silent:true}`
->   （リスニング録音も無音）。独自カメラ経路 `cxr-s/camera2`。**フラッシュ・シャッター音・録音音を出さない**。
-> - **プライバシーLEDは不可侵**：`capture.privacy_led` を `state:"on_while_camera_active", tamper:"forbidden"` として公示し、**サーバはLEDを制御・無効化する機能を一切持たない**。LED はカメラ稼働中に必ず点灯するハードのプライバシー表示（フラッシュではない）で、**視認＝認識＝カメラON＝LED点灯**（カメラOFFの視認は存在しない）。
-> - **LED 点灯時間の最小化（設計原則）**：`capture.led_off_during_review:true` を公示。3 フェーズフローでは**読取フェーズだけ**カメラON（LED点灯）で、`finalize-reading` 以降の解答・閲覧フェーズはカメラを閉じるため **LED は消灯**。
+> - 撮影成功は `capture_ack`（HUD1行・`ttl_sec:2`）で通知し、サーバは音や白フラッシュの
+>   render directive を出しません。これは HUD 表示だけの契約であり、物理シャッター音、
+>   フラッシュ、capture indicator の代替・制御・保証ではありません。
+> - `GET /v1/settings` の `capture` は現行撮影経路を機械可読に公示します：
+>   `mode:"photograph"`、`camera_path:"cxr-l/takePhoto"`、
+>   `shutter_sound:"device_controlled"`、`flash:"device_controlled"`、
+>   `capture_tone:"device_controlled"`。`hud.silent:true` と
+>   `hud.white_flash:false` は server render directive であり、物理 cue を制御しません。
+> - リスニング録音の server contract は
+>   `audio_record:{start_tone:false, stop_tone:false, silent:true}` です。これも撮影時の物理 cue
+>   に対する保証ではありません。
+> - **privacy LED（プライバシーLED）は不可侵**：
+>   `capture.privacy_led` は `state:"on_while_camera_active", tamper:"forbidden"` です。
+>   アプリやサーバは LED を無効化・回避・隠蔽・誤表現しません。正確な点灯・消灯挙動は
+>   対象ファームウェアで physical checklist を完了して確認します。
+> - `capture.led_off_during_review:true` は review 中にカメラを閉じるアプリ契約です。
+>   実機での LED 遷移は checklist 完了まで確認済みと扱いません。物理音が出ないことや
+>   物理フラッシュが作動しないことも、同じ実機確認を終えるまで報告しません。
 
 ## 音声操作トグル（設定 ON/OFF）
 
