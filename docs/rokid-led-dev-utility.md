@@ -25,6 +25,34 @@
 
 ---
 
+## 2026-07-24 時点で確認できた範囲 / What is actually verified
+
+- 一般向け **Rokid Glasses** の[日本公式 FAQ](https://jp.rokid.com/pages/faqs)は、
+  カメラ動作中の LED は消せず、LED を隠すとカメラが起動しないと明記しています。
+- このリポジトリが使う公式
+  [`com.rokid.cxr:client-l:1.0.1`](https://maven.rokid.com/repository/maven-public/com/rokid/cxr/client-l/1.0.1/client-l-1.0.1.aar)
+  の `IMediaStreamService` 公開メソッドを確認しましたが、LED / capture-light
+  制御 API は含まれていません。
+- 別製品系統の **Rokid Glass3 Enterprise** 用
+  [`glass3.open.sdk`](https://x-docs.rokid.com/docs/terminal-sdk/api-reference/Glass3%20%20SDK%28%E7%9C%BC%E9%95%9C%E7%AB%AF%29%20API%E6%96%87%E6%A1%A3.html)
+  には `IDeviceService.setCameraLedEnable(boolean)` が公開されています。これは Glass3
+  上で動く眼鏡側 SDK / system service の API であり、本リポジトリの一般向け Glasses +
+  Global Hi Rokid + スマホ側 CXR-L 構成へそのまま移植できる証拠ではありません。
+- [Rokid Glasses のセキュリティ調査](https://www.secrss.com/articles/85621?app=1)でも、
+  LED は system アプリが一元管理し、一般アプリからは直接制御できない一方、system
+  制御権を得た状態では切替可能と報告されています。
+- `vendor.rkd.camera.session_open` と `/sys/class/leds/white` を使う本ツールの経路は、
+  公開資料で裏付けられた一般向け Glasses の API ではありません。root / system 権限と
+  機種・ファームウェア固有ノードが揃えば動く可能性はありますが、接続実機での物理確認までは
+  完了していないため、引き続き **未確認の仮説** として扱います。
+
+結論として、LED ハードウェアが絶対に消せないわけではありません。しかし、一般向け純正
+ファームウェア上の CXR-L アプリから確実に消せる方法は確認できていません。実機検証では
+`probe` でノードと権限を先に確認し、`verify` の読み戻しに加えて別カメラで物理 LED を
+確認してください。
+
+---
+
 ## なぜこのツールは「dry-run 既定＋明示フラグ」なのか / Why it is gated
 
 リポジトリ全体の安全方針（本番試験解答が既定でロックされているのと同じ思想）に合わせ、
@@ -36,13 +64,38 @@
 | `probe`   | 読み取り専用 | dry-run | `--apply` |
 | `status`  | 読み取り専用 | dry-run | `--apply` |
 | `disable` | **書き込み（LED 状態変更）** | dry-run | `--apply` **かつ** `--force` |
-| `restore` | **書き込み（undo）** | dry-run | `--apply` **かつ** `--force` |
+| `restore` | **再起動（runtime変更の破棄）** | dry-run | `--apply` **かつ** `--force` |
 | `verify`  | status→**disable（書き込み）**→status＋判定 | dry-run | `--apply` **かつ** `--force` |
 
 - **既定は常に dry-run**：コマンド列を表示するだけで、端末には何も送りません。
 - `--apply` を付けて初めて実際に実行します。
 - `disable` / `restore` は端末状態を変えるため、`--apply` に加えて `--force` が必須です。
   `--apply` だけで write 操作を呼ぶと **ブロックされ、exit code 2** で終了します。
+
+---
+
+## 変更してはいけない設定 / Protected settings
+
+実験で端末が常時点灯・常時消灯・起動不能になることを避けるため、次の項目は本ツールでも
+通常アプリでも変更しません。
+
+- `app/glasses_view.py` の `CAPTURE_CONTRACT`：
+  `privacy_led.state=on_while_camera_active` と `tamper=forbidden` を維持する。
+- `persist.*` 系 system property、`init*.rc`、Lights HAL、system アプリ、boot image：
+  永続変更、置換、無効化を行わない。
+- SELinux：
+  `setenforce 0`、ポリシー追加、Magisk の常駐ルールを自動実行しない。
+- `/sys/class/leds/*`：
+  `chmod` / `chown` せず、起動スクリプトや常駐ループから brightness / trigger を
+  再アサートしない。`verify --retries` も最大10回に制限する。
+- 推測した復旧値：
+  trigger を `timer`、`vendor.rkd.camera.session_open` を `1` に固定しない。これらは
+  一般向け Rokid Glasses の既定値として確認されておらず、常時点灯や点滅を招き得ます。
+- 通常実行経路：
+  `disable` / `verify` を FastAPI、Android relay、環境変数、HTTP API、通常UIから呼ばない。
+
+実験用の変更は非永続の ADB コマンドに限定し、終了後の `restore` は値を推測して上書きせず、
+端末を再起動してファームウェア自身の LED ポリシーへ戻します。
 
 ---
 
@@ -111,12 +164,15 @@ echo none > /sys/class/leds/white/trigger
 echo 0    > /sys/class/leds/white/brightness   # トリガ変更後に再度 0
 ```
 
-### 6. 元に戻す（best-effort undo）
+### 6. 元に戻す（端末再起動）
 
 ```bash
-python scripts/rokid_led.py restore --led white --host 192.168.1.50:5555 --apply --force
-# 確実なクリーン状態にはグラスの再起動を推奨。
+python scripts/rokid_led.py restore --host 192.168.1.50:5555 --apply --force
 ```
+
+`restore` は `adb reboot` のみを実行します。LED trigger や camera-session property に
+推測値を書き戻しません。runtime の sysfs / 非永続 property 変更は再起動で破棄され、
+起動後はファームウェアが本来の状態を決めます。
 
 ### JSON 出力（ツール連携用）
 
@@ -168,7 +224,7 @@ python scripts/rokid_led.py verify --led white --host 192.168.1.50:5555 \
     --apply --force --retries 3 --evidence-out led-evidence.json
 
 # 3. 終わったら必ず元に戻す（または再起動）:
-python scripts/rokid_led.py restore --led white --host 192.168.1.50:5555 --apply --force
+python scripts/rokid_led.py restore --host 192.168.1.50:5555 --apply --force
 ```
 
 ### 期待される出力 / Expected output
@@ -218,7 +274,7 @@ snapshots:
 1. **別のスマホ／カメラでグラスの録画 LED を録画しながら** `verify --apply --force` を実行する。
 2. 録画映像で LED が **実際に消灯したか** を目視確認する（一瞬だけ消えて再点灯する場合もある）。
 3. `reasserted: true` や、目視で点滅・再点灯が見えたら **「消えていない」** と判断する。
-4. 検証後は `restore` または **再起動** で必ず元の状態に戻す。
+4. 検証後は `restore`（端末再起動）で必ずファームウェア管理へ戻す。
 
 ---
 
@@ -255,5 +311,7 @@ snapshots:
 - CLI は `scripts/rokid_led.py`（`scripts/evaluate.py` と同じ argparse スタイル）。`verify`
   は `--retries` / `--retry-delay` / `--evidence-out` を持ち、終了コードで状態を表します
   （0=confirmed off/dry-run、2=blocked、3=unknown、4=still on）。
+- `restore` は未確認の trigger / property 値を書きません。`adb reboot` だけを二段ゲートの
+  内側で実行し、runtime 実験状態をファームウェア初期化へ委ねます。
 - テストは `tests/test_rokid_led.py`：コマンド構築・dry-run・安全ゲートに加え、読み戻しの
   パース・判定（off/on/unknown）・再アサート検知・JSON 証跡・失敗モードを検証。

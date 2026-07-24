@@ -7,3 +7,6 @@ data/
 .env
 .env.*
 !.env.example
+android-relay/.gradle/
+android-relay/local.properties
+android-relay/**/build/

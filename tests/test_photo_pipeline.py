@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import importlib
 import io
+import struct
+import zlib
 
 import pytest
 from fastapi.testclient import TestClient
@@ -38,6 +40,22 @@ def _orientation_png() -> bytes:
     output = io.BytesIO()
     image.save(output, format="PNG")
     return output.getvalue()
+
+
+def _png_header(width: int, height: int) -> bytes:
+    """PNG metadata with no pixel payload; enough to exercise dimension checks."""
+
+    def chunk(kind: bytes, data: bytes = b"") -> bytes:
+        checksum = zlib.crc32(kind + data) & 0xFFFFFFFF
+        return (
+            struct.pack(">I", len(data))
+            + kind
+            + data
+            + struct.pack(">I", checksum)
+        )
+
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) + chunk(b"IEND")
 
 
 def _new_document(client) -> int:
@@ -90,6 +108,19 @@ def test_photo_rotation_rejects_unsupported_angle(client):
     assert response.status_code == 400
     assert response.json()["detail"] == (
         "image_rotation must be one of 0, 90, 180, or 270"
+    )
+
+
+def test_photo_rejects_excessive_decoded_dimensions(client):
+    document_id = _new_document(client)
+    response = client.post(
+        f"/v1/documents/{document_id}/pages",
+        data={"page_index": "0", "ocr_text": "問1"},
+        files={"image": ("oversized.png", _png_header(6000, 5000), "image/png")},
+    )
+    assert response.status_code == 413
+    assert response.json()["detail"] == (
+        "image dimensions too large (max 25 megapixels)"
     )
 
 

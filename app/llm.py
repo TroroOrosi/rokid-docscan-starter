@@ -29,7 +29,8 @@ import base64
 import json
 import math
 import os
-import re
+
+from .audio_formats import detect_audio_format
 
 PROVIDERS = ("openai", "gemini", "anthropic")
 
@@ -152,13 +153,27 @@ class LLMClient:
             # e.g. docker-compose passing `ROKID_TRANSCRIBE_MODEL=` when unset —
             # still falls back to the default instead of requesting model="".
             model = os.environ.get("ROKID_TRANSCRIBE_MODEL") or "gpt-4o-transcribe"
-            resp = self._sdk.audio.transcriptions.create(model=model, file=("audio", audio))
+            audio_format = detect_audio_format(audio)
+            resp = self._sdk.audio.transcriptions.create(
+                model=model,
+                file=(
+                    audio_format.upload_name,
+                    audio,
+                    audio_format.mime_type,
+                ),
+            )
             return (getattr(resp, "text", "") or "").strip()
         if self.provider == "gemini":
+            audio_format = detect_audio_format(audio)
             resp = self._sdk.models.generate_content(
                 model=self.model,
                 contents=[
-                    {"inline_data": {"mime_type": _audio_media_type(audio), "data": _b64(audio)}},
+                    {
+                        "inline_data": {
+                            "mime_type": audio_format.mime_type,
+                            "data": _b64(audio),
+                        }
+                    },
                     {"text": "Transcribe the audio verbatim."},
                 ],
             )
@@ -273,15 +288,7 @@ def _media_type(image: bytes) -> str:
 
 def _audio_media_type(audio: bytes) -> str:
     """Best-effort audio MIME from magic bytes (default audio/mpeg)."""
-    if audio[:4] == b"RIFF" and audio[8:12] == b"WAVE":
-        return "audio/wav"
-    if audio[:3] == b"ID3" or audio[:2] in (b"\xff\xfb", b"\xff\xf3", b"\xff\xf2"):
-        return "audio/mpeg"
-    if audio[:4] == b"OggS":
-        return "audio/ogg"
-    if audio[:4] == b"fLaC":
-        return "audio/flac"
-    return "audio/mpeg"
+    return detect_audio_format(audio).mime_type
 
 
 def clamp01(value, default: float = 0.0) -> float:

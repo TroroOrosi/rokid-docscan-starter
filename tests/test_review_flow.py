@@ -139,6 +139,94 @@ def test_finalize_reading_is_idempotent(client):
     assert again["problem_count"] == first["problem_count"] == 2
 
 
+def test_finalize_reading_atomically_freezes_page_replacement(client, monkeypatch):
+    """A replacement that loses the write-lock race must not rewrite the deck."""
+    import threading
+
+    import app.main as main
+
+    document_id = _doc_with_text_pages(client, ["問1 置換前の本文"])
+    session_id = _new_doc_exam(client, document_id)["session_id"]
+
+    review_check_finished = threading.Event()
+    release_replacement = threading.Event()
+    real_connect = main.db.connect
+
+    class BufferedCursor:
+        def __init__(self, row):
+            self._row = row
+
+        def fetchone(self):
+            return self._row
+
+    class PausingConnection:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def execute(self, sql, parameters=()):
+            cursor = self._inner.execute(sql, parameters)
+            if "SELECT COUNT(*) FROM exam_sessions" in sql:
+                # Buffer and close the read cursor before pausing so the
+                # finalizer can acquire and commit under SQLite's write lock.
+                row = cursor.fetchone()
+                cursor.close()
+                review_check_finished.set()
+                assert release_replacement.wait(5), (
+                    "test did not release the page replacement"
+                )
+                return BufferedCursor(row)
+            return cursor
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+    monkeypatch.setattr(
+        main.db,
+        "connect",
+        lambda *args, **kwargs: PausingConnection(real_connect(*args, **kwargs)),
+    )
+
+    outcome = {}
+
+    def replace_page():
+        outcome["replacement"] = client.post(
+            f"/v1/documents/{document_id}/pages",
+            data={"page_index": 0, "ocr_text": "問1 置換後の本文"},
+        )
+
+    worker = threading.Thread(target=replace_page)
+    worker.start()
+    try:
+        assert review_check_finished.wait(3), "replacement did not reach review check"
+        finalized = client.post(
+            f"/v1/exam-sessions/{session_id}/finalize-reading"
+        )
+    finally:
+        release_replacement.set()
+        worker.join(timeout=5)
+
+    assert not worker.is_alive()
+    assert finalized.status_code == 200
+    assert outcome["replacement"].status_code == 409
+    assert "already finished reading" in outcome["replacement"].json()["detail"]
+
+    conn = real_connect()
+    try:
+        page = conn.execute(
+            "SELECT ocr_text FROM pages "
+            "WHERE document_id = ? AND page_index = 0",
+            (document_id,),
+        ).fetchone()
+        question = conn.execute(
+            "SELECT body_text FROM questions WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert page["ocr_text"] == "問1 置換前の本文"
+    assert question["body_text"] == "問1 置換前の本文"
+
+
 def test_concurrent_finalize_claims_paid_solve_once(client, monkeypatch):
     """A double-fired finalize must not double-charge the configured solver."""
     import threading

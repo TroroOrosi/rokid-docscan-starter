@@ -91,7 +91,13 @@ from __future__ import annotations
 #        resulting text is persisted before segmentation. scan-status reports
 #        has_image, and deck solvers receive the originating page image.
 #        API -> 1.12.0, glasses view -> 1.6.0.
-APP_VERSION = "0.12.0"
+# 0.13.0: review and media integrity hardening. Page replacement is frozen
+#        atomically once review begins, decoded images are bounded to 25 MP,
+#        audio persistence/provider metadata share one canonical registry, and
+#        the Android relay keeps unknown captures blocked across timeout/IPC
+#        failures while rejecting stale callbacks after reconnect.
+#        API -> 1.13.0, glasses view -> 1.7.0.
+APP_VERSION = "0.13.0"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.
@@ -136,7 +142,10 @@ APP_VERSION = "0.12.0"
 # 1.12.0: scan-status pages gain has_image; document finalization persists
 #        image-analyzer OCR/vision text and rejects unreadable photo-only pages;
 #        finalize-reading attaches the problem's starting-page image to solvers.
-API_VERSION = "1.12.0"
+# 1.13.0: page replacement is atomically rejected after a session enters
+#        review; oversized decoded images return 413; audio uploads use
+#        allow-listed suffixes and format-correct provider metadata.
+API_VERSION = "1.13.0"
 
 # Matching algorithm identity. Bump when thresholds or hashing change so a
 # re-index/eval is triggered. Mirrors thresholds in app/matching.py.
@@ -212,7 +221,10 @@ EXPLAINER_API_VERSION = "1.1.0"
 #        (`D{document_id}:P{page_number}`) when structured refs are available.
 # 1.6.0: capture contract describes real CXR-L photography and reports shutter,
 #        flash and capture cues as device-controlled instead of promising silence.
-GLASSES_VIEW_CONTRACT_VERSION = "1.6.0"
+# 1.7.0: the relay capture lifecycle is fail-closed for timeout and ambiguous
+#        Binder starts; reconnect creates a new callback epoch so delayed events
+#        from an old service binding cannot complete a new capture.
+GLASSES_VIEW_CONTRACT_VERSION = "1.7.0"
 
 # Answer-area overlay payload (box + short answer; 2D image-anchored).
 # 1.1.0: added tracking metadata (tracking/fixed_ar/anchor_hint).

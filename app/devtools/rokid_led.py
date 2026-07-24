@@ -30,6 +30,7 @@ Nothing here runs on import. The server never imports this module.
 
 from __future__ import annotations
 
+import re
 import shlex
 import subprocess
 import time
@@ -43,6 +44,8 @@ SESSION_OPEN_PROP = "vendor.rkd.camera.session_open"
 # real node name varies by device; `probe` is what discovers the truth.
 DEFAULT_LED_NAME = "white"
 LEDS_ROOT = "/sys/class/leds"
+MAX_VERIFY_RETRIES = 10
+_LED_NAME_RE = re.compile(r"[A-Za-z0-9_.:-]+")
 
 # Property name fragments worth grepping for during discovery.
 PROP_GREP_TERMS = ("led", "light")
@@ -92,6 +95,23 @@ def _adb_prefix(serial: str | None, host: str | None) -> tuple[str, ...]:
     return ("adb",)
 
 
+def validate_led_name(led_name: str) -> str:
+    """Reject path traversal and remote-shell metacharacters in LED node names."""
+    if (
+        not led_name
+        or led_name in {".", ".."}
+        or _LED_NAME_RE.fullmatch(led_name) is None
+    ):
+        raise ValueError(
+            "LED name must contain only letters, digits, '.', '_', ':', or '-'"
+        )
+    return led_name
+
+
+def _led_node(led_name: str) -> str:
+    return f"{LEDS_ROOT}/{validate_led_name(led_name)}"
+
+
 def build_connect_plan(host: str, *, port: int = 5555) -> Plan:
     """Plan the wireless ADB handshake: `adb tcpip` + `adb connect <ip:port>`.
 
@@ -125,7 +145,7 @@ def build_probe_plan(
     Everything here is non-destructive — safe to run without `--force`.
     """
     adb = _adb_prefix(serial, host)
-    node = f"{LEDS_ROOT}/{led_name}"
+    node = _led_node(led_name)
     commands = [
         Command(("adb", "devices"), "list attached/connected adb devices"),
         Command((*adb, "shell", "getenforce"), "report SELinux enforcing/permissive"),
@@ -161,7 +181,7 @@ def build_status_plan(
 ) -> Plan:
     """Read-only: report current brightness / trigger / session-open property."""
     adb = _adb_prefix(serial, host)
-    node = f"{LEDS_ROOT}/{led_name}"
+    node = _led_node(led_name)
     return Plan(
         operation="status",
         commands=(
@@ -199,7 +219,7 @@ def build_disable_plan(
     simply not work on a stock device.
     """
     adb = _adb_prefix(serial, host)
-    node = f"{LEDS_ROOT}/{led_name}"
+    node = _led_node(led_name)
     return Plan(
         operation="disable",
         commands=(
@@ -230,25 +250,29 @@ def build_restore_plan(
     host: str | None = None,
     led_name: str = DEFAULT_LED_NAME,
 ) -> Plan:
-    """Side-effectful attempt to put the LED back under normal control.
+    """Reboot so firmware restores the device's own LED policy.
 
-    Rebinds the default kernel trigger and restores the session property, so a
-    developer can undo a `disable` attempt. Requires `force=True`.
+    The former implementation guessed ``timer`` and session property ``1``.
+    Neither value is a documented default for consumer Rokid Glasses, and
+    writing them can leave the indicator lit or blinking after the experiment.
+    Runtime sysfs and non-persistent property changes are instead discarded by
+    rebooting, without inventing device-specific LED state. Requires
+    ``force=True`` because reboot is disruptive.
     """
     adb = _adb_prefix(serial, host)
-    node = f"{LEDS_ROOT}/{led_name}"
     return Plan(
         operation="restore",
         commands=(
-            Command((*adb, "shell", f"echo timer > {node}/trigger"),
-                    "rebind a default kernel trigger", writes=True),
-            Command((*adb, "shell", "setprop", SESSION_OPEN_PROP, "1"),
-                    f"restore {SESSION_OPEN_PROP}", writes=True),
+            Command((*adb, "reboot"),
+                    "reboot and let firmware restore its LED policy", writes=True),
         ),
         needs_force=True,
         notes=(
-            "Best-effort undo of `disable`. The exact default trigger varies by "
-            "device; reboot the glasses to guarantee a clean LED state.",
+            "Does not guess brightness, trigger, or camera-session values.",
+            "No persist.* property, init script, SELinux policy, permission, or "
+            "boot hook is changed by this tool.",
+            f"The --led value ({led_name}) is ignored for restore; firmware owns "
+            "the post-reboot LED state.",
         ),
     )
 
@@ -604,8 +628,8 @@ def run_verification(
     disable_plan = build_disable_plan(serial=serial, host=host, led_name=led_name)
     if apply and disable_plan.needs_force and not force:
         rep.blocked_reason = (
-            f"operation 'disable' changes device state and requires an explicit "
-            f"force flag; refusing to run"
+            "operation 'disable' changes device state and requires an explicit "
+            "force flag; refusing to run"
         )
         rep.applied = False
         return rep
@@ -632,8 +656,9 @@ def run_verification(
     # loop stops early only once a check confirms off AND the prior check also
     # confirmed off (state is stable).
     prev_off = verdict_for(rep.after) == VERDICT_OFF
-    for _ in range(max(0, retries)) if (apply and force) else ():
-        sleep(retry_delay)
+    bounded_retries = min(max(0, retries), MAX_VERIFY_RETRIES)
+    for _ in range(bounded_retries) if (apply and force) else ():
+        sleep(max(0.0, retry_delay))
         if verdict_for(rep.after) != VERDICT_OFF:
             # LED is on/unknown: actively re-assert the disable.
             rep.write_report = execute_plan(

@@ -89,7 +89,7 @@ Hi Rokidを再認可して接続すると、`/scan-status`を読み、未確定�
 | サーバ接続不可 | PC IPv4、同一LAN、Firewall、ポート、URLを確認 |
 | 401 | RelayとWindowsの `ROKID_API_KEY` を一致させる |
 | Hi Rokid未接続 | Hi Rokidでペアリング確認後、再認可 |
-| 撮影callbackなし | Relayを前面表示し、スマホをスリープさせない |
+| 撮影callbackなし | Relayを前面表示し、スマホをスリープさせない。30秒後は追加撮影せず「Hi Rokid認可・再接続」を実行 |
 | OCR空 / 問題0件 | 回転を直して同じページを再撮影、または画像対応Analyzer設定を確認 |
 | 問題0件 | OCR/図表説明を確認して該当ページを再撮影 |
 | HUD更新なし | サービス再接続。Relayはclose + open更新を使用 |

@@ -82,7 +82,7 @@ def phash(image: Image.Image) -> int:
     try:
         pixels = list(img.get_flattened_data())
     except AttributeError:
-        pixels = list(img.getdata())  # noqa: small image, fine here
+        pixels = list(img.getdata())  # The resized image is intentionally small.
     matrix = [
         [float(pixels[r * PHASH_SIZE + c]) for c in range(PHASH_SIZE)]
         for r in range(PHASH_SIZE)

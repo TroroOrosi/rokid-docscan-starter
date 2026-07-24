@@ -6,7 +6,6 @@ from app.analyzers import (
     list_analyzers,
     register_analyzer,
 )
-from app.analyzers.local_placeholder import LocalPlaceholderAnalyzer
 
 
 # --- version module ---------------------------------------------------------
@@ -16,22 +15,23 @@ def test_version_info_pins_every_contract():
     # simultaneous doc/pin update CLAUDE.md requires (no silent version drift —
     # docs hardcode several of these, e.g. user-operation-guide's JSON block).
     assert version.version_info() == {
-        "app_version": "0.12.0",
-        "api_version": "1.12.0",
+        "app_version": "0.13.0",
+        "api_version": "1.13.0",
         "matcher_version": "1.2.0",
         "hud_contract_version": "1.0.0",
         "analyzer_api_version": "1.0.0",
         "solver_api_version": "1.2.0",
         "extractor_api_version": "1.0.0",
         "explainer_api_version": "1.1.0",
-        "glasses_view_contract_version": "1.6.0",
+        "glasses_view_contract_version": "1.7.0",
         "overlay_contract_version": "1.1.0",
     }
 
 
-def test_glasses_contract_reflects_real_photo_cues():
-    # 1.6.0: capture cues are device-controlled and photography is explicit.
-    assert version.GLASSES_VIEW_CONTRACT_VERSION == "1.6.0"
+def test_glasses_contract_reflects_fail_closed_capture_lifecycle():
+    # 1.7.0: ambiguous capture starts stay blocked and callback epochs prevent
+    # an old service binding from completing a new capture.
+    assert version.GLASSES_VIEW_CONTRACT_VERSION == "1.7.0"
 
 
 def test_contract_versions_reflect_phase234():
@@ -41,10 +41,10 @@ def test_contract_versions_reflect_phase234():
     assert version.OVERLAY_CONTRACT_VERSION == "1.1.0"
 
 
-def test_contract_versions_reflect_real_device_photo_pipeline():
-    # 1.12.0: scan-status exposes has_image, photo OCR is persisted, and
-    # deck solvers receive the originating page image.
-    assert version.API_VERSION == "1.12.0"
+def test_contract_versions_reflect_review_and_media_integrity():
+    # 1.13.0: review freezes page replacement atomically, decoded image size is
+    # bounded, and audio upload/provider metadata is format-safe.
+    assert version.API_VERSION == "1.13.0"
     assert version.SOLVER_API_VERSION == "1.2.0"
     assert version.EXPLAINER_API_VERSION == "1.1.0"
 

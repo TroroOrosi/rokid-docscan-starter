@@ -3,15 +3,15 @@
 
 Out-of-band developer tool. It is NOT wired into the server or the doc-scan /
 exam flows — the running service still advertises the recording LED as
-always_on / tamper:forbidden (see app/glasses_view.py). Use this only on a
-device you own and control.
+on_while_camera_active / tamper:forbidden (see app/glasses_view.py). Use this
+only on a device you own and control.
 
 Subcommands:
   connect <ip>   plan the wireless ADB handshake (adb tcpip + adb connect)
   probe          read-only discovery of LED nodes / properties / SELinux state
   status         read-only report of current LED brightness / trigger / prop
   disable        UNCONFIRMED attempt to turn the recording LED off  (gated)
-  restore        best-effort undo of `disable`                       (gated)
+  restore        reboot to discard runtime LED experiments           (gated)
   verify         status -> disable -> status, then judge the VERIFIED state
                  (separates "command exit 0" from "LED actually reads off");
                  supports --retries to catch a re-asserting init/HAL  (gated)
@@ -63,7 +63,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from app.devtools import rokid_led  # noqa: E402
 from app.devtools.rokid_led import (  # noqa: E402
     DEFAULT_LED_NAME,
-    VERDICT_OFF,
     VERDICT_UNKNOWN,
     execute_plan,
     run_verification,
@@ -73,6 +72,13 @@ WARNING_BANNER = (
     "!! Rokid recording-LED dev tool — own-device use only. Disabling a "
     "recording indicator may be illegal; no confirmed non-root method exists."
 )
+
+
+def _led_name(value: str) -> str:
+    try:
+        return rokid_led.validate_led_name(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(str(error)) from error
 
 
 def build_plan(args: argparse.Namespace):
@@ -118,7 +124,7 @@ _VERIFY_CHECKLIST = (
     "  1. 別のスマホ/カメラでグラスの録画 LED を録画しながら apply してください。",
     "  2. ADB が rc=0 でも『物理 LED が消えた』証明にはなりません。必ず目視＋他カメラで確認。",
     "  3. confirmed_off=true は brightness=0 の読み戻しのみが根拠。点灯が見えたら ON と判断。",
-    "  4. restore（または再起動）で必ず元の状態に戻し、録画は引き続き見える形で行うこと。",
+    "  4. restore（端末再起動）で必ず元の状態に戻し、録画は引き続き見える形で行うこと。",
 )
 
 
@@ -214,7 +220,7 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("--serial", help="adb device serial (adb -s)")
         p.add_argument("--host", help="device ip:port after `adb connect` (e.g. 192.168.1.50:5555)")
         if with_led:
-            p.add_argument("--led", default=DEFAULT_LED_NAME,
+            p.add_argument("--led", default=DEFAULT_LED_NAME, type=_led_name,
                            help=f"LED node name under /sys/class/leds (default: {DEFAULT_LED_NAME})")
         p.add_argument("--apply", action="store_true",
                        help="actually execute (default is a dry run)")
@@ -226,7 +232,8 @@ def build_parser() -> argparse.ArgumentParser:
     pc.add_argument("host", help="glasses IP, optionally ip:port")
     pc.add_argument("--port", type=int, default=5555, help="tcpip port (default 5555)")
     pc.add_argument("--serial", default=None, help=argparse.SUPPRESS)
-    pc.add_argument("--led", default=DEFAULT_LED_NAME, help=argparse.SUPPRESS)
+    pc.add_argument(
+        "--led", default=DEFAULT_LED_NAME, type=_led_name, help=argparse.SUPPRESS)
     pc.add_argument("--apply", action="store_true",
                     help="actually execute (default is a dry run)")
     pc.add_argument("--force", action="store_true", help=argparse.SUPPRESS)
@@ -235,14 +242,16 @@ def build_parser() -> argparse.ArgumentParser:
     add_common(sub.add_parser("probe", help="read-only LED/property discovery"))
     add_common(sub.add_parser("status", help="read-only current LED state"))
     add_common(sub.add_parser("disable", help="UNCONFIRMED LED-off attempt (gated)"))
-    add_common(sub.add_parser("restore", help="best-effort undo of disable (gated)"))
+    add_common(sub.add_parser(
+        "restore", help="reboot to discard runtime LED changes (gated)"))
 
     pv = sub.add_parser("verify",
                         help="disable + readback-based verification (gated)")
     add_common(pv)
     pv.add_argument("--retries", type=int, default=0,
                     help="re-assert the disable up to N times if the LED reads "
-                         "on again (catches a re-asserting init/HAL service)")
+                         "on again (bounded to 10; catches a re-asserting "
+                         "init/HAL service)")
     pv.add_argument("--retry-delay", type=float, default=1.0,
                     help="seconds to wait before each re-assert (default 1.0)")
     pv.add_argument("--evidence-out",

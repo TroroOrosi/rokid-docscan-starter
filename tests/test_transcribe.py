@@ -8,6 +8,7 @@ Exercises the whole real path via an injected fake SDK (no network, no creds):
 
 from types import SimpleNamespace
 
+from app.audio_formats import AUDIO_FORMATS, safe_audio_suffix
 from app.llm import LLMClient, _audio_media_type
 from app.transcribe import transcribe_audio
 
@@ -40,6 +41,22 @@ def test_openai_transcribes(tmp_path):
     path = _write_audio(tmp_path)
     out = transcribe_audio(path, client=_openai_client("hello world"))
     assert out == "hello world"
+
+
+def test_openai_transcription_supplies_supported_filename_and_mime(tmp_path):
+    captured: dict = {}
+
+    def _create(**kw):
+        captured.update(kw)
+        return SimpleNamespace(text="ok")
+
+    sdk = SimpleNamespace(
+        audio=SimpleNamespace(transcriptions=SimpleNamespace(create=_create))
+    )
+    client = LLMClient(sdk, provider="openai", model="unused")
+    audio = b"RIFF0000WAVEdata"
+    assert transcribe_audio(_write_audio(tmp_path, data=audio), client=client) == "ok"
+    assert captured["file"] == ("audio.wav", audio, "audio/wav")
 
 
 def test_gemini_transcribes(tmp_path):
@@ -132,9 +149,39 @@ def test_transcribe_model_env_overrides_default(tmp_path, monkeypatch):
     assert captured["model"] == "whisper-x"
 
 
+def test_empty_gemini_model_env_uses_default(monkeypatch):
+    import app.transcribe as tr
+
+    monkeypatch.setenv("ROKID_LLM_MODEL", "")
+    monkeypatch.setattr(tr, "_provider_key", lambda provider: "key-present")
+    monkeypatch.setattr(tr, "_build_sdk", lambda provider: object())
+    client = tr._load_transcriber("gemini")
+    assert client is not None
+    assert client.model == "gemini-2.5-flash"
+
+
 def test_audio_media_type_detection():
     assert _audio_media_type(b"RIFF0000WAVEmore") == "audio/wav"
     assert _audio_media_type(b"ID3xxxxx") == "audio/mpeg"
     assert _audio_media_type(b"OggS0000") == "audio/ogg"
     assert _audio_media_type(b"fLaC0000") == "audio/flac"
+    assert _audio_media_type(b"\xff\xf1aac") == "audio/aac"
+    assert _audio_media_type(b"\x00\x00\x00\x18ftypM4A ") == "audio/mp4"
+    assert _audio_media_type(b"\x1aE\xdf\xa3webm") == "audio/webm"
     assert _audio_media_type(b"\x00\x00\x00\x00") == "audio/mpeg"
+
+
+def test_aac_detection_accepts_adts_headers_with_or_without_crc():
+    assert _audio_media_type(b"\xff\xf0aac-with-crc") == "audio/aac"
+    assert _audio_media_type(b"\xff\xf1aac-without-crc") == "audio/aac"
+    assert _audio_media_type(b"\xff\xf8aac-with-crc") == "audio/aac"
+    assert _audio_media_type(b"\xff\xf9aac-without-crc") == "audio/aac"
+
+
+def test_audio_registry_keeps_storage_and_provider_metadata_consistent():
+    for audio_format in AUDIO_FORMATS:
+        assert safe_audio_suffix(
+            "../untrusted.not-audio",
+            f"{audio_format.mime_type}; charset=binary",
+        ) == audio_format.persisted_suffix
+        assert audio_format.upload_name.endswith(audio_format.persisted_suffix)
