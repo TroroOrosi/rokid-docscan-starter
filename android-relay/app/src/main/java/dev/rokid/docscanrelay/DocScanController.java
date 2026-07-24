@@ -120,15 +120,25 @@ public final class DocScanController implements AutoCloseable {
     }
 
     public void setLinkReady(boolean ready) {
+        updateLinkReady(ready, CaptureLinkEvent.GLASSES_STATUS_CHANGED);
+    }
+
+    public void resetLink() {
+        updateLinkReady(false, CaptureLinkEvent.SERVICE_BINDING_RESET);
+    }
+
+    private void updateLinkReady(boolean ready, CaptureLinkEvent event) {
         try {
             serial.execute(() -> {
                 linkReady = ready;
                 if (!ready) {
-                    captureLease.resetAfterDisconnect();
+                    event.resetCaptureIfSafe(captureLease::resetAfterBindingReset);
                     publish(
                             RelayState.DISCONNECTED,
                             List.of("Hi Rokid未接続", "ペアリングを確認", ""),
-                            "Rokid link disconnected; capture lease reset");
+                            event.resetsCapture()
+                                    ? "Rokid service binding reset; capture lease released"
+                                    : "Rokid glasses unavailable; capture lease retained");
                     return;
                 }
                 if (captureLease.isUnresolved()) {
@@ -631,7 +641,7 @@ public final class DocScanController implements AutoCloseable {
 
     @Override
     public void close() {
-        captureLease.resetAfterDisconnect();
+        captureLease.resetAfterBindingReset();
         watchdog.shutdownNow();
         serial.shutdownNow();
     }

@@ -164,7 +164,14 @@ def _load_image(raw: bytes) -> Image.Image:
         return img
     except HTTPException:
         raise
-    except (UnidentifiedImageError, OSError, Image.DecompressionBombError):
+    except Image.DecompressionBombError:
+        if img is not None:
+            img.close()
+        raise HTTPException(
+            status_code=413,
+            detail="image dimensions too large (max 25 megapixels)",
+        )
+    except (UnidentifiedImageError, OSError):
         if img is not None:
             img.close()
         raise HTTPException(status_code=400, detail="invalid image upload")

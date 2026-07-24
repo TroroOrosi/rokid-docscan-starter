@@ -223,7 +223,7 @@ public final class MainActivity extends Activity
         // a photo timeout. An actual unbind clears both capture guards before
         // the replacement service can report itself ready.
         link.close();
-        controller.setLinkReady(false);
+        controller.resetLink();
         link.connect(token);
     }
 
@@ -231,7 +231,7 @@ public final class MainActivity extends Activity
     public void onLinkConnected(boolean connected) {
         runOnUiThread(() -> appendLog("Hi Rokid service connected=" + connected));
         if (!connected) {
-            controller.setLinkReady(false);
+            controller.resetLink();
         }
     }
 

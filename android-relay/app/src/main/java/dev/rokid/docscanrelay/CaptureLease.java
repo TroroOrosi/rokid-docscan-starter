@@ -7,7 +7,7 @@ package dev.rokid.docscanrelay;
  * documented cancellation API. A timeout therefore makes the camera state
  * unknown; it must not be treated as permission to start another capture.
  * The lease remains unresolved until a late callback arrives or the link is
- * disconnected.</p>
+ * rebound with a fresh callback epoch.</p>
  */
 final class CaptureLease {
     static final long NO_TOKEN = -1;
@@ -75,7 +75,7 @@ final class CaptureLease {
         return isUnresolved() && timedOut;
     }
 
-    synchronized void resetAfterDisconnect() {
+    synchronized void resetAfterBindingReset() {
         clear();
         generation++;
     }

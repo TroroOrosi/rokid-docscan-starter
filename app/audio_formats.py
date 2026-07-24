@@ -13,6 +13,7 @@ class AudioFormat:
     persisted_suffix: str
     filename_suffixes: tuple[str, ...]
     mime_aliases: tuple[str, ...] = ()
+    openai_supported: bool = True
 
 
 WAV = AudioFormat("audio/wav", "audio.wav", ".wav", (".wav",), ("audio/x-wav",))
@@ -24,7 +25,13 @@ MPEG = AudioFormat(
 )
 OGG = AudioFormat("audio/ogg", "audio.ogg", ".ogg", (".ogg",))
 FLAC = AudioFormat("audio/flac", "audio.flac", ".flac", (".flac",))
-AAC = AudioFormat("audio/aac", "audio.aac", ".aac", (".aac",))
+AAC = AudioFormat(
+    "audio/aac",
+    "audio.aac",
+    ".aac",
+    (".aac",),
+    openai_supported=False,
+)
 MP4 = AudioFormat("audio/mp4", "audio.m4a", ".m4a", (".m4a", ".mp4"))
 WEBM = AudioFormat("audio/webm", "audio.webm", ".webm", (".webm",))
 
@@ -73,3 +80,13 @@ def detect_audio_format(audio: bytes) -> AudioFormat:
         if audio[1] & 0xE0 == 0xE0:
             return MPEG
     return MPEG
+
+
+def detect_openai_audio_format(audio: bytes) -> AudioFormat:
+    """Return documented OpenAI upload metadata or reject the container."""
+    audio_format = detect_audio_format(audio)
+    if not audio_format.openai_supported:
+        raise ValueError(
+            f"OpenAI transcription does not support raw {audio_format.mime_type}"
+        )
+    return audio_format

@@ -232,11 +232,7 @@ public final class RokidGlobalLink implements AutoCloseable {
                 @Override
                 public void onDeviceConnectChanged(boolean connected) {
                     callbackEpochs.runIfActive(epoch, () -> {
-                        if (!connected) {
-                            // A real glasses disconnect terminates any
-                            // outstanding one-shot capture.
-                            photoInFlight.set(false);
-                        }
+                        applyCaptureLinkEvent(CaptureLinkEvent.GLASSES_STATUS_CHANGED);
                         listener.onGlassesConnected(connected);
                     });
                 }
@@ -375,7 +371,7 @@ public final class RokidGlobalLink implements AutoCloseable {
                     service = connected;
                     callbacks = candidate;
                     imageCallbackRegistered = true;
-                    photoInFlight.set(false);
+                    applyCaptureLinkEvent(CaptureLinkEvent.SERVICE_BINDING_RESET);
                     viewOpen = false;
                     listener.onLinkConnected(true);
                     listener.onGlassesConnected(glassesConnected);
@@ -408,7 +404,7 @@ public final class RokidGlobalLink implements AutoCloseable {
                 connection = null;
                 bound = false;
                 imageCallbackRegistered = false;
-                photoInFlight.set(false);
+                applyCaptureLinkEvent(CaptureLinkEvent.SERVICE_BINDING_RESET);
                 viewOpen = false;
                 failedCurrentBinding = true;
                 listener.onLinkConnected(false);
@@ -435,7 +431,7 @@ public final class RokidGlobalLink implements AutoCloseable {
             service = null;
             callbacks = null;
             imageCallbackRegistered = false;
-            photoInFlight.set(false);
+            applyCaptureLinkEvent(CaptureLinkEvent.SERVICE_BINDING_RESET);
             viewOpen = false;
             listener.onLinkConnected(false);
             listener.onGlassesConnected(false);
@@ -468,6 +464,10 @@ public final class RokidGlobalLink implements AutoCloseable {
         }
     }
 
+    private void applyCaptureLinkEvent(CaptureLinkEvent event) {
+        event.resetCaptureIfSafe(() -> photoInFlight.set(false));
+    }
+
     @Override
     public void close() {
         IMediaStreamService current;
@@ -486,7 +486,7 @@ public final class RokidGlobalLink implements AutoCloseable {
             connection = null;
             bound = false;
             imageCallbackRegistered = false;
-            photoInFlight.set(false);
+            applyCaptureLinkEvent(CaptureLinkEvent.SERVICE_BINDING_RESET);
             viewOpen = false;
         }
         if (current != null && registered != null) {

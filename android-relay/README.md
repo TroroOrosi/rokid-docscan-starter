@@ -78,9 +78,10 @@ uses a fail-closed capture lease:
 - after the 30-second watchdog expires, another photo, finalization, workflow
   reset, and configuration changes are blocked because camera completion is
   unknown;
-- a late callback is discarded but releases the block; otherwise a real
-  Hi Rokid/glasses disconnection and reconnection is required. Re-running
-  **Hi Rokid認可・再接続** explicitly unbinds the old CXR-L service first;
+- a late callback is discarded but releases the block; otherwise the CXR-L
+  service binding must be reset. A glasses connected/disconnected status event
+  alone retains the block because callbacks from that binding may still arrive.
+  Re-running **Hi Rokid認可・再接続** explicitly unbinds the old service first;
 - every bind owns a separate callback epoch. Callbacks already dispatched by an
   old service binding are ignored after disconnect/reconnect and cannot release
   or upload data for a newer capture.

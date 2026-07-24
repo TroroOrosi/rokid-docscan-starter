@@ -97,7 +97,12 @@ from __future__ import annotations
 #        the Android relay keeps unknown captures blocked across timeout/IPC
 #        failures while rejecting stale callbacks after reconnect.
 #        API -> 1.13.0, glasses view -> 1.7.0.
-APP_VERSION = "0.13.0"
+# 0.13.1: review follow-ups. A glasses status change no longer releases an
+#        unresolved capture without a new CXR-L callback epoch, Pillow
+#        decompression bombs map to 413, and raw AAC is never sent to OpenAI's
+#        documented transcription endpoint.
+#        API -> 1.13.1, glasses view -> 1.7.1.
+APP_VERSION = "0.13.1"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.
@@ -145,7 +150,9 @@ APP_VERSION = "0.13.0"
 # 1.13.0: page replacement is atomically rejected after a session enters
 #        review; oversized decoded images return 413; audio uploads use
 #        allow-listed suffixes and format-correct provider metadata.
-API_VERSION = "1.13.0"
+# 1.13.1: Pillow decompression-bomb rejections consistently return 413, and
+#        raw AAC is rejected before an OpenAI transcription SDK call.
+API_VERSION = "1.13.1"
 
 # Matching algorithm identity. Bump when thresholds or hashing change so a
 # re-index/eval is triggered. Mirrors thresholds in app/matching.py.
@@ -224,7 +231,9 @@ EXPLAINER_API_VERSION = "1.1.0"
 # 1.7.0: the relay capture lifecycle is fail-closed for timeout and ambiguous
 #        Binder starts; reconnect creates a new callback epoch so delayed events
 #        from an old service binding cannot complete a new capture.
-GLASSES_VIEW_CONTRACT_VERSION = "1.7.0"
+# 1.7.1: glasses status callbacks retain unresolved captures. Only a terminal
+#        image callback or an actual CXR-L service-binding reset releases them.
+GLASSES_VIEW_CONTRACT_VERSION = "1.7.1"
 
 # Answer-area overlay payload (box + short answer; 2D image-anchored).
 # 1.1.0: added tracking metadata (tracking/fixed_ar/anchor_hint).

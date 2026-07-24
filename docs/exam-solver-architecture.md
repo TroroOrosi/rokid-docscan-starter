@@ -99,6 +99,7 @@ exam-session(document_id, exam_type, answer_format)
 - **リスニング録音**：`POST …/{id}/audio`（`audio` ファイル＋任意 `transcript`）を `data/audio/` に保存。
   `app/transcribe.py` が `ROKID_TRANSCRIBER`（openai=`audio.transcriptions.create`、gemini=inline audio）で
   書き起こし。未設定/失敗/オフラインは**与えた `transcript` をそのまま使用**（クレデンシャル不要で成立）。
+  OpenAIには公式対応コンテナだけを送信し、raw ADTS AACは与値へフォールバックする。
   Anthropic は ASR 非対応。
 - **グラス単独操作**：`OPERATION_CONTRACT`（`GET /v1/settings.operations`）が 3 フェーズの全操作
   （`capture_read`/`finish_reading`/`mode_toggle`/`record_toggle`/`review_next_problem`/

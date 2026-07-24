@@ -59,6 +59,27 @@ def test_openai_transcription_supplies_supported_filename_and_mime(tmp_path):
     assert captured["file"] == ("audio.wav", audio, "audio/wav")
 
 
+def test_openai_raw_aac_falls_back_without_calling_the_sdk(tmp_path):
+    called = False
+
+    def _create(**kw):
+        nonlocal called
+        called = True
+        return SimpleNamespace(text="must not be used")
+
+    sdk = SimpleNamespace(
+        audio=SimpleNamespace(transcriptions=SimpleNamespace(create=_create))
+    )
+    client = LLMClient(sdk, provider="openai", model="unused")
+    path = _write_audio(tmp_path, name="recording.aac", data=b"\xff\xf1raw-aac")
+
+    assert (
+        transcribe_audio(path, provided_transcript="safe fallback", client=client)
+        == "safe fallback"
+    )
+    assert called is False
+
+
 def test_gemini_transcribes(tmp_path):
     path = _write_audio(tmp_path)
     out = transcribe_audio(path, client=_gemini_client("bonjour"))

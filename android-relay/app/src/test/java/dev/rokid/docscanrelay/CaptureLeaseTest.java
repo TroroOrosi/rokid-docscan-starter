@@ -49,7 +49,7 @@ public class CaptureLeaseTest {
     }
 
     @Test
-    public void failedStartAndDisconnectBothReleaseLease() {
+    public void failedStartAndBindingResetBothReleaseLease() {
         CaptureLease lease = new CaptureLease();
         long first = lease.begin(0);
         assertTrue(lease.abortBeforeStart(first));
@@ -57,7 +57,7 @@ public class CaptureLeaseTest {
 
         long second = lease.begin(1);
         assertTrue(lease.markTimedOut(second));
-        lease.resetAfterDisconnect();
+        lease.resetAfterBindingReset();
         assertFalse(lease.isUnresolved());
         assertTrue(lease.begin(2) != CaptureLease.NO_TOKEN);
     }
@@ -84,7 +84,7 @@ public class CaptureLeaseTest {
         assertTrue(lease.isTimedOut());
         assertEquals(CaptureLease.NO_TOKEN, lease.begin(5));
 
-        lease.resetAfterDisconnect();
+        lease.resetAfterBindingReset();
         assertFalse(lease.isUnresolved());
         assertTrue(lease.begin(5) != CaptureLease.NO_TOKEN);
     }
