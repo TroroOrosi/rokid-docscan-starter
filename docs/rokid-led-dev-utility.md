@@ -25,6 +25,34 @@
 
 ---
 
+## 2026-07-24 時点で確認できた範囲 / What is actually verified
+
+- 一般向け **Rokid Glasses** の[日本公式 FAQ](https://jp.rokid.com/pages/faqs)は、
+  カメラ動作中の LED は消せず、LED を隠すとカメラが起動しないと明記しています。
+- このリポジトリが使う公式
+  [`com.rokid.cxr:client-l:1.0.1`](https://maven.rokid.com/repository/maven-public/com/rokid/cxr/client-l/1.0.1/client-l-1.0.1.aar)
+  の `IMediaStreamService` 公開メソッドを確認しましたが、LED / capture-light
+  制御 API は含まれていません。
+- 別製品系統の **Rokid Glass3 Enterprise** 用
+  [`glass3.open.sdk`](https://x-docs.rokid.com/docs/terminal-sdk/api-reference/Glass3%20%20SDK%28%E7%9C%BC%E9%95%9C%E7%AB%AF%29%20API%E6%96%87%E6%A1%A3.html)
+  には `IDeviceService.setCameraLedEnable(boolean)` が公開されています。これは Glass3
+  上で動く眼鏡側 SDK / system service の API であり、本リポジトリの一般向け Glasses +
+  Global Hi Rokid + スマホ側 CXR-L 構成へそのまま移植できる証拠ではありません。
+- [Rokid Glasses のセキュリティ調査](https://www.secrss.com/articles/85621?app=1)でも、
+  LED は system アプリが一元管理し、一般アプリからは直接制御できない一方、system
+  制御権を得た状態では切替可能と報告されています。
+- `vendor.rkd.camera.session_open` と `/sys/class/leds/white` を使う本ツールの経路は、
+  公開資料で裏付けられた一般向け Glasses の API ではありません。root / system 権限と
+  機種・ファームウェア固有ノードが揃えば動く可能性はありますが、接続実機での物理確認までは
+  完了していないため、引き続き **未確認の仮説** として扱います。
+
+結論として、LED ハードウェアが絶対に消せないわけではありません。しかし、一般向け純正
+ファームウェア上の CXR-L アプリから確実に消せる方法は確認できていません。実機検証では
+`probe` でノードと権限を先に確認し、`verify` の読み戻しに加えて別カメラで物理 LED を
+確認してください。
+
+---
+
 ## なぜこのツールは「dry-run 既定＋明示フラグ」なのか / Why it is gated
 
 リポジトリ全体の安全方針（本番試験解答が既定でロックされているのと同じ思想）に合わせ、
