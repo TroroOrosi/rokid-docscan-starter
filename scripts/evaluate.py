@@ -104,22 +104,29 @@ def _query_variants(image: Image.Image) -> list[tuple[str, Image.Image]]:
 
 
 def _eval_candidates(
-    items: list[tuple[int, int, str]],
-    queries: list[tuple[int, str, str]],
+    items: list[tuple[int, int, int, str]],
+    queries: list[tuple[int, int, str, str]],
 ) -> dict:
-    """Match (expected_page_id, variant_name, pHash) queries to candidates."""
-    candidates = [
-        Candidate(page_id=pid, page_index=idx, phash=ph, ocr_md5=None)
-        for pid, idx, ph in items
-    ]
-    candidate_hashes = {pid: ph for pid, _idx, ph in items}
-    candidate_indexes = {pid: idx for pid, idx, _ph in items}
+    """Match each scoped variant query to candidates from its document."""
+    candidates_by_scope: dict[int, list[Candidate]] = {}
+    candidate_hashes = {}
+    candidate_indexes = {}
+    for scope_id, pid, idx, ph in items:
+        candidates_by_scope.setdefault(scope_id, []).append(
+            Candidate(page_id=pid, page_index=idx, phash=ph, ocr_md5=None)
+        )
+        candidate_hashes[pid] = ph
+        candidate_indexes[pid] = idx
     results = []
     variant_hammings = []
     hits = 0    # expected page ranked first AND the app would accept it (HIT)
     top1 = 0    # expected page ranked first, regardless of verdict
-    for expected_pid, variant, query_hash in queries:
-        best, verdict, _ = match(query_hash, None, candidates)
+    for scope_id, expected_pid, variant, query_hash in queries:
+        best, verdict, _ = match(
+            query_hash,
+            None,
+            candidates_by_scope.get(scope_id, []),
+        )
         ranked_first = best is not None and best.page_id == expected_pid
         # The live /v1/match path only surfaces a page the app acts on when the
         # verdict clears the confidence bar (HIT). A variant whose expected page
@@ -188,8 +195,8 @@ def from_db(db_path: str) -> dict:
         # This tool tunes the image-compat pHash thresholds; 撮影しない
         # text-only pages (phash='') carry no visual signal to evaluate.
         rows = conn.execute(
-            "SELECT id, page_index, phash, image_path FROM pages WHERE phash != '' "
-            "ORDER BY document_id, page_index"
+            "SELECT id, document_id, page_index, phash, image_path FROM pages "
+            "WHERE phash != '' ORDER BY document_id, page_index"
         ).fetchall()
         skipped = conn.execute(
             "SELECT COUNT(*) FROM pages WHERE phash = ''"
@@ -201,12 +208,19 @@ def from_db(db_path: str) -> dict:
     skipped_missing_images = 0
     for row in rows:
         # The live /v1/match path ranks EVERY stored pHash row, so a page whose
-        # image is gone is still a candidate other pages' variants can collide
+        # image is gone is still a candidate same-document variants can collide
         # with. Register it as a candidate regardless; only skip generating
         # queries for it (no source image to perturb). Dropping it entirely
         # would hide false matches and make threshold tuning look safer than
         # production.
-        items.append((row["id"], row["page_index"], row["phash"]))
+        items.append(
+            (
+                row["document_id"],
+                row["id"],
+                row["page_index"],
+                row["phash"],
+            )
+        )
         path = Path(row["image_path"] or "")
         if not path.is_file():
             skipped_missing_images += 1
@@ -218,7 +232,7 @@ def from_db(db_path: str) -> dict:
             skipped_missing_images += 1
             continue
         queries.extend(
-            (row["id"], name, phash_hex(variant))
+            (row["document_id"], row["id"], name, phash_hex(variant))
             for name, variant in _query_variants(image)
         )
     report = _eval_candidates(items, queries)
@@ -252,11 +266,12 @@ def from_synthetic(n: int) -> dict:
 
     items = []
     queries = []
+    synthetic_scope = 0
     for i in range(n):
         img = make(seed=10 + i * 17)
-        items.append((i + 1, i, phash_hex(img)))
+        items.append((synthetic_scope, i + 1, i, phash_hex(img)))
         queries.extend(
-            (i + 1, name, phash_hex(variant))
+            (synthetic_scope, i + 1, name, phash_hex(variant))
             for name, variant in _query_variants(img)
         )
         _ = phash(img)  # exercise int path too

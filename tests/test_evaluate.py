@@ -127,6 +127,63 @@ def test_from_db_matches_variants_of_stored_page_images(tmp_path):
     }
 
 
+def test_from_db_scopes_identical_images_to_their_document(tmp_path):
+    db_path = tmp_path / "eval.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "CREATE TABLE pages (id INTEGER PRIMARY KEY, document_id INTEGER, "
+        "page_index INTEGER, phash TEXT, image_path TEXT)"
+    )
+    image = make_image(seed=23)
+    image_hash = phash_hex(image)
+    for page_id, document_id in ((1, 1), (2, 2)):
+        path = tmp_path / f"document-{document_id}-page-0.png"
+        image.save(path)
+        conn.execute(
+            "INSERT INTO pages (id, document_id, page_index, phash, image_path) "
+            "VALUES (?, ?, 0, ?, ?)",
+            (page_id, document_id, image_hash, str(path)),
+        )
+    conn.commit()
+    conn.close()
+
+    report = from_db(str(db_path))
+    assert report["page_count"] == 2
+    assert report["query_count"] == 6
+    assert report["variant_match_accuracy"] == 1.0
+    assert report["variant_top1_accuracy"] == 1.0
+    assert {result["matched_page_id"] for result in report["results"]} == {1, 2}
+    assert all(result["ranked_first"] for result in report["results"])
+    assert set(report) == {
+        "page_count",
+        "query_count",
+        "variant_match_count",
+        "variant_match_accuracy",
+        "variant_hit_count",
+        "variant_hit_rate",
+        "variant_top1_count",
+        "variant_top1_accuracy",
+        "self_match_hits",
+        "self_match_accuracy",
+        "hamming_distribution",
+        "suggested_thresholds",
+        "results",
+        "source",
+    }
+    assert set(report["results"][0]) == {
+        "expected_page_id",
+        "page_index",
+        "variant",
+        "verdict",
+        "matched_page_id",
+        "matched_hamming",
+        "expected_hamming",
+        "confidence",
+        "ranked_first",
+        "usable",
+    }
+
+
 def test_from_db_keeps_missing_image_pages_as_candidates(tmp_path):
     # A stored page with a pHash but a missing image file is still ranked by the
     # live /v1/match path, so the evaluator must keep it as a candidate (only

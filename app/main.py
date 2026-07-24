@@ -217,6 +217,21 @@ def _page_material(ocr_text: str | None, vision_text: str | None) -> str:
     return "\n\n".join(parts)
 
 
+def _require_dense_page_index_values(indexes: list[int]) -> int:
+    expected = list(range(len(indexes)))
+    if indexes != expected:
+        missing = sorted(set(expected) - set(indexes))
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "page indexes must be contiguous from 0 before finalizing or "
+                f"starting navigation (registered={indexes}, missing={missing}); "
+                "review /scan-status and create a corrected document"
+            ),
+        )
+    return len(indexes)
+
+
 def _require_dense_page_indexes(conn, document_id: int) -> int:
     """Require the navigation invariant page_index == 0..N-1.
 
@@ -231,18 +246,82 @@ def _require_dense_page_indexes(conn, document_id: int) -> int:
             (document_id,),
         ).fetchall()
     ]
-    expected = list(range(len(indexes)))
-    if indexes != expected:
-        missing = sorted(set(expected) - set(indexes))
+    return _require_dense_page_index_values(indexes)
+
+
+_FINALIZE_SNAPSHOT_FIELDS = (
+    "id",
+    "page_index",
+    "image_path",
+    "ocr_text",
+    "vision_text",
+    "summary",
+)
+_finalize_mutex_registry_guard = threading.Lock()
+_finalize_mutex_registry: dict[int, tuple[threading.Lock, int]] = {}
+
+
+@contextmanager
+def _document_finalize_mutex(document_id: int):
+    """Serialize finalizers for one document without blocking page writers."""
+    with _finalize_mutex_registry_guard:
+        entry = _finalize_mutex_registry.get(document_id)
+        if entry is None:
+            mutex, users = threading.Lock(), 0
+        else:
+            mutex, users = entry
+        _finalize_mutex_registry[document_id] = (mutex, users + 1)
+    try:
+        with mutex:
+            yield
+    finally:
+        with _finalize_mutex_registry_guard:
+            current = _finalize_mutex_registry.get(document_id)
+            if current is not None and current[0] is mutex:
+                if current[1] == 1:
+                    del _finalize_mutex_registry[document_id]
+                else:
+                    _finalize_mutex_registry[document_id] = (
+                        mutex,
+                        current[1] - 1,
+                    )
+
+
+def _finalize_snapshot_from_rows(rows) -> list[tuple]:
+    return [
+        tuple(row[field] for field in _FINALIZE_SNAPSHOT_FIELDS) for row in rows
+    ]
+
+
+def _require_finalize_snapshot(
+    conn,
+    document_id: int,
+    original_snapshot: list[tuple],
+    data_version: int,
+    *,
+    force: bool = False,
+) -> int:
+    """Reject page changes, scanning rows only after another connection commits."""
+    current_data_version = conn.execute("PRAGMA data_version").fetchone()[0]
+    if not force and current_data_version == data_version:
+        return data_version
+    current_pages = conn.execute(
+        "SELECT id, page_index, image_path, ocr_text, vision_text, summary "
+        "FROM pages WHERE document_id = ? ORDER BY page_index",
+        (document_id,),
+    ).fetchall()
+    _require_dense_page_index_values(
+        [page["page_index"] for page in current_pages]
+    )
+    if _finalize_snapshot_from_rows(current_pages) != original_snapshot:
         raise HTTPException(
             status_code=409,
             detail=(
-                "page indexes must be contiguous from 0 before finalizing or "
-                f"starting navigation (registered={indexes}, missing={missing}); "
-                "review /scan-status and create a corrected document"
+                "document pages changed during finalization; retry finalize "
+                "after reviewing /scan-status"
             ),
         )
-    return len(indexes)
+    return current_data_version
 
 
 # --- endpoints --------------------------------------------------------------
@@ -654,8 +733,14 @@ def get_document_scan_status(
 
 @app.post("/v1/documents/{document_id}/finalize")
 def finalize_document(document_id: int) -> dict:
+    with _document_finalize_mutex(document_id):
+        return _finalize_document_once(document_id)
+
+
+def _finalize_document_once(document_id: int) -> dict:
     conn = db.connect()
     try:
+        snapshot_data_version = conn.execute("PRAGMA data_version").fetchone()[0]
         _doc_or_404(conn, document_id)
         pages = conn.execute(
             "SELECT id, page_index, image_path, ocr_text, vision_text, summary FROM pages "
@@ -667,15 +752,14 @@ def finalize_document(document_id: int) -> dict:
         _require_dense_page_indexes(conn, document_id)
 
         analyzer = get_analyzer()
-        snapshot_fields = (
-            "id",
-            "page_index",
-            "image_path",
-            "ocr_text",
-            "vision_text",
-            "summary",
+        original_snapshot = _finalize_snapshot_from_rows(pages)
+        snapshot_data_version = _require_finalize_snapshot(
+            conn,
+            document_id,
+            original_snapshot,
+            snapshot_data_version,
         )
-        analyzed_snapshot = []
+        pending_updates = []
         for p in pages:
             next_ocr = p["ocr_text"]
             next_vision = p["vision_text"]
@@ -683,35 +767,55 @@ def finalize_document(document_id: int) -> dict:
             # Idempotent: an already-finalized page needs no repeated cloud call.
             # Replaced pages have summary=NULL and are analyzed again.
             if p["summary"] is not None:
-                analyzed_snapshot.append(
-                    tuple(p[field] for field in snapshot_fields)
-                )
                 continue
 
-            result = analyzer.analyze(
-                image_path=p["image_path"],
-                ocr_text=_page_material(next_ocr, next_vision) or next_ocr,
+            # A page may be replaced between any two provider calls. Check both
+            # sides of each slow call so a stale request stops promptly without
+            # billing later pages. If the provider itself fails after a
+            # replacement completed, preserve the existing 409 conflict instead
+            # of masking it with an unrelated provider error.
+            snapshot_data_version = _require_finalize_snapshot(
+                conn,
+                document_id,
+                original_snapshot,
+                snapshot_data_version,
             )
-            extras = result.extras if isinstance(result.extras, dict) else {}
-            analyzed_text = (result.text or "").strip()
-            if analyzed_text and (
-                not (next_ocr and next_ocr.strip()) or extras.get("image_analyzed")
-            ):
-                # A successful image analyzer is authoritative over provisional
-                # phone OCR; a text-only/local analyzer preserves supplied OCR.
-                next_ocr = analyzed_text
-            analyzed_vision = str(extras.get("vision_text") or "").strip()
-            if analyzed_vision and not (next_vision and next_vision.strip()):
-                next_vision = analyzed_vision
+            try:
+                result = analyzer.analyze(
+                    image_path=p["image_path"],
+                    ocr_text=_page_material(next_ocr, next_vision) or next_ocr,
+                )
+                extras = result.extras if isinstance(result.extras, dict) else {}
+                analyzed_text = (result.text or "").strip()
+                if analyzed_text and (
+                    not (next_ocr and next_ocr.strip())
+                    or extras.get("image_analyzed")
+                ):
+                    # A successful image analyzer is authoritative over provisional
+                    # phone OCR; a text-only/local analyzer preserves supplied OCR.
+                    next_ocr = analyzed_text
+                analyzed_vision = str(extras.get("vision_text") or "").strip()
+                if analyzed_vision and not (next_vision and next_vision.strip()):
+                    next_vision = analyzed_vision
 
-            next_summary = (
-                result.summary or next_ocr or next_vision or ""
-            )[:48]
-            updated = conn.execute(
-                "UPDATE pages SET ocr_text = ?, vision_text = ?, summary = ? "
-                "WHERE id = ? AND page_index = ? "
-                "AND image_path IS ? AND ocr_text IS ? "
-                "AND vision_text IS ? AND summary IS ?",
+                next_summary = (
+                    result.summary or next_ocr or next_vision or ""
+                )[:48]
+            except Exception:
+                _require_finalize_snapshot(
+                    conn,
+                    document_id,
+                    original_snapshot,
+                    snapshot_data_version,
+                )
+                raise
+            snapshot_data_version = _require_finalize_snapshot(
+                conn,
+                document_id,
+                original_snapshot,
+                snapshot_data_version,
+            )
+            pending_updates.append(
                 (
                     next_ocr,
                     next_vision,
@@ -722,7 +826,30 @@ def finalize_document(document_id: int) -> dict:
                     p["ocr_text"],
                     p["vision_text"],
                     p["summary"],
-                ),
+                )
+            )
+
+        # The analyzer can be slow or remote, so every call and result
+        # transformation above runs before the write transaction. Acquire the
+        # writer lock only for the final snapshot check and atomic page/status
+        # update. A queued new-page INSERT also re-checks document.status in its
+        # write statement, so it cannot slip in after this commits ready.
+        if not conn.in_transaction:
+            conn.execute("BEGIN IMMEDIATE")
+        _require_finalize_snapshot(
+            conn,
+            document_id,
+            original_snapshot,
+            snapshot_data_version,
+            force=True,
+        )
+        for update_values in pending_updates:
+            updated = conn.execute(
+                "UPDATE pages SET ocr_text = ?, vision_text = ?, summary = ? "
+                "WHERE id = ? AND page_index = ? "
+                "AND image_path IS ? AND ocr_text IS ? "
+                "AND vision_text IS ? AND summary IS ?",
+                update_values,
             )
             if updated.rowcount != 1:
                 raise HTTPException(
@@ -732,43 +859,6 @@ def finalize_document(document_id: int) -> dict:
                         "after reviewing /scan-status"
                     ),
                 )
-            analyzed_snapshot.append(
-                (
-                    p["id"],
-                    p["page_index"],
-                    p["image_path"],
-                    next_ocr,
-                    next_vision,
-                    next_summary,
-                )
-            )
-
-        # The analyzer can be slow or remote. A page may have been added or
-        # replaced after the first density check but before the first summary
-        # write. Hold a write transaction for the final check/update, then
-        # verify both the navigation invariant and the exact analyzed snapshot.
-        # A queued new-page INSERT also re-checks document.status atomically in
-        # add_page, so it cannot slip in after this transaction commits ready.
-        if not conn.in_transaction:
-            conn.execute("BEGIN IMMEDIATE")
-        _require_dense_page_indexes(conn, document_id)
-        current_pages = conn.execute(
-            "SELECT id, page_index, image_path, ocr_text, vision_text, summary "
-            "FROM pages "
-            "WHERE document_id = ? ORDER BY page_index",
-            (document_id,),
-        ).fetchall()
-        current_snapshot = [
-            tuple(page[field] for field in snapshot_fields) for page in current_pages
-        ]
-        if current_snapshot != analyzed_snapshot:
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    "document pages changed during finalization; retry finalize "
-                    "after reviewing /scan-status"
-                ),
-            )
         conn.execute(
             "UPDATE documents SET status = 'ready' WHERE id = ?", (document_id,)
         )

@@ -6,6 +6,7 @@ recognized text are present so a phone relay can resume safely.
 
 import importlib
 import threading
+from contextlib import contextmanager
 
 import pytest
 from fastapi.testclient import TestClient
@@ -303,6 +304,444 @@ def test_finalize_does_not_overwrite_concurrent_page_replacement(client, monkeyp
 
     assert page["ocr_text"] == "置換後のページ"
     assert page["summary"] is None
+    assert document["status"] == "open"
+
+
+def test_finalize_does_not_hold_writer_lock_during_second_analysis(
+    client, monkeypatch
+):
+    """A replacement must finish while the second analyzer call is blocked."""
+    import app.main as main
+    from app.analyzers.base import AnalyzerResult
+
+    second_started = threading.Event()
+    release_second = threading.Event()
+    replacement_completed = threading.Event()
+
+    class SecondPageBlockingAnalyzer:
+        name = "second-page-blocking-test"
+        provider_version = "test-1"
+        offline = True
+
+        def __init__(self):
+            self.calls = 0
+
+        def analyze(self, *, image_path=None, ocr_text=None, max_summary_len=48):
+            self.calls += 1
+            if self.calls == 2:
+                second_started.set()
+                if not release_second.wait(timeout=5):
+                    raise AssertionError("test analyzer was not released")
+            return AnalyzerResult(
+                text=ocr_text,
+                summary=f"stale summary {self.calls}",
+            )
+
+        def info(self):
+            return {
+                "name": self.name,
+                "provider_version": self.provider_version,
+                "offline": self.offline,
+            }
+
+    analyzer = SecondPageBlockingAnalyzer()
+    monkeypatch.setattr(main, "get_analyzer", lambda: analyzer)
+    doc_id = _new_doc(client)
+    _add_text_page(client, doc_id, 0, "置換前の1ページ目")
+    _add_text_page(client, doc_id, 1, "解析待機する2ページ目")
+
+    outcome = {}
+
+    def run_finalize():
+        outcome["finalize"] = client.post(
+            f"/v1/documents/{doc_id}/finalize"
+        )
+
+    def run_replacement():
+        try:
+            outcome["replacement"] = client.post(
+                f"/v1/documents/{doc_id}/pages",
+                data={"page_index": 0, "ocr_text": "置換後の1ページ目"},
+            )
+        finally:
+            replacement_completed.set()
+
+    finalize_worker = threading.Thread(target=run_finalize)
+    replacement_worker = threading.Thread(target=run_replacement)
+    finalize_worker.start()
+    try:
+        assert second_started.wait(timeout=2)
+        replacement_worker.start()
+        assert replacement_completed.wait(timeout=2), (
+            "page replacement remained blocked by finalize's writer lock"
+        )
+    finally:
+        release_second.set()
+        finalize_worker.join(timeout=5)
+        if replacement_worker.ident is not None:
+            replacement_worker.join(timeout=5)
+
+    assert not finalize_worker.is_alive()
+    assert not replacement_worker.is_alive()
+    assert outcome["replacement"].status_code == 201
+    response = outcome["finalize"]
+    assert response.status_code == 409
+    assert "changed during finalization" in response.json()["detail"]
+
+    conn = main.db.connect()
+    try:
+        pages = conn.execute(
+            "SELECT page_index, ocr_text, summary FROM pages "
+            "WHERE document_id = ? ORDER BY page_index",
+            (doc_id,),
+        ).fetchall()
+        document = conn.execute(
+            "SELECT status FROM documents WHERE id = ?", (doc_id,)
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert [dict(page) for page in pages] == [
+        {
+            "page_index": 0,
+            "ocr_text": "置換後の1ページ目",
+            "summary": None,
+        },
+        {
+            "page_index": 1,
+            "ocr_text": "解析待機する2ページ目",
+            "summary": None,
+        },
+    ]
+    assert document["status"] == "open"
+
+
+def test_finalize_stops_before_analyzing_more_pages_after_replacement(
+    client, monkeypatch
+):
+    """Once its snapshot is stale, finalize must not bill later pages."""
+    import app.main as main
+    from app.analyzers.base import AnalyzerResult
+
+    first_started = threading.Event()
+    release_first = threading.Event()
+
+    class FirstPageBlockingAnalyzer:
+        name = "first-page-blocking-test"
+        provider_version = "test-1"
+        offline = False
+
+        def __init__(self):
+            self.calls = 0
+
+        def analyze(self, *, image_path=None, ocr_text=None, max_summary_len=48):
+            self.calls += 1
+            if self.calls == 1:
+                first_started.set()
+                if not release_first.wait(timeout=5):
+                    raise AssertionError("test analyzer was not released")
+            return AnalyzerResult(text=ocr_text, summary=f"summary {self.calls}")
+
+        def info(self):
+            return {
+                "name": self.name,
+                "provider_version": self.provider_version,
+                "offline": self.offline,
+            }
+
+    analyzer = FirstPageBlockingAnalyzer()
+    monkeypatch.setattr(main, "get_analyzer", lambda: analyzer)
+    doc_id = _new_doc(client)
+    for page_index in range(3):
+        _add_text_page(client, doc_id, page_index, f"元の{page_index + 1}ページ目")
+
+    outcome = {}
+
+    def run_finalize():
+        outcome["response"] = client.post(f"/v1/documents/{doc_id}/finalize")
+
+    worker = threading.Thread(target=run_finalize)
+    worker.start()
+    try:
+        assert first_started.wait(timeout=2)
+        _add_text_page(client, doc_id, 0, "置換後の1ページ目")
+    finally:
+        release_first.set()
+        worker.join(timeout=5)
+
+    assert not worker.is_alive()
+    assert outcome["response"].status_code == 409
+    assert "changed during finalization" in outcome["response"].json()["detail"]
+    assert analyzer.calls == 1
+
+
+def test_finalize_ignores_other_document_commits_during_analysis(
+    client, monkeypatch
+):
+    """SQLite data-version changes are only conflicts for the same snapshot."""
+    import app.main as main
+    from app.analyzers.base import AnalyzerResult
+
+    started = threading.Event()
+    release = threading.Event()
+
+    class BlockingAnalyzer:
+        name = "other-document-write-test"
+        provider_version = "test-1"
+        offline = True
+
+        def analyze(self, *, image_path=None, ocr_text=None, max_summary_len=48):
+            started.set()
+            if not release.wait(timeout=5):
+                raise AssertionError("test analyzer was not released")
+            return AnalyzerResult(text=ocr_text, summary="summary")
+
+        def info(self):
+            return {
+                "name": self.name,
+                "provider_version": self.provider_version,
+                "offline": self.offline,
+            }
+
+    monkeypatch.setattr(main, "get_analyzer", lambda: BlockingAnalyzer())
+    finalized_doc_id = _new_doc(client, "解析対象")
+    other_doc_id = _new_doc(client, "別文書")
+    _add_text_page(client, finalized_doc_id, 0, "解析するページ")
+    outcome = {}
+
+    def run_finalize():
+        outcome["response"] = client.post(
+            f"/v1/documents/{finalized_doc_id}/finalize"
+        )
+
+    worker = threading.Thread(target=run_finalize)
+    worker.start()
+    try:
+        assert started.wait(timeout=2)
+        _add_text_page(client, other_doc_id, 0, "別文書のページ")
+    finally:
+        release.set()
+        worker.join(timeout=5)
+
+    assert not worker.is_alive()
+    assert outcome["response"].status_code == 200
+    assert outcome["response"].json()["status"] == "ready"
+
+
+def test_finalize_page_change_wins_over_inflight_analyzer_failure(
+    client, monkeypatch
+):
+    """A stale snapshot keeps its 409 even when the active analyzer fails."""
+    import app.main as main
+    from app.analyzers.base import AnalyzerResult
+
+    second_started = threading.Event()
+    release_second = threading.Event()
+
+    class FailingBlockedSecondAnalyzer:
+        name = "failing-blocked-second-test"
+        provider_version = "test-1"
+        offline = False
+
+        def __init__(self):
+            self.calls = 0
+
+        def analyze(self, *, image_path=None, ocr_text=None, max_summary_len=48):
+            self.calls += 1
+            if self.calls == 2:
+                second_started.set()
+                if not release_second.wait(timeout=5):
+                    raise AssertionError("test analyzer was not released")
+                raise RuntimeError("second page analysis failed")
+            return AnalyzerResult(text=ocr_text, summary="first summary")
+
+        def info(self):
+            return {
+                "name": self.name,
+                "provider_version": self.provider_version,
+                "offline": self.offline,
+            }
+
+    analyzer = FailingBlockedSecondAnalyzer()
+    monkeypatch.setattr(main, "get_analyzer", lambda: analyzer)
+    doc_id = _new_doc(client)
+    _add_text_page(client, doc_id, 0, "置換前の1ページ目")
+    _add_text_page(client, doc_id, 1, "失敗する2ページ目")
+
+    outcome = {}
+
+    def run_finalize():
+        try:
+            outcome["response"] = client.post(
+                f"/v1/documents/{doc_id}/finalize"
+            )
+        except Exception as exc:  # TestClient re-raises unhandled app errors.
+            outcome["error"] = exc
+
+    worker = threading.Thread(target=run_finalize)
+    worker.start()
+    try:
+        assert second_started.wait(timeout=2)
+        _add_text_page(client, doc_id, 0, "置換後の1ページ目")
+    finally:
+        release_second.set()
+        worker.join(timeout=5)
+
+    assert not worker.is_alive()
+    assert "error" not in outcome
+    response = outcome["response"]
+    assert response.status_code == 409
+    assert "changed during finalization" in response.json()["detail"]
+    assert analyzer.calls == 2
+
+
+def test_concurrent_document_finalizers_share_analyzer_work(client, monkeypatch):
+    """A double-fired document finalize must not double-charge its analyzer."""
+    import app.main as main
+    from app.analyzers.base import AnalyzerResult
+
+    first_started = threading.Event()
+    release = threading.Event()
+    duplicate_started = threading.Event()
+    second_attempted = threading.Event()
+    call_guard = threading.Lock()
+
+    class BlockingAnalyzer:
+        name = "concurrent-finalize-test"
+        provider_version = "test-1"
+        offline = False
+
+        def __init__(self):
+            self.calls = 0
+
+        def analyze(self, *, image_path=None, ocr_text=None, max_summary_len=48):
+            with call_guard:
+                self.calls += 1
+                call_number = self.calls
+            if call_number == 1:
+                first_started.set()
+            elif not release.is_set():
+                duplicate_started.set()
+            if not release.wait(timeout=5):
+                raise AssertionError("test analyzer was not released")
+            return AnalyzerResult(
+                text=ocr_text,
+                summary=f"summary {call_number}",
+            )
+
+        def info(self):
+            return {
+                "name": self.name,
+                "provider_version": self.provider_version,
+                "offline": self.offline,
+            }
+
+    analyzer = BlockingAnalyzer()
+    monkeypatch.setattr(main, "get_analyzer", lambda: analyzer)
+    real_mutex = main._document_finalize_mutex
+    attempts = 0
+    attempt_guard = threading.Lock()
+
+    @contextmanager
+    def observed_mutex(document_id):
+        nonlocal attempts
+        with attempt_guard:
+            attempts += 1
+            if attempts == 2:
+                second_attempted.set()
+        with real_mutex(document_id):
+            yield
+
+    monkeypatch.setattr(main, "_document_finalize_mutex", observed_mutex)
+    doc_id = _new_doc(client)
+    _add_text_page(client, doc_id, 0, "1ページ目")
+    _add_text_page(client, doc_id, 1, "2ページ目")
+    outcome = {}
+
+    def run_finalize(key):
+        outcome[key] = client.post(f"/v1/documents/{doc_id}/finalize")
+
+    first_worker = threading.Thread(target=run_finalize, args=("first",))
+    second_worker = threading.Thread(target=run_finalize, args=("second",))
+    first_worker.start()
+    try:
+        assert first_started.wait(timeout=2)
+        second_worker.start()
+        assert second_attempted.wait(timeout=2)
+        assert not duplicate_started.wait(timeout=0.5), (
+            "a concurrent finalize reached the paid analyzer"
+        )
+    finally:
+        release.set()
+        first_worker.join(timeout=5)
+        if second_worker.ident is not None:
+            second_worker.join(timeout=5)
+
+    assert not first_worker.is_alive()
+    assert not second_worker.is_alive()
+    assert outcome["first"].status_code == outcome["second"].status_code == 200
+    assert analyzer.calls == 2
+    with main._finalize_mutex_registry_guard:
+        assert doc_id not in main._finalize_mutex_registry
+
+
+def test_finalize_analyzer_failure_does_not_commit_partial_page_updates(
+    client, monkeypatch
+):
+    """A later analyzer failure must leave every page and status untouched."""
+    import app.main as main
+    from app.analyzers.base import AnalyzerResult
+
+    class FailingSecondAnalyzer:
+        name = "failing-second-test"
+        provider_version = "test-1"
+        offline = True
+
+        def __init__(self):
+            self.calls = 0
+
+        def analyze(self, *, image_path=None, ocr_text=None, max_summary_len=48):
+            self.calls += 1
+            if self.calls == 2:
+                raise RuntimeError("second page analysis failed")
+            return AnalyzerResult(
+                text="rewritten first page",
+                summary="partial summary",
+                extras={"image_analyzed": True},
+            )
+
+        def info(self):
+            return {
+                "name": self.name,
+                "provider_version": self.provider_version,
+                "offline": self.offline,
+            }
+
+    monkeypatch.setattr(main, "get_analyzer", lambda: FailingSecondAnalyzer())
+    doc_id = _new_doc(client)
+    _add_text_page(client, doc_id, 0, "元の1ページ目")
+    _add_text_page(client, doc_id, 1, "失敗する2ページ目")
+
+    with pytest.raises(RuntimeError, match="second page analysis failed"):
+        client.post(f"/v1/documents/{doc_id}/finalize")
+
+    conn = main.db.connect()
+    try:
+        pages = conn.execute(
+            "SELECT page_index, ocr_text, summary FROM pages "
+            "WHERE document_id = ? ORDER BY page_index",
+            (doc_id,),
+        ).fetchall()
+        document = conn.execute(
+            "SELECT status FROM documents WHERE id = ?", (doc_id,)
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert [dict(page) for page in pages] == [
+        {"page_index": 0, "ocr_text": "元の1ページ目", "summary": None},
+        {"page_index": 1, "ocr_text": "失敗する2ページ目", "summary": None},
+    ]
     assert document["status"] == "open"
 
 
