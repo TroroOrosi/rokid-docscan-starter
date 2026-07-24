@@ -239,6 +239,73 @@ def test_finalize_rechecks_pages_after_slow_analysis(client, monkeypatch):
     assert body["recommended_action"] == "review_page_indexes"
 
 
+def test_finalize_does_not_overwrite_concurrent_page_replacement(client, monkeypatch):
+    """A replacement made during analysis remains authoritative."""
+    import app.main as main
+    from app.analyzers.base import AnalyzerResult
+
+    started = threading.Event()
+    release = threading.Event()
+
+    class BlockingAnalyzer:
+        name = "blocking-test"
+        provider_version = "test-1"
+        offline = True
+
+        def analyze(self, *, image_path=None, ocr_text=None, max_summary_len=48):
+            started.set()
+            if not release.wait(timeout=5):
+                raise AssertionError("test analyzer was not released")
+            return AnalyzerResult(text=ocr_text, summary="stale summary")
+
+        def info(self):
+            return {
+                "name": self.name,
+                "provider_version": self.provider_version,
+                "offline": self.offline,
+            }
+
+    monkeypatch.setattr(main, "get_analyzer", lambda: BlockingAnalyzer())
+    doc_id = _new_doc(client)
+    _add_text_page(client, doc_id, 0, "置換前のページ")
+
+    outcome = {}
+
+    def run_finalize():
+        outcome["response"] = client.post(f"/v1/documents/{doc_id}/finalize")
+
+    worker = threading.Thread(target=run_finalize)
+    worker.start()
+    try:
+        assert started.wait(timeout=2)
+        _add_text_page(client, doc_id, 0, "置換後のページ")
+    finally:
+        release.set()
+        worker.join(timeout=5)
+
+    assert not worker.is_alive()
+    response = outcome["response"]
+    assert response.status_code == 409
+    assert "changed during finalization" in response.json()["detail"]
+
+    conn = main.db.connect()
+    try:
+        page = conn.execute(
+            "SELECT ocr_text, summary FROM pages "
+            "WHERE document_id = ? AND page_index = 0",
+            (doc_id,),
+        ).fetchone()
+        document = conn.execute(
+            "SELECT status FROM documents WHERE id = ?", (doc_id,)
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert page["ocr_text"] == "置換後のページ"
+    assert page["summary"] is None
+    assert document["status"] == "open"
+
+
 def test_legacy_ready_sparse_document_cannot_start_navigation(client):
     # Defense in depth for databases created before finalize enforced this
     # invariant: new sessions fail early with 409 instead of current/explain

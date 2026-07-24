@@ -10,7 +10,7 @@ Rokid Glasses で紙資料を撮影し、Android スマホを中継して問題�
 
 1. CXR-L `takePhoto` でページを実際に撮影する。
 2. Android の bundled Japanese ML Kit で OCR する。
-3. 元 JPEG と OCR を FastAPI へ送る。
+3. 元 JPEG、ML Kit と同じ回転角、OCR を FastAPI へ送る。
 4. 画像対応 Analyzer が転記・図表説明を補い、Solver が問題を解く。
 5. Android リレーが CUSTOMVIEW へ最大3行ずつ表示する。
 
@@ -190,12 +190,15 @@ curl -s -X POST http://127.0.0.1:8000/v1/documents \
 
 ### 3. ページを追加（実機主経路：写真 + スマホOCR）
 
-Android リレーは元 JPEG と端末 OCR を同時に送ります。画像はサーバーに保存され、
-設定済みの画像対応 Analyzer が必要に応じて OCR を補正します。
+Android リレーは元 JPEG、ML Kit と同じ回転角、端末 OCR を同時に送ります。画像は
+OCR と同じ向きの PNG に正規化してサーバーに保存され、設定済みの画像対応 Analyzer が
+必要に応じて OCR を補正します。`image_rotation` は `0`、`90`、`180`、`270`
+（時計回り）を受け付け、省略時は `0` です。
 
 ```bash
 curl -s -X POST http://127.0.0.1:8000/v1/documents/1/pages \
   -F page_index=0 \
+  -F image_rotation=0 \
   -F image=@page0.png \
   -F ocr_text='問1 図の回路の合成抵抗を求めよ'
 # {"page_id":1,...,"image_path":"...","scan_ack":{...}}

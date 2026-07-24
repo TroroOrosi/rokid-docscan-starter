@@ -43,9 +43,10 @@ as an independent project.
 - server is started with a real analyzer/solver for useful answers, for example
   `ROKID_ANALYZER=openai` and `ROKID_SOLVER=openai`
 
-The bundled Japanese ML Kit model performs local OCR. The original JPEG is
-always uploaded as the authoritative source. If local OCR is empty, a configured
-server-side vision analyzer can recover it from the photo.
+The bundled Japanese ML Kit model performs local OCR. The original JPEG and the
+rotation applied by ML Kit are uploaded together; the server stores a normalized
+PNG in that same orientation as the authoritative source. If local OCR is empty,
+a configured server-side vision analyzer can recover it from the photo.
 
 ## Controls
 

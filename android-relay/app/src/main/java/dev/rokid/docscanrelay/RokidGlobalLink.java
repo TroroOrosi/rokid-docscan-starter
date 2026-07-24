@@ -39,6 +39,8 @@ public final class RokidGlobalLink implements AutoCloseable {
 
         void onPhoto(byte[] jpeg);
 
+        void onPhotoError(String message, Throwable cause);
+
         void onError(String message, Throwable cause);
     }
 
@@ -185,7 +187,7 @@ public final class RokidGlobalLink implements AutoCloseable {
         @Override
         public void onImageReceived(byte[] data) {
             if (data == null || data.length == 0) {
-                listener.onError("グラスから空の写真が返されました", null);
+                listener.onPhotoError("グラスから空の写真が返されました", null);
                 return;
             }
             listener.onPhoto(Arrays.copyOf(data, data.length));
@@ -193,7 +195,7 @@ public final class RokidGlobalLink implements AutoCloseable {
 
         @Override
         public void onImageError(int code, String message) {
-            listener.onError("グラス撮影エラー " + code + ": " + message, null);
+            listener.onPhotoError("グラス撮影エラー " + code + ": " + message, null);
         }
     };
 

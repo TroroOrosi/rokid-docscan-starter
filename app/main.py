@@ -150,6 +150,17 @@ def _load_image(raw: bytes) -> Image.Image:
         raise HTTPException(status_code=400, detail="invalid image upload")
 
 
+def _rotate_image_for_ocr(img: Image.Image, rotation: int) -> Image.Image:
+    """Match the clockwise rotation ML Kit applies to the relay's raw JPEG."""
+    transpose = {
+        0: None,
+        90: Image.Transpose.ROTATE_270,
+        180: Image.Transpose.ROTATE_180,
+        270: Image.Transpose.ROTATE_90,
+    }[rotation]
+    return img if transpose is None else img.transpose(transpose)
+
+
 def _match_text(ocr_text: str | None, vision_text: str | None) -> str:
     """Combine body text and figure reading into one /match similarity string.
 
@@ -298,6 +309,7 @@ async def add_page(
     document_id: int,
     page_index: int = Form(...),
     image: UploadFile | None = File(None),
+    image_rotation: int = Form(0),
     ocr_text: str | None = Form(None),
     vision_text: str | None = Form(None),
     total_pages: int | None = Form(None),
@@ -323,6 +335,11 @@ async def add_page(
         )
     if page_index < 0:
         raise HTTPException(status_code=400, detail="page_index must be >= 0")
+    if image_rotation not in (0, 90, 180, 270):
+        raise HTTPException(
+            status_code=400,
+            detail="image_rotation must be one of 0, 90, 180, or 270",
+        )
     pending_image_path: Path | None = None
     image_persisted = False
     conn = db.connect()
@@ -331,7 +348,7 @@ async def add_page(
 
         if has_image:
             raw = await _read_upload_limited(image)
-            img = _load_image(raw)
+            img = _rotate_image_for_ocr(_load_image(raw), image_rotation)
             ph = phash_hex(img)
             omd5 = _fallback_md5(ocr_md5(ocr_text), raw)
             fname = f"{document_id}_{page_index}_{uuid.uuid4().hex[:8]}.png"
@@ -463,6 +480,7 @@ async def add_page(
             "phash": ph,
             "ocr_md5": omd5,
             "image_path": image_path,
+            "image_rotation": image_rotation,
             "has_vision_text": bool(vision_text and vision_text.strip()),
             "scan_ack": ack,
         }
@@ -649,7 +667,14 @@ def finalize_document(document_id: int) -> dict:
         _require_dense_page_indexes(conn, document_id)
 
         analyzer = get_analyzer()
-        snapshot_fields = ("id", "page_index", "image_path", "ocr_text", "vision_text")
+        snapshot_fields = (
+            "id",
+            "page_index",
+            "image_path",
+            "ocr_text",
+            "vision_text",
+            "summary",
+        )
         analyzed_snapshot = []
         for p in pages:
             next_ocr = p["ocr_text"]
@@ -682,13 +707,40 @@ def finalize_document(document_id: int) -> dict:
             next_summary = (
                 result.summary or next_ocr or next_vision or ""
             )[:48]
-            conn.execute(
+            updated = conn.execute(
                 "UPDATE pages SET ocr_text = ?, vision_text = ?, summary = ? "
-                "WHERE id = ?",
-                (next_ocr, next_vision, next_summary, p["id"]),
+                "WHERE id = ? AND page_index = ? "
+                "AND image_path IS ? AND ocr_text IS ? "
+                "AND vision_text IS ? AND summary IS ?",
+                (
+                    next_ocr,
+                    next_vision,
+                    next_summary,
+                    p["id"],
+                    p["page_index"],
+                    p["image_path"],
+                    p["ocr_text"],
+                    p["vision_text"],
+                    p["summary"],
+                ),
             )
+            if updated.rowcount != 1:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "document pages changed during finalization; retry finalize "
+                        "after reviewing /scan-status"
+                    ),
+                )
             analyzed_snapshot.append(
-                (p["id"], p["page_index"], p["image_path"], next_ocr, next_vision)
+                (
+                    p["id"],
+                    p["page_index"],
+                    p["image_path"],
+                    next_ocr,
+                    next_vision,
+                    next_summary,
+                )
             )
 
         # The analyzer can be slow or remote. A page may have been added or
@@ -701,7 +753,8 @@ def finalize_document(document_id: int) -> dict:
             conn.execute("BEGIN IMMEDIATE")
         _require_dense_page_indexes(conn, document_id)
         current_pages = conn.execute(
-            "SELECT id, page_index, image_path, ocr_text, vision_text FROM pages "
+            "SELECT id, page_index, image_path, ocr_text, vision_text, summary "
+            "FROM pages "
             "WHERE document_id = ? ORDER BY page_index",
             (document_id,),
         ).fetchall()

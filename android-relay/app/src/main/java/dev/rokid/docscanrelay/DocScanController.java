@@ -13,6 +13,10 @@ import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 
 /** Serial state machine for capture -> OCR -> upload -> solve -> HUD review. */
 public final class DocScanController implements AutoCloseable {
@@ -25,12 +29,17 @@ public final class DocScanController implements AutoCloseable {
     private static final String KEY_DOCUMENT = "document_id";
     private static final String KEY_NEXT_PAGE = "next_page";
     private static final String KEY_SESSION = "session_id";
+    private static final long CAPTURE_TIMEOUT_SECONDS = 30;
 
     private final RokidGlobalLink link;
     private final JapaneseOcr ocr;
     private final Listener listener;
     private final SharedPreferences preferences;
     private final ExecutorService serial = Executors.newSingleThreadExecutor();
+    private final ScheduledExecutorService watchdog =
+            Executors.newSingleThreadScheduledExecutor();
+    private final AtomicLong captureAttempt = new AtomicLong();
+    private final RetryCursor retryCursor = new RetryCursor();
 
     private volatile RelayState state = RelayState.DISCONNECTED;
     private DocScanApi api;
@@ -170,19 +179,20 @@ public final class DocScanController implements AutoCloseable {
     }
 
     public void captureNextPage() {
-        serial.execute(() -> captureAt(nextPageIndex));
+        serial.execute(() -> captureAt(retryCursor.nextOr(nextPageIndex)));
     }
 
     public void recapturePreviousPage() {
         serial.execute(() -> {
-            if (nextPageIndex <= 0) {
+            int pageIndex = retryCursor.previousOr(nextPageIndex);
+            if (pageIndex < 0) {
                 publish(
                         RelayState.READING,
                         List.of("再撮影対象なし", "短押し: 1ページ目", ""),
                         "No previous page");
                 return;
             }
-            captureAt(nextPageIndex - 1);
+            captureAt(pageIndex);
         });
     }
 
@@ -198,6 +208,7 @@ public final class DocScanController implements AutoCloseable {
             return;
         }
         try {
+            long attempt = captureAttempt.incrementAndGet();
             if (documentId == 0) {
                 String stamp = new SimpleDateFormat(
                         "yyyy-MM-dd HH:mm:ss", Locale.JAPAN).format(new Date());
@@ -214,7 +225,12 @@ public final class DocScanController implements AutoCloseable {
             if (!link.takePhoto(1440, 1920, 85)) {
                 throw new IllegalStateException("takePhoto returned false");
             }
+            watchdog.schedule(
+                    () -> enqueueCaptureTimeout(attempt, pageIndex),
+                    CAPTURE_TIMEOUT_SECONDS,
+                    TimeUnit.SECONDS);
         } catch (Exception error) {
+            captureAttempt.incrementAndGet();
             capturePageIndex = -1;
             fail("撮影開始に失敗しました", error);
         }
@@ -224,43 +240,86 @@ public final class DocScanController implements AutoCloseable {
         if (state != RelayState.CAPTURING) {
             return;
         }
+        captureAttempt.incrementAndGet();
         final int uploadIndex = capturePageIndex >= 0 ? capturePageIndex : nextPageIndex;
+        final int uploadRotation = imageRotation;
         capturePageIndex = -1;
         publish(
                 RelayState.OCR,
                 List.of("文字認識中", "P" + (uploadIndex + 1), ""),
                 "Photo received: " + jpeg.length + " bytes");
-        ocr.recognize(jpeg, imageRotation, new JapaneseOcr.Callback() {
+        ocr.recognize(jpeg, uploadRotation, new JapaneseOcr.Callback() {
             @Override
             public void onResult(String text) {
-                serial.execute(() -> uploadCapturedPage(uploadIndex, jpeg, text));
+                serial.execute(
+                        () -> uploadCapturedPage(uploadIndex, jpeg, text, uploadRotation));
             }
 
             @Override
             public void onError(Throwable error) {
                 // Keep the real photo as the authoritative input. The server's
                 // configured vision analyzer may still recover OCR.
-                serial.execute(() -> uploadCapturedPage(uploadIndex, jpeg, ""));
+                serial.execute(
+                        () -> uploadCapturedPage(uploadIndex, jpeg, "", uploadRotation));
             }
         });
     }
 
-    private void uploadCapturedPage(int uploadIndex, byte[] jpeg, String ocrText) {
+    public void onPhotoError(String message, Throwable cause) {
+        serial.execute(() -> {
+            if (state != RelayState.CAPTURING) {
+                return;
+            }
+            captureAttempt.incrementAndGet();
+            capturePageIndex = -1;
+            Throwable detail = cause;
+            if (detail == null && message != null && !message.trim().isEmpty()) {
+                detail = new IllegalStateException(message);
+            }
+            fail("撮影に失敗しました。短押しで再撮影できます", detail);
+        });
+    }
+
+    private void enqueueCaptureTimeout(long attempt, int pageIndex) {
+        try {
+            serial.execute(() -> {
+                if (captureAttempt.get() != attempt
+                        || state != RelayState.CAPTURING
+                        || capturePageIndex != pageIndex) {
+                    return;
+                }
+                captureAttempt.incrementAndGet();
+                capturePageIndex = -1;
+                fail("写真が返りませんでした。短押しで再撮影できます", null);
+            });
+        } catch (RejectedExecutionException ignored) {
+            // The activity closed while the watchdog was expiring.
+        }
+    }
+
+    private void uploadCapturedPage(
+            int uploadIndex,
+            byte[] jpeg,
+            String ocrText,
+            int uploadRotation
+    ) {
         try {
             publish(
                     RelayState.UPLOADING,
                     List.of("送信中", "P" + (uploadIndex + 1), ""),
                     "OCR characters: " + ocrText.length());
             JSONObject response = api.uploadPage(
-                    documentId, uploadIndex, jpeg, ocrText);
+                    documentId, uploadIndex, jpeg, ocrText, uploadRotation);
             boolean replaced = response.optBoolean("replaced", false);
             if (!replaced) {
                 nextPageIndex = Math.max(nextPageIndex, uploadIndex + 1);
             } else if (uploadIndex >= nextPageIndex) {
                 nextPageIndex = uploadIndex + 1;
             }
+            retryCursor.onUploaded(uploadIndex);
             persistWorkflow();
-            List<String> lines = extractLines(response.optJSONObject("scan_ack"));
+            List<String> lines = RelayMessages.forAiKeyScanAck(
+                    extractLines(response.optJSONObject("scan_ack")));
             if (ocrText.trim().isEmpty()) {
                 lines = List.of(
                         "写真は保存済み",
@@ -279,6 +338,13 @@ public final class DocScanController implements AutoCloseable {
     public void finishReading() {
         serial.execute(() -> {
             if (!requireApi()) {
+                return;
+            }
+            if (state.isCaptureInProgress()) {
+                publish(
+                        state,
+                        List.of("処理中", "写真の登録完了まで待機", ""),
+                        "Finish ignored while capture pipeline is active");
                 return;
             }
             if (documentId == 0 || nextPageIndex == 0) {
@@ -311,12 +377,14 @@ public final class DocScanController implements AutoCloseable {
 
     private void handleFinalizedSession(JSONObject finished, String diagnostic) {
         if ("reading".equals(finished.optString("status"))) {
+            retryCursor.begin(nextPageIndex);
             publish(
                     RelayState.READING,
                     extractLines(finished.optJSONObject("reading_ack")),
-                    diagnostic + "; no problems detected, recapture is allowed");
+                    diagnostic + "; no problems detected, retry starts at page 0");
             return;
         }
+        retryCursor.clear();
         reviewIndex = 0;
         reviewViewPage = 0;
         loadReview();
@@ -437,6 +505,7 @@ public final class DocScanController implements AutoCloseable {
         reviewViewPage = 0;
         reviewProblemCount = 0;
         reviewViewPageCount = 0;
+        retryCursor.clear();
         preferences.edit()
                 .remove(KEY_DOCUMENT)
                 .remove(KEY_NEXT_PAGE)
@@ -446,6 +515,7 @@ public final class DocScanController implements AutoCloseable {
 
     @Override
     public void close() {
+        watchdog.shutdownNow();
         serial.shutdownNow();
     }
 }

@@ -85,7 +85,8 @@ sequenceDiagram
 
 1. `takePhoto(1440, 1920, 85)` で JPEG を受け取る。
 2. Android 上の bundled Japanese ML Kit で OCR する。
-3. 元 JPEG と OCR を `/v1/documents/{id}/pages` へ送る。
+3. 元 JPEG、ML Kit と同じ回転角、OCR を `/v1/documents/{id}/pages` へ送り、
+   サーバーで OCR と同じ向きの PNG に正規化する。
 4. `ROKID_ANALYZER=openai|gemini|claude` の画像対応 Analyzer が、必要に
    応じて画像から完全な転記と図表説明を生成する。
 5. `finalize-reading` が問題を分割し、開始ページ画像を画像対応 Solver へ渡す。

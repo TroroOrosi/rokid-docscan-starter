@@ -285,6 +285,12 @@ public final class MainActivity extends Activity
     }
 
     @Override
+    public void onPhotoError(String message, Throwable cause) {
+        controller.onPhotoError(message, cause);
+        onError(message, cause);
+    }
+
+    @Override
     public void onError(String message, Throwable cause) {
         String detail = cause == null ? message : message + ": " + cause.getMessage();
         runOnUiThread(() -> {

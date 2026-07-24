@@ -9,5 +9,9 @@ public enum RelayState {
     READING,
     FINALIZING,
     REVIEW,
-    ERROR
+    ERROR;
+
+    public boolean isCaptureInProgress() {
+        return this == CAPTURING || this == OCR || this == UPLOADING;
+    }
 }

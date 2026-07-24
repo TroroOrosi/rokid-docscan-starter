@@ -31,6 +31,15 @@ def _jpeg() -> bytes:
     return output.getvalue()
 
 
+def _orientation_png() -> bytes:
+    image = Image.new("RGB", (2, 3), "black")
+    image.putpixel((0, 0), (255, 0, 0))
+    image.putpixel((1, 2), (0, 0, 255))
+    output = io.BytesIO()
+    image.save(output, format="PNG")
+    return output.getvalue()
+
+
 def _new_document(client) -> int:
     response = client.post("/v1/documents", json={"title": "photo exam"})
     assert response.status_code == 201
@@ -49,6 +58,39 @@ def test_scan_status_reports_real_photo(client):
     status = client.get(f"/v1/documents/{document_id}/scan-status")
     assert status.status_code == 200
     assert status.json()["pages"][0]["has_image"] is True
+
+
+def test_photo_rotation_matches_local_ocr_orientation(client):
+    document_id = _new_document(client)
+    response = client.post(
+        f"/v1/documents/{document_id}/pages",
+        data={
+            "page_index": "0",
+            "ocr_text": "問1",
+            "image_rotation": "90",
+        },
+        files={"image": ("page.png", _orientation_png(), "image/png")},
+    )
+    assert response.status_code == 201
+    assert response.json()["image_rotation"] == 90
+
+    with Image.open(response.json()["image_path"]) as saved:
+        assert saved.size == (3, 2)
+        assert saved.getpixel((2, 0)) == (255, 0, 0)
+        assert saved.getpixel((0, 1)) == (0, 0, 255)
+
+
+def test_photo_rotation_rejects_unsupported_angle(client):
+    document_id = _new_document(client)
+    response = client.post(
+        f"/v1/documents/{document_id}/pages",
+        data={"page_index": "0", "ocr_text": "問1", "image_rotation": "45"},
+        files={"image": ("page.jpg", _jpeg(), "image/jpeg")},
+    )
+    assert response.status_code == 400
+    assert response.json()["detail"] == (
+        "image_rotation must be one of 0, 90, 180, or 270"
+    )
 
 
 def test_finalize_persists_analyzer_ocr_for_photo(client, monkeypatch):

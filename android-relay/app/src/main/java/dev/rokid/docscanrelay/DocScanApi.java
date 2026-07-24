@@ -69,11 +69,13 @@ public final class DocScanApi {
             long documentId,
             int pageIndex,
             byte[] jpeg,
-            String ocrText
+            String ocrText,
+            int imageRotation
     ) throws IOException, JSONException {
         MultipartBody.Builder multipart = new MultipartBody.Builder()
                 .setType(MultipartBody.FORM)
                 .addFormDataPart("page_index", Integer.toString(pageIndex))
+                .addFormDataPart("image_rotation", Integer.toString(imageRotation))
                 .addFormDataPart(
                         "image",
                         "page-" + (pageIndex + 1) + ".jpg",
