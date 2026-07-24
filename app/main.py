@@ -27,6 +27,7 @@ from PIL import Image, UnidentifiedImageError
 from pydantic import BaseModel
 
 from . import config, db
+from .audio_formats import safe_audio_suffix
 from .analyzers import get_analyzer
 from .config import IMAGE_DIR, ensure_dirs
 from .explainer import ExplainRequest, ExplainResult
@@ -134,28 +135,6 @@ _MAX_UPLOAD_BYTES = 15 * 1024 * 1024  # generous for page photos / recordings
 # The relay camera is 12 MP. Keep enough headroom for imported scans while
 # bounding decoded memory independently of the compressed upload byte limit.
 _MAX_IMAGE_PIXELS = 25_000_000
-_SAFE_AUDIO_SUFFIXES = {
-    ".aac",
-    ".flac",
-    ".m4a",
-    ".mp3",
-    ".mp4",
-    ".mpeg",
-    ".mpga",
-    ".ogg",
-    ".wav",
-    ".webm",
-}
-_AUDIO_MIME_SUFFIXES = {
-    "audio/aac": ".aac",
-    "audio/flac": ".flac",
-    "audio/mp4": ".m4a",
-    "audio/mpeg": ".mp3",
-    "audio/ogg": ".ogg",
-    "audio/wav": ".wav",
-    "audio/x-wav": ".wav",
-    "audio/webm": ".webm",
-}
 
 
 async def _read_upload_limited(upload: UploadFile) -> bytes:
@@ -168,11 +147,7 @@ async def _read_upload_limited(upload: UploadFile) -> bytes:
 
 def _safe_audio_suffix(upload: UploadFile) -> str:
     """Keep user-supplied filenames out of persisted filesystem paths."""
-    suffix = Path(upload.filename or "").suffix.lower()
-    if suffix in _SAFE_AUDIO_SUFFIXES:
-        return suffix
-    content_type = (upload.content_type or "").partition(";")[0].strip().lower()
-    return _AUDIO_MIME_SUFFIXES.get(content_type, ".bin")
+    return safe_audio_suffix(upload.filename, upload.content_type)
 
 
 def _load_image(raw: bytes) -> Image.Image:

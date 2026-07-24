@@ -54,6 +54,10 @@ final class CaptureLease {
         return true;
     }
 
+    synchronized boolean markStartUnknown(long expectedToken) {
+        return markTimedOut(expectedToken);
+    }
+
     synchronized Completion complete() {
         if (!isUnresolved()) {
             return null;

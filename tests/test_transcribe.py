@@ -8,6 +8,7 @@ Exercises the whole real path via an injected fake SDK (no network, no creds):
 
 from types import SimpleNamespace
 
+from app.audio_formats import AUDIO_FORMATS, safe_audio_suffix
 from app.llm import LLMClient, _audio_media_type
 from app.transcribe import transcribe_audio
 
@@ -168,3 +169,19 @@ def test_audio_media_type_detection():
     assert _audio_media_type(b"\x00\x00\x00\x18ftypM4A ") == "audio/mp4"
     assert _audio_media_type(b"\x1aE\xdf\xa3webm") == "audio/webm"
     assert _audio_media_type(b"\x00\x00\x00\x00") == "audio/mpeg"
+
+
+def test_aac_detection_accepts_adts_headers_with_or_without_crc():
+    assert _audio_media_type(b"\xff\xf0aac-with-crc") == "audio/aac"
+    assert _audio_media_type(b"\xff\xf1aac-without-crc") == "audio/aac"
+    assert _audio_media_type(b"\xff\xf8aac-with-crc") == "audio/aac"
+    assert _audio_media_type(b"\xff\xf9aac-without-crc") == "audio/aac"
+
+
+def test_audio_registry_keeps_storage_and_provider_metadata_consistent():
+    for audio_format in AUDIO_FORMATS:
+        assert safe_audio_suffix(
+            "../untrusted.not-audio",
+            f"{audio_format.mime_type}; charset=binary",
+        ) == audio_format.persisted_suffix
+        assert audio_format.upload_name.endswith(audio_format.persisted_suffix)

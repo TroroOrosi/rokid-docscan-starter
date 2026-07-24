@@ -45,6 +45,12 @@ public final class RokidGlobalLink implements AutoCloseable {
         void onError(String message, Throwable cause);
     }
 
+    public enum PhotoStartResult {
+        STARTED,
+        REJECTED,
+        UNKNOWN
+    }
+
     private static final String TAG = "DocScanRokid";
     private static final String GLOBAL_PACKAGE = "com.rokid.sprite.global.aiapp";
     private static final String AUTH_ACTION =
@@ -61,10 +67,14 @@ public final class RokidGlobalLink implements AutoCloseable {
     private final Context context;
     private final Listener listener;
     private final AtomicBoolean photoInFlight = new AtomicBoolean();
+    private final LinkEpoch bindingEpochs = new LinkEpoch();
+    private final LinkEpoch callbackEpochs = new LinkEpoch();
     private volatile IMediaStreamService service;
     private volatile boolean bound;
     private volatile boolean imageCallbackRegistered;
     private volatile boolean viewOpen;
+    private volatile BindingConnection connection;
+    private volatile CallbackSet callbacks;
 
     public RokidGlobalLink(Context context, Listener listener) {
         this.context = context.getApplicationContext();
@@ -118,9 +128,25 @@ public final class RokidGlobalLink implements AutoCloseable {
                 .setPackage(GLOBAL_PACKAGE)
                 .putExtra(EXTRA_AUTH_TOKEN, token)
                 .putExtra(EXTRA_AUTH_PACKAGE, context.getPackageName());
+        long bindingEpoch = bindingEpochs.begin();
+        BindingConnection candidate = new BindingConnection(bindingEpoch);
+        connection = candidate;
+        // Mark the candidate current before bindService: Android normally
+        // delivers onServiceConnected asynchronously, but this also keeps a
+        // synchronous test/future implementation from being rejected.
+        bound = true;
         try {
-            bound = context.bindService(intent, connection, Context.BIND_AUTO_CREATE);
+            boolean didBind = context.bindService(
+                    intent, candidate, Context.BIND_AUTO_CREATE);
+            if (!didBind) {
+                bound = false;
+                connection = null;
+                bindingEpochs.invalidate(bindingEpoch);
+            }
         } catch (RuntimeException error) {
+            bound = false;
+            connection = null;
+            bindingEpochs.invalidate(bindingEpoch);
             listener.onError("Hi Rokid MediaStreamServiceへの接続に失敗しました", error);
             return false;
         }
@@ -132,30 +158,33 @@ public final class RokidGlobalLink implements AutoCloseable {
         return bound;
     }
 
-    public synchronized boolean takePhoto(int width, int height, int quality) {
+    public synchronized PhotoStartResult takePhoto(int width, int height, int quality) {
         IMediaStreamService current = service;
         if (current == null) {
             listener.onError("Rokidサービス未接続のため撮影できません", null);
-            return false;
+            return PhotoStartResult.REJECTED;
         }
         if (!imageCallbackRegistered) {
             listener.onError("写真コールバック未登録のため撮影を安全停止しました", null);
-            return false;
+            return PhotoStartResult.REJECTED;
         }
         if (!photoInFlight.compareAndSet(false, true)) {
             listener.onError("前回の撮影結果が未着のため重複撮影を拒否しました", null);
-            return false;
+            return PhotoStartResult.REJECTED;
         }
         try {
             boolean started = current.takePhoto(width, height, quality);
             if (!started) {
                 photoInFlight.set(false);
+                return PhotoStartResult.REJECTED;
             }
-            return started;
+            return PhotoStartResult.STARTED;
         } catch (Exception error) {
-            photoInFlight.set(false);
+            // A Binder failure can happen after the remote process accepted
+            // the request but before its boolean reply reached this process.
+            // Keep the guard held until a terminal callback or real reconnect.
             listener.onError("Rokid Glassesの撮影要求に失敗しました", error);
-            return false;
+            return PhotoStartResult.UNKNOWN;
         }
     }
 
@@ -192,171 +221,283 @@ public final class RokidGlobalLink implements AutoCloseable {
         }
     }
 
-    private final IDeviceStatusCallback deviceStatus = new IDeviceStatusCallback.Stub() {
-        @Override
-        public void onDeviceConnectChanged(boolean connected) {
-            if (!connected) {
-                // A real glasses disconnect terminates any outstanding
-                // one-shot capture and is the only safe reset when no image
-                // callback arrived.
-                photoInFlight.set(false);
-            }
-            listener.onGlassesConnected(connected);
-        }
-    };
+    private final class CallbackSet {
+        private final IDeviceStatusCallback deviceStatus;
+        private final IImageStreamCallback imageStream;
+        private final IAiEventCallback aiEvents;
+        private final ICustomViewCallback customView;
 
-    private final IImageStreamCallback imageStream = new IImageStreamCallback.Stub() {
-        @Override
-        public void onImageReceived(byte[] data) {
-            photoInFlight.set(false);
-            if (data == null || data.length == 0) {
-                listener.onPhotoError("グラスから空の写真が返されました", null);
-                return;
-            }
-            listener.onPhoto(Arrays.copyOf(data, data.length));
+        CallbackSet(long epoch) {
+            deviceStatus = new IDeviceStatusCallback.Stub() {
+                @Override
+                public void onDeviceConnectChanged(boolean connected) {
+                    callbackEpochs.runIfActive(epoch, () -> {
+                        if (!connected) {
+                            // A real glasses disconnect terminates any
+                            // outstanding one-shot capture.
+                            photoInFlight.set(false);
+                        }
+                        listener.onGlassesConnected(connected);
+                    });
+                }
+            };
+            imageStream = new IImageStreamCallback.Stub() {
+                @Override
+                public void onImageReceived(byte[] data) {
+                    callbackEpochs.runIfActive(epoch, () -> {
+                        if (!photoInFlight.compareAndSet(true, false)) {
+                            return;
+                        }
+                        if (data == null || data.length == 0) {
+                            listener.onPhotoError(
+                                    "グラスから空の写真が返されました", null);
+                            return;
+                        }
+                        listener.onPhoto(Arrays.copyOf(data, data.length));
+                    });
+                }
+
+                @Override
+                public void onImageError(int code, String message) {
+                    callbackEpochs.runIfActive(epoch, () -> {
+                        if (!photoInFlight.compareAndSet(true, false)) {
+                            return;
+                        }
+                        listener.onPhotoError(
+                                "グラス撮影エラー " + code + ": " + message, null);
+                    });
+                }
+            };
+            aiEvents = new IAiEventCallback.Stub() {
+                @Override
+                public void onAiKeyDown() {
+                    callbackEpochs.runIfActive(epoch, listener::onAiPressDown);
+                }
+
+                @Override
+                public void onAiKeyUp() {
+                    callbackEpochs.runIfActive(epoch, listener::onAiPressUp);
+                }
+
+                @Override
+                public void onAiExit() {
+                    callbackEpochs.runIfActive(epoch, listener::onAiPressUp);
+                }
+
+                @Override
+                public void onGlassAppResumeChange(String from, String to) {
+                    // No glasses-side custom APK is installed in CUSTOMVIEW mode.
+                }
+            };
+            customView = new ICustomViewCallback.Stub() {
+                @Override
+                public void onCustomViewOpened() {
+                    callbackEpochs.runIfActive(epoch, () -> viewOpen = true);
+                }
+
+                @Override
+                public void onCustomViewUpdated() {
+                    callbackEpochs.runIfActive(epoch, () -> viewOpen = true);
+                }
+
+                @Override
+                public void onCustomViewClosed() {
+                    callbackEpochs.runIfActive(epoch, () -> viewOpen = false);
+                }
+
+                @Override
+                public void onCustomViewIconsSent() {
+                }
+
+                @Override
+                public void onCustomViewError(int code, String message) {
+                    callbackEpochs.runIfActive(
+                            epoch,
+                            () -> listener.onError(
+                                    "HUDエラー " + code + ": " + message,
+                                    null));
+                }
+            };
+        }
+    }
+
+    private final class BindingConnection implements ServiceConnection {
+        private final long epoch;
+
+        BindingConnection(long epoch) {
+            this.epoch = epoch;
         }
 
-        @Override
-        public void onImageError(int code, String message) {
-            photoInFlight.set(false);
-            listener.onPhotoError("グラス撮影エラー " + code + ": " + message, null);
-        }
-    };
-
-    private final IAiEventCallback aiEvents = new IAiEventCallback.Stub() {
-        @Override
-        public void onAiKeyDown() {
-            listener.onAiPressDown();
-        }
-
-        @Override
-        public void onAiKeyUp() {
-            listener.onAiPressUp();
-        }
-
-        @Override
-        public void onAiExit() {
-            listener.onAiPressUp();
-        }
-
-        @Override
-        public void onGlassAppResumeChange(String from, String to) {
-            // No glasses-side custom APK is installed in CUSTOMVIEW mode.
-        }
-    };
-
-    private final ICustomViewCallback customView = new ICustomViewCallback.Stub() {
-        @Override
-        public void onCustomViewOpened() {
-            viewOpen = true;
-        }
-
-        @Override
-        public void onCustomViewUpdated() {
-            viewOpen = true;
-        }
-
-        @Override
-        public void onCustomViewClosed() {
-            viewOpen = false;
-        }
-
-        @Override
-        public void onCustomViewIconsSent() {
-        }
-
-        @Override
-        public void onCustomViewError(int code, String message) {
-            listener.onError("HUDエラー " + code + ": " + message, null);
-        }
-    };
-
-    private final ServiceConnection connection = new ServiceConnection() {
         @Override
         public void onServiceConnected(ComponentName name, IBinder binder) {
-            IMediaStreamService connected = IMediaStreamService.Stub.asInterface(binder);
-            service = connected;
-            try {
-                boolean callbacksReady =
-                        connected.registerDeviceStatusCallback(deviceStatus)
-                                && connected.registerImageCallback(imageStream)
-                                && connected.registerCustomViewCallback(customView)
-                                && connected.registAiEventCallback(aiEvents);
-                if (!callbacksReady) {
-                    throw new IllegalStateException(
-                            "one or more required CXR-L callbacks were rejected");
+            handleServiceConnected(this, binder);
+        }
+
+        @Override
+        public void onServiceDisconnected(ComponentName name) {
+            handleServiceDisconnected(this);
+        }
+    }
+
+    private void handleServiceConnected(BindingConnection source, IBinder binder) {
+        long callbackEpoch;
+        synchronized (this) {
+            if (!bound
+                    || connection != source
+                    || !bindingEpochs.isCurrent(source.epoch)
+                    || service != null) {
+                return;
+            }
+            callbackEpoch = callbackEpochs.begin();
+        }
+
+        IMediaStreamService connected = IMediaStreamService.Stub.asInterface(binder);
+        CallbackSet candidate = new CallbackSet(callbackEpoch);
+        try {
+            boolean callbacksReady =
+                    connected.registerDeviceStatusCallback(candidate.deviceStatus)
+                            && connected.registerImageCallback(candidate.imageStream)
+                            && connected.registerCustomViewCallback(candidate.customView)
+                            && connected.registAiEventCallback(candidate.aiEvents);
+            if (!callbacksReady) {
+                throw new IllegalStateException(
+                        "one or more required CXR-L callbacks were rejected");
+            }
+            boolean glassesConnected = connected.isDeviceConnected();
+            boolean installed;
+            synchronized (this) {
+                installed =
+                        bound
+                                && connection == source
+                                && bindingEpochs.isCurrent(source.epoch)
+                                && callbackEpochs.activate(callbackEpoch);
+                if (installed) {
+                    service = connected;
+                    callbacks = candidate;
+                    imageCallbackRegistered = true;
+                    photoInFlight.set(false);
+                    viewOpen = false;
+                    listener.onLinkConnected(true);
+                    listener.onGlassesConnected(glassesConnected);
                 }
-                imageCallbackRegistered = true;
-                listener.onLinkConnected(true);
-                listener.onGlassesConnected(connected.isDeviceConnected());
-            } catch (Exception error) {
+            }
+            if (!installed) {
+                callbackEpochs.invalidate(callbackEpoch);
+                unregisterCallbacks(connected, candidate);
+            }
+        } catch (Exception error) {
+            unregisterCallbacks(connected, candidate);
+            failCallbackRegistration(source, callbackEpoch, error);
+        }
+    }
+
+    private void failCallbackRegistration(
+            BindingConnection source,
+            long callbackEpoch,
+            Exception error
+    ) {
+        boolean failedCurrentBinding = false;
+        synchronized (this) {
+            if (connection == source
+                    && bindingEpochs.isCurrent(source.epoch)
+                    && callbackEpochs.isCurrent(callbackEpoch)) {
+                callbackEpochs.invalidate(callbackEpoch);
+                bindingEpochs.invalidate(source.epoch);
+                service = null;
+                callbacks = null;
+                connection = null;
+                bound = false;
                 imageCallbackRegistered = false;
                 photoInFlight.set(false);
-                unregisterCallbacks(connected);
-                service = null;
-                try {
-                    context.unbindService(connection);
-                } catch (RuntimeException cleanupError) {
-                    Log.w(TAG, "unbind after callback registration failure failed", cleanupError);
-                }
-                bound = false;
+                viewOpen = false;
+                failedCurrentBinding = true;
                 listener.onLinkConnected(false);
                 listener.onGlassesConnected(false);
                 listener.onError("Rokidコールバック登録に失敗しました", error);
             }
         }
+        if (!failedCurrentBinding) {
+            return;
+        }
+        try {
+            context.unbindService(source);
+        } catch (RuntimeException cleanupError) {
+            Log.w(TAG, "unbind after callback registration failure failed", cleanupError);
+        }
+    }
 
-        @Override
-        public void onServiceDisconnected(ComponentName name) {
+    private void handleServiceDisconnected(BindingConnection source) {
+        synchronized (this) {
+            if (connection != source || !bindingEpochs.isCurrent(source.epoch)) {
+                return;
+            }
+            callbackEpochs.invalidateCurrent();
             service = null;
+            callbacks = null;
             imageCallbackRegistered = false;
             photoInFlight.set(false);
             viewOpen = false;
             listener.onLinkConnected(false);
             listener.onGlassesConnected(false);
         }
-    };
+    }
 
-    private void unregisterCallbacks(IMediaStreamService current) {
+    private void unregisterCallbacks(
+            IMediaStreamService current,
+            CallbackSet registered
+    ) {
         try {
-            current.unregisterDeviceStatusCallback(deviceStatus);
+            current.unregisterDeviceStatusCallback(registered.deviceStatus);
         } catch (Exception error) {
             Log.w(TAG, "device-status callback cleanup failed", error);
         }
         try {
-            current.unregisterImageCallback(imageStream);
+            current.unregisterImageCallback(registered.imageStream);
         } catch (Exception error) {
             Log.w(TAG, "image callback cleanup failed", error);
         }
         try {
-            current.unregisterCustomViewCallback(customView);
+            current.unregisterCustomViewCallback(registered.customView);
         } catch (Exception error) {
             Log.w(TAG, "custom-view callback cleanup failed", error);
         }
         try {
-            current.unregistAiEventCallback(aiEvents);
+            current.unregistAiEventCallback(registered.aiEvents);
         } catch (Exception error) {
             Log.w(TAG, "AI-event callback cleanup failed", error);
         }
     }
 
     @Override
-    public synchronized void close() {
-        IMediaStreamService current = service;
-        if (current != null) {
-            unregisterCallbacks(current);
+    public void close() {
+        IMediaStreamService current;
+        CallbackSet registered;
+        BindingConnection activeConnection;
+        boolean wasBound;
+        synchronized (this) {
+            current = service;
+            registered = callbacks;
+            activeConnection = connection;
+            wasBound = bound;
+            bindingEpochs.invalidateCurrent();
+            callbackEpochs.invalidateCurrent();
+            service = null;
+            callbacks = null;
+            connection = null;
+            bound = false;
+            imageCallbackRegistered = false;
+            photoInFlight.set(false);
+            viewOpen = false;
         }
-        if (bound) {
+        if (current != null && registered != null) {
+            unregisterCallbacks(current, registered);
+        }
+        if (wasBound && activeConnection != null) {
             try {
-                context.unbindService(connection);
+                context.unbindService(activeConnection);
             } catch (RuntimeException error) {
                 Log.w(TAG, "unbindService failed", error);
             }
         }
-        service = null;
-        bound = false;
-        imageCallbackRegistered = false;
-        photoInFlight.set(false);
-        viewOpen = false;
     }
 }

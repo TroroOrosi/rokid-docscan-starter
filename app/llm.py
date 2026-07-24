@@ -30,6 +30,8 @@ import json
 import math
 import os
 
+from .audio_formats import detect_audio_format
+
 PROVIDERS = ("openai", "gemini", "anthropic")
 
 # Per-provider model defaults, GPT (openai) first — the onboard AI's family.
@@ -41,15 +43,6 @@ DEFAULT_MODELS = {
     "anthropic": "claude-opus-4-8",
 }
 DEFAULT_MAX_TOKENS = 1024
-_AUDIO_UPLOAD_NAMES = {
-    "audio/wav": "audio.wav",
-    "audio/mpeg": "audio.mp3",
-    "audio/ogg": "audio.ogg",
-    "audio/flac": "audio.flac",
-    "audio/aac": "audio.aac",
-    "audio/mp4": "audio.m4a",
-    "audio/webm": "audio.webm",
-}
 
 # (adapter registration name, llm provider) pairs shared by all four adapter
 # families (solvers/analyzers/explainers/extractors) — GPT (openai) first.
@@ -160,17 +153,27 @@ class LLMClient:
             # e.g. docker-compose passing `ROKID_TRANSCRIBE_MODEL=` when unset —
             # still falls back to the default instead of requesting model="".
             model = os.environ.get("ROKID_TRANSCRIBE_MODEL") or "gpt-4o-transcribe"
-            media_type = _audio_media_type(audio)
+            audio_format = detect_audio_format(audio)
             resp = self._sdk.audio.transcriptions.create(
                 model=model,
-                file=(_AUDIO_UPLOAD_NAMES[media_type], audio, media_type),
+                file=(
+                    audio_format.upload_name,
+                    audio,
+                    audio_format.mime_type,
+                ),
             )
             return (getattr(resp, "text", "") or "").strip()
         if self.provider == "gemini":
+            audio_format = detect_audio_format(audio)
             resp = self._sdk.models.generate_content(
                 model=self.model,
                 contents=[
-                    {"inline_data": {"mime_type": _audio_media_type(audio), "data": _b64(audio)}},
+                    {
+                        "inline_data": {
+                            "mime_type": audio_format.mime_type,
+                            "data": _b64(audio),
+                        }
+                    },
                     {"text": "Transcribe the audio verbatim."},
                 ],
             )
@@ -285,21 +288,7 @@ def _media_type(image: bytes) -> str:
 
 def _audio_media_type(audio: bytes) -> str:
     """Best-effort audio MIME from magic bytes (default audio/mpeg)."""
-    if audio[:4] == b"RIFF" and audio[8:12] == b"WAVE":
-        return "audio/wav"
-    if audio[:3] == b"ID3" or audio[:2] in (b"\xff\xfb", b"\xff\xf3", b"\xff\xf2"):
-        return "audio/mpeg"
-    if audio[:4] == b"OggS":
-        return "audio/ogg"
-    if audio[:4] == b"fLaC":
-        return "audio/flac"
-    if audio[:2] in (b"\xff\xf1", b"\xff\xf9"):
-        return "audio/aac"
-    if audio[4:8] == b"ftyp":
-        return "audio/mp4"
-    if audio[:4] == b"\x1aE\xdf\xa3":
-        return "audio/webm"
-    return "audio/mpeg"
+    return detect_audio_format(audio).mime_type
 
 
 def clamp01(value, default: float = 0.0) -> float:

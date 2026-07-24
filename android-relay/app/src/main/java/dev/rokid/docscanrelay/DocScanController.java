@@ -72,6 +72,10 @@ public final class DocScanController implements AutoCloseable {
         return state;
     }
 
+    public boolean isCaptureReconnectRequired() {
+        return captureLease.isTimedOut();
+    }
+
     public void configure(String serverUrl, String apiKey, int rotationDegrees) {
         if (captureLease.isUnresolved()
                 || state.isCaptureInProgress()
@@ -127,6 +131,19 @@ public final class DocScanController implements AutoCloseable {
                             "Rokid link disconnected; capture lease reset");
                     return;
                 }
+                if (captureLease.isUnresolved()) {
+                    if (captureLease.isTimedOut()) {
+                        publish(
+                                RelayState.ERROR,
+                                List.of(
+                                        "撮影終了が未確認",
+                                        "Hi Rokid認可・再接続",
+                                        "追加処理を安全停止"),
+                                "Duplicate connected callback ignored while "
+                                        + "the capture lease is unresolved");
+                    }
+                    return;
+                }
                 publish(
                         RelayState.READY,
                         List.of("接続完了", "短押し: 撮影", "長押し: 読取完了"),
@@ -140,7 +157,22 @@ public final class DocScanController implements AutoCloseable {
 
     public void resume() {
         serial.execute(() -> {
-            if (!linkReady || !requireApi()) {
+            if (!linkReady) {
+                return;
+            }
+            if (captureLease.isUnresolved()) {
+                if (captureLease.isTimedOut()) {
+                    publish(
+                            RelayState.ERROR,
+                            List.of(
+                                    "復旧処理を保留",
+                                    "撮影終了が未確認",
+                                    "Hi Rokid認可・再接続"),
+                            "Resume rejected while a CXR-L photo lease is unresolved");
+                }
+                return;
+            }
+            if (!requireApi()) {
                 return;
             }
             try {
@@ -229,6 +261,7 @@ public final class DocScanController implements AutoCloseable {
             return;
         }
         long attempt = CaptureLease.NO_TOKEN;
+        boolean photoRequestMayBeActive = false;
         try {
             if (documentId == 0) {
                 String stamp = new SimpleDateFormat(
@@ -246,8 +279,15 @@ public final class DocScanController implements AutoCloseable {
                     RelayState.CAPTURING,
                     List.of("撮影中", "P" + (pageIndex + 1), "動かさないでください"),
                     "Requesting glasses photo for page index " + pageIndex);
-            if (!link.takePhoto(1440, 1920, 85)) {
+            RokidGlobalLink.PhotoStartResult startResult =
+                    link.takePhoto(1440, 1920, 85);
+            if (startResult == RokidGlobalLink.PhotoStartResult.REJECTED) {
                 throw new IllegalStateException("takePhoto returned false");
+            }
+            photoRequestMayBeActive = true;
+            if (startResult == RokidGlobalLink.PhotoStartResult.UNKNOWN) {
+                throw new IllegalStateException(
+                        "takePhoto acceptance is unknown after an IPC failure");
             }
             final long scheduledAttempt = attempt;
             watchdog.schedule(
@@ -256,9 +296,17 @@ public final class DocScanController implements AutoCloseable {
                     TimeUnit.SECONDS);
         } catch (Exception error) {
             if (attempt != CaptureLease.NO_TOKEN) {
-                captureLease.abortBeforeStart(attempt);
+                if (photoRequestMayBeActive) {
+                    captureLease.markStartUnknown(attempt);
+                } else {
+                    captureLease.abortBeforeStart(attempt);
+                }
             }
-            fail("撮影開始に失敗しました", error);
+            fail(
+                    photoRequestMayBeActive
+                            ? "撮影開始結果を確認できません。Hi Rokidを再接続してください"
+                            : "撮影開始に失敗しました",
+                    error);
         }
     }
 

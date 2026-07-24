@@ -140,8 +140,14 @@ public final class MainActivity extends Activity
     }
 
     private void authorizeAndConnect() {
-        if (!configureController()) {
+        boolean captureRecovery = controller.isCaptureReconnectRequired();
+        if (!captureRecovery && !configureController()) {
             return;
+        }
+        if (captureRecovery) {
+            appendLog(
+                    "Capture completion is unknown; reconnecting without "
+                            + "changing the current server configuration.");
         }
         if (!RokidGlobalLink.isGlobalHiRokidInstalled(this)) {
             showError("グローバル版Hi Rokidがスマホにインストールされていません");
@@ -216,8 +222,8 @@ public final class MainActivity extends Activity
         // A fresh authorization is also the user-visible recovery path after
         // a photo timeout. An actual unbind clears both capture guards before
         // the replacement service can report itself ready.
-        controller.setLinkReady(false);
         link.close();
+        controller.setLinkReady(false);
         link.connect(token);
     }
 

@@ -73,12 +73,17 @@ uses a fail-closed capture lease:
 - all required callbacks must register successfully before photography is enabled;
 - only one `takePhoto` may be in flight;
 - a success or error callback releases the lease;
+- if Binder fails before the `takePhoto` result is known, the request is treated
+  as potentially active and is blocked immediately;
 - after the 30-second watchdog expires, another photo, finalization, workflow
   reset, and configuration changes are blocked because camera completion is
   unknown;
 - a late callback is discarded but releases the block; otherwise a real
   Hi Rokid/glasses disconnection and reconnection is required. Re-running
-  **Hi Rokid認可・再接続** explicitly unbinds the old CXR-L service first.
+  **Hi Rokid認可・再接続** explicitly unbinds the old CXR-L service first;
+- every bind owns a separate callback epoch. Callbacks already dispatched by an
+  old service binding are ignored after disconnect/reconnect and cannot release
+  or upload data for a newer capture.
 
 The timeout is not treated as proof that the camera or privacy LED is off. This
 prevents a retry from opening a second capture while the first request may still

@@ -73,4 +73,19 @@ public class CaptureLeaseTest {
         assertFalse(lease.isTimedOut());
         assertTrue(lease.markTimedOut(second));
     }
+
+    @Test
+    public void unknownStartStaysBlockedUntilReconnect() {
+        CaptureLease lease = new CaptureLease();
+        long token = lease.begin(4);
+
+        assertTrue(lease.markStartUnknown(token));
+        assertTrue(lease.isUnresolved());
+        assertTrue(lease.isTimedOut());
+        assertEquals(CaptureLease.NO_TOKEN, lease.begin(5));
+
+        lease.resetAfterDisconnect();
+        assertFalse(lease.isUnresolved());
+        assertTrue(lease.begin(5) != CaptureLease.NO_TOKEN);
+    }
 }
