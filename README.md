@@ -469,8 +469,9 @@ uvicorn app.main:app --port 8000
 [user-operation-guide.md](docs/user-operation-guide.md) §7 を参照。
 
 OpenAI書き起こしには公式に対応するWAV/MP3/M4A/MP4/OGG/FLAC/WebMを使用します。
-raw ADTS AACは保存できますがOpenAIへは送信せず、与えられた transcript へ
-フォールバックします。
+raw ADTS/ADIF AACと識別できない音声データは保存できますがOpenAIへは送信せず、
+与えられた transcript へフォールバックします。先頭にID3v2タグがあっても、タグ後の
+実コンテナを判定します。
 
 ### 実機運用（グラス連携・入力・認証）
 

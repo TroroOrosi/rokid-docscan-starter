@@ -7,7 +7,7 @@ package dev.rokid.docscanrelay;
  * current CXR-L binding is gone. Only resetting the service binding invalidates
  * that callback epoch and makes it safe to release an unresolved capture.</p>
  */
-enum CaptureLinkEvent {
+public enum CaptureLinkEvent {
     GLASSES_STATUS_CHANGED(false),
     SERVICE_BINDING_RESET(true);
 

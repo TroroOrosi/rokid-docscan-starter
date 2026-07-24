@@ -150,8 +150,9 @@ APP_VERSION = "0.13.1"
 # 1.13.0: page replacement is atomically rejected after a session enters
 #        review; oversized decoded images return 413; audio uploads use
 #        allow-listed suffixes and format-correct provider metadata.
-# 1.13.1: Pillow decompression-bomb rejections consistently return 413, and
-#        raw AAC is rejected before an OpenAI transcription SDK call.
+# 1.13.1: Pillow decompression-bomb rejections consistently return 413; raw
+#        AAC and unrecognized audio are rejected before an OpenAI SDK call,
+#        including AAC hidden behind a leading ID3v2 tag.
 API_VERSION = "1.13.1"
 
 # Matching algorithm identity. Bump when thresholds or hashing change so a

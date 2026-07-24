@@ -8,6 +8,8 @@ Exercises the whole real path via an injected fake SDK (no network, no creds):
 
 from types import SimpleNamespace
 
+import pytest
+
 from app.audio_formats import AUDIO_FORMATS, safe_audio_suffix
 from app.llm import LLMClient, _audio_media_type
 from app.transcribe import transcribe_audio
@@ -59,7 +61,38 @@ def test_openai_transcription_supplies_supported_filename_and_mime(tmp_path):
     assert captured["file"] == ("audio.wav", audio, "audio/wav")
 
 
-def test_openai_raw_aac_falls_back_without_calling_the_sdk(tmp_path):
+def test_openai_id3v2_tagged_mp3_remains_supported(tmp_path):
+    captured: dict = {}
+
+    def _create(**kw):
+        captured.update(kw)
+        return SimpleNamespace(text="ok")
+
+    sdk = SimpleNamespace(
+        audio=SimpleNamespace(transcriptions=SimpleNamespace(create=_create))
+    )
+    client = LLMClient(sdk, provider="openai", model="unused")
+    audio = b"ID3\x04\x00\x00\x00\x00\x00\x00\xff\xfbmp3-frame"
+
+    assert (
+        transcribe_audio(
+            _write_audio(tmp_path, name="recording.mp3", data=audio),
+            client=client,
+        )
+        == "ok"
+    )
+    assert captured["file"] == ("audio.mp3", audio, "audio/mpeg")
+
+
+@pytest.mark.parametrize(
+    "audio",
+    [
+        b"\xff\xf1raw-aac",
+        b"ID3\x04\x00\x00\x00\x00\x00\x00\xff\xf1raw-aac",
+    ],
+    ids=["adts", "id3v2-adts"],
+)
+def test_openai_raw_aac_falls_back_without_calling_the_sdk(tmp_path, audio):
     called = False
 
     def _create(**kw):
@@ -71,7 +104,35 @@ def test_openai_raw_aac_falls_back_without_calling_the_sdk(tmp_path):
         audio=SimpleNamespace(transcriptions=SimpleNamespace(create=_create))
     )
     client = LLMClient(sdk, provider="openai", model="unused")
-    path = _write_audio(tmp_path, name="recording.aac", data=b"\xff\xf1raw-aac")
+    path = _write_audio(tmp_path, name="recording.aac", data=audio)
+
+    assert (
+        transcribe_audio(path, provided_transcript="safe fallback", client=client)
+        == "safe fallback"
+    )
+    assert called is False
+
+
+@pytest.mark.parametrize(
+    "audio",
+    [b"ADIFraw-aac", b"not-a-supported-audio-container"],
+    ids=["adif-aac", "unrecognized"],
+)
+def test_openai_unsupported_audio_falls_back_without_calling_the_sdk(
+    tmp_path, audio
+):
+    called = False
+
+    def _create(**kw):
+        nonlocal called
+        called = True
+        return SimpleNamespace(text="must not be used")
+
+    sdk = SimpleNamespace(
+        audio=SimpleNamespace(transcriptions=SimpleNamespace(create=_create))
+    )
+    client = LLMClient(sdk, provider="openai", model="unused")
+    path = _write_audio(tmp_path, name="recording.bin", data=audio)
 
     assert (
         transcribe_audio(path, provided_transcript="safe fallback", client=client)
