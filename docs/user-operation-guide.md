@@ -90,7 +90,7 @@ Hi Rokidを再認可して接続すると、`/scan-status`を読み、未確定�
 | 401 | RelayとWindowsの `ROKID_API_KEY` を一致させる |
 | Hi Rokid未接続 | Hi Rokidでペアリング確認後、再認可 |
 | 撮影callbackなし | Relayを前面表示し、スマホをスリープさせない |
-| OCR空 / finalize 409 | 回転を直して再撮影、または画像対応Analyzer設定を確認 |
+| OCR空 / 問題0件 | 回転を直して同じページを再撮影、または画像対応Analyzer設定を確認 |
 | 問題0件 | OCR/図表説明を確認して該当ページを再撮影 |
 | HUD更新なし | サービス再接続。Relayはclose + open更新を使用 |
 | Provider失敗 | SDK、APIキー、model名、課金/利用上限、ネットワークを確認 |

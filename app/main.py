@@ -651,14 +651,13 @@ def finalize_document(document_id: int) -> dict:
         analyzer = get_analyzer()
         snapshot_fields = ("id", "page_index", "image_path", "ocr_text", "vision_text")
         analyzed_snapshot = []
-        unreadable_pages = []
         for p in pages:
             next_ocr = p["ocr_text"]
             next_vision = p["vision_text"]
 
-            # Idempotent: a complete, already-summarized page needs no repeated
-            # cloud call. Replaced pages have summary=NULL and are analyzed again.
-            if p["summary"] is not None and _page_material(next_ocr, next_vision):
+            # Idempotent: an already-finalized page needs no repeated cloud call.
+            # Replaced pages have summary=NULL and are analyzed again.
+            if p["summary"] is not None:
                 analyzed_snapshot.append(
                     tuple(p[field] for field in snapshot_fields)
                 )
@@ -680,10 +679,6 @@ def finalize_document(document_id: int) -> dict:
             if analyzed_vision and not (next_vision and next_vision.strip()):
                 next_vision = analyzed_vision
 
-            if not _page_material(next_ocr, next_vision):
-                unreadable_pages.append(p["page_index"])
-                continue
-
             next_summary = (
                 result.summary or next_ocr or next_vision or ""
             )[:48]
@@ -694,17 +689,6 @@ def finalize_document(document_id: int) -> dict:
             )
             analyzed_snapshot.append(
                 (p["id"], p["page_index"], p["image_path"], next_ocr, next_vision)
-            )
-
-        if unreadable_pages:
-            conn.rollback()
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    "photo OCR is empty for page indexes "
-                    f"{unreadable_pages}; configure ROKID_ANALYZER="
-                    "openai|gemini|claude or re-photograph those pages"
-                ),
             )
 
         # The analyzer can be slow or remote. A page may have been added or

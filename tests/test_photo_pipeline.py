@@ -1,8 +1,27 @@
 from __future__ import annotations
 
+import importlib
 import io
 
+import pytest
+from fastapi.testclient import TestClient
 from PIL import Image
+
+
+@pytest.fixture
+def client(tmp_path, monkeypatch):
+    monkeypatch.setenv("ROKID_DATA_DIR", str(tmp_path))
+    monkeypatch.delenv("ROKID_ANALYZER", raising=False)
+    monkeypatch.delenv("ROKID_SOLVER", raising=False)
+    import app.config as config
+    importlib.reload(config)
+    import app.db as db
+    importlib.reload(db)
+    import app.main as main
+    importlib.reload(main)
+    main.ensure_dirs()
+    main.db.init_db()
+    return TestClient(main.app)
 
 
 def _jpeg() -> bytes:
@@ -81,7 +100,7 @@ def test_finalize_persists_analyzer_ocr_for_photo(client, monkeypatch):
     assert row["summary"] == "問1"
 
 
-def test_photo_without_any_ocr_remains_open(client):
+def test_photo_without_any_ocr_stays_recoverable(client):
     document_id = _new_document(client)
     added = client.post(
         f"/v1/documents/{document_id}/pages",
@@ -91,8 +110,18 @@ def test_photo_without_any_ocr_remains_open(client):
     assert added.status_code == 201
 
     finalized = client.post(f"/v1/documents/{document_id}/finalize")
-    assert finalized.status_code == 409
-    assert "OCR" in finalized.json()["detail"]
+    assert finalized.status_code == 200
+
+    session = client.post(
+        "/v1/exam-sessions",
+        json={"mode": "study", "document_id": document_id},
+    ).json()
+    reading = client.post(
+        f"/v1/exam-sessions/{session['session_id']}/finalize-reading"
+    )
+    assert reading.status_code == 200
+    assert reading.json()["status"] == "reading"
+    assert reading.json()["problem_count"] == 0
 
 
 def test_finalize_reading_passes_primary_page_photo_to_solver(client, monkeypatch):
