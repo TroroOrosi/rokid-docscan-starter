@@ -43,9 +43,10 @@ APIキー、Bearer値、Hi Rokid認可トークンは記録しません。
 
 ## C. Global Hi Rokid / AIDL
 
-- [ ] Relayの「Hi Rokid認可・接続」から認可画面が開く。
+- [ ] Relayの「Hi Rokid認可・再接続」から認可画面が開く。
 - [ ] 未確認アプリ確認が出た場合、内容を確認して許可した。
 - [ ] `IMediaStreamService` bind後に接続状態がtrueになる。
+- [ ] 必須callbackの登録が1つでも失敗した場合、接続済み表示にならず撮影できない。
 - [ ] サービス切断時にRelayとHUDが未接続表示へ戻る。
 - [ ] 再認可・再接続で復帰する。
 
@@ -72,6 +73,7 @@ adb logcat -s DocScanRokid:*
 ## E. 写真とOCR
 
 - [ ] `takePhoto(1440, 1920, 85)` がtrueを返す。
+- [ ] callback到着前の連続操作で2件目の`takePhoto`が発行されない。
 - [ ] `onImageReceived` のJPEGが0バイトでない。
 - [ ] `/scan-status.pages[n].has_image` がtrueになる。
 - [ ] 用紙の問題番号、本文、選択肢が端末OCRへ入る。
@@ -81,6 +83,9 @@ adb logcat -s DocScanRokid:*
 - [ ] 画像対応Analyzerが空OCRを回復できる。
 - [ ] Analyzer未設定かつOCR空の場合、`finalize-reading` 後も読取状態を保つ。
 - [ ] 同じページ番号を再撮影すると置換され、再度読取完了できる。
+- [ ] 写真callbackを30秒以上返さない試験では、再撮影・読取完了・新規文書が拒否される。
+- [ ] タイムアウト後の遅延画像はアップロードされず、callback受信後に再撮影可能になる。
+- [ ] callbackが来ない場合、実際の切断・再接続後にだけ撮影ブロックが解除される。
 
 写真には個人情報や試験資料が含まれる可能性があります。保存・クラウド送信の同意と
 削除方針を運用前に決めます。
@@ -113,6 +118,7 @@ adb logcat -s DocScanRokid:*
 - [ ] OCR/アップロード/Analyzer/Solver処理中に追加撮影が起きず、LEDが消灯している。
 - [ ] 解答閲覧中もLEDが消灯したままである。
 - [ ] アプリがLEDを無効化・迂回・偽装していない。
+- [ ] 撮影タイムアウトをLED消灯とみなさず、接続復旧まで追加撮影しない。
 - [ ] シャッター音、フラッシュ、撮影表示の実挙動を当該ファームで記録した。
 
 「無音」「無フラッシュ」は公開SDKで制御済みと仮定しません。

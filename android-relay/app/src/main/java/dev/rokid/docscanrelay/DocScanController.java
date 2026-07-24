@@ -16,7 +16,6 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicLong;
 
 /** Serial state machine for capture -> OCR -> upload -> solve -> HUD review. */
 public final class DocScanController implements AutoCloseable {
@@ -38,7 +37,7 @@ public final class DocScanController implements AutoCloseable {
     private final ExecutorService serial = Executors.newSingleThreadExecutor();
     private final ScheduledExecutorService watchdog =
             Executors.newSingleThreadScheduledExecutor();
-    private final AtomicLong captureAttempt = new AtomicLong();
+    private final CaptureLease captureLease = new CaptureLease();
     private final RetryCursor retryCursor = new RetryCursor();
 
     private volatile RelayState state = RelayState.DISCONNECTED;
@@ -49,7 +48,6 @@ public final class DocScanController implements AutoCloseable {
     private long documentId;
     private int nextPageIndex;
     private long sessionId;
-    private int capturePageIndex = -1;
     private int reviewIndex;
     private int reviewViewPage;
     private int reviewProblemCount;
@@ -75,6 +73,12 @@ public final class DocScanController implements AutoCloseable {
     }
 
     public void configure(String serverUrl, String apiKey, int rotationDegrees) {
+        if (captureLease.isUnresolved()
+                || state.isCaptureInProgress()
+                || state == RelayState.FINALIZING) {
+            throw new IllegalStateException(
+                    "撮影処理中のため設定を変更できません。完了を待つかHi Rokidを再接続してください");
+        }
         DocScanApi candidate = new DocScanApi(serverUrl, apiKey);
         String previousServer = preferences.getString(KEY_SERVER, "");
         configuredServer = serverUrl.trim().replaceAll("/+$", "");
@@ -112,19 +116,26 @@ public final class DocScanController implements AutoCloseable {
     }
 
     public void setLinkReady(boolean ready) {
-        linkReady = ready;
-        if (!ready) {
-            publish(
-                    RelayState.DISCONNECTED,
-                    List.of("Hi Rokid未接続", "ペアリングを確認", ""),
-                    "Rokid link disconnected");
-            return;
+        try {
+            serial.execute(() -> {
+                linkReady = ready;
+                if (!ready) {
+                    captureLease.resetAfterDisconnect();
+                    publish(
+                            RelayState.DISCONNECTED,
+                            List.of("Hi Rokid未接続", "ペアリングを確認", ""),
+                            "Rokid link disconnected; capture lease reset");
+                    return;
+                }
+                publish(
+                        RelayState.READY,
+                        List.of("接続完了", "短押し: 撮影", "長押し: 読取完了"),
+                        "Rokid AIDL connected");
+                resume();
+            });
+        } catch (RejectedExecutionException ignored) {
+            // The activity is already closing.
         }
-        publish(
-                RelayState.READY,
-                List.of("接続完了", "短押し: 撮影", "長押し: 読取完了"),
-                "Rokid AIDL connected");
-        resume();
     }
 
     public void resume() {
@@ -200,6 +211,16 @@ public final class DocScanController implements AutoCloseable {
         if (!linkReady || !requireApi()) {
             return;
         }
+        if (captureLease.isUnresolved()) {
+            String reason = captureLease.isTimedOut()
+                    ? "前回撮影の終了未確認。Hi Rokidを再接続"
+                    : "前回撮影の結果を待っています";
+            publish(
+                    RelayState.ERROR,
+                    List.of("撮影を安全停止", reason, "重複撮影は禁止"),
+                    "Capture rejected while a CXR-L photo lease is unresolved");
+            return;
+        }
         if (state == RelayState.CAPTURING
                 || state == RelayState.OCR
                 || state == RelayState.UPLOADING
@@ -207,8 +228,8 @@ public final class DocScanController implements AutoCloseable {
             publish(state, List.of("処理中", "完了まで待機", ""), "Ignored overlapping capture");
             return;
         }
+        long attempt = CaptureLease.NO_TOKEN;
         try {
-            long attempt = captureAttempt.incrementAndGet();
             if (documentId == 0) {
                 String stamp = new SimpleDateFormat(
                         "yyyy-MM-dd HH:mm:ss", Locale.JAPAN).format(new Date());
@@ -217,33 +238,56 @@ public final class DocScanController implements AutoCloseable {
                 nextPageIndex = 0;
                 persistWorkflow();
             }
+            attempt = captureLease.begin(pageIndex);
+            if (attempt == CaptureLease.NO_TOKEN) {
+                throw new IllegalStateException("another photo request is still unresolved");
+            }
             publish(
                     RelayState.CAPTURING,
                     List.of("撮影中", "P" + (pageIndex + 1), "動かさないでください"),
                     "Requesting glasses photo for page index " + pageIndex);
-            capturePageIndex = pageIndex;
             if (!link.takePhoto(1440, 1920, 85)) {
                 throw new IllegalStateException("takePhoto returned false");
             }
+            final long scheduledAttempt = attempt;
             watchdog.schedule(
-                    () -> enqueueCaptureTimeout(attempt, pageIndex),
+                    () -> enqueueCaptureTimeout(scheduledAttempt),
                     CAPTURE_TIMEOUT_SECONDS,
                     TimeUnit.SECONDS);
         } catch (Exception error) {
-            captureAttempt.incrementAndGet();
-            capturePageIndex = -1;
+            if (attempt != CaptureLease.NO_TOKEN) {
+                captureLease.abortBeforeStart(attempt);
+            }
             fail("撮影開始に失敗しました", error);
         }
     }
 
     public void onPhoto(byte[] jpeg) {
-        if (state != RelayState.CAPTURING) {
+        try {
+            serial.execute(() -> handlePhoto(jpeg));
+        } catch (RejectedExecutionException ignored) {
+            // The activity closed while the Binder callback was arriving.
+        }
+    }
+
+    private void handlePhoto(byte[] jpeg) {
+        CaptureLease.Completion completion = captureLease.complete();
+        if (completion == null) {
             return;
         }
-        captureAttempt.incrementAndGet();
-        final int uploadIndex = capturePageIndex >= 0 ? capturePageIndex : nextPageIndex;
+        if (completion.lateAfterTimeout) {
+            publish(
+                    RelayState.READING,
+                    List.of("遅延写真を破棄", "撮影終了を確認", "再撮影できます"),
+                    "Late photo callback discarded after timeout; capture lease released");
+            return;
+        }
+        if (jpeg == null || jpeg.length == 0) {
+            fail("グラスから空の写真が返されました", null);
+            return;
+        }
+        final int uploadIndex = completion.pageIndex;
         final int uploadRotation = imageRotation;
-        capturePageIndex = -1;
         publish(
                 RelayState.OCR,
                 List.of("文字認識中", "P" + (uploadIndex + 1), ""),
@@ -266,31 +310,35 @@ public final class DocScanController implements AutoCloseable {
     }
 
     public void onPhotoError(String message, Throwable cause) {
-        serial.execute(() -> {
-            if (state != RelayState.CAPTURING) {
-                return;
-            }
-            captureAttempt.incrementAndGet();
-            capturePageIndex = -1;
-            Throwable detail = cause;
-            if (detail == null && message != null && !message.trim().isEmpty()) {
-                detail = new IllegalStateException(message);
-            }
-            fail("撮影に失敗しました。短押しで再撮影できます", detail);
-        });
-    }
-
-    private void enqueueCaptureTimeout(long attempt, int pageIndex) {
         try {
             serial.execute(() -> {
-                if (captureAttempt.get() != attempt
-                        || state != RelayState.CAPTURING
-                        || capturePageIndex != pageIndex) {
+                CaptureLease.Completion completion = captureLease.complete();
+                if (completion == null) {
                     return;
                 }
-                captureAttempt.incrementAndGet();
-                capturePageIndex = -1;
-                fail("写真が返りませんでした。短押しで再撮影できます", null);
+                Throwable detail = cause;
+                if (detail == null && message != null && !message.trim().isEmpty()) {
+                    detail = new IllegalStateException(message);
+                }
+                String userMessage = completion.lateAfterTimeout
+                        ? "撮影終了を確認しました。短押しで再撮影できます"
+                        : "撮影に失敗しました。短押しで再撮影できます";
+                fail(userMessage, detail);
+            });
+        } catch (RejectedExecutionException ignored) {
+            // The activity closed while the Binder callback was arriving.
+        }
+    }
+
+    private void enqueueCaptureTimeout(long attempt) {
+        try {
+            serial.execute(() -> {
+                if (!captureLease.markTimedOut(attempt)) {
+                    return;
+                }
+                fail(
+                        "写真が返りませんでした。安全のためHi Rokidを再接続してください",
+                        null);
             });
         } catch (RejectedExecutionException ignored) {
             // The activity closed while the watchdog was expiring.
@@ -338,6 +386,13 @@ public final class DocScanController implements AutoCloseable {
     public void finishReading() {
         serial.execute(() -> {
             if (!requireApi()) {
+                return;
+            }
+            if (captureLease.isUnresolved()) {
+                publish(
+                        RelayState.ERROR,
+                        List.of("読取完了を保留", "撮影終了が未確認", "Hi Rokidを再接続"),
+                        "Finish rejected while a CXR-L photo lease is unresolved");
                 return;
             }
             if (state.isCaptureInProgress()) {
@@ -440,6 +495,20 @@ public final class DocScanController implements AutoCloseable {
 
     public void startNewDocument() {
         serial.execute(() -> {
+            if (captureLease.isUnresolved()) {
+                publish(
+                        RelayState.ERROR,
+                        List.of("新規読取を保留", "撮影終了が未確認", "Hi Rokidを再接続"),
+                        "Workflow reset rejected while a photo lease is unresolved");
+                return;
+            }
+            if (state.isCaptureInProgress() || state == RelayState.FINALIZING) {
+                publish(
+                        state,
+                        List.of("処理中", "完了まで待機", ""),
+                        "Workflow reset rejected while processing is active");
+                return;
+            }
             clearWorkflow();
             publish(
                     linkReady ? RelayState.READY : RelayState.DISCONNECTED,
@@ -500,7 +569,6 @@ public final class DocScanController implements AutoCloseable {
         documentId = 0;
         nextPageIndex = 0;
         sessionId = 0;
-        capturePageIndex = -1;
         reviewIndex = 0;
         reviewViewPage = 0;
         reviewProblemCount = 0;
@@ -515,6 +583,7 @@ public final class DocScanController implements AutoCloseable {
 
     @Override
     public void close() {
+        captureLease.resetAfterDisconnect();
         watchdog.shutdownNow();
         serial.shutdownNow();
     }

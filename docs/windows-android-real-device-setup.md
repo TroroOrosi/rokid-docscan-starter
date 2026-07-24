@@ -107,7 +107,7 @@ adb install -r .\app\build\outputs\apk\debug\app-debug.apk
 4. `ROKID_API_KEY`と同じ値を入力する。
 5. 写真向きは最初に`0°`を選ぶ。
 6. 「サーバ確認」で`health`とHUD契約を確認する。
-7. 「Hi Rokid認可・接続」を押し、Bluetooth権限とHi Rokid認可を許可する。
+7. 「Hi Rokid認可・再接続」を押し、Bluetooth権限とHi Rokid認可を許可する。
 8. グラスに「接続完了」が表示されることを確認する。
 
 認可トークンはログ出力・保存しません。APIキーもアプリ終了後は保存されません。

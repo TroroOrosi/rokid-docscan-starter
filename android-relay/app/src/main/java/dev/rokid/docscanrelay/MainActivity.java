@@ -100,7 +100,8 @@ public final class MainActivity extends Activity
 
         LinearLayout connectRow = horizontalRow();
         connectRow.addView(button("サーバ確認", ignored -> configureAndVerify()), weighted());
-        connectRow.addView(button("Hi Rokid認可・接続", ignored -> authorizeAndConnect()), weighted());
+        connectRow.addView(
+                button("Hi Rokid認可・再接続", ignored -> authorizeAndConnect()), weighted());
         root.addView(connectRow, matchWrap());
 
         LinearLayout captureRow = horizontalRow();
@@ -210,7 +211,13 @@ public final class MainActivity extends Activity
             showError("Hi Rokidの認可がキャンセルまたは拒否されました");
             return;
         }
-        appendLog("Authorization succeeded; connecting without logging the token.");
+        appendLog(
+                "Authorization succeeded; resetting the CXR-L binding without logging the token.");
+        // A fresh authorization is also the user-visible recovery path after
+        // a photo timeout. An actual unbind clears both capture guards before
+        // the replacement service can report itself ready.
+        controller.setLinkReady(false);
+        link.close();
         link.connect(token);
     }
 

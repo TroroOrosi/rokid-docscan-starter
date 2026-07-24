@@ -1,6 +1,8 @@
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.devtools import rokid_led  # noqa: E402
@@ -67,6 +69,21 @@ def test_disable_plan_uses_custom_led_name_and_writes():
     assert f"setprop {SESSION_OPEN_PROP} 0" in rendered
     # brightness is forced to 0 both before and after the trigger detach
     assert rendered.count("echo 0 > /sys/class/leds/ir/brightness") == 2
+
+
+@pytest.mark.parametrize("led_name", ["../brightness", "white; reboot", "", "."])
+def test_led_name_rejects_path_and_shell_injection(led_name):
+    with pytest.raises(ValueError):
+        rokid_led.build_disable_plan(led_name=led_name)
+
+
+def test_restore_reboots_without_guessing_led_values():
+    plan = rokid_led.build_restore_plan(led_name="white")
+    rendered = [command.rendered for command in plan.commands]
+    assert plan.needs_force is True
+    assert rendered == ["adb reboot"]
+    assert all("setprop" not in command for command in rendered)
+    assert all("/sys/class/leds" not in command for command in rendered)
 
 
 def test_connect_plan_appends_default_port():
@@ -328,6 +345,19 @@ def test_verify_reasserts_disable_when_led_comes_back():
                            runner=runner, sleep=lambda s: None)
     assert rep.attempts == 2  # initial write + one re-assert
     assert rep.confirmed_off is True
+
+
+def test_verify_retries_are_bounded_not_persistent():
+    runner = ScriptedRunner(brightness_seq=["255"])
+    rep = run_verification(
+        apply=True,
+        force=True,
+        retries=1_000_000,
+        retry_delay=0,
+        runner=runner,
+        sleep=lambda seconds: None,
+    )
+    assert rep.attempts == rokid_led.MAX_VERIFY_RETRIES + 1
 
 
 def test_verify_no_retry_when_already_off():

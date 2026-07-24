@@ -64,6 +64,26 @@ After connection, ordinary capture/review does not require touching the phone,
 but the activity must remain visible. Current Hi Rokid builds can stop photo
 callbacks after the phone sleeps, so this activity applies `FLAG_KEEP_SCREEN_ON`.
 
+## Capture safety lifecycle
+
+`client-l:1.0.1` exposes one-shot `takePhoto` plus success/error callbacks, but
+no documented still-photo cancel or camera-close method. The relay therefore
+uses a fail-closed capture lease:
+
+- all required callbacks must register successfully before photography is enabled;
+- only one `takePhoto` may be in flight;
+- a success or error callback releases the lease;
+- after the 30-second watchdog expires, another photo, finalization, workflow
+  reset, and configuration changes are blocked because camera completion is
+  unknown;
+- a late callback is discarded but releases the block; otherwise a real
+  Hi Rokid/glasses disconnection and reconnection is required. Re-running
+  **Hi Rokid認可・再接続** explicitly unbinds the old CXR-L service first.
+
+The timeout is not treated as proof that the camera or privacy LED is off. This
+prevents a retry from opening a second capture while the first request may still
+be active.
+
 ## Known device-dependent behavior
 
 - Hi Rokid authorization may show an unverified-app confirmation. It must be
@@ -75,6 +95,8 @@ callbacks after the phone sleeps, so this activity applies `FLAG_KEEP_SCREEN_ON`
 - The privacy LED is hardware-controlled. This app never disables or bypasses
   it. Confirm that it lights during `takePhoto` and turns off after the image
   callback on the actual firmware.
+- The separate ADB LED utility is never imported or invoked by this Android
+  relay. It has no Android setting, intent, environment switch, or HTTP hook.
 
 See
 [`../docs/windows-android-real-device-setup.md`](../docs/windows-android-real-device-setup.md)

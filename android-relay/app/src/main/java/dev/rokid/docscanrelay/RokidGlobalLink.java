@@ -17,6 +17,7 @@ import com.rokid.sprite.aiapp.externalapp.IMediaStreamService;
 
 import java.util.Arrays;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Minimal global-Hi-Rokid CXR-L client.
@@ -59,8 +60,10 @@ public final class RokidGlobalLink implements AutoCloseable {
 
     private final Context context;
     private final Listener listener;
-    private IMediaStreamService service;
-    private boolean bound;
+    private final AtomicBoolean photoInFlight = new AtomicBoolean();
+    private volatile IMediaStreamService service;
+    private volatile boolean bound;
+    private volatile boolean imageCallbackRegistered;
     private volatile boolean viewOpen;
 
     public RokidGlobalLink(Context context, Listener listener) {
@@ -135,9 +138,22 @@ public final class RokidGlobalLink implements AutoCloseable {
             listener.onError("Rokidサービス未接続のため撮影できません", null);
             return false;
         }
+        if (!imageCallbackRegistered) {
+            listener.onError("写真コールバック未登録のため撮影を安全停止しました", null);
+            return false;
+        }
+        if (!photoInFlight.compareAndSet(false, true)) {
+            listener.onError("前回の撮影結果が未着のため重複撮影を拒否しました", null);
+            return false;
+        }
         try {
-            return current.takePhoto(width, height, quality);
+            boolean started = current.takePhoto(width, height, quality);
+            if (!started) {
+                photoInFlight.set(false);
+            }
+            return started;
         } catch (Exception error) {
+            photoInFlight.set(false);
             listener.onError("Rokid Glassesの撮影要求に失敗しました", error);
             return false;
         }
@@ -179,6 +195,12 @@ public final class RokidGlobalLink implements AutoCloseable {
     private final IDeviceStatusCallback deviceStatus = new IDeviceStatusCallback.Stub() {
         @Override
         public void onDeviceConnectChanged(boolean connected) {
+            if (!connected) {
+                // A real glasses disconnect terminates any outstanding
+                // one-shot capture and is the only safe reset when no image
+                // callback arrived.
+                photoInFlight.set(false);
+            }
             listener.onGlassesConnected(connected);
         }
     };
@@ -186,6 +208,7 @@ public final class RokidGlobalLink implements AutoCloseable {
     private final IImageStreamCallback imageStream = new IImageStreamCallback.Stub() {
         @Override
         public void onImageReceived(byte[] data) {
+            photoInFlight.set(false);
             if (data == null || data.length == 0) {
                 listener.onPhotoError("グラスから空の写真が返されました", null);
                 return;
@@ -195,6 +218,7 @@ public final class RokidGlobalLink implements AutoCloseable {
 
         @Override
         public void onImageError(int code, String message) {
+            photoInFlight.set(false);
             listener.onPhotoError("グラス撮影エラー " + code + ": " + message, null);
         }
     };
@@ -253,13 +277,31 @@ public final class RokidGlobalLink implements AutoCloseable {
             IMediaStreamService connected = IMediaStreamService.Stub.asInterface(binder);
             service = connected;
             try {
-                connected.registerDeviceStatusCallback(deviceStatus);
-                connected.registerImageCallback(imageStream);
-                connected.registerCustomViewCallback(customView);
-                connected.registAiEventCallback(aiEvents);
+                boolean callbacksReady =
+                        connected.registerDeviceStatusCallback(deviceStatus)
+                                && connected.registerImageCallback(imageStream)
+                                && connected.registerCustomViewCallback(customView)
+                                && connected.registAiEventCallback(aiEvents);
+                if (!callbacksReady) {
+                    throw new IllegalStateException(
+                            "one or more required CXR-L callbacks were rejected");
+                }
+                imageCallbackRegistered = true;
                 listener.onLinkConnected(true);
                 listener.onGlassesConnected(connected.isDeviceConnected());
             } catch (Exception error) {
+                imageCallbackRegistered = false;
+                photoInFlight.set(false);
+                unregisterCallbacks(connected);
+                service = null;
+                try {
+                    context.unbindService(connection);
+                } catch (RuntimeException cleanupError) {
+                    Log.w(TAG, "unbind after callback registration failure failed", cleanupError);
+                }
+                bound = false;
+                listener.onLinkConnected(false);
+                listener.onGlassesConnected(false);
                 listener.onError("Rokidコールバック登録に失敗しました", error);
             }
         }
@@ -267,24 +309,42 @@ public final class RokidGlobalLink implements AutoCloseable {
         @Override
         public void onServiceDisconnected(ComponentName name) {
             service = null;
+            imageCallbackRegistered = false;
+            photoInFlight.set(false);
             viewOpen = false;
             listener.onLinkConnected(false);
             listener.onGlassesConnected(false);
         }
     };
 
+    private void unregisterCallbacks(IMediaStreamService current) {
+        try {
+            current.unregisterDeviceStatusCallback(deviceStatus);
+        } catch (Exception error) {
+            Log.w(TAG, "device-status callback cleanup failed", error);
+        }
+        try {
+            current.unregisterImageCallback(imageStream);
+        } catch (Exception error) {
+            Log.w(TAG, "image callback cleanup failed", error);
+        }
+        try {
+            current.unregisterCustomViewCallback(customView);
+        } catch (Exception error) {
+            Log.w(TAG, "custom-view callback cleanup failed", error);
+        }
+        try {
+            current.unregistAiEventCallback(aiEvents);
+        } catch (Exception error) {
+            Log.w(TAG, "AI-event callback cleanup failed", error);
+        }
+    }
+
     @Override
     public synchronized void close() {
         IMediaStreamService current = service;
         if (current != null) {
-            try {
-                current.unregisterDeviceStatusCallback(deviceStatus);
-                current.unregisterImageCallback(imageStream);
-                current.unregisterCustomViewCallback(customView);
-                current.unregistAiEventCallback(aiEvents);
-            } catch (Exception error) {
-                Log.w(TAG, "callback cleanup failed", error);
-            }
+            unregisterCallbacks(current);
         }
         if (bound) {
             try {
@@ -295,6 +355,8 @@ public final class RokidGlobalLink implements AutoCloseable {
         }
         service = null;
         bound = false;
+        imageCallbackRegistered = false;
+        photoInFlight.set(false);
         viewOpen = false;
     }
 }
