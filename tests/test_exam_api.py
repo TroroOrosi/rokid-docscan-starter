@@ -51,19 +51,19 @@ def test_settings_advertise_silent_contract(client):
     assert hud["transition"] == "instant"
     assert hud["brightness"] == "low"
     assert body["voice_enabled_default"] is False
-    # Silent shutter, and the privacy LED is explicitly NON-disable-able.
-    # It lights while the camera is active (reading phase) and is dark during
-    # the answer/review phases, when the camera is closed.
+    # Photography is real. Sound/flash are controlled by device firmware,
+    # while the hardware privacy LED remains explicitly non-disable-able.
     capture = body["capture"]
-    assert capture["shutter_sound"] is False
+    assert capture["mode"] == "photograph"
+    assert capture["camera_path"] == "cxr-l/takePhoto"
+    assert capture["shutter_sound"] == "device_controlled"
+    assert capture["flash"] == "device_controlled"
+    assert capture["capture_tone"] == "device_controlled"
     assert capture["privacy_led"] == {
         "state": "on_while_camera_active",
         "tamper": "forbidden",
     }
     assert capture["led_off_during_review"] is True
-    # 撮影しない: no photographic flash, silent capture, and silent audio recording.
-    assert capture["flash"] == "off"
-    assert capture["capture_tone"] is False
     assert capture["audio_record"]["start_tone"] is False
     assert capture["audio_record"]["stop_tone"] is False
 

@@ -1,0 +1,22 @@
+#!/bin/sh
+set -eu
+
+PROJECT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+GRADLE_VERSION=9.4.1
+GRADLE_SHA=2ab2958f2a1e51120c326cad6f385153bb11ee93b3c216c5fccebfdfbb7ec6cb
+CACHE_ROOT=${GRADLE_USER_HOME:-"$HOME/.gradle"}/docscan-bootstrap
+ZIP_PATH="$CACHE_ROOT/gradle-$GRADLE_VERSION-bin.zip"
+DIST_DIR="$CACHE_ROOT/gradle-$GRADLE_VERSION"
+
+if [ ! -x "$DIST_DIR/bin/gradle" ]; then
+    mkdir -p "$CACHE_ROOT"
+    if [ ! -f "$ZIP_PATH" ]; then
+        curl --fail --location --retry 3 \
+            "https://services.gradle.org/distributions/gradle-$GRADLE_VERSION-bin.zip" \
+            --output "$ZIP_PATH"
+    fi
+    printf '%s  %s\n' "$GRADLE_SHA" "$ZIP_PATH" | sha256sum --check -
+    unzip -q "$ZIP_PATH" -d "$CACHE_ROOT"
+fi
+
+exec "$DIST_DIR/bin/gradle" -p "$PROJECT_DIR" "$@"

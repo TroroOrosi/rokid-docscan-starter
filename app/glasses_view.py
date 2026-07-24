@@ -1,4 +1,4 @@
-"""Build the on-glasses view payload (silent, monochrome, paginated lines).
+"""Build the on-glasses view payload (silent HUD, monochrome, paginated lines).
 
 Hardware reality (Rokid Glasses, web-verified 2026-07; see
 docs/cxr-l-integration.md):
@@ -14,8 +14,10 @@ docs/cxr-l-integration.md):
             the Caps/Bluetooth wire as a CUSTOMVIEW — phone relay required)
             + CXR-S (on-device bridge) + CXR-M (mobile companion).
 
-Design principles (SILENT-FRIENDLY, no-flash):
-  - NO audio cues and NO animation directives.
+Design principles (silent HUD; device-controlled capture indicators):
+  - HUD payloads contain NO audio cues and NO animation directives.
+  - Photography uses CXR-L takePhoto. Shutter sound, flash and firmware capture
+    indicators are not controlled or promised by this server contract.
   - NO character-per-line limit imposed by the server.  The client renderer
     is responsible for reflowing text to fit the physical display.
     (Previous 24-char server-side truncation caused problem text and answer
@@ -42,9 +44,9 @@ docs/glasses-ux-contract.md):
   two_finger_swipe_up/down    : teleprompter scroll (within a view)
   two_finger_swipe_left/right : prev/next document page or review problem
   long_press                  : video⇄audio record toggle → written⇄listening
-No camera image is used for page/problem navigation: after finalize-reading
-the camera stays closed, so the privacy LED is dark for the whole answer and
-review phases (LED lit time is minimized by design).
+A real page image is captured during the reading phase. After the image
+callback and finalize-reading, no camera image is requested for answer/problem
+navigation; the privacy LED must remain dark during answer and review.
 """
 
 from __future__ import annotations
@@ -75,23 +77,18 @@ RENDER_CONTRACT = {
     "brightness": "low",
 }
 
-# Capture-path contract. 撮影しない (no photography): the on-glass AI recognizes
-# the page and sends its reading as TEXT — no photo is taken, so there is no
-# flash and no shutter. Listening records audio via the microphone, silently.
-# privacy_led is hardware-enforced (steady recording indicator, not a flash) and
-# is never server-controllable; it lights whenever the camera is active — i.e.
-# 視認＝認識＝カメラON＝LED点灯. The 3-phase flow therefore keeps the reading
-# phase short; after finalize-reading the camera is closed, so the LED is dark
-# for the whole answer and review phases (led_off_during_review).
+# Capture-path contract for the real-device Android relay. The relay calls
+# CXR-L takePhoto and uploads the original image. Privacy LED, shutter sound,
+# flash and capture indicators are hardware/firmware controlled; the application
+# never disables or bypasses them and must verify their behavior physically.
 CAPTURE_CONTRACT = {
-    "shutter_sound": False,
-    "flash": "off",                # no photographic flash/torch on capture
-    "capture_tone": False,         # silent capture (reinforces shutter_sound)
-    "camera_path": "cxr-s/camera2",
-    # Listening recording is silent: no start/stop tones (microphone, not camera).
+    "mode": "photograph",
+    "shutter_sound": "device_controlled",
+    "flash": "device_controlled",
+    "capture_tone": "device_controlled",
+    "camera_path": "cxr-l/takePhoto",
     "audio_record": {"start_tone": False, "stop_tone": False, "silent": True},
     "privacy_led": {"state": "on_while_camera_active", "tamper": "forbidden"},
-    # Review/answer phases run with the camera closed → LED off (点灯時間最小化).
     "led_off_during_review": True,
 }
 
@@ -209,7 +206,7 @@ def build_input_contract() -> dict:
 def build_capture_ack(
     *, page_number: int | None = None, question_id: int | None = None
 ) -> dict:
-    """Silent, no-flash capture confirmation: one short HUD line, ~2 s."""
+    """Short HUD confirmation after a capture callback, with no audio directive."""
     if page_number is not None:
         label = f"P{page_number:02d}"
     elif question_id is not None:
