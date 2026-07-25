@@ -16,8 +16,14 @@ public final class PressGestureInterpreter {
 
     private final long longPressMillis;
     private final long doublePressMillis;
+    private final long customViewArbitrationMillis;
     private long downAt = -1;
     private long pendingShortAt = -1;
+    private long aiAssistDeduplicateUntil = -1;
+    private long aiAssistActiveUntil = -1;
+    private long suppressCustomViewUntil = -1;
+    private boolean suppressCurrentPress;
+    private boolean pendingCustomViewExit;
 
     public PressGestureInterpreter(long longPressMillis, long doublePressMillis) {
         if (longPressMillis <= 0 || doublePressMillis <= 0) {
@@ -25,9 +31,16 @@ public final class PressGestureInterpreter {
         }
         this.longPressMillis = longPressMillis;
         this.doublePressMillis = doublePressMillis;
+        customViewArbitrationMillis = longPressMillis + doublePressMillis;
     }
 
     public synchronized void onDown(long nowMillis) {
+        if (nowMillis <= aiAssistDeduplicateUntil) {
+            suppressCurrentPress = true;
+            downAt = -1;
+            return;
+        }
+        suppressCurrentPress = false;
         downAt = nowMillis;
     }
 
@@ -36,6 +49,10 @@ public final class PressGestureInterpreter {
      * until {@link #flush(long)} proves that no second short press followed.
      */
     public synchronized Action onUp(long nowMillis) {
+        if (suppressCurrentPress) {
+            suppressCurrentPress = false;
+            return null;
+        }
         if (downAt < 0) {
             return null;
         }
@@ -43,13 +60,16 @@ public final class PressGestureInterpreter {
         downAt = -1;
         if (duration >= longPressMillis) {
             pendingShortAt = -1;
+            pendingCustomViewExit = false;
             return Action.LONG;
         }
         if (pendingShortAt >= 0 && nowMillis - pendingShortAt <= doublePressMillis) {
             pendingShortAt = -1;
+            pendingCustomViewExit = false;
             return Action.DOUBLE_SHORT;
         }
         pendingShortAt = nowMillis;
+        pendingCustomViewExit = false;
         return null;
     }
 
@@ -60,15 +80,87 @@ public final class PressGestureInterpreter {
         if (downAt >= 0) {
             return null;
         }
-        if (pendingShortAt >= 0 && nowMillis - pendingShortAt >= doublePressMillis) {
+        long requiredDelay = pendingCustomViewExit
+                ? customViewArbitrationMillis
+                : doublePressMillis;
+        if (pendingShortAt >= 0 && nowMillis - pendingShortAt >= requiredDelay) {
             pendingShortAt = -1;
+            pendingCustomViewExit = false;
             return Action.SHORT;
         }
         return null;
     }
 
+    /**
+     * Queues the standalone signal emitted when a user closes a CustomView.
+     *
+     * <p>Some Global Hi Rokid builds close the CustomView without delivering
+     * a matching key-up event. Dispatch is delayed until {@link #flush(long)}
+     * so an AI-assist-start callback from the same long press can take
+     * precedence without first triggering the short action.</p>
+     */
+    public synchronized Action onCustomViewExit(long nowMillis) {
+        if (nowMillis <= suppressCustomViewUntil) {
+            return null;
+        }
+        downAt = -1;
+        suppressCurrentPress = false;
+        if (pendingShortAt < 0) {
+            pendingShortAt = nowMillis;
+        }
+        pendingCustomViewExit = true;
+        return null;
+    }
+
+    /**
+     * Treats the SDK's AI-assist-start event as the glasses long action.
+     * The CustomView close caused by the same long press is coalesced.
+     */
+    public synchronized Action onAiAssistStart(long nowMillis) {
+        if (nowMillis <= aiAssistDeduplicateUntil
+                || nowMillis <= aiAssistActiveUntil) {
+            return null;
+        }
+        aiAssistDeduplicateUntil = nowMillis + doublePressMillis;
+        aiAssistActiveUntil = nowMillis + customViewArbitrationMillis;
+        suppressCustomViewUntil = Math.max(
+                suppressCustomViewUntil,
+                aiAssistActiveUntil);
+        downAt = -1;
+        pendingShortAt = -1;
+        pendingCustomViewExit = false;
+        suppressCurrentPress = false;
+        return Action.LONG;
+    }
+
+    public synchronized void onAiAssistExit(long nowMillis) {
+        if (nowMillis <= aiAssistActiveUntil) {
+            suppressCustomViewUntil = Math.max(
+                    suppressCustomViewUntil,
+                    nowMillis + doublePressMillis);
+        }
+        aiAssistActiveUntil = -1;
+    }
+
+    /**
+     * Cancels only the close-derived short action when the absence of a
+     * replacement view proves that the glasses navigated to the system menu.
+     */
+    public synchronized void cancelPendingCustomViewExit() {
+        if (!pendingCustomViewExit) {
+            return;
+        }
+        pendingShortAt = -1;
+        pendingCustomViewExit = false;
+    }
+
     public synchronized void cancel() {
         downAt = -1;
         pendingShortAt = -1;
+        aiAssistDeduplicateUntil = -1;
+        aiAssistActiveUntil = -1;
+        suppressCustomViewUntil = -1;
+        suppressCurrentPress = false;
+        pendingCustomViewExit = false;
     }
 }

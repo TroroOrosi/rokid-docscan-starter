@@ -16,8 +16,9 @@
 | Global Hi Rokid version / versionCode | |
 | Rokid Glasses model | |
 | YodaOS build | |
-| APK commit SHA / version | |
+| APK commit SHA / client version（期待値 `0.2.0`） | |
 | サーバー commit SHA / APP・API version | |
+| Glasses View contract（期待値 `1.8.0`） | |
 | Analyzer / model | |
 | Solver / model | |
 | PC IPv4 / network profile | |
@@ -58,28 +59,79 @@ adb shell dumpsys package com.rokid.sprite.global.aiapp |
 adb logcat -v threadtime -s DocScanRokid:*
 ```
 
-## D. AIキー入力
+## D. グラス入力
 
-公開AIDLの `onAiKeyDown` / `onAiKeyUp` を確認します。旧KeyCode表や全タッチ
-ジェスチャを前提にしません。
+公開CXR-Lで受信できるuser CustomView closeと`AI-assist-start`を確認します。
+専用シャッターボタンの入力イベントや全タッチジェスチャは前提にしません。
 
-- [ ] 短押し1回で撮影が1回だけ始まる。
-- [ ] 短押し2回で直前ページが同じ `page_index` に置換される。
-- [ ] 1.2秒以上の長押しで読取完了へ進む。
-- [ ] 閲覧中の短押し/短押し2回で前後へ移動する。
-- [ ] 閲覧中の長押しで終了し、新規文書へ戻る。
-- [ ] スマホ画面ボタンでも同じ処理を実行できる。
+- [ ] `READING` で最初のユーザータップによりCustomViewが閉じると、スマホログに
+  `source=user CustomView close` が残り、`AIMING` の照準が表示される。
+- [ ] 最初のタップ後は `takePhoto` が0回のままで、自動撮影されない。
+- [ ] `AIMING` の短押しまたは2回短押しは準備を取り消して戻り、`takePhoto`を発行しない。
+- [ ] `AIMING` で照準を確認した後の長押しだけが1.5秒静止待ちを開始する。
+- [ ] 現在世代の静止案内open callbackより前は1.5秒timerを開始せず、open errorまたは
+  3秒のACK timeoutでは`takePhoto`を0回のまま準備を取り消し、そのcallback epochを
+  fenceする。
+- [ ] ACK fault/timeout後は新しいCustomViewを要求せず、「Hi Rokid認可・再接続」を
+  完了した後の新しいcallback epochでだけ再開する。
+- [ ] 1.5秒待ちの間も `takePhoto` は0回で、満了後に
+  `takePhoto(1920, 1080, 80)` が1回だけ発行される。
+- [ ] `STABILIZING`中は短押し、2回短押し、長押しのどれでも静止待ちを取り消し、
+  旧timer満了後も`takePhoto`は0回である。
+- [ ] リレー自身がHUD更新のために行うclose + openは確認済みcallback世代内で識別され、
+  ユーザータップとして処理されない。
+- [ ] 同じ物理操作由来のuser CustomView closeと`AI-assist-start`が近接配送されても
+  debounceされ、撮影・登録・読取完了が重複しない。
+- [ ] 同じCustomView世代のclose callbackが重複しても、入力は1回だけ処理される。
+- [ ] ダブルタップで標準メニューへ戻り`AI-exit`が届くと、現在のDocScan画面が
+  自動再表示される。メニュー遷移のcloseは入力として破棄され、復帰だけでは
+  `takePhoto`、写真登録、読取完了を発行しない。
+- [ ] 通常のCustomView openに伴う`AI-exit`は後続open callbackで復帰予約を取り消し、
+  close + openを余分に繰り返さない。
+- [ ] 復帰timerとopen callbackが競合しても、remote CustomViewがopenなら新しい世代を
+  要求せず現在表示を維持する。
+- [ ] `CAPTURE_REVIEW` の短押しまたは2回短押しは同じ `page_index` の `AIMING` を
+  表示するだけで、
+  その場では `takePhoto` を発行しない。
+- [ ] 同ページ再撮影準備後の長押しで、1.5秒待ち後に `takePhoto` が1回だけ発行される。
+- [ ] `CAPTURE_REVIEW` のタッチパッド長押しが
+  `source=AI-assist-start -> LONG` と記録され、未登録写真を1回だけ登録する。
+- [ ] 登録成功後にpending削除を失敗させても、再起動後に同じJPEGが未登録写真として
+  復活しない。
+- [ ] `READING` の長押しで読取完了へ進む。
+- [ ] `REVIEW` のタップで次へ移動し、長押しで終了して新規文書へ戻る。
+- [ ] ファームウェアが2回の入力を`DOUBLE_SHORT`としてアプリへ配送する場合だけ、
+  読取中は前ページ再撮影準備、
+  撮影確認中は同ページ再撮影準備、閲覧中は前へ移動し、意図しない撮影をしない。
+- [ ] 専用シャッターボタンを押してもイベントを受信できるとは案内しない。
+- [ ] スマホ画面に「この写真を登録」「同じページを撮り直す」
+  「未登録写真を破棄」のフォールバック操作が表示され、それぞれ実行できる。
 
 ## E. 写真とOCR
 
-- [ ] `takePhoto(1440, 1920, 85)` がtrueを返す。
+- [ ] 短押し→長押しの二段階操作と1.5秒静止待ちを経た
+  `takePhoto(1920, 1080, 80)` がtrueを返す。
 - [ ] callback到着前の連続操作で2件目の`takePhoto`が発行されない。
 - [ ] `onImageReceived` のJPEGが0バイトでない。
-- [ ] `/scan-status.pages[n].has_image` がtrueになる。
+- [ ] 撮影後は `CAPTURE_REVIEW` になり、写真が「未登録」と表示される。
+- [ ] 初回撮影前に文書自体は作成されるが、未登録の間は対象 `page_index` が
+  `/scan-status.page_indexes` に増えず、次ページ番号も変化しない。
+- [ ] 長押しまたは「この写真を登録」で登録成功した後にだけ
+  `/scan-status.pages[n].has_image` がtrueになる。
+- [ ] 登録通信が失敗した場合は未登録写真を保持し、対象ページと次ページ番号を
+  進めず再試行できる。
 - [ ] 用紙の問題番号、本文、選択肢が端末OCRへ入る。
-- [ ] 向きが不正な場合、0/90/180/270°設定で修正できる。
-- [ ] ブレたページをAIキー2回押しで置換できる。
-- [ ] 端末OCRが空でも元写真は保存される。
+- [ ] 写真回転の初期値が、検証済み実機に合わせた90°である。
+- [ ] スマホで0/90/180/270°を選び「同じページを撮り直す」と、選択した回転が
+  次の再撮影とOCRに適用され、現在の未登録写真自体は変更されない。
+- [ ] 用紙まで40〜60cm離し、用紙中心を照準の「＋」へ合わせ、`AIMING`の長押し後1.5秒から
+  callbackまで静止して撮影できる。
+- [ ] 撮影後プレビューで用紙の四隅、文字の輪郭、ブレを確認できる。
+- [ ] ブレや欠けがある未登録写真は、撮影確認中の短押しまたは2回短押しで
+  同ページ再撮影を準備し、照準確認後の長押しで撮り直せる。
+- [ ] 端末OCRが0文字なら警告され、自動登録されない。
+- [ ] OCRが0文字でも、警告を確認して明示登録すると元写真が保存される。
+- [ ] 「未登録写真を破棄」でサーバーへ送信せず、同じ次ページ番号の読取へ戻る。
 - [ ] 画像対応Analyzerが空OCRを回復できる。
 - [ ] Analyzer未設定かつOCR空の場合、`finalize-reading` 後も読取状態を保つ。
 - [ ] 同じページ番号を再撮影すると置換され、再度読取完了できる。
@@ -90,6 +142,12 @@ adb logcat -v threadtime -s DocScanRokid:*
 - [ ] `takePhoto` のBinder応答だけを失敗させた場合、受理不明として直ちに撮影ブロックされる。
 - [ ] 再接続後、旧bindから遅延配送した画像callbackが新しい撮影を完了せず、
   旧JPEGもアップロードされない。
+
+カメラは固定焦点です。Rokid公称の被写界深度は34cm〜∞ですが、34cmは限界値のため
+40〜60cmを運用目安にします。公開CXR-Lにライブプレビュー、AF制御、合焦状態はなく、
+照準の「＋」もディスプレイFOVとカメラFOVが異なるため正確な撮影境界ではありません。
+構図と四隅は撮影後プレビューで判定します。`takePhoto(4032, 3024, 80)` は実機でJPEG
+callbackがBinder上限を超え、callbackなしになった既知NGです。通常試験では使用しません。
 
 撮影ガードとcallback epochを再現性高く調べる場合は、debug APKへAndroid Studioの
 デバッガをattachし、`RokidGlobalLink.CallbackSet.onImageReceived` の
@@ -127,6 +185,10 @@ threadだけで停止したまま、次を確認します。
 - [ ] 黒背景・緑文字で表示される。
 - [ ] 1レスポンスあたり最大3行である。
 - [ ] `customViewUpdate`だけに依存せず、close + openで更新される。
+- [ ] 撮影後の縮小プレビューが正しい向きでスマホとグラスのCustomViewへ表示される。
+- [ ] `AIMING` の「＋」が用紙中心合わせの目安として表示され、正確な撮影境界や
+  合焦表示とは案内されない。
+- [ ] 撮影前ライブ映像とAF/合焦状態を表示可能とは案内せず、CXR-L非対応として扱う。
 - [ ] 長文は次の表示へ送れる。
 - [ ] 日本語、記号、引用符、改行がJSON破損せず表示される。
 - [ ] HUD更新で白背景フレームをアプリが生成しない。
@@ -148,6 +210,9 @@ threadだけで停止したまま、次を確認します。
 ## I. 中断復帰と連続運用
 
 - [ ] 2ページ目以降でアプリを中断し、再認可後に次ページ番号から再開する。
+- [ ] `CAPTURE_REVIEW` 中にアプリを終了・再起動すると、同じ未登録写真、OCR文字数、
+  `page_index`、回転が復元され、自動登録されない。
+- [ ] 再起動や再接続だけでは `takePhoto` が発行されず、自動撮影されない。
 - [ ] `/finalize` 後・session作成前の中断から自動復帰する。
 - [ ] session作成後・`finalize-reading`前の中断から自動復帰する。
 - [ ] 同じ長押しが二重配送されても文書/問題/課金呼び出しが重複しない。
@@ -160,7 +225,7 @@ threadだけで停止したまま、次を確認します。
 |---|---|---|
 | Android build / unit test | | |
 | Hi Rokid auth / AIDL | | |
-| AIキー入力 | | |
+| グラス入力 / event source | | |
 | 写真 / OCR | | |
 | Analyzer / Solver | | |
 | HUD | | |

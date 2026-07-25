@@ -7,6 +7,7 @@ import android.content.Intent;
 import android.content.ServiceConnection;
 import android.content.pm.PackageManager;
 import android.os.IBinder;
+import android.os.SystemClock;
 import android.util.Log;
 
 import com.rokid.sprite.aiapp.externalapp.IAiEventCallback;
@@ -16,7 +17,9 @@ import com.rokid.sprite.aiapp.externalapp.IImageStreamCallback;
 import com.rokid.sprite.aiapp.externalapp.IMediaStreamService;
 
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
@@ -37,6 +40,18 @@ public final class RokidGlobalLink implements AutoCloseable {
         void onAiPressDown();
 
         void onAiPressUp();
+
+        void onAiExit();
+
+        void onCustomViewClosedByUser();
+
+        void onCustomViewAvailable(long generation, String purpose);
+
+        void onCustomViewFailed(
+                long generation,
+                String purpose,
+                String message,
+                Throwable cause);
 
         void onPhoto(byte[] jpeg);
 
@@ -63,6 +78,8 @@ public final class RokidGlobalLink implements AutoCloseable {
     private static final String EXTRA_AUTH_TOKEN = "auth_token";
     private static final String EXTRA_AUTH_PACKAGE = "auth_package";
     private static final int AUTH_SUCCESS = 2001;
+    private static final long PROGRAMMATIC_CLOSE_TTL_MILLIS = 2000;
+    public static final long NO_VIEW_GENERATION = -1;
 
     private final Context context;
     private final Listener listener;
@@ -70,10 +87,16 @@ public final class RokidGlobalLink implements AutoCloseable {
     private final CaptureLinkCoordinator captureLinks;
     private final LinkEpoch bindingEpochs = new LinkEpoch();
     private final LinkEpoch callbackEpochs = new LinkEpoch();
+    private final CustomViewCloseTracker customViewCloses =
+            new CustomViewCloseTracker(PROGRAMMATIC_CLOSE_TTL_MILLIS);
+    private final CustomViewOpenTracker customViewOpens = new CustomViewOpenTracker();
+    private final Map<Long, String> viewPurposes = new HashMap<>();
     private volatile IMediaStreamService service;
     private volatile boolean bound;
     private volatile boolean imageCallbackRegistered;
     private volatile boolean viewOpen;
+    private volatile long viewGeneration;
+    private volatile String viewPurpose = "none";
     private volatile BindingConnection connection;
     private volatile CallbackSet callbacks;
 
@@ -192,23 +215,146 @@ public final class RokidGlobalLink implements AutoCloseable {
         }
     }
 
-    public synchronized void showHud(List<String> lines) {
+    public synchronized long showHud(List<String> lines) {
         IMediaStreamService current = service;
         if (current == null) {
-            return;
+            return NO_VIEW_GENERATION;
         }
-        String layout = HudLayout.fromLines(lines);
         try {
-            // client-l 1.0.1 / current Global Hi Rokid acknowledges update but
-            // does not always redraw. Re-open on a black background is the
-            // verified fallback. No white frame is emitted by this app.
-            if (viewOpen || current.isCustomViewOpened()) {
-                current.closeCustomView();
-            }
-            viewOpen = current.openCustomView(layout);
+            return replaceCustomView(current, HudLayout.fromLines(lines), "hud");
         } catch (Exception error) {
             listener.onError("HUD更新に失敗しました", error);
+            return NO_VIEW_GENERATION;
         }
+    }
+
+    /**
+     * Returns the service's current CustomView state for recovery decisions.
+     * A false result is fail-closed: callers may attempt one normal reopen,
+     * whose own request and acknowledgement are still generation-gated.
+     */
+    public synchronized boolean isCustomViewActuallyOpen() {
+        IMediaStreamService current = service;
+        if (current == null) {
+            return false;
+        }
+        try {
+            return current.isCustomViewOpened();
+        } catch (Exception error) {
+            Log.w(TAG, "could not query current CustomView state", error);
+            return false;
+        }
+    }
+
+    public synchronized long showCaptureAiming(
+            int pageNumber,
+            boolean retake,
+            boolean stabilizing
+    ) {
+        IMediaStreamService current = service;
+        if (current == null) {
+            return NO_VIEW_GENERATION;
+        }
+        try {
+            return replaceCustomView(
+                    current,
+                    HudLayout.fromCaptureAiming(pageNumber, retake, stabilizing),
+                    stabilizing ? "capture-stabilizing" : "capture-aiming");
+        } catch (Exception error) {
+            listener.onError("撮影ガイドの表示に失敗しました", error);
+            return NO_VIEW_GENERATION;
+        }
+    }
+
+    public synchronized long showCaptureReview(
+            byte[] jpeg,
+            int rotationDegrees,
+            List<String> lines
+    ) {
+        IMediaStreamService current = service;
+        if (current == null) {
+            return NO_VIEW_GENERATION;
+        }
+        try {
+            if (current.isCustomViewOpened()) {
+                closeCustomViewProgrammatically(current);
+            }
+            String icons = GlassesCapturePreview.iconJson(jpeg, rotationDegrees);
+            if (!current.setIcons(icons)) {
+                throw new IllegalStateException("setIcons returned false");
+            }
+            long generation = requestCustomView(
+                    current,
+                    HudLayout.fromCaptureReview(GlassesCapturePreview.ICON_NAME, lines),
+                    "capture-review");
+            Log.i(
+                    TAG,
+                    "capture review preview requested on glasses generation="
+                            + generation);
+            return generation;
+        } catch (Exception error) {
+            Log.w(TAG, "capture review image failed; falling back to text HUD", error);
+            long fallbackGeneration = NO_VIEW_GENERATION;
+            try {
+                fallbackGeneration = replaceCustomView(
+                        current,
+                        HudLayout.fromLines(lines),
+                        "capture-review-text");
+            } catch (Exception fallbackError) {
+                error.addSuppressed(fallbackError);
+            }
+            listener.onError(
+                    "グラスに撮影プレビューを表示できないため文字案内へ切り替えました",
+                    error);
+            return fallbackGeneration;
+        }
+    }
+
+    private long replaceCustomView(
+            IMediaStreamService current,
+            String layout,
+            String purpose
+    ) throws Exception {
+        // client-l 1.0.1 / current Global Hi Rokid acknowledges update but
+        // does not always redraw. Re-open is the verified fallback.
+        if (current.isCustomViewOpened()) {
+            closeCustomViewProgrammatically(current);
+        }
+        return requestCustomView(current, layout, purpose);
+    }
+
+    private long requestCustomView(
+            IMediaStreamService current,
+            String layout,
+            String purpose
+    ) throws Exception {
+        if (customViewOpens.isFaulted()) {
+            throw new IllegalStateException(
+                    "CustomView callbacks are fenced; Hi Rokid再認可・再接続が必要です");
+        }
+        long generation = customViewOpens.requestOpen();
+        viewGeneration = generation;
+        viewPurpose = purpose;
+        viewOpen = false;
+        viewPurposes.put(generation, purpose);
+        boolean accepted;
+        try {
+            accepted = current.openCustomView(layout);
+        } catch (Exception error) {
+            customViewOpens.rejectOpen(generation);
+            viewPurposes.remove(generation);
+            throw error;
+        }
+        if (!accepted) {
+            customViewOpens.rejectOpen(generation);
+            viewPurposes.remove(generation);
+            throw new IllegalStateException("openCustomView returned false");
+        }
+        Log.i(
+                TAG,
+                "custom view requested generation=" + generation
+                        + " purpose=" + purpose);
+        return generation;
     }
 
     public synchronized void closeHud() {
@@ -217,11 +363,14 @@ public final class RokidGlobalLink implements AutoCloseable {
             return;
         }
         try {
-            current.closeCustomView();
+            if (current.isCustomViewOpened()) {
+                closeCustomViewProgrammatically(current);
+            }
         } catch (Exception error) {
             Log.w(TAG, "closeCustomView failed", error);
         } finally {
             viewOpen = false;
+            customViewOpens.onCurrentClosed();
         }
     }
 
@@ -271,17 +420,70 @@ public final class RokidGlobalLink implements AutoCloseable {
             aiEvents = new IAiEventCallback.Stub() {
                 @Override
                 public void onAiKeyDown() {
-                    dispatchCallback(epoch, "AI-key-down", listener::onAiPressDown);
+                    dispatchCallback(epoch, "AI-key-down", () -> {
+                        Log.i(
+                                TAG,
+                                "AI-key-down epoch=" + epoch
+                                        + " elapsed=" + SystemClock.elapsedRealtime()
+                                        + " viewGeneration=" + viewGeneration
+                                        + " purpose=" + viewPurpose);
+                        IMediaStreamService current = service;
+                        if (current == null) {
+                            listener.onError(
+                                    "AI長押しを安全に終了できないため操作を中止しました",
+                                    null);
+                            return;
+                        }
+                        final boolean exitAccepted;
+                        try {
+                            exitAccepted = current.sendExit(false);
+                            Log.i(
+                                    TAG,
+                                    "sendExit(false) before LONG dispatch returned "
+                                            + exitAccepted);
+                        } catch (Exception error) {
+                            Log.w(TAG, "sendExit(false) failed", error);
+                            listener.onError(
+                                    "AI長押しの終了確認に失敗したため操作を中止しました",
+                                    error);
+                            return;
+                        }
+                        if (!exitAccepted) {
+                            listener.onError(
+                                    "AI長押しの終了が拒否されたため操作を中止しました",
+                                    null);
+                            return;
+                        }
+                        // Match client-l 1.0.1's ExternalAppClient ordering:
+                        // leave AI assist before the app mutates/reopens its HUD.
+                        listener.onAiPressDown();
+                    });
                 }
 
                 @Override
                 public void onAiKeyUp() {
-                    dispatchCallback(epoch, "AI-key-up", listener::onAiPressUp);
+                    dispatchCallback(epoch, "AI-key-up", () -> {
+                        Log.i(
+                                TAG,
+                                "AI-key-up epoch=" + epoch
+                                        + " elapsed=" + SystemClock.elapsedRealtime()
+                                        + " viewGeneration=" + viewGeneration
+                                        + " purpose=" + viewPurpose);
+                        listener.onAiPressUp();
+                    });
                 }
 
                 @Override
                 public void onAiExit() {
-                    dispatchCallback(epoch, "AI-exit", listener::onAiPressUp);
+                    dispatchCallback(epoch, "AI-exit", () -> {
+                        Log.i(
+                                TAG,
+                                "AI-exit epoch=" + epoch
+                                        + " elapsed=" + SystemClock.elapsedRealtime()
+                                        + " viewGeneration=" + viewGeneration
+                                        + " purpose=" + viewPurpose);
+                        listener.onAiExit();
+                    });
                 }
 
                 @Override
@@ -292,21 +494,34 @@ public final class RokidGlobalLink implements AutoCloseable {
             customView = new ICustomViewCallback.Stub() {
                 @Override
                 public void onCustomViewOpened() {
-                    dispatchCallback(epoch, "custom-view-open", () -> viewOpen = true);
+                    dispatchCallback(
+                            epoch,
+                            "custom-view-open",
+                            () -> handleCustomViewOpened(epoch));
                 }
 
                 @Override
                 public void onCustomViewUpdated() {
-                    dispatchCallback(epoch, "custom-view-update", () -> viewOpen = true);
+                    dispatchCallback(
+                            epoch,
+                            "custom-view-update",
+                            () -> handleCustomViewUpdated(epoch));
                 }
 
                 @Override
                 public void onCustomViewClosed() {
-                    dispatchCallback(epoch, "custom-view-close", () -> viewOpen = false);
+                    dispatchCallback(
+                            epoch,
+                            "custom-view-close",
+                            () -> handleCustomViewClosed(epoch));
                 }
 
                 @Override
                 public void onCustomViewIconsSent() {
+                    dispatchCallback(
+                            epoch,
+                            "custom-view-icons",
+                            () -> Log.i(TAG, "custom view icons sent to glasses"));
                 }
 
                 @Override
@@ -314,12 +529,225 @@ public final class RokidGlobalLink implements AutoCloseable {
                     dispatchCallback(
                             epoch,
                             "custom-view-error",
-                            () -> listener.onError(
-                                    "HUDエラー " + code + ": " + message,
-                                    null));
+                            () -> handleCustomViewError(code, message));
                 }
             };
         }
+    }
+
+    private void closeCustomViewProgrammatically(IMediaStreamService current)
+            throws Exception {
+        customViewCloses.expectProgrammaticClose(
+                SystemClock.elapsedRealtime(),
+                viewGeneration);
+        final boolean accepted;
+        try {
+            accepted = current.closeCustomView();
+        } catch (Exception error) {
+            customViewCloses.cancelLatestExpectation();
+            customViewOpens.fault();
+            throw error;
+        }
+        if (!accepted) {
+            customViewCloses.cancelLatestExpectation();
+            customViewOpens.fault();
+            throw new IllegalStateException("closeCustomView returned false");
+        }
+        viewOpen = false;
+        customViewOpens.onCurrentClosed();
+    }
+
+    private synchronized void handleCustomViewOpened(long epoch) {
+        if (customViewOpens.isFaulted()) {
+            Log.i(TAG, "ignored CustomView open from a fenced callback epoch=" + epoch);
+            return;
+        }
+        long openedGeneration = customViewOpens.onOpened();
+        if (openedGeneration == CustomViewOpenTracker.NONE) {
+            Log.i(TAG, "unexpected CustomView open callback epoch=" + epoch);
+            return;
+        }
+        String purpose = viewPurposes.remove(openedGeneration);
+        if (purpose == null) {
+            purpose = "unknown";
+        }
+        if (!customViewOpens.isCurrentAcknowledged(openedGeneration)) {
+            Log.i(
+                    TAG,
+                    "stale custom view open acknowledged epoch=" + epoch
+                            + " generation=" + openedGeneration
+                            + " purpose=" + purpose
+                            + " currentGeneration=" + viewGeneration);
+            return;
+        }
+        IMediaStreamService current = service;
+        boolean remoteOpen;
+        try {
+            remoteOpen = current != null && current.isCustomViewOpened();
+        } catch (Exception error) {
+            customViewOpens.onError();
+            notifyCurrentViewFailed(
+                    openedGeneration,
+                    purpose,
+                    "CustomView open acknowledgement could not be verified",
+                    error);
+            return;
+        }
+        if (!remoteOpen) {
+            customViewOpens.onError();
+            notifyCurrentViewFailed(
+                    openedGeneration,
+                    purpose,
+                    "CustomView closed before its open acknowledgement",
+                    null);
+            return;
+        }
+        viewOpen = true;
+        viewPurpose = purpose;
+        Log.i(
+                TAG,
+                "custom view opened on glasses epoch=" + epoch
+                        + " generation=" + openedGeneration
+                        + " purpose=" + purpose);
+        listener.onCustomViewAvailable(openedGeneration, purpose);
+    }
+
+    private synchronized void handleCustomViewUpdated(long epoch) {
+        if (customViewOpens.isFaulted()) {
+            Log.i(TAG, "ignored CustomView update from a fenced callback epoch=" + epoch);
+            return;
+        }
+        if (!customViewOpens.isCurrentAcknowledged()) {
+            Log.i(
+                    TAG,
+                    "CustomView update ignored before current open acknowledgement epoch="
+                            + epoch);
+            return;
+        }
+        viewOpen = true;
+        Log.i(
+                TAG,
+                "custom view updated on glasses epoch=" + epoch
+                        + " generation=" + viewGeneration
+                        + " purpose=" + viewPurpose);
+        listener.onCustomViewAvailable(viewGeneration, viewPurpose);
+    }
+
+    private synchronized void handleCustomViewClosed(long epoch) {
+        if (customViewOpens.isFaulted()) {
+            Log.i(TAG, "ignored CustomView close from a fenced callback epoch=" + epoch);
+            return;
+        }
+        long now = SystemClock.elapsedRealtime();
+        boolean localViewWasOpen =
+                viewOpen && customViewOpens.isCurrentAcknowledged();
+        boolean remoteStillOpen = false;
+        IMediaStreamService current = service;
+        if (current != null) {
+            try {
+                remoteStillOpen = current.isCustomViewOpened();
+            } catch (Exception error) {
+                Log.w(TAG, "could not query CustomView after close callback", error);
+                viewOpen = false;
+                customViewOpens.onCurrentClosed();
+                customViewCloses.reset();
+                notifyCurrentViewFailed(
+                        viewGeneration,
+                        viewPurpose,
+                        "グラス画面の終了状態を確認できなかったため操作を受け付けません",
+                        error);
+                return;
+            }
+        }
+        boolean userInitiated = customViewCloses.onClosed(
+                now,
+                viewGeneration,
+                remoteStillOpen,
+                localViewWasOpen);
+        viewOpen = remoteStillOpen;
+        if (!remoteStillOpen) {
+            customViewOpens.onCurrentClosed();
+        }
+        Log.i(
+                TAG,
+                "custom view closed on glasses epoch=" + epoch
+                        + " elapsed=" + now
+                        + " generation=" + viewGeneration
+                        + " purpose=" + viewPurpose
+                        + " userInitiated=" + userInitiated
+                        + " remoteStillOpen=" + remoteStillOpen);
+        if (userInitiated && !remoteStillOpen) {
+            listener.onCustomViewClosedByUser();
+        }
+    }
+
+    private synchronized void handleCustomViewError(int code, String message) {
+        if (customViewOpens.isFaulted()) {
+            Log.i(TAG, "ignored CustomView error from a fenced callback epoch");
+            return;
+        }
+        long failedGeneration = customViewOpens.onError();
+        if (failedGeneration == CustomViewOpenTracker.NONE) {
+            Log.w(TAG, "CustomView error without a tracked view: " + code + ": " + message);
+            return;
+        }
+        String failedPurpose = viewPurposes.remove(failedGeneration);
+        if (failedPurpose == null) {
+            failedPurpose = failedGeneration == viewGeneration
+                    ? viewPurpose
+                    : "unknown";
+        }
+        if (failedGeneration != viewGeneration) {
+            Log.w(
+                    TAG,
+                    "stale CustomView error generation=" + failedGeneration
+                            + " purpose=" + failedPurpose
+                            + " currentGeneration=" + viewGeneration
+                            + ": " + code + ": " + message);
+            return;
+        }
+        notifyCurrentViewFailed(
+                failedGeneration,
+                failedPurpose,
+                "HUDエラー " + code + ": " + message,
+                null);
+    }
+
+    private void notifyCurrentViewFailed(
+            long generation,
+            String purpose,
+            String message,
+            Throwable cause
+    ) {
+        viewOpen = false;
+        viewPurpose = "error";
+        customViewCloses.reset();
+        customViewOpens.fault();
+        viewPurposes.clear();
+        listener.onCustomViewFailed(generation, purpose, message, cause);
+        listener.onError(message, cause);
+    }
+
+    /**
+     * Retires an ambiguous callback stream after an acknowledgement timeout.
+     * No later view request is accepted until a real service rebind installs
+     * fresh callback stubs.
+     */
+    public synchronized void fenceCustomViewEpoch(
+            long generation,
+            String reason
+    ) {
+        if (generation != viewGeneration || customViewOpens.isFaulted()) {
+            return;
+        }
+        viewOpen = false;
+        viewPurpose = "fenced";
+        customViewCloses.reset();
+        customViewOpens.fault();
+        viewPurposes.clear();
+        listener.onError(
+                reason + "。Hi Rokid認可・再接続が必要です",
+                null);
     }
 
     private final class BindingConnection implements ServiceConnection {
@@ -377,6 +805,10 @@ public final class RokidGlobalLink implements AutoCloseable {
                     callbacks = candidate;
                     imageCallbackRegistered = true;
                     viewOpen = false;
+                    viewPurpose = "none";
+                    customViewCloses.reset();
+                    customViewOpens.reset();
+                    viewPurposes.clear();
                     listener.onLinkConnected(true);
                     serviceBindingReset(glassesConnected);
                 }
@@ -410,6 +842,10 @@ public final class RokidGlobalLink implements AutoCloseable {
                 imageCallbackRegistered = false;
                 serviceBindingReset(false);
                 viewOpen = false;
+                viewPurpose = "none";
+                customViewCloses.reset();
+                customViewOpens.reset();
+                viewPurposes.clear();
                 failedCurrentBinding = true;
                 listener.onLinkConnected(false);
                 listener.onError("Rokidコールバック登録に失敗しました", error);
@@ -436,6 +872,10 @@ public final class RokidGlobalLink implements AutoCloseable {
             imageCallbackRegistered = false;
             serviceBindingReset(false);
             viewOpen = false;
+            viewPurpose = "none";
+            customViewCloses.reset();
+            customViewOpens.reset();
+            viewPurposes.clear();
             listener.onLinkConnected(false);
         }
     }
@@ -508,6 +948,10 @@ public final class RokidGlobalLink implements AutoCloseable {
             imageCallbackRegistered = false;
             serviceBindingReset(false);
             viewOpen = false;
+            viewPurpose = "none";
+            customViewCloses.reset();
+            customViewOpens.reset();
+            viewPurposes.clear();
         }
         if (current != null && registered != null) {
             unregisterCallbacks(current, registered);
