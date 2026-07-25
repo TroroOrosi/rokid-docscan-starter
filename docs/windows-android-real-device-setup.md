@@ -88,6 +88,21 @@ TLSリバースプロキシとBearer認証を必須にします。
 ## 4. Android APKをビルド・導入
 
 Android Studioで`android-relay`フォルダを開くか、PowerShellでビルドします。
+Windowsでは、実体のチェックアウトパスをASCII文字だけにしてください。OneDriveの
+`ドキュメント`など非ASCII文字を含むパスではAndroid Gradle Pluginが拒否し、チェックを
+無効化してもGradleのテストプロセスがテストクラスを読み込めません。該当する場合は
+ASCIIパスのworktreeを作成します。
+
+```powershell
+git worktree add C:\Users\Public\rokid-docscan-build HEAD
+cd C:\Users\Public\rokid-docscan-build\android-relay
+
+.\gradlew.bat testDebugUnitTest assembleDebug
+adb devices
+adb install -r .\app\build\outputs\apk\debug\app-debug.apk
+```
+
+すでにASCIIパスへチェックアウトしている場合は、そのまま`android-relay`で実行します。
 
 ```powershell
 cd android-relay
@@ -97,7 +112,9 @@ adb install -r .\app\build\outputs\apk\debug\app-debug.apk
 ```
 
 最初のビルドはGradle、Android依存、Rokid AAR、ML Kitモデルを取得するため
-インターネット接続が必要です。
+インターネット接続が必要です。`ANDROID_HOME`、`ANDROID_SDK_ROOT`、
+`local.properties`のいずれも未設定なら、Windows用スクリプトは標準の
+`%LOCALAPPDATA%\Android\Sdk`を自動検出します。
 
 ## 5. 初回接続
 

@@ -31,8 +31,22 @@ adb install -r .\app\build\outputs\apk\debug\app-debug.apk
 ```
 
 `gradlew.bat` uses `build-windows.ps1`, downloads Gradle 9.4.1 once, and verifies
-its pinned SHA-256 before execution. Android Studio can also open this directory
-as an independent project.
+its pinned SHA-256 before execution. If neither `ANDROID_HOME`,
+`ANDROID_SDK_ROOT`, nor `local.properties` is configured, the script uses the
+standard Android Studio SDK location under `%LOCALAPPDATA%\Android\Sdk` when it
+exists. Android Studio can also open this directory as an independent project.
+
+On Windows, the physical checkout path must contain ASCII characters only.
+Android Gradle Plugin rejects paths such as a localized OneDrive
+`ドキュメント` directory, and disabling its path check is not sufficient:
+Gradle test workers then fail to load the compiled test classes. Create an
+ASCII-only worktree when the main checkout is under a localized path:
+
+```powershell
+git worktree add C:\Users\Public\rokid-docscan-build HEAD
+cd C:\Users\Public\rokid-docscan-build\android-relay
+.\gradlew.bat testDebugUnitTest assembleDebug
+```
 
 ## Runtime requirements
 
