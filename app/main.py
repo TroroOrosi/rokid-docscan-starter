@@ -150,21 +150,28 @@ def _safe_audio_suffix(upload: UploadFile) -> str:
     return safe_audio_suffix(upload.filename, upload.content_type)
 
 
+def _oversized_image_error(img: Image.Image | None = None) -> HTTPException:
+    if img is not None:
+        img.close()
+    return HTTPException(
+        status_code=413,
+        detail="image dimensions too large (max 25 megapixels)",
+    )
+
+
 def _load_image(raw: bytes) -> Image.Image:
     img: Image.Image | None = None
     try:
         img = Image.open(io.BytesIO(raw))
         if img.width * img.height > _MAX_IMAGE_PIXELS:
-            img.close()
-            raise HTTPException(
-                status_code=413,
-                detail="image dimensions too large (max 25 megapixels)",
-            )
+            raise _oversized_image_error(img)
         img.load()
         return img
     except HTTPException:
         raise
-    except (UnidentifiedImageError, OSError, Image.DecompressionBombError):
+    except Image.DecompressionBombError:
+        raise _oversized_image_error(img)
+    except (UnidentifiedImageError, OSError):
         if img is not None:
             img.close()
         raise HTTPException(status_code=400, detail="invalid image upload")

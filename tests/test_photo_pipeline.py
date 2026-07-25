@@ -124,6 +124,19 @@ def test_photo_rejects_excessive_decoded_dimensions(client):
     )
 
 
+def test_photo_maps_pillow_decompression_bomb_to_payload_too_large(client):
+    document_id = _new_document(client)
+    response = client.post(
+        f"/v1/documents/{document_id}/pages",
+        data={"page_index": "0", "ocr_text": "問1"},
+        files={"image": ("bomb.png", _png_header(50_000, 50_000), "image/png")},
+    )
+    assert response.status_code == 413
+    assert response.json()["detail"] == (
+        "image dimensions too large (max 25 megapixels)"
+    )
+
+
 def test_finalize_persists_analyzer_ocr_for_photo(client, monkeypatch):
     import app.main as main
     from app.analyzers.base import AnalyzerResult

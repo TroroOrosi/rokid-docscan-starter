@@ -32,7 +32,7 @@ public final class RokidGlobalLink implements AutoCloseable {
     public interface Listener {
         void onLinkConnected(boolean connected);
 
-        void onGlassesConnected(boolean connected);
+        void onCaptureLinkStateChanged(boolean connected, CaptureLinkEvent event);
 
         void onAiPressDown();
 
@@ -67,6 +67,7 @@ public final class RokidGlobalLink implements AutoCloseable {
     private final Context context;
     private final Listener listener;
     private final AtomicBoolean photoInFlight = new AtomicBoolean();
+    private final CaptureLinkCoordinator captureLinks;
     private final LinkEpoch bindingEpochs = new LinkEpoch();
     private final LinkEpoch callbackEpochs = new LinkEpoch();
     private volatile IMediaStreamService service;
@@ -79,6 +80,9 @@ public final class RokidGlobalLink implements AutoCloseable {
     public RokidGlobalLink(Context context, Listener listener) {
         this.context = context.getApplicationContext();
         this.listener = listener;
+        captureLinks = new CaptureLinkCoordinator(
+                () -> photoInFlight.set(false),
+                listener::onCaptureLinkStateChanged);
     }
 
     public static boolean isGlobalHiRokidInstalled(Context context) {
@@ -231,20 +235,16 @@ public final class RokidGlobalLink implements AutoCloseable {
             deviceStatus = new IDeviceStatusCallback.Stub() {
                 @Override
                 public void onDeviceConnectChanged(boolean connected) {
-                    callbackEpochs.runIfActive(epoch, () -> {
-                        if (!connected) {
-                            // A real glasses disconnect terminates any
-                            // outstanding one-shot capture.
-                            photoInFlight.set(false);
-                        }
-                        listener.onGlassesConnected(connected);
-                    });
+                    dispatchCallback(
+                            epoch,
+                            "device-status",
+                            () -> glassesStatusChanged(connected));
                 }
             };
             imageStream = new IImageStreamCallback.Stub() {
                 @Override
                 public void onImageReceived(byte[] data) {
-                    callbackEpochs.runIfActive(epoch, () -> {
+                    dispatchCallback(epoch, "image", () -> {
                         if (!photoInFlight.compareAndSet(true, false)) {
                             return;
                         }
@@ -259,7 +259,7 @@ public final class RokidGlobalLink implements AutoCloseable {
 
                 @Override
                 public void onImageError(int code, String message) {
-                    callbackEpochs.runIfActive(epoch, () -> {
+                    dispatchCallback(epoch, "image-error", () -> {
                         if (!photoInFlight.compareAndSet(true, false)) {
                             return;
                         }
@@ -271,17 +271,17 @@ public final class RokidGlobalLink implements AutoCloseable {
             aiEvents = new IAiEventCallback.Stub() {
                 @Override
                 public void onAiKeyDown() {
-                    callbackEpochs.runIfActive(epoch, listener::onAiPressDown);
+                    dispatchCallback(epoch, "AI-key-down", listener::onAiPressDown);
                 }
 
                 @Override
                 public void onAiKeyUp() {
-                    callbackEpochs.runIfActive(epoch, listener::onAiPressUp);
+                    dispatchCallback(epoch, "AI-key-up", listener::onAiPressUp);
                 }
 
                 @Override
                 public void onAiExit() {
-                    callbackEpochs.runIfActive(epoch, listener::onAiPressUp);
+                    dispatchCallback(epoch, "AI-exit", listener::onAiPressUp);
                 }
 
                 @Override
@@ -292,17 +292,17 @@ public final class RokidGlobalLink implements AutoCloseable {
             customView = new ICustomViewCallback.Stub() {
                 @Override
                 public void onCustomViewOpened() {
-                    callbackEpochs.runIfActive(epoch, () -> viewOpen = true);
+                    dispatchCallback(epoch, "custom-view-open", () -> viewOpen = true);
                 }
 
                 @Override
                 public void onCustomViewUpdated() {
-                    callbackEpochs.runIfActive(epoch, () -> viewOpen = true);
+                    dispatchCallback(epoch, "custom-view-update", () -> viewOpen = true);
                 }
 
                 @Override
                 public void onCustomViewClosed() {
-                    callbackEpochs.runIfActive(epoch, () -> viewOpen = false);
+                    dispatchCallback(epoch, "custom-view-close", () -> viewOpen = false);
                 }
 
                 @Override
@@ -311,8 +311,9 @@ public final class RokidGlobalLink implements AutoCloseable {
 
                 @Override
                 public void onCustomViewError(int code, String message) {
-                    callbackEpochs.runIfActive(
+                    dispatchCallback(
                             epoch,
+                            "custom-view-error",
                             () -> listener.onError(
                                     "HUDエラー " + code + ": " + message,
                                     null));
@@ -375,10 +376,9 @@ public final class RokidGlobalLink implements AutoCloseable {
                     service = connected;
                     callbacks = candidate;
                     imageCallbackRegistered = true;
-                    photoInFlight.set(false);
                     viewOpen = false;
                     listener.onLinkConnected(true);
-                    listener.onGlassesConnected(glassesConnected);
+                    serviceBindingReset(glassesConnected);
                 }
             }
             if (!installed) {
@@ -408,11 +408,10 @@ public final class RokidGlobalLink implements AutoCloseable {
                 connection = null;
                 bound = false;
                 imageCallbackRegistered = false;
-                photoInFlight.set(false);
+                serviceBindingReset(false);
                 viewOpen = false;
                 failedCurrentBinding = true;
                 listener.onLinkConnected(false);
-                listener.onGlassesConnected(false);
                 listener.onError("Rokidコールバック登録に失敗しました", error);
             }
         }
@@ -435,11 +434,32 @@ public final class RokidGlobalLink implements AutoCloseable {
             service = null;
             callbacks = null;
             imageCallbackRegistered = false;
-            photoInFlight.set(false);
+            serviceBindingReset(false);
             viewOpen = false;
             listener.onLinkConnected(false);
-            listener.onGlassesConnected(false);
         }
+    }
+
+    private void dispatchCallback(long epoch, String name, Runnable action) {
+        if (!callbackEpochs.runIfActive(epoch, action)) {
+            Log.i(TAG, "ignored stale " + name + " callback epoch=" + epoch);
+        }
+    }
+
+    private void glassesStatusChanged(boolean connected) {
+        Log.i(
+                TAG,
+                "capture link ready=" + connected
+                        + " event=" + CaptureLinkEvent.GLASSES_STATUS_CHANGED);
+        captureLinks.glassesStatusChanged(connected);
+    }
+
+    private void serviceBindingReset(boolean connected) {
+        Log.i(
+                TAG,
+                "capture link ready=" + connected
+                        + " event=" + CaptureLinkEvent.SERVICE_BINDING_RESET);
+        captureLinks.serviceBindingReset(connected);
     }
 
     private void unregisterCallbacks(
@@ -486,7 +506,7 @@ public final class RokidGlobalLink implements AutoCloseable {
             connection = null;
             bound = false;
             imageCallbackRegistered = false;
-            photoInFlight.set(false);
+            serviceBindingReset(false);
             viewOpen = false;
         }
         if (current != null && registered != null) {

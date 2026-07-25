@@ -37,7 +37,7 @@ submodule、AARコピーは不要です。
 CXR-L の実装境界は
 [CXR-L / Global Hi Rokid integration](docs/cxr-l-integration.md)です。
 
-現在のバージョン: **APP 0.13.0 / API 1.13.0**。
+現在のバージョン: **APP 0.13.1 / API 1.13.1**。
 
 ---
 
@@ -73,8 +73,8 @@ rokid-docscan-starter/
 │   ├── summarize.py   # 要約シム（analyzer に委譲）
 │   ├── explainer.py   # Explainer ポート（ExplainRequest / ExplainResult / ABC）
 │   ├── llm.py         # ★実 AI ブリッジ（openai/gemini/claude、遅延import・注入可）
-│   ├── audio_formats.py # 音声MIME・保存suffix・provider upload名の共通定義
-│   ├── version.py     # 各契約バージョン（app 0.13.0 / api 1.13.0 ほか）
+│   ├── audio_formats.py # 音声MIME・保存suffix・provider対応の共通定義
+│   ├── version.py     # 各契約バージョン（app 0.13.1 / api 1.13.1 ほか）
 │   ├── config.py      # 保存先・フィーチャーフラグ（ROKID_* / ANTHROPIC_API_KEY / ROKID_TRANSCRIBER）
 │   ├── transcribe.py  # ★リスニング録音の書き起こし（openai/gemini・未設定時は与値）
 │   ├── db.py          # sqlite3（documents/pages/exam/explain テーブル）
@@ -467,6 +467,11 @@ uvicorn app.main:app --port 8000
 
 全変数の雛形は [`.env.example`](.env.example)、一覧は
 [user-operation-guide.md](docs/user-operation-guide.md) §7 を参照。
+
+OpenAI書き起こしには公式に対応するWAV/MP3/M4A/MP4/OGG/FLAC/WebMを使用します。
+raw ADTS/ADIF AACと識別できない音声データは保存できますがOpenAIへは送信せず、
+与えられた transcript へフォールバックします。先頭にID3v2タグがあっても、タグ後の
+実コンテナを判定します。
 
 ### 実機運用（グラス連携・入力・認証）
 

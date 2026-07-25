@@ -55,7 +55,7 @@ APIキー、Bearer値、Hi Rokid認可トークンは記録しません。
 ```powershell
 adb shell dumpsys package com.rokid.sprite.global.aiapp |
   Select-String "AUTHORIZATION|MEDIA_STREAM_SERVICE"
-adb logcat -s DocScanRokid:*
+adb logcat -v threadtime -s DocScanRokid:*
 ```
 
 ## D. AIキー入力
@@ -85,10 +85,29 @@ adb logcat -s DocScanRokid:*
 - [ ] 同じページ番号を再撮影すると置換され、再度読取完了できる。
 - [ ] 写真callbackを30秒以上返さない試験では、再撮影・読取完了・新規文書が拒否される。
 - [ ] タイムアウト後の遅延画像はアップロードされず、callback受信後に再撮影可能になる。
-- [ ] callbackが来ない場合、実際の切断・再接続後にだけ撮影ブロックが解除される。
+- [ ] callbackが来ない場合、実際のCXR-L service unbind/rebind後にだけ撮影ブロックが解除される。
+- [ ] 同じservice bind中のグラス切断→接続通知だけでは撮影ブロックが解除されない。
 - [ ] `takePhoto` のBinder応答だけを失敗させた場合、受理不明として直ちに撮影ブロックされる。
 - [ ] 再接続後、旧bindから遅延配送した画像callbackが新しい撮影を完了せず、
   旧JPEGもアップロードされない。
+
+撮影ガードとcallback epochを再現性高く調べる場合は、debug APKへAndroid Studioの
+デバッガをattachし、`RokidGlobalLink.CallbackSet.onImageReceived` の
+`dispatchCallback` 呼び出し行へ、Suspendを **Thread** にしたbreakpointを置きます。
+ガード値を見る場合は、`RokidGlobalLink.glassesStatusChanged` /
+`serviceBindingReset` と、`DocScanController.onCaptureLinkStateChanged` 内の
+`event.resetCaptureIfSafe` の直後にもbreakpointを置きます。撮影callbackをそのBinder
+threadだけで停止したまま、次を確認します。
+
+1. Hi Rokid上でグラスだけを切断・再接続する。Logcatは
+   `event=GLASSES_STATUS_CHANGED` を示し、`photoInFlight` と
+   `CaptureLease.isUnresolved()` はどちらもtrueのままである。
+2. Relayの「Hi Rokid認可・再接続」を押す。Logcatは
+   `event=SERVICE_BINDING_RESET` を示し、両ガードがfalseへ戻る。
+3. 停止中の旧callbackをresumeする。Logcatに
+   `ignored stale image callback epoch=...` が出て、旧JPEGがアップロードされない。
+
+全threadを停止すると再接続操作も止まるため、breakpointのSuspendは必ずThreadにします。
 
 写真には個人情報や試験資料が含まれる可能性があります。保存・クラウド送信の同意と
 削除方針を運用前に決めます。

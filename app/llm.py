@@ -30,7 +30,7 @@ import json
 import math
 import os
 
-from .audio_formats import detect_audio_format
+from .audio_formats import detect_audio_format, detect_openai_audio_format
 
 PROVIDERS = ("openai", "gemini", "anthropic")
 
@@ -153,7 +153,7 @@ class LLMClient:
             # e.g. docker-compose passing `ROKID_TRANSCRIBE_MODEL=` when unset —
             # still falls back to the default instead of requesting model="".
             model = os.environ.get("ROKID_TRANSCRIBE_MODEL") or "gpt-4o-transcribe"
-            audio_format = detect_audio_format(audio)
+            audio_format = detect_openai_audio_format(audio)
             resp = self._sdk.audio.transcriptions.create(
                 model=model,
                 file=(
