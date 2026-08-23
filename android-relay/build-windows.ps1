@@ -12,6 +12,34 @@ $ZipPath = Join-Path $CacheRoot "gradle-$GradleVersion-bin.zip"
 $DistributionDir = Join-Path $CacheRoot "gradle-$GradleVersion"
 $GradleBat = Join-Path $DistributionDir "bin\gradle.bat"
 
+if ($ProjectDir -match "[^\x00-\x7F]") {
+    $Message = @"
+The Android relay checkout path contains non-ASCII characters:
+$ProjectDir
+
+Android Gradle Plugin rejects this path on Windows, and bypassing its path
+check is not sufficient because Gradle test workers still fail to load test
+classes. Build from an ASCII-only checkout or worktree instead, for example:
+
+  git worktree add C:\Users\Public\rokid-docscan-build HEAD
+  cd C:\Users\Public\rokid-docscan-build\android-relay
+  .\gradlew.bat testDebugUnitTest assembleDebug
+"@
+    [Console]::Error.WriteLine($Message)
+    exit 1
+}
+
+$LocalProperties = Join-Path $ProjectDir "local.properties"
+if (-not $env:ANDROID_HOME -and
+    -not $env:ANDROID_SDK_ROOT -and
+    -not (Test-Path $LocalProperties)) {
+    $DefaultAndroidSdk = Join-Path $env:LOCALAPPDATA "Android\Sdk"
+    if (Test-Path $DefaultAndroidSdk) {
+        $env:ANDROID_HOME = $DefaultAndroidSdk
+        $env:ANDROID_SDK_ROOT = $DefaultAndroidSdk
+    }
+}
+
 New-Item -ItemType Directory -Force -Path $CacheRoot | Out-Null
 
 if (-not (Test-Path $GradleBat)) {
