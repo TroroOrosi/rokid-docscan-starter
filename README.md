@@ -8,11 +8,14 @@ Rokid Glasses で紙資料を撮影し、Android スマホを中継して問題�
 
 実機の主経路は次の通りです。
 
-1. CXR-L `takePhoto` でページを実際に撮影する。
+1. グラスを短押しして `AIMING` の照準を表示し、照準確認後に長押しして1.5秒静止してから
+   CXR-L `takePhoto(1920, 1080, 80)` でページを撮影する。
 2. Android の bundled Japanese ML Kit で OCR する。
-3. 元 JPEG、ML Kit と同じ回転角、OCR を FastAPI へ送る。
-4. 画像対応 Analyzer が転記・図表説明を補い、Solver が問題を解く。
-5. Android リレーが CUSTOMVIEW へ最大3行ずつ表示する。
+3. `CAPTURE_REVIEW` の縮小プレビューで未登録写真を確認し、タッチパッド長押し
+   （`AI-assist-start`）で登録する。短押しまたは2回短押しなら同じページの再撮影準備へ戻る。
+4. 明示登録後に元 JPEG、ML Kit と同じ回転角、OCR を FastAPI へ送る。
+5. 画像対応 Analyzer が転記・図表説明を補い、Solver が問題を解く。
+6. Android リレーが CUSTOMVIEW へ最大3行ずつ表示する。
 
 `android-relay/RokidGlobalLink` は、公式
 `com.rokid.cxr:client-l:1.0.1` AAR を使い、Global Hi Rokid
@@ -23,12 +26,16 @@ submodule、AARコピーは不要です。
 公開 CXR-L で確認できない「グラス搭載 AI の任意認識文・回答を外部アプリへ返す
 コールバック」には依存しません。テキストだけのページ登録と `POST /solutions` は API
 互換として残していますが、実機の成立条件には数えません。
+公開静止画面には撮影前ライブプレビュー、オートフォーカス、専用シャッターボタンの
+入力コールバックもありません。固定焦点のため照準は構図合わせ用であり、合焦表示では
+ありません。
 
 - **プライバシー LED**：ハードウェア/ファームウェア制御です。アプリは無効化・迂回しません。
   撮影中の点灯、写真 callback 後の消灯、解答閲覧中の消灯維持を実機で物理確認します。
 - **撮影通知**：シャッター音、フラッシュ、撮影表示は端末制御です。無音・無フラッシュを
   ソフトウェア契約として約束しません。
-- **中断復帰**：文書IDと次ページ番号をスマホに保存し、`/scan-status` から再開します。
+- **中断復帰**：文書IDと次ページ番号に加え、未登録写真、OCR、回転をスマホの
+  アプリ専用領域へ保存します。再起動後は確認画面へ戻し、自動登録しません。
 - **安全な公開**：実機利用では Bearer 認証を有効にし、信頼できる LAN 内で動かします。
 - **学習用途**：`mode="real"` の解答は既定でロックされます。
 
@@ -37,7 +44,8 @@ submodule、AARコピーは不要です。
 CXR-L の実装境界は
 [CXR-L / Global Hi Rokid integration](docs/cxr-l-integration.md)です。
 
-現在のバージョン: **APP 0.13.1 / API 1.13.1**。
+現在のバージョン: **Server APP 0.14.0 / API 1.13.1 / Android client 0.2.0 /
+Glasses View contract 1.8.0**。
 
 ---
 
@@ -74,7 +82,7 @@ rokid-docscan-starter/
 │   ├── explainer.py   # Explainer ポート（ExplainRequest / ExplainResult / ABC）
 │   ├── llm.py         # ★実 AI ブリッジ（openai/gemini/claude、遅延import・注入可）
 │   ├── audio_formats.py # 音声MIME・保存suffix・provider対応の共通定義
-│   ├── version.py     # 各契約バージョン（app 0.13.1 / api 1.13.1 ほか）
+│   ├── version.py     # 各契約バージョン（app 0.14.0 / api 1.13.1 / glasses 1.8.0 ほか）
 │   ├── config.py      # 保存先・フィーチャーフラグ（ROKID_* / ANTHROPIC_API_KEY / ROKID_TRANSCRIBER）
 │   ├── transcribe.py  # ★リスニング録音の書き起こし（openai/gemini・未設定時は与値）
 │   ├── db.py          # sqlite3（documents/pages/exam/explain テーブル）
@@ -93,7 +101,7 @@ rokid-docscan-starter/
 │   ├── windows-android-real-device-setup.md # ★Windows+Android実機手順（正本）
 │   ├── cxr-l-integration.md         # ★CXR-L / Global Hi Rokid実装境界
 │   ├── real-device-operation.md     # 実機運用の索引・合格条件
-│   ├── device-verification-checklist.md # ★実機検証チェックリスト（KeyCode/CXR-L/LED/読取品質/閾値）
+│   ├── device-verification-checklist.md # ★実機検証チェックリスト（CXR-L入力/LED/読取品質/閾値）
 │   ├── implementation-notes.md      # 実機/実AI 差し込み点・CXR SDK・実アダプタ
 │   ├── user-operation-guide.md      # ユーザー操作 / 自動化 / 設計判断 / 環境変数一覧
 │   ├── future-proof-architecture.md # 将来対応アーキテクチャ
@@ -195,6 +203,30 @@ Android リレーは元 JPEG、ML Kit と同じ回転角、端末 OCR を同時�
 OCR と同じ向きの PNG に正規化してサーバーに保存され、設定済みの画像対応 Analyzer が
 必要に応じて OCR を補正します。`image_rotation` は `0`、`90`、`180`、`270`
 （時計回り）を受け付け、省略時は `0` です。
+
+実機撮影値は `takePhoto(1920, 1080, 80)` です。カメラは固定焦点で、公称被写界深度は
+34cm〜∞のため、運用では用紙まで40〜60cm離します。最初の短押しで `AIMING` の照準を
+表示して用紙中心を「＋」へ合わせ、長押し後は画面の1.5秒カウント中からcallbackまで
+静止します。`AIMING` の短押しまたは2回短押しは撮影準備を取り消し、写真を撮りません。
+四隅は撮影後プレビューで確認します。`takePhoto(4032, 3024, 80)` は実機で
+JPEG callbackがBinder上限を超えた既知NGです。
+
+撮影と端末OCRの完了後は `CAPTURE_REVIEW` となり、スマホとグラスのCustomViewへ
+縮小プレビューを表示します。写真はまだ未登録です。グラスのタッチパッド長押し
+（`AI-assist-start`）またはスマホの「この写真を登録」で初めてサーバーへ送ります。
+グラスを短押しまたは2回短押しすると同じ `page_index` の `AIMING` へ戻り、照準を
+確認して長押しすると再撮影します。スマホでは登録、再撮影、未登録写真の破棄を
+代替操作できます。
+OCRが0文字でも警告を確認して明示登録できます。登録成功まで対象ページと次ページ番号は
+変わりません。文書自体は初回撮影前に作成されます。
+
+撮影前ライブ映像とオートフォーカスは公開CXR-L非対応です。照準の「＋」は用紙中心を
+合わせる目安で、ディスプレイFOVとカメラFOVが異なるため正確な撮影境界でも合焦判定でも
+ありません。専用シャッターボタンの入力イベントも公開面から受信できないため、
+CustomViewをユーザーが閉じるタップを撮影操作に使います。
+写真回転の既定は実機に合わせた90°で、スマホで回転選択後に再撮影を準備すると次の写真へ
+適用されます。未登録写真はアプリ再起動後も `CAPTURE_REVIEW` へ復元されますが、自動撮影・
+自動登録は行いません。
 
 ```bash
 curl -s -X POST http://127.0.0.1:8000/v1/documents/1/pages \
@@ -329,8 +361,9 @@ Rokid Glasses
 | 中断復帰 | Android保存ID + `GET /scan-status` |
 
 スマホは初期設定画面を持ち、セッション中も画面を表示したままにします。これは現行
-Hi Rokid の写真 callback が画面消灯後に止まる場合へ備えるためです。通常の撮影・閲覧は
-AIキーだけで進められ、スマホボタンは診断と復旧にも使えます。
+Hi Rokid の写真 callback が画面消灯後に止まる場合へ備えるためです。接続後の撮影、
+再撮影、登録、読取完了、閲覧はグラスのタッチパッド操作だけで進められます。スマホ
+ボタンは同じ操作のフォールバックと診断・復旧用です。
 
 詳細は [実機手順](docs/windows-android-real-device-setup.md) を参照してください。
 
@@ -347,24 +380,43 @@ explain-sessions のグラス操作はまだ組み込んでいません。サー
 
 ## 解答モード（実機主経路）
 
-Android リレーが次のチェーンを自動実行します。
+Android リレーが撮影後のユーザー確認を挟んで次のチェーンを実行します。
 
 1. 初回撮影時に `POST /v1/documents`。
-2. 各写真を `POST /v1/documents/{id}/pages` へ JPEG + OCR で送信。
-3. AIキー長押しで `/scan-status` → `/finalize`。
-4. `POST /v1/exam-sessions` → `/finalize-reading`。
-5. `GET /review` を CUSTOMVIEW へ表示。
+2. 短押しで `AIMING` の照準を表示し、長押し後1.5秒静止して撮影。
+3. 各撮影後に `CAPTURE_REVIEW` で未登録写真とOCR文字数を表示。
+4. タッチパッド長押し（`AI-assist-start`）で確定した写真だけを
+   `POST /v1/documents/{id}/pages` へ JPEG + OCR で送信。
+5. `READING` の長押しで `/scan-status` → `/finalize`。
+6. `POST /v1/exam-sessions` → `/finalize-reading`。
+7. `GET /review` を CUSTOMVIEW へ表示。
 
 `/finalize` は画像 Analyzer の転記をページへ保存してから問題を分割します。
 `/finalize-reading` は各問題の開始ページ画像を画像対応 Solver へ渡します。
 端末 OCR とクラウド OCR の両方が空なら問題0件として読取状態を維持し、同じページの
 再撮影または Analyzer 設定を促します。
 
-| AIキー | 読取中 | 閲覧中 |
+| 状態 | 短押し / 2回短押し | 長押し / `AI-assist-start` |
 |---|---|---|
-| 短押し | 次ページを撮影 | 次の表示 |
-| 短押し2回 | 直前ページを再撮影 | 前の表示 |
-| 長押し | 読取完了・解答開始 | 終了・新規文書 |
+| 接続完了・読取中 (`READY` / `READING`) | 短押しで次ページの `AIMING` を開始（2回短押しは下記互換動作） | `READING` なら読取完了・解答開始 |
+| 撮影準備 (`AIMING`) | 準備取消・直前画面へ戻る。撮影しない | 静止案内を開き、ACK後1.5秒静止して1回だけ撮影 |
+| 静止待ち (`STABILIZING`) | 静止待ちを取り消す。撮影しない | 静止待ちを取り消す。撮影しない |
+| 撮影確認 (`CAPTURE_REVIEW`) | 同じページの `AIMING` を開始 | 未登録写真を登録 |
+| 閲覧中 (`REVIEW`) | 短押しで次の表示（2回短押しは前の表示） | 終了・新規文書 |
+
+通常の二段階撮影は、短押しで照準を開き、構図確認後の長押しで静止待ちを開始します。
+`AIMING` の短押しまたは2回短押しと、`STABILIZING` 中のすべてのジェスチャーは
+安全側で撮影を取り消します。Rokid公式操作では
+ダブルタップが「戻る／現在画面を終了」なので、連続してタップするとDocScanではなく
+標準メニューへ戻ることがあります。リレーはその `AI-exit` 後、撮影や登録を行わずに
+現在のDocScan画面を再表示し、メニュー遷移に使われたcloseを撮影操作として再実行しません。
+静止待ち中に別のジェスチャーが届いた場合、旧timerは無効化され、自動では再開しません。
+CustomViewのopen ACK faultまたは3秒のACK timeoutではcallback epochをfenceし、
+`takePhoto`を発行しません。「Hi Rokid認可・再接続」を完了するまで次のView要求も
+行いません。
+ファームウェアが2回の入力をアプリへ
+`DOUBLE_SHORT` として配送した場合だけ、読取中は直前ページの再撮影準備、
+撮影確認中は同じページの再撮影準備、閲覧中は前の表示として扱います。
 
 サーバーだけを確認する場合の最小 API 例:
 
@@ -475,9 +527,9 @@ raw ADTS/ADIF AACと識別できない音声データは保存できますがOpe
 
 ### 実機運用（グラス連携・入力・認証）
 
-実機では `android-relay` の AIキー down/up コールバックを使います。旧 KeyCode/
-タッチジェスチャ表は現行リレーの入力契約ではありません。認証、Windows Firewall、
-APK導入、回転調整、LED/HUD合格条件は
+実機では `android-relay` がuser CustomView closeをタップ、`AI-assist-start`を長押し
+として扱います。専用シャッターボタン、旧KeyCode、全タッチジェスチャ表は現行リレーの
+入力契約ではありません。認証、Windows Firewall、APK導入、回転調整、LED/HUD合格条件は
 [Windows + Android 実機手順](docs/windows-android-real-device-setup.md) に集約しています。
 
 ## Docker（任意）

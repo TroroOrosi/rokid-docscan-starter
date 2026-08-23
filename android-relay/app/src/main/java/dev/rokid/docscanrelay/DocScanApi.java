@@ -60,7 +60,7 @@ public final class DocScanApi {
         JSONObject payload = new JSONObject()
                 .put("title", title)
                 .put("capture_device", "rokid-glasses-cxr-l")
-                .put("client_version", "android-relay/0.1.0")
+                .put("client_version", "android-relay/" + BuildConfig.VERSION_NAME)
                 .put("sdk_hint", "client-l:1.0.1/global-aidl");
         return postJson("/v1/documents", payload);
     }

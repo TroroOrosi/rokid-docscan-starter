@@ -102,7 +102,12 @@ from __future__ import annotations
 #        decompression bombs map to 413, and raw AAC is never sent to OpenAI's
 #        documented transcription endpoint.
 #        API -> 1.13.1, glasses view -> 1.7.1.
-APP_VERSION = "0.13.1"
+# 0.14.0: real-device capture review. Photos remain unregistered until an
+#        explicit decision, the glasses show a post-capture preview, short press
+#        safely retakes, and long press confirms. Pending captures survive app
+#        restarts; CXR-L photography uses its 1920x1080/80 defaults.
+#        API unchanged, glasses view -> 1.8.0.
+APP_VERSION = "0.14.0"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.
@@ -234,7 +239,10 @@ EXPLAINER_API_VERSION = "1.1.0"
 #        from an old service binding cannot complete a new capture.
 # 1.7.1: glasses status callbacks retain unresolved captures. Only a terminal
 #        image callback or an actual CXR-L service-binding reset releases them.
-GLASSES_VIEW_CONTRACT_VERSION = "1.7.1"
+# 1.8.0: every snapshot enters an explicit capture-review state. The glasses
+#        render a downsampled preview; short/double press retakes the same page
+#        and long press confirms registration.
+GLASSES_VIEW_CONTRACT_VERSION = "1.8.0"
 
 # Answer-area overlay payload (box + short answer; 2D image-anchored).
 # 1.1.0: added tracking metadata (tracking/fixed_ar/anchor_hint).

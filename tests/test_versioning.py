@@ -15,7 +15,7 @@ def test_version_info_pins_every_contract():
     # simultaneous doc/pin update CLAUDE.md requires (no silent version drift —
     # docs hardcode several of these, e.g. user-operation-guide's JSON block).
     assert version.version_info() == {
-        "app_version": "0.13.1",
+        "app_version": "0.14.0",
         "api_version": "1.13.1",
         "matcher_version": "1.2.0",
         "hud_contract_version": "1.0.0",
@@ -23,15 +23,15 @@ def test_version_info_pins_every_contract():
         "solver_api_version": "1.2.0",
         "extractor_api_version": "1.0.0",
         "explainer_api_version": "1.1.0",
-        "glasses_view_contract_version": "1.7.1",
+        "glasses_view_contract_version": "1.8.0",
         "overlay_contract_version": "1.1.0",
     }
 
 
-def test_glasses_contract_reflects_fail_closed_capture_lifecycle():
-    # 1.7.1: device status alone cannot clear a capture; a real binding reset
-    # rotates the callback epoch before a new capture is allowed.
-    assert version.GLASSES_VIEW_CONTRACT_VERSION == "1.7.1"
+def test_glasses_contract_reflects_explicit_capture_review():
+    # 1.8.0: snapshots are reviewed before upload; safe gestures retake and
+    # an intentional long press confirms registration.
+    assert version.GLASSES_VIEW_CONTRACT_VERSION == "1.8.0"
 
 
 def test_contract_versions_reflect_phase234():

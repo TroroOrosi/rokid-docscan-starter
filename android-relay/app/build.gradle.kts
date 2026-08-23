@@ -6,13 +6,16 @@ android {
     namespace = "dev.rokid.docscanrelay"
     compileSdk = 36
     enableKotlin = false
+    buildFeatures {
+        buildConfig = true
+    }
 
     defaultConfig {
         applicationId = "dev.rokid.docscanrelay"
         minSdk = 31
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 2
+        versionName = "0.2.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -43,4 +46,6 @@ dependencies {
     implementation("com.google.mlkit:text-recognition-japanese:16.0.1")
 
     testImplementation("junit:junit:4.13.2")
+    androidTestImplementation("androidx.test:runner:1.6.2")
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
 }

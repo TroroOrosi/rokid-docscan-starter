@@ -35,4 +35,142 @@ public class PressGestureInterpreterTest {
         assertEquals(PressGestureInterpreter.Action.LONG, interpreter.onUp(1500));
         assertNull(interpreter.flush(2000));
     }
+
+    @Test
+    public void customViewExitWithoutKeyDownBecomesOneShortPress() {
+        PressGestureInterpreter interpreter = new PressGestureInterpreter(1200, 350);
+
+        assertNull(interpreter.onCustomViewExit(100));
+        assertNull(interpreter.flush(1649));
+        assertEquals(
+                PressGestureInterpreter.Action.SHORT,
+                interpreter.flush(1650));
+    }
+
+    @Test
+    public void keyReleaseAndCustomViewExitDoNotDispatchTwice() {
+        PressGestureInterpreter interpreter = new PressGestureInterpreter(1200, 350);
+        interpreter.onDown(100);
+        assertNull(interpreter.onUp(150));
+
+        assertNull(interpreter.onCustomViewExit(160));
+        assertNull(interpreter.onCustomViewExit(200));
+        assertNull(interpreter.flush(1699));
+        assertEquals(
+                PressGestureInterpreter.Action.SHORT,
+                interpreter.flush(1700));
+    }
+
+    @Test
+    public void aiAssistStartIsLongAndCoalescesItsViewClose() {
+        PressGestureInterpreter interpreter = new PressGestureInterpreter(1200, 350);
+
+        assertEquals(
+                PressGestureInterpreter.Action.LONG,
+                interpreter.onAiAssistStart(100));
+        assertNull(interpreter.onCustomViewExit(120));
+        assertNull(interpreter.flush(1000));
+    }
+
+    @Test
+    public void aiAssistStartOverridesAViewCloseThatArrivesFirst() {
+        PressGestureInterpreter interpreter = new PressGestureInterpreter(1200, 350);
+
+        assertNull(interpreter.onCustomViewExit(100));
+        assertEquals(
+                PressGestureInterpreter.Action.LONG,
+                interpreter.onAiAssistStart(120));
+        assertNull(interpreter.flush(1000));
+    }
+
+    @Test
+    public void duplicateAiAssistStartDispatchesOneLongAction() {
+        PressGestureInterpreter interpreter = new PressGestureInterpreter(1200, 350);
+
+        assertEquals(
+                PressGestureInterpreter.Action.LONG,
+                interpreter.onAiAssistStart(100));
+        assertNull(interpreter.onAiAssistStart(110));
+        interpreter.onAiAssistExit(115);
+        assertNull(interpreter.onAiAssistStart(120));
+        interpreter.onAiAssistExit(125);
+        assertEquals(
+                PressGestureInterpreter.Action.LONG,
+                interpreter.onAiAssistStart(500));
+    }
+
+    @Test
+    public void longAssistSuppressesAViewCloseAfterTheNormalShortWindow() {
+        PressGestureInterpreter interpreter = new PressGestureInterpreter(1200, 350);
+
+        assertEquals(
+                PressGestureInterpreter.Action.LONG,
+                interpreter.onAiAssistStart(100));
+        assertNull(interpreter.onCustomViewExit(600));
+        assertNull(interpreter.flush(1000));
+    }
+
+    @Test
+    public void viewCloseImmediatelyAfterAssistExitIsStillCoalesced() {
+        PressGestureInterpreter interpreter = new PressGestureInterpreter(1200, 350);
+
+        assertEquals(
+                PressGestureInterpreter.Action.LONG,
+                interpreter.onAiAssistStart(100));
+        interpreter.onAiAssistExit(1000);
+        assertNull(interpreter.onCustomViewExit(1010));
+        assertNull(interpreter.flush(1500));
+    }
+
+    @Test
+    public void unrelatedLifecycleExitDoesNotSuppressARealTap() {
+        PressGestureInterpreter interpreter = new PressGestureInterpreter(1200, 350);
+
+        interpreter.onAiAssistExit(100);
+        assertNull(interpreter.onCustomViewExit(110));
+        assertEquals(
+                PressGestureInterpreter.Action.SHORT,
+                interpreter.flush(1660));
+    }
+
+    @Test
+    public void delayedAiAssistStillOverridesACloseThatArrivesFirst() {
+        PressGestureInterpreter interpreter = new PressGestureInterpreter(1200, 350);
+
+        assertNull(interpreter.onCustomViewExit(100));
+        assertNull(interpreter.flush(500));
+        assertEquals(
+                PressGestureInterpreter.Action.LONG,
+                interpreter.onAiAssistStart(600));
+        assertNull(interpreter.flush(2000));
+    }
+
+    @Test
+    public void missingAssistExitCannotSuppressFutureTapsForever() {
+        PressGestureInterpreter interpreter = new PressGestureInterpreter(1200, 350);
+
+        assertEquals(
+                PressGestureInterpreter.Action.LONG,
+                interpreter.onAiAssistStart(100));
+        assertNull(interpreter.onAiAssistStart(600));
+        assertNull(interpreter.onCustomViewExit(1700));
+        assertEquals(
+                PressGestureInterpreter.Action.SHORT,
+                interpreter.flush(3250));
+    }
+
+    @Test
+    public void systemMenuRecoveryCancelsOnlyThePendingCloseAction() {
+        PressGestureInterpreter interpreter = new PressGestureInterpreter(1200, 350);
+
+        assertNull(interpreter.onCustomViewExit(100));
+        interpreter.cancelPendingCustomViewExit();
+        assertNull(interpreter.flush(2000));
+
+        interpreter.onDown(2100);
+        assertNull(interpreter.onUp(2150));
+        assertEquals(
+                PressGestureInterpreter.Action.SHORT,
+                interpreter.flush(2500));
+    }
 }
