@@ -126,6 +126,39 @@ py -3.12 -m pytest -q
 `local.properties`のいずれも未設定なら、Windows用スクリプトは標準の
 `%LOCALAPPDATA%\Android\Sdk`を自動検出します。
 
+### USB接続が数秒で切れる場合（Android 16）
+
+Android 16の「高度な保護機能（Advanced Protection）」が有効だと
+USBデータ通信が遮断されます。F-51F（Android 16 / API 36）での実測では、
+列挙の約4秒後にMTPとADBの全インターフェースが同時に消えました。
+画面のロックを解除して点灯させたまま接続しても再現します。
+
+切り分け:
+
+- 毎回同じ長さ（約4秒）で切れ、自動で再接続しない
+  → ソフトによる意図的な遮断
+- 数秒周期で自動的に再列挙を繰り返す
+  → ケーブル・ポートの接触不良
+
+対処は`設定` → `セキュリティとプライバシー` → `高度な保護機能`をOFFです。
+この機能は個別に無効化できず、有効のままだとサイドロードも禁止されるため
+`adb install`自体が通りません。
+
+それでも切れる場合はUSB4/ThunderboltのType-Cポートを避けて
+USB-Aポートに変えるか、`adb tcpip 5555`で無線に切り替えます。
+無線に切り替えた場合は、端末の5555番ポートがLANに開いたままになるため
+作業終了時に`adb usb`で必ず戻してください。
+
+### versionCodeの逆行
+
+`adb install -r`は端末に入っているビルドより`versionCode`が低いAPKを
+`INSTALL_FAILED_VERSION_DOWNGRADE`で拒否します。アンインストールすれば入りますが、
+Hi Rokidの認可と保存済みの撮影設定が消えます。先に確認してください。
+
+```powershell
+adb shell dumpsys package dev.rokid.docscanrelay | Select-String versionCode
+```
+
 ## 5. 初回接続
 
 1. スマホでHi Rokidを開き、グラスが接続済みであることを確認する。

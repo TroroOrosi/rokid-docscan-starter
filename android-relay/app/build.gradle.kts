@@ -14,7 +14,10 @@ android {
         applicationId = "dev.rokid.docscanrelay"
         minSdk = 31
         targetSdk = 36
-        versionCode = 3
+        // 4 is skipped: the real-device test phone already carries a
+        // versionCode 4 build, and installing a lower code fails with
+        // INSTALL_FAILED_VERSION_DOWNGRADE without a data-losing uninstall.
+        versionCode = 5
         versionName = "0.3.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
