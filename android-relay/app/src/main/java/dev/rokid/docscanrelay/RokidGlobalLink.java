@@ -32,6 +32,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * repository.</p>
  */
 public final class RokidGlobalLink implements AutoCloseable {
+    private volatile String serviceIdentity = "CXR-L 未接続";
+
     public interface Listener {
         void onLinkConnected(boolean connected);
 
@@ -852,7 +854,19 @@ public final class RokidGlobalLink implements AutoCloseable {
         } catch (Exception error) {
             Log.w(TAG, "CXR-L service version unavailable", error);
         }
-        Log.i(TAG, CaptureDiagnostics.serviceIdentity(version, versionCode));
+        serviceIdentity = CaptureDiagnostics.serviceIdentity(version, versionCode);
+        Log.i(TAG, serviceIdentity);
+    }
+
+    /**
+     * The CXR-L build that answered the most recent bind.
+     *
+     * <p>Exposed rather than only logged because a real-device session is run
+     * without adb attached, and the service build has to be recorded alongside
+     * the capture results for them to mean anything later.</p>
+     */
+    public String serviceIdentity() {
+        return serviceIdentity;
     }
 
     private void failCallbackRegistration(

@@ -383,7 +383,9 @@ public final class MainActivity extends Activity
 
     @Override
     public void onLinkConnected(boolean connected) {
-        runOnUiThread(() -> appendLog("Hi Rokid service connected=" + connected));
+        String identity = link.serviceIdentity();
+        runOnUiThread(() -> appendLog(
+                "Hi Rokid service connected=" + connected + " " + identity));
     }
 
     @Override
