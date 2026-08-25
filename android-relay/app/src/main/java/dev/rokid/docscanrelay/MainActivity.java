@@ -7,17 +7,21 @@ import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Color;
+import android.graphics.Insets;
 import android.graphics.Matrix;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
 import android.text.InputType;
+import android.util.Log;
 import android.view.Gravity;
 import android.view.View;
+import android.view.WindowInsets;
 import android.view.WindowManager;
 import android.widget.Button;
 import android.widget.EditText;
+import android.widget.FrameLayout;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
@@ -35,6 +39,7 @@ import java.util.concurrent.atomic.AtomicLong;
 /** Setup/status screen. Once connected, normal operation is driven by glasses. */
 public final class MainActivity extends Activity
         implements RokidGlobalLink.Listener, DocScanController.Listener {
+    private static final String TAG = "DocScanRokid";
     private static final int AUTH_REQUEST = 4027;
     private static final int PERMISSION_REQUEST = 4028;
     private static final long LEGACY_LONG_PRESS_MILLIS = 1200;
@@ -230,9 +235,29 @@ public final class MainActivity extends Activity
         log.setTextIsSelectable(true);
         ScrollView scroll = new ScrollView(this);
         scroll.addView(log, matchWrap());
+        // A fixed height instead of a weight: inside the outer page scroller
+        // there is no leftover space to weight against, and on the F-51F the
+        // weighted log collapsed to zero height as soon as the capture preview
+        // became visible, taking the status line off-screen with it.
         root.addView(scroll, new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
-        return root;
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(180)));
+
+        // targetSdk 36 means Android 15+ forces edge-to-edge, so the status
+        // bar covers the title and the navigation bar covers the capture
+        // review buttons unless the insets are applied here. The page also has
+        // to scroll: with the preview shown the content is taller than the
+        // screen, and a clipped status line leaves the operator no feedback.
+        ScrollView page = new ScrollView(this);
+        page.setFillViewport(true);
+        page.addView(root, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT));
+        page.setOnApplyWindowInsetsListener((view, insets) -> {
+            Insets bars = insets.getInsets(WindowInsets.Type.systemBars());
+            view.setPadding(bars.left, bars.top, bars.right, bars.bottom);
+            return insets;
+        });
+        return page;
     }
 
     private EditText numberField(String hint, int value) {
@@ -614,6 +639,10 @@ public final class MainActivity extends Activity
     }
 
     private void appendLog(String message) {
+        // Mirrored to logcat so a real-device run leaves a trace that survives
+        // the activity. Only the structural diagnostics reach this method; HUD
+        // lines carrying page content go to the status view and stay there.
+        Log.i(TAG, message);
         String current = log.getText().toString();
         log.setText(current + (current.isEmpty() ? "" : "\n") + message);
     }
