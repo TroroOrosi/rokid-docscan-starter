@@ -15,7 +15,7 @@ def test_version_info_pins_every_contract():
     # simultaneous doc/pin update CLAUDE.md requires (no silent version drift —
     # docs hardcode several of these, e.g. user-operation-guide's JSON block).
     assert version.version_info() == {
-        "app_version": "0.14.0",
+        "app_version": "0.15.0",
         "api_version": "1.13.1",
         "matcher_version": "1.2.0",
         "hud_contract_version": "1.0.0",

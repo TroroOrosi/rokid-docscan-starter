@@ -27,7 +27,7 @@ Analyzer/Solver を組み合わせます。サーバーの保存画像は OCR �
 | FastAPI サーバー | 実装済み |
 | Global Hi Rokid 対応 Android リレー | `android-relay` に実装済み |
 | CXR-L 依存 | 公式 `client-l:1.0.1` を Gradle 取得 |
-| Android client / Glasses View contract | `0.2.0` / `1.8.0` |
+| Android client / Glasses View contract | `0.3.0` / `1.8.0` |
 | Global 化 | `RokidGlobalLink` に実装済み |
 | 日本語端末 OCR | bundled ML Kit を実装済み |
 | 写真アップロード・中断復帰 | 実装済み |

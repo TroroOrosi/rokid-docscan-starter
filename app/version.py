@@ -107,7 +107,13 @@ from __future__ import annotations
 #        safely retakes, and long press confirms. Pending captures survive app
 #        restarts; CXR-L photography uses its 1920x1080/80 defaults.
 #        API unchanged, glasses view -> 1.8.0.
-APP_VERSION = "0.14.0"
+# 0.15.0: real-device capture instrumentation. takePhoto dimensions and JPEG
+#        quality became operator-adjustable at runtime so the usable capture
+#        size can be measured on the device, the delivered JPEG size is now
+#        reported against the async Binder budget, the CXR-L service version is
+#        recorded on connect, and OCR results carry a mean symbol confidence.
+#        Relay-only; API and glasses view unchanged.
+APP_VERSION = "0.15.0"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.

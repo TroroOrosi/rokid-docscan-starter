@@ -200,6 +200,7 @@ public final class RokidGlobalLink implements AutoCloseable {
             return PhotoStartResult.REJECTED;
         }
         try {
+            Log.i(TAG, "takePhoto request: " + width + "x" + height + " q" + quality);
             boolean started = current.takePhoto(width, height, quality);
             if (!started) {
                 photoInFlight.set(false);
@@ -393,6 +394,16 @@ public final class RokidGlobalLink implements AutoCloseable {
             imageStream = new IImageStreamCallback.Stub() {
                 @Override
                 public void onImageReceived(byte[] data) {
+                    // Logged before the in-flight check so a duplicate or late
+                    // frame is still measurable: the payload size is what tells
+                    // a capture sweep whether the Binder budget was the limit.
+                    int received = data == null ? 0 : data.length;
+                    Log.i(
+                            TAG,
+                            "Photo callback: " + received + " bytes ("
+                                    + Math.round(received * 100.0
+                                            / CaptureDiagnostics.ASYNC_BINDER_BUDGET_BYTES)
+                                    + "% of the async Binder budget)");
                     dispatchCallback(epoch, "image", () -> {
                         if (!photoInFlight.compareAndSet(true, false)) {
                             return;
@@ -782,6 +793,7 @@ public final class RokidGlobalLink implements AutoCloseable {
 
         IMediaStreamService connected = IMediaStreamService.Stub.asInterface(binder);
         CallbackSet candidate = new CallbackSet(callbackEpoch);
+        logServiceIdentity(connected);
         try {
             boolean callbacksReady =
                     connected.registerDeviceStatusCallback(candidate.deviceStatus)
@@ -821,6 +833,26 @@ public final class RokidGlobalLink implements AutoCloseable {
             unregisterCallbacks(connected, candidate);
             failCallbackRegistration(source, callbackEpoch, error);
         }
+    }
+
+    /**
+     * Records which CXR-L build answered the bind.
+     *
+     * <p>Capture behaviour is firmware-dependent, so a sweep result is only
+     * reproducible if the service build that produced it is known. Failures are
+     * swallowed: this is measurement, and it must never keep a working link
+     * from being established.</p>
+     */
+    private void logServiceIdentity(IMediaStreamService connected) {
+        String version = null;
+        int versionCode = 0;
+        try {
+            version = connected.getServiceVersion();
+            versionCode = connected.getServiceVersionCode();
+        } catch (Exception error) {
+            Log.w(TAG, "CXR-L service version unavailable", error);
+        }
+        Log.i(TAG, CaptureDiagnostics.serviceIdentity(version, versionCode));
     }
 
     private void failCallbackRegistration(

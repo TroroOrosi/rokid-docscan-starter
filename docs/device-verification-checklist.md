@@ -16,7 +16,9 @@
 | Global Hi Rokid version / versionCode | |
 | Rokid Glasses model | |
 | YodaOS build | |
-| APK commit SHA / client version（期待値 `0.2.0`） | |
+| APK commit SHA / client version（期待値 `0.3.0`） | |
+| CXR-L service version / versionCode（接続ログ） | |
+| 採用した撮影設定 `幅x高さ q品質` | |
 | サーバー commit SHA / APP・API version | |
 | Glasses View contract（期待値 `1.8.0`） | |
 | Analyzer / model | |
@@ -111,6 +113,7 @@ adb logcat -v threadtime -s DocScanRokid:*
 
 - [ ] 短押し→長押しの二段階操作と1.5秒静止待ちを経た
   `takePhoto(1920, 1080, 80)` がtrueを返す。
+- [ ] `onImageReceived` のログにJPEGバイト数と予算比が記録される。
 - [ ] callback到着前の連続操作で2件目の`takePhoto`が発行されない。
 - [ ] `onImageReceived` のJPEGが0バイトでない。
 - [ ] 撮影後は `CAPTURE_REVIEW` になり、写真が「未登録」と表示される。
@@ -147,7 +150,46 @@ adb logcat -v threadtime -s DocScanRokid:*
 40〜60cmを運用目安にします。公開CXR-Lにライブプレビュー、AF制御、合焦状態はなく、
 照準の「＋」もディスプレイFOVとカメラFOVが異なるため正確な撮影境界ではありません。
 構図と四隅は撮影後プレビューで判定します。`takePhoto(4032, 3024, 80)` は実機でJPEG
-callbackがBinder上限を超え、callbackなしになった既知NGです。通常試験では使用しません。
+callbackが返らなかった既知NGですが、原因は未特定です。E-2で実測します。
+
+## E-2. 撮影解像度の実測（capture sweep）
+
+CXR-Lは写真を`oneway`のBinder callbackで返すため、非同期側の約512KBを超えたJPEGは
+エラーにならず消えます。「解像度が拒否された」のか「JPEGが大きすぎた」のかは、
+返ってきたバイト数を記録しないと区別できません。手順は
+[windows-android-real-device-setup.md](windows-android-real-device-setup.md)
+の「撮影解像度の実測」を参照します。
+
+- [ ] 接続時のログに `CXR-L <version> (code <n>)` が出て、記録した。
+- [ ] `1920x1080 q80` で撮影し、ログに `… …KB 予算…%` が出た。
+- [ ] `次のプリセット` で `4032x3024 q50` へ切り替わり、値がスマホ画面に反映された。
+- [ ] `4032x3024 q50` の結果を記録した（callback到達／`応答なし 30.0s`）。
+- [ ] callbackが返った場合、`q60`・`q70` と上げて上限の直前を特定した。
+- [ ] `応答なし` だった場合、`3264x2448` 以下の段へ移り、通る最大値を特定した。
+- [ ] 撮影処理中に撮影設定を変更しようとすると拒否される。
+- [ ] アプリを再起動しても、採用した撮影設定が保持される。
+- [ ] 不正値（例: 幅`0`、品質`101`）を入力すると、日本語メッセージで拒否される。
+
+| 試行 | 設定 | JPEGバイト数 | 予算比 | 経過秒 | OCR文字数 / 確信度 |
+|---|---|---|---|---|---|
+| 1 | `1920x1080 q80` | | | | |
+| 2 | `4032x3024 q50` | | | | |
+| 3 | | | | | |
+| 4 | | | | | |
+
+## E-3. 校正シートによるOCR下限の測定
+
+`docs/assets/calibration-a4-300dpi.png` をA4等倍で印刷して使います。グラスのカメラは
+109°の超広角で、40cmで撮ったA4は横幅の約23%しか占めません。ML Kitは1文字16px以上を
+要求するため、`1920x1080` では10.5ptが1文字5〜9pxとなり、これが「OCR 0文字」の
+主因と考えられます。段階表のどこまで読めたかで、必要な解像度を直接決められます。
+
+- [ ] 四隅の二重丸が4つとも写る距離を記録した。
+- [ ] 100mmスケールバーの画素幅から px/mm を算出した。
+- [ ] 段階表のうちOCRが正しく返した最小の文字サイズを記録した。
+- [ ] 線パターンのうち分離して見える最小幅を記録した。
+- [ ] `mean confidence` が0.50を下回る文字サイズを記録した。
+- [ ] 採用した撮影設定で、実際の試験問題用紙が読めることを確認した。
 
 撮影ガードとcallback epochを再現性高く調べる場合は、debug APKへAndroid Studioの
 デバッガをattachし、`RokidGlobalLink.CallbackSet.onImageReceived` の

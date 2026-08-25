@@ -4,6 +4,7 @@ import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 
 import com.google.mlkit.vision.common.InputImage;
+import com.google.mlkit.vision.text.Text;
 import com.google.mlkit.vision.text.TextRecognition;
 import com.google.mlkit.vision.text.TextRecognizer;
 import com.google.mlkit.vision.text.japanese.JapaneseTextRecognizerOptions;
@@ -11,7 +12,7 @@ import com.google.mlkit.vision.text.japanese.JapaneseTextRecognizerOptions;
 /** Bundled, on-device OCR used before a captured page is uploaded. */
 public final class JapaneseOcr implements AutoCloseable {
     public interface Callback {
-        void onResult(String text);
+        void onResult(String text, OcrQuality quality);
 
         void onError(Throwable error);
     }
@@ -20,7 +21,17 @@ public final class JapaneseOcr implements AutoCloseable {
             new JapaneseTextRecognizerOptions.Builder().build());
 
     public void recognize(byte[] encodedImage, int rotationDegrees, Callback callback) {
-        Bitmap bitmap = BitmapFactory.decodeByteArray(encodedImage, 0, encodedImage.length);
+        Bitmap bitmap;
+        try {
+            bitmap = BitmapFactory.decodeByteArray(encodedImage, 0, encodedImage.length);
+        } catch (OutOfMemoryError error) {
+            // A 12MP capture needs about 48MB for the decoded bitmap. Losing
+            // the process here would also lose the photo, so the capture is
+            // reported as an OCR failure and stays available for review.
+            callback.onError(new IllegalStateException(
+                    "写真が大きすぎてメモリに展開できません。撮影解像度を下げてください"));
+            return;
+        }
         if (bitmap == null) {
             callback.onError(new IllegalArgumentException("写真をBitmapとして復号できません"));
             return;
@@ -28,9 +39,31 @@ public final class JapaneseOcr implements AutoCloseable {
         int normalizedRotation = normalizeRotation(rotationDegrees);
         InputImage input = InputImage.fromBitmap(bitmap, normalizedRotation);
         recognizer.process(input)
-                .addOnSuccessListener(result -> callback.onResult(result.getText().trim()))
+                .addOnSuccessListener(
+                        result -> callback.onResult(result.getText().trim(), measure(result)))
                 .addOnFailureListener(callback::onError)
                 .addOnCompleteListener(ignored -> bitmap.recycle());
+    }
+
+    /**
+     * Collects per-symbol confidence so a capture that returned text can still
+     * be reported as unreliable.
+     *
+     * <p>Confidence is only populated by the bundled recogniser, so the builder
+     * tolerates its absence rather than assuming it.</p>
+     */
+    private static OcrQuality measure(Text result) {
+        OcrQuality.Builder quality = OcrQuality.builder();
+        for (Text.TextBlock block : result.getTextBlocks()) {
+            for (Text.Line line : block.getLines()) {
+                for (Text.Element element : line.getElements()) {
+                    for (Text.Symbol symbol : element.getSymbols()) {
+                        quality.addSymbol(symbol.getText(), symbol.getConfidence());
+                    }
+                }
+            }
+        }
+        return quality.build();
     }
 
     static int normalizeRotation(int degrees) {

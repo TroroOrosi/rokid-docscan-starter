@@ -45,9 +45,9 @@ public final class DocScanController implements AutoCloseable {
     private static final long CAPTURE_TIMEOUT_SECONDS = 30;
     private static final long SHUTTER_STABILIZATION_MILLIS = 1500;
     private static final long CUSTOM_VIEW_ACK_TIMEOUT_MILLIS = 3000;
-    static final int PHOTO_WIDTH = 1920;
-    static final int PHOTO_HEIGHT = 1080;
-    static final int PHOTO_QUALITY = 80;
+    private static final String KEY_PHOTO_WIDTH = "photo_width";
+    private static final String KEY_PHOTO_HEIGHT = "photo_height";
+    private static final String KEY_PHOTO_QUALITY = "photo_quality";
 
     private final RokidGlobalLink link;
     private final JapaneseOcr ocr;
@@ -62,6 +62,9 @@ public final class DocScanController implements AutoCloseable {
     private final RetryCursor retryCursor = new RetryCursor();
 
     private volatile RelayState state = RelayState.DISCONNECTED;
+    private volatile PhotoCaptureSettings photoSettings = PhotoCaptureSettings.DEFAULT;
+    private volatile long photoRequestedAtMillis;
+    private volatile String lastOcrQuality = "";
     private DocScanApi api;
     private String configuredServer = "";
     private int imageRotation;
@@ -99,6 +102,10 @@ public final class DocScanController implements AutoCloseable {
         captureReviewPersistence = new CaptureReviewPersistence(
                 new File(context.getFilesDir(), "pending-capture-v1.bin"));
         configuredServer = preferences.getString(KEY_SERVER, "");
+        photoSettings = PhotoCaptureSettings.ofOrDefault(
+                preferences.getInt(KEY_PHOTO_WIDTH, PhotoCaptureSettings.DEFAULT.width),
+                preferences.getInt(KEY_PHOTO_HEIGHT, PhotoCaptureSettings.DEFAULT.height),
+                preferences.getInt(KEY_PHOTO_QUALITY, PhotoCaptureSettings.DEFAULT.quality));
         documentId = preferences.getLong(KEY_DOCUMENT, 0);
         nextPageIndex = preferences.getInt(KEY_NEXT_PAGE, 0);
         sessionId = preferences.getLong(KEY_SESSION, 0);
@@ -392,6 +399,42 @@ public final class DocScanController implements AutoCloseable {
             clearWorkflow();
         }
         preferences.edit().putString(KEY_SERVER, configuredServer).apply();
+    }
+
+    public PhotoCaptureSettings captureSettings() {
+        return photoSettings;
+    }
+
+    /**
+     * Changes the {@code takePhoto} arguments used by the next capture.
+     *
+     * <p>The usable capture size depends on the glasses firmware and can only
+     * be found by probing on the device, so this is adjustable at runtime: a
+     * rebuild between probes would cost a reinstall and a Hi Rokid
+     * re-authorization for every step of the sweep.</p>
+     */
+    public void applyCaptureSettings(PhotoCaptureSettings settings) {
+        if (settings == null) {
+            throw new IllegalArgumentException("撮影設定が指定されていません");
+        }
+        if (captureLease.isUnresolved() || state.isCaptureInProgress()) {
+            throw new IllegalStateException(
+                    "撮影処理中です。完了してから撮影設定を変更してください");
+        }
+        photoSettings = settings;
+        preferences.edit()
+                .putInt(KEY_PHOTO_WIDTH, settings.width)
+                .putInt(KEY_PHOTO_HEIGHT, settings.height)
+                .putInt(KEY_PHOTO_QUALITY, settings.quality)
+                .apply();
+        listener.onUpdate(state, currentHudLines, "撮影設定 " + settings.describe());
+    }
+
+    /** Advances the capture sweep by one probe without needing a rebuild. */
+    public PhotoCaptureSettings applyNextCapturePreset() {
+        PhotoCaptureSettings next = PhotoCaptureSettings.nextPreset(photoSettings);
+        applyCaptureSettings(next);
+        return next;
     }
 
     public void verifyServer() {
@@ -821,12 +864,15 @@ public final class DocScanController implements AutoCloseable {
             if (attempt == CaptureLease.NO_TOKEN) {
                 throw new IllegalStateException("another photo request is still unresolved");
             }
+            PhotoCaptureSettings settings = photoSettings;
             publish(
                     RelayState.CAPTURING,
                     List.of("撮影中", "40〜60cm離す", "用紙全体を入れて静止"),
-                    "Requesting glasses photo for page index " + pageIndex);
+                    "Requesting glasses photo for page index " + pageIndex
+                            + " (" + settings.describe() + ")");
+            photoRequestedAtMillis = System.currentTimeMillis();
             RokidGlobalLink.PhotoStartResult startResult =
-                    link.takePhoto(PHOTO_WIDTH, PHOTO_HEIGHT, PHOTO_QUALITY);
+                    link.takePhoto(settings.width, settings.height, settings.quality);
             if (startResult == RokidGlobalLink.PhotoStartResult.REJECTED) {
                 throw new IllegalStateException("takePhoto returned false");
             }
@@ -891,6 +937,10 @@ public final class DocScanController implements AutoCloseable {
             return;
         }
         if (jpeg == null || jpeg.length == 0) {
+            listener.onUpdate(
+                    state,
+                    currentHudLines,
+                    CaptureDiagnostics.photoReceived(photoSettings, 0, captureElapsedMillis()));
             CaptureReviewStore.Pending pending = captureReview.peek();
             if (pending != null) {
                 publishCaptureReview(
@@ -906,10 +956,12 @@ public final class DocScanController implements AutoCloseable {
         publish(
                 RelayState.OCR,
                 List.of("文字認識中", "P" + (uploadIndex + 1), ""),
-                "Photo received: " + jpeg.length + " bytes");
+                CaptureDiagnostics.photoReceived(
+                        photoSettings, jpeg.length, captureElapsedMillis()));
         ocr.recognize(jpeg, uploadRotation, new JapaneseOcr.Callback() {
             @Override
-            public void onResult(String text) {
+            public void onResult(String text, OcrQuality quality) {
+                lastOcrQuality = quality == null ? "" : quality.describe();
                 serial.execute(
                         () -> stageCaptureReview(
                                 uploadIndex, jpeg, text, uploadRotation, ""));
@@ -917,6 +969,7 @@ public final class DocScanController implements AutoCloseable {
 
             @Override
             public void onError(Throwable error) {
+                lastOcrQuality = "";
                 String detail = error == null || error.getMessage() == null
                         ? "unknown OCR error"
                         : error.getMessage();
@@ -961,9 +1014,12 @@ public final class DocScanController implements AutoCloseable {
                 if (!captureLease.markTimedOut(attempt)) {
                     return;
                 }
+                // The request that produced no callback is the measurement the
+                // capture sweep is after, so it has to survive the failure.
                 fail(
                         "写真が返りませんでした。安全のためHi Rokidを再接続してください",
-                        null);
+                        new IllegalStateException(CaptureDiagnostics.photoNoCallback(
+                                photoSettings, captureElapsedMillis())));
             });
         } catch (RejectedExecutionException ignored) {
             // The activity closed while the watchdog was expiring.
@@ -1012,7 +1068,11 @@ public final class DocScanController implements AutoCloseable {
         }
         listener.onCaptureReview(pending);
         String diagnostic = "Photo awaiting confirmation: page " + pageIndex
+                + ", " + photoSettings.describe()
                 + ", OCR characters: " + pending.ocrCharacters();
+        if (!lastOcrQuality.isEmpty()) {
+            diagnostic += " (" + lastOcrQuality + ")";
+        }
         if (pending.hasOcrFailure()) {
             diagnostic += ", OCR error: " + pending.ocrFailure;
         }
@@ -1503,6 +1563,11 @@ public final class DocScanController implements AutoCloseable {
         }
         fail("先にサーバURLを設定してください", null);
         return false;
+    }
+
+    private long captureElapsedMillis() {
+        long requestedAt = photoRequestedAtMillis;
+        return requestedAt == 0 ? 0 : System.currentTimeMillis() - requestedAt;
     }
 
     private void publish(RelayState next, List<String> lines, String diagnostic) {

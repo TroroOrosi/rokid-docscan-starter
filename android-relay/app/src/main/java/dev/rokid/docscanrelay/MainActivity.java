@@ -69,6 +69,9 @@ public final class MainActivity extends Activity
     private EditText serverUrl;
     private EditText apiKey;
     private Spinner rotation;
+    private EditText photoWidth;
+    private EditText photoHeight;
+    private EditText photoQuality;
     private TextView status;
     private TextView log;
     private ImageView capturePreview;
@@ -134,6 +137,26 @@ public final class MainActivity extends Activity
         rotation.setSelection(getPreferences(MODE_PRIVATE)
                 .getInt(PREF_ROTATION_INDEX, 1));
         root.addView(rotation, matchWrap());
+
+        // The usable capture size is firmware-dependent and has to be probed on
+        // the device; keeping it editable here means a sweep costs a button
+        // press instead of a reinstall and a fresh Hi Rokid authorization.
+        PhotoCaptureSettings initial = controller.captureSettings();
+        photoWidth = numberField("幅", initial.width);
+        photoHeight = numberField("高さ", initial.height);
+        photoQuality = numberField("品質", initial.quality);
+        LinearLayout captureSettingsRow = horizontalRow();
+        captureSettingsRow.addView(photoWidth, weighted());
+        captureSettingsRow.addView(photoHeight, weighted());
+        captureSettingsRow.addView(photoQuality, weighted());
+        root.addView(captureSettingsRow, matchWrap());
+
+        LinearLayout captureSettingsActions = horizontalRow();
+        captureSettingsActions.addView(
+                button("撮影設定を適用", ignored -> applyCaptureSettings()), weighted());
+        captureSettingsActions.addView(
+                button("次のプリセット", ignored -> applyNextCapturePreset()), weighted());
+        root.addView(captureSettingsActions, matchWrap());
 
         LinearLayout connectRow = horizontalRow();
         connectRow.addView(button("サーバ確認", ignored -> configureAndVerify()), weighted());
@@ -210,6 +233,52 @@ public final class MainActivity extends Activity
         root.addView(scroll, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
         return root;
+    }
+
+    private EditText numberField(String hint, int value) {
+        EditText field = new EditText(this);
+        field.setHint(hint);
+        field.setSingleLine(true);
+        field.setInputType(InputType.TYPE_CLASS_NUMBER);
+        field.setText(String.valueOf(value));
+        return field;
+    }
+
+    private void applyCaptureSettings() {
+        PhotoCaptureSettings settings;
+        try {
+            settings = PhotoCaptureSettings.parse(
+                    photoWidth.getText().toString(),
+                    photoHeight.getText().toString(),
+                    photoQuality.getText().toString());
+        } catch (IllegalArgumentException error) {
+            showError(error.getMessage());
+            return;
+        }
+        applyCaptureSettings(settings);
+    }
+
+    private void applyNextCapturePreset() {
+        applyCaptureSettings(
+                PhotoCaptureSettings.nextPreset(controller.captureSettings()));
+    }
+
+    private void applyCaptureSettings(PhotoCaptureSettings settings) {
+        try {
+            controller.applyCaptureSettings(settings);
+        } catch (IllegalStateException error) {
+            showError(error.getMessage());
+            return;
+        }
+        showCaptureSettings(settings);
+        appendLog("撮影設定 " + settings.describe());
+        Toast.makeText(this, "撮影設定 " + settings.describe(), Toast.LENGTH_SHORT).show();
+    }
+
+    private void showCaptureSettings(PhotoCaptureSettings settings) {
+        photoWidth.setText(String.valueOf(settings.width));
+        photoHeight.setText(String.valueOf(settings.height));
+        photoQuality.setText(String.valueOf(settings.quality));
     }
 
     private void configureAndVerify() {
