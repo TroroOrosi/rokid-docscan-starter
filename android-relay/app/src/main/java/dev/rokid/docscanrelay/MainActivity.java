@@ -444,13 +444,28 @@ public final class MainActivity extends Activity
 
     @Override
     public void onAiExit() {
-        pressInterpreter.onAiAssistExit(SystemClock.elapsedRealtime());
+        // YodaOS reserves long press and double tap, and this firmware delivers
+        // neither AI key down/up nor a user-initiated CustomView close, so a
+        // single tap surfacing as this callback is the only glasses input the
+        // relay receives. Only the non-destructive short action is derived.
+        PressGestureInterpreter.Action action =
+                pressInterpreter.onAiExit(SystemClock.elapsedRealtime());
         mainHandler.removeCallbacks(systemMenuRecovery);
         mainHandler.postDelayed(
                 systemMenuRecovery,
                 SYSTEM_MENU_RECOVERY_DELAY_MILLIS);
         runOnUiThread(() -> appendLog(
-                "Glasses AI-exit observed; DocScan view recovery scheduled"));
+                action == null
+                        ? "Glasses AI-exit echoed our own view push; no input"
+                        : "Glasses input source=AI-exit tap -> " + action));
+        if (action != null) {
+            dispatchGesture(action);
+        }
+    }
+
+    @Override
+    public void onGlassesViewPushed() {
+        pressInterpreter.onGlassesViewOperation(SystemClock.elapsedRealtime());
     }
 
     @Override

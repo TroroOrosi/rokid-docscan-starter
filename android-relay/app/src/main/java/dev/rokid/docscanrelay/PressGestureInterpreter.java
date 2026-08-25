@@ -14,6 +14,14 @@ public final class PressGestureInterpreter {
         LONG
     }
 
+    /**
+     * A view pushed by the relay makes the glasses echo an AI-exit a few
+     * milliseconds later. Echoes measured on Hi Rokid G1.12.10.0815 arrived
+     * within 51 ms of the push, while a real tap arrived seconds after the
+     * last view operation, so this window separates the two safely.
+     */
+    private static final long PROGRAMMATIC_EXIT_ECHO_MILLIS = 500;
+
     private final long longPressMillis;
     private final long doublePressMillis;
     private final long customViewArbitrationMillis;
@@ -24,6 +32,8 @@ public final class PressGestureInterpreter {
     private long suppressCustomViewUntil = -1;
     private boolean suppressCurrentPress;
     private boolean pendingCustomViewExit;
+    private long lastViewOperationAt = -1;
+    private long lastTapAt = -1;
 
     public PressGestureInterpreter(long longPressMillis, long doublePressMillis) {
         if (longPressMillis <= 0 || doublePressMillis <= 0) {
@@ -133,6 +143,37 @@ public final class PressGestureInterpreter {
         return Action.LONG;
     }
 
+    /** Records a view push so its AI-exit echo is not mistaken for a tap. */
+    public synchronized void onGlassesViewOperation(long nowMillis) {
+        lastViewOperationAt = nowMillis;
+    }
+
+    /**
+     * Treats a user-originated AI-exit as the glasses short action.
+     *
+     * <p>YodaOS reserves long press (record/audio toggle) and double tap
+     * (exit), and Hi Rokid G1.12.10.0815 delivers neither AI key down/up nor a
+     * user-initiated CustomView close to a third-party app. A single tap,
+     * observed only as this exit callback, is therefore the sole glasses input
+     * the relay can receive, so no committing action may be derived from it.</p>
+     */
+    public synchronized Action onAiExit(long nowMillis) {
+        boolean closedActiveAssist = nowMillis <= aiAssistActiveUntil;
+        onAiAssistExit(nowMillis);
+        if (closedActiveAssist) {
+            return null;
+        }
+        if (lastViewOperationAt >= 0
+                && nowMillis - lastViewOperationAt < PROGRAMMATIC_EXIT_ECHO_MILLIS) {
+            return null;
+        }
+        if (lastTapAt >= 0 && nowMillis - lastTapAt < doublePressMillis) {
+            return null;
+        }
+        lastTapAt = nowMillis;
+        return Action.SHORT;
+    }
+
     public synchronized void onAiAssistExit(long nowMillis) {
         if (nowMillis <= aiAssistActiveUntil) {
             suppressCustomViewUntil = Math.max(
@@ -162,5 +203,7 @@ public final class PressGestureInterpreter {
         suppressCustomViewUntil = -1;
         suppressCurrentPress = false;
         pendingCustomViewExit = false;
+        lastViewOperationAt = -1;
+        lastTapAt = -1;
     }
 }

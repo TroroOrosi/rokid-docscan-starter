@@ -173,4 +173,55 @@ public class PressGestureInterpreterTest {
                 PressGestureInterpreter.Action.SHORT,
                 interpreter.flush(2500));
     }
+
+    @Test
+    public void aiExitEchoingOurOwnViewOperationIsNotATap() {
+        PressGestureInterpreter interpreter = new PressGestureInterpreter(1200, 350);
+
+        interpreter.onGlassesViewOperation(1000);
+        assertNull(interpreter.onAiExit(1051));
+        assertNull(interpreter.flush(3000));
+    }
+
+    @Test
+    public void aiExitLongAfterTheLastViewOperationIsATap() {
+        PressGestureInterpreter interpreter = new PressGestureInterpreter(1200, 350);
+
+        interpreter.onGlassesViewOperation(1000);
+        assertEquals(
+                PressGestureInterpreter.Action.SHORT,
+                interpreter.onAiExit(24700));
+    }
+
+    @Test
+    public void aiExitWithoutAnyViewOperationIsATap() {
+        PressGestureInterpreter interpreter = new PressGestureInterpreter(1200, 350);
+
+        assertEquals(
+                PressGestureInterpreter.Action.SHORT,
+                interpreter.onAiExit(100));
+    }
+
+    @Test
+    public void repeatedAiExitFromOneTapDispatchesOneAction() {
+        PressGestureInterpreter interpreter = new PressGestureInterpreter(1200, 350);
+
+        assertEquals(
+                PressGestureInterpreter.Action.SHORT,
+                interpreter.onAiExit(1000));
+        assertNull(interpreter.onAiExit(1100));
+        assertEquals(
+                PressGestureInterpreter.Action.SHORT,
+                interpreter.onAiExit(1400));
+    }
+
+    @Test
+    public void aiExitClosingAnActiveAssistIsNotATap() {
+        PressGestureInterpreter interpreter = new PressGestureInterpreter(1200, 350);
+
+        assertEquals(
+                PressGestureInterpreter.Action.LONG,
+                interpreter.onAiAssistStart(100));
+        assertNull(interpreter.onAiExit(400));
+    }
 }

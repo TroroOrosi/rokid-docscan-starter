@@ -27,9 +27,16 @@ Rokid Glasses -> Global Hi Rokid -> Android relay -> FastAPI server -> HUD
 - Global Hi Rokid uses package `com.rokid.sprite.global.aiapp`. Keep the
   package/action assumptions isolated in `RokidGlobalLink` and revalidate them
   after Hi Rokid or YodaOS updates.
-- CXR-L reliably exposes AI-key down/up callbacks, not the full glasses touch
-  gesture stream. The relay's short/double/long timing controls are the
-  supported hands-free input contract.
+- YodaOS reserves long press (record/audio toggle), double tap (exit), two-finger
+  tap (AI) and two-finger swipes for itself. A third-party app cannot receive
+  them, so never assign a relay action to one. See the official gesture table in
+  `docs/glasses-ux-contract.md`.
+- Measured on Hi Rokid G1.12.10.0815 with CXR-L service `1.0.0 code 10000`:
+  `onAiKeyDown`/`onAiKeyUp` never fire, and CustomView closes always arrive
+  `userInitiated=false`. A user-originated `AI-exit` is the only glasses input
+  the relay receives, and it carries no press duration. Treat it as the short
+  action only. Committing actions (登録 / 読取完了 / シャッター) stay on the
+  phone until a second signal is proven on hardware.
 - CUSTOMVIEW output is a black background, green text, and at most three lines.
   Current Global builds may require close-and-open for a reliable redraw.
 - Keep the phone activity awake during a session. Some firmware stops photo

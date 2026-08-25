@@ -47,6 +47,12 @@ public final class RokidGlobalLink implements AutoCloseable {
 
         void onCustomViewClosedByUser();
 
+        /**
+         * Reports that the relay itself pushed a view, so the AI-exit the
+         * glasses echo a few milliseconds later is not read as a user tap.
+         */
+        void onGlassesViewPushed();
+
         void onCustomViewAvailable(long generation, String purpose);
 
         void onCustomViewFailed(
@@ -357,6 +363,7 @@ public final class RokidGlobalLink implements AutoCloseable {
                 TAG,
                 "custom view requested generation=" + generation
                         + " purpose=" + purpose);
+        listener.onGlassesViewPushed();
         return generation;
     }
 
