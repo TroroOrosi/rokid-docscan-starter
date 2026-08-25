@@ -114,8 +114,10 @@ public final class MainActivity extends Activity
 
         TextView description = new TextView(this);
         description.setText(
-                "撮影準備後、グラスを長押しして1.5秒後にシャッターを切ります。"
-                        + "撮影後はタップ=撮り直し準備、長押し=登録です。");
+                "グラスは1本指タップだけが届きます（長押しとダブルタップはOSが占有）。"
+                        + "撮影準備後は照準でタップ=シャッター、"
+                        + "撮影後はタップ=撮り直し準備です。"
+                        + "登録・読取完了・撮影取消はこの画面のボタンで行います。");
         description.setTextSize(14);
         root.addView(description, matchWrap());
 
@@ -178,6 +180,18 @@ public final class MainActivity extends Activity
                         ignored -> controller.recapturePreviousPage()),
                 weighted());
         captureRow.addView(button("読取完了", ignored -> controller.finishReading()), weighted());
+
+        // The glasses can only deliver a tap, so every action they cannot reach
+        // needs a phone control. The shutter is duplicated rather than moved:
+        // during aiming the operator is holding the page and should not have to
+        // reach for the phone at all.
+        LinearLayout shutterRow = horizontalRow();
+        shutterRow.addView(
+                button("シャッター", ignored -> controller.triggerArmedCapture()),
+                weighted());
+        shutterRow.addView(
+                button("撮影取消", ignored -> controller.cancelAiming()), weighted());
+        root.addView(shutterRow, matchWrap());
         root.addView(captureRow, matchWrap());
 
         LinearLayout reviewRow = horizontalRow();
@@ -189,7 +203,8 @@ public final class MainActivity extends Activity
         TextView captureGuide = new TextView(this);
         captureGuide.setText(
                 "固定焦点・ライブ映像なし: 用紙を40〜60cm離し、中心を＋へ合わせます。"
-                        + "長押し後は1.5秒静止し、撮影後に四隅と文字の輪郭を確認してください。");
+                        + "照準でタップした後は1.5秒静止し、"
+                        + "撮影後に四隅と文字の輪郭を確認してください。");
         captureGuide.setTextSize(14);
         captureGuide.setPadding(0, dp(8), 0, dp(8));
         root.addView(captureGuide, matchWrap());
@@ -475,6 +490,7 @@ public final class MainActivity extends Activity
 
     @Override
     public void onCustomViewAvailable(long generation, String purpose) {
+        pressInterpreter.onGlassesViewOpened(SystemClock.elapsedRealtime());
         mainHandler.removeCallbacks(systemMenuRecovery);
         controller.onCustomViewAvailable(generation, purpose);
         runOnUiThread(() -> appendLog(

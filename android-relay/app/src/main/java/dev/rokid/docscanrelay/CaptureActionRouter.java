@@ -31,9 +31,13 @@ final class CaptureActionRouter {
             }
         }
         if (state == RelayState.AIMING) {
-            return gesture == PressGestureInterpreter.Action.LONG
-                    ? Command.TAKE_PHOTO
-                    : Command.CANCEL_AIMING;
+            // YodaOS reserves long press, so a tap is the only glasses input
+            // available while the operator holds the page against the reticle.
+            // Cancelling moves to the phone: reaching for it during aiming
+            // would move the framing this state exists to establish.
+            return gesture == PressGestureInterpreter.Action.DOUBLE_SHORT
+                    ? Command.CANCEL_AIMING
+                    : Command.TAKE_PHOTO;
         }
         if (state == RelayState.STABILIZING) {
             return Command.CANCEL_AIMING;

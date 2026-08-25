@@ -49,7 +49,7 @@ public class RelayWorkflowTest {
 
         List<String> adapted = RelayMessages.forAiKeyScanAck(source);
 
-        assertEquals("次ページ / 完了は長押し", adapted.get(2));
+        assertEquals("次ページ / 完了はスマホ", adapted.get(2));
         assertEquals("次ページ / 完了はダブルタップ", source.get(2));
     }
 

@@ -15,12 +15,14 @@ public final class PressGestureInterpreter {
     }
 
     /**
-     * A view pushed by the relay makes the glasses echo an AI-exit a few
-     * milliseconds later. Echoes measured on Hi Rokid G1.12.10.0815 arrived
-     * within 51 ms of the push, while a real tap arrived seconds after the
-     * last view operation, so this window separates the two safely.
+     * A view pushed by the relay makes the glasses echo an AI-exit, always
+     * before that view reports itself open. The delay is not bounded usefully:
+     * measured echoes on Hi Rokid G1.12.10.0815 trailed their push by 1 ms to
+     * 1375 ms depending on how long the icons took to reach the glasses, so the
+     * pending open, not a timeout, is what identifies an echo. This cap only
+     * keeps a push whose open callback never arrives from muting the glasses.
      */
-    private static final long PROGRAMMATIC_EXIT_ECHO_MILLIS = 500;
+    private static final long ECHO_SUPPRESSION_CAP_MILLIS = 3000;
 
     private final long longPressMillis;
     private final long doublePressMillis;
@@ -33,6 +35,7 @@ public final class PressGestureInterpreter {
     private boolean suppressCurrentPress;
     private boolean pendingCustomViewExit;
     private long lastViewOperationAt = -1;
+    private boolean awaitingViewOpen;
     private long lastTapAt = -1;
 
     public PressGestureInterpreter(long longPressMillis, long doublePressMillis) {
@@ -146,6 +149,12 @@ public final class PressGestureInterpreter {
     /** Records a view push so its AI-exit echo is not mistaken for a tap. */
     public synchronized void onGlassesViewOperation(long nowMillis) {
         lastViewOperationAt = nowMillis;
+        awaitingViewOpen = true;
+    }
+
+    /** Ends the echo window: after this, an exit can only be a user tap. */
+    public synchronized void onGlassesViewOpened(long nowMillis) {
+        awaitingViewOpen = false;
     }
 
     /**
@@ -163,8 +172,8 @@ public final class PressGestureInterpreter {
         if (closedActiveAssist) {
             return null;
         }
-        if (lastViewOperationAt >= 0
-                && nowMillis - lastViewOperationAt < PROGRAMMATIC_EXIT_ECHO_MILLIS) {
+        if (awaitingViewOpen
+                && nowMillis - lastViewOperationAt < ECHO_SUPPRESSION_CAP_MILLIS) {
             return null;
         }
         if (lastTapAt >= 0 && nowMillis - lastTapAt < doublePressMillis) {
@@ -204,6 +213,7 @@ public final class PressGestureInterpreter {
         suppressCurrentPress = false;
         pendingCustomViewExit = false;
         lastViewOperationAt = -1;
+        awaitingViewOpen = false;
         lastTapAt = -1;
     }
 }

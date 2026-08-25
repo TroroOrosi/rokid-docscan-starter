@@ -224,4 +224,36 @@ public class PressGestureInterpreterTest {
                 interpreter.onAiAssistStart(100));
         assertNull(interpreter.onAiExit(400));
     }
+
+    @Test
+    public void aiExitBeforeThePushedViewOpensIsNotATap() {
+        PressGestureInterpreter interpreter = new PressGestureInterpreter(1200, 350);
+
+        // Measured on hardware: a push at 00:41:00.828 reached the glasses only
+        // at 00:41:01.723 and echoed at 00:41:02.203, so the echo can trail the
+        // push by well over a second. Its open callback had not arrived yet.
+        interpreter.onGlassesViewOperation(1000);
+        assertNull(interpreter.onAiExit(2375));
+    }
+
+    @Test
+    public void aiExitAfterThePushedViewOpensIsATap() {
+        PressGestureInterpreter interpreter = new PressGestureInterpreter(1200, 350);
+
+        interpreter.onGlassesViewOperation(1000);
+        interpreter.onGlassesViewOpened(1500);
+        assertEquals(
+                PressGestureInterpreter.Action.SHORT,
+                interpreter.onAiExit(1600));
+    }
+
+    @Test
+    public void aViewThatNeverOpensCannotSuppressTapsForever() {
+        PressGestureInterpreter interpreter = new PressGestureInterpreter(1200, 350);
+
+        interpreter.onGlassesViewOperation(1000);
+        assertEquals(
+                PressGestureInterpreter.Action.SHORT,
+                interpreter.onAiExit(4500));
+    }
 }

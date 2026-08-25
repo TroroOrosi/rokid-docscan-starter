@@ -584,7 +584,7 @@ public final class DocScanController implements AutoCloseable {
                 }
                 publish(
                         RelayState.READY,
-                        List.of("準備完了", "タップ: 1ページ目準備", "長押し: 読取完了"),
+                        List.of("準備完了", "タップ: 1ページ目準備", "読取完了はスマホ"),
                         "Ready for a new document");
             } catch (Exception error) {
                 fail("前回状態を復元できません", error);
@@ -715,7 +715,7 @@ public final class DocScanController implements AutoCloseable {
         }
         publish(
                 documentId > 0 ? RelayState.READING : RelayState.READY,
-                List.of("撮影を取消", "タップ: 撮影準備", "長押し: 読取完了"),
+                List.of("撮影を取消", "タップ: 撮影準備", "読取完了はスマホ"),
                 "Manual capture preparation/stabilization cancelled");
     }
 
@@ -760,7 +760,7 @@ public final class DocScanController implements AutoCloseable {
                         "P" + (pageIndex + 1)
                                 + (replacingPending ? " 撮り直し準備" : " 撮影準備"),
                         "40〜60cm・中心を＋へ",
-                        "静止して長押し");
+                        "静止してタップ");
         long viewGeneration =
                 link.showCaptureAiming(pageIndex + 1, replacingPending, stabilizing);
         if (viewGeneration == RokidGlobalLink.NO_VIEW_GENERATION) {
@@ -1340,7 +1340,7 @@ public final class DocScanController implements AutoCloseable {
             listener.onCaptureReviewCleared();
             publish(
                     RelayState.READING,
-                    List.of("写真を破棄しました", "タップ: 撮影準備", "長押し: 読取完了"),
+                    List.of("写真を破棄しました", "タップ: 撮影準備", "読取完了はスマホ"),
                     "Discarded unregistered photo for page " + pending.pageIndex);
         });
     }
@@ -1360,7 +1360,7 @@ public final class DocScanController implements AutoCloseable {
         List<String> lines = List.of(
                 "P" + (pending.pageIndex + 1) + " 未登録 / " + secondLine,
                 "タップ: 同じページを撮り直す",
-                "長押し: この写真を登録");
+                "登録はスマホのボタン");
         state = RelayState.CAPTURE_REVIEW;
         currentHudLines = lines;
         link.showCaptureReview(
@@ -1553,7 +1553,7 @@ public final class DocScanController implements AutoCloseable {
         clearWorkflow();
         publish(
                 linkReady ? RelayState.READY : RelayState.DISCONNECTED,
-                List.of("新規読取", "タップ: 撮影準備", "長押し: 完了"),
+                List.of("新規読取", "タップ: 撮影準備", "完了はスマホ"),
                 "Workflow cleared");
     }
 

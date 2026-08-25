@@ -25,7 +25,7 @@ public class CaptureActionRouterTest {
     }
 
     @Test
-    public void aimingRequiresLongAndEveryOtherGestureCancelsWithoutAPhoto() {
+    public void aimingTakesThePhotoUnlessTheGestureIsAnExplicitCancel() {
         assertEquals(
                 CaptureActionRouter.Command.ARM_NEXT,
                 CaptureActionRouter.route(
@@ -42,7 +42,7 @@ public class CaptureActionRouterTest {
                         RelayState.READING,
                         PressGestureInterpreter.Action.LONG));
         assertEquals(
-                CaptureActionRouter.Command.CANCEL_AIMING,
+                CaptureActionRouter.Command.TAKE_PHOTO,
                 CaptureActionRouter.route(
                         RelayState.AIMING,
                         PressGestureInterpreter.Action.SHORT));
@@ -90,5 +90,18 @@ public class CaptureActionRouterTest {
                 CaptureActionRouter.route(
                         RelayState.REVIEW,
                         PressGestureInterpreter.Action.LONG));
+    }
+
+    @Test
+    public void aimingTapTakesThePhotoBecauseLongPressNeverArrives() {
+        // YodaOS keeps long press, so a tap is the only glasses input while the
+        // operator is holding the page against the reticle. Reaching for the
+        // phone there would move the framing the aiming view just established,
+        // so the tap has to be the shutter and cancelling moves to the phone.
+        assertEquals(
+                CaptureActionRouter.Command.TAKE_PHOTO,
+                CaptureActionRouter.route(
+                        RelayState.AIMING,
+                        PressGestureInterpreter.Action.SHORT));
     }
 }
