@@ -242,19 +242,6 @@ public final class RokidGlobalLink implements AutoCloseable {
      * A false result is fail-closed: callers may attempt one normal reopen,
      * whose own request and acknowledgement are still generation-gated.
      */
-    public synchronized boolean isCustomViewActuallyOpen() {
-        IMediaStreamService current = service;
-        if (current == null) {
-            return false;
-        }
-        try {
-            return current.isCustomViewOpened();
-        } catch (Exception error) {
-            Log.w(TAG, "could not query current CustomView state", error);
-            return false;
-        }
-    }
-
     public synchronized long showCaptureAiming(
             int pageNumber,
             boolean retake,
@@ -670,42 +657,27 @@ public final class RokidGlobalLink implements AutoCloseable {
         long now = SystemClock.elapsedRealtime();
         boolean localViewWasOpen =
                 viewOpen && customViewOpens.isCurrentAcknowledged();
-        boolean remoteStillOpen = false;
-        IMediaStreamService current = service;
-        if (current != null) {
-            try {
-                remoteStillOpen = current.isCustomViewOpened();
-            } catch (Exception error) {
-                Log.w(TAG, "could not query CustomView after close callback", error);
-                viewOpen = false;
-                customViewOpens.onCurrentClosed();
-                customViewCloses.reset();
-                notifyCurrentViewFailed(
-                        viewGeneration,
-                        viewPurpose,
-                        "グラス画面の終了状態を確認できなかったため操作を受け付けません",
-                        error);
-                return;
-            }
-        }
+        // isCustomViewOpened() is not consulted here. Measured on Hi Rokid
+        // G1.12.10.0815 / CXR-L service 1.0.0 code 10000 it answers true for
+        // every close callback, including the tap that left DocScan for the
+        // default menu. Gating on it reported userInitiated=false every single
+        // time, so no tap ever reached the relay and nothing reopened the view.
+        // Our own close expectation queue, armed before each programmatic
+        // close/open pair, already separates a view swap's echo from a tap.
         boolean userInitiated = customViewCloses.onClosed(
                 now,
                 viewGeneration,
-                remoteStillOpen,
                 localViewWasOpen);
-        viewOpen = remoteStillOpen;
-        if (!remoteStillOpen) {
-            customViewOpens.onCurrentClosed();
-        }
+        viewOpen = false;
+        customViewOpens.onCurrentClosed();
         Log.i(
                 TAG,
                 "custom view closed on glasses epoch=" + epoch
                         + " elapsed=" + now
                         + " generation=" + viewGeneration
                         + " purpose=" + viewPurpose
-                        + " userInitiated=" + userInitiated
-                        + " remoteStillOpen=" + remoteStillOpen);
-        if (userInitiated && !remoteStillOpen) {
+                        + " userInitiated=" + userInitiated);
+        if (userInitiated) {
             listener.onCustomViewClosedByUser();
         }
     }

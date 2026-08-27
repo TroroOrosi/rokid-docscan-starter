@@ -499,6 +499,21 @@ public final class MainActivity extends Activity
 
     @Override
     public void onCustomViewClosedByUser() {
+        // Taking a close as input was rejected once before, because telling our
+        // own close from the operator's could only be done by elimination and a
+        // miss registers the wrong photo. It is used here for exactly one state
+        // and no other: measured on Hi Rokid G1.12.10.0815, a tap on the
+        // capture-review view (an setIcons image view) closes the CustomView and
+        // delivers no AI event at all, while AIMING does deliver AI-exit. So the
+        // review screen has no other input, and everywhere else a misread close
+        // must never reach the shutter.
+        if (controller == null
+                || controller.getState() != RelayState.CAPTURE_REVIEW
+                || !controller.hasPendingCaptureReview()) {
+            runOnUiThread(() -> appendLog(
+                    "Ignored a user CustomView close outside capture review"));
+            return;
+        }
         dispatchDiscreteGlassesAction("user CustomView close");
     }
 

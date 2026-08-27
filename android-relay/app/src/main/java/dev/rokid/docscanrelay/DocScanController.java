@@ -700,7 +700,7 @@ public final class DocScanController implements AutoCloseable {
                     "Capture preparation blocked until committed-photo recovery completes");
             return;
         }
-        if (!linkReady || !requireApi()) {
+        if (!requireLink()) {
             return;
         }
         if (captureLease.isUnresolved()) {
@@ -927,7 +927,7 @@ public final class DocScanController implements AutoCloseable {
         if (state != RelayState.STABILIZING) {
             return;
         }
-        if (!linkReady || !requireApi()) {
+        if (!requireLink()) {
             return;
         }
         CaptureReviewStore.Pending pending = captureReview.peek();
@@ -1533,7 +1533,7 @@ public final class DocScanController implements AutoCloseable {
     }
 
     private void startAutoCaptureNow() {
-        if (!linkReady || !requireApi()) {
+        if (!requireLink()) {
             return;
         }
         if (captureLease.isUnresolved()) {
@@ -2020,6 +2020,25 @@ public final class DocScanController implements AutoCloseable {
         }
         fail("先にサーバURLを設定してください", null);
         return false;
+    }
+
+    /**
+     * Reports why a command cannot run instead of returning in silence.
+     *
+     * <p>The old {@code !linkReady || !requireApi()} short-circuited before
+     * {@code requireApi} could speak, so with the glasses disconnected every
+     * phone button did nothing and said nothing. That is what "the manual
+     * buttons do not work" turned out to be.</p>
+     */
+    private boolean requireLink() {
+        if (!linkReady) {
+            publish(
+                    RelayState.DISCONNECTED,
+                    List.of("グラス未接続", "Hi Rokid認可・再接続", ""),
+                    "Command ignored because the glasses link is not ready");
+            return false;
+        }
+        return requireApi();
     }
 
     private long captureElapsedMillis() {

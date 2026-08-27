@@ -23,8 +23,13 @@ android {
         // burst at once.
         // 10 fixes menu-exit recovery, which skipped itself because the
         // service reports the CustomView as open even on the home screen.
-        versionCode = 10
-        versionName = "0.3.5"
+        // 11 stops asking the service at all on a close callback: it answers
+        // "still open" for every one of them, so no tap ever reached the relay.
+        // 12 narrows that close-derived input to CAPTURE_REVIEW, the one state
+        // measured to deliver no AI event, and reports why a command was
+        // ignored when the glasses link is down instead of returning silently.
+        versionCode = 12
+        versionName = "0.3.7"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

@@ -41,20 +41,18 @@ final class CustomViewCloseTracker {
     synchronized boolean onClosed(
             long nowMillis,
             long currentGeneration,
-            boolean remoteStillOpen,
             boolean localViewWasOpen
     ) {
         pruneExpired(nowMillis);
 
-        // The callback cannot represent the currently displayed view while
-        // the service still reports that view open. It is a delayed close
-        // from a replacement (or a duplicate of one).
-        if (remoteStillOpen) {
-            if (!programmaticCloses.isEmpty()) {
-                programmaticCloses.removeFirst();
-            } else if (!orphanedCloseDeadlines.isEmpty()) {
-                orphanedCloseDeadlines.removeFirst();
-            }
+        // Our own close of the view still on screen. The expectation is armed
+        // before the Binder call and carries the generation being closed, so a
+        // swap's echo is recognised here even though that view was locally
+        // open. The service's isCustomViewOpened() cannot decide this: on the
+        // measured firmware it answers true for every close callback.
+        if (!programmaticCloses.isEmpty()
+                && programmaticCloses.peekFirst().viewGeneration == currentGeneration) {
+            programmaticCloses.removeFirst();
             return false;
         }
 
