@@ -1100,6 +1100,7 @@ public final class DocScanController implements AutoCloseable {
         listener.onCaptureReview(pending);
         String diagnostic = "Photo awaiting confirmation: page " + pageIndex
                 + ", " + photoSettings.describe()
+                + ", framing: " + pending.framing
                 + ", OCR characters: " + pending.ocrCharacters();
         if (!lastOcrQuality.isEmpty()) {
             diagnostic += " (" + lastOcrQuality + ")";
