@@ -217,7 +217,7 @@ public final class MainActivity extends Activity
         TextView captureGuide = new TextView(this);
         captureGuide.setText(
                 "固定焦点・ライブ映像なし: 用紙を40〜60cm離し、中心を＋へ合わせます。"
-                        + "照準でタップした後は1.5秒静止し、"
+                        + "照準でタップしたら確認画面が出るまで静止し（実測で約5秒）、"
                         + "撮影後に四隅と文字の輪郭を確認してください。");
         captureGuide.setTextSize(14);
         captureGuide.setPadding(0, dp(8), 0, dp(8));

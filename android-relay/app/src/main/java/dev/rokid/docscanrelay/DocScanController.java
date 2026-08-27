@@ -836,8 +836,8 @@ public final class DocScanController implements AutoCloseable {
         List<String> lines = stabilizing
                 ? List.of(
                         "P" + (pageIndex + 1) + " シャッター受付",
-                        "1.5秒そのまま静止",
-                        "撮影まで動かない")
+                        "確認画面まで静止",
+                        "約5秒 動かない")
                 : List.of(
                         "P" + (pageIndex + 1)
                                 + (replacingPending ? " 撮り直し準備" : " 撮影準備"),

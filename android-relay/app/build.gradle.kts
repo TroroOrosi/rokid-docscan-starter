@@ -28,8 +28,11 @@ android {
         // 12 narrows that close-derived input to CAPTURE_REVIEW, the one state
         // measured to deliver no AI event, and reports why a command was
         // ignored when the glasses link is down instead of returning silently.
-        versionCode = 12
-        versionName = "0.3.7"
+        // 13 corrects the operator guidance: the shutter was documented as a
+        // 1.5 s hold, but takePhoto measured 5.2 s to its callback, so moving
+        // at 1.5 s blurs the page.
+        versionCode = 13
+        versionName = "0.3.8"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
