@@ -2,6 +2,7 @@ package dev.rokid.docscanrelay;
 
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
+import android.graphics.Rect;
 
 import com.google.mlkit.vision.common.InputImage;
 import com.google.mlkit.vision.text.Text;
@@ -12,7 +13,7 @@ import com.google.mlkit.vision.text.japanese.JapaneseTextRecognizerOptions;
 /** Bundled, on-device OCR used before a captured page is uploaded. */
 public final class JapaneseOcr implements AutoCloseable {
     public interface Callback {
-        void onResult(String text, OcrQuality quality);
+        void onResult(String text, OcrQuality quality, PageFraming framing);
 
         void onError(Throwable error);
     }
@@ -37,12 +38,40 @@ public final class JapaneseOcr implements AutoCloseable {
             return;
         }
         int normalizedRotation = normalizeRotation(rotationDegrees);
+        // ML Kit reports bounding boxes in the upright image it was handed, so
+        // a quarter turn swaps the dimensions the framing check measures
+        // against.
+        boolean quarterTurned = normalizedRotation == 90 || normalizedRotation == 270;
+        int uprightWidth = quarterTurned ? bitmap.getHeight() : bitmap.getWidth();
+        int uprightHeight = quarterTurned ? bitmap.getWidth() : bitmap.getHeight();
         InputImage input = InputImage.fromBitmap(bitmap, normalizedRotation);
         recognizer.process(input)
                 .addOnSuccessListener(
-                        result -> callback.onResult(result.getText().trim(), measure(result)))
+                        result -> callback.onResult(
+                                result.getText().trim(),
+                                measure(result),
+                                measureFraming(result, uprightWidth, uprightHeight)))
                 .addOnFailureListener(callback::onError)
                 .addOnCompleteListener(ignored -> bitmap.recycle());
+    }
+
+    /**
+     * Judges whether the page is wholly inside the frame from where the
+     * recognised lines sit.
+     */
+    private static PageFraming measureFraming(Text result, int width, int height) {
+        PageFraming.Builder framing = PageFraming.builder(width, height);
+        for (Text.TextBlock block : result.getTextBlocks()) {
+            for (Text.Line line : block.getLines()) {
+                Rect bounds = line.getBoundingBox();
+                if (bounds == null) {
+                    continue;
+                }
+                framing.addLineBounds(
+                        bounds.left, bounds.top, bounds.right, bounds.bottom);
+            }
+        }
+        return framing.build();
     }
 
     /**

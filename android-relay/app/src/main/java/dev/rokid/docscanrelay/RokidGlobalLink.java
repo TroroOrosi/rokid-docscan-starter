@@ -346,6 +346,11 @@ public final class RokidGlobalLink implements AutoCloseable {
         viewPurpose = purpose;
         viewOpen = false;
         viewPurposes.put(generation, purpose);
+        // The echo this open provokes can arrive while openCustomView is still
+        // in its Binder round-trip, so the suppression must be armed before the
+        // call, not after it. Arming it on a request that then fails only costs
+        // the interpreter's 3s cap.
+        listener.onGlassesViewPushed();
         boolean accepted;
         try {
             accepted = current.openCustomView(layout);
@@ -363,7 +368,6 @@ public final class RokidGlobalLink implements AutoCloseable {
                 TAG,
                 "custom view requested generation=" + generation
                         + " purpose=" + purpose);
-        listener.onGlassesViewPushed();
         return generation;
     }
 
@@ -560,6 +564,11 @@ public final class RokidGlobalLink implements AutoCloseable {
         customViewCloses.expectProgrammaticClose(
                 SystemClock.elapsedRealtime(),
                 viewGeneration);
+        // A view swap closes before it reopens, and the glasses echo an AI-exit
+        // for the close as well. Arming the suppression here — before the
+        // Binder call — is what keeps that echo from being read as the tap that
+        // fires the shutter in AIMING.
+        listener.onGlassesViewPushed();
         final boolean accepted;
         try {
             accepted = current.closeCustomView();

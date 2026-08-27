@@ -593,9 +593,16 @@ public final class MainActivity extends Activity
                     if (pending.hasOcrFailure()) {
                         warning += " OCR処理エラーも発生しました。";
                     }
+                    // The framing verdict is what the operator cannot judge
+                    // from the glasses, so it leads the message and names the
+                    // recommended action outright.
+                    String verdict = pending.isFramingFailing()
+                            ? "判定: 不合格 — " + pending.framing.describe()
+                                    + "。撮り直しを推奨します。"
+                            : "判定: " + pending.framing.describe() + "。";
                     capturePreviewMessage.setText(
                             "P" + (pending.pageIndex + 1) + "（まだ未登録）— "
-                                    + warning
+                                    + verdict + " " + warning
                                     + "\n用紙の四隅と文字の輪郭を確認し、登録か撮り直しを選んでください。");
                     capturePreview.setVisibility(bitmap == null ? View.GONE : View.VISIBLE);
                     capturePreviewMessage.setVisibility(View.VISIBLE);

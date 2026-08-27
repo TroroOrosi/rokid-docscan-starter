@@ -960,11 +960,11 @@ public final class DocScanController implements AutoCloseable {
                         photoSettings, jpeg.length, captureElapsedMillis()));
         ocr.recognize(jpeg, uploadRotation, new JapaneseOcr.Callback() {
             @Override
-            public void onResult(String text, OcrQuality quality) {
+            public void onResult(String text, OcrQuality quality, PageFraming framing) {
                 lastOcrQuality = quality == null ? "" : quality.describe();
                 serial.execute(
                         () -> stageCaptureReview(
-                                uploadIndex, jpeg, text, uploadRotation, ""));
+                                uploadIndex, jpeg, text, uploadRotation, "", framing));
             }
 
             @Override
@@ -975,7 +975,12 @@ public final class DocScanController implements AutoCloseable {
                         : error.getMessage();
                 serial.execute(
                         () -> stageCaptureReview(
-                                uploadIndex, jpeg, "", uploadRotation, detail));
+                                uploadIndex,
+                                jpeg,
+                                "",
+                                uploadRotation,
+                                detail,
+                                PageFraming.UNKNOWN));
             }
         });
     }
@@ -1031,7 +1036,8 @@ public final class DocScanController implements AutoCloseable {
             byte[] jpeg,
             String ocrText,
             int rotationDegrees,
-            String ocrFailure
+            String ocrFailure,
+            PageFraming framing
     ) {
         CaptureReviewStore.Pending previous = captureReview.peek();
         CaptureReviewStore.Pending candidate = new CaptureReviewStore.Pending(
@@ -1039,7 +1045,8 @@ public final class DocScanController implements AutoCloseable {
                 jpeg,
                 ocrText,
                 rotationDegrees,
-                ocrFailure);
+                ocrFailure,
+                framing);
         CaptureReviewStore.Pending pending;
         try {
             pending = CaptureReviewTransaction.replace(
@@ -1354,13 +1361,20 @@ public final class DocScanController implements AutoCloseable {
             return;
         }
         clearArmedCapture();
-        String secondLine = pending.ocrCharacters() == 0
-                ? "OCR 0文字・写真を確認"
-                : "OCR " + pending.ocrCharacters() + "文字・全体を確認";
-        List<String> lines = List.of(
-                "P" + (pending.pageIndex + 1) + " 未登録 / " + secondLine,
-                "タップ: 同じページを撮り直す",
-                "登録はスマホのボタン");
+        // The operator cannot see the camera's field of view, so the framing
+        // verdict leads: a page that ran outside the frame must read as a
+        // failure, not as a photo that is merely waiting to be registered.
+        String page = "P" + (pending.pageIndex + 1);
+        String ocrLine = "OCR " + pending.ocrCharacters() + "文字";
+        List<String> lines = pending.isFramingFailing()
+                ? List.of(
+                        page + " 不合格 " + pending.framing.describe(),
+                        "タップ: 撮り直す",
+                        ocrLine)
+                : List.of(
+                        page + " 未登録 " + pending.framing.describe(),
+                        ocrLine + "・タップで撮り直す",
+                        "登録はスマホのボタン");
         state = RelayState.CAPTURE_REVIEW;
         currentHudLines = lines;
         link.showCaptureReview(

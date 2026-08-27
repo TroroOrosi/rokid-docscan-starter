@@ -35,7 +35,7 @@ Global版Hi Rokidを経由してRokid Glassesを使う構成の正本です。
 確認実績の基準値はCxrGlobalの公開情報と同じく、Global Hi Rokidパッケージ
 `com.rokid.sprite.global.aiapp`、CXR-L `client-l:1.0.1`です。Hi Rokidや
 YodaOS更新後はAIDL Actionと実機動作を再検証してください。
-この手順のAndroid clientは`0.3.0`、Glasses View contractは`1.8.0`です。
+この手順のAndroid clientは`0.3.1`、Glasses View contractは`1.8.0`です。
 
 ## 3. Windowsでサーバを起動
 
@@ -256,6 +256,9 @@ adb shell dumpsys package dev.rokid.docscanrelay | Select-String versionCode
 `AIMING`中は準備取消として扱います。
 
 写真callbackとOCRの後は `CAPTURE_REVIEW` になり、まだサーバーへ登録されません。
+このとき、認識した各行の外接矩形が画像の縁2%の帯に触れていないかを判定し、触れて
+いれば用紙がその方向で切れていると見て「不合格 右が切れています」のように表示します。
+判定が不合格でも登録操作は塞ぎませんが、既定の誘導は撮り直しです。
 スマホとグラスの縮小プレビューで四隅、文字の輪郭、ブレを確認し、スマホの
 「この写真を登録」で明示登録します。撮影確認中のタップ、または「同じページを
 撮り直す」は同じ `page_index` の再撮影準備へ戻り、照準確認後のタップで未登録写真を

@@ -256,4 +256,30 @@ public class PressGestureInterpreterTest {
                 PressGestureInterpreter.Action.SHORT,
                 interpreter.onAiExit(4500));
     }
+
+    @Test
+    public void theCloseHalfOfAViewSwapAlsoSuppressesItsEcho() {
+        PressGestureInterpreter interpreter = new PressGestureInterpreter(1200, 350);
+
+        // A swap closes before it reopens, and the glasses echo the close. The
+        // relay must arm the suppression before the close Binder call, because
+        // the echo can arrive while the reopen is still in flight. Arming only
+        // after the reopen let that echo through as a tap, which fired the
+        // shutter as soon as AIMING appeared.
+        interpreter.onGlassesViewOperation(1000);
+        interpreter.onGlassesViewOperation(1040);
+        assertNull(interpreter.onAiExit(1200));
+        assertNull(interpreter.flush(1600));
+    }
+
+    @Test
+    public void reArmingDuringASwapDoesNotOutlastTheCap() {
+        PressGestureInterpreter interpreter = new PressGestureInterpreter(1200, 350);
+
+        interpreter.onGlassesViewOperation(1000);
+        interpreter.onGlassesViewOperation(1040);
+        assertEquals(
+                PressGestureInterpreter.Action.SHORT,
+                interpreter.onAiExit(4100));
+    }
 }
