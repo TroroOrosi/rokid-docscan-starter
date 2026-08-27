@@ -29,8 +29,11 @@ APIキー、Bearer値、Hi Rokid認可トークンは記録しません。
 
 ## A. ビルドと導入
 
-- [ ] JDK 17、Android SDK Platform 36、ADBをWindowsへ導入した。
+- [ ] JDK 17以上、Android SDK Platform 36、ADBをWindowsへ導入した。
+      （Android Studio 同梱の JBR 21 で `assembleDebug` 成功を実測済み。既定の
+      `java` が JDK 25 の環境では `JAVA_HOME` を JBR 側へ明示する。）
 - [ ] `android-relay\gradlew.bat testDebugUnitTest assembleDebug` が成功した。
+- [ ] チェックアウトパスがASCIIのみである（非ASCIIパスはAGPが拒否する）。
 - [ ] `adb install -r ...\app-debug.apk` が成功した。
 - [ ] スマホへGlobal版Hi Rokidが入り、ログイン済みである。
 - [ ] Hi Rokid上でグラスがBluetooth接続済みである。
@@ -39,10 +42,18 @@ APIキー、Bearer値、Hi Rokid認可トークンは記録しません。
 
 - [ ] サーバーを `--host 0.0.0.0 --port 8000` で起動した。
 - [ ] `ROKID_API_KEY` と画像対応 `ROKID_ANALYZER` / `ROKID_SOLVER` を設定した。
+- [ ] `OPENAI_BASE_URL` / `ANTHROPIC_BASE_URL` / `GOOGLE_*` の既存値を確認した。
+      SDKはこれらを自動採用するため、別用途のローカルproxyを指している場合は
+      サーバー起動シェルで解除する。
+- [ ] PC側で `curl http://PC-IP:8000/health` が応答する（自分のLAN IPで確認する）。
 - [ ] スマホのブラウザで `http://PC-IP:8000/health` が開く。
 - [ ] Relayの「サーバ確認」が成功する。
 - [ ] 誤ったBearer値では保護APIが401になる。
-- [ ] WindowsネットワークはPrivateで、公衆Wi-Fi/インターネットへ8000番を公開していない。
+- [ ] スマホとPCが同一サブネットにあり、APアイソレーション（ゲストSSID等）で
+      分離されていない。
+- [ ] 8000番の受信許可がWindowsの現在のネットワークプロファイルに適用されている。
+      プロファイルがPublicの場合、Private限定の規則は効かない。
+- [ ] 公衆Wi-Fi/インターネットへ8000番を公開していない。
 
 ## C. Global Hi Rokid / AIDL
 
@@ -63,14 +74,22 @@ adb logcat -v threadtime -s DocScanRokid:*
 
 ## D. グラス入力
 
-公開CXR-Lで受信できるuser CustomView closeと`AI-assist-start`を確認します。
-専用シャッターボタンの入力イベントや全タッチジェスチャは前提にしません。
+公開CXR-Lで受信できるグラス入力を確認します。専用シャッターボタンの入力イベントや
+全タッチジェスチャは前提にしません。
+
+Hi Rokid `G1.12.10.0815` / CXR-L service `1.0.0 (code 10000)` の実測では、グラスから
+届く入力は**1本指タップ由来の `AI-exit` だけ**です。長押しはグラス側AIが占有し、
+ダブルタップはYodaOSの「終了」に予約されています。以下の長押し・2回短押し項目は、
+より多くの信号を配送するファームウェアでのみ確認できます。現行ファームでは該当項目を
+N/Aとし、対応するスマホ側ボタンで確認してください。
 
 - [ ] `READING` で最初のユーザータップによりCustomViewが閉じると、スマホログに
-  `source=user CustomView close` が残り、`AIMING` の照準が表示される。
+  `Glasses input source=...` が残り、`AIMING` の照準が表示される。
 - [ ] 最初のタップ後は `takePhoto` が0回のままで、自動撮影されない。
-- [ ] `AIMING` の短押しまたは2回短押しは準備を取り消して戻り、`takePhoto`を発行しない。
-- [ ] `AIMING` で照準を確認した後の長押しだけが1.5秒静止待ちを開始する。
+- [ ] リレーが表示をpushした直後のecho `AI-exit` は入力として扱われず、`AIMING` から
+  即座に `takePhoto` が発行されない（旧500 ms窓実装の誤シャッター再発チェック）。
+- [ ] スマホの「撮影取消」で `AIMING` を取り消せ、`takePhoto` を発行しない。
+- [ ] `AIMING` で照準を確認した後の2回目のタップが1.5秒静止待ちを開始する。
 - [ ] 現在世代の静止案内open callbackより前は1.5秒timerを開始せず、open errorまたは
   3秒のACK timeoutでは`takePhoto`を0回のまま準備を取り消し、そのcallback epochを
   fenceする。
@@ -78,7 +97,7 @@ adb logcat -v threadtime -s DocScanRokid:*
   完了した後の新しいcallback epochでだけ再開する。
 - [ ] 1.5秒待ちの間も `takePhoto` は0回で、満了後に
   `takePhoto(1920, 1080, 80)` が1回だけ発行される。
-- [ ] `STABILIZING`中は短押し、2回短押し、長押しのどれでも静止待ちを取り消し、
+- [ ] `STABILIZING`中のタップまたはスマホの「撮影取消」で静止待ちを取り消し、
   旧timer満了後も`takePhoto`は0回である。
 - [ ] リレー自身がHUD更新のために行うclose + openは確認済みcallback世代内で識別され、
   ユーザータップとして処理されない。
@@ -92,16 +111,14 @@ adb logcat -v threadtime -s DocScanRokid:*
   close + openを余分に繰り返さない。
 - [ ] 復帰timerとopen callbackが競合しても、remote CustomViewがopenなら新しい世代を
   要求せず現在表示を維持する。
-- [ ] `CAPTURE_REVIEW` の短押しまたは2回短押しは同じ `page_index` の `AIMING` を
-  表示するだけで、
+- [ ] `CAPTURE_REVIEW` のタップは同じ `page_index` の `AIMING` を表示するだけで、
   その場では `takePhoto` を発行しない。
-- [ ] 同ページ再撮影準備後の長押しで、1.5秒待ち後に `takePhoto` が1回だけ発行される。
-- [ ] `CAPTURE_REVIEW` のタッチパッド長押しが
-  `source=AI-assist-start -> LONG` と記録され、未登録写真を1回だけ登録する。
+- [ ] 同ページ再撮影準備後のタップで、1.5秒待ち後に `takePhoto` が1回だけ発行される。
+- [ ] スマホの「この写真を登録」が未登録写真を1回だけ登録する。
 - [ ] 登録成功後にpending削除を失敗させても、再起動後に同じJPEGが未登録写真として
   復活しない。
-- [ ] `READING` の長押しで読取完了へ進む。
-- [ ] `REVIEW` のタップで次へ移動し、長押しで終了して新規文書へ戻る。
+- [ ] スマホの「読取完了」で読取完了へ進む。
+- [ ] `REVIEW` のタップで次へ移動し、スマホの「新規」で新規文書へ戻る。
 - [ ] ファームウェアが2回の入力を`DOUBLE_SHORT`としてアプリへ配送する場合だけ、
   読取中は前ページ再撮影準備、
   撮影確認中は同ページ再撮影準備、閲覧中は前へ移動し、意図しない撮影をしない。
@@ -111,7 +128,7 @@ adb logcat -v threadtime -s DocScanRokid:*
 
 ## E. 写真とOCR
 
-- [ ] 短押し→長押しの二段階操作と1.5秒静止待ちを経た
+- [ ] タップ→タップの二段階操作と1.5秒静止待ちを経た
   `takePhoto(1920, 1080, 80)` がtrueを返す。
 - [ ] `onImageReceived` のログにJPEGバイト数と予算比が記録される。
 - [ ] callback到着前の連続操作で2件目の`takePhoto`が発行されない。
@@ -119,7 +136,7 @@ adb logcat -v threadtime -s DocScanRokid:*
 - [ ] 撮影後は `CAPTURE_REVIEW` になり、写真が「未登録」と表示される。
 - [ ] 初回撮影前に文書自体は作成されるが、未登録の間は対象 `page_index` が
   `/scan-status.page_indexes` に増えず、次ページ番号も変化しない。
-- [ ] 長押しまたは「この写真を登録」で登録成功した後にだけ
+- [ ] 「この写真を登録」で登録成功した後にだけ
   `/scan-status.pages[n].has_image` がtrueになる。
 - [ ] 登録通信が失敗した場合は未登録写真を保持し、対象ページと次ページ番号を
   進めず再試行できる。
@@ -127,11 +144,11 @@ adb logcat -v threadtime -s DocScanRokid:*
 - [ ] 写真回転の初期値が、検証済み実機に合わせた90°である。
 - [ ] スマホで0/90/180/270°を選び「同じページを撮り直す」と、選択した回転が
   次の再撮影とOCRに適用され、現在の未登録写真自体は変更されない。
-- [ ] 用紙まで40〜60cm離し、用紙中心を照準の「＋」へ合わせ、`AIMING`の長押し後1.5秒から
+- [ ] 用紙まで40〜60cm離し、用紙中心を照準の「＋」へ合わせ、`AIMING`のタップ後1.5秒から
   callbackまで静止して撮影できる。
 - [ ] 撮影後プレビューで用紙の四隅、文字の輪郭、ブレを確認できる。
-- [ ] ブレや欠けがある未登録写真は、撮影確認中の短押しまたは2回短押しで
-  同ページ再撮影を準備し、照準確認後の長押しで撮り直せる。
+- [ ] ブレや欠けがある未登録写真は、撮影確認中のタップで同ページ再撮影を準備し、
+  照準確認後のタップで撮り直せる。
 - [ ] 端末OCRが0文字なら警告され、自動登録されない。
 - [ ] OCRが0文字でも、警告を確認して明示登録すると元写真が保存される。
 - [ ] 「未登録写真を破棄」でサーバーへ送信せず、同じ次ページ番号の読取へ戻る。
@@ -215,7 +232,7 @@ threadだけで停止したまま、次を確認します。
 ## F. 文書確定・解答
 
 - [ ] ページ番号が0から連続している。
-- [ ] 長押し後に `/finalize` → session作成 → `/finalize-reading` が完了する。
+- [ ] 「読取完了」後に `/finalize` → session作成 → `/finalize-reading` が完了する。
 - [ ] Analyzer由来 `ocr_text` / `vision_text` がページへ保存される。
 - [ ] 問題が1件以上に分割される。
 - [ ] Solverへ各問題の開始ページ `image_path` が渡る。
@@ -257,7 +274,7 @@ threadだけで停止したまま、次を確認します。
 - [ ] 再起動や再接続だけでは `takePhoto` が発行されず、自動撮影されない。
 - [ ] `/finalize` 後・session作成前の中断から自動復帰する。
 - [ ] session作成後・`finalize-reading`前の中断から自動復帰する。
-- [ ] 同じ長押しが二重配送されても文書/問題/課金呼び出しが重複しない。
+- [ ] 同じ読取完了操作が二重配送されても文書/問題/課金呼び出しが重複しない。
 - [ ] Relay表示中はスマホがスリープせず、複数ページの写真callbackが継続する。
 - [ ] Wi-Fi一時切断後、エラーがスマホとHUDに表示され、再操作で復旧できる。
 

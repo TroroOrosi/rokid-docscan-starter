@@ -7,9 +7,11 @@
 > [device-verification-checklist.md](device-verification-checklist.md) を優先してください。
 > 特に下表の「ダブルタップ=読取完了」は現行Android Relayには適用しません。
 > 現行グラスではダブルタップがCustomView終了として標準メニューへ戻るため、Relayは
-> `AI-exit`後に現在画面を再表示します。現行撮影は短押しで`AIMING`、`AIMING`の長押しで
-> 静止・撮影です。`AIMING`の短押し/2回短押しと`STABILIZING`の全操作は取り消し、
-> `CAPTURE_REVIEW`の短押し/2回短押しは再撮影準備、長押しは登録です。
+> `AI-exit`後に現在画面を再表示します。検証済みファームウェアがRelayへ配送する入力は
+> **1本指タップだけ**で、下表の長押し・2回短押しは届きません。現行撮影はタップで
+> `AIMING`、`AIMING`のタップで静止・撮影、`STABILIZING`のタップは取り消し、
+> `CAPTURE_REVIEW`のタップは再撮影準備です。**登録・読取完了・新規はスマホの
+> ボタン**で行います。
 
 本サーバは**サーバ側**実装です。ここでは眼鏡（Rokid Glasses）と伴走アプリ
 （スマホ＝裏方）の表示・操作に関するレガシー規約を記録します。サーバは守れる範囲を
