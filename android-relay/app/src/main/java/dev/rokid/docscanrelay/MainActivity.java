@@ -82,6 +82,7 @@ public final class MainActivity extends Activity
     private ImageView capturePreview;
     private TextView capturePreviewMessage;
     private LinearLayout captureReviewActions;
+    private Button autoCaptureButton;
     private Button confirmCaptureButton;
     private Button retakeCaptureButton;
     private Button discardCaptureButton;
@@ -170,6 +171,14 @@ public final class MainActivity extends Activity
         connectRow.addView(
                 button("Hi Rokid認可・再接続", ignored -> authorizeAndConnect()), weighted());
         root.addView(connectRow, matchWrap());
+
+        // The capture-review CustomView swallows taps: it closes without
+        // delivering any AI event. Hands-free reading is therefore the primary
+        // way to get pages in, and the manual row below stays for diagnosis.
+        LinearLayout autoRow = horizontalRow();
+        autoCaptureButton = button("自動読取 開始", ignored -> toggleAutoCapture());
+        autoRow.addView(autoCaptureButton, weighted());
+        root.addView(autoRow, matchWrap());
 
         LinearLayout captureRow = horizontalRow();
         captureRow.addView(
@@ -619,6 +628,26 @@ public final class MainActivity extends Activity
         } catch (RejectedExecutionException ignored) {
             // The activity is already closing.
         }
+    }
+
+    private void toggleAutoCapture() {
+        if (controller.isAutoCaptureEnabled()) {
+            controller.stopAutoCapture();
+        } else {
+            controller.startAutoCapture();
+        }
+    }
+
+    @Override
+    public void onAutoCaptureChanged(boolean running) {
+        runOnUiThread(() -> {
+            if (autoCaptureButton != null) {
+                autoCaptureButton.setText(running ? "自動読取 停止" : "自動読取 開始");
+            }
+            appendLog(running
+                    ? "Automatic reading started"
+                    : "Automatic reading stopped");
+        });
     }
 
     @Override

@@ -17,11 +17,11 @@ android {
         // 4 is skipped: the real-device test phone already carries a
         // versionCode 4 build, and installing a lower code fails with
         // INSTALL_FAILED_VERSION_DOWNGRADE without a data-losing uninstall.
-        // 6 carried the echo-ordering fix and the framing verdict, and is
-        // already installed on the test phone; 7 adds glasses-only
-        // registration by countdown.
-        versionCode = 7
-        versionName = "0.3.2"
+        // 6 carried the echo-ordering fix and the framing verdict, 7 the
+        // countdown registration; 8 adds hands-free burst reading, after the
+        // capture-review view was measured to swallow taps entirely.
+        versionCode = 8
+        versionName = "0.3.3"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
