@@ -16,7 +16,7 @@
 | Global Hi Rokid version / versionCode | |
 | Rokid Glasses model | |
 | YodaOS build | |
-| APK commit SHA / client version（期待値 `0.3.4`） | |
+| APK commit SHA / client version（期待値 `0.3.5`） | |
 | CXR-L service version / versionCode（接続ログ） | |
 | 採用した撮影設定 `幅x高さ q品質` | |
 | サーバー commit SHA / APP・API version | |
@@ -129,7 +129,7 @@ N/Aとし、対応するスマホ側ボタンで確認してください。
 - [ ] スマホ画面に「この写真を登録」「同じページを撮り直す」
   「未登録写真を破棄」のフォールバック操作が表示され、それぞれ実行できる。
 
-## D-2. 自動読取（`0.3.4`）
+## D-2. 自動読取（`0.3.5`）
 
 操作を前提にしない経路です。`CAPTURE_REVIEW` のタップは実機で `AI-exit` を配送しない
 ことが実測されているため、こちらが主経路になります。

@@ -61,14 +61,23 @@ public final class DocScanController implements AutoCloseable {
     // Instead of asking, the relay shoots the same page several times, keeps
     // the frame the recogniser did best on, and registers it.
     private static final int AUTO_BURST_SHOTS = 3;
-    private static final long AUTO_SHOT_INTERVAL_MILLIS = 900;
-    private static final long AUTO_PAGE_TURN_MILLIS = 6000;
+    // Continuous scanning is what the operator asked for, so the intervals
+    // are only long enough to let the camera settle between frames and to
+    // let a page be turned. They are not a throttle.
+    private static final long AUTO_SHOT_INTERVAL_MILLIS = 400;
+    private static final long AUTO_PAGE_TURN_MILLIS = 2500;
     /** Give up on a page that keeps reading as the one already registered. */
     private static final int AUTO_DUPLICATE_BURST_LIMIT = 20;
     /** An unreadable burst is retried at once; nothing was captured to keep. */
-    private static final long AUTO_RETRY_IMMEDIATE_MILLIS = 300;
-    /** After this many unreadable bursts, stop firing the camera flat out. */
-    private static final int AUTO_UNREADABLE_RETRY_LIMIT = 5;
+    private static final long AUTO_RETRY_IMMEDIATE_MILLIS = 200;
+    /**
+     * Unreadable bursts keep retrying at full speed for this long before the
+     * interval opens up slightly. This is a thermal and battery guard, not a
+     * privacy one: the LED stays lit for exactly as long as the camera runs,
+     * which is the whole point of it.
+     */
+    private static final int AUTO_UNREADABLE_RETRY_LIMIT = 40;
+    private static final long AUTO_UNREADABLE_BACKOFF_MILLIS = 1200;
     private static final String KEY_PHOTO_WIDTH = "photo_width";
     private static final String KEY_PHOTO_HEIGHT = "photo_height";
     private static final String KEY_PHOTO_QUALITY = "photo_quality";
@@ -277,14 +286,13 @@ public final class DocScanController implements AutoCloseable {
         if (!linkReady || state == RelayState.DISCONNECTED) {
             return;
         }
-        if (link.isCustomViewActuallyOpen()) {
-            listener.onUpdate(
-                    state,
-                    currentHudLines,
-                    "System-menu recovery skipped because the current "
-                            + "DocScan CustomView is already open");
-            return;
-        }
+        // Deliberately not consulting isCustomViewOpened() here. This runs only
+        // when an AI-exit arrived and no open callback followed within 650 ms,
+        // so our own bookkeeping already proves the view is not confirmed open.
+        // The service disagrees: every close callback on this firmware reports
+        // remoteStillOpen=true, including the ones the user caused by leaving
+        // for the default screen. Trusting it stranded the operator on the home
+        // screen, because recovery skipped itself every single time.
         long restoredGeneration;
         CaptureReviewStore.Pending pending = captureReview.peek();
         if (state == RelayState.CAPTURE_REVIEW && pending != null) {
@@ -741,6 +749,17 @@ public final class DocScanController implements AutoCloseable {
     }
 
     private void triggerArmedCaptureNow() {
+        if (state == RelayState.CAPTURE_REVIEW && captureReview.peek() != null) {
+            // Pressing the shutter while looking at a photo can only mean
+            // "take another one". Answering "撮影準備なし" was a dead end that
+            // made the operator hunt for the right button.
+            if (autoCaptureEnabled) {
+                beginAutoBurst();
+            } else {
+                retakePendingCaptureNow(null);
+            }
+            return;
+        }
         if (state != RelayState.AIMING || armedPageIndex < 0) {
             publish(
                     state,
@@ -1657,7 +1676,9 @@ public final class DocScanController implements AutoCloseable {
                             + (backOff ? "after backing off" : "immediately"));
             scheduleAuto(
                     this::beginAutoBurst,
-                    backOff ? AUTO_PAGE_TURN_MILLIS : AUTO_RETRY_IMMEDIATE_MILLIS);
+                    backOff
+                            ? AUTO_UNREADABLE_BACKOFF_MILLIS
+                            : AUTO_RETRY_IMMEDIATE_MILLIS);
             return;
         }
         unreadableBurstsSeen = 0;

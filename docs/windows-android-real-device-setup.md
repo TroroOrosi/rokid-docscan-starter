@@ -35,7 +35,7 @@ Global版Hi Rokidを経由してRokid Glassesを使う構成の正本です。
 確認実績の基準値はCxrGlobalの公開情報と同じく、Global Hi Rokidパッケージ
 `com.rokid.sprite.global.aiapp`、CXR-L `client-l:1.0.1`です。Hi Rokidや
 YodaOS更新後はAIDL Actionと実機動作を再検証してください。
-この手順のAndroid clientは`0.3.4`、Glasses View contractは`1.8.0`です。
+この手順のAndroid clientは`0.3.5`、Glasses View contractは`1.8.0`です。
 
 ## 3. Windowsでサーバを起動
 

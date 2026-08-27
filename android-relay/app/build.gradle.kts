@@ -21,8 +21,10 @@ android {
         // countdown registration, 8 hands-free burst reading; 9 takes the
         // OS double-tap exit as the retake signal and retries an unreadable
         // burst at once.
-        versionCode = 9
-        versionName = "0.3.4"
+        // 10 fixes menu-exit recovery, which skipped itself because the
+        // service reports the CustomView as open even on the home screen.
+        versionCode = 10
+        versionName = "0.3.5"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
