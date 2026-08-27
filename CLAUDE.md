@@ -35,8 +35,17 @@ Rokid Glasses -> Global Hi Rokid -> Android relay -> FastAPI server -> HUD
   `onAiKeyDown`/`onAiKeyUp` never fire, and CustomView closes always arrive
   `userInitiated=false`. A user-originated `AI-exit` is the only glasses input
   the relay receives, and it carries no press duration. Treat it as the short
-  action only. Committing actions (登録 / 読取完了 / シャッター) stay on the
-  phone until a second signal is proven on hardware.
+  action only. With one signal, the tap has to be the reversible action and a
+  commit has to be the outcome of not tapping: the tap arms/retakes, the
+  shutter fires on the tap in `AIMING`, and page registration commits on a
+  countdown in `CAPTURE_REVIEW`. 読取完了 has no such timeout — a pause between
+  pages is indistinguishable from being finished — so it stays on the phone.
+- A view swap closes before it reopens and the glasses echo the close. Arm the
+  echo suppression *before* the `closeCustomView`/`openCustomView` Binder
+  calls. Arming it afterwards let the swap's own echo register as a tap, which
+  fired the shutter the instant `AIMING` appeared.
+- Never start an auto-registration countdown before the glasses acknowledge the
+  review view. Nothing may be uploaded that the operator was not shown.
 - CUSTOMVIEW output is a black background, green text, and at most three lines.
   Current Global builds may require close-and-open for a reliable redraw.
 - Keep the phone activity awake during a session. Some firmware stops photo

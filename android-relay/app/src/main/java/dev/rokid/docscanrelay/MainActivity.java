@@ -603,6 +603,8 @@ public final class MainActivity extends Activity
                     capturePreviewMessage.setText(
                             "P" + (pending.pageIndex + 1) + "（まだ未登録）— "
                                     + verdict + " " + warning
+                                    + "\nグラスの表示が出てから一定時間で自動登録します。"
+                                    + "撮り直すならグラスをタップしてください。"
                                     + "\n用紙の四隅と文字の輪郭を確認し、登録か撮り直しを選んでください。");
                     capturePreview.setVisibility(bitmap == null ? View.GONE : View.VISIBLE);
                     capturePreviewMessage.setVisibility(View.VISIBLE);

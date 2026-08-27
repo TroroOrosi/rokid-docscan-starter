@@ -45,6 +45,13 @@ public final class DocScanController implements AutoCloseable {
     private static final long CAPTURE_TIMEOUT_SECONDS = 30;
     private static final long SHUTTER_STABILIZATION_MILLIS = 1500;
     private static final long CUSTOM_VIEW_ACK_TIMEOUT_MILLIS = 3000;
+    // This firmware delivers one tap and nothing else, and the tap is already
+    // the retake. Registration therefore has to be the outcome of doing
+    // nothing, or it is unreachable from the glasses. A page the framing check
+    // passed commits quickly; anything it could not vouch for waits long
+    // enough to be tapped away.
+    private static final long AUTO_COMMIT_COMPLETE_MILLIS = 4000;
+    private static final long AUTO_COMMIT_UNVERIFIED_MILLIS = 12000;
     private static final String KEY_PHOTO_WIDTH = "photo_width";
     private static final String KEY_PHOTO_HEIGHT = "photo_height";
     private static final String KEY_PHOTO_QUALITY = "photo_quality";
@@ -81,6 +88,10 @@ public final class DocScanController implements AutoCloseable {
             RokidGlobalLink.NO_VIEW_GENERATION;
     private boolean captureGuideAcknowledged;
     private boolean stabilizationTimerScheduled;
+    private long reviewGeneration;
+    private long reviewViewGeneration = RokidGlobalLink.NO_VIEW_GENERATION;
+    private boolean autoCommitArmed;
+    private boolean autoCommitScheduled;
     private long sessionId;
     private int reviewIndex;
     private int reviewViewPage;
@@ -308,6 +319,10 @@ public final class DocScanController implements AutoCloseable {
     }
 
     private void onCustomViewAvailableNow(long generation, String purpose) {
+        if (state == RelayState.CAPTURE_REVIEW) {
+            scheduleAutoCommitOnAck(generation, purpose);
+            return;
+        }
         if (generation != captureGuideViewGeneration
                 || (state != RelayState.AIMING
                 && state != RelayState.STABILIZING)) {
@@ -366,7 +381,10 @@ public final class DocScanController implements AutoCloseable {
                 return;
             }
             listener.onCaptureReview(pending);
-            publishCaptureReview(pending, "Recovered unregistered photo after app restart");
+            publishCaptureReview(
+                    pending,
+                    "Recovered unregistered photo after app restart",
+                    true);
         });
     }
 
@@ -445,7 +463,10 @@ public final class DocScanController implements AutoCloseable {
             CaptureReviewStore.Pending pending = captureReview.peek();
             if (pending != null) {
                 listener.onCaptureReview(pending);
-                publishCaptureReview(pending, "Recovered unregistered photo review");
+                publishCaptureReview(
+                        pending,
+                        "Recovered unregistered photo review",
+                        true);
                 return;
             }
             try {
@@ -543,7 +564,10 @@ public final class DocScanController implements AutoCloseable {
             CaptureReviewStore.Pending pending = captureReview.peek();
             if (pending != null) {
                 listener.onCaptureReview(pending);
-                publishCaptureReview(pending, "Recovered unregistered photo review");
+                publishCaptureReview(
+                        pending,
+                        "Recovered unregistered photo review",
+                        true);
                 return;
             }
             try {
@@ -1083,7 +1107,7 @@ public final class DocScanController implements AutoCloseable {
         if (pending.hasOcrFailure()) {
             diagnostic += ", OCR error: " + pending.ocrFailure;
         }
-        publishCaptureReview(pending, diagnostic);
+        publishCaptureReview(pending, diagnostic, true);
     }
 
     public void confirmPendingCapture() {
@@ -1356,32 +1380,149 @@ public final class DocScanController implements AutoCloseable {
             CaptureReviewStore.Pending pending,
             String diagnostic
     ) {
+        publishCaptureReview(pending, diagnostic, false);
+    }
+
+    /**
+     * Shows the unregistered photo.
+     *
+     * <p>{@code armAutoCommit} is what makes registration reachable without
+     * the phone: the countdown starts only once the glasses acknowledge this
+     * view, so nothing is uploaded that the operator was not shown. It is
+     * deliberately withheld from re-publishes that follow a failed upload, or
+     * the relay would retry a failing server on a loop.</p>
+     */
+    private void publishCaptureReview(
+            CaptureReviewStore.Pending pending,
+            String diagnostic,
+            boolean armAutoCommit
+    ) {
         if (committedRecoveryBlocked || pending == committedPendingLocked) {
             publishCommittedPendingLocked(pending, diagnostic);
             return;
         }
         clearArmedCapture();
+        // Any earlier countdown belongs to a view that is being replaced.
+        reviewGeneration++;
+        autoCommitScheduled = false;
+        autoCommitArmed = armAutoCommit;
+        reviewViewGeneration = RokidGlobalLink.NO_VIEW_GENERATION;
         // The operator cannot see the camera's field of view, so the framing
         // verdict leads: a page that ran outside the frame must read as a
         // failure, not as a photo that is merely waiting to be registered.
         String page = "P" + (pending.pageIndex + 1);
         String ocrLine = "OCR " + pending.ocrCharacters() + "文字";
-        List<String> lines = pending.isFramingFailing()
-                ? List.of(
-                        page + " 不合格 " + pending.framing.describe(),
-                        "タップ: 撮り直す",
-                        ocrLine)
-                : List.of(
-                        page + " 未登録 " + pending.framing.describe(),
-                        ocrLine + "・タップで撮り直す",
-                        "登録はスマホのボタン");
+        List<String> lines;
+        if (armAutoCommit) {
+            long seconds = autoCommitDelayMillis(pending) / 1000;
+            lines = List.of(
+                    page + (pending.isFramingFailing() ? " 不合格 " : " 合格 ")
+                            + pending.framing.describe(),
+                    seconds + "秒で登録",
+                    "タップ: 撮り直す");
+        } else {
+            lines = pending.isFramingFailing()
+                    ? List.of(
+                            page + " 不合格 " + pending.framing.describe(),
+                            "タップ: 撮り直す",
+                            ocrLine)
+                    : List.of(
+                            page + " 未登録 " + pending.framing.describe(),
+                            ocrLine + "・タップで撮り直す",
+                            "登録はスマホのボタン");
+        }
         state = RelayState.CAPTURE_REVIEW;
         currentHudLines = lines;
-        link.showCaptureReview(
+        long viewGeneration = link.showCaptureReview(
                 pending.jpeg,
                 pending.rotationDegrees,
                 lines);
+        if (armAutoCommit) {
+            if (viewGeneration == RokidGlobalLink.NO_VIEW_GENERATION) {
+                // The glasses never got this view, so the operator cannot see
+                // what would be uploaded. Fall back to the phone button.
+                autoCommitArmed = false;
+                diagnostic += "; auto-registration withheld because the review"
+                        + " view was not accepted by the glasses";
+            } else {
+                reviewViewGeneration = viewGeneration;
+            }
+        }
         listener.onUpdate(RelayState.CAPTURE_REVIEW, lines, diagnostic);
+    }
+
+    static long autoCommitDelayMillis(CaptureReviewStore.Pending pending) {
+        return pending.framing.verdict() == PageFraming.Verdict.COMPLETE
+                ? AUTO_COMMIT_COMPLETE_MILLIS
+                : AUTO_COMMIT_UNVERIFIED_MILLIS;
+    }
+
+    /**
+     * Whether a countdown that has just expired may still register its photo.
+     *
+     * <p>A tap leaves {@code CAPTURE_REVIEW}, and any newer review view bumps
+     * the generation, so both are enough to retire a timer that is already in
+     * flight. Kept static so the arithmetic is covered without a Context.</p>
+     */
+    static boolean shouldAutoCommit(
+            RelayState state,
+            long generationAtSchedule,
+            long currentGeneration,
+            boolean armed
+    ) {
+        return armed
+                && state == RelayState.CAPTURE_REVIEW
+                && generationAtSchedule == currentGeneration;
+    }
+
+    /**
+     * Starts the registration countdown once the glasses confirm the review
+     * view is on screen. Without that acknowledgement nothing is uploaded.
+     */
+    private void scheduleAutoCommitOnAck(long generation, String purpose) {
+        if (!autoCommitArmed
+                || autoCommitScheduled
+                || generation != reviewViewGeneration) {
+            return;
+        }
+        CaptureReviewStore.Pending pending = captureReview.peek();
+        if (pending == null) {
+            autoCommitArmed = false;
+            return;
+        }
+        autoCommitScheduled = true;
+        long delayMillis = autoCommitDelayMillis(pending);
+        final long generationAtSchedule = reviewGeneration;
+        watchdog.schedule(
+                () -> enqueueAutoCommit(generationAtSchedule),
+                delayMillis,
+                TimeUnit.MILLISECONDS);
+        listener.onUpdate(
+                state,
+                currentHudLines,
+                "Auto-registration countdown started after review view"
+                        + " acknowledgement generation=" + generation
+                        + " purpose=" + purpose
+                        + " delay=" + delayMillis + "ms"
+                        + " framing=" + pending.framing);
+    }
+
+    private void enqueueAutoCommit(long generationAtSchedule) {
+        try {
+            serial.execute(() -> {
+                if (!shouldAutoCommit(
+                        state,
+                        generationAtSchedule,
+                        reviewGeneration,
+                        autoCommitArmed)) {
+                    return;
+                }
+                autoCommitArmed = false;
+                confirmPendingCaptureNow();
+            });
+        } catch (RejectedExecutionException ignored) {
+            // The activity closed while the countdown was running.
+        }
     }
 
     private void publishCommittedPendingLocked(
