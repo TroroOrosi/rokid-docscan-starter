@@ -18,10 +18,11 @@ android {
         // versionCode 4 build, and installing a lower code fails with
         // INSTALL_FAILED_VERSION_DOWNGRADE without a data-losing uninstall.
         // 6 carried the echo-ordering fix and the framing verdict, 7 the
-        // countdown registration; 8 adds hands-free burst reading, after the
-        // capture-review view was measured to swallow taps entirely.
-        versionCode = 8
-        versionName = "0.3.3"
+        // countdown registration, 8 hands-free burst reading; 9 takes the
+        // OS double-tap exit as the retake signal and retries an unreadable
+        // burst at once.
+        versionCode = 9
+        versionName = "0.3.4"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

@@ -65,6 +65,10 @@ public final class DocScanController implements AutoCloseable {
     private static final long AUTO_PAGE_TURN_MILLIS = 6000;
     /** Give up on a page that keeps reading as the one already registered. */
     private static final int AUTO_DUPLICATE_BURST_LIMIT = 20;
+    /** An unreadable burst is retried at once; nothing was captured to keep. */
+    private static final long AUTO_RETRY_IMMEDIATE_MILLIS = 300;
+    /** After this many unreadable bursts, stop firing the camera flat out. */
+    private static final int AUTO_UNREADABLE_RETRY_LIMIT = 5;
     private static final String KEY_PHOTO_WIDTH = "photo_width";
     private static final String KEY_PHOTO_HEIGHT = "photo_height";
     private static final String KEY_PHOTO_QUALITY = "photo_quality";
@@ -112,6 +116,7 @@ public final class DocScanController implements AutoCloseable {
     private double autoBestScore;
     private String lastRegisteredPageText = "";
     private int duplicateBurstsSeen;
+    private int unreadableBurstsSeen;
     private long sessionId;
     private int reviewIndex;
     private int reviewViewPage;
@@ -283,11 +288,25 @@ public final class DocScanController implements AutoCloseable {
         long restoredGeneration;
         CaptureReviewStore.Pending pending = captureReview.peek();
         if (state == RelayState.CAPTURE_REVIEW && pending != null) {
-            restoredGeneration = link.showCaptureReview(
-                    pending.jpeg,
-                    pending.rotationDegrees,
-                    currentHudLines);
-        } else if ((state == RelayState.AIMING || state == RelayState.STABILIZING)
+            // The capture-review view delivers no AI event for a single tap —
+            // measured on hardware, the tap closes the CustomView and nothing
+            // follows. The only thing the operator can express from there is
+            // the OS double-tap that leaves for the default screen, and that
+            // does arrive. Take it as "retake this page" rather than merely
+            // redrawing the photo they were trying to reject.
+            listener.onUpdate(
+                    state,
+                    currentHudLines,
+                    "System-menu exit taken as a retake request for page index "
+                            + pending.pageIndex);
+            if (autoCaptureEnabled) {
+                beginAutoBurst();
+            } else {
+                retakePendingCaptureNow(null);
+            }
+            return;
+        }
+        if ((state == RelayState.AIMING || state == RelayState.STABILIZING)
                 && armedPageIndex >= 0) {
             if (state == RelayState.STABILIZING) {
                 // A system-menu exit pauses the shutter countdown. Invalidate
@@ -1446,19 +1465,18 @@ public final class DocScanController implements AutoCloseable {
         if (armAutoCommit) {
             long seconds = autoCommitDelayMillis(pending) / 1000;
             lines = List.of(
-                    page + (pending.isFramingFailing() ? " 不合格 " : " 合格 ")
-                            + pending.framing.describe(),
+                    reviewHeadline(pending.pageIndex + 1, pending.framing),
                     seconds + "秒で登録",
-                    "タップ: 撮り直す");
+                    "2回タップ: 撮り直す");
         } else {
             lines = pending.isFramingFailing()
                     ? List.of(
-                            page + " 不合格 " + pending.framing.describe(),
-                            "タップ: 撮り直す",
+                            reviewHeadline(pending.pageIndex + 1, pending.framing),
+                            "2回タップ: 撮り直す",
                             ocrLine)
                     : List.of(
-                            page + " 未登録 " + pending.framing.describe(),
-                            ocrLine + "・タップで撮り直す",
+                            reviewHeadline(pending.pageIndex + 1, pending.framing),
+                            ocrLine + "・2回タップで撮り直す",
                             "登録はスマホのボタン");
         }
         state = RelayState.CAPTURE_REVIEW;
@@ -1623,16 +1641,26 @@ public final class DocScanController implements AutoCloseable {
         CaptureReviewStore.Pending best = autoBest;
         autoBest = null;
         autoBestScore = 0;
-        if (best == null || best.ocrCharacters() == 0) {
-            // Nothing readable. Wait for the operator to reposition rather
-            // than registering a blank page.
+        if (best == null || best.ocrCharacters() == 0 || best.hasOcrFailure()) {
+            // Nothing was read, so there is nothing to register and nothing to
+            // wait for: go straight back and shoot again. Only after several
+            // consecutive failures does the interval open up, because a camera
+            // firing continuously keeps the privacy LED lit and heats the
+            // glasses.
+            unreadableBurstsSeen++;
+            boolean backOff = unreadableBurstsSeen > AUTO_UNREADABLE_RETRY_LIMIT;
             publishAutoWaiting(
                     "読み取れません",
-                    "位置を調整してください",
-                    "Automatic burst produced no readable frame; retrying");
-            scheduleAuto(this::beginAutoBurst, AUTO_PAGE_TURN_MILLIS);
+                    backOff ? "位置を調整してください" : "すぐに撮り直します",
+                    "Automatic burst produced no readable frame ("
+                            + unreadableBurstsSeen + " in a row); retrying "
+                            + (backOff ? "after backing off" : "immediately"));
+            scheduleAuto(
+                    this::beginAutoBurst,
+                    backOff ? AUTO_PAGE_TURN_MILLIS : AUTO_RETRY_IMMEDIATE_MILLIS);
             return;
         }
+        unreadableBurstsSeen = 0;
         if (PageTextSimilarity.isSamePage(lastRegisteredPageText, best.ocrText)) {
             duplicateBurstsSeen++;
             if (duplicateBurstsSeen >= AUTO_DUPLICATE_BURST_LIMIT) {
@@ -1678,6 +1706,30 @@ public final class DocScanController implements AutoCloseable {
                 documentId > 0 ? RelayState.READING : RelayState.READY,
                 List.of(first, second, "停止はスマホ"),
                 diagnostic);
+    }
+
+    /**
+     * First HUD line of the review.
+     *
+     * <p>Only a page the check actually vouched for may be called 合格. An
+     * unjudgeable frame said "合格 判定情報なし" on hardware, which claims a
+     * pass and denies one in the same breath.</p>
+     */
+    static String reviewHeadline(int pageNumber, PageFraming framing) {
+        String verdict;
+        switch (framing.verdict()) {
+            case COMPLETE:
+                verdict = "合格 ";
+                break;
+            case CLIPPED:
+                verdict = "不合格 ";
+                break;
+            default:
+                // describe() already states that it could not be judged.
+                verdict = "";
+                break;
+        }
+        return "P" + pageNumber + " " + verdict + framing.describe();
     }
 
     static long autoCommitDelayMillis(CaptureReviewStore.Pending pending) {

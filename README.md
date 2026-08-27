@@ -44,7 +44,7 @@ submodule、AARコピーは不要です。
 CXR-L の実装境界は
 [CXR-L / Global Hi Rokid integration](docs/cxr-l-integration.md)です。
 
-現在のバージョン: **Server APP 0.15.0 / API 1.13.1 / Android client 0.3.3 /
+現在のバージョン: **Server APP 0.15.0 / API 1.13.1 / Android client 0.3.4 /
 Glasses View contract 1.8.0**。
 
 ---

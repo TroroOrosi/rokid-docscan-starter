@@ -115,10 +115,15 @@ public final class MainActivity extends Activity
 
         TextView description = new TextView(this);
         description.setText(
-                "グラスは1本指タップだけが届きます（長押しとダブルタップはOSが占有）。"
-                        + "撮影準備後は照準でタップ=シャッター、"
-                        + "撮影後はタップ=撮り直し準備です。"
-                        + "登録・読取完了・撮影取消はこの画面のボタンで行います。");
+                "推奨は「自動読取」です。開始すると1ページを3枚撮り、"
+                        + "最も読めた1枚を自動で登録し、次のページへ進みます。"
+                        + "グラス操作は要りません。読取完了だけこの画面で行います。\n"
+                        + "手動時: グラスは1本指タップだけが届きます"
+                        + "（長押しとダブルタップはOSが占有）。"
+                        + "照準でタップ=シャッター。撮影確認画面は1回タップが届かないため"
+                        + "（実機で `AI-exit` 非配送を確認）、撮り直しは2回タップ"
+                        + "（デフォルト画面へ戻ると自動復帰して撮り直します）、"
+                        + "登録は待機満了かこの画面のボタンです。");
         description.setTextSize(14);
         root.addView(description, matchWrap());
 
@@ -613,7 +618,8 @@ public final class MainActivity extends Activity
                             "P" + (pending.pageIndex + 1) + "（まだ未登録）— "
                                     + verdict + " " + warning
                                     + "\nグラスの表示が出てから一定時間で自動登録します。"
-                                    + "撮り直すならグラスをタップしてください。"
+                                    + "撮り直すならグラスを2回タップしてください"
+                                    + "（デフォルト画面へ戻ると自動で復帰し、撮り直します）。"
                                     + "\n用紙の四隅と文字の輪郭を確認し、登録か撮り直しを選んでください。");
                     capturePreview.setVisibility(bitmap == null ? View.GONE : View.VISIBLE);
                     capturePreviewMessage.setVisibility(View.VISIBLE);
