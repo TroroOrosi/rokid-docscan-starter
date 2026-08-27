@@ -29,6 +29,7 @@ import base64
 import json
 import math
 import os
+from urllib.parse import urlparse
 
 from .audio_formats import detect_audio_format, detect_openai_audio_format
 
@@ -183,7 +184,47 @@ class LLMClient:
 
 # --- provider SDK construction (lazy) ---------------------------------------
 
+#: The environment variable each SDK silently adopts as its endpoint when the
+#: client is constructed without arguments.
+_BASE_URL_ENV = {
+    "anthropic": "ANTHROPIC_BASE_URL",
+    "openai": "OPENAI_BASE_URL",
+    "gemini": "GOOGLE_GEMINI_BASE_URL",
+}
+
+_LOCAL_HOSTS = ("localhost", "127.0.0.1", "0.0.0.0", "[::1]")
+
+
+def _reject_local_endpoint(provider: str) -> None:
+    """Refuse to analyze a page through a local proxy that was set for other tools.
+
+    The SDK clients below take no arguments, so they adopt these variables from
+    the environment. A developer proxy left in the user environment therefore
+    reroutes page analysis silently, and the failure only surfaces *after* the
+    page has been photographed, which costs a whole capture session. Fail at
+    construction with the variable named instead.
+    """
+    name = _BASE_URL_ENV.get(provider)
+    if not name:
+        return
+    value = (os.environ.get(name) or "").strip()
+    if not value:
+        return
+    host = urlparse(value if "//" in value else f"//{value}").hostname or ""
+    if host.lower() not in _LOCAL_HOSTS:
+        return
+    if os.environ.get("ROKID_ALLOW_LOCAL_LLM_ENDPOINT") == "1":
+        return
+    raise LLMConfigError(
+        f"{name}={value} points at a local endpoint, so provider '{provider}' "
+        "would analyze pages through it instead of the real API. Clear the "
+        "variable in the server's shell, or set "
+        "ROKID_ALLOW_LOCAL_LLM_ENDPOINT=1 if the local endpoint is intended."
+    )
+
+
 def _build_sdk(provider: str):
+    _reject_local_endpoint(provider)
     try:
         if provider == "anthropic":
             import anthropic  # noqa: PLC0415

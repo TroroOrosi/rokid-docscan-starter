@@ -12,6 +12,7 @@ import pytest
 
 from app.llm import (
     DEFAULT_MODELS,
+    _build_sdk,
     LLMClient,
     LLMConfigError,
     clamp01,
@@ -215,3 +216,42 @@ def test_no_image_stays_text_only():
     sdk = _anthropic_sdk("ok")
     LLMClient(sdk, provider="anthropic", model="m").complete(system="s", prompt="p")
     assert sdk.calls[0]["messages"][0]["content"] == "p"
+
+
+# --- local-endpoint guard ----------------------------------------------------
+
+@pytest.mark.parametrize(
+    ("provider", "var"),
+    [
+        ("anthropic", "ANTHROPIC_BASE_URL"),
+        ("openai", "OPENAI_BASE_URL"),
+    ],
+)
+def test_local_base_url_is_refused_before_any_page_is_analyzed(monkeypatch, provider, var):
+    """A developer proxy left in the environment must fail loudly at construction.
+
+    The SDK clients take no arguments, so they adopt these variables silently and
+    the misroute would only surface after the page had already been photographed.
+    """
+    monkeypatch.setenv(var, "http://127.0.0.1:8787/v1")
+    monkeypatch.delenv("ROKID_ALLOW_LOCAL_LLM_ENDPOINT", raising=False)
+    with pytest.raises(LLMConfigError) as excinfo:
+        _build_sdk(provider)
+    assert var in str(excinfo.value)
+
+
+def test_local_base_url_is_allowed_with_an_explicit_opt_in(monkeypatch):
+    monkeypatch.setenv("OPENAI_BASE_URL", "http://localhost:8787/v1")
+    monkeypatch.setenv("ROKID_ALLOW_LOCAL_LLM_ENDPOINT", "1")
+    # Reaching the import is enough: the guard did not raise.
+    with pytest.raises((LLMConfigError, ImportError, Exception)):
+        _build_sdk("openai")
+
+
+def test_remote_base_url_is_untouched(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
+    monkeypatch.delenv("ROKID_ALLOW_LOCAL_LLM_ENDPOINT", raising=False)
+    try:
+        _build_sdk("anthropic")
+    except LLMConfigError as exc:
+        assert "points at a local endpoint" not in str(exc)
