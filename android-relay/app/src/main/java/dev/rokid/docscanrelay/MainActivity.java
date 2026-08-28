@@ -518,9 +518,18 @@ public final class MainActivity extends Activity
         if (controller == null
                 || !GlassesCloseInputPolicy.acceptsAsInput(
                         controller.getState(), controller.hasPendingCaptureReview())) {
-            RelayState ignoredIn = controller == null ? null : controller.getState();
+            // The view is gone whichever way this close was produced -- the
+            // operator double-tapping out to the launcher, or the glasses
+            // dismissing it on their ~30s timer -- so re-present it. Recovery
+            // used to be armed only from onAiExit, which is why nothing came
+            // back once the echo-driven arming was removed: an exit that
+            // arrives as a close never reached it.
+            RelayState closedIn = controller == null ? null : controller.getState();
+            mainHandler.removeCallbacks(systemMenuRecovery);
+            mainHandler.postDelayed(systemMenuRecovery, SYSTEM_MENU_RECOVERY_DELAY_MILLIS);
             runOnUiThread(() -> appendLog(
-                    "Ignored a user CustomView close in state " + ignoredIn));
+                    "User CustomView close in state " + closedIn
+                            + " is not input here; re-presenting the view"));
             return;
         }
         dispatchDiscreteGlassesAction("user CustomView close");

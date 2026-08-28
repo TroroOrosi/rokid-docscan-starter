@@ -3,22 +3,22 @@ package dev.rokid.docscanrelay;
 /**
  * Whether a user-originated CustomView close counts as glasses input.
  *
- * <p>The close is not always redundant with AI-exit. Measured on Hi Rokid
- * G1.12.10.0815 on 2026-08-29, a tap in AIMING produced no AI event at all and
- * arrived only as a close that {@code CustomViewCloseTracker} correctly scored
- * {@code userInitiated=true} -- three view-swap echoes in the same session
- * scored false, so the discrimination works. The relay then discarded it,
- * because close-as-input was restricted to the capture-review screen on the
- * assumption that AIMING always receives AI-exit. It does not, and the operator
- * saw a tap do nothing.</p>
+ * <p>A close scored {@code userInitiated=true} is only known not to be ours. It
+ * is not therefore the operator: measured on Hi Rokid G1.12.10.0815 on
+ * 2026-08-29, the closes that reached AIMING arrived 29.7s, 30.1s and 30.1s
+ * after their view opened, which is the glasses dismissing the CustomView on a
+ * timer. Accepting those as the tap fired the shutter and registered a page
+ * nobody asked for.</p>
+ *
+ * <p>So the capture-review screen keeps the exception it was given -- a tap
+ * there delivers no AI event and the operator has nothing else to press -- and
+ * every other state refuses. A close that is refused here is not discarded: it
+ * arms menu-exit recovery, because the view is gone either way.</p>
  */
 public final class GlassesCloseInputPolicy {
     private GlassesCloseInputPolicy() {}
 
     public static boolean acceptsAsInput(RelayState state, boolean hasPendingCaptureReview) {
-        if (state == RelayState.CAPTURE_REVIEW) {
-            return hasPendingCaptureReview;
-        }
-        return state == RelayState.AIMING;
+        return state == RelayState.CAPTURE_REVIEW && hasPendingCaptureReview;
     }
 }
