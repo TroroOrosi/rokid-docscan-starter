@@ -108,7 +108,7 @@ public final class MainActivity extends Activity
         root.setPadding(pad, pad, pad, pad);
 
         TextView title = new TextView(this);
-        title.setText("Rokid DocScan Relay");
+        title.setText(RelayBuildLabel.title(BuildConfig.VERSION_NAME, BuildConfig.VERSION_CODE));
         title.setTextSize(24);
         title.setTextColor(Color.BLACK);
         root.addView(title, matchWrap());
