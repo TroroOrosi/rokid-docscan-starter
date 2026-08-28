@@ -27,10 +27,19 @@ Rokid Glasses -> Global Hi Rokid -> Android relay -> FastAPI server -> HUD
 - Global Hi Rokid uses package `com.rokid.sprite.global.aiapp`. Keep the
   package/action assumptions isolated in `RokidGlobalLink` and revalidate them
   after Hi Rokid or YodaOS updates.
-- YodaOS reserves long press (record/audio toggle), double tap (exit), two-finger
-  tap (AI) and two-finger swipes for itself. A third-party app cannot receive
-  them, so never assign a relay action to one. See the official gesture table in
-  `docs/glasses-ux-contract.md`.
+- Inside a CUSTOMVIEW overlay, YodaOS reserves long press (record/audio toggle),
+  double tap (exit), two-finger tap (AI) and two-finger swipes, so a phone-side
+  CXR-L client cannot receive them. See `docs/glasses-ux-contract.md`. This is a
+  property of the overlay, **not of the platform**: measured 2026-08-29, an
+  overlay delivers no operator tap at all, and CXR-L has always exposed
+  `IMediaStreamService.uploadAndInstallApk` / `openApp` / `stopApp` /
+  `uninstallApp` / `queryGlassAppInstalled` (present in 1.0.1 and 1.1.1), with
+  `SessionType.CUSTOM_APP` in 1.1.x. YodaOS-Sprite is Android 12 and runs
+  ordinary APKs, so an app on the glasses is a supported option this repo has
+  never used.
+- Treat this file and `docs/` as a record of what was measured, not as a
+  statement of what the SDK permits. Before concluding the platform forbids
+  something, read the AAR (`javap`) or another primary source.
 - Measured on Hi Rokid G1.12.10.0815 with CXR-L service `1.0.0 code 10000`:
   `onAiKeyDown`/`onAiKeyUp` never fire, and CustomView closes always arrive
   `userInitiated=false`. A user-originated `AI-exit` is the only glasses input
