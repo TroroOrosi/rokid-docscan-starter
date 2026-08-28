@@ -76,28 +76,27 @@ F-51F, Android 16, relay `0.3.14` / code 19 installed 07:26. Hi Rokid bound and
 the glasses live: `Hi Rokid service connected=true CXR-L 1.0.0 (code 10000)`,
 `custom view opened on glasses`.
 
-| Probed package | Verdict | Latency |
-|---|---|---|
-| `com.android.settings` | `ANSWERED installed=true` | 195 ms |
-| `dev.rokid.definitely.absentd.settings` (nonsense) | `ANSWERED installed=false` | 173 ms |
+| Probed package | On phone | On glasses | Verdict | Latency |
+|---|---|---|---|---|
+| `com.android.settings` | yes | expected yes | `ANSWERED installed=true` | 195 ms |
+| `dev.rokid.definitely.absentd.settings` (nonsense) | no | no | `ANSWERED installed=false` | 173 ms |
+| `dev.rokid.docscanrelay` (**discriminator**) | **yes, running** | no | `ANSWERED installed=false` | 269 ms |
 
-**`queryGlassAppInstalled` is implemented on this firmware and discriminates.**
-Neither `CALL_FAILED` nor `NO_RESPONSE` occurred. Phase 0's stop condition did
-not trigger, so the glasses-app route is not closed — which is the opposite of
-what `CLAUDE.md` and `docs/` implied for months.
+**`queryGlassAppInstalled` is implemented on this firmware, it discriminates,
+and it queries the glasses — not the phone.** Neither `CALL_FAILED` nor
+`NO_RESPONSE` ever occurred. Phase 0's stop condition did not trigger.
 
-**Still unresolved: which device is being queried.** `com.android.settings`
-exists on the phone *and* on YodaOS-Sprite, and the nonsense package exists on
-neither, so both readings fit. The discriminator is the relay's own package,
-`dev.rokid.docscanrelay`: installed on the phone, and certainly not on the
-glasses. `installed=false` proves the query reaches the glasses; `installed=true`
-means Hi Rokid answers locally and both rows above are worthless. **That probe
-was set up and not run — the phone dropped off wireless debugging first.** Run
-it before building anything on this result.
+The third row settles it. The relay was the foreground process making the call
+(pid 22668) and is unquestionably installed on the phone, yet the answer was
+`false`. A phone-local `PackageManager` lookup could not return that. So the
+first row is a real statement about the glasses: YodaOS-Sprite carries
+`com.android.settings`, consistent with it being Android 12.
 
-Weak supporting evidence only: 173–195 ms is long for a local `PackageManager`
-lookup (~1 ms) and about right for a round trip to the glasses. Suggestive, not
-proof.
+Latency corroborates: 173–269 ms throughout, far above a local lookup (~1 ms)
+and about right for a round trip to the glasses.
+
+**The glasses-app route is open.** Every documented claim that it was not
+described life inside a CUSTOMVIEW overlay and was never a platform limit.
 
 ### How Phase 0 was driven
 
@@ -148,12 +147,8 @@ Read the verdict on the phone log line or with
 
 ## Next steps, in order
 
-1. **Phase 0 — done except the discriminator.** The API answers and
-   discriminates (see above). One probe is still owed: `dev.rokid.docscanrelay`,
-   to establish whether the query reaches the glasses or is answered by the
-   phone. Everything below assumes it comes back `installed=false`.
-   *Blocked 2026-08-29 07:50: the phone dropped off wireless debugging
-   mid-probe and both advertised ports refused.*
+1. ~~**Phase 0**~~ — **done 2026-08-29.** The API is implemented, it
+   discriminates, and it queries the glasses. Nothing here is blocking any more.
 2. **Phase 1 — a minimal glasses APK**: one Activity that draws something and
    logs touch events. Install with `uploadAndInstallApk`, launch with `openApp`.
    This is the first opportunity to find out whether a tap is receivable at all.
