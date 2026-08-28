@@ -90,10 +90,32 @@ public class PhotoCaptureSettingsTest {
     }
 
     @Test
-    public void sweepPresetsPutTheDecisiveTwelveMegapixelProbeSecond() {
-        // 4032x3024 at q50 is small enough that a failure cannot be blamed on
-        // the Binder payload budget, which is what makes it the discriminator.
-        assertEquals("4032x3024 q50", PhotoCaptureSettings.SWEEP_PRESETS.get(1).describe());
+    public void sweepPresetsIsolateCompressionBeforeResolution() {
+        // Measuring a real capture settled that glyph size was never the limit:
+        // the column pitch was 37px against ML Kit's documented 16px floor.
+        // What is short is 0.071 bytes/pixel of JPEG against 0.2-0.5 for a
+        // document, so raising quality at the baseline size is the probe that
+        // moves the suspected variable and nothing else.
+        assertEquals("1920x1080 q95", PhotoCaptureSettings.SWEEP_PRESETS.get(1).describe());
+    }
+
+    @Test
+    public void sweepProbesResolutionLastAndAtTheBaselineQuality() {
+        List<PhotoCaptureSettings> presets = PhotoCaptureSettings.SWEEP_PRESETS;
+
+        assertEquals("4032x3024 q80", presets.get(presets.size() - 1).describe());
+    }
+
+    @Test
+    public void noSweepPresetTradesQualityAwayForResolution() {
+        // The abandoned ladder reached 12MP by dropping to q50, which multiplies
+        // the pixels while making the thin strokes worse and lengthens the
+        // 5.2s callback. No probe may buy resolution with quality again.
+        for (PhotoCaptureSettings preset : PhotoCaptureSettings.SWEEP_PRESETS) {
+            assertTrue(
+                    preset.describe() + " drops below the baseline quality",
+                    preset.quality >= PhotoCaptureSettings.DEFAULT.quality);
+        }
     }
 
     @Test

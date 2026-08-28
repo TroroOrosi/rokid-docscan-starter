@@ -35,22 +35,24 @@ public final class PhotoCaptureSettings {
     /**
      * Probe order for the real-device capture sweep.
      *
-     * <p>The baseline comes first to establish a reference frame. The 12MP
-     * probe at quality 50 comes second on purpose: its payload is comparable to
-     * the baseline, so if that request produces no callback the cause cannot be
-     * the Binder payload budget, and one attempt settles whether the ceiling is
-     * about bytes or about resolution. The remaining entries walk quality back
-     * up at 12MP, then step down in resolution for the fallback branch.</p>
+     * <p>Measuring a real capture on 2026-08-28 removed the reason the old
+     * ladder existed. Resolution was never the limit: the column pitch was 37px
+     * against ML Kit's documented 16px floor. What is short is contrast
+     * (41/255, against roughly 200 for a scan) and JPEG information
+     * (0.071 bytes/pixel, against 0.2-0.5 for a document). So the ladder no
+     * longer buys resolution by trading quality away, which would have made the
+     * thin strokes worse while lengthening the measured 5.2s callback.</p>
+     *
+     * <p>It now moves one variable per probe: the baseline for reference, the
+     * same frame at quality 95 to isolate compression, and 12MP at quality 80
+     * last, reached only when raising quality and lighting have both failed.
+     * The contrast probe is the baseline re-shot under strong even light, so it
+     * is an operating condition rather than a preset and has no entry here.</p>
      */
     public static final List<PhotoCaptureSettings> SWEEP_PRESETS = List.of(
             DEFAULT,
-            new PhotoCaptureSettings(4032, 3024, 50),
-            new PhotoCaptureSettings(4032, 3024, 60),
-            new PhotoCaptureSettings(4032, 3024, 70),
-            new PhotoCaptureSettings(3264, 2448, 50),
-            new PhotoCaptureSettings(3264, 2448, 60),
-            new PhotoCaptureSettings(2560, 1920, 60),
-            new PhotoCaptureSettings(2560, 1440, 60));
+            new PhotoCaptureSettings(1920, 1080, 95),
+            new PhotoCaptureSettings(4032, 3024, 80));
 
     /**
      * The probe after {@code current}, wrapping at the end of the ladder.
