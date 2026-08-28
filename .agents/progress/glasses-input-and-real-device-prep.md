@@ -1,7 +1,8 @@
 # Glasses input + real-device preparation
 
-Updated 2026-08-29. Branch `agent/real-device-test-prep`, HEAD `1a2e74c`,
-4 commits ahead of `origin` at the time of writing.
+Updated 2026-08-29. Branch `agent/real-device-test-prep`, HEAD `482ad3f`,
+1 commit ahead of `origin` at the time of writing (`3eb64ce` and earlier are
+pushed).
 
 ## Objective
 
@@ -63,9 +64,26 @@ platform can do; the AAR is.**
 | `dc6b40a` | Menu-exit recovery no longer re-arms on the echo of its own restore | **user confirmed the blinking stopped** |
 | `149d579` | CXR-L 1.0.1 → 1.1.1 plus the 5 callback methods 1.1.x added | 156 tests; resolved to `client-l:1.1.1` |
 | `1a2e74c` | Reverts the AIMING close-as-input mistake; a refused close now arms recovery | 159 tests; **user confirmed the view is re-presented again** |
+| `3eb64ce` | Checkpoints the glasses-input work; stops `CLAUDE.md` overstating the platform | docs only |
+| `482ad3f` | Phase 0 probe: `GlassAppProbe` + `RokidGlobalLink.probeGlassApp` + a phone button with an editable package | 26 classes / 171 tests; APK `0.3.14` / code 19 assembled. **No firmware has answered the call** |
 
 Relay on the phone: **0.3.13 / versionCode 18**. `pending-capture-v1.bin`
 (149,406 bytes, 2026-08-28 02:49) survived every reinstall.
+
+### Phase 0, as built and not yet run
+
+`GlassAppProbe` keeps the timeout verdict provisional on purpose: Hi Rokid can
+refuse the transaction (`CALL_FAILED`), or accept it and never call back
+(`NO_RESPONSE` after 5 s), and a callback arriving later still resolves to
+`ANSWERED`. Only `ANSWERED` answers Phase 0's question; `installed` is
+secondary. The probed package is an on-screen `EditText` so another package
+costs a button press rather than a rebuild and a fresh Hi Rokid authorization,
+and it defaults to `com.android.settings` — YodaOS-Sprite is Android 12, so a
+`true` there means the query really reached the glasses rather than being
+answered locally.
+
+Read the verdict on the phone log line or with
+`adb logcat -s DocScanRokid | grep glass-app-probe`.
 
 ## Environment
 
@@ -85,10 +103,15 @@ Relay on the phone: **0.3.13 / versionCode 18**. `pending-capture-v1.bin`
 
 ## Next steps, in order
 
-1. **Phase 0 — probe `queryGlassAppInstalled` from the relay and log the
-   callback.** The AIDL declaring these methods does not prove Hi Rokid
-   implements them. If this fails, the glasses-app route is closed on this
-   firmware and everything below is moot. Cheap, and it is the stop condition.
+1. **Phase 0 — run the probe on hardware.** The code is in `482ad3f`; nothing
+   has executed it. Install `0.3.14` / code 19, authorize Hi Rokid, press
+   「グラス側アプリ調査」, and record the verdict. The AIDL declaring these
+   methods does not prove Hi Rokid implements them. If the verdict is
+   `CALL_FAILED` or `NO_RESPONSE`, the glasses-app route is closed on this
+   firmware and everything below is moot. This is the stop condition.
+   *Blocked 2026-08-29: the phone was not reachable over adb — `adb connect
+   192.168.0.32:5555` refused (10061) and `adb mdns services` was empty, so
+   wireless debugging is down. Installing also needs the user's go-ahead.*
 2. **Phase 1 — a minimal glasses APK**: one Activity that draws something and
    logs touch events. Install with `uploadAndInstallApk`, launch with `openApp`.
    This is the first opportunity to find out whether a tap is receivable at all.
