@@ -13,6 +13,7 @@ import android.util.Log;
 import com.rokid.sprite.aiapp.externalapp.IAiEventCallback;
 import com.rokid.sprite.aiapp.externalapp.ICustomViewCallback;
 import com.rokid.sprite.aiapp.externalapp.IDeviceStatusCallback;
+import com.rokid.sprite.aiapp.externalapp.IGlassAppCallback;
 import com.rokid.sprite.aiapp.externalapp.IImageStreamCallback;
 import com.rokid.sprite.aiapp.externalapp.IMediaStreamService;
 
@@ -65,6 +66,13 @@ public final class RokidGlobalLink implements AutoCloseable {
 
         void onPhotoError(String message, Throwable cause);
 
+        /**
+         * Reports the verdict of a {@code queryGlassAppInstalled} probe. This
+         * asks whether Hi Rokid implements the glasses-app API at all, so the
+         * summary is diagnostic output, not an error.
+         */
+        void onGlassAppProbe(String summary);
+
         void onError(String message, Throwable cause);
     }
 
@@ -87,6 +95,7 @@ public final class RokidGlobalLink implements AutoCloseable {
     private static final String EXTRA_AUTH_PACKAGE = "auth_package";
     private static final int AUTH_SUCCESS = 2001;
     private static final long PROGRAMMATIC_CLOSE_TTL_MILLIS = 2000;
+    public static final long GLASS_APP_PROBE_TIMEOUT_MILLIS = 5000;
     public static final long NO_VIEW_GENERATION = -1;
 
     private final Context context;
@@ -98,6 +107,8 @@ public final class RokidGlobalLink implements AutoCloseable {
     private final CustomViewCloseTracker customViewCloses =
             new CustomViewCloseTracker(PROGRAMMATIC_CLOSE_TTL_MILLIS);
     private final CustomViewOpenTracker customViewOpens = new CustomViewOpenTracker();
+    private final GlassAppProbe glassAppProbe =
+            new GlassAppProbe(GLASS_APP_PROBE_TIMEOUT_MILLIS);
     private final Map<Long, String> viewPurposes = new HashMap<>();
     private volatile IMediaStreamService service;
     private volatile boolean bound;
@@ -107,6 +118,10 @@ public final class RokidGlobalLink implements AutoCloseable {
     private volatile String viewPurpose = "none";
     private volatile BindingConnection connection;
     private volatile CallbackSet callbacks;
+    // A Stub handed over Binder is collectable on this side as soon as the
+    // local reference goes out of scope, which would lose the answer the
+    // probe exists to capture.
+    private volatile IGlassAppCallback glassAppCallback;
 
     public RokidGlobalLink(Context context, Listener listener) {
         this.context = context.getApplicationContext();
@@ -222,6 +237,77 @@ public final class RokidGlobalLink implements AutoCloseable {
             listener.onError("Rokid Glassesの撮影要求に失敗しました", error);
             return PhotoStartResult.UNKNOWN;
         }
+    }
+
+    /**
+     * Asks Hi Rokid whether a package is installed on the glasses.
+     *
+     * <p>This is the cheapest question that decides whether the glasses-app
+     * route exists on this firmware. {@code IMediaStreamService} has declared
+     * {@code queryGlassAppInstalled} since client-l 1.0.1, but the relay has
+     * never called it, so nothing here is known to work: Hi Rokid may reject
+     * the transaction, or accept it and never call back. Both outcomes are
+     * reported, the second only after {@link #GLASS_APP_PROBE_TIMEOUT_MILLIS}
+     * via {@link #reportGlassAppProbe()}.</p>
+     */
+    public synchronized void probeGlassApp(String packageName) {
+        IMediaStreamService current = service;
+        if (current == null) {
+            listener.onError(
+                    "Rokidサービス未接続のためグラス側アプリを調査できません", null);
+            return;
+        }
+        glassAppProbe.start(SystemClock.elapsedRealtime(), packageName);
+        glassAppCallback = new IGlassAppCallback.Stub() {
+            @Override
+            public void onQueryAppResult(String queriedPackage, boolean installed) {
+                if (glassAppProbe.onQueryResult(
+                        SystemClock.elapsedRealtime(), queriedPackage, installed)) {
+                    reportGlassAppProbe();
+                } else {
+                    Log.i(
+                            TAG,
+                            "ignored unmatched glass-app query result pkg="
+                                    + queriedPackage + " installed=" + installed);
+                }
+            }
+
+            @Override
+            public void onInstallAppResult(boolean succeeded) {
+                Log.i(TAG, "glass-app install result=" + succeeded);
+            }
+
+            @Override
+            public void onUnInstallAppResult(boolean succeeded) {
+                Log.i(TAG, "glass-app uninstall result=" + succeeded);
+            }
+
+            @Override
+            public void onOpenAppResult(boolean succeeded) {
+                Log.i(TAG, "glass-app open result=" + succeeded);
+            }
+
+            @Override
+            public void onStopAppResult(boolean succeeded) {
+                Log.i(TAG, "glass-app stop result=" + succeeded);
+            }
+        };
+        try {
+            Log.i(TAG, "queryGlassAppInstalled request pkg=" + packageName);
+            current.queryGlassAppInstalled(packageName, glassAppCallback);
+        } catch (Exception error) {
+            glassAppProbe.onCallFailed(
+                    SystemClock.elapsedRealtime(), String.valueOf(error));
+            reportGlassAppProbe();
+            listener.onError("queryGlassAppInstalledの呼び出しに失敗しました", error);
+        }
+    }
+
+    /** Logs and reports the probe's current verdict, including a timeout. */
+    public void reportGlassAppProbe() {
+        String summary = glassAppProbe.summary(SystemClock.elapsedRealtime());
+        Log.i(TAG, summary);
+        listener.onGlassAppProbe(summary);
     }
 
     public synchronized long showHud(List<String> lines) {

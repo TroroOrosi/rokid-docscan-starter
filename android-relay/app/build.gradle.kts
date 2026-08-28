@@ -31,8 +31,8 @@ android {
         // 13 corrects the operator guidance: the shutter was documented as a
         // 1.5 s hold, but takePhoto measured 5.2 s to its callback, so moving
         // at 1.5 s blurs the page.
-        versionCode = 18
-        versionName = "0.3.13"
+        versionCode = 19
+        versionName = "0.3.14"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

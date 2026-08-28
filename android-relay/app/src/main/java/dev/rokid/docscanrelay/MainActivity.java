@@ -77,6 +77,7 @@ public final class MainActivity extends Activity
     private EditText photoWidth;
     private EditText photoHeight;
     private EditText photoQuality;
+    private EditText glassAppPackage;
     private TextView status;
     private TextView log;
     private ImageView capturePreview;
@@ -170,6 +171,23 @@ public final class MainActivity extends Activity
         captureSettingsActions.addView(
                 button("次のプリセット", ignored -> applyNextCapturePreset()), weighted());
         root.addView(captureSettingsActions, matchWrap());
+
+        // Phase 0 of the glasses-app question. IMediaStreamService has
+        // declared queryGlassAppInstalled since client-l 1.0.1, but the relay
+        // has never called it and no firmware has answered it. The package is
+        // editable because a hardware session is expensive: trying another one
+        // must cost a button press, not a rebuild and a fresh authorization.
+        // com.android.settings is the default because YodaOS-Sprite is Android
+        // 12, so a true answer means the query really reached the glasses.
+        glassAppPackage = new EditText(this);
+        glassAppPackage.setHint("グラス側パッケージ名");
+        glassAppPackage.setSingleLine(true);
+        glassAppPackage.setText("com.android.settings");
+        LinearLayout glassAppRow = horizontalRow();
+        glassAppRow.addView(glassAppPackage, weighted());
+        glassAppRow.addView(
+                button("グラス側アプリ調査", ignored -> probeGlassApp()), weighted());
+        root.addView(glassAppRow, matchWrap());
 
         LinearLayout connectRow = horizontalRow();
         connectRow.addView(button("サーバ確認", ignored -> configureAndVerify()), weighted());
@@ -310,6 +328,21 @@ public final class MainActivity extends Activity
             return;
         }
         applyCaptureSettings(settings);
+    }
+
+    private void probeGlassApp() {
+        String packageName = glassAppPackage.getText().toString().trim();
+        if (packageName.isEmpty()) {
+            showError("調査するグラス側パッケージ名を入力してください");
+            return;
+        }
+        appendLog("グラス側アプリ調査 " + packageName);
+        link.probeGlassApp(packageName);
+        // Nothing else reports the outcome this probe exists to catch: Hi
+        // Rokid accepting the transaction and never calling back.
+        glassAppPackage.postDelayed(
+                link::reportGlassAppProbe,
+                RokidGlobalLink.GLASS_APP_PROBE_TIMEOUT_MILLIS + 200);
     }
 
     private void applyNextCapturePreset() {
@@ -503,6 +536,11 @@ public final class MainActivity extends Activity
     @Override
     public void onGlassesViewPushed() {
         pressInterpreter.onGlassesViewOperation(SystemClock.elapsedRealtime());
+    }
+
+    @Override
+    public void onGlassAppProbe(String summary) {
+        runOnUiThread(() -> appendLog(summary));
     }
 
     @Override
