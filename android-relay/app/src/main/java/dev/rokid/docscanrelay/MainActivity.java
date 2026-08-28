@@ -480,9 +480,17 @@ public final class MainActivity extends Activity
         PressGestureInterpreter.Action action =
                 pressInterpreter.onAiExit(SystemClock.elapsedRealtime());
         mainHandler.removeCallbacks(systemMenuRecovery);
-        mainHandler.postDelayed(
-                systemMenuRecovery,
-                SYSTEM_MENU_RECOVERY_DELAY_MILLIS);
+        // Never arm recovery on our own echo. An echo proves the push reached
+        // the glasses, which is the opposite of the operator having left for
+        // the system menu, and arming it here made every restore schedule the
+        // next one: the view blinked at 0.7s and the acknowledged generation
+        // fell ~30 pushes behind. Echoes trail their push by 1ms to 1375ms, so
+        // no recovery delay can separate the two -- only the echo flag can.
+        if (!pressInterpreter.lastAiExitWasViewEcho()) {
+            mainHandler.postDelayed(
+                    systemMenuRecovery,
+                    SYSTEM_MENU_RECOVERY_DELAY_MILLIS);
+        }
         runOnUiThread(() -> appendLog(
                 action == null
                         ? "Glasses AI-exit echoed our own view push; no input"

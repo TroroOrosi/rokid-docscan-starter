@@ -37,6 +37,7 @@ public final class PressGestureInterpreter {
     private long lastViewOperationAt = -1;
     private boolean awaitingViewOpen;
     private long lastTapAt = -1;
+    private boolean lastAiExitWasViewEcho;
 
     public PressGestureInterpreter(long longPressMillis, long doublePressMillis) {
         if (longPressMillis <= 0 || doublePressMillis <= 0) {
@@ -167,6 +168,7 @@ public final class PressGestureInterpreter {
      * the relay can receive, so no committing action may be derived from it.</p>
      */
     public synchronized Action onAiExit(long nowMillis) {
+        lastAiExitWasViewEcho = false;
         boolean closedActiveAssist = nowMillis <= aiAssistActiveUntil;
         onAiAssistExit(nowMillis);
         if (closedActiveAssist) {
@@ -174,6 +176,7 @@ public final class PressGestureInterpreter {
         }
         if (awaitingViewOpen
                 && nowMillis - lastViewOperationAt < ECHO_SUPPRESSION_CAP_MILLIS) {
+            lastAiExitWasViewEcho = true;
             return null;
         }
         if (lastTapAt >= 0 && nowMillis - lastTapAt < doublePressMillis) {
@@ -181,6 +184,18 @@ public final class PressGestureInterpreter {
         }
         lastTapAt = nowMillis;
         return Action.SHORT;
+    }
+
+    /**
+     * Whether the last {@link #onAiExit} was our own view push coming back.
+     *
+     * <p>A null action is not enough to answer this: it also covers an assist
+     * close and a debounced second tap. Scheduling menu-exit recovery on an
+     * echo makes the recovery re-trigger itself, which drove the CustomView
+     * through a close/open every 0.7s on hardware.</p>
+     */
+    public synchronized boolean lastAiExitWasViewEcho() {
+        return lastAiExitWasViewEcho;
     }
 
     public synchronized void onAiAssistExit(long nowMillis) {

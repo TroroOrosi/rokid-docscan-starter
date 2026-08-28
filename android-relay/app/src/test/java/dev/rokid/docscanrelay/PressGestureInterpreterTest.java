@@ -1,7 +1,9 @@
 package dev.rokid.docscanrelay;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertTrue;
 
 import org.junit.Test;
 
@@ -281,5 +283,43 @@ public class PressGestureInterpreterTest {
         assertEquals(
                 PressGestureInterpreter.Action.SHORT,
                 interpreter.onAiExit(4100));
+    }
+
+    @Test
+    public void anExitEchoingOurOwnViewPushIsIdentifiedAsAnEcho() {
+        // Measured on hardware: the recovery timer fired on the echo of its own
+        // restore, restored again, and drove the CustomView through a
+        // close/open every 0.7s -- the glasses visibly blinked and the
+        // acknowledged generation fell ~30 pushes behind. The caller must be
+        // able to tell an echo from a real exit, because "action == null" also
+        // covers an assist close and a debounced second tap.
+        PressGestureInterpreter interpreter = new PressGestureInterpreter(1200, 350);
+        interpreter.onGlassesViewOperation(1_000);
+
+        assertNull(interpreter.onAiExit(1_050));
+
+        assertTrue(interpreter.lastAiExitWasViewEcho());
+    }
+
+    @Test
+    public void aUserTapIsNotIdentifiedAsAnEcho() {
+        PressGestureInterpreter interpreter = new PressGestureInterpreter(1200, 350);
+
+        assertEquals(PressGestureInterpreter.Action.SHORT, interpreter.onAiExit(1_000));
+
+        assertFalse(interpreter.lastAiExitWasViewEcho());
+    }
+
+    @Test
+    public void anEchoStopsBeingAnEchoOnceTheViewIsAcknowledgedOpen() {
+        // Echoes trail their push by 1ms to 1375ms, so the pending open, not a
+        // timeout, is what ends the window.
+        PressGestureInterpreter interpreter = new PressGestureInterpreter(1200, 350);
+        interpreter.onGlassesViewOperation(1_000);
+        interpreter.onGlassesViewOpened(1_100);
+
+        assertEquals(PressGestureInterpreter.Action.SHORT, interpreter.onAiExit(1_150));
+
+        assertFalse(interpreter.lastAiExitWasViewEcho());
     }
 }
