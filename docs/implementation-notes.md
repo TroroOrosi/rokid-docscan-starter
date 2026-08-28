@@ -60,7 +60,7 @@ CXR（Connected XR）SDK スイートは役割別に分かれている（末尾�
   `com.rokid.sprite.global.aiapp`）の `IMediaStreamService` にバインド。Hi Rokid が
   グラスとは CXR-L wire protocol（Caps シリアライズ・Bluetooth）で通信する。HUD は
   **CUSTOMVIEW**（`customViewUpdate`・グラス側アプリ不要）へテキスト・リレー。Maven
-  `com.rokid.cxr:client-l:1.0.1`、minSdk 31。**グラス本体 AI を本サーバに繋ぐ主経路**
+  `com.rokid.cxr:client-l:1.1.1`、minSdk 31。**グラス本体 AI を本サーバに繋ぐ主経路**
   であり、詳細は [cxr-l-integration.md](cxr-l-integration.md) を参照（旧版の
   「グラス単体ランチャー型・Wi-Fi 直結」記述は同 doc §2 で是正済み。スマホ中継必須）。
 - **差し込み手順（CXR-L スマホプラグイン例）**:

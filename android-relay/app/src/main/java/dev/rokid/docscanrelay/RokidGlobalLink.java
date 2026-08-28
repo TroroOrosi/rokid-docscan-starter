@@ -390,6 +390,31 @@ public final class RokidGlobalLink implements AutoCloseable {
                             "device-status",
                             () -> glassesStatusChanged(connected));
                 }
+
+                // Added by CXR-L 1.1.x. Logged only for now: this build is
+                // upgrading the SDK to find out whether the installed Hi Rokid
+                // backs the new surface at all, and acting on semantics that
+                // have not been observed on this firmware could disconnect a
+                // working session. Adopt them once they are seen to fire.
+                @Override
+                public void onWearingStatusNotify(boolean worn) {
+                    Log.i(TAG, "device-status wearing epoch=" + epoch + " worn=" + worn);
+                }
+
+                @Override
+                public void onDeviceInfoNotifiy(String info) {
+                    Log.i(TAG, "device-status info epoch=" + epoch + " present=" + (info != null));
+                }
+
+                @Override
+                public void onCurrentScenesNotify(String scene) {
+                    Log.i(TAG, "device-status scene epoch=" + epoch + " scene=" + scene);
+                }
+
+                @Override
+                public void onDisconnectByServer() {
+                    Log.w(TAG, "device-status disconnect-by-server epoch=" + epoch);
+                }
             };
             imageStream = new IImageStreamCallback.Stub() {
                 @Override
@@ -429,6 +454,15 @@ public final class RokidGlobalLink implements AutoCloseable {
                 }
             };
             aiEvents = new IAiEventCallback.Stub() {
+                // Added by CXR-L 1.1.x, alongside IMediaStreamService
+                // .interruptAiWake(boolean). This is the callback that would
+                // let the relay own the AI gesture instead of YodaOS; logged
+                // first so the hardware can say whether it ever fires.
+                @Override
+                public void onInterruptAiWake(boolean interrupted) {
+                    Log.i(TAG, "AI-interrupt epoch=" + epoch + " interrupted=" + interrupted);
+                }
+
                 @Override
                 public void onAiKeyDown() {
                     dispatchCallback(epoch, "AI-key-down", () -> {

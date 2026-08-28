@@ -18,7 +18,7 @@ Rokid Glasses で紙資料を撮影し、Android スマホを中継して問題�
 6. Android リレーが CUSTOMVIEW へ最大3行ずつ表示する。
 
 `android-relay/RokidGlobalLink` は、公式
-`com.rokid.cxr:client-l:1.0.1` AAR を使い、Global Hi Rokid
+`com.rokid.cxr:client-l:1.1.1` AAR を使い、Global Hi Rokid
 `com.rokid.sprite.global.aiapp` へ接続します。
 [TakanariShimbo/CxrGlobal](https://github.com/TakanariShimbo/CxrGlobal) の clone、
 submodule、AARコピーは不要です。

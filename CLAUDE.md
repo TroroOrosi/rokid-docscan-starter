@@ -19,10 +19,10 @@ Rokid Glasses -> Global Hi Rokid -> Android relay -> FastAPI server -> HUD
   and uploads both JPEG and OCR.
 - Text-only page upload remains an API compatibility path. Do not describe it
   as the real-device primary path.
-- The public CXR-L 1.0.1 AIDL surface does not expose arbitrary recognition or
+- The public CXR-L AIDL surface does not expose arbitrary recognition or
   answer text from the AI running on the glasses. The current production path
   therefore uses the phone OCR and a configured server analyzer/solver.
-- Use the official `com.rokid.cxr:client-l:1.0.1` dependency. Do not commit,
+- Use the official `com.rokid.cxr:client-l:1.1.1` dependency. Do not commit,
   copy, or redistribute Rokid AAR files.
 - Global Hi Rokid uses package `com.rokid.sprite.global.aiapp`. Keep the
   package/action assumptions isolated in `RokidGlobalLink` and revalidate them

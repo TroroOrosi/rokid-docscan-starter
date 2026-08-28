@@ -14,7 +14,7 @@ Android スマホを使う導入手順は
 います。
 
 - `android-relay` が Rokid 公式 AAR
-  `com.rokid.cxr:client-l:1.0.1` を Rokid Maven から取得する。
+  `com.rokid.cxr:client-l:1.1.1` を Rokid Maven から取得する。
 - AAR に含まれる公開 AIDL 型を使う。
 - `RokidGlobalLink` が Global Hi Rokid
   `com.rokid.sprite.global.aiapp` の認可 Activity と
