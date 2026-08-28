@@ -16,7 +16,7 @@ def test_version_info_pins_every_contract():
     # docs hardcode several of these, e.g. user-operation-guide's JSON block).
     assert version.version_info() == {
         "app_version": "0.15.0",
-        "api_version": "1.13.1",
+        "api_version": "1.14.0",
         "matcher_version": "1.2.0",
         "hud_contract_version": "1.0.0",
         "analyzer_api_version": "1.0.0",
@@ -42,9 +42,12 @@ def test_contract_versions_reflect_phase234():
 
 
 def test_contract_versions_reflect_review_and_media_integrity():
+    # 1.14.0: /v1/settings reports the selected analyzer/solver and whether
+    # it can actually run, so a real-device run can be checked before a page
+    # is photographed rather than after.
     # 1.13.1: decoded image limits consistently return 413 and OpenAI only
     # receives a documented transcription container.
-    assert version.API_VERSION == "1.13.1"
+    assert version.API_VERSION == "1.14.0"
     assert version.SOLVER_API_VERSION == "1.2.0"
     assert version.EXPLAINER_API_VERSION == "1.1.0"
 

@@ -61,10 +61,21 @@ class MediaExtractor(abc.ABC):
         """Return an ExtractorResult. Implementations must not raise on empty
         input; return a best-effort placeholder instead."""
 
+    def ready(self) -> bool:
+        """Whether this adapter can actually run, as opposed to being selected.
+
+        Offline adapters always run. Cloud adapters override this: they fall
+        back to the offline placeholder without saying so when no credential is
+        present, so "selected" and "will run" are different questions and a
+        pre-flight has to be able to ask the second one.
+        """
+        return True
+
     def info(self) -> dict:
         return {
             "name": self.name,
             "provider_version": self.provider_version,
             "offline": self.offline,
+            "ready": self.ready(),
             "kinds": list(self.kinds),
         }

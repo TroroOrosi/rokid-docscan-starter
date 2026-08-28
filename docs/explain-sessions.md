@@ -1,6 +1,6 @@
 # 資料解説モード（explain-sessions）仕様書
 
-**UX 第 v1.7 世代**の撮影なし設計（HTTP エンベロープは現在 `API_VERSION = 1.13.1`、
+**UX 第 v1.7 世代**の撮影なし設計（HTTP エンベロープは現在 `API_VERSION = 1.14.0`、
 `APP_VERSION = 0.13.1`）。登録済み文書を Rokid Glasses
 **単体でページナビゲーション→解説を HUD に段階表示**する機能です。
 

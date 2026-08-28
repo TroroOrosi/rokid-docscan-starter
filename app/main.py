@@ -374,6 +374,23 @@ def get_version() -> dict:
     }
 
 
+def provider_status() -> dict:
+    """Which adapter routing picks, and whether it can actually run.
+
+    The relay photographs a physical page before anything is analyzed. If the
+    configured cloud analyzer has no credential it degrades to the offline
+    placeholder silently, so without this block the operator only discovers it
+    after the session. This reports the state; it does not reject anything.
+    """
+    from .analyzers import get_analyzer
+    from .solvers import get_solver
+
+    return {
+        "analyzer": get_analyzer().info(),
+        "solver": get_solver().info(),
+    }
+
+
 @app.get("/v1/settings")
 def get_settings() -> dict:
     """Client-facing flags."""
@@ -384,6 +401,7 @@ def get_settings() -> dict:
         "capture": dict(CAPTURE_CONTRACT),
         "operations": dict(OPERATION_CONTRACT),
         "input": build_input_contract(),
+        "providers": provider_status(),
         "versions": version_info(),
     }
 

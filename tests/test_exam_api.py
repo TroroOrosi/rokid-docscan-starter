@@ -418,3 +418,31 @@ def test_session_detail_lists_questions(client):
 def test_session_404(client):
     r = client.get("/v1/exam-sessions/9999")
     assert r.status_code == 404
+
+
+def test_settings_report_whether_the_selected_providers_can_actually_run(client):
+    """Pre-flight for a real-device run.
+
+    The relay photographs a physical page; if the configured analyzer has no
+    credential it degrades to the offline placeholder without saying so, and
+    the operator only finds out after the session. /v1/settings therefore has
+    to state both which adapter routing picks and whether it can run.
+    """
+    providers = client.get("/v1/settings").json()["providers"]
+
+    assert providers["analyzer"]["name"] == "local"
+    assert providers["analyzer"]["ready"] is True
+    assert providers["solver"]["name"] == "local"
+    assert providers["solver"]["ready"] is True
+
+
+def test_settings_expose_a_selected_but_unusable_analyzer(client, monkeypatch):
+    monkeypatch.setenv("ROKID_ANALYZER", "claude")
+    for key in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GOOGLE_API_KEY"):
+        monkeypatch.delenv(key, raising=False)
+
+    analyzer = client.get("/v1/settings").json()["providers"]["analyzer"]
+
+    assert analyzer["name"] == "claude"
+    assert analyzer["offline"] is False
+    assert analyzer["ready"] is False

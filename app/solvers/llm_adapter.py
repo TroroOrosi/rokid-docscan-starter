@@ -84,6 +84,19 @@ class LLMSolver(Solver):
         self.provider_version = f"{provider}-messages-1.0.0"
         self._client = client
 
+    def ready(self) -> bool:
+        """True when a client can be built, i.e. the credential is present.
+
+        ``LLMClient.load`` returns None without a key and raises when a key is
+        present but the provider SDK is missing. Both mean this adapter would
+        degrade to the offline placeholder, so both report not ready rather
+        than advertising a cloud provider that will not run.
+        """
+        try:
+            return get_client(self._client, self.provider) is not None
+        except Exception:  # noqa: BLE001 - a pre-flight probe must not raise
+            return False
+
     def solve(self, *, question: Question, max_answer_len: int = 64) -> SolveResult:
         client = get_client(self._client, self.provider)
         if client is None:

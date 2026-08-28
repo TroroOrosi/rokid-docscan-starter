@@ -44,7 +44,7 @@ submodule、AARコピーは不要です。
 CXR-L の実装境界は
 [CXR-L / Global Hi Rokid integration](docs/cxr-l-integration.md)です。
 
-現在のバージョン: **Server APP 0.15.0 / API 1.13.1 / Android client 0.3.5 /
+現在のバージョン: **Server APP 0.15.0 / API 1.14.0 / Android client 0.3.9 /
 Glasses View contract 1.8.0**。
 
 ---
@@ -82,7 +82,7 @@ rokid-docscan-starter/
 │   ├── explainer.py   # Explainer ポート（ExplainRequest / ExplainResult / ABC）
 │   ├── llm.py         # ★実 AI ブリッジ（openai/gemini/claude、遅延import・注入可）
 │   ├── audio_formats.py # 音声MIME・保存suffix・provider対応の共通定義
-│   ├── version.py     # 各契約バージョン（app 0.15.0 / api 1.13.1 / glasses 1.8.0 ほか）
+│   ├── version.py     # 各契約バージョン（app 0.15.0 / api 1.14.0 / glasses 1.8.0 ほか）
 │   ├── config.py      # 保存先・フィーチャーフラグ（ROKID_* / ANTHROPIC_API_KEY / ROKID_TRANSCRIBER）
 │   ├── transcribe.py  # ★リスニング録音の書き起こし（openai/gemini・未設定時は与値）
 │   ├── db.py          # sqlite3（documents/pages/exam/explain テーブル）

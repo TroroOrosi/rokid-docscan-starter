@@ -42,6 +42,11 @@ APIキー、Bearer値、Hi Rokid認可トークンは記録しません。
 
 - [ ] サーバーを `--host 0.0.0.0 --port 8000` で起動した。
 - [ ] `ROKID_API_KEY` と画像対応 `ROKID_ANALYZER` / `ROKID_SOLVER` を設定した。
+- [ ] `curl http://PC-IP:8000/v1/settings` を実行し、`providers.analyzer.ready`
+      と `providers.solver.ready` が `true` であることを、1枚も撮影する前に確認した。
+      `false` は資格情報かSDKが無い状態で、撮影しても offline placeholder が
+      応答する。アダプタは黙って切り替わるため、応答内容では気付けない。
+- [ ] `providers.analyzer.name` が意図したプロバイダで、`offline` が `false` である。
 - [ ] `OPENAI_BASE_URL` / `ANTHROPIC_BASE_URL` / `GOOGLE_*` の既存値を確認した。
       SDKはこれらを自動採用するため、別用途のローカルproxyを指している場合は
       サーバー起動シェルで解除する。
