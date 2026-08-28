@@ -516,10 +516,11 @@ public final class MainActivity extends Activity
         // review screen has no other input, and everywhere else a misread close
         // must never reach the shutter.
         if (controller == null
-                || controller.getState() != RelayState.CAPTURE_REVIEW
-                || !controller.hasPendingCaptureReview()) {
+                || !GlassesCloseInputPolicy.acceptsAsInput(
+                        controller.getState(), controller.hasPendingCaptureReview())) {
+            RelayState ignoredIn = controller == null ? null : controller.getState();
             runOnUiThread(() -> appendLog(
-                    "Ignored a user CustomView close outside capture review"));
+                    "Ignored a user CustomView close in state " + ignoredIn));
             return;
         }
         dispatchDiscreteGlassesAction("user CustomView close");
