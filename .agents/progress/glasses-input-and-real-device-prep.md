@@ -70,7 +70,52 @@ platform can do; the AAR is.**
 Relay on the phone: **0.3.13 / versionCode 18**. `pending-capture-v1.bin`
 (149,406 bytes, 2026-08-28 02:49) survived every reinstall.
 
-### Phase 0, as built and not yet run
+### Phase 0 ran on hardware, 2026-08-29 — the API answers
+
+F-51F, Android 16, relay `0.3.14` / code 19 installed 07:26. Hi Rokid bound and
+the glasses live: `Hi Rokid service connected=true CXR-L 1.0.0 (code 10000)`,
+`custom view opened on glasses`.
+
+| Probed package | Verdict | Latency |
+|---|---|---|
+| `com.android.settings` | `ANSWERED installed=true` | 195 ms |
+| `dev.rokid.definitely.absentd.settings` (nonsense) | `ANSWERED installed=false` | 173 ms |
+
+**`queryGlassAppInstalled` is implemented on this firmware and discriminates.**
+Neither `CALL_FAILED` nor `NO_RESPONSE` occurred. Phase 0's stop condition did
+not trigger, so the glasses-app route is not closed — which is the opposite of
+what `CLAUDE.md` and `docs/` implied for months.
+
+**Still unresolved: which device is being queried.** `com.android.settings`
+exists on the phone *and* on YodaOS-Sprite, and the nonsense package exists on
+neither, so both readings fit. The discriminator is the relay's own package,
+`dev.rokid.docscanrelay`: installed on the phone, and certainly not on the
+glasses. `installed=false` proves the query reaches the glasses; `installed=true`
+means Hi Rokid answers locally and both rows above are worthless. **That probe
+was set up and not run — the phone dropped off wireless debugging first.** Run
+it before building anything on this result.
+
+Weak supporting evidence only: 173–195 ms is long for a local `PackageManager`
+lookup (~1 ms) and about right for a round trip to the glasses. Suggestive, not
+proof.
+
+### How Phase 0 was driven
+
+`adb` over wireless debugging is unreliable here — the transport dropped between
+almost every invocation. What worked: `adb connect <ip>:<port>` and the real
+work in **one** shell invocation, re-connecting each time. The phone advertised
+`192.168.0.30:33991` and `:41709` over mDNS; only `33991` ever connected, and
+`adb connect` printing `failed connect` while `adb devices` shows `device` is
+normal — trust `adb devices`. A 57 MB `install -r` failed once mid-transfer with
+an empty error and succeeded on retry.
+
+Driving the UI: the button is at `[600,1426][1155,1561]`, the package field at
+`[45,1427][600,1560]`. A tap with the IME open hits the keyboard, not the
+button, and produces no log at all — dismiss it with `input keyevent 111` first.
+`input keyevent 67` (DEL) in a loop does **not** reliably clear the field;
+`input keycombination 113 29` (Ctrl+A) then one DEL does.
+
+### Phase 0, as built
 
 `GlassAppProbe` keeps the timeout verdict provisional on purpose: Hi Rokid can
 refuse the transaction (`CALL_FAILED`), or accept it and never call back
@@ -103,15 +148,12 @@ Read the verdict on the phone log line or with
 
 ## Next steps, in order
 
-1. **Phase 0 — run the probe on hardware.** The code is in `482ad3f`; nothing
-   has executed it. Install `0.3.14` / code 19, authorize Hi Rokid, press
-   「グラス側アプリ調査」, and record the verdict. The AIDL declaring these
-   methods does not prove Hi Rokid implements them. If the verdict is
-   `CALL_FAILED` or `NO_RESPONSE`, the glasses-app route is closed on this
-   firmware and everything below is moot. This is the stop condition.
-   *Blocked 2026-08-29: the phone was not reachable over adb — `adb connect
-   192.168.0.32:5555` refused (10061) and `adb mdns services` was empty, so
-   wireless debugging is down. Installing also needs the user's go-ahead.*
+1. **Phase 0 — done except the discriminator.** The API answers and
+   discriminates (see above). One probe is still owed: `dev.rokid.docscanrelay`,
+   to establish whether the query reaches the glasses or is answered by the
+   phone. Everything below assumes it comes back `installed=false`.
+   *Blocked 2026-08-29 07:50: the phone dropped off wireless debugging
+   mid-probe and both advertised ports refused.*
 2. **Phase 1 — a minimal glasses APK**: one Activity that draws something and
    logs touch events. Install with `uploadAndInstallApk`, launch with `openApp`.
    This is the first opportunity to find out whether a tap is receivable at all.
