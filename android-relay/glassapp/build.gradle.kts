@@ -22,6 +22,18 @@ android {
         versionName = "0.1.0"
     }
 
+    // AGP turns v1 (JAR) signing off on its own once minSdk is 24 or above, so
+    // this APK shipped with a v2 signature and nothing else, and the glasses
+    // answered onInstallAppResult(false) after 43 s. Android 12's own
+    // PackageManager accepts v2 alone; a vendor installer that reads JAR
+    // signatures does not. v1 is turned back on here as the single variable of
+    // that experiment -- v2 and v3 are left exactly as they were.
+    signingConfigs {
+        getByName("debug") {
+            enableV1Signing = true
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false

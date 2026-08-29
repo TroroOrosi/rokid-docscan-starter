@@ -221,6 +221,23 @@ so the run also settles that.
 
 ### Why the result is read off the glasses, not from a log
 
+> **Corrected 2026-08-29, after the hardware run.** The claim below that adb on
+> the glasses is undocumented is **wrong**, and it was asserted from one web
+> search instead of from the vendor SDK documentation. Rokid's CXR-L docs say
+> plainly: *"When using Rokid CXR-S SDK, you need enable ADB on Rokid Glasses
+> through Rokid AI APP"* — the toggle is 歯車 → グラス設定 → 開発者 →
+> 「グラスADBデバッグ」 — after which a **5-pin development cable** gives
+> ordinary `adb devices` / `adb install`. The retail box ships a **3-pin
+> charging cable that carries no data**; the dev cable is the "Cable only"
+> option on `global.rokid.com/products/rokid-glasses-prototype` at **$39.99**,
+> about two weeks' delivery, or from the developer assistant.
+>
+> Consequences: (a) the on-glasses readout is still the right design for a
+> probe that must work without a cable, but it is a workaround, not the only
+> option; (b) **the ADB toggle has never been enabled on this device**, and it
+> is the cheapest untested variable behind the install failure. Enable it
+> before spending more hardware cycles.
+
 Nothing can carry it off the device. There is **no documented adb** on the
 glasses (the firmware is a `user/release-keys` build and no developer-mode
 sequence is documented), and **no documented CXR-S to CXR-L message channel** —
