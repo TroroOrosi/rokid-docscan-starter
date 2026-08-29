@@ -224,6 +224,15 @@ private const val SWIPE_DOMINANCE = 1.3f
 コミュニティ資料は端末の Primary ABI を `arm64-v8a` としているが、ネイティブコードを
 持たない限り関係しない。
 
+> **範囲の限定（2026-08-29 追記）。** 上表は参照実装、すなわち **Rokid SDK を一切
+> 使わないグラス側アプリ**についての事実である。CXR-S を採用すると成立しない。
+> `cxr-service-bridge:1.0` の AAR を展開して確認したところ、`arm64-v8a` と
+> `armeabi-v7a` の両方に `libcaps.so` / `libcxr-bridge-jni.so` /
+> `libcxr-sock-proto-jni.so` / `libflora-cli.so` / `libmutils.so` を同梱している。
+> `CXRServiceBridge` の主要メソッド（`sendMessage`、`disconnectCXRDevice`、
+> `startAudioStream`、`appLaunch` など）は `native` 宣言である。
+> Phase 1 の計測アプリは SDK を使わないので、この制約を受けない。
+
 ## 4. Rokid Maven の配布状況
 
 `https://maven.rokid.com/repository/maven-public/` の `maven-metadata.xml` を直接取得

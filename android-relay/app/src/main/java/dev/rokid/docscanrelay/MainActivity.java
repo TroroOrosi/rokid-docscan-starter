@@ -46,6 +46,9 @@ public final class MainActivity extends Activity
     private static final long INPUT_EVENT_DEBOUNCE_MILLIS = 350;
     private static final long SYSTEM_MENU_RECOVERY_DELAY_MILLIS = 650;
     private static final String PREF_ROTATION_INDEX = "rotation_index";
+    private static final String GLASS_PROBE_PACKAGE = "dev.rokid.docscanglass";
+    private static final String GLASS_PROBE_ACTIVITY =
+            "dev.rokid.docscanglass.TapProbeActivity";
 
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private final PressGestureInterpreter pressInterpreter =
@@ -188,6 +191,20 @@ public final class MainActivity extends Activity
         glassAppRow.addView(
                 button("グラス側アプリ調査", ignored -> probeGlassApp()), weighted());
         root.addView(glassAppRow, matchWrap());
+
+        // Phase 1. Phase 0 established that the query is implemented and asks
+        // the glasses rather than the phone; these two calls put an app on the
+        // glasses and start it, which is the only way to learn whether operator
+        // input reaches an app that is not a CUSTOMVIEW overlay.
+        LinearLayout glassAppActions = horizontalRow();
+        glassAppActions.addView(
+                button("計測アプリ名", ignored -> glassAppPackage.setText(GLASS_PROBE_PACKAGE)),
+                weighted());
+        glassAppActions.addView(
+                button("グラスへ導入", ignored -> installGlassApp()), weighted());
+        glassAppActions.addView(
+                button("グラスで起動", ignored -> openGlassApp()), weighted());
+        root.addView(glassAppActions, matchWrap());
 
         LinearLayout connectRow = horizontalRow();
         connectRow.addView(button("サーバ確認", ignored -> configureAndVerify()), weighted());
@@ -343,6 +360,52 @@ public final class MainActivity extends Activity
         glassAppPackage.postDelayed(
                 link::reportGlassAppProbe,
                 RokidGlobalLink.GLASS_APP_PROBE_TIMEOUT_MILLIS + 200);
+    }
+
+    /**
+     * Uploads the tap-probe APK to the glasses.
+     *
+     * <p>The APK is not bundled: it is pushed with {@code adb push} into this
+     * app's external files directory, so a throwaway probe never ships inside a
+     * relay build. Everything checkable about the file is checked before the
+     * call, because {@code uploadAndInstallApk} answers with one boolean and a
+     * truncated push would otherwise look like the firmware refusing the route.
+     */
+    private void installGlassApp() {
+        String packageName = glassAppPackage.getText().toString().trim();
+        if (packageName.isEmpty()) {
+            showError("導入するグラス側パッケージ名を入力してください");
+            return;
+        }
+        GlassAppApkSource apk = GlassAppApkSource.resolve(getExternalFilesDir(null));
+        appendLog(apk.summary());
+        if (!apk.usable()) {
+            showError(apk.problem());
+            return;
+        }
+        appendLog("グラスへ導入 " + packageName);
+        link.installGlassApp(packageName, apk.file());
+        // Hi Rokid may accept the transaction and never call back; nothing else
+        // would ever report that.
+        glassAppPackage.postDelayed(
+                link::reportGlassAppInstall,
+                RokidGlobalLink.GLASS_APP_INSTALL_TIMEOUT_MILLIS + 200);
+    }
+
+    private void openGlassApp() {
+        String packageName = glassAppPackage.getText().toString().trim();
+        if (packageName.isEmpty()) {
+            showError("起動するグラス側パッケージ名を入力してください");
+            return;
+        }
+        String activityName = packageName.equals(GLASS_PROBE_PACKAGE)
+                ? GLASS_PROBE_ACTIVITY
+                : packageName + ".MainActivity";
+        appendLog("グラスで起動 " + packageName + "/" + activityName);
+        link.openGlassApp(packageName, activityName);
+        glassAppPackage.postDelayed(
+                link::reportGlassAppOpen,
+                RokidGlobalLink.GLASS_APP_OPEN_TIMEOUT_MILLIS + 200);
     }
 
     private void applyNextCapturePreset() {
@@ -539,7 +602,7 @@ public final class MainActivity extends Activity
     }
 
     @Override
-    public void onGlassAppProbe(String summary) {
+    public void onGlassAppReport(String summary) {
         runOnUiThread(() -> appendLog(summary));
     }
 

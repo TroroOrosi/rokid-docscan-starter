@@ -7,6 +7,7 @@ import android.content.Intent;
 import android.content.ServiceConnection;
 import android.content.pm.PackageManager;
 import android.os.IBinder;
+import android.os.ParcelFileDescriptor;
 import android.os.SystemClock;
 import android.util.Log;
 
@@ -17,6 +18,8 @@ import com.rokid.sprite.aiapp.externalapp.IGlassAppCallback;
 import com.rokid.sprite.aiapp.externalapp.IImageStreamCallback;
 import com.rokid.sprite.aiapp.externalapp.IMediaStreamService;
 
+import java.io.File;
+import java.io.IOException;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
@@ -67,11 +70,11 @@ public final class RokidGlobalLink implements AutoCloseable {
         void onPhotoError(String message, Throwable cause);
 
         /**
-         * Reports the verdict of a {@code queryGlassAppInstalled} probe. This
-         * asks whether Hi Rokid implements the glasses-app API at all, so the
+         * Reports the verdict of a glasses-app query, install, or launch. These
+         * ask whether Hi Rokid implements the glasses-app route at all, so the
          * summary is diagnostic output, not an error.
          */
-        void onGlassAppProbe(String summary);
+        void onGlassAppReport(String summary);
 
         void onError(String message, Throwable cause);
     }
@@ -96,6 +99,12 @@ public final class RokidGlobalLink implements AutoCloseable {
     private static final int AUTH_SUCCESS = 2001;
     private static final long PROGRAMMATIC_CLOSE_TTL_MILLIS = 2000;
     public static final long GLASS_APP_PROBE_TIMEOUT_MILLIS = 5000;
+    // An install ships an APK across the phone-to-glasses link and then runs a
+    // package install on the far side; a launch only starts an activity that is
+    // already there. Holding both to the query's 5 s would report a working
+    // install as NO_RESPONSE.
+    public static final long GLASS_APP_INSTALL_TIMEOUT_MILLIS = 120_000;
+    public static final long GLASS_APP_OPEN_TIMEOUT_MILLIS = 15_000;
     public static final long NO_VIEW_GENERATION = -1;
 
     private final Context context;
@@ -109,6 +118,10 @@ public final class RokidGlobalLink implements AutoCloseable {
     private final CustomViewOpenTracker customViewOpens = new CustomViewOpenTracker();
     private final GlassAppProbe glassAppProbe =
             new GlassAppProbe(GLASS_APP_PROBE_TIMEOUT_MILLIS);
+    private final GlassAppOperation glassAppInstall =
+            new GlassAppOperation("install", GLASS_APP_INSTALL_TIMEOUT_MILLIS);
+    private final GlassAppOperation glassAppOpen =
+            new GlassAppOperation("open", GLASS_APP_OPEN_TIMEOUT_MILLIS);
     private final Map<Long, String> viewPurposes = new HashMap<>();
     private volatile IMediaStreamService service;
     private volatile boolean bound;
@@ -258,7 +271,114 @@ public final class RokidGlobalLink implements AutoCloseable {
             return;
         }
         glassAppProbe.start(SystemClock.elapsedRealtime(), packageName);
-        glassAppCallback = new IGlassAppCallback.Stub() {
+        glassAppCallback = newGlassAppCallback();
+        try {
+            Log.i(TAG, "queryGlassAppInstalled request pkg=" + packageName);
+            current.queryGlassAppInstalled(packageName, glassAppCallback);
+        } catch (Exception error) {
+            glassAppProbe.onCallFailed(
+                    SystemClock.elapsedRealtime(), String.valueOf(error));
+            reportGlassAppProbe();
+            listener.onError("queryGlassAppInstalledの呼び出しに失敗しました", error);
+        }
+    }
+
+    /** Logs and reports the probe's current verdict, including a timeout. */
+    public void reportGlassAppProbe() {
+        report(glassAppProbe.summary(SystemClock.elapsedRealtime()));
+    }
+
+    /**
+     * Uploads an APK to the glasses and installs it there.
+     *
+     * <p>Phase 1 of the glasses-app question. Phase 0 established that
+     * {@code queryGlassAppInstalled} is implemented and answers about the
+     * glasses rather than the phone; this is the first call that changes their
+     * state, and the first that can put an app where operator input might
+     * actually reach it.
+     *
+     * <p>The descriptor is closed as soon as the transaction returns. Binder
+     * dups it during the call, so the copy Hi Rokid holds outlives this one.
+     */
+    public synchronized void installGlassApp(String packageName, File apk) {
+        IMediaStreamService current = service;
+        if (current == null) {
+            listener.onError(
+                    "Rokidサービス未接続のためグラスへ導入できません", null);
+            return;
+        }
+        glassAppInstall.start(SystemClock.elapsedRealtime(), packageName);
+        glassAppCallback = newGlassAppCallback();
+        ParcelFileDescriptor descriptor = null;
+        try {
+            descriptor = ParcelFileDescriptor.open(
+                    apk, ParcelFileDescriptor.MODE_READ_ONLY);
+            Log.i(
+                    TAG,
+                    "uploadAndInstallApk request pkg=" + packageName
+                            + " bytes=" + apk.length());
+            current.uploadAndInstallApk(packageName, descriptor, glassAppCallback);
+        } catch (Exception error) {
+            glassAppInstall.onCallFailed(
+                    SystemClock.elapsedRealtime(), String.valueOf(error));
+            reportGlassAppInstall();
+            listener.onError("uploadAndInstallApkの呼び出しに失敗しました", error);
+        } finally {
+            closeQuietly(descriptor);
+        }
+    }
+
+    /**
+     * Starts an activity of an app already installed on the glasses.
+     *
+     * <p>The AIDL takes the activity as a second string and the SDK documents
+     * neither its form nor whether it may be empty. A fully qualified class
+     * name is what is passed here; a rejection is reported rather than retried,
+     * because guessing a second form would make the verdict unreadable.
+     */
+    public synchronized void openGlassApp(String packageName, String activityName) {
+        IMediaStreamService current = service;
+        if (current == null) {
+            listener.onError(
+                    "Rokidサービス未接続のためグラスで起動できません", null);
+            return;
+        }
+        String target = packageName + "/" + activityName;
+        glassAppOpen.start(SystemClock.elapsedRealtime(), target);
+        glassAppCallback = newGlassAppCallback();
+        try {
+            Log.i(TAG, "openApp request " + target);
+            current.openApp(packageName, activityName, glassAppCallback);
+        } catch (Exception error) {
+            glassAppOpen.onCallFailed(
+                    SystemClock.elapsedRealtime(), String.valueOf(error));
+            reportGlassAppOpen();
+            listener.onError("openAppの呼び出しに失敗しました", error);
+        }
+    }
+
+    /** Logs and reports the install verdict, including a timeout. */
+    public void reportGlassAppInstall() {
+        report(glassAppInstall.summary(SystemClock.elapsedRealtime()));
+    }
+
+    /** Logs and reports the launch verdict, including a timeout. */
+    public void reportGlassAppOpen() {
+        report(glassAppOpen.summary(SystemClock.elapsedRealtime()));
+    }
+
+    private void report(String summary) {
+        Log.i(TAG, summary);
+        listener.onGlassAppReport(summary);
+    }
+
+    /**
+     * One callback serves the query, the install and the launch. Each result
+     * lands on its own tracker, so a stale callback from an earlier call cannot
+     * resolve a later one: the trackers ignore results they did not ask for.
+     */
+    private IGlassAppCallback newGlassAppCallback() {
+        return new IGlassAppCallback.Stub() {
             @Override
             public void onQueryAppResult(String queriedPackage, boolean installed) {
                 if (glassAppProbe.onQueryResult(
@@ -274,7 +394,11 @@ public final class RokidGlobalLink implements AutoCloseable {
 
             @Override
             public void onInstallAppResult(boolean succeeded) {
-                Log.i(TAG, "glass-app install result=" + succeeded);
+                if (glassAppInstall.onResult(SystemClock.elapsedRealtime(), succeeded)) {
+                    reportGlassAppInstall();
+                } else {
+                    Log.i(TAG, "ignored unmatched glass-app install result=" + succeeded);
+                }
             }
 
             @Override
@@ -284,7 +408,11 @@ public final class RokidGlobalLink implements AutoCloseable {
 
             @Override
             public void onOpenAppResult(boolean succeeded) {
-                Log.i(TAG, "glass-app open result=" + succeeded);
+                if (glassAppOpen.onResult(SystemClock.elapsedRealtime(), succeeded)) {
+                    reportGlassAppOpen();
+                } else {
+                    Log.i(TAG, "ignored unmatched glass-app open result=" + succeeded);
+                }
             }
 
             @Override
@@ -292,22 +420,17 @@ public final class RokidGlobalLink implements AutoCloseable {
                 Log.i(TAG, "glass-app stop result=" + succeeded);
             }
         };
-        try {
-            Log.i(TAG, "queryGlassAppInstalled request pkg=" + packageName);
-            current.queryGlassAppInstalled(packageName, glassAppCallback);
-        } catch (Exception error) {
-            glassAppProbe.onCallFailed(
-                    SystemClock.elapsedRealtime(), String.valueOf(error));
-            reportGlassAppProbe();
-            listener.onError("queryGlassAppInstalledの呼び出しに失敗しました", error);
-        }
     }
 
-    /** Logs and reports the probe's current verdict, including a timeout. */
-    public void reportGlassAppProbe() {
-        String summary = glassAppProbe.summary(SystemClock.elapsedRealtime());
-        Log.i(TAG, summary);
-        listener.onGlassAppProbe(summary);
+    private static void closeQuietly(ParcelFileDescriptor descriptor) {
+        if (descriptor == null) {
+            return;
+        }
+        try {
+            descriptor.close();
+        } catch (IOException error) {
+            Log.i(TAG, "ignored failure closing the apk descriptor: " + error);
+        }
     }
 
     public synchronized long showHud(List<String> lines) {

@@ -149,19 +149,99 @@ Read the verdict on the phone log line or with
 
 1. ~~**Phase 0**~~ — **done 2026-08-29.** The API is implemented, it
    discriminates, and it queries the glasses. Nothing here is blocking any more.
-2. **Phase 1 — a minimal glasses APK**: one Activity that draws something and
-   logs touch events. Install with `uploadAndInstallApk`, launch with `openApp`.
-   The source research (2026-08-29, `docs/glasses-app-route-findings.md`) has
-   already answered most of what made this risky: a working glasses-side app
-   receives single taps and horizontal swipes as ordinary `MotionEvent`s, needs
-   no special signing, no ABI filter and no Rokid manifest entries, and builds
-   at `minSdk 28` / `targetSdk 36`. Remember the phone's Wi-Fi must be on for
-   Hi Rokid to join the glasses hotspot during install.
+2. **Phase 1 — a minimal glasses APK**: **built 2026-08-29, never run on
+   hardware.** See "Phase 1, as built" below for the procedure and for how to
+   read each failure. Remember the phone's Wi-Fi must be on for Hi Rokid to join
+   the glasses hotspot during install.
 3. **Phase 2** — if taps arrive, move capture/HUD/input ownership to the glasses
    app and leave the phone as network + OCR relay.
 4. Unrelated and still open: the operator has to create `.env` with a real
    provider key before any acceptance run, and the three-shot parameter sweep
    (`docs/capture-timing-findings.md` §5) has never been run.
+
+## Phase 1, as built (2026-08-29) — not yet run on hardware
+
+New Gradle module `:glassapp`, applicationId `dev.rokid.docscanglass`,
+`minSdk 28` / `targetSdk 36`, **zero dependencies** — no androidx, no CXR-S, no
+native libraries. Every dependency added here is another way for a negative
+result to mean something other than "no input arrived".
+
+`TapProbeActivity` draws black-on-green on the glasses and counts what reaches
+it. It watches **both** input paths — `dispatchTouchEvent` and `onKeyDown` —
+because the working reference implementation handles the same gesture on either,
+which suggests the touchpad can surface as `KEYCODE_DPAD_*` rather than as a
+`MotionEvent`. It also watches `dispatchGenericMotionEvent`, since a touchpad
+reporting as a non-touchscreen source would never reach `dispatchTouchEvent` at
+all. A probe watching one path could report an absence of input that is really
+an absence of one source.
+
+Text is sized from the view rather than from a constant, because **the glasses
+display resolution has never been measured by this repo**. The header prints it,
+so the run also settles that.
+
+### Why the result is read off the glasses, not from a log
+
+Nothing can carry it off the device. There is **no documented adb** on the
+glasses (the firmware is a `user/release-keys` build and no developer-mode
+sequence is documented), and **no documented CXR-S to CXR-L message channel** —
+the community documentation's transport table has a CXR-M↔CXR-S row and no
+CXR-S↔CXR-L row. `IMediaStreamService.sendCustomCmd(String, byte[])` and
+`ICustomCmdCallback.onCustomCmdResult(String, byte[])` do exist in the AAR and
+the relay has never used either; whether they pair with CXR-S
+`sendMessage`/`subscribe` is **unverified**. Wiring that in now would drag in
+five native libraries and an unverified channel, so a silent probe could no
+longer be told from a broken transport. It belongs in the iteration *after*
+input is confirmed.
+
+### Procedure
+
+Build in the ASCII worktree; `gradlew.bat` is not directly invocable from Git
+Bash, so call the script it wraps:
+
+```bash
+export JAVA_HOME="C:/Program Files/Android/Android Studio/jbr"
+powershell -NoProfile -ExecutionPolicy Bypass \
+  -File "C:\Users\Public\rokid-docscan-build\android-relay\build-windows.ps1" \
+  testDebugUnitTest assembleDebug
+```
+
+Then, with `MSYS_NO_PATHCONV=1` exported for any `adb shell` path:
+
+1. `adb install -r app/build/outputs/apk/debug/app-debug.apk` — relay 0.3.15 /
+   versionCode 20.
+2. `adb push glassapp/build/outputs/apk/debug/glassapp-debug.apk
+   /sdcard/Android/data/dev.rokid.docscanrelay/files/glassapp.apk`. That
+   directory is writable by the shell user and readable by the relay with no
+   storage permission. The APK is **not** bundled as an asset: a throwaway probe
+   must not ship inside a relay build.
+3. On the phone: 「Hi Rokid認可・再接続」, then 「計測アプリ名」 to fill the
+   package field.
+4. 「グラス側アプリ調査」 → expect `installed=false`.
+5. 「グラスへ導入」 → expect `glass-app-install ... verdict=SUCCEEDED`.
+6. 「グラス側アプリ調査」 again → **expect `installed=true`. This is the
+   discriminator**: it is the only evidence the APK landed on the glasses rather
+   than the call merely returning.
+7. 「グラスで起動」 → expect `glass-app-open ... verdict=SUCCEEDED`.
+8. Look through the glasses. Expect `TAP PROBE <w>x<h>`, a counter line, and
+   `waiting for input`.
+9. Tap the temple. Then try, one at a time, long press / double tap / two-finger
+   tap / horizontal swipe, and record which of `DOWN TAP SWIPE KEY EVT` moves.
+
+### How to read each failure
+
+| Symptom | Meaning |
+|---|---|
+| `APKがありません` / `APKではありません` | The push did not land or was truncated. The relay checks this **before** calling, so a bad file can never be mistaken for the firmware refusing the route. |
+| install `CALL_FAILED` | Hi Rokid refused the transaction at the Binder boundary. |
+| install `FAILED` | The call ran and the glasses rejected the APK — signing, ABI, or space. |
+| install `NO_RESPONSE` (120 s) | Accepted and never answered. Provisional: a late callback still resolves. |
+| open `FAILED` | Possibly the activity string's form. The AIDL takes it as a bare second `String` and neither its form nor whether it may be empty is documented; a fully qualified class name is what the relay sends. Do not guess a second form in the same run — that would make the verdict unreadable. |
+| App visible, counters stay `0` | Input does not reach a glasses-side app either. Output works, input does not, and Phase 2 needs a different control surface. |
+
+The install timeout is 120 s and the launch timeout 15 s, against the query's
+5 s: an install ships an APK across the link and then runs a package install on
+the far side, so holding it to 5 s would report a working install as
+`NO_RESPONSE`.
 
 ## Open risks
 
@@ -176,10 +256,22 @@ Read the verdict on the phone log line or with
   and an `AiInterceptMode.BLOCK_AI` that may bear on the gesture-reservation
   problem the whole UX contract is built around. Untested; do not design on it
   until it is.
-- **Debugging on the glasses may need a development cable** that the retail
-  package does not include (the magnetic charging port doubles as a data port).
-  Installing via `uploadAndInstallApk` should not need it, but that is unverified.
-  If Phase 1 turns out to need on-glasses `adb`, procurement is a lead time.
+- **There is no known way to read anything off the glasses.** Searched
+  2026-08-29: no documented adb or developer-mode sequence for YodaOS-Sprite
+  (the firmware is a `user/release-keys` build), and no documented CXR-S↔CXR-L
+  message path. Phase 1 therefore reports on the glasses display. If a run needs
+  more than that, the candidates are, in order: the unverified
+  `sendCustomCmd`/`onCustomCmdResult` ↔ CXR-S `sendMessage`/`subscribe` pairing;
+  plain HTTP from the glasses app, if the glasses share a network with the
+  server; and a development cable the retail package does not include (the
+  magnetic charging port doubles as a data port) — that last one is procurement
+  lead time.
+- **`cxr-service-bridge` ships native libraries**, `arm64-v8a` and
+  `armeabi-v7a`: `libcaps`, `libcxr-bridge-jni`, `libcxr-sock-proto-jni`,
+  `libflora-cli`, `libmutils`. `docs/glasses-app-route-findings.md` records "no
+  ABI filter" — that is accurate for the reference implementation, which uses no
+  Rokid SDK, but it does **not** hold for a glasses app that adopts CXR-S. The
+  Phase 1 probe uses no SDK, so it is unaffected.
 - `ROKID_REAL_MODE` in `CLAUDE.md` is still unimplemented — `refactor-instructions.md`
   D06 holds it until its scope and fail-fast policy are decided. Nothing rejects
   a placeholder analyzer today; `/v1/settings` only reports.

@@ -31,8 +31,12 @@ android {
         // 13 corrects the operator guidance: the shutter was documented as a
         // 1.5 s hold, but takePhoto measured 5.2 s to its callback, so moving
         // at 1.5 s blurs the page.
-        versionCode = 19
-        versionName = "0.3.14"
+        // 20 adds Phase 1: uploadAndInstallApk and openApp, so an ordinary
+        // Android app can be put on the glasses and started there. Phase 0
+        // measured queryGlassAppInstalled answering about the glasses rather
+        // than the phone, which is what makes this worth calling.
+        versionCode = 20
+        versionName = "0.3.15"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
