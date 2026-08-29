@@ -159,7 +159,47 @@ Read the verdict on the phone log line or with
    provider key before any acceptance run, and the three-shot parameter sweep
    (`docs/capture-timing-findings.md` §5) has never been run.
 
-## Phase 1, as built (2026-08-29) — not yet run on hardware
+## Phase 1 ran on hardware 2026-08-29 — the install is refused
+
+F-51F, relay `0.3.15` / code 20 installed 22:13. Hi Rokid reconnected without a
+fresh authorization: `Hi Rokid service connected=true CXR-L 1.0.0 (code 10000)`,
+`custom view opened on glasses ... purpose=capture-review`.
+
+| Step | Result | Time |
+|---|---|---|
+| `adb push` of `glassapp.apk` | 112,995 bytes landed at `/sdcard/Android/data/dev.rokid.docscanrelay/files/` | — |
+| `queryGlassAppInstalled dev.rokid.docscanglass` | `ANSWERED installed=false` | 0.4 s |
+| **`uploadAndInstallApk`** | **`glass-app-install target=dev.rokid.docscanglass verdict=FAILED`** | **43 s** |
+
+**What `FAILED` rules out.** Not `CALL_FAILED`: Hi Rokid accepted the Binder
+transaction. Not `NO_RESPONSE`: it called back. This is
+`onInstallAppResult(false)` from the far side, 43 s after the request — long
+enough that a transfer plausibly happened before the refusal. Hi Rokid logged
+no reason; the full logcat for the window carries nothing from the Rokid
+packages.
+
+**The APK is not obviously at fault.** `aapt2 dump badging` and `apksigner`:
+package `dev.rokid.docscanglass`, `minSdk 28`, `targetSdk 36`, no required
+features beyond the implied `android.hardware.faketouch`, no native code.
+But two properties are worth one experiment each:
+
+- **signed with v2 only** — no v1 (JAR), no v3. Android 12's own PackageManager
+  accepts v2 alone, so this is only a suspect if the glasses use a vendor
+  installer that checks JAR signatures.
+- **`application-debuggable`** — some vendor installers refuse debuggable APKs.
+
+**And one property of the session, not the APK.** A capture-review CUSTOMVIEW
+was open on the glasses for the whole attempt. `client-l:1.1.1` has
+`SessionType{CUSTOM_VIEW, CUSTOM_APP}` and the wrapper has
+`configCXRSession(CXRSession(sessionType, customAppPackageName))`; the raw AIDL
+this relay calls has no session concept at all. Installing a CUSTOM_APP while a
+CUSTOM_VIEW session is live may simply not be allowed.
+
+**Next experiment: one variable at a time**, re-querying `installed` after each
+so a success is not inferred from the absence of an error. Do not change the
+signing, the debuggable flag and the session in one build.
+
+## Phase 1, as built (2026-08-29)
 
 New Gradle module `:glassapp`, applicationId `dev.rokid.docscanglass`,
 `minSdk 28` / `targetSdk 36`, **zero dependencies** — no androidx, no CXR-S, no
