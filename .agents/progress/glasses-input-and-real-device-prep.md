@@ -151,7 +151,12 @@ Read the verdict on the phone log line or with
    discriminates, and it queries the glasses. Nothing here is blocking any more.
 2. **Phase 1 — a minimal glasses APK**: one Activity that draws something and
    logs touch events. Install with `uploadAndInstallApk`, launch with `openApp`.
-   This is the first opportunity to find out whether a tap is receivable at all.
+   The source research (2026-08-29, `docs/glasses-app-route-findings.md`) has
+   already answered most of what made this risky: a working glasses-side app
+   receives single taps and horizontal swipes as ordinary `MotionEvent`s, needs
+   no special signing, no ABI filter and no Rokid manifest entries, and builds
+   at `minSdk 28` / `targetSdk 36`. Remember the phone's Wi-Fi must be on for
+   Hi Rokid to join the glasses hotspot during install.
 3. **Phase 2** — if taps arrive, move capture/HUD/input ownership to the glasses
    app and leave the phone as network + OCR relay.
 4. Unrelated and still open: the operator has to create `.env` with a real
@@ -160,8 +165,21 @@ Read the verdict on the phone log line or with
 
 ## Open risks
 
-- Phase 1 needs a second Gradle module and a signing story for the glasses APK.
-  Nothing about that has been investigated.
+- ~~Phase 1 needs a second Gradle module and a signing story for the glasses
+  APK.~~ **Investigated 2026-08-29.** A second module is the right shape — the
+  reference implementation is exactly that — and there is no signing story to
+  have: its `release` block sets no `signingConfig` at all. See
+  `docs/glasses-app-route-findings.md`.
+- **The relay uses none of the SDK's session layer.** `client-l:1.1.1` ships
+  `CxrSessionManager` / `CxrSession` / `SessionConfig` / `CapabilityBroker`
+  above the raw AIDL this repo calls directly, including `SessionType.CUSTOM_APP`
+  and an `AiInterceptMode.BLOCK_AI` that may bear on the gesture-reservation
+  problem the whole UX contract is built around. Untested; do not design on it
+  until it is.
+- **Debugging on the glasses may need a development cable** that the retail
+  package does not include (the magnetic charging port doubles as a data port).
+  Installing via `uploadAndInstallApk` should not need it, but that is unverified.
+  If Phase 1 turns out to need on-glasses `adb`, procurement is a lead time.
 - `ROKID_REAL_MODE` in `CLAUDE.md` is still unimplemented — `refactor-instructions.md`
   D06 holds it until its scope and fail-fast policy are decided. Nothing rejects
   a placeholder analyzer today; `/v1/settings` only reports.
