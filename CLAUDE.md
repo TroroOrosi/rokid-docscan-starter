@@ -1,5 +1,7 @@
 # rokid-docscan-starter development guide
 
+Status: Current engineering contract. Updated 2026-09-01.
+
 This repository contains two cooperating runtimes:
 
 - `app/`: the FastAPI document-analysis and answer server.
@@ -27,32 +29,26 @@ Rokid Glasses -> Global Hi Rokid -> Android relay -> FastAPI server -> HUD
 - Global Hi Rokid uses package `com.rokid.sprite.global.aiapp`. Keep the
   package/action assumptions isolated in `RokidGlobalLink` and revalidate them
   after Hi Rokid or YodaOS updates.
-- Inside a CUSTOMVIEW overlay, YodaOS reserves long press (record/audio toggle),
-  double tap (exit), two-finger tap (AI) and two-finger swipes, so a phone-side
-  CXR-L client cannot receive them. See `docs/glasses-ux-contract.md`. This is a
-  property of the overlay, **not of the platform**: measured 2026-08-29, an
-  overlay delivers no operator tap at all, and CXR-L has always exposed
+- CUSTOMVIEW operator tap delivery is not a verified control surface. A
+  17-minute measurement on 2026-08-29 found no callback aligned with operator
+  taps; use phone controls for capture, retake, registration, and completion.
+  This is a property of the tested overlay/session, **not of the platform**.
+  The CXR-L AAR exposes
   `IMediaStreamService.uploadAndInstallApk` / `openApp` / `stopApp` /
-  `uninstallApp` / `queryGlassAppInstalled` (present in 1.0.1 and 1.1.1), with
-  `SessionType.CUSTOM_APP` in 1.1.x. YodaOS-Sprite is Android 12 and runs
-  ordinary APKs, so an app on the glasses is a supported option this repo has
-  never used.
+  `uninstallApp` / `queryGlassAppInstalled` in the inspected 1.0.1 and 1.1.1
+  artifacts, with `SessionType.CUSTOM_APP` in 1.1.1. A glasses-side Android app
+  is therefore a supported SDK route, but this repository has not completed a
+  successful hardware install/start validation.
 - Treat this file and `docs/` as a record of what was measured, not as a
   statement of what the SDK permits. Before concluding the platform forbids
   something, read the AAR (`javap`) or another primary source.
-- Measured on Hi Rokid G1.12.10.0815 with CXR-L service `1.0.0 code 10000`:
-  `onAiKeyDown`/`onAiKeyUp` never fire, and CustomView closes always arrive
-  `userInitiated=false`. A user-originated `AI-exit` is the only glasses input
-  the relay receives, and it carries no press duration. Treat it as the short
-  action only. With one signal, the tap has to be the reversible action and a
-  commit has to be the outcome of not tapping: the tap arms/retakes, the
-  shutter fires on the tap in `AIMING`, and page registration commits on a
-  countdown in `CAPTURE_REVIEW`. 読取完了 has no such timeout — a pause between
-  pages is indistinguishable from being finished — so it stays on the phone.
-- A view swap closes before it reopens and the glasses echo the close. Arm the
-  echo suppression *before* the `closeCustomView`/`openCustomView` Binder
-  calls. Arming it afterwards let the swap's own echo register as a tap, which
-  fired the shutter the instant `AIMING` appeared.
+- On the measured Hi Rokid G1.12.10.0815 / CXR-L service `1.0.0 code 10000`,
+  `onAiKeyDown`/`onAiKeyUp` did not fire and CustomView close callbacks did not
+  provide trustworthy operator provenance. Treat `AI-exit` and view-close
+  callbacks as lifecycle evidence only, never as a shutter or commit command.
+- A view swap closes before it reopens and can echo the close. Arm echo
+  suppression before the Binder close/open calls, but do not promote the
+  remaining close to operator input.
 - Never start an auto-registration countdown before the glasses acknowledge the
   review view. Nothing may be uploaded that the operator was not shown.
 - CUSTOMVIEW output is a black background, green text, and at most three lines.
@@ -62,9 +58,9 @@ Rokid Glasses -> Global Hi Rokid -> Android relay -> FastAPI server -> HUD
 
 ## Camera and privacy
 
-The privacy LED is controlled by the glasses hardware/firmware. Application
-code must never attempt to disable, bypass, hide, or misrepresent it. A
-real-device acceptance run must physically confirm:
+The privacy LED is controlled by the glasses hardware/firmware. Supported code
+must never disable, obscure, spoof, or bypass it.
+A real-device acceptance run must physically confirm:
 
 1. the LED is lit while `takePhoto` is active;
 2. it turns off after the image callback; and
@@ -76,7 +72,9 @@ without physical verification on the exact firmware.
 
 ## Server invariants
 
-- Store the original page image as the authoritative source.
+- Store the orientation-corrected, normalized PNG as the authoritative server
+  image. The relay upload may be a JPEG, but the raw upload bytes are not
+  persisted.
 - A configured cloud analyzer may transcribe/correct OCR and describe diagrams
   from the image. Finalization must fail clearly if a photo has no usable text
   and no image-capable analyzer is configured.

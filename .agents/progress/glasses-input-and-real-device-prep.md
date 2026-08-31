@@ -1,5 +1,11 @@
 # Glasses input + real-device preparation
 
+> **Status (2026-09-01): historical progress plus current checkpoint.** The
+> 2026-08-29 narrative below records hypotheses and earlier decisions; it is
+> not an operating guide. The final section, current runbooks under `docs/`,
+> and `CAPABILITY-MAP-safe-real-device-readiness.md` supersede conflicting
+> claims. Privacy-indicator bypass is not implemented or tested.
+
 Updated 2026-08-29. Branch `agent/real-device-test-prep`, HEAD `482ad3f`,
 1 commit ahead of `origin` at the time of writing (`3eb64ce` and earlier are
 pushed).
@@ -332,3 +338,46 @@ the far side, so holding it to 5 s would report a working install as
 - `ROKID_REAL_MODE` in `CLAUDE.md` is still unimplemented — `refactor-instructions.md`
   D06 holds it until its scope and fail-fast policy are decided. Nothing rejects
   a placeholder analyzer today; `/v1/settings` only reports.
+
+## Checkpoint — 2026-09-01 safe device-ready artifact
+
+Branch: `agent/real-device-test-prep` (working tree intentionally not committed
+at this checkpoint because it contains pre-existing user edits interleaved with
+the requested documentation corrections).
+
+### Completed and verified
+
+- All 29 Markdown files are classified from `docs/README.md`; current runbooks
+  use phone controls and separate application camera-request state from the
+  externally observed privacy indicator.
+- Executable privacy-indicator manipulation code was replaced with explicit
+  compatibility stubs. Focused quarantine tests pass.
+- `ROKID_REAL_MODE=1` rejects placeholder/unready analyzer and solver choices,
+  startup validates both ports, analyzer failures do not silently degrade, and
+  solver tiers do not append the local placeholder.
+- CUSTOMVIEW/AI callbacks and close events are lifecycle diagnostics only.
+  Capture, shutter, registration, retake, discard, completion, and review
+  navigation require explicit phone controls; automatic capture/registration
+  is disabled.
+- Python: `425 passed`, one known Starlette/httpx deprecation warning; `ruff
+  check .` passes; `git diff --check` passes.
+- Android: 72 relevant source/config files hash-identical between the repository
+  and ASCII build copy. Microsoft OpenJDK 17.0.20.1 was SHA-256 verified. JDK 17
+  `testDebugUnitTest assembleDebug` passes.
+- Relay APK: package `dev.rokid.docscanrelay`, versionCode `21`, versionName
+  `0.3.16`, SHA-256
+  `C96BF67F51CC64BA0F581ABF97D09E73B9272243376DA2F2FBBB3D31F7E16A52`.
+
+### Exact blocker / safe resume point
+
+The Android device-bridge inventory returned no devices. No relay APK was
+installed and no photo was requested. `ROKID_REAL_MODE`, analyzer/solver
+selections, server bearer key, and all supported cloud-provider keys were absent
+from process/user/machine environment checks (only presence booleans printed).
+
+Resume only after one unlocked Android phone is attached and its USB-debugging
+prompt is accepted. Require exactly one connected serial, inspect the installed
+relay version/signature before updating it, and configure a real analyzer and
+solver without printing credentials. A capture run additionally requires a
+second observer/camera to record the physical indicator during `takePhoto`,
+after callback, and throughout analysis/review.

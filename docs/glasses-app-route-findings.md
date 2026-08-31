@@ -1,5 +1,9 @@
 # グラス側アプリ経路の調査記録
 
+Status: Research, not local hardware acceptance. Reference-app input behavior
+does not prove that this repository's glass APK installs, starts, or receives
+the same events on the target firmware.
+
 調査日 2026-08-29。Phase 1（グラス上で動く最小 APK）に着手する前の一次資料調査。
 
 この文書は**測定と引用の記録**であって、プラットフォームの仕様書ではない。各主張には

@@ -1,5 +1,9 @@
 # 実装メモ — 実機 Rokid 連携の差し込み箇所
 
+Status: Historical implementation notes. The onboard-AI and gesture passages
+below are superseded; the current path uses phone OCR plus configured server
+analyzer/solver and phone controls. Do not use this file as a runbook.
+
 このリポジトリは **サーバ側** を実装します。**解答の主経路はグラス搭載 AI（GPT / Gemini）**
 で、その問題別解答を `POST /solutions` で取り込みます（サーバ鍵不要）。サーバは既定で
 オフライン・クレデンシャル不要で動きますが、各プロバイダポート（analyzer / solver /

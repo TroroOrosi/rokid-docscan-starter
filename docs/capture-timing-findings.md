@@ -1,5 +1,9 @@
 # 撮影経路の実測と、固定秒数設計の見直し
 
+Status: Historical `0.3.6` measurement record. Its tap/auto-registration
+hypotheses are superseded by the phone-controlled `0.3.16` contract and must
+not be used as an operator runbook.
+
 2026-08-28 の実機セッション（F-51F / Global Hi Rokid / Rokid Glasses）で測った値と、
 そこから確定した設計上の判断を記録します。ビルドが通ったことは根拠になりません。
 ここに載せているのは実機で観測した値だけです。

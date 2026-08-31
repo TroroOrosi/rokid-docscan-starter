@@ -1,5 +1,7 @@
 # Rokid DocScan（紙資料スキャン・ページ照合・解答・解説サーバ）
 
+Status: Current project entrypoint. Updated 2026-09-01.
+
 ## このリポジトリの目的
 
 Rokid Glasses で紙資料を撮影し、Android スマホを中継して問題を解析・解答し、
@@ -8,12 +10,13 @@ Rokid Glasses で紙資料を撮影し、Android スマホを中継して問題�
 
 実機の主経路は次の通りです。
 
-1. グラスをタップして `AIMING` の照準を表示し、照準確認後にもう一度タップして
-   1.5秒静止してから CXR-L `takePhoto(1920, 1080, 80)` でページを撮影する。
+1. スマホの撮影操作で `AIMING` を表示し、表示open callback後に静止時間を置いて
+   CXR-L `takePhoto(1920, 1080, 80)` でページを1回だけ撮影する。
 2. Android の bundled Japanese ML Kit で OCR する。
-3. `CAPTURE_REVIEW` の縮小プレビューと枠内判定を確認する。無操作なら待機満了で
-   登録し、グラスのタップなら取り消して同じページの再撮影準備へ戻る。
-4. 確認画面の待機満了後に元 JPEG、ML Kit と同じ回転角、OCR を FastAPI へ送る。
+3. スマホの `CAPTURE_REVIEW` で縮小プレビューと枠内判定を確認し、登録または
+   同じページの再撮影を明示的に選ぶ。
+4. 登録操作後に撮影JPEG、回転角、OCRをFastAPIへ送り、サーバーは向きを補正した
+   normalized PNGを正本として保存する。
 5. 画像対応 Analyzer が転記・図表説明を補い、Solver が問題を解く。
 6. Android リレーが CUSTOMVIEW へ最大3行ずつ表示する。
 
@@ -30,7 +33,8 @@ submodule、AARコピーは不要です。
 入力コールバックもありません。固定焦点のため照準は構図合わせ用であり、合焦表示では
 ありません。
 
-- **プライバシー LED**：ハードウェア/ファームウェア制御です。アプリは無効化・迂回しません。
+- **プライバシー LED**：ハードウェア/ファームウェア制御です。対応コードは無効化・遮蔽・
+  偽装・迂回を行いません。
   撮影中の点灯、写真 callback 後の消灯、解答閲覧中の消灯維持を実機で物理確認します。
 - **撮影通知**：シャッター音、フラッシュ、撮影表示は端末制御です。無音・無フラッシュを
   ソフトウェア契約として約束しません。
@@ -44,8 +48,7 @@ submodule、AARコピーは不要です。
 CXR-L の実装境界は
 [CXR-L / Global Hi Rokid integration](docs/cxr-l-integration.md)です。
 
-現在のバージョン: **Server APP 0.15.0 / API 1.14.0 / Android client 0.3.9 /
-Glasses View contract 1.8.0**。
+現在のバージョン: **Server APP 0.16.0 / API 1.15.0 / Android client 0.3.16 / Glasses View 1.9.0**。
 
 ---
 
@@ -82,7 +85,7 @@ rokid-docscan-starter/
 │   ├── explainer.py   # Explainer ポート（ExplainRequest / ExplainResult / ABC）
 │   ├── llm.py         # ★実 AI ブリッジ（openai/gemini/claude、遅延import・注入可）
 │   ├── audio_formats.py # 音声MIME・保存suffix・provider対応の共通定義
-│   ├── version.py     # 各契約バージョン（app 0.15.0 / api 1.14.0 / glasses 1.8.0 ほか）
+│   ├── version.py     # 各契約バージョン（app 0.16.0 / api 1.15.0 / glasses 1.9.0 ほか）
 │   ├── config.py      # 保存先・フィーチャーフラグ（ROKID_* / ANTHROPIC_API_KEY / ROKID_TRANSCRIBER）
 │   ├── transcribe.py  # ★リスニング録音の書き起こし（openai/gemini・未設定時は与値）
 │   ├── db.py          # sqlite3（documents/pages/exam/explain テーブル）
@@ -90,13 +93,13 @@ rokid-docscan-starter/
 │   ├── solvers/       # 解答ポート: base / registry / local_placeholder / claude ★
 │   ├── explainers/    # 解説ポート: registry / local_placeholder / claude ★
 │   ├── extractors/    # メディア抽出: base / registry / local_placeholder / claude ★
-│   └── devtools/      # rokid_led.py（録画LED診断・サーバ非依存）
+│   └── devtools/      # 旧隔離実験（supported runtimeから未参照）
 ├── tests/             # pytest（照合/API/バージョン/レジストリ/exam/explain/LLM）
 ├── scripts/
 │   ├── make_sample_pages.py  # curl 用サンプル画像生成
 │   ├── evaluate.py           # 照合評価 → JSON レポート
 │   ├── eval_exam.py          # 解答パイプライン評価 → JSON レポート
-│   └── rokid_led.py          # 録画LED診断 CLI（実機所有者専用・任意）
+│   └── rokid_led.py          # 旧隔離実験。実行・連携対象外
 ├── docs/
 │   ├── windows-android-real-device-setup.md # ★Windows+Android実機手順（正本）
 │   ├── cxr-l-integration.md         # ★CXR-L / Global Hi Rokid実装境界
@@ -108,7 +111,7 @@ rokid-docscan-starter/
 │   ├── explain-sessions.md          # 資料解説モード詳細・curl 例
 │   ├── glasses-ux-contract.md       # 旧操作を含むグラス UX 参考資料
 │   ├── exam-solver-architecture.md  # 解答モードアーキテクチャ
-│   └── rokid-led-dev-utility.md     # 録画LED診断ツールの詳細・警告
+│   └── rokid-led-dev-utility.md     # 旧実験の隔離記録（操作手順なし）
 ├── .env.example       # 全環境変数の雛形（コピーして .env に）
 ├── data/images/       # 画像保存先（実行時に自動生成）
 ├── requirements.txt   # コア依存（anthropic/openai/google-genai は任意・コメント参照）
@@ -199,33 +202,33 @@ curl -s -X POST http://127.0.0.1:8000/v1/documents \
 
 ### 3. ページを追加（実機主経路：写真 + スマホOCR）
 
-Android リレーは元 JPEG、ML Kit と同じ回転角、端末 OCR を同時に送ります。画像は
-OCR と同じ向きの PNG に正規化してサーバーに保存され、設定済みの画像対応 Analyzer が
+Android リレーは撮影JPEG、回転角、端末OCRを同時に送ります。画像は
+OCR と同じ向きの PNG に正規化してサーバーの正本として保存され、raw upload bytesは
+保持されません。設定済みの画像対応 Analyzer が
 必要に応じて OCR を補正します。`image_rotation` は `0`、`90`、`180`、`270`
 （時計回り）を受け付け、省略時は `0` です。
 
-実機撮影値は `takePhoto(1920, 1080, 80)` です。カメラは固定焦点で、公称被写界深度は
-34cm〜∞のため、運用では用紙まで40〜60cm離します。最初のタップで `AIMING` の照準を
-表示して用紙中心を「＋」へ合わせ、2回目のタップ後は画面の1.5秒カウント中から
-callbackまで静止します。`AIMING` の取消はスマホの「撮影取消」で行い、写真を撮りません。
+実機撮影値は `takePhoto(1920, 1080, 80)` です。40〜60cmはローカル運用上の開始距離で、
+対象SKUの合焦保証ではありません。スマホで `AIMING` を開いて用紙中心を「＋」へ合わせ、
+スマホのシャッター操作後はcallbackまで静止します。取消はスマホの「撮影取消」で行い、
+`takePhoto`発行前なら写真を撮りません。
 四隅は撮影後プレビューで確認します。`takePhoto(4032, 3024, 80)` は実機で
-JPEG callbackがBinder上限を超えた既知NGです。
+JPEG callbackが届かなかった既知NGです。Binder容量圧迫と整合しますが、原因は未確定です。
 
-撮影と端末OCRの完了後は `CAPTURE_REVIEW` となり、スマホとグラスのCustomViewへ
-縮小プレビューを表示します。写真はまだ未登録です。スマホの「この写真を登録」で
-初めてサーバーへ送ります。グラスをタップすると同じ `page_index` の `AIMING` へ戻り、
-照準を確認してもう一度タップすると再撮影します。スマホでは登録、再撮影、未登録写真の
-破棄を操作できます。
+撮影と端末OCRの完了後は `CAPTURE_REVIEW` となり、スマホへ縮小プレビューを表示します。
+グラスへの表示は状態通知であり、確認済み入力面ではありません。写真はまだ未登録です。
+スマホの「この写真を登録」で初めてサーバーへ送り、再撮影または未登録写真の破棄も
+スマホで操作します。
 OCRが0文字でも警告を確認したうえで登録できます。登録成功まで対象ページと次ページ番号は
 変わりません。文書自体は初回撮影前に作成されます。
 
 撮影前ライブ映像とオートフォーカスは公開CXR-L非対応です。照準の「＋」は用紙中心を
 合わせる目安で、ディスプレイFOVとカメラFOVが異なるため正確な撮影境界でも合焦判定でも
-ありません。専用シャッターボタンの入力イベントも公開面から受信できないため、
-CustomViewをユーザーが閉じるタップを撮影操作に使います。
+ありません。CUSTOMVIEWのcloseや`AI-exit`には信頼できるoperator provenanceがないため、
+シャッターや登録操作には使いません。
 写真回転の既定は実機に合わせた90°で、スマホで回転選択後に再撮影を準備すると次の写真へ
 適用されます。未登録写真はアプリ再起動後も `CAPTURE_REVIEW` へ復元されますが、自動撮影・
-グラスが確認表示を開けなかった場合は自動登録しません。
+自動登録は行いません。
 
 ```bash
 curl -s -X POST http://127.0.0.1:8000/v1/documents/1/pages \
@@ -361,8 +364,8 @@ Rokid Glasses
 
 スマホは初期設定画面を持ち、セッション中も画面を表示したままにします。これは現行
 Hi Rokid の写真 callback が画面消灯後に止まる場合へ備えるためです。接続後の撮影、
-再撮影、登録、読取完了、閲覧はグラスのタッチパッド操作だけで進められます。スマホ
-ボタンは同じ操作のフォールバックと診断・復旧用です。
+再撮影、登録、読取完了、閲覧はスマホで操作します。CUSTOMVIEWはHUD出力として使い、
+グラス側入力はglass-app経路が別途実機合格するまで運用契約へ含めません。
 
 詳細は [実機手順](docs/windows-android-real-device-setup.md) を参照してください。
 
@@ -382,7 +385,7 @@ explain-sessions のグラス操作はまだ組み込んでいません。サー
 Android リレーが撮影後のユーザー確認を挟んで次のチェーンを実行します。
 
 1. 初回撮影時に `POST /v1/documents`。
-2. タップで `AIMING` の照準を表示し、もう一度タップして1.5秒静止して撮影。
+2. スマホで `AIMING` を表示し、open callback後にスマホから1回だけ撮影。
 3. 各撮影後に `CAPTURE_REVIEW` で未登録写真とOCR文字数を表示。
 4. スマホの「この写真を登録」で確定した写真だけを
    `POST /v1/documents/{id}/pages` へ JPEG + OCR で送信。
@@ -395,24 +398,19 @@ Android リレーが撮影後のユーザー確認を挟んで次のチェーン
 端末 OCR とクラウド OCR の両方が空なら問題0件として読取状態を維持し、同じページの
 再撮影または Analyzer 設定を促します。
 
-検証済みファームウェアがアプリへ配送するグラス入力は1本指タップだけです。長押しは
-グラス側AIが占有し、ダブルタップはYodaOSの「終了」に予約されています。
+CUSTOMVIEWのoperator tap deliveryは確認済み入力ではありません。close callbackと
+`AI-exit`はlifecycle evidenceとしてのみ記録します。
 
-| 状態 | グラスのタップ | スマホのボタン |
+| 状態 | グラス側 | スマホのボタン |
 |---|---|---|
-| 接続完了・読取中 (`READY` / `READING`) | 次ページの `AIMING` を開始 | 撮影準備 / 前ページ撮影準備 / **読取完了** |
-| 撮影準備 (`AIMING`) | 静止案内を開き、ACK後1.5秒静止して1回だけ撮影 | シャッター / 撮影取消 |
-| 静止待ち (`STABILIZING`) | 静止待ちを取り消す。撮影しない | 撮影取消 |
-| 撮影確認 (`CAPTURE_REVIEW`) | 同じページの `AIMING` を開始（待機中なら自動登録を取消） | この写真を登録 / 同じページを撮り直す / 未登録写真を破棄 |
-| 閲覧中 (`REVIEW`) | 次の表示 | 戻る / 次へ / **新規** |
+| 接続完了・読取中 (`READY` / `READING`) | 状態表示のみ | 撮影準備 / 前ページ撮影準備 / **読取完了** |
+| 撮影準備 (`AIMING`) | 照準表示のみ | シャッター / 撮影取消 |
+| 静止待ち (`STABILIZING`) | 静止案内のみ | 撮影取消 |
+| 撮影確認 (`CAPTURE_REVIEW`) | 状態表示のみ | この写真を登録 / 同じページを撮り直す / 未登録写真を破棄 |
+| 閲覧中 (`REVIEW`) | HUD表示のみ | 戻る / 次へ / **新規** |
 
-通常の二段階撮影は、タップで照準を開き、構図確認後のタップで静止待ちを開始します。
-`STABILIZING` 中のすべてのジェスチャーは
-安全側で撮影を取り消します。Rokid公式操作では
-ダブルタップが「戻る／現在画面を終了」なので、連続してタップするとDocScanではなく
-標準メニューへ戻ることがあります。リレーはその `AI-exit` 後、撮影や登録を行わずに
-現在のDocScan画面を再表示し、メニュー遷移に使われたcloseを撮影操作として再実行しません。
-静止待ち中に別のジェスチャーが届いた場合、旧timerは無効化され、自動では再開しません。
+通常撮影は、スマホで照準を開き、構図確認後にスマホで静止待ちを開始します。
+CUSTOMVIEWのcloseや`AI-exit`で撮影、取消、登録、画面送りを行いません。
 CustomViewのopen ACK faultまたは3秒のACK timeoutではcallback epochをfenceし、
 `takePhoto`を発行しません。「Hi Rokid認可・再接続」を完了するまで次のView要求も
 行いません。
@@ -439,51 +437,12 @@ curl -s 'http://127.0.0.1:8000/v1/exam-sessions/1/review?index=0&view_page=0'
 
 ---
 
-## 録画 LED 開発用診断ツール（任意・実機所有者専用）
+## 撮影インジケータの実機確認
 
-実機の **録画インジケータ（プライバシー）LED** を調査するための、**サーバとは独立した
-開発者向け診断ツール** を `scripts/rokid_led.py` に追加しました。**サーバや文書スキャン／
-解答フローからは一切呼ばれません**。`GET /v1/settings` の `capture.privacy_led` は
-`on_while_camera_active / tamper:forbidden`（カメラ稼働中は必ず点灯・改変不可）を公示し、
-本ツールはその契約を変更しません。点灯時間を短くする正攻法は本 README の 3 フェーズフロー
-（読取フェーズの最短化）であり、LED の無効化ではありません。
-
-> **⚠️ 重要**: 録画インジケータを無効化する **確実な非 root・ソフトウェアのみの方法は
-> 確認されていません**。`disable` は **未確認の仮説**（root / SELinux 変更が必要な場合あり）
-> で、効かないこともあります。録画インジケータの無効化は **違法となりうる行為** です。
-> **自分が所有・管理する端末** に対し、現地法と「録画は見える形で行う」期待に従って、
-> 管理された開発環境でのみ使用してください。
-
-- **既定は dry-run**（コマンド列を表示するだけ・端末に何も送らない）。
-- 実行は `--apply`、状態を変える `disable`/`restore` は `--apply` に加え `--force` が必須
-  （`--apply` のみで write を呼ぶと **ブロックして exit code 2**）。
-
-```bash
-# ワイヤレス ADB 接続コマンドの確認（dry-run。眼鏡のIPアドレスに置換）
-python scripts/rokid_led.py connect 192.168.1.50
-
-# LED ノード / プロパティ / SELinux 状態の探索（読み取り専用）
-python scripts/rokid_led.py probe --host 192.168.1.50:5555 --apply
-
-# 現在の LED 状態（読み取り専用）
-python scripts/rokid_led.py status --host 192.168.1.50:5555 --apply
-
-# 無効化の計画だけ表示（既定 dry-run・何も実行しない）
-python scripts/rokid_led.py disable --led white
-
-# 自分の端末で実際に試行（両フラグ必須）
-python scripts/rokid_led.py disable --led white --host 192.168.1.50:5555 --apply --force
-
-# 「本当に消えたか」を読み戻しで検証し、JSON 証跡を出力（再点灯対策に最大3回再アサート）
-python scripts/rokid_led.py verify --led white --host 192.168.1.50:5555 \
-    --apply --force --retries 3 --evidence-out led-evidence.json
-```
-
-> `verify` は ADB の `rc=0`（`write_succeeded`）と **実際の状態**（`verified_state` /
-> `confirmed_off`、brightness 読み戻しが根拠）を分離します。`confirmed_off: true` でも
-> **別カメラでの目視確認が必須**です（ADB 成功は物理 LED の消灯を証明しません）。
-
-詳細・警告・既知の制約・検証手順は [docs/rokid-led-dev-utility.md](docs/rokid-led-dev-utility.md) を参照。
+対応フローは撮影インジケータを変更しません。別カメラで、撮影前の消灯、`takePhoto`中の
+点灯、成功または失敗callback後の消灯、OCR・解析・閲覧中の消灯を連続記録します。
+callbackはアプリ状態の証拠であり、物理消灯の代用にはなりません。安全な観測手順は
+[実機準備調査](docs/research-safe-led-and-device-readiness-2026-09-01.md)を参照してください。
 
 ## 実モデル接続（実機の写真解析・解答には必須）
 
@@ -522,16 +481,17 @@ uvicorn app.main:app --port 8000
 全変数の雛形は [`.env.example`](.env.example)、一覧は
 [user-operation-guide.md](docs/user-operation-guide.md) §7 を参照。
 
-OpenAI書き起こしには公式に対応するWAV/MP3/M4A/MP4/OGG/FLAC/WebMを使用します。
+OpenAI書き起こしへ直接送る形式はWAV/MP3/MPEG/MPGA/M4A/MP4/WebMです。
+OGG/FLACは保存できますが、変換なしではOpenAIへ送信しません。
 raw ADTS/ADIF AACと識別できない音声データは保存できますがOpenAIへは送信せず、
 与えられた transcript へフォールバックします。先頭にID3v2タグがあっても、タグ後の
 実コンテナを判定します。
 
 ### 実機運用（グラス連携・入力・認証）
 
-実機では `android-relay` がユーザー由来の`AI-exit` callbackをタップとして扱います。
-長押しとダブルタップはOS予約のためアプリへ届かず、専用シャッターボタン、旧KeyCode、
-全タッチジェスチャ表は現行リレーの入力契約ではありません。認証、Windows Firewall、APK導入、回転調整、LED/HUD合格条件は
+実機のCUSTOMVIEW closeと`AI-exit`はoperator入力として扱わず、スマホを操作面にします。
+専用シャッターボタン、旧KeyCode、全タッチジェスチャ表も現行リレーの入力契約ではありません。
+認証、Windows Firewall、APK導入、回転調整、LED/HUD合格条件は
 [Windows + Android 実機手順](docs/windows-android-real-device-setup.md) に集約しています。
 
 ## Docker（任意）

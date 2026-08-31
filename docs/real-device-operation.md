@@ -1,320 +1,76 @@
-# 実機運用ガイド
+# Real-device operation
 
-Windows PC、Android スマホ、Rokid Glasses の実機運用は
-[Windows + Androidスマホ中継による実機運用](windows-android-real-device-setup.md)
-を正本とします。
+Status: Current supported path. Updated 2026-09-01.
 
-## 対応構成
+The supported topology is:
 
 ```text
-Rokid Glasses
-  └─ CXR-L / Bluetooth
-      └─ Androidスマホ: Global Hi Rokid + android-relay
-          └─ 信頼できるLAN / HTTP(S)
-              └─ Windows: FastAPI + SQLite + Vision Analyzer/Solver
+Rokid Glasses -> Global Hi Rokid -> Android relay -> FastAPI server -> HUD
 ```
 
-この構成では、グラスで物理ページを実際に撮影します。元 JPEG をスマホへ受け取り、
-スマホの日本語 ML Kit OCR と同じ回転角をサーバーにも伝え、画像対応
-Analyzer/Solver を組み合わせます。サーバーの保存画像は OCR と同じ向きに正規化されます。
-「撮影せず、グラス搭載 AI の認識文や回答を CXR-L から直接取得する」経路は、公開 API
-で確認できないため運用前提にしません。
+The phone is the operator control surface. CUSTOMVIEW close, `AI-exit`, and AI
+key callbacks are lifecycle/diagnostic evidence only and must not trigger a
+photo, cancellation, registration, finalization, or navigation.
 
-## リポジトリに揃っているもの
+## Before a session
 
-| 項目 | 状態 |
-|---|---|
-| FastAPI サーバー | 実装済み |
-| Global Hi Rokid 対応 Android リレー | `android-relay` に実装済み |
-| CXR-L 依存 | 公式 `client-l:1.1.1` を Gradle 取得 |
-| Android client / Glasses View contract | `0.3.5` / `1.8.0` |
-| Global 化 | `RokidGlobalLink` に実装済み |
-| 日本語端末 OCR | bundled ML Kit を実装済み |
-| 写真アップロード・中断復帰 | 実装済み |
-| Vision OCR・問題画像付き Solver | 実装済み |
-| CUSTOMVIEW HUD | 実装済み |
-| APK ビルド | Windows script / GitHub Actions を実装済み |
+1. Record the phone, Android, Global Hi Rokid, YodaOS, glasses, CXR-L service,
+   relay APK, server commit, and configured provider versions.
+2. Start the server with `ROKID_REAL_MODE=1`, an API key, an image-capable
+   analyzer, and a non-placeholder solver.
+3. Confirm `/health` and `/v1/settings` from the phone. Do not proceed if the
+   intended analyzer or solver is not ready or reports `offline=true`.
+4. Open the relay, keep its activity awake, authorize Hi Rokid, and wait for
+   the CXR-L connection and CUSTOMVIEW open acknowledgement.
 
-## 利用者が用意するもの
+## Capture one page
 
-- Android 12/API 31 以上のスマホ
-- Global版 Hi Rokid とログイン済みアカウント
-- ペアリング済み Rokid Glasses
-- Windows 10/11、Python、JDK 17、Android SDK Platform 36、ADB
-- 初回依存取得用インターネット接続
-- OpenAI、Gemini、Anthropic のいずれかの API キー
-- PC とスマホが相互到達できる信頼済み LAN
+1. On the phone, select capture preparation. `AIMING` opens on the glasses;
+   this does not call `takePhoto`.
+2. Hold the whole page in view. The reticle is an alignment aid, not a camera
+   boundary or focus indicator.
+3. On the phone, request the shutter. Only after the requested view generation
+   is acknowledged does the stabilization delay begin, followed by one
+   `takePhoto(1920, 1080, 80)` call.
+4. Keep still until an image or explicit image-error callback arrives. A
+   timeout does not prove the camera stopped; reconnect the CXR-L binding before
+   another attempt.
+5. Inspect the phone preview, orientation, all four corners, blur, and OCR. Use
+   phone buttons to register, retake, or discard. Nothing is uploaded merely
+   because a CUSTOMVIEW callback arrived.
 
-Rokid AAR、Hi Rokid 認可トークン、クラウド API キーはリポジトリへ同梱しません。
-これは不足ではなく、配布条件と秘密情報管理のための意図した境界です。
+The relay uploads the captured JPEG, rotation, and phone OCR. The server stores
+an orientation-corrected normalized PNG as the authoritative page image; the
+transport JPEG is not separately retained as an original-file archive.
 
-## 運用フェーズ
+## Finalize and review
 
-1. Windows で Analyzer/Solver と Bearer 認証を設定し、FastAPI を起動する。
-2. Android リレー APK をビルドしてスマホへインストールする。
-3. リレー画面でサーバー確認後、Hi Rokid 認可を行う。
-4. 用紙まで40〜60cm離し、グラスをタップして `AIMING` の照準を表示する。用紙中心を
-   「＋」へ合わせ、静止したまま**もう一度タップ**する。以後、1.5秒の静止表示から
-   写真callbackまで動かさない。
-5. `CAPTURE_REVIEW` でスマホとグラスの縮小プレビューと**枠内判定**を確認する。
-   何もしなければ表示された秒数で自動登録される。判定が「不合格」なら用紙が枠から
-   出ているので、その前にグラスをタップして撮り直す。タップは同じページの `AIMING`
-   へ戻る再撮影準備で、そこからもう一度タップすれば撮り直せる。
-6. スマホの「読取完了」で文書確定、問題分割、一括解答へ進む。
-7. `REVIEW` はグラスのタップで次のHUDへ送る。終了はスマホの「新規」で行う。
+Use the phone to finish reading. The configured analyzer persists corrected
+text and diagram descriptions before problem segmentation, and an image-capable
+solver receives the originating normalized page image. Use phone controls for
+review navigation and a new document. HUD output remains black, green, and at
+most three lines.
 
-APIキーとHi Rokid認可トークンはログへ出しません。リレーはセッションIDとページ番号を
-保存し、再接続時に `/scan-status` から続行します。確認中の未登録写真とOCR等は、
-下記のとおりアプリ専用領域に限って保存します。
+## Camera state and indicator evidence
 
-撮影値は `takePhoto(1920, 1080, 80)` です。カメラは固定焦点で、公称被写界深度は
-34cm〜∞です。`takePhoto(4032, 3024, 80)` は実機でBinder上限を超えcallbackなしに
-なった既知NGです。撮影前ライブ映像、オートフォーカス、合焦状態、専用シャッター
-ボタンの入力イベントは公開CXR-L非対応です。照準は用紙中心を合わせる目安で、ディスプレイ
-FOVとカメラFOVが異なるため撮影境界や合焦表示ではありません。四隅は撮影後プレビューで
-確認します。回転既定は実機に合わせた90°で、スマホの回転選択後に同ページ再撮影を
-準備すると、次の写真へ適用されます。
+Supported code never changes, obscures, spoofs, or bypasses the camera/privacy
+indicator. A second camera must continuously record the physical indicator:
 
-未登録写真、OCR、ページ番号、回転はアプリ専用領域に保持され、再起動後も
-`CAPTURE_REVIEW` へ復元されます。復元した写真も、グラスが表示を確認した時点から
-同じ待機時間で自動登録の対象になります。登録成功まで対象ページと次ページ番号は
-変わりませんが、文書自体は初回撮影前に作成されます。スマホでは「この写真を登録」
-「同じページを撮り直す」「未登録写真を破棄」を即時操作として選べます。状態復元や
-表示更新だけで自動撮影することはありません。
+- off before the request;
+- lit while the device camera is active;
+- off after the image callback; and
+- still off during OCR, upload, analysis, and review.
 
-## ファームウェア実測による訂正（2026-08-26）
+These observations are acceptance evidence for the exact recorded version
+tuple, not a guarantee for another firmware. Callback timestamps alone are not
+physical-light evidence. See
+`docs/research-safe-led-and-device-readiness-2026-09-01.md`.
 
-以下の入力仕様は Hi Rokid `G1.12.10.0815` / CXR-L service `1.0.0 (code 10000)` /
-リレー `0.3.0` の実機で成立しません。この節より後の長押し・2回短押しを前提とした
-手順は、当該ファームでは読み替えが必要です。
+## Stop conditions
 
-| 操作 | 実測結果 |
-| --- | --- |
-| 長押し | グラス側 AI アシスタントが占有。「サードパーティアプリ実行中は実行できない」と音声で拒否し、リレーへは何も届かない |
-| ダブルタップ | YodaOS の「終了」に予約済み。リレーへ届かない |
-| `onAiKeyDown` / `onAiKeyUp` | 16 MiB の logcat 全体で **0回** |
-| user CustomView close | 常に `userInitiated=false remoteStillOpen=true` で、`onCustomViewClosedByUser` は発火しない |
-| 1本指タップ | `AI-exit` が1本だけ届く。**グラスから得られる唯一の入力** |
-
-リレー自身が表示を押し出した直後の `AI-exit` は自前のechoです。遅延は一定ではなく、
-実測では push から 1 ms〜1375 ms の幅がありました（グラスへiconが届くまでの時間に
-依存します）。時間窓ではechoと実タップを分離できないため、`PressGestureInterpreter`
-は**その push が open を報告するまでの間**に届いた exit をechoとして捨てます。
-open callbackが来ない表示でグラス入力が恒久的に無効化されないよう、3000 msの上限
-だけを併用します。500 ms窓で判定していた旧実装は実機で誤シャッターを発生させたため
-採用しません。
-
-押下時間は取得できないため、`AI-exit` からは**短押しのみ**を導出します。信号が1つ
-しかない以上、タップには取り消せる操作を割り当て、確定は「タップしないこと」で
-表すしかありません。シャッターは `AIMING` のタップ、ページ登録は `CAPTURE_REVIEW`
-の待機満了です。読取完了だけは時間で判定できないためスマホに残します。
-
-公式の既定ジェスチャ表は [glasses-ux-contract.md](glasses-ux-contract.md) にあります。
-アプリはOS予約ジェスチャを奪えません。
-
-アプリ自身が表示更新のために行うcloseは確認済みcallback世代内で識別し、同じ物理操作
-からcloseとAIイベントが重複した場合もdebounceします。スマホログの
-`Glasses input source=...`で実際のイベント源を確認できます。
-
-このファームウェアで成立する操作割当は次のとおりです。グラス側は全状態で
-「タップ1つ」だけです。
-
-| 状態 | グラスのタップ | スマホのボタン |
-| --- | --- | --- |
-| `READY` / `READING` | 次ページの撮影準備（`AIMING`へ） | 撮影準備 / 前ページ撮影準備 / **読取完了** |
-| `AIMING` | **シャッター**（`STABILIZING`へ） | シャッター / 撮影取消 |
-| `STABILIZING` | 静止待ちを取消 | 撮影取消 |
-| `CAPTURE_REVIEW` | 同ページの再撮影準備（`AIMING`へ）。無操作なら待機満了で**自動登録** | この写真を登録 / 同じページを撮り直す / 未登録写真を破棄 |
-| `REVIEW` | 次の解答へ | 戻る / 次へ / **新規** |
-| 撮影中 / `FINALIZING` | 無視 | — |
-
-`AIMING`でタップすると1.5秒の静止待ち（`STABILIZING`）に入り、その間のタップは
-取り消しになります。取り消したtimerは自動再開しません。`AIMING`の取り消しは
-2回短押しに割り当てられていますが、このファームウェアは2回目のタップを届けないため、
-実際にはスマホの「撮影取消」を使ってください。同様に、`DOUBLE_SHORT` と `LONG` を
-前提とする割当（前ページ再撮影準備、即時登録、読取完了、新規）は、より多くの信号を
-配送するファームウェア向けの予備です。現行ファームでは、登録は待機満了、それ以外は
-スマホ側が正規の経路になります。
-
-公式のダブルタップは現在画面を終了するため、誤って連続タップすると標準メニューへ
-戻ることがあります。`AI-exit`の650ms後まで新しいCustomView openがなければ、
-リレーは現在のDocScan画面を再表示します。メニュー遷移のcloseは入力として破棄し、
-状態は進めず、撮影・写真登録・読取完了は発行しません。静止待ち中の遷移なら旧timerを
-無効化し、復帰後も1.5秒待ちを自動でやり直しません。
-
-CustomViewのopen errorまたは3秒のACK timeoutではcallback epochをfenceし、新しい
-CustomViewを要求しません。「Hi Rokid認可・再接続」を完了して新しいcallback epochに
-切り替わるまで、次の表示要求や撮影を行わないでください。
-
-### 表示切替のcloseもechoを出す（`0.3.1` で修正）
-
-表示の差し替えはcloseしてからopenします。グラスは**closeに対してもecho**を返します
-が、`0.3.0` はecho抑止をopen要求の後で開始していたため、closeが誘発したechoが抑止の
-外に落ちて実タップとして扱われました。その結果、`CAPTURE_REVIEW` でタップして
-`AIMING` へ入った瞬間に、そのecho自身がシャッターとして解釈され、構図を合わせる前に
-撮影されていました。「ワンタップの再撮影ができない」「勝手に自動スキャンされる」
-「用紙全体が入らない」は、いずれもこの1つの順序バグの症状です。
-
-`0.3.1` は抑止をclose呼び出しとopen呼び出しの**前**に開始します。3000 msの上限は
-そのままなので、openが返らない表示でも入力が恒久的に止まることはありません。
-
-### 枠内判定（`0.3.1` で追加）
-
-グラスにはライブプレビューがなく、ディスプレイFOVとカメラFOVも違うため、操作者は
-用紙が枠に収まったかを撮影前に確認できません。そこで撮影後、ML Kitが返す各行の
-外接矩形を使い、画像の縁2%の帯に文字が触れているかを判定します。触れていれば
-その方向の外へ本文が続いている、つまり用紙が切れていると判断します。
-
-| 判定 | HUD表示 | 意味 |
-| --- | --- | --- |
-| 合格 | `未登録 全体が入っています` | 全行が縁の帯の内側 |
-| 不合格 | `不合格 右が切れています` | 触れている辺を左上右下で列挙 |
-| 判定不可 | `文字が見つからず判定不可` | 行が1つも取れなかった |
-
-文字と縁の接触は用紙外形そのものではないため、余白だけが切れた場合は検出できず、
-枠いっぱいの用紙では不合格側へ倒れます。
-
-### 一定時間での自動登録（`0.3.5` で追加）
-
-このファームウェアがアプリへ配送する入力はタップ1つだけで、そのタップは既に
-「撮り直し」に使われています。したがって**登録をグラスだけで到達可能にするには、
-「何もしないこと」を登録の合図にするしかありません**。`CAPTURE_REVIEW` に入ると
-待機時間が始まり、満了で登録します。タップすれば取り消して撮り直しへ移ります。
-
-待機時間は枠内判定と連動します。切れた写真がそのまま素通りしないためです。
-
-| 判定 | 待機 | HUD |
-| --- | --- | --- |
-| 合格 | 4秒 | `P1 合格 全体が入っています` / `4秒で登録` / `タップ: 撮り直す` |
-| 不合格・判定不可 | 12秒 | `P1 不合格 右が切れています` / `12秒で登録` / `タップ: 撮り直す` |
-
-安全側の条件が3つあります。
-
-1. **グラスが表示を確認するまで待機を開始しません。** open callbackが届かない場合は
-   自動登録せず、スマホの「この写真を登録」だけが残ります。操作者が見ていない写真を
-   送らないための fail-closed です。
-2. **登録失敗後の再表示は自動登録の対象外です。** 対象にすると、応答しないサーバーへ
-   無限に再送してしまいます。復旧はスマホ側ボタンで行います。
-3. 復元した未登録写真は対象にします。保存された判定に応じた待機時間が適用され、
-   `0.3.1` 以前に保存されたレコードは「判定情報なし」として12秒側になります。
-
-読取完了には待機時間を設けていません。ページ間で考えている状態と読み終えた状態を
-時間では区別できないためです。読取完了はスマホのボタンのままです。
-
-### 撮影確認画面はタップを飲み込む（実測 2026-08-27）
-
-`CAPTURE_REVIEW` で操作が効かない原因を実機ログで特定しました。**このビューでは
-タップしてもCustomViewが閉じるだけで、`AI-exit` が1件も配送されません。**
-
-```text
-17:43:16.666 Glasses DocScan view available generation=6 purpose=capture-review
-17:43:41.000 custom view closed on glasses ... purpose=capture-review
-             userInitiated=false remoteStillOpen=true
-             ← この後に AI-exit なし
-```
-
-同じ操作でも `AIMING`（テキストビュー）では `17:43:10.585` に `AI-exit` が届きます。
-差は `setIcons` を使う画像ビューかどうかです。リレーは `onAiExit` だけを入力へ変換
-するため、**この状態には使えるグラス入力が存在しません**。close を入力に使う案は、
-`userInitiated=false` がリレー自身のcloseと同一で、消去法でしか区別できず、
-取りこぼすと誤登録になるため採りません。
-
-したがって `CAPTURE_REVIEW` に操作を割り当てる設計は、実装をどう直しても成立しません。
-
-**ただし、ダブルタップだけは届きます。** YodaOS がダブルタップを「終了」に予約して
-いるため、グラスはデフォルト画面へ戻り、その離脱は `AI-exit` として配送されます。
-リレーはこれを検出して現在のDocScan画面へ自動復帰します。`0.3.5` からは、
-`CAPTURE_REVIEW` でこの復帰が起きた場合を**「このページを撮り直す」**として扱います。
-写真を再表示するだけでは、拒否したはずの写真をもう一度見せることになるためです。
-
-復帰は `AI-exit` から650ms以内に新しいCustomView openが来なければ発火します。表示
-pushのechoは直後（実測18ms）に自前のopenが続くため、誤って撮り直しが走ることは
-ありません。
-
-**`0.3.5` で復帰そのものを修正しました。** `0.3.4` まで復帰処理は
-`isCustomViewOpened()` が true を返すと自分をスキップしていました。ところがこの
-ファームウェアは、ユーザーがホーム画面へ出た後も同じ値を true で返します（全ての
-close callback が `remoteStillOpen=true` を報告するのと同じ現象です）。そのため
-復帰は毎回スキップされ、操作者はホーム画面に取り残されていました。
-
-復帰処理は `AI-exit` が届き、650ms以内に open callback が**来なかった**ときにだけ
-走ります。つまり自前のコールバック帳簿の時点で未オープンが確定しています。サービス
-側の申告より自前の帳簿を信用するようにしました。
-
-### 自動読取（`0.3.5` で追加）
-
-操作を前提にせず、同じページを複数回撮って最良の1枚を自動登録します。スマホの
-「自動読取 開始」で始め、以後は用紙をグラスの視野に保つだけです。
-
-0. 撮影に失敗、またはOCRが0文字・OCRエラーだった場合は、待たずに即座
-   （200ms後）に撮り直します。何も取得できていない以上、待つ理由がないためです。
-   連続40回読めなければ間隔を1.2秒へ広げます。これは発熱と電池のための保護で、
-   プライバシーのためではありません。**LEDはカメラが動いている間だけ点灯します。
-   それがLEDの役目であり、アプリ側で消灯・抑制・偽装は行いません。**
-   点灯時間を減らす唯一の正当な方法は、カメラを動かす時間を実際に減らすことです。
-1. 同じページを3枚連続で撮影する（間隔400ms）。
-2. 各枚を採点する。**採点 = 文字数 × 平均確信度**、枠外れは0.2倍。
-   これは「正しく読めた文字数の期待値」です。確信度だけでは3文字を完璧に読んだ枚が
-   勝ち、文字数だけでは自信を持って誤読した枚が勝つため、積を使います。
-3. 最良の1枚だけを保存して登録する。3枚とも保存はしません。
-4. 2.5秒待って次のページのバーストへ進む。その間に用紙をめくります。
-5. 読み取れた文字が直前の登録ページと**文字トライグラムのJaccardで0.8以上**なら
-   同じページとみなして登録せず、待って撮り直します。めくり忘れの二重登録を防ぎます。
-
-停止条件は、エラー発生時、リンク切断時、そして同一ページが20バースト続いたときです。
-読取完了はスマホのままです。
-
-限界を明記します。重複判定は用紙ではなく**本文の文字列**を見ています。文面がほぼ
-同じ2ページ（同じ書式の帳票、反復練習のドリル）は同一ページと誤判定して2枚目を
-飛ばします。実材料で問題になる場合は、文字列指標を凝らすのではなくページ番号を
-明示する操作を足すべきです。
-
-## 実機合格条件
-
-次の全項目を、使用するスマホ・Hi Rokid・YodaOSの組み合わせで確認してください。
-
-- Hi Rokid 認可と AIDL bind が成功する。
-- グラス入力のイベント源がスマホログの `Glasses input source=...` へ記録される。
-- `READING` の1回目のタップでは `AIMING` だけが表示され、`takePhoto` は0回である。
-- 表示push直後のechoでは `takePhoto` が発行されず、ログに抑止が残る。
-- スマホの「撮影取消」で `AIMING` を取り消せ、`takePhoto` は0回である。
-- 照準確認後の2回目のタップで静止案内を開き、そのopen callback確認から1.5秒静止した
-  後に、`takePhoto` が1回だけ発行される。
-- 静止待ち中のタップまたはスマホの「撮影取消」で準備を取り消せ、旧timerから
-  撮影されない。
-- CustomViewのACK fault/timeout後は次の表示要求がなく、Hi Rokid再認可・再接続後の
-  新しいcallback epochでだけ再開する。
-- アプリ起因closeやclose/AIの重複配送で、撮影・登録・読取完了が重複しない。
-- ダブルタップで標準メニューへ戻った後、現在のDocScan画面へ自動復帰し、その復帰では
-  撮影も登録も行われない。
-- 写真 callback が0バイトでなく、登録前は `CAPTURE_REVIEW` と未登録表示になる。
-- 待機満了の自動登録、またはスマホの「この写真を登録」が成功した後にだけ
-  `has_image=true` になる。
-- 待機中のタップで自動登録が取り消され、`AIMING` へ戻る。
-- 合格は4秒、不合格・判定不可は12秒で登録される。
-- グラスが確認表示を開かなかった場合は自動登録されない。
-- `CAPTURE_REVIEW` のタップで同ページ再撮影を準備でき、次のタップで撮り直せる。
-- スマホの「読取完了」で読取を確定できる。
-- 登録前または登録失敗時は対象ページと次ページ番号が変わらない。
-- 登録成功後のローカル削除失敗でも、同じJPEGが再起動後に未登録へ戻らない。
-- 用紙まで40〜60cm離し、用紙中心を「＋」へ合わせて静止できる。
-- 撮影後プレビューで四隅が入り、文字の輪郭とブレを判別できる。
-- 撮影後の縮小プレビューがスマホとグラスのCustomViewへ正しく表示される。
-- OCRに用紙の文字が入り、必要なら回転設定で直せる。
-- OCRが0文字なら警告され、待機中に撮り直すか、そのまま登録させるか選べる。
-- 未登録写真を残した再起動で同じ確認状態へ戻り、表示確認後に待機が始まる。
-- Analyzer が写真を読み、文書確定後に問題が1件以上作成される。
-- Solverへ設問開始ページの画像が渡る。
-- HUDが黒背景・緑文字・最大3行で更新される。
-- プライバシーLEDが撮影中に点灯し、写真受信後に物理的に消灯する。
-- 解答と閲覧中に追加撮影が起きず、LEDが消灯したままである。
-- スマホ画面を維持した状態で複数ページを連続撮影できる。
-
-ビルド/単体テストの成功だけでは、LED、写真 callback、Hi Rokid 認可、HUD再描画を
-検証済みとはしません。
-
-## 詳細
-
-- [Windows + Android セットアップ](windows-android-real-device-setup.md)
-- [CXR-L / Global Hi Rokid integration](cxr-l-integration.md)
-- [Android relay](../android-relay/README.md)
+Stop without taking another photo if a required callback registration fails,
+CUSTOMVIEW acknowledgement fails, a photo callback times out, the service
+disconnects during capture, the indicator state is uncertain, or the server is
+not using the intended real providers. Preserve content-free timing/error logs,
+recreate the binding, and begin a new capture generation only after the state is
+known.

@@ -1,152 +1,67 @@
-# ユーザー運用ガイド
+# User operation guide
 
-この文書は、Windows PC、Android スマホ、Rokid Glassesを所有する利用者向けです。
-コマンドを含む完全な導入手順は
-[windows-android-real-device-setup.md](windows-android-real-device-setup.md)、
-合格判定は
-[device-verification-checklist.md](device-verification-checklist.md)を使ってください。
+Status: Current phone-controlled workflow. Updated 2026-09-01.
 
-## システム構成
+## What this system does
 
-```text
-Rokid Glassesで撮影
-  → Global Hi Rokid
-  → Android Relay（日本語ML Kit OCR）
-  → Windows FastAPI（Vision Analyzer / Solver）
-  → Android Relay
-  → CUSTOMVIEW HUD
-```
+Rokid Glasses capture a physical page through CXR-L. The Android relay runs
+bundled Japanese ML Kit OCR and sends the photo, rotation, and OCR to the
+FastAPI server. The server normalizes the image, optionally corrects/transcribes
+it with an image-capable analyzer, segments problems, solves them, and returns a
+compact HUD view.
 
-写真を撮らずにグラス搭載AIの任意認識文・回答を外部へ取り出す公開CXR-L APIは
-確認できないため、運用の主経路には使いません。
+Text-only upload remains API compatibility support; it is not the real-device
+primary path. The public CXR-L surface inspected for this project does not
+provide arbitrary text or answers produced by an AI running on the glasses.
 
-## 利用者が用意するもの
+## Start
 
-- Android 12/API 31以上のスマホ
-- Global版Hi Rokid、Rokidアカウント、ペアリング済みグラス
-- Windows 10/11、Python 3.10–3.12
-- JDK 17、Android Studio/SDK Platform 36、ADB
-- PCとスマホが相互到達できる信頼済みLAN
-- OpenAI、Google Gemini、AnthropicのいずれかのSDK/APIキー
-- サーバー用の長いランダムBearer値
+1. Connect the glasses in Global Hi Rokid.
+2. Start the configured server and verify it from the phone.
+3. Open Rokid DocScan Relay, enter the LAN server URL and API key, and authorize
+   Hi Rokid.
+4. Wait for both the CXR-L connection and the glasses display acknowledgement.
 
-Rokid AARはGradleが公式Mavenから取得します。CxrGlobalのcloneやAARコピーは不要です。
+Do not expose the FastAPI port to the public internet. Do not put API keys,
+authorization tokens, page content, or provider credentials in logs or test
+records.
 
-## 初回セットアップ
+## Read pages
 
-1. WindowsでPython仮想環境と依存を導入する。
-2. 使用するProvider SDKを一つ導入する。
-3. `ROKID_ANALYZER`、`ROKID_SOLVER`、Provider APIキー、
-   `ROKID_API_KEY`を設定する。
-4. FastAPIをLAN向けに起動する。
-5. Windows FirewallはPrivate profileの8000/TCPだけを許可する。
-6. `android-relay`をビルドし、ADBでスマホへ導入する。
-7. RelayへPCのIPv4 URLとBearer値を入力する。
-8. サーバー確認後、Hi Rokid認可を行う。
+For each page:
 
-APIキーとHi Rokid認可トークンをログ、スクリーンショット、Issue、PRへ貼らないで
-ください。
+1. Press the phone's capture-preparation control.
+2. Center the complete page in the reticle and hold still.
+3. Press the phone shutter control once.
+4. Wait for the callback and local OCR.
+5. Inspect the phone preview. Register it only if orientation, corners, text,
+   and blur are acceptable; otherwise retake or discard from the phone.
 
-## 通常操作
+CUSTOMVIEW taps and close/`AI-exit` callbacks are not a supported control path.
+They do not trigger capture or commit data. The phone is required for capture,
+retake, registration, completion, and review navigation.
 
-### 読取
+After registration, the server retains the normalized orientation-corrected PNG
+as the authoritative page image and the persisted analyzer-derived text. A new
+upload with the same `(document_id, page_index)` replaces that page.
 
-1. 用紙をグラスから40〜60cm離す。
-2. タッチパッドをタップし、`AIMING` の「＋」へ用紙中心を合わせる。
-3. もう一度タップし、静止表示が開いてから1.5秒と写真callback到着まで動かさない。
-4. `CAPTURE_REVIEW` の撮影済みプレビューで四隅、文字の輪郭、ブレを確認する。
-5. 良ければスマホの「この写真を登録」を押す。悪ければグラスをタップして
-   同じページの`AIMING`へ戻り、照準を確認してもう一度タップして撮り直す。
-6. 次ページで繰り返す。
-7. 全ページを登録した後、スマホの「読取完了」で読取を完了する。
+## Finish and review
 
-各ページは元JPEGとOCRの両方で保存されます。AnalyzerがOCRを補い、問題分割後に
-Solverが各問題の開始ページ画像を見て解答します。
-撮影前ライブ映像、オートフォーカス、専用シャッターボタン入力は公開CXR-Lにないため、
-照準は中心合わせの目安です。四隅と合焦は必ず撮影後プレビューで確認してください。
-`AIMING`を撮影せずに取り消すときは、スマホの「撮影取消」を使います。
+After the last registered page, press the phone's reading-complete control.
+If the server reports that no usable text or image-capable analyzer exists,
+retake the page or configure the analyzer; do not treat placeholder output as a
+real-device result. Navigate answers and start a new document with phone
+controls.
 
-グラスから届く操作はタップだけです。長押しはグラス側のAIアシスタントが占有し、
-ダブルタップはYodaOSの「終了」に予約されているため、アプリには届きません。
-登録・読取完了・新規はスマホのボタンで行います。
+## Physical camera indicator
 
-公式のダブルタップは現在画面を終了します。誤って連続タップして標準メニューへ戻った
-場合、Relayが現在のDocScan画面を自動再表示します。この復帰だけで撮影や登録はしません。
-`STABILIZING`の静止表示中は、タップまたはスマホの「撮影取消」で撮影を取り消せます。
-取り消した1.5秒待ちは自動再開しません。
+Do not modify or cover the camera/privacy indicator. During acceptance testing,
+have another person or an independent camera observe it continuously before,
+during, and after capture. It must be lit while the camera is active and off
+after the image callback, throughout analysis and review. If a callback times
+out or the indicator state is uncertain, stop and reconnect rather than taking
+another photo.
 
-### 閲覧
-
-| 操作 | 動作 |
-|---|---|
-| グラスのタップ | 次の表示ページ、末尾なら次問題 |
-| スマホ「戻る」 | 前の表示ページ、先頭なら前問題 |
-| スマホ「新規」 | 閲覧終了・新規文書 |
-
-スマホのボタンは設定と診断に加え、グラスへ届かない操作の正規の入口です。
-
-## 中断時
-
-Relayは次をスマホへ保存します。
-
-- `document_id`
-- 次の `page_index`
-- `session_id`
-
-Hi Rokidを再認可して接続すると、`/scan-status`を読み、未確定文書、確定済み文書、
-作成途中sessionのいずれからも再開します。APIキーと認可トークンは保存しません。
-
-## エラー対応
-
-| 表示 | 対応 |
-|---|---|
-| サーバ接続不可 | PC IPv4、同一LAN、Firewall、ポート、URLを確認 |
-| 401 | RelayとWindowsの `ROKID_API_KEY` を一致させる |
-| Hi Rokid未接続 | Hi Rokidでペアリング確認後、再認可 |
-| 撮影callbackなし | Relayを前面表示し、スマホをスリープさせない。30秒後は追加撮影せず「Hi Rokid認可・再接続」を実行 |
-| CustomView ACK fault / timeout | callback epochがfenceされ、次の表示要求は発行されない。「Hi Rokid認可・再接続」を完了してから再開 |
-| OCR空 / 問題0件 | 回転を直して同じページを再撮影、または画像対応Analyzer設定を確認 |
-| 問題0件 | OCR/図表説明を確認して該当ページを再撮影 |
-| HUD更新なし | 「Hi Rokid認可・再接続」を実行。RelayはACK済みcallback epochでだけclose + open更新を行う |
-| ダブルタップで標準メニューへ戻る | 約1秒待つ。現在のDocScan画面が自動再表示され、メニュー遷移は撮影・登録操作にならない |
-| Provider失敗 | SDK、APIキー、model名、課金/利用上限、ネットワークを確認 |
-
-## 環境変数
-
-| 変数 | 実機での意味 |
-|---|---|
-| `ROKID_ANALYZER` | `openai` / `gemini` / `claude` の画像OCR |
-| `ROKID_SOLVER` | 同Providerの問題解答 |
-| `ROKID_EXPLAINER` | 任意の資料解説 |
-| `ROKID_EXTRACTOR` | 任意の図表/数式抽出 |
-| `OPENAI_API_KEY` | OpenAI選択時 |
-| `GOOGLE_API_KEY` | Gemini選択時 |
-| `ANTHROPIC_API_KEY` | Claude選択時 |
-| `ROKID_API_KEY` | Android RelayからのBearer認証 |
-| `ROKID_DATA_DIR` | SQLiteとページ画像の保存先 |
-| `ROKID_ALLOW_REAL_EXAM_SOLVE` | 既定0。実試験modeのロック解除 |
-
-`local` Analyzer/Solverは開発用プレースホルダーです。写真と端末OCRの両方から文字を
-得られない場合、ローカル構成では文書確定を拒否します。
-
-## プライバシーと安全
-
-- 撮影、保存、クラウド送信について利用者と資料所有者の同意を得る。
-- 公衆Wi-FiやインターネットへFastAPIを直接公開しない。
-- LAN外ではTLSリバースプロキシとBearer認証を使う。
-- 不要になった `ROKID_DATA_DIR` の画像とDBを運用手順に従って削除する。
-- プライバシーLEDはハードウェア強制のままにする。
-- 撮影中点灯、callback後消灯、閲覧中消灯を物理確認する。
-- シャッター音、フラッシュ、撮影表示はdevice-controlledとしてファームごとに実測する。
-
-## 実装済みと断定しないもの
-
-- 全Hi Rokid/YodaOSバージョン互換
-- 全タッチジェスチャの外部アプリ配送
-- グラス搭載GPT/Geminiの任意認識文/回答 callback
-- `customViewUpdate`だけによる確実な再描画
-- ビルドだけで確認したLED挙動
-
-これらを含む「実機検証済み」の判断は
-[device-verification-checklist.md](device-verification-checklist.md)の全項目を
-満たした後に行います。
+Shutter sound, flash, and capture indicators are device-controlled unless a
+future public SDK control is separately documented and physically verified for
+the exact firmware.
