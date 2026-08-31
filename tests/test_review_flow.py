@@ -2,7 +2,7 @@
 
 Covers:
   * POST /finalize-reading — segmentation into problems, status open→reviewing,
-    reading ack (camera off / LED off), idempotency, document requirement,
+    reading ack (no subsequent camera request), idempotency, document requirement,
   * server-side solve-all only when a non-local ROKID_SOLVER is configured
     (whole document as context; listening transcript folded in),
   * POST /solutions — onboard AI ingest (primary path): deck solved flags,
@@ -119,7 +119,10 @@ def test_finalize_reading_segments_and_transitions(client):
     assert body["problem_count"] == 2
     assert [p["problem_no"] for p in body["problems"]] == ["問1", "問2"]
     # Camera is off from here: LED dark for the whole answer/review phases.
-    assert body["camera"] == {"expected_state": "off", "privacy_led": "off"}
+    assert body["camera"] == {
+        "request_state": "none",
+        "privacy_led": "physically_verify_off",
+    }
     ack = body["reading_ack"]
     assert len(ack["lines"]) <= 3
     assert ack["camera_off"] is True
@@ -832,18 +835,16 @@ def test_zero_problem_finalize_reading_is_repeatable(client):
 
 
 def test_zero_problem_response_keeps_reading_controls(client):
-    # Reverted -> the operations block must be the READING bindings (double
-    # tap = finish_reading again), not the review bindings where the same
-    # gesture means close — that would strand the advertised re-scan loop.
+    # Reverted and review states both remain phone-controlled.
     sid, _doc_id = _unreadable_session(client)
     body = client.post(f"/v1/exam-sessions/{sid}/finalize-reading").json()
     assert body["status"] == "reading"
-    assert body["operations"]["finish_reading"] == "double_tap"
-    assert body["operations"]["capture_read"] == "two_finger_tap"
+    assert body["operations"]["finish_reading"] == "phone"
+    assert body["operations"]["capture_read"] == "phone"
     assert "close" not in body["operations"]
     # A successful finalize keeps advertising the review bindings.
     sid2, ok = _finalized_session(client)
-    assert ok["operations"]["close"] == "double_tap"
+    assert ok["operations"]["close"] == "phone"
     assert "finish_reading" not in ok["operations"]
 
 

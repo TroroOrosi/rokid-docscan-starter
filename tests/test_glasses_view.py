@@ -70,10 +70,10 @@ def test_answer_stage_shows_confidence_symbol_and_locator():
     assert v["locator"].startswith("解答欄")
 
 
-def test_voice_toggle_changes_hint():
+def test_voice_toggle_does_not_override_phone_control_hint():
     on = build_glasses_view(_sol(), voice_enabled=True)["nav"]["hint"]
     off = build_glasses_view(_sol(), voice_enabled=False)["nav"]["hint"]
-    assert on != off
+    assert on == off == "操作はスマホ"
 
 
 def test_locked_view_never_reveals_answer():
@@ -185,9 +185,7 @@ def test_review_view_problem_nav_edges():
     assert last["nav"]["prev_problem"] == 1
     assert last["nav"]["next_problem"] is None
     ops = first["nav"]["operations"]
-    assert ops["next_problem"] == "two_finger_swipe_left"
-    assert ops["scroll_next"] == "two_finger_swipe_down"
-    assert ops["close"] == "double_tap"
+    assert set(ops.values()) == {"phone"}
 
 
 def test_review_view_omits_empty_sections():

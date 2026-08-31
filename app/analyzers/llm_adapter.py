@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from .. import config
 from ..llm import LLMClient, get_client
 from .base import Analyzer, AnalyzerResult
 from .local_placeholder import LocalPlaceholderAnalyzer
@@ -86,7 +87,21 @@ class LLMAnalyzer(Analyzer):
         supplied_text = (ocr_text or "").strip()
         try:
             client = get_client(self._client, self.provider)
-            if client is None or (image is None and not supplied_text):
+            if client is None:
+                if config.REAL_MODE:
+                    raise RuntimeError(
+                        f"real-mode analyzer '{self.name}' is not configured"
+                    )
+                return self._fallback.analyze(
+                    image_path=image_path,
+                    ocr_text=ocr_text,
+                    max_summary_len=max_summary_len,
+                )
+            if image is None and not supplied_text:
+                if config.REAL_MODE:
+                    raise RuntimeError(
+                        f"real-mode analyzer '{self.name}' received no usable input"
+                    )
                 return self._fallback.analyze(
                     image_path=image_path,
                     ocr_text=ocr_text,
@@ -102,7 +117,11 @@ class LLMAnalyzer(Analyzer):
                 prompt=prompt,
                 image=image,
             )
-        except Exception:  # noqa: BLE001 - finalization degrades safely
+        except Exception as exc:  # noqa: BLE001 - mode selects fail behavior
+            if config.REAL_MODE:
+                raise RuntimeError(
+                    f"real-mode analyzer '{self.name}' failed: {exc}"
+                ) from exc
             return self._fallback.analyze(
                 image_path=image_path,
                 ocr_text=ocr_text,

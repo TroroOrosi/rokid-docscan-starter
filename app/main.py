@@ -90,6 +90,13 @@ def _extract_media(ocr_text: str | None, image_path: str | None) -> list[dict]:
 async def lifespan(app: FastAPI):
     ensure_dirs()
     db.init_db()
+    if config.REAL_MODE:
+        # Resolve both adapters before accepting a physical-device session.
+        # Registry access rejects local, unknown->local, and unready providers.
+        from .solvers import get_solver  # noqa: PLC0415
+
+        get_analyzer()
+        get_solver()
     yield
 
 
@@ -1172,7 +1179,7 @@ def _exam_session_or_404(conn, session_id: int):
 
 
 def _session_phase(session) -> str:
-    """3-phase lifecycle: 'reading' (camera ON, LED lit) → 'reviewing' (camera OFF).
+    """Lifecycle: reading may request photos; reviewing requests no photos.
 
     The legacy default status 'open' is a reading-phase alias, so pre-existing
     sessions keep working unchanged; finalize-reading sets status='reviewing'.
@@ -1722,19 +1729,19 @@ def get_exam_session(session_id: int) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Document exam — 3-phase flow (primary path), designed to minimize the time
-# the camera is on (= the privacy LED is lit):
+# Document exam — 3-phase flow (primary path), designed to minimize photo
+# requests. Physical indicator state is verified independently on the device:
 #
-#   Phase 1 読取 (camera ON, LED lit — keep it short):
+#   Phase 1 読取 (takePhoto is requested only for explicit phone captures):
 #     register every page once (POST /documents/{id}/pages + finalize), then
-#     POST .../{id}/finalize-reading      declare 読取完了 (double tap) →
-#                                         segment into problems, camera OFF
-#   Phase 2 解答 (camera OFF): all problems solved in one batch
+#     POST .../{id}/finalize-reading      phone declares 読取完了 →
+#                                         segment into problems; no photo request
+#   Phase 2 解答 (no camera request): all problems solved in one batch
 #     POST .../{id}/solutions             ingest the onboard AI's per-problem
 #                                         answers (primary), or — with
 #                                         ROKID_SOLVER=openai|gemini|claude —
 #                                         finalize-reading solves server-side
-#   Phase 3 閲覧 (camera OFF, LED off): per-problem review deck
+#   Phase 3 閲覧 (no camera request): per-problem review deck
 #     GET  .../{id}/solutions             deck listing (solved flags)
 #     GET  .../{id}/review?index=k        one problem, 答え+解法+根拠+注意 in
 #                                         one stream (view_page teleprompter)
@@ -1772,7 +1779,7 @@ def _require_document_exam(session):
 
 @app.post("/v1/exam-sessions/{session_id}/next-page")
 def exam_next_page(session_id: int) -> dict:
-    """Advance the current page index by 1 (two_finger_swipe_left). Clamped at last."""
+    """Advance the current page index by one from the phone; clamp at last."""
     conn = db.connect()
     try:
         session = _exam_session_or_404(conn, session_id)
@@ -1799,7 +1806,7 @@ def exam_next_page(session_id: int) -> dict:
 
 @app.post("/v1/exam-sessions/{session_id}/prev-page")
 def exam_prev_page(session_id: int) -> dict:
-    """Move the current page index back by 1 (two_finger_swipe_right). Clamped at 0."""
+    """Move the current page index back by one from the phone; clamp at zero."""
     conn = db.connect()
     try:
         session = _exam_session_or_404(conn, session_id)
@@ -2466,7 +2473,10 @@ def exam_finalize_reading(session_id: int) -> dict:
             # The camera is off either way at this instant (the double tap
             # closed it); after a revert it only re-opens on the user's next
             # two-finger tap (capture_read), keeping LED time minimal.
-            "camera": {"expected_state": "off", "privacy_led": "off"},
+            "camera": {
+                "request_state": "none",
+                "privacy_led": "physically_verify_off",
+            },
             # Reverted -> the client must keep READING controls (double_tap =
             # finish_reading again), not the review bindings where the same
             # gesture means close — that would strand the re-scan loop.
@@ -2672,7 +2682,7 @@ def exam_ingest_solutions(session_id: int, payload: IngestSolutions) -> dict:
                 "lines": [
                     "解答受信",
                     f"{solved_count}/{len(deck)}問 解答済",
-                    "横スワイプで閲覧",
+                    "操作はスマホ",
                 ],
                 "ttl_sec": 2,
             },
@@ -2684,7 +2694,7 @@ def exam_ingest_solutions(session_id: int, payload: IngestSolutions) -> dict:
 
 @app.get("/v1/exam-sessions/{session_id}/solutions")
 def exam_list_solutions(session_id: int) -> dict:
-    """Review-deck listing (phase 3 閲覧). Camera off, LED off, no paper needed.
+    """Review-deck listing; it makes no camera request and needs no paper.
 
     Always 200: during the reading phase it returns an empty deck with
     status="reading" so a client can poll for readiness.
@@ -2858,8 +2868,8 @@ def create_explain_session(payload: CreateExplainSession) -> dict:
 def explain_next_page(session_id: int) -> dict:
     """Advance the current page index by 1.
 
-    Triggered by the user pressing the 'next page' button (two_finger_swipe_left /
-    KEYCODE_DPAD_UP) on the glasses.  Clamped at the last page.
+    Triggered by the user pressing the phone's next-page control. Clamped at
+    the last page.
     Returns the new current_page_index and a brief HUD ack.
     """
     conn = db.connect()
@@ -2888,7 +2898,7 @@ def explain_next_page(session_id: int) -> dict:
 def explain_prev_page(session_id: int) -> dict:
     """Move the current page index back by 1.
 
-    Triggered by two_finger_swipe_right / KEYCODE_DPAD_RIGHT (unverified).  Clamped at page 0.
+    Triggered by the phone's previous-page control. Clamped at page zero.
     """
     conn = db.connect()
     try:
@@ -3180,9 +3190,9 @@ def explain_page(
     No page_index parameter — the server uses current_page_index, which is
     updated by POST /next-page and /prev-page.
 
-    Navigation within a page:
-      - stage     : overview | detail | evidence  (long-press)
-      - view_page : 0-based teleprompter slice    (two_finger_swipe_down / up)
+    Phone-controlled navigation within a page:
+      - stage     : overview | detail | evidence
+      - view_page : 0-based teleprompter slice
     """
     if stage not in EXPLAIN_STAGES:
         raise HTTPException(

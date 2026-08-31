@@ -115,6 +115,32 @@ def test_openai_raw_aac_falls_back_without_calling_the_sdk(tmp_path, audio):
 
 @pytest.mark.parametrize(
     "audio",
+    [b"OggS0000payload", b"fLaC0000payload"],
+    ids=["ogg", "flac"],
+)
+def test_openai_ogg_and_flac_fall_back_without_calling_the_sdk(tmp_path, audio):
+    called = False
+
+    def _create(**kw):
+        nonlocal called
+        called = True
+        return SimpleNamespace(text="must not be used")
+
+    sdk = SimpleNamespace(
+        audio=SimpleNamespace(transcriptions=SimpleNamespace(create=_create))
+    )
+    client = LLMClient(sdk, provider="openai", model="unused")
+    path = _write_audio(tmp_path, name="recording.bin", data=audio)
+
+    assert (
+        transcribe_audio(path, provided_transcript="safe fallback", client=client)
+        == "safe fallback"
+    )
+    assert called is False
+
+
+@pytest.mark.parametrize(
+    "audio",
     [b"ADIFraw-aac", b"not-a-supported-audio-container"],
     ids=["adif-aac", "unrecognized"],
 )

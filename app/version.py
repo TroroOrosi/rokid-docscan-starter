@@ -113,7 +113,7 @@ from __future__ import annotations
 #        reported against the async Binder budget, the CXR-L service version is
 #        recorded on connect, and OCR results carry a mean symbol confidence.
 #        Relay-only; API and glasses view unchanged.
-APP_VERSION = "0.15.0"
+APP_VERSION = "0.16.0"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.
@@ -164,7 +164,7 @@ APP_VERSION = "0.15.0"
 # 1.13.1: Pillow decompression-bomb rejections consistently return 413; raw
 #        AAC and unrecognized audio are rejected before an OpenAI SDK call,
 #        including AAC hidden behind a leading ID3v2 tag.
-API_VERSION = "1.14.0"
+API_VERSION = "1.15.0"
 
 # Matching algorithm identity. Bump when thresholds or hashing change so a
 # re-index/eval is triggered. Mirrors thresholds in app/matching.py.
@@ -245,10 +245,11 @@ EXPLAINER_API_VERSION = "1.1.0"
 #        from an old service binding cannot complete a new capture.
 # 1.7.1: glasses status callbacks retain unresolved captures. Only a terminal
 #        image callback or an actual CXR-L service-binding reset releases them.
-# 1.8.0: every snapshot enters an explicit capture-review state. The glasses
-#        render a downsampled preview; short/double press retakes the same page
-#        and long press confirms registration.
-GLASSES_VIEW_CONTRACT_VERSION = "1.8.0"
+# 1.8.0: every snapshot enters an explicit capture-review state.
+# 1.9.0: unverified CUSTOMVIEW/AI callbacks are diagnostic-only. Capture,
+#        registration, completion and navigation are phone-controlled; no
+#        automatic registration is advertised.
+GLASSES_VIEW_CONTRACT_VERSION = "1.9.0"
 
 # Answer-area overlay payload (box + short answer; 2D image-anchored).
 # 1.1.0: added tracking metadata (tracking/fixed_ar/anchor_hint).

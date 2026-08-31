@@ -237,6 +237,11 @@ def _build_sdk(provider: str):
         if provider == "gemini":
             from google import genai  # noqa: PLC0415
 
+            base_url = (os.environ.get("GOOGLE_GEMINI_BASE_URL") or "").strip()
+            if base_url:
+                return genai.Client(
+                    http_options=genai.types.HttpOptions(base_url=base_url)
+                )
             return genai.Client()
     except ImportError as exc:  # pragma: no cover - exercised via stub in tests
         pkg = {"anthropic": "anthropic", "openai": "openai", "gemini": "google-genai"}[provider]

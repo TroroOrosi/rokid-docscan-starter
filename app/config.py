@@ -26,6 +26,24 @@ ALLOW_REAL_EXAM_SOLVE = os.environ.get("ROKID_ALLOW_REAL_EXAM_SOLVE", "0") == "1
 # falls back to its dependency-free lexical scorer regardless of this flag.
 ENABLE_EMBEDDING = os.environ.get("ROKID_ENABLE_EMBEDDING", "0") == "1"
 
+# Physical-device sessions must fail closed instead of silently serving local
+# placeholder analyzer/solver output. Development and CI remain offline-first
+# unless this flag is explicitly enabled before process start.
+REAL_MODE = os.environ.get("ROKID_REAL_MODE", "0") == "1"
+
+
+def require_real_provider(kind: str, provider):
+    """Reject placeholder or unready providers in a physical-device session."""
+    if not REAL_MODE:
+        return provider
+    info = provider.info()
+    if info.get("offline") or not info.get("ready"):
+        raise RuntimeError(
+            "ROKID_REAL_MODE=1 rejects placeholder or unready "
+            f"{kind} provider '{info.get('name', 'unknown')}'"
+        )
+    return provider
+
 # Explainer adapter selection (explain-sessions).
 # Default: "local" (LocalPlaceholderExplainer — offline, no credentials).
 # Override with ROKID_EXPLAINER=openai|gemini|claude to swap in a real adapter.
@@ -33,11 +51,10 @@ ENABLE_EMBEDDING = os.environ.get("ROKID_ENABLE_EMBEDDING", "0") == "1"
 ROKID_EXPLAINER = os.environ.get("ROKID_EXPLAINER", "local")
 
 # --- Real cloud-model adapters (opt-in, credential-gated) -------------------
-# PRIMARY solving path: the glasses' onboard AI (natively GPT/Gemini) solves and
-# its answers are ingested via POST /v1/exam-sessions/{id}/solutions — no server
-# adapter needed. The adapters below are the OPTIONAL upgrade path for a more
-# capable model, routed per port (openai|gemini|claude) with that provider's
-# API key. All optional; with none set the server runs fully offline on local.
+# Physical-device solving uses the configured server adapters. The public CXR-L
+# surface inspected by this project does not export arbitrary answers from an
+# AI running on the glasses. Local placeholders remain available for development
+# only and are rejected when ROKID_REAL_MODE=1.
 #   ROKID_ANALYZER=openai|gemini|claude   real page summarization (finalize)
 #   ROKID_SOLVER=openai|gemini|claude     real exam solving; a non-local value
 #                                         also makes finalize-reading solve ALL
@@ -60,12 +77,11 @@ ROKID_EXPLAINER = os.environ.get("ROKID_EXPLAINER", "local")
 #                           ROKID_LLM_MODEL (an audio-capable gemini model)
 TRANSCRIBER = os.environ.get("ROKID_TRANSCRIBER") or None
 
-# --- On-glasses input (KeyCode) override ------------------------------------
-# The server publishes a gesture->KeyCode contract at GET /v1/settings (see
-# app/glasses_view.py INPUT_CONTRACT) so the on-glass CXR-L client has one
-# authoritative source. Defaults follow Rokid's current mapping; override any
-# gesture for a specific device/firmware via ROKID_KEYMAP (JSON), e.g.
-#   ROKID_KEYMAP='{"single_tap": 23, "long_press": 170}'
+# --- Diagnostic glasses KeyCode map -----------------------------------------
+# GET /v1/settings publishes an unverified gesture->KeyCode map for diagnostics.
+# It does not enable operator actions in the supported phone-controlled relay.
+# Override a measured map for a specific device/firmware via ROKID_KEYMAP, e.g.
+#   ROKID_KEYMAP='{"single_tap": 23, "long_press": 170}'  # diagnostics only
 def _load_keymap() -> dict:
     raw = os.environ.get("ROKID_KEYMAP")
     if not raw:

@@ -6,6 +6,7 @@ extraction, JSON parsing, per-provider dispatch) runs without a key or network.
 """
 
 import builtins
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -255,3 +256,26 @@ def test_remote_base_url_is_untouched(monkeypatch):
         _build_sdk("anthropic")
     except LLMConfigError as exc:
         assert "points at a local endpoint" not in str(exc)
+
+
+def test_gemini_custom_base_url_is_passed_explicitly(monkeypatch):
+    calls = []
+
+    class HttpOptions:
+        def __init__(self, *, base_url):
+            self.base_url = base_url
+
+    def client(**kwargs):
+        calls.append(kwargs)
+        return object()
+
+    fake_genai = SimpleNamespace(
+        Client=client,
+        types=SimpleNamespace(HttpOptions=HttpOptions),
+    )
+    monkeypatch.setitem(sys.modules, "google", SimpleNamespace(genai=fake_genai))
+    monkeypatch.setenv("GOOGLE_GEMINI_BASE_URL", "https://gemini.example.test/v1")
+
+    _build_sdk("gemini")
+
+    assert calls[0]["http_options"].base_url == "https://gemini.example.test/v1"

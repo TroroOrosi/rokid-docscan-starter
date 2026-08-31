@@ -36,6 +36,8 @@ def test_input_contract_default(tmp_path, monkeypatch):
     assert g["back"]["keycode"] == 4
     # Honest flag: legacy keycodes are NOT verified on the current hardware.
     assert inp["keycodes_verified"] is False
+    assert inp["operator_actions_enabled"] is False
+    assert inp["role"] == "diagnostic_only"
     assert "unverified" in inp["keycode_source"]
     assert inp["overridden"] is False
 
@@ -76,20 +78,5 @@ def test_input_contract_has_ai_activation_gesture(tmp_path, monkeypatch):
 def test_operations_cover_three_phase_flow(tmp_path, monkeypatch):
     c = _make_client(tmp_path, monkeypatch, ROKID_KEYMAP=None)
     ops = c.get("/v1/settings").json()["operations"]
-    # Phase 1 読取 (camera ON, LED lit — keep it short)
-    assert ops["capture_read"] == "two_finger_tap"
-    assert ops["finish_reading"] == "double_tap"
-    # Phase 2 解答 (camera OFF): written⇄listening toggle = official
-    # video⇄audio record toggle (long press)
-    assert ops["mode_toggle"] == "long_press"
-    assert ops["record_toggle"] == "long_press"
-    # Phase 3 閲覧 (camera OFF, LED off): per-problem deck navigation
-    assert ops["review_next_problem"] == "two_finger_swipe_left"
-    assert ops["review_prev_problem"] == "two_finger_swipe_right"
-    assert ops["scroll_next"] == "two_finger_swipe_down"
-    assert ops["scroll_prev"] == "two_finger_swipe_up"
-    assert ops["close"] == "double_tap"
-    # Secondary/compat solve-current型 operations stay published.
-    assert ops["exam_next_page"] == "two_finger_swipe_left"
-    assert ops["exam_prev_page"] == "two_finger_swipe_right"
-    assert ops["exam_solve_current"] == "single_tap"
+    assert ops
+    assert set(ops.values()) == {"phone"}

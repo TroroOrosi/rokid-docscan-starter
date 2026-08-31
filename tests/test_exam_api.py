@@ -63,7 +63,8 @@ def test_settings_advertise_silent_contract(client):
         "state": "on_while_camera_active",
         "tamper": "forbidden",
     }
-    assert capture["led_off_during_review"] is True
+    assert capture["camera_requests_during_review"] is False
+    assert capture["indicator_during_review"] == "physically_verify_off"
     assert capture["audio_record"]["start_tone"] is False
     assert capture["audio_record"]["stop_tone"] is False
 
