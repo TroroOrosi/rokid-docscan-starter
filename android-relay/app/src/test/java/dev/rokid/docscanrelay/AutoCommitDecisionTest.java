@@ -29,8 +29,8 @@ public class AutoCommitDecisionTest {
     }
 
     @Test
-    public void anUndisturbedCountdownRegisters() {
-        assertTrue(DocScanController.shouldAutoCommit(
+    public void evenAnUndisturbedCountdownCannotRegisterWithoutPhoneConfirmation() {
+        assertFalse(DocScanController.shouldAutoCommit(
                 RelayState.CAPTURE_REVIEW, 7, 7, true));
     }
 

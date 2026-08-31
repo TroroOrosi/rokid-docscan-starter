@@ -1,7 +1,7 @@
 package dev.rokid.docscanrelay;
 
 /**
- * Whether a user-originated CustomView close counts as glasses input.
+ * Whether a CustomView close counts as operator input.
  *
  * <p>A close scored {@code userInitiated=true} is only known not to be ours. It
  * is not therefore the operator: measured on Hi Rokid G1.12.10.0815 on
@@ -10,15 +10,13 @@ package dev.rokid.docscanrelay;
  * timer. Accepting those as the tap fired the shutter and registered a page
  * nobody asked for.</p>
  *
- * <p>So the capture-review screen keeps the exception it was given -- a tap
- * there delivers no AI event and the operator has nothing else to press -- and
- * every other state refuses. A close that is refused here is not discarded: it
- * arms menu-exit recovery, because the view is gone either way.</p>
+ * <p>No state accepts it. A close can still cause a view to be re-presented,
+ * but it cannot capture, cancel, register, finalize, or navigate.</p>
  */
 public final class GlassesCloseInputPolicy {
     private GlassesCloseInputPolicy() {}
 
     public static boolean acceptsAsInput(RelayState state, boolean hasPendingCaptureReview) {
-        return state == RelayState.CAPTURE_REVIEW && hasPendingCaptureReview;
+        return false;
     }
 }

@@ -119,15 +119,10 @@ public final class MainActivity extends Activity
 
         TextView description = new TextView(this);
         description.setText(
-                "推奨は「自動読取」です。開始すると1ページを3枚撮り、"
-                        + "最も読めた1枚を自動で登録し、次のページへ進みます。"
-                        + "グラス操作は要りません。読取完了だけこの画面で行います。\n"
-                        + "手動時: グラスは1本指タップだけが届きます"
-                        + "（長押しとダブルタップはOSが占有）。"
-                        + "照準でタップ=シャッター。撮影確認画面は1回タップが届かないため"
-                        + "（実機で `AI-exit` 非配送を確認）、撮り直しは2回タップ"
-                        + "（デフォルト画面へ戻ると自動復帰して撮り直します）、"
-                        + "登録は待機満了かこの画面のボタンです。");
+                "操作はスマホの明示ボタンで行います。撮影準備、シャッター、取消、"
+                        + "登録、撮り直し、読取完了、レビュー移動をグラスのcallbackから"
+                        + "推定しません。撮影確認後にこの画面で登録または撮り直しを"
+                        + "選ぶまで、写真はサーバーへ送信されません。");
         description.setTextSize(14);
         root.addView(description, matchWrap());
 
@@ -212,14 +207,6 @@ public final class MainActivity extends Activity
                 button("Hi Rokid認可・再接続", ignored -> authorizeAndConnect()), weighted());
         root.addView(connectRow, matchWrap());
 
-        // The capture-review CustomView swallows taps: it closes without
-        // delivering any AI event. Hands-free reading is therefore the primary
-        // way to get pages in, and the manual row below stays for diagnosis.
-        LinearLayout autoRow = horizontalRow();
-        autoCaptureButton = button("自動読取 開始", ignored -> toggleAutoCapture());
-        autoRow.addView(autoCaptureButton, weighted());
-        root.addView(autoRow, matchWrap());
-
         LinearLayout captureRow = horizontalRow();
         captureRow.addView(
                 button("撮影準備", ignored -> controller.captureNextPage()), weighted());
@@ -230,10 +217,8 @@ public final class MainActivity extends Activity
                 weighted());
         captureRow.addView(button("読取完了", ignored -> controller.finishReading()), weighted());
 
-        // The glasses can only deliver a tap, so every action they cannot reach
-        // needs a phone control. The shutter is duplicated rather than moved:
-        // during aiming the operator is holding the page and should not have to
-        // reach for the phone at all.
+        // Phone controls are authoritative. CUSTOMVIEW/AI callbacks are only
+        // lifecycle diagnostics because they lack trustworthy provenance.
         LinearLayout shutterRow = horizontalRow();
         shutterRow.addView(
                 button("シャッター", ignored -> controller.triggerArmedCapture()),
@@ -252,7 +237,7 @@ public final class MainActivity extends Activity
         TextView captureGuide = new TextView(this);
         captureGuide.setText(
                 "固定焦点・ライブ映像なし: 用紙を40〜60cm離し、中心を＋へ合わせます。"
-                        + "照準でタップしたら確認画面が出るまで静止し（実測で約5秒）、"
+                        + "スマホのシャッター後は確認画面が出るまで静止し（実測で約5秒）、"
                         + "撮影後に四隅と文字の輪郭を確認してください。");
         captureGuide.setTextSize(14);
         captureGuide.setPadding(0, dp(8), 0, dp(8));
@@ -550,15 +535,9 @@ public final class MainActivity extends Activity
 
     @Override
     public void onAiPressDown() {
-        PressGestureInterpreter.Action action =
-                pressInterpreter.onAiAssistStart(SystemClock.elapsedRealtime());
+        pressInterpreter.onAiAssistStart(SystemClock.elapsedRealtime());
         runOnUiThread(() -> appendLog(
-                action == null
-                        ? "Glasses input source=AI-assist-start (duplicate ignored)"
-                        : "Glasses input source=AI-assist-start -> LONG"));
-        if (action != null) {
-            dispatchGesture(action);
-        }
+                "Glasses AI-assist-start lifecycle observed; no operator action inferred"));
     }
 
     @Override
@@ -569,10 +548,6 @@ public final class MainActivity extends Activity
 
     @Override
     public void onAiExit() {
-        // YodaOS reserves long press and double tap, and this firmware delivers
-        // neither AI key down/up nor a user-initiated CustomView close, so a
-        // single tap surfacing as this callback is the only glasses input the
-        // relay receives. Only the non-destructive short action is derived.
         PressGestureInterpreter.Action action =
                 pressInterpreter.onAiExit(SystemClock.elapsedRealtime());
         mainHandler.removeCallbacks(systemMenuRecovery);
@@ -588,12 +563,11 @@ public final class MainActivity extends Activity
                     SYSTEM_MENU_RECOVERY_DELAY_MILLIS);
         }
         runOnUiThread(() -> appendLog(
-                action == null
-                        ? "Glasses AI-exit echoed our own view push; no input"
-                        : "Glasses input source=AI-exit tap -> " + action));
-        if (action != null) {
-            dispatchGesture(action);
-        }
+                "Glasses AI-exit lifecycle observed"
+                        + (pressInterpreter.lastAiExitWasViewEcho()
+                        ? " (view-push echo)" : "")
+                        + "; no operator action inferred"
+                        + (action == null ? "" : " (legacy classification=" + action + ")")));
     }
 
     @Override
@@ -608,32 +582,12 @@ public final class MainActivity extends Activity
 
     @Override
     public void onCustomViewClosedByUser() {
-        // Taking a close as input was rejected once before, because telling our
-        // own close from the operator's could only be done by elimination and a
-        // miss registers the wrong photo. It is used here for exactly one state
-        // and no other: measured on Hi Rokid G1.12.10.0815, a tap on the
-        // capture-review view (an setIcons image view) closes the CustomView and
-        // delivers no AI event at all, while AIMING does deliver AI-exit. So the
-        // review screen has no other input, and everywhere else a misread close
-        // must never reach the shutter.
-        if (controller == null
-                || !GlassesCloseInputPolicy.acceptsAsInput(
-                        controller.getState(), controller.hasPendingCaptureReview())) {
-            // The view is gone whichever way this close was produced -- the
-            // operator double-tapping out to the launcher, or the glasses
-            // dismissing it on their ~30s timer -- so re-present it. Recovery
-            // used to be armed only from onAiExit, which is why nothing came
-            // back once the echo-driven arming was removed: an exit that
-            // arrives as a close never reached it.
-            RelayState closedIn = controller == null ? null : controller.getState();
-            mainHandler.removeCallbacks(systemMenuRecovery);
-            mainHandler.postDelayed(systemMenuRecovery, SYSTEM_MENU_RECOVERY_DELAY_MILLIS);
-            runOnUiThread(() -> appendLog(
-                    "User CustomView close in state " + closedIn
-                            + " is not input here; re-presenting the view"));
-            return;
-        }
-        dispatchDiscreteGlassesAction("user CustomView close");
+        RelayState closedIn = controller == null ? null : controller.getState();
+        mainHandler.removeCallbacks(systemMenuRecovery);
+        mainHandler.postDelayed(systemMenuRecovery, SYSTEM_MENU_RECOVERY_DELAY_MILLIS);
+        runOnUiThread(() -> appendLog(
+                "CustomView close in state " + closedIn
+                        + " is lifecycle-only; re-presenting without changing state"));
     }
 
     @Override
@@ -660,30 +614,6 @@ public final class MainActivity extends Activity
                 "Glasses DocScan view failed generation=" + generation
                         + " purpose=" + purpose
                         + ": " + message));
-    }
-
-    private void dispatchDiscreteGlassesAction(String source) {
-        PressGestureInterpreter.Action immediate =
-                pressInterpreter.onCustomViewExit(SystemClock.elapsedRealtime());
-        runOnUiThread(() -> appendLog(
-                "Glasses input source=" + source
-                        + (immediate == null ? " (SHORT pending/coalesced)" : " -> " + immediate)));
-        if (immediate != null) {
-            dispatchGesture(immediate);
-            return;
-        }
-        mainHandler.postDelayed(() -> {
-            PressGestureInterpreter.Action delayed =
-                    pressInterpreter.flush(SystemClock.elapsedRealtime());
-            if (delayed != null) {
-                appendLog("Glasses input -> " + delayed);
-                dispatchGesture(delayed);
-            }
-        }, LEGACY_LONG_PRESS_MILLIS + INPUT_EVENT_DEBOUNCE_MILLIS + 20);
-    }
-
-    private void dispatchGesture(PressGestureInterpreter.Action action) {
-        controller.onGlassesGesture(action);
     }
 
     @Override
@@ -751,10 +681,8 @@ public final class MainActivity extends Activity
                     capturePreviewMessage.setText(
                             "P" + (pending.pageIndex + 1) + "（まだ未登録）— "
                                     + verdict + " " + warning
-                                    + "\nグラスの表示が出てから一定時間で自動登録します。"
-                                    + "撮り直すならグラスを2回タップしてください"
-                                    + "（デフォルト画面へ戻ると自動で復帰し、撮り直します）。"
-                                    + "\n用紙の四隅と文字の輪郭を確認し、登録か撮り直しを選んでください。");
+                                    + "\n自動登録はしません。用紙の四隅と文字の輪郭を確認し、"
+                                    + "スマホで登録、撮り直し、または破棄を選んでください。");
                     capturePreview.setVisibility(bitmap == null ? View.GONE : View.VISIBLE);
                     capturePreviewMessage.setVisibility(View.VISIBLE);
                     captureReviewActions.setVisibility(View.VISIBLE);

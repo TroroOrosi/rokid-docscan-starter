@@ -45,12 +45,12 @@ public class RelayWorkflowTest {
         List<String> source = List.of(
                 "P01 読取済み",
                 "1ページ読取済",
-                "次ページ / 完了はダブルタップ");
+                "次ページ / 完了はスマホ");
 
         List<String> adapted = RelayMessages.forAiKeyScanAck(source);
 
         assertEquals("次ページ / 完了はスマホ", adapted.get(2));
-        assertEquals("次ページ / 完了はダブルタップ", source.get(2));
+        assertEquals("次ページ / 完了はスマホ", source.get(2));
     }
 
     @Test

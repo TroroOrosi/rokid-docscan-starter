@@ -296,22 +296,9 @@ public final class DocScanController implements AutoCloseable {
         long restoredGeneration;
         CaptureReviewStore.Pending pending = captureReview.peek();
         if (state == RelayState.CAPTURE_REVIEW && pending != null) {
-            // The capture-review view delivers no AI event for a single tap —
-            // measured on hardware, the tap closes the CustomView and nothing
-            // follows. The only thing the operator can express from there is
-            // the OS double-tap that leaves for the default screen, and that
-            // does arrive. Take it as "retake this page" rather than merely
-            // redrawing the photo they were trying to reject.
-            listener.onUpdate(
-                    state,
-                    currentHudLines,
-                    "System-menu exit taken as a retake request for page index "
-                            + pending.pageIndex);
-            if (autoCaptureEnabled) {
-                beginAutoBurst();
-            } else {
-                retakePendingCaptureNow(null);
-            }
+            publishCaptureReview(
+                    pending,
+                    "Re-presented pending review after a lifecycle close; no operator action inferred");
             return;
         }
         if ((state == RelayState.AIMING || state == RelayState.STABILIZING)
@@ -649,13 +636,13 @@ public final class DocScanController implements AutoCloseable {
                             List.of(
                                     "読取を再開",
                                     nextPageIndex + "ページ登録済",
-                                    "タップ: 次の撮影準備"),
+                                    "撮影準備はスマホ"),
                             "Recovered document " + documentId);
                     return;
                 }
                 publish(
                         RelayState.READY,
-                        List.of("準備完了", "タップ: 1ページ目準備", "読取完了はスマホ"),
+                        List.of("準備完了", "撮影準備はスマホ", "読取完了はスマホ"),
                         "Ready for a new document");
             } catch (Exception error) {
                 fail("前回状態を復元できません", error);
@@ -686,7 +673,7 @@ public final class DocScanController implements AutoCloseable {
         if (pageIndex < 0) {
             publish(
                     RelayState.READING,
-                    List.of("再撮影対象なし", "タップ: 1ページ目準備", ""),
+                    List.of("再撮影対象なし", "撮影準備はスマホ", ""),
                     "No previous page");
             return;
         }
@@ -797,7 +784,7 @@ public final class DocScanController implements AutoCloseable {
         }
         publish(
                 documentId > 0 ? RelayState.READING : RelayState.READY,
-                List.of("撮影を取消", "タップ: 撮影準備", "読取完了はスマホ"),
+                List.of("撮影を取消", "撮影準備はスマホ", "読取完了はスマホ"),
                 "Manual capture preparation/stabilization cancelled");
     }
 
@@ -842,7 +829,7 @@ public final class DocScanController implements AutoCloseable {
                         "P" + (pageIndex + 1)
                                 + (replacingPending ? " 撮り直し準備" : " 撮影準備"),
                         "40〜60cm・中心を＋へ",
-                        "静止してタップ");
+                        "シャッターはスマホ");
         long viewGeneration =
                 link.showCaptureAiming(pageIndex + 1, replacingPending, stabilizing);
         if (viewGeneration == RokidGlobalLink.NO_VIEW_GENERATION) {
@@ -1157,7 +1144,7 @@ public final class DocScanController implements AutoCloseable {
                         RelayState.ERROR,
                         List.of(
                                 "写真を安全保存できません",
-                                "タップ: 同じページを再準備",
+                                "再撮影はスマホ",
                                 "登録はしていません"),
                         "Initial review photo rejected because durable save failed: "
                                 + error.getMessage());
@@ -1193,7 +1180,7 @@ public final class DocScanController implements AutoCloseable {
         if (pending == null) {
             publish(
                     RelayState.READING,
-                    List.of("確認写真なし", "タップ: 撮影準備", ""),
+                    List.of("確認写真なし", "撮影準備はスマホ", ""),
                     "No pending photo to register");
             return;
         }
@@ -1251,7 +1238,7 @@ public final class DocScanController implements AutoCloseable {
         if (pending == null) {
             publish(
                     RelayState.READING,
-                    List.of("確認写真なし", "タップ: 撮影準備", ""),
+                    List.of("確認写真なし", "撮影準備はスマホ", ""),
                     "No pending photo to retake");
             return;
         }
@@ -1341,7 +1328,7 @@ public final class DocScanController implements AutoCloseable {
             lines = List.of(
                     "写真を登録しました",
                     "端末OCRは空",
-                    "タップ: 次の撮影準備");
+                    "撮影準備はスマホ");
         }
         String persistenceWarning = workflowPersisted
                 ? ""
@@ -1404,7 +1391,7 @@ public final class DocScanController implements AutoCloseable {
             if (pending == null) {
                 publish(
                         RelayState.READING,
-                        List.of("確認写真なし", "タップ: 撮影準備", ""),
+                        List.of("確認写真なし", "撮影準備はスマホ", ""),
                         "No pending photo to discard");
                 return;
             }
@@ -1439,7 +1426,7 @@ public final class DocScanController implements AutoCloseable {
             listener.onCaptureReviewCleared();
             publish(
                     RelayState.READING,
-                    List.of("写真を破棄しました", "タップ: 撮影準備", "読取完了はスマホ"),
+                    List.of("写真を破棄しました", "撮影準備はスマホ", "読取完了はスマホ"),
                     "Discarded unregistered photo for page " + pending.pageIndex);
         });
     }
@@ -1454,11 +1441,9 @@ public final class DocScanController implements AutoCloseable {
     /**
      * Shows the unregistered photo.
      *
-     * <p>{@code armAutoCommit} is what makes registration reachable without
-     * the phone: the countdown starts only once the glasses acknowledge this
-     * view, so nothing is uploaded that the operator was not shown. It is
-     * deliberately withheld from re-publishes that follow a failed upload, or
-     * the relay would retry a failing server on a loop.</p>
+     * <p>Registration is manual-only. The compatibility parameter is ignored
+     * so restored and newly captured photos follow the same phone-confirmed
+     * path.</p>
      */
     private void publishCaptureReview(
             CaptureReviewStore.Pending pending,
@@ -1473,55 +1458,39 @@ public final class DocScanController implements AutoCloseable {
         // Any earlier countdown belongs to a view that is being replaced.
         reviewGeneration++;
         autoCommitScheduled = false;
-        autoCommitArmed = armAutoCommit;
+        autoCommitArmed = false;
         reviewViewGeneration = RokidGlobalLink.NO_VIEW_GENERATION;
         // The operator cannot see the camera's field of view, so the framing
         // verdict leads: a page that ran outside the frame must read as a
         // failure, not as a photo that is merely waiting to be registered.
         String page = "P" + (pending.pageIndex + 1);
         String ocrLine = "OCR " + pending.ocrCharacters() + "文字";
-        List<String> lines;
-        if (armAutoCommit) {
-            long seconds = autoCommitDelayMillis(pending) / 1000;
-            lines = List.of(
-                    reviewHeadline(pending.pageIndex + 1, pending.framing),
-                    seconds + "秒で登録",
-                    "2回タップ: 撮り直す");
-        } else {
-            lines = pending.isFramingFailing()
-                    ? List.of(
-                            reviewHeadline(pending.pageIndex + 1, pending.framing),
-                            "2回タップ: 撮り直す",
-                            ocrLine)
-                    : List.of(
-                            reviewHeadline(pending.pageIndex + 1, pending.framing),
-                            ocrLine + "・2回タップで撮り直す",
-                            "登録はスマホのボタン");
-        }
+        List<String> lines = pending.isFramingFailing()
+                ? List.of(
+                        reviewHeadline(pending.pageIndex + 1, pending.framing),
+                        "撮り直しはスマホ",
+                        ocrLine)
+                : List.of(
+                        reviewHeadline(pending.pageIndex + 1, pending.framing),
+                        ocrLine + "・確認はスマホ",
+                        "登録はスマホのボタン");
         state = RelayState.CAPTURE_REVIEW;
         currentHudLines = lines;
         long viewGeneration = link.showCaptureReview(
                 pending.jpeg,
                 pending.rotationDegrees,
                 lines);
-        if (armAutoCommit) {
-            if (viewGeneration == RokidGlobalLink.NO_VIEW_GENERATION) {
-                // The glasses never got this view, so the operator cannot see
-                // what would be uploaded. Fall back to the phone button.
-                autoCommitArmed = false;
-                diagnostic += "; auto-registration withheld because the review"
-                        + " view was not accepted by the glasses";
-            } else {
-                reviewViewGeneration = viewGeneration;
-            }
-        }
+        reviewViewGeneration = viewGeneration;
         listener.onUpdate(RelayState.CAPTURE_REVIEW, lines, diagnostic);
     }
 
     // ---- hands-free automatic reading -------------------------------------
 
     public void startAutoCapture() {
-        serial.execute(this::startAutoCaptureNow);
+        serial.execute(() -> publish(
+                state,
+                currentHudLines,
+                "Automatic capture is disabled; use explicit phone controls"));
     }
 
     public void stopAutoCapture() {
@@ -1533,20 +1502,9 @@ public final class DocScanController implements AutoCloseable {
     }
 
     private void startAutoCaptureNow() {
-        if (!requireLink()) {
-            return;
-        }
-        if (captureLease.isUnresolved()) {
-            publish(
-                    state,
-                    List.of("自動読取を保留", "撮影終了が未確認", "Hi Rokidを再接続"),
-                    "Automatic reading rejected while a CXR-L photo lease is unresolved");
-            return;
-        }
-        autoCaptureEnabled = true;
-        duplicateBurstsSeen = 0;
-        listener.onAutoCaptureChanged(true);
-        beginAutoBurst();
+        autoCaptureEnabled = false;
+        listener.onAutoCaptureChanged(false);
+        publish(state, currentHudLines, "Automatic capture is disabled");
     }
 
     private void stopAutoCaptureNow(String reason) {
@@ -1772,9 +1730,7 @@ public final class DocScanController implements AutoCloseable {
             long currentGeneration,
             boolean armed
     ) {
-        return armed
-                && state == RelayState.CAPTURE_REVIEW
-                && generationAtSchedule == currentGeneration;
+        return false;
     }
 
     /**
@@ -1882,7 +1838,7 @@ public final class DocScanController implements AutoCloseable {
         if (documentId == 0 || nextPageIndex == 0) {
             publish(
                     RelayState.READING,
-                    List.of("ページがありません", "タップで撮影準備", ""),
+                    List.of("ページがありません", "撮影準備はスマホ", ""),
                     "Finish rejected: empty document");
             return;
         }
@@ -2010,7 +1966,7 @@ public final class DocScanController implements AutoCloseable {
         clearWorkflow();
         publish(
                 linkReady ? RelayState.READY : RelayState.DISCONNECTED,
-                List.of("新規読取", "タップ: 撮影準備", "完了はスマホ"),
+                List.of("新規読取", "撮影準備はスマホ", "完了はスマホ"),
                 "Workflow cleared");
     }
 

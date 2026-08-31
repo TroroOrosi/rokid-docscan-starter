@@ -35,8 +35,10 @@ android {
         // Android app can be put on the glasses and started there. Phase 0
         // measured queryGlassAppInstalled answering about the glasses rather
         // than the phone, which is what makes this worth calling.
-        versionCode = 20
-        versionName = "0.3.15"
+        // 21 makes all unverified CUSTOMVIEW/AI callbacks diagnostic-only and
+        // requires explicit phone controls for capture and registration.
+        versionCode = 21
+        versionName = "0.3.16"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
