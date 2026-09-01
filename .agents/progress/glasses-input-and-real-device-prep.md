@@ -458,3 +458,47 @@ server bearer key, analyzer/solver selection, or supported provider key. Do not
 launch a capture until a fail-closed real-mode server is configured and an
 independent camera/observer can keep the physical indicator continuously in
 frame.
+
+## Checkpoint — 2026-09-01 glasses app installed, launched, and receives input
+
+The user connected the glasses directly and explicitly authorized installing
+and launching the existing no-permission tap probe. Two Android devices were
+present and unambiguous: the F-51F phone and a directly attached `RG_glasses`;
+every command named the intended device serial.
+
+### Exact glasses tuple
+
+- Hardware: Rokid `RG-glasses`, physical display `480x640` at 240 dpi.
+- OS: Android 12 / API 32, user/release-keys build
+  `1.25.012-20260901-150201`, build ID `SKQ1.240613.001`.
+- Security patch: `2024-07-05`.
+- Glasses CXR service: package `com.rokid.cxrservice`, versionName `12`,
+  versionCode `32`, signing scheme v3, process running.
+- Launcher: `com.rokid.os.sprite.launcher` versionName `0.3.7`, versionCode
+  `3717`, process running.
+
+### Probe installation and input proof
+
+- Installed package `dev.rokid.docscanglass`, versionName `0.1.0`, versionCode
+  `1`, directly on the glasses.
+- The installed base APK SHA-256 is
+  `78347FFDF836F516764ADA977C02E040BCEA2AFD9FBC87F218C7A439E1FA0443`,
+  exactly matching the verified build artifact.
+- `TapProbeActivity` launched successfully and held the foreground input/window
+  focus. It requests no Android permissions and did not open a camera or make a
+  network request.
+- The physical input device identifies as `ROKID,PSOC-TP-R`. Raw events included
+  `KEY_ENTER`, `KEY_DASHBOARD`, `KEY_PROG1`, `KEY_BACK`, `KEY_RIGHT`, and
+  `KEY_DOWN`. Long presses were distinguishable from the DOWN-to-UP interval
+  (observed around 0.8–0.9 seconds for `KEY_PROG1`).
+- The app recorded 33 `onKeyDown` events under tag `DocScanGlass`. This proves
+  physical glasses input reaches an ordinary glasses-side Android Activity on
+  this exact tuple. It does not prove a production command mapping or a
+  glasses-to-phone transport yet.
+
+This result supersedes the earlier hardware blocker: direct installation,
+launch, foreground rendering, and physical input delivery are now verified.
+The next change must specify and implement the production glasses app as the
+operator control surface, keeping the phone as OCR/network relay until a
+source-grounded transport and capture contract are verified. No photo was
+requested during this probe.
