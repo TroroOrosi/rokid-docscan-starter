@@ -112,6 +112,26 @@ public class GlassesInputNormalizerTest {
                 1_200, "UP", "KEYCODE_DPAD_LEFT", true)).isEmpty());
     }
 
+    @Test
+    public void resetClearsPartialAndDeduplicationStateWithoutReplaying() {
+        GlassesInputNormalizer normalizer = new GlassesInputNormalizer();
+
+        assertTrue(normalizer.accept(key(0, "KEYCODE_NOTIFICATION")).isEmpty());
+        normalizer.reset();
+        assertTrue(normalizer.accept(key(500, "KEYCODE_ENTER")).isEmpty());
+
+        assertTrue(normalizer.accept(key(600, "KEYCODE_NOTIFICATION")).isEmpty());
+        assertEquals(
+                Optional.of(GlassesInputAction.SHORT_TAP),
+                normalizer.accept(key(700, "KEYCODE_ENTER")));
+
+        normalizer.reset();
+        assertTrue(normalizer.accept(key(710, "KEYCODE_NOTIFICATION")).isEmpty());
+        assertEquals(
+                Optional.of(GlassesInputAction.SHORT_TAP),
+                normalizer.accept(key(720, "KEYCODE_ENTER")));
+    }
+
     private static InputSignal key(long elapsedMillis, String name) {
         return InputSignal.key(elapsedMillis, "DOWN", name, true);
     }

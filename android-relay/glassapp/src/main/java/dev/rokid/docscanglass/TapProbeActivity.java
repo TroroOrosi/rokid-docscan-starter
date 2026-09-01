@@ -23,6 +23,7 @@ import dev.rokid.docscanglass.input.InputCalibrationLog;
 import dev.rokid.docscanglass.input.InputSignal;
 import dev.rokid.docscanglass.input.GlassesInputAction;
 import dev.rokid.docscanglass.input.GlassesInputNormalizer;
+import dev.rokid.docscanglass.input.GlassesInputReceiver;
 import dev.rokid.docscanglass.input.OfficialKeyBroadcasts;
 
 import java.util.List;
@@ -61,22 +62,18 @@ public final class TapProbeActivity extends Activity {
     private final InputCalibrationLog calibration =
             new InputCalibrationLog(VISIBLE_EVENTS);
     private final GlassesInputNormalizer normalizer = new GlassesInputNormalizer();
+    private final GlassesInputReceiver inputReceiver =
+            new GlassesInputReceiver(this::recordCalibration);
     private final BroadcastReceiver officialKeyReceiver = new BroadcastReceiver() {
         @Override
         public void onReceive(Context context, Intent intent) {
-            String action = intent.getAction();
-            if (action == null) {
-                return;
-            }
-            recordCalibration(InputSignal.broadcast(
-                    elapsed(), action, OfficialKeyBroadcasts.isOfficial(action)));
+            inputReceiver.accept(elapsed(), intent.getAction());
         }
     };
 
     private ProbeView view;
     private GestureDetector gestures;
     private long startedAtMillis;
-    private boolean officialKeyReceiverRegistered;
     private int normalizedCount;
     private String normalizedLine = "ACTION waiting";
 
@@ -163,11 +160,16 @@ public final class TapProbeActivity extends Activity {
 
     @Override
     protected void onDestroy() {
-        if (officialKeyReceiverRegistered) {
-            unregisterReceiver(officialKeyReceiver);
-            officialKeyReceiverRegistered = false;
-        }
+        inputReceiver.unregister(() -> unregisterReceiver(officialKeyReceiver));
+        normalizer.reset();
         super.onDestroy();
+    }
+
+    @Override
+    public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        normalizer.reset();
+        Log.i(TAG, "focus changed hasFocus=" + hasFocus + " input state reset");
     }
 
     private void registerOfficialKeyReceiver() {
@@ -175,12 +177,13 @@ public final class TapProbeActivity extends Activity {
         for (String action : OfficialKeyBroadcasts.actions()) {
             filter.addAction(action);
         }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            registerReceiver(officialKeyReceiver, filter, Context.RECEIVER_EXPORTED);
-        } else {
-            registerReceiver(officialKeyReceiver, filter);
-        }
-        officialKeyReceiverRegistered = true;
+        inputReceiver.register(() -> {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                registerReceiver(officialKeyReceiver, filter, Context.RECEIVER_EXPORTED);
+            } else {
+                registerReceiver(officialKeyReceiver, filter);
+            }
+        });
     }
 
     private boolean consumeProbeKey(int keyCode) {

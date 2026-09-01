@@ -32,7 +32,7 @@ Current version tuple:
 - Server APP `0.16.0`
 - HTTP API `1.15.0`
 - Android relay `0.3.16` (`versionCode 21`)
-- Glasses input app `0.1.5` (`versionCode 6`)
+- Glasses input app `0.1.6` (`versionCode 7`)
 - Glasses View contract `1.9.0`
 - CXR-L tested/pinned dependency `1.1.1` (not described as the latest release)
 

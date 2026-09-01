@@ -160,19 +160,19 @@ and unknown future actions safe while retaining content-free diagnostics.
 
 **Acceptance criteria:**
 
-- [ ] Receiver registration is paired exactly once with lifecycle cleanup and
+- [x] Receiver registration is paired exactly once with lifecycle cleanup and
       does not call `abortBroadcast()`.
-- [ ] Restart/focus recovery clears transient correlation state and never replays
+- [x] Restart/focus recovery clears transient correlation state and never replays
       a normalized action.
-- [ ] Unknown/system-owned inputs remain unconsumed and have no application side
+- [x] Unknown/system-owned inputs remain unconsumed and have no application side
       effect.
 
 **Verification:**
 
-- [ ] Focused lifecycle/normalizer tests pass.
-- [ ] `gradle --no-daemon -p android-relay testDebugUnitTest assembleDebug`
+- [x] Focused lifecycle/normalizer tests pass.
+- [x] `gradle --no-daemon -p android-relay testDebugUnitTest assembleDebug`
       passes from the verified ASCII build path.
-- [ ] Install/restart/gesture hardware check passes on the recorded tuple.
+- [x] Install/restart/gesture hardware check passes on the recorded tuple.
 
 **Dependencies:** GI-2.
 
@@ -187,10 +187,10 @@ and unknown future actions safe while retaining content-free diagnostics.
 
 ## Checkpoint GI-B: `glasses-input` complete
 
-- [ ] All `:glassapp` unit tests pass.
-- [ ] Full Android unit/build gate passes.
-- [ ] Controlled hardware sequence emits exactly one normalized action per
+- [x] All `:glassapp` unit tests pass.
+- [x] Full Android unit/build gate passes.
+- [x] Controlled hardware sequence emits exactly one normalized action per
       supported gesture after install and restart.
-- [ ] No camera/network/upload/registration side effect is observed.
-- [ ] Specs, evidence, and progress record match the implemented behavior.
+- [x] No camera/network/upload/registration side effect is observed.
+- [x] Specs, evidence, and progress record match the implemented behavior.
 - [ ] Human review approves moving to `custom-app-session`.

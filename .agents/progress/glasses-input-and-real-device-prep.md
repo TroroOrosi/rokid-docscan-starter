@@ -656,3 +656,57 @@ named the intended glasses device, and a failed attempt was never reinterpreted
 as success. One retry reached the device before Android's package service was
 ready and failed without changing the package; the successful retry first
 confirmed OS boot completion and package-service availability.
+
+## Checkpoint — 2026-09-02 GI-3 lifecycle hardening complete
+
+GI-3 adds an exact-once receiver lifecycle boundary and an explicit normalizer
+reset without changing the four side-effect-free actions or assigning workflow
+semantics to them.
+
+### Lifecycle and test evidence
+
+- `GlassesInputReceiver` registers and unregisters its platform operation at
+  most once, changes its internal state only after the platform operation
+  succeeds, and forwards content-free official or unknown action names only
+  while registered.
+- `TapProbeActivity` uses that lifecycle boundary, unregisters it during
+  destruction, and never calls `abortBroadcast()`.
+- `GlassesInputNormalizer.reset()` clears incomplete correlation and per-action
+  deduplication history without emitting an action. Activity destruction and
+  every window-focus transition invoke the reset.
+- Tests cover exact-once registration and cleanup, failed registration, gated
+  delivery, partial-sequence clearing, deduplication clearing, and no replay.
+  Existing tests continue to prove that BACK and unknown, incomplete,
+  reordered, late, and UP-only input remain unconsumed or unnormalized.
+- Full Android `testDebugUnitTest assembleDebug` and `:glassapp:lintDebug` pass
+  from the verified ASCII build path.
+
+### Final artifact and hardware restart evidence
+
+- Final package `dev.rokid.docscanglass`, versionName `0.1.6`, versionCode 7,
+  signer SHA-256
+  `906307478018E09E2937CFD8042A674D27598767577E08A304472AAE407CCACC`.
+- Candidate and device-resident APK SHA-256 both equal
+  `C370A2457B12DB31C652758982325468AF73E1AB10A5F0335EB801C848B9CC98`.
+  The preserved first-install timestamp proves an in-place update.
+- An app-process-only restart changed PID 3165 to PID 3218. The new process
+  logged `tap probe started` and a focus-gain reset before any normalized
+  action, with no replay from the previous process.
+- Two user-performed short taps after that restart emitted exactly
+  `SHORT_TAP #1` and `SHORT_TAP #2`, one action per physical tap. No duplicate
+  or numbering/state carry-over occurred. Combined with the GI-2 controlled
+  four-gesture run, this completes the install/restart hardware acceptance for
+  the module on the recorded tuple.
+- The glass app still requests no Android permissions and contains no camera,
+  network, upload, OCR, or document-registration operation. GI-3 observed no
+  such side effect.
+
+During the first GI-3 hardware attempt the glasses restarted unexpectedly. No
+reboot command had been sent. Read-only diagnosis found a generic `reboot`
+reason, no pstore record, no `SYSTEM_RESTART` dropbox entry, no contemporaneous
+app crash, and only older low-memory process exits. A 30-second baseline with
+the app stopped and a further 30-second run with the Activity foregrounded were
+stable, so the restart was not reproduced and is not attributed to the app.
+
+All technical items in Checkpoint GI-B are now satisfied. The separate human
+review gate for moving to `custom-app-session` remains intentionally open.

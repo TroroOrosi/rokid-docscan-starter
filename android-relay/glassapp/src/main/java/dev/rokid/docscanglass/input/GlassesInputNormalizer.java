@@ -59,6 +59,13 @@ public final class GlassesInputNormalizer {
         return acceptKey(signal.name(), now);
     }
 
+    /** Clears incomplete correlation and deduplication history without emitting. */
+    public synchronized void reset() {
+        lastSeenMillis = -1;
+        clearPending();
+        lastActionMillis.clear();
+    }
+
     private Optional<GlassesInputAction> acceptBroadcast(String action, long now) {
         switch (action) {
             case ACTION_CLICK:
