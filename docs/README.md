@@ -61,6 +61,10 @@ on the measured hardware. Unresolved claims remain explicitly unverified.
 
 ## Accepted specifications and implementation plan
 
+- `CAPABILITY-MAP-glasses-app-operation.md` — accepted module boundaries and
+  build order for moving the operator control surface into a glasses app.
+- `SPEC-glasses-input.md` — accepted first-module specification for normalizing
+  and deduplicating glasses input without capture/network side effects.
 - `CAPABILITY-MAP-safe-real-device-readiness.md`
 - `SPEC-evidence-contract.md`
 - `SPEC-safe-capture.md`
