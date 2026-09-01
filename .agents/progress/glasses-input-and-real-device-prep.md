@@ -433,3 +433,28 @@ camera/observer setup and fail-closed real-mode server configuration. Install
 only the verified `0.3.16` candidate above, then re-observe Hi Rokid
 authorization, glasses link, CXR-L service version, and CUSTOMVIEW acknowledgement
 before any phone-controlled photo request.
+
+## Checkpoint — 2026-09-01 verified relay update
+
+The user explicitly authorized updating the phone relay. With exactly one
+F-51F selected by its explicit wireless-debugging serial, the verified
+`0.3.16` / versionCode `21` candidate was installed as an in-place update. The
+package manager returned `Success`; no uninstall, downgrade, app launch, or
+photo request occurred.
+
+Post-install read-only verification found:
+
+- package `dev.rokid.docscanrelay`, versionName `0.3.16`, versionCode `21`;
+- installed base APK SHA-256
+  `C96BF67F51CC64BA0F581ABF97D09E73B9272243376DA2F2FBBB3D31F7E16A52`,
+  exactly matching the verified candidate;
+- unchanged `firstInstallTime` (`2026-07-25 23:18:48`) and unchanged app-data
+  inode, confirming the update preserved the existing installation state;
+- relay process not running after installation.
+
+Task 6 remains incomplete. The server is not listening on port 8000, and the
+checked process/user/machine environments contain no real-mode selection,
+server bearer key, analyzer/solver selection, or supported provider key. Do not
+launch a capture until a fail-closed real-mode server is configured and an
+independent camera/observer can keep the physical indicator continuously in
+frame.

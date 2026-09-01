@@ -53,7 +53,7 @@
 
 ## Task 6: Controlled device validation
 
-- [ ] Install only the verified relay artifact if update-compatible.
+- [x] Install only the verified relay artifact if update-compatible.
 - [ ] Complete authorization/link/Bluetooth and one phone-controlled capture.
 - [ ] Record external physical LED, callback, OCR/upload, and HUD evidence.
 - Verify: completed checklist with exact version/hash tuple.
