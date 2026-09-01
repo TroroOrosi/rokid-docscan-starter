@@ -127,19 +127,19 @@ and late/repeated/reordered events fail closed.
 
 **Acceptance criteria:**
 
-- [ ] The correlation window is derived from GI-1 evidence and recorded as a
+- [x] The correlation window is derived from GI-1 evidence and recorded as a
       firmware-scoped decision, not a platform constant.
-- [ ] Broadcast-only, KeyEvent-only, paired, repeated, reordered, late, and
+- [x] Broadcast-only, KeyEvent-only, paired, repeated, reordered, late, and
       unknown cases have deterministic unit tests.
-- [ ] The Activity displays/logs one normalized action without assigning it to
+- [x] The Activity displays/logs one normalized action without assigning it to
       capture, navigation, registration, or app exit.
 
 **Verification:**
 
-- [ ] Failing correlator tests are added before implementation.
-- [ ] `gradle --no-daemon -p android-relay :glassapp:testDebugUnitTest`
+- [x] Failing correlator tests are added before implementation.
+- [x] `gradle --no-daemon -p android-relay :glassapp:testDebugUnitTest`
       passes.
-- [ ] A controlled hardware sequence produces exactly one normalized action per
+- [x] A controlled hardware sequence produces exactly one normalized action per
       supported physical gesture.
 
 **Dependencies:** GI-1 and Checkpoint GI-A.

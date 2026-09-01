@@ -21,6 +21,8 @@ import android.view.WindowManager;
 import dev.rokid.docscanglass.input.GlassKeyEvents;
 import dev.rokid.docscanglass.input.InputCalibrationLog;
 import dev.rokid.docscanglass.input.InputSignal;
+import dev.rokid.docscanglass.input.GlassesInputAction;
+import dev.rokid.docscanglass.input.GlassesInputNormalizer;
 import dev.rokid.docscanglass.input.OfficialKeyBroadcasts;
 
 import java.util.List;
@@ -58,6 +60,7 @@ public final class TapProbeActivity extends Activity {
     private final TapLog log = new TapLog(VISIBLE_EVENTS);
     private final InputCalibrationLog calibration =
             new InputCalibrationLog(VISIBLE_EVENTS);
+    private final GlassesInputNormalizer normalizer = new GlassesInputNormalizer();
     private final BroadcastReceiver officialKeyReceiver = new BroadcastReceiver() {
         @Override
         public void onReceive(Context context, Intent intent) {
@@ -74,6 +77,8 @@ public final class TapProbeActivity extends Activity {
     private GestureDetector gestures;
     private long startedAtMillis;
     private boolean officialKeyReceiverRegistered;
+    private int normalizedCount;
+    private String normalizedLine = "ACTION waiting";
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -196,9 +201,16 @@ public final class TapProbeActivity extends Activity {
     private void recordCalibration(InputSignal signal) {
         calibration.record(signal);
         Log.i(TAG, "input " + calibration.lines().get(0));
+        normalizer.accept(signal).ifPresent(this::recordNormalizedAction);
         if (view != null) {
             view.invalidate();
         }
+    }
+
+    private void recordNormalizedAction(GlassesInputAction action) {
+        normalizedCount++;
+        normalizedLine = "ACTION #" + normalizedCount + " " + action;
+        Log.i(TAG, "normalized #" + normalizedCount + " action=" + action);
     }
 
     private void recordMotion(MotionEvent event, String path) {
@@ -261,6 +273,9 @@ public final class TapProbeActivity extends Activity {
                     left,
                     y,
                     paint);
+
+            y += rowHeight;
+            canvas.drawText(normalizedLine, left, y, paint);
 
             List<String> lines = log.lines();
             int shown = 0;

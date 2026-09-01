@@ -41,6 +41,22 @@ public final class InputSignal {
         return known;
     }
 
+    public long elapsedMillis() {
+        return elapsedMillis;
+    }
+
+    public Source source() {
+        return source;
+    }
+
+    public String phase() {
+        return phase;
+    }
+
+    public String name() {
+        return name;
+    }
+
     String diagnostic(long sequence) {
         return "#" + sequence
                 + " t=" + elapsedMillis

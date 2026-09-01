@@ -567,7 +567,7 @@ checkpoint.
 | About-one-second long press | `KEY_DASHBOARD`, then `KEY_PROG1` DOWN/UP | `KEYCODE_NOTIFICATION`; `ACTION_AI_START`; no `KEY_PROG1` Activity event | `PROG1` began 507 ms after dashboard, official broadcast followed 315 ms later, raw hold was 799 ms |
 | Double tap | `KEY_DASHBOARD` twice, then `KEY_BACK` | `KEYCODE_NOTIFICATION` twice, then `KEYCODE_BACK`; no official double-click broadcast | dashboard DOWN gap 207 ms; back followed the second by 312 ms and closed the Activity because BACK remains unconsumed |
 | Back-to-front swipe | `KEY_DASHBOARD`, `KEY_RIGHT`, `KEY_DOWN` | `KEYCODE_NOTIFICATION`, `KEYCODE_DPAD_RIGHT`, `KEYCODE_DPAD_DOWN`; no official forward-swipe broadcast | right began 426 ms after dashboard; down followed right-UP immediately |
-| Front-to-back swipe | `KEY_DASHBOARD`, then `KEY_ENTER` | `KEYCODE_NOTIFICATION`, then `KEYCODE_ENTER`; no official back-swipe broadcast | 579 ms gap; indistinguishable from the measured short-tap shape on these callbacks |
+| Front-to-back swipe | Initial attempt: `KEY_DASHBOARD`, then `KEY_ENTER`; three user-requested retries: `KEY_DASHBOARD`, `KEY_LEFT`, `KEY_UP` every time | Retry sequence: `KEYCODE_NOTIFICATION`, `KEYCODE_DPAD_LEFT`, `KEYCODE_DPAD_UP`; no official back-swipe broadcast | The initial attempt was not a completed swipe. Retry dashboard-to-left gaps were 469/370/396 ms; left-to-up gaps were 86/48/23 ms |
 
 Raw-to-Activity delivery was approximately 2–10 ms in the isolated short-tap
 run. The only official broadcast observed across the controlled sequence was
@@ -593,8 +593,66 @@ run. The only official broadcast observed across the controlled sequence was
   the seven mirrored source/config/test files match the current ASCII build
   copy byte-for-byte.
 
-GI-2 must not map the front-to-back swipe separately because it is not
-distinguishable from a short tap in this evidence. Double tap remains a
-system-owned BACK sequence and must stay unconsumed. The correlation policy may
-use only the measured rows above and must fail closed for absent official
-broadcasts and unknown sequences.
+The user identified that the initial front-to-back attempt might not have been
+performed successfully and repeated it three times. All three retries produced
+the same LEFT/UP sequence, distinct from short tap and the RIGHT/DOWN forward
+sequence. GI-2 may therefore normalize short tap and both swipe directions.
+Double tap remains a system-owned BACK sequence and must stay unconsumed. The
+correlation policy may use only the measured rows above and must fail closed for
+absent official broadcasts and unknown sequences.
+
+## Checkpoint — 2026-09-01 GI-2 normalization complete
+
+The user confirmed that short tap must remain a supported normalized gesture.
+After the repeated front-to-back measurements distinguished LEFT/UP from the
+short-tap ENTER sequence, the implemented side-effect-free vocabulary is:
+
+- `SHORT_TAP` from `NOTIFICATION → ENTER` or an official click report;
+- `LONG_PRESS` from official long-press or AI-start;
+- `SWIPE_FORWARD` from `NOTIFICATION → RIGHT → DOWN` or its official report;
+- `SWIPE_BACK` from `NOTIFICATION → LEFT → UP` or its official report.
+
+Double tap ends in system-owned BACK and produces no normalized action. Unknown,
+UP-only, reordered, incomplete, and late sequences also produce no action.
+Nothing in this module assigns capture, navigation, registration, discard,
+network, or exit semantics.
+
+### Correlation and test evidence
+
+- The first 816 ms bound failed closed on a deliberately slow physical back
+  swipe whose notification-to-terminal interval was 970 ms. The test was
+  changed RED-first so 970 ms is inclusive and 971 ms is rejected; the
+  firmware-scoped constant is now exactly 970 ms.
+- Pure-Java tests cover KeyEvent-only and broadcast-only recognition, paired
+  callback deduplication, repeated and distinct actions, an intervening
+  different action, late/reordered/unknown signals, ambiguous/incomplete input,
+  and system BACK.
+- Deduplication tracks the last emission per action type. A different normalized
+  action between two reports cannot re-enable a duplicate from the earlier
+  physical gesture.
+- `TapProbeActivity` shows and logs a numbered normalized action but invokes no
+  workflow operation.
+
+### Hardware and artifact evidence
+
+- On 0.1.4 / versionCode 5, SHA-256
+  `B8E8A0532887BB51426B55BBD685A0166787451089575294155C4CE7A9AB0EB5`,
+  one controlled sequence emitted exactly four rows:
+  `SWIPE_BACK #1`, `SHORT_TAP #2`, `LONG_PRESS #3`, and
+  `SWIPE_FORWARD #4`. No extra normalized row appeared.
+- A later RED-first interleaved-action deduplication test changed only the pure
+  normalizer. The final package is 0.1.5 / versionCode 6, signer SHA-256
+  `906307478018E09E2937CFD8042A674D27598767577E08A304472AAE407CCACC`,
+  APK SHA-256
+  `5BCCA4D5DC66B0844FC22A2C2356132024DBBC0FEF3E7B16588A96DD065555E3`.
+- The device-resident 0.1.5 APK matched that hash exactly and retained the
+  original first-deployment time. Its Activity launched and a user-performed
+  short tap emitted exactly `normalized #1 action=SHORT_TAP`.
+- Full Android unit tests and both debug APK builds pass; glassapp lint passes;
+  the six changed source/config/test files match the current ASCII build copy.
+
+The direct USB transport was intermittent during deployment. Commands always
+named the intended glasses device, and a failed attempt was never reinterpreted
+as success. One retry reached the device before Android's package service was
+ready and failed without changing the package; the successful retry first
+confirmed OS boot completion and package-service availability.
