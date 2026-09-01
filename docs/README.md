@@ -60,6 +60,13 @@ They must not be used to override a current runbook.
 Research can identify a supported SDK capability without proving that it works
 on the measured hardware. Unresolved claims remain explicitly unverified.
 
+## Draft specifications
+
+- `SPEC-custom-app-session.md` — review draft for the official CXR-L
+  `CUSTOMAPP` session and glasses-side CXR-S lifecycle foundation. It is not an
+  implementation contract until the user accepts its deliberate preinstalled-
+  app-only first increment.
+
 ## Accepted specifications and implementation plan
 
 - `CAPABILITY-MAP-glasses-app-operation.md` — accepted module boundaries and

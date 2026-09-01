@@ -193,4 +193,4 @@ and unknown future actions safe while retaining content-free diagnostics.
       supported gesture after install and restart.
 - [x] No camera/network/upload/registration side effect is observed.
 - [x] Specs, evidence, and progress record match the implemented behavior.
-- [ ] Human review approves moving to `custom-app-session`.
+- [x] Human review approves moving to `custom-app-session`.

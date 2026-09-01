@@ -710,3 +710,50 @@ stable, so the restart was not reproduced and is not attributed to the app.
 
 All technical items in Checkpoint GI-B are now satisfied. The separate human
 review gate for moving to `custom-app-session` remains intentionally open.
+
+## Checkpoint — 2026-09-02 GI-B human review accepted
+
+The user explicitly approved moving from the completed `glasses-input` module
+to `custom-app-session`. Checkpoint GI-B is therefore fully closed. The user
+then intentionally restarted the glasses; this is not the unexplained restart
+from the preceding hardware attempt. Read-only verification after that restart
+found the explicit `RG_glasses` device online, Android boot complete, and
+`dev.rokid.docscanglass` 0.1.6 / versionCode 7 still installed.
+
+Specification research for `custom-app-session` found that the linked
+`client-l:1.1.1` bytecode supports Global Hi Rokid selection through
+`AuthorizationHelper.isConnectHiRokid()`. The existing manual token flow does
+not establish that SDK-owned selection and permission state, so the new module
+must use the official authorization helper before creating its one-process
+`CUSTOMAPP` `CXRLink`. No session implementation or device mutation was made in
+this checkpoint.
+
+### PR checkpoint state
+
+- Repository: `TroroOrosi/rokid-docscan-starter`; branch
+  `agent/real-device-test-prep`; pre-checkpoint HEAD
+  `b92940bb5377d68e53a70065c0f026bd17e6f85d`.
+- Existing pull request: #30, `Harden and document the Rokid real-device
+  workflow`, targeting `main`. Do not open a duplicate PR.
+- Checkpoint paths are limited to `SPEC-custom-app-session.md`,
+  `tasks/todo.md`, `docs/README.md`, and this progress record. Tool-generated
+  untracked directories remain excluded.
+- Verified before checkpoint: the focused documentation contract is 4 passed /
+  1 deselected, `git diff --check` passes, the restarted glasses reports boot
+  complete, and glass app 0.1.6 / versionCode 7 remains installed. The prior
+  implementation HEAD passed the full Android unit/build/lint gate and PR CI.
+- The new spec is a review draft, not an accepted implementation contract. Its
+  open decision is whether the first increment uses only the already-installed
+  glasses app and omits runtime install/update/uninstall.
+
+Resume in this order:
+
+1. obtain human approval or revision of `SPEC-custom-app-session.md`;
+2. mark the spec accepted and use `agent-skills:planning-and-task-breakdown` to
+   extend `tasks/plan.md` and `tasks/todo.md`;
+3. inspect the resolved stable CXR-S 1.0 AAR, correct the superseded Global
+   CXR-L note, and implement each task with
+   `agent-skills:incremental-implementation` plus
+   `agent-skills:test-driven-development`;
+4. build from the verified ASCII copy and perform explicit-phone plus direct-
+   glasses hardware acceptance without invoking capture or custom commands.
