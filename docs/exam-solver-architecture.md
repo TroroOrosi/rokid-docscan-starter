@@ -1,5 +1,8 @@
 # 入試問題ソルバー アーキテクチャ（解答モード）
 
+Status: Historical architecture narrative. Current real-device provider and
+phone-control behavior is defined by `docs/README.md` and the implementation.
+
 既存の「ページ照合（資料化）」モードに、**未登録の入試問題を読み取って解答・根拠を返す**
 解答モードを追加した。設計は既存と同じ **ポート＆アダプタ＋レジストリ＋契約バージョニング**。
 

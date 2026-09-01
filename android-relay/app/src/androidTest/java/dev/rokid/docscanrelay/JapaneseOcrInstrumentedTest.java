@@ -40,12 +40,14 @@ public class JapaneseOcrInstrumentedTest {
 
         CountDownLatch completed = new CountDownLatch(1);
         AtomicReference<String> recognized = new AtomicReference<>();
+        AtomicReference<OcrQuality> quality = new AtomicReference<>();
         AtomicReference<Throwable> failure = new AtomicReference<>();
         try (JapaneseOcr ocr = new JapaneseOcr()) {
             ocr.recognize(encoded.toByteArray(), 0, new JapaneseOcr.Callback() {
                 @Override
-                public void onResult(String text) {
+                public void onResult(String text, OcrQuality measured) {
                     recognized.set(text);
+                    quality.set(measured);
                     completed.countDown();
                 }
 
@@ -63,6 +65,9 @@ public class JapaneseOcrInstrumentedTest {
                     recognized.get() != null
                             && recognized.get().matches(
                             "(?s).*[\u3040-\u30ff\u3400-\u9fff].*"));
+            assertTrue(
+                    "The bundled recogniser reported no character count",
+                    quality.get() != null && quality.get().characterCount() > 0);
         }
     }
 }

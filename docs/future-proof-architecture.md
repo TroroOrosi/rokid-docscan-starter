@@ -1,5 +1,8 @@
 # 将来対応アーキテクチャ（Future-proof Design）
 
+Status: Conceptual extension guide. Current code, tests, and the contracts in
+`docs/README.md` take precedence where examples here have aged.
+
 目的: **モデル（Gemini/OpenAI/ローカルOCR）や端末/SDK（Rokid CXR、Android XR、
 iOS）が将来新しくなっても、サーバのコア（照合ロジック・API契約）を壊さずに
 差し替えられる** 設計を、具体的なインターフェース付きで定義します。

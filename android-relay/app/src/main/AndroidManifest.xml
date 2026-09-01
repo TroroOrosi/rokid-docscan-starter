@@ -14,8 +14,13 @@
         </intent>
     </queries>
 
+    <!-- A 4032x3024 capture decodes to a ~48MB ARGB_8888 bitmap for OCR while
+         the encoded JPEG is still held, which exceeds the default heap on many
+         phones. The capture sweep has to be able to reach 12MP without the
+         relay being killed mid-session. -->
     <application
         android:allowBackup="false"
+        android:largeHeap="true"
         android:label="Rokid DocScan Relay"
         android:supportsRtl="true"
         android:usesCleartextTraffic="true"

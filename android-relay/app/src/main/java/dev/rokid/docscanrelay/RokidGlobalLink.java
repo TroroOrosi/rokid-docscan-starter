@@ -7,15 +7,19 @@ import android.content.Intent;
 import android.content.ServiceConnection;
 import android.content.pm.PackageManager;
 import android.os.IBinder;
+import android.os.ParcelFileDescriptor;
 import android.os.SystemClock;
 import android.util.Log;
 
 import com.rokid.sprite.aiapp.externalapp.IAiEventCallback;
 import com.rokid.sprite.aiapp.externalapp.ICustomViewCallback;
 import com.rokid.sprite.aiapp.externalapp.IDeviceStatusCallback;
+import com.rokid.sprite.aiapp.externalapp.IGlassAppCallback;
 import com.rokid.sprite.aiapp.externalapp.IImageStreamCallback;
 import com.rokid.sprite.aiapp.externalapp.IMediaStreamService;
 
+import java.io.File;
+import java.io.IOException;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
@@ -32,6 +36,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * repository.</p>
  */
 public final class RokidGlobalLink implements AutoCloseable {
+    private volatile String serviceIdentity = "CXR-L 未接続";
+
     public interface Listener {
         void onLinkConnected(boolean connected);
 
@@ -45,6 +51,12 @@ public final class RokidGlobalLink implements AutoCloseable {
 
         void onCustomViewClosedByUser();
 
+        /**
+         * Reports that the relay itself pushed a view, so the AI-exit the
+         * glasses echo a few milliseconds later is not read as a user tap.
+         */
+        void onGlassesViewPushed();
+
         void onCustomViewAvailable(long generation, String purpose);
 
         void onCustomViewFailed(
@@ -56,6 +68,13 @@ public final class RokidGlobalLink implements AutoCloseable {
         void onPhoto(byte[] jpeg);
 
         void onPhotoError(String message, Throwable cause);
+
+        /**
+         * Reports the verdict of a glasses-app query, install, or launch. These
+         * ask whether Hi Rokid implements the glasses-app route at all, so the
+         * summary is diagnostic output, not an error.
+         */
+        void onGlassAppReport(String summary);
 
         void onError(String message, Throwable cause);
     }
@@ -79,6 +98,13 @@ public final class RokidGlobalLink implements AutoCloseable {
     private static final String EXTRA_AUTH_PACKAGE = "auth_package";
     private static final int AUTH_SUCCESS = 2001;
     private static final long PROGRAMMATIC_CLOSE_TTL_MILLIS = 2000;
+    public static final long GLASS_APP_PROBE_TIMEOUT_MILLIS = 5000;
+    // An install ships an APK across the phone-to-glasses link and then runs a
+    // package install on the far side; a launch only starts an activity that is
+    // already there. Holding both to the query's 5 s would report a working
+    // install as NO_RESPONSE.
+    public static final long GLASS_APP_INSTALL_TIMEOUT_MILLIS = 120_000;
+    public static final long GLASS_APP_OPEN_TIMEOUT_MILLIS = 15_000;
     public static final long NO_VIEW_GENERATION = -1;
 
     private final Context context;
@@ -90,6 +116,12 @@ public final class RokidGlobalLink implements AutoCloseable {
     private final CustomViewCloseTracker customViewCloses =
             new CustomViewCloseTracker(PROGRAMMATIC_CLOSE_TTL_MILLIS);
     private final CustomViewOpenTracker customViewOpens = new CustomViewOpenTracker();
+    private final GlassAppProbe glassAppProbe =
+            new GlassAppProbe(GLASS_APP_PROBE_TIMEOUT_MILLIS);
+    private final GlassAppOperation glassAppInstall =
+            new GlassAppOperation("install", GLASS_APP_INSTALL_TIMEOUT_MILLIS);
+    private final GlassAppOperation glassAppOpen =
+            new GlassAppOperation("open", GLASS_APP_OPEN_TIMEOUT_MILLIS);
     private final Map<Long, String> viewPurposes = new HashMap<>();
     private volatile IMediaStreamService service;
     private volatile boolean bound;
@@ -99,6 +131,10 @@ public final class RokidGlobalLink implements AutoCloseable {
     private volatile String viewPurpose = "none";
     private volatile BindingConnection connection;
     private volatile CallbackSet callbacks;
+    // A Stub handed over Binder is collectable on this side as soon as the
+    // local reference goes out of scope, which would lose the answer the
+    // probe exists to capture.
+    private volatile IGlassAppCallback glassAppCallback;
 
     public RokidGlobalLink(Context context, Listener listener) {
         this.context = context.getApplicationContext();
@@ -200,6 +236,7 @@ public final class RokidGlobalLink implements AutoCloseable {
             return PhotoStartResult.REJECTED;
         }
         try {
+            Log.i(TAG, "takePhoto request: " + width + "x" + height + " q" + quality);
             boolean started = current.takePhoto(width, height, quality);
             if (!started) {
                 photoInFlight.set(false);
@@ -212,6 +249,187 @@ public final class RokidGlobalLink implements AutoCloseable {
             // Keep the guard held until a terminal callback or real reconnect.
             listener.onError("Rokid Glassesの撮影要求に失敗しました", error);
             return PhotoStartResult.UNKNOWN;
+        }
+    }
+
+    /**
+     * Asks Hi Rokid whether a package is installed on the glasses.
+     *
+     * <p>This is the cheapest question that decides whether the glasses-app
+     * route exists on this firmware. {@code IMediaStreamService} has declared
+     * {@code queryGlassAppInstalled} since client-l 1.0.1, but the relay has
+     * never called it, so nothing here is known to work: Hi Rokid may reject
+     * the transaction, or accept it and never call back. Both outcomes are
+     * reported, the second only after {@link #GLASS_APP_PROBE_TIMEOUT_MILLIS}
+     * via {@link #reportGlassAppProbe()}.</p>
+     */
+    public synchronized void probeGlassApp(String packageName) {
+        IMediaStreamService current = service;
+        if (current == null) {
+            listener.onError(
+                    "Rokidサービス未接続のためグラス側アプリを調査できません", null);
+            return;
+        }
+        glassAppProbe.start(SystemClock.elapsedRealtime(), packageName);
+        glassAppCallback = newGlassAppCallback();
+        try {
+            Log.i(TAG, "queryGlassAppInstalled request pkg=" + packageName);
+            current.queryGlassAppInstalled(packageName, glassAppCallback);
+        } catch (Exception error) {
+            glassAppProbe.onCallFailed(
+                    SystemClock.elapsedRealtime(), String.valueOf(error));
+            reportGlassAppProbe();
+            listener.onError("queryGlassAppInstalledの呼び出しに失敗しました", error);
+        }
+    }
+
+    /** Logs and reports the probe's current verdict, including a timeout. */
+    public void reportGlassAppProbe() {
+        report(glassAppProbe.summary(SystemClock.elapsedRealtime()));
+    }
+
+    /**
+     * Uploads an APK to the glasses and installs it there.
+     *
+     * <p>Phase 1 of the glasses-app question. Phase 0 established that
+     * {@code queryGlassAppInstalled} is implemented and answers about the
+     * glasses rather than the phone; this is the first call that changes their
+     * state, and the first that can put an app where operator input might
+     * actually reach it.
+     *
+     * <p>The descriptor is closed as soon as the transaction returns. Binder
+     * dups it during the call, so the copy Hi Rokid holds outlives this one.
+     */
+    public synchronized void installGlassApp(String packageName, File apk) {
+        IMediaStreamService current = service;
+        if (current == null) {
+            listener.onError(
+                    "Rokidサービス未接続のためグラスへ導入できません", null);
+            return;
+        }
+        glassAppInstall.start(SystemClock.elapsedRealtime(), packageName);
+        glassAppCallback = newGlassAppCallback();
+        ParcelFileDescriptor descriptor = null;
+        try {
+            descriptor = ParcelFileDescriptor.open(
+                    apk, ParcelFileDescriptor.MODE_READ_ONLY);
+            Log.i(
+                    TAG,
+                    "uploadAndInstallApk request pkg=" + packageName
+                            + " bytes=" + apk.length());
+            current.uploadAndInstallApk(packageName, descriptor, glassAppCallback);
+        } catch (Exception error) {
+            glassAppInstall.onCallFailed(
+                    SystemClock.elapsedRealtime(), String.valueOf(error));
+            reportGlassAppInstall();
+            listener.onError("uploadAndInstallApkの呼び出しに失敗しました", error);
+        } finally {
+            closeQuietly(descriptor);
+        }
+    }
+
+    /**
+     * Starts an activity of an app already installed on the glasses.
+     *
+     * <p>The AIDL takes the activity as a second string and the SDK documents
+     * neither its form nor whether it may be empty. A fully qualified class
+     * name is what is passed here; a rejection is reported rather than retried,
+     * because guessing a second form would make the verdict unreadable.
+     */
+    public synchronized void openGlassApp(String packageName, String activityName) {
+        IMediaStreamService current = service;
+        if (current == null) {
+            listener.onError(
+                    "Rokidサービス未接続のためグラスで起動できません", null);
+            return;
+        }
+        String target = packageName + "/" + activityName;
+        glassAppOpen.start(SystemClock.elapsedRealtime(), target);
+        glassAppCallback = newGlassAppCallback();
+        try {
+            Log.i(TAG, "openApp request " + target);
+            current.openApp(packageName, activityName, glassAppCallback);
+        } catch (Exception error) {
+            glassAppOpen.onCallFailed(
+                    SystemClock.elapsedRealtime(), String.valueOf(error));
+            reportGlassAppOpen();
+            listener.onError("openAppの呼び出しに失敗しました", error);
+        }
+    }
+
+    /** Logs and reports the install verdict, including a timeout. */
+    public void reportGlassAppInstall() {
+        report(glassAppInstall.summary(SystemClock.elapsedRealtime()));
+    }
+
+    /** Logs and reports the launch verdict, including a timeout. */
+    public void reportGlassAppOpen() {
+        report(glassAppOpen.summary(SystemClock.elapsedRealtime()));
+    }
+
+    private void report(String summary) {
+        Log.i(TAG, summary);
+        listener.onGlassAppReport(summary);
+    }
+
+    /**
+     * One callback serves the query, the install and the launch. Each result
+     * lands on its own tracker, so a stale callback from an earlier call cannot
+     * resolve a later one: the trackers ignore results they did not ask for.
+     */
+    private IGlassAppCallback newGlassAppCallback() {
+        return new IGlassAppCallback.Stub() {
+            @Override
+            public void onQueryAppResult(String queriedPackage, boolean installed) {
+                if (glassAppProbe.onQueryResult(
+                        SystemClock.elapsedRealtime(), queriedPackage, installed)) {
+                    reportGlassAppProbe();
+                } else {
+                    Log.i(
+                            TAG,
+                            "ignored unmatched glass-app query result pkg="
+                                    + queriedPackage + " installed=" + installed);
+                }
+            }
+
+            @Override
+            public void onInstallAppResult(boolean succeeded) {
+                if (glassAppInstall.onResult(SystemClock.elapsedRealtime(), succeeded)) {
+                    reportGlassAppInstall();
+                } else {
+                    Log.i(TAG, "ignored unmatched glass-app install result=" + succeeded);
+                }
+            }
+
+            @Override
+            public void onUnInstallAppResult(boolean succeeded) {
+                Log.i(TAG, "glass-app uninstall result=" + succeeded);
+            }
+
+            @Override
+            public void onOpenAppResult(boolean succeeded) {
+                if (glassAppOpen.onResult(SystemClock.elapsedRealtime(), succeeded)) {
+                    reportGlassAppOpen();
+                } else {
+                    Log.i(TAG, "ignored unmatched glass-app open result=" + succeeded);
+                }
+            }
+
+            @Override
+            public void onStopAppResult(boolean succeeded) {
+                Log.i(TAG, "glass-app stop result=" + succeeded);
+            }
+        };
+    }
+
+    private static void closeQuietly(ParcelFileDescriptor descriptor) {
+        if (descriptor == null) {
+            return;
+        }
+        try {
+            descriptor.close();
+        } catch (IOException error) {
+            Log.i(TAG, "ignored failure closing the apk descriptor: " + error);
         }
     }
 
@@ -233,19 +451,6 @@ public final class RokidGlobalLink implements AutoCloseable {
      * A false result is fail-closed: callers may attempt one normal reopen,
      * whose own request and acknowledgement are still generation-gated.
      */
-    public synchronized boolean isCustomViewActuallyOpen() {
-        IMediaStreamService current = service;
-        if (current == null) {
-            return false;
-        }
-        try {
-            return current.isCustomViewOpened();
-        } catch (Exception error) {
-            Log.w(TAG, "could not query current CustomView state", error);
-            return false;
-        }
-    }
-
     public synchronized long showCaptureAiming(
             int pageNumber,
             boolean retake,
@@ -337,6 +542,11 @@ public final class RokidGlobalLink implements AutoCloseable {
         viewPurpose = purpose;
         viewOpen = false;
         viewPurposes.put(generation, purpose);
+        // The echo this open provokes can arrive while openCustomView is still
+        // in its Binder round-trip, so the suppression must be armed before the
+        // call, not after it. Arming it on a request that then fails only costs
+        // the interpreter's 3s cap.
+        listener.onGlassesViewPushed();
         boolean accepted;
         try {
             accepted = current.openCustomView(layout);
@@ -389,10 +599,45 @@ public final class RokidGlobalLink implements AutoCloseable {
                             "device-status",
                             () -> glassesStatusChanged(connected));
                 }
+
+                // Added by CXR-L 1.1.x. Logged only for now: this build is
+                // upgrading the SDK to find out whether the installed Hi Rokid
+                // backs the new surface at all, and acting on semantics that
+                // have not been observed on this firmware could disconnect a
+                // working session. Adopt them once they are seen to fire.
+                @Override
+                public void onWearingStatusNotify(boolean worn) {
+                    Log.i(TAG, "device-status wearing epoch=" + epoch + " worn=" + worn);
+                }
+
+                @Override
+                public void onDeviceInfoNotifiy(String info) {
+                    Log.i(TAG, "device-status info epoch=" + epoch + " present=" + (info != null));
+                }
+
+                @Override
+                public void onCurrentScenesNotify(String scene) {
+                    Log.i(TAG, "device-status scene epoch=" + epoch + " scene=" + scene);
+                }
+
+                @Override
+                public void onDisconnectByServer() {
+                    Log.w(TAG, "device-status disconnect-by-server epoch=" + epoch);
+                }
             };
             imageStream = new IImageStreamCallback.Stub() {
                 @Override
                 public void onImageReceived(byte[] data) {
+                    // Logged before the in-flight check so a duplicate or late
+                    // frame is still measurable: the payload size is what tells
+                    // a capture sweep whether the Binder budget was the limit.
+                    int received = data == null ? 0 : data.length;
+                    Log.i(
+                            TAG,
+                            "Photo callback: " + received + " bytes ("
+                                    + Math.round(received * 100.0
+                                            / CaptureDiagnostics.ASYNC_BINDER_BUDGET_BYTES)
+                                    + "% of the async Binder budget)");
                     dispatchCallback(epoch, "image", () -> {
                         if (!photoInFlight.compareAndSet(true, false)) {
                             return;
@@ -418,6 +663,15 @@ public final class RokidGlobalLink implements AutoCloseable {
                 }
             };
             aiEvents = new IAiEventCallback.Stub() {
+                // Added by CXR-L 1.1.x, alongside IMediaStreamService
+                // .interruptAiWake(boolean). This is the callback that would
+                // let the relay own the AI gesture instead of YodaOS; logged
+                // first so the hardware can say whether it ever fires.
+                @Override
+                public void onInterruptAiWake(boolean interrupted) {
+                    Log.i(TAG, "AI-interrupt epoch=" + epoch + " interrupted=" + interrupted);
+                }
+
                 @Override
                 public void onAiKeyDown() {
                     dispatchCallback(epoch, "AI-key-down", () -> {
@@ -540,6 +794,11 @@ public final class RokidGlobalLink implements AutoCloseable {
         customViewCloses.expectProgrammaticClose(
                 SystemClock.elapsedRealtime(),
                 viewGeneration);
+        // A view swap closes before it reopens, and the glasses echo an AI-exit
+        // for the close as well. Arming the suppression here — before the
+        // Binder call — is what keeps that echo from being read as the tap that
+        // fires the shutter in AIMING.
+        listener.onGlassesViewPushed();
         final boolean accepted;
         try {
             accepted = current.closeCustomView();
@@ -641,42 +900,27 @@ public final class RokidGlobalLink implements AutoCloseable {
         long now = SystemClock.elapsedRealtime();
         boolean localViewWasOpen =
                 viewOpen && customViewOpens.isCurrentAcknowledged();
-        boolean remoteStillOpen = false;
-        IMediaStreamService current = service;
-        if (current != null) {
-            try {
-                remoteStillOpen = current.isCustomViewOpened();
-            } catch (Exception error) {
-                Log.w(TAG, "could not query CustomView after close callback", error);
-                viewOpen = false;
-                customViewOpens.onCurrentClosed();
-                customViewCloses.reset();
-                notifyCurrentViewFailed(
-                        viewGeneration,
-                        viewPurpose,
-                        "グラス画面の終了状態を確認できなかったため操作を受け付けません",
-                        error);
-                return;
-            }
-        }
+        // isCustomViewOpened() is not consulted here. Measured on Hi Rokid
+        // G1.12.10.0815 / CXR-L service 1.0.0 code 10000 it answers true for
+        // every close callback, including the tap that left DocScan for the
+        // default menu. Gating on it reported userInitiated=false every single
+        // time, so no tap ever reached the relay and nothing reopened the view.
+        // Our own close expectation queue, armed before each programmatic
+        // close/open pair, already separates a view swap's echo from a tap.
         boolean userInitiated = customViewCloses.onClosed(
                 now,
                 viewGeneration,
-                remoteStillOpen,
                 localViewWasOpen);
-        viewOpen = remoteStillOpen;
-        if (!remoteStillOpen) {
-            customViewOpens.onCurrentClosed();
-        }
+        viewOpen = false;
+        customViewOpens.onCurrentClosed();
         Log.i(
                 TAG,
                 "custom view closed on glasses epoch=" + epoch
                         + " elapsed=" + now
                         + " generation=" + viewGeneration
                         + " purpose=" + viewPurpose
-                        + " userInitiated=" + userInitiated
-                        + " remoteStillOpen=" + remoteStillOpen);
-        if (userInitiated && !remoteStillOpen) {
+                        + " userInitiated=" + userInitiated);
+        if (userInitiated) {
             listener.onCustomViewClosedByUser();
         }
     }
@@ -782,6 +1026,7 @@ public final class RokidGlobalLink implements AutoCloseable {
 
         IMediaStreamService connected = IMediaStreamService.Stub.asInterface(binder);
         CallbackSet candidate = new CallbackSet(callbackEpoch);
+        logServiceIdentity(connected);
         try {
             boolean callbacksReady =
                     connected.registerDeviceStatusCallback(candidate.deviceStatus)
@@ -821,6 +1066,38 @@ public final class RokidGlobalLink implements AutoCloseable {
             unregisterCallbacks(connected, candidate);
             failCallbackRegistration(source, callbackEpoch, error);
         }
+    }
+
+    /**
+     * Records which CXR-L build answered the bind.
+     *
+     * <p>Capture behaviour is firmware-dependent, so a sweep result is only
+     * reproducible if the service build that produced it is known. Failures are
+     * swallowed: this is measurement, and it must never keep a working link
+     * from being established.</p>
+     */
+    private void logServiceIdentity(IMediaStreamService connected) {
+        String version = null;
+        int versionCode = 0;
+        try {
+            version = connected.getServiceVersion();
+            versionCode = connected.getServiceVersionCode();
+        } catch (Exception error) {
+            Log.w(TAG, "CXR-L service version unavailable", error);
+        }
+        serviceIdentity = CaptureDiagnostics.serviceIdentity(version, versionCode);
+        Log.i(TAG, serviceIdentity);
+    }
+
+    /**
+     * The CXR-L build that answered the most recent bind.
+     *
+     * <p>Exposed rather than only logged because a real-device session is run
+     * without adb attached, and the service build has to be recorded alongside
+     * the capture results for them to mean anything later.</p>
+     */
+    public String serviceIdentity() {
+        return serviceIdentity;
     }
 
     private void failCallbackRegistration(

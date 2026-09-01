@@ -14,6 +14,16 @@ public final class PressGestureInterpreter {
         LONG
     }
 
+    /**
+     * A view pushed by the relay makes the glasses echo an AI-exit, always
+     * before that view reports itself open. The delay is not bounded usefully:
+     * measured echoes on Hi Rokid G1.12.10.0815 trailed their push by 1 ms to
+     * 1375 ms depending on how long the icons took to reach the glasses, so the
+     * pending open, not a timeout, is what identifies an echo. This cap only
+     * keeps a push whose open callback never arrives from muting the glasses.
+     */
+    private static final long ECHO_SUPPRESSION_CAP_MILLIS = 3000;
+
     private final long longPressMillis;
     private final long doublePressMillis;
     private final long customViewArbitrationMillis;
@@ -24,6 +34,10 @@ public final class PressGestureInterpreter {
     private long suppressCustomViewUntil = -1;
     private boolean suppressCurrentPress;
     private boolean pendingCustomViewExit;
+    private long lastViewOperationAt = -1;
+    private boolean awaitingViewOpen;
+    private long lastTapAt = -1;
+    private boolean lastAiExitWasViewEcho;
 
     public PressGestureInterpreter(long longPressMillis, long doublePressMillis) {
         if (longPressMillis <= 0 || doublePressMillis <= 0) {
@@ -133,6 +147,57 @@ public final class PressGestureInterpreter {
         return Action.LONG;
     }
 
+    /** Records a view push so its AI-exit echo is not mistaken for a tap. */
+    public synchronized void onGlassesViewOperation(long nowMillis) {
+        lastViewOperationAt = nowMillis;
+        awaitingViewOpen = true;
+    }
+
+    /** Ends the echo window: after this, an exit can only be a user tap. */
+    public synchronized void onGlassesViewOpened(long nowMillis) {
+        awaitingViewOpen = false;
+    }
+
+    /**
+     * Treats a user-originated AI-exit as the glasses short action.
+     *
+     * <p>YodaOS reserves long press (record/audio toggle) and double tap
+     * (exit), and Hi Rokid G1.12.10.0815 delivers neither AI key down/up nor a
+     * user-initiated CustomView close to a third-party app. A single tap,
+     * observed only as this exit callback, is therefore the sole glasses input
+     * the relay can receive, so no committing action may be derived from it.</p>
+     */
+    public synchronized Action onAiExit(long nowMillis) {
+        lastAiExitWasViewEcho = false;
+        boolean closedActiveAssist = nowMillis <= aiAssistActiveUntil;
+        onAiAssistExit(nowMillis);
+        if (closedActiveAssist) {
+            return null;
+        }
+        if (awaitingViewOpen
+                && nowMillis - lastViewOperationAt < ECHO_SUPPRESSION_CAP_MILLIS) {
+            lastAiExitWasViewEcho = true;
+            return null;
+        }
+        if (lastTapAt >= 0 && nowMillis - lastTapAt < doublePressMillis) {
+            return null;
+        }
+        lastTapAt = nowMillis;
+        return Action.SHORT;
+    }
+
+    /**
+     * Whether the last {@link #onAiExit} was our own view push coming back.
+     *
+     * <p>A null action is not enough to answer this: it also covers an assist
+     * close and a debounced second tap. Scheduling menu-exit recovery on an
+     * echo makes the recovery re-trigger itself, which drove the CustomView
+     * through a close/open every 0.7s on hardware.</p>
+     */
+    public synchronized boolean lastAiExitWasViewEcho() {
+        return lastAiExitWasViewEcho;
+    }
+
     public synchronized void onAiAssistExit(long nowMillis) {
         if (nowMillis <= aiAssistActiveUntil) {
             suppressCustomViewUntil = Math.max(
@@ -162,5 +227,8 @@ public final class PressGestureInterpreter {
         suppressCustomViewUntil = -1;
         suppressCurrentPress = false;
         pendingCustomViewExit = false;
+        lastViewOperationAt = -1;
+        awaitingViewOpen = false;
+        lastTapAt = -1;
     }
 }

@@ -32,6 +32,9 @@ public final class DocScanController implements AutoCloseable {
 
         default void onCaptureReviewCleared() {
         }
+
+        default void onAutoCaptureChanged(boolean running) {
+        }
     }
 
     private static final String PREFS = "docscan_relay";
@@ -45,9 +48,39 @@ public final class DocScanController implements AutoCloseable {
     private static final long CAPTURE_TIMEOUT_SECONDS = 30;
     private static final long SHUTTER_STABILIZATION_MILLIS = 1500;
     private static final long CUSTOM_VIEW_ACK_TIMEOUT_MILLIS = 3000;
-    static final int PHOTO_WIDTH = 1920;
-    static final int PHOTO_HEIGHT = 1080;
-    static final int PHOTO_QUALITY = 80;
+    // This firmware delivers one tap and nothing else, and the tap is already
+    // the retake. Registration therefore has to be the outcome of doing
+    // nothing, or it is unreachable from the glasses. A page the framing check
+    // passed commits quickly; anything it could not vouch for waits long
+    // enough to be tapped away.
+    private static final long AUTO_COMMIT_COMPLETE_MILLIS = 4000;
+    private static final long AUTO_COMMIT_UNVERIFIED_MILLIS = 12000;
+    // Hands-free reading. On the capture-review view a tap closes the
+    // CustomView without delivering any AI event, so that state has no usable
+    // glasses input at all and no amount of gesture work will give it one.
+    // Instead of asking, the relay shoots the same page several times, keeps
+    // the frame the recogniser did best on, and registers it.
+    private static final int AUTO_BURST_SHOTS = 3;
+    // Continuous scanning is what the operator asked for, so the intervals
+    // are only long enough to let the camera settle between frames and to
+    // let a page be turned. They are not a throttle.
+    private static final long AUTO_SHOT_INTERVAL_MILLIS = 400;
+    private static final long AUTO_PAGE_TURN_MILLIS = 2500;
+    /** Give up on a page that keeps reading as the one already registered. */
+    private static final int AUTO_DUPLICATE_BURST_LIMIT = 20;
+    /** An unreadable burst is retried at once; nothing was captured to keep. */
+    private static final long AUTO_RETRY_IMMEDIATE_MILLIS = 200;
+    /**
+     * Unreadable bursts keep retrying at full speed for this long before the
+     * interval opens up slightly. This is a thermal and battery guard, not a
+     * privacy one: the LED stays lit for exactly as long as the camera runs,
+     * which is the whole point of it.
+     */
+    private static final int AUTO_UNREADABLE_RETRY_LIMIT = 40;
+    private static final long AUTO_UNREADABLE_BACKOFF_MILLIS = 1200;
+    private static final String KEY_PHOTO_WIDTH = "photo_width";
+    private static final String KEY_PHOTO_HEIGHT = "photo_height";
+    private static final String KEY_PHOTO_QUALITY = "photo_quality";
 
     private final RokidGlobalLink link;
     private final JapaneseOcr ocr;
@@ -62,6 +95,9 @@ public final class DocScanController implements AutoCloseable {
     private final RetryCursor retryCursor = new RetryCursor();
 
     private volatile RelayState state = RelayState.DISCONNECTED;
+    private volatile PhotoCaptureSettings photoSettings = PhotoCaptureSettings.DEFAULT;
+    private volatile long photoRequestedAtMillis;
+    private volatile String lastOcrQuality = "";
     private DocScanApi api;
     private String configuredServer = "";
     private int imageRotation;
@@ -78,6 +114,18 @@ public final class DocScanController implements AutoCloseable {
             RokidGlobalLink.NO_VIEW_GENERATION;
     private boolean captureGuideAcknowledged;
     private boolean stabilizationTimerScheduled;
+    private long reviewGeneration;
+    private long reviewViewGeneration = RokidGlobalLink.NO_VIEW_GENERATION;
+    private boolean autoCommitArmed;
+    private boolean autoCommitScheduled;
+    private boolean autoCaptureEnabled;
+    private int autoShotsRemaining;
+    private int autoShotsTaken;
+    private CaptureReviewStore.Pending autoBest;
+    private double autoBestScore;
+    private String lastRegisteredPageText = "";
+    private int duplicateBurstsSeen;
+    private int unreadableBurstsSeen;
     private long sessionId;
     private int reviewIndex;
     private int reviewViewPage;
@@ -99,6 +147,10 @@ public final class DocScanController implements AutoCloseable {
         captureReviewPersistence = new CaptureReviewPersistence(
                 new File(context.getFilesDir(), "pending-capture-v1.bin"));
         configuredServer = preferences.getString(KEY_SERVER, "");
+        photoSettings = PhotoCaptureSettings.ofOrDefault(
+                preferences.getInt(KEY_PHOTO_WIDTH, PhotoCaptureSettings.DEFAULT.width),
+                preferences.getInt(KEY_PHOTO_HEIGHT, PhotoCaptureSettings.DEFAULT.height),
+                preferences.getInt(KEY_PHOTO_QUALITY, PhotoCaptureSettings.DEFAULT.quality));
         documentId = preferences.getLong(KEY_DOCUMENT, 0);
         nextPageIndex = preferences.getInt(KEY_NEXT_PAGE, 0);
         sessionId = preferences.getLong(KEY_SESSION, 0);
@@ -234,22 +286,22 @@ public final class DocScanController implements AutoCloseable {
         if (!linkReady || state == RelayState.DISCONNECTED) {
             return;
         }
-        if (link.isCustomViewActuallyOpen()) {
-            listener.onUpdate(
-                    state,
-                    currentHudLines,
-                    "System-menu recovery skipped because the current "
-                            + "DocScan CustomView is already open");
-            return;
-        }
+        // Deliberately not consulting isCustomViewOpened() here. This runs only
+        // when an AI-exit arrived and no open callback followed within 650 ms,
+        // so our own bookkeeping already proves the view is not confirmed open.
+        // The service disagrees: every close callback on this firmware reports
+        // remoteStillOpen=true, including the ones the user caused by leaving
+        // for the default screen. Trusting it stranded the operator on the home
+        // screen, because recovery skipped itself every single time.
         long restoredGeneration;
         CaptureReviewStore.Pending pending = captureReview.peek();
         if (state == RelayState.CAPTURE_REVIEW && pending != null) {
-            restoredGeneration = link.showCaptureReview(
-                    pending.jpeg,
-                    pending.rotationDegrees,
-                    currentHudLines);
-        } else if ((state == RelayState.AIMING || state == RelayState.STABILIZING)
+            publishCaptureReview(
+                    pending,
+                    "Re-presented pending review after a lifecycle close; no operator action inferred");
+            return;
+        }
+        if ((state == RelayState.AIMING || state == RelayState.STABILIZING)
                 && armedPageIndex >= 0) {
             if (state == RelayState.STABILIZING) {
                 // A system-menu exit pauses the shutter countdown. Invalidate
@@ -301,6 +353,10 @@ public final class DocScanController implements AutoCloseable {
     }
 
     private void onCustomViewAvailableNow(long generation, String purpose) {
+        if (state == RelayState.CAPTURE_REVIEW) {
+            scheduleAutoCommitOnAck(generation, purpose);
+            return;
+        }
         if (generation != captureGuideViewGeneration
                 || (state != RelayState.AIMING
                 && state != RelayState.STABILIZING)) {
@@ -359,7 +415,10 @@ public final class DocScanController implements AutoCloseable {
                 return;
             }
             listener.onCaptureReview(pending);
-            publishCaptureReview(pending, "Recovered unregistered photo after app restart");
+            publishCaptureReview(
+                    pending,
+                    "Recovered unregistered photo after app restart",
+                    true);
         });
     }
 
@@ -394,6 +453,42 @@ public final class DocScanController implements AutoCloseable {
         preferences.edit().putString(KEY_SERVER, configuredServer).apply();
     }
 
+    public PhotoCaptureSettings captureSettings() {
+        return photoSettings;
+    }
+
+    /**
+     * Changes the {@code takePhoto} arguments used by the next capture.
+     *
+     * <p>The usable capture size depends on the glasses firmware and can only
+     * be found by probing on the device, so this is adjustable at runtime: a
+     * rebuild between probes would cost a reinstall and a Hi Rokid
+     * re-authorization for every step of the sweep.</p>
+     */
+    public void applyCaptureSettings(PhotoCaptureSettings settings) {
+        if (settings == null) {
+            throw new IllegalArgumentException("撮影設定が指定されていません");
+        }
+        if (captureLease.isUnresolved() || state.isCaptureInProgress()) {
+            throw new IllegalStateException(
+                    "撮影処理中です。完了してから撮影設定を変更してください");
+        }
+        photoSettings = settings;
+        preferences.edit()
+                .putInt(KEY_PHOTO_WIDTH, settings.width)
+                .putInt(KEY_PHOTO_HEIGHT, settings.height)
+                .putInt(KEY_PHOTO_QUALITY, settings.quality)
+                .apply();
+        listener.onUpdate(state, currentHudLines, "撮影設定 " + settings.describe());
+    }
+
+    /** Advances the capture sweep by one probe without needing a rebuild. */
+    public PhotoCaptureSettings applyNextCapturePreset() {
+        PhotoCaptureSettings next = PhotoCaptureSettings.nextPreset(photoSettings);
+        applyCaptureSettings(next);
+        return next;
+    }
+
     public void verifyServer() {
         serial.execute(() -> {
             if (!requireApi()) {
@@ -402,7 +497,10 @@ public final class DocScanController implements AutoCloseable {
             CaptureReviewStore.Pending pending = captureReview.peek();
             if (pending != null) {
                 listener.onCaptureReview(pending);
-                publishCaptureReview(pending, "Recovered unregistered photo review");
+                publishCaptureReview(
+                        pending,
+                        "Recovered unregistered photo review",
+                        true);
                 return;
             }
             try {
@@ -500,7 +598,10 @@ public final class DocScanController implements AutoCloseable {
             CaptureReviewStore.Pending pending = captureReview.peek();
             if (pending != null) {
                 listener.onCaptureReview(pending);
-                publishCaptureReview(pending, "Recovered unregistered photo review");
+                publishCaptureReview(
+                        pending,
+                        "Recovered unregistered photo review",
+                        true);
                 return;
             }
             try {
@@ -535,13 +636,13 @@ public final class DocScanController implements AutoCloseable {
                             List.of(
                                     "読取を再開",
                                     nextPageIndex + "ページ登録済",
-                                    "タップ: 次の撮影準備"),
+                                    "撮影準備はスマホ"),
                             "Recovered document " + documentId);
                     return;
                 }
                 publish(
                         RelayState.READY,
-                        List.of("準備完了", "タップ: 1ページ目準備", "長押し: 読取完了"),
+                        List.of("準備完了", "撮影準備はスマホ", "読取完了はスマホ"),
                         "Ready for a new document");
             } catch (Exception error) {
                 fail("前回状態を復元できません", error);
@@ -572,7 +673,7 @@ public final class DocScanController implements AutoCloseable {
         if (pageIndex < 0) {
             publish(
                     RelayState.READING,
-                    List.of("再撮影対象なし", "タップ: 1ページ目準備", ""),
+                    List.of("再撮影対象なし", "撮影準備はスマホ", ""),
                     "No previous page");
             return;
         }
@@ -586,7 +687,7 @@ public final class DocScanController implements AutoCloseable {
                     "Capture preparation blocked until committed-photo recovery completes");
             return;
         }
-        if (!linkReady || !requireApi()) {
+        if (!requireLink()) {
             return;
         }
         if (captureLease.isUnresolved()) {
@@ -635,6 +736,17 @@ public final class DocScanController implements AutoCloseable {
     }
 
     private void triggerArmedCaptureNow() {
+        if (state == RelayState.CAPTURE_REVIEW && captureReview.peek() != null) {
+            // Pressing the shutter while looking at a photo can only mean
+            // "take another one". Answering "撮影準備なし" was a dead end that
+            // made the operator hunt for the right button.
+            if (autoCaptureEnabled) {
+                beginAutoBurst();
+            } else {
+                retakePendingCaptureNow(null);
+            }
+            return;
+        }
         if (state != RelayState.AIMING || armedPageIndex < 0) {
             publish(
                     state,
@@ -672,7 +784,7 @@ public final class DocScanController implements AutoCloseable {
         }
         publish(
                 documentId > 0 ? RelayState.READING : RelayState.READY,
-                List.of("撮影を取消", "タップ: 撮影準備", "長押し: 読取完了"),
+                List.of("撮影を取消", "撮影準備はスマホ", "読取完了はスマホ"),
                 "Manual capture preparation/stabilization cancelled");
     }
 
@@ -711,13 +823,13 @@ public final class DocScanController implements AutoCloseable {
         List<String> lines = stabilizing
                 ? List.of(
                         "P" + (pageIndex + 1) + " シャッター受付",
-                        "1.5秒そのまま静止",
-                        "撮影まで動かない")
+                        "確認画面まで静止",
+                        "約5秒 動かない")
                 : List.of(
                         "P" + (pageIndex + 1)
                                 + (replacingPending ? " 撮り直し準備" : " 撮影準備"),
                         "40〜60cm・中心を＋へ",
-                        "静止して長押し");
+                        "シャッターはスマホ");
         long viewGeneration =
                 link.showCaptureAiming(pageIndex + 1, replacingPending, stabilizing);
         if (viewGeneration == RokidGlobalLink.NO_VIEW_GENERATION) {
@@ -802,7 +914,7 @@ public final class DocScanController implements AutoCloseable {
         if (state != RelayState.STABILIZING) {
             return;
         }
-        if (!linkReady || !requireApi()) {
+        if (!requireLink()) {
             return;
         }
         CaptureReviewStore.Pending pending = captureReview.peek();
@@ -821,12 +933,15 @@ public final class DocScanController implements AutoCloseable {
             if (attempt == CaptureLease.NO_TOKEN) {
                 throw new IllegalStateException("another photo request is still unresolved");
             }
+            PhotoCaptureSettings settings = photoSettings;
             publish(
                     RelayState.CAPTURING,
                     List.of("撮影中", "40〜60cm離す", "用紙全体を入れて静止"),
-                    "Requesting glasses photo for page index " + pageIndex);
+                    "Requesting glasses photo for page index " + pageIndex
+                            + " (" + settings.describe() + ")");
+            photoRequestedAtMillis = System.currentTimeMillis();
             RokidGlobalLink.PhotoStartResult startResult =
-                    link.takePhoto(PHOTO_WIDTH, PHOTO_HEIGHT, PHOTO_QUALITY);
+                    link.takePhoto(settings.width, settings.height, settings.quality);
             if (startResult == RokidGlobalLink.PhotoStartResult.REJECTED) {
                 throw new IllegalStateException("takePhoto returned false");
             }
@@ -891,6 +1006,10 @@ public final class DocScanController implements AutoCloseable {
             return;
         }
         if (jpeg == null || jpeg.length == 0) {
+            listener.onUpdate(
+                    state,
+                    currentHudLines,
+                    CaptureDiagnostics.photoReceived(photoSettings, 0, captureElapsedMillis()));
             CaptureReviewStore.Pending pending = captureReview.peek();
             if (pending != null) {
                 publishCaptureReview(
@@ -906,23 +1025,32 @@ public final class DocScanController implements AutoCloseable {
         publish(
                 RelayState.OCR,
                 List.of("文字認識中", "P" + (uploadIndex + 1), ""),
-                "Photo received: " + jpeg.length + " bytes");
+                CaptureDiagnostics.photoReceived(
+                        photoSettings, jpeg.length, captureElapsedMillis()));
         ocr.recognize(jpeg, uploadRotation, new JapaneseOcr.Callback() {
             @Override
-            public void onResult(String text) {
+            public void onResult(String text, OcrQuality quality, PageFraming framing) {
+                lastOcrQuality = quality == null ? "" : quality.describe();
                 serial.execute(
                         () -> stageCaptureReview(
-                                uploadIndex, jpeg, text, uploadRotation, ""));
+                                uploadIndex, jpeg, text, uploadRotation, "", framing, quality));
             }
 
             @Override
             public void onError(Throwable error) {
+                lastOcrQuality = "";
                 String detail = error == null || error.getMessage() == null
                         ? "unknown OCR error"
                         : error.getMessage();
                 serial.execute(
                         () -> stageCaptureReview(
-                                uploadIndex, jpeg, "", uploadRotation, detail));
+                                uploadIndex,
+                                jpeg,
+                                "",
+                                uploadRotation,
+                                detail,
+                                PageFraming.UNKNOWN,
+                                null));
             }
         });
     }
@@ -961,9 +1089,12 @@ public final class DocScanController implements AutoCloseable {
                 if (!captureLease.markTimedOut(attempt)) {
                     return;
                 }
+                // The request that produced no callback is the measurement the
+                // capture sweep is after, so it has to survive the failure.
                 fail(
                         "写真が返りませんでした。安全のためHi Rokidを再接続してください",
-                        null);
+                        new IllegalStateException(CaptureDiagnostics.photoNoCallback(
+                                photoSettings, captureElapsedMillis())));
             });
         } catch (RejectedExecutionException ignored) {
             // The activity closed while the watchdog was expiring.
@@ -975,15 +1106,25 @@ public final class DocScanController implements AutoCloseable {
             byte[] jpeg,
             String ocrText,
             int rotationDegrees,
-            String ocrFailure
+            String ocrFailure,
+            PageFraming framing,
+            OcrQuality quality
     ) {
+        if (autoShotsRemaining > 0) {
+            acceptAutoShot(
+                    new CaptureReviewStore.Pending(
+                            pageIndex, jpeg, ocrText, rotationDegrees, ocrFailure, framing),
+                    quality);
+            return;
+        }
         CaptureReviewStore.Pending previous = captureReview.peek();
         CaptureReviewStore.Pending candidate = new CaptureReviewStore.Pending(
                 pageIndex,
                 jpeg,
                 ocrText,
                 rotationDegrees,
-                ocrFailure);
+                ocrFailure,
+                framing);
         CaptureReviewStore.Pending pending;
         try {
             pending = CaptureReviewTransaction.replace(
@@ -1003,7 +1144,7 @@ public final class DocScanController implements AutoCloseable {
                         RelayState.ERROR,
                         List.of(
                                 "写真を安全保存できません",
-                                "タップ: 同じページを再準備",
+                                "再撮影はスマホ",
                                 "登録はしていません"),
                         "Initial review photo rejected because durable save failed: "
                                 + error.getMessage());
@@ -1012,11 +1153,16 @@ public final class DocScanController implements AutoCloseable {
         }
         listener.onCaptureReview(pending);
         String diagnostic = "Photo awaiting confirmation: page " + pageIndex
+                + ", " + photoSettings.describe()
+                + ", framing: " + pending.framing
                 + ", OCR characters: " + pending.ocrCharacters();
+        if (!lastOcrQuality.isEmpty()) {
+            diagnostic += " (" + lastOcrQuality + ")";
+        }
         if (pending.hasOcrFailure()) {
             diagnostic += ", OCR error: " + pending.ocrFailure;
         }
-        publishCaptureReview(pending, diagnostic);
+        publishCaptureReview(pending, diagnostic, true);
     }
 
     public void confirmPendingCapture() {
@@ -1034,7 +1180,7 @@ public final class DocScanController implements AutoCloseable {
         if (pending == null) {
             publish(
                     RelayState.READING,
-                    List.of("確認写真なし", "タップ: 撮影準備", ""),
+                    List.of("確認写真なし", "撮影準備はスマホ", ""),
                     "No pending photo to register");
             return;
         }
@@ -1092,7 +1238,7 @@ public final class DocScanController implements AutoCloseable {
         if (pending == null) {
             publish(
                     RelayState.READING,
-                    List.of("確認写真なし", "タップ: 撮影準備", ""),
+                    List.of("確認写真なし", "撮影準備はスマホ", ""),
                     "No pending photo to retake");
             return;
         }
@@ -1182,7 +1328,7 @@ public final class DocScanController implements AutoCloseable {
             lines = List.of(
                     "写真を登録しました",
                     "端末OCRは空",
-                    "タップ: 次の撮影準備");
+                    "撮影準備はスマホ");
         }
         String persistenceWarning = workflowPersisted
                 ? ""
@@ -1245,7 +1391,7 @@ public final class DocScanController implements AutoCloseable {
             if (pending == null) {
                 publish(
                         RelayState.READING,
-                        List.of("確認写真なし", "タップ: 撮影準備", ""),
+                        List.of("確認写真なし", "撮影準備はスマホ", ""),
                         "No pending photo to discard");
                 return;
             }
@@ -1280,7 +1426,7 @@ public final class DocScanController implements AutoCloseable {
             listener.onCaptureReviewCleared();
             publish(
                     RelayState.READING,
-                    List.of("写真を破棄しました", "タップ: 撮影準備", "長押し: 読取完了"),
+                    List.of("写真を破棄しました", "撮影準備はスマホ", "読取完了はスマホ"),
                     "Discarded unregistered photo for page " + pending.pageIndex);
         });
     }
@@ -1289,25 +1435,352 @@ public final class DocScanController implements AutoCloseable {
             CaptureReviewStore.Pending pending,
             String diagnostic
     ) {
+        publishCaptureReview(pending, diagnostic, false);
+    }
+
+    /**
+     * Shows the unregistered photo.
+     *
+     * <p>Registration is manual-only. The compatibility parameter is ignored
+     * so restored and newly captured photos follow the same phone-confirmed
+     * path.</p>
+     */
+    private void publishCaptureReview(
+            CaptureReviewStore.Pending pending,
+            String diagnostic,
+            boolean armAutoCommit
+    ) {
         if (committedRecoveryBlocked || pending == committedPendingLocked) {
             publishCommittedPendingLocked(pending, diagnostic);
             return;
         }
         clearArmedCapture();
-        String secondLine = pending.ocrCharacters() == 0
-                ? "OCR 0文字・写真を確認"
-                : "OCR " + pending.ocrCharacters() + "文字・全体を確認";
-        List<String> lines = List.of(
-                "P" + (pending.pageIndex + 1) + " 未登録 / " + secondLine,
-                "タップ: 同じページを撮り直す",
-                "長押し: この写真を登録");
+        // Any earlier countdown belongs to a view that is being replaced.
+        reviewGeneration++;
+        autoCommitScheduled = false;
+        autoCommitArmed = false;
+        reviewViewGeneration = RokidGlobalLink.NO_VIEW_GENERATION;
+        // The operator cannot see the camera's field of view, so the framing
+        // verdict leads: a page that ran outside the frame must read as a
+        // failure, not as a photo that is merely waiting to be registered.
+        String page = "P" + (pending.pageIndex + 1);
+        String ocrLine = "OCR " + pending.ocrCharacters() + "文字";
+        List<String> lines = pending.isFramingFailing()
+                ? List.of(
+                        reviewHeadline(pending.pageIndex + 1, pending.framing),
+                        "撮り直しはスマホ",
+                        ocrLine)
+                : List.of(
+                        reviewHeadline(pending.pageIndex + 1, pending.framing),
+                        ocrLine + "・確認はスマホ",
+                        "登録はスマホのボタン");
         state = RelayState.CAPTURE_REVIEW;
         currentHudLines = lines;
-        link.showCaptureReview(
+        long viewGeneration = link.showCaptureReview(
                 pending.jpeg,
                 pending.rotationDegrees,
                 lines);
+        reviewViewGeneration = viewGeneration;
         listener.onUpdate(RelayState.CAPTURE_REVIEW, lines, diagnostic);
+    }
+
+    // ---- hands-free automatic reading -------------------------------------
+
+    public void startAutoCapture() {
+        serial.execute(() -> publish(
+                state,
+                currentHudLines,
+                "Automatic capture is disabled; use explicit phone controls"));
+    }
+
+    public void stopAutoCapture() {
+        serial.execute(() -> stopAutoCaptureNow("Automatic reading stopped by the operator"));
+    }
+
+    public boolean isAutoCaptureEnabled() {
+        return autoCaptureEnabled;
+    }
+
+    private void startAutoCaptureNow() {
+        autoCaptureEnabled = false;
+        listener.onAutoCaptureChanged(false);
+        publish(state, currentHudLines, "Automatic capture is disabled");
+    }
+
+    private void stopAutoCaptureNow(String reason) {
+        if (!autoCaptureEnabled && autoShotsRemaining == 0) {
+            return;
+        }
+        autoCaptureEnabled = false;
+        autoShotsRemaining = 0;
+        autoShotsTaken = 0;
+        autoBest = null;
+        autoBestScore = 0;
+        listener.onAutoCaptureChanged(false);
+        publish(
+                documentId > 0 ? RelayState.READING : RelayState.READY,
+                List.of("自動読取を停止", "読取完了はスマホ", ""),
+                reason);
+    }
+
+    private void beginAutoBurst() {
+        if (!autoCaptureEnabled) {
+            return;
+        }
+        autoShotsRemaining = AUTO_BURST_SHOTS;
+        autoShotsTaken = 0;
+        autoBest = null;
+        autoBestScore = 0;
+        takeAutoShotNow();
+    }
+
+    private void takeAutoShotNow() {
+        if (!autoCaptureEnabled || autoShotsRemaining <= 0) {
+            return;
+        }
+        if (!linkReady || !requireApi()) {
+            stopAutoCaptureNow("Automatic reading stopped because the glasses link is not ready");
+            return;
+        }
+        if (captureLease.isUnresolved()) {
+            stopAutoCaptureNow(
+                    "Automatic reading stopped because a CXR-L photo lease is unresolved");
+            return;
+        }
+        int pageIndex = nextPageIndex;
+        int shot = autoShotsTaken + 1;
+        // requestPhotoAt only fires from STABILIZING, and it publishes its own
+        // "撮影中" view. Pushing another one here would double the view swaps
+        // per shot, and each swap costs the glasses several hundred ms.
+        state = RelayState.STABILIZING;
+        listener.onUpdate(
+                state,
+                currentHudLines,
+                "Automatic burst shot " + shot + "/" + AUTO_BURST_SHOTS
+                        + " for page index " + pageIndex);
+        requestPhotoAt(pageIndex, false);
+    }
+
+    private void scheduleAuto(Runnable action, long delayMillis) {
+        try {
+            watchdog.schedule(
+                    () -> {
+                        try {
+                            serial.execute(action);
+                        } catch (RejectedExecutionException ignored) {
+                            // The activity closed while the cycle was waiting.
+                        }
+                    },
+                    delayMillis,
+                    TimeUnit.MILLISECONDS);
+        } catch (RejectedExecutionException ignored) {
+            // The activity is already closing.
+        }
+    }
+
+    /**
+     * Keeps the best frame of the burst and, once the burst is done, registers
+     * it without asking. The photo is only persisted when it wins, so a burst
+     * costs one durable write rather than {@link #AUTO_BURST_SHOTS}.
+     */
+    private void acceptAutoShot(CaptureReviewStore.Pending shot, OcrQuality quality) {
+        autoShotsTaken++;
+        autoShotsRemaining--;
+        double score = ShotScore.of(
+                shot.framing,
+                shot.ocrCharacters(),
+                quality == null ? 0f : quality.meanConfidence(),
+                quality != null && quality.hasConfidence());
+        listener.onUpdate(
+                RelayState.OCR,
+                currentHudLines,
+                "Automatic burst shot " + autoShotsTaken + "/" + AUTO_BURST_SHOTS
+                        + " " + ShotScore.describe(score)
+                        + " framing=" + shot.framing
+                        + " OCR characters: " + shot.ocrCharacters()
+                        + (quality == null ? "" : " (" + quality.describe() + ")"));
+        if (autoBest == null || ShotScore.isBetter(score, autoBestScore)) {
+            autoBest = shot;
+            autoBestScore = score;
+        }
+        if (!autoCaptureEnabled) {
+            autoShotsRemaining = 0;
+            return;
+        }
+        if (autoShotsRemaining > 0) {
+            scheduleAuto(this::takeAutoShotNow, AUTO_SHOT_INTERVAL_MILLIS);
+            return;
+        }
+        finishAutoBurst();
+    }
+
+    private void finishAutoBurst() {
+        CaptureReviewStore.Pending best = autoBest;
+        autoBest = null;
+        autoBestScore = 0;
+        if (best == null || best.ocrCharacters() == 0 || best.hasOcrFailure()) {
+            // Nothing was read, so there is nothing to register and nothing to
+            // wait for: go straight back and shoot again. Only after several
+            // consecutive failures does the interval open up, because a camera
+            // firing continuously keeps the privacy LED lit and heats the
+            // glasses.
+            unreadableBurstsSeen++;
+            boolean backOff = unreadableBurstsSeen > AUTO_UNREADABLE_RETRY_LIMIT;
+            publishAutoWaiting(
+                    "読み取れません",
+                    backOff ? "位置を調整してください" : "すぐに撮り直します",
+                    "Automatic burst produced no readable frame ("
+                            + unreadableBurstsSeen + " in a row); retrying "
+                            + (backOff ? "after backing off" : "immediately"));
+            scheduleAuto(
+                    this::beginAutoBurst,
+                    backOff
+                            ? AUTO_UNREADABLE_BACKOFF_MILLIS
+                            : AUTO_RETRY_IMMEDIATE_MILLIS);
+            return;
+        }
+        unreadableBurstsSeen = 0;
+        if (PageTextSimilarity.isSamePage(lastRegisteredPageText, best.ocrText)) {
+            duplicateBurstsSeen++;
+            if (duplicateBurstsSeen >= AUTO_DUPLICATE_BURST_LIMIT) {
+                stopAutoCaptureNow(
+                        "Automatic reading stopped after " + duplicateBurstsSeen
+                                + " bursts that read as the page already registered");
+                return;
+            }
+            publishAutoWaiting(
+                    "同じページです",
+                    "次のページへ",
+                    "Automatic burst skipped as a duplicate of the registered page");
+            scheduleAuto(this::beginAutoBurst, AUTO_PAGE_TURN_MILLIS);
+            return;
+        }
+        duplicateBurstsSeen = 0;
+        try {
+            CaptureReviewTransaction.replace(
+                    captureReview,
+                    best,
+                    captureReviewPersistence::save);
+        } catch (IOException error) {
+            stopAutoCaptureNow(
+                    "Automatic reading stopped because the chosen photo could not be saved: "
+                            + error.getMessage());
+            return;
+        }
+        listener.onCaptureReview(best);
+        state = RelayState.CAPTURE_REVIEW;
+        lastRegisteredPageText = best.ocrText;
+        confirmPendingCaptureNow();
+        if (autoCaptureEnabled && state == RelayState.READING) {
+            publishAutoWaiting(
+                    "P" + (best.pageIndex + 1) + " 登録",
+                    "次のページへ",
+                    "Automatic registration complete; waiting for the next page");
+            scheduleAuto(this::beginAutoBurst, AUTO_PAGE_TURN_MILLIS);
+        }
+    }
+
+    private void publishAutoWaiting(String first, String second, String diagnostic) {
+        publish(
+                documentId > 0 ? RelayState.READING : RelayState.READY,
+                List.of(first, second, "停止はスマホ"),
+                diagnostic);
+    }
+
+    /**
+     * First HUD line of the review.
+     *
+     * <p>Only a page the check actually vouched for may be called 合格. An
+     * unjudgeable frame said "合格 判定情報なし" on hardware, which claims a
+     * pass and denies one in the same breath.</p>
+     */
+    static String reviewHeadline(int pageNumber, PageFraming framing) {
+        String verdict;
+        switch (framing.verdict()) {
+            case COMPLETE:
+                verdict = "合格 ";
+                break;
+            case CLIPPED:
+                verdict = "不合格 ";
+                break;
+            default:
+                // describe() already states that it could not be judged.
+                verdict = "";
+                break;
+        }
+        return "P" + pageNumber + " " + verdict + framing.describe();
+    }
+
+    static long autoCommitDelayMillis(CaptureReviewStore.Pending pending) {
+        return pending.framing.verdict() == PageFraming.Verdict.COMPLETE
+                ? AUTO_COMMIT_COMPLETE_MILLIS
+                : AUTO_COMMIT_UNVERIFIED_MILLIS;
+    }
+
+    /**
+     * Whether a countdown that has just expired may still register its photo.
+     *
+     * <p>A tap leaves {@code CAPTURE_REVIEW}, and any newer review view bumps
+     * the generation, so both are enough to retire a timer that is already in
+     * flight. Kept static so the arithmetic is covered without a Context.</p>
+     */
+    static boolean shouldAutoCommit(
+            RelayState state,
+            long generationAtSchedule,
+            long currentGeneration,
+            boolean armed
+    ) {
+        return false;
+    }
+
+    /**
+     * Starts the registration countdown once the glasses confirm the review
+     * view is on screen. Without that acknowledgement nothing is uploaded.
+     */
+    private void scheduleAutoCommitOnAck(long generation, String purpose) {
+        if (!autoCommitArmed
+                || autoCommitScheduled
+                || generation != reviewViewGeneration) {
+            return;
+        }
+        CaptureReviewStore.Pending pending = captureReview.peek();
+        if (pending == null) {
+            autoCommitArmed = false;
+            return;
+        }
+        autoCommitScheduled = true;
+        long delayMillis = autoCommitDelayMillis(pending);
+        final long generationAtSchedule = reviewGeneration;
+        watchdog.schedule(
+                () -> enqueueAutoCommit(generationAtSchedule),
+                delayMillis,
+                TimeUnit.MILLISECONDS);
+        listener.onUpdate(
+                state,
+                currentHudLines,
+                "Auto-registration countdown started after review view"
+                        + " acknowledgement generation=" + generation
+                        + " purpose=" + purpose
+                        + " delay=" + delayMillis + "ms"
+                        + " framing=" + pending.framing);
+    }
+
+    private void enqueueAutoCommit(long generationAtSchedule) {
+        try {
+            serial.execute(() -> {
+                if (!shouldAutoCommit(
+                        state,
+                        generationAtSchedule,
+                        reviewGeneration,
+                        autoCommitArmed)) {
+                    return;
+                }
+                autoCommitArmed = false;
+                confirmPendingCaptureNow();
+            });
+        } catch (RejectedExecutionException ignored) {
+            // The activity closed while the countdown was running.
+        }
     }
 
     private void publishCommittedPendingLocked(
@@ -1365,7 +1838,7 @@ public final class DocScanController implements AutoCloseable {
         if (documentId == 0 || nextPageIndex == 0) {
             publish(
                     RelayState.READING,
-                    List.of("ページがありません", "タップで撮影準備", ""),
+                    List.of("ページがありません", "撮影準備はスマホ", ""),
                     "Finish rejected: empty document");
             return;
         }
@@ -1493,7 +1966,7 @@ public final class DocScanController implements AutoCloseable {
         clearWorkflow();
         publish(
                 linkReady ? RelayState.READY : RelayState.DISCONNECTED,
-                List.of("新規読取", "タップ: 撮影準備", "長押し: 完了"),
+                List.of("新規読取", "撮影準備はスマホ", "完了はスマホ"),
                 "Workflow cleared");
     }
 
@@ -1503,6 +1976,30 @@ public final class DocScanController implements AutoCloseable {
         }
         fail("先にサーバURLを設定してください", null);
         return false;
+    }
+
+    /**
+     * Reports why a command cannot run instead of returning in silence.
+     *
+     * <p>The old {@code !linkReady || !requireApi()} short-circuited before
+     * {@code requireApi} could speak, so with the glasses disconnected every
+     * phone button did nothing and said nothing. That is what "the manual
+     * buttons do not work" turned out to be.</p>
+     */
+    private boolean requireLink() {
+        if (!linkReady) {
+            publish(
+                    RelayState.DISCONNECTED,
+                    List.of("グラス未接続", "Hi Rokid認可・再接続", ""),
+                    "Command ignored because the glasses link is not ready");
+            return false;
+        }
+        return requireApi();
+    }
+
+    private long captureElapsedMillis() {
+        long requestedAt = photoRequestedAtMillis;
+        return requestedAt == 0 ? 0 : System.currentTimeMillis() - requestedAt;
     }
 
     private void publish(RelayState next, List<String> lines, String diagnostic) {
@@ -1517,6 +2014,16 @@ public final class DocScanController implements AutoCloseable {
 
     private void fail(String userMessage, Throwable error) {
         String detail = error == null ? userMessage : userMessage + ": " + error.getMessage();
+        // A hands-free cycle must not keep shooting into a fault; the operator
+        // is not watching the phone and would never see it.
+        if (autoCaptureEnabled) {
+            autoCaptureEnabled = false;
+            autoShotsRemaining = 0;
+            autoShotsTaken = 0;
+            autoBest = null;
+            autoBestScore = 0;
+            listener.onAutoCaptureChanged(false);
+        }
         publish(
                 RelayState.ERROR,
                 List.of("エラー", userMessage, "スマホ画面を確認"),

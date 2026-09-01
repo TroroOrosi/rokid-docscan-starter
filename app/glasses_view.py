@@ -34,19 +34,13 @@ Stages:
   review mode (primary): NO stages — 答え+解法+根拠+注意 merged into one
                          teleprompter stream per problem (一括表示)
 
-Navigation is always touch-gesture based — voice is opt-in only.
-Official Rokid Glasses gesture vocabulary (current model; see
-docs/glasses-ux-contract.md):
-  two_finger_tap              : AI activation → page 視認 (reading phase only)
-  single_tap                  : click / show / next stage (secondary flows)
-  double_tap                  : exit — phase-modal: reading=finish_reading,
-                                review=close
-  two_finger_swipe_up/down    : teleprompter scroll (within a view)
-  two_finger_swipe_left/right : prev/next document page or review problem
-  long_press                  : video⇄audio record toggle → written⇄listening
+Navigation and capture decisions are phone-controlled. CUSTOMVIEW/AI callbacks
+are published only as unverified diagnostic mappings and are not operator
+actions in the supported relay.
 A real page image is captured during the reading phase. After the image
-callback and finalize-reading, no camera image is requested for answer/problem
-navigation; the privacy LED must remain dark during answer and review.
+callback and finalize-reading, the application makes no camera request for
+answer/problem navigation. Indicator state is a separate physical acceptance
+observation and is never inferred from this software state.
 """
 
 from __future__ import annotations
@@ -78,7 +72,7 @@ RENDER_CONTRACT = {
 }
 
 # Capture-path contract for the real-device Android relay. The relay calls
-# CXR-L takePhoto and uploads the original image. Privacy LED, shutter sound,
+# CXR-L takePhoto and uploads the transport image. Privacy LED, shutter sound,
 # flash and capture indicators are hardware/firmware controlled; the application
 # never disables or bypasses them and must verify their behavior physically.
 CAPTURE_CONTRACT = {
@@ -89,74 +83,40 @@ CAPTURE_CONTRACT = {
     "camera_path": "cxr-l/takePhoto",
     "audio_record": {"start_tone": False, "stop_tone": False, "silent": True},
     "privacy_led": {"state": "on_while_camera_active", "tamper": "forbidden"},
-    "led_off_during_review": True,
+    "camera_requests_during_review": False,
+    "indicator_during_review": "physically_verify_off",
 }
 
-# Operation mapping for the glasses-only 3-phase exam flow (and the secondary
-# flows), using the CURRENT Rokid Glasses official gesture vocabulary:
-# two-finger tap = AI activation / single tap = click / double tap = exit /
-# two-finger swipe up・down = scroll, left・right = prev/next page /
-# long press = video⇄audio record toggle. Every operation below is doable on
-# the glasses alone (the phone, if present, is a silent HTTP relay). Gestures
-# resolve to KeyCodes via GET /v1/settings.input (overridable with ROKID_KEYMAP).
-#
-# Design notes (pending on-device UX validation):
-#   - Three REQUIRED calls have no gesture of their own: document creation
-#     (POST /v1/documents), the all-pages declaration (POST /v1/documents/
-#     {id}/finalize) and exam-session creation (POST /v1/exam-sessions).
-#     They are the RELAY APP's auto-chain duty — the first two_finger_tap of
-#     a reading session creates the document (title required) and posts that
-#     same tap's recognition as page 0, and finish_reading (double_tap)
-#     fires finalize → session create → finalize-reading as one chain (see
-#     docs/cxr-l-integration.md §5). The user's input is gestures only;
-#     "glasses-only operation" holds through that relay duty, which is why
-#     these calls are deliberately absent from OPERATION_CONTRACT.
-#   - finish_reading = double_tap reuses the official "exit" gesture and is
-#     phase-modal: during reading it declares 読取完了 (finalize-reading);
-#     during review it closes the deck. 読取フェーズの終了＝カメラOFF＝LED消灯.
-#   - mode_toggle/record_toggle share long_press (the official video⇄audio
-#     record toggle) and are phase-modal: written → switch to listening;
-#     listening → start/stop the silent recording.
-#   - Swipe direction keeps the existing left=next (page-flip) convention;
-#     clients may mirror it per user preference.
+# Supported operation mapping. Values describe the authoritative control
+# surface, not a gesture hypothesis.
 OPERATION_CONTRACT = {
-    # --- Phase 1 読取 (camera ON → privacy LED lit; keep this phase short) ---
-    "capture_read": "two_finger_tap",             # AI起動=視認 → POST /documents/{id}/pages
-    "finish_reading": "double_tap",               # → POST /exam-sessions/{id}/finalize-reading
-    # --- Phase 2 解答 (camera OFF): onboard GPT solves → POST /solutions ---
-    "mode_toggle": "long_press",                  # 筆記⇄リスニング → POST /exam-sessions/{id}/mode
-    "record_toggle": "long_press",                # listening中: 録音開始/停止 (phase-modal)
-    # --- Phase 3 閲覧 (camera OFF, LED off): per-problem review deck ---
-    "review_next_problem": "two_finger_swipe_left",   # → GET /review?index=k+1
-    "review_prev_problem": "two_finger_swipe_right",  # → GET /review?index=k-1
-    "scroll_next": "two_finger_swipe_down",       # teleprompter 送り (view_page+1)
-    "scroll_prev": "two_finger_swipe_up",         # teleprompter 戻し (view_page-1)
-    "close": "double_tap",                        # exit review
-    # --- Secondary/compat: solve-current型 page-move exam ---
-    "exam_next_page": "two_finger_swipe_left",    # → POST /exam-sessions/{id}/next-page
-    "exam_prev_page": "two_finger_swipe_right",   # → POST /exam-sessions/{id}/prev-page
-    "exam_solve_current": "single_tap",           # → POST /exam-sessions/{id}/solve-current
-    "exam_next_stage": "single_tap",              # while a solution is shown: next stage
-    # --- Secondary/compat: explain-sessions ---
-    "explain_show": "single_tap",
-    "explain_next_stage": "single_tap",           # while an explanation is shown
-    "explain_next_doc_page": "two_finger_swipe_left",   # → POST /explain-sessions/{id}/next-page
-    "explain_prev_doc_page": "two_finger_swipe_right",  # → POST /explain-sessions/{id}/prev-page
-    # Teleprompter scroll within a staged view (secondary flows)
-    "next_view_page": "two_finger_swipe_down",
-    "prev_view_page": "two_finger_swipe_up",
-    "voice_hint": None,
+    "capture_read": "phone",
+    "finish_reading": "phone",
+    "mode_toggle": "phone",
+    "record_toggle": "phone",
+    "review_next_problem": "phone",
+    "review_prev_problem": "phone",
+    "scroll_next": "phone",
+    "scroll_prev": "phone",
+    "close": "phone",
+    "exam_next_page": "phone",
+    "exam_prev_page": "phone",
+    "exam_solve_current": "phone",
+    "exam_next_stage": "phone",
+    "explain_show": "phone",
+    "explain_next_stage": "phone",
+    "explain_next_doc_page": "phone",
+    "explain_prev_doc_page": "phone",
+    "next_view_page": "phone",
+    "prev_view_page": "phone",
+    "voice_hint": "phone",
 }
 
-# On-glasses input contract: gesture -> Android KeyCode. Published at
-# GET /v1/settings so the CXR-L client has a single authoritative source for
-# which KeyEvent to listen for. Gesture NAMES are the current official Rokid
-# Glasses vocabulary; the KeyCode VALUES are carried over from the legacy
-# monocular Rokid Glass table and are UNVERIFIED on the current hardware
-# (keycodes_verified: false — measure with `adb shell getevent -l`, see
-# docs/real-device-operation.md §5). A device/firmware difference is absorbed
-# via ROKID_KEYMAP (see app/config.py) without any client change.
-# build_input_contract() applies the override at call time.
+# Legacy diagnostic map published at GET /v1/settings. It is not an operator
+# input contract: the supported workflow routes every action through the phone.
+# Names and values are retained only to label device measurements and may not
+# represent events delivered by current Global Hi Rokid/CXR-L firmware.
+# build_input_contract() applies an optional diagnostic override at call time.
 _DEFAULT_GESTURES = {
     "single_tap":             {"keycode": 23,  "keyevent": "KEYCODE_DPAD_CENTER"},
     "double_tap":             {"keycode": 66,  "keyevent": "KEYCODE_ENTER"},
@@ -189,13 +149,14 @@ def build_input_contract() -> dict:
         else:
             gestures[gesture] = {"keycode": keycode, "keyevent": None}
     return {
-        # Honest flag: the KeyCode values come from the LEGACY monocular
-        # Rokid Glass table and have NOT been measured on the current
-        # binocular Rokid Glasses. Treat them as a starting hypothesis.
+        "operator_actions_enabled": False,
+        "role": "diagnostic_only",
+        # These legacy values have not been accepted as usable operator input
+        # on the current hardware. They are diagnostic labels only.
         "keycodes_verified": False,
         "keycode_source": (
             "legacy Rokid Glass mapping, unverified — measure on device "
-            "(docs/real-device-operation.md §5)"
+            "(docs/device-verification-checklist.md)"
             + (" + ROKID_KEYMAP override" if overridden else "")
         ),
         "overridden": overridden,
@@ -231,7 +192,7 @@ def build_page_nav_ack(
         "最終ページ" if page_index >= total_pages - 1
         else ("先頭ページ" if page_index == 0 else "")
     )
-    lines = [label] + ([at_edge] if at_edge else []) + ["タップで解説"]
+    lines = [label] + ([at_edge] if at_edge else []) + ["解説操作はスマホ"]
     return {
         "lines": lines[:_MAX_LINES],
         "ttl_sec": 1.5,
@@ -393,7 +354,7 @@ def build_glasses_view(
             "prev": page - 1 if page > 0 else None,
             "next": page + 1 if page < total - 1 else None,
             "stages": list(STAGES),
-            "hint": "『次の答え』と言う" if voice_enabled else "縦スワイプで次へ",
+            "hint": "操作はスマホ",
         },
     }
 
@@ -419,8 +380,8 @@ def _explain_stage_lines(
         head = f"{page_label} {_confidence_symbol(result.confidence)}".strip()
         return [head] + (result.lines or [])
     if stage == "detail":
-        # Split long detail into sentence lines so it paginates into multiple
-        # 3-line teleprompter pages (two_finger_swipe_down/up) instead of one long line.
+        # Split long detail into sentence lines so phone-driven pagination can
+        # show multiple 3-line views instead of one long line.
         return [label] + (_split_sentences(result.detail) or ["(詳細なし)"])
     # evidence
     labels = _evidence_labels(result)
@@ -441,17 +402,14 @@ def build_explain_view(
 ) -> dict:
     """Return one paginated HUD view for an explain-session page.
 
-    Pagination (teleprompter-style):
+    Pagination (phone-controlled teleprompter-style):
       - Each logical line is passed through _wrap() unchanged.
       - Lines are chunked into slices of _MAX_LINES (3) view pages.
-      - Client scrolls with two_finger_swipe_down (next) / _up (prev).
 
-    Stage navigation (single_tap cycles forward; wraps at evidence->overview):
+    Stage navigation (the phone advances and wraps at evidence->overview):
       overview -> detail -> evidence -> (wrap) -> overview
 
-    Page navigation (no camera):
-      two_finger_swipe_left  → POST /next-page
-      two_finger_swipe_right → POST /prev-page
+    Page navigation is performed with phone controls and requests no camera.
     """
     if stage not in EXPLAIN_STAGES:
         stage = "overview"
@@ -476,10 +434,7 @@ def build_explain_view(
         else EXPLAIN_STAGES[0]  # wrap around to overview
     )
 
-    if total_view_pages > 1:
-        hint = "縦スワイプ 送り / タップ 次段階"
-    else:
-        hint = "タップ 次段階 / 横スワイプ 次ページ"
+    hint = "操作はスマホ"
 
     return {
         "stage": stage,
@@ -495,11 +450,11 @@ def build_explain_view(
             "next_stage": next_stage,
             "stages": list(EXPLAIN_STAGES),
             "operations": {
-                "next_view_page": "two_finger_swipe_down",
-                "prev_view_page": "two_finger_swipe_up",
-                "next_stage": "single_tap",
-                "next_doc_page": "two_finger_swipe_left",
-                "prev_doc_page": "two_finger_swipe_right",
+                "next_view_page": "phone",
+                "prev_view_page": "phone",
+                "next_stage": "phone",
+                "next_doc_page": "phone",
+                "prev_doc_page": "phone",
             },
             "hint": hint,
         },
@@ -507,7 +462,7 @@ def build_explain_view(
 
 
 # ---------------------------------------------------------------------------
-# Review-deck view builder (3-phase exam flow, phase 3 閲覧: camera OFF, LED off)
+# Review-deck view builder (phase 3: the application requests no camera image)
 # ---------------------------------------------------------------------------
 
 
@@ -534,26 +489,25 @@ def _review_lines(solution: SolveResult, header: str) -> list[str]:
     return lines
 
 
-# Gesture bindings for the reading phase (subset of OPERATION_CONTRACT).
+# Phone bindings for the reading phase (subset of OPERATION_CONTRACT).
 # Returned by finalize-reading when a 0-problem outcome reverts the session to
 # the reading phase: the client must keep showing re-scan controls — with the
-# review bindings, double_tap would read as "close" exactly when the user
-# needs it to mean "finish_reading" again after re-scanning.
+# review bindings when the user needs reading controls again after re-scanning.
 READING_OPERATIONS = {
     key: OPERATION_CONTRACT[key]
     for key in ("capture_read", "finish_reading", "mode_toggle")
 }
 
-# Gesture bindings for the review phase (subset of OPERATION_CONTRACT). The
+# Phone bindings for the review phase (subset of OPERATION_CONTRACT). The
 # single source used both inside every review view (nav.operations) and by the
 # endpoint envelopes (main._review_operations), so a client sees one set.
 REVIEW_OPERATIONS = {
-    "next_problem": "two_finger_swipe_left",
-    "prev_problem": "two_finger_swipe_right",
-    "scroll_next": "two_finger_swipe_down",
-    "scroll_prev": "two_finger_swipe_up",
-    "close": "double_tap",
-    "mode_toggle": "long_press",
+    "next_problem": "phone",
+    "prev_problem": "phone",
+    "scroll_next": "phone",
+    "scroll_prev": "phone",
+    "close": "phone",
+    "mode_toggle": "phone",
 }
 
 
@@ -570,12 +524,11 @@ def build_review_view(
 ) -> dict:
     """Return one teleprompter page of the per-problem review view.
 
-    Phase 3 閲覧: the paper and the camera are no longer needed (LED off).
+    Phase 3 閲覧: the paper is no longer needed and no camera request is made.
     Answer, solution steps, rationale and cautions are merged into ONE stream
-    (確定事項: 一括表示) and chunked into <=3-line pages; the user scrolls with
-    two-finger vertical swipes and moves between problems with two-finger
-    horizontal swipes.  An unsolved problem renders a placeholder so the deck
-    is fully navigable before/while the onboard AI's answers are ingested.
+    and chunked into <=3-line pages. The user scrolls and moves between
+    problems with the phone controls. An unsolved problem renders a placeholder
+    so the deck remains navigable while answers are ingested.
     """
     position = f"{index + 1}/{problem_count}"
     label = problem_no or f"#{index + 1}"
@@ -607,17 +560,13 @@ def build_review_view(
             "prev_view_page": vp - 1 if vp > 0 else None,
             "next_view_page": vp + 1 if vp < total - 1 else None,
             "operations": dict(REVIEW_OPERATIONS),
-            "hint": (
-                "『次の問題』と言う"
-                if voice_enabled
-                else "横スワイプ 前後の問 / 縦スワイプ 送り"
-            ),
+            "hint": "操作はスマホ",
         },
     }
 
 
 def build_reading_done_ack(problem_count: int, total_pages: int) -> dict:
-    """HUD ack for finalize-reading: reading phase over, camera off, LED off.
+    """HUD ack for finalize-reading: reading is over; no camera request follows.
 
     A 0-problem outcome (e.g. every page was figure-only with no recognized
     text) gets explicit guidance instead of dropping the user into an empty
@@ -633,7 +582,7 @@ def build_reading_done_ack(problem_count: int, total_pages: int) -> dict:
         lines = [
             f"読取完了 {total_pages}ページ",
             f"{problem_count}問を検出",
-            "カメラOFF 解答へ",
+            "撮影終了 解答へ",
         ]
     return {
         "lines": lines[:_MAX_LINES],
@@ -653,9 +602,9 @@ def build_scan_ack(
 
     Called from POST /v1/documents/{id}/pages (add_page) so the user gets
     real-time feedback.  When the expected total is known and reached, the
-    hint changes to the completion message so the user knows to double-tap
-    (finish_reading → POST /v1/exam-sessions/{id}/finalize-reading, which
-    closes the camera and turns the privacy LED off).
+    hint changes to a phone-control completion message. Finishing calls
+    POST /v1/exam-sessions/{id}/finalize-reading; indicator state remains a
+    separate physical observation.
 
     ``total_pages=None`` = the client never declared an expected count: the
     ack must NOT claim completion (previously it asserted all_scanned after
@@ -664,14 +613,14 @@ def build_scan_ack(
     label = f"P{page_index + 1:02d} 読取済 ✓"
     if total_pages is None:
         return {
-            "lines": [label, f"{scanned_count}ページ読取済", "次ページ / 完了はダブルタップ"],
+            "lines": [label, f"{scanned_count}ページ読取済", "次ページ / 完了はスマホ"],
             "ttl_sec": 2,
             "scanned_count": scanned_count,
             "total_pages": None,
             "all_scanned": False,
         }
     progress = f"{scanned_count}/{total_pages}ページ完了"
-    hint = "完了: ダブルタップ" if scanned_count >= total_pages else "次ページへ"
+    hint = "完了はスマホ" if scanned_count >= total_pages else "次ページへ"
     return {
         "lines": [label, progress, hint],
         "ttl_sec": 2,

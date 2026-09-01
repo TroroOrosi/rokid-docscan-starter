@@ -1,290 +1,32 @@
-# グラス UX 参考資料（旧操作を含むレガシー契約）
+# Legacy glasses gesture proposal
 
-> **適用範囲:** この文書は旧操作を含む参考資料であり、現行実機の撮影経路や SDK 境界の
-> 権威ソースではありません。real-device capture については [CLAUDE.md](../CLAUDE.md)、
-> [cxr-l-integration.md](cxr-l-integration.md)、
-> [windows-android-real-device-setup.md](windows-android-real-device-setup.md)、
-> [device-verification-checklist.md](device-verification-checklist.md) を優先してください。
-> 特に下表の「ダブルタップ=読取完了」は現行Android Relayには適用しません。
-> 現行グラスではダブルタップがCustomView終了として標準メニューへ戻るため、Relayは
-> `AI-exit`後に現在画面を再表示します。現行撮影は短押しで`AIMING`、`AIMING`の長押しで
-> 静止・撮影です。`AIMING`の短押し/2回短押しと`STABILIZING`の全操作は取り消し、
-> `CAPTURE_REVIEW`の短押し/2回短押しは再撮影準備、長押しは登録です。
+Status: Superseded design record. Not an operator contract.
 
-本サーバは**サーバ側**実装です。ここでは眼鏡（Rokid Glasses）と伴走アプリ
-（スマホ＝裏方）の表示・操作に関するレガシー規約を記録します。サーバは守れる範囲を
-強制し（HUD は最大3行・音/アニメ指示を持たない・本番モードはロック）、物理撮影 cue
-の挙動はアプリから保証せず、正確な機種・ファームウェアで確認します。
+Earlier revisions mapped tap, double tap, long press, and two-finger swipes to
+capture, completion, and review actions. Those mappings were based on platform
+gesture descriptions and incomplete callback observations. Later testing on Hi
+Rokid `G1.12.10.0815` / CXR-L service `1.0.0 code 10000` did not establish a
+trustworthy CUSTOMVIEW operator-input channel.
 
-## 役割分担
+The current contract is Glasses View `1.9.0`:
 
-```
-[眼鏡: 唯一のUI]  ──BLE/Wi-Fi──  [スマホ伴走アプリ: 裏方]  ──HTTPS──  [本サーバ]
- 撮影 / HUD表示 / 物理操作        保存・通信・HUD中継(画面は見せない)     解析・解答・契約
-```
+- CUSTOMVIEW close, `AI-exit`, and AI key callbacks are lifecycle/diagnostic
+  events only.
+- The Android relay maps every such event to no operator command.
+- Capture preparation, shutter, cancellation, registration, retake, discard,
+  reading completion, and navigation are phone controls.
+- HUD output remains black, green, static, and at most three lines.
+- The relay makes no camera request during analysis/review. The physical
+  indicator must still be observed independently.
 
-- **ユーザーが操作・閲覧するのは眼鏡だけ**。スマホ/PC はポケット・自宅側で通信と AI 処理を担う裏方。
-- 接続は CXR-M 伴走アプリ経由、または **CXR-L プラグイン（スマホの Hi Rokid 経由・Bluetooth）**のいずれでも可。サーバから見れば同じ HTTP 契約。
-- 実機ハードウェア（**両眼** 480×398 モノクロ緑 Micro-LED 等）と CXR-M/S/L の役割、
-  グラス本体 AI（`com.rokid.sprite.aiapp`）との接続は [cxr-l-integration.md](cxr-l-integration.md) を参照。
+`GET /v1/settings.operations` publishes `"phone"` for every supported action.
+`GET /v1/settings.input` retains a legacy/unverified KeyCode map only for
+diagnosis and explicitly publishes `operator_actions_enabled:false`.
 
-## 必須要件（外せない）
+A future glasses-side APK may define a separate input adapter only after its
+install/start path and input events pass the physical checklist on the exact
+recorded hardware/software tuple. That future result must not silently
+reactivate the legacy CUSTOMVIEW mapping.
 
-| 項目 | 規約 |
-|------|------|
-| **音** | HUD ペイロードは音の指示を出さない。物理シャッター音・capture indicator は device-controlled であり、アプリから抑止を保証しない。 |
-| **フラッシュ** | HUD の**白フラッシュ指示は禁止**。物理フラッシュは device-controlled、プライバシーLEDは不可侵であり、実機挙動は checklist で確認する。 |
-| **アニメーション** | 大きいアニメ禁止。テキスト切替は**フェード無しの即時置換**。 |
-| **点滅** | 強い点滅禁止。状態は点滅でなく**静的記号**（✓ / ! / ★）で表す。 |
-| **輝度** | 10段階調光の**低位**を既定に。 |
-| **行数** | HUD は**最大3行**。1 行の文字数はクライアント責務（表示目安 ~24字/行、サーバは切り詰めない）。長文は**ページ送り**（テレプロンプター式）。 |
-
-> サーバ側の担保:
-> - `glasses_view` ペイロードは `sound`/`flash`/`animation`/`blink` 等の指示フィールドを**持たず**、`lines` を**最大3行**に制限。
-> - `GET /v1/settings` の `hud` を**機械可読の描画契約**として公示：
->   `silent:true, white_flash:false, transition:"instant", brightness:"low", animations:false, blinking:false, max_lines:3`。
->   クライアントは起動時にこれを唯一の権威ソースとして読む。
-> - 撮影成功は `capture_ack`（HUD1行・`ttl_sec:2`）で通知し、サーバは音や白フラッシュの
->   render directive を出しません。これは HUD 表示だけの契約であり、物理シャッター音、
->   フラッシュ、capture indicator の代替・制御・保証ではありません。
-> - `GET /v1/settings` の `capture` は現行撮影経路を機械可読に公示します：
->   `mode:"photograph"`、`camera_path:"cxr-l/takePhoto"`、
->   `shutter_sound:"device_controlled"`、`flash:"device_controlled"`、
->   `capture_tone:"device_controlled"`。`hud.silent:true` と
->   `hud.white_flash:false` は server render directive であり、物理 cue を制御しません。
-> - リスニング録音の server contract は
->   `audio_record:{start_tone:false, stop_tone:false, silent:true}` です。これも撮影時の物理 cue
->   に対する保証ではありません。
-> - **privacy LED（プライバシーLED）は不可侵**：
->   `capture.privacy_led` は `state:"on_while_camera_active", tamper:"forbidden"` です。
->   アプリやサーバは LED を無効化・回避・隠蔽・誤表現しません。正確な点灯・消灯挙動は
->   対象ファームウェアで physical checklist を完了して確認します。
-> - `capture.led_off_during_review:true` は review 中にカメラを閉じるアプリ契約です。
->   実機での LED 遷移は checklist 完了まで確認済みと扱いません。物理音が出ないことや
->   物理フラッシュが作動しないことも、同じ実機確認を終えるまで報告しません。
-
-## 音声操作トグル（設定 ON/OFF）
-
-- セッション作成時 `voice_enabled`（既定 `false`）。
-  - `false`（既定・無音）: ウェイクワード無効。**物理ボタン＋タッチパッド**で操作。
-  - `true`: 「Hi Rokid」等の音声操作（公式の「常時リスニング」設定を利用）。
-- サーバは `glasses_view.nav.hint` の文言を `voice_enabled` で切替（音声時=「『次へ』と言う」／ボタン時=「タッチパッドで操作」）。
-
----
-
-## タッチパッド操作マッピング（公式ジェスチャ / KeyCode）
-
-> ジェスチャ名は**現行 Rokid Glasses の公式操作**（2本指タップ=AI起動 / 1本指タップ=クリック /
-> ダブルタップ=終了 / 2本指スワイプ上下=スクロール・左右=前後ページ / 長押し=録画⇄録音切替 /
-> 首振り=通話応答。スワイプ方向は Hi Rokid アプリでカスタム可）。サーバは gesture→KeyCode を
-> **`GET /v1/settings` の `input` ブロック**として機械可読に公示します
-> （`app/glasses_view.py` の `build_input_contract()`）。
->
-> ⚠️ **KeyCode 値は未検証**：下表の KeyCode は**旧・単眼 Rokid Glass 由来のレガシー表**で、
-> 現行の両眼 Rokid Glasses では**実測されていません**（API も `keycodes_verified:false`・
-> `keycode_source` で明示）。実機で `adb shell getevent -l` により計測し
-> （手順は [real-device-operation.md](real-device-operation.md) §5）、機種/ファーム差は
-> サーバ側の環境変数 **`ROKID_KEYMAP`（JSON）** で上書きしてください（クライアント改修不要）。
-
-| ユーザー操作（公式） | gesture 名 | Android KeyCode（旧機由来・未検証） | 本サーバの用途 |
-|---|---|---|---|
-| **2本指タップ**（AI 起動） | `two_finger_tap` | なし（システムジェスチャ・`keycode:null`） | **視認＝ページ読取**（本体 AI → `POST /pages`） |
-| **1本指タップ**（クリック） | `single_tap` | `KEYCODE_DPAD_CENTER = 23` | 表示・確認・段階送り（二次経路） |
-| **ダブルタップ**（終了） | `double_tap` | `KEYCODE_ENTER = 66` | **読取完了宣言**（読取中）／**閉じる**（閲覧中） |
-| **2本指スワイプ左/右**（前後ページ） | `two_finger_swipe_left/right` | `KEYCODE_DPAD_LEFT/RIGHT = 21/22` | **前後の問題**（閲覧）／前後ページ（二次経路） |
-| **2本指スワイプ上/下**（スクロール） | `two_finger_swipe_up/down` | `KEYCODE_DPAD_UP/DOWN = 19/20` | テレプロンプター送り/戻し |
-| **長押し**（録画⇄録音切替） | `long_press` | `KEYCODE_TV = 170` | **筆記 ⇄ リスニング切替・録音開始/停止**（フェーズ・モーダル） |
-| 戻る | `back` | `KEYCODE_BACK = 4` | 前の画面へ戻る |
-
-> `two_finger_tap`（AI 起動）は標準 KeyCode を持たないため `keycode:null` で公示します。
-> ファームが KeyEvent として配送する機種では `ROKID_KEYMAP` で割り当ててください。
-> **全操作がグラスのジェスチャに割当済みで、スマホは HTTP 中継のみ（画面不要）**。
-> ただし**文書作成・`/finalize`・exam セッション作成の 3 呼び出しはジェスチャ未割当**で、
-> 読取開始（初回 2本指タップ）／読取完了宣言（ダブルタップ）に連動して**中継アプリが
-> 自動発行**します（[cxr-l-integration.md](cxr-l-integration.md) §5）。ユーザーの入力が
-> ジェスチャのみで完結するのは、この中継責務まで実装されている前提です。
-
----
-
-## 操作セット一覧（モード別）
-
-### ページ照合モード（match）
-
-| 操作 | ジェスチャ | 音声ON時 |
-|------|-----------|----------|
-| 照合用フレーム取得（任意・画像経路） | クライアント実装に依存 | 「照合」 |
-| HUD 確認・閉じる | ダブルタップ | 「閉じる」 |
-
-### 解答モード（exam-sessions・3 フェーズフロー / 主経路 v1.8・LED 点灯最小）
-
-> **読取（カメラON・LED点灯・最短化）→ 一括解答（カメラOFF）→ 閲覧（カメラOFF・LED消灯）**。
-> 読取完了をダブルタップで宣言した瞬間からカメラは閉じ、以降は用紙も視認も不要。
-
-| フェーズ | 操作 | 公式ジェスチャ | operation 名 | サーバ側処理 |
-|----------|------|---------------|--------------|-------------|
-| 1 読取 | 読取開始（文書作成） | （初回 2本指タップに連動・中継が自動発行） | — | `POST /v1/documents`（`title` 必須。同じタップの認識は page_index=0 として続けて pages へ） |
-| 1 読取 | ページを視認＝読取 | **2本指タップ**（AI起動） | `capture_read` | 本体 AI → `POST /v1/documents/{id}/pages`（scan_ack） |
-| 1 読取 | **読取完了宣言** | **ダブルタップ** | `finish_reading` | 即カメラOFF → 中継の自動チェーン: `POST /v1/documents/{document_id}/finalize` → `POST /v1/exam-sessions`（`session_id` を取得）→ `POST /v1/exam-sessions/{session_id}/finalize-reading` |
-| 2 解答 | 筆記 ⇄ リスニング切替 | **長押し**（録画⇄録音） | `mode_toggle` | `POST /v1/exam-sessions/{id}/mode` |
-| 2 解答 | リスニング録音 開始/停止 | **長押し**（listening 中） | `record_toggle` | `POST /v1/exam-sessions/{id}/audio` |
-| 2 解答 | （自動）搭載 GPT が全問解答 | — | — | `POST /v1/exam-sessions/{id}/solutions`（ingest） |
-| 3 閲覧 | 次/前の問題 | **2本指スワイプ左/右** | `review_next_problem` / `review_prev_problem` | `GET …/review?index=k±1` |
-| 3 閲覧 | テキスト送り/戻し | **2本指スワイプ下/上** | `scroll_next` / `scroll_prev` | `GET …/review?view_page=n±1` |
-| 3 閲覧 | 閲覧を閉じる | **ダブルタップ** | `close` | — |
-
-- **ダブルタップはフェーズ・モーダル**：読取中=読取完了宣言／閲覧中=閉じる（公式の「終了」の転用。
-  実機 UX 検証待ちの割当として `OPERATION_CONTRACT` のコメントにも明記）。
-- **長押しもフェーズ・モーダル**：筆記中=リスニングへ切替／リスニング中=録音開始/停止
-  （公式の録画⇄音声録音トグルに合致）。
-- `exam_type`＝`written`(筆記) / `listening`(リスニング)、`answer_format`＝`mark`(マーク) / `written`(記述)。
-- 1 問題を開くと**解答＋解法＋根拠＋注意が一括 1 ストリーム**（段階なし）。3 行 HUD 制約は
-  テレプロンプター送り（2本指スワイプ上下）で送り読み。
-- これらの操作↔用途対応は `GET /v1/settings` の `operations` ブロック（`app/glasses_view.py` の
-  `OPERATION_CONTRACT`）としても公示。契約上の `finish_reading` が指すのは
-  `finalize-reading` のみ——同じダブルタップで先行する `/finalize`・セッション作成は
-  **中継アプリの自動チェーン責務**（契約外・クライアント実装）であり、意図的に
-  `OPERATION_CONTRACT` に載せていない。
-
-### 資料解説モード（explain-sessions）撮影なし設計
-
-> スキャンフェーズ（撮影）なし。セッション作成直後から解説可能（`status=ready`）。
-> ページナビゲーションはジェスチャ操作のみ。カメラ画像は一切送信しない。
-> （`POST /scan`・`POST /commit` は v1.7 で廃止済み。）
-
-| フェーズ | 操作 | 公式ジェスチャ | サーバ側処理 |
-|----------|------|---------------|-------------|
-| ready | 現在ページの解説表示 | 1本指タップ | `GET /explain` |
-| explaining | 次ページへ | 2本指スワイプ左 | `POST /next-page`（撮影なし） |
-| explaining | 前ページへ | 2本指スワイプ右 | `POST /prev-page`（撮影なし） |
-| explaining | 次テキストスライス | 2本指スワイプ下 | `GET /explain?view_page=N+1` |
-| explaining | 前テキストスライス | 2本指スワイプ上 | `GET /explain?view_page=N-1` |
-| explaining | 次解説段階（詳細へ） | 1本指タップ（解説表示中） | `GET /explain?stage=detail` |
-| explaining | 解説を閉じる | ダブルタップ | — |
-
-### 解答モード（exam-sessions・文書ページ移動型 / 二次経路・互換）
-
-> ページを移動して**現在ページを解く**従来経路（挙動不変で維持）。ページを視認しながら
-> 解くため、主経路（3 フェーズ）より LED 点灯時間が長くなります。
-
-| 操作 | 公式ジェスチャ | サーバ側処理 |
-|------|---------------|-------------|
-| 次/前ページへ | 2本指スワイプ左/右 | `POST /exam-sessions/{id}/next-page`・`/prev-page` |
-| 現在ページを解く | 1本指タップ | `POST /exam-sessions/{id}/solve-current` |
-| 次の解説段階 | 1本指タップ（解答表示中） | `GET …/questions/{qid}/view?stage=…` |
-| テキスト送り/戻し | 2本指スワイプ下/上 | `…/view?page=N±1`（テレプロンプター） |
-
-設問1枚型（`POST /questions` → `/solve` → `/view`）も同じジェスチャ体系で互換維持
-（取り込みは認識テキストのみで完結。画像は互換の任意入力・非推奨）。
-
----
-
-## HUD 表示の形（段階×ページ送り）
-
-### ページ照合モード
-
-```
-PAGE 2/5
-設計仕様書 v1
-conf 0.93  hd 3
-```
-
-### 資料解説モード
-
-セッション作成 / ページ移動後のナビ ACK（`ttl_sec:1.5` で自動消去）:
-
-```
-→ P02/5
-タップで解説
-```
-
-先頭ページで前へ操作したとき:
-
-```
-← P01/5
-先頭ページ
-タップで解説
-```
-
-解説 HUD（overview 段階）:
-
-```
-P01/5 ★★★
-（概要テキスト1行目）
-タップ 次段階 / 横スワイプ 次ページ
-```
-
-解説 HUD（detail 段階）:
-
-```
-P01/5 詳細
-（詳細テキスト1行目）
-タップ 次段階
-```
-
-解説 HUD（evidence 段階）:
-
-```
-P01/5 根拠
-参照: D1:P03, D2:P05
-タップ → 概要へ戻る
-```
-
-構造化 `evidence_refs` がある場合は `D{document_id}:P{page_number}`（1始まり）を表示します。
-旧保存行に bare `evidence_pages` しかない場合だけ、互換表示として保存値をそのまま `P##` にします。
-
-### 解答モード（3 フェーズ）
-
-読取フェーズ（各ページの scan_ack、2秒で消去）:
-
-```
-P02 読取済 ✓
-2/5ページ完了
-次ページへ            ← 全ページ完了時は「完了: ダブルタップ」
-```
-
-読取完了（finalize-reading の reading_ack。以降カメラOFF＝LED消灯）:
-
-```
-読取完了 5ページ
-4問を検出
-カメラOFF 解答へ
-```
-
-閲覧フェーズ（review デッキ・**一括 1 ストリーム**、`kind:"review"`）:
-
-```
-問2 2/4 ★★☆        ← 問題番号 デッキ位置 確信度
-答え: ③
-解法                 ← 続きは 2本指スワイプ下で送り読み
-```
-
-送り読みの続き（同じ問題の view_page=1 以降）:
-
-```
-本文の主題を把握する。
-根拠
-第2段落より。
-```
-
-- 1 問題＝**解答＋解法＋根拠＋注意を一括**（段階めくりなし）。空のセクションは省略。
-- 未解答の問題は「未解答 / 本体AIの解答待ち」のプレースホルダ（デッキ巡回は可能）。
-- 問題送り＝2本指スワイプ左右、送り読み＝2本指スワイプ上下、終了＝ダブルタップ。
-
-### 解答モード（二次経路・段階表示）
-
-```
-P02 問3 ★★★      ← answer: ページ/設問 + 確信度記号
-答え: B
-解答欄: 下右       ← 方向ヒント（紙への固定描画はしない）
-```
-
-- 既定段階は `answer`（まず答え）。`solution → rationale → caution` をタップ/音声で遷移。
-- 長い解答全文は `page` 送りでグラス内スクロール。
-- 一致度・読取信頼度が低いときは断定せず「近づけて再読取」を表示。
-
----
-
-## 安全（不正利用防止）
-
-- セッション `mode` ∈ `study | mock | real`。**`real` は既定でロック**（`ROKID_ALLOW_REAL_EXAM_SOLVE=1` が無い限り解答非表示）。
-- 学習・模試・研究用途のための機能です。本番試験での使用は不正行為になり得ます。
+See `docs/cxr-l-integration.md`, `docs/real-device-operation.md`, and
+`docs/device-verification-checklist.md` for the current behavior.

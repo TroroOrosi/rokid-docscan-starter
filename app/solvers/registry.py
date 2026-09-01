@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 
+from .. import config
 from ..llm import ADAPTER_PROVIDERS
 from ..provider_registry import ProviderRegistry
 from .base import Solver
@@ -43,7 +44,7 @@ def _select_name(prefer: str | None) -> str:
 
 def get_solver(prefer: str | None = None) -> Solver:
     """Return a solver by routing rules, falling back to the local one."""
-    return _registry.get(prefer)
+    return config.require_real_provider("solver", _registry.get(prefer))
 
 
 def _tier_names(tiers: list[str] | None) -> list[str]:
@@ -59,7 +60,7 @@ def _tier_names(tiers: list[str] | None) -> list[str]:
             if env
             else [_select_name(None)]
         )
-    if DEFAULT_SOLVER not in names:
+    if not config.REAL_MODE and DEFAULT_SOLVER not in names:
         names.append(DEFAULT_SOLVER)
     return names
 
@@ -108,6 +109,12 @@ def solve_with_fallback(
                 result.extras["fallback_from"] = skipped
             return result, solver
         skipped.append(f"{name}:empty")
+
+    if config.REAL_MODE:
+        raise RuntimeError(
+            "ROKID_REAL_MODE=1: every configured real solver tier failed; "
+            "placeholder fallback is disabled"
+        )
 
     # Nothing acceptable; return the last result (the local default never
     # returns an empty answer, so this is effectively the placeholder).

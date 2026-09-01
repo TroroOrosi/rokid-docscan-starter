@@ -236,3 +236,31 @@ def test_adapters_fall_back_when_sdk_missing(monkeypatch):
     # extractor -> local placeholder, no raise
     r = xt.LLMExtractor(name="openai", provider="openai").extract(ocr_text="2x=4", kind="math")
     assert r.kind == "math"
+
+
+def test_unconfigured_cloud_adapters_report_that_they_cannot_run(monkeypatch):
+    """Selected is not the same as will-run.
+
+    Both LLM adapters fall back to the offline placeholder when no credential
+    is present, and they do it silently. A pre-flight has to be able to tell
+    the two apart before a page is photographed.
+    """
+    for key in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GOOGLE_API_KEY"):
+        monkeypatch.delenv(key, raising=False)
+
+    assert ClaudeAnalyzer().info()["ready"] is False
+    assert ClaudeSolver().info()["ready"] is False
+
+
+def test_configured_cloud_adapters_report_that_they_can_run():
+    analyzer = LLMAnalyzer(client=_client('{"text": "t", "summary": "s"}'))
+    solver = LLMSolver(client=_client('{"answer": "a", "confidence": 0.5}'))
+
+    assert analyzer.info()["ready"] is True
+    assert solver.info()["ready"] is True
+
+
+def test_offline_adapters_are_always_ready():
+    from app.analyzers.local_placeholder import LocalPlaceholderAnalyzer
+
+    assert LocalPlaceholderAnalyzer().info()["ready"] is True

@@ -25,6 +25,7 @@ final class CaptureReviewStore {
         final String ocrText;
         final int rotationDegrees;
         final String ocrFailure;
+        final PageFraming framing;
 
         Pending(
                 int pageIndex,
@@ -33,11 +34,23 @@ final class CaptureReviewStore {
                 int rotationDegrees,
                 String ocrFailure
         ) {
+            this(pageIndex, jpeg, ocrText, rotationDegrees, ocrFailure, null);
+        }
+
+        Pending(
+                int pageIndex,
+                byte[] jpeg,
+                String ocrText,
+                int rotationDegrees,
+                String ocrFailure,
+                PageFraming framing
+        ) {
             this.pageIndex = pageIndex;
             this.jpeg = jpeg;
             this.ocrText = ocrText == null ? "" : ocrText;
             this.rotationDegrees = rotationDegrees;
             this.ocrFailure = ocrFailure == null ? "" : ocrFailure;
+            this.framing = framing == null ? PageFraming.UNKNOWN : framing;
         }
 
         int ocrCharacters() {
@@ -46,6 +59,11 @@ final class CaptureReviewStore {
 
         boolean hasOcrFailure() {
             return !ocrFailure.isEmpty();
+        }
+
+        /** True when the framing check says the page ran outside the frame. */
+        boolean isFramingFailing() {
+            return framing.isFailing();
         }
     }
 

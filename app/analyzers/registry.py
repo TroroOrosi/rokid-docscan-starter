@@ -12,6 +12,7 @@ working.
 
 from __future__ import annotations
 
+from .. import config
 from ..llm import ADAPTER_PROVIDERS
 from ..provider_registry import ProviderRegistry
 from .base import Analyzer
@@ -38,7 +39,7 @@ def list_analyzers() -> list[dict]:
 
 def get_analyzer(prefer: str | None = None) -> Analyzer:
     """Return an analyzer by routing rules, falling back to the local one."""
-    return _registry.get(prefer)
+    return config.require_real_provider("analyzer", _registry.get(prefer))
 
 
 # Register the offline default at import time so the server always has one.

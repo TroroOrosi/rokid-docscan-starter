@@ -23,8 +23,12 @@ MPEG = AudioFormat(
     ".mp3",
     (".mp3", ".mpeg", ".mpga"),
 )
-OGG = AudioFormat("audio/ogg", "audio.ogg", ".ogg", (".ogg",))
-FLAC = AudioFormat("audio/flac", "audio.flac", ".flac", (".flac",))
+OGG = AudioFormat(
+    "audio/ogg", "audio.ogg", ".ogg", (".ogg",), openai_supported=False
+)
+FLAC = AudioFormat(
+    "audio/flac", "audio.flac", ".flac", (".flac",), openai_supported=False
+)
 AAC = AudioFormat(
     "audio/aac",
     "audio.aac",

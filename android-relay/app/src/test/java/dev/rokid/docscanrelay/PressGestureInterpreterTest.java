@@ -1,7 +1,9 @@
 package dev.rokid.docscanrelay;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertTrue;
 
 import org.junit.Test;
 
@@ -172,5 +174,152 @@ public class PressGestureInterpreterTest {
         assertEquals(
                 PressGestureInterpreter.Action.SHORT,
                 interpreter.flush(2500));
+    }
+
+    @Test
+    public void aiExitEchoingOurOwnViewOperationIsNotATap() {
+        PressGestureInterpreter interpreter = new PressGestureInterpreter(1200, 350);
+
+        interpreter.onGlassesViewOperation(1000);
+        assertNull(interpreter.onAiExit(1051));
+        assertNull(interpreter.flush(3000));
+    }
+
+    @Test
+    public void aiExitLongAfterTheLastViewOperationIsATap() {
+        PressGestureInterpreter interpreter = new PressGestureInterpreter(1200, 350);
+
+        interpreter.onGlassesViewOperation(1000);
+        assertEquals(
+                PressGestureInterpreter.Action.SHORT,
+                interpreter.onAiExit(24700));
+    }
+
+    @Test
+    public void aiExitWithoutAnyViewOperationIsATap() {
+        PressGestureInterpreter interpreter = new PressGestureInterpreter(1200, 350);
+
+        assertEquals(
+                PressGestureInterpreter.Action.SHORT,
+                interpreter.onAiExit(100));
+    }
+
+    @Test
+    public void repeatedAiExitFromOneTapDispatchesOneAction() {
+        PressGestureInterpreter interpreter = new PressGestureInterpreter(1200, 350);
+
+        assertEquals(
+                PressGestureInterpreter.Action.SHORT,
+                interpreter.onAiExit(1000));
+        assertNull(interpreter.onAiExit(1100));
+        assertEquals(
+                PressGestureInterpreter.Action.SHORT,
+                interpreter.onAiExit(1400));
+    }
+
+    @Test
+    public void aiExitClosingAnActiveAssistIsNotATap() {
+        PressGestureInterpreter interpreter = new PressGestureInterpreter(1200, 350);
+
+        assertEquals(
+                PressGestureInterpreter.Action.LONG,
+                interpreter.onAiAssistStart(100));
+        assertNull(interpreter.onAiExit(400));
+    }
+
+    @Test
+    public void aiExitBeforeThePushedViewOpensIsNotATap() {
+        PressGestureInterpreter interpreter = new PressGestureInterpreter(1200, 350);
+
+        // Measured on hardware: a push at 00:41:00.828 reached the glasses only
+        // at 00:41:01.723 and echoed at 00:41:02.203, so the echo can trail the
+        // push by well over a second. Its open callback had not arrived yet.
+        interpreter.onGlassesViewOperation(1000);
+        assertNull(interpreter.onAiExit(2375));
+    }
+
+    @Test
+    public void aiExitAfterThePushedViewOpensIsATap() {
+        PressGestureInterpreter interpreter = new PressGestureInterpreter(1200, 350);
+
+        interpreter.onGlassesViewOperation(1000);
+        interpreter.onGlassesViewOpened(1500);
+        assertEquals(
+                PressGestureInterpreter.Action.SHORT,
+                interpreter.onAiExit(1600));
+    }
+
+    @Test
+    public void aViewThatNeverOpensCannotSuppressTapsForever() {
+        PressGestureInterpreter interpreter = new PressGestureInterpreter(1200, 350);
+
+        interpreter.onGlassesViewOperation(1000);
+        assertEquals(
+                PressGestureInterpreter.Action.SHORT,
+                interpreter.onAiExit(4500));
+    }
+
+    @Test
+    public void theCloseHalfOfAViewSwapAlsoSuppressesItsEcho() {
+        PressGestureInterpreter interpreter = new PressGestureInterpreter(1200, 350);
+
+        // A swap closes before it reopens, and the glasses echo the close. The
+        // relay must arm the suppression before the close Binder call, because
+        // the echo can arrive while the reopen is still in flight. Arming only
+        // after the reopen let that echo through as a tap, which fired the
+        // shutter as soon as AIMING appeared.
+        interpreter.onGlassesViewOperation(1000);
+        interpreter.onGlassesViewOperation(1040);
+        assertNull(interpreter.onAiExit(1200));
+        assertNull(interpreter.flush(1600));
+    }
+
+    @Test
+    public void reArmingDuringASwapDoesNotOutlastTheCap() {
+        PressGestureInterpreter interpreter = new PressGestureInterpreter(1200, 350);
+
+        interpreter.onGlassesViewOperation(1000);
+        interpreter.onGlassesViewOperation(1040);
+        assertEquals(
+                PressGestureInterpreter.Action.SHORT,
+                interpreter.onAiExit(4100));
+    }
+
+    @Test
+    public void anExitEchoingOurOwnViewPushIsIdentifiedAsAnEcho() {
+        // Measured on hardware: the recovery timer fired on the echo of its own
+        // restore, restored again, and drove the CustomView through a
+        // close/open every 0.7s -- the glasses visibly blinked and the
+        // acknowledged generation fell ~30 pushes behind. The caller must be
+        // able to tell an echo from a real exit, because "action == null" also
+        // covers an assist close and a debounced second tap.
+        PressGestureInterpreter interpreter = new PressGestureInterpreter(1200, 350);
+        interpreter.onGlassesViewOperation(1_000);
+
+        assertNull(interpreter.onAiExit(1_050));
+
+        assertTrue(interpreter.lastAiExitWasViewEcho());
+    }
+
+    @Test
+    public void aUserTapIsNotIdentifiedAsAnEcho() {
+        PressGestureInterpreter interpreter = new PressGestureInterpreter(1200, 350);
+
+        assertEquals(PressGestureInterpreter.Action.SHORT, interpreter.onAiExit(1_000));
+
+        assertFalse(interpreter.lastAiExitWasViewEcho());
+    }
+
+    @Test
+    public void anEchoStopsBeingAnEchoOnceTheViewIsAcknowledgedOpen() {
+        // Echoes trail their push by 1ms to 1375ms, so the pending open, not a
+        // timeout, is what ends the window.
+        PressGestureInterpreter interpreter = new PressGestureInterpreter(1200, 350);
+        interpreter.onGlassesViewOperation(1_000);
+        interpreter.onGlassesViewOpened(1_100);
+
+        assertEquals(PressGestureInterpreter.Action.SHORT, interpreter.onAiExit(1_150));
+
+        assertFalse(interpreter.lastAiExitWasViewEcho());
     }
 }

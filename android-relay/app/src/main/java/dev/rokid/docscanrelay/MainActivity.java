@@ -7,17 +7,21 @@ import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Color;
+import android.graphics.Insets;
 import android.graphics.Matrix;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
 import android.text.InputType;
+import android.util.Log;
 import android.view.Gravity;
 import android.view.View;
+import android.view.WindowInsets;
 import android.view.WindowManager;
 import android.widget.Button;
 import android.widget.EditText;
+import android.widget.FrameLayout;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
@@ -35,12 +39,16 @@ import java.util.concurrent.atomic.AtomicLong;
 /** Setup/status screen. Once connected, normal operation is driven by glasses. */
 public final class MainActivity extends Activity
         implements RokidGlobalLink.Listener, DocScanController.Listener {
+    private static final String TAG = "DocScanRokid";
     private static final int AUTH_REQUEST = 4027;
     private static final int PERMISSION_REQUEST = 4028;
     private static final long LEGACY_LONG_PRESS_MILLIS = 1200;
     private static final long INPUT_EVENT_DEBOUNCE_MILLIS = 350;
     private static final long SYSTEM_MENU_RECOVERY_DELAY_MILLIS = 650;
     private static final String PREF_ROTATION_INDEX = "rotation_index";
+    private static final String GLASS_PROBE_PACKAGE = "dev.rokid.docscanglass";
+    private static final String GLASS_PROBE_ACTIVITY =
+            "dev.rokid.docscanglass.TapProbeActivity";
 
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private final PressGestureInterpreter pressInterpreter =
@@ -69,11 +77,16 @@ public final class MainActivity extends Activity
     private EditText serverUrl;
     private EditText apiKey;
     private Spinner rotation;
+    private EditText photoWidth;
+    private EditText photoHeight;
+    private EditText photoQuality;
+    private EditText glassAppPackage;
     private TextView status;
     private TextView log;
     private ImageView capturePreview;
     private TextView capturePreviewMessage;
     private LinearLayout captureReviewActions;
+    private Button autoCaptureButton;
     private Button confirmCaptureButton;
     private Button retakeCaptureButton;
     private Button discardCaptureButton;
@@ -99,15 +112,17 @@ public final class MainActivity extends Activity
         root.setPadding(pad, pad, pad, pad);
 
         TextView title = new TextView(this);
-        title.setText("Rokid DocScan Relay");
+        title.setText(RelayBuildLabel.title(BuildConfig.VERSION_NAME, BuildConfig.VERSION_CODE));
         title.setTextSize(24);
         title.setTextColor(Color.BLACK);
         root.addView(title, matchWrap());
 
         TextView description = new TextView(this);
         description.setText(
-                "撮影準備後、グラスを長押しして1.5秒後にシャッターを切ります。"
-                        + "撮影後はタップ=撮り直し準備、長押し=登録です。");
+                "操作はスマホの明示ボタンで行います。撮影準備、シャッター、取消、"
+                        + "登録、撮り直し、読取完了、レビュー移動をグラスのcallbackから"
+                        + "推定しません。撮影確認後にこの画面で登録または撮り直しを"
+                        + "選ぶまで、写真はサーバーへ送信されません。");
         description.setTextSize(14);
         root.addView(description, matchWrap());
 
@@ -135,6 +150,57 @@ public final class MainActivity extends Activity
                 .getInt(PREF_ROTATION_INDEX, 1));
         root.addView(rotation, matchWrap());
 
+        // The usable capture size is firmware-dependent and has to be probed on
+        // the device; keeping it editable here means a sweep costs a button
+        // press instead of a reinstall and a fresh Hi Rokid authorization.
+        PhotoCaptureSettings initial = controller.captureSettings();
+        photoWidth = numberField("幅", initial.width);
+        photoHeight = numberField("高さ", initial.height);
+        photoQuality = numberField("品質", initial.quality);
+        LinearLayout captureSettingsRow = horizontalRow();
+        captureSettingsRow.addView(photoWidth, weighted());
+        captureSettingsRow.addView(photoHeight, weighted());
+        captureSettingsRow.addView(photoQuality, weighted());
+        root.addView(captureSettingsRow, matchWrap());
+
+        LinearLayout captureSettingsActions = horizontalRow();
+        captureSettingsActions.addView(
+                button("撮影設定を適用", ignored -> applyCaptureSettings()), weighted());
+        captureSettingsActions.addView(
+                button("次のプリセット", ignored -> applyNextCapturePreset()), weighted());
+        root.addView(captureSettingsActions, matchWrap());
+
+        // Phase 0 of the glasses-app question. IMediaStreamService has
+        // declared queryGlassAppInstalled since client-l 1.0.1, but the relay
+        // has never called it and no firmware has answered it. The package is
+        // editable because a hardware session is expensive: trying another one
+        // must cost a button press, not a rebuild and a fresh authorization.
+        // com.android.settings is the default because YodaOS-Sprite is Android
+        // 12, so a true answer means the query really reached the glasses.
+        glassAppPackage = new EditText(this);
+        glassAppPackage.setHint("グラス側パッケージ名");
+        glassAppPackage.setSingleLine(true);
+        glassAppPackage.setText("com.android.settings");
+        LinearLayout glassAppRow = horizontalRow();
+        glassAppRow.addView(glassAppPackage, weighted());
+        glassAppRow.addView(
+                button("グラス側アプリ調査", ignored -> probeGlassApp()), weighted());
+        root.addView(glassAppRow, matchWrap());
+
+        // Phase 1. Phase 0 established that the query is implemented and asks
+        // the glasses rather than the phone; these two calls put an app on the
+        // glasses and start it, which is the only way to learn whether operator
+        // input reaches an app that is not a CUSTOMVIEW overlay.
+        LinearLayout glassAppActions = horizontalRow();
+        glassAppActions.addView(
+                button("計測アプリ名", ignored -> glassAppPackage.setText(GLASS_PROBE_PACKAGE)),
+                weighted());
+        glassAppActions.addView(
+                button("グラスへ導入", ignored -> installGlassApp()), weighted());
+        glassAppActions.addView(
+                button("グラスで起動", ignored -> openGlassApp()), weighted());
+        root.addView(glassAppActions, matchWrap());
+
         LinearLayout connectRow = horizontalRow();
         connectRow.addView(button("サーバ確認", ignored -> configureAndVerify()), weighted());
         connectRow.addView(
@@ -150,6 +216,16 @@ public final class MainActivity extends Activity
                         ignored -> controller.recapturePreviousPage()),
                 weighted());
         captureRow.addView(button("読取完了", ignored -> controller.finishReading()), weighted());
+
+        // Phone controls are authoritative. CUSTOMVIEW/AI callbacks are only
+        // lifecycle diagnostics because they lack trustworthy provenance.
+        LinearLayout shutterRow = horizontalRow();
+        shutterRow.addView(
+                button("シャッター", ignored -> controller.triggerArmedCapture()),
+                weighted());
+        shutterRow.addView(
+                button("撮影取消", ignored -> controller.cancelAiming()), weighted());
+        root.addView(shutterRow, matchWrap());
         root.addView(captureRow, matchWrap());
 
         LinearLayout reviewRow = horizontalRow();
@@ -161,7 +237,8 @@ public final class MainActivity extends Activity
         TextView captureGuide = new TextView(this);
         captureGuide.setText(
                 "固定焦点・ライブ映像なし: 用紙を40〜60cm離し、中心を＋へ合わせます。"
-                        + "長押し後は1.5秒静止し、撮影後に四隅と文字の輪郭を確認してください。");
+                        + "スマホのシャッター後は確認画面が出るまで静止し（実測で約5秒）、"
+                        + "撮影後に四隅と文字の輪郭を確認してください。");
         captureGuide.setTextSize(14);
         captureGuide.setPadding(0, dp(8), 0, dp(8));
         root.addView(captureGuide, matchWrap());
@@ -207,9 +284,136 @@ public final class MainActivity extends Activity
         log.setTextIsSelectable(true);
         ScrollView scroll = new ScrollView(this);
         scroll.addView(log, matchWrap());
+        // A fixed height instead of a weight: inside the outer page scroller
+        // there is no leftover space to weight against, and on the F-51F the
+        // weighted log collapsed to zero height as soon as the capture preview
+        // became visible, taking the status line off-screen with it.
         root.addView(scroll, new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
-        return root;
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(180)));
+
+        // targetSdk 36 means Android 15+ forces edge-to-edge, so the status
+        // bar covers the title and the navigation bar covers the capture
+        // review buttons unless the insets are applied here. The page also has
+        // to scroll: with the preview shown the content is taller than the
+        // screen, and a clipped status line leaves the operator no feedback.
+        ScrollView page = new ScrollView(this);
+        page.setFillViewport(true);
+        page.addView(root, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT));
+        page.setOnApplyWindowInsetsListener((view, insets) -> {
+            Insets bars = insets.getInsets(WindowInsets.Type.systemBars());
+            view.setPadding(bars.left, bars.top, bars.right, bars.bottom);
+            return insets;
+        });
+        return page;
+    }
+
+    private EditText numberField(String hint, int value) {
+        EditText field = new EditText(this);
+        field.setHint(hint);
+        field.setSingleLine(true);
+        field.setInputType(InputType.TYPE_CLASS_NUMBER);
+        field.setText(String.valueOf(value));
+        return field;
+    }
+
+    private void applyCaptureSettings() {
+        PhotoCaptureSettings settings;
+        try {
+            settings = PhotoCaptureSettings.parse(
+                    photoWidth.getText().toString(),
+                    photoHeight.getText().toString(),
+                    photoQuality.getText().toString());
+        } catch (IllegalArgumentException error) {
+            showError(error.getMessage());
+            return;
+        }
+        applyCaptureSettings(settings);
+    }
+
+    private void probeGlassApp() {
+        String packageName = glassAppPackage.getText().toString().trim();
+        if (packageName.isEmpty()) {
+            showError("調査するグラス側パッケージ名を入力してください");
+            return;
+        }
+        appendLog("グラス側アプリ調査 " + packageName);
+        link.probeGlassApp(packageName);
+        // Nothing else reports the outcome this probe exists to catch: Hi
+        // Rokid accepting the transaction and never calling back.
+        glassAppPackage.postDelayed(
+                link::reportGlassAppProbe,
+                RokidGlobalLink.GLASS_APP_PROBE_TIMEOUT_MILLIS + 200);
+    }
+
+    /**
+     * Uploads the tap-probe APK to the glasses.
+     *
+     * <p>The APK is not bundled: it is pushed with {@code adb push} into this
+     * app's external files directory, so a throwaway probe never ships inside a
+     * relay build. Everything checkable about the file is checked before the
+     * call, because {@code uploadAndInstallApk} answers with one boolean and a
+     * truncated push would otherwise look like the firmware refusing the route.
+     */
+    private void installGlassApp() {
+        String packageName = glassAppPackage.getText().toString().trim();
+        if (packageName.isEmpty()) {
+            showError("導入するグラス側パッケージ名を入力してください");
+            return;
+        }
+        GlassAppApkSource apk = GlassAppApkSource.resolve(getExternalFilesDir(null));
+        appendLog(apk.summary());
+        if (!apk.usable()) {
+            showError(apk.problem());
+            return;
+        }
+        appendLog("グラスへ導入 " + packageName);
+        link.installGlassApp(packageName, apk.file());
+        // Hi Rokid may accept the transaction and never call back; nothing else
+        // would ever report that.
+        glassAppPackage.postDelayed(
+                link::reportGlassAppInstall,
+                RokidGlobalLink.GLASS_APP_INSTALL_TIMEOUT_MILLIS + 200);
+    }
+
+    private void openGlassApp() {
+        String packageName = glassAppPackage.getText().toString().trim();
+        if (packageName.isEmpty()) {
+            showError("起動するグラス側パッケージ名を入力してください");
+            return;
+        }
+        String activityName = packageName.equals(GLASS_PROBE_PACKAGE)
+                ? GLASS_PROBE_ACTIVITY
+                : packageName + ".MainActivity";
+        appendLog("グラスで起動 " + packageName + "/" + activityName);
+        link.openGlassApp(packageName, activityName);
+        glassAppPackage.postDelayed(
+                link::reportGlassAppOpen,
+                RokidGlobalLink.GLASS_APP_OPEN_TIMEOUT_MILLIS + 200);
+    }
+
+    private void applyNextCapturePreset() {
+        applyCaptureSettings(
+                PhotoCaptureSettings.nextPreset(controller.captureSettings()));
+    }
+
+    private void applyCaptureSettings(PhotoCaptureSettings settings) {
+        try {
+            controller.applyCaptureSettings(settings);
+        } catch (IllegalStateException error) {
+            showError(error.getMessage());
+            return;
+        }
+        showCaptureSettings(settings);
+        appendLog("撮影設定 " + settings.describe());
+        Toast.makeText(this, "撮影設定 " + settings.describe(), Toast.LENGTH_SHORT).show();
+    }
+
+    private void showCaptureSettings(PhotoCaptureSettings settings) {
+        photoWidth.setText(String.valueOf(settings.width));
+        photoHeight.setText(String.valueOf(settings.height));
+        photoQuality.setText(String.valueOf(settings.quality));
     }
 
     private void configureAndVerify() {
@@ -314,7 +518,9 @@ public final class MainActivity extends Activity
 
     @Override
     public void onLinkConnected(boolean connected) {
-        runOnUiThread(() -> appendLog("Hi Rokid service connected=" + connected));
+        String identity = link.serviceIdentity();
+        runOnUiThread(() -> appendLog(
+                "Hi Rokid service connected=" + connected + " " + identity));
     }
 
     @Override
@@ -329,15 +535,9 @@ public final class MainActivity extends Activity
 
     @Override
     public void onAiPressDown() {
-        PressGestureInterpreter.Action action =
-                pressInterpreter.onAiAssistStart(SystemClock.elapsedRealtime());
+        pressInterpreter.onAiAssistStart(SystemClock.elapsedRealtime());
         runOnUiThread(() -> appendLog(
-                action == null
-                        ? "Glasses input source=AI-assist-start (duplicate ignored)"
-                        : "Glasses input source=AI-assist-start -> LONG"));
-        if (action != null) {
-            dispatchGesture(action);
-        }
+                "Glasses AI-assist-start lifecycle observed; no operator action inferred"));
     }
 
     @Override
@@ -348,22 +548,51 @@ public final class MainActivity extends Activity
 
     @Override
     public void onAiExit() {
-        pressInterpreter.onAiAssistExit(SystemClock.elapsedRealtime());
+        PressGestureInterpreter.Action action =
+                pressInterpreter.onAiExit(SystemClock.elapsedRealtime());
         mainHandler.removeCallbacks(systemMenuRecovery);
-        mainHandler.postDelayed(
-                systemMenuRecovery,
-                SYSTEM_MENU_RECOVERY_DELAY_MILLIS);
+        // Never arm recovery on our own echo. An echo proves the push reached
+        // the glasses, which is the opposite of the operator having left for
+        // the system menu, and arming it here made every restore schedule the
+        // next one: the view blinked at 0.7s and the acknowledged generation
+        // fell ~30 pushes behind. Echoes trail their push by 1ms to 1375ms, so
+        // no recovery delay can separate the two -- only the echo flag can.
+        if (!pressInterpreter.lastAiExitWasViewEcho()) {
+            mainHandler.postDelayed(
+                    systemMenuRecovery,
+                    SYSTEM_MENU_RECOVERY_DELAY_MILLIS);
+        }
         runOnUiThread(() -> appendLog(
-                "Glasses AI-exit observed; DocScan view recovery scheduled"));
+                "Glasses AI-exit lifecycle observed"
+                        + (pressInterpreter.lastAiExitWasViewEcho()
+                        ? " (view-push echo)" : "")
+                        + "; no operator action inferred"
+                        + (action == null ? "" : " (legacy classification=" + action + ")")));
+    }
+
+    @Override
+    public void onGlassesViewPushed() {
+        pressInterpreter.onGlassesViewOperation(SystemClock.elapsedRealtime());
+    }
+
+    @Override
+    public void onGlassAppReport(String summary) {
+        runOnUiThread(() -> appendLog(summary));
     }
 
     @Override
     public void onCustomViewClosedByUser() {
-        dispatchDiscreteGlassesAction("user CustomView close");
+        RelayState closedIn = controller == null ? null : controller.getState();
+        mainHandler.removeCallbacks(systemMenuRecovery);
+        mainHandler.postDelayed(systemMenuRecovery, SYSTEM_MENU_RECOVERY_DELAY_MILLIS);
+        runOnUiThread(() -> appendLog(
+                "CustomView close in state " + closedIn
+                        + " is lifecycle-only; re-presenting without changing state"));
     }
 
     @Override
     public void onCustomViewAvailable(long generation, String purpose) {
+        pressInterpreter.onGlassesViewOpened(SystemClock.elapsedRealtime());
         mainHandler.removeCallbacks(systemMenuRecovery);
         controller.onCustomViewAvailable(generation, purpose);
         runOnUiThread(() -> appendLog(
@@ -385,30 +614,6 @@ public final class MainActivity extends Activity
                 "Glasses DocScan view failed generation=" + generation
                         + " purpose=" + purpose
                         + ": " + message));
-    }
-
-    private void dispatchDiscreteGlassesAction(String source) {
-        PressGestureInterpreter.Action immediate =
-                pressInterpreter.onCustomViewExit(SystemClock.elapsedRealtime());
-        runOnUiThread(() -> appendLog(
-                "Glasses input source=" + source
-                        + (immediate == null ? " (SHORT pending/coalesced)" : " -> " + immediate)));
-        if (immediate != null) {
-            dispatchGesture(immediate);
-            return;
-        }
-        mainHandler.postDelayed(() -> {
-            PressGestureInterpreter.Action delayed =
-                    pressInterpreter.flush(SystemClock.elapsedRealtime());
-            if (delayed != null) {
-                appendLog("Glasses input -> " + delayed);
-                dispatchGesture(delayed);
-            }
-        }, LEGACY_LONG_PRESS_MILLIS + INPUT_EVENT_DEBOUNCE_MILLIS + 20);
-    }
-
-    private void dispatchGesture(PressGestureInterpreter.Action action) {
-        controller.onGlassesGesture(action);
     }
 
     @Override
@@ -466,10 +671,18 @@ public final class MainActivity extends Activity
                     if (pending.hasOcrFailure()) {
                         warning += " OCR処理エラーも発生しました。";
                     }
+                    // The framing verdict is what the operator cannot judge
+                    // from the glasses, so it leads the message and names the
+                    // recommended action outright.
+                    String verdict = pending.isFramingFailing()
+                            ? "判定: 不合格 — " + pending.framing.describe()
+                                    + "。撮り直しを推奨します。"
+                            : "判定: " + pending.framing.describe() + "。";
                     capturePreviewMessage.setText(
                             "P" + (pending.pageIndex + 1) + "（まだ未登録）— "
-                                    + warning
-                                    + "\n用紙の四隅と文字の輪郭を確認し、登録か撮り直しを選んでください。");
+                                    + verdict + " " + warning
+                                    + "\n自動登録はしません。用紙の四隅と文字の輪郭を確認し、"
+                                    + "スマホで登録、撮り直し、または破棄を選んでください。");
                     capturePreview.setVisibility(bitmap == null ? View.GONE : View.VISIBLE);
                     capturePreviewMessage.setVisibility(View.VISIBLE);
                     captureReviewActions.setVisibility(View.VISIBLE);
@@ -483,6 +696,26 @@ public final class MainActivity extends Activity
         } catch (RejectedExecutionException ignored) {
             // The activity is already closing.
         }
+    }
+
+    private void toggleAutoCapture() {
+        if (controller.isAutoCaptureEnabled()) {
+            controller.stopAutoCapture();
+        } else {
+            controller.startAutoCapture();
+        }
+    }
+
+    @Override
+    public void onAutoCaptureChanged(boolean running) {
+        runOnUiThread(() -> {
+            if (autoCaptureButton != null) {
+                autoCaptureButton.setText(running ? "自動読取 停止" : "自動読取 開始");
+            }
+            appendLog(running
+                    ? "Automatic reading started"
+                    : "Automatic reading stopped");
+        });
     }
 
     @Override
@@ -543,6 +776,10 @@ public final class MainActivity extends Activity
     }
 
     private void appendLog(String message) {
+        // Mirrored to logcat so a real-device run leaves a trace that survives
+        // the activity. Only the structural diagnostics reach this method; HUD
+        // lines carrying page content go to the status view and stay there.
+        Log.i(TAG, message);
         String current = log.getText().toString();
         log.setText(current + (current.isEmpty() ? "" : "\n") + message);
     }

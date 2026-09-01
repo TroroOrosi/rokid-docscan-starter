@@ -90,8 +90,8 @@ public final class HudLayout {
                 + "│      ＋      │\n"
                 + "└──────────────┘";
         String instruction = stabilizing
-                ? "シャッター受付\n1.5秒そのまま静止"
-                : "40〜60cm / 用紙の中心を＋へ\n静止して長押し・四隅は撮影後確認";
+                ? "シャッター受付\n確認画面まで静止（約5秒）"
+                : "40〜60cm / 用紙の中心を＋へ\nシャッターはスマホ・四隅は撮影後確認";
         return "{"
                 + "\"type\":\"LinearLayout\","
                 + "\"props\":{"

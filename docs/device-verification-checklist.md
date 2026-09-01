@@ -1,236 +1,114 @@
-# Rokid DocScan 実機検証チェックリスト
+# Rokid DocScan real-device verification checklist
 
-対象は Windows PC + Android スマホ + Global Hi Rokid + Rokid Glasses の構成です。
-導入は [windows-android-real-device-setup.md](windows-android-real-device-setup.md)、
-接続面は [cxr-l-integration.md](cxr-l-integration.md) を参照してください。
+Status: Current acceptance form. Updated 2026-09-01.
 
-ビルド成功は実機合格を意味しません。Hi Rokid/YodaOS更新後は、このチェックリストを
-再実施します。
+A build is not hardware verification. Complete every applicable item on the
+exact version tuple; otherwise report “build verified, device verification
+pending.”
 
-## 0. 検証記録
+## Evidence record
 
-| 項目 | 記録 |
+| Item | Recorded value |
 |---|---|
-| 実施日時 | |
-| スマホ機種 / Android version / API | |
+| Date/time and tester | |
+| Phone model / Android / API | |
 | Global Hi Rokid version / versionCode | |
-| Rokid Glasses model | |
-| YodaOS build | |
-| APK commit SHA / client version（期待値 `0.2.0`） | |
-| サーバー commit SHA / APP・API version | |
-| Glasses View contract（期待値 `1.8.0`） | |
-| Analyzer / model | |
-| Solver / model | |
-| PC IPv4 / network profile | |
+| Glasses model / YodaOS build | |
+| CXR-L service version / versionCode | |
+| APK version / SHA-256 / signing fingerprint | |
+| Server commit / APP / API version | |
+| Glasses View contract | |
+| Analyzer / model / readiness | |
+| Solver / model / readiness | |
+| Capture width / height / quality / rotation | |
+| PC LAN address / network profile | |
 
-APIキー、Bearer値、Hi Rokid認可トークンは記録しません。
+Never record credentials, authorization tokens, page content, or provider
+request/response bodies.
 
-## A. ビルドと導入
+## Static and build gates
 
-- [ ] JDK 17、Android SDK Platform 36、ADBをWindowsへ導入した。
-- [ ] `android-relay\gradlew.bat testDebugUnitTest assembleDebug` が成功した。
-- [ ] `adb install -r ...\app-debug.apk` が成功した。
-- [ ] スマホへGlobal版Hi Rokidが入り、ログイン済みである。
-- [ ] Hi Rokid上でグラスがBluetooth接続済みである。
+- [ ] `py -3.12 -m pytest -q` passes.
+- [ ] `ruff check .` passes.
+- [ ] JDK 17, Android SDK Platform 36, and Android build tools are selected.
+- [ ] The Android checkout/build path contains ASCII characters only.
+- [ ] `gradlew.bat testDebugUnitTest assembleDebug` passes in that checkout.
+- [ ] The APK version and checksum above match the installed artifact.
+- [ ] The supported relay/runtime has no import or UI/API/intent route to the
+      quarantined indicator experiment.
 
-## B. サーバーとネットワーク
+## Server and network gates
 
-- [ ] サーバーを `--host 0.0.0.0 --port 8000` で起動した。
-- [ ] `ROKID_API_KEY` と画像対応 `ROKID_ANALYZER` / `ROKID_SOLVER` を設定した。
-- [ ] スマホのブラウザで `http://PC-IP:8000/health` が開く。
-- [ ] Relayの「サーバ確認」が成功する。
-- [ ] 誤ったBearer値では保護APIが401になる。
-- [ ] WindowsネットワークはPrivateで、公衆Wi-Fi/インターネットへ8000番を公開していない。
+- [ ] Server runs with `ROKID_REAL_MODE=1` and a non-empty API key.
+- [ ] `/health` is reachable from the PC and phone on the intended private LAN.
+- [ ] `/v1/settings` reports the intended analyzer and solver ready and
+      `offline=false`; a placeholder causes startup/request failure.
+- [ ] An incorrect bearer token returns 401.
+- [ ] Port 8000 is not exposed to a public network or the internet.
 
-## C. Global Hi Rokid / AIDL
+## Hi Rokid and lifecycle gates
 
-- [ ] Relayの「Hi Rokid認可・再接続」から認可画面が開く。
-- [ ] 未確認アプリ確認が出た場合、内容を確認して許可した。
-- [ ] `IMediaStreamService` bind後に接続状態がtrueになる。
-- [ ] 必須callbackの登録が1つでも失敗した場合、接続済み表示にならず撮影できない。
-- [ ] サービス切断時にRelayとHUDが未接続表示へ戻る。
-- [ ] 再認可・再接続で復帰する。
+- [ ] Authorization succeeds and the required CXR-L callbacks all register.
+- [ ] A registration failure prevents capture.
+- [ ] CUSTOMVIEW open acknowledgement is recorded before stabilization starts.
+- [ ] Close, `AI-exit`, and AI key callbacks never invoke capture, cancellation,
+      registration, finalization, or navigation.
+- [ ] A CUSTOMVIEW ACK error/timeout prevents `takePhoto` and requires a new
+      callback epoch.
+- [ ] Service disconnect returns the relay to disconnected state.
+- [ ] The phone activity remains awake and callbacks continue during a session.
 
-必要なら次を記録します。
+## Capture and data gates
 
-```powershell
-adb shell dumpsys package com.rokid.sprite.global.aiapp |
-  Select-String "AUTHORIZATION|MEDIA_STREAM_SERVICE"
-adb logcat -v threadtime -s DocScanRokid:*
-```
+- [ ] Phone capture preparation shows `AIMING` with zero photo requests.
+- [ ] One phone shutter action produces exactly one photo request after the
+      acknowledged stabilization view/delay.
+- [ ] Phone cancellation before the request produces zero photo requests.
+- [ ] A non-empty image callback produces a correctly oriented phone/glasses
+      preview and OCR result.
+- [ ] Register, retake, and discard are explicit phone actions.
+- [ ] Registration success advances the page; failure does not.
+- [ ] Re-upload of the same `(document_id, page_index)` replaces the page.
+- [ ] The server stores an orientation-corrected normalized PNG and does not
+      claim a separately retained raw JPEG archive.
+- [ ] Analyzer-derived text is persisted before segmentation.
+- [ ] The solver receives the originating page image when image capable.
+- [ ] A photo with no usable text and no image-capable analyzer fails clearly.
+- [ ] Photo timeout/disconnect blocks another request until a new binding epoch;
+      a late callback is discarded and cannot complete a newer request.
 
-## D. グラス入力
+## Physical indicator and device-controlled cues
 
-公開CXR-Lで受信できるuser CustomView closeと`AI-assist-start`を確認します。
-専用シャッターボタンの入力イベントや全タッチジェスチャは前提にしません。
+Use an independent camera with the indicator continuously in frame. Record
+timestamps later from the video; application logs alone do not pass this gate.
 
-- [ ] `READING` で最初のユーザータップによりCustomViewが閉じると、スマホログに
-  `source=user CustomView close` が残り、`AIMING` の照準が表示される。
-- [ ] 最初のタップ後は `takePhoto` が0回のままで、自動撮影されない。
-- [ ] `AIMING` の短押しまたは2回短押しは準備を取り消して戻り、`takePhoto`を発行しない。
-- [ ] `AIMING` で照準を確認した後の長押しだけが1.5秒静止待ちを開始する。
-- [ ] 現在世代の静止案内open callbackより前は1.5秒timerを開始せず、open errorまたは
-  3秒のACK timeoutでは`takePhoto`を0回のまま準備を取り消し、そのcallback epochを
-  fenceする。
-- [ ] ACK fault/timeout後は新しいCustomViewを要求せず、「Hi Rokid認可・再接続」を
-  完了した後の新しいcallback epochでだけ再開する。
-- [ ] 1.5秒待ちの間も `takePhoto` は0回で、満了後に
-  `takePhoto(1920, 1080, 80)` が1回だけ発行される。
-- [ ] `STABILIZING`中は短押し、2回短押し、長押しのどれでも静止待ちを取り消し、
-  旧timer満了後も`takePhoto`は0回である。
-- [ ] リレー自身がHUD更新のために行うclose + openは確認済みcallback世代内で識別され、
-  ユーザータップとして処理されない。
-- [ ] 同じ物理操作由来のuser CustomView closeと`AI-assist-start`が近接配送されても
-  debounceされ、撮影・登録・読取完了が重複しない。
-- [ ] 同じCustomView世代のclose callbackが重複しても、入力は1回だけ処理される。
-- [ ] ダブルタップで標準メニューへ戻り`AI-exit`が届くと、現在のDocScan画面が
-  自動再表示される。メニュー遷移のcloseは入力として破棄され、復帰だけでは
-  `takePhoto`、写真登録、読取完了を発行しない。
-- [ ] 通常のCustomView openに伴う`AI-exit`は後続open callbackで復帰予約を取り消し、
-  close + openを余分に繰り返さない。
-- [ ] 復帰timerとopen callbackが競合しても、remote CustomViewがopenなら新しい世代を
-  要求せず現在表示を維持する。
-- [ ] `CAPTURE_REVIEW` の短押しまたは2回短押しは同じ `page_index` の `AIMING` を
-  表示するだけで、
-  その場では `takePhoto` を発行しない。
-- [ ] 同ページ再撮影準備後の長押しで、1.5秒待ち後に `takePhoto` が1回だけ発行される。
-- [ ] `CAPTURE_REVIEW` のタッチパッド長押しが
-  `source=AI-assist-start -> LONG` と記録され、未登録写真を1回だけ登録する。
-- [ ] 登録成功後にpending削除を失敗させても、再起動後に同じJPEGが未登録写真として
-  復活しない。
-- [ ] `READING` の長押しで読取完了へ進む。
-- [ ] `REVIEW` のタップで次へ移動し、長押しで終了して新規文書へ戻る。
-- [ ] ファームウェアが2回の入力を`DOUBLE_SHORT`としてアプリへ配送する場合だけ、
-  読取中は前ページ再撮影準備、
-  撮影確認中は同ページ再撮影準備、閲覧中は前へ移動し、意図しない撮影をしない。
-- [ ] 専用シャッターボタンを押してもイベントを受信できるとは案内しない。
-- [ ] スマホ画面に「この写真を登録」「同じページを撮り直す」
-  「未登録写真を破棄」のフォールバック操作が表示され、それぞれ実行できる。
+- [ ] Indicator is visibly off for at least five seconds before capture.
+- [ ] Indicator is visibly lit while the camera is active.
+- [ ] Indicator turns off after the image callback.
+- [ ] Indicator remains off through OCR, upload, analysis, and answer review.
+- [ ] Successful capture is repeated at least three times.
+- [ ] Cancellation before `takePhoto` never lights the indicator.
+- [ ] Timeout/disconnect is treated as unknown, not as proof of indicator-off.
+- [ ] Actual shutter sound, flash, and capture-indicator behavior is recorded
+      for this firmware without claiming application control.
 
-## E. 写真とOCR
+## HUD and recovery
 
-- [ ] 短押し→長押しの二段階操作と1.5秒静止待ちを経た
-  `takePhoto(1920, 1080, 80)` がtrueを返す。
-- [ ] callback到着前の連続操作で2件目の`takePhoto`が発行されない。
-- [ ] `onImageReceived` のJPEGが0バイトでない。
-- [ ] 撮影後は `CAPTURE_REVIEW` になり、写真が「未登録」と表示される。
-- [ ] 初回撮影前に文書自体は作成されるが、未登録の間は対象 `page_index` が
-  `/scan-status.page_indexes` に増えず、次ページ番号も変化しない。
-- [ ] 長押しまたは「この写真を登録」で登録成功した後にだけ
-  `/scan-status.pages[n].has_image` がtrueになる。
-- [ ] 登録通信が失敗した場合は未登録写真を保持し、対象ページと次ページ番号を
-  進めず再試行できる。
-- [ ] 用紙の問題番号、本文、選択肢が端末OCRへ入る。
-- [ ] 写真回転の初期値が、検証済み実機に合わせた90°である。
-- [ ] スマホで0/90/180/270°を選び「同じページを撮り直す」と、選択した回転が
-  次の再撮影とOCRに適用され、現在の未登録写真自体は変更されない。
-- [ ] 用紙まで40〜60cm離し、用紙中心を照準の「＋」へ合わせ、`AIMING`の長押し後1.5秒から
-  callbackまで静止して撮影できる。
-- [ ] 撮影後プレビューで用紙の四隅、文字の輪郭、ブレを確認できる。
-- [ ] ブレや欠けがある未登録写真は、撮影確認中の短押しまたは2回短押しで
-  同ページ再撮影を準備し、照準確認後の長押しで撮り直せる。
-- [ ] 端末OCRが0文字なら警告され、自動登録されない。
-- [ ] OCRが0文字でも、警告を確認して明示登録すると元写真が保存される。
-- [ ] 「未登録写真を破棄」でサーバーへ送信せず、同じ次ページ番号の読取へ戻る。
-- [ ] 画像対応Analyzerが空OCRを回復できる。
-- [ ] Analyzer未設定かつOCR空の場合、`finalize-reading` 後も読取状態を保つ。
-- [ ] 同じページ番号を再撮影すると置換され、再度読取完了できる。
-- [ ] 写真callbackを30秒以上返さない試験では、再撮影・読取完了・新規文書が拒否される。
-- [ ] タイムアウト後の遅延画像はアップロードされず、callback受信後に再撮影可能になる。
-- [ ] callbackが来ない場合、実際のCXR-L service unbind/rebind後にだけ撮影ブロックが解除される。
-- [ ] 同じservice bind中のグラス切断→接続通知だけでは撮影ブロックが解除されない。
-- [ ] `takePhoto` のBinder応答だけを失敗させた場合、受理不明として直ちに撮影ブロックされる。
-- [ ] 再接続後、旧bindから遅延配送した画像callbackが新しい撮影を完了せず、
-  旧JPEGもアップロードされない。
+- [ ] HUD is black, green, and at most three lines.
+- [ ] A redraw does not turn a lifecycle callback into an operator action.
+- [ ] Registered-page state resumes from `/scan-status` after reconnect.
+- [ ] App restart/reconnect does not automatically take or register a photo.
+- [ ] No sensitive content appears in logs.
 
-カメラは固定焦点です。Rokid公称の被写界深度は34cm〜∞ですが、34cmは限界値のため
-40〜60cmを運用目安にします。公開CXR-Lにライブプレビュー、AF制御、合焦状態はなく、
-照準の「＋」もディスプレイFOVとカメラFOVが異なるため正確な撮影境界ではありません。
-構図と四隅は撮影後プレビューで判定します。`takePhoto(4032, 3024, 80)` は実機でJPEG
-callbackがBinder上限を超え、callbackなしになった既知NGです。通常試験では使用しません。
+## Result
 
-撮影ガードとcallback epochを再現性高く調べる場合は、debug APKへAndroid Studioの
-デバッガをattachし、`RokidGlobalLink.CallbackSet.onImageReceived` の
-`dispatchCallback` 呼び出し行へ、Suspendを **Thread** にしたbreakpointを置きます。
-ガード値を見る場合は、`RokidGlobalLink.glassesStatusChanged` /
-`serviceBindingReset` と、`DocScanController.onCaptureLinkStateChanged` 内の
-`event.resetCaptureIfSafe` の直後にもbreakpointを置きます。撮影callbackをそのBinder
-threadだけで停止したまま、次を確認します。
-
-1. Hi Rokid上でグラスだけを切断・再接続する。Logcatは
-   `event=GLASSES_STATUS_CHANGED` を示し、`photoInFlight` と
-   `CaptureLease.isUnresolved()` はどちらもtrueのままである。
-2. Relayの「Hi Rokid認可・再接続」を押す。Logcatは
-   `event=SERVICE_BINDING_RESET` を示し、両ガードがfalseへ戻る。
-3. 停止中の旧callbackをresumeする。Logcatに
-   `ignored stale image callback epoch=...` が出て、旧JPEGがアップロードされない。
-
-全threadを停止すると再接続操作も止まるため、breakpointのSuspendは必ずThreadにします。
-
-写真には個人情報や試験資料が含まれる可能性があります。保存・クラウド送信の同意と
-削除方針を運用前に決めます。
-
-## F. 文書確定・解答
-
-- [ ] ページ番号が0から連続している。
-- [ ] 長押し後に `/finalize` → session作成 → `/finalize-reading` が完了する。
-- [ ] Analyzer由来 `ocr_text` / `vision_text` がページへ保存される。
-- [ ] 問題が1件以上に分割される。
-- [ ] Solverへ各問題の開始ページ `image_path` が渡る。
-- [ ] Provider失敗時にプレースホルダー結果を解答済みとして保存しない。
-- [ ] `mode=real` は許可フラグなしでロックされる。
-
-## G. HUD
-
-- [ ] 黒背景・緑文字で表示される。
-- [ ] 1レスポンスあたり最大3行である。
-- [ ] `customViewUpdate`だけに依存せず、close + openで更新される。
-- [ ] 撮影後の縮小プレビューが正しい向きでスマホとグラスのCustomViewへ表示される。
-- [ ] `AIMING` の「＋」が用紙中心合わせの目安として表示され、正確な撮影境界や
-  合焦表示とは案内されない。
-- [ ] 撮影前ライブ映像とAF/合焦状態を表示可能とは案内せず、CXR-L非対応として扱う。
-- [ ] 長文は次の表示へ送れる。
-- [ ] 日本語、記号、引用符、改行がJSON破損せず表示される。
-- [ ] HUD更新で白背景フレームをアプリが生成しない。
-
-## H. プライバシーLEDと撮影通知
-
-別の人または別カメラで物理確認し、動画と時刻を残します。
-
-- [ ] 撮影要求中にプライバシーLEDが点灯する。
-- [ ] 写真callback完了後にLEDが消灯する。
-- [ ] OCR/アップロード/Analyzer/Solver処理中に追加撮影が起きず、LEDが消灯している。
-- [ ] 解答閲覧中もLEDが消灯したままである。
-- [ ] アプリがLEDを無効化・迂回・偽装していない。
-- [ ] 撮影タイムアウトをLED消灯とみなさず、接続復旧まで追加撮影しない。
-- [ ] シャッター音、フラッシュ、撮影表示の実挙動を当該ファームで記録した。
-
-「無音」「無フラッシュ」は公開SDKで制御済みと仮定しません。
-
-## I. 中断復帰と連続運用
-
-- [ ] 2ページ目以降でアプリを中断し、再認可後に次ページ番号から再開する。
-- [ ] `CAPTURE_REVIEW` 中にアプリを終了・再起動すると、同じ未登録写真、OCR文字数、
-  `page_index`、回転が復元され、自動登録されない。
-- [ ] 再起動や再接続だけでは `takePhoto` が発行されず、自動撮影されない。
-- [ ] `/finalize` 後・session作成前の中断から自動復帰する。
-- [ ] session作成後・`finalize-reading`前の中断から自動復帰する。
-- [ ] 同じ長押しが二重配送されても文書/問題/課金呼び出しが重複しない。
-- [ ] Relay表示中はスマホがスリープせず、複数ページの写真callbackが継続する。
-- [ ] Wi-Fi一時切断後、エラーがスマホとHUDに表示され、再操作で復旧できる。
-
-## 合格判定
-
-| 領域 | 合否 | 証跡 |
+| Area | Pass / fail / N/A | Evidence reference |
 |---|---|---|
-| Android build / unit test | | |
-| Hi Rokid auth / AIDL | | |
-| グラス入力 / event source | | |
-| 写真 / OCR | | |
-| Analyzer / Solver | | |
-| HUD | | |
-| LED / 撮影通知 | | |
-| 中断復帰 | | |
+| Server tests and real mode | | |
+| Android tests and APK | | |
+| Hi Rokid connection/lifecycle | | |
+| Capture/OCR/data persistence | | |
+| Physical indicator/cues | | |
+| HUD/recovery | | |
 
-未実施項目が一つでもある場合は「実機検証済み」ではなく「ビルド済み・実機検証待ち」と
-記録します。
+Any failed or unperformed applicable item blocks “real-device verified.”

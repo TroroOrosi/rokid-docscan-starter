@@ -1,5 +1,8 @@
 # Refactor Implementation Instructions
 
+Status: Superseded planning snapshot. Do not execute without revalidating each
+item against current code and `docs/README.md`.
+
 ## Objective
 
 この文書は、`rokid-docscan-starter` の既存仕様を変えずに、確認済みの技術的負債だけを小さく解消するための実装指示書である。

@@ -19,12 +19,14 @@ import java.security.NoSuchAlgorithmException;
 /** Atomically persists one unregistered capture across activity/process restarts. */
 final class CaptureReviewPersistence {
     private static final int MAGIC = 0x44534350; // DSCP
-    private static final int VERSION = 1;
+    /** 2 added the framing verdict; 1 records are still read, without one. */
+    private static final int VERSION = 2;
     private static final int COMMIT_MAGIC = 0x44534343; // DSCC
     private static final int COMMIT_VERSION = 1;
     private static final int SHA_256_BYTES = 32;
     private static final int MAX_TEXT_BYTES = 4 * 1024 * 1024;
     private static final int MAX_FAILURE_BYTES = 64 * 1024;
+    private static final int MAX_FRAMING_BYTES = 256;
     private static final int MAX_JPEG_BYTES = 8 * 1024 * 1024;
 
     private final File file;
@@ -57,6 +59,9 @@ final class CaptureReviewPersistence {
             data.writeInt(pending.rotationDegrees);
             writeBytes(data, pending.ocrText.getBytes(StandardCharsets.UTF_8));
             writeBytes(data, pending.ocrFailure.getBytes(StandardCharsets.UTF_8));
+            writeBytes(
+                    data,
+                    pending.framing.toToken().getBytes(StandardCharsets.UTF_8));
             writeBytes(data, pending.jpeg);
             data.flush();
             output.getFD().sync();
@@ -93,7 +98,13 @@ final class CaptureReviewPersistence {
         CaptureReviewStore.Pending pending;
         try (DataInputStream data = new DataInputStream(
                 new BufferedInputStream(new FileInputStream(file)))) {
-            if (data.readInt() != MAGIC || data.readInt() != VERSION) {
+            if (data.readInt() != MAGIC) {
+                throw new IOException("unsupported pending capture format");
+            }
+            // Version 1 predates the framing check. Its photo is still valid
+            // and must survive the upgrade; it simply carries no verdict.
+            int recordVersion = data.readInt();
+            if (recordVersion != VERSION && recordVersion != 1) {
                 throw new IOException("unsupported pending capture format");
             }
             int pageIndex = data.readInt();
@@ -108,12 +119,17 @@ final class CaptureReviewPersistence {
                     readBytes(data, MAX_TEXT_BYTES), StandardCharsets.UTF_8);
             String ocrFailure = new String(
                     readBytes(data, MAX_FAILURE_BYTES), StandardCharsets.UTF_8);
+            PageFraming framing = recordVersion == 1
+                    ? PageFraming.UNKNOWN
+                    : PageFraming.fromToken(new String(
+                            readBytes(data, MAX_FRAMING_BYTES),
+                            StandardCharsets.UTF_8));
             byte[] jpeg = readBytes(data, MAX_JPEG_BYTES);
             if (jpeg.length == 0 || data.read() != -1) {
                 throw new IOException("invalid pending capture payload");
             }
             pending = new CaptureReviewStore.Pending(
-                    pageIndex, jpeg, ocrText, rotationDegrees, ocrFailure);
+                    pageIndex, jpeg, ocrText, rotationDegrees, ocrFailure, framing);
         } catch (IOException | RuntimeException invalid) {
             try {
                 clear();

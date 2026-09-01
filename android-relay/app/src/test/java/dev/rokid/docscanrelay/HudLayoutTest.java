@@ -24,13 +24,14 @@ public class HudLayoutTest {
     public void captureReviewUsesAPresentIconAndSafeGlassesActions() {
         String json = HudLayout.fromCaptureReview(
                 "docscan_preview",
-                List.of("P2 未登録 / OCR 0文字", "タップ: 撮り直し準備", "長押し: 登録"));
+                List.of("P2 未登録 / OCR 0文字", "確認と操作はスマホ", "登録はスマホのボタン"));
 
         assertTrue(json.contains("\"type\":\"ImageView\""));
         assertTrue(json.contains("\"name\":\"docscan_preview\""));
         assertTrue(json.contains("\"scaleType\":\"fit_center\""));
-        assertTrue(json.contains("タップ: 撮り直し準備"));
-        assertTrue(json.contains("長押し: 登録"));
+        assertTrue(json.contains("確認と操作はスマホ"));
+        assertFalse(json.contains("タップ"));
+        assertTrue(json.contains("登録はスマホのボタン"));
     }
 
     @Test
@@ -40,7 +41,8 @@ public class HudLayoutTest {
         assertTrue(json.contains("P2を撮り直し"));
         assertTrue(json.contains("40〜60cm"));
         assertTrue(json.contains("四隅"));
-        assertTrue(json.contains("静止して長押し"));
+        assertTrue(json.contains("シャッターはスマホ"));
+        assertFalse(json.contains("タップ"));
         assertTrue(json.contains("＋"));
     }
 }
