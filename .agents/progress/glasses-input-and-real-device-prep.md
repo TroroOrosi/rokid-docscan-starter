@@ -381,3 +381,55 @@ relay version/signature before updating it, and configure a real analyzer and
 solver without printing credentials. A capture run additionally requires a
 second observer/camera to record the physical indicator during `takePhoto`,
 after callback, and throughout analysis/review.
+
+## Checkpoint — 2026-09-01 read-only phone inventory
+
+Branch `agent/real-device-test-prep`, HEAD `2f3179e`. At 20:12 JST, wireless
+debugging enumerated exactly one device. The network serial is intentionally
+omitted from this record; every device-specific command used the explicit
+serial.
+
+### Sanitized inventory evidence
+
+- Phone: FCNT F-51F, Android 16 / API 36, build
+  `W1VHS36H.80-34-2-2-1-5`, security patch `2026-07-01`.
+- Global Hi Rokid: `com.rokid.sprite.global.aiapp`, versionName
+  `G1.12.10.0815`, versionCode `10120010`, signing scheme v3; its process was
+  running.
+- Installed relay: `dev.rokid.docscanrelay`, versionName `0.3.15`, versionCode
+  `20`, SHA-256
+  `BD13F5A1EF21849EEE7CF2C2B9499B332E157CC3503387177FDD0DA8F22BB83B`;
+  its process was not running.
+- Verified update candidate:
+  `C:\Users\Public\rokid-docscan-build-current-20260901a\android-relay\app\build\outputs\apk\debug\app-debug.apk`,
+  versionName `0.3.16`, versionCode `21`, SHA-256
+  `C96BF67F51CC64BA0F581ABF97D09E73B9272243376DA2F2FBBB3D31F7E16A52`.
+- Installed and candidate signer SHA-256 is identical:
+  `906307478018E09E2937CFD8042A674D27598767577E08A304472AAE407CCACC`.
+  The update is signature-compatible and versionCode increases from 20 to 21.
+- A stale APK under `C:\Users\Public\rokid-docscan-build` is byte-identical to
+  installed `0.3.15`; it is not the update candidate and must not be installed.
+- No install, app launch, photo request, or phone setting change occurred during
+  this inventory. The relay was not running, so the glasses connection and
+  CXR-L service version were not re-observed; both remain Task 6 evidence.
+
+The sanitized sequence enumerated devices; read system properties, package
+metadata, package paths, and process presence with an explicit serial; copied
+the installed base APK read-only to a temporary local directory; and compared
+local hashes, package metadata, and signing certificates. No credentials,
+tokens, page contents, OCR, or provider payloads were read or recorded.
+
+Checkpoint verification: `git diff --check` passes. Four focused documentation
+contract tests pass. The full documentation-contract module has one known
+environmental failure: its repository-wide Markdown scan sees 57 untracked
+generated OpenSpec/Spec Kit skill, command, and template files as unclassified.
+The same audit found zero unclassified tracked Markdown files. Those pre-existing
+untracked tool assets were not deleted, moved, indexed, staged, or modified.
+
+### Safe resume point
+
+Task 5 is complete. Before Task 6 capture validation, confirm the external
+camera/observer setup and fail-closed real-mode server configuration. Install
+only the verified `0.3.16` candidate above, then re-observe Hi Rokid
+authorization, glasses link, CXR-L service version, and CUSTOMVIEW acknowledgement
+before any phone-controlled photo request.

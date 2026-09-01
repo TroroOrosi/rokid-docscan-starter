@@ -46,9 +46,9 @@
 
 ## Task 5: Read-only phone inventory
 
-- [ ] Enumerate devices and require exactly one explicit serial.
-- [ ] Record phone, Hi Rokid, existing relay, and connection state without secrets.
-- [ ] Stop on version/signature/no-device/multiple-device conflicts.
+- [x] Enumerate devices and require exactly one explicit serial.
+- [x] Record phone, Hi Rokid, existing relay, and connection state without secrets.
+- [x] Stop on version/signature/no-device/multiple-device conflicts.
 - Verify: sanitized command transcript.
 
 ## Task 6: Controlled device validation
