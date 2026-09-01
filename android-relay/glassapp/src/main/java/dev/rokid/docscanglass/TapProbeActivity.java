@@ -1,10 +1,14 @@
 package dev.rokid.docscanglass;
 
 import android.app.Activity;
+import android.content.BroadcastReceiver;
 import android.content.Context;
+import android.content.Intent;
+import android.content.IntentFilter;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.SystemClock;
 import android.util.Log;
@@ -13,6 +17,11 @@ import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.WindowManager;
+
+import dev.rokid.docscanglass.input.GlassKeyEvents;
+import dev.rokid.docscanglass.input.InputCalibrationLog;
+import dev.rokid.docscanglass.input.InputSignal;
+import dev.rokid.docscanglass.input.OfficialKeyBroadcasts;
 
 import java.util.List;
 import java.util.Locale;
@@ -27,10 +36,10 @@ import java.util.Locale;
  * {@code userInitiated=true} close was the glasses dismissing the view on a
  * ~30 s timer. That is a property of the overlay. This app is not an overlay.
  *
- * <p>The verdict is drawn on the glasses display because nothing can carry it
- * off the device: the glasses expose no documented adb, and no CXR-S to CXR-L
- * message channel is documented. Log output is written anyway, since it costs
- * one line and becomes readable if a shell is ever available.
+ * <p>The verdict is drawn on the glasses display and written to a content-free
+ * diagnostic log. The calibration observes both the official custom-app key
+ * broadcasts and Activity key events without assigning either path to a
+ * document workflow action.
  *
  * <p>Both the touch path and the key path are recorded. The working reference
  * implementation handles the same gesture on either, which suggests the
@@ -42,14 +51,29 @@ public final class TapProbeActivity extends Activity {
 
     private static final String TAG = "DocScanGlass";
     private static final int VISIBLE_EVENTS = 6;
+    private static final int VISIBLE_CALIBRATION_EVENTS = 3;
     private static final float SWIPE_MIN_DISTANCE_DP = 40f;
     private static final float SWIPE_DOMINANCE = 1.3f;
 
     private final TapLog log = new TapLog(VISIBLE_EVENTS);
+    private final InputCalibrationLog calibration =
+            new InputCalibrationLog(VISIBLE_EVENTS);
+    private final BroadcastReceiver officialKeyReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            String action = intent.getAction();
+            if (action == null) {
+                return;
+            }
+            recordCalibration(InputSignal.broadcast(
+                    elapsed(), action, OfficialKeyBroadcasts.isOfficial(action)));
+        }
+    };
 
     private ProbeView view;
     private GestureDetector gestures;
     private long startedAtMillis;
+    private boolean officialKeyReceiverRegistered;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -91,6 +115,7 @@ public final class TapProbeActivity extends Activity {
 
         view = new ProbeView(this);
         setContentView(view);
+        registerOfficialKeyReceiver();
         Log.i(TAG, "tap probe started");
     }
 
@@ -114,8 +139,46 @@ public final class TapProbeActivity extends Activity {
 
     @Override
     public boolean onKeyDown(int keyCode, KeyEvent event) {
-        log.recordKey(elapsed(), "DOWN", KeyEvent.keyCodeToString(keyCode));
+        String keyName = KeyEvent.keyCodeToString(keyCode);
+        long eventElapsed = elapsed();
+        log.recordKey(eventElapsed, "DOWN", keyName);
+        recordCalibration(InputSignal.key(
+                eventElapsed, "DOWN", keyName, GlassKeyEvents.isKnown(keyName)));
         report("key down");
+        return consumeProbeKey(keyCode) || super.onKeyDown(keyCode, event);
+    }
+
+    @Override
+    public boolean onKeyUp(int keyCode, KeyEvent event) {
+        String keyName = KeyEvent.keyCodeToString(keyCode);
+        recordCalibration(InputSignal.key(
+                elapsed(), "UP", keyName, GlassKeyEvents.isKnown(keyName)));
+        return consumeProbeKey(keyCode) || super.onKeyUp(keyCode, event);
+    }
+
+    @Override
+    protected void onDestroy() {
+        if (officialKeyReceiverRegistered) {
+            unregisterReceiver(officialKeyReceiver);
+            officialKeyReceiverRegistered = false;
+        }
+        super.onDestroy();
+    }
+
+    private void registerOfficialKeyReceiver() {
+        IntentFilter filter = new IntentFilter();
+        for (String action : OfficialKeyBroadcasts.actions()) {
+            filter.addAction(action);
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(officialKeyReceiver, filter, Context.RECEIVER_EXPORTED);
+        } else {
+            registerReceiver(officialKeyReceiver, filter);
+        }
+        officialKeyReceiverRegistered = true;
+    }
+
+    private boolean consumeProbeKey(int keyCode) {
         switch (keyCode) {
             case KeyEvent.KEYCODE_DPAD_CENTER:
             case KeyEvent.KEYCODE_ENTER:
@@ -126,7 +189,15 @@ public final class TapProbeActivity extends Activity {
                 return true;
             default:
                 // BACK included: consuming it would leave no way off this screen.
-                return super.onKeyDown(keyCode, event);
+                return false;
+        }
+    }
+
+    private void recordCalibration(InputSignal signal) {
+        calibration.record(signal);
+        Log.i(TAG, "input " + calibration.lines().get(0));
+        if (view != null) {
+            view.invalidate();
         }
     }
 
@@ -192,7 +263,20 @@ public final class TapProbeActivity extends Activity {
                     paint);
 
             List<String> lines = log.lines();
+            int shown = 0;
             for (String line : lines) {
+                if (shown++ >= VISIBLE_CALIBRATION_EVENTS) {
+                    break;
+                }
+                y += rowHeight;
+                canvas.drawText(line, left, y, paint);
+            }
+
+            shown = 0;
+            for (String line : calibration.lines()) {
+                if (shown++ >= VISIBLE_CALIBRATION_EVENTS) {
+                    break;
+                }
                 y += rowHeight;
                 canvas.drawText(line, left, y, paint);
             }

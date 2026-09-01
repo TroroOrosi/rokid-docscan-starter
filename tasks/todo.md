@@ -80,21 +80,21 @@ triggering an operation.
 
 **Acceptance criteria:**
 
-- [ ] Every official action named by the accepted spec is registered
+- [x] Every official action named by the accepted spec is registered
       dynamically and represented by an allow-listed signal type.
-- [ ] KeyEvent down/up and broadcast observations use one monotonic timeline and
+- [x] KeyEvent down/up and broadcast observations use one monotonic timeline and
       log no content, credentials, tokens, images, or OCR.
-- [ ] Unknown actions/keys are observable but produce no normalized action or
+- [x] Unknown actions/keys are observable but produce no normalized action or
       side effect.
 
 **Verification:**
 
-- [ ] Failing tests are added first for the official action catalog, event
+- [x] Failing tests are added first for the official action catalog, event
       ordering, and unknown-event behavior.
-- [ ] `gradle --no-daemon -p android-relay :glassapp:testDebugUnitTest`
+- [x] `gradle --no-daemon -p android-relay :glassapp:testDebugUnitTest`
       passes.
-- [ ] `gradle --no-daemon -p android-relay :glassapp:assembleDebug` passes.
-- [ ] On the explicit glasses serial, a controlled gesture sequence records the
+- [x] `gradle --no-daemon -p android-relay :glassapp:assembleDebug` passes.
+- [x] On the explicit glasses serial, a controlled gesture sequence records the
       raw device event, broadcast (if any), and Activity KeyEvent with exact
       timing and the APK/firmware tuple.
 
@@ -105,17 +105,18 @@ triggering an operation.
 - `android-relay/glassapp/src/main/java/dev/rokid/docscanglass/input/InputSignal.java`
 - `android-relay/glassapp/src/main/java/dev/rokid/docscanglass/input/OfficialKeyBroadcasts.java`
 - `android-relay/glassapp/src/main/java/dev/rokid/docscanglass/input/InputCalibrationLog.java`
+- `android-relay/glassapp/src/main/java/dev/rokid/docscanglass/input/GlassKeyEvents.java`
 - `android-relay/glassapp/src/main/java/dev/rokid/docscanglass/TapProbeActivity.java`
 - `android-relay/glassapp/src/test/java/dev/rokid/docscanglass/input/InputCalibrationLogTest.java`
 
-**Estimated scope:** Medium (5 files).
+**Estimated scope:** Medium (6 files plus the glasses-app version).
 
 ## Checkpoint GI-A: Hardware calibration
 
-- [ ] GI-1 focused tests and glass APK build pass.
-- [ ] Controlled physical gestures are matched to raw/broadcast/KeyEvent rows.
-- [ ] No photo, network request, upload, or registration occurs.
-- [ ] Correlation evidence and exact version/hash tuple are checkpointed before
+- [x] GI-1 focused tests and glass APK build pass.
+- [x] Controlled physical gestures are matched to raw/broadcast/KeyEvent rows.
+- [x] No photo, network request, upload, or registration occurs.
+- [x] Correlation evidence and exact version/hash tuple are checkpointed before
       choosing a deduplication bound.
 
 ## Task GI-2: Normalize and deduplicate one physical gesture

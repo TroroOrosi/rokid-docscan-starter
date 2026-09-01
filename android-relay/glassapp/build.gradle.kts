@@ -18,8 +18,8 @@ android {
         // reference implementation and leaves room for older firmware.
         minSdk = 28
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 3
+        versionName = "0.1.2"
     }
 
     // AGP turns v1 (JAR) signing off on its own once minSdk is 24 or above, so

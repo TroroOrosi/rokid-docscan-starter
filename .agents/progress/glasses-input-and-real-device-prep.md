@@ -502,3 +502,99 @@ The next change must specify and implement the production glasses app as the
 operator control surface, keeping the phone as OCR/network relay until a
 source-grounded transport and capture contract are verified. No photo was
 requested during this probe.
+
+## Checkpoint — 2026-09-01 GI-1 local implementation; hardware calibration pending
+
+The user accepted `SPEC-glasses-input.md` and authorized continuing with an
+app-based glasses control surface. GI-1 now has a locally verified,
+side-effect-free dual-path calibration implementation. This checkpoint does
+not claim a new hardware result.
+
+### Implemented and verified locally
+
+- The exact 11 official Rokid custom-app input actions are held in one immutable
+  catalog and registered dynamically by `TapProbeActivity`.
+- Official broadcasts and Activity key DOWN/UP events enter one bounded,
+  newest-first diagnostic sequence using `SystemClock.elapsedRealtime()`.
+- Diagnostics contain only sequence, monotonic elapsed time, source, phase,
+  action/key name, and allow-list status. No intent extras are read, no
+  broadcast is aborted, and no capture, network, upload, OCR, or registration
+  call was added.
+- Unknown input signals remain representable with `known=false` and cannot emit
+  a workflow action; GI-1 intentionally contains no normalizer or business
+  mapping.
+- TDD RED failed only because the new calibration types were absent. The
+  focused test then passed after the minimal implementation.
+- From the current ASCII build copy,
+  `:glassapp:testDebugUnitTest :glassapp:assembleDebug`, full
+  `testDebugUnitTest assembleDebug`, and `:glassapp:lintDebug` all pass.
+- The seven changed source/config/test files are SHA-256 identical between the
+  repository and the current ASCII build copy. `git diff --check` passes.
+
+### Candidate and exact blocker
+
+- Candidate package `dev.rokid.docscanglass`, versionName `0.1.1`, versionCode
+  `2`, signer SHA-256
+  `906307478018E09E2937CFD8042A674D27598767577E08A304472AAE407CCACC`.
+- Candidate APK SHA-256:
+  `344242C989FAD1479B164C9A251B1719379DC64E677998CDBC9202EC55E7348A`.
+- At the hardware gate, the device bridge enumerated only the F-51F phone; the
+  previously direct-attached `RG-glasses` was absent from both the bridge and
+  matching Windows USB-device inventory. No APK was transferred or launched in
+  this checkpoint.
+
+Resume by reconnecting the glasses with its data-capable development cable and
+confirming it appears as `RG-glasses`. Then deploy only the candidate hash above
+to the explicit glasses device, launch `TapProbeActivity`, and record a
+controlled gesture sequence against raw input, official broadcast, and Activity
+KeyEvent timing. Do not choose the GI-2 deduplication bound until that physical
+correlation evidence exists.
+
+## Checkpoint — 2026-09-01 GI-A hardware calibration complete
+
+The user reconnected the directly attached `RG-glasses` and performed each
+named physical gesture separately while the raw input stream and content-free
+`DocScanGlass` callbacks were recorded on a shared monotonic clock. Every
+device command selected the glasses explicitly; no command was redirected to
+the phone. The hardware/OS/CXR tuple is unchanged from the preceding glasses
+checkpoint.
+
+### Measured gesture rows
+
+| User-confirmed gesture | Raw device sequence | App observation | Timing and disposition |
+|---|---|---|---|
+| Short tap | `KEY_DASHBOARD`, then `KEY_ENTER` | `KEYCODE_NOTIFICATION`, then `KEYCODE_ENTER`; no official broadcast | raw DOWN gap 544 ms in calibration; final 0.1.2 smoke-test app gap 516 ms |
+| About-one-second long press | `KEY_DASHBOARD`, then `KEY_PROG1` DOWN/UP | `KEYCODE_NOTIFICATION`; `ACTION_AI_START`; no `KEY_PROG1` Activity event | `PROG1` began 507 ms after dashboard, official broadcast followed 315 ms later, raw hold was 799 ms |
+| Double tap | `KEY_DASHBOARD` twice, then `KEY_BACK` | `KEYCODE_NOTIFICATION` twice, then `KEYCODE_BACK`; no official double-click broadcast | dashboard DOWN gap 207 ms; back followed the second by 312 ms and closed the Activity because BACK remains unconsumed |
+| Back-to-front swipe | `KEY_DASHBOARD`, `KEY_RIGHT`, `KEY_DOWN` | `KEYCODE_NOTIFICATION`, `KEYCODE_DPAD_RIGHT`, `KEYCODE_DPAD_DOWN`; no official forward-swipe broadcast | right began 426 ms after dashboard; down followed right-UP immediately |
+| Front-to-back swipe | `KEY_DASHBOARD`, then `KEY_ENTER` | `KEYCODE_NOTIFICATION`, then `KEYCODE_ENTER`; no official back-swipe broadcast | 579 ms gap; indistinguishable from the measured short-tap shape on these callbacks |
+
+Raw-to-Activity delivery was approximately 2–10 ms in the isolated short-tap
+run. The only official broadcast observed across the controlled sequence was
+`ACTION_AI_START` during the physical long press. These are properties of build
+`1.25.012-20260901-150201`, not platform-wide constants.
+
+### Final artifact and verification
+
+- The calibration run used 0.1.1 / versionCode 2, SHA-256
+  `344242C989FAD1479B164C9A251B1719379DC64E677998CDBC9202EC55E7348A`.
+- The measured `KEY_DASHBOARD → KEYCODE_NOTIFICATION` mapping was added to the
+  tested allow-list using a RED-then-GREEN unit-test increment.
+- Final package `dev.rokid.docscanglass`, versionName `0.1.2`, versionCode 3,
+  signer SHA-256
+  `906307478018E09E2937CFD8042A674D27598767577E08A304472AAE407CCACC`.
+- Final APK SHA-256:
+  `41092B73ADCAF2E651D202BEDF3D88874EAF4ED20036AA04EE613180D197B915`.
+  The device-resident APK matched this hash exactly, and the preserved first
+  deployment time proved an in-place update.
+- On 0.1.2, a final user-confirmed short tap recorded both
+  `KEYCODE_NOTIFICATION` and `KEYCODE_ENTER` as `known=true`.
+- Full Android unit tests and both debug APK builds pass; glassapp lint passes;
+  the seven mirrored source/config/test files match the current ASCII build
+  copy byte-for-byte.
+
+GI-2 must not map the front-to-back swipe separately because it is not
+distinguishable from a short tap in this evidence. Double tap remains a
+system-owned BACK sequence and must stay unconsumed. The correlation policy may
+use only the measured rows above and must fail closed for absent official
+broadcasts and unknown sequences.
