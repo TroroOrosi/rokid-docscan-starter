@@ -95,6 +95,12 @@ public final class GlassesInputNormalizer {
                 }
                 clearPending();
                 return Optional.empty();
+            case "KEYCODE_BACK":
+                if (withinMeasuredBound(notificationMillis, now)) {
+                    return emit(GlassesInputAction.BACK, now);
+                }
+                clearPending();
+                return Optional.empty();
             case "KEYCODE_DPAD_RIGHT":
                 return armDirection(PendingDirection.FORWARD, now);
             case "KEYCODE_DPAD_LEFT":

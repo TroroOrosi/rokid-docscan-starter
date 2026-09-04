@@ -1,5 +1,6 @@
 package dev.rokid.docscanglass;
 
+import android.annotation.SuppressLint;
 import android.app.Activity;
 import android.content.BroadcastReceiver;
 import android.content.Context;
@@ -18,6 +19,7 @@ import android.view.MotionEvent;
 import android.view.View;
 import android.view.WindowManager;
 
+import dev.rokid.docscanglass.input.BackExitPolicy;
 import dev.rokid.docscanglass.input.GlassKeyEvents;
 import dev.rokid.docscanglass.input.InputCalibrationLog;
 import dev.rokid.docscanglass.input.InputSignal;
@@ -62,6 +64,7 @@ public final class TapProbeActivity extends Activity {
     private final InputCalibrationLog calibration =
             new InputCalibrationLog(VISIBLE_EVENTS);
     private final GlassesInputNormalizer normalizer = new GlassesInputNormalizer();
+    private final BackExitPolicy backExit = new BackExitPolicy();
     private final GlassesInputReceiver inputReceiver =
             new GlassesInputReceiver(this::recordCalibration);
     private final BroadcastReceiver officialKeyReceiver = new BroadcastReceiver() {
@@ -158,10 +161,45 @@ public final class TapProbeActivity extends Activity {
         return consumeProbeKey(keyCode) || super.onKeyUp(keyCode, event);
     }
 
+    /**
+     * Intercepts the measured one-finger double tap without ending the session.
+     *
+     * <p>Deliberately does not call {@code super}. The firmware ends that
+     * gesture with {@code KEYCODE_BACK}, whose default handling finishes the
+     * Activity, so one mis-tap ended the run. The glasses report Android 12 /
+     * API 32, where {@code OnBackInvokedDispatcher} does not exist yet, so this
+     * is the interception point available on the measured build.
+     *
+     * <p>Lint asks for the AndroidX OnBackPressedDispatcher instead. Its claim
+     * that onBackPressed is no longer called holds only where
+     * android.window.OnBackInvokedDispatcher exists, which is API 33; the
+     * measured build is API 32. AndroidX would also need ComponentActivity,
+     * and this module carries no dependencies on purpose so that a negative
+     * hardware result cannot be blamed on a library. Revisit the suppression
+     * when the glasses report API 33 or later.
+     */
+    @Override
+    @SuppressLint("GestureBackNavigation")
+    @SuppressWarnings("deprecation")
+    public void onBackPressed() {
+        if (backExit.onBack(elapsed()) == BackExitPolicy.Decision.EXIT) {
+            Log.i(TAG, "back confirmed; finishing");
+            finish();
+            return;
+        }
+        normalizedLine = "BACK - again to exit";
+        Log.i(TAG, "back armed; a second BACK within "
+                + BackExitPolicy.CONFIRM_WINDOW_MILLIS + " ms exits");
+        if (view != null) {
+            view.invalidate();
+        }
+    }
+
     @Override
     protected void onDestroy() {
         inputReceiver.unregister(() -> unregisterReceiver(officialKeyReceiver));
         normalizer.reset();
+        backExit.reset();
         super.onDestroy();
     }
 
@@ -169,6 +207,7 @@ public final class TapProbeActivity extends Activity {
     public void onWindowFocusChanged(boolean hasFocus) {
         super.onWindowFocusChanged(hasFocus);
         normalizer.reset();
+        backExit.reset();
         Log.i(TAG, "focus changed hasFocus=" + hasFocus + " input state reset");
     }
 
@@ -196,7 +235,10 @@ public final class TapProbeActivity extends Activity {
             case KeyEvent.KEYCODE_DPAD_RIGHT:
                 return true;
             default:
-                // BACK included: consuming it would leave no way off this screen.
+                // BACK is deliberately not consumed here. It has to reach
+                // Activity.onKeyDown so the framework starts tracking it and
+                // dispatches onBackPressed on key up, which is where the
+                // double-tap exit is decided.
                 return false;
         }
     }
@@ -214,6 +256,10 @@ public final class TapProbeActivity extends Activity {
         normalizedCount++;
         normalizedLine = "ACTION #" + normalizedCount + " " + action;
         Log.i(TAG, "normalized #" + normalizedCount + " action=" + action);
+        if (action != GlassesInputAction.BACK) {
+            // Any other deliberate action means the operator is not leaving.
+            backExit.reset();
+        }
     }
 
     private void recordMotion(MotionEvent event, String path) {

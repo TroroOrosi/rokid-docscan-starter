@@ -38,7 +38,7 @@ public class GlassesInputNormalizerTest {
     }
 
     @Test
-    public void normalizesShortTapButLeavesSystemBackSequenceUnnormalized() {
+    public void distinguishesTheMeasuredShortTapAndDoubleTapSequences() {
         GlassesInputNormalizer normalizer = new GlassesInputNormalizer();
 
         assertTrue(normalizer.accept(key(0, "KEYCODE_NOTIFICATION")).isEmpty());
@@ -47,7 +47,9 @@ public class GlassesInputNormalizerTest {
                 normalizer.accept(key(516, "KEYCODE_ENTER")));
         assertTrue(normalizer.accept(key(2_000, "KEYCODE_NOTIFICATION")).isEmpty());
         assertTrue(normalizer.accept(key(2_207, "KEYCODE_NOTIFICATION")).isEmpty());
-        assertTrue(normalizer.accept(key(2_519, "KEYCODE_BACK")).isEmpty());
+        assertEquals(
+                Optional.of(GlassesInputAction.BACK),
+                normalizer.accept(key(2_519, "KEYCODE_BACK")));
     }
 
     @Test
@@ -130,6 +132,50 @@ public class GlassesInputNormalizerTest {
         assertEquals(
                 Optional.of(GlassesInputAction.SHORT_TAP),
                 normalizer.accept(key(720, "KEYCODE_ENTER")));
+    }
+
+    @Test
+    public void normalizesTheMeasuredDoubleTapSequenceIntoABackAction() {
+        GlassesInputNormalizer normalizer = new GlassesInputNormalizer();
+
+        assertTrue(normalizer.accept(key(0, "KEYCODE_NOTIFICATION")).isEmpty());
+        assertTrue(normalizer.accept(key(207, "KEYCODE_NOTIFICATION")).isEmpty());
+        assertEquals(
+                Optional.of(GlassesInputAction.BACK),
+                normalizer.accept(key(519, "KEYCODE_BACK")));
+    }
+
+    @Test
+    public void failsClosedForBackKeysOutsideTheMeasuredCorrelation() {
+        GlassesInputNormalizer normalizer = new GlassesInputNormalizer();
+
+        assertTrue(normalizer.accept(key(0, "KEYCODE_BACK")).isEmpty());
+
+        assertTrue(normalizer.accept(key(1_000, "KEYCODE_NOTIFICATION")).isEmpty());
+        assertTrue(normalizer.accept(key(1_971, "KEYCODE_BACK")).isEmpty());
+
+        assertTrue(normalizer.accept(key(3_000, "KEYCODE_NOTIFICATION")).isEmpty());
+        assertEquals(
+                Optional.of(GlassesInputAction.BACK),
+                normalizer.accept(key(3_970, "KEYCODE_BACK")));
+    }
+
+    @Test
+    public void deduplicatesRepeatedBackActionsWithinTheMeasuredBound() {
+        GlassesInputNormalizer normalizer = new GlassesInputNormalizer();
+
+        assertTrue(normalizer.accept(key(0, "KEYCODE_NOTIFICATION")).isEmpty());
+        assertEquals(
+                Optional.of(GlassesInputAction.BACK),
+                normalizer.accept(key(300, "KEYCODE_BACK")));
+
+        assertTrue(normalizer.accept(key(400, "KEYCODE_NOTIFICATION")).isEmpty());
+        assertTrue(normalizer.accept(key(600, "KEYCODE_BACK")).isEmpty());
+
+        assertTrue(normalizer.accept(key(1_400, "KEYCODE_NOTIFICATION")).isEmpty());
+        assertEquals(
+                Optional.of(GlassesInputAction.BACK),
+                normalizer.accept(key(1_500, "KEYCODE_BACK")));
     }
 
     private static InputSignal key(long elapsedMillis, String name) {

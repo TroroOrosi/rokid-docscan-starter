@@ -64,6 +64,7 @@ android {
 }
 
 dependencies {
+    implementation(project(":pagequality"))
     implementation("com.rokid.cxr:client-l:1.1.1")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("com.google.mlkit:text-recognition-japanese:16.0.1")
