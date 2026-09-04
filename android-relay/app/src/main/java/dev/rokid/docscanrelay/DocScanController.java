@@ -83,6 +83,7 @@ public final class DocScanController implements AutoCloseable {
     private static final String KEY_PHOTO_QUALITY = "photo_quality";
 
     private final CaptureSurface link;
+    private final ClientIdentity client;
     private final JapaneseOcr ocr;
     private final Listener listener;
     private final SharedPreferences preferences;
@@ -138,11 +139,13 @@ public final class DocScanController implements AutoCloseable {
             Context context,
             CaptureSurface link,
             JapaneseOcr ocr,
-            Listener listener
+            Listener listener,
+            ClientIdentity client
     ) {
         this.link = link;
         this.ocr = ocr;
         this.listener = listener;
+        this.client = client;
         preferences = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
         captureReviewPersistence = new CaptureReviewPersistence(
                 new File(context.getFilesDir(), "pending-capture-v1.bin"));
@@ -434,7 +437,7 @@ public final class DocScanController implements AutoCloseable {
             throw new IllegalStateException(
                     "写真の確認または撮影処理中です。登録か撮り直しを選んでください");
         }
-        DocScanApi candidate = new DocScanApi(serverUrl, apiKey);
+        DocScanApi candidate = new DocScanApi(serverUrl, apiKey, client);
         String previousServer = preferences.getString(KEY_SERVER, "");
         String normalizedServer = serverUrl.trim().replaceAll("/+$", "");
         if (captureReview.hasPending()

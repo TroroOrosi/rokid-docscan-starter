@@ -33,8 +33,9 @@ public final class DocScanApi {
             .build();
     private final String baseUrl;
     private final String apiKey;
+    private final ClientIdentity client;
 
-    public DocScanApi(String baseUrl, String apiKey) {
+    public DocScanApi(String baseUrl, String apiKey, ClientIdentity client) {
         String normalized = baseUrl == null ? "" : baseUrl.trim();
         while (normalized.endsWith("/")) {
             normalized = normalized.substring(0, normalized.length() - 1);
@@ -46,6 +47,10 @@ public final class DocScanApi {
         }
         this.baseUrl = normalized;
         this.apiKey = apiKey == null ? "" : apiKey.trim();
+        if (client == null) {
+            throw new IllegalArgumentException("クライアント識別子が必要です");
+        }
+        this.client = client;
     }
 
     public JSONObject health() throws IOException, JSONException {
@@ -59,9 +64,9 @@ public final class DocScanApi {
     public JSONObject createDocument(String title) throws IOException, JSONException {
         JSONObject payload = new JSONObject()
                 .put("title", title)
-                .put("capture_device", "rokid-glasses-cxr-l")
-                .put("client_version", "android-relay/" + BuildConfig.VERSION_NAME)
-                .put("sdk_hint", "client-l:1.0.1/global-aidl");
+                .put("capture_device", client.captureDevice)
+                .put("client_version", client.clientVersion)
+                .put("sdk_hint", client.sdkHint);
         return postJson("/v1/documents", payload);
     }
 
