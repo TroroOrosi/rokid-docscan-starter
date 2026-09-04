@@ -82,7 +82,7 @@ public final class DocScanController implements AutoCloseable {
     private static final String KEY_PHOTO_HEIGHT = "photo_height";
     private static final String KEY_PHOTO_QUALITY = "photo_quality";
 
-    private final RokidGlobalLink link;
+    private final CaptureSurface link;
     private final JapaneseOcr ocr;
     private final Listener listener;
     private final SharedPreferences preferences;
@@ -111,11 +111,11 @@ public final class DocScanController implements AutoCloseable {
     private boolean armedReplacingPending;
     private long aimingGeneration;
     private long captureGuideViewGeneration =
-            RokidGlobalLink.NO_VIEW_GENERATION;
+            CaptureSurface.NO_VIEW_GENERATION;
     private boolean captureGuideAcknowledged;
     private boolean stabilizationTimerScheduled;
     private long reviewGeneration;
-    private long reviewViewGeneration = RokidGlobalLink.NO_VIEW_GENERATION;
+    private long reviewViewGeneration = CaptureSurface.NO_VIEW_GENERATION;
     private boolean autoCommitArmed;
     private boolean autoCommitScheduled;
     private boolean autoCaptureEnabled;
@@ -136,7 +136,7 @@ public final class DocScanController implements AutoCloseable {
 
     public DocScanController(
             Context context,
-            RokidGlobalLink link,
+            CaptureSurface link,
             JapaneseOcr ocr,
             Listener listener
     ) {
@@ -314,14 +314,14 @@ public final class DocScanController implements AutoCloseable {
                     armedPageIndex + 1,
                     armedReplacingPending,
                     state == RelayState.STABILIZING);
-            if (restoredGeneration != RokidGlobalLink.NO_VIEW_GENERATION) {
+            if (restoredGeneration != CaptureSurface.NO_VIEW_GENERATION) {
                 trackCaptureGuideOpen(restoredGeneration);
             }
         } else {
             restoredGeneration = link.showHud(currentHudLines);
         }
         boolean restored =
-                restoredGeneration != RokidGlobalLink.NO_VIEW_GENERATION;
+                restoredGeneration != CaptureSurface.NO_VIEW_GENERATION;
         if (!restored
                 && (state == RelayState.AIMING || state == RelayState.STABILIZING)) {
             rollbackCaptureGuideFailure(
@@ -800,7 +800,7 @@ public final class DocScanController implements AutoCloseable {
                 }
                 stabilizationTimerScheduled = false;
                 captureGuideViewGeneration =
-                        RokidGlobalLink.NO_VIEW_GENERATION;
+                        CaptureSurface.NO_VIEW_GENERATION;
                 captureGuideAcknowledged = false;
                 int pageIndex = armedPageIndex;
                 boolean replacingPending = armedReplacingPending;
@@ -832,7 +832,7 @@ public final class DocScanController implements AutoCloseable {
                         "シャッターはスマホ");
         long viewGeneration =
                 link.showCaptureAiming(pageIndex + 1, replacingPending, stabilizing);
-        if (viewGeneration == RokidGlobalLink.NO_VIEW_GENERATION) {
+        if (viewGeneration == CaptureSurface.NO_VIEW_GENERATION) {
             listener.onUpdate(
                     state,
                     List.of("グラス表示を復元できません", "撮影は開始していません", ""),
@@ -905,7 +905,7 @@ public final class DocScanController implements AutoCloseable {
         aimingGeneration++;
         armedPageIndex = -1;
         armedReplacingPending = false;
-        captureGuideViewGeneration = RokidGlobalLink.NO_VIEW_GENERATION;
+        captureGuideViewGeneration = CaptureSurface.NO_VIEW_GENERATION;
         captureGuideAcknowledged = false;
         stabilizationTimerScheduled = false;
     }
@@ -940,13 +940,13 @@ public final class DocScanController implements AutoCloseable {
                     "Requesting glasses photo for page index " + pageIndex
                             + " (" + settings.describe() + ")");
             photoRequestedAtMillis = System.currentTimeMillis();
-            RokidGlobalLink.PhotoStartResult startResult =
+            CaptureSurface.PhotoStartResult startResult =
                     link.takePhoto(settings.width, settings.height, settings.quality);
-            if (startResult == RokidGlobalLink.PhotoStartResult.REJECTED) {
+            if (startResult == CaptureSurface.PhotoStartResult.REJECTED) {
                 throw new IllegalStateException("takePhoto returned false");
             }
             photoRequestMayBeActive = true;
-            if (startResult == RokidGlobalLink.PhotoStartResult.UNKNOWN) {
+            if (startResult == CaptureSurface.PhotoStartResult.UNKNOWN) {
                 throw new IllegalStateException(
                         "takePhoto acceptance is unknown after an IPC failure");
             }
@@ -1459,7 +1459,7 @@ public final class DocScanController implements AutoCloseable {
         reviewGeneration++;
         autoCommitScheduled = false;
         autoCommitArmed = false;
-        reviewViewGeneration = RokidGlobalLink.NO_VIEW_GENERATION;
+        reviewViewGeneration = CaptureSurface.NO_VIEW_GENERATION;
         // The operator cannot see the camera's field of view, so the framing
         // verdict leads: a page that ran outside the frame must read as a
         // failure, not as a photo that is merely waiting to be registered.

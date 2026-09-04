@@ -35,7 +35,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * {@code com.rokid.sprite.global.aiapp}. No Rokid binary is copied into this
  * repository.</p>
  */
-public final class RokidGlobalLink implements AutoCloseable {
+public final class RokidGlobalLink implements CaptureSurface, AutoCloseable {
     private volatile String serviceIdentity = "CXR-L 未接続";
 
     public interface Listener {
@@ -79,12 +79,6 @@ public final class RokidGlobalLink implements AutoCloseable {
         void onError(String message, Throwable cause);
     }
 
-    public enum PhotoStartResult {
-        STARTED,
-        REJECTED,
-        UNKNOWN
-    }
-
     private static final String TAG = "DocScanRokid";
     private static final String GLOBAL_PACKAGE = "com.rokid.sprite.global.aiapp";
     private static final String AUTH_ACTION =
@@ -105,7 +99,6 @@ public final class RokidGlobalLink implements AutoCloseable {
     // install as NO_RESPONSE.
     public static final long GLASS_APP_INSTALL_TIMEOUT_MILLIS = 120_000;
     public static final long GLASS_APP_OPEN_TIMEOUT_MILLIS = 15_000;
-    public static final long NO_VIEW_GENERATION = -1;
 
     private final Context context;
     private final Listener listener;
@@ -221,6 +214,7 @@ public final class RokidGlobalLink implements AutoCloseable {
         return bound;
     }
 
+    @Override
     public synchronized PhotoStartResult takePhoto(int width, int height, int quality) {
         IMediaStreamService current = service;
         if (current == null) {
@@ -433,6 +427,7 @@ public final class RokidGlobalLink implements AutoCloseable {
         }
     }
 
+    @Override
     public synchronized long showHud(List<String> lines) {
         IMediaStreamService current = service;
         if (current == null) {
@@ -451,6 +446,7 @@ public final class RokidGlobalLink implements AutoCloseable {
      * A false result is fail-closed: callers may attempt one normal reopen,
      * whose own request and acknowledgement are still generation-gated.
      */
+    @Override
     public synchronized long showCaptureAiming(
             int pageNumber,
             boolean retake,
@@ -471,6 +467,7 @@ public final class RokidGlobalLink implements AutoCloseable {
         }
     }
 
+    @Override
     public synchronized long showCaptureReview(
             byte[] jpeg,
             int rotationDegrees,
@@ -977,6 +974,7 @@ public final class RokidGlobalLink implements AutoCloseable {
      * No later view request is accepted until a real service rebind installs
      * fresh callback stubs.
      */
+    @Override
     public synchronized void fenceCustomViewEpoch(
             long generation,
             String reason
