@@ -329,6 +329,17 @@ the far side, so holding it to 5 s would report a working install as
   server; and a development cable the retail package does not include (the
   magnetic charging port doubles as a data port) — that last one is procurement
   lead time.
+
+  > **Corrected 2026-09-03.** Both halves of this risk are now false.
+  > (a) The data-capable cable was obtained and used: from 2026-09-01 the
+  > glasses appear as `RG_glasses` over direct `adb`, and every glasses build
+  > from 0.1.0 to 0.1.6 was installed, launched, and read back through it.
+  > `adb logcat` is the channel, not the glasses display.
+  > (b) A CXR-S↔CXR-L message path is documented by a working third party:
+  > `TakanariShimbo/RokidGlassesAppCenter` runs JSON over `Caps` on a CXR-L
+  > `CUSTOMAPP` session, phone `sendCustomCmd("appmgr.req", ...)` to glasses
+  > `CXRServiceBridge` `subscribe`/`sendMessage`, and back on `appmgr.res`.
+  > Rokid does not publish the pairing, but it is not unknown.
 - **`cxr-service-bridge` ships native libraries**, `arm64-v8a` and
   `armeabi-v7a`: `libcaps`, `libcxr-bridge-jni`, `libcxr-sock-proto-jni`,
   `libflora-cli`, `libmutils`. `docs/glasses-app-route-findings.md` records "no
@@ -757,3 +768,430 @@ Resume in this order:
    `agent-skills:test-driven-development`;
 4. build from the verified ASCII copy and perform explicit-phone plus direct-
    glasses hardware acceptance without invoking capture or custom commands.
+
+## Checkpoint - 2026-09-03 published sources reviewed; capability spike built
+
+The user supplied three articles and three Reddit threads and asked whether the
+approach was still rational before continuing. The review found that several
+decisions here were taken from this repository's own notes rather than from
+sources that were already public, and that one hardware session re-derived a
+published table.
+
+### What was already public and did not need measuring
+
+- Two-finger gestures and the one-finger long press never reach an ordinary app
+  because `/system/usr/keylayout/Generic.kl` maps them to vendor codes
+  (`SPRITE_SWIPE_FORWARD`, `SPRITE_SWIPE_BACK`, `SPRITE_DOUBLE_TAP`,
+  `PROG_BLUE`) with no AOSP `KeyEvent` equivalent. One `adb shell cat` answers
+  what the GI-A session spent a controlled gesture run establishing.
+- Exactly four inputs reach an app: `KEYCODE_ENTER`, `KEYCODE_DPAD_*`,
+  `KEYCODE_BACK`, `KEYCODE_NOTIFICATION` (83, scan 204).
+- The display is 480x640 at 240 dpi. `docs/glasses-app-route-findings.md` still
+  called it unknown.
+- The glasses reach the network over their own Wi-Fi in several community apps,
+  while the Open risks here said nothing could be read off the device at all.
+- Phone-to-glasses custom commands are implemented publicly by
+  `TakanariShimbo/RokidGlassesAppCenter` as JSON over `Caps` on a CXR-L
+  `CUSTOMAPP` session.
+
+GI-A recorded that the double tap "closed the Activity because BACK remains
+unconsumed" and left it. That is the defect the user hit.
+
+### Checked against the artifact, 2026-09-03
+
+`javap` over the linked `client-l:1.1.1` AAR: `AuthorizationHelper`
+(`requestAuthorization`, `hasGlassPermission`, `isConnectHiRokid`,
+`canLaunchApp`), `GlassPermission{MICROPHONE, CAMERA, MEDIA, DEVICE_MANAGE}`,
+`ExternalAppClient.configCXRSession(CXRSession, ICXRSessionCbk)`,
+`CXRSessionType{NONE, CUSTOMVIEW, CUSTOMAPP}`, and `CxrSession.takePhoto`
+alongside `CxrSession.sendCustomCmd`. The relay calls none of this layer; grep
+finds zero references. Rokid Maven `maven-metadata.xml` reports `client-l`
+release **1.1.2** (`lastUpdated 20260828083628`); this repository pins 1.1.1.
+
+### Implemented
+
+- `:glassapp` 0.1.7 / versionCode 8. `GlassesInputAction.BACK` is normalized
+  from the measured `NOTIFICATION, NOTIFICATION, BACK` sequence, and
+  `BackExitPolicy` turns the first BACK into an armed confirmation and a second
+  within 3000 ms into an exit. The interception point is `onBackPressed`, not a
+  consumed `KEYCODE_BACK`: the key must still reach `Activity.onKeyDown` so the
+  framework tracks it. The measured build is API 32, where
+  `OnBackInvokedDispatcher` does not exist, so the lint request to migrate to
+  the AndroidX dispatcher is suppressed with an expiry condition recorded at
+  the call site.
+- New `:glassprobe` module 0.1.0 / versionCode 1, applicationId
+  `dev.rokid.docscanglass.probe`. Separate from `:glassapp` so that adding
+  CAMERA and INTERNET cannot weaken the no-permission record of the app under
+  test. It reports display metrics, camera enumeration, one explicitly
+  requested camera2 still into app-private cache, one `GET /health` plus one
+  `GET /v1/settings` against a `--es server` extra, and a BACK counter. It
+  uploads nothing, recognizes nothing, registers nothing, and does not touch
+  the privacy indicator.
+- Documents corrected in the same change: the unknown display size, the
+  superseded `client-l` release, the resolved gesture question, and both halves
+  of the "nothing can be read off the glasses" risk. New index
+  `docs/glasses-primary-sources-2026-09-03.md` records what is already known so
+  the next session does not re-search or re-measure.
+- `SPEC-custom-app-session.md` is retained as a draft but is no longer the next
+  increment; its Open Questions now carry the decision table the spike feeds.
+
+### Verified locally (commands and results)
+
+- `py -3.12 -m pytest -q`: **424 passed, 1 failed**. The failure is the known
+  environmental one: the repository-wide Markdown scan counts 57 untracked
+  tool-generated OpenSpec/Spec Kit files. Zero tracked Markdown files are
+  unclassified, and the new document is registered.
+- `ruff check .`: all checks passed. `git diff --check`: clean.
+- Android, from the ASCII copy with
+  `JAVA_HOME=C:/Users/Public/rokid-build-tools-20260901/jdk17/jdk-17.0.20.1+1`
+  (Android Studio `jbr` is openjdk 25 and AGP rejects it):
+  `testDebugUnitTest assembleDebug :glassapp:lintDebug :glassprobe:lintDebug`
+  -> **BUILD SUCCESSFUL**, 135 actionable tasks. `:app` 182 tests, `:glassapp`
+  31 tests, `:glassprobe` 6 tests, all 0 failures and 0 errors. Both lint tasks
+  pass.
+- Artifacts:
+  - `dev.rokid.docscanglass` 0.1.7 / 8, 140,364 B, SHA-256
+    `3F435131149A985B9E4015A603CC110C4ABFEC8E327B4DA05B16EA405415D6B1`.
+    `aapt2 dump badging` shows **no `uses-permission` at all**.
+  - `dev.rokid.docscanglass.probe` 0.1.0 / 1, 158,710 B, SHA-256
+    `60C9356B0A5497BD226A02ADB2CEDB4A1430F5084A0781F3F20780935D7715C6`,
+    `uses-permission` exactly CAMERA and INTERNET.
+  - `dev.rokid.docscanrelay` unchanged at 0.3.16 / 21, SHA-256
+    `C96BF67F51CC64BA0F581ABF97D09E73B9272243376DA2F2FBBB3D31F7E16A52`.
+
+### Not verified
+
+**Nothing was installed, started, or run on any device in this checkpoint.** The
+device bridge was not invoked and no photo was requested. A build proves
+compilation. Specifically unverified on hardware: that consuming the double tap
+keeps the Activity alive; that camera2 opens on the glasses; that the privacy
+indicator lights during and clears after a capture; that the glasses reach the
+server over Wi-Fi; and whether a sideloaded app appears in the glasses launcher.
+
+### Resume, with the approval each step needs
+
+1. Ask the user before any device write. `adb install` changes device state.
+2. Read-only first, no approval needed:
+   `adb -s SERIAL shell cmd package query-activities -a android.intent.action.MAIN
+   -c android.intent.category.LAUNCHER | grep docscanglass`. If absent, phone-side
+   `openApp` becomes mandatory and `SPEC-custom-app-session.md` is promoted.
+3. With approval, install only the two hashes above to the explicit
+   `RG_glasses` serial, then
+   `adb -s SERIAL shell am start -n
+   dev.rokid.docscanglass.probe/.CapabilityProbeActivity --es server
+   "http://HOST:8000"` and read `adb logcat -s DocScanGlassProbe`.
+4. Run P2 only with an independent observer keeping the privacy indicator
+   continuously in frame. If that is not arranged, skip P2 and report it as not
+   run rather than as a negative result.
+5. Record the outcome against the decision table in
+   `SPEC-custom-app-session.md`, then choose the architecture.
+
+## Checkpoint — 2026-09-04 hardware acceptance run; the spike is settled
+
+The user connected the glasses on request and approved the installs. Every
+device write below was run against the explicit serial `1904092623381086`
+(`RG-glasses`), never a bare `adb install`.
+
+### Device, read-only, before any write
+
+`ro.build.fingerprint=Rokid/glasses/glasses:12/SKQ1.240613.001/1.25.012-20260901-150201:user/release-keys`,
+Android 12 / API 32, `ro.config.low_ram=true`. `dev.rokid.docscanglass` was
+present at 0.1.6 / versionCode 7.
+
+**Launcher visibility was answered without installing anything.**
+`cmd package query-activities -a android.intent.action.MAIN -c android.intent.category.LAUNCHER`
+returns 18 activities across 9 packages, and
+`dev.rokid.docscanglass/.TapProbeActivity` is one of them, beside
+`com.android.camera2`, `com.android.settings`, `com.rokid.os.sprite.launcher`,
+`com.eg.android.AlipayGGlasses` and `com.tencent.glasswxpay.glassapp`. A
+sideloaded app is launcher-visible, so **phone-side `openApp` is not a
+precondition** and `SPEC-custom-app-session.md` is not promoted.
+
+### Installed
+
+Hashes were re-computed immediately before the install and matched the recorded
+build exactly.
+
+| APK | Version | SHA-256 | Result |
+|---|---|---|---|
+| `dev.rokid.docscanglass` | 0.1.7 / 8 | `3F435131149A985B9E4015A603CC110C4ABFEC8E327B4DA05B16EA405415D6B1` | `Success`, confirmed 0.1.7 / 8 on device |
+| `dev.rokid.docscanglass.probe` | 0.1.0 / 1 | `60C9356B0A5497BD226A02ADB2CEDB4A1430F5084A0781F3F20780935D7715C6` | `Success`, confirmed 0.1.0 / 1 on device |
+
+### P1 display — OK
+
+`480x640 240dpi heap256MB`, read from inside the app. Matches the 2026-09-01
+`dumpsys` measurement and the published figure.
+
+### P2 camera — OK, and the privacy indicator behaves
+
+Seven consecutive stills, every one at the sensor maximum:
+
+| Time | Size | Bytes | Elapsed |
+|---|---|---|---|
+| 18:15:40 | 4032x3024 | 5,718,125 | 1380 ms |
+| 18:15:54 | 4032x3024 | 5,915,983 | 922 ms |
+| 18:16:01 | 4032x3024 | 5,929,367 | 785 ms |
+| 18:16:22 | 4032x3024 | 6,127,682 | 811 ms |
+| 18:16:26 | 4032x3024 | 6,081,992 | 796 ms |
+
+`camera2` opens from an ordinary third-party app holding only
+`android.permission.CAMERA`. The phone relay `takePhoto` was measured at 5.2 s;
+glasses-direct capture is roughly six times faster at full resolution.
+
+**Privacy indicator, corroborated two independent ways.** An observer watching
+the physical LED reported it lit only while the capture was pending. The kernel
+LED driver log shows the same on all seven captures:
+
+```
+CameraService: connectDevice                   18:15:38.593
+aw2110x chan=3 brightness=0xFF   <- lit        18:15:38.624   (+31 ms)
+finishCameraStreamingOps                       18:15:39.748
+aw2110x chan=3 brightness=0x00   <- cleared    18:15:39.767   (+19 ms)
+CameraService: disconnect                      18:15:40.091
+```
+
+Channel 3 is the white privacy LED. It is driven by the camera pipeline in
+firmware and clears **before** the client disconnects; the app never touches it.
+All three `CLAUDE.md` acceptance conditions hold on this firmware.
+`run-as ... ls cache/` after `onDestroy` shows the directory empty, so
+`probe-capture.jpg` was deleted as designed. Nothing was uploaded, recognized,
+or registered.
+
+### P3 network — OK, and this is the finding that decides the architecture
+
+The glasses reach the FastAPI server over their own Wi-Fi, twice, independently:
+
+```
+18:12:27  link=wlan0=192.168.0.5  /health 200 in 197ms   /v1/settings 200 in 17ms
+18:15:03  link=wlan0=192.168.0.5  /health 200 in  96ms   /v1/settings 200 in 1037ms
+```
+
+Server was `app 0.16.0 / API 1.15.0` on `192.168.0.32:8000`. The phone is not
+required in the data path.
+
+### P4 BACK — OK
+
+```
+18:18:35.238  probe P4 BACK OK consumed x1, again to exit
+18:18:40.346  probe P4 BACK OK consumed x2, again to exit   (+5.11 s, window expired, re-armed)
+18:18:43.870  probe P4 BACK OK consumed x3, again to exit   (+3.52 s, window expired, re-armed)
+18:18:46.014  back confirmed after 4 reports; finishing     (+2.14 s, inside the window)
+```
+
+`KEYCODE_BACK` is consumable by an ordinary app. Three of four deliveries were
+consumed without finishing the Activity, and the timeout re-arm behaved as the
+unit tests specify.
+
+### `:glassapp` 0.1.7 on hardware — the double-tap exit is fixed
+
+```
+18:21:15.229  KEYCODE_NOTIFICATION DOWN  #39
+18:21:15.246  KEYCODE_NOTIFICATION UP    #40
+18:21:15.412  KEYCODE_NOTIFICATION DOWN  #41
+18:21:15.430  KEYCODE_NOTIFICATION UP    #42
+18:21:15.720  KEYCODE_BACK DOWN          #43
+18:21:15.720  normalized #7 action=BACK          <- emitted exactly once
+18:21:15.744  back armed; a second BACK within 3000 ms exits
+```
+
+`topResumedActivity` remained `dev.rokid.docscanglass/.TapProbeActivity`: the
+Activity survived. The measured correlation span is 491 ms, inside the 970 ms
+bound the normalizer enforces. Deduplication also confirmed on a forward swipe —
+two `KEYCODE_DPAD_RIGHT` events produced a single
+`normalized #6 action=SWIPE_FORWARD`.
+
+**This closes the defect the user identified.** On 0.1.6 a single mis-tap ended
+the session; on 0.1.7 it does not.
+
+### New platform constraint: folding the temples kills a third-party app
+
+Found by diagnosing an unexpected close, and not recorded anywhere in this
+repository before. `com.rokid.os.sprite.assistserver` (pid 2041) manages a
+third-party app as a `third_app` scene and cancels it when the temple arms fold:
+
+```
+ACTION_LEG_STATUS_CHANGED  leg status: 0   vendor.rkd.glasses.is_spread: 0
+SceneManager -> glassLegStatusChange spread[false]
+SceneManager -> cancelAllScene()  ignoreSceneList -> [[phone_call]]
+   closeMark = SceneCloseMark(initiator=glass_use_event, param=glassLegStatusChange fold)
+ThirdAppScene -> isSceneRunning: true, useTime: 3
+SceneManager -> stopSceneAndSendToMobile sceneList -> [[third_app]]
+-> ActivityManager kills dev.rokid.docscanglass.probe
+-> topResumedActivity = com.rokid.os.sprite.launcher
+```
+
+Only `phone_call` is exempt. A glasses-side operator surface cannot survive the
+glasses being folded, so any session state it holds must be recoverable.
+`getprop vendor.rkd.glasses.is_spread` reads the current state (1 spread,
+0 folded). Keep the temples spread for the whole of any measurement.
+
+### Architecture decision
+
+Row 1 of the `SPEC-custom-app-session.md` decision table applies:
+**glasses-direct**. The camera opens, the privacy indicator behaves, the glasses
+reach the server on their own Wi-Fi, and the app is launcher-visible.
+CUSTOMVIEW, the Hi Rokid AIDL path, echo suppression, close tracking, and the
+keep-the-phone-awake constraint are not required for the capture path.
+`SPEC-custom-app-session.md` stays a Draft as the documented CUSTOMAPP +
+CustomCMD transport, to be revived only if the operating network makes the
+glasses Wi-Fi unusable.
+
+### Not verified
+
+Battery life, thermal behaviour, and Wi-Fi retention over a long operating
+session were not measured; P3 measured reachability, not endurance. No OCR,
+upload, analysis, or page registration was exercised on the glasses-direct path
+— no such code exists yet. `AiInterceptMode.BLOCK_AI` and the `boolean` in
+`appStart(String, boolean, IGlassAppCbk)` remain unknown. The relay
+(`dev.rokid.docscanrelay` 0.3.16 / 21) was not changed, reinstalled, or run.
+
+## Checkpoint — 2026-09-04 (late) suspended by the user for a design rethink
+
+**Status: paused mid-task at the user's instruction.** The glasses-side app
+`:glassdoc` builds and unit-tests clean but is **not fit for use**, and the
+reason is an architectural mistake described below. Do not continue building on
+it without re-reading "The mistake" first.
+
+### What the user stopped the work to say
+
+Three criticisms, all correct, recorded verbatim in substance:
+
+1. **Hardware runs were used to discover things the repository already knew.**
+   The exposure regression and the framing check are both examples: reading
+   `PageFraming` and the relay's capture path first would have prevented both
+   without touching a device.
+2. **Referencing an existing element does not justify rebuilding around it.**
+3. **Why was a glasses-only app written from scratch when the existing relay
+   could be reused, given the control keys do not conflict?**
+
+### The mistake
+
+`:glassdoc` reimplemented, from nothing, what `dev.rokid.docscanrelay` already
+does and already tests: the server client, the Japanese ML Kit wrapper, the
+capture state machine, and a framing check that measured **worse** than the one
+the relay has had all along.
+
+The relay is an ordinary Android app at `minSdk 31`. The glasses report
+**API 32**. The only part of the relay bound to the phone is the capture call
+itself — `link.takePhoto(width, height, quality)` through CXR-L. Everything
+downstream of the JPEG is device-independent: `JapaneseOcr`, `PageFraming`,
+`ShotScore`, `CaptureReviewStore`, `DocScanApi`, the exam and explain session
+flows, the HUD contract. 182 tests cover it.
+
+**The route not taken, and the one to evaluate first next session:** run the
+existing relay on the glasses and replace only the capture seam — CXR-L
+`takePhoto` becomes a local `camera2` still. `:glassdoc`'s own classes would
+then reduce to that seam plus whatever the glasses HUD genuinely needs.
+
+This has not been designed or costed. It is a hypothesis, not a decision. Points
+that must be checked against the code before committing to it, none of which
+need hardware:
+
+- what in `:app` actually depends on `com.rokid.cxr:client-l` and whether that
+  dependency can be isolated behind an interface;
+- whether `MainActivity`'s phone-sized UI can be separated from the pipeline;
+- whether the relay's gesture handling collides with `:glassinput`'s normalizer
+  (the user's "操作キーが被らないなら" premise — verify, do not assume);
+- what `ROKID_REAL_MODE` and the exam/explain flows assume about the device.
+
+### Verified on hardware this session
+
+Serial `1904092623381086` (`RG-glasses`, build `1.25.012-20260901-150201`,
+Android 12 / API 32), phone `F-51F` relay `0.3.16` / 21.
+
+**The CXR-L app-control route works. This contradicts the earlier record.**
+
+| Call | Result | Latency |
+|---|---|---|
+| `queryGlassAppInstalled` | `ANSWERED installed=true` | **106 ms** |
+| `openApp` | `SUCCEEDED`, and the glasses foreground really became `dev.rokid.docscanglass/.TapProbeActivity` | **300 ms** |
+| `uploadAndInstallApk` | **not run.** It reads `glassapp.apk` from the phone; no such file is staged | — |
+
+The previous record — "no firmware has answered the call", two attempts ending
+in `onInstallAppResult(false)` after a constant 43-44 s — no longer holds. The
+untested variable named in the memory note was the **Hi Rokid glasses ADB
+debugging toggle**, which is now on (that is why the cable adb works). An
+earlier `openApp` `FAILED` in this session was a wrong activity name
+(`com.android.settings.MainActivity` does not exist; it is
+`com.android.settings.Settings`), not an API failure.
+
+`SPEC-custom-app-session.md`'s precondition is therefore demonstrated, not
+merely supported by bytecode.
+
+### Defects found in `:glassdoc`, and their state
+
+| Defect | Evidence | Fixed? |
+|---|---|---|
+| Two taps created two documents (3 and 4) | the guard sat on the response, not the request | **yes**, `ScanSession.beginOpenDocument()`, with a test |
+| Pages stored 180 degrees from upright, so the recognizer read Japanese as noise | `SENSOR_ORIENTATION=270`, `JPEG_ORIENTATION=0`; rotating the stored PNG 180 makes the exam paper legible | **yes**, `ReviewFrame.MEASURED_ROTATION_DEGREES`, applied to upload, OCR and review |
+| Mean luminance 16-24 of 255 against ~200 for a lit page | three stored PNGs measured | **not fixed.** See below |
+| `+2 EV` exposure bias **stopped capture completing** | four consecutive 15 s timeouts, zero images, where the untouched template had returned seven stills in 785-1380 ms | **reverted.** The relay never sets exposure either |
+| `FAILED` showed a blank HUD | operator could not see what to change | **yes**, the still now stays on screen through a failure |
+| Home-grown border-luminance framing check, worse than the relay's | operator judgement on hardware, and it is true: `PageFraming` works from recognized-line bounding boxes and names the cut side | **partly.** `PageFraming` extracted to `:pagequality` and wired in, unverified on hardware |
+| **Killed by `lowmemorykiller` at 118 MB RSS** | `Kill 'dev.rokid.docscanglass.doc' ... to free 121300kB rss`, `oom_score_adj 900` | **not fixed.** `PageOcr.MAX_EDGE_PIXELS = 2048` never subsamples: `4032/2 = 2016 < 2048`, so it decodes full 4032x3024 |
+| Aiming guide is sensor-shaped, not paper-shaped | camera is 4:3 (1.33); A4/B4 is 1:1.41. A portrait page cannot fill a 4:3 guide | **not fixed** |
+
+Measured framing of the first upload: the page filled **70.2% of frame width,
+82.8% of height**, and its bounding box reached **y=3016 of 3024** — cut at the
+bottom.
+
+### Repository state
+
+Branch `agent/real-device-test-prep`, HEAD `ce38e9e`, **nothing committed**.
+PR #30 exists; do not open a duplicate.
+
+New modules, all registered in `android-relay/settings.gradle.kts`:
+
+- `:glassinput` — plain `java-library`. The whole `input` package moved out of
+  `:glassapp` (every class was already free of android imports). Shared so
+  `:glassdoc` uses the normalizer `:glassapp` validated, not a copy.
+- `:pagequality` — plain `java-library`. `PageFraming` and `ShotScore` moved out
+  of `:app` **keeping package `dev.rokid.docscanrelay`**, so `:app` needed no
+  edit at all.
+- `:glassprobe` — the throwaway spike, its four questions answered.
+- `:glassdoc` — the glasses document scanner. See the defect table.
+
+Versions: `:glassapp` 0.1.8 / 9 (behaviourally identical to 8; the input classes
+moved). `:glassdoc` 0.5.0 / 5, installed on the glasses. `:glassprobe` 0.1.0 / 1.
+Relay unchanged at 0.3.16 / 21.
+
+### Verification actually run
+
+- Android, ASCII worktree, `JAVA_HOME=C:/Users/Public/rokid-build-tools-20260901/jdk17/jdk-17.0.20.1+1`:
+  `test testDebugUnitTest assembleDebug :glassdoc:lintDebug :glassapp:lintDebug`
+  -> **BUILD SUCCESSFUL**. `:app` 164, `:pagequality` 18, `:glassinput` 25,
+  `:glassdoc` 51, `:glassapp` 6, `:glassprobe` 6 = **270 tests, 0 failures,
+  0 errors**. 164 + 18 = the 182 `:app` had before the move, so nothing was
+  lost.
+- `py -3.12 -m pytest -q` -> 424 passed, 1 failed. The failure is the standing
+  environmental one: 57 untracked tool-generated markdown files, verified to be
+  entirely inside tool directories and none tracked by git.
+- `ruff check .` -> all checks passed. `git diff --check` -> clean.
+- **`test` is not redundant in that command.** `:glassinput` and `:pagequality`
+  are plain `java-library` modules; `testDebugUnitTest` alone silently skips
+  them. `CLAUDE.md` was corrected accordingly.
+
+### Not verified
+
+`:glassdoc` 0.5.0 has **never completed a page on hardware**. Neither the
+`PageFraming` integration, nor the 180-degree rotation as applied to a real
+upload, nor the review display in its current form, has been confirmed by a
+successful capture-to-upload cycle. The last hardware attempt ended with the
+process killed for memory. `uploadAndInstallApk` remains unrun. Battery,
+thermals and Wi-Fi endurance were measured for `:glassprobe`, not for
+`:glassdoc`, whose memory profile is different.
+
+### Resume, in order
+
+1. **Do not touch hardware first.** Answer from `:app`'s source whether the
+   relay can run on the glasses with only the capture seam replaced. That
+   decides whether `:glassdoc` shrinks to a seam or is abandoned.
+2. Ask the user for the paper size to design the aiming guide around; A4
+   portrait was proposed and not confirmed.
+3. Fix `PageOcr` subsampling regardless of route — full-resolution decode on a
+   `ro.config.low_ram=true` device is what the `lowmemorykiller` acted on.
+4. Underexposure is an operating condition, not a code defect: the relay's own
+   earlier finding was that contrast, not resolution, limits recognition. Light
+   the page rather than biasing the sensor; the bias broke capture outright.
+5. Only then return to hardware, with the specific question each run answers
+   written down before the cable goes in.

@@ -32,9 +32,19 @@ Current version tuple:
 - Server APP `0.16.0`
 - HTTP API `1.15.0`
 - Android relay `0.3.16` (`versionCode 21`)
-- Glasses input app `0.1.6` (`versionCode 7`)
+- Glasses input app `0.1.8` (`versionCode 9`; 9 is behaviourally identical to 8
+  and differs only because the input classes moved to `:glassinput`)
+- Glasses capability probe `0.1.0` (`versionCode 1`, throwaway spike; its four
+  questions were answered on hardware 2026-09-04)
+- Glasses document scanner `0.1.0` (`versionCode 1`); the glasses own capture,
+  Japanese ML Kit recognition and the server connection, and the phone is not in
+  the data path. Built and unit-tested; the review flow, the +2EV exposure and
+  the 180-degree rotation are **not yet confirmed on hardware**.
+- `:glassinput` is a plain `java-library` shared by the glasses apps, so its
+  tests run under `test`, not `testDebugUnitTest`
 - Glasses View contract `1.9.0`
-- CXR-L tested/pinned dependency `1.1.1` (not described as the latest release)
+- CXR-L tested/pinned dependency `1.1.1`; the current Rokid Maven release is
+  `1.1.2` and the latest coordinate is `1.2.X-SNAPSHOT`
 
 ## Historical measurements and superseded designs
 
@@ -55,6 +65,8 @@ They must not be used to override a current runbook.
 - `docs/documentation-evidence-audit-2026-08-31.md`
 - `docs/research-safe-led-and-device-readiness-2026-09-01.md`
 - `docs/glasses-app-route-findings.md`
+- `docs/glasses-primary-sources-2026-09-03.md` — published-source index for the
+  glasses-side route; read before booking another hardware session.
 - `report-source.md` — internal claim ledger behind the 2026-08-31 audit.
 
 Research can identify a supported SDK capability without proving that it works
