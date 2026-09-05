@@ -1259,8 +1259,14 @@ dependency is 1.1.1, deliberately left for its own change.
 
 ### Resume state — 2026-09-05
 
-Branch `agent/real-device-test-prep`, HEAD `f840d12`, working tree clean for
-tracked files. PR #30 exists; **do not open a duplicate**. The only untracked
+Branch `agent/real-device-test-prep`, working tree clean for tracked files.
+
+**PR #30 is MERGED, not open** -- it landed 2026-09-01 as `8cc22af`, and every
+earlier note in this file saying "PR #30 exists; do not open a duplicate" is
+stale from before that. Checked 2026-09-05: `gh pr list --state open` returns
+nothing, `main` carries only the merge commit that this branch lacks, and the
+11 commits of this session are **not in `main`**. Landing them needs a new
+pull request, which needs the operator to ask for one. The only untracked
 paths are tool output (`.agents/skills/`, `.claude/`, `.cursor/`, `.specify/`,
 `openspec/`) and they are deliberately excluded from every commit.
 
