@@ -86,7 +86,7 @@ public final class DocScanGlassActivity extends Activity
         cameraThread = new HandlerThread("glass-camera");
         cameraThread.start();
         camera = new GlassCamera(this, new Handler(cameraThread.getLooper()), cameraCallback());
-        surface = new GlassesCaptureSurface(camera, hud, main, this);
+        surface = new GlassesCaptureSurface(this, camera, hud, main, this);
         ocr = new JapaneseOcr();
         controller = new DocScanController(
                 this,

@@ -24,11 +24,15 @@ public final class FramingGuideTest {
     private static final int DISPLAY_HEIGHT = 640;
 
     @Test
-    public void keepsTheSensorAspectRatioSoTheGuideMatchesWhatIsCaptured() {
+    public void isPageShapedRatherThanSensorShaped() {
+        // The camera field is 4:3 landscape and the page is 1:1.41 portrait.
+        // A portrait page can never fill a landscape guide, so aligning to a
+        // sensor-shaped one tells the operator nothing about framing.
         FramingGuide.Rect guide = FramingGuide.of(DISPLAY_WIDTH, DISPLAY_HEIGHT, 1.0);
 
         double aspect = guide.width() / (double) guide.height();
-        assertEquals("4032x3024 is 4:3", 4.0 / 3.0, aspect, 0.01);
+        assertEquals("B5 portrait is 182:257", FramingGuide.PAPER_ASPECT, aspect, 0.01);
+        assertTrue("portrait", guide.height() > guide.width());
     }
 
     @Test
@@ -94,7 +98,12 @@ public final class FramingGuideTest {
     public void reportsTheFractionOfTheCaptureThePageShouldFillWhenAligned() {
         // The calibration loop: shoot a page filling the guide, measure what
         // fraction of the still it occupies, feed that back as the fraction.
-        assertEquals(0.64, FramingGuide.expectedPageAreaFraction(0.8), 0.0001);
-        assertEquals(1.0, FramingGuide.expectedPageAreaFraction(1.0), 0.0001);
+        // The guide is page-shaped inside a 4:3 field, so a page filling it
+        // covers less of the still than the visible fraction alone suggests.
+        double shapeLoss = FramingGuide.PAPER_ASPECT / FramingGuide.SENSOR_ASPECT;
+        assertEquals(0.64 * shapeLoss,
+                FramingGuide.expectedPageAreaFraction(0.8), 0.0001);
+        assertEquals(shapeLoss,
+                FramingGuide.expectedPageAreaFraction(1.0), 0.0001);
     }
 }

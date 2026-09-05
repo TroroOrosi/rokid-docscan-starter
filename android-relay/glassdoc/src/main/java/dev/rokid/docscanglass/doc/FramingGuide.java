@@ -31,6 +31,15 @@ public final class FramingGuide {
     /** Sensor aspect ratio measured on this device: 4032x3024. */
     public static final double SENSOR_ASPECT = 4032.0 / 3024.0;
 
+    /**
+     * The page, as width over height. JIS B5 portrait is 182x257 mm.
+     *
+     * <p>A4 (210x297) and B4 (257x364) sit within 0.3% of the same figure --
+     * the ISO and JIS series are both built on 1:root-2 -- so the guide shape
+     * serves all three and only the shooting distance changes.</p>
+     */
+    public static final double PAPER_ASPECT = 182.0 / 257.0;
+
     public static final double MIN_VISIBLE_FRACTION = 0.20;
     public static final double MAX_VISIBLE_FRACTION = 1.00;
 
@@ -94,11 +103,19 @@ public final class FramingGuide {
         double fraction = Math.max(MIN_VISIBLE_FRACTION,
                 Math.min(MAX_VISIBLE_FRACTION, visibleFraction));
 
-        // Largest 4:3 box that fits the display, then scaled by the fraction.
-        double boxWidth = Math.min(displayWidth, displayHeight * SENSOR_ASPECT);
-        double boxHeight = boxWidth / SENSOR_ASPECT;
-        int width = (int) Math.round(boxWidth * fraction);
-        int height = (int) Math.round(boxHeight * fraction);
+        // What the camera covers: the largest 4:3 box the display can show,
+        // scaled by how much of it the camera actually reaches.
+        double fieldWidth = Math.min(displayWidth, displayHeight * SENSOR_ASPECT);
+        double visibleWidth = fieldWidth * fraction;
+        double visibleHeight = visibleWidth / SENSOR_ASPECT;
+
+        // The guide is the largest page-shaped rectangle inside that. The
+        // field is landscape and the page is portrait, so height is always the
+        // binding constraint; the min keeps that from being an assumption.
+        double boxHeight = Math.min(visibleHeight, visibleWidth / PAPER_ASPECT);
+        double boxWidth = boxHeight * PAPER_ASPECT;
+        int width = (int) Math.round(boxWidth);
+        int height = (int) Math.round(boxHeight);
 
         int left = (displayWidth - width) / 2;
         int top = (displayHeight - height) / 2;
@@ -113,6 +130,8 @@ public final class FramingGuide {
     public static double expectedPageAreaFraction(double visibleFraction) {
         double fraction = Math.max(MIN_VISIBLE_FRACTION,
                 Math.min(MAX_VISIBLE_FRACTION, visibleFraction));
-        return fraction * fraction;
+        // The guide is page-shaped inside a 4:3 field, so a page filling it
+        // covers less of the still than the visible fraction alone suggests.
+        return fraction * fraction * PAPER_ASPECT / SENSOR_ASPECT;
     }
 }

@@ -1,5 +1,8 @@
 package dev.rokid.docscanglass.doc;
 
+import android.Manifest;
+import android.content.Context;
+import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Matrix;
@@ -34,6 +37,7 @@ final class GlassesCaptureSurface implements CaptureSurface {
         void onViewShown(long generation, String purpose);
     }
 
+    private final Context context;
     private final GlassCamera camera;
     private final HudView hud;
     private final Handler main;
@@ -43,7 +47,12 @@ final class GlassesCaptureSurface implements CaptureSurface {
     private Bitmap preview;
 
     GlassesCaptureSurface(
-            GlassCamera camera, HudView hud, Handler main, Listener listener) {
+            Context context,
+            GlassCamera camera,
+            HudView hud,
+            Handler main,
+            Listener listener) {
+        this.context = context;
         this.camera = camera;
         this.hud = hud;
         this.main = main;
@@ -61,6 +70,13 @@ final class GlassesCaptureSurface implements CaptureSurface {
      */
     @Override
     public PhotoStartResult takePhoto(int width, int height, int quality) {
+        if (context.checkSelfPermission(Manifest.permission.CAMERA)
+                != PackageManager.PERMISSION_GRANTED) {
+            // REJECTED rather than UNKNOWN: nothing reached the camera, so the
+            // controller can release the capture lease at once instead of
+            // holding it for a callback that will never arrive.
+            return PhotoStartResult.REJECTED;
+        }
         camera.captureOnce();
         return PhotoStartResult.STARTED;
     }
