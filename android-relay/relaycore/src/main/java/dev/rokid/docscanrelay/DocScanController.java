@@ -526,7 +526,7 @@ public final class DocScanController implements AutoCloseable {
         });
     }
 
-    void onCaptureLinkStateChanged(boolean ready, CaptureLinkEvent event) {
+    public void onCaptureLinkStateChanged(boolean ready, CaptureLinkEvent event) {
         try {
             serial.execute(() -> {
                 linkReady = ready;

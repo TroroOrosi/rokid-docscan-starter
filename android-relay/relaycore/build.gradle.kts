@@ -38,6 +38,10 @@ android {
 }
 
 dependencies {
+    // The gesture vocabulary `:glassapp` validated on hardware. `api` because
+    // `CaptureActionRouter.route` takes a `GlassesInputAction` in its
+    // signature, so callers have to see the type.
+    api(project(":glassinput"))
     // `api`, not `implementation`: `JapaneseOcr.Callback` hands `PageFraming`
     // to whoever implements it, so the type is part of this module's surface.
     api(project(":pagequality"))

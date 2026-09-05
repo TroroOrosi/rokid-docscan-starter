@@ -59,8 +59,13 @@ android {
         // bounding boxes of recognized lines, so it names the side that is cut.
         // 5 also hands the recognizer the measured 180-degree rotation, which
         // is why the first run read upside-down Japanese as noise.
-        versionCode = 5
-        versionName = "0.5.0"
+        // 6 stops being a second implementation. The controller, recognizer,
+        // server client and review store are now `:relaycore` -- the relay's
+        // own, with its tests -- and this module is the capture seam over
+        // them: camera2 for the still, a canvas for the HUD, and the
+        // `:glassinput` gestures routed through CaptureActionRouter.
+        versionCode = 6
+        versionName = "0.6.0"
     }
 
     // Same reasoning as `:glassapp`: a vendor installer that reads JAR
@@ -89,6 +94,9 @@ android {
 }
 
 dependencies {
+    // The relay pipeline: controller, OCR, server client, review store. The
+    // glasses replace only the capture seam, not the pipeline under it.
+    implementation(project(":relaycore"))
     // The gesture contract `:glassapp` validated on hardware, not a copy of it.
     implementation(project(":glassinput"))
     // PageFraming/ShotScore, the framing check the relay already proved. The
