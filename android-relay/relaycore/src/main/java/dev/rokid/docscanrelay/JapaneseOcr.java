@@ -24,11 +24,12 @@ public final class JapaneseOcr implements AutoCloseable {
     public void recognize(byte[] encodedImage, int rotationDegrees, Callback callback) {
         Bitmap bitmap;
         try {
-            bitmap = BitmapFactory.decodeByteArray(encodedImage, 0, encodedImage.length);
+            bitmap = decodeSubsampled(encodedImage);
         } catch (OutOfMemoryError error) {
-            // A 12MP capture needs about 48MB for the decoded bitmap. Losing
-            // the process here would also lose the photo, so the capture is
-            // reported as an OCR failure and stays available for review.
+            // Subsampling puts a 12MP still near 6 MB, but a device already
+            // under memory pressure can still fail here. Losing the process
+            // would also lose the photo, so the capture is reported as an
+            // OCR failure and stays available for review.
             callback.onError(new IllegalStateException(
                     "写真が大きすぎてメモリに展開できません。撮影解像度を下げてください"));
             return;
@@ -93,6 +94,55 @@ public final class JapaneseOcr implements AutoCloseable {
             }
         }
         return quality.build();
+    }
+
+    /**
+     * Longest edge below which the decoder refuses to halve again.
+     *
+     * <p>Two measurements bound this. {@code docs/capture-timing-findings.md}
+     * read a 37 px column pitch off a 1920x1080 capture of an A4 page at
+     * 40-60 cm, against ML Kit's 16 px floor, and called 24 px the point
+     * beyond which more resolution stops helping. The same page at 4032 px
+     * therefore carries roughly 78 px per character, so halving it to 2016
+     * leaves about 39 px, while quartering it would land near 19 px: above
+     * the floor, but below where resolution still pays.</p>
+     *
+     * <p>The reason to subsample at all is memory. 4032x3024 decoded whole
+     * needs about 48 MB, and the glasses run with {@code ro.config.low_ram},
+     * where 118 MB RSS was enough for lowmemorykiller to act. The relay's
+     * default 1920x1080 capture sits below this bound and is left untouched.</p>
+     */
+    static final int MIN_EDGE_PIXELS = 1200;
+
+    /**
+     * The {@code inSampleSize} for an image of this longest edge: the largest
+     * power-of-two reduction that still leaves {@link #MIN_EDGE_PIXELS}.
+     */
+    static int sampleSizeFor(int longestEdge) {
+        int sample = 1;
+        while (longestEdge / (sample * 2) >= MIN_EDGE_PIXELS) {
+            sample *= 2;
+        }
+        return sample;
+    }
+
+    /**
+     * Reads the JPEG header first, so the reduction follows the real
+     * dimensions rather than an assumption about which preset took the shot.
+     */
+    private static Bitmap decodeSubsampled(byte[] encodedImage) {
+        BitmapFactory.Options bounds = new BitmapFactory.Options();
+        bounds.inJustDecodeBounds = true;
+        BitmapFactory.decodeByteArray(encodedImage, 0, encodedImage.length, bounds);
+
+        BitmapFactory.Options options = new BitmapFactory.Options();
+        options.inSampleSize =
+                sampleSizeFor(Math.max(bounds.outWidth, bounds.outHeight));
+        // Recognition is on glyph shape and the HUD is monochrome green
+        // regardless, so 16-bit colour halves the bitmap again for nothing.
+        options.inPreferredConfig = Bitmap.Config.RGB_565;
+        return BitmapFactory.decodeByteArray(
+                encodedImage, 0, encodedImage.length, options);
     }
 
     static int normalizeRotation(int degrees) {
