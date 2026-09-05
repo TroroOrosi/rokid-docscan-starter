@@ -1195,3 +1195,64 @@ thermals and Wi-Fi endurance were measured for `:glassprobe`, not for
    the page rather than biasing the sensor; the bias broke capture outright.
 5. Only then return to hardware, with the specific question each run answers
    written down before the cable goes in.
+
+## Checkpoint — 2026-09-05 the relay pipeline now runs on the glasses
+
+The route the 2026-09-04 suspension named -- reuse the relay, replace only the
+capture seam -- was costed from `:app`'s source **without touching hardware**,
+found to hold, and implemented.
+
+### What the source said, before any device
+
+- CXR-L imports appear in exactly one file of 30: `RokidGlobalLink`.
+- `DocScanController` reaches the link through 5 methods at 7 call sites.
+- 24 of those 30 files carry no platform import at all.
+- `PressGestureInterpreter` is CXR-L-callback-only, so `:glassinput` cannot
+  collide with it. The user's "操作キーが被らないなら" premise holds.
+
+That is the entire seam. `:glassdoc` had reimplemented 2451 lines behind it.
+
+### Built and verified locally
+
+| Stage | Tests |
+|---|---|
+| `CaptureSurface` seam extracted | 270, unchanged |
+| `ClientIdentity` injected so a library needs no BuildConfig | 273 |
+| `:relaycore` extracted: 45 files, 100% identical renames, zero `:app` source edits | 273 |
+| `JapaneseOcr` subsampling | 276 |
+| CUSTOMVIEW-only classes returned to `:app` | 276 |
+| `:glassdoc` rebuilt on the controller, 9 duplicate classes deleted | 242 |
+| B5 aiming guide | 242 |
+
+Final gate from the ASCII copy: `test testDebugUnitTest assembleDebug
+:glassdoc:lintDebug :glassapp:lintDebug` -> **BUILD SUCCESSFUL, 242 tests, 0
+failures, 0 errors**, both lint tasks pass. `ruff check .` passes.
+`py -3.12 -m pytest -q` gives **424 passed, 1 failed** -- the standing
+environmental failure, re-verified today: all 57 unclassified files are
+untracked tool output and all 34 tracked Markdown files are classified.
+
+The count falls 276 -> 242 because `:glassdoc`'s tests for the code this change
+deletes go with it; 9 routing tests are added. That responsibility is covered
+by `:relaycore`'s existing tests.
+
+### Two premises corrected against primary sources
+
+- `PageOcr`'s 2048 px bound never fired, because `4032/2 = 2016`. Its comment
+  justified refusing a quarter reduction by reading the measured 37 px column
+  pitch as a property of a 4032 px capture; `docs/capture-timing-findings.md`
+  line 16 measured it on a **1920x1080** capture, where the same page at 4032
+  carries roughly 78 px. The conclusion held, the reason did not. The new bound
+  is documented against the measurement it came from.
+- `HudLayout` builds CUSTOMVIEW JSON, so a glasses canvas cannot draw its
+  output -- the plan said it could. `CaptureSurface` passes `List<String>`, so
+  the seam survived the error; the class moved back to `:app`.
+
+### Not verified
+
+**Nothing in this checkpoint ran on hardware.** Specifically unverified: that
+`DocScanController` behaves against the glasses' own `SharedPreferences` and
+`filesDir`; that Japanese recognition holds at 2016 px; that the gesture
+routing table is the one an operator wants; and that a session survives the
+temple-fold force-stop. `:glassdoc` 0.6.0 / versionCode 6 has never been
+installed. `sdk_hint` still reports `client-l:1.0.1` where the resolved
+dependency is 1.1.1, deliberately left for its own change.
