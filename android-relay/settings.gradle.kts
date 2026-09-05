@@ -17,6 +17,11 @@ dependencyResolutionManagement {
 
 rootProject.name = "RokidDocScanRelay"
 include(":app")
+
+// The capture pipeline `:app` and `:glassdoc` share. Extracted so the glasses
+// run the relay's tested controller, OCR, upload and review instead of a
+// second implementation of the same thing.
+include(":relaycore")
 // Runs on the glasses, not the phone. Kept out of :app's dependencies on
 // purpose: its APK is pushed to the phone and uploaded at run time, so a
 // throwaway probe never ships inside a relay build.
