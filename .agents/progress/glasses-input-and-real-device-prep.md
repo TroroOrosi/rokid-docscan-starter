@@ -1256,3 +1256,77 @@ routing table is the one an operator wants; and that a session survives the
 temple-fold force-stop. `:glassdoc` 0.6.0 / versionCode 6 has never been
 installed. `sdk_hint` still reports `client-l:1.0.1` where the resolved
 dependency is 1.1.1, deliberately left for its own change.
+
+### Resume state — 2026-09-05
+
+Branch `agent/real-device-test-prep`, HEAD `f840d12`, working tree clean for
+tracked files. PR #30 exists; **do not open a duplicate**. The only untracked
+paths are tool output (`.agents/skills/`, `.claude/`, `.cursor/`, `.specify/`,
+`openspec/`) and they are deliberately excluded from every commit.
+
+**Build environment, rebuilt this session.** The previous ASCII copies
+(`rokid-docscan-build`, `-current-20260901a`) are stale. `build-windows.ps1`
+refuses a non-ASCII project path, and the checkout is under a Japanese path, so
+the working copy is:
+
+```bash
+SRC="/c/Users/pupu_/OneDrive/ドキュメント/rokid-docscan-starter/android-relay"
+BUILD="/c/Users/Public/rokid-build-20260905/android-relay"
+rm -rf "$BUILD"; cp -r "$SRC" "/c/Users/Public/rokid-build-20260905/"
+rm -rf "$BUILD/.gradle"
+printf 'sdk.dir=C:/Users/pupu_/AppData/Local/Android/Sdk\n' > "$BUILD/local.properties"
+```
+
+A copy, not `git worktree`: a worktree only sees HEAD, and every gate here runs
+against uncommitted work. Re-copy with `cp -r "$SRC"/. "$BUILD/"` when nothing
+was deleted; recreate the directory when files moved. `local.properties` is
+required — no `ANDROID_HOME` is set on this machine — and forward slashes avoid
+the Java properties escaping trap.
+
+```bash
+export JAVA_HOME="C:/Users/Public/rokid-build-tools-20260901/jdk17/jdk-17.0.20.1+1"
+powershell -NoProfile -ExecutionPolicy Bypass \
+  -File "C:\Users\Public\rokid-build-20260905\android-relay\build-windows.ps1" \
+  --console=plain test testDebugUnitTest assembleDebug \
+  :glassdoc:lintDebug :glassapp:lintDebug
+```
+
+Android Studio's `jbr` is openjdk 25 and AGP rejects it. `bc` is absent from
+this Git Bash; sum test results with `awk` over
+`*/build/test-results/**/TEST-*.xml`.
+
+**Editing note.** Source files are CRLF. `perl -pi -e 's/...$/'` silently fails
+to match because of the trailing `\r`; either drop the `$` anchor or write
+`\r?\n`, and emit `\r\n` in replacements that add lines.
+
+**Artifacts built at this HEAD** (none installed anywhere):
+
+| Module | Version | SHA-256 |
+|---|---|---|
+| `dev.rokid.docscanglass.doc` | 0.6.0 / 6 | `CA3618A6D39230A4B62A9C17685827B1B9A6FDEC4F132E6857818479D6E222AD` |
+| `dev.rokid.docscanrelay` | 0.3.16 / 21 | `4793E37D81714A4E9F18FA582504A23FB87630B662D15BEAE074ECA2E62FBFB1` |
+| `dev.rokid.docscanglass` | 0.1.8 / 9 | `5FE98E72D40212A90ADD2949891BA1D360048BE4FBC9105D301002E3202584D4` |
+
+**The relay APK differs from the installed one at the same versionCode.** The
+phone carries 0.3.16 / 21 with SHA-256 `C96BF67F...E16A52`; the `:relaycore`
+split rebuilt it to the hash above. Bump `versionCode` before installing, or
+the two builds become indistinguishable on the device.
+
+### Next steps, in order
+
+1. **Ask before any device write.** State the question each run answers first.
+2. Read-only: confirm the glasses appear as `RG-glasses` (serial
+   `1904092623381086`) and that `getprop vendor.rkd.glasses.is_spread` is 1.
+   Keep the temples spread — folding force-stops the app.
+3. Start the server: `unset OPENAI_BASE_URL ANTHROPIC_BASE_URL`, then
+   `py -3.12 -m uvicorn app.main:app --host 0.0.0.0 --port 8000`. There is
+   still **no `.env` and no provider key**, so the analyzer reports
+   `placeholder, offline: true`; finalization of a photo-only page will fail
+   until the operator supplies one.
+4. Install `:glassdoc` 0.6.0 to the explicit serial, launch with
+   `am start -n dev.rokid.docscanglass.doc/.DocScanGlassActivity --es server
+   "http://HOST:8000"`, read `adb logcat -s DocScanGlassDoc`.
+5. Answer U1 first (does `DocScanController` work against the glasses'
+   `SharedPreferences`/`filesDir`), then U2 (recognition at 2016 px), then the
+   routing table's usability. Record which question each run answered.
+6. Separately, and not on hardware: `sdk_hint` still says `client-l:1.0.1`.
