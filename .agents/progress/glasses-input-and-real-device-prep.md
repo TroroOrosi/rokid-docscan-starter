@@ -1516,3 +1516,16 @@ PR #30はMERGEDであり、同ブランチの新しいopen PRは存在しない�
 
 評価パック3ファイルと計画・記録6ファイルを分けてコミットし、通常push後にPRを作成する。
 PRのURLと公開確認結果は次の節に保存する。mainへのmergeは今回の依頼に含まれない。
+
+### PR公開結果
+
+- [PR #31](https://github.com/TroroOrosi/rokid-docscan-starter/pull/31) を作成。
+  タイトル: グラス側スキャン基盤と自動スキャン・同時リスニング計画を保存。
+  base `main`、head `agent/real-device-test-prep`、OPEN、通常PR。
+- 評価パックcommit `c59d780`、計画・外部調査・進捗commit `48b42dd` をpush済み。
+  作成直後のPR headは `48b42dd5a0b7a987ea7af3cd06597e8d57ad83cb` と一致。
+  このURL追記も同じブランチで保存するため、最新HEADはPRのcommitsで確認する。
+- 作成直後のGitHub判定はMERGEABLE。CI/Android buildは実行中で、
+  完了済みとは扱わない。次回はPRの最新checksを確認してから統合判断へ進む。
+- 追跡対象の未保存差分はなく、未追跡のツール出力5ディレクトリだけを残した。
+  merge、端末導入、外部AI設定は行っていない。
