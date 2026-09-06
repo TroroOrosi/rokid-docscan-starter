@@ -1336,3 +1336,183 @@ the two builds become indistinguishable on the device.
    `SharedPreferences`/`filesDir`), then U2 (recognition at 2016 px), then the
    routing table's usability. Record which question each run answered.
 6. Separately, and not on hardware: `sdk_hint` still says `client-l:1.0.1`.
+
+## 2026-09-06 — 自動スキャン・同時リスニングの詳細計画を作成
+
+### 再開時に優先するユーザー訂正
+
+今回の依頼は、ソースと一次資料を調べた上での詳細な改善計画の作成。
+この節で実装完了を宣言していない。アプリコード、端末、外部AI設定は変更していない。
+
+ユーザーは最終的に環境を次のように明確化した:
+**グラスはWi-Fiに接続できない。スマホは携行し、モバイル回線でインターネットを利用できる。
+PC・自前サーバは現場で使わない。完全オフライン解答は必須ではない。**
+前回の中断時草案にあった「スマホ内AIで完全オフライン解答をP0にする」は撤回済み。
+古い段落のサーバ起動・グラスのWi-Fi接続を、今回の本番構成へ戻さない。
+
+録音しながら資料をスキャンし、問題と読み上げ音声の両方から解答する。
+グラス起動で通常/リスニングを選択。用紙を自動認識して撮影し、実画像を3秒確認、
+タップは同じページの取り直し、無操作は次ページ。第1ダブルタップで撮影終了、
+リスニングは録音を続け、別の第2ダブルタップで録音終了。
+問題ごとの完全な答えだけを表示し、閲覧終了を保存して次回は最初の選択画面へ戻す。
+初回準備後は、スマホをロックしたまま日常操作0回を必須とする。
+
+### 成果物と着手順
+
+- [詳細計画](../../tasks/plan.md#glasses-autoscan-listening-20260906): 13の必須要件、
+  状態/ジェスチャ、3秒と終了の競合、ページ判定、連続録音、転送/保存、AIの選択、
+  長い音声と複数ページの入力、全文表示、終了/復旧、測定目標、一次資料を記載。
+- [実装タスク](../../tasks/todo.md#fast-scan-tasks): FS-01〜51と追加候補FS-52〜58。
+  **すべて未実装・未チェック。** 各実装タスクに完了条件、依存、検証、最大5ファイルの対象を記載。
+- docs/README.md: 新計画を提案として索引化し、先行承認済み計画と区別。
+  glassdocの現在の0.6.0/code6と、+2EV撤回・当該APKの実機未検証も訂正。
+
+次はFS-01〜07のM0から。評価資料/基準整理 → カメラ＋録音同時試験 →
+Bluetooth/CXRでJPEGと音声の転送 → スマホロック中の寿命 →
+スマホのモバイル回線で音声認識・画像＋原音から1問解答を順に実証する。
+実機と実AIの事前設定が必要な時は、その時点の利用者環境と認証を確認する。
+計画作成の範囲で端末インストール、録音、AIへの資料送信、課金設定を実施していない。
+
+### 調査で確認したこと・未確認のこと
+
+- 既存 :glassdoc / :relaycore / :glassinput / :pagequality を再利用する。
+  削除済みの重複パイプラインや固定+2EVを復活させない。
+- ソース上の主な差分: 自動撮影無効、紙の外周ではなくOCR枠でページ判定、
+  表示要求直後のACK、同種入力970ms抑制、操作実行器上の同期HTTP、録音未実装、
+  解答64字切断、解法等が混ざるHUD、先頭ページ1画像制限、終了/再起動の扱い。
+- codebase-memoryをfast index。generation 2026-09-06T08:51:49Z、3907 nodes / 14851 edges。
+  coverageでglassdocのpackage末尾doc除外と他パスのfreshness欠落を検出し、実ソース読みにより補完。
+  検索不在を未実装の証拠にはしていない。
+- ローカルのclient-l:1.1.1とcxr-service-bridge成果物を一時領域でjavapし、
+  sendCustomCmd/sendCustomCmdStream、sendMessage(String,Caps,byte[])、
+  音声stream/callbackのAPIを確認。AAR/抽出クラスをrepoへ追加していない。
+  **Global間のワイヤ互換、Wi-Fiなしの実効帯域、同時録音、ロック中動作は未実証。**
+- 6MB画像を6秒ごとに転送するだけでも約1MB/sが必要。
+  スマホの携帯回線速度とBluetooth帯域を混同せず、画像品質・転送量をM0で評価する。
+- Context7のFirebase AI Logic公式IDを解決し、認証/マルチモーダル入力を取得。
+  公式本文でAndroid Java/Kotlin SDK、管理プロキシ、App CheckのPlay外配布設定、
+  inline20MB・1音声ファイル制限、Files API未対応、JSON出力を確認。
+  第一評価候補であり、プロジェクト作成・課金有効化・実AI評価はしていない。
+  モデル/SDKの例が検索抜粋と公式本文で異なるため、その例を固定バージョンにしない。
+- 長い録音は原音と時刻付き文字起こしを保持し、全体文脈を照合して問題ごとの画像＋原音区間へ分ける。
+  同梱OCR・紙面検知・入力整理は端末内。スマホ内ASR/VLMやRokid AIUIは追加候補。
+  PC用Codex CLIの存在をAndroidの無操作連携の証拠にしない。
+
+2026-09-04/05の撮影、入力、つる折りforce-stop、メモリ、APKハッシュの実測は上の履歴を維持する。
+openApp成功300msの追記と、SDK経由インストール未確認を区別する。
+当時の242 Androidテスト/ビルド成功を、今回の新仕様の動作保証にしない。
+
+### 検証とワークツリー
+
+Root: C:/Users/pupu_/OneDrive/ドキュメント/rokid-docscan-starter。
+Branch: agent/real-device-test-prep。
+調査HEAD: 56f82c7df3f2641c2e123abbacd8937562140ba5。
+この計画の変更は tasks/plan.md、tasks/todo.md、docs/README.md、本進捗ファイルの4件。
+コミット/プッシュはこの計画作成では行っていない。
+既存未追跡の .agents/skills/、.claude/、.cursor/、.specify/、openspec/ は変更対象外。
+
+- 計画作成前の全pytest: **424 passed / 1 failed / 1 warning、32.91s**。
+  Ruff: **All checks passed**。失敗は未分類の未追跡ツール文書57件。
+- 計画更新後の文書テスト: py -3.12 -m pytest -q tests/test_documentation_contract.py
+  → **4 passed / 1 failed、0.12s**。同じ57件。未分類の追跡済みMarkdownは0件。
+- 計画の一回限りの構造検査: 要件13件、タスクID58件一意、実装タスク51件、追加7件、
+  各対象最大5ファイル、先のタスクへの依存0件、すべて未チェック。
+  HEADの先行計画本文を保持し、計画/索引のローカルリンク・明示アンカーが解決することを確認。
+- git diff --check成功。アプリコードは変更していないのでAndroidの再ビルドはしていない。
+
+再開時はこの節と計画の冒頭を読み、Agent Skillsの計画/実装スキルを作業段階に合わせて選択する。
+重要な疑義にはverifying-premises、SDK資料はfind-docs/Context7と実成果物、
+OpenAIの仕様にはopenai-docsを使う。次の検証済み区切りでこの進捗記録を更新する。
+
+## 2026-09-07 — 外部アプリの事例を既存計画へ反映
+
+### 再開時に優先する要望と現在地
+
+ユーザーの追加要望は「内部の例だけでなく、外部ソースや他アプリの例も参考にする」。
+途中の「再開してください」も同じ作業の継続として扱った。
+グラスWi-Fiなし、携行スマホのモバイル回線、現場PC/自前サーバ不要、
+日常スマホ操作0回、実画像3秒確認、撮影と録音の二段階終了を維持する。
+
+前節の「FSすべて未チェック」は初回計画時の履歴。
+再開時の既存ワークツリーにはFS-02完了とFS-01の合成14ケース18問、照合CLI、
+回帰14件、準備ノートが存在していた。tasks/plan.md末尾に全pytest
+441 passed / 1 warning / 33.76sとRuff成功の記録がある。
+この全体試験は前回の記録を再利用し、今回新たに全件実行した実績にはしない。
+
+### 完了した成果物
+
+- [外部事例の調査記録](../../docs/fast-scan-external-examples.md):
+  Adobe Scan、Apple Notes、OSS Document Scanner、Notability、Seeing AI、Joplinの6例。
+  公式資料・公開ソース、取得日、採用/適応/保留、適用限界、R/FSへの対応を記録。
+- OSS Document Scannerはcommit `2aded0d2f16240143bf2c51c35397b0d9e00640a`
+  のAutoScanHandler.ktに参照を固定。撮影前待機・取消・輪郭による再発火抑制の
+  参考であり、撮影後3秒確認・内容同一性・画質・Rokid上の動作の証明ではない。
+- [計画の採用判断](../../tasks/plan.md#external-app-design)と
+  [タスク](../../tasks/todo.md#fast-scan-tasks)へ事例を反映。
+  [X01〜X06](../../docs/fast-scan-preflight.md#external-derived-cases)に
+  過去ページ修正、安定判定、音声対応、短いHUD案内、ロック中転送、切断復旧を追加。
+  これらの比較試験は全件未実行。S01〜S30と既存合成データを保持した。
+- docs/README.mdで研究資料と計画を分類。FS-02だけ完了の状態を保持。
+
+### 検証と作業範囲
+
+Root: C:/Users/pupu_/OneDrive/ドキュメント/rokid-docscan-starter。
+Branch: agent/real-device-test-prep。
+HEAD: `9b6da5ffc9c8e51a172bce1434479e7f6e03217f`。
+
+- `py -3.12 -m pytest -q tests/test_documentation_contract.py tests/test_fast_scan_pack.py`
+  → **21 passed in 0.33s**（外部調査文書の作成・計画への反映後）。
+- `py -3.12 scripts/eval_fast_scan.py` → 14ケース18問、通常6/リスニング8、
+  hardware_verified=false、ai_executed=false。合成データの照合のみ。
+- `ruff check .` → **All checks passed!**。
+- 一回限りの構造検査: 先行計画本文保持、R1〜R13、FS-01〜58一意・依存順維持、
+  完了FS-02のみ、S01〜S30とX01〜X06、関連5文書の45ローカルリンク/アンカー解決。
+  最初の先行計画比較は既存の案内リンク・区切り線も本文と比較して失敗したため、
+  差分を確認して追加案内だけを分離し、元の本文が保持されていることを確認した。
+- `git diff --check`成功。アプリコード変更なしのためAndroidビルド/実機試験は再実行していない。
+
+今回の変更はtasks/plan.md、tasks/todo.md、docs/README.md、
+docs/fast-scan-preflight.md、docs/fast-scan-external-examples.md、本進捗ファイル。
+開始時からstageされていたscripts/eval_fast_scan.py、tests/fixtures/fast_scan/cases.json、
+tests/test_fast_scan_pack.pyは変更・stage操作していない。
+既存の未追跡ツール出力にも変更していない。今回コミット/プッシュは行っていない。
+外部製品資料は閲覧したが、製品操作の比較、端末導入、録音、AI送信や設定変更は行っていない。
+
+### 次に進む順序
+
+1. 準備ノートのstartから、外部調査E01〜E06と採用判断を読む。
+2. FS-01の実写/実録音・独立保持資料を準備し、X01〜X06を対応FSの試験へ落とす。
+   追加比較のために既存の合格条件やスマホ操作0回を緩めない。
+3. 準備ノート§7のA群に従い、端末不要の状態/契約の準備を進められる。
+   実SDK採用・本番結合はFS-03〜07の能力実証結果で決める。
+4. 実機/実AI試験ではその時点の端末・接続・認証条件と操作範囲を確認。
+   以前のWi-Fi・SDK能力・ビルド成功を、今回のBluetooth＋同時録音の合格に転用しない。
+
+使用スキル: progress-checkpoint → research（外部資料調査のみ別エージェント）→
+planning-and-task-breakdown（既存計画の更新）。次の段階ではAgent Skillsの
+実装/検証スキルを責任に合わせて選び直す。
+
+## 2026-09-07 — GitHub PR向けの進捗保存
+
+ユーザーから進捗の保存とGitHub PR作成を明示的に依頼された。
+対象は `TroroOrosi/rokid-docscan-starter`、head `agent/real-device-test-prep`、base `main`。
+PR #30はMERGEDであり、同ブランチの新しいopen PRは存在しないことを確認した。
+今回のPRはmain以降のグラス側スキャン基盤13コミットと、合成評価パック、
+自動スキャン/同時リスニング計画、外部6アプリの調査・比較試験を含む。
+旧計画と新構成を区別し、自動スキャン/同時録音が実装済みとは記載しない。
+
+提出前の検証:
+
+- `py -3.12 -m pytest -q` → **441 passed, 1 warning in 19.69s**。
+  warningは既存Starlette/httpxの非推奨通知。
+- `ruff check .` → **All checks passed!**。
+- `git diff --check` / `git diff --cached --check`成功。
+- Android追跡対象112ファイルを `C:/Users/Public/rokid-build-20260905`
+  の対応ファイルとバイト比較し、欠落/差分0件。
+  既存の242テスト、assembleDebug、glassdoc/glassapp lint成功記録を再利用。
+  今回Android再ビルド・端末インストールは行っていない。
+- 今回保存する9ファイルに既知の実キー形式・秘密鍵のパターンなし。
+  未追跡ツール設定/生成物はコミットへ含めない。
+
+評価パック3ファイルと計画・記録6ファイルを分けてコミットし、通常push後にPRを作成する。
+PRのURLと公開確認結果は次の節に保存する。mainへのmergeは今回の依頼に含まれない。
