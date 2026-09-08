@@ -1,0 +1,528 @@
+{
+  "kind": "rokid-fast-scan-preflight-v1",
+  "revision": 1,
+  "evidence": "synthetic_design_cases",
+  "media_status": "not_photographed_or_recorded",
+  "purpose": "端末なしの契約準備用。実機・ASR・AIの精度実績ではない。expectedをAIの入力へ渡さない。",
+  "cases": [
+    {
+      "id": "N01",
+      "mode": "normal",
+      "title": "数値と単位",
+      "input": {
+        "pages": [
+          {
+            "id": "P1",
+            "text": "問1 縦4 cm、横9 cmの長方形の面積を、単位を付けて答えなさい。",
+            "image_file": null
+          }
+        ],
+        "audio": []
+      },
+      "expected": [
+        {
+          "question_id": "Q1",
+          "status": "answered",
+          "answer": "36 cm²",
+          "scoring": "exact",
+          "page_ids": [
+            "P1"
+          ],
+          "audio_ids": []
+        }
+      ]
+    },
+    {
+      "id": "N02",
+      "mode": "normal",
+      "title": "選択肢が次ページ",
+      "input": {
+        "pages": [
+          {
+            "id": "P1",
+            "text": "問1 1袋に8個入った品物が3袋ある。全部の個数を次ページの選択肢から選びなさい。",
+            "image_file": null
+          },
+          {
+            "id": "P2",
+            "text": "問1の選択肢\nA: 11個\nB: 24個\nC: 32個",
+            "image_file": null
+          }
+        ],
+        "audio": []
+      },
+      "expected": [
+        {
+          "question_id": "Q1",
+          "status": "answered",
+          "answer": "B（24個）",
+          "scoring": "exact",
+          "page_ids": [
+            "P1",
+            "P2"
+          ],
+          "audio_ids": []
+        }
+      ]
+    },
+    {
+      "id": "N03",
+      "mode": "normal",
+      "title": "章ごとに問番号が再開",
+      "input": {
+        "pages": [
+          {
+            "id": "P1",
+            "text": "第1章 問1: 2＋2を計算しなさい。",
+            "image_file": null
+          },
+          {
+            "id": "P2",
+            "text": "第2章 問1: 3×3を計算しなさい。",
+            "image_file": null
+          }
+        ],
+        "audio": []
+      },
+      "expected": [
+        {
+          "question_id": "第1章.Q1",
+          "status": "answered",
+          "answer": "4",
+          "scoring": "exact",
+          "page_ids": [
+            "P1"
+          ],
+          "audio_ids": []
+        },
+        {
+          "question_id": "第2章.Q1",
+          "status": "answered",
+          "answer": "9",
+          "scoring": "exact",
+          "page_ids": [
+            "P2"
+          ],
+          "audio_ids": []
+        }
+      ]
+    },
+    {
+      "id": "N04",
+      "mode": "normal",
+      "title": "証明自体が完全な答え",
+      "input": {
+        "pages": [
+          {
+            "id": "P1",
+            "text": "問1 任意の2つの偶数の和が偶数になることを、整数を用いて証明しなさい。",
+            "image_file": null
+          }
+        ],
+        "audio": []
+      },
+      "expected": [
+        {
+          "question_id": "Q1",
+          "status": "answered",
+          "answer": "任意の偶数を2m、別の任意の偶数を2nとおく。ただしm、nは整数である。この2つの数の和は2m＋2n＝2(m＋n)となる。整数の和m＋nも整数なので、この和は2の整数倍である。したがって、任意の2つの偶数の和は偶数である。",
+          "scoring": "manual_rubric",
+          "page_ids": [
+            "P1"
+          ],
+          "audio_ids": [],
+          "rubric": [
+            "任意の偶数を2mと2nで表す",
+            "mとnが整数だと述べる",
+            "和を2(m+n)と変形する",
+            "m+nが整数なので偶数と結論する"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "N05",
+      "mode": "normal",
+      "title": "小問と単位換算",
+      "input": {
+        "pages": [
+          {
+            "id": "P1",
+            "text": "問1 自動車が144 kmを2時間で走った。\n(1) 平均の速さをkm/hで答えなさい。\n(2) (1)の速さをm/sに直しなさい。",
+            "image_file": null
+          }
+        ],
+        "audio": []
+      },
+      "expected": [
+        {
+          "question_id": "Q1.1",
+          "status": "answered",
+          "answer": "72 km/h",
+          "scoring": "exact",
+          "page_ids": [
+            "P1"
+          ],
+          "audio_ids": []
+        },
+        {
+          "question_id": "Q1.2",
+          "status": "answered",
+          "answer": "20 m/s",
+          "scoring": "exact",
+          "page_ids": [
+            "P1"
+          ],
+          "audio_ids": []
+        }
+      ]
+    },
+    {
+      "id": "N06",
+      "mode": "normal",
+      "title": "欠けた図を補って捏造しない",
+      "input": {
+        "pages": [
+          {
+            "id": "P1",
+            "text": "問1 図1の三角形の面積を答えなさい。\n[この評価ケースでは図1が欠落している]",
+            "image_file": null
+          }
+        ],
+        "audio": []
+      },
+      "expected": [
+        {
+          "question_id": "Q1",
+          "status": "needs_material",
+          "answer": "",
+          "scoring": "status",
+          "page_ids": [
+            "P1"
+          ],
+          "audio_ids": [],
+          "missing": [
+            "図1"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "L01A",
+      "mode": "listening",
+      "title": "同じ資料・音声条件A",
+      "input": {
+        "pages": [
+          {
+            "id": "P1",
+            "text": "問1 放送の条件を満たす便のうち、最も早く出発する便を選び、便名・発車時刻・運賃を答えなさい。\nA便 8:10発 1,200円\nB便 8:35発 1,400円\nC便 9:10発 1,000円",
+            "image_file": null
+          }
+        ],
+        "audio": [
+          {
+            "id": "A1",
+            "transcript": "出発は8時20分以降、9時までです。予算は1,500円以内です。",
+            "audio_file": null
+          }
+        ]
+      },
+      "expected": [
+        {
+          "question_id": "Q1",
+          "status": "answered",
+          "answer": "B便（8:35発、1,400円）",
+          "scoring": "exact",
+          "page_ids": [
+            "P1"
+          ],
+          "audio_ids": [
+            "A1"
+          ]
+        }
+      ],
+      "contrast_group": "timetable"
+    },
+    {
+      "id": "L01B",
+      "mode": "listening",
+      "title": "同じ資料・音声条件B",
+      "input": {
+        "pages": [
+          {
+            "id": "P1",
+            "text": "問1 放送の条件を満たす便のうち、最も早く出発する便を選び、便名・発車時刻・運賃を答えなさい。\nA便 8:10発 1,200円\nB便 8:35発 1,400円\nC便 9:10発 1,000円",
+            "image_file": null
+          }
+        ],
+        "audio": [
+          {
+            "id": "A1",
+            "transcript": "出発は8時50分以降、9時30分までです。予算は1,500円以内です。",
+            "audio_file": null
+          }
+        ]
+      },
+      "expected": [
+        {
+          "question_id": "Q1",
+          "status": "answered",
+          "answer": "C便（9:10発、1,000円）",
+          "scoring": "exact",
+          "page_ids": [
+            "P1"
+          ],
+          "audio_ids": [
+            "A1"
+          ]
+        }
+      ],
+      "contrast_group": "timetable"
+    },
+    {
+      "id": "L02",
+      "mode": "listening",
+      "title": "数量の訂正を反映",
+      "input": {
+        "pages": [
+          {
+            "id": "P1",
+            "text": "問1 商品は1個120円です。放送で最後に確定した個数を使い、合計金額を答えなさい。",
+            "image_file": null
+          }
+        ],
+        "audio": [
+          {
+            "id": "A1",
+            "transcript": "注文は15個です。訂正します。50個に変更してください。",
+            "audio_file": null
+          }
+        ]
+      },
+      "expected": [
+        {
+          "question_id": "Q1",
+          "status": "answered",
+          "answer": "6,000円",
+          "scoring": "exact",
+          "page_ids": [
+            "P1"
+          ],
+          "audio_ids": [
+            "A1"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "L03",
+      "mode": "listening",
+      "title": "英語の否定と条件",
+      "input": {
+        "pages": [
+          {
+            "id": "P1",
+            "text": "Question 1. Choose the meal Maya wants.\nA: Chicken and rice with nuts.\nB: Chicken and rice without nuts.\nC: Fish and potatoes without nuts.",
+            "image_file": null
+          }
+        ],
+        "audio": [
+          {
+            "id": "A1",
+            "transcript": "Maya wants chicken and rice. She does not want any nuts in her meal.",
+            "audio_file": null
+          }
+        ]
+      },
+      "expected": [
+        {
+          "question_id": "Q1",
+          "status": "answered",
+          "answer": "B",
+          "scoring": "exact",
+          "page_ids": [
+            "P1"
+          ],
+          "audio_ids": [
+            "A1"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "L04",
+      "mode": "listening",
+      "title": "読み上げが問題順と逆",
+      "input": {
+        "pages": [
+          {
+            "id": "P1",
+            "text": "問1 赤いカードは1枚50円。読み上げられた枚数の合計金額を答えなさい。",
+            "image_file": null
+          },
+          {
+            "id": "P2",
+            "text": "問2 青いカードは1枚70円。読み上げられた枚数の合計金額を答えなさい。",
+            "image_file": null
+          }
+        ],
+        "audio": [
+          {
+            "id": "A1",
+            "transcript": "先に問2です。青いカードは3枚です。",
+            "audio_file": null
+          },
+          {
+            "id": "A2",
+            "transcript": "次は問1です。赤いカードは5枚です。",
+            "audio_file": null
+          }
+        ]
+      },
+      "expected": [
+        {
+          "question_id": "Q1",
+          "status": "answered",
+          "answer": "250円",
+          "scoring": "exact",
+          "page_ids": [
+            "P1"
+          ],
+          "audio_ids": [
+            "A2"
+          ]
+        },
+        {
+          "question_id": "Q2",
+          "status": "answered",
+          "answer": "210円",
+          "scoring": "exact",
+          "page_ids": [
+            "P2"
+          ],
+          "audio_ids": [
+            "A1"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "L05",
+      "mode": "listening",
+      "title": "共通音声を複数の小問で使う",
+      "input": {
+        "pages": [
+          {
+            "id": "P1",
+            "text": "問1 入館料表: 大人通常1,000円、大人割引800円、学生500円。\n(1) 放送の大人1人の入館料はいくらか。\n(2) 同じ条件の大人2人分の入館料はいくらか。",
+            "image_file": null
+          }
+        ],
+        "audio": [
+          {
+            "id": "A1",
+            "transcript": "このグループの大人は全員、割引券を持っています。",
+            "audio_file": null
+          }
+        ]
+      },
+      "expected": [
+        {
+          "question_id": "Q1.1",
+          "status": "answered",
+          "answer": "800円",
+          "scoring": "exact",
+          "page_ids": [
+            "P1"
+          ],
+          "audio_ids": [
+            "A1"
+          ]
+        },
+        {
+          "question_id": "Q1.2",
+          "status": "answered",
+          "answer": "1,600円",
+          "scoring": "exact",
+          "page_ids": [
+            "P1"
+          ],
+          "audio_ids": [
+            "A1"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "L06",
+      "mode": "listening",
+      "title": "必要な録音がない",
+      "input": {
+        "pages": [
+          {
+            "id": "P1",
+            "text": "問1 放送で指定された番号を選びなさい。\nA: 1\nB: 2\nC: 3",
+            "image_file": null
+          }
+        ],
+        "audio": []
+      },
+      "expected": [
+        {
+          "question_id": "Q1",
+          "status": "needs_material",
+          "answer": "",
+          "scoring": "status",
+          "page_ids": [
+            "P1"
+          ],
+          "audio_ids": [],
+          "missing": [
+            "録音"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "L07",
+      "mode": "listening",
+      "title": "終了直前の発話で条件が変わる",
+      "input": {
+        "pages": [
+          {
+            "id": "P1",
+            "text": "問1 正方形の1辺は6 cmです。読み上げで最後に指定された量を、単位付きで答えなさい。",
+            "image_file": null
+          }
+        ],
+        "audio": [
+          {
+            "id": "A1",
+            "transcript": "周の長さを求めてください。",
+            "audio_file": null
+          },
+          {
+            "id": "A2",
+            "transcript": "訂正です。最後は面積を答えてください。",
+            "audio_file": null
+          }
+        ]
+      },
+      "expected": [
+        {
+          "question_id": "Q1",
+          "status": "answered",
+          "answer": "36 cm²",
+          "scoring": "exact",
+          "page_ids": [
+            "P1"
+          ],
+          "audio_ids": [
+            "A1",
+            "A2"
+          ]
+        }
+      ]
+    }
+  ]
+}

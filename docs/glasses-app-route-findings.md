@@ -118,8 +118,14 @@ public final class GlassesInfo {
 }
 ```
 
-`displayWidth` / `displayHeight` はグラス側 UI を書くのに必須で、現在は不明のまま
-CUSTOMVIEW の 3 行制約を経験則で守っている。
+`displayWidth` / `displayHeight` はグラス側 UI を書くのに必須である。
+
+> **訂正 2026-09-03。** 「不明のまま」という記述は古い。2026-09-01 に直接接続した
+> `RG_glasses`（build `1.25.012-20260901-150201`）で **480x640 @ 240dpi** を実測済み。
+> 外部の独立した計測（zenn / maruhana, `getprop` と `wm size`）も同じ値を報告しており、
+> 加えて Android 12 / API 32、`ro.config.low_ram=true`、`MemTotal` 約 1.73GB を記録して
+> いる。CUSTOMVIEW の 3 行制約はオーバーレイの性質であって、この画面サイズの帰結では
+> ない。
 
 ### アプリ管理 API（SDK ラッパー版）
 
@@ -244,7 +250,7 @@ private const val SWIPE_DOMINANCE = 1.3f
 
 | アーティファクト | 最新リリース | 最終更新 | 備考 |
 |---|---|---|---|
-| `com.rokid.cxr:client-l` | **1.1.1** | 2026-08-27 | 現在使用中。最新リリースに追随済み。`1.2.X-SNAPSHOT` あり |
+| `com.rokid.cxr:client-l` | **1.1.2** | 2026-08-28 | `1.1.1` を使用中。**最新リリースではない。** `1.2.X-SNAPSHOT` あり |
 | `com.rokid.cxr:cxr-service-bridge` | **1.0** | 2026-07-28 | CXR-S。グラス上で動くアプリ用 |
 | `com.rokid.cxr:client-m` | 1.2.2 | 2026-08-26 | 電話機コンパニオン用。未使用 |
 
@@ -315,9 +321,19 @@ Phase 2 でグラス側に機能を移す場合、CXR-S が該当の SDK であ�
 
 1. **`AiInterceptMode.BLOCK_AI` は実際に何をするか。** 長押し・ダブルタップ・
    二本指の OS 占有を解除できるなら、設計全体に影響する。
-2. **グラス側アプリで長押し・ダブルタップ・二本指は使えるか。** リファレンス実装は
-   単タップと水平スワイプしか使っていない。それが「使えるのがこれだけ」だからなのか、
-   「必要がこれだけ」だったのかが区別できない。
+2. ~~**グラス側アプリで長押し・ダブルタップ・二本指は使えるか。**~~ **解決 2026-09-03。**
+   理由は端末上の `/system/usr/keylayout/Generic.kl` にある。2 本指スワイプ・2 本指
+   ダブルタップ・1 本指長押しは `SPRITE_SWIPE_FORWARD` / `SPRITE_SWIPE_BACK` /
+   `SPRITE_DOUBLE_TAP` / `PROG_BLUE` といったベンダー独自コードに割り当てられており、
+   AOSP の `KeyEvent.KEYCODE_*` に対応する定数が無いため通常のアプリには届かない。
+   アプリに届くのは 4 種だけである — 単タップの `KEYCODE_ENTER`、前後スワイプの
+   `KEYCODE_DPAD_*`、**1 本指ダブルタップの `KEYCODE_BACK`**、接触マーカーの
+   `KEYCODE_NOTIFICATION`（83, scan=204）。
+   リファレンス実装が単タップと水平スワイプしか扱っていないのは「必要がこれだけ」
+   ではなく「使えるのがこれだけ」だったからである。本リポジトリの GI-A 実測行
+   （`.agents/progress/glasses-input-and-real-device-prep.md`）は外部計測と一致する。
+   `KEYCODE_BACK` は消費しなければ Activity を終了させる。詳細は
+   `docs/glasses-primary-sources-2026-09-03.md`。
 3. **`appStart(String, boolean, IGlassAppCbk)` の `boolean` の意味。**
 4. **`uploadAndInstallApk` 経由の導入に開発用ケーブルが要るか。** 要らないはずだが未確認。
 5. **`client-l:1.2.X-SNAPSHOT` に何が入っているか。** 2026-08-27 更新。

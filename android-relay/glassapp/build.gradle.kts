@@ -18,8 +18,15 @@ android {
         // reference implementation and leaves room for older firmware.
         minSdk = 28
         targetSdk = 36
-        versionCode = 7
-        versionName = "0.1.6"
+        // 8 consumed KEYCODE_BACK: the firmware ends a one-finger double tap
+        // there, and leaving it unconsumed finished the Activity on a single
+        // mis-tap. BackExitPolicy supplies the deliberate way off the screen,
+        // confirmed on hardware 2026-09-04.
+        // 9 is behaviourally identical to 8. The input classes moved to
+        // `:glassinput` so `:glassdoc` shares them, which changes the APK; a
+        // changed artifact must not reuse a version number.
+        versionCode = 9
+        versionName = "0.1.8"
     }
 
     // AGP turns v1 (JAR) signing off on its own once minSdk is 24 or above, so
@@ -51,5 +58,8 @@ android {
 }
 
 dependencies {
+    // The gesture contract moved to `:glassinput` so `:glassdoc` can share the
+    // exact normalizer this app validated on hardware, rather than a copy of it.
+    implementation(project(":glassinput"))
     testImplementation("junit:junit:4.13.2")
 }

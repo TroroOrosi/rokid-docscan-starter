@@ -329,6 +329,17 @@ the far side, so holding it to 5 s would report a working install as
   server; and a development cable the retail package does not include (the
   magnetic charging port doubles as a data port) — that last one is procurement
   lead time.
+
+  > **Corrected 2026-09-03.** Both halves of this risk are now false.
+  > (a) The data-capable cable was obtained and used: from 2026-09-01 the
+  > glasses appear as `RG_glasses` over direct `adb`, and every glasses build
+  > from 0.1.0 to 0.1.6 was installed, launched, and read back through it.
+  > `adb logcat` is the channel, not the glasses display.
+  > (b) A CXR-S↔CXR-L message path is documented by a working third party:
+  > `TakanariShimbo/RokidGlassesAppCenter` runs JSON over `Caps` on a CXR-L
+  > `CUSTOMAPP` session, phone `sendCustomCmd("appmgr.req", ...)` to glasses
+  > `CXRServiceBridge` `subscribe`/`sendMessage`, and back on `appmgr.res`.
+  > Rokid does not publish the pairing, but it is not unknown.
 - **`cxr-service-bridge` ships native libraries**, `arm64-v8a` and
   `armeabi-v7a`: `libcaps`, `libcxr-bridge-jni`, `libcxr-sock-proto-jni`,
   `libflora-cli`, `libmutils`. `docs/glasses-app-route-findings.md` records "no
@@ -757,3 +768,764 @@ Resume in this order:
    `agent-skills:test-driven-development`;
 4. build from the verified ASCII copy and perform explicit-phone plus direct-
    glasses hardware acceptance without invoking capture or custom commands.
+
+## Checkpoint - 2026-09-03 published sources reviewed; capability spike built
+
+The user supplied three articles and three Reddit threads and asked whether the
+approach was still rational before continuing. The review found that several
+decisions here were taken from this repository's own notes rather than from
+sources that were already public, and that one hardware session re-derived a
+published table.
+
+### What was already public and did not need measuring
+
+- Two-finger gestures and the one-finger long press never reach an ordinary app
+  because `/system/usr/keylayout/Generic.kl` maps them to vendor codes
+  (`SPRITE_SWIPE_FORWARD`, `SPRITE_SWIPE_BACK`, `SPRITE_DOUBLE_TAP`,
+  `PROG_BLUE`) with no AOSP `KeyEvent` equivalent. One `adb shell cat` answers
+  what the GI-A session spent a controlled gesture run establishing.
+- Exactly four inputs reach an app: `KEYCODE_ENTER`, `KEYCODE_DPAD_*`,
+  `KEYCODE_BACK`, `KEYCODE_NOTIFICATION` (83, scan 204).
+- The display is 480x640 at 240 dpi. `docs/glasses-app-route-findings.md` still
+  called it unknown.
+- The glasses reach the network over their own Wi-Fi in several community apps,
+  while the Open risks here said nothing could be read off the device at all.
+- Phone-to-glasses custom commands are implemented publicly by
+  `TakanariShimbo/RokidGlassesAppCenter` as JSON over `Caps` on a CXR-L
+  `CUSTOMAPP` session.
+
+GI-A recorded that the double tap "closed the Activity because BACK remains
+unconsumed" and left it. That is the defect the user hit.
+
+### Checked against the artifact, 2026-09-03
+
+`javap` over the linked `client-l:1.1.1` AAR: `AuthorizationHelper`
+(`requestAuthorization`, `hasGlassPermission`, `isConnectHiRokid`,
+`canLaunchApp`), `GlassPermission{MICROPHONE, CAMERA, MEDIA, DEVICE_MANAGE}`,
+`ExternalAppClient.configCXRSession(CXRSession, ICXRSessionCbk)`,
+`CXRSessionType{NONE, CUSTOMVIEW, CUSTOMAPP}`, and `CxrSession.takePhoto`
+alongside `CxrSession.sendCustomCmd`. The relay calls none of this layer; grep
+finds zero references. Rokid Maven `maven-metadata.xml` reports `client-l`
+release **1.1.2** (`lastUpdated 20260828083628`); this repository pins 1.1.1.
+
+### Implemented
+
+- `:glassapp` 0.1.7 / versionCode 8. `GlassesInputAction.BACK` is normalized
+  from the measured `NOTIFICATION, NOTIFICATION, BACK` sequence, and
+  `BackExitPolicy` turns the first BACK into an armed confirmation and a second
+  within 3000 ms into an exit. The interception point is `onBackPressed`, not a
+  consumed `KEYCODE_BACK`: the key must still reach `Activity.onKeyDown` so the
+  framework tracks it. The measured build is API 32, where
+  `OnBackInvokedDispatcher` does not exist, so the lint request to migrate to
+  the AndroidX dispatcher is suppressed with an expiry condition recorded at
+  the call site.
+- New `:glassprobe` module 0.1.0 / versionCode 1, applicationId
+  `dev.rokid.docscanglass.probe`. Separate from `:glassapp` so that adding
+  CAMERA and INTERNET cannot weaken the no-permission record of the app under
+  test. It reports display metrics, camera enumeration, one explicitly
+  requested camera2 still into app-private cache, one `GET /health` plus one
+  `GET /v1/settings` against a `--es server` extra, and a BACK counter. It
+  uploads nothing, recognizes nothing, registers nothing, and does not touch
+  the privacy indicator.
+- Documents corrected in the same change: the unknown display size, the
+  superseded `client-l` release, the resolved gesture question, and both halves
+  of the "nothing can be read off the glasses" risk. New index
+  `docs/glasses-primary-sources-2026-09-03.md` records what is already known so
+  the next session does not re-search or re-measure.
+- `SPEC-custom-app-session.md` is retained as a draft but is no longer the next
+  increment; its Open Questions now carry the decision table the spike feeds.
+
+### Verified locally (commands and results)
+
+- `py -3.12 -m pytest -q`: **424 passed, 1 failed**. The failure is the known
+  environmental one: the repository-wide Markdown scan counts 57 untracked
+  tool-generated OpenSpec/Spec Kit files. Zero tracked Markdown files are
+  unclassified, and the new document is registered.
+- `ruff check .`: all checks passed. `git diff --check`: clean.
+- Android, from the ASCII copy with
+  `JAVA_HOME=C:/Users/Public/rokid-build-tools-20260901/jdk17/jdk-17.0.20.1+1`
+  (Android Studio `jbr` is openjdk 25 and AGP rejects it):
+  `testDebugUnitTest assembleDebug :glassapp:lintDebug :glassprobe:lintDebug`
+  -> **BUILD SUCCESSFUL**, 135 actionable tasks. `:app` 182 tests, `:glassapp`
+  31 tests, `:glassprobe` 6 tests, all 0 failures and 0 errors. Both lint tasks
+  pass.
+- Artifacts:
+  - `dev.rokid.docscanglass` 0.1.7 / 8, 140,364 B, SHA-256
+    `3F435131149A985B9E4015A603CC110C4ABFEC8E327B4DA05B16EA405415D6B1`.
+    `aapt2 dump badging` shows **no `uses-permission` at all**.
+  - `dev.rokid.docscanglass.probe` 0.1.0 / 1, 158,710 B, SHA-256
+    `60C9356B0A5497BD226A02ADB2CEDB4A1430F5084A0781F3F20780935D7715C6`,
+    `uses-permission` exactly CAMERA and INTERNET.
+  - `dev.rokid.docscanrelay` unchanged at 0.3.16 / 21, SHA-256
+    `C96BF67F51CC64BA0F581ABF97D09E73B9272243376DA2F2FBBB3D31F7E16A52`.
+
+### Not verified
+
+**Nothing was installed, started, or run on any device in this checkpoint.** The
+device bridge was not invoked and no photo was requested. A build proves
+compilation. Specifically unverified on hardware: that consuming the double tap
+keeps the Activity alive; that camera2 opens on the glasses; that the privacy
+indicator lights during and clears after a capture; that the glasses reach the
+server over Wi-Fi; and whether a sideloaded app appears in the glasses launcher.
+
+### Resume, with the approval each step needs
+
+1. Ask the user before any device write. `adb install` changes device state.
+2. Read-only first, no approval needed:
+   `adb -s SERIAL shell cmd package query-activities -a android.intent.action.MAIN
+   -c android.intent.category.LAUNCHER | grep docscanglass`. If absent, phone-side
+   `openApp` becomes mandatory and `SPEC-custom-app-session.md` is promoted.
+3. With approval, install only the two hashes above to the explicit
+   `RG_glasses` serial, then
+   `adb -s SERIAL shell am start -n
+   dev.rokid.docscanglass.probe/.CapabilityProbeActivity --es server
+   "http://HOST:8000"` and read `adb logcat -s DocScanGlassProbe`.
+4. Run P2 only with an independent observer keeping the privacy indicator
+   continuously in frame. If that is not arranged, skip P2 and report it as not
+   run rather than as a negative result.
+5. Record the outcome against the decision table in
+   `SPEC-custom-app-session.md`, then choose the architecture.
+
+## Checkpoint — 2026-09-04 hardware acceptance run; the spike is settled
+
+The user connected the glasses on request and approved the installs. Every
+device write below was run against the explicit serial `1904092623381086`
+(`RG-glasses`), never a bare `adb install`.
+
+### Device, read-only, before any write
+
+`ro.build.fingerprint=Rokid/glasses/glasses:12/SKQ1.240613.001/1.25.012-20260901-150201:user/release-keys`,
+Android 12 / API 32, `ro.config.low_ram=true`. `dev.rokid.docscanglass` was
+present at 0.1.6 / versionCode 7.
+
+**Launcher visibility was answered without installing anything.**
+`cmd package query-activities -a android.intent.action.MAIN -c android.intent.category.LAUNCHER`
+returns 18 activities across 9 packages, and
+`dev.rokid.docscanglass/.TapProbeActivity` is one of them, beside
+`com.android.camera2`, `com.android.settings`, `com.rokid.os.sprite.launcher`,
+`com.eg.android.AlipayGGlasses` and `com.tencent.glasswxpay.glassapp`. A
+sideloaded app is launcher-visible, so **phone-side `openApp` is not a
+precondition** and `SPEC-custom-app-session.md` is not promoted.
+
+### Installed
+
+Hashes were re-computed immediately before the install and matched the recorded
+build exactly.
+
+| APK | Version | SHA-256 | Result |
+|---|---|---|---|
+| `dev.rokid.docscanglass` | 0.1.7 / 8 | `3F435131149A985B9E4015A603CC110C4ABFEC8E327B4DA05B16EA405415D6B1` | `Success`, confirmed 0.1.7 / 8 on device |
+| `dev.rokid.docscanglass.probe` | 0.1.0 / 1 | `60C9356B0A5497BD226A02ADB2CEDB4A1430F5084A0781F3F20780935D7715C6` | `Success`, confirmed 0.1.0 / 1 on device |
+
+### P1 display — OK
+
+`480x640 240dpi heap256MB`, read from inside the app. Matches the 2026-09-01
+`dumpsys` measurement and the published figure.
+
+### P2 camera — OK, and the privacy indicator behaves
+
+Seven consecutive stills, every one at the sensor maximum:
+
+| Time | Size | Bytes | Elapsed |
+|---|---|---|---|
+| 18:15:40 | 4032x3024 | 5,718,125 | 1380 ms |
+| 18:15:54 | 4032x3024 | 5,915,983 | 922 ms |
+| 18:16:01 | 4032x3024 | 5,929,367 | 785 ms |
+| 18:16:22 | 4032x3024 | 6,127,682 | 811 ms |
+| 18:16:26 | 4032x3024 | 6,081,992 | 796 ms |
+
+`camera2` opens from an ordinary third-party app holding only
+`android.permission.CAMERA`. The phone relay `takePhoto` was measured at 5.2 s;
+glasses-direct capture is roughly six times faster at full resolution.
+
+**Privacy indicator, corroborated two independent ways.** An observer watching
+the physical LED reported it lit only while the capture was pending. The kernel
+LED driver log shows the same on all seven captures:
+
+```
+CameraService: connectDevice                   18:15:38.593
+aw2110x chan=3 brightness=0xFF   <- lit        18:15:38.624   (+31 ms)
+finishCameraStreamingOps                       18:15:39.748
+aw2110x chan=3 brightness=0x00   <- cleared    18:15:39.767   (+19 ms)
+CameraService: disconnect                      18:15:40.091
+```
+
+Channel 3 is the white privacy LED. It is driven by the camera pipeline in
+firmware and clears **before** the client disconnects; the app never touches it.
+All three `CLAUDE.md` acceptance conditions hold on this firmware.
+`run-as ... ls cache/` after `onDestroy` shows the directory empty, so
+`probe-capture.jpg` was deleted as designed. Nothing was uploaded, recognized,
+or registered.
+
+### P3 network — OK, and this is the finding that decides the architecture
+
+The glasses reach the FastAPI server over their own Wi-Fi, twice, independently:
+
+```
+18:12:27  link=wlan0=192.168.0.5  /health 200 in 197ms   /v1/settings 200 in 17ms
+18:15:03  link=wlan0=192.168.0.5  /health 200 in  96ms   /v1/settings 200 in 1037ms
+```
+
+Server was `app 0.16.0 / API 1.15.0` on `192.168.0.32:8000`. The phone is not
+required in the data path.
+
+### P4 BACK — OK
+
+```
+18:18:35.238  probe P4 BACK OK consumed x1, again to exit
+18:18:40.346  probe P4 BACK OK consumed x2, again to exit   (+5.11 s, window expired, re-armed)
+18:18:43.870  probe P4 BACK OK consumed x3, again to exit   (+3.52 s, window expired, re-armed)
+18:18:46.014  back confirmed after 4 reports; finishing     (+2.14 s, inside the window)
+```
+
+`KEYCODE_BACK` is consumable by an ordinary app. Three of four deliveries were
+consumed without finishing the Activity, and the timeout re-arm behaved as the
+unit tests specify.
+
+### `:glassapp` 0.1.7 on hardware — the double-tap exit is fixed
+
+```
+18:21:15.229  KEYCODE_NOTIFICATION DOWN  #39
+18:21:15.246  KEYCODE_NOTIFICATION UP    #40
+18:21:15.412  KEYCODE_NOTIFICATION DOWN  #41
+18:21:15.430  KEYCODE_NOTIFICATION UP    #42
+18:21:15.720  KEYCODE_BACK DOWN          #43
+18:21:15.720  normalized #7 action=BACK          <- emitted exactly once
+18:21:15.744  back armed; a second BACK within 3000 ms exits
+```
+
+`topResumedActivity` remained `dev.rokid.docscanglass/.TapProbeActivity`: the
+Activity survived. The measured correlation span is 491 ms, inside the 970 ms
+bound the normalizer enforces. Deduplication also confirmed on a forward swipe —
+two `KEYCODE_DPAD_RIGHT` events produced a single
+`normalized #6 action=SWIPE_FORWARD`.
+
+**This closes the defect the user identified.** On 0.1.6 a single mis-tap ended
+the session; on 0.1.7 it does not.
+
+### New platform constraint: folding the temples kills a third-party app
+
+Found by diagnosing an unexpected close, and not recorded anywhere in this
+repository before. `com.rokid.os.sprite.assistserver` (pid 2041) manages a
+third-party app as a `third_app` scene and cancels it when the temple arms fold:
+
+```
+ACTION_LEG_STATUS_CHANGED  leg status: 0   vendor.rkd.glasses.is_spread: 0
+SceneManager -> glassLegStatusChange spread[false]
+SceneManager -> cancelAllScene()  ignoreSceneList -> [[phone_call]]
+   closeMark = SceneCloseMark(initiator=glass_use_event, param=glassLegStatusChange fold)
+ThirdAppScene -> isSceneRunning: true, useTime: 3
+SceneManager -> stopSceneAndSendToMobile sceneList -> [[third_app]]
+-> ActivityManager kills dev.rokid.docscanglass.probe
+-> topResumedActivity = com.rokid.os.sprite.launcher
+```
+
+Only `phone_call` is exempt. A glasses-side operator surface cannot survive the
+glasses being folded, so any session state it holds must be recoverable.
+`getprop vendor.rkd.glasses.is_spread` reads the current state (1 spread,
+0 folded). Keep the temples spread for the whole of any measurement.
+
+### Architecture decision
+
+Row 1 of the `SPEC-custom-app-session.md` decision table applies:
+**glasses-direct**. The camera opens, the privacy indicator behaves, the glasses
+reach the server on their own Wi-Fi, and the app is launcher-visible.
+CUSTOMVIEW, the Hi Rokid AIDL path, echo suppression, close tracking, and the
+keep-the-phone-awake constraint are not required for the capture path.
+`SPEC-custom-app-session.md` stays a Draft as the documented CUSTOMAPP +
+CustomCMD transport, to be revived only if the operating network makes the
+glasses Wi-Fi unusable.
+
+### Not verified
+
+Battery life, thermal behaviour, and Wi-Fi retention over a long operating
+session were not measured; P3 measured reachability, not endurance. No OCR,
+upload, analysis, or page registration was exercised on the glasses-direct path
+— no such code exists yet. `AiInterceptMode.BLOCK_AI` and the `boolean` in
+`appStart(String, boolean, IGlassAppCbk)` remain unknown. The relay
+(`dev.rokid.docscanrelay` 0.3.16 / 21) was not changed, reinstalled, or run.
+
+## Checkpoint — 2026-09-04 (late) suspended by the user for a design rethink
+
+**Status: paused mid-task at the user's instruction.** The glasses-side app
+`:glassdoc` builds and unit-tests clean but is **not fit for use**, and the
+reason is an architectural mistake described below. Do not continue building on
+it without re-reading "The mistake" first.
+
+### What the user stopped the work to say
+
+Three criticisms, all correct, recorded verbatim in substance:
+
+1. **Hardware runs were used to discover things the repository already knew.**
+   The exposure regression and the framing check are both examples: reading
+   `PageFraming` and the relay's capture path first would have prevented both
+   without touching a device.
+2. **Referencing an existing element does not justify rebuilding around it.**
+3. **Why was a glasses-only app written from scratch when the existing relay
+   could be reused, given the control keys do not conflict?**
+
+### The mistake
+
+`:glassdoc` reimplemented, from nothing, what `dev.rokid.docscanrelay` already
+does and already tests: the server client, the Japanese ML Kit wrapper, the
+capture state machine, and a framing check that measured **worse** than the one
+the relay has had all along.
+
+The relay is an ordinary Android app at `minSdk 31`. The glasses report
+**API 32**. The only part of the relay bound to the phone is the capture call
+itself — `link.takePhoto(width, height, quality)` through CXR-L. Everything
+downstream of the JPEG is device-independent: `JapaneseOcr`, `PageFraming`,
+`ShotScore`, `CaptureReviewStore`, `DocScanApi`, the exam and explain session
+flows, the HUD contract. 182 tests cover it.
+
+**The route not taken, and the one to evaluate first next session:** run the
+existing relay on the glasses and replace only the capture seam — CXR-L
+`takePhoto` becomes a local `camera2` still. `:glassdoc`'s own classes would
+then reduce to that seam plus whatever the glasses HUD genuinely needs.
+
+This has not been designed or costed. It is a hypothesis, not a decision. Points
+that must be checked against the code before committing to it, none of which
+need hardware:
+
+- what in `:app` actually depends on `com.rokid.cxr:client-l` and whether that
+  dependency can be isolated behind an interface;
+- whether `MainActivity`'s phone-sized UI can be separated from the pipeline;
+- whether the relay's gesture handling collides with `:glassinput`'s normalizer
+  (the user's "操作キーが被らないなら" premise — verify, do not assume);
+- what `ROKID_REAL_MODE` and the exam/explain flows assume about the device.
+
+### Verified on hardware this session
+
+Serial `1904092623381086` (`RG-glasses`, build `1.25.012-20260901-150201`,
+Android 12 / API 32), phone `F-51F` relay `0.3.16` / 21.
+
+**The CXR-L app-control route works. This contradicts the earlier record.**
+
+| Call | Result | Latency |
+|---|---|---|
+| `queryGlassAppInstalled` | `ANSWERED installed=true` | **106 ms** |
+| `openApp` | `SUCCEEDED`, and the glasses foreground really became `dev.rokid.docscanglass/.TapProbeActivity` | **300 ms** |
+| `uploadAndInstallApk` | **not run.** It reads `glassapp.apk` from the phone; no such file is staged | — |
+
+The previous record — "no firmware has answered the call", two attempts ending
+in `onInstallAppResult(false)` after a constant 43-44 s — no longer holds. The
+untested variable named in the memory note was the **Hi Rokid glasses ADB
+debugging toggle**, which is now on (that is why the cable adb works). An
+earlier `openApp` `FAILED` in this session was a wrong activity name
+(`com.android.settings.MainActivity` does not exist; it is
+`com.android.settings.Settings`), not an API failure.
+
+`SPEC-custom-app-session.md`'s precondition is therefore demonstrated, not
+merely supported by bytecode.
+
+### Defects found in `:glassdoc`, and their state
+
+| Defect | Evidence | Fixed? |
+|---|---|---|
+| Two taps created two documents (3 and 4) | the guard sat on the response, not the request | **yes**, `ScanSession.beginOpenDocument()`, with a test |
+| Pages stored 180 degrees from upright, so the recognizer read Japanese as noise | `SENSOR_ORIENTATION=270`, `JPEG_ORIENTATION=0`; rotating the stored PNG 180 makes the exam paper legible | **yes**, `ReviewFrame.MEASURED_ROTATION_DEGREES`, applied to upload, OCR and review |
+| Mean luminance 16-24 of 255 against ~200 for a lit page | three stored PNGs measured | **not fixed.** See below |
+| `+2 EV` exposure bias **stopped capture completing** | four consecutive 15 s timeouts, zero images, where the untouched template had returned seven stills in 785-1380 ms | **reverted.** The relay never sets exposure either |
+| `FAILED` showed a blank HUD | operator could not see what to change | **yes**, the still now stays on screen through a failure |
+| Home-grown border-luminance framing check, worse than the relay's | operator judgement on hardware, and it is true: `PageFraming` works from recognized-line bounding boxes and names the cut side | **partly.** `PageFraming` extracted to `:pagequality` and wired in, unverified on hardware |
+| **Killed by `lowmemorykiller` at 118 MB RSS** | `Kill 'dev.rokid.docscanglass.doc' ... to free 121300kB rss`, `oom_score_adj 900` | **not fixed.** `PageOcr.MAX_EDGE_PIXELS = 2048` never subsamples: `4032/2 = 2016 < 2048`, so it decodes full 4032x3024 |
+| Aiming guide is sensor-shaped, not paper-shaped | camera is 4:3 (1.33); A4/B4 is 1:1.41. A portrait page cannot fill a 4:3 guide | **not fixed** |
+
+Measured framing of the first upload: the page filled **70.2% of frame width,
+82.8% of height**, and its bounding box reached **y=3016 of 3024** — cut at the
+bottom.
+
+### Repository state
+
+Branch `agent/real-device-test-prep`, HEAD `ce38e9e`, **nothing committed**.
+PR #30 exists; do not open a duplicate.
+
+New modules, all registered in `android-relay/settings.gradle.kts`:
+
+- `:glassinput` — plain `java-library`. The whole `input` package moved out of
+  `:glassapp` (every class was already free of android imports). Shared so
+  `:glassdoc` uses the normalizer `:glassapp` validated, not a copy.
+- `:pagequality` — plain `java-library`. `PageFraming` and `ShotScore` moved out
+  of `:app` **keeping package `dev.rokid.docscanrelay`**, so `:app` needed no
+  edit at all.
+- `:glassprobe` — the throwaway spike, its four questions answered.
+- `:glassdoc` — the glasses document scanner. See the defect table.
+
+Versions: `:glassapp` 0.1.8 / 9 (behaviourally identical to 8; the input classes
+moved). `:glassdoc` 0.5.0 / 5, installed on the glasses. `:glassprobe` 0.1.0 / 1.
+Relay unchanged at 0.3.16 / 21.
+
+### Verification actually run
+
+- Android, ASCII worktree, `JAVA_HOME=C:/Users/Public/rokid-build-tools-20260901/jdk17/jdk-17.0.20.1+1`:
+  `test testDebugUnitTest assembleDebug :glassdoc:lintDebug :glassapp:lintDebug`
+  -> **BUILD SUCCESSFUL**. `:app` 164, `:pagequality` 18, `:glassinput` 25,
+  `:glassdoc` 51, `:glassapp` 6, `:glassprobe` 6 = **270 tests, 0 failures,
+  0 errors**. 164 + 18 = the 182 `:app` had before the move, so nothing was
+  lost.
+- `py -3.12 -m pytest -q` -> 424 passed, 1 failed. The failure is the standing
+  environmental one: 57 untracked tool-generated markdown files, verified to be
+  entirely inside tool directories and none tracked by git.
+- `ruff check .` -> all checks passed. `git diff --check` -> clean.
+- **`test` is not redundant in that command.** `:glassinput` and `:pagequality`
+  are plain `java-library` modules; `testDebugUnitTest` alone silently skips
+  them. `CLAUDE.md` was corrected accordingly.
+
+### Not verified
+
+`:glassdoc` 0.5.0 has **never completed a page on hardware**. Neither the
+`PageFraming` integration, nor the 180-degree rotation as applied to a real
+upload, nor the review display in its current form, has been confirmed by a
+successful capture-to-upload cycle. The last hardware attempt ended with the
+process killed for memory. `uploadAndInstallApk` remains unrun. Battery,
+thermals and Wi-Fi endurance were measured for `:glassprobe`, not for
+`:glassdoc`, whose memory profile is different.
+
+### Resume, in order
+
+1. **Do not touch hardware first.** Answer from `:app`'s source whether the
+   relay can run on the glasses with only the capture seam replaced. That
+   decides whether `:glassdoc` shrinks to a seam or is abandoned.
+2. Ask the user for the paper size to design the aiming guide around; A4
+   portrait was proposed and not confirmed.
+3. Fix `PageOcr` subsampling regardless of route — full-resolution decode on a
+   `ro.config.low_ram=true` device is what the `lowmemorykiller` acted on.
+4. Underexposure is an operating condition, not a code defect: the relay's own
+   earlier finding was that contrast, not resolution, limits recognition. Light
+   the page rather than biasing the sensor; the bias broke capture outright.
+5. Only then return to hardware, with the specific question each run answers
+   written down before the cable goes in.
+
+## Checkpoint — 2026-09-05 the relay pipeline now runs on the glasses
+
+The route the 2026-09-04 suspension named -- reuse the relay, replace only the
+capture seam -- was costed from `:app`'s source **without touching hardware**,
+found to hold, and implemented.
+
+### What the source said, before any device
+
+- CXR-L imports appear in exactly one file of 30: `RokidGlobalLink`.
+- `DocScanController` reaches the link through 5 methods at 7 call sites.
+- 24 of those 30 files carry no platform import at all.
+- `PressGestureInterpreter` is CXR-L-callback-only, so `:glassinput` cannot
+  collide with it. The user's "操作キーが被らないなら" premise holds.
+
+That is the entire seam. `:glassdoc` had reimplemented 2451 lines behind it.
+
+### Built and verified locally
+
+| Stage | Tests |
+|---|---|
+| `CaptureSurface` seam extracted | 270, unchanged |
+| `ClientIdentity` injected so a library needs no BuildConfig | 273 |
+| `:relaycore` extracted: 45 files, 100% identical renames, zero `:app` source edits | 273 |
+| `JapaneseOcr` subsampling | 276 |
+| CUSTOMVIEW-only classes returned to `:app` | 276 |
+| `:glassdoc` rebuilt on the controller, 9 duplicate classes deleted | 242 |
+| B5 aiming guide | 242 |
+
+Final gate from the ASCII copy: `test testDebugUnitTest assembleDebug
+:glassdoc:lintDebug :glassapp:lintDebug` -> **BUILD SUCCESSFUL, 242 tests, 0
+failures, 0 errors**, both lint tasks pass. `ruff check .` passes.
+`py -3.12 -m pytest -q` gives **424 passed, 1 failed** -- the standing
+environmental failure, re-verified today: all 57 unclassified files are
+untracked tool output and all 34 tracked Markdown files are classified.
+
+The count falls 276 -> 242 because `:glassdoc`'s tests for the code this change
+deletes go with it; 9 routing tests are added. That responsibility is covered
+by `:relaycore`'s existing tests.
+
+### Two premises corrected against primary sources
+
+- `PageOcr`'s 2048 px bound never fired, because `4032/2 = 2016`. Its comment
+  justified refusing a quarter reduction by reading the measured 37 px column
+  pitch as a property of a 4032 px capture; `docs/capture-timing-findings.md`
+  line 16 measured it on a **1920x1080** capture, where the same page at 4032
+  carries roughly 78 px. The conclusion held, the reason did not. The new bound
+  is documented against the measurement it came from.
+- `HudLayout` builds CUSTOMVIEW JSON, so a glasses canvas cannot draw its
+  output -- the plan said it could. `CaptureSurface` passes `List<String>`, so
+  the seam survived the error; the class moved back to `:app`.
+
+### Not verified
+
+**Nothing in this checkpoint ran on hardware.** Specifically unverified: that
+`DocScanController` behaves against the glasses' own `SharedPreferences` and
+`filesDir`; that Japanese recognition holds at 2016 px; that the gesture
+routing table is the one an operator wants; and that a session survives the
+temple-fold force-stop. `:glassdoc` 0.6.0 / versionCode 6 has never been
+installed. `sdk_hint` still reports `client-l:1.0.1` where the resolved
+dependency is 1.1.1, deliberately left for its own change.
+
+### Resume state — 2026-09-05
+
+Branch `agent/real-device-test-prep`, working tree clean for tracked files.
+
+**PR #30 is MERGED, not open** -- it landed 2026-09-01 as `8cc22af`, and every
+earlier note in this file saying "PR #30 exists; do not open a duplicate" is
+stale from before that. Checked 2026-09-05: `gh pr list --state open` returns
+nothing, `main` carries only the merge commit that this branch lacks, and the
+11 commits of this session are **not in `main`**. Landing them needs a new
+pull request, which needs the operator to ask for one. The only untracked
+paths are tool output (`.agents/skills/`, `.claude/`, `.cursor/`, `.specify/`,
+`openspec/`) and they are deliberately excluded from every commit.
+
+**Build environment, rebuilt this session.** The previous ASCII copies
+(`rokid-docscan-build`, `-current-20260901a`) are stale. `build-windows.ps1`
+refuses a non-ASCII project path, and the checkout is under a Japanese path, so
+the working copy is:
+
+```bash
+SRC="/c/Users/pupu_/OneDrive/ドキュメント/rokid-docscan-starter/android-relay"
+BUILD="/c/Users/Public/rokid-build-20260905/android-relay"
+rm -rf "$BUILD"; cp -r "$SRC" "/c/Users/Public/rokid-build-20260905/"
+rm -rf "$BUILD/.gradle"
+printf 'sdk.dir=C:/Users/pupu_/AppData/Local/Android/Sdk\n' > "$BUILD/local.properties"
+```
+
+A copy, not `git worktree`: a worktree only sees HEAD, and every gate here runs
+against uncommitted work. Re-copy with `cp -r "$SRC"/. "$BUILD/"` when nothing
+was deleted; recreate the directory when files moved. `local.properties` is
+required — no `ANDROID_HOME` is set on this machine — and forward slashes avoid
+the Java properties escaping trap.
+
+```bash
+export JAVA_HOME="C:/Users/Public/rokid-build-tools-20260901/jdk17/jdk-17.0.20.1+1"
+powershell -NoProfile -ExecutionPolicy Bypass \
+  -File "C:\Users\Public\rokid-build-20260905\android-relay\build-windows.ps1" \
+  --console=plain test testDebugUnitTest assembleDebug \
+  :glassdoc:lintDebug :glassapp:lintDebug
+```
+
+Android Studio's `jbr` is openjdk 25 and AGP rejects it. `bc` is absent from
+this Git Bash; sum test results with `awk` over
+`*/build/test-results/**/TEST-*.xml`.
+
+**Editing note.** Source files are CRLF. `perl -pi -e 's/...$/'` silently fails
+to match because of the trailing `\r`; either drop the `$` anchor or write
+`\r?\n`, and emit `\r\n` in replacements that add lines.
+
+**Artifacts built at this HEAD** (none installed anywhere):
+
+| Module | Version | SHA-256 |
+|---|---|---|
+| `dev.rokid.docscanglass.doc` | 0.6.0 / 6 | `CA3618A6D39230A4B62A9C17685827B1B9A6FDEC4F132E6857818479D6E222AD` |
+| `dev.rokid.docscanrelay` | 0.3.16 / 21 | `4793E37D81714A4E9F18FA582504A23FB87630B662D15BEAE074ECA2E62FBFB1` |
+| `dev.rokid.docscanglass` | 0.1.8 / 9 | `5FE98E72D40212A90ADD2949891BA1D360048BE4FBC9105D301002E3202584D4` |
+
+**The relay APK differs from the installed one at the same versionCode.** The
+phone carries 0.3.16 / 21 with SHA-256 `C96BF67F...E16A52`; the `:relaycore`
+split rebuilt it to the hash above. Bump `versionCode` before installing, or
+the two builds become indistinguishable on the device.
+
+### Next steps, in order
+
+1. **Ask before any device write.** State the question each run answers first.
+2. Read-only: confirm the glasses appear as `RG-glasses` (serial
+   `1904092623381086`) and that `getprop vendor.rkd.glasses.is_spread` is 1.
+   Keep the temples spread — folding force-stops the app.
+3. Start the server: `unset OPENAI_BASE_URL ANTHROPIC_BASE_URL`, then
+   `py -3.12 -m uvicorn app.main:app --host 0.0.0.0 --port 8000`. There is
+   still **no `.env` and no provider key**, so the analyzer reports
+   `placeholder, offline: true`; finalization of a photo-only page will fail
+   until the operator supplies one.
+4. Install `:glassdoc` 0.6.0 to the explicit serial, launch with
+   `am start -n dev.rokid.docscanglass.doc/.DocScanGlassActivity --es server
+   "http://HOST:8000"`, read `adb logcat -s DocScanGlassDoc`.
+5. Answer U1 first (does `DocScanController` work against the glasses'
+   `SharedPreferences`/`filesDir`), then U2 (recognition at 2016 px), then the
+   routing table's usability. Record which question each run answered.
+6. Separately, and not on hardware: `sdk_hint` still says `client-l:1.0.1`.
+
+## 2026-09-06 — 自動スキャン・同時リスニングの詳細計画を作成
+
+### 再開時に優先するユーザー訂正
+
+今回の依頼は、ソースと一次資料を調べた上での詳細な改善計画の作成。
+この節で実装完了を宣言していない。アプリコード、端末、外部AI設定は変更していない。
+
+ユーザーは最終的に環境を次のように明確化した:
+**グラスはWi-Fiに接続できない。スマホは携行し、モバイル回線でインターネットを利用できる。
+PC・自前サーバは現場で使わない。完全オフライン解答は必須ではない。**
+前回の中断時草案にあった「スマホ内AIで完全オフライン解答をP0にする」は撤回済み。
+古い段落のサーバ起動・グラスのWi-Fi接続を、今回の本番構成へ戻さない。
+
+録音しながら資料をスキャンし、問題と読み上げ音声の両方から解答する。
+グラス起動で通常/リスニングを選択。用紙を自動認識して撮影し、実画像を3秒確認、
+タップは同じページの取り直し、無操作は次ページ。第1ダブルタップで撮影終了、
+リスニングは録音を続け、別の第2ダブルタップで録音終了。
+問題ごとの完全な答えだけを表示し、閲覧終了を保存して次回は最初の選択画面へ戻す。
+初回準備後は、スマホをロックしたまま日常操作0回を必須とする。
+
+### 成果物と着手順
+
+- [詳細計画](../../tasks/plan.md#glasses-autoscan-listening-20260906): 13の必須要件、
+  状態/ジェスチャ、3秒と終了の競合、ページ判定、連続録音、転送/保存、AIの選択、
+  長い音声と複数ページの入力、全文表示、終了/復旧、測定目標、一次資料を記載。
+- [実装タスク](../../tasks/todo.md#fast-scan-tasks): FS-01〜51と追加候補FS-52〜58。
+  **すべて未実装・未チェック。** 各実装タスクに完了条件、依存、検証、最大5ファイルの対象を記載。
+- docs/README.md: 新計画を提案として索引化し、先行承認済み計画と区別。
+  glassdocの現在の0.6.0/code6と、+2EV撤回・当該APKの実機未検証も訂正。
+
+次はFS-01〜07のM0から。評価資料/基準整理 → カメラ＋録音同時試験 →
+Bluetooth/CXRでJPEGと音声の転送 → スマホロック中の寿命 →
+スマホのモバイル回線で音声認識・画像＋原音から1問解答を順に実証する。
+実機と実AIの事前設定が必要な時は、その時点の利用者環境と認証を確認する。
+計画作成の範囲で端末インストール、録音、AIへの資料送信、課金設定を実施していない。
+
+### 調査で確認したこと・未確認のこと
+
+- 既存 :glassdoc / :relaycore / :glassinput / :pagequality を再利用する。
+  削除済みの重複パイプラインや固定+2EVを復活させない。
+- ソース上の主な差分: 自動撮影無効、紙の外周ではなくOCR枠でページ判定、
+  表示要求直後のACK、同種入力970ms抑制、操作実行器上の同期HTTP、録音未実装、
+  解答64字切断、解法等が混ざるHUD、先頭ページ1画像制限、終了/再起動の扱い。
+- codebase-memoryをfast index。generation 2026-09-06T08:51:49Z、3907 nodes / 14851 edges。
+  coverageでglassdocのpackage末尾doc除外と他パスのfreshness欠落を検出し、実ソース読みにより補完。
+  検索不在を未実装の証拠にはしていない。
+- ローカルのclient-l:1.1.1とcxr-service-bridge成果物を一時領域でjavapし、
+  sendCustomCmd/sendCustomCmdStream、sendMessage(String,Caps,byte[])、
+  音声stream/callbackのAPIを確認。AAR/抽出クラスをrepoへ追加していない。
+  **Global間のワイヤ互換、Wi-Fiなしの実効帯域、同時録音、ロック中動作は未実証。**
+- 6MB画像を6秒ごとに転送するだけでも約1MB/sが必要。
+  スマホの携帯回線速度とBluetooth帯域を混同せず、画像品質・転送量をM0で評価する。
+- Context7のFirebase AI Logic公式IDを解決し、認証/マルチモーダル入力を取得。
+  公式本文でAndroid Java/Kotlin SDK、管理プロキシ、App CheckのPlay外配布設定、
+  inline20MB・1音声ファイル制限、Files API未対応、JSON出力を確認。
+  第一評価候補であり、プロジェクト作成・課金有効化・実AI評価はしていない。
+  モデル/SDKの例が検索抜粋と公式本文で異なるため、その例を固定バージョンにしない。
+- 長い録音は原音と時刻付き文字起こしを保持し、全体文脈を照合して問題ごとの画像＋原音区間へ分ける。
+  同梱OCR・紙面検知・入力整理は端末内。スマホ内ASR/VLMやRokid AIUIは追加候補。
+  PC用Codex CLIの存在をAndroidの無操作連携の証拠にしない。
+
+2026-09-04/05の撮影、入力、つる折りforce-stop、メモリ、APKハッシュの実測は上の履歴を維持する。
+openApp成功300msの追記と、SDK経由インストール未確認を区別する。
+当時の242 Androidテスト/ビルド成功を、今回の新仕様の動作保証にしない。
+
+### 検証とワークツリー
+
+Root: C:/Users/pupu_/OneDrive/ドキュメント/rokid-docscan-starter。
+Branch: agent/real-device-test-prep。
+調査HEAD: 56f82c7df3f2641c2e123abbacd8937562140ba5。
+この計画の変更は tasks/plan.md、tasks/todo.md、docs/README.md、本進捗ファイルの4件。
+コミット/プッシュはこの計画作成では行っていない。
+既存未追跡の .agents/skills/、.claude/、.cursor/、.specify/、openspec/ は変更対象外。
+
+- 計画作成前の全pytest: **424 passed / 1 failed / 1 warning、32.91s**。
+  Ruff: **All checks passed**。失敗は未分類の未追跡ツール文書57件。
+- 計画更新後の文書テスト: py -3.12 -m pytest -q tests/test_documentation_contract.py
+  → **4 passed / 1 failed、0.12s**。同じ57件。未分類の追跡済みMarkdownは0件。
+- 計画の一回限りの構造検査: 要件13件、タスクID58件一意、実装タスク51件、追加7件、
+  各対象最大5ファイル、先のタスクへの依存0件、すべて未チェック。
+  HEADの先行計画本文を保持し、計画/索引のローカルリンク・明示アンカーが解決することを確認。
+- git diff --check成功。アプリコードは変更していないのでAndroidの再ビルドはしていない。
+
+再開時はこの節と計画の冒頭を読み、Agent Skillsの計画/実装スキルを作業段階に合わせて選択する。
+重要な疑義にはverifying-premises、SDK資料はfind-docs/Context7と実成果物、
+OpenAIの仕様にはopenai-docsを使う。次の検証済み区切りでこの進捗記録を更新する。
+
+## 2026-09-07 — 外部アプリの事例を既存計画へ反映
+
+### 再開時に優先する要望と現在地
+
+ユーザーの追加要望は「内部の例だけでなく、外部ソースや他アプリの例も参考にする」。
+途中の「再開してください」も同じ作業の継続として扱った。
+グラスWi-Fiなし、携行スマホのモバイル回線、現場PC/自前サーバ不要、
+日常スマホ操作0回、実画像3秒確認、撮影と録音の二段階終了を維持する。
+
+前節の「FSすべて未チェック」は初回計画時の履歴。
+再開時の既存ワークツリーにはFS-02完了とFS-01の合成14ケース18問、照合CLI、
+回帰14件、準備ノートが存在していた。tasks/plan.md末尾に全pytest
+441 passed / 1 warning / 33.76sとRuff成功の記録がある。
+この全体試験は前回の記録を再利用し、今回新たに全件実行した実績にはしない。
+
+### 完了した成果物
+
+- [外部事例の調査記録](../../docs/fast-scan-external-examples.md):
+  Adobe Scan、Apple Notes、OSS Document Scanner、Notability、Seeing AI、Joplinの6例。
+  公式資料・公開ソース、取得日、採用/適応/保留、適用限界、R/FSへの対応を記録。
+- OSS Document Scannerはcommit `2aded0d2f16240143bf2c51c35397b0d9e00640a`
+  のAutoScanHandler.ktに参照を固定。撮影前待機・取消・輪郭による再発火抑制の
+  参考であり、撮影後3秒確認・内容同一性・画質・Rokid上の動作の証明ではない。
+- [計画の採用判断](../../tasks/plan.md#external-app-design)と
+  [タスク](../../tasks/todo.md#fast-scan-tasks)へ事例を反映。
+  [X01〜X06](../../docs/fast-scan-preflight.md#external-derived-cases)に
+  過去ページ修正、安定判定、音声対応、短いHUD案内、ロック中転送、切断復旧を追加。
+  これらの比較試験は全件未実行。S01〜S30と既存合成データを保持した。
+- docs/README.mdで研究資料と計画を分類。FS-02だけ完了の状態を保持。
+
+### 検証と作業範囲
+
+Root: C:/Users/pupu_/OneDrive/ドキュメント/rokid-docscan-starter。
+Branch: agent/real-device-test-prep。
+HEAD: `9b6da5ffc9c8e51a172bce1434479e7f6e03217f`。
+
+- `py -3.12 -m pytest -q tests/test_documentation_contract.py tests/test_fast_scan_pack.py`
+  → **21 passed in 0.33s**（外部調査文書の作成・計画への反映後）。
+- `py -3.12 scripts/eval_fast_scan.py` → 14ケース18問、通常6/リスニング8、
+  hardware_verified=false、ai_executed=false。合成データの照合のみ。
+- `ruff check .` → **All checks passed!**。
+- 一回限りの構造検査: 先行計画本文保持、R1〜R13、FS-01〜58一意・依存順維持、
+  完了FS-02のみ、S01〜S30とX01〜X06、関連5文書の45ローカルリンク/アンカー解決。
+  最初の先行計画比較は既存の案内リンク・区切り線も本文と比較して失敗したため、
+  差分を確認して追加案内だけを分離し、元の本文が保持されていることを確認した。
+- `git diff --check`成功。アプリコード変更なしのためAndroidビルド/実機試験は再実行していない。
+
+今回の変更はtasks/plan.md、tasks/todo.md、docs/README.md、
+docs/fast-scan-preflight.md、docs/fast-scan-external-examples.md、本進捗ファイル。
+開始時からstageされていたscripts/eval_fast_scan.py、tests/fixtures/fast_scan/cases.json、
+tests/test_fast_scan_pack.pyは変更・stage操作していない。
+既存の未追跡ツール出力にも変更していない。今回コミット/プッシュは行っていない。
+外部製品資料は閲覧したが、製品操作の比較、端末導入、録音、AI送信や設定変更は行っていない。
+
+### 次に進む順序
+
+1. 準備ノートのstartから、外部調査E01〜E06と採用判断を読む。
+2. FS-01の実写/実録音・独立保持資料を準備し、X01〜X06を対応FSの試験へ落とす。
+   追加比較のために既存の合格条件やスマホ操作0回を緩めない。
+3. 準備ノート§7のA群に従い、端末不要の状態/契約の準備を進められる。
+   実SDK採用・本番結合はFS-03〜07の能力実証結果で決める。
+4. 実機/実AI試験ではその時点の端末・接続・認証条件と操作範囲を確認。
+   以前のWi-Fi・SDK能力・ビルド成功を、今回のBluetooth＋同時録音の合格に転用しない。
+
+使用スキル: progress-checkpoint → research（外部資料調査のみ別エージェント）→
+planning-and-task-breakdown（既存計画の更新）。次の段階ではAgent Skillsの
+実装/検証スキルを責任に合わせて選び直す。
+
+## 2026-09-07 — GitHub PR向けの進捗保存
+
+ユーザーから進捗の保存とGitHub PR作成を明示的に依頼された。
+対象は `TroroOrosi/rokid-docscan-starter`、head `agent/real-device-test-prep`、base `main`。
+PR #30はMERGEDであり、同ブランチの新しいopen PRは存在しないことを確認した。
+今回のPRはmain以降のグラス側スキャン基盤13コミットと、合成評価パック、
+自動スキャン/同時リスニング計画、外部6アプリの調査・比較試験を含む。
+旧計画と新構成を区別し、自動スキャン/同時録音が実装済みとは記載しない。
+
+提出前の検証:
+
+- `py -3.12 -m pytest -q` → **441 passed, 1 warning in 19.69s**。
+  warningは既存Starlette/httpxの非推奨通知。
+- `ruff check .` → **All checks passed!**。
+- `git diff --check` / `git diff --cached --check`成功。
+- Android追跡対象112ファイルを `C:/Users/Public/rokid-build-20260905`
+  の対応ファイルとバイト比較し、欠落/差分0件。
+  既存の242テスト、assembleDebug、glassdoc/glassapp lint成功記録を再利用。
+  今回Android再ビルド・端末インストールは行っていない。
+- 今回保存する9ファイルに既知の実キー形式・秘密鍵のパターンなし。
+  未追跡ツール設定/生成物はコミットへ含めない。
+
+評価パック3ファイルと計画・記録6ファイルを分けてコミットし、通常push後にPRを作成する。
+PRのURLと公開確認結果は次の節に保存する。mainへのmergeは今回の依頼に含まれない。
+
+### PR公開結果
+
+- [PR #31](https://github.com/TroroOrosi/rokid-docscan-starter/pull/31) を作成。
+  タイトル: グラス側スキャン基盤と自動スキャン・同時リスニング計画を保存。
+  base `main`、head `agent/real-device-test-prep`、OPEN、通常PR。
+- 評価パックcommit `c59d780`、計画・外部調査・進捗commit `48b42dd` をpush済み。
+  作成直後のPR headは `48b42dd5a0b7a987ea7af3cd06597e8d57ad83cb` と一致。
+  このURL追記も同じブランチで保存するため、最新HEADはPRのcommitsで確認する。
+- 作成直後のGitHub判定はMERGEABLE。CI/Android buildは実行中で、
+  完了済みとは扱わない。次回はPRの最新checksを確認してから統合判断へ進む。
+- 追跡対象の未保存差分はなく、未追跡のツール出力5ディレクトリだけを残した。
+  merge、端末導入、外部AI設定は行っていない。

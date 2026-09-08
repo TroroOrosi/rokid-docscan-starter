@@ -1,6 +1,10 @@
 # Spec: custom-app-session
 
-Status: Draft for human review on 2026-09-02.
+Status: Draft, and not the capture path. The 2026-09-04 hardware spike
+selected the glasses-direct architecture; see "Spike outcome, measured
+2026-09-04" at the end. Retained as the documented CUSTOMAPP + CustomCMD
+transport in case the operating network makes the glasses' Wi-Fi unusable.
+(2026-09-03).
 Module id: `custom-app-session` from
 `CAPABILITY-MAP-glasses-app-operation.md`.
 
@@ -242,10 +246,40 @@ until the physical checklist and content-free logs are recorded.
 
 ## Open Questions
 
-Human review must confirm the deliberate first increment: use the app already
-installed on the glasses and omit runtime APK install/update/uninstall. Remote
-deployment can be specified later as a separate, explicit operator operation
-if it is still needed after session start is proven.
+**Superseded as the first increment, 2026-09-03.** This spec still describes a
+supported design and matches a working third-party reference
+(`TakanariShimbo/RokidGlassesAppCenter`, CXR-L `CUSTOMAPP` plus CustomCMD as
+JSON over `Caps`), so it is retained as a draft. It is no longer the next thing
+built, because it assumes a division of labour that has never been tested:
+the phone owning capture, OCR, and the server connection.
+
+Four unverified points decide whether that division is necessary or merely
+historical, and the `:glassprobe` capability spike settles all four in one
+install:
+
+1. does `android.hardware.camera2` open on the glasses, and does the
+   firmware privacy indicator light during and clear after the capture;
+2. do the glasses reach the FastAPI server over their own Wi-Fi;
+3. does a sideloaded app appear in the glasses launcher, or is phone-side
+   `openApp` the only way to start it;
+4. can `KEYCODE_BACK` be consumed, so the measured one-finger double tap stops
+   finishing the Activity.
+
+Point 4 is already implemented and unit-tested in `:glassapp` 0.1.7
+(`GlassesInputAction.BACK`, `BackExitPolicy`); it awaits hardware confirmation.
+
+Read the outcome against this table before reviving this spec:
+
+| Spike outcome | Consequence for this spec |
+|---|---|
+| Camera opens, indicator behaves, Wi-Fi reaches the server | Glasses-direct. This spec is not needed for the capture path |
+| Camera opens, Wi-Fi unusable in operation | Glasses capture, CustomCMD to the phone. This spec becomes the transport |
+| Camera does not open | This spec applies as written: phone `takePhoto`, glasses HUD and input |
+| App absent from the launcher | Phone-side `openApp` is mandatory in every case, so `AuthorizationHelper` + `DEVICE_MANAGE` + `configCXRSession(CUSTOMAPP)` is a precondition rather than an option |
+
+The original open question also stands: if this spec is revived, human review
+must confirm using the app already installed on the glasses and omitting
+runtime APK install/update/uninstall.
 
 ## Official Sources and Version Evidence
 
@@ -267,3 +301,67 @@ actual bytecode selects `com.rokid.sprite.global.aiapp` when
 `CUSTOMAPP`, `configCXRSession`, link callbacks, app callbacks, and app control.
 This supersedes the older repository note claiming the upper API targets only
 the mainland-China package.
+
+## Spike outcome, measured 2026-09-04 — this spec is not the capture path
+
+The `:glassprobe` capability spike ran on `RG-glasses`, build
+`Rokid/glasses/glasses:12/SKQ1.240613.001/1.25.012-20260901-150201`, Android 12
+/ API 32, over a direct 5-pin adb cable. Every one of the four points is
+answered, and the answers select the **first** row of the decision table above.
+
+| Point | Result | Evidence |
+|---|---|---|
+| 1 camera + privacy indicator | **Opens.** 7 consecutive stills, all `4032x3024`, 5.72–6.13 MB JPEG, **785–1380 ms** each | `camera probe OK 4032x3024 5718125B in 1380ms` and six more |
+| 2 glasses Wi-Fi reaches the server | **Yes.** `wlan0=192.168.0.5` -> `192.168.0.32:8000`; `/health` 96–197 ms, `/v1/settings` 17–1037 ms, both 200 | two independent runs, 18:12:27 and 18:15:03 |
+| 3 launcher visibility | **Visible.** `dev.rokid.docscanglass/.TapProbeActivity` is one of 9 launcher packages, beside `com.android.camera2` and `com.rokid.os.sprite.launcher` | `cmd package query-activities`, read-only, before any install |
+| 4 `KEYCODE_BACK` consumable | **Yes.** 4 BACK deliveries, 3 consumed without finishing; only the one inside the 3 s window exited | `probe P4 BACK OK consumed x1..x3`, then `back confirmed after 4 reports` |
+
+Point 3 was settled by a read-only query, so **phone-side `openApp` is not a
+precondition**. `AuthorizationHelper` + `DEVICE_MANAGE` +
+`configCXRSession(CUSTOMAPP)` stay optional rather than mandatory.
+
+### The privacy indicator is firmware-owned, and it behaves
+
+Independently corroborated two ways: an observer watching the physical LED
+reported it lit only while the capture was pending, and the kernel LED driver
+log shows the same thing on all 7 captures. Nothing in the app touches it.
+
+```
+CameraService: connectDevice                   18:15:38.593
+aw2110x chan=3 brightness=0xFF   <- lit        18:15:38.624   (+31 ms)
+finishCameraStreamingOps                       18:15:39.748
+aw2110x chan=3 brightness=0x00   <- cleared    18:15:39.767   (+19 ms)
+CameraService: disconnect                      18:15:40.091
+```
+
+The indicator clears **before** the client disconnects. All three `CLAUDE.md`
+acceptance conditions hold on this firmware: lit during capture, off after the
+image callback, off afterwards. `probe-capture.jpg` was gone from the app cache
+after `onDestroy`.
+
+### New constraint found: folding the temples kills a third-party app
+
+Not previously recorded anywhere in this repository. `com.rokid.os.sprite.assistserver`
+runs a third-party app as a `third_app` scene and cancels it when the temple
+arms fold:
+
+```
+ACTION_LEG_STATUS_CHANGED  leg status: 0   vendor.rkd.glasses.is_spread: 0
+SceneManager -> glassLegStatusChange spread[false]
+SceneManager -> cancelAllScene()  ignoreSceneList -> [[phone_call]]
+   closeMark = SceneCloseMark(initiator=glass_use_event, param=glassLegStatusChange fold)
+ThirdAppScene -> isSceneRunning: true, useTime: 3
+SceneManager -> stopSceneAndSendToMobile sceneList -> [[third_app]]
+-> ActivityManager kills dev.rokid.docscanglass.probe
+-> topResumedActivity = com.rokid.os.sprite.launcher
+```
+
+Only `phone_call` is exempt. A glasses-side operator surface therefore cannot
+survive the glasses being folded, and any session state it holds must be
+recoverable. `vendor.rkd.glasses.is_spread` reads the current state.
+
+### Consequence
+
+Row 1 applies: **glasses-direct**. This spec is not needed for the capture path.
+It stays a Draft as the documented `CUSTOMAPP` + CustomCMD transport, to be
+revived only if the operating network makes the glasses' own Wi-Fi unusable.

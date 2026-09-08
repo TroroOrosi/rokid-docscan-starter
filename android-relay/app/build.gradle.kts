@@ -64,9 +64,8 @@ android {
 }
 
 dependencies {
+    implementation(project(":relaycore"))
     implementation("com.rokid.cxr:client-l:1.1.1")
-    implementation("com.squareup.okhttp3:okhttp:4.12.0")
-    implementation("com.google.mlkit:text-recognition-japanese:16.0.1")
 
     testImplementation("junit:junit:4.13.2")
     androidTestImplementation("androidx.test:runner:1.6.2")

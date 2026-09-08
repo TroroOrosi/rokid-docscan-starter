@@ -39,6 +39,19 @@ Rokid Glasses -> Global Hi Rokid -> Android relay -> FastAPI server -> HUD
   artifacts, with `SessionType.CUSTOM_APP` in 1.1.1. A glasses-side Android app
   is therefore a supported SDK route, but this repository has not completed a
   successful hardware install/start validation.
+- A glasses-side app is validated by the **adb sideload** route, not the SDK
+  route, as of 2026-09-04 on build `1.25.012-20260901-150201` (Android 12 /
+  API 32). Measured there: a sideloaded app is launcher-visible; `camera2`
+  opens and returns `4032x3024` JPEGs in 785-1380 ms holding only
+  `android.permission.CAMERA`; the glasses reach the server over their own
+  Wi-Fi (`/health` 96-197 ms); and `KEYCODE_BACK` is consumable, so the
+  one-finger double tap no longer ends the Activity. `uploadAndInstallApk` /
+  `openApp` are still unvalidated on hardware.
+- `com.rokid.os.sprite.assistserver` runs a third-party app as a `third_app`
+  scene and force-stops it when the temple arms fold (`cancelAllScene`,
+  `ignoreSceneList` is `[phone_call]` only). A glasses-side operator surface
+  cannot survive folding; keep session state recoverable and read
+  `vendor.rkd.glasses.is_spread` (1 spread, 0 folded).
 - Treat this file and `docs/` as a record of what was measured, not as a
   statement of what the SDK permits. Before concluding the platform forbids
   something, read the AAR (`javap`) or another primary source.
@@ -98,8 +111,12 @@ ruff check .
 Android relay:
 
 ```bash
-gradle --no-daemon -p android-relay testDebugUnitTest assembleDebug
+gradle --no-daemon -p android-relay test testDebugUnitTest assembleDebug
 ```
+
+`test` is not redundant: `:glassinput` is a plain `java-library`, so its
+tests run under `test` and `testDebugUnitTest` alone would skip them
+silently.
 
 The Android project requires JDK 17, Android SDK Platform 36, and internet
 access for Google, Maven Central, Rokid Maven, and Gradle dependencies. The

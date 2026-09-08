@@ -100,7 +100,15 @@ public final class MainActivity extends Activity
 
         link = new RokidGlobalLink(this, this);
         ocr = new JapaneseOcr();
-        controller = new DocScanController(this, link, ocr, this);
+        controller = new DocScanController(
+                this,
+                link,
+                ocr,
+                this,
+                new ClientIdentity(
+                        "rokid-glasses-cxr-l",
+                        "android-relay/" + BuildConfig.VERSION_NAME,
+                        "client-l:1.0.1/global-aidl"));
         setContentView(buildContentView());
         controller.showPendingCaptureReview();
     }

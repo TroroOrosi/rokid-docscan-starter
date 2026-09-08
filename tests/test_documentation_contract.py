@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import subprocess
 from pathlib import Path
 
 
@@ -26,10 +27,29 @@ def _text(relative_path: str) -> str:
 
 def _repository_markdown() -> set[str]:
     ignored_parts = {".git", ".pytest_cache"}
-    return {
+    paths = {
         path.relative_to(ROOT).as_posix()
         for path in ROOT.rglob("*.md")
         if not ignored_parts.intersection(path.parts)
+    }
+    # Keep ordinary untracked project docs in the gate. Only local tool output
+    # under these exact root directories is exempt; a tracked file never is.
+    local_tool_roots = (".agents/skills/", ".claude/", ".cursor/", ".specify/", "openspec/")
+    if not (ROOT / ".git").exists():
+        return paths
+    try:
+        tracked = set(
+            subprocess.check_output(
+                ["git", "-C", str(ROOT), "ls-files", "-z"],
+                encoding="utf-8",
+                stderr=subprocess.DEVNULL,
+            ).split("\0")
+        )
+    except (OSError, subprocess.CalledProcessError):
+        # A source archive or unavailable Git must not silently hide documents.
+        return paths
+    return {
+        path for path in paths if path in tracked or not path.startswith(local_tool_roots)
     }
 
 
@@ -41,6 +61,43 @@ def test_documentation_index_classifies_every_markdown_file():
         if path != "docs/README.md" and f"`{path}`" not in index
     )
     assert missing == []
+
+
+def test_local_tool_output_is_excluded_but_project_documents_remain(tmp_path, monkeypatch):
+    monkeypatch.setitem(globals(), "ROOT", tmp_path)
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    project_docs = {
+        "docs/new-untracked-runbook.md",
+        ".agents/progress/current.md",
+        "app/openspec/design.md",
+        ".claude/tracked-contract.md",
+    }
+    tool_docs = {
+        ".agents/skills/example/SKILL.md",
+        ".claude/commands/generated.md",
+        ".cursor/commands/generated.md",
+        ".specify/templates/generated.md",
+        "openspec/AGENTS.md",
+    }
+    for relative_path in project_docs | tool_docs:
+        path = tmp_path / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("# Fixture\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "-C", str(tmp_path), "add", "--", ".claude/tracked-contract.md"],
+        check=True,
+    )
+
+    assert _repository_markdown() == project_docs
+
+
+def test_documentation_scan_does_not_hide_files_without_git_metadata(tmp_path, monkeypatch):
+    monkeypatch.setitem(globals(), "ROOT", tmp_path)
+    path = tmp_path / ".agents/skills/example/SKILL.md"
+    path.parent.mkdir(parents=True)
+    path.write_text("# Source archive fixture\n", encoding="utf-8")
+
+    assert _repository_markdown() == {".agents/skills/example/SKILL.md"}
 
 
 def test_current_runbooks_do_not_promote_indicator_tampering():
