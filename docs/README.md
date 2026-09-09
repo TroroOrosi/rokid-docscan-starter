@@ -52,7 +52,7 @@ Current version tuple:
   below is not implemented yet.
 - `:glassinput` is a plain `java-library` shared by the glasses apps, so its
   tests run under `test`, not `testDebugUnitTest`
-- Glasses View contract `1.9.0`
+- Glasses View contract `1.10.0`
 - CXR-L tested/pinned dependency `1.1.1`; the current Rokid Maven release is
   `1.1.2` and the latest coordinate is `1.2.X-SNAPSHOT`
 

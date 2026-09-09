@@ -5,7 +5,7 @@ Android スマホを使う導入手順は
 [windows-android-real-device-setup.md](windows-android-real-device-setup.md)
 を正本としてください。
 
-対象は Android client `0.3.16`、Glasses View contract `1.9.0` です。
+対象は Android client `0.3.16`、Glasses View contract `1.10.0` です。
 
 ## 結論
 

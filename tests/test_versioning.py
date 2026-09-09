@@ -23,13 +23,13 @@ def test_version_info_pins_every_contract():
         "solver_api_version": "1.2.0",
         "extractor_api_version": "1.0.0",
         "explainer_api_version": "1.1.0",
-        "glasses_view_contract_version": "1.9.0",
+        "glasses_view_contract_version": "1.10.0",
         "overlay_contract_version": "1.1.0",
     }
 
 
 def test_glasses_contract_reflects_phone_controlled_capture_review():
-    assert version.GLASSES_VIEW_CONTRACT_VERSION == "1.9.0"
+    assert version.GLASSES_VIEW_CONTRACT_VERSION == "1.10.0"
 
 
 def test_contract_versions_reflect_phase234():

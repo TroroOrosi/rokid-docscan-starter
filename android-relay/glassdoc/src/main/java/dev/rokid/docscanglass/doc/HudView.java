@@ -43,6 +43,7 @@ final class HudView extends View {
     /** The visible fraction measured for this device, from {@code --ef guide}. */
     void calibrateGuide(double visibleFraction) {
         guideFraction = visibleFraction;
+        invalidate();
     }
 
     /** Text only: the states where there is nothing to look at. */
@@ -91,7 +92,16 @@ final class HudView extends View {
 
         float available = getHeight() - textTop;
         float lineHeight = available / (float) (lines.size() + 1);
-        paint.setTextSize(lineHeight * 0.55f);
+        float textSize = lineHeight * 0.55f;
+        paint.setTextSize(textSize);
+        float widest = 0;
+        for (String line : lines) {
+            widest = Math.max(widest, paint.measureText(line == null ? "" : line));
+        }
+        float textWidth = Math.max(1, getWidth() - lineHeight * 0.4f);
+        if (widest > textWidth) {
+            paint.setTextSize(textSize * textWidth / widest);
+        }
         float y = textTop + lineHeight;
         for (String line : lines) {
             canvas.drawText(line == null ? "" : line, lineHeight * 0.2f, y, paint);

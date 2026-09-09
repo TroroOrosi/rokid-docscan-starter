@@ -22,6 +22,8 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.function.BooleanSupplier;
 
+import dev.rokid.docscanglass.input.GlassesInputAction;
+
 /** Serial state machine for capture -> OCR -> upload -> solve -> HUD review. */
 public final class DocScanController implements AutoCloseable {
     public interface Listener {
@@ -34,6 +36,9 @@ public final class DocScanController implements AutoCloseable {
         }
 
         default void onAutoCaptureChanged(boolean running) {
+        }
+
+        default void onConfigurationRejected(String message) {
         }
     }
 
@@ -101,6 +106,8 @@ public final class DocScanController implements AutoCloseable {
     private volatile String lastOcrQuality = "";
     private DocScanApi api;
     private String configuredServer = "";
+    // Deliberately process-local, as on the phone relay.
+    private String configuredKey = "";
     private int imageRotation;
     private boolean linkReady;
     private long documentId;
@@ -235,7 +242,22 @@ public final class DocScanController implements AutoCloseable {
     }
 
     private void handleGlassesGestureNow(PressGestureInterpreter.Action gesture) {
-        CaptureActionRouter.Command command = CaptureActionRouter.route(state, gesture);
+        applyGlassesCommandNow(CaptureActionRouter.route(state, gesture));
+    }
+
+    /** Routes local, normalized input against the state at execution time. */
+    public void onGlassesAction(GlassesInputAction action) {
+        if (action == null) {
+            return;
+        }
+        try {
+            serial.execute(() -> applyGlassesCommandNow(CaptureActionRouter.route(state, action)));
+        } catch (RejectedExecutionException ignored) {
+            // The activity is already closing.
+        }
+    }
+
+    private void applyGlassesCommandNow(CaptureActionRouter.Command command) {
         switch (command) {
             case ARM_NEXT:
                 captureNextPageNow();
@@ -425,6 +447,50 @@ public final class DocScanController implements AutoCloseable {
         });
     }
 
+    /**
+     * Starts/reconfigures an in-process surface. Configuration precedes link
+     * readiness and restoration in one task; no intermediate READY can hide
+     * the saved workflow. Null overrides preserve the available configuration.
+     */
+    public void configureAndResume(String serverOverride, String keyOverride, int rotationDegrees) {
+        try {
+            serial.execute(() -> {
+                String server = serverOverride == null ? configuredServer : serverOverride;
+                String normalizedServer = server.trim().replaceAll("/+$", "");
+                String key = keyOverride == null
+                        ? (normalizedServer.equals(configuredServer) ? configuredKey : "")
+                        : keyOverride;
+                try {
+                    configure(server, key, rotationDegrees);
+                } catch (RuntimeException error) {
+                    if (api == null) {
+                        fail("サーバ設定を確認してください", error);
+                    } else {
+                        // A rejected Intent cannot cancel a live capture or
+                        // hide its pending photo. Report outside the workflow.
+                        listener.onConfigurationRejected(error.getMessage());
+                    }
+                    return;
+                }
+                linkReady = true;
+                if (!captureReview.hasPending() && documentId == 0 && sessionId == 0) {
+                    try {
+                        if (!"ok".equalsIgnoreCase(api.health().optString("status", ""))) {
+                            throw new IllegalStateException("health status is not ok");
+                        }
+                        api.settings();
+                    } catch (Exception error) {
+                        fail("サーバへ接続できません", error);
+                        return;
+                    }
+                }
+                resumeNow();
+            });
+        } catch (RejectedExecutionException ignored) {
+            // The activity is already closing.
+        }
+    }
+
     public void configure(String serverUrl, String apiKey, int rotationDegrees) {
         if (committedRecoveryBlocked && !retryCommittedRecoverySynchronously()) {
             throw new IllegalStateException(
@@ -446,6 +512,7 @@ public final class DocScanController implements AutoCloseable {
                     "未登録写真の送信先は変更できません。先に登録または破棄してください");
         }
         configuredServer = normalizedServer;
+        configuredKey = apiKey == null ? "" : apiKey.trim();
         imageRotation = JapaneseOcr.normalizeRotation(rotationDegrees);
         api = candidate;
         if (!captureReview.hasPending()
@@ -565,7 +632,7 @@ public final class DocScanController implements AutoCloseable {
                 // resume() publishes the one view that matches the durable
                 // workflow. Avoid opening an intermediate READY HUD whose
                 // delayed callbacks could race the real restored view.
-                resume();
+                resumeNow();
             });
         } catch (RejectedExecutionException ignored) {
             // The activity is already closing.
@@ -573,84 +640,86 @@ public final class DocScanController implements AutoCloseable {
     }
 
     public void resume() {
-        serial.execute(() -> {
-            if (!linkReady) {
+        serial.execute(this::resumeNow);
+    }
+
+    private void resumeNow() {
+        if (!linkReady) {
+            return;
+        }
+        if (committedRecoveryBlocked && !retryCommittedRecoverySynchronously()) {
+            publishCommittedPendingLocked(
+                    captureReview.peek(),
+                    "Resume blocked until committed-photo recovery completes");
+            return;
+        }
+        if (captureLease.isUnresolved()) {
+            if (captureLease.isTimedOut()) {
+                publish(
+                        RelayState.ERROR,
+                        List.of(
+                                "復旧処理を保留",
+                                "撮影終了が未確認",
+                                "Hi Rokid認可・再接続"),
+                        "Resume rejected while a CXR-L photo lease is unresolved");
+            }
+            return;
+        }
+        if (!requireApi()) {
+            return;
+        }
+        CaptureReviewStore.Pending pending = captureReview.peek();
+        if (pending != null) {
+            listener.onCaptureReview(pending);
+            publishCaptureReview(
+                    pending,
+                    "Recovered unregistered photo review",
+                    true);
+            return;
+        }
+        try {
+            if (sessionId > 0) {
+                handleFinalizedSession(
+                        api.finalizeReading(sessionId),
+                        "Recovered exam session " + sessionId);
                 return;
             }
-            if (committedRecoveryBlocked && !retryCommittedRecoverySynchronously()) {
-                publishCommittedPendingLocked(
-                        captureReview.peek(),
-                        "Resume blocked until committed-photo recovery completes");
-                return;
-            }
-            if (captureLease.isUnresolved()) {
-                if (captureLease.isTimedOut()) {
-                    publish(
-                            RelayState.ERROR,
-                            List.of(
-                                    "復旧処理を保留",
-                                    "撮影終了が未確認",
-                                    "Hi Rokid認可・再接続"),
-                            "Resume rejected while a CXR-L photo lease is unresolved");
+            if (documentId > 0) {
+                JSONObject status = api.scanStatus(documentId);
+                JSONArray indexes = status.optJSONArray("page_indexes");
+                int max = -1;
+                if (indexes != null) {
+                    for (int i = 0; i < indexes.length(); i++) {
+                        max = Math.max(max, indexes.optInt(i, -1));
+                    }
                 }
-                return;
-            }
-            if (!requireApi()) {
-                return;
-            }
-            CaptureReviewStore.Pending pending = captureReview.peek();
-            if (pending != null) {
-                listener.onCaptureReview(pending);
-                publishCaptureReview(
-                        pending,
-                        "Recovered unregistered photo review",
-                        true);
-                return;
-            }
-            try {
-                if (sessionId > 0) {
+                nextPageIndex = max + 1;
+                persistWorkflow();
+                if ("ready".equals(status.optString("status"))) {
+                    sessionId = api.createExamSession(documentId)
+                            .getLong("session_id");
+                    persistWorkflow();
                     handleFinalizedSession(
                             api.finalizeReading(sessionId),
-                            "Recovered exam session " + sessionId);
-                    return;
-                }
-                if (documentId > 0) {
-                    JSONObject status = api.scanStatus(documentId);
-                    JSONArray indexes = status.optJSONArray("page_indexes");
-                    int max = -1;
-                    if (indexes != null) {
-                        for (int i = 0; i < indexes.length(); i++) {
-                            max = Math.max(max, indexes.optInt(i, -1));
-                        }
-                    }
-                    nextPageIndex = max + 1;
-                    persistWorkflow();
-                    if ("ready".equals(status.optString("status"))) {
-                        sessionId = api.createExamSession(documentId)
-                                .getLong("session_id");
-                        persistWorkflow();
-                        handleFinalizedSession(
-                                api.finalizeReading(sessionId),
-                                "Recovered finalized document " + documentId);
-                        return;
-                    }
-                    publish(
-                            RelayState.READING,
-                            List.of(
-                                    "読取を再開",
-                                    nextPageIndex + "ページ登録済",
-                                    "撮影準備はスマホ"),
-                            "Recovered document " + documentId);
+                            "Recovered finalized document " + documentId);
                     return;
                 }
                 publish(
-                        RelayState.READY,
-                        List.of("準備完了", "撮影準備はスマホ", "読取完了はスマホ"),
-                        "Ready for a new document");
-            } catch (Exception error) {
-                fail("前回状態を復元できません", error);
+                        RelayState.READING,
+                        List.of(
+                                "読取を再開",
+                                nextPageIndex + "ページ登録済",
+                                "撮影準備はスマホ"),
+                        "Recovered document " + documentId);
+                return;
             }
-        });
+            publish(
+                    RelayState.READY,
+                    List.of("準備完了", "撮影準備はスマホ", "読取完了はスマホ"),
+                    "Ready for a new document");
+        } catch (Exception error) {
+            fail("前回状態を復元できません", error);
+        }
     }
 
     public void captureNextPage() {
@@ -1078,7 +1147,8 @@ public final class DocScanController implements AutoCloseable {
                             pending,
                             userMessage + (detail == null ? "" : ": " + detail.getMessage()));
                 } else {
-                    fail(userMessage, detail);
+                    fail(userMessage, detail, !linkReady ? RelayState.DISCONNECTED
+                            : documentId > 0 ? RelayState.READING : RelayState.READY);
                 }
             });
         } catch (RejectedExecutionException ignored) {
@@ -2016,6 +2086,10 @@ public final class DocScanController implements AutoCloseable {
     }
 
     private void fail(String userMessage, Throwable error) {
+        fail(userMessage, error, RelayState.ERROR);
+    }
+
+    private void fail(String userMessage, Throwable error, RelayState next) {
         String detail = error == null ? userMessage : userMessage + ": " + error.getMessage();
         // A hands-free cycle must not keep shooting into a fault; the operator
         // is not watching the phone and would never see it.
@@ -2028,8 +2102,10 @@ public final class DocScanController implements AutoCloseable {
             listener.onAutoCaptureChanged(false);
         }
         publish(
-                RelayState.ERROR,
-                List.of("エラー", userMessage, "スマホ画面を確認"),
+                next,
+                List.of("エラー", userMessage,
+                        next == RelayState.READY || next == RelayState.READING
+                                ? "撮影準備はスマホ" : "スマホ画面を確認"),
                 detail);
     }
 

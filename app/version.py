@@ -249,7 +249,10 @@ EXPLAINER_API_VERSION = "1.1.0"
 # 1.9.0: unverified CUSTOMVIEW/AI callbacks are diagnostic-only. Capture,
 #        registration, completion and navigation are phone-controlled; no
 #        automatic registration is advertised.
-GLASSES_VIEW_CONTRACT_VERSION = "1.9.0"
+# 1.10.0: local glassdoc gestures restore sessions after configuration, retry only
+#         terminal capture failures, and display tap/swipe instructions.
+#         Phone/CUSTOMVIEW controls remain unchanged.
+GLASSES_VIEW_CONTRACT_VERSION = "1.10.0"
 
 # Answer-area overlay payload (box + short answer; 2D image-anchored).
 # 1.1.0: added tracking metadata (tracking/fixed_ar/anchor_hint).
