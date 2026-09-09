@@ -1648,3 +1648,24 @@ fixtureはPID23752で8000/8001待受、ローカルhealthはstatus=ok/test_fixtu
 実機チェックへ進む。端末書き込みの既存明示承認は上記範囲で有効。
 URL付きIntentの自動承認レビュー拒否は回避せず、利用者による設定適用を維持する。
 撮影準備の回答待ちは今回の中断で終了し、再開依頼があるまで追加操作を行わない。
+
+### 2026-09-10 承認済み計画の実装開始
+
+利用者の「Implement the plan.」によりソフトウェア実装を開始。
+正本は tasks/plan.md の answer-sheet-20260910。目的は記入用の完全な答えを小問単位で
+迷わず読むこと。大問は全撮影後の自動分類、必要時プレビュー、入力終了後のAI分析、
+通常10+10+130分/リスニング30+10+110分、スマホモバイル回線・グラスWi-Fiなしを保持する。
+実機へ書き込む前に既存承認範囲と接続状態を照合し、未確認機能を実測済みと扱わない。
+
+ブランチ agent/real-device-test-prep、着手HEAD 191535f7d2c5adf158ca931e0e9e859967703532。
+既存未追跡 .agents/skills/、.claude/、.cursor/、.specify/、openspec/ は対象外。
+
+最初の増分: PythonのQuestion.answer_only、補足解説を返さない全文solver契約、資料不足の
+別状態とplaceholder禁止。従来のtutor/明示長さ制限は互換として維持。APP 0.17.0、Solver 1.3.0。
+`py -3.12 -m pytest -q tests/test_answer_sheet_solver.py` は実装前8 failed / 1 passed。
+実装後の関連4ファイルは39 passed、全体 `py -3.12 -m pytest -q` は450 passed,
+1 warning in 22.26s（既存Starlette/httpx非推奨）。`py -3.12 -m ruff check .` はAll checks passed!。
+これらはfake SDKを含む自動テストであり、実AI精度・新しいAndroid経路の証拠ではない。
+
+次: 全文解答の共通データ/ローカル閲覧→大問と小問/スマホAI→終了復旧→撮影/録音/転送。
+FS-36は部分着手のまま。端末入力・実AI認証・150分電池持ち・学習モデルは未検証。

@@ -36,7 +36,7 @@ silently applying that exception. `.agents/progress/` remains in scope.
 
 Current version tuple:
 
-- Server APP `0.16.0`
+- Server APP `0.17.0`
 - HTTP API `1.15.0`
 - Android relay `0.3.16` (`versionCode 21`)
 - Glasses input app `0.1.8` (`versionCode 9`; 9 is behaviourally identical to 8

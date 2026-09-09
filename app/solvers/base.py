@@ -33,6 +33,9 @@ class Question:
     # model sees figures / equations / tables directly (OCR text is imperfect).
     # Optional/last so existing positional construction keeps working.
     image_path: str | None = None
+    # Written-answer mode keeps the complete answer and excludes tutorial text.
+    # False preserves the existing tutor/overlay API for older clients.
+    answer_only: bool = False
 
 
 @dataclass
