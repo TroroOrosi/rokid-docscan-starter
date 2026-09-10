@@ -14,7 +14,11 @@ import org.junit.Test;
 public class AnswerGesturesTest {
     private AnswerReader reader() {
         AnswerBundle bundle = new AnswerBundle("7", "a".repeat(64), 1, List.of(
-                AnswerItem.ready("g1", "第1問", "q10", "問1", "x = 2"),
+                // "x".repeat(90): at width=400f/measurer=length*10, each line holds 40
+                // chars and each page holds 2 lines, so this answer paginates into
+                // exactly two pages (80 chars, then 10). That lets
+                // forwardAndBackMoveTheReader tell forward from back.
+                AnswerItem.ready("g1", "第1問", "q10", "問1", "x".repeat(90)),
                 AnswerItem.ready("g1", "第1問", "q11", "問2", "y = 3")));
         return new AnswerReader(bundle, 400f, 2, text -> text.length() * 10f);
     }
@@ -24,8 +28,9 @@ public class AnswerGesturesTest {
         AnswerReader reader = reader();
 
         assertTrue(AnswerGestures.apply(reader, GlassesInputAction.SWIPE_FORWARD));
-        assertTrue(AnswerGestures.apply(reader, GlassesInputAction.SWIPE_BACK));
+        assertEquals(2, reader.pageNumber());
 
+        assertTrue(AnswerGestures.apply(reader, GlassesInputAction.SWIPE_BACK));
         assertEquals(1, reader.pageNumber());
     }
 
