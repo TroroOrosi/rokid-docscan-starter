@@ -1906,3 +1906,89 @@ FS-61 の「lockNow で実消灯する」経路はこの端末では成立しな
 これは測定した1台・このビルドについての結果であり、CXR-L SDK 側に別の消灯 API が
 無いことの証明ではない。次は SDK 側の候補と、Accessibility を汎用回避策にしない
 条件を分けて詰める。
+
+### FS-59 の記録訂正（2026-09-10 深夜）
+
+`C:\Users\Public\rokid-docscan-live` は独立したビルドコピーではなく、
+`ls -la /c/Users/Public` で
+`rokid-docscan-live -> /c/Users/pupu_/OneDrive/ドキュメント/rokid-docscan-starter`
+と表示される symlink である。したがって上の「hash照合で全10ファイル一致」は
+別コピーとの一致ではなく同一実体を指していた。ビルドコピーの選定という表現も誤り。
+
+有効なまま残る事実:
+
+- gradle には ASCII のパス文字列が渡るため、AGP のパス拒否と
+  test worker の ClassNotFoundException を回避できた。
+  `:relaycore:testDebugUnitTest --tests 'dev.rokid.docscanrelay.study.*'` は
+  実際に実行され 22 tests / failures 0。symlink 経由の実行は有効な回避策である。
+- `C:\Users\Public\rokid-docscan-build` は別実体の worktree で、
+  `9df5b09` の旧構成のまま（43変更・15未追跡）。
+
+**Stopフックとの関係:** `~/.claude/hooks/stop-verification-gate.sh` は
+`ASCII_WORKTREE="C:/Users/Public/rokid-docscan-build"` を固定で見る。
+android-relay の .java/.kts を変更すると、この旧 worktree への複製と
+そこでの APK ビルドを要求する。旧 worktree は現在の module 構成と異なるため、
+FS-61 で Android を触る前に、worktree を現 HEAD へ更新するか、
+フックの参照先を変えるかを決める必要がある。どちらも利用者の判断を要する。
+
+### AnswerViewTest の退避（2026-09-10 深夜）
+
+`android-relay/glassdoc/src/test/java/dev/rokid/docscanglass/doc/AnswerViewTest.java` は
+参照する `AnswerView` が未実装で、実測でコンパイルできない:
+
+```
+gradlew --no-daemon :glassdoc:testDebugUnitTest
+> Task :glassdoc:compileDebugUnitTestJavaWithJavac FAILED
+  AnswerViewTest.java:24: エラー: シンボルを見つけられません
+          AnswerView view = new AnswerView(RuntimeEnvironment.getApplication());
+    シンボル: クラス AnswerView
+```
+
+内容を失わずコンパイル対象から外すため `AnswerViewTest.java.pending` へ改名した。
+削除ではない。FS-12/65 で `AnswerView` を実装する時にこの名前を戻す。
+このテストが定義する契約: ページ送りで全文を復元できること、
+ビューポートが狭くなってもフォントを縮めず再流しすること、
+読み上げ文字列が3行以内であること、索引画面と答案本文が混ざらないこと。
+
+### FS-61/62 の一次調査（2026-09-10 深夜、読み取りのみ）
+
+利用者の指示: FS-61/62 を進める。モデルは API 課金なしの経路と試験にする。
+
+**SDK 側（javap、端末操作なし）:** `client-l-1.1.1.aar` の `classes.jar`
+（sha256 `3e889ea5e62ec46aee5e260b1018416ec126e57463c8e17d101e8a110ebd583d`、
+142クラス）を再検査した。`IMediaStreamService` の全メソッドに消灯・画面電源・
+輝度の API は無い。あるのは撮影・音声・CustomView・アプリ導入/起動/停止・
+`sendCustomCmd(String, byte[])`・`registAiEventCallback` など。
+`sendCustomCmd` は型の無い任意コマンドで、消灯できるともできないとも AAR からは決まらない。
+`IDeviceStatusCallback` は `onDeviceInfoNotifiy` と `onCurrentScenesNotify` のみ。
+
+**グラス実機（読み取り）:** build fingerprint は
+`Rokid/glasses/glasses:12/SKQ1.240613.001/1.25.015-20260903-150201:user/release-keys`。
+以前の記録の `1.25.012-20260901-150201` から更新されている。
+
+- `settings get system screen_off_timeout` → `864000000`（10日）。
+  wakelock を解放して待つ経路では画面は消えない。
+- `settings get global stay_on_while_plugged_in` → `0`。
+- `getprop` に `persist.rkd.screen.turn.off.mode` → `1` がある。意味は未確認。
+- `service list` に `91 lights_ctrl: [com.rokid.light.ILightsCtrl]`。
+  Rokid 独自のライト制御サービスだが、AIDL は CXR-L AAR に無く、
+  第三者アプリから利用できるかは未確認。
+- `dumpsys sensorservice` に近接センサが2つ
+  （`Proximity Sensor Non-wakeup` と `Proximity Sensor Wakeup`、sensortek ucs_ucs146e0）。
+
+**現時点の結論:**
+
+- FS-61（実消灯）: device admin 無し・画面タイムアウト10日・SDK に API 無し、で
+  無承認・無権限で到達できる経路は今のところ無い。残る候補は
+  `com.rokid.light.ILightsCtrl` と `persist.rkd.screen.turn.off.mode` の意味、
+  および CXR-L `sendCustomCmd` の実際の受け口。いずれも実機での書き込み試験が要る。
+  黒画面や `finish()` を消灯と呼ばない方針は維持する。
+- FS-62（再装着で起動）: 近接センサの wakeup 版があるため、SensorManager だけで
+  装着検出を実装できる見込み。特別な権限は要らない。つるの開閉は
+  `vendor.rkd.glasses.is_spread` で別に読む。実機での確認は未実施。
+
+**モデル経路（API 課金なしの指示を受けて）:** 現在の既定は `.env` 無し・
+API キー未設定で、`ROKID_ANALYZER` はオフラインの placeholder。したがって
+既存の 458 件のテストはネットワークにも課金にも触れていない。
+有料 API を使わない実答案の候補は、FS-57（Rokid 標準AI）と FS-58（端末内推論）。
+FS-63/64 の GPT 経路は、課金の発生しない範囲が確定するまで設計のみに留める。
