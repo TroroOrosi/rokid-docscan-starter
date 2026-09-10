@@ -183,3 +183,25 @@ def test_segment_problems_is_deterministic_and_safe_on_empty():
     assert segment_problems(pages) == segment_problems(pages)
     assert segment_problems([]) == []
     assert segment_problems([(0, ""), (1, "  ")]) == []
+
+
+def test_kanji_and_letter_sub_questions_split():
+    text = "\n".join([
+        "第1問 次の問いに答えよ。",
+        "(三) 傍線部の理由を述べよ。",
+        "(A) 自由英作文を書け。",
+        "（Ａ） 全角の英字も設問である。",
+    ])
+    numbers = [p.question_no for p in segment_problems([(0, text)])]
+    assert numbers == ["第1問", "(三)", "(A)", "(Ａ)"]
+
+
+def test_mid_text_parentheses_are_not_sub_questions():
+    text = "\n".join([
+        "第1問 次の問いに答えよ。",
+        "第一次大戦（1914）について述べよ。",
+        "A) りんご",
+    ])
+    units = segment_problems([(0, text)])
+    assert [p.question_no for p in units] == ["第1問"]
+    assert units[0].choices == ["りんご"]

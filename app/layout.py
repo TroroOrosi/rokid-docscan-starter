@@ -29,7 +29,9 @@ _Q_PATTERNS = [
 # (n)-style numbering counts only when it LEADS the line — mid-text
 # parentheses like 「大戦（1914）」 are years/inline notes, not boundaries —
 # and question numbers realistically have 1-3 digits.
-_PAREN_Q_RE = re.compile(r"^\s*[（(]\s*([0-9０-９]{1,3})\s*[)）]")
+_PAREN_Q_RE = re.compile(
+    r"^\s*[（(]\s*(?:([0-9０-９]{1,3})|([一二三四五六七八九十]{1,3})|([A-ZＡ-Ｚ]))\s*[)）]"
+)
 
 # Choice markers: circled digits, katakana enumerals, and A-D / 1-4 list items.
 # The 1-4 marker must not be followed by a digit so a decimal-leading line
@@ -73,7 +75,10 @@ def _detect_question_no(line: str) -> str | None:
             return f"問{num}"
     m = _PAREN_Q_RE.match(line)
     if m:
-        return f"({_zen_to_han(m.group(1))})"
+        digits, kanji, letter = m.group(1), m.group(2), m.group(3)
+        if digits is not None:
+            return f"({_zen_to_han(digits)})"
+        return f"({kanji or letter})"
     return None
 
 
