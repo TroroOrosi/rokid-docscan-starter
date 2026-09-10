@@ -2106,3 +2106,70 @@ KEYCODE_WAKEUP → am start（再起動）
 
 **全体検証:** `gradlew --no-daemon test testDebugUnitTest assembleDebug` →
 `BUILD SUCCESSFUL`、Android 単体テスト 295件 / failures 0 / errors 0。
+
+## 再開入口（2026-09-10 深夜・この節から読む）
+
+**目的:** グラス単体で教材を撮影し、答案の全内容を小問単位で読む。150分の試験時間、
+スマホはモバイル回線、グラスはWi-Fiなし。終了は二段階で実消灯、再装着で復帰。
+モデルは **API課金なし** の経路のみ（利用者指示）。
+
+**作業環境（ここを間違えると再現しない）:**
+
+- 作業ディレクトリは `C:\rokid-docscan-starter`。
+  旧 `C:\Users\pupu_\OneDrive\ドキュメント\rokid-docscan-starter` は残っているが使わない。
+  理由は OneDrive がビルド中間物をプレースホルダ化して gradle が自分の出力で失敗するため。
+- branch `agent/real-device-test-prep`、HEAD `55e75c5`。
+  `origin/main` との差分は 8 コミット / 24 ファイル。**PR #32 は既に MERGED**。
+  この 8 コミットは新しい PR で出す。
+- Android ビルド:
+  ```
+  export JAVA_HOME="C:/Users/Public/rokid-build-tools-20260901/jdk17/jdk-17.0.20.1+1"
+  export ANDROID_HOME="C:/Users/pupu_/AppData/Local/Android/Sdk"
+  /c/rokid-docscan-starter/android-relay/gradlew --no-daemon test testDebugUnitTest assembleDebug
+  ```
+  `gradlew.bat` は使わない（ASCIIガードが Bash ツールの cd 正規化で誤作動する）。
+- `~/.claude/hooks/stop-verification-gate.sh` の `ASCII_WORKTREE` は
+  `C:/rokid-docscan-starter`。android-relay の .java/.kts を変更したら
+  APK をビルドしてからターンを終える必要がある。
+- 未追跡のまま残す環境ディレクトリ: `.agents/skills/` `.claude/` `.cursor/` `.specify/` `openspec/`。
+  `git add -A` で巻き込まない。一度巻き込んで push 前にコミットし直した。
+
+**完了済み（証拠つき）:**
+
+| 項目 | 状態 | 証拠 |
+|---|---|---|
+| FS-59 途中実装の固定 | 完了 | study 22 tests / failures 0 |
+| FS-60 答案形式の評価 | 完了 | 8形式17小問、`answer-form-pack-check`、pytest 458 passed |
+| FS-12/65 の中核 `AnswerView` | 実装済み・実機未確認 | `AnswerViewTest` 3件を含む glassdoc 18件 |
+| FS-61 実消灯 | **実機検証済み** | `mScreenState=OFF` / `mWakefulness=Asleep`、復元も確認 |
+| FS-62 再装着判定 | 実装済み・**物理試験未了** | `WearTransitionTest` 6件 |
+
+最新の全体検証: Android 単体テスト 295件 / failures 0 / errors 0、`assembleDebug` 成功、
+`py -3.12 -m pytest -q` → 458 passed、`ruff check .` → All checks passed!。
+
+**実機の状態:** グラス `192.168.0.5:5555`（build `1.25.015-20260903-150201`、API 32）と
+スマホ F-51F が adb 接続中。`dev.rokid.docscanglass.doc` は導入済みで
+`WRITE_SETTINGS: allow` を adb で付与済み。端末書き込みは利用者承認済み。
+
+**次の手順（この順で）:**
+
+1. **物理試験**: グラスを装着し、(a) 二段階終了で実際に暗くなるか目視、
+   (b) 再装着で `WearWatch` が復帰させるか、(c) `AnswerView` の表示可読性。
+   `adb logcat -s DocScanGlass WearWatch` で確認する。TAG は要確認（前回 logcat は空だった）。
+2. **FS-65**: `AnswerView` を実セッションへ接続する。現在どこからも `bind()` されていない。
+   `DocScanGlassActivity` は `HudView` のみを `setContentView` している。
+   撮影完了後に答案を読む画面へ切り替える導線が未実装。
+3. **サーバ側の bundle 経路**: `sessionId` / `inputDigest` / `revision` を返す HTTP は未実装。
+   既存は `/v1/exam-sessions/...` の小問単位。FS-64 と合わせて設計する。
+4. **FS-57/58**: 課金なしで実答案を得る候補（Rokid標準AI、端末内推論）の評価。
+   FS-63/64 の GPT 経路は課金なしの範囲が決まるまで設計のみ。
+
+**未解決・注意:**
+
+- 消灯後にプロセスが生存し続けるか未測定。生存しなければ再装着復帰は成立しない。
+- `WRITE_SETTINGS` をグラスの設定画面から付与できるかは未確認（初回準備手順として残る）。
+- 評価 rubric 10件は `drafted_pending_review`。利用者の確認後に
+  `human_checked_requirements` へ変更する。
+- `.git/worktrees/rokid-docscan-doc-audit-20260831` の削除が権限エラーになるが、
+  コミット自体は成功する。旧 worktree `C:\Users\Public\rokid-docscan-build`（`9df5b09`）は
+  旧構成のまま放置。
