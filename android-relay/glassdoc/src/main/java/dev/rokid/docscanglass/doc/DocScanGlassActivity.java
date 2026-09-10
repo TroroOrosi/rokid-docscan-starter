@@ -58,8 +58,13 @@ public final class DocScanGlassActivity extends Activity
      */
     private static final int MEASURED_ROTATION_DEGREES = 180;
 
+    /** Long enough to read why the display stayed on before the session ends. */
+    private static final long EXIT_NOTICE_MILLIS = 2_000;
+
     private final GlassesInputNormalizer normalizer = new GlassesInputNormalizer();
     private final BackExitPolicy backExit = new BackExitPolicy();
+    private final DisplaySleep displaySleep = new DisplaySleep();
+    private WearWatch wearWatch;
     private final Handler main = new Handler(Looper.getMainLooper());
 
     private HandlerThread cameraThread;
@@ -72,12 +77,20 @@ public final class DocScanGlassActivity extends Activity
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        // The measured default screen-off is 20 s, shorter than one capture
-        // plus one upload.
+        // A previous exit may have shortened the screen-off timeout to leave
+        // the display asleep; give the operator their own value back first.
+        displaySleep.restore(this);
+        // Measured 2026-09-10: the stock timeout on these glasses is
+        // 864000000 ms, ten days, so the screen never sleeps on its own. The
+        // flag still matters, because DisplaySleep releases it to exit.
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
 
         hud = new HudView(this);
         setContentView(hud);
+        // Putting the glasses back on wakes the display and the session with
+        // it. Nothing restarts while they stay on the operator's face.
+        wearWatch = new WearWatch(this, this::wornAgain);
+        wearWatch.start();
         hud.calibrateGuide(getPreferences(MODE_PRIVATE).getFloat(
                 EXTRA_GUIDE, (float) FramingGuide.UNCALIBRATED_FRACTION));
 
@@ -165,10 +178,28 @@ public final class DocScanGlassActivity extends Activity
     public void onBackPressed() {
         if (backExit.onBack(SystemClock.elapsedRealtime()) == BackExitPolicy.Decision.EXIT) {
             Log.i(TAG, "exit confirmed");
+            if (displaySleep.sleep(this) == DisplaySleep.Result.NOT_PERMITTED) {
+                // Never claim an exit that left the display lit.
+                Log.w(TAG, "display stays on: WRITE_SETTINGS is not granted");
+                hud.showLines(List.of("終了しました", "消灯できません", "設定の許可が必要"));
+                main.postDelayed(this::finish, EXIT_NOTICE_MILLIS);
+                return;
+            }
             finish();
             return;
         }
         hud.showLines(List.of("もう一度で終了", "", ""));
+    }
+
+    /**
+     * The glasses came back on after an exit that put the display to sleep.
+     * The process is still alive -- only the screen slept -- so the operator's
+     * own timeout goes back and the session is held awake again.
+     */
+    private void wornAgain() {
+        Log.i(TAG, "worn again");
+        displaySleep.restore(this);
+        getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
     }
 
     @Override
@@ -188,6 +219,9 @@ public final class DocScanGlassActivity extends Activity
         // pending capture, which is what makes that survivable.
         normalizer.reset();
         backExit.reset();
+        if (wearWatch != null) {
+            wearWatch.stop();
+        }
         controller.close();
         surface.close();
         camera.close();

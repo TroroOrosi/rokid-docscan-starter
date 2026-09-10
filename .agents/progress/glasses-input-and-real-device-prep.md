@@ -2053,3 +2053,56 @@ wakelock を解放することである。`DevicePolicyManager.lockNow` は使�
 
 **FS-62:** 近接センサ wakeup 版が使えるが、まだ実装していない。
 グラスには `dev.rokid.docscanglass.doc` が導入済みで、次はこの経路の実装と実機確認。
+
+### FS-61 実装・実機検証完了 / FS-62 実装（2026-09-10 深夜）
+
+作業場所は `C:\rokid-docscan-starter`。実機はグラス `192.168.0.5:5555`、
+build `1.25.015-20260903-150201`（API 32）。端末書き込みは利用者の承認済み。
+
+**FS-61 の実装:** `glassdoc/DisplaySleep.java` を追加し、終了時に
+`Settings.System.SCREEN_OFF_TIMEOUT` を 15000ms へ短縮して
+`FLAG_KEEP_SCREEN_ON` を解放する。元値は SharedPreferences に保存し、
+次回起動の `onCreate` で戻す（つる折りたたみでプロセスが強制停止されるため）。
+書き込みが拒否された場合は `Result.NOT_PERMITTED` を返し、
+HUD に「消灯できません／設定の許可が必要」を 2 秒表示してから終了する。
+黒画面や `finish()` を消灯と呼ばない。`AndroidManifest.xml` に
+`WRITE_SETTINGS` を宣言した。
+
+`DisplaySleepTest` 5件: 短縮と flag 解放、次回起動での復元、
+復元後に利用者が変えた値を上書きしないこと、拒否時に設定も flag も変えないこと、
+短縮していない時は何も戻さないこと。
+
+**FS-62 の実装:** `glassinput/WearTransition.java`（端末非依存）を追加。
+近接センサの値から装着を判定し、**off→on の遷移が 1000ms 続いた時だけ** 1 回だけ
+真を返す。初回読み取りは記録のみで発火しない。ちらつき・装着継続・
+時刻の巻き戻りでは発火しない。`WearTransitionTest` 6件。
+`glassdoc/WearWatch.java` が wakeup 版近接センサへ接続し、再装着で
+元のタイムアウトを復元して `FLAG_KEEP_SCREEN_ON` を戻す。
+
+**実機検証（グラス上で実行）:**
+
+```
+adb install -r glassdoc-debug.apk                    → Success
+appops set dev.rokid.docscanglass.doc WRITE_SETTINGS allow → WRITE_SETTINGS: allow
+am start -n dev.rokid.docscanglass.doc/.DocScanGlassActivity
+  timeout_at_start=864000000  screen=mScreenState=ON
+input keyevent KEYCODE_BACK ×2（3秒以内、二段階終了）
+  after_exit_timeout=15000
+（20秒待機）
+  screen=mScreenState=OFF  wake=mWakefulness=Asleep
+KEYCODE_WAKEUP → am start（再起動）
+  timeout_after_restart=864000000  screen=mScreenState=ON
+```
+
+つまり二段階終了で**実際に消灯し**、再起動で利用者の値が戻ることを実機で確認した。
+`WRITE_SETTINGS` は adb で付与した。グラスの設定画面から
+`ACTION_MANAGE_WRITE_SETTINGS` で付与できるかは未確認で、
+初回準備の手順として残る。
+
+**まだ検証していないこと:** 再装着による復帰は、近接センサへ物理的に
+触れる必要があるため未実施。`WearTransition` は単体テストのみ。
+`AnswerView` の実機表示も未確認。消灯後にプロセスが生存し続けるか
+（アイドル中の kill）も未測定。
+
+**全体検証:** `gradlew --no-daemon test testDebugUnitTest assembleDebug` →
+`BUILD SUCCESSFUL`、Android 単体テスト 295件 / failures 0 / errors 0。
