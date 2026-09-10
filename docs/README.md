@@ -15,7 +15,7 @@ was recorded, not that it applies to another device or firmware.
 
 The documentation gate includes tracked Markdown and new, untracked project
 documents. It excludes only untracked local tool output under the root paths
-`.agents/skills/`, `.claude/`, `.cursor/`, `.specify/`, and `openspec/`.
+`.agents/skills/`, `.claude/`, `.cursor/`, `.specify/`, `.superpowers/`, and `openspec/`.
 Tracked files in those directories still need classification. Without repository
 metadata or a working Git command, the gate includes all Markdown rather than
 silently applying that exception. `.agents/progress/` remains in scope.
@@ -119,13 +119,14 @@ on the measured hardware. Unresolved claims remain explicitly unverified.
 - `refactor-instructions.md` — an older refactor snapshot; individual items may
   already be resolved and must be rechecked against current code.
 
-## Offline answer bundle implementation
+## Glasses offline answer bundle (design approved, not implemented)
 
 - `docs/superpowers/specs/2026-09-11-glasses-offline-answer-bundle-design.md` —
-  approved design for glasses-side offline answer bundle: phone-hotspot topology,
-  大問/小問 derivation, server endpoint shape.
+  approved design document (status: approved 2026-09-11, not implemented). Describes
+  phone-hotspot topology, 大問/小問 derivation, and server endpoint shape. The
+  phone-hotspot topology in particular has not been validated end-to-end on hardware.
 - `docs/superpowers/plans/2026-09-11-glasses-offline-answer-bundle.md` —
-  six-task implementation plan for the offline answer bundle.
+  six-task implementation plan for the approved design. Not hardware-verified.
 
 ## Internal progress record
 
