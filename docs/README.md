@@ -36,7 +36,7 @@ silently applying that exception. `.agents/progress/` remains in scope.
 
 Current version tuple:
 
-- Server APP `0.16.0`
+- Server APP `0.17.0`
 - HTTP API `1.15.0`
 - Android relay `0.3.16` (`versionCode 21`)
 - Glasses input app `0.1.8` (`versionCode 9`; 9 is behaviourally identical to 8
@@ -52,7 +52,7 @@ Current version tuple:
   below is not implemented yet.
 - `:glassinput` is a plain `java-library` shared by the glasses apps, so its
   tests run under `test`, not `testDebugUnitTest`
-- Glasses View contract `1.9.0`
+- Glasses View contract `1.10.0`
 - CXR-L tested/pinned dependency `1.1.1`; the current Rokid Maven release is
   `1.1.2` and the latest coordinate is `1.2.X-SNAPSHOT`
 

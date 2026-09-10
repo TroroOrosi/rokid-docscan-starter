@@ -83,7 +83,7 @@ final class GlassesCaptureSurface implements CaptureSurface {
 
     @Override
     public long showHud(List<String> lines) {
-        return show("hud", () -> hud.showLines(lines));
+        return show("hud", () -> hud.showLines(GlassesHudText.adapt(lines)));
     }
 
     @Override
@@ -100,7 +100,7 @@ final class GlassesCaptureSurface implements CaptureSurface {
         return show("capture-review", () -> {
             Bitmap previous = preview;
             preview = still;
-            hud.showReview(still, lines);
+            hud.showReview(still, GlassesHudText.adapt(lines));
             recycle(previous);
         });
     }

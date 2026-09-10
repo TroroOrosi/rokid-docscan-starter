@@ -88,6 +88,8 @@ def solve_with_fallback(
     last_result = None
     last_solver = None
     for name in names:
+        if question.answer_only and name == DEFAULT_SOLVER:
+            continue
         # An unknown/mistyped tier name (e.g. ROKID_SOLVER_TIERS="claud,claude")
         # must not silently coerce to the local placeholder mid-list — that
         # would "answer" before the real later tiers get a chance. Skip it and
@@ -103,6 +105,13 @@ def solve_with_fallback(
             skipped.append(f"{name}:error")
             continue
         last_result = result
+        if question.answer_only:
+            if result.extras.get("placeholder"):
+                skipped.append(f"{name}:placeholder")
+                continue
+            if result.extras.get("answer_status") == "needs_input":
+                result.extras["served_by"] = solver.name
+                return result, solver
         if _acceptable(result):
             result.extras["served_by"] = solver.name
             if skipped:
@@ -110,6 +119,8 @@ def solve_with_fallback(
             return result, solver
         skipped.append(f"{name}:empty")
 
+    if question.answer_only:
+        raise RuntimeError("answer-sheet: no configured solver produced a valid response")
     if config.REAL_MODE:
         raise RuntimeError(
             "ROKID_REAL_MODE=1: every configured real solver tier failed; "

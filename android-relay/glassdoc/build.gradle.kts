@@ -64,8 +64,8 @@ android {
         // own, with its tests -- and this module is the capture seam over
         // them: camera2 for the still, a canvas for the HUD, and the
         // `:glassinput` gestures routed through CaptureActionRouter.
-        versionCode = 6
-        versionName = "0.6.0"
+        versionCode = 7
+        versionName = "0.6.1"
     }
 
     // Same reasoning as `:glassapp`: a vendor installer that reads JAR
@@ -106,4 +106,6 @@ dependencies {
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("com.google.mlkit:text-recognition-japanese:16.0.1")
     testImplementation("junit:junit:4.13.2")
+    testImplementation("org.robolectric:robolectric:4.14.1")
+    testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
 }

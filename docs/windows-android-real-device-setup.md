@@ -7,6 +7,25 @@ modify a camera/privacy indicator and does not treat a build as device proof.
 
 ## Requirements
 
+For the standalone `:glassdoc` review fixes, additionally verify on the target
+glasses after approving installation and launch:
+
+- Start with an explicit server, save a reading session, then restart without
+  extras and confirm the same page count. Repeat from answer review.
+- While the Activity is alive, deliver another Intent with a test server/key
+  and guide value; confirm the new destination and visible guide. A guide-only
+  update must preserve an active aiming/review state.
+- Tap twice from READY: prepare capture, then shutter/stabilization. Confirm
+  that a completed camera failure permits tap-to-retry and an unresolved
+  capture still blocks a new shutter.
+- Read the READY, READING and capture-review hints on the HUD and exercise
+  their tap/swipe instructions. Confirm the full text fits the display.
+- Physically observe the privacy LED during capture, after the image callback,
+  and during analysis/answer review. Record APK version/hash and firmware.
+
+These steps are pending until performed on the connected device; unit tests
+and a successful APK build do not establish hardware acceptance.
+
 - Windows with Python 3.12 available as `py -3.12`
 - JDK 17 for the Android build
 - Android SDK Platform 36, build tools, and platform tools

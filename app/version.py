@@ -113,7 +113,7 @@ from __future__ import annotations
 #        reported against the async Binder budget, the CXR-L service version is
 #        recorded on connect, and OCR results carry a mean symbol confidence.
 #        Relay-only; API and glasses view unchanged.
-APP_VERSION = "0.16.0"
+APP_VERSION = "0.17.0"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.
@@ -212,7 +212,9 @@ ANALYZER_API_VERSION = "1.0.0"
 #        solvers can answer from the scanned page image (additive/back-compat).
 # 1.2.0: SolveResult gained canonical, document-qualified, 1-based
 #        `evidence_refs`; legacy `evidence_pages` semantics stay unchanged.
-SOLVER_API_VERSION = "1.2.0"
+# 1.3.0: opt-in answer_only keeps the complete written response, separates
+#        missing material and prohibits placeholder fallback in that mode.
+SOLVER_API_VERSION = "1.3.0"
 
 # Media-extractor plugin interface (formula/figure/graph/table).
 EXTRACTOR_API_VERSION = "1.0.0"
@@ -249,7 +251,10 @@ EXPLAINER_API_VERSION = "1.1.0"
 # 1.9.0: unverified CUSTOMVIEW/AI callbacks are diagnostic-only. Capture,
 #        registration, completion and navigation are phone-controlled; no
 #        automatic registration is advertised.
-GLASSES_VIEW_CONTRACT_VERSION = "1.9.0"
+# 1.10.0: local glassdoc gestures restore sessions after configuration, retry only
+#         terminal capture failures, and display tap/swipe instructions.
+#         Phone/CUSTOMVIEW controls remain unchanged.
+GLASSES_VIEW_CONTRACT_VERSION = "1.10.0"
 
 # Answer-area overlay payload (box + short answer; 2D image-anchored).
 # 1.1.0: added tracking metadata (tracking/fixed_ar/anchor_hint).

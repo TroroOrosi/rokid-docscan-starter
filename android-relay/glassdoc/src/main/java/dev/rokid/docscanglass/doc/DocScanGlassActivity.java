@@ -3,6 +3,7 @@ package dev.rokid.docscanglass.doc;
 import android.Manifest;
 import android.annotation.SuppressLint;
 import android.app.Activity;
+import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.os.Bundle;
 import android.os.Handler;
@@ -12,6 +13,7 @@ import android.os.SystemClock;
 import android.util.Log;
 import android.view.KeyEvent;
 import android.view.WindowManager;
+import android.widget.Toast;
 
 import java.util.List;
 import java.util.Optional;
@@ -21,8 +23,6 @@ import dev.rokid.docscanglass.input.GlassKeyEvents;
 import dev.rokid.docscanglass.input.GlassesInputAction;
 import dev.rokid.docscanglass.input.GlassesInputNormalizer;
 import dev.rokid.docscanglass.input.InputSignal;
-import dev.rokid.docscanrelay.CaptureActionRouter;
-import dev.rokid.docscanrelay.CaptureLinkEvent;
 import dev.rokid.docscanrelay.ClientIdentity;
 import dev.rokid.docscanrelay.DocScanController;
 import dev.rokid.docscanrelay.JapaneseOcr;
@@ -78,10 +78,8 @@ public final class DocScanGlassActivity extends Activity
 
         hud = new HudView(this);
         setContentView(hud);
-        if (getIntent() != null) {
-            hud.calibrateGuide(getIntent().getFloatExtra(
-                    EXTRA_GUIDE, (float) FramingGuide.UNCALIBRATED_FRACTION));
-        }
+        hud.calibrateGuide(getPreferences(MODE_PRIVATE).getFloat(
+                EXTRA_GUIDE, (float) FramingGuide.UNCALIBRATED_FRACTION));
 
         cameraThread = new HandlerThread("glass-camera");
         cameraThread.start();
@@ -98,23 +96,38 @@ public final class DocScanGlassActivity extends Activity
                         "glassdoc/" + BuildConfig.VERSION_NAME,
                         "camera2/no-cxr"));
 
-        // There is no service to bind and no pairing to lose: the camera and
-        // the display are in this process. The link is ready as soon as the
-        // activity is.
-        controller.onCaptureLinkStateChanged(true, CaptureLinkEvent.GLASSES_STATUS_CHANGED);
-
-        String server = getIntent() == null ? null : getIntent().getStringExtra(EXTRA_SERVER);
-        String key = getIntent() == null ? "" : getIntent().getStringExtra(EXTRA_KEY);
-        try {
-            controller.configure(server, key == null ? "" : key, MEASURED_ROTATION_DEGREES);
-            controller.verifyServer();
-        } catch (RuntimeException error) {
-            hud.showLines(List.of("サーバ未設定", String.valueOf(error.getMessage()), ""));
-            Log.w(TAG, "no usable server URL supplied", error);
-        }
+        applyIntent(getIntent(), true);
         if (!hasCamera()) {
             requestPermissions(
                     new String[] {Manifest.permission.CAMERA}, CAMERA_PERMISSION_REQUEST);
+        }
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        applyIntent(intent, false);
+    }
+
+    private void applyIntent(Intent intent, boolean starting) {
+        if (intent != null && intent.hasExtra(EXTRA_GUIDE)) {
+            float fraction = intent.getFloatExtra(
+                    EXTRA_GUIDE, (float) FramingGuide.UNCALIBRATED_FRACTION);
+            if (Float.isFinite(fraction)) {
+                fraction = Math.max((float) FramingGuide.MIN_VISIBLE_FRACTION,
+                        Math.min((float) FramingGuide.MAX_VISIBLE_FRACTION, fraction));
+                hud.calibrateGuide(fraction);
+                getPreferences(MODE_PRIVATE).edit().putFloat(EXTRA_GUIDE, fraction).apply();
+            }
+        }
+        // A guide-only Intent must not reset an active capture or review.
+        if (starting || (intent != null
+                && (intent.hasExtra(EXTRA_SERVER) || intent.hasExtra(EXTRA_KEY)))) {
+            controller.configureAndResume(
+                    intent == null ? null : intent.getStringExtra(EXTRA_SERVER),
+                    intent == null ? null : intent.getStringExtra(EXTRA_KEY),
+                    MEASURED_ROTATION_DEGREES);
         }
     }
 
@@ -207,47 +220,7 @@ public final class DocScanGlassActivity extends Activity
         if (action != GlassesInputAction.BACK) {
             backExit.reset();
         }
-        RelayState state = controller.getState();
-        CaptureActionRouter.Command command = CaptureActionRouter.route(state, action);
-        Log.i(TAG, "action " + action + " in " + state + " -> " + command);
-        apply(command);
-    }
-
-    private void apply(CaptureActionRouter.Command command) {
-        switch (command) {
-            case ARM_NEXT:
-                controller.captureNextPage();
-                break;
-            case ARM_PREVIOUS:
-                controller.recapturePreviousPage();
-                break;
-            case ARM_RETAKE:
-                controller.retakePendingCapture();
-                break;
-            case TAKE_PHOTO:
-                controller.triggerArmedCapture();
-                break;
-            case CANCEL_AIMING:
-                controller.cancelAiming();
-                break;
-            case FINISH_READING:
-                controller.finishReading();
-                break;
-            case CONFIRM_CAPTURE:
-                controller.confirmPendingCapture();
-                break;
-            case NEXT_REVIEW:
-                controller.nextReviewItem();
-                break;
-            case PREVIOUS_REVIEW:
-                controller.previousReviewItem();
-                break;
-            case START_NEW_DOCUMENT:
-                controller.startNewDocument();
-                break;
-            default:
-                break;
-        }
+        controller.onGlassesAction(action);
     }
 
     // --- camera -----------------------------------------------------------
@@ -275,6 +248,11 @@ public final class DocScanGlassActivity extends Activity
     // --- controller callbacks --------------------------------------------
 
     @Override
+    public void onConfigurationRejected(String message) {
+        main.post(() -> Toast.makeText(this, message, Toast.LENGTH_LONG).show());
+    }
+
+    @Override
     public void onViewShown(long generation, String purpose) {
         controller.onCustomViewAvailable(generation, purpose);
     }
@@ -290,6 +268,6 @@ public final class DocScanGlassActivity extends Activity
                 || state == RelayState.CAPTURE_REVIEW) {
             return;
         }
-        main.post(() -> hud.showLines(hudLines));
+        main.post(() -> hud.showLines(GlassesHudText.adapt(hudLines)));
     }
 }
