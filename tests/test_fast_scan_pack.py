@@ -13,10 +13,20 @@ from scripts.eval_fast_scan import evaluate_results, validate_pack
 
 ROOT = Path(__file__).resolve().parents[1]
 PACK_PATH = ROOT / "tests/fixtures/fast_scan/cases.json"
+FORM_PACK_PATH = ROOT / "tests/fixtures/answer_forms/cases.json"
 
 
 def _pack():
     return json.loads(PACK_PATH.read_text(encoding="utf-8"))
+
+
+def _form_pack():
+    return json.loads(FORM_PACK_PATH.read_text(encoding="utf-8"))
+
+
+def _form_question(pack, case_id, question_id="Q1"):
+    case = next(case for case in pack["cases"] if case["id"] == case_id)
+    return case, next(q for q in case["expected"] if q["question_id"] == question_id)
 
 
 def _submission(*rows):
@@ -129,3 +139,89 @@ def test_check_command_runs_without_device_credentials_or_ai(tmp_path):
     assert report["report_kind"] == "fast-scan-pack-check"
     assert report["hardware_verified"] is False
     assert "objective_match_rate" not in report
+
+
+def test_every_written_form_is_covered_and_tuning_is_separate_from_holdout():
+    summary = validate_pack(_form_pack())
+    assert summary["report_kind"] == "answer-form-pack-check"
+    assert set(summary["by_form"]) == {
+        "choice",
+        "multi_field",
+        "worked_steps",
+        "proof",
+        "word_limit",
+        "english_composition",
+        "audio_dependent",
+        "figure",
+    }
+    assert set(summary["by_usage"]) == {"tuning", "holdout"}
+    assert summary["ai_executed"] is False
+    assert summary["sources"] == {"kyotsu-test:2026": 7, "todai:2026": 10}
+    # Nobody has reviewed the drafted requirement tables yet; the report says so.
+    assert summary["rubrics_pending_review"] == 10
+    assert "human_checked_requirements" not in summary["rubric_origins"]
+
+
+def test_a_form_with_no_case_is_reported_instead_of_silently_passing():
+    pack = _form_pack()
+    pack["cases"] = [case for case in pack["cases"] if case["id"] not in {"T02", "T04"}]
+    with pytest.raises(ValueError, match="answer forms with no case"):
+        validate_pack(pack)
+
+
+def test_a_written_answer_cannot_be_graded_by_matching_the_final_value():
+    pack = _form_pack()
+    _, question = _form_question(pack, "T01", "Q2")
+    question["scoring"] = "exact"
+    question["answer"] = "0 < a <= 1"
+    with pytest.raises(ValueError, match="cannot be scored by exact match"):
+        validate_pack(pack)
+
+
+def test_a_published_statement_of_intent_is_not_a_mark_scheme():
+    pack = _form_pack()
+    _, question = _form_question(pack, "T01")
+    question["rubric_origin"] = "published_intent"
+    with pytest.raises(ValueError, match="human-checked requirements"):
+        validate_pack(pack)
+
+
+def test_original_wording_may_not_be_reproduced_as_the_case_text():
+    pack = _form_pack()
+    _, question = _form_question(pack, "K01")
+    question["source"]["text_origin"] = "verbatim"
+    with pytest.raises(ValueError, match="synthetic or paraphrased"):
+        validate_pack(pack)
+
+
+def test_the_same_answer_field_cannot_be_claimed_twice():
+    pack = _form_pack()
+    _, first = _form_question(pack, "K01")
+    _, other = _form_question(pack, "K03")
+    other["source"] = deepcopy(first["source"])
+    with pytest.raises(ValueError, match="duplicate answer-sheet field reference"):
+        validate_pack(pack)
+
+
+def test_an_audio_question_without_recording_is_rejected():
+    pack = _form_pack()
+    case, question = _form_question(pack, "K02")
+    case["mode"] = "normal"
+    case["input"]["audio"] = []
+    question["audio_ids"] = []
+    with pytest.raises(ValueError, match="listening mode and audio"):
+        validate_pack(pack)
+
+
+def test_held_out_scores_are_never_averaged_into_the_tuning_number():
+    report = evaluate_results(
+        _form_pack(),
+        _submission(_result("K01", "Q1", "-3"), _result("K03", "Q1", "5")),
+    )
+    tuning = report["by_usage_results"]["tuning"]
+    holdout = report["by_usage_results"]["holdout"]
+    assert tuning["objective_correct"] == 1
+    assert tuning["objective_match_rate"] == pytest.approx(1 / 3)
+    assert holdout["objective_correct"] == 0
+    assert holdout["objective_match_rate"] == 0
+    assert report["manual_review_pending"] == 0
