@@ -1882,3 +1882,27 @@ py -3.12 -X utf8 scripts/eval_fast_scan.py --pack tests/fixtures/answer_forms/ca
 **次:** FS-61/62（消灯と再装着起動）は実機ゲート。`adb devices` は接続なしのままで、
 端末設定の変更が要る場合は具体的な設定名を示して承認を得てから行う。
 FS-63/64（GPT中継の認証・費用・一大問の往復）は端末なしで進められる。
+
+### FS-61 の一次測定（2026-09-10 深夜、読み取りのみ）
+
+FS-60 完了後に `adb devices -l` を再実行したところ、今回は接続があった。
+グラス `192.168.0.5:5555`（product/model/device: glasses）、
+スマホ `adb-ZY22LWGDCV-...` (F-51F)。端末の状態を変える操作は行っていない。
+
+グラス側の読み取り結果:
+
+- `getprop ro.build.display.id` → `SKQ1.240613.001 release-keys`、
+  `ro.build.version.sdk` → `32`（Android 12）。
+- `getprop vendor.rkd.glasses.is_spread` → `1`（つるは開）。
+- `dumpsys power` → `mWakefulness=Awake`。
+- `dumpsys device_policy` → `Current Device Policy Manager state:` の
+  `Immutable state:` に `mHasFeature=false`。`Enabled Device Admins (User 0)` は空。
+- `pm list features | grep -i "admin\|manag"` → 一致なし（grep exit 1）。
+  すなわち `android.software.device_admin` が無い。
+
+**判断:** このビルドの DevicePolicyManager は機能自体が無効で、device admin を
+有効化できない。`DevicePolicyManager.lockNow` は admin 権限を前提とするため、
+FS-61 の「lockNow で実消灯する」経路はこの端末では成立しない。
+これは測定した1台・このビルドについての結果であり、CXR-L SDK 側に別の消灯 API が
+無いことの証明ではない。次は SDK 側の候補と、Accessibility を汎用回避策にしない
+条件を分けて詰める。
