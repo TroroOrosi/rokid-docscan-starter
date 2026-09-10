@@ -1669,3 +1669,76 @@ URL付きIntentの自動承認レビュー拒否は回避せず、利用者に�
 
 次: 全文解答の共通データ/ローカル閲覧→大問と小問/スマホAI→終了復旧→撮影/録音/転送。
 FS-36は部分着手のまま。端末入力・実AI認証・150分電池持ち・学習モデルは未検証。
+
+### 2026-09-10 夜：追加条件を調査し、実装再開計画を保存
+
+この節が再開入口。今回の依頼は追加条件を考慮して計画を保存すること。
+追加実装・クラウド作成/公開・API課金・実機操作は行っていない。
+正本: [plan.md](../../tasks/plan.md#answer-sheet-20260910)、作業一覧:
+[todo.md](../../tasks/todo.md) FS-59〜65。既存未完了FSを削除していない。
+
+**利用者の補足・確定事項:**
+
+- 記述内容は最終値だけでなく、答案に必要な式・途中計算・証明・理由・作図を含む全内容のみ。
+  共通テスト/東大の形式を参考にし、大問文脈で解いて小問/解答欄ごとに表示する。
+- 閲覧終了はダブルタップを二回。ホームへ戻らず実消灯し、再装着でアプリを起動する。
+  前の「一回で終了→選択画面」はこの訂正で置き換える。再装着後はモード選択。
+- グラスWi-Fiなし、スマホモバイル回線、初回準備後の操作はグラスだけ。
+- GPTを希望。非API/ローカル/Rokid標準AIも比較する。
+- 質問への回答で「管理型クラウド中継を候補にする（推奨）」を選択済み。
+  中継候補の調査承認を、クラウド公開・credential変更や実機設定変更へ拡張しない。
+
+**現ソース・SDK検査（2026-09-10）:**
+
+- 着手HEAD `f5b15c5aeb83029282c52233eb47f333b0d7c9c4`、branch `agent/real-device-test-prep`。
+  Python全文solverの増分はこのcommitにある。以前の450 passed/Ruffの記録はその増分の証拠。
+- 未追跡の途中成果物: `android-relay/relaycore/src/{main,test}/java/dev/rokid/docscanrelay/study/`
+  （5クラス＋4テスト）と `android-relay/glassdoc/src/test/java/dev/rokid/docscanglass/doc/AnswerViewTest.java`。
+  読み取りのみで保持。`Test-Path .../glassdoc/.../AnswerView.java` → `False`。
+  画面テストが参照する実装はまだなく、新Android機能がビルド可能とは報告しない。
+- `DocScanGlassActivity.onBackPressed` は現状二回目に `finish()`。消灯API呼出しなし。
+  `RokidGlobalLink.onWearingStatusNotify` はログのみ。`BackExitPolicy` の窓は3000ms。
+- JDK17 `javap -classpath <client-l-1.1.1/classes.jar>` に
+  `IMediaStreamService IDeviceStatusCallback IAiEventCallback` の完全修飾名を渡した結果:
+  `openApp(String,String,IGlassAppCallback)`、`onWearingStatusNotify(boolean)` を確認。
+  検査したinterfaceには直接消灯/答案全文返却の型付きAPIを確認できず。
+  `sendCustomCmd` の意味や別SDKの機能を推測して非対応と断定していない。
+  検査jar SHA256: `3E889EA5E62EC46AEE5E260B1018416EC126E57463C8E17D101E8A110EBD583D`。
+- `C:/Users/pupu_/AppData/Local/Android/Sdk/platform-tools/adb.exe devices -l`
+  → `List of devices attached` のみ。接続端末なし。消灯・装着・電池は未測定。
+
+**一次資料と設計判断:**
+
+- 参照URLと用途はplan.mdに集約。大学入試センターの2026問題/正解/音声ページと
+  数学ⅠA・リスニングのPDF、東大2026の数学/国語/英語出題意図を確認。
+  東大の要項URLは現物が2027年度（2026年7月公表）。検索snippetの2026表記を採用しない。
+  出題意図を完全な模範解答・公式の詳細採点基準として扱わない。
+- OpenAI公式Docs MCPで画像入力/認証/モデル現物を取得。
+  Astra/Terraは比較候補であり実評価による選定ではない。録音は別ASR工程にする。
+  中継候補はCloud Run、秘密はSecret Manager。既存Python資産を再利用する方針。
+- `find-docs` のContext7でAndroid IDを解決したがlockNowの検索は該当なし。
+  Android公式APIを直接確認。lockNowは管理者権限・端末機能が必要で実機未確認。
+  Accessibility画面ロックを汎用回避策として既定にしない。
+- 装着通知false→trueでスマホからopenAppする候補を採用。つる開閉を装着と混同しない。
+  装着中終了の直後に自動復活しない状態が必要。通知存在と実機成功は別。
+
+**次回の手順:**
+
+1. FS-59: 途中のstudy実装を読み、JDK17/ASCIIコピーのhashを照合し共通テストを実行する。
+   全文表示はFS-12/65へつなぐ。既存reader/storeを新しく作り直さない。
+2. FS-60: 答案形式別の評価を固定。FS-61/62: 消灯/着脱能力と純粋状態試験を分けて進める。
+   新たな管理者有効化が必要なら、その具体的端末設定について承認を得てから実施する。
+3. FS-63/64: 認証・費用・永続ジョブを具体化し、GPT一大問の往復から統合する。
+4. FS-65と既存FSで全文表示・撮影/録音・転送を結合し、両150分の受入へ進む。
+
+skills: planning-and-task-breakdown、openai-docs、verifying-premises、find-docs（Android補助）、
+progress-checkpoint。graphの既存coverage不足は現ソース参照で補った。
+今回の保存対象はplan/todo/この記録の3ファイルのみ。未追跡の既存環境ディレクトリと
+途中コードはそのまま残す。
+
+保存前検査: `py -3.12 -`（既存FS/チェック数、新規FS-59〜65の目的・条件・検証・依存・対象、
+再開参照と決定事項のassert）→
+`PASS: existing FS tasks/checkmarks retained; 7 new tasks complete; continuation links and required decisions present`。
+ここでcompleteは7タスクの定義項目が揃った意味で、実装完了ではない。
+`git -c core.safecrlf=false diff --check` → 出力なし、exit 0。
+文書のみの変更なのでPython/Android全体のビルド・テストは今回は再実行していない。
