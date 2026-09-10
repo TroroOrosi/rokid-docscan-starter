@@ -1755,3 +1755,9 @@ plan.mdとFS-63へ反映した。Google Cloud側の既存環境有無も未確�
 警告は既存Starlette/httpx非推奨。`py -3.12 -m ruff check .` → `All checks passed!`。
 `git -c core.safecrlf=false diff --check` → 出力なし、exit 0。
 Androidビルドと実機試験はこのPR公開作業では再実行していない。
+
+公開先: [PR #32](https://github.com/TroroOrosi/rokid-docscan-starter/pull/32)。
+`git push origin HEAD:refs/heads/agent/real-device-test-prep` → `3c6a5aa..2800ffd`。
+`gh pr create --base main --head agent/real-device-test-prep ... --body-file <temp>` → 上記URL。
+ローカルの公開フックには今回の利用者承認を対応させた `AGENT_APPROVED=1` を指定した。
+フックの変更・無効化、merge、クラウド環境作成は行っていない。
