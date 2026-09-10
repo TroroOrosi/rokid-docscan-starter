@@ -31,6 +31,10 @@ public class AnswerGesturesTest {
         assertEquals(2, reader.pageNumber());
 
         assertTrue(AnswerGestures.apply(reader, GlassesInputAction.SWIPE_BACK));
+        // Pin identity, not just page number: a one-sided SWIPE_BACK ->
+        // forward() bug would overflow onto the second item, whose single
+        // page also happens to report pageNumber() == 1.
+        assertEquals("q10", reader.current().questionId);
         assertEquals(1, reader.pageNumber());
     }
 
