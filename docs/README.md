@@ -119,6 +119,14 @@ on the measured hardware. Unresolved claims remain explicitly unverified.
 - `refactor-instructions.md` — an older refactor snapshot; individual items may
   already be resolved and must be rechecked against current code.
 
+## Offline answer bundle implementation
+
+- `docs/superpowers/specs/2026-09-11-glasses-offline-answer-bundle-design.md` —
+  approved design for glasses-side offline answer bundle: phone-hotspot topology,
+  大問/小問 derivation, server endpoint shape.
+- `docs/superpowers/plans/2026-09-11-glasses-offline-answer-bundle.md` —
+  six-task implementation plan for the offline answer bundle.
+
 ## Internal progress record
 
 - `.agents/progress/glasses-input-and-real-device-prep.md` — append-only internal
