@@ -1992,3 +1992,64 @@ API キー未設定で、`ROKID_ANALYZER` はオフラインの placeholder。�
 既存の 458 件のテストはネットワークにも課金にも触れていない。
 有料 API を使わない実答案の候補は、FS-57（Rokid 標準AI）と FS-58（端末内推論）。
 FS-63/64 の GPT 経路は、課金の発生しない範囲が確定するまで設計のみに留める。
+
+### 2026-09-10 深夜: 作業場所の移動、AnswerView 実装、実消灯経路の確定
+
+利用者の承認と「OneDrive だと不便」という指示を受けて実施した。
+
+**作業場所を `C:\rokid-docscan-starter` へ移した。** 旧 `C:\Users\pupu_\OneDrive\ドキュメント\rokid-docscan-starter`
+は削除せず残す。移動の理由は測定した障害である:
+
+- OneDrive 配下では gradle が自分の出力で失敗する。
+  `Cannot snapshot ...\packageDebugResources\compile-file-map.properties: not a regular file`、
+  `Unable to delete directory ...\test-results\testDebugUnitTest\binary`。
+  同期がビルド中間物をプレースホルダ化・ロックするため。
+- 非 ASCII パス問題も同時に消える。symlink `rokid-docscan-live` や
+  別 worktree `rokid-docscan-build` を維持する必要がなくなった。
+- 複製は `tar` で行い、`build` / `.gradle` / `__pycache__` を除外した。
+  複製後の `git log -1` は `4a96156`、branch `agent/real-device-test-prep`、
+  remote は同じ GitHub。未追跡ファイルの集合も一致。
+- `~/.claude/hooks/stop-verification-gate.sh` の `ASCII_WORKTREE` を
+  `C:/rokid-docscan-starter` に変更した。旧値は `C:/Users/Public/rokid-docscan-build`。
+
+**AnswerView を実装した（FS-12/65 の中核）。** 退避していた `AnswerViewTest` を元に戻し、
+契約通りに実装した。索引行と答案行を分け、contentDescription には答案だけを載せる。
+幅が狭くなったら `AnswerReader.viewport` で再流しし、文字を落とさずフォントも縮めない。
+`:glassdoc:testDebugUnitTest` は AnswerViewTest 3件を含む18件が成功。
+
+**新しい場所での全体検証:**
+
+```
+gradlew --no-daemon test testDebugUnitTest assembleDebug  → BUILD SUCCESSFUL in 34s
+                                                             199 actionable tasks
+android unit tests: {'tests': 284, 'skipped': 0, 'failures': 0, 'errors': 0}
+APK: app-debug.apk 57.6MB / glassdoc-debug.apk 54.8MB / glassapp / glassprobe
+py -3.12 -m pytest -q → 458 passed, 1 warning
+py -3.12 -m ruff check . → All checks passed!
+```
+
+**FS-61: 実消灯の経路を実機で確認した。** device admin が無くても消える。
+
+```
+before: mScreenState=ON  / mWakefulness=Awake
+settings put system screen_off_timeout 15000
+(25秒待機)
+after:  mScreenState=OFF   mWakefulness=Asleep
+settings put system screen_off_timeout 864000000   (元値へ復元)
+復元後: mScreenState=ON / mWakefulness=Awake / 864000000
+```
+
+したがって FS-61 の経路は `Settings.System.SCREEN_OFF_TIMEOUT` を一時的に短くし、
+wakelock を解放することである。`DevicePolicyManager.lockNow` は使えないが、
+実消灯そのものは到達可能。前回の「無承認・無権限で到達できる経路は無い」という
+書き方は、この測定で更新される。
+
+**未解決:** アプリからこれを行うには `WRITE_SETTINGS` が要る。
+`appops get dev.rokid.docscanglass.doc WRITE_SETTINGS` は `Default mode: default` で未許可。
+`appops set ... allow` は今回のツール制限で実行できなかった。利用者の許可が要る。
+実運用ではグラス側の設定画面（`ACTION_MANAGE_WRITE_SETTINGS`）で許可できるかも未確認。
+`com.rokid.light.ILightsCtrl` へは触れていない。privacy LED を制御する可能性があり、
+意味の分からないコマンドを送らない方針を守った。
+
+**FS-62:** 近接センサ wakeup 版が使えるが、まだ実装していない。
+グラスには `dev.rokid.docscanglass.doc` が導入済みで、次はこの経路の実装と実機確認。
