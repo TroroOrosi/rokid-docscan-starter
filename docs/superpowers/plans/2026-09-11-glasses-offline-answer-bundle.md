@@ -542,15 +542,16 @@ Android.
                       DocScanApi.ApiException.class, () -> api(server).answerBundle(7));
 
               assertEquals(409, error.getStatusCode());
-              assertEquals("call finalize-reading first", error.getMessage());
+              // ApiException composes "HTTP <code>: <detail>"
+              // (DocScanApi.java:178), so match the detail, not the whole text.
+              assertTrue(error.getMessage().contains("call finalize-reading first"));
           }
       }
   }
   ```
 
-  If `ApiException.getMessage()` does not return the detail, read
-  `DocScanApi.java:175` and assert on whatever accessor it does expose rather
-  than changing the exception.
+  Add `import static org.junit.Assert.assertTrue;` beside the other static
+  imports.
 
 - [ ] **Step 2: Run the test and verify it fails**
 
@@ -946,8 +947,6 @@ so it can be tested without an Activity.
   ```bash
   git add android-relay/glassdoc/src/main/java/dev/rokid/docscanglass/doc/DocScanGlassActivity.java \
           android-relay/relaycore/src/main/java/dev/rokid/docscanrelay/DocScanController.java \
-          android-relay/relaycore/src/main/java/dev/rokid/docscanrelay/DocScanApi.java \
-          android-relay/glassdoc/src/main/java/dev/rokid/docscanglass/doc/AnswerView.java \
           android-relay/glassdoc/src/test/java/dev/rokid/docscanglass/doc/AnswerSurfaceTest.java
   git commit -m "feat: read the answer bundle on the glasses"
   ```
