@@ -27,6 +27,9 @@ import dev.rokid.docscanrelay.ClientIdentity;
 import dev.rokid.docscanrelay.DocScanController;
 import dev.rokid.docscanrelay.JapaneseOcr;
 import dev.rokid.docscanrelay.RelayState;
+import dev.rokid.docscanrelay.study.AnswerBundle;
+import dev.rokid.docscanrelay.study.AnswerReader;
+import dev.rokid.docscanrelay.study.AnswerStore;
 
 /**
  * The glasses-side operator surface.
@@ -73,6 +76,13 @@ public final class DocScanGlassActivity extends Activity
     private JapaneseOcr ocr;
     private DocScanController controller;
     private HudView hud;
+    private AnswerView answers;
+    private AnswerStore answerStore;
+    // volatile: onUpdate's "reader == null" guard runs on the controller's
+    // serial executor thread, but reader is only ever written from the main
+    // thread (openAnswers/closeAnswers).
+    private volatile AnswerReader reader;
+    private volatile boolean fetchingAnswers;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -87,6 +97,7 @@ public final class DocScanGlassActivity extends Activity
 
         hud = new HudView(this);
         setContentView(hud);
+        answerStore = new AnswerStore(getFilesDir());
         // Putting the glasses back on wakes the display and the session with
         // it. Nothing restarts while they stay on the operator's face.
         wearWatch = new WearWatch(this, this::wornAgain);
@@ -254,6 +265,14 @@ public final class DocScanGlassActivity extends Activity
         if (action != GlassesInputAction.BACK) {
             backExit.reset();
         }
+        if (reader != null) {
+            if (!AnswerGestures.apply(reader, action)) {
+                closeAnswers();
+                return;
+            }
+            answers.refresh();
+            return;
+        }
         controller.onGlassesAction(action);
     }
 
@@ -294,6 +313,9 @@ public final class DocScanGlassActivity extends Activity
     @Override
     public void onUpdate(RelayState state, List<String> hudLines, String diagnostic) {
         Log.i(TAG, state + ": " + diagnostic);
+        if (state == RelayState.REVIEW && reader == null && !fetchingAnswers) {
+            fetchAnswers(controller.sessionId());
+        }
         // AIMING, STABILIZING and CAPTURE_REVIEW each own the screen through
         // their own surface call -- the guide brackets, and the still. Redrawing
         // plain text here would wipe them.
@@ -303,5 +325,48 @@ public final class DocScanGlassActivity extends Activity
             return;
         }
         main.post(() -> hud.showLines(GlassesHudText.adapt(hudLines)));
+    }
+
+    // --- answer reading -----------------------------------------------------
+
+    /**
+     * One request, then the reader works with no route to the server. The exam
+     * venue has no Wi-Fi network; the glasses reach the server only while the
+     * phone's hotspot is up, which may be true only before the exam starts.
+     */
+    private void fetchAnswers(long sessionId) {
+        if (sessionId <= 0) {
+            return;
+        }
+        fetchingAnswers = true;
+        new Thread(() -> {
+            try {
+                AnswerBundle bundle = controller.api().answerBundle(sessionId);
+                answerStore.start(bundle);
+                main.post(() -> openAnswers(bundle));
+            } catch (Exception error) {
+                Log.w(TAG, "answer bundle unavailable", error);
+                main.post(() -> hud.showLines(
+                        List.of("答案を取得できません", "通信を確認", "")));
+            } finally {
+                fetchingAnswers = false;
+            }
+        }, "answer-bundle").start();
+    }
+
+    private void openAnswers(AnswerBundle bundle) {
+        answers = new AnswerView(this);
+        // A placeholder viewport: AnswerView.onSizeChanged calls
+        // reader.viewport with its own Paint as soon as it is laid out, and
+        // the view owns the layout, so nothing here should guess at width.
+        reader = new AnswerReader(bundle, 1f, 2, text -> text.length());
+        answers.bind(reader);
+        setContentView(answers);
+    }
+
+    private void closeAnswers() {
+        reader = null;
+        answers = null;
+        setContentView(hud);
     }
 }
