@@ -22,7 +22,7 @@ def client(tmp_path, monkeypatch):
     return TestClient(main.app)
 
 
-def _session_with(client, pages):
+def _session_with(client, pages, mode="study"):
     doc_id = client.post("/v1/documents", json={"title": "t"}).json()["document_id"]
     for index, text in enumerate(pages):
         client.post(
@@ -33,7 +33,7 @@ def _session_with(client, pages):
     session_id = client.post(
         "/v1/exam-sessions",
         json={
-            "mode": "study",
+            "mode": mode,
             "document_id": doc_id,
             "exam_type": "written",
             "answer_format": "mark",
@@ -98,14 +98,25 @@ def test_a_section_without_sub_questions_becomes_one_whole_item(client):
     ]
 
 
-def test_digest_is_stable_and_revision_never_goes_backwards(client):
+def test_digest_is_stable_and_revision_advances_when_an_answer_is_ingested(client):
     _, session_id = _session_with(client, [PAGE])
     client.post(f"/v1/exam-sessions/{session_id}/finalize-reading")
     first = client.get(f"/v1/exam-sessions/{session_id}/answer-bundle").json()
+
+    ingested = client.post(
+        f"/v1/exam-sessions/{session_id}/solutions",
+        json={"solutions": [{"problem_no": "問1", "answer": "x = 2"}]},
+    )
+    assert ingested.status_code == 200
+
     second = client.get(f"/v1/exam-sessions/{session_id}/answer-bundle").json()
 
-    assert first["input_digest"] == second["input_digest"]
-    assert second["revision"] >= first["revision"]
+    assert second["input_digest"] == first["input_digest"]
+    assert second["revision"] > first["revision"]
+    item = second["items"][0]
+    assert (item["group_label"], item["question_label"]) == ("第1問", "問1")
+    assert item["status"] == "ready"
+    assert item["answer"] == "x = 2"
 
 
 def test_reading_phase_is_409(client):
@@ -117,5 +128,36 @@ def test_reading_phase_is_409(client):
     assert "finalize-reading" in response.json()["detail"]
 
 
+def test_real_mode_lock_is_409(client):
+    # finalize-reading still segments/transitions in mode=real (it reveals
+    # nothing); the lock is on answers, so it must reject the bundle itself.
+    _, session_id = _session_with(client, [PAGE], mode="real")
+    client.post(f"/v1/exam-sessions/{session_id}/finalize-reading")
+
+    response = client.get(f"/v1/exam-sessions/{session_id}/answer-bundle")
+
+    assert response.status_code == 409
+    assert "locked" in response.json()["detail"]
+
+
 def test_unknown_session_is_404(client):
     assert client.get("/v1/exam-sessions/9999/answer-bundle").status_code == 404
+
+
+def test_items_without_a_group_heading_fall_back_to_one_default_group(client):
+    # No 大問N / 第N問 heading anywhere on the page: _answer_groups opens the
+    # synthesized "全体" default group instead of leaving the first row
+    # groupless.
+    page = "\n".join([
+        "問1 2x + 3 = 7 を解け。",
+        "問2 その理由を述べよ。",
+    ])
+    _, session_id = _session_with(client, [page])
+    client.post(f"/v1/exam-sessions/{session_id}/finalize-reading")
+
+    items = client.get(f"/v1/exam-sessions/{session_id}/answer-bundle").json()["items"]
+
+    assert [(i["group_id"], i["group_label"], i["question_label"]) for i in items] == [
+        ("g1", "全体", "問1"),
+        ("g1", "全体", "問2"),
+    ]
