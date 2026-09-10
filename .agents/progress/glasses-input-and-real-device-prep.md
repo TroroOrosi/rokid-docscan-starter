@@ -1742,3 +1742,16 @@ progress-checkpoint。graphの既存coverage不足は現ソース参照で補っ
 ここでcompleteは7タスクの定義項目が揃った意味で、実装完了ではない。
 `git -c core.safecrlf=false diff --check` → 出力なし、exit 0。
 文書のみの変更なのでPython/Android全体のビルド・テストは今回は再実行していない。
+
+### GitHub PR依頼（2026-09-10）
+
+利用者からGitHubへのPR作成を明示依頼。Firebaseプロジェクトは未作成との補足を
+plan.mdとFS-63へ反映した。Google Cloud側の既存環境有無も未確認で、初期準備から扱う。
+対象は `TroroOrosi/rokid-docscan-starter`、head `agent/real-device-test-prep`、base `main`。
+既存PR #30/#31はMERGEDのため、新規PRを作成する。未追跡のAndroid途中成果物と
+環境ディレクトリをPRへ含めない。今回の承認はPR公開であり、mergeやクラウド作成は行わない。
+
+公開前の再検証: `py -3.12 -m pytest -q` → `450 passed, 1 warning in 20.71s`。
+警告は既存Starlette/httpx非推奨。`py -3.12 -m ruff check .` → `All checks passed!`。
+`git -c core.safecrlf=false diff --check` → 出力なし、exit 0。
+Androidビルドと実機試験はこのPR公開作業では再実行していない。
