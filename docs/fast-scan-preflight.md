@@ -224,6 +224,23 @@ ruff check .
 git diff --check
 ~~~
 
+答案の形式ごとの評価は、同じCLIで別のパックを読む。
+
+~~~powershell
+py -3.12 scripts/eval_fast_scan.py --pack tests/fixtures/answer_forms/cases.json
+~~~
+
+- `kind` は `rokid-answer-form-eval-v1`。小問ごとに `form`（choice / multi_field /
+  worked_steps / proof / word_limit / english_composition / audio_dependent / figure）と
+  `source`（試験・年度・大問・小問・欄ID・本文の由来）を持つ。
+- ケースは `usage` で `tuning` と `holdout` に分かれ、`by_usage_results` で別々に集計する。
+  未使用側の一致率を調整用と平均しない。
+- 記述式は `manual_rubric` のみ。`rubric_origin` は人が確認済みの
+  `human_checked_requirements` か、未確認の `drafted_pending_review` に限る。
+  公表された出題意図や公式解答を採点基準として転記しない。
+- 8形式のいずれかにケースが無い、欄IDの重複、音声なしのaudio_dependentはエラーになる。
+- 本文は合成。`text_origin` に `synthetic` か `paraphrased` 以外を書けない。
+
 供給された結果を照合する時のJSON形式:
 
 ~~~json

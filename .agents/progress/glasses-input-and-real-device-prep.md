@@ -1836,3 +1836,49 @@ AnswerBundleTest 5、AnswerLayoutTest 6、AnswerReaderTest 6、AnswerStoreTest 5
 
 **次:** FS-60（共通テスト・東大形式の答案評価を固定）。FS-61/62 は実機ゲートのため
 接続確認後。`adb devices` は前回 `List of devices attached` のみで接続なし。
+
+### FS-60 完了（2026-09-10 深夜）: 答案形式ごとの評価を固定
+
+**変更したファイル（4件）:** `tests/fixtures/answer_forms/cases.json`（新規）、
+`scripts/eval_fast_scan.py`、`tests/test_fast_scan_pack.py`、`docs/fast-scan-preflight.md`。
+新しい評価スクリプトは作らず、既存CLIに2つ目のパック種別を追加した。
+`tests/test_answer_sheet_solver.py` と `app/` は変更していない。
+
+**評価manifest:** `kind` は `rokid-answer-form-eval-v1`、revision 1、
+`evidence: synthetic_design_cases`、8ケース17小問。8形式（choice / multi_field /
+worked_steps / proof / word_limit / english_composition / audio_dependent / figure）を
+すべて含み、`usage` で tuning 8問・holdout 9問に分けた。
+出典は `kyotsu-test:2026` 7問、`todai:2026` 10問。
+
+**検査で落ちる条件（テストで固定）:** 8形式のいずれかにケースが無い、
+`(exam, year, section, item, field_ids)` の重複、`text_origin` が
+synthetic/paraphrased 以外、記述形式の `exact` 採点、
+`rubric_origin` が許可値以外、音声なしの `audio_dependent`、
+tuning と holdout の片方が空。
+
+**正直に区別した点:** rubric 10件はこのセッションで起草したもので、利用者の確認を
+受けていない。`human_checked_requirements` と書くと事実と異なるため
+`drafted_pending_review` とし、レポートに `rubrics_pending_review: 10` を出す。
+利用者が要件表を確認した時点で `human_checked_requirements` へ変更する。
+ケース本文はすべて合成で、実際の問題文・公式解答・出題意図の転記ではない。
+出典欄は形式の参照であり、実問題の内容を主張しない。
+
+**検証コマンドと出力:**
+
+```
+py -3.12 -X utf8 scripts/eval_fast_scan.py --pack tests/fixtures/answer_forms/cases.json
+```
+
+→ `{'report_kind': 'answer-form-pack-check', 'cases': 8, 'questions': 17,
+'by_usage': {'holdout': 9, 'tuning': 8}, 'rubrics_pending_review': 10,
+'ai_executed': False, 'hardware_verified': False}`。
+既存パックは `fast-scan-pack-check` のまま 14ケース18問で従来通り通る。
+
+`py -3.12 -X utf8 -m pytest -q` → `458 passed, 1 warning in 19.14s`
+（従来450 passed、新規8件。警告は既存Starlette/httpx非推奨）。
+`py -3.12 -m ruff check .` → `All checks passed!`。
+いずれも実AI・実機を呼ばない自動テストであり、実資料に対する正答率の証拠ではない。
+
+**次:** FS-61/62（消灯と再装着起動）は実機ゲート。`adb devices` は接続なしのままで、
+端末設定の変更が要る場合は具体的な設定名を示して承認を得てから行う。
+FS-63/64（GPT中継の認証・費用・一大問の往復）は端末なしで進められる。
