@@ -48,7 +48,7 @@ submodule、AARコピーは不要です。
 CXR-L の実装境界は
 [CXR-L / Global Hi Rokid integration](docs/cxr-l-integration.md)です。
 
-現在のバージョン: **Server APP 0.17.0 / API 1.15.0 / Android client 0.3.16 / Glasses View 1.10.0**。
+現在のバージョン: **Server APP 0.17.0 / API 1.16.0 / Android client 0.3.16 / Glasses View 1.10.0**。
 Solver API 1.3.0は、記入用解答の全文保持・資料不足の分離を行う`answer_only`モードを追加しています。
 
 ---

@@ -2139,6 +2139,90 @@ def _exam_deck(conn, session_id: int) -> list[dict]:
     return deck
 
 
+# 大問 headings, as the segmenter emits them (app/layout.py:64).
+_GROUP_NO_RE = re.compile(r"^(?:大問\s*[0-9０-９]+|第\s*[0-9０-９]+\s*問)")
+
+
+def _answer_groups(conn, session_id: int) -> list[dict]:
+    """Deck rows folded into 大問 groups, in document order.
+
+    A heading row is the group's label, not an answer. A group that collects
+    no sub-question keeps its own heading row as one 全問 item, which is the
+    figure-style whole-section form (T02/T04 in the answer-form pack) and also
+    what stops AnswerBundle from rejecting an empty group.
+    """
+    groups: list[dict] = []
+    for row in _deck_question_rows(conn, session_id):
+        label = row["question_no"] or "全問"
+        if _GROUP_NO_RE.match(label):
+            groups.append({"id": f"g{len(groups) + 1}", "label": label,
+                           "heading": row, "items": [], "whole": False})
+            continue
+        if not groups:
+            groups.append({"id": "g1", "label": "全体",
+                           "heading": row, "items": [], "whole": False})
+        groups[-1]["items"].append(row)
+    for group in groups:
+        if not group["items"]:
+            group["items"] = [group["heading"]]
+            group["whole"] = True
+    return groups
+
+
+def _answer_bundle_item(conn, group: dict, row) -> dict:
+    sol = _latest_solution_row(conn, row["id"])
+    answer = (sol["answer"] or "").strip() if sol is not None else ""
+    if sol is None:
+        status, issue = "pending", "未解答"
+    elif answer:
+        status, issue = "ready", ""
+    else:
+        status, issue = "failed", "解答本文がありません"
+    label = "全問" if group["whole"] else (row["question_no"] or "全問")
+    return {
+        "group_id": group["id"],
+        "group_label": group["label"][:120],
+        "question_id": f"q{row['id']}",
+        "question_label": label[:120],
+        "answer": answer if status == "ready" else "",
+        "status": status,
+        "issue": issue,
+    }
+
+
+def _answer_input_digest(conn, session) -> str:
+    """Input identity: the pages the answers were read from.
+
+    Stable while the material is unchanged, different after a re-capture, so
+    AnswerStore can refuse a bundle belonging to different input.
+    """
+    document_id = session["document_id"]
+    if document_id:
+        rows = conn.execute(
+            "SELECT page_index, phash, ocr_md5 FROM pages "
+            "WHERE document_id = ? ORDER BY page_index",
+            (document_id,),
+        ).fetchall()
+        material = "\n".join(
+            f"{r['page_index']}:{r['phash']}:{r['ocr_md5'] or ''}" for r in rows
+        )
+    else:
+        material = "\n".join(
+            str(r["id"]) for r in _deck_question_rows(conn, session["id"])
+        )
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+def _answer_revision(conn, session_id: int) -> int:
+    """Monotonic snapshot number; AnswerStore rejects anything older."""
+    row = conn.execute(
+        "SELECT MAX(s.id) AS latest FROM solutions s "
+        "JOIN questions q ON q.id = s.question_id WHERE q.session_id = ?",
+        (session_id,),
+    ).fetchone()
+    return (row["latest"] or 0) + 1
+
+
 def _review_operations() -> dict:
     """The review-phase gesture bindings (same source as the view payloads)."""
     return dict(REVIEW_OPERATIONS)
@@ -2721,6 +2805,43 @@ def exam_list_solutions(session_id: int) -> dict:
             "deck": deck,
             "operations": _review_operations(),
             "versions": version_info(),
+        }
+    finally:
+        conn.close()
+
+
+@app.get("/v1/exam-sessions/{session_id}/answer-bundle")
+def exam_answer_bundle(session_id: int) -> dict:
+    """One complete snapshot the glasses read offline.
+
+    The schema is AnswerBundle's, parsed by
+    android-relay/relaycore/.../study/AnswerBundle.java. It has no way to say
+    "locked" or "still reading", so those are 409s rather than a partial body.
+    """
+    conn = db.connect()
+    try:
+        session = _exam_session_or_404(conn, session_id)
+        if _session_phase(session) == "reading":
+            raise HTTPException(status_code=409, detail="call finalize-reading first")
+        if session["mode"] == "real" and not config.ALLOW_REAL_EXAM_SOLVE:
+            raise HTTPException(status_code=409, detail="real-mode answers are locked")
+        groups = _answer_groups(conn, session_id)
+        if not groups:
+            raise HTTPException(
+                status_code=409,
+                detail="no problems were detected in this document",
+            )
+        items = [
+            _answer_bundle_item(conn, group, row)
+            for group in groups
+            for row in group["items"]
+        ]
+        return {
+            "schema_version": 1,
+            "session_id": str(session_id),
+            "input_digest": _answer_input_digest(conn, session),
+            "revision": _answer_revision(conn, session_id),
+            "items": items,
         }
     finally:
         conn.close()
