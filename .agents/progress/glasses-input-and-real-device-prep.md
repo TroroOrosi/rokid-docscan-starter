@@ -1761,3 +1761,78 @@ Androidビルドと実機試験はこのPR公開作業では再実行してい�
 `gh pr create --base main --head agent/real-device-test-prep ... --body-file <temp>` → 上記URL。
 ローカルの公開フックには今回の利用者承認を対応させた `AGENT_APPROVED=1` を指定した。
 フックの変更・無効化、merge、クラウド環境作成は行っていない。
+
+### FS-59 完了（2026-09-10 深夜）: 途中のローカル解答実装を検証可能な単位に固定
+
+再開入口はこの節。着手 HEAD `4cfad89`、branch `agent/real-device-test-prep`。
+今回の変更は本記録と `tasks/todo.md` の 2 ファイルのみで、`study/` のコードは読み取りのみ。
+
+**ASCII ビルドコピーの選定:**
+
+`C:\Users\Public\rokid-docscan-build` は旧コミット `9df5b09`（モジュール分割前で
+`app/DocScanController.java` が残る構成、43 変更・15 未追跡）のため使用しない。破棄もしない。
+現行は `C:\Users\Public\rokid-docscan-live` で `git log --oneline -1` → `4cfad89`、
+未追跡集合も主チェックアウトと同一。以後の Android 検証はこちらを使う。
+
+**hash 照合（主チェックアウトとビルドコピーで全 10 ファイル一致、sha256）:**
+
+| ファイル | sha256 |
+|---|---|
+| `study/AnswerBundle.java` | `cece03a90ed2f52aef67182b963cc9ef3546927c637cb32ac09bd1cbd52d4281` |
+| `study/AnswerItem.java` | `a450179ac563143179881c4cdd66665d63128c173575f5d525f8d3c310713cf6` |
+| `study/AnswerLayout.java` | `4576926897863e3d9b9454ac45fe969ea4a9422e573e45bdad0f4beca3c979da` |
+| `study/AnswerReader.java` | `dce36632f68e92428b64890560d8af196816e23dc72b10603affed07390a64ad` |
+| `study/AnswerStore.java` | `1a7b2bcffb4d3161d11b3bcb1c9ab4a6c14acb66dbb28e22e65499cd99353f2b` |
+| `study/AnswerBundleTest.java` | `4d03c844ec6e5a9b61c8c2c39447114d57a0242f33dcfa0cd6341cfbce8e6b2e` |
+| `study/AnswerLayoutTest.java` | `ed8f17bcc70fc9335280d0aefe4cbeb4fab8f61882298e23e527ef54f0dcdbd0` |
+| `study/AnswerReaderTest.java` | `427965faf71118c21cf8470e2318656dfcbb35d76475db1f5263dfb1ff658d2d` |
+| `study/AnswerStoreTest.java` | `31e415c1aaec4dfc8814c3143d9dd69ed46c04309ca9ace9e70419df5f8f676f` |
+| `glassdoc/.../AnswerViewTest.java` | `5c9a7e0d0da2eb9bdb3606c444135c0e48df7088ff04724cf2190f94866d91e8` |
+
+**未実装の再確認:** `glassdoc/src/main/java/dev/rokid/docscanglass/doc/` は
+`DocScanGlassActivity` `FramingGuide` `GlassCamera` `GlassesCaptureSurface`
+`GlassesHudText` `HudView` の 6 ファイルで、`AnswerView.java` は存在しない。
+`AnswerViewTest.java` は削除せず実装待ちとして保持する。画面テストは FS-12/65 で実装後に実行する。
+
+**テスト実行（自動テストのみ。実機・実 AI の証拠ではない）:**
+
+```
+JAVA_HOME=C:/Users/Public/rokid-build-tools-20260901/jdk17/jdk-17.0.20.1+1
+ANDROID_HOME=C:/Users/pupu_/AppData/Local/Android/Sdk
+/c/Users/Public/rokid-docscan-live/android-relay/gradlew --no-daemon \
+  :relaycore:testDebugUnitTest --tests 'dev.rokid.docscanrelay.study.*'
+```
+
+→ `BUILD SUCCESSFUL in 33s`、`17 actionable tasks: 17 executed`。
+`relaycore/build/test-results/testDebugUnitTest/*.xml` の集計は
+AnswerBundleTest 5、AnswerLayoutTest 6、AnswerReaderTest 6、AnswerStoreTest 5 の
+計 22 tests / failures 0 / errors 0 / skipped 0。
+
+**実行環境で判明した手順（次回の手戻り防止）:**
+
+- `gradlew.bat` は `build-windows.ps1` の ASCII ガードを呼ぶ。Bash ツールの `cd` は
+  主チェックアウトへ正規化されるため、`cd` してから `gradlew.bat` を叩くとガードが
+  非 ASCII パスを検出して停止する。POSIX 版 `gradlew` はスクリプト位置から
+  `-p PROJECT_DIR` を決めるので、絶対パスで直接起動すれば ASCII コピーで動く。
+- `ANDROID_HOME` 未設定だと `SDK location not found` で
+  `Could not determine the dependencies of task ':relaycore:testDebugUnitTest'`。
+  `local.properties` はビルドコピーに無いので環境変数で渡す。
+- Gradle 9.4.1 の bootstrap zip をこの環境で初回取得した（sha256 検証 OK）。
+
+**「答案の式を落とさない」契約との照合:**
+
+- `AnswerItem` は答案本文を最大 200,000 文字まで保持し、超過・空の READY・
+  非 READY での本文混入をいずれも `IllegalArgumentException` で拒否する。
+  無音の切り詰めはない。設問文は答案に含めない設計。
+- `AnswerBundle` `AnswerReader` `AnswerStore` `AnswerItem` に
+  `substring` `truncat` `maxLen` `ellips` の該当なし。
+- `AnswerLayout.paginate` は文字クラスタ単位で行を切り、`Page.start/end` に
+  元テキストのオフセットを保持する。省略記号を挿入せず、全文字がどこかのページに入る。
+- サーバー側は `Question.answer_only`（Solver 1.3.0）で補足解説を除いた完全な答案を返す。
+  `app/solvers/llm_adapter.py` の状態語は `ready` / `needs_input` で、Android の
+  `Status.READY` / `NEEDS_INPUT` と一致する。`PENDING` `FAILED` は端末側のローカル状態。
+- 現時点で `sessionId` / `inputDigest` / `revision` を含む bundle を返す HTTP 経路は
+  サーバーに無い。既存は `/v1/exam-sessions/...` の小問単位。転送経路の確定は FS-64/65 で行う。
+
+**次:** FS-60（共通テスト・東大形式の答案評価を固定）。FS-61/62 は実機ゲートのため
+接続確認後。`adb devices` は前回 `List of devices attached` のみで接続なし。
