@@ -719,7 +719,10 @@ so it can be tested without an Activity.
                   reader.tap();
                   return true;
               case BACK:
-                  return reader.back();
+                  // AnswerReader#back() returns true only when the host should
+                  // persist CLOSED and leave answer reading -- the opposite of
+                  // this method's own contract. Negate it.
+                  return !reader.back();
               default:
                   return true;
           }
