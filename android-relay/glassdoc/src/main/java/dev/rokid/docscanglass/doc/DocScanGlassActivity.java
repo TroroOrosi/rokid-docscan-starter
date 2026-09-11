@@ -18,6 +18,10 @@ import android.widget.Toast;
 import java.io.IOException;
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 
 import dev.rokid.docscanglass.input.BackExitPolicy;
 import dev.rokid.docscanglass.input.GlassKeyEvents;
@@ -79,6 +83,18 @@ public final class DocScanGlassActivity extends Activity
     private HudView hud;
     private AnswerView answers;
     private AnswerStore answerStore;
+    // Off the main thread only for AnswerStore.save's per-gesture write --
+    // load-then-rewrite-the-whole-bundle plus an fsync, too expensive for a
+    // wearable's UI thread on every page turn. Single-threaded so writes
+    // still commit in the order the gestures that queued them happened in;
+    // daemon so it never has to be shut down from onDestroy, which this
+    // change does not touch.
+    private final ExecutorService answerPersistExecutor = Executors.newSingleThreadExecutor(
+            runnable -> {
+                Thread thread = new Thread(runnable, "answer-persist");
+                thread.setDaemon(true);
+                return thread;
+            });
     // Screen ownership only. Always read/written on the main thread (onAction,
     // openAnswers/closeAnswers, and the main.post callback fetchAnswers posts
     // from its background thread) -- onUpdate's guard no longer reads it.
@@ -90,8 +106,20 @@ public final class DocScanGlassActivity extends Activity
     // answers too -- a plain "already fetched" boolean would leave it with
     // no reader and no error. volatile: read and written from the
     // controller's serial-executor thread, matching the convention
-    // DocScanController itself uses for its own cross-thread fields.
+    // DocScanController itself uses for its own cross-thread fields. Also
+    // reset back to -1 on a failed fetch (see fetchAnswers), so the next
+    // REVIEW publish -- nextReviewItem/previousReviewItem republish it on
+    // every page turn -- retries instead of forfeiting the session's
+    // answers to one bad request.
     private volatile long answersFetchedForSession = -1;
+    // True once this Activity instance has checked AnswerStore for a saved
+    // reader without waiting on RelayState.REVIEW, which needs the network
+    // to ever be published (see fetchAnswers's own comment). Read and
+    // written only from onUpdate's calling thread -- the controller's
+    // serial executor in production, whatever thread drives it directly in
+    // tests -- the same single-caller convention answersFetchedForSession
+    // already relies on.
+    private boolean resolvedOfflineAnswersAtStartup;
     // True while the reader owned the screen when the most recent
     // KEYCODE_BACK DOWN was processed. Read again by the matching UP: onAction
     // (called from the DOWN phase, below) may itself close the reader --
@@ -347,6 +375,7 @@ public final class DocScanGlassActivity extends Activity
     @Override
     public void onUpdate(RelayState state, List<String> hudLines, String diagnostic) {
         Log.i(TAG, state + ": " + diagnostic);
+        maybeOpenSavedAnswersOffline();
         if (state == RelayState.REVIEW) {
             long sessionId = controller.sessionId();
             if (sessionId != answersFetchedForSession) {
@@ -366,6 +395,42 @@ public final class DocScanGlassActivity extends Activity
     }
 
     // --- answer reading -----------------------------------------------------
+
+    /**
+     * The saved reader has to survive a restart with no route to the server
+     * at all, so it cannot wait for {@code RelayState.REVIEW} -- reaching
+     * REVIEW itself needs the network (see {@link #fetchAnswers}'s own
+     * comment). Runs once, on the very first {@code onUpdate} this Activity
+     * instance observes, for whatever state that happens to be: reads
+     * {@code controller.sessionId()} -- already restored from
+     * SharedPreferences in the controller's constructor, before any network
+     * call -- and opens the saved reader when it matches and is not CLOSED.
+     *
+     * <p>Claims the session ({@code answersFetchedForSession}) whenever a
+     * match is found, closed or not, so the REVIEW-gated {@code fetchAnswers}
+     * below never duplicates this or overwrites a CLOSED save with a fresh
+     * fetch. When there is no match -- including no session yet -- nothing
+     * changes, and the existing REVIEW-gated fetch stays fully in control,
+     * exactly as before this method existed.</p>
+     */
+    private void maybeOpenSavedAnswersOffline() {
+        if (resolvedOfflineAnswersAtStartup) {
+            return;
+        }
+        resolvedOfflineAnswersAtStartup = true;
+        long sessionId = controller.sessionId();
+        if (sessionId <= 0) {
+            return;
+        }
+        AnswerStore.Saved saved = loadSavedAnswers();
+        if (saved == null || !saved.bundle.sessionId.equals(Long.toString(sessionId))) {
+            return;
+        }
+        answersFetchedForSession = sessionId;
+        if (!saved.closed) {
+            main.post(() -> openAnswers(saved.bundle, saved.questionId, saved.offset));
+        }
+    }
 
     /**
      * A saved reader survives the process restart that folding the temple
@@ -409,6 +474,17 @@ public final class DocScanGlassActivity extends Activity
                 main.post(() -> openAnswers(bundle, bundle.items.get(0).questionId, 0));
             } catch (Exception error) {
                 Log.w(TAG, "answer bundle unavailable", error);
+                // The likeliest failure at a venue: the hotspot is not yet
+                // up when REVIEW is first published. Roll the guard back to
+                // its unfetched sentinel so the next REVIEW publish --
+                // nextReviewItem/previousReviewItem republish it on every
+                // page turn -- retries, instead of one failed request
+                // forfeiting the whole session's answers with no operator
+                // gesture to recover. While this fetch was in flight the
+                // guard stayed equal to sessionId, so no concurrent retry
+                // could start; only a fetch that already finished (here)
+                // reopens the door.
+                answersFetchedForSession = -1;
                 main.post(() -> {
                     if (isFinishing() || isDestroyed()) {
                         return;
@@ -438,8 +514,17 @@ public final class DocScanGlassActivity extends Activity
         answers = new AnswerView(this);
         // A placeholder viewport: AnswerView.onSizeChanged calls
         // reader.viewport with its own Paint as soon as it is laid out, and
-        // the view owns the layout, so nothing here should guess at width.
-        reader = new AnswerReader(bundle, 1f, 2, text -> text.length());
+        // the view owns the layout, so nothing here should guess at width --
+        // it only has to be safe, not accurate. A measurer that always
+        // reports zero width never exceeds the placeholder's width=1f, so
+        // AnswerLayout.paginate never has to split a line mid-cluster; a
+        // measurer keyed to UTF-16 length() (the previous placeholder)
+        // measures >= 2 for any surrogate pair or combining mark, which is
+        // always > 1f and throws IllegalArgumentException from inside this
+        // main.post callback -- uncaught, and permanent, since the bundle
+        // is already saved to disk by the time this runs and the next
+        // launch takes the same saved-state branch into the same crash.
+        reader = new AnswerReader(bundle, 1f, 2, text -> 0f);
         reader.restore(questionId, offset);
         answers.bind(reader);
         setContentView(answers);
@@ -452,13 +537,38 @@ public final class DocScanGlassActivity extends Activity
         setContentView(hud);
     }
 
-    /** Persistence must never throw into the UI, exactly as the fetch does not. */
+    /**
+     * Persistence must never throw into the UI, exactly as the fetch does
+     * not. The write itself runs off the main thread on
+     * {@code answerPersistExecutor} -- single-threaded, so writes still
+     * commit in the order the gestures that queued them happened in. CLOSED
+     * is queued on that same executor, not a separate path, so it can never
+     * be overtaken by a position write queued earlier by a faster gesture;
+     * and this method blocks on it (only for CLOSED) so the latch is
+     * durable before {@code closeAnswers} swaps the screen back to the HUD.
+     */
     private void persistAnswerPosition(boolean closed) {
         if (reader == null) {
             return;
         }
+        AnswerBundle bundle = reader.bundle();
+        String questionId = reader.current().questionId;
+        int offset = reader.offset();
+        Future<?> queued = answerPersistExecutor.submit(
+                () -> writeAnswerPosition(bundle, questionId, offset, closed));
+        if (closed) {
+            try {
+                queued.get();
+            } catch (InterruptedException | ExecutionException error) {
+                Log.w(TAG, "answer position not saved", error);
+            }
+        }
+    }
+
+    private void writeAnswerPosition(
+            AnswerBundle bundle, String questionId, int offset, boolean closed) {
         try {
-            answerStore.save(reader.bundle(), reader.current().questionId, reader.offset(), closed);
+            answerStore.save(bundle, questionId, offset, closed);
         } catch (IOException error) {
             Log.w(TAG, "answer position not saved", error);
         }

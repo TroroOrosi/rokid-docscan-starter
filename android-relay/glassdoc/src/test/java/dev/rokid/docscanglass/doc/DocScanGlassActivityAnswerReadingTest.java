@@ -20,6 +20,7 @@ import org.robolectric.Shadows;
 import org.robolectric.annotation.Config;
 
 import java.io.File;
+import java.io.IOException;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.List;
@@ -130,6 +131,54 @@ public class DocScanGlassActivityAnswerReadingTest {
         assertNull("the reader must not reopen on its own", getField(activity, "reader"));
     }
 
+    /**
+     * I3: one failed request must not permanently forfeit the session's
+     * answers. The likeliest failure at a venue is the hotspot not yet up
+     * when REVIEW is first published; {@code nextReviewItem}/
+     * {@code previousReviewItem} republish REVIEW on every page turn, so the
+     * guard must roll back on failure to give the next publish a free retry
+     * -- and a fetch that does succeed must not be retried again.
+     */
+    @Test
+    public void aFailedFetchIsRetriedOnTheNextReviewPublishButNotAfterSucceeding()
+            throws Exception {
+        AtomicInteger bundleAttempts = new AtomicInteger();
+        server.setDispatcher(new Dispatcher() {
+            @Override
+            public MockResponse dispatch(RecordedRequest request) {
+                String path = request.getPath();
+                if (path != null && path.endsWith("/answer-bundle")) {
+                    if (bundleAttempts.incrementAndGet() == 1) {
+                        return new MockResponse().setResponseCode(500);
+                    }
+                    return json(bundleForSession(SESSION_ID).toJson());
+                }
+                return new MockResponse().setResponseCode(404).setBody("unexpected test request");
+            }
+        });
+
+        activity.onUpdate(RelayState.REVIEW, List.of("a"), "review-1");
+        awaitTrue(() -> bundleAttempts.get() >= 1);
+        Thread.sleep(200);
+        Shadows.shadowOf(Looper.getMainLooper()).idle();
+        assertNull("a failed fetch must not open the reader",
+                getField(activity, "reader"));
+
+        // A later REVIEW publish -- e.g. nextReviewItem/previousReviewItem
+        // republishing it -- must retry, not be permanently skipped.
+        activity.onUpdate(RelayState.REVIEW, List.of("b"), "review-2");
+        awaitTrue(() -> getField(activity, "reader") != null);
+        assertEquals("the failed attempt must be retried exactly once more",
+                2, bundleAttempts.get());
+
+        // A successful fetch must not be retried by a further REVIEW publish.
+        activity.onUpdate(RelayState.REVIEW, List.of("c"), "review-3");
+        Thread.sleep(200);
+        Shadows.shadowOf(Looper.getMainLooper()).idle();
+        assertEquals("a successful fetch must not be retried again",
+                2, bundleAttempts.get());
+    }
+
     @Test
     public void aSavedReaderIsResumedInsteadOfFetched() throws Exception {
         AnswerStore preSeeded = new AnswerStore(filesDir);
@@ -202,6 +251,41 @@ public class DocScanGlassActivityAnswerReadingTest {
                 getField(activity, "reader"));
         assertEquals("a CLOSED reader for the current session must not trigger a fetch either",
                 0, server.getRequestCount());
+    }
+
+    /**
+     * C2: the saved reader must resume with no route to the server at all --
+     * the one condition the whole feature exists for. Offline, a restart's
+     * first {@code onUpdate} is never {@code RelayState.REVIEW}: reaching
+     * REVIEW needs {@code finalize-reading} then {@code review}, both HTTP,
+     * and a failed {@code resumeNow} publishes {@code ERROR} instead (see
+     * {@code DocScanController.java:668-694,730}). This drives exactly that
+     * -- {@code onUpdate(ERROR, ...)}, never REVIEW -- against a server
+     * that fails every request, and the reader must still open from disk.
+     */
+    @Test
+    public void aSavedReaderResumesFromAnUnreachableServerWithoutEverReachingReview()
+            throws Exception {
+        AnswerStore preSeeded = new AnswerStore(filesDir);
+        AnswerBundle bundle = bundleForSession(SESSION_ID);
+        preSeeded.start(bundle);
+        preSeeded.save(bundle, "q11", 3, false);
+
+        server.setDispatcher(new Dispatcher() {
+            @Override
+            public MockResponse dispatch(RecordedRequest request) {
+                return new MockResponse().setResponseCode(500)
+                        .setBody("server unreachable in this test");
+            }
+        });
+
+        activity.onUpdate(RelayState.ERROR, List.of("offline"), "network unreachable");
+        awaitTrue(() -> getField(activity, "reader") != null);
+
+        assertEquals("resume must not touch the network", 0, server.getRequestCount());
+        AnswerReader reader = (AnswerReader) getField(activity, "reader");
+        assertEquals("q11", reader.current().questionId);
+        assertEquals(3, reader.offset());
     }
 
     private static AnswerBundle bundleForSession(long sessionId) {
@@ -305,6 +389,10 @@ public class DocScanGlassActivityAnswerReadingTest {
         int movedOffset = reader.offset();
         assertEquals("one HTTP request for the first Activity's fetch",
                 1, answerBundleRequests.get());
+        // persistAnswerPosition(false) now writes off the main thread (I4):
+        // wait for the last swipe's write to land before the "restart"
+        // reads it back, instead of assuming it already has.
+        awaitSavedState(filesDir, "q11", movedOffset);
 
         DocScanGlassActivity activity2 = Robolectric.buildActivity(DocScanGlassActivity.class).get();
         setField(activity2, "hud", new HudView(activity2));
@@ -335,12 +423,37 @@ public class DocScanGlassActivityAnswerReadingTest {
         assertEquals("swiping forward enough must cross into the second question",
                 "q11", reader.current().questionId);
 
+        // persistAnswerPosition(false) now writes off the main thread (I4),
+        // so the on-disk state catches up asynchronously -- wait for it
+        // instead of assuming the last gesture's write already landed.
+        AnswerStore.Saved saved = awaitSavedState(filesDir, "q11", reader.offset());
+        assertFalse(saved.closed);
+    }
+
+    /**
+     * I4: {@code persistAnswerPosition} queues both position writes and the
+     * CLOSED write on the same single-threaded executor, so CLOSED -- and
+     * only {@code closeAnswers} blocks on its own write -- can never be
+     * overtaken by a position write a faster preceding gesture already
+     * queued. Fires two moving gestures immediately followed by BACK, with
+     * no wait in between, and reads the file synchronously right after:
+     * a separate queue (or no queue at all) for CLOSED could let a still
+     * in-flight position write land after it and silently reopen the
+     * session on the next resume.
+     */
+    @Test
+    public void closingRightAfterMovingPersistsClosedNotAStalePosition() throws Exception {
+        activity.onUpdate(RelayState.REVIEW, List.of("a"), "review-1");
+        awaitTrue(() -> getField(activity, "reader") != null);
+
+        invokeOnAction(GlassesInputAction.SWIPE_FORWARD);
+        invokeOnAction(GlassesInputAction.SWIPE_FORWARD);
+        invokeOnAction(GlassesInputAction.BACK);
+
         AnswerStore.Saved saved = new AnswerStore(filesDir).load();
         assertNotNull(saved);
-        assertFalse(saved.closed);
-        assertEquals("the saved question must follow the reader, not stay at fetch time",
-                "q11", saved.questionId);
-        assertEquals(reader.offset(), saved.offset);
+        assertTrue("CLOSED must not be overtaken by an earlier-queued, now-stale "
+                + "position write", saved.closed);
     }
 
     /**
@@ -417,6 +530,28 @@ public class DocScanGlassActivityAnswerReadingTest {
     }
 
     /**
+     * C1: {@code openAnswers}'s placeholder viewport (width=1f, replaced by
+     * {@code AnswerView.onSizeChanged} as soon as it is laid out) must not
+     * crash on any answer text. The old placeholder measured a cluster's
+     * UTF-16 {@code length()}: any surrogate pair or combining mark -- a
+     * math italic variable, an emoji, an NFD-decomposed accent -- measures
+     * &gt;= 2, always &gt; width=1f, and {@code AnswerLayout.paginate}
+     * throws {@code IllegalArgumentException("viewport narrower than
+     * glyph")} for a cluster it cannot start a line with. Uses U+1D465
+     * (MATHEMATICAL ITALIC SMALL X, "𝑥") as the surrogate pair.
+     */
+    @Test
+    public void openAnswersToleratesASurrogatePairInThePlaceholderViewport() throws Exception {
+        AnswerBundle bundle = new AnswerBundle(Long.toString(SESSION_ID), "a".repeat(64), 1, List.of(
+                AnswerItem.ready("g1", "第1問", "q10", "問1", "x = 𝑥")));
+
+        invokeOpenAnswers(bundle, "q10", 0);
+
+        assertNotNull("the placeholder viewport must not crash the Activity",
+                getField(activity, "reader"));
+    }
+
+    /**
      * A real BACK key press: {@code onKeyDown} then {@code onKeyUp}, both
      * through the Activity's real overrides, so {@code normalize}'s own
      * consumption decision -- not a stand-in for it -- controls whether
@@ -465,6 +600,34 @@ public class DocScanGlassActivityAnswerReadingTest {
             Thread.sleep(10);
         }
         assertTrue("condition not met within timeout", condition.getAsBoolean());
+    }
+
+    /**
+     * I4: {@code persistAnswerPosition(false)} now queues its write on a
+     * background executor instead of writing inline, so a test that just
+     * moved the reader cannot assume the on-disk state already matches --
+     * it has to wait for it, the same way {@link #awaitTrue} waits for a
+     * main-thread post.
+     */
+    private static AnswerStore.Saved awaitSavedState(File dir, String questionId, int offset)
+            throws InterruptedException {
+        AnswerStore.Saved[] holder = new AnswerStore.Saved[1];
+        awaitTrue(() -> {
+            AnswerStore.Saved candidate;
+            try {
+                candidate = new AnswerStore(dir).load();
+            } catch (IOException error) {
+                throw new AssertionError(error);
+            }
+            if (candidate != null && questionId.equals(candidate.questionId)
+                    && candidate.offset == offset) {
+                holder[0] = candidate;
+                return true;
+            }
+            return false;
+        });
+        assertNotNull(holder[0]);
+        return holder[0];
     }
 
     private static Object getField(Object target, String name) {
