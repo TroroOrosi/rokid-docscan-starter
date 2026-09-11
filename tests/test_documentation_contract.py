@@ -34,7 +34,7 @@ def _repository_markdown() -> set[str]:
     }
     # Keep ordinary untracked project docs in the gate. Only local tool output
     # under these exact root directories is exempt; a tracked file never is.
-    local_tool_roots = (".agents/skills/", ".claude/", ".cursor/", ".specify/", "openspec/")
+    local_tool_roots = (".agents/skills/", ".claude/", ".cursor/", ".specify/", ".superpowers/", "openspec/")
     if not (ROOT / ".git").exists():
         return paths
     try:

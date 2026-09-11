@@ -1,5 +1,6 @@
 package dev.rokid.docscanrelay;
 
+import dev.rokid.docscanrelay.study.AnswerBundle;
 import org.json.JSONException;
 import org.json.JSONObject;
 
@@ -122,6 +123,12 @@ public final class DocScanApi {
                 .addQueryParameter("view_page", Integer.toString(viewPage))
                 .build();
         return execute(new Request.Builder().url(url).get());
+    }
+
+    /** One complete snapshot, so a reader works with no route to the server. */
+    public AnswerBundle answerBundle(long sessionId) throws IOException, JSONException {
+        return AnswerBundle.fromJson(
+                get("/v1/exam-sessions/" + sessionId + "/answer-bundle").toString());
     }
 
     private JSONObject get(String path) throws IOException, JSONException {

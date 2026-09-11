@@ -164,7 +164,10 @@ APP_VERSION = "0.17.0"
 # 1.13.1: Pillow decompression-bomb rejections consistently return 413; raw
 #        AAC and unrecognized audio are rejected before an OpenAI SDK call,
 #        including AAC hidden behind a leading ID3v2 tag.
-API_VERSION = "1.15.0"
+# 1.16.0: new GET .../answer-bundle — one complete, ordered answer snapshot
+#        (大問 groups folding their sub-question rows) for offline glasses
+#        reading; 409 during the reading phase or a real-mode lock. Additive.
+API_VERSION = "1.16.0"
 
 # Matching algorithm identity. Bump when thresholds or hashing change so a
 # re-index/eval is triggered. Mirrors thresholds in app/matching.py.

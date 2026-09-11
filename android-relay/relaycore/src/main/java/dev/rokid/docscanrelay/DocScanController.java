@@ -104,7 +104,7 @@ public final class DocScanController implements AutoCloseable {
     private volatile PhotoCaptureSettings photoSettings = PhotoCaptureSettings.DEFAULT;
     private volatile long photoRequestedAtMillis;
     private volatile String lastOcrQuality = "";
-    private DocScanApi api;
+    private volatile DocScanApi api;
     private String configuredServer = "";
     // Deliberately process-local, as on the phone relay.
     private String configuredKey = "";
@@ -134,7 +134,7 @@ public final class DocScanController implements AutoCloseable {
     private String lastRegisteredPageText = "";
     private int duplicateBurstsSeen;
     private int unreadableBurstsSeen;
-    private long sessionId;
+    private volatile long sessionId;
     private int reviewIndex;
     private int reviewViewPage;
     private int reviewProblemCount;
@@ -223,6 +223,16 @@ public final class DocScanController implements AutoCloseable {
 
     public RelayState getState() {
         return state;
+    }
+
+    /** The finalized exam session, or 0 before one exists. */
+    public long sessionId() {
+        return sessionId;
+    }
+
+    /** The configured client, so a caller never builds an unconfigured one. */
+    public DocScanApi api() {
+        return api;
     }
 
     /**

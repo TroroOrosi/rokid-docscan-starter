@@ -1,6 +1,6 @@
 # Documentation index and authority
 
-Status: Current documentation map. Updated 2026-09-07.
+Status: Current documentation map. Updated 2026-09-11.
 
 When two documents disagree, use this order:
 
@@ -15,7 +15,7 @@ was recorded, not that it applies to another device or firmware.
 
 The documentation gate includes tracked Markdown and new, untracked project
 documents. It excludes only untracked local tool output under the root paths
-`.agents/skills/`, `.claude/`, `.cursor/`, `.specify/`, and `openspec/`.
+`.agents/skills/`, `.claude/`, `.cursor/`, `.specify/`, `.superpowers/`, and `openspec/`.
 Tracked files in those directories still need classification. Without repository
 metadata or a working Git command, the gate includes all Markdown rather than
 silently applying that exception. `.agents/progress/` remains in scope.
@@ -118,6 +118,22 @@ on the measured hardware. Unresolved claims remain explicitly unverified.
 - `tasks/todo.md` — earlier tasks, followed by the unimplemented FS task list.
 - `refactor-instructions.md` — an older refactor snapshot; individual items may
   already be resolved and must be rechecked against current code.
+
+## Glasses offline answer bundle (implemented, not hardware-verified)
+
+- `docs/superpowers/specs/2026-09-11-glasses-offline-answer-bundle-design.md` —
+  design document (status: implemented, unit-tested, green build, 2026-09-11).
+  Describes phone-hotspot topology, 大問/小問 derivation, and server endpoint
+  shape. **Not verified on hardware in any respect**: no device was involved
+  at any point. The phone-hotspot topology has never been exercised end to
+  end, `AnswerView`'s readability on the glasses is unverified, reading with
+  the hotspot off is unverified, and the two-stage exit and re-wear recovery
+  were not re-tested after this branch changed the `KEYCODE_BACK` consumption
+  decision.
+- `docs/superpowers/plans/2026-09-11-glasses-offline-answer-bundle.md` —
+  six-task implementation plan; all six tasks completed and merged. Preparation
+  evidence (unit tests, `assembleDebug`) is separate from hardware acceptance,
+  which has not been run.
 
 ## Internal progress record
 
