@@ -1,4 +1,11 @@
+import json
+from pathlib import Path
+
 from app.layout import parse_layout, primary_question, segment_problems
+
+FORM_PACK_PATH = (
+    Path(__file__).resolve().parent / "fixtures/answer_forms/cases.json"
+)
 
 
 def test_detects_question_number_and_choices():
@@ -205,3 +212,36 @@ def test_mid_text_parentheses_are_not_sub_questions():
     units = segment_problems([(0, text)])
     assert [p.question_no for p in units] == ["第1問"]
     assert units[0].choices == ["りんご"]
+
+
+def test_answer_form_pack_segments_to_section_headings_only():
+    # Pins measured reality, not the design goal: tests/fixtures/answer_forms/
+    # cases.json stores each page's OCR as a single line (no "\n"), and
+    # parse_layout only ever splits on line breaks, so a sub-question marker
+    # that would be line-leading in real, multi-line OCR is mid-line here and
+    # is never seen as a boundary. All eight forms therefore collapse to their
+    # 第N問/大問N heading(s) with zero sub-question deck rows -- the
+    # whole-section fallback, not the per-sub-question split this feature is
+    # for. Whether real device OCR emits actual line breaks (which would make
+    # this a non-issue in production) is untested here; see
+    # docs/superpowers/specs/2026-09-11-glasses-offline-answer-bundle-design.md.
+    expected = {
+        "K01": ["第1問"],
+        "K02": ["第2問"],
+        "T01": ["第3問"],
+        "T02": ["第1問", "第2問", "第4問"],
+        "K03": ["第2問"],
+        "K04": ["第3問"],
+        "T03": ["第5問"],
+        "T04": ["第1問", "第2問", "第4問"],
+    }
+    cases = {
+        c["id"]: c
+        for c in json.loads(FORM_PACK_PATH.read_text(encoding="utf-8"))["cases"]
+    }
+    assert set(cases) == set(expected)
+    for case_id, want in expected.items():
+        pages = cases[case_id]["input"]["pages"]
+        materials = [(i, p["text"]) for i, p in enumerate(pages)]
+        units = [p.question_no for p in segment_problems(materials)]
+        assert units == want, case_id

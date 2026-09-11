@@ -71,7 +71,7 @@ Android.
   `question_no` is `(三)` or `(A)` for those lines. Task 2 relies on those
   strings reaching `questions.question_no`.
 
-- [ ] **Step 1: Write failing test**
+- [x] **Step 1: Write failing test**
 
   Append to `tests/test_layout.py`:
 
@@ -98,7 +98,7 @@ Android.
       assert units[0].choices == ["りんご"]
   ```
 
-- [ ] **Step 2: Run the tests and verify they fail**
+- [x] **Step 2: Run the tests and verify they fail**
 
   Run: `py -3.12 -m pytest tests/test_layout.py -k "kanji_and_letter or mid_text_parentheses" -v`
 
@@ -106,7 +106,7 @@ Android.
   `assert ['第1問'] == ['第1問', '(三)', '(A)', '(Ａ)']` because the
   parenthesized lines are absorbed into the body.
 
-- [ ] **Step 3: Widen the marker**
+- [x] **Step 3: Widen the marker**
 
   Replace `app/layout.py:32`:
 
@@ -132,20 +132,20 @@ Android.
   parenthesis, so it does not compete with `(A)`, and the classification loop at
   `app/layout.py:120` prefers a choice over a question number when both match.
 
-- [ ] **Step 4: Run the tests and verify they pass**
+- [x] **Step 4: Run the tests and verify they pass**
 
   Run: `py -3.12 -m pytest tests/test_layout.py -v`
 
   Expected: PASS, including the pre-existing cases.
 
-- [ ] **Step 5: Run the whole server suite**
+- [x] **Step 5: Run the whole server suite**
 
   Run: `py -3.12 -m pytest -q` then `ruff check .`
 
   Expected: no failures; `All checks passed!`. Segmentation feeds many tests, so
   a regression here shows up outside `tests/test_layout.py`.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
   ```bash
   git add app/layout.py tests/test_layout.py
@@ -170,7 +170,7 @@ Android.
   "revision": int, "items": [{"group_id", "group_label", "question_id",
   "question_label", "answer", "status", "issue"}]}`. Task 3 parses it.
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
 
   Create `tests/test_answer_bundle_api.py`:
 
@@ -296,13 +296,13 @@ Android.
       assert client.get("/v1/exam-sessions/9999/answer-bundle").status_code == 404
   ```
 
-- [ ] **Step 2: Run the tests and verify they fail**
+- [x] **Step 2: Run the tests and verify they fail**
 
   Run: `py -3.12 -m pytest tests/test_answer_bundle_api.py -v`
 
   Expected: FAIL with 404 responses, because the route does not exist yet.
 
-- [ ] **Step 3: Add the helpers**
+- [x] **Step 3: Add the helpers**
 
   In `app/main.py`, beside `_exam_deck`:
 
@@ -393,7 +393,7 @@ Android.
 
   `hashlib` and `re` are already imported in `app/main.py`.
 
-- [ ] **Step 4: Add the endpoint**
+- [x] **Step 4: Add the endpoint**
 
   In `app/main.py`, after `exam_list_solutions`:
 
@@ -435,13 +435,13 @@ Android.
           conn.close()
   ```
 
-- [ ] **Step 5: Run the tests and verify they pass**
+- [x] **Step 5: Run the tests and verify they pass**
 
   Run: `py -3.12 -m pytest tests/test_answer_bundle_api.py -v`
 
   Expected: PASS, all six.
 
-- [ ] **Step 6: Bump the API version**
+- [x] **Step 6: Bump the API version**
 
   In `app/version.py:167` set `API_VERSION = "1.16.0"`, and add a line to the
   changelog comment block above it in the file's existing style, naming the new
@@ -454,13 +454,13 @@ Android.
   `android-relay/app/build.gradle.kts`, so read those two files for the values
   rather than typing them from memory.
 
-- [ ] **Step 7: Run the whole server suite**
+- [x] **Step 7: Run the whole server suite**
 
   Run: `py -3.12 -m pytest -q` then `ruff check .`
 
   Expected: no failures; `All checks passed!`.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
   ```bash
   git add app/main.py app/version.py README.md tests/test_answer_bundle_api.py
@@ -480,7 +480,7 @@ Android.
 - Produces: `public AnswerBundle answerBundle(long sessionId) throws IOException,
   JSONException`. Task 4 calls it.
 
-- [ ] **Step 1: Write a failing test**
+- [x] **Step 1: Write a failing test**
 
   Create `DocScanApiAnswerBundleTest.java`:
 
@@ -553,7 +553,7 @@ Android.
   Add `import static org.junit.Assert.assertTrue;` beside the other static
   imports.
 
-- [ ] **Step 2: Run the test and verify it fails**
+- [x] **Step 2: Run the test and verify it fails**
 
   ```bash
   export JAVA_HOME="C:/Users/Public/rokid-build-tools-20260901/jdk17/jdk-17.0.20.1+1"
@@ -564,7 +564,7 @@ Android.
 
   Expected: compilation failure — `cannot find symbol: method answerBundle(long)`.
 
-- [ ] **Step 3: Add the method**
+- [x] **Step 3: Add the method**
 
   In `DocScanApi.java`, after `review(...)`:
 
@@ -579,11 +579,11 @@ Android.
   Add `import dev.rokid.docscanrelay.study.AnswerBundle;` beside the existing
   imports.
 
-- [ ] **Step 4: Run the test and verify it passes**
+- [x] **Step 4: Run the test and verify it passes**
 
   Same command as Step 2. Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
   ```bash
   git add android-relay/relaycore/src/main/java/dev/rokid/docscanrelay/DocScanApi.java \
@@ -609,7 +609,7 @@ Android.
 This mirrors the existing `CaptureActionRouter`: the decision is a pure function
 so it can be tested without an Activity.
 
-- [ ] **Step 1: Write a failing test**
+- [x] **Step 1: Write a failing test**
 
   Create `AnswerGesturesTest.java`:
 
@@ -679,7 +679,7 @@ so it can be tested without an Activity.
   reach `GROUPS`, correct this test to match the reader rather than changing the
   reader.
 
-- [ ] **Step 2: Run the test and verify it fails**
+- [x] **Step 2: Run the test and verify it fails**
 
   ```bash
   /c/rokid-docscan-starter/android-relay/gradlew --no-daemon :glassdoc:testDebugUnitTest \
@@ -688,7 +688,7 @@ so it can be tested without an Activity.
 
   Expected: compilation failure — `cannot find symbol: class AnswerGestures`.
 
-- [ ] **Step 3: Write the router**
+- [x] **Step 3: Write the router**
 
   ```java
   package dev.rokid.docscanglass.doc;
@@ -730,11 +730,11 @@ so it can be tested without an Activity.
   }
   ```
 
-- [ ] **Step 4: Run the test and verify it passes**
+- [x] **Step 4: Run the test and verify it passes**
 
   Same command as Step 2. Expected: PASS, four tests.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
   ```bash
   git add android-relay/glassdoc/src/main/java/dev/rokid/docscanglass/doc/AnswerGestures.java \
@@ -757,7 +757,7 @@ so it can be tested without an Activity.
   (Task 4), and the existing `AnswerView`, `AnswerReader`, `AnswerStore`.
 - Produces: nothing later tasks depend on.
 
-- [ ] **Step 1: Expose the session and the configured client**
+- [x] **Step 1: Expose the session and the configured client**
 
   `DocScanController.java:107` holds `private DocScanApi api;` and
   `DocScanController.java:137` holds `private long sessionId;`. The Activity
@@ -778,7 +778,7 @@ so it can be tested without an Activity.
       }
   ```
 
-- [ ] **Step 2: Write a failing test**
+- [x] **Step 2: Write a failing test**
 
   Create `AnswerSurfaceTest.java`. It covers the part that is decidable without
   hardware: a fetched bundle is persisted and a later resume restores the same
@@ -829,7 +829,7 @@ so it can be tested without an Activity.
   convention; `resume()` may clear a closed flag, and this test must not assert
   the opposite of what that test already fixes.
 
-- [ ] **Step 3: Run the test and verify it fails or passes for the right reason**
+- [x] **Step 3: Run the test and verify it fails or passes for the right reason**
 
   ```bash
   /c/rokid-docscan-starter/android-relay/gradlew --no-daemon :glassdoc:testDebugUnitTest \
@@ -840,7 +840,7 @@ so it can be tested without an Activity.
   implemented and tested, and this test only pins the glasses-side directory
   choice. Keep it.
 
-- [ ] **Step 4: Wire the Activity**
+- [x] **Step 4: Wire the Activity**
 
   In `DocScanGlassActivity.java`:
 
@@ -937,7 +937,7 @@ so it can be tested without an Activity.
   "Re-reads the reader after the host moved it", which is exactly this call. Do
   not add a second redraw method.
 
-- [ ] **Step 5: Build and run the module's tests**
+- [x] **Step 5: Build and run the module's tests**
 
   ```bash
   /c/rokid-docscan-starter/android-relay/gradlew --no-daemon test testDebugUnitTest assembleDebug
@@ -945,7 +945,7 @@ so it can be tested without an Activity.
 
   Expected: `BUILD SUCCESSFUL`, no failures.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
   ```bash
   git add android-relay/glassdoc/src/main/java/dev/rokid/docscanglass/doc/DocScanGlassActivity.java \
@@ -964,7 +964,7 @@ so it can be tested without an Activity.
 
 **Interfaces:** none.
 
-- [ ] **Step 1: Run every check**
+- [x] **Step 1: Run every check**
 
   ```bash
   py -3.12 -m pytest -q
@@ -976,7 +976,7 @@ so it can be tested without an Activity.
 
   Record the actual counts. Do not write a number you did not read from output.
 
-- [ ] **Step 2: Append a section to the progress record**
+- [x] **Step 2: Append a section to the progress record**
 
   State, with the commands and their output: what the endpoint returns, that the
   Android side parses it, and that the gesture routing is unit-tested. State
@@ -985,13 +985,13 @@ so it can be tested without an Activity.
   are all unmeasured. Fix the stale logcat tags in the resume section while you
   are there: the tags are `DocScanGlassDoc` and `WearWatch`, not `DocScanGlass`.
 
-- [ ] **Step 3: Update the task list**
+- [x] **Step 3: Update the task list**
 
   In `tasks/todo.md`, note under FS-65 that the transport and the reading
   surface are implemented and that the todo-list FS-65 scope — 数式・表・作図 —
   is untouched. Leave the checkbox unchecked; it is not verified.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
   ```bash
   git add .agents/progress/glasses-input-and-real-device-prep.md tasks/todo.md

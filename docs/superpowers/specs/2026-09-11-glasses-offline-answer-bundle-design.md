@@ -1,6 +1,11 @@
 # Glasses offline answer bundle
 
-Status: Design, approved 2026-09-11. Not implemented.
+Status: Implemented, unit-tested, green build (2026-09-11). **Not verified on
+hardware in any respect** — no device was involved at any point. The
+phone-hotspot topology has never been exercised end to end, `AnswerView`'s
+readability on the glasses is unverified, reading with the hotspot off is
+unverified, and the two-stage exit and re-wear recovery were not re-tested
+after this branch changed the `KEYCODE_BACK` consumption decision.
 
 ## Problem
 
@@ -63,10 +68,32 @@ Measured 2026-09-11 by running `layout.segment_problems` on a multi-line page:
 '(2)'   | (2) 筆者の主張を80字で述べよ。
 ```
 
-The same split appears in the repository's own answer-form evidence pack,
-`tests/fixtures/answer_forms/cases.json`, whose seventeen expectations each
-carry `source.section` and `source.item`. Every one of the eight forms uses
-`第N問` as the section; the items are `問N`, `(N)`, `(三)`, `(A)` and `全問`.
+**Correction (final review, measured on the current head):** the claim above
+that this split "appears in" the evidence pack does not hold. Running
+`layout.segment_problems` over all eight forms' stored page text in
+`tests/fixtures/answer_forms/cases.json` produces only `第N問`/`大問N`
+headings and zero sub-question deck rows for every form — each one collapses
+to the `全問` whole-section fallback described under "Grouping rule" below,
+not the per-sub-question split this feature is for:
+
+```
+K01 lines=1 units=['第1問']      T02 lines=3 units=['第1問','第2問','第4問']
+K02 lines=1 units=['第2問']      K03 lines=1 units=['第2問']
+T01 lines=1 units=['第3問']      K04 lines=1 units=['第3問']
+T03 lines=1 units=['第5問']      T04 lines=3 units=['第1問','第2問','第4問']
+```
+
+The seventeen `expected[].source.section`/`source.item` values (`第N問` as
+section; `問N`, `(N)`, `(三)`, `(A)`, `全問` as items) are hand-authored
+scoring metadata, not something the segmenter reproduces from the stored
+text. The cause: the fixture pack stores each page's OCR as a single line
+(`input.pages[].text` contains no `\n`), and `parse_layout` scans
+`text.splitlines()`, so a marker that would be line-leading in real,
+multi-line OCR is instead mid-line in this pack and is never seen as a
+boundary. Whether real device OCR emits actual line breaks — which would
+make this a non-issue in production — is an open question with no evidence
+in this repository, not a conclusion; see the pytest case pinning this
+measurement in `tests/test_layout.py`.
 
 ### Grouping rule
 
@@ -92,15 +119,24 @@ to 120 characters.
 _PAREN_Q_RE = re.compile(r"^\s*[（(]\s*([0-9０-９]{1,3})\s*[)）]")
 ```
 
-Only half-width and full-width Arabic digits match. `(三)` and `(A)` do not, so
-they are absorbed into the preceding item's body instead of becoming their own
-deck rows. Both appear in the evidence pack (T02 and T04, the 東大国語 and
-英語 forms), which means two of the eight evaluated answer forms cannot be read
-per sub-question today.
+Only half-width and full-width Arabic digits match. A line-leading `(三)` or
+`(A)` is absorbed into the preceding item's body instead of becoming its own
+deck row. This narrowing is real and is confirmed with hand-built,
+genuinely line-leading cases
+(`tests/test_layout.py::test_kanji_and_letter_sub_questions_split`) — **not**
+with the evidence pack. **Correction (final review):** T02 and T04's `(三)`
+and `(A)` are mid-line, not line-leading — T02's stored page text is
+`'第1問 (三) 傍線部について…'` — so `_PAREN_Q_RE`'s `^\s*` anchor never
+reaches them regardless of the character class, and this widening changes
+nothing for T02 or T04. See "Sub-question structure" above for what the
+eight-form measurement does and does not establish.
 
 Fix: extend the character class to kanji numerals 一-十 and Latin capitals A-Z.
 The rule stays anchored at the start of a line, so the existing protection
-against mid-text parentheses such as `大戦（1914）` is unaffected.
+against mid-text parentheses such as `大戦（1914）` is unaffected, and a
+genuinely line-leading `(三)`/`(A)` — the form real per-line OCR would
+produce — now splits correctly. The fix is correct on its own terms; it just
+does not do what this section originally claimed for T02/T04.
 
 ## Server: GET /v1/exam-sessions/{id}/answer-bundle
 
