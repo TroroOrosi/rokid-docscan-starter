@@ -15,6 +15,7 @@ import android.view.KeyEvent;
 import android.view.WindowManager;
 import android.widget.Toast;
 
+import java.io.IOException;
 import java.util.List;
 import java.util.Optional;
 
@@ -78,11 +79,16 @@ public final class DocScanGlassActivity extends Activity
     private HudView hud;
     private AnswerView answers;
     private AnswerStore answerStore;
-    // volatile: onUpdate's "reader == null" guard runs on the controller's
-    // serial executor thread, but reader is only ever written from the main
-    // thread (openAnswers/closeAnswers).
-    private volatile AnswerReader reader;
-    private volatile boolean fetchingAnswers;
+    // Screen ownership only. Always read/written on the main thread (onAction,
+    // openAnswers/closeAnswers, and the main.post callback fetchAnswers posts
+    // from its background thread) -- onUpdate's guard no longer reads it.
+    private AnswerReader reader;
+    // Set once, the first time a REVIEW state is seen, and never cleared, so
+    // fetchAnswers runs exactly once per Activity instance -- closing the
+    // reader must not make onUpdate try again. volatile: read and written
+    // from the controller's serial-executor thread, matching the convention
+    // DocScanController itself uses for its own cross-thread fields.
+    private volatile boolean answersFetched;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -270,6 +276,7 @@ public final class DocScanGlassActivity extends Activity
                 closeAnswers();
                 return;
             }
+            persistAnswerPosition(false);
             answers.refresh();
             return;
         }
@@ -313,7 +320,8 @@ public final class DocScanGlassActivity extends Activity
     @Override
     public void onUpdate(RelayState state, List<String> hudLines, String diagnostic) {
         Log.i(TAG, state + ": " + diagnostic);
-        if (state == RelayState.REVIEW && reader == null && !fetchingAnswers) {
+        if (state == RelayState.REVIEW && !answersFetched) {
+            answersFetched = true;
             fetchAnswers(controller.sessionId());
         }
         // AIMING, STABILIZING and CAPTURE_REVIEW each own the screen through
@@ -330,43 +338,71 @@ public final class DocScanGlassActivity extends Activity
     // --- answer reading -----------------------------------------------------
 
     /**
-     * One request, then the reader works with no route to the server. The exam
-     * venue has no Wi-Fi network; the glasses reach the server only while the
-     * phone's hotspot is up, which may be true only before the exam starts.
+     * A saved reader survives the process restart that folding the temple
+     * arms causes, so a resume is tried before any network request. Past
+     * that, one request, then the reader works with no route to the server:
+     * the exam venue has no Wi-Fi network, and the glasses reach the server
+     * only while the phone's hotspot is up, which may be true only before
+     * the exam starts.
      */
     private void fetchAnswers(long sessionId) {
-        if (sessionId <= 0) {
-            return;
-        }
-        fetchingAnswers = true;
         new Thread(() -> {
+            AnswerStore.Saved saved = resumeSavedAnswers();
+            if (saved != null) {
+                main.post(() -> openAnswers(saved.bundle, saved.questionId, saved.offset));
+                return;
+            }
+            if (sessionId <= 0) {
+                return;
+            }
             try {
                 AnswerBundle bundle = controller.api().answerBundle(sessionId);
                 answerStore.start(bundle);
-                main.post(() -> openAnswers(bundle));
+                main.post(() -> openAnswers(bundle, bundle.items.get(0).questionId, 0));
             } catch (Exception error) {
                 Log.w(TAG, "answer bundle unavailable", error);
                 main.post(() -> hud.showLines(
                         List.of("答案を取得できません", "通信を確認", "")));
-            } finally {
-                fetchingAnswers = false;
             }
         }, "answer-bundle").start();
     }
 
-    private void openAnswers(AnswerBundle bundle) {
+    private AnswerStore.Saved resumeSavedAnswers() {
+        try {
+            return answerStore.resume();
+        } catch (IOException error) {
+            Log.w(TAG, "saved answer state unavailable", error);
+            return null;
+        }
+    }
+
+    private void openAnswers(AnswerBundle bundle, String questionId, int offset) {
         answers = new AnswerView(this);
         // A placeholder viewport: AnswerView.onSizeChanged calls
         // reader.viewport with its own Paint as soon as it is laid out, and
         // the view owns the layout, so nothing here should guess at width.
         reader = new AnswerReader(bundle, 1f, 2, text -> text.length());
+        reader.restore(questionId, offset);
         answers.bind(reader);
         setContentView(answers);
     }
 
     private void closeAnswers() {
+        persistAnswerPosition(true);
         reader = null;
         answers = null;
         setContentView(hud);
+    }
+
+    /** Persistence must never throw into the UI, exactly as the fetch does not. */
+    private void persistAnswerPosition(boolean closed) {
+        if (reader == null) {
+            return;
+        }
+        try {
+            answerStore.save(reader.bundle(), reader.current().questionId, reader.offset(), closed);
+        } catch (IOException error) {
+            Log.w(TAG, "answer position not saved", error);
+        }
     }
 }
