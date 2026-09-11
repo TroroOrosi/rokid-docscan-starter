@@ -127,7 +127,10 @@ public class DocScanGlassActivityAnswerReadingTest {
     @Test
     public void aSavedReaderIsResumedInsteadOfFetched() throws Exception {
         AnswerStore preSeeded = new AnswerStore(filesDir);
-        AnswerBundle bundle = bundle();
+        // sessionId must match the controller's session (SESSION_ID): a saved
+        // bundle from a different session must not be resumed, see
+        // aSavedReaderFromADifferentSessionIsNotResumedAndIsFetchedInstead.
+        AnswerBundle bundle = bundleForSession(SESSION_ID);
         preSeeded.start(bundle);
         // Offset 3 of "y = 3" (length 5): AnswerReader#restore clamps to the
         // current question's own answer length, so a larger offset here would
@@ -141,6 +144,64 @@ public class DocScanGlassActivityAnswerReadingTest {
         AnswerReader reader = (AnswerReader) getField(activity, "reader");
         assertEquals("q11", reader.current().questionId);
         assertEquals(3, reader.offset());
+    }
+
+    /**
+     * New Breakage #1 from the Task 5 fix-round review: {@code AnswerStore}'s
+     * {@code save} rejects a mismatched {@code sessionId} as stale, but an
+     * earlier version of the resume path did not apply the same check, so a
+     * bundle saved for one session was resumed for any later one and no
+     * fetch ever ran again. This pins the fix: a saved bundle for a
+     * different session must be ignored and a fresh fetch must run instead.
+     */
+    @Test
+    public void aSavedReaderFromADifferentSessionIsNotResumedAndIsFetchedInstead()
+            throws Exception {
+        AnswerStore preSeeded = new AnswerStore(filesDir);
+        AnswerBundle staleBundle = bundle(); // sessionId "s1" != SESSION_ID (7)
+        preSeeded.start(staleBundle);
+        preSeeded.save(staleBundle, "q11", 3, false);
+
+        activity.onUpdate(RelayState.REVIEW, List.of("a"), "review-1");
+        awaitTrue(() -> getField(activity, "reader") != null);
+
+        assertEquals("a session mismatch must fall through to a fresh fetch",
+                1, server.getRequestCount());
+        AnswerReader reader = (AnswerReader) getField(activity, "reader");
+        assertEquals("the freshly fetched bundle must be shown, not the stale saved state",
+                "q10", reader.current().questionId);
+        assertEquals(0, reader.offset());
+    }
+
+    /**
+     * New Breakage #3: {@code AnswerStore.resume()} is documented as the only
+     * thing allowed to clear CLOSED, and only for a user-requested resume.
+     * The automatic path on REVIEW is not that, so it must read with
+     * {@code load()} and leave a same-session CLOSED save alone -- neither
+     * reopening the old reader nor fetching a fresh one that would silently
+     * undo the close.
+     */
+    @Test
+    public void aClosedSavedReaderIsNotAutomaticallyReopenedOrRefetched() throws Exception {
+        AnswerStore preSeeded = new AnswerStore(filesDir);
+        AnswerBundle bundle = bundleForSession(SESSION_ID);
+        preSeeded.start(bundle);
+        preSeeded.save(bundle, "q11", 3, true);
+
+        activity.onUpdate(RelayState.REVIEW, List.of("a"), "review-1");
+        Thread.sleep(200);
+        Shadows.shadowOf(Looper.getMainLooper()).idle();
+
+        assertNull("a CLOSED reader must not be reopened automatically",
+                getField(activity, "reader"));
+        assertEquals("a CLOSED reader for the current session must not trigger a fetch either",
+                0, server.getRequestCount());
+    }
+
+    private static AnswerBundle bundleForSession(long sessionId) {
+        return new AnswerBundle(Long.toString(sessionId), "a".repeat(64), 1, List.of(
+                AnswerItem.ready("g1", "第1問", "q10", "問1", "x = 2"),
+                AnswerItem.ready("g1", "第1問", "q11", "問2", "y = 3")));
     }
 
     @Test
@@ -185,8 +246,9 @@ public class DocScanGlassActivityAnswerReadingTest {
      * {@code KeyEvent.nativeKeyCodeToString}, to drive. The reader-closing
      * behavior itself is covered separately, at the {@code onAction} level,
      * by {@link #theBundleIsFetchedOnceAndClosingTheReaderDoesNotReopenOrRefetchIt}.
-     * This test instead sets {@code reader} directly (as that behavior would
-     * have left it) and drives only the key-consumption decision.
+     * This test instead drives {@code onUpdate(REVIEW, ...)} through the real
+     * fetch to put the reader in place (the same seam as the other tests in
+     * this file), then drives only the key-consumption decision.
      */
     @Test
     public void backPressWhileTheReaderOwnsTheScreenDoesNotArmTheExitConfirmation()

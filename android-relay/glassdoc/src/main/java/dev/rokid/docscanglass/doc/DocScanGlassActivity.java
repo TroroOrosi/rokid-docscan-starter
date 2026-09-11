@@ -83,12 +83,15 @@ public final class DocScanGlassActivity extends Activity
     // openAnswers/closeAnswers, and the main.post callback fetchAnswers posts
     // from its background thread) -- onUpdate's guard no longer reads it.
     private AnswerReader reader;
-    // Set once, the first time a REVIEW state is seen, and never cleared, so
-    // fetchAnswers runs exactly once per Activity instance -- closing the
-    // reader must not make onUpdate try again. volatile: read and written
-    // from the controller's serial-executor thread, matching the convention
+    // The session id fetchAnswers last ran for, or -1 for none yet. Keyed by
+    // session, not a plain flag: SHORT_TAP in REVIEW starts a new document,
+    // DocScanController#clearWorkflow resets sessionId to 0 and a later
+    // capture assigns a new one, and that second session must fetch its own
+    // answers too -- a plain "already fetched" boolean would leave it with
+    // no reader and no error. volatile: read and written from the
+    // controller's serial-executor thread, matching the convention
     // DocScanController itself uses for its own cross-thread fields.
-    private volatile boolean answersFetched;
+    private volatile long answersFetchedForSession = -1;
     // True while the reader owned the screen when the most recent
     // KEYCODE_BACK DOWN was processed. Read again by the matching UP: onAction
     // (called from the DOWN phase, below) may itself close the reader --
@@ -344,9 +347,12 @@ public final class DocScanGlassActivity extends Activity
     @Override
     public void onUpdate(RelayState state, List<String> hudLines, String diagnostic) {
         Log.i(TAG, state + ": " + diagnostic);
-        if (state == RelayState.REVIEW && !answersFetched) {
-            answersFetched = true;
-            fetchAnswers(controller.sessionId());
+        if (state == RelayState.REVIEW) {
+            long sessionId = controller.sessionId();
+            if (sessionId != answersFetchedForSession) {
+                answersFetchedForSession = sessionId;
+                fetchAnswers(sessionId);
+            }
         }
         // AIMING, STABILIZING and CAPTURE_REVIEW each own the screen through
         // their own surface call -- the guide brackets, and the still. Redrawing
@@ -363,17 +369,35 @@ public final class DocScanGlassActivity extends Activity
 
     /**
      * A saved reader survives the process restart that folding the temple
-     * arms causes, so a resume is tried before any network request. Past
-     * that, one request, then the reader works with no route to the server:
-     * the exam venue has no Wi-Fi network, and the glasses reach the server
-     * only while the phone's hotspot is up, which may be true only before
-     * the exam starts.
+     * arms causes, so the saved state is read before any network request.
+     * Two things gate reusing it instead of fetching fresh: it must belong
+     * to this session (AnswerStore.save rejects a mismatched sessionId as
+     * stale, so an unchecked read here would show a previous document's
+     * answers forever, on a device that has ever saved a bundle, since the
+     * fetch that follows would never run either), and it must not be CLOSED
+     * -- AnswerStore.resume() is the only thing allowed to clear CLOSED, and
+     * that is a user-requested action this automatic path is not, so this
+     * reads with load() and leaves resume() uncalled from production. There
+     * is deliberately no gesture to reopen a CLOSED reader within the same
+     * session; an operator who closes the reader gets the HUD until the
+     * next document.
+     *
+     * Past the saved state, one request, then the reader works with no
+     * route to the server: the exam venue has no Wi-Fi network, and the
+     * glasses reach the server only while the phone's hotspot is up, which
+     * may be true only before the exam starts.
      */
     private void fetchAnswers(long sessionId) {
         new Thread(() -> {
-            AnswerStore.Saved saved = resumeSavedAnswers();
-            if (saved != null) {
-                main.post(() -> openAnswers(saved.bundle, saved.questionId, saved.offset));
+            AnswerStore.Saved saved = loadSavedAnswers();
+            if (saved != null && saved.bundle.sessionId.equals(Long.toString(sessionId))) {
+                // Saved state belongs to this session. CLOSED must stop here,
+                // not fall through to a fresh fetch: a fetch would open a new
+                // reader on the same session's answers, silently undoing the
+                // close it was supposed to respect.
+                if (!saved.closed) {
+                    main.post(() -> openAnswers(saved.bundle, saved.questionId, saved.offset));
+                }
                 return;
             }
             if (sessionId <= 0) {
@@ -385,15 +409,19 @@ public final class DocScanGlassActivity extends Activity
                 main.post(() -> openAnswers(bundle, bundle.items.get(0).questionId, 0));
             } catch (Exception error) {
                 Log.w(TAG, "answer bundle unavailable", error);
-                main.post(() -> hud.showLines(
-                        List.of("答案を取得できません", "通信を確認", "")));
+                main.post(() -> {
+                    if (isFinishing() || isDestroyed()) {
+                        return;
+                    }
+                    hud.showLines(List.of("答案を取得できません", "通信を確認", ""));
+                });
             }
         }, "answer-bundle").start();
     }
 
-    private AnswerStore.Saved resumeSavedAnswers() {
+    private AnswerStore.Saved loadSavedAnswers() {
         try {
-            return answerStore.resume();
+            return answerStore.load();
         } catch (IOException error) {
             Log.w(TAG, "saved answer state unavailable", error);
             return null;
