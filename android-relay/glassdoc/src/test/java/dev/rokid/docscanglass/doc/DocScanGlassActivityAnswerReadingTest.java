@@ -24,6 +24,7 @@ import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BooleanSupplier;
 
 import dev.rokid.docscanglass.input.BackExitPolicy;
@@ -66,6 +67,11 @@ public class DocScanGlassActivityAnswerReadingTest {
     // return the same File across separate calls (AnswerSurfaceTest avoids
     // this the same way, by capturing its directory into a local once).
     private File filesDir;
+    // Counts only "/answer-bundle" requests. server.getRequestCount() alone
+    // is not enough for aSecondSessionInTheSameActivityInstanceFetchesAgain,
+    // which also drives a real DocScanController recovery
+    // (finalize-reading + review) through the same MockWebServer.
+    private final AtomicInteger answerBundleRequests = new AtomicInteger();
 
     private AnswerBundle bundle() {
         return new AnswerBundle("s1", "a".repeat(64), 1, List.of(
@@ -202,6 +208,117 @@ public class DocScanGlassActivityAnswerReadingTest {
         return new AnswerBundle(Long.toString(sessionId), "a".repeat(64), 1, List.of(
                 AnswerItem.ready("g1", "第1問", "q10", "問1", "x = 2"),
                 AnswerItem.ready("g1", "第1問", "q11", "問2", "y = 3")));
+    }
+
+    /**
+     * Item 2 test-coverage gap flagged in review: {@code SESSION_ID} is
+     * written into SharedPreferences once in {@code setUp} and
+     * {@code DocScanController} only reads {@code KEY_SESSION} in its own
+     * constructor, so nothing in the rest of this file ever varies the
+     * session id mid-test. Every other test here still passes if
+     * {@code answersFetchedForSession} is reverted to a plain
+     * {@code boolean answersFetched} -- this is the one that does not (see
+     * the fix report for the captured failing/passing runs).
+     *
+     * <p>The only real production path that hands an Activity a second,
+     * genuinely-assigned session id is a new {@code DocScanController}
+     * recovering a persisted session -- the same
+     * {@code configureAndResume -> resumeNow}'s {@code sessionId > 0} branch
+     * that runs on a real process restart (temple-arm fold), and the same
+     * seam {@code DocScanControllerLifecycleTest} already drives. This test
+     * persists a second session id, builds a second real
+     * {@code DocScanController} against it, swaps it into this Activity
+     * instance the same way {@code setUp} wires the first one, and drives
+     * that controller's real recovery (finalize-reading, then review) end to
+     * end through the Activity's real {@code onUpdate} callback.
+     *
+     * <p><b>What this proves:</b> when the same Activity instance observes
+     * REVIEW for two distinct, genuinely-assigned session ids, it fetches
+     * the answer bundle for both -- not just the first, which is what a
+     * plain one-shot boolean guard would do.
+     *
+     * <p><b>What this does not prove:</b> that a single
+     * {@code DocScanController} instance can hand the same Activity a
+     * second session id without an intervening restart (e.g. a
+     * SHORT_TAP-driven new document within one continuous run). That would
+     * need a full second capture/OCR/finalize cycle through one controller
+     * -- {@code sessionId} is only ever reassigned via
+     * {@code api.createExamSession(...)}'s real response, in the finalize
+     * flow or in this same recovery branch -- which would mean standing up
+     * the capture/OCR/finalize HTTP surface as well as review's, not
+     * attempted here for cost. The guard's job is identical either way: react
+     * to whatever {@code controller.sessionId()} currently reports. Driving
+     * that comparison through a second controller is the closest seam that
+     * still exercises the real production check
+     * ({@code sessionId != answersFetchedForSession}), rather than reaching
+     * past it by poking the field with reflection.
+     */
+    @Test
+    public void aSecondSessionInTheSameActivityInstanceFetchesAgain() throws Exception {
+        activity.onUpdate(RelayState.REVIEW, List.of("a"), "review-1");
+        awaitTrue(() -> getField(activity, "reader") != null);
+        assertEquals("first session fetches once", 1, answerBundleRequests.get());
+
+        long secondSessionId = SESSION_ID + 1;
+        activity.getSharedPreferences("docscan_relay", Context.MODE_PRIVATE)
+                .edit().putLong("session_id", secondSessionId).apply();
+        DocScanController controller2 = new DocScanController(activity, new Surface(), null,
+                activity, new ClientIdentity("test-glasses", "answer-test/1", "fake-camera"));
+        try {
+            assertEquals("test precondition: the new controller must read the "
+                    + "second session id from preferences, not the first",
+                    secondSessionId, controller2.sessionId());
+
+            setField(activity, "controller", controller2);
+            controller2.configureAndResume(server.url("/").toString(), "test-key", 180);
+
+            awaitTrue(() -> answerBundleRequests.get() >= 2);
+            assertEquals("the second session must be fetched too, not silently "
+                    + "skipped by a guard still keyed to the first session",
+                    2, answerBundleRequests.get());
+        } finally {
+            controller2.close();
+        }
+    }
+
+    /**
+     * The fetch -> persist -> new Activity -> resume round trip, made cheap
+     * by the {@code bundleForSession(SESSION_ID)} fixture fix: the saved
+     * bundle's session id now actually matches the session a later resume
+     * checks against, which it never did against the old {@code bundle()}
+     * ("s1") fixture. Reuses the same {@code controller} and
+     * {@code filesDir} from {@code setUp} for a second Activity instance --
+     * the same {@code AnswerStore} on disk is what a real process restart
+     * shares, not a second controller (that is
+     * {@link #aSecondSessionInTheSameActivityInstanceFetchesAgain}'s job).
+     */
+    @Test
+    public void fetchThenPersistThenANewActivityResumesWithoutRefetching() throws Exception {
+        activity.onUpdate(RelayState.REVIEW, List.of("a"), "review-1");
+        awaitTrue(() -> getField(activity, "reader") != null);
+        AnswerReader reader = (AnswerReader) getField(activity, "reader");
+        int guard = 0;
+        while (!"q11".equals(reader.current().questionId) && guard++ < 50) {
+            invokeOnAction(GlassesInputAction.SWIPE_FORWARD);
+        }
+        assertEquals("q11", reader.current().questionId);
+        int movedOffset = reader.offset();
+        assertEquals("one HTTP request for the first Activity's fetch",
+                1, answerBundleRequests.get());
+
+        DocScanGlassActivity activity2 = Robolectric.buildActivity(DocScanGlassActivity.class).get();
+        setField(activity2, "hud", new HudView(activity2));
+        setField(activity2, "answerStore", new AnswerStore(filesDir));
+        setField(activity2, "controller", controller);
+
+        activity2.onUpdate(RelayState.REVIEW, List.of("a"), "review-1");
+        awaitTrue(() -> getField(activity2, "reader") != null);
+
+        assertEquals("resuming from the saved state must not re-fetch",
+                1, answerBundleRequests.get());
+        AnswerReader resumed = (AnswerReader) getField(activity2, "reader");
+        assertEquals("q11", resumed.current().questionId);
+        assertEquals(movedOffset, resumed.offset());
     }
 
     @Test
@@ -373,13 +490,37 @@ public class DocScanGlassActivityAnswerReadingTest {
             public MockResponse dispatch(RecordedRequest request) {
                 String path = request.getPath();
                 if (path != null && path.endsWith("/answer-bundle")) {
-                    return new MockResponse().setBody(bundle().toJson());
+                    answerBundleRequests.incrementAndGet();
+                    // sessionId must match SESSION_ID, the same way the real
+                    // server's answer-bundle response's session_id always
+                    // matches the session it was requested for
+                    // (app/main.py:2841 returns str(session_id)). A mismatch
+                    // here (the old "s1" placeholder) made every fetch->
+                    // persist->resume round trip untestable, since no saved
+                    // bundle could ever match the session a later resume
+                    // checks against.
+                    return json(bundleForSession(SESSION_ID).toJson());
+                }
+                // Only exercised by aSecondSessionInTheSameActivityInstanceFetchesAgain,
+                // which drives a second, real DocScanController through its
+                // own recovery path (resumeNow) to reach REVIEW with a
+                // second, genuinely-assigned session id.
+                if (path != null && path.endsWith("/finalize-reading")) {
+                    return json("{\"status\":\"ready\"}");
+                }
+                if (path != null && path.contains("/review?")) {
+                    return json("{\"index\":0,\"problem_count\":1,\"glasses_view\":{"
+                            + "\"lines\":[\"answer\"],\"view_page\":0,\"total_view_pages\":1}}");
                 }
                 return new MockResponse().setResponseCode(404).setBody("unexpected test request");
             }
         });
         result.start();
         return result;
+    }
+
+    private static MockResponse json(String body) {
+        return new MockResponse().addHeader("Content-Type", "application/json").setBody(body);
     }
 
     private static final class Surface implements CaptureSurface {
