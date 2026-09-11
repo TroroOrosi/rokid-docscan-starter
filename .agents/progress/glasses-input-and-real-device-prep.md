@@ -2155,7 +2155,10 @@ KEYCODE_WAKEUP → am start（再起動）
 
 1. **物理試験**: グラスを装着し、(a) 二段階終了で実際に暗くなるか目視、
    (b) 再装着で `WearWatch` が復帰させるか、(c) `AnswerView` の表示可読性。
-   `adb logcat -s DocScanGlass WearWatch` で確認する。TAG は要確認（前回 logcat は空だった）。
+   `adb logcat -s DocScanGlassDoc WearWatch` で確認する。前回 logcat が空だったのは
+   TAG を `DocScanGlass` と誤っていたためで、正しくは `DocScanGlassDoc`
+   (`DocScanGlassActivity.java:51`、`GlassCamera.java:41`) と `WearWatch`
+   (`WearWatch.java:22`)。2026-09-11 に訂正。
 2. **FS-65**: `AnswerView` を実セッションへ接続する。現在どこからも `bind()` されていない。
    `DocScanGlassActivity` は `HudView` のみを `setContentView` している。
    撮影完了後に答案を読む画面へ切り替える導線が未実装。
@@ -2173,3 +2176,112 @@ KEYCODE_WAKEUP → am start（再起動）
 - `.git/worktrees/rokid-docscan-doc-audit-20260831` の削除が権限エラーになるが、
   コミット自体は成功する。旧 worktree `C:\Users\Public\rokid-docscan-build`（`9df5b09`）は
   旧構成のまま放置。
+
+## Checkpoint — 2026-09-11 オフライン答案バンドル、実装完了・実機未検証
+
+Task 1〜5 がマージ済み。試験会場に Wi-Fi が無い前提で、グラスがスマホの
+ホットスポット越しに答案バンドルを一括取得し、全小問をオフラインで読める
+ようにする機能。ここに書くのは**単体テストとビルドで確認できた範囲だけ**で、
+実機は一度も関与していない。
+
+### 実行した検証コマンドと実際の出力
+
+```
+py -3.12 -m pytest -q
+  → 468 passed, 1 warning in 21.82s
+  （warning は既知の StarletteDeprecationWarning、この変更と無関係）
+
+py -3.12 -m ruff check .
+  → All checks passed!
+```
+
+Android は素の `gradlew --no-daemon test testDebugUnitTest assembleDebug` を
+最初に実行したところ、全タスクが `UP-TO-DATE` で `199 actionable tasks:
+199 up-to-date` と出た。**これはテストを再実行していない。** `--rerun-tasks`
+を付けて取り直した:
+
+```
+gradlew --no-daemon --rerun-tasks test testDebugUnitTest assembleDebug
+  → BUILD SUCCESSFUL in 1m 4s
+    199 actionable tasks: 199 executed
+```
+
+`test-results/**/*.xml`（`glassinput` は plain java-library なので
+`test`、他は `testDebugUnitTest`）を集計すると **51ファイル / 312 tests /
+failures 0 / errors 0**。`app-debug.apk`・`glassdoc-debug.apk`・
+`glassapp-debug.apk`・`glassprobe-debug.apk` の4つがビルドされた
+（`glassdoc-debug.apk` 54.8MB 他）。
+
+### 実装されたもの(コミット、古い順)
+
+- `88ae879` 答案の小問分割(`(三)`・`(A)`)。
+- `5805aa2` `7117b8f` ドキュメント索引の修正。
+- `f5a6fd1` `aa704f3` `GET /v1/exam-sessions/{id}/answer-bundle`
+  (`app/main.py:2813`)、`API_VERSION` → `1.16.0`。
+- `01ac961` `DocScanApi.answerBundle(long)`
+  (`DocScanApi.java:129`)。
+- `058cee7` `9b77c45` `dbbe0b4` `AnswerGestures` とそのテスト。
+- `937e0a0` 他4コミット、グラス側の配線。
+
+### 実機で確認していないこと(明示)
+
+- **ホットスポット経路そのものを一度も通していない。** グラスをスマホの
+  ホットスポットへ実際に参加させてバンドルを取得した記録は無い。
+- **`AnswerView` のグラス上での可読性は未検証。** 実機の画面で見た記録が無い。
+- **ホットスポットを切ってから読む動作は未検証。**
+- **二段階終了と再装着復帰は、このブランチが `KEYCODE_BACK` の消費判定を
+  変えた後に再検証していない。**
+
+### 設計が想定していなかった実際の制約: `AnswerStore.resume()` に本番の呼び出し元が無い
+
+`AnswerStore.resume()` は「CLOSED フラグを消せるのはユーザーが明示的に
+resume を求めた時だけ」という契約で書かれている
+(`AnswerStore.java:57`「Only a user-requested resume is allowed to clear
+CLOSED.」)。しかし実際の再開処理
+(`DocScanGlassActivity.fetchAnswers`, `DocScanGlassActivity.java:390-419`)は
+自動実行(つる折りたたみによるプロセス再起動からの復帰)であり
+「ユーザーが明示的に求めた」に該当しない。そのため本番コードは
+`AnswerStore.load()`(`DocScanGlassActivity.java:424`)で保存状態を見るだけに
+留め、CLOSED のリーダーは CLOSED のまま返す。結果として **`resume()` は
+本番のどこからも呼ばれていない**(コメント `DocScanGlassActivity.java:378`
+が名指ししているだけ)。同一セッション中に一度閉じたリーダーを再び開く
+ジェスチャーは存在しない。これは意図した設計判断であって欠陥ではない。
+次に触る人が `resume()` を自動的に呼んで「直す」ことのないよう、ここに残す。
+
+### コードを読んで正しいと確認したが、テストでは踏んでいない2つの経路
+
+- **同一 `DocScanController` 上での2件目のセッション。** 本番では
+  `sessionId` は同じ `DocScanController` インスタンス上で
+  `api.createExamSession(...)` の応答により再代入される
+  (`DocScanController.java:1936`)。一方、セッション別フェッチガードを
+  証明するテスト
+  (`aSecondSessionInTheSameActivityInstanceFetchesAgain`,
+  `DocScanGlassActivityAnswerReadingTest.java:257`)は、2件目のセッションIDを
+  持つ**別の** `DocScanController` インスタンスを Activity へ差し替えて確認
+  している。ガードは毎回 `controller.sessionId()` を読み直すので正しいが、
+  「同一コントローラ内で2件目の書類を続けて扱う」という本番の経路そのものを
+  駆動するテストは無い(テストのコメント自身がこれを明記している)。
+- **ファームウェア形状のワンフィンガー・ダブルタップ**
+  (`KEYCODE_NOTIFICATION` 2回のち `KEYCODE_BACK`)は Robolectric 上で駆動
+  できない。`KeyEvent.keyCodeToString` は
+  `shadows-framework-4.14.1.jar` を検査した限り `nativeKeyCodeFromString`
+  (逆方向)だけを shadow しており、`nativeKeyCodeToString` は unshadowed の
+  ネイティブ呼び出しのまま(`DocScanGlassActivityAnswerReadingTest.java:351`
+  以降のコメント)。新しい BACK 分岐自体は実 `onKeyDown`/`onKeyUp` を通して
+  カバーされているが、ジェスチャー相関の全体は未カバー。
+
+### 環境上の事実: Windows では `AtomicFile` の2回目の同一パス書き込みが黙って失敗する
+
+API 32 が同梱する `AtomicFile` は `File.renameTo` に依存するが、Windows では
+`renameTo` が既存ファイルを上書きしない。`AnswerStore` を経由して書き込む
+テストはこれを踏むため `AnswerStoreTest` は `@Config(manifest = Config.NONE,
+sdk = 28)`(`AnswerStoreTest.java:16`)に固定している。実機の Linux では
+発生しない。
+
+### 訂正: 再開入口節の logcat タグ
+
+上の「再開入口」節が指示していた `adb logcat -s DocScanGlass WearWatch` は
+誤りで、`DocScanGlass` というタグは存在しない。実際のタグは
+`DocScanGlassDoc`(`DocScanGlassActivity.java:51`、`GlassCamera.java:41`)と
+`WearWatch`(`WearWatch.java:22`)。前回 logcat が空だったのはこのタグ違いが
+原因の可能性が高い。該当節は本更新で訂正済み。
