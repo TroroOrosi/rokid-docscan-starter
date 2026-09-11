@@ -8,6 +8,7 @@ import static org.junit.Assert.assertTrue;
 
 import android.content.Context;
 import android.os.Looper;
+import android.view.KeyEvent;
 
 import org.junit.After;
 import org.junit.Before;
@@ -25,6 +26,7 @@ import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java.util.function.BooleanSupplier;
 
+import dev.rokid.docscanglass.input.BackExitPolicy;
 import dev.rokid.docscanglass.input.GlassesInputAction;
 import dev.rokid.docscanrelay.CaptureSurface;
 import dev.rokid.docscanrelay.ClientIdentity;
@@ -161,6 +163,110 @@ public class DocScanGlassActivityAnswerReadingTest {
         assertEquals("the saved question must follow the reader, not stay at fetch time",
                 "q11", saved.questionId);
         assertEquals(reader.offset(), saved.offset);
+    }
+
+    /**
+     * Finding 3: leaving the reader must not also arm the two-stage exit.
+     * Drives the real {@code onKeyDown}/{@code onKeyUp} pair -- the code path
+     * {@code normalize} actually guards -- rather than calling {@code onAction}
+     * directly, so the fix under test (the key-consumption decision) is the
+     * thing exercised, not bypassed.
+     *
+     * <p>This cannot also exercise the one-finger-double-tap correlation that
+     * really closes the reader on hardware ({@code KEYCODE_NOTIFICATION}
+     * twice then {@code KEYCODE_BACK}, decided inside
+     * {@code GlassesInputNormalizer}): under Robolectric 4.14.1,
+     * {@code KeyEvent.keyCodeToString} always returns the numeric keyCode as
+     * a string (confirmed by inspecting {@code shadows-framework-4.14.1.jar}
+     * -- it shadows only {@code nativeKeyCodeFromString}, the reverse
+     * direction), so {@code GlassKeyEvents.isKnown(name)} is false for every
+     * key driven this way and the normalizer never recognizes a gesture.
+     * That would need a real device, or a Robolectric shadow for
+     * {@code KeyEvent.nativeKeyCodeToString}, to drive. The reader-closing
+     * behavior itself is covered separately, at the {@code onAction} level,
+     * by {@link #theBundleIsFetchedOnceAndClosingTheReaderDoesNotReopenOrRefetchIt}.
+     * This test instead sets {@code reader} directly (as that behavior would
+     * have left it) and drives only the key-consumption decision.
+     */
+    @Test
+    public void backPressWhileTheReaderOwnsTheScreenDoesNotArmTheExitConfirmation()
+            throws Exception {
+        activity.onUpdate(RelayState.REVIEW, List.of("a"), "review-1");
+        awaitTrue(() -> getField(activity, "reader") != null);
+
+        pressBack();
+
+        assertFalse("leaving the reader must not also arm the exit confirmation",
+                backExit().isArmed());
+    }
+
+    /**
+     * The other half of Finding 3's fix: when the reader does not own the
+     * screen, the ordinary two-stage exit must arm exactly as before. A test
+     * that only covered the reader case would still pass if BACK were made to
+     * never reach the exit policy at all.
+     */
+    @Test
+    public void backPressWhileTheReaderDoesNotOwnTheScreenStillArmsTheExitConfirmation()
+            throws Exception {
+        // No onUpdate(REVIEW, ...): the reader never opens, matching the
+        // ordinary capture/review flow this must leave unchanged.
+        assertNull(getField(activity, "reader"));
+
+        pressBack();
+
+        assertTrue("the ordinary two-stage exit must still arm on the first BACK",
+                backExit().isArmed());
+    }
+
+    /**
+     * Minor 2: a fetch or resume that completes after the two-stage exit
+     * already finished the Activity must not touch its screen.
+     */
+    @Test
+    public void openAnswersDoesNothingOnceTheActivityIsFinishing() throws Exception {
+        activity.finish();
+        assertTrue("test precondition: finish() must mark the Activity finishing",
+                activity.isFinishing());
+
+        invokeOpenAnswers(bundle(), "q10", 0);
+
+        assertNull("a late fetch must not open the reader on a finishing Activity",
+                getField(activity, "reader"));
+        assertNull("a late fetch must not touch the screen of a finishing Activity",
+                getField(activity, "answers"));
+    }
+
+    /**
+     * A real BACK key press: {@code onKeyDown} then {@code onKeyUp}, both
+     * through the Activity's real overrides, so {@code normalize}'s own
+     * consumption decision -- not a stand-in for it -- controls whether
+     * {@code super.onKeyUp} (and, through it, the framework's tracking-based
+     * {@code onBackPressed} dispatch, unmodified by this change) ever runs.
+     * The UP event carries {@code FLAG_TRACKING} because Robolectric does not
+     * run the native input pipeline that would set it on a real device after
+     * Activity's own default {@code onKeyDown} calls
+     * {@code event.startTracking()} on the DOWN; this reproduces what a real
+     * BACK release delivers to {@code onKeyUp}.
+     */
+    private void pressBack() {
+        activity.onKeyDown(KeyEvent.KEYCODE_BACK,
+                new KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_BACK));
+        activity.onKeyUp(KeyEvent.KEYCODE_BACK,
+                new KeyEvent(0L, 0L, KeyEvent.ACTION_UP, KeyEvent.KEYCODE_BACK,
+                        0, 0, 0, 0, KeyEvent.FLAG_TRACKING));
+    }
+
+    private BackExitPolicy backExit() {
+        return (BackExitPolicy) getField(activity, "backExit");
+    }
+
+    private void invokeOpenAnswers(AnswerBundle bundle, String questionId, int offset)
+            throws Exception {
+        Method openAnswers = DocScanGlassActivity.class.getDeclaredMethod(
+                "openAnswers", AnswerBundle.class, String.class, int.class);
+        openAnswers.setAccessible(true);
+        openAnswers.invoke(activity, bundle, questionId, offset);
     }
 
     private void invokeOnAction(GlassesInputAction action) throws Exception {

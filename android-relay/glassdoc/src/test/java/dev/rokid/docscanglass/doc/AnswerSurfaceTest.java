@@ -3,7 +3,6 @@ package dev.rokid.docscanglass.doc;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 
-import androidx.test.core.app.ApplicationProvider;
 import dev.rokid.docscanrelay.study.AnswerBundle;
 import dev.rokid.docscanrelay.study.AnswerItem;
 import dev.rokid.docscanrelay.study.AnswerStore;
@@ -12,6 +11,7 @@ import java.util.List;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.robolectric.RobolectricTestRunner;
+import org.robolectric.RuntimeEnvironment;
 
 @RunWith(RobolectricTestRunner.class)
 public class AnswerSurfaceTest {
@@ -23,7 +23,7 @@ public class AnswerSurfaceTest {
 
     @Test
     public void aFetchedBundleSurvivesAndResumesWhereItWasLeft() throws Exception {
-        File directory = ApplicationProvider.getApplicationContext().getFilesDir();
+        File directory = RuntimeEnvironment.getApplication().getFilesDir();
         AnswerStore store = new AnswerStore(directory);
 
         store.start(bundle());

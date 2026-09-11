@@ -89,6 +89,13 @@ public final class DocScanGlassActivity extends Activity
     // from the controller's serial-executor thread, matching the convention
     // DocScanController itself uses for its own cross-thread fields.
     private volatile boolean answersFetched;
+    // True while the reader owned the screen when the most recent
+    // KEYCODE_BACK DOWN was processed. Read again by the matching UP: onAction
+    // (called from the DOWN phase, below) may itself close the reader --
+    // setting `reader` to null -- as a side effect of that same press, so the
+    // UP phase cannot recompute this from the live `reader` field. Always
+    // read/written on the main thread (onKeyDown/onKeyUp).
+    private boolean backOwnedByReader;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -259,9 +266,26 @@ public final class DocScanGlassActivity extends Activity
 
     private boolean normalize(String phase, int keyCode) {
         String name = KeyEvent.keyCodeToString(keyCode);
+        // Compared against the raw keyCode, not the derived name: it is the
+        // more fundamental fact ("KEYCODE_BACK" is keyCodeToString's own name
+        // for exactly this constant) and does not depend on
+        // KeyEvent.keyCodeToString resolving a symbolic name at all.
+        boolean isBackKey = keyCode == KeyEvent.KEYCODE_BACK;
+        if (isBackKey && "DOWN".equals(phase)) {
+            // Captured before onAction (below) runs, and before it has a
+            // chance to close the reader as a side effect of this very press.
+            backOwnedByReader = reader != null;
+        }
         Optional<GlassesInputAction> action = normalizer.accept(InputSignal.key(
                 SystemClock.elapsedRealtime(), phase, name, GlassKeyEvents.isKnown(name)));
         action.ifPresent(this::onAction);
+        if (isBackKey && backOwnedByReader) {
+            // The reader owned the screen when this press began: BACK is its
+            // gesture, not the two-stage exit's. Consuming it here (for both
+            // the DOWN and the matching UP) keeps it from also reaching
+            // onBackPressed and arming the exit confirmation.
+            return true;
+        }
         // Consume every gesture key the firmware delivers except BACK, so the
         // system does not act on it behind the session.
         return !"KEYCODE_BACK".equals(name) && GlassKeyEvents.isKnown(name);
@@ -377,6 +401,12 @@ public final class DocScanGlassActivity extends Activity
     }
 
     private void openAnswers(AnswerBundle bundle, String questionId, int offset) {
+        if (isFinishing() || isDestroyed()) {
+            // The fetch (or a resume) completed after the two-stage exit
+            // already finished this Activity. Nothing to show, and nothing
+            // left to leak a View or a reader into.
+            return;
+        }
         answers = new AnswerView(this);
         // A placeholder viewport: AnswerView.onSizeChanged calls
         // reader.viewport with its own Paint as soon as it is laid out, and
