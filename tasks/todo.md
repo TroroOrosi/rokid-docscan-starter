@@ -1063,7 +1063,21 @@ Status: **実機前準備まで実施。FS-02完了、FS-01一部準備済み。
 
 ### FS-55: スマホ内AIによる非API・圏外経路を評価
 
-- [ ] スマホ内ASRや画像対応推論を比較し、精度/速度/通信量に利益がある部分から組み込む。完全ローカル解答は実機品質基準を満たした場合のみ有効にし、実装時にASR/画像推論/モデル保存へ小分けする。
+- [x] 解答部分の評価完了（2026-09-12、F-51F実機）。**完全ローカル解答は有効化しない。** 実機品質基準を満たさなかった。ASR/画像推論/モデル保存の評価は未実施。
+
+  測定（llama.cpp `718f7b4`、`-DGGML_CPU_REPACK=ON`、`-t 4`）:
+  Qwen3-4B-Instruct-2507 Q4_K_M が pp128 19.65 t/s / tg64 5.87 t/s、
+  Qwen3.5-4B Q4_K_M が 17.91 / 4.46。**9B Q4_K_M はロード時に Android が
+  メモリ枯渇し、`am_proc_died` が Termux だけでなくランチャー
+  `com.fujitsu.mobile_phone.fjhome` まで同時多発**したため測定不能。
+  答案形式評価 `tests/fixtures/answer_forms/cases.json` の17小問で
+  完全一致 1/6（`exact` 採点対象のみ、音声依存2問は音声未供給）、
+  記述式は17件中5件が空文字。詳細は
+  `.agents/progress/glasses-input-and-real-device-prep.md` の 2026-09-12 節。
+
+  画像入力（`-c 2048` 必須、既定コンテキストでは同じ枯渇で kill）と、
+  `llama-server` への接続経路自体は動作する。圏外時の縮退表示や
+  短い計算の補助として再検討する余地は残すが、本筋の解答経路にはしない。
 
 **依存:** FS-51。 **対象の目安:** LocalInferenceProbe / ModelStore / 評価fixture / 実機記録。
 
