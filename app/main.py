@@ -1195,18 +1195,30 @@ def _exam_total_pages(conn, doc_id: int | None) -> int:
     ).fetchone()[0]
 
 
-def _document_material(conn, doc_id: int, current_index: int) -> str:
-    """Return ALL pages of the document as labeled text, current page marked.
+def _document_material(
+    conn, doc_id: int, current_index: int, page_indexes: list[int] | None = None
+) -> str:
+    """Return the document's pages as labeled text, current page marked.
 
     A problem may continue across pages (e.g. a passage on one page, its
-    questions on the next), so the solver is given every remembered page — not
-    just the current one — as context, and can read the continuation accurately.
+    questions on the next), so the solver is given every page of the problem's
+    own 大問 — not just the current one — and can read the continuation
+    accurately. ``page_indexes`` narrows that to those pages; None keeps every
+    remembered page (the compat solve-current path).
+
+    Narrowing matters for an on-device model: it prefills the whole prompt for
+    every sub-question, so repeating all 20-40 pages per 小問 costs minutes
+    each. plan.md's answer contract only asks for the shared passage and
+    material of the same 大問.
     """
     rows = conn.execute(
         "SELECT page_index, ocr_text, vision_text FROM pages "
         "WHERE document_id = ? ORDER BY page_index",
         (doc_id,),
     ).fetchall()
+    if page_indexes:
+        wanted = set(page_indexes)
+        rows = [r for r in rows if r["page_index"] in wanted] or rows
     blocks: list[str] = []
     for r in rows:
         mark = "◀現在ページ" if r["page_index"] == current_index else ""
@@ -1220,9 +1232,11 @@ def _exam_prompt_context(
 ) -> str | None:
     """Compose solver context for a document-page exam.
 
-    Folds in the answer-format hint, the **whole document** (all remembered
-    pages, so page-spanning problems are read correctly), and — in listening
-    mode — the recorded audio's transcript. The current page stays the body_text.
+    Folds in the answer-format hint, ``document_material`` (the pages the
+    caller chose: the problem's own 大問 on the deck path, every remembered
+    page on the compat solve-current path, so page-spanning problems are read
+    correctly), and — in listening mode — the recorded audio's transcript. The
+    current page stays the body_text.
     """
     parts: list[str] = []
     fmt_hint = _ANSWER_FORMAT_HINT.get(session["answer_format"], "")
@@ -2169,6 +2183,39 @@ def _answer_groups(conn, session_id: int) -> list[dict]:
     return groups
 
 
+def _row_page_indexes(row) -> list[int]:
+    """Pages a deck row spans, 0-based. Falls back to its single page_number."""
+    try:
+        span = json.loads(row["structure_json"] or "{}").get("page_indexes") or []
+    except (ValueError, TypeError):
+        span = []
+    span = [i for i in span if isinstance(i, int)]
+    if span:
+        return span
+    page_number = row["page_number"]
+    return [page_number - 1] if page_number else []
+
+
+def _group_page_indexes(conn, session_id: int) -> dict[int, list[int]]:
+    """Per deck row: the pages of its own 大問, for solver context narrowing.
+
+    Every row of a group gets the group's whole page span, so a 小問 still sees
+    the shared passage and any figure page its 大問 started on. A document with
+    no 大問 heading collapses to one group, i.e. the previous whole-document
+    behaviour.
+    """
+    windows: dict[int, list[int]] = {}
+    for group in _answer_groups(conn, session_id):
+        rows = [group["heading"], *group["items"]]
+        pages: set[int] = set()
+        for row in rows:
+            pages.update(_row_page_indexes(row))
+        ordered = sorted(pages)
+        for row in rows:
+            windows[row["id"]] = ordered
+    return windows
+
+
 def _answer_bundle_item(conn, group: dict, row) -> dict:
     sol = _latest_solution_row(conn, row["id"])
     answer = (sol["answer"] or "").strip() if sol is not None else ""
@@ -2461,6 +2508,9 @@ def exam_finalize_reading(session_id: int) -> dict:
         server_solved = 0
         solver_env = (os.environ.get("ROKID_SOLVER") or "").strip()
         if not locked and solver_env and solver_env != "local":
+            # Context is scoped to each problem's own 大問 (plan.md contract 1),
+            # not the whole document: an on-device model prefills every prompt.
+            page_windows = _group_page_indexes(conn, session_id)
             for row in _deck_question_rows(conn, session_id):
                 if _latest_solution_row(conn, row["id"]) is not None:
                     continue
@@ -2473,7 +2523,9 @@ def exam_finalize_reading(session_id: int) -> dict:
                         name=f"solve-claim-{row['id']}",
                     ):
                         start_index = (row["page_number"] or 1) - 1
-                        doc_material = _document_material(conn, doc_id, start_index)
+                        doc_material = _document_material(
+                            conn, doc_id, start_index, page_windows.get(row["id"])
+                        )
                         retrieved = retrieve_context(conn, row["body_text"])
                         context = _exam_prompt_context(
                             session, doc_material, retrieved["context"]

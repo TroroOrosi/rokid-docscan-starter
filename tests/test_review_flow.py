@@ -4,7 +4,7 @@ Covers:
   * POST /finalize-reading — segmentation into problems, status open→reviewing,
     reading ack (no subsequent camera request), idempotency, document requirement,
   * server-side solve-all only when a non-local ROKID_SOLVER is configured
-    (whole document as context; listening transcript folded in),
+    (context scoped to the problem's own 大問; listening transcript folded in),
   * POST /solutions — onboard AI ingest (primary path): deck solved flags,
     served_by, 409 before finalize, unknown problem_no appends, latest wins,
     empty answer rejected,
@@ -1154,3 +1154,31 @@ def test_solve_current_still_works_after_finalize_reading(client):
     r = client.post(f"/v1/exam-sessions/{sid}/solve-current")
     assert r.status_code == 200
     assert r.json()["locked"] is False
+
+
+def test_finalize_reading_scopes_solver_context_to_its_own_group(client, monkeypatch):
+    # An on-device model prefills every prompt, so passing all 20-40 pages per
+    # 小問 costs minutes each. Each problem gets its own 大問's pages only —
+    # including the shared passage the 大問 opened with.
+    _use_recording_solver(monkeypatch)
+    doc_id = _doc_with_text_pages(
+        client,
+        [
+            "第1問 長文: メロスは激怒した。必ずかの邪智暴虐の王を除かねばならぬ。",
+            "問1 前ページの本文の主題を、続きを踏まえて答えよ。",
+            "第2問 次の二次方程式を考える。x^2 - 5x + 6 = 0",
+            "問2 二つの解の和を求めよ。",
+        ],
+    )
+    sid = _new_doc_exam(client, doc_id)["session_id"]
+    r = client.post(f"/v1/exam-sessions/{sid}/finalize-reading")
+    assert r.status_code == 200, r.text
+
+    contexts = {q.question_no: q.context for q in _RecordingSolver.seen}
+    assert set(contexts) == {"第1問", "問1", "第2問", "問2"}
+    for no in ("第1問", "問1"):
+        assert "【P01" in contexts[no] and "【P02" in contexts[no]
+        assert "【P03" not in contexts[no] and "【P04" not in contexts[no]
+    for no in ("第2問", "問2"):
+        assert "【P03" in contexts[no] and "【P04" in contexts[no]
+        assert "【P01" not in contexts[no] and "【P02" not in contexts[no]
