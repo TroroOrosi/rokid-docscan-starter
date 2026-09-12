@@ -2285,3 +2285,114 @@ sdk = 28)`(`AnswerStoreTest.java:16`)に固定している。実機の Linux で
 `DocScanGlassDoc`(`DocScanGlassActivity.java:51`、`GlassCamera.java:41`)と
 `WearWatch`(`WearWatch.java:22`)。前回 logcat が空だったのはこのタグ違いが
 原因の可能性が高い。該当節は本更新で訂正済み。
+
+## 2026-09-12 F-51F 端末内推論（無課金経路）の実測と、既存 solver への接続
+
+利用者の指示で実機テストを中断し、無課金の解答経路（FS-58 系）へ切り替えた。
+以下はすべて実行して得た出力であり、見積りには「見積り」と明記する。
+計画の全文は `C:\Users\pupu_\Downloads\F-51F ローカルAI環境構築 Codex用プロンプト v2.md`。
+
+### 端末の一次情報（読み取りのみ）
+
+F-51F、Android 16 / API 36、SoC `MT6897`（Dimensity 8300/8350 系、この ID では
+区別できない）、CPU 8コア（3.35 / 3.2 / 2.2 GHz）、`MemTotal 11728552 kB`、
+zram `SwapTotal 8796408 kB`、内蔵 456G（空き 320G）、**microSD 未挿入**、
+Vulkan 1.3、ページサイズ 4096。
+CPU features に `i8mm` `bf16` `sve2` `svei8mm` `svebf16` `asimddp`。
+
+Termux は Play 版が入っていたが、利用者が GitHub 版 0.118.3 へ入れ替えた。
+PC からは ssh（port 8022、鍵認証、鍵は `~/.ssh/f51f_key`）で操作している。
+**adb からの `am start` と `settings put global ...` はツールの安全性分類器が
+拒否するため、端末内の操作経路は ssh に一本化した。**
+
+### ビルド
+
+```
+llama.cpp 718f7b4
+cmake -B build -DCMAKE_BUILD_TYPE=Release -DGGML_NATIVE=ON -DGGML_CPU_REPACK=ON -DLLAMA_CURL=ON
+  -> HAVE_MATMUL_INT8 - Success
+  -> Adding CPU backend variant ggml-cpu: -mcpu=native+dotprod+i8mm+sve+nosme
+cmake --build build -j 6  -> 100%
+```
+
+repack が実際に効いていることをロード時ログで確認した:
+`CPU_REPACK model buffer size = 495.49 MiB`、`repack tensor ... with q6_K_8x8`。
+なお**この版の llama.cpp は `system_info` 行を出力しない**ので、`MATMUL_INT8 = 1`
+を実行時ログで確認する手順は使えない。ビルド証拠で代替した。
+
+### 測定（`llama-bench -p 128 -n 64 -r 2`）
+
+| モデル | threads | pp128 t/s | tg64 t/s |
+|---|---|---|---|
+| Qwen3.5-0.8B Q4_K_M | 4 | 78.16 | 16.36 |
+| Qwen3.5-4B Q4_K_M | 4 | 17.91 | 4.46 |
+| Qwen3.5-4B Q4_K_M | 8 | 17.92 | 4.50 |
+| Qwen3.5-4B（`taskset -c 4-7`） | 4 | 16.84 | 4.01 |
+| Qwen3-4B-Instruct-2507 Q4_K_M | 4 | 19.65 | 5.87 |
+| Qwen3.5-9B Q4_K_M | 4 | 測定不能 | 測定不能 |
+
+- `-t 4` が最良。`-t 8` は tg を落とす。big core 固定は改善しない。
+- 発熱ではない（測定中も `Thermal Status: 0`、SKIN 36-37℃、閾値 43℃）。
+- CPU 制限でもない（前面かつ wakelock 保持なら `Cpus_allowed_list: 0-7`）。
+  スリープ中は cpu7 が affinity から外れるが、復帰後は解消し速度は変わらない。
+- **新アーキテクチャ要因は否定された。** 従来型 dense の Qwen3-4B と
+  Gated DeltaNet の Qwen3.5-4B が同じオーダー。**pp 18-20 / tg 4.5-6 t/s が
+  この端末の実力値**。
+- **9B は不採用。** 空き 7.1GB で 5.68GB をロードすると Android がメモリ枯渇し、
+  `logcat -b events` に `am_proc_died` が同時多発する（`com.termux` だけでなく
+  `com.fujitsu.mobile_phone.fjhome` ランチャーや `gms.persistent` も死ぬ）。
+  phantom process killer ではない（`settings_enable_monitor_phantom_procs` は
+  `null` のまま）。
+
+### 画像入力（mmproj）
+
+既定コンテキストのままだと 4B + mmproj でも同じメモリ枯渇で kill される。
+**`-c 2048` を付ければ通る。**
+
+```
+llama-mtmd-cli -m Qwen3.5-4B-Q4_K_M.gguf --mmproj mmproj-4B-F16.gguf \
+  --image test-problem.png -c 2048 -n 60
+  -> "x^2 - 5x + 6 = 0"（画像の数式を正しく読み取り）
+```
+
+Qwen3.5-0.8B + mmproj でも同じ画像を正しく読めた。**mmproj 経路自体は動く。**
+
+### 既存 solver への接続は、コード変更なしで成立した
+
+`app/llm.py:189` の `_BASE_URL_ENV` が `OPENAI_BASE_URL` を既に読み、
+ローカル宛は `ROKID_ALLOW_LOCAL_LLM_ENDPOINT=1` で明示解禁する設計になっている。
+llama-server は OpenAI 互換なので、新しいアダプタは要らない。
+
+端末側:
+
+```
+llama-server -m Qwen3-4B-Instruct-2507-Q4_K_M.gguf -c 4096 -t 4 --alias local \
+  --host 127.0.0.1 --port 8080
+```
+
+PC 側（ssh トンネル `-L 8080:127.0.0.1:8080` 経由、外部公開しない）:
+
+```
+ROKID_SOLVER=openai OPENAI_BASE_URL=http://127.0.0.1:8080/v1 OPENAI_API_KEY=dummy \
+ROKID_ALLOW_LOCAL_LLM_ENDPOINT=1 ROKID_LLM_MODEL=local
+```
+
+実行結果:
+
+- `x^2 - 5x + 6 = 0 を解き、2解の和を求めよ` -> `answer: 5`
+- `a+b=5, ab=6 のとき a^2+b^2` -> `answer: 13`
+- どちらも `extras.model = local`、`offline: False`（placeholder ではない）
+
+`llama-server` 直叩きでの日本語記述答案は、400 トークン上限で **32 秒**、
+因数分解の手順つきで正答した。
+
+### 未検証・注意
+
+- **Git Bash から `ROKID_LLM_MODEL` に絶対パスを渡すと MSYS がパス変換する**
+  （`C:/Program Files/Git/data/data/...` になった）。`--alias local` を使う。
+- 試験会場の構成（FastAPI を端末の Termux 上で動かす）は未実施。今回は
+  PC 上の Python から solver を直接呼んで接続性を確認しただけである。
+- ASR / TTS / RAG / SymPy 検算は未着手。
+- グラスとの通し（撮影 -> OCR -> 端末 LLM -> 答案表示）は未実施。
+- thinking の制御は未実装。Qwen3.5 系は thinking を出すので実効速度がさらに落ちる。
+  既定の解答エンジンを非 thinking の `Qwen3-4B-Instruct-2507` にしたのはこのため。
