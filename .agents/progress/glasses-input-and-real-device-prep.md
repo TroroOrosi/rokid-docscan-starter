@@ -2508,3 +2508,60 @@ py -3.12 -m ruff check .       -> All checks passed!
 戻すこと（現在の答案バンドルは Wi-Fi 前提で計画と矛盾している）、SymPy 検算と RAG、
 FS-62 の物理的な再装着試験、FS-65 が定義する数式・表・作図の表示そのもの。
 `Downloads\...v2.md` は表題が「本筋ではない側道」のままで、改訂が要る。
+
+## 2026-09-12 夜 FS-67 / FS-68 実測 — 9B の不採用を取り消す
+
+いずれも読み取りのみ。ssh（`ssh -i ~/.ssh/f51f_key -p 8022 u0_a26@192.168.0.30`）経由。
+モデルのロードは行っていない。
+
+### FS-68: GGUF metadata（`llama-gguf` のキー一覧＋stdlib のヘッダ読み取り）
+
+| モデル | arch | block_count | KVを持つ層 | head_count_kv | key+value_length | KV/token |
+|---|---|---|---|---|---|---|
+| Qwen3-4B-Instruct-2507 Q4_K_M | qwen3 | 36 | 36 | 8 | 128+128 | 147,456 B = 144 KiB |
+| Qwen3.5-4B Q4_K_M | qwen35 | 32 | **8** | 4 | 256+256 | 32,768 B = 32 KiB |
+| Qwen3.5-9B Q4_K_M | qwen35 | 32 | **8** | 4 | 256+256 | 32,768 B = 32 KiB |
+| Qwen3.5-0.8B Q4_K_M | qwen35 | 24 | 6 | 2 | 256+256 | 12,288 B = 12 KiB |
+
+`qwen35` は `full_attention_interval = 4`。32層のうち8層だけが full attention で KV を持ち、
+残り24層は Gated DeltaNet の定数サイズ状態（`ssm.inner_size 4096` / `ssm.state_size 128` /
+`ssm.conv_kernel 4` / `ssm.group_count 16`、合計おおよそ50MB、コンテキスト長に依存しない）。
+
+**4モデルとも `context_length = 262144`。** `-c` を指定しないと llama.cpp はこれを確保する。
+
+| モデル | 既定 `-c` の KV | 重み（ファイル実サイズ） | 合計 |
+|---|---|---|---|
+| Qwen3-4B-Instruct-2507 | 36.0 GiB | 2.33 GiB | 38.3 GiB |
+| Qwen3.5-9B | 8.0 GiB | 5.29 GiB | 13.3 GiB |
+
+端末の MemTotal は 11.2 GiB。**どちらも搭載メモリを超える。**
+
+**訂正:** 同日昼に記録した「9B はロード時にメモリ枯渇するので不採用」「4B + mmproj は
+`-c 2048` が必須」は、いずれも 9B や mmproj の性質ではなく **`-c` 未指定** が原因である。
+`-c` を与えた場合の必要量は次のとおりで、9B も収まる見込み:
+
+| Qwen3.5-9B | KV | DeltaNet状態 | 重み | 合計 |
+|---|---|---|---|---|
+| `-c 8192` | 0.25 GiB | 約0.05 GiB | 5.29 GiB | 約5.6 GiB |
+| `-c 32768` | 1.00 GiB | 約0.05 GiB | 5.29 GiB | 約6.3 GiB |
+
+測定時点の空き: `free -m` の available = 6359 MiB = 6.21 GiB。**9B の不採用は取り消し、
+`-c 8192` での実ロードを保留中の検証項目に戻す。**
+
+### FS-67: 日本語のトークン化比率（`llama-tokenize`）
+
+`tests/fixtures/answer_forms/cases.json` の全ページ文（日本語の設問文、771文字）を投入:
+
+```
+llama-tokenize -m <model>.gguf -f jp_sample.txt --ids
+  Qwen3-4B-Instruct-2507-Q4_K_M  -> 593 tokens (0.77 tokens/文字)
+  Qwen3.5-4B-Q4_K_M              -> 537 tokens (0.70 tokens/文字)
+```
+
+1ページ1,000文字なら約770トークン、20ページで約15,400トークン。
+
+**未測定:** 実際の試験ページが何文字になるかは分からない。`data/docscan.db` の `pages` は
+0件で、実撮影のページが1枚も残っていない。上の文字数は仮定のままである。
+
+**注意:** prefill の 19.65 t/s は `pp128`（128トークン）での値。16,000トークンでは
+attention の計算量が増えるためこれより遅くなる。同日の「1問13.6分」は楽観側の見積り。
