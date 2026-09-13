@@ -16,6 +16,9 @@ wiring a real model here does not weaken it.
 
 from __future__ import annotations
 
+import re
+import unicodedata
+
 from ..llm import LLMClient, LLMConfigError, clamp01, get_client
 from .base import Question, SolveResult, Solver
 
@@ -76,6 +79,51 @@ _SUBJECT_GUIDANCE = {
 
 def _subject_guidance(subject: str | None) -> str:
     return _SUBJECT_GUIDANCE.get(subject or "", "")
+
+
+# The labels the prompt hands the model, and the inverse reading of an answer.
+# They live together so the two can never drift apart.
+_CIRCLED_DIGITS = "①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳"
+
+
+def choice_label(index: int) -> str:
+    """Label of the index-th choice: A..Z, then plain numbers past 26."""
+    return chr(ord("A") + index) if index < 26 else str(index + 1)
+
+
+def choice_index(answer: str) -> int | None:
+    """0-based index of the choice an answer names, or None when it names none.
+
+    Reads the LEADING label only — "B: text", "3.", "②" — the forms a model
+    answers a labelled question in. An answer that quotes the choice's own text
+    instead returns None and is left alone, and so does a longer digit run like
+    "2000年", which is a value rather than a label.
+    """
+    text = (answer or "").strip()
+    if not text:
+        return None
+    if text[0] in _CIRCLED_DIGITS:
+        return _CIRCLED_DIGITS.index(text[0])
+    letter = re.match(r"([A-Za-z])(?![A-Za-z0-9])", text)
+    if letter:
+        return ord(letter.group(1).upper()) - ord("A")
+    digits = re.match(r"([0-9０-９]{1,2})(?![0-9０-９])", text)
+    if digits:
+        return int(unicodedata.normalize("NFKC", digits.group(1))) - 1
+    return None
+
+
+def choice_out_of_range(answer: str, choices: list[str]) -> bool:
+    """True when the answer names a choice the question does not offer.
+
+    A model that replies "6" to five choices produced an unusable form, not a
+    wrong answer — nothing can be marked against it. Conservative by design: it
+    only fires when a label was actually read.
+    """
+    if not choices:
+        return False
+    index = choice_index(answer)
+    return index is not None and not 0 <= index < len(choices)
 
 
 def _read_image(path: str | None) -> bytes | None:
@@ -172,10 +220,16 @@ def _build_prompt(question: Question) -> str:
     if question.choices:
         lines.append("選択肢/Choices:")
         for i, choice in enumerate(question.choices):
-            label = chr(ord("A") + i) if i < 26 else str(i + 1)
-            lines.append(f"{label}. {choice}")
+            lines.append(f"{choice_label(i)}. {choice}")
+        last = choice_label(len(question.choices) - 1)
+        lines.append(
+            f"解答は上の記号 A〜{last} のいずれかを使う"
+            f"/Answer with one of the labels A-{last}; no other label exists."
+        )
     if question.context:
         lines.append("参考資料/Reference context (from the user's own notes):")
         lines.append(question.context)
+    if question.retry_hint:
+        lines.append(question.retry_hint)
     return "\n".join(lines)
 

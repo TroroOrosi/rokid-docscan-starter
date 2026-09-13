@@ -36,6 +36,10 @@ class Question:
     # Written-answer mode keeps the complete answer and excludes tutorial text.
     # False preserves the existing tutor/overlay API for older clients.
     answer_only: bool = False
+    # Set only by the out-of-range retry: the first answer named a choice label
+    # that does not exist, so the re-ask states the valid labels instead of
+    # sending the identical prompt again.
+    retry_hint: str | None = None
 
 
 @dataclass

@@ -12,12 +12,13 @@ fallback).
 from __future__ import annotations
 
 import os
+from dataclasses import replace
 
 from .. import config
 from ..llm import ADAPTER_PROVIDERS
 from ..provider_registry import ProviderRegistry
 from .base import Solver
-from .llm_adapter import LLMSolver
+from .llm_adapter import LLMSolver, choice_label, choice_out_of_range
 from .local_placeholder import LocalPlaceholderSolver
 
 DEFAULT_SOLVER = "local"
@@ -65,6 +66,37 @@ def _tier_names(tiers: list[str] | None) -> list[str]:
     return names
 
 
+def _choice_retry_hint(question) -> str:
+    last = choice_label(len(question.choices) - 1)
+    return (
+        f"直前の解答は選択肢に無い記号だった。記号 A〜{last} のいずれかだけで答える"
+        f"/The previous answer named a label that does not exist; "
+        f"reply with one of A-{last} only."
+    )
+
+
+def _retry_out_of_range(solver, question, result, max_answer_len: int):
+    """Re-ask the same tier once when the answer named a nonexistent choice.
+
+    Answering "6" to five choices is an unusable form, not a wrong answer, so
+    the tier gets one more attempt with the valid labels spelled out. If the
+    re-ask is no better the first answer is kept and flagged instead of being
+    treated as a tier failure: a label slip must not spend the next (paid) tier
+    or fail a whole answer sheet, and it must not be read as the model being
+    unable to solve the question.
+    """
+    retry = replace(question, retry_hint=_choice_retry_hint(question))
+    try:
+        retried = solver.solve(question=retry, max_answer_len=max_answer_len)
+    except Exception:  # noqa: BLE001 - a failed retry must not lose the answer
+        retried = None
+    if retried is not None and not choice_out_of_range(retried.answer, question.choices):
+        retried.extras["choice_retry"] = "recovered"
+        return retried
+    result.extras["choice_out_of_range"] = True
+    return result
+
+
 def _acceptable(result) -> bool:
     """An answer is usable if the tier didn't flag an error and produced text."""
     if result is None or result.extras.get("error"):
@@ -104,6 +136,8 @@ def solve_with_fallback(
         except Exception:  # noqa: BLE001 - one tier failing must not 500
             skipped.append(f"{name}:error")
             continue
+        if choice_out_of_range(result.answer, question.choices):
+            result = _retry_out_of_range(solver, question, result, max_answer_len)
         last_result = result
         if question.answer_only:
             if result.extras.get("placeholder"):
