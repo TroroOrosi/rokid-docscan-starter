@@ -3018,3 +3018,42 @@ py -3.12 -m ruff check .   -> All checks passed!
 ```
 
 Android は未変更のためビルド未実行。コード変更は `7d88b88` の1件のみで、残りは記録。
+
+## 2026-09-13 夕 範囲外の選択肢記号を1回だけ問い直す経路（次の一手 1 を完了）
+
+引き継ぎ要約の優先順1。国語で1問だけ出た「選択肢に無い 6」への対処。`22e985a`。
+
+**入れた経路。** `solve_with_fallback` は3か所の解答経路（`app/main.py` の 1557 /
+1940 / 2541）がすべて通る唯一の合流点なので、検査と問い直しはそこに1か所だけ置いた。
+
+1. `app/solvers/llm_adapter.py` に `choice_label` / `choice_index` /
+   `choice_out_of_range`。記号の付与と読み取りを同じファイルに置き、両者がずれないようにした。
+2. 読み取りは**先頭の記号だけ**。英字1文字、半角/全角の数字（2桁まで）、丸数字。
+   選択肢の本文をそのまま答えた場合や「2000年」のような値は記号と見なさない（誤検知を避ける）。
+3. 範囲外なら**同じ tier に1回だけ**問い直す。`Question.retry_hint` に有効な記号の範囲を入れ、
+   同じプロンプトを盲目的に再送しない。
+4. プロンプト自体にも記号の範囲を明記した（`解答は上の記号 A〜C のいずれかを使う`）。
+   追加コストは無く、そもそも範囲外を出させないための予防。
+5. 2回目も範囲外なら**最初の解答を残して** `extras["choice_out_of_range"]` を立てる。
+   tier の失敗とは扱わない。記号の誤りで次の有料 tier を消費したり答案全体を失敗させない。
+   **これが「能力不足と混同しない」の実装。**
+
+**残した天井。** `extras` は `fallback_from` と同じくDBに保存しない。よって
+`choice_out_of_range` はセッションの結果には見えるが、後からDBで数えられない。
+保存するなら `solutions` に列が要る。評価（次の一手2）で頻度が問題になったら追加する。
+
+**検証:**
+
+```
+py -3.12 -m pytest -q      -> 487 passed（473 + 新規14）
+py -3.12 -m ruff check .   -> All checks passed!
+```
+
+否定確認: `registry.py` の `_retry_out_of_range` 呼び出しを外すと
+`test_out_of_range_choice_is_retried_once_with_the_valid_labels` と
+`test_persistent_out_of_range_answer_is_kept_and_flagged_not_dropped` が
+`KeyError: 'choice_out_of_range'` で落ちる。
+
+Android は未変更のためビルド未実行。実機での再測定は未実施（この経路はサーバ側のみ）。
+
+**次の一手は引き継ぎ要約の 2 以降。** 優先順1はこの節で完了。
