@@ -12,6 +12,9 @@ from __future__ import annotations
 
 import json
 
+import io
+import itertools
+
 import pytest
 
 from app.solvers import Question
@@ -27,6 +30,19 @@ from app.solvers.chatgpt_web import (
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"fake page image"
 JPEG = b"\xff\xd8\xff" + b"fake page photo"
+
+
+@pytest.fixture(autouse=True)
+def _reset_throttle_streak():
+    """The slow-generation brake is process state; a test must not inherit it.
+
+    Several tests drive the page with a jumping fake clock, which reads as a
+    slow generation. Real runs use the real clock, so only here does the streak
+    need clearing between cases.
+    """
+    chatgpt_web._slow_streak = 0
+    yield
+    chatgpt_web._slow_streak = 0
 
 
 class _Locator:
@@ -48,6 +64,7 @@ class _Locator:
     def set_input_files(self, payload):
         self._page.events.append(("upload", payload))
         self._page.uploads.append(payload)
+        self._page.upload_selectors.append(self._selector)
         # Scripted per attach, so a retry can behave differently from the
         # attempt before it: the retry reuses this same page now.
         if self._page.next_attach_succeeds():
@@ -105,6 +122,7 @@ class _StubPage:
         self.replies = reply_frames
         self.events = []
         self.uploads = []
+        self.upload_selectors = []
         self.thumbnail_script = (
             list(thumbnail_appears) if isinstance(thumbnail_appears, (list, tuple)) else None
         )
@@ -533,3 +551,110 @@ def test_the_last_attempt_accepts_an_unconfirmed_upload_rather_than_losing_the_a
 
     assert reply == "70度"
     assert client.last_image_attached is False
+
+
+def test_an_unconfirmed_upload_costs_no_generation(monkeypatch):
+    """The retry must happen BEFORE the question is asked, not after.
+
+    The first order attached, asked, threw the answer away and asked again, so
+    a thumbnail selector that had moved cost three generations per question.
+    That is the load that got the account rate-limited, so it is pinned here:
+    two upload attempts, exactly one message sent.
+    """
+    monkeypatch.setattr(chatgpt_web, "RETRY_BACKOFF_S", 0)
+    monkeypatch.setattr(chatgpt_web, "UPLOAD_TIMEOUT_S", 0)
+    monkeypatch.setattr(chatgpt_web, "POLL_S", 0)
+    page = _StubPage(["70度", "70度", "70度"], thumbnail_appears=[False, True])
+
+    chatgpt_web.ChatGptWebClient()._ask_with_retries(_OneTabContext(page), "第2問", [PNG])
+
+    assert len([k for k, _ in page.events if k == "upload"]) == 2
+    assert len([k for k, _ in page.events if k == "press"]) == 1, "one question, one message"
+
+
+def test_a_usage_limit_reply_is_never_retried(monkeypatch):
+    """A throttled account is refused in the message body, not by an exception.
+
+    Retrying it opens another chat and asks again, which is how a slowdown
+    turned into a block. It ends the question instead, still as a
+    ChatGptWebError so solve_with_fallback drops to the next tier.
+    """
+    monkeypatch.setattr(chatgpt_web, "POLL_S", 0)
+    monkeypatch.setattr(chatgpt_web, "STABLE_POLLS", 1)
+    monkeypatch.setattr(chatgpt_web, "RETRY_BACKOFF_S", 0)
+    limit = "使用制限に達しました。しばらくしてからもう一度お試しください。"
+    page = _StubPage([limit, limit])
+
+    with pytest.raises(chatgpt_web.ChatGptWebRateLimit):
+        chatgpt_web.ChatGptWebClient()._ask_with_retries(_OneTabContext(page), "第2問", [])
+
+    assert len([k for k, _ in page.events if k == "press"]) == 1, "no retry after a limit"
+    assert isinstance(chatgpt_web.ChatGptWebRateLimit("x"), ChatGptWebError)
+
+
+def test_two_slow_generations_in_a_row_refuse_the_next_send(monkeypatch):
+    """The documented throttle signal is the per-question time, so enforce it.
+
+    Measured before the block: 7-13s clean, then 43s, 48s, 130s while the run
+    kept going. The brake stops the third send rather than leaving it to the
+    operator to notice.
+    """
+    monkeypatch.setattr(chatgpt_web, "SLOW_S", 1)
+    monkeypatch.setattr(chatgpt_web, "SLOW_STREAK", 2)
+    ticks = itertools.count(0, 10)
+
+    def one_slow_solve():
+        return chatgpt_web.send_and_read(
+            _StubPage(["x=2", "x=2"]),
+            "問1",
+            poll_s=0,
+            stable_polls=1,
+            sleep=lambda _s: None,
+            now=lambda: next(ticks),
+        )
+
+    assert one_slow_solve() == "x=2"
+    assert one_slow_solve() == "x=2"
+    with pytest.raises(chatgpt_web.ChatGptWebRateLimit, match="longer than"):
+        one_slow_solve()
+
+
+def test_a_fast_generation_clears_the_slow_streak(monkeypatch):
+    monkeypatch.setattr(chatgpt_web, "SLOW_S", 1)
+    monkeypatch.setattr(chatgpt_web, "SLOW_STREAK", 2)
+    chatgpt_web._slow_streak = 1
+    ticks = itertools.count(0, 0)
+
+    chatgpt_web.send_and_read(
+        _StubPage(["x=2", "x=2"]), "問1", poll_s=0, stable_polls=1,
+        sleep=lambda _s: None, now=lambda: next(ticks),
+    )
+
+    assert chatgpt_web._slow_streak == 0
+
+
+def _real_png(colour: int) -> bytes:
+    from PIL import Image
+
+    buffer = io.BytesIO()
+    Image.new("RGB", (8, 8), (colour, colour, colour)).save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def test_the_pages_can_be_bundled_into_one_pdf_upload(monkeypatch):
+    """Opt-in: one document instead of one upload per page.
+
+    UNVERIFIED against the live page -- this pins our side only: one payload,
+    a PDF through the file input rather than the image-only photo input.
+    """
+    monkeypatch.setattr(chatgpt_web, "BUNDLE_PDF", True)
+    page = _StubPage(["70度"])
+
+    assert chatgpt_web.attach_images(page, [_real_png(10), _real_png(200)]) is True
+
+    (payload,) = page.uploads
+    assert len(payload) == 1, "two pages, one upload"
+    assert payload[0]["name"].endswith(".pdf")
+    assert payload[0]["mimeType"] == "application/pdf"
+    assert payload[0]["buffer"].startswith(b"%PDF")
+    assert page.upload_selectors == [chatgpt_web.FILE_UPLOAD_SEL]

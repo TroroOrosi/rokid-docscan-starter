@@ -23,7 +23,7 @@ from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from PIL import Image, UnidentifiedImageError
 from pydantic import BaseModel
 
@@ -65,6 +65,7 @@ from .matching import (
 )
 from .matching import verdict as match_verdict
 from .overlay import build_overlay
+from .page_pdf import images_to_pdf
 from .retrieval import retrieve_context
 from .solvers import Question
 from .solvers.llm_adapter import paste_prompt
@@ -1914,7 +1915,50 @@ def exam_paste_prompt(session_id: int) -> dict:
             "text": text,
             "url": "https://chatgpt.com/?q=" + urllib.parse.quote(text, safe=""),
             "has_image": bool(page_row["image_path"]),
+            # The phone path's missing half: the prompt could be pasted, but the
+            # pages could not be attached one photo at a time by hand. One PDF
+            # of the whole captured document can.
+            "pages_pdf_url": f"/v1/exam-sessions/{session_id}/pages.pdf",
         }
+    finally:
+        conn.close()
+
+
+@app.get("/v1/exam-sessions/{session_id}/pages.pdf")
+def exam_pages_pdf(session_id: int) -> Response:
+    """Every captured page of this session's document as ONE PDF.
+
+    For the phone path: the operator opens ``paste-prompt``'s ``url`` in the
+    ChatGPT app, attaches this single file once, and asks each question against
+    it. Attaching a dozen photos by hand is the step that does not survive a
+    real session; attaching one file does. Pages keep their reading order.
+
+    Text-only pages are skipped -- they carry nothing an image would add. The
+    solver path is unchanged: it attaches the page images themselves unless
+    ROKID_CHATGPT_BUNDLE_PDF is set.
+    """
+    conn = db.connect()
+    try:
+        session = _exam_session_or_404(conn, session_id)
+        doc_id = _require_document_exam(session)
+        rows = conn.execute(
+            "SELECT image_path FROM pages WHERE document_id = ? ORDER BY page_index",
+            (doc_id,),
+        ).fetchall()
+        images = [
+            Path(row["image_path"]).read_bytes()
+            for row in rows
+            if row["image_path"] and Path(row["image_path"]).exists()
+        ]
+        if not images:
+            raise HTTPException(status_code=404, detail="no page images to bundle")
+        return Response(
+            content=images_to_pdf(images),
+            media_type="application/pdf",
+            headers={
+                "Content-Disposition": f'inline; filename="session{session_id}-pages.pdf"'
+            },
+        )
     finally:
         conn.close()
 

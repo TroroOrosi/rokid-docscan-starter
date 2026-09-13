@@ -148,7 +148,17 @@ from __future__ import annotations
 #        placeholder (4 of 5 long prompts returned it as the answer), and each
 #        question is retried in a fresh chat, an unconfirmed image upload
 #        included. Measured: composer.fill carries 34,205 characters intact.
-APP_VERSION = "0.24.0"
+# 0.25.0: chatgpt-web stops spending generations it does not need. The retry
+#        for an unconfirmed upload now happens BEFORE the question is sent, so
+#        a moved thumbnail selector costs uploads instead of three answers per
+#        question; a reply that is a usage-limit notice ends the question
+#        instead of being retried in yet another new chat; and two generations
+#        in a row slower than ROKID_CHATGPT_SLOW_S (40s, measured throttle
+#        signal: 7-13s clean, degraded to 43/48/130s before the 2026-09-14
+#        block) refuse the next send. ROKID_CHATGPT_BUNDLE_PDF=1 sends the 大問
+#        as one PDF through the file input instead of one image per page;
+#        off by default and UNVERIFIED against the live page.
+APP_VERSION = "0.25.0"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.
@@ -206,7 +216,11 @@ APP_VERSION = "0.24.0"
 #        answer-only prompt text plus a prefilled chatgpt.com link, for solving
 #        by hand in a phone browser. Read-only: it sends nothing, persists no
 #        question and returns no answer to the session. Additive.
-API_VERSION = "1.17.0"
+# 1.18.0: new GET .../pages.pdf — every captured page of the session's document
+#        as one PDF, so the phone path can attach the material once instead of
+#        one photo per page; paste-prompt gains the additive `pages_pdf_url`.
+#        404 when the document is text-only. Additive.
+API_VERSION = "1.18.0"
 
 # Matching algorithm identity. Bump when thresholds or hashing change so a
 # re-index/eval is triggered. Mirrors thresholds in app/matching.py.

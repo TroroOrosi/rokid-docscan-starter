@@ -151,7 +151,7 @@ tests/test_document_exam_api.py       paste-prompt endpoint
 app/config.py README.md requirements.txt app/version.py tests/test_versioning.py
 ```
 
-Versions: `APP 0.24.0`, `API 1.17.0`, `SOLVER_API 1.5.0`.
+Versions: `APP 0.25.0`, `API 1.18.0`, `SOLVER_API 1.5.0`.
 
 ## Operating requirements
 
@@ -212,3 +212,49 @@ clicking `create-new-chat-button`, so a question costs no page load at all.
   the model. A wrong diagram answer should be diagnosed from it first.
 - The API adapters still send a single image; only `chatgpt-web` sends the
   whole page span.
+
+
+## 2026-09-14: the generations this route no longer spends
+
+The account was rate-limited by the harness (see
+[subject-separation-harness.md](subject-separation-harness.md)), but the solver
+was making it worse in three ways. All three are now closed, with stub tests
+(`tests/test_chatgpt_web_solver.py`, 32 of them, offline):
+
+1. **The retry for an unconfirmed upload happened AFTER the question was
+   sent.** It attached, asked, threw the answer away and asked again in a new
+   chat. One moved thumbnail selector therefore cost *three generations per
+   question*. `_ask_with_retries` now attaches, decides, and only then sends:
+   `start_new_chat` -> `attach_images` -> (retry here, free) -> `send_and_read`.
+   Pinned by `test_an_unconfirmed_upload_costs_no_generation`.
+2. **A usage-limit reply was retried like any other bad answer.** ChatGPT
+   refuses a throttled account in the message body, not with an exception, so
+   the loop opened another chat and asked again. `ChatGptWebRateLimit` (a
+   `ChatGptWebError`, so `solve_with_fallback` still degrades) ends the
+   question instead. Markers: `ROKID_CHATGPT_RATE_LIMIT_MARKERS`.
+3. **Nothing acted on the documented throttle signal.** Two generations in a
+   row over `ROKID_CHATGPT_SLOW_S` (40s; measured 7-13s clean, degraded to
+   43/48/130s before the block) now refuse the next send
+   (`ROKID_CHATGPT_SLOW_STREAK=0` disables). The streak is process state, so a
+   sweep script stops itself rather than relying on the operator watching.
+
+`ask_page` still exists with the same signature and behaviour; it is now
+`wait_for_composer` + `attach_images` + `send_and_read` composed.
+
+### Sending the 大問 as one PDF (opt-in, UNVERIFIED)
+
+`ROKID_CHATGPT_BUNDLE_PDF=1` uploads one PDF of every page through
+`input[data-testid="upload-files-input"]` instead of one image per page through
+the photo input (which is `accept="image/*"` and would reject a PDF). Built
+during the rate limit, so **no live run has shown whether a figure survives the
+PDF route**; the image-per-page route is the measured one. Verify with a single
+figure-only question before using it. `app/page_pdf.py` holds the conversion.
+
+### The phone path gained its missing half
+
+`GET /v1/exam-sessions/{id}/pages.pdf` returns the whole captured document as
+one PDF, and `paste-prompt` now carries `pages_pdf_url`. The hand-paste route
+was rejected as the *primary* path and still is; this is for running a session
+without the PC Chrome at all. Attaching a dozen photos by hand is the step that
+does not survive a real session, so the material is one file. `API 1.18.0`,
+`APP 0.25.0`.

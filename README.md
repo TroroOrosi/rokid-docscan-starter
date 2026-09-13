@@ -48,7 +48,7 @@ submodule、AARコピーは不要です。
 CXR-L の実装境界は
 [CXR-L / Global Hi Rokid integration](docs/cxr-l-integration.md)です。
 
-現在のバージョン: **Server APP 0.24.0 / API 1.17.0 / Android client 0.3.16 / Glasses View 1.10.0**。
+現在のバージョン: **Server APP 0.25.0 / API 1.18.0 / Android client 0.3.16 / Glasses View 1.10.0**。
 Solver API 1.3.0は、記入用解答の全文保持・資料不足の分離を行う`answer_only`モードを追加しています。
 
 ---
@@ -86,7 +86,7 @@ rokid-docscan-starter/
 │   ├── explainer.py   # Explainer ポート（ExplainRequest / ExplainResult / ABC）
 │   ├── llm.py         # ★実 AI ブリッジ（openai/gemini/claude、遅延import・注入可）
 │   ├── audio_formats.py # 音声MIME・保存suffix・provider対応の共通定義
-│   ├── version.py     # 各契約バージョン（app 0.24.0 / api 1.17.0 / glasses 1.10.0 ほか）
+│   ├── version.py     # 各契約バージョン（app 0.25.0 / api 1.18.0 / glasses 1.10.0 ほか）
 │   ├── config.py      # 保存先・フィーチャーフラグ（ROKID_* / ANTHROPIC_API_KEY / ROKID_TRANSCRIBER）
 │   ├── transcribe.py  # ★リスニング録音の書き起こし（openai/gemini・未設定時は与値）
 │   ├── db.py          # sqlite3（documents/pages/exam/explain テーブル）
@@ -529,7 +529,23 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 - 連続実行はflakeします（16問連続でアップロード未確認1件、composer操作
   不能1件）。`ROKID_CHATGPT_ATTEMPTS`（既定3）で新しいチャットを開いて
   再試行します。**添付が未確認の場合も再試行対象**です — 図なしで送ると
-  エラーにならず、誤答か `needs_input` になるためです。
+  エラーにならず、誤答か `needs_input` になるためです。ただし再試行の判定は
+  **送信前**に行うため、サムネイル未確認は生成回数を消費しません（旧実装は
+  送信済みの解答を捨てて再質問しており、1問あたり最大3生成でした）。
+- **使用制限への防御**（2026-09-14 にアカウントが制限された経験から）:
+  - 返答が使用制限の通知だった場合は `ChatGptWebRateLimit` で即座に打ち切り、
+    再試行しません（新しいチャットを開いて再質問するのが悪化の原因でした）。
+    検出語は `ROKID_CHATGPT_RATE_LIMIT_MARKERS`（`|` 区切り）で変更できます。
+  - 生成時間が `ROKID_CHATGPT_SLOW_S`（既定40秒）を超えた回が
+    `ROKID_CHATGPT_SLOW_STREAK`（既定2）回続くと、次の送信を拒否します。
+    実測のスロットリング兆候は「正常 7-13秒 → 43秒 → 48秒 → 130秒 → ブロック」
+    でした。`ROKID_CHATGPT_SLOW_STREAK=0` で無効化できます。
+- **複数ページを1つの PDF にまとめて送る**（任意、既定オフ）:
+  `ROKID_CHATGPT_BUNDLE_PDF=1` で大問の全ページを1つの PDF にして
+  `ROKID_CHATGPT_FILE_UPLOAD_SEL`（既定 `input[data-testid="upload-files-input"]`）
+  から送ります。アップロード回数が1回になりますが、**実ページでは未検証**
+  です（制限中に実装したため）。図がPDF経路でも読めるかを1問で確認してから
+  使ってください。画像1枚ずつの経路のみが実測済みです。
 
 注意点:
 
@@ -543,6 +559,29 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
   （API solver と同じ扱い）。添付が確認できたかは解答の
   `extras["image_attached"]` に記録されます。画像経路の確認は
   `py -3.12 -m app.solvers.chatgpt_web "<問題文>" <画像パス>`。
+
+#### スマホの ChatGPT で解く経路（PC の Chrome を使わない）
+
+PC を立ち上げずにスマホだけで回す場合は、自動操作ではなく**貼り付け経路**を
+使います。サーバは解答を受け取らないため HUD は駆動されません（手元で読む
+運用）。
+
+```bash
+# 1問ごと: 貼り付け用の本文と ChatGPT の事前入力リンク
+curl "$BASE/v1/exam-sessions/$SID/paste-prompt"
+# -> {"text": "...", "url": "https://chatgpt.com/?q=...",
+#     "pages_pdf_url": "/v1/exam-sessions/$SID/pages.pdf", ...}
+
+# セッション中1回: 撮影した全ページを1つの PDF で取得し、チャットに添付
+curl -o pages.pdf "$BASE/v1/exam-sessions/$SID/pages.pdf"
+```
+
+- 写真を1枚ずつ手で添付する作業が実運用で破綻する部分なので、**資料は1
+  ファイル**にまとめます。ページは撮影順（reading order）で並びます。
+- 画像を持たないページ（テキストのみ取り込み）は含めません。全ページが
+  テキストのみなら 404 を返します（空の PDF は「図を送った」と誤読されます）。
+- この経路では OCR 本文が `text`、図は PDF 添付という分担になります。図が
+  PDF 経由でどこまで読めるかは**未検証**です。
 - Chrome が未起動・未ログインなら `answer_only` はプレースホルダーに落ちず
   明示的に失敗します。
 

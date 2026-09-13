@@ -36,6 +36,7 @@ import urllib.error
 import urllib.request
 
 from ..llm import extract_json
+from ..page_pdf import images_to_pdf
 from .llm_adapter import LLMSolver, _read_images
 
 # DevTools endpoint of the operator's already-running browser.
@@ -56,6 +57,19 @@ ASSISTANT_SEL = os.environ.get(
 FILE_INPUT_SEL = os.environ.get(
     "ROKID_CHATGPT_FILE_INPUT_SEL", 'input[data-testid="upload-photos-input"]'
 )
+# The photo input only accepts image/*. A bundled PDF has to go through the
+# general file input instead, so it gets its own selector.
+FILE_UPLOAD_SEL = os.environ.get(
+    "ROKID_CHATGPT_FILE_UPLOAD_SEL", 'input[data-testid="upload-files-input"]'
+)
+# Off by default: send one PDF of the whole 大問 instead of one image per page.
+# Fewer uploads per question and one document to read, at the cost of handing
+# the pages to the file reader rather than to vision. UNVERIFIED against the
+# live page -- it was written while the account was rate-limited, so whether a
+# figure survives the PDF route has not been measured. Keep it off until it is.
+BUNDLE_PDF = os.environ.get("ROKID_CHATGPT_BUNDLE_PDF", "0").strip().lower() in {
+    "1", "true", "yes", "on",
+}
 # Verified on the signed-in composer: 0 matches empty, 1 after an upload lands.
 ATTACHMENT_SEL = os.environ.get(
     "ROKID_CHATGPT_ATTACHMENT_SEL", 'form img, [data-testid*="attachment"]'
@@ -92,6 +106,28 @@ READY_TIMEOUT_S = float(os.environ.get("ROKID_CHATGPT_READY_S", "30"))
 # single flake would silently cost that question its answer.
 ATTEMPTS = int(os.environ.get("ROKID_CHATGPT_ATTEMPTS", "3"))
 RETRY_BACKOFF_S = float(os.environ.get("ROKID_CHATGPT_RETRY_S", "5"))
+# A throttled account is refused in the message body, not by an exception, so a
+# retry loop reads it as a bad answer and asks again in yet another new chat.
+# That is how one block became many on 2026-09-14. Any of these in a reply ends
+# the question immediately and is never retried.
+RATE_LIMIT_MARKERS = tuple(
+    m
+    for m in os.environ.get(
+        "ROKID_CHATGPT_RATE_LIMIT_MARKERS",
+        "使用制限|制限に達し|上限に達し|You've reached|usage limit|rate limit|too many requests",
+    ).split("|")
+    if m
+)
+# Measured before that block: a clean solve is 7-13s and it degraded to 43s,
+# 48s, then 130s while the run kept going. Two slow generations in a row are
+# the throttle showing, so the next send is refused instead of feeding it.
+# Set ROKID_CHATGPT_SLOW_STREAK=0 to disable the brake.
+SLOW_S = float(os.environ.get("ROKID_CHATGPT_SLOW_S", "40"))
+SLOW_STREAK = int(os.environ.get("ROKID_CHATGPT_SLOW_STREAK", "2"))
+
+# ponytail: process-global streak. Per-account state if this ever runs in more
+# than one process against one login.
+_slow_streak = 0
 
 
 class ChatGptWebError(RuntimeError):
@@ -99,6 +135,15 @@ class ChatGptWebError(RuntimeError):
 
     ``solve_with_fallback`` catches this and drops to the next tier, so a
     closed browser or a changed page degrades instead of failing the session.
+    """
+
+
+class ChatGptWebRateLimit(ChatGptWebError):
+    """Raised when the account is throttled, or was on its way to being.
+
+    Separate from the base error for one reason: every other failure is worth
+    another attempt, and this one is worth none. Still a ``ChatGptWebError``, so
+    ``solve_with_fallback`` degrades to the next tier rather than failing.
     """
 
 
@@ -132,6 +177,34 @@ def image_payload(image: bytes, *, name: str = "page") -> dict:
     return {"name": f"{name}.{suffix}", "mimeType": mime, "buffer": image}
 
 
+def pdf_payload(images: list[bytes], *, name: str = "pages") -> dict:
+    """Bundle every page into one PDF for ``set_input_files``.
+
+    One upload instead of one per page, and the pages keep their reading order
+    inside a single document. Pillow is already a dependency for the server's
+    own image normalization, so this needs nothing new.
+    """
+    return {
+        "name": f"{name}.pdf",
+        "mimeType": "application/pdf",
+        "buffer": images_to_pdf(images),
+    }
+
+
+def upload_plan(images: list[bytes]) -> tuple[list[dict], str]:
+    """Return what to upload and which input takes it.
+
+    Two shapes: one payload per page through the photo input (the measured
+    route), or one PDF of the whole 大問 through the file input.
+    """
+    if BUNDLE_PDF and images:
+        return [pdf_payload(images)], FILE_UPLOAD_SEL
+    return (
+        [image_payload(data, name=f"page{i + 1:02d}") for i, data in enumerate(images)],
+        FILE_INPUT_SEL,
+    )
+
+
 def attach_images(
     page,
     images: list[bytes],
@@ -162,16 +235,15 @@ def attach_images(
         return False
     timeout_s = UPLOAD_TIMEOUT_S if timeout_s is None else timeout_s
     poll_s = POLL_S if poll_s is None else poll_s
+    payloads, file_input = upload_plan(images)
     thumbnails = page.locator(ATTACHMENT_SEL)
     baseline = thumbnails.count()
-    page.locator(FILE_INPUT_SEL).set_input_files(
-        [image_payload(data, name=f"page{i + 1:02d}") for i, data in enumerate(images)]
-    )
+    page.locator(file_input).set_input_files(payloads)
     # Check before waiting, so an upload that has already landed is never
     # reported unconfirmed just because the budget was small.
     deadline = now() + timeout_s
     while True:
-        if thumbnails.count() >= baseline + len(images):
+        if thumbnails.count() >= baseline + len(payloads):
             return True
         if now() >= deadline:
             return False
@@ -195,7 +267,7 @@ def reuse_page(context):
     return page
 
 
-def start_new_chat(page, *, ready_timeout_s: float | None = None) -> None:
+def start_new_chat(page, *, ready_timeout_s: float | None = None):
     """Clear the composer for the next question without reloading the page.
 
     A fresh thread per question is required -- earlier turns would become
@@ -213,7 +285,53 @@ def start_new_chat(page, *, ready_timeout_s: float | None = None) -> None:
             page.goto(CHAT_URL, wait_until="domcontentloaded")
     except Exception:  # noqa: BLE001 - any click failure is worth one reload
         page.goto(CHAT_URL, wait_until="domcontentloaded")
-    page.locator(COMPOSER_SEL).wait_for(state="visible", timeout=ready_timeout_s * 1000)
+    return wait_for_composer(page, ready_timeout_s=ready_timeout_s)
+
+
+def wait_for_composer(page, *, ready_timeout_s: float | None = None):
+    """Return the composer once it is usable, or say why it is not.
+
+    Kept apart from the sending so the caller can get the page ready, attach
+    the images and only then decide whether the question is worth a message.
+    """
+    ready_timeout_s = READY_TIMEOUT_S if ready_timeout_s is None else ready_timeout_s
+    composer = page.locator(COMPOSER_SEL)
+    try:
+        composer.wait_for(state="visible", timeout=ready_timeout_s * 1000)
+    except Exception as exc:  # noqa: BLE001 - playwright raises its own timeout
+        raise ChatGptWebError(
+            f"composer {COMPOSER_SEL!r} never appeared within {ready_timeout_s:g}s. "
+            "A signed-out chatgpt.com serves a placeholder shell without it: "
+            "check the browser profile is signed in, else retune "
+            "ROKID_CHATGPT_COMPOSER_SEL"
+        ) from exc
+    return composer
+
+
+def check_throttle() -> None:
+    """Refuse to send after a run of slow generations.
+
+    The account's own rate limiting is what stopped this route once. The
+    documented signal is the per-question time, so it is enforced here rather
+    than left to the operator to notice.
+    """
+    if SLOW_STREAK and _slow_streak >= SLOW_STREAK:
+        raise ChatGptWebRateLimit(
+            f"{_slow_streak} generations in a row took longer than {SLOW_S:g}s, which is "
+            "how throttling showed last time. Stopping instead of sending more. "
+            "Let the limit clear, then set ROKID_CHATGPT_SLOW_STREAK=0 to override"
+        )
+
+
+def record_generation(elapsed: float, reply: str) -> None:
+    """Note how the last generation went, and refuse a throttled reply outright."""
+    global _slow_streak
+    if any(marker in reply for marker in RATE_LIMIT_MARKERS):
+        _slow_streak = SLOW_STREAK or 1
+        raise ChatGptWebRateLimit(
+            f"ChatGPT answered with a usage limit instead of an answer: {reply[:120]!r}"
+        )
+    _slow_streak = _slow_streak + 1 if SLOW_S and elapsed > SLOW_S else 0
 
 
 def ask_page(
@@ -238,26 +356,14 @@ def ask_page(
 
     Returns ``(reply_text, attached)``, where ``attached`` is None when there
     were no images and False when the uploads could not all be confirmed.
+
+    This sends whatever it attached. The retry loop uses the three steps below
+    separately, so an upload it is not happy with costs no message at all.
     """
-    # Resolved here, not bound as defaults: the ROKID_CHATGPT_* knobs exist so a
-    # changed page can be retuned, and a default bound at import cannot be.
-    timeout_s = TIMEOUT_S if timeout_s is None else timeout_s
     poll_s = POLL_S if poll_s is None else poll_s
-    stable_polls = STABLE_POLLS if stable_polls is None else stable_polls
     upload_timeout_s = UPLOAD_TIMEOUT_S if upload_timeout_s is None else upload_timeout_s
-    ready_timeout_s = READY_TIMEOUT_S if ready_timeout_s is None else ready_timeout_s
 
-    composer = page.locator(COMPOSER_SEL)
-    try:
-        composer.wait_for(state="visible", timeout=ready_timeout_s * 1000)
-    except Exception as exc:  # noqa: BLE001 - playwright raises its own timeout
-        raise ChatGptWebError(
-            f"composer {COMPOSER_SEL!r} never appeared within {ready_timeout_s:g}s. "
-            "A signed-out chatgpt.com serves a placeholder shell without it: "
-            "check the browser profile is signed in, else retune "
-            "ROKID_CHATGPT_COMPOSER_SEL"
-        ) from exc
-
+    composer = wait_for_composer(page, ready_timeout_s=ready_timeout_s)
     attached: bool | None = None
     if images:
         # After the composer exists but before the text: the upload runs while
@@ -265,7 +371,43 @@ def ask_page(
         attached = attach_images(
             page, images, timeout_s=upload_timeout_s, poll_s=poll_s, sleep=sleep, now=now
         )
+    reply = send_and_read(
+        page,
+        text,
+        composer=composer,
+        timeout_s=timeout_s,
+        poll_s=poll_s,
+        stable_polls=stable_polls,
+        sleep=sleep,
+        now=now,
+    )
+    return reply, attached
 
+
+def send_and_read(
+    page,
+    text: str,
+    *,
+    composer=None,
+    timeout_s: float | None = None,
+    poll_s: float | None = None,
+    stable_polls: int | None = None,
+    sleep=time.sleep,
+    now=time.monotonic,
+) -> str:
+    """Type the prompt, send it, and return the finished reply.
+
+    This is the only place that spends a generation, so the throttle brake sits
+    here rather than in the caller: every path to a message goes through it.
+    """
+    # Resolved here, not bound as defaults: the ROKID_CHATGPT_* knobs exist so a
+    # changed page can be retuned, and a default bound at import cannot be.
+    timeout_s = TIMEOUT_S if timeout_s is None else timeout_s
+    poll_s = POLL_S if poll_s is None else poll_s
+    stable_polls = STABLE_POLLS if stable_polls is None else stable_polls
+
+    check_throttle()
+    composer = page.locator(COMPOSER_SEL) if composer is None else composer
     composer.click()
     # ``fill`` sets a contenteditable's content in one step. Typing it key by
     # key would send the message at the prompt's first newline.
@@ -274,7 +416,8 @@ def ask_page(
 
     replies = page.locator(ASSISTANT_SEL)
     stop_button = page.locator(STOP_SEL)
-    deadline = now() + timeout_s
+    started = now()
+    deadline = started + timeout_s
     previous: str | None = None
     stable = 0
     seen = False
@@ -301,12 +444,14 @@ def ask_page(
             seen = True
             if streaming_started:
                 # Seen streaming, now finished: this is the settled reply.
-                return current.strip(), attached
+                record_generation(now() - started, current)
+                return current.strip()
             # The stop button never appeared at all, so it is missing or has
             # moved. Fall back to text-stability rather than waiting it out.
             stable = stable + 1 if current == previous else 0
             if stable >= stable_polls:
-                return current.strip(), attached
+                record_generation(now() - started, current)
+                return current.strip()
         previous = current
     state = "still streaming" if seen else "no reply appeared"
     raise ChatGptWebError(f"ChatGPT web reply did not finish within {timeout_s:g}s ({state})")
@@ -377,13 +522,24 @@ class ChatGptWebClient:
                 # that needs the wait most.
                 time.sleep(RETRY_BACKOFF_S * (attempt - 1))
             try:
-                start_new_chat(page)
-                reply, attached = ask_page(page, text, images=pages)
+                composer = start_new_chat(page)
+                attached = (
+                    attach_images(page, pages, poll_s=POLL_S) if pages else None
+                )
                 if pages and attached is not True and attempt < ATTEMPTS:
+                    # Decided BEFORE the send. The earlier order asked the
+                    # question, threw the answer away and asked again, so one
+                    # moved thumbnail selector cost three generations a
+                    # question -- the load that got the account limited.
                     last_error = ChatGptWebError("page images never confirmed as attached")
                     continue
+                reply = send_and_read(page, text, composer=composer)
                 self.last_image_attached = attached
                 return reply
+            except ChatGptWebRateLimit:
+                # The one failure no retry helps. Asking again in a new chat is
+                # exactly how a slowdown became a block.
+                raise
             except Exception as exc:  # noqa: BLE001 - playwright raises broadly
                 last_error = exc
                 if attempt >= ATTEMPTS:

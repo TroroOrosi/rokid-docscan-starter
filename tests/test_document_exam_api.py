@@ -481,3 +481,40 @@ def test_paste_prompt_carries_answer_only_rules_and_a_prefilled_url(client):
     # Prefill link is percent-encoded, so the Japanese body survives the URL.
     assert body["url"].startswith("https://chatgpt.com/?q=")
     assert urllib.parse.unquote(body["url"].split("?q=", 1)[1]) == body["text"]
+
+
+def test_pages_pdf_bundles_every_captured_page_into_one_file(client):
+    """The phone path's attachment: one file instead of a photo per page.
+
+    Pasting the prompt into the ChatGPT app was already possible; attaching the
+    pages by hand, one photo at a time, was the step that does not survive a
+    real session.
+    """
+    doc_id = _new_doc(client)
+    for i in range(2):
+        r = client.post(
+            f"/v1/documents/{doc_id}/pages",
+            data={"page_index": i, "ocr_text": f"第{i + 1}問"},
+            files={"image": ("p.png", image_bytes(make_image(seed=i + 1)), "image/png")},
+        )
+        assert r.status_code == 201
+    assert client.post(f"/v1/documents/{doc_id}/finalize").status_code == 200
+    sid = _new_doc_exam(client, doc_id)["session_id"]
+
+    r = client.get(f"/v1/exam-sessions/{sid}/pages.pdf")
+
+    assert r.status_code == 200
+    assert r.headers["content-type"] == "application/pdf"
+    assert r.content.startswith(b"%PDF")
+    assert client.get(f"/v1/exam-sessions/{sid}/paste-prompt").json()["pages_pdf_url"] == (
+        f"/v1/exam-sessions/{sid}/pages.pdf"
+    )
+
+
+def test_pages_pdf_is_404_when_the_document_is_text_only(client):
+    # A camera-free document has nothing to bundle, and an empty PDF would read
+    # as "the figures were attached" when they were not.
+    doc_id = _doc_with_text_pages(client, ["問1 2x+3=7 を解け"])
+    sid = _new_doc_exam(client, doc_id)["session_id"]
+
+    assert client.get(f"/v1/exam-sessions/{sid}/pages.pdf").status_code == 404
