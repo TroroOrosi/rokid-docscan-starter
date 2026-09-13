@@ -48,7 +48,7 @@ submodule、AARコピーは不要です。
 CXR-L の実装境界は
 [CXR-L / Global Hi Rokid integration](docs/cxr-l-integration.md)です。
 
-現在のバージョン: **Server APP 0.23.0 / API 1.17.0 / Android client 0.3.16 / Glasses View 1.10.0**。
+現在のバージョン: **Server APP 0.24.0 / API 1.17.0 / Android client 0.3.16 / Glasses View 1.10.0**。
 Solver API 1.3.0は、記入用解答の全文保持・資料不足の分離を行う`answer_only`モードを追加しています。
 
 ---
@@ -86,7 +86,7 @@ rokid-docscan-starter/
 │   ├── explainer.py   # Explainer ポート（ExplainRequest / ExplainResult / ABC）
 │   ├── llm.py         # ★実 AI ブリッジ（openai/gemini/claude、遅延import・注入可）
 │   ├── audio_formats.py # 音声MIME・保存suffix・provider対応の共通定義
-│   ├── version.py     # 各契約バージョン（app 0.23.0 / api 1.17.0 / glasses 1.10.0 ほか）
+│   ├── version.py     # 各契約バージョン（app 0.24.0 / api 1.17.0 / glasses 1.10.0 ほか）
 │   ├── config.py      # 保存先・フィーチャーフラグ（ROKID_* / ANTHROPIC_API_KEY / ROKID_TRANSCRIBER）
 │   ├── transcribe.py  # ★リスニング録音の書き起こし（openai/gemini・未設定時は与値）
 │   ├── db.py          # sqlite3（documents/pages/exam/explain テーブル）
@@ -519,9 +519,17 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
   `needs_input`（「角a、角bの大きさが不足」）、2枚で `70度` と正答しました。
   ページは1回の `set_input_files` で送るため読み順が保たれます。全ページの
   サムネイルが揃って初めて `image_attached` が true になります。
-- 応答完了は `stop-button` の消滅で判定します（実測 7.89秒、テキスト安定判定
-  8.92秒。約1秒速い）。セレクタが変わった場合はテキスト安定判定に自動で
-  フォールバックします。
+- 応答完了は `stop-button` の消滅で判定します。**このボタンは思考フェーズを
+  含む生成中ずっと存在する**ため、表示されている間は何も確定しません。推論
+  モデルは「思考中」を1秒以上静止表示するので、テキスト安定判定だけだと長文
+  5問中4問でこれを解答として確定していました。安定判定はセレクタ消失時の
+  フォールバックに限定しています。
+- 本文の長さは **34,205字まで欠落なし**を実測（末尾に置いた合言葉が全長で
+  返る）。`composer.fill()` は1回で全量を入れるため途中送信も起きません。
+- 連続実行はflakeします（16問連続でアップロード未確認1件、composer操作
+  不能1件）。`ROKID_CHATGPT_ATTEMPTS`（既定3）で新しいチャットを開いて
+  再試行します。**添付が未確認の場合も再試行対象**です — 図なしで送ると
+  エラーにならず、誤答か `needs_input` になるためです。
 
 注意点:
 

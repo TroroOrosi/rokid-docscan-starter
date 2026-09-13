@@ -84,8 +84,13 @@ ROKID_EXPLAINER = os.environ.get("ROKID_EXPLAINER", "local")
 #                                     input[type=file]: five of those exist and
 #                                     Playwright rejects the ambiguous locator
 #   ROKID_CHATGPT_ATTACHMENT_SEL      upload-finished thumbnail (form img)
-#   ROKID_CHATGPT_STOP_SEL            streaming indicator; its absence ends the
-#                                     wait ~1s earlier than text-stability
+#   ROKID_CHATGPT_STOP_SEL            streaming indicator. It is present for the
+#                                     WHOLE generation including the thinking
+#                                     phase, so nothing on screen is the answer
+#                                     while it exists
+#   ROKID_CHATGPT_UPLOAD_S            default 20 (a confirmed upload took 0.11s)
+#   ROKID_CHATGPT_ATTEMPTS            default 3 tries per question, fresh chat
+#   ROKID_CHATGPT_RETRY_S             default 5, multiplied by the attempt
 #   ROKID_CHATGPT_TIMEOUT_S           default 180
 #   ROKID_CHATGPT_UPLOAD_S            default 60
 #   ROKID_CHATGPT_READY_S             default 30 (composer mount wait)

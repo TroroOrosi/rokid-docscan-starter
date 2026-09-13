@@ -1,7 +1,7 @@
 # Subscription-only GPT route (`ROKID_SOLVER=chatgpt-web`)
 
-Updated 2026-09-13. Branch `agent/group-scoped-solver-context`, HEAD `f576ac1`
-at the time of writing, with the work below **uncommitted in the working tree**.
+Updated 2026-09-14. Branch `agent/group-scoped-solver-context`. The route is
+committed as `cd567f4` (the solver) and `e231b76` (the live-run fixes below).
 
 ## Objective
 
@@ -89,6 +89,19 @@ spans pages, and that the answer-only contract refuses to guess.
 | reply | `[data-message-author-role="assistant"]` | read back fine |
 | streaming | `[data-testid="stop-button"]` | present only while streaming |
 
+### Prompt length (2026-09-13)
+
+`composer.fill()` carries a long 大問 intact. A sentinel placed at the very END
+of the body was returned for every rung, so nothing was truncated:
+
+| body chars | secs | sentinel |
+|---|---|---|
+| 1,115 | 7.4 | yes |
+| 4,265 | 7.8 | yes |
+| 8,465 | 8.5 | yes |
+| 17,033 | 10.4 | yes |
+| 34,205 | 23.9 | yes |
+
 ## Defects found and fixed (each cost a live run to see)
 
 1. **`input[type="file"]` matched FIVE inputs** (`upload-files`,
@@ -105,15 +118,30 @@ spans pages, and that the answer-only contract refuses to guess.
 4. **Only the 大問's starting page image was sent.** `app/main.py` stored
    `primary_image_path` while `structure_json` already held every
    `page_indexes`. Fixed via `_page_image_paths()` + `Question.image_paths`.
-5. **Reply polling cost a fixed 3s** (`1.0s x 3`). Now `0.25s x 4`, and the
-   stop button's disappearance ends the wait first (measured: gone at 7.89s vs
-   text-stable at 8.92s), with text-stability kept as the fallback.
+5. **Reply polling cost a fixed 3s** (`1.0s x 3`). Now `0.25s x 4`.
+6. **The wait ended on a "思考中" placeholder** on 4 of 5 long prompts. The stop
+   button is present for the WHOLE generation, thinking phase included, and the
+   placeholder holds still long enough for text-stability to confirm it. The
+   assistant turn then goes briefly EMPTY before the real text arrives. Nothing
+   visible while the stop button exists may end the wait; stability is now only
+   the fallback for when that selector goes missing. **Do not "optimise" this
+   back** — the earlier 7.89s-vs-8.92s measurement was taken on a short answer
+   with no thinking phase and does not generalise.
+7. **No retry.** Over 16 consecutive solves, one upload never confirmed inside
+   60s and one composer never became clickable inside 30s. `ATTEMPTS`/
+   `RETRY_BACKOFF_S` now retry in a fresh chat, and an unconfirmed upload is
+   itself retryable because sending without the figure does not raise.
+8. **The knobs were bound as default arguments at import**, so `ROKID_CHATGPT_*`
+   could not retune a running call. Resolved per call now.
+9. **The upload wait checked its deadline before looking**, reporting an
+   already-landed upload as unconfirmed on a small budget.
 
-## Changed paths (uncommitted)
+## Changed paths
 
 ```text
 app/solvers/chatgpt_web.py       NEW  solver, client, ask_page, attach_images, _smoke
-tests/test_chatgpt_web_solver.py NEW  21 stub-page tests, no network
+tests/test_chatgpt_web_solver.py NEW  27 stub-page tests, no network
+tests/test_chatgpt_web_live.py   NEW  opt-in live deck check, skips without a browser
 app/solvers/base.py                   Question.image_paths
 app/solvers/llm_adapter.py            _read_images, overridable _complete, paste_prompt
 app/solvers/registry.py               registers chatgpt-web
@@ -123,7 +151,7 @@ tests/test_document_exam_api.py       paste-prompt endpoint
 app/config.py README.md requirements.txt app/version.py tests/test_versioning.py
 ```
 
-Versions: `APP 0.23.0`, `API 1.17.0`, `SOLVER_API 1.5.0`.
+Versions: `APP 0.24.0`, `API 1.17.0`, `SOLVER_API 1.5.0`.
 
 ## Operating requirements
 
@@ -142,8 +170,26 @@ Versions: `APP 0.23.0`, `API 1.17.0`, `SOLVER_API 1.5.0`.
 - `pip install playwright` only. `playwright install` is **not** needed; the
   solver attaches to the real Chrome.
 
+## Rate limiting (2026-09-14) — read before any live run
+
+The account was rate-limited and the user stopped the work. The cause was the
+verification method, not the solver: whole-sweep runs over 16 subjects, re-run
+after every failure, plus separate probes — well over a hundred generations in
+an afternoon. Per-question time had degraded 7-13s -> 43s -> 48s -> 130s before
+the block, and that slowdown was the signal to stop.
+
+Budget rules are in [subject-separation-harness.md](subject-separation-harness.md).
+One or two questions per change. Never re-run a sweep to chase one failure.
+The 27 stub tests are offline and cover everything that does not strictly need
+the real page.
+
+Also fixed on the way in: the route used to `page.goto(CHAT_URL)` once per
+question and again per retry. It now claims one tab and starts each chat by
+clicking `create-new-chat-button`, so a question costs no page load at all.
+
 ## Next steps, in order
 
+0. **Wait for the rate limit to clear.** Do not open a live run before that.
 1. **Send one real 共通テスト subject through the web route end to end.** Not
    yet attempted; every live run so far used synthetic single-problem pages.
 2. **Confirm image/text separation holds for every subject.** The current proof

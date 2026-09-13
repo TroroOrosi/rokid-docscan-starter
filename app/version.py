@@ -144,7 +144,11 @@ from __future__ import annotations
 #        two-page problem whose conditions and figure are on different pages
 #        returned needs_input with one image and the correct answer with both.
 #        Solver -> 1.5.0; API unchanged.
-APP_VERSION = "0.23.0"
+# 0.24.0: chatgpt-web no longer ends its wait on a reasoning model's "思考中"
+#        placeholder (4 of 5 long prompts returned it as the answer), and each
+#        question is retried in a fresh chat, an unconfirmed image upload
+#        included. Measured: composer.fill carries 34,205 characters intact.
+APP_VERSION = "0.24.0"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.

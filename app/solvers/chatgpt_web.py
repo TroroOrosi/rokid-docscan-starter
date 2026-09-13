@@ -63,6 +63,12 @@ ATTACHMENT_SEL = os.environ.get(
 # Present only while a reply streams. Its absence is the fastest honest signal
 # that the answer is finished; text-stability below covers it going missing.
 STOP_SEL = os.environ.get("ROKID_CHATGPT_STOP_SEL", '[data-testid="stop-button"]')
+# Starting the next question is a CLICK, not a page load. Reloading chatgpt.com
+# once per question (and again per retry) hammers the site for no benefit and
+# was measured destabilising the browser partway through a run of subjects.
+NEW_CHAT_SEL = os.environ.get(
+    "ROKID_CHATGPT_NEW_CHAT_SEL", '[data-testid="create-new-chat-button"]'
+)
 # A reply is complete when its text stops growing. Streaming pauses mid-answer,
 # so require several consecutive identical polls rather than a single one.
 # 0.25s x 4 confirms after 1s of silence. The earlier 1.0s x 3 spent 3s waiting
@@ -71,7 +77,10 @@ STOP_SEL = os.environ.get("ROKID_CHATGPT_STOP_SEL", '[data-testid="stop-button"]
 POLL_S = float(os.environ.get("ROKID_CHATGPT_POLL_S", "0.25"))
 STABLE_POLLS = int(os.environ.get("ROKID_CHATGPT_STABLE_POLLS", "4"))
 TIMEOUT_S = float(os.environ.get("ROKID_CHATGPT_TIMEOUT_S", "180"))
-UPLOAD_TIMEOUT_S = float(os.environ.get("ROKID_CHATGPT_UPLOAD_S", "60"))
+# A confirmed upload measured 0.11s. 60s was budgeted before there were
+# retries; with ATTEMPTS on top it made one unattachable question cost 3
+# minutes, which on a deck is worse than a fast retry in a fresh chat.
+UPLOAD_TIMEOUT_S = float(os.environ.get("ROKID_CHATGPT_UPLOAD_S", "20"))
 # chatgpt.com serves a signed-out "lightweight shell" whose DOM has none of the
 # app's controls, and the real composer mounts after the document is loaded.
 # Measured on Chrome 152: domcontentloaded returns ~0.2s, ~0.9s before the app.
@@ -167,6 +176,44 @@ def attach_images(
         if now() >= deadline:
             return False
         sleep(poll_s)
+
+
+def reuse_page(context):
+    """The tab this route works in: an existing chatgpt.com tab, else one new one.
+
+    Opening a tab per question left dozens behind over a deck and reloaded the
+    site every time. One tab is claimed and kept.
+    """
+    for page in context.pages:
+        try:
+            if page.url.startswith(CHAT_URL.rstrip("/")):
+                return page
+        except Exception:  # noqa: BLE001 - a closing page has no url
+            continue
+    page = context.new_page()
+    page.goto(CHAT_URL, wait_until="domcontentloaded")
+    return page
+
+
+def start_new_chat(page, *, ready_timeout_s: float | None = None) -> None:
+    """Clear the composer for the next question without reloading the page.
+
+    A fresh thread per question is required -- earlier turns would become
+    context the grader never saw -- but it does not require a navigation. The
+    sidebar's new-chat control is a client-side route change. Only when the tab
+    is not on chatgpt.com at all, or that control is missing, does this fall
+    back to a real page load.
+    """
+    ready_timeout_s = READY_TIMEOUT_S if ready_timeout_s is None else ready_timeout_s
+    new_chat = page.locator(NEW_CHAT_SEL)
+    try:
+        if page.url.startswith(CHAT_URL.rstrip("/")) and new_chat.count():
+            new_chat.first.click()
+        else:
+            page.goto(CHAT_URL, wait_until="domcontentloaded")
+    except Exception:  # noqa: BLE001 - any click failure is worth one reload
+        page.goto(CHAT_URL, wait_until="domcontentloaded")
+    page.locator(COMPOSER_SEL).wait_for(state="visible", timeout=ready_timeout_s * 1000)
 
 
 def ask_page(
@@ -322,17 +369,15 @@ class ChatGptWebClient:
         thumbnail selector still yields an answer rather than nothing.
         """
         last_error: Exception | None = None
+        page = reuse_page(context)
         for attempt in range(1, ATTEMPTS + 1):
             if attempt > 1:
                 # Backing off at the top covers every way the previous attempt
                 # ended. Retrying a throttled upload immediately is the case
                 # that needs the wait most.
                 time.sleep(RETRY_BACKOFF_S * (attempt - 1))
-            page = context.new_page()
             try:
-                # A fresh chat every time: earlier turns in a reused thread
-                # would become context the grader never saw.
-                page.goto(CHAT_URL, wait_until="domcontentloaded")
+                start_new_chat(page)
                 reply, attached = ask_page(page, text, images=pages)
                 if pages and attached is not True and attempt < ATTEMPTS:
                     last_error = ChatGptWebError("page images never confirmed as attached")
@@ -345,8 +390,6 @@ class ChatGptWebClient:
                     raise ChatGptWebError(
                         f"ChatGPT web failed {ATTEMPTS} times; last: {exc}"
                     ) from exc
-            finally:
-                page.close()
         raise ChatGptWebError(f"ChatGPT web failed {ATTEMPTS} times; last: {last_error}")
 
     def complete_json(

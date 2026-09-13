@@ -48,6 +48,10 @@ class _Locator:
     def set_input_files(self, payload):
         self._page.events.append(("upload", payload))
         self._page.uploads.append(payload)
+        # Scripted per attach, so a retry can behave differently from the
+        # attempt before it: the retry reuses this same page now.
+        if self._page.next_attach_succeeds():
+            self._page.confirmed_files += len(payload) if isinstance(payload, list) else 1
 
     def count(self):
         if self._selector == chatgpt_web.STOP_SEL:
@@ -61,12 +65,17 @@ class _Locator:
         if self._selector == chatgpt_web.ATTACHMENT_SEL:
             # A real chatgpt.com composer already matches the default selector
             # once with nothing attached, so the stub carries that baseline too.
-            uploaded = len(self._page.uploads) if self._page.thumbnail_appears else 0
-            return self._page.thumbnail_baseline + uploaded
+            return self._page.thumbnail_baseline + self._page.confirmed_files
+        if self._selector == chatgpt_web.NEW_CHAT_SEL:
+            return 1
         return len(self._page.replies)
 
     @property
     def last(self):
+        return self
+
+    @property
+    def first(self):
         return self
 
     def inner_text(self):
@@ -89,11 +98,17 @@ class _Keyboard:
 class _StubPage:
     """Minimal stand-in for a Playwright page: the calls ask_page actually makes."""
 
+    url = "https://chatgpt.com/"
+
     def __init__(self, reply_frames, *, thumbnail_appears=True, thumbnail_baseline=1,
                  missing=(), streaming=()):
         self.replies = reply_frames
         self.events = []
         self.uploads = []
+        self.thumbnail_script = (
+            list(thumbnail_appears) if isinstance(thumbnail_appears, (list, tuple)) else None
+        )
+        self.confirmed_files = 0
         self.streaming = list(streaming)
         self.stop_poll = 0
         self.thumbnail_appears = thumbnail_appears
@@ -102,15 +117,19 @@ class _StubPage:
         self.poll = 0
         self.keyboard = _Keyboard(self)
 
-    def locator(self, selector):
-        return _Locator(self, selector)
+    def next_attach_succeeds(self) -> bool:
+        if self.thumbnail_script is None:
+            return self.thumbnail_appears
+        return self.thumbnail_script.pop(0) if self.thumbnail_script else False
 
-    # The retry path opens and closes a page per attempt.
     def goto(self, *args, **kwargs):
         self.events.append(("goto", args[0] if args else ""))
 
     def close(self):
         self.events.append(("close", None))
+
+    def locator(self, selector):
+        return _Locator(self, selector)
 
 
 def _ask(page, text="問1 2x+3=7 を解け", **kw):
@@ -431,51 +450,71 @@ def test_a_pause_inside_the_stream_does_not_end_the_wait():
     assert reply == "解答は 70度"
 
 
-class _FlakyContext:
-    """Hands out stub pages: the scripted ones first, then a good one."""
+class _OneTabContext:
+    """A browser context holding exactly one reusable chatgpt.com tab."""
 
-    def __init__(self, pages):
-        self.queue = list(pages)
-        self.handed = []
+    def __init__(self, page):
+        self.page = page
+        self.pages = [page]
+        self.opened = 0
 
     def new_page(self):
-        page = self.queue.pop(0) if self.queue else _StubPage(["ok", "ok", "ok"])
-        self.handed.append(page)
-        return page
+        self.opened += 1
+        return self.page
 
 
-def test_an_unconfirmed_upload_is_retried_in_a_fresh_chat(monkeypatch):
+def _clicks(page, selector):
+    return [v for kind, v in page.events if kind == "click" and v == selector]
+
+
+def test_a_question_reuses_the_open_tab_instead_of_loading_the_site_again():
+    """Reloading chatgpt.com per question hammers the site for no benefit.
+
+    It was also measured destabilising the browser partway through a run of
+    subjects. A new chat is a click on the sidebar control; the only navigation
+    is the one that opens the tab in the first place.
+    """
+    page = _StubPage(["70度", "70度", "70度"])
+    ctx = _OneTabContext(page)
+
+    chatgpt_web.ChatGptWebClient()._ask_with_retries(ctx, "第2問", [])
+
+    assert ctx.opened == 0, "an already-open chatgpt.com tab must be reused"
+    assert not [k for k, _ in page.events if k == "goto"], "no page load per question"
+    assert _clicks(page, chatgpt_web.NEW_CHAT_SEL), "the next question needs its own chat"
+
+
+def test_an_unconfirmed_upload_is_retried_in_a_new_chat_on_the_same_tab(monkeypatch):
     """Measured over 16 consecutive solves: one upload never confirmed in 60s.
 
     Sending without the figure does not raise -- it answers the wrong question
-    or returns needs_input. That has to be retried, not accepted.
+    or returns needs_input. That has to be retried, in a new chat but the SAME
+    tab, and the retry must not reload the site either.
     """
     monkeypatch.setattr(chatgpt_web, "RETRY_BACKOFF_S", 0)
     monkeypatch.setattr(chatgpt_web, "UPLOAD_TIMEOUT_S", 0)
     monkeypatch.setattr(chatgpt_web, "POLL_S", 0)
-    bad = (_StubPage(["nope", "nope", "nope"], thumbnail_appears=False))
-    good = (_StubPage(["70度", "70度", "70度"]))
-    ctx = _FlakyContext([bad, good])
+    # The first attach never shows a thumbnail; the second one does.
+    page = _StubPage(["70度", "70度", "70度"], thumbnail_appears=[False, True])
     client = chatgpt_web.ChatGptWebClient()
 
-    reply = client._ask_with_retries(ctx, "第2問", [PNG])
+    reply = client._ask_with_retries(_OneTabContext(page), "第2問", [PNG])
 
     assert reply == "70度"
     assert client.last_image_attached is True
-    assert len(ctx.handed) == 2, "the retry must use a fresh chat, not the same one"
+    assert len([k for k, _ in page.events if k == "upload"]) == 2
+    assert len(_clicks(page, chatgpt_web.NEW_CHAT_SEL)) == 2
+    assert not [k for k, _ in page.events if k == "goto"]
 
 
 def test_a_page_that_never_becomes_usable_is_retried_then_reported(monkeypatch):
     monkeypatch.setattr(chatgpt_web, "RETRY_BACKOFF_S", 0)
     monkeypatch.setattr(chatgpt_web, "ATTEMPTS", 2)
     monkeypatch.setattr(chatgpt_web, "READY_TIMEOUT_S", 0)
-    dead = [(_StubPage(["x"], missing={chatgpt_web.COMPOSER_SEL})) for _ in range(2)]
-    ctx = _FlakyContext(dead)
+    page = _StubPage(["x"], missing={chatgpt_web.COMPOSER_SEL})
 
     with pytest.raises(ChatGptWebError, match="failed 2 times"):
-        chatgpt_web.ChatGptWebClient()._ask_with_retries(ctx, "第2問", [])
-
-    assert len(ctx.handed) == 2
+        chatgpt_web.ChatGptWebClient()._ask_with_retries(_OneTabContext(page), "第2問", [])
 
 
 def test_the_last_attempt_accepts_an_unconfirmed_upload_rather_than_losing_the_answer(
@@ -487,13 +526,10 @@ def test_the_last_attempt_accepts_an_unconfirmed_upload_rather_than_losing_the_a
     monkeypatch.setattr(chatgpt_web, "ATTEMPTS", 2)
     monkeypatch.setattr(chatgpt_web, "UPLOAD_TIMEOUT_S", 0)
     monkeypatch.setattr(chatgpt_web, "POLL_S", 0)
-    pages = [
-        (_StubPage(["70度", "70度", "70度"], thumbnail_appears=False))
-        for _ in range(2)
-    ]
+    page = _StubPage(["70度", "70度", "70度"], thumbnail_appears=False)
     client = chatgpt_web.ChatGptWebClient()
 
-    reply = client._ask_with_retries(_FlakyContext(pages), "第2問", [PNG])
+    reply = client._ask_with_retries(_OneTabContext(page), "第2問", [PNG])
 
     assert reply == "70度"
     assert client.last_image_attached is False
