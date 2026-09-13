@@ -139,6 +139,10 @@ on the measured hardware. Unresolved claims remain explicitly unverified.
 
 - `.agents/progress/glasses-input-and-real-device-prep.md` — append-only internal
   work history across several commits; never a current operator contract.
+- `.agents/progress/chatgpt-web-solver.md` — continuation record for the
+  subscription-only `ROKID_SOLVER=chatgpt-web` route: what was measured on the
+  live page, the selectors that were wrong, and the next steps. Internal
+  working state, not an operator contract.
 
 ## Indicator and input boundary
 

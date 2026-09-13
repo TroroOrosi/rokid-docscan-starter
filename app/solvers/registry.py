@@ -18,6 +18,7 @@ from .. import config
 from ..llm import ADAPTER_PROVIDERS
 from ..provider_registry import ProviderRegistry
 from .base import Solver
+from .chatgpt_web import ChatGptWebSolver
 from .llm_adapter import LLMSolver, choice_label, choice_out_of_range
 from .local_placeholder import LocalPlaceholderSolver
 
@@ -180,3 +181,7 @@ register_solver(LocalPlaceholderSolver(), replace=True)
 # key is set; otherwise solve() raises and solve_with_fallback drops to local.
 for _name, _provider in ADAPTER_PROVIDERS:
     register_solver(LLMSolver(name=_name, provider=_provider), replace=True)
+# Subscription-only GPT route: no API key, answers read out of the operator's
+# own signed-in ChatGPT web session over a Chrome debugging port. Only runs
+# when routed to AND that browser is reachable.
+register_solver(ChatGptWebSolver(), replace=True)

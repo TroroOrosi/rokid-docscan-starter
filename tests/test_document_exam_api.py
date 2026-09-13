@@ -14,6 +14,7 @@ All offline: the local placeholder solver answers, no external credentials.
 """
 
 import importlib
+import urllib.parse
 
 import pytest
 from fastapi.testclient import TestClient
@@ -462,3 +463,21 @@ def test_listening_solve_current_folds_in_transcript(client):
     assert r.status_code == 200
     assert r.json()["exam_type"] == "listening"
     assert r.json()["locked"] is False
+
+
+# --- paste-prompt (hand-paste into a chat UI) ---------------------------------
+
+
+def test_paste_prompt_carries_answer_only_rules_and_a_prefilled_url(client):
+    doc_id = _doc_with_text_pages(client, ["問1 2x+3=7 を解け"])
+    sid = _new_doc_exam(client, doc_id)["session_id"]
+
+    body = client.get(f"/v1/exam-sessions/{sid}/paste-prompt").json()
+
+    # The pasted text must carry the answer-sheet-only rule, or the chat
+    # answers like a tutor and the operator copies the wrong thing.
+    assert "only what belongs on" in body["text"].lower()
+    assert "2x+3=7" in body["text"]
+    # Prefill link is percent-encoded, so the Japanese body survives the URL.
+    assert body["url"].startswith("https://chatgpt.com/?q=")
+    assert urllib.parse.unquote(body["url"].split("?q=", 1)[1]) == body["text"]

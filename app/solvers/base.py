@@ -33,6 +33,11 @@ class Question:
     # model sees figures / equations / tables directly (OCR text is imperfect).
     # Optional/last so existing positional construction keeps working.
     image_path: str | None = None
+    # Every page of this question's 大問, in reading order. A 大問 that spans
+    # pages keeps its passage on one page and its figures on another, so a
+    # single starting-page image loses the diagram the question asks about.
+    # `image_path` stays the first/primary page for adapters that take one.
+    image_paths: list[str] = field(default_factory=list)
     # Written-answer mode keeps the complete answer and excludes tutorial text.
     # False preserves the existing tutor/overlay API for older clients.
     answer_only: bool = False

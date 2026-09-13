@@ -136,6 +136,17 @@ def _read_image(path: str | None) -> bytes | None:
         return None
 
 
+def _read_images(question: Question) -> list[bytes]:
+    """Every readable page image of the question's 大問, in reading order.
+
+    Falls back to the single `image_path` so a question built the old way still
+    carries its page. Unreadable paths are skipped rather than failing the
+    solve: a missing page is worse answered than not answered at all.
+    """
+    paths = list(question.image_paths) or ([question.image_path] if question.image_path else [])
+    return [data for data in (_read_image(p) for p in paths) if data]
+
+
 class LLMSolver(Solver):
     offline = False
 
@@ -159,18 +170,29 @@ class LLMSolver(Solver):
         except Exception:  # noqa: BLE001 - a pre-flight probe must not raise
             return False
 
+    def _complete(self, client, *, system: str, prompt: str, question: Question) -> dict:
+        """Call the model. Overridden by adapters that can carry more than one page.
+
+        Vision: attach the captured page image so the model reads figures /
+        equations / tables directly. Falls back to text-only when absent. The
+        API providers take a single image, so this sends the question's primary
+        page; see ChatGptWebSolver for the multi-page case.
+        """
+        return client.complete_json(
+            system=system, prompt=prompt, image=_read_image(question.image_path)
+        )
+
     def solve(self, *, question: Question, max_answer_len: int = 64) -> SolveResult:
         client = get_client(self._client, self.provider)
         if client is None:
             # Unconfigured -> let solve_with_fallback drop to the local solver.
             raise LLMConfigError(f"{self.name} solver requires its provider API key/model")
 
-        # Vision: attach the captured page image so the model reads figures /
-        # equations / tables directly. Falls back to text-only when absent.
-        image = _read_image(question.image_path)
-        data = client.complete_json(
+        data = self._complete(
+            client,
             system=_ANSWER_ONLY_SYSTEM if question.answer_only else _SYSTEM,
-            prompt=_build_prompt(question), image=image
+            prompt=_build_prompt(question),
+            question=question,
         )
         if question.answer_only:
             status = data.get("status", "ready")
@@ -233,3 +255,17 @@ def _build_prompt(question: Question) -> str:
         lines.append(question.retry_hint)
     return "\n".join(lines)
 
+
+
+def paste_prompt(question: Question) -> str:
+    """The answer-only solve rendered as one block of text for a chat UI.
+
+    Wording is the API path's verbatim, so a hand-pasted answer and a solver
+    answer are asked exactly the same question and stay comparable against the
+    measurements already recorded for this prompt.
+    """
+    # ponytail: reuses the JSON-envelope system prompt, so the chat replies with
+    # {"status", "answer", "missing_material"} rather than a bare answer. Split
+    # the constant only if reading raw JSON on the phone proves to be friction --
+    # a separate wording would need its own accuracy measurement.
+    return _ANSWER_ONLY_SYSTEM + "\n\n" + _build_prompt(question)

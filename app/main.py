@@ -17,6 +17,7 @@ import re
 import sqlite3
 import threading
 import time
+import urllib.parse
 import uuid
 from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
@@ -66,6 +67,7 @@ from .matching import verdict as match_verdict
 from .overlay import build_overlay
 from .retrieval import retrieve_context
 from .solvers import Question
+from .solvers.llm_adapter import paste_prompt
 from .solvers.registry import solve_with_fallback
 from .subjects import detect_subject
 from .version import APP_VERSION, HUD_CONTRACT_VERSION, version_info
@@ -1874,6 +1876,49 @@ def exam_current_page(session_id: int) -> dict:
         conn.close()
 
 
+@app.get("/v1/exam-sessions/{session_id}/paste-prompt")
+def exam_paste_prompt(session_id: int) -> dict:
+    """The current page as a prompt to paste into a chat UI by hand.
+
+    The relay opens ``url`` on the phone, which prefills the question in the
+    ChatGPT web UI; the operator sends it and reads the answer on the phone.
+    Nothing is sent from here and no answer comes back into the session, so
+    this path produces no SolveResult and drives no HUD.  Text is OCR only --
+    the page image is not carried, unlike the solver path.
+    """
+    conn = db.connect()
+    try:
+        session = _exam_session_or_404(conn, session_id)
+        doc_id = _require_document_exam(session)
+        page_index = session["current_page_index"]
+        page_row = _exam_page_row(conn, doc_id, page_index)
+
+        material = _page_material(page_row["ocr_text"], page_row["vision_text"])
+        subject, _ = detect_subject(material or page_row["ocr_text"])
+        doc_material = _document_material(conn, doc_id, page_index)
+        retrieved = retrieve_context(conn, material or page_row["ocr_text"])
+        context = _exam_prompt_context(session, doc_material, retrieved["context"])
+
+        text = paste_prompt(
+            Question(
+                body_text=material,
+                subject=subject,
+                context=context,
+                answer_only=True,
+            )
+        )
+        return {
+            "session_id": session_id,
+            "current_page_index": page_index,
+            "subject": subject,
+            "text": text,
+            "url": "https://chatgpt.com/?q=" + urllib.parse.quote(text, safe=""),
+            "has_image": bool(page_row["image_path"]),
+        }
+    finally:
+        conn.close()
+
+
 @app.post("/v1/exam-sessions/{session_id}/solve-current")
 def exam_solve_current(session_id: int) -> dict:
     """Solve the CURRENT page — secondary/compat path (solve-current型).
@@ -2194,6 +2239,24 @@ def _row_page_indexes(row) -> list[int]:
         return span
     page_number = row["page_number"]
     return [page_number - 1] if page_number else []
+
+
+def _page_image_paths(conn, doc_id: int, page_indexes: list[int] | None) -> list[str]:
+    """Stored images for the given pages, in reading order, skipping text-only ones.
+
+    A 大問 that spans pages keeps its passage on one page and its figures on
+    another, so a solver handed only the starting page is asked about a diagram
+    it was never shown.
+    """
+    if not page_indexes:
+        return []
+    rows = conn.execute(
+        "SELECT page_index, image_path FROM pages "
+        f"WHERE document_id = ? AND page_index IN ({','.join('?' * len(page_indexes))})",
+        (doc_id, *page_indexes),
+    ).fetchall()
+    by_index = {r["page_index"]: r["image_path"] for r in rows}
+    return [by_index[i] for i in page_indexes if by_index.get(i)]
 
 
 def _group_page_indexes(conn, session_id: int) -> dict[int, list[int]]:
@@ -2530,6 +2593,7 @@ def exam_finalize_reading(session_id: int) -> dict:
                         context = _exam_prompt_context(
                             session, doc_material, retrieved["context"]
                         )
+                        window = page_windows.get(row["id"]) or _row_page_indexes(row)
                         question = Question(
                             question_no=row["question_no"],
                             body_text=row["body_text"],
@@ -2537,6 +2601,7 @@ def exam_finalize_reading(session_id: int) -> dict:
                             subject=row["subject"],
                             context=context,
                             image_path=row["image_path"],
+                            image_paths=_page_image_paths(conn, doc_id, window),
                         )
                         result, solver = solve_with_fallback(question=question)
                     served_by = result.extras.get("served_by", solver.name)

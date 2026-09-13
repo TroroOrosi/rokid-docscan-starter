@@ -1182,3 +1182,70 @@ def test_finalize_reading_scopes_solver_context_to_its_own_group(client, monkeyp
     for no in ("第2問", "問2"):
         assert "【P03" in contexts[no] and "【P04" in contexts[no]
         assert "【P01" not in contexts[no] and "【P02" not in contexts[no]
+
+
+class _ImageRecordingSolver:
+    """Records every Question the batch solve built (offline, no credentials)."""
+
+    name = "image-recording-test"
+    provider_version = "t-1"
+    offline = False
+    seen: list = []
+
+    def solve(self, *, question, max_answer_len=64):
+        from app.solvers import SolveResult
+
+        _ImageRecordingSolver.seen.append(question)
+        return SolveResult(answer="70度", answer_confidence=0.9)
+
+    def ready(self):
+        return True
+
+    def info(self):
+        return {"name": self.name, "provider_version": self.provider_version,
+                "offline": self.offline, "ready": True}
+
+
+def test_a_daimon_spanning_pages_sends_every_one_of_its_page_images(client, monkeypatch):
+    """The whole 大問's pages must reach the solver, not just its first page.
+
+    A 大問 keeps its conditions on one page and its figure on another. Sending
+    only the starting page asks the model about a diagram it never received.
+    """
+    from app.solvers.registry import register_solver
+
+    _ImageRecordingSolver.seen = []
+    register_solver(_ImageRecordingSolver(), replace=True)
+    monkeypatch.setenv("ROKID_SOLVER", "image-recording-test")
+
+    r = client.post("/v1/documents", json={"title": "模試"})
+    doc_id = r.json()["document_id"]
+    pages = [
+        "第2問 図2において、角aは50度、角bは60度である。",
+        "問1 角xの大きさを求めよ。",
+    ]
+    for i, text in enumerate(pages):
+        r = client.post(
+            f"/v1/documents/{doc_id}/pages",
+            data={"page_index": i, "ocr_text": text},
+            files={"image": (f"p{i}.png", image_bytes(make_image(80, 100)), "image/png")},
+        )
+        assert r.status_code == 201, r.text
+    assert client.post(f"/v1/documents/{doc_id}/finalize").status_code == 200
+
+    sid = _new_doc_exam(client, doc_id)["session_id"]
+    assert client.post(f"/v1/exam-sessions/{sid}/finalize-reading").status_code == 200
+
+    assert _ImageRecordingSolver.seen, "the batch solve never ran"
+    spanning = [q for q in _ImageRecordingSolver.seen if len(q.image_paths) > 1]
+    assert spanning, (
+        "every question carried at most one page image: "
+        f"{[len(q.image_paths) for q in _ImageRecordingSolver.seen]}"
+    )
+    for q in spanning:
+        # Reading order, no duplicates.
+        assert q.image_paths == sorted(set(q.image_paths), key=q.image_paths.index)
+        # The row's own page is in the span. It is NOT necessarily first: a 小問
+        # inherits its 大問's window, which starts on the heading's page, and
+        # that wider span is the whole point of this fix.
+        assert q.image_path in q.image_paths

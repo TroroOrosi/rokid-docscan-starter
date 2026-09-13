@@ -48,7 +48,7 @@ submodule、AARコピーは不要です。
 CXR-L の実装境界は
 [CXR-L / Global Hi Rokid integration](docs/cxr-l-integration.md)です。
 
-現在のバージョン: **Server APP 0.17.0 / API 1.16.0 / Android client 0.3.16 / Glasses View 1.10.0**。
+現在のバージョン: **Server APP 0.23.0 / API 1.17.0 / Android client 0.3.16 / Glasses View 1.10.0**。
 Solver API 1.3.0は、記入用解答の全文保持・資料不足の分離を行う`answer_only`モードを追加しています。
 
 ---
@@ -86,7 +86,7 @@ rokid-docscan-starter/
 │   ├── explainer.py   # Explainer ポート（ExplainRequest / ExplainResult / ABC）
 │   ├── llm.py         # ★実 AI ブリッジ（openai/gemini/claude、遅延import・注入可）
 │   ├── audio_formats.py # 音声MIME・保存suffix・provider対応の共通定義
-│   ├── version.py     # 各契約バージョン（app 0.17.0 / api 1.15.0 / glasses 1.10.0 ほか）
+│   ├── version.py     # 各契約バージョン（app 0.23.0 / api 1.17.0 / glasses 1.10.0 ほか）
 │   ├── config.py      # 保存先・フィーチャーフラグ（ROKID_* / ANTHROPIC_API_KEY / ROKID_TRANSCRIBER）
 │   ├── transcribe.py  # ★リスニング録音の書き起こし（openai/gemini・未設定時は与値）
 │   ├── db.py          # sqlite3（documents/pages/exam/explain テーブル）
@@ -476,8 +476,67 @@ uvicorn app.main:app --port 8000
 | `ROKID_TRANSCRIBER` | （なし） | リスニング録音の書き起こし `openai\|gemini`（未設定=与えた transcript を使用） |
 | `ROKID_TRANSCRIBE_MODEL` | `gpt-4o-transcribe` | openai の書き起こしモデル（gemini は `ROKID_LLM_MODEL`） |
 | `ROKID_SOLVER_TIERS` | （単一） | 二段フォールバック順（例 `openai,local`） |
+| `ROKID_CHATGPT_CDP` | `http://127.0.0.1:9222` | `ROKID_SOLVER=chatgpt-web` 時に接続する Chrome の DevTools ポート |
 | `ROKID_KEYMAP` | （なし） | gesture→KeyCode の上書き（JSON、`/v1/settings.input`。既定 KeyCode は旧機由来・未実測） |
 | `ROKID_API_KEY` | （なし） | 設定時に Bearer 認証（発見系は開放） |
+
+
+### API キー無しの GPT 経路（`ROKID_SOLVER=chatgpt-web`）
+
+サブスクリプションのみで解答させる経路です。サーバがログイン済み Chrome を
+DevTools プロトコル経由で操作し、ChatGPT ウェブ UI に問題文を入力して返答を
+読み取ります。撮影 → OCR → 解答 → HUD までスマホの手動操作は不要です。
+
+```bash
+pip install playwright            # `playwright install` は不要（実 Chrome に接続）
+# 専用プロファイルで Chrome を起動し、そこで ChatGPT に一度ログインしておく
+chrome.exe --remote-debugging-port=9222 --user-data-dir="C:\chrome-rokid-profile"
+
+export ROKID_SOLVER=chatgpt-web
+py -3.12 -m app.solvers.chatgpt_web   # ライブ確認（セレクタが現行 UI に合うか）
+py -3.12 -m app.solvers.chatgpt_web "図の角度を求めよ" data/images/p01.png  # 画像経路も
+uvicorn app.main:app --host 0.0.0.0 --port 8000
+```
+
+実測値（Chrome 152.0.7977.83 / 2026-09-13）と注意点:
+
+- **起動中の Chrome に `--remote-debugging-port` を付けても無効です。** 既存
+  セッションにタブが開くだけでポートは開きません（`既存のブラウザ セッションで
+  開いています` と出て終了）。必ず**専用の `--user-data-dir`** を使います。
+- **ログアウト状態では別 DOM が出ます。** `lightweight-shell` というプレース
+  ホルダーで、composer も `data-testid` も存在しません。専用プロファイルで
+  一度ログインする必要があります（毎問の手動操作は不要）。
+- **実機検証済み**（2026-09-13、ログイン済みセッション）。1問あたり実測
+  **テキストのみ 7.58秒 / 画像付き 8.98秒**。内訳は遷移+composer 2.0秒、
+  添付 0.11秒、残りが生成時間です。ブラウザ接続自体は 0.61秒
+  （playwright 0.23 / CDP 0.03 / 遷移 0.28）で律速ではないため、接続プールは
+  作っていません。
+- 画像到達は、角度が**画像にしか無い**三角形で検証しました（本文は「図の角 x
+  の大きさを求めよ」のみ）。解答 `70°` で正答し、図が OCR を経ずにモデルへ
+  届いていることを確認しています。
+- **大問が複数ページにまたがる場合は全ページを添付します**（`Question.image_paths`）。
+  条件をページ1に、図をページ2に置いた2ページ問題で検証: 1枚のみだと
+  `needs_input`（「角a、角bの大きさが不足」）、2枚で `70度` と正答しました。
+  ページは1回の `set_input_files` で送るため読み順が保たれます。全ページの
+  サムネイルが揃って初めて `image_attached` が true になります。
+- 応答完了は `stop-button` の消滅で判定します（実測 7.89秒、テキスト安定判定
+  8.92秒。約1秒速い）。セレクタが変わった場合はテキスト安定判定に自動で
+  フォールバックします。
+
+注意点:
+
+- **ChatGPT ウェブ UI の自動操作は OpenAI の利用規約に反します。** アカウント
+  停止のリスクを負う経路で、API 経路にはこのリスクはありません。
+- ページ構造は OpenAI のもので予告なく変わります。壊れた場合は
+  `ROKID_CHATGPT_COMPOSER_SEL` / `ROKID_CHATGPT_ASSISTANT_SEL` を再設定します
+  （コード変更は不要）。`py -3.12 -m app.solvers.chatgpt_web` が切り分け用です。
+- **画像とテキストは別パートとして送られます。** ページ画像を添付し、OCR
+  テキストを本文に入力するため、図・グラフ・数式は OCR を経ずに渡ります
+  （API solver と同じ扱い）。添付が確認できたかは解答の
+  `extras["image_attached"]` に記録されます。画像経路の確認は
+  `py -3.12 -m app.solvers.chatgpt_web "<問題文>" <画像パス>`。
+- Chrome が未起動・未ログインなら `answer_only` はプレースホルダーに落ちず
+  明示的に失敗します。
 
 全変数の雛形は [`.env.example`](.env.example)、一覧は
 [user-operation-guide.md](docs/user-operation-guide.md) §7 を参照。

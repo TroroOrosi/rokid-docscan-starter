@@ -15,12 +15,12 @@ def test_version_info_pins_every_contract():
     # simultaneous doc/pin update CLAUDE.md requires (no silent version drift —
     # docs hardcode several of these, e.g. user-operation-guide's JSON block).
     assert version.version_info() == {
-        "app_version": "0.17.0",
-        "api_version": "1.16.0",
+        "app_version": "0.23.0",
+        "api_version": "1.17.0",
         "matcher_version": "1.2.0",
         "hud_contract_version": "1.0.0",
         "analyzer_api_version": "1.0.0",
-        "solver_api_version": "1.3.0",
+        "solver_api_version": "1.5.0",
         "extractor_api_version": "1.0.0",
         "explainer_api_version": "1.1.0",
         "glasses_view_contract_version": "1.10.0",
@@ -46,8 +46,8 @@ def test_contract_versions_reflect_review_and_media_integrity():
     # 1.13.1: decoded image limits consistently return 413 and OpenAI only
     # receives a documented transcription container.
     # 1.16.0: new GET .../answer-bundle serves one complete answer snapshot.
-    assert version.API_VERSION == "1.16.0"
-    assert version.SOLVER_API_VERSION == "1.3.0"
+    assert version.API_VERSION == "1.17.0"
+    assert version.SOLVER_API_VERSION == "1.5.0"
     assert version.EXPLAINER_API_VERSION == "1.1.0"
 
 
