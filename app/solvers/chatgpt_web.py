@@ -77,6 +77,12 @@ UPLOAD_TIMEOUT_S = float(os.environ.get("ROKID_CHATGPT_UPLOAD_S", "60"))
 # Measured on Chrome 152: domcontentloaded returns ~0.2s, ~0.9s before the app.
 # So the composer is waited for, never assumed to be there on arrival.
 READY_TIMEOUT_S = float(os.environ.get("ROKID_CHATGPT_READY_S", "30"))
+# A run of questions back to back is not as reliable as one. Measured over 16
+# consecutive solves: one upload never confirmed inside 60s and one composer
+# never became clickable inside 30s. A 大問 deck is dozens of solves, so a
+# single flake would silently cost that question its answer.
+ATTEMPTS = int(os.environ.get("ROKID_CHATGPT_ATTEMPTS", "3"))
+RETRY_BACKOFF_S = float(os.environ.get("ROKID_CHATGPT_RETRY_S", "5"))
 
 
 class ChatGptWebError(RuntimeError):
@@ -121,8 +127,8 @@ def attach_images(
     page,
     images: list[bytes],
     *,
-    timeout_s: float = UPLOAD_TIMEOUT_S,
-    poll_s: float = POLL_S,
+    timeout_s: float | None = None,
+    poll_s: float | None = None,
     sleep=time.sleep,
     now=time.monotonic,
 ) -> bool:
@@ -145,17 +151,22 @@ def attach_images(
     """
     if not images:
         return False
+    timeout_s = UPLOAD_TIMEOUT_S if timeout_s is None else timeout_s
+    poll_s = POLL_S if poll_s is None else poll_s
     thumbnails = page.locator(ATTACHMENT_SEL)
     baseline = thumbnails.count()
     page.locator(FILE_INPUT_SEL).set_input_files(
         [image_payload(data, name=f"page{i + 1:02d}") for i, data in enumerate(images)]
     )
+    # Check before waiting, so an upload that has already landed is never
+    # reported unconfirmed just because the budget was small.
     deadline = now() + timeout_s
-    while now() < deadline:
+    while True:
         if thumbnails.count() >= baseline + len(images):
             return True
+        if now() >= deadline:
+            return False
         sleep(poll_s)
-    return False
 
 
 def ask_page(
@@ -163,11 +174,11 @@ def ask_page(
     text: str,
     *,
     images: list[bytes] | None = None,
-    timeout_s: float = TIMEOUT_S,
-    poll_s: float = POLL_S,
-    stable_polls: int = STABLE_POLLS,
-    upload_timeout_s: float = UPLOAD_TIMEOUT_S,
-    ready_timeout_s: float = READY_TIMEOUT_S,
+    timeout_s: float | None = None,
+    poll_s: float | None = None,
+    stable_polls: int | None = None,
+    upload_timeout_s: float | None = None,
+    ready_timeout_s: float | None = None,
     sleep=time.sleep,
     now=time.monotonic,
 ) -> tuple[str, bool | None]:
@@ -181,6 +192,14 @@ def ask_page(
     Returns ``(reply_text, attached)``, where ``attached`` is None when there
     were no images and False when the uploads could not all be confirmed.
     """
+    # Resolved here, not bound as defaults: the ROKID_CHATGPT_* knobs exist so a
+    # changed page can be retuned, and a default bound at import cannot be.
+    timeout_s = TIMEOUT_S if timeout_s is None else timeout_s
+    poll_s = POLL_S if poll_s is None else poll_s
+    stable_polls = STABLE_POLLS if stable_polls is None else stable_polls
+    upload_timeout_s = UPLOAD_TIMEOUT_S if upload_timeout_s is None else upload_timeout_s
+    ready_timeout_s = READY_TIMEOUT_S if ready_timeout_s is None else ready_timeout_s
+
     composer = page.locator(COMPOSER_SEL)
     try:
         composer.wait_for(state="visible", timeout=ready_timeout_s * 1000)
@@ -215,17 +234,29 @@ def ask_page(
     streaming_started = False
     while now() < deadline:
         sleep(poll_s)
-        # The stop button exists only while a reply is streaming, so its
-        # disappearance ends the wait a full second before text-stability can.
-        # Measured: stop button gone at 7.89s, text stable at 8.92s. Stability
-        # stays as the fallback for when this selector moves.
+        # The stop button exists for the WHOLE generation, thinking phase
+        # included. While it is there, nothing on screen is the answer: a
+        # reasoning model shows a "思考中" placeholder that holds still for over
+        # a second, and text-stability alone confirmed that placeholder as the
+        # final answer on 4 of 5 measured long prompts. The assistant turn then
+        # goes briefly EMPTY before the real text streams in.
         streaming = bool(stop_button.count())
         streaming_started = streaming_started or streaming
         current = replies.last.inner_text() if replies.count() else ""
+        if streaming:
+            # Anything visible mid-generation is provisional. Drop any
+            # stability credit so a pause inside the stream cannot end the wait.
+            seen = seen or bool(current.strip())
+            stable = 0
+            previous = current
+            continue
         if current.strip():
             seen = True
-            if streaming_started and not streaming:
+            if streaming_started:
+                # Seen streaming, now finished: this is the settled reply.
                 return current.strip(), attached
+            # The stop button never appeared at all, so it is missing or has
+            # moved. Fall back to text-stability rather than waiting it out.
             stable = stable + 1 if current == previous else 0
             if stable >= stable_polls:
                 return current.strip(), attached
@@ -277,18 +308,46 @@ class ChatGptWebClient:
                 ) from exc
             try:
                 context = browser.contexts[0] if browser.contexts else browser.new_context()
-                page = context.new_page()
-                try:
-                    # A fresh chat every time: earlier turns in a reused thread
-                    # would become context the grader never saw.
-                    page.goto(CHAT_URL, wait_until="domcontentloaded")
-                    reply, attached = ask_page(page, f"{system}\n\n{prompt}", images=pages)
-                    self.last_image_attached = attached
-                    return reply
-                finally:
-                    page.close()
+                return self._ask_with_retries(context, f"{system}\n\n{prompt}", pages)
             finally:
                 browser.close()
+
+    def _ask_with_retries(self, context, text: str, pages: list[bytes]) -> str:
+        """One question, retried on a flake, each attempt in its own fresh chat.
+
+        An unconfirmed upload counts as a failure worth retrying: sending the
+        question without its figure does not error, it just answers the wrong
+        question or returns needs_input, which is the expensive kind of wrong.
+        The last attempt's reply is accepted either way, so a permanently moved
+        thumbnail selector still yields an answer rather than nothing.
+        """
+        last_error: Exception | None = None
+        for attempt in range(1, ATTEMPTS + 1):
+            if attempt > 1:
+                # Backing off at the top covers every way the previous attempt
+                # ended. Retrying a throttled upload immediately is the case
+                # that needs the wait most.
+                time.sleep(RETRY_BACKOFF_S * (attempt - 1))
+            page = context.new_page()
+            try:
+                # A fresh chat every time: earlier turns in a reused thread
+                # would become context the grader never saw.
+                page.goto(CHAT_URL, wait_until="domcontentloaded")
+                reply, attached = ask_page(page, text, images=pages)
+                if pages and attached is not True and attempt < ATTEMPTS:
+                    last_error = ChatGptWebError("page images never confirmed as attached")
+                    continue
+                self.last_image_attached = attached
+                return reply
+            except Exception as exc:  # noqa: BLE001 - playwright raises broadly
+                last_error = exc
+                if attempt >= ATTEMPTS:
+                    raise ChatGptWebError(
+                        f"ChatGPT web failed {ATTEMPTS} times; last: {exc}"
+                    ) from exc
+            finally:
+                page.close()
+        raise ChatGptWebError(f"ChatGPT web failed {ATTEMPTS} times; last: {last_error}")
 
     def complete_json(
         self,

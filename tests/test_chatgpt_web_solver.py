@@ -105,6 +105,13 @@ class _StubPage:
     def locator(self, selector):
         return _Locator(self, selector)
 
+    # The retry path opens and closes a page per attempt.
+    def goto(self, *args, **kwargs):
+        self.events.append(("goto", args[0] if args else ""))
+
+    def close(self):
+        self.events.append(("close", None))
+
 
 def _ask(page, text="問1 2x+3=7 を解け", **kw):
     kw.setdefault("sleep", lambda _s: None)
@@ -389,3 +396,104 @@ def test_a_partial_upload_is_not_reported_as_attached():
     # All three went out in ONE set_input_files call, so page order is kept.
     uploads = [payload for kind, payload in page.events if kind == "upload"]
     assert len(uploads) == 1
+
+
+def test_a_thinking_placeholder_is_never_returned_as_the_answer():
+    """Measured failure: 4 of 5 long prompts came back as the literal '思考中'.
+
+    A reasoning model shows that placeholder while the stop button is still
+    present, and it holds still for over a second -- long enough for the
+    text-stability rule to confirm it. Then the turn goes briefly EMPTY before
+    the real answer streams in. Nothing visible while the stop button exists
+    may end the wait.
+    """
+    page = _StubPage(
+        # Exactly the observed sequence: placeholder, blank, then the answer.
+        ["思考中", "思考中", "思考中", "", "", '{"status":"ready","answer":"70度"}'],
+        streaming=[True, True, True, True, True, True, False],
+    )
+
+    reply, _ = ask_page(page, "第1問", poll_s=0, stable_polls=2, sleep=lambda _s: None)
+
+    assert reply == '{"status":"ready","answer":"70度"}'
+
+
+def test_a_pause_inside_the_stream_does_not_end_the_wait():
+    # Streaming stalls mid-answer. The partial text repeats, but the stop
+    # button is still there, so it is not the answer yet.
+    page = _StubPage(
+        ["解答は", "解答は", "解答は", "解答は 70度"],
+        streaming=[True, True, True, True, False],
+    )
+
+    reply, _ = ask_page(page, "第1問", poll_s=0, stable_polls=2, sleep=lambda _s: None)
+
+    assert reply == "解答は 70度"
+
+
+class _FlakyContext:
+    """Hands out stub pages: the scripted ones first, then a good one."""
+
+    def __init__(self, pages):
+        self.queue = list(pages)
+        self.handed = []
+
+    def new_page(self):
+        page = self.queue.pop(0) if self.queue else _StubPage(["ok", "ok", "ok"])
+        self.handed.append(page)
+        return page
+
+
+def test_an_unconfirmed_upload_is_retried_in_a_fresh_chat(monkeypatch):
+    """Measured over 16 consecutive solves: one upload never confirmed in 60s.
+
+    Sending without the figure does not raise -- it answers the wrong question
+    or returns needs_input. That has to be retried, not accepted.
+    """
+    monkeypatch.setattr(chatgpt_web, "RETRY_BACKOFF_S", 0)
+    monkeypatch.setattr(chatgpt_web, "UPLOAD_TIMEOUT_S", 0)
+    monkeypatch.setattr(chatgpt_web, "POLL_S", 0)
+    bad = (_StubPage(["nope", "nope", "nope"], thumbnail_appears=False))
+    good = (_StubPage(["70度", "70度", "70度"]))
+    ctx = _FlakyContext([bad, good])
+    client = chatgpt_web.ChatGptWebClient()
+
+    reply = client._ask_with_retries(ctx, "第2問", [PNG])
+
+    assert reply == "70度"
+    assert client.last_image_attached is True
+    assert len(ctx.handed) == 2, "the retry must use a fresh chat, not the same one"
+
+
+def test_a_page_that_never_becomes_usable_is_retried_then_reported(monkeypatch):
+    monkeypatch.setattr(chatgpt_web, "RETRY_BACKOFF_S", 0)
+    monkeypatch.setattr(chatgpt_web, "ATTEMPTS", 2)
+    monkeypatch.setattr(chatgpt_web, "READY_TIMEOUT_S", 0)
+    dead = [(_StubPage(["x"], missing={chatgpt_web.COMPOSER_SEL})) for _ in range(2)]
+    ctx = _FlakyContext(dead)
+
+    with pytest.raises(ChatGptWebError, match="failed 2 times"):
+        chatgpt_web.ChatGptWebClient()._ask_with_retries(ctx, "第2問", [])
+
+    assert len(ctx.handed) == 2
+
+
+def test_the_last_attempt_accepts_an_unconfirmed_upload_rather_than_losing_the_answer(
+    monkeypatch,
+):
+    # If the thumbnail selector has moved for good, retrying forever helps
+    # nobody. The final attempt returns the reply and records the doubt.
+    monkeypatch.setattr(chatgpt_web, "RETRY_BACKOFF_S", 0)
+    monkeypatch.setattr(chatgpt_web, "ATTEMPTS", 2)
+    monkeypatch.setattr(chatgpt_web, "UPLOAD_TIMEOUT_S", 0)
+    monkeypatch.setattr(chatgpt_web, "POLL_S", 0)
+    pages = [
+        (_StubPage(["70度", "70度", "70度"], thumbnail_appears=False))
+        for _ in range(2)
+    ]
+    client = chatgpt_web.ChatGptWebClient()
+
+    reply = client._ask_with_retries(_FlakyContext(pages), "第2問", [PNG])
+
+    assert reply == "70度"
+    assert client.last_image_attached is False
