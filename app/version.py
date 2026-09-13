@@ -158,7 +158,14 @@ from __future__ import annotations
 #        block) refuse the next send. ROKID_CHATGPT_BUNDLE_PDF=1 sends the 大問
 #        as one PDF through the file input instead of one image per page;
 #        off by default and UNVERIFIED against the live page.
-APP_VERSION = "0.25.0"
+# 0.26.0: chatgpt-web can share ONE chat per 科目 (ROKID_CHATGPT_CHAT_SCOPE=
+#        subject): a deck opens one chat per subject instead of one per 小問,
+#        and a page already attached in that chat is not uploaded again. A
+#        listening session now sends the recording itself alongside the pages
+#        (Question.audio_path -> the general file input; the photo input is
+#        image-only), so intonation, speaker turns and numbers no longer have
+#        to survive the transcript.
+APP_VERSION = "0.26.0"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.
@@ -276,7 +283,10 @@ ANALYZER_API_VERSION = "1.0.0"
 # 1.5.0: Question gained `image_paths` — every page of the question's 大問 in
 #        reading order. `image_path` stays the primary page for adapters that
 #        take one image; multi-page-capable adapters read the list (additive).
-SOLVER_API_VERSION = "1.5.0"
+# 1.6.0: Question gained the optional `audio_path` field, so a listening
+#        question can carry the recording itself and not only its transcript.
+#        Adapters that cannot take audio ignore it (additive/back-compat).
+SOLVER_API_VERSION = "1.6.0"
 
 # Media-extractor plugin interface (formula/figure/graph/table).
 EXTRACTOR_API_VERSION = "1.0.0"

@@ -2025,6 +2025,7 @@ def exam_solve_current(session_id: int) -> dict:
             subject=subject,
             context=context,
             image_path=page_row["image_path"],
+            audio_path=session["audio_path"],
         )
         result, solver = solve_with_fallback(question=question)
         served_by = result.extras.get("served_by", solver.name)
@@ -2646,6 +2647,10 @@ def exam_finalize_reading(session_id: int) -> dict:
                             context=context,
                             image_path=row["image_path"],
                             image_paths=_page_image_paths(conn, doc_id, window),
+                            # Listening: the recording itself, not only its
+                            # transcript. A solver that takes audio hears the
+                            # speaker turns and numbers a transcript flattens.
+                            audio_path=session["audio_path"],
                         )
                         result, solver = solve_with_fallback(question=question)
                     served_by = result.extras.get("served_by", solver.name)

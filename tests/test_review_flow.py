@@ -1249,3 +1249,41 @@ def test_a_daimon_spanning_pages_sends_every_one_of_its_page_images(client, monk
         # inherits its 大問's window, which starts on the heading's page, and
         # that wider span is the whole point of this fix.
         assert q.image_path in q.image_paths
+
+
+def test_a_listening_session_sends_the_recording_itself_not_only_its_transcript(
+    client, monkeypatch
+):
+    """リスニング: the audio file travels with the question, like the pages do.
+
+    A transcript flattens speaker turns, intonation and numbers. The solver
+    decides what to do with the recording -- the API adapters ignore it -- but
+    the server has to put it in the Question or no adapter can ever use it.
+    """
+    from app.solvers.registry import register_solver
+
+    _ImageRecordingSolver.seen = []
+    register_solver(_ImageRecordingSolver(), replace=True)
+    monkeypatch.setenv("ROKID_SOLVER", "image-recording-test")
+
+    doc_id = client.post("/v1/documents", json={"title": "リスニング"}).json()["document_id"]
+    r = client.post(
+        f"/v1/documents/{doc_id}/pages",
+        data={"page_index": 0, "ocr_text": "第1問 放送を聞いて答えよ"},
+        files={"image": ("p0.png", image_bytes(make_image(80, 100)), "image/png")},
+    )
+    assert r.status_code == 201, r.text
+    assert client.post(f"/v1/documents/{doc_id}/finalize").status_code == 200
+    sid = _new_doc_exam(client, doc_id, exam_type="listening")["session_id"]
+    r = client.post(
+        f"/v1/exam-sessions/{sid}/audio",
+        files={"audio": ("rec.mp3", b"ID3 recorded audio", "audio/mpeg")},
+        data={"transcript": "Now listen to the conversation."},
+    )
+    assert r.status_code == 200, r.text
+
+    assert client.post(f"/v1/exam-sessions/{sid}/finalize-reading").status_code == 200
+
+    assert _ImageRecordingSolver.seen, "the batch solve never ran"
+    audio_paths = {q.audio_path for q in _ImageRecordingSolver.seen}
+    assert audio_paths and all(p and p.endswith(".mp3") for p in audio_paths), audio_paths

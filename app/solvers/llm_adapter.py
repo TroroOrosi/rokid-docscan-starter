@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from pathlib import Path
 
 from ..llm import LLMClient, LLMConfigError, clamp01, get_client
 from .base import Question, SolveResult, Solver
@@ -145,6 +146,18 @@ def _read_images(question: Question) -> list[bytes]:
     """
     paths = list(question.image_paths) or ([question.image_path] if question.image_path else [])
     return [data for data in (_read_image(p) for p in paths) if data]
+
+
+def _read_audio(question: Question) -> tuple[str, bytes] | None:
+    """The listening recording as (filename, bytes), or None.
+
+    Unreadable paths are skipped exactly as page images are: a listening
+    question still has its transcript, so losing the recording degrades the
+    answer rather than failing the solve.
+    """
+    path = getattr(question, "audio_path", None)
+    data = _read_image(path)
+    return (Path(path).name, data) if data else None
 
 
 class LLMSolver(Solver):

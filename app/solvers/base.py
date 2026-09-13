@@ -41,6 +41,11 @@ class Question:
     # Written-answer mode keeps the complete answer and excludes tutorial text.
     # False preserves the existing tutor/overlay API for older clients.
     answer_only: bool = False
+    # The listening recording itself, not only its transcript. A solver that
+    # accepts audio hears the intonation, speaker turns and numbers that a
+    # transcript flattens; adapters that cannot take audio ignore this and keep
+    # using the transcript folded into `body_text`/`context`.
+    audio_path: str | None = None
     # Set only by the out-of-range retry: the first answer named a choice label
     # that does not exist, so the re-ask states the valid labels instead of
     # sending the identical prompt again.

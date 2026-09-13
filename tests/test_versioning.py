@@ -15,12 +15,12 @@ def test_version_info_pins_every_contract():
     # simultaneous doc/pin update CLAUDE.md requires (no silent version drift —
     # docs hardcode several of these, e.g. user-operation-guide's JSON block).
     assert version.version_info() == {
-        "app_version": "0.25.0",
+        "app_version": "0.26.0",
         "api_version": "1.18.0",
         "matcher_version": "1.2.0",
         "hud_contract_version": "1.0.0",
         "analyzer_api_version": "1.0.0",
-        "solver_api_version": "1.5.0",
+        "solver_api_version": "1.6.0",
         "extractor_api_version": "1.0.0",
         "explainer_api_version": "1.1.0",
         "glasses_view_contract_version": "1.10.0",
@@ -47,7 +47,7 @@ def test_contract_versions_reflect_review_and_media_integrity():
     # receives a documented transcription container.
     # 1.16.0: new GET .../answer-bundle serves one complete answer snapshot.
     assert version.API_VERSION == "1.18.0"
-    assert version.SOLVER_API_VERSION == "1.5.0"
+    assert version.SOLVER_API_VERSION == "1.6.0"
     assert version.EXPLAINER_API_VERSION == "1.1.0"
 
 

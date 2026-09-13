@@ -295,8 +295,15 @@ class _FakeClient:
         self.seen = {}
         self.last_image_attached = attached
 
-    def complete_json(self, *, system, prompt, image=None, images=None):
-        self.seen = {"system": system, "prompt": prompt, "image": image, "images": images}
+    def complete_json(self, *, system, prompt, image=None, images=None, audio=None, chat_key=None):
+        self.seen = {
+            "system": system,
+            "prompt": prompt,
+            "image": image,
+            "images": images,
+            "audio": audio,
+            "chat_key": chat_key,
+        }
         return json.loads(self.payload)
 
 
@@ -658,3 +665,134 @@ def test_the_pages_can_be_bundled_into_one_pdf_upload(monkeypatch):
     assert payload[0]["mimeType"] == "application/pdf"
     assert payload[0]["buffer"].startswith(b"%PDF")
     assert page.upload_selectors == [chatgpt_web.FILE_UPLOAD_SEL]
+
+
+# --- one chat per 科目 (CHAT_SCOPE="subject") ---------------------------------
+
+
+def test_a_subject_scoped_deck_opens_one_chat_not_one_per_question(monkeypatch):
+    """The final-test shape: 16 subjects, one chat each, not one per 小問."""
+    monkeypatch.setattr(chatgpt_web, "CHAT_SCOPE", "subject")
+    monkeypatch.setattr(chatgpt_web, "POLL_S", 0)
+    page = _StubPage(["70度", "70度"])
+    client = chatgpt_web.ChatGptWebClient()
+    ctx = _OneTabContext(page)
+
+    client._ask_with_retries(ctx, "問1", [], chat_key="subject:数学")
+    client._ask_with_retries(ctx, "問2", [], chat_key="subject:数学")
+
+    assert len(_clicks(page, chatgpt_web.NEW_CHAT_SEL)) == 1, "one chat for the subject"
+    assert len([k for k, _ in page.events if k == "press"]) == 2, "both questions asked"
+
+
+def test_the_next_subject_gets_its_own_chat(monkeypatch):
+    monkeypatch.setattr(chatgpt_web, "CHAT_SCOPE", "subject")
+    monkeypatch.setattr(chatgpt_web, "POLL_S", 0)
+    page = _StubPage(["答", "答"])
+    client = chatgpt_web.ChatGptWebClient()
+    ctx = _OneTabContext(page)
+
+    client._ask_with_retries(ctx, "問1", [], chat_key="subject:数学")
+    client._ask_with_retries(ctx, "問1", [], chat_key="subject:物理")
+
+    assert len(_clicks(page, chatgpt_web.NEW_CHAT_SEL)) == 2
+
+
+def test_a_page_already_in_this_chat_is_not_uploaded_again(monkeypatch):
+    """A 大問 is uploaded once per subject, not once per 小問 of it."""
+    monkeypatch.setattr(chatgpt_web, "CHAT_SCOPE", "subject")
+    monkeypatch.setattr(chatgpt_web, "POLL_S", 0)
+    page = _StubPage(["70度", "70度"])
+    client = chatgpt_web.ChatGptWebClient()
+    ctx = _OneTabContext(page)
+
+    client._ask_with_retries(ctx, "問1", [PNG], chat_key="subject:数学")
+    client._ask_with_retries(ctx, "問2", [PNG], chat_key="subject:数学")
+
+    assert len([k for k, _ in page.events if k == "upload"]) == 1, "uploaded once"
+    assert client.last_image_attached is True, "still in the chat, so still attached"
+
+
+def test_a_question_scoped_run_still_opens_a_chat_per_question(monkeypatch):
+    # The default has to stay the measured behaviour: no answer of an earlier
+    # question becomes context the grader never saw.
+    monkeypatch.setattr(chatgpt_web, "CHAT_SCOPE", "question")
+    monkeypatch.setattr(chatgpt_web, "POLL_S", 0)
+    page = _StubPage(["答", "答"])
+    client = chatgpt_web.ChatGptWebClient()
+    ctx = _OneTabContext(page)
+
+    client._ask_with_retries(ctx, "問1", [], chat_key=None)
+    client._ask_with_retries(ctx, "問2", [], chat_key=None)
+
+    assert len(_clicks(page, chatgpt_web.NEW_CHAT_SEL)) == 2
+
+
+def test_chat_key_follows_the_scope(monkeypatch):
+    question = Question(body_text="問1", subject="数学", answer_only=True)
+    monkeypatch.setattr(chatgpt_web, "CHAT_SCOPE", "question")
+    assert chatgpt_web.chat_key_for(question) is None
+    monkeypatch.setattr(chatgpt_web, "CHAT_SCOPE", "subject")
+    assert chatgpt_web.chat_key_for(question) == "subject:数学"
+    assert chatgpt_web.chat_key_for(Question(body_text="問1")) == "subject:unknown"
+
+
+# --- listening: the recording travels with the pages -------------------------
+
+
+def test_a_listening_recording_is_attached_alongside_the_pages():
+    """A listening 大問 is the audio AND the question booklet, in one message.
+
+    The transcript alone flattens speaker turns and numbers, so the recording
+    goes too. It cannot use the photo input (accept="image/*"), so it takes the
+    general file input while the pages keep theirs.
+    """
+    page = _StubPage(["答"])
+
+    assert chatgpt_web.attach_images(page, [PNG], audio=("rec.mp3", b"ID3rec")) is True
+
+    assert page.upload_selectors == [chatgpt_web.FILE_INPUT_SEL, chatgpt_web.FILE_UPLOAD_SEL]
+    assert page.uploads[1][0]["mimeType"] == "audio/mpeg"
+    assert page.uploads[1][0]["name"] == "rec.mp3"
+
+
+def test_an_audio_only_question_still_attaches():
+    page = _StubPage(["答"])
+
+    assert chatgpt_web.attach_images(page, [], audio=("rec.m4a", b"m4a")) is True
+
+    assert page.upload_selectors == [chatgpt_web.FILE_UPLOAD_SEL]
+    assert page.uploads[0][0]["mimeType"] == "audio/mp4"
+
+
+def test_the_recording_reaches_the_solver_from_the_question(tmp_path):
+    recording = tmp_path / "listening.mp3"
+    recording.write_bytes(b"ID3 recorded")
+    client = _FakeClient('{"status":"ready","answer":"②"}', attached=True)
+
+    ChatGptWebSolver(client=client).solve(
+        question=Question(
+            body_text="問1 放送を聞いて答えよ",
+            subject="英語",
+            audio_path=str(recording),
+            answer_only=True,
+        )
+    )
+
+    assert client.seen["audio"] == ("listening.mp3", b"ID3 recorded")
+
+
+def test_an_unreadable_recording_does_not_fail_the_solve(tmp_path):
+    # The transcript is still in the prompt, so a missing file degrades the
+    # answer rather than losing it.
+    client = _FakeClient('{"status":"ready","answer":"②"}')
+
+    result = ChatGptWebSolver(client=client).solve(
+        question=Question(
+            body_text="問1", subject="英語", audio_path=str(tmp_path / "gone.mp3"),
+            answer_only=True,
+        )
+    )
+
+    assert client.seen["audio"] is None
+    assert result.answer == "②"

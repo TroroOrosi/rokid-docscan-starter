@@ -29,6 +29,7 @@ attachment and does not survive OCR.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import time
@@ -37,7 +38,7 @@ import urllib.request
 
 from ..llm import extract_json
 from ..page_pdf import images_to_pdf
-from .llm_adapter import LLMSolver, _read_images
+from .llm_adapter import LLMSolver, _read_audio, _read_images
 
 # DevTools endpoint of the operator's already-running browser.
 CDP_ENDPOINT = os.environ.get("ROKID_CHATGPT_CDP", "http://127.0.0.1:9222")
@@ -104,6 +105,12 @@ READY_TIMEOUT_S = float(os.environ.get("ROKID_CHATGPT_READY_S", "30"))
 # consecutive solves: one upload never confirmed inside 60s and one composer
 # never became clickable inside 30s. A 大問 deck is dozens of solves, so a
 # single flake would silently cost that question its answer.
+# How much of a session shares one chat. "question" opens a fresh chat for every
+# question, which is what keeps an earlier answer from becoming context the
+# grader never saw. "subject" keeps one chat per 科目 for a whole deck: far
+# fewer chats, and a page attached once stays attached for the rest of that
+# subject, so a 大問 is uploaded once instead of once per 小問.
+CHAT_SCOPE = os.environ.get("ROKID_CHATGPT_CHAT_SCOPE", "question").strip().lower()
 ATTEMPTS = int(os.environ.get("ROKID_CHATGPT_ATTEMPTS", "3"))
 RETRY_BACKOFF_S = float(os.environ.get("ROKID_CHATGPT_RETRY_S", "5"))
 # A throttled account is refused in the message body, not by an exception, so a
@@ -177,6 +184,11 @@ def image_payload(image: bytes, *, name: str = "page") -> dict:
     return {"name": f"{name}.{suffix}", "mimeType": mime, "buffer": image}
 
 
+def _digest(image: bytes) -> str:
+    """Identify a page by its bytes, so the same page is not uploaded twice."""
+    return hashlib.sha256(image).hexdigest()
+
+
 def pdf_payload(images: list[bytes], *, name: str = "pages") -> dict:
     """Bundle every page into one PDF for ``set_input_files``.
 
@@ -191,24 +203,59 @@ def pdf_payload(images: list[bytes], *, name: str = "pages") -> dict:
     }
 
 
-def upload_plan(images: list[bytes]) -> tuple[list[dict], str]:
-    """Return what to upload and which input takes it.
+AUDIO_MIME = {
+    ".mp3": "audio/mpeg",
+    ".m4a": "audio/mp4",
+    ".mp4": "audio/mp4",
+    ".wav": "audio/wav",
+    ".ogg": "audio/ogg",
+    ".webm": "audio/webm",
+    ".flac": "audio/flac",
+    ".aac": "audio/aac",
+}
 
-    Two shapes: one payload per page through the photo input (the measured
-    route), or one PDF of the whole 大問 through the file input.
+
+def audio_payload(name: str, data: bytes) -> dict:
+    """Describe a listening recording for ``set_input_files``.
+
+    The type comes from the suffix the server already validated on upload
+    (``app/audio_formats.py``); an unknown one is sent as mpeg rather than
+    dropped, because a rejected upload is visible and a missing one is not.
     """
-    if BUNDLE_PDF and images:
-        return [pdf_payload(images)], FILE_UPLOAD_SEL
-    return (
-        [image_payload(data, name=f"page{i + 1:02d}") for i, data in enumerate(images)],
-        FILE_INPUT_SEL,
-    )
+    suffix = ("." + name.rsplit(".", 1)[-1].lower()) if "." in name else ""
+    return {"name": name, "mimeType": AUDIO_MIME.get(suffix, "audio/mpeg"), "buffer": data}
+
+
+def upload_plan(
+    images: list[bytes], audio: tuple[str, bytes] | None = None
+) -> list[tuple[str, list[dict]]]:
+    """What to upload, and which input takes each part.
+
+    Pages go through the photo input (``accept="image/*"``) one per page, or as
+    a single PDF through the general file input when BUNDLE_PDF is set. A
+    listening recording always goes through the general file input: the photo
+    input would reject it. Both travel with the same message, which is the
+    point -- a listening 大問 is the audio AND the question booklet.
+    """
+    plan: list[tuple[str, list[dict]]] = []
+    if images:
+        if BUNDLE_PDF:
+            plan.append((FILE_UPLOAD_SEL, [pdf_payload(images)]))
+        else:
+            plan.append((
+                FILE_INPUT_SEL,
+                [image_payload(d, name=f"page{i + 1:02d}") for i, d in enumerate(images)],
+            ))
+    if audio:
+        plan.append((FILE_UPLOAD_SEL, [audio_payload(*audio)]))
+    return plan
 
 
 def attach_images(
     page,
     images: list[bytes],
     *,
+    audio: tuple[str, bytes] | None = None,
     timeout_s: float | None = None,
     poll_s: float | None = None,
     sleep=time.sleep,
@@ -231,19 +278,21 @@ def attach_images(
     and losing the whole answer over an unconfirmed preview is worse than
     sending and recording that it was unconfirmed.
     """
-    if not images:
+    plan = upload_plan(images, audio)
+    if not plan:
         return False
     timeout_s = UPLOAD_TIMEOUT_S if timeout_s is None else timeout_s
     poll_s = POLL_S if poll_s is None else poll_s
-    payloads, file_input = upload_plan(images)
+    expected = sum(len(payloads) for _, payloads in plan)
     thumbnails = page.locator(ATTACHMENT_SEL)
     baseline = thumbnails.count()
-    page.locator(file_input).set_input_files(payloads)
+    for file_input, payloads in plan:
+        page.locator(file_input).set_input_files(payloads)
     # Check before waiting, so an upload that has already landed is never
     # reported unconfirmed just because the budget was small.
     deadline = now() + timeout_s
     while True:
-        if thumbnails.count() >= baseline + len(payloads):
+        if thumbnails.count() >= baseline + expected:
             return True
         if now() >= deadline:
             return False
@@ -472,6 +521,12 @@ class ChatGptWebClient:
         #: the thumbnail never appeared, None when there was no image. Read by
         #: the solver so an unconfirmed figure is recorded, not assumed.
         self.last_image_attached: bool | None = None
+        #: Which chat the open tab is currently in, under CHAT_SCOPE="subject".
+        #: None means "start a fresh chat for this question".
+        self._chat_key: str | None = None
+        #: Digests of the pages already attached inside that chat, so a 大問 is
+        #: uploaded once per subject rather than once per 小問.
+        self._attached_in_chat: set[str] = set()
 
     def complete(
         self,
@@ -480,6 +535,8 @@ class ChatGptWebClient:
         prompt: str,
         image: bytes | None = None,
         images: list[bytes] | None = None,
+        audio: tuple[str, bytes] | None = None,
+        chat_key: str | None = None,
     ) -> str:
         # `image` keeps the single-page LLMClient shape; `images` carries a 大問
         # that spans pages. Either way the pages travel as attachments and the
@@ -504,7 +561,15 @@ class ChatGptWebClient:
             finally:
                 browser.close()
 
-    def _ask_with_retries(self, context, text: str, pages: list[bytes]) -> str:
+    def _ask_with_retries(
+        self,
+        context,
+        text: str,
+        pages: list[bytes],
+        *,
+        audio: tuple[str, bytes] | None = None,
+        chat_key: str | None = None,
+    ) -> str:
         """One question, retried on a flake, each attempt in its own fresh chat.
 
         An unconfirmed upload counts as a failure worth retrying: sending the
@@ -522,11 +587,32 @@ class ChatGptWebClient:
                 # that needs the wait most.
                 time.sleep(RETRY_BACKOFF_S * (attempt - 1))
             try:
-                composer = start_new_chat(page)
-                attached = (
-                    attach_images(page, pages, poll_s=POLL_S) if pages else None
+                if chat_key is None or chat_key != self._chat_key:
+                    # A new question (or a new subject) gets its own chat. Under
+                    # CHAT_SCOPE="subject" a retry stays in the chat it is
+                    # already in: opening another one per attempt is what filled
+                    # the sidebar and the rate limit.
+                    composer = start_new_chat(page)
+                    self._chat_key = chat_key
+                    self._attached_in_chat.clear()
+                else:
+                    composer = wait_for_composer(page)
+                pending = [p for p in pages if _digest(p) not in self._attached_in_chat]
+                # The recording is one more attachment on the same message, and
+                # it is deduplicated the same way: a listening 大問 uploads its
+                # audio once per chat, not once per 小問.
+                pending_audio = (
+                    audio if audio and _digest(audio[1]) not in self._attached_in_chat else None
                 )
-                if pages and attached is not True and attempt < ATTEMPTS:
+                attached = (
+                    attach_images(page, pending, audio=pending_audio, poll_s=POLL_S)
+                    if (pending or pending_audio)
+                    else None
+                )
+                if (pages or audio) and not (pending or pending_audio):
+                    # Already in this chat from an earlier 小問 of the same 大問.
+                    attached = True
+                if (pages or audio) and attached is not True and attempt < ATTEMPTS:
                     # Decided BEFORE the send. The earlier order asked the
                     # question, threw the answer away and asked again, so one
                     # moved thumbnail selector cost three generations a
@@ -534,6 +620,9 @@ class ChatGptWebClient:
                     last_error = ChatGptWebError("page images never confirmed as attached")
                     continue
                 reply = send_and_read(page, text, composer=composer)
+                self._attached_in_chat.update(_digest(p) for p in pending)
+                if pending_audio:
+                    self._attached_in_chat.add(_digest(pending_audio[1]))
                 self.last_image_attached = attached
                 return reply
             except ChatGptWebRateLimit:
@@ -555,10 +644,32 @@ class ChatGptWebClient:
         prompt: str,
         image: bytes | None = None,
         images: list[bytes] | None = None,
+        audio: tuple[str, bytes] | None = None,
+        chat_key: str | None = None,
     ) -> dict:
         return extract_json(
-            self.complete(system=system, prompt=prompt, image=image, images=images)
+            self.complete(
+                system=system,
+                prompt=prompt,
+                image=image,
+                images=images,
+                audio=audio,
+                chat_key=chat_key,
+            )
         )
+
+
+def chat_key_for(question) -> str | None:
+    """Which chat this question belongs in, or None for one chat per question.
+
+    Under CHAT_SCOPE="subject" a whole 科目 shares one chat: the deck opens 16
+    chats instead of one per 小問, and the 大問's pages are uploaded once. The
+    cost is that earlier answers in that subject are context the grader never
+    saw, which is why it is not the default.
+    """
+    if CHAT_SCOPE == "subject":
+        return f"subject:{getattr(question, 'subject', None) or 'unknown'}"
+    return None
 
 
 class ChatGptWebSolver(LLMSolver):
@@ -577,7 +688,11 @@ class ChatGptWebSolver(LLMSolver):
         and its figures on another, and the question is usually about the figure.
         """
         return client.complete_json(
-            system=system, prompt=prompt, images=_read_images(question)
+            system=system,
+            prompt=prompt,
+            images=_read_images(question),
+            audio=_read_audio(question),
+            chat_key=chat_key_for(question),
         )
 
     def solve(self, *, question, max_answer_len: int = 64):

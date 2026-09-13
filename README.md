@@ -48,7 +48,7 @@ submodule、AARコピーは不要です。
 CXR-L の実装境界は
 [CXR-L / Global Hi Rokid integration](docs/cxr-l-integration.md)です。
 
-現在のバージョン: **Server APP 0.25.0 / API 1.18.0 / Android client 0.3.16 / Glasses View 1.10.0**。
+現在のバージョン: **Server APP 0.26.0 / API 1.18.0 / Android client 0.3.16 / Glasses View 1.10.0**。
 Solver API 1.3.0は、記入用解答の全文保持・資料不足の分離を行う`answer_only`モードを追加しています。
 
 ---
@@ -86,7 +86,7 @@ rokid-docscan-starter/
 │   ├── explainer.py   # Explainer ポート（ExplainRequest / ExplainResult / ABC）
 │   ├── llm.py         # ★実 AI ブリッジ（openai/gemini/claude、遅延import・注入可）
 │   ├── audio_formats.py # 音声MIME・保存suffix・provider対応の共通定義
-│   ├── version.py     # 各契約バージョン（app 0.25.0 / api 1.18.0 / glasses 1.10.0 ほか）
+│   ├── version.py     # 各契約バージョン（app 0.26.0 / api 1.18.0 / glasses 1.10.0 ほか）
 │   ├── config.py      # 保存先・フィーチャーフラグ（ROKID_* / ANTHROPIC_API_KEY / ROKID_TRANSCRIBER）
 │   ├── transcribe.py  # ★リスニング録音の書き起こし（openai/gemini・未設定時は与値）
 │   ├── db.py          # sqlite3（documents/pages/exam/explain テーブル）
@@ -540,6 +540,16 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
     `ROKID_CHATGPT_SLOW_STREAK`（既定2）回続くと、次の送信を拒否します。
     実測のスロットリング兆候は「正常 7-13秒 → 43秒 → 48秒 → 130秒 → ブロック」
     でした。`ROKID_CHATGPT_SLOW_STREAK=0` で無効化できます。
+- **教科ごとに1チャット**（任意、既定は問題ごと）: `ROKID_CHATGPT_CHAT_SCOPE=subject`
+  で1科目が1チャットを共有します。全教科デックでチャット数が小問数から教科数に
+  減り、同じ大問のページは**その科目で1回だけ**アップロードされます（同一バイト
+  列を SHA-256 で判定）。代償は、同じ科目の前問の解答が文脈に残ることです。
+  既定の `question` は測定済みの挙動（1問1チャット）を維持します。
+- **リスニング音声は資料と同じメッセージに添付されます。** `Question.audio_path`
+  が録音ファイルを運び、写真用 input は `accept="image/*"` のため
+  `ROKID_CHATGPT_FILE_UPLOAD_SEL`（汎用ファイル input）から送ります。文字起こしは
+  従来どおり本文に入るため、音声が読めない場合も解答は失われません。音声も
+  チャット内で重複アップロードしません。
 - **複数ページを1つの PDF にまとめて送る**（任意、既定オフ）:
   `ROKID_CHATGPT_BUNDLE_PDF=1` で大問の全ページを1つの PDF にして
   `ROKID_CHATGPT_FILE_UPLOAD_SEL`（既定 `input[data-testid="upload-files-input"]`）
