@@ -1172,8 +1172,12 @@ _ANSWER_FORMATS = {"mark", "written"}
 # Answer-format instruction folded into the solver context so a real model
 # answers in the format the exam expects (offline placeholder ignores it).
 _ANSWER_FORMAT_HINT = {
-    "mark": "解答はマーク式（選択肢の記号）で選び、根拠を簡潔に示してください。",
-    "written": "解答は記述式で、結論と要点の過程を簡潔に示してください。",
+    # The answer sheet carries the answer, nothing else. Asking for 根拠 here
+    # put explanations INTO the answer field: a measured reply was
+    # "A: 画像上の正答は④（エ＝崩壊、オ＝原子核、カ＝人体）", which is not what
+    # the operator writes on the sheet and does not fit the 3-line HUD.
+    "mark": "解答はマーク式（選択肢の記号）で答えてください。",
+    "written": "解答は記述式で、解答欄に書く文だけを答えてください。",
 }
 
 
@@ -2026,6 +2030,7 @@ def exam_solve_current(session_id: int) -> dict:
             context=context,
             image_path=page_row["image_path"],
             audio_path=session["audio_path"],
+            chat_key=f"session:{session_id}",
         )
         result, solver = solve_with_fallback(question=question)
         served_by = result.extras.get("served_by", solver.name)
@@ -2302,6 +2307,19 @@ def _page_image_paths(conn, doc_id: int, page_indexes: list[int] | None) -> list
     ).fetchall()
     by_index = {r["page_index"]: r["image_path"] for r in rows}
     return [by_index[i] for i in page_indexes if by_index.get(i)]
+
+
+def _document_image_paths(conn, doc_id: int) -> list[str]:
+    """Every page image of the document, in reading order.
+
+    The browser route attaches the whole booklet once as a single PDF, so the
+    question text does not have to be retyped into every message.
+    """
+    rows = conn.execute(
+        "SELECT image_path FROM pages WHERE document_id = ? ORDER BY page_index",
+        (doc_id,),
+    ).fetchall()
+    return [r["image_path"] for r in rows if r["image_path"]]
 
 
 def _group_page_indexes(conn, session_id: int) -> dict[int, list[int]]:
@@ -2651,8 +2669,27 @@ def exam_finalize_reading(session_id: int) -> dict:
                             # transcript. A solver that takes audio hears the
                             # speaker turns and numbers a transcript flattens.
                             audio_path=session["audio_path"],
+                            # One session is one paper, so one chat. Never the
+                            # row's `subject`: that is a per-row heuristic.
+                            chat_key=f"session:{session_id}",
+                            # The whole booklet, attached once per chat, and
+                            # where this question sits inside it.
+                            document_image_paths=_document_image_paths(conn, doc_id),
+                            page_numbers=[i + 1 for i in (window or [])],
+                            # What the operator writes on the answer sheet, and
+                            # nothing else. This is the documented contract
+                            # (Solver 1.3.0) and was never set on this path.
+                            answer_only=True,
                         )
-                        result, solver = solve_with_fallback(question=question)
+                        try:
+                            result, solver = solve_with_fallback(question=question)
+                        except Exception:  # noqa: BLE001 - documented behaviour
+                            # The answer-sheet contract refuses the placeholder
+                            # and raises when no real solver answers. That must
+                            # leave the row UNSOLVED (the batch is resumable and
+                            # the onboard ingest can still fill it), never fail
+                            # the whole finalize-reading.
+                            continue
                     served_by = result.extras.get("served_by", solver.name)
                     if served_by == "local":
                         # A failed/missing cloud adapter fell back to the

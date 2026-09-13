@@ -295,13 +295,15 @@ class _FakeClient:
         self.seen = {}
         self.last_image_attached = attached
 
-    def complete_json(self, *, system, prompt, image=None, images=None, audio=None, chat_key=None):
+    def complete_json(self, *, system, prompt, image=None, images=None, audio=None,
+                      bundle_pdf=None, chat_key=None):
         self.seen = {
             "system": system,
             "prompt": prompt,
             "image": image,
             "images": images,
             "audio": audio,
+            "bundle_pdf": bundle_pdf,
             "chat_key": chat_key,
         }
         return json.loads(self.payload)
@@ -728,13 +730,24 @@ def test_a_question_scoped_run_still_opens_a_chat_per_question(monkeypatch):
     assert len(_clicks(page, chatgpt_web.NEW_CHAT_SEL)) == 2
 
 
-def test_chat_key_follows_the_scope(monkeypatch):
-    question = Question(body_text="問1", subject="数学", answer_only=True)
-    monkeypatch.setattr(chatgpt_web, "CHAT_SCOPE", "question")
-    assert chatgpt_web.chat_key_for(question) is None
+def test_the_chat_key_comes_from_the_server_never_from_the_detected_subject(monkeypatch):
+    """One paper is one chat, and `subject` cannot decide that.
+
+    `subject` is a per-row heuristic. A single 物理基礎 paper was measured
+    producing 現代文/物理/化学/数学/地学 across its rows, which keyed five chats
+    and re-uploaded the same pages into every one of them.
+    """
+    scattered = [
+        Question(body_text="問1", subject="現代文", chat_key="session:7"),
+        Question(body_text="問2", subject="化学", chat_key="session:7"),
+        Question(body_text="問3", subject="地学", chat_key="session:7"),
+    ]
     monkeypatch.setattr(chatgpt_web, "CHAT_SCOPE", "subject")
-    assert chatgpt_web.chat_key_for(question) == "subject:数学"
-    assert chatgpt_web.chat_key_for(Question(body_text="問1")) == "subject:unknown"
+
+    assert {chatgpt_web.chat_key_for(q) for q in scattered} == {"session:7"}
+
+    monkeypatch.setattr(chatgpt_web, "CHAT_SCOPE", "question")
+    assert all(chatgpt_web.chat_key_for(q) is None for q in scattered)
 
 
 # --- listening: the recording travels with the pages -------------------------

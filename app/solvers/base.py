@@ -46,6 +46,22 @@ class Question:
     # transcript flattens; adapters that cannot take audio ignore this and keep
     # using the transcript folded into `body_text`/`context`.
     audio_path: str | None = None
+    # EVERY page of the paper this question came from, in reading order. The
+    # browser route attaches the whole booklet once as a single PDF and then
+    # only says which question to answer, so the OCR body does not have to be
+    # retyped into every message (and cannot be truncated on the way).
+    # Adapters that take one image ignore this and keep using image_path(s).
+    document_image_paths: list[str] = field(default_factory=list)
+    # 1-based page numbers this question occupies, used to point at it inside
+    # that PDF ("P05-P07") instead of quoting its text.
+    page_numbers: list[int] = field(default_factory=list)
+    # Which conversation this question belongs to, when the adapter has the
+    # concept (the browser route). The SERVER decides it -- one exam session is
+    # one 科目's paper. It must not be derived from `subject`: that field is a
+    # per-row heuristic, and a single 物理基礎 paper was measured producing
+    # 現代文/物理/化学/数学/地学 across its rows, which would scatter one paper
+    # over five chats and re-upload its pages into each.
+    chat_key: str | None = None
     # Set only by the out-of-range retry: the first answer named a choice label
     # that does not exist, so the re-ask states the valid labels instead of
     # sending the identical prompt again.

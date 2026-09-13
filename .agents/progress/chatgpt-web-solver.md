@@ -314,3 +314,105 @@ one generation per 小問.
   On the real path the phone OCRs the printed heading and reads it normally.
 - 共通テスト PDFs carry a no-extract flag. It is honoured for anything that
   leaves this machine; the text is used only to stand in for OCR.
+
+
+## 2026-09-14 (evening): the live run that failed, and the premises behind it
+
+### Purpose this route serves (re-read from the authoritative documents)
+
+`docs/README.md` sets the authority order; `docs/real-device-operation.md` is
+the current runbook. In production the operator wears the glasses and **does
+not touch the phone**: glasses capture (`takePhoto(1920, 1080, 80)`) -> Hi
+Rokid -> relay (ML Kit JA OCR) -> server -> HUD, which is black, green and **at
+most three lines**. The only output that matters is *the string the operator
+writes on the answer sheet*. The ChatGPT web route is a stand-in for an API
+key, nothing more. Anything that does not serve that sentence is waste.
+
+### What was run, and what it produced
+
+One live run, 物理基礎 (14 pages, 14 questions), `ROKID_CHATGPT_CHAT_SCOPE=subject`:
+
+```text
+ok    answers        3/14 ready in 326.0s (23.3s per question)
+      問1   ④: ρ(1−α)Vg
+      問2   B: ②（ア＝比例、イ＝反比例、ウ＝Ω・m）
+      問3   A: 画像上の正答は④（エ＝崩壊、オ＝原子核、カ＝人体）
+```
+
+The operator watching the browser saw **five chats**, the same page images
+pasted into each, and answers carrying explanations. Every one of those is a
+defect, and every one was findable offline before spending a generation.
+
+### Root causes, each verified against the artifact
+
+1. **`complete()` never passed `chat_key` or `audio` to `_ask_with_retries`.**
+   An earlier edit to that call was applied with `str.replace` and **no
+   assertion**, so it silently did nothing. Chat scoping therefore never ran at
+   all: every question opened a new chat and re-uploaded its pages. Any patch
+   to this repository must assert that its anchor matched.
+2. **The chat key was derived from `question.subject`.** That field is a
+   per-row heuristic (`detect_subject`), not the paper's 科目. Measured in the
+   run database: one 物理基礎 paper produced rows labelled
+   現代文 / 物理 / 化学 / 数学 / 地学. Even with (1) fixed, that would have
+   scattered the paper across chats. The key now comes from the server as
+   `session:{id}` -- one session is one paper.
+3. **`answer_only` was never set on any solve path.** `grep -n answer_only
+   app/main.py` returned exactly one hit: line 1908, the paste-prompt endpoint.
+   The deck solve used the tutor contract, whose system prompt says *for
+   multiple choice use the label form "B: text"* -- which is precisely the
+   "A: ..." prose that came back. The progress record had claimed the server
+   uses `Question.answer_only`; the code never did.
+4. **The mark-format hint asked for reasoning.** `_ANSWER_FORMAT_HINT["mark"]`
+   read 「解答はマーク式（選択肢の記号）で選び、**根拠を簡潔に示してください**」,
+   which contradicts the answer-sheet contract from the other direction.
+5. **The OCR body was retyped into every message.** With the whole booklet
+   attachable as one PDF, that text is redundant, is the longest part of each
+   request, and was observed arriving truncated.
+6. **The HUD has no per-line character limit.** `app/glasses_view.py:62`:
+   "No max_chars_per_line specified". The measured answer rendered as one
+   32-character line on a 480x398 px display. Not fixed yet.
+
+### What changed in response (all offline-verified)
+
+- `Question.chat_key` (server-supplied), `document_image_paths`, `page_numbers`.
+- The web route attaches the **whole booklet once per chat as a single PDF**
+  and sends only a locator:
+
+  ```text
+  添付の問題冊子PDFを見て、次の設問に解答してください。
+  設問: 問3（P05-P07）
+  解答用紙に書く内容だけを出力してください。説明・理由・見出し・前置きは含めません。
+  ```
+
+- The deck solve path sets `answer_only=True`; a row whose solve raises is left
+  unsolved rather than failing the whole `finalize-reading`.
+- `FILE_UPLOAD_SEL` corrected to `input#upload-files`, measured on the live DOM
+  (the five file inputs are upload-files, upload-photos-input, upload-media-
+  input, upload-camera, upload-media-files; only the first accepts a PDF or
+  audio).
+
+### NOT verified, and not to be claimed
+
+- **No live run of the new shape.** The operator stopped live runs. Whether
+  ChatGPT reads a figure out of the bundled PDF as well as out of a page image
+  is unmeasured.
+- The bench renders pages at `--scale 2` PNG; the device captures
+  `takePhoto(1920, 1080, 80)` JPEG with measured 16% contrast
+  (`docs/capture-timing-findings.md`). The stand-in is kinder than reality.
+- Attachment ceilings are third-party figures: 10-20 files per message,
+  80 files per 3 hours, ~100 images per conversation. Not measured here.
+- 東大 英語 is not published by the university; 世界史第2問 and 生物第3問 are
+  partially withheld.
+
+### Resume here
+
+1. One live question, not a subject: confirm the PDF-once + locator shape
+   returns an answer-sheet-only string and that the browser shows ONE chat.
+2. Then one subject (物理基礎, 14 questions) and score against
+   `C:/rokid-exam-materials/kyotsu/seikai/rika_kiso.pdf`.
+3. Give the HUD a per-line limit before any accuracy claim: a 32-character
+   answer line does not fit 480 px.
+4. The bench writes every run into one `--data-dir`; give each paper its own,
+   or a later query reads another run's rows (as happened while diagnosing).
+
+Full sweep remains ~513 questions and is NOT scheduled.

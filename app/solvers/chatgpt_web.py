@@ -38,7 +38,7 @@ import urllib.request
 
 from ..llm import extract_json
 from ..page_pdf import images_to_pdf
-from .llm_adapter import LLMSolver, _read_audio, _read_images
+from .llm_adapter import LLMSolver, _read_audio, _read_image, _read_images
 
 # DevTools endpoint of the operator's already-running browser.
 CDP_ENDPOINT = os.environ.get("ROKID_CHATGPT_CDP", "http://127.0.0.1:9222")
@@ -60,9 +60,12 @@ FILE_INPUT_SEL = os.environ.get(
 )
 # The photo input only accepts image/*. A bundled PDF has to go through the
 # general file input instead, so it gets its own selector.
-FILE_UPLOAD_SEL = os.environ.get(
-    "ROKID_CHATGPT_FILE_UPLOAD_SEL", 'input[data-testid="upload-files-input"]'
-)
+# Measured on the signed-in page (Chrome/152.0.7977.83, 2026-09-14): the five
+# file inputs are upload-files (no accept, no testid), upload-photos-input
+# (image/*), upload-media-input (image/*,video/*), upload-camera (image/*) and
+# upload-media-files (image/*,video/*). Only the first takes a PDF or an audio
+# file, and it is addressed by id because it carries no testid.
+FILE_UPLOAD_SEL = os.environ.get("ROKID_CHATGPT_FILE_UPLOAD_SEL", "input#upload-files")
 # Off by default: send one PDF of the whole 大問 instead of one image per page.
 # Fewer uploads per question and one document to read, at the cost of handing
 # the pages to the file reader rather than to vision. UNVERIFIED against the
@@ -227,7 +230,9 @@ def audio_payload(name: str, data: bytes) -> dict:
 
 
 def upload_plan(
-    images: list[bytes], audio: tuple[str, bytes] | None = None
+    images: list[bytes],
+    audio: tuple[str, bytes] | None = None,
+    bundle_pdf: bool | None = None,
 ) -> list[tuple[str, list[dict]]]:
     """What to upload, and which input takes each part.
 
@@ -238,8 +243,9 @@ def upload_plan(
     point -- a listening 大問 is the audio AND the question booklet.
     """
     plan: list[tuple[str, list[dict]]] = []
+    bundle_pdf = BUNDLE_PDF if bundle_pdf is None else bundle_pdf
     if images:
-        if BUNDLE_PDF:
+        if bundle_pdf:
             plan.append((FILE_UPLOAD_SEL, [pdf_payload(images)]))
         else:
             plan.append((
@@ -256,6 +262,7 @@ def attach_images(
     images: list[bytes],
     *,
     audio: tuple[str, bytes] | None = None,
+    bundle_pdf: bool | None = None,
     timeout_s: float | None = None,
     poll_s: float | None = None,
     sleep=time.sleep,
@@ -278,7 +285,7 @@ def attach_images(
     and losing the whole answer over an unconfirmed preview is worse than
     sending and recording that it was unconfirmed.
     """
-    plan = upload_plan(images, audio)
+    plan = upload_plan(images, audio, bundle_pdf)
     if not plan:
         return False
     timeout_s = UPLOAD_TIMEOUT_S if timeout_s is None else timeout_s
@@ -536,6 +543,7 @@ class ChatGptWebClient:
         image: bytes | None = None,
         images: list[bytes] | None = None,
         audio: tuple[str, bytes] | None = None,
+        bundle_pdf: bool | None = None,
         chat_key: str | None = None,
     ) -> str:
         # `image` keeps the single-page LLMClient shape; `images` carries a 大問
@@ -557,7 +565,14 @@ class ChatGptWebClient:
                 ) from exc
             try:
                 context = browser.contexts[0] if browser.contexts else browser.new_context()
-                return self._ask_with_retries(context, f"{system}\n\n{prompt}", pages)
+                return self._ask_with_retries(
+                    context,
+                    f"{system}\n\n{prompt}",
+                    pages,
+                    audio=audio,
+                    bundle_pdf=bundle_pdf,
+                    chat_key=chat_key,
+                )
             finally:
                 browser.close()
 
@@ -568,6 +583,7 @@ class ChatGptWebClient:
         pages: list[bytes],
         *,
         audio: tuple[str, bytes] | None = None,
+        bundle_pdf: bool | None = None,
         chat_key: str | None = None,
     ) -> str:
         """One question, retried on a flake, each attempt in its own fresh chat.
@@ -605,7 +621,9 @@ class ChatGptWebClient:
                     audio if audio and _digest(audio[1]) not in self._attached_in_chat else None
                 )
                 attached = (
-                    attach_images(page, pending, audio=pending_audio, poll_s=POLL_S)
+                    attach_images(
+                        page, pending, audio=pending_audio, bundle_pdf=bundle_pdf, poll_s=POLL_S
+                    )
                     if (pending or pending_audio)
                     else None
                 )
@@ -645,6 +663,7 @@ class ChatGptWebClient:
         image: bytes | None = None,
         images: list[bytes] | None = None,
         audio: tuple[str, bytes] | None = None,
+        bundle_pdf: bool | None = None,
         chat_key: str | None = None,
     ) -> dict:
         return extract_json(
@@ -654,6 +673,7 @@ class ChatGptWebClient:
                 image=image,
                 images=images,
                 audio=audio,
+                bundle_pdf=bundle_pdf,
                 chat_key=chat_key,
             )
         )
@@ -662,14 +682,41 @@ class ChatGptWebClient:
 def chat_key_for(question) -> str | None:
     """Which chat this question belongs in, or None for one chat per question.
 
-    Under CHAT_SCOPE="subject" a whole 科目 shares one chat: the deck opens 16
-    chats instead of one per 小問, and the 大問's pages are uploaded once. The
-    cost is that earlier answers in that subject are context the grader never
-    saw, which is why it is not the default.
+    Under CHAT_SCOPE="subject" the whole paper shares one chat: the deck opens
+    one chat per session instead of one per 小問, and each 大問's pages are
+    uploaded once. The key comes from the SERVER (`Question.chat_key`), never
+    from `question.subject`: subject is a per-row heuristic, and one 物理基礎
+    paper was measured yielding 現代文/物理/化学/数学/地学 across its rows --
+    keying on it scattered that paper over five chats and re-uploaded its pages
+    into every one of them. No key means one chat per question.
     """
     if CHAT_SCOPE == "subject":
-        return f"subject:{getattr(question, 'subject', None) or 'unknown'}"
+        return getattr(question, "chat_key", None)
     return None
+
+
+def locator_prompt(question) -> str:
+    """Say WHICH question to answer, not what it says.
+
+    The whole booklet is already in the chat as one PDF, so retyping the OCR
+    body into every message buys nothing: it repeats what the model can already
+    read, costs the longest part of each request, and was measured arriving
+    truncated. The model is pointed at the question instead.
+    """
+    where = question.question_no or "この問題"
+    pages = getattr(question, "page_numbers", None) or []
+    span = (
+        f"P{pages[0]:02d}" if len(pages) == 1
+        else (f"P{pages[0]:02d}-P{pages[-1]:02d}" if pages else "")
+    )
+    lines = [
+        "添付の問題冊子PDFを見て、次の設問に解答してください。",
+        f"設問: {where}" + (f"（{span}）" if span else ""),
+        "解答用紙に書く内容だけを出力してください。説明・理由・見出し・前置きは含めません。",
+    ]
+    if question.choices:
+        lines.append("選択肢は冊子のものを使ってください。")
+    return chr(10).join(lines)
 
 
 class ChatGptWebSolver(LLMSolver):
@@ -687,10 +734,19 @@ class ChatGptWebSolver(LLMSolver):
         the primary page. A 大問 that spans pages keeps its passage on one page
         and its figures on another, and the question is usually about the figure.
         """
+        booklet = getattr(question, "document_image_paths", None) or []
+        if booklet:
+            # One PDF of the whole paper, attached once per chat, and a prompt
+            # that only points at the question. See locator_prompt.
+            pages = [data for data in (_read_image(p) for p in booklet) if data]
+            prompt = locator_prompt(question)
+        else:
+            pages = _read_images(question)
         return client.complete_json(
             system=system,
             prompt=prompt,
-            images=_read_images(question),
+            images=pages,
+            bundle_pdf=bool(booklet),
             audio=_read_audio(question),
             chat_key=chat_key_for(question),
         )
