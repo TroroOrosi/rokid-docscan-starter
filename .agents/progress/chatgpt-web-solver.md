@@ -258,3 +258,59 @@ was rejected as the *primary* path and still is; this is for running a session
 without the PC Chrome at all. Attaching a dozen photos by hand is the step that
 does not survive a real session, so the material is one file. `API 1.18.0`,
 `APP 0.25.0`.
+
+
+## 2026-09-14: the deck bench, and what one full sweep would actually cost
+
+`scripts/run_exam_deck.py` runs ONE subject end to end from a PDF: each page is
+rendered to a PNG (pypdfium2) as a photographed page would arrive, its text is
+extracted (pdfminer.six, `detect_vertical=True`) as the phone's ML Kit OCR
+would provide it, and it then goes through the ordinary endpoints, ending at
+the `answer-bundle` the glasses read. `--solver local` exercises everything
+except the model, which is how all of the numbers below were measured without
+spending a single generation.
+
+Material lives OUTSIDE the repository in `C:/rokid-exam-materials/`
+(共通テスト 2026 本試験 from dnc.ac.jp, 東大 令和8 前期 from u-tokyo.ac.jp,
+plus the official 正解 and the listening MP3). It is copyrighted: do not commit
+it, and do not commit the run reports either.
+
+### Two segmentation defects the real material exposed
+
+1. **An exam booklet prints a 第N問 side tab on every page of that 大問.** Each
+   tab started a new problem, so 数学Ⅰ・Ａ became **26 problems over 26 pages
+   instead of 4** -- 26 solver calls, each seeing only its own page.
+   `_is_continuation` now folds a repeated 大問 number into the open problem.
+   A repeated 小問 number (問1 under two 大問) still becomes 問1(2).
+2. **大問 numbered in kanji (第一問) were not matched at all**, which is how
+   東大 numbers every paper. `_Q_PATTERNS` now accepts kanji numerals and
+   normalizes them to Arabic, so 第一問 and 第1問 are one problem, not two.
+
+### Measured question counts (offline, `--solver local`)
+
+25 papers, 513 questions total. Per subject, the ones that matter:
+
+| subject | pages | questions |
+|---|---|---|
+| 情報Ⅰ | 34 | 49 |
+| 英語リーディング | 31 | 38 |
+| 歴史総合，日本史探究 | 35 | 38 |
+| 公共，政治・経済 | 39 | 36 |
+| 英語リスニング | 22 | 35 |
+| 国語 | 47 | 32 |
+| 数学Ⅰ・Ａ | 26 | 4 |
+| 東大 国語（文科） | 26 | 4 |
+
+**A full 共通テスト + 東大 sweep is therefore ~513 generations.** What
+rate-limited the account on 2026-09-14 was "well over a hundred in an
+afternoon". This run is five times that, so it cannot be done in one sitting at
+one generation per 小問.
+
+### Bench limitations that are NOT production limitations
+
+- The 東大 PDFs draw their numbers as unmapped glyphs: 第一問 extracts as
+  `第(cid:2)問`, and the 国語/地歴 booklets split 第一問 across lines in vertical
+  mode. `--daimon 4,12,16,20` lets the operator state where each 大問 starts.
+  On the real path the phone OCRs the printed heading and reads it normally.
+- 共通テスト PDFs carry a no-extract flag. It is honoured for anything that
+  leaves this machine; the text is used only to stand in for OCR.

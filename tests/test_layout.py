@@ -245,3 +245,53 @@ def test_answer_form_pack_segments_to_section_headings_only():
         materials = [(i, p["text"]) for i, p in enumerate(pages)]
         units = [p.question_no for p in segment_problems(materials)]
         assert units == want, case_id
+
+
+def test_a_daimon_numbered_in_kanji_is_one_problem_with_an_arabic_label():
+    """東大 and most 記述式 papers write 第一問, not 第1問.
+
+    The deck addresses a problem by this string, so the two spellings must not
+    become two problems.
+    """
+    from app.layout import segment_problems
+
+    problems = segment_problems([
+        (0, "第一問 次の文章を読んで答えよ。"),
+        (1, "第二問 以下の設問に答えよ。"),
+    ])
+
+    assert [p.question_no for p in problems] == ["第1問", "第2問"]
+
+
+def test_a_repeated_daimon_heading_continues_that_problem_instead_of_splitting_it():
+    """An exam booklet prints a 第N問 side tab on EVERY page of that 大問.
+
+    Measured on the 2026 共通テスト 数学Ⅰ・Ａ PDF: without this, 4 大問 across
+    26 pages became 26 problems -- 26 solver calls instead of 4, each seeing
+    only its own page.
+    """
+    from app.layout import segment_problems
+
+    problems = segment_problems([
+        (0, "第1問 四角形 ABCD の面積 S について考えよう。"),
+        (1, "第1問 ク , ケ の解答群"),
+        (2, "第1問 点 O を中心とする円を考える。"),
+        (3, "第2問 花子さんの記録を考える。"),
+    ])
+
+    assert [p.question_no for p in problems] == ["第1問", "第2問"]
+    assert problems[0].page_indexes == [0, 1, 2]
+    assert "解答群" in problems[0].body_text and "点 O" in problems[0].body_text
+
+
+def test_a_repeated_shoumon_number_under_two_daimon_stays_two_problems():
+    # 問1 under 第1問 and 問1 under 第2問 are different questions; only the
+    # 大問-level number repeats as a page tab.
+    from app.layout import segment_problems
+
+    problems = segment_problems([
+        (0, "第1問 リード文\n問1 これを答えよ"),
+        (1, "第2問 別のリード文\n問1 これも答えよ"),
+    ])
+
+    assert [p.question_no for p in problems] == ["第1問", "問1", "第2問", "問1(2)"]
