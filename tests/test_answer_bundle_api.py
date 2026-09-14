@@ -161,3 +161,42 @@ def test_items_without_a_group_heading_fall_back_to_one_default_group(client):
         ("g1", "全体", "問1"),
         ("g1", "全体", "問2"),
     ]
+
+
+# --- FS-65: 未対応要素を落としたREADYを禁止 ----------------------------------
+
+
+def _ingest(client, session_id, answer):
+    client.post(f"/v1/exam-sessions/{session_id}/finalize-reading")
+    posted = client.post(
+        f"/v1/exam-sessions/{session_id}/solutions",
+        json={"solutions": [{"problem_no": "問1", "answer": answer}]},
+    )
+    assert posted.status_code == 200
+    body = client.get(f"/v1/exam-sessions/{session_id}/answer-bundle").json()
+    return next(i for i in body["items"] if i["question_label"] == "問1")
+
+
+def test_a_latex_fraction_reaches_the_operator_as_writable_text(client):
+    _, session_id = _session_with(client, [PAGE])
+    item = _ingest(client, session_id, chr(92) + "frac{1}{2}")
+    assert item["status"] == "ready"
+    assert item["answer"] == "1/2"
+
+
+def test_an_answer_with_a_table_is_not_reported_ready(client):
+    """The HUD renders characters, not columns. Reporting this ready would put
+    a row of pipes in front of the operator and call it an answer."""
+    _, session_id = _session_with(client, [PAGE])
+    item = _ingest(client, session_id, "| a | b |\n|---|---|\n| 1 | 2 |")
+    assert item["status"] == "needs_review"
+    assert "表" in item["issue"]
+    # The text is still carried: a partial answer beats no answer.
+    assert item["answer"]
+
+
+def test_unknown_notation_is_named_and_kept_out_of_ready(client):
+    _, session_id = _session_with(client, [PAGE])
+    item = _ingest(client, session_id, chr(92) + "begin{array}{c}1" + chr(92) + "end{array}")
+    assert item["status"] == "needs_review"
+    assert chr(92) + "begin" in item["issue"]

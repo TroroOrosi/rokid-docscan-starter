@@ -168,7 +168,9 @@ from __future__ import annotations
 # 0.27.0: the HUD wraps a long line at a column budget instead of handing the
 #        renderer one line wider than the glasses display, and the deck bench
 #        gives each paper its own database. See GLASSES_VIEW_CONTRACT 1.11.0.
-APP_VERSION = "0.27.0"
+# 0.28.0: an answer reaches the operator as writable text, and an answer that
+#        lost an element is no longer reported ready. See API 1.19.0.
+APP_VERSION = "0.28.0"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.
@@ -230,7 +232,14 @@ APP_VERSION = "0.27.0"
 #        as one PDF, so the phone path can attach the material once instead of
 #        one photo per page; paste-prompt gains the additive `pages_pdf_url`.
 #        404 when the document is text-only. Additive.
-API_VERSION = "1.18.0"
+# 1.19.0: the answer bundle converts a solver's answer into text the glasses can
+#        render (LaTeX fractions, powers, indices, roots, greek, 場合分け) and
+#        adds the item status `needs_review`: the answer is still carried, but an
+#        element the display cannot hold — a table, a figure, unknown notation —
+#        is named in `issue` instead of being dropped from a `ready` answer
+#        (tasks/todo.md FS-65). A client that does not know the status must be
+#        updated; relaycore 0.3.17 does.
+API_VERSION = "1.19.0"
 
 # Matching algorithm identity. Bump when thresholds or hashing change so a
 # re-index/eval is triggered. Mirrors thresholds in app/matching.py.

@@ -38,7 +38,7 @@ android {
         // 21 makes all unverified CUSTOMVIEW/AI callbacks diagnostic-only and
         // requires explicit phone controls for capture and registration.
         versionCode = 21
-        versionName = "0.3.16"
+        versionName = "0.3.17"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

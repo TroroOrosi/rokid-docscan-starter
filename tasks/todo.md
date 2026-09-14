@@ -362,9 +362,18 @@ and unknown future actions safe while retaining content-free diagnostics.
 - [ ] 実装・検証完了（2026-09-11、答案バンドルの転送(`GET
   /v1/exam-sessions/{id}/answer-bundle`、`DocScanApi.answerBundle`)と
   グラス側の読み上げ画面`AnswerView`・ジェスチャー操作は実装・単体テスト済み。
-  実機のホットスポット経路・表示可読性はいずれも未検証。この項目が定義する
-  数式・表・必要な作図の表示そのものには未着手。詳細は
+  実機のホットスポット経路・表示可読性はいずれも未検証。詳細は
   `docs/hardware-measurements.md` E 節）
+- [x] 数式と場合分けの表示、および未対応要素のREADY禁止（2026-09-14、API 1.19.0 /
+  Android 0.3.17）。`app/answer_text.py` が LaTeX の分数・指数・添字・根号・
+  ギリシャ文字・`egin{cases}` を表示可能な文字へ変換し、変換できない要素が
+  残る項目は `needs_review`＋`issue` で返す（テキストは捨てない）。
+  検証: pytest 564 passed / 1 skipped、ruff clean、
+  `gradlew --no-daemon test testDebugUnitTest assembleDebug` BUILD SUCCESSFUL 199 tasks
+- [ ] 表と作図の**描画**そのもの。現状は「表」「図（画像）」と名前を出して
+  `needs_review` にするだけで、列そろえも作図も行っていない。HUD の桁数上限が
+  実測されるまで幅を決められない（`docs/hardware-measurements.md` §F の隣、
+  実測待ちは HUD の 1 行桁数）
 
 **目的:** 文字列が保存できるだけで「記述内容全て」を満たしたとしない。
 **完了条件:** 既存全文文字列と互換な答案ブロックを必要箇所だけ追加。指数/分数/場合分け/表/図を読みやすい幅で全文表示し、答案の順序を保持。未対応要素を落としたREADYを禁止し、ラベルと答案を分離する。

@@ -30,6 +30,7 @@ from pydantic import BaseModel
 from . import config, db
 from .audio_formats import safe_audio_suffix
 from .analyzers import get_analyzer
+from .answer_text import to_display_answer
 from .config import IMAGE_DIR, ensure_dirs
 from .explainer import ExplainRequest, ExplainResult
 from .explainers import get_explainer, list_explainers
@@ -2344,20 +2345,27 @@ def _group_page_indexes(conn, session_id: int) -> dict[int, list[int]]:
 
 def _answer_bundle_item(conn, group: dict, row) -> dict:
     sol = _latest_solution_row(conn, row["id"])
-    answer = (sol["answer"] or "").strip() if sol is not None else ""
+    raw = (sol["answer"] or "").strip() if sol is not None else ""
+    display = to_display_answer(raw)
+    answer = display.text
     if sol is None:
         status, issue = "pending", "未解答"
-    elif answer:
+    elif not answer:
+        status, issue = "failed", "解答本文がありません"
+    elif display.complete:
         status, issue = "ready", ""
     else:
-        status, issue = "failed", "解答本文がありません"
+        # FS-65: an answer whose elements the display cannot carry is never
+        # reported ready. The converted text still reaches the operator.
+        status = "needs_review"
+        issue = "表示できない要素: " + "、".join(display.unsupported)
     label = "全問" if group["whole"] else (row["question_no"] or "全問")
     return {
         "group_id": group["id"],
         "group_label": group["label"][:120],
         "question_id": f"q{row['id']}",
         "question_label": label[:120],
-        "answer": answer if status == "ready" else "",
+        "answer": answer if status in ("ready", "needs_review") else "",
         "status": status,
         "issue": issue,
     }

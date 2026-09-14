@@ -63,4 +63,22 @@ public class AnswerBundleTest {
         assertThrows(IllegalArgumentException.class, () -> bundle.withAnswer(
                 AnswerItem.ready("other", "別資料", "q2", "(2)", "C")));
     }
+
+    @Test public void anAnswerNeedingReviewKeepsItsTextButIsNotFullyAnswered() throws Exception {
+        AnswerBundle bundle = new AnswerBundle("s", digest, 1, List.of(
+                new AnswerItem("g1", "大問1", "q1", "問1", "12",
+                        AnswerItem.Status.NEEDS_REVIEW, "表示できない要素: 表")));
+        assertEquals("12", bundle.items.get(0).answer);
+        assertEquals("表示できない要素: 表", bundle.items.get(0).issue);
+        assertFalse(bundle.fullyAnswered());
+        assertTrue(bundle.finished());
+        assertEquals(bundle.toJson(), AnswerBundle.fromJson(bundle.toJson()).toJson());
+    }
+
+    @Test public void reviewWithoutAReasonOrWithoutAnAnswerIsRejected() {
+        assertThrows(IllegalArgumentException.class, () -> new AnswerItem(
+                "g1", "大問1", "q1", "問1", "12", AnswerItem.Status.NEEDS_REVIEW, "  "));
+        assertThrows(IllegalArgumentException.class, () -> new AnswerItem(
+                "g1", "大問1", "q1", "問1", "", AnswerItem.Status.NEEDS_REVIEW, "表"));
+    }
 }
