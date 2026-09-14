@@ -36,7 +36,7 @@ Rokid Glasses -> Global Hi Rokid -> Android relay -> FastAPI server -> HUD
 | Route | Status |
 |---|---|
 | `ROKID_SOLVER=chatgpt-web` | **Current primary.** Drives the operator's own signed-in ChatGPT web session over CDP. |
-| On-phone local model (F-51F, llama.cpp) | The venue target. Measured, not wired into the venue topology. |
+| On-phone local model (F-51F, llama.cpp) | **Not the route.** The operator chose chatgpt-web on 2026-09-14. Its measurements are kept as evidence in `docs/hardware-measurements.md` §E; no further work is scheduled on it. |
 | `openai` / `gemini` / `claude` API keys | Supported and config-only. Kept as a fallback tier via `ROKID_SOLVER_TIERS`. |
 | Local OpenAI-compatible HTTP (`app/llm_http.py`) | Reaches an on-phone `llama-server` without the openai SDK. |
 

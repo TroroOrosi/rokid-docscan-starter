@@ -903,9 +903,8 @@ domain も MCS カテゴリも異なる（`c30,c257` 対 `c26,c256`）。`levelF
 - **実測:** 接続元の認可は `root` / `shell` / Chrome 自身の UID に限られる。
 - **実測:** F-51F 上で `@chrome_devtools_remote` が listen 中。Chrome と Termux は
   SELinux の domain・カテゴリが異なる。
-- **推論:** Termux から Chrome の abstract socket へ直接繋ぐ経路は、UID 認可と
-  SELinux の MLS 制約という**独立した 2 つの門**で塞がれている。実地の接続試行は
-  未実施（sshd 停止中）。
+- **実測（2026-09-14 追加）:** Termux から Chrome の abstract socket へ直接繋ぐ経路は
+  **塞がっている**。推論ではなく実地で確認した。F-5 を見ること。
 - **推論:** 端末内 adb（shell 文脈）を経由すれば両方の門を通る。
   `adb forward tcp:9222 localabstract:chrome_devtools_remote` を**端末上で**実行すると、
   adbd（`shell`、uid 2000）が abstract socket へ繋ぎ、127.0.0.1:9222 に TCP を開く。
@@ -922,14 +921,89 @@ domain も MCS カテゴリも異なる（`c30,c257` 対 `c26,c256`）。`levelF
 
 1. Termux に `adb`（`android-tools`）を入れ、`127.0.0.1` へ自己ペアできるか。
    未実施。sshd が停止しており、復旧は利用者の `termux-wake-lock; sshd` が要る。
-2. Playwright の Node driver が Termux（bionic、glibc ではない）で動くか。
-   **成果物で確認済みの逃げ道:** PC の site-packages に入っている playwright
-   1.62.0 の playwright/_impl/_driver.py 30-33 行は `PLAYWRIGHT_NODEJS_PATH` を読み、
-   同梱 node の代わりに任意の node を使える。Termux の nodejs を指させる想定。
-   wheel が Termux に入るかは未確認。
+2. ~~Playwright の Node driver が Termux で動くか~~ → **動かない。** F-5-4 で実測。
+   driver が `Unsupported platform: android` で初期化に失敗する。
+   `PLAYWRIGHT_NODEJS_PATH` では回避できない。
 3. Chrome・llama-server・FastAPI を同居させたときのメモリ。E 節の実測では
    モデルロードで Termux ごと kill されている。
 4. ChatGPT ウェブ UI の自動操作が OpenAI の利用規約に反する点は変わらない。
+
+## F-5. スマホ単独で CDP 終端に到達できるか（実機、2026-09-14）
+
+F-2 の推論を実機で確かめ、さらに 2 つの壁が出た。機体 F-51F、Android 16 / API 36、
+Termux 0.118.3（`u0_a26`、`untrusted_app_27`）、`com.android.chrome`（`u0_a286`）。
+
+### F-5-1. アプリから直接は繋がらない（実測）
+
+```
+$ ssh ... 'grep -i devtools /proc/net/unix'
+grep: /proc/net/unix: Permission denied
+
+$ ssh ... 'curl -s -m 8 --abstract-unix-socket chrome_devtools_remote http://localhost/json/version; echo exit=$?'
+exit=7
+```
+
+Termux からはソケット一覧すら読めず、`curl --abstract-unix-socket` は
+exit 7（接続失敗）。F-2 が示した UID 認可（`root`/`shell`/Chrome 自身）と
+SELinux の MCS カテゴリ分離のとおりで、**アプリ間では繋がらない**。
+
+### F-5-2. DevTools ソケットは Chrome の活動に従って現れ消えする（実測）
+
+同じ日のうちに、listen していたソケットが消えた。Chrome のプロセス自体は同じ pid
+12143 で生きていた。前景へ戻すと**別の inode で再び現れた**。
+
+| 状態 | `/proc/net/unix` の `@chrome_devtools_remote` |
+|---|---|
+| 13:0x（Chrome 起動済み） | inode 4869806 で listen |
+| llama-cli を 8 回実行した後 | **無し**（Chrome の pid は 12143 のまま） |
+| `am start ... chatgpt.com` で前景へ | inode 5248971 で listen |
+| `KEYCODE_HOME` の 6 秒後 | inode 5248971 のまま listen |
+
+背景へ回しただけでは消えない。消えたのはメモリ圧迫を掛けた後であり、
+**解答中に落ちうる終端である**ことを意味する。会場の経路は、ソケットが消えた場合の
+復帰を持たなければならない。llama-cli を 8 回回した副作用でこれが起きたのは、
+測定の偶然ではなく、同じ端末で重い処理を走らせる構成そのものの性質である。
+
+### F-5-3. 端末内 adb はペア設定が要る（実測、未完了）
+
+`pkg install android-tools` で Termux に adb 1.0.41（35.0.2）が入った。しかし
+
+```
+$ adb connect 127.0.0.1:44409
+failed to connect to 127.0.0.1:44409
+```
+
+PC が使っている接続ポートへは繋げない。ワイヤレスデバッグの接続ポートは
+**ペア済みクライアント証明書**を要求し、クライアントごとに鍵が異なるためである
+（PC はペア済み、Termux は未ペア）。`adb mdns services` もこのビルドでは
+`error: unknown host service 'mdns:services'` を返す。
+
+ペア設定は設定アプリが表示する 6 桁のコードを要するため、**利用者の操作が要る**。
+Shizuku が文書化している手順と同じで、ペアは一度だけ、開始操作は再起動ごとに要る。
+
+### F-5-4. Playwright は Termux では動かない（実測）
+
+wheel は Termux 用が無い（`ERROR: No matching distribution found playwright`）。
+manylinux aarch64 wheel を `--platform` 指定で入れ、同梱 node の代わりに Termux の
+node v26.4.0 を `PLAYWRIGHT_NODEJS_PATH` で使わせても、driver 自体が起動を拒否する。
+
+```
+$ cd ~/pw/playwright/driver && node package/cli.js --version
+Error: Unsupported platform: android
+    at packages/playwright-core/src/server/registry/index.ts
+```
+
+`process.platform === "android"` を registry が弾く。ブラウザを起動するかどうかに
+関係なく、driver の初期化で落ちるため、`connect_over_cdp` にも到達しない。
+**`PLAYWRIGHT_NODEJS_PATH` は解決策にならない。** F-4 の「逃げ道」はここで否定された。
+
+残る選択肢は 2 つ。どちらも未実施。
+
+1. Playwright を使わず、CDP を直接話す（HTTP `/json` ＋ WebSocket）。
+   `app/solvers/chatgpt_web.py` の実装変更が要るが、スマホ側の依存は
+   Python の WebSocket クライアントだけになる。
+2. proot で glibc の Linux を動かし、その中の node に `platform === "linux"` を
+   名乗らせる。実装は変えずに済むが、メモリの厳しい端末に別のユーザランドを足す。
 
 # 出典
 
