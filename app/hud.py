@@ -5,8 +5,13 @@ Exam-mode and explain-mode views are built in glasses_view.py instead.
 
 The HUD is intentionally minimal: monochrome green Micro-LED overlay.
 We always return exactly 3 lines so the on-glass renderer can lay them out
-deterministically.  Character-level reflow is the client's responsibility;
-the server does NOT truncate or split text.
+deterministically.  The server does NOT truncate or split text here: a line
+longer than the display is left to the client renderer, because this payload's
+shape is fixed at 3 lines and wrapping would change its count.
+
+The exam/review HUD is different: glasses_view._wrap() wraps a long line at a
+column budget and paginates the result (contract 1.11.0).  That is where a
+solver's answer goes, and it is the payload the operator reads at the venue.
 """
 
 from __future__ import annotations

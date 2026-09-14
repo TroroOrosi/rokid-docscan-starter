@@ -165,7 +165,10 @@ from __future__ import annotations
 #        (Question.audio_path -> the general file input; the photo input is
 #        image-only), so intonation, speaker turns and numbers no longer have
 #        to survive the transcript.
-APP_VERSION = "0.26.0"
+# 0.27.0: the HUD wraps a long line at a column budget instead of handing the
+#        renderer one line wider than the glasses display, and the deck bench
+#        gives each paper its own database. See GLASSES_VIEW_CONTRACT 1.11.0.
+APP_VERSION = "0.27.0"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.
@@ -326,7 +329,14 @@ EXPLAINER_API_VERSION = "1.1.0"
 # 1.10.0: local glassdoc gestures restore sessions after configuration, retry only
 #         terminal capture failures, and display tap/swipe instructions.
 #         Phone/CUSTOMVIEW controls remain unchanged.
-GLASSES_VIEW_CONTRACT_VERSION = "1.10.0"
+# 1.11.0: a logical line WRAPS at a column budget (MAX_COLUMNS,
+#         ROKID_HUD_MAX_COLUMNS, default 18; a full-width glyph costs 2), so a
+#         long answer becomes more lines and more view pages instead of one
+#         line wider than the display. No character is dropped: this is not the
+#         [:24] truncation removed in 1.2.0. GET /v1/settings publishes
+#         max_columns_per_line, column_unit, wraps and truncates. The budget is
+#         an estimate; the CUSTOMVIEW overlay's text area is not measured.
+GLASSES_VIEW_CONTRACT_VERSION = "1.11.0"
 
 # Answer-area overlay payload (box + short answer; 2D image-anchored).
 # 1.1.0: added tracking metadata (tracking/fixed_ar/anchor_hint).

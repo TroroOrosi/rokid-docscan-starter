@@ -39,7 +39,7 @@ from .glasses_view import (
     EXPLAIN_STAGES,
     OPERATION_CONTRACT,
     READING_OPERATIONS,
-    RENDER_CONTRACT,
+    render_contract,
     REVIEW_OPERATIONS,
     STAGES,
     build_capture_ack,
@@ -407,7 +407,7 @@ def get_settings() -> dict:
     return {
         "voice_enabled_default": False,
         "allow_real_exam_solve": config.ALLOW_REAL_EXAM_SOLVE,
-        "hud": dict(RENDER_CONTRACT),
+        "hud": render_contract(),
         "capture": dict(CAPTURE_CONTRACT),
         "operations": dict(OPERATION_CONTRACT),
         "input": build_input_contract(),
