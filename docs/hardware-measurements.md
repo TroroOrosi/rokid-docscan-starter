@@ -1218,6 +1218,34 @@ new/chat/sidebar を含む testid は `open-sidebar-button` と `composer-plus-b
 新規チャットは折りたたまれたサイドバーの中にある。`ROKID_CHATGPT_CHAT_SCOPE=subject`
 なら 1 科目に 1 回しか呼ばれないので、ページ読み込み 1 回の差でしかない。
 
+### F-6-8. スマホ上で FastAPI が動く（実測、2026-09-15）
+
+`app/` を Termux へ置き、`python3 -m uvicorn app.main:app --host 127.0.0.1 --port 8000`
+で起動した。**PC は経路に入っていない。**
+
+```
+GET /health      200  {"status":"ok","versions":{"app_version":"0.28.0", ...}}
+GET /v1/version  200  solvers[] に {"name":"chatgpt-web","provider_version":"web-ui",
+                                    "offline":false,"ready":true}
+```
+
+`chatgpt-web` の `ready:true` は、`cdp_available()` が**スマホ自身の Chrome を
+見つけた**ことを意味する（F-6-6 の端末内 `adb forward` 経由）。
+
+**FastAPI は 0.99.1 のまま動く。** `requirements.txt` の `fastapi>=0.110` は
+この端末では満たせない。0.100 以降は pydantic 2 を要求し、`pydantic-core` は
+Rust 拡張で Android wheel が無く、`pip install` は maturin で落ちる
+（`app/llm_http.py` が openai SDK を避けているのと同じ理由）。
+
+```
+ERROR: Failed to build 'pydantic-core' when installing build dependencies
+```
+
+実際に載っている組み合わせ: fastapi 0.99.1 / pydantic 1.10.26 / starlette 0.27.0 /
+uvicorn 0.52.4 / pillow 12.3.0 / httpx 0.28.1 / websockets 17.1。
+本アプリは素の `BaseModel` とスカラ型しか使わず `Annotated` も無いので、
+どちらの major でも動く。よって下限を `fastapi>=0.99` に緩めた。
+
 **未測定:** 送信も生成も1度もしていない。`Input.insertText` を ProseMirror が受けるか、
 `DataTransfer` の添付が composer に載るかは、実ページでは未確認。
 

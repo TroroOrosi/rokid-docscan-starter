@@ -1,4 +1,11 @@
-fastapi>=0.110
+# 0.99 is the floor, not 0.110: the venue runs this server on the phone, and
+# FastAPI >=0.100 pulls pydantic 2, whose `pydantic-core` is a Rust extension
+# with no Android wheel -- `pip install` dies in maturin on Termux (the same
+# reason `app/llm_http.py` exists). The app only uses plain `BaseModel`
+# subclasses with scalar fields and no `Annotated`, so it runs on either major.
+# Measured 2026-09-15 on F-51F: fastapi 0.99.1 / pydantic 1.10.26 /
+# starlette 0.27.0 serve /health and /v1/version correctly.
+fastapi>=0.99
 uvicorn[standard]>=0.27
 python-multipart>=0.0.9
 python-dotenv>=1.0

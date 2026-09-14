@@ -121,7 +121,14 @@ READY_TIMEOUT_S = float(os.environ.get("ROKID_CHATGPT_READY_S", "30"))
 # grader never saw. "subject" keeps one chat per 科目 for a whole deck: far
 # fewer chats, and a page attached once stays attached for the rest of that
 # subject, so a 大問 is uploaded once instead of once per 小問.
-CHAT_SCOPE = os.environ.get("ROKID_CHATGPT_CHAT_SCOPE", "question").strip().lower()
+#
+# The default is "subject" because the decided route attaches the WHOLE booklet
+# as one PDF and then sends only a locator per 小問 (see _complete). Under
+# "question" that booklet is re-uploaded for every 小問: a measured 6 MB
+# attachment costs 1.57s on the phone, times dozens of 小問, for a document the
+# chat already holds. The cross-talk "question" avoids is handled by the
+# locator prompt naming the 設問 rather than by a fresh thread.
+CHAT_SCOPE = os.environ.get("ROKID_CHATGPT_CHAT_SCOPE", "subject").strip().lower()
 ATTEMPTS = int(os.environ.get("ROKID_CHATGPT_ATTEMPTS", "3"))
 RETRY_BACKOFF_S = float(os.environ.get("ROKID_CHATGPT_RETRY_S", "5"))
 # A throttled account is refused in the message body, not by an exception, so a
