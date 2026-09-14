@@ -419,6 +419,14 @@ operator stopped it and asked why the phone route was not being used. Step 1 is
 blocked until a phone-side CDP endpoint exists, not merely pending. Do not
 re-run it on a PC and call it progress.
 
+**2026-09-14 (late): what a phone-side endpoint actually requires.** Measured;
+see "The phone-side CDP endpoint" below and `docs/hardware-measurements.md` §F.
+Chrome for Android never listens on TCP and authorizes its socket by peer UID
+(`root` / `shell` / its own), so no phone-side app can connect to it directly.
+An on-device `adb forward` is the route, because adbd runs as `shell`. That is
+now a concrete, testable sequence rather than an open question -- but none of it
+has been run, so step 1 stays blocked.
+
 1. One live question, not a subject: confirm the PDF-once + locator shape
    returns an answer-sheet-only string and that the browser shows ONE chat.
 2. Then one subject (物理基礎, 14 questions) and score against
@@ -487,4 +495,74 @@ the same directory, so re-running one paper still resumes in place.
 Steps 1 and 2 are still blocked: they run on PC Chrome, which is not the venue
 topology. Nothing here was run against chatgpt.com, and no generation was
 spent.
+
+
+## 2026-09-14 (late): the phone-side CDP endpoint
+
+Runs on: PC only for the source reading; read-only `adb` against F-51F for the
+device facts. Nothing was installed, started, or changed on either device, and
+no generation was spent.
+
+### The question
+
+Every chatgpt-web measurement ran on PC Chrome. The venue has no PC, so the
+route needs a CDP endpoint on the phone. Until now the record said only that
+`ROKID_CHATGPT_CDP` "accepts any CDP endpoint, so nothing in the design blocks
+it". That is true of this repository's code and says nothing about Chrome.
+
+### What is true of Chrome for Android (measured, from chromium/src main)
+
+1. **No TCP listener exists.** The Android DevTools server uses
+   `net::UnixDomainServerSocket` in the POSIX abstract namespace and nothing
+   else. Passing `--remote-debugging-port` does not change that; the Android
+   build routes through the unix-socket factory. The name is
+   `<prefix>_devtools_remote`, overridable with `kRemoteDebuggingSocketName`.
+2. **The peer is authorized by UID.** `CanUserConnectToDevTools` requires
+   `group_id == user_id` and then accepts only `root`, `shell`, or the
+   browser's own UID, using SO_PEERCRED. Another app is refused by Chrome
+   itself, before any SELinux question.
+
+### What is true of the device (measured 2026-09-14 on F-51F, read-only adb)
+
+- Android 16 / API 36, SELinux **Enforcing**.
+- `@chrome_devtools_remote` is listening right now:
+  `adb -s 192.168.0.30:44409 shell cat /proc/net/unix | grep -i devtools`.
+- Chrome is `u:r:untrusted_app:s0:c30,c257,c512,c768` (u0_a286); Termux is
+  `u:r:untrusted_app_27:s0:c26,c256,c512,c768` (u0_a26). `plat_seapp_contexts`
+  carries `levelFrom=all`, so each app gets its own MCS categories.
+- Wireless debugging is already enabled: `adb devices` lists
+  `192.168.0.30:44409`.
+
+### The route that follows (inferred, NOT yet run)
+
+adbd runs as `shell`, which is exactly one of the three UIDs Chrome accepts, and
+loopback TCP between apps is not subject to the MLS constraint that blocks the
+abstract socket. So, on the phone:
+
+```text
+adb pair / connect 127.0.0.1:<wireless-debugging-port>   # on-device, no PC
+adb forward tcp:9222 localabstract:chrome_devtools_remote
+ROKID_CHATGPT_CDP=http://127.0.0.1:9222
+```
+
+Android 11+ wireless debugging pairs from the device itself with no computer
+(developer.android.com/tools/adb; Shizuku documents the no-PC startup and that
+it must be redone after a reboot).
+
+### Before this can be used
+
+1. Termux needs `adb` (`android-tools`) and must pair to `127.0.0.1`. **Not
+   attempted:** sshd is down and only the operator can restart it
+   (`termux-wake-lock; sshd`). `am start` from the PC is refused by the tool
+   classifier.
+2. Playwright's Node driver has to run under Termux, which is bionic, not glibc.
+   The escape hatch is measured on the artifact: playwright 1.62.0 reads
+   `PLAYWRIGHT_NODEJS_PATH` (playwright/_impl/_driver.py, lines 30-33) and will
+   use a system node instead of the bundled one. Whether the wheel installs on
+   Termux at all is unchecked.
+3. Memory. §E of the measurements records Termux being killed outright when a
+   model loads; Chrome plus a server plus llama-server on one phone is
+   unmeasured.
+4. Automating the ChatGPT web UI still breaks OpenAI's terms of use. This
+   finding changes the topology, not that.
 

@@ -57,6 +57,15 @@ requires no PC, so the route has to reach a phone-side browser instead;
 `ROKID_CHATGPT_CDP` accepts any CDP endpoint, so nothing in the design blocks
 it, but **this has never been run**. Do not describe chatgpt-web as venue-ready.
 
+Chrome for Android does not hand out a CDP endpoint the way a PC does, and the
+difference is not a configuration detail. It listens only on a unix
+abstract-namespace socket, never on TCP, and it authorizes the connecting
+process by peer UID: `root`, `shell`, or its own. A phone-side app is neither,
+and SELinux gives each app its own MCS categories on top of that. The route
+therefore needs an on-device `adb forward` (adbd runs as `shell`) to turn that
+socket into `127.0.0.1:9222`. Measured, with the source and device evidence, in
+`docs/hardware-measurements.md` §F.
+
 A throttled account is refused in the message *body*, not by an exception. The
 solver's rate-limit markers and slow-generation brake exist because a retry loop
 read a refusal as a bad answer and turned one block into many on 2026-09-14.

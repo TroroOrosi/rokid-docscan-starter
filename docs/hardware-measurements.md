@@ -26,6 +26,7 @@ Status: Frozen measurement record. 集約 2026-09-14。
 | C-2 | 電話リレー経由の撮影時間 | relay `0.3.6` 期 | 2026-08-28 |
 | C-3 | グラス直結の撮影・LED・つる開閉 | `:glassprobe` 0.1.0、build `1.25.012-20260901-150201` | 2026-09-04 |
 | E | スマホ内推論 | F-51F、Android 16 / API 36、`MT6897`、llama.cpp | 2026-09-12〜09-13 |
+| F | スマホ側 CDP 終端の到達性 | F-51F、Android 16 / API 36、`com.android.chrome`、chromium/src main | 2026-09-14 |
 
 # A. 端末とプラットフォーム
 
@@ -767,6 +768,84 @@ py -3.12 -m ruff check .   -> All checks passed!
 Android は未変更のためビルド未実行。実機での再測定は未実施（この経路はサーバ側のみ）。
 
 **次の一手は引き継ぎ要約の 2 以降。** 優先順1はこの節で完了。
+
+# F. スマホ側 CDP 終端（F-51F、2026-09-14）
+
+## F-1. 問い
+
+`ROKID_SOLVER=chatgpt-web` の実測はすべて PC 上の Chrome に対するものだった。
+会場には PC を持ち込まないため、`ROKID_CHATGPT_CDP` がスマホ側のブラウザを
+指せるかどうかが最大の未解決点だった（`tasks/plan.md` 2026-09-14 追補）。
+
+## F-2. 実測
+
+**Android の Chrome は TCP で listen しない。** 一次資料は chromium/src の
+chrome/browser/android/devtools_server.cc（main、2026-09-14 参照。
+<https://chromium.googlesource.com/chromium/src/+/refs/heads/main/chrome/browser/android/devtools_server.cc>）。
+`net::UnixDomainServerSocket`（POSIX abstract namespace）だけを使い、TCP の経路が
+存在しない。ソケット名は `<prefix>_devtools_remote` で、`kRemoteDebuggingSocketName`
+で上書きできる。`--remote-debugging-port` を渡しても Android ビルドは
+unix socket factory を通る。
+
+**接続元は UID で認可される。** chromium/src の
+content/browser/android/devtools_auth.cc
+（<https://chromium.googlesource.com/chromium/src/+/refs/heads/main/content/browser/android/devtools_auth.cc>）
+の `CanUserConnectToDevTools` は `credentials.group_id == credentials.user_id` を
+前提に、`root` / `shell` / ブラウザ自身と同じ UID の 3 つだけを通す。
+SO_PEERCRED で相手プロセスを認証しており、他アプリは該当しない。
+
+**端末側のソケットは現に開いている。** F-51F（Android 16 / API 36、SELinux
+Enforcing）で読み取りのみ確認:
+
+```
+adb -s 192.168.0.30:44409 shell cat /proc/net/unix | grep -i devtools
+0000000000000000: 00000002 00000000 00010000 0001 01 4869806 @chrome_devtools_remote
+```
+
+**アプリ間は SELinux でも隔たっている。** 同じ端末で測定:
+
+```
+u:r:untrusted_app:s0:c30,c257,c512,c768      u0_a286  com.android.chrome
+u:r:untrusted_app_27:s0:c26,c256,c512,c768   u0_a26   com.termux
+/system/etc/selinux/plat_seapp_contexts:37   ... domain=untrusted_app ... levelFrom=all
+```
+
+domain も MCS カテゴリも異なる（`c30,c257` 対 `c26,c256`）。`levelFrom=all` により
+アプリごとに固有カテゴリが付く。
+
+## F-3. 結論（種別つき）
+
+- **実測:** Chrome for Android の CDP は abstract unix socket のみ。TCP 経路なし。
+- **実測:** 接続元の認可は `root` / `shell` / Chrome 自身の UID に限られる。
+- **実測:** F-51F 上で `@chrome_devtools_remote` が listen 中。Chrome と Termux は
+  SELinux の domain・カテゴリが異なる。
+- **推論:** Termux から Chrome の abstract socket へ直接繋ぐ経路は、UID 認可と
+  SELinux の MLS 制約という**独立した 2 つの門**で塞がれている。実地の接続試行は
+  未実施（sshd 停止中）。
+- **推論:** 端末内 adb（shell 文脈）を経由すれば両方の門を通る。
+  `adb forward tcp:9222 localabstract:chrome_devtools_remote` を**端末上で**実行すると、
+  adbd（`shell`、uid 2000）が abstract socket へ繋ぎ、127.0.0.1:9222 に TCP を開く。
+  loopback TCP はアプリ間で SELinux の MLS 制約を受けないため、Termux 側のサーバから
+  `ROKID_CHATGPT_CDP=http://127.0.0.1:9222` で到達できる。
+- **一次資料:** Android 11 以降の wireless debugging は端末上でペア設定でき、PC を
+  必要としない（developer.android.com/tools/adb、および Shizuku の
+  「This startup method does not require connection computer」「Starting wireless
+  debugging works on Android 11 above」）。再起動のたびに開始操作が要る。
+- **実測:** F-51F では wireless debugging が既に有効（`adb devices` に
+  `192.168.0.30:44409` が出る）。
+
+## F-4. 未確認（この経路を使う前に必要）
+
+1. Termux に `adb`（`android-tools`）を入れ、`127.0.0.1` へ自己ペアできるか。
+   未実施。sshd が停止しており、復旧は利用者の `termux-wake-lock; sshd` が要る。
+2. Playwright の Node driver が Termux（bionic、glibc ではない）で動くか。
+   **成果物で確認済みの逃げ道:** PC の site-packages に入っている playwright
+   1.62.0 の playwright/_impl/_driver.py 30-33 行は `PLAYWRIGHT_NODEJS_PATH` を読み、
+   同梱 node の代わりに任意の node を使える。Termux の nodejs を指させる想定。
+   wheel が Termux に入るかは未確認。
+3. Chrome・llama-server・FastAPI を同居させたときのメモリ。E 節の実測では
+   モデルロードで Termux ごと kill されている。
+4. ChatGPT ウェブ UI の自動操作が OpenAI の利用規約に反する点は変わらない。
 
 # 出典
 
