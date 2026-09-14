@@ -15,9 +15,15 @@ The intended session, from `tasks/plan.md`:
 - Normal: 20-40 pages, ~10 min capture, ~10 min analysis, ~130 min review.
 - Listening: ~10 min capture inside a 30 min recording, ~10 min analysis,
   ~110 min review.
-- Glasses have no Wi-Fi; the phone is on 4G/5G and may be locked. **No PC, no
-  self-hosted server, and no tethering at the venue.** Nothing auto-terminates
-  at 150 minutes.
+- **No PC at the venue.** The phone reaches the internet over 4G/5G and, from
+  2026-09-14, also serves a Wi-Fi AP that carries the glasses; the operator
+  confirmed this is available. The server process therefore runs on the phone.
+  Nothing auto-terminates at 150 minutes.
+- The phone being lockable is no longer free. FastAPI, Chrome with its CDP
+  endpoint, and the AP all have to survive whatever the screen does, and
+  `docs/hardware-measurements.md` §F-5-3 measured the DevTools socket
+  disappearing while Chrome's pid stayed the same. Treat "the phone can be
+  locked" as unmeasured for this topology.
 
 Two cooperating runtimes:
 
@@ -25,11 +31,51 @@ Two cooperating runtimes:
 - `android-relay/`: the Android-phone relay for Global Hi Rokid and Rokid
   Glasses, plus the glasses-side apps.
 
-The supported real-device topology is:
+The **decided venue topology** (operator, 2026-09-14) is the standalone glasses
+app over a phone access point. The operator does not touch the phone during a
+session; the glasses' own tap/swipe drive it.
+
+```text
+Rokid Glasses (:glassdoc APK) -> phone Wi-Fi AP -> FastAPI on the phone
+                                                -> Chrome CDP on the phone -> ChatGPT web
+Rokid Glasses (:glassdoc AnswerView) <- answer-bundle
+```
+
+The operator confirmed on 2026-09-14 that the phone can be an access point,
+which retires the "the glasses have no network at the venue" premise that this
+file carried until then.
+
+**None of that topology has been run.** What is measured is each piece
+separately: the glasses app captures and reaches a server over Wi-Fi
+(2026-09-04), and chatgpt-web answers against PC Chrome (2026-09-13). FastAPI on
+the phone is `docs/hardware-measurements.md` 未着手, the phone-side CDP endpoint
+is blocked on pairing (§F-5), and the AP has never carried a session.
+
+The **phone-relay topology** below is what this repository has actually
+exercised end to end, and it stays as the fallback. Do not extend it.
 
 ```text
 Rokid Glasses -> Global Hi Rokid -> Android relay -> FastAPI server -> HUD
 ```
+
+The server still publishes `OPERATION_CONTRACT` as `phone` for every action,
+because that is the relay route's contract and the glasses route has not been
+wired to it. A document that says the glasses drive the operations is describing
+a decision, not the current published contract. Say which one you mean.
+
+Which of each duplicated surface is the route, decided 2026-09-14:
+
+| Role | Route | Kept but frozen |
+|---|---|---|
+| Capture + OCR | `android-relay/glassdoc` | `android-relay/app` (phone relay) |
+| Answer display | `AnswerView` + `AnswerLayout` (measures the real font) | `app/glasses_view.py` wrapping (estimates 18 columns), `app/hud.py` (`/v1/match` only) |
+| Answer delivery | `GET /v1/exam-sessions/{id}/answer-bundle` | `/v1/exam-sessions/{id}/paste-prompt` (already rejected), `/v1/exam-sessions/{id}/pages.pdf` (kept: chatgpt-web attaches it) |
+
+Frozen means the code stays and its tests keep running. It does not get new
+features, and a measurement taken on it does not validate the decided route.
+`docs/superpowers/specs/2026-09-11-glasses-offline-answer-bundle-design.md` is
+the design of the decided route, not a shelved one — its phone-hotspot topology
+is now the intended topology and is still unexercised.
 
 ## Answer routes
 
@@ -72,9 +118,16 @@ read a refusal as a bad answer and turned one block into many on 2026-09-14.
 
 ## Real-device contract
 
-- Photographing the physical page is the primary input path. The relay calls
-  CXR-L `takePhoto`, receives the JPEG, performs bundled Japanese ML Kit OCR,
-  and uploads both JPEG and OCR.
+- Photographing the physical page is the primary input path. On the decided
+  route `:glassdoc` opens `camera2` on the glasses and OCRs there; on the
+  fallback relay route the phone calls CXR-L `takePhoto`, receives the JPEG,
+  performs bundled Japanese ML Kit OCR, and uploads both JPEG and OCR. Both go
+  through `relaycore`'s `DocScanController`.
+- Fully automatic scanning does not exist on either route.
+  `DocScanController.startAutoCapture()` answers `"Automatic capture is
+  disabled; use explicit phone controls"`. One gesture per page is the
+  implemented behaviour; on the decided route that gesture is on the glasses,
+  so the phone is still untouched. Do not describe the capture as automatic.
 - Text-only page upload remains an API compatibility path. Do not describe it
   as the real-device primary path.
 - The public CXR-L AIDL surface does not expose arbitrary recognition or

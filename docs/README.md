@@ -33,10 +33,11 @@ silently applying that exception. `.agents/progress/` remains in scope.
   device gates, and the documentation rules above.
 - `android-relay/README.md` — relay implementation contract and Windows build.
 - `docs/cxr-l-integration.md` — current CXR-L boundary.
-- `docs/glasses-ux-contract.md` — the current input contract for the phone
-  route and the standalone `:glassdoc` app.
+- `docs/glasses-ux-contract.md` — the input contract for the decided
+  `:glassdoc` route and for the frozen phone relay.
 - `docs/device-verification-checklist.md` — physical acceptance evidence form.
-- `docs/real-device-operation.md` — supported phone-controlled operation.
+- `docs/real-device-operation.md` — the decided venue route and the exercised
+  phone-relay fallback.
 - `docs/user-operation-guide.md` — operator and data-handling guide.
 - `docs/windows-android-real-device-setup.md` — Windows/Android setup.
 - `docs/explain-sessions.md` — server explain-session API.
@@ -63,11 +64,14 @@ what the platform permits.
   design of the offline answer bundle: phone-hotspot topology, 大問/小問
   derivation, and the endpoint shape. Implemented, unit-tested, and merged; the
   six-task plan that built it was deleted on 2026-09-14 because every task was
-  complete. **Not verified on hardware in any respect**: no device was involved
-  at any point. The phone-hotspot topology has never been exercised end to end,
-  `AnswerView`'s readability on the glasses is unverified, reading with the
-  hotspot off is unverified, and the two-stage exit and re-wear recovery were
-  not re-tested after the `KEYCODE_BACK` consumption decision changed.
+  complete. **This became the decided venue route on 2026-09-14** when the
+  operator confirmed the phone can be an access point; read it with `CLAUDE.md`
+  "decided venue topology". **Still not verified on hardware in any respect**:
+  no device was involved at any point. The phone-hotspot topology has never been
+  exercised end to end, `AnswerView`'s readability on the glasses is unverified,
+  reading with the hotspot off is unverified, and the two-stage exit and re-wear
+  recovery were not re-tested after the `KEYCODE_BACK` consumption decision
+  changed.
 
 ## Shelved plans
 

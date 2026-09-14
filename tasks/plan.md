@@ -1,6 +1,46 @@
 # Implementation Plan: Safe real-device readiness
 
-**Current plan (2026-09-14 追補):** [解答経路は chatgpt-web に決まった](#answer-route-20260914)。記入用解答の契約は下の 2026-09-10 改訂を引き続き使う。
+**Current plan (2026-09-14 追補2):** [会場トポロジはグラス単独アプリ＋スマホAP](#venue-topology-20260914)。解答経路は [chatgpt-web](#answer-route-20260914)。記入用解答の契約は下の 2026-09-10 改訂を引き続き使う。
+
+<a id="venue-topology-20260914"></a>
+
+## 2026-09-14 追補2：会場トポロジを決める
+
+利用者が **スマホをアクセスポイントにできる** と確認した。これにより
+「会場でグラスは網に出られない」という前提が消えた。同日、AAR の `javap` で
+`IMediaStreamService.sendCustomCmd(String, byte[])` と
+`ICustomCmdCallback.onCustomCmdResult(String, byte[])` が 1.0.1 から
+存在することも確認した（`docs/hardware-measurements.md` §B-0-2）。
+グラス側アプリは AP 経由でも CXR-L 経由でもスマホへ到達できる。
+
+**決定:** グラス単独アプリ `:glassdoc` を本流とする。セッション中はスマホを触らない。
+
+```text
+Rokid Glasses（:glassdoc） → スマホの Wi-Fi AP → スマホ上の FastAPI
+                                              → スマホ上の Chrome CDP → ChatGPT ウェブ
+Rokid Glasses（AnswerView） ← answer-bundle
+```
+
+重複していた実体の振り分け:
+
+| 役割 | 本流 | 凍結（残すが伸ばさない） |
+|---|---|---|
+| 撮影と OCR | `android-relay/glassdoc` | `android-relay/app`（スマホリレー） |
+| 解答表示 | `AnswerView` ＋ `AnswerLayout`（実フォント計測） | `app/glasses_view.py` の折り返し（18桁は推定）、`app/hud.py`（`/v1/match` 専用） |
+| 解答の配送 | `GET /v1/exam-sessions/{id}/answer-bundle` | `/v1/exam-sessions/{id}/paste-prompt`（却下済み）、`/v1/exam-sessions/{id}/pages.pdf`（chatgpt-web が内部で使うので残す） |
+
+`docs/superpowers/specs/2026-09-11-glasses-offline-answer-bundle-design.md` は
+この経路の設計であって、棚上げではない。
+
+**この経路は一度も通していない。** 測れているのは部品だけである。
+残る未了は、スマホ上の FastAPI 常駐（未着手）、スマホ側 CDP 終端（ペア設定待ち、§F-5）、
+AP を通したセッション（未実施）、`OPERATION_CONTRACT` のグラス経路への対応（未実装。
+サーバは今も全項目 `phone` を公示している）。
+
+**全自動スキャンは無い。** `DocScanController.startAutoCapture()` は
+`"Automatic capture is disabled; use explicit phone controls"` を返すだけで、
+実装はページごとに1ジェスチャである。決定経路ではそれがグラス側なので、
+スマホを触らないという条件は満たす。ページ送りの自動検出が要るなら別途決める。
 
 **2026-09-12 改訂は撤回済み**（[該当節](#answer-route-20260912)）。「スマホ内ローカルAIが本筋」という順位は、この文書の中でもう有効ではない。
 
@@ -86,8 +126,11 @@ FastAPI から ssh トンネル越しにスマホの `llama-server` を叩く「
 - 通常: 20〜40ページを約10分撮影→約10分分析→約130分閲覧。
 - リスニング: 30分録音の間に約10分撮影→両入力終了後に約10分分析→約110分閲覧。
 - 両方150分を電池試験条件にし、終了時10%以上を初期目標とする。150分で自動終了しない。
-- グラスWi-Fiなし、スマホ4G/5G・ロック中、端末間の近距離通信を維持する。
-  現場PC・常時稼働させる自前サーバ・テザリングは不要。
+- ~~グラスWi-Fiなし、スマホ4G/5G・ロック中、端末間の近距離通信を維持する。
+  現場PC・常時稼働させる自前サーバ・テザリングは不要。~~
+  **2026-09-14 に更新**（[追補2](#venue-topology-20260914)）: 現場PCは引き続き無いが、
+  スマホは4G/5Gと同時にWi-Fi APを出し、サーバはそのスマホ上で常駐する。
+  ロック中に成立するかは未測定。
 - GPT利用のための管理型クラウド中継を第一候補とすることは利用者回答で承認済み。
   既存FastAPIのsolver/検証処理を再利用候補にする。クラウドへの公開、課金設定、認証情報の
   新規作成は今回行わない。初回設定後の日常操作はグラスだけで完結させる。

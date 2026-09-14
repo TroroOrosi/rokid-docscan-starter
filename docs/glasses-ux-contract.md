@@ -1,6 +1,13 @@
 # Glasses operator contracts
 
-Status: Current phone and standalone surface contracts. Updated 2026-09-09.
+Status: Current phone and standalone surface contracts. Updated 2026-09-14.
+
+**The `:glassdoc` table below is the decided operator surface** (operator,
+2026-09-14): the venue runs the standalone app over a phone access point and the
+phone is not touched during a session. The phone/CUSTOMVIEW rules above it
+describe the frozen relay route, which stays as the fallback. Neither surface
+has passed the physical checklist; the `:glassdoc` gestures are implemented and
+unit-tested, not accepted on hardware.
 
 Earlier revisions mapped tap, double tap, long press, and two-finger swipes to
 capture, completion, and review actions. Those mappings were based on platform
@@ -25,7 +32,10 @@ contract (`app/version.py`):
 diagnosis and explicitly publishes `operator_actions_enabled:false`.
 
 The standalone `:glassdoc` APK has a separate local input adapter
-(its version is in `android-relay/glassdoc/build.gradle.kts`):
+(its version is in `android-relay/glassdoc/build.gradle.kts`). One gesture per
+page, not automatic scanning: `DocScanController.startAutoCapture()` refuses
+with `"Automatic capture is disabled; use explicit phone controls"` on both
+routes.
 
 | State | Tap | Forward swipe | Backward swipe |
 | --- | --- | --- | --- |

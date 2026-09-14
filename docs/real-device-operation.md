@@ -1,16 +1,23 @@
 # Real-device operation
 
-Status: Current supported path. Updated 2026-09-01.
+Status: Current runbook for the exercised phone-relay route. Updated 2026-09-14.
 
-The supported topology is:
+**This is the fallback route, not the decided one.** On 2026-09-14 the operator
+decided the venue runs the standalone `:glassdoc` app over a phone access point,
+with the server and Chrome on the phone; see `CLAUDE.md` "decided venue
+topology" and `docs/glasses-ux-contract.md` for its gesture table. That route
+has never been run end to end, so it has no runbook yet. This document keeps the
+route that has been exercised, and it stays the fallback.
+
+The topology below is the exercised one:
 
 ```text
 Rokid Glasses -> Global Hi Rokid -> Android relay -> FastAPI server -> HUD
 ```
 
-The phone is the operator control surface. CUSTOMVIEW close, `AI-exit`, and AI
-key callbacks are lifecycle/diagnostic evidence only and must not trigger a
-photo, cancellation, registration, finalization, or navigation.
+On this route the phone is the operator control surface. CUSTOMVIEW close,
+`AI-exit`, and AI key callbacks are lifecycle/diagnostic evidence only and must
+not trigger a photo, cancellation, registration, finalization, or navigation.
 
 ## Before a session
 
