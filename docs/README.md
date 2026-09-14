@@ -27,6 +27,11 @@ silently applying that exception. `.agents/progress/` remains in scope.
 
 ## Current contracts and runbooks
 
+- `docs/implementation-surfaces.md` — **read this before adding anything.**
+  Every Gradle module, Activity and operator-facing server module, each with a
+  status: route, frozen, probe or shared. `tests/test_surface_inventory.py`
+  fails when a surface is missing from it, so a second implementation of an
+  existing role has to be declared rather than merely appear.
 - `README.md` — project entrypoint: what this is for, setup, and the HTTP API.
 - `CLAUDE.md` — engineering invariants. The contract that governs changes:
   real-device rules, answer routes, capture/input/server invariants, build and
@@ -73,13 +78,20 @@ what the platform permits.
   recovery were not re-tested after the `KEYCODE_BACK` consumption decision
   changed.
 
+## Decided, not yet implemented
+
+A decision is not a runbook and not a measurement. These describe what the
+system is meant to do, against code that does not do it yet.
+
+- `docs/fast-scan-decisions.md` — **the decided capture method**: automatic
+  scanning with simultaneous listening (operator, 2026-09-15). R2-R6 define it.
+  The adoption decisions (D01-D15, E01-E06, X01-X06) survive; the 30 operation
+  scenarios, probe worksheets and task list were deleted on 2026-09-14. All of
+  it is unexecuted design, not hardware or model acceptance, and
+  `DocScanController.startAutoCapture()` still refuses.
+
 ## Shelved plans
 
-- `docs/fast-scan-decisions.md` — automatic scanning with simultaneous
-  listening. **Not implemented and not scheduled.** Only the adoption decisions
-  survive (D01-D15, E01-E06, X01-X06); the 30 operation scenarios, probe
-  worksheets and task list were deleted on 2026-09-14. All of it is unexecuted
-  design, not hardware or model acceptance.
 - `tasks/plan.md` — the current plan and its accepted revisions.
 - `tasks/todo.md` — open tasks. Unchecked never means implemented.
 

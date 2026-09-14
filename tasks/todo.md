@@ -207,11 +207,16 @@ and unknown future actions safe while retaining content-free diagnostics.
 
 <a id="fast-scan-tasks"></a>
 
-# 自動スキャン・同時リスニング（FS-01〜FS-51）— 保留
+# 自動スキャン・同時リスニング（FS-01〜FS-51）— **決定済み・未実装**
+
+**2026-09-15 に「保留」から格上げ。** これが本番の撮影方式である（利用者の決定）。
+方式の定義は [`docs/fast-scan-decisions.md`](../docs/fast-scan-decisions.md) の R2〜R6。
+タスク一覧そのものは 2026-09-14 に削除済みで、**書き直しが要る**。
 
 **2026-09-14 に削除した。** 831 行の未着手タスクだった。機能はコードに無く
 （`AudioRecord` の実装 0 件、自動スキャン未実装）、2026-09-12 の解答経路改訂で
-優先度が下がり、現行の主経路は `ROKID_SOLVER=chatgpt-web` になった。
+着手順が下がっていた。解答経路は `ROKID_SOLVER=chatgpt-web` で確定しており、
+撮影方式とは独立である。「保留」は着手順の話であって、方式の不採用ではなかった。
 
 再調査コストの高い採否判断（D01-D15、E01-E06、X01-X06）だけを
 `docs/fast-scan-decisions.md` に残した。再開するときは、あの判断を出発点に

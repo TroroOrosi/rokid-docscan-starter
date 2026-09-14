@@ -127,11 +127,31 @@ read a refusal as a bad answer and turned one block into many on 2026-09-14.
   fallback relay route the phone calls CXR-L `takePhoto`, receives the JPEG,
   performs bundled Japanese ML Kit OCR, and uploads both JPEG and OCR. Both go
   through `relaycore`'s `DocScanController`.
-- Fully automatic scanning does not exist on either route.
-  `DocScanController.startAutoCapture()` answers `"Automatic capture is
-  disabled; use explicit phone controls"`. One gesture per page is the
-  implemented behaviour; on the decided route that gesture is on the glasses,
-  so the phone is still untouched. Do not describe the capture as automatic.
+- **The decided capture method is automatic scanning** (operator, 2026-09-15).
+  `docs/fast-scan-decisions.md` defines it: the glasses detect the page and
+  shoot on their own, the captured image is shown for 3 seconds, a single tap
+  in that window retakes, no input commits it and moves to the next page, and a
+  double tap ends the capture phase. Zero phone operations after setup.
+- **It is built, and switched off.** Do not write it as missing.
+  `relaycore/DocScanController` carries the whole loop — `AUTO_BURST_SHOTS=3`
+  at `AUTO_SHOT_INTERVAL_MILLIS=400`, `AUTO_PAGE_TURN_MILLIS=2500`, the best
+  frame chosen by `:pagequality`'s `ShotScore` and `PageFraming`, duplicates
+  given up after `AUTO_DUPLICATE_BURST_LIMIT=20`, unreadable bursts retried
+  `AUTO_UNREADABLE_RETRY_LIMIT=40` times before backing off, then auto-commit
+  at 4s (12s unverified). `feat: read pages hands-free` built it.
+  `adf12ee` (2026-09-01, `fix: require explicit phone capture controls`) then
+  made `startAutoCapture()` answer `"Automatic capture is disabled; use
+  explicit phone controls"`.
+- **Why it was switched off is route-specific, and the route changed.** On the
+  CUSTOMVIEW/phone-relay route a tap reaches nothing, so automatic registration
+  would upload pages the operator could neither see nor stop. On `:glassdoc`
+  tap and swipe do reach the Activity (`docs/hardware-measurements.md` §A-2),
+  which is the input that gate was waiting for. Re-enabling it there is the
+  work; writing it again is not.
+- What the decided method still needs on top: the 3-second look at the real
+  captured image and the single tap inside that window that retakes it (R3,
+  R4). The existing auto-commit delays are keyed to a CUSTOMVIEW
+  acknowledgement, not to a glasses-side review.
 - Text-only page upload remains an API compatibility path. Do not describe it
   as the real-device primary path.
 - The public CXR-L AIDL surface does not expose arbitrary recognition or

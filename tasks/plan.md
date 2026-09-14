@@ -37,10 +37,26 @@ Rokid Glasses（AnswerView） ← answer-bundle
 AP を通したセッション（未実施）、`OPERATION_CONTRACT` のグラス経路への対応（未実装。
 サーバは今も全項目 `phone` を公示している）。
 
-**全自動スキャンは無い。** `DocScanController.startAutoCapture()` は
-`"Automatic capture is disabled; use explicit phone controls"` を返すだけで、
-実装はページごとに1ジェスチャである。決定経路ではそれがグラス側なので、
-スマホを触らないという条件は満たす。ページ送りの自動検出が要るなら別途決める。
+**撮影方式は自動スキャン**（2026-09-15、利用者の決定）。定義は
+[`docs/fast-scan-decisions.md`](../docs/fast-scan-decisions.md) の R2〜R6 で、
+検知して自動撮影 → 実画像を3秒表示 → その間の単タップで取り直し →
+無操作で確定して次ページ → ダブルタップで撮影終了。スマホ操作は0回。
+
+撮影ページは**1つの PDF** にまとめ、**1教科につき1チャット**へ1回だけ添付する。
+以降の小問は設問を指す文だけを送る。解答は**解答用紙に記入する内容のみ**。
+
+**実装済み・無効化中。「無い」と書かないこと。** `relaycore/DocScanController` に
+連続スキャン一式がある（`AUTO_BURST_SHOTS=3` / `AUTO_SHOT_INTERVAL_MILLIS=400` /
+`AUTO_PAGE_TURN_MILLIS=2500` / `AUTO_DUPLICATE_BURST_LIMIT=20` /
+`AUTO_UNREADABLE_RETRY_LIMIT=40` / 自動確定 4 秒、最良フレームは `:pagequality` の
+`ShotScore` と `PageFraming`）。2026-09-01 の `adf12ee` が `startAutoCapture()` を
+拒否へ変えた。理由は **CUSTOMVIEW 経路にタップが届かない**ことで、操作者が
+止められない自動登録を防ぐためだった。
+
+**その理由は経路に固有で、経路は変わった。** `:glassdoc` にはタップとスワイプが
+届く（`docs/hardware-measurements.md` §A-2）。残る作業は再有効化と、
+実画像3秒表示＋その間の単タップ取り直し（R3/R4）をグラス側の面に作ること。
+既存の自動確定の待ちは CUSTOMVIEW の ack に紐づいており、そのままでは使えない。
 
 **2026-09-12 改訂は撤回済み**（[該当節](#answer-route-20260912)）。「スマホ内ローカルAIが本筋」という順位は、この文書の中でもう有効ではない。
 

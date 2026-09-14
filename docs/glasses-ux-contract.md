@@ -32,10 +32,15 @@ contract (`app/version.py`):
 diagnosis and explicitly publishes `operator_actions_enabled:false`.
 
 The standalone `:glassdoc` APK has a separate local input adapter
-(its version is in `android-relay/glassdoc/build.gradle.kts`). One gesture per
-page, not automatic scanning: `DocScanController.startAutoCapture()` refuses
-with `"Automatic capture is disabled; use explicit phone controls"` on both
-routes.
+(its version is in `android-relay/glassdoc/build.gradle.kts`).
+
+**This table is what the code does today: one gesture per page.** The decided
+capture method is automatic scanning — detect, shoot, show the real image for 3
+seconds, single tap to retake inside it, no input commits and advances, double
+tap ends the phase (`docs/fast-scan-decisions.md` R2-R6). That method is not
+implemented; `DocScanController.startAutoCapture()` refuses with `"Automatic
+capture is disabled; use explicit phone controls"` on both routes. When it is
+built, the Ready/Aiming rows below are what it replaces.
 
 | State | Tap | Forward swipe | Backward swipe |
 | --- | --- | --- | --- |

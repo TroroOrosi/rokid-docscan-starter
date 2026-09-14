@@ -4,10 +4,23 @@ Updated 2026-09-14（2回目の更新）。Branch `agent/hud-line-budget`. PR #3
 
 ## 次のセッションへ：まずこれを読むこと
 
-**重複の整理は 2026-09-14 に終わった。** 下の「振り分け」が利用者の決定である。
-前回この節にあった「利用者と整理すること」は完了したので、繰り返さないこと。
+**1. `docs/implementation-surfaces.md` を先に読む。** 全実装面（Gradle モジュール、
+Activity、表示モジュール）と、それぞれが 本流 / 凍結 / probe / 共有 のどれかの台帳。
+`tests/test_surface_inventory.py` が漏れを落とす。**機能を足す前にここを見る。**
 
-**凍結した側で測っても、決定した経路の検証にはならない。** スマホリレーでの計測、
+**2. 2026-09-15 にやらかした失敗を繰り返さないこと。** このセッションは
+`DocScanController.startAutoCapture()` が拒否を返す1点だけを見て
+「自動スキャンは未実装」と資料6箇所に書いた。**実際は実装済みで、無効化されていた。**
+連続スキャン一式（バースト・最良フレーム選択・重複検出・自動確定）は
+`relaycore` にあり、`:pagequality` に採点器がある。無効化は 2026-09-01 の `adf12ee` で、
+理由は **CUSTOMVIEW 経路にタップが届かない**ことだった。決定した `:glassdoc` 経路には
+届くので、その理由は当てはまらない。
+
+利用者の指摘: **作る機能だけを見て、コードと資料の全体を把握していない。**
+md とコードが増える一方で整理されず、過去のものを確認していない。
+台帳と検査はその対策として入れた。読むのを省くと同じことが起きる。
+
+**3. 凍結した側で測っても、決定した経路の検証にはならない。** スマホリレーでの計測、
 `glasses_view` の桁数実測、PC Chrome に対する chatgpt-web の実行は、いずれも
 部品の測定であって経路の検証ではない。実行する前にどちらの経路かを言うこと。
 
@@ -69,14 +82,27 @@ Rokid Glasses（AnswerView） ← answer-bundle
 - FS-65 の残り（表の桁揃え・作図）は、対象が `glasses_view` なら不要。
   `AnswerView` 側で同じ問題が要るかは未確認。
 
-### まだ実装されていないこと
+## 撮影方式（2026-09-15、利用者の決定）
 
-- `OPERATION_CONTRACT` は今もサーバが全項目 `phone` を公示する
-  （`app/glasses_view.py:119`）。グラス経路へは未対応。**決定と実装は別である。**
-- **全自動スキャンは無い。** `DocScanController.startAutoCapture()` は
-  `"Automatic capture is disabled; use explicit phone controls"` を返すだけ。
-  実装はページごとに1ジェスチャ。決定経路ではそれがグラス側なので
-  「スマホを触らない」は満たすが、「自動」ではない。ページ送りの自動検出は未決定。
+**自動スキャンが本番の方式である。** 定義は `docs/fast-scan-decisions.md` の R2〜R6:
+検知して自動撮影 → 実画像を3秒表示 → その間の単タップで取り直し →
+無操作で確定して次ページ → ダブルタップで撮影終了。初回準備後のスマホ操作は0回。
+
+撮影ページは**1つの PDF** にまとめ、**1教科につき1チャット**へ1回だけ添付する。
+以降の小問は設問を指す文だけを送る。解答は**解答用紙に記入する内容のみ**。
+
+### 実装状況（「無い」と書かないこと）
+
+| 要素 | 状態 |
+|---|---|
+| 連続スキャンのループ | **実装済み・無効化中。** `relaycore/DocScanController`：`AUTO_BURST_SHOTS=3`、`AUTO_SHOT_INTERVAL_MILLIS=400`、`AUTO_PAGE_TURN_MILLIS=2500`、`AUTO_DUPLICATE_BURST_LIMIT=20`、`AUTO_UNREADABLE_RETRY_LIMIT=40`、`AUTO_UNREADABLE_BACKOFF_MILLIS=1200` |
+| 最良フレームの選択 | **実装済み。** `:pagequality` の `ShotScore`（バーストの採点）と `PageFraming`（枠内判定） |
+| 自動確定 | **実装済み。** `AUTO_COMMIT_COMPLETE_MILLIS=4000` / 未検証時 `12000`。ただし CUSTOMVIEW の ack に紐づく |
+| 無効化 | `adf12ee`（2026-09-01）が `startAutoCapture()` を拒否へ。理由は CUSTOMVIEW 経路の入力欠如で、**経路固有** |
+| 実画像3秒＋単タップ取り直し（R3/R4） | **未実装。** グラス側の面に作る必要がある |
+| 冊子を1PDFで1教科1チャット | **実装済み。** `document_image_paths` → `images_to_pdf`、`CHAT_SCOPE=subject` 既定、`chat_key=session:{id}` |
+| 解答用紙の内容のみ | **実装済み。** `answer_only=True` |
+| `OPERATION_CONTRACT` | サーバは今も全項目 `phone` を公示（`app/glasses_view.py:119`）。グラス経路へは未対応 |
 
 ## 2026-09-14 に検証済みのこと（証拠つき）
 
@@ -138,26 +164,43 @@ Runs on: 1 は完了（オフライン）。2 はオフラインの実装。3 �
 （F-51F、ssh + 端末内 adb）。5 はグラス実機＋スマホ実機。決定経路で動くのは 3 以降で、
 PC 上の Chrome に対する実行は**経路の検証にならない**。
 
-1. ~~**重複の整理。**~~ **完了 2026-09-14。** 上の「振り分け」が結果。
-   `CLAUDE.md` / `README.md` / `docs/README.md` / `docs/real-device-operation.md` /
-   `docs/glasses-ux-contract.md` / `tasks/plan.md` に反映済み。
-2. **スマホ側 CDP の方式を実装する。** 決定は A（Playwright をやめて CDP を直接話す。
-   HTTP `/json` ＋ WebSocket）。理由は実測：Termux に Playwright の wheel が無く、
-   manylinux wheel ＋ `PLAYWRIGHT_NODEJS_PATH` でも driver が
-   `Error: Unsupported platform: android` で初期化に失敗する（§F-5-4）。
-   B（proot で glibc）はコード変更不要だがユーザランドを1つ増やす。
-   対象は `app/solvers/chatgpt_web.py`。オフラインで書ける。
-3. **スマホ上で FastAPI を常駐させる。** `docs/hardware-measurements.md` は
-   「未着手」と記録している。決定経路ではサーバがスマホ上に居ることが前提なので、
-   ここが通らないと 5 に進めない。
-4. **ペア設定と `adb forward`。** **利用者の操作が1回要る。** 設定アプリが表示する
-   6桁コードを受け取り、`adb pair 127.0.0.1:<port>` → `adb connect` →
-   `adb forward tcp:9222 localabstract:chrome_devtools_remote` →
-   `curl http://127.0.0.1:9222/json/version`。
-5. **AP を通して経路を1本通す。** `:glassdoc` を sideload し、スマホの AP へ
-   グラスを収容し、撮影 → OCR → アップロード → chatgpt-web → `answer-bundle` →
-   `AnswerView` を1冊分。ここで初めて経路の検証になる。
-   LED の物理確認（`docs/device-verification-checklist.md`）を同時に行う。
+1. ~~**重複の整理**~~ / ~~**スマホ側 CDP を Playwright から CDP 直接へ**~~ /
+   ~~**スマホ上の FastAPI 常駐**~~ / ~~**端末内 `adb forward`**~~ — **完了 2026-09-15。**
+   詳細は下の「2026-09-15 に実測したこと」。
+
+2. **自動スキャンを `:glassdoc` で有効化する。** 書き直しではなく**再有効化**。
+   `startAutoCapture()` の拒否を外し、CUSTOMVIEW の ack に紐づく自動確定を
+   グラス側の面へ繋ぐ。R3（実画像3秒）と R4（その間の単タップで取り直し）を作る。
+   既存の `AnswerView` / `HudView` / `FramingGuide` を見てから足すこと。
+   **オフラインで書ける。** 単体試験は `AutoCommitDecisionTest` の隣に置く。
+
+3. **共通テスト1教科の PDF を chatgpt-web へ送って測る。** 利用者の指摘：
+   時間と読字精度を見るなら、合成画像ではなく実際の試験 PDF を1教科送る。
+   2026-09-15 に送った自作画像（白地・三角形・潰れた数字）は安全性チェックを引き、
+   所要時間の参考にならなかった。`ROKID_CHATGPT_TIMEOUT_S` と
+   `SLOW_S`/`SLOW_STREAK` の妥当性はこの測定の後に判断する。**送信前に利用者へ確認。**
+
+4. **`:glassdoc` を sideload し、AP を通して経路を1本通す。** 撮影 → OCR →
+   アップロード → chatgpt-web → `answer-bundle` → `AnswerView` を1冊分。
+   ここで初めて経路の検証になる。LED の物理確認
+   （`docs/device-verification-checklist.md`）を同時に行う。
+
+## 2026-09-15 に実測したこと（証拠つき）
+
+| 内容 | 結果 |
+|---|---|
+| 端末内 `adb forward` | **通った。** 6桁コード不要。`adb tcpip 5555` で平文 TCP にすると端末内 client が `adb_keys` の許可制を通る（§F-6-6） |
+| スマホ単独で CDP | **通った。** Termux Python → `app/solvers/cdp.py` → Chrome for Android。日本語完全一致、36,000字、6MB PDF 1.57s |
+| スマホ上の FastAPI | **動いた。** fastapi 0.99.1 / pydantic 1.10.26 のまま。`/health` と `/v1/version` が 200、`chatgpt-web` は `ready:true`（§F-6-8） |
+| 解答（テキスト） | **返った。** `2x+3=7 を解け` → `x=2`、19.5s。PC はどこにも入っていない（§F-6-9） |
+| 解答（画像添付） | **届いた。** 画像の `6391` を `691` と返した。誤読は自作画像が潰れていたため（§F-6-10） |
+
+Playwright は使わなくなった。`app/solvers/cdp.py` が CDP を直接話す。
+`requirements.txt` の `fastapi` 下限は 0.99 へ（pydantic 2 は Android に wheel が無い）。
+
+修正した欠陥3つ。いずれも stub 試験では見えなかった:
+Enter はモバイルでは改行で送信にならない／座標のマウスイベントは React に届かない／
+`start_new_chat` 直後の file input は React が差し替えるので書いても消える。
 
 ## 環境（再現に要る）
 
