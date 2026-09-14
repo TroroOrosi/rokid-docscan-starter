@@ -1246,8 +1246,63 @@ uvicorn 0.52.4 / pillow 12.3.0 / httpx 0.28.1 / websockets 17.1。
 本アプリは素の `BaseModel` とスカラ型しか使わず `Annotated` も無いので、
 どちらの major でも動く。よって下限を `fastapi>=0.99` に緩めた。
 
-**未測定:** 送信も生成も1度もしていない。`Input.insertText` を ProseMirror が受けるか、
-`DataTransfer` の添付が composer に載るかは、実ページでは未確認。
+### F-6-9. スマホだけで解答が返った（実測、2026-09-15）
+
+**会場トポロジで解答が1件返った。PC はどこにも入っていない。**
+
+```
+browser: Chrome/153.0.8010.36 | chat scope: subject
+prompt : 2x+3=7 を解け。（system: 解答用紙に書く内容だけを出力）
+elapsed: 19.5s
+reply  : 'x=2'
+```
+
+経路は Termux Python → `app/solvers/cdp.py` → 端末内 `adb forward tcp:9222` →
+Chrome for Android → chatgpt.com。添付なし、1 生成。
+
+ここへ来るまでに**欠陥が2つ**あり、どちらも stub では見えなかった。
+
+#### 欠陥1: Enter は送信ではない（モバイル）
+
+`send_and_read` は `keyboard.press("Enter")` で送っていた。デスクトップでは動くが、
+**モバイルのウェブ composer では Enter は改行**である。3 回の attempt がそれぞれ
+Enter を押し、composer に空行を足しただけで、1 件も送信されなかった。
+利用者が画面で気付いて指摘した。
+
+送信ボタンは `[data-testid="send-button"]`（`aria-label="プロンプトを送信する"`）。
+**composer が空のときは DOM に出ない**ので、F-6-7 の空ページ調査では見つからなかった。
+文字を入れた状態で調べ直して判明した。`submit()` はボタンを優先し、無ければ Enter。
+
+#### 欠陥2: 座標のマウスイベントは React に届かない
+
+ボタンを押すようにしても送信されなかった。**推測せずページを読んだ**（送信なし）:
+
+```
+composer length: 44          ← 文章は入ったまま
+conversation started: False  ← URL が /c/... にならない
+[data-message-author-role] total: 0
+```
+
+`Locator.click()` は `Input.dispatchMouseEvent` で要素中心の座標を撃っていた。
+`data:` ページのインライン `onclick` は発火するが、chatgpt.com の React には届かない。
+`HTMLElement.click()` へ変更し、無害なボタンで先に確かめた:
+
+```
+[data-testid="open-sidebar-button"] を click()
+nav-ish elements before: 1  →  after: 41
+```
+
+座標打ちは layout・ズーム・可視タブに依存する。要素そのものを呼ぶほうが単純で確実。
+
+#### 手順の教訓
+
+生成を 3 回無駄にした。1 回目は出力の取り逃し、2 回目は欠陥1、3 回目は欠陥2。
+**送信のたびに1つずつ欠陥を見つけた。** 送信前にページ状態を読んでいれば
+2 つとも 1 回で分かった。実ページに対しては、送る前に読む。
+
+**まだ未測定:** 添付付きの送信は 1 度もしていない。`DataTransfer` で入れた
+`files` が composer の添付として載り、モデルに届くかは未確認（F-6-4 は
+`input.files` に載ることまでしか見ていない）。
 
 `adb forward tcp:9222` を張ったまま `py -3.12 -m pytest -q` を回したところ、
 `tests/test_chatgpt_web_live.py` の門（`cdp_available() is None` で skip）が

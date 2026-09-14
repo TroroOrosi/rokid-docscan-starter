@@ -210,29 +210,25 @@ class Locator:
             time.sleep(0.1)
 
     def click(self) -> None:
-        """Click where the element is, not just dispatch a click event.
+        """Click the element itself, not a point on the screen.
 
-        A React tree reacts to both, but a real mouse event also moves focus and
-        closes whatever popover is open, which a dispatched event does not.
+        ``Input.dispatchMouseEvent`` at the element's centre looks more faithful
+        and was tried first. It fires an inline ``onclick`` on a plain page, but
+        it did not submit chatgpt.com's composer: measured 2026-09-15 on F-51F,
+        the prompt stayed in the composer, the URL never became ``/c/...`` and no
+        message turn appeared, three attempts running. A React tree listens for
+        the delegated ``click`` that ``HTMLElement.click()`` produces, and the
+        coordinate route depends on layout, zoom and which tab is visible.
+
+        ``fill()`` focuses explicitly, so nothing here relies on a click to move
+        focus.
         """
-        box = self._page.evaluate(
-            f"(() => {{ const e = {self._element_js()}; if (!e) return null; "
-            "e.scrollIntoView({block: 'center'}); const r = e.getBoundingClientRect(); "
-            "return {x: r.x + r.width / 2, y: r.y + r.height / 2}; })()"
+        clicked = self._page.evaluate(
+            f"(() => {{ const e = {self._element_js()}; if (!e) return false; "
+            "e.scrollIntoView({block: 'center'}); e.click(); return true; })()"
         )
-        if not box:
+        if not clicked:
             raise CdpError(f"cannot click {self._selector!r}: no element matched")
-        for event_type in ("mousePressed", "mouseReleased"):
-            self._page.send(
-                "Input.dispatchMouseEvent",
-                {
-                    "type": event_type,
-                    "x": box["x"],
-                    "y": box["y"],
-                    "button": "left",
-                    "clickCount": 1,
-                },
-            )
 
     def fill(self, text: str) -> None:
         """Focus the element, clear it, and insert the text as typed input.

@@ -92,16 +92,14 @@ def test_press_enter_sends_a_real_key_event_pair():
     assert up["type"] == "keyUp"
 
 
-def test_click_uses_the_element_centre_and_refuses_an_absent_one():
-    page = FakePage(values=[{"x": 12.0, "y": 34.0}])
+def test_click_calls_the_element_rather_than_aiming_at_coordinates():
+    """A coordinate mouse event did not submit chatgpt.com's composer."""
+    page = FakePage(values=[True])
     page.locator("#go").click()
-    assert [method for method, _ in page.sent] == [
-        "Input.dispatchMouseEvent",
-        "Input.dispatchMouseEvent",
-    ]
-    assert all(params["x"] == 12.0 for _, params in page.sent)
+    assert "e.click()" in page.evaluated[0]
+    assert page.sent == []
 
-    empty = FakePage(values=[None])
+    empty = FakePage(values=[False])
     with pytest.raises(cdp.CdpError, match="cannot click"):
         empty.locator("#gone").click()
 

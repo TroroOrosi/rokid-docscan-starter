@@ -85,6 +85,10 @@ class _Locator:
             return self._page.thumbnail_baseline + self._page.confirmed_files
         if self._selector == chatgpt_web.NEW_CHAT_SEL:
             return 1
+        if self._selector == chatgpt_web.SEND_SEL:
+            # The real composer has one, and it is what submits: on the mobile
+            # web layout Enter only inserts a newline.
+            return 0 if self._selector in self._page.missing else 1
         return len(self._page.replies)
 
     @property
@@ -150,6 +154,19 @@ class _StubPage:
         return _Locator(self, selector)
 
 
+def _kinds(page):
+    """Event kinds with the send click named as such, so a sequence reads."""
+    return [
+        "send" if (kind == "click" and value == chatgpt_web.SEND_SEL) else kind
+        for kind, value in page.events
+    ]
+
+
+def _sends(page):
+    """Every submitted message. The button is normal; Enter is the fallback."""
+    return [k for k in _kinds(page) if k in ("send", "press")]
+
+
 def _ask(page, text="問1 2x+3=7 を解け", **kw):
     kw.setdefault("sleep", lambda _s: None)
     return ask_page(page, text, poll_s=0, stable_polls=2, **kw)
@@ -170,7 +187,7 @@ def test_prompt_is_filled_whole_so_a_newline_does_not_send_it_early():
     fills = [value for kind, value in page.events if kind == "fill"]
     assert fills == [text]
     # Exactly one send, and it comes after the text is in place.
-    assert [kind for kind, _ in page.events] == ["wait_for", "click", "fill", "press"]
+    assert _kinds(page) == ["wait_for", "click", "fill", "send"]
 
 
 def test_a_reply_that_never_settles_raises_instead_of_returning_a_partial():
@@ -197,8 +214,7 @@ def test_image_is_attached_as_its_own_part_before_the_text_is_typed():
 
     assert attached is True
     assert reply == "done"
-    kinds = [kind for kind, _ in page.events]
-    assert kinds == ["wait_for", "upload", "click", "fill", "press"]
+    assert _kinds(page) == ["wait_for", "upload", "click", "fill", "send"]
     # The text part carries no image bytes.
     fills = [value for kind, value in page.events if kind == "fill"]
     assert fills == ["問3 図の角度を求めよ"]
@@ -209,7 +225,7 @@ def test_no_image_means_no_upload_at_all():
     _, attached = _ask(page, images=None)
 
     assert attached is None
-    assert [kind for kind, _ in page.events] == ["wait_for", "click", "fill", "press"]
+    assert _kinds(page) == ["wait_for", "click", "fill", "send"]
 
 
 def test_an_unconfirmed_upload_still_sends_but_is_reported():
@@ -578,7 +594,7 @@ def test_an_unconfirmed_upload_costs_no_generation(monkeypatch):
     chatgpt_web.ChatGptWebClient()._ask_with_retries(_OneTabContext(page), "第2問", [PNG])
 
     assert len([k for k, _ in page.events if k == "upload"]) == 2
-    assert len([k for k, _ in page.events if k == "press"]) == 1, "one question, one message"
+    assert len(_sends(page)) == 1, "one question, one message"
 
 
 def test_a_usage_limit_reply_is_never_retried(monkeypatch):
@@ -597,7 +613,7 @@ def test_a_usage_limit_reply_is_never_retried(monkeypatch):
     with pytest.raises(chatgpt_web.ChatGptWebRateLimit):
         chatgpt_web.ChatGptWebClient()._ask_with_retries(_OneTabContext(page), "第2問", [])
 
-    assert len([k for k, _ in page.events if k == "press"]) == 1, "no retry after a limit"
+    assert len(_sends(page)) == 1, "no retry after a limit"
     assert isinstance(chatgpt_web.ChatGptWebRateLimit("x"), ChatGptWebError)
 
 
@@ -684,7 +700,7 @@ def test_a_subject_scoped_deck_opens_one_chat_not_one_per_question(monkeypatch):
     client._ask_with_retries(ctx, "問2", [], chat_key="subject:数学")
 
     assert len(_clicks(page, chatgpt_web.NEW_CHAT_SEL)) == 1, "one chat for the subject"
-    assert len([k for k, _ in page.events if k == "press"]) == 2, "both questions asked"
+    assert len(_sends(page)) == 2, "both questions asked"
 
 
 def test_the_next_subject_gets_its_own_chat(monkeypatch):
@@ -809,3 +825,18 @@ def test_an_unreadable_recording_does_not_fail_the_solve(tmp_path):
 
     assert client.seen["audio"] is None
     assert result.answer == "②"
+
+
+def test_the_send_button_submits_and_enter_is_only_the_fallback():
+    """Enter is a NEWLINE on the mobile web composer, not a submit.
+
+    Measured 2026-09-15 on F-51F: three attempts pressed Enter, each left
+    another blank line in the composer, and none of them sent the question.
+    """
+    page = _StubPage(["done", "done", "done"])
+    assert chatgpt_web.submit(page) == "button"
+    assert _kinds(page) == ["send"]
+
+    moved = _StubPage(["done", "done", "done"], missing=(chatgpt_web.SEND_SEL,))
+    assert chatgpt_web.submit(moved) == "enter"
+    assert [value for kind, value in moved.events if kind == "press"] == ["Enter"]

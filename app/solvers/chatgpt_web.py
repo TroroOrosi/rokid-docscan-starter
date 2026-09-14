@@ -95,6 +95,13 @@ STOP_SEL = os.environ.get("ROKID_CHATGPT_STOP_SEL", '[data-testid="stop-button"]
 NEW_CHAT_SEL = os.environ.get(
     "ROKID_CHATGPT_NEW_CHAT_SEL", '[data-testid="create-new-chat-button"]'
 )
+# The composer's send control. Clicked rather than pressing Enter, because on a
+# phone Enter is a NEWLINE: the mobile web composer keeps the caret in the
+# message and only the button submits. Measured 2026-09-15 on F-51F -- three
+# attempts each pressed Enter, each left another blank line in the composer, and
+# not one of them sent anything. The button carries the same testid on both
+# layouts; Enter stays as the fallback for a page where it has moved.
+SEND_SEL = os.environ.get("ROKID_CHATGPT_SEND_SEL", '[data-testid="send-button"]')
 # A reply is complete when its text stops growing. Streaming pauses mid-answer,
 # so require several consecutive identical polls rather than a single one.
 # 0.25s x 4 confirms after 1s of silence. The earlier 1.0s x 3 spent 3s waiting
@@ -467,6 +474,22 @@ def ask_page(
     return reply, attached
 
 
+def submit(page) -> str:
+    """Send the composed message. Returns which control did it.
+
+    The send button is preferred over Enter and is not a nicety: on the mobile
+    web composer Enter inserts a newline and submits nothing, so a route that
+    presses it waits out its whole timeout with the question sitting on screen.
+    Enter remains the fallback for a layout where the button has moved.
+    """
+    button = page.locator(SEND_SEL)
+    if button.count():
+        button.first.click()
+        return "button"
+    page.keyboard.press("Enter")
+    return "enter"
+
+
 def send_and_read(
     page,
     text: str,
@@ -495,7 +518,7 @@ def send_and_read(
     # ``fill`` sets a contenteditable's content in one step. Typing it key by
     # key would send the message at the prompt's first newline.
     composer.fill(text)
-    page.keyboard.press("Enter")
+    submit(page)
 
     replies = page.locator(ASSISTANT_SEL)
     stop_button = page.locator(STOP_SEL)
