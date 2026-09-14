@@ -1023,7 +1023,12 @@ SELinux の MCS カテゴリ分離のとおりで、**アプリ間では繋が�
 回した副作用でこれが起きたのは、測定の偶然ではなく、同じ端末で重い処理を走らせる
 構成そのものの性質である。
 
-### F-5-3. 端末内 adb はペア設定が要る（実測、未完了）
+### F-5-3. 端末内 adb はペア設定が要る（実測、**2026-09-15 に解決**）
+
+> **解決済み。F-6-6 を読むこと。** 6桁コードは要らなかった。`adb tcpip 5555` で
+> 平文 TCP に切り替えると、端末内 client は `/data/misc/adb/adb_keys` の許可制を
+> 通る。この節が「要る」と書いたのはワイヤレスデバッグ（TLS）に限った話で、
+> それが唯一の経路だと決めつけていた。
 
 `pkg install android-tools` で Termux に adb 1.0.41（35.0.2）が入った。しかし
 
@@ -1143,7 +1148,78 @@ Chrome for Android からサーバのファイルは見えない。ページへ 
 **未測定:** chatgpt.com の実ページに対しては1度も動かしていない。セレクタが今も
 合うか、ProseMirror が `Input.insertText` を受けるかは未確認。
 
-### F-6-5. 事故の記録（2026-09-15）
+### F-6-6. 端末内 adb と、スマホ単独での CDP 実行（実測、2026-09-15）
+
+**PC をデータ経路から外した状態で通った。** F-5-3 が「ペア設定未了」としていた壁は、
+6桁コードではなく `adb tcpip` で越えた。
+
+```
+[PC]    adb -s 192.168.0.30:36763 tcpip 5555      restarting in TCP mode port: 5555
+[端末]  adb connect 127.0.0.1:5555                connected to 127.0.0.1:5555
+[端末]  adb -s 127.0.0.1:5555 forward tcp:9222 localabstract:chrome_devtools_remote
+[端末]  curl -m 8 http://127.0.0.1:9222/json/version
+        try1 OK  {"Browser":"Chrome/153.0.8010.36", ...}
+```
+
+ワイヤレスデバッグ（TLS・無作為 port）は client 鍵のペアが要るが、`adb tcpip` の
+平文 TCP は `/data/misc/adb/adb_keys` の許可制で、端末内 client はそこを通った。
+**PC の秘密鍵を複製する必要はない。**
+
+Termux の Python 3.14.6 に `pip install websockets`（17.1）を入れ、`app/solvers/cdp.py`
+をそのまま実行した。**PC は経路に入っていない**（Termux Python → 端末内 forward →
+Chrome for Android）。
+
+```
+connected; page targets: 3
+japanese exact: True
+36k fill: 36000
+6MB pdf: size=6291465 in 1.57s
+click -> clicked
+PHONE-ONLY CDP OK
+```
+
+PC 経由の F-6-4（6 MB が 1.50 s）と同等。**転送層は会場トポロジで成立する。**
+
+Termux に既にあったもの: fastapi 0.99.1、uvicorn 0.52.4、pillow 12.3.0、httpx 0.28.1、
+python-dotenv 1.2.3、python-multipart 0.0.32。**fastapi は `requirements.txt` の
+`>=0.110` を満たしていない**ので、サーバ常駐の前に上げる必要がある。
+
+### F-6-7. スマホの chatgpt.com のセレクタ（実測、2026-09-15。送信なし）
+
+`chatgpt.com` を開いて DOM を読んだだけで、メッセージは送っていない。
+UA は `...Android 10; K...Mobile Safari/537.36`、`window.innerWidth` = 426。
+
+| 定数 | セレクタ | 一致数 | 判定 |
+|---|---|---|---|
+| `COMPOSER_SEL` | `#prompt-textarea` | 1 | **合う**。`isContentEditable` が true |
+| `FILE_INPUT_SEL` | `input[data-testid="upload-photos-input"]` | 1 | **合う** |
+| `FILE_UPLOAD_SEL` | `input#upload-files` | 1 | **合う**（`accept=""`・`multiple`） |
+| `ASSISTANT_SEL` | `[data-message-author-role="assistant"]` | 0 | 会話が無いので当然 |
+| `STOP_SEL` | `[data-testid="stop-button"]` | 0 | 生成中のみ出るので当然 |
+| `ATTACHMENT_SEL` | `form img, [data-testid*="attachment"]` | 0 | 添付が無いので当然 |
+| `NEW_CHAT_SEL` | `[data-testid="create-new-chat-button"]` | **0** | **モバイルには無い** |
+
+ログイン状態: `login-button` / `signup-button` が 0 件、composer が編集可能。
+**サインイン済み**である（未サインインの shell は composer を持たない、F-5 系の記録）。
+
+ページ上の `input[type=file]` は5つ。**デスクトップ実測（2026-09-14）から入れ替わっている。**
+
+```
+upload-files            accept=""            multiple   ← PDF・音声はここ
+upload-photos           image/*              multiple   (testid=upload-photos-input)
+upload-media            image/*,video/*      multiple
+upload-camera           image/*              multiple
+upload-fast-tools-files .pdf,.doc,...,.7z    multiple   ← 新規。desktop の upload-media-files は消えた
+```
+
+`NEW_CHAT_SEL` が無い件は動作を止めない。`start_new_chat()` は控えが無ければ
+`page.goto(CHAT_URL)` へ落ちるので、新しいチャットは作れる。モバイルで
+new/chat/sidebar を含む testid は `open-sidebar-button` と `composer-plus-btn` の2つだけで、
+新規チャットは折りたたまれたサイドバーの中にある。`ROKID_CHATGPT_CHAT_SCOPE=subject`
+なら 1 科目に 1 回しか呼ばれないので、ページ読み込み 1 回の差でしかない。
+
+**未測定:** 送信も生成も1度もしていない。`Input.insertText` を ProseMirror が受けるか、
+`DataTransfer` の添付が composer に載るかは、実ページでは未確認。
 
 `adb forward tcp:9222` を張ったまま `py -3.12 -m pytest -q` を回したところ、
 `tests/test_chatgpt_web_live.py` の門（`cdp_available() is None` で skip）が
