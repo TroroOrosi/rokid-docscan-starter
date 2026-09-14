@@ -28,9 +28,12 @@ iOS）が将来新しくなっても、サーバのコア（照合ロジック�
 
 > **同梱済みの実アダプタは `openai`（OpenAI GPT）/ `gemini`（Google）/ `claude`（Anthropic）**
 > で、`ROKID_*=openai|gemini|claude` で全ポートを実 AI 化できます（§5 フラグ表・§6(a)）。
-> なお exam の解答主経路はグラス搭載 AI（GPT/Gemini）の ingest（`POST /solutions`）であり、
-> サーバ側アダプタは任意の高性能化経路。追加ベンダは同じ `Analyzer`/`Solver`/… ポートに
-> アダプタを1つ実装して `register_*()` するだけ。
+> なお exam の解答主経路は**サーバ側 solver**（現行は `ROKID_SOLVER=chatgpt-web`。
+> ポートは同じ `Solver` で、API キーではなくブラウザセッションに背後を持つ）であり、
+> `POST /solutions` の ingest は API 互換の取り込み口です。グラス搭載 AI の回答を
+> 外部アプリへ返す CXR-L コールバックは公開面にありません
+> （[cxr-l-integration.md](cxr-l-integration.md)）。追加ベンダは同じ
+> `Analyzer`/`Solver`/… ポートにアダプタを1つ実装して `register_*()` するだけ。
 
 ---
 

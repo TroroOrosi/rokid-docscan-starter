@@ -9,20 +9,26 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
-CURRENT_RUNBOOKS = (
-    "CLAUDE.md",
-    "README.md",
-    "android-relay/README.md",
-    "docs/cxr-l-integration.md",
-    "docs/device-verification-checklist.md",
-    "docs/real-device-operation.md",
-    "docs/user-operation-guide.md",
-    "docs/windows-android-real-device-setup.md",
-)
-
-
 def _text(relative_path: str) -> str:
     return (ROOT / relative_path).read_text(encoding="utf-8")
+
+
+def _current_runbooks() -> tuple[str, ...]:
+    """Every document `docs/README.md` classifies as a current runbook.
+
+    Derived, never listed twice. A hardcoded copy of this list is how
+    `docs/exam-solver-architecture.md` kept claiming the glasses' onboard AI
+    was the answer route until 2026-09-14: the index called it current, the
+    test's own tuple did not name it, and no check ever read it.
+    """
+    section = _text("docs/README.md").split("## Current contracts and runbooks", 1)
+    if len(section) != 2:  # pragma: no cover - the heading is itself contract
+        raise AssertionError("docs/README.md lost its current-runbook section")
+    body = section[1].split("\n## ", 1)[0]
+    return tuple(re.findall(r"^- `([^`]+\.md)`", body, flags=re.MULTILINE))
+
+
+CURRENT_RUNBOOKS = _current_runbooks()
 
 
 def _generated_prefixes() -> tuple[str, ...]:
@@ -137,6 +143,44 @@ def test_current_runbooks_do_not_claim_customview_operator_tap_is_verified():
         "ユーザー由来の `AI-exit`",
         "グラスから得られる唯一の入力",
         "アプリへ配送するグラス入力は**1本指タップだけ**",
+    )
+    offenders = []
+    for path in CURRENT_RUNBOOKS:
+        text = _text(path)
+        for phrase in prohibited:
+            if phrase in text:
+                offenders.append(f"{path}: {phrase}")
+    assert offenders == []
+
+
+def test_current_runbooks_do_not_call_the_onboard_glasses_ai_the_answer_route():
+    """CXR-L exposes no onboard-AI answer callback, so it cannot be the route.
+
+    `POST /solutions` ingests answers produced elsewhere. Describing it as the
+    primary path sent a session down the wrong route on 2026-09-14.
+    """
+    prohibited = (
+        "解答の主体は**グラス搭載 AI",
+        "解答主経路はグラス搭載",
+        "主経路: 搭載 GPT が全問解答",
+        "onboard ingest（主経路）",
+        "搭載 GPT の問題別解答を ingest**",
+    )
+    offenders = []
+    for path in CURRENT_RUNBOOKS:
+        text = _text(path)
+        for phrase in prohibited:
+            if phrase in text:
+                offenders.append(f"{path}: {phrase}")
+    assert offenders == []
+
+
+def test_current_runbooks_do_not_bind_operations_to_glasses_gestures():
+    """`OPERATION_CONTRACT` publishes `phone` for every operation."""
+    prohibited = (
+        "グラスのジェスチャに割当済み",
+        "スマホは HTTP 中継のみ",
+        "スマホは HTTP中継のみ",
     )
     offenders = []
     for path in CURRENT_RUNBOOKS:

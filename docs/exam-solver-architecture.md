@@ -29,24 +29,31 @@ Status: Current architecture of the answer mode. Updated 2026-09-14.
 ## 3 フェーズフロー（読取→一括解答→閲覧・主経路）
 
 **主経路**。カメラ（＝プライバシー LED 点灯）は読取フェーズのみで、`finalize-reading` 以降は
-カメラを閉じる（LED 消灯）。解答の主体は**グラス搭載 AI（GPT）**で、サーバは分割・取り込み・
-整形・状態管理を担う。
+カメラを閉じる（LED 消灯）。解答の主体は**サーバに設定した solver**（現行は
+`ROKID_SOLVER=chatgpt-web`）で、サーバは分割・解答・整形・状態管理を担う。
+
+グラス搭載 AI の任意の回答を外部アプリへ返す CXR-L コールバックは公開面に無い
+（[cxr-l-integration.md](cxr-l-integration.md) の「取れないもの」）。したがって
+`POST /solutions` は **API 互換の取り込み口**であり、実機の主経路ではない。
+操作はすべてスマホ側で、`OPERATION_CONTRACT` は全項目 `phone`（§グラス単独操作）。
 
 ```
 フェーズ1 読取（カメラON・LED点灯・最短化）
-  本体AIの視認テキスト ─▶ POST /pages(ocr_text, vision_text) ×N ─▶ finalize
-  ダブルタップ ─▶ POST /finalize-reading ─▶ segment_problems(全ページ) ─▶ questions 行 ×問題数
+  CXR-L takePhoto → 端末内 ML Kit OCR ─▶ POST /pages(image, ocr_text, vision_text) ×N ─▶ finalize
+  スマホの読取完了操作 ─▶ POST /finalize-reading ─▶ segment_problems(全ページ) ─▶ questions 行 ×問題数
                                             status: open/reading → reviewing（以降カメラOFF）
 フェーズ2 解答（カメラOFF・一括）
-  主経路: 搭載 GPT が全問解答 ─▶ POST /solutions（ingest, served_by="onboard"）
-  任意:   ROKID_SOLVER=openai|gemini|claude ─▶ finalize-reading 内で全問を solve_with_fallback
-          （各問とも context=_exam_prompt_context: 全ページ＋RAG＋(listening時)書き起こし＋書式指示）
+  主経路: ROKID_SOLVER=chatgpt-web|openai|gemini|claude
+          ─▶ finalize-reading 内で未解答の問題を solve_with_fallback
+          （各問とも context=_exam_prompt_context: 自分の大問のページ＋RAG
+            ＋(listening時)書き起こし＋書式指示。answer_only=True）
           solution_claims を provider 呼出前に取得し、同時 finalize の二重課金を防止
+  互換:   外部で解いた問題別解答 ─▶ POST /solutions（ingest, served_by="onboard"）
 フェーズ3 閲覧（カメラOFF・LED消灯）
   GET /solutions（デッキ一覧） ─▶ GET /review?index=k&view_page=n
   build_review_view: 解答+解法+根拠+注意を一括1ストリーム（3行×テレプロンプター送り）
 リスニング: /audio(録音+任意transcript) ─▶ transcribe(openai/gemini or 与値) ─▶ transcript
-  /mode で 筆記(written) ⇄ リスニング(listening) 切替（グラス=長押し / スマホ）
+  /mode で 筆記(written) ⇄ リスニング(listening) 切替（スマホ操作）
 ```
 
 - **問題分割 `segment_problems`**（`app/layout.py`）：全ページの材料（`_page_material` ＝本文＋図の
@@ -57,7 +64,7 @@ Status: Current architecture of the answer mode. Updated 2026-09-14.
 - **status ライフサイクル**：`open`（既定・読取フェーズの別名）→ `reviewing`（`finalize-reading` で
   遷移）。`finalize-reading` は**冪等**（ジェスチャ二度撃ちで再分割しない）。応答の `camera` は
   `{expected_state:"off", privacy_led:"off"}`。
-- **onboard ingest（主経路）**：`POST /solutions` は問題別解答の配列
+- **onboard ingest（API 互換）**：`POST /solutions` は問題別解答の配列
   `[{problem_no, problem_index?, answer, subject?, solution_steps?, rationale?, cautions?, answer_confidence?, page_number?}]`
   を受け、`solver_name="onboard"`・`served_by`（既定 `"onboard"`）で `solutions` 行を追加。
   照合は **`problem_index`（デッキ index）優先**・なければ `problem_no` 完全一致——大問跨ぎで
@@ -67,10 +74,11 @@ Status: Current architecture of the answer mode. Updated 2026-09-14.
   後から追加された問題は末尾に付く。index 照合の安定性を優先）。検証は全或無
   （空 answer・範囲外 index は 400）、`answer_confidence` は [0,1] にクランプ。
   `mode=real` は何も保存しない（locked 応答）。
-- **サーバ一括解答（任意・再開可能）**：`ROKID_SOLVER` が non-local のときだけ `finalize-reading` が
-  同期で**未解答の問題**を解く（呼ぶたびに残りを解く＝途中失敗はダブルタップ再実行で再開。
-  1 問ごとに commit）。local/未設定、またはクラウド solver が local へフォールバックした結果は
-  **保存しない**（プレースホルダのゴミ行で「解答済み」になり搭載 GPT ingest を隠すのを防ぐ）。
+- **サーバ一括解答（主経路・再開可能）**：`ROKID_SOLVER` が non-local のときだけ `finalize-reading` が
+  同期で**未解答の問題**を解く（呼ぶたびに残りを解く＝途中失敗はスマホの読取完了操作を
+  もう一度で再開。1 問ごとに commit）。local/未設定、またはクラウド solver が local へ
+  フォールバックした結果は**保存しない**（プレースホルダのゴミ行で「解答済み」になり
+  `POST /solutions` の取り込みを隠すのを防ぐ）。
   読取完了宣言は guarded UPDATE で**競合安全**（二度撃ちでもデッキは 1 回だけ生成）。
   境界なし文書のフォールバック 1 問題には安定 id **「全体」** を合成（ingest から指名可能）。
 
@@ -82,7 +90,7 @@ Status: Current architecture of the answer mode. Updated 2026-09-14.
 ```
 exam-session(document_id, exam_type, answer_format)
   next-page/prev-page ─▶ current_page_index ─▶ solve-current ─▶ 現在ページ pages 行を解く
-   （2本指スワイプ左右）    （現在ページ把握）     （タップ）        │ subject=detect_subject(そのページ)
+   （スマホ操作）          （現在ページ把握）     （スマホ操作）    │ subject=detect_subject(そのページ)
                                                                    │ context=RAG＋(listening時)書き起こし
                                                                    ▼ solve_with_fallback → glasses_view(3行段階)
 ```
@@ -106,11 +114,13 @@ exam-session(document_id, exam_type, answer_format)
   OpenAIには公式対応コンテナだけを送信し、raw ADTS/ADIF AACと識別不能データは
   与値へフォールバックする。先頭のID3v2タグは実コンテナ判定前に読み飛ばす。
   Anthropic は ASR 非対応。
-- **グラス単独操作**：`OPERATION_CONTRACT`（`GET /v1/settings.operations`）が 3 フェーズの全操作
+- **操作はスマホ**：`OPERATION_CONTRACT`（`GET /v1/settings.operations`）が 3 フェーズの全操作
   （`capture_read`/`finish_reading`/`mode_toggle`/`record_toggle`/`review_next_problem`/
   `review_prev_problem`/`scroll_next`/`scroll_prev`/`close`）と二次経路（`exam_next_page`/
-  `exam_prev_page`/`exam_solve_current`/`exam_next_stage`）を現行公式ジェスチャで公示。全操作が
-  グラスのジェスチャに割当済みで、スマホは HTTP 中継のみ（画面不要）。
+  `exam_prev_page`/`exam_solve_current`/`exam_next_stage`）を公示し、**全項目の値は `phone`**
+  （`app/glasses_view.py`）。CUSTOMVIEW のタップ配送は検証済みの制御面ではないため、撮影・
+  再撮影・登録・完了・閲覧送りはスマホで行う。`GET /v1/settings.input` のキーコード表は
+  診断用の legacy で、操作契約ではない（`keycodes_verified:false`）。
 
 ## モジュール（このリポジトリで実装済み）
 
@@ -148,7 +158,7 @@ exam-session(document_id, exam_type, answer_format)
 |----------|------|------|
 | POST | `/v1/exam-sessions` | 一時セッション作成（mode, voice_enabled, **document_id, exam_type, answer_format**） |
 | POST | `/v1/exam-sessions/{id}/finalize-reading` | **読取完了宣言（3フェーズ主経路）**：問題分割→デッキ作成→`reviewing` 遷移→（solver 設定時）一括解答。冪等 |
-| POST | `/v1/exam-sessions/{id}/solutions` | **搭載 GPT の問題別解答を ingest**（`served_by="onboard"`・latest wins・real ロック） |
+| POST | `/v1/exam-sessions/{id}/solutions` | **外部で解いた問題別解答を ingest**（API 互換。`served_by="onboard"`・latest wins・real ロック） |
 | GET | `/v1/exam-sessions/{id}/solutions` | **レビューデッキ一覧**（問題番号・教科・解答済み・確信度。読取中は空デッキ） |
 | GET | `/v1/exam-sessions/{id}/review?index=&view_page=` | **問題別閲覧 HUD**（解答+解法+根拠+注意を一括1ストリーム・クランプ・未解答プレースホルダ） |
 | GET | `/v1/exam-sessions/{id}/answer-bundle` | **グラスのオフライン一括答案**（`schema_version`/`session_id`/`input_digest`/`revision`+`items[]`。deckの`question_no`から大問/小問を復元・グループに小問が無ければ`全問`1件を維持。読取中・realロック中は409。実機未検証。解答は表示可能なテキストへ変換して返し（LaTeXの分数・指数・添字・根号・ギリシャ文字・場合分け）、表・図・未対応記法が残る項目は`ready`にせず`needs_review`＋`issue`で返す。テキストは捨てない） |
@@ -188,7 +198,9 @@ Playwright は使いますが `playwright install` は不要です（実ブラ�
 
 - **チャットの粒度** — `ROKID_CHATGPT_CHAT_SCOPE`。既定 `question` は小問ごとに
   新しいチャットを開き、前の解答が文脈に混ざらないようにします。`subject` は
-  科目ごとに 1 チャットを保ち、大問のページを 1 回添付すればその科目の間ずっと
+  サーバが渡す `Question.chat_key` で 1 チャットを保ちます。現在の鍵は
+  **exam セッション**（`session:{id}` ＝ 1 冊＝ 1 科目）で、行ごとの
+  `detect_subject` ではありません。ページを 1 回添付すればそのチャットの間ずっと
   残るので、小問ごとに上げ直さずに済みます。
 - **冊子の一括添付** — `app/page_pdf.py` の `images_to_pdf()` が撮影ページを 1 つの
   PDF に束ね、`GET /v1/exam-sessions/{id}/pages.pdf` が配信します。

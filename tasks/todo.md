@@ -1,5 +1,8 @@
 # Tasks: Safe real-device readiness
 
+**再開位置の正本は `.agents/progress/` です。** このファイルは作業項目の一覧であって、
+次に何をするかの決定ではありません。
+
 **2026-09-10 夜の再開順:** FS-59 → FS-60 → FS-61/62（実機ゲート）→ FS-63/64 →
 FS-65 → 既存FS-12/20/35〜38/42/47を統合。現行契約は [plan.md](plan.md#answer-sheet-20260910)。
 今回の追加は計画保存まで。未チェック項目を実装済みとは扱わない。
@@ -338,7 +341,9 @@ and unknown future actions safe while retaining content-free diagnostics.
 
 ### FS-63: GPT中継の認証と利用境界を固定する
 
-- [ ] 実装・検証完了（2026-09-12: **最終手段**へ順位変更。本筋はスマホ内ローカル。圏内には残す。[plan.md](plan.md#answer-route-20260912)）
+- [ ] 実装・検証完了（2026-09-14: 決まった経路は chatgpt-web。本項目は API キー経路の
+      `ROKID_SOLVER_TIERS` フォールバック段として残すが、着手予定は無い。
+      [plan.md](plan.md#answer-route-20260914)）
 
 **目的:** 管理型クラウドからGPTを使い、秘密キーを端末へ渡さない。
 **初期条件:** Firebaseプロジェクトは未作成（利用者確認）。Google Cloudの既存環境も未確認。配置先・認証方式の選択後、必要なプロジェクト、課金、秘密管理の準備を具体化する。既存Firebase設定やgoogle-services.jsonを前提に実装を始めない。
@@ -387,9 +392,15 @@ and unknown future actions safe while retaining content-free diagnostics.
 - [ ] 実AIの答案精度、全文表示、終了消灯/再装着、スマホ操作0回、両150分の電池試験を別々に判定する。
 - [ ] 検証済み増分だけをcommitし、既存の進捗記録に次のFSと未検証条件を残す。
 
-## 2026-09-12追加：スマホ内ローカル解答を成立させる
+## 2026-09-12追加：スマホ内ローカル解答を成立させる（**撤回済み**）
 
-順位は [plan.md](plan.md#answer-route-20260912) の改訂に従う。本筋はスマホ内ローカル、
+> **2026-09-14 撤回。** 決まった経路は `ROKID_SOLVER=chatgpt-web`
+> （[plan.md](plan.md#answer-route-20260914)）。本節と次節の未着手項目
+> （FS-67 / FS-69 / FS-70 / FS-71 / FS-72）は**予定に入らない**。完了済みの
+> FS-66 / FS-68 と実測値は証拠として残す（`docs/hardware-measurements.md` E 節）。
+> 未チェックの項目を再開待ちと読まないこと。
+
+（撤回前の前提）順位は [plan.md](plan.md#answer-route-20260912) の改訂に従う。本筋はスマホ内ローカル、
 GPT中継は最終手段。実機で試す前に計算で潰せるものは計算で潰す。
 
 ### FS-66: 解答プロンプトを大問単位に絞る
@@ -429,7 +440,12 @@ GPT中継は最終手段。実機で試す前に計算で潰せるものは計�
 **検証:** 記録した手順での再実行。実AI未実行と実行済みを分離する。
 **依存:** FS-66, FS-67, FS-68。 **規模:** M。
 
-## 2026-09-13追加：端末内モデルで長文を読む構成を確定する
+## 2026-09-13追加：端末内モデルで長文を読む構成を確定する（**撤回済み**）
+
+> **2026-09-14 撤回。** 上節と同じ理由で FS-70 / FS-71 / FS-72 は予定に入らない。
+> 実測の再利用案（CDP 喪失時のフォールバック、縦書きの OCR 補正 等）は
+> `.agents/progress/venue-route-and-duplicated-surfaces.md` の提案節にあり、
+> 採用は利用者の決定を待つ。
 
 根拠は `docs/hardware-measurements.md` E 節。
 

@@ -1,6 +1,6 @@
 # User operation guide
 
-Status: Current phone-controlled workflow. Updated 2026-09-01.
+Status: Current phone-controlled workflow. Updated 2026-09-14.
 
 ## What this system does
 
@@ -13,6 +13,24 @@ compact HUD view.
 Text-only upload remains API compatibility support; it is not the real-device
 primary path. The public CXR-L surface inspected for this project does not
 provide arbitrary text or answers produced by an AI running on the glasses.
+`POST /solutions` therefore ingests answers produced elsewhere; it is not the
+glasses answering by themselves.
+
+## Answer route and what it costs you
+
+The configured server solver answers the problems. The current primary route is
+`ROKID_SOLVER=chatgpt-web`, which drives your own signed-in ChatGPT web session
+through a Chrome debugging port. It needs no API key.
+
+**Automating the ChatGPT web UI is against OpenAI's terms of use, and the
+account can be restricted.** This is your decision to make, and it is recorded
+here because the route is the default one. `ROKID_SOLVER=openai|gemini|claude`
+with an API key is the supported alternative, and `ROKID_SOLVER_TIERS` orders
+the fallbacks.
+
+Every chatgpt-web measurement this repository owns was taken against Chrome on
+a PC. Pointing `ROKID_CHATGPT_CDP` at a phone-side browser has never been run.
+Do not plan a session that assumes it works.
 
 ## Start
 

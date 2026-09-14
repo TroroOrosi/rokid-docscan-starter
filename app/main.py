@@ -1759,10 +1759,12 @@ def get_exam_session(session_id: int) -> dict:
 #     POST .../{id}/finalize-reading      phone declares 読取完了 →
 #                                         segment into problems; no photo request
 #   Phase 2 解答 (no camera request): all problems solved in one batch
-#     POST .../{id}/solutions             ingest the onboard AI's per-problem
-#                                         answers (primary), or — with
-#                                         ROKID_SOLVER=openai|gemini|claude —
-#                                         finalize-reading solves server-side
+#     finalize-reading solves server-side (primary) with ROKID_SOLVER=
+#                                         chatgpt-web|openai|gemini|claude
+#     POST .../{id}/solutions             API-compat ingest of per-problem
+#                                         answers produced elsewhere. CXR-L
+#                                         exposes no onboard-AI answer callback,
+#                                         so this is not the real-device path.
 #   Phase 3 閲覧 (no camera request): per-problem review deck
 #     GET  .../{id}/solutions             deck listing (solved flags)
 #     GET  .../{id}/review?index=k        one problem, 答え+解法+根拠+注意 in
@@ -2643,7 +2645,8 @@ def exam_finalize_reading(session_id: int) -> dict:
         solver_env = (os.environ.get("ROKID_SOLVER") or "").strip()
         if not locked and solver_env and solver_env != "local":
             # Context is scoped to each problem's own 大問 (plan.md contract 1),
-            # not the whole document: an on-device model prefills every prompt.
+            # not the whole document: every prompt is prefilled per question, so
+            # the whole booklet per 小問 is paid for once per 小問.
             page_windows = _group_page_indexes(conn, session_id)
             for row in _deck_question_rows(conn, session_id):
                 if _latest_solution_row(conn, row["id"]) is not None:
