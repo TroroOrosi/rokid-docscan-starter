@@ -236,6 +236,10 @@ Then, on a device:
   checked against `app/version.py` by `test_readme_versions_match_source_of_truth`.
   Do not copy a version into another document; that is how every copy drifted
   before 2026-09-14.
+- A record that tells the next session what to do next names the runtime of
+  each step, as a `Runs on:` line in that section. A resume list is not
+  authorization: a step that does not run on the venue topology measures the
+  component, not the route, and that has to be said before it is executed.
 - Ask before deleting a historical record. When one is consolidated, move the
   measurements first and verify each value survived.
 
@@ -253,16 +257,25 @@ py -3.12 -m ruff check .
 Android relay:
 
 ```bash
-gradle --no-daemon -p android-relay test testDebugUnitTest assembleDebug
+export JAVA_HOME="C:/Users/Public/rokid-build-tools-20260901/jdk17/jdk-17.0.20.1+1"
+export ANDROID_HOME="C:/Users/pupu_/AppData/Local/Android/Sdk"
+./android-relay/gradlew --no-daemon test testDebugUnitTest assembleDebug
 ```
+
+Use the wrapper. There is no `gradle` on this machine's PATH, and the wrapper
+already sets the project directory, so adding `-p android-relay` fails with
+`Multiple arguments were provided for command-line option '-p'`. From
+`android-relay`, `.\gradlew.bat --no-daemon test testDebugUnitTest assembleDebug`
+is equivalent. Both measured 2026-09-14: `BUILD SUCCESSFUL`, 199 tasks.
 
 `test` is not redundant: `:glassinput` is a plain `java-library`, so its
 tests run under `test` and `testDebugUnitTest` alone would skip them
 silently.
 
 The Android project requires JDK 17, Android SDK Platform 36, and internet
-access for Google, Maven Central, Rokid Maven, and Gradle dependencies. The
-Windows bootstrap is `android-relay\gradlew.bat`.
+access for Google, Maven Central, Rokid Maven, and Gradle dependencies.
+`android-relay\gradlew.bat` is a shim over `android-relay/build-windows.ps1`,
+which downloads Gradle 9.4.1 once and checks the checkout path is ASCII.
 
 For changes to the real-device path:
 

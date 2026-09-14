@@ -63,7 +63,9 @@ stop if either selected provider is not ready or is offline. Do not expose port
 
 ## 2. Build in an ASCII-only path
 
-Android Gradle Plugin can reject this repository's non-ASCII OneDrive path. A
+This checkout is `C:okid-docscan-starter`, which is already ASCII, so build
+it in place. Android Gradle Plugin rejects a non-ASCII path such as the
+former OneDrive `ドキュメント` copy, which is not this repository. A
 build copy/worktree must include the current changes; a stale worktree is not
 evidence. Use JDK 17 and run from its `android-relay` directory:
 

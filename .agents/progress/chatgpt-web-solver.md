@@ -189,6 +189,10 @@ clicking `create-new-chat-button`, so a question costs no page load at all.
 
 ## Next steps, in order
 
+Runs on: PC Chrome for every live step below. That is NOT the venue topology;
+the venue has no PC (`CLAUDE.md`, "Open gap"). A PC run measures the solver,
+not the route. Name the runtime before asking to execute one of these.
+
 0. **Wait for the rate limit to clear.** Do not open a live run before that.
 1. **Send one real 共通テスト subject through the web route end to end.** Not
    yet attempted; every live run so far used synthetic single-problem pages.
@@ -405,6 +409,15 @@ defect, and every one was findable offline before spending a generation.
   partially withheld.
 
 ### Resume here
+
+Runs on: PC Chrome for steps 1-2, which is NOT the venue topology (`CLAUDE.md`,
+"Open gap"). Steps 3-4 are offline and runtime-independent. A resume list is not
+authorization: say which runtime a step uses before asking to run it.
+
+Blocked, 2026-09-14: a session resumed at step 1 and ran it on PC Chrome. The
+operator stopped it and asked why the phone route was not being used. Step 1 is
+blocked until a phone-side CDP endpoint exists, not merely pending. Do not
+re-run it on a PC and call it progress.
 
 1. One live question, not a subject: confirm the PDF-once + locator shape
    returns an answer-sheet-only string and that the browser shows ONE chat.

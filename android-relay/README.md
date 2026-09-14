@@ -46,7 +46,8 @@ On Windows, the physical checkout path must contain ASCII characters only.
 Android Gradle Plugin rejects paths such as a localized OneDrive
 `ドキュメント` directory, and disabling its path check is not sufficient:
 Gradle test workers then fail to load the compiled test classes. Create an
-ASCII-only worktree when the main checkout is under a localized path:
+ASCII-only worktree only when the main checkout is under a localized path.
+`C:okid-docscan-starter` is not, and builds in place:
 
 ```powershell
 git worktree add C:\Users\Public\rokid-docscan-build HEAD

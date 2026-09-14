@@ -106,12 +106,12 @@ triggering an operation.
 
 **Files likely touched:**
 
-- `android-relay/glassapp/src/main/java/dev/rokid/docscanglass/input/InputSignal.java`
-- `android-relay/glassapp/src/main/java/dev/rokid/docscanglass/input/OfficialKeyBroadcasts.java`
-- `android-relay/glassapp/src/main/java/dev/rokid/docscanglass/input/InputCalibrationLog.java`
-- `android-relay/glassapp/src/main/java/dev/rokid/docscanglass/input/GlassKeyEvents.java`
+- `android-relay/glassinput/src/main/java/dev/rokid/docscanglass/input/InputSignal.java`
+- `android-relay/glassinput/src/main/java/dev/rokid/docscanglass/input/OfficialKeyBroadcasts.java`
+- `android-relay/glassinput/src/main/java/dev/rokid/docscanglass/input/InputCalibrationLog.java`
+- `android-relay/glassinput/src/main/java/dev/rokid/docscanglass/input/GlassKeyEvents.java`
 - `android-relay/glassapp/src/main/java/dev/rokid/docscanglass/TapProbeActivity.java`
-- `android-relay/glassapp/src/test/java/dev/rokid/docscanglass/input/InputCalibrationLogTest.java`
+- `android-relay/glassinput/src/test/java/dev/rokid/docscanglass/input/InputCalibrationLogTest.java`
 
 **Estimated scope:** Medium (6 files plus the glasses-app version).
 
@@ -150,10 +150,10 @@ and late/repeated/reordered events fail closed.
 
 **Files likely touched:**
 
-- `android-relay/glassapp/src/main/java/dev/rokid/docscanglass/input/GlassesInputAction.java`
-- `android-relay/glassapp/src/main/java/dev/rokid/docscanglass/input/GlassesInputNormalizer.java`
+- `android-relay/glassinput/src/main/java/dev/rokid/docscanglass/input/GlassesInputAction.java`
+- `android-relay/glassinput/src/main/java/dev/rokid/docscanglass/input/GlassesInputNormalizer.java`
 - `android-relay/glassapp/src/main/java/dev/rokid/docscanglass/TapProbeActivity.java`
-- `android-relay/glassapp/src/test/java/dev/rokid/docscanglass/input/GlassesInputNormalizerTest.java`
+- `android-relay/glassinput/src/test/java/dev/rokid/docscanglass/input/GlassesInputNormalizerTest.java`
 
 **Estimated scope:** Medium (4 files).
 
@@ -182,10 +182,10 @@ and unknown future actions safe while retaining content-free diagnostics.
 
 **Files likely touched:**
 
-- `android-relay/glassapp/src/main/java/dev/rokid/docscanglass/input/GlassesInputReceiver.java`
-- `android-relay/glassapp/src/main/java/dev/rokid/docscanglass/input/GlassesInputNormalizer.java`
+- `android-relay/glassinput/src/main/java/dev/rokid/docscanglass/input/GlassesInputReceiver.java`
+- `android-relay/glassinput/src/main/java/dev/rokid/docscanglass/input/GlassesInputNormalizer.java`
 - `android-relay/glassapp/src/main/java/dev/rokid/docscanglass/TapProbeActivity.java`
-- `android-relay/glassapp/src/test/java/dev/rokid/docscanglass/input/GlassesInputNormalizerTest.java`
+- `android-relay/glassinput/src/test/java/dev/rokid/docscanglass/input/GlassesInputNormalizerTest.java`
 
 **Estimated scope:** Medium (4 files).
 

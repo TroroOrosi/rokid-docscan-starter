@@ -81,6 +81,9 @@ Both are consistent with load, not with a defect that a smaller run would hit.
 
 ## Still to do
 
+Runs on: PC Chrome, which is NOT the venue topology (`CLAUDE.md`, "Open gap").
+Every item below measures the solver, not the venue route.
+
 - Let the rate limit clear before any further live run.
 - Re-check the remaining subjects **a couple at a time**, not as a sweep.
 - Run a real 共通テスト subject rather than synthetic pages.

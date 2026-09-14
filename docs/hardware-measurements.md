@@ -759,7 +759,7 @@ py -3.12 -m pytest -q      -> 487 passed（473 + 新規14）
 py -3.12 -m ruff check .   -> All checks passed!
 ```
 
-否定確認: `registry.py` の `_retry_out_of_range` 呼び出しを外すと
+否定確認: `app/solvers/registry.py` の `_retry_out_of_range` 呼び出しを外すと
 `test_out_of_range_choice_is_retried_once_with_the_valid_labels` と
 `test_persistent_out_of_range_answer_is_kept_and_flagged_not_dropped` が
 `KeyError: 'choice_out_of_range'` で落ちる。
