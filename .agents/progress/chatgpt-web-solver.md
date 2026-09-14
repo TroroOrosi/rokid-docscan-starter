@@ -423,9 +423,68 @@ re-run it on a PC and call it progress.
    returns an answer-sheet-only string and that the browser shows ONE chat.
 2. Then one subject (物理基礎, 14 questions) and score against
    `C:/rokid-exam-materials/kyotsu/seikai/rika_kiso.pdf`.
-3. Give the HUD a per-line limit before any accuracy claim: a 32-character
-   answer line does not fit 480 px.
-4. The bench writes every run into one `--data-dir`; give each paper its own,
-   or a later query reads another run's rows (as happened while diagnosing).
+3. ~~Give the HUD a per-line limit~~ **Done 2026-09-14**, as wrapping, not
+   as a limit. See "The HUD line budget" below; the budget itself is an
+   estimate and still needs one physical observation.
+4. ~~Give each paper its own `--data-dir`~~ **Done 2026-09-14.**
+   `deck_data_dir()` puts each paper in its own subdirectory of the run root.
 
 Full sweep remains ~513 questions and is NOT scheduled.
+
+
+## 2026-09-14 (late): the HUD line budget, and one database per paper
+
+Runs on: nothing device-side. Both changes are offline and were verified by
+`py -3.12 -m pytest -q` (550 passed, 1 skipped) and `py -3.12 -m ruff check .`
+(clean). Neither has been seen on the glasses.
+
+### The HUD wraps; it does not truncate
+
+`app/glasses_view._wrap()` used to return every logical line as-is, so the
+32-character answer measured in the 物理基礎 run was handed to the renderer as
+one line. It now splits a line at `MAX_COLUMNS` columns, where a full-width
+glyph costs 2, and `_paginate` turns the extra lines into extra view pages.
+
+This is deliberately NOT the `[:24]` truncation that contract 1.2.0 removed
+after it cut problem and answer text off. Nothing is dropped:
+`test_wrapping_loses_no_character` pins the concatenation back to the source.
+A closing mark (、。」）:;…) may hang up to one full-width glyph past the budget
+rather than open the next line.
+
+**The default of 18 columns (9 full-width glyphs) is an ESTIMATE, not a
+measurement.** It is what 34sp -- the size `HudLayout.fromLines` writes into
+the CUSTOMVIEW TextView -- spans across a 480 px logical screen at 240 dpi
+(`docs/hardware-measurements.md`, measured 2026-09-01 on build
+`1.25.012-20260901-150201`). That document also states that the 3-line limit is
+a property of the overlay rather than of the screen size, so **the CUSTOMVIEW
+text area's real width is unmeasured** and this number may be wrong in either
+direction. Wrong-narrow costs extra swipes; wrong-wide is what we had.
+
+To correct it, put a known ruler string on the glasses and count what fits:
+`ROKID_HUD_MAX_COLUMNS` retunes it without a code change, and
+`GET /v1/settings` publishes `max_columns_per_line`, `column_unit`, `wraps` and
+`truncates` so the client can see the value in force.
+
+`app/hud.py` (`/v1/match`) is unchanged and still unwrapped: its payload's
+shape is fixed at exactly 3 lines, and that route is the scan-and-match
+foundation, not the answer path.
+
+Contract `GLASSES_VIEW 1.11.0`, `APP 0.27.0`. `API` unchanged: no schema moved,
+only the contract values published inside `/v1/settings`.
+
+### One paper, one database
+
+`scripts/run_exam_deck.py` took `--data-dir` as the database itself, so every
+paper's rows landed in one place and a query after a later run read the
+previous paper's rows. `deck_data_dir(root, pdf)` now derives a subdirectory
+from the PDF stem (path-unsafe characters replaced, blank falls back to
+`unnamed`), and the run prints the directory it used. The same PDF resolves to
+the same directory, so re-running one paper still resumes in place.
+`tests/test_run_exam_deck.py` covers it.
+
+### What did NOT change
+
+Steps 1 and 2 are still blocked: they run on PC Chrome, which is not the venue
+topology. Nothing here was run against chatgpt.com, and no generation was
+spent.
+
