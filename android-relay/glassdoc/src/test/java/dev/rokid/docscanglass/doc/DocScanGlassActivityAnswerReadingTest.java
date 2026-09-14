@@ -24,6 +24,7 @@ import java.io.IOException;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.List;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BooleanSupplier;
@@ -626,31 +627,27 @@ public class DocScanGlassActivityAnswerReadingTest {
      * it has to wait for it, the same way {@link #awaitTrue} waits for a
      * main-thread post.
      */
-    private static AnswerStore.Saved awaitSavedState(File dir, String questionId, int offset)
-            throws InterruptedException {
-        AnswerStore.Saved[] holder = new AnswerStore.Saved[1];
-        String[] seen = {"nothing on disk"};
-        awaitTrue(() -> "saved cursor " + questionId + "@" + offset
-                + " (last seen: " + seen[0] + ")", () -> {
-            AnswerStore.Saved candidate;
-            try {
-                candidate = new AnswerStore(dir).load();
-            } catch (IOException error) {
-                throw new AssertionError(error);
-            }
-            if (candidate != null) {
-                seen[0] = candidate.questionId + "@" + candidate.offset
-                        + (candidate.closed ? " closed" : "");
-            }
-            if (candidate != null && questionId.equals(candidate.questionId)
-                    && candidate.offset == offset) {
-                holder[0] = candidate;
-                return true;
-            }
-            return false;
-        });
-        assertNotNull(holder[0]);
-        return holder[0];
+    /**
+     * Wait for the write itself, not for a stretch of wall-clock time.
+     *
+     * persistAnswerPosition(false) queues the write on the Activity's
+     * single-threaded answerPersistExecutor, so submitting an empty task and
+     * waiting for THAT proves the earlier write has already run: a
+     * single-threaded executor runs its queue in order. Polling the file for
+     * five seconds instead made this a race against the CI runner's load, and
+     * it lost there while passing on a developer machine.
+     */
+    private AnswerStore.Saved awaitSavedState(File dir, String questionId, int offset)
+            throws Exception {
+        Shadows.shadowOf(Looper.getMainLooper()).idle();
+        ExecutorService persist =
+                (ExecutorService) getField(activity, "answerPersistExecutor");
+        persist.submit(() -> { }).get(30, TimeUnit.SECONDS);
+        AnswerStore.Saved saved = new AnswerStore(dir).load();
+        assertNotNull("nothing was persisted at all", saved);
+        assertEquals("persisted question", questionId, saved.questionId);
+        assertEquals("persisted offset", offset, saved.offset);
+        return saved;
     }
 
     private static Object getField(Object target, String name) {
