@@ -840,3 +840,34 @@ def test_the_send_button_submits_and_enter_is_only_the_fallback():
     moved = _StubPage(["done", "done", "done"], missing=(chatgpt_web.SEND_SEL,))
     assert chatgpt_web.submit(moved) == "enter"
     assert [value for kind, value in moved.events if kind == "press"] == ["Enter"]
+
+
+def test_a_write_that_lands_on_nothing_is_written_again():
+    """React replaces the file input under us on the mobile composer.
+
+    Measured 2026-09-15 on F-51F: a node marked the instant `start_new_chat`
+    returned was REPLACED 0.5s later, and the bytes written to it disappeared
+    with no error. Retrying the write costs no generation.
+    """
+    page = _StubPage(["done"], thumbnail_appears=[False, True], thumbnail_baseline=0)
+    assert chatgpt_web.attach_images(page, [PNG], sleep=lambda _s: None, now=_ticks()) is True
+    assert len([k for k in _kinds(page) if k == "upload"]) == 2, "wrote twice"
+
+
+def test_a_slow_upload_that_landed_is_never_written_twice():
+    """A second write would attach the same page again and ask about a duplicate."""
+    page = _StubPage(["done"], thumbnail_appears=[True], thumbnail_baseline=0)
+    page.confirmed_files = 0
+    chatgpt_web.attach_images(page, [PNG, PNG], sleep=lambda _s: None, now=_ticks())
+    assert len([k for k in _kinds(page) if k == "upload"]) == 1, "one write, then wait"
+
+
+def _ticks():
+    """A monotonic clock that always advances, so each window closes."""
+    state = {"t": 0.0}
+
+    def now():
+        state["t"] += 1.0
+        return state["t"]
+
+    return now

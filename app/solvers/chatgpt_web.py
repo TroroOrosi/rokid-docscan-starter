@@ -114,6 +114,11 @@ TIMEOUT_S = float(os.environ.get("ROKID_CHATGPT_TIMEOUT_S", "180"))
 # retries; with ATTEMPTS on top it made one unattachable question cost 3
 # minutes, which on a deck is worse than a fast retry in a fresh chat.
 UPLOAD_TIMEOUT_S = float(os.environ.get("ROKID_CHATGPT_UPLOAD_S", "20"))
+# How many times the bytes are written before the attach is called unconfirmed.
+# Not a flake allowance: the mobile composer replaces its file input under us,
+# so the first write can land on a node that is already discarded. Costs no
+# generation -- the question is not sent until the attachment is confirmed.
+UPLOAD_ATTEMPTS = int(os.environ.get("ROKID_CHATGPT_UPLOAD_ATTEMPTS", "3"))
 # chatgpt.com serves a signed-out "lightweight shell" whose DOM has none of the
 # app's controls, and the real composer mounts after the document is loaded.
 # Measured on Chrome 152: domcontentloaded returns ~0.2s, ~0.9s before the app.
@@ -327,17 +332,38 @@ def attach_images(
     expected = sum(len(payloads) for _, payloads in plan)
     thumbnails = page.locator(ATTACHMENT_SEL)
     baseline = thumbnails.count()
-    for file_input, payloads in plan:
-        page.locator(file_input).set_input_files(payloads)
-    # Check before waiting, so an upload that has already landed is never
-    # reported unconfirmed just because the budget was small.
+    # The write is retried, because the node it lands on can be thrown away.
+    # On the mobile layout `start_new_chat` falls back to a real page load --
+    # that layout has no new-chat control -- and React replaces the file input
+    # after the composer is already visible. Measured 2026-09-15 on F-51F: a
+    # node marked the instant `start_new_chat` returned was REPLACED 0.5s later,
+    # and the bytes written to it vanished with it, silently. Waiting for the
+    # input to exist does not help: the stale one already exists.
+    #
+    # A retry only happens when NOTHING landed. Writing again on top of a slow
+    # upload that did land would attach the same page twice and ask the model
+    # about a duplicate.
+    # One budget for the whole attach. Each attempt gets a share of it and none
+    # may outlive it: a per-attempt window computed on its own would never close
+    # against a clock that stops advancing.
     deadline = now() + timeout_s
-    while True:
-        if thumbnails.count() >= baseline + expected:
-            return True
+    for attempt in range(UPLOAD_ATTEMPTS):
+        if attempt and thumbnails.count() > baseline:
+            break
+        for file_input, payloads in plan:
+            page.locator(file_input).set_input_files(payloads)
+        # Check before waiting, so an upload that has already landed is never
+        # reported unconfirmed just because the budget was small.
+        window = min(now() + timeout_s / UPLOAD_ATTEMPTS, deadline)
+        while True:
+            if thumbnails.count() >= baseline + expected:
+                return True
+            if now() >= window:
+                break
+            sleep(poll_s)
         if now() >= deadline:
-            return False
-        sleep(poll_s)
+            break
+    return thumbnails.count() >= baseline + expected
 
 
 def reuse_page(context):
