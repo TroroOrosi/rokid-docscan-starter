@@ -27,6 +27,7 @@ import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BooleanSupplier;
+import java.util.function.Supplier;
 
 import dev.rokid.docscanglass.input.BackExitPolicy;
 import dev.rokid.docscanglass.input.GlassesInputAction;
@@ -379,7 +380,7 @@ public class DocScanGlassActivityAnswerReadingTest {
     @Test
     public void fetchThenPersistThenANewActivityResumesWithoutRefetching() throws Exception {
         activity.onUpdate(RelayState.REVIEW, List.of("a"), "review-1");
-        awaitTrue(() -> getField(activity, "reader") != null);
+        awaitTrue("first activity reader", () -> getField(activity, "reader") != null);
         AnswerReader reader = (AnswerReader) getField(activity, "reader");
         int guard = 0;
         while (!"q11".equals(reader.current().questionId) && guard++ < 50) {
@@ -400,7 +401,7 @@ public class DocScanGlassActivityAnswerReadingTest {
         setField(activity2, "controller", controller);
 
         activity2.onUpdate(RelayState.REVIEW, List.of("a"), "review-1");
-        awaitTrue(() -> getField(activity2, "reader") != null);
+        awaitTrue("resumed activity reader", () -> getField(activity2, "reader") != null);
 
         assertEquals("resuming from the saved state must not re-fetch",
                 1, answerBundleRequests.get());
@@ -591,6 +592,22 @@ public class DocScanGlassActivityAnswerReadingTest {
     }
 
     private static void awaitTrue(BooleanSupplier condition) throws InterruptedException {
+        awaitTrue("condition", condition);
+    }
+
+    /**
+     * `what` is not decoration: every wait in this file reports the same
+     * "condition not met within timeout", so a failure names the helper's line
+     * and nothing about which wait, or what the state actually was.
+     */
+    private static void awaitTrue(String what, BooleanSupplier condition)
+            throws InterruptedException {
+        awaitTrue(() -> what, condition);
+    }
+
+    /** The message is built on failure, so it can report the state it saw. */
+    private static void awaitTrue(Supplier<String> what, BooleanSupplier condition)
+            throws InterruptedException {
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
         while (System.nanoTime() < deadline) {
             Shadows.shadowOf(Looper.getMainLooper()).idle();
@@ -599,7 +616,7 @@ public class DocScanGlassActivityAnswerReadingTest {
             }
             Thread.sleep(10);
         }
-        assertTrue("condition not met within timeout", condition.getAsBoolean());
+        assertTrue(what.get() + " not met within 5s", condition.getAsBoolean());
     }
 
     /**
@@ -612,12 +629,18 @@ public class DocScanGlassActivityAnswerReadingTest {
     private static AnswerStore.Saved awaitSavedState(File dir, String questionId, int offset)
             throws InterruptedException {
         AnswerStore.Saved[] holder = new AnswerStore.Saved[1];
-        awaitTrue(() -> {
+        String[] seen = {"nothing on disk"};
+        awaitTrue(() -> "saved cursor " + questionId + "@" + offset
+                + " (last seen: " + seen[0] + ")", () -> {
             AnswerStore.Saved candidate;
             try {
                 candidate = new AnswerStore(dir).load();
             } catch (IOException error) {
                 throw new AssertionError(error);
+            }
+            if (candidate != null) {
+                seen[0] = candidate.questionId + "@" + candidate.offset
+                        + (candidate.closed ? " closed" : "");
             }
             if (candidate != null && questionId.equals(candidate.questionId)
                     && candidate.offset == offset) {
