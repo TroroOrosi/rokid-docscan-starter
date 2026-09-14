@@ -9,12 +9,20 @@ are unchanged.
 The operational cost of this route, stated plainly:
 
 * Chrome must already be running with a debugging port open and signed in to
-  ChatGPT. Start it once per session::
+  ChatGPT. On a PC, start it once per session::
 
       chrome.exe --remote-debugging-port=9222 --user-data-dir=<your profile>
 
   Reusing the real profile is deliberate: a fresh automation profile is not
   signed in and draws bot checks.
+
+  On the venue topology the browser is Chrome for Android, which never listens
+  on TCP. An **on-device** ``adb forward tcp:9222
+  localabstract:chrome_devtools_remote`` publishes its abstract socket, and
+  **Chrome has to stay in the foreground**: backgrounding it removes the socket
+  outright, measured on F-51F in `docs/hardware-measurements.md` §F-5-3.
+  The endpoint also refuses the first probes and then answers, so both
+  :func:`cdp_available` and the CDP client retry rather than conclude.
 * Automated access to the ChatGPT web UI is against OpenAI's terms of use. The
   account carries a suspension risk that the API route does not.
 * The page structure belongs to OpenAI and changes without notice. Every
@@ -53,7 +61,7 @@ ASSISTANT_SEL = os.environ.get(
 # never received, so the thumbnail is waited for rather than assumed.
 # Measured on the signed-in page: `input[type="file"]` matches FIVE inputs
 # (upload-files, upload-photos, upload-media, upload-camera, upload-media-files)
-# and Playwright refuses an ambiguous locator with a strict mode violation, so
+# and the Playwright-era locator refused the ambiguity as a strict mode violation, so
 # that selector failed every upload. This is the photo one, accept="image/*".
 FILE_INPUT_SEL = os.environ.get(
     "ROKID_CHATGPT_FILE_INPUT_SEL", 'input[data-testid="upload-photos-input"]'
@@ -157,21 +165,33 @@ class ChatGptWebRateLimit(ChatGptWebError):
     """
 
 
-def cdp_available(endpoint: str = CDP_ENDPOINT, *, timeout: float = 1.0) -> str | None:
+def cdp_available(
+    endpoint: str = CDP_ENDPOINT, *, timeout: float = 1.0, attempts: int = 3
+) -> str | None:
     """Return the browser's version string if a DevTools endpoint answers.
 
-    A cheap pre-flight over plain HTTP: it does not start Playwright and does
-    not touch chatgpt.com, so ``ready()`` stays a probe rather than a page load.
+    A cheap pre-flight over plain HTTP: it opens no page and does not touch
+    chatgpt.com, so ``ready()`` stays a probe rather than a page load.
+
+    It retries, because one refusal is not an absent endpoint. Measured on
+    F-51F / Chrome 153.0.8010.36 through an `adb forward`: the endpoint timed
+    out twice and then served the version JSON, and another run answered
+    `RemoteDisconnected` first. A single-shot probe would have called a working
+    browser missing and dropped the session to the next solver tier.
     """
-    try:
-        with urllib.request.urlopen(f"{endpoint.rstrip('/')}/json/version", timeout=timeout) as r:
-            return str(json.loads(r.read().decode("utf-8")).get("Browser", "unknown"))
-    except (urllib.error.URLError, OSError, ValueError):
-        return None
+    url = f"{endpoint.rstrip('/')}/json/version"
+    for attempt in range(attempts):
+        try:
+            with urllib.request.urlopen(url, timeout=timeout) as r:  # noqa: S310
+                return str(json.loads(r.read().decode("utf-8")).get("Browser", "unknown"))
+        except (urllib.error.URLError, OSError, ValueError):
+            if attempt + 1 < attempts:
+                time.sleep(timeout)
+    return None
 
 
 def image_payload(image: bytes, *, name: str = "page") -> dict:
-    """Describe ``image`` for Playwright's ``set_input_files``.
+    """Describe ``image`` for ``set_input_files``.
 
     Passing the buffer straight through avoids a temporary file. The type is
     sniffed from the magic bytes rather than trusted from a path: the server
@@ -354,7 +374,7 @@ def wait_for_composer(page, *, ready_timeout_s: float | None = None):
     composer = page.locator(COMPOSER_SEL)
     try:
         composer.wait_for(state="visible", timeout=ready_timeout_s * 1000)
-    except Exception as exc:  # noqa: BLE001 - playwright raises its own timeout
+    except Exception as exc:  # noqa: BLE001 - the wait raises its own timeout
         raise ChatGptWebError(
             f"composer {COMPOSER_SEL!r} never appeared within {ready_timeout_s:g}s. "
             "A signed-out chatgpt.com serves a placeholder shell without it: "
@@ -551,30 +571,34 @@ class ChatGptWebClient:
         # OCR text as the message body -- never merged into one part.
         pages = list(images) if images else ([image] if image else [])
         self.last_image_attached = None
-        try:
-            from playwright.sync_api import sync_playwright  # noqa: PLC0415
-        except ImportError as exc:  # pragma: no cover - environment-dependent
-            raise ChatGptWebError("chatgpt-web solver needs `pip install playwright`") from exc
+        # CDP is spoken directly rather than through Playwright: the venue runs
+        # this server on the phone, where Playwright's driver refuses to start
+        # (`Error: Unsupported platform: android`, measured in
+        # `docs/hardware-measurements.md` §F-5-4). `app.solvers.cdp` implements
+        # exactly the calls below, with the same names.
+        from .cdp import CdpError, connect_over_cdp  # noqa: PLC0415
 
-        with sync_playwright() as pw:
-            try:
-                browser = pw.chromium.connect_over_cdp(self.endpoint)
-            except Exception as exc:  # noqa: BLE001 - playwright raises broadly
-                raise ChatGptWebError(
-                    f"no Chrome on {self.endpoint}; start it with --remote-debugging-port"
-                ) from exc
-            try:
-                context = browser.contexts[0] if browser.contexts else browser.new_context()
-                return self._ask_with_retries(
-                    context,
-                    f"{system}\n\n{prompt}",
-                    pages,
-                    audio=audio,
-                    bundle_pdf=bundle_pdf,
-                    chat_key=chat_key,
-                )
-            finally:
-                browser.close()
+        try:
+            browser = connect_over_cdp(self.endpoint)
+        except CdpError as exc:
+            raise ChatGptWebError(
+                f"no Chrome on {self.endpoint}; start it with --remote-debugging-port. "
+                "On a phone the endpoint is an on-device `adb forward tcp:9222 "
+                "localabstract:chrome_devtools_remote`, and Chrome must be in the "
+                "FOREGROUND: backgrounding it removes the socket (§F-5-3)"
+            ) from exc
+        try:
+            context = browser.contexts[0] if browser.contexts else browser.new_context()
+            return self._ask_with_retries(
+                context,
+                f"{system}\n\n{prompt}",
+                pages,
+                audio=audio,
+                bundle_pdf=bundle_pdf,
+                chat_key=chat_key,
+            )
+        finally:
+            browser.close()
 
     def _ask_with_retries(
         self,
@@ -647,7 +671,7 @@ class ChatGptWebClient:
                 # The one failure no retry helps. Asking again in a new chat is
                 # exactly how a slowdown became a block.
                 raise
-            except Exception as exc:  # noqa: BLE001 - playwright raises broadly
+            except Exception as exc:  # noqa: BLE001 - page automation raises broadly
                 last_error = exc
                 if attempt >= ATTEMPTS:
                     raise ChatGptWebError(

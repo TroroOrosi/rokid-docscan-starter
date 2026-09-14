@@ -19,11 +19,15 @@ The intended session, from `tasks/plan.md`:
   2026-09-14, also serves a Wi-Fi AP that carries the glasses; the operator
   confirmed this is available. The server process therefore runs on the phone.
   Nothing auto-terminates at 150 minutes.
-- The phone being lockable is no longer free. FastAPI, Chrome with its CDP
-  endpoint, and the AP all have to survive whatever the screen does, and
-  `docs/hardware-measurements.md` §F-5-3 measured the DevTools socket
-  disappearing while Chrome's pid stayed the same. Treat "the phone can be
-  locked" as unmeasured for this topology.
+- **Chrome has to stay in the foreground on the phone**, and the server runs
+  behind it. Measured 2026-09-15 (`docs/hardware-measurements.md` §F-6-1):
+  foregrounding Termux removed `@chrome_devtools_remote` outright, and
+  foregrounding Chrome rebuilt it under a new inode in about 2s, with the
+  screen awake throughout. The operator's 2026-09-15 decision to keep the
+  screen on and the phone face down therefore fixes the foreground app too.
+  The endpoint also refuses the first probes and then answers (§F-6-2), so one
+  refusal is not an absent browser; both `cdp_available()` and
+  `app/solvers/cdp.py` retry.
 
 Two cooperating runtimes:
 

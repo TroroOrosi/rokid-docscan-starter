@@ -19,7 +19,11 @@ httpx>=0.27
 
 # Optional — only needed for ROKID_SOLVER=chatgpt-web, which answers from an
 # already-signed-in ChatGPT web session over a Chrome debugging port instead of
-# an API key. `playwright install` is NOT needed: it attaches to the operator's
-# real Chrome rather than downloading its own browser.
-#   pip install playwright
-# playwright>=1.44
+# an API key. No browser is downloaded: it attaches to the operator's real
+# Chrome and speaks CDP directly (app/solvers/cdp.py), so the only thing needed
+# is a WebSocket client. Playwright was used here until 2026-09-15 and was
+# dropped because its driver refuses to start on the phone
+# (`Error: Unsupported platform: android`), and the venue runs this server on
+# the phone. `websockets` is pure Python and installs under Termux.
+#   pip install websockets
+# websockets>=12.0

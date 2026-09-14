@@ -27,6 +27,7 @@ Status: Frozen measurement record. 集約 2026-09-14。
 | C-3 | グラス直結の撮影・LED・つる開閉 | `:glassprobe` 0.1.0、build `1.25.012-20260901-150201` | 2026-09-04 |
 | E | スマホ内推論 | F-51F、Android 16 / API 36、`MT6897`、llama.cpp | 2026-09-12〜09-14 |
 | F | スマホ側 CDP 終端の到達性 | F-51F、Android 16 / API 36、`com.android.chrome`、chromium/src main | 2026-09-14 |
+| F-6 | スマホの Chrome を CDP で実操作 | F-51F、Android 16 / API 36、Chrome/153.0.8010.36 | 2026-09-15 |
 
 # A. 端末とプラットフォーム
 
@@ -1011,10 +1012,16 @@ SELinux の MCS カテゴリ分離のとおりで、**アプリ間では繋が�
 | `am start ... chatgpt.com` で前景へ | inode 5248971 で listen |
 | `KEYCODE_HOME` の 6 秒後 | inode 5248971 のまま listen |
 
-背景へ回しただけでは消えない。消えたのはメモリ圧迫を掛けた後であり、
-**解答中に落ちうる終端である**ことを意味する。会場の経路は、ソケットが消えた場合の
-復帰を持たなければならない。llama-cli を 8 回回した副作用でこれが起きたのは、
-測定の偶然ではなく、同じ端末で重い処理を走らせる構成そのものの性質である。
+> **この節の結論「背景へ回しただけでは消えない」は 2026-09-15 に否定された。**
+> F-6-1 を読むこと。Termux を前景にしただけでソケットは消え、Chrome を前景へ戻すと
+> 約2秒で別 inode に作り直された。上の表の `KEYCODE_HOME` 行は、ホーム画面へ戻した
+> 直後の 6 秒しか見ていない。**より長い背景化や別アプリの前景化は試していなかった。**
+> 数値は有効、結論は無効。
+
+消えたのはメモリ圧迫を掛けた後でもあり、**解答中に落ちうる終端である**ことを意味する。
+会場の経路は、ソケットが消えた場合の復帰を持たなければならない。llama-cli を 8 回
+回した副作用でこれが起きたのは、測定の偶然ではなく、同じ端末で重い処理を走らせる
+構成そのものの性質である。
 
 ### F-5-3. 端末内 adb はペア設定が要る（実測、未完了）
 
@@ -1056,6 +1063,95 @@ Error: Unsupported platform: android
    Python の WebSocket クライアントだけになる。
 2. proot で glibc の Linux を動かし、その中の node に `platform === "linux"` を
    名乗らせる。実装は変えずに済むが、メモリの厳しい端末に別のユーザランドを足す。
+
+**採用は 1**（2026-09-14、利用者承認）。実装は `app/solvers/cdp.py`。結果は F-6。
+
+## F-6. スマホの Chrome を CDP で実際に動かした（実機、2026-09-15）
+
+機体 F-51F、Android 16 / API 36。`com.android.chrome` は **Chrome/153.0.8010.36**。
+PC から `adb forward tcp:9222 localabstract:chrome_devtools_remote` を張って測った。
+**PC を経路に入れた測定であり、会場トポロジの検証ではない。** 端末内 `adb forward`
+はまだ通っていない（F-6-3）。証明できたのは「スマホの Chrome が CDP を話す」
+ことと「`app/solvers/cdp.py` がその Chrome で動く」ことである。
+
+### F-6-1. DevTools ソケットは Chrome が前景にある間だけ存在する（実測）
+
+F-5-2 は「背景化だけでは消えない」と記録していた。**これは限定しすぎだった。**
+
+```
+[Termux が前景]      cat /proc/net/unix | grep devtools  →  出力なし
+[Chrome を前景へ]    monkey -p com.android.chrome -c android.intent.category.LAUNCHER 1
+[+1s]  なし
+[+2s]  5707196 @chrome_devtools_remote
+[+3s〜+6s]  同じ inode で継続
+```
+
+先に観測した inode は 5412234 で、再出現時は 5707196。**同じソケットが戻るのではなく
+作り直される。** 画面は `mWakefulness=Awake` のままで、変わったのは前景アプリだけ。
+
+会場への帰結: **Chrome を前景に置いたままにする。** サーバ（Termux の FastAPI）は
+背景で動かす。「画面を点けたまま伏せて置く」という 2026-09-15 の運用決定は、
+画面だけでなく**前景アプリ**も固定する必要がある。
+
+### F-6-2. 終端は最初の数回を拒否してから応答する（実測）
+
+```
+curl -sS -m 10 http://127.0.0.1:9222/json/version
+  try1 rc=28 timed out after 10004 ms
+  try2 rc=28 timed out after 10003 ms
+  try3 rc=0  {"Browser":"Chrome/153.0.8010.36", ...
+           "webSocketDebuggerUrl":"ws://127.0.0.1:9222/devtools/browser"}
+```
+
+Chrome が背景のときは 5 回とも `RemoteDisconnected`（F-6-1 のとおりソケットが無い）。
+**1 回の拒否は「ブラウザが無い」ではない。** `cdp_available()` と
+`app/solvers/cdp.py` の両方を再試行にしたのはこの実測による。単発判定のままなら、
+動いているブラウザを不在と判断して次の solver tier へ落ちる。
+
+### F-6-3. 端末内 adb はまだ通っていない（実測、未了）
+
+```
+$ ssh ... 'adb connect 127.0.0.1:36763'    failed to connect to 127.0.0.1:36763
+$ ssh ... 'adb connect 192.168.0.30:36763' failed to connect to 192.168.0.30:36763
+$ ssh ... 'adb connect 127.0.0.1:5555'     failed to connect: Connection refused
+```
+
+PC からは同じ `192.168.0.30:36763` に繋がる。port は開いていて、Termux の鍵が
+ペアされていないだけである（`getprop` は `sys.usb.config=mtp,adb`、
+`service.adb.tcp.port` は空。ワイヤレスデバッグの無作為 port）。
+**`adb pair` に要る 6 桁コードは設定アプリが表示するもので、利用者の操作が要る。**
+PC の `~/.android/adbkey` を複製する案は、秘密鍵の複製にあたるため採らない。
+
+### F-6-4. `app/solvers/cdp.py` の各操作（実測、スマホの Chrome に対して）
+
+| 操作 | 結果 |
+|---|---|
+| `connect_over_cdp` → `Target.getTargets` | 成功。page target 2 件 |
+| `new_page` / `goto` / `url` | 成功 |
+| `locator().count()` / `is_visible()` / `inner_text()` | 成功 |
+| `fill()` 日本語 30 字（`√2`・`x²` 込み） | **完全一致で往復** |
+| `fill()` 36,000 字 | `value.length` が 36000。Playwright 期の 34,205 字と同等 |
+| `fill()` 2 回目（消去して入れ直し） | 成功 |
+| `set_input_files()` 6 MB の PDF 1 件 | `files[0].size` = 6,291,465、**1.50 s** |
+| `set_input_files()` 200 KB 画像 8 件 | `files.length` = 8、**0.25 s** |
+| `click()`（`Input.dispatchMouseEvent`） | ハンドラが発火 |
+
+添付は `DOM.setFileInputFiles` を使わない。あれはブラウザ側のファイルパスを指すもので、
+Chrome for Android からサーバのファイルは見えない。ページへ `DataTransfer` として
+バイト列を渡している。**6 MB が 1.50 s** なので、冊子1冊の PDF は現実的な範囲に入る。
+
+**未測定:** chatgpt.com の実ページに対しては1度も動かしていない。セレクタが今も
+合うか、ProseMirror が `Input.insertText` を受けるかは未確認。
+
+### F-6-5. 事故の記録（2026-09-15）
+
+`adb forward tcp:9222` を張ったまま `py -3.12 -m pytest -q` を回したところ、
+`tests/test_chatgpt_web_live.py` の門（`cdp_available() is None` で skip）が
+**実機の Chrome を見つけてライブ試験に入った。** 878.60 s 走り、
+`test_a_deck_solves_through_the_server_threadpool` が
+「the deck solved nothing through the server」で失敗。**ChatGPT への送信は
+発生していない**（利用者確認）。到達可能性は「動かしてよいか」の答えではない。
+門を `ROKID_CHATGPT_LIVE=1` との AND に変更した。開発機で 9222 を使わないこと。
 
 # 出典
 

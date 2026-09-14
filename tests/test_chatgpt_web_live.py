@@ -9,14 +9,22 @@ reachable, and they cover the two things a stub cannot reach:
    API is bound to the thread that created it;
 2. a deck solves problem after problem, which is where the flakes appeared.
 
-Enable with a reachable CDP endpoint (see README), then::
+Enable deliberately -- a reachable endpoint is NOT enough on its own::
 
-    py -3.12 -m pytest tests/test_chatgpt_web_live.py -q
+    ROKID_CHATGPT_LIVE=1 py -3.12 -m pytest tests/test_chatgpt_web_live.py -q
+
+The opt-in exists because these tests spend real generations on the operator's
+own account, and the endpoint can become reachable by accident. On 2026-09-15 a
+plain `pytest -q` did exactly that: an `adb forward tcp:9222` had been left up
+to inspect the phone's Chrome, this module's gate found a browser, and the full
+suite started driving the live chatgpt.com page. Reachability answers "could
+this run", never "should it".
 """
 
 from __future__ import annotations
 
 import importlib
+import os
 
 import pytest
 from fastapi.testclient import TestClient
@@ -24,9 +32,15 @@ from fastapi.testclient import TestClient
 from app.solvers.chatgpt_web import cdp_available
 from tests.conftest import image_bytes, make_image
 
+LIVE = os.environ.get("ROKID_CHATGPT_LIVE", "").strip().lower() in {"1", "true", "yes", "on"}
+
 pytestmark = pytest.mark.skipif(
-    cdp_available() is None,
-    reason="no debuggable Chrome on the CDP endpoint; see README for the setup",
+    not LIVE or cdp_available() is None,
+    reason=(
+        "live ChatGPT checks are opt-in: set ROKID_CHATGPT_LIVE=1 AND have a "
+        "debuggable signed-in Chrome on the CDP endpoint. They spend real "
+        "generations on the operator's account"
+    ),
 )
 
 
