@@ -95,6 +95,14 @@ read a refusal as a bad answer and turned one block into many on 2026-09-14.
   artifacts, with `SessionType.CUSTOM_APP` in 1.1.1. A glasses-side Android app
   is therefore a supported SDK route, but this repository has not completed a
   successful hardware install/start validation.
+- The same interface carries an arbitrary-`byte[]` channel in **both** 1.0.1 and
+  1.1.1: `sendCustomCmd(String, byte[])` phone-to-glasses and
+  `ICustomCmdCallback.onCustomCmdResult(String, byte[])` glasses-to-phone
+  (`sendCustomCmdStream` is 1.1.1-only). So a glasses-side app does not need its
+  own network to return data. Nothing in this repository calls it, the
+  glasses-side counterpart API has not been seen, and no payload ceiling has
+  been measured. Read `docs/hardware-measurements.md` §B-0-2 before designing
+  around it.
 - A glasses-side app is validated by the **adb sideload** route, not the SDK
   route, as of 2026-09-04 on build `1.25.012-20260901-150201` (Android 12 /
   API 32). Measured there: a sideloaded app is launcher-visible; `camera2`

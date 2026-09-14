@@ -127,6 +127,50 @@ cannot receive them — describes life *inside a CUSTOMVIEW overlay*. It is not 
 platform limit. **Those documents are not a trustworthy source for what the
 platform can do; the AAR is.**
 
+## B-0-2. 任意バイトの双方向チャネル（`javap`、2026-09-14）
+
+**グラス側アプリは自前の Wi-Fi を持たなくてもスマホへデータを返せる。** 同じ
+`IMediaStreamService` に、任意の `byte[]` を双方向に運ぶ口がある。`uploadAndInstallApk`
+の一覧（B-0）を写したときに見落としていた。
+
+```java
+// スマホ → グラス。1.0.1 と 1.1.1 の両方に存在
+int  sendCustomCmd(String name, byte[] payload)
+boolean registerCustomCmdCallback(ICustomCmdCallback cb)
+boolean unregisterCustomCmdCallback(ICustomCmdCallback cb)
+
+// グラス → スマホ
+interface ICustomCmdCallback { void onCustomCmdResult(String name, byte[] payload); }
+
+// 1.1.1 のみ
+int sendCustomCmdStream(String name, byte[] header, byte[] payload)
+```
+
+1.1.1 の session 層にも同じものがある。`CxrSession.sendCustomCmd(String, Caps, byte[])` と
+`addCustomCmdCallback(ICustomCmdSessionCallback)`（同じ `onCustomCmdResult(String, byte[])`）。
+同梱サンプル `ExternalAppClient` は、この口とアプリのライフサイクルを1つのクライアントに
+まとめている：`appUploadAndInstall` / `appStart(pkg, boolean, cb)` / `appStop` /
+`appIsInstalled` ＋ `sendCustomCmd(String, Caps)` / `sendCustomCmd(String, Caps, byte[])` /
+`setCXRCustomCmdCbk(ICustomCmdCbk)`。
+
+`com.rokid.cxr.Caps` は 1.0.1 の jar に同梱。1.1.1 の jar には無く、
+`com.rokid.cxr:cxr-service-bridge` が供給する（`Caps$Binary` / `Caps$Value` 込み）。
+
+**本リポジトリはこの API を1度も呼んでいない**（`grep -rl CustomCmd android-relay` は 0 件、
+2026-09-14）。
+
+### まだ測っていないこと（これらを検証と呼ばない）
+
+1. **グラス側の対向 API が未確認。** このAARはスマホ側クライアントである。グラス側アプリが
+   `onCustomCmdResult` を受け、スマホへ送り返すための YodaOS 側 API は、この成果物には
+   入っていない。**有無は不明。**
+2. **実機のサービスが実装しているか不明。** C-1 で測った Hi Rokid は CXR-L service
+   `1.0.0 code 10000`。AAR に口があることは、その service が応答することを意味しない。
+3. **ペイロード上限が不明。** Binder のトランザクションは概ね 1 MB で、`takePhoto` の
+   JPEG はそれを超えうる。`sendCustomCmdStream`（1.1.1 のみ）の存在は分割前提を示唆するが、
+   上限も分割規約も測っていない。
+4. `uploadAndInstallApk` / `openApp` は実機で成功していない（`CLAUDE.md`）。
+
 ## B-1. リンク対象 AAR に、未使用の上位 API 一式がある
 
 `javap` で `com.rokid.cxr:client-l:1.1.1` を読んだ結果。このリポジトリは生の AIDL
