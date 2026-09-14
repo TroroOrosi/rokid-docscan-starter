@@ -236,6 +236,9 @@ Then, on a device:
   checked against `app/version.py` by `test_readme_versions_match_source_of_truth`.
   Do not copy a version into another document; that is how every copy drifted
   before 2026-09-14.
+- Work resumes from `.agents/progress/`, indexed under "Internal progress
+  records" in `docs/README.md`. Read the whole record, not only its last
+  section; the reason a step is blocked is usually not next to the step.
 - A record that tells the next session what to do next names the runtime of
   each step, as a `Runs on:` line in that section. A resume list is not
   authorization: a step that does not run on the venue topology measures the
