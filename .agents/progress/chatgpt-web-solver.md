@@ -1,5 +1,9 @@
 # Subscription-only GPT route (`ROKID_SOLVER=chatgpt-web`)
 
+> **2026-09-14: read [venue-route-and-duplicated-surfaces.md](venue-route-and-duplicated-surfaces.md) first.** It carries the route decision, the duplicated implementations that have
+> to be settled before more work lands, and the measured state of the phone-side
+> CDP endpoint. This file remains the detail record for the solver itself.
+
 Updated 2026-09-14. Branch `agent/group-scoped-solver-context`. The route is
 committed as `cd567f4` (the solver) and `e231b76` (the live-run fixes below).
 
