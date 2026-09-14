@@ -99,7 +99,7 @@ public final class JapaneseOcr implements AutoCloseable {
     /**
      * Longest edge below which the decoder refuses to halve again.
      *
-     * <p>Two measurements bound this. {@code docs/capture-timing-findings.md}
+     * <p>Two measurements bound this. {@code docs/hardware-measurements.md} §C-2b
      * read a 37 px column pitch off a 1920x1080 capture of an A4 page at
      * 40-60 cm, against ML Kit's 16 px floor, and called 24 px the point
      * beyond which more resolution stops helping. The same page at 4032 px

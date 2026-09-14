@@ -398,7 +398,7 @@ defect, and every one was findable offline before spending a generation.
   is unmeasured.
 - The bench renders pages at `--scale 2` PNG; the device captures
   `takePhoto(1920, 1080, 80)` JPEG with measured 16% contrast
-  (`docs/capture-timing-findings.md`). The stand-in is kinder than reality.
+  (`docs/hardware-measurements.md`). The stand-in is kinder than reality.
 - Attachment ceilings are third-party figures: 10-20 files per message,
   80 files per 3 hours, ~100 images per conversation. Not measured here.
 - 東大 英語 is not published by the university; 世界史第2問 and 生物第3問 are

@@ -163,6 +163,11 @@ def test_readme_versions_match_source_of_truth():
         _text("app/version.py"),
         re.MULTILINE,
     ).group(1)
+    solver_version = re.search(
+        r'^SOLVER_API_VERSION = "([^"]+)"$',
+        _text("app/version.py"),
+        re.MULTILINE,
+    ).group(1)
     gradle = _text("android-relay/app/build.gradle.kts")
     relay_version = re.search(r'versionName = "([^"]+)"', gradle).group(1)
     cxrl_version = re.search(
@@ -173,7 +178,8 @@ def test_readme_versions_match_source_of_truth():
     readme = _text("README.md")
     expected = (
         f"Server APP {server_version} / API {api_version} / "
-        f"Android client {relay_version} / Glasses View {glasses_version}"
+        f"Android client {relay_version} / Glasses View {glasses_version} / "
+        f"Solver API {solver_version}"
     )
     assert expected in readme
     assert f"com.rokid.cxr:client-l:{cxrl_version}" in readme

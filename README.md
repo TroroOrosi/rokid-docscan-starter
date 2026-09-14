@@ -1,14 +1,25 @@
-# Rokid DocScan（紙資料スキャン・ページ照合・解答・解説サーバ）
+# Rokid DocScan（入試問題を撮影して解答するサーバ）
 
-Status: Current project entrypoint. Updated 2026-09-01.
+Status: Current project entrypoint. Updated 2026-09-14.
 
 ## このリポジトリの目的
 
-Rokid Glasses で紙資料を撮影し、Android スマホを中継して問題を解析・解答し、
-グラスの小さな HUD（最大3行）へ返すシステムです。Windows PC をサーバーとして使う
-実機経路をリポジトリ内に含みます。
+入試問題（共通テスト想定）の冊子を Rokid Glasses で撮影し、**解答用紙に記入する
+内容を小問ごとに**グラスの HUD（最大3行）で確認できるようにするシステムです。
+Android スマホを中継し、Windows PC をサーバーとして使う実機経路をリポジトリ内に
+含みます。
 
-実機の主経路は次の通りです。
+紙資料のスキャンとページ照合（`/v1/match`、pHash）は、この上に解答モードを載せた
+**土台**です。現在の目的ではありません。
+
+想定するセッション（`tasks/plan.md` の現行契約）:
+
+- 通常: 20〜40ページを約10分撮影 → 約10分分析 → 約130分閲覧。
+- リスニング: 30分録音の間に約10分撮影 → 両入力終了後に約10分分析 → 約110分閲覧。
+- グラスに Wi-Fi は無く、スマホは 4G/5G でロック中。**現場に PC・自前サーバ・
+  テザリングを持ち込みません。** 150分で自動終了しません。
+
+撮影の主経路は次の通りです。
 
 1. スマホの撮影操作で `AIMING` を表示し、表示open callback後に静止時間を置いて
    CXR-L `takePhoto(1920, 1080, 80)` でページを1回だけ撮影する。
@@ -43,13 +54,31 @@ submodule、AARコピーは不要です。
 - **安全な公開**：実機利用では Bearer 認証を有効にし、信頼できる LAN 内で動かします。
 - **学習用途**：`mode="real"` の解答は既定でロックされます。
 
+### 解答経路
+
+| 経路 | 位置づけ |
+|---|---|
+| `ROKID_SOLVER=chatgpt-web` | **現行の主経路。** 利用者のログイン済み ChatGPT ウェブセッションを CDP 経由で操作します |
+| スマホ内ローカルモデル（F-51F、llama.cpp） | 現場向けの目標。実測は済んでいますが、現場構成への組み込みは未了です |
+| `openai` / `gemini` / `claude` | API キーがあれば設定だけで動きます。`ROKID_SOLVER_TIERS` のフォールバック段として残します |
+
+**ChatGPT ウェブ UI の自動操作は OpenAI の利用規約に反し、アカウントが制限される
+risk があります。**利用者の判断で選択した経路です（詳細は下の「実モデル接続」）。
+
+**未解決:** chatgpt-web の実測はすべて PC 上の Chrome に対するものです。現場は PC を
+置かない前提なので、スマホ側のブラウザへ `ROKID_CHATGPT_CDP` を向ける必要があります。
+設計上は塞がっていませんが**一度も実行していません**。chatgpt-web を現場対応済みとは
+書かないでください。
+
 導入の正本は
 [Windows + Androidスマホ中継による実機運用](docs/windows-android-real-device-setup.md)、
 CXR-L の実装境界は
 [CXR-L / Global Hi Rokid integration](docs/cxr-l-integration.md)です。
 
-現在のバージョン: **Server APP 0.26.0 / API 1.18.0 / Android client 0.3.16 / Glasses View 1.10.0**。
-Solver API 1.3.0は、記入用解答の全文保持・資料不足の分離を行う`answer_only`モードを追加しています。
+現在のバージョン: **Server APP 0.26.0 / API 1.18.0 / Android client 0.3.16 / Glasses View 1.10.0 / Solver API 1.6.0**。
+版数の正本は `app/version.py` です。他の資料は版数を書かず、この行だけが
+`tests/test_documentation_contract.py` で実装と照合されます。
+Solver API は、記入用解答の全文保持・資料不足の分離を行う `answer_only` モードを含みます。
 
 ---
 
@@ -85,13 +114,17 @@ rokid-docscan-starter/
 │   ├── summarize.py   # 要約シム（analyzer に委譲）
 │   ├── explainer.py   # Explainer ポート（ExplainRequest / ExplainResult / ABC）
 │   ├── llm.py         # ★実 AI ブリッジ（openai/gemini/claude、遅延import・注入可）
+│   ├── llm_http.py    # OpenAI互換HTTPクライアント（端末内 llama-server 用・SDK不要）
+│   ├── provider_registry.py # 4ポート共通のアダプタ登録・選択
+│   ├── page_pdf.py    # 撮影ページを1つのPDFへ束ねる（chatgpt-web の一括添付用）
 │   ├── audio_formats.py # 音声MIME・保存suffix・provider対応の共通定義
 │   ├── version.py     # 各契約バージョン（app 0.26.0 / api 1.18.0 / glasses 1.10.0 ほか）
 │   ├── config.py      # 保存先・フィーチャーフラグ（ROKID_* / ANTHROPIC_API_KEY / ROKID_TRANSCRIBER）
 │   ├── transcribe.py  # ★リスニング録音の書き起こし（openai/gemini・未設定時は与値）
 │   ├── db.py          # sqlite3（documents/pages/exam/explain テーブル）
 │   ├── analyzers/     # 解析ポート: base / registry / local_placeholder / claude ★
-│   ├── solvers/       # 解答ポート: base / registry / local_placeholder / claude ★
+│   ├── solvers/       # 解答ポート: base / registry / local_placeholder /
+│   │                  #   llm_adapter / claude / chatgpt_web（★現行主経路）
 │   ├── explainers/    # 解説ポート: registry / local_placeholder / claude ★
 │   ├── extractors/    # メディア抽出: base / registry / local_placeholder / claude ★
 │   └── devtools/      # 旧隔離実験（supported runtimeから未参照）
@@ -102,17 +135,19 @@ rokid-docscan-starter/
 │   ├── eval_exam.py          # 解答パイプライン評価 → JSON レポート
 │   └── rokid_led.py          # 旧隔離実験。実行・連携対象外
 ├── docs/
+│   ├── README.md                    # ★資料の索引と権威順（最初に読む）
 │   ├── windows-android-real-device-setup.md # ★Windows+Android実機手順（正本）
 │   ├── cxr-l-integration.md         # ★CXR-L / Global Hi Rokid実装境界
+│   ├── glasses-ux-contract.md       # 現行の入力契約（スマホ経路と :glassdoc）
 │   ├── real-device-operation.md     # 実機運用の索引・合格条件
 │   ├── device-verification-checklist.md # ★実機検証チェックリスト（CXR-L入力/LED/読取品質/閾値）
-│   ├── implementation-notes.md      # 実機/実AI 差し込み点・CXR SDK・実アダプタ
-│   ├── user-operation-guide.md      # ユーザー操作 / 自動化 / 設計判断 / 環境変数一覧
-│   ├── future-proof-architecture.md # 将来対応アーキテクチャ
+│   ├── user-operation-guide.md      # ユーザー操作 / 自動化 / 設計判断
+│   ├── exam-solver-architecture.md  # ★解答モードアーキテクチャ
 │   ├── explain-sessions.md          # 資料解説モード詳細・curl 例
-│   ├── glasses-ux-contract.md       # 旧操作を含むグラス UX 参考資料
-│   ├── exam-solver-architecture.md  # 解答モードアーキテクチャ
-│   └── rokid-led-dev-utility.md     # 旧実験の隔離記録（操作手順なし）
+│   ├── future-proof-architecture.md # 将来対応アーキテクチャ
+│   ├── hardware-measurements.md     # 実機・成果物の測定記録（凍結）
+│   ├── fast-scan-decisions.md       # 自動スキャン構想の採否判断（未実装・保留）
+│   └── superpowers/specs/           # オフライン解答バンドルの設計（実装済み）
 ├── .env.example       # 全環境変数の雛形（コピーして .env に）
 ├── data/images/       # 画像保存先（実行時に自動生成）
 ├── requirements.txt   # コア依存（anthropic/openai/google-genai は任意・コメント参照）
@@ -359,7 +394,7 @@ Rokid Glasses
 | 撮影 | Glasses / CXR-L `takePhoto` |
 | 端末 OCR | Android bundled Japanese ML Kit |
 | Vision OCR・図表説明 | `ROKID_ANALYZER=openai\|gemini\|claude` |
-| 問題分割・解答 | FastAPI + `ROKID_SOLVER=openai\|gemini\|claude` |
+| 問題分割・解答 | FastAPI + `ROKID_SOLVER=chatgpt-web\|openai\|gemini\|claude` |
 | HUD | Android relay → Global Hi Rokid CUSTOMVIEW |
 | 中断復帰 | Android保存ID + `GET /scan-status` |
 
@@ -443,7 +478,7 @@ curl -s 'http://127.0.0.1:8000/v1/exam-sessions/1/review?index=0&view_page=0'
 対応フローは撮影インジケータを変更しません。別カメラで、撮影前の消灯、`takePhoto`中の
 点灯、成功または失敗callback後の消灯、OCR・解析・閲覧中の消灯を連続記録します。
 callbackはアプリ状態の証拠であり、物理消灯の代用にはなりません。安全な観測手順は
-[実機準備調査](docs/research-safe-led-and-device-readiness-2026-09-01.md)を参照してください。
+[実機準備調査](docs/hardware-measurements.md)を参照してください。
 
 ## 実モデル接続（実機の写真解析・解答には必須）
 

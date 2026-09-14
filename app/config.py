@@ -92,7 +92,6 @@ ROKID_EXPLAINER = os.environ.get("ROKID_EXPLAINER", "local")
 #   ROKID_CHATGPT_ATTEMPTS            default 3 tries per question, fresh chat
 #   ROKID_CHATGPT_RETRY_S             default 5, multiplied by the attempt
 #   ROKID_CHATGPT_TIMEOUT_S           default 180
-#   ROKID_CHATGPT_UPLOAD_S            default 60
 #   ROKID_CHATGPT_READY_S             default 30 (composer mount wait)
 #   ROKID_CHATGPT_POLL_S              default 0.25
 #   ROKID_CHATGPT_STABLE_POLLS        default 4  (0.25 x 4 = 1s of silence)

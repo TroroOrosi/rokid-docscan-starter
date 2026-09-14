@@ -15,8 +15,9 @@ It does not copy or redistribute Rokid's SDK. Gradle resolves the official
 `RokidGlobalLink` binds its AIDL surface to the Global package
 `com.rokid.sprite.global.aiapp`.
 
-The Android client is version `0.3.16` and implements glasses-view contract
-`1.9.0`.
+The Android client version and the glasses-view contract it implements are
+recorded once, in `README.md`; the sources are `app/version.py` and
+`android-relay/app/build.gradle.kts`.
 
 ## Build on Windows
 

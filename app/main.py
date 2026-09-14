@@ -3,7 +3,7 @@
 Server-side. Runs locally with SQLite + local filesystem, offline by default
 (no Rokid hardware and no external credentials required). Real cloud models
 (OpenAI GPT / Google Gemini / Anthropic Claude) plug in via the provider
-registries; see docs/implementation-notes.md and docs/cxr-l-integration.md.
+registries; see docs/exam-solver-architecture.md and docs/cxr-l-integration.md.
 """
 
 from __future__ import annotations

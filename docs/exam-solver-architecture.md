@@ -1,7 +1,8 @@
 # 入試問題ソルバー アーキテクチャ（解答モード）
 
-Status: Historical architecture narrative. Current real-device provider and
-phone-control behavior is defined by `docs/README.md` and the implementation.
+Status: Current architecture of the answer mode. Updated 2026-09-14.
+実装が正で、この文書はその地図です。食い違いを見つけたらコードを信じ、ここを直して
+ください。
 
 既存の「ページ照合（資料化）」モードに、**未登録の入試問題を読み取って解答・根拠を返す**
 解答モードを追加した。設計は既存と同じ **ポート＆アダプタ＋レジストリ＋契約バージョニング**。
@@ -25,7 +26,7 @@ phone-control behavior is defined by `docs/README.md` and the implementation.
 - **overlay**: `tracking:"2d_image_anchor"`・`fixed_ar:false`・`anchor_hint{page_number,box}` を機械可読化（6DoF 固定 AR は未対応＝ハード待ち）。
 - **reasoning**: `GET …/questions/{qid}/reasoning` で `raw_reasoning`＋`evidence`＋`served_by` を返す（HUD は短縮版のまま、`real` ロック準拠）。
 
-## 3 フェーズフロー（読取→一括解答→閲覧 / API 1.11.0・主経路）
+## 3 フェーズフロー（読取→一括解答→閲覧・主経路）
 
 **主経路**。カメラ（＝プライバシー LED 点灯）は読取フェーズのみで、`finalize-reading` 以降は
 カメラを閉じる（LED 消灯）。解答の主体は**グラス搭載 AI（GPT）**で、サーバは分割・取り込み・
@@ -115,7 +116,7 @@ exam-session(document_id, exam_type, answer_format)
 
 | モジュール | 役割 | 差込口 |
 |------------|------|--------|
-| `app/solvers/`（base/registry/local_placeholder/**claude=LLMSolver**） | 問題解答ポート。既定はオフライン**プレースホルダ**（実際には解かない＝不正利用ガード）。`solve_with_fallback` で**二段フォールバック**。**実アダプタ openai/gemini/claude 同梱**（**vision：用紙画像を添付**＋教科別プロンプト） | `ROKID_SOLVER=openai\|gemini\|claude`＋各社 API キーで実解答。`ROKID_SOLVER_TIERS` で tier 指定 |
+| `app/solvers/`（base/registry/local_placeholder/llm_adapter/claude/**chatgpt_web**） | 問題解答ポート。既定はオフライン**プレースホルダ**（実際には解かない＝不正利用ガード）。`solve_with_fallback` で**二段フォールバック**。**実アダプタ openai/gemini/claude 同梱**（**vision：用紙画像を添付**＋教科別プロンプト） | `ROKID_SOLVER=openai\|gemini\|claude`＋各社 API キーで実解答。`ROKID_SOLVER_TIERS` で tier 指定 |
 | `app/extractors/`（base/registry/local_placeholder/**claude=LLMExtractor**） | メディア抽出ポート（数式/図/グラフ/表）。既定はオフライン placeholder。**実アダプタ openai/gemini/claude 同梱**（数式→LaTeX 等） | `ROKID_EXTRACTOR=openai\|gemini\|claude` で実抽出 |
 | `app/retrieval.py` | 既存 `documents/pages` を横断検索し根拠 `context`/`evidence` を供給（依存なしの lexical scorer） | `ROKID_ENABLE_EMBEDDING` で実 embedding 検索に差替（未接続時は lexical へフォールバック） |
 | `app/layout.py` | OCRテキスト→設問番号/本文/選択肢/図表/**解答欄box**（正規化座標） | 実レイアウト/ビジョンモデルが同構造を埋める |
@@ -164,6 +165,48 @@ exam-session(document_id, exam_type, answer_format)
 | GET | `/v1/settings` | 無音契約・操作/入力/キャプチャ契約・音声トグル・real ロックの公示 |
 | GET | `/v1/version` | 契約バージョン＋ analyzers/solvers/extractors 一覧 |
 
+## 解答プロバイダの選択（現行）
+
+`app/provider_registry.py` が 4 ポート（analyzer / solver / extractor / explainer）
+共通の登録・選択を持ち、solver だけ `app/solvers/registry.py` が多段
+フォールバックを重ねます。
+
+| 値 | 実装 | 中身 |
+|---|---|---|
+| `local` | `LocalPlaceholderSolver` | 既定。実際には解かない。不正利用ガードであり、`ROKID_REAL_MODE=1` は拒否します |
+| `openai` / `gemini` / `claude` | `LLMSolver` / `ClaudeSolver` | API キー経路。用紙画像を添付し、教科別プロンプトを使います |
+| `chatgpt-web` | `ChatGptWebSolver` | **現行の主経路。** 下記 |
+
+`ROKID_SOLVER_TIERS` に csv で順序を書くと、その順に試して最後に `local` へ落ちます。
+選択肢記号が設問に存在しない答えが返った場合は、1 回だけ問い直します。
+
+### `chatgpt-web`（`app/solvers/chatgpt_web.py`）
+
+利用者のログイン済み ChatGPT ウェブセッションを、起動済み Chrome の DevTools
+プロトコル（`ROKID_CHATGPT_CDP`、既定 `http://127.0.0.1:9222`）経由で操作します。
+Playwright は使いますが `playwright install` は不要です（実ブラウザに接続するため）。
+
+- **チャットの粒度** — `ROKID_CHATGPT_CHAT_SCOPE`。既定 `question` は小問ごとに
+  新しいチャットを開き、前の解答が文脈に混ざらないようにします。`subject` は
+  科目ごとに 1 チャットを保ち、大問のページを 1 回添付すればその科目の間ずっと
+  残るので、小問ごとに上げ直さずに済みます。
+- **冊子の一括添付** — `app/page_pdf.py` の `images_to_pdf()` が撮影ページを 1 つの
+  PDF に束ね、`GET /v1/exam-sessions/{id}/pages.pdf` が配信します。
+  `Question.document_image_paths` があるとソルバーは PDF 経路を選びます
+  （`ROKID_CHATGPT_BUNDLE_PDF` は手動の上書き）。
+- **タブの再利用** — 質問ごとに `chatgpt.com` を読み込み直さず、1 枚のタブを使い回します。
+- **使用制限への防御** — 制限はメッセージ本文で通知され例外になりません。
+  `ROKID_CHATGPT_RATE_LIMIT_MARKERS` に当たった返答は即座に打ち切り、再試行しません。
+  加えて、`ROKID_CHATGPT_SLOW_S` を超える生成が
+  `ROKID_CHATGPT_SLOW_STREAK` 回続いたら次の送信を止めます。
+- **未確定の答えを確定させない** — 生成中の表示（thinking プレースホルダ）を
+  解答として確定しません。
+
+**ChatGPT ウェブ UI の自動操作は OpenAI の利用規約に反します。** アカウントが制限
+される risk があり、利用者の判断で選択した経路です。セレクタと待ち時間はすべて
+環境変数で上書きできます（`.env.example` 参照）。ページ構造は OpenAI のものなので、
+DOM が変わったらコードではなくセレクタを差し替えてください。
+
 ## 信頼度の分離（案7）
 
 - 読取信頼度（`read_conf`）＝ OCR が読めたか → 低ければ「近づけて再読取」。
@@ -174,9 +217,9 @@ exam-session(document_id, exam_type, answer_format)
 
 `SOLVER_API_VERSION` / `EXPLAINER_API_VERSION` / `EXTRACTOR_API_VERSION` /
 `GLASSES_VIEW_CONTRACT_VERSION` / `OVERLAY_CONTRACT_VERSION` を契約ごとに管理。
-現在は APP `0.11.0` / API `1.11.0` / Solver `1.2.0` / Explainer `1.1.0` /
-Glasses View `1.5.0`。構造化 `evidence_refs`、解説キャッシュ・履歴メタデータ、
-疎な page index の早期拒否を加算的に追加し、旧 `evidence_pages` の意味は変更しません。
+版数はここに書きません。正本は `app/version.py`、公示は `README.md` の 1 行です。
+構造化 `evidence_refs`、解説キャッシュ・履歴メタデータ、疎な page index の早期拒否は
+加算的に追加され、旧 `evidence_pages` の意味は変更していません。
 クライアントは `GET /v1/version` でネゴシエートします。
 
 ## 評価ベンチ（案12）
