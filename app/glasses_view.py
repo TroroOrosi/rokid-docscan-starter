@@ -18,10 +18,19 @@ Design principles (silent HUD; device-controlled capture indicators):
   - HUD payloads contain NO audio cues and NO animation directives.
   - Photography uses CXR-L takePhoto. Shutter sound, flash and firmware capture
     indicators are not controlled or promised by this server contract.
-  - NO character-per-line limit imposed by the server.  The client renderer
-    is responsible for reflowing text to fit the physical display.
-    (Previous 24-char server-side truncation caused problem text and answer
-    text to be cut off and was therefore removed.)
+  - Long logical lines are WRAPPED, never truncated, at a column budget
+    (MAX_COLUMNS, `ROKID_HUD_MAX_COLUMNS`, full-width glyph = 2 columns).
+    Every character survives; a wrapped line simply becomes more lines and
+    therefore more view pages.  The earlier 24-char server-side behaviour was
+    a truncation ([:24]) that cut problem and answer text off, which is why it
+    was removed in contract 1.2.0; this is not that.
+    The budget is an ESTIMATE, not a measurement: the CUSTOMVIEW overlay's
+    text area has never been measured.  480x640 @240dpi is the glasses'
+    logical screen (docs/hardware-measurements.md), and that document states
+    the 3-line constraint is a property of the overlay, not of the screen
+    size.  18 columns is what 34sp (HudLayout.fromLines) spans across 480 px
+    at density 1.5 -- 9 full-width characters.  Set ROKID_HUD_MAX_COLUMNS=0
+    to restore unwrapped logical lines.
   - Lines are paginated server-side into slices of <=_MAX_LINES (3) so the
     client always receives a manageable chunk; teleprompter-style scrolling
     lets the user read long explanations line by line.
@@ -45,7 +54,9 @@ observation and is never inferred from this software state.
 
 from __future__ import annotations
 
+import os
 import re
+import unicodedata
 
 from .explainer import ExplainResult
 from .solvers import SolveResult
@@ -58,11 +69,27 @@ EXPLAIN_STAGES = ("overview", "detail", "evidence")
 
 _MAX_LINES = 3
 
+# Column budget for ONE rendered line.  A full-width glyph costs 2 columns, so
+# 18 columns is 9 Japanese characters.  Resolved from the module attribute at
+# call time, so a test or an operator can retune it without reimporting.
+# 0 disables wrapping and restores one logical line per source line.
+MAX_COLUMNS = int(os.environ.get("ROKID_HUD_MAX_COLUMNS", "18"))
+
+# Closing marks that may not open a line.  One of these is allowed to hang
+# past the budget (by at most one full-width glyph) rather than start the
+# next line alone.
+_NO_LINE_START = "、。，．,.!?！？」』）)]｝}：；:;"
+
 # Server-authoritative render contract for the on-glasses display.
-# NOTE: No max_chars_per_line is specified here — character-level reflow is
-# the client's responsibility.  The server only controls page chunking.
+# max_columns_per_line is the wrap budget above, NOT a truncation limit, and
+# NOT a measured property of the CUSTOMVIEW overlay.  Use render_contract()
+# to read it: this dict is frozen at import.
 RENDER_CONTRACT = {
     "max_lines": _MAX_LINES,
+    "max_columns_per_line": MAX_COLUMNS,
+    "column_unit": "full_width_glyph_is_2",
+    "wraps": True,
+    "truncates": False,
     "silent": True,
     "white_flash": False,
     "animations": False,
@@ -247,16 +274,51 @@ def _locator(answer_box: dict | None) -> str:
     return f"解答欄: {vert}{horiz}"
 
 
-def _wrap(text: str) -> list[str]:
-    """Return the logical line as-is (no character-based splitting).
+def render_contract() -> dict:
+    """Return the render contract with the CURRENT column budget resolved."""
+    return {**RENDER_CONTRACT, "max_columns_per_line": MAX_COLUMNS}
 
-    Character-level reflow is the client renderer's responsibility.
-    The server's role is only page-level chunking (_paginate).
+
+def _columns(ch: str) -> int:
+    """Rendered width of one character, in columns (full-width glyph = 2).
+
+    East Asian Ambiguous counts as 2: the display renders with a Japanese
+    font, where the answer marks ①②③④ and ° occupy a full cell.
+    """
+    return 2 if unicodedata.east_asian_width(ch) in ("W", "F", "A") else 1
+
+
+def _wrap(text: str) -> list[str]:
+    """Split one logical line into lines that fit MAX_COLUMNS columns.
+
+    Wrapping only.  No character is ever dropped: a long line becomes more
+    lines, which _paginate then turns into more view pages.  MAX_COLUMNS <= 0
+    returns the line unwrapped (the contract 1.2.0 behaviour).
     """
     text = (text or "").strip()
     if not text:
         return []
-    return [text]
+    budget = MAX_COLUMNS
+    if budget <= 0:
+        return [text]
+    lines: list[str] = []
+    line = ""
+    used = 0
+    for ch in text:
+        width = _columns(ch)
+        if used + width > budget:
+            if line and ch in _NO_LINE_START and used + width <= budget + 2:
+                line += ch
+                used += width
+                continue
+            lines.append(line)
+            line, used = ch, width
+        else:
+            line += ch
+            used += width
+    if line:
+        lines.append(line)
+    return lines
 
 
 def _split_sentences(text: str) -> list[str]:

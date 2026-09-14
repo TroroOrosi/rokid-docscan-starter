@@ -43,6 +43,9 @@ public final class AnswerReader {
         String content;
         switch (item.status) {
             case READY: content = item.answer; break;
+            // The warning comes first so the operator knows the answer is
+            // incomplete before copying it, and the answer still follows.
+            case NEEDS_REVIEW: content = "【要確認】" + item.issue + "\n" + item.answer; break;
             case NEEDS_INPUT: content = "資料不足\n" + item.issue; break;
             case FAILED: content = "解析できません\n" + item.issue; break;
             default: content = "解析中"; break;

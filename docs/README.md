@@ -83,6 +83,10 @@ what the platform permits.
 
 Continuation records for agents. Never an operator contract.
 
+- `.agents/progress/venue-route-and-duplicated-surfaces.md` — **read this first.**
+  The route the operator decided (chatgpt-web), the implementations that still
+  duplicate each other's role, what is blocking the phone-side CDP endpoint, and
+  what the next session must settle with the operator before adding anything.
 - `.agents/progress/chatgpt-web-solver.md` — the subscription-only
   `ROKID_SOLVER=chatgpt-web` route: what was measured on the live page, the
   selectors that were wrong, and the next steps. Read its rate-limit warning

@@ -36,7 +36,7 @@ Rokid Glasses -> Global Hi Rokid -> Android relay -> FastAPI server -> HUD
 | Route | Status |
 |---|---|
 | `ROKID_SOLVER=chatgpt-web` | **Current primary.** Drives the operator's own signed-in ChatGPT web session over CDP. |
-| On-phone local model (F-51F, llama.cpp) | The venue target. Measured, not wired into the venue topology. |
+| On-phone local model (F-51F, llama.cpp) | **Not the route.** The operator chose chatgpt-web on 2026-09-14. Its measurements are kept as evidence in `docs/hardware-measurements.md` §E; no further work is scheduled on it. |
 | `openai` / `gemini` / `claude` API keys | Supported and config-only. Kept as a fallback tier via `ROKID_SOLVER_TIERS`. |
 | Local OpenAI-compatible HTTP (`app/llm_http.py`) | Reaches an on-phone `llama-server` without the openai SDK. |
 
@@ -56,6 +56,15 @@ Settled decisions. Do not re-argue them:
 requires no PC, so the route has to reach a phone-side browser instead;
 `ROKID_CHATGPT_CDP` accepts any CDP endpoint, so nothing in the design blocks
 it, but **this has never been run**. Do not describe chatgpt-web as venue-ready.
+
+Chrome for Android does not hand out a CDP endpoint the way a PC does, and the
+difference is not a configuration detail. It listens only on a unix
+abstract-namespace socket, never on TCP, and it authorizes the connecting
+process by peer UID: `root`, `shell`, or its own. A phone-side app is neither,
+and SELinux gives each app its own MCS categories on top of that. The route
+therefore needs an on-device `adb forward` (adbd runs as `shell`) to turn that
+socket into `127.0.0.1:9222`. Measured, with the source and device evidence, in
+`docs/hardware-measurements.md` §F.
 
 A throttled account is refused in the message *body*, not by an exception. The
 solver's rate-limit markers and slow-generation brake exist because a retry loop

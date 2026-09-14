@@ -82,4 +82,14 @@ public class AnswerReaderTest {
                 List.of(old.get(2), old.get(1), old.get(0)))));
         assertEquals("g1-q1", reader.current().questionId);
     }
+
+    @Test public void anAnswerNeedingReviewWarnsFirstAndStillShowsTheAnswer() {
+        AnswerBundle bundle = new AnswerBundle("session", "a".repeat(64), 1, List.of(
+                new AnswerItem("g1", "大問1", "g1-q1", "(1)", "12",
+                        AnswerItem.Status.NEEDS_REVIEW, "表")));
+        AnswerReader reader = new AnswerReader(bundle, 40, 3, String::length);
+        List<String> lines = reader.page().lines;
+        assertTrue(lines.get(0).startsWith("【要確認】"));
+        assertTrue(String.join("", lines).contains("12"));
+    }
 }

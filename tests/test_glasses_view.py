@@ -1,3 +1,4 @@
+from app import glasses_view
 from app.explainer import ExplainResult
 from app.glasses_view import (
     STAGES,
@@ -11,6 +12,21 @@ from app.glasses_view import (
 from app.solvers import SolveResult
 
 
+def _stream(sol, stage):
+    """Every line of a stage, across all view pages, joined without breaks.
+
+    A line now wraps at MAX_COLUMNS columns, so a label can start on one line
+    and finish on the next, or on the next view page. Joining with "" asks the
+    question these tests mean to ask: does the text reach the operator at all.
+    """
+    total = build_glasses_view(sol, stage=stage, page=0)["total_pages"]
+    return "".join(
+        line
+        for page in range(total)
+        for line in build_glasses_view(sol, stage=stage, page=page)["lines"]
+    )
+
+
 def _sol(**kw):
     base = dict(answer="B: 青", rationale="条件②より", cautions="参考値",
                 solution_steps=["手順1", "手順2"], answer_confidence=0.8)
@@ -21,11 +37,10 @@ def _sol(**kw):
 def test_view_has_at_most_three_lines():
     """Each page in the paginated view must have <= _MAX_LINES (3) lines.
 
-    Previously this test assumed server-side 24-char splitting would produce
-    multiple physical lines per logical line.  Since _wrap() no longer splits
-    on character count (client renderer is responsible for reflow), each
-    logical line stays as one element.  The invariant is still that every
-    *page* returned by _paginate() contains at most _MAX_LINES entries.
+    _wrap() splits a logical line that exceeds MAX_COLUMNS columns, so one
+    logical line can become several entries. The invariant is unchanged and
+    independent of that: every *page* returned by _paginate() carries at most
+    _MAX_LINES entries.
     """
     for stage in STAGES:
         v = build_glasses_view(_sol(), stage=stage)
@@ -40,13 +55,11 @@ def test_view_has_no_audio_or_animation_fields():
 
 
 def test_long_text_is_paginated():
-    """Pagination is driven by the number of logical lines, not char count.
+    """Many short logical lines paginate, independently of wrapping.
 
-    _wrap() no longer splits a single long string into multiple lines;
-    it returns the string as-is (one element).  Pagination to total_pages > 1
-    therefore requires that _stage_lines() produces more than _MAX_LINES (3)
-    logical lines.  The 'solution' stage returns [header] + solution_steps,
-    so passing many steps guarantees multi-page output.
+    The 'solution' stage returns [header] + solution_steps, so many short
+    steps produce more than _MAX_LINES (3) lines without any step being long
+    enough for _wrap() to split. Wrapping is covered separately below.
     """
     many_steps = [f"手順{i}" for i in range(10)]  # 10 steps -> 11 lines -> 4 pages
     sol = _sol(solution_steps=many_steps)
@@ -111,7 +124,7 @@ def test_evidence_labels_are_one_based_and_document_qualified():
             {"document_id": 9, "page_number": 3},
         ],
     )
-    joined = "\n".join(build_glasses_view(sol, stage="rationale")["lines"])
+    joined = _stream(sol, "rationale")
     assert "D7:P01,D9:P03" in joined
     assert "P00" not in joined
 
@@ -121,7 +134,7 @@ def test_legacy_zero_based_evidence_is_shifted_only_for_display():
         evidence_pages=[0, 2],
         extras={"_evidence_pages_base": 0},
     )
-    joined = "\n".join(build_glasses_view(sol, stage="rationale")["lines"])
+    joined = _stream(sol, "rationale")
     assert "P01,P03" in joined
     assert "P00" not in joined
     # The API v1 compatibility value remains untouched.
@@ -217,3 +230,78 @@ def test_reading_done_ack_reports_camera_off():
     assert ack["camera_off"] is True
     assert "読取完了 5ページ" in ack["lines"][0]
     assert "4問" in ack["lines"][1]
+
+
+# --- Column budget (contract 1.11.0) -----------------------------------------
+# The HUD renders one TextView at 34sp (HudLayout.fromLines) on a 480x640
+# @240dpi logical screen, so ~9 full-width glyphs span a line. The budget is an
+# ESTIMATE: the CUSTOMVIEW overlay's text area has never been measured, and
+# docs/hardware-measurements.md states the 3-line limit is a property of the
+# overlay rather than of the screen size. These tests pin the behaviour the
+# budget is supposed to have, not the number itself.
+
+# The answer 物理基礎 問2 returned in the live run of 2026-09-14.
+_MEASURED_ANSWER = "②（ア＝比例、イ＝反比例、ウ＝Ω・m）"
+
+
+def _widest(lines):
+    return max((sum(glasses_view._columns(c) for c in ln) for ln in lines), default=0)
+
+
+def test_a_measured_answer_line_is_wrapped_to_the_column_budget():
+    lines = glasses_view._wrap(f"答え: {_MEASURED_ANSWER}")
+    assert len(lines) > 1, "the measured answer is wider than one line"
+    # A hung closing mark may exceed the budget by at most one full-width glyph.
+    assert _widest(lines) <= glasses_view.MAX_COLUMNS + 2
+
+
+def test_wrapping_loses_no_character():
+    """The 1.2.0 regression was truncation. Wrapping must never drop text."""
+    text = "答え: " + _MEASURED_ANSWER + "（ただし有効数字2桁、単位はΩ・mとする）"
+    assert "".join(glasses_view._wrap(text)) == text
+
+
+def test_a_full_width_glyph_costs_two_columns():
+    assert glasses_view._columns("答") == 2
+    assert glasses_view._columns("①") == 2, "answer marks render full-width"
+    assert glasses_view._columns("A") == 1
+    lines = glasses_view._wrap("あ" * 30)
+    assert all(len(ln) <= glasses_view.MAX_COLUMNS // 2 for ln in lines)
+
+
+def test_a_closing_mark_never_opens_a_line():
+    # 9 full-width glyphs fill an 18-column line; the 10th is a closing mark,
+    # which hangs rather than starting the next line alone.
+    lines = glasses_view._wrap("あいうえおかきくけ、これで終わり。")
+    assert lines[0].endswith("、")
+    assert not any(ln.startswith("、") or ln.startswith("。") for ln in lines)
+
+
+def test_zero_columns_restores_the_unwrapped_line(monkeypatch):
+    monkeypatch.setattr(glasses_view, "MAX_COLUMNS", 0)
+    text = "答え: " + _MEASURED_ANSWER
+    assert glasses_view._wrap(text) == [text]
+
+
+def test_render_contract_reports_the_current_budget(monkeypatch):
+    monkeypatch.setattr(glasses_view, "MAX_COLUMNS", 12)
+    contract = glasses_view.render_contract()
+    assert contract["max_columns_per_line"] == 12
+    assert contract["max_lines"] == 3
+    assert contract["truncates"] is False
+    assert contract["wraps"] is True
+
+
+def test_a_review_page_never_exceeds_the_budget_or_three_lines():
+    sol = _sol(answer=_MEASURED_ANSWER, solution_steps=[], rationale="", cautions="")
+    view = build_review_view(sol, index=0, problem_count=1, problem_no="問2")
+    total = view["total_view_pages"]
+    seen = []
+    for page in range(total):
+        lines = build_review_view(
+            sol, index=0, problem_count=1, problem_no="問2", view_page=page
+        )["lines"]
+        assert len(lines) <= 3
+        assert _widest(lines) <= glasses_view.MAX_COLUMNS + 2
+        seen += lines
+    assert _MEASURED_ANSWER in "".join(seen)

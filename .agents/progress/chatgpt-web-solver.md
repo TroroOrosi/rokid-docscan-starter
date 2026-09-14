@@ -1,5 +1,9 @@
 # Subscription-only GPT route (`ROKID_SOLVER=chatgpt-web`)
 
+> **2026-09-14: read [venue-route-and-duplicated-surfaces.md](venue-route-and-duplicated-surfaces.md) first.** It carries the route decision, the duplicated implementations that have
+> to be settled before more work lands, and the measured state of the phone-side
+> CDP endpoint. This file remains the detail record for the solver itself.
+
 Updated 2026-09-14. Branch `agent/group-scoped-solver-context`. The route is
 committed as `cd567f4` (the solver) and `e231b76` (the live-run fixes below).
 
@@ -419,13 +423,150 @@ operator stopped it and asked why the phone route was not being used. Step 1 is
 blocked until a phone-side CDP endpoint exists, not merely pending. Do not
 re-run it on a PC and call it progress.
 
+**2026-09-14 (late): what a phone-side endpoint actually requires.** Measured;
+see "The phone-side CDP endpoint" below and `docs/hardware-measurements.md` §F.
+Chrome for Android never listens on TCP and authorizes its socket by peer UID
+(`root` / `shell` / its own), so no phone-side app can connect to it directly.
+An on-device `adb forward` is the route, because adbd runs as `shell`. That is
+now a concrete, testable sequence rather than an open question -- but none of it
+has been run, so step 1 stays blocked.
+
 1. One live question, not a subject: confirm the PDF-once + locator shape
    returns an answer-sheet-only string and that the browser shows ONE chat.
 2. Then one subject (物理基礎, 14 questions) and score against
    `C:/rokid-exam-materials/kyotsu/seikai/rika_kiso.pdf`.
-3. Give the HUD a per-line limit before any accuracy claim: a 32-character
-   answer line does not fit 480 px.
-4. The bench writes every run into one `--data-dir`; give each paper its own,
-   or a later query reads another run's rows (as happened while diagnosing).
+3. ~~Give the HUD a per-line limit~~ **Done 2026-09-14**, as wrapping, not
+   as a limit. See "The HUD line budget" below; the budget itself is an
+   estimate and still needs one physical observation.
+4. ~~Give each paper its own `--data-dir`~~ **Done 2026-09-14.**
+   `deck_data_dir()` puts each paper in its own subdirectory of the run root.
 
 Full sweep remains ~513 questions and is NOT scheduled.
+
+
+## 2026-09-14 (late): the HUD line budget, and one database per paper
+
+Runs on: nothing device-side. Both changes are offline and were verified by
+`py -3.12 -m pytest -q` (550 passed, 1 skipped) and `py -3.12 -m ruff check .`
+(clean). Neither has been seen on the glasses.
+
+### The HUD wraps; it does not truncate
+
+`app/glasses_view._wrap()` used to return every logical line as-is, so the
+32-character answer measured in the 物理基礎 run was handed to the renderer as
+one line. It now splits a line at `MAX_COLUMNS` columns, where a full-width
+glyph costs 2, and `_paginate` turns the extra lines into extra view pages.
+
+This is deliberately NOT the `[:24]` truncation that contract 1.2.0 removed
+after it cut problem and answer text off. Nothing is dropped:
+`test_wrapping_loses_no_character` pins the concatenation back to the source.
+A closing mark (、。」）:;…) may hang up to one full-width glyph past the budget
+rather than open the next line.
+
+**The default of 18 columns (9 full-width glyphs) is an ESTIMATE, not a
+measurement.** It is what 34sp -- the size `HudLayout.fromLines` writes into
+the CUSTOMVIEW TextView -- spans across a 480 px logical screen at 240 dpi
+(`docs/hardware-measurements.md`, measured 2026-09-01 on build
+`1.25.012-20260901-150201`). That document also states that the 3-line limit is
+a property of the overlay rather than of the screen size, so **the CUSTOMVIEW
+text area's real width is unmeasured** and this number may be wrong in either
+direction. Wrong-narrow costs extra swipes; wrong-wide is what we had.
+
+To correct it, put a known ruler string on the glasses and count what fits:
+`ROKID_HUD_MAX_COLUMNS` retunes it without a code change, and
+`GET /v1/settings` publishes `max_columns_per_line`, `column_unit`, `wraps` and
+`truncates` so the client can see the value in force.
+
+`app/hud.py` (`/v1/match`) is unchanged and still unwrapped: its payload's
+shape is fixed at exactly 3 lines, and that route is the scan-and-match
+foundation, not the answer path.
+
+Contract `GLASSES_VIEW 1.11.0`, `APP 0.27.0`. `API` unchanged: no schema moved,
+only the contract values published inside `/v1/settings`.
+
+### One paper, one database
+
+`scripts/run_exam_deck.py` took `--data-dir` as the database itself, so every
+paper's rows landed in one place and a query after a later run read the
+previous paper's rows. `deck_data_dir(root, pdf)` now derives a subdirectory
+from the PDF stem (path-unsafe characters replaced, blank falls back to
+`unnamed`), and the run prints the directory it used. The same PDF resolves to
+the same directory, so re-running one paper still resumes in place.
+`tests/test_run_exam_deck.py` covers it.
+
+### What did NOT change
+
+Steps 1 and 2 are still blocked: they run on PC Chrome, which is not the venue
+topology. Nothing here was run against chatgpt.com, and no generation was
+spent.
+
+
+## 2026-09-14 (late): the phone-side CDP endpoint
+
+Runs on: PC only for the source reading; read-only `adb` against F-51F for the
+device facts. Nothing was installed, started, or changed on either device, and
+no generation was spent.
+
+### The question
+
+Every chatgpt-web measurement ran on PC Chrome. The venue has no PC, so the
+route needs a CDP endpoint on the phone. Until now the record said only that
+`ROKID_CHATGPT_CDP` "accepts any CDP endpoint, so nothing in the design blocks
+it". That is true of this repository's code and says nothing about Chrome.
+
+### What is true of Chrome for Android (measured, from chromium/src main)
+
+1. **No TCP listener exists.** The Android DevTools server uses
+   `net::UnixDomainServerSocket` in the POSIX abstract namespace and nothing
+   else. Passing `--remote-debugging-port` does not change that; the Android
+   build routes through the unix-socket factory. The name is
+   `<prefix>_devtools_remote`, overridable with `kRemoteDebuggingSocketName`.
+2. **The peer is authorized by UID.** `CanUserConnectToDevTools` requires
+   `group_id == user_id` and then accepts only `root`, `shell`, or the
+   browser's own UID, using SO_PEERCRED. Another app is refused by Chrome
+   itself, before any SELinux question.
+
+### What is true of the device (measured 2026-09-14 on F-51F, read-only adb)
+
+- Android 16 / API 36, SELinux **Enforcing**.
+- `@chrome_devtools_remote` is listening right now:
+  `adb -s 192.168.0.30:44409 shell cat /proc/net/unix | grep -i devtools`.
+- Chrome is `u:r:untrusted_app:s0:c30,c257,c512,c768` (u0_a286); Termux is
+  `u:r:untrusted_app_27:s0:c26,c256,c512,c768` (u0_a26). `plat_seapp_contexts`
+  carries `levelFrom=all`, so each app gets its own MCS categories.
+- Wireless debugging is already enabled: `adb devices` lists
+  `192.168.0.30:44409`.
+
+### The route that follows (inferred, NOT yet run)
+
+adbd runs as `shell`, which is exactly one of the three UIDs Chrome accepts, and
+loopback TCP between apps is not subject to the MLS constraint that blocks the
+abstract socket. So, on the phone:
+
+```text
+adb pair / connect 127.0.0.1:<wireless-debugging-port>   # on-device, no PC
+adb forward tcp:9222 localabstract:chrome_devtools_remote
+ROKID_CHATGPT_CDP=http://127.0.0.1:9222
+```
+
+Android 11+ wireless debugging pairs from the device itself with no computer
+(developer.android.com/tools/adb; Shizuku documents the no-PC startup and that
+it must be redone after a reboot).
+
+### Before this can be used
+
+1. Termux needs `adb` (`android-tools`) and must pair to `127.0.0.1`. **Not
+   attempted:** sshd is down and only the operator can restart it
+   (`termux-wake-lock; sshd`). `am start` from the PC is refused by the tool
+   classifier.
+2. Playwright's Node driver has to run under Termux, which is bionic, not glibc.
+   The escape hatch is measured on the artifact: playwright 1.62.0 reads
+   `PLAYWRIGHT_NODEJS_PATH` (playwright/_impl/_driver.py, lines 30-33) and will
+   use a system node instead of the bundled one. Whether the wheel installs on
+   Termux at all is unchecked.
+3. Memory. §E of the measurements records Termux being killed outright when a
+   model loads; Chrome plus a server plus llama-server on one phone is
+   unmeasured.
+4. Automating the ChatGPT web UI still breaks OpenAI's terms of use. This
+   finding changes the topology, not that.
+

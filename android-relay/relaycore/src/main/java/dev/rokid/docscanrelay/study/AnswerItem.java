@@ -2,7 +2,13 @@ package dev.rokid.docscanrelay.study;
 
 /** A single answer-sheet entry. Issue text is never part of the written answer. */
 public final class AnswerItem {
-    public enum Status { PENDING, READY, NEEDS_INPUT, FAILED }
+    /**
+     * NEEDS_REVIEW carries an answer AND an issue: the server converted what it
+     * could for the display and named the element it could not carry (a table,
+     * a figure, unknown notation). Such an answer is never READY, because the
+     * operator would otherwise copy an incomplete one without knowing.
+     */
+    public enum Status { PENDING, READY, NEEDS_REVIEW, NEEDS_INPUT, FAILED }
 
     public final String groupId;
     public final String groupLabel;
@@ -18,9 +24,11 @@ public final class AnswerItem {
         this.questionId = identifier(questionId);
         this.groupLabel = label(groupLabel);
         this.questionLabel = label(questionLabel);
+        boolean carriesAnswer = status == Status.READY || status == Status.NEEDS_REVIEW;
         if (status == null || answer == null || issue == null || answer.length() > 200_000
-                || issue.length() > 1000 || (status == Status.READY && answer.trim().isEmpty())
-                || (status != Status.READY && !answer.isEmpty())) {
+                || issue.length() > 1000 || (carriesAnswer && answer.trim().isEmpty())
+                || (!carriesAnswer && !answer.isEmpty())
+                || (status == Status.NEEDS_REVIEW && issue.trim().isEmpty())) {
             throw new IllegalArgumentException("invalid written answer");
         }
         this.answer = answer;

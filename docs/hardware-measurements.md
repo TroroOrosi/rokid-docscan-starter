@@ -25,7 +25,8 @@ Status: Frozen measurement record. 集約 2026-09-14。
 | C-1 | CUSTOMVIEW のタップ到達性 | F-51F、Hi Rokid G1.12.10.0815、CXR-L service `1.0.0 code 10000` | 2026-08-29 |
 | C-2 | 電話リレー経由の撮影時間 | relay `0.3.6` 期 | 2026-08-28 |
 | C-3 | グラス直結の撮影・LED・つる開閉 | `:glassprobe` 0.1.0、build `1.25.012-20260901-150201` | 2026-09-04 |
-| E | スマホ内推論 | F-51F、Android 16 / API 36、`MT6897`、llama.cpp | 2026-09-12〜09-13 |
+| E | スマホ内推論 | F-51F、Android 16 / API 36、`MT6897`、llama.cpp | 2026-09-12〜09-14 |
+| F | スマホ側 CDP 終端の到達性 | F-51F、Android 16 / API 36、`com.android.chrome`、chromium/src main | 2026-09-14 |
 
 # A. 端末とプラットフォーム
 
@@ -592,7 +593,7 @@ Android は未変更のためビルド未実行。
    実機OCRか別の本文取得経路を先に決める。
 2. **FS-71 横書き科目の先行測定。** 数学ⅠA・情報Ⅰは抽出がほぼ正常なので、
    国語の本文経路を待たずに大問スコープ時の正答率を固められる。
-3. **FS-72 `-c` の安全上限。** `-c` 2048/4096/8192/16384 での `VmRSS` と kill の有無。
+3. ~~**FS-72 `-c` の安全上限。**~~ 実測完了。E-3 を見ること。
 4. **FS-70 の実装。** サーバ側の既定モデル・`--reasoning off` 相当の設定を
    `llama-server` 起動条件として文書化する。
 5. Termux 上での FastAPI 常駐（現場構成から PC を外す）。未着手。
@@ -600,10 +601,94 @@ Android は未変更のためビルド未実行。
 **未解決・注意:**
 
 - 国語・古文漢文の本文取得経路が未決定。実機OCRが計画どおりの方法。
-- `-c 16384` の `VmRSS` 5.75GB は計算値3.1GBと合わない。**計算だけで `-c` を決めると落ちる。**
+- ~~`-c 16384` の `VmRSS` 5.75GB は計算値3.1GBと合わない~~ → E-3 で解決。差は KV では
+  なく、mmap した重みを `VmRSS` が数えていたこと。`Private_Dirty` は 3.38GB で計算と整合する。
 - 数学の記述式はマーク式と別に評価が要る。英語リーディングの結果を数学記述へ外挿しない。
 - グラス⇄スマホは現在の答案バンドルが Wi-Fi 前提で、計画の Bluetooth/CXR と矛盾したまま。
 - FS-62 の物理的な再装着試験、FS-65 が定義する数式・表・作図の表示は未着手のまま。
+
+## E-3. `-c` の実効メモリと、大問あたりの実トークン数（2026-09-14）
+
+機体 F-51F、Android 16 / API 36、`MT6897`、8 コア、`MemTotal` 11,728,552 kB。
+モデル `Qwen3.5-4B-Q4_K_M`（ファイル 2,740,937,888 B）。`llama-cli -n 8 -t 4 -st`。
+ピークは `/proc/<pid>/status` の `VmHWM` と `/proc/<pid>/smaps_rollup` を 0.4〜0.5 秒
+間隔で標本化した最大値。
+
+### E-3-1. `-c` を変えたときの実効メモリ — FS-72
+
+| `-c` | `VmHWM` | `Private_Dirty` | `Pss` | 実行時の `MemAvailable` | 結果 |
+|---|---|---|---|---|---|
+| 2,048 | 5,543,560 kB | 2,922,432 kB | 5,598,964 kB | 5,924,148 kB | exit 0 |
+| 4,096 | 5,670,648 kB | — | — | 7,386,856 kB | exit 0 |
+| 8,192 | 5,802,940 kB | — | — | 7,238,400 kB | exit 0 |
+| 16,384 | 6,065,084 kB | 3,382,816 kB | 6,058,509 kB | 7,389,700 kB | exit 0 |
+| 32,768 | 6,588,076 kB | — | — | 7,148,360 kB | exit 0 |
+| 49,152 | 7,112,096 kB | 4,432,540 kB | 7,103,071 kB | 7,646,652 kB | exit 0 |
+
+**kill は一度も起きていない。** 増分は 16,384→32,768 が 522,992 kB、32,768→49,152 が
+524,020 kB。どちらも **32.0 KiB/token** で、FS-68 が GGUF metadata から計算した
+`full_attention_interval=4`・8 層のみ KV という値と一致する。
+
+**「計算値と合わない」という 2026-09-12 の記述は、指標の取り違えだった。**
+`VmRSS`／`VmHWM` は mmap した重み（2.55 GiB、file-backed で clean、圧力下では回収可能）
+を数える。回収できない分は `Private_Dirty` で、`-c 16384` で 3,382,816 kB = 3.23 GiB。
+計算値（重み 2.55 GiB ＋ KV 0.5 GiB ＝ 約 3.1 GiB）とはこちらが整合する。
+KV の計算は正しく、モデルの能力とも無関係だった。
+
+線形性から `VmHWM ≈ 5.22 GiB + c × 32 KiB`、`Private_Dirty ≈ 2.86 GiB + c × 32 KiB`。
+
+**上限を失敗するまでは詰めていない。** `-c 65536` は約 7.6 GiB で当日の
+`MemAvailable` を超える見込みであり、kill は Termux と sshd を道連れにして利用者の
+復旧操作を要求するため、意図的に実行していない。実測で確かめたのは
+**49,152 まで安全**という事実である。なお測定時の端末は他に重い常駐が無い状態で、
+会場でリレーやブラウザを同時に動かす場合の余裕は別に測る必要がある。
+
+### E-3-2. 実問題の大問あたりトークン数 — FS-67
+
+`llama-tokenize -m Qwen3.5-4B-Q4_K_M.gguf` による**実測**。比率からの推定ではない。
+本文は 2026 年度共通テストの公式 PDF から `pdfminer.six`（`detect_vertical=True`）で
+1 ページずつ抽出し、`app/layout.py` の `segment_problems` で大問へまとめたもの。測定後、
+端末へ送った本文は削除した。リポジトリには統計だけを残す。
+
+| 科目 | ページ | 論文全体 | 1ページ平均 | 最大ページ | 大問数 | 大問 最小 | 大問 最大 |
+|---|---|---|---|---|---|---|---|
+| 英語リーディング | 31 | 9,660 | 311 | 492 | 8 | 585 | 1,920 |
+| 物理基礎 | 14 | 5,272 | 376 | 495 | 3 | 1,453 | 2,055 |
+| 数学ⅠA | 26 | 8,959 | 344 | 543 | 4 | 938 | 3,771 |
+| 情報Ⅰ | 34 | 13,907 | 409 | 593 | 4 | 2,832 | 3,990 |
+| 国語 | 47 | 29,579 | 629 | 1,256 | 5 | 4,023 | **9,484** |
+
+**単一の「トークン/文字」比率は使えない。** 文字種で 2.7 倍違う。
+
+| 対象 | 文字 | トークン | トークン/文字 |
+|---|---|---|---|
+| 英語リーディング 大問8 | 6,348 | 1,920 | **0.30** |
+| 情報Ⅰ 大問2 | 5,557 | 3,979 | 0.72 |
+| 国語 大問1 | 9,413 | 6,873 | 0.73 |
+| 数学ⅠA 大問1 | 2,480 | 2,039 | **0.82** |
+
+2026-09-12 に記録した 0.70／0.77 という単一比率を英語へ当てると約 2.4 倍の過大見積りに
+なる。逆に数学・国語では過小になる。
+
+**ここで得た数字は 2026-09-12 の推定値とも食い違う**（数学ⅠA 5,744 → 8,959、
+国語 20,889 → 29,579、英語リーディング 8,548 → 9,660）。差はトークン化だけでなく
+抽出にもある。今回は `detect_vertical=True` でページ単位に抽出しており、文字数自体が
+多い（数学ⅠA 7,992 字 → 11,026 字）。どちらが実機 OCR に近いかは未測定であり、
+**この表は「PDF 抽出を OCR の代役にしたときの値」であって、撮影したページの値ではない。**
+FS-67 が要求する実ページ OCR の文字数は、実機撮影が残っていないため依然として未測定。
+
+### E-3-3. これが時間予算に対して意味すること（推論、未検証）
+
+実測済みの prompt 速度は 950 トークンで 15.7 t/s、5,420 で 9.1 t/s、8,548 で 6.2 t/s。
+外挿すると国語 大問2（9,484 トークン）の prefill だけで 25 分前後になる。分析 10 分の
+窓には収まらず、閲覧 130 分側へ食い込む。
+
+さらに **`-c` の上限は制約になっていない**（49,152 まで安全、最大の大問でも 9,484）。
+律速は prefill 速度であって文脈長ではない。
+
+未確認の重大な点: 大問スコープでは同じ大問の小問ごとに同じページを prefill し直す。
+国語は 5 大問で 32 小問あるため、キャッシュが効かなければ prefill は大問合計の数倍に
+なる。`llama-server` のプロンプトキャッシュで再利用できるかは測っていない。
 
 ## E-2. 2026-09-13 縦書き科目の本文取得経路（評価用）
 
@@ -767,6 +852,158 @@ py -3.12 -m ruff check .   -> All checks passed!
 Android は未変更のためビルド未実行。実機での再測定は未実施（この経路はサーバ側のみ）。
 
 **次の一手は引き継ぎ要約の 2 以降。** 優先順1はこの節で完了。
+
+# F. スマホ側 CDP 終端（F-51F、2026-09-14）
+
+## F-1. 問い
+
+`ROKID_SOLVER=chatgpt-web` の実測はすべて PC 上の Chrome に対するものだった。
+会場には PC を持ち込まないため、`ROKID_CHATGPT_CDP` がスマホ側のブラウザを
+指せるかどうかが最大の未解決点だった（`tasks/plan.md` 2026-09-14 追補）。
+
+## F-2. 実測
+
+**Android の Chrome は TCP で listen しない。** 一次資料は chromium/src の
+chrome/browser/android/devtools_server.cc（main、2026-09-14 参照。
+<https://chromium.googlesource.com/chromium/src/+/refs/heads/main/chrome/browser/android/devtools_server.cc>）。
+`net::UnixDomainServerSocket`（POSIX abstract namespace）だけを使い、TCP の経路が
+存在しない。ソケット名は `<prefix>_devtools_remote` で、`kRemoteDebuggingSocketName`
+で上書きできる。`--remote-debugging-port` を渡しても Android ビルドは
+unix socket factory を通る。
+
+**接続元は UID で認可される。** chromium/src の
+content/browser/android/devtools_auth.cc
+（<https://chromium.googlesource.com/chromium/src/+/refs/heads/main/content/browser/android/devtools_auth.cc>）
+の `CanUserConnectToDevTools` は `credentials.group_id == credentials.user_id` を
+前提に、`root` / `shell` / ブラウザ自身と同じ UID の 3 つだけを通す。
+SO_PEERCRED で相手プロセスを認証しており、他アプリは該当しない。
+
+**端末側のソケットは現に開いている。** F-51F（Android 16 / API 36、SELinux
+Enforcing）で読み取りのみ確認:
+
+```
+adb -s 192.168.0.30:44409 shell cat /proc/net/unix | grep -i devtools
+0000000000000000: 00000002 00000000 00010000 0001 01 4869806 @chrome_devtools_remote
+```
+
+**アプリ間は SELinux でも隔たっている。** 同じ端末で測定:
+
+```
+u:r:untrusted_app:s0:c30,c257,c512,c768      u0_a286  com.android.chrome
+u:r:untrusted_app_27:s0:c26,c256,c512,c768   u0_a26   com.termux
+/system/etc/selinux/plat_seapp_contexts:37   ... domain=untrusted_app ... levelFrom=all
+```
+
+domain も MCS カテゴリも異なる（`c30,c257` 対 `c26,c256`）。`levelFrom=all` により
+アプリごとに固有カテゴリが付く。
+
+## F-3. 結論（種別つき）
+
+- **実測:** Chrome for Android の CDP は abstract unix socket のみ。TCP 経路なし。
+- **実測:** 接続元の認可は `root` / `shell` / Chrome 自身の UID に限られる。
+- **実測:** F-51F 上で `@chrome_devtools_remote` が listen 中。Chrome と Termux は
+  SELinux の domain・カテゴリが異なる。
+- **実測（2026-09-14 追加）:** Termux から Chrome の abstract socket へ直接繋ぐ経路は
+  **塞がっている**。推論ではなく実地で確認した。F-5 を見ること。
+- **推論:** 端末内 adb（shell 文脈）を経由すれば両方の門を通る。
+  `adb forward tcp:9222 localabstract:chrome_devtools_remote` を**端末上で**実行すると、
+  adbd（`shell`、uid 2000）が abstract socket へ繋ぎ、127.0.0.1:9222 に TCP を開く。
+  loopback TCP はアプリ間で SELinux の MLS 制約を受けないため、Termux 側のサーバから
+  `ROKID_CHATGPT_CDP=http://127.0.0.1:9222` で到達できる。
+- **一次資料:** Android 11 以降の wireless debugging は端末上でペア設定でき、PC を
+  必要としない（developer.android.com/tools/adb、および Shizuku の
+  「This startup method does not require connection computer」「Starting wireless
+  debugging works on Android 11 above」）。再起動のたびに開始操作が要る。
+- **実測:** F-51F では wireless debugging が既に有効（`adb devices` に
+  `192.168.0.30:44409` が出る）。
+
+## F-4. 未確認（この経路を使う前に必要）
+
+1. Termux に `adb`（`android-tools`）を入れ、`127.0.0.1` へ自己ペアできるか。
+   未実施。sshd が停止しており、復旧は利用者の `termux-wake-lock; sshd` が要る。
+2. ~~Playwright の Node driver が Termux で動くか~~ → **動かない。** F-5-4 で実測。
+   driver が `Unsupported platform: android` で初期化に失敗する。
+   `PLAYWRIGHT_NODEJS_PATH` では回避できない。
+3. Chrome・llama-server・FastAPI を同居させたときのメモリ。E 節の実測では
+   モデルロードで Termux ごと kill されている。
+4. ChatGPT ウェブ UI の自動操作が OpenAI の利用規約に反する点は変わらない。
+
+## F-5. スマホ単独で CDP 終端に到達できるか（実機、2026-09-14）
+
+F-2 の推論を実機で確かめ、さらに 2 つの壁が出た。機体 F-51F、Android 16 / API 36、
+Termux 0.118.3（`u0_a26`、`untrusted_app_27`）、`com.android.chrome`（`u0_a286`）。
+
+### F-5-1. アプリから直接は繋がらない（実測）
+
+```
+$ ssh ... 'grep -i devtools /proc/net/unix'
+grep: /proc/net/unix: Permission denied
+
+$ ssh ... 'curl -s -m 8 --abstract-unix-socket chrome_devtools_remote http://localhost/json/version; echo exit=$?'
+exit=7
+```
+
+Termux からはソケット一覧すら読めず、`curl --abstract-unix-socket` は
+exit 7（接続失敗）。F-2 が示した UID 認可（`root`/`shell`/Chrome 自身）と
+SELinux の MCS カテゴリ分離のとおりで、**アプリ間では繋がらない**。
+
+### F-5-2. DevTools ソケットは Chrome の活動に従って現れ消えする（実測）
+
+同じ日のうちに、listen していたソケットが消えた。Chrome のプロセス自体は同じ pid
+12143 で生きていた。前景へ戻すと**別の inode で再び現れた**。
+
+| 状態 | `/proc/net/unix` の `@chrome_devtools_remote` |
+|---|---|
+| 13:0x（Chrome 起動済み） | inode 4869806 で listen |
+| llama-cli を 8 回実行した後 | **無し**（Chrome の pid は 12143 のまま） |
+| `am start ... chatgpt.com` で前景へ | inode 5248971 で listen |
+| `KEYCODE_HOME` の 6 秒後 | inode 5248971 のまま listen |
+
+背景へ回しただけでは消えない。消えたのはメモリ圧迫を掛けた後であり、
+**解答中に落ちうる終端である**ことを意味する。会場の経路は、ソケットが消えた場合の
+復帰を持たなければならない。llama-cli を 8 回回した副作用でこれが起きたのは、
+測定の偶然ではなく、同じ端末で重い処理を走らせる構成そのものの性質である。
+
+### F-5-3. 端末内 adb はペア設定が要る（実測、未完了）
+
+`pkg install android-tools` で Termux に adb 1.0.41（35.0.2）が入った。しかし
+
+```
+$ adb connect 127.0.0.1:44409
+failed to connect to 127.0.0.1:44409
+```
+
+PC が使っている接続ポートへは繋げない。ワイヤレスデバッグの接続ポートは
+**ペア済みクライアント証明書**を要求し、クライアントごとに鍵が異なるためである
+（PC はペア済み、Termux は未ペア）。`adb mdns services` もこのビルドでは
+`error: unknown host service 'mdns:services'` を返す。
+
+ペア設定は設定アプリが表示する 6 桁のコードを要するため、**利用者の操作が要る**。
+Shizuku が文書化している手順と同じで、ペアは一度だけ、開始操作は再起動ごとに要る。
+
+### F-5-4. Playwright は Termux では動かない（実測）
+
+wheel は Termux 用が無い（`ERROR: No matching distribution found playwright`）。
+manylinux aarch64 wheel を `--platform` 指定で入れ、同梱 node の代わりに Termux の
+node v26.4.0 を `PLAYWRIGHT_NODEJS_PATH` で使わせても、driver 自体が起動を拒否する。
+
+```
+$ cd ~/pw/playwright/driver && node package/cli.js --version
+Error: Unsupported platform: android
+    at packages/playwright-core/src/server/registry/index.ts
+```
+
+`process.platform === "android"` を registry が弾く。ブラウザを起動するかどうかに
+関係なく、driver の初期化で落ちるため、`connect_over_cdp` にも到達しない。
+**`PLAYWRIGHT_NODEJS_PATH` は解決策にならない。** F-4 の「逃げ道」はここで否定された。
+
+残る選択肢は 2 つ。どちらも未実施。
+
+1. Playwright を使わず、CDP を直接話す（HTTP `/json` ＋ WebSocket）。
+   `app/solvers/chatgpt_web.py` の実装変更が要るが、スマホ側の依存は
+   Python の WebSocket クライアントだけになる。
+2. proot で glibc の Linux を動かし、その中の node に `platform === "linux"` を
+   名乗らせる。実装は変えずに済むが、メモリの厳しい端末に別のユーザランドを足す。
 
 # 出典
 

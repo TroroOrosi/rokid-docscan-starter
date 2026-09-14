@@ -151,7 +151,7 @@ exam-session(document_id, exam_type, answer_format)
 | POST | `/v1/exam-sessions/{id}/solutions` | **搭載 GPT の問題別解答を ingest**（`served_by="onboard"`・latest wins・real ロック） |
 | GET | `/v1/exam-sessions/{id}/solutions` | **レビューデッキ一覧**（問題番号・教科・解答済み・確信度。読取中は空デッキ） |
 | GET | `/v1/exam-sessions/{id}/review?index=&view_page=` | **問題別閲覧 HUD**（解答+解法+根拠+注意を一括1ストリーム・クランプ・未解答プレースホルダ） |
-| GET | `/v1/exam-sessions/{id}/answer-bundle` | **グラスのオフライン一括答案**（`schema_version`/`session_id`/`input_digest`/`revision`+`items[]`。deckの`question_no`から大問/小問を復元・グループに小問が無ければ`全問`1件を維持。読取中・realロック中は409。実機未検証） |
+| GET | `/v1/exam-sessions/{id}/answer-bundle` | **グラスのオフライン一括答案**（`schema_version`/`session_id`/`input_digest`/`revision`+`items[]`。deckの`question_no`から大問/小問を復元・グループに小問が無ければ`全問`1件を維持。読取中・realロック中は409。実機未検証。解答は表示可能なテキストへ変換して返し（LaTeXの分数・指数・添字・根号・ギリシャ文字・場合分け）、表・図・未対応記法が残る項目は`ready`にせず`needs_review`＋`issue`で返す。テキストは捨てない） |
 | POST | `/v1/exam-sessions/{id}/mode` | **筆記 ⇄ リスニング** 切替（`{"exam_type":...}`） |
 | POST | `/v1/exam-sessions/{id}/audio` | **リスニング録音**アップロード（`audio`＋任意`transcript`）→ 書き起こし保存 |
 | POST | `/v1/exam-sessions/{id}/next-page` / `prev-page` | 文書ページ移動（二次経路。現在ページ ±1・クランプ・撮影なし） |

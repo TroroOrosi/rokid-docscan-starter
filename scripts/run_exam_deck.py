@@ -98,6 +98,22 @@ def parse_pages(spec: str | None) -> range:
     return range(start, int(last) if last else start + 1)
 
 
+_UNSAFE = set('<>:"/|?*' + chr(92))
+
+
+def deck_data_dir(root: Path | str, pdf: Path | str) -> Path:
+    """This paper's OWN database directory, under the run root.
+
+    Every paper used to be written into one --data-dir, so a query run after a
+    later paper read the earlier paper's rows. That happened while diagnosing
+    on 2026-09-14. One paper is one directory; the same PDF resolves to the
+    same directory, so a re-run of that paper still resumes in place.
+    """
+    stem = Path(pdf).stem.strip()
+    safe = "".join("_" if c in _UNSAFE or ord(c) < 32 else c for c in stem)
+    return Path(root) / (safe or "unnamed")
+
+
 def build_client(data_dir: Path, solver: str):
     """A server bound to its own data directory, so runs cannot collide."""
     import importlib
@@ -137,7 +153,9 @@ def run(args) -> int:
     print(f"ok    pages          {len(pages)} rendered, "
           f"{sum(len(t) for _, t in pages)} chars of text")
 
-    client = build_client(Path(args.data_dir), args.solver)
+    data_dir = deck_data_dir(args.data_dir, pdf)
+    print(f"ok    data dir       {data_dir}")
+    client = build_client(data_dir, args.solver)
     doc_id = client.post("/v1/documents", json={"title": pdf.stem}).json()["document_id"]
     for index, (png, text) in enumerate(pages):
         r = client.post(
@@ -230,7 +248,12 @@ def main() -> int:
     parser.add_argument("--solver", default="chatgpt-web")
     parser.add_argument("--scale", type=float, default=2.0, help="render scale")
     parser.add_argument("--out", default=None)
-    parser.add_argument("--data-dir", default="C:/rokid-exam-materials/rundata")
+    parser.add_argument(
+        "--data-dir",
+        default="C:/rokid-exam-materials/rundata",
+        help="run ROOT. Each paper gets its own subdirectory named after the "
+             "PDF, so one paper's rows are never read back for another",
+    )
     parser.add_argument("--force", action="store_true")
     return run(parser.parse_args())
 

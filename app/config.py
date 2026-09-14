@@ -112,6 +112,15 @@ ROKID_EXPLAINER = os.environ.get("ROKID_EXPLAINER", "local")
 #                           ROKID_LLM_MODEL (an audio-capable gemini model)
 TRANSCRIBER = os.environ.get("ROKID_TRANSCRIBER") or None
 
+# --- HUD line width ---------------------------------------------------------
+# The on-glasses HUD wraps a logical line at ROKID_HUD_MAX_COLUMNS columns
+# (default 18; a full-width glyph costs 2, so 9 Japanese characters). It never
+# truncates: a longer line becomes more lines and more view pages. The budget
+# is read by app.glasses_view.MAX_COLUMNS and published at GET /v1/settings.
+# It is an ESTIMATE — 34sp across a 480 px logical screen — not a measurement
+# of the CUSTOMVIEW overlay's text area, which has never been measured.
+# Set 0 to disable wrapping.
+
 # --- Diagnostic glasses KeyCode map -----------------------------------------
 # GET /v1/settings publishes an unverified gesture->KeyCode map for diagnostics.
 # It does not enable operator actions in the supported phone-controlled relay.
