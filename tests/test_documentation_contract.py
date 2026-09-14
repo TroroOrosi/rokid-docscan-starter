@@ -25,6 +25,21 @@ def _text(relative_path: str) -> str:
     return (ROOT / relative_path).read_text(encoding="utf-8")
 
 
+def _generated_prefixes() -> tuple[str, ...]:
+    """Directory prefixes `.gitignore` marks as generated at runtime.
+
+    A checkout never contains them, so requiring a documented path under one to
+    exist passes only on a machine that has already run the thing that writes
+    it. `data/docscan.db` is documented as created on startup; asking CI to
+    find it is asking the wrong question.
+    """
+    return tuple(
+        line
+        for line in (raw.strip() for raw in _text(".gitignore").splitlines())
+        if line.endswith("/") and not line.startswith(("#", "!", "*")) and "*" not in line
+    )
+
+
 def _repository_markdown() -> set[str]:
     ignored_parts = {".git", ".pytest_cache"}
     paths = {
@@ -162,11 +177,14 @@ def test_current_runbooks_do_not_document_a_gradle_command_that_cannot_run():
 def test_every_documented_repository_path_exists():
     """A path that moved silently sends the next agent to the wrong module."""
     reference = re.compile(r"`([A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)+)`")
+    generated = _generated_prefixes()
     offenders = []
     for document in sorted(_repository_markdown()):
         for match in reference.finditer(_text(document)):
             candidate = match.group(1)
             if not Path(candidate).suffix or candidate.startswith(("http", "C:/")):
+                continue
+            if candidate.startswith(generated):
                 continue
             if (ROOT / candidate).exists() or (ROOT / document).parent.joinpath(candidate).exists():
                 continue

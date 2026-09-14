@@ -14,6 +14,7 @@ import pytest
 from app.llm import (
     DEFAULT_MODELS,
     _build_sdk,
+    _reject_local_endpoint,
     LLMClient,
     LLMConfigError,
     clamp01,
@@ -242,11 +243,23 @@ def test_local_base_url_is_refused_before_any_page_is_analyzed(monkeypatch, prov
 
 
 def test_local_base_url_is_allowed_with_an_explicit_opt_in(monkeypatch):
+    """The opt-in lets the local endpoint through; nothing else is asserted.
+
+    What happens after the guard depends on the machine: with `openai`
+    installed the SDK rejects the missing key, without it `_build_sdk` returns
+    the llm_http shim for the endpoint that was just allowed. Asserting that
+    *something* raised made this pass on a developer box for the first reason
+    and fail in CI for the second, so it asserts the guard instead.
+    """
     monkeypatch.setenv("OPENAI_BASE_URL", "http://localhost:8787/v1")
     monkeypatch.setenv("ROKID_ALLOW_LOCAL_LLM_ENDPOINT", "1")
-    # Reaching the import is enough: the guard did not raise.
-    with pytest.raises((LLMConfigError, ImportError, Exception)):
+    _reject_local_endpoint("openai")
+    try:
         _build_sdk("openai")
+    except LLMConfigError as exc:  # pragma: no cover - guard already checked
+        pytest.fail(f"the opt-in did not allow the endpoint: {exc}")
+    except Exception:
+        pass  # a missing SDK or credential is not this test's subject
 
 
 def test_remote_base_url_is_untouched(monkeypatch):
