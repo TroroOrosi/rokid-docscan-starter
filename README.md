@@ -1,14 +1,25 @@
-# Rokid DocScan（紙資料スキャン・ページ照合・解答・解説サーバ）
+# Rokid DocScan（入試問題を撮影して解答するサーバ）
 
-Status: Current project entrypoint. Updated 2026-09-01.
+Status: Current project entrypoint. Updated 2026-09-14.
 
 ## このリポジトリの目的
 
-Rokid Glasses で紙資料を撮影し、Android スマホを中継して問題を解析・解答し、
-グラスの小さな HUD（最大3行）へ返すシステムです。Windows PC をサーバーとして使う
-実機経路をリポジトリ内に含みます。
+入試問題（共通テスト想定）の冊子を Rokid Glasses で撮影し、**解答用紙に記入する
+内容を小問ごとに**グラスの HUD（最大3行）で確認できるようにするシステムです。
+Android スマホを中継し、Windows PC をサーバーとして使う実機経路をリポジトリ内に
+含みます。
 
-実機の主経路は次の通りです。
+紙資料のスキャンとページ照合（`/v1/match`、pHash）は、この上に解答モードを載せた
+**土台**です。現在の目的ではありません。
+
+想定するセッション（`tasks/plan.md` の現行契約）:
+
+- 通常: 20〜40ページを約10分撮影 → 約10分分析 → 約130分閲覧。
+- リスニング: 30分録音の間に約10分撮影 → 両入力終了後に約10分分析 → 約110分閲覧。
+- グラスに Wi-Fi は無く、スマホは 4G/5G でロック中。**現場に PC・自前サーバ・
+  テザリングを持ち込みません。** 150分で自動終了しません。
+
+撮影の主経路は次の通りです。
 
 1. スマホの撮影操作で `AIMING` を表示し、表示open callback後に静止時間を置いて
    CXR-L `takePhoto(1920, 1080, 80)` でページを1回だけ撮影する。
@@ -43,13 +54,31 @@ submodule、AARコピーは不要です。
 - **安全な公開**：実機利用では Bearer 認証を有効にし、信頼できる LAN 内で動かします。
 - **学習用途**：`mode="real"` の解答は既定でロックされます。
 
+### 解答経路
+
+| 経路 | 位置づけ |
+|---|---|
+| `ROKID_SOLVER=chatgpt-web` | **現行の主経路。** 利用者のログイン済み ChatGPT ウェブセッションを CDP 経由で操作します |
+| スマホ内ローカルモデル（F-51F、llama.cpp） | 現場向けの目標。実測は済んでいますが、現場構成への組み込みは未了です |
+| `openai` / `gemini` / `claude` | API キーがあれば設定だけで動きます。`ROKID_SOLVER_TIERS` のフォールバック段として残します |
+
+**ChatGPT ウェブ UI の自動操作は OpenAI の利用規約に反し、アカウントが制限される
+risk があります。**利用者の判断で選択した経路です（詳細は下の「実モデル接続」）。
+
+**未解決:** chatgpt-web の実測はすべて PC 上の Chrome に対するものです。現場は PC を
+置かない前提なので、スマホ側のブラウザへ `ROKID_CHATGPT_CDP` を向ける必要があります。
+設計上は塞がっていませんが**一度も実行していません**。chatgpt-web を現場対応済みとは
+書かないでください。
+
 導入の正本は
 [Windows + Androidスマホ中継による実機運用](docs/windows-android-real-device-setup.md)、
 CXR-L の実装境界は
 [CXR-L / Global Hi Rokid integration](docs/cxr-l-integration.md)です。
 
-現在のバージョン: **Server APP 0.17.0 / API 1.16.0 / Android client 0.3.16 / Glasses View 1.10.0**。
-Solver API 1.3.0は、記入用解答の全文保持・資料不足の分離を行う`answer_only`モードを追加しています。
+現在のバージョン: **Server APP 0.26.0 / API 1.18.0 / Android client 0.3.16 / Glasses View 1.10.0 / Solver API 1.6.0**。
+版数の正本は `app/version.py` です。他の資料は版数を書かず、この行だけが
+`tests/test_documentation_contract.py` で実装と照合されます。
+Solver API は、記入用解答の全文保持・資料不足の分離を行う `answer_only` モードを含みます。
 
 ---
 
@@ -85,13 +114,17 @@ rokid-docscan-starter/
 │   ├── summarize.py   # 要約シム（analyzer に委譲）
 │   ├── explainer.py   # Explainer ポート（ExplainRequest / ExplainResult / ABC）
 │   ├── llm.py         # ★実 AI ブリッジ（openai/gemini/claude、遅延import・注入可）
+│   ├── llm_http.py    # OpenAI互換HTTPクライアント（端末内 llama-server 用・SDK不要）
+│   ├── provider_registry.py # 4ポート共通のアダプタ登録・選択
+│   ├── page_pdf.py    # 撮影ページを1つのPDFへ束ねる（chatgpt-web の一括添付用）
 │   ├── audio_formats.py # 音声MIME・保存suffix・provider対応の共通定義
-│   ├── version.py     # 各契約バージョン（app 0.17.0 / api 1.15.0 / glasses 1.10.0 ほか）
+│   ├── version.py     # 各契約バージョン（app 0.26.0 / api 1.18.0 / glasses 1.10.0 ほか）
 │   ├── config.py      # 保存先・フィーチャーフラグ（ROKID_* / ANTHROPIC_API_KEY / ROKID_TRANSCRIBER）
 │   ├── transcribe.py  # ★リスニング録音の書き起こし（openai/gemini・未設定時は与値）
 │   ├── db.py          # sqlite3（documents/pages/exam/explain テーブル）
 │   ├── analyzers/     # 解析ポート: base / registry / local_placeholder / claude ★
-│   ├── solvers/       # 解答ポート: base / registry / local_placeholder / claude ★
+│   ├── solvers/       # 解答ポート: base / registry / local_placeholder /
+│   │                  #   llm_adapter / claude / chatgpt_web（★現行主経路）
 │   ├── explainers/    # 解説ポート: registry / local_placeholder / claude ★
 │   ├── extractors/    # メディア抽出: base / registry / local_placeholder / claude ★
 │   └── devtools/      # 旧隔離実験（supported runtimeから未参照）
@@ -102,17 +135,19 @@ rokid-docscan-starter/
 │   ├── eval_exam.py          # 解答パイプライン評価 → JSON レポート
 │   └── rokid_led.py          # 旧隔離実験。実行・連携対象外
 ├── docs/
+│   ├── README.md                    # ★資料の索引と権威順（最初に読む）
 │   ├── windows-android-real-device-setup.md # ★Windows+Android実機手順（正本）
 │   ├── cxr-l-integration.md         # ★CXR-L / Global Hi Rokid実装境界
+│   ├── glasses-ux-contract.md       # 現行の入力契約（スマホ経路と :glassdoc）
 │   ├── real-device-operation.md     # 実機運用の索引・合格条件
 │   ├── device-verification-checklist.md # ★実機検証チェックリスト（CXR-L入力/LED/読取品質/閾値）
-│   ├── implementation-notes.md      # 実機/実AI 差し込み点・CXR SDK・実アダプタ
-│   ├── user-operation-guide.md      # ユーザー操作 / 自動化 / 設計判断 / 環境変数一覧
-│   ├── future-proof-architecture.md # 将来対応アーキテクチャ
+│   ├── user-operation-guide.md      # ユーザー操作 / 自動化 / 設計判断
+│   ├── exam-solver-architecture.md  # ★解答モードアーキテクチャ
 │   ├── explain-sessions.md          # 資料解説モード詳細・curl 例
-│   ├── glasses-ux-contract.md       # 旧操作を含むグラス UX 参考資料
-│   ├── exam-solver-architecture.md  # 解答モードアーキテクチャ
-│   └── rokid-led-dev-utility.md     # 旧実験の隔離記録（操作手順なし）
+│   ├── future-proof-architecture.md # 将来対応アーキテクチャ
+│   ├── hardware-measurements.md     # 実機・成果物の測定記録（凍結）
+│   ├── fast-scan-decisions.md       # 自動スキャン構想の採否判断（未実装・保留）
+│   └── superpowers/specs/           # オフライン解答バンドルの設計（実装済み）
 ├── .env.example       # 全環境変数の雛形（コピーして .env に）
 ├── data/images/       # 画像保存先（実行時に自動生成）
 ├── requirements.txt   # コア依存（anthropic/openai/google-genai は任意・コメント参照）
@@ -359,7 +394,7 @@ Rokid Glasses
 | 撮影 | Glasses / CXR-L `takePhoto` |
 | 端末 OCR | Android bundled Japanese ML Kit |
 | Vision OCR・図表説明 | `ROKID_ANALYZER=openai\|gemini\|claude` |
-| 問題分割・解答 | FastAPI + `ROKID_SOLVER=openai\|gemini\|claude` |
+| 問題分割・解答 | FastAPI + `ROKID_SOLVER=chatgpt-web\|openai\|gemini\|claude` |
 | HUD | Android relay → Global Hi Rokid CUSTOMVIEW |
 | 中断復帰 | Android保存ID + `GET /scan-status` |
 
@@ -443,7 +478,7 @@ curl -s 'http://127.0.0.1:8000/v1/exam-sessions/1/review?index=0&view_page=0'
 対応フローは撮影インジケータを変更しません。別カメラで、撮影前の消灯、`takePhoto`中の
 点灯、成功または失敗callback後の消灯、OCR・解析・閲覧中の消灯を連続記録します。
 callbackはアプリ状態の証拠であり、物理消灯の代用にはなりません。安全な観測手順は
-[実機準備調査](docs/research-safe-led-and-device-readiness-2026-09-01.md)を参照してください。
+[実機準備調査](docs/hardware-measurements.md)を参照してください。
 
 ## 実モデル接続（実機の写真解析・解答には必須）
 
@@ -476,8 +511,124 @@ uvicorn app.main:app --port 8000
 | `ROKID_TRANSCRIBER` | （なし） | リスニング録音の書き起こし `openai\|gemini`（未設定=与えた transcript を使用） |
 | `ROKID_TRANSCRIBE_MODEL` | `gpt-4o-transcribe` | openai の書き起こしモデル（gemini は `ROKID_LLM_MODEL`） |
 | `ROKID_SOLVER_TIERS` | （単一） | 二段フォールバック順（例 `openai,local`） |
+| `ROKID_CHATGPT_CDP` | `http://127.0.0.1:9222` | `ROKID_SOLVER=chatgpt-web` 時に接続する Chrome の DevTools ポート |
 | `ROKID_KEYMAP` | （なし） | gesture→KeyCode の上書き（JSON、`/v1/settings.input`。既定 KeyCode は旧機由来・未実測） |
 | `ROKID_API_KEY` | （なし） | 設定時に Bearer 認証（発見系は開放） |
+
+
+### API キー無しの GPT 経路（`ROKID_SOLVER=chatgpt-web`）
+
+サブスクリプションのみで解答させる経路です。サーバがログイン済み Chrome を
+DevTools プロトコル経由で操作し、ChatGPT ウェブ UI に問題文を入力して返答を
+読み取ります。撮影 → OCR → 解答 → HUD までスマホの手動操作は不要です。
+
+```bash
+pip install playwright            # `playwright install` は不要（実 Chrome に接続）
+# 専用プロファイルで Chrome を起動し、そこで ChatGPT に一度ログインしておく
+chrome.exe --remote-debugging-port=9222 --user-data-dir="C:\chrome-rokid-profile"
+
+export ROKID_SOLVER=chatgpt-web
+py -3.12 -m app.solvers.chatgpt_web   # ライブ確認（セレクタが現行 UI に合うか）
+py -3.12 -m app.solvers.chatgpt_web "図の角度を求めよ" data/images/p01.png  # 画像経路も
+uvicorn app.main:app --host 0.0.0.0 --port 8000
+```
+
+実測値（Chrome 152.0.7977.83 / 2026-09-13）と注意点:
+
+- **起動中の Chrome に `--remote-debugging-port` を付けても無効です。** 既存
+  セッションにタブが開くだけでポートは開きません（`既存のブラウザ セッションで
+  開いています` と出て終了）。必ず**専用の `--user-data-dir`** を使います。
+- **ログアウト状態では別 DOM が出ます。** `lightweight-shell` というプレース
+  ホルダーで、composer も `data-testid` も存在しません。専用プロファイルで
+  一度ログインする必要があります（毎問の手動操作は不要）。
+- **実機検証済み**（2026-09-13、ログイン済みセッション）。1問あたり実測
+  **テキストのみ 7.58秒 / 画像付き 8.98秒**。内訳は遷移+composer 2.0秒、
+  添付 0.11秒、残りが生成時間です。ブラウザ接続自体は 0.61秒
+  （playwright 0.23 / CDP 0.03 / 遷移 0.28）で律速ではないため、接続プールは
+  作っていません。
+- 画像到達は、角度が**画像にしか無い**三角形で検証しました（本文は「図の角 x
+  の大きさを求めよ」のみ）。解答 `70°` で正答し、図が OCR を経ずにモデルへ
+  届いていることを確認しています。
+- **大問が複数ページにまたがる場合は全ページを添付します**（`Question.image_paths`）。
+  条件をページ1に、図をページ2に置いた2ページ問題で検証: 1枚のみだと
+  `needs_input`（「角a、角bの大きさが不足」）、2枚で `70度` と正答しました。
+  ページは1回の `set_input_files` で送るため読み順が保たれます。全ページの
+  サムネイルが揃って初めて `image_attached` が true になります。
+- 応答完了は `stop-button` の消滅で判定します。**このボタンは思考フェーズを
+  含む生成中ずっと存在する**ため、表示されている間は何も確定しません。推論
+  モデルは「思考中」を1秒以上静止表示するので、テキスト安定判定だけだと長文
+  5問中4問でこれを解答として確定していました。安定判定はセレクタ消失時の
+  フォールバックに限定しています。
+- 本文の長さは **34,205字まで欠落なし**を実測（末尾に置いた合言葉が全長で
+  返る）。`composer.fill()` は1回で全量を入れるため途中送信も起きません。
+- 連続実行はflakeします（16問連続でアップロード未確認1件、composer操作
+  不能1件）。`ROKID_CHATGPT_ATTEMPTS`（既定3）で新しいチャットを開いて
+  再試行します。**添付が未確認の場合も再試行対象**です — 図なしで送ると
+  エラーにならず、誤答か `needs_input` になるためです。ただし再試行の判定は
+  **送信前**に行うため、サムネイル未確認は生成回数を消費しません（旧実装は
+  送信済みの解答を捨てて再質問しており、1問あたり最大3生成でした）。
+- **使用制限への防御**（2026-09-14 にアカウントが制限された経験から）:
+  - 返答が使用制限の通知だった場合は `ChatGptWebRateLimit` で即座に打ち切り、
+    再試行しません（新しいチャットを開いて再質問するのが悪化の原因でした）。
+    検出語は `ROKID_CHATGPT_RATE_LIMIT_MARKERS`（`|` 区切り）で変更できます。
+  - 生成時間が `ROKID_CHATGPT_SLOW_S`（既定40秒）を超えた回が
+    `ROKID_CHATGPT_SLOW_STREAK`（既定2）回続くと、次の送信を拒否します。
+    実測のスロットリング兆候は「正常 7-13秒 → 43秒 → 48秒 → 130秒 → ブロック」
+    でした。`ROKID_CHATGPT_SLOW_STREAK=0` で無効化できます。
+- **教科ごとに1チャット**（任意、既定は問題ごと）: `ROKID_CHATGPT_CHAT_SCOPE=subject`
+  で1科目が1チャットを共有します。全教科デックでチャット数が小問数から教科数に
+  減り、同じ大問のページは**その科目で1回だけ**アップロードされます（同一バイト
+  列を SHA-256 で判定）。代償は、同じ科目の前問の解答が文脈に残ることです。
+  既定の `question` は測定済みの挙動（1問1チャット）を維持します。
+- **リスニング音声は資料と同じメッセージに添付されます。** `Question.audio_path`
+  が録音ファイルを運び、写真用 input は `accept="image/*"` のため
+  `ROKID_CHATGPT_FILE_UPLOAD_SEL`（汎用ファイル input）から送ります。文字起こしは
+  従来どおり本文に入るため、音声が読めない場合も解答は失われません。音声も
+  チャット内で重複アップロードしません。
+- **複数ページを1つの PDF にまとめて送る**（任意、既定オフ）:
+  `ROKID_CHATGPT_BUNDLE_PDF=1` で大問の全ページを1つの PDF にして
+  `ROKID_CHATGPT_FILE_UPLOAD_SEL`（既定 `input[data-testid="upload-files-input"]`）
+  から送ります。アップロード回数が1回になりますが、**実ページでは未検証**
+  です（制限中に実装したため）。図がPDF経路でも読めるかを1問で確認してから
+  使ってください。画像1枚ずつの経路のみが実測済みです。
+
+注意点:
+
+- **ChatGPT ウェブ UI の自動操作は OpenAI の利用規約に反します。** アカウント
+  停止のリスクを負う経路で、API 経路にはこのリスクはありません。
+- ページ構造は OpenAI のもので予告なく変わります。壊れた場合は
+  `ROKID_CHATGPT_COMPOSER_SEL` / `ROKID_CHATGPT_ASSISTANT_SEL` を再設定します
+  （コード変更は不要）。`py -3.12 -m app.solvers.chatgpt_web` が切り分け用です。
+- **画像とテキストは別パートとして送られます。** ページ画像を添付し、OCR
+  テキストを本文に入力するため、図・グラフ・数式は OCR を経ずに渡ります
+  （API solver と同じ扱い）。添付が確認できたかは解答の
+  `extras["image_attached"]` に記録されます。画像経路の確認は
+  `py -3.12 -m app.solvers.chatgpt_web "<問題文>" <画像パス>`。
+
+#### スマホの ChatGPT で解く経路（PC の Chrome を使わない）
+
+PC を立ち上げずにスマホだけで回す場合は、自動操作ではなく**貼り付け経路**を
+使います。サーバは解答を受け取らないため HUD は駆動されません（手元で読む
+運用）。
+
+```bash
+# 1問ごと: 貼り付け用の本文と ChatGPT の事前入力リンク
+curl "$BASE/v1/exam-sessions/$SID/paste-prompt"
+# -> {"text": "...", "url": "https://chatgpt.com/?q=...",
+#     "pages_pdf_url": "/v1/exam-sessions/$SID/pages.pdf", ...}
+
+# セッション中1回: 撮影した全ページを1つの PDF で取得し、チャットに添付
+curl -o pages.pdf "$BASE/v1/exam-sessions/$SID/pages.pdf"
+```
+
+- 写真を1枚ずつ手で添付する作業が実運用で破綻する部分なので、**資料は1
+  ファイル**にまとめます。ページは撮影順（reading order）で並びます。
+- 画像を持たないページ（テキストのみ取り込み）は含めません。全ページが
+  テキストのみなら 404 を返します（空の PDF は「図を送った」と誤読されます）。
+- この経路では OCR 本文が `text`、図は PDF 添付という分担になります。図が
+  PDF 経由でどこまで読めるかは**未検証**です。
+- Chrome が未起動・未ログインなら `answer_only` はプレースホルダーに落ちず
+  明示的に失敗します。
 
 全変数の雛形は [`.env.example`](.env.example)、一覧は
 [user-operation-guide.md](docs/user-operation-guide.md) §7 を参照。

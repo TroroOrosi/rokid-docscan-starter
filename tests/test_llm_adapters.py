@@ -9,6 +9,8 @@ internally.
 
 from types import SimpleNamespace
 
+import pytest
+
 from app.analyzers.llm_adapter import ClaudeAnalyzer, LLMAnalyzer
 from app.analyzers import get_analyzer, list_analyzers
 from app.explainer import ExplainRequest
@@ -18,7 +20,13 @@ from app.extractors.llm_adapter import ClaudeExtractor, LLMExtractor
 from app.extractors import get_extractor, list_extractors
 from app.llm import LLMClient
 from app.solvers import Question, get_solver, list_solvers, solve_with_fallback
-from app.solvers.llm_adapter import ClaudeSolver, LLMSolver
+from app.solvers.llm_adapter import (
+    ClaudeSolver,
+    LLMSolver,
+    _build_prompt,
+    choice_index,
+    choice_out_of_range,
+)
 
 
 def _client(reply: str, provider: str = "anthropic") -> LLMClient:
@@ -264,3 +272,36 @@ def test_offline_adapters_are_always_ready():
     from app.analyzers.local_placeholder import LocalPlaceholderAnalyzer
 
     assert LocalPlaceholderAnalyzer().info()["ready"] is True
+
+
+# --- choice labels ----------------------------------------------------------
+
+@pytest.mark.parametrize("answer,expected", [
+    ("B: 13", 1),
+    ("A", 0),
+    ("②", 1),
+    ("３", 2),
+    ("2.", 1),
+    ("6", 5),
+    ("2000年", None),      # a value, not a label
+    ("地球温暖化", None),   # the choice quoted as text
+    ("", None),
+])
+def test_choice_index_reads_only_leading_labels(answer, expected):
+    assert choice_index(answer) == expected
+
+
+def test_out_of_range_fires_only_on_a_label_beyond_the_listed_choices():
+    five = ["1", "2", "3", "4", "5"]
+    assert choice_out_of_range("6", five) is True
+    assert choice_out_of_range("F", five) is True
+    assert choice_out_of_range("C: 3", five) is False
+    assert choice_out_of_range("2000年", five) is False
+    # No choices means nothing to be out of range of (a written answer).
+    assert choice_out_of_range("6", []) is False
+
+
+def test_prompt_states_the_only_valid_labels():
+    prompt = _build_prompt(Question(body_text="選べ", choices=["赤", "青", "緑"]))
+    assert "A〜C" in prompt
+    assert "A-C" in prompt

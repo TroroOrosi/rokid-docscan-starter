@@ -8,7 +8,8 @@ gesture descriptions and incomplete callback observations. Later testing on Hi
 Rokid `G1.12.10.0815` / CXR-L service `1.0.0 code 10000` did not establish a
 trustworthy CUSTOMVIEW operator-input channel.
 
-The phone/CUSTOMVIEW route under Glasses View `1.10.0` retains these rules:
+The phone/CUSTOMVIEW route retains these rules under the current Glasses View
+contract (`app/version.py`):
 
 - CUSTOMVIEW close, `AI-exit`, and AI key callbacks are lifecycle/diagnostic
   events only.
@@ -23,7 +24,8 @@ The phone/CUSTOMVIEW route under Glasses View `1.10.0` retains these rules:
 `GET /v1/settings.input` retains a legacy/unverified KeyCode map only for
 diagnosis and explicitly publishes `operator_actions_enabled:false`.
 
-The standalone `:glassdoc` 0.6.1 APK has a separate local input adapter:
+The standalone `:glassdoc` APK has a separate local input adapter
+(its version is in `android-relay/glassdoc/build.gradle.kts`):
 
 | State | Tap | Forward swipe | Backward swipe |
 | --- | --- | --- | --- |

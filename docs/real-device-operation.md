@@ -64,7 +64,7 @@ indicator. A second camera must continuously record the physical indicator:
 These observations are acceptance evidence for the exact recorded version
 tuple, not a guarantee for another firmware. Callback timestamps alone are not
 physical-light evidence. See
-`docs/research-safe-led-and-device-readiness-2026-09-01.md`.
+`docs/hardware-measurements.md`.
 
 ## Stop conditions
 

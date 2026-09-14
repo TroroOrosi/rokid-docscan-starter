@@ -15,8 +15,9 @@ It does not copy or redistribute Rokid's SDK. Gradle resolves the official
 `RokidGlobalLink` binds its AIDL surface to the Global package
 `com.rokid.sprite.global.aiapp`.
 
-The Android client is version `0.3.16` and implements glasses-view contract
-`1.9.0`.
+The Android client version and the glasses-view contract it implements are
+recorded once, in `README.md`; the sources are `app/version.py` and
+`android-relay/app/build.gradle.kts`.
 
 ## Build on Windows
 
@@ -45,7 +46,8 @@ On Windows, the physical checkout path must contain ASCII characters only.
 Android Gradle Plugin rejects paths such as a localized OneDrive
 `ドキュメント` directory, and disabling its path check is not sufficient:
 Gradle test workers then fail to load the compiled test classes. Create an
-ASCII-only worktree when the main checkout is under a localized path:
+ASCII-only worktree only when the main checkout is under a localized path.
+`C:okid-docscan-starter` is not, and builds in place:
 
 ```powershell
 git worktree add C:\Users\Public\rokid-docscan-build HEAD

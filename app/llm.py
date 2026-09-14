@@ -231,7 +231,22 @@ def _build_sdk(provider: str):
 
             return anthropic.Anthropic()
         if provider == "openai":
-            import openai  # noqa: PLC0415
+            try:
+                import openai  # noqa: PLC0415
+            except ImportError:
+                # The phone deployment cannot build the SDK's Rust wheels, but
+                # the local llama-server it talks to speaks the same HTTP API.
+                # Only take this path when an endpoint was explicitly set:
+                # without one there is nothing to talk to, and silently
+                # substituting a shim would hide a missing dependency.
+                base_url = (os.environ.get("OPENAI_BASE_URL") or "").strip()
+                if not base_url:
+                    raise
+                from .llm_http import OpenAICompatibleSDK  # noqa: PLC0415
+
+                return OpenAICompatibleSDK(
+                    base_url, os.environ.get("OPENAI_API_KEY") or "local"
+                )
 
             return openai.OpenAI()
         if provider == "gemini":

@@ -4,7 +4,7 @@ Covers:
   * POST /finalize-reading — segmentation into problems, status open→reviewing,
     reading ack (no subsequent camera request), idempotency, document requirement,
   * server-side solve-all only when a non-local ROKID_SOLVER is configured
-    (whole document as context; listening transcript folded in),
+    (context scoped to the problem's own 大問; listening transcript folded in),
   * POST /solutions — onboard AI ingest (primary path): deck solved flags,
     served_by, 409 before finalize, unknown problem_no appends, latest wins,
     empty answer rejected,
@@ -1154,3 +1154,136 @@ def test_solve_current_still_works_after_finalize_reading(client):
     r = client.post(f"/v1/exam-sessions/{sid}/solve-current")
     assert r.status_code == 200
     assert r.json()["locked"] is False
+
+
+def test_finalize_reading_scopes_solver_context_to_its_own_group(client, monkeypatch):
+    # An on-device model prefills every prompt, so passing all 20-40 pages per
+    # 小問 costs minutes each. Each problem gets its own 大問's pages only —
+    # including the shared passage the 大問 opened with.
+    _use_recording_solver(monkeypatch)
+    doc_id = _doc_with_text_pages(
+        client,
+        [
+            "第1問 長文: メロスは激怒した。必ずかの邪智暴虐の王を除かねばならぬ。",
+            "問1 前ページの本文の主題を、続きを踏まえて答えよ。",
+            "第2問 次の二次方程式を考える。x^2 - 5x + 6 = 0",
+            "問2 二つの解の和を求めよ。",
+        ],
+    )
+    sid = _new_doc_exam(client, doc_id)["session_id"]
+    r = client.post(f"/v1/exam-sessions/{sid}/finalize-reading")
+    assert r.status_code == 200, r.text
+
+    contexts = {q.question_no: q.context for q in _RecordingSolver.seen}
+    assert set(contexts) == {"第1問", "問1", "第2問", "問2"}
+    for no in ("第1問", "問1"):
+        assert "【P01" in contexts[no] and "【P02" in contexts[no]
+        assert "【P03" not in contexts[no] and "【P04" not in contexts[no]
+    for no in ("第2問", "問2"):
+        assert "【P03" in contexts[no] and "【P04" in contexts[no]
+        assert "【P01" not in contexts[no] and "【P02" not in contexts[no]
+
+
+class _ImageRecordingSolver:
+    """Records every Question the batch solve built (offline, no credentials)."""
+
+    name = "image-recording-test"
+    provider_version = "t-1"
+    offline = False
+    seen: list = []
+
+    def solve(self, *, question, max_answer_len=64):
+        from app.solvers import SolveResult
+
+        _ImageRecordingSolver.seen.append(question)
+        return SolveResult(answer="70度", answer_confidence=0.9)
+
+    def ready(self):
+        return True
+
+    def info(self):
+        return {"name": self.name, "provider_version": self.provider_version,
+                "offline": self.offline, "ready": True}
+
+
+def test_a_daimon_spanning_pages_sends_every_one_of_its_page_images(client, monkeypatch):
+    """The whole 大問's pages must reach the solver, not just its first page.
+
+    A 大問 keeps its conditions on one page and its figure on another. Sending
+    only the starting page asks the model about a diagram it never received.
+    """
+    from app.solvers.registry import register_solver
+
+    _ImageRecordingSolver.seen = []
+    register_solver(_ImageRecordingSolver(), replace=True)
+    monkeypatch.setenv("ROKID_SOLVER", "image-recording-test")
+
+    r = client.post("/v1/documents", json={"title": "模試"})
+    doc_id = r.json()["document_id"]
+    pages = [
+        "第2問 図2において、角aは50度、角bは60度である。",
+        "問1 角xの大きさを求めよ。",
+    ]
+    for i, text in enumerate(pages):
+        r = client.post(
+            f"/v1/documents/{doc_id}/pages",
+            data={"page_index": i, "ocr_text": text},
+            files={"image": (f"p{i}.png", image_bytes(make_image(80, 100)), "image/png")},
+        )
+        assert r.status_code == 201, r.text
+    assert client.post(f"/v1/documents/{doc_id}/finalize").status_code == 200
+
+    sid = _new_doc_exam(client, doc_id)["session_id"]
+    assert client.post(f"/v1/exam-sessions/{sid}/finalize-reading").status_code == 200
+
+    assert _ImageRecordingSolver.seen, "the batch solve never ran"
+    spanning = [q for q in _ImageRecordingSolver.seen if len(q.image_paths) > 1]
+    assert spanning, (
+        "every question carried at most one page image: "
+        f"{[len(q.image_paths) for q in _ImageRecordingSolver.seen]}"
+    )
+    for q in spanning:
+        # Reading order, no duplicates.
+        assert q.image_paths == sorted(set(q.image_paths), key=q.image_paths.index)
+        # The row's own page is in the span. It is NOT necessarily first: a 小問
+        # inherits its 大問's window, which starts on the heading's page, and
+        # that wider span is the whole point of this fix.
+        assert q.image_path in q.image_paths
+
+
+def test_a_listening_session_sends_the_recording_itself_not_only_its_transcript(
+    client, monkeypatch
+):
+    """リスニング: the audio file travels with the question, like the pages do.
+
+    A transcript flattens speaker turns, intonation and numbers. The solver
+    decides what to do with the recording -- the API adapters ignore it -- but
+    the server has to put it in the Question or no adapter can ever use it.
+    """
+    from app.solvers.registry import register_solver
+
+    _ImageRecordingSolver.seen = []
+    register_solver(_ImageRecordingSolver(), replace=True)
+    monkeypatch.setenv("ROKID_SOLVER", "image-recording-test")
+
+    doc_id = client.post("/v1/documents", json={"title": "リスニング"}).json()["document_id"]
+    r = client.post(
+        f"/v1/documents/{doc_id}/pages",
+        data={"page_index": 0, "ocr_text": "第1問 放送を聞いて答えよ"},
+        files={"image": ("p0.png", image_bytes(make_image(80, 100)), "image/png")},
+    )
+    assert r.status_code == 201, r.text
+    assert client.post(f"/v1/documents/{doc_id}/finalize").status_code == 200
+    sid = _new_doc_exam(client, doc_id, exam_type="listening")["session_id"]
+    r = client.post(
+        f"/v1/exam-sessions/{sid}/audio",
+        files={"audio": ("rec.mp3", b"ID3 recorded audio", "audio/mpeg")},
+        data={"transcript": "Now listen to the conversation."},
+    )
+    assert r.status_code == 200, r.text
+
+    assert client.post(f"/v1/exam-sessions/{sid}/finalize-reading").status_code == 200
+
+    assert _ImageRecordingSolver.seen, "the batch solve never ran"
+    audio_paths = {q.audio_path for q in _ImageRecordingSolver.seen}
+    assert audio_paths and all(p and p.endswith(".mp3") for p in audio_paths), audio_paths

@@ -21,9 +21,13 @@ from dataclasses import dataclass, field
 # 問N carries a lookbehind so 熟語 (学問1/質問3/疑問2/設問…) inside prose never
 # fabricates a question boundary — a real boundary is 問 used as a label, not
 # as the tail of a compound word.
+# 東大 and many 記述式 papers number their 大問 with kanji numerals (第一問),
+# so the 大問-level patterns accept both and the number is normalized to
+# Arabic: the deck addresses problems by this string, and 第一問 and 第1問 must
+# not become two different problems.
 _Q_PATTERNS = [
-    re.compile(r"大問\s*([0-9０-９]+)"),
-    re.compile(r"第\s*([0-9０-９]+)\s*問"),
+    re.compile(r"大問\s*([0-9０-９]+|[一二三四五六七八九十]+)"),
+    re.compile(r"第\s*([0-9０-９]+|[一二三四五六七八九十]+)\s*問"),
     re.compile(r"(?<![学質疑設訪顧諮])問\s*([0-9０-９]+)"),
 ]
 # (n)-style numbering counts only when it LEADS the line — mid-text
@@ -65,6 +69,24 @@ class QuestionUnit:
     answer_box: dict | None = None
 
 
+_KANJI_DIGITS = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5,
+                 "六": 6, "七": 7, "八": 8, "九": 9}
+
+
+def _kanji_to_arabic(s: str) -> str:
+    """一 -> 1, 十 -> 10, 十二 -> 12, 三十 -> 30. Anything else is returned as is.
+
+    Only 1-99 is supported, which is every 大問 number an exam paper uses.
+    """
+    if not s or any(c not in _KANJI_DIGITS and c != "十" for c in s):
+        return s
+    if "十" not in s:
+        return str(_KANJI_DIGITS.get(s, s)) if len(s) == 1 else s
+    tens, _, ones = s.partition("十")
+    return str((_KANJI_DIGITS.get(tens, 1) if tens else 1) * 10
+               + (_KANJI_DIGITS.get(ones, 0) if ones else 0))
+
+
 def _zen_to_han(s: str) -> str:
     """Normalize full-width digits so '問１' and '問1' compare equal."""
     return s.translate(str.maketrans("０１２３４５６７８９", "0123456789"))
@@ -74,7 +96,7 @@ def _detect_question_no(line: str) -> str | None:
     for pat in _Q_PATTERNS:
         m = pat.search(line)
         if m:
-            num = _zen_to_han(m.group(1))
+            num = _kanji_to_arabic(_zen_to_han(m.group(1)))
             if "大問" in pat.pattern:
                 return f"大問{num}"
             if "第" in pat.pattern:
@@ -189,6 +211,20 @@ def _figure_block(vision_text: str | None) -> str:
     return f"【図・画像の読み取り】\n{v}" if v else ""
 
 
+def _is_continuation(problems: list, question_no: str | None) -> bool:
+    """True when this number repeats the 大問 already open.
+
+    Only 大問-level numbers (第N問 / 大問N) are treated this way. A repeated
+    小問 number (問1 under two different 大問) is a real second question and
+    keeps its (2) suffix.
+    """
+    if not problems or not question_no:
+        return False
+    if not (question_no.startswith("大問") or question_no.startswith("第")):
+        return False
+    return problems[-1].question_no == question_no
+
+
 def segment_problems(
     page_materials: list[tuple[int, str] | tuple[int, str, str | None]],
 ) -> list[ProblemUnit]:
@@ -255,6 +291,26 @@ def segment_problems(
 
         for pos, unit in enumerate(numbered):
             body = unit.body_text
+            if _is_continuation(problems, unit.question_no):
+                # The same 大問 number again on a later page. Exam booklets
+                # print a 第N問 side tab on EVERY page of that 大問, so this is
+                # the 大問 continuing, never a second one with the same number.
+                # Measured on the 2026 共通テスト 数学Ⅰ・Ａ PDF: without this,
+                # 4 大問 across 26 pages became 26 problems, i.e. 26 solver
+                # calls instead of 4, each seeing only its own page.
+                last = problems[-1]
+                if pos == 0 and leading is not None and leading.body_text:
+                    body = (
+                        f"{leading.body_text}\n{body}" if body else leading.body_text
+                    )
+                if body:
+                    last.body_text = (
+                        f"{last.body_text}\n{body}" if last.body_text else body
+                    )
+                last.choices.extend(unit.choices)
+                if page_index not in last.page_indexes:
+                    last.page_indexes.append(page_index)
+                continue
             # Shared attribution (see docstring): the page-leading block may be
             # the prompt/passage of THIS problem, so the first numbered problem
             # of the page also receives it. (Skipped when it went to the

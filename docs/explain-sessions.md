@@ -1,7 +1,7 @@
 # Explain sessions
 
-Status: Current HTTP/API guide. APP `0.16.0`, API `1.15.0`, Glasses View
-contract `1.10.0`.
+Status: Current HTTP/API guide. Versions live in `app/version.py`; see
+`README.md` for the current tuple.
 
 Explain sessions operate on pages already registered on the server. They do not
 request another camera image. The HUD is output-only in the supported relay;

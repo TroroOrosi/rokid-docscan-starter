@@ -75,3 +75,68 @@ def test_unknown_tier_does_not_shadow_later_tiers():
     assert solver.name == "good-tier"
     assert result.answer == "正解X"
     assert any("no-such-solver:unknown" in s for s in result.extras["fallback_from"])
+
+
+# --- out-of-range choices ---------------------------------------------------
+
+class _OutOfRange(Solver):
+    """First answer names a choice that does not exist; the re-ask is valid."""
+
+    name = "out-of-range-tier"
+    provider_version = "t-1"
+    offline = True
+
+    def __init__(self, *, recovers: bool = True):
+        self.recovers = recovers
+        self.prompts: list[str | None] = []
+
+    def solve(self, *, question, max_answer_len=64):
+        self.prompts.append(question.retry_hint)
+        if self.recovers and question.retry_hint:
+            return SolveResult(answer="B: 青", answer_confidence=0.8)
+        return SolveResult(answer="F", answer_confidence=0.8)
+
+
+def test_out_of_range_choice_is_retried_once_with_the_valid_labels():
+    solver = _OutOfRange()
+    register_solver(solver, replace=True)
+    result, served = solve_with_fallback(
+        Question(body_text="選べ", choices=["赤", "青", "緑"]),
+        tiers=["out-of-range-tier"],
+    )
+    assert served.name == "out-of-range-tier"
+    assert result.answer == "B: 青"
+    assert result.extras["choice_retry"] == "recovered"
+    # Exactly one re-ask, and it stated the labels rather than repeating blind.
+    assert len(solver.prompts) == 2
+    assert solver.prompts[0] is None
+    assert "A〜C" in solver.prompts[1]
+
+
+def test_persistent_out_of_range_answer_is_kept_and_flagged_not_dropped():
+    register_solver(_OutOfRange(recovers=False), replace=True)
+    result, served = solve_with_fallback(
+        Question(body_text="選べ", choices=["赤", "青", "緑"]),
+        tiers=["out-of-range-tier"],
+    )
+    # Still served by the tier: a label slip is not a capability failure, so it
+    # must not fall through to the next (paid) tier or to the placeholder.
+    assert served.name == "out-of-range-tier"
+    assert result.answer == "F"
+    assert result.extras["choice_out_of_range"] is True
+
+
+def test_in_range_choice_is_never_retried():
+    solver = _OutOfRange()
+    solver.solve = lambda *, question, max_answer_len=64: (
+        solver.prompts.append(question.retry_hint)
+        or SolveResult(answer="C: 緑", answer_confidence=0.9)
+    )
+    register_solver(solver, replace=True)
+    result, _ = solve_with_fallback(
+        Question(body_text="選べ", choices=["赤", "青", "緑"]),
+        tiers=["out-of-range-tier"],
+    )
+    assert result.answer == "C: 緑"
+    assert len(solver.prompts) == 1
+    assert "choice_out_of_range" not in result.extras

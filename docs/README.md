@@ -1,6 +1,6 @@
 # Documentation index and authority
 
-Status: Current documentation map. Updated 2026-09-11.
+Status: Current documentation map. Updated 2026-09-14.
 
 When two documents disagree, use this order:
 
@@ -13,6 +13,11 @@ When two documents disagree, use this order:
 A build proves compilation only. A repository note proves that an observation
 was recorded, not that it applies to another device or firmware.
 
+**Versions are not written here.** The single source is `app/version.py`, and
+the only document that restates it is the tuple line in `README.md`, which
+`tests/test_documentation_contract.py` checks against the source. Copying a
+version into a second document is how every copy drifted before 2026-09-14.
+
 The documentation gate includes tracked Markdown and new, untracked project
 documents. It excludes only untracked local tool output under the root paths
 `.agents/skills/`, `.claude/`, `.cursor/`, `.specify/`, `.superpowers/`, and `openspec/`.
@@ -22,123 +27,68 @@ silently applying that exception. `.agents/progress/` remains in scope.
 
 ## Current contracts and runbooks
 
-- `README.md` — project entrypoint and supported topology.
-- `CLAUDE.md` — engineering invariants.
-- `android-relay/README.md` — relay implementation contract.
+- `README.md` — project entrypoint: what this is for, setup, and the HTTP API.
+- `CLAUDE.md` — engineering invariants. The contract that governs changes:
+  real-device rules, answer routes, capture/input/server invariants, build and
+  device gates, and the documentation rules above.
+- `android-relay/README.md` — relay implementation contract and Windows build.
 - `docs/cxr-l-integration.md` — current CXR-L boundary.
+- `docs/glasses-ux-contract.md` — the current input contract for the phone
+  route and the standalone `:glassdoc` app.
 - `docs/device-verification-checklist.md` — physical acceptance evidence form.
 - `docs/real-device-operation.md` — supported phone-controlled operation.
 - `docs/user-operation-guide.md` — operator and data-handling guide.
 - `docs/windows-android-real-device-setup.md` — Windows/Android setup.
 - `docs/explain-sessions.md` — server explain-session API.
+- `docs/exam-solver-architecture.md` — answer-mode architecture, including the
+  `chatgpt-web` route and the PDF booklet upload.
 - `docs/future-proof-architecture.md` — extension boundaries; current where it
-  agrees with the implementation and module specs.
+  agrees with the implementation.
 
-Current version tuple:
+## Frozen measurements
 
-- Server APP `0.17.0`
-- HTTP API `1.15.0`
-- Android relay `0.3.16` (`versionCode 21`)
-- Glasses input app `0.1.8` (`versionCode 9`; 9 is behaviourally identical to 8
-  and differs only because the input classes moved to `:glassinput`)
-- Glasses capability probe `0.1.0` (`versionCode 1`, throwaway spike; its four
-  questions were answered on hardware 2026-09-04)
-- Glasses document scanner `0.6.0` (`versionCode 6`); the current code reuses
-  `:relaycore` for recognition and the server workflow, with glasses-side
-  camera2 capture and a canvas HUD. The +2EV experiment was reverted after
-  measured capture timeouts. The 2026-09-05 APK was built and tested locally;
-  that artifact has **not been validated on hardware**. See the progress record
-  for hashes and measured conditions. The proposed phone/mobile-data path
-  below is not implemented yet.
-- `:glassinput` is a plain `java-library` shared by the glasses apps, so its
-  tests run under `test`, not `testDebugUnitTest`
-- Glasses View contract `1.10.0`
-- CXR-L tested/pinned dependency `1.1.1`; the current Rokid Maven release is
-  `1.1.2` and the latest coordinate is `1.2.X-SNAPSHOT`
+- `docs/hardware-measurements.md` — every device, artifact, and primary-source
+  measurement this repository owns, each with its date, device, firmware and
+  version tuple. Consolidated on 2026-09-14 from six documents that have been
+  deleted. Read it before booking another hardware session; much of what a
+  session would "discover" is already in here.
 
-## Historical measurements and superseded designs
+A frozen measurement preserves what was observed at the named time on the named
+hardware. It never overrides a current runbook, and it is not a statement about
+what the platform permits.
 
-- `docs/capture-timing-findings.md` — relay 0.3.6-era measurements; later input
-  measurements supersede its tap hypothesis.
-- `docs/exam-solver-architecture.md` — earlier onboard/text-first design.
-- `docs/glasses-ux-contract.md` — legacy gesture/UI proposal, not the current
-  CUSTOMVIEW input contract.
-- `docs/implementation-notes.md` — implementation history; not a runbook.
-- `docs/rokid-led-dev-utility.md` — quarantined historical experiment; no
-  operational indicator-modification instructions are retained.
-
-Historical files preserve what was believed or measured at the named time.
-They must not be used to override a current runbook.
-
-## Research and evidence ledgers
-
-- `docs/fast-scan-external-examples.md` — six external app examples from
-  first-party documentation and public implementation, with adoption decisions
-  and limits. Research evidence, not hardware or app acceptance results.
-- `docs/documentation-evidence-audit-2026-08-31.md`
-- `docs/research-safe-led-and-device-readiness-2026-09-01.md`
-- `docs/glasses-app-route-findings.md`
-- `docs/glasses-primary-sources-2026-09-03.md` — published-source index for the
-  glasses-side route; read before booking another hardware session.
-- `report-source.md` — internal claim ledger behind the 2026-08-31 audit.
-
-Research can identify a supported SDK capability without proving that it works
-on the measured hardware. Unresolved claims remain explicitly unverified.
-
-## Draft specifications
-
-- `docs/fast-scan-preflight.md` — reviewed design decisions, 30 operation
-  scenarios, six additional evaluations derived from external examples,
-  synthetic examples, device-free checks, and M0 probe worksheets.
-  Preparation evidence is separate from hardware and real-model acceptance.
-- [Automatic scanning and simultaneous listening plan](../tasks/plan.md#glasses-autoscan-listening-20260906)
-  and [implementation tasks](../tasks/todo.md#fast-scan-tasks) — the 2026-09-06
-  proposal uses glasses without Wi-Fi and a phone with mobile internet, with
-  no onsite PC or self-hosted server. FS-02's documentation gate is fixed and
-  FS-01 has synthetic cases and a checker; app features and hardware acceptance
-  remain unimplemented. Earlier accepted plans remain in the same files.
-- `SPEC-custom-app-session.md` — review draft for the official CXR-L
-  `CUSTOMAPP` session and glasses-side CXR-S lifecycle foundation. It is not an
-  implementation contract until the user accepts its deliberate preinstalled-
-  app-only first increment.
-
-## Accepted specifications and implementation plan
-
-- `CAPABILITY-MAP-glasses-app-operation.md` — accepted module boundaries and
-  build order for moving the operator control surface into a glasses app.
-- `SPEC-glasses-input.md` — accepted first-module specification for normalizing
-  and deduplicating glasses input without capture/network side effects.
-- `CAPABILITY-MAP-safe-real-device-readiness.md`
-- `SPEC-evidence-contract.md`
-- `SPEC-safe-capture.md`
-- `SPEC-server-contract.md`
-- `SPEC-android-readiness.md`
-- `SPEC-device-validation.md`
-- `tasks/plan.md` — earlier accepted plans, followed by the draft linked above.
-- `tasks/todo.md` — earlier tasks, followed by the unimplemented FS task list.
-- `refactor-instructions.md` — an older refactor snapshot; individual items may
-  already be resolved and must be rechecked against current code.
-
-## Glasses offline answer bundle (implemented, not hardware-verified)
+## Shipped designs
 
 - `docs/superpowers/specs/2026-09-11-glasses-offline-answer-bundle-design.md` —
-  design document (status: implemented, unit-tested, green build, 2026-09-11).
-  Describes phone-hotspot topology, 大問/小問 derivation, and server endpoint
-  shape. **Not verified on hardware in any respect**: no device was involved
-  at any point. The phone-hotspot topology has never been exercised end to
-  end, `AnswerView`'s readability on the glasses is unverified, reading with
-  the hotspot off is unverified, and the two-stage exit and re-wear recovery
-  were not re-tested after this branch changed the `KEYCODE_BACK` consumption
-  decision.
-- `docs/superpowers/plans/2026-09-11-glasses-offline-answer-bundle.md` —
-  six-task implementation plan; all six tasks completed and merged. Preparation
-  evidence (unit tests, `assembleDebug`) is separate from hardware acceptance,
-  which has not been run.
+  design of the offline answer bundle: phone-hotspot topology, 大問/小問
+  derivation, and the endpoint shape. Implemented, unit-tested, and merged; the
+  six-task plan that built it was deleted on 2026-09-14 because every task was
+  complete. **Not verified on hardware in any respect**: no device was involved
+  at any point. The phone-hotspot topology has never been exercised end to end,
+  `AnswerView`'s readability on the glasses is unverified, reading with the
+  hotspot off is unverified, and the two-stage exit and re-wear recovery were
+  not re-tested after the `KEYCODE_BACK` consumption decision changed.
 
-## Internal progress record
+## Shelved plans
 
-- `.agents/progress/glasses-input-and-real-device-prep.md` — append-only internal
-  work history across several commits; never a current operator contract.
+- `docs/fast-scan-decisions.md` — automatic scanning with simultaneous
+  listening. **Not implemented and not scheduled.** Only the adoption decisions
+  survive (D01-D15, E01-E06, X01-X06); the 30 operation scenarios, probe
+  worksheets and task list were deleted on 2026-09-14. All of it is unexecuted
+  design, not hardware or model acceptance.
+- `tasks/plan.md` — the current plan and its accepted revisions.
+- `tasks/todo.md` — open tasks. Unchecked never means implemented.
+
+## Internal progress records
+
+Continuation records for agents. Never an operator contract.
+
+- `.agents/progress/chatgpt-web-solver.md` — the subscription-only
+  `ROKID_SOLVER=chatgpt-web` route: what was measured on the live page, the
+  selectors that were wrong, and the next steps. Read its rate-limit warning
+  before any live run.
+- `.agents/progress/subject-separation-harness.md` — how the live per-subject
+  image/text separation check is built and run, and what it has returned.
 
 ## Indicator and input boundary
 

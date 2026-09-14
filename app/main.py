@@ -3,7 +3,7 @@
 Server-side. Runs locally with SQLite + local filesystem, offline by default
 (no Rokid hardware and no external credentials required). Real cloud models
 (OpenAI GPT / Google Gemini / Anthropic Claude) plug in via the provider
-registries; see docs/implementation-notes.md and docs/cxr-l-integration.md.
+registries; see docs/exam-solver-architecture.md and docs/cxr-l-integration.md.
 """
 
 from __future__ import annotations
@@ -17,12 +17,13 @@ import re
 import sqlite3
 import threading
 import time
+import urllib.parse
 import uuid
 from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from PIL import Image, UnidentifiedImageError
 from pydantic import BaseModel
 
@@ -64,8 +65,10 @@ from .matching import (
 )
 from .matching import verdict as match_verdict
 from .overlay import build_overlay
+from .page_pdf import images_to_pdf
 from .retrieval import retrieve_context
 from .solvers import Question
+from .solvers.llm_adapter import paste_prompt
 from .solvers.registry import solve_with_fallback
 from .subjects import detect_subject
 from .version import APP_VERSION, HUD_CONTRACT_VERSION, version_info
@@ -1169,8 +1172,12 @@ _ANSWER_FORMATS = {"mark", "written"}
 # Answer-format instruction folded into the solver context so a real model
 # answers in the format the exam expects (offline placeholder ignores it).
 _ANSWER_FORMAT_HINT = {
-    "mark": "解答はマーク式（選択肢の記号）で選び、根拠を簡潔に示してください。",
-    "written": "解答は記述式で、結論と要点の過程を簡潔に示してください。",
+    # The answer sheet carries the answer, nothing else. Asking for 根拠 here
+    # put explanations INTO the answer field: a measured reply was
+    # "A: 画像上の正答は④（エ＝崩壊、オ＝原子核、カ＝人体）", which is not what
+    # the operator writes on the sheet and does not fit the 3-line HUD.
+    "mark": "解答はマーク式（選択肢の記号）で答えてください。",
+    "written": "解答は記述式で、解答欄に書く文だけを答えてください。",
 }
 
 
@@ -1195,18 +1202,30 @@ def _exam_total_pages(conn, doc_id: int | None) -> int:
     ).fetchone()[0]
 
 
-def _document_material(conn, doc_id: int, current_index: int) -> str:
-    """Return ALL pages of the document as labeled text, current page marked.
+def _document_material(
+    conn, doc_id: int, current_index: int, page_indexes: list[int] | None = None
+) -> str:
+    """Return the document's pages as labeled text, current page marked.
 
     A problem may continue across pages (e.g. a passage on one page, its
-    questions on the next), so the solver is given every remembered page — not
-    just the current one — as context, and can read the continuation accurately.
+    questions on the next), so the solver is given every page of the problem's
+    own 大問 — not just the current one — and can read the continuation
+    accurately. ``page_indexes`` narrows that to those pages; None keeps every
+    remembered page (the compat solve-current path).
+
+    Narrowing matters for an on-device model: it prefills the whole prompt for
+    every sub-question, so repeating all 20-40 pages per 小問 costs minutes
+    each. plan.md's answer contract only asks for the shared passage and
+    material of the same 大問.
     """
     rows = conn.execute(
         "SELECT page_index, ocr_text, vision_text FROM pages "
         "WHERE document_id = ? ORDER BY page_index",
         (doc_id,),
     ).fetchall()
+    if page_indexes:
+        wanted = set(page_indexes)
+        rows = [r for r in rows if r["page_index"] in wanted] or rows
     blocks: list[str] = []
     for r in rows:
         mark = "◀現在ページ" if r["page_index"] == current_index else ""
@@ -1220,9 +1239,11 @@ def _exam_prompt_context(
 ) -> str | None:
     """Compose solver context for a document-page exam.
 
-    Folds in the answer-format hint, the **whole document** (all remembered
-    pages, so page-spanning problems are read correctly), and — in listening
-    mode — the recorded audio's transcript. The current page stays the body_text.
+    Folds in the answer-format hint, ``document_material`` (the pages the
+    caller chose: the problem's own 大問 on the deck path, every remembered
+    page on the compat solve-current path, so page-spanning problems are read
+    correctly), and — in listening mode — the recorded audio's transcript. The
+    current page stays the body_text.
     """
     parts: list[str] = []
     fmt_hint = _ANSWER_FORMAT_HINT.get(session["answer_format"], "")
@@ -1860,6 +1881,92 @@ def exam_current_page(session_id: int) -> dict:
         conn.close()
 
 
+@app.get("/v1/exam-sessions/{session_id}/paste-prompt")
+def exam_paste_prompt(session_id: int) -> dict:
+    """The current page as a prompt to paste into a chat UI by hand.
+
+    The relay opens ``url`` on the phone, which prefills the question in the
+    ChatGPT web UI; the operator sends it and reads the answer on the phone.
+    Nothing is sent from here and no answer comes back into the session, so
+    this path produces no SolveResult and drives no HUD.  Text is OCR only --
+    the page image is not carried, unlike the solver path.
+    """
+    conn = db.connect()
+    try:
+        session = _exam_session_or_404(conn, session_id)
+        doc_id = _require_document_exam(session)
+        page_index = session["current_page_index"]
+        page_row = _exam_page_row(conn, doc_id, page_index)
+
+        material = _page_material(page_row["ocr_text"], page_row["vision_text"])
+        subject, _ = detect_subject(material or page_row["ocr_text"])
+        doc_material = _document_material(conn, doc_id, page_index)
+        retrieved = retrieve_context(conn, material or page_row["ocr_text"])
+        context = _exam_prompt_context(session, doc_material, retrieved["context"])
+
+        text = paste_prompt(
+            Question(
+                body_text=material,
+                subject=subject,
+                context=context,
+                answer_only=True,
+            )
+        )
+        return {
+            "session_id": session_id,
+            "current_page_index": page_index,
+            "subject": subject,
+            "text": text,
+            "url": "https://chatgpt.com/?q=" + urllib.parse.quote(text, safe=""),
+            "has_image": bool(page_row["image_path"]),
+            # The phone path's missing half: the prompt could be pasted, but the
+            # pages could not be attached one photo at a time by hand. One PDF
+            # of the whole captured document can.
+            "pages_pdf_url": f"/v1/exam-sessions/{session_id}/pages.pdf",
+        }
+    finally:
+        conn.close()
+
+
+@app.get("/v1/exam-sessions/{session_id}/pages.pdf")
+def exam_pages_pdf(session_id: int) -> Response:
+    """Every captured page of this session's document as ONE PDF.
+
+    For the phone path: the operator opens ``paste-prompt``'s ``url`` in the
+    ChatGPT app, attaches this single file once, and asks each question against
+    it. Attaching a dozen photos by hand is the step that does not survive a
+    real session; attaching one file does. Pages keep their reading order.
+
+    Text-only pages are skipped -- they carry nothing an image would add. The
+    solver path is unchanged: it attaches the page images themselves unless
+    ROKID_CHATGPT_BUNDLE_PDF is set.
+    """
+    conn = db.connect()
+    try:
+        session = _exam_session_or_404(conn, session_id)
+        doc_id = _require_document_exam(session)
+        rows = conn.execute(
+            "SELECT image_path FROM pages WHERE document_id = ? ORDER BY page_index",
+            (doc_id,),
+        ).fetchall()
+        images = [
+            Path(row["image_path"]).read_bytes()
+            for row in rows
+            if row["image_path"] and Path(row["image_path"]).exists()
+        ]
+        if not images:
+            raise HTTPException(status_code=404, detail="no page images to bundle")
+        return Response(
+            content=images_to_pdf(images),
+            media_type="application/pdf",
+            headers={
+                "Content-Disposition": f'inline; filename="session{session_id}-pages.pdf"'
+            },
+        )
+    finally:
+        conn.close()
+
+
 @app.post("/v1/exam-sessions/{session_id}/solve-current")
 def exam_solve_current(session_id: int) -> dict:
     """Solve the CURRENT page — secondary/compat path (solve-current型).
@@ -1922,6 +2029,8 @@ def exam_solve_current(session_id: int) -> dict:
             subject=subject,
             context=context,
             image_path=page_row["image_path"],
+            audio_path=session["audio_path"],
+            chat_key=f"session:{session_id}",
         )
         result, solver = solve_with_fallback(question=question)
         served_by = result.extras.get("served_by", solver.name)
@@ -2167,6 +2276,70 @@ def _answer_groups(conn, session_id: int) -> list[dict]:
             group["items"] = [group["heading"]]
             group["whole"] = True
     return groups
+
+
+def _row_page_indexes(row) -> list[int]:
+    """Pages a deck row spans, 0-based. Falls back to its single page_number."""
+    try:
+        span = json.loads(row["structure_json"] or "{}").get("page_indexes") or []
+    except (ValueError, TypeError):
+        span = []
+    span = [i for i in span if isinstance(i, int)]
+    if span:
+        return span
+    page_number = row["page_number"]
+    return [page_number - 1] if page_number else []
+
+
+def _page_image_paths(conn, doc_id: int, page_indexes: list[int] | None) -> list[str]:
+    """Stored images for the given pages, in reading order, skipping text-only ones.
+
+    A 大問 that spans pages keeps its passage on one page and its figures on
+    another, so a solver handed only the starting page is asked about a diagram
+    it was never shown.
+    """
+    if not page_indexes:
+        return []
+    rows = conn.execute(
+        "SELECT page_index, image_path FROM pages "
+        f"WHERE document_id = ? AND page_index IN ({','.join('?' * len(page_indexes))})",
+        (doc_id, *page_indexes),
+    ).fetchall()
+    by_index = {r["page_index"]: r["image_path"] for r in rows}
+    return [by_index[i] for i in page_indexes if by_index.get(i)]
+
+
+def _document_image_paths(conn, doc_id: int) -> list[str]:
+    """Every page image of the document, in reading order.
+
+    The browser route attaches the whole booklet once as a single PDF, so the
+    question text does not have to be retyped into every message.
+    """
+    rows = conn.execute(
+        "SELECT image_path FROM pages WHERE document_id = ? ORDER BY page_index",
+        (doc_id,),
+    ).fetchall()
+    return [r["image_path"] for r in rows if r["image_path"]]
+
+
+def _group_page_indexes(conn, session_id: int) -> dict[int, list[int]]:
+    """Per deck row: the pages of its own 大問, for solver context narrowing.
+
+    Every row of a group gets the group's whole page span, so a 小問 still sees
+    the shared passage and any figure page its 大問 started on. A document with
+    no 大問 heading collapses to one group, i.e. the previous whole-document
+    behaviour.
+    """
+    windows: dict[int, list[int]] = {}
+    for group in _answer_groups(conn, session_id):
+        rows = [group["heading"], *group["items"]]
+        pages: set[int] = set()
+        for row in rows:
+            pages.update(_row_page_indexes(row))
+        ordered = sorted(pages)
+        for row in rows:
+            windows[row["id"]] = ordered
+    return windows
 
 
 def _answer_bundle_item(conn, group: dict, row) -> dict:
@@ -2461,6 +2634,9 @@ def exam_finalize_reading(session_id: int) -> dict:
         server_solved = 0
         solver_env = (os.environ.get("ROKID_SOLVER") or "").strip()
         if not locked and solver_env and solver_env != "local":
+            # Context is scoped to each problem's own 大問 (plan.md contract 1),
+            # not the whole document: an on-device model prefills every prompt.
+            page_windows = _group_page_indexes(conn, session_id)
             for row in _deck_question_rows(conn, session_id):
                 if _latest_solution_row(conn, row["id"]) is not None:
                     continue
@@ -2473,11 +2649,14 @@ def exam_finalize_reading(session_id: int) -> dict:
                         name=f"solve-claim-{row['id']}",
                     ):
                         start_index = (row["page_number"] or 1) - 1
-                        doc_material = _document_material(conn, doc_id, start_index)
+                        doc_material = _document_material(
+                            conn, doc_id, start_index, page_windows.get(row["id"])
+                        )
                         retrieved = retrieve_context(conn, row["body_text"])
                         context = _exam_prompt_context(
                             session, doc_material, retrieved["context"]
                         )
+                        window = page_windows.get(row["id"]) or _row_page_indexes(row)
                         question = Question(
                             question_no=row["question_no"],
                             body_text=row["body_text"],
@@ -2485,8 +2664,32 @@ def exam_finalize_reading(session_id: int) -> dict:
                             subject=row["subject"],
                             context=context,
                             image_path=row["image_path"],
+                            image_paths=_page_image_paths(conn, doc_id, window),
+                            # Listening: the recording itself, not only its
+                            # transcript. A solver that takes audio hears the
+                            # speaker turns and numbers a transcript flattens.
+                            audio_path=session["audio_path"],
+                            # One session is one paper, so one chat. Never the
+                            # row's `subject`: that is a per-row heuristic.
+                            chat_key=f"session:{session_id}",
+                            # The whole booklet, attached once per chat, and
+                            # where this question sits inside it.
+                            document_image_paths=_document_image_paths(conn, doc_id),
+                            page_numbers=[i + 1 for i in (window or [])],
+                            # What the operator writes on the answer sheet, and
+                            # nothing else. This is the documented contract
+                            # (Solver 1.3.0) and was never set on this path.
+                            answer_only=True,
                         )
-                        result, solver = solve_with_fallback(question=question)
+                        try:
+                            result, solver = solve_with_fallback(question=question)
+                        except Exception:  # noqa: BLE001 - documented behaviour
+                            # The answer-sheet contract refuses the placeholder
+                            # and raises when no real solver answers. That must
+                            # leave the row UNSOLVED (the batch is resumable and
+                            # the onboard ingest can still fill it), never fail
+                            # the whole finalize-reading.
+                            continue
                     served_by = result.extras.get("served_by", solver.name)
                     if served_by == "local":
                         # A failed/missing cloud adapter fell back to the

@@ -25,6 +25,21 @@ def _text(relative_path: str) -> str:
     return (ROOT / relative_path).read_text(encoding="utf-8")
 
 
+def _generated_prefixes() -> tuple[str, ...]:
+    """Directory prefixes `.gitignore` marks as generated at runtime.
+
+    A checkout never contains them, so requiring a documented path under one to
+    exist passes only on a machine that has already run the thing that writes
+    it. `data/docscan.db` is documented as created on startup; asking CI to
+    find it is asking the wrong question.
+    """
+    return tuple(
+        line
+        for line in (raw.strip() for raw in _text(".gitignore").splitlines())
+        if line.endswith("/") and not line.startswith(("#", "!", "*")) and "*" not in line
+    )
+
+
 def _repository_markdown() -> set[str]:
     ignored_parts = {".git", ".pytest_cache"}
     paths = {
@@ -147,6 +162,49 @@ def test_current_runbooks_describe_normalized_png_not_raw_jpeg_persistence():
     assert offenders == []
 
 
+def test_current_runbooks_do_not_document_a_gradle_command_that_cannot_run():
+    """No `gradle` on PATH, and the wrapper already supplies -p."""
+    prohibited = ("gradle --no-daemon -p", "gradle -p android-relay")
+    offenders = []
+    for path in CURRENT_RUNBOOKS:
+        text = _text(path)
+        for phrase in prohibited:
+            if phrase in text:
+                offenders.append(f"{path}: {phrase}")
+    assert offenders == []
+
+
+def test_every_documented_repository_path_exists():
+    """A path that moved silently sends the next agent to the wrong module."""
+    reference = re.compile(r"`([A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)+)`")
+    generated = _generated_prefixes()
+    offenders = []
+    for document in sorted(_repository_markdown()):
+        for match in reference.finditer(_text(document)):
+            candidate = match.group(1)
+            if not Path(candidate).suffix or candidate.startswith(("http", "C:/")):
+                continue
+            if candidate.startswith(generated):
+                continue
+            if (ROOT / candidate).exists() or (ROOT / document).parent.joinpath(candidate).exists():
+                continue
+            offenders.append(f"{document}: {candidate}")
+    assert offenders == []
+
+
+def test_progress_records_name_the_runtime_of_every_resume_list():
+    """A resume list without its runtime gets executed on the wrong one."""
+    actionable = ("Resume here", "Next steps", "Still to do")
+    offenders = []
+    for path in sorted((ROOT / ".agents/progress").glob("*.md")):
+        sections = re.split(r"^#{2,4} ", path.read_text(encoding="utf-8"), flags=re.MULTILINE)
+        for section in sections[1:]:
+            title = section.splitlines()[0].strip()
+            if title.startswith(actionable) and "Runs on:" not in section:
+                offenders.append(f"{path.relative_to(ROOT).as_posix()}: {title}")
+    assert offenders == []
+
+
 def test_readme_versions_match_source_of_truth():
     server_version = re.search(
         r'^APP_VERSION = "([^"]+)"$',
@@ -163,6 +221,11 @@ def test_readme_versions_match_source_of_truth():
         _text("app/version.py"),
         re.MULTILINE,
     ).group(1)
+    solver_version = re.search(
+        r'^SOLVER_API_VERSION = "([^"]+)"$',
+        _text("app/version.py"),
+        re.MULTILINE,
+    ).group(1)
     gradle = _text("android-relay/app/build.gradle.kts")
     relay_version = re.search(r'versionName = "([^"]+)"', gradle).group(1)
     cxrl_version = re.search(
@@ -173,7 +236,8 @@ def test_readme_versions_match_source_of_truth():
     readme = _text("README.md")
     expected = (
         f"Server APP {server_version} / API {api_version} / "
-        f"Android client {relay_version} / Glasses View {glasses_version}"
+        f"Android client {relay_version} / Glasses View {glasses_version} / "
+        f"Solver API {solver_version}"
     )
     assert expected in readme
     assert f"com.rokid.cxr:client-l:{cxrl_version}" in readme

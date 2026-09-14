@@ -113,7 +113,59 @@ from __future__ import annotations
 #        reported against the async Binder budget, the CXR-L service version is
 #        recorded on connect, and OCR results carry a mean symbol confidence.
 #        Relay-only; API and glasses view unchanged.
-APP_VERSION = "0.17.0"
+# 0.18.0: manual chat-UI route. The current page can be exported as pasteable
+#        answer-only prompt text and a prefilled chatgpt.com link, so a phone
+#        browser can answer a page without a configured cloud solver. No answer
+#        returns to the session, so this drives no HUD. API -> 1.17.0.
+# 0.19.0: ROKID_SOLVER=chatgpt-web — a subscription-only GPT route that needs no
+#        API key. The server drives the operator's already-signed-in ChatGPT web
+#        session over a Chrome debugging port, so the whole capture -> OCR ->
+#        answer -> HUD path runs without hand work on the phone.
+#        Solver -> 1.4.0; API unchanged.
+# 0.20.0: the chatgpt-web route uploads the page image as its own message part
+#        alongside the OCR text, so figures, graphs and equations reach the
+#        model instead of surviving only as OCR. Upload confirmation is carried
+#        on the result as extras["image_attached"]. API/glasses view unchanged.
+# 0.21.0: chatgpt-web hardened against three things measured on the live page
+#        (Chrome 152): the composer is waited for instead of assumed, because a
+#        signed-out chatgpt.com serves a placeholder shell without one; upload
+#        confirmation needs the thumbnail count to RISE, because the selector
+#        already matched once on an empty composer; and reply polling went from
+#        1.0s x 3 to 0.25s x 4, cutting a fixed 3s per question to 1s. Attaching
+#        the browser costs 0.61s measured, so it is not pooled.
+# 0.22.0: chatgpt-web verified end to end on the signed-in page. Two defects the
+#        stub tests could not see are fixed: `input[type="file"]` matched FIVE
+#        inputs and Playwright refused it as a strict mode violation, failing
+#        every upload, so the photo input is now addressed by testid; and the
+#        streaming stop button now ends the wait, which measured a second faster
+#        than text-stability. Measured per question: 7.6s text, 9.0s with image.
+# 0.23.0: a 大問 that spans pages now reaches chatgpt-web with EVERY one of its
+#        page images, not just the starting page. Measured on the live page: a
+#        two-page problem whose conditions and figure are on different pages
+#        returned needs_input with one image and the correct answer with both.
+#        Solver -> 1.5.0; API unchanged.
+# 0.24.0: chatgpt-web no longer ends its wait on a reasoning model's "思考中"
+#        placeholder (4 of 5 long prompts returned it as the answer), and each
+#        question is retried in a fresh chat, an unconfirmed image upload
+#        included. Measured: composer.fill carries 34,205 characters intact.
+# 0.25.0: chatgpt-web stops spending generations it does not need. The retry
+#        for an unconfirmed upload now happens BEFORE the question is sent, so
+#        a moved thumbnail selector costs uploads instead of three answers per
+#        question; a reply that is a usage-limit notice ends the question
+#        instead of being retried in yet another new chat; and two generations
+#        in a row slower than ROKID_CHATGPT_SLOW_S (40s, measured throttle
+#        signal: 7-13s clean, degraded to 43/48/130s before the 2026-09-14
+#        block) refuse the next send. ROKID_CHATGPT_BUNDLE_PDF=1 sends the 大問
+#        as one PDF through the file input instead of one image per page;
+#        off by default and UNVERIFIED against the live page.
+# 0.26.0: chatgpt-web can share ONE chat per 科目 (ROKID_CHATGPT_CHAT_SCOPE=
+#        subject): a deck opens one chat per subject instead of one per 小問,
+#        and a page already attached in that chat is not uploaded again. A
+#        listening session now sends the recording itself alongside the pages
+#        (Question.audio_path -> the general file input; the photo input is
+#        image-only), so intonation, speaker turns and numbers no longer have
+#        to survive the transcript.
+APP_VERSION = "0.26.0"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.
@@ -167,7 +219,15 @@ APP_VERSION = "0.17.0"
 # 1.16.0: new GET .../answer-bundle — one complete, ordered answer snapshot
 #        (大問 groups folding their sub-question rows) for offline glasses
 #        reading; 409 during the reading phase or a real-mode lock. Additive.
-API_VERSION = "1.16.0"
+# 1.17.0: new GET .../paste-prompt — the current page rendered as one block of
+#        answer-only prompt text plus a prefilled chatgpt.com link, for solving
+#        by hand in a phone browser. Read-only: it sends nothing, persists no
+#        question and returns no answer to the session. Additive.
+# 1.18.0: new GET .../pages.pdf — every captured page of the session's document
+#        as one PDF, so the phone path can attach the material once instead of
+#        one photo per page; paste-prompt gains the additive `pages_pdf_url`.
+#        404 when the document is text-only. Additive.
+API_VERSION = "1.18.0"
 
 # Matching algorithm identity. Bump when thresholds or hashing change so a
 # re-index/eval is triggered. Mirrors thresholds in app/matching.py.
@@ -217,7 +277,16 @@ ANALYZER_API_VERSION = "1.0.0"
 #        `evidence_refs`; legacy `evidence_pages` semantics stay unchanged.
 # 1.3.0: opt-in answer_only keeps the complete written response, separates
 #        missing material and prohibits placeholder fallback in that mode.
-SOLVER_API_VERSION = "1.3.0"
+# 1.4.0: a solver may be backed by a browser session instead of a credentialed
+#        API. `ready()` therefore probes a reachable browser, and provider names
+#        are no longer restricted to the API provider set (additive).
+# 1.5.0: Question gained `image_paths` — every page of the question's 大問 in
+#        reading order. `image_path` stays the primary page for adapters that
+#        take one image; multi-page-capable adapters read the list (additive).
+# 1.6.0: Question gained the optional `audio_path` field, so a listening
+#        question can carry the recording itself and not only its transcript.
+#        Adapters that cannot take audio ignore it (additive/back-compat).
+SOLVER_API_VERSION = "1.6.0"
 
 # Media-extractor plugin interface (formula/figure/graph/table).
 EXTRACTOR_API_VERSION = "1.0.0"

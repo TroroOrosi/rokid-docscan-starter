@@ -10,3 +10,16 @@ data/
 android-relay/.gradle/
 android-relay/local.properties
 android-relay/**/build/
+
+# Local agent/tool scaffolding and caches (not project documentation).
+# tests/test_documentation_contract.py exempts the first six only while they
+# stay untracked.
+.agents/skills/
+.claude/
+.cursor/
+.specify/
+.superpowers/
+openspec/
+.repowise/
+.code-review-graph/
+.ruff_cache/

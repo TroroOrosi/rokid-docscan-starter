@@ -16,6 +16,10 @@ wiring a real model here does not weaken it.
 
 from __future__ import annotations
 
+import re
+import unicodedata
+from pathlib import Path
+
 from ..llm import LLMClient, LLMConfigError, clamp01, get_client
 from .base import Question, SolveResult, Solver
 
@@ -78,6 +82,51 @@ def _subject_guidance(subject: str | None) -> str:
     return _SUBJECT_GUIDANCE.get(subject or "", "")
 
 
+# The labels the prompt hands the model, and the inverse reading of an answer.
+# They live together so the two can never drift apart.
+_CIRCLED_DIGITS = "①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳"
+
+
+def choice_label(index: int) -> str:
+    """Label of the index-th choice: A..Z, then plain numbers past 26."""
+    return chr(ord("A") + index) if index < 26 else str(index + 1)
+
+
+def choice_index(answer: str) -> int | None:
+    """0-based index of the choice an answer names, or None when it names none.
+
+    Reads the LEADING label only — "B: text", "3.", "②" — the forms a model
+    answers a labelled question in. An answer that quotes the choice's own text
+    instead returns None and is left alone, and so does a longer digit run like
+    "2000年", which is a value rather than a label.
+    """
+    text = (answer or "").strip()
+    if not text:
+        return None
+    if text[0] in _CIRCLED_DIGITS:
+        return _CIRCLED_DIGITS.index(text[0])
+    letter = re.match(r"([A-Za-z])(?![A-Za-z0-9])", text)
+    if letter:
+        return ord(letter.group(1).upper()) - ord("A")
+    digits = re.match(r"([0-9０-９]{1,2})(?![0-9０-９])", text)
+    if digits:
+        return int(unicodedata.normalize("NFKC", digits.group(1))) - 1
+    return None
+
+
+def choice_out_of_range(answer: str, choices: list[str]) -> bool:
+    """True when the answer names a choice the question does not offer.
+
+    A model that replies "6" to five choices produced an unusable form, not a
+    wrong answer — nothing can be marked against it. Conservative by design: it
+    only fires when a label was actually read.
+    """
+    if not choices:
+        return False
+    index = choice_index(answer)
+    return index is not None and not 0 <= index < len(choices)
+
+
 def _read_image(path: str | None) -> bytes | None:
     if not path:
         return None
@@ -86,6 +135,29 @@ def _read_image(path: str | None) -> bytes | None:
             return fh.read()
     except OSError:
         return None
+
+
+def _read_images(question: Question) -> list[bytes]:
+    """Every readable page image of the question's 大問, in reading order.
+
+    Falls back to the single `image_path` so a question built the old way still
+    carries its page. Unreadable paths are skipped rather than failing the
+    solve: a missing page is worse answered than not answered at all.
+    """
+    paths = list(question.image_paths) or ([question.image_path] if question.image_path else [])
+    return [data for data in (_read_image(p) for p in paths) if data]
+
+
+def _read_audio(question: Question) -> tuple[str, bytes] | None:
+    """The listening recording as (filename, bytes), or None.
+
+    Unreadable paths are skipped exactly as page images are: a listening
+    question still has its transcript, so losing the recording degrades the
+    answer rather than failing the solve.
+    """
+    path = getattr(question, "audio_path", None)
+    data = _read_image(path)
+    return (Path(path).name, data) if data else None
 
 
 class LLMSolver(Solver):
@@ -111,18 +183,29 @@ class LLMSolver(Solver):
         except Exception:  # noqa: BLE001 - a pre-flight probe must not raise
             return False
 
+    def _complete(self, client, *, system: str, prompt: str, question: Question) -> dict:
+        """Call the model. Overridden by adapters that can carry more than one page.
+
+        Vision: attach the captured page image so the model reads figures /
+        equations / tables directly. Falls back to text-only when absent. The
+        API providers take a single image, so this sends the question's primary
+        page; see ChatGptWebSolver for the multi-page case.
+        """
+        return client.complete_json(
+            system=system, prompt=prompt, image=_read_image(question.image_path)
+        )
+
     def solve(self, *, question: Question, max_answer_len: int = 64) -> SolveResult:
         client = get_client(self._client, self.provider)
         if client is None:
             # Unconfigured -> let solve_with_fallback drop to the local solver.
             raise LLMConfigError(f"{self.name} solver requires its provider API key/model")
 
-        # Vision: attach the captured page image so the model reads figures /
-        # equations / tables directly. Falls back to text-only when absent.
-        image = _read_image(question.image_path)
-        data = client.complete_json(
+        data = self._complete(
+            client,
             system=_ANSWER_ONLY_SYSTEM if question.answer_only else _SYSTEM,
-            prompt=_build_prompt(question), image=image
+            prompt=_build_prompt(question),
+            question=question,
         )
         if question.answer_only:
             status = data.get("status", "ready")
@@ -172,10 +255,30 @@ def _build_prompt(question: Question) -> str:
     if question.choices:
         lines.append("選択肢/Choices:")
         for i, choice in enumerate(question.choices):
-            label = chr(ord("A") + i) if i < 26 else str(i + 1)
-            lines.append(f"{label}. {choice}")
+            lines.append(f"{choice_label(i)}. {choice}")
+        last = choice_label(len(question.choices) - 1)
+        lines.append(
+            f"解答は上の記号 A〜{last} のいずれかを使う"
+            f"/Answer with one of the labels A-{last}; no other label exists."
+        )
     if question.context:
         lines.append("参考資料/Reference context (from the user's own notes):")
         lines.append(question.context)
+    if question.retry_hint:
+        lines.append(question.retry_hint)
     return "\n".join(lines)
 
+
+
+def paste_prompt(question: Question) -> str:
+    """The answer-only solve rendered as one block of text for a chat UI.
+
+    Wording is the API path's verbatim, so a hand-pasted answer and a solver
+    answer are asked exactly the same question and stay comparable against the
+    measurements already recorded for this prompt.
+    """
+    # ponytail: reuses the JSON-envelope system prompt, so the chat replies with
+    # {"status", "answer", "missing_material"} rather than a bare answer. Split
+    # the constant only if reading raw JSON on the phone proves to be friction --
+    # a separate wording would need its own accuracy measurement.
+    return _ANSWER_ONLY_SYSTEM + "\n\n" + _build_prompt(question)

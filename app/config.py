@@ -69,6 +69,41 @@ ROKID_EXPLAINER = os.environ.get("ROKID_EXPLAINER", "local")
 #   ROKID_LLM_MAX_TOKENS   default 1024
 # Optional deps (install only for the provider you use):
 #   pip install openai | google-genai | anthropic
+#
+# Subscription-only GPT route (no API key): ROKID_SOLVER=chatgpt-web answers out
+# of the operator's own signed-in ChatGPT web session, driven over a Chrome
+# debugging port. Automating that UI is against OpenAI's terms of use and risks
+# the account; the API route above does not. Chrome must already be running:
+#   chrome.exe --remote-debugging-port=9222 --user-data-dir=<real profile>
+#   pip install playwright            (no `playwright install` — real Chrome)
+#   ROKID_CHATGPT_CDP                 default http://127.0.0.1:9222
+#   ROKID_CHATGPT_COMPOSER_SEL        default #prompt-textarea
+#   ROKID_CHATGPT_ASSISTANT_SEL       default [data-message-author-role=...]
+#   ROKID_CHATGPT_FILE_INPUT_SEL      default input[data-testid=
+#                                     "upload-photos-input"] — NOT a bare
+#                                     input[type=file]: five of those exist and
+#                                     Playwright rejects the ambiguous locator
+#   ROKID_CHATGPT_ATTACHMENT_SEL      upload-finished thumbnail (form img)
+#   ROKID_CHATGPT_STOP_SEL            streaming indicator. It is present for the
+#                                     WHOLE generation including the thinking
+#                                     phase, so nothing on screen is the answer
+#                                     while it exists
+#   ROKID_CHATGPT_UPLOAD_S            default 20 (a confirmed upload took 0.11s)
+#   ROKID_CHATGPT_ATTEMPTS            default 3 tries per question, fresh chat
+#   ROKID_CHATGPT_RETRY_S             default 5, multiplied by the attempt
+#   ROKID_CHATGPT_TIMEOUT_S           default 180
+#   ROKID_CHATGPT_READY_S             default 30 (composer mount wait)
+#   ROKID_CHATGPT_POLL_S              default 0.25
+#   ROKID_CHATGPT_STABLE_POLLS        default 4  (0.25 x 4 = 1s of silence)
+# Use a DEDICATED --user-data-dir and sign in there once. Passing the flag to an
+# already-running Chrome only opens a tab in it and never opens the port, and a
+# signed-out chatgpt.com serves a placeholder shell with no composer at all.
+# The selectors are OpenAI's page, not ours: when the UI changes, retune these
+# rather than editing app/solvers/chatgpt_web.py. The page image and the OCR
+# text are sent as two separate parts (attachment + typed message), as the API
+# solvers do, so figures survive. `extras["image_attached"]` records whether
+# the upload was confirmed; verify with
+#   py -3.12 -m app.solvers.chatgpt_web "<question>" <page image>
 # Listening transcription (English listening mode). The recorded audio is
 # transcribed by ROKID_TRANSCRIBER (openai|gemini). Anthropic has no ASR, so
 # unset/anthropic → the client-provided transcript is used as-is (offline-safe).
