@@ -1,6 +1,6 @@
 # Rokid DocScan（入試問題を撮影して解答するサーバ）
 
-Status: Current project entrypoint. Updated 2026-09-14.
+Status: Current project entrypoint. Updated 2026-09-16.
 
 ## このリポジトリの目的
 
@@ -31,8 +31,10 @@ Rokid Glasses（AnswerView） ← answer-bundle
 ```
 
 **この経路はまだ一度も通していません。** 測れているのは部品だけです
-（グラスアプリの撮影とサーバ到達 2026-09-04、chatgpt-web の解答は PC Chrome 2026-09-13）。
-スマホ上の FastAPI 常駐は未着手、スマホ側 CDP はペア設定待ちです。
+（グラスアプリの撮影とサーバ到達、スマホ上のFastAPI・端末内CDP・ChatGPT解答・ASR）。
+スマホ内の部品は2026-09-15に実行済みですが、AP上の撮影から答案までの受け入れは未実施です。
+測定は[端末内CDPと解答](docs/hardware-measurements.md#f-6-6-端末内-adb-とスマホ単独での-cdp-実行実測2026-09-15)と
+[スマホ内ASR](docs/hardware-measurements.md#g-local-asr)に保持しています。
 
 撮影方式は**自動スキャン**です（2026-09-14 決定）。グラスがページを検知して自分で
 撮り、実画像を3秒見せ、その間の単タップで取り直し、無操作なら確定して次ページへ進み、
@@ -42,6 +44,8 @@ Rokid Glasses（AnswerView） ← answer-bundle
 現行実装は**glassdocだけで自動スキャンを有効化**し、待機中の単タップを手動撮影、
 静止画表示後3秒以内の単タップを取り直しに割り当てます。既存の自動ループを再利用し、
 凍結したphone/CUSTOMVIEWの明示操作は維持します。
+起動時は通常／リスニングを選びます。通常撮影は通信を待たずに進め、確定写真をグラス内に
+保存してから送信します。中断資料と直近答案は明示的に選んで再開できます。
 
 資料は全文OCRのMarkdown＋大問のページ画像が既定で、結合画像/PDFも比較できます。
 図付き答案と、撮影に並行する録音・スマホ内VAD/ASRも実装しています。
@@ -106,7 +110,7 @@ risk があります。**利用者の判断で選択した経路です（詳細�
 CXR-L の実装境界は
 [CXR-L / Global Hi Rokid integration](docs/cxr-l-integration.md)です。
 
-現在のバージョン: **Server APP 0.29.0 / API 1.20.0 / Android client 0.3.17 / Glasses View 1.12.0 / Solver API 1.7.0**。
+現在のバージョン: **Server APP 0.30.0 / API 1.21.0 / Android client 0.3.17 / Glasses View 1.13.0 / Solver API 1.7.0**。
 版数の正本は `app/version.py` です。他の資料は版数を書かず、この行だけが
 `tests/test_documentation_contract.py` で実装と照合されます。
 Solver API は、記入用解答の全文保持・資料不足の分離を行う `answer_only` モードを含みます。

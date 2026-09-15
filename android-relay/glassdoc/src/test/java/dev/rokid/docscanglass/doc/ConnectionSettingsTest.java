@@ -41,4 +41,17 @@ public class ConnectionSettingsTest {
         assertThrows(IOException.class, settings::load);
         assertArrayEquals(damaged, Files.readAllBytes(file.toPath()));
     }
+
+    @Test public void acceptedPrivateSetupIsConsumedOnlyAfterTheMatchingCredentialIsSaved() throws Exception {
+        File file = new File(folder.getRoot(), "connection.bin");
+        File setup = new File(folder.getRoot(), "setup.properties");
+        Files.write(setup.toPath(), "server=http://phone:8000\nkey=test-only-credential\n".getBytes(StandardCharsets.UTF_8));
+        ConnectionSettings settings = new ConnectionSettings(file, KeyGenerator.getInstance("AES").generateKey());
+        ConnectionSettings.Saved provisioned = settings.provisioning();
+        settings.save("http://previous:8000", "previous-test-key");
+        assertTrue(setup.exists());
+        settings.save(provisioned.server, provisioned.key);
+        assertFalse(setup.exists());
+        assertEquals(provisioned.key, settings.load().key);
+    }
 }

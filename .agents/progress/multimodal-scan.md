@@ -50,6 +50,47 @@ B5指定だけで全体取得の証明にせず、RP-10で四辺・余白と実�
   `py -3.12 -m ruff check .` は `All checks passed!`。実ChatGPT送信はまだ行っていない。
   公開契約／APKの版と全体buildは導入用のまとまりで更新・検査する。
 
+### ローカル先行の通常撮影と起動選択（2026-09-16）
+
+Runs on: Windowsの実装・自動試験。新APKの実機導入とAP受け入れはまだ行っていない。
+
+LocalCaptureSessionはHTTPより先にUUID記録を作り、送信先、モード、phase、CLOSED、後から得た
+HTTPのlong IDを保存する。既存CaptureReviewのバイナリ形式を再利用し、確定写真の各版を保持して
+atomic manifestで採用版とACKを選ぶ。未ACKは同じ文書／page番号／内容で再送する。
+通常撮影のHTTPは別executorへ移し、サーバ待ちで次のグラス操作を止めない。
+ローカル破損・保存失敗・認証や形式の拒否は原本を保持して停止する。解析を自動で繰り返さない。
+
+起動は通常／リスニング二択と明示再開。以前の中断記録は新規開始後も一覧から選べる。
+再開が受理されるまでchooserを維持し、別originや破損記録の拒否後に他の記録をCLOSEDにしない。
+前回答案を開いて閉じる場合も、選ばなかった撮影記録は変更しない。旧形式の保存資料は
+送信先を上書きせず、元のURLでの復元を要求する。リスニングはまだ開始前のHTTP待ちが残る。
+
+初回設定はprivate領域のsetup.propertiesから受け、URLと鍵をKeystoreで暗号化して保存後に
+一致する平文設定を除去する。実鍵はまだ発行・設定していない。
+GET /v1/settingsにoperation_routes.glassdocを追加し、既存phone契約は維持する。
+API／view／APKの版とREADME tupleを更新。公開契約はphysical_acceptance=pending。
+
+- 保存破損試験は修正前 `1 test completed, 1 failed`。
+- `./android-relay/gradlew --no-daemon :relaycore:testDebugUnitTest --tests '*LocalReviewTest'`
+  → `BUILD SUCCESSFUL in 1m 29s`。遅いHTTP中の操作、終了前ACK不明の再起動と同じ写真の再送を含む。
+- `./android-relay/gradlew --no-daemon :glassdoc:testDebugUnitTest --tests '*DocScanGlassActivityIntentTest'`
+  → `BUILD SUCCESSFUL in 2m 4s`。起動待機・明示選択・再開拒否後の他記録保全・前回答案終了を含む。
+- `py -3.12 -m pytest -q` → `606 passed, 1 skipped, 1 warning in 340.04s`。
+  `py -3.12 -m ruff check .` → `All checks passed!`。既存httpx deprecation warningを保持。
+- 旧形式origin保護の追加後、`./android-relay/gradlew --no-daemon test testDebugUnitTest assembleDebug`
+  → `BUILD SUCCESSFUL in 3m 35s`、199 tasks。JDK 17.0.20.1+1、SDK Platform 36 revision 2、Gradle 9.4.1。
+  `py -3.12 -m pytest -q tests/test_documentation_contract.py tests/test_versioning.py` → `21 passed in 8.45s`。
+  `git diff --check` → exit 0。
+- aapt2でpackage=dev.rokid.docscanglass.doc、launchable=DocScanGlassActivityを照合。
+  apksignerは`Verifies`、v2=true、証明書SHA-256=`906307478018e09e2937cfd8042a674d27598767577e08a304472aae407ccacc`。
+  Get-FileHashでAPK SHA-256=`A375A10D71CD158D5A98568289A1D75F59F39774CC6A5B2043A4E8ACADD4156A`。
+  実機に入っているAPKは旧版。新APKの導入・物理試験はまだ実行していない。
+
+読み取りでF-51FのAPIはlocalhost health=200、実行appは従来の版、REAL_MODE／analyzerは未設定、
+API鍵なしを再確認。データは~/rokid-server/data。AP interfaceはまだ起動していない。
+cmd wifiのAP照会は権限例外を併記して「他interfaceを破棄せず作成可能」と返しただけで、
+APと携帯回線の同時接続を物理検証した結果ではない。
+
 ### Next steps — 追加実装
 
 Runs on: 以下の認証保存はWindowsの自動試験。Android Keystoreの実機確認はAPK導入後。
@@ -70,9 +111,9 @@ Android Keystore、暗号化ファイルはno-backup領域に置く。Controller
 Runs on: WindowsでRP-05のActivity接続、RP-02の実OCR契約、起動・保存・録音を順次実装。
 実機の短い通し試験は指定グラス→F-51F AP→F-51F Chrome。
 
-1. 入力相関・Activity時刻／メニュー・REAL_MODEの実OCR／空OCR画像経路の修正を保存済み。
-   認証保存も自動試験まで実装。次はRP-03/04/06のローカル記録・起動二択・独立送信。
-   取消期限へ時刻を渡すRP-09も残る。
+1. 起動二択・通常写真のローカル保存と独立送信まで実装。全Android gateとAPK identity／署名／hashを確認。
+   変更を保存して、認証設定の具体的承認後に新APKとスマホappを適用する。録音の中断保存・開始と終了の分離はRP-07/08、
+   取消期限へ時刻を渡すRP-09が残る。これらは実装済みと扱わない。
 2. 用紙経路の準備後、同じB5紙面の単頁／見開きを撮り、実OCRと最終答案の差を測る。
    ガイド切替だけで外周検出が実装されたとは扱わない。カメラ寸法・retryは変更しない。
 3. RP-01/18の未成立能力を小さく検査する。実英語音声は利用者指示で後回し。

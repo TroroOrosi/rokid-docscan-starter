@@ -64,8 +64,8 @@ android {
         // own, with its tests -- and this module is the capture seam over
         // them: camera2 for the still, a canvas for the HUD, and the
         // `:glassinput` gestures routed through CaptureActionRouter.
-        versionCode = 8
-        versionName = "0.7.0"
+        versionCode = 9
+        versionName = "0.8.0"
     }
 
     // Same reasoning as `:glassapp`: a vendor installer that reads JAR

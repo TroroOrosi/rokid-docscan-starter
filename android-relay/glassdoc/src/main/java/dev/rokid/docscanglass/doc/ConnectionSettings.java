@@ -8,6 +8,7 @@ import java.nio.file.Files;
 import java.nio.file.StandardCopyOption;
 import java.security.GeneralSecurityException;
 import java.security.KeyStore;
+import java.util.Properties;
 import javax.crypto.Cipher;
 import javax.crypto.KeyGenerator;
 import javax.crypto.SecretKey;
@@ -34,6 +35,19 @@ final class ConnectionSettings {
         Saved(String server, String key) { this.server = server; this.key = key; }
     }
 
+    /** Initial setup is delivered through run-as stdin, so credentials never appear in an adb command. */
+    synchronized Saved provisioning() throws IOException {
+        File setup = new File(file.getParentFile(), "setup.properties");
+        if (!setup.exists()) return null;
+        if (setup.length() > 16384) throw new IOException("初回設定が大きすぎます");
+        Properties values = new Properties();
+        try (InputStream input = new FileInputStream(setup)) { values.load(input); }
+        if (values.size() != 2 || !values.containsKey("server") || !values.containsKey("key")) {
+            throw new IOException("初回設定の形式を確認してください");
+        }
+        return new Saved(normalizeServer(values.getProperty("server")), values.getProperty("key").trim());
+    }
+
     static String normalizeServer(String value) {
         String server = value == null ? "" : value.trim().replaceAll("/+$", "");
         HttpUrl url = HttpUrl.parse(server);
@@ -45,6 +59,7 @@ final class ConnectionSettings {
     }
 
     synchronized void save(String server, String apiKey) throws IOException {
+        Saved setup = provisioning();
         server = normalizeServer(server);
         String value = apiKey == null ? "" : apiKey.trim();
         if (value.length() > 8192 || value.chars().anyMatch(c -> c < 32 || c > 126)) {
@@ -81,6 +96,9 @@ final class ConnectionSettings {
                     StandardCopyOption.REPLACE_EXISTING);
         } catch (AtomicMoveNotSupportedException error) {
             Files.move(temporary.toPath(), file.toPath(), StandardCopyOption.REPLACE_EXISTING);
+        }
+        if (setup != null && server.equals(setup.server) && value.equals(setup.key)) {
+            Files.delete(new File(file.getParentFile(), "setup.properties").toPath());
         }
     }
 

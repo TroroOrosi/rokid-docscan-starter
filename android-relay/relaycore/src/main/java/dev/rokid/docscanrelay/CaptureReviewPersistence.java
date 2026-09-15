@@ -97,6 +97,36 @@ final class CaptureReviewPersistence {
             return null;
         }
         CaptureReviewStore.Pending pending;
+        try {
+            pending = readPending();
+        } catch (IOException | RuntimeException invalid) {
+            try {
+                clear();
+            } catch (IOException ignored) {
+                // Frozen relay recovery: invalid pending records are not uploaded.
+            }
+            return null;
+        }
+        CommitMarker marker = loadCommitMarkerOrNull();
+        if (marker == null) {
+            return pending;
+        }
+        if (marker.pageIndex == pending.pageIndex
+                && MessageDigest.isEqual(marker.jpegSha256, sha256(pending.jpeg))) {
+            recoveredCommittedPageIndex = marker.pageIndex;
+            try {
+                clearAfterCommit();
+            } catch (IOException ignored) {
+                // Keep the matching marker so a later restart still suppresses this upload.
+            }
+            return null;
+        }
+        clearCommitMarkerQuietly();
+        return pending;
+    }
+
+    /** Read a retained image without deleting it or consuming acknowledgement markers. */
+    synchronized CaptureReviewStore.Pending readPending() throws IOException {
         try (DataInputStream data = new DataInputStream(
                 new BufferedInputStream(new FileInputStream(file)))) {
             if (data.readInt() != MAGIC) {
@@ -130,32 +160,9 @@ final class CaptureReviewPersistence {
             if (jpeg.length == 0 || capturedAt < 0 || data.read() != -1) {
                 throw new IOException("invalid pending capture payload");
             }
-            pending = new CaptureReviewStore.Pending(
+            return new CaptureReviewStore.Pending(
                     pageIndex, jpeg, ocrText, rotationDegrees, ocrFailure, framing, capturedAt);
-        } catch (IOException | RuntimeException invalid) {
-            try {
-                clear();
-            } catch (IOException ignored) {
-                // A stale file still cannot be auto-uploaded; load remains fail-closed.
-            }
-            return null;
         }
-        CommitMarker marker = loadCommitMarkerOrNull();
-        if (marker == null) {
-            return pending;
-        }
-        if (marker.pageIndex == pending.pageIndex
-                && MessageDigest.isEqual(marker.jpegSha256, sha256(pending.jpeg))) {
-            recoveredCommittedPageIndex = marker.pageIndex;
-            try {
-                clearAfterCommit();
-            } catch (IOException ignored) {
-                // Keep the matching marker so a later restart still suppresses this upload.
-            }
-            return null;
-        }
-        clearCommitMarkerQuietly();
-        return pending;
     }
 
     synchronized int consumeRecoveredCommittedPageIndex() {
@@ -244,7 +251,7 @@ final class CaptureReviewPersistence {
         }
     }
 
-    private static void moveReplacing(File source, File target) throws IOException {
+    static void moveReplacing(File source, File target) throws IOException {
         try {
             Files.move(
                     source.toPath(),

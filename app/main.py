@@ -36,6 +36,7 @@ from .config import IMAGE_DIR, ensure_dirs
 from .explainer import ExplainRequest, ExplainResult
 from .explainers import get_explainer, list_explainers
 from .extractors import detect_media, get_extractor
+from .glassdoc_contract import GLASSDOC_OPERATION_CONTRACT
 from .glasses_view import (
     CAPTURE_CONTRACT,
     EXPLAIN_STAGES,
@@ -412,6 +413,10 @@ def get_settings() -> dict:
         "hud": render_contract(),
         "capture": dict(CAPTURE_CONTRACT),
         "operations": dict(OPERATION_CONTRACT),
+        "operation_routes": {
+            "phone": {"operator": "phone", "operations": dict(OPERATION_CONTRACT)},
+            "glassdoc": GLASSDOC_OPERATION_CONTRACT,
+        },
         "input": build_input_contract(),
         "providers": provider_status(),
         "versions": version_info(),

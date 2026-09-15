@@ -58,8 +58,8 @@ Runs on: WindowsでAPI試験、適用後F-51F。
 
 Runs on: Windows、glassdoc。
 
-- [ ] ローカル記録と後から得るHTTP文書IDの対応、選択モード、撮影／音声phase、CLOSEDを保存する。
-- [ ] URLと認証の安全な保存を初回設定へまとめ、起動ごとのkey入力をなくす。既存HTTPのlong IDは保つ。
+- [x] ローカル記録と後から得るHTTP文書IDの対応、選択モード、撮影／音声phase、CLOSEDを保存する。音声chunkの復旧はRP-07。
+- [x] URLと認証をKeystore暗号化で保存し、起動ごとのkey入力をなくす。既存HTTPのlong IDは維持。実鍵設定・実機再起動は未検証。
 - 検証: 書込み途中kill、認証ありでプロセス再起動、別serverへの未送信資料混入なし。秘密をログへ出さない。
 - 依存: なし。対象: 既存Controller保存、Activity設定、AnswerStore周辺の必要範囲と試験。認証の実設定はRP-20。
 
@@ -67,8 +67,9 @@ Runs on: Windows、glassdoc。
 
 Runs on: Windows、glassdoc。
 
-- [ ] 起動で通常／リスニングを表示、前回選択を強調しタップで開始する。中断資料・直近答案は任意項目。
+- [x] 起動で通常／リスニングを表示、前回選択を強調しタップで開始する。中断資料・直近答案は任意項目。実機の起動時間は未測定。
 - [ ] カメラ／マイクは選択前に開始しない。通信確認を二択やローカル取得の待ち条件にしない。
+  通常撮影とchooserはHTTPを待たない。リスニング開始のHTTP待ちはRP-07/08で解消する。
 - 検証: 新規・再起動・未接続・中断・CLOSEDの起動試験。準備済み選択→最初の取得の3秒目標を実機で測る。
 - 依存: RP-03。対象: Activity、既存HUD、Controller起動境界と対応試験。
 
@@ -85,8 +86,8 @@ Runs on: Windowsの純Java試験、同じAPK／firmwareのグラス。
 
 Runs on: Windows、glassdoc → F-51F API。
 
-- [ ] 可視確認が終わったページを端末に原子的に保存。保存後はHTTPを待たず次ページと操作を受ける。
-- [ ] 未ACKページの状態を保持し、AP断・再起動後は同じpage ID／内容で再送する。確定前は送らない。
+- [x] 可視確認が終わったページを端末に原子的に保存。保存後はHTTPを待たず次ページと操作を受ける。自動試験済み、物理試験未了。
+- [x] 未ACKページを保持し、同じ文書／page ID／内容で再送する。確定前は送らない。ACK不明の再生成・再送を自動試験、実AP断は未測定。
 - 検証: 遅いHTTP中の次操作、ACK前後kill、重複再送、保存失敗時の旧写真保全。S20/23、X06。
 - 依存: RP-03。対象: Controller、既存CaptureReview保存／API、回帰試験。汎用queue製品を追加しない。
 
@@ -227,7 +228,7 @@ Runs on: 会場経路の同一PNG／OCR／実音声、同じF-51F Chrome・モ�
 
 Runs on: Windows。実機操作前のAPK検査。
 
-- [ ] 21a: glassdocの操作主体を公示できる経路別契約を追加し、frozen phone契約は維持。API／view挙動の版と試験を揃える。
+- [x] 21a: settingsにglassdocの操作主体を公示する経路別契約を追加し、frozen phone契約は維持。API／view挙動の版と試験を揃えた。物理受け入れはpending。
 - [ ] 21b: plan・runbook・README tuple・進捗を実装へ合わせ、共通最終gateとAPK identity／署名／hash照合を行う。
 - 検証: settings／sessionの経路別API回帰、全文書gate、全pytest／Ruff／Java test／assemble、APK検査出力。
 - 依存: RP-02～17/20の採用範囲。対象: 契約定義とAPI、version／README、対応試験を分割。新しい表面を重複実装しない。

@@ -19,6 +19,7 @@ import android.widget.Toast;
 import java.io.IOException;
 import java.io.File;
 import java.util.List;
+import java.util.ArrayList;
 import java.util.Optional;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
@@ -62,6 +63,12 @@ public final class DocScanGlassActivity extends Activity
     private static final int CAMERA_PERMISSION_REQUEST = 7401;
     private static final int AUDIO_PERMISSION_REQUEST = 7402;
     private boolean listeningMode;
+    private boolean choosingSession;
+    private int startupSelection;
+    private AnswerStore.Saved startupAnswers;
+    private List<DocScanController.SavedCapture> startupCaptures;
+    private boolean viewingPreviousAnswers;
+    private boolean startupStarting;
     private ListeningRecorder listening;
     private boolean finishingAudio;
     private long listeningDocument;
@@ -155,6 +162,8 @@ public final class DocScanGlassActivity extends Activity
         setContentView(hud);
         answerStore = new AnswerStore(getFilesDir());
         connectionSettings = new ConnectionSettings(new File(getNoBackupFilesDir(), "connection.bin"));
+        choosingSession = true;
+        resolvedOfflineAnswersAtStartup = true;
         // Putting the glasses back on wakes the display and the session with
         // it. Nothing restarts while they stay on the operator's face.
         wearWatch = new WearWatch(this, this::wornAgain);
@@ -179,6 +188,9 @@ public final class DocScanGlassActivity extends Activity
                         "camera2/no-cxr"));
 
         applyIntent(getIntent(), true);
+        startupSelection = listeningMode ? 1 : 0;
+        startupAnswers = loadSavedAnswers();
+        showStartupChoices();
         if (!hasCamera()) {
             requestPermissions(
                     new String[] {Manifest.permission.CAMERA}, CAMERA_PERMISSION_REQUEST);
@@ -202,7 +214,7 @@ public final class DocScanGlassActivity extends Activity
             listeningMode = intent != null && intent.hasExtra("listening")
                     ? intent.getBooleanExtra("listening", false) : getPreferences(MODE_PRIVATE).getBoolean("listening", false);
             getPreferences(MODE_PRIVATE).edit().putBoolean("listening", listeningMode).apply();
-            controller.setListeningMode(listeningMode);
+            if (!choosingSession) controller.setListeningMode(listeningMode);
         }
         if (intent != null && intent.hasExtra(EXTRA_GUIDE)) {
             float fraction = intent.getFloatExtra(
@@ -222,12 +234,17 @@ public final class DocScanGlassActivity extends Activity
             // Remove the delivered credential from this Activity's retained Intent.
             if (intent != null) intent.removeExtra(EXTRA_KEY);
             try {
+                if (server == null && key == null) {
+                    ConnectionSettings.Saved setup = connectionSettings.provisioning();
+                    if (setup != null) { server = setup.server; key = setup.key; }
+                }
                 ConnectionSettings.Saved saved = server != null && key != null ? null : connectionSettings.load();
                 if (saved != null) {
                     if (server == null) server = saved.server;
                     if (key == null) key = ConnectionSettings.normalizeServer(server).equals(saved.server) ? saved.key : "";
                 }
-                controller.configureAndResume(server, key, MEASURED_ROTATION_DEGREES);
+                if (choosingSession) controller.configureForLocalStart(server, key, MEASURED_ROTATION_DEGREES);
+                else controller.configureAndResume(server, key, MEASURED_ROTATION_DEGREES);
             } catch (IOException | IllegalArgumentException error) {
                 hud.showLines(List.of("接続設定を読み出せません", "初回設定を確認してください", ""));
             }
@@ -274,6 +291,11 @@ public final class DocScanGlassActivity extends Activity
     }
 
     private void exitSession() {
+            if (!choosingSession && !viewingPreviousAnswers && !controller.closeLocalSession()) {
+                backExit.reset();
+                hud.showLines(List.of("終了を保存できません", "原本は保持しています", "もう一度操作してください"));
+                return;
+            }
             sessionClosed = true;
             if (reader != null) closeAnswers();
             releaseAnalysisWakeLock();
@@ -383,8 +405,29 @@ public final class DocScanGlassActivity extends Activity
     }
 
     private void onAction(GlassesInputAction action, long elapsedMillis) {
+        if (sessionClosed) return;
         if (action != GlassesInputAction.BACK) {
             backExit.reset();
+        }
+        if (choosingSession) {
+            if (startupStarting) return;
+            if (action == GlassesInputAction.SWIPE_FORWARD || action == GlassesInputAction.SWIPE_BACK) {
+                int step = action == GlassesInputAction.SWIPE_FORWARD ? 1 : -1;
+                int count = startupCaptures == null ? startupOptions().size() : startupCaptures.size();
+                startupSelection = Math.floorMod(startupSelection + step, count);
+                showStartupChoices();
+            } else if (action == GlassesInputAction.SHORT_TAP) {
+                startSelectedSession();
+            } else if (action == GlassesInputAction.BACK) {
+                if (startupCaptures != null) {
+                    startupCaptures = null;
+                    startupSelection = 2;
+                    backExit.reset();
+                    showStartupChoices();
+                } else if (backExit.onBack(elapsedMillis) == BackExitPolicy.Decision.EXIT) exitSession();
+                else hud.showLines(List.of("もう一度で終了", "タップで選択中の読取を開始", ""));
+            }
+            return;
         }
         if (reader != null) {
             if (action == GlassesInputAction.BACK) {
@@ -424,6 +467,82 @@ public final class DocScanGlassActivity extends Activity
             return;
         }
         controller.onGlassesAction(action);
+    }
+
+    private List<String> startupOptions() {
+        List<String> options = new ArrayList<>(List.of("通常の読取", "リスニング"));
+        if (controller.hasSavedWorkflow()) options.add("中断した読取");
+        if (startupAnswers != null) options.add("前回の答案");
+        return options;
+    }
+
+    private void showStartupChoices() {
+        if (startupCaptures != null) {
+            DocScanController.SavedCapture selected = startupCaptures.get(startupSelection);
+            hud.showLines(List.of("中断した読取 " + (startupSelection + 1) + "/" + startupCaptures.size(),
+                    selected.label, "スワイプで選択・タップで再開", "ダブルタップで戻る"));
+            return;
+        }
+        List<String> options = startupOptions();
+        startupSelection = Math.floorMod(startupSelection, options.size());
+        List<String> lines = new ArrayList<>();
+        for (int index = 0; index < options.size(); index++) {
+            lines.add((index == startupSelection ? "▶ " : "　 ") + options.get(index));
+        }
+        lines.add("スワイプで選択・タップで開始");
+        hud.showLines(lines);
+    }
+
+    private void startSelectedSession() {
+        String selected = startupCaptures == null ? startupOptions().get(startupSelection) : "中断記録";
+        backExit.reset();
+        if ("中断した読取".equals(selected)) {
+            startupCaptures = controller.savedCaptures();
+            if (startupCaptures.isEmpty()) startupCaptures = null;
+            startupSelection = 0;
+            showStartupChoices();
+            return;
+        }
+        if ("前回の答案".equals(selected)) {
+            try {
+                AnswerStore.Saved saved = answerStore.resume();
+                if (saved == null) return;
+                choosingSession = false;
+                viewingPreviousAnswers = true;
+                openAnswers(saved.bundle, saved.questionId, saved.offset);
+            } catch (IOException error) { hud.showLines(List.of("前回答案を開けません", "原本は保持しています", "")); }
+            return;
+        }
+        if (!hasCamera()) {
+            requestPermissions(new String[]{Manifest.permission.CAMERA}, CAMERA_PERMISSION_REQUEST);
+            return;
+        }
+        viewingPreviousAnswers = false;
+        startupStarting = true;
+        if (startupCaptures != null) {
+            DocScanController.SavedCapture saved = startupCaptures.get(startupSelection);
+            listeningMode = saved.listening;
+            controller.resumeLocalSession(saved.id, this::onStartupSelected);
+        } else {
+            listeningMode = startupSelection == 1;
+            getPreferences(MODE_PRIVATE).edit().putBoolean("listening", listeningMode).apply();
+            controller.startLocalSession(listeningMode, this::onStartupSelected);
+        }
+    }
+
+    private void onStartupSelected(boolean accepted) {
+        main.post(() -> {
+            if (sessionClosed) return;
+            startupStarting = false;
+            if (!accepted) {
+                hud.showLines(List.of("開始・再開できません", "接続先と保存記録を確認", "ダブルタップで戻る"));
+                return;
+            }
+            choosingSession = false;
+            startupCaptures = null;
+            answersFetchedForSession = -1;
+            onUpdate(controller.getState(), List.of("読取を開始", "", ""), "Local selection accepted");
+        });
     }
 
     // --- camera -----------------------------------------------------------
@@ -473,6 +592,7 @@ public final class DocScanGlassActivity extends Activity
     @Override
     public void onUpdate(RelayState state, List<String> hudLines, String diagnostic) {
         Log.i(TAG, state + ": " + diagnostic);
+        if (sessionClosed || choosingSession) return;
         maybeOpenSavedAnswersOffline();
         if (state == RelayState.FINALIZING || state == RelayState.LISTENING) main.post(this::waitWithDisplayOff);
         if (state == RelayState.ERROR || state == RelayState.READING) {

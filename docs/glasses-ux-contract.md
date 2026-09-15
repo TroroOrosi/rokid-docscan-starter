@@ -1,12 +1,14 @@
 # Glasses operator contracts
 
-Status: Current phone and standalone surface contracts. Updated 2026-09-15.
+Status: Current phone and standalone surface contracts. Updated 2026-09-16.
 
 The intended startup and complete operator flow are in the current section of
-[`tasks/plan.md`](../tasks/plan.md). The on-glasses mode chooser, immediate local
-start, progressive answer updates and post-CLOSED automatic launch remain planned.
-Known current input and navigation limitations are listed in
-[`requirements-audit.md`](requirements-audit.md); passing component tests did not cover them.
+[`tasks/plan.md`](../tasks/plan.md). The on-glasses mode chooser and normal-mode
+capture without HTTP are implemented. Listening still waits for server preparation;
+progressive answer updates and post-CLOSED automatic launch remain planned.
+[`requirements-audit.md`](requirements-audit.md) retains the pre-change audit;
+the current implementation and checks are recorded in
+[`multimodal-scan.md`](../.agents/progress/multimodal-scan.md).
 
 **The `:glassdoc` table below is the decided operator surface** (operator,
 2026-09-14): the venue runs the standalone app over a phone access point and the
@@ -36,6 +38,8 @@ contract (`app/version.py`):
 `GET /v1/settings.operations` publishes `"phone"` for every supported action.
 `GET /v1/settings.input` retains a legacy/unverified KeyCode map only for
 diagnosis and explicitly publishes `operator_actions_enabled:false`.
+`GET /v1/settings.operation_routes.glassdoc` publishes the separate standalone
+controls and explicitly marks physical acceptance as pending.
 
 The standalone `:glassdoc` APK has a separate local input adapter
 (its version is in `android-relay/glassdoc/build.gradle.kts`).
@@ -43,18 +47,26 @@ The standalone `:glassdoc` APK has a separate local input adapter
 Automatic capture is enabled only on `:glassdoc`. A tap requests a manual shot while
 waiting; during the visible still review it retakes. No input commits after 3 seconds.
 BACK ends capture after the last review; in listening mode a later BACK ends audio.
-Two BACK gestures exit answer reading. Distinct rapid BACK gestures may currently be
-deduplicated, and a second BACK during the last photo review does not end audio.
-The current Activity also sends reader-menu BACK to exit handling instead of one-level back.
+Two BACK gestures within three seconds exit answer reading. Reader-menu BACK returns
+one level. Distinct rapid KeyEvent gestures are retained; physical correlation is
+still unverified on the new APK. A second BACK during the last photo review does not
+yet end audio, and event-time cancellation across the commit boundary is pending.
 Full operation and power/error behavior:
 [`multimodal-scan.md`](multimodal-scan.md). Physical acceptance is pending.
 
-Configuration and session restoration run together on the controller queue.
+Startup shows normal/listening choices; capture starts only after selection.
+Unfinished captures and the latest saved answers can be selected explicitly.
+Starting another capture preserves earlier records and their pending photos.
+Normal-mode photos are committed locally before background HTTP upload, and
+unacknowledged revisions remain available after restart. Storage errors retain
+originals and stop processing; transient upload failures retry separately from capture.
+
 Launching without a `server` extra reuses the saved URL. A new Intent applies
 explicit `server`/`key` overrides; a guide-only Intent updates and saves the
-guide without restarting the workflow. An omitted key retains the current
-in-memory key only for the same server. Keys are not persisted across process
-death, so authenticated servers require the key again on restart.
+guide without restarting the workflow. URL and key are encrypted together with
+an Android Keystore key in app-private no-backup storage. A key is reused only for
+the same server. Initial provisioning can use the private `setup.properties` file;
+matching plaintext setup is removed after encrypted persistence succeeds.
 Configuration changes during capture are rejected and preserve the active
 workflow. Pending photos cannot be redirected to another server.
 
