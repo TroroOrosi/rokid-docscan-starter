@@ -23,6 +23,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.function.BooleanSupplier;
 
 import dev.rokid.docscanglass.input.GlassesInputAction;
+import dev.rokid.docscanglass.input.GlassesInputNormalizer;
 
 /** Serial state machine for capture -> OCR -> upload -> solve -> HUD review. */
 public final class DocScanController implements AutoCloseable {
@@ -138,7 +139,17 @@ public final class DocScanController implements AutoCloseable {
             CaptureSurface.NO_VIEW_GENERATION;
     private boolean captureGuideAcknowledged;
     private boolean stabilizationTimerScheduled;
-    private long reviewGeneration;
+    private volatile long reviewGeneration;
+    private record ReviewWindow(long generation, long shownAtMillis, long deadlineMillis, int pageIndex) { }
+    private record ReviewGesture(long startedAtMillis, ReviewWindow window) {
+        boolean isInReview() {
+            return window != null && startedAtMillis >= window.shownAtMillis
+                    && startedAtMillis < window.deadlineMillis;
+        }
+    }
+    private volatile ReviewWindow reviewWindow;
+    private volatile ReviewGesture pendingGlassesGesture;
+    private volatile ReviewGesture queuedRetake;
     private long reviewViewGeneration = CaptureSurface.NO_VIEW_GENERATION;
     private boolean autoCommitArmed;
     private boolean autoCommitScheduled;
@@ -294,8 +305,36 @@ public final class DocScanController implements AutoCloseable {
         applyGlassesCommandNow(CaptureActionRouter.route(state, gesture));
     }
 
+    /** Records the physical prefix before firmware classifies a tap. */
+    public void onGlassesGestureStarted(long elapsedMillis) {
+        if (link.supportsLocalCaptureReview()) {
+            pendingGlassesGesture = new ReviewGesture(elapsedMillis, reviewForInput(elapsedMillis));
+        }
+    }
+
+    private ReviewWindow reviewForInput(long elapsedMillis) {
+        ReviewWindow window = reviewWindow;
+        return window != null && (state == RelayState.CAPTURE_REVIEW || elapsedMillis < window.deadlineMillis)
+                ? window : null;
+    }
+
+    public void onGlassesAction(GlassesInputAction action, long elapsedMillis) {
+        ReviewGesture gesture = pendingGlassesGesture;
+        if (gesture == null || elapsedMillis < gesture.startedAtMillis
+                || elapsedMillis - gesture.startedAtMillis > GlassesInputNormalizer.MEASURED_CORRELATION_MILLIS) {
+            gesture = new ReviewGesture(elapsedMillis, reviewForInput(elapsedMillis));
+        }
+        // Publish before queueing: a timer already ahead of this action must wait for it.
+        if (action == GlassesInputAction.SHORT_TAP && gesture.isInReview()) queuedRetake = gesture;
+        enqueueGlassesAction(action, gesture);
+    }
+
     /** Routes local, normalized input against the state at execution time. */
     public void onGlassesAction(GlassesInputAction action) {
+        enqueueGlassesAction(action, null);
+    }
+
+    private void enqueueGlassesAction(GlassesInputAction action, ReviewGesture gesture) {
         if (action == null) {
             return;
         }
@@ -305,7 +344,17 @@ public final class DocScanController implements AutoCloseable {
                     if (action == GlassesInputAction.BACK) {
                         finishLocalCaptureNow();
                     } else if (action == GlassesInputAction.SHORT_TAP) {
-                        manualCaptureNow();
+                        try {
+                            if (gesture != null && gesture.window != null
+                                    && (!gesture.isInReview() || gesture.window.generation != reviewGeneration)) {
+                                listener.onUpdate(state, currentHudLines,
+                                        "Late review tap ignored for page index " + gesture.window.pageIndex);
+                                return;
+                            }
+                            manualCaptureNow();
+                        } finally {
+                            if (queuedRetake == gesture) queuedRetake = null;
+                        }
                     }
                     return;
                 }
@@ -563,6 +612,7 @@ public final class DocScanController implements AutoCloseable {
         autoRunGeneration++;
         autoCommitArmed = false;
         reviewGeneration++;
+        reviewWindow = null;
         // A tap during a burst selects the in-flight still; it never starts a second photo.
         if (state == RelayState.CAPTURING || ocrInFlight) return;
         if (reviewBufferedBurst()) return;
@@ -1646,6 +1696,7 @@ public final class DocScanController implements AutoCloseable {
         }
         if (link.supportsLocalCaptureReview() && (reviewDeadlineMillis == 0
                 || android.os.SystemClock.elapsedRealtime() < reviewDeadlineMillis
+                || reviewGestureBlocksCommit(reviewGeneration)
                 || !link.isCaptureReviewVisible(reviewViewGeneration))) return;
         if (api == null) {
             publishCaptureReview(
@@ -2022,6 +2073,7 @@ public final class DocScanController implements AutoCloseable {
         reviewGeneration++;
         autoCommitScheduled = false;
         reviewDeadlineMillis = 0;
+        reviewWindow = null;
         autoCommitArmed = link.supportsLocalCaptureReview() && armAutoCommit;
         reviewViewGeneration = CaptureSurface.NO_VIEW_GENERATION;
         // The operator cannot see the camera's field of view, so the framing
@@ -2334,6 +2386,8 @@ public final class DocScanController implements AutoCloseable {
         autoCommitScheduled = true;
         long delayMillis = LOCAL_REVIEW_MILLIS;
         reviewDeadlineMillis = android.os.SystemClock.elapsedRealtime() + delayMillis;
+        reviewWindow = new ReviewWindow(reviewGeneration, reviewDeadlineMillis - delayMillis,
+                reviewDeadlineMillis, pending.pageIndex);
         final long generationAtSchedule = reviewGeneration;
         watchdog.schedule(
                 () -> enqueueAutoCommit(generationAtSchedule),
@@ -2361,12 +2415,27 @@ public final class DocScanController implements AutoCloseable {
                 }
                 if (link.supportsLocalCaptureReview() && (reviewDeadlineMillis == 0
                         || android.os.SystemClock.elapsedRealtime() < reviewDeadlineMillis)) return;
+                if (reviewGestureBlocksCommit(generationAtSchedule)) {
+                    // Only an actual in-window prefix earns classification time. No-input stays 3s.
+                    watchdog.schedule(() -> enqueueAutoCommit(generationAtSchedule),
+                            GlassesInputNormalizer.MEASURED_CORRELATION_MILLIS + 1, TimeUnit.MILLISECONDS);
+                    return;
+                }
                 autoCommitArmed = false;
                 confirmPendingCaptureNow();
             });
         } catch (RejectedExecutionException ignored) {
             // The activity closed while the countdown was running.
         }
+    }
+
+    private boolean reviewGestureBlocksCommit(long generation) {
+        ReviewGesture queued = queuedRetake;
+        if (queued != null && queued.isInReview() && queued.window.generation == generation) return true;
+        ReviewGesture pending = pendingGlassesGesture;
+        long now = android.os.SystemClock.elapsedRealtime();
+        return pending != null && pending.isInReview() && pending.window.generation == generation
+                && now - pending.startedAtMillis <= GlassesInputNormalizer.MEASURED_CORRELATION_MILLIS;
     }
 
     private void publishCommittedPendingLocked(

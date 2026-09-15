@@ -3,7 +3,85 @@
 Status: Internal progress。計画の認識合わせ後、利用者が追加実装・実機操作を依頼。RP実装を開始。
 Runs on: Windowsで実装・試験。運用先はglassdocとスマホAP/FastAPI/Chrome。
 
-## 現在地 — 見開き・確認写真・開閉復帰（2026-09-16）
+## 再開地点 — 利用者の依頼で保存・停止（2026-09-16）
+
+Runs on: 今回の修正・最終gate・APK保全はWindows。修正版の実機適用は再開後に行う。
+
+利用者は「P1を撮りなおしタップを行ってもP2に行く」と報告。ずれの意味は
+「用紙が斜めに傾いて写る」と明確化した。その後「キリがいいところで保存して停止し、
+再開時に実機確認できるように」と指示したため、撮影・モデル送信・実機適用を進めず停止する。
+**再開前に実機試験を自動で始めない。** この節が下記の過去の次工程より優先する。
+
+### 保存する修正と根拠
+
+Runs on: Windowsの実装とRobolectric、原因の一次ログは§Lの実グラス。
+
+- f8ce0faは前節記録後に同じグラスへ導入済み。270度・中央2倍・見開き初期値を反映。
+  旧4件のmanifest byte一致、導入Success、起動Status okを確認済み。今回の修正版は未導入。
+- 単タップの物理開始NOTIFICATIONは確認表示から2485ms、確定ENTERは3003msだった。
+  3秒タイマーが先行し、実行時の次ページへタップを適用していた。過去のP1→P2も同じ経路（§L）。
+- 新修正は開始時刻と確認世代を結び、期限内に始まった入力の分類待ちだけ既存の実測970msまで
+  保存を保留する。確定済みでserial実行待ちの取り直しも優先。期限後・旧世代は次写真へ流さない。
+  明示取り直しで旧windowを退役させ、直後の新しい撮影タップが古い期限に捕まらないようにした。
+- 物理確認は未実施。取得イベント自体がlocal保存後まで届かない場合の元写真再取得など、
+  RP-09全項目が終わったとは扱わない。単タップ／ダブルタップの割当、無操作3秒、カメラ寸法・露出・retryは維持。
+- 実ログ再現testはP1期待0／実際1で `1 test completed, 1 failed` → 修正後 `BUILD SUCCESSFUL in 25s`。
+  独立レビューの「早い取り直し直後の次タップ」も `expected STABILIZING but was AIMING` でREDを確認して修正。
+- 最終 `./android-relay/gradlew.bat --no-daemon test testDebugUnitTest assembleDebug`
+  → `BUILD SUCCESSFUL in 51s`、199 tasks。上記レビュー修正と版更新を含む。
+  ASCII root `C:/rokid-docscan-starter`、JDK17.0.20.1+1／SDK Platform36 rev2／Gradle9.4.1。
+- `py -3.12 -m pytest -q tests/test_documentation_contract.py tests/test_versioning.py tests/test_rokid_led.py tests/test_watch_glasses.py`
+  → `26 passed in 0.93s`。`py -3.12 -m ruff check .` → `All checks passed!`。`git diff --check` → exit0。
+- `aapt2 dump badging` → `dev.rokid.docscanglass.doc`、`DocScanGlassActivity`、versionCode13、target36。
+  `apksigner verify --verbose --print-certs` → `Verifies`／v2=true、証明書SHA-256は
+  `906307478018e09e2937cfd8042a674d27598767577e08a304472aae407ccacc`、§Kと同じ。
+- 次回用APK: `data/device-setup/glassdoc-retake-review-20260916.apk`。
+  build出力と保全コピーを `Get-FileHash -Algorithm SHA256` で照合し、両方
+  `F8FEFBD15FF05D4E378715AA6061EA35585729472458E9D68793F55D4FEB9EC4`。
+  private data tarのSHA-256は `DCF08B583B5403B3B2C15ABC7B90074B1552E68A2F38D1FB360813E553961E78`。
+- 対象rootは `C:/rokid-docscan-starter`、branchは `feature/multimodal-scan`、
+  originは `https://github.com/TroroOrosi/rokid-docscan-starter.git`。
+  このチェックポイントの変更はController／Activity／LocalReviewTest、版、runbook／測定／進捗に限定。
+  APKと私的原本はローカル保全のみ。実機はf8ce0fa、F-51F appは8cc1ad2のまま。
+
+### 未解決の実画像
+
+Runs on: 既存Wi-Fiのglassdoc → F-51F。AP・携帯回線セッションの測定ではない。
+
+- 同じ見開きを繰り返した写真があり、**単頁と見開きの比較はまだ行っていない**。
+  doc6の2枚はOCR 78／0文字、doc7は6文字、doc8は0／38文字。新しいrotation=270を保存済み。
+  少し近い姿勢、確認画面の光学可読性、ブレの判別、解答精度も未確認。
+- 保存画像で上下の辺が平行にならない形も見える。一律の角度補正を入れて解決扱いしない。
+  台形歪み・湾曲・文字の小ささ・暗さ・OCR復号倍率は未切分け。斜め補正コードは追加していない。
+  Google ML Kit docsはContext7で `/websites/developers_google_ml-kit` を特定しただけで本文未取得。
+- 原本は端末に保持。Windowsにも `data/device-setup/before-retake-prefix-local-scans.tar` を保全。
+  document2～8の7読取、確定写真11枚とpendingを含む。doc2/6はANALYSIS、他はCAPTURE。
+  このtarから抽出した `latest-doc-{6,7,8}-page-*.jpg`、`retake-report-live.log` と
+  `after-visibility-bde4f09.log` はGit対象外のまま。OCR本文・画像をコミットしない。
+
+### 再開時の順序
+
+Runs on: 1はWindows／グラス、2～4はグラスとF-51F。会場経路の検証はその後のAP試験。
+
+1. `feature/multimodal-scan` のこの記録・現diffと検査済みAPKを照合。実機をread-onlyで列挙し、
+   グラス本体serial `1904092623381086`、F-51F `ZY22LWGDCV` を確認。IPは変わり得る。
+   同一実機への通常のAPK適用・起動は既に承認済み。UNKNOWN撮影や別機種なら進めない。
+   最終APKと既存署名、旧f8ce0fa APK hashを照合し、原本を保全して更新する。
+2. 選択画面で待機。用紙と利用者の準備を確認してから通常読取を開始する。
+   実画像表示の2.5～2.9秒付近に単タップし、P1がP1のまま取り直すことをログと見え方の両方で確認。
+   早い取り直し直後のタップ、無操作の確定、期限後入力、最後の1枚も続けて確認する。
+3. **同じB5冊子の見開き→片側1ページ**を実際に撮り分ける。傾き・欠け・ブレ・OCR・最終解答を比較する。
+   まだ比較画像がないことを忘れず、見開き2枚の反復を比較完了として扱わない。
+   手元の原本へ保存済み画像から原因を切り分け、撮り直しや露出変更を闇雲に重ねない。
+4. F-51F側はapp `8cc1ad2` のまま。CDPは直前 `/json/version` 200でChrome前景だったが、
+   解析結果は未取得。doc6等のupload/ACK・未完解析を確認してから同じ資料の解答確認を再開する。
+   watcherはF-51Fの `~/rokid-server/scripts/watch_glasses.py`、PID/logは `data/watch-glasses.*`。
+   閉→開で選択に戻る1回は利用者確認済み。今回停止依頼で常設server/watcher設定は変更していない。
+
+実英語音声の試験は利用者指定どおり後回し。RP残件全体は `tasks/todo.md` を維持する。
+選択skillは Agent Skills spine／diagnosing-bugs、固定点レビューとprogress-checkpoint。
+
+## 直前の現在地 — 見開き・確認写真・開閉復帰（2026-09-16）
 
 Runs on: 実装/build/描画QAはWindows。watcherはF-51F Termux、グラスは既存Wi-Fi接続。
 
@@ -29,8 +107,8 @@ F-51Fの既存adbから閉→開時にchooserを一度起動するscriptを追�
 - 独立レビューで起動応答UNKNOWNの繰返しを修正。通信断中の開閉欠落は制限を明記。
   Hud／向き／復号のRequired所見はない。光学可読性・OCR精度の合格ではない。
 
-次は検査済みAPKを同じグラスへ反映し、保存済み単頁設定も明示的に見開きへ切り替える。
-同じB5紙面の見開き→単頁比較を優先する。実英語音声は後回し。phone appは8cc1ad2。
+この節の後、f8ce0fa APKの導入と見開き設定の反映を実施済み。上の再開地点を参照。
+同じB5紙面の見開き→単頁比較は未実施。実英語音声は後回し。phone appは8cc1ad2。
 RP-09以降を今回の表示修正で完了扱いしない。下記は直前の履歴で、上記を優先する。
 
 ## 直前の不具合対応（2026-09-16）

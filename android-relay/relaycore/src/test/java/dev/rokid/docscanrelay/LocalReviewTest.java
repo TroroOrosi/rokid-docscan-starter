@@ -24,6 +24,103 @@ import org.robolectric.annotation.Config;
 @RunWith(RobolectricTestRunner.class)
 @Config(sdk = 32, manifest = Config.NONE)
 public class LocalReviewTest {
+    @Test public void tapStartedBeforeDeadlineRetakesSamePageAfterFirmwareClassification() throws Exception {
+        Context context = RuntimeEnvironment.getApplication();
+        Surface surface = new Surface();
+        try (MockWebServer server = new MockWebServer()) {
+            DocScanController controller = new DocScanController(context, surface, null,
+                    (state, lines, diagnostic) -> {}, new ClientIdentity("test", "test", "test"));
+            try {
+                controller.configureForLocalStart(server.url("/").toString(), "", 270);
+                controller.startLocalSession(false);
+                barrier(controller);
+                set(controller, "autoShotsRemaining", 0);
+                // A real pending page, including local persistence and the visible ACK.
+                CaptureReviewStore.Pending photo = new CaptureReviewStore.Pending(0, new byte[]{1, 2, 3}, "page", 270, "");
+                call(controller, "stageCaptureReview", new Class<?>[]{CaptureReviewStore.Pending.class, OcrQuality.class}, photo, null);
+                surface.visible = true;
+                controller.onCustomViewAvailable(1, "capture-review");
+                barrier(controller);
+                long generation = (long)get(controller, "reviewGeneration");
+                long start = android.os.SystemClock.elapsedRealtime();
+                // Measured: NOTIFICATION at 2485ms, ENTER at 3003ms.
+                org.robolectric.shadows.ShadowSystemClock.advanceBy(java.time.Duration.ofMillis(2485));
+                controller.onGlassesGestureStarted(start + 2485);
+                org.robolectric.shadows.ShadowSystemClock.advanceBy(java.time.Duration.ofMillis(518));
+                call(controller, "enqueueAutoCommit", new Class<?>[]{long.class}, generation);
+                barrier(controller);
+                controller.onGlassesAction(GlassesInputAction.SHORT_TAP, start + 3003);
+                barrier(controller);
+                assertEquals("Retake must still target P1", 0, (int)get(controller, "armedPageIndex"));
+                assertEquals("The tap must prevent the original commit", 0,
+                        ((LocalCaptureSession)get(controller, "localSession")).pageCount());
+                assertEquals(0, server.getRequestCount());
+
+                // An early retake retires the old deadline before a fresh shutter gesture.
+                call(controller, "stageCaptureReview", new Class<?>[]{CaptureReviewStore.Pending.class, OcrQuality.class}, photo, null);
+                controller.onCustomViewAvailable(1, "capture-review");
+                barrier(controller);
+                start = android.os.SystemClock.elapsedRealtime();
+                controller.onGlassesGestureStarted(start + 500);
+                controller.onGlassesAction(GlassesInputAction.SHORT_TAP, start + 1000);
+                barrier(controller);
+                assertEquals(RelayState.AIMING, controller.getState());
+                set(controller, "captureGuideAcknowledged", true);
+                controller.onGlassesGestureStarted(start + 1200);
+                controller.onGlassesAction(GlassesInputAction.SHORT_TAP, start + 1700);
+                barrier(controller);
+                assertEquals("Fresh shutter must not inherit the retired review", RelayState.STABILIZING, controller.getState());
+                assertEquals(0, (int)get(controller, "armedPageIndex"));
+
+                // An action queued before processing still wins when the timer is ahead of it.
+                call(controller, "stageCaptureReview", new Class<?>[]{CaptureReviewStore.Pending.class, OcrQuality.class}, photo, null);
+                controller.onCustomViewAvailable(1, "capture-review");
+                barrier(controller);
+                generation = (long)get(controller, "reviewGeneration");
+                start = android.os.SystemClock.elapsedRealtime();
+                controller.onGlassesGestureStarted(start + 2999);
+                org.robolectric.shadows.ShadowSystemClock.advanceBy(java.time.Duration.ofMillis(4500));
+                CountDownLatch blocked = new CountDownLatch(1), release = new CountDownLatch(1);
+                ((ExecutorService)get(controller, "serial")).execute(() -> {
+                    blocked.countDown();
+                    try { release.await(2, TimeUnit.SECONDS); } catch (InterruptedException error) { Thread.currentThread().interrupt(); }
+                });
+                assertTrue(blocked.await(1, TimeUnit.SECONDS));
+                try {
+                    Method timer = DocScanController.class.getDeclaredMethod("enqueueAutoCommit", long.class);
+                    timer.setAccessible(true);
+                    timer.invoke(controller, generation);
+                    controller.onGlassesAction(GlassesInputAction.SHORT_TAP, start + 3500);
+                } finally { release.countDown(); }
+                barrier(controller);
+                assertEquals(0, (int)get(controller, "armedPageIndex"));
+                assertEquals(0, ((LocalCaptureSession)get(controller, "localSession")).pageCount());
+
+                // A fresh tap that starts at the deadline cannot retake or become P2.
+                call(controller, "stageCaptureReview", new Class<?>[]{CaptureReviewStore.Pending.class, OcrQuality.class}, photo, null);
+                controller.onCustomViewAvailable(1, "capture-review");
+                barrier(controller);
+                start = android.os.SystemClock.elapsedRealtime();
+                org.robolectric.shadows.ShadowSystemClock.advanceBy(java.time.Duration.ofMillis(3000));
+                controller.onGlassesGestureStarted(start + 3000);
+                controller.onGlassesAction(GlassesInputAction.SHORT_TAP, start + 3500);
+                barrier(controller);
+                assertEquals(RelayState.CAPTURE_REVIEW, controller.getState());
+                assertEquals(-1, (int)get(controller, "armedPageIndex"));
+
+                // An incomplete gesture cannot hold the page forever.
+                call(controller, "stageCaptureReview", new Class<?>[]{CaptureReviewStore.Pending.class, OcrQuality.class}, photo, null);
+                controller.onCustomViewAvailable(1, "capture-review");
+                barrier(controller);
+                generation = (long)get(controller, "reviewGeneration");
+                start = android.os.SystemClock.elapsedRealtime();
+                controller.onGlassesGestureStarted(start + 2999);
+                org.robolectric.shadows.ShadowSystemClock.advanceBy(java.time.Duration.ofMillis(3970));
+                assertEquals(false, invoke(controller, "reviewGestureBlocksCommit", new Class<?>[]{long.class}, generation));
+            } finally { controller.close(); }
+        }
+    }
+
     @Test public void upgradedLegacyWorkflowCannotLoseItsOriginalServer() throws Exception {
         Context context = RuntimeEnvironment.getApplication();
         android.content.SharedPreferences prefs = context.getSharedPreferences("docscan_relay", Context.MODE_PRIVATE);
@@ -375,9 +472,12 @@ public class LocalReviewTest {
         Field field = object.getClass().getDeclaredField(name); field.setAccessible(true); field.set(object, value);
     }
     private static void call(Object object, String name, Class<?>[] types, Object... args) throws Exception {
+        invoke(object, name, types, args);
+    }
+    private static Object invoke(Object object, String name, Class<?>[] types, Object... args) throws Exception {
         Method method = object.getClass().getDeclaredMethod(name, types); method.setAccessible(true);
-        ((ExecutorService) get(object, "serial")).submit(() -> {
-            try { method.invoke(object, args); } catch (Exception error) { throw new RuntimeException(error); }
+        return ((ExecutorService) get(object, "serial")).submit(() -> {
+            try { return method.invoke(object, args); } catch (Exception error) { throw new RuntimeException(error); }
         }).get(5, TimeUnit.SECONDS);
     }
     private static void barrier(Object object) throws Exception {

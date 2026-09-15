@@ -1594,6 +1594,42 @@ Runs on: 再起動watcherはF-51F Termux → 同一Wi-Fiのグラス。画像QA�
   `Get-FileHash` → `29CFF4401AA1CC44B746B2B00FC5DDDC978F5BE5DD83ACAA947451E838AB0E3A`。
   導入前installed APKは§Jのhashと一致。保存4件をtarへ退避し原本を保全。
 
+## L. 確認期限をまたぐ単タップと傾きの申告（2026-09-16）
+
+Status: Frozen measurement。グラス1904092623381086／1.25.015-20260903-150201、実機APKはf8ce0fa（§K hash）。旧P1記録はbde4f09（§J hash）。F-51F appは8cc1ad2。
+Runs on: 実グラス、家庭Wi-FiとF-51F。修正の回帰試験とbuildはWindows。修正版の実機適用は未実施。
+
+§KのAPKを `adb -s 192.168.0.4:5555 install -r` で導入 → `Success`、起動 `am start -W` →
+`Status: ok`／`LaunchState: COLD`／`TotalTime: 2064`。保存4件のmanifestは導入前後でbyte一致。
+保存設定も見開きtrueへ反映した。新しい写真はrotation=270を持つ。
+
+利用者は「P1を撮りなおしタップを行ってもP2に行く」と申告。
+`adb -s 192.168.0.4:5555 logcat -d -v threadtime DocScanGlassDoc:I *:S` の記録は次のとおり。
+
+| 端末ログ時刻 | 観測 |
+|---|---|
+| 05:51:53.694 | page index 1の確認可視ACK、delay=3000ms |
+| 05:51:56.179 | NOTIFICATION、表示から2485msで操作開始 |
+| 05:51:56.697 | ENTER／SHORT_TAP、表示から3003ms |
+| 05:51:56.869 | local photo committed |
+| 05:51:56.870 | 同じタップでpage index 2のAIMINGへ進んだ |
+
+旧bde4f09にもP1（index0）で05:13:36.597 ACK、39.467 NOTIFICATION、39.810 commit、
+40.017 SHORT_TAP、40.018 index1 AIMINGがある。単タップは最初の通知から約0.5秒後に
+確定していた。`onAction` は取得時刻を持っていたがControllerへ渡しておらず、分類待ちも
+保存タイマーを保留しなかった。ログにはOCR本文や写真データを出していない。
+
+修正テスト `:relaycore:testDebugUnitTest --tests '*LocalReviewTest.tapStartedBeforeDeadlineRetakesSamePageAfterFirmwareClassification'`
+は修正前 `1 test completed, 1 failed`（expected0 / got1）、修正後 `BUILD SUCCESSFUL in 25s`。
+開始時刻と確認世代を保持し、実測相関窓970ms内の分類待ちとqueuedRetakeを保護。
+独立レビューの早い取り直し後の次操作もREDで再現し、旧window退役で対応した。
+実機での修正確認は利用者の停止依頼により次回へ持ち越す。全gateとAPKは進捗記録を参照。
+
+利用者は傾きについて「用紙が斜めに傾いて写る」と回答。保存画像には上下の辺が平行でない形もあり、
+一律回転で直るとは確認できない。doc6のOCR78／0文字、doc7は6文字、doc8は0／38文字。
+いずれも同じ見開きで、**片ページとの比較ではない**。光学可読性、ブレ判別、傾き補正、
+単頁／見開きのOCR・解答精度は未検証。画像とOCR内容はGit対象外のローカル保全のみ。
+
 # 出典
 
 ## 出典 — グラス一次情報索引（2026-09-03）

@@ -392,6 +392,10 @@ public final class DocScanGlassActivity extends Activity
         long elapsedMillis = event.getEventTime()
                 + SystemClock.elapsedRealtime() - SystemClock.uptimeMillis();
         if (event.getRepeatCount() == 0) {
+            if (keyCode == KeyEvent.KEYCODE_NOTIFICATION && "DOWN".equals(phase)
+                    && !choosingSession && reader == null && !sessionClosed) {
+                controller.onGlassesGestureStarted(elapsedMillis);
+            }
             Optional<GlassesInputAction> action = normalizer.accept(InputSignal.key(
                     elapsedMillis, phase, name, GlassKeyEvents.isKnown(name)));
             if (BuildConfig.DEBUG) Log.i(TAG, "input phase=" + phase + " key=" + name
@@ -467,7 +471,7 @@ public final class DocScanGlassActivity extends Activity
         if (listeningMode && action == GlassesInputAction.BACK && (!awaitingAnswers || !audioStopRequested)) {
             boolean stopAudio = captureEndRequested || controller.getState() == RelayState.LISTENING;
             captureEndRequested = true;
-            controller.onGlassesAction(action);
+            controller.onGlassesAction(action, elapsedMillis);
             if (stopAudio) finishAudio();
             return;
         }
@@ -479,7 +483,7 @@ public final class DocScanGlassActivity extends Activity
             }
             return;
         }
-        controller.onGlassesAction(action);
+        controller.onGlassesAction(action, elapsedMillis);
     }
 
     private List<String> startupOptions() {

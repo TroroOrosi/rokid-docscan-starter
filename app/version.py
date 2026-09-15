@@ -170,7 +170,7 @@ from __future__ import annotations
 #        gives each paper its own database. See GLASSES_VIEW_CONTRACT 1.11.0.
 # 0.28.0: an answer reaches the operator as writable text, and an answer that
 #        lost an element is no longer reported ready. See API 1.19.0.
-APP_VERSION = "0.33.0"
+APP_VERSION = "0.34.0"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.
@@ -350,7 +350,7 @@ EXPLAINER_API_VERSION = "1.1.0"
 # Local PCM recovery, sample-driven REC, and audio stop independent of photo review.
 # Full-display page aiming, readable still previews and visible analysis exit confirmation.
 # Upright, magnified still review and phone-side unfold-to-chooser startup.
-GLASSES_VIEW_CONTRACT_VERSION = "1.16.0"
+GLASSES_VIEW_CONTRACT_VERSION = "1.17.0"
 
 # Answer-area overlay payload (box + short answer; 2D image-anchored).
 # 1.1.0: added tracking metadata (tracking/fixed_ar/anchor_hint).
