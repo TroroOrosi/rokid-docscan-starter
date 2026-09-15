@@ -10,10 +10,8 @@ package dev.rokid.docscanglass.input;
  * the screen. This policy resolves both: the first BACK arms a confirmation and
  * a second BACK inside {@link #CONFIRM_WINDOW_MILLIS} exits.
  *
- * <p>The window is longer than
- * {@link GlassesInputNormalizer#MEASURED_CORRELATION_MILLIS} on purpose: the
- * normalizer deduplicates BACK inside that bound, so a shorter window could
- * never see the second report.
+ * <p>The confirmation window is independent of the normalizer's event-pair
+ * correlation. Two distinct fast BACK gestures can confirm an exit.
  *
  * <p>Fails closed. A non-monotonic timestamp re-arms rather than exiting.
  */

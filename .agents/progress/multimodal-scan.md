@@ -1,7 +1,38 @@
 # 手動併用スキャン・省電力・OCR/画像/音声/図
 
-Status: Internal progress。現在は全体の認識合わせ・計画整理。以前の実装・導入・ASR部品試験を保持。追加実装は未着手。
+Status: Internal progress。計画の認識合わせ後、利用者が追加実装・実機操作を依頼。RP実装を開始。
 Runs on: Windowsで実装・試験。運用先はglassdocとスマホAP/FastAPI/Chrome。
+
+## 追加実装の開始（2026-09-15）
+
+Runs on: 実装・回帰試験はWindows。実機操作は同一性を確認したグラスとF-51F。
+
+利用者が「追加実装・実機操作を行ってください」と明示したため、下の認識合わせ待ちは解消した。
+基準は `ed708b4`、branchは `feature/multimodal-scan`。RP計画の採用範囲を実装する。
+物理試験の用紙は準備可能。追加指示で英語リスニングの実音声試験は後回しになった。
+今回は用紙の撮影から答案表示までを優先し、録音側は実装と自動試験を進める。
+実音声の再生／収録／モデル送信はその後に行う。撮影開始のタイミングを事前に伝える。
+
+- `adb devices -l` は3接続だが、IP／mDNS側のF-51Fをそれぞれ `getprop ro.serialno` で照合し、
+  両方 `ZY22LWGDCV` と確認。操作対象はIP側 `192.168.0.30:38615` に統一する。
+  グラス `192.168.0.4:5555` はserial `1904092623381086`、build `1.25.015-20260903-150201`、spread=1。
+  F-51F build `64c964-a8f54`。読み取り時はTermux前景・Awake、SSH接続可能。
+  まだこの追加実装段階では実機状態を変更していない。
+- RP-05の入力相関: 異なる速いBACK／tap／swipeをテストで再現。最初の
+  `./android-relay/gradlew --no-daemon :glassinput:test` は `32 tests completed, 2 failed`。
+  同一KeyEvent組の重複と別のNOTIFICATION→terminal組を分離する修正後は
+  `BUILD SUCCESSFUL in 16s`。相関幅970msは維持。broadcastだけの曖昧な重複は保守的な扱いを維持する。
+- RP-05全体は未完了。Activityのevent時刻・focus時の終了確認解除、実機ジェスチャ照合は次。
+  公開契約／APKの版と全体buildは導入用のまとまりで更新・検査する。
+
+### Next steps — 追加実装
+
+Runs on: WindowsでRP-05のActivity接続、RP-02の実OCR契約、起動・保存・録音を順次実装。
+実機の短い通し試験は指定グラス→F-51F AP→F-51F Chrome。
+
+1. 入力相関修正を保存し、Activityの入力時刻とメニューの戻る操作を接続する。
+2. REAL_MODEの実OCR契約と起動二択／保存を進める。カメラ寸法・retryは変更しない。
+3. RP-01/18の未成立能力を小さく検査する。既存測定を読み直すだけで未実施と誤認しない。
 
 ## 現在の依頼と再開境界（2026-09-15）
 

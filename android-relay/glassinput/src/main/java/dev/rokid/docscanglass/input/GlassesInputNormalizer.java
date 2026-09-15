@@ -1,6 +1,7 @@
 package dev.rokid.docscanglass.input;
 
 import java.util.EnumMap;
+import java.util.EnumSet;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
@@ -35,8 +36,12 @@ public final class GlassesInputNormalizer {
     private long notificationMillis = -1;
     private long directionMillis = -1;
     private PendingDirection pendingDirection = PendingDirection.NONE;
-    private final Map<GlassesInputAction, Long> lastActionMillis =
+    private final Map<GlassesInputAction, Long> lastKeyMillis =
             new EnumMap<>(GlassesInputAction.class);
+    private final Map<GlassesInputAction, Long> lastBroadcastMillis =
+            new EnumMap<>(GlassesInputAction.class);
+    private final EnumSet<GlassesInputAction> unpairedBroadcasts =
+            EnumSet.noneOf(GlassesInputAction.class);
 
     public synchronized Optional<GlassesInputAction> accept(InputSignal signal) {
         Objects.requireNonNull(signal, "signal");
@@ -63,20 +68,22 @@ public final class GlassesInputNormalizer {
     public synchronized void reset() {
         lastSeenMillis = -1;
         clearPending();
-        lastActionMillis.clear();
+        lastKeyMillis.clear();
+        lastBroadcastMillis.clear();
+        unpairedBroadcasts.clear();
     }
 
     private Optional<GlassesInputAction> acceptBroadcast(String action, long now) {
         switch (action) {
             case ACTION_CLICK:
-                return emit(GlassesInputAction.SHORT_TAP, now);
+                return emitBroadcast(GlassesInputAction.SHORT_TAP, now);
             case ACTION_LONG_PRESS:
             case ACTION_AI_START:
-                return emit(GlassesInputAction.LONG_PRESS, now);
+                return emitBroadcast(GlassesInputAction.LONG_PRESS, now);
             case ACTION_SWIPE_FORWARD:
-                return emit(GlassesInputAction.SWIPE_FORWARD, now);
+                return emitBroadcast(GlassesInputAction.SWIPE_FORWARD, now);
             case ACTION_SWIPE_BACK:
-                return emit(GlassesInputAction.SWIPE_BACK, now);
+                return emitBroadcast(GlassesInputAction.SWIPE_BACK, now);
             default:
                 return Optional.empty();
         }
@@ -91,13 +98,13 @@ public final class GlassesInputNormalizer {
                 return Optional.empty();
             case "KEYCODE_ENTER":
                 if (withinMeasuredBound(notificationMillis, now)) {
-                    return emit(GlassesInputAction.SHORT_TAP, now);
+                    return emitKey(GlassesInputAction.SHORT_TAP, now);
                 }
                 clearPending();
                 return Optional.empty();
             case "KEYCODE_BACK":
                 if (withinMeasuredBound(notificationMillis, now)) {
-                    return emit(GlassesInputAction.BACK, now);
+                    return emitKey(GlassesInputAction.BACK, now);
                 }
                 clearPending();
                 return Optional.empty();
@@ -136,16 +143,31 @@ public final class GlassesInputNormalizer {
             clearPending();
             return Optional.empty();
         }
-        return emit(action, now);
+        return emitKey(action, now);
     }
 
-    private Optional<GlassesInputAction> emit(GlassesInputAction action, long now) {
+    private Optional<GlassesInputAction> emitKey(GlassesInputAction action, long now) {
         clearPending();
-        Long previous = lastActionMillis.get(action);
-        if (previous != null && withinMeasuredBound(previous, now)) {
+        lastKeyMillis.put(action, now);
+        if (unpairedBroadcasts.remove(action)
+                && withinMeasuredBound(lastBroadcastMillis.getOrDefault(action, -1L), now)) {
             return Optional.empty();
         }
-        lastActionMillis.put(action, now);
+        // A fresh NOTIFICATION + terminal sequence is a distinct gesture,
+        // even when the previous gesture finished inside the correlation window.
+        return Optional.of(action);
+    }
+
+    private Optional<GlassesInputAction> emitBroadcast(GlassesInputAction action, long now) {
+        // Keep an in-flight key prefix so its terminal can pair with this report.
+        // ponytail: broadcasts carry no gesture ID; repeated broadcast-only
+        // reports remain conservative until the firmware exposes such identity.
+        if (withinMeasuredBound(lastKeyMillis.getOrDefault(action, -1L), now)
+                || withinMeasuredBound(lastBroadcastMillis.getOrDefault(action, -1L), now)) {
+            return Optional.empty();
+        }
+        lastBroadcastMillis.put(action, now);
+        unpairedBroadcasts.add(action);
         return Optional.of(action);
     }
 
