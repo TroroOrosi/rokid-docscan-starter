@@ -132,6 +132,9 @@ def solve_with_fallback(
             continue
         solver = get_solver(name)
         last_solver = solver
+        if question.required_image_paths and not getattr(solver, "accepts_images", False):
+            skipped.append(f"{name}:images_unsupported")
+            continue
         try:
             result = solver.solve(question=question, max_answer_len=max_answer_len)
         except Exception:  # noqa: BLE001 - one tier failing must not 500
@@ -156,6 +159,8 @@ def solve_with_fallback(
 
     if question.answer_only:
         raise RuntimeError("answer-sheet: no configured solver produced a valid response")
+    if question.required_image_paths:
+        raise RuntimeError("no configured solver could read the required page images")
     if config.REAL_MODE:
         raise RuntimeError(
             "ROKID_REAL_MODE=1: every configured real solver tier failed; "

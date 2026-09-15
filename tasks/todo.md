@@ -50,7 +50,7 @@ Runs on: 指定グラス。スマホの協力が必要な既存経路だけF-51F
 Runs on: WindowsでAPI試験、適用後F-51F。
 
 - [x] REAL_MODEで実クライアントOCRを受け付け、placeholder solver/analyzerは引き続き拒否する。
-- [ ] 空OCRの写真を捨てず、画像対応solverで読める入力として扱う。画像非対応なら資料不足を明示する。
+- [x] 空OCRの写真を捨てず、画像対応solverで読める入力として扱う。画像非対応なら資料不足を明示する。API試験で確認、実モデル評価はRP-01。
 - 検証: 実OCR＋chatgpt-web、空OCR＋画像、placeholder／未準備の正負API試験。REAL_MODE=0への逃げを入れない。
 - 依存: なし。対象: config、analyzer境界、main、既存real-mode／photo試験。schema変更が必要なら適用前に具体化。
 
@@ -143,7 +143,7 @@ Runs on: Windows gate後、グラス→F-51F AP→Chrome→answer-bundle。
 Runs on: Windows、グラスで同じ照明／距離の実写真比較。
 
 - [ ] 既存camera／OCR／ShotScoreを使い、空OCRの図ページを保全。同じ紙の自動連写を止め、別紙を類似度だけで捨てない。
-- [ ] 既存guideの画角を校正し、短い欠け／反射案内を測る。意図した同一紙は手動追加可能。
+- [ ] 自動対象のB5で既存guideの画角を校正し、四辺・余白・短い欠け／反射案内を測る。別サイズや意図した同一紙は手動追加可能。
 - 検証: S06～08・X02/04、取得時間、撮影枚数、欠け、微小文字。輪郭消失・静止・ページ交換の実写真で判定。
 - 依存: RP-01/09。対象: Controller、pagequality、FramingGuide、試験。新preview／MLは現行方式の限界を数値化してから。
 - 測定済み寸法・burst／retryを変える場合は具体案を事前確認する。

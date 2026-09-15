@@ -69,7 +69,7 @@ from .matching import verdict as match_verdict
 from .overlay import build_overlay
 from .page_pdf import images_to_pdf
 from .retrieval import retrieve_context
-from .solvers import Question
+from .solvers import Question, get_solver
 from .solvers.llm_adapter import paste_prompt
 from .solvers.registry import solve_with_fallback
 from .subjects import detect_subject
@@ -911,6 +911,19 @@ def _finalize_document_once(document_id: int) -> dict:
                     p["summary"],
                 )
             )
+
+        # Client OCR may be empty on a figure-only page. Keep its image, but
+        # do not declare that input ready for a text-only solver. Check cached
+        # pages too, since provider configuration may change between attempts.
+        if config.REAL_MODE or analyzer.name == "client-ocr":
+            updated_text = {u[3]: (u[0], u[1]) for u in pending_updates}
+            empty_photos = [p for p in pages if p["image_path"] and not _page_material(
+                *updated_text.get(p["id"], (p["ocr_text"], p["vision_text"]))
+            )]
+            if empty_photos and not getattr(get_solver(), "accepts_images", False):
+                raise HTTPException(status_code=422, detail=(
+                    "photo has no usable OCR; configure an image-capable solver or retake the page"
+                ))
 
         # The analyzer can be slow or remote, so every call and result
         # transformation above runs before the write transaction. Acquire the
@@ -2697,7 +2710,7 @@ def exam_finalize_reading(session_id: int) -> dict:
         else:
             # Segment and insert the deck in the SAME transaction as the claim.
             page_rows = conn.execute(
-                "SELECT page_index, ocr_text, vision_text FROM pages "
+                "SELECT page_index, ocr_text, vision_text, image_path FROM pages "
                 "WHERE document_id = ? ORDER BY page_index",
                 (doc_id,),
             ).fetchall()
@@ -2705,7 +2718,13 @@ def exam_finalize_reading(session_id: int) -> dict:
                 [
                     # Body drives boundaries; the figure reading is appended
                     # to the owning problem so its labels don't split it.
-                    (r["page_index"], r["ocr_text"] or "", r["vision_text"])
+                    (r["page_index"], r["ocr_text"] or "", r["vision_text"] or (
+                        f"Page {r['page_index'] + 1}: OCR unavailable. "
+                        "Read the questions and diagrams from the original page image."
+                        if r["image_path"] and not (r["ocr_text"] or "").strip()
+                        and (config.REAL_MODE or os.environ.get("ROKID_ANALYZER") == "client-ocr")
+                        else None
+                    ))
                     for r in page_rows
                 ]
             )
@@ -2797,6 +2816,11 @@ def exam_finalize_reading(session_id: int) -> dict:
                             context=context,
                             image_path=row["image_path"],
                             image_paths=_page_image_paths(conn, doc_id, window),
+                            required_image_paths=[
+                                p["image_path"] for p in source_pages
+                                if p["page_number"] - 1 in (window or []) and p["image_path"]
+                                and not _page_material(p["ocr_text"], p["vision_text"])
+                            ],
                             # Listening: the recording itself, not only its
                             # transcript. A solver that takes audio hears the
                             # speaker turns and numbers a transcript flattens.

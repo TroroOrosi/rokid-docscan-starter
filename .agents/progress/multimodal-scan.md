@@ -12,6 +12,9 @@ Runs on: 実装・回帰試験はWindows。実機操作は同一性を確認し�
 物理試験の用紙は準備可能。追加指示で英語リスニングの実音声試験は後回しになった。
 今回は用紙の撮影から答案表示までを優先し、録音側は実装と自動試験を進める。
 実音声の再生／収録／モデル送信はその後に行う。撮影開始のタイミングを事前に伝える。
+追加指定で、自動スキャンはB5の問題冊子を開いた見開き2ページを一度に撮る。他サイズは手動撮影で扱う。
+FramingGuideは既にB5比率。PageFramingはOCR文字枠の端接触だけを見ており、紙外周を検出していない。
+B5指定だけで全体取得の証明にせず、RP-10で四辺・余白と実距離の校正を扱う。
 
 - `adb devices -l` は3接続だが、IP／mDNS側のF-51Fをそれぞれ `getprop ro.serialno` で照合し、
   両方 `ZY22LWGDCV` と確認。操作対象はIP側 `192.168.0.30:38615` に統一する。
@@ -30,7 +33,14 @@ Runs on: 実装・回帰試験はWindows。実機操作は同一性を確認し�
 - RP-02前半: `ROKID_ANALYZER=client-ocr` を明示的に登録。offlineとplaceholderを分け、
   未準備／既定placeholderの拒否を維持。新試験の修正前は `1 failed, 4 passed`、修正後の
   `py -3.12 -m pytest -q tests/test_real_mode.py tests/test_llm_adapters.py tests/test_provider_registry.py`
-  は `40 passed in 5.20s`。空OCRの画像経路は次の小工程。
+  は `40 passed in 5.20s`。
+- RP-02後半: 空OCRの正本PNGを保存したまま、OCRを捏造せず画像参照を分割入力へ渡す。
+  画像非対応solverは422で資料不足を明示。fallbackも必須画像を捨てず、単画像adapterは
+  第2の必須画像を黙って落とさない。新しいAPI試験の修正前は `2 failed, 1 passed`、
+  修正後のphoto／real_mode／llm_adapters／provider_registry／source_bundleは `60 passed in 8.15s`。
+  fallback試験追加後のreal_mode／photoは `17 passed in 1.64s`。
+  `py -3.12 -m pytest -q` は `605 passed, 1 skipped, 1 warning in 65.23s`。
+  `py -3.12 -m ruff check .` は `All checks passed!`。実ChatGPT送信はまだ行っていない。
   公開契約／APKの版と全体buildは導入用のまとまりで更新・検査する。
 
 ### Next steps — 追加実装

@@ -66,3 +66,38 @@ def test_real_mode_analyzer_provider_failure_is_loud(monkeypatch):
 
     with pytest.raises(RuntimeError, match="provider unavailable"):
         analyzer.analyze(ocr_text="page text")
+
+
+def test_required_images_cannot_fall_back_to_text_or_omit_a_second_page(monkeypatch, tmp_path):
+    import app.solvers.registry as registry
+    from app.solvers.llm_adapter import LLMSolver
+
+    class Client:
+        model = "test"
+        fail = True
+
+        def complete_json(self, **kwargs):
+            if self.fail:
+                raise RuntimeError("image provider unavailable")
+            return {"status": "ready", "answer": "2"}
+
+    class TextOnly(LLMSolver):
+        accepts_images = False
+
+        def solve(self, **kwargs):
+            pytest.fail("required images must not reach a text-only fallback")
+
+    image_client = Client()
+    image_solver = LLMSolver(name="image-fails", client=image_client)
+    text_solver = TextOnly(name="text-only", client=Client())
+    monkeypatch.setattr(registry._registry, "_items", {
+        image_solver.name: image_solver, text_solver.name: text_solver,
+    })
+    monkeypatch.setattr(config, "REAL_MODE", True)
+    image = tmp_path / "page.png"
+    image.write_bytes(b"test image bytes")
+    for required in ([str(image)], [str(image), str(tmp_path / "second.png")]):
+        image_client.fail = len(required) == 1
+        question = Question(answer_only=True, image_path=str(image), required_image_paths=required)
+        with pytest.raises(RuntimeError, match="no configured solver"):
+            solve_with_fallback(question, tiers=[image_solver.name, text_solver.name])

@@ -71,6 +71,8 @@ class Question:
     document_id: str = ""
     audio_transcript: str = ""
     question_id: str = ""
+    # Pages whose content has no text representation; a fallback must read them.
+    required_image_paths: list[str] = field(default_factory=list)
 
 
 @dataclass

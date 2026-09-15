@@ -174,6 +174,7 @@ def _read_audio(question: Question) -> tuple[str, bytes] | None:
 
 class LLMSolver(Solver):
     offline = False
+    accepts_images = True
 
     def __init__(self, *, name: str = "claude", provider: str = "anthropic",
                  client: LLMClient | None = None):
@@ -203,9 +204,12 @@ class LLMSolver(Solver):
         API providers take a single image, so this sends the question's primary
         page; see ChatGptWebSolver for the multi-page case.
         """
-        return client.complete_json(
-            system=system, prompt=prompt, image=_read_image(question.image_path)
-        )
+        if any(path != question.image_path for path in question.required_image_paths):
+            raise ValueError("this solver cannot carry every required page image")
+        image = _read_image(question.image_path)
+        if question.required_image_paths and not image:
+            raise ValueError("required page image is unavailable")
+        return client.complete_json(system=system, prompt=prompt, image=image)
 
     def solve(self, *, question: Question, max_answer_len: int = 64) -> SolveResult:
         client = get_client(self._client, self.provider)
