@@ -17,6 +17,7 @@ import android.view.WindowManager;
 import android.widget.Toast;
 
 import java.io.IOException;
+import java.io.File;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.ExecutionException;
@@ -93,6 +94,7 @@ public final class DocScanGlassActivity extends Activity
     private HudView hud;
     private AnswerView answers;
     private AnswerStore answerStore;
+    private ConnectionSettings connectionSettings;
     // Off the main thread only for AnswerStore.save's per-gesture write --
     // load-then-rewrite-the-whole-bundle plus an fsync, too expensive for a
     // wearable's UI thread on every page turn. Single-threaded so writes
@@ -152,6 +154,7 @@ public final class DocScanGlassActivity extends Activity
         hud = new HudView(this);
         setContentView(hud);
         answerStore = new AnswerStore(getFilesDir());
+        connectionSettings = new ConnectionSettings(new File(getNoBackupFilesDir(), "connection.bin"));
         // Putting the glasses back on wakes the display and the session with
         // it. Nothing restarts while they stay on the operator's face.
         wearWatch = new WearWatch(this, this::wornAgain);
@@ -214,10 +217,20 @@ public final class DocScanGlassActivity extends Activity
         // A guide-only Intent must not reset an active capture or review.
         if (starting || (intent != null
                 && (intent.hasExtra(EXTRA_SERVER) || intent.hasExtra(EXTRA_KEY)))) {
-            controller.configureAndResume(
-                    intent == null ? null : intent.getStringExtra(EXTRA_SERVER),
-                    intent == null ? null : intent.getStringExtra(EXTRA_KEY),
-                    MEASURED_ROTATION_DEGREES);
+            String server = intent == null ? null : intent.getStringExtra(EXTRA_SERVER);
+            String key = intent == null ? null : intent.getStringExtra(EXTRA_KEY);
+            // Remove the delivered credential from this Activity's retained Intent.
+            if (intent != null) intent.removeExtra(EXTRA_KEY);
+            try {
+                ConnectionSettings.Saved saved = server != null && key != null ? null : connectionSettings.load();
+                if (saved != null) {
+                    if (server == null) server = saved.server;
+                    if (key == null) key = ConnectionSettings.normalizeServer(server).equals(saved.server) ? saved.key : "";
+                }
+                controller.configureAndResume(server, key, MEASURED_ROTATION_DEGREES);
+            } catch (IOException | IllegalArgumentException error) {
+                hud.showLines(List.of("接続設定を読み出せません", "初回設定を確認してください", ""));
+            }
         }
     }
 
@@ -436,6 +449,11 @@ public final class DocScanGlassActivity extends Activity
     }
 
     // --- controller callbacks --------------------------------------------
+
+    @Override
+    public void persistConfiguration(String server, String key) throws IOException {
+        connectionSettings.save(server, key);
+    }
 
     @Override
     public void onConfigurationRejected(String message) {

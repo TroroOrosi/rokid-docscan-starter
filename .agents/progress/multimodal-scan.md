@@ -52,11 +52,27 @@ B5指定だけで全体取得の証明にせず、RP-10で四辺・余白と実�
 
 ### Next steps — 追加実装
 
+Runs on: 以下の認証保存はWindowsの自動試験。Android Keystoreの実機確認はAPK導入後。
+
+RP-03の認証保存を追加。glassdocはURLと鍵をAES-GCMで一組として保存し、暗号鍵は
+Android Keystore、暗号化ファイルはno-backup領域に置く。Controllerが設定変更を受理してから
+永続化し、保存失敗時は送信先を変えない。別URLへ前の鍵を流用せず、配送済みIntentから鍵を除去。
+破損ファイルを勝手に削除／再生成しない。Context7に該当資料はなく、
+[Android公式AES-GCM例](https://developer.android.com/reference/android/security/keystore/KeyGenParameterSpec)
+の公開APIを確認した。追加依存なし。
+
+`./android-relay/gradlew --no-daemon :glassdoc:testDebugUnitTest --tests '*ConnectionSettingsTest' --tests '*DocScanGlassActivityIntentTest'`
+は `BUILD SUCCESSFUL in 25s`。Activity試験の初期化を更新した後の
+`./android-relay/gradlew --no-daemon :relaycore:testDebugUnitTest :glassdoc:testDebugUnitTest`
+は `BUILD SUCCESSFUL in 55s`。再生成したstoreからの復元、毎回異なる暗号文、改変検出、
+中断tmpの非採用、起動時の認証、送信先変更／拒否時の保存維持を確認。実鍵設定・実機再起動は未実施。
+
 Runs on: WindowsでRP-05のActivity接続、RP-02の実OCR契約、起動・保存・録音を順次実装。
 実機の短い通し試験は指定グラス→F-51F AP→F-51F Chrome。
 
 1. 入力相関・Activity時刻／メニュー・REAL_MODEの実OCR／空OCR画像経路の修正を保存済み。
-   次はRP-03/04/06のローカル記録・認証保存・起動二択・独立送信。取消期限へ時刻を渡すRP-09も残る。
+   認証保存も自動試験まで実装。次はRP-03/04/06のローカル記録・起動二択・独立送信。
+   取消期限へ時刻を渡すRP-09も残る。
 2. 用紙経路の準備後、同じB5紙面の単頁／見開きを撮り、実OCRと最終答案の差を測る。
    ガイド切替だけで外周検出が実装されたとは扱わない。カメラ寸法・retryは変更しない。
 3. RP-01/18の未成立能力を小さく検査する。実英語音声は利用者指示で後回し。

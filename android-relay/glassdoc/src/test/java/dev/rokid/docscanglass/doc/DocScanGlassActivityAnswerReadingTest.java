@@ -88,6 +88,8 @@ public class DocScanGlassActivityAnswerReadingTest {
         filesDir = activity.getFilesDir();
         setField(activity, "hud", new HudView(activity));
         setField(activity, "answerStore", new AnswerStore(filesDir));
+        setField(activity, "connectionSettings", new ConnectionSettings(new File(filesDir, "test-connection.bin"),
+                javax.crypto.KeyGenerator.getInstance("AES").generateKey()));
         // configureAndResume's health check is not exercised here; onCreate
         // was not called (matching DocScanGlassActivityIntentTest's own
         // pattern), so nothing else has touched "docscan_relay" yet.

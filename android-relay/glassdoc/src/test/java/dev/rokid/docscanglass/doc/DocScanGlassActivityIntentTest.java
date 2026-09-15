@@ -4,6 +4,8 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNull;
 
 import android.content.Context;
 import android.content.Intent;
@@ -18,6 +20,9 @@ import org.robolectric.RobolectricTestRunner;
 import org.robolectric.annotation.Config;
 
 import java.lang.reflect.Field;
+import java.io.File;
+import java.io.IOException;
+import javax.crypto.KeyGenerator;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
@@ -50,6 +55,9 @@ public class DocScanGlassActivityIntentTest {
         activity = Robolectric.buildActivity(DocScanGlassActivity.class).get();
         hud = new HudView(activity);
         setField(activity, "hud", hud);
+        updates.settings = new ConnectionSettings(new File(activity.getFilesDir(), "intent-connection.bin"),
+                KeyGenerator.getInstance("AES").generateKey());
+        setField(activity, "connectionSettings", updates.settings);
         activity.getPreferences(Context.MODE_PRIVATE).edit().clear().commit();
         workflow = activity.getSharedPreferences("docscan_relay", Context.MODE_PRIVATE);
         workflow.edit().clear().commit();
@@ -145,6 +153,36 @@ public class DocScanGlassActivityIntentTest {
         assertEquals("Bearer updated-test-key", health.getHeader("Authorization"));
         assertEquals(server.url("/").toString().replaceAll("/+$", ""),
                 workflow.getString("server", ""));
+        assertFalse(intent.hasExtra("key"));
+    }
+
+    @Test
+    public void restartUsesSavedCredentialButNewDestinationNeverReceivesIt() throws Exception {
+        controller.close();
+        controller = new DocScanController(activity, new Surface(), null, updates,
+                new ClientIdentity("test-glasses", "intent-test/1", "fake-camera"));
+        setField(activity, "controller", controller);
+        java.lang.reflect.Method apply = DocScanGlassActivity.class.getDeclaredMethod("applyIntent", Intent.class, boolean.class);
+        apply.setAccessible(true);
+        apply.invoke(activity, new Intent(), true);
+        assertEquals("Bearer original-test-key", takeRequest(server).getHeader("Authorization"));
+        updates.awaitState(RelayState.READY);
+        try (MockWebServer replacement = newServer()) {
+            activity.onNewIntent(new Intent().putExtra("server", replacement.url("/").toString()));
+            assertNull(takeRequest(replacement).getHeader("Authorization"));
+        }
+    }
+
+    @Test
+    public void rejectedDestinationCannotReplaceSavedConfiguration() throws Exception {
+        controller.captureNextPage();
+        updates.awaitState(RelayState.AIMING);
+        String previous = updates.settings.load().server;
+        activity.onNewIntent(new Intent().putExtra("server", "http://replacement.test").putExtra("key", "replacement"));
+        awaitControllerBarrier();
+        assertEquals(previous, updates.settings.load().server);
+        assertEquals("original-test-key", updates.settings.load().key);
+        assertEquals(0, server.getRequestCount());
     }
 
     private void awaitControllerBarrier() throws Exception {
@@ -219,8 +257,13 @@ public class DocScanGlassActivityIntentTest {
     }
 
     private static final class Updates implements DocScanController.Listener {
+        private ConnectionSettings settings;
         private final List<RelayState> states = new ArrayList<>();
         private final List<String> diagnostics = new ArrayList<>();
+
+        @Override public void persistConfiguration(String server, String key) throws IOException {
+            settings.save(server, key);
+        }
 
         @Override
         public synchronized void onUpdate(RelayState state, List<String> lines, String diagnostic) {

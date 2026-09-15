@@ -41,6 +41,9 @@ public final class DocScanController implements AutoCloseable {
         default void onConfigurationRejected(String message) {
         }
 
+        /** Persist accepted settings before changing the active destination. Never log the key. */
+        default void persistConfiguration(String server, String key) throws IOException { }
+
         default void onListeningReady(long documentId) { }
     }
 
@@ -633,6 +636,11 @@ public final class DocScanController implements AutoCloseable {
                 && !normalizedServer.equals(previousServer)) {
             throw new IllegalStateException(
                     "未登録写真の送信先は変更できません。先に登録または破棄してください");
+        }
+        try {
+            listener.persistConfiguration(normalizedServer, apiKey);
+        } catch (IOException error) {
+            throw new IllegalStateException("接続設定を保存できません");
         }
         configuredServer = normalizedServer;
         configuredKey = apiKey == null ? "" : apiKey.trim();
