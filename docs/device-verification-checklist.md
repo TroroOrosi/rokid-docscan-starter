@@ -1,6 +1,6 @@
 # Rokid DocScan real-device verification checklist
 
-Status: Current acceptance form. Updated 2026-09-01.
+Status: Current acceptance form. Updated 2026-09-15.
 
 A build is not hardware verification. Complete every applicable item on the
 exact version tuple; otherwise report “build verified, device verification
@@ -79,8 +79,11 @@ request/response bodies.
 
 ## Physical indicator and device-controlled cues
 
-Use an independent camera with the indicator continuously in frame. Record
-timestamps later from the video; application logs alone do not pass this gate.
+The operator waived the external LED audit on 2026-09-15 because the indicator
+is system-controlled. The LED observations below are optional evidence, not an
+acceptance gate. Leave unobserved items unchecked. Do not request an external
+camera as a prerequisite. Application logs do not prove physical light state;
+the code must never disable, obscure, spoof, or bypass the indicator.
 
 - [ ] Indicator is visibly off for at least five seconds before capture.
 - [ ] Indicator is visibly lit while the camera is active.

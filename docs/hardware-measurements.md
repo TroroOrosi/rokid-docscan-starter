@@ -1354,6 +1354,107 @@ PC Chrome 152 での画像付きは 9.0 s（2026-09-14）。
 発生していない**（利用者確認）。到達可能性は「動かしてよいか」の答えではない。
 門を `ROKID_CHATGPT_LIVE=1` との AND に変更した。開発機で 9222 を使わないこと。
 
+<a id="g-local-asr"></a>
+
+## G. F-51Fへの更新と端末内ASR（2026-09-15）
+
+Status: Frozen measurement。APK導入、スマホ内CDP/FastAPI/ASRを実測。
+Runs on: Windowsは転送と起動指示のみ。推論、VAD、API、原音保存はF-51FのTermux内。
+グラスの撮影/録音やスマホAPを通した試験ではありません。
+
+### G-1. 対象と導入
+
+測定tuple: F-51F / Android 16 / incremental `64c964-a8f54` / Python 3.14.6 /
+fastapi 0.99.1 / pydantic 1.10.26 / uvicorn 0.52.4 / Chrome 153.0.8010.36。
+グラスのincrementalは `1.25.015-20260903-150201`、Hi Rokidは
+`G1.13.8.0828` (code 10130008)。今回の経路ではCXR-Lを使用していません。
+APKのソースcommitは `8163b5f`、サーバの配布commitは `12004a4`。
+
+利用者は対象グラスへのAPK導入とF-51Fの更新・ASR設定を承認し、LED監査は
+システム固定のため不要と指定しました。外部LED観察は実施していません。
+
+- `adb devices -l` → グラス `192.168.0.4:5555`、F-51F `192.168.0.30:38615`、
+  F-51Fの別mDNS endpoint。指定したserialを全操作に使用。
+- 旧APKをpullして保全し、`apksigner verify --print-certs` で署名SHA-256
+  `906307478018e09e2937cfd8042a674d27598767577e08a304472aae407ccacc` を照合。
+- `$env:AGENT_APPROVED=1; adb -s 192.168.0.4:5555 install -r <APK>` → `Success`。
+  `dumpsys package dev.rokid.docscanglass.doc` → versionCode 8、versionName 0.7.0。
+  APK SHA-256 `599BC0CC4F8151373B0EEFD0B8A62D71C089ABC9383AFA6C1BF60A2EFCC2E4A6`。
+- Termuxの空プロンプトを画面で確認して `termux-wake-lock` / `sshd` を起動。
+  SSH接続拒否から復旧。Chromeを前景へ戻して、端末内ADBのserial `emulator-5554` から
+  `forward tcp:9222 localabstract:chrome_devtools_remote` → `9222`。
+- 旧コードとSQLite backupを `~/rokid-backups/pre-multimodal-8163b5f` に保全。
+  移行前後の `PRAGMA quick_check` → `ok`、既存9テーブルの件数は全て0のまま。
+  pagesの撮影時刻とsolutionsの図/資料不足メタデータ列の存在を確認。
+- サーバ待受は部品試験用 `127.0.0.1:8000`。AP向け公開は未適用。
+  `ROKID_REAL_MODE` は既定0、cloud analyzer未設定、API認証キー未設定なので、
+  現行の実機受け入れにあるreal-mode/認証条件を満たしたとの主張はしません。
+
+スマホ内HTTPの実行結果:
+
+| コマンド/リクエスト | 出力 |
+|---|---|
+| `python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --no-access-log` | `Application startup complete` |
+| `GET /health`、`GET /v1/version` | HTTP 200、APP/APIは配布コードと一致 |
+| `GET /v1/listening-ready` | HTTP 200、`ready: true`, `asr: whisper.cpp`, `sample_rate: 16000` |
+| `GET /v1/version` のsolver情報 | `chatgpt-web` が `ready: true`, `offline: false` |
+| `GET http://127.0.0.1:9222/json/version` | HTTP 200、Chrome 153.0.8010.36 |
+
+この測定でChatGPTへ質問や添付を送信していません。
+終了時の `dumpsys power/window` はAwake、Chrome前景、ScreenOffTimeout 120000ms。
+長時間の画面保持や、スマホを伏せた運用の証明ではありません。
+
+### G-2. ビルド成果物と改行
+
+`bash scripts/build_local_asr.sh` をスマホ上で実行。cmake 4.4.3、clang 21.1.8。
+whisper.cppの固定revisionは `2eeeba56e9edd762b4b38467bab96c2517163158`。
+
+最初の配布ではWindowsの `git archive` がscriptをCRLFへ変換し、
+`set: pipefail CR: invalid option name` で停止しました。Git blobのCRLFは0件、
+tar内では17件でした。`.gitattributes` の `*.sh text eol=lf` で配布物もLFに固定。
+再配布後のスマホで `bash -n scripts/build_local_asr.sh` → exit 0。
+
+- 修正版tar SHA-256: `3d51669958feecdef0b1b39db9ea2a3301cc0df11f94cffec431f4cd483dab61`。
+- ビルド出力: `[100%] Built target whisper-cli`、モデル2個の `verified` 出力。
+- CLI SHA-256: `5d8b9f5985f7b52da567f13fb7ee18a21ab06f01eb3c6c5f9a116a167e1f9c62`。
+- base.en SHA-256: `a03779c86df3323075f5e796cb2ce5029f00ec8869eee3fdfb897afe36c6d002`。
+- Silero VAD SHA-256: `2aa269b785eeb53a82983a20501ddf7c1d9c48e33ab63a41391ac6c9f7fb6987`。
+
+### G-3. 速度と元音声時刻
+
+入力は固定した公式whisper.cppのサンプル音声。padded版は前後に3秒ずつ無音を追加。
+スマホ内の `multimodal.env` を読み込み、次を実行しました。
+
+| コマンド | 音声長 | wall秒 | 実時間比 | segmentの元音声時刻 |
+|---|---:|---:|---:|---|
+| `python scripts/benchmark_local_asr.py data/local-asr/jfk.wav` | 11秒 | 5.109 | 0.464 | 150–10790ms |
+| `python scripts/benchmark_local_asr.py data/local-asr/jfk-padded.wav` | 17秒 | 5.814 | 0.342 | 3160–13620ms |
+
+実時間比は処理秒÷音声秒。短いサンプルでは1未満でした。
+モデル読み込みを含みます。30分継続、熱、撮影/OCRとの競合は評価していません。
+
+### G-4. 2チャンクAPIと原音保全
+
+スマホ上の `python -` からhttpxで、padded音声を2回連結した34秒を送信。
+テスト文書はdocument_id 1で、タイトルにASR smokeと公式サンプルであることを明記。
+撮影入力を使った試験ではありません。
+
+1. `POST /v1/documents` で作成。
+2. `POST /v1/documents/1/audio-chunks` にsequence 0（30秒、480000 samples）と
+   sequence 1（前区間との1秒重複を含む5秒、80000 samples）を送信。
+3. 同じsequence 1を再送し、応答が完全一致することをassert。
+4. `POST /v1/documents/1/audio-complete`、`expected_chunks=2`, `total_samples=544000`。
+5. 保存されたoriginal.wavのPCMと入力PCMを比較し、完全一致をassert。
+
+出力: `retry: identical`, `status: complete`, `chunks: 2`, `total_samples: 544000`,
+`original_preserved: true`。ASRはsequence 0が8.142秒（実時間比0.271）、
+sequence 1が3.893秒（0.779）。原音PCM SHA-256は
+`45c3f8b866723b62dd1ac54187c19e36ed140ba91ab0e0e16401946199a97614`。
+メタデータと原音はスマホのdata/audio/document-1、結果はdata/asr-smoke-12004a4.jsonに保全。
+
+**未測定:** グラスのマイクとカメラの同時使用、3秒実画像確認、手動取り直し、消灯/復帰、
+AP経路、長時間運用、実リスニングの正答率、ChatGPTの原音受理、画像/PDFの精度差。
+
 # 出典
 
 ## 出典 — グラス一次情報索引（2026-09-03）

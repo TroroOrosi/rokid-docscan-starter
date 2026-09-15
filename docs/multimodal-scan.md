@@ -1,6 +1,6 @@
 # グラス撮影・画像資料・図付き解答・端末内ASR
 
-Status: Current runbook for the implemented standalone route. 新しいAPKの実機受け入れは未実施。
+Status: Current runbook for the implemented standalone route. APK導入とスマホ内ASRを実測済み。会場経路の受け入れは未実施。
 Runs on: glassdoc → スマホAP → スマホFastAPI → スマホChrome CDP → ChatGPT Web。
 
 ## 操作
@@ -17,7 +17,8 @@ Runs on: glassdoc → スマホAP → スマホFastAPI → スマホChrome CDP �
 実画像を描画し、画面が見えると確認した時点から3秒後に登録します。画面が隠れた場合は
 タイマーを止め、再表示後に3秒を取り直します。送信失敗は無限再試行せず操作を待ちます。
 camera2は静止画を返す前に閉じます。タイムアウトはUNKNOWNを保持し、同じセッションで
-追加撮影しません。LEDの物理状態は外部カメラで別途確認します。
+追加撮影しません。LEDはシステム制御のため、利用者の2026-09-15指示により外部監査を
+省略します。アプリでLEDを変更せず、物理状態を観察済みとも扱いません。
 
 照準の細い外枠はセンサー形状、内側の括弧は用紙形状です。設定時の`guide`値を保存します。
 この図形だけでは実際の視野と撮影範囲の一致を証明できません。使用距離・眼位置で
@@ -56,7 +57,8 @@ PDF内画像の扱いはプランに依存します。原寸添付はモデル�
 
 ## 端末内ASRの準備
 
-Runs on: スマホのTermux。以下は導入用手順で、本変更では実機へ実行していません。
+Runs on: スマホのTermux。2026-09-15にF-51Fで実行済み。測定条件は
+[hardware-measurements.md §G](hardware-measurements.md#g-local-asr) を参照してください。
 
 既存のPython/FastAPI/CDP環境に加え、ビルド時にgit、cmake、clangが必要です。
 `scripts/build_local_asr.sh`は固定したwhisper.cppを取得・ビルドし、SHA-256を照合して
@@ -76,6 +78,14 @@ python scripts/benchmark_local_asr.py /path/to/mono-16k-pcm16.wav
 録音を開始しません。このチェックはファイル存在の確認で、推論速度の合格ではありません。
 録音と並行処理できるかは実音声でreal_time_factor（処理秒÷音声秒）と待ち行列を測ります。
 1未満が処理追従の目安ですが、撮影・OCR・Chromeとの同居時にも確認が必要です。
+
+今回のスマホ内試験では11秒音声を5.109秒、前後に無音を加えた17秒を5.814秒で処理しました。
+34秒・2チャンクのAPI試験では再送の冪等性と原音の完全一致も確認しました。
+グラスのマイク入力、30分の連続録音、撮影と同時処理した速度は未測定です。
+
+F-51Fの実行設定は `~/rokid-server/multimodal.env` に保存しています。現在のサーバは
+部品試験用の `127.0.0.1:8000` 待受で、グラスから接続するAP公開設定はまだ適用していません。
+起動し直す場合はこの設定を環境へ読み込み、同じデータディレクトリを使ってください。
 
 glassdocの起動設定`listening=true`で録音を選択し、マイク権限を許可します。選択は保存されます。
 録音はグラスのAudioRecord、ASRはスマホで動きます。30秒ごとのPCM16 WAVに前の1秒を重ね、

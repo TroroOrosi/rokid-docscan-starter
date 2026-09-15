@@ -1,6 +1,6 @@
 # 手動併用スキャン・省電力・OCR/画像/音声/図
 
-Status: Internal progress。実装・自動試験済み。APK導入済み、スマホ更新とASR導入を継続中。
+Status: Internal progress。実装・自動試験、APK導入、スマホ更新・ASRの部品試験済み。AP全経路は未実施。
 Runs on: Windowsで実装・試験。運用先はglassdocとスマホAP/FastAPI/Chrome。
 
 ## 依頼・決定
@@ -55,7 +55,7 @@ Runs on: 以下の実装確認と自動試験はWindows。物理挙動の証明�
 
 ## 検証結果
 
-Runs on: Windows、ASCIIパス `C:/rokid-docscan-starter`、2026-09-15。
+Runs on: Windows、ASCIIパス `C:/rokid-docscan-starter`、2026-09-15。ASR scriptの構文検査はTermux。
 
 | 実行コマンド | 出力 |
 |---|---|
@@ -64,7 +64,7 @@ Runs on: Windows、ASCIIパス `C:/rokid-docscan-starter`、2026-09-15。
 | `py -3.12 -m pytest -q tests/test_documentation_contract.py tests/test_versioning.py` | 進捗更新後 `21 passed in 4.82s` |
 | `git diff --check` | exit 0、出力なし |
 | `./android-relay/gradlew --no-daemon test testDebugUnitTest assembleDebug` | `BUILD SUCCESSFUL in 46s`、199 tasks: 19 executed, 180 up-to-date |
-| `bash -n scripts/build_local_asr.sh` | exit 0、出力なし |
+| `bash -n scripts/build_local_asr.sh` | LF修正後の配布物をTermuxで検査、exit 0 |
 
 基準pytestは `583 passed, 1 skipped in 70.16s` でした。
 GradleはJDK `C:/Users/Public/rokid-build-tools-20260901/jdk17/jdk-17.0.20.1+1`、
@@ -117,18 +117,30 @@ F-51F `192.168.0.30:38615`、別の `adb-ZY22LWGDCV-gAfvon._adb-tls-connect._tcp
 接続を再列挙して上記対象を確認しました。以後も対象の同一性と署名/ダウングレードを確認します。
 APK再ビルド時は上のハッシュを流用せず再検査します。
 
-### 2. スマホASRを導入して測る
+### 2. スマホ更新・ASRの部品試験（実施済み）
 
-Runs on: 指定F-51FのTermux。実機適用の承認後。
+Runs on: 指定F-51FのTermux。利用者の適用承認後に実行済み。
 
-runbookのビルドscript、モデル取得、環境設定を実行します。撮影時刻・図・資料不足
-メタデータの加算DB移行があるので、起動前に既存DBを保全して適用対象を確認します。
-実DB移行は以下の保全後に実施します。Chromeを前景/点灯で保持し、録音・撮影と
-同居させて処理速度と待ち行列を測ります。ファイル存在だけのreadinessを速度合格と扱いません。
+ビルド、モデル取得、環境保存、DB保全・加算移行、サーバ起動、ASRと2チャンクAPI試験を実施。
+実測のコマンド・出力・tupleは [hardware-measurements.md §G](../../docs/hardware-measurements.md#g-local-asr)。
+11秒音声を5.109秒、17秒を5.814秒で処理。34秒音声の再送と原音一致を確認しました。
+グラス実録音と撮影の同居、長時間運用は未測定です。
+
+サーバのappはcommit `12004a4`、PID記録はスマホの `~/rokid-server/data/server-12004a4.pid`、
+ログは同ディレクトリのserver-12004a4.log。設定は `~/rokid-server/multimodal.env`。
+端末内CDP forwardは `emulator-5554` → 127.0.0.1:9222。SSHが停止しても再インストールせず、
+端末の既存Termux/sshdを復旧してください。Chromeは前景に戻します。
 
 ### 3. APKと会場経路を受け入れる
 
 Runs on: 指定グラス → F-51F AP → F-51F FastAPI/CDP/Chrome。LED監査は利用者指定で省略。
+
+現在のサーバは部品試験用の127.0.0.1:8000待受で、AP公開は未適用です。
+API認証キー未設定、REAL_MODEは既定0、cloud analyzer未設定です。`REAL_MODE=1` は
+現行 `config.require_real_provider` / `main.lifespan` でlocal analyzerを拒否します。
+この条件を解消してから経路の実機受け入れへ進みます。利用者が選択した主解答経路は
+ChatGPT Webのままで、検査を通すためにAPI課金ルートへ勝手に変更しないでください。
+新しい認証鍵の設定とAP設定変更は、対象を明示した承認を必要とします。
 
 自動/手動撮影、3秒確認/取消/最後の1枚、画角校正、録音独立終了、図の可読性、消灯と
 結果復帰、ダブルタップ2回での終了を確認します。既存15秒timeoutは瞬時消灯ではありません。
@@ -174,4 +186,12 @@ Runs on: Windowsから指定グラスとF-51Fへ適用。まだ会場経路の�
 - ASR buildは `set: pipefail CR: invalid option name` で停止。Git blobはCRLF 0件なのに
   Windows `git archive` がCRLF 17件へ変換していました。`.gitattributes` に
   `*.sh text eol=lf` を加え、`git archive --worktree-attributes` から取り出したscriptが
-  CRLF 0件、LF 17件であることを確認。修正版を実機へ再配布してビルドを続けます。
+  CRLF 0件、LF 17件であることを確認。修正版をcommit `12004a4` として再配布しました。
+- 修正版をスマホで `bash -n` → exit 0、`bash scripts/build_local_asr.sh` →
+  `[100%] Built target whisper-cli` と2モデルのハッシュ照合出力。
+  以後の実測値と成果物ハッシュはhardware-measurements.md §Gを正本にしました。
+- スマホのテスト文書document_id 1には公式サンプルから作った音声だけが入り、撮影ページは0件。
+  `data/asr-smoke-12004a4.json` とoriginal.wavを保全。ChatGPTへの実送信はしていません。
+- 文書とLED監査方針の更新後、`py -3.12 -m pytest -q tests/test_documentation_contract.py tests/test_rokid_led.py`
+  → `15 passed in 0.81s`。`py -3.12 -m ruff check .` → `All checks passed!`。
+  原音試験の結果JSONをPCの `data/f51f-asr-smoke-12004a4.json` にも保全しました。

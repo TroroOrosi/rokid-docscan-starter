@@ -74,8 +74,8 @@ Runs on: ビルド・単体/API試験はWindows。運用はglassdoc → スマ�
 - Java/JUnit/Robolectricとpytestの既存方式で状態競合・添付欠落・図形式を試験。
 - `py -3.12 -m pytest -q`、`py -3.12 -m ruff check .`。
 - JDK17/SDK36を指定し、`./android-relay/gradlew --no-daemon test testDebugUnitTest assembleDebug`。
-- 新しい依存・実DB移行・実機書込みは適用前に対象を明示。外部カメラでLEDを観察し、
-  3秒確認、画角、消灯・復帰、AP上の完走は実機未検証として分ける。
+- 新しい依存・実DB移行・実機書込みは適用前に対象を明示。LED外部監査は同日の利用者指示で
+  省略。3秒確認、画角、消灯・復帰、AP上の完走は実機未検証として分ける。
 - 基準HEAD f6e7364。基準pytest: 583 passed, 1 skipped（70.16s）。
 
 一次資料（2026-09-15取得）:

@@ -212,13 +212,10 @@ must never disable, obscure, spoof, or bypass it. This boundary holds regardless
 of whether a vendor, community post, local script, privileged shell, or private
 API claims a way to change it.
 
-A real-device acceptance run must physically confirm:
-
-1. the LED is lit while `takePhoto` is active;
-2. it turns off after the image callback; and
-3. it remains off during analysis and answer review.
-
-The indicator is observed with an independent camera. An SDK callback records
+The operator waived the external LED audit on 2026-09-15 because the indicator
+is system-controlled. It is not an acceptance gate for this route; do not ask
+for an external camera again. This does not change the prohibition above or
+turn an unobserved physical state into verified evidence. An SDK callback records
 application state and never proves physical light state. Shutter sound, flash,
 and capture indicators are device-controlled unless a documented public SDK
 control is added. Do not claim silent or no-flash capture without physical
@@ -299,7 +296,7 @@ Then, on a device:
 
 - Enumerate devices read-only first and name the serial in every command. Stop
   on multiple devices, signature mismatch, version downgrade, unknown callback
-  state, or a missing external-video setup.
+  state.
 - Record the exact phone / glasses / Hi Rokid / service / relay tuple.
 - Report the LED result only from external physical observation.
 - Ask before uninstalling apps or changing phone security settings.

@@ -19,7 +19,9 @@ Runs on: MS-1～6はWindowsで実装・試験。MS-7はWindowsの統合検査後
 - [ ] MS-7 統合: 全pytest/Ruff/Gradle、APK identity/signature/SHA-256、資料の整合。
   - [x] Windows自動検査とAPK検査。pytest `600 passed, 1 skipped`、Ruff `All checks passed!`、
     Gradle `BUILD SUCCESSFUL`。コマンドと条件は進捗記録に保存。
-  - [ ] スマホASR速度、実機消灯/復帰/LED、AP全経路。導入承認と外部LED観察の準備後。
+  - [x] APK導入、F-51FでASRの短いサンプル速度・2チャンクAPI原音保全を実測。
+    条件と出力は `docs/hardware-measurements.md` §G。LED監査は利用者指定で省略。
+  - [ ] グラスのマイク、撮影との同時処理、実機消灯/復帰、AP全経路、長時間運用。
   - [ ] OCR＋画像／結合画像／PDFの精度比較。実写真で別途記録。
 
 
