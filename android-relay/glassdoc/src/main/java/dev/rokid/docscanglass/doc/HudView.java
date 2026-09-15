@@ -4,6 +4,7 @@ import android.content.Context;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.Color;
+import android.graphics.ColorMatrixColorFilter;
 import android.graphics.Paint;
 import android.graphics.RectF;
 import android.graphics.Typeface;
@@ -26,6 +27,7 @@ final class HudView extends View {
 
     private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint guidePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint previewPaint = new Paint(Paint.FILTER_BITMAP_FLAG);
 
     private List<String> lines = Collections.emptyList();
     private Bitmap preview;
@@ -73,7 +75,7 @@ final class HudView extends View {
         guidePaint.setStyle(Paint.Style.STROKE);
     }
 
-    /** The visible fraction measured for this device, from {@code --ef guide}. */
+    /** Operator-adjustable drawing scale, from {@code --ef guide}. */
     void calibrateGuide(double visibleFraction) {
         guideFraction = visibleFraction;
         invalidate();
@@ -102,6 +104,7 @@ final class HudView extends View {
      * long as the camera streams.</p>
      */
     void showReview(Bitmap still, List<String> newLines) {
+        previewPaint.setColorFilter(reviewContrast(still));
         set(newLines, still, false);
     }
 
@@ -132,6 +135,7 @@ final class HudView extends View {
             textTop = drawPreview(canvas, still);
         } else if (aiming) {
             drawGuide(canvas);
+            textTop = Math.max(0, getHeight() - (lines.size() + 1) * 26f);
         }
         if (recording) {
             paint.setTextSize(22);
@@ -142,8 +146,9 @@ final class HudView extends View {
         }
 
         float available = getHeight() - textTop;
-        float lineHeight = available / (float) (lines.size() + 1);
-        float textSize = lineHeight * 0.55f;
+        boolean compact = aiming || still != null;
+        float lineHeight = compact ? 26f : available / (float) (lines.size() + 1);
+        float textSize = compact ? 22f : lineHeight * 0.55f;
         paint.setTextSize(textSize);
         float widest = 0;
         for (String line : lines) {
@@ -171,15 +176,12 @@ final class HudView extends View {
             return;
         }
         float arm = Math.min(guide.width(), guide.height()) * 0.18f;
-        FramingGuide.Rect field = FramingGuide.fieldOf(getWidth(), getHeight(), guideFraction);
-        guidePaint.setStrokeWidth(1f);
-        canvas.drawRect(field.left(), field.top(), field.right()-1, field.bottom()-1, guidePaint);
         guidePaint.setStrokeWidth(Math.max(2f, guide.width() * 0.008f));
         float[] corners = {
             guide.left(), guide.top(), 1, 1,
-            guide.right(), guide.top(), -1, 1,
-            guide.left(), guide.bottom(), 1, -1,
-            guide.right(), guide.bottom(), -1, -1,
+            guide.right() - 1, guide.top(), -1, 1,
+            guide.left(), guide.bottom() - 1, 1, -1,
+            guide.right() - 1, guide.bottom() - 1, -1, -1,
         };
         for (int i = 0; i < corners.length; i += 4) {
             float x = corners[i];
@@ -191,16 +193,43 @@ final class HudView extends View {
         }
     }
 
-    /** Draws the still letterboxed into the top band and returns its bottom. */
+    /** Fit the complete still above a compact instruction band, without cropping. */
     private float drawPreview(Canvas canvas, Bitmap still) {
-        float band = getHeight() * 0.62f;
+        float band = Math.max(1, getHeight() - (lines.size() + 1) * 26f);
         float scale = Math.min(
                 getWidth() / (float) still.getWidth(), band / still.getHeight());
         float width = still.getWidth() * scale;
         float height = still.getHeight() * scale;
         RectF target = new RectF(
-                (getWidth() - width) / 2f, 0, (getWidth() + width) / 2f, height);
-        canvas.drawBitmap(still, null, target, null);
-        return height;
+                (getWidth() - width) / 2f, (band - height) / 2f,
+                (getWidth() + width) / 2f, (band + height) / 2f);
+        canvas.drawBitmap(still, null, target, previewPaint);
+        return band;
+    }
+
+    /** Display-only green contrast stretch; JPEG, OCR and uploaded pixels stay untouched. */
+    private static ColorMatrixColorFilter reviewContrast(Bitmap still) {
+        int[] histogram = new int[256];
+        int samples = 0;
+        for (int y = 0; y < still.getHeight(); y += Math.max(1, still.getHeight() / 128)) {
+            for (int x = 0; x < still.getWidth(); x += Math.max(1, still.getWidth() / 128)) {
+                int pixel = still.getPixel(x, y);
+                int gray = (int) (.213f * Color.red(pixel) + .715f * Color.green(pixel) + .072f * Color.blue(pixel));
+                histogram[gray]++;
+                samples++;
+            }
+        }
+        // Ignore the extreme 1% so a lamp or one black corner cannot set the entire range.
+        int low = 0, high = 255, count = 0;
+        while (low < 255 && count + histogram[low] <= samples / 100) count += histogram[low++];
+        count = 0;
+        while (high > low && count + histogram[high] <= samples / 100) count += histogram[high--];
+        if (high - low < 16) { low = 0; high = 255; }
+        float scale = 255f / (high - low);
+        return new ColorMatrixColorFilter(new float[]{
+                0, 0, 0, 0, 0,
+                .213f * scale, .715f * scale, .072f * scale, 0, -low * scale,
+                0, 0, 0, 0, 0,
+                0, 0, 0, 1, 0});
     }
 }

@@ -169,7 +169,7 @@ final class GlassesCaptureSurface implements CaptureSurface {
         if (stabilizing) {
             return List.of(title, "そのまま静止");
         }
-        return List.of(title, "枠に用紙を合わせる", "タップで撮影");
+        return List.of(title, "用紙全体を中央へ", "タップで撮影");
     }
 
     /**

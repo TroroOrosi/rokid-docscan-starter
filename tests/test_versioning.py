@@ -15,7 +15,7 @@ def test_version_info_pins_every_contract():
     # simultaneous doc/pin update CLAUDE.md requires (no silent version drift —
     # docs hardcode several of these, e.g. user-operation-guide's JSON block).
     assert version.version_info() == {
-        "app_version": "0.31.0",
+        "app_version": "0.32.0",
         "api_version": "1.21.0",
         "matcher_version": "1.2.0",
         "hud_contract_version": "1.0.0",
@@ -23,13 +23,13 @@ def test_version_info_pins_every_contract():
         "solver_api_version": "1.7.0",
         "extractor_api_version": "1.0.0",
         "explainer_api_version": "1.1.0",
-        "glasses_view_contract_version": "1.14.0",
+        "glasses_view_contract_version": "1.15.0",
         "overlay_contract_version": "1.1.0",
     }
 
 
 def test_glasses_contract_reflects_local_review_and_diagrams():
-    assert version.GLASSES_VIEW_CONTRACT_VERSION == "1.14.0"
+    assert version.GLASSES_VIEW_CONTRACT_VERSION == "1.15.0"
 
 
 def test_contract_versions_reflect_phase234():

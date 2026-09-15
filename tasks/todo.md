@@ -59,7 +59,7 @@ Runs on: WindowsでAPI試験、適用後F-51F。
 Runs on: Windows、glassdoc。
 
 - [x] ローカル記録と後から得るHTTP文書IDの対応、選択モード、撮影／音声phase、CLOSEDを保存する。音声chunkの復旧はRP-07。
-- [x] URLと認証をKeystore暗号化で保存し、起動ごとのkey入力をなくす。既存HTTPのlong IDは維持。実鍵設定・実機再起動は未検証。
+- [x] URLと認証をKeystore暗号化で保存し、起動ごとのkey入力をなくす。既存HTTPのlong IDは維持。実鍵設定・再起動後の復号と認証HTTPを実機確認（hardware-measurements §I）。
 - 検証: 書込み途中kill、認証ありでプロセス再起動、別serverへの未送信資料混入なし。秘密をログへ出さない。
 - 依存: なし。対象: 既存Controller保存、Activity設定、AnswerStore周辺の必要範囲と試験。認証の実設定はRP-20。
 
@@ -125,6 +125,7 @@ Runs on: F-51FのTermux／Chrome／AP、接続するglassdoc。会場にPCなし
 
 - [ ] REAL_MODE、ASR実推論、ログイン・CDP・利用可能状態を初回確認。placeholderや「CDP接続可」だけで準備完了にしない。
 - [ ] API認証・接続先を設定しAPへ公開。携帯回線と同居し、無断で公衆internetへ公開しない。
+  認証と既存Wi-Fiの192.168.0.30:8000待受は承認後に実施済み。AP切替・携帯回線併用は未実施。
 - [ ] スマホ再起動後の立上げをPCなしで行える手順にし、セッション中はChrome前景／点灯・スマホ操作0回。
 - 検証: AP断／携帯回線断を分ける。再接続、端末再起動、鍵保持、サーバ／ASR／CDP状態、実際の到達性を記録。
 - 依存: 最小接続確認は先行可能。最終受入はRP-02/03/04。対象: 既存起動script・設定読取・手順・最小試験。

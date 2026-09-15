@@ -473,6 +473,10 @@ public final class DocScanGlassActivity extends Activity
         }
         if (awaitingAnswers && action == GlassesInputAction.BACK) {
             if (backExit.onBack(elapsedMillis) == BackExitPolicy.Decision.EXIT) exitSession();
+            else {
+                displaySleep.wake(this);
+                hud.showLines(List.of("もう一度ダブルタップで終了", "保存した資料は保持します", "結果を待っています"));
+            }
             return;
         }
         controller.onGlassesAction(action);

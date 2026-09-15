@@ -3,6 +3,50 @@
 Status: Internal progress。計画の認識合わせ後、利用者が追加実装・実機操作を依頼。RP実装を開始。
 Runs on: Windowsで実装・試験。運用先はglassdocとスマホAP/FastAPI/Chrome。
 
+## 現在の不具合対応（2026-09-16）
+
+Runs on: Windowsの実装・自動試験。実機ログはグラス、サーバはF-51Fの既存Wi-Fi経路。
+
+利用者の「停止」で撮影比較を止め、その後の「取消後の読み込み待ち」「小さい枠で着座撮影できない」
+「折りたたみ後に選択へ戻れない」「確認写真も見づらい」の申告を優先して修正している。
+ジェスチャは利用者へ再質問せずログで確認した。保存の直後のBACKで撮影終了へ移っており、
+期限内の単タップ取消は観測されなかった。紙面比較の新たな撮影・解答送信は再開していない。
+
+- 認証とサーバの更新は承認後に実施済み。旧記述の「鍵生成待ち」は解消。phoneのappは8cc1ad2。
+- 解析待ちのBACKに終了確認と画面復帰を追加。最初の操作で解析のwake lockは保持し、
+  3秒以内の第2BACKで既存の保存・終了処理へ進む。終了後の結果通知で答案は再表示しない。
+- B5単頁ガイドは表示へ直接合わせる。255×360を作っていたセンサー比率の制限と、
+  光学校正済みと誤解させる外枠・面積推定を削除。表示倍率の校正値は引き続き設定できる。
+- 確認写真の明暗をグラス表示だけで緑色へ拡げ、操作案内は下端へ小さく移動。
+  原本JPEG・OCR・送信PNG、カメラ寸法・露出・retry、3秒の確認期間は変えていない。
+- 再現: 対象Activity/FramingGuide試験 → `4 tests completed, 2 failed`、
+  HudView描画試験 → `1 test completed, 1 failed`。修正後のglassdoc全単体試験 →
+  `BUILD SUCCESSFUL in 47s`。操作案内を下端へ移した後のHudView/実写真描画 → `BUILD SUCCESSFUL in 32s`。
+- 実写真の描画QAは保存JPEGを既存decodePreview(rotation=180)とHudViewへ渡して実行。
+  `android-relay/glassdoc/build/outputs/reported-photo-{review,guide}.png`を確認。
+  私的画像を読む一時テストは除去し、一般化したHudView回帰試験だけを残す。
+- 実機ホームのアプリ一覧からDocScan Glassesを起動し、選択画面に戻る経路を確認。
+  測定とログ時刻はhardware-measurements §J。再装着だけでの自動起動は未実装。
+
+- 独立レビューの必須所見は描画のright/bottom境界だけ。native試験で`1 test completed, 1 failed`を再現し、
+  描画座標だけ1px内側へ補正した。ほかのRequired/Critical所見はない。
+- `./android-relay/gradlew --no-daemon test testDebugUnitTest assembleDebug` →
+  `BUILD SUCCESSFUL in 1m 5s`、199 tasks。境界修正後の
+  `./android-relay/gradlew --no-daemon :glassdoc:testDebugUnitTest :glassdoc:assembleDebug` →
+  `BUILD SUCCESSFUL in 48s`、63 tasks。
+- `py -3.12 -m pytest -q tests/test_documentation_contract.py tests/test_versioning.py tests/test_rokid_led.py`
+  → `24 passed in 1.34s`。`py -3.12 -m ruff check .` → `All checks passed!`。
+- ASCII checkout `C:/rokid-docscan-starter`、JDK17.0.20.1+1／SDK Platform36 rev2／Gradle9.4.1。
+  `aapt2 dump badging` → `dev.rokid.docscanglass.doc`、DocScanGlassActivity、versionCode11。
+  `apksigner verify --verbose --print-certs` → `Verifies`、v2=true、既存証明書と一致。
+  `Get-FileHash` → `8DBBE3702744FABA03C7456AB8439D6C81615DE61FDE446142E389D7452301C3`。
+- 導入前の実機APKを`sha256sum`で再照合し§IのAPKと一致。カメラは`Active Camera Clients: []`。
+  保存読取はdocument2／session1／count1／ANALYSISのまま。
+
+次は承認済みのグラスへこのAPKを反映し、選択画面・設定復号・保存資料の維持を確認する。
+着座位置の画角校正、光学表示での写真可読性、B5単頁／見開きの精度比較は未検証。
+RP-09以降の残件を今回の表示修正で完了と扱わない。英語実音声試験は引き続き後回し。
+
 ## 追加実装の開始（2026-09-15）
 
 Runs on: 実装・回帰試験はWindows。実機操作は同一性を確認したグラスとF-51F。
@@ -103,10 +147,9 @@ commit `db4255d` をorigin/feature/multimodal-scanへpush。新APKと、その�
 正確な成果物ハッシュ・コマンドと限界は [hardware-measurements §H](../../docs/hardware-measurements.md#h-起動二択と診断キー入力2026-09-16)。
 
 F-51FにAPI鍵を新規設定して `192.168.0.30:8000` で待受、同じ鍵をグラスへ暗号化保存する
-具体案を利用者へ提示済み。返答は未着。`REAL_MODE=1`／`client-ocr`／`chatgpt-web`、
-dataは既存のまま。準備manifestはignored `data/device-setup/preflight.json`。
-認証変更は承認待ちなので、鍵生成・サーバ更新・新しいLAN待受はまだ実行していない。
-AP切替も未適用。待機中はRP-07/08の実装と自動試験を進める。英語実音声試験は後回し。
+具体案は利用者が2026-09-16に承認し、適用済み。`REAL_MODE=1`／`client-ocr`／`chatgpt-web`、
+dataは既存のまま。実鍵の値は記録しない。再起動復号とアプリUIDからの認証401/200を確認。
+詳細はhardware-measurements §I。AP切替は未適用。英語実音声試験は後回し。
 
 ### 原音の回収と再送位置（2026-09-16）
 
@@ -197,7 +240,7 @@ Context7の既存Android IDから公開APIを確認し、
   `906307478018e09e2937cfd8042a674d27598767577e08a304472aae407ccacc`。
   `Get-FileHash -Algorithm SHA256` → APK
   `98A87A0E642E0E32CA9DD3F745A1155DC28ED13488B309ACCE10AFBC14D45B1C`。
-  このAPKはまだ実機へ導入していない。認証の具体案は引き続き承認待ちで、実鍵は生成していない。
+  この時点ではAPK未導入・認証承認待ちだった。その後の承認と導入はhardware-measurements §Iに記録。
 
 ### Next steps — 追加実装
 
@@ -220,7 +263,7 @@ Runs on: WindowsでRP-05のActivity接続、RP-02の実OCR契約、起動・保�
 実機の短い通し試験は指定グラス→F-51F AP→F-51F Chrome。
 
 1. 起動二択・通常写真のローカル保存と独立送信まで実装。全Android gateとAPK identity／署名／hashを確認。
-   グラス導入と二択の合成入力確認まで実行。認証設定の具体的承認後にスマホappと実鍵を適用する。
+   グラス導入とスマホapp・実鍵の承認後適用を実行。最新の再起動認証はhardware-measurements §I。
    RP-07/08の録音保存・開始表示・独立終了は自動試験まで実装。実機負荷・容量保護と、
    取消期限へ時刻を渡すRP-09が残る。これらは実装済みと扱わない。
 2. 用紙経路の準備後、同じB5紙面の単頁／見開きを撮り、実OCRと最終答案の差を測る。
@@ -409,12 +452,9 @@ Runs on: 指定F-51FのTermux。利用者の適用承認後に実行済み。
 
 Runs on: 指定グラス → F-51F AP → F-51F FastAPI/CDP/Chrome。LED監査は利用者指定で省略。
 
-現在のサーバは部品試験用の127.0.0.1:8000待受で、AP公開は未適用です。
-API認証キー未設定、REAL_MODEは既定0、cloud analyzer未設定です。`REAL_MODE=1` は
-現行 `config.require_real_provider` / `main.lifespan` でlocal analyzerを拒否します。
-この条件を解消してから経路の実機受け入れへ進みます。利用者が選択した主解答経路は
-ChatGPT Webのままで、検査を通すためにAPI課金ルートへ勝手に変更しないでください。
-新しい認証鍵の設定とAP設定変更は、対象を明示した承認を必要とします。
+現在は承認済みの192.168.0.30:8000待受、API認証あり、REAL_MODE=1／client-ocr／chatgpt-webです。
+実機再起動後の復号・認証HTTPも確認済み（hardware-measurements §I）。スマホAPへの切替と
+携帯回線併用は未実施です。設定鍵は再生成しないでください。AP設定変更は別の承認が必要です。
 
 自動/手動撮影、3秒確認/取消/最後の1枚、画角校正、録音独立終了、図の可読性、消灯と
 結果復帰、ダブルタップ2回での終了を確認します。既存15秒timeoutは瞬時消灯ではありません。

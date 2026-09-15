@@ -1496,6 +1496,70 @@ Runs on: Windowsからグラス `192.168.0.4:5555`。スマホAP経路の受け�
 privateのno-backup領域に暗号化設定ファイルが作られたが、実API鍵の設定・認証再起動は未実施。
 画面証跡はignoredの `data/device-setup/startup-display0-{listening,normal}.png` に保全した。
 
+## I. 認証設定・LAN接続・再起動復号（2026-09-16）
+
+Status: Frozen measurement。glassdoc/server source `8cc1ad2`。グラスfirmware
+`1.25.015-20260903-150201`、serial `1904092623381086`。F-51F `ZY22LWGDCV`、
+build `64c964-a8f54`、Python 3.14.6、Chrome `153.0.8010.36`。
+Runs on: グラス → 既存Wi-Fi → F-51F FastAPI。スマホAP経路ではない。
+
+利用者がAPI鍵の新規設定、F-51Fの `192.168.0.30:8000` 待受、グラスへの暗号化保存を承認した。
+API鍵はF-51F上で生成し、値は記録・コマンド引数・リポジトリへ出していない。
+
+- `git archive` のapp配布tar SHA-256は
+  `8bb69b9d0b8682f1c626ef534ead2975073592d285e219644242454f0dabf75a`。
+  旧appとenvを `~/rokid-backups/pre-auth-8cc1ad2-20260915T192314Z` に保存し、SQLite backupを作成。
+  `PRAGMA quick_check` → `ok`。更新前後の9テーブル行数が一致（documents 1、他0）。DB実装も同一。
+- スマホで `python -m uvicorn app.main:app --host 192.168.0.30 --port 8000 --no-access-log` を起動。
+  設定はREAL_MODE=1／client-ocr／chatgpt-web。envのmodeは0600、データディレクトリとASR設定は維持。
+  `/health` → 200、`/v1/documents/1/scan-status` → 無鍵401／誤鍵401／設定鍵200。
+- Chrome前景・Awakeに戻した後、`/v1/settings` → 200、analyzer/solver ready=true。
+  Termux前景ではCDPが失われた。readyは解答精度・会場経路の証明ではない。
+- 新APK SHA-256
+  `98A87A0E642E0E32CA9DD3F745A1155DC28ED13488B309ACCE10AFBC14D45B1C`。
+  `aapt2 dump badging` でpackage/activityを照合、`apksigner verify --print-certs` → `Verifies`。
+  署名SHA-256は `906307478018e09e2937cfd8042a674d27598767577e08a304472aae407ccacc` で既存APKと一致。
+  承認済みの `adb -s 192.168.0.4:5555 install -r` → `Success`。
+- `py -3.12 data/device-setup/verify_glasses.py` → exit 0、
+  `restart_decryption_and_resave=true`、`fresh_ciphertext=true`、`plaintext_setup_absent=true`。
+  アプリUIDから同じscan-statusへ無鍵401／設定鍵200。privateの一時設定ファイルは除去され、
+  再起動後のconnection.binはGDC1ヘッダーの暗号文。設定URL・鍵の平文は含まれない。
+- この設定確認時点ではカメラを開始していない。後の利用者操作による撮影は§Jに分ける。
+  AP／security設定は変更していない。全体の受け入れ、LED物理観察は未実施。
+
+## J. 取消申告・確認画像・折りたたみ後の起動（2026-09-16）
+
+Status: Frozen measurement。device/firmware/installed sourceは§Iと同じ。
+Runs on: 実グラスの利用者操作ログ、保存JPEG/OCR、F-51F DB。修正前の観測。
+
+`adb -s 192.168.0.4:5555 logcat -d -v time DocScanGlassDoc:I *:S` の保存ログから次を確認した。
+
+| 時刻（端末ログ） | 観測 |
+|---|---|
+| 04:34:50.369 | SHORT_TAPで通常撮影開始 |
+| 04:34:53.751／56.721／58.855 | 4032×3024 JPEGを取得。1434／1071／845ms |
+| 04:35:00.002 | 最良画像の確認表示ACK、delay=3000 |
+| 04:35:03.374 | local photo committed |
+| 04:35:03.521 | BACKを正規化。続いてFINALIZING |
+| 04:35:07.105／08.858／09.507／12.225 | 単タップ／前後スワイプ／BACKも届いていた |
+| 04:35:37.761 | assistserverが本アプリをforce-stop。Activity exit reason=10、USER REQUESTED |
+
+したがって「1枚キャンセル」の申告に対応した操作は、保存後のダブルタップで撮影終了へ進んでいた。
+期限内の単タップ取り直しが観測されたとは言わない。解析待ちの最初のBACKには終了確認の表示がなく、
+後のBACKまでに別入力も挟まったため、2回操作の終了確認は成立していなかった。
+
+原本をignored `data/device-setup/reported-cancel-local-scans.tar` へ保全。ローカルは
+phase=ANALYSIS、document=2、session=1、写真1枚。F-51Fはdocument ready、session reviewing、
+questions 1、solutions 0。保存JPEGは5,850,017 bytes、OCRは2文字だけだった。
+実画像は紙面が暗く、机・周囲も多い。原本は回転180度の指定を持つ。表示補正でOCR精度が直るとは扱わない。
+修正前のB5単頁ガイドは480×640の画面内に255×360。確認表示は上側62%を写真領域とする描画だった。
+
+折りたたみ後のホームでアプリ一覧を開き、スワイプで「DocScan Glasses」を選び単タップした。
+診断入力は§Hの `input -d 0` を使用。`dumpsys activity activities` →
+`topResumedActivity=dev.rokid.docscanglass.doc/.DocScanGlassActivity`。
+`fold-launcher-opened-active.png` は通常／リスニング／中断した読取の選択画面。
+カメラは開始していない。アプリ一覧からの起動経路を確認したもので、再装着だけの自動起動ではない。
+
 # 出典
 
 ## 出典 — グラス一次情報索引（2026-09-03）

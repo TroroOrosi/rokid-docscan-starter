@@ -114,6 +114,33 @@ public class DocScanGlassActivityAnswerReadingTest {
     }
 
     @Test
+    public void waitingBackShowsExitConfirmationAndKeepsThePendingAnalysis() throws Exception {
+        controllerBarrier();
+        activity.setContentView((HudView) getField(activity, "hud"));
+        activity.onUpdate(RelayState.FINALIZING, List.of("資料読み込み中"), "waiting");
+        Shadows.shadowOf(Looper.getMainLooper()).idle();
+        android.os.PowerManager.WakeLock pending =
+                (android.os.PowerManager.WakeLock) getField(activity, "analysisWakeLock");
+        assertNotNull(pending);
+
+        invokeOnAction(GlassesInputAction.BACK, 1000);
+        assertEquals("もう一度ダブルタップで終了",
+                ((List<?>) getField(getField(activity, "hud"), "lines")).get(0));
+        assertTrue((boolean) getField(activity, "awaitingAnswers"));
+        assertTrue("showing the confirmation must not cancel analysis", pending.isHeld());
+        assertFalse((boolean) getField(activity, "sessionClosed"));
+
+        invokeOnAction(GlassesInputAction.BACK, 2000);
+        assertTrue((boolean) getField(activity, "sessionClosed"));
+        assertTrue((boolean) getField(controller, "closed"));
+        assertFalse(pending.isHeld());
+        activity.onUpdate(RelayState.REVIEW, List.of("late result"), "late");
+        Shadows.shadowOf(Looper.getMainLooper()).idle();
+        assertEquals("exit must suppress a late answer fetch", 0, server.getRequestCount());
+        assertNull(getField(activity, "reader"));
+    }
+
+    @Test
     public void delayedBackEventsKeepTheirOriginalConfirmationInterval() throws Exception {
         invokeOpenAnswers(bundleForSession(SESSION_ID), "q10", 0);
         invokeOnAction(GlassesInputAction.BACK, 1000);
