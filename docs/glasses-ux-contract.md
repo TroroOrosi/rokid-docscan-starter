@@ -34,21 +34,11 @@ diagnosis and explicitly publishes `operator_actions_enabled:false`.
 The standalone `:glassdoc` APK has a separate local input adapter
 (its version is in `android-relay/glassdoc/build.gradle.kts`).
 
-**This table is what the code does today: one gesture per page.** The decided
-capture method is automatic scanning — detect, shoot, show the real image for 3
-seconds, single tap to retake inside it, no input commits and advances, double
-tap ends the phase (`docs/fast-scan-decisions.md` R2-R6). That method is not
-implemented; `DocScanController.startAutoCapture()` refuses with `"Automatic
-capture is disabled; use explicit phone controls"` on both routes. When it is
-built, the Ready/Aiming rows below are what it replaces.
-
-| State | Tap | Forward swipe | Backward swipe |
-| --- | --- | --- | --- |
-| Ready | Prepare capture | — | — |
-| Aiming | Shutter | — | Cancel |
-| Capture review | Register | — | Retake |
-| Reading | Prepare next page | Finish reading | Retake previous page |
-| Answer review | New document | Next | Previous |
+Automatic capture is enabled only on `:glassdoc`. A tap requests a manual shot while
+waiting; during the visible still review it retakes. No input commits after 3 seconds.
+BACK ends capture after the last review; in listening mode a later BACK ends audio.
+Two BACK gestures exit answer reading. Full operation and power/error behavior:
+[`multimodal-scan.md`](multimodal-scan.md). Physical acceptance is pending.
 
 Configuration and session restoration run together on the controller queue.
 Launching without a `server` extra reuses the saved URL. A new Intent applies
@@ -59,8 +49,8 @@ death, so authenticated servers require the key again on restart.
 Configuration changes during capture are rejected and preserve the active
 workflow. Pending photos cannot be redirected to another server.
 
-A terminal camera failure releases the capture lease and permits a tap to
-prepare another capture. An unresolved timeout remains stopped. HUD hints on
+A camera failure or unresolved timeout keeps UNKNOWN and blocks another photo until
+a fresh app/session generation. Two BACK gestures remain available to exit ERROR. HUD hints on
 this local surface name these gestures instead of phone buttons; the phone
 relay's CUSTOMVIEW input policy is unchanged. This patch still requires the
 physical acceptance checklist on the installed APK and firmware.

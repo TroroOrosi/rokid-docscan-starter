@@ -9,6 +9,7 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.Looper;
+import android.os.PowerManager;
 import android.os.SystemClock;
 import android.util.Log;
 import android.view.KeyEvent;
@@ -57,6 +58,11 @@ public final class DocScanGlassActivity extends Activity
     private static final String EXTRA_KEY = "key";
     private static final String EXTRA_GUIDE = "guide";
     private static final int CAMERA_PERMISSION_REQUEST = 7401;
+    private static final int AUDIO_PERMISSION_REQUEST = 7402;
+    private boolean listeningMode;
+    private ListeningRecorder listening;
+    private boolean finishingAudio;
+    private long listeningDocument;
 
     /**
      * The sensor reports {@code SENSOR_ORIENTATION=270} and writes
@@ -73,6 +79,9 @@ public final class DocScanGlassActivity extends Activity
     private final BackExitPolicy backExit = new BackExitPolicy();
     private final DisplaySleep displaySleep = new DisplaySleep();
     private WearWatch wearWatch;
+    private PowerManager.WakeLock analysisWakeLock;
+    private boolean awaitingAnswers;
+    private boolean sessionClosed;
     private final Handler main = new Handler(Looper.getMainLooper());
 
     private HandlerThread cameraThread;
@@ -179,6 +188,12 @@ public final class DocScanGlassActivity extends Activity
     }
 
     private void applyIntent(Intent intent, boolean starting) {
+        if (starting) {
+            listeningMode = intent != null && intent.hasExtra("listening")
+                    ? intent.getBooleanExtra("listening", false) : getPreferences(MODE_PRIVATE).getBoolean("listening", false);
+            getPreferences(MODE_PRIVATE).edit().putBoolean("listening", listeningMode).apply();
+            controller.setListeningMode(listeningMode);
+        }
         if (intent != null && intent.hasExtra(EXTRA_GUIDE)) {
             float fraction = intent.getFloatExtra(
                     EXTRA_GUIDE, (float) FramingGuide.UNCALIBRATED_FRACTION);
@@ -232,6 +247,16 @@ public final class DocScanGlassActivity extends Activity
     @SuppressWarnings("deprecation")
     public void onBackPressed() {
         if (backExit.onBack(SystemClock.elapsedRealtime()) == BackExitPolicy.Decision.EXIT) {
+            exitSession();
+            return;
+        }
+        hud.showLines(List.of("もう一度で終了", "", ""));
+    }
+
+    private void exitSession() {
+            sessionClosed = true;
+            if (reader != null) closeAnswers();
+            releaseAnalysisWakeLock();
             Log.i(TAG, "exit confirmed");
             if (displaySleep.sleep(this) == DisplaySleep.Result.NOT_PERMITTED) {
                 // Never claim an exit that left the display lit.
@@ -241,9 +266,6 @@ public final class DocScanGlassActivity extends Activity
                 return;
             }
             finish();
-            return;
-        }
-        hud.showLines(List.of("もう一度で終了", "", ""));
     }
 
     /**
@@ -252,6 +274,7 @@ public final class DocScanGlassActivity extends Activity
      * own timeout goes back and the session is held awake again.
      */
     private void wornAgain() {
+        if (awaitingAnswers || sessionClosed) return;
         Log.i(TAG, "worn again");
         displaySleep.restore(this);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
@@ -264,10 +287,18 @@ public final class DocScanGlassActivity extends Activity
         if (requestCode == CAMERA_PERMISSION_REQUEST && !hasCamera()) {
             hud.showLines(List.of("カメラ権限がありません", "", ""));
         }
+        if (requestCode == AUDIO_PERMISSION_REQUEST) {
+            if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) startListening();
+            else controller.onListeningError();
+        }
     }
 
     @Override
     protected void onDestroy() {
+        sessionClosed = true;
+        releaseAnalysisWakeLock();
+        if (listening != null) listening.close();
+        stopService(new Intent(this, ListeningService.class));
         // Folding the temple arms force-stops this process through the
         // assistserver third_app scene, so destruction is an ordinary end to a
         // session rather than an exceptional one. The controller persists its
@@ -305,7 +336,8 @@ public final class DocScanGlassActivity extends Activity
         if (isBackKey && "DOWN".equals(phase)) {
             // Captured before onAction (below) runs, and before it has a
             // chance to close the reader as a side effect of this very press.
-            backOwnedByReader = reader != null;
+            backOwnedByReader = reader != null || (controller != null
+                    && controller.getState() != RelayState.REVIEW);
         }
         Optional<GlassesInputAction> action = normalizer.accept(InputSignal.key(
                 SystemClock.elapsedRealtime(), phase, name, GlassKeyEvents.isKnown(name)));
@@ -327,12 +359,36 @@ public final class DocScanGlassActivity extends Activity
             backExit.reset();
         }
         if (reader != null) {
+            if (action == GlassesInputAction.BACK) {
+                if (backExit.onBack(SystemClock.elapsedRealtime()) == BackExitPolicy.Decision.EXIT) {
+                    exitSession();
+                } else {
+                    answers.announceExit();
+                }
+                return;
+            }
             if (!AnswerGestures.apply(reader, action)) {
                 closeAnswers();
                 return;
             }
             persistAnswerPosition(false);
             answers.refresh();
+            return;
+        }
+        if (controller.getState() == RelayState.ERROR
+                || (listeningMode && listening == null && controller.getState() != RelayState.REVIEW)) {
+            if (action == GlassesInputAction.BACK) {
+                if (backExit.onBack(SystemClock.elapsedRealtime()) == BackExitPolicy.Decision.EXIT) exitSession();
+                else hud.showLines(List.of("もう一度ダブルタップで終了", "保存した資料は保持します", ""));
+            }
+            return;
+        }
+        if (listeningMode && controller.getState() == RelayState.LISTENING) {
+            if (action == GlassesInputAction.BACK) finishAudio();
+            return;
+        }
+        if (awaitingAnswers && action == GlassesInputAction.BACK) {
+            if (backExit.onBack(SystemClock.elapsedRealtime()) == BackExitPolicy.Decision.EXIT) exitSession();
             return;
         }
         controller.onGlassesAction(action);
@@ -373,9 +429,18 @@ public final class DocScanGlassActivity extends Activity
     }
 
     @Override
+    public void onReviewHidden(long generation) {
+        controller.onCaptureReviewHidden(generation);
+    }
+
+    @Override
     public void onUpdate(RelayState state, List<String> hudLines, String diagnostic) {
         Log.i(TAG, state + ": " + diagnostic);
         maybeOpenSavedAnswersOffline();
+        if (state == RelayState.FINALIZING || state == RelayState.LISTENING) main.post(this::waitWithDisplayOff);
+        if (state == RelayState.ERROR || state == RelayState.READING) {
+            main.post(() -> { if (awaitingAnswers) wakeForResult(); });
+        }
         if (state == RelayState.REVIEW) {
             long sessionId = controller.sessionId();
             if (sessionId != answersFetchedForSession) {
@@ -392,6 +457,61 @@ public final class DocScanGlassActivity extends Activity
             return;
         }
         main.post(() -> hud.showLines(GlassesHudText.adapt(hudLines)));
+    }
+
+    @Override public void onListeningReady(long documentId) {
+        main.post(() -> {
+            if (sessionClosed || (listening != null && listeningDocument == documentId)) return;
+            if (listening != null) listening.close();
+            listening = null;
+            finishingAudio = false;
+            listeningDocument = documentId;
+            if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+                requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, AUDIO_PERMISSION_REQUEST);
+                return;
+            }
+            startListening();
+        });
+    }
+
+    private void startListening() {
+        try {
+            listening = new ListeningRecorder(getFilesDir(), listeningDocument, controller.api(), () -> {
+                controller.onListeningError();
+                main.post(() -> { wakeForResult(); stopService(new Intent(this, ListeningService.class)); });
+            });
+            startForegroundService(new Intent(this, ListeningService.class));
+            listening.start();
+            controller.startAutoCapture();
+        } catch (Exception error) {
+            if (listening != null) listening.close();
+            listening = null;
+            stopService(new Intent(this, ListeningService.class));
+            controller.onListeningError();
+            hud.showLines(List.of("録音を開始できません", "権限・前回録音を確認", "原音は削除していません"));
+        }
+    }
+
+    private void finishAudio() {
+        if (finishingAudio || listening == null) return;
+        finishingAudio = true;
+        waitWithDisplayOff();
+        new Thread(() -> {
+            try {
+                listening.finishAndUpload();
+                main.post(() -> {
+                    stopService(new Intent(this, ListeningService.class));
+                    if (!sessionClosed) controller.completeListening();
+                });
+            } catch (Exception error) {
+                main.post(() -> {
+                    if (sessionClosed) return;
+                    finishingAudio = false;
+                    wakeForResult();
+                    hud.showLines(List.of("録音・文字起こしを確認", "原音は保存済み", "ダブルタップで再試行"));
+                });
+            }
+        }, "listening-finish").start();
     }
 
     // --- answer reading -----------------------------------------------------
@@ -489,6 +609,7 @@ public final class DocScanGlassActivity extends Activity
                     if (isFinishing() || isDestroyed()) {
                         return;
                     }
+                    wakeForResult();
                     hud.showLines(List.of("答案を取得できません", "通信を確認", ""));
                 });
             }
@@ -505,12 +626,13 @@ public final class DocScanGlassActivity extends Activity
     }
 
     private void openAnswers(AnswerBundle bundle, String questionId, int offset) {
-        if (isFinishing() || isDestroyed()) {
+        if (sessionClosed || isFinishing() || isDestroyed()) {
             // The fetch (or a resume) completed after the two-stage exit
             // already finished this Activity. Nothing to show, and nothing
             // left to leak a View or a reader into.
             return;
         }
+        wakeForResult();
         answers = new AnswerView(this);
         // A placeholder viewport: AnswerView.onSizeChanged calls
         // reader.viewport with its own Paint as soon as it is laid out, and
@@ -535,6 +657,33 @@ public final class DocScanGlassActivity extends Activity
         reader = null;
         answers = null;
         setContentView(hud);
+    }
+
+    private void waitWithDisplayOff() {
+        if (awaitingAnswers || sessionClosed || isFinishing()) return;
+        awaitingAnswers = true;
+        PowerManager power = (PowerManager) getSystemService(POWER_SERVICE);
+        if (power != null) {
+            analysisWakeLock = power.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "docscan:analysis");
+            analysisWakeLock.acquire(); // held only until result, error or explicit exit
+        }
+        if (displaySleep.sleep(this) == DisplaySleep.Result.NOT_PERMITTED) {
+            hud.showLines(List.of("解析中", "消灯には設定の許可が必要", ""));
+        }
+    }
+
+    private void wakeForResult() {
+        if (sessionClosed) return;
+        if (awaitingAnswers && !displaySleep.wake(this)) {
+            Log.w(TAG, "answer display wake request refused");
+        }
+        awaitingAnswers = false;
+        releaseAnalysisWakeLock();
+    }
+
+    private void releaseAnalysisWakeLock() {
+        if (analysisWakeLock != null && analysisWakeLock.isHeld()) analysisWakeLock.release();
+        analysisWakeLock = null;
     }
 
     /**

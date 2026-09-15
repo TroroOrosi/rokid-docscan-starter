@@ -53,6 +53,9 @@ public final class FramingGuideTest {
 
         assertEquals(DISPLAY_WIDTH - guide.right(), guide.left());
         assertEquals(DISPLAY_HEIGHT - guide.bottom(), guide.top());
+        FramingGuide.Rect field = FramingGuide.fieldOf(DISPLAY_WIDTH, DISPLAY_HEIGHT, 0.8);
+        assertEquals(FramingGuide.SENSOR_ASPECT, field.width() / (double)field.height(), .01);
+        assertTrue(field.left() < guide.left() && field.right() > guide.right());
     }
 
     @Test

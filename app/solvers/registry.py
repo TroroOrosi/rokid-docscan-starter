@@ -102,7 +102,7 @@ def _acceptable(result) -> bool:
     """An answer is usable if the tier didn't flag an error and produced text."""
     if result is None or result.extras.get("error"):
         return False
-    return bool((result.answer or "").strip())
+    return bool((result.answer or "").strip() or result.diagrams)
 
 
 def solve_with_fallback(

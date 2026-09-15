@@ -6,7 +6,8 @@ Status: Current runbook for the exercised phone-relay route. Updated 2026-09-14.
 decided the venue runs the standalone `:glassdoc` app over a phone access point,
 with the server and Chrome on the phone; see `CLAUDE.md` "decided venue
 topology" and `docs/glasses-ux-contract.md` for its gesture table. That route
-has never been run end to end, so it has no runbook yet. This document keeps the
+has never been run end to end; its implementation/setup guide is
+[multimodal-scan.md](multimodal-scan.md). This document keeps the
 route that has been exercised, and it stays the fallback.
 
 The topology below is the exercised one:

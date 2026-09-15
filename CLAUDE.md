@@ -51,9 +51,8 @@ file carried until then.
 
 **None of that topology has been run.** What is measured is each piece
 separately: the glasses app captures and reaches a server over Wi-Fi
-(2026-09-04), and chatgpt-web answers against PC Chrome (2026-09-13). FastAPI on
-the phone is `docs/hardware-measurements.md` 未着手, the phone-side CDP endpoint
-is blocked on pairing (§F-5), and the AP has never carried a session.
+(2026-09-04), and the phone-only CDP/FastAPI/answer component in §F-6 (2026-09-15).
+The AP has never carried a complete glasses session.
 
 The **phone-relay topology** below is what this repository has actually
 exercised end to end, and it stays as the fallback. Do not extend it.
@@ -101,11 +100,11 @@ Settled decisions. Do not re-argue them:
   not acceptable.
 - Do not build a browser connection pool.
 
-**Open gap.** Every chatgpt-web measurement so far ran against Chrome on a PC
-(Chrome/152.0.7977.83, 2026-09-13). That is not the venue topology. The venue
-requires no PC, so the route has to reach a phone-side browser instead;
-`ROKID_CHATGPT_CDP` accepts any CDP endpoint, so nothing in the design blocks
-it, but **this has never been run**. Do not describe chatgpt-web as venue-ready.
+**Open gap.** The current record includes phone-only CDP, FastAPI discovery and a
+text answer in `docs/hardware-measurements.md` §F-6-6 through §F-6-10. These are
+component measurements, not a glasses → phone AP → answer-bundle session.
+That full route, the new capture/power behavior and local listening ASR remain
+unvalidated on hardware. Do not describe chatgpt-web as venue-ready.
 
 Chrome for Android does not hand out a CDP endpoint the way a PC does, and the
 difference is not a configuration detail. It listens only on a unix
@@ -132,26 +131,19 @@ read a refusal as a bad answer and turned one block into many on 2026-09-14.
   shoot on their own, the captured image is shown for 3 seconds, a single tap
   in that window retakes, no input commits it and moves to the next page, and a
   double tap ends the capture phase. Zero phone operations after setup.
-- **It is built, and switched off.** Do not write it as missing.
-  `relaycore/DocScanController` carries the whole loop — `AUTO_BURST_SHOTS=3`
-  at `AUTO_SHOT_INTERVAL_MILLIS=400`, `AUTO_PAGE_TURN_MILLIS=2500`, the best
-  frame chosen by `:pagequality`'s `ShotScore` and `PageFraming`, duplicates
-  given up after `AUTO_DUPLICATE_BURST_LIMIT=20`, unreadable bursts retried
-  `AUTO_UNREADABLE_RETRY_LIMIT=40` times before backing off, then auto-commit
-  at 4s (12s unverified). `feat: read pages hands-free` built it.
-  `adf12ee` (2026-09-01, `fix: require explicit phone capture controls`) then
-  made `startAutoCapture()` answer `"Automatic capture is disabled; use
-  explicit phone controls"`.
-- **Why it was switched off is route-specific, and the route changed.** On the
-  CUSTOMVIEW/phone-relay route a tap reaches nothing, so automatic registration
-  would upload pages the operator could neither see nor stop. On `:glassdoc`
-  tap and swipe do reach the Activity (`docs/hardware-measurements.md` §A-2),
-  which is the input that gate was waiting for. Re-enabling it there is the
-  work; writing it again is not.
-- What the decided method still needs on top: the 3-second look at the real
-  captured image and the single tap inside that window that retakes it (R3,
-  R4). The existing auto-commit delays are keyed to a CUSTOMVIEW
-  acknowledgement, not to a glasses-side review.
+- **The existing loop is enabled only on `:glassdoc`.** It still uses three shots,
+  the existing intervals, ShotScore/PageFraming and duplicate/unreadable limits.
+  The frozen CUSTOMVIEW route keeps explicit phone controls. The original
+  `adf12ee` disable decision belonged to the route without operator taps.
+- On the local surface the captured still is drawn after camera closure; a
+  visible acknowledgement starts a fresh 3000ms review. A single tap retakes,
+  no input commits, BACK ends capture after the last review. Hidden or stale
+  views cannot commit. A waiting tap requests a manual shot without starting
+  a second request in flight. See `docs/multimodal-scan.md`.
+- The standalone app records listening PCM while capturing. VAD/ASR runs on the
+  phone, retains originals and waits for all chunks before final analysis.
+  Diagram answers use validated vectors and the existing AnswerReader/Canvas.
+  These new behaviors have not passed physical acceptance on the current APK.
 - Text-only page upload remains an API compatibility path. Do not describe it
   as the real-device primary path.
 - The public CXR-L AIDL surface does not expose arbitrary recognition or

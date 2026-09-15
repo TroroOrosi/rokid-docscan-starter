@@ -19,8 +19,8 @@ import java.security.NoSuchAlgorithmException;
 /** Atomically persists one unregistered capture across activity/process restarts. */
 final class CaptureReviewPersistence {
     private static final int MAGIC = 0x44534350; // DSCP
-    /** 2 added the framing verdict; 1 records are still read, without one. */
-    private static final int VERSION = 2;
+    /** 3 adds the glasses' shutter-request epoch; old records retain unknown (0). */
+    private static final int VERSION = 3;
     private static final int COMMIT_MAGIC = 0x44534343; // DSCC
     private static final int COMMIT_VERSION = 1;
     private static final int SHA_256_BYTES = 32;
@@ -63,6 +63,7 @@ final class CaptureReviewPersistence {
                     data,
                     pending.framing.toToken().getBytes(StandardCharsets.UTF_8));
             writeBytes(data, pending.jpeg);
+            data.writeLong(pending.capturedAtMillis);
             data.flush();
             output.getFD().sync();
         }
@@ -104,7 +105,7 @@ final class CaptureReviewPersistence {
             // Version 1 predates the framing check. Its photo is still valid
             // and must survive the upgrade; it simply carries no verdict.
             int recordVersion = data.readInt();
-            if (recordVersion != VERSION && recordVersion != 1) {
+            if (recordVersion < 1 || recordVersion > VERSION) {
                 throw new IOException("unsupported pending capture format");
             }
             int pageIndex = data.readInt();
@@ -125,11 +126,12 @@ final class CaptureReviewPersistence {
                             readBytes(data, MAX_FRAMING_BYTES),
                             StandardCharsets.UTF_8));
             byte[] jpeg = readBytes(data, MAX_JPEG_BYTES);
-            if (jpeg.length == 0 || data.read() != -1) {
+            long capturedAt = recordVersion >= 3 ? data.readLong() : 0;
+            if (jpeg.length == 0 || capturedAt < 0 || data.read() != -1) {
                 throw new IOException("invalid pending capture payload");
             }
             pending = new CaptureReviewStore.Pending(
-                    pageIndex, jpeg, ocrText, rotationDegrees, ocrFailure, framing);
+                    pageIndex, jpeg, ocrText, rotationDegrees, ocrFailure, framing, capturedAt);
         } catch (IOException | RuntimeException invalid) {
             try {
                 clear();

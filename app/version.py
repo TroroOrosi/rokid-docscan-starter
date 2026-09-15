@@ -170,7 +170,7 @@ from __future__ import annotations
 #        gives each paper its own database. See GLASSES_VIEW_CONTRACT 1.11.0.
 # 0.28.0: an answer reaches the operator as writable text, and an answer that
 #        lost an element is no longer reported ready. See API 1.19.0.
-APP_VERSION = "0.28.0"
+APP_VERSION = "0.29.0"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.
@@ -239,7 +239,7 @@ APP_VERSION = "0.28.0"
 #        is named in `issue` instead of being dropped from a `ready` answer
 #        (tasks/todo.md FS-65). A client that does not know the status must be
 #        updated; relaycore 0.3.17 does.
-API_VERSION = "1.19.0"
+API_VERSION = "1.20.0"
 
 # Matching algorithm identity. Bump when thresholds or hashing change so a
 # re-index/eval is triggered. Mirrors thresholds in app/matching.py.
@@ -298,7 +298,7 @@ ANALYZER_API_VERSION = "1.0.0"
 # 1.6.0: Question gained the optional `audio_path` field, so a listening
 #        question can carry the recording itself and not only its transcript.
 #        Adapters that cannot take audio ignore it (additive/back-compat).
-SOLVER_API_VERSION = "1.6.0"
+SOLVER_API_VERSION = "1.7.0"
 
 # Media-extractor plugin interface (formula/figure/graph/table).
 EXTRACTOR_API_VERSION = "1.0.0"
@@ -345,7 +345,7 @@ EXPLAINER_API_VERSION = "1.1.0"
 #         [:24] truncation removed in 1.2.0. GET /v1/settings publishes
 #         max_columns_per_line, column_unit, wraps and truncates. The budget is
 #         an estimate; the CUSTOMVIEW overlay's text area is not measured.
-GLASSES_VIEW_CONTRACT_VERSION = "1.11.0"
+GLASSES_VIEW_CONTRACT_VERSION = "1.12.0"
 
 # Answer-area overlay payload (box + short answer; 2D image-anchored).
 # 1.1.0: added tracking metadata (tracking/fixed_ar/anchor_hint).

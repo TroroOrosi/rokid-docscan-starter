@@ -1,5 +1,9 @@
 package dev.rokid.docscanrelay.study;
 
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+
 /** A single answer-sheet entry. Issue text is never part of the written answer. */
 public final class AnswerItem {
     /**
@@ -17,23 +21,32 @@ public final class AnswerItem {
     public final String answer;
     public final Status status;
     public final String issue;
+    public final List<AnswerDiagram> diagrams;
 
     public AnswerItem(String groupId, String groupLabel, String questionId, String questionLabel,
                       String answer, Status status, String issue) {
+        this(groupId, groupLabel, questionId, questionLabel, answer, status, issue, Collections.emptyList());
+    }
+
+    public AnswerItem(String groupId, String groupLabel, String questionId, String questionLabel,
+                      String answer, Status status, String issue, List<AnswerDiagram> diagrams) {
         this.groupId = identifier(groupId);
         this.questionId = identifier(questionId);
         this.groupLabel = label(groupLabel);
         this.questionLabel = label(questionLabel);
         boolean carriesAnswer = status == Status.READY || status == Status.NEEDS_REVIEW;
         if (status == null || answer == null || issue == null || answer.length() > 200_000
-                || issue.length() > 1000 || (carriesAnswer && answer.trim().isEmpty())
+                || diagrams == null || diagrams.size() > 4 || diagrams.stream().anyMatch(d -> d == null)
+                || issue.length() > 1000 || (carriesAnswer && answer.trim().isEmpty() && diagrams.isEmpty())
                 || (!carriesAnswer && !answer.isEmpty())
+                || (!carriesAnswer && !diagrams.isEmpty())
                 || (status == Status.NEEDS_REVIEW && issue.trim().isEmpty())) {
             throw new IllegalArgumentException("invalid written answer");
         }
         this.answer = answer;
         this.status = status;
         this.issue = status == Status.READY ? "" : issue;
+        this.diagrams = Collections.unmodifiableList(new ArrayList<>(diagrams));
     }
 
     public static AnswerItem ready(String groupId, String groupLabel, String questionId,

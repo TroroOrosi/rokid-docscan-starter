@@ -312,7 +312,7 @@ class _FakeClient:
         self.last_image_attached = attached
 
     def complete_json(self, *, system, prompt, image=None, images=None, audio=None,
-                      bundle_pdf=None, chat_key=None):
+                      bundle_pdf=None, chat_key=None, files=None):
         self.seen = {
             "system": system,
             "prompt": prompt,
@@ -321,6 +321,7 @@ class _FakeClient:
             "audio": audio,
             "bundle_pdf": bundle_pdf,
             "chat_key": chat_key,
+            "files": files,
         }
         return json.loads(self.payload)
 
@@ -809,6 +810,46 @@ def test_the_recording_reaches_the_solver_from_the_question(tmp_path):
     )
 
     assert client.seen["audio"] == ("listening.mp3", b"ID3 recorded")
+
+
+def test_document_route_counts_audio_and_reuses_confirmed_files(tmp_path, monkeypatch):
+    monkeypatch.setattr(chatgpt_web, "POLL_S", 0)
+    page_path = tmp_path / "page.png"
+    page_path.write_bytes(_real_png(80))
+    recording = tmp_path / "original.wav"
+    recording.write_bytes(b"RIFF original")
+    pages = [{"page_number": i+1, "image_path": str(page_path), "ocr_text": f"Question {i+1}"}
+             for i in range(40)]
+    fake = _FakeClient('{"status":"ready","answer":"2"}', attached=True)
+    question = Question(body_text="Question two", question_no="問2", question_id="q9", answer_only=True,
+                        document_pages=pages, document_id="1", page_numbers=list(range(1, 41)),
+                        audio_path=str(recording), audio_transcript="[30000..31000ms] Question two", chat_key="session:1")
+    ChatGptWebSolver(client=fake).solve(question=question)
+    files, first_key = fake.seen["files"], fake.seen["chat_key"]
+    assert len(files) <= 20
+    assert files[0]["name"] == "document.md" and files[-1]["name"] == "original.wav"
+    assert b"Question two" in files[0]["buffer"] and "q9" in fake.seen["prompt"]
+    recording.write_bytes(b"RIFF corrected original")
+    ChatGptWebSolver(client=fake).solve(question=question)
+    assert fake.seen["chat_key"] != first_key
+    browser = _StubPage(["2", "2"])
+    client = chatgpt_web.ChatGptWebClient()
+    ctx = _OneTabContext(browser)
+    client._ask_with_retries(ctx, "問2", [], files=files, chat_key=first_key)
+    count = len([k for k, _ in browser.events if k == "upload"])
+    client._ask_with_retries(ctx, "問3", [], files=files, chat_key=first_key)
+    assert len([k for k, _ in browser.events if k == "upload"]) == count
+
+
+def test_unconfirmed_document_files_never_send_a_question(monkeypatch):
+    monkeypatch.setattr(chatgpt_web, "RETRY_BACKOFF_S", 0)
+    monkeypatch.setattr(chatgpt_web, "UPLOAD_TIMEOUT_S", 0)
+    monkeypatch.setattr(chatgpt_web, "POLL_S", 0)
+    page = _StubPage(["answer"], thumbnail_appears=[False] * 20, thumbnail_baseline=0)
+    with pytest.raises(chatgpt_web.ChatGptWebError):
+        chatgpt_web.ChatGptWebClient()._ask_with_retries(_OneTabContext(page), "question", [],
+                files=[{"name": "document.md", "mimeType": "text/markdown", "buffer": b"source"}])
+    assert not _sends(page)
 
 
 def test_an_unreadable_recording_does_not_fail_the_solve(tmp_path):

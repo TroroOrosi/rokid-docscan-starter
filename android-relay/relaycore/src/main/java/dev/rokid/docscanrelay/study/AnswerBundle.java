@@ -80,8 +80,10 @@ public final class AnswerBundle {
                     .put("group_id", item.groupId).put("group_label", item.groupLabel)
                     .put("question_id", item.questionId).put("question_label", item.questionLabel)
                     .put("answer", item.answer).put("status", item.status.name().toLowerCase(Locale.ROOT))
-                    .put("issue", item.issue));
-            String json = new JSONObject().put("schema_version", SCHEMA_VERSION)
+                    .put("issue", item.issue).put("diagrams", AnswerDiagram.encode(item.diagrams)));
+            boolean hasDiagrams = false;
+            for (AnswerItem item : items) hasDiagrams |= !item.diagrams.isEmpty();
+            String json = new JSONObject().put("schema_version", hasDiagrams ? 2 : SCHEMA_VERSION)
                     .put("session_id", sessionId).put("input_digest", inputDigest)
                     .put("revision", revision).put("items", array).toString();
             if (json.getBytes(StandardCharsets.UTF_8).length > MAX_JSON_BYTES) {
@@ -99,7 +101,8 @@ public final class AnswerBundle {
             throw new IllegalArgumentException("answer bundle too large");
         }
         JSONObject root = new JSONObject(json);
-        if (number(root, "schema_version") != SCHEMA_VERSION) {
+        long schema = number(root, "schema_version");
+        if (schema != SCHEMA_VERSION && schema != 2) {
             throw new IllegalArgumentException("unsupported answer schema");
         }
         JSONArray array = root.getJSONArray("items");
@@ -110,7 +113,8 @@ public final class AnswerBundle {
             items.add(new AnswerItem(string(item, "group_id"), string(item, "group_label"),
                     string(item, "question_id"), string(item, "question_label"), string(item, "answer"),
                     AnswerItem.Status.valueOf(string(item, "status").toUpperCase(Locale.ROOT)),
-                    string(item, "issue")));
+                    string(item, "issue"), AnswerDiagram.parse(item.has("diagrams")
+                            ? item.getJSONArray("diagrams") : null)));
         }
         return new AnswerBundle(string(root, "session_id"), string(root, "input_digest"),
                 number(root, "revision"), items);

@@ -50,6 +50,35 @@ PAGE = "\n".join([
 ])
 
 
+def test_vector_answer_round_trip_and_invalid_stored_diagram(client):
+    import json
+    from app import db
+
+    _, session_id = _session_with(client, [PAGE])
+    client.post(f"/v1/exam-sessions/{session_id}/finalize-reading")
+    bundle = client.get(f"/v1/exam-sessions/{session_id}/answer-bundle").json()
+    question_id = int(bundle["items"][0]["question_id"][1:])
+    diagram = {"alt": "円", "aspect_ratio": 1, "elements": [
+        {"type": "circle", "cx": 0.5, "cy": 0.5, "r": 0.3}]}
+    with db.connect() as conn:
+        conn.execute("INSERT INTO solutions(question_id, answer, diagrams_json) VALUES (?, '', ?)",
+                     (question_id, json.dumps([diagram])))
+    bundle = client.get(f"/v1/exam-sessions/{session_id}/answer-bundle").json()
+    assert bundle["schema_version"] == 2
+    assert bundle["items"][0]["status"] == "ready"
+    assert bundle["items"][0]["answer"] == ""
+    assert bundle["items"][0]["diagrams"] == [diagram]
+    with db.connect() as conn:
+        conn.execute("UPDATE solutions SET diagrams_json = '[{}]' WHERE question_id = ?", (question_id,))
+    item = client.get(f"/v1/exam-sessions/{session_id}/answer-bundle").json()["items"][0]
+    assert item["status"] == "failed" and "図" in item["issue"]
+    with db.connect() as conn:
+        conn.execute("UPDATE solutions SET diagrams_json = NULL, answer_metadata_json = ? WHERE question_id = ?",
+                     (json.dumps({"answer_status": "needs_input", "missing_material": "図の寸法が不明"}), question_id))
+    item = client.get(f"/v1/exam-sessions/{session_id}/answer-bundle").json()["items"][0]
+    assert item["status"] == "needs_input" and item["issue"] == "図の寸法が不明"
+
+
 def test_bundle_groups_sub_questions_under_their_section(client):
     _, session_id = _session_with(client, [PAGE])
     client.post(f"/v1/exam-sessions/{session_id}/finalize-reading")

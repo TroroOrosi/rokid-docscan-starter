@@ -24,8 +24,8 @@ and `tasks/plan.md`. Do not restate them here; this is the map, not the reason.
 
 | Module | Status | Role |
 |---|---|---|
-| `:glassdoc` | route | The glasses-side scanner. Owns capture, OCR and the server connection; the phone is not in the data path. |
-| `:relaycore` | shared | The capture pipeline both apps run: `DocScanController`, OCR, upload, review. **The automatic-scan loop lives here and is currently gated off.** |
+| `:glassdoc` | route | The glasses-side scanner. Owns capture, OCR and the server connection; the phone hosts its server over the phone AP. |
+| `:relaycore` | shared | The capture pipeline both apps run: `DocScanController`, OCR, upload, review. The automatic-scan loop lives here; enabled only for the local glasses surface. |
 | `:pagequality` | shared | `PageFraming` (is the page wholly in frame) and `ShotScore` (rank an automatic burst). Built for hands-free capture. |
 | `:glassinput` | shared | The gesture contract. Plain `java-library`, so its tests run with no Android runtime. |
 | `:app` | frozen | The phone relay over CXR-L/CUSTOMVIEW. The only module with CXR-L imports. |
@@ -70,3 +70,7 @@ and auto-commit after `AUTO_COMMIT_COMPLETE_MILLIS=4000`
 disabled; use explicit phone controls"`. The reason was the CUSTOMVIEW route's
 missing operator tap, not the loop. `:glassdoc` has that tap
 (`docs/hardware-measurements.md` §A-2), so the reason does not carry over.
+
+The local surface now replaces the historical commit delays with 3000ms after a visible
+still acknowledgement. `ListeningRecorder` / `ListeningService` belong to `:glassdoc`;
+`app/local_asr.py` / `app/listening.py` run on the phone. No new Activity/module was added.

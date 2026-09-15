@@ -1,6 +1,9 @@
 # User operation guide
 
-Status: Current phone-controlled workflow. Updated 2026-09-14.
+Status: Current phone-controlled fallback workflow. Updated 2026-09-15.
+
+本流glassdocの自動/手動撮影・図・録音/ASRは[multimodal-scan.md](multimodal-scan.md)を参照。
+以下は凍結したphone relayの操作です。
 
 ## What this system does
 
@@ -28,9 +31,9 @@ here because the route is the default one. `ROKID_SOLVER=openai|gemini|claude`
 with an API key is the supported alternative, and `ROKID_SOLVER_TIERS` orders
 the fallbacks.
 
-Every chatgpt-web measurement this repository owns was taken against Chrome on
-a PC. Pointing `ROKID_CHATGPT_CDP` at a phone-side browser has never been run.
-Do not plan a session that assumes it works.
+Phone-only CDP, FastAPI and a text answer are recorded in hardware-measurements.md
+§F-6. The full glasses/phone-AP session and the new features have not passed
+physical acceptance.
 
 ## Start
 

@@ -29,8 +29,8 @@ public class AutoCommitDecisionTest {
     }
 
     @Test
-    public void evenAnUndisturbedCountdownCannotRegisterWithoutPhoneConfirmation() {
-        assertFalse(DocScanController.shouldAutoCommit(
+    public void anArmedLocalReviewCanCommitOnlyWhileItsGenerationStillOwnsTheScreen() {
+        assertTrue(DocScanController.shouldAutoCommit(
                 RelayState.CAPTURE_REVIEW, 7, 7, true));
     }
 

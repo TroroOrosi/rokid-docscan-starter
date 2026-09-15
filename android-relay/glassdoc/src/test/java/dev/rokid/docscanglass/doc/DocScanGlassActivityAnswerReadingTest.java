@@ -118,6 +118,8 @@ public class DocScanGlassActivityAnswerReadingTest {
         assertEquals("one HTTP request for the bundle", 1, server.getRequestCount());
 
         invokeOnAction(GlassesInputAction.BACK);
+        assertNotNull(getField(activity, "reader"));
+        invokeOnAction(GlassesInputAction.BACK);
         assertNull("closing must release screen ownership", getField(activity, "reader"));
         AnswerStore.Saved closed = new AnswerStore(filesDir).load();
         assertNotNull(closed);
@@ -451,6 +453,8 @@ public class DocScanGlassActivityAnswerReadingTest {
         invokeOnAction(GlassesInputAction.SWIPE_FORWARD);
         invokeOnAction(GlassesInputAction.SWIPE_FORWARD);
         invokeOnAction(GlassesInputAction.BACK);
+        assertNotNull(getField(activity, "reader"));
+        invokeOnAction(GlassesInputAction.BACK);
 
         AnswerStore.Saved saved = new AnswerStore(filesDir).load();
         assertNotNull(saved);
@@ -501,7 +505,7 @@ public class DocScanGlassActivityAnswerReadingTest {
      * never reach the exit policy at all.
      */
     @Test
-    public void backPressWhileTheReaderDoesNotOwnTheScreenStillArmsTheExitConfirmation()
+    public void backDuringCaptureBelongsToCaptureCompletionInsteadOfAppExit()
             throws Exception {
         // No onUpdate(REVIEW, ...): the reader never opens, matching the
         // ordinary capture/review flow this must leave unchanged.
@@ -509,7 +513,7 @@ public class DocScanGlassActivityAnswerReadingTest {
 
         pressBack();
 
-        assertTrue("the ordinary two-stage exit must still arm on the first BACK",
+        assertFalse("capture completion must not also arm app exit",
                 backExit().isArmed());
     }
 

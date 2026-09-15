@@ -39,17 +39,14 @@ Rokid Glasses（AnswerView） ← answer-bundle
 ダブルタップで撮影を終えます。初回準備後のスマホ操作は0回です。方式の定義は
 [自動スキャンの決定記録](docs/fast-scan-decisions.md) の R2〜R6 です。
 
-撮影したページは**1つの PDF にまとめて**、1教科につき1チャットへ1回だけ添付します。
-以降の小問は設問を指す文だけを送ります。解答は**解答用紙に記入する内容のみ**を返します。
+現行実装は**glassdocだけで自動スキャンを有効化**し、待機中の単タップを手動撮影、
+静止画表示後3秒以内の単タップを取り直しに割り当てます。既存の自動ループを再利用し、
+凍結したphone/CUSTOMVIEWの明示操作は維持します。
 
-**自動スキャンは実装済みで、現在は無効化されています。** 無いのではありません。
-`relaycore/DocScanController` に連続スキャン一式があります（3枚バースト・400ms間隔、
-ページ送り2500ms、`:pagequality` の `ShotScore`/`PageFraming` で最良フレーム選択、
-重複20回で打ち切り、不読40回まで即再試行、4秒で自動確定）。
-2026-09-01 の `adf12ee` が `startAutoCapture()` を拒否に変えました。理由は
-**CUSTOMVIEW 経路にタップが届かない**ことで、操作者が止められない登録を防ぐためです。
-決定した `:glassdoc` 経路にはタップが届くので、この理由は当てはまりません。
-残る作業は再有効化と、実画像3秒表示＋その間の単タップ取り直し（R3/R4）です。
+資料は全文OCRのMarkdown＋大問のページ画像が既定で、結合画像/PDFも比較できます。
+図付き答案と、撮影に並行する録音・スマホ内VAD/ASRも実装しています。
+設定・操作・未検証の範囲は[グラス撮影と端末内ASR](docs/multimodal-scan.md)を参照してください。
+新しいAPKでの物理LED、3秒表示、画角、消灯/復帰、スマホAP上の完走と精度比較は未検証です。
 
 ### 実際に通したことがある経路（フォールバック。凍結）
 
@@ -109,7 +106,7 @@ risk があります。**利用者の判断で選択した経路です（詳細�
 CXR-L の実装境界は
 [CXR-L / Global Hi Rokid integration](docs/cxr-l-integration.md)です。
 
-現在のバージョン: **Server APP 0.28.0 / API 1.19.0 / Android client 0.3.17 / Glasses View 1.11.0 / Solver API 1.6.0**。
+現在のバージョン: **Server APP 0.29.0 / API 1.20.0 / Android client 0.3.17 / Glasses View 1.12.0 / Solver API 1.7.0**。
 版数の正本は `app/version.py` です。他の資料は版数を書かず、この行だけが
 `tests/test_documentation_contract.py` で実装と照合されます。
 Solver API は、記入用解答の全文保持・資料不足の分離を行う `answer_only` モードを含みます。
@@ -180,7 +177,7 @@ rokid-docscan-starter/
 │   ├── explain-sessions.md          # 資料解説モード詳細・curl 例
 │   ├── future-proof-architecture.md # 将来対応アーキテクチャ
 │   ├── hardware-measurements.md     # 実機・成果物の測定記録（凍結）
-│   ├── fast-scan-decisions.md       # 自動スキャン構想の採否判断（未実装・保留）
+│   ├── fast-scan-decisions.md       # 自動スキャンの採否判断と現行実装への参照
 │   └── superpowers/specs/           # オフライン解答バンドルの設計（実装済み）
 ├── .env.example       # 全環境変数の雛形（コピーして .env に）
 ├── data/images/       # 画像保存先（実行時に自動生成）
@@ -641,9 +638,9 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 
 #### スマホの ChatGPT で解く経路（PC の Chrome を使わない）
 
-PC を立ち上げずにスマホだけで回す場合は、自動操作ではなく**貼り付け経路**を
-使います。サーバは解答を受け取らないため HUD は駆動されません（手元で読む
-運用）。
+以下の貼り付けAPIは凍結した互換経路で、利用者が選択した会場運用には使いません。
+現行はスマホFastAPIからスマホChrome CDPを操作します。以下の手作業では
+サーバは解答を受け取らず、HUDも駆動されません。
 
 ```bash
 # 1問ごと: 貼り付け用の本文と ChatGPT の事前入力リンク

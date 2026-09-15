@@ -31,6 +31,35 @@ final class HudView extends View {
     private Bitmap preview;
     private boolean aiming;
     private double guideFraction = FramingGuide.UNCALIBRATED_FRACTION;
+    private Runnable visibleFrame;
+    private Runnable hiddenFrame;
+    private boolean frameReported;
+
+    void onVisibleFrame(Runnable shown, Runnable hidden) {
+        visibleFrame = shown;
+        hiddenFrame = hidden;
+        frameReported = false;
+        invalidate();
+    }
+
+    @Override
+    protected void onWindowVisibilityChanged(int visibility) {
+        super.onWindowVisibilityChanged(visibility);
+        if (visibility != VISIBLE && frameReported) {
+            frameReported = false;
+            if (hiddenFrame != null) hiddenFrame.run();
+        }
+    }
+
+    @Override
+    public void onWindowFocusChanged(boolean focused) {
+        super.onWindowFocusChanged(focused);
+        if (!focused && frameReported) {
+            frameReported = false;
+            if (hiddenFrame != null) hiddenFrame.run();
+        }
+        if (focused) invalidate();
+    }
 
     HudView(Context context) {
         super(context);
@@ -78,6 +107,15 @@ final class HudView extends View {
     protected void onDraw(Canvas canvas) {
         super.onDraw(canvas);
         canvas.drawColor(Color.BLACK);
+        if (!frameReported && isShown() && hasWindowFocus() && visibleFrame != null) {
+            frameReported = true;
+            Runnable rendered = visibleFrame;
+            post(() -> {
+                if (frameReported && rendered == visibleFrame && isShown() && hasWindowFocus()) {
+                    rendered.run();
+                }
+            });
+        }
 
         float textTop = 0;
         Bitmap still = preview;
@@ -120,6 +158,9 @@ final class HudView extends View {
             return;
         }
         float arm = Math.min(guide.width(), guide.height()) * 0.18f;
+        FramingGuide.Rect field = FramingGuide.fieldOf(getWidth(), getHeight(), guideFraction);
+        guidePaint.setStrokeWidth(1f);
+        canvas.drawRect(field.left(), field.top(), field.right()-1, field.bottom()-1, guidePaint);
         guidePaint.setStrokeWidth(Math.max(2f, guide.width() * 0.008f));
         float[] corners = {
             guide.left(), guide.top(), 1, 1,

@@ -35,6 +35,8 @@ final class GlassesCaptureSurface implements CaptureSurface {
          * hears this for the generation it requested.
          */
         void onViewShown(long generation, String purpose);
+
+        default void onReviewHidden(long generation) { }
     }
 
     private final Context context;
@@ -45,6 +47,16 @@ final class GlassesCaptureSurface implements CaptureSurface {
     private final AtomicLong generations = new AtomicLong();
 
     private Bitmap preview;
+    private volatile long visibleReview = NO_VIEW_GENERATION;
+    private volatile boolean closed;
+
+    @Override
+    public boolean supportsLocalCaptureReview() { return true; }
+
+    @Override
+    public boolean isCaptureReviewVisible(long generation) {
+        return generation == visibleReview && visibleReview != NO_VIEW_GENERATION;
+    }
 
     GlassesCaptureSurface(
             Context context,
@@ -97,6 +109,7 @@ final class GlassesCaptureSurface implements CaptureSurface {
     @Override
     public long showCaptureReview(byte[] jpeg, int rotationDegrees, List<String> lines) {
         Bitmap still = decodePreview(jpeg, rotationDegrees);
+        if (still == null) return NO_VIEW_GENERATION;
         return show("capture-review", () -> {
             Bitmap previous = preview;
             preview = still;
@@ -118,6 +131,10 @@ final class GlassesCaptureSurface implements CaptureSurface {
 
     /** Releases the review thumbnail. The activity calls this on destruction. */
     void close() {
+        closed = true;
+        visibleReview = NO_VIEW_GENERATION;
+        generations.incrementAndGet();
+        hud.onVisibleFrame(null, null);
         Bitmap held = preview;
         preview = null;
         recycle(held);
@@ -125,9 +142,18 @@ final class GlassesCaptureSurface implements CaptureSurface {
 
     private long show(String purpose, Runnable draw) {
         long generation = generations.incrementAndGet();
+        visibleReview = NO_VIEW_GENERATION;
         main.post(() -> {
+            if (closed || generation != generations.get()) return;
             draw.run();
-            listener.onViewShown(generation, purpose);
+            hud.onVisibleFrame(() -> {
+                if (closed || generation != generations.get()) return;
+                if ("capture-review".equals(purpose)) visibleReview = generation;
+                listener.onViewShown(generation, purpose);
+            }, () -> {
+                visibleReview = NO_VIEW_GENERATION;
+                if ("capture-review".equals(purpose)) listener.onReviewHidden(generation);
+            });
         });
         return generation;
     }

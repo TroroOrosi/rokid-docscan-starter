@@ -1,5 +1,28 @@
 # Tasks: Safe real-device readiness
 
+## 2026-09-15 現行実装: multimodal-scan
+
+Runs on: MS-1～6はWindowsで実装・試験。MS-7はWindowsの統合検査後、指定実機とスマホAP上。
+仕様・依存順は `tasks/plan.md` の2026-09-15改訂。旧項目は履歴として保持。
+
+- [x] MS-1 capture-review: 既存自動ループをglassdocに接続。単タップ手動/取消、
+  描画後3秒、最終写真と終了の競合をJUnit/Robolectricで検査。
+- [x] MS-2 display-power: 既存DisplaySleepの待機/復帰/終了を統合。
+  CLOSED後の遅延応答、権限拒否、繰返し消灯の設定復元を検査。
+- [x] MS-3 source-bundle: OCR MarkdownとPage対応、個別画像/結合/PDFを実装。
+  欠番・空OCR・20添付境界・画素保持・大問範囲・添付確認をpytestで検査。
+- [x] MS-4 answer-diagrams server: 形式検証、生成指示、保存、bundle配送をAPI試験。
+- [x] MS-5 answer-diagrams glasses: 既存AnswerViewで図を表示、本文・図の移動と
+  オフライン再開をJUnit/Robolectricで検査。
+- [x] MS-6 listening-stream: 選定ASR、録音/撮影の独立終了、原音保持、区間/設問参照。
+  無音・発話境界・再送・末尾・欠落・不確実な対応を自動試験。
+- [ ] MS-7 統合: 全pytest/Ruff/Gradle、APK identity/signature/SHA-256、資料の整合。
+  - [x] Windows自動検査とAPK検査。pytest `600 passed, 1 skipped`、Ruff `All checks passed!`、
+    Gradle `BUILD SUCCESSFUL`。コマンドと条件は進捗記録に保存。
+  - [ ] スマホASR速度、実機消灯/復帰/LED、AP全経路。導入承認と外部LED観察の準備後。
+  - [ ] OCR＋画像／結合画像／PDFの精度比較。実写真で別途記録。
+
+
 **再開位置の正本は `.agents/progress/` です。** このファイルは作業項目の一覧であって、
 次に何をするかの決定ではありません。
 

@@ -26,6 +26,7 @@ final class CaptureReviewStore {
         final int rotationDegrees;
         final String ocrFailure;
         final PageFraming framing;
+        final long capturedAtMillis;
 
         Pending(
                 int pageIndex,
@@ -45,12 +46,18 @@ final class CaptureReviewStore {
                 String ocrFailure,
                 PageFraming framing
         ) {
+            this(pageIndex, jpeg, ocrText, rotationDegrees, ocrFailure, framing, 0);
+        }
+
+        Pending(int pageIndex, byte[] jpeg, String ocrText, int rotationDegrees,
+                String ocrFailure, PageFraming framing, long capturedAtMillis) {
             this.pageIndex = pageIndex;
             this.jpeg = jpeg;
             this.ocrText = ocrText == null ? "" : ocrText;
             this.rotationDegrees = rotationDegrees;
             this.ocrFailure = ocrFailure == null ? "" : ocrFailure;
             this.framing = framing == null ? PageFraming.UNKNOWN : framing;
+            this.capturedAtMillis = capturedAtMillis;
         }
 
         int ocrCharacters() {

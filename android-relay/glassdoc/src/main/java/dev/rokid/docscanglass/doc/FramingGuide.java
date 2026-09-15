@@ -45,8 +45,7 @@ public final class FramingGuide {
 
     /**
      * The starting point before anyone has photographed a page against the
-     * guide. The whole display is the honest claim -- the camera certainly sees
-     * at least this much -- rather than a fit nobody measured.
+     * guide. This is a drawing default, not a measured optical field of view.
      */
     public static final double UNCALIBRATED_FRACTION = MAX_VISIBLE_FRACTION;
 
@@ -120,6 +119,15 @@ public final class FramingGuide {
         int left = (displayWidth - width) / 2;
         int top = (displayHeight - height) / 2;
         return new Rect(left, top, left + width, top + height);
+    }
+
+    /** Outer sensor-shaped coverage guide; must be calibrated at the working distance. */
+    public static Rect fieldOf(int displayWidth, int displayHeight, double visibleFraction) {
+        Rect page = of(displayWidth, displayHeight, visibleFraction);
+        int height = page.height();
+        int width = Math.min(displayWidth, (int)Math.round(height * SENSOR_ASPECT));
+        int left = (displayWidth - width) / 2;
+        return new Rect(left, page.top(), left + width, page.bottom());
     }
 
     /**

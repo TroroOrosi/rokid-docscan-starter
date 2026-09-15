@@ -4,6 +4,7 @@ import android.app.Activity;
 import android.content.ContentResolver;
 import android.content.Context;
 import android.content.SharedPreferences;
+import android.os.PowerManager;
 import android.provider.Settings;
 import android.view.WindowManager;
 
@@ -69,9 +70,30 @@ final class DisplaySleep {
         if (!write(activity, SHORT_TIMEOUT_MILLIS)) {
             return Result.NOT_PERMITTED;
         }
-        prefs(activity).edit().putInt(KEY_PREVIOUS, previous).apply();
+        if (!prefs(activity).contains(KEY_PREVIOUS)) {
+            prefs(activity).edit().putInt(KEY_PREVIOUS, previous).apply();
+        }
         activity.getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         return Result.SLEEPING;
+    }
+
+    /** Public Android 12 wake-up path; the actual light state requires hardware observation. */
+    @SuppressWarnings("deprecation")
+    boolean wake(Activity activity) {
+        restore(activity);
+        activity.getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        PowerManager power = (PowerManager) activity.getSystemService(Context.POWER_SERVICE);
+        if (power == null) return false;
+        try {
+            PowerManager.WakeLock wake = power.newWakeLock(
+                    PowerManager.SCREEN_BRIGHT_WAKE_LOCK | PowerManager.ACQUIRE_CAUSES_WAKEUP,
+                    "docscan:answer-display");
+            wake.acquire(2000);
+            wake.release();
+            return true;
+        } catch (SecurityException refused) {
+            return false;
+        }
     }
 
     private boolean write(Context context, int millis) {

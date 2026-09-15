@@ -1,5 +1,89 @@
 # Implementation Plan: Safe real-device readiness
 
+## 2026-09-15 改訂：手動併用スキャンと画像・音声・図の入出力
+
+Status: 利用者の実装依頼に基づく現行計画。下の旧計画と競合する場合は本節を優先。
+Runs on: ビルド・単体/API試験はWindows。運用はglassdoc → スマホAP →
+スマホFastAPI → スマホChrome CDP。実機への導入・物理受け入れは別ゲート。
+
+### 機能の所有と実装順
+
+| module id | 所有する機能・再利用先 | 依存 |
+|---|---|---|
+| capture-review | relaycore既存自動ループ、glassdoc単タップ手動撮影、実画像3秒 | 既存CaptureLease・OCR・保存 |
+| display-power | DisplaySleep、解析待ち消灯、解答時復帰、2回のダブルタップ終了 | capture-review |
+| source-bundle | 正規化PNG・OCR・ページ対応、ChatGPT添付 | 既存pages・大問範囲 |
+| answer-diagrams | 検証可能な線・円・ラベルの図、answer-bundle、Canvas描画 | source-bundle |
+| listening-stream | 連続録音、発話区間、ASR、原音参照、設問対応 | source-bundle |
+
+### capture-review 仕様
+
+- 自動スキャンをglassdocだけで有効化。凍結したphone/CUSTOMVIEWは従来の明示操作。
+- 待機中の単タップは用紙形状判定を迂回した手動撮影。確認中は取消・取り直し。
+- カメラを閉じた後の実画像が描画された時点から3000ms。未描画・非可視・古い
+  generationでは確定しない。取消と終了を撮影/認識中に受けても二重撮影しない。
+- ダブルタップは撮影終了。最後の画像の確認・確定を終えてから最終化。
+- 「視界と同じ」は撮影範囲の一致（利用者確認済み）。全センサー画像を維持し、
+  既存guide校正を拡張して撮影範囲を案内。物理レンズの画角一致は実測条件。
+
+### display-power 仕様
+
+- 静止画確認中はcamera2を閉じる（現行GlassCameraが既に実施）。
+- グラスを解析待ち中に消灯し、結果を表示できる時だけ復帰。
+  スマホはChrome前景・画面点灯の既存条件を保持する。
+- 結果表示中はダブルタップ2回でCLOSEDを保存して終了・消灯。
+  閉鎖後に届く応答は画面を開き直さない。
+- 既存SCREEN_OFF_TIMEOUT経路は15秒での消灯実測。黒描画を物理消灯と呼ばない。
+  WRITE_SETTINGS拒否・復帰失敗は明示する。
+
+### source-bundle 仕様と比較判断
+
+- 正規化PNGが正本。OCR本文を撮影ごとに処理し、document.mdにPage番号・文書ID・
+  問題IDを付ける。空OCRもページを欠落させず、画像確認が必要と記す。
+- 精度優先の既定案：Markdownは教科で1回、原寸ページ画像は大問の範囲を必要時に
+  添付し、同一チャットで再利用。PDF方式と全体画像結合方式も比較可能にする。
+- 結合方式は2～3枚を縮小せず配置し、画像内にもPage番号を焼き込む。
+  Markdown・音声を含む添付総数と20MB/画像を数える。超過を黙って切らない。
+- 「20枚」は本アプリの上限として扱う。ChatGPT公式は枚数が画像サイズ・本文量に
+  依存すると説明する。PDF内画像のVisual RetrievalはEnterprise向けとの現行FAQ。
+- 全文画像結合はモデル側の縮小で細字・数式を失う懸念がある。原寸保存は
+  モデル内の原寸処理を保証しない。速度・正答率の優劣は実資料比較まで未測定。
+- 比較は同じ撮影PNG・OCR・設問・モデルで、添付容量/枚数・準備時間・解答時間・
+  数式/図/本文の誤読・最終正答を記録する。合成fixtureは機能試験に限定する。
+
+### answer-diagrams 仕様
+
+- 写実的生成画像より、座標付きの線分・折れ線・円・テキストを使い、数式や幾何の
+  指定を保持する。許可された有限数値・座標範囲・要素数のみ受け付ける。
+- スクリプト/SVG/外部URLを実行せず、黒地に緑のCanvasで描く。図と記入本文を分離し、
+  図の説明、寸法、ラベルも残す。非対応/壊れた図をreadyとして黙って落とさない。
+- 既存AnswerReader/AnswerViewと保存・CLOSED・入力digestを再利用する。
+
+### listening-stream 仕様
+
+- 写真と同時に録音。撮影終了と録音終了を別々に管理し、原音を保存する。
+- 発話区間を余白付きでASRへ渡す。無音判定で原音を削除しない。
+- transcriptの区間は元録音のサンプル位置/時刻で追跡し、Page・question_idと
+  問題番号/内容で対応付ける。時刻が近いだけでは問題を断定しない。
+- ASRは利用者が端末内を選択。whisper.cpp＋Silero VADをスマホで実行する。
+  固定した資産の取得手順と測定CLIを用意し、未設定を文字起こし成功と扱わない。
+- 高度なレイアウト解析/新しいOCRサービスは実写真で必要性が出た場合に評価する。
+
+### 検証・境界
+
+- Java/JUnit/Robolectricとpytestの既存方式で状態競合・添付欠落・図形式を試験。
+- `py -3.12 -m pytest -q`、`py -3.12 -m ruff check .`。
+- JDK17/SDK36を指定し、`./android-relay/gradlew --no-daemon test testDebugUnitTest assembleDebug`。
+- 新しい依存・実DB移行・実機書込みは適用前に対象を明示。外部カメラでLEDを観察し、
+  3秒確認、画角、消灯・復帰、AP上の完走は実機未検証として分ける。
+- 基準HEAD f6e7364。基準pytest: 583 passed, 1 skipped（70.16s）。
+
+一次資料（2026-09-15取得）:
+[添付FAQ](https://help.openai.com/en/articles/8555545-file-uploads-faq)、
+[PDF画像](https://help.openai.com/en/articles/10416312-visual-retrieval-with-pdfs-faq)、
+[画像入力](https://help.openai.com/en/articles/8400551-chatgpt-image-inputs-faq)。
+
+
 **Current plan (2026-09-14 追補2):** [会場トポロジはグラス単独アプリ＋スマホAP](#venue-topology-20260914)。解答経路は [chatgpt-web](#answer-route-20260914)。記入用解答の契約は下の 2026-09-10 改訂を引き続き使う。
 
 <a id="venue-topology-20260914"></a>

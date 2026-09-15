@@ -272,6 +272,7 @@ def upload_plan(
     images: list[bytes],
     audio: tuple[str, bytes] | None = None,
     bundle_pdf: bool | None = None,
+    files: list[dict] | None = None,
 ) -> list[tuple[str, list[dict]]]:
     """What to upload, and which input takes each part.
 
@@ -293,6 +294,15 @@ def upload_plan(
             ))
     if audio:
         plan.append((FILE_UPLOAD_SEL, [audio_payload(*audio)]))
+    for item in files or []:
+        selector = FILE_INPUT_SEL if item["mimeType"].startswith("image/") else FILE_UPLOAD_SEL
+        existing = next((payloads for target, payloads in plan if target == selector), None)
+        if existing is None:
+            plan.append((selector, [item]))
+        else:
+            existing.append(item)
+    if sum(len(payloads) for _, payloads in plan) > 20:
+        raise ChatGptWebError("attachment count exceeds the application's 20-file budget")
     return plan
 
 
@@ -306,6 +316,7 @@ def attach_images(
     poll_s: float | None = None,
     sleep=time.sleep,
     now=time.monotonic,
+    files: list[dict] | None = None,
 ) -> bool:
     """Attach every page of the question; return whether ALL uploads confirmed.
 
@@ -324,7 +335,7 @@ def attach_images(
     and losing the whole answer over an unconfirmed preview is worse than
     sending and recording that it was unconfirmed.
     """
-    plan = upload_plan(images, audio, bundle_pdf)
+    plan = upload_plan(images, audio, bundle_pdf, files)
     if not plan:
         return False
     timeout_s = UPLOAD_TIMEOUT_S if timeout_s is None else timeout_s
@@ -621,6 +632,7 @@ class ChatGptWebClient:
         audio: tuple[str, bytes] | None = None,
         bundle_pdf: bool | None = None,
         chat_key: str | None = None,
+        files: list[dict] | None = None,
     ) -> str:
         # `image` keeps the single-page LLMClient shape; `images` carries a 大問
         # that spans pages. Either way the pages travel as attachments and the
@@ -652,6 +664,7 @@ class ChatGptWebClient:
                 audio=audio,
                 bundle_pdf=bundle_pdf,
                 chat_key=chat_key,
+                files=files,
             )
         finally:
             browser.close()
@@ -665,6 +678,7 @@ class ChatGptWebClient:
         audio: tuple[str, bytes] | None = None,
         bundle_pdf: bool | None = None,
         chat_key: str | None = None,
+        files: list[dict] | None = None,
     ) -> str:
         """One question, retried on a flake, each attempt in its own fresh chat.
 
@@ -694,6 +708,8 @@ class ChatGptWebClient:
                 else:
                     composer = wait_for_composer(page)
                 pending = [p for p in pages if _digest(p) not in self._attached_in_chat]
+                pending_files = [f for f in (files or [])
+                                 if _digest(f["buffer"]) not in self._attached_in_chat]
                 # The recording is one more attachment on the same message, and
                 # it is deduplicated the same way: a listening 大問 uploads its
                 # audio once per chat, not once per 小問.
@@ -702,25 +718,29 @@ class ChatGptWebClient:
                 )
                 attached = (
                     attach_images(
-                        page, pending, audio=pending_audio, bundle_pdf=bundle_pdf, poll_s=POLL_S
+                        page, pending, audio=pending_audio, bundle_pdf=bundle_pdf, poll_s=POLL_S,
+                        files=pending_files,
                     )
-                    if (pending or pending_audio)
+                    if (pending or pending_audio or pending_files)
                     else None
                 )
-                if (pages or audio) and not (pending or pending_audio):
+                if (pages or audio or files) and not (pending or pending_audio or pending_files):
                     # Already in this chat from an earlier 小問 of the same 大問.
                     attached = True
-                if (pages or audio) and attached is not True and attempt < ATTEMPTS:
+                if (pages or audio or files) and attached is not True and attempt < ATTEMPTS:
                     # Decided BEFORE the send. The earlier order asked the
                     # question, threw the answer away and asked again, so one
                     # moved thumbnail selector cost three generations a
                     # question -- the load that got the account limited.
                     last_error = ChatGptWebError("page images never confirmed as attached")
                     continue
+                if files and attached is not True:
+                    raise ChatGptWebError("source attachments were not confirmed; no question sent")
                 reply = send_and_read(page, text, composer=composer)
                 self._attached_in_chat.update(_digest(p) for p in pending)
                 if pending_audio:
                     self._attached_in_chat.add(_digest(pending_audio[1]))
+                self._attached_in_chat.update(_digest(f["buffer"]) for f in pending_files)
                 self.last_image_attached = attached
                 return reply
             except ChatGptWebRateLimit:
@@ -745,6 +765,7 @@ class ChatGptWebClient:
         audio: tuple[str, bytes] | None = None,
         bundle_pdf: bool | None = None,
         chat_key: str | None = None,
+        files: list[dict] | None = None,
     ) -> dict:
         return extract_json(
             self.complete(
@@ -755,6 +776,7 @@ class ChatGptWebClient:
                 audio=audio,
                 bundle_pdf=bundle_pdf,
                 chat_key=chat_key,
+                files=files,
             )
         )
 
@@ -814,6 +836,41 @@ class ChatGptWebSolver(LLMSolver):
         the primary page. A 大問 that spans pages keeps its passage on one page
         and its figures on another, and the question is usually about the figure.
         """
+        if question.document_pages:
+            from ..source_bundle import source_bundle  # noqa: PLC0415
+
+            mode = os.environ.get("ROKID_CHATGPT_INPUT_MODE", "ocr-images")
+            audio = _read_audio(question)
+            if question.audio_path and not audio:
+                raise ChatGptWebError("original listening audio unavailable")
+            files = source_bundle(
+                question.document_pages, page_numbers=question.page_numbers,
+                document_id=question.document_id, transcript=question.audio_transcript, mode=mode,
+                max_files=19 if audio else 20,
+            )
+            if audio:
+                files.append(audio_payload(*audio))
+            instructions = (
+                "Use document.md as the primary text source. Check the matching Page images "
+                "for layout, diagrams, graphs, formulas and uncertain OCR. If OCR and the "
+                "image disagree, verify the image; do not invent missing material. "
+                "Page numbers are capture order. Associate audio by question number and "
+                "content, never by timestamp alone. The original recording is attached for "
+                "uncertain ASR, stress, pronunciation and emotion. Do not claim to have checked "
+                "audio if it is unreadable; return needs_input for questions requiring it. "
+            ) if mode != "pdf" else "Use the attached booklet PDF. "
+            prompt = (instructions + f"Solve {question.question_no or 'the question'}; "
+                      f"question_id={question.question_id}; Pages {question.page_numbers}. "
+                      f"Question locator: {(question.body_text or '')[:400]}\n"
+                      + (question.retry_hint or ""))
+            # A retake or transcript correction starts a new evidence context.
+            identity = _digest(json.dumps(question.document_pages, sort_keys=True,
+                                          ensure_ascii=False).encode()
+                               + question.audio_transcript.encode()
+                               + (_digest(audio[1]).encode() if audio else b""))
+            key = chat_key_for(question)
+            return client.complete_json(system=system, prompt=prompt, files=files,
+                                        chat_key=f"{key}:{identity}" if key else None)
         booklet = getattr(question, "document_image_paths", None) or []
         if booklet:
             # One PDF of the whole paper, attached once per chat, and a prompt

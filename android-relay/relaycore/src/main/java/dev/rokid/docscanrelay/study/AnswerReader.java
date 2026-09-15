@@ -14,6 +14,8 @@ public final class AnswerReader {
     private int lines;
     private AnswerLayout.Measurer measurer;
     private List<AnswerLayout.Page> pages;
+    private int textPageCount;
+    private int contentLength;
     private Screen screen = Screen.ANSWER;
     private int menuIndex;
     private String menuGroup;
@@ -28,8 +30,17 @@ public final class AnswerReader {
     public Screen screen() { return screen; }
     public int offset() { return anchorOffset; }
     public int pageNumber() { return pageIndex + 1; }
-    public int pageCount() { return pages.size(); }
-    public AnswerLayout.Page page() { return pages.get(pageIndex); }
+    public int pageCount() { return textPageCount + current().diagrams.size(); }
+    public AnswerLayout.Page page() { return pages.get(Math.min(pageIndex, pages.size()-1)); }
+    public AnswerDiagram diagram() {
+        return screen == Screen.ANSWER && pageIndex >= textPageCount
+                ? current().diagrams.get(pageIndex - textPageCount) : null;
+    }
+
+    private int pageStart() {
+        return pageIndex < textPageCount ? pages.get(pageIndex).start
+                : contentLength + 1 + pageIndex - textPageCount;
+    }
 
     public void viewport(float width, int lines, AnswerLayout.Measurer measurer) {
         this.width = width;
@@ -50,9 +61,16 @@ public final class AnswerReader {
             case FAILED: content = "解析できません\n" + item.issue; break;
             default: content = "解析中"; break;
         }
+        for (int i = 0; i < item.diagrams.size(); i++) content += item.diagrams.get(i).readingText(i + 1);
         pages = AnswerLayout.paginate(content, width, lines, measurer);
+        contentLength = content.length();
+        textPageCount = content.isEmpty() && !item.diagrams.isEmpty() ? 0 : pages.size();
         pageIndex = 0;
-        while (pageIndex + 1 < pages.size() && pages.get(pageIndex).end <= anchorOffset) pageIndex++;
+        if (anchorOffset > contentLength && !item.diagrams.isEmpty()) {
+            pageIndex = textPageCount + Math.min(item.diagrams.size()-1, anchorOffset-contentLength-1);
+        } else {
+            while (pageIndex + 1 < textPageCount && pages.get(pageIndex).end <= anchorOffset) pageIndex++;
+        }
     }
 
     public boolean accept(AnswerBundle next) {
@@ -68,7 +86,8 @@ public final class AnswerReader {
         }
         boolean changed = !current().answer.equals(next.items.get(questionIndex).answer)
                 || current().status != next.items.get(questionIndex).status
-                || !current().issue.equals(next.items.get(questionIndex).issue);
+                || !current().issue.equals(next.items.get(questionIndex).issue)
+                || !current().diagrams.equals(next.items.get(questionIndex).diagrams);
         bundle = next;
         if (changed) reflow();
         return true;
@@ -78,8 +97,9 @@ public final class AnswerReader {
         for (int i = 0; i < bundle.items.size(); i++) {
             if (bundle.items.get(i).questionId.equals(questionId)) {
                 questionIndex = i;
-                anchorOffset = Math.max(0, Math.min(offset, current().answer.length()));
+                anchorOffset = Math.max(0, offset);
                 reflow();
+                anchorOffset = Math.min(anchorOffset, contentLength + current().diagrams.size());
                 return;
             }
         }
@@ -88,8 +108,9 @@ public final class AnswerReader {
     public void forward() {
         if (screen != Screen.ANSWER) {
             menuIndex = Math.min(menuIndex + 1, menuChoices().size() - 1);
-        } else if (pageIndex + 1 < pages.size()) {
-            anchorOffset = pages.get(++pageIndex).start;
+        } else if (pageIndex + 1 < pageCount()) {
+            pageIndex++;
+            anchorOffset = pageStart();
         } else if (questionIndex + 1 < bundle.items.size()) {
             questionIndex++;
             anchorOffset = 0;
@@ -101,12 +122,13 @@ public final class AnswerReader {
         if (screen != Screen.ANSWER) {
             menuIndex = Math.max(menuIndex - 1, 0);
         } else if (pageIndex > 0) {
-            anchorOffset = pages.get(--pageIndex).start;
+            pageIndex--;
+            anchorOffset = pageStart();
         } else if (questionIndex > 0) {
             questionIndex--;
             reflow();
-            pageIndex = pages.size() - 1;
-            anchorOffset = page().start;
+            pageIndex = pageCount() - 1;
+            anchorOffset = pageStart();
         }
     }
 

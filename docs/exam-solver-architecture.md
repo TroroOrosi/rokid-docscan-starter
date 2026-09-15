@@ -194,18 +194,20 @@ exam-session(document_id, exam_type, answer_format)
 
 利用者のログイン済み ChatGPT ウェブセッションを、起動済み Chrome の DevTools
 プロトコル（`ROKID_CHATGPT_CDP`、既定 `http://127.0.0.1:9222`）経由で操作します。
-Playwright は使いますが `playwright install` は不要です（実ブラウザに接続するため）。
+`app/solvers/cdp.py`がCDPを直接話します。Playwrightのドライバは使いません。
 
-- **チャットの粒度** — `ROKID_CHATGPT_CHAT_SCOPE`。既定 `question` は小問ごとに
-  新しいチャットを開き、前の解答が文脈に混ざらないようにします。`subject` は
+- **チャットの粒度** — `ROKID_CHATGPT_CHAT_SCOPE`。`question` は小問ごとに
+  新しいチャットを開き、前の解答が文脈に混ざらないようにします。既定の`subject` は
   サーバが渡す `Question.chat_key` で 1 チャットを保ちます。現在の鍵は
   **exam セッション**（`session:{id}` ＝ 1 冊＝ 1 科目）で、行ごとの
   `detect_subject` ではありません。ページを 1 回添付すればそのチャットの間ずっと
   残るので、小問ごとに上げ直さずに済みます。
-- **冊子の一括添付** — `app/page_pdf.py` の `images_to_pdf()` が撮影ページを 1 つの
-  PDF に束ね、`GET /v1/exam-sessions/{id}/pages.pdf` が配信します。
-  `Question.document_image_paths` があるとソルバーは PDF 経路を選びます
-  （`ROKID_CHATGPT_BUNDLE_PDF` は手動の上書き）。
+- **資料の添付** — 既定は全文OCR Markdown＋対象大問のページ画像です。
+  `ROKID_CHATGPT_INPUT_MODE=merged-images|pdf`で同じ資料の比較ができます。
+  リスニングの原音を含め20添付を数え、未確認添付のまま質問を送りません。
+  図は検証したベクトルを保存し、answer-bundle schema 2で配送します。
+  録音はglassdoc、端末内VAD/ASRはスマホ。設定とAPIは
+  [現行手順](multimodal-scan.md)を参照してください。
 - **タブの再利用** — 質問ごとに `chatgpt.com` を読み込み直さず、1 枚のタブを使い回します。
 - **使用制限への防御** — 制限はメッセージ本文で通知され例外になりません。
   `ROKID_CHATGPT_RATE_LIMIT_MARKERS` に当たった返答は即座に打ち切り、再試行しません。

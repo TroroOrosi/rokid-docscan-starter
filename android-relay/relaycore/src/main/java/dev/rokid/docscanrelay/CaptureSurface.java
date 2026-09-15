@@ -39,6 +39,12 @@ public interface CaptureSurface {
 
     long showCaptureReview(byte[] jpeg, int rotationDegrees, List<String> lines);
 
+    /** Only an app-owned surface with verified gestures may register automatically. */
+    default boolean supportsLocalCaptureReview() { return false; }
+
+    /** True only while this exact still remains visible, not merely requested. */
+    default boolean isCaptureReviewVisible(long generation) { return false; }
+
     /**
      * Retires an ambiguous view callback stream after an acknowledgement
      * timeout. An implementation that owns its own display has nothing to

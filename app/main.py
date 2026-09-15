@@ -26,6 +26,7 @@ from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse, Response
 from PIL import Image, UnidentifiedImageError
 from pydantic import BaseModel
+from starlette.concurrency import run_in_threadpool
 
 from . import config, db
 from .audio_formats import safe_audio_suffix
@@ -445,6 +446,7 @@ async def add_page(
     page_index: int = Form(...),
     image: UploadFile | None = File(None),
     image_rotation: int = Form(0),
+    captured_at_ms: int = Form(0, ge=0),
     ocr_text: str | None = Form(None),
     vision_text: str | None = Form(None),
     total_pages: int | None = Form(None),
@@ -525,7 +527,7 @@ async def add_page(
                 )
             updated = conn.execute(
                 "UPDATE pages SET image_path = ?, phash = ?, ocr_text = ?, "
-                "vision_text = ?, ocr_md5 = ?, summary = NULL WHERE id = ? "
+                "vision_text = ?, ocr_md5 = ?, captured_at_ms = ?, summary = NULL WHERE id = ? "
                 "AND NOT EXISTS ("
                 "  SELECT 1 FROM exam_sessions "
                 "  WHERE document_id = ? AND status = 'reviewing'"
@@ -536,6 +538,7 @@ async def add_page(
                     ocr_text,
                     vision_text,
                     omd5,
+                    captured_at_ms or None,
                     existing["id"],
                     document_id,
                 ),
@@ -571,8 +574,8 @@ async def add_page(
                 cur = conn.execute(
                     """INSERT INTO pages
                        (document_id, page_index, image_path, phash, ocr_text,
-                        vision_text, ocr_md5)
-                       SELECT ?, ?, ?, ?, ?, ?, ?
+                        vision_text, ocr_md5, captured_at_ms)
+                       SELECT ?, ?, ?, ?, ?, ?, ?, ?
                        WHERE EXISTS (
                            SELECT 1 FROM documents
                            WHERE id = ? AND status = 'open'
@@ -585,6 +588,7 @@ async def add_page(
                         ocr_text,
                         vision_text,
                         omd5,
+                        captured_at_ms or None,
                         document_id,
                     ),
                 )
@@ -2127,6 +2131,76 @@ def exam_set_mode(session_id: int, payload: ExamMode) -> dict:
         conn.close()
 
 
+@app.get("/v1/listening-ready")
+def listening_ready() -> dict:
+    from .local_asr import local_asr_settings
+
+    try:
+        local_asr_settings()
+    except ValueError as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
+    return {"ready": True, "asr": "whisper.cpp", "sample_rate": 16000}
+
+
+@app.post("/v1/documents/{document_id}/audio-chunks")
+async def document_audio_chunk(
+    document_id: int, sequence: int = Form(...), start_sample: int = Form(...),
+    captured_at_ms: int = Form(...), audio: UploadFile = File(...),
+) -> dict:
+    from .listening import store_chunk
+
+    with db.connect() as conn:
+        _doc_or_404(conn, document_id)
+    raw = await _read_upload_limited(audio)
+    try:
+        result = await run_in_threadpool(store_chunk, document_id, sequence, start_sample, captured_at_ms, raw)
+        # Transcript contents remain on the server; the glasses need only progress/timing.
+        return {"sequence": result["sequence"], "samples": result["samples"],
+                "asr_seconds": result["asr_seconds"], "real_time_factor": result["real_time_factor"]}
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+
+class CompleteRecording(BaseModel):
+    expected_chunks: int
+    total_samples: int
+
+
+@app.post("/v1/documents/{document_id}/audio-complete")
+def document_audio_complete(document_id: int, payload: CompleteRecording) -> dict:
+    from .listening import complete_recording
+
+    with db.connect() as conn:
+        _doc_or_404(conn, document_id)
+    try:
+        result = complete_recording(document_id, payload.expected_chunks, payload.total_samples)
+        return {"status": "complete", "chunks": result["chunks"], "total_samples": result["total_samples"]}
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+
+@app.post("/v1/exam-sessions/{session_id}/document-audio")
+def exam_document_audio(session_id: int) -> dict:
+    from .listening import recording_transcript
+
+    with db.connect() as conn:
+        session = _exam_session_or_404(conn, session_id)
+        doc_id = _require_document_exam(session)
+        if session["exam_type"] != "listening":
+            raise HTTPException(status_code=409, detail="listening session required")
+        try:
+            path, text = recording_transcript(doc_id)
+        except ValueError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        updated = conn.execute(
+            "UPDATE exam_sessions SET audio_path = ?, transcript = ? WHERE id = ? "
+            "AND (status != 'reviewing' OR (audio_path = ? AND transcript = ?))",
+            (path, text, session_id, path, text))
+        if updated.rowcount != 1:
+            raise HTTPException(status_code=409, detail="reviewed audio is immutable; start a new document")
+        return {"status": "complete", "audio_stored": True}
+
+
 @app.post("/v1/exam-sessions/{session_id}/audio")
 async def exam_upload_audio(
     session_id: int,
@@ -2154,6 +2228,8 @@ async def exam_upload_audio(
         session = _exam_session_or_404(conn, session_id)
 
         old_audio_path: str | None = session["audio_path"]
+        if session["status"] == "reviewing" or (old_audio_path and Path(old_audio_path).with_name("complete.json").is_file()):
+            raise HTTPException(status_code=409, detail="reviewed or completed original audio is immutable; start a new document")
         audio_path: str | None = None
         if audio is not None and getattr(audio, "filename", None):
             raw = await _read_upload_limited(audio)
@@ -2166,10 +2242,13 @@ async def exam_upload_audio(
             audio_path = str(fpath)
 
         text = transcribe_audio(audio_path, provided_transcript=transcript)
-        conn.execute(
-            "UPDATE exam_sessions SET audio_path = ?, transcript = ? WHERE id = ?",
-            (audio_path, text, session_id),
+        updated = conn.execute(
+            "UPDATE exam_sessions SET audio_path = ?, transcript = ? WHERE id = ? AND status != 'reviewing' "
+            "AND audio_path IS ? AND transcript IS ?",
+            (audio_path, text, session_id, old_audio_path, session["transcript"]),
         )
+        if updated.rowcount != 1:
+            raise HTTPException(status_code=409, detail="reviewed audio is immutable; start a new document")
         conn.commit()
         audio_persisted = pending_audio_path is not None
         if old_audio_path and old_audio_path != audio_path:
@@ -2325,6 +2404,24 @@ def _document_image_paths(conn, doc_id: int) -> list[str]:
     return [r["image_path"] for r in rows if r["image_path"]]
 
 
+def _document_source_pages(conn, doc_id: int, session_id: int) -> list[dict]:
+    refs: dict[int, list[str]] = {}
+    for question in _deck_question_rows(conn, session_id):
+        for index in _row_page_indexes(question):
+            refs.setdefault(index, []).append(f"q{question['id']}")
+    return [
+        {"page_number": row["page_index"] + 1, "image_path": row["image_path"],
+         "image_sha256": hashlib.sha256(Path(row["image_path"]).read_bytes()).hexdigest()
+         if row["image_path"] and Path(row["image_path"]).is_file() else "missing",
+         "ocr_text": row["ocr_text"] or "", "vision_text": row["vision_text"] or "",
+         "question_ids": refs.get(row["page_index"], []),
+         "captured_at": row["captured_at_ms"] or "unknown; server received at " + row["created_at"]}
+        for row in conn.execute(
+            "SELECT * FROM pages WHERE document_id = ? ORDER BY page_index", (doc_id,)
+        )
+    ]
+
+
 def _group_page_indexes(conn, session_id: int) -> dict[int, list[int]]:
     """Per deck row: the pages of its own 大問, for solver context narrowing.
 
@@ -2346,13 +2443,29 @@ def _group_page_indexes(conn, session_id: int) -> dict[int, list[int]]:
 
 
 def _answer_bundle_item(conn, group: dict, row) -> dict:
+    from .answer_diagrams import validate_diagrams
+
     sol = _latest_solution_row(conn, row["id"])
     raw = (sol["answer"] or "").strip() if sol is not None else ""
     display = to_display_answer(raw)
     answer = display.text
+    diagram_error = False
+    try:
+        diagrams = validate_diagrams(json.loads(sol["diagrams_json"] or "[]")) if sol else []
+    except (ValueError, TypeError):
+        diagrams, diagram_error = [], True
+    try:
+        metadata = json.loads(sol["answer_metadata_json"] or "{}") if sol else {}
+        needs_input = metadata.get("answer_status") == "needs_input"
+    except (ValueError, TypeError, AttributeError):
+        metadata, needs_input = {}, False
     if sol is None:
         status, issue = "pending", "未解答"
-    elif not answer:
+    elif needs_input:
+        status, issue = "needs_input", str(metadata.get("missing_material") or "資料が不足しています")[:1000]
+    elif diagram_error:
+        status, issue = "needs_review" if answer else "failed", "図の形式を表示できません"
+    elif not answer and not diagrams:
         status, issue = "failed", "解答本文がありません"
     elif display.complete:
         status, issue = "ready", ""
@@ -2370,6 +2483,7 @@ def _answer_bundle_item(conn, group: dict, row) -> dict:
         "answer": answer if status in ("ready", "needs_review") else "",
         "status": status,
         "issue": issue,
+        **({"diagrams": diagrams} if diagrams else {}),
     }
 
 
@@ -2393,6 +2507,12 @@ def _answer_input_digest(conn, session) -> str:
         material = "\n".join(
             str(r["id"]) for r in _deck_question_rows(conn, session["id"])
         )
+    if session["audio_path"] or session["transcript"]:
+        audio_digest = "missing"
+        if session["audio_path"] and Path(session["audio_path"]).is_file():
+            with Path(session["audio_path"]).open("rb") as audio:
+                audio_digest = hashlib.file_digest(audio, "sha256").hexdigest()
+        material += "\naudio:" + audio_digest + "\ntranscript:" + (session["transcript"] or "")
     return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
@@ -2648,6 +2768,7 @@ def exam_finalize_reading(session_id: int) -> dict:
             # not the whole document: every prompt is prefilled per question, so
             # the whole booklet per 小問 is paid for once per 小問.
             page_windows = _group_page_indexes(conn, session_id)
+            source_pages = _document_source_pages(conn, doc_id, session_id)
             for row in _deck_question_rows(conn, session_id):
                 if _latest_solution_row(conn, row["id"]) is not None:
                     continue
@@ -2686,6 +2807,10 @@ def exam_finalize_reading(session_id: int) -> dict:
                             # The whole booklet, attached once per chat, and
                             # where this question sits inside it.
                             document_image_paths=_document_image_paths(conn, doc_id),
+                            document_pages=source_pages,
+                            document_id=str(doc_id),
+                            audio_transcript=session["transcript"] or "",
+                            question_id=f"q{row['id']}",
                             page_numbers=[i + 1 for i in (window or [])],
                             # What the operator writes on the answer sheet, and
                             # nothing else. This is the documented contract
@@ -2721,8 +2846,8 @@ def exam_finalize_reading(session_id: int) -> dict:
                            (question_id, solver_name, answer, solution_steps_json,
                             rationale, cautions, answer_conf, rationale_conf,
                             evidence_pages_json, evidence_refs_json,
-                            raw_reasoning, served_by)
-                           SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                            raw_reasoning, served_by, diagrams_json, answer_metadata_json)
+                           SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                            WHERE NOT EXISTS
                                (SELECT 1 FROM solutions WHERE question_id = ?)""",
                         (
@@ -2738,6 +2863,8 @@ def exam_finalize_reading(session_id: int) -> dict:
                             _evidence_refs_storage_value(result),
                             result.raw_reasoning,
                             served_by,
+                            json.dumps(result.diagrams, ensure_ascii=False),
+                            json.dumps({k: result.extras.get(k) for k in ("answer_status", "missing_material")}, ensure_ascii=False),
                             row["id"],
                         ),
                     )
@@ -3051,7 +3178,7 @@ def exam_answer_bundle(session_id: int) -> dict:
             for row in group["items"]
         ]
         return {
-            "schema_version": 1,
+            "schema_version": 2 if any(i.get("diagrams") for i in items) else 1,
             "session_id": str(session_id),
             "input_digest": _answer_input_digest(conn, session),
             "revision": _answer_revision(conn, session_id),

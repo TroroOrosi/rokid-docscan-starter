@@ -25,7 +25,7 @@ public final class AnswerStore {
         private Saved(AnswerBundle bundle, String questionId, int offset, boolean closed) {
             boolean found = false;
             for (AnswerItem item : bundle.items) if (item.questionId.equals(questionId)) found = true;
-            if (!found || offset < 0 || offset > 200_000) throw new IllegalArgumentException("invalid reader cursor");
+            if (!found || offset < 0 || offset > 250_000) throw new IllegalArgumentException("invalid reader cursor");
             this.bundle = bundle;
             this.questionId = questionId;
             this.offset = offset;

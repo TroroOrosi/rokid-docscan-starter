@@ -21,6 +21,7 @@ import unicodedata
 from pathlib import Path
 
 from ..llm import LLMClient, LLMConfigError, clamp01, get_client
+from ..answer_diagrams import validate_diagrams
 from .base import Question, SolveResult, Solver
 
 _SYSTEM = (
@@ -53,7 +54,18 @@ _ANSWER_ONLY_SYSTEM = (
     "question explicitly requests a proof, reason or derivation, include that complete "
     "written response in answer. Never shorten an answer to fit a display. "
     "If required material is missing or unreadable, return status needs_input, an "
-    "empty answer and identify the missing material separately; do not guess."
+    "empty answer and identify the missing material separately; do not guess. "
+    "For questions requiring a drawing, include diagrams (array, at most 4). Each has "
+    "alt (description <=500 characters), aspect_ratio (width/height, 0.25..4), elements "
+    "(1..128). Supported elements ONLY: {type:'line',x1,y1,x2,y2}, "
+    "{type:'polyline',points:[[x,y],...]}, {type:'circle',cx,cy,r}, "
+    "{type:'text',x,y,text}. All coordinates are 0..1, origin top left. Circle r is "
+    "relative to the shorter side. Keep all geometry and labels inside margins. "
+    "Text labels <=80 characters, polyline <=256 points. Preserve mathematical "
+    "scale and geometry; add axes, units and labels where required. No SVG, images, "
+    "URLs or Markdown image references. Use an empty diagrams array for text answers. "
+    "A drawing-only answer may have empty answer text. If the required drawing "
+    "cannot be represented faithfully, return needs_input with the limitation."
 )
 
 # Short, subject-tailored solving guidance appended to the user prompt so the
@@ -212,11 +224,13 @@ class LLMSolver(Solver):
             if status not in ("ready", "needs_input"):
                 raise ValueError("invalid answer-sheet status")
             answer = data.get("answer")
-            if status == "ready" and (not isinstance(answer, str) or not answer.strip()):
+            diagrams = validate_diagrams(data.get("diagrams", []))
+            if status == "ready" and (not isinstance(answer, str) or not (answer.strip() or diagrams)):
                 raise ValueError("written answer must be a non-empty string")
             return SolveResult(
                 answer=answer.strip() if status == "ready" else "",
                 subject=question.subject,
+                diagrams=diagrams if status == "ready" else [],
                 extras={"source": self.name, "provider": self.provider, "model": client.model,
                         "answer_status": status,
                         "missing_material": str(data.get("missing_material", ""))

@@ -56,6 +56,9 @@ final class GlassCamera {
     private ImageReader reader;
     private long startedAtMillis;
     private boolean settled;
+    private boolean closed;
+    private boolean unknown;
+    private long generation;
 
     private final Runnable timeout = () -> fail("CAMERA TIMEOUT");
 
@@ -68,6 +71,13 @@ final class GlassCamera {
     /** Opens the rear camera and captures exactly one JPEG at its largest size. */
     @RequiresPermission(Manifest.permission.CAMERA)
     void captureOnce() {
+        handler.post(this::captureOnHandler);
+    }
+
+    @RequiresPermission(Manifest.permission.CAMERA)
+    private void captureOnHandler() {
+        if (closed || unknown || (generation > 0 && !settled)) return;
+        long current = ++generation;
         settled = false;
         startedAtMillis = SystemClock.elapsedRealtime();
         CameraManager manager =
@@ -89,9 +99,11 @@ final class GlassCamera {
             }
             reader = ImageReader.newInstance(
                     size.getWidth(), size.getHeight(), ImageFormat.JPEG, 1);
-            reader.setOnImageAvailableListener(this::onImageAvailable, handler);
+            reader.setOnImageAvailableListener(source -> {
+                if (current == generation && !closed && !settled) onImageAvailable(source);
+            }, handler);
             handler.postDelayed(timeout, CAPTURE_TIMEOUT_MILLIS);
-            manager.openCamera(id, deviceCallback(), handler);
+            manager.openCamera(id, deviceCallback(current), handler);
         } catch (CameraAccessException | RuntimeException error) {
             // SecurityException is a RuntimeException, so a refused CAMERA
             // permission lands here too.
@@ -100,45 +112,55 @@ final class GlassCamera {
     }
 
     void close() {
-        handler.removeCallbacks(timeout);
-        release();
+        handler.post(() -> {
+            closed = true;
+            settled = true;
+            generation++;
+            handler.removeCallbacks(timeout);
+            release();
+        });
     }
 
-    private CameraDevice.StateCallback deviceCallback() {
+    private CameraDevice.StateCallback deviceCallback(long current) {
         return new CameraDevice.StateCallback() {
             @Override
             public void onOpened(CameraDevice opened) {
+                if (closed || settled || current != generation) { opened.close(); return; }
                 device = opened;
-                configureSession();
+                configureSession(current);
             }
 
             @Override
             public void onDisconnected(CameraDevice disconnected) {
+                if (closed || settled || current != generation) { disconnected.close(); return; }
                 device = disconnected;
                 fail("camera disconnected");
             }
 
             @Override
             public void onError(CameraDevice errored, int error) {
+                if (closed || settled || current != generation) { errored.close(); return; }
                 device = errored;
                 fail("camera error " + error);
             }
         };
     }
 
-    private void configureSession() {
+    private void configureSession(long current) {
         try {
             device.createCaptureSession(
                     Collections.singletonList(reader.getSurface()),
                     new CameraCaptureSession.StateCallback() {
                         @Override
                         public void onConfigured(CameraCaptureSession configured) {
+                            if (closed || settled || current != generation) { configured.close(); return; }
                             session = configured;
                             requestStill();
                         }
 
                         @Override
                         public void onConfigureFailed(CameraCaptureSession failed) {
+                            if (closed || settled || current != generation) { failed.close(); return; }
                             session = failed;
                             fail("session refused");
                         }
@@ -202,6 +224,7 @@ final class GlassCamera {
             return;
         }
         settled = true;
+        unknown = true;
         handler.removeCallbacks(timeout);
         release();
         Log.w(TAG, "capture failed: " + reason);
