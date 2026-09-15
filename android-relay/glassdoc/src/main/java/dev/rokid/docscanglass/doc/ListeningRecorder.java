@@ -3,7 +3,11 @@ package dev.rokid.docscanglass.doc;
 import android.Manifest;
 import android.media.AudioFormat;
 import android.media.AudioRecord;
+import android.media.AudioManager;
+import android.media.AudioRecordingConfiguration;
 import android.media.MediaRecorder;
+import android.os.Build;
+import android.os.SystemClock;
 import androidx.annotation.RequiresPermission;
 import dev.rokid.docscanrelay.DocScanApi;
 import java.io.File;
@@ -26,7 +30,11 @@ import java.util.concurrent.Future;
 
 /** PCM originals are written before upload; one upload queue runs alongside recording/capture. */
 final class ListeningRecorder implements AutoCloseable {
+    static final class DocumentPending extends IOException {
+        DocumentPending() { super("接続を待っています。録音は保存済みです"); }
+    }
     private static final int RATE = 16000, CHUNK = RATE * 30, OVERLAP = RATE;
+    private static final long INPUT_STALL_MILLIS = 2000;
     private final DocScanApi api;
     private volatile long documentId;
     private final File directory;
@@ -35,6 +43,11 @@ final class ListeningRecorder implements AutoCloseable {
     private AudioRecord microphone;
     private Thread recording;
     private volatile boolean running;
+    private volatile boolean closed;
+    private boolean recordingStopped;
+    private java.util.function.Consumer<Boolean> recordingState;
+    private AudioManager.AudioRecordingCallback audioCallback;
+    private int inputDeviceId;
     private volatile String recordingError;
     private volatile Exception uploadError;
     private int chunks;
@@ -53,7 +66,7 @@ final class ListeningRecorder implements AutoCloseable {
 
     void bindDocument(long id) throws IOException {
         synchronized (this) {
-            if (id <= 0 || (documentId > 0 && documentId != id)) throw new IOException("録音の送信先文書が一致しません");
+            if (closed || id <= 0 || (documentId > 0 && documentId != id)) throw new IOException("録音の送信先文書が一致しません");
             save("document", Long.toString(id));
             documentId = id;
         }
@@ -66,7 +79,9 @@ final class ListeningRecorder implements AutoCloseable {
     }
 
     @RequiresPermission(Manifest.permission.RECORD_AUDIO)
-    void start() throws IOException {
+    void start(java.util.function.Consumer<Boolean> state) throws IOException {
+        recordingState = java.util.Objects.requireNonNull(state);
+        if (closed) throw new IOException("終了した録音です");
         if (directory.exists()) throw new IOException("前回の録音を保全中です。新しい読取で録音してください");
         if (!directory.mkdirs()) throw new IOException("録音保存先を作れません");
         epoch = System.currentTimeMillis();
@@ -84,15 +99,37 @@ final class ListeningRecorder implements AutoCloseable {
             throw new IOException("マイクを開始できません");
         }
         try {
+            if (Build.VERSION.SDK_INT >= 29) {
+                int audioSession = microphone.getAudioSessionId();
+                audioCallback = new AudioManager.AudioRecordingCallback() {
+                    @Override public void onRecordingConfigChanged(java.util.List<AudioRecordingConfiguration> configurations) {
+                        for (AudioRecordingConfiguration config : configurations) {
+                            if (config.getClientAudioSessionId() == audioSession) inspectInput(config);
+                        }
+                    }
+                };
+                microphone.registerAudioRecordingCallback(Runnable::run, audioCallback);
+            }
             microphone.startRecording();
             if (microphone.getRecordingState() != AudioRecord.RECORDSTATE_RECORDING) throw new IOException("マイクが録音状態になりません");
         } catch (RuntimeException | IOException error) {
-            microphone.release(); microphone = null;
+            releaseMicrophone();
             throw new IOException("マイクを開始できません", error);
         }
         running = true;
         recording = new Thread(this::record, "listening-pcm");
         recording.start();
+    }
+
+    private synchronized void inspectInput(AudioRecordingConfiguration config) {
+        if (!running || config == null || Build.VERSION.SDK_INT < 29) return;
+        int device = config.getAudioDevice() == null ? 0 : config.getAudioDevice().getId();
+        if (config.isClientSilenced() || (inputDeviceId != 0 && device != 0 && inputDeviceId != device)) {
+            recordingError = "OSの無音化またはマイク経路変更を検出しました。原音は保存済みです";
+            running = false;
+            onFailure.run();
+        }
+        if (device != 0) inputDeviceId = device;
     }
 
     /** Explicit resume recovers stored samples; it never starts another microphone session. */
@@ -172,6 +209,10 @@ final class ListeningRecorder implements AutoCloseable {
 
     private void record() {
         byte[] buffer = new byte[3200], tail = new byte[OVERLAP * 2];
+        short[] pcm = new short[buffer.length / 2];
+        ByteBuffer encoded = ByteBuffer.wrap(buffer).order(ByteOrder.LITTLE_ENDIAN);
+        boolean receivedSamples = false;
+        long lastInput = SystemClock.elapsedRealtime();
         int tailLength = 0;
         try {
             while (running) {
@@ -182,9 +223,23 @@ final class ListeningRecorder implements AutoCloseable {
                     output.write(wavHeader(prefix));
                     if (prefix > 0) output.write(tail, 0, prefix);
                     while (running && fresh < CHUNK * 2) {
-                        int count = microphone.read(buffer, 0, Math.min(buffer.length, CHUNK * 2 - fresh));
-                        if (count < 0 || count % 2 != 0) throw new IOException("マイク入力が中断されました");
-                        if (count == 0) continue;
+                        int requested = Math.min(pcm.length, CHUNK - fresh / 2);
+                        int read = microphone.read(pcm, 0, requested, AudioRecord.READ_NON_BLOCKING);
+                        if (!running) break;
+                        if (read < 0 || read > requested || microphone.getRecordingState() != AudioRecord.RECORDSTATE_RECORDING) {
+                            throw new IOException("マイク入力が中断されました");
+                        }
+                        if (read == 0) {
+                            if (SystemClock.elapsedRealtime() - lastInput >= INPUT_STALL_MILLIS) throw new IOException("マイクからサンプルが届いていません");
+                            Thread.sleep(10);
+                            continue;
+                        }
+                        if (Build.VERSION.SDK_INT >= 29) inspectInput(microphone.getActiveRecordingConfiguration());
+                        if (!running) break;
+                        lastInput = SystemClock.elapsedRealtime();
+                        encoded.clear();
+                        for (int i = 0; i < read; i++) encoded.putShort(pcm[i]);
+                        int count = read * 2;
                         output.seek(44L + prefix + fresh);
                         output.write(buffer, 0, count);
                         fresh += count;
@@ -192,6 +247,7 @@ final class ListeningRecorder implements AutoCloseable {
                         output.seek(0); output.write(wavHeader(prefix + fresh));
                         // ponytail: sync each second of PCM; calibrate the interval with concurrent camera load.
                         if (fresh / (RATE * 2) != (fresh - count) / (RATE * 2)) output.getFD().sync();
+                        if (!receivedSamples) { receivedSamples = true; recordingState.accept(true); }
                     }
                     output.getFD().sync();
                     int bytes = prefix + fresh;
@@ -208,19 +264,36 @@ final class ListeningRecorder implements AutoCloseable {
                 if (chunks >= 600) throw new IOException("録音保存上限に達しました。原音は保存済みです");
             }
         } catch (Exception error) {
+            if (BuildConfig.DEBUG) android.util.Log.w("DocScanListening", "Audio input stopped", error);
             recordingError = "録音が中断されました。原音を保全しています";
-            onFailure.run();
+            if (!closed) onFailure.run();
         } finally {
             running = false;
-            if (microphone != null) {
-                try { microphone.stop(); } catch (IllegalStateException ignored) { }
-                finally { microphone.release(); microphone = null; }
+            try {
+                releaseMicrophone();
+                if (!closed && recordingError == null) save("phase", "stopped");
+            } catch (IOException error) {
+                recordingError = "録音の終了位置を保存できません。原音は保持しています";
+                if (!closed) onFailure.run();
+            }
+            finally {
+                recordingState.accept(false);
+                synchronized (this) { recordingStopped = true; if (closed) uploads.shutdown(); }
             }
         }
     }
 
+    private void releaseMicrophone() {
+        if (microphone == null) return;
+        try {
+            if (audioCallback != null && Build.VERSION.SDK_INT >= 29) microphone.unregisterAudioRecordingCallback(audioCallback);
+            microphone.stop();
+        } catch (IllegalStateException ignored) { }
+        finally { microphone.release(); microphone = null; }
+    }
+
     private void upload(File file, int sequence, long start) {
-        if (documentId == 0) return;
+        if (closed || documentId == 0) return;
         try {
             String hash = digest(readBounded(file));
             synchronized (this) {
@@ -235,19 +308,20 @@ final class ListeningRecorder implements AutoCloseable {
 
     /** Off UI thread. A later call retries stored originals, with stable sequence identities. */
     void finishAndUpload() throws Exception {
+        if (closed) throw new IOException("録音は終了しています");
         running = false;
         if (recording != null) recording.join();
-        if (recordingError == null && recording != null) save("phase", "stopped");
         Future<?> drained = uploads.submit(() -> { });
         drained.get();
         if (chunks == 0) throw new IOException("録音がありません");
-        if (documentId == 0) throw new IOException("接続を待っています。録音は保存済みです");
+        if (documentId == 0) throw new DocumentPending();
         uploadError = null;
         for (int i = 0; i < chunks; i++) {
             upload(chunk(i), i, Math.max(0, (long)i * CHUNK - OVERLAP));
             if (uploadError != null) throw new IOException("文字起こしが未完了です。原音は保存済みです", uploadError);
         }
         if (recordingError != null) throw new IOException(recordingError);
+        if (closed) throw new IOException("録音は終了しています");
         api.completeAudio(documentId, chunks, samples);
         save("phase", "complete");
     }
@@ -293,5 +367,11 @@ final class ListeningRecorder implements AutoCloseable {
                 .putShort((short)2).putShort((short)16).put(new byte[]{'d','a','t','a'}).putInt(bytes).array();
     }
 
-    @Override public void close() { running = false; uploads.shutdown(); }
+    void requestStop() { running = false; }
+
+    @Override public synchronized void close() {
+        closed = true;
+        running = false;
+        if (recording == null || recordingStopped) uploads.shutdown();
+    }
 }

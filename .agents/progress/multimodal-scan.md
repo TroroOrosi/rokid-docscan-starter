@@ -155,6 +155,50 @@ pending写真が残る明示再開でも音声復元を呼び、再送だけな�
 - 続くRP-08: 有効サンプル後のREC／入力停止検出、第2BACK、可視確認を隠さない音声終了、
   番号到着待ちで停止した録音の完了再試行を接続する。最後の写真確認中の表示はまだ未完。
 
+### 有効サンプルのRECと独立した音声終了（2026-09-16）
+
+Runs on: WindowsのJVM試験とAPK build。録音変更はグラス未導入、実音声試験は利用者指示で後回し。
+
+RP-08を実装。AudioRecordの非blocking読取りでPCMを受けてからRECと自動撮影を開始する。
+ゼロPCMは自然な無音として保存し、2秒のサンプル欠落、読取り異常、公開通知で確認できる
+OS無音化／マイク経路変更では中断状態にする。2秒と原音sync間隔は同時撮影負荷で未校正。
+第1BACKで撮影を終え、第2の別BACKは最後の写真確認中でも録音を止める。写真を隠さず、
+取り直しで録音を再開しない。文書番号の到着前に停止しても、番号が保存されれば同じ原音から送信する。
+
+レビューで、番号待ちとして開始したHTTP失敗の誤再試行と、録音停止通知が停止位置保存より先に
+サービスを終了する競合を修正した。未bindingだけをDocumentPendingとして区別する。
+WAV確定とSHA保存、stoppedの同期・atomic保存を終えてから停止を通知する。
+送信再試行もforeground serviceを開始し、DocumentPending中は維持、成功／実エラー時に停止する。
+録音用microphoneと保存音声用dataSyncを同じ既存serviceで切り替える。
+Context7の既存Android IDから公開APIを確認し、
+[Android公式service types](https://developer.android.com/develop/background-work/services/fgs/service-types)
+でdataSyncのupload用途と権限条件を照合。SDK/AAR・依存・DB schemaの変更はない。
+
+- 第2BACKの追加試験は修正前 `6 tests completed, 1 failed`。修正後の単独試験は
+  `BUILD SUCCESSFUL in 1m 12s`。
+- 停止位置保存と未binding例外の回帰試験は修正前 `6 tests completed, 2 failed`。
+- 遅いbinding後のサービス再開試験は修正前 `1 test completed, 1 failed`。
+- 最終修正後 `./android-relay/gradlew --no-daemon :glassdoc:testDebugUnitTest`
+  → `BUILD SUCCESSFUL in 2m 34s`、41 tasks。REC前後、自然なゼロPCM、入力停止／OS無音化、
+  中断末尾PCM、文書binding、最後の写真保持、再送サービスの種別を確認。
+- JVMの録音サービス模擬がnullリストを返す失敗は、実行jarのjavapとstackで原因を確認し、
+  テストのBinder応答を空リストにした。実機コードで例外を黙殺する回避は加えていない。
+- 独立レビューの最終再確認に追加所見なし。実機の録音継続・入力停止検出・省電力は未検証。
+- `./android-relay/gradlew --no-daemon test testDebugUnitTest assembleDebug`
+  → `BUILD SUCCESSFUL in 2m 12s`、199 tasks: 13 executed, 186 up-to-date。
+  JDK 17.0.20.1+1／SDK Platform 36 revision 2／Gradle 9.4.1、ASCII checkout。
+- `py -3.12 -m pytest -q tests/test_documentation_contract.py tests/test_versioning.py`
+  → `21 passed in 5.45s`。Ruff → `All checks passed!`、`git diff --check` → exit 0。
+  view契約／APP／APKの版更新後、同じPython試験 → `21 passed in 8.49s`、Ruff → `All checks passed!`。
+- 版更新後 `./android-relay/gradlew --no-daemon :glassdoc:assembleDebug`
+  → `BUILD SUCCESSFUL in 1m 59s`、57 tasks: 11 executed, 46 up-to-date。
+  `aapt2 dump badging` → package `dev.rokid.docscanglass.doc`、activity `DocScanGlassActivity`。
+  `apksigner verify --verbose --print-certs` → `Verifies`、v2=true、証明書SHA-256
+  `906307478018e09e2937cfd8042a674d27598767577e08a304472aae407ccacc`。
+  `Get-FileHash -Algorithm SHA256` → APK
+  `98A87A0E642E0E32CA9DD3F745A1155DC28ED13488B309ACCE10AFBC14D45B1C`。
+  このAPKはまだ実機へ導入していない。認証の具体案は引き続き承認待ちで、実鍵は生成していない。
+
 ### Next steps — 追加実装
 
 Runs on: 以下の認証保存はWindowsの自動試験。Android Keystoreの実機確認はAPK導入後。
@@ -176,7 +220,8 @@ Runs on: WindowsでRP-05のActivity接続、RP-02の実OCR契約、起動・保�
 実機の短い通し試験は指定グラス→F-51F AP→F-51F Chrome。
 
 1. 起動二択・通常写真のローカル保存と独立送信まで実装。全Android gateとAPK identity／署名／hashを確認。
-   グラス導入と二択の合成入力確認まで実行。認証設定の具体的承認後にスマホappと実鍵を適用する。録音の中断保存・開始と終了の分離はRP-07/08、
+   グラス導入と二択の合成入力確認まで実行。認証設定の具体的承認後にスマホappと実鍵を適用する。
+   RP-07/08の録音保存・開始表示・独立終了は自動試験まで実装。実機負荷・容量保護と、
    取消期限へ時刻を渡すRP-09が残る。これらは実装済みと扱わない。
 2. 用紙経路の準備後、同じB5紙面の単頁／見開きを撮り、実OCRと最終答案の差を測る。
    ガイド切替だけで外周検出が実装されたとは扱わない。カメラ寸法・retryは変更しない。

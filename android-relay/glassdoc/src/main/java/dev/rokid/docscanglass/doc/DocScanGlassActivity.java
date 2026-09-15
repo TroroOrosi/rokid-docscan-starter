@@ -71,6 +71,8 @@ public final class DocScanGlassActivity extends Activity
     private boolean startupStarting;
     private ListeningRecorder listening;
     private boolean finishingAudio;
+    private boolean captureEndRequested;
+    private boolean audioStopRequested;
     private long listeningDocument;
     private File listeningDirectory;
     private boolean resumingListening;
@@ -462,8 +464,11 @@ public final class DocScanGlassActivity extends Activity
             }
             return;
         }
-        if (listeningMode && controller.getState() == RelayState.LISTENING) {
-            if (action == GlassesInputAction.BACK) finishAudio();
+        if (listeningMode && action == GlassesInputAction.BACK && (!awaitingAnswers || !audioStopRequested)) {
+            boolean stopAudio = captureEndRequested || controller.getState() == RelayState.LISTENING;
+            captureEndRequested = true;
+            controller.onGlassesAction(action);
+            if (stopAudio) finishAudio();
             return;
         }
         if (awaitingAnswers && action == GlassesInputAction.BACK) {
@@ -598,7 +603,19 @@ public final class DocScanGlassActivity extends Activity
         Log.i(TAG, state + ": " + diagnostic);
         if (sessionClosed || choosingSession) return;
         maybeOpenSavedAnswersOffline();
-        if (state == RelayState.FINALIZING || state == RelayState.LISTENING) main.post(this::waitWithDisplayOff);
+        if (state == RelayState.LISTENING) {
+            main.post(() -> {
+                if (audioStopRequested && !finishingAudio) {
+                    wakeForResult();
+                    hud.showLines(List.of("録音・文字起こしを確認", "原音は保存済み", "ダブルタップで再試行"));
+                } else {
+                    hud.showLines(GlassesHudText.adapt(hudLines));
+                    waitWithDisplayOff();
+                }
+            });
+            return;
+        }
+        if (state == RelayState.FINALIZING) main.post(this::waitWithDisplayOff);
         if (state == RelayState.ERROR || state == RelayState.READING) {
             main.post(() -> { if (awaitingAnswers) wakeForResult(); });
         }
@@ -626,7 +643,10 @@ public final class DocScanGlassActivity extends Activity
             if (directory.equals(listeningDirectory)) {
                 listeningDocument = documentId;
                 if (listening != null && documentId > 0) {
-                    try { listening.bindDocument(documentId); }
+                    try {
+                        listening.bindDocument(documentId);
+                        if (audioStopRequested && !finishingAudio) finishAudio();
+                    }
                     catch (IOException error) { controller.onListeningError(); }
                 }
                 return;
@@ -634,6 +654,8 @@ public final class DocScanGlassActivity extends Activity
             if (listening != null) listening.close();
             listening = null;
             finishingAudio = false;
+            captureEndRequested = false;
+            audioStopRequested = false;
             listeningDocument = documentId;
             listeningDirectory = directory;
             resumingListening = resume;
@@ -658,8 +680,17 @@ public final class DocScanGlassActivity extends Activity
                 return;
             }
             startForegroundService(new Intent(this, ListeningService.class));
-            listening.start();
-            controller.startAutoCapture();
+            ListeningRecorder recording = listening;
+            listening.start(active -> main.post(() -> {
+                if (sessionClosed || listening != recording) return;
+                hud.showRecording(active);
+                if (active) {
+                    startService(new Intent(this, ListeningService.class).putExtra(ListeningService.RECORDING, true));
+                    controller.startAutoCapture();
+                } else if (finishingAudio && !recording.isInterrupted()) {
+                    startService(new Intent(this, ListeningService.class).putExtra(ListeningService.FINISHING, true));
+                } else stopService(new Intent(this, ListeningService.class));
+            }));
         } catch (Exception error) {
             if (listening != null) listening.close();
             listening = null;
@@ -672,21 +703,30 @@ public final class DocScanGlassActivity extends Activity
     private void finishAudio() {
         if (finishingAudio || listening == null) return;
         finishingAudio = true;
-        waitWithDisplayOff();
+        audioStopRequested = true;
+        listening.requestStop();
+        try { startForegroundService(new Intent(this, ListeningService.class).putExtra(ListeningService.FINISHING, true)); }
+        catch (RuntimeException error) { finishingAudio = false; controller.onListeningError(); return; }
+        if (controller.getState() == RelayState.LISTENING || controller.getState() == RelayState.FINALIZING) waitWithDisplayOff();
         ListeningRecorder recording = listening;
         new Thread(() -> {
             try {
                 recording.finishAndUpload();
                 main.post(() -> {
+                    if (sessionClosed || listening != recording) return;
                     stopService(new Intent(this, ListeningService.class));
-                    if (!sessionClosed) controller.completeListening();
+                    controller.completeListening();
                 });
             } catch (Exception error) {
                 main.post(() -> {
-                    if (sessionClosed) return;
+                    if (sessionClosed || listening != recording) return;
                     finishingAudio = false;
+                    if (error instanceof ListeningRecorder.DocumentPending && listeningDocument > 0) { finishAudio(); return; }
+                    if (!(error instanceof ListeningRecorder.DocumentPending)) stopService(new Intent(this, ListeningService.class));
                     wakeForResult();
-                    hud.showLines(List.of("録音・文字起こしを確認", "原音は保存済み", "ダブルタップで再試行"));
+                    if (controller.getState() == RelayState.LISTENING || controller.getState() == RelayState.ERROR) {
+                        hud.showLines(List.of("録音・文字起こしを確認", "原音は保存済み", "ダブルタップで再試行"));
+                    }
                 });
             }
         }, "listening-finish").start();

@@ -35,6 +35,9 @@ final class HudView extends View {
     private Runnable visibleFrame;
     private Runnable hiddenFrame;
     private boolean frameReported;
+    private boolean recording;
+
+    void showRecording(boolean active) { recording = active; invalidate(); }
 
     void onVisibleFrame(Runnable shown, Runnable hidden) {
         visibleFrame = shown;
@@ -129,6 +132,10 @@ final class HudView extends View {
             textTop = drawPreview(canvas, still);
         } else if (aiming) {
             drawGuide(canvas);
+        }
+        if (recording) {
+            paint.setTextSize(22);
+            canvas.drawText("REC", Math.max(8, getWidth() - 62), getHeight() - 8, paint);
         }
         if (lines.isEmpty()) {
             return;

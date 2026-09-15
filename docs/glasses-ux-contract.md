@@ -49,8 +49,9 @@ waiting; during the visible still review it retakes. No input commits after 3 se
 BACK ends capture after the last review; in listening mode a later BACK ends audio.
 Two BACK gestures within three seconds exit answer reading. Reader-menu BACK returns
 one level. Distinct rapid KeyEvent gestures are retained; physical correlation is
-still unverified on the new APK. A second BACK during the last photo review does not
-yet end audio, and event-time cancellation across the commit boundary is pending.
+still unverified on the new APK. A second BACK during the last photo review ends
+audio while preserving the still. Retaking does not restart audio. Event-time
+cancellation across the commit boundary is pending.
 Full operation and power/error behavior:
 [`multimodal-scan.md`](multimodal-scan.md). Physical acceptance is pending.
 
@@ -60,6 +61,10 @@ Starting another capture preserves earlier records and their pending photos.
 Normal-mode photos are committed locally before background HTTP upload, and
 unacknowledged revisions remain available after restart. Storage errors retain
 originals and stop processing; transient upload failures retry separately from capture.
+Listening starts locally before the server document is available. REC appears only
+after valid PCM samples arrive; natural zero-valued samples remain valid audio.
+Missing samples, read failures, OS silencing, or an observed input-device change stop
+recording and preserve the interrupted originals. These checks need hardware calibration.
 
 Launching without a `server` extra reuses the saved URL. A new Intent applies
 explicit `server`/`key` overrides; a guide-only Intent updates and saves the
