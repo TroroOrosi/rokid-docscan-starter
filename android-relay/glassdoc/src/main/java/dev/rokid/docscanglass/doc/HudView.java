@@ -191,19 +191,38 @@ final class HudView extends View {
             canvas.drawLine(x, y, x + arm * dx, y, guidePaint);
             canvas.drawLine(x, y, x, y + arm * dy, guidePaint);
         }
+        paint.setTextSize(22);
+        canvas.drawText(spreadGuide ? "B5 見開き" : "B5 1ページ", 8, 26, paint);
     }
 
-    /** Fit the complete still above a compact instruction band, without cropping. */
+    /** Magnify the center; an uncropped inset keeps framing and missing edges visible. */
     private float drawPreview(Canvas canvas, Bitmap still) {
         float band = Math.max(1, getHeight() - (lines.size() + 1) * 26f);
-        float scale = Math.min(
+        float scale = 2 * Math.min(
                 getWidth() / (float) still.getWidth(), band / still.getHeight());
         float width = still.getWidth() * scale;
         float height = still.getHeight() * scale;
         RectF target = new RectF(
                 (getWidth() - width) / 2f, (band - height) / 2f,
                 (getWidth() + width) / 2f, (band + height) / 2f);
+        canvas.save();
+        canvas.clipRect(0, 0, getWidth(), band);
         canvas.drawBitmap(still, null, target, previewPaint);
+        canvas.restore();
+        float overviewScale = Math.min(
+                getWidth() / 3f / still.getWidth(), band / 3f / still.getHeight());
+        float overviewWidth = still.getWidth() * overviewScale;
+        float overviewHeight = still.getHeight() * overviewScale;
+        RectF overview = new RectF(getWidth() - overviewWidth - 8, band - overviewHeight - 8,
+                getWidth() - 8, band - 8);
+        canvas.drawBitmap(still, null, overview, previewPaint);
+        guidePaint.setStrokeWidth(2);
+        canvas.drawRect(overview, guidePaint);
+        paint.setTextSize(22);
+        paint.setShadowLayer(2, 0, 0, Color.BLACK);
+        canvas.drawText("中央2倍", 8, 26, paint);
+        canvas.drawText("全体", overview.left, overview.top - 4, paint);
+        paint.clearShadowLayer();
         return band;
     }
 

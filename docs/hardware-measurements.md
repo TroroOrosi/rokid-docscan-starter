@@ -1560,6 +1560,40 @@ questions 1、solutions 0。保存JPEGは5,850,017 bytes、OCRは2文字だけ�
 `fold-launcher-opened-active.png` は通常／リスニング／中断した読取の選択画面。
 カメラは開始していない。アプリ一覧からの起動経路を確認したもので、再装着だけの自動起動ではない。
 
+## K. 向き・拡大確認・スマホからの開閉復帰（2026-09-16）
+
+Status: Frozen measurements。開閉試験のAPKはbde4f09、グラスは§Jと同じ1904092623381086／1.25.015-20260903-150201、F-51FはZY22LWGDCV。
+Runs on: 再起動watcherはF-51F Termux → 同一Wi-Fiのグラス。画像QAとbuildはWindows。
+
+利用者は枠の改善を確認したが、写真が小さく文字・ブレを判別しづらい、角度も違うと申告。
+さらに単頁ではなくB5見開きの枠と、少し近い距離での撮影を指定した。
+
+- 直近保存JPEG2枚は4032×3024、EXIF Orientation=1、保存rotation=180、OCRは17／26文字。
+  Android Bitmap/Matrixで90／180／270を描画すると270で縦書きの「第1問」が正立、180は横向き。
+  過去の180度記録はこの入力の正立を証明していなかった。私的写真はGit対象外。過去pendingは変更しない。
+- 一時native描画試験 `:glassdoc:testDebugUnitTest --tests '*CaptureOrientationRenderTest'` → `BUILD SUCCESSFUL in 34s`。
+  中央2倍・右下全体像の実写真QAは同じ試験で `BUILD SUCCESSFUL in 28s`。
+  出力 `android-relay/glassdoc/build/outputs/photo-review-magnified.png`。一時テストを除去後に全体gateを実行。
+  光学表示でのブレの判別、補正後OCR精度は未検証。
+- F-51Fからグラスへ接続。最初のconnectは認証失敗を表示したが、直後のdevicesはdevice。
+  `getprop ro.serialno` → `1904092623381086`、`getprop vendor.rkd.glasses.is_spread` → `1`。
+  新しい鍵の生成・移送は行っていない。スマホから既存Activityを起動しPID8693を確認。
+  `dumpsys media.camera` → `Active Camera Clients: []`。
+- F-51Fで `scripts/watch_glasses.py` を実行し、利用者がツル閉約2秒→開で「選択画面に戻った」と回答。
+  ログ `Glasses unfolded: chooser started`。保存先は `~/rokid-server/data/watch-glasses.log`、PIDは同じ場所の `watch-glasses.pid`。
+  script SHA-256: `903c94dc39777cbac8fd3b6e7032093758dfc3a277e402f6498a7b75b0dd63fa`。
+  1回の家庭Wi-Fi開閉であり、AP・通信断中の開閉・着脱だけ・CLOSED後・反復は未検証。
+- watcherの曖昧な起動応答を再送しない試験: 修正前 `1 failed, 1 passed`、修正後
+  `py -3.12 -m pytest -q tests/test_watch_glasses.py` → `2 passed in 0.03s`。
+  通信断中に閉状態を見逃した開閉は自動復帰しない制限をrunbookへ記録。
+- 全Android `test testDebugUnitTest assembleDebug` → `BUILD SUCCESSFUL in 54s`、199 tasks。
+  見開き初期値・ラベル後 `:glassdoc:testDebugUnitTest :glassdoc:assembleDebug` → `BUILD SUCCESSFUL in 50s`、63 tasks。
+  JDK17.0.20.1+1／SDK Platform36 rev2／Gradle9.4.1、ASCII checkout。
+  `aapt2 dump badging` → package `dev.rokid.docscanglass.doc`、DocScanGlassActivity、versionCode12。
+  `apksigner verify --verbose --print-certs` → `Verifies`、v2=true、既存証明書と一致。
+  `Get-FileHash` → `29CFF4401AA1CC44B746B2B00FC5DDDC978F5BE5DD83ACAA947451E838AB0E3A`。
+  導入前installed APKは§Jのhashと一致。保存4件をtarへ退避し原本を保全。
+
 # 出典
 
 ## 出典 — グラス一次情報索引（2026-09-03）

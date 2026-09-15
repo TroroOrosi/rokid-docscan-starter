@@ -3,7 +3,37 @@
 Status: Internal progress。計画の認識合わせ後、利用者が追加実装・実機操作を依頼。RP実装を開始。
 Runs on: Windowsで実装・試験。運用先はglassdocとスマホAP/FastAPI/Chrome。
 
-## 現在の不具合対応（2026-09-16）
+## 現在地 — 見開き・確認写真・開閉復帰（2026-09-16）
+
+Runs on: 実装/build/描画QAはWindows。watcherはF-51F Termux、グラスは既存Wi-Fi接続。
+
+bde4f09を導入して設定復号と保存原本維持を確認後、利用者は「枠は改善、確認写真は小さい」
+「角度が違う」「単頁／見開き比較がまだ」「閉じて開いてもホーム」と申告。
+F-51Fの既存adbから閉→開時にchooserを一度起動するscriptを追加し、利用者が物理開閉で
+「選択画面に戻った」と確認した。スマホで稼働中。撮影・原音は自動開始しない。
+通信断中に閉状態を見逃す開閉は未対応。AP・着脱だけ・CLOSED後・50回・時刻目標は未検証（§K）。
+
+実保存JPEGのAndroid native描画で270度が正立、旧180度が横向きと確認。
+新規撮影のOCR／確認表示／server PNGへ同じ270度を渡し、旧pendingは書き換えない。
+中央2倍＋右下全体像、RGB_565の2016px復号で細部を残す。原本・カメラ寸法／露出／retry・3秒・ジェスチャは維持。
+利用者の最新指定で見開きを初期値にし、「B5 見開き」と横幅最大の枠を表示。
+近づける距離、光学表示のブレ判別、単頁／見開き精度はこれから実写で確認する。
+
+- Hud拡大試験 RED `1 test completed, 1 failed` → 既存込み `BUILD SUCCESSFUL in 33s`。
+- 一時実写真QA `BUILD SUCCESSFUL in 28s`。一時テストを除去し、一般のHudViewTestを残した。
+- watcher境界 RED `1 failed, 1 passed` → `2 passed in 0.03s`。
+- 全Android `test testDebugUnitTest assembleDebug` → `BUILD SUCCESSFUL in 54s`、199 tasks。
+- 見開き初期値・ラベル後 `:glassdoc:testDebugUnitTest :glassdoc:assembleDebug` → `BUILD SUCCESSFUL in 50s`、63 tasks。
+- Python watcher/doc/version/LED → `26 passed in 1.09s`、Ruff → `All checks passed!`。
+- APK identity／署名／hashはhardware-measurements §K。旧APK hash一致と保存4件の退避を確認。
+- 独立レビューで起動応答UNKNOWNの繰返しを修正。通信断中の開閉欠落は制限を明記。
+  Hud／向き／復号のRequired所見はない。光学可読性・OCR精度の合格ではない。
+
+次は検査済みAPKを同じグラスへ反映し、保存済み単頁設定も明示的に見開きへ切り替える。
+同じB5紙面の見開き→単頁比較を優先する。実英語音声は後回し。phone appは8cc1ad2。
+RP-09以降を今回の表示修正で完了扱いしない。下記は直前の履歴で、上記を優先する。
+
+## 直前の不具合対応（2026-09-16）
 
 Runs on: Windowsの実装・自動試験。実機ログはグラス、サーバはF-51Fの既存Wi-Fi経路。
 

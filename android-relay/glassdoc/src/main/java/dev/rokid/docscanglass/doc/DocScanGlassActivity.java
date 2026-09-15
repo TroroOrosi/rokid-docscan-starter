@@ -78,12 +78,12 @@ public final class DocScanGlassActivity extends Activity
     private boolean resumingListening;
 
     /**
-     * The sensor reports {@code SENSOR_ORIENTATION=270} and writes
-     * {@code JPEG_ORIENTATION=0}, so a still arrives upside down. Measured on
-     * 2026-09-04: rotating a stored page by 180 made the exam paper legible
-     * where the recognizer had been reading it as noise.
+     * Stored JPEGs from 1.25.015-20260903-150201, checked 2026-09-16:
+     * clockwise 270 makes the vertical Japanese page upright. The old
+     * 180-degree setting left this capture sideways; sensor metadata alone
+     * did not establish the correct paper orientation.
      */
-    private static final int MEASURED_ROTATION_DEGREES = 180;
+    private static final int MEASURED_ROTATION_DEGREES = 270;
 
     /** Long enough to read why the display stayed on before the session ends. */
     private static final long EXIT_NOTICE_MILLIS = 2_000;
@@ -174,7 +174,7 @@ public final class DocScanGlassActivity extends Activity
         wearWatch.start();
         hud.calibrateGuide(getPreferences(MODE_PRIVATE).getFloat(
                 EXTRA_GUIDE, (float) FramingGuide.UNCALIBRATED_FRACTION));
-        hud.showSpreadGuide(getPreferences(MODE_PRIVATE).getBoolean(EXTRA_SPREAD, false));
+        hud.showSpreadGuide(getPreferences(MODE_PRIVATE).getBoolean(EXTRA_SPREAD, true));
 
         cameraThread = new HandlerThread("glass-camera");
         cameraThread.start();

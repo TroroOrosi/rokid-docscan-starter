@@ -23,11 +23,10 @@ import dev.rokid.docscanrelay.CaptureSurface;
  */
 final class GlassesCaptureSurface implements CaptureSurface {
     /**
-     * Longest edge of the review thumbnail. The display is 480x640, so a
-     * larger decode would be scaled straight back down, and the still is
-     * already held in full as JPEG bytes by the review store.
+     * Retain detail for the magnified review. A 4032px capture decodes to
+     * 2016px in RGB_565, matching the existing OCR memory budget.
      */
-    private static final int PREVIEW_MAX_EDGE = 640;
+    private static final int PREVIEW_MAX_EDGE = 1200;
 
     interface Listener {
         /**
@@ -173,8 +172,8 @@ final class GlassesCaptureSurface implements CaptureSurface {
     }
 
     /**
-     * Decodes a thumbnail at the display's own size and applies the rotation
-     * the controller was configured with.
+     * Decodes enough detail for magnification and applies the same clockwise
+     * rotation as OCR and the authoritative server PNG.
      */
     private static Bitmap decodePreview(byte[] jpeg, int rotationDegrees) {
         if (jpeg == null || jpeg.length == 0) {

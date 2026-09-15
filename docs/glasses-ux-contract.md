@@ -4,8 +4,10 @@ Status: Current phone and standalone surface contracts. Updated 2026-09-16.
 
 The intended startup and complete operator flow are in the current section of
 [`tasks/plan.md`](../tasks/plan.md). The on-glasses mode chooser and normal-mode
-capture without HTTP are implemented. Listening still waits for server preparation;
-progressive answer updates and post-CLOSED automatic launch remain planned.
+capture without HTTP are implemented. Listening also starts locally before HTTP.
+Progressive answer updates remain planned. A phone-side watcher has returned the
+chooser after one physical fold/unfold; wearing-only and disconnected transitions
+remain unverified (see the runbook for its limits).
 [`requirements-audit.md`](requirements-audit.md) retains the pre-change audit;
 the current implementation and checks are recorded in
 [`multimodal-scan.md`](../.agents/progress/multimodal-scan.md).
