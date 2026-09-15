@@ -57,6 +57,7 @@ public final class DocScanGlassActivity extends Activity
     private static final String EXTRA_SERVER = "server";
     private static final String EXTRA_KEY = "key";
     private static final String EXTRA_GUIDE = "guide";
+    private static final String EXTRA_SPREAD = "spread";
     private static final int CAMERA_PERMISSION_REQUEST = 7401;
     private static final int AUDIO_PERMISSION_REQUEST = 7402;
     private boolean listeningMode;
@@ -157,6 +158,7 @@ public final class DocScanGlassActivity extends Activity
         wearWatch.start();
         hud.calibrateGuide(getPreferences(MODE_PRIVATE).getFloat(
                 EXTRA_GUIDE, (float) FramingGuide.UNCALIBRATED_FRACTION));
+        hud.showSpreadGuide(getPreferences(MODE_PRIVATE).getBoolean(EXTRA_SPREAD, false));
 
         cameraThread = new HandlerThread("glass-camera");
         cameraThread.start();
@@ -188,6 +190,11 @@ public final class DocScanGlassActivity extends Activity
     }
 
     private void applyIntent(Intent intent, boolean starting) {
+        if (intent != null && intent.hasExtra(EXTRA_SPREAD)) {
+            boolean spread = intent.getBooleanExtra(EXTRA_SPREAD, false);
+            hud.showSpreadGuide(spread);
+            getPreferences(MODE_PRIVATE).edit().putBoolean(EXTRA_SPREAD, spread).apply();
+        }
         if (starting) {
             listeningMode = intent != null && intent.hasExtra("listening")
                     ? intent.getBooleanExtra("listening", false) : getPreferences(MODE_PRIVATE).getBoolean("listening", false);

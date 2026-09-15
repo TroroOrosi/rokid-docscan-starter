@@ -96,6 +96,24 @@ public final class FramingGuide {
      *     the calibration run. Clamped, because it is operator-supplied.
      */
     public static Rect of(int displayWidth, int displayHeight, double visibleFraction) {
+        return of(displayWidth, displayHeight, visibleFraction, false);
+    }
+
+    /** One B5 page or an open two-page B5 spread, using the same camera calibration. */
+    public static Rect of(int displayWidth, int displayHeight, double visibleFraction, boolean spread) {
+        Rect field = fieldOf(displayWidth, displayHeight, visibleFraction);
+        if (field.width() == 0 || field.height() == 0) return field;
+        double aspect = PAPER_ASPECT * (spread ? 2 : 1);
+        double boxHeight = Math.min(field.height(), field.width() / aspect);
+        int width = (int) Math.round(boxHeight * aspect);
+        int height = (int) Math.round(boxHeight);
+        int left = (displayWidth - width) / 2;
+        int top = (displayHeight - height) / 2;
+        return new Rect(left, top, left + width, top + height);
+    }
+
+    /** Outer sensor-shaped coverage guide; independent of the chosen paper shape. */
+    public static Rect fieldOf(int displayWidth, int displayHeight, double visibleFraction) {
         if (displayWidth <= 0 || displayHeight <= 0) {
             return new Rect(0, 0, 0, 0);
         }
@@ -105,30 +123,13 @@ public final class FramingGuide {
         // What the camera covers: the largest 4:3 box the display can show,
         // scaled by how much of it the camera actually reaches.
         double fieldWidth = Math.min(displayWidth, displayHeight * SENSOR_ASPECT);
-        double visibleWidth = fieldWidth * fraction;
-        double visibleHeight = visibleWidth / SENSOR_ASPECT;
-
-        // The guide is the largest page-shaped rectangle inside that. The
-        // field is landscape and the page is portrait, so height is always the
-        // binding constraint; the min keeps that from being an assumption.
-        double boxHeight = Math.min(visibleHeight, visibleWidth / PAPER_ASPECT);
-        double boxWidth = boxHeight * PAPER_ASPECT;
-        int width = (int) Math.round(boxWidth);
-        int height = (int) Math.round(boxHeight);
-
+        int width = (int) Math.round(fieldWidth * fraction);
+        int height = (int) Math.round(fieldWidth * fraction / SENSOR_ASPECT);
         int left = (displayWidth - width) / 2;
         int top = (displayHeight - height) / 2;
         return new Rect(left, top, left + width, top + height);
     }
 
-    /** Outer sensor-shaped coverage guide; must be calibrated at the working distance. */
-    public static Rect fieldOf(int displayWidth, int displayHeight, double visibleFraction) {
-        Rect page = of(displayWidth, displayHeight, visibleFraction);
-        int height = page.height();
-        int width = Math.min(displayWidth, (int)Math.round(height * SENSOR_ASPECT));
-        int left = (displayWidth - width) / 2;
-        return new Rect(left, page.top(), left + width, page.bottom());
-    }
 
     /**
      * What fraction of the captured still a page filling the guide should
@@ -136,10 +137,15 @@ public final class FramingGuide {
      * capture to confirm or correct the calibration.
      */
     public static double expectedPageAreaFraction(double visibleFraction) {
+        return expectedPageAreaFraction(visibleFraction, false);
+    }
+
+    public static double expectedPageAreaFraction(double visibleFraction, boolean spread) {
         double fraction = Math.max(MIN_VISIBLE_FRACTION,
                 Math.min(MAX_VISIBLE_FRACTION, visibleFraction));
         // The guide is page-shaped inside a 4:3 field, so a page filling it
         // covers less of the still than the visible fraction alone suggests.
-        return fraction * fraction * PAPER_ASPECT / SENSOR_ASPECT;
+        double aspect = PAPER_ASPECT * (spread ? 2 : 1);
+        return fraction * fraction * Math.min(aspect / SENSOR_ASPECT, SENSOR_ASPECT / aspect);
     }
 }

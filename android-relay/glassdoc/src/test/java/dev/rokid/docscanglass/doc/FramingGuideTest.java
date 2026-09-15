@@ -36,6 +36,19 @@ public final class FramingGuideTest {
     }
 
     @Test
+    public void spreadFitsTwoB5PagesInsideTheSameSensorField() {
+        for (double fraction : new double[]{0.2, 0.8, 1.0}) {
+            FramingGuide.Rect field = FramingGuide.fieldOf(DISPLAY_WIDTH, DISPLAY_HEIGHT, fraction);
+            FramingGuide.Rect spread = FramingGuide.of(DISPLAY_WIDTH, DISPLAY_HEIGHT, fraction, true);
+            assertEquals(364.0 / 257.0, spread.width() / (double) spread.height(), 0.02);
+            assertTrue(spread.left() >= field.left() && spread.right() <= field.right());
+            assertTrue(spread.top() >= field.top() && spread.bottom() <= field.bottom());
+            assertEquals(fraction * fraction * (4.0 / 3.0) / (364.0 / 257.0),
+                    FramingGuide.expectedPageAreaFraction(fraction, true), 0.0001);
+        }
+    }
+
+    @Test
     public void fitsInsideTheDisplayAtEveryCalibration() {
         for (double fraction : new double[]{0.1, 0.5, 0.8, 1.0}) {
             FramingGuide.Rect guide = FramingGuide.of(DISPLAY_WIDTH, DISPLAY_HEIGHT, fraction);

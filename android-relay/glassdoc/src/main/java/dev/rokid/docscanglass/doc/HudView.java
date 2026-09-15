@@ -31,6 +31,7 @@ final class HudView extends View {
     private Bitmap preview;
     private boolean aiming;
     private double guideFraction = FramingGuide.UNCALIBRATED_FRACTION;
+    private boolean spreadGuide;
     private Runnable visibleFrame;
     private Runnable hiddenFrame;
     private boolean frameReported;
@@ -72,6 +73,11 @@ final class HudView extends View {
     /** The visible fraction measured for this device, from {@code --ef guide}. */
     void calibrateGuide(double visibleFraction) {
         guideFraction = visibleFraction;
+        invalidate();
+    }
+
+    void showSpreadGuide(boolean spread) {
+        spreadGuide = spread;
         invalidate();
     }
 
@@ -153,7 +159,7 @@ final class HudView extends View {
      * itself, and the corners are what the operator aligns to.
      */
     private void drawGuide(Canvas canvas) {
-        FramingGuide.Rect guide = FramingGuide.of(getWidth(), getHeight(), guideFraction);
+        FramingGuide.Rect guide = FramingGuide.of(getWidth(), getHeight(), guideFraction, spreadGuide);
         if (guide.width() <= 0) {
             return;
         }

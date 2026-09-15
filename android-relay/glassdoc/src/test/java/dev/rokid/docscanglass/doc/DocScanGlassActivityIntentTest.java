@@ -79,7 +79,7 @@ public class DocScanGlassActivityIntentTest {
         controller.captureNextPage();
         updates.awaitState(RelayState.AIMING);
         updates.clear();
-        Intent intent = new Intent().putExtra("guide", 0.72f);
+        Intent intent = new Intent().putExtra("guide", 0.72f).putExtra("spread", true);
 
         activity.onNewIntent(intent);
         awaitControllerBarrier();
@@ -87,6 +87,10 @@ public class DocScanGlassActivityIntentTest {
         assertSame(intent, activity.getIntent());
         assertEquals(0.72, guideFraction(), 0.00001);
         assertEquals(0.72f, activity.getPreferences(Context.MODE_PRIVATE).getFloat("guide", -1), 0.00001f);
+        assertTrue(activity.getPreferences(Context.MODE_PRIVATE).getBoolean("spread", false));
+        Field spread = HudView.class.getDeclaredField("spreadGuide");
+        spread.setAccessible(true);
+        assertTrue(spread.getBoolean(hud));
         assertEquals(RelayState.AIMING, controller.getState());
         assertEquals("Guide-only Intent must not submit configuration work", 1, updates.size());
         assertEquals(0, server.getRequestCount());
