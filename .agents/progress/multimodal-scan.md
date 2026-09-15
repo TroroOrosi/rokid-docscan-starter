@@ -1,7 +1,56 @@
 # 手動併用スキャン・省電力・OCR/画像/音声/図
 
-Status: Internal progress。実装・自動試験、APK導入、スマホ更新・ASRの部品試験済み。AP全経路は未実施。
+Status: Internal progress。現在は全体の認識合わせ・計画整理。以前の実装・導入・ASR部品試験を保持。追加実装は未着手。
 Runs on: Windowsで実装・試験。運用先はglassdocとスマホAP/FastAPI/Chrome。
+
+## 現在の依頼と再開境界（2026-09-15）
+
+Runs on: 今回の照合・文書更新はWindowsだけ。実機への書込み・ChatGPT送信はしていない。
+
+利用者は残作業の前に認識合わせを求め、通常／リスニングの選択と起動直後の開始を再確認した。
+さらに「抜けを徹底確認」「全て実装せず、新旧を組み合わせて使用感と精度を高める」と指定した。
+そのため追加実装を止め、旧FS-01～72・R1～13・S01～30・X01～06と現コードを照合した。
+
+正本は [現行plan](../../tasks/plan.md)、[RPタスク](../../tasks/todo.md)、
+[ソース根拠・採否対応表](../../docs/requirements-audit.md)。旧planとtodoは全文を履歴区画へ保持した。
+この後に続く以前の「残る範囲と再開順」は当時の記録であり、今はRP一覧に優先しない。
+
+- 基準HEAD `97ef5b8e02d06436406543ad2d6de3672b43088b`、branch `feature/multimodal-scan`、開始時clean。
+- 実装は変えていない。起動二択、通信に依存しない取得、順次答案、終了後の自動再装着起動はまだ未接続。
+- 現コードの重大な不足: 970ms内の別BACK抑止、Controller内の同期HTTP、最終写真確認中の音声終了漏れ、
+  readerの追加取得未接続、menu BACKの終了への横取り、全phaseのCLOSED保存、実OCRとplaceholderの区別。
+- 使用感を改善する接続を先行し、精度は全文OCR＋関連画像を既定に実資料比較。PDF／結合は比較用。
+  訂正後は新入力文書で全再解析。新CXR転送・別クラウド・local LLM本流・汎用queueは追加しない。
+- 即消灯／CLOSED後の再装着自動起動と原音のChatGPT利用は早期能力確認。成立したと仮定して製品化しない。
+- graph索引世代は以前と同じ。根拠ファイルのcoverageを確認し、変更・未索引は現在のソースを直接確認した。
+- 以前のAPK導入／F-51F更新承認、LED監査省略、スマホAP／Chrome前景・点灯、端末内ASRの選択を保持する。
+  新しい認証・AP設定変更、実資料のモデル送信などをこの計画整理の承認と混同しない。
+
+### 今回の検査
+
+Runs on: Windows、上記基準HEADに対する文書だけの変更。
+
+- `py -3.12 -m pytest -q tests/test_documentation_contract.py tests/test_versioning.py tests/test_surface_inventory.py`
+  → `26 passed in 11.94s`。
+- `py -3.12 -m ruff check .` → `All checks passed!`。`git diff --check` → exit 0。
+- `py -3.12 -` の一時照合（Pathで読み、git show HEADの旧全文が新文書に含まれること、
+  採否表のFS番号集合、RP見出しとruntime／検証／依存／対象をassert）→
+  `tasks/plan.md: previous full text preserved`、`tasks/todo.md: previous full text preserved`、
+  `FS coverage: 72/72; RP tasks: 22/22 with runtime, checks, dependencies and scope`。
+- 指定JDK17の `jshell.exe -q --class-path android-relay/glassinput/build/classes/java/main -` に
+  監査文書の再現コードを入力 → `first=Optional[BACK]`、`second_distinct_500ms=Optional.empty`。
+  異なる速い操作の欠落を再現した結果であり、合格と扱わない。
+- `py -3.12 scripts/eval_fast_scan.py --pack tests/fixtures/answer_forms/cases.json`
+  → 8 cases／17 questions、hardware_verified=false、ai_executed=false、rubrics_pending_review=10。
+  今回は全pytest／Android build／物理試験を再実行していない。以前の部品証跡は下に保持する。
+
+### Next steps
+
+Runs on: 認識合わせは会話。実装開始後はWindows、能力測定は指定グラスとF-51F。
+
+1. 利用者へ採用・統合・保留・廃止と未成立能力を説明し、認識合わせを終える。
+2. その後、RP-01/18の早期能力確認とRP-02～09/20の短い一周から始める。
+3. 既存のASR／CDP部品測定を保持し、未測定条件だけ追加する。実機適用前に具体的対象・条件を照合する。
 
 ## 依頼・決定
 

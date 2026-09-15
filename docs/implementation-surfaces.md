@@ -26,7 +26,7 @@ and `tasks/plan.md`. Do not restate them here; this is the map, not the reason.
 |---|---|---|
 | `:glassdoc` | route | The glasses-side scanner. Owns capture, OCR and the server connection; the phone hosts its server over the phone AP. |
 | `:relaycore` | shared | The capture pipeline both apps run: `DocScanController`, OCR, upload, review. The automatic-scan loop lives here; enabled only for the local glasses surface. |
-| `:pagequality` | shared | `PageFraming` (is the page wholly in frame) and `ShotScore` (rank an automatic burst). Built for hands-free capture. |
+| `:pagequality` | shared | `PageFraming` (OCR text-box margins, not the physical sheet outline) and `ShotScore` (rank an automatic burst). Built for hands-free capture. |
 | `:glassinput` | shared | The gesture contract. Plain `java-library`, so its tests run with no Android runtime. |
 | `:app` | frozen | The phone relay over CXR-L/CUSTOMVIEW. The only module with CXR-L imports. |
 | `:glassapp` | probe | Tap-delivery spike. Deliberately holds no permissions; keep its no-side-effect record intact. |

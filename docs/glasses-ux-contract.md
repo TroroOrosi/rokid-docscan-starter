@@ -1,6 +1,12 @@
 # Glasses operator contracts
 
-Status: Current phone and standalone surface contracts. Updated 2026-09-14.
+Status: Current phone and standalone surface contracts. Updated 2026-09-15.
+
+The intended startup and complete operator flow are in the current section of
+[`tasks/plan.md`](../tasks/plan.md). The on-glasses mode chooser, immediate local
+start, progressive answer updates and post-CLOSED automatic launch remain planned.
+Known current input and navigation limitations are listed in
+[`requirements-audit.md`](requirements-audit.md); passing component tests did not cover them.
 
 **The `:glassdoc` table below is the decided operator surface** (operator,
 2026-09-14): the venue runs the standalone app over a phone access point and the
@@ -25,7 +31,7 @@ contract (`app/version.py`):
   reading completion, and navigation are phone controls.
 - HUD output remains black, green, static, and at most three lines.
 - The relay makes no camera request during analysis/review. The physical
-  indicator must still be observed independently.
+  indicator is system-controlled; the operator waived the external LED audit on 2026-09-15.
 
 `GET /v1/settings.operations` publishes `"phone"` for every supported action.
 `GET /v1/settings.input` retains a legacy/unverified KeyCode map only for
@@ -37,7 +43,10 @@ The standalone `:glassdoc` APK has a separate local input adapter
 Automatic capture is enabled only on `:glassdoc`. A tap requests a manual shot while
 waiting; during the visible still review it retakes. No input commits after 3 seconds.
 BACK ends capture after the last review; in listening mode a later BACK ends audio.
-Two BACK gestures exit answer reading. Full operation and power/error behavior:
+Two BACK gestures exit answer reading. Distinct rapid BACK gestures may currently be
+deduplicated, and a second BACK during the last photo review does not end audio.
+The current Activity also sends reader-menu BACK to exit handling instead of one-level back.
+Full operation and power/error behavior:
 [`multimodal-scan.md`](multimodal-scan.md). Physical acceptance is pending.
 
 Configuration and session restoration run together on the controller queue.

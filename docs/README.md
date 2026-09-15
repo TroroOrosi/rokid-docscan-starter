@@ -1,14 +1,17 @@
 # Documentation index and authority
 
-Status: Current documentation map. Updated 2026-09-14.
+Status: Current documentation map. Updated 2026-09-15.
 
-When two documents disagree, use this order:
+Separate the intended requirement from evidence of what works:
 
-1. current implementation and automated tests;
-2. current runbooks listed below;
-3. versioned official API or inspected artifact evidence;
-4. dated device measurements with a complete version/hash tuple;
-5. research, historical notes, and hypotheses.
+- User decisions and the current section of `tasks/plan.md` define intended behavior.
+  Implementations and passing tests do not override an unmet requirement.
+- Current source and tests establish implemented behavior. Current runbooks describe
+  that behavior and its limits; a plan does not prove implementation.
+- Versioned official APIs and inspected artifacts establish the supported surface.
+  Device claims require dated measurements with the exact version/hash tuple.
+- Historical plans and research retain context. Their superseded resume instructions
+  are not current work; use the RP list in `tasks/todo.md`.
 
 A build proves compilation only. A repository note proves that an observation
 was recorded, not that it applies to another device or firmware.
@@ -47,8 +50,8 @@ silently applying that exception. `.agents/progress/` remains in scope.
 - `docs/user-operation-guide.md` — operator and data-handling guide.
 - `docs/windows-android-real-device-setup.md` — Windows/Android setup.
 - `docs/explain-sessions.md` — server explain-session API.
-- `docs/exam-solver-architecture.md` — answer-mode architecture, including the
-  `chatgpt-web` route and the PDF booklet upload.
+- `docs/exam-solver-architecture.md` — answer-mode architecture, including
+  `chatgpt-web` and OCR/image/PDF attachment paths.
 - `docs/future-proof-architecture.md` — extension boundaries; current where it
   agrees with the implementation.
 
@@ -81,22 +84,22 @@ what the platform permits.
 
 ## Implementation plans and adoption decisions
 
+- `tasks/plan.md` — current rationalized plan first; superseded plans preserved in a historical section.
+- `tasks/todo.md` — active RP tasks with acceptance criteria; older checkboxes are history.
+- `docs/requirements-audit.md` — source findings, adoption/defer/retire decisions,
+  and the complete old FS/R/S/X requirement mapping. Planning only, not physical acceptance.
 - `docs/fast-scan-decisions.md` — automatic/manual scan and listening decisions.
   The current implementation is described in `docs/multimodal-scan.md`.
   D/E/X comparisons retain their original evidence; physical/model acceptance is pending.
 
-## Shelved plans
-
-- `tasks/plan.md` — the current plan and its accepted revisions.
-- `tasks/todo.md` — open tasks. Unchecked never means implemented.
-
 ## Internal progress records
 
-- `.agents/progress/multimodal-scan.md` — 手動併用スキャン・省電力・OCR/画像/音声/図の継続記録。
+- `.agents/progress/multimodal-scan.md` — **read this first, in full.** 現在は全体認識合わせと計画整理。
+  以前の実装・実機導入・ASRの測定と、追加実装を始める前の境界を保持する。
 
 Continuation records for agents. Never an operator contract.
 
-- `.agents/progress/venue-route-and-duplicated-surfaces.md` — **read this first.**
+- `.agents/progress/venue-route-and-duplicated-surfaces.md` — earlier continuation context.
   The route the operator decided (chatgpt-web), the implementations that still
   duplicate each other's role, what is blocking the phone-side CDP endpoint, and
   what the next session must settle with the operator before adding anything.
@@ -110,10 +113,9 @@ Continuation records for agents. Never an operator contract.
 ## Indicator and input boundary
 
 Supported code and runbooks do not disable, obscure, spoof, or bypass a camera
-or privacy indicator. The physical indicator is observed with an independent
-camera. SDK callbacks record application state but do not prove physical light
-state.
+or privacy indicator. The operator waived the external LED audit on 2026-09-15.
+This is not a physical observation; SDK callbacks do not prove light state.
 
-CUSTOMVIEW operator tap delivery is not a current verified control surface. Use
-the phone controls until a glasses-side app and its input path pass the physical
-checklist on the exact recorded version tuple.
+CUSTOMVIEW operator tap delivery remains unverified; its frozen relay uses phone
+controls. The decided glassdoc route uses its own input adapter. Its complete
+operation still requires acceptance on the exact installed APK and firmware.

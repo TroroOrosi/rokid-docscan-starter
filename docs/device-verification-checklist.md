@@ -2,6 +2,12 @@
 
 Status: Current acceptance form. Updated 2026-09-15.
 
+The detailed phone/CXR-L checks below belong to the frozen relay route. For the
+decided glassdoc route, use the RP acceptance tasks in [`tasks/todo.md`](../tasks/todo.md)
+and the boundary scenarios in [`requirements-audit.md`](requirements-audit.md).
+Record the phone AP/mobile network instead of requiring a PC LAN. A relay pass
+does not validate the standalone route; the LED audit is waived by the operator.
+
 A build is not hardware verification. Complete every applicable item on the
 exact version tuple; otherwise report “build verified, device verification
 pending.”
