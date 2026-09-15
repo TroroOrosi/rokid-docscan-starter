@@ -1,6 +1,6 @@
 # 手動併用スキャン・省電力・OCR/画像/音声/図
 
-Status: Internal progress。実装・自動試験を完了。実機適用と精度比較は未実施。
+Status: Internal progress。実装・自動試験済み。APK導入済み、スマホ更新とASR導入を継続中。
 Runs on: Windowsで実装・試験。運用先はglassdocとスマホAP/FastAPI/Chrome。
 
 ## 依頼・決定
@@ -111,8 +111,10 @@ Runs on: Windowsのadb読み取り。その後の書込み先は明示したグ�
 
 `adb devices -l` の直近出力はグラス `192.168.0.4:5555` (`RG_glasses`)、
 F-51F `192.168.0.30:38615`、別の `adb-ZY22LWGDCV-gAfvon._adb-tls-connect._tcp` です。
-複数endpointのため個別実機操作へ進んでいません。導入・起動・設定変更の承認は未取得。
-接続を再列挙し、対象の同一性、署名/ダウングレード、外部LED動画の準備を確認してください。
+利用者がこのグラスへのAPK導入とF-51Fのサーバ更新・ASR設定を承認しました。
+さらに「LEDの監査はシステム固定のため不要」と指定したため、今回のLED監査は省略します。
+物理LEDを観察済みという意味ではなく、制御コードも変更しません。
+接続を再列挙して上記対象を確認しました。以後も対象の同一性と署名/ダウングレードを確認します。
 APK再ビルド時は上のハッシュを流用せず再検査します。
 
 ### 2. スマホASRを導入して測る
@@ -121,12 +123,12 @@ Runs on: 指定F-51FのTermux。実機適用の承認後。
 
 runbookのビルドscript、モデル取得、環境設定を実行します。撮影時刻・図・資料不足
 メタデータの加算DB移行があるので、起動前に既存DBを保全して適用対象を確認します。
-実DBへの適用は本変更では実行していません。Chromeを前景/点灯で保持し、録音・撮影と
+実DB移行は以下の保全後に実施します。Chromeを前景/点灯で保持し、録音・撮影と
 同居させて処理速度と待ち行列を測ります。ファイル存在だけのreadinessを速度合格と扱いません。
 
 ### 3. APKと会場経路を受け入れる
 
-Runs on: 指定グラス → F-51F AP → F-51F FastAPI/CDP/Chrome。外部カメラでLEDを観察。
+Runs on: 指定グラス → F-51F AP → F-51F FastAPI/CDP/Chrome。LED監査は利用者指定で省略。
 
 自動/手動撮影、3秒確認/取消/最後の1枚、画角校正、録音独立終了、図の可読性、消灯と
 結果復帰、ダブルタップ2回での終了を確認します。既存15秒timeoutは瞬時消灯ではありません。
@@ -153,3 +155,23 @@ whisper.cpp CLI/VAD時刻変換とCMakeはscriptが固定する公式revisionを
 Context7 library IDは `/websites/developer_android`。有効な既存測定を再利用し、
 変更した条件だけ測り直します。工程spineはAgent Skills、最小実装はPonytail。
 再開には `progress-checkpoint`、実機適用前には `verifying-premises` を使用します。
+
+## 実機適用中の記録（2026-09-15）
+
+Runs on: Windowsから指定グラスとF-51Fへ適用。まだ会場経路の通し試験ではありません。
+
+- `adb -s 192.168.0.4:5555 pull <既存APK> data/glassdoc-installed-before-multimodal.apk`
+  で旧APKを保全。`apksigner verify --print-certs` のSHA-256が上記証明書と一致。
+- `$env:AGENT_APPROVED=1; adb -s 192.168.0.4:5555 install -r <最終APK>` → `Success`。
+  `dumpsys package dev.rokid.docscanglass.doc` → versionCode 8、versionName 0.7.0。
+  導入前の `dumpsys media.camera` は `Active Camera Clients: []`。
+- F-51FのSSHが接続拒否。Termuxが空のプロンプトにあることを画面で確認し、承認範囲内で
+  `termux-wake-lock` と `sshd` を入力。再接続後のPythonは3.14.6、空きメモリ約5.8GB。
+- スマホの `~/rokid-backups/pre-multimodal-8163b5f` に旧app/requirementsとSQLite backupを保全。
+  `PRAGMA quick_check` → `ok`。既存9テーブルの行数は全て0。サーバは更新前に停止状態。
+- commit 8163b5fのappとASR scriptを `~/rokid-server` へ配置。
+  転送tar SHA-256 `9f322753bc068c15aae7b1c6105dda25c92351a5905203b6855bee6142618a4e` を照合。
+- ASR buildは `set: pipefail CR: invalid option name` で停止。Git blobはCRLF 0件なのに
+  Windows `git archive` がCRLF 17件へ変換していました。`.gitattributes` に
+  `*.sh text eol=lf` を加え、`git archive --worktree-attributes` から取り出したscriptが
+  CRLF 0件、LF 17件であることを確認。修正版を実機へ再配布してビルドを続けます。
