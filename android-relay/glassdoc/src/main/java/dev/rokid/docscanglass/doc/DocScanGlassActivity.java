@@ -390,6 +390,8 @@ public final class DocScanGlassActivity extends Activity
         if (event.getRepeatCount() == 0) {
             Optional<GlassesInputAction> action = normalizer.accept(InputSignal.key(
                     elapsedMillis, phase, name, GlassKeyEvents.isKnown(name)));
+            if (BuildConfig.DEBUG) Log.i(TAG, "input phase=" + phase + " key=" + name
+                    + " event=" + elapsedMillis + " action=" + action.orElse(null));
             action.ifPresent(value -> onAction(value, elapsedMillis));
         }
         if (isBackKey && backOwnedByReader) {

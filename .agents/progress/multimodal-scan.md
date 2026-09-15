@@ -52,7 +52,7 @@ B5指定だけで全体取得の証明にせず、RP-10で四辺・余白と実�
 
 ### ローカル先行の通常撮影と起動選択（2026-09-16）
 
-Runs on: Windowsの実装・自動試験。新APKの実機導入とAP受け入れはまだ行っていない。
+Runs on: Windowsの実装・自動試験。その後のグラス導入は下記、AP受け入れは未実施。
 
 LocalCaptureSessionはHTTPより先にUUID記録を作り、送信先、モード、phase、CLOSED、後から得た
 HTTPのlong IDを保存する。既存CaptureReviewのバイナリ形式を再利用し、確定写真の各版を保持して
@@ -84,12 +84,29 @@ API／view／APKの版とREADME tupleを更新。公開契約はphysical_accepta
 - aapt2でpackage=dev.rokid.docscanglass.doc、launchable=DocScanGlassActivityを照合。
   apksignerは`Verifies`、v2=true、証明書SHA-256=`906307478018e09e2937cfd8042a674d27598767577e08a304472aae407ccacc`。
   Get-FileHashでAPK SHA-256=`A375A10D71CD158D5A98568289A1D75F59F39774CC6A5B2043A4E8ACADD4156A`。
-  実機に入っているAPKは旧版。新APKの導入・物理試験はまだ実行していない。
+  このbuild検査後に新APKを導入。撮影の物理試験はまだ実行していない。
 
 読み取りでF-51FのAPIはlocalhost health=200、実行appは従来の版、REAL_MODE／analyzerは未設定、
 API鍵なしを再確認。データは~/rokid-server/data。AP interfaceはまだ起動していない。
 cmd wifiのAP照会は権限例外を併記して「他interfaceを破棄せず作成可能」と返しただけで、
 APと携帯回線の同時接続を物理検証した結果ではない。
+
+### 起動二択のグラス導入（2026-09-16）
+
+Runs on: Windows → 指定グラス。同じ家庭Wi-Fiでの準備であり、会場AP経路の受け入れではない。
+
+commit `db4255d` をorigin/feature/multimodal-scanへpush。新APKと、その後の入力ログ2行を加えた
+診断APKをそれぞれidentity／署名／SHA-256照合後に導入した。`adb install -r` → `Success`。
+導入前からAsleepだったため、起動後にwakeして通常／リスニング二択を確認した。
+診断キーは `input -d 0` で指定すると届き、往復の選択後は通常モードを選択したまま待機。
+`dumpsys media.camera` → `Active Camera Clients: []`。撮影・録音は始めていない。
+正確な成果物ハッシュ・コマンドと限界は [hardware-measurements §H](../../docs/hardware-measurements.md#h-起動二択と診断キー入力2026-09-16)。
+
+F-51FにAPI鍵を新規設定して `192.168.0.30:8000` で待受、同じ鍵をグラスへ暗号化保存する
+具体案を利用者へ提示済み。返答は未着。`REAL_MODE=1`／`client-ocr`／`chatgpt-web`、
+dataは既存のまま。準備manifestはignored `data/device-setup/preflight.json`。
+認証変更は承認待ちなので、鍵生成・サーバ更新・新しいLAN待受はまだ実行していない。
+AP切替も未適用。待機中はRP-07/08の実装と自動試験を進める。英語実音声試験は後回し。
 
 ### Next steps — 追加実装
 
@@ -112,7 +129,7 @@ Runs on: WindowsでRP-05のActivity接続、RP-02の実OCR契約、起動・保�
 実機の短い通し試験は指定グラス→F-51F AP→F-51F Chrome。
 
 1. 起動二択・通常写真のローカル保存と独立送信まで実装。全Android gateとAPK identity／署名／hashを確認。
-   変更を保存して、認証設定の具体的承認後に新APKとスマホappを適用する。録音の中断保存・開始と終了の分離はRP-07/08、
+   グラス導入と二択の合成入力確認まで実行。認証設定の具体的承認後にスマホappと実鍵を適用する。録音の中断保存・開始と終了の分離はRP-07/08、
    取消期限へ時刻を渡すRP-09が残る。これらは実装済みと扱わない。
 2. 用紙経路の準備後、同じB5紙面の単頁／見開きを撮り、実OCRと最終答案の差を測る。
    ガイド切替だけで外周検出が実装されたとは扱わない。カメラ寸法・retryは変更しない。

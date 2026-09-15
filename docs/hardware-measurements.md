@@ -1455,6 +1455,47 @@ sequence 1が3.893秒（0.779）。原音PCM SHA-256は
 **未測定:** グラスのマイクとカメラの同時使用、3秒実画像確認、手動取り直し、消灯/復帰、
 AP経路、長時間運用、実リスニングの正答率、ChatGPTの原音受理、画像/PDFの精度差。
 
+## H. 起動二択と診断キー入力（2026-09-16）
+
+Status: Frozen measurement。グラス firmware `1.25.015-20260903-150201`／serial
+`1904092623381086`／glassdoc commit `db4255d`と入力ログ2行を加えた診断APK。
+Runs on: Windowsからグラス `192.168.0.4:5555`。スマホAP経路の受け入れではない。
+
+`adb devices -l` は3接続。スマホのIPとmDNSは同じserial `ZY22LWGDCV` と照合済み。
+グラスの `getprop ro.serialno` は上記serial、`vendor.rkd.glasses.is_spread` は1。
+導入前の既存APKをpullして保全し、新APKと証明書SHA-256が一致することを確認した。
+承認済みの書込みは `$env:AGENT_APPROVED=1` を指定して実行した。
+
+- `aapt2 dump badging` → package `dev.rokid.docscanglass.doc`、
+  launchable activity `dev.rokid.docscanglass.doc.DocScanGlassActivity`。
+- `apksigner verify --verbose --print-certs` → `Verifies`、v2=true、証明書SHA-256
+  `906307478018e09e2937cfd8042a674d27598767577e08a304472aae407ccacc`。
+- `Get-FileHash -Algorithm SHA256` → db4255d APK
+  `A375A10D71CD158D5A98568289A1D75F59F39774CC6A5B2043A4E8ACADD4156A`。
+- `adb -s 192.168.0.4:5555 install -r <APK>` → `Success`。
+  `am start -W -n dev.rokid.docscanglass.doc/.DocScanGlassActivity` → `Status: ok`、WaitTime 3053ms。
+  ただし導入前からAsleepで、起動直後のscreencapは黒。`KEYCODE_WAKEUP` 後に二択を確認した。
+  この時間を選択から取得までの速度や、装着による起動の証拠にしない。
+- 診断ログ追加後の `./android-relay/gradlew --no-daemon :glassdoc:assembleDebug`
+  → `BUILD SUCCESSFUL in 1m 7s`。APK SHA-256
+  `F43FBFDC75C6B62C80A0640464C83D14667BC76E04CE067880841324128A279F`。
+  identityと同じ署名を照合して導入 → `Success`、起動 → `Status: ok`。
+
+診断用 `adb shell input keyevent` は表示先の既定が-1。この条件ではActivityに入力ログがなく、
+二択も変わらなかった。`dumpsys input` のfocused displayは0。
+次のように明示するとログと選択画面の双方に反映された。
+
+| `adb -s 192.168.0.4:5555 shell` 以下のコマンド | 出力・観測 |
+|---|---|
+| `input -d 0 keyevent KEYCODE_NOTIFICATION KEYCODE_DPAD_RIGHT KEYCODE_DPAD_DOWN` | `action=SWIPE_FORWARD` 1回、リスニングを選択 |
+| `input -d 0 keyevent KEYCODE_NOTIFICATION KEYCODE_DPAD_LEFT KEYCODE_DPAD_UP` | `action=SWIPE_BACK` 1回、通常の読取へ戻る |
+| `dumpsys media.camera` | 前後とも `Active Camera Clients: []` |
+
+これは合成KeyEventの測定で、物理スワイプの重複・相関幅を検証したものではない。
+タップによる開始、撮影、録音、ChatGPT送信は行っていない。LEDの物理観察も行っていない。
+privateのno-backup領域に暗号化設定ファイルが作られたが、実API鍵の設定・認証再起動は未実施。
+画面証跡はignoredの `data/device-setup/startup-display0-{listening,normal}.png` に保全した。
+
 # 出典
 
 ## 出典 — グラス一次情報索引（2026-09-03）
