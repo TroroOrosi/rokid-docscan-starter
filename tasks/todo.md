@@ -1,11 +1,11 @@
 # タスク：起動から記入用答案まで
 
-Status: Current implementation task list。2026-09-15の認識合わせ案。RP項目は未着手。
+Status: Current implementation task list。2026-09-15の認識合わせ後、追加実装の依頼を受けRP項目を実装中。
 Runs on: 開発・自動試験はWindows。実機受け入れはglassdocとF-51F AP／FastAPI／ASR／Chrome。
 
 仕様は[plan](plan.md)、採否と旧IDの対応は[requirements-audit](../docs/requirements-audit.md)。
 下の旧チェックボックスはその時点の記録を保持したもので、現在の再開順ではない。
-今回は計画の認識合わせまで。RP実装を開始したと解釈しない。
+実機の英語リスニング試験は利用者の追加指示で後回し。用紙から答案までを優先する。
 
 ## 共通の進め方
 
@@ -49,7 +49,7 @@ Runs on: 指定グラス。スマホの協力が必要な既存経路だけF-51F
 
 Runs on: WindowsでAPI試験、適用後F-51F。
 
-- [ ] REAL_MODEで実クライアントOCRを受け付け、placeholder solver/analyzerは引き続き拒否する。
+- [x] REAL_MODEで実クライアントOCRを受け付け、placeholder solver/analyzerは引き続き拒否する。
 - [ ] 空OCRの写真を捨てず、画像対応solverで読める入力として扱う。画像非対応なら資料不足を明示する。
 - 検証: 実OCR＋chatgpt-web、空OCR＋画像、placeholder／未準備の正負API試験。REAL_MODE=0への逃げを入れない。
 - 依存: なし。対象: config、analyzer境界、main、既存real-mode／photo試験。schema変更が必要なら適用前に具体化。
@@ -76,8 +76,8 @@ Runs on: Windows、glassdoc。
 
 Runs on: Windowsの純Java試験、同じAPK／firmwareのグラス。
 
-- [ ] broadcast／KeyEventの同一操作の相関と、異なる操作の連続を分ける。970ms内の別BACKを保持。
-- [ ] 取得時の単調時計を維持し、focus喪失時は相関と二段階終了の一時状態を消す。
+- [x] broadcast／KeyEventの同一操作の相関と、異なる操作の連続を分ける。970ms内の別BACKを保持。純Java試験で確認、実機照合は未実施。
+- [x] 取得時の単調時計を維持し、focus喪失時は相関と二段階終了の一時状態を消す。取消期限への接続はRP-09。
 - 検証: S14/15、順序逆転、重複、遅延、未知event。既存の相関実測を保持して実機の物理操作数と照合。
 - 依存: なし。対象: normalizer／InputSignalの必要境界、Activity、既存入力試験。
 

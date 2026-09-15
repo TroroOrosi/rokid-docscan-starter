@@ -17,7 +17,7 @@ from ..llm import ADAPTER_PROVIDERS
 from ..provider_registry import ProviderRegistry
 from .base import Analyzer
 from .llm_adapter import LLMAnalyzer
-from .local_placeholder import LocalPlaceholderAnalyzer
+from .local_placeholder import ClientOcrAnalyzer, LocalPlaceholderAnalyzer
 
 DEFAULT_ANALYZER = "local"
 
@@ -44,6 +44,7 @@ def get_analyzer(prefer: str | None = None) -> Analyzer:
 
 # Register the offline default at import time so the server always has one.
 register_analyzer(LocalPlaceholderAnalyzer(), replace=True)
+register_analyzer(ClientOcrAnalyzer(), replace=True)
 # Register the real cloud analyzers (OpenAI GPT / Google Gemini / Anthropic Claude).
 # Each defers to local when unconfigured or on any error, so finalize never breaks.
 for _name, _provider in ADAPTER_PROVIDERS:

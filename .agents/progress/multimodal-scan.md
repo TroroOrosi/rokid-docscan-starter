@@ -22,7 +22,15 @@ Runs on: 実装・回帰試験はWindows。実機操作は同一性を確認し�
   `./android-relay/gradlew --no-daemon :glassinput:test` は `32 tests completed, 2 failed`。
   同一KeyEvent組の重複と別のNOTIFICATION→terminal組を分離する修正後は
   `BUILD SUCCESSFUL in 16s`。相関幅970msは維持。broadcastだけの曖昧な重複は保守的な扱いを維持する。
-- RP-05全体は未完了。Activityのevent時刻・focus時の終了確認解除、実機ジェスチャ照合は次。
+- RP-05のActivity接続: KeyEvent発生時刻をelapsed clockへ変換し、終了確認の間隔を維持。
+  focus変化で相関と終了確認を解除。readerメニューのBACKは一段戻り、本文だけ終了確認へ進む。
+  メニュー試験の修正前は `1 test completed, 1 failed`。修正後の
+  `./android-relay/gradlew --no-daemon :glassdoc:testDebugUnitTest --tests '*DocScanGlassActivityAnswerReadingTest'`
+  は `BUILD SUCCESSFUL in 38s`。実機ジェスチャ照合と取消期限への接続は未実施。
+- RP-02前半: `ROKID_ANALYZER=client-ocr` を明示的に登録。offlineとplaceholderを分け、
+  未準備／既定placeholderの拒否を維持。新試験の修正前は `1 failed, 4 passed`、修正後の
+  `py -3.12 -m pytest -q tests/test_real_mode.py tests/test_llm_adapters.py tests/test_provider_registry.py`
+  は `40 passed in 5.20s`。空OCRの画像経路は次の小工程。
   公開契約／APKの版と全体buildは導入用のまとまりで更新・検査する。
 
 ### Next steps — 追加実装

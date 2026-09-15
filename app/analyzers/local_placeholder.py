@@ -42,3 +42,15 @@ class LocalPlaceholderAnalyzer(Analyzer):
             if line:
                 return line[:max_len]
         return normalize_ocr_text(ocr_text)[:max_len] or "(no text)"
+
+
+class ClientOcrAnalyzer(LocalPlaceholderAnalyzer):
+    """Explicitly use the client's real OCR; this adapter does not read images."""
+
+    name = "client-ocr"
+    provider_version = "client-ocr-1.0.0"
+    placeholder = False
+
+    @staticmethod
+    def _summarize(ocr_text: str | None, max_len: int) -> str:
+        return LocalPlaceholderAnalyzer._summarize(ocr_text, max_len) if (ocr_text or "").strip() else ""

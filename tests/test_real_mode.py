@@ -25,6 +25,17 @@ def test_real_mode_rejects_local_analyzer_and_solver(monkeypatch):
         get_solver("local")
 
 
+def test_real_mode_accepts_explicit_client_ocr_but_still_checks_readiness(monkeypatch):
+    monkeypatch.setattr(config, "REAL_MODE", True)
+    analyzer = get_analyzer("client-ocr")
+    assert analyzer.info()["offline"] is True
+    assert analyzer.analyze(ocr_text="問1 1+1を答えよ").text == "問1 1+1を答えよ"
+    assert not analyzer.analyze(image_path="photo.png").text
+    monkeypatch.setattr(analyzer, "ready", lambda: False)
+    with pytest.raises(RuntimeError, match="unready analyzer"):
+        get_analyzer("client-ocr")
+
+
 def test_real_mode_rejects_unknown_provider_fallback(monkeypatch):
     monkeypatch.setattr(config, "REAL_MODE", True)
 

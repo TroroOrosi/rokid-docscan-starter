@@ -37,7 +37,7 @@ def require_real_provider(kind: str, provider):
     if not REAL_MODE:
         return provider
     info = provider.info()
-    if info.get("offline") or not info.get("ready"):
+    if getattr(provider, "placeholder", info.get("offline")) or not info.get("ready"):
         raise RuntimeError(
             "ROKID_REAL_MODE=1 rejects placeholder or unready "
             f"{kind} provider '{info.get('name', 'unknown')}'"
