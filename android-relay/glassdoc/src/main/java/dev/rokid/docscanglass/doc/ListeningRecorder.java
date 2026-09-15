@@ -28,7 +28,7 @@ import java.util.concurrent.Future;
 final class ListeningRecorder implements AutoCloseable {
     private static final int RATE = 16000, CHUNK = RATE * 30, OVERLAP = RATE;
     private final DocScanApi api;
-    private final long documentId;
+    private volatile long documentId;
     private final File directory;
     private final Runnable onFailure;
     private final ExecutorService uploads = Executors.newSingleThreadExecutor();
@@ -42,11 +42,27 @@ final class ListeningRecorder implements AutoCloseable {
     private long epoch;
     private Properties saved = new Properties();
 
-    ListeningRecorder(File root, long documentId, DocScanApi api, Runnable onFailure) {
+    ListeningRecorder(File root, long documentId, DocScanApi api, Runnable onFailure) throws IOException {
         this.api = api;
         this.documentId = documentId;
         this.onFailure = onFailure;
-        directory = new File(root, "listening-" + documentId);
+        File previous = new File(root, "listening-" + documentId);
+        if (previous.exists() && new File(root, "listening").exists()) throw new IOException("録音記録が重複しています。両方の原音を保持しています");
+        directory = previous.exists() ? previous : new File(root, "listening");
+    }
+
+    void bindDocument(long id) throws IOException {
+        synchronized (this) {
+            if (id <= 0 || (documentId > 0 && documentId != id)) throw new IOException("録音の送信先文書が一致しません");
+            save("document", Long.toString(id));
+            documentId = id;
+        }
+        uploads.submit(() -> {
+            for (int i = 0; i < 600; i++) {
+                synchronized (this) { if (!saved.containsKey("sha." + i)) break; }
+                upload(chunk(i), i, Math.max(0, (long)i * CHUNK - OVERLAP));
+            }
+        });
     }
 
     @RequiresPermission(Manifest.permission.RECORD_AUDIO)
@@ -95,6 +111,8 @@ final class ListeningRecorder implements AutoCloseable {
         String phase = saved.getProperty("phase", "interrupted");
         if (!Arrays.asList("recording", "interrupted", "stopped", "complete").contains(phase)) throw new IOException("録音状態が不正です");
         if (saved.containsKey("epoch") && !saved.getProperty("epoch").equals(Long.toString(epoch))) throw new IOException("録音時計が一致しません");
+        String bound = saved.getProperty("document", Long.toString(documentId));
+        if (!bound.equals("0") && !bound.equals(Long.toString(documentId))) throw new IOException("録音の送信先文書が一致しません");
         boolean interrupted = phase.equals("recording") || phase.equals("interrupted");
         File[] files = directory.listFiles((dir, name) -> name.matches("[0-9]{4}\\.wav(\\.part)?"));
         if (files == null) throw new IOException("原音を確認できません");
@@ -202,6 +220,7 @@ final class ListeningRecorder implements AutoCloseable {
     }
 
     private void upload(File file, int sequence, long start) {
+        if (documentId == 0) return;
         try {
             String hash = digest(readBounded(file));
             synchronized (this) {
@@ -222,6 +241,7 @@ final class ListeningRecorder implements AutoCloseable {
         Future<?> drained = uploads.submit(() -> { });
         drained.get();
         if (chunks == 0) throw new IOException("録音がありません");
+        if (documentId == 0) throw new IOException("接続を待っています。録音は保存済みです");
         uploadError = null;
         for (int i = 0; i < chunks; i++) {
             upload(chunk(i), i, Math.max(0, (long)i * CHUNK - OVERLAP));
@@ -237,6 +257,9 @@ final class ListeningRecorder implements AutoCloseable {
     private synchronized void save(String name, String value) throws IOException {
         Properties next = new Properties(); next.putAll(saved); next.setProperty(name, value);
         next.setProperty("epoch", Long.toString(epoch));
+        if (!next.containsKey("document") || (next.getProperty("document").equals("0") && documentId > 0)) {
+            next.setProperty("document", Long.toString(documentId));
+        }
         if (name.equals("phase") && (value.equals("stopped") || value.equals("complete"))) {
             next.setProperty("chunks", Integer.toString(chunks)); next.setProperty("samples", Long.toString(samples));
         }

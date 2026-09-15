@@ -72,6 +72,8 @@ public final class DocScanGlassActivity extends Activity
     private ListeningRecorder listening;
     private boolean finishingAudio;
     private long listeningDocument;
+    private File listeningDirectory;
+    private boolean resumingListening;
 
     /**
      * The sensor reports {@code SENSOR_ORIENTATION=270} and writes
@@ -618,14 +620,24 @@ public final class DocScanGlassActivity extends Activity
         main.post(() -> hud.showLines(GlassesHudText.adapt(hudLines)));
     }
 
-    @Override public void onListeningReady(long documentId) {
+    @Override public void onListeningReady(File directory, long documentId, boolean resume) {
         main.post(() -> {
-            if (sessionClosed || (listening != null && listeningDocument == documentId)) return;
+            if (sessionClosed) return;
+            if (directory.equals(listeningDirectory)) {
+                listeningDocument = documentId;
+                if (listening != null && documentId > 0) {
+                    try { listening.bindDocument(documentId); }
+                    catch (IOException error) { controller.onListeningError(); }
+                }
+                return;
+            }
             if (listening != null) listening.close();
             listening = null;
             finishingAudio = false;
             listeningDocument = documentId;
-            if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            listeningDirectory = directory;
+            resumingListening = resume;
+            if (!resume && checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
                 requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, AUDIO_PERMISSION_REQUEST);
                 return;
             }
@@ -635,11 +647,12 @@ public final class DocScanGlassActivity extends Activity
 
     private void startListening() {
         try {
-            listening = new ListeningRecorder(controller.localCaptureDirectory(), listeningDocument, controller.api(), () -> {
+            listening = new ListeningRecorder(listeningDirectory, listeningDocument, controller.api(), () -> {
                 controller.onListeningError();
                 main.post(() -> { wakeForResult(); stopService(new Intent(this, ListeningService.class)); });
             });
-            if (listening.restore()) {
+            if (resumingListening) {
+                if (!listening.restore()) throw new IOException("再開する録音がありません");
                 if (listening.isInterrupted()) controller.onListeningError();
                 finishAudio();
                 return;
@@ -660,9 +673,10 @@ public final class DocScanGlassActivity extends Activity
         if (finishingAudio || listening == null) return;
         finishingAudio = true;
         waitWithDisplayOff();
+        ListeningRecorder recording = listening;
         new Thread(() -> {
             try {
-                listening.finishAndUpload();
+                recording.finishAndUpload();
                 main.post(() -> {
                     stopService(new Intent(this, ListeningService.class));
                     if (!sessionClosed) controller.completeListening();

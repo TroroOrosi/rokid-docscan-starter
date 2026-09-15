@@ -44,7 +44,7 @@ public final class DocScanController implements AutoCloseable {
         /** Persist accepted settings before changing the active destination. Never log the key. */
         default void persistConfiguration(String server, String key) throws IOException { }
 
-        default void onListeningReady(long documentId) { }
+        default void onListeningReady(File directory, long documentId, boolean resume) { }
     }
 
     private static final String PREFS = "docscan_relay";
@@ -453,7 +453,7 @@ public final class DocScanController implements AutoCloseable {
                 accepted = true;
                 selection.accept(true);
                 publish(RelayState.READY, List.of("読取を開始", "用紙全体を入れてください", ""), "Started local capture session");
-                startLocalCapture();
+                startLocalCapture(false);
             } catch (Exception error) { fail("読取を開始できません", error); if (!accepted) selection.accept(false); }
         });
     }
@@ -519,9 +519,10 @@ public final class DocScanController implements AutoCloseable {
                     publish(RelayState.FINALIZING, List.of("解析を再開", "資料は保存済み", ""), "Resumed saved analysis");
                 } else if (captureReview.hasPending()) {
                     publishCaptureReview(captureReview.peek(), "Resumed local pending photo", true);
+                    if (listeningMode) startLocalCapture(true);
                 } else {
                     publish(RelayState.READING, List.of("読取を再開", nextPageIndex + "枚保存済み", ""), "Resumed local capture");
-                    startLocalCapture();
+                    startLocalCapture(true);
                 }
                 queueLocalUpload();
             } catch (Exception error) { fail("読取を復元できません", error); if (!accepted) selection.accept(false); }
@@ -546,16 +547,11 @@ public final class DocScanController implements AutoCloseable {
         }); } catch (RejectedExecutionException ignored) { }
     }
 
-    private void startLocalCapture() throws Exception {
+    private void startLocalCapture(boolean resume) throws Exception {
         if (!link.supportsLocalCaptureReview()) return;
         if (listeningMode) {
-            api.requireLocalAsr();
-            if (documentId == 0) {
-                documentId = api.createDocument("Rokid listening").getLong("document_id");
-                if (localSession != null) localSession.bindDocument(documentId);
-                persistWorkflow();
-            }
-            listener.onListeningReady(documentId);
+            listener.onListeningReady(localCaptureDirectory(), documentId, resume);
+            queueLocalUpload();
         } else startAutoCaptureNow();
     }
 
@@ -1065,14 +1061,14 @@ public final class DocScanController implements AutoCloseable {
                                 nextPageIndex + "ページ登録済",
                                 "撮影準備はスマホ"),
                         "Recovered document " + documentId);
-                startLocalCapture();
+                startLocalCapture(true);
                 return;
             }
             publish(
                     RelayState.READY,
                     List.of("準備完了", "撮影準備はスマホ", "読取完了はスマホ"),
                     "Ready for a new document");
-            startLocalCapture();
+            startLocalCapture(true);
         } catch (Exception error) {
             fail("前回状態を復元できません", error);
         }
@@ -1705,12 +1701,18 @@ public final class DocScanController implements AutoCloseable {
             JSONObject finished = null;
             try {
                 LocalCaptureSession.Page page = saved.nextUnsent();
-                if (page != null && saved.documentId() == 0) {
+                if ((page != null || saved.listening()) && saved.documentId() == 0) {
                     // An ambiguous create can leave an empty server document; images only use the durably bound ID.
                     httpInProgress = true;
                     JSONObject created = destination.createDocument("Rokid scan");
                     httpInProgress = false;
                     saved.bindDocument(created.getLong("document_id"));
+                    if (saved.listening()) serial.execute(() -> {
+                        if (closed || localSession != saved) return;
+                        documentId = saved.documentId();
+                        persistWorkflow();
+                        listener.onListeningReady(saved.directory(), documentId, false);
+                    });
                 }
                 while (!closed && page != null) {
                     CaptureReviewStore.Pending photo = saved.read(page);
@@ -2580,7 +2582,7 @@ public final class DocScanController implements AutoCloseable {
                 List.of("新規読取", "撮影準備はスマホ", "完了はスマホ"),
                 "Workflow cleared");
         if (linkReady && link.supportsLocalCaptureReview()) {
-            try { startLocalCapture(); }
+            try { startLocalCapture(false); }
             catch (Exception error) { fail("新規読取を開始できません", error); }
         }
     }

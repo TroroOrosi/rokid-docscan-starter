@@ -66,6 +66,61 @@ public class LocalReviewTest {
         }
     }
 
+    @Test public void listeningSelectionHandsOffLocalRecordingBeforeAnyHttpResponse() throws Exception {
+        Context context = RuntimeEnvironment.getApplication();
+        CountDownLatch selected = new CountDownLatch(1), response = new CountDownLatch(1);
+        try (MockWebServer server = new MockWebServer()) {
+            server.setDispatcher(new Dispatcher() {
+                @Override public MockResponse dispatch(RecordedRequest request) throws InterruptedException {
+                    response.await(5, TimeUnit.SECONDS);
+                    return new MockResponse().setBody(request.getPath().equals("/v1/listening-ready")
+                            ? "{\"ready\":true}" : "{\"document_id\":17}");
+                }
+            });
+            DocScanController controller = new DocScanController(context, new Surface(), null,
+                    new DocScanController.Listener() {
+                        public void onUpdate(RelayState state, List<String> lines, String diagnostic) { }
+                        @Override public void onListeningReady(File directory, long documentId, boolean resume) {
+                            if (documentId == 0 && !resume && directory.isDirectory()) selected.countDown();
+                        }
+                    }, new ClientIdentity("test", "test", "test"));
+            try {
+                controller.configureForLocalStart(server.url("/").toString(), "", 180);
+                controller.startLocalSession(true);
+                assertTrue("Audio must be handed off locally before the server answers", selected.await(1, TimeUnit.SECONDS));
+            } finally { response.countDown(); controller.close(); }
+        }
+    }
+
+    @Test public void resumingPendingListeningPhotoAlsoRestoresItsAudioWithoutStartingANewRecording() throws Exception {
+        Context context = RuntimeEnvironment.getApplication();
+        File root = new File(context.getFilesDir(), "local-scans");
+        CountDownLatch restored = new CountDownLatch(1);
+        try (MockWebServer server = new MockWebServer()) {
+            String address = server.url("/").toString().replaceAll("/+$", "");
+            LocalCaptureSession saved = LocalCaptureSession.create(root, address, true);
+            saved.bindDocument(17);
+            CaptureReviewStore.Pending pending = new CaptureReviewStore.Pending(0, new byte[]{1, 2}, "前の資料", 180, "");
+            new CaptureReviewPersistence(new File(saved.directory(), "pending.bin")).save(pending);
+            DocScanController controller = new DocScanController(context, new Surface(), null,
+                    new DocScanController.Listener() {
+                        public void onUpdate(RelayState state, List<String> lines, String diagnostic) { }
+                        @Override public void onListeningReady(File directory, long documentId, boolean resume) {
+                            if (directory.equals(saved.directory()) && documentId == 17 && resume) restored.countDown();
+                        }
+                    }, new ClientIdentity("test", "test", "test"));
+            try {
+                controller.configureForLocalStart(address, "", 180);
+                controller.resumeLocalSession(saved.id());
+                assertTrue(restored.await(2, TimeUnit.SECONDS));
+                barrier(controller);
+                assertEquals(RelayState.CAPTURE_REVIEW, controller.getState());
+                assertArrayEquals(pending.jpeg, ((CaptureReviewStore) get(controller, "captureReview")).peek().jpeg);
+                assertEquals(0, server.getRequestCount());
+            } finally { controller.close(); }
+        }
+    }
+
     @Test public void olderInterruptedScanRemainsSelectableAfterStartingAnother() throws Exception {
         Context context = RuntimeEnvironment.getApplication();
         File root = new File(context.getFilesDir(), "local-scans");

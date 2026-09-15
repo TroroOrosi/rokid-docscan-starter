@@ -122,6 +122,36 @@ public class ListeningRecorderTest {
         }
     }
 
+    @Test public void localAudioWaitsForADurableDocumentBindingAndRejectsAnotherId() throws Exception {
+        File root = Files.createTempDirectory("listening-before-http").toFile();
+        File folder = new File(root, "listening");
+        assertTrue(folder.mkdir());
+        Files.write(new File(folder, "started-epoch-ms").toPath(), "1700000000000".getBytes(StandardCharsets.UTF_8));
+        writeWav(new File(folder, "0000.wav"), new byte[3200], 3200);
+        try (MockWebServer server = new MockWebServer()) {
+            DocScanApi api = new DocScanApi(server.url("/").toString(), "",
+                    new dev.rokid.docscanrelay.ClientIdentity("test", "test", "test"));
+            try (ListeningRecorder recorder = new ListeningRecorder(root, 0, api, () -> { })) {
+                assertTrue(recorder.restore());
+                assertThrows(java.io.IOException.class, recorder::finishAndUpload);
+                assertEquals(0, server.getRequestCount());
+                server.enqueue(new MockResponse().setBody("{}"));
+                recorder.bindDocument(17);
+                assertThrows(java.io.IOException.class, recorder::finishAndUpload); // Still interrupted.
+                assertEquals("/v1/documents/17/audio-chunks", server.takeRequest().getPath());
+            }
+            try (ListeningRecorder recorder = new ListeningRecorder(root, 18, api, () -> { })) {
+                assertThrows(java.io.IOException.class, recorder::restore);
+            }
+            try (ListeningRecorder recorder = new ListeningRecorder(root, 17, api, () -> { })) {
+                assertTrue(recorder.restore());
+                assertThrows(java.io.IOException.class, recorder::finishAndUpload);
+            }
+            assertNull(server.takeRequest(100, TimeUnit.MILLISECONDS));
+            assertTrue(new File(folder, "0000.wav").isFile());
+        }
+    }
+
     private static void writeWav(File file, byte[] pcm, int headerBytes) throws Exception {
         try (RandomAccessFile output = new RandomAccessFile(file, "rw")) {
             output.write(ListeningRecorder.wavHeader(headerBytes));

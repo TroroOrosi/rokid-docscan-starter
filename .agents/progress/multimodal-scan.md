@@ -137,6 +137,24 @@ HTTP document番号だけを使う旧フォルダは自動移動・再送しな�
 - `py -3.12 -m pytest -q tests/test_documentation_contract.py` → `12 passed in 2.21s`。
   `py -3.12 -m ruff check .` → `All checks passed!`、`git diff --check` → exit 0。
 
+### 録音開始から通信待ちを分離（2026-09-16）
+
+Runs on: Windowsの実装・自動試験。まだグラスへは導入していない。
+
+RP-08の接続工程。Controllerは選択後、HTTP応答より先にUUID保存先と新規／再開をActivityへ通知。
+文書作成は既存localNetworkで行い、文書番号をLocalCaptureSessionへ永続保存してからRecorderへ渡す。
+Recorderは番号0でも`listening/`へ保存し、正の番号を自身の記録へ保存後に送信する。
+同じUUID内の従来`listening-{id}`はそのまま使用し、二重記録は拒否する。
+保存済み録音の文書番号を別番号へ変更しない。再開では録音が無ければ失敗し、新規録音へ切り替えない。
+pending写真が残る明示再開でも音声復元を呼び、再送だけならマイク権限を要求しない。
+
+- 通信応答を止めた新規リスニング試験は修正前 `1 test completed, 1 failed`。
+- `./android-relay/gradlew --no-daemon :relaycore:testDebugUnitTest --tests '*LocalReviewTest' :glassdoc:testDebugUnitTest`
+  → `BUILD SUCCESSFUL in 2m 20s`。番号未取得時のHTTP0件、遅いHTTP前の開始通知、
+  pending写真＋音声復元、番号binding後の再送・別番号拒否を確認。
+- 続くRP-08: 有効サンプル後のREC／入力停止検出、第2BACK、可視確認を隠さない音声終了、
+  番号到着待ちで停止した録音の完了再試行を接続する。最後の写真確認中の表示はまだ未完。
+
 ### Next steps — 追加実装
 
 Runs on: 以下の認証保存はWindowsの自動試験。Android Keystoreの実機確認はAPK導入後。
