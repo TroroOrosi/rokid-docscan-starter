@@ -218,7 +218,7 @@ public final class DocScanGlassActivity extends Activity
     public boolean onKeyDown(int keyCode, KeyEvent event) {
         // KEYCODE_BACK is absent on purpose: it has to reach the framework so
         // onBackPressed runs, which is where the two-stage exit is decided.
-        if (normalize("DOWN", keyCode)) {
+        if (normalize("DOWN", keyCode, event)) {
             return true;
         }
         return super.onKeyDown(keyCode, event);
@@ -226,7 +226,7 @@ public final class DocScanGlassActivity extends Activity
 
     @Override
     public boolean onKeyUp(int keyCode, KeyEvent event) {
-        if (normalize("UP", keyCode)) {
+        if (normalize("UP", keyCode, event)) {
             return true;
         }
         return super.onKeyUp(keyCode, event);
@@ -322,11 +322,13 @@ public final class DocScanGlassActivity extends Activity
         // A half-delivered gesture must not survive the assistant taking the
         // foreground and handing it back.
         normalizer.reset();
+        backExit.reset();
+        backOwnedByReader = false;
     }
 
     // --- input ------------------------------------------------------------
 
-    private boolean normalize(String phase, int keyCode) {
+    private boolean normalize(String phase, int keyCode, KeyEvent event) {
         String name = KeyEvent.keyCodeToString(keyCode);
         // Compared against the raw keyCode, not the derived name: it is the
         // more fundamental fact ("KEYCODE_BACK" is keyCodeToString's own name
@@ -339,9 +341,15 @@ public final class DocScanGlassActivity extends Activity
             backOwnedByReader = reader != null || (controller != null
                     && controller.getState() != RelayState.REVIEW);
         }
-        Optional<GlassesInputAction> action = normalizer.accept(InputSignal.key(
-                SystemClock.elapsedRealtime(), phase, name, GlassKeyEvents.isKnown(name)));
-        action.ifPresent(this::onAction);
+        // KeyEvent uses uptime; convert to the controller's elapsed clock,
+        // preserving the event's age if the main thread delivered it late.
+        long elapsedMillis = event.getEventTime()
+                + SystemClock.elapsedRealtime() - SystemClock.uptimeMillis();
+        if (event.getRepeatCount() == 0) {
+            Optional<GlassesInputAction> action = normalizer.accept(InputSignal.key(
+                    elapsedMillis, phase, name, GlassKeyEvents.isKnown(name)));
+            action.ifPresent(value -> onAction(value, elapsedMillis));
+        }
         if (isBackKey && backOwnedByReader) {
             // The reader owned the screen when this press began: BACK is its
             // gesture, not the two-stage exit's. Consuming it here (for both
@@ -354,13 +362,17 @@ public final class DocScanGlassActivity extends Activity
         return !"KEYCODE_BACK".equals(name) && GlassKeyEvents.isKnown(name);
     }
 
-    private void onAction(GlassesInputAction action) {
+    private void onAction(GlassesInputAction action, long elapsedMillis) {
         if (action != GlassesInputAction.BACK) {
             backExit.reset();
         }
         if (reader != null) {
             if (action == GlassesInputAction.BACK) {
-                if (backExit.onBack(SystemClock.elapsedRealtime()) == BackExitPolicy.Decision.EXIT) {
+                if (reader.screen() != AnswerReader.Screen.ANSWER) {
+                    reader.back();
+                    backExit.reset();
+                    answers.refresh();
+                } else if (backExit.onBack(elapsedMillis) == BackExitPolicy.Decision.EXIT) {
                     exitSession();
                 } else {
                     answers.announceExit();
@@ -378,7 +390,7 @@ public final class DocScanGlassActivity extends Activity
         if (controller.getState() == RelayState.ERROR
                 || (listeningMode && listening == null && controller.getState() != RelayState.REVIEW)) {
             if (action == GlassesInputAction.BACK) {
-                if (backExit.onBack(SystemClock.elapsedRealtime()) == BackExitPolicy.Decision.EXIT) exitSession();
+                if (backExit.onBack(elapsedMillis) == BackExitPolicy.Decision.EXIT) exitSession();
                 else hud.showLines(List.of("もう一度ダブルタップで終了", "保存した資料は保持します", ""));
             }
             return;
@@ -388,7 +400,7 @@ public final class DocScanGlassActivity extends Activity
             return;
         }
         if (awaitingAnswers && action == GlassesInputAction.BACK) {
-            if (backExit.onBack(SystemClock.elapsedRealtime()) == BackExitPolicy.Decision.EXIT) exitSession();
+            if (backExit.onBack(elapsedMillis) == BackExitPolicy.Decision.EXIT) exitSession();
             return;
         }
         controller.onGlassesAction(action);

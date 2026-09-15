@@ -111,6 +111,39 @@ public class DocScanGlassActivityAnswerReadingTest {
     }
 
     @Test
+    public void delayedBackEventsKeepTheirOriginalConfirmationInterval() throws Exception {
+        invokeOpenAnswers(bundleForSession(SESSION_ID), "q10", 0);
+        invokeOnAction(GlassesInputAction.BACK, 1000);
+        invokeOnAction(GlassesInputAction.BACK, 5000);
+        assertNotNull("events four seconds apart cannot confirm exit", getField(activity, "reader"));
+        invokeOnAction(GlassesInputAction.BACK, 5500);
+        assertNull(getField(activity, "reader"));
+    }
+
+    @Test
+    public void menuBackReturnsOneLevelAndFocusLossDisarmsExit() throws Exception {
+        invokeOpenAnswers(bundleForSession(SESSION_ID), "q10", 0);
+        AnswerReader reader = (AnswerReader) getField(activity, "reader");
+        invokeOnAction(GlassesInputAction.SHORT_TAP);
+        invokeOnAction(GlassesInputAction.SHORT_TAP);
+        assertEquals(AnswerReader.Screen.QUESTIONS, reader.screen());
+        invokeOnAction(GlassesInputAction.BACK);
+        assertEquals(AnswerReader.Screen.GROUPS, reader.screen());
+        assertFalse(backExit().isArmed());
+        invokeOnAction(GlassesInputAction.BACK);
+        assertEquals(AnswerReader.Screen.ANSWER, reader.screen());
+        assertFalse(backExit().isArmed());
+        invokeOnAction(GlassesInputAction.BACK);
+        assertTrue(backExit().isArmed());
+        activity.onWindowFocusChanged(false);
+        activity.onWindowFocusChanged(true);
+        assertFalse(backExit().isArmed());
+        invokeOnAction(GlassesInputAction.BACK);
+        assertNotNull(getField(activity, "reader"));
+        assertTrue(backExit().isArmed());
+    }
+
+    @Test
     public void theBundleIsFetchedOnceAndClosingTheReaderDoesNotReopenOrRefetchIt()
             throws Exception {
         activity.onUpdate(RelayState.REVIEW, List.of("a", "b", "c"), "review-1");
@@ -590,10 +623,14 @@ public class DocScanGlassActivityAnswerReadingTest {
     }
 
     private void invokeOnAction(GlassesInputAction action) throws Exception {
+        invokeOnAction(action, android.os.SystemClock.elapsedRealtime());
+    }
+
+    private void invokeOnAction(GlassesInputAction action, long elapsedMillis) throws Exception {
         Method onAction = DocScanGlassActivity.class.getDeclaredMethod(
-                "onAction", GlassesInputAction.class);
+                "onAction", GlassesInputAction.class, long.class);
         onAction.setAccessible(true);
-        onAction.invoke(activity, action);
+        onAction.invoke(activity, action, elapsedMillis);
     }
 
     private static void awaitTrue(BooleanSupplier condition) throws InterruptedException {
