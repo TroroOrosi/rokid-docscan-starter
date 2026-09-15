@@ -108,6 +108,35 @@ dataは既存のまま。準備manifestはignored `data/device-setup/preflight.j
 認証変更は承認待ちなので、鍵生成・サーバ更新・新しいLAN待受はまだ実行していない。
 AP切替も未適用。待機中はRP-07/08の実装と自動試験を進める。英語実音声試験は後回し。
 
+### 原音の回収と再送位置（2026-09-16）
+
+Runs on: Windowsの実装・自動試験。グラスでの録音・負荷測定は未実施。
+
+RP-07の保存工程を実装。ListeningRecorderは`.part`へPCMを保存し、暫定1秒分ごとにsync、
+確定WAVへatomic move後にshaとACKをatomic propertiesへ保存する。明示再開時に末尾の
+完全サンプルをWAVへ回収し、元の`.part`も保全する。未ACKだけ同じsequence／時刻で再送。
+途切れた録音はinterruptedのまま、正常に停止した記録だけaudio-completeへ進める。
+録音停止位置はASR待ちより先に保存する。容量不足時の写真停止とsync実負荷はまだ未測定。
+
+保存先はLocalCaptureSessionのUUID配下。Controllerが保存originと現在originを照合して渡す。
+HTTP document番号だけを使う旧フォルダは自動移動・再送しない。別originの同じ番号から
+原音を誤送信する問題をレビューで確認して修正した。
+
+現段階の制限: pending写真が残るresumeLocalSessionは音声ready callbackを呼ばない。
+この再開経路、新規／再開の区別、HTTP前の録音開始、有効サンプル後のREC、入力停止検出、
+第2BACKでの音声終了は次のRP-08で接続する。RP-07のcheckboxは未完のまま。
+旧形式の録音原本は削除しない。実機にはこの録音変更をまだ導入していない。
+
+- 追加試験の最初はfixtureのAPI誤用でcompile失敗。修正後、未実装のrestoreに対して
+  `:glassdoc:testDebugUnitTest --tests '*ListeningRecorderTest'` → `2 tests completed, 1 failed`。
+- 回収実装後、multipartのfixtureを修正し、停止後のcomplete再試行を追加して同コマンド
+  → `BUILD SUCCESSFUL in 1m 32s`。
+- origin修正後、`./android-relay/gradlew --no-daemon :relaycore:testDebugUnitTest --tests '*LocalReviewTest' :glassdoc:testDebugUnitTest`
+  → `BUILD SUCCESSFUL in 2m 44s`。未ACK末尾だけ再送、回収PCM一致、元part不変、
+  ACK済み原音の破損拒否、停止後complete再試行、異なるoriginの同じ文書番号拒否を含む。
+- `py -3.12 -m pytest -q tests/test_documentation_contract.py` → `12 passed in 2.21s`。
+  `py -3.12 -m ruff check .` → `All checks passed!`、`git diff --check` → exit 0。
+
 ### Next steps — 追加実装
 
 Runs on: 以下の認証保存はWindowsの自動試験。Android Keystoreの実機確認はAPK導入後。

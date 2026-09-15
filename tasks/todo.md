@@ -96,6 +96,7 @@ Runs on: Windows、glassdoc → F-51F API。
 Runs on: Windows、グラス録音 → F-51F音声API／ASR。
 
 - [ ] 現行WAV／30秒chunk／重複1秒を再利用し、書込み中断の末尾回収と未ACK再送を可能にする。
+  保存・回収・再送を実装。UUID配下で接続先混入を防止。最後の写真確認が残る再開の音声接続はRP-08に残る。
 - [ ] sync間隔・原音保全・空き容量を測る。容量不足は写真から止める。ASR失敗でも原音を残す。
 - 検証: 逆順／同一再送／違うhash／欠番／短い末尾、保存・ACK前後kill、original PCM一致、S22/23/30。
 - 依存: RP-03。対象: ListeningRecorder、listening API、既存録音／API試験。保存ACKとASR完了分離は遅延測定で判断。

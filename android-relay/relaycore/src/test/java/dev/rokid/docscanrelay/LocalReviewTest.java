@@ -40,6 +40,32 @@ public class LocalReviewTest {
         } finally { controller.close(); }
     }
 
+    @Test public void audioDirectoryUsesLocalIdentityAndRejectsAnotherOriginWithTheSameDocumentId() throws Exception {
+        Context context = RuntimeEnvironment.getApplication();
+        File root = new File(context.getFilesDir(), "local-scans");
+        try (MockWebServer server = new MockWebServer()) {
+            String address = server.url("/").toString().replaceAll("/+$", "");
+            LocalCaptureSession old = LocalCaptureSession.create(root, "http://previous.invalid", true);
+            LocalCaptureSession current = LocalCaptureSession.create(root, address, true);
+            old.bindDocument(17); current.bindDocument(17);
+            File original = new File(old.directory(), "original-audio");
+            java.nio.file.Files.write(original.toPath(), new byte[]{1, 2, 3});
+            DocScanController controller = new DocScanController(context, new Surface(), null,
+                    (state, lines, diagnostic) -> {}, new ClientIdentity("test", "test", "test"));
+            try {
+                controller.configureForLocalStart(address, "", 180);
+                barrier(controller);
+                set(controller, "localSession", old);
+                org.junit.Assert.assertThrows(java.io.IOException.class, controller::localCaptureDirectory);
+                set(controller, "localSession", current);
+                assertEquals(current.directory(), controller.localCaptureDirectory());
+                assertFalse(old.directory().equals(controller.localCaptureDirectory()));
+                assertArrayEquals(new byte[]{1, 2, 3}, java.nio.file.Files.readAllBytes(original.toPath()));
+                assertEquals(0, server.getRequestCount());
+            } finally { controller.close(); }
+        }
+    }
+
     @Test public void olderInterruptedScanRemainsSelectableAfterStartingAnother() throws Exception {
         Context context = RuntimeEnvironment.getApplication();
         File root = new File(context.getFilesDir(), "local-scans");

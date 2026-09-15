@@ -360,6 +360,13 @@ public final class DocScanController implements AutoCloseable {
     public boolean hasSavedWorkflow() { return !savedCaptures().isEmpty(); }
     public boolean isListeningMode() { return listeningMode; }
 
+    /** Media shares the local UUID and its validated origin, never just an HTTP document number. */
+    public File localCaptureDirectory() throws IOException {
+        LocalCaptureSession saved = localSession;
+        if (saved == null || !saved.server().equals(configuredServer)) throw new IOException("録音の読取記録と接続先を確認してください");
+        return saved.directory();
+    }
+
     public static final class SavedCapture {
         public final String id;
         public final String label;

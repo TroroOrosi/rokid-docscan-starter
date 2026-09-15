@@ -635,10 +635,15 @@ public final class DocScanGlassActivity extends Activity
 
     private void startListening() {
         try {
-            listening = new ListeningRecorder(getFilesDir(), listeningDocument, controller.api(), () -> {
+            listening = new ListeningRecorder(controller.localCaptureDirectory(), listeningDocument, controller.api(), () -> {
                 controller.onListeningError();
                 main.post(() -> { wakeForResult(); stopService(new Intent(this, ListeningService.class)); });
             });
+            if (listening.restore()) {
+                if (listening.isInterrupted()) controller.onListeningError();
+                finishAudio();
+                return;
+            }
             startForegroundService(new Intent(this, ListeningService.class));
             listening.start();
             controller.startAutoCapture();
