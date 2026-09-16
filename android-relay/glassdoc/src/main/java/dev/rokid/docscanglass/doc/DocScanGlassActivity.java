@@ -468,6 +468,11 @@ public final class DocScanGlassActivity extends Activity
             }
             return;
         }
+        // Feedback only; the serial controller still owns finish/retake and the deadline.
+        if (action == GlassesInputAction.BACK
+                && controller.getState() == RelayState.CAPTURE_REVIEW) {
+            surface.showCaptureEndRequested();
+        }
         if (listeningMode && action == GlassesInputAction.BACK && (!awaitingAnswers || !audioStopRequested)) {
             boolean stopAudio = captureEndRequested || controller.getState() == RelayState.LISTENING;
             captureEndRequested = true;

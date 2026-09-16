@@ -54,7 +54,7 @@ public class JapaneseOcrLifecycleTest {
         ocr.recognize(jpeg.toByteArray(), 270, new JapaneseOcr.Callback() {
             public void onResult(String text, OcrQuality quality, PageFraming framing) { fail("unexpected success"); }
             public void onError(Throwable error) {
-                assertNotNull(input.get());
+                if (input.get() == null) throw new AssertionError("InputImage setup failed before recognizer.process", error);
                 assertTrue("OCR pixels must be freed before next-stage work", input.get().isRecycled());
                 callbacks.incrementAndGet();
             }
