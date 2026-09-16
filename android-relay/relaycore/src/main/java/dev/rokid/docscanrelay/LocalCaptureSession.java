@@ -4,7 +4,6 @@ import java.io.*;
 import java.nio.file.Files;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
-import java.util.Arrays;
 import java.util.Properties;
 import java.util.UUID;
 
@@ -125,7 +124,9 @@ final class LocalCaptureSession {
                 || pending.pageIndex >= 1000) throw new IOException("この状態では写真を保存できません");
         File incoming = new File(directory, "incoming-" + UUID.randomUUID() + ".bin");
         new CaptureReviewPersistence(incoming).save(pending);
-        new CaptureReviewPersistence(incoming).readPending();
+        if (!new CaptureReviewPersistence(incoming).matches(pending)) {
+            throw new IOException("保存画像の検証に失敗しました");
+        }
         String name = "p-" + pending.pageIndex + "-" + digest(incoming) + ".bin";
         CaptureReviewPersistence.moveReplacing(incoming, new File(directory, name));
         Properties next = copy();
@@ -150,10 +151,12 @@ final class LocalCaptureSession {
 
     synchronized boolean contains(CaptureReviewStore.Pending pending) throws IOException {
         if (pending.pageIndex < 0 || pending.pageIndex >= pageCount()) return false;
-        CaptureReviewStore.Pending stored = read(page(pending.pageIndex));
-        return stored.rotationDegrees == pending.rotationDegrees && stored.capturedAtMillis == pending.capturedAtMillis
-                && stored.ocrText.equals(pending.ocrText) && stored.ocrFailure.equals(pending.ocrFailure)
-                && stored.framing.toToken().equals(pending.framing.toToken()) && Arrays.equals(stored.jpeg, pending.jpeg);
+        Page page = page(pending.pageIndex);
+        File file = new File(directory, page.fileName);
+        if (!page.fileName.equals("p-" + page.index + "-" + digest(file) + ".bin")) {
+            throw new IOException("保存画像の破損を検出しました");
+        }
+        return new CaptureReviewPersistence(file).matches(pending);
     }
 
     private void update(String name, String value) throws IOException {

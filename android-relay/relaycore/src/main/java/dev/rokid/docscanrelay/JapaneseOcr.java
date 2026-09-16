@@ -18,20 +18,29 @@ public final class JapaneseOcr implements AutoCloseable {
         void onError(Throwable error);
     }
 
-    private final TextRecognizer recognizer = TextRecognition.getClient(
-            new JapaneseTextRecognizerOptions.Builder().build());
+    // The chooser does not need a native recognizer. Open it only for actual OCR.
+    private TextRecognizer recognizer;
+    private boolean closed;
+
+    private synchronized TextRecognizer recognizer() {
+        if (closed) throw new IllegalStateException("OCRは終了しています");
+        if (recognizer == null) recognizer = TextRecognition.getClient(
+                new JapaneseTextRecognizerOptions.Builder().build());
+        return recognizer;
+    }
 
     public void recognize(byte[] encodedImage, int rotationDegrees, Callback callback) {
         Bitmap bitmap;
         try {
-            bitmap = decodeSubsampled(encodedImage);
+            synchronized (this) {
+                if (closed) throw new IllegalStateException("OCRは終了しています");
+            }
+            bitmap = encodedImage == null ? null : decodeSubsampled(encodedImage);
         } catch (OutOfMemoryError error) {
-            // Subsampling puts a 12MP still near 6 MB, but a device already
-            // under memory pressure can still fail here. Losing the process
-            // would also lose the photo, so the capture is reported as an
-            // OCR failure and stays available for review.
-            callback.onError(new IllegalStateException(
-                    "写真が大きすぎてメモリに展開できません。撮影解像度を下げてください"));
+            callback.onError(memoryError());
+            return;
+        } catch (RuntimeException error) {
+            callback.onError(error);
             return;
         }
         if (bitmap == null) {
@@ -39,26 +48,52 @@ public final class JapaneseOcr implements AutoCloseable {
             return;
         }
         int normalizedRotation = normalizeRotation(rotationDegrees);
-        // ML Kit reports bounding boxes in the upright image it was handed, so
-        // a quarter turn swaps the dimensions the framing check measures
-        // against.
         boolean quarterTurned = normalizedRotation == 90 || normalizedRotation == 270;
         int uprightWidth = quarterTurned ? bitmap.getHeight() : bitmap.getWidth();
         int uprightHeight = quarterTurned ? bitmap.getWidth() : bitmap.getHeight();
-        InputImage input = InputImage.fromBitmap(bitmap, normalizedRotation);
-        recognizer.process(input)
-                .addOnSuccessListener(
-                        result -> callback.onResult(
-                                result.getText().trim(),
-                                measure(result),
-                                measureFraming(result, uprightWidth, uprightHeight)))
-                .addOnFailureListener(callback::onError)
-                .addOnCompleteListener(ignored -> bitmap.recycle());
+        com.google.android.gms.tasks.Task<Text> task;
+        try {
+            InputImage input = InputImage.fromBitmap(bitmap, normalizedRotation);
+            task = recognizer().process(input);
+        } catch (RuntimeException | OutOfMemoryError error) {
+            bitmap.recycle();
+            callback.onError(error instanceof OutOfMemoryError ? memoryError() : error);
+            return;
+        }
+        task.addOnCompleteListener(completed -> {
+            String text = null;
+            OcrQuality quality = null;
+            PageFraming framing = null;
+            Throwable failure = null;
+            try {
+                if (completed.isSuccessful()) {
+                    Text result = completed.getResult();
+                    text = result.getText().trim();
+                    quality = measure(result);
+                    framing = measureFraming(result, uprightWidth, uprightHeight);
+                } else {
+                    failure = completed.getException();
+                    if (failure == null) failure = new IllegalStateException("OCRが中断されました");
+                }
+            } catch (RuntimeException | OutOfMemoryError error) {
+                failure = error instanceof OutOfMemoryError ? memoryError() : error;
+            } finally {
+                // Release BEFORE the callback can queue preview/next-shot allocation.
+                // A callback exception must not prevent disposal or call it twice.
+                bitmap.recycle();
+            }
+            if (failure == null) callback.onResult(text, quality, framing);
+            else callback.onError(failure);
+        });
+    }
+
+    private static IllegalStateException memoryError() {
+        return new IllegalStateException("OCRのメモリが不足しています。写真を保持して終了・再開してください");
     }
 
     /**
-     * Judges whether the page is wholly inside the frame from where the
-     * recognised lines sit.
+     * Measures recognized TEXT bounds, not physical paper corners. Blank margins,
+     * missed lines, figures and an obstructed page cannot be certified by OCR.
      */
     private static PageFraming measureFraming(Text result, int width, int height) {
         PageFraming.Builder framing = PageFraming.builder(width, height);
@@ -163,7 +198,12 @@ public final class JapaneseOcr implements AutoCloseable {
     }
 
     @Override
-    public void close() {
-        recognizer.close();
+    public synchronized void close() {
+        if (closed) return;
+        closed = true;
+        if (recognizer != null) {
+            recognizer.close();
+            recognizer = null;
+        }
     }
 }

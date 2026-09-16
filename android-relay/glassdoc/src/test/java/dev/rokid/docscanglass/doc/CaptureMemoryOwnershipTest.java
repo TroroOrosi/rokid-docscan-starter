@@ -63,4 +63,45 @@ public class CaptureMemoryOwnershipTest {
                 surface.showCaptureReview(jpeg(), 270, List.of("P1")));
         surface.close();
     }
+    @Test public void supersedingQueuedReviewRecyclesBeforeUiWorkRuns() {
+        HudView hud = new HudView(RuntimeEnvironment.getApplication());
+        GlassesCaptureSurface surface = surface(hud, new Handler(Looper.getMainLooper()));
+        surface.showCaptureReview(jpeg(), 270, List.of("P1"));
+        Bitmap queued = ReflectionHelpers.getField(surface, "waitingPreview");
+        assertNotNull(queued);
+        surface.showHud(List.of("保存中"));
+        assertTrue("superseded native pixels must not wait for GC", queued.isRecycled());
+        ShadowLooper.runUiThreadTasksIncludingDelayedTasks();
+        assertNull(ReflectionHelpers.getField(hud, "preview"));
+        surface.showCaptureReview(jpeg(), 270, List.of("P2"));
+        Bitmap next = ReflectionHelpers.getField(surface, "waitingPreview");
+        surface.close();
+        assertTrue(next.isRecycled());
+        ShadowLooper.runUiThreadTasksIncludingDelayedTasks();
+        assertNull(ReflectionHelpers.getField(hud, "preview"));
+    }
+    @Test public void endNoticeKeepsTheSameImageAndDoesNotRearmFrameAcknowledgement() {
+        HudView hud = new HudView(RuntimeEnvironment.getApplication());
+        GlassesCaptureSurface surface = surface(hud, new Handler(Looper.getMainLooper()));
+        long generation = surface.showCaptureReview(jpeg(), 270, List.of("P1", "3秒以内", "無操作で確定"));
+        ShadowLooper.runUiThreadTasksIncludingDelayedTasks();
+        Bitmap image = ReflectionHelpers.getField(hud, "preview");
+        Object frame = ReflectionHelpers.getField(hud, "visibleFrame");
+        ReflectionHelpers.setField(hud, "frameReported", true);
+        ReflectionHelpers.setField(surface, "visibleReview", generation);
+        surface.showCaptureEndRequested();
+        ShadowLooper.runUiThreadTasksIncludingDelayedTasks();
+        assertSame(image, ReflectionHelpers.getField(hud, "preview"));
+        assertSame(frame, ReflectionHelpers.getField(hud, "visibleFrame"));
+        assertTrue((Boolean) ReflectionHelpers.getField(hud, "frameReported"));
+        assertTrue(surface.isCaptureReviewVisible(generation));
+        List<String> lines = ReflectionHelpers.getField(hud, "lines");
+        assertEquals("確認後に撮影終了・操作せず待つ", lines.get(2));
+        surface.showCaptureEndRequested();
+        surface.showHud(List.of("保存済み"));
+        ShadowLooper.runUiThreadTasksIncludingDelayedTasks();
+        assertEquals(List.of("保存済み"), ReflectionHelpers.getField(hud, "lines"));
+        surface.close();
+    }
+
 }

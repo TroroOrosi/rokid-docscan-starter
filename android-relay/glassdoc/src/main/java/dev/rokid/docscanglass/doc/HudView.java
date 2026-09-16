@@ -108,6 +108,15 @@ final class HudView extends View {
         set(newLines, still, false);
     }
 
+    /** Change only the footer: the same image/frame and its 3s clock stay valid. */
+    void showReviewNotice(String notice) {
+        if (preview == null || preview.isRecycled() || lines.isEmpty()) return;
+        List<String> updated = new ArrayList<>(lines);
+        updated.set(updated.size() - 1, notice);
+        lines = updated;
+        invalidate();
+    }
+
     private void set(List<String> newLines, Bitmap still, boolean showGuide) {
         lines = newLines == null ? Collections.emptyList() : new ArrayList<>(newLines);
         preview = still;
