@@ -1,0 +1,117 @@
+name: PR37 reviewed patch objects
+
+on:
+  pull_request:
+    types: [synchronize, reopened]
+    paths: [".github/workflows/pr37-materialize.yml"]
+
+permissions:
+  contents: write
+
+jobs:
+  materialize:
+    if: >-
+      github.repository == 'TroroOrosi/rokid-docscan-starter' &&
+      github.event.pull_request.number == 37 &&
+      github.head_ref == 'feature/multimodal-scan' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Prepare verified Git objects without changing any branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python - <<'PY'
+          import base64
+          import gzip
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import subprocess
+          import urllib.request
+
+          REPO = 'TroroOrosi/rokid-docscan-starter'
+          PARENT = 'cce86cbbc6cd457712b093b82eb9ac73c0ebde30'
+          TARGET = '231113f536cb4039c03d209d68ffa0119436f535'
+          PATCH_SHA = 'e063a795e52e225d495de39667099a8bcac1d1bcea450b8068d8813024cd5f90'
+          WORKFLOW = '.github/workflows/pr37-materialize.yml'
+          SHAS = '''85ea34cff537943d3129c1364be7019d8cfc3151
+          4a00e1f6d4506ec8519589d0468ddc13a9f85340
+          ef1bdf064a645b6d2fda7d867eefc69694eed6b1
+          159a710f96732df8c923a523e0010b29da8d51d7
+          17750bd778a0b08ffc3eb0bfe7beae1e38b82392
+          1c7f104dea95e1111c20bf54a5e0f4267d77ca0d
+          32755caf1283a4689046b2a4918323f38ceb36e2
+          0a38c2c77ed4f43bbbafb1d0580b6ae3d7aa26e4
+          9f6984177b7f314dd13af2f777b9590b80eb8f84
+          e9494d1988546e09a64eab3064e8f01fe9bf62ed
+          160aa087dd184757c61a4383158a035fb68dd6b2
+          996b24a6cf92266826ed529ab913cc4d518fa6ca
+          3612edecf3fc84ab8cbc528989ebd2cda151696d
+          fb529ca0f1fd1a838aeaa8a3498259bab2f5919b
+          218caa719005cafd21106c93b84f6c573372b171
+          5a1900f7c4b0328dc8f6d956e6a6ff3451fe71ff
+          3f3083354ba353e5ffd7730b663003403b7de4bd'''.split()
+
+          def git(*args):
+              return subprocess.check_output(['git', *args], text=True).strip()
+
+          def api(path, payload=None):
+              body = None if payload is None else json.dumps(payload).encode()
+              request = urllib.request.Request(
+                  'https://api.github.com/repos/' + REPO + path,
+                  data=body,
+                  headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'],
+                           'Accept': 'application/vnd.github+json',
+                           'Content-Type': 'application/json'},
+              )
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  return json.load(response)
+
+          head = git('rev-parse', 'HEAD')
+          assert 'parent ' + PARENT in git('cat-file', '-p', 'HEAD').splitlines(), 'Unexpected parent'
+          compressed = bytearray()
+          for sha in SHAS:
+              blob = api('/git/blobs/' + sha)
+              assert blob['sha'] == sha
+              data = base64.b64decode(blob['content'])
+              assert hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest() == sha
+              compressed.extend(data)
+          patch = gzip.decompress(compressed)
+          assert len(patch) == 73724 and hashlib.sha256(patch).hexdigest() == PATCH_SHA, 'Patch mismatch'
+          Path('data').mkdir(exist_ok=True)
+          patch_path = Path('data/pr37-apply.patch')
+          patch_path.write_bytes(patch)
+          subprocess.run(['git', 'apply', '--index', str(patch_path)], check=True)
+          subprocess.run(['git', 'rm', '-q', '--', WORKFLOW], check=True)
+          assert git('write-tree') == TARGET, 'Staged tree differs from tested source'
+          entries = []
+          for path in subprocess.check_output(['git', 'diff', '--cached', '--name-only', '-z']).decode().split('\0'):
+              if not path:
+                  continue
+              if path == WORKFLOW:
+                  entries.append({'path': path, 'mode': '100644', 'type': 'blob', 'sha': None})
+                  continue
+              record = git('ls-files', '-s', '--', path).split()
+              mode, expected = record[:2]
+              data = Path(path).read_bytes()
+              blob = api('/git/blobs', {'content': base64.b64encode(data).decode(), 'encoding': 'base64'})
+              assert blob['sha'] == expected, 'Uploaded object differs from tested file'
+              entries.append({'path': path, 'mode': mode, 'type': 'blob', 'sha': expected})
+          Path('data/pr37-objects.json').write_text(json.dumps(
+              {'base_head': head, 'expected_tree': TARGET, 'patch_sha256': PATCH_SHA, 'entries': entries},
+              ensure_ascii=False, indent=2), encoding='utf-8')
+          print('Verified patch objects prepared:', TARGET, 'entries:', len(entries))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pr37-prepared-objects-${{ github.event.pull_request.head.sha }}
+          path: data/pr37-objects.json
+          if-no-files-found: error
+          retention-days: 14
