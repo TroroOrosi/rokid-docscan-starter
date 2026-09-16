@@ -23,10 +23,10 @@ import dev.rokid.docscanrelay.CaptureSurface;
  */
 final class GlassesCaptureSurface implements CaptureSurface {
     /**
-     * Retain detail for the magnified review. A 4032px capture decodes to
-     * 2016px in RGB_565, matching the existing OCR memory budget.
+     * Bound the full-frame preview to twice the 640px HUD edge.
+     * A 4032px capture decodes to 1008px in RGB_565 (about 1.5 MB).
      */
-    private static final int PREVIEW_MAX_EDGE = 1200;
+    private static final int PREVIEW_MAX_EDGE = 1280;
 
     interface Listener {
         /**
@@ -145,6 +145,11 @@ final class GlassesCaptureSurface implements CaptureSurface {
         main.post(() -> {
             if (closed || generation != generations.get()) return;
             draw.run();
+            if (!"capture-review".equals(purpose)) {
+                Bitmap held = preview;
+                preview = null;
+                recycle(held);
+            }
             hud.onVisibleFrame(() -> {
                 if (closed || generation != generations.get()) return;
                 if ("capture-review".equals(purpose)) visibleReview = generation;
@@ -172,7 +177,7 @@ final class GlassesCaptureSurface implements CaptureSurface {
     }
 
     /**
-     * Decodes enough detail for magnification and applies the same clockwise
+     * Decodes a bounded display image and applies the same clockwise
      * rotation as OCR and the authoritative server PNG.
      */
     private static Bitmap decodePreview(byte[] jpeg, int rotationDegrees) {
@@ -185,7 +190,7 @@ final class GlassesCaptureSurface implements CaptureSurface {
 
         int sample = 1;
         int longest = Math.max(bounds.outWidth, bounds.outHeight);
-        while (longest / (sample * 2) >= PREVIEW_MAX_EDGE) {
+        while (longest / sample > PREVIEW_MAX_EDGE) {
             sample *= 2;
         }
         BitmapFactory.Options options = new BitmapFactory.Options();

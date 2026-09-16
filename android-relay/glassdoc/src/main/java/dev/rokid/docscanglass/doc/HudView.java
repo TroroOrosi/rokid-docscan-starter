@@ -182,10 +182,10 @@ final class HudView extends View {
         canvas.drawText("紙面へ顔を向ける", 8, 54, paint);
     }
 
-    /** Magnify the center; an uncropped inset keeps framing and missing edges visible. */
+    /** Show the complete capture once, with no inset or label covering the paper. */
     private float drawPreview(Canvas canvas, Bitmap still) {
         float band = Math.max(1, getHeight() - (lines.size() + 1) * 26f);
-        float scale = 2 * Math.min(
+        float scale = Math.min(
                 getWidth() / (float) still.getWidth(), band / still.getHeight());
         float width = still.getWidth() * scale;
         float height = still.getHeight() * scale;
@@ -196,20 +196,6 @@ final class HudView extends View {
         canvas.clipRect(0, 0, getWidth(), band);
         canvas.drawBitmap(still, null, target, previewPaint);
         canvas.restore();
-        float overviewScale = Math.min(
-                getWidth() / 3f / still.getWidth(), band / 3f / still.getHeight());
-        float overviewWidth = still.getWidth() * overviewScale;
-        float overviewHeight = still.getHeight() * overviewScale;
-        RectF overview = new RectF(getWidth() - overviewWidth - 8, band - overviewHeight - 8,
-                getWidth() - 8, band - 8);
-        canvas.drawBitmap(still, null, overview, previewPaint);
-        guidePaint.setStrokeWidth(2);
-        canvas.drawRect(overview, guidePaint);
-        paint.setTextSize(22);
-        paint.setShadowLayer(2, 0, 0, Color.BLACK);
-        canvas.drawText("中央2倍", 8, 26, paint);
-        canvas.drawText("全体", overview.left, overview.top - 4, paint);
-        paint.clearShadowLayer();
         return band;
     }
 

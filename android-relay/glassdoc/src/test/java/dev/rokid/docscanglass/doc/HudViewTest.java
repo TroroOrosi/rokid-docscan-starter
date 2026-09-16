@@ -18,7 +18,7 @@ import org.robolectric.annotation.GraphicsMode;
 @Config(sdk = 32, manifest = Config.NONE)
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 public class HudViewTest {
-    @Test public void reviewMagnifiesThePaperAndAlsoKeepsTheWholeCaptureVisible() {
+    @Test public void reviewShowsTheWholePhotoWithoutAnOverviewCoveringIt() {
         Bitmap photo = Bitmap.createBitmap(800, 600, Bitmap.Config.ARGB_8888);
         photo.eraseColor(Color.rgb(10, 10, 10));
         Canvas source = new Canvas(photo);
@@ -31,10 +31,11 @@ public class HudViewTest {
         view.showReview(photo, List.of("P1 撮影確認", "3秒以内のタップで撮り直し", "無操作で保存・次へ"));
         Bitmap screen = Bitmap.createBitmap(480, 640, Bitmap.Config.ARGB_8888);
         view.draw(new Canvas(screen));
-        assertTrue("the center paper must be enlarged beyond the full-frame thumbnail",
-                Color.green(screen.getPixel(130, 110)) > 180);
-        assertTrue("an uncropped overview must retain the top-left edge marker",
-                Color.green(screen.getPixel(322, 410)) > 180);
+        assertTrue("the paper must be visible", Color.green(screen.getPixel(240, 220)) > 180);
+        assertTrue("the original top-left marker must be visible without a second image",
+                Color.green(screen.getPixel(12, 100)) > 180);
+        assertEquals("no inset may cover the original lower-right pixels",
+                Color.BLACK, screen.getPixel(322, 410));
         assertEquals(Color.rgb(90, 90, 90), photo.getPixel(400, 300));
         photo.recycle();
         screen.recycle();
@@ -56,7 +57,7 @@ public class HudViewTest {
         assertTrue("dark paper should be bright enough to inspect",
                 Color.green(screen.getPixel(280, 100)) > 180);
         assertTrue("ink should remain darker than paper",
-                Color.green(screen.getPixel(80, 100)) < 50);
+                Color.green(screen.getPixel(150, 100)) < 50);
         assertEquals(0, Color.red(screen.getPixel(280, 100)));
         assertEquals("display correction must not mutate the saved photograph",
                 Color.rgb(70, 70, 70), photo.getPixel(120, 120));

@@ -479,3 +479,68 @@ Runs on: 次の実答案試験はグラス → F-51F → 同じF-51F Chrome。�
 - 本追記前の同一製品ソースで `py -3.12 -m pytest -q tests/test_documentation_contract.py`
   → `14 passed in 0.80s`、`py -3.12 -m ruff check .` → `All checks passed!`、
   `git diff --check` → exit0。追加実装なし。
+
+### 次の試験範囲の確定
+
+Runs on: 同じグラス → F-51Fサーバ → F-51F Chrome。家庭内Wi-Fi。
+
+- 「ない」は資料欠如と確定した返答ではなく、撮影対象の説明が伝わっていなかった。
+  「問題文と選択肢の全文が載っているページ」を撮る意味だと説明し直した。
+  利用者は**その1ページに問題文と全選択肢がそろっている問題**を準備可能と回答。
+  ページ番号の申告は不要とし、当該1ページだけで短い答案試験を行うことにした。
+- 開閉→通常読取→P1確認後ダブルタップ1回→以後操作せず保存解析を待つ、を依頼中。
+  今回は送信停止解除後の新しい試験。スマホのChatGPT・添付・会話を操作せず残すよう説明済み。
+  元の不明送信や本文のみの過去セッションを自動再解析するものではない。
+
+### 実機試験を停止：LOW_MEMORYと表示の再指摘
+
+Runs on: 終了原因の読取は同じグラス。以後の修正・検証はWindowsのみ。
+
+- 利用者から「アプリが終了」「全体表示が邪魔」「撮影範囲が広すぎる」「傾き」「少し暗いと
+  見えない」と再申告。未整備の状態で実機操作を繰り返し依頼し、時間と使用量を消費したとの指摘。
+  **実機試験・ChatGPT送信を停止した。追加の撮影依頼や実機への更新導入を行わない。**
+  保存済み写真による事前検証を先に行い、現状を実機試験の準備完了と扱わない。
+- `dumpsys activity exit-info dev.rokid.docscanglass.doc` →
+  21:36:01.045、PID19153、`reason=3 (LOW_MEMORY)`、PSS215MB、RSS255MB、importance100。
+  直前の21:35:59.736には撮影要求があり、画像callbackの前にprocessが終了した。
+  その後のread-only確認ではspread0、processなし、camera clients `[]`。
+  今回の終了原因は開閉やダブルタップの操作失敗とは扱わない。
+- 新しい試験のUUID `1beccff9-0219-4e84-805d-427a02827316` はdocument0/session0/count0、
+  phase CAPTURE。P1取り直し前のpendingが残っており、解析・送信には到達していない。
+  `question-page-interrupted.tar` → 5,933,056 bytes、SHA-256
+  `83de637273454169dd5f2ccc24c096d5c908a841d1b72978d3193977587ff15d`。
+  pending JPEGは5,929,690 bytes、rotation270、OCR0文字。
+  `question-page-pending.jpg` と `question-page-interrupted.log` を既存ignored evidenceへ保全。
+- 原本には設問の紙面が写るが、暗さ・周囲の広さが残り、ケーブルが紙面にかかる。
+  これを認識・答案試験に適した原本とは扱わない。追加撮影で取り繕わない。
+- 現ソースで、確認用Bitmapは次のaiming/statusでもSurfaceに保持され、2016pxまで復号していた。
+  「全体」小窓は主画像へ重ね描きされる。回帰試験を先に追加し、
+  最初の対象試験 → 4 tests / 2 failed（重なり・画像未解放）。
+  全画面表示・復号上限の条件を含めた修正前試験 → 4 tests / 3 failed。
+- ローカル修正: 原本全体を1枚で表示し、中央2倍の切抜き・全体小窓・画像上のラベルを除去。
+  表示用復号を長辺1280px以内とし、4032px原本では1008pxへ縮小する。
+  次のaiming/statusを描いた時点で、前の確認Bitmapを解放する。
+  原本JPEG・カメラの撮影寸法・露出・回転・retry・入力割当は変更していない。
+  **画像の重なりと保持を修正しただけで、LOW_MEMORYの全原因・撮影品質の解消は未証明。**
+- `test testDebugUnitTest assembleDebug` → `BUILD SUCCESSFUL in 53s`、199 tasks、7 executed。
+  JUnit合計355件、failures/errors/skipped0（glassdoc62、他は上記同数）。
+  `py -3.12 -m pytest -q tests/test_documentation_contract.py` → `14 passed in 1.29s`、
+  ruff → `All checks passed!`、diff check → exit0。
+- `glassdoc-fullframe-review.apk` を既存evidence directoryへ別名で保全。
+  aapt2 → 同じpackage/activity、versionCode13。apksigner → `Verifies`、同じ既存証明書。
+  SHA-256 → `95968CEF6C5389D40BD16B9B4577FD89BB0CD9E9ED2CE3A7B32C38EB4E1CD5F4`。
+  **このAPKは未導入。実機は前のC08C5253…のAPKのまま。**
+- 保存済みの単頁・設問JPEGをWindowsのRobolectric native Canvasで実際のSurface/HudViewへ通した。
+  ignored evidence内の単発render用testとinit scriptを使用し、実機・ChatGPTは使っていない。
+  `:glassdoc:testDebugUnitTest --tests '*OfflineReviewRenderTest'`（`--init-script` 指定）
+  → `BUILD SUCCESSFUL in 39s`、1 test / failures0。
+  両画像とも `decoded=756x1008 allocation=1524096` bytes。これはWindows上のBitmap測定で、
+  グラスprocessのPSS/RSS測定ではない。
+  `single-page-0-offline-hud.png` と `question-page-pending-offline-hud.png` を目視確認し、
+  全体小窓・ラベルの重なりがなく、元画像が1枚で収まることを確認した。
+- 全体表示では原本中の紙面の小ささもそのまま見える。紙面を大きく撮ること、低照度での文字品質、
+  視点による傾き、camera/OCR/表示を含む全processのメモリ不足は**未解決**。
+  このローカル変更を、それらの合格や実機試験再開の根拠にしない。
+- 次の作業は、保存済み実写真で紙面の範囲・傾き・明暗と文字認識を検証すること、および
+  camera/OCR/表示の同時保持を含むメモリ予算の確認。利用者に再撮影を繰り返してもらう進め方は停止。
+  問題文・選択肢からの答案表示、phone AP経路、長時間・リスニングの実機合格は依然として未了。
