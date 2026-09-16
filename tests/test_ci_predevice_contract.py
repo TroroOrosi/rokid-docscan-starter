@@ -40,3 +40,9 @@ def test_ci_exercises_windows_locking_and_phone_compatibility():
     assert 'windows-latest' in workflow
     assert 'tests/test_browser_guard.py' in workflow
     assert 'constraints-phone.txt' in workflow
+
+
+def test_phone_ci_installs_yaml_for_the_complete_test_suite():
+    workflow = (ROOT / '.github/workflows/ci.yml').read_text(encoding='utf-8')
+    phone_job = workflow.split('  phone-stack-compatibility:')[1].split('  windows-predevice:')[0]
+    assert 'pytest httpx pyyaml' in phone_job
