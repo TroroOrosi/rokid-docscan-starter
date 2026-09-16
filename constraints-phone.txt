@@ -1,0 +1,7 @@
+# Compatibility lane for the FastAPI stack recorded on F-51F.
+# Not a lock of every transitive dependency or permission to replace the phone environment.
+fastapi==0.99.1
+pydantic==1.10.26
+starlette==0.27.0
+# Development TestClient compatibility; not required by the phone runtime.
+httpx==0.27.2

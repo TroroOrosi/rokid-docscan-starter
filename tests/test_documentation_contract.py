@@ -31,19 +31,27 @@ def _current_runbooks() -> tuple[str, ...]:
 CURRENT_RUNBOOKS = _current_runbooks()
 
 
-def _generated_prefixes() -> tuple[str, ...]:
-    """Directory prefixes `.gitignore` marks as generated at runtime.
+def _generated_directory_patterns() -> tuple[re.Pattern, ...]:
+    """Match ignored generated directories, including zero-or-more ** segments.
 
-    A checkout never contains them, so requiring a documented path under one to
-    exist passes only on a machine that has already run the thing that writes
-    it. `data/docscan.db` is documented as created on startup; asking CI to
-    find it is asking the wrong question.
+    Only directory rules are used: broad file globs (such as *.pyc) must not
+    exempt source references. This is a restricted matcher for this repository's
+    positive directory rules, not a replacement implementation of gitignore.
     """
-    return tuple(
-        line
-        for line in (raw.strip() for raw in _text(".gitignore").splitlines())
-        if line.endswith("/") and not line.startswith(("#", "!", "*")) and "*" not in line
-    )
+    patterns = []
+    for raw in _text(".gitignore").splitlines():
+        rule = raw.strip()
+        if not rule.endswith("/") or rule.startswith(("#", "!")):
+            continue
+        segments = rule.strip("/").split("/")
+        pattern = ""
+        for part in segments:
+            if part == "**":
+                pattern += r"(?:[^/]+/)*"
+            else:
+                pattern += re.escape(part).replace(r"\*", "[^/]*") + "/"
+        patterns.append(re.compile("^" + pattern))
+    return tuple(patterns)
 
 
 def _repository_markdown() -> set[str]:
@@ -221,14 +229,14 @@ def test_current_runbooks_do_not_document_a_gradle_command_that_cannot_run():
 def test_every_documented_repository_path_exists():
     """A path that moved silently sends the next agent to the wrong module."""
     reference = re.compile(r"`([A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)+)`")
-    generated = _generated_prefixes()
+    generated = _generated_directory_patterns()
     offenders = []
     for document in sorted(_repository_markdown()):
         for match in reference.finditer(_text(document)):
             candidate = match.group(1)
             if not Path(candidate).suffix or candidate.startswith(("http", "C:/")):
                 continue
-            if candidate.startswith(generated):
+            if any(pattern.match(candidate) for pattern in generated):
                 continue
             if (ROOT / candidate).exists() or (ROOT / document).parent.joinpath(candidate).exists():
                 continue
@@ -285,3 +293,22 @@ def test_readme_versions_match_source_of_truth():
     )
     assert expected in readme
     assert f"com.rokid.cxr:client-l:{cxrl_version}" in readme
+
+
+def test_recursive_generated_directory_is_not_a_required_source_path(tmp_path, monkeypatch):
+    monkeypatch.setitem(globals(), "ROOT", tmp_path)
+    (tmp_path / ".gitignore").write_text("android-relay/**/build/\n", encoding="utf-8")
+    (tmp_path / "note.md").write_text(
+        "`android-relay/glassdoc/build/outputs/apk/debug/glassdoc-debug.apk`\n"
+        "`android-relay/build/reports/generated.txt`\n", encoding="utf-8")
+    test_every_documented_repository_path_exists()
+
+
+def test_generated_exemption_never_hides_a_missing_source_path(tmp_path, monkeypatch):
+    import pytest
+    monkeypatch.setitem(globals(), "ROOT", tmp_path)
+    (tmp_path / ".gitignore").write_text("android-relay/**/build/\n", encoding="utf-8")
+    (tmp_path / "note.md").write_text(
+        "`android-relay/glassdoc/src/main/Missing.java`", encoding="utf-8")
+    with pytest.raises(AssertionError):
+        test_every_documented_repository_path_exists()

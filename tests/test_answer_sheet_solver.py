@@ -72,3 +72,15 @@ def test_drawing_only_answer_survives_registry():
     register_solver(solver_for({"answer": "", "status": "ready", "diagrams": [diagram]}), replace=True)
     result, _ = solve_with_fallback(Question(body_text="円を描け", answer_only=True), tiers=["answer-sheet-test"])
     assert result.answer == "" and result.diagrams == [diagram]
+
+
+def test_uncertain_browser_submission_never_falls_through_to_another_provider(monkeypatch):
+    from app.solvers.chatgpt_web import ChatGptWebUncertain
+    failing = solver_for({"answer": "not used", "status": "ready"})
+    def fail(**_):
+        raise ChatGptWebUncertain("unknown send")
+    monkeypatch.setattr(failing, "solve", fail)
+    register_solver(failing, replace=True)
+    with pytest.raises(ChatGptWebUncertain):
+        solve_with_fallback(Question(body_text="question", answer_only=True),
+                            tiers=["answer-sheet-test", "local"])

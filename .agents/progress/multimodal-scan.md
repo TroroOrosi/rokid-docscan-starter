@@ -3,6 +3,14 @@
 Status: Internal progress。計画の認識合わせ後、利用者が追加実装・実機操作を依頼。RP実装を開始。
 Runs on: Windowsで実装・試験。運用先はglassdocとスマホAP/FastAPI/Chrome。
 
+## 実機前修正の追補（2026-09-16）
+
+Runs on: 今回は隔離Linux環境とGitHub Actions。端末への適用は未実施。
+
+PR37へサーバ入力版・ブラウザ排他・送信不明時の再送停止・回帰試験を追加する。
+現在の差分とWindowsでの再開手順は [PR37引き継ぎ](pr37-predevice-handoff.md) を先に確認する。
+以下の停止記録、原本保全、実機の照合条件を変更せず維持する。
+
 ## 再開地点 — 利用者の依頼で保存・停止（2026-09-16）
 
 Runs on: 今回の修正・最終gate・APK保全はWindows。修正版の実機適用は再開後に行う。

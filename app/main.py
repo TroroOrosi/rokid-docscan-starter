@@ -56,6 +56,7 @@ from .glasses_view import (
     build_scan_ack,
 )
 from .hud import build_hud
+from .input_identity import file_sha256
 from .layout import parse_layout, primary_question, segment_problems
 from .llm import clamp01
 from .matching import (
@@ -72,6 +73,7 @@ from .page_pdf import images_to_pdf
 from .retrieval import retrieve_context
 from .solvers import Question, get_solver
 from .solvers.llm_adapter import paste_prompt
+from .solvers.chatgpt_web import ChatGptWebUncertain
 from .solvers.registry import solve_with_fallback
 from .subjects import detect_subject
 from .version import APP_VERSION, HUD_CONTRACT_VERSION, version_info
@@ -2429,8 +2431,7 @@ def _document_source_pages(conn, doc_id: int, session_id: int) -> list[dict]:
             refs.setdefault(index, []).append(f"q{question['id']}")
     return [
         {"page_number": row["page_index"] + 1, "image_path": row["image_path"],
-         "image_sha256": hashlib.sha256(Path(row["image_path"]).read_bytes()).hexdigest()
-         if row["image_path"] and Path(row["image_path"]).is_file() else "missing",
+         "image_sha256": file_sha256(row["image_path"]),
          "ocr_text": row["ocr_text"] or "", "vision_text": row["vision_text"] or "",
          "question_ids": refs.get(row["page_index"], []),
          "captured_at": row["captured_at_ms"] or "unknown; server received at " + row["created_at"]}
@@ -2460,6 +2461,29 @@ def _group_page_indexes(conn, session_id: int) -> dict[int, list[int]]:
     return windows
 
 
+def _solve_failure(row) -> dict:
+    try:
+        metadata = json.loads(row["structure_json"] or "{}") if row is not None else {}
+        failure = metadata.get("solve_failure", {})
+        return failure if isinstance(failure, dict) else {}
+    except (ValueError, TypeError, AttributeError):
+        return {}
+
+
+def _record_solve_failure(conn, row, error: Exception) -> None:
+    # Keep only a fixed code, never a provider exception containing source or keys.
+    current = conn.execute("SELECT structure_json FROM questions WHERE id = ?", (row["id"],)).fetchone()
+    metadata = json.loads(current["structure_json"] or "{}")
+    if not isinstance(metadata, dict):
+        metadata = {}
+    metadata["solve_failures"] = int(metadata.get("solve_failures", 0)) + 1
+    metadata["solve_failure"] = {"code": "browser_outcome_unknown"
+                                 if isinstance(error, ChatGptWebUncertain) else "solver_failed"}
+    conn.execute("UPDATE questions SET structure_json = ? WHERE id = ?",
+                 (json.dumps(metadata, ensure_ascii=False), row["id"]))
+    conn.commit()
+
+
 def _answer_bundle_item(conn, group: dict, row) -> dict:
     from .answer_diagrams import validate_diagrams
 
@@ -2478,7 +2502,12 @@ def _answer_bundle_item(conn, group: dict, row) -> dict:
     except (ValueError, TypeError, AttributeError):
         metadata, needs_input = {}, False
     if sol is None:
-        status, issue = "pending", "未解答"
+        failure = _solve_failure(row)
+        inherited = _solve_failure(group.get("heading"))
+        code = (failure or inherited).get("code")
+        status = "failed" if failure else "pending"
+        issue = ("送信結果の確認待ち。自動再送は停止しています" if code == "browser_outcome_unknown"
+                 else "解析に失敗しました。資料は保持しています" if code == "solver_failed" else "未解答")
     elif needs_input:
         status, issue = "needs_input", str(metadata.get("missing_material") or "資料が不足しています")[:1000]
     elif diagram_error:
@@ -2506,32 +2535,31 @@ def _answer_bundle_item(conn, group: dict, row) -> dict:
 
 
 def _answer_input_digest(conn, session) -> str:
-    """Input identity: the pages the answers were read from.
+    """Content-based identity for the exact input, not a pHash similarity key.
 
-    Stable while the material is unchanged, different after a re-capture, so
-    AnswerStore can refuse a bundle belonging to different input.
+    Changing this algorithm invalidates old digests. Existing offline saves are
+    not deleted; never combine their results with a newly identified input.
     """
     document_id = session["document_id"]
     if document_id:
         rows = conn.execute(
-            "SELECT page_index, phash, ocr_md5 FROM pages "
-            "WHERE document_id = ? ORDER BY page_index",
-            (document_id,),
+            "SELECT page_index, image_path, ocr_text, vision_text FROM pages "
+            "WHERE document_id = ? ORDER BY page_index", (document_id,),
         ).fetchall()
-        material = "\n".join(
-            f"{r['page_index']}:{r['phash']}:{r['ocr_md5'] or ''}" for r in rows
-        )
+        pages = [
+            {"page_index": r["page_index"], "image_sha256": file_sha256(r["image_path"]),
+             "ocr_text": r["ocr_text"] or "", "vision_text": r["vision_text"] or ""}
+            for r in rows
+        ]
     else:
-        material = "\n".join(
-            str(r["id"]) for r in _deck_question_rows(conn, session["id"])
-        )
-    if session["audio_path"] or session["transcript"]:
-        audio_digest = "missing"
-        if session["audio_path"] and Path(session["audio_path"]).is_file():
-            with Path(session["audio_path"]).open("rb") as audio:
-                audio_digest = hashlib.file_digest(audio, "sha256").hexdigest()
-        material += "\naudio:" + audio_digest + "\ntranscript:" + (session["transcript"] or "")
-    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+        pages = [{"question_id": r["id"], "body_text": r["body_text"] or ""}
+                 for r in _deck_question_rows(conn, session["id"])]
+    material = {"identity_schema": 2, "pages": pages,
+                "audio_sha256": file_sha256(session["audio_path"]),
+                "transcript": session["transcript"] or ""}
+    encoded = json.dumps(material, ensure_ascii=False, sort_keys=True,
+                         separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _answer_revision(conn, session_id: int) -> int:
@@ -2541,7 +2569,16 @@ def _answer_revision(conn, session_id: int) -> int:
         "JOIN questions q ON q.id = s.question_id WHERE q.session_id = ?",
         (session_id,),
     ).fetchone()
-    return (row["latest"] or 0) + 1
+    # Failure-only updates also change a snapshot. Counts are never cleared on
+    # success, so later answer insertions cannot move this revision backwards.
+    failures = 0
+    for question in _deck_question_rows(conn, session_id):
+        try:
+            metadata = json.loads(question["structure_json"] or "{}")
+            failures += max(0, int(metadata.get("solve_failures", 0)))
+        except (ValueError, TypeError, AttributeError):
+            pass
+    return (row["latest"] or 0) + 1 + failures
 
 
 def _review_operations() -> dict:
@@ -2848,12 +2885,10 @@ def exam_finalize_reading(session_id: int) -> dict:
                         )
                         try:
                             result, solver = solve_with_fallback(question=question)
-                        except Exception:  # noqa: BLE001 - documented behaviour
-                            # The answer-sheet contract refuses the placeholder
-                            # and raises when no real solver answers. That must
-                            # leave the row UNSOLVED (the batch is resumable and
-                            # the onboard ingest can still fill it), never fail
-                            # the whole finalize-reading.
+                        except Exception as error:  # noqa: BLE001 - retain resumable failures
+                            _record_solve_failure(conn, row, error)
+                            if isinstance(error, ChatGptWebUncertain):
+                                break  # Do not touch the browser for the remaining questions.
                             continue
                     served_by = result.extras.get("served_by", solver.name)
                     if served_by == "local":

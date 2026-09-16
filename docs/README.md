@@ -94,7 +94,9 @@ what the platform permits.
 
 ## Internal progress records
 
-- `.agents/progress/multimodal-scan.md` — **read this first, in full.** 現在は全体認識合わせと計画整理。
+- `.agents/progress/pr37-predevice-handoff.md` — PR37の実機前修正、検証範囲、Windows Codexへの引き継ぎと未実装の対応表。
+
+- `.agents/progress/multimodal-scan.md` — **read this in full after the PR37 handoff.** 保存・停止時の実機状態と経緯。
   以前の実装・実機導入・ASRの測定と、追加実装を始める前の境界を保持する。
 
 Continuation records for agents. Never an operator contract.

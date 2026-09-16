@@ -18,7 +18,7 @@ from .. import config
 from ..llm import ADAPTER_PROVIDERS
 from ..provider_registry import ProviderRegistry
 from .base import Solver
-from .chatgpt_web import ChatGptWebSolver
+from .chatgpt_web import ChatGptWebSolver, ChatGptWebUncertain
 from .llm_adapter import LLMSolver, choice_label, choice_out_of_range
 from .local_placeholder import LocalPlaceholderSolver
 
@@ -89,6 +89,8 @@ def _retry_out_of_range(solver, question, result, max_answer_len: int):
     retry = replace(question, retry_hint=_choice_retry_hint(question))
     try:
         retried = solver.solve(question=retry, max_answer_len=max_answer_len)
+    except ChatGptWebUncertain:
+        raise  # Do not hide an ambiguously submitted corrective question.
     except Exception:  # noqa: BLE001 - a failed retry must not lose the answer
         retried = None
     if retried is not None and not choice_out_of_range(retried.answer, question.choices):
@@ -137,6 +139,8 @@ def solve_with_fallback(
             continue
         try:
             result = solver.solve(question=question, max_answer_len=max_answer_len)
+        except ChatGptWebUncertain:
+            raise  # Another provider would still duplicate a possibly submitted question.
         except Exception:  # noqa: BLE001 - one tier failing must not 500
             skipped.append(f"{name}:error")
             continue

@@ -170,7 +170,8 @@ from __future__ import annotations
 #        gives each paper its own database. See GLASSES_VIEW_CONTRACT 1.11.0.
 # 0.28.0: an answer reaches the operator as writable text, and an answer that
 #        lost an element is no longer reported ready. See API 1.19.0.
-APP_VERSION = "0.34.0"
+# Predevice hardening: exact input identity and durable browser send guard.
+APP_VERSION = "0.35.0"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.
@@ -240,7 +241,8 @@ APP_VERSION = "0.34.0"
 #        (tasks/todo.md FS-65). A client that does not know the status must be
 #        updated; relaycore 0.3.17 does.
 # Adds operation_routes and explicit client-OCR/image-only real-mode behavior.
-API_VERSION = "1.21.0"
+# Content digest v2; persisted solve failures change the existing bundle revision.
+API_VERSION = "1.22.0"
 
 # Matching algorithm identity. Bump when thresholds or hashing change so a
 # re-index/eval is triggered. Mirrors thresholds in app/matching.py.
@@ -299,7 +301,7 @@ ANALYZER_API_VERSION = "1.0.0"
 # 1.6.0: Question gained the optional `audio_path` field, so a listening
 #        question can carry the recording itself and not only its transcript.
 #        Adapters that cannot take audio ignore it (additive/back-compat).
-SOLVER_API_VERSION = "1.7.0"
+SOLVER_API_VERSION = "1.7.1"
 
 # Media-extractor plugin interface (formula/figure/graph/table).
 EXTRACTOR_API_VERSION = "1.0.0"

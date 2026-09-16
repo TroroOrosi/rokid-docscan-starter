@@ -47,3 +47,40 @@ jobs:
           pip install -r requirements.txt
       - name: Run tests
         run: pytest -q
+
+  phone-stack-compatibility:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Test the recorded phone API stack (not Android wheel installation)
+        run: |
+          python -m pip install -r requirements-phone.txt -c constraints-phone.txt pytest httpx
+          python -m pytest -q
+
+  windows-predevice:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install test dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Exercise Windows file locks, journals, and input identity
+        run: python -m pytest -q tests/test_browser_guard.py tests/test_chatgpt_web_solver.py tests/test_answer_bundle_api.py tests/test_documentation_contract.py
+
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install ruff==0.13.3
+      - run: python -m ruff check .

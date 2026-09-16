@@ -40,11 +40,13 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import secrets
 import time
 import urllib.error
 import urllib.request
 
 from ..llm import extract_json
+from ..browser_guard import BrowserGuard, BrowserGuardError
 from ..page_pdf import images_to_pdf
 from .llm_adapter import LLMSolver, _read_audio, _read_image, _read_images
 
@@ -173,6 +175,10 @@ class ChatGptWebError(RuntimeError):
     ``solve_with_fallback`` catches this and drops to the next tier, so a
     closed browser or a changed page degrades instead of failing the session.
     """
+
+
+class ChatGptWebUncertain(ChatGptWebError):
+    """A send may have landed. Never retry it automatically."""
 
 
 class ChatGptWebRateLimit(ChatGptWebError):
@@ -330,10 +336,8 @@ def attach_images(
     every upload as confirmed without checking anything, and a partial rise
     means some page never made it.
 
-    Returns False instead of raising when the count never rises far enough. The
-    attachments may well have landed and only the preview markup have moved,
-    and losing the whole answer over an unconfirmed preview is worse than
-    sending and recording that it was unconfirmed.
+    Returns False if the complete attachment set cannot be confirmed. Callers
+    must not submit that message, including on the final preparation attempt.
     """
     plan = upload_plan(images, audio, bundle_pdf, files)
     if not plan:
@@ -484,8 +488,8 @@ def ask_page(
     Returns ``(reply_text, attached)``, where ``attached`` is None when there
     were no images and False when the uploads could not all be confirmed.
 
-    This sends whatever it attached. The retry loop uses the three steps below
-    separately, so an upload it is not happy with costs no message at all.
+    Unconfirmed source attachments raise before sending. Production uses the
+    guarded client below; this helper is for explicitly invoked component tests.
     """
     poll_s = POLL_S if poll_s is None else poll_s
     upload_timeout_s = UPLOAD_TIMEOUT_S if upload_timeout_s is None else upload_timeout_s
@@ -498,6 +502,8 @@ def ask_page(
         attached = attach_images(
             page, images, timeout_s=upload_timeout_s, poll_s=poll_s, sleep=sleep, now=now
         )
+        if attached is not True:
+            raise ChatGptWebError("source attachments were not confirmed; no question sent")
     reply = send_and_read(
         page,
         text,
@@ -537,6 +543,7 @@ def send_and_read(
     stable_polls: int | None = None,
     sleep=time.sleep,
     now=time.monotonic,
+    before_submit=None,
 ) -> str:
     """Type the prompt, send it, and return the finished reply.
 
@@ -555,9 +562,12 @@ def send_and_read(
     # ``fill`` sets a contenteditable's content in one step. Typing it key by
     # key would send the message at the prompt's first newline.
     composer.fill(text)
+    replies = page.locator(ASSISTANT_SEL)
+    baseline_turns = replies.count()
+    if before_submit is not None:
+        before_submit()
     submit(page)
 
-    replies = page.locator(ASSISTANT_SEL)
     stop_button = page.locator(STOP_SEL)
     started = now()
     deadline = started + timeout_s
@@ -575,7 +585,9 @@ def send_and_read(
         # goes briefly EMPTY before the real text streams in.
         streaming = bool(stop_button.count())
         streaming_started = streaming_started or streaming
-        current = replies.last.inner_text() if replies.count() else ""
+        # An unchanged old answer is not proof that this submission completed.
+        # Conservatively stop if a changed DOM cannot identify a new turn.
+        current = replies.last.inner_text() if replies.count() > baseline_turns else ""
         if streaming:
             # Anything visible mid-generation is provisional. Drop any
             # stability credit so a pause inside the stream cannot end the wait.
@@ -618,6 +630,7 @@ class ChatGptWebClient:
         #: Which chat the open tab is currently in, under CHAT_SCOPE="subject".
         #: None means "start a fresh chat for this question".
         self._chat_key: str | None = None
+        self._chat_url: str | None = None
         #: Digests of the pages already attached inside that chat, so a 大問 is
         #: uploaded once per subject rather than once per 小問.
         self._attached_in_chat: set[str] = set()
@@ -638,7 +651,6 @@ class ChatGptWebClient:
         # that spans pages. Either way the pages travel as attachments and the
         # OCR text as the message body -- never merged into one part.
         pages = list(images) if images else ([image] if image else [])
-        self.last_image_attached = None
         # CDP is spoken directly rather than through Playwright: the venue runs
         # this server on the phone, where Playwright's driver refuses to start
         # (`Error: Unsupported platform: android`, measured in
@@ -669,25 +681,23 @@ class ChatGptWebClient:
         finally:
             browser.close()
 
-    def _ask_with_retries(
-        self,
-        context,
-        text: str,
-        pages: list[bytes],
-        *,
-        audio: tuple[str, bytes] | None = None,
-        bundle_pdf: bool | None = None,
-        chat_key: str | None = None,
-        files: list[dict] | None = None,
-    ) -> str:
-        """One question, retried on a flake, each attempt in its own fresh chat.
+    def _ask_with_retries(self, context, text: str, pages: list[bytes], *,
+                          audio=None, bundle_pdf=None, chat_key=None, files=None) -> str:
+        """Serialize all tab interaction; a restart cannot erase an uncertain send."""
+        try:
+            with BrowserGuard() as guard:
+                guard.require_clear()
+                self.last_image_attached = None
+                return self._ask_locked(context, text, pages, guard=guard, audio=audio,
+                                        bundle_pdf=bundle_pdf, chat_key=chat_key, files=files)
+        except BrowserGuardError as error:
+            raise ChatGptWebUncertain(str(error)) from error
+        except OSError as error:
+            raise ChatGptWebUncertain("browser state could not be saved; no automatic retry") from error
 
-        An unconfirmed upload counts as a failure worth retrying: sending the
-        question without its figure does not error, it just answers the wrong
-        question or returns needs_input, which is the expensive kind of wrong.
-        The last attempt's reply is accepted either way, so a permanently moved
-        thumbnail selector still yields an answer rather than nothing.
-        """
+    def _ask_locked(self, context, text: str, pages: list[bytes], *, guard,
+                    audio=None, bundle_pdf=None, chat_key=None, files=None) -> str:
+        """Retry preparation only. Once submit is attempted, ambiguity is durable."""
         last_error: Exception | None = None
         page = reuse_page(context)
         for attempt in range(1, ATTEMPTS + 1):
@@ -696,8 +706,17 @@ class ChatGptWebClient:
                 # ended. Retrying a throttled upload immediately is the case
                 # that needs the wait most.
                 time.sleep(RETRY_BACKOFF_S * (attempt - 1))
+            sent = False
+            request_id = secrets.token_hex(32)
+
+            def before_submit():
+                nonlocal sent
+                guard.mark_sending(request_id)
+                sent = True
+
             try:
-                if chat_key is None or chat_key != self._chat_key:
+                if (chat_key is None or chat_key != self._chat_key
+                        or self._chat_url != page.url):
                     # A new question (or a new subject) gets its own chat. Under
                     # CHAT_SCOPE="subject" a retry stays in the chat it is
                     # already in: opening another one per attempt is what filled
@@ -705,6 +724,7 @@ class ChatGptWebClient:
                     composer = start_new_chat(page)
                     self._chat_key = chat_key
                     self._attached_in_chat.clear()
+                    self._chat_url = page.url
                 else:
                     composer = wait_for_composer(page)
                 pending = [p for p in pages if _digest(p) not in self._attached_in_chat]
@@ -734,9 +754,11 @@ class ChatGptWebClient:
                     # question -- the load that got the account limited.
                     last_error = ChatGptWebError("page images never confirmed as attached")
                     continue
-                if files and attached is not True:
+                if (pages or audio or files) and attached is not True:
                     raise ChatGptWebError("source attachments were not confirmed; no question sent")
-                reply = send_and_read(page, text, composer=composer)
+                reply = send_and_read(page, text, composer=composer, before_submit=before_submit)
+                guard.acknowledge(request_id)
+                self._chat_url = page.url
                 self._attached_in_chat.update(_digest(p) for p in pending)
                 if pending_audio:
                     self._attached_in_chat.add(_digest(pending_audio[1]))
@@ -744,10 +766,21 @@ class ChatGptWebClient:
                 self.last_image_attached = attached
                 return reply
             except ChatGptWebRateLimit:
+                # A received rate-limit reply is known, not an uncertain send.
+                if sent:
+                    guard.acknowledge(request_id)
                 # The one failure no retry helps. Asking again in a new chat is
                 # exactly how a slowdown became a block.
                 raise
             except Exception as exc:  # noqa: BLE001 - page automation raises broadly
+                if sent:
+                    self._chat_key = self._chat_url = None
+                    self._attached_in_chat.clear()
+                    raise ChatGptWebUncertain(
+                        "send outcome unknown; retained for inspection, no automatic resend"
+                    ) from exc
+                self._chat_key = self._chat_url = None
+                self._attached_in_chat.clear()
                 last_error = exc
                 if attempt >= ATTEMPTS:
                     raise ChatGptWebError(
