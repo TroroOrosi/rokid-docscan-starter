@@ -397,3 +397,85 @@ Runs on: F-51Fとグラス、同じ家庭内Wi-Fi。会場のphone AP経路の�
   BrowserGuardの送信停止は保持。紙面の読みやすさ、単頁比較、実答案表示はまだ未合格。
 - 本追記後 `py -3.12 -m pytest -q tests/test_documentation_contract.py`
   → `14 passed in 1.01s`、`git diff --check` → exit0（既存設定によるLF/CRLF警告のみ）。
+
+### 近づけた見開きの比較（1回）
+
+Runs on: 同じグラス・F-51F、家庭内Wi-Fi。写真品質の部分試験。
+
+- 利用者は「大きく写り、四辺と文字が見えた」と回答。これは確認画面の光学的な見やすさの申告。
+  保存原本を見て、文字認識・答案品質まで合格したとは扱わない。
+- `adb -s 192.168.0.4:5555 logcat -d -v time -s DocScanGlassDoc` →
+  21:17:31.744 review ACK、21:17:34.209 BACK、21:17:36.136 local commit、
+  21:17:36.144 FINALIZING、21:17:53.969 REVIEW。今回は終了操作後に追加タップなし。
+- UUID `6239deec-faf0-473c-b6c4-9ff1f55c8fd5`、document11/session3、P1 ACK済み。
+  read-only tar → `spread-raised-session.tar` 5,847,040 bytes、SHA-256
+  `939dfb70eb57a8a47b6ddf45cca8103e3c3c9e50737d551b89e74a5c1d9c8937`。
+  サーバ正本 `data/images/11_0_7e5881cb.png` を `spread-raised-normalized.png` として保全。
+  全体の原本では、紙面の四辺はあるが、まだ周囲が大きく暗い。OCRは6文字。
+- read-only DB → question3 solve_failure.code browser_outcome_unknown、solutions0。
+  submission.jsonは同じuncertain barrierを保持し、解析を再送していない。
+  次は同冊子の片側1頁を約30cm目安で撮り、既存の操作で終了する比較を利用者へ依頼中。
+
+### 単頁比較と送信確認の利用者訂正
+
+Runs on: 同じ実機・家庭内Wi-Fi。撮影比較のみで、実答案試験ではない。
+
+- 利用者は単頁についても「文字が大きく、四辺も見えた」と回答。
+  サーバ正本 `data/images/12_0_e3f57cd8.png` を `single-page-normalized.png` として保全。
+  原本で右側の単頁の四辺を確認。隣頁も一部写っており、右側だけへ自動cropした画像ではない。
+  暗さは残り、OCR3文字なので、読取品質は合格としていない。
+- UUID `9b0f1286-9385-485f-942b-82413181e9ec`、document12/session4、P1 ACK済み。
+  read-only tar → `single-page-session.tar` 5,948,928 bytes、SHA-256
+  `d77befd067021dd29179a6bf9a0f8468d7c39c8463c9b81037dd211058e861b0`。
+  manifestのbin名のSHA-256と内容を照合し、既存DSCP v3形式からJPEGを別ファイルへ読み出した。
+  5,944,677 bytes、rotation270、ExposureTime0.008333333、ISO60。原本の変更なし。
+- `single-page-logcat.log` に、OCR0で確認写真を出せず再試行する区間がある。
+  21:22:26.785 review ACK、21:22:29.821 BACK、21:22:31.181 local commit、
+  21:22:31.189 FINALIZING、manifest更新21:22:47にREVIEW。
+  認識が安定せず確認写真まで待たされる点は未解決。撮影寸法・retry・露出は変更していない。
+- read-only submission.json → 同じrequest_id/state uncertain。
+  近づけた見開き・単頁試験の間も、元の送信結果不明の記録を上書きしていない。
+- 利用者が**20:35記録の解析再開後にも「画像または会話を削除した」**と回答。
+  21:05の送信結果不明を、利用者の操作がない条件で再現したアプリ不具合とは扱わない。
+  入力欄の添付だけ／送信済み発言／会話自体のどれだったかを確認中。
+  削除対象を確認するまでjournalは保留し、追加の削除・送信を依頼しない。
+- 実答案試験に向け、同冊子の設問・選択肢ページを準備できるか利用者へ確認中。
+  ここまでの写真は本文ページであり、解答に必要な設問がそろったという証拠はない。
+
+### 会話削除の照合後、次の短い答案試験を準備
+
+Runs on: F-51Fの既存サーバ。次の撮影は同じグラス・家庭内Wi-Fi。
+
+- 利用者は解析再開後に削除したのが「チャットの会話自体」と回答。
+  既知の履歴候補へのHTTP404と併せ、当該結果を回収できない状態として照合した。
+  削除時刻と180秒待機終了の前後関係までは分からず、timeoutの全原因とは断定しない。
+- BrowserGuard lock下で同じrequest_id・uncertain、solution_claims0を確認。
+  journalのbyte一致backupとSQLite consistent backupを
+  `~/rokid-backups/deleted-chat-reconciliation-20260916T122746Z` へ保存。
+  journal backup SHA-256
+  `4c442a359ce4df1e2d5d1b2926dec7a463cf6a0c84095cb27958fac57d8fc5dc`。
+  利用者の削除対象の確認後、既存 `BrowserGuard.acknowledge(request_id)` を実行し、
+  出力 → `state_after {schema: 1, state: idle}`。原本・過去のfailed記録はそのまま。
+  これは結果の照合による送信停止解除であり、答案成功への書き換えではない。
+- 利用者は同じ冊子の設問ページを準備可能と回答。本文と問1〜2の設問・全選択肢が
+  そろうページ番号を確認中。次の試験はその紙面だけとし、過去の未完記録をまとめて再送しない。
+  今回は答案がグラスへ戻るまで、スマホのChatGPT・添付・会話を操作せず残すよう説明した。
+
+### 現在の停止点
+
+Runs on: 次の実答案試験はグラス → F-51F → 同じF-51F Chrome。家庭内Wi-Fiの部分試験。
+
+- ページ番号の問いに利用者は「ない」と回答。「設問・選択肢のページが手元にない」か、
+  「設問はあるがページ番号が分からない」かを確認中。新規撮影・解析は開始していない。
+  後者ならページ番号の申告を必須にせず、設問と対応する本文の現物から短い試験範囲を決める。
+  前者なら実答案試験は必要な紙面が用意できるまで未実施として残す。
+- 同じグラスのread-only `pm path dev.rokid.docscanglass.doc` で導入先を特定し、
+  `sha256sum <installed base.apk>` →
+  `c08c5253fad5d021da94abc26bddf630d48ceecbe978d0f4773ba1b296a65a35`。
+  検査済み既存署名の中央目印APKと一致。`dumpsys media.camera` → `Active Camera Clients: []`。
+- `gh pr checks 37 --repo TroroOrosi/rokid-docscan-starter` → build、lint、source-snapshot、
+  phone-stack-compatibility、Python各版、windows-predeviceはいずれもpass（4a9e218時点）。
+  これらを実機の読取品質・答案表示の合格には数えない。
+- 本追記前の同一製品ソースで `py -3.12 -m pytest -q tests/test_documentation_contract.py`
+  → `14 passed in 0.80s`、`py -3.12 -m ruff check .` → `All checks passed!`、
+  `git diff --check` → exit0。追加実装なし。
