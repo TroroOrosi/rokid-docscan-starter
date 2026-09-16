@@ -64,8 +64,10 @@ android {
         // own, with its tests -- and this module is the capture seam over
         // them: camera2 for the still, a canvas for the HUD, and the
         // `:glassinput` gestures routed through CaptureActionRouter.
-        versionCode = 13
-        versionName = "0.12.0"
+        // 14 bounds preview ownership and avoids duplicate saved-photo buffers.
+        // Review end feedback never changes the visible-frame clock or capture policy.
+        versionCode = 14
+        versionName = "0.13.0"
     }
 
     // Same reasoning as `:glassapp`: a vendor installer that reads JAR

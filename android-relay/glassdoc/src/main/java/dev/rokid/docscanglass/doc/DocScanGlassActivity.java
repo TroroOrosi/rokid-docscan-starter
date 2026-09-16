@@ -469,7 +469,7 @@ public final class DocScanGlassActivity extends Activity
             return;
         }
         // Feedback only; the serial controller still owns finish/retake and the deadline.
-        if (action == GlassesInputAction.BACK
+        if (action == GlassesInputAction.BACK && surface != null
                 && controller.getState() == RelayState.CAPTURE_REVIEW) {
             surface.showCaptureEndRequested();
         }

@@ -2,6 +2,10 @@ package dev.rokid.docscanrelay;
 
 import static org.junit.Assert.*;
 import android.graphics.Bitmap;
+import android.content.Context;
+import android.content.pm.ServiceInfo;
+import android.os.Bundle;
+import com.google.mlkit.common.sdkinternal.MlKitContext;
 import com.google.android.gms.tasks.TaskCompletionSource;
 import com.google.mlkit.vision.common.InputImage;
 import com.google.mlkit.vision.text.Text;
@@ -10,9 +14,12 @@ import java.io.ByteArrayOutputStream;
 import java.lang.reflect.Proxy;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.robolectric.RobolectricTestRunner;
+import org.robolectric.RuntimeEnvironment;
+import static org.robolectric.Shadows.shadowOf;
 import org.robolectric.annotation.Config;
 import org.robolectric.annotation.GraphicsMode;
 import org.robolectric.shadows.ShadowLooper;
@@ -22,6 +29,22 @@ import org.robolectric.util.ReflectionHelpers;
 @Config(sdk = 32, manifest = Config.NONE)
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 public class JapaneseOcrLifecycleTest {
+    @Before public void initializeSdkContextWithoutStartingRecognition() {
+        // Config.NONE omits manifest providers/registrars. InputImage itself logs
+        // through ML Kit, even with a fake recognizer. Supply its real common
+        // components rather than shadowing bitmap lifetime or weakening assertions.
+        Context context = RuntimeEnvironment.getApplication();
+        ServiceInfo service = new ServiceInfo();
+        service.packageName = context.getPackageName();
+        service.name = "com.google.mlkit.common.internal.MlKitComponentDiscoveryService";
+        service.metaData = new Bundle();
+        service.metaData.putString(
+                "com.google.firebase.components:com.google.mlkit.common.internal.CommonComponentRegistrar",
+                "com.google.firebase.components.ComponentRegistrar");
+        shadowOf(context.getPackageManager()).addOrUpdateService(service);
+        MlKitContext.initializeIfNeeded(context);
+    }
+
     @Test public void chooserDoesNotInitializeRecognizerAndCloseIsIdempotent() {
         JapaneseOcr ocr = new JapaneseOcr();
         assertNull(ReflectionHelpers.getField(ocr, "recognizer"));
