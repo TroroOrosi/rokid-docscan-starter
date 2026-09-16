@@ -321,3 +321,79 @@ Runs on: 表示修正・自動試験はWindows。写真・入力・サーバ状�
   ここからは再送・新規チャットへの移動・削除を止め、元の送信状態を確認する。
   submission.jsonは存在せず、アプリ経由の送信予約/完了journalはない。
   ただし手動操作の有無はこのjournalだけで断定しない。ブラウザ側ソースは一切変更していない。
+
+### 中央目印の導入と添付件数の現物照合
+
+Runs on: APK導入はWindows → 同じ実グラス。添付条件の設定はF-51Fの既存Termuxサーバ。
+
+- 中央目印のソースは `aabad555d15a41caea0658f2ab85bd0f7919d410` でcommit/push済み。
+  `git push origin HEAD:feature/multimodal-scan` → `3e4b777..aabad55`。mainは触っていない。
+- 更新前のfull private tarは最初50秒でtimeout（部分ファイル98,113,536 bytesも保持）。
+  新しい名前で時間枠を広げ、`private-before-center-mark-complete.tar` の読み出しを完了。
+  106,981,376 bytes、33 files、SHA-256
+  `b6fdf7682e9adecb27c727c15bc0b5d8850313bea2a1427161ff19b90f067545`。
+  全ファイルのhash一覧を `private-before-center-mark-hashes.json` に保存。
+- 再列挙、実serial一致、camera clients `[]`、停止済み、installed versionCode13を確認。
+  `$env:AGENT_APPROVED=1; adb -s 192.168.0.4:5555 install -r <glassdoc-center-mark.apk>` → `Success`。
+  `sha256sum`照合 → `after_center_install_private_identical 33`。
+  開閉後の選択画面復帰を利用者が確認。中央目印自体の光学確認はまだ。
+- 利用者は消した画像が「下の入力欄の添付」だったと回答。履歴の発言の削除ではない。
+  直近の部分試験で送信操作はしていない。元アプリのsubmission.jsonも存在しない。
+  続く確認は共有BrowserGuardを保持し、空のtask chat・user messages0を確認して添付だけを実行。
+- 画像単独の再添付 → 9.88秒、従来selector count1、user messages0。
+  文章を追加後、画面の削除ボタンに `page001.png` と `document.md` がそれぞれ存在。
+  それでも旧 `form img, [data-testid*="attachment"]` は1件。
+  **文章ファイルのカードを旧確認条件が数えない**ことを、利用者操作がない状態で再現した。
+  画像添付そのものの失敗という前の仮説とは区別する。
+- 実ChromeのDOMで `form button[aria-label^="ファイル "][aria-label*=" を削除"]`
+  →2件、送信ボタン有効、user messages0。`assert count == 2` → `attachment_dom_check=passed`。
+  設定用の既存 `ROKID_CHATGPT_ATTACHMENT_SEL` にこの条件を入れた。
+  日本語Chromeの今回のDOMに対する測定で、他言語・他版の保証ではない。
+  Pythonソース・依存・鍵・写真・再試行回数は変えていない。
+- env変更前backup:
+  `/data/data/com.termux/files/home/rokid-backups/attachment-selector-20260916T120200Z/multimodal.env`。
+  空の送信journal・solution claims0・旧PIDのcmdlineを確認し、旧serverを通常終了して再起動。
+  新PID **21172**、`data/server-3e4b777-attachments.log`、`data/server-current.pid`。
+  出力 → health200、変更envキーは上記1個、credentials/source unchanged。
+  watcher PID7988はそのまま。appのソースは引き続き3e4b777。
+- 次はグラスの「中断した読取」→「9/16 20:35 通常 1枚」でdocument10/session2を
+  利用者操作により再開するよう依頼中。今回の同じ資料の送信状態を照合してからの1回であり、
+  過去の全未完読取を一括再送しない。新規撮影・単頁比較・答案の物理確認はまだ。
+
+### 保存済み解析の再開結果と紙面品質の再申告
+
+Runs on: F-51Fとグラス、同じ家庭内Wi-Fi。会場のphone AP経路の合格ではない。
+
+- 利用者が20:35の記録を選択。`adb -s 192.168.0.4:5555 logcat -d -v time -s DocScanGlassDoc`
+  → 21:05:20.390 `FINALIZING: Resumed saved analysis`、21:08:39.055
+  `REVIEW: Local session analysis finished`。後者は処理終了を表し、答案成功ではない。
+- read-only SQLite → question2のsolutions0、solution_claims0、solve_failures2、
+  `solve_failure.code=browser_outcome_unknown`。Bearer GET
+  `http://192.168.0.30:8000/v1/exam-sessions/2/answer-bundle` → HTTP200、1項目status failed、answer空。
+  serverはこのLANアドレスにbindしており、127.0.0.1:8000への拒否はserver停止を意味しない。
+- `adb -s 192.168.0.4:5555 exec-out screencap -p` の画像は
+  「解析できません／送信結果の確認待ち。」。`glasses-current.png` と
+  `resumed-analysis-glasses.log` を既存のignored evidence directoryへ保全した。
+- submission.jsonはstate uncertain、request_id
+  `3894a56d08253c7d1c6d9785496a0b92cebe046d8f4579f1feb92fdd39fd00f0`。
+  初回の送信処理中はclaim1、終了後は0。自動再送・journalのacknowledge/削除は行っていない。
+  添付確認を通って送信予約まで進んだことと、送信・回答完了は区別する。
+- 元のtask tabのNavigationHistoryには会話パス候補が1件あった。BrowserGuardを保持し、
+  現composer空・添付0を確認して当該会話だけを開いたが、読み込み後はトップへ戻り、
+  user/assistant turnはいずれも0。これで「未送信」「削除済み」とは断定しない。
+  CDP Network.responseReceived → document HTTP200、当該conversation API HTTP404。
+  今回の送信先との同一性も確定できず、journalを保留したままにする。
+- 利用者が「画像が暗く、紙面の面積が小さく、広く撮りすぎ」と申告。
+  `spread-server-normalized.png` の現物でも、見開きが下寄りで、机と周囲が大きく写ることを確認。
+  原本JPEGのPillow EXIF読取 → 4032×3024、ExposureTime 0.008333333、FNumber2.25、
+  ISO60、ExposureBias0.0、FocalLength1.9。暗さの原因まではこの値だけで断定しない。
+- GlassCamera現ソースは最大JPEGでTEMPLATE_STILL_CAPTUREを1回要求し、JPEG_ORIENTATION以外の
+  設定変更はない。中央目印は撮影範囲・露出を変えていない。今回も未変更。
+  過去の露出変更timeoutのコメントを、現firmwareでの制御不可能という一般論へ広げない。
+- 利用者は現在「大問を選択」と回答し、着座したまま冊子を近づける/持ち上げることは可能と回答。
+  同じB5見開きを約40cm目安で顔へ近づけ、紙面へ正面から顔を向け、影を避けて撮る比較を依頼。
+  開閉→通常読取→P1確認後ダブルタップ1回→5秒触らず、の既存操作。
+  今回は写真品質の部分試験であり、解析の確認待ちでも再開を選ばないよう案内した。
+  BrowserGuardの送信停止は保持。紙面の読みやすさ、単頁比較、実答案表示はまだ未合格。
+- 本追記後 `py -3.12 -m pytest -q tests/test_documentation_contract.py`
+  → `14 passed in 1.01s`、`git diff --check` → exit0（既存設定によるLF/CRLF警告のみ）。
