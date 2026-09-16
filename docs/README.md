@@ -1,6 +1,6 @@
 # Documentation index and authority
 
-Status: Current documentation map. Updated 2026-09-15.
+Status: Current documentation map. Updated 2026-09-16.
 
 Separate the intended requirement from evidence of what works:
 
@@ -9,7 +9,7 @@ Separate the intended requirement from evidence of what works:
 - Current source and tests establish implemented behavior. Current runbooks describe
   that behavior and its limits; a plan does not prove implementation.
 - Versioned official APIs and inspected artifacts establish the supported surface.
-  Device claims require dated measurements with the exact version/hash tuple.
+- Device claims require dated measurements with the exact version/hash tuple.
 - Historical plans and research retain context. Their superseded resume instructions
   are not current work; use the RP list in `tasks/todo.md`.
 
@@ -29,6 +29,8 @@ metadata or a working Git command, the gate includes all Markdown rather than
 silently applying that exception. `.agents/progress/` remains in scope.
 
 ## Current contracts and runbooks
+
+- `docs/capture-preflight.md` — PR37の撮影再開前チェック。保存写真の無送信検査、原本保全、制限ヒープ試験。
 
 - `docs/implementation-surfaces.md` — **read this before adding anything.**
   Every Gradle module, Activity and operator-facing server module, each with a
@@ -93,6 +95,8 @@ what the platform permits.
   D/E/X comparisons retain their original evidence; physical/model acceptance is pending.
 
 ## Internal progress records
+
+- `.agents/progress/pr37-offline-remediation.md` — **PR37の再開入口として最初に読む。** 追加修正と停止条件。続いて既存2記録の全文を読む。
 
 - `.agents/progress/pr37-predevice-handoff.md` — PR37の実機前修正、検証範囲、Windows Codexへの引き継ぎと未実装の対応表。
 
