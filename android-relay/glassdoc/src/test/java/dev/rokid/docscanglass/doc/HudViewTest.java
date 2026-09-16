@@ -60,16 +60,25 @@ public class HudViewTest {
         assertEquals(0, Color.red(screen.getPixel(280, 100)));
         assertEquals("display correction must not mutate the saved photograph",
                 Color.rgb(70, 70, 70), photo.getPixel(120, 120));
-        view.showAiming(List.of("P1 撮影", "用紙全体を中央へ", "タップで撮影"));
-        view.draw(new Canvas(screen));
-        for (int y = 120; y < 400; y++) for (int x = 100; x < 380; x++) {
-            assertEquals("aiming instructions must leave the paper visible", Color.BLACK, screen.getPixel(x, y));
-        }
-        assertEquals("bottom bracket belongs inside the viewport", 255, Color.green(screen.getPixel(40, 638)));
-        view.showSpreadGuide(true);
-        view.draw(new Canvas(screen));
-        assertEquals("right spread bracket belongs inside the viewport", 255, Color.green(screen.getPixel(478, 180)));
         photo.recycle();
+        screen.recycle();
+    }
+
+    @Test public void aimingShowsACenterMarkWithoutPretendingToOutlineThePaper() {
+        HudView view = new HudView(RuntimeEnvironment.getApplication());
+        view.layout(0, 0, 480, 640);
+        Bitmap screen = Bitmap.createBitmap(480, 640, Bitmap.Config.ARGB_8888);
+        for (boolean spread : new boolean[]{false, true}) {
+            view.showSpreadGuide(spread);
+            view.showAiming(List.of("P1 撮影", "タップで撮影"));
+            view.draw(new Canvas(screen));
+            assertTrue("the center must be visible", Color.green(screen.getPixel(240, 320)) > 200);
+            for (int y = 120; y < 500; y++) for (int x = 0; x < 480; x++) {
+                if (Math.abs(x - 240) <= 20 && Math.abs(y - 320) <= 20) continue;
+                assertEquals("no page-shaped corners or outline", Color.BLACK, screen.getPixel(x, y));
+            }
+            assertEquals("no bottom page corner", Color.BLACK, screen.getPixel(40, 638));
+        }
         screen.recycle();
     }
 }

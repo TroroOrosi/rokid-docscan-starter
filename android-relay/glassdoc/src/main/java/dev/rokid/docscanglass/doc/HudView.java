@@ -16,7 +16,7 @@ import java.util.List;
 
 /**
  * The glasses display: black background, green monospace text, and either the
- * aiming brackets or the still that was just taken.
+ * aiming mark or the still that was just taken.
  *
  * <p>It holds no session state. What to show is decided by the shared
  * {@code DocScanController} and arrives through {@link GlassesCaptureSurface},
@@ -91,7 +91,7 @@ final class HudView extends View {
         set(newLines, null, false);
     }
 
-    /** Aiming: the brackets the operator aligns the page to. */
+    /** Aiming: a direction cue, not an outline to fit the physical page into. */
     void showAiming(List<String> newLines) {
         set(newLines, null, true);
     }
@@ -165,34 +165,21 @@ final class HudView extends View {
         }
     }
 
-    /**
-     * The aiming rectangle. Corner brackets rather than a closed box: on a
-     * monochrome see-through display a full outline competes with the page
-     * itself, and the corners are what the operator aligns to.
-     */
+    /** The display bounds are not a calibrated camera field of view. */
     private void drawGuide(Canvas canvas) {
         FramingGuide.Rect guide = FramingGuide.of(getWidth(), getHeight(), guideFraction, spreadGuide);
         if (guide.width() <= 0) {
             return;
         }
-        float arm = Math.min(guide.width(), guide.height()) * 0.18f;
-        guidePaint.setStrokeWidth(Math.max(2f, guide.width() * 0.008f));
-        float[] corners = {
-            guide.left(), guide.top(), 1, 1,
-            guide.right() - 1, guide.top(), -1, 1,
-            guide.left(), guide.bottom() - 1, 1, -1,
-            guide.right() - 1, guide.bottom() - 1, -1, -1,
-        };
-        for (int i = 0; i < corners.length; i += 4) {
-            float x = corners[i];
-            float y = corners[i + 1];
-            float dx = corners[i + 2];
-            float dy = corners[i + 3];
-            canvas.drawLine(x, y, x + arm * dx, y, guidePaint);
-            canvas.drawLine(x, y, x, y + arm * dy, guidePaint);
-        }
+        float radius = Math.max(4f, Math.min(guide.width(), guide.height()) * 0.03f);
+        float x = getWidth() / 2f;
+        float y = getHeight() / 2f;
+        guidePaint.setStrokeWidth(2f);
+        canvas.drawLine(x - radius, y, x + radius, y, guidePaint);
+        canvas.drawLine(x, y - radius, x, y + radius, guidePaint);
         paint.setTextSize(22);
         canvas.drawText(spreadGuide ? "B5 見開き" : "B5 1ページ", 8, 26, paint);
+        canvas.drawText("紙面へ顔を向ける", 8, 54, paint);
     }
 
     /** Magnify the center; an uncropped inset keeps framing and missing edges visible. */

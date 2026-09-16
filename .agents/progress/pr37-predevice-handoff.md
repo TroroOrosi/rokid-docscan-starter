@@ -158,3 +158,166 @@ Runs on: 計画照合はWindows。物理採否は実グラス＋F-51F。既存RP
 
 今回の「PRへ反映」はこの修正群と引き継ぎを指し、RP-01～22全ての実装完了や実用完成を意味しない。
 未実装を実機試験待ちへ書き換えない。短い一周が不成立なら該当箇所を直し、別機能を増やして埋めない。
+
+## Windows再開実行（2026-09-16、実機試験継続中）
+
+Runs on: ビルド・照合はWindows。実機はRG_glassesとF-51F上のFastAPI/CDP/Chrome。
+今回は既存家庭内Wi-Fi経由であり、電話AP＋携帯回線の会場経路の検証ではない。
+
+### ソース・自動試験
+
+- 開始時 `git status --porcelain=v1 --untracked-files=all` は空。
+  branch `feature/multimodal-scan`、origin `https://github.com/TroroOrosi/rokid-docscan-starter.git`。
+  既存のignoredデータを保全し、fetch後に祖先関係と新規追跡パス衝突なしを確認。
+  `git merge --ff-only origin/feature/multimodal-scan` → `Fast-forward`。
+  `f4f1b1032fff746d502eee121a88ba52c45a7643` → `3e4b777fdbc71463c38659f4659f0d5974c275c4`。
+  tree `08ea0ab8742d7ac8d7005f3e9cc7226e4cde918e`。製品コードは変更していない。
+- 指定順で本書、CLAUDE.md、multimodal-scan進捗全文、plan現行部分、todo全文、
+  [PR検証コメント](https://github.com/TroroOrosi/rokid-docscan-starter/pull/37#issuecomment-5692888458)を読んだ。
+- Python 3.12.10、`ROKID_CHATGPT_LIVE=0`、一時データディレクトリで
+  `py -3.12 -m pytest -q` → `631 passed, 1 skipped, 1 warning in 88.85s`。
+  `py -3.12 -m ruff check .` → `All checks passed!`。`git diff --check` → exit 0。
+- JDK 17.0.20.1+1、SDK Platform 36 rev2、Build Tools 36.0.0、Gradle wrapper 9.4.1。
+  ASCII checkout `C:\rokid-docscan-starter` で
+  `.\android-relay\gradlew.bat --no-daemon --rerun-tasks test testDebugUnitTest assembleDebug`
+  → `BUILD SUCCESSFUL in 1m 37s`、199 executed、exit 0。
+  再実行JUnit XMLは353件、failures/errors/skipped各0。
+  glassinput32/pagequality18/glassdoc60/relaycore184/app47/glassapp6/glassprobe6。
+
+### 原本保全と更新導入
+
+Runs on: Windowsのadbから役割・実serialを確認した2端末。各コマンドで接続先を指定。
+利用者の当初の更新導入・選択画面起動の承認範囲で実行した。
+
+- glasses接続先 `192.168.0.4:5555`、実serial `1904092623381086`、
+  build `1.25.015-20260903-150201`、API 32。
+- F-51F接続先 `adb-ZY22LWGDCV-gAfvon._adb-tls-connect._tcp`、実serial `ZY22LWGDCV`、
+  IP `192.168.0.30`、build `W1VHS36H.80-34-2-2-1-5` / incremental `64c964-a8f54`、API 36。
+  Hi Rokid `G1.13.8.0828`、Chrome `153.0.8010.36`。CXR serviceは今回未再取得。
+- ローカル証拠はignoredの `data/device-setup/pr37-windows-3e4b777-20260916-200352/`。
+  `pr37-current-evidence-path.txt` がその絶対パスを指す。鍵・画像・OCR内容をGitへ入れない。
+- 更新前にアプリ停止・camera clients空を確認。`exec-out run-as ... tar -cf - files no_backup shared_prefs`
+  でprivate全体を `private-before-pr37.tar` へ保全（76,836,352 bytes、25 files）。
+  SHA-256 `9c86e365a446ea88191d9ef964f5ab1a18230335149852325e328e04d1770b52`。
+  7読取、11確定写真、pending 2件とmanifest・接続設定を保持。
+- 既存APK・旧ビルド・過去backupも残した。旧導入APK SHA-256
+  `29CFF4401AA1CC44B746B2B00FC5DDDC978F5BE5DD83ACAA947451E838AB0E3A`。
+- `aapt2 dump badging` → package `dev.rokid.docscanglass.doc`、activity
+  `dev.rokid.docscanglass.doc.DocScanGlassActivity`、versionCode 13、min 28 / target 36。
+  `apksigner verify --verbose --print-certs` → `Verifies`、v2 true。
+  旧導入APK・再ビルドAPKの証明書SHA-256はともに
+  `906307478018e09e2937cfd8042a674d27598767577e08a304472aae407ccacc`。
+  `Get-FileHash`で新APKと保存コピーが一致:
+  `68813958166FF82DC79E079320A78CBB7D8E84D7C42719CC604197DA862740D3`。
+- `$env:AGENT_APPROVED=1; adb -s 192.168.0.4:5555 install -r <照合済APK>` → `Success`。
+  導入後のprivate 25/25ファイルhash一致。起動後もcapture 20/20一致。
+  接続情報binの再暗号化のみ差分。起動は `am start -W` → `Status: ok`、選択画面をスクリーンショット確認。
+  アンインストール、消去、無断stash、鍵変更、CI APK導入、main mergeはしていない。
+
+### F-51Fサーバ・watcherの復旧
+
+Runs on: F-51FのTermux。Chromeは利用者が前景へ戻した。PCサーバへの代替はしていない。
+
+- 当初SSH拒否、旧server/watcher PIDは不在。利用者がTermuxでwake-lock/sshdを実行した。
+  phone adbの `emulator-5554` は実serial `ZY22LWGDCV` を再確認。
+  phone側 `forward tcp:9222 localabstract:chrome_devtools_remote` 後の `/json/version` → HTTP 200。
+- 旧ログ `data/server-8cc1ad2.log` は3,021,080,685 bytesで保持。
+  末尾64KiBにsocket.acceptの `OSError [Errno 22] Invalid argument` を92回観測。
+  発生根因・再発条件は未解決。再起動だけを修正済みとしない。
+- HEADのapp/scripts/phone requirementsをgit archiveしたtarのSHA-256:
+  `2C333C5FC38071C99C0EABEED9D94104C114F14E866209C56C9788CE5C68F9C7`。
+  phoneバックアップ:
+  `/data/data/com.termux/files/home/rokid-backups/pre-pr37-3e4b777-20260916T112048Z`。
+  旧app、env、requirements、scripts、SQLite整合backup、images/audio全17ファイルを保全。
+  db.py同一、schema変更なし。モデル・巨大旧ログは元位置に保持。
+- 更新スクリプト出力 → `imports_and_adapter_preflight=ok`、`health=200`、
+  `db_rows_preserved=true`、`environment_unchanged=true`、`dependencies_unchanged=true`、
+  `media_files_preserved=17`。新app 55ファイルがsource tarとbyte一致。
+  documents8/pages11/exam_sessions1/questions1/solutions0の既存行数を保持。
+- server PID 7903、`data/server-3e4b777.log`、`data/server-current.pid`。
+  phone Python 3.14.6、fastapi0.99.1/pydantic1.10.26/uvicorn0.52.4等の既存依存は変更なし。
+  保存envとprocess環境一致、認証付きsettings → HTTP 200。
+  `python -m app.browser_guard status` → `{"schema":1,"state":"idle"}`。
+  旧未完文書の解析を勝手に再送していない。
+- 既存 `scripts/watch_glasses.py --serial 192.168.0.4:5555 --expected-serial 1904092623381086`
+  を復旧、PID 7988。実ファイルSHA-256は
+  `903c94dc39777cbac8fd3b6e7032093758dfc3a277e402f6498a7b75b0dd63fa` でHEADと一致。
+  利用者が開閉後の選択画面復帰を1回確認（物理確認）。自動撮影開始は行わない。
+
+### 実機の部分結果と現在の停止点
+
+Runs on: 同じglasses＋F-51F、家庭内Wi-Fi。用紙・装着の準備は利用者が確認済み。
+
+- 最初の「撮影失敗」報告時、camera2のJPEG返却9回を観測したが、OCRは0–4文字。
+  保存画像を確認すると紙面が端に寄りPC/机が大部分。四辺・文字の読取は未成立。
+  UUID `1fa209d0-9adb-4e92-8480-306db2f633f2` の確定P1とpending P2をtarで別途保全した。
+  server未稼働で送信待ち、20:17:30にsystem force-stop。開閉復帰はwatcher復旧後に上記の確認。
+- 20:24の試験で利用者は「P1のまま取り直せた、四辺も見えた」と確認。
+  `adb ... logcat -d -v time -s DocScanGlassDoc` に
+  20:24:20.551 review表示ACK → 20:24:22.533 SHORT_TAP → page index 0再撮影。
+  約1.98秒の取り直しは物理確認。約2.5秒の端境界試験とは区別する。
+- 利用者は「ダブルタップで終了できず撮影する」と報告。20:25:11以降にはBACKも到着し
+  `Review last photo before finishing` に遷移する一方、3秒経過前のSHORT_TAPで再撮影へ戻る。
+  入力の欠落・誤配送と断定せず、最終確認の表示/待ち時間と終了中の取り直し動作を調べる。
+  ログは `retake-doubletap-report.log` に保全。試験を止め、テンプルを閉じたまま待つよう案内した。
+  見開き/単頁の質問には「まずB5見開き、単頁は後に比較」と回答。
+- B5比較、短い読取から答案表示、通信途絶復帰、AP経路、listeningは未確認。
+  実装・自動試験の合格をこれらの実機合格へ書き換えない。
+- 利用者の補足: 見えた四辺は冊子ではなく緑の枠だった。したがって上記の四辺表示の
+  報告は紙面撮影の合格ではない。最後のpending画像は今回もPC中央・冊子が端だった。
+  `7adf492d-7ae8-4d4c-9450-7ed4a29240f8` の原本/manifest/pendingを
+  `retake-doubletap-session.tar`（11,959,296 bytes）へ保全。
+  SHA-256 `03f15a30bb3e91cd25f384a4ccc13c27bab0d4cdeb0e3763458e4348914b62cb`。
+  document 9、確定P1（OCR 0、ACK一致）、pending P2（OCR 7）、phase CAPTURE。
+  phoneのread-only SQLite照合 → documents9/pages12、document9 open、solutions0。
+  `/health` → 200、submission journalなし、新serverログ200bytes/Traceback0。
+  今回の資料はChatGPTへまだ送られていない。
+- `manualCaptureNow()` は最後の確認中の単タップで終了予約を解除する既存動作。
+  最後の確認表示も通常の撮影確認と同じため、終了予約の状態は画面で分かりにくい。
+  現在は変更せず、見開きを正面に置く→顔を紙面へ向ける→P1確認後にダブルタップ1回→
+  手を離して5秒待つ、の短い再試験を利用者へ依頼中。緑の枠を紙面検出と扱わない。
+- 本記録の追加後 `py -3.12 -m pytest -q tests/test_documentation_contract.py`
+  → `14 passed in 0.82s`。製品コード変更なし。
+
+### 着座ガイドの変更と送信確認の停止点
+
+Runs on: 表示修正・自動試験はWindows。写真・入力・サーバ状態は上記家庭内Wi-Fiの実機。
+
+- 20:34:47.442にP1確認を表示、20:34:49.124 BACK、20:34:50.628原本確定、
+  20:34:50.635 `Local capture finished; analysis queued`。利用者も撮影停止・保存解析への遷移を確認。
+  ダブルタップ1回の後に触らず待てば終了することを1回物理確認。入力割当・終了処理は変更していない。
+- UUID `ccb68598-2d5e-4f20-b7b3-508d65a08a89`、document10/session2、1枚ACK済み、phase ANALYSIS。
+  `spread-stop-session.tar` は5,958,144 bytes、SHA-256
+  `982d4e6c39c0b1f2efe69b71ef1b3823105b7033fafde9bb329cdb9dd165cb40`。
+  原本JPEGは5,953,586 bytes、4032×3024、rotation270、OCR49文字。
+  サーバ正本 `data/images/10_0_080428c8.png` もWindowsへ保全し、見開き全体は写っていると確認。
+  暗さ・文字の細部は未合格。単頁比較はまだ行っていない。
+- 利用者は「緑の枠が小さく、着座で合わせられない」と申告。
+  private XMLの限定読取 → `guide=1.0, spread=true`。最大の480×339の描画枠であっても
+  実物の四辺に合わせる根拠がなかった。利用者は「小さな中央の目印＋紙面へ顔を向ける」を選択。
+  HudViewの撮影前の括弧を中央の小さな十字と当該文言へ変更した。
+  既存guide/spread設定、確認写真、カメラ寸法・向き・露出・retry・タップ操作は保持。
+- 既存HudView描画試験へ「中央に目印、周囲に用紙形の枠なし」の回帰確認を追加。
+  修正前 `:glassdoc:testDebugUnitTest --tests '*HudViewTest'`
+  → `3 tests completed, 1 failed`（新規中央目印のassert）。
+  修正後 `test testDebugUnitTest assembleDebug` → `BUILD SUCCESSFUL in 51s`、199 tasks。
+  JUnit合計354件、failures/errors/skipped各0（glassdoc61、他は上記同数）。
+  `py -3.12 -m pytest -q tests/test_documentation_contract.py` → `14 passed in 0.71s`、ruff → `All checks passed!`。
+- 中央目印APKのaapt2は同じpackage/activity、versionCode13。
+  apksigner → `Verifies`、v2 true、同じ既存証明書。
+  `Get-FileHash` → `C08C5253FAD5D021DA94ABC26BDDF630D48CEECBE978D0F4773BA1B296A65A35`。
+  この段階では未導入・光学表示未確認。新しいソース変更はHudView/HudViewTestと本書・runbookのみ。
+- 答案は失敗: read-only DBにq2の `solve_failure.code=solver_failed`、solutions0。
+  正しいBearer認証でGET answer-bundle → HTTP200、1項目 `status=failed, answer_chars=0`。
+  以前のX-API-Key付きsettings HTTP200は公開設定への到達であり、認証成功の証拠ではない。
+  protected endpointはAuthorization Bearerを使う。鍵そのものは出力・変更していない。
+- phone側source_bundle準備の部分試験は成功（document.md 443 bytes、page001.png 14,808,685 bytes）。
+  Chrome CDP接続は0.088秒、ログイン済みcomposerも確認。新しい空のチャットの準備は3.15秒。
+  元の失敗原因はまだ特定していない。新serverログにtracebackはない。F-51F ChromeはAwake/前景。
+- 部分試験の `attach_images` は `False, 15.8秒`、DOMにdocument.mdあり、画像なしを観測したが、
+  **利用者がGPTチャットに付いた画像を削除したと申告したため、添付失敗との因果判断を撤回**。
+  その部分試験は添付だけで質問文・送信ボタンの操作はしていない。
+  利用者は送信の有無は分からないとのこと。入力欄の添付か、履歴の画像かを確認中。
+  ここからは再送・新規チャットへの移動・削除を止め、元の送信状態を確認する。
+  submission.jsonは存在せず、アプリ経由の送信予約/完了journalはない。
+  ただし手動操作の有無はこのjournalだけで断定しない。ブラウザ側ソースは一切変更していない。
