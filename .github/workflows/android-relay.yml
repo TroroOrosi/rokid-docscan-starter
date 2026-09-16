@@ -34,6 +34,16 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
       - name: Test and build both supported surfaces
         run: sh android-relay/gradlew --no-daemon test testDebugUnitTest assembleDebug
+      - name: Preserve unit-test reports even on failure
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-test-reports-${{ github.sha }}
+          path: |
+            android-relay/*/build/test-results/
+            android-relay/*/build/reports/tests/
+          if-no-files-found: warn
+          retention-days: 14
       - name: Record APK identity and build evidence (not hardware acceptance)
         shell: bash
         run: |
