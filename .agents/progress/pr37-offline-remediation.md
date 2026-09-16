@@ -57,7 +57,7 @@ Runs on: Isolated Linux, JDK 21 and Python 3.13; CI uses the configured JDK/Pyth
   regressions. Added ML Kit lifecycle tests initially stopped in InputImage creation because the
   manifest-free test runtime lacked ML Kit initialization, not because a photo was unreadable.
   Keep the tests and their assertions; supply the SDK test context rather than skip them.
-- Local full pytest hit the command timeout in pre-existing source-bundle tests; this is not a
+- Local full pytest hit the command timeout; the specific stalled test was not established. This is not a
   local full-suite pass. Final PR CI links/results, the exact head and Android report counts must
   be read from the PR checks/comment. Never reuse previous successful run counts for a new head.
 
