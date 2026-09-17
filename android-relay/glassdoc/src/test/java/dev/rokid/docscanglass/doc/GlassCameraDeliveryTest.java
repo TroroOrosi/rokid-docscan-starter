@@ -11,6 +11,8 @@ import android.media.ImageReader;
 import android.os.Handler;
 import android.os.Looper;
 import java.nio.ByteBuffer;
+import java.time.Duration;
+import static org.robolectric.Shadows.shadowOf;
 import java.util.ArrayList;
 import java.util.List;
 import org.junit.Before;
@@ -157,11 +159,18 @@ public class GlassCameraDeliveryTest {
         assertEquals(1, delivered);
     }
     @Test public void resultMetadataAloneCannotDeliverOrExtendTheDeadline() {
+        Handler handler = ReflectionHelpers.getField(camera, "handler");
+        Runnable timeout = ReflectionHelpers.getField(camera, "timeout");
+        handler.postDelayed(timeout, 15_000);
+        shadowOf(Looper.getMainLooper()).idleFor(Duration.ofSeconds(14));
         captureEvents(1).onCaptureCompleted(null, null, null);
         assertEquals(0, delivered);
         assertTrue(failures.isEmpty());
         assertFalse((Boolean) ReflectionHelpers.getField(camera, "settled"));
+        shadowOf(Looper.getMainLooper()).idleFor(Duration.ofSeconds(1));
+        assertEquals(List.of("CAMERA TIMEOUT"), failures);
     }
+
 
     @Implements(ImageReader.class)
     public static class ReaderShadow {

@@ -9,6 +9,8 @@ import android.hardware.camera2.CameraCharacteristics;
 import android.hardware.camera2.CameraDevice;
 import android.hardware.camera2.CameraManager;
 import android.hardware.camera2.CaptureRequest;
+import android.hardware.camera2.CaptureFailure;
+import android.hardware.camera2.TotalCaptureResult;
 import android.hardware.camera2.params.StreamConfigurationMap;
 import android.media.Image;
 import android.media.ImageReader;
@@ -16,6 +18,7 @@ import android.os.Handler;
 import android.os.SystemClock;
 import android.util.Log;
 import android.util.Size;
+import android.view.Surface;
 
 import androidx.annotation.RequiresPermission;
 
@@ -40,6 +43,8 @@ final class GlassCamera {
 
     private static final String TAG = "DocScanGlassDoc";
     private static final long CAPTURE_TIMEOUT_MILLIS = 15_000;
+    // Same bound as CaptureReviewPersistence; reject before allocating a second buffer.
+    private static final int MAX_JPEG_BYTES = 8 * 1024 * 1024;
 
     interface Callback {
         void onCaptured(byte[] jpeg, int width, int height, long elapsedMillis);
@@ -92,11 +97,13 @@ final class GlassCamera {
                 fail("no camera");
                 return;
             }
-            Size size = largestJpegSize(manager.getCameraCharacteristics(id));
+            CameraCharacteristics characteristics = manager.getCameraCharacteristics(id);
+            Size size = largestJpegSize(characteristics);
             if (size == null) {
                 fail("no JPEG size");
                 return;
             }
+            CameraDiagnostics.capabilities(current, characteristics, size);
             reader = ImageReader.newInstance(
                     size.getWidth(), size.getHeight(), ImageFormat.JPEG, 1);
             reader.setOnImageAvailableListener(source -> {
@@ -104,7 +111,7 @@ final class GlassCamera {
             }, handler);
             handler.postDelayed(timeout, CAPTURE_TIMEOUT_MILLIS);
             manager.openCamera(id, deviceCallback(current), handler);
-        } catch (CameraAccessException | RuntimeException error) {
+        } catch (CameraAccessException | RuntimeException | OutOfMemoryError error) {
             // SecurityException is a RuntimeException, so a refused CAMERA
             // permission lands here too.
             fail("open " + error.getClass().getSimpleName());
@@ -125,21 +132,21 @@ final class GlassCamera {
         return new CameraDevice.StateCallback() {
             @Override
             public void onOpened(CameraDevice opened) {
-                if (closed || settled || current != generation) { opened.close(); return; }
+                if (closed || settled || current != generation) { closeResource(opened); return; }
                 device = opened;
                 configureSession(current);
             }
 
             @Override
             public void onDisconnected(CameraDevice disconnected) {
-                if (closed || settled || current != generation) { disconnected.close(); return; }
+                if (closed || settled || current != generation) { closeResource(disconnected); return; }
                 device = disconnected;
                 fail("camera disconnected");
             }
 
             @Override
             public void onError(CameraDevice errored, int error) {
-                if (closed || settled || current != generation) { errored.close(); return; }
+                if (closed || settled || current != generation) { closeResource(errored); return; }
                 device = errored;
                 fail("camera error " + error);
             }
@@ -153,25 +160,25 @@ final class GlassCamera {
                     new CameraCaptureSession.StateCallback() {
                         @Override
                         public void onConfigured(CameraCaptureSession configured) {
-                            if (closed || settled || current != generation) { configured.close(); return; }
+                            if (closed || settled || current != generation) { closeResource(configured); return; }
                             session = configured;
-                            requestStill();
+                            requestStill(current);
                         }
 
                         @Override
                         public void onConfigureFailed(CameraCaptureSession failed) {
-                            if (closed || settled || current != generation) { failed.close(); return; }
+                            if (closed || settled || current != generation) { closeResource(failed); return; }
                             session = failed;
                             fail("session refused");
                         }
                     },
                     handler);
-        } catch (CameraAccessException | RuntimeException error) {
+        } catch (CameraAccessException | RuntimeException | OutOfMemoryError error) {
             fail("session " + error.getClass().getSimpleName());
         }
     }
 
-    private void requestStill() {
+    private void requestStill(long current) {
         try {
             CaptureRequest.Builder request =
                     device.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE);
@@ -187,36 +194,89 @@ final class GlassCamera {
             // seven stills in 785-1380 ms. The phone relay never sets exposure
             // either -- it calls takePhoto(w, h, quality) and nothing more.
             // Underexposure is an operating condition: light the page.
-            session.capture(request.build(), null, handler);
-        } catch (CameraAccessException | RuntimeException error) {
+            session.capture(request.build(), captureCallback(current), handler);
+        } catch (CameraAccessException | RuntimeException | OutOfMemoryError error) {
             fail("capture " + error.getClass().getSimpleName());
         }
     }
 
+    private boolean active(long current) {
+        return current == generation && !closed && !settled;
+    }
+
+    private CameraCaptureSession.CaptureCallback captureCallback(long current) {
+        return new CameraCaptureSession.CaptureCallback() {
+            @Override public void onCaptureFailed(CameraCaptureSession source,
+                    CaptureRequest request, CaptureFailure failure) {
+                if (!active(current)) return;
+                // Metadata can fail while an image is still delivered. Do not discard it
+                // or restart the deadline merely because the result metadata failed.
+                if (!failure.wasImageCaptured()) fail("capture failed " + failure.getReason());
+                else Log.w(TAG, "capture_result gen=" + current + " unavailable; waiting for JPEG");
+            }
+            @Override public void onCaptureBufferLost(CameraCaptureSession source,
+                    CaptureRequest request, Surface target, long frameNumber) {
+                if (active(current)) fail("JPEG buffer lost");
+            }
+            @Override public void onCaptureSequenceAborted(CameraCaptureSession source, int id) {
+                if (active(current)) fail("capture sequence aborted");
+            }
+            @Override public void onCaptureCompleted(CameraCaptureSession source,
+                    CaptureRequest request, TotalCaptureResult result) {
+                // Results and ImageReader notifications have independent ordering. A
+                // late result is diagnostic only, never a success or a retry trigger.
+                if (current == generation && !closed && !unknown) {
+                    CameraDiagnostics.result(current, result);
+                }
+            }
+        };
+    }
+
     private void onImageAvailable(ImageReader source) {
+        final byte[] jpeg;
+        final int width;
+        final int height;
         try (Image image = source.acquireNextImage()) {
-            if (image == null) {
-                fail("null image");
-                return;
+            if (image == null || image.getFormat() != ImageFormat.JPEG) {
+                throw new RejectedJpeg("missing JPEG image");
             }
-            ByteBuffer buffer = image.getPlanes()[0].getBuffer();
-            byte[] jpeg = new byte[buffer.remaining()];
+            width = image.getWidth();
+            height = image.getHeight();
+            if (width <= 0 || height <= 0) throw new RejectedJpeg("invalid JPEG dimensions");
+            Image.Plane[] planes = image.getPlanes();
+            if (planes.length != 1) throw new RejectedJpeg("invalid JPEG planes");
+            ByteBuffer buffer = planes[0].getBuffer();
+            int bytes = buffer.remaining();
+            if (bytes <= 0 || bytes > MAX_JPEG_BYTES) {
+                throw new RejectedJpeg("JPEG byte limit (1..8MiB)");
+            }
+            jpeg = new byte[bytes];
             buffer.get(jpeg);
-            int width = image.getWidth();
-            int height = image.getHeight();
-            long elapsed = SystemClock.elapsedRealtime() - startedAtMillis;
-            if (settled) {
-                return;
-            }
-            settled = true;
-            handler.removeCallbacks(timeout);
-            release();
-            Log.i(TAG, "captured " + width + "x" + height
-                    + " " + jpeg.length + "B in " + elapsed + "ms");
-            callback.onCaptured(jpeg, width, height, elapsed);
-        } catch (RuntimeException error) {
+        } catch (RejectedJpeg error) {
+            fail(error.getMessage());
+            return;
+        } catch (RuntimeException | OutOfMemoryError error) {
+            // The Image has already closed before the reader can be released by fail().
             fail("image " + error.getClass().getSimpleName());
+            return;
         }
+        if (settled || closed) return;
+        if (!release()) {
+            fail("camera close failed");
+            return;
+        }
+        settled = true;
+        handler.removeCallbacks(timeout);
+        long elapsed = SystemClock.elapsedRealtime() - startedAtMillis;
+        Log.i(TAG, "captured " + width + "x" + height
+                + " " + jpeg.length + "B in " + elapsed + "ms gen=" + generation);
+        // The consumer may queue another allocation. No native Image/reader is held.
+        // Consumer exceptions must not re-label a delivered image as a camera failure.
+        callback.onCaptured(jpeg, width, height, elapsed);
+    }
+
+    private static final class RejectedJpeg extends RuntimeException {
+        RejectedJpeg(String reason) { super(reason); }
     }
 
     private void fail(String reason) {
@@ -231,18 +291,27 @@ final class GlassCamera {
         callback.onCaptureFailed(reason);
     }
 
-    private void release() {
-        if (session != null) {
-            session.close();
-            session = null;
-        }
-        if (device != null) {
-            device.close();
-            device = null;
-        }
-        if (reader != null) {
-            reader.close();
-            reader = null;
+    private boolean release() {
+        // Detach ownership first, then attempt every close even if one fails.
+        CameraCaptureSession oldSession = session;
+        CameraDevice oldDevice = device;
+        ImageReader oldReader = reader;
+        session = null;
+        device = null;
+        reader = null;
+        boolean ok = closeResource(oldSession);
+        ok = closeResource(oldDevice) && ok;
+        return closeResource(oldReader) && ok;
+    }
+
+    private static boolean closeResource(AutoCloseable resource) {
+        if (resource == null) return true;
+        try {
+            resource.close();
+            return true;
+        } catch (Exception | OutOfMemoryError error) {
+            Log.w(TAG, "camera close " + error.getClass().getSimpleName());
+            return false;
         }
     }
 
