@@ -39,6 +39,7 @@ final class CameraDiagnostics {
                     + " sensor_timestamp_ns=" + value(result.get(CaptureResult.SENSOR_TIMESTAMP))
                     + " exposure_ns=" + value(result.get(CaptureResult.SENSOR_EXPOSURE_TIME))
                     + " iso=" + value(result.get(CaptureResult.SENSOR_SENSITIVITY))
+                    + " focal_length_mm=" + value(result.get(CaptureResult.LENS_FOCAL_LENGTH))
                     + " aperture=" + value(result.get(CaptureResult.LENS_APERTURE))
                     + " focus_distance=" + value(result.get(CaptureResult.LENS_FOCUS_DISTANCE))
                     + " ae_state=" + value(result.get(CaptureResult.CONTROL_AE_STATE))

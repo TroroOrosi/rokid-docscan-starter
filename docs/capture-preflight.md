@@ -1,6 +1,6 @@
 # PR37 — 撮影を増やす前の確認
 
-Status: Current offline preflight runbook, 2026-09-16. 実機・光学・OCR精度の合格記録ではない。
+Status: Current offline preflight runbook, 2026-09-17. 実機・光学・OCR精度の合格記録ではない。
 
 ## 先に維持する前提
 
@@ -16,6 +16,10 @@ Runs on: 準備と保存画像の検査はWindows PC。会場の本流はグラ�
 「撮影終了」操作時は確認後に終了する旨をフッターに表示しますが、画像も確認期限も変えません。
 十字は方向の目安であり、実際の撮影範囲や紙の四隅の保証ではありません。
 新しいカメラ試験モードや自動紙面補正をグラスへ追加したわけではありません。
+
+撮影仕様の追加調査とCamera2の失敗処理・数値診断は `docs/rokid-capture-research.md`。
+保存写真の等倍切出し、OCR入力縮小率、文字の画素数、EXIFの限定抽出も同書を参照します。
+撮影再開の承認や、既存のカメラ条件・操作の変更は含みません。
 
 ## 1. 保存写真を無送信で比較する
 
@@ -99,5 +103,5 @@ Runs on: まずWindowsで原本・派生画像・自動試験を比較。実機�
 家庭Wi-FiやPC上の試験を会場経路の合格へ転記しません。
 
 残るRPタスクは `tasks/todo.md`、最新の再開入口は
-`.agents/progress/pr37-offline-remediation.md`。長時間解析の受付/進捗分離、設問階層、
+`.agents/progress/pr37-camera-research.md`。長時間解析の受付/進捗分離、設問階層、
 答案の追加取得、完全なexactly-once、自動紙面校正などは今回の完成範囲ではありません。

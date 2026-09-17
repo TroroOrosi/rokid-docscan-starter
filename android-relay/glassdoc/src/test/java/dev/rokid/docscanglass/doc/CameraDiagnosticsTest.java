@@ -43,9 +43,11 @@ public class CameraDiagnosticsTest {
         ResultShadow values = Shadow.extract(r);
         values.data.put(CaptureResult.SENSOR_EXPOSURE_TIME.getName(), 20_000_000L);
         values.data.put(CaptureResult.SENSOR_SENSITIVITY.getName(), 800);
+        values.data.put(CaptureResult.LENS_FOCAL_LENGTH.getName(), 1.9f);
         values.data.put("android.jpeg.gpsLocation", "private GPS");
         CameraDiagnostics.result(3, r);
         assertTrue(lastLog().contains("exposure_ns=20000000 iso=800"));
+        assertTrue(lastLog().contains("focal_length_mm=1.9"));
         assertTrue(lastLog().contains("af_state=unknown"));
         assertFalse(lastLog().contains("private"));
         assertFalse(lastLog().contains("gps"));

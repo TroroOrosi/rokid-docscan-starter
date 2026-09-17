@@ -134,13 +134,12 @@ public final class JapaneseOcr implements AutoCloseable {
     /**
      * Longest edge below which the decoder refuses to halve again.
      *
-     * <p>Two measurements bound this. {@code docs/hardware-measurements.md} §C-2b
-     * read a 37 px column pitch off a 1920x1080 capture of an A4 page at
-     * 40-60 cm, against ML Kit's 16 px floor, and called 24 px the point
-     * beyond which more resolution stops helping. The same page at 4032 px
-     * therefore carries roughly 78 px per character, so halving it to 2016
-     * leaves about 39 px, while quartering it would land near 19 px: above
-     * the floor, but below where resolution still pays.</p>
+     * <p>This is an existing memory policy, not a guarantee of readable glyphs.
+     * ML Kit recommends roughly 16x16 pixels for each actual character; a
+     * measured line/column pitch is not a character's width or height. At
+     * 4032x3024 the sample is 2 (2016x1512 before rotation), but the retained
+     * glyph dimensions must be measured on the source photo. The PC saved-photo
+     * preflight reports this separately from the smaller HUD preview.</p>
      *
      * <p>The reason to subsample at all is memory. 4032x3024 decoded whole
      * needs about 48 MB, and the glasses run with {@code ro.config.low_ram},
@@ -173,8 +172,8 @@ public final class JapaneseOcr implements AutoCloseable {
         BitmapFactory.Options options = new BitmapFactory.Options();
         options.inSampleSize =
                 sampleSizeFor(Math.max(bounds.outWidth, bounds.outHeight));
-        // Recognition is on glyph shape and the HUD is monochrome green
-        // regardless, so 16-bit colour halves the bitmap again for nothing.
+        // Preserve the existing RGB565 memory budget. Its optical/OCR impact
+        // must be evaluated on real saved photos, not inferred from HUD colour.
         options.inPreferredConfig = Bitmap.Config.RGB_565;
         return BitmapFactory.decodeByteArray(
                 encodedImage, 0, encodedImage.length, options);

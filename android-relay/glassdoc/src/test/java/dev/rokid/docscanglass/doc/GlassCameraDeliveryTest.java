@@ -29,7 +29,8 @@ import org.robolectric.util.ReflectionHelpers.ClassParameter;
 
 /** Exercises the real delivery/lifetime code with fake HAL buffers, not a camera. */
 @RunWith(RobolectricTestRunner.class)
-@Config(sdk = 32, manifest = Config.NONE, shadows = GlassCameraDeliveryTest.ReaderShadow.class)
+@Config(sdk = 32, manifest = Config.NONE,
+        shadows = {GlassCameraDeliveryTest.ReaderShadow.class, GlassCameraDeliveryTest.FailureShadow.class})
 public class GlassCameraDeliveryTest {
     private final List<String> events = new ArrayList<>();
     private final List<String> failures = new ArrayList<>();
@@ -74,11 +75,9 @@ public class GlassCameraDeliveryTest {
         }
     }
     private static CaptureFailure failure(boolean imageCaptured) {
-        return ReflectionHelpers.callConstructor(CaptureFailure.class,
-                ClassParameter.from(CaptureRequest.class, null),
-                ClassParameter.from(int.class, CaptureFailure.REASON_ERROR),
-                ClassParameter.from(boolean.class, imageCaptured),
-                ClassParameter.from(int.class, 1), ClassParameter.from(long.class, 1L));
+        CaptureFailure failure = Shadow.newInstanceOf(CaptureFailure.class);
+        ((FailureShadow) Shadow.extract(failure)).imageCaptured = imageCaptured;
+        return failure;
     }
     @Test public void imageIsClosedBeforeReaderAndConsumer() {
         deliver();
@@ -171,6 +170,13 @@ public class GlassCameraDeliveryTest {
         assertEquals(List.of("CAMERA TIMEOUT"), failures);
     }
 
+
+    @Implements(CaptureFailure.class)
+    public static class FailureShadow {
+        boolean imageCaptured;
+        @Implementation protected boolean wasImageCaptured() { return imageCaptured; }
+        @Implementation protected int getReason() { return CaptureFailure.REASON_ERROR; }
+    }
 
     @Implements(ImageReader.class)
     public static class ReaderShadow {

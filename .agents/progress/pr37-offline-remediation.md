@@ -1,5 +1,8 @@
 # PR37 — offline remediation restart point
 
+2026-09-17追記: 最新の撮影仕様調査・配送修正・診断の入口は
+`.agents/progress/pr37-camera-research.md`。本記録の停止条件は継続する。
+
 Status: Current continuation entry, 2026-09-16. Start here, then read the previous records in full.
 
 ## Authority and baseline

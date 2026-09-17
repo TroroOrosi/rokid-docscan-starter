@@ -66,8 +66,10 @@ android {
         // `:glassinput` gestures routed through CaptureActionRouter.
         // 14 bounds preview ownership and avoids duplicate saved-photo buffers.
         // Review end feedback never changes the visible-frame clock or capture policy.
-        versionCode = 14
-        versionName = "0.13.0"
+        // 15 handles Camera2 delivery failures and records numeric diagnostics.
+        // Capture settings and physical acceptance gates remain unchanged.
+        versionCode = 15
+        versionName = "0.14.0"
     }
 
     // Same reasoning as `:glassapp`: a vendor installer that reads JAR

@@ -1,6 +1,6 @@
 # Documentation index and authority
 
-Status: Current documentation map. Updated 2026-09-16.
+Status: Current documentation map. Updated 2026-09-17.
 
 Separate the intended requirement from evidence of what works:
 
@@ -29,6 +29,8 @@ metadata or a working Git command, the gate includes all Markdown rather than
 silently applying that exception. `.agents/progress/` remains in scope.
 
 ## Current contracts and runbooks
+
+- `docs/rokid-capture-research.md` — Rokid公式仕様・Camera2/OCRの境界、保存写真の細部診断、停止解除後の限定確認。
 
 - `docs/capture-preflight.md` — PR37の撮影再開前チェック。保存写真の無送信検査、原本保全、制限ヒープ試験。
 
@@ -96,7 +98,9 @@ what the platform permits.
 
 ## Internal progress records
 
-- `.agents/progress/pr37-offline-remediation.md` — **PR37の再開入口として最初に読む。** 追加修正と停止条件。続いて既存2記録の全文を読む。
+- `.agents/progress/pr37-camera-research.md` — **PR37の最新の再開入口。** 撮影仕様調査、配送・診断修正、検証の範囲。追加撮影は停止のまま。
+
+- `.agents/progress/pr37-offline-remediation.md` — **新しいcamera-research記録の後に読む。** 追加修正と停止条件。続いて既存2記録の全文を読む。
 
 - `.agents/progress/pr37-predevice-handoff.md` — PR37の実機前修正、検証範囲、Windows Codexへの引き継ぎと未実装の対応表。
 
