@@ -90,3 +90,85 @@ def test_audio_api_preserves_page_clock_original_and_transcript(tmp_path, monkey
         from pathlib import Path
         Path(session["audio_path"]).write_bytes(wav(16000, b"\x02\x00"))
         assert main._answer_input_digest(conn, session) != first_digest
+
+
+@pytest.fixture
+def saved_audio(tmp_path, monkeypatch):
+    monkeypatch.setattr(listening.config, "AUDIO_DIR", tmp_path)
+    monkeypatch.setattr(listening, "transcribe_chunk", lambda path, **kw: {
+        "segments": [], "samples": listening.wav_samples(path),
+        "asr_seconds": 0, "real_time_factor": 0,
+    })
+    return tmp_path
+
+
+@pytest.mark.parametrize("later_sequence", [2, 599])
+def test_completion_rejects_nonadjacent_retained_audio(saved_audio, later_sequence):
+    """An out-of-order later chunk must not be silently excluded by a short stop."""
+    first = wav(16000)
+    listening.store_chunk(1, 0, 0, 1000, first)
+    start = later_sequence * listening.CHUNK_SAMPLES - listening.OVERLAP_SAMPLES
+    listening.store_chunk(1, later_sequence, start, 1000 + start // 16, wav(32000))
+    directory = listening.folder(1)
+    originals = {path.name: path.read_bytes() for path in directory.iterdir()}
+    with pytest.raises(ValueError, match="omit"):
+        listening.complete_recording(1, 1, 16000)
+    assert {path.name: path.read_bytes() for path in directory.iterdir()} == originals
+    assert not (directory / "complete.json").exists()
+    assert not (directory / "original.wav").exists()
+
+
+def test_chunk_retry_does_not_acknowledge_missing_original(saved_audio, monkeypatch):
+    raw = wav(16000)
+    listening.store_chunk(1, 0, 0, 1000, raw)
+    directory = listening.folder(1)
+    metadata = (directory / "0000.json").read_bytes()
+    (directory / "0000.wav").unlink()  # e.g. a partial restore from backup
+    monkeypatch.setattr(listening, "transcribe_chunk", lambda *a, **kw: pytest.fail("unexpected ASR"))
+    with pytest.raises(ValueError, match="integrity|original"):
+        listening.store_chunk(1, 0, 0, 1000, raw)
+    assert (directory / "0000.json").read_bytes() == metadata
+    assert not (directory / "0000.wav").exists()  # fail closed, do not silently rewrite evidence
+
+
+@pytest.mark.parametrize("key, value", [
+    ("sha256", "0" * 64), ("sequence", 1), ("start_sample", 42), ("samples", 1),
+])
+def test_chunk_retry_rejects_inconsistent_metadata(saved_audio, key, value):
+    import json
+
+    raw = wav(16000)
+    listening.store_chunk(1, 0, 0, 1000, raw)
+    path = listening.folder(1) / "0000.json"
+    metadata = json.loads(path.read_text(encoding="utf-8"))
+    metadata[key] = value
+    path.write_text(json.dumps(metadata), encoding="utf-8")
+    before = path.read_bytes()
+    with pytest.raises(ValueError, match="integrity|identity"):
+        listening.store_chunk(1, 0, 0, 1000, raw)
+    assert (listening.folder(1) / "0000.wav").read_bytes() == raw
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("retained_suffix", [".wav", ".json"])
+def test_completion_rejects_an_orphan_later_original_or_metadata(saved_audio, retained_suffix):
+    listening.store_chunk(1, 0, 0, 1000, wav(16000))
+    directory = listening.folder(1)
+    later = directory / ("0002" + retained_suffix)
+    later.write_bytes(wav(16000) if retained_suffix == ".wav" else b"{}")
+    before = {path.name: path.read_bytes() for path in directory.iterdir()}
+    with pytest.raises(ValueError, match="omit"):
+        listening.complete_recording(1, 1, 16000)
+    assert {path.name: path.read_bytes() for path in directory.iterdir()} == before
+
+
+def test_valid_out_of_order_chunks_complete_without_losing_or_duplicating_overlap(saved_audio):
+    # Upload the short tail before the first full 30-second chunk.
+    tail = wav(32000, b"\x02\x00")
+    row = listening.store_chunk(1, 1, 464000, 30000, tail)
+    listening.store_chunk(1, 0, 0, 1000, wav(480000))
+    completed = listening.complete_recording(1, 2, 496000)
+    with wave.open(completed["audio_path"], "rb") as original:
+        assert original.readframes(496001) == b"\x01\x00" * 480000 + b"\x02\x00" * 16000
+    assert listening.store_chunk(1, 1, 464000, 30000, tail) == row
+    assert listening.complete_recording(1, 2, 496000) == completed

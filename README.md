@@ -110,7 +110,7 @@ risk があります。**利用者の判断で選択した経路です（詳細�
 CXR-L の実装境界は
 [CXR-L / Global Hi Rokid integration](docs/cxr-l-integration.md)です。
 
-現在のバージョン: **Server APP 0.35.0 / API 1.22.0 / Android client 0.3.17 / Glasses View 1.17.0 / Solver API 1.7.1**。
+現在のバージョン: **Server APP 0.35.1 / API 1.22.0 / Android client 0.3.17 / Glasses View 1.17.1 / Solver API 1.7.1**。
 版数の正本は `app/version.py` です。他の資料は版数を書かず、この行だけが
 `tests/test_documentation_contract.py` で実装と照合されます。
 Solver API は、記入用解答の全文保持・資料不足の分離を行う `answer_only` モードを含みます。
@@ -153,7 +153,7 @@ rokid-docscan-starter/
 │   ├── provider_registry.py # 4ポート共通のアダプタ登録・選択
 │   ├── page_pdf.py    # 撮影ページを1つのPDFへ束ねる（chatgpt-web の一括添付用）
 │   ├── audio_formats.py # 音声MIME・保存suffix・provider対応の共通定義
-│   ├── version.py     # 各契約バージョン（app 0.28.0 / api 1.19.0 / glasses 1.11.0 ほか）
+│   ├── version.py     # 各契約バージョンの正本（上記の版数一覧と連動）
 │   ├── config.py      # 保存先・フィーチャーフラグ（ROKID_* / ANTHROPIC_API_KEY / ROKID_TRANSCRIBER）
 │   ├── transcribe.py  # ★リスニング録音の書き起こし（openai/gemini・未設定時は与値）
 │   ├── db.py          # sqlite3（documents/pages/exam/explain テーブル）

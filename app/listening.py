@@ -33,8 +33,19 @@ def store_chunk(document_id, sequence, start_sample, captured_at_ms, raw):
         if path.exists() and hashlib.sha256(path.read_bytes()).hexdigest() != digest:
             raise ValueError("recording chunk identity conflict; original retained")
         if meta_path.exists():
-            metadata = json.loads(meta_path.read_text(encoding="utf-8"))
-            if metadata["captured_at_ms"] != captured_at_ms:
+            try:
+                metadata = json.loads(meta_path.read_text(encoding="utf-8"))
+                # A metadata-only restore is not proof that the original is
+                # retained. Never ACK it or silently rewrite the evidence.
+                if (not path.is_file() or not isinstance(metadata, dict)
+                        or metadata.get("sha256") != digest
+                        or metadata.get("sequence") != sequence
+                        or metadata.get("start_sample") != start_sample
+                        or metadata.get("samples") != wav_samples(path)):
+                    raise ValueError("inconsistent recording metadata")
+            except (OSError, ValueError, wave.Error, EOFError):
+                raise ValueError("recording chunk integrity check failed; original retained") from None
+            if metadata.get("captured_at_ms") != captured_at_ms:
                 raise ValueError("recording clock identity conflict")
             return metadata
         if (directory / "complete.json").exists():
@@ -89,8 +100,14 @@ def complete_recording(document_id, expected_chunks, total_samples):
             if expected <= 0 or row["samples"] != expected:
                 raise ValueError("recording has a sample gap or truncated chunk")
             rows.append(row)
-        if (directory / f"{expected_chunks:04d}.wav").exists():
-            raise ValueError("recording completion would omit a chunk")
+        # Uploads may arrive out of order. Checking only the immediately next
+        # number would silently finalize a prefix while a later original (or
+        # its metadata) still belongs to this recording.
+        for retained in directory.iterdir():
+            if (retained.suffix in (".wav", ".json") and len(retained.stem) == 4
+                    and retained.stem.isascii() and retained.stem.isdigit()
+                    and int(retained.stem) >= expected_chunks):
+                raise ValueError("recording completion would omit a chunk")
         output = directory / "original.wav"
         pending = directory / "original.pending"
         with wave.open(str(pending), "wb") as target:

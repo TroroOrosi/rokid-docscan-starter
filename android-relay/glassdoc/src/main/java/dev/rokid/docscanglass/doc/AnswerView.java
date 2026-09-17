@@ -71,6 +71,12 @@ final class AnswerView extends View {
         invalidate();
     }
 
+    /** Failure stays in the index row; the answer text and position stay visible. */
+    void announceSaveFailure() {
+        index = "終了の保存失敗・再操作";
+        invalidate();
+    }
+
     /** Re-reads the reader after the host moved it. */
     void refresh() {
         if (reader == null) {

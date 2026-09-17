@@ -303,3 +303,40 @@ def test_uncertain_browser_send_stops_batch_before_other_questions(client, monke
     assert body["items"][0]["status"] == "failed"
     assert "再送" in body["items"][0]["issue"]
     assert any(item["status"] == "pending" for item in body["items"][1:])
+
+
+def test_bundle_keeps_items_and_revision_in_one_snapshot(client, monkeypatch):
+    """Concurrent committed answers cannot lend their revision to older items.
+
+    WAL is enabled only in this fixture to commit deterministically while the
+    read is paused, without timing assumptions or changing production settings.
+    """
+    from app import db, main
+
+    _, session_id = _session_with(client, [PAGE])
+    client.post(f"/v1/exam-sessions/{session_id}/finalize-reading")
+    url = f"/v1/exam-sessions/{session_id}/answer-bundle"
+    before = client.get(url).json()
+    question_id = int(before["items"][0]["question_id"][1:])
+    with db.connect() as conn:
+        assert conn.execute("PRAGMA journal_mode=WAL").fetchone()[0] == "wal"
+    original_revision = main._answer_revision
+    inserted = False
+
+    def publish_answer_during_snapshot(conn, selected_session):
+        nonlocal inserted
+        if not inserted:
+            inserted = True
+            with db.connect() as writer:
+                writer.execute("INSERT INTO solutions(question_id, answer) VALUES (?, ?)",
+                               (question_id, "new concurrent answer"))
+        return original_revision(conn, selected_session)
+
+    monkeypatch.setattr(main, "_answer_revision", publish_answer_during_snapshot)
+    during = client.get(url).json()
+    after = client.get(url).json()
+    assert inserted
+    assert during == before
+    assert after["items"][0]["answer"] == "new concurrent answer"
+    assert after["revision"] > during["revision"]
+    assert after["input_digest"] == during["input_digest"]

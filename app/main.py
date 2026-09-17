@@ -3225,6 +3225,10 @@ def exam_answer_bundle(session_id: int) -> dict:
     """
     conn = db.connect()
     try:
+        # Multiple SELECTs form one wire snapshot. A concurrent answer commit
+        # must not attach a newer revision to items read before that commit.
+        # This is a read transaction, not a schema/journal-mode change.
+        conn.execute("BEGIN")
         session = _exam_session_or_404(conn, session_id)
         if _session_phase(session) == "reading":
             raise HTTPException(status_code=409, detail="call finalize-reading first")

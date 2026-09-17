@@ -8,7 +8,8 @@ plugins {
 // `RG-glasses` build 1.25.012-20260901-150201: camera2 opens and returns
 // 4032x3024 JPEGs in 785-1380 ms, the glasses reach the server on their own
 // Wi-Fi, a sideloaded app is launcher-visible, and KEYCODE_BACK is consumable.
-// So the phone is not in the data path at all.
+// The frozen CXR-L relay is not in this capture path. In the current venue
+// route the phone still hosts the hotspot, API server and browser.
 //
 // Unlike `:glassprobe`, this one carries dependencies, and deliberately the
 // same two the phone relay uses: the bundled Japanese ML Kit recognizer and
@@ -68,8 +69,8 @@ android {
         // Review end feedback never changes the visible-frame clock or capture policy.
         // 15 handles Camera2 delivery failures and records numeric diagnostics.
         // Capture settings and physical acceptance gates remain unchanged.
-        versionCode = 15
-        versionName = "0.14.0"
+        versionCode = 16
+        versionName = "0.14.1"
     }
 
     // Same reasoning as `:glassapp`: a vendor installer that reads JAR
