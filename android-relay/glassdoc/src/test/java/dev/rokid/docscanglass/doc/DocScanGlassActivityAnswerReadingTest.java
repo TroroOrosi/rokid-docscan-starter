@@ -142,6 +142,8 @@ public class DocScanGlassActivityAnswerReadingTest {
 
     @Test
     public void delayedBackEventsKeepTheirOriginalConfirmationInterval() throws Exception {
+        // Production opens the reader only after its initial snapshot is durable.
+        new AnswerStore(filesDir).start(bundleForSession(SESSION_ID));
         invokeOpenAnswers(bundleForSession(SESSION_ID), "q10", 0);
         invokeOnAction(GlassesInputAction.BACK, 1000);
         invokeOnAction(GlassesInputAction.BACK, 5000);

@@ -1,5 +1,6 @@
 package dev.rokid.docscanglass.doc;
 
+import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
@@ -58,6 +59,9 @@ public class AnswerExitPersistenceFailureTest {
         invoke("closeAnswers");
         assertNotNull("a failed CLOSED write must not release the reader", get("reader"));
         assertFalse(original.load().closed);
+        Field notice = AnswerView.class.getDeclaredField("index");
+        notice.setAccessible(true);
+        assertEquals("終了の保存失敗・再操作", notice.get(get("answers")));
         set("answerStore", original);
         invoke("closeAnswers");
         assertNull(get("reader"));

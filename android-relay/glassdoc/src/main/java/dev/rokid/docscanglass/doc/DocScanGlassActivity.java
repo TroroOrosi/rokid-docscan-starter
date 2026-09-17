@@ -300,8 +300,8 @@ public final class DocScanGlassActivity extends Activity
                 hud.showLines(List.of("終了を保存できません", "原本は保持しています", "もう一度操作してください"));
                 return;
             }
+            if (reader != null && !closeAnswers()) return;
             sessionClosed = true;
-            if (reader != null) closeAnswers();
             releaseAnalysisWakeLock();
             Log.i(TAG, "exit confirmed");
             if (displaySleep.sleep(this) == DisplaySleep.Result.NOT_PERMITTED) {
@@ -883,11 +883,18 @@ public final class DocScanGlassActivity extends Activity
         setContentView(answers);
     }
 
-    private void closeAnswers() {
-        persistAnswerPosition(true);
+    private boolean closeAnswers() {
+        if (!persistAnswerPosition(true)) {
+            // A failed durable CLOSED write is not an exit. Keep the answer
+            // and the same input route so the operator can retry explicitly.
+            backExit.reset();
+            if (answers != null) answers.announceSaveFailure();
+            return false;
+        }
         reader = null;
         answers = null;
         setContentView(hud);
+        return true;
     }
 
     private void waitWithDisplayOff() {
@@ -927,30 +934,38 @@ public final class DocScanGlassActivity extends Activity
      * and this method blocks on it (only for CLOSED) so the latch is
      * durable before {@code closeAnswers} swaps the screen back to the HUD.
      */
-    private void persistAnswerPosition(boolean closed) {
+    private boolean persistAnswerPosition(boolean closed) {
         if (reader == null) {
-            return;
+            return true;
         }
         AnswerBundle bundle = reader.bundle();
         String questionId = reader.current().questionId;
         int offset = reader.offset();
-        Future<?> queued = answerPersistExecutor.submit(
+        Future<Boolean> queued = answerPersistExecutor.submit(
                 () -> writeAnswerPosition(bundle, questionId, offset, closed));
         if (closed) {
             try {
-                queued.get();
-            } catch (InterruptedException | ExecutionException error) {
+                return queued.get();
+            } catch (InterruptedException error) {
+                Thread.currentThread().interrupt();
+                Log.w(TAG, "answer position save interrupted", error);
+                return false;
+            } catch (ExecutionException error) {
                 Log.w(TAG, "answer position not saved", error);
+                return false;
             }
         }
+        return true; // ordinary position accepted by the queue, not yet durable
     }
 
-    private void writeAnswerPosition(
+    private boolean writeAnswerPosition(
             AnswerBundle bundle, String questionId, int offset, boolean closed) {
         try {
             answerStore.save(bundle, questionId, offset, closed);
+            return true;
         } catch (IOException error) {
             Log.w(TAG, "answer position not saved", error);
+            return false;
         }
     }
 }

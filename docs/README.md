@@ -98,7 +98,9 @@ what the platform permits.
 
 ## Internal progress records
 
-- `.agents/progress/pr37-camera-research.md` — **PR37の最新の再開入口。** 撮影仕様調査、配送・診断修正、検証の範囲。追加撮影は停止のまま。
+- `.agents/progress/pr37-objective-review.md` — **PR37の最新のレビュー・再開入口。** 整合性・録音・終了保存の回帰修正、客観的な未解決事項。実機停止は維持。
+
+- `.agents/progress/pr37-camera-research.md` — **objective-reviewの次に読む。** 撮影仕様調査、配送・診断修正、検証の範囲。追加撮影は停止のまま。
 
 - `.agents/progress/pr37-offline-remediation.md` — **新しいcamera-research記録の後に読む。** 追加修正と停止条件。続いて既存2記録の全文を読む。
 
