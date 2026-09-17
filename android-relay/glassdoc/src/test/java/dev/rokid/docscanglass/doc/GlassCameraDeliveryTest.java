@@ -6,6 +6,7 @@ import android.hardware.camera2.CameraCaptureSession;
 import android.hardware.camera2.CaptureFailure;
 import android.hardware.camera2.CaptureRequest;
 import android.media.Image;
+import android.media.DocScanTestImage;
 import android.media.ImageReader;
 import android.os.Handler;
 import android.os.Looper;
@@ -34,6 +35,9 @@ public class GlassCameraDeliveryTest {
     private ImageReader reader;
     private ReaderShadow readerShadow;
     private int delivered;
+    private byte[] deliveredBytes;
+    private int deliveredWidth;
+    private int deliveredHeight;
 
     @Before public void setup() {
         camera = new GlassCamera(RuntimeEnvironment.getApplication(),
@@ -41,16 +45,16 @@ public class GlassCameraDeliveryTest {
                     @Override public void onCaptured(byte[] bytes, int width, int height, long elapsed) {
                         events.add("delivered");
                         delivered++;
-                        assertArrayEquals(new byte[]{1, 2, 3}, bytes);
-                        assertEquals(4032, width);
-                        assertEquals(3024, height);
+                        deliveredBytes = bytes;
+                        deliveredWidth = width;
+                        deliveredHeight = height;
                     }
                     @Override public void onCaptureFailed(String reason) { failures.add(reason); }
                 });
         reader = Shadow.newInstanceOf(ImageReader.class);
         readerShadow = Shadow.extract(reader);
         readerShadow.events = events;
-        readerShadow.image = new TestImage(events);
+        readerShadow.image = new DocScanTestImage(events);
         ReflectionHelpers.setField(camera, "reader", reader);
         ReflectionHelpers.setField(camera, "generation", 1L);
     }
@@ -78,10 +82,13 @@ public class GlassCameraDeliveryTest {
         deliver();
         assertEquals(List.of("image.close", "reader.close", "delivered"), events);
         assertEquals(1, delivered);
+        assertArrayEquals(new byte[]{1, 2, 3}, deliveredBytes);
+        assertEquals(4032, deliveredWidth);
+        assertEquals(3024, deliveredHeight);
         assertTrue(failures.isEmpty());
     }
     @Test public void bufferAboveExistingReviewLimitIsRejectedBeforeCopy() {
-        ((TestImage) readerShadow.image).buffer = ByteBuffer.allocate(8 * 1024 * 1024 + 1);
+        ((DocScanTestImage) readerShadow.image).buffer = ByteBuffer.allocate(8 * 1024 * 1024 + 1);
         deliver();
         assertEquals(0, delivered);
         assertEquals(1, failures.size());
@@ -89,19 +96,19 @@ public class GlassCameraDeliveryTest {
         assertEquals(List.of("image.close", "reader.close"), events);
     }
     @Test public void emptyBufferIsNotAValidPhotograph() {
-        ((TestImage) readerShadow.image).buffer = ByteBuffer.allocate(0);
+        ((DocScanTestImage) readerShadow.image).buffer = ByteBuffer.allocate(0);
         deliver();
         assertEquals(0, delivered);
         assertEquals(1, failures.size());
     }
     @Test public void nonJpegImageIsNotForwardedAsJpeg() {
-        ((TestImage) readerShadow.image).format = ImageFormat.YUV_420_888;
+        ((DocScanTestImage) readerShadow.image).format = ImageFormat.YUV_420_888;
         deliver();
         assertEquals(0, delivered);
         assertEquals(1, failures.size());
     }
     @Test public void memoryFailureClosesTheImageAndSettlesOnce() {
-        ((TestImage) readerShadow.image).memoryFailure = true;
+        ((DocScanTestImage) readerShadow.image).memoryFailure = true;
         deliver();
         assertEquals(0, delivered);
         assertEquals(1, failures.size());
@@ -165,27 +172,6 @@ public class GlassCameraDeliveryTest {
         @Implementation protected void close() {
             events.add("reader.close");
             if (throwOnClose) throw new IllegalStateException("synthetic close failure");
-        }
-    }
-    private static final class TestImage extends Image {
-        final List<String> events;
-        ByteBuffer buffer = ByteBuffer.wrap(new byte[]{1, 2, 3});
-        int format = ImageFormat.JPEG;
-        boolean memoryFailure;
-        TestImage(List<String> events) { this.events = events; }
-        @Override public int getFormat() { return format; }
-        @Override public int getWidth() { return 4032; }
-        @Override public int getHeight() { return 3024; }
-        @Override public long getTimestamp() { return 10L; }
-        @Override public void setTimestamp(long timestamp) { }
-        @Override public void close() { events.add("image.close"); }
-        @Override public Plane[] getPlanes() {
-            if (memoryFailure) throw new OutOfMemoryError("synthetic allocation failure");
-            return new Plane[]{new Plane() {
-                @Override public int getRowStride() { return 0; }
-                @Override public int getPixelStride() { return 0; }
-                @Override public ByteBuffer getBuffer() { return buffer; }
-            }};
         }
     }
 }
