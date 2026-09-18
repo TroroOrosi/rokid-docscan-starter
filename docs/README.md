@@ -1,6 +1,6 @@
 # Documentation index and authority
 
-Status: Current documentation map. Updated 2026-09-17.
+Status: Current documentation map. Updated 2026-09-18.
 
 Separate the intended requirement from evidence of what works:
 
@@ -29,6 +29,8 @@ metadata or a working Git command, the gate includes all Markdown rather than
 silently applying that exception. `.agents/progress/` remains in scope.
 
 ## Current contracts and runbooks
+
+- `docs/capture-geometry.md` — PC用の単ページ角度補正・鮮鋭度診断部品。前回統合差分の一部のみで、本流未接続。
 
 - `docs/rokid-capture-research.md` — Rokid公式仕様・Camera2/OCRの境界、保存写真の細部診断、停止解除後の限定確認。
 
