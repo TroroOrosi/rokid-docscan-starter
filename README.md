@@ -1,6 +1,10 @@
 # Rokid DocScan（入試問題を撮影して解答するサーバ）
 
-Status: Current project entrypoint. Updated 2026-09-16.
+Status: Current project entrypoint. Updated 2026-09-22.
+
+撮影後のグラス表示は**構図確認のみ**です。無操作で保存しても画質は未検証です。
+保存写真の [原寸点検・補正候補・登録条件評価](docs/capture-quality.md) はPC用部品で、
+撮影・正式登録本流の品質ゲートは未接続です。既存の実機試験停止は継続しています。
 
 ## このリポジトリの目的
 
@@ -110,7 +114,7 @@ risk があります。**利用者の判断で選択した経路です（詳細�
 CXR-L の実装境界は
 [CXR-L / Global Hi Rokid integration](docs/cxr-l-integration.md)です。
 
-現在のバージョン: **Server APP 0.35.1 / API 1.22.0 / Android client 0.3.17 / Glasses View 1.17.1 / Solver API 1.7.1**。
+現在のバージョン: **Server APP 0.35.2 / API 1.22.0 / Android client 0.3.17 / Glasses View 1.17.2 / Solver API 1.7.1**。
 版数の正本は `app/version.py` です。他の資料は版数を書かず、この行だけが
 `tests/test_documentation_contract.py` で実装と照合されます。
 Solver API は、記入用解答の全文保持・資料不足の分離を行う `answer_only` モードを含みます。

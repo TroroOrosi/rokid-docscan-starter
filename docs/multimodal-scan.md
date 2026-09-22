@@ -3,6 +3,10 @@
 Status: Current runbook for the implemented standalone route. APK導入とスマホ内ASRを実測済み。会場経路の受け入れは未実施。
 Runs on: glassdoc → スマホAP → スマホFastAPI → スマホChrome CDP → ChatGPT Web。
 
+現在のレビューは「構図確認のみ」「無操作で保存・画質未検証」です。
+文字枠が内側にあることは紙面全体の合格ではありません。原寸点検と登録条件評価は
+[PC用の品質部品](capture-quality.md) で、本流の品質ゲートは未接続です。3秒の可視確認・入力割当は維持します。
+
 ## 現在の制限と計画の区別
 
 以下は開発中の現ソースの説明です。新しいAPKでの物理受け入れはまだ行っていません。

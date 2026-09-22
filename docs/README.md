@@ -1,6 +1,6 @@
 # Documentation index and authority
 
-Status: Current documentation map. Updated 2026-09-18.
+Status: Current documentation map. Updated 2026-09-22.
 
 Separate the intended requirement from evidence of what works:
 
@@ -30,7 +30,9 @@ silently applying that exception. `.agents/progress/` remains in scope.
 
 ## Current contracts and runbooks
 
-- `docs/capture-geometry.md` — PC用の単ページ角度補正・鮮鋭度診断部品。前回統合差分の一部のみで、本流未接続。
+- `docs/capture-quality.md` — PC用の原寸点検・補正候補・登録条件・方式比較。本流の品質ゲートは未接続。
+
+- `docs/capture-geometry.md` — PC用の単ページ角度補正・鮮鋭度診断部品。capture-qualityから再利用する既存部品。本流未接続。
 
 - `docs/rokid-capture-research.md` — Rokid公式仕様・Camera2/OCRの境界、保存写真の細部診断、停止解除後の限定確認。
 
@@ -100,7 +102,9 @@ what the platform permits.
 
 ## Internal progress records
 
-- `.agents/progress/pr37-objective-review.md` — **PR37の最新のレビュー・再開入口。** 整合性・録音・終了保存の回帰修正、客観的な未解決事項。実機停止は維持。
+- `.agents/progress/pr37-capture-quality.md` — **PR37の再開入口。** 撮影品質要件の31件対応表、今回の検証と本流未接続の残作業。
+
+- `.agents/progress/pr37-objective-review.md` — **2026-09-17時点のレビュー。** 整合性・録音・終了保存の回帰修正、客観的な未解決事項。実機停止は維持。
 
 - `.agents/progress/pr37-camera-research.md` — **objective-reviewの次に読む。** 撮影仕様調査、配送・診断修正、検証の範囲。追加撮影は停止のまま。
 

@@ -5,23 +5,11 @@ import java.util.Locale;
 import java.util.Set;
 
 /**
- * Judges whether the photographed page is wholly inside the frame.
+ * Recognised-text border evidence, not physical paper or content completeness.
  *
- * <p>The glasses have no live preview and their display FOV is not the camera
- * FOV, so an operator who believes the page is centred can still cut a column
- * off. The recogniser already reports where every text line sits, and text that
- * runs into the border of the image is text that continues outside it. That is
- * the signal used here: a line whose box reaches the edge band means the page
- * was clipped on that side.</p>
- *
- * <p>ponytail: text-to-border contact is a proxy for the paper outline. It
- * cannot see a blank margin that was cut off, and it warns on a page that
- * legitimately fills the frame. Detecting the sheet itself needs edge
- * detection; add that only if real pages start failing this in both
- * directions.</p>
- *
- * <p>Kept free of ML Kit and Android types so the arithmetic is testable
- * without a device; {@link JapaneseOcr} feeds the boxes in.</p>
+ * <p>ponytail: text boxes cannot see unrecognised text, diagrams or a lost blank
+ * margin. A separately calibrated paper/content detector is needed for admission.</p>
+ * Kept free of Android/ML Kit types; JapaneseOcr feeds the boxes in.
  */
 public final class PageFraming {
     /** Fraction of each dimension treated as the border band. */
@@ -33,10 +21,10 @@ public final class PageFraming {
     public enum Verdict {
         /** No text was located, so framing cannot be judged from text at all. */
         NO_TEXT,
-        /** Text reaches at least one border: the page continues outside. */
+        /** Text reaches a border: clipping is suspected, not proved. */
         CLIPPED,
-        /** Every located line sits inside the border band. */
-        COMPLETE,
+        /** Located text is inside the border; unrecognised content is unknown. */
+        TEXT_BOUNDS_ONLY,
         /** Restored from an older record that predates this check. */
         UNKNOWN
     }
@@ -96,8 +84,8 @@ public final class PageFraming {
     /** One HUD-sized line, no wider than the three-line contract allows. */
     public String describe() {
         switch (verdict) {
-            case COMPLETE:
-                return "全体が入っています";
+            case TEXT_BOUNDS_ONLY:
+                return "文字枠のみ・紙面未確認";
             case CLIPPED:
                 return describeClippedSides() + "が切れています";
             case NO_TEXT:
@@ -151,7 +139,7 @@ public final class PageFraming {
         String name = sidesAt < 0 ? head : head.substring(0, sidesAt);
         Verdict verdict;
         try {
-            verdict = Verdict.valueOf(name);
+            verdict = "COMPLETE".equals(name) ? Verdict.TEXT_BOUNDS_ONLY : Verdict.valueOf(name);
         } catch (IllegalArgumentException ignored) {
             return UNKNOWN;
         }
@@ -232,7 +220,7 @@ public final class PageFraming {
                         Verdict.CLIPPED, EnumSet.copyOf(clippedSides), lineCount);
             }
             return new PageFraming(
-                    Verdict.COMPLETE, EnumSet.noneOf(Side.class), lineCount);
+                    Verdict.TEXT_BOUNDS_ONLY, EnumSet.noneOf(Side.class), lineCount);
         }
     }
 }

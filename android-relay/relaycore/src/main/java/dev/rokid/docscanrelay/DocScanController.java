@@ -2320,32 +2320,13 @@ public final class DocScanController implements AutoCloseable {
                 diagnostic);
     }
 
-    /**
-     * First HUD line of the review.
-     *
-     * <p>Only a page the check actually vouched for may be called 合格. An
-     * unjudgeable frame said "合格 判定情報なし" on hardware, which claims a
-     * pass and denies one in the same breath.</p>
-     */
+    /** OCR bounds can warn about clipping but never certify the whole page. */
     static String reviewHeadline(int pageNumber, PageFraming framing) {
-        String verdict;
-        switch (framing.verdict()) {
-            case COMPLETE:
-                verdict = "合格 ";
-                break;
-            case CLIPPED:
-                verdict = "不合格 ";
-                break;
-            default:
-                // describe() already states that it could not be judged.
-                verdict = "";
-                break;
-        }
-        return "P" + pageNumber + " " + verdict + framing.describe();
+        return "P" + pageNumber + " " + (framing.isFailing() ? "不合格 " : "") + framing.describe();
     }
 
     static long autoCommitDelayMillis(CaptureReviewStore.Pending pending) {
-        return pending.framing.verdict() == PageFraming.Verdict.COMPLETE
+        return pending.framing.verdict() == PageFraming.Verdict.TEXT_BOUNDS_ONLY
                 ? AUTO_COMMIT_COMPLETE_MILLIS
                 : AUTO_COMMIT_UNVERIFIED_MILLIS;
     }

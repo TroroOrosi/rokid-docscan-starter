@@ -5,6 +5,11 @@ Status: Current phone-controlled fallback workflow. Updated 2026-09-15.
 本流glassdocの自動/手動撮影・図・録音/ASRは[multimodal-scan.md](multimodal-scan.md)を参照。
 以下は凍結したphone relayの操作です。
 
+本流glassdocの撮影後表示は「構図確認のみ」「無操作で保存・画質未検証」です。
+紙面全体・細字・数式・図表が読める証明にはなりません。撮影品質の点検方法は
+[保存写真の原寸点検](capture-quality.md)。PC用部品で、本流の品質ゲートは未接続です。
+現在の実機試験・導入・外部送信停止を、このツールの実装だけで解除しません。
+
 ## What this system does
 
 Rokid Glasses capture a physical page through CXR-L. The Android relay runs

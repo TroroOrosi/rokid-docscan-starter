@@ -172,7 +172,8 @@ from __future__ import annotations
 #        lost an element is no longer reported ready. See API 1.19.0.
 # Predevice hardening: exact input identity and durable browser send guard.
 # Snapshot reads and recording-retry integrity; no HTTP envelope change.
-APP_VERSION = "0.35.1"
+# Capture evidence diagnostics and honest text-bounds/review labels; HTTP unchanged.
+APP_VERSION = "0.35.2"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.
@@ -354,7 +355,8 @@ EXPLAINER_API_VERSION = "1.1.0"
 # Full-display page aiming, readable still previews and visible analysis exit confirmation.
 # Upright, magnified still review and phone-side unfold-to-chooser startup.
 # Failed CLOSED persistence keeps the answer and shows a retry notice.
-GLASSES_VIEW_CONTRACT_VERSION = "1.17.1"
+# Composition-only review and bounded clipped-shot ranking; 3s timing unchanged.
+GLASSES_VIEW_CONTRACT_VERSION = "1.17.2"
 
 # Answer-area overlay payload (box + short answer; 2D image-anchored).
 # 1.1.0: added tracking metadata (tracking/fixed_ar/anchor_hint).

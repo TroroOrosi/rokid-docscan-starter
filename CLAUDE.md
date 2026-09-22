@@ -1,6 +1,6 @@
 # rokid-docscan-starter development guide
 
-Status: Current engineering contract. Updated 2026-09-14.
+Status: Current engineering contract. Updated 2026-09-22.
 
 ## What this repository is
 
@@ -225,6 +225,12 @@ An earlier branch explored changing the indicator from a diagnostic shell. It
 is quarantined: `app/devtools/rokid_led.py` and `scripts/rokid_led.py` are stubs
 with no device commands, `tests/test_rokid_led.py` enforces that, and the
 procedures are deliberately not kept anywhere in this repository.
+
+OCR文字枠の内側判定は `TEXT_BOUNDS_ONLY`（旧保存token `COMPLETE` も同義）であり、
+紙面・未認識文字・図表の合格ではない。glassdocの確認表示は「構図確認のみ」
+「無操作で保存・画質未検証」とし、3秒の無操作を品質承認と説明しない。
+PC用の原寸点検・登録条件・比較部品は `docs/capture-quality.md`。画像由来の証拠生成と
+撮影／正式登録本流の品質ゲートは未接続。既存の実機試験・導入・送信停止を維持する。
 
 ## Capture invariants
 

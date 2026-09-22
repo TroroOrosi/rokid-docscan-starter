@@ -11,13 +11,15 @@ import org.junit.Test;
  */
 public class ReviewHeadlineTest {
     @Test
-    public void onlyACheckedPageIsCalledAPass() {
+    public void recognisedTextNeverCertifiesTheWholePage() {
         PageFraming complete = PageFraming.builder(1920, 1080)
                 .addLineBounds(200, 150, 1700, 200)
                 .build();
 
-        assertEquals("P1 合格 全体が入っています",
+        assertEquals("P1 文字枠のみ・紙面未確認",
                 DocScanController.reviewHeadline(1, complete));
+        assertEquals("P1 文字枠のみ・紙面未確認",
+                DocScanController.reviewHeadline(1, PageFraming.fromToken("COMPLETE#1")));
     }
 
     @Test

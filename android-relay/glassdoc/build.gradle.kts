@@ -69,8 +69,8 @@ android {
         // Review end feedback never changes the visible-frame clock or capture policy.
         // 15 handles Camera2 delivery failures and records numeric diagnostics.
         // Capture settings and physical acceptance gates remain unchanged.
-        versionCode = 16
-        versionName = "0.14.1"
+        versionCode = 17
+        versionName = "0.14.2"
     }
 
     // Same reasoning as `:glassapp`: a vendor installer that reads JAR

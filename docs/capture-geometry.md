@@ -1,6 +1,12 @@
 # 保存写真の角度補正・鮮鋭度診断（PC用部品）
 
-## 今回のPR追加範囲
+Status: Current component reference。原寸パケットへの接続はcapture-quality、本流の品質ゲートは未接続。
+Runs on: Windows PC、保存画像のみ。
+
+現在は [原寸点検CLI](capture-quality.md) が本書の3関数を再利用します。
+独立したcoreテストと以下の部分導入時の経緯は維持します。
+
+## 2026-09-18時点のPR追加範囲（履歴）
 
 `scripts/capture_geometry.py` と独立した合成画像テストを追加します。
 これは前回の31ファイル統合差分の全反映ではありません。品質判定・比較モジュールの
@@ -24,7 +30,7 @@ GitHub書き込みがツール側でブロックされたため、既存コー�
 ピンぼけと手ブレの原因を区別せず、撮影機器のピントを調整する機能でもありません。
 全画像を展開するPC用処理なので、そのままグラスへ移植しないでください。
 
-## 検証と残作業
+## 部分導入時の検証と残作業（2026-09-18の履歴）
 
 ```powershell
 py -3.12 -m pytest -q tests/test_capture_geometry_core.py tests/test_capture_preflight.py
@@ -38,3 +44,6 @@ py -3.12 -m pytest -q
 原寸タイル出力・明るさ補正候補・登録判定・方式比較・HUD修正・他の資料整理は、
 この部分反映には含みません。前回の統合差分を後から取り込む際は、
 今回すでに追加した `scripts/capture_geometry.py` を照合し、パッチを無条件に重ねないでください。
+
+上記は部分導入時の記録です。現在の取り込み範囲・検証・未接続要件は
+[pr37-capture-quality](../.agents/progress/pr37-capture-quality.md) を参照してください。
