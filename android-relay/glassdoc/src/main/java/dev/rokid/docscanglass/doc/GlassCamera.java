@@ -193,7 +193,10 @@ final class GlassCamera {
             // one image, where TEMPLATE_STILL_CAPTURE untouched had returned
             // seven stills in 785-1380 ms. The phone relay never sets exposure
             // either -- it calls takePhoto(w, h, quality) and nothing more.
-            // Underexposure is an operating condition: light the page.
+            // Dark captures remain unresolved. The 2026-09-22 operator reported
+            // a bright room; do not attribute the result to lighting alone.
+            // This path requests a still immediately, without waiting for AE
+            // convergence. The older timeout does not establish its cause.
             session.capture(request.build(), captureCallback(current), handler);
         } catch (CameraAccessException | RuntimeException | OutOfMemoryError error) {
             fail("capture " + error.getClass().getSimpleName());

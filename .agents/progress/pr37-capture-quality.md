@@ -1,9 +1,9 @@
 # PR #37 撮影品質部品の統合
 
-Status: Internal progress。2026-09-22、31ファイル要件を現行ブランチへ統合しローカル試験を実施。本流品質ゲートと実機受け入れは未完。
-Runs on: Windows PC `C:\rokid-docscan-starter`。保存済み写真とローカル試験のみ。
+Status: Internal progress。2026-09-22、CI再実行は通過。明示承認後の実機試験で撮影範囲・暗さ・解析失敗を確認し、追加撮影を停止。本流品質ゲートと実機受け入れは未完。
+Runs on: Windows PC `C:\rokid-docscan-starter`。末尾の実機試験はglassdocとF-51F上のサーバ・Chrome（既存Wi-Fi、スマホAPではない）。
 
-## 再開点と権限
+## 再開点と権限（実装時点。後続の実機承認は末尾参照）
 
 対象は [PR #37](https://github.com/TroroOrosi/rokid-docscan-starter/pull/37)、
 `origin=https://github.com/TroroOrosi/rokid-docscan-starter.git`、`feature/multimodal-scan`。
@@ -175,7 +175,7 @@ code-review-graphの `detect_changes(base=781fa7d)` は旧索引 `0be008a` を�
 選択skillはAgent Skills router → incremental-implementation/TDD、git-workflow-and-versioning、
 codebase-memory、progress-checkpoint。最終差分はcode-review-and-qualityで確認した。
 
-## 次の作業
+## 実装時点の残作業
 
 Runs on: 当面の実装・検証はWindows PC。会場本流はglassdoc → スマホAP → スマホAPIであり、PC試験はその実機受け入れを代替しない。
 
@@ -188,3 +188,88 @@ Runs on: 当面の実装・検証はWindows PC。会場本流はglassdoc → ス
 
 別の既知課題（完了録音の原本欠落、文書作成request ID/冪等性、長時間HTTPと進捗、答案追加更新、終了時UI待ち）は未解決のまま維持する。
 CQ-5〜9とこれらの課題を、この31ファイル対応の完了へ含めない。
+
+## 2026-09-22 CI再実行と承認後の実機試験
+
+Runs on: CIはGitHub Actions。実機はglassdoc → 既存Wi-Fi → F-51F上FastAPI → 同じスマホ上Chrome CDP。PCは導入・SSH・証拠回収のみ。スマホAPが無効のため会場経路の受け入れではない。
+
+実行対象は `57daf52cab4a9a92c1e712cafa714335a1767d10`、tree
+`b9c696930d2557c9b53aae7e68f018a9808fda3b`。上の全体試験・APK検査を再利用した。
+`gh run rerun <id> --failed` → 各exit 0。run `35727924039` / `35727924052` /
+`35727917625` / `35727917622` のattempt 2はすべてcompleted/success。
+`gh pr checks 37` → 全16 checks pass、exit 0。初回のartifact容量失敗を受けた削除・設定変更はない。
+
+利用者はグラス `192.168.0.3:5555` とスマホ `192.168.0.6:38043` を明示した確認に
+「撮影・解析を含む実機試験まで」と回答し、前段の実機停止をこの試験範囲で解除した。
+承認は品質課題の解消を意味しない。エージェントは未解決の撮影範囲・暗さを十分説明せず、
+1ページ試験へ進めた。利用者の指摘は「1ページを撮ったが視野が広く両面になった。
+画面の枠よりも広い。部屋が明るいはずなのに画像が暗い」。追加撮影・追加送信を止め、
+保存画像と現行ソースの照合へ切り替えた。端末接続だけで再試験を始めない。
+
+### 導入と保全
+
+- `adb devices -l` → RG_glasses / F-51Fの上記2接続。以後すべて対象serial指定。
+- グラス: 実serial `1904092623381086`、firmware `1.25.015-20260903-150201`、API 32。
+  スマホ: 実serial `ZY22LWGDCV`、build `W1VHS36H.80-34-2-2-1-5`、API 36。
+  Hi Rokid `G1.13.8.0828`。今回はCXR-Lを使わずglassdocのcamera2経路。
+- 上記APK SHAと既存署名の一致・versionCode増加を確認。
+  `adb -s 192.168.0.3:5555 install -r <glassdoc-debug.apk>` → `Success`。
+  導入前の私有データをtarで保全し、導入前後41ファイルのSHA-256は全件一致。
+- スマホの旧app 55ファイルは改行正規化後 `3e4b777` と一致。DB・依存を変更せず現行appへ更新。
+  `GET /health` → HTTP 200、既存23データhash・DB行数・envバイト不変。
+  バックアップ: スマホの `~/rokid-backups/pr37-57daf52-20260922T125226Z`。
+- TermuxのSSHとwake lock起動後、Chromeを前景へ戻した。スマホ内adb対象
+  `emulator-5554` の実serialを照合し、
+  `adb -s emulator-5554 forward tcp:9222 localabstract:chrome_devtools_remote` → `9222`。
+  API/CDPともスマホ上。送信前journalはidle。既存キーを再利用し出力していない。
+- グラスの接続先を同じスマホの現在IPへ更新。起動 → `Status: ok`、読取選択画面。
+  起動後の変更は接続情報・表示設定。既存保存セッションの欠落なし。
+
+### 1ページを意図した試験の結果
+
+- `adb -s 192.168.0.3:5555 logcat ...` → 21:58:47〜21:59:00に撮影と単タップでの撮り直し。
+  最終原本4032×3024、6,190,468 B、1139 ms。21:59:01.749の表示ACK後に3秒review開始。
+  21:59:04.862の物理BACK、21:59:06.053のlocal commit、同06.060のfinalizeを記録。
+- 保存はlocal session `dd0108b6-5328-4682-b6ef-b6e358a05737` の1画像。
+  サーバdocument 13 / exam-session 5 / page 16。documents/pages/sessions/questionsは
+  12/15/4/4 → 13/16/5/5、solutionsは0のまま。
+- 原本JPEG SHA-256 `b2174b90e5f14718f75c06468378dc29f734700d840501fd3607145918daf686`。
+  永続record SHA-256 `888c97b1823af82fe34ac84ab67d90202adbd36ca4fc72cac390fd37a7736041`。
+  サーバPNGは3024×4032、SHA-256 `aec5c39eba94fabce32e25bfdf55cce93a667ff49e219a1a80185aa6fdebb528`。
+  Pillow比較 → `rotated_original_equals_server_pixels: true`。回転以外の明るさ補正・切出しなし。
+- 全画面輝度p05/p50/p95は1/35/80（背景込み。紙面ROIではない）。画像で見開き・広い背景・
+  暗い紙面を確認。紙面左端は画面外へ続き、単ページ検証ではない。
+  最終metadataは露出10,000,000 ns、ISO 50、ae_state=1。照度は測っていない。
+- 現行 `HudView.drawGuide` は静的な方向目印でカメラ画角と未校正。
+  `GlassCamera` は最大JPEGを取得し、目印に合わせたcropをしない。
+  `reviewContrast` は確認表示だけ。PCの `capture_quality --tone` は本流未接続。
+  `requestStill` はセッション構成直後に実行しAE収束待ちはない。暗さの根本原因かは未確定。
+  「照明だけの問題」というソースコメントを撤回した。挙動・撮影条件は変更していない。
+- 22:02:39.851 `REVIEW: Local session analysis finished` は答案成功ではない。
+  `GET /v1/exam-sessions/5/answer-bundle` → HTTP 200、1 item、`status=failed`、`question_id=q5`。
+  グラス表示「解析できません／送信結果の確認待ち。」。journalは `uncertain`。
+  solver待機上限は既定180秒。22:04のスマホ画面では元のChatGPT応答が生成中だった。
+  journal解除・再送・追加生成はしていない。
+- `dumpsys media.camera` → `Active Camera Clients: []`。5秒間隔36標本の最大PSSは165,165 KiB。
+  取りこぼしを含む標本最大であり、長時間メモリ試験ではない。
+
+私有証拠: Git対象外 `data/device-setup/pr37-resume-20260922-214723`。
+導入前tar・新session tar・原本record/JPEG・サーバPNG・logcat・画面・メモリ標本を保持。
+recordのPillow直読は `UnidentifiedImageError`。既存 `CaptureReviewPersistence` の形式を照合し
+JPEGを抽出した。原本の書換えなし。グラフは古いため該当ソースを直接照合した。
+
+### 次に再開する順序
+
+Runs on: Windows PC上の保存原本・現行ソースのみ。利用者がGPTを停止したため、実機試験・ブラウザ待機・追加送信を行わない。
+
+利用者の最新訂正: OCR精度が低く、1ページだけでは設問に必要な資料も不足し得る。
+「今やるべきは待つことではない」「実機試験も今やるべきではなく、それまでに画像の精度向上に
+取り組むべき」「GPTは止めた」。これを以後の優先順位とする。
+
+1. この利用者指摘と実測を先に読む。CI通過・導入成功を撮影品質の改善と扱わない。
+2. 枠/画角と露出を別々に調べる。今回の原本でPC診断を行い、CQ-5〜9の未接続を解消する。
+   表示枠の拡大や、照明・近寄る操作だけで解決したことにしない。
+3. 実機・GPTには触れず、保存原本の切出し・明暗・OCR入力をPCで改善・比較する。
+   TesseractはPCに既存導入済み（jpn / jpn_vertあり）。PCのOCR比較をグラスのML Kit精度と同一視しない。
+4. 次の実機試験は、直した点・測る点を具体化してから再開する。スマホAP・長時間・録音・
+   画質・全答案取得は未検証。LEDは外部観測しておらず、依頼もしない。
