@@ -39,6 +39,20 @@ def _add_question(client, sid, ocr_text="問2 次の計算\n① 12\n② 13\n③ 
     )
 
 
+def test_settings_distinguish_local_glasses_and_frozen_phone_controls(client):
+    body = client.get("/v1/settings").json()
+    assert set(body["operations"].values()) == {"phone"}
+    assert body["operation_routes"]["phone"]["operations"] == body["operations"]
+    local = body["operation_routes"]["glassdoc"]
+    assert local["operator"] == "glasses"
+    assert local["startup"]["requires_selection"] is True
+    assert local["capture"]["review_visible_seconds"] == 3
+    assert local["capture"]["commit"] == "local_before_http"
+    assert local["answers"]["menu_back"] == "double_tap"
+    assert local["answers"]["exit"] == "two_double_taps_within_3_seconds"
+    assert local["physical_acceptance"] == "pending"
+
+
 def test_settings_advertise_silent_contract(client):
     body = client.get("/v1/settings").json()
     hud = body["hud"]

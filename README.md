@@ -1,13 +1,17 @@
 # Rokid DocScan（入試問題を撮影して解答するサーバ）
 
-Status: Current project entrypoint. Updated 2026-09-14.
+Status: Current project entrypoint. Updated 2026-09-22.
+
+撮影後のグラス表示は**構図確認のみ**です。無操作で保存しても画質は未検証です。
+保存写真の [原寸点検・補正候補・登録条件評価](docs/capture-quality.md) はPC用部品で、
+撮影・正式登録本流の品質ゲートは未接続です。既存の実機試験停止は継続しています。
 
 ## このリポジトリの目的
 
 入試問題（共通テスト想定）の冊子を Rokid Glasses で撮影し、**解答用紙に記入する
 内容を小問ごとに**グラスの HUD（最大3行）で確認できるようにするシステムです。
-Android スマホを中継し、Windows PC をサーバーとして使う実機経路をリポジトリ内に
-含みます。
+Android スマホを中継し、Windows PC をサーバーとして使う実機経路もリポジトリ内に
+含みます。そちらは**開発と検証のための構成**で、現場では使いません。
 
 紙資料のスキャンとページ照合（`/v1/match`、pHash）は、この上に解答モードを載せた
 **土台**です。現在の目的ではありません。
@@ -16,10 +20,45 @@ Android スマホを中継し、Windows PC をサーバーとして使う実機�
 
 - 通常: 20〜40ページを約10分撮影 → 約10分分析 → 約130分閲覧。
 - リスニング: 30分録音の間に約10分撮影 → 両入力終了後に約10分分析 → 約110分閲覧。
-- グラスに Wi-Fi は無く、スマホは 4G/5G でロック中。**現場に PC・自前サーバ・
-  テザリングを持ち込みません。** 150分で自動終了しません。
+- **現場に PC を持ち込みません。** スマホは 4G/5G で外へ出て、同時に Wi-Fi AP として
+  グラスを収容します（2026-09-14 に利用者が可能と確認）。150分で自動終了しません。
 
-撮影の主経路は次の通りです。
+### 決定した会場経路（2026-09-14、利用者の決定）
+
+グラス単独アプリ `:glassdoc` を本流とし、スマホをアクセスポイントにします。
+**セッション中にスマホを触りません。** 操作はグラスのタップとスワイプです。
+
+```text
+Rokid Glasses（:glassdoc） → スマホの Wi-Fi AP → スマホ上の FastAPI
+                                              → スマホ上の Chrome CDP → ChatGPT ウェブ
+Rokid Glasses（AnswerView） ← answer-bundle
+```
+
+**この経路はまだ一度も通していません。** 測れているのは部品だけです
+（グラスアプリの撮影とサーバ到達、スマホ上のFastAPI・端末内CDP・ChatGPT解答・ASR）。
+スマホ内の部品は2026-09-15に実行済みですが、AP上の撮影から答案までの受け入れは未実施です。
+測定は[端末内CDPと解答](docs/hardware-measurements.md#f-6-6-端末内-adb-とスマホ単独での-cdp-実行実測2026-09-15)と
+[スマホ内ASR](docs/hardware-measurements.md#g-local-asr)に保持しています。
+
+撮影方式は**自動スキャン**です（2026-09-14 決定）。グラスがページを検知して自分で
+撮り、実画像を3秒見せ、その間の単タップで取り直し、無操作なら確定して次ページへ進み、
+ダブルタップで撮影を終えます。初回準備後のスマホ操作は0回です。方式の定義は
+[自動スキャンの決定記録](docs/fast-scan-decisions.md) の R2〜R6 です。
+
+現行実装は**glassdocだけで自動スキャンを有効化**し、待機中の単タップを手動撮影、
+静止画表示後3秒以内の単タップを取り直しに割り当てます。既存の自動ループを再利用し、
+凍結したphone/CUSTOMVIEWの明示操作は維持します。
+起動時は通常／リスニングを選びます。通常撮影は通信を待たずに進め、確定写真をグラス内に
+保存してから送信します。中断資料と直近答案は明示的に選んで再開できます。
+
+資料は全文OCRのMarkdown＋大問のページ画像が既定で、結合画像/PDFも比較できます。
+図付き答案と、撮影に並行する録音・スマホ内VAD/ASRも実装しています。
+設定・操作・未検証の範囲は[グラス撮影と端末内ASR](docs/multimodal-scan.md)を参照してください。
+新しいAPKでの物理LED、3秒表示、画角、消灯/復帰、スマホAP上の完走と精度比較は未検証です。
+
+### 実際に通したことがある経路（フォールバック。凍結）
+
+スマホリレー `android-relay/app` 経由です。新機能は載せません。
 
 1. スマホの撮影操作で `AIMING` を表示し、表示open callback後に静止時間を置いて
    CXR-L `takePhoto(1920, 1080, 80)` でページを1回だけ撮影する。
@@ -59,7 +98,7 @@ submodule、AARコピーは不要です。
 | 経路 | 位置づけ |
 |---|---|
 | `ROKID_SOLVER=chatgpt-web` | **現行の主経路。** 利用者のログイン済み ChatGPT ウェブセッションを CDP 経由で操作します |
-| スマホ内ローカルモデル（F-51F、llama.cpp） | 現場向けの目標。実測は済んでいますが、現場構成への組み込みは未了です |
+| スマホ内ローカルモデル（F-51F、llama.cpp） | **不採用**（2026-09-14、利用者の決定）。実測は `docs/hardware-measurements.md` E 節に証拠として残しますが、新規作業はありません |
 | `openai` / `gemini` / `claude` | API キーがあれば設定だけで動きます。`ROKID_SOLVER_TIERS` のフォールバック段として残します |
 
 **ChatGPT ウェブ UI の自動操作は OpenAI の利用規約に反し、アカウントが制限される
@@ -75,7 +114,7 @@ risk があります。**利用者の判断で選択した経路です（詳細�
 CXR-L の実装境界は
 [CXR-L / Global Hi Rokid integration](docs/cxr-l-integration.md)です。
 
-現在のバージョン: **Server APP 0.28.0 / API 1.19.0 / Android client 0.3.17 / Glasses View 1.11.0 / Solver API 1.6.0**。
+現在のバージョン: **Server APP 0.35.3 / API 1.22.0 / Android client 0.3.17 / Glasses View 1.17.2 / Solver API 1.7.1**。
 版数の正本は `app/version.py` です。他の資料は版数を書かず、この行だけが
 `tests/test_documentation_contract.py` で実装と照合されます。
 Solver API は、記入用解答の全文保持・資料不足の分離を行う `answer_only` モードを含みます。
@@ -118,7 +157,7 @@ rokid-docscan-starter/
 │   ├── provider_registry.py # 4ポート共通のアダプタ登録・選択
 │   ├── page_pdf.py    # 撮影ページを1つのPDFへ束ねる（chatgpt-web の一括添付用）
 │   ├── audio_formats.py # 音声MIME・保存suffix・provider対応の共通定義
-│   ├── version.py     # 各契約バージョン（app 0.28.0 / api 1.19.0 / glasses 1.11.0 ほか）
+│   ├── version.py     # 各契約バージョンの正本（上記の版数一覧と連動）
 │   ├── config.py      # 保存先・フィーチャーフラグ（ROKID_* / ANTHROPIC_API_KEY / ROKID_TRANSCRIBER）
 │   ├── transcribe.py  # ★リスニング録音の書き起こし（openai/gemini・未設定時は与値）
 │   ├── db.py          # sqlite3（documents/pages/exam/explain テーブル）
@@ -146,7 +185,7 @@ rokid-docscan-starter/
 │   ├── explain-sessions.md          # 資料解説モード詳細・curl 例
 │   ├── future-proof-architecture.md # 将来対応アーキテクチャ
 │   ├── hardware-measurements.md     # 実機・成果物の測定記録（凍結）
-│   ├── fast-scan-decisions.md       # 自動スキャン構想の採否判断（未実装・保留）
+│   ├── fast-scan-decisions.md       # 自動スキャンの採否判断と現行実装への参照
 │   └── superpowers/specs/           # オフライン解答バンドルの設計（実装済み）
 ├── .env.example       # 全環境変数の雛形（コピーして .env に）
 ├── data/images/       # 画像保存先（実行時に自動生成）
@@ -607,9 +646,9 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 
 #### スマホの ChatGPT で解く経路（PC の Chrome を使わない）
 
-PC を立ち上げずにスマホだけで回す場合は、自動操作ではなく**貼り付け経路**を
-使います。サーバは解答を受け取らないため HUD は駆動されません（手元で読む
-運用）。
+以下の貼り付けAPIは凍結した互換経路で、利用者が選択した会場運用には使いません。
+現行はスマホFastAPIからスマホChrome CDPを操作します。以下の手作業では
+サーバは解答を受け取らず、HUDも駆動されません。
 
 ```bash
 # 1問ごと: 貼り付け用の本文と ChatGPT の事前入力リンク

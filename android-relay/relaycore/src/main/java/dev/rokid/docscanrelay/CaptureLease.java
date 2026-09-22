@@ -58,6 +58,10 @@ final class CaptureLease {
         return markTimedOut(expectedToken);
     }
 
+    synchronized void markUnknown() {
+        if (isUnresolved()) timedOut = true;
+    }
+
     synchronized Completion complete() {
         if (!isUnresolved()) {
             return null;

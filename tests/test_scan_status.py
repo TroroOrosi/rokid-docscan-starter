@@ -717,13 +717,18 @@ def test_finalize_analyzer_failure_does_not_commit_partial_page_updates(
                 "offline": self.offline,
             }
 
-    monkeypatch.setattr(main, "get_analyzer", lambda: FailingSecondAnalyzer())
+    analyzer = FailingSecondAnalyzer()
+    monkeypatch.setattr(main, "get_analyzer", lambda: analyzer)
     doc_id = _new_doc(client)
     _add_text_page(client, doc_id, 0, "元の1ページ目")
     _add_text_page(client, doc_id, 1, "失敗する2ページ目")
 
-    with pytest.raises(RuntimeError, match="second page analysis failed"):
-        client.post(f"/v1/documents/{doc_id}/finalize")
+    # Starlette/AnyIO versions wrap application exceptions differently.
+    # The HTTP failure and complete database rollback are the public contract.
+    with TestClient(main.app, raise_server_exceptions=False) as failing_client:
+        response = failing_client.post(f"/v1/documents/{doc_id}/finalize")
+    assert response.status_code == 500
+    assert analyzer.calls == 2
 
     conn = main.db.connect()
     try:

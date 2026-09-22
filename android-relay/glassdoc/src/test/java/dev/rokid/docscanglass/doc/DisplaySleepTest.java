@@ -70,6 +70,15 @@ public class DisplaySleepTest {
         assertEquals(60_000, timeout());
     }
 
+    @Test public void repeatedSleepPreservesTheOriginalTimeout() {
+        setTimeout(TEN_DAYS);
+        DisplaySleep sleep = new DisplaySleep();
+        sleep.sleep(activity());
+        sleep.sleep(activity());
+        sleep.restore(RuntimeEnvironment.getApplication());
+        assertEquals(TEN_DAYS, timeout());
+    }
+
     @Test public void aRefusedWriteIsReportedInsteadOfPretendingToSleep() {
         setTimeout(TEN_DAYS);
         DisplaySleep sleep = new DisplaySleep();

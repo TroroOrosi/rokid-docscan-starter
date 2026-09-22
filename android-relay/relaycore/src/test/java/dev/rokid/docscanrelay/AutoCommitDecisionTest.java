@@ -13,7 +13,7 @@ import org.junit.Test;
  */
 public class AutoCommitDecisionTest {
     @Test
-    public void aFramingPassCommitsSoonerThanAnythingUnverified() {
+    public void legacyTimerSelectionIsPreservedWithoutClaimingAQualityPass() {
         long pass = DocScanController.autoCommitDelayMillis(
                 pendingWith(framing(200, 150, 1700, 200)));
         long clipped = DocScanController.autoCommitDelayMillis(
@@ -26,11 +26,26 @@ public class AutoCommitDecisionTest {
         assertTrue(pass < clipped);
         assertEquals(clipped, noText);
         assertEquals(clipped, unknown);
+        assertEquals(pass, DocScanController.autoCommitDelayMillis(
+                pendingWith(PageFraming.fromToken("COMPLETE#1"))));
     }
 
     @Test
-    public void evenAnUndisturbedCountdownCannotRegisterWithoutPhoneConfirmation() {
-        assertFalse(DocScanController.shouldAutoCommit(
+    public void burstRankingKeepsTheNonClippedCandidateForTheDownstreamCheck() {
+        CaptureReviewStore.Pending clipped = new CaptureReviewStore.Pending(
+                0, new byte[]{1}, "x".repeat(1000), 90, "", framing(200, 150, 1919, 200));
+        CaptureReviewStore.Pending inside = new CaptureReviewStore.Pending(
+                0, new byte[]{2}, "x".repeat(100), 90, "", framing(200, 150, 1700, 200));
+        double clippedScore = ShotScore.of(clipped.framing, clipped.ocrCharacters(), .9f, true);
+        double insideScore = ShotScore.of(inside.framing, inside.ocrCharacters(), .9f, true);
+        assertTrue(ShotScore.isBetter(insideScore, clippedScore));
+        assertFalse(inside.isFramingFailing());
+        assertTrue(clipped.isFramingFailing());
+    }
+
+    @Test
+    public void anArmedLocalReviewCanCommitOnlyWhileItsGenerationStillOwnsTheScreen() {
+        assertTrue(DocScanController.shouldAutoCommit(
                 RelayState.CAPTURE_REVIEW, 7, 7, true));
     }
 

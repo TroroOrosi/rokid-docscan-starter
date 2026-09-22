@@ -18,9 +18,10 @@ public class CaptureReviewPersistenceTest {
         CaptureReviewPersistence persistence = new CaptureReviewPersistence(file);
 
         persistence.save(new CaptureReviewStore.Pending(
-                2, new byte[]{1, 2, 3}, "本文", 90, ""));
+                2, new byte[]{1, 2, 3}, "本文", 90, "", PageFraming.UNKNOWN, 1720000000123L));
         CaptureReviewStore.Pending first = persistence.loadOrNull();
         assertEquals(2, first.pageIndex);
+        assertEquals(1720000000123L, first.capturedAtMillis);
         assertEquals("本文", first.ocrText);
         assertEquals(90, first.rotationDegrees);
         assertArrayEquals(new byte[]{1, 2, 3}, first.jpeg);

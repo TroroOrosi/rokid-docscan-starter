@@ -18,7 +18,7 @@ from .. import config
 from ..llm import ADAPTER_PROVIDERS
 from ..provider_registry import ProviderRegistry
 from .base import Solver
-from .chatgpt_web import ChatGptWebSolver
+from .chatgpt_web import ChatGptWebSolver, ChatGptWebUncertain
 from .llm_adapter import LLMSolver, choice_label, choice_out_of_range
 from .local_placeholder import LocalPlaceholderSolver
 
@@ -89,6 +89,8 @@ def _retry_out_of_range(solver, question, result, max_answer_len: int):
     retry = replace(question, retry_hint=_choice_retry_hint(question))
     try:
         retried = solver.solve(question=retry, max_answer_len=max_answer_len)
+    except ChatGptWebUncertain:
+        raise  # Do not hide an ambiguously submitted corrective question.
     except Exception:  # noqa: BLE001 - a failed retry must not lose the answer
         retried = None
     if retried is not None and not choice_out_of_range(retried.answer, question.choices):
@@ -102,7 +104,7 @@ def _acceptable(result) -> bool:
     """An answer is usable if the tier didn't flag an error and produced text."""
     if result is None or result.extras.get("error"):
         return False
-    return bool((result.answer or "").strip())
+    return bool((result.answer or "").strip() or result.diagrams)
 
 
 def solve_with_fallback(
@@ -132,8 +134,13 @@ def solve_with_fallback(
             continue
         solver = get_solver(name)
         last_solver = solver
+        if question.required_image_paths and not getattr(solver, "accepts_images", False):
+            skipped.append(f"{name}:images_unsupported")
+            continue
         try:
             result = solver.solve(question=question, max_answer_len=max_answer_len)
+        except ChatGptWebUncertain:
+            raise  # Another provider would still duplicate a possibly submitted question.
         except Exception:  # noqa: BLE001 - one tier failing must not 500
             skipped.append(f"{name}:error")
             continue
@@ -156,6 +163,8 @@ def solve_with_fallback(
 
     if question.answer_only:
         raise RuntimeError("answer-sheet: no configured solver produced a valid response")
+    if question.required_image_paths:
+        raise RuntimeError("no configured solver could read the required page images")
     if config.REAL_MODE:
         raise RuntimeError(
             "ROKID_REAL_MODE=1: every configured real solver tier failed; "

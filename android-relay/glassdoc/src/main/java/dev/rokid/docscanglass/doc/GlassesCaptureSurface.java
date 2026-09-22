@@ -23,11 +23,10 @@ import dev.rokid.docscanrelay.CaptureSurface;
  */
 final class GlassesCaptureSurface implements CaptureSurface {
     /**
-     * Longest edge of the review thumbnail. The display is 480x640, so a
-     * larger decode would be scaled straight back down, and the still is
-     * already held in full as JPEG bytes by the review store.
+     * Bound the full-frame preview to twice the 640px HUD edge.
+     * A 4032px capture decodes to 1008px in RGB_565 (about 1.5 MB).
      */
-    private static final int PREVIEW_MAX_EDGE = 640;
+    private static final int PREVIEW_MAX_EDGE = 1280;
 
     interface Listener {
         /**
@@ -35,6 +34,8 @@ final class GlassesCaptureSurface implements CaptureSurface {
          * hears this for the generation it requested.
          */
         void onViewShown(long generation, String purpose);
+
+        default void onReviewHidden(long generation) { }
     }
 
     private final Context context;
@@ -45,6 +46,19 @@ final class GlassesCaptureSurface implements CaptureSurface {
     private final AtomicLong generations = new AtomicLong();
 
     private Bitmap preview;
+    // Owned by the queued draw until it transfers to preview on the UI thread.
+    private Bitmap waitingPreview;
+    private Runnable waitingDraw;
+    private volatile long visibleReview = NO_VIEW_GENERATION;
+    private volatile boolean closed;
+
+    @Override
+    public boolean supportsLocalCaptureReview() { return true; }
+
+    @Override
+    public boolean isCaptureReviewVisible(long generation) {
+        return generation == visibleReview && visibleReview != NO_VIEW_GENERATION;
+    }
 
     GlassesCaptureSurface(
             Context context,
@@ -96,13 +110,15 @@ final class GlassesCaptureSurface implements CaptureSurface {
 
     @Override
     public long showCaptureReview(byte[] jpeg, int rotationDegrees, List<String> lines) {
+        if (closed) return NO_VIEW_GENERATION;
         Bitmap still = decodePreview(jpeg, rotationDegrees);
+        if (still == null) return NO_VIEW_GENERATION;
         return show("capture-review", () -> {
             Bitmap previous = preview;
             preview = still;
             hud.showReview(still, GlassesHudText.adapt(lines));
             recycle(previous);
-        });
+        }, still);
     }
 
     /**
@@ -117,19 +133,76 @@ final class GlassesCaptureSurface implements CaptureSurface {
     }
 
     /** Releases the review thumbnail. The activity calls this on destruction. */
-    void close() {
+    synchronized void close() {
+        closed = true;
+        if (waitingDraw != null) main.removeCallbacks(waitingDraw);
+        waitingDraw = null;
+        recycle(waitingPreview);
+        waitingPreview = null;
+        visibleReview = NO_VIEW_GENERATION;
+        generations.incrementAndGet();
+        hud.onVisibleFrame(null, null);
+        hud.showLines(List.of());
         Bitmap held = preview;
         preview = null;
         recycle(held);
     }
 
     private long show(String purpose, Runnable draw) {
+        return show(purpose, draw, null);
+    }
+
+    private synchronized long show(String purpose, Runnable draw, Bitmap ownedImage) {
+        if (closed) {
+            recycle(ownedImage);
+            return NO_VIEW_GENERATION;
+        }
         long generation = generations.incrementAndGet();
-        main.post(() -> {
-            draw.run();
-            listener.onViewShown(generation, purpose);
-        });
+        visibleReview = NO_VIEW_GENERATION;
+        // Superseded UI work must not keep a native bitmap (or its closure) alive.
+        if (waitingDraw != null) main.removeCallbacks(waitingDraw);
+        recycle(waitingPreview);
+        waitingPreview = ownedImage;
+        waitingDraw = () -> {
+            synchronized (GlassesCaptureSurface.this) {
+                if (closed || generation != generations.get()) return;
+                waitingDraw = null;
+                waitingPreview = null; // ownership transfers to draw/preview
+                draw.run();
+                if (!"capture-review".equals(purpose)) {
+                    Bitmap held = preview;
+                    preview = null;
+                    recycle(held);
+                }
+                hud.onVisibleFrame(() -> {
+                    if (closed || generation != generations.get()) return;
+                    if ("capture-review".equals(purpose)) visibleReview = generation;
+                    listener.onViewShown(generation, purpose);
+                }, () -> {
+                    if (generation != generations.get()) return;
+                    visibleReview = NO_VIEW_GENERATION;
+                    if ("capture-review".equals(purpose)) listener.onReviewHidden(generation);
+                });
+            }
+        };
+        if (!main.post(waitingDraw)) {
+            waitingDraw = null;
+            recycle(waitingPreview);
+            waitingPreview = null;
+            return NO_VIEW_GENERATION;
+        }
         return generation;
+    }
+
+    /** Acknowledges an observed end gesture without re-decoding or re-arming review. */
+    void showCaptureEndRequested() {
+        long generation = generations.get();
+        main.post(() -> {
+            if (!closed && generation == generations.get() && preview != null
+                    && visibleReview == generation) {
+                hud.showReviewNotice("確認後に撮影終了・操作せず待つ");
+            }
+        });
     }
 
     /**
@@ -143,12 +216,12 @@ final class GlassesCaptureSurface implements CaptureSurface {
         if (stabilizing) {
             return List.of(title, "そのまま静止");
         }
-        return List.of(title, "枠に用紙を合わせる", "タップで撮影");
+        return List.of(title, "十字は方向の目安・撮影枠ではありません", "タップで撮影");
     }
 
     /**
-     * Decodes a thumbnail at the display's own size and applies the rotation
-     * the controller was configured with.
+     * Decodes a bounded display image and applies the same clockwise
+     * rotation as OCR and the authoritative server PNG.
      */
     private static Bitmap decodePreview(byte[] jpeg, int rotationDegrees) {
         if (jpeg == null || jpeg.length == 0) {
@@ -160,30 +233,28 @@ final class GlassesCaptureSurface implements CaptureSurface {
 
         int sample = 1;
         int longest = Math.max(bounds.outWidth, bounds.outHeight);
-        while (longest / (sample * 2) >= PREVIEW_MAX_EDGE) {
+        while (longest / sample > PREVIEW_MAX_EDGE) {
             sample *= 2;
         }
         BitmapFactory.Options options = new BitmapFactory.Options();
         options.inSampleSize = sample;
         options.inPreferredConfig = Bitmap.Config.RGB_565;
 
-        Bitmap decoded;
+        Bitmap decoded = null;
         try {
             decoded = BitmapFactory.decodeByteArray(jpeg, 0, jpeg.length, options);
+            if (decoded == null || rotationDegrees % 360 == 0) return decoded;
+            Matrix matrix = new Matrix();
+            matrix.postRotate(rotationDegrees);
+            Bitmap rotated = Bitmap.createBitmap(
+                    decoded, 0, 0, decoded.getWidth(), decoded.getHeight(), matrix, true);
+            if (rotated != decoded) recycle(decoded);
+            return rotated;
         } catch (OutOfMemoryError error) {
+            // Rotation allocates too. Failure must not strand the first bitmap.
+            recycle(decoded);
             return null;
         }
-        if (decoded == null || rotationDegrees % 360 == 0) {
-            return decoded;
-        }
-        Matrix matrix = new Matrix();
-        matrix.postRotate(rotationDegrees);
-        Bitmap rotated = Bitmap.createBitmap(
-                decoded, 0, 0, decoded.getWidth(), decoded.getHeight(), matrix, true);
-        if (rotated != decoded) {
-            decoded.recycle();
-        }
-        return rotated;
     }
 
     private static void recycle(Bitmap bitmap) {

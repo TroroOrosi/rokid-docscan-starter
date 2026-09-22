@@ -1,0 +1,9 @@
+# Apply only in a separate environment first; see the PR37 predevice handoff.
+# No compiled optional server accelerators are requested on Termux.
+-c constraints-phone.txt
+fastapi
+uvicorn>=0.27
+python-multipart>=0.0.9
+python-dotenv>=1.0
+pillow>=10.0
+websockets>=12.0

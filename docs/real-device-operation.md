@@ -1,16 +1,29 @@
 # Real-device operation
 
-Status: Current supported path. Updated 2026-09-01.
+Status: Current runbook for the exercised phone-relay route. Updated 2026-09-14.
 
-The supported topology is:
+**This is the fallback route, not the decided one.** On 2026-09-14 the operator
+decided the venue runs the standalone `:glassdoc` app over a phone access point,
+with the server and Chrome on the phone; see `CLAUDE.md` "decided venue
+topology" and `docs/glasses-ux-contract.md` for its gesture table. That route
+has never been run end to end; its implementation/setup guide is
+[multimodal-scan.md](multimodal-scan.md). This document keeps the
+route that has been exercised, and it stays the fallback.
+
+The topology below is the exercised one:
 
 ```text
 Rokid Glasses -> Global Hi Rokid -> Android relay -> FastAPI server -> HUD
 ```
 
-The phone is the operator control surface. CUSTOMVIEW close, `AI-exit`, and AI
-key callbacks are lifecycle/diagnostic evidence only and must not trigger a
-photo, cancellation, registration, finalization, or navigation.
+On this route the phone is the operator control surface. CUSTOMVIEW close,
+`AI-exit`, and AI key callbacks are lifecycle/diagnostic evidence only and must
+not trigger a photo, cancellation, registration, finalization, or navigation.
+
+現在の撮影品質の説明は [保存写真の原寸点検](capture-quality.md) を参照してください。
+本流glassdocの確認は構図確認のみで、無操作保存は画質未検証です。PC部品を正式登録本流へつなぐ
+品質ゲートは未接続。実機試験の承認範囲・停止状態・結果は
+[PR #37の再開記録](../.agents/progress/pr37-capture-quality.md)を参照してください。
 
 ## Before a session
 

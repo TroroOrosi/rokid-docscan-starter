@@ -10,6 +10,7 @@ public enum RelayState {
     CAPTURE_REVIEW,
     UPLOADING,
     READING,
+    LISTENING,
     FINALIZING,
     REVIEW,
     ERROR;

@@ -9,35 +9,49 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
-CURRENT_RUNBOOKS = (
-    "CLAUDE.md",
-    "README.md",
-    "android-relay/README.md",
-    "docs/cxr-l-integration.md",
-    "docs/device-verification-checklist.md",
-    "docs/real-device-operation.md",
-    "docs/user-operation-guide.md",
-    "docs/windows-android-real-device-setup.md",
-)
-
-
 def _text(relative_path: str) -> str:
     return (ROOT / relative_path).read_text(encoding="utf-8")
 
 
-def _generated_prefixes() -> tuple[str, ...]:
-    """Directory prefixes `.gitignore` marks as generated at runtime.
+def _current_runbooks() -> tuple[str, ...]:
+    """Every document `docs/README.md` classifies as a current runbook.
 
-    A checkout never contains them, so requiring a documented path under one to
-    exist passes only on a machine that has already run the thing that writes
-    it. `data/docscan.db` is documented as created on startup; asking CI to
-    find it is asking the wrong question.
+    Derived, never listed twice. A hardcoded copy of this list is how
+    `docs/exam-solver-architecture.md` kept claiming the glasses' onboard AI
+    was the answer route until 2026-09-14: the index called it current, the
+    test's own tuple did not name it, and no check ever read it.
     """
-    return tuple(
-        line
-        for line in (raw.strip() for raw in _text(".gitignore").splitlines())
-        if line.endswith("/") and not line.startswith(("#", "!", "*")) and "*" not in line
-    )
+    section = _text("docs/README.md").split("## Current contracts and runbooks", 1)
+    if len(section) != 2:  # pragma: no cover - the heading is itself contract
+        raise AssertionError("docs/README.md lost its current-runbook section")
+    body = section[1].split("\n## ", 1)[0]
+    return tuple(re.findall(r"^- `([^`]+\.md)`", body, flags=re.MULTILINE))
+
+
+CURRENT_RUNBOOKS = _current_runbooks()
+
+
+def _generated_directory_patterns() -> tuple[re.Pattern, ...]:
+    """Match ignored generated directories, including zero-or-more ** segments.
+
+    Only directory rules are used: broad file globs (such as *.pyc) must not
+    exempt source references. This is a restricted matcher for this repository's
+    positive directory rules, not a replacement implementation of gitignore.
+    """
+    patterns = []
+    for raw in _text(".gitignore").splitlines():
+        rule = raw.strip()
+        if not rule.endswith("/") or rule.startswith(("#", "!")):
+            continue
+        segments = rule.strip("/").split("/")
+        pattern = ""
+        for part in segments:
+            if part == "**":
+                pattern += r"(?:[^/]+/)*"
+            else:
+                pattern += re.escape(part).replace(r"\*", "[^/]*") + "/"
+        patterns.append(re.compile("^" + pattern))
+    return tuple(patterns)
 
 
 def _repository_markdown() -> set[str]:
@@ -147,6 +161,44 @@ def test_current_runbooks_do_not_claim_customview_operator_tap_is_verified():
     assert offenders == []
 
 
+def test_current_runbooks_do_not_call_the_onboard_glasses_ai_the_answer_route():
+    """CXR-L exposes no onboard-AI answer callback, so it cannot be the route.
+
+    `POST /solutions` ingests answers produced elsewhere. Describing it as the
+    primary path sent a session down the wrong route on 2026-09-14.
+    """
+    prohibited = (
+        "解答の主体は**グラス搭載 AI",
+        "解答主経路はグラス搭載",
+        "主経路: 搭載 GPT が全問解答",
+        "onboard ingest（主経路）",
+        "搭載 GPT の問題別解答を ingest**",
+    )
+    offenders = []
+    for path in CURRENT_RUNBOOKS:
+        text = _text(path)
+        for phrase in prohibited:
+            if phrase in text:
+                offenders.append(f"{path}: {phrase}")
+    assert offenders == []
+
+
+def test_current_runbooks_do_not_bind_operations_to_glasses_gestures():
+    """`OPERATION_CONTRACT` publishes `phone` for every operation."""
+    prohibited = (
+        "グラスのジェスチャに割当済み",
+        "スマホは HTTP 中継のみ",
+        "スマホは HTTP中継のみ",
+    )
+    offenders = []
+    for path in CURRENT_RUNBOOKS:
+        text = _text(path)
+        for phrase in prohibited:
+            if phrase in text:
+                offenders.append(f"{path}: {phrase}")
+    assert offenders == []
+
+
 def test_current_runbooks_describe_normalized_png_not_raw_jpeg_persistence():
     prohibited = (
         "元JPEGとOCRの両方で保存",
@@ -177,14 +229,14 @@ def test_current_runbooks_do_not_document_a_gradle_command_that_cannot_run():
 def test_every_documented_repository_path_exists():
     """A path that moved silently sends the next agent to the wrong module."""
     reference = re.compile(r"`([A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)+)`")
-    generated = _generated_prefixes()
+    generated = _generated_directory_patterns()
     offenders = []
     for document in sorted(_repository_markdown()):
         for match in reference.finditer(_text(document)):
             candidate = match.group(1)
             if not Path(candidate).suffix or candidate.startswith(("http", "C:/")):
                 continue
-            if candidate.startswith(generated):
+            if any(pattern.match(candidate) for pattern in generated):
                 continue
             if (ROOT / candidate).exists() or (ROOT / document).parent.joinpath(candidate).exists():
                 continue
@@ -241,3 +293,22 @@ def test_readme_versions_match_source_of_truth():
     )
     assert expected in readme
     assert f"com.rokid.cxr:client-l:{cxrl_version}" in readme
+
+
+def test_recursive_generated_directory_is_not_a_required_source_path(tmp_path, monkeypatch):
+    monkeypatch.setitem(globals(), "ROOT", tmp_path)
+    (tmp_path / ".gitignore").write_text("android-relay/**/build/\n", encoding="utf-8")
+    (tmp_path / "note.md").write_text(
+        "`android-relay/glassdoc/build/outputs/apk/debug/glassdoc-debug.apk`\n"
+        "`android-relay/build/reports/generated.txt`\n", encoding="utf-8")
+    test_every_documented_repository_path_exists()
+
+
+def test_generated_exemption_never_hides_a_missing_source_path(tmp_path, monkeypatch):
+    import pytest
+    monkeypatch.setitem(globals(), "ROOT", tmp_path)
+    (tmp_path / ".gitignore").write_text("android-relay/**/build/\n", encoding="utf-8")
+    (tmp_path / "note.md").write_text(
+        "`android-relay/glassdoc/src/main/Missing.java`", encoding="utf-8")
+    with pytest.raises(AssertionError):
+        test_every_documented_repository_path_exists()

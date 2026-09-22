@@ -66,6 +66,13 @@ class Question:
     # that does not exist, so the re-ask states the valid labels instead of
     # sending the identical prompt again.
     retry_hint: str | None = None
+    # Stable capture-page identities with OCR, image path and question references.
+    document_pages: list[dict] = field(default_factory=list)
+    document_id: str = ""
+    audio_transcript: str = ""
+    question_id: str = ""
+    # Pages whose content has no text representation; a fallback must read them.
+    required_image_paths: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -90,6 +97,7 @@ class SolveResult:
     raw_reasoning: str = ""
     # Free-form provider diagnostics; never relied on by the server.
     extras: dict = field(default_factory=dict)
+    diagrams: list[dict] = field(default_factory=list)
 
 
 class Solver(abc.ABC):

@@ -50,6 +50,35 @@ PAGE = "\n".join([
 ])
 
 
+def test_vector_answer_round_trip_and_invalid_stored_diagram(client):
+    import json
+    from app import db
+
+    _, session_id = _session_with(client, [PAGE])
+    client.post(f"/v1/exam-sessions/{session_id}/finalize-reading")
+    bundle = client.get(f"/v1/exam-sessions/{session_id}/answer-bundle").json()
+    question_id = int(bundle["items"][0]["question_id"][1:])
+    diagram = {"alt": "円", "aspect_ratio": 1, "elements": [
+        {"type": "circle", "cx": 0.5, "cy": 0.5, "r": 0.3}]}
+    with db.connect() as conn:
+        conn.execute("INSERT INTO solutions(question_id, answer, diagrams_json) VALUES (?, '', ?)",
+                     (question_id, json.dumps([diagram])))
+    bundle = client.get(f"/v1/exam-sessions/{session_id}/answer-bundle").json()
+    assert bundle["schema_version"] == 2
+    assert bundle["items"][0]["status"] == "ready"
+    assert bundle["items"][0]["answer"] == ""
+    assert bundle["items"][0]["diagrams"] == [diagram]
+    with db.connect() as conn:
+        conn.execute("UPDATE solutions SET diagrams_json = '[{}]' WHERE question_id = ?", (question_id,))
+    item = client.get(f"/v1/exam-sessions/{session_id}/answer-bundle").json()["items"][0]
+    assert item["status"] == "failed" and "図" in item["issue"]
+    with db.connect() as conn:
+        conn.execute("UPDATE solutions SET diagrams_json = NULL, answer_metadata_json = ? WHERE question_id = ?",
+                     (json.dumps({"answer_status": "needs_input", "missing_material": "図の寸法が不明"}), question_id))
+    item = client.get(f"/v1/exam-sessions/{session_id}/answer-bundle").json()["items"][0]
+    assert item["status"] == "needs_input" and item["issue"] == "図の寸法が不明"
+
+
 def test_bundle_groups_sub_questions_under_their_section(client):
     _, session_id = _session_with(client, [PAGE])
     client.post(f"/v1/exam-sessions/{session_id}/finalize-reading")
@@ -200,3 +229,114 @@ def test_unknown_notation_is_named_and_kept_out_of_ready(client):
     item = _ingest(client, session_id, chr(92) + "begin{array}{c}1" + chr(92) + "end{array}")
     assert item["status"] == "needs_review"
     assert chr(92) + "begin" in item["issue"]
+
+
+def test_input_digest_changes_for_image_bytes_even_with_identical_phash_and_ocr(client, tmp_path):
+    from app import db, main
+    doc_id, session_id = _session_with(client, [PAGE])
+    path = tmp_path / "same-path.png"
+    path.write_bytes(b"first-original")
+    with db.connect() as conn:
+        conn.execute("UPDATE pages SET image_path = ?, phash = 'same', ocr_md5 = 'same' WHERE document_id = ?",
+                     (str(path), doc_id))
+        session = conn.execute("SELECT * FROM exam_sessions WHERE id = ?", (session_id,)).fetchone()
+        first = main._answer_input_digest(conn, session)
+        assert first == main._answer_input_digest(conn, session)
+        path.write_bytes(b"other-original")
+        assert first != main._answer_input_digest(conn, session)
+
+
+def test_input_digest_includes_vision_text_not_only_ocr(client):
+    from app import db, main
+    doc_id, session_id = _session_with(client, [PAGE])
+    with db.connect() as conn:
+        session = conn.execute("SELECT * FROM exam_sessions WHERE id = ?", (session_id,)).fetchone()
+        first = main._answer_input_digest(conn, session)
+        conn.execute("UPDATE pages SET vision_text = 'changed diagram' WHERE document_id = ?", (doc_id,))
+        assert first != main._answer_input_digest(conn, session)
+
+
+def test_audio_digest_works_without_python_311_file_digest(client, tmp_path, monkeypatch):
+    import hashlib
+    from app import db, main
+    _, session_id = _session_with(client, [PAGE])
+    path = tmp_path / "original.wav"
+    path.write_bytes(b"audio original")
+    monkeypatch.delattr(hashlib, "file_digest", raising=False)
+    with db.connect() as conn:
+        conn.execute("UPDATE exam_sessions SET audio_path = ? WHERE id = ?", (str(path), session_id))
+        session = conn.execute("SELECT * FROM exam_sessions WHERE id = ?", (session_id,)).fetchone()
+        first = main._answer_input_digest(conn, session)
+        path.write_bytes(b"audio changed")
+        assert first != main._answer_input_digest(conn, session)
+
+
+def test_failed_solve_is_persisted_without_leaking_exception_text(client, monkeypatch):
+    from app import main
+    _, session_id = _session_with(client, [PAGE])
+    monkeypatch.setenv("ROKID_SOLVER", "test-provider")
+    def fail(**_):
+        raise RuntimeError("private OCR text and credential must not be returned")
+    monkeypatch.setattr(main, "solve_with_fallback", fail)
+    assert client.post(f"/v1/exam-sessions/{session_id}/finalize-reading").status_code == 200
+    first = client.get(f"/v1/exam-sessions/{session_id}/answer-bundle").json()
+    assert all(item["status"] == "failed" for item in first["items"])
+    assert "private OCR" not in str(first)
+    client.post(f"/v1/exam-sessions/{session_id}/finalize-reading")
+    second = client.get(f"/v1/exam-sessions/{session_id}/answer-bundle").json()
+    assert second["revision"] > first["revision"]
+
+
+def test_uncertain_browser_send_stops_batch_before_other_questions(client, monkeypatch):
+    from app import main
+    from app.solvers.chatgpt_web import ChatGptWebUncertain
+    _, session_id = _session_with(client, ["問1 2+2を求めよ。\n問2 3+3を求めよ。"])
+    monkeypatch.setenv("ROKID_SOLVER", "test-provider")
+    calls = []
+    def fail(**_):
+        calls.append(1)
+        raise ChatGptWebUncertain("send needs inspection")
+    monkeypatch.setattr(main, "solve_with_fallback", fail)
+    assert client.post(f"/v1/exam-sessions/{session_id}/finalize-reading").status_code == 200
+    assert len(calls) == 1
+    body = client.get(f"/v1/exam-sessions/{session_id}/answer-bundle").json()
+    assert body["items"][0]["status"] == "failed"
+    assert "再送" in body["items"][0]["issue"]
+    assert any(item["status"] == "pending" for item in body["items"][1:])
+
+
+def test_bundle_keeps_items_and_revision_in_one_snapshot(client, monkeypatch):
+    """Concurrent committed answers cannot lend their revision to older items.
+
+    WAL is enabled only in this fixture to commit deterministically while the
+    read is paused, without timing assumptions or changing production settings.
+    """
+    from app import db, main
+
+    _, session_id = _session_with(client, [PAGE])
+    client.post(f"/v1/exam-sessions/{session_id}/finalize-reading")
+    url = f"/v1/exam-sessions/{session_id}/answer-bundle"
+    before = client.get(url).json()
+    question_id = int(before["items"][0]["question_id"][1:])
+    with db.connect() as conn:
+        assert conn.execute("PRAGMA journal_mode=WAL").fetchone()[0] == "wal"
+    original_revision = main._answer_revision
+    inserted = False
+
+    def publish_answer_during_snapshot(conn, selected_session):
+        nonlocal inserted
+        if not inserted:
+            inserted = True
+            with db.connect() as writer:
+                writer.execute("INSERT INTO solutions(question_id, answer) VALUES (?, ?)",
+                               (question_id, "new concurrent answer"))
+        return original_revision(conn, selected_session)
+
+    monkeypatch.setattr(main, "_answer_revision", publish_answer_during_snapshot)
+    during = client.get(url).json()
+    after = client.get(url).json()
+    assert inserted
+    assert during == before
+    assert after["items"][0]["answer"] == "new concurrent answer"
+    assert after["revision"] > during["revision"]
+    assert after["input_digest"] == during["input_digest"]

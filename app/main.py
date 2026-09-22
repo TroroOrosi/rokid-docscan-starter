@@ -26,6 +26,7 @@ from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse, Response
 from PIL import Image, UnidentifiedImageError
 from pydantic import BaseModel
+from starlette.concurrency import run_in_threadpool
 
 from . import config, db
 from .audio_formats import safe_audio_suffix
@@ -35,6 +36,7 @@ from .config import IMAGE_DIR, ensure_dirs
 from .explainer import ExplainRequest, ExplainResult
 from .explainers import get_explainer, list_explainers
 from .extractors import detect_media, get_extractor
+from .glassdoc_contract import GLASSDOC_OPERATION_CONTRACT
 from .glasses_view import (
     CAPTURE_CONTRACT,
     EXPLAIN_STAGES,
@@ -54,6 +56,7 @@ from .glasses_view import (
     build_scan_ack,
 )
 from .hud import build_hud
+from .input_identity import file_sha256
 from .layout import parse_layout, primary_question, segment_problems
 from .llm import clamp01
 from .matching import (
@@ -68,8 +71,9 @@ from .matching import verdict as match_verdict
 from .overlay import build_overlay
 from .page_pdf import images_to_pdf
 from .retrieval import retrieve_context
-from .solvers import Question
+from .solvers import Question, get_solver
 from .solvers.llm_adapter import paste_prompt
+from .solvers.chatgpt_web import ChatGptWebUncertain
 from .solvers.registry import solve_with_fallback
 from .subjects import detect_subject
 from .version import APP_VERSION, HUD_CONTRACT_VERSION, version_info
@@ -411,6 +415,10 @@ def get_settings() -> dict:
         "hud": render_contract(),
         "capture": dict(CAPTURE_CONTRACT),
         "operations": dict(OPERATION_CONTRACT),
+        "operation_routes": {
+            "phone": {"operator": "phone", "operations": dict(OPERATION_CONTRACT)},
+            "glassdoc": GLASSDOC_OPERATION_CONTRACT,
+        },
         "input": build_input_contract(),
         "providers": provider_status(),
         "versions": version_info(),
@@ -445,6 +453,7 @@ async def add_page(
     page_index: int = Form(...),
     image: UploadFile | None = File(None),
     image_rotation: int = Form(0),
+    captured_at_ms: int = Form(0, ge=0),
     ocr_text: str | None = Form(None),
     vision_text: str | None = Form(None),
     total_pages: int | None = Form(None),
@@ -525,7 +534,7 @@ async def add_page(
                 )
             updated = conn.execute(
                 "UPDATE pages SET image_path = ?, phash = ?, ocr_text = ?, "
-                "vision_text = ?, ocr_md5 = ?, summary = NULL WHERE id = ? "
+                "vision_text = ?, ocr_md5 = ?, captured_at_ms = ?, summary = NULL WHERE id = ? "
                 "AND NOT EXISTS ("
                 "  SELECT 1 FROM exam_sessions "
                 "  WHERE document_id = ? AND status = 'reviewing'"
@@ -536,6 +545,7 @@ async def add_page(
                     ocr_text,
                     vision_text,
                     omd5,
+                    captured_at_ms or None,
                     existing["id"],
                     document_id,
                 ),
@@ -571,8 +581,8 @@ async def add_page(
                 cur = conn.execute(
                     """INSERT INTO pages
                        (document_id, page_index, image_path, phash, ocr_text,
-                        vision_text, ocr_md5)
-                       SELECT ?, ?, ?, ?, ?, ?, ?
+                        vision_text, ocr_md5, captured_at_ms)
+                       SELECT ?, ?, ?, ?, ?, ?, ?, ?
                        WHERE EXISTS (
                            SELECT 1 FROM documents
                            WHERE id = ? AND status = 'open'
@@ -585,6 +595,7 @@ async def add_page(
                         ocr_text,
                         vision_text,
                         omd5,
+                        captured_at_ms or None,
                         document_id,
                     ),
                 )
@@ -907,6 +918,19 @@ def _finalize_document_once(document_id: int) -> dict:
                     p["summary"],
                 )
             )
+
+        # Client OCR may be empty on a figure-only page. Keep its image, but
+        # do not declare that input ready for a text-only solver. Check cached
+        # pages too, since provider configuration may change between attempts.
+        if config.REAL_MODE or analyzer.name == "client-ocr":
+            updated_text = {u[3]: (u[0], u[1]) for u in pending_updates}
+            empty_photos = [p for p in pages if p["image_path"] and not _page_material(
+                *updated_text.get(p["id"], (p["ocr_text"], p["vision_text"]))
+            )]
+            if empty_photos and not getattr(get_solver(), "accepts_images", False):
+                raise HTTPException(status_code=422, detail=(
+                    "photo has no usable OCR; configure an image-capable solver or retake the page"
+                ))
 
         # The analyzer can be slow or remote, so every call and result
         # transformation above runs before the write transaction. Acquire the
@@ -1759,10 +1783,12 @@ def get_exam_session(session_id: int) -> dict:
 #     POST .../{id}/finalize-reading      phone declares 読取完了 →
 #                                         segment into problems; no photo request
 #   Phase 2 解答 (no camera request): all problems solved in one batch
-#     POST .../{id}/solutions             ingest the onboard AI's per-problem
-#                                         answers (primary), or — with
-#                                         ROKID_SOLVER=openai|gemini|claude —
-#                                         finalize-reading solves server-side
+#     finalize-reading solves server-side (primary) with ROKID_SOLVER=
+#                                         chatgpt-web|openai|gemini|claude
+#     POST .../{id}/solutions             API-compat ingest of per-problem
+#                                         answers produced elsewhere. CXR-L
+#                                         exposes no onboard-AI answer callback,
+#                                         so this is not the real-device path.
 #   Phase 3 閲覧 (no camera request): per-problem review deck
 #     GET  .../{id}/solutions             deck listing (solved flags)
 #     GET  .../{id}/review?index=k        one problem, 答え+解法+根拠+注意 in
@@ -2125,6 +2151,76 @@ def exam_set_mode(session_id: int, payload: ExamMode) -> dict:
         conn.close()
 
 
+@app.get("/v1/listening-ready")
+def listening_ready() -> dict:
+    from .local_asr import local_asr_settings
+
+    try:
+        local_asr_settings()
+    except ValueError as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
+    return {"ready": True, "asr": "whisper.cpp", "sample_rate": 16000}
+
+
+@app.post("/v1/documents/{document_id}/audio-chunks")
+async def document_audio_chunk(
+    document_id: int, sequence: int = Form(...), start_sample: int = Form(...),
+    captured_at_ms: int = Form(...), audio: UploadFile = File(...),
+) -> dict:
+    from .listening import store_chunk
+
+    with db.connect() as conn:
+        _doc_or_404(conn, document_id)
+    raw = await _read_upload_limited(audio)
+    try:
+        result = await run_in_threadpool(store_chunk, document_id, sequence, start_sample, captured_at_ms, raw)
+        # Transcript contents remain on the server; the glasses need only progress/timing.
+        return {"sequence": result["sequence"], "samples": result["samples"],
+                "asr_seconds": result["asr_seconds"], "real_time_factor": result["real_time_factor"]}
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+
+class CompleteRecording(BaseModel):
+    expected_chunks: int
+    total_samples: int
+
+
+@app.post("/v1/documents/{document_id}/audio-complete")
+def document_audio_complete(document_id: int, payload: CompleteRecording) -> dict:
+    from .listening import complete_recording
+
+    with db.connect() as conn:
+        _doc_or_404(conn, document_id)
+    try:
+        result = complete_recording(document_id, payload.expected_chunks, payload.total_samples)
+        return {"status": "complete", "chunks": result["chunks"], "total_samples": result["total_samples"]}
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+
+@app.post("/v1/exam-sessions/{session_id}/document-audio")
+def exam_document_audio(session_id: int) -> dict:
+    from .listening import recording_transcript
+
+    with db.connect() as conn:
+        session = _exam_session_or_404(conn, session_id)
+        doc_id = _require_document_exam(session)
+        if session["exam_type"] != "listening":
+            raise HTTPException(status_code=409, detail="listening session required")
+        try:
+            path, text = recording_transcript(doc_id)
+        except ValueError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        updated = conn.execute(
+            "UPDATE exam_sessions SET audio_path = ?, transcript = ? WHERE id = ? "
+            "AND (status != 'reviewing' OR (audio_path = ? AND transcript = ?))",
+            (path, text, session_id, path, text))
+        if updated.rowcount != 1:
+            raise HTTPException(status_code=409, detail="reviewed audio is immutable; start a new document")
+        return {"status": "complete", "audio_stored": True}
+
+
 @app.post("/v1/exam-sessions/{session_id}/audio")
 async def exam_upload_audio(
     session_id: int,
@@ -2152,6 +2248,8 @@ async def exam_upload_audio(
         session = _exam_session_or_404(conn, session_id)
 
         old_audio_path: str | None = session["audio_path"]
+        if session["status"] == "reviewing" or (old_audio_path and Path(old_audio_path).with_name("complete.json").is_file()):
+            raise HTTPException(status_code=409, detail="reviewed or completed original audio is immutable; start a new document")
         audio_path: str | None = None
         if audio is not None and getattr(audio, "filename", None):
             raw = await _read_upload_limited(audio)
@@ -2164,10 +2262,13 @@ async def exam_upload_audio(
             audio_path = str(fpath)
 
         text = transcribe_audio(audio_path, provided_transcript=transcript)
-        conn.execute(
-            "UPDATE exam_sessions SET audio_path = ?, transcript = ? WHERE id = ?",
-            (audio_path, text, session_id),
+        updated = conn.execute(
+            "UPDATE exam_sessions SET audio_path = ?, transcript = ? WHERE id = ? AND status != 'reviewing' "
+            "AND audio_path IS ? AND transcript IS ?",
+            (audio_path, text, session_id, old_audio_path, session["transcript"]),
         )
+        if updated.rowcount != 1:
+            raise HTTPException(status_code=409, detail="reviewed audio is immutable; start a new document")
         conn.commit()
         audio_persisted = pending_audio_path is not None
         if old_audio_path and old_audio_path != audio_path:
@@ -2323,6 +2424,23 @@ def _document_image_paths(conn, doc_id: int) -> list[str]:
     return [r["image_path"] for r in rows if r["image_path"]]
 
 
+def _document_source_pages(conn, doc_id: int, session_id: int) -> list[dict]:
+    refs: dict[int, list[str]] = {}
+    for question in _deck_question_rows(conn, session_id):
+        for index in _row_page_indexes(question):
+            refs.setdefault(index, []).append(f"q{question['id']}")
+    return [
+        {"page_number": row["page_index"] + 1, "image_path": row["image_path"],
+         "image_sha256": file_sha256(row["image_path"]),
+         "ocr_text": row["ocr_text"] or "", "vision_text": row["vision_text"] or "",
+         "question_ids": refs.get(row["page_index"], []),
+         "captured_at": row["captured_at_ms"] or "unknown; server received at " + row["created_at"]}
+        for row in conn.execute(
+            "SELECT * FROM pages WHERE document_id = ? ORDER BY page_index", (doc_id,)
+        )
+    ]
+
+
 def _group_page_indexes(conn, session_id: int) -> dict[int, list[int]]:
     """Per deck row: the pages of its own 大問, for solver context narrowing.
 
@@ -2343,14 +2461,58 @@ def _group_page_indexes(conn, session_id: int) -> dict[int, list[int]]:
     return windows
 
 
+def _solve_failure(row) -> dict:
+    try:
+        metadata = json.loads(row["structure_json"] or "{}") if row is not None else {}
+        failure = metadata.get("solve_failure", {})
+        return failure if isinstance(failure, dict) else {}
+    except (ValueError, TypeError, AttributeError):
+        return {}
+
+
+def _record_solve_failure(conn, row, error: Exception) -> None:
+    # Keep only a fixed code, never a provider exception containing source or keys.
+    current = conn.execute("SELECT structure_json FROM questions WHERE id = ?", (row["id"],)).fetchone()
+    metadata = json.loads(current["structure_json"] or "{}")
+    if not isinstance(metadata, dict):
+        metadata = {}
+    metadata["solve_failures"] = int(metadata.get("solve_failures", 0)) + 1
+    metadata["solve_failure"] = {"code": "browser_outcome_unknown"
+                                 if isinstance(error, ChatGptWebUncertain) else "solver_failed"}
+    conn.execute("UPDATE questions SET structure_json = ? WHERE id = ?",
+                 (json.dumps(metadata, ensure_ascii=False), row["id"]))
+    conn.commit()
+
+
 def _answer_bundle_item(conn, group: dict, row) -> dict:
+    from .answer_diagrams import validate_diagrams
+
     sol = _latest_solution_row(conn, row["id"])
     raw = (sol["answer"] or "").strip() if sol is not None else ""
     display = to_display_answer(raw)
     answer = display.text
+    diagram_error = False
+    try:
+        diagrams = validate_diagrams(json.loads(sol["diagrams_json"] or "[]")) if sol else []
+    except (ValueError, TypeError):
+        diagrams, diagram_error = [], True
+    try:
+        metadata = json.loads(sol["answer_metadata_json"] or "{}") if sol else {}
+        needs_input = metadata.get("answer_status") == "needs_input"
+    except (ValueError, TypeError, AttributeError):
+        metadata, needs_input = {}, False
     if sol is None:
-        status, issue = "pending", "未解答"
-    elif not answer:
+        failure = _solve_failure(row)
+        inherited = _solve_failure(group.get("heading"))
+        code = (failure or inherited).get("code")
+        status = "failed" if failure else "pending"
+        issue = ("送信結果の確認待ち。自動再送は停止しています" if code == "browser_outcome_unknown"
+                 else "解析に失敗しました。資料は保持しています" if code == "solver_failed" else "未解答")
+    elif needs_input:
+        status, issue = "needs_input", str(metadata.get("missing_material") or "資料が不足しています")[:1000]
+    elif diagram_error:
+        status, issue = "needs_review" if answer else "failed", "図の形式を表示できません"
+    elif not answer and not diagrams:
         status, issue = "failed", "解答本文がありません"
     elif display.complete:
         status, issue = "ready", ""
@@ -2368,30 +2530,36 @@ def _answer_bundle_item(conn, group: dict, row) -> dict:
         "answer": answer if status in ("ready", "needs_review") else "",
         "status": status,
         "issue": issue,
+        **({"diagrams": diagrams} if diagrams else {}),
     }
 
 
 def _answer_input_digest(conn, session) -> str:
-    """Input identity: the pages the answers were read from.
+    """Content-based identity for the exact input, not a pHash similarity key.
 
-    Stable while the material is unchanged, different after a re-capture, so
-    AnswerStore can refuse a bundle belonging to different input.
+    Changing this algorithm invalidates old digests. Existing offline saves are
+    not deleted; never combine their results with a newly identified input.
     """
     document_id = session["document_id"]
     if document_id:
         rows = conn.execute(
-            "SELECT page_index, phash, ocr_md5 FROM pages "
-            "WHERE document_id = ? ORDER BY page_index",
-            (document_id,),
+            "SELECT page_index, image_path, ocr_text, vision_text FROM pages "
+            "WHERE document_id = ? ORDER BY page_index", (document_id,),
         ).fetchall()
-        material = "\n".join(
-            f"{r['page_index']}:{r['phash']}:{r['ocr_md5'] or ''}" for r in rows
-        )
+        pages = [
+            {"page_index": r["page_index"], "image_sha256": file_sha256(r["image_path"]),
+             "ocr_text": r["ocr_text"] or "", "vision_text": r["vision_text"] or ""}
+            for r in rows
+        ]
     else:
-        material = "\n".join(
-            str(r["id"]) for r in _deck_question_rows(conn, session["id"])
-        )
-    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+        pages = [{"question_id": r["id"], "body_text": r["body_text"] or ""}
+                 for r in _deck_question_rows(conn, session["id"])]
+    material = {"identity_schema": 2, "pages": pages,
+                "audio_sha256": file_sha256(session["audio_path"]),
+                "transcript": session["transcript"] or ""}
+    encoded = json.dumps(material, ensure_ascii=False, sort_keys=True,
+                         separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _answer_revision(conn, session_id: int) -> int:
@@ -2401,7 +2569,16 @@ def _answer_revision(conn, session_id: int) -> int:
         "JOIN questions q ON q.id = s.question_id WHERE q.session_id = ?",
         (session_id,),
     ).fetchone()
-    return (row["latest"] or 0) + 1
+    # Failure-only updates also change a snapshot. Counts are never cleared on
+    # success, so later answer insertions cannot move this revision backwards.
+    failures = 0
+    for question in _deck_question_rows(conn, session_id):
+        try:
+            metadata = json.loads(question["structure_json"] or "{}")
+            failures += max(0, int(metadata.get("solve_failures", 0)))
+        except (ValueError, TypeError, AttributeError):
+            pass
+    return (row["latest"] or 0) + 1 + failures
 
 
 def _review_operations() -> dict:
@@ -2575,7 +2752,7 @@ def exam_finalize_reading(session_id: int) -> dict:
         else:
             # Segment and insert the deck in the SAME transaction as the claim.
             page_rows = conn.execute(
-                "SELECT page_index, ocr_text, vision_text FROM pages "
+                "SELECT page_index, ocr_text, vision_text, image_path FROM pages "
                 "WHERE document_id = ? ORDER BY page_index",
                 (doc_id,),
             ).fetchall()
@@ -2583,7 +2760,13 @@ def exam_finalize_reading(session_id: int) -> dict:
                 [
                     # Body drives boundaries; the figure reading is appended
                     # to the owning problem so its labels don't split it.
-                    (r["page_index"], r["ocr_text"] or "", r["vision_text"])
+                    (r["page_index"], r["ocr_text"] or "", r["vision_text"] or (
+                        f"Page {r['page_index'] + 1}: OCR unavailable. "
+                        "Read the questions and diagrams from the original page image."
+                        if r["image_path"] and not (r["ocr_text"] or "").strip()
+                        and (config.REAL_MODE or os.environ.get("ROKID_ANALYZER") == "client-ocr")
+                        else None
+                    ))
                     for r in page_rows
                 ]
             )
@@ -2643,8 +2826,10 @@ def exam_finalize_reading(session_id: int) -> dict:
         solver_env = (os.environ.get("ROKID_SOLVER") or "").strip()
         if not locked and solver_env and solver_env != "local":
             # Context is scoped to each problem's own 大問 (plan.md contract 1),
-            # not the whole document: an on-device model prefills every prompt.
+            # not the whole document: every prompt is prefilled per question, so
+            # the whole booklet per 小問 is paid for once per 小問.
             page_windows = _group_page_indexes(conn, session_id)
+            source_pages = _document_source_pages(conn, doc_id, session_id)
             for row in _deck_question_rows(conn, session_id):
                 if _latest_solution_row(conn, row["id"]) is not None:
                     continue
@@ -2673,6 +2858,11 @@ def exam_finalize_reading(session_id: int) -> dict:
                             context=context,
                             image_path=row["image_path"],
                             image_paths=_page_image_paths(conn, doc_id, window),
+                            required_image_paths=[
+                                p["image_path"] for p in source_pages
+                                if p["page_number"] - 1 in (window or []) and p["image_path"]
+                                and not _page_material(p["ocr_text"], p["vision_text"])
+                            ],
                             # Listening: the recording itself, not only its
                             # transcript. A solver that takes audio hears the
                             # speaker turns and numbers a transcript flattens.
@@ -2683,6 +2873,10 @@ def exam_finalize_reading(session_id: int) -> dict:
                             # The whole booklet, attached once per chat, and
                             # where this question sits inside it.
                             document_image_paths=_document_image_paths(conn, doc_id),
+                            document_pages=source_pages,
+                            document_id=str(doc_id),
+                            audio_transcript=session["transcript"] or "",
+                            question_id=f"q{row['id']}",
                             page_numbers=[i + 1 for i in (window or [])],
                             # What the operator writes on the answer sheet, and
                             # nothing else. This is the documented contract
@@ -2691,12 +2885,10 @@ def exam_finalize_reading(session_id: int) -> dict:
                         )
                         try:
                             result, solver = solve_with_fallback(question=question)
-                        except Exception:  # noqa: BLE001 - documented behaviour
-                            # The answer-sheet contract refuses the placeholder
-                            # and raises when no real solver answers. That must
-                            # leave the row UNSOLVED (the batch is resumable and
-                            # the onboard ingest can still fill it), never fail
-                            # the whole finalize-reading.
+                        except Exception as error:  # noqa: BLE001 - retain resumable failures
+                            _record_solve_failure(conn, row, error)
+                            if isinstance(error, ChatGptWebUncertain):
+                                break  # Do not touch the browser for the remaining questions.
                             continue
                     served_by = result.extras.get("served_by", solver.name)
                     if served_by == "local":
@@ -2718,8 +2910,8 @@ def exam_finalize_reading(session_id: int) -> dict:
                            (question_id, solver_name, answer, solution_steps_json,
                             rationale, cautions, answer_conf, rationale_conf,
                             evidence_pages_json, evidence_refs_json,
-                            raw_reasoning, served_by)
-                           SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                            raw_reasoning, served_by, diagrams_json, answer_metadata_json)
+                           SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                            WHERE NOT EXISTS
                                (SELECT 1 FROM solutions WHERE question_id = ?)""",
                         (
@@ -2735,6 +2927,8 @@ def exam_finalize_reading(session_id: int) -> dict:
                             _evidence_refs_storage_value(result),
                             result.raw_reasoning,
                             served_by,
+                            json.dumps(result.diagrams, ensure_ascii=False),
+                            json.dumps({k: result.extras.get(k) for k in ("answer_status", "missing_material")}, ensure_ascii=False),
                             row["id"],
                         ),
                     )
@@ -3031,6 +3225,10 @@ def exam_answer_bundle(session_id: int) -> dict:
     """
     conn = db.connect()
     try:
+        # Multiple SELECTs form one wire snapshot. A concurrent answer commit
+        # must not attach a newer revision to items read before that commit.
+        # This is a read transaction, not a schema/journal-mode change.
+        conn.execute("BEGIN")
         session = _exam_session_or_404(conn, session_id)
         if _session_phase(session) == "reading":
             raise HTTPException(status_code=409, detail="call finalize-reading first")
@@ -3048,7 +3246,7 @@ def exam_answer_bundle(session_id: int) -> dict:
             for row in group["items"]
         ]
         return {
-            "schema_version": 1,
+            "schema_version": 2 if any(i.get("diagrams") for i in items) else 1,
             "session_id": str(session_id),
             "input_digest": _answer_input_digest(conn, session),
             "revision": _answer_revision(conn, session_id),

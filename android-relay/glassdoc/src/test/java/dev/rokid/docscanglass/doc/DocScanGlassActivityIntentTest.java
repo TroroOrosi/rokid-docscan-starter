@@ -4,6 +4,8 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNull;
 
 import android.content.Context;
 import android.content.Intent;
@@ -15,9 +17,13 @@ import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.robolectric.Robolectric;
 import org.robolectric.RobolectricTestRunner;
+import org.robolectric.Shadows;
 import org.robolectric.annotation.Config;
 
 import java.lang.reflect.Field;
+import java.io.File;
+import java.io.IOException;
+import javax.crypto.KeyGenerator;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
@@ -27,6 +33,10 @@ import dev.rokid.docscanrelay.CaptureSurface;
 import dev.rokid.docscanrelay.ClientIdentity;
 import dev.rokid.docscanrelay.DocScanController;
 import dev.rokid.docscanrelay.RelayState;
+import dev.rokid.docscanglass.input.GlassesInputAction;
+import dev.rokid.docscanrelay.study.AnswerBundle;
+import dev.rokid.docscanrelay.study.AnswerItem;
+import dev.rokid.docscanrelay.study.AnswerStore;
 import okhttp3.mockwebserver.Dispatcher;
 import okhttp3.mockwebserver.MockResponse;
 import okhttp3.mockwebserver.MockWebServer;
@@ -50,6 +60,9 @@ public class DocScanGlassActivityIntentTest {
         activity = Robolectric.buildActivity(DocScanGlassActivity.class).get();
         hud = new HudView(activity);
         setField(activity, "hud", hud);
+        updates.settings = new ConnectionSettings(new File(activity.getFilesDir(), "intent-connection.bin"),
+                KeyGenerator.getInstance("AES").generateKey());
+        setField(activity, "connectionSettings", updates.settings);
         activity.getPreferences(Context.MODE_PRIVATE).edit().clear().commit();
         workflow = activity.getSharedPreferences("docscan_relay", Context.MODE_PRIVATE);
         workflow.edit().clear().commit();
@@ -79,7 +92,7 @@ public class DocScanGlassActivityIntentTest {
         controller.captureNextPage();
         updates.awaitState(RelayState.AIMING);
         updates.clear();
-        Intent intent = new Intent().putExtra("guide", 0.72f);
+        Intent intent = new Intent().putExtra("guide", 0.72f).putExtra("spread", true);
 
         activity.onNewIntent(intent);
         awaitControllerBarrier();
@@ -87,6 +100,10 @@ public class DocScanGlassActivityIntentTest {
         assertSame(intent, activity.getIntent());
         assertEquals(0.72, guideFraction(), 0.00001);
         assertEquals(0.72f, activity.getPreferences(Context.MODE_PRIVATE).getFloat("guide", -1), 0.00001f);
+        assertTrue(activity.getPreferences(Context.MODE_PRIVATE).getBoolean("spread", false));
+        Field spread = HudView.class.getDeclaredField("spreadGuide");
+        spread.setAccessible(true);
+        assertTrue(spread.getBoolean(hud));
         assertEquals(RelayState.AIMING, controller.getState());
         assertEquals("Guide-only Intent must not submit configuration work", 1, updates.size());
         assertEquals(0, server.getRequestCount());
@@ -141,6 +158,153 @@ public class DocScanGlassActivityIntentTest {
         assertEquals("Bearer updated-test-key", health.getHeader("Authorization"));
         assertEquals(server.url("/").toString().replaceAll("/+$", ""),
                 workflow.getString("server", ""));
+        assertFalse(intent.hasExtra("key"));
+    }
+
+    @Test
+    public void restartUsesSavedCredentialButNewDestinationNeverReceivesIt() throws Exception {
+        controller.close();
+        controller = new DocScanController(activity, new Surface(), null, updates,
+                new ClientIdentity("test-glasses", "intent-test/1", "fake-camera"));
+        setField(activity, "controller", controller);
+        java.lang.reflect.Method apply = DocScanGlassActivity.class.getDeclaredMethod("applyIntent", Intent.class, boolean.class);
+        apply.setAccessible(true);
+        apply.invoke(activity, new Intent(), true);
+        assertEquals("Bearer original-test-key", takeRequest(server).getHeader("Authorization"));
+        updates.awaitState(RelayState.READY);
+        try (MockWebServer replacement = newServer()) {
+            activity.onNewIntent(new Intent().putExtra("server", replacement.url("/").toString()));
+            assertNull(takeRequest(replacement).getHeader("Authorization"));
+        }
+    }
+
+    @Test
+    public void rejectedDestinationCannotReplaceSavedConfiguration() throws Exception {
+        controller.captureNextPage();
+        updates.awaitState(RelayState.AIMING);
+        String previous = updates.settings.load().server;
+        activity.onNewIntent(new Intent().putExtra("server", "http://replacement.test").putExtra("key", "replacement"));
+        awaitControllerBarrier();
+        assertEquals(previous, updates.settings.load().server);
+        assertEquals("original-test-key", updates.settings.load().key);
+        assertEquals(0, server.getRequestCount());
+    }
+
+    @Test
+    public void startupWaitsForSelectionAndNormalModeStartsWithoutHttp() throws Exception {
+        controller.close();
+        controller = new DocScanController(activity, new Surface(true), null, updates,
+                new ClientIdentity("test-glasses", "intent-test/1", "fake-camera"));
+        setField(activity, "controller", controller);
+        setField(activity, "choosingSession", true);
+        Shadows.shadowOf(activity.getApplication()).grantPermissions(android.Manifest.permission.CAMERA);
+        java.lang.reflect.Method apply = DocScanGlassActivity.class.getDeclaredMethod("applyIntent", Intent.class, boolean.class);
+        apply.setAccessible(true);
+        apply.invoke(activity, new Intent(), true);
+        awaitSerial();
+        assertEquals(RelayState.DISCONNECTED, controller.getState());
+        assertEquals(0, server.getRequestCount());
+        java.lang.reflect.Method action = DocScanGlassActivity.class.getDeclaredMethod("onAction", GlassesInputAction.class, long.class);
+        action.setAccessible(true);
+        action.invoke(activity, GlassesInputAction.SWIPE_FORWARD, 1000L);
+        assertEquals(0, server.getRequestCount());
+        action.invoke(activity, GlassesInputAction.SWIPE_BACK, 1200L);
+        action.invoke(activity, GlassesInputAction.SHORT_TAP, 1400L);
+        awaitSerial();
+        assertEquals(RelayState.AIMING, controller.getState());
+        assertTrue(controller.hasLocalSession());
+        assertFalse(controller.isListeningMode());
+        assertEquals(0, server.getRequestCount());
+        assertTrue(controller.closeLocalSession());
+        controller.close();
+        controller = new DocScanController(activity, new Surface(true), null, updates,
+                new ClientIdentity("test-glasses", "intent-test/1", "fake-camera"));
+        assertTrue(controller.hasSavedWorkflow());
+        assertEquals("Restart never starts a capture automatically", RelayState.DISCONNECTED, controller.getState());
+    }
+
+    private void awaitSerial() throws Exception {
+        Field serial = DocScanController.class.getDeclaredField("serial");
+        serial.setAccessible(true);
+        ((java.util.concurrent.ExecutorService) serial.get(controller)).submit(() -> {}).get(5, TimeUnit.SECONDS);
+    }
+
+    @Test @Config(sdk = 28, manifest = Config.NONE)
+    public void closingPreviousAnswersDoesNotCloseAnUnselectedCapture() throws Exception {
+        controller.close();
+        controller = new DocScanController(activity, new Surface(true), null, updates,
+                new ClientIdentity("test-glasses", "intent-test/1", "fake-camera"));
+        controller.configureForLocalStart(server.url("/").toString(), "", 180);
+        controller.startLocalSession(false);
+        awaitSerial();
+        File record = new File(activity.getFilesDir(), "local-scans/"
+                + controller.savedCaptures().get(0).id + "/state.properties");
+        controller.close();
+        controller = new DocScanController(activity, new Surface(true), null, updates,
+                new ClientIdentity("test-glasses", "intent-test/1", "fake-camera"));
+        setField(activity, "controller", controller);
+        AnswerStore answers = new AnswerStore(activity.getFilesDir());
+        AnswerBundle bundle = new AnswerBundle("7", "a".repeat(64), 1,
+                List.of(AnswerItem.ready("g1", "第1問", "q1", "問1", "2")));
+        answers.start(bundle);
+        answers.save(bundle, "q1", 0, true);
+        setField(activity, "answerStore", answers);
+        setField(activity, "startupAnswers", answers.load());
+        setField(activity, "choosingSession", true);
+        setField(activity, "startupSelection", 3);
+        java.lang.reflect.Method action = DocScanGlassActivity.class.getDeclaredMethod("onAction", GlassesInputAction.class, long.class);
+        action.setAccessible(true);
+        action.invoke(activity, GlassesInputAction.SHORT_TAP, 1000L);
+        action.invoke(activity, GlassesInputAction.BACK, 2000L);
+        action.invoke(activity, GlassesInputAction.BACK, 2500L);
+        java.util.Properties state = new java.util.Properties();
+        try (java.io.InputStream stream = new java.io.FileInputStream(record)) { state.load(stream); }
+        assertEquals("CAPTURE", state.getProperty("phase"));
+        assertTrue(answers.load().closed);
+        assertEquals(0, server.getRequestCount());
+    }
+
+    @Test public void rejectedResumeKeepsChooserAndDoesNotCloseTheCurrentRecord() throws Exception {
+        controller.close();
+        controller = new DocScanController(activity, new Surface(true), null, updates,
+                new ClientIdentity("test", "test", "test"));
+        controller.configureForLocalStart("http://old-server.test", "", 180);
+        controller.startLocalSession(false);
+        awaitSerial();
+        String oldId = controller.savedCaptures().get(0).id;
+        controller.close();
+        controller = new DocScanController(activity, new Surface(true), null, updates,
+                new ClientIdentity("test", "test", "test"));
+        controller.configureForLocalStart(server.url("/").toString(), "", 180);
+        controller.startLocalSession(false);
+        awaitSerial();
+        String currentId = controller.savedCaptures().stream().filter(saved -> !saved.id.equals(oldId)).findFirst().get().id;
+        controller.close();
+        controller = new DocScanController(activity, new Surface(true), null, updates,
+                new ClientIdentity("test", "test", "test"));
+        controller.configureForLocalStart(server.url("/").toString(), "", 180);
+        awaitSerial();
+        setField(activity, "controller", controller);
+        setField(activity, "choosingSession", true);
+        setField(activity, "startupCaptures", controller.savedCaptures().stream()
+                .filter(saved -> saved.id.equals(oldId)).collect(java.util.stream.Collectors.toList()));
+        Shadows.shadowOf(activity.getApplication()).grantPermissions(android.Manifest.permission.CAMERA);
+        java.lang.reflect.Method action = DocScanGlassActivity.class.getDeclaredMethod("onAction", GlassesInputAction.class, long.class);
+        action.setAccessible(true);
+        action.invoke(activity, GlassesInputAction.SHORT_TAP, 1000L);
+        awaitSerial();
+        Shadows.shadowOf(android.os.Looper.getMainLooper()).idle();
+        Field choosing = DocScanGlassActivity.class.getDeclaredField("choosingSession");
+        choosing.setAccessible(true);
+        assertTrue(choosing.getBoolean(activity));
+        action.invoke(activity, GlassesInputAction.BACK, 2000L); // back to root
+        action.invoke(activity, GlassesInputAction.BACK, 2500L);
+        action.invoke(activity, GlassesInputAction.BACK, 3000L);
+        java.util.Properties saved = new java.util.Properties();
+        try (java.io.InputStream stream = new java.io.FileInputStream(new File(activity.getFilesDir(),
+                "local-scans/" + currentId + "/state.properties"))) { saved.load(stream); }
+        assertEquals("CAPTURE", saved.getProperty("phase"));
+        assertEquals(0, server.getRequestCount());
     }
 
     private void awaitControllerBarrier() throws Exception {
@@ -188,6 +352,10 @@ public class DocScanGlassActivityIntentTest {
 
     private static final class Surface implements CaptureSurface {
         private long generation;
+        private final boolean local;
+        Surface() { this(false); }
+        Surface(boolean local) { this.local = local; }
+        @Override public boolean supportsLocalCaptureReview() { return local; }
 
         @Override
         public PhotoStartResult takePhoto(int width, int height, int quality) {
@@ -215,8 +383,13 @@ public class DocScanGlassActivityIntentTest {
     }
 
     private static final class Updates implements DocScanController.Listener {
+        private ConnectionSettings settings;
         private final List<RelayState> states = new ArrayList<>();
         private final List<String> diagnostics = new ArrayList<>();
+
+        @Override public void persistConfiguration(String server, String key) throws IOException {
+            settings.save(server, key);
+        }
 
         @Override
         public synchronized void onUpdate(RelayState state, List<String> lines, String diagnostic) {

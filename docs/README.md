@@ -1,14 +1,17 @@
 # Documentation index and authority
 
-Status: Current documentation map. Updated 2026-09-14.
+Status: Current documentation map. Updated 2026-09-22.
 
-When two documents disagree, use this order:
+Separate the intended requirement from evidence of what works:
 
-1. current implementation and automated tests;
-2. current runbooks listed below;
-3. versioned official API or inspected artifact evidence;
-4. dated device measurements with a complete version/hash tuple;
-5. research, historical notes, and hypotheses.
+- User decisions and the current section of `tasks/plan.md` define intended behavior.
+  Implementations and passing tests do not override an unmet requirement.
+- Current source and tests establish implemented behavior. Current runbooks describe
+  that behavior and its limits; a plan does not prove implementation.
+- Versioned official APIs and inspected artifacts establish the supported surface.
+- Device claims require dated measurements with the exact version/hash tuple.
+- Historical plans and research retain context. Their superseded resume instructions
+  are not current work; use the RP list in `tasks/todo.md`.
 
 A build proves compilation only. A repository note proves that an observation
 was recorded, not that it applies to another device or firmware.
@@ -27,21 +30,36 @@ silently applying that exception. `.agents/progress/` remains in scope.
 
 ## Current contracts and runbooks
 
+- `docs/capture-quality.md` — PC用の原寸点検・補正候補・登録条件・方式比較。本流の品質ゲートは未接続。
+
+- `docs/capture-geometry.md` — PC用の単ページ角度補正・鮮鋭度診断部品。capture-qualityから再利用する既存部品。本流未接続。
+
+- `docs/rokid-capture-research.md` — Rokid公式仕様・Camera2/OCRの境界、保存写真の細部診断、停止解除後の限定確認。
+
+- `docs/capture-preflight.md` — PR37の撮影再開前チェック。保存写真の無送信検査、原本保全、制限ヒープ試験。
+
+- `docs/implementation-surfaces.md` — **read this before adding anything.**
+  Every Gradle module, Activity and operator-facing server module, each with a
+  status: route, frozen, probe or shared. `tests/test_surface_inventory.py`
+  fails when a surface is missing from it, so a second implementation of an
+  existing role has to be declared rather than merely appear.
+- `docs/multimodal-scan.md` — standalone capture, diagrams, source attachments and local listening ASR; physical acceptance pending.
 - `README.md` — project entrypoint: what this is for, setup, and the HTTP API.
 - `CLAUDE.md` — engineering invariants. The contract that governs changes:
   real-device rules, answer routes, capture/input/server invariants, build and
   device gates, and the documentation rules above.
 - `android-relay/README.md` — relay implementation contract and Windows build.
 - `docs/cxr-l-integration.md` — current CXR-L boundary.
-- `docs/glasses-ux-contract.md` — the current input contract for the phone
-  route and the standalone `:glassdoc` app.
+- `docs/glasses-ux-contract.md` — the input contract for the decided
+  `:glassdoc` route and for the frozen phone relay.
 - `docs/device-verification-checklist.md` — physical acceptance evidence form.
-- `docs/real-device-operation.md` — supported phone-controlled operation.
+- `docs/real-device-operation.md` — the decided venue route and the exercised
+  phone-relay fallback.
 - `docs/user-operation-guide.md` — operator and data-handling guide.
 - `docs/windows-android-real-device-setup.md` — Windows/Android setup.
 - `docs/explain-sessions.md` — server explain-session API.
-- `docs/exam-solver-architecture.md` — answer-mode architecture, including the
-  `chatgpt-web` route and the PDF booklet upload.
+- `docs/exam-solver-architecture.md` — answer-mode architecture, including
+  `chatgpt-web` and OCR/image/PDF attachment paths.
 - `docs/future-proof-architecture.md` — extension boundaries; current where it
   agrees with the implementation.
 
@@ -63,27 +81,43 @@ what the platform permits.
   design of the offline answer bundle: phone-hotspot topology, 大問/小問
   derivation, and the endpoint shape. Implemented, unit-tested, and merged; the
   six-task plan that built it was deleted on 2026-09-14 because every task was
-  complete. **Not verified on hardware in any respect**: no device was involved
-  at any point. The phone-hotspot topology has never been exercised end to end,
-  `AnswerView`'s readability on the glasses is unverified, reading with the
-  hotspot off is unverified, and the two-stage exit and re-wear recovery were
-  not re-tested after the `KEYCODE_BACK` consumption decision changed.
+  complete. **This became the decided venue route on 2026-09-14** when the
+  operator confirmed the phone can be an access point; read it with `CLAUDE.md`
+  "decided venue topology". **Still not verified on hardware in any respect**:
+  no device was involved at any point. The phone-hotspot topology has never been
+  exercised end to end, `AnswerView`'s readability on the glasses is unverified,
+  reading with the hotspot off is unverified, and the two-stage exit and re-wear
+  recovery were not re-tested after the `KEYCODE_BACK` consumption decision
+  changed.
 
-## Shelved plans
+## Implementation plans and adoption decisions
 
-- `docs/fast-scan-decisions.md` — automatic scanning with simultaneous
-  listening. **Not implemented and not scheduled.** Only the adoption decisions
-  survive (D01-D15, E01-E06, X01-X06); the 30 operation scenarios, probe
-  worksheets and task list were deleted on 2026-09-14. All of it is unexecuted
-  design, not hardware or model acceptance.
-- `tasks/plan.md` — the current plan and its accepted revisions.
-- `tasks/todo.md` — open tasks. Unchecked never means implemented.
+- `tasks/plan.md` — current rationalized plan first; superseded plans preserved in a historical section.
+- `tasks/todo.md` — active RP tasks with acceptance criteria; older checkboxes are history.
+- `docs/requirements-audit.md` — source findings, adoption/defer/retire decisions,
+  and the complete old FS/R/S/X requirement mapping. Planning only, not physical acceptance.
+- `docs/fast-scan-decisions.md` — automatic/manual scan and listening decisions.
+  The current implementation is described in `docs/multimodal-scan.md`.
+  D/E/X comparisons retain their original evidence; physical/model acceptance is pending.
 
 ## Internal progress records
 
+- `.agents/progress/pr37-capture-quality.md` — **PR37の再開入口。** 撮影品質要件の31件対応表、今回の検証と本流未接続の残作業。
+
+- `.agents/progress/pr37-objective-review.md` — **2026-09-17時点のレビュー。** 整合性・録音・終了保存の回帰修正、客観的な未解決事項。実機停止は維持。
+
+- `.agents/progress/pr37-camera-research.md` — **objective-reviewの次に読む。** 撮影仕様調査、配送・診断修正、検証の範囲。追加撮影は停止のまま。
+
+- `.agents/progress/pr37-offline-remediation.md` — **新しいcamera-research記録の後に読む。** 追加修正と停止条件。続いて既存2記録の全文を読む。
+
+- `.agents/progress/pr37-predevice-handoff.md` — PR37の実機前修正、検証範囲、Windows Codexへの引き継ぎと未実装の対応表。
+
+- `.agents/progress/multimodal-scan.md` — **read this in full after the PR37 handoff.** 保存・停止時の実機状態と経緯。
+  以前の実装・実機導入・ASRの測定と、追加実装を始める前の境界を保持する。
+
 Continuation records for agents. Never an operator contract.
 
-- `.agents/progress/venue-route-and-duplicated-surfaces.md` — **read this first.**
+- `.agents/progress/venue-route-and-duplicated-surfaces.md` — earlier continuation context.
   The route the operator decided (chatgpt-web), the implementations that still
   duplicate each other's role, what is blocking the phone-side CDP endpoint, and
   what the next session must settle with the operator before adding anything.
@@ -97,10 +131,9 @@ Continuation records for agents. Never an operator contract.
 ## Indicator and input boundary
 
 Supported code and runbooks do not disable, obscure, spoof, or bypass a camera
-or privacy indicator. The physical indicator is observed with an independent
-camera. SDK callbacks record application state but do not prove physical light
-state.
+or privacy indicator. The operator waived the external LED audit on 2026-09-15.
+This is not a physical observation; SDK callbacks do not prove light state.
 
-CUSTOMVIEW operator tap delivery is not a current verified control surface. Use
-the phone controls until a glasses-side app and its input path pass the physical
-checklist on the exact recorded version tuple.
+CUSTOMVIEW operator tap delivery remains unverified; its frozen relay uses phone
+controls. The decided glassdoc route uses its own input adapter. Its complete
+operation still requires acceptance on the exact installed APK and firmware.

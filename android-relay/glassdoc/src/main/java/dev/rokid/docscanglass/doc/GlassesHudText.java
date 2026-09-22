@@ -12,6 +12,11 @@ final class GlassesHudText {
         List<String> adapted = new ArrayList<>(lines.size());
         for (String line : lines) {
             adapted.add((line == null ? "" : line)
+                    .replace("撮影確認", "構図確認のみ")
+                    .replace("全体を確認", "構図確認のみ")
+                    .replace("無操作で確定", "無操作で保存・画質未検証")
+                    .replace("40〜60cm離す", "距離と照明を確認")
+                    .replace("40〜60cm", "距離と照明を確認")
                     .replace("撮影準備はスマホ", "タップで撮影準備")
                     .replace("読取完了はスマホ", "前スワイプで完了")
                     .replace("次ページ / 完了はスマホ", "タップで次・前スワイプで完了")

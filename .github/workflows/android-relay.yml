@@ -6,36 +6,65 @@ on:
     paths:
       - "android-relay/**"
       - ".github/workflows/android-relay.yml"
+      - "tests/test_ci_predevice_contract.py"
   pull_request:
     paths:
       - "android-relay/**"
       - ".github/workflows/android-relay.yml"
+      - "tests/test_ci_predevice_contract.py"
+
+permissions:
+  contents: read
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
-
       - uses: android-actions/setup-android@v3
-
+        with:
+          packages: platform-tools
       - name: Install Android SDK 36
         run: sdkmanager "platforms;android-36" "build-tools;36.0.0"
-
       - uses: gradle/actions/setup-gradle@v4
+      - name: Test and build both supported surfaces
+        run: sh android-relay/gradlew --no-daemon test testDebugUnitTest assembleDebug
+      - name: Preserve unit-test reports even on failure
+        if: always()
+        uses: actions/upload-artifact@v4
         with:
-          gradle-version: "9.4.1"
-
-      - name: Test and build debug APK
-        run: gradle --no-daemon -p android-relay testDebugUnitTest assembleDebug
-
+          name: android-test-reports-${{ github.sha }}
+          path: |
+            android-relay/*/build/test-results/
+            android-relay/*/build/reports/tests/
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Record APK identity and build evidence (not hardware acceptance)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p data/ci-apk
+          tools="$ANDROID_HOME/build-tools/36.0.0"
+          git rev-parse HEAD > data/ci-apk/commit.txt
+          java -version 2> data/ci-apk/java.txt
+          sdkmanager --list_installed > data/ci-apk/sdk.txt
+          for apk in android-relay/glassdoc/build/outputs/apk/debug/glassdoc-debug.apk android-relay/app/build/outputs/apk/debug/app-debug.apk; do
+            name=$(basename "$apk" .apk)
+            "$tools/aapt2" dump badging "$apk" > "data/ci-apk/$name-identity.txt"
+            "$tools/apksigner" verify --verbose --print-certs "$apk" > "data/ci-apk/$name-signature.txt"
+            sha256sum "$apk" >> data/ci-apk/SHA256SUMS
+          done
       - uses: actions/upload-artifact@v4
         with:
-          name: rokid-docscan-relay-debug
-          path: android-relay/app/build/outputs/apk/debug/app-debug.apk
+          name: rokid-docscan-debug-${{ github.sha }}
+          path: |
+            android-relay/glassdoc/build/outputs/apk/debug/glassdoc-debug.apk
+            android-relay/app/build/outputs/apk/debug/app-debug.apk
+            data/ci-apk/
+          if-no-files-found: error
           retention-days: 14

@@ -210,6 +210,55 @@ def test_photo_without_any_ocr_stays_recoverable(client):
     assert reading.json()["problem_count"] == 0
 
 
+@pytest.mark.parametrize("ocr,accepts_images", [("問1 1+1を答えよ", True), ("", True), ("", False)])
+def test_real_client_ocr_keeps_photo_evidence_and_requires_image_solver(client, monkeypatch, ocr, accepts_images):
+    import app.main as main
+    import app.solvers.registry as registry
+    from app.solvers.llm_adapter import LLMSolver
+
+    calls = []
+
+    class Client:
+        model = "test"
+
+        def complete_json(self, **kwargs):
+            calls.append(kwargs)
+            assert kwargs["image"].startswith(b"\x89PNG")
+            return {"status": "ready", "answer": "2"}
+
+    solver = LLMSolver(name="image-test", client=Client())
+    solver.accepts_images = accepts_images
+    monkeypatch.setattr(registry._registry, "_items", {**registry._registry._items, solver.name: solver})
+    monkeypatch.setattr(main.config, "REAL_MODE", True)
+    monkeypatch.setenv("ROKID_ANALYZER", "client-ocr")
+    monkeypatch.setenv("ROKID_SOLVER", solver.name)
+    document_id = _new_document(client)
+    added = client.post(
+        f"/v1/documents/{document_id}/pages",
+        data={"page_index": "0", "ocr_text": ocr},
+        files={"image": ("page.jpg", _jpeg(), "image/jpeg")},
+    )
+    assert added.status_code == 201
+    finalized = client.post(f"/v1/documents/{document_id}/finalize")
+    with main.db.connect() as conn:
+        page = conn.execute("SELECT * FROM pages WHERE document_id = ?", (document_id,)).fetchone()
+    assert (page["ocr_text"] or "") == ocr  # Never invent OCR to make an image-only page segment.
+    assert main.Path(page["image_path"]).is_file()
+    if not accepts_images:
+        assert finalized.status_code == 422
+        assert "image-capable solver" in finalized.json()["detail"]
+        assert page["summary"] is None
+        assert not calls
+        return
+    assert finalized.status_code == 200
+    session = client.post("/v1/exam-sessions", json={"mode": "study", "document_id": document_id}).json()
+    reading = client.post(f"/v1/exam-sessions/{session['session_id']}/finalize-reading")
+    assert reading.status_code == 200
+    assert reading.json()["problem_count"] == 1
+    assert reading.json()["server_solved"] == 1
+    assert len(calls) == 1
+
+
 def test_finalize_reading_passes_primary_page_photo_to_solver(client, monkeypatch):
     import app.main as main
     from app.solvers.base import SolveResult

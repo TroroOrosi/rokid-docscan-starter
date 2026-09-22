@@ -18,20 +18,29 @@ public final class JapaneseOcr implements AutoCloseable {
         void onError(Throwable error);
     }
 
-    private final TextRecognizer recognizer = TextRecognition.getClient(
-            new JapaneseTextRecognizerOptions.Builder().build());
+    // The chooser does not need a native recognizer. Open it only for actual OCR.
+    private TextRecognizer recognizer;
+    private boolean closed;
+
+    private synchronized TextRecognizer recognizer() {
+        if (closed) throw new IllegalStateException("OCRは終了しています");
+        if (recognizer == null) recognizer = TextRecognition.getClient(
+                new JapaneseTextRecognizerOptions.Builder().build());
+        return recognizer;
+    }
 
     public void recognize(byte[] encodedImage, int rotationDegrees, Callback callback) {
         Bitmap bitmap;
         try {
-            bitmap = decodeSubsampled(encodedImage);
+            synchronized (this) {
+                if (closed) throw new IllegalStateException("OCRは終了しています");
+            }
+            bitmap = encodedImage == null ? null : decodeSubsampled(encodedImage);
         } catch (OutOfMemoryError error) {
-            // Subsampling puts a 12MP still near 6 MB, but a device already
-            // under memory pressure can still fail here. Losing the process
-            // would also lose the photo, so the capture is reported as an
-            // OCR failure and stays available for review.
-            callback.onError(new IllegalStateException(
-                    "写真が大きすぎてメモリに展開できません。撮影解像度を下げてください"));
+            callback.onError(memoryError());
+            return;
+        } catch (RuntimeException error) {
+            callback.onError(error);
             return;
         }
         if (bitmap == null) {
@@ -39,26 +48,52 @@ public final class JapaneseOcr implements AutoCloseable {
             return;
         }
         int normalizedRotation = normalizeRotation(rotationDegrees);
-        // ML Kit reports bounding boxes in the upright image it was handed, so
-        // a quarter turn swaps the dimensions the framing check measures
-        // against.
         boolean quarterTurned = normalizedRotation == 90 || normalizedRotation == 270;
         int uprightWidth = quarterTurned ? bitmap.getHeight() : bitmap.getWidth();
         int uprightHeight = quarterTurned ? bitmap.getWidth() : bitmap.getHeight();
-        InputImage input = InputImage.fromBitmap(bitmap, normalizedRotation);
-        recognizer.process(input)
-                .addOnSuccessListener(
-                        result -> callback.onResult(
-                                result.getText().trim(),
-                                measure(result),
-                                measureFraming(result, uprightWidth, uprightHeight)))
-                .addOnFailureListener(callback::onError)
-                .addOnCompleteListener(ignored -> bitmap.recycle());
+        com.google.android.gms.tasks.Task<Text> task;
+        try {
+            InputImage input = InputImage.fromBitmap(bitmap, normalizedRotation);
+            task = recognizer().process(input);
+        } catch (RuntimeException | OutOfMemoryError error) {
+            bitmap.recycle();
+            callback.onError(error instanceof OutOfMemoryError ? memoryError() : error);
+            return;
+        }
+        task.addOnCompleteListener(completed -> {
+            String text = null;
+            OcrQuality quality = null;
+            PageFraming framing = null;
+            Throwable failure = null;
+            try {
+                if (completed.isSuccessful()) {
+                    Text result = completed.getResult();
+                    text = result.getText().trim();
+                    quality = measure(result);
+                    framing = measureFraming(result, uprightWidth, uprightHeight);
+                } else {
+                    failure = completed.getException();
+                    if (failure == null) failure = new IllegalStateException("OCRが中断されました");
+                }
+            } catch (RuntimeException | OutOfMemoryError error) {
+                failure = error instanceof OutOfMemoryError ? memoryError() : error;
+            } finally {
+                // Release BEFORE the callback can queue preview/next-shot allocation.
+                // A callback exception must not prevent disposal or call it twice.
+                bitmap.recycle();
+            }
+            if (failure == null) callback.onResult(text, quality, framing);
+            else callback.onError(failure);
+        });
+    }
+
+    private static IllegalStateException memoryError() {
+        return new IllegalStateException("OCRのメモリが不足しています。写真を保持して終了・再開してください");
     }
 
     /**
-     * Judges whether the page is wholly inside the frame from where the
-     * recognised lines sit.
+     * Measures recognized TEXT bounds, not physical paper corners. Blank margins,
+     * missed lines, figures and an obstructed page cannot be certified by OCR.
      */
     private static PageFraming measureFraming(Text result, int width, int height) {
         PageFraming.Builder framing = PageFraming.builder(width, height);
@@ -99,13 +134,12 @@ public final class JapaneseOcr implements AutoCloseable {
     /**
      * Longest edge below which the decoder refuses to halve again.
      *
-     * <p>Two measurements bound this. {@code docs/hardware-measurements.md} §C-2b
-     * read a 37 px column pitch off a 1920x1080 capture of an A4 page at
-     * 40-60 cm, against ML Kit's 16 px floor, and called 24 px the point
-     * beyond which more resolution stops helping. The same page at 4032 px
-     * therefore carries roughly 78 px per character, so halving it to 2016
-     * leaves about 39 px, while quartering it would land near 19 px: above
-     * the floor, but below where resolution still pays.</p>
+     * <p>This is an existing memory policy, not a guarantee of readable glyphs.
+     * ML Kit recommends roughly 16x16 pixels for each actual character; a
+     * measured line/column pitch is not a character's width or height. At
+     * 4032x3024 the sample is 2 (2016x1512 before rotation), but the retained
+     * glyph dimensions must be measured on the source photo. The PC saved-photo
+     * preflight reports this separately from the smaller HUD preview.</p>
      *
      * <p>The reason to subsample at all is memory. 4032x3024 decoded whole
      * needs about 48 MB, and the glasses run with {@code ro.config.low_ram},
@@ -138,8 +172,8 @@ public final class JapaneseOcr implements AutoCloseable {
         BitmapFactory.Options options = new BitmapFactory.Options();
         options.inSampleSize =
                 sampleSizeFor(Math.max(bounds.outWidth, bounds.outHeight));
-        // Recognition is on glyph shape and the HUD is monochrome green
-        // regardless, so 16-bit colour halves the bitmap again for nothing.
+        // Preserve the existing RGB565 memory budget. Its optical/OCR impact
+        // must be evaluated on real saved photos, not inferred from HUD colour.
         options.inPreferredConfig = Bitmap.Config.RGB_565;
         return BitmapFactory.decodeByteArray(
                 encodedImage, 0, encodedImage.length, options);
@@ -163,7 +197,12 @@ public final class JapaneseOcr implements AutoCloseable {
     }
 
     @Override
-    public void close() {
-        recognizer.close();
+    public synchronized void close() {
+        if (closed) return;
+        closed = true;
+        if (recognizer != null) {
+            recognizer.close();
+            recognizer = null;
+        }
     }
 }

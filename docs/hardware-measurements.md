@@ -27,6 +27,7 @@ Status: Frozen measurement record. 集約 2026-09-14。
 | C-3 | グラス直結の撮影・LED・つる開閉 | `:glassprobe` 0.1.0、build `1.25.012-20260901-150201` | 2026-09-04 |
 | E | スマホ内推論 | F-51F、Android 16 / API 36、`MT6897`、llama.cpp | 2026-09-12〜09-14 |
 | F | スマホ側 CDP 終端の到達性 | F-51F、Android 16 / API 36、`com.android.chrome`、chromium/src main | 2026-09-14 |
+| F-6 | スマホの Chrome を CDP で実操作 | F-51F、Android 16 / API 36、Chrome/153.0.8010.36 | 2026-09-15 |
 
 # A. 端末とプラットフォーム
 
@@ -126,6 +127,50 @@ output, the phone owns the UI, YodaOS reserves the gestures so a third-party app
 cannot receive them — describes life *inside a CUSTOMVIEW overlay*. It is not a
 platform limit. **Those documents are not a trustworthy source for what the
 platform can do; the AAR is.**
+
+## B-0-2. 任意バイトの双方向チャネル（`javap`、2026-09-14）
+
+**グラス側アプリは自前の Wi-Fi を持たなくてもスマホへデータを返せる。** 同じ
+`IMediaStreamService` に、任意の `byte[]` を双方向に運ぶ口がある。`uploadAndInstallApk`
+の一覧（B-0）を写したときに見落としていた。
+
+```java
+// スマホ → グラス。1.0.1 と 1.1.1 の両方に存在
+int  sendCustomCmd(String name, byte[] payload)
+boolean registerCustomCmdCallback(ICustomCmdCallback cb)
+boolean unregisterCustomCmdCallback(ICustomCmdCallback cb)
+
+// グラス → スマホ
+interface ICustomCmdCallback { void onCustomCmdResult(String name, byte[] payload); }
+
+// 1.1.1 のみ
+int sendCustomCmdStream(String name, byte[] header, byte[] payload)
+```
+
+1.1.1 の session 層にも同じものがある。`CxrSession.sendCustomCmd(String, Caps, byte[])` と
+`addCustomCmdCallback(ICustomCmdSessionCallback)`（同じ `onCustomCmdResult(String, byte[])`）。
+同梱サンプル `ExternalAppClient` は、この口とアプリのライフサイクルを1つのクライアントに
+まとめている：`appUploadAndInstall` / `appStart(pkg, boolean, cb)` / `appStop` /
+`appIsInstalled` ＋ `sendCustomCmd(String, Caps)` / `sendCustomCmd(String, Caps, byte[])` /
+`setCXRCustomCmdCbk(ICustomCmdCbk)`。
+
+`com.rokid.cxr.Caps` は 1.0.1 の jar に同梱。1.1.1 の jar には無く、
+`com.rokid.cxr:cxr-service-bridge` が供給する（`Caps$Binary` / `Caps$Value` 込み）。
+
+**本リポジトリはこの API を1度も呼んでいない**（`grep -rl CustomCmd android-relay` は 0 件、
+2026-09-14）。
+
+### まだ測っていないこと（これらを検証と呼ばない）
+
+1. **グラス側の対向 API が未確認。** このAARはスマホ側クライアントである。グラス側アプリが
+   `onCustomCmdResult` を受け、スマホへ送り返すための YodaOS 側 API は、この成果物には
+   入っていない。**有無は不明。**
+2. **実機のサービスが実装しているか不明。** C-1 で測った Hi Rokid は CXR-L service
+   `1.0.0 code 10000`。AAR に口があることは、その service が応答することを意味しない。
+3. **ペイロード上限が不明。** Binder のトランザクションは概ね 1 MB で、`takePhoto` の
+   JPEG はそれを超えうる。`sendCustomCmdStream`（1.1.1 のみ）の存在は分割前提を示唆するが、
+   上限も分割規約も測っていない。
+4. `uploadAndInstallApk` / `openApp` は実機で成功していない（`CLAUDE.md`）。
 
 ## B-1. リンク対象 AAR に、未使用の上位 API 一式がある
 
@@ -524,16 +569,24 @@ Rokid 公開ドキュメントの `cxr-l/api-reference` が記述しているの
 
 ## E-1. 2026-09-13 時点の到達状態
 
-**目的:** グラス単体で教材を撮影し、答案の全内容を小問単位で読む。150分の試験時間、
-スマホはモバイル回線、グラスはWi-Fiなし。**難問はスマホ内ローカルモデルで解く**（本筋）。
-GPT中継は**最終手段として圏内に残す**（外さない）。PC は APK ビルドとモデル転送だけに使い、
-現場のデータ経路には入れない。順位の正本は
-[`tasks/plan.md#answer-route-20260912`](../tasks/plan.md)。
+> **測定時点の前提であり、現在の経路ではない。** 2026-09-14 に利用者が
+> `ROKID_SOLVER=chatgpt-web` を決定し、スマホ内ローカルは不採用になった
+> （[`tasks/plan.md#answer-route-20260914`](../tasks/plan.md)）。以下の E 節は
+> 測定値を証拠として保存するためのもので、E 節の「本筋」「最終手段」という
+> 順位づけは**測定当時のもの**である。数値は有効、順位は無効。
 
-**利用者からの訂正（守ること）:**
+**目的（当時）:** グラス単体で教材を撮影し、答案の全内容を小問単位で読む。150分の試験時間、
+スマホはモバイル回線、グラスはWi-Fiなし。難問はスマホ内ローカルモデルで解く（当時の本筋）。
+GPT中継は最終手段として圏内に残す（外さない）。PC は APK ビルドとモデル転送だけに使い、
+現場のデータ経路には入れない。順位の正本は当時
+[`tasks/plan.md#answer-route-20260912`](../tasks/plan.md) だった。
 
-1. 2026-09-12 昼に「スマホ内推論は側道」と書いたのは誤り。**本筋である。**
-2. GPT中継を取り下げようとしたのも誤り。**圏内に残す。**
+**利用者からの訂正（2026-09-13 時点。1 と 2 は 2026-09-14 の決定が上書きした）:**
+
+1. ~~2026-09-12 昼に「スマホ内推論は側道」と書いたのは誤り。**本筋である。**~~
+   → 2026-09-14 にローカルは不採用。
+2. ~~GPT中継を取り下げようとしたのも誤り。**圏内に残す。**~~
+   → API キー経路は `ROKID_SOLVER_TIERS` のフォールバック段として残る。主経路は chatgpt-web。
 3. **実証の前に計算する。** 手段を先に走らせて全体手順を見失わない。
 4. 実ページ規模は撮影より先に**公式の共通テスト・東大入試資料から**把握する。
 
@@ -959,12 +1012,23 @@ SELinux の MCS カテゴリ分離のとおりで、**アプリ間では繋が�
 | `am start ... chatgpt.com` で前景へ | inode 5248971 で listen |
 | `KEYCODE_HOME` の 6 秒後 | inode 5248971 のまま listen |
 
-背景へ回しただけでは消えない。消えたのはメモリ圧迫を掛けた後であり、
-**解答中に落ちうる終端である**ことを意味する。会場の経路は、ソケットが消えた場合の
-復帰を持たなければならない。llama-cli を 8 回回した副作用でこれが起きたのは、
-測定の偶然ではなく、同じ端末で重い処理を走らせる構成そのものの性質である。
+> **この節の結論「背景へ回しただけでは消えない」は 2026-09-15 に否定された。**
+> F-6-1 を読むこと。Termux を前景にしただけでソケットは消え、Chrome を前景へ戻すと
+> 約2秒で別 inode に作り直された。上の表の `KEYCODE_HOME` 行は、ホーム画面へ戻した
+> 直後の 6 秒しか見ていない。**より長い背景化や別アプリの前景化は試していなかった。**
+> 数値は有効、結論は無効。
 
-### F-5-3. 端末内 adb はペア設定が要る（実測、未完了）
+消えたのはメモリ圧迫を掛けた後でもあり、**解答中に落ちうる終端である**ことを意味する。
+会場の経路は、ソケットが消えた場合の復帰を持たなければならない。llama-cli を 8 回
+回した副作用でこれが起きたのは、測定の偶然ではなく、同じ端末で重い処理を走らせる
+構成そのものの性質である。
+
+### F-5-3. 端末内 adb はペア設定が要る（実測、**2026-09-15 に解決**）
+
+> **解決済み。F-6-6 を読むこと。** 6桁コードは要らなかった。`adb tcpip 5555` で
+> 平文 TCP に切り替えると、端末内 client は `/data/misc/adb/adb_keys` の許可制を
+> 通る。この節が「要る」と書いたのはワイヤレスデバッグ（TLS）に限った話で、
+> それが唯一の経路だと決めつけていた。
 
 `pkg install android-tools` で Termux に adb 1.0.41（35.0.2）が入った。しかし
 
@@ -1004,6 +1068,567 @@ Error: Unsupported platform: android
    Python の WebSocket クライアントだけになる。
 2. proot で glibc の Linux を動かし、その中の node に `platform === "linux"` を
    名乗らせる。実装は変えずに済むが、メモリの厳しい端末に別のユーザランドを足す。
+
+**採用は 1**（2026-09-14、利用者承認）。実装は `app/solvers/cdp.py`。結果は F-6。
+
+## F-6. スマホの Chrome を CDP で実際に動かした（実機、2026-09-15）
+
+機体 F-51F、Android 16 / API 36。`com.android.chrome` は **Chrome/153.0.8010.36**。
+PC から `adb forward tcp:9222 localabstract:chrome_devtools_remote` を張って測った。
+**PC を経路に入れた測定であり、会場トポロジの検証ではない。** 端末内 `adb forward`
+はまだ通っていない（F-6-3）。証明できたのは「スマホの Chrome が CDP を話す」
+ことと「`app/solvers/cdp.py` がその Chrome で動く」ことである。
+
+### F-6-1. DevTools ソケットは Chrome が前景にある間だけ存在する（実測）
+
+F-5-2 は「背景化だけでは消えない」と記録していた。**これは限定しすぎだった。**
+
+```
+[Termux が前景]      cat /proc/net/unix | grep devtools  →  出力なし
+[Chrome を前景へ]    monkey -p com.android.chrome -c android.intent.category.LAUNCHER 1
+[+1s]  なし
+[+2s]  5707196 @chrome_devtools_remote
+[+3s〜+6s]  同じ inode で継続
+```
+
+先に観測した inode は 5412234 で、再出現時は 5707196。**同じソケットが戻るのではなく
+作り直される。** 画面は `mWakefulness=Awake` のままで、変わったのは前景アプリだけ。
+
+会場への帰結: **Chrome を前景に置いたままにする。** サーバ（Termux の FastAPI）は
+背景で動かす。「画面を点けたまま伏せて置く」という 2026-09-15 の運用決定は、
+画面だけでなく**前景アプリ**も固定する必要がある。
+
+### F-6-2. 終端は最初の数回を拒否してから応答する（実測）
+
+```
+curl -sS -m 10 http://127.0.0.1:9222/json/version
+  try1 rc=28 timed out after 10004 ms
+  try2 rc=28 timed out after 10003 ms
+  try3 rc=0  {"Browser":"Chrome/153.0.8010.36", ...
+           "webSocketDebuggerUrl":"ws://127.0.0.1:9222/devtools/browser"}
+```
+
+Chrome が背景のときは 5 回とも `RemoteDisconnected`（F-6-1 のとおりソケットが無い）。
+**1 回の拒否は「ブラウザが無い」ではない。** `cdp_available()` と
+`app/solvers/cdp.py` の両方を再試行にしたのはこの実測による。単発判定のままなら、
+動いているブラウザを不在と判断して次の solver tier へ落ちる。
+
+### F-6-3. 端末内 adb はまだ通っていない（実測、未了）
+
+```
+$ ssh ... 'adb connect 127.0.0.1:36763'    failed to connect to 127.0.0.1:36763
+$ ssh ... 'adb connect 192.168.0.30:36763' failed to connect to 192.168.0.30:36763
+$ ssh ... 'adb connect 127.0.0.1:5555'     failed to connect: Connection refused
+```
+
+PC からは同じ `192.168.0.30:36763` に繋がる。port は開いていて、Termux の鍵が
+ペアされていないだけである（`getprop` は `sys.usb.config=mtp,adb`、
+`service.adb.tcp.port` は空。ワイヤレスデバッグの無作為 port）。
+**`adb pair` に要る 6 桁コードは設定アプリが表示するもので、利用者の操作が要る。**
+PC の `~/.android/adbkey` を複製する案は、秘密鍵の複製にあたるため採らない。
+
+### F-6-4. `app/solvers/cdp.py` の各操作（実測、スマホの Chrome に対して）
+
+| 操作 | 結果 |
+|---|---|
+| `connect_over_cdp` → `Target.getTargets` | 成功。page target 2 件 |
+| `new_page` / `goto` / `url` | 成功 |
+| `locator().count()` / `is_visible()` / `inner_text()` | 成功 |
+| `fill()` 日本語 30 字（`√2`・`x²` 込み） | **完全一致で往復** |
+| `fill()` 36,000 字 | `value.length` が 36000。Playwright 期の 34,205 字と同等 |
+| `fill()` 2 回目（消去して入れ直し） | 成功 |
+| `set_input_files()` 6 MB の PDF 1 件 | `files[0].size` = 6,291,465、**1.50 s** |
+| `set_input_files()` 200 KB 画像 8 件 | `files.length` = 8、**0.25 s** |
+| `click()`（`Input.dispatchMouseEvent`） | ハンドラが発火 |
+
+添付は `DOM.setFileInputFiles` を使わない。あれはブラウザ側のファイルパスを指すもので、
+Chrome for Android からサーバのファイルは見えない。ページへ `DataTransfer` として
+バイト列を渡している。**6 MB が 1.50 s** なので、冊子1冊の PDF は現実的な範囲に入る。
+
+**未測定:** chatgpt.com の実ページに対しては1度も動かしていない。セレクタが今も
+合うか、ProseMirror が `Input.insertText` を受けるかは未確認。
+
+### F-6-6. 端末内 adb と、スマホ単独での CDP 実行（実測、2026-09-15）
+
+**PC をデータ経路から外した状態で通った。** F-5-3 が「ペア設定未了」としていた壁は、
+6桁コードではなく `adb tcpip` で越えた。
+
+```
+[PC]    adb -s 192.168.0.30:36763 tcpip 5555      restarting in TCP mode port: 5555
+[端末]  adb connect 127.0.0.1:5555                connected to 127.0.0.1:5555
+[端末]  adb -s 127.0.0.1:5555 forward tcp:9222 localabstract:chrome_devtools_remote
+[端末]  curl -m 8 http://127.0.0.1:9222/json/version
+        try1 OK  {"Browser":"Chrome/153.0.8010.36", ...}
+```
+
+ワイヤレスデバッグ（TLS・無作為 port）は client 鍵のペアが要るが、`adb tcpip` の
+平文 TCP は `/data/misc/adb/adb_keys` の許可制で、端末内 client はそこを通った。
+**PC の秘密鍵を複製する必要はない。**
+
+Termux の Python 3.14.6 に `pip install websockets`（17.1）を入れ、`app/solvers/cdp.py`
+をそのまま実行した。**PC は経路に入っていない**（Termux Python → 端末内 forward →
+Chrome for Android）。
+
+```
+connected; page targets: 3
+japanese exact: True
+36k fill: 36000
+6MB pdf: size=6291465 in 1.57s
+click -> clicked
+PHONE-ONLY CDP OK
+```
+
+PC 経由の F-6-4（6 MB が 1.50 s）と同等。**転送層は会場トポロジで成立する。**
+
+Termux に既にあったもの: fastapi 0.99.1、uvicorn 0.52.4、pillow 12.3.0、httpx 0.28.1、
+python-dotenv 1.2.3、python-multipart 0.0.32。**fastapi は `requirements.txt` の
+`>=0.110` を満たしていない**ので、サーバ常駐の前に上げる必要がある。
+
+### F-6-7. スマホの chatgpt.com のセレクタ（実測、2026-09-15。送信なし）
+
+`chatgpt.com` を開いて DOM を読んだだけで、メッセージは送っていない。
+UA は `...Android 10; K...Mobile Safari/537.36`、`window.innerWidth` = 426。
+
+| 定数 | セレクタ | 一致数 | 判定 |
+|---|---|---|---|
+| `COMPOSER_SEL` | `#prompt-textarea` | 1 | **合う**。`isContentEditable` が true |
+| `FILE_INPUT_SEL` | `input[data-testid="upload-photos-input"]` | 1 | **合う** |
+| `FILE_UPLOAD_SEL` | `input#upload-files` | 1 | **合う**（`accept=""`・`multiple`） |
+| `ASSISTANT_SEL` | `[data-message-author-role="assistant"]` | 0 | 会話が無いので当然 |
+| `STOP_SEL` | `[data-testid="stop-button"]` | 0 | 生成中のみ出るので当然 |
+| `ATTACHMENT_SEL` | `form img, [data-testid*="attachment"]` | 0 | 添付が無いので当然 |
+| `NEW_CHAT_SEL` | `[data-testid="create-new-chat-button"]` | **0** | **モバイルには無い** |
+
+ログイン状態: `login-button` / `signup-button` が 0 件、composer が編集可能。
+**サインイン済み**である（未サインインの shell は composer を持たない、F-5 系の記録）。
+
+ページ上の `input[type=file]` は5つ。**デスクトップ実測（2026-09-14）から入れ替わっている。**
+
+```
+upload-files            accept=""            multiple   ← PDF・音声はここ
+upload-photos           image/*              multiple   (testid=upload-photos-input)
+upload-media            image/*,video/*      multiple
+upload-camera           image/*              multiple
+upload-fast-tools-files .pdf,.doc,...,.7z    multiple   ← 新規。desktop の upload-media-files は消えた
+```
+
+`NEW_CHAT_SEL` が無い件は動作を止めない。`start_new_chat()` は控えが無ければ
+`page.goto(CHAT_URL)` へ落ちるので、新しいチャットは作れる。モバイルで
+new/chat/sidebar を含む testid は `open-sidebar-button` と `composer-plus-btn` の2つだけで、
+新規チャットは折りたたまれたサイドバーの中にある。`ROKID_CHATGPT_CHAT_SCOPE=subject`
+なら 1 科目に 1 回しか呼ばれないので、ページ読み込み 1 回の差でしかない。
+
+### F-6-8. スマホ上で FastAPI が動く（実測、2026-09-15）
+
+`app/` を Termux へ置き、`python3 -m uvicorn app.main:app --host 127.0.0.1 --port 8000`
+で起動した。**PC は経路に入っていない。**
+
+```
+GET /health      200  {"status":"ok","versions":{"app_version":"0.28.0", ...}}
+GET /v1/version  200  solvers[] に {"name":"chatgpt-web","provider_version":"web-ui",
+                                    "offline":false,"ready":true}
+```
+
+`chatgpt-web` の `ready:true` は、`cdp_available()` が**スマホ自身の Chrome を
+見つけた**ことを意味する（F-6-6 の端末内 `adb forward` 経由）。
+
+**FastAPI は 0.99.1 のまま動く。** `requirements.txt` の `fastapi>=0.110` は
+この端末では満たせない。0.100 以降は pydantic 2 を要求し、`pydantic-core` は
+Rust 拡張で Android wheel が無く、`pip install` は maturin で落ちる
+（`app/llm_http.py` が openai SDK を避けているのと同じ理由）。
+
+```
+ERROR: Failed to build 'pydantic-core' when installing build dependencies
+```
+
+実際に載っている組み合わせ: fastapi 0.99.1 / pydantic 1.10.26 / starlette 0.27.0 /
+uvicorn 0.52.4 / pillow 12.3.0 / httpx 0.28.1 / websockets 17.1。
+本アプリは素の `BaseModel` とスカラ型しか使わず `Annotated` も無いので、
+どちらの major でも動く。よって下限を `fastapi>=0.99` に緩めた。
+
+### F-6-9. スマホだけで解答が返った（実測、2026-09-15）
+
+**会場トポロジで解答が1件返った。PC はどこにも入っていない。**
+
+```
+browser: Chrome/153.0.8010.36 | chat scope: subject
+prompt : 2x+3=7 を解け。（system: 解答用紙に書く内容だけを出力）
+elapsed: 19.5s
+reply  : 'x=2'
+```
+
+経路は Termux Python → `app/solvers/cdp.py` → 端末内 `adb forward tcp:9222` →
+Chrome for Android → chatgpt.com。添付なし、1 生成。
+
+ここへ来るまでに**欠陥が2つ**あり、どちらも stub では見えなかった。
+
+#### 欠陥1: Enter は送信ではない（モバイル）
+
+`send_and_read` は `keyboard.press("Enter")` で送っていた。デスクトップでは動くが、
+**モバイルのウェブ composer では Enter は改行**である。3 回の attempt がそれぞれ
+Enter を押し、composer に空行を足しただけで、1 件も送信されなかった。
+利用者が画面で気付いて指摘した。
+
+送信ボタンは `[data-testid="send-button"]`（`aria-label="プロンプトを送信する"`）。
+**composer が空のときは DOM に出ない**ので、F-6-7 の空ページ調査では見つからなかった。
+文字を入れた状態で調べ直して判明した。`submit()` はボタンを優先し、無ければ Enter。
+
+#### 欠陥2: 座標のマウスイベントは React に届かない
+
+ボタンを押すようにしても送信されなかった。**推測せずページを読んだ**（送信なし）:
+
+```
+composer length: 44          ← 文章は入ったまま
+conversation started: False  ← URL が /c/... にならない
+[data-message-author-role] total: 0
+```
+
+`Locator.click()` は `Input.dispatchMouseEvent` で要素中心の座標を撃っていた。
+`data:` ページのインライン `onclick` は発火するが、chatgpt.com の React には届かない。
+`HTMLElement.click()` へ変更し、無害なボタンで先に確かめた:
+
+```
+[data-testid="open-sidebar-button"] を click()
+nav-ish elements before: 1  →  after: 41
+```
+
+座標打ちは layout・ズーム・可視タブに依存する。要素そのものを呼ぶほうが単純で確実。
+
+#### 手順の教訓
+
+生成を 3 回無駄にした。1 回目は出力の取り逃し、2 回目は欠陥1、3 回目は欠陥2。
+**送信のたびに1つずつ欠陥を見つけた。** 送信前にページ状態を読んでいれば
+2 つとも 1 回で分かった。実ページに対しては、送る前に読む。
+
+### F-6-10. 添付はモデルに届く。ただしスマホでは桁違いに遅い（実測、2026-09-15）
+
+`DataTransfer` で入れた画像は composer の添付として載り、**モデルに届く**。
+PIL で 900x600 の白画像に三角形と `6391` を描いて送り、「画像に描かれている数字を
+そのまま答えよ」と聞いた。返答は **`691`**。桁を 1 つ落としているが、
+数字を読んでいる以上**画像は確実に届いている**（`6391` は推測できない）。
+誤読は試験画像の作りが悪い（PIL 既定のビットマップフォントを 1px ずらして
+9 回重ねた潰れた字）。読字精度の測定ではない。
+
+添付が composer に載ったことの確認:
+
+```
+attach confirmed: True
+thumbnails now  : 1
+conversation url: https://chatgpt.com/c/6aa84bb6-...   （user メッセージが記録された）
+```
+
+#### この 1 件は所要時間の測定にならない
+
+送信から確定まで約 280 s かかったが、**その間 OpenAI 側の安全性チェックが走っていた**
+（利用者が画面で確認）。したがってこれは画像経路の latency ではない。
+
+```
+t+  0.0s stop=1 msgs=1 text=''      ← user のみ。assistant 要素すら無い
+t+130.4s stop=1 msgs=2 text=''      ← assistant が現れる
+t+140.5s stop=0 msgs=2 text='691'   ← 確定
+```
+
+比較のため: テキストのみ（`2x+3=7 を解け`）は同じ端末で **19.5 s**。
+PC Chrome 152 での画像付きは 9.0 s（2026-09-14）。
+
+**タブの可視性は原因ではない**ことだけは確かめた。画像の会話は
+`visibility=visible`、19.5 s で返ったテキストの会話はむしろ `hidden=True` だった。
+
+いったん「スマホでは生成が桁違いに遅い」と書いたが、**誤りだったので取り消す**。
+待ち時間の内訳を確かめずに、観測した総時間をそのまま latency と呼んでいた。
+安全性チェックを引いたのは、試験用に描いた白地・三角形・潰れた数字という
+不自然な画像である可能性が高い。実際の試験ページ画像で測り直すまで、
+この数字を根拠に既定値を動かさない。
+
+**未測定:** 通常の試験ページ画像での所要時間。冊子 PDF（6 MB、複数ページ）での
+所要時間。`ROKID_CHATGPT_TIMEOUT_S=180` と、遅い生成 2 連続で送信を止める
+`SLOW_S=40` / `SLOW_STREAK=2` のブレーキがこの端末で妥当かどうか。
+ブレーキは 2026-09-14 にアカウントが止まった実測から入れたもので、
+**閾値の変更は利用者の判断が要る**。
+
+`adb forward tcp:9222` を張ったまま `py -3.12 -m pytest -q` を回したところ、
+`tests/test_chatgpt_web_live.py` の門（`cdp_available() is None` で skip）が
+**実機の Chrome を見つけてライブ試験に入った。** 878.60 s 走り、
+`test_a_deck_solves_through_the_server_threadpool` が
+「the deck solved nothing through the server」で失敗。**ChatGPT への送信は
+発生していない**（利用者確認）。到達可能性は「動かしてよいか」の答えではない。
+門を `ROKID_CHATGPT_LIVE=1` との AND に変更した。開発機で 9222 を使わないこと。
+
+<a id="g-local-asr"></a>
+
+## G. F-51Fへの更新と端末内ASR（2026-09-15）
+
+Status: Frozen measurement。APK導入、スマホ内CDP/FastAPI/ASRを実測。
+Runs on: Windowsは転送と起動指示のみ。推論、VAD、API、原音保存はF-51FのTermux内。
+グラスの撮影/録音やスマホAPを通した試験ではありません。
+
+### G-1. 対象と導入
+
+測定tuple: F-51F / Android 16 / incremental `64c964-a8f54` / Python 3.14.6 /
+fastapi 0.99.1 / pydantic 1.10.26 / uvicorn 0.52.4 / Chrome 153.0.8010.36。
+グラスのincrementalは `1.25.015-20260903-150201`、Hi Rokidは
+`G1.13.8.0828` (code 10130008)。今回の経路ではCXR-Lを使用していません。
+APKのソースcommitは `8163b5f`、サーバの配布commitは `12004a4`。
+
+利用者は対象グラスへのAPK導入とF-51Fの更新・ASR設定を承認し、LED監査は
+システム固定のため不要と指定しました。外部LED観察は実施していません。
+
+- `adb devices -l` → グラス `192.168.0.4:5555`、F-51F `192.168.0.30:38615`、
+  F-51Fの別mDNS endpoint。指定したserialを全操作に使用。
+- 旧APKをpullして保全し、`apksigner verify --print-certs` で署名SHA-256
+  `906307478018e09e2937cfd8042a674d27598767577e08a304472aae407ccacc` を照合。
+- `$env:AGENT_APPROVED=1; adb -s 192.168.0.4:5555 install -r <APK>` → `Success`。
+  `dumpsys package dev.rokid.docscanglass.doc` → versionCode 8、versionName 0.7.0。
+  APK SHA-256 `599BC0CC4F8151373B0EEFD0B8A62D71C089ABC9383AFA6C1BF60A2EFCC2E4A6`。
+- Termuxの空プロンプトを画面で確認して `termux-wake-lock` / `sshd` を起動。
+  SSH接続拒否から復旧。Chromeを前景へ戻して、端末内ADBのserial `emulator-5554` から
+  `forward tcp:9222 localabstract:chrome_devtools_remote` → `9222`。
+- 旧コードとSQLite backupを `~/rokid-backups/pre-multimodal-8163b5f` に保全。
+  移行前後の `PRAGMA quick_check` → `ok`、既存9テーブルの件数は全て0のまま。
+  pagesの撮影時刻とsolutionsの図/資料不足メタデータ列の存在を確認。
+- サーバ待受は部品試験用 `127.0.0.1:8000`。AP向け公開は未適用。
+  `ROKID_REAL_MODE` は既定0、cloud analyzer未設定、API認証キー未設定なので、
+  現行の実機受け入れにあるreal-mode/認証条件を満たしたとの主張はしません。
+
+スマホ内HTTPの実行結果:
+
+| コマンド/リクエスト | 出力 |
+|---|---|
+| `python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --no-access-log` | `Application startup complete` |
+| `GET /health`、`GET /v1/version` | HTTP 200、APP/APIは配布コードと一致 |
+| `GET /v1/listening-ready` | HTTP 200、`ready: true`, `asr: whisper.cpp`, `sample_rate: 16000` |
+| `GET /v1/version` のsolver情報 | `chatgpt-web` が `ready: true`, `offline: false` |
+| `GET http://127.0.0.1:9222/json/version` | HTTP 200、Chrome 153.0.8010.36 |
+
+この測定でChatGPTへ質問や添付を送信していません。
+終了時の `dumpsys power/window` はAwake、Chrome前景、ScreenOffTimeout 120000ms。
+長時間の画面保持や、スマホを伏せた運用の証明ではありません。
+
+### G-2. ビルド成果物と改行
+
+`bash scripts/build_local_asr.sh` をスマホ上で実行。cmake 4.4.3、clang 21.1.8。
+whisper.cppの固定revisionは `2eeeba56e9edd762b4b38467bab96c2517163158`。
+
+最初の配布ではWindowsの `git archive` がscriptをCRLFへ変換し、
+`set: pipefail CR: invalid option name` で停止しました。Git blobのCRLFは0件、
+tar内では17件でした。`.gitattributes` の `*.sh text eol=lf` で配布物もLFに固定。
+再配布後のスマホで `bash -n scripts/build_local_asr.sh` → exit 0。
+
+- 修正版tar SHA-256: `3d51669958feecdef0b1b39db9ea2a3301cc0df11f94cffec431f4cd483dab61`。
+- ビルド出力: `[100%] Built target whisper-cli`、モデル2個の `verified` 出力。
+- CLI SHA-256: `5d8b9f5985f7b52da567f13fb7ee18a21ab06f01eb3c6c5f9a116a167e1f9c62`。
+- base.en SHA-256: `a03779c86df3323075f5e796cb2ce5029f00ec8869eee3fdfb897afe36c6d002`。
+- Silero VAD SHA-256: `2aa269b785eeb53a82983a20501ddf7c1d9c48e33ab63a41391ac6c9f7fb6987`。
+
+### G-3. 速度と元音声時刻
+
+入力は固定した公式whisper.cppのサンプル音声。padded版は前後に3秒ずつ無音を追加。
+スマホ内の `multimodal.env` を読み込み、次を実行しました。
+
+| コマンド | 音声長 | wall秒 | 実時間比 | segmentの元音声時刻 |
+|---|---:|---:|---:|---|
+| `python scripts/benchmark_local_asr.py data/local-asr/jfk.wav` | 11秒 | 5.109 | 0.464 | 150–10790ms |
+| `python scripts/benchmark_local_asr.py data/local-asr/jfk-padded.wav` | 17秒 | 5.814 | 0.342 | 3160–13620ms |
+
+実時間比は処理秒÷音声秒。短いサンプルでは1未満でした。
+モデル読み込みを含みます。30分継続、熱、撮影/OCRとの競合は評価していません。
+
+### G-4. 2チャンクAPIと原音保全
+
+スマホ上の `python -` からhttpxで、padded音声を2回連結した34秒を送信。
+テスト文書はdocument_id 1で、タイトルにASR smokeと公式サンプルであることを明記。
+撮影入力を使った試験ではありません。
+
+1. `POST /v1/documents` で作成。
+2. `POST /v1/documents/1/audio-chunks` にsequence 0（30秒、480000 samples）と
+   sequence 1（前区間との1秒重複を含む5秒、80000 samples）を送信。
+3. 同じsequence 1を再送し、応答が完全一致することをassert。
+4. `POST /v1/documents/1/audio-complete`、`expected_chunks=2`, `total_samples=544000`。
+5. 保存されたoriginal.wavのPCMと入力PCMを比較し、完全一致をassert。
+
+出力: `retry: identical`, `status: complete`, `chunks: 2`, `total_samples: 544000`,
+`original_preserved: true`。ASRはsequence 0が8.142秒（実時間比0.271）、
+sequence 1が3.893秒（0.779）。原音PCM SHA-256は
+`45c3f8b866723b62dd1ac54187c19e36ed140ba91ab0e0e16401946199a97614`。
+メタデータと原音はスマホのdata/audio/document-1、結果はdata/asr-smoke-12004a4.jsonに保全。
+
+**未測定:** グラスのマイクとカメラの同時使用、3秒実画像確認、手動取り直し、消灯/復帰、
+AP経路、長時間運用、実リスニングの正答率、ChatGPTの原音受理、画像/PDFの精度差。
+
+## H. 起動二択と診断キー入力（2026-09-16）
+
+Status: Frozen measurement。グラス firmware `1.25.015-20260903-150201`／serial
+`1904092623381086`／glassdoc commit `db4255d`と入力ログ2行を加えた診断APK。
+Runs on: Windowsからグラス `192.168.0.4:5555`。スマホAP経路の受け入れではない。
+
+`adb devices -l` は3接続。スマホのIPとmDNSは同じserial `ZY22LWGDCV` と照合済み。
+グラスの `getprop ro.serialno` は上記serial、`vendor.rkd.glasses.is_spread` は1。
+導入前の既存APKをpullして保全し、新APKと証明書SHA-256が一致することを確認した。
+承認済みの書込みは `$env:AGENT_APPROVED=1` を指定して実行した。
+
+- `aapt2 dump badging` → package `dev.rokid.docscanglass.doc`、
+  launchable activity `dev.rokid.docscanglass.doc.DocScanGlassActivity`。
+- `apksigner verify --verbose --print-certs` → `Verifies`、v2=true、証明書SHA-256
+  `906307478018e09e2937cfd8042a674d27598767577e08a304472aae407ccacc`。
+- `Get-FileHash -Algorithm SHA256` → db4255d APK
+  `A375A10D71CD158D5A98568289A1D75F59F39774CC6A5B2043A4E8ACADD4156A`。
+- `adb -s 192.168.0.4:5555 install -r <APK>` → `Success`。
+  `am start -W -n dev.rokid.docscanglass.doc/.DocScanGlassActivity` → `Status: ok`、WaitTime 3053ms。
+  ただし導入前からAsleepで、起動直後のscreencapは黒。`KEYCODE_WAKEUP` 後に二択を確認した。
+  この時間を選択から取得までの速度や、装着による起動の証拠にしない。
+- 診断ログ追加後の `./android-relay/gradlew --no-daemon :glassdoc:assembleDebug`
+  → `BUILD SUCCESSFUL in 1m 7s`。APK SHA-256
+  `F43FBFDC75C6B62C80A0640464C83D14667BC76E04CE067880841324128A279F`。
+  identityと同じ署名を照合して導入 → `Success`、起動 → `Status: ok`。
+
+診断用 `adb shell input keyevent` は表示先の既定が-1。この条件ではActivityに入力ログがなく、
+二択も変わらなかった。`dumpsys input` のfocused displayは0。
+次のように明示するとログと選択画面の双方に反映された。
+
+| `adb -s 192.168.0.4:5555 shell` 以下のコマンド | 出力・観測 |
+|---|---|
+| `input -d 0 keyevent KEYCODE_NOTIFICATION KEYCODE_DPAD_RIGHT KEYCODE_DPAD_DOWN` | `action=SWIPE_FORWARD` 1回、リスニングを選択 |
+| `input -d 0 keyevent KEYCODE_NOTIFICATION KEYCODE_DPAD_LEFT KEYCODE_DPAD_UP` | `action=SWIPE_BACK` 1回、通常の読取へ戻る |
+| `dumpsys media.camera` | 前後とも `Active Camera Clients: []` |
+
+これは合成KeyEventの測定で、物理スワイプの重複・相関幅を検証したものではない。
+タップによる開始、撮影、録音、ChatGPT送信は行っていない。LEDの物理観察も行っていない。
+privateのno-backup領域に暗号化設定ファイルが作られたが、実API鍵の設定・認証再起動は未実施。
+画面証跡はignoredの `data/device-setup/startup-display0-{listening,normal}.png` に保全した。
+
+## I. 認証設定・LAN接続・再起動復号（2026-09-16）
+
+Status: Frozen measurement。glassdoc/server source `8cc1ad2`。グラスfirmware
+`1.25.015-20260903-150201`、serial `1904092623381086`。F-51F `ZY22LWGDCV`、
+build `64c964-a8f54`、Python 3.14.6、Chrome `153.0.8010.36`。
+Runs on: グラス → 既存Wi-Fi → F-51F FastAPI。スマホAP経路ではない。
+
+利用者がAPI鍵の新規設定、F-51Fの `192.168.0.30:8000` 待受、グラスへの暗号化保存を承認した。
+API鍵はF-51F上で生成し、値は記録・コマンド引数・リポジトリへ出していない。
+
+- `git archive` のapp配布tar SHA-256は
+  `8bb69b9d0b8682f1c626ef534ead2975073592d285e219644242454f0dabf75a`。
+  旧appとenvを `~/rokid-backups/pre-auth-8cc1ad2-20260915T192314Z` に保存し、SQLite backupを作成。
+  `PRAGMA quick_check` → `ok`。更新前後の9テーブル行数が一致（documents 1、他0）。DB実装も同一。
+- スマホで `python -m uvicorn app.main:app --host 192.168.0.30 --port 8000 --no-access-log` を起動。
+  設定はREAL_MODE=1／client-ocr／chatgpt-web。envのmodeは0600、データディレクトリとASR設定は維持。
+  `/health` → 200、`/v1/documents/1/scan-status` → 無鍵401／誤鍵401／設定鍵200。
+- Chrome前景・Awakeに戻した後、`/v1/settings` → 200、analyzer/solver ready=true。
+  Termux前景ではCDPが失われた。readyは解答精度・会場経路の証明ではない。
+- 新APK SHA-256
+  `98A87A0E642E0E32CA9DD3F745A1155DC28ED13488B309ACCE10AFBC14D45B1C`。
+  `aapt2 dump badging` でpackage/activityを照合、`apksigner verify --print-certs` → `Verifies`。
+  署名SHA-256は `906307478018e09e2937cfd8042a674d27598767577e08a304472aae407ccacc` で既存APKと一致。
+  承認済みの `adb -s 192.168.0.4:5555 install -r` → `Success`。
+- `py -3.12 data/device-setup/verify_glasses.py` → exit 0、
+  `restart_decryption_and_resave=true`、`fresh_ciphertext=true`、`plaintext_setup_absent=true`。
+  アプリUIDから同じscan-statusへ無鍵401／設定鍵200。privateの一時設定ファイルは除去され、
+  再起動後のconnection.binはGDC1ヘッダーの暗号文。設定URL・鍵の平文は含まれない。
+- この設定確認時点ではカメラを開始していない。後の利用者操作による撮影は§Jに分ける。
+  AP／security設定は変更していない。全体の受け入れ、LED物理観察は未実施。
+
+## J. 取消申告・確認画像・折りたたみ後の起動（2026-09-16）
+
+Status: Frozen measurement。device/firmware/installed sourceは§Iと同じ。
+Runs on: 実グラスの利用者操作ログ、保存JPEG/OCR、F-51F DB。修正前の観測。
+
+`adb -s 192.168.0.4:5555 logcat -d -v time DocScanGlassDoc:I *:S` の保存ログから次を確認した。
+
+| 時刻（端末ログ） | 観測 |
+|---|---|
+| 04:34:50.369 | SHORT_TAPで通常撮影開始 |
+| 04:34:53.751／56.721／58.855 | 4032×3024 JPEGを取得。1434／1071／845ms |
+| 04:35:00.002 | 最良画像の確認表示ACK、delay=3000 |
+| 04:35:03.374 | local photo committed |
+| 04:35:03.521 | BACKを正規化。続いてFINALIZING |
+| 04:35:07.105／08.858／09.507／12.225 | 単タップ／前後スワイプ／BACKも届いていた |
+| 04:35:37.761 | assistserverが本アプリをforce-stop。Activity exit reason=10、USER REQUESTED |
+
+したがって「1枚キャンセル」の申告に対応した操作は、保存後のダブルタップで撮影終了へ進んでいた。
+期限内の単タップ取り直しが観測されたとは言わない。解析待ちの最初のBACKには終了確認の表示がなく、
+後のBACKまでに別入力も挟まったため、2回操作の終了確認は成立していなかった。
+
+原本をignored `data/device-setup/reported-cancel-local-scans.tar` へ保全。ローカルは
+phase=ANALYSIS、document=2、session=1、写真1枚。F-51Fはdocument ready、session reviewing、
+questions 1、solutions 0。保存JPEGは5,850,017 bytes、OCRは2文字だけだった。
+実画像は紙面が暗く、机・周囲も多い。原本は回転180度の指定を持つ。表示補正でOCR精度が直るとは扱わない。
+修正前のB5単頁ガイドは480×640の画面内に255×360。確認表示は上側62%を写真領域とする描画だった。
+
+折りたたみ後のホームでアプリ一覧を開き、スワイプで「DocScan Glasses」を選び単タップした。
+診断入力は§Hの `input -d 0` を使用。`dumpsys activity activities` →
+`topResumedActivity=dev.rokid.docscanglass.doc/.DocScanGlassActivity`。
+`fold-launcher-opened-active.png` は通常／リスニング／中断した読取の選択画面。
+カメラは開始していない。アプリ一覧からの起動経路を確認したもので、再装着だけの自動起動ではない。
+
+## K. 向き・拡大確認・スマホからの開閉復帰（2026-09-16）
+
+Status: Frozen measurements。開閉試験のAPKはbde4f09、グラスは§Jと同じ1904092623381086／1.25.015-20260903-150201、F-51FはZY22LWGDCV。
+Runs on: 再起動watcherはF-51F Termux → 同一Wi-Fiのグラス。画像QAとbuildはWindows。
+
+利用者は枠の改善を確認したが、写真が小さく文字・ブレを判別しづらい、角度も違うと申告。
+さらに単頁ではなくB5見開きの枠と、少し近い距離での撮影を指定した。
+
+- 直近保存JPEG2枚は4032×3024、EXIF Orientation=1、保存rotation=180、OCRは17／26文字。
+  Android Bitmap/Matrixで90／180／270を描画すると270で縦書きの「第1問」が正立、180は横向き。
+  過去の180度記録はこの入力の正立を証明していなかった。私的写真はGit対象外。過去pendingは変更しない。
+- 一時native描画試験 `:glassdoc:testDebugUnitTest --tests '*CaptureOrientationRenderTest'` → `BUILD SUCCESSFUL in 34s`。
+  中央2倍・右下全体像の実写真QAは同じ試験で `BUILD SUCCESSFUL in 28s`。
+  出力 `android-relay/glassdoc/build/outputs/photo-review-magnified.png`。一時テストを除去後に全体gateを実行。
+  光学表示でのブレの判別、補正後OCR精度は未検証。
+- F-51Fからグラスへ接続。最初のconnectは認証失敗を表示したが、直後のdevicesはdevice。
+  `getprop ro.serialno` → `1904092623381086`、`getprop vendor.rkd.glasses.is_spread` → `1`。
+  新しい鍵の生成・移送は行っていない。スマホから既存Activityを起動しPID8693を確認。
+  `dumpsys media.camera` → `Active Camera Clients: []`。
+- F-51Fで `scripts/watch_glasses.py` を実行し、利用者がツル閉約2秒→開で「選択画面に戻った」と回答。
+  ログ `Glasses unfolded: chooser started`。保存先は `~/rokid-server/data/watch-glasses.log`、PIDは同じ場所の `watch-glasses.pid`。
+  script SHA-256: `903c94dc39777cbac8fd3b6e7032093758dfc3a277e402f6498a7b75b0dd63fa`。
+  1回の家庭Wi-Fi開閉であり、AP・通信断中の開閉・着脱だけ・CLOSED後・反復は未検証。
+- watcherの曖昧な起動応答を再送しない試験: 修正前 `1 failed, 1 passed`、修正後
+  `py -3.12 -m pytest -q tests/test_watch_glasses.py` → `2 passed in 0.03s`。
+  通信断中に閉状態を見逃した開閉は自動復帰しない制限をrunbookへ記録。
+- 全Android `test testDebugUnitTest assembleDebug` → `BUILD SUCCESSFUL in 54s`、199 tasks。
+  見開き初期値・ラベル後 `:glassdoc:testDebugUnitTest :glassdoc:assembleDebug` → `BUILD SUCCESSFUL in 50s`、63 tasks。
+  JDK17.0.20.1+1／SDK Platform36 rev2／Gradle9.4.1、ASCII checkout。
+  `aapt2 dump badging` → package `dev.rokid.docscanglass.doc`、DocScanGlassActivity、versionCode12。
+  `apksigner verify --verbose --print-certs` → `Verifies`、v2=true、既存証明書と一致。
+  `Get-FileHash` → `29CFF4401AA1CC44B746B2B00FC5DDDC978F5BE5DD83ACAA947451E838AB0E3A`。
+  導入前installed APKは§Jのhashと一致。保存4件をtarへ退避し原本を保全。
+
+## L. 確認期限をまたぐ単タップと傾きの申告（2026-09-16）
+
+Status: Frozen measurement。グラス1904092623381086／1.25.015-20260903-150201、実機APKはf8ce0fa（§K hash）。旧P1記録はbde4f09（§J hash）。F-51F appは8cc1ad2。
+Runs on: 実グラス、家庭Wi-FiとF-51F。修正の回帰試験とbuildはWindows。修正版の実機適用は未実施。
+
+§KのAPKを `adb -s 192.168.0.4:5555 install -r` で導入 → `Success`、起動 `am start -W` →
+`Status: ok`／`LaunchState: COLD`／`TotalTime: 2064`。保存4件のmanifestは導入前後でbyte一致。
+保存設定も見開きtrueへ反映した。新しい写真はrotation=270を持つ。
+
+利用者は「P1を撮りなおしタップを行ってもP2に行く」と申告。
+`adb -s 192.168.0.4:5555 logcat -d -v threadtime DocScanGlassDoc:I *:S` の記録は次のとおり。
+
+| 端末ログ時刻 | 観測 |
+|---|---|
+| 05:51:53.694 | page index 1の確認可視ACK、delay=3000ms |
+| 05:51:56.179 | NOTIFICATION、表示から2485msで操作開始 |
+| 05:51:56.697 | ENTER／SHORT_TAP、表示から3003ms |
+| 05:51:56.869 | local photo committed |
+| 05:51:56.870 | 同じタップでpage index 2のAIMINGへ進んだ |
+
+旧bde4f09にもP1（index0）で05:13:36.597 ACK、39.467 NOTIFICATION、39.810 commit、
+40.017 SHORT_TAP、40.018 index1 AIMINGがある。単タップは最初の通知から約0.5秒後に
+確定していた。`onAction` は取得時刻を持っていたがControllerへ渡しておらず、分類待ちも
+保存タイマーを保留しなかった。ログにはOCR本文や写真データを出していない。
+
+修正テスト `:relaycore:testDebugUnitTest --tests '*LocalReviewTest.tapStartedBeforeDeadlineRetakesSamePageAfterFirmwareClassification'`
+は修正前 `1 test completed, 1 failed`（expected0 / got1）、修正後 `BUILD SUCCESSFUL in 25s`。
+開始時刻と確認世代を保持し、実測相関窓970ms内の分類待ちとqueuedRetakeを保護。
+独立レビューの早い取り直し後の次操作もREDで再現し、旧window退役で対応した。
+実機での修正確認は利用者の停止依頼により次回へ持ち越す。全gateとAPKは進捗記録を参照。
+
+利用者は傾きについて「用紙が斜めに傾いて写る」と回答。保存画像には上下の辺が平行でない形もあり、
+一律回転で直るとは確認できない。doc6のOCR78／0文字、doc7は6文字、doc8は0／38文字。
+いずれも同じ見開きで、**片ページとの比較ではない**。光学可読性、ブレ判別、傾き補正、
+単頁／見開きのOCR・解答精度は未検証。画像とOCR内容はGit対象外のローカル保全のみ。
 
 # 出典
 

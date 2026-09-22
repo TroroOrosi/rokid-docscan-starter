@@ -2,10 +2,15 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <uses-permission android:name="android.permission.CAMERA" />
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <!-- Special access: the exit shortens Settings.System.SCREEN_OFF_TIMEOUT to
          sleep the display. Measured 2026-09-10: this build has no
          android.software.device_admin, so lockNow is unavailable. -->
     <uses-permission android:name="android.permission.WRITE_SETTINGS" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
@@ -16,6 +21,8 @@
         android:label="DocScan Glasses"
         android:supportsRtl="false"
         android:usesCleartextTraffic="true">
+        <service android:name=".ListeningService" android:exported="false"
+            android:foregroundServiceType="microphone|dataSync" />
 
         <!-- No android:screenOrientation. Declaring "landscape" rotates the
              glasses display 90 degrees; the system default is correct here. -->

@@ -5,6 +5,7 @@ import org.json.JSONException;
 import org.json.JSONObject;
 
 import java.io.IOException;
+import java.io.File;
 import java.util.Objects;
 import java.util.concurrent.TimeUnit;
 
@@ -62,6 +63,10 @@ public final class DocScanApi {
         return get("/v1/settings");
     }
 
+    public void requireLocalAsr() throws IOException, JSONException {
+        if (!get("/v1/listening-ready").getBoolean("ready")) throw new IOException("端末内ASRが未設定です");
+    }
+
     public JSONObject createDocument(String title) throws IOException, JSONException {
         JSONObject payload = new JSONObject()
                 .put("title", title)
@@ -78,10 +83,16 @@ public final class DocScanApi {
             String ocrText,
             int imageRotation
     ) throws IOException, JSONException {
+        return uploadPage(documentId, pageIndex, jpeg, ocrText, imageRotation, 0);
+    }
+
+    public JSONObject uploadPage(long documentId, int pageIndex, byte[] jpeg, String ocrText,
+                                 int imageRotation, long capturedAtMillis) throws IOException, JSONException {
         MultipartBody.Builder multipart = new MultipartBody.Builder()
                 .setType(MultipartBody.FORM)
                 .addFormDataPart("page_index", Integer.toString(pageIndex))
                 .addFormDataPart("image_rotation", Integer.toString(imageRotation))
+                .addFormDataPart("captured_at_ms", Long.toString(capturedAtMillis))
                 .addFormDataPart(
                         "image",
                         "page-" + (pageIndex + 1) + ".jpg",
@@ -103,10 +114,14 @@ public final class DocScanApi {
     }
 
     public JSONObject createExamSession(long documentId) throws IOException, JSONException {
+        return createExamSession(documentId, false);
+    }
+
+    public JSONObject createExamSession(long documentId, boolean listening) throws IOException, JSONException {
         JSONObject payload = new JSONObject()
                 .put("mode", "study")
                 .put("document_id", documentId)
-                .put("exam_type", "written")
+                .put("exam_type", listening ? "listening" : "written")
                 .put("answer_format", "mark");
         return postJson("/v1/exam-sessions", payload);
     }
@@ -114,6 +129,34 @@ public final class DocScanApi {
     public JSONObject finalizeReading(long sessionId) throws IOException, JSONException {
         return postEmpty("/v1/exam-sessions/" + sessionId + "/finalize-reading");
     }
+
+    /** Analysis outlives the usual five-minute upload deadline; server solver has its own brakes. */
+    public JSONObject finalizeReadingLocal(long sessionId) throws IOException, JSONException {
+        return execute(new Request.Builder().url(baseUrl + "/v1/exam-sessions/" + sessionId + "/finalize-reading")
+                .post(RequestBody.create(new byte[0], EMPTY)), true);
+    }
+
+    public void uploadAudioChunk(long documentId, int sequence, long startSample, long capturedAt, File wav)
+            throws IOException, JSONException {
+        MultipartBody body = new MultipartBody.Builder().setType(MultipartBody.FORM)
+                .addFormDataPart("sequence", Integer.toString(sequence))
+                .addFormDataPart("start_sample", Long.toString(startSample))
+                .addFormDataPart("captured_at_ms", Long.toString(capturedAt))
+                .addFormDataPart("audio", "chunk.wav", RequestBody.create(wav, MediaType.get("audio/wav")))
+                .build();
+        execute(new Request.Builder().url(baseUrl + "/v1/documents/" + documentId + "/audio-chunks").post(body), true);
+    }
+
+    public void completeAudio(long documentId, int chunks, long samples) throws IOException, JSONException {
+        postJson("/v1/documents/" + documentId + "/audio-complete",
+                new JSONObject().put("expected_chunks", chunks).put("total_samples", samples));
+    }
+
+    public void attachDocumentAudio(long sessionId) throws IOException, JSONException {
+        postEmpty("/v1/exam-sessions/" + sessionId + "/document-audio");
+    }
+
+    public void cancelRequests() { http.dispatcher().cancelAll(); }
 
     public JSONObject review(long sessionId, int index, int viewPage)
             throws IOException, JSONException {
@@ -149,11 +192,17 @@ public final class DocScanApi {
     }
 
     private JSONObject execute(Request.Builder builder) throws IOException, JSONException {
+        return execute(builder, false);
+    }
+
+    private JSONObject execute(Request.Builder builder, boolean longRunning) throws IOException, JSONException {
         if (!apiKey.isEmpty()) {
             builder.header("Authorization", "Bearer " + apiKey);
         }
         builder.header("Accept", "application/json");
-        try (Response response = http.newCall(builder.build()).execute()) {
+        OkHttpClient transport = longRunning ? http.newBuilder().readTimeout(0, TimeUnit.SECONDS)
+                .callTimeout(0, TimeUnit.SECONDS).build() : http;
+        try (Response response = transport.newCall(builder.build()).execute()) {
             String body = response.body() == null ? "" : response.body().string();
             if (!response.isSuccessful()) {
                 String detail = body;

@@ -1,6 +1,14 @@
 # User operation guide
 
-Status: Current phone-controlled workflow. Updated 2026-09-01.
+Status: Current phone-controlled fallback workflow. Updated 2026-09-15.
+
+本流glassdocの自動/手動撮影・図・録音/ASRは[multimodal-scan.md](multimodal-scan.md)を参照。
+以下は凍結したphone relayの操作です。
+
+本流glassdocの撮影後表示は「構図確認のみ」「無操作で保存・画質未検証」です。
+紙面全体・細字・数式・図表が読める証明にはなりません。撮影品質の点検方法は
+[保存写真の原寸点検](capture-quality.md)。PC用部品で、本流の品質ゲートは未接続です。
+現在の実機試験・導入・外部送信停止を、このツールの実装だけで解除しません。
 
 ## What this system does
 
@@ -13,6 +21,24 @@ compact HUD view.
 Text-only upload remains API compatibility support; it is not the real-device
 primary path. The public CXR-L surface inspected for this project does not
 provide arbitrary text or answers produced by an AI running on the glasses.
+`POST /solutions` therefore ingests answers produced elsewhere; it is not the
+glasses answering by themselves.
+
+## Answer route and what it costs you
+
+The configured server solver answers the problems. The current primary route is
+`ROKID_SOLVER=chatgpt-web`, which drives your own signed-in ChatGPT web session
+through a Chrome debugging port. It needs no API key.
+
+**Automating the ChatGPT web UI is against OpenAI's terms of use, and the
+account can be restricted.** This is your decision to make, and it is recorded
+here because the route is the default one. `ROKID_SOLVER=openai|gemini|claude`
+with an API key is the supported alternative, and `ROKID_SOLVER_TIERS` orders
+the fallbacks.
+
+Phone-only CDP, FastAPI and a text answer are recorded in hardware-measurements.md
+§F-6. The full glasses/phone-AP session and the new features have not passed
+physical acceptance.
 
 ## Start
 

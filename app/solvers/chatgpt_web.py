@@ -9,12 +9,20 @@ are unchanged.
 The operational cost of this route, stated plainly:
 
 * Chrome must already be running with a debugging port open and signed in to
-  ChatGPT. Start it once per session::
+  ChatGPT. On a PC, start it once per session::
 
       chrome.exe --remote-debugging-port=9222 --user-data-dir=<your profile>
 
   Reusing the real profile is deliberate: a fresh automation profile is not
   signed in and draws bot checks.
+
+  On the venue topology the browser is Chrome for Android, which never listens
+  on TCP. An **on-device** ``adb forward tcp:9222
+  localabstract:chrome_devtools_remote`` publishes its abstract socket, and
+  **Chrome has to stay in the foreground**: backgrounding it removes the socket
+  outright, measured on F-51F in `docs/hardware-measurements.md` §F-5-3.
+  The endpoint also refuses the first probes and then answers, so both
+  :func:`cdp_available` and the CDP client retry rather than conclude.
 * Automated access to the ChatGPT web UI is against OpenAI's terms of use. The
   account carries a suspension risk that the API route does not.
 * The page structure belongs to OpenAI and changes without notice. Every
@@ -32,11 +40,13 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import secrets
 import time
 import urllib.error
 import urllib.request
 
 from ..llm import extract_json
+from ..browser_guard import BrowserGuard, BrowserGuardError
 from ..page_pdf import images_to_pdf
 from .llm_adapter import LLMSolver, _read_audio, _read_image, _read_images
 
@@ -53,7 +63,7 @@ ASSISTANT_SEL = os.environ.get(
 # never received, so the thumbnail is waited for rather than assumed.
 # Measured on the signed-in page: `input[type="file"]` matches FIVE inputs
 # (upload-files, upload-photos, upload-media, upload-camera, upload-media-files)
-# and Playwright refuses an ambiguous locator with a strict mode violation, so
+# and the Playwright-era locator refused the ambiguity as a strict mode violation, so
 # that selector failed every upload. This is the photo one, accept="image/*".
 FILE_INPUT_SEL = os.environ.get(
     "ROKID_CHATGPT_FILE_INPUT_SEL", 'input[data-testid="upload-photos-input"]'
@@ -87,6 +97,13 @@ STOP_SEL = os.environ.get("ROKID_CHATGPT_STOP_SEL", '[data-testid="stop-button"]
 NEW_CHAT_SEL = os.environ.get(
     "ROKID_CHATGPT_NEW_CHAT_SEL", '[data-testid="create-new-chat-button"]'
 )
+# The composer's send control. Clicked rather than pressing Enter, because on a
+# phone Enter is a NEWLINE: the mobile web composer keeps the caret in the
+# message and only the button submits. Measured 2026-09-15 on F-51F -- three
+# attempts each pressed Enter, each left another blank line in the composer, and
+# not one of them sent anything. The button carries the same testid on both
+# layouts; Enter stays as the fallback for a page where it has moved.
+SEND_SEL = os.environ.get("ROKID_CHATGPT_SEND_SEL", '[data-testid="send-button"]')
 # A reply is complete when its text stops growing. Streaming pauses mid-answer,
 # so require several consecutive identical polls rather than a single one.
 # 0.25s x 4 confirms after 1s of silence. The earlier 1.0s x 3 spent 3s waiting
@@ -99,6 +116,11 @@ TIMEOUT_S = float(os.environ.get("ROKID_CHATGPT_TIMEOUT_S", "180"))
 # retries; with ATTEMPTS on top it made one unattachable question cost 3
 # minutes, which on a deck is worse than a fast retry in a fresh chat.
 UPLOAD_TIMEOUT_S = float(os.environ.get("ROKID_CHATGPT_UPLOAD_S", "20"))
+# How many times the bytes are written before the attach is called unconfirmed.
+# Not a flake allowance: the mobile composer replaces its file input under us,
+# so the first write can land on a node that is already discarded. Costs no
+# generation -- the question is not sent until the attachment is confirmed.
+UPLOAD_ATTEMPTS = int(os.environ.get("ROKID_CHATGPT_UPLOAD_ATTEMPTS", "3"))
 # chatgpt.com serves a signed-out "lightweight shell" whose DOM has none of the
 # app's controls, and the real composer mounts after the document is loaded.
 # Measured on Chrome 152: domcontentloaded returns ~0.2s, ~0.9s before the app.
@@ -113,7 +135,14 @@ READY_TIMEOUT_S = float(os.environ.get("ROKID_CHATGPT_READY_S", "30"))
 # grader never saw. "subject" keeps one chat per 科目 for a whole deck: far
 # fewer chats, and a page attached once stays attached for the rest of that
 # subject, so a 大問 is uploaded once instead of once per 小問.
-CHAT_SCOPE = os.environ.get("ROKID_CHATGPT_CHAT_SCOPE", "question").strip().lower()
+#
+# The default is "subject" because the decided route attaches the WHOLE booklet
+# as one PDF and then sends only a locator per 小問 (see _complete). Under
+# "question" that booklet is re-uploaded for every 小問: a measured 6 MB
+# attachment costs 1.57s on the phone, times dozens of 小問, for a document the
+# chat already holds. The cross-talk "question" avoids is handled by the
+# locator prompt naming the 設問 rather than by a fresh thread.
+CHAT_SCOPE = os.environ.get("ROKID_CHATGPT_CHAT_SCOPE", "subject").strip().lower()
 ATTEMPTS = int(os.environ.get("ROKID_CHATGPT_ATTEMPTS", "3"))
 RETRY_BACKOFF_S = float(os.environ.get("ROKID_CHATGPT_RETRY_S", "5"))
 # A throttled account is refused in the message body, not by an exception, so a
@@ -148,6 +177,10 @@ class ChatGptWebError(RuntimeError):
     """
 
 
+class ChatGptWebUncertain(ChatGptWebError):
+    """A send may have landed. Never retry it automatically."""
+
+
 class ChatGptWebRateLimit(ChatGptWebError):
     """Raised when the account is throttled, or was on its way to being.
 
@@ -157,21 +190,33 @@ class ChatGptWebRateLimit(ChatGptWebError):
     """
 
 
-def cdp_available(endpoint: str = CDP_ENDPOINT, *, timeout: float = 1.0) -> str | None:
+def cdp_available(
+    endpoint: str = CDP_ENDPOINT, *, timeout: float = 1.0, attempts: int = 3
+) -> str | None:
     """Return the browser's version string if a DevTools endpoint answers.
 
-    A cheap pre-flight over plain HTTP: it does not start Playwright and does
-    not touch chatgpt.com, so ``ready()`` stays a probe rather than a page load.
+    A cheap pre-flight over plain HTTP: it opens no page and does not touch
+    chatgpt.com, so ``ready()`` stays a probe rather than a page load.
+
+    It retries, because one refusal is not an absent endpoint. Measured on
+    F-51F / Chrome 153.0.8010.36 through an `adb forward`: the endpoint timed
+    out twice and then served the version JSON, and another run answered
+    `RemoteDisconnected` first. A single-shot probe would have called a working
+    browser missing and dropped the session to the next solver tier.
     """
-    try:
-        with urllib.request.urlopen(f"{endpoint.rstrip('/')}/json/version", timeout=timeout) as r:
-            return str(json.loads(r.read().decode("utf-8")).get("Browser", "unknown"))
-    except (urllib.error.URLError, OSError, ValueError):
-        return None
+    url = f"{endpoint.rstrip('/')}/json/version"
+    for attempt in range(attempts):
+        try:
+            with urllib.request.urlopen(url, timeout=timeout) as r:  # noqa: S310
+                return str(json.loads(r.read().decode("utf-8")).get("Browser", "unknown"))
+        except (urllib.error.URLError, OSError, ValueError):
+            if attempt + 1 < attempts:
+                time.sleep(timeout)
+    return None
 
 
 def image_payload(image: bytes, *, name: str = "page") -> dict:
-    """Describe ``image`` for Playwright's ``set_input_files``.
+    """Describe ``image`` for ``set_input_files``.
 
     Passing the buffer straight through avoids a temporary file. The type is
     sniffed from the magic bytes rather than trusted from a path: the server
@@ -233,6 +278,7 @@ def upload_plan(
     images: list[bytes],
     audio: tuple[str, bytes] | None = None,
     bundle_pdf: bool | None = None,
+    files: list[dict] | None = None,
 ) -> list[tuple[str, list[dict]]]:
     """What to upload, and which input takes each part.
 
@@ -254,6 +300,15 @@ def upload_plan(
             ))
     if audio:
         plan.append((FILE_UPLOAD_SEL, [audio_payload(*audio)]))
+    for item in files or []:
+        selector = FILE_INPUT_SEL if item["mimeType"].startswith("image/") else FILE_UPLOAD_SEL
+        existing = next((payloads for target, payloads in plan if target == selector), None)
+        if existing is None:
+            plan.append((selector, [item]))
+        else:
+            existing.append(item)
+    if sum(len(payloads) for _, payloads in plan) > 20:
+        raise ChatGptWebError("attachment count exceeds the application's 20-file budget")
     return plan
 
 
@@ -267,6 +322,7 @@ def attach_images(
     poll_s: float | None = None,
     sleep=time.sleep,
     now=time.monotonic,
+    files: list[dict] | None = None,
 ) -> bool:
     """Attach every page of the question; return whether ALL uploads confirmed.
 
@@ -280,12 +336,10 @@ def attach_images(
     every upload as confirmed without checking anything, and a partial rise
     means some page never made it.
 
-    Returns False instead of raising when the count never rises far enough. The
-    attachments may well have landed and only the preview markup have moved,
-    and losing the whole answer over an unconfirmed preview is worse than
-    sending and recording that it was unconfirmed.
+    Returns False if the complete attachment set cannot be confirmed. Callers
+    must not submit that message, including on the final preparation attempt.
     """
-    plan = upload_plan(images, audio, bundle_pdf)
+    plan = upload_plan(images, audio, bundle_pdf, files)
     if not plan:
         return False
     timeout_s = UPLOAD_TIMEOUT_S if timeout_s is None else timeout_s
@@ -293,17 +347,38 @@ def attach_images(
     expected = sum(len(payloads) for _, payloads in plan)
     thumbnails = page.locator(ATTACHMENT_SEL)
     baseline = thumbnails.count()
-    for file_input, payloads in plan:
-        page.locator(file_input).set_input_files(payloads)
-    # Check before waiting, so an upload that has already landed is never
-    # reported unconfirmed just because the budget was small.
+    # The write is retried, because the node it lands on can be thrown away.
+    # On the mobile layout `start_new_chat` falls back to a real page load --
+    # that layout has no new-chat control -- and React replaces the file input
+    # after the composer is already visible. Measured 2026-09-15 on F-51F: a
+    # node marked the instant `start_new_chat` returned was REPLACED 0.5s later,
+    # and the bytes written to it vanished with it, silently. Waiting for the
+    # input to exist does not help: the stale one already exists.
+    #
+    # A retry only happens when NOTHING landed. Writing again on top of a slow
+    # upload that did land would attach the same page twice and ask the model
+    # about a duplicate.
+    # One budget for the whole attach. Each attempt gets a share of it and none
+    # may outlive it: a per-attempt window computed on its own would never close
+    # against a clock that stops advancing.
     deadline = now() + timeout_s
-    while True:
-        if thumbnails.count() >= baseline + expected:
-            return True
+    for attempt in range(UPLOAD_ATTEMPTS):
+        if attempt and thumbnails.count() > baseline:
+            break
+        for file_input, payloads in plan:
+            page.locator(file_input).set_input_files(payloads)
+        # Check before waiting, so an upload that has already landed is never
+        # reported unconfirmed just because the budget was small.
+        window = min(now() + timeout_s / UPLOAD_ATTEMPTS, deadline)
+        while True:
+            if thumbnails.count() >= baseline + expected:
+                return True
+            if now() >= window:
+                break
+            sleep(poll_s)
         if now() >= deadline:
-            return False
-        sleep(poll_s)
+            break
+    return thumbnails.count() >= baseline + expected
 
 
 def reuse_page(context):
@@ -354,7 +429,7 @@ def wait_for_composer(page, *, ready_timeout_s: float | None = None):
     composer = page.locator(COMPOSER_SEL)
     try:
         composer.wait_for(state="visible", timeout=ready_timeout_s * 1000)
-    except Exception as exc:  # noqa: BLE001 - playwright raises its own timeout
+    except Exception as exc:  # noqa: BLE001 - the wait raises its own timeout
         raise ChatGptWebError(
             f"composer {COMPOSER_SEL!r} never appeared within {ready_timeout_s:g}s. "
             "A signed-out chatgpt.com serves a placeholder shell without it: "
@@ -413,8 +488,8 @@ def ask_page(
     Returns ``(reply_text, attached)``, where ``attached`` is None when there
     were no images and False when the uploads could not all be confirmed.
 
-    This sends whatever it attached. The retry loop uses the three steps below
-    separately, so an upload it is not happy with costs no message at all.
+    Unconfirmed source attachments raise before sending. Production uses the
+    guarded client below; this helper is for explicitly invoked component tests.
     """
     poll_s = POLL_S if poll_s is None else poll_s
     upload_timeout_s = UPLOAD_TIMEOUT_S if upload_timeout_s is None else upload_timeout_s
@@ -427,6 +502,8 @@ def ask_page(
         attached = attach_images(
             page, images, timeout_s=upload_timeout_s, poll_s=poll_s, sleep=sleep, now=now
         )
+        if attached is not True:
+            raise ChatGptWebError("source attachments were not confirmed; no question sent")
     reply = send_and_read(
         page,
         text,
@@ -440,6 +517,22 @@ def ask_page(
     return reply, attached
 
 
+def submit(page) -> str:
+    """Send the composed message. Returns which control did it.
+
+    The send button is preferred over Enter and is not a nicety: on the mobile
+    web composer Enter inserts a newline and submits nothing, so a route that
+    presses it waits out its whole timeout with the question sitting on screen.
+    Enter remains the fallback for a layout where the button has moved.
+    """
+    button = page.locator(SEND_SEL)
+    if button.count():
+        button.first.click()
+        return "button"
+    page.keyboard.press("Enter")
+    return "enter"
+
+
 def send_and_read(
     page,
     text: str,
@@ -450,6 +543,7 @@ def send_and_read(
     stable_polls: int | None = None,
     sleep=time.sleep,
     now=time.monotonic,
+    before_submit=None,
 ) -> str:
     """Type the prompt, send it, and return the finished reply.
 
@@ -468,9 +562,12 @@ def send_and_read(
     # ``fill`` sets a contenteditable's content in one step. Typing it key by
     # key would send the message at the prompt's first newline.
     composer.fill(text)
-    page.keyboard.press("Enter")
-
     replies = page.locator(ASSISTANT_SEL)
+    baseline_turns = replies.count()
+    if before_submit is not None:
+        before_submit()
+    submit(page)
+
     stop_button = page.locator(STOP_SEL)
     started = now()
     deadline = started + timeout_s
@@ -488,7 +585,9 @@ def send_and_read(
         # goes briefly EMPTY before the real text streams in.
         streaming = bool(stop_button.count())
         streaming_started = streaming_started or streaming
-        current = replies.last.inner_text() if replies.count() else ""
+        # An unchanged old answer is not proof that this submission completed.
+        # Conservatively stop if a changed DOM cannot identify a new turn.
+        current = replies.last.inner_text() if replies.count() > baseline_turns else ""
         if streaming:
             # Anything visible mid-generation is provisional. Drop any
             # stability credit so a pause inside the stream cannot end the wait.
@@ -531,6 +630,7 @@ class ChatGptWebClient:
         #: Which chat the open tab is currently in, under CHAT_SCOPE="subject".
         #: None means "start a fresh chat for this question".
         self._chat_key: str | None = None
+        self._chat_url: str | None = None
         #: Digests of the pages already attached inside that chat, so a 大問 is
         #: uploaded once per subject rather than once per 小問.
         self._attached_in_chat: set[str] = set()
@@ -545,55 +645,59 @@ class ChatGptWebClient:
         audio: tuple[str, bytes] | None = None,
         bundle_pdf: bool | None = None,
         chat_key: str | None = None,
+        files: list[dict] | None = None,
     ) -> str:
         # `image` keeps the single-page LLMClient shape; `images` carries a 大問
         # that spans pages. Either way the pages travel as attachments and the
         # OCR text as the message body -- never merged into one part.
         pages = list(images) if images else ([image] if image else [])
-        self.last_image_attached = None
+        # CDP is spoken directly rather than through Playwright: the venue runs
+        # this server on the phone, where Playwright's driver refuses to start
+        # (`Error: Unsupported platform: android`, measured in
+        # `docs/hardware-measurements.md` §F-5-4). `app.solvers.cdp` implements
+        # exactly the calls below, with the same names.
+        from .cdp import CdpError, connect_over_cdp  # noqa: PLC0415
+
         try:
-            from playwright.sync_api import sync_playwright  # noqa: PLC0415
-        except ImportError as exc:  # pragma: no cover - environment-dependent
-            raise ChatGptWebError("chatgpt-web solver needs `pip install playwright`") from exc
+            browser = connect_over_cdp(self.endpoint)
+        except CdpError as exc:
+            raise ChatGptWebError(
+                f"no Chrome on {self.endpoint}; start it with --remote-debugging-port. "
+                "On a phone the endpoint is an on-device `adb forward tcp:9222 "
+                "localabstract:chrome_devtools_remote`, and Chrome must be in the "
+                "FOREGROUND: backgrounding it removes the socket (§F-5-3)"
+            ) from exc
+        try:
+            context = browser.contexts[0] if browser.contexts else browser.new_context()
+            return self._ask_with_retries(
+                context,
+                f"{system}\n\n{prompt}",
+                pages,
+                audio=audio,
+                bundle_pdf=bundle_pdf,
+                chat_key=chat_key,
+                files=files,
+            )
+        finally:
+            browser.close()
 
-        with sync_playwright() as pw:
-            try:
-                browser = pw.chromium.connect_over_cdp(self.endpoint)
-            except Exception as exc:  # noqa: BLE001 - playwright raises broadly
-                raise ChatGptWebError(
-                    f"no Chrome on {self.endpoint}; start it with --remote-debugging-port"
-                ) from exc
-            try:
-                context = browser.contexts[0] if browser.contexts else browser.new_context()
-                return self._ask_with_retries(
-                    context,
-                    f"{system}\n\n{prompt}",
-                    pages,
-                    audio=audio,
-                    bundle_pdf=bundle_pdf,
-                    chat_key=chat_key,
-                )
-            finally:
-                browser.close()
+    def _ask_with_retries(self, context, text: str, pages: list[bytes], *,
+                          audio=None, bundle_pdf=None, chat_key=None, files=None) -> str:
+        """Serialize all tab interaction; a restart cannot erase an uncertain send."""
+        try:
+            with BrowserGuard() as guard:
+                guard.require_clear()
+                self.last_image_attached = None
+                return self._ask_locked(context, text, pages, guard=guard, audio=audio,
+                                        bundle_pdf=bundle_pdf, chat_key=chat_key, files=files)
+        except BrowserGuardError as error:
+            raise ChatGptWebUncertain(str(error)) from error
+        except OSError as error:
+            raise ChatGptWebUncertain("browser state could not be saved; no automatic retry") from error
 
-    def _ask_with_retries(
-        self,
-        context,
-        text: str,
-        pages: list[bytes],
-        *,
-        audio: tuple[str, bytes] | None = None,
-        bundle_pdf: bool | None = None,
-        chat_key: str | None = None,
-    ) -> str:
-        """One question, retried on a flake, each attempt in its own fresh chat.
-
-        An unconfirmed upload counts as a failure worth retrying: sending the
-        question without its figure does not error, it just answers the wrong
-        question or returns needs_input, which is the expensive kind of wrong.
-        The last attempt's reply is accepted either way, so a permanently moved
-        thumbnail selector still yields an answer rather than nothing.
-        """
+    def _ask_locked(self, context, text: str, pages: list[bytes], *, guard,
+                    audio=None, bundle_pdf=None, chat_key=None, files=None) -> str:
+        """Retry preparation only. Once submit is attempted, ambiguity is durable."""
         last_error: Exception | None = None
         page = reuse_page(context)
         for attempt in range(1, ATTEMPTS + 1):
@@ -602,8 +706,17 @@ class ChatGptWebClient:
                 # ended. Retrying a throttled upload immediately is the case
                 # that needs the wait most.
                 time.sleep(RETRY_BACKOFF_S * (attempt - 1))
+            sent = False
+            request_id = secrets.token_hex(32)
+
+            def before_submit():
+                nonlocal sent
+                guard.mark_sending(request_id)
+                sent = True
+
             try:
-                if chat_key is None or chat_key != self._chat_key:
+                if (chat_key is None or chat_key != self._chat_key
+                        or self._chat_url != page.url):
                     # A new question (or a new subject) gets its own chat. Under
                     # CHAT_SCOPE="subject" a retry stays in the chat it is
                     # already in: opening another one per attempt is what filled
@@ -611,9 +724,12 @@ class ChatGptWebClient:
                     composer = start_new_chat(page)
                     self._chat_key = chat_key
                     self._attached_in_chat.clear()
+                    self._chat_url = page.url
                 else:
                     composer = wait_for_composer(page)
                 pending = [p for p in pages if _digest(p) not in self._attached_in_chat]
+                pending_files = [f for f in (files or [])
+                                 if _digest(f["buffer"]) not in self._attached_in_chat]
                 # The recording is one more attachment on the same message, and
                 # it is deduplicated the same way: a listening 大問 uploads its
                 # audio once per chat, not once per 小問.
@@ -622,32 +738,49 @@ class ChatGptWebClient:
                 )
                 attached = (
                     attach_images(
-                        page, pending, audio=pending_audio, bundle_pdf=bundle_pdf, poll_s=POLL_S
+                        page, pending, audio=pending_audio, bundle_pdf=bundle_pdf, poll_s=POLL_S,
+                        files=pending_files,
                     )
-                    if (pending or pending_audio)
+                    if (pending or pending_audio or pending_files)
                     else None
                 )
-                if (pages or audio) and not (pending or pending_audio):
+                if (pages or audio or files) and not (pending or pending_audio or pending_files):
                     # Already in this chat from an earlier 小問 of the same 大問.
                     attached = True
-                if (pages or audio) and attached is not True and attempt < ATTEMPTS:
+                if (pages or audio or files) and attached is not True and attempt < ATTEMPTS:
                     # Decided BEFORE the send. The earlier order asked the
                     # question, threw the answer away and asked again, so one
                     # moved thumbnail selector cost three generations a
                     # question -- the load that got the account limited.
                     last_error = ChatGptWebError("page images never confirmed as attached")
                     continue
-                reply = send_and_read(page, text, composer=composer)
+                if (pages or audio or files) and attached is not True:
+                    raise ChatGptWebError("source attachments were not confirmed; no question sent")
+                reply = send_and_read(page, text, composer=composer, before_submit=before_submit)
+                guard.acknowledge(request_id)
+                self._chat_url = page.url
                 self._attached_in_chat.update(_digest(p) for p in pending)
                 if pending_audio:
                     self._attached_in_chat.add(_digest(pending_audio[1]))
+                self._attached_in_chat.update(_digest(f["buffer"]) for f in pending_files)
                 self.last_image_attached = attached
                 return reply
             except ChatGptWebRateLimit:
+                # A received rate-limit reply is known, not an uncertain send.
+                if sent:
+                    guard.acknowledge(request_id)
                 # The one failure no retry helps. Asking again in a new chat is
                 # exactly how a slowdown became a block.
                 raise
-            except Exception as exc:  # noqa: BLE001 - playwright raises broadly
+            except Exception as exc:  # noqa: BLE001 - page automation raises broadly
+                if sent:
+                    self._chat_key = self._chat_url = None
+                    self._attached_in_chat.clear()
+                    raise ChatGptWebUncertain(
+                        "send outcome unknown; retained for inspection, no automatic resend"
+                    ) from exc
+                self._chat_key = self._chat_url = None
+                self._attached_in_chat.clear()
                 last_error = exc
                 if attempt >= ATTEMPTS:
                     raise ChatGptWebError(
@@ -665,6 +798,7 @@ class ChatGptWebClient:
         audio: tuple[str, bytes] | None = None,
         bundle_pdf: bool | None = None,
         chat_key: str | None = None,
+        files: list[dict] | None = None,
     ) -> dict:
         return extract_json(
             self.complete(
@@ -675,6 +809,7 @@ class ChatGptWebClient:
                 audio=audio,
                 bundle_pdf=bundle_pdf,
                 chat_key=chat_key,
+                files=files,
             )
         )
 
@@ -734,6 +869,41 @@ class ChatGptWebSolver(LLMSolver):
         the primary page. A 大問 that spans pages keeps its passage on one page
         and its figures on another, and the question is usually about the figure.
         """
+        if question.document_pages:
+            from ..source_bundle import source_bundle  # noqa: PLC0415
+
+            mode = os.environ.get("ROKID_CHATGPT_INPUT_MODE", "ocr-images")
+            audio = _read_audio(question)
+            if question.audio_path and not audio:
+                raise ChatGptWebError("original listening audio unavailable")
+            files = source_bundle(
+                question.document_pages, page_numbers=question.page_numbers,
+                document_id=question.document_id, transcript=question.audio_transcript, mode=mode,
+                max_files=19 if audio else 20,
+            )
+            if audio:
+                files.append(audio_payload(*audio))
+            instructions = (
+                "Use document.md as the primary text source. Check the matching Page images "
+                "for layout, diagrams, graphs, formulas and uncertain OCR. If OCR and the "
+                "image disagree, verify the image; do not invent missing material. "
+                "Page numbers are capture order. Associate audio by question number and "
+                "content, never by timestamp alone. The original recording is attached for "
+                "uncertain ASR, stress, pronunciation and emotion. Do not claim to have checked "
+                "audio if it is unreadable; return needs_input for questions requiring it. "
+            ) if mode != "pdf" else "Use the attached booklet PDF. "
+            prompt = (instructions + f"Solve {question.question_no or 'the question'}; "
+                      f"question_id={question.question_id}; Pages {question.page_numbers}. "
+                      f"Question locator: {(question.body_text or '')[:400]}\n"
+                      + (question.retry_hint or ""))
+            # A retake or transcript correction starts a new evidence context.
+            identity = _digest(json.dumps(question.document_pages, sort_keys=True,
+                                          ensure_ascii=False).encode()
+                               + question.audio_transcript.encode()
+                               + (_digest(audio[1]).encode() if audio else b""))
+            key = chat_key_for(question)
+            return client.complete_json(system=system, prompt=prompt, files=files,
+                                        chat_key=f"{key}:{identity}" if key else None)
         booklet = getattr(question, "document_image_paths", None) or []
         if booklet:
             # One PDF of the whole paper, attached once per chat, and a prompt

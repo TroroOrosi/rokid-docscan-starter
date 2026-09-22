@@ -161,7 +161,7 @@ public class GlassesInputNormalizerTest {
     }
 
     @Test
-    public void deduplicatesRepeatedBackActionsWithinTheMeasuredBound() {
+    public void preservesDistinctFastBackGesturesButDropsRepeatedTerminalKeys() {
         GlassesInputNormalizer normalizer = new GlassesInputNormalizer();
 
         assertTrue(normalizer.accept(key(0, "KEYCODE_NOTIFICATION")).isEmpty());
@@ -170,12 +170,53 @@ public class GlassesInputNormalizerTest {
                 normalizer.accept(key(300, "KEYCODE_BACK")));
 
         assertTrue(normalizer.accept(key(400, "KEYCODE_NOTIFICATION")).isEmpty());
-        assertTrue(normalizer.accept(key(600, "KEYCODE_BACK")).isEmpty());
+        assertEquals(Optional.of(GlassesInputAction.BACK),
+                normalizer.accept(key(600, "KEYCODE_BACK")));
+        assertTrue(normalizer.accept(key(601, "KEYCODE_BACK")).isEmpty());
+        assertTrue(normalizer.accept(InputSignal.key(602, "UP", "KEYCODE_BACK", true)).isEmpty());
 
         assertTrue(normalizer.accept(key(1_400, "KEYCODE_NOTIFICATION")).isEmpty());
         assertEquals(
                 Optional.of(GlassesInputAction.BACK),
                 normalizer.accept(key(1_500, "KEYCODE_BACK")));
+    }
+
+    @Test
+    public void pairsBroadcastCopiesWithoutDroppingTheNextCompleteKeyGesture() {
+        GlassesInputNormalizer normalizer = new GlassesInputNormalizer();
+        String click = "com.android.action.ACTION_SPRITE_BUTTON_CLICK";
+
+        assertEquals(Optional.of(GlassesInputAction.SHORT_TAP),
+                normalizer.accept(broadcast(100, click)));
+        normalizer.accept(key(110, "KEYCODE_NOTIFICATION"));
+        assertTrue(normalizer.accept(key(200, "KEYCODE_ENTER")).isEmpty());
+        // A second complete key sequence is a different physical gesture.
+        normalizer.accept(key(300, "KEYCODE_NOTIFICATION"));
+        assertEquals(Optional.of(GlassesInputAction.SHORT_TAP),
+                normalizer.accept(key(400, "KEYCODE_ENTER")));
+        assertTrue(normalizer.accept(broadcast(410, click)).isEmpty());
+        normalizer.accept(key(500, "KEYCODE_NOTIFICATION"));
+        assertEquals(Optional.of(GlassesInputAction.SHORT_TAP),
+                normalizer.accept(key(600, "KEYCODE_ENTER")));
+        assertTrue(normalizer.accept(broadcast(610, click)).isEmpty());
+
+        normalizer.accept(key(700, "KEYCODE_NOTIFICATION"));
+        normalizer.accept(key(710, "KEYCODE_DPAD_RIGHT"));
+        assertEquals(Optional.of(GlassesInputAction.SWIPE_FORWARD),
+                normalizer.accept(key(720, "KEYCODE_DPAD_DOWN")));
+        normalizer.accept(key(800, "KEYCODE_NOTIFICATION"));
+        normalizer.accept(key(810, "KEYCODE_DPAD_RIGHT"));
+        assertEquals(Optional.of(GlassesInputAction.SWIPE_FORWARD),
+                normalizer.accept(key(820, "KEYCODE_DPAD_DOWN")));
+
+        normalizer.reset();
+        normalizer.accept(key(1000, "KEYCODE_NOTIFICATION"));
+        assertEquals(Optional.of(GlassesInputAction.SHORT_TAP),
+                normalizer.accept(broadcast(1100, click)));
+        assertTrue(normalizer.accept(key(1150, "KEYCODE_ENTER")).isEmpty());
+        normalizer.accept(key(1200, "KEYCODE_NOTIFICATION"));
+        assertEquals(Optional.of(GlassesInputAction.SHORT_TAP),
+                normalizer.accept(key(1250, "KEYCODE_ENTER")));
     }
 
     private static InputSignal key(long elapsedMillis, String name) {

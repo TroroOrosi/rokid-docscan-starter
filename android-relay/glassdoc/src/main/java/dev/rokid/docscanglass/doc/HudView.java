@@ -4,6 +4,7 @@ import android.content.Context;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.Color;
+import android.graphics.ColorMatrixColorFilter;
 import android.graphics.Paint;
 import android.graphics.RectF;
 import android.graphics.Typeface;
@@ -15,7 +16,7 @@ import java.util.List;
 
 /**
  * The glasses display: black background, green monospace text, and either the
- * aiming brackets or the still that was just taken.
+ * aiming mark or the still that was just taken.
  *
  * <p>It holds no session state. What to show is decided by the shared
  * {@code DocScanController} and arrives through {@link GlassesCaptureSurface},
@@ -26,11 +27,45 @@ final class HudView extends View {
 
     private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint guidePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint previewPaint = new Paint(Paint.FILTER_BITMAP_FLAG);
 
     private List<String> lines = Collections.emptyList();
     private Bitmap preview;
     private boolean aiming;
     private double guideFraction = FramingGuide.UNCALIBRATED_FRACTION;
+    private boolean spreadGuide;
+    private Runnable visibleFrame;
+    private Runnable hiddenFrame;
+    private boolean frameReported;
+    private boolean recording;
+
+    void showRecording(boolean active) { recording = active; invalidate(); }
+
+    void onVisibleFrame(Runnable shown, Runnable hidden) {
+        visibleFrame = shown;
+        hiddenFrame = hidden;
+        frameReported = false;
+        invalidate();
+    }
+
+    @Override
+    protected void onWindowVisibilityChanged(int visibility) {
+        super.onWindowVisibilityChanged(visibility);
+        if (visibility != VISIBLE && frameReported) {
+            frameReported = false;
+            if (hiddenFrame != null) hiddenFrame.run();
+        }
+    }
+
+    @Override
+    public void onWindowFocusChanged(boolean focused) {
+        super.onWindowFocusChanged(focused);
+        if (!focused && frameReported) {
+            frameReported = false;
+            if (hiddenFrame != null) hiddenFrame.run();
+        }
+        if (focused) invalidate();
+    }
 
     HudView(Context context) {
         super(context);
@@ -40,9 +75,14 @@ final class HudView extends View {
         guidePaint.setStyle(Paint.Style.STROKE);
     }
 
-    /** The visible fraction measured for this device, from {@code --ef guide}. */
+    /** Operator-adjustable drawing scale, from {@code --ef guide}. */
     void calibrateGuide(double visibleFraction) {
         guideFraction = visibleFraction;
+        invalidate();
+    }
+
+    void showSpreadGuide(boolean spread) {
+        spreadGuide = spread;
         invalidate();
     }
 
@@ -51,7 +91,7 @@ final class HudView extends View {
         set(newLines, null, false);
     }
 
-    /** Aiming: the brackets the operator aligns the page to. */
+    /** Aiming: a direction cue, not an outline to fit the physical page into. */
     void showAiming(List<String> newLines) {
         set(newLines, null, true);
     }
@@ -64,7 +104,17 @@ final class HudView extends View {
      * long as the camera streams.</p>
      */
     void showReview(Bitmap still, List<String> newLines) {
+        previewPaint.setColorFilter(reviewContrast(still));
         set(newLines, still, false);
+    }
+
+    /** Change only the footer: the same image/frame and its 3s clock stay valid. */
+    void showReviewNotice(String notice) {
+        if (preview == null || preview.isRecycled() || lines.isEmpty()) return;
+        List<String> updated = new ArrayList<>(lines);
+        updated.set(updated.size() - 1, notice);
+        lines = updated;
+        invalidate();
     }
 
     private void set(List<String> newLines, Bitmap still, boolean showGuide) {
@@ -78,6 +128,15 @@ final class HudView extends View {
     protected void onDraw(Canvas canvas) {
         super.onDraw(canvas);
         canvas.drawColor(Color.BLACK);
+        if (!frameReported && isShown() && hasWindowFocus() && visibleFrame != null) {
+            frameReported = true;
+            Runnable rendered = visibleFrame;
+            post(() -> {
+                if (frameReported && rendered == visibleFrame && isShown() && hasWindowFocus()) {
+                    rendered.run();
+                }
+            });
+        }
 
         float textTop = 0;
         Bitmap still = preview;
@@ -85,14 +144,20 @@ final class HudView extends View {
             textTop = drawPreview(canvas, still);
         } else if (aiming) {
             drawGuide(canvas);
+            textTop = Math.max(0, getHeight() - (lines.size() + 1) * 26f);
+        }
+        if (recording) {
+            paint.setTextSize(22);
+            canvas.drawText("REC", Math.max(8, getWidth() - 62), getHeight() - 8, paint);
         }
         if (lines.isEmpty()) {
             return;
         }
 
         float available = getHeight() - textTop;
-        float lineHeight = available / (float) (lines.size() + 1);
-        float textSize = lineHeight * 0.55f;
+        boolean compact = aiming || still != null;
+        float lineHeight = compact ? 26f : available / (float) (lines.size() + 1);
+        float textSize = compact ? 22f : lineHeight * 0.55f;
         paint.setTextSize(textSize);
         float widest = 0;
         for (String line : lines) {
@@ -109,44 +174,63 @@ final class HudView extends View {
         }
     }
 
-    /**
-     * The aiming rectangle. Corner brackets rather than a closed box: on a
-     * monochrome see-through display a full outline competes with the page
-     * itself, and the corners are what the operator aligns to.
-     */
+    /** The display bounds are not a calibrated camera field of view. */
     private void drawGuide(Canvas canvas) {
-        FramingGuide.Rect guide = FramingGuide.of(getWidth(), getHeight(), guideFraction);
+        FramingGuide.Rect guide = FramingGuide.of(getWidth(), getHeight(), guideFraction, spreadGuide);
         if (guide.width() <= 0) {
             return;
         }
-        float arm = Math.min(guide.width(), guide.height()) * 0.18f;
-        guidePaint.setStrokeWidth(Math.max(2f, guide.width() * 0.008f));
-        float[] corners = {
-            guide.left(), guide.top(), 1, 1,
-            guide.right(), guide.top(), -1, 1,
-            guide.left(), guide.bottom(), 1, -1,
-            guide.right(), guide.bottom(), -1, -1,
-        };
-        for (int i = 0; i < corners.length; i += 4) {
-            float x = corners[i];
-            float y = corners[i + 1];
-            float dx = corners[i + 2];
-            float dy = corners[i + 3];
-            canvas.drawLine(x, y, x + arm * dx, y, guidePaint);
-            canvas.drawLine(x, y, x, y + arm * dy, guidePaint);
-        }
+        float radius = Math.max(4f, Math.min(guide.width(), guide.height()) * 0.03f);
+        float x = getWidth() / 2f;
+        float y = getHeight() / 2f;
+        guidePaint.setStrokeWidth(2f);
+        canvas.drawLine(x - radius, y, x + radius, y, guidePaint);
+        canvas.drawLine(x, y - radius, x, y + radius, guidePaint);
+        paint.setTextSize(22);
+        canvas.drawText(spreadGuide ? "B5 見開き" : "B5 1ページ", 8, 26, paint);
+        canvas.drawText("紙面へ顔を向ける", 8, 54, paint);
     }
 
-    /** Draws the still letterboxed into the top band and returns its bottom. */
+    /** Show the complete capture once, with no inset or label covering the paper. */
     private float drawPreview(Canvas canvas, Bitmap still) {
-        float band = getHeight() * 0.62f;
+        float band = Math.max(1, getHeight() - (lines.size() + 1) * 26f);
         float scale = Math.min(
                 getWidth() / (float) still.getWidth(), band / still.getHeight());
         float width = still.getWidth() * scale;
         float height = still.getHeight() * scale;
         RectF target = new RectF(
-                (getWidth() - width) / 2f, 0, (getWidth() + width) / 2f, height);
-        canvas.drawBitmap(still, null, target, null);
-        return height;
+                (getWidth() - width) / 2f, (band - height) / 2f,
+                (getWidth() + width) / 2f, (band + height) / 2f);
+        canvas.save();
+        canvas.clipRect(0, 0, getWidth(), band);
+        canvas.drawBitmap(still, null, target, previewPaint);
+        canvas.restore();
+        return band;
+    }
+
+    /** Display-only green contrast stretch; JPEG, OCR and uploaded pixels stay untouched. */
+    private static ColorMatrixColorFilter reviewContrast(Bitmap still) {
+        int[] histogram = new int[256];
+        int samples = 0;
+        for (int y = 0; y < still.getHeight(); y += Math.max(1, still.getHeight() / 128)) {
+            for (int x = 0; x < still.getWidth(); x += Math.max(1, still.getWidth() / 128)) {
+                int pixel = still.getPixel(x, y);
+                int gray = (int) (.213f * Color.red(pixel) + .715f * Color.green(pixel) + .072f * Color.blue(pixel));
+                histogram[gray]++;
+                samples++;
+            }
+        }
+        // Ignore the extreme 1% so a lamp or one black corner cannot set the entire range.
+        int low = 0, high = 255, count = 0;
+        while (low < 255 && count + histogram[low] <= samples / 100) count += histogram[low++];
+        count = 0;
+        while (high > low && count + histogram[high] <= samples / 100) count += histogram[high--];
+        if (high - low < 16) { low = 0; high = 255; }
+        float scale = 255f / (high - low);
+        return new ColorMatrixColorFilter(new float[]{
+                0, 0, 0, 0, 0,
+                .213f * scale, .715f * scale, .072f * scale, 0, -low * scale,
+                0, 0, 0, 0, 0,
+                0, 0, 0, 1, 0});
     }
 }

@@ -1,5 +1,6 @@
 package dev.rokid.docscanglass.doc;
 
+import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
@@ -88,6 +89,8 @@ public class DocScanGlassActivityAnswerReadingTest {
         filesDir = activity.getFilesDir();
         setField(activity, "hud", new HudView(activity));
         setField(activity, "answerStore", new AnswerStore(filesDir));
+        setField(activity, "connectionSettings", new ConnectionSettings(new File(filesDir, "test-connection.bin"),
+                javax.crypto.KeyGenerator.getInstance("AES").generateKey()));
         // configureAndResume's health check is not exercised here; onCreate
         // was not called (matching DocScanGlassActivityIntentTest's own
         // pattern), so nothing else has touched "docscan_relay" yet.
@@ -111,12 +114,76 @@ public class DocScanGlassActivityAnswerReadingTest {
     }
 
     @Test
+    public void waitingBackShowsExitConfirmationAndKeepsThePendingAnalysis() throws Exception {
+        controllerBarrier();
+        activity.setContentView((HudView) getField(activity, "hud"));
+        activity.onUpdate(RelayState.FINALIZING, List.of("資料読み込み中"), "waiting");
+        Shadows.shadowOf(Looper.getMainLooper()).idle();
+        android.os.PowerManager.WakeLock pending =
+                (android.os.PowerManager.WakeLock) getField(activity, "analysisWakeLock");
+        assertNotNull(pending);
+
+        invokeOnAction(GlassesInputAction.BACK, 1000);
+        assertEquals("もう一度ダブルタップで終了",
+                ((List<?>) getField(getField(activity, "hud"), "lines")).get(0));
+        assertTrue((boolean) getField(activity, "awaitingAnswers"));
+        assertTrue("showing the confirmation must not cancel analysis", pending.isHeld());
+        assertFalse((boolean) getField(activity, "sessionClosed"));
+
+        invokeOnAction(GlassesInputAction.BACK, 2000);
+        assertTrue((boolean) getField(activity, "sessionClosed"));
+        assertTrue((boolean) getField(controller, "closed"));
+        assertFalse(pending.isHeld());
+        activity.onUpdate(RelayState.REVIEW, List.of("late result"), "late");
+        Shadows.shadowOf(Looper.getMainLooper()).idle();
+        assertEquals("exit must suppress a late answer fetch", 0, server.getRequestCount());
+        assertNull(getField(activity, "reader"));
+    }
+
+    @Test
+    public void delayedBackEventsKeepTheirOriginalConfirmationInterval() throws Exception {
+        // Production opens the reader only after its initial snapshot is durable.
+        new AnswerStore(filesDir).start(bundleForSession(SESSION_ID));
+        invokeOpenAnswers(bundleForSession(SESSION_ID), "q10", 0);
+        invokeOnAction(GlassesInputAction.BACK, 1000);
+        invokeOnAction(GlassesInputAction.BACK, 5000);
+        assertNotNull("events four seconds apart cannot confirm exit", getField(activity, "reader"));
+        invokeOnAction(GlassesInputAction.BACK, 5500);
+        assertNull(getField(activity, "reader"));
+    }
+
+    @Test
+    public void menuBackReturnsOneLevelAndFocusLossDisarmsExit() throws Exception {
+        invokeOpenAnswers(bundleForSession(SESSION_ID), "q10", 0);
+        AnswerReader reader = (AnswerReader) getField(activity, "reader");
+        invokeOnAction(GlassesInputAction.SHORT_TAP);
+        invokeOnAction(GlassesInputAction.SHORT_TAP);
+        assertEquals(AnswerReader.Screen.QUESTIONS, reader.screen());
+        invokeOnAction(GlassesInputAction.BACK);
+        assertEquals(AnswerReader.Screen.GROUPS, reader.screen());
+        assertFalse(backExit().isArmed());
+        invokeOnAction(GlassesInputAction.BACK);
+        assertEquals(AnswerReader.Screen.ANSWER, reader.screen());
+        assertFalse(backExit().isArmed());
+        invokeOnAction(GlassesInputAction.BACK);
+        assertTrue(backExit().isArmed());
+        activity.onWindowFocusChanged(false);
+        activity.onWindowFocusChanged(true);
+        assertFalse(backExit().isArmed());
+        invokeOnAction(GlassesInputAction.BACK);
+        assertNotNull(getField(activity, "reader"));
+        assertTrue(backExit().isArmed());
+    }
+
+    @Test
     public void theBundleIsFetchedOnceAndClosingTheReaderDoesNotReopenOrRefetchIt()
             throws Exception {
         activity.onUpdate(RelayState.REVIEW, List.of("a", "b", "c"), "review-1");
         awaitTrue(() -> getField(activity, "reader") != null);
         assertEquals("one HTTP request for the bundle", 1, server.getRequestCount());
 
+        invokeOnAction(GlassesInputAction.BACK);
+        assertNotNull(getField(activity, "reader"));
         invokeOnAction(GlassesInputAction.BACK);
         assertNull("closing must release screen ownership", getField(activity, "reader"));
         AnswerStore.Saved closed = new AnswerStore(filesDir).load();
@@ -451,6 +518,8 @@ public class DocScanGlassActivityAnswerReadingTest {
         invokeOnAction(GlassesInputAction.SWIPE_FORWARD);
         invokeOnAction(GlassesInputAction.SWIPE_FORWARD);
         invokeOnAction(GlassesInputAction.BACK);
+        assertNotNull(getField(activity, "reader"));
+        invokeOnAction(GlassesInputAction.BACK);
 
         AnswerStore.Saved saved = new AnswerStore(filesDir).load();
         assertNotNull(saved);
@@ -501,7 +570,7 @@ public class DocScanGlassActivityAnswerReadingTest {
      * never reach the exit policy at all.
      */
     @Test
-    public void backPressWhileTheReaderDoesNotOwnTheScreenStillArmsTheExitConfirmation()
+    public void backDuringCaptureBelongsToCaptureCompletionInsteadOfAppExit()
             throws Exception {
         // No onUpdate(REVIEW, ...): the reader never opens, matching the
         // ordinary capture/review flow this must leave unchanged.
@@ -509,7 +578,7 @@ public class DocScanGlassActivityAnswerReadingTest {
 
         pressBack();
 
-        assertTrue("the ordinary two-stage exit must still arm on the first BACK",
+        assertFalse("capture completion must not also arm app exit",
                 backExit().isArmed());
     }
 
@@ -553,6 +622,101 @@ public class DocScanGlassActivityAnswerReadingTest {
                 getField(activity, "reader"));
     }
 
+    @Test
+    public void secondListeningBackFinishesAudioWhileTheLastPhotoRemainsInReview()
+            throws Exception {
+        java.util.concurrent.CountDownLatch audioUpload = new java.util.concurrent.CountDownLatch(1);
+        java.util.concurrent.CountDownLatch releaseUpload = new java.util.concurrent.CountDownLatch(1);
+        server.setDispatcher(new Dispatcher() {
+            @Override public MockResponse dispatch(RecordedRequest request) throws InterruptedException {
+                if (request.getPath() != null && request.getPath().endsWith("/audio-chunks")) {
+                    audioUpload.countDown();
+                    releaseUpload.await(5, TimeUnit.SECONDS);
+                }
+                return json("{}");
+            }
+        });
+
+        controller.close();
+        LocalReviewSurface surface = new LocalReviewSurface();
+        controller = new DocScanController(activity, surface, null, activity,
+                new ClientIdentity("test-glasses", "answer-test/1", "fake-camera"));
+        controller.configure(server.url("/").toString(), "test-key", 180);
+        controllerBarrier();
+        setField(activity, "controller", controller);
+        setField(activity, "listeningMode", true);
+
+        File audioRoot = new File(filesDir, "rp08-stopped-audio");
+        ListeningRecorder recording = stoppedRecording(audioRoot, 18, controller);
+        setField(activity, "listening", recording);
+        byte[] photo = new byte[]{11, 22, 33, 44};
+        invokeStageCaptureReview(photo);
+        File pendingOriginal = new File(filesDir, "pending-capture-v1.bin");
+        byte[] savedPhoto = java.nio.file.Files.readAllBytes(pendingOriginal.toPath());
+
+        try {
+            invokeOnAction(GlassesInputAction.BACK, 1_000);
+            controllerBarrier();
+            assertTrue("the first BACK must end capture without leaving the last review",
+                    (boolean) getField(controller, "finishCaptureRequested"));
+            assertEquals(RelayState.CAPTURE_REVIEW, controller.getState());
+            assertTrue(controller.hasPendingCaptureReview());
+            assertArrayEquals(photo, surface.reviewJpeg);
+            assertEquals("the first BACK must not finish the recording", 0, server.getRequestCount());
+
+            invokeOnAction(GlassesInputAction.BACK, 2_000);
+            assertTrue("the second BACK must start finishing the saved recording even while CAPTURE_REVIEW remains",
+                    audioUpload.await(2, TimeUnit.SECONDS));
+            Shadows.shadowOf(Looper.getMainLooper()).idle();
+            assertFalse("audio finish must not turn off the last-photo review",
+                    (boolean) getField(activity, "awaitingAnswers"));
+            assertEquals(RelayState.CAPTURE_REVIEW, controller.getState());
+            assertTrue(controller.hasPendingCaptureReview());
+            assertArrayEquals(photo, surface.reviewJpeg);
+            assertArrayEquals("the durable pending photo must remain byte-for-byte unchanged",
+                    savedPhoto, java.nio.file.Files.readAllBytes(pendingOriginal.toPath()));
+        } finally {
+            releaseUpload.countDown();
+            recording.close();
+        }
+    }
+
+    @Test public void stoppedAudioCompletesWhenDocumentBindingArrivesWithoutStartingAnotherRecorder() throws Exception {
+        java.util.concurrent.CountDownLatch complete = new java.util.concurrent.CountDownLatch(1);
+        server.setDispatcher(new Dispatcher() {
+            @Override public MockResponse dispatch(RecordedRequest request) {
+                if (request.getPath().endsWith("/audio-complete")) complete.countDown();
+                return json("{}");
+            }
+        });
+        controllerBarrier();
+        setField(activity, "listeningMode", true);
+        File root = new File(filesDir, "audio-before-binding");
+        ListeningRecorder recording = stoppedRecording(root, 0, controller);
+        setField(activity, "listening", recording);
+        setField(activity, "listeningDirectory", root);
+        byte[] original = java.nio.file.Files.readAllBytes(new File(root, "listening-0/0000.wav").toPath());
+        try {
+            Method finish = DocScanGlassActivity.class.getDeclaredMethod("finishAudio");
+            finish.setAccessible(true); finish.invoke(activity);
+            awaitTrue(() -> !(boolean) getField(activity, "finishingAudio"));
+            assertEquals(0, server.getRequestCount());
+            org.robolectric.shadows.ShadowApplication application = Shadows.shadowOf(org.robolectric.RuntimeEnvironment.getApplication());
+            application.clearStartedServices();
+            activity.onListeningReady(root, 18, false);
+            Shadows.shadowOf(Looper.getMainLooper()).idle();
+            android.content.Intent resumedService = application.getNextStartedService();
+            assertNotNull("saved audio must have a foreground service during retry", resumedService);
+            assertTrue(resumedService.getBooleanExtra(ListeningService.FINISHING, false));
+            assertTrue(complete.await(3, TimeUnit.SECONDS));
+            assertEquals("/v1/documents/18/audio-chunks", server.takeRequest().getPath());
+            assertEquals("/v1/documents/18/audio-complete", server.takeRequest().getPath());
+            assertTrue(recording == getField(activity, "listening"));
+            assertNull(getField(recording, "microphone"));
+            assertArrayEquals(original, java.nio.file.Files.readAllBytes(new File(root, "listening-0/0000.wav").toPath()));
+        } finally { recording.close(); }
+    }
+
     /**
      * A real BACK key press: {@code onKeyDown} then {@code onKeyUp}, both
      * through the Activity's real overrides, so {@code normalize}'s own
@@ -586,10 +750,56 @@ public class DocScanGlassActivityAnswerReadingTest {
     }
 
     private void invokeOnAction(GlassesInputAction action) throws Exception {
+        invokeOnAction(action, android.os.SystemClock.elapsedRealtime());
+    }
+
+    private void invokeOnAction(GlassesInputAction action, long elapsedMillis) throws Exception {
         Method onAction = DocScanGlassActivity.class.getDeclaredMethod(
-                "onAction", GlassesInputAction.class);
+                "onAction", GlassesInputAction.class, long.class);
         onAction.setAccessible(true);
-        onAction.invoke(activity, action);
+        onAction.invoke(activity, action, elapsedMillis);
+    }
+
+    private void controllerBarrier() throws Exception {
+        ((ExecutorService) getField(controller, "serial")).submit(() -> { }).get(5, TimeUnit.SECONDS);
+    }
+
+    private void invokeStageCaptureReview(byte[] jpeg) throws Exception {
+        for (Method method : DocScanController.class.getDeclaredMethods()) {
+            if (method.getName().equals("stageCaptureReview") && method.getParameterCount() == 7) {
+                method.setAccessible(true);
+                method.invoke(controller, 0, jpeg, "実資料", 180, "", null, null);
+                return;
+            }
+        }
+        throw new AssertionError("stageCaptureReview overload not found");
+    }
+
+    private static ListeningRecorder stoppedRecording(
+            File root, long documentId, DocScanController controller) throws Exception {
+        File folder = new File(root, "listening-" + documentId);
+        assertTrue(folder.mkdirs());
+        java.nio.file.Files.write(new File(folder, "started-epoch-ms").toPath(),
+                "1700000000000".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        File wav = new File(folder, "0000.wav");
+        try (java.io.RandomAccessFile output = new java.io.RandomAccessFile(wav, "rw")) {
+            output.write(ListeningRecorder.wavHeader(3200));
+            output.write(new byte[3200]);
+        }
+        java.util.Properties manifest = new java.util.Properties();
+        manifest.setProperty("phase", "stopped");
+        manifest.setProperty("epoch", "1700000000000");
+        manifest.setProperty("document", Long.toString(documentId));
+        manifest.setProperty("chunks", "1");
+        manifest.setProperty("samples", "1600");
+        try (java.io.FileOutputStream output = new java.io.FileOutputStream(
+                new File(folder, "recording.properties"))) {
+            manifest.store(output, "stopped before network ACK");
+        }
+        ListeningRecorder recording = new ListeningRecorder(root, documentId, controller.api(), () -> { });
+        assertTrue(recording.restore());
+        assertFalse(recording.isInterrupted());
+        return recording;
     }
 
     private static void awaitTrue(BooleanSupplier condition) throws InterruptedException {
@@ -706,7 +916,7 @@ public class DocScanGlassActivityAnswerReadingTest {
         return new MockResponse().addHeader("Content-Type", "application/json").setBody(body);
     }
 
-    private static final class Surface implements CaptureSurface {
+    private static class Surface implements CaptureSurface {
         private long generation;
 
         @Override
@@ -731,6 +941,19 @@ public class DocScanGlassActivityAnswerReadingTest {
 
         @Override
         public void fenceCustomViewEpoch(long viewGeneration, String reason) {
+        }
+    }
+
+    private static final class LocalReviewSurface extends Surface {
+        byte[] reviewJpeg;
+
+        @Override public boolean supportsLocalCaptureReview() {
+            return true;
+        }
+
+        @Override public long showCaptureReview(byte[] jpeg, int rotation, List<String> lines) {
+            reviewJpeg = jpeg.clone();
+            return super.showCaptureReview(jpeg, rotation, lines);
         }
     }
 }

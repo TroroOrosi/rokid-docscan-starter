@@ -8,13 +8,14 @@ import org.junit.Test;
 
 public class PageFramingTest {
     @Test
-    public void textWellInsideTheFrameIsComplete() {
+    public void textWellInsideTheFrameIsOnlyTextEvidence() {
         PageFraming framing = PageFraming.builder(1920, 1080)
                 .addLineBounds(200, 150, 1700, 200)
                 .addLineBounds(200, 400, 1600, 460)
                 .build();
 
-        assertEquals(PageFraming.Verdict.COMPLETE, framing.verdict());
+        assertEquals("TEXT_BOUNDS_ONLY", framing.verdict().name());
+        assertEquals("文字枠のみ・紙面未確認", framing.describe());
         assertFalse(framing.isFailing());
         assertEquals(2, framing.lineCount());
         assertTrue(framing.clippedSides().isEmpty());
@@ -47,7 +48,7 @@ public class PageFramingTest {
     public void theBandScalesWithTheImageAndHasAFloor() {
         // The bands are 38px across and 22px down, so this line clears both.
         assertEquals(
-                PageFraming.Verdict.COMPLETE,
+                PageFraming.Verdict.TEXT_BOUNDS_ONLY,
                 PageFraming.builder(1920, 1080)
                         .addLineBounds(100, 100, 1870, 1050)
                         .build()
@@ -119,7 +120,7 @@ public class PageFramingTest {
 
         PageFraming restored = PageFraming.fromToken(complete.toToken());
 
-        assertEquals(PageFraming.Verdict.COMPLETE, restored.verdict());
+        assertEquals(PageFraming.Verdict.TEXT_BOUNDS_ONLY, restored.verdict());
         assertEquals(1, restored.lineCount());
     }
 
@@ -130,5 +131,13 @@ public class PageFramingTest {
         assertEquals(
                 PageFraming.Verdict.UNKNOWN,
                 PageFraming.fromToken("NOT_A_VERDICT#3").verdict());
+    }
+
+    @Test
+    public void oldCompleteTokenIsTextEvidenceNotPaperAcceptance() {
+        PageFraming restored = PageFraming.fromToken("COMPLETE#4");
+        assertEquals("TEXT_BOUNDS_ONLY", restored.verdict().name());
+        assertEquals(4, restored.lineCount());
+        assertEquals("文字枠のみ・紙面未確認", restored.describe());
     }
 }

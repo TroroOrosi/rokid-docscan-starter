@@ -1,6 +1,6 @@
 # rokid-docscan-starter development guide
 
-Status: Current engineering contract. Updated 2026-09-14.
+Status: Current engineering contract. Updated 2026-09-22.
 
 ## What this repository is
 
@@ -15,9 +15,19 @@ The intended session, from `tasks/plan.md`:
 - Normal: 20-40 pages, ~10 min capture, ~10 min analysis, ~130 min review.
 - Listening: ~10 min capture inside a 30 min recording, ~10 min analysis,
   ~110 min review.
-- Glasses have no Wi-Fi; the phone is on 4G/5G and may be locked. **No PC, no
-  self-hosted server, and no tethering at the venue.** Nothing auto-terminates
-  at 150 minutes.
+- **No PC at the venue.** The phone reaches the internet over 4G/5G and, from
+  2026-09-14, also serves a Wi-Fi AP that carries the glasses; the operator
+  confirmed this is available. The server process therefore runs on the phone.
+  Nothing auto-terminates at 150 minutes.
+- **Chrome has to stay in the foreground on the phone**, and the server runs
+  behind it. Measured 2026-09-15 (`docs/hardware-measurements.md` §F-6-1):
+  foregrounding Termux removed `@chrome_devtools_remote` outright, and
+  foregrounding Chrome rebuilt it under a new inode in about 2s, with the
+  screen awake throughout. The operator's 2026-09-15 decision to keep the
+  screen on and the phone face down therefore fixes the foreground app too.
+  The endpoint also refuses the first probes and then answers (§F-6-2), so one
+  refusal is not an absent browser; both `cdp_available()` and
+  `app/solvers/cdp.py` retry.
 
 Two cooperating runtimes:
 
@@ -25,11 +35,50 @@ Two cooperating runtimes:
 - `android-relay/`: the Android-phone relay for Global Hi Rokid and Rokid
   Glasses, plus the glasses-side apps.
 
-The supported real-device topology is:
+The **decided venue topology** (operator, 2026-09-14) is the standalone glasses
+app over a phone access point. The operator does not touch the phone during a
+session; the glasses' own tap/swipe drive it.
+
+```text
+Rokid Glasses (:glassdoc APK) -> phone Wi-Fi AP -> FastAPI on the phone
+                                                -> Chrome CDP on the phone -> ChatGPT web
+Rokid Glasses (:glassdoc AnswerView) <- answer-bundle
+```
+
+The operator confirmed on 2026-09-14 that the phone can be an access point,
+which retires the "the glasses have no network at the venue" premise that this
+file carried until then.
+
+**None of that topology has been run.** What is measured is each piece
+separately: the glasses app captures and reaches a server over Wi-Fi
+(2026-09-04), and the phone-only CDP/FastAPI/answer component in §F-6 (2026-09-15).
+The AP has never carried a complete glasses session.
+
+The **phone-relay topology** below is what this repository has actually
+exercised end to end, and it stays as the fallback. Do not extend it.
 
 ```text
 Rokid Glasses -> Global Hi Rokid -> Android relay -> FastAPI server -> HUD
 ```
+
+The server still publishes `OPERATION_CONTRACT` as `phone` for every action,
+because that is the relay route's contract and the glasses route has not been
+wired to it. A document that says the glasses drive the operations is describing
+a decision, not the current published contract. Say which one you mean.
+
+Which of each duplicated surface is the route, decided 2026-09-14:
+
+| Role | Route | Kept but frozen |
+|---|---|---|
+| Capture + OCR | `android-relay/glassdoc` | `android-relay/app` (phone relay) |
+| Answer display | `AnswerView` + `AnswerLayout` (measures the real font) | `app/glasses_view.py` wrapping (estimates 18 columns), `app/hud.py` (`/v1/match` only) |
+| Answer delivery | `GET /v1/exam-sessions/{id}/answer-bundle` | `/v1/exam-sessions/{id}/paste-prompt` (already rejected), `/v1/exam-sessions/{id}/pages.pdf` (kept: chatgpt-web attaches it) |
+
+Frozen means the code stays and its tests keep running. It does not get new
+features, and a measurement taken on it does not validate the decided route.
+`docs/superpowers/specs/2026-09-11-glasses-offline-answer-bundle-design.md` is
+the design of the decided route, not a shelved one — its phone-hotspot topology
+is now the intended topology and is still unexercised.
 
 ## Answer routes
 
@@ -51,11 +100,11 @@ Settled decisions. Do not re-argue them:
   not acceptable.
 - Do not build a browser connection pool.
 
-**Open gap.** Every chatgpt-web measurement so far ran against Chrome on a PC
-(Chrome/152.0.7977.83, 2026-09-13). That is not the venue topology. The venue
-requires no PC, so the route has to reach a phone-side browser instead;
-`ROKID_CHATGPT_CDP` accepts any CDP endpoint, so nothing in the design blocks
-it, but **this has never been run**. Do not describe chatgpt-web as venue-ready.
+**Open gap.** The current record includes phone-only CDP, FastAPI discovery and a
+text answer in `docs/hardware-measurements.md` §F-6-6 through §F-6-10. These are
+component measurements, not a glasses → phone AP → answer-bundle session.
+That full route, the new capture/power behavior and local listening ASR remain
+unvalidated on hardware. Do not describe chatgpt-web as venue-ready.
 
 Chrome for Android does not hand out a CDP endpoint the way a PC does, and the
 difference is not a configuration detail. It listens only on a unix
@@ -72,9 +121,29 @@ read a refusal as a bad answer and turned one block into many on 2026-09-14.
 
 ## Real-device contract
 
-- Photographing the physical page is the primary input path. The relay calls
-  CXR-L `takePhoto`, receives the JPEG, performs bundled Japanese ML Kit OCR,
-  and uploads both JPEG and OCR.
+- Photographing the physical page is the primary input path. On the decided
+  route `:glassdoc` opens `camera2` on the glasses and OCRs there; on the
+  fallback relay route the phone calls CXR-L `takePhoto`, receives the JPEG,
+  performs bundled Japanese ML Kit OCR, and uploads both JPEG and OCR. Both go
+  through `relaycore`'s `DocScanController`.
+- **The decided capture method is automatic scanning** (operator, 2026-09-15).
+  `docs/fast-scan-decisions.md` defines it: the glasses detect the page and
+  shoot on their own, the captured image is shown for 3 seconds, a single tap
+  in that window retakes, no input commits it and moves to the next page, and a
+  double tap ends the capture phase. Zero phone operations after setup.
+- **The existing loop is enabled only on `:glassdoc`.** It still uses three shots,
+  the existing intervals, ShotScore/PageFraming and duplicate/unreadable limits.
+  The frozen CUSTOMVIEW route keeps explicit phone controls. The original
+  `adf12ee` disable decision belonged to the route without operator taps.
+- On the local surface the captured still is drawn after camera closure; a
+  visible acknowledgement starts a fresh 3000ms review. A single tap retakes,
+  no input commits, BACK ends capture after the last review. Hidden or stale
+  views cannot commit. A waiting tap requests a manual shot without starting
+  a second request in flight. See `docs/multimodal-scan.md`.
+- The standalone app records listening PCM while capturing. VAD/ASR runs on the
+  phone, retains originals and waits for all chunks before final analysis.
+  Diagram answers use validated vectors and the existing AnswerReader/Canvas.
+  These new behaviors have not passed physical acceptance on the current APK.
 - Text-only page upload remains an API compatibility path. Do not describe it
   as the real-device primary path.
 - The public CXR-L AIDL surface does not expose arbitrary recognition or
@@ -95,6 +164,14 @@ read a refusal as a bad answer and turned one block into many on 2026-09-14.
   artifacts, with `SessionType.CUSTOM_APP` in 1.1.1. A glasses-side Android app
   is therefore a supported SDK route, but this repository has not completed a
   successful hardware install/start validation.
+- The same interface carries an arbitrary-`byte[]` channel in **both** 1.0.1 and
+  1.1.1: `sendCustomCmd(String, byte[])` phone-to-glasses and
+  `ICustomCmdCallback.onCustomCmdResult(String, byte[])` glasses-to-phone
+  (`sendCustomCmdStream` is 1.1.1-only). So a glasses-side app does not need its
+  own network to return data. Nothing in this repository calls it, the
+  glasses-side counterpart API has not been seen, and no payload ceiling has
+  been measured. Read `docs/hardware-measurements.md` §B-0-2 before designing
+  around it.
 - A glasses-side app is validated by the **adb sideload** route, not the SDK
   route, as of 2026-09-04 on build `1.25.012-20260901-150201` (Android 12 /
   API 32). Measured there: a sideloaded app is launcher-visible; `camera2`
@@ -135,13 +212,10 @@ must never disable, obscure, spoof, or bypass it. This boundary holds regardless
 of whether a vendor, community post, local script, privileged shell, or private
 API claims a way to change it.
 
-A real-device acceptance run must physically confirm:
-
-1. the LED is lit while `takePhoto` is active;
-2. it turns off after the image callback; and
-3. it remains off during analysis and answer review.
-
-The indicator is observed with an independent camera. An SDK callback records
+The operator waived the external LED audit on 2026-09-15 because the indicator
+is system-controlled. It is not an acceptance gate for this route; do not ask
+for an external camera again. This does not change the prohibition above or
+turn an unobserved physical state into verified evidence. An SDK callback records
 application state and never proves physical light state. Shutter sound, flash,
 and capture indicators are device-controlled unless a documented public SDK
 control is added. Do not claim silent or no-flash capture without physical
@@ -151,6 +225,12 @@ An earlier branch explored changing the indicator from a diagnostic shell. It
 is quarantined: `app/devtools/rokid_led.py` and `scripts/rokid_led.py` are stubs
 with no device commands, `tests/test_rokid_led.py` enforces that, and the
 procedures are deliberately not kept anywhere in this repository.
+
+OCR文字枠の内側判定は `TEXT_BOUNDS_ONLY`（旧保存token `COMPLETE` も同義）であり、
+紙面・未認識文字・図表の合格ではない。glassdocの確認表示は「構図確認のみ」
+「無操作で保存・画質未検証」とし、3秒の無操作を品質承認と説明しない。
+PC用の原寸点検・登録条件・比較部品は `docs/capture-quality.md`。画像由来の証拠生成と
+撮影／正式登録本流の品質ゲートは未接続。既存の実機試験・導入・送信停止を維持する。
 
 ## Capture invariants
 
@@ -222,7 +302,7 @@ Then, on a device:
 
 - Enumerate devices read-only first and name the serial in every command. Stop
   on multiple devices, signature mismatch, version downgrade, unknown callback
-  state, or a missing external-video setup.
+  state.
 - Record the exact phone / glasses / Hi Rokid / service / relay tuple.
 - Report the LED result only from external physical observation.
 - Ask before uninstalling apps or changing phone security settings.

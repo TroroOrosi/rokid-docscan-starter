@@ -45,7 +45,7 @@ public class ShotScoreTest {
         double worse = ShotScore.of(CLIPPED, 100, 0.8f, true);
 
         assertTrue(ShotScore.isBetter(better, worse));
-        assertTrue(better > 0);
+        assertTrue(better < 0);
     }
 
     @Test
@@ -78,5 +78,23 @@ public class ShotScoreTest {
                 ShotScore.of(COMPLETE, 100, 4.2f, true),
                 1e-9);
         assertEquals(0.0, ShotScore.of(COMPLETE, 100, -3f, true), 1e-9);
+    }
+
+    @Test
+    public void evenManyClippedCharactersLoseToAnyNonClippedCandidate() {
+        double clipped = ShotScore.of(CLIPPED, 1000, 0.9f, true);
+        assertTrue(ShotScore.isBetter(ShotScore.of(COMPLETE, 100, 0.9f, true), clipped));
+        assertTrue(ShotScore.isBetter(0, clipped));
+        assertTrue(ShotScore.of(CLIPPED, -1, 0.9f, true) < 0);
+        assertTrue(ShotScore.of(CLIPPED, Integer.MAX_VALUE, 1f, true) < 0);
+    }
+
+    @Test
+    public void nonfiniteConfidenceIsMissingEvidenceAndNeverPoisonsRanking() {
+        for (float confidence : new float[]{Float.NaN, Float.POSITIVE_INFINITY, Float.NEGATIVE_INFINITY}) {
+            assertEquals(50.0, ShotScore.of(null, 100, confidence, true), 1e-9);
+            assertEquals(50.0, ShotScore.of(null, 100, confidence, false), 1e-9);
+            assertTrue(Double.isFinite(ShotScore.of(CLIPPED, 100, confidence, true)));
+        }
     }
 }

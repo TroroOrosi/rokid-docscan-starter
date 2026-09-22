@@ -87,6 +87,8 @@ CREATE TABLE IF NOT EXISTS solutions (
     rationale_conf     REAL,
     evidence_pages_json TEXT,
     evidence_refs_json  TEXT,
+    diagrams_json      TEXT,
+    answer_metadata_json TEXT,
     raw_reasoning      TEXT,
     served_by          TEXT,
     user_confirmed     INTEGER NOT NULL DEFAULT 0,
@@ -191,6 +193,8 @@ _EXAM_SESSION_MIGRATIONS = (
 _TABLE_COLUMN_MIGRATIONS = {
     "solutions": (
         ("evidence_refs_json", "TEXT"),
+        ("diagrams_json", "TEXT"),
+        ("answer_metadata_json", "TEXT"),
     ),
     "solution_claims": (
         ("owner_token", "TEXT"),
@@ -274,6 +278,10 @@ def _migrate(conn: sqlite3.Connection) -> None:
         pcols = {r[1] for r in conn.execute("PRAGMA table_info(pages)")}
         if "vision_text" not in pcols:
             conn.execute("ALTER TABLE pages ADD COLUMN vision_text TEXT")
+
+    pcols = {r[1] for r in conn.execute("PRAGMA table_info(pages)")}
+    if "captured_at_ms" not in pcols:
+        conn.execute("ALTER TABLE pages ADD COLUMN captured_at_ms INTEGER")
 
 
 def init_db(db_path: Path | None = None) -> None:

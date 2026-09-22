@@ -19,8 +19,8 @@ import java.security.NoSuchAlgorithmException;
 /** Atomically persists one unregistered capture across activity/process restarts. */
 final class CaptureReviewPersistence {
     private static final int MAGIC = 0x44534350; // DSCP
-    /** 2 added the framing verdict; 1 records are still read, without one. */
-    private static final int VERSION = 2;
+    /** 3 adds the glasses' shutter-request epoch; old records retain unknown (0). */
+    private static final int VERSION = 3;
     private static final int COMMIT_MAGIC = 0x44534343; // DSCC
     private static final int COMMIT_VERSION = 1;
     private static final int SHA_256_BYTES = 32;
@@ -47,6 +47,20 @@ final class CaptureReviewPersistence {
     }
 
     synchronized void save(CaptureReviewStore.Pending pending) throws IOException {
+        // Reject malformed candidates BEFORE touching the last recoverable original.
+        if (pending == null || pending.pageIndex < 0 || pending.rotationDegrees < 0
+                || pending.rotationDegrees >= 360 || pending.rotationDegrees % 90 != 0
+                || pending.capturedAtMillis < 0 || pending.jpeg == null
+                || pending.jpeg.length == 0 || pending.jpeg.length > MAX_JPEG_BYTES) {
+            throw new IOException("invalid pending capture payload");
+        }
+        byte[] text = pending.ocrText.getBytes(StandardCharsets.UTF_8);
+        byte[] failure = pending.ocrFailure.getBytes(StandardCharsets.UTF_8);
+        byte[] framing = pending.framing.toToken().getBytes(StandardCharsets.UTF_8);
+        if (text.length > MAX_TEXT_BYTES || failure.length > MAX_FAILURE_BYTES
+                || framing.length > MAX_FRAMING_BYTES) {
+            throw new IOException("pending capture field is too large");
+        }
         File parent = file.getParentFile();
         if (parent == null || (!parent.isDirectory() && !parent.mkdirs())) {
             throw new IOException("pending capture directory is unavailable");
@@ -57,12 +71,11 @@ final class CaptureReviewPersistence {
             data.writeInt(VERSION);
             data.writeInt(pending.pageIndex);
             data.writeInt(pending.rotationDegrees);
-            writeBytes(data, pending.ocrText.getBytes(StandardCharsets.UTF_8));
-            writeBytes(data, pending.ocrFailure.getBytes(StandardCharsets.UTF_8));
-            writeBytes(
-                    data,
-                    pending.framing.toToken().getBytes(StandardCharsets.UTF_8));
+            writeBytes(data, text);
+            writeBytes(data, failure);
+            writeBytes(data, framing);
             writeBytes(data, pending.jpeg);
+            data.writeLong(pending.capturedAtMillis);
             data.flush();
             output.getFD().sync();
         }
@@ -96,45 +109,13 @@ final class CaptureReviewPersistence {
             return null;
         }
         CaptureReviewStore.Pending pending;
-        try (DataInputStream data = new DataInputStream(
-                new BufferedInputStream(new FileInputStream(file)))) {
-            if (data.readInt() != MAGIC) {
-                throw new IOException("unsupported pending capture format");
-            }
-            // Version 1 predates the framing check. Its photo is still valid
-            // and must survive the upgrade; it simply carries no verdict.
-            int recordVersion = data.readInt();
-            if (recordVersion != VERSION && recordVersion != 1) {
-                throw new IOException("unsupported pending capture format");
-            }
-            int pageIndex = data.readInt();
-            int rotationDegrees = data.readInt();
-            if (pageIndex < 0
-                    || rotationDegrees < 0
-                    || rotationDegrees >= 360
-                    || rotationDegrees % 90 != 0) {
-                throw new IOException("invalid pending capture metadata");
-            }
-            String ocrText = new String(
-                    readBytes(data, MAX_TEXT_BYTES), StandardCharsets.UTF_8);
-            String ocrFailure = new String(
-                    readBytes(data, MAX_FAILURE_BYTES), StandardCharsets.UTF_8);
-            PageFraming framing = recordVersion == 1
-                    ? PageFraming.UNKNOWN
-                    : PageFraming.fromToken(new String(
-                            readBytes(data, MAX_FRAMING_BYTES),
-                            StandardCharsets.UTF_8));
-            byte[] jpeg = readBytes(data, MAX_JPEG_BYTES);
-            if (jpeg.length == 0 || data.read() != -1) {
-                throw new IOException("invalid pending capture payload");
-            }
-            pending = new CaptureReviewStore.Pending(
-                    pageIndex, jpeg, ocrText, rotationDegrees, ocrFailure, framing);
+        try {
+            pending = readPending();
         } catch (IOException | RuntimeException invalid) {
             try {
                 clear();
             } catch (IOException ignored) {
-                // A stale file still cannot be auto-uploaded; load remains fail-closed.
+                // Frozen relay recovery: invalid pending records are not uploaded.
             }
             return null;
         }
@@ -154,6 +135,85 @@ final class CaptureReviewPersistence {
         }
         clearCommitMarkerQuietly();
         return pending;
+    }
+
+    /** Read a retained image without deleting it or consuming acknowledgement markers. */
+    synchronized CaptureReviewStore.Pending readPending() throws IOException {
+        return readRecord(null);
+    }
+
+    /** Validate and compare a retained record without allocating a second full JPEG. */
+    synchronized boolean matches(CaptureReviewStore.Pending expected) throws IOException {
+        if (expected == null || expected.jpeg == null) return false;
+        CaptureReviewStore.Pending stored = readRecord(expected.jpeg);
+        return stored != null && stored.pageIndex == expected.pageIndex
+                && stored.rotationDegrees == expected.rotationDegrees
+                && stored.capturedAtMillis == expected.capturedAtMillis
+                && stored.ocrText.equals(expected.ocrText)
+                && stored.ocrFailure.equals(expected.ocrFailure)
+                && stored.framing.toToken().equals(expected.framing.toToken());
+    }
+
+    private CaptureReviewStore.Pending readRecord(byte[] expectedJpeg) throws IOException {
+        try (DataInputStream data = new DataInputStream(
+                new BufferedInputStream(new FileInputStream(file)))) {
+            if (data.readInt() != MAGIC) {
+                throw new IOException("unsupported pending capture format");
+            }
+            // Version 1 predates the framing check. Its photo is still valid
+            // and must survive the upgrade; it simply carries no verdict.
+            int recordVersion = data.readInt();
+            if (recordVersion < 1 || recordVersion > VERSION) {
+                throw new IOException("unsupported pending capture format");
+            }
+            int pageIndex = data.readInt();
+            int rotationDegrees = data.readInt();
+            if (pageIndex < 0
+                    || rotationDegrees < 0
+                    || rotationDegrees >= 360
+                    || rotationDegrees % 90 != 0) {
+                throw new IOException("invalid pending capture metadata");
+            }
+            String ocrText = new String(
+                    readBytes(data, MAX_TEXT_BYTES), StandardCharsets.UTF_8);
+            String ocrFailure = new String(
+                    readBytes(data, MAX_FAILURE_BYTES), StandardCharsets.UTF_8);
+            PageFraming framing = recordVersion == 1
+                    ? PageFraming.UNKNOWN
+                    : PageFraming.fromToken(new String(
+                            readBytes(data, MAX_FRAMING_BYTES),
+                            StandardCharsets.UTF_8));
+            int jpegLength = readLength(data, MAX_JPEG_BYTES);
+            if (jpegLength == 0) throw new IOException("invalid pending capture payload");
+            byte[] jpeg;
+            if (expectedJpeg == null) {
+                jpeg = new byte[jpegLength];
+                data.readFully(jpeg);
+            } else {
+                // Even a mismatch must consume/validate the entire record: a corrupt
+                // tail must not silently look like an ordinary different revision.
+                boolean same = jpegLength == expectedJpeg.length;
+                byte[] buffer = new byte[Math.min(8192, jpegLength)];
+                for (int offset = 0; offset < jpegLength;) {
+                    int count = Math.min(buffer.length, jpegLength - offset);
+                    data.readFully(buffer, 0, count);
+                    if (same) {
+                        for (int i = 0; i < count; i++) {
+                            if (buffer[i] != expectedJpeg[offset + i]) { same = false; break; }
+                        }
+                    }
+                    offset += count;
+                }
+                jpeg = same ? expectedJpeg : null;
+            }
+            long capturedAt = recordVersion >= 3 ? data.readLong() : 0;
+            if (capturedAt < 0 || data.read() != -1) {
+                throw new IOException("invalid pending capture payload");
+            }
+            if (jpeg == null) return null;
+            return new CaptureReviewStore.Pending(
+                    pageIndex, jpeg, ocrText, rotationDegrees, ocrFailure, framing, capturedAt);
+        }
     }
 
     synchronized int consumeRecoveredCommittedPageIndex() {
@@ -177,6 +237,12 @@ final class CaptureReviewPersistence {
     }
 
     private static byte[] readBytes(DataInputStream data, int maximum) throws IOException {
+        byte[] value = new byte[readLength(data, maximum)];
+        data.readFully(value);
+        return value;
+    }
+
+    private static int readLength(DataInputStream data, int maximum) throws IOException {
         int length;
         try {
             length = data.readInt();
@@ -186,9 +252,7 @@ final class CaptureReviewPersistence {
         if (length < 0 || length > maximum) {
             throw new IOException("pending capture field is too large: " + length);
         }
-        byte[] value = new byte[length];
-        data.readFully(value);
-        return value;
+        return length;
     }
 
     private CommitMarker loadCommitMarkerOrNull() {
@@ -242,7 +306,7 @@ final class CaptureReviewPersistence {
         }
     }
 
-    private static void moveReplacing(File source, File target) throws IOException {
+    static void moveReplacing(File source, File target) throws IOException {
         try {
             Files.move(
                     source.toPath(),
