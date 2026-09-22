@@ -146,6 +146,47 @@ def test_flat_images_are_not_amplified_or_called_in_focus(level):
         assert metrics["mean_adjacent_difference"] == 0
 
 
+def test_document_contrast_exposes_dark_print_without_resampling():
+    with Image.new("RGB", (200, 120), (75, 75, 75)) as image:
+        # Dark print and uneven paper, with one bright outlier.
+        image.paste((20, 20, 20), (30, 20, 32, 100))
+        image.paste((95, 95, 95), (100, 0, 200, 120))
+        image.putpixel((0, 0), (255, 255, 255))
+        before = image.tobytes()
+        candidate, report = quality().document_contrast(image)
+        with candidate:
+            assert candidate.size == image.size
+            assert candidate.mode == "L"
+            assert candidate.getpixel((120, 30)) >= 240
+            assert candidate.getpixel((40, 30)) - candidate.getpixel((30, 30)) > 100
+            assert not candidate.getexif()
+        assert image.tobytes() == before
+        assert report["recovers_lost_detail"] is False
+
+
+@pytest.mark.parametrize("level", [0, 64, 255])
+def test_document_contrast_does_not_amplify_flat_inputs(level):
+    with Image.new("RGB", (32, 32), (level, level, level)) as image:
+        candidate, report = quality().document_contrast(image)
+        with candidate:
+            assert candidate.getextrema() == (level, level)
+        assert report["applied"] is False
+
+
+def test_packet_keeps_readable_full_image_and_rectified_page_separate(tmp_path):
+    source = photo(tmp_path / "source.png")
+    before = source.read_bytes()
+    path = quality().build_packet(source, tmp_path / "out", rotation=0, tone=True,
+                                 corners=[[.1, .1], [.9, .1], [.9, .9], [.1, .9]])
+    report = json.loads(path.read_text())
+    assert report["decision"] == "hold" and source.read_bytes() == before
+    with Image.open(path.parent / report["readable"]["file"]) as whole:
+        assert whole.size == (537, 301)
+    with Image.open(path.parent / report["rectified"]["readable"]["file"]) as paper:
+        assert list(paper.size) == report["rectified"]["output_size"]
+    assert report["readable"]["scale"] == "source_pixels_1_to_1"
+
+
 def test_failed_output_removes_only_its_own_directory(tmp_path, monkeypatch):
     source = photo(tmp_path / "source.png")
     before = source.read_bytes()

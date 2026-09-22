@@ -173,7 +173,7 @@ from __future__ import annotations
 # Predevice hardening: exact input identity and durable browser send guard.
 # Snapshot reads and recording-retry integrity; no HTTP envelope change.
 # Capture evidence diagnostics and honest text-bounds/review labels; HTTP unchanged.
-APP_VERSION = "0.35.2"
+APP_VERSION = "0.35.3"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.

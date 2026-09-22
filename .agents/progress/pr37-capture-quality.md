@@ -1,6 +1,6 @@
 # PR #37 撮影品質部品の統合
 
-Status: Internal progress。2026-09-22、CI再実行は通過。明示承認後の実機試験で撮影範囲・暗さ・解析失敗を確認し、追加撮影を停止。本流品質ゲートと実機受け入れは未完。
+Status: Internal progress。2026-09-22、承認後の実機試験は撮影範囲・暗さ・解析で失敗。利用者の訂正後は実機/GPTを停止し、保存画像5枚のPC補正を追加。OCR精度改善・本流品質ゲート・実機受け入れは未完。
 Runs on: Windows PC `C:\rokid-docscan-starter`。末尾の実機試験はglassdocとF-51F上のサーバ・Chrome（既存Wi-Fi、スマホAPではない）。
 
 ## 再開点と権限（実装時点。後続の実機承認は末尾参照）
@@ -273,3 +273,69 @@ Runs on: Windows PC上の保存原本・現行ソースのみ。利用者がGPT�
    TesseractはPCに既存導入済み（jpn / jpn_vertあり）。PCのOCR比較をグラスのML Kit精度と同一視しない。
 4. 次の実機試験は、直した点・測る点を具体化してから再開する。スマホAP・長時間・録音・
    画質・全答案取得は未検証。LEDは外部観測しておらず、依頼もしない。
+
+## 利用者訂正後の保存画像改善
+
+Runs on: Windows PCのみ。撮影・導入・ブラウザ待機・GPT送信は再開していない。
+
+`0fcd4da` に失敗試験・承認履歴・最新の停止指示を保存した後の変更。
+原本5枚に `build_packet(..., rotation=270, tone=True)` を実行した。
+従来の原寸タイルとgamma候補を保持し、全画面の原寸グレースケール補正を追加。
+既存の四隅指定・射影変換にも同じ補正を接続し、未加工の派生画像も残した。
+明るい上位1%だけを除いて白点を求め、黒側の少数の細線を百分位で潰さない。
+濃淡幅16未満は増幅せず、全体のhold・品質未検証は維持する。
+
+今回の画像の右紙面だけはPCで目視した四隅
+`[[.402,.335],[.811,.340],[.795,.786],[.414,.813]]` で切り出した。
+`paper-readable.png` は1238×1928。自動紙面検出の成功ではない。
+出力: 私有証拠配下 `improved-packets/b2174b90e5f1-34u22117/`。
+旧4枚の出力対応は `data/device-setup/pr37-resume-20260922-214723/improved-packets/saved-photo-results.json`。
+SHA照合 → `original_hashes_unchanged 5 / 5`。見た目の明るさは改善したが、細字のぼけと欠けは残る。
+
+### OCR比較と不採用の候補
+
+Runs on: PCの既存Tesseract 5.5.0、`jpn_vert --psm 5`。ML Kit実推論ではない。
+
+基準は今回の原本の正規化座標系でROI `[1740,1870,1985,2230]` にある33文字。
+エージェントの目視転記であり、利用者確認済みの正解・独立test資料ではない。
+NFKC後の英数字・日本語を対象に編集距離を数える探索的比較。全文正答率へ外挿しない。
+半分画像はPillow BOX縮小で、Android decoder/RGB565の完全な再現ではない。
+
+`py -3.12 data/device-setup/pr37-resume-20260922-214723/offline-quality/evaluate_reference.py`
+→ 原寸の誤り4/33、原寸＋採用したPC明暗補正も4/33。半分は9/33、半分＋同補正も9/33。
+黒白両端1%を切る別案は半分5/33だが、少数の細線を潰す合成反例があり採用しない。
+射影変換4/33、同変換＋補正5/33、UnsharpMask候補は33/33。文字数増加を改善とは扱わない。
+
+一時的にグラスOCRの復号Bitmapへ補正するコードも試作した。
+no-opから `6 tests completed, 2 failed` を再現し、実装後は対象試験が通過した。
+追加メモリを1行分に制限する試験と全Android buildも通過したが、上の実画像比較で精度向上を
+示せなかったため、この自動適用は採用せず自分の試作差分だけをHEADへ戻した。
+差分は私有 `data/device-setup/pr37-resume-20260922-214723/offline-quality/unadopted-android-contrast.patch` に保全。端末へ入れていない。
+今後、明暗補正だけの試作を「画像/OCR改善済み」として実機試験へ進めない。
+
+### 最終差分の検証と残る作業
+
+Runs on: Windows PC。JDK/SDK/Gradleは前段と同じ。
+
+- Python新機能の回帰は実装前 `5 failed, 34 deselected`、実装後の画像処理試験は `62 passed`。
+- `py -3.12 -m pytest -q tests/test_capture_quality.py tests/test_capture_geometry.py tests/test_capture_geometry_core.py tests/test_capture_documentation.py tests/test_documentation_contract.py tests/test_versioning.py`
+  → `95 passed in 6.18s`、exit 0。試作撤回・最終版pin反映後。
+- `py -3.12 -m ruff check .` → `All checks passed!`、exit 0。
+- `.\android-relay\gradlew.bat --no-daemon test testDebugUnitTest assembleDebug`
+  → `BUILD SUCCESSFUL in 1m 2s`、199 tasks（29 executed / 170 up-to-date）、exit 0。
+  試作撤回後にbuildし直した。JUnit集計391 / failures 0 / errors 0 / skipped 0。
+- 実験中の全Python試験は `819 passed, 1 skipped, 1 warning in 102.40s`。
+  最終差分の全体CI・commit/hashはPR本文で確定する。実機品質の合格ではない。
+- 最終記録の相対パス2件を修正後、
+  `py -3.12 -m pytest -q tests/test_capture_documentation.py tests/test_documentation_contract.py`
+  → `24 passed in 0.87s`、exit 0。
+
+再buildしたglassdoc APKは `aapt2 dump badging` で既存package/activityと一致、
+`apksigner verify --verbose --print-certs` → `Verifies`、v2=true、上記certificateと一致。
+`Get-FileHash -Algorithm SHA256` → `5bd97247394b24189b89788afe3d45f24af5a6f213f9cd2f40e905ffa4b68a80`。
+これは停止後のPC build成果物であり、実機へ導入していない。
+
+次は原寸の文字を保ったOCR入力と、参照資料に基づく紙面/全文評価を優先する。
+現在のAndroid OCRは縮小入力のまま。単純な全画面原寸復号は既知のメモリ問題へ戻るため、
+分割処理と文字・行の欠落/重複を同時に評価してから接続する。
+自動画角合わせ、露出の原因解消、CQ-5〜9は未完。GPT待機や再撮影でこれを代替しない。

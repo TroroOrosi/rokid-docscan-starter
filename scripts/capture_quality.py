@@ -16,7 +16,7 @@ import warnings
 from contextlib import ExitStack
 from pathlib import Path
 
-from PIL import Image, UnidentifiedImageError
+from PIL import Image, ImageOps, UnidentifiedImageError
 
 from scripts.capture_geometry import detect_paper, focus_metrics, rectify
 from scripts.capture_preflight import MAX_BYTES, MAX_PIXELS, PREVIEW_EDGE, _upright
@@ -92,6 +92,30 @@ def tone_candidate(image: Image.Image) -> tuple[Image.Image, dict]:
                     "recovers_lost_detail": False}
 
 
+def document_contrast(image: Image.Image) -> tuple[Image.Image, dict]:
+    """A grayscale reading derivative; retain faint ink and original geometry.
+
+    Trim only the brightest 1% (lamps/glare), never the sparse dark strokes.
+    This improves visibility, not source resolution or a quality verdict.
+    """
+    if min(image.size) < 1 or image.width * image.height > MAX_PIXELS:
+        raise ValueError("invalid document dimensions")
+    with image.convert("L") as gray:
+        histogram = gray.histogram()
+        low = next(i for i, n in enumerate(histogram) if n)
+        remaining = sum(histogram) // 100
+        high = 255
+        while high > low and histogram[high] <= remaining:
+            remaining -= histogram[high]
+            high -= 1
+        applied = high - low >= 16 and (low > 0 or high < 255)
+        output = ImageOps.autocontrast(gray, cutoff=(0, 1)) if applied else gray.copy()
+    output.info.clear()
+    return output, {"method": "grayscale_linear_levels", "black_point": low,
+                    "white_point": high, "applied": applied,
+                    "recovers_lost_detail": False}
+
+
 def _save(image: Image.Image, output: Path, name: str) -> dict:
     image.info.clear()
     path = output / name
@@ -153,6 +177,11 @@ def build_packet(source: Path, output_root: Path, *, rotation: int, edge: int = 
             with full.copy() as overview:
                 overview.thumbnail((PREVIEW_EDGE, PREVIEW_EDGE), Image.Resampling.LANCZOS)
                 report["overview"] = _save(overview, output, "overview.png")
+            if tone:
+                readable, adjustment = document_contrast(full)
+                with readable:
+                    report["readable"] = dict(adjustment, scale="source_pixels_1_to_1",
+                                              **_save(readable, output, "document-readable.png"))
             for index, box in enumerate(boxes, 1):
                 with full.crop(box) as tile:
                     entry = dict(_save(tile, output, f"tile-{index:03d}.png"),
@@ -165,6 +194,12 @@ def build_packet(source: Path, output_root: Path, *, rotation: int, edge: int = 
                     report["tiles"].append(entry)
             if corrected is not None:
                 report["rectified"] = dict(geometry, **_save(corrected, output, "paper-rectified.png"))
+                if tone:
+                    readable, adjustment = document_contrast(corrected)
+                    with readable:
+                        report["rectified"]["readable"] = dict(
+                            adjustment, scale="resampled_derivative",
+                            **_save(readable, output, "paper-readable.png"))
             path = output / "report.json"
             path.write_text(json.dumps(report, ensure_ascii=False, allow_nan=False, indent=2) + "\n", encoding="utf-8")
             return path
