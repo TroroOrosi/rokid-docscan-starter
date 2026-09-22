@@ -9,6 +9,7 @@ import android.hardware.camera2.CameraCharacteristics;
 import android.hardware.camera2.CameraDevice;
 import android.hardware.camera2.CameraManager;
 import android.hardware.camera2.CaptureRequest;
+import android.hardware.camera2.CaptureResult;
 import android.hardware.camera2.CaptureFailure;
 import android.hardware.camera2.TotalCaptureResult;
 import android.hardware.camera2.params.StreamConfigurationMap;
@@ -23,7 +24,8 @@ import android.view.Surface;
 import androidx.annotation.RequiresPermission;
 
 import java.nio.ByteBuffer;
-import java.util.Collections;
+import java.util.List;
+import java.util.Objects;
 
 /**
  * One still per request, straight from {@code android.hardware.camera2}.
@@ -59,6 +61,8 @@ final class GlassCamera {
     private CameraDevice device;
     private CameraCaptureSession session;
     private ImageReader reader;
+    private ImageReader meteringReader;
+    private boolean stillRequested;
     private long startedAtMillis;
     private boolean settled;
     private boolean closed;
@@ -84,6 +88,7 @@ final class GlassCamera {
         if (closed || unknown || (generation > 0 && !settled)) return;
         long current = ++generation;
         settled = false;
+        stillRequested = false;
         startedAtMillis = SystemClock.elapsedRealtime();
         CameraManager manager =
                 (CameraManager) context.getSystemService(Context.CAMERA_SERVICE);
@@ -103,12 +108,25 @@ final class GlassCamera {
                 fail("no JPEG size");
                 return;
             }
+            Size meteringSize = meteringSize(characteristics, size);
+            if (meteringSize == null) {
+                fail("no bounded metering size");
+                return;
+            }
             CameraDiagnostics.capabilities(current, characteristics, size);
             reader = ImageReader.newInstance(
                     size.getWidth(), size.getHeight(), ImageFormat.JPEG, 1);
             reader.setOnImageAvailableListener(source -> {
                 if (current == generation && !closed && !settled) onImageAvailable(source);
             }, handler);
+            // YUV PREVIEW + JPEG MAXIMUM is a Camera2 guaranteed stream combination.
+            // This buffer is for AE only; never allocate a bitmap or retain its pixels.
+            meteringReader = ImageReader.newInstance(meteringSize.getWidth(),
+                    meteringSize.getHeight(), ImageFormat.YUV_420_888, 2);
+            meteringReader.setOnImageAvailableListener(source -> {
+                if (active(current)) drainMeteringImage(source);
+            }, handler);
+            Log.i(TAG, "camera_metering gen=" + current + " size=" + meteringSize);
             handler.postDelayed(timeout, CAPTURE_TIMEOUT_MILLIS);
             manager.openCamera(id, deviceCallback(current), handler);
         } catch (CameraAccessException | RuntimeException | OutOfMemoryError error) {
@@ -156,13 +174,13 @@ final class GlassCamera {
     private void configureSession(long current) {
         try {
             device.createCaptureSession(
-                    Collections.singletonList(reader.getSurface()),
+                    List.of(reader.getSurface(), meteringReader.getSurface()),
                     new CameraCaptureSession.StateCallback() {
                         @Override
                         public void onConfigured(CameraCaptureSession configured) {
                             if (closed || settled || current != generation) { closeResource(configured); return; }
                             session = configured;
-                            requestStill(current);
+                            startMetering(current);
                         }
 
                         @Override
@@ -178,6 +196,60 @@ final class GlassCamera {
         }
     }
 
+    private void startMetering(long current) {
+        try {
+            CaptureRequest.Builder request = device.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW);
+            request.addTarget(meteringReader.getSurface());
+            request.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON);
+            session.setRepeatingRequest(request.build(), new CameraCaptureSession.CaptureCallback() {
+                private Integer lastAeState = -1;
+                @Override public void onCaptureCompleted(CameraCaptureSession source,
+                        CaptureRequest request, TotalCaptureResult result) {
+                    if (!active(current) || stillRequested) return;
+                    try {
+                        Integer ae = result == null ? null : result.get(CaptureResult.CONTROL_AE_STATE);
+                        if (!Objects.equals(lastAeState, ae)) {
+                            lastAeState = ae;
+                            Log.i(TAG, "camera_metering_state gen=" + current
+                                    + " ae_state=" + (ae == null ? "unknown" : ae)
+                                    + " elapsed_ms=" + (SystemClock.elapsedRealtime() - startedAtMillis));
+                        }
+                        if (ae == null || ae != CaptureResult.CONTROL_AE_STATE_CONVERGED) return;
+                        // Set before Camera2 calls: queued results/stop echoes must not shoot twice.
+                        stillRequested = true;
+                        Log.i(TAG, "camera_metering_ready gen=" + current + " ae_state=" + ae
+                                + " elapsed_ms=" + (SystemClock.elapsedRealtime() - startedAtMillis));
+                        session.stopRepeating();
+                        requestStill(current);
+                    } catch (CameraAccessException | RuntimeException | OutOfMemoryError error) {
+                        fail("metering " + error.getClass().getSimpleName());
+                    }
+                }
+                @Override public void onCaptureFailed(CameraCaptureSession source,
+                        CaptureRequest request, CaptureFailure failure) {
+                    if (active(current) && !stillRequested) fail("metering failed");
+                }
+                @Override public void onCaptureBufferLost(CameraCaptureSession source,
+                        CaptureRequest request, Surface target, long frameNumber) {
+                    if (active(current) && !stillRequested) fail("metering buffer lost");
+                }
+                @Override public void onCaptureSequenceAborted(CameraCaptureSession source, int id) {
+                    if (active(current) && !stillRequested) fail("metering sequence aborted");
+                }
+            }, handler);
+        } catch (CameraAccessException | RuntimeException | OutOfMemoryError error) {
+            fail("metering " + error.getClass().getSimpleName());
+        }
+    }
+
+    private void drainMeteringImage(ImageReader source) {
+        try (Image ignored = source.acquireLatestImage()) {
+            // Closing promptly keeps repeating requests moving; no preview pixels escape.
+        } catch (RuntimeException | OutOfMemoryError error) {
+            fail("metering image " + error.getClass().getSimpleName());
+        }
+    }
+
     private void requestStill(long current) {
         try {
             CaptureRequest.Builder request =
@@ -187,16 +259,9 @@ final class GlassCamera {
             // orientation-corrected PNG and is told the rotation separately,
             // so exactly one component rotates the page.
             request.set(CaptureRequest.JPEG_ORIENTATION, 0);
-            // Nothing else is set on the request. Biasing exposure +2 EV here
-            // (glassdoc 0.3.0) stopped the capture completing at all: four
-            // consecutive attempts on 2026-09-04 hit the 15 s timeout without
-            // one image, where TEMPLATE_STILL_CAPTURE untouched had returned
-            // seven stills in 785-1380 ms. The phone relay never sets exposure
-            // either -- it calls takePhoto(w, h, quality) and nothing more.
-            // Dark captures remain unresolved. The 2026-09-22 operator reported
-            // a bright room; do not attribute the result to lighting alone.
-            // This path requests a still immediately, without waiting for AE
-            // convergence. The older timeout does not establish its cause.
+            request.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON);
+            // No EV bias, flash, focus trigger or exposure lock. Preview convergence
+            // is preparation, not proof of the JPEG's exposure or text readability.
             session.capture(request.build(), captureCallback(current), handler);
         } catch (CameraAccessException | RuntimeException | OutOfMemoryError error) {
             fail("capture " + error.getClass().getSimpleName());
@@ -299,12 +364,15 @@ final class GlassCamera {
         CameraCaptureSession oldSession = session;
         CameraDevice oldDevice = device;
         ImageReader oldReader = reader;
+        ImageReader oldMeteringReader = meteringReader;
         session = null;
         device = null;
         reader = null;
+        meteringReader = null;
         boolean ok = closeResource(oldSession);
         ok = closeResource(oldDevice) && ok;
-        return closeResource(oldReader) && ok;
+        ok = closeResource(oldReader) && ok;
+        return closeResource(oldMeteringReader) && ok;
     }
 
     private static boolean closeResource(AutoCloseable resource) {
@@ -348,5 +416,22 @@ final class GlassCamera {
             }
         }
         return largest;
+    }
+
+    private static Size meteringSize(CameraCharacteristics characteristics, Size jpeg) {
+        StreamConfigurationMap map = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
+        Size[] sizes = map == null ? null : map.getOutputSizes(ImageFormat.YUV_420_888);
+        Size selected = null;
+        if (sizes == null) return null;
+        for (Size candidate : sizes) {
+            long pixels = (long) candidate.getWidth() * candidate.getHeight();
+            if (pixels <= 0 || pixels > 640 * 480
+                    || (long) candidate.getWidth() * jpeg.getHeight()
+                    != (long) candidate.getHeight() * jpeg.getWidth()) continue;
+            if (selected == null || pixels > (long) selected.getWidth() * selected.getHeight()) {
+                selected = candidate;
+            }
+        }
+        return selected;
     }
 }

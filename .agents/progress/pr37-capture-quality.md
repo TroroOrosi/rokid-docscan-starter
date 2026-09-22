@@ -1,6 +1,6 @@
-# PR #37 撮影品質部品の統合
+# 撮影品質の継続記録（PR #37 → PR #38）
 
-Status: Internal progress。2026-09-22、撮影品質は未解決。標準JPEG8枚を回収したが距離・姿勢は未確認。利用者の5方向の再点検と席の制約を優先し、追加撮影・GPT・APK更新・通常読取を停止。本流の不足と測定方法を研究資料・plan・todoへ反映。
+Status: Internal progress。2026-09-23、PR37はmerge済み。利用者の新PR・必要作業の依頼に基づくPR38の画像比較・露出準備は末尾参照。撮影品質は未解決。標準JPEG8枚の距離・姿勢は未確認。追加撮影・GPT・APK更新・通常読取は停止を維持。
 Runs on: Windows PC `C:\rokid-docscan-starter`。前段の実機試験はglassdocとF-51F上のサーバ・Chrome（既存Wi-Fi、スマホAPではない）。最新節はPCでの再点検。
 
 ## 再開点と権限（実装時点。後続の実機承認は末尾参照）
@@ -422,3 +422,87 @@ OCRゼロの自動撮影反復、品質ゲートなしの保存・送信、選�
 → `24 passed in 4.09s`、exit 0。`py -3.12 -m ruff check .` → `All checks passed!`、exit 0。
 `git diff --check` → 空白エラーなし、exit 0（WindowsのLF/CRLF変換警告のみ）。
 変更は既存の研究・plan・todo・本進捗の4ファイル。製品コード未変更につきAndroid再build・実機再試験なし。
+
+## PR38: 同一文字の比較と露出準備（2026-09-23）
+
+Runs on: Windows PC `C:\rokid-docscan-starter`。実機導入・撮影・通常読取・GPT送信は再開していない。
+
+利用者「マージしました。新しくPRを作成し、必要な作業を行ってください。作業の方向性もぶれないように
+整理してから行ってください」に基づく。PR37のmerge commitは `c8835ac0cbdc3d1863ff29153a19322a32d9efab`、
+旧headとのtree差分なしを確認して `feature/capture-quality-readiness` を作成。
+`0619251` にplan/todoのQN-1〜3と合格範囲を先に保存・pushし、
+[PR38](https://github.com/TroroOrosi/rokid-docscan-starter/pull/38)をdraft作成した。
+対象remoteは `https://github.com/TroroOrosi/rokid-docscan-starter.git`。このPRの通常commit/pushは依頼範囲。
+最終commitはPR本文で確定する。冒頭の「別PR対象外」はPR37実装時点の履歴であり、今回の依頼が更新する。
+
+### 変更と5方向の再点検
+
+Runs on: 現ソースのCamera2準備経路とPC上の既存画像。物理カメラの改善は未検証。
+
+| 方向 | このPRの到達点と残る境界 |
+|---|---|
+| 目的達成 | 原寸／半分／補間を同じ33文字で比較。誤り6/29/7/7。画素を保持する優先度の根拠であり全文精度ではない。露出未収束でも即時JPEGを要求する箇所を修正。 |
+| 全体への影響 | 撮影入口GlassCameraだけに測光を接続。最大JPEG・回転・burst・retry・操作・正式登録・凍結relayは不変。露出準備の時間・電力・メモリが増え得るため実機受け入れは保留。 |
+| 事実確認 | Camera2公式のAE/同時出力/ImageReader契約、保存dumpのzoomRatioRange=[1,8]・YUV640×480、原本hash8/8を照合。「列挙範囲未確認」を訂正。 |
+| 未確認事項 | 最新2枚は席の基準ではない。ML Kit精度、紙面／細字／数式全体、実カメラの収束と最終JPEG、同時出力PSS、スマホAP経路は未確認。 |
+| 指示漏れ | 後退・正確な測距を必須にしない。CQ-5〜9、資料不足・過去ページ訂正・分割RP-11/12、答案追加取得RP-15、録音復元・冪等性・終了保存待ちを未完で保持。 |
+
+実装は列挙からJPEGと同じ縦横比、640×480画素以下のYUVを選び、AE CONVERGED後にJPEGを1回要求する。
+測光状態の変化と経過時間だけを数値診断へ記録。null/SEARCHING/LOCKED/FLASH_REQUIREDは合格にしない。
+全体15秒の期限を延長せず、timeoutはUNKNOWNを保ち再要求しない。測光Imageは即close、
+成功・失敗・明示closeで全資源を解放。世代違い・重複・測光停止echoから撮影を増やさない。
+previewの露出収束を画質合格・最終JPEGの収束保証にはしない。依存・schema・署名鍵の変更なし。
+
+比較の原本hash・座標・方式・参照の限界・一次資料URLは
+[研究の2026-09-23節](../../docs/rokid-capture-research.md)に集約。
+一律拡大は原寸より良くならず不採用。原寸全文Bitmap化と自動明暗補正も採用しない。
+私有出力は `data/device-setup/pr37-camera-baseline-20260922-225825/text-comparison/`。
+元画像・OCR本文・参照本文をGitへ追加していない。
+
+### PC検証
+
+Runs on: ASCIIパスの本checkout、JDK 17.0.20.1+1 / SDK Platform 36・build-tools 36.0.0 / Gradle wrapper 9.4.1。
+
+- 回帰RED: `.\android-relay\gradlew.bat --no-daemon :glassdoc:testDebugUnitTest --tests '*GlassCameraExposureTest'`
+  → 模擬HALの準備を修正した後、旧実装の即時JPEGで `3 tests completed, 3 failed`、`BUILD FAILED in 23s`。
+- 最初のGREEN: `:glassdoc:testDebugUnitTest --tests '*GlassCamera*Test'` → `BUILD SUCCESSFUL in 26s`。
+- 追加した試験のCameraCharacteristics二重setが全体試験で失敗。模擬カメラを置き換えるよう試験側を修正し、
+  `test testDebugUnitTest assembleDebug` → `BUILD SUCCESSFUL in 38s`、199 tasks、JUnit400件／失敗0。
+- `py -3.12 -m pytest -q` → `819 passed, 1 skipped, 1 warning in 111.57s`、exit 0。
+  LIVE=0、新規TEMPのROKID_DATA_DIR。skipは実送信、warningは既存Starlette/httpx非推奨。
+- `py -3.12 -m ruff check .` → `All checks passed!`、exit 0。
+- `compare_text.py` → 6/33・29/33・7/33・7/33、`original_unchanged: true`、exit 0。
+  全8原本のSHA再照合 → `originals_unchanged 8 / 8`、exit 0。
+
+最終コード（AE状態変化の数値診断を追加後）:
+
+- `.\android-relay\gradlew.bat --no-daemon test testDebugUnitTest assembleDebug`
+  → `BUILD SUCCESSFUL in 46s`、`199 actionable tasks: 7 executed, 192 up-to-date`、exit 0。
+  JUnit XML集計 → `tests:400, failures:0, errors:0, skipped:0`。
+- 研究資料の私有パス2件を修正し、
+  `py -3.12 -m pytest -q tests/test_capture_documentation.py tests/test_documentation_contract.py tests/test_versioning.py`
+  → `33 passed in 0.90s`、exit 0。`git diff --check` → 空白エラーなし、exit 0。
+- `aapt2 dump badging android-relay/glassdoc/build/outputs/apk/debug/glassdoc-debug.apk`
+  → package `dev.rokid.docscanglass.doc`、activity `dev.rokid.docscanglass.doc.DocScanGlassActivity`。
+- `apksigner verify --verbose --print-certs <同APK>` → `Verifies`、v2=true、certificate SHA-256
+  `906307478018e09e2937cfd8042a674d27598767577e08a304472aae407ccacc`。既存署名と一致。
+- `Get-FileHash -Algorithm SHA256 <同APK>` →
+  `4c96a139e1fe916ce4417e345038fe78634529689229f841a14dab873d80510f`。
+
+これは本checkoutのPC成果物。端末にあるAPKの置換や、新しい実機動作の確認ではない。
+
+グラフ索引は古く、coverageの変更済み／未追跡ファイルを直接読んだ。差分レビュー用graphも旧SHAのため、
+未追跡ExposureTestを含む実ソースとGlassCameraのActivity生成箇所で補った。
+Agent Skills router → planning/incremental/TDD、verifying-premises/find-docs、code-review-and-quality、
+progress-checkpointを使用。サブエージェントやクラウドCodexへ再委任していない。
+
+### 次に戻る作業
+
+Runs on: まずWindows PC。実機作業はここに記載しただけでは再開しない。
+
+1. QNのPC成果とCQ全体の未完を区別する。原寸領域OCRを既存メモリ上限で扱う方法を、領域境界の欠落・
+   重複・文字順と一緒に比較する。33文字だけで既定方式を承認しない。
+2. 同じ原本の紙面・文字の証拠を、候補保全／正式登録の全経路へ接続する（CQ-6〜8）。
+   RP-11/12/15の資料不足・分割・答案追加取得を作業表から落とさない。
+3. 実機でしか答えられない問いは、通常の着席姿勢・同じ紙位置で標準／Camera2を比較できる
+   撮影だけの経路を準備してから具体化する。新しいAPKは未導入。測距・後退を必須にしない。

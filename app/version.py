@@ -173,7 +173,8 @@ from __future__ import annotations
 # Predevice hardening: exact input identity and durable browser send guard.
 # Snapshot reads and recording-retry integrity; no HTTP envelope change.
 # Capture evidence diagnostics and honest text-bounds/review labels; HTTP unchanged.
-APP_VERSION = "0.35.3"
+# Bounded Camera2 metering before glassdoc JPEG capture; physical quality unverified.
+APP_VERSION = "0.36.0"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.
@@ -356,7 +357,8 @@ EXPLAINER_API_VERSION = "1.1.0"
 # Upright, magnified still review and phone-side unfold-to-chooser startup.
 # Failed CLOSED persistence keeps the answer and shows a retry notice.
 # Composition-only review and bounded clipped-shot ranking; 3s timing unchanged.
-GLASSES_VIEW_CONTRACT_VERSION = "1.17.2"
+# Local capture waits for AE convergence within the existing total deadline.
+GLASSES_VIEW_CONTRACT_VERSION = "1.18.0"
 
 # Answer-area overlay payload (box + short answer; 2D image-anchored).
 # 1.1.0: added tracking metadata (tracking/fixed_ar/anchor_hint).

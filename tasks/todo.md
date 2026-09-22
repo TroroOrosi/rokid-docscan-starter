@@ -56,13 +56,17 @@ Runs on: Windows PCの保存原本と実ソース。追加撮影・APK更新・�
 
 Runs on: Windows PCのみ。対象はglassdocの撮影準備。既存の停止・未完CQ/RPは維持する。
 
-- [ ] QN-1（CQ-5）: 既存画像の同じ文字を原寸／縮小／補間で比較し、参照転記の限界と原本hashを記録。
+- [x] QN-1（CQ-5）: 既存画像の同じ文字を原寸／縮小／補間で比較し、参照転記の限界と原本hashを記録。
   合格: 条件・誤り・不採用の判断を再現でき、TesseractをML Kitの実証にしない。私有比較スクリプトで検証。
-- [ ] QN-2（CQ-6の露出部分）: 即時JPEGを測光→AE収束→JPEGへ変更。null/SEARCHING/古い世代/重複で
+- [x] QN-2（CQ-6の露出部分）: 即時JPEGを測光→AE収束→JPEGへ変更。null/SEARCHING/古い世代/重複で
   撮影しない。15秒でUNKNOWN、成功・失敗・closeで測光Image/readerを解放する。
   検証: GlassCamera回帰のRED→GREEN、全Android試験・build。JPEG寸法・操作・retryは不変。
-- [ ] QN-3: 5方向レビュー、資料整合性、APK identity/署名/hash、新PR作成。
+- [x] QN-3: 5方向レビュー、資料整合性、APK identity/署名/hash、新PR作成。
   完了はPC検証とPRまで。露出改善・文字判読・実機受け入れは未確認として残す。
+
+結果: [PR38](https://github.com/TroroOrosi/rokid-docscan-starter/pull/38)。
+コマンド出力・APK hash・5方向の点検は[継続記録](../.agents/progress/pr37-capture-quality.md)の末尾。
+QNの完了は上のCQ-5〜9全体の完了を意味しない。
 
 ## 共通の進め方
 

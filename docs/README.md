@@ -102,7 +102,7 @@ what the platform permits.
 
 ## Internal progress records
 
-- `.agents/progress/pr37-capture-quality.md` — **PR37の再開入口。** 撮影品質要件の31件対応表、今回の検証と本流未接続の残作業。
+- `.agents/progress/pr37-capture-quality.md` — **撮影品質作業の再開入口（PR37→PR38）。** 31件対応表、利用者訂正、画像比較・露出準備の検証と本流未接続の残作業。
 
 - `.agents/progress/pr37-objective-review.md` — **2026-09-17時点のレビュー。** 整合性・録音・終了保存の回帰修正、客観的な未解決事項。実機停止は維持。
 
