@@ -1,7 +1,7 @@
 # PR #37 撮影品質部品の統合
 
-Status: Internal progress。2026-09-22、承認後の実機試験は撮影範囲・暗さ・解析で失敗。利用者の訂正後は実機/GPTを停止し、保存画像5枚のPC補正を追加。OCR精度改善・本流品質ゲート・実機受け入れは未完。
-Runs on: Windows PC `C:\rokid-docscan-starter`。末尾の実機試験はglassdocとF-51F上のサーバ・Chrome（既存Wi-Fi、スマホAPではない）。
+Status: Internal progress。2026-09-22、撮影品質は未解決。標準JPEG8枚を回収したが距離・姿勢は未確認。利用者の5方向の再点検と席の制約を優先し、追加撮影・GPT・APK更新・通常読取を停止。本流の不足と測定方法を研究資料・plan・todoへ反映。
+Runs on: Windows PC `C:\rokid-docscan-starter`。前段の実機試験はglassdocとF-51F上のサーバ・Chrome（既存Wi-Fi、スマホAPではない）。最新節はPCでの再点検。
 
 ## 再開点と権限（実装時点。後続の実機承認は末尾参照）
 
@@ -339,3 +339,86 @@ Runs on: Windows PC。JDK/SDK/Gradleは前段と同じ。
 現在のAndroid OCRは縮小入力のまま。単純な全画面原寸復号は既知のメモリ問題へ戻るため、
 分割処理と文字・行の欠落/重複を同時に評価してから接続する。
 自動画角合わせ、露出の原因解消、CQ-5〜9は未完。GPT待機や再撮影でこれを代替しない。
+
+## 一次資料と対照撮影を判断へ反映する（後続で測定方法を訂正）
+
+Runs on: この節の時点は一次資料調査・コード照合・端末read-only確認。以後の撮影結果と停止は次節を優先する。
+
+PC処理は `5981c3a` でPRへ反映済み。`gh pr checks 37` → 全16 checks pass。
+それを撮影品質解決と扱わない。利用者は「外部ソースや公式情報をもとに撮影情報を分析せず、
+内部調査で決めつける」「実際に何枚か撮影する必要もあるのに求めない」と訂正した。
+過去の研究資料はあったが、今回の判断前に一次資料を再照合して対照撮影へつなげていなかった。
+停止指示を、必要な比較測定の設計・提案まで避ける理由にした点を是正する。
+
+`verifying-premises` → `find-docs`を使用。Context7のCamera2 IDを解決してAE資料を取得し、
+Android公式のAPI 21からの状態定義、Rokidの現行FAQ・独公式製品詳細・公式撮影記事を開いた。
+旧global製品URLは404のため別の公式地域ページへ照合。公式資料・現物・推論は
+[研究資料の2026-09-22節](../../docs/rokid-capture-research.md)で区別した。
+固定焦点・34cm〜∞の公称範囲、撮影109°と表示30°、標準LLHDRを確認した。
+この公称値は手元の細字可読性やCamera2での同じ処理を保証しない。
+
+保存logcatのcapture_resultは4件すべてae_state=1。公式定義はSEARCHINGであり、
+現行の即時撮影に対してAE未収束を検査すべき証拠。暗さの単一原因とは断定しない。
+グラフcoverageは古かったためGlassCamera/CameraDiagnostics実ソースで照合した。
+`adb devices -l` → RG_glasses `192.168.0.3:5555`、F-51F `192.168.0.6:38043`。
+`adb -s 192.168.0.3:5555 shell getprop ro.build.version.incremental`
+→ `1.25.015-20260903-150201`。共有DCIM/Cameraの存在と撮影前一覧だけを取得した。
+一覧保存先はGit対象外 `data/device-setup/pr37-camera-baseline-path.txt` が指す。
+
+同じページ・照明で標準カメラ40/50/60cm各2枚、計6枚を最初の対照基準として提案し、
+直前の停止をこの撮影品質測定だけ解除する確認を出した。APK更新・通常読取・GPTは含めない。
+6枚は距離による細字と撮影ばらつきの比較であり、統計的保証ではない。
+承認後は1条件ずつ案内し、新規JPEGをコピーする。標準Hi Rokidの一括取込は写真削除を伴う
+公式仕様のため使わない。次段のアプリ対照は同条件を揃え、送信を伴わない準備を先に行う。
+
+利用者回答: 「6枚の比較撮影を進める」。上記の標準カメラ測定だけ承認された。
+40cmの準備を案内し、変更可能な物理ボタン短押しの割当を確認中。
+直前の `adb -s 192.168.0.3:5555 shell dumpsys media.camera` → `Active Camera Clients: []`。
+資料試験 `py -3.12 -m pytest -q tests/test_capture_documentation.py tests/test_documentation_contract.py`
+→ `24 passed in 0.84s`（承認追記前）。実機品質の合格ではない。
+
+## 最新訂正: 5方向の点検と実際の席の制約
+
+Runs on: Windows PC。追加撮影・導入・通常読取・GPT送信は停止。既存JPEGの読み取りと比較だけ。
+
+利用者は短押し写真を確認し、最初の2枚と「少し離れて2枚」の撮影を報告した。
+正確な測距を要求した案は撤回したが、その後も離れられる席を前提にしてしまった。
+最新2枚を普段の着席位置と扱う根拠もない。利用者の訂正は「近づけても離れるのは条件次第で難しい」。
+今後は目的達成・全体への影響・事実確認・未確認事項・指示漏れの5方向と、文字の判読を優先する。
+
+### 原本と測定の限界
+
+Runs on: 標準撮影は利用者の物理操作。回収・診断はPC。会場経路やアプリ画質の合格試験ではない。
+
+私有出力先: `data/device-setup/pr37-camera-baseline-20260922-225825/`。
+撮影前DCIM一覧との差分を明示serialの`adb -s 192.168.0.3:5555 pull`でコピーした。削除・Hi Rokid取込なし。
+新規JPEGは準備時1枚、最初の報告に対応する時刻2枚、その後の区間5枚の計8枚。
+報告枚数と一致しないため、末尾2枚だけを2組目や着席基準へ自動割当しない。
+全8枚の距離・姿勢・撮影群を未確認へ訂正した。条件統制した6枚の実験完了とは呼ばない。
+寸法は全件3024×4032、EXIF露光16.6〜25ms・ISO191〜318。暗いアプリ写真と同条件の対照ではない。
+私有`pixel-audit/`の同一領域は原寸580×460と半分290×230。Pillow BOXで、Android復号／ML Kitではない。
+
+`py -3.12 data/device-setup/pr37-camera-baseline-20260922-225825/audit_native.py`
+→ `originals_unchanged 8 / 8`、`prior_hashes_match 3 / 3`。`native-metadata.json`へ全件のSHA・EXIF・未確認条件を保存。
+文字数や輝度をOCR精度へ置き換えず、最新の2枚を校正に使わない。元JPEG・OCR本文・派生画像はGit対象外。
+
+### 本流点検の結果と再開順
+
+Runs on: PCの現行ソース `5981c3a`。グラフ2026-09-14のcoverageは古いため対象ソースへフォールバック。
+
+[研究資料](../../docs/rokid-capture-research.md)に5方向の事実・根拠・未確認を記録した。
+主な不足は、表示だけのguide/spread、背景込み半分OCR、撮影前の紙面／細字判定なし、
+OCRゼロの自動撮影反復、品質ゲートなしの保存・送信、選択肢の偽問題化、全問待ち後の1回bundle取得。
+`segment_problems`の合成入力「問1＋(A)＋(B)」→3問題。実写真での誤分割原因を確定したものではない。
+既存の完了録音復元・文書作成冪等性・終了保存UI待ち・AP経路の未検証を消さない。
+
+次は通常姿勢の制約を保ち、同一原本の全体の収まり／原寸細字／OCR入力の処理差を比較する（CQ-5）。
+その後にCQ-6〜8の撮影・登録境界、RP-11/12の資料と分割、RP-15の答案追加取得へ戻る。
+撮影方法は「さらに離れる」を必須にせず、対応可能な倍率・cropと単頁／見開きを判読で選ぶ。
+実機でのzoom範囲・同時preview・露出収束・ML Kit精度は未確認。新たな撮影はまだ依頼しない。
+本変更は点検・測定設計の訂正であり、製品コードの品質改善・実機検証を完了したものではない。
+
+検証: `py -3.12 -m pytest -q tests/test_capture_documentation.py tests/test_documentation_contract.py`
+→ `24 passed in 4.09s`、exit 0。`py -3.12 -m ruff check .` → `All checks passed!`、exit 0。
+`git diff --check` → 空白エラーなし、exit 0（WindowsのLF/CRLF変換警告のみ）。
+変更は既存の研究・plan・todo・本進捗の4ファイル。製品コード未変更につきAndroid再build・実機再試験なし。
