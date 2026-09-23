@@ -16,6 +16,39 @@ def evaluate(records):
     return importlib.import_module("scripts.capture_evaluation").evaluate_trials(records)
 
 
+@pytest.mark.parametrize("reference,recognized,errors", [
+    ("答えは12。", "答えは12。", 0), ("甲乙丙", "", 3),
+    ("甲乙丙", "甲丙", 1), ("甲乙丙", "甲乙乙丙", 1),
+    ("甲乙", "乙甲", 2), ("x−1=2", "x+1=2", 1),
+    ("x²", "x2", 1), ("ガ", "カ\u3099", 0),
+    ("甲", "甲乙丙丁", 3), ("甲 乙", "甲乙", 1),
+])
+def test_text_comparison_counts_loss_duplicates_order_and_symbols(reference, recognized, errors):
+    result = importlib.import_module("scripts.capture_evaluation").compare_text(reference, recognized)
+    assert result["errors"] == errors
+    assert result["reference_characters"] == len(reference)
+    assert result["error_rate"] == errors / len(reference)
+    assert "decision" not in result
+
+
+@pytest.mark.parametrize("reference,recognized", [
+    ("", "text"), (" \n", ""), (None, ""), ("text", None),
+    ("a" * 2049, ""), ("a", "a" * 2049),
+    ("\u0344" * 1025, ""), ("a", "\u0344" * 1025),
+], ids=["empty", "blank", "missing-reference", "missing-ocr", "long-reference", "long-ocr",
+        "expanded-reference", "expanded-ocr"])
+def test_text_comparison_rejects_missing_reference_and_unbounded_input(reference, recognized):
+    with pytest.raises(ValueError):
+        importlib.import_module("scripts.capture_evaluation").compare_text(reference, recognized)
+
+
+def test_text_comparison_denominator_uses_canonically_composed_reference():
+    result = importlib.import_module("scripts.capture_evaluation").compare_text("カ\u3099", "カ")
+    assert result["reference_characters"] == 1
+    assert result["errors"] == 1
+    assert result["error_rate"] == 1
+
+
 def test_test_only_metrics_include_false_accepts_and_unmatched_pairs():
     single = trial()
     spread = {**trial("s2"), "layout": "spread", "source_sha256": ["b" * 64],

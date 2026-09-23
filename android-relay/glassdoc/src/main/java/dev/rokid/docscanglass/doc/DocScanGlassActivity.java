@@ -32,10 +32,12 @@ import dev.rokid.docscanglass.input.GlassesInputAction;
 import dev.rokid.docscanglass.input.GlassesInputNormalizer;
 import dev.rokid.docscanglass.input.InputSignal;
 import dev.rokid.docscanrelay.ClientIdentity;
+import dev.rokid.docscanrelay.DocScanApi;
 import dev.rokid.docscanrelay.DocScanController;
 import dev.rokid.docscanrelay.JapaneseOcr;
 import dev.rokid.docscanrelay.RelayState;
 import dev.rokid.docscanrelay.study.AnswerBundle;
+import dev.rokid.docscanrelay.study.AnswerItem;
 import dev.rokid.docscanrelay.study.AnswerReader;
 import dev.rokid.docscanrelay.study.AnswerStore;
 
@@ -87,6 +89,8 @@ public final class DocScanGlassActivity extends Activity
 
     /** Long enough to read why the display stayed on before the session ends. */
     private static final long EXIT_NOTICE_MILLIS = 2_000;
+    // ponytail: fixed interval, measured cost on the AP route may call for backoff.
+    private static final long PENDING_ANSWER_POLL_MILLIS = 5_000;
 
     private final GlassesInputNormalizer normalizer = new GlassesInputNormalizer();
     private final BackExitPolicy backExit = new BackExitPolicy();
@@ -135,6 +139,8 @@ public final class DocScanGlassActivity extends Activity
     // every page turn -- retries instead of forfeiting the session's
     // answers to one bad request.
     private volatile long answersFetchedForSession = -1;
+    // Wakes the display once per run of failed fetches, not once per retry.
+    private volatile boolean answerFetchFailing;
     // True once this Activity instance has checked AnswerStore for a saved
     // reader without waiting on RelayState.REVIEW, which needs the network
     // to ever be published (see fetchAnswers's own comment). Read and
@@ -620,7 +626,7 @@ public final class DocScanGlassActivity extends Activity
             main.post(() -> {
                 if (audioStopRequested && !finishingAudio) {
                     wakeForResult();
-                    hud.showLines(List.of("録音・文字起こしを確認", "原音は保存済み", "ダブルタップで再試行"));
+                    hud.showLines(List.of("録音・転送を確認", "原音は保存済み", "ダブルタップで再試行"));
                 } else {
                     hud.showLines(GlassesHudText.adapt(hudLines));
                     waitWithDisplayOff();
@@ -738,7 +744,7 @@ public final class DocScanGlassActivity extends Activity
                     if (!(error instanceof ListeningRecorder.DocumentPending)) stopService(new Intent(this, ListeningService.class));
                     wakeForResult();
                     if (controller.getState() == RelayState.LISTENING || controller.getState() == RelayState.ERROR) {
-                        hud.showLines(List.of("録音・文字起こしを確認", "原音は保存済み", "ダブルタップで再試行"));
+                        hud.showLines(List.of("録音・転送を確認", "原音は保存済み", "ダブルタップで再試行"));
                     }
                 });
             }
@@ -821,6 +827,7 @@ public final class DocScanGlassActivity extends Activity
             }
             try {
                 AnswerBundle bundle = controller.api().answerBundle(sessionId);
+                answerFetchFailing = false;
                 answerStore.start(bundle);
                 main.post(() -> openAnswers(bundle, bundle.items.get(0).questionId, 0));
             } catch (Exception error) {
@@ -836,12 +843,27 @@ public final class DocScanGlassActivity extends Activity
                 // could start; only a fetch that already finished (here)
                 // reopens the door.
                 answersFetchedForSession = -1;
+                // 409: the server is still listing the 小問 (RP-12). Keep the
+                // display asleep for that; wake only for the first real failure.
+                boolean listing = error instanceof DocScanApi.ApiException
+                        && ((DocScanApi.ApiException) error).getStatusCode() == 409;
                 main.post(() -> {
                     if (isFinishing() || isDestroyed()) {
                         return;
                     }
-                    wakeForResult();
-                    hud.showLines(List.of("答案を取得できません", "通信を確認", ""));
+                    if (!listing && !answerFetchFailing) wakeForResult();
+                    answerFetchFailing = !listing;
+                    hud.showLines(listing ? List.of("問題一覧を作成中", "答案を待っています", "")
+                            : List.of("答案を取得できません", "通信を確認", ""));
+                    // Retry on a timer too: in local mode nothing republishes REVIEW.
+                    main.postDelayed(() -> {
+                        if (sessionClosed || isFinishing() || isDestroyed() || answersFetchedForSession != -1
+                                || controller.sessionId() != sessionId) {
+                            return;
+                        }
+                        answersFetchedForSession = sessionId;
+                        fetchAnswers(sessionId);
+                    }, PENDING_ANSWER_POLL_MILLIS);
                 });
             }
         }, "answer-bundle").start();
@@ -881,6 +903,40 @@ public final class DocScanGlassActivity extends Activity
         reader.restore(questionId, offset);
         answers.bind(reader);
         setContentView(answers);
+        refreshPendingAnswers(reader);
+    }
+
+    /**
+     * RP-15: the server saves 小問 one at a time, so a snapshot may still hold
+     * PENDING items. Re-read it with GET only while one remains -- never a
+     * finalize, which could resend a question whose browser send is unknown.
+     * Stops when the reader closes or is replaced.
+     */
+    private void refreshPendingAnswers(AnswerReader shown) {
+        main.postDelayed(() -> {
+            if (reader != shown || sessionClosed || isFinishing() || isDestroyed()) return;
+            AnswerBundle current = shown.bundle();
+            if (current.items.stream().noneMatch(i -> i.status == AnswerItem.Status.PENDING)) return;
+            long sessionId = controller.sessionId();
+            if (!Long.toString(sessionId).equals(current.sessionId)) return;
+            new Thread(() -> {
+                AnswerBundle next = null;
+                try {
+                    next = controller.api().answerBundle(sessionId);
+                } catch (Exception error) {
+                    Log.w(TAG, "pending answers not refreshed", error);
+                }
+                AnswerBundle fetched = next;
+                main.post(() -> {
+                    if (reader != shown || sessionClosed || isFinishing() || isDestroyed()) return;
+                    if (fetched != null && shown.accept(fetched)) {
+                        answers.refresh();
+                        persistAnswerPosition(false);
+                    }
+                    refreshPendingAnswers(shown);
+                });
+            }, "answer-refresh").start();
+        }, PENDING_ANSWER_POLL_MILLIS);
     }
 
     private boolean closeAnswers() {

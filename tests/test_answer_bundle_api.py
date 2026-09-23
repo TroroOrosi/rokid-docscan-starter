@@ -340,3 +340,151 @@ def test_bundle_keeps_items_and_revision_in_one_snapshot(client, monkeypatch):
     assert after["items"][0]["answer"] == "new concurrent answer"
     assert after["revision"] > during["revision"]
     assert after["input_digest"] == during["input_digest"]
+
+
+def test_background_finalize_publishes_each_answer_before_the_batch_ends(client, monkeypatch):
+    """RP-15: the glasses read saved 小問 while later ones are still solving."""
+    import threading
+    import time
+
+    from app import main
+    from app.solvers.base import SolveResult
+
+    _, session_id = _session_with(client, ["問1 2+2を求めよ。\n問2 3+3を求めよ。"])
+    monkeypatch.setenv("ROKID_SOLVER", "test-provider")
+    second_may_finish = threading.Event()
+    calls = []
+
+    class Solver:
+        name = "test-provider"
+
+    def solve(*, question):
+        calls.append(question.question_id)
+        if len(calls) == 2:
+            assert second_may_finish.wait(5)
+        return SolveResult(answer=f"answer {len(calls)}"), Solver()
+
+    monkeypatch.setattr(main, "solve_with_fallback", solve)
+    url = f"/v1/exam-sessions/{session_id}/answer-bundle"
+    finalize = f"/v1/exam-sessions/{session_id}/finalize-reading?solve=background"
+    body = client.post(finalize).json()
+    assert body["status"] == "reviewing" and body["solving"] == "background"
+
+    def statuses():
+        response = client.get(url)  # 409 while the question list is being made
+        return [item["status"] for item in response.json()["items"]] if response.status_code == 200 else []
+
+    deadline = time.monotonic() + 5
+    while statuses() != ["ready", "pending"] and time.monotonic() < deadline:
+        time.sleep(0.01)
+    partial = client.get(url).json()
+    assert [i["status"] for i in partial["items"]] == ["ready", "pending"]
+    # A repeated call while the batch runs must not start a second browser user.
+    assert client.post(finalize).json()["solving"] == "background"
+    second_may_finish.set()
+    while statuses() != ["ready", "ready"] and time.monotonic() < deadline:
+        time.sleep(0.01)
+    final = client.get(url).json()
+    assert [i["status"] for i in final["items"]] == ["ready", "ready"]
+    assert final["revision"] > partial["revision"]
+    assert len(calls) == 2
+
+
+def test_finalize_without_background_still_solves_before_returning(client, monkeypatch):
+    from app import main
+    from app.solvers.base import SolveResult
+
+    _, session_id = _session_with(client, ["問1 2+2を求めよ。"])
+    monkeypatch.setenv("ROKID_SOLVER", "test-provider")
+
+    class Solver:
+        name = "test-provider"
+
+    monkeypatch.setattr(main, "solve_with_fallback", lambda **_: (SolveResult(answer="4"), Solver()))
+    body = client.post(f"/v1/exam-sessions/{session_id}/finalize-reading").json()
+    assert body["server_solved"] == 1 and "solving" not in body
+
+
+def _background_finalize_and_wait(client, session_id, done):
+    import time
+
+    url = f"/v1/exam-sessions/{session_id}/answer-bundle"
+    body = client.post(f"/v1/exam-sessions/{session_id}/finalize-reading?solve=background").json()
+    assert body["solving"] == "background"
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        response = client.get(url)
+        if response.status_code == 200 and done(response.json()["items"]):
+            return response.json()
+        time.sleep(0.01)
+    raise AssertionError("background batch did not finish")
+
+
+def test_model_question_list_defines_the_deck(client, monkeypatch):
+    from app import main
+    from app.solvers.base import SolveResult
+
+    _, session_id = _session_with(client, ["問1 Choose\n(1) a\n(2) b"])
+    monkeypatch.setenv("ROKID_SOLVER", "test-provider")
+    listed, asked = [], []
+
+    def list_questions(question):
+        listed.append(question)
+        return [{"group": "第1問", "label": "問1", "pages": [1]},
+                {"group": "第1問", "label": "問2", "pages": [1, 99]},
+                {"group": "第2問", "label": "問1", "pages": []},
+                {"group": "", "label": "", "pages": [1]}]
+
+    class Solver:
+        name = "test-provider"
+
+    def solve(*, question):
+        asked.append(question.question_no)
+        return SolveResult(answer="x"), Solver()
+
+    monkeypatch.setattr(main, "_list_questions", list_questions)
+    monkeypatch.setattr(main, "solve_with_fallback", solve)
+    bundle = _background_finalize_and_wait(
+        client, session_id, lambda items: all(i["status"] == "ready" for i in items))
+    assert [(i["group_label"], i["question_label"]) for i in bundle["items"]] == [
+        ("第1問", "問1"), ("第1問", "問2"), ("第2問", "問1(2)")]
+    assert asked == ["第1問 問1", "第1問 問2", "第2問 問1"]
+    assert listed[0].chat_key == f"session:{session_id}" and listed[0].document_pages
+
+
+def test_unusable_model_list_falls_back_to_ocr_segments(client, monkeypatch):
+    from app import main
+    from app.solvers.base import SolveResult
+
+    _, session_id = _session_with(client, ["問1 2+2を求めよ。\n問2 3+3を求めよ。"])
+    monkeypatch.setenv("ROKID_SOLVER", "test-provider")
+
+    def list_questions(question):
+        raise ValueError("no JSON")
+
+    class Solver:
+        name = "test-provider"
+
+    monkeypatch.setattr(main, "_list_questions", list_questions)
+    monkeypatch.setattr(main, "solve_with_fallback", lambda **_: (SolveResult(answer="4"), Solver()))
+    bundle = _background_finalize_and_wait(
+        client, session_id, lambda items: all(i["status"] == "ready" for i in items))
+    assert [i["question_label"] for i in bundle["items"]] == ["問1", "問2"]
+
+
+def test_uncertain_question_list_send_stops_the_browser(client, monkeypatch):
+    from app import main
+    from app.solvers.chatgpt_web import ChatGptWebUncertain
+
+    _, session_id = _session_with(client, ["問1 2+2を求めよ。\n問2 3+3を求めよ。"])
+    monkeypatch.setenv("ROKID_SOLVER", "test-provider")
+    calls = []
+
+    def list_questions(question):
+        raise ChatGptWebUncertain("send needs inspection")
+
+    monkeypatch.setattr(main, "_list_questions", list_questions)
+    monkeypatch.setattr(main, "solve_with_fallback", lambda **_: calls.append(1))
+    bundle = _background_finalize_and_wait(
+        client, session_id, lambda items: items[0]["status"] == "failed")
+    assert "再送" in bundle["items"][0]["issue"] and calls == []

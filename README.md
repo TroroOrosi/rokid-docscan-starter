@@ -1,20 +1,24 @@
 # Rokid DocScan（入試問題を撮影して解答するサーバ）
 
-Status: Current project entrypoint. Updated 2026-09-22.
+Status: Current project entrypoint. Updated 2026-09-23.
 
 撮影後のグラス表示は**構図確認のみ**です。無操作で保存しても画質は未検証です。
 保存写真の [原寸点検・補正候補・登録条件評価](docs/capture-quality.md) はPC用部品で、
 撮影・正式登録本流の品質ゲートは未接続です。既存の実機試験停止は継続しています。
+glassdocには撮影要求ごとの露出収束待ちを追加しました。暗さ・文字精度の改善は実機未確認です。
 
 ## このリポジトリの目的
 
 入試問題（共通テスト想定）の冊子を Rokid Glasses で撮影し、**解答用紙に記入する
-内容を小問ごとに**グラスの HUD（最大3行）で確認できるようにするシステムです。
+内容を小問ごとに**グラスの AnswerView で確認できるようにするシステムです。
 Android スマホを中継し、Windows PC をサーバーとして使う実機経路もリポジトリ内に
 含みます。そちらは**開発と検証のための構成**で、現場では使いません。
 
 紙資料のスキャンとページ照合（`/v1/match`、pHash）は、この上に解答モードを載せた
 **土台**です。現在の目的ではありません。
+
+実機確認前の入口は [目的・機能・未完了の全体整理](docs/requirements-audit.md) です。
+コードの所在は [リポジトリ配置図](docs/implementation-surfaces.md)、実施条件は [現行タスク](tasks/todo.md)。
 
 想定するセッション（`tasks/plan.md` の現行契約）:
 
@@ -51,9 +55,10 @@ Rokid Glasses（AnswerView） ← answer-bundle
 起動時は通常／リスニングを選びます。通常撮影は通信を待たずに進め、確定写真をグラス内に
 保存してから送信します。中断資料と直近答案は明示的に選んで再開できます。
 
-資料は全文OCRのMarkdown＋大問のページ画像が既定で、結合画像/PDFも比較できます。
-図付き答案と、撮影に並行する録音・スマホ内VAD/ASRも実装しています。
-設定・操作・未検証の範囲は[グラス撮影と端末内ASR](docs/multimodal-scan.md)を参照してください。
+資料は冊子の全ページ画像が既定で、添付数に応じた結合画像と比較用PDFを扱います。
+図付き答案と、撮影に並行する録音も実装しています。主経路は画像・音声の原本をGPTへ渡し、
+OCR全文・ローカル文字起こしの送信やASR完了待ちは行いません。
+設定・操作・未検証の範囲は[グラス撮影と原本資料](docs/multimodal-scan.md)を参照してください。
 新しいAPKでの物理LED、3秒表示、画角、消灯/復帰、スマホAP上の完走と精度比較は未検証です。
 
 ### 実際に通したことがある経路（フォールバック。凍結）
@@ -114,7 +119,7 @@ risk があります。**利用者の判断で選択した経路です（詳細�
 CXR-L の実装境界は
 [CXR-L / Global Hi Rokid integration](docs/cxr-l-integration.md)です。
 
-現在のバージョン: **Server APP 0.35.3 / API 1.22.0 / Android client 0.3.17 / Glasses View 1.17.2 / Solver API 1.7.1**。
+現在のバージョン: **Server APP 0.39.0 / API 1.25.0 / Android client 0.3.17 / Glasses View 1.18.0 / Solver API 1.7.1**。
 版数の正本は `app/version.py` です。他の資料は版数を書かず、この行だけが
 `tests/test_documentation_contract.py` で実装と照合されます。
 Solver API は、記入用解答の全文保持・資料不足の分離を行う `answer_only` モードを含みます。

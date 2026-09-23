@@ -173,7 +173,11 @@ from __future__ import annotations
 # Predevice hardening: exact input identity and durable browser send guard.
 # Snapshot reads and recording-retry integrity; no HTTP envelope change.
 # Capture evidence diagnostics and honest text-bounds/review labels; HTTP unchanged.
-APP_VERSION = "0.35.3"
+# Bounded Camera2 metering before glassdoc JPEG capture; physical quality unverified.
+# Original-image/audio browser input; no local transcription gate or repeated bundle encoding.
+# finalize-reading can return after segmentation and solve in the background.
+# A background batch asks the model for the 小問 before solving (RP-12).
+APP_VERSION = "0.39.0"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.
@@ -244,7 +248,17 @@ APP_VERSION = "0.35.3"
 #        updated; relaycore 0.3.17 does.
 # Adds operation_routes and explicit client-OCR/image-only real-mode behavior.
 # Content digest v2; persisted solve failures change the existing bundle revision.
-API_VERSION = "1.22.0"
+# Browser listening accepts complete original audio without requiring ASR.
+# 1.24.0: finalize-reading?solve=background returns after segmentation with
+#        `solving: "background"`; answer-bundle shows each 小問 as it is saved.
+#        Without the parameter the call still solves before answering. Additive.
+#        A (A)-style letter line under 問N is now that question's choice, not a
+#        separate deck problem (fewer problems for such pages).
+# 1.25.0: a background finalize-reading lists the 小問 with the configured solver
+#        from the originals (OCR segmentation is the fallback), solves only the
+#        items answer-bundle shows, and answer-bundle answers 409 "the question
+#        list is being made" until the list exists.
+API_VERSION = "1.25.0"
 
 # Matching algorithm identity. Bump when thresholds or hashing change so a
 # re-index/eval is triggered. Mirrors thresholds in app/matching.py.
@@ -356,7 +370,8 @@ EXPLAINER_API_VERSION = "1.1.0"
 # Upright, magnified still review and phone-side unfold-to-chooser startup.
 # Failed CLOSED persistence keeps the answer and shows a retry notice.
 # Composition-only review and bounded clipped-shot ranking; 3s timing unchanged.
-GLASSES_VIEW_CONTRACT_VERSION = "1.17.2"
+# Local capture waits for AE convergence within the existing total deadline.
+GLASSES_VIEW_CONTRACT_VERSION = "1.18.0"
 
 # Answer-area overlay payload (box + short answer; 2D image-anchored).
 # 1.1.0: added tracking metadata (tracking/fixed_ar/anchor_hint).

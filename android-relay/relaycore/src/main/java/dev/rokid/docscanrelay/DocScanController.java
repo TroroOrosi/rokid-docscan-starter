@@ -1308,7 +1308,7 @@ public final class DocScanController implements AutoCloseable {
                 : List.of(
                         "P" + (pageIndex + 1)
                                 + (replacingPending ? " 撮り直し準備" : " 撮影準備"),
-                        "40〜60cm・中心を＋へ",
+                        "無理のない姿勢で合わせる",
                         "シャッターはスマホ");
         long viewGeneration =
                 link.showCaptureAiming(pageIndex + 1, replacingPending, stabilizing);
@@ -1416,7 +1416,7 @@ public final class DocScanController implements AutoCloseable {
             PhotoCaptureSettings settings = photoSettings;
             publish(
                     RelayState.CAPTURING,
-                    List.of("撮影中", "40〜60cm離す", "用紙全体を入れて静止"),
+                    List.of("撮影中", "無理のない姿勢で", "文字と必要な範囲を確認"),
                     "Requesting glasses photo for page index " + pageIndex
                             + " (" + settings.describe() + ")");
             photoRequestedAtMillis = System.currentTimeMillis();
