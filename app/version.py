@@ -251,6 +251,8 @@ APP_VERSION = "0.38.0"
 # 1.24.0: finalize-reading?solve=background returns after segmentation with
 #        `solving: "background"`; answer-bundle shows each 小問 as it is saved.
 #        Without the parameter the call still solves before answering. Additive.
+#        A (A)-style letter line under 問N is now that question's choice, not a
+#        separate deck problem (fewer problems for such pages).
 API_VERSION = "1.24.0"
 
 # Matching algorithm identity. Bump when thresholds or hashing change so a
