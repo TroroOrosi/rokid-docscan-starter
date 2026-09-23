@@ -1,6 +1,6 @@
 # rokid-docscan-starter development guide
 
-Status: Current engineering contract. Updated 2026-09-22.
+Status: Current engineering contract. Updated 2026-09-23.
 
 ## What this repository is
 
@@ -103,7 +103,7 @@ Settled decisions. Do not re-argue them:
 **Open gap.** The current record includes phone-only CDP, FastAPI discovery and a
 text answer in `docs/hardware-measurements.md` §F-6-6 through §F-6-10. These are
 component measurements, not a glasses → phone AP → answer-bundle session.
-That full route, the new capture/power behavior and local listening ASR remain
+That full route, the new capture/power behavior and the model's use of original listening audio remain
 unvalidated on hardware. Do not describe chatgpt-web as venue-ready.
 
 Chrome for Android does not hand out a CDP endpoint the way a PC does, and the
@@ -140,15 +140,19 @@ read a refusal as a bad answer and turned one block into many on 2026-09-14.
   no input commits, BACK ends capture after the last review. Hidden or stale
   views cannot commit. A waiting tap requests a manual shot without starting
   a second request in flight. See `docs/multimodal-scan.md`.
-- The standalone app records listening PCM while capturing. VAD/ASR runs on the
-  phone, retains originals and waits for all chunks before final analysis.
+- The standalone app records listening PCM while capturing. The phone preserves
+  originals and waits for all chunks before final analysis. The chatgpt-web route
+  sends original images/audio, not OCR or local transcripts, and does not require
+  local VAD/ASR. ASR remains for compatible non-browser provider paths.
   Diagram answers use validated vectors and the existing AnswerReader/Canvas.
   These new behaviors have not passed physical acceptance on the current APK.
 - Text-only page upload remains an API compatibility path. Do not describe it
   as the real-device primary path.
 - The public CXR-L AIDL surface does not expose arbitrary recognition or
   answer text from the AI running on the glasses. The current production path
-  therefore uses the phone OCR and a configured server analyzer/solver.
+  uses a configured server solver; glassdoc performs its OCR on the glasses,
+  while the frozen relay performs OCR on the phone. OCR is intended as quality
+  evidence, but currently also drives server segmentation; this remains RP-12 work.
 - Use the official `com.rokid.cxr:client-l:1.1.1` dependency. Do not commit,
   copy, or redistribute Rokid AAR files.
 - Global Hi Rokid uses package `com.rokid.sprite.global.aiapp`. Keep the

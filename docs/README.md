@@ -1,6 +1,11 @@
 # Documentation index and authority
 
-Status: Current documentation map. Updated 2026-09-22.
+Status: Current documentation map. Updated 2026-09-23.
+
+実機確認前の入口は [目的・機能の全体整理](requirements-audit.md)。
+目的／採否と全機能の不足 → [実装配置図](implementation-surfaces.md) → [設計](../tasks/plan.md)・
+[既存CQ/RPタスク](../tasks/todo.md) → [継続記録](../.agents/progress/pr37-capture-quality.md) の順で読む。
+実機操作・導入・GPT送信の停止は継続する。文書の保存やPC検査は停止解除ではない。
 
 Separate the intended requirement from evidence of what works:
 
@@ -39,7 +44,8 @@ silently applying that exception. `.agents/progress/` remains in scope.
 - `docs/capture-preflight.md` — PR37の撮影再開前チェック。保存写真の無送信検査、原本保全、制限ヒープ試験。
 
 - `docs/implementation-surfaces.md` — **read this before adding anything.**
-  Every Gradle module, Activity and operator-facing server module, each with a
+  Repository map covering the server, Android, scripts, tests, CI, configuration and records.
+  Every Gradle module, Activity and operator-facing server module carries a
   status: route, frozen, probe or shared. `tests/test_surface_inventory.py`
   fails when a surface is missing from it, so a second implementation of an
   existing role has to be declared rather than merely appear.
@@ -59,7 +65,8 @@ silently applying that exception. `.agents/progress/` remains in scope.
 - `docs/windows-android-real-device-setup.md` — Windows/Android setup.
 - `docs/explain-sessions.md` — server explain-session API.
 - `docs/exam-solver-architecture.md` — answer-mode architecture, including
-  `chatgpt-web` and OCR/image/PDF attachment paths.
+  original image/audio input, chatgpt-web, and unfinished segmentation/delivery connections.
+  The superseded architecture is retained in an explicitly historical section.
 - `docs/future-proof-architecture.md` — extension boundaries; current where it
   agrees with the implementation.
 
@@ -94,8 +101,8 @@ what the platform permits.
 
 - `tasks/plan.md` — current rationalized plan first; superseded plans preserved in a historical section.
 - `tasks/todo.md` — active RP tasks with acceptance criteria; older checkboxes are history.
-- `docs/requirements-audit.md` — source findings, adoption/defer/retire decisions,
-  and the complete old FS/R/S/X requirement mapping. Planning only, not physical acceptance.
+- `docs/requirements-audit.md` — 目的・使用条件・全機能の現状・採否・実機前の順序と5方向の点検。
+  旧FS/R/S/Xの対応と2026-09-15の調査履歴も保持。実装／物理受け入れの完了ではない。
 - `docs/fast-scan-decisions.md` — automatic/manual scan and listening decisions.
   The current implementation is described in `docs/multimodal-scan.md`.
   D/E/X comparisons retain their original evidence; physical/model acceptance is pending.

@@ -580,3 +580,37 @@ Runs on: まずWindows PCの現行本流と保存原本。以下は実機・GPT�
    既存の小問別保存をRP-15の追加取得へ届ける。入力の不足をGPTの待ち時間で補わない。
 3. 原音利用・実画像の判読など実機／実モデルでしか確かめられない問いは、停止を維持したまま
    同一条件で比較できる手順と合格基準を具体化する。距離を測らせたり、後退を前提にしたりしない。
+
+## 2026-09-23 実機前のリポジトリ全体整理を保存（最新）
+
+Runs on: Windows PCのみ。対象branchはfeature/capture-quality-readiness、継続先はPR #38。
+
+利用者の依頼は「実機確認を行う前にリポジトリ全体や目的・機能の整理を行い保存」。
+基準実装 `7a05928` を変えず、既存文書の役割・現状・履歴を整理した。
+
+- `docs/requirements-audit.md`: 目的と使用条件、取得から終了・会場運用までの10項目、採否、
+  CQ/RPへの対応、測定前の順序と5方向の点検を現行入口にする。旧FS/R/S/Xの対応と当時の証拠は保持。
+- `docs/implementation-surfaces.md`: Androidだけでなく、サーバ、scripts、試験、CI、設定、
+  作業資料まで所在を分類。部品があることと本流への接続・実機合格を区別する。
+- `docs/exam-solver-architecture.md`: 全画像・原音経路と品質／小問／配送の未接続を冒頭へ。
+  旧OCR優先／ASR／phone HUDの構成説明は履歴へ分離。README・CLAUDE・plan・todo・索引・決定記録も整合。
+- 現行taskにも残っていた「全文OCR＋関連画像を比較基準」「ASR状態を準備条件」を修正。
+  原本・原音、必要な小問、保存済み答案の表示を基準にする。CQ-5～9と未完RPは完了にしていない。
+
+検査:
+
+- `py -3.12 -m pytest -q tests/test_documentation_contract.py tests/test_surface_inventory.py tests/test_capture_documentation.py tests/test_versioning.py`
+  → 初回 `38 passed in 1.20s`、最終 `38 passed in 2.85s`、exit 0。
+- `git diff --check` → whitespace errorなし、exit 0。
+- グラフcoverageの鮮度は古いため、現行ソース・tracked file一覧と照合。
+  Python／scriptの宣言一覧は `py -3.12 -X utf8 -` でASTを読むだけとし、CLI・サーバ・実providerは起動していない。
+- 文書のみの変更。全pytest／Android build／APK照合は前節の `7a05928` の証拠を保持し、今回は再実行しない。
+
+### 次回の入口と停止条件
+
+Runs on: Windows PCの現行ソース・保存原本。実機操作・追加撮影・APK導入・GPT送信は停止を維持。
+
+まず全体整理を読み、判読・登録（CQ-5～8）→資料・小問・逐次答案（RP-11/12/14/15/16）→
+中断・終了の接続へ戻る。実機だけで分かる疑問は、対象・通常姿勢・比較箇所・原本対応・判定／中止条件を
+明記した限定測定にする。保存8枚の距離・姿勢を推定し直さず、最新2枚を着席基準にしない。
+今回の保存は実装完了・画質改善・会場受け入れを意味しない。

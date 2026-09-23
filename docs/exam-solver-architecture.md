@@ -1,8 +1,63 @@
 # 入試問題ソルバー アーキテクチャ（解答モード）
 
-Status: Current architecture of the answer mode. Updated 2026-09-14.
-実装が正で、この文書はその地図です。食い違いを見つけたらコードを信じ、ここを直して
-ください。
+Status: Current architecture map。2026-09-23、基準実装 `7a05928`。後半の旧構成は履歴として保持。
+Runs on: 会場はglassdocとスマホAP／FastAPI／Chrome。PC試験は部品の検査。
+
+## 現在の本流と未接続部分
+
+目的・採否は [全体整理](requirements-audit.md)、実装の所在は [配置図](implementation-surfaces.md)、
+実行条件は [multimodal-scan](multimodal-scan.md)。実機試験・導入・GPT送信は停止中。
+
+```text
+グラス: 通常／リスニング選択
+  写真: GlassCamera 測光→AE収束→JPEG
+        → JapaneseOcr → DocScanControllerの候補順位・文字枠判定
+        → 実画像の可視ACK → 3秒確認 → ローカル保存 → 背景HTTP送信
+  音声: ListeningRecorder/Service → chunkのローカル保全 → 再送・完了要求
+                          ↓ スマホAP
+スマホFastAPI:
+  写真は向き補正・正規化PNG、音声は連続性確認・原音を保存
+  finalize-reading → OCR由来のsegment_problems → 小問を順にsolve・保存
+    source_bundle: 冊子の全画像＋原音
+    ChatGptWebSolver → Chrome CDP → 同じ会話で確認済み資料を再利用
+  answer-bundle（入力digest・revision・各小問の状態／答案）
+                          ↓
+グラス: bundle取得 → AnswerStore → AnswerReader → AnswerView / AnswerLayout
+```
+
+これは**実装の接続図**であり、要求を満たしたという図ではない。
+
+- **品質の空白**: OCRは登録前だが、認識完了・文字数・文字枠は判読合格ではない。
+  PCの品質部品は正式登録ゲートに未接続。撮影前の紙面検出・画角校正も未完（CQ-5～9）。
+- **設問の空白**: OCRは依然として分割・小問一覧に使われ、選択肢の偽小問化が残る。
+  画像を全ページ渡しても、小問一覧の誤りは自動で解消しない（RP-12）。
+- **配送の空白**: 小問別に保存するが、finalize-readingのHTTPは全問処理を待つ。
+  Activityはbundleを1回取得し、追加取得からAnswerReader.acceptへの接続は未完（RP-15）。
+- **受け入れの空白**: AP全経路、文字・数式・図表の正答、原音の実利用、実表示と長時間運用は未検証。
+  カメラAPIの終了は物理LED状態の測定ではない。
+
+## 入力と互換経路の境界
+
+| 対象 | 現在の扱い |
+|---|---|
+| GPTへの資料 | 全ページ画像＋リスニング原音。OCR全文・補正文・ローカル文字起こしは送らない。質問には小問を示す番号等を使う |
+| 画像添付 | 既定はimages。旧ocr-images／merged-images値も画像経路。添付数に応じ結合し、PDFは比較用。欠落原本や未確認添付のまま質問を続けない |
+| 同じ会話 | 原本の内容・ページ・原音・入力方式で同一性を判定。確認済み会話では添付生成を省く。原本／会話の変更と送信結果不明を同じ扱いにしない |
+| リスニング | 主経路はASRを起動・待機しない。原音保存・hash・sample・欠番・完了検査は残す。他provider向けASRは互換機能 |
+| solver | chatgpt-webが選択された主経路。API key経路は設定によるfallback。必要な音声を失うfallbackで成功扱いしない。REAL_MODEでplaceholderを許可しない |
+| 操作契約 | glassdocは自身の入力とanswer-bundleを使う。サーバのOPERATION_CONTRACT=phoneは凍結relayの公示であり、glassdocの操作を表していない（RP-21） |
+| 旧API | match、text-only upload、外部solutions ingest、review HUD、solve-current等は互換。目的の実機経路の代わりに拡張しない |
+
+設定値の詳細は `.env.example`、APIの実装は `app/main.py`、契約の版は `app/version.py` を参照する。
+本改訂はコード・schema・ジェスチャの変更を含まない。
+
+## 2026-09-14の構成説明（履歴、現在の手順ではない）
+
+<details>
+<summary>旧構成・旧API説明を表示。OCR優先資料・ASR必須・スマホ操作・サーバHUDの記述は本流から置き換わっています。</summary>
+
+以下は当時の設計説明を保持したもの。端末・プラットフォームに関する断定を新しい実装判断の根拠にせず、
+[撮影研究](rokid-capture-research.md)の一次資料と[実測記録](hardware-measurements.md)の対象tupleを確認する。
 
 既存の「ページ照合（資料化）」モードに、**未登録の入試問題を読み取って解答・根拠を返す**
 解答モードを追加した。設計は既存と同じ **ポート＆アダプタ＋レジストリ＋契約バージョニング**。
@@ -251,3 +306,5 @@ layout→subject→solver→HUD を流し、**設問抽出率/科目判定率/�
 解答は `glasses_view` のグラス内テキスト（段階・ページ送り）で読む。詳細は
 [glasses-ux-contract.md](glasses-ux-contract.md)、実機仕様は
 [cxr-l-integration.md](cxr-l-integration.md)。
+
+</details>

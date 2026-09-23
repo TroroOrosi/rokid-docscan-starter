@@ -1,9 +1,13 @@
 # 実装計画：起動から記入用答案まで
 
-Status: Current implementation plan。2026-09-15の認識合わせ後、追加実装・実機操作の依頼を受け実装中。
+Status: Current implementation plan。2026-09-23、実機前の全体整理を反映。実機操作・導入・GPT送信は停止中。
 Runs on: 開発と自動試験はWindows。会場はglassdoc → スマホAP → スマホFastAPI／Chrome CDP。
 
 ## この改訂の扱い
+
+目的・必要機能・現在の不足・採否は [全体整理](../docs/requirements-audit.md) に集約する。
+本書は設計、[実装配置図](../docs/implementation-surfaces.md)はコードの所在、todoは既存CQ/RPの合格条件を所有する。
+再開順は全体整理の「実機確認へ進むまでの順序」と継続記録を読む。過去の承認・測定を現在の停止解除に流用しない。
 
 利用者から、残作業の実行前に認識を合わせ、過去の起動・モード選択も含めて抜けを確認し、
 全機能の実装ではなく使用感と精度を基準に組み合わせるよう依頼された。
