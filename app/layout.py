@@ -389,8 +389,15 @@ def segment_problems(
         first.body_text = "\n".join(preamble_parts + [first.body_text]).strip()
         first.page_indexes = sorted(set(preamble_pages) | set(first.page_indexes))
 
-    # Disambiguate duplicate numbers: the deck / ingest address problems by
-    # this string, so it must be unique within the document.
+    return unique_question_numbers(problems)
+
+
+def unique_question_numbers(problems: list[ProblemUnit]) -> list[ProblemUnit]:
+    """Suffix repeated numbers (問1 under two 大問 -> 問1(2)).
+
+    The deck / ingest address problems by this string, so it must be unique
+    within the document.
+    """
     seen: dict[str, int] = {}
     for p in problems:
         if p.question_no is None:
@@ -399,5 +406,4 @@ def segment_problems(
         seen[p.question_no] = n
         if n > 1:
             p.question_no = f"{p.question_no}({n})"
-
     return problems

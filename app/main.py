@@ -58,7 +58,13 @@ from .glasses_view import (
 )
 from .hud import build_hud
 from .input_identity import file_sha256
-from .layout import parse_layout, primary_question, segment_problems
+from .layout import (
+    ProblemUnit,
+    parse_layout,
+    primary_question,
+    segment_problems,
+    unique_question_numbers,
+)
 from .llm import clamp01
 from .matching import (
     Candidate,
@@ -2701,11 +2707,139 @@ def _release_server_solve(conn, question_id: int, owner_token: str) -> None:
     conn.commit()
 
 
-def _solve_deck(conn, session, session_id: int, doc_id: int) -> int:
+def _ocr_problems(conn, doc_id: int) -> list:
+    page_rows = conn.execute(
+        "SELECT page_index, ocr_text, vision_text, image_path FROM pages "
+        "WHERE document_id = ? ORDER BY page_index",
+        (doc_id,),
+    ).fetchall()
+    return segment_problems(
+        [
+            # Body drives boundaries; the figure reading is appended
+            # to the owning problem so its labels don't split it.
+            (r["page_index"], r["ocr_text"] or "", r["vision_text"] or (
+                f"Page {r['page_index'] + 1}: OCR unavailable. "
+                "Read the questions and diagrams from the original page image."
+                if r["image_path"] and not (r["ocr_text"] or "").strip()
+                and (config.REAL_MODE or os.environ.get("ROKID_ANALYZER") == "client-ocr")
+                else None
+            ))
+            for r in page_rows
+        ]
+    )
+
+
+def _insert_deck(conn, session_id: int, doc_id: int, problems: list) -> None:
+    """One questions row per problem; the caller commits."""
+    for prob in problems:
+        subject, subj_conf = detect_subject(prob.body_text)
+        primary_page = conn.execute(
+            "SELECT image_path FROM pages "
+            "WHERE document_id = ? AND page_index = ?",
+            (doc_id, prob.start_page_index),
+        ).fetchone()
+        primary_image_path = (
+            primary_page["image_path"] if primary_page is not None else None
+        )
+        conn.execute(
+            """INSERT INTO questions
+               (session_id, question_no, body_text, choices_json, subject,
+                read_conf, page_number, structure_json, image_path)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                session_id,
+                # The boundary-less fallback problem gets a stable
+                # synthesized id so the onboard ingest can address it
+                # (a NULL problem_no would be unreachable by name).
+                prob.question_no or "全体",
+                prob.body_text,
+                json.dumps(prob.choices, ensure_ascii=False),
+                subject,
+                round(min(1.0, 0.5 + subj_conf / 2), 3)
+                if normalize_ocr_text(prob.body_text)
+                else 0.0,
+                prob.start_page_index + 1,
+                json.dumps(
+                    {"page_indexes": prob.page_indexes, "deck": True}
+                ),
+                primary_image_path,
+            ),
+        )
+
+
+def _list_questions(question) -> list | None:
+    """The configured solver's index of the originals, when it can make one."""
+    lister = getattr(get_solver(os.environ.get("ROKID_SOLVER")), "list_questions", None)
+    return lister(question=question) if lister else None
+
+
+def _model_problems(items: list | None, page_count: int) -> list[ProblemUnit]:
+    """Validated model list -> deck problems, with 大問 heading rows where printed."""
+    problems: list[ProblemUnit] = []
+    heading: ProblemUnit | None = None
+    for item in (items or [])[:300]:
+        group = str(item.get("group") or "").strip()[:60]
+        label = str(item.get("label") or "").strip()[:60]
+        if not label:
+            continue
+        raw_pages = item.get("pages") if isinstance(item.get("pages"), list) else []
+        pages = sorted({p - 1 for p in raw_pages
+                        if isinstance(p, int) and 1 <= p <= page_count}) or list(range(page_count))
+        if group and not _GROUP_NO_RE.match(group):
+            label, group = f"{group} {label}", ""
+        if group and (heading is None or heading.question_no != group):
+            heading = ProblemUnit(group, group, start_page_index=pages[0], page_indexes=[])
+            problems.append(heading)
+        elif not group:
+            heading = None
+        if heading is not None:
+            heading.page_indexes = sorted(set(heading.page_indexes) | set(pages))
+        problems.append(ProblemUnit(label, f"{group} {label}".strip(),
+                                    start_page_index=pages[0], page_indexes=pages))
+    return unique_question_numbers(problems)
+
+
+def _list_deck(conn, session, session_id: int, doc_id: int) -> bool:
+    """RP-12: the model names the 小問 from the originals; OCR is the fallback.
+
+    Returns False after an uncertain browser send, so nothing else is sent.
+    """
+    source_pages = _document_source_pages(conn, doc_id, session_id)
+    question = Question(
+        question_no=None,
+        audio_path=session["audio_path"],
+        chat_key=f"session:{session_id}",
+        document_image_paths=_document_image_paths(conn, doc_id),
+        document_pages=source_pages,
+        document_id=str(doc_id),
+        question_id="question-list",
+        page_numbers=[p["page_number"] for p in source_pages],
+        answer_only=True,
+    )
+    uncertain = False
+    try:
+        problems = _model_problems(_list_questions(question), len(source_pages))
+    except ChatGptWebUncertain:
+        problems, uncertain = [], True
+    except Exception:  # noqa: BLE001 - any unusable list falls back to OCR
+        problems = []
+    problems = problems or _ocr_problems(conn, doc_id) or [
+        ProblemUnit(None, "", start_page_index=0, page_indexes=list(range(len(source_pages))))]
+    _insert_deck(conn, session_id, doc_id, problems)
+    conn.commit()
+    if uncertain:
+        first = _answer_groups(conn, session_id)[0]["items"][0]
+        _record_solve_failure(conn, first, ChatGptWebUncertain("question list send"))
+    return not uncertain
+
+
+def _solve_deck(conn, session, session_id: int, doc_id: int, *, bundle_items: bool = False) -> int:
     """Solve every deck problem that has no solution yet; return how many were saved.
 
     Resumable and claim-guarded, so a synchronous call and a background batch
-    for the same session never pay for the same problem twice.
+    for the same session never pay for the same problem twice. ``bundle_items``
+    (the glassdoc route) solves only what answer-bundle shows and names the 大問
+    in the locator; the frozen /review route keeps solving every deck row.
     """
     server_solved = 0
     # Context is scoped to each problem's own 大問 (plan.md contract 1),
@@ -2713,8 +2847,18 @@ def _solve_deck(conn, session, session_id: int, doc_id: int) -> int:
     # the whole booklet per 小問 is paid for once per 小問.
     page_windows = _group_page_indexes(conn, session_id)
     source_pages = _document_source_pages(conn, doc_id, session_id)
+    # "第2問 問1", not "問1(2)": the suffix is a deck id the booklet never prints.
+    locators = {
+        row["id"]: " ".join(filter(None, [
+            group["label"] if not group["whole"] and _GROUP_NO_RE.match(group["label"]) else "",
+            re.sub(r"\(\d+\)$", "", row["question_no"] or ""),
+        ]))
+        for group in _answer_groups(conn, session_id) for row in group["items"]
+    }
     for row in _deck_question_rows(conn, session_id):
-        if _latest_solution_row(conn, row["id"]) is not None:
+        # A 大問 heading with 小問 under it is a label, not a question: sending
+        # it cost one extra browser message per 大問 that nothing displayed.
+        if (bundle_items and row["id"] not in locators) or _latest_solution_row(conn, row["id"]) is not None:
             continue
         claim_token = _claim_server_solve(conn, row["id"])
         if not claim_token:
@@ -2734,7 +2878,7 @@ def _solve_deck(conn, session, session_id: int, doc_id: int) -> int:
                 )
                 window = page_windows.get(row["id"]) or _row_page_indexes(row)
                 question = Question(
-                    question_no=row["question_no"],
+                    question_no=(bundle_items and locators.get(row["id"])) or row["question_no"],
                     body_text=row["body_text"],
                     choices=json.loads(row["choices_json"] or "[]"),
                     subject=row["subject"],
@@ -2832,7 +2976,9 @@ _background_solves_lock = threading.Lock()
 def _solve_deck_in_background(session_id: int, doc_id: int) -> None:
     conn = db.connect()
     try:
-        _solve_deck(conn, _exam_session_or_404(conn, session_id), session_id, doc_id)
+        session = _exam_session_or_404(conn, session_id)
+        if _deck_question_rows(conn, session_id) or _list_deck(conn, session, session_id, doc_id):
+            _solve_deck(conn, session, session_id, doc_id, bundle_items=True)
     finally:
         conn.close()
         with _background_solves_lock:
@@ -2871,6 +3017,15 @@ def exam_finalize_reading(session_id: int, solve: Literal["background"] | None =
         doc_id = _require_document_exam(session)
         total_pages = _exam_total_pages(conn, doc_id)
         locked = session["mode"] == "real" and not config.ALLOW_REAL_EXAM_SOLVE
+        solver_env = (os.environ.get("ROKID_SOLVER") or "").strip()
+        background = (solve == "background" and not locked and total_pages > 0
+                      and solver_env not in ("", "local"))
+        # A batch still listing has no deck rows yet, so the claim below would
+        # take the session again; a running batch owns it instead.
+        with _background_solves_lock:
+            busy = session_id in _background_solves
+            if background and not busy:
+                _background_solves.add(session_id)
 
         # Atomically claim the transition: the guarded UPDATE takes SQLite's
         # write lock, so of two racing requests exactly one sees rowcount==1
@@ -2881,86 +3036,39 @@ def exam_finalize_reading(session_id: int, solve: Literal["background"] | None =
         # The deck predicate must mirror _deck_question_rows: legacy deck rows
         # carry only {"page_indexes": ...} (no "deck" key) and still count —
         # missing them here would re-segment a finalized session's deck.
-        claim = conn.execute(
-            "UPDATE exam_sessions SET status = 'reviewing' "
-            "WHERE id = ? AND (status != 'reviewing' "
-            "  OR NOT EXISTS (SELECT 1 FROM questions q "
-            "                 WHERE q.session_id = exam_sessions.id "
-            "                 AND (q.structure_json LIKE '%\"deck\"%' "
-            "                      OR q.structure_json LIKE '%\"page_indexes\"%')))",
-            (session_id,),
-        )
-        already_finalized = claim.rowcount == 0
+        already_finalized = True
+        if not busy:
+            claim = conn.execute(
+                "UPDATE exam_sessions SET status = 'reviewing' "
+                "WHERE id = ? AND (status != 'reviewing' "
+                "  OR NOT EXISTS (SELECT 1 FROM questions q "
+                "                 WHERE q.session_id = exam_sessions.id "
+                "                 AND (q.structure_json LIKE '%\"deck\"%' "
+                "                      OR q.structure_json LIKE '%\"page_indexes\"%')))",
+                (session_id,),
+            )
+            already_finalized = claim.rowcount == 0
         reverted = False
 
         if already_finalized:
             conn.rollback()  # nothing claimed; end the implicit transaction
         else:
-            # Segment and insert the deck in the SAME transaction as the claim.
-            page_rows = conn.execute(
-                "SELECT page_index, ocr_text, vision_text, image_path FROM pages "
-                "WHERE document_id = ? ORDER BY page_index",
-                (doc_id,),
-            ).fetchall()
-            problems = segment_problems(
-                [
-                    # Body drives boundaries; the figure reading is appended
-                    # to the owning problem so its labels don't split it.
-                    (r["page_index"], r["ocr_text"] or "", r["vision_text"] or (
-                        f"Page {r['page_index'] + 1}: OCR unavailable. "
-                        "Read the questions and diagrams from the original page image."
-                        if r["image_path"] and not (r["ocr_text"] or "").strip()
-                        and (config.REAL_MODE or os.environ.get("ROKID_ANALYZER") == "client-ocr")
-                        else None
-                    ))
-                    for r in page_rows
-                ]
-            )
-            if not problems:
-                # Nothing recognizable was read: give the claim back in the
-                # SAME transaction so the session stays in the reading phase —
-                # the ack's 再読取 guidance is then actually possible (re-scan
-                # the pages, double-tap again). Racing double-fires serialize
-                # on the write lock and revert identically (idempotent).
-                conn.execute(
-                    "UPDATE exam_sessions SET status = 'open' WHERE id = ?",
-                    (session_id,),
-                )
-                reverted = True
-            for prob in problems:
-                subject, subj_conf = detect_subject(prob.body_text)
-                primary_page = conn.execute(
-                    "SELECT image_path FROM pages "
-                    "WHERE document_id = ? AND page_index = ?",
-                    (doc_id, prob.start_page_index),
-                ).fetchone()
-                primary_image_path = (
-                    primary_page["image_path"] if primary_page is not None else None
-                )
-                conn.execute(
-                    """INSERT INTO questions
-                       (session_id, question_no, body_text, choices_json, subject,
-                        read_conf, page_number, structure_json, image_path)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (
-                        session_id,
-                        # The boundary-less fallback problem gets a stable
-                        # synthesized id so the onboard ingest can address it
-                        # (a NULL problem_no would be unreachable by name).
-                        prob.question_no or "全体",
-                        prob.body_text,
-                        json.dumps(prob.choices, ensure_ascii=False),
-                        subject,
-                        round(min(1.0, 0.5 + subj_conf / 2), 3)
-                        if normalize_ocr_text(prob.body_text)
-                        else 0.0,
-                        prob.start_page_index + 1,
-                        json.dumps(
-                            {"page_indexes": prob.page_indexes, "deck": True}
-                        ),
-                        primary_image_path,
-                    ),
-                )
+            if not background:
+                # Segment and insert the deck in the SAME transaction as the claim.
+                # (A background batch asks the model for the 小問 instead, RP-12.)
+                problems = _ocr_problems(conn, doc_id)
+                if not problems:
+                    # Nothing recognizable was read: give the claim back in the
+                    # SAME transaction so the session stays in the reading phase —
+                    # the ack's 再読取 guidance is then actually possible (re-scan
+                    # the pages, double-tap again). Racing double-fires serialize
+                    # on the write lock and revert identically (idempotent).
+                    conn.execute(
+                        "UPDATE exam_sessions SET status = 'open' WHERE id = ?",
+                        (session_id,),
+                    )
+                    reverted = True
+                _insert_deck(conn, session_id, doc_id, problems)
             conn.commit()
 
         # Optional server-side solve-all — resumable: solve every deck problem
@@ -2970,22 +3078,17 @@ def exam_finalize_reading(session_id: int, solve: Literal["background"] | None =
         # rows would mark problems "solved" and shadow the onboard ingest.
         server_solved = 0
         solving = None
-        solver_env = (os.environ.get("ROKID_SOLVER") or "").strip()
-        if not locked and solver_env and solver_env != "local":
-            if solve == "background":
-                # RP-15: return after segmentation; the glasses poll
-                # answer-bundle and read each 小問 as it is saved.
-                solving = "background"
-                with _background_solves_lock:
-                    start_batch = session_id not in _background_solves
-                    _background_solves.add(session_id)
-                if start_batch:
-                    threading.Thread(
-                        target=_solve_deck_in_background, args=(session_id, doc_id),
-                        name=f"solve-session-{session_id}", daemon=True,
-                    ).start()
-            else:
-                server_solved = _solve_deck(conn, session, session_id, doc_id)
+        if background or (busy and solve == "background"):
+            # RP-15: return at once; the glasses poll answer-bundle and read
+            # each 小問 as it is saved.
+            solving = "background"
+            if not busy:
+                threading.Thread(
+                    target=_solve_deck_in_background, args=(session_id, doc_id),
+                    name=f"solve-session-{session_id}", daemon=True,
+                ).start()
+        elif not locked and not busy and solver_env not in ("", "local"):
+            server_solved = _solve_deck(conn, session, session_id, doc_id)
 
         deck = _exam_deck(conn, session_id)
         if locked:
@@ -3288,7 +3391,8 @@ def exam_answer_bundle(session_id: int) -> dict:
         if not groups:
             raise HTTPException(
                 status_code=409,
-                detail="no problems were detected in this document",
+                detail="the question list is being made" if session_id in _background_solves
+                else "no problems were detected in this document",
             )
         items = [
             _answer_bundle_item(conn, group, row)

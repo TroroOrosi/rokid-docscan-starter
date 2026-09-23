@@ -397,6 +397,31 @@ public class DocScanGlassActivityAnswerReadingTest {
         assertEquals("nothing pending, so no further requests", 2, fetches.get());
     }
 
+    /** RP-12: the server lists the 小問 first; the reader waits for it without a new REVIEW. */
+    @Test
+    public void aBundleStillBeingListedIsFetchedAgainWithoutAnotherPublish() throws Exception {
+        AtomicInteger attempts = new AtomicInteger();
+        server.setDispatcher(new Dispatcher() {
+            @Override
+            public MockResponse dispatch(RecordedRequest request) {
+                String path = request.getPath();
+                if (path == null || !path.endsWith("/answer-bundle")) {
+                    return new MockResponse().setResponseCode(404).setBody("unexpected test request");
+                }
+                return attempts.incrementAndGet() == 1
+                        ? json("{\"detail\":\"the question list is being made\"}").setResponseCode(409)
+                        : json(bundleForSession(SESSION_ID).toJson());
+            }
+        });
+        activity.onUpdate(RelayState.REVIEW, List.of("a"), "review");
+        awaitTrue(() -> "問題一覧を作成中".equals(
+                ((List<?>) getField(getField(activity, "hud"), "lines")).get(0)));
+        assertNull(getField(activity, "reader"));
+        Shadows.shadowOf(Looper.getMainLooper()).idleFor(java.time.Duration.ofSeconds(6));
+        awaitTrue("listed bundle opened", () -> getField(activity, "reader") != null);
+        assertEquals(2, attempts.get());
+    }
+
     private static AnswerBundle bundleForSession(long sessionId) {
         return new AnswerBundle(Long.toString(sessionId), "a".repeat(64), 1, List.of(
                 AnswerItem.ready("g1", "第1問", "q10", "問1", "x = 2"),

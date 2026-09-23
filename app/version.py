@@ -176,7 +176,8 @@ from __future__ import annotations
 # Bounded Camera2 metering before glassdoc JPEG capture; physical quality unverified.
 # Original-image/audio browser input; no local transcription gate or repeated bundle encoding.
 # finalize-reading can return after segmentation and solve in the background.
-APP_VERSION = "0.38.0"
+# A background batch asks the model for the 小問 before solving (RP-12).
+APP_VERSION = "0.39.0"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.
@@ -253,7 +254,11 @@ APP_VERSION = "0.38.0"
 #        Without the parameter the call still solves before answering. Additive.
 #        A (A)-style letter line under 問N is now that question's choice, not a
 #        separate deck problem (fewer problems for such pages).
-API_VERSION = "1.24.0"
+# 1.25.0: a background finalize-reading lists the 小問 with the configured solver
+#        from the originals (OCR segmentation is the fallback), solves only the
+#        items answer-bundle shows, and answer-bundle answers 409 "the question
+#        list is being made" until the list exists.
+API_VERSION = "1.25.0"
 
 # Matching algorithm identity. Bump when thresholds or hashing change so a
 # re-index/eval is triggered. Mirrors thresholds in app/matching.py.

@@ -1008,3 +1008,27 @@ def test_a_later_identical_submission_gets_a_distinct_reconciliation_id(monkeypa
             ids.append(guard.status()["request_id"])
             guard.acknowledge(ids[-1])
     assert ids[0] != ids[1], "an old acknowledgment must not clear a later submission"
+
+
+def test_question_list_reads_the_originals_in_the_answer_chat(tmp_path):
+    """RP-12: the model, not OCR, names the 小問; the booklet stays in the chat."""
+    page_path = tmp_path / "page.png"
+    page_path.write_bytes(_real_png(80))
+    pages = [{"page_number": 1, "image_path": str(page_path), "ocr_text": ""}]
+    fake = _FakeClient('{"questions":[{"group":"第1問","label":"問1","pages":[1]},"bad"]}',
+                       attached=True)
+    question = Question(question_no=None, question_id="question-list", answer_only=True,
+                        document_pages=pages, document_id="1", page_numbers=[1],
+                        chat_key="session:1")
+    listed = ChatGptWebSolver(client=fake).list_questions(question=question)
+    assert listed == [{"group": "第1問", "label": "問1", "pages": [1]}]
+    assert "Do not answer" in fake.seen["prompt"] and fake.seen["files"]
+    solve = Question(question_no="第1問 問1", question_id="q1", answer_only=True,
+                     document_pages=pages, document_id="1", page_numbers=[1], chat_key="session:1")
+    listing_key = fake.seen["chat_key"]
+    fake.payload = '{"status":"ready","answer":"2"}'
+    ChatGptWebSolver(client=fake).solve(question=solve)
+    assert fake.seen["chat_key"] == listing_key
+    fake.payload = '{"status":"ready","answer":"2"}'
+    with pytest.raises(ValueError):
+        ChatGptWebSolver(client=fake).list_questions(question=question)

@@ -32,6 +32,7 @@ import dev.rokid.docscanglass.input.GlassesInputAction;
 import dev.rokid.docscanglass.input.GlassesInputNormalizer;
 import dev.rokid.docscanglass.input.InputSignal;
 import dev.rokid.docscanrelay.ClientIdentity;
+import dev.rokid.docscanrelay.DocScanApi;
 import dev.rokid.docscanrelay.DocScanController;
 import dev.rokid.docscanrelay.JapaneseOcr;
 import dev.rokid.docscanrelay.RelayState;
@@ -138,6 +139,8 @@ public final class DocScanGlassActivity extends Activity
     // every page turn -- retries instead of forfeiting the session's
     // answers to one bad request.
     private volatile long answersFetchedForSession = -1;
+    // Wakes the display once per run of failed fetches, not once per retry.
+    private volatile boolean answerFetchFailing;
     // True once this Activity instance has checked AnswerStore for a saved
     // reader without waiting on RelayState.REVIEW, which needs the network
     // to ever be published (see fetchAnswers's own comment). Read and
@@ -824,6 +827,7 @@ public final class DocScanGlassActivity extends Activity
             }
             try {
                 AnswerBundle bundle = controller.api().answerBundle(sessionId);
+                answerFetchFailing = false;
                 answerStore.start(bundle);
                 main.post(() -> openAnswers(bundle, bundle.items.get(0).questionId, 0));
             } catch (Exception error) {
@@ -839,12 +843,27 @@ public final class DocScanGlassActivity extends Activity
                 // could start; only a fetch that already finished (here)
                 // reopens the door.
                 answersFetchedForSession = -1;
+                // 409: the server is still listing the 小問 (RP-12). Keep the
+                // display asleep for that; wake only for the first real failure.
+                boolean listing = error instanceof DocScanApi.ApiException
+                        && ((DocScanApi.ApiException) error).getStatusCode() == 409;
                 main.post(() -> {
                     if (isFinishing() || isDestroyed()) {
                         return;
                     }
-                    wakeForResult();
-                    hud.showLines(List.of("答案を取得できません", "通信を確認", ""));
+                    if (!listing && !answerFetchFailing) wakeForResult();
+                    answerFetchFailing = !listing;
+                    hud.showLines(listing ? List.of("問題一覧を作成中", "答案を待っています", "")
+                            : List.of("答案を取得できません", "通信を確認", ""));
+                    // Retry on a timer too: in local mode nothing republishes REVIEW.
+                    main.postDelayed(() -> {
+                        if (sessionClosed || isFinishing() || isDestroyed() || answersFetchedForSession != -1
+                                || controller.sessionId() != sessionId) {
+                            return;
+                        }
+                        answersFetchedForSession = sessionId;
+                        fetchAnswers(sessionId);
+                    }, PENDING_ANSWER_POLL_MILLIS);
                 });
             }
         }, "answer-bundle").start();
