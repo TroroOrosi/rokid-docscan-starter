@@ -36,6 +36,7 @@ import dev.rokid.docscanrelay.DocScanController;
 import dev.rokid.docscanrelay.JapaneseOcr;
 import dev.rokid.docscanrelay.RelayState;
 import dev.rokid.docscanrelay.study.AnswerBundle;
+import dev.rokid.docscanrelay.study.AnswerItem;
 import dev.rokid.docscanrelay.study.AnswerReader;
 import dev.rokid.docscanrelay.study.AnswerStore;
 
@@ -87,6 +88,8 @@ public final class DocScanGlassActivity extends Activity
 
     /** Long enough to read why the display stayed on before the session ends. */
     private static final long EXIT_NOTICE_MILLIS = 2_000;
+    // ponytail: fixed interval, measured cost on the AP route may call for backoff.
+    private static final long PENDING_ANSWER_POLL_MILLIS = 5_000;
 
     private final GlassesInputNormalizer normalizer = new GlassesInputNormalizer();
     private final BackExitPolicy backExit = new BackExitPolicy();
@@ -881,6 +884,40 @@ public final class DocScanGlassActivity extends Activity
         reader.restore(questionId, offset);
         answers.bind(reader);
         setContentView(answers);
+        refreshPendingAnswers(reader);
+    }
+
+    /**
+     * RP-15: the server saves 小問 one at a time, so a snapshot may still hold
+     * PENDING items. Re-read it with GET only while one remains -- never a
+     * finalize, which could resend a question whose browser send is unknown.
+     * Stops when the reader closes or is replaced.
+     */
+    private void refreshPendingAnswers(AnswerReader shown) {
+        main.postDelayed(() -> {
+            if (reader != shown || sessionClosed || isFinishing() || isDestroyed()) return;
+            AnswerBundle current = shown.bundle();
+            if (current.items.stream().noneMatch(i -> i.status == AnswerItem.Status.PENDING)) return;
+            long sessionId = controller.sessionId();
+            if (!Long.toString(sessionId).equals(current.sessionId)) return;
+            new Thread(() -> {
+                AnswerBundle next = null;
+                try {
+                    next = controller.api().answerBundle(sessionId);
+                } catch (Exception error) {
+                    Log.w(TAG, "pending answers not refreshed", error);
+                }
+                AnswerBundle fetched = next;
+                main.post(() -> {
+                    if (reader != shown || sessionClosed || isFinishing() || isDestroyed()) return;
+                    if (fetched != null && shown.accept(fetched)) {
+                        answers.refresh();
+                        persistAnswerPosition(false);
+                    }
+                    refreshPendingAnswers(shown);
+                });
+            }, "answer-refresh").start();
+        }, PENDING_ANSWER_POLL_MILLIS);
     }
 
     private boolean closeAnswers() {

@@ -130,9 +130,14 @@ public final class DocScanApi {
         return postEmpty("/v1/exam-sessions/" + sessionId + "/finalize-reading");
     }
 
-    /** Analysis outlives the usual five-minute upload deadline; server solver has its own brakes. */
+    /**
+     * Returns once the deck is segmented; the server solves in the background and
+     * the reader polls answer-bundle (RP-15). The long deadline stays for servers
+     * older than that, which still solve before answering.
+     */
     public JSONObject finalizeReadingLocal(long sessionId) throws IOException, JSONException {
-        return execute(new Request.Builder().url(baseUrl + "/v1/exam-sessions/" + sessionId + "/finalize-reading")
+        return execute(new Request.Builder().url(baseUrl + "/v1/exam-sessions/" + sessionId
+                        + "/finalize-reading?solve=background")
                 .post(RequestBody.create(new byte[0], EMPTY)), true);
     }
 

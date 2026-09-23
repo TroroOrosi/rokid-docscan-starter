@@ -340,3 +340,65 @@ def test_bundle_keeps_items_and_revision_in_one_snapshot(client, monkeypatch):
     assert after["items"][0]["answer"] == "new concurrent answer"
     assert after["revision"] > during["revision"]
     assert after["input_digest"] == during["input_digest"]
+
+
+def test_background_finalize_publishes_each_answer_before_the_batch_ends(client, monkeypatch):
+    """RP-15: the glasses read saved 小問 while later ones are still solving."""
+    import threading
+    import time
+
+    from app import main
+    from app.solvers.base import SolveResult
+
+    _, session_id = _session_with(client, ["問1 2+2を求めよ。\n問2 3+3を求めよ。"])
+    monkeypatch.setenv("ROKID_SOLVER", "test-provider")
+    second_may_finish = threading.Event()
+    calls = []
+
+    class Solver:
+        name = "test-provider"
+
+    def solve(*, question):
+        calls.append(question.question_id)
+        if len(calls) == 2:
+            assert second_may_finish.wait(5)
+        return SolveResult(answer=f"answer {len(calls)}"), Solver()
+
+    monkeypatch.setattr(main, "solve_with_fallback", solve)
+    url = f"/v1/exam-sessions/{session_id}/answer-bundle"
+    finalize = f"/v1/exam-sessions/{session_id}/finalize-reading?solve=background"
+    body = client.post(finalize).json()
+    assert body["status"] == "reviewing" and body["solving"] == "background"
+
+    def statuses():
+        return [item["status"] for item in client.get(url).json()["items"]]
+
+    deadline = time.monotonic() + 5
+    while statuses() != ["ready", "pending"] and time.monotonic() < deadline:
+        time.sleep(0.01)
+    partial = client.get(url).json()
+    assert [i["status"] for i in partial["items"]] == ["ready", "pending"]
+    # A repeated call while the batch runs must not start a second browser user.
+    assert client.post(finalize).json()["solving"] == "background"
+    second_may_finish.set()
+    while statuses() != ["ready", "ready"] and time.monotonic() < deadline:
+        time.sleep(0.01)
+    final = client.get(url).json()
+    assert [i["status"] for i in final["items"]] == ["ready", "ready"]
+    assert final["revision"] > partial["revision"]
+    assert len(calls) == 2
+
+
+def test_finalize_without_background_still_solves_before_returning(client, monkeypatch):
+    from app import main
+    from app.solvers.base import SolveResult
+
+    _, session_id = _session_with(client, ["問1 2+2を求めよ。"])
+    monkeypatch.setenv("ROKID_SOLVER", "test-provider")
+
+    class Solver:
+        name = "test-provider"
+
+    monkeypatch.setattr(main, "solve_with_fallback", lambda **_: (SolveResult(answer="4"), Solver()))
+    body = client.post(f"/v1/exam-sessions/{session_id}/finalize-reading").json()
+    assert body["server_solved"] == 1 and "solving" not in body

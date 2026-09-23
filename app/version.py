@@ -175,7 +175,8 @@ from __future__ import annotations
 # Capture evidence diagnostics and honest text-bounds/review labels; HTTP unchanged.
 # Bounded Camera2 metering before glassdoc JPEG capture; physical quality unverified.
 # Original-image/audio browser input; no local transcription gate or repeated bundle encoding.
-APP_VERSION = "0.37.0"
+# finalize-reading can return after segmentation and solve in the background.
+APP_VERSION = "0.38.0"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.
@@ -247,7 +248,10 @@ APP_VERSION = "0.37.0"
 # Adds operation_routes and explicit client-OCR/image-only real-mode behavior.
 # Content digest v2; persisted solve failures change the existing bundle revision.
 # Browser listening accepts complete original audio without requiring ASR.
-API_VERSION = "1.23.0"
+# 1.24.0: finalize-reading?solve=background returns after segmentation with
+#        `solving: "background"`; answer-bundle shows each 小問 as it is saved.
+#        Without the parameter the call still solves before answering. Additive.
+API_VERSION = "1.24.0"
 
 # Matching algorithm identity. Bump when thresholds or hashing change so a
 # re-index/eval is triggered. Mirrors thresholds in app/matching.py.

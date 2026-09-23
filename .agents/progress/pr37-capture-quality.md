@@ -1,6 +1,6 @@
 # 撮影品質の継続記録（PR #37 → PR #38）
 
-Status: Internal progress。2026-09-23、PR37はmerge済み。利用者の新PR・必要作業の依頼に基づくPR38の画像比較・露出準備は末尾参照。撮影品質は未解決。標準JPEG8枚の距離・姿勢は未確認。追加撮影・GPT・APK更新・通常読取は停止を維持。
+Status: Internal progress。2026-09-23、PR37はmerge済み。**最新はRP-15節（末尾）。**利用者の新PR・必要作業の依頼に基づくPR38の画像比較・露出準備は末尾参照。撮影品質は未解決。標準JPEG8枚の距離・姿勢は未確認。追加撮影・GPT・APK更新・通常読取は停止を維持。
 Runs on: Windows PC `C:\rokid-docscan-starter`。前段の実機試験はglassdocとF-51F上のサーバ・Chrome（既存Wi-Fi、スマホAPではない）。最新節はPCでの再点検。
 
 ## 再開点と権限（実装時点。後続の実機承認は末尾参照）
@@ -680,3 +680,28 @@ Runs on: まずPC。実機・GPT送信の再開許可は本節に含まれない
    現在の空OCR破棄・反復、品質未検証の3秒登録は未修正。retry変更の事前承認条件を維持する。
 3. RP-11/12/15の資料不足・偽小問・保存答案の追加取得を未完として保持する。
    撮影側を測る場合は送信しない限定測定の対象・比較条件・中止条件を先に具体化する。
+
+## 2026-09-23 遅延原因の是正とRP-15（最新）
+
+Runs on: Windows PC `C:\rokid-docscan-starter`。開始HEAD `4845295`、PR #38（Draft、開始時CI 15件success）。実機・GPT送信・導入は停止のまま。
+
+利用者「作業の続き、リポジトリ全体の合理性、目的達成に時間がかかる原因への対処を確認・改善してから作業」。
+
+原因（根拠つき）: 9/22〜23はTesseract比較（33→109文字、ML Kitへ移せないと本記録が明記）と文書再整理2回。
+実機・GPT不要の本流欠陥RP-15/RP-12a/CQ-8接続が未着手。9/14以降の追加行の約35%がmd（6,524 / 12,253非md）。
+対処: todo冒頭に「PCで完結し会場の一周を妨げる欠陥を先に、CQ-5は参照ラベル取得後」と、更新文書を作業表・本記録・版の正本に限る規則を記載。
+
+RP-15（PCで完結する部分）:
+- サーバ: 解答ループを`_solve_deck`へ抽出。`finalize-reading?solve=background`は分割commit後にdaemon threadで同じclaim・保存処理を実行し即返る（`solving: "background"`）。1セッション1本（`_background_solves`）。引数なしは従来どおり同期。
+- glassdoc: `finalizeReadingLocal`がbackgroundを要求。`openAnswers`後、PENDINGが残る間だけ5秒ごとにbundleをGETし`accept`→`refresh`→位置保存。finalize再送はしない。閉じる／別reader／別sessionで停止。
+- 版: APP 0.38.0 / API 1.24.0 / glassdoc 19・0.16.0。凍結relayは同期のまま。
+
+検証:
+- RED: `pytest tests/test_answer_bundle_api.py -k background` → `1 failed, 1 passed`。Android新試験 → `pendingAnswersAreRefreshedUntilNoneRemain FAILED`。
+- `py -3.12 -X utf8 -m pytest -q`（LIVE=0、新規TEMP DATA_DIR） → `846 passed, 1 skipped, 1 warning in 80.92s`。`ruff check .` → `All checks passed!`。`git diff --check` → exit 0。
+- `gradlew --no-daemon test testDebugUnitTest assembleDebug` → `BUILD SUCCESSFUL in 49s`、199 tasks。版更新前の同コマンドでJUnit 401 / failures 0 / errors 0 / skipped 0。
+- glassdoc APK: aapt2 → versionCode 19 / 0.16.0、`DocScanGlassActivity`。apksigner → Verifies、v2、証明書 `906307478018…ccacc` 一致。SHA-256 `520aa6d6b36ad4a4abc5ba36527382c9b7286bf7dc92a8dca965da4cc2a1c8a2`。未導入。
+
+未解決: (1) `ChatGptWebUncertain`で処理が止まった後やサーバ再起動後のPENDINGは解答者不在で「解析中」のまま、glassdocはGETを続ける（再送しない）。表示で区別する設計が要る。(2) 5秒間隔の電力・AP通信量は未測定。(3) 実機・AP経路未検証。
+
+次: RP-12a（`問1…(A)…(B)`が3問になる分割）をPCで修正 → CQ-8（品質未検証の3秒登録と候補保全の分離）。Runs on: Windows PC。

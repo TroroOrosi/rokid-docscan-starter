@@ -357,6 +357,46 @@ public class DocScanGlassActivityAnswerReadingTest {
         assertEquals(3, reader.offset());
     }
 
+    /**
+     * RP-15: the server answers 小問 one at a time, so the first snapshot can
+     * still hold PENDING items. The reader refreshes only while one remains,
+     * with GET only -- never a finalize that could resend a failed question.
+     */
+    @Test
+    public void pendingAnswersAreRefreshedUntilNoneRemain() throws Exception {
+        AtomicInteger fetches = new AtomicInteger();
+        server.setDispatcher(new Dispatcher() {
+            @Override
+            public MockResponse dispatch(RecordedRequest request) {
+                String path = request.getPath();
+                if (path == null || !path.endsWith("/answer-bundle")) {
+                    return new MockResponse().setResponseCode(404).setBody("unexpected test request");
+                }
+                AnswerItem second = fetches.incrementAndGet() == 1
+                        ? new AnswerItem("g1", "第1問", "q11", "問2", "", AnswerItem.Status.PENDING, "未解答")
+                        : AnswerItem.ready("g1", "第1問", "q11", "問2", "y = 3");
+                return json(new AnswerBundle(Long.toString(SESSION_ID), "a".repeat(64), fetches.get(), List.of(
+                        AnswerItem.ready("g1", "第1問", "q10", "問1", "x = 2"), second)).toJson());
+            }
+        });
+
+        activity.onUpdate(RelayState.REVIEW, List.of("a"), "review");
+        awaitTrue(() -> getField(activity, "reader") != null);
+        AnswerReader reader = (AnswerReader) getField(activity, "reader");
+        assertEquals(AnswerItem.Status.PENDING, reader.bundle().items.get(1).status);
+
+        Shadows.shadowOf(Looper.getMainLooper()).idleFor(java.time.Duration.ofSeconds(6));
+        awaitTrue("pending answer refreshed", () -> reader.bundle().revision == 2);
+        assertEquals(AnswerItem.Status.READY, reader.bundle().items.get(1).status);
+        assertEquals("the refreshed snapshot is what a restart resumes",
+                2, awaitSavedState(filesDir, "q10", 0).bundle.revision);
+
+        Shadows.shadowOf(Looper.getMainLooper()).idleFor(java.time.Duration.ofSeconds(30));
+        Thread.sleep(200);
+        Shadows.shadowOf(Looper.getMainLooper()).idle();
+        assertEquals("nothing pending, so no further requests", 2, fetches.get());
+    }
+
     private static AnswerBundle bundleForSession(long sessionId) {
         return new AnswerBundle(Long.toString(sessionId), "a".repeat(64), 1, List.of(
                 AnswerItem.ready("g1", "第1問", "q10", "問1", "x = 2"),
