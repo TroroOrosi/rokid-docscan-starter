@@ -23,7 +23,7 @@ not trigger a photo, cancellation, registration, finalization, or navigation.
 現在の撮影品質の説明は [保存写真の原寸点検](capture-quality.md) を参照してください。
 本流glassdocの確認は構図確認のみで、無操作保存は画質未検証です。PC部品を正式登録本流へつなぐ
 品質ゲートは未接続。実機試験の承認範囲・停止状態・結果は
-[PR #37の再開記録](../.agents/progress/pr37-capture-quality.md)を参照してください。
+[PR #37の再開記録](../.agents/progress/archive/pr37-capture-quality.md)を参照してください。
 
 ## Before a session
 

@@ -21,7 +21,7 @@ Runs on: glassdoc → スマホAP → スマホFastAPI → スマホChrome CDP �
 有効サンプル後にRECを表示し、第2の終了操作は最後の写真確認中でも録音を止めます。
 答案取得は現在一度だけで、完成した小問の追加反映が残ります。ツルを閉じて開いた際の選択画面起動は、
 下記のスマホ常駐scriptで1回の実機動作を確認しました。着脱だけの起動、通信断中の開閉、会場APは未検証です。
-改修前のソース根拠は[照合表](requirements-audit.md)、改修と試験は[進捗](../.agents/progress/multimodal-scan.md)を参照してください。
+改修前のソース根拠は[照合表](requirements-audit.md)、改修と試験は[進捗](../.agents/progress/archive/multimodal-scan.md)を参照してください。
 
 ## 操作
 

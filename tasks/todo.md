@@ -35,13 +35,15 @@ Runs on: Windows PCのみ。実機・導入・GPT送信停止を維持する。�
 Tesseract値はML Kitの閾値へ移せないと記録自身が述べており、参照ラベルなしのCQ-5探索は会場到達を早めない。
 以後は、PCで完結し会場の一周を直接妨げる欠陥を先に直し、CQ-5の比較実験は参照ラベルを得てから行う。
 一つの変更で更新する文書は、作業表・進捗記録・版の正本に限る。他の資料は内容が変わったときだけ直す。
+**目的の再確認（利用者、2026-09-23）:** 目的は、グラスで撮った原本画像を正確にGPTへ送ること。OCR・枠・自動スキャン・画像加工は手段である。
+旧スマホ経路の画像は読めたが、glassdocは広すぎて暗い。画角と露出を旧経路と同等にすることを最優先にする（`.agents/progress/current.md`）。
 
 ## PR37 実機前の追補
 
 Runs on: 実装・自動試験は隔離Linux／GitHub Actions。実機確認はWindows PC＋既存グラス／F-51F。
 
 今回の追加修正・検証の範囲と、既存RPへ戻す未実装項目は
-[PR37引き継ぎ](../.agents/progress/pr37-predevice-handoff.md) を参照する。
+[PR37引き継ぎ](../.agents/progress/archive/pr37-predevice-handoff.md) を参照する。
 RPの未完了を一括完了にはしない。以後の停止・再開順は下の最新訂正を優先する。
 
 ## PR37 撮影品質（31件統合と最終要件を分離）
@@ -62,7 +64,7 @@ Runs on: 今回はWindows PC。実機試験・導入・実資料外部送信は�
 - [ ] CQ-9 / RP-10/21/22: HUDに修正理由を出し、対応範囲内の調整・再撮影上限を具体化して実機受け入れ。
   カメラ寸法・retry変更、撮影停止解除はこのチェックリストだけで承認されない。
 
-31件対応表とコマンド出力は [pr37-capture-quality](../.agents/progress/pr37-capture-quality.md)。
+31件対応表とコマンド出力は [pr37-capture-quality](../.agents/progress/archive/pr37-capture-quality.md)。
 CQ-1〜4は部品の範囲。本流の品質ゲートは未接続であり、RP-01〜22を完了にしない。
 別課題として、完了録音の部分復元時の原本欠落監査、文書作成の要求ID、長時間HTTPの受付/進捗分離、
 答案の追加取得、終了保存のUI待ちを維持する。今回の撮影品質統合で解決済みとはしない。
@@ -96,7 +98,7 @@ Runs on: Windows PCのみ。対象はglassdocの撮影準備。既存の停止�
   完了はPC検証とPRまで。露出改善・文字判読・実機受け入れは未確認として残す。
 
 結果: [PR38](https://github.com/TroroOrosi/rokid-docscan-starter/pull/38)。
-コマンド出力・APK hash・5方向の点検は[継続記録](../.agents/progress/pr37-capture-quality.md)の末尾。
+コマンド出力・APK hash・5方向の点検は[継続記録](../.agents/progress/archive/pr37-capture-quality.md)の末尾。
 QNの完了は上のCQ-5〜9全体の完了を意味しない。
 
 ## 共通の進め方

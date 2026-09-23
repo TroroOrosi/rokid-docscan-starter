@@ -3,7 +3,7 @@
 調査日: 2026-09-17、一次資料再照合2026-09-23。対象は利用中の **Rokid Glasses / RG-glasses**。
 Rokid Style、Max、Air、法人向けGlass 3の仕様を流用しない。
 本書は撮影再開の承認ではない。最新の利用者訂正と停止範囲は
-[現在の進捗記録](../.agents/progress/pr37-capture-quality.md)を参照する。
+[現在の進捗記録](../.agents/progress/archive/pr37-capture-quality.md)を参照する。
 以前の試験順と6枚の比較案は履歴として残す。最新の5方向の点検と席の制約は末尾を参照する。
 追加撮影は停止し、距離の正確な測定や後退を必須にしない。
 
@@ -27,7 +27,7 @@ Rokid Style、Max、Air、法人向けGlass 3の仕様を流用しない。
 
 公開情報より端末上の能力列挙・返却JPEGを優先するが、能力列挙も画質合格ではない。
 既存の測定は `docs/hardware-measurements.md` と
-`.agents/progress/pr37-predevice-handoff.md` に日付・firmwareとともに残す。
+`.agents/progress/archive/pr37-predevice-handoff.md` に日付・firmwareとともに残す。
 過去の7枚成功、露出+2EV時の4回タイムアウトを、新しいfirmwareで再実証したとは書かない。
 
 ## 文書撮影への含意

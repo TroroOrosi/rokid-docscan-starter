@@ -19,7 +19,7 @@ OCR、ASR、連写、添付変換は手段であり、実行できたことを�
 
 本書は目的から機能の要否を判断する入口。[実装配置図](implementation-surfaces.md)は所在と役割、
 [plan](../tasks/plan.md)は設計、[todo](../tasks/todo.md)は既存CQ/RPの実施・合格条件を所有する。
-[継続記録](../.agents/progress/pr37-capture-quality.md)はコマンド出力・原本照合・停止経緯を保持する。
+[継続記録](../.agents/progress/archive/pr37-capture-quality.md)はコマンド出力・原本照合・停止経緯を保持する。
 旧番号の追跡表は下に残す。新しい並行タスクリストは作らない。
 
 ## 必要な機能と現在の到達点

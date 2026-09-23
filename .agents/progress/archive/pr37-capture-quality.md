@@ -29,7 +29,7 @@ Runs on: Windows PC `C:\rokid-docscan-starter`。前段の実機試験はglassdo
 
 | # | ファイル | 状態 | 根拠・対応内容 |
 |---|---|---|---|
-| 1 | `.agents/progress/pr37-capture-quality.md` | 今回統合 | 本記録。停止、台帳、検証、残作業 |
+| 1 | `.agents/progress/archive/pr37-capture-quality.md` | 今回統合 | 本記録。停止、台帳、検証、残作業 |
 | 2 | `CLAUDE.md` | 今回統合 | 文字枠の限界とPC品質ゲート未接続 |
 | 3 | `README.md` | 今回統合 | 正本の版tuple更新、PC部品と本流の区別 |
 | 4 | `android-relay/glassdoc/build.gradle.kts` | 今回統合 | versionName/code更新、依存・署名設定不変 |
@@ -78,7 +78,7 @@ PCでは既存Pillowとgeometryだけで原寸タイル、任意の明るさ・�
 カメラ、OCR、モデル、ネットワーク呼出しは加えていない。パケットは常時hold。
 admissionは渡された証拠の評価だけで生成・認証をしない。検証済みprofileは既定で空。
 evaluationは参照ラベル付きtest記録の集計だけで、方式選択・本番profile承認はしない。
-詳しい入力契約は [capture-quality.md](../../docs/capture-quality.md) に集約する。
+詳しい入力契約は [capture-quality.md](../../../docs/capture-quality.md) に集約する。
 
 ## 保存写真への適用
 
@@ -180,7 +180,7 @@ codebase-memory、progress-checkpoint。最終差分はcode-review-and-quality�
 Runs on: 当面の実装・検証はWindows PC。会場本流はglassdoc → スマホAP → スマホAPIであり、PC試験はその実機受け入れを代替しない。
 
 1. PR #37本文のcommit・push・CI結果を読む。ソースが同一なら上記ローカル全体試験・APK検査を繰り返さない。
-2. [tasks/todo.md](../../tasks/todo.md) CQ-5: 保存原本から紙面・文字・数式・図表の根拠を生成し、参照ラベルで校正する。自動profile承認はしない。
+2. [tasks/todo.md](../../../tasks/todo.md) CQ-5: 保存原本から紙面・文字・数式・図表の根拠を生成し、参照ラベルで校正する。自動profile承認はしない。
 3. CQ-6: 新鮮な撮影前プレビュー、紙面四隅・余白・安定、同時出力/メモリ。撮影後burstを撮影前検査と呼ばない。
 4. CQ-7: 同じ本撮影原本で再検査しcapture_id/source_sha256/rotation/policy/profile版を対応付ける。
 5. CQ-8: 手動・自動・終了時・復元時の候補保全と正式登録を分離し、confirm/upload/サーバの全境界に同じゲートを接続する。遅延・timeout・不明はhold。
@@ -353,7 +353,7 @@ PC処理は `5981c3a` でPRへ反映済み。`gh pr checks 37` → 全16 checks 
 `verifying-premises` → `find-docs`を使用。Context7のCamera2 IDを解決してAE資料を取得し、
 Android公式のAPI 21からの状態定義、Rokidの現行FAQ・独公式製品詳細・公式撮影記事を開いた。
 旧global製品URLは404のため別の公式地域ページへ照合。公式資料・現物・推論は
-[研究資料の2026-09-22節](../../docs/rokid-capture-research.md)で区別した。
+[研究資料の2026-09-22節](../../../docs/rokid-capture-research.md)で区別した。
 固定焦点・34cm〜∞の公称範囲、撮影109°と表示30°、標準LLHDRを確認した。
 この公称値は手元の細字可読性やCamera2での同じ処理を保証しない。
 
@@ -406,7 +406,7 @@ Runs on: 標準撮影は利用者の物理操作。回収・診断はPC。会場
 
 Runs on: PCの現行ソース `5981c3a`。グラフ2026-09-14のcoverageは古いため対象ソースへフォールバック。
 
-[研究資料](../../docs/rokid-capture-research.md)に5方向の事実・根拠・未確認を記録した。
+[研究資料](../../../docs/rokid-capture-research.md)に5方向の事実・根拠・未確認を記録した。
 主な不足は、表示だけのguide/spread、背景込み半分OCR、撮影前の紙面／細字判定なし、
 OCRゼロの自動撮影反復、品質ゲートなしの保存・送信、選択肢の偽問題化、全問待ち後の1回bundle取得。
 `segment_problems`の合成入力「問1＋(A)＋(B)」→3問題。実写真での誤分割原因を確定したものではない。
@@ -454,7 +454,7 @@ Runs on: 現ソースのCamera2準備経路とPC上の既存画像。物理カ�
 previewの露出収束を画質合格・最終JPEGの収束保証にはしない。依存・schema・署名鍵の変更なし。
 
 比較の原本hash・座標・方式・参照の限界・一次資料URLは
-[研究の2026-09-23節](../../docs/rokid-capture-research.md)に集約。
+[研究の2026-09-23節](../../../docs/rokid-capture-research.md)に集約。
 一律拡大は原寸より良くならず不採用。原寸全文Bitmap化と自動明暗補正も採用しない。
 私有出力は `data/device-setup/pr37-camera-baseline-20260922-225825/text-comparison/`。
 元画像・OCR本文・参照本文をGitへ追加していない。
@@ -629,7 +629,7 @@ Runs on: Windows PC `C:\rokid-docscan-starter`。branch `feature/capture-quality
 Runs on: 既存標準JPEG、PC Tesseract。グラスのML Kitではない。
 
 前回の33文字と同じ原本で3領域109文字を先に転記し、7方式を比較した。
-結果は[研究資料](../../docs/rokid-capture-research.md#2026-09-23-3領域で縮小補正分割を比較)へ集約。
+結果は[研究資料](../../../docs/rokid-capture-research.md#2026-09-23-3領域で縮小補正分割を比較)へ集約。
 原寸21、縮小82、縮小後補間26、明暗補正21、上下分割67、64px重なり分割80、左右分割33の編集誤り。
 上下連結の順序・重複を問題として、縦書きの右→左連結を試したが、3領域目で原寸6→20に悪化した。
 補正・単純分割は本流に採用しない。原寸も誤りが残り、校正／品質合格・全文評価とはしない。

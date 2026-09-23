@@ -4,7 +4,7 @@ Status: Current documentation map. Updated 2026-09-23.
 
 実機確認前の入口は [目的・機能の全体整理](requirements-audit.md)。
 目的／採否と全機能の不足 → [実装配置図](implementation-surfaces.md) → [設計](../tasks/plan.md)・
-[既存CQ/RPタスク](../tasks/todo.md) → [継続記録](../.agents/progress/pr37-capture-quality.md) の順で読む。
+[既存CQ/RPタスク](../tasks/todo.md) → [継続記録](../.agents/progress/archive/pr37-capture-quality.md) の順で読む。
 実機操作・導入・GPT送信の停止は継続する。文書の保存やPC検査は停止解除ではない。
 
 Separate the intended requirement from evidence of what works:
@@ -109,18 +109,16 @@ what the platform permits.
 
 ## Internal progress records
 
-- `.agents/progress/pr37-capture-quality.md` — **撮影品質作業の再開入口（PR37→PR38）。** 31件対応表、利用者訂正、画像比較・露出準備の検証と本流未接続の残作業。
+- `.agents/progress/current.md` — **再開入口。** 目的（原本画像を正確にGPTへ）、遅延の原因、有効な停止、PR38の完了分と次の作業。
 
-- `.agents/progress/pr37-objective-review.md` — **2026-09-17時点のレビュー。** 整合性・録音・終了保存の回帰修正、客観的な未解決事項。実機停止は維持。
+退避済み（2026-09-23、利用者承認）。PR37〜38の測定と訂正の一次記録。必要な節だけ参照する:
 
-- `.agents/progress/pr37-camera-research.md` — **objective-reviewの次に読む。** 撮影仕様調査、配送・診断修正、検証の範囲。追加撮影は停止のまま。
-
-- `.agents/progress/pr37-offline-remediation.md` — **新しいcamera-research記録の後に読む。** 追加修正と停止条件。続いて既存2記録の全文を読む。
-
-- `.agents/progress/pr37-predevice-handoff.md` — PR37の実機前修正、検証範囲、Windows Codexへの引き継ぎと未実装の対応表。
-
-- `.agents/progress/multimodal-scan.md` — **read this in full after the PR37 handoff.** 保存・停止時の実機状態と経緯。
-  以前の実装・実機導入・ASRの測定と、追加実装を始める前の境界を保持する。
+- `.agents/progress/archive/pr37-capture-quality.md` — 31件の対応表、実機試験、保存画像・OCR比較、訂正の全履歴。
+- `.agents/progress/archive/pr37-objective-review.md` — 2026-09-17時点のレビューと回帰修正。
+- `.agents/progress/archive/pr37-camera-research.md` — 撮影仕様調査と配送・診断修正。
+- `.agents/progress/archive/pr37-offline-remediation.md` — 追加修正と停止条件。
+- `.agents/progress/archive/pr37-predevice-handoff.md` — PR37の実機前修正とCodexへの引き継ぎ。
+- `.agents/progress/archive/multimodal-scan.md` — multimodal-scanの実機状態と経緯。
 
 Continuation records for agents. Never an operator contract.
 

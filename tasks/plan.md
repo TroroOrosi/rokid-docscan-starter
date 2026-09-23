@@ -43,7 +43,7 @@ Runs on: 今回の部品実装・検証はWindows PC。本流はglassdoc → F-5
 [PR37の復元要件](https://github.com/TroroOrosi/rokid-docscan-starter/pull/37#issuecomment-5725014528)
 の文字枠表示・連写順位と、PC用の原寸パケット／補正候補／登録条件／比較評価を統合する。
 詳細は [capture-quality](../docs/capture-quality.md)、31件対応表と検証は
-[進捗](../.agents/progress/pr37-capture-quality.md)。3秒・可視ACK・操作割当は維持する。
+[進捗](../.agents/progress/archive/pr37-capture-quality.md)。3秒・可視ACK・操作割当は維持する。
 
 最終要件は、原本保全と正式登録を分け、不明／不良画像を正式登録へ昇格させないこと。
 PCの判定部品を追加しただけでは、次の本流工程を満たさない。

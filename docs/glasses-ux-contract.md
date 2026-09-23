@@ -10,7 +10,7 @@ chooser after one physical fold/unfold; wearing-only and disconnected transition
 remain unverified (see the runbook for its limits).
 [`requirements-audit.md`](requirements-audit.md) retains the pre-change audit;
 the current implementation and checks are recorded in
-[`multimodal-scan.md`](../.agents/progress/multimodal-scan.md).
+[`multimodal-scan.md`](../.agents/progress/archive/multimodal-scan.md).
 
 **The `:glassdoc` table below is the decided operator surface** (operator,
 2026-09-14): the venue runs the standalone app over a phone access point and the

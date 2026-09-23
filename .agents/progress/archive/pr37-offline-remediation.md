@@ -1,7 +1,7 @@
 # PR37 — offline remediation restart point
 
 2026-09-17追記: 最新の撮影仕様調査・配送修正・診断の入口は
-`.agents/progress/pr37-camera-research.md`。本記録の停止条件は継続する。
+`.agents/progress/archive/pr37-camera-research.md`。本記録の停止条件は継続する。
 
 Status: Current continuation entry, 2026-09-16. Start here, then read the previous records in full.
 
@@ -14,8 +14,8 @@ head `0be008a25d74c1e6e88b27378b177c1c3ddd874d`, tree `44084caa0f0fd7096bc0052d2
 Its CI source archive was checked against this Git tree before edits. The old PR body pointed
 at an earlier head and is not evidence about the device's current APK.
 
-Read `CLAUDE.md`, `.agents/progress/pr37-predevice-handoff.md` and
-`.agents/progress/multimodal-scan.md` completely, including the later stop/LOW_MEMORY records.
+Read `CLAUDE.md`, `.agents/progress/archive/pr37-predevice-handoff.md` and
+`.agents/progress/archive/multimodal-scan.md` completely, including the later stop/LOW_MEMORY records.
 Their hardware observations, original hashes, pending records and unmet requirements remain in place.
 Use `docs/capture-preflight.md` for the new offline commands.
 
