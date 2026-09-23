@@ -174,7 +174,8 @@ from __future__ import annotations
 # Snapshot reads and recording-retry integrity; no HTTP envelope change.
 # Capture evidence diagnostics and honest text-bounds/review labels; HTTP unchanged.
 # Bounded Camera2 metering before glassdoc JPEG capture; physical quality unverified.
-APP_VERSION = "0.36.0"
+# Original-image/audio browser input; no local transcription gate or repeated bundle encoding.
+APP_VERSION = "0.37.0"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.
@@ -245,7 +246,8 @@ APP_VERSION = "0.36.0"
 #        updated; relaycore 0.3.17 does.
 # Adds operation_routes and explicit client-OCR/image-only real-mode behavior.
 # Content digest v2; persisted solve failures change the existing bundle revision.
-API_VERSION = "1.22.0"
+# Browser listening accepts complete original audio without requiring ASR.
+API_VERSION = "1.23.0"
 
 # Matching algorithm identity. Bump when thresholds or hashing change so a
 # re-index/eval is triggered. Mirrors thresholds in app/matching.py.

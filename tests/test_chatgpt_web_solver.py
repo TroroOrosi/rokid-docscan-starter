@@ -328,7 +328,7 @@ class _FakeClient:
             "audio": audio,
             "bundle_pdf": bundle_pdf,
             "chat_key": chat_key,
-            "files": files,
+            "files": files() if callable(files) else files,
         }
         return json.loads(self.payload)
 
@@ -360,15 +360,17 @@ def test_the_page_image_reaches_the_browser_as_bytes_and_is_recorded(tmp_path):
     result = solver.solve(
         question=Question(
             body_text="問3 図の角度を求めよ",
+            question_no="問3",
             image_path=str(page_png),
             subject="数学",
             answer_only=True,
         )
     )
 
-    # Figure and OCR text travel as two parts, exactly as the API solvers send them.
+    # Only the locator is typed; local OCR is not source material for GPT.
     assert client.seen["images"] == [PNG]
     assert "問3" in client.seen["prompt"]
+    assert "図の角度を求めよ" not in client.seen["prompt"]
     assert result.extras["image_attached"] is True
 
 
@@ -437,20 +439,20 @@ def test_a_single_image_path_still_works_without_image_paths(tmp_path):
     assert client.seen["images"] == [PNG]
 
 
-def test_an_unreadable_page_is_skipped_rather_than_failing_the_solve(tmp_path):
+def test_an_unreadable_page_blocks_the_solve(tmp_path):
     good = tmp_path / "good.png"
     good.write_bytes(PNG)
     client = _FakeClient('{"status":"ready","answer":"70°"}', attached=True)
 
-    ChatGptWebSolver(client=client).solve(
-        question=Question(
-            body_text="第2問",
-            image_paths=[str(good), str(tmp_path / "gone.png")],
-            answer_only=True,
+    with pytest.raises(ValueError, match="image"):
+        ChatGptWebSolver(client=client).solve(
+            question=Question(
+                body_text="第2問",
+                image_paths=[str(good), str(tmp_path / "gone.png")],
+                answer_only=True,
+            )
         )
-    )
-
-    assert client.seen["images"] == [PNG]
+    assert not client.seen
 
 
 def test_a_partial_upload_is_not_reported_as_attached():
@@ -819,13 +821,24 @@ def test_document_route_counts_audio_and_reuses_confirmed_files(tmp_path, monkey
              for i in range(40)]
     fake = _FakeClient('{"status":"ready","answer":"2"}', attached=True)
     question = Question(body_text="Question two", question_no="問2", question_id="q9", answer_only=True,
-                        document_pages=pages, document_id="1", page_numbers=list(range(1, 41)),
+                        document_pages=pages, document_id="1", page_numbers=[2],
                         audio_path=str(recording), audio_transcript="[30000..31000ms] Question two", chat_key="session:1")
     ChatGptWebSolver(client=fake).solve(question=question)
     files, first_key = fake.seen["files"], fake.seen["chat_key"]
     assert len(files) <= 20
-    assert files[0]["name"] == "document.md" and files[-1]["name"] == "original.wav"
-    assert b"Question two" in files[0]["buffer"] and "q9" in fake.seen["prompt"]
+    assert len(files) == 15 and files[-2]["name"] == "page040.png", "shared pages cannot be lost"
+    assert files[0]["mimeType"].startswith("image/") and files[-1]["name"] == "original.wav"
+    assert all(f["name"] != "document.md" for f in files)
+    assert "Question two" not in fake.seen["prompt"] and "q9" in fake.seen["prompt"]
+    question.body_text = "corrected OCR"
+    question.audio_transcript = "corrected ASR"
+    pages[0]["ocr_text"] = "corrected page OCR"
+    ChatGptWebSolver(client=fake).solve(question=question)
+    assert fake.seen["chat_key"] == first_key, "local text cannot reset original evidence"
+    page_path.write_bytes(_real_png(81))
+    ChatGptWebSolver(client=fake).solve(question=question)
+    assert fake.seen["chat_key"] != first_key, "retake changes evidence even at the same path"
+    first_key = fake.seen["chat_key"]
     recording.write_bytes(b"RIFF corrected original")
     ChatGptWebSolver(client=fake).solve(question=question)
     assert fake.seen["chat_key"] != first_key
@@ -838,6 +851,27 @@ def test_document_route_counts_audio_and_reuses_confirmed_files(tmp_path, monkey
     assert len([k for k, _ in browser.events if k == "upload"]) == count
 
 
+def test_confirmed_booklet_is_not_encoded_again_until_chat_changes(monkeypatch):
+    monkeypatch.setattr(chatgpt_web, "POLL_S", 0)
+    browser = _StubPage(["2", "2"])
+    client = chatgpt_web.ChatGptWebClient()
+    context = _OneTabContext(browser)
+    builds = []
+
+    def prepare():
+        builds.append(1)
+        return [{"name": "page001.png", "mimeType": "image/png", "buffer": PNG}]
+
+    client._ask_with_retries(context, "問1", [], files=prepare, chat_key="original-1")
+    client._ask_with_retries(context, "問2", [], files=prepare, chat_key="original-1")
+    assert len(builds) == 1
+    browser.url = "https://chatgpt.com/c/operator-changed-chat"
+    client._ask_with_retries(context, "問3", [], files=prepare, chat_key="original-1")
+    assert len(builds) == 2
+    client._ask_with_retries(context, "問3", [], files=prepare, chat_key="retaken-page")
+    assert len(builds) == 3
+
+
 def test_unconfirmed_document_files_never_send_a_question(monkeypatch):
     monkeypatch.setattr(chatgpt_web, "RETRY_BACKOFF_S", 0)
     monkeypatch.setattr(chatgpt_web, "UPLOAD_TIMEOUT_S", 0)
@@ -845,24 +879,21 @@ def test_unconfirmed_document_files_never_send_a_question(monkeypatch):
     page = _StubPage(["answer"], thumbnail_appears=[False] * 20, thumbnail_baseline=0)
     with pytest.raises(chatgpt_web.ChatGptWebError):
         chatgpt_web.ChatGptWebClient()._ask_with_retries(_OneTabContext(page), "question", [],
-                files=[{"name": "document.md", "mimeType": "text/markdown", "buffer": b"source"}])
+                files=lambda: [{"name": "page001.png", "mimeType": "image/png", "buffer": PNG}])
     assert not _sends(page)
 
 
-def test_an_unreadable_recording_does_not_fail_the_solve(tmp_path):
-    # The transcript is still in the prompt, so a missing file degrades the
-    # answer rather than losing it.
+def test_an_unreadable_recording_blocks_the_solve(tmp_path):
     client = _FakeClient('{"status":"ready","answer":"②"}')
 
-    result = ChatGptWebSolver(client=client).solve(
-        question=Question(
-            body_text="問1", subject="英語", audio_path=str(tmp_path / "gone.mp3"),
-            answer_only=True,
+    with pytest.raises(ValueError, match="audio"):
+        ChatGptWebSolver(client=client).solve(
+            question=Question(
+                body_text="問1", subject="英語", audio_path=str(tmp_path / "gone.mp3"),
+                answer_only=True,
+            )
         )
-    )
-
-    assert client.seen["audio"] is None
-    assert result.answer == "②"
+    assert not client.seen
 
 
 def test_the_send_button_submits_and_enter_is_only_the_fallback():

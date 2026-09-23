@@ -2153,8 +2153,11 @@ def exam_set_mode(session_id: int, payload: ExamMode) -> dict:
 
 @app.get("/v1/listening-ready")
 def listening_ready() -> dict:
+    from .listening import requires_transcript
     from .local_asr import local_asr_settings
 
+    if not requires_transcript():
+        return {"ready": True, "asr": "disabled", "sample_rate": 16000}
     try:
         local_asr_settings()
     except ValueError as error:
@@ -2167,13 +2170,14 @@ async def document_audio_chunk(
     document_id: int, sequence: int = Form(...), start_sample: int = Form(...),
     captured_at_ms: int = Form(...), audio: UploadFile = File(...),
 ) -> dict:
-    from .listening import store_chunk
+    from .listening import requires_transcript, store_chunk
 
     with db.connect() as conn:
         _doc_or_404(conn, document_id)
     raw = await _read_upload_limited(audio)
     try:
-        result = await run_in_threadpool(store_chunk, document_id, sequence, start_sample, captured_at_ms, raw)
+        result = await run_in_threadpool(store_chunk, document_id, sequence, start_sample, captured_at_ms, raw,
+                                         transcribe=requires_transcript())
         # Transcript contents remain on the server; the glasses need only progress/timing.
         return {"sequence": result["sequence"], "samples": result["samples"],
                 "asr_seconds": result["asr_seconds"], "real_time_factor": result["real_time_factor"]}
@@ -2201,7 +2205,7 @@ def document_audio_complete(document_id: int, payload: CompleteRecording) -> dic
 
 @app.post("/v1/exam-sessions/{session_id}/document-audio")
 def exam_document_audio(session_id: int) -> dict:
-    from .listening import recording_transcript
+    from .listening import recording_transcript, requires_transcript
 
     with db.connect() as conn:
         session = _exam_session_or_404(conn, session_id)
@@ -2209,7 +2213,7 @@ def exam_document_audio(session_id: int) -> dict:
         if session["exam_type"] != "listening":
             raise HTTPException(status_code=409, detail="listening session required")
         try:
-            path, text = recording_transcript(doc_id)
+            path, text = recording_transcript(doc_id, require_transcript=requires_transcript())
         except ValueError as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
         updated = conn.execute(
@@ -2227,16 +2231,20 @@ async def exam_upload_audio(
     audio: UploadFile | None = File(None),
     transcript: str | None = Form(None),
 ) -> dict:
-    """Listening mode: record the audio on the spot and store its transcript.
+    """Retain original audio; the browser route does not transcribe it locally.
 
-    Saves the uploaded recording to data/audio/ and transcribes it via the
+    The non-browser compatibility route transcribes the saved recording via the
     configured ROKID_TRANSCRIBER (openai|gemini). With no transcriber (or on
     failure/offline) the client-provided ``transcript`` is stored as-is, so
     listening works without any ASR credential. Either ``audio`` or
     ``transcript`` must be supplied.
     """
     from .transcribe import transcribe_audio
+    from .listening import requires_transcript
 
+    transcribe = requires_transcript()
+    if not transcribe and (audio is None or not getattr(audio, "filename", None)):
+        raise HTTPException(status_code=400, detail="original listening audio required")
     if (audio is None or not getattr(audio, "filename", None)) and not (
         transcript and transcript.strip()
     ):
@@ -2261,7 +2269,7 @@ async def exam_upload_audio(
             fpath.write_bytes(raw)
             audio_path = str(fpath)
 
-        text = transcribe_audio(audio_path, provided_transcript=transcript)
+        text = transcribe_audio(audio_path, provided_transcript=transcript) if transcribe else ""
         updated = conn.execute(
             "UPDATE exam_sessions SET audio_path = ?, transcript = ? WHERE id = ? AND status != 'reviewing' "
             "AND audio_path IS ? AND transcript IS ?",

@@ -2,7 +2,7 @@
 
 Status: Current phone-controlled fallback workflow. Updated 2026-09-15.
 
-本流glassdocの自動/手動撮影・図・録音/ASRは[multimodal-scan.md](multimodal-scan.md)を参照。
+本流glassdocの自動/手動撮影・図・原本画像/録音は[multimodal-scan.md](multimodal-scan.md)を参照。
 以下は凍結したphone relayの操作です。
 
 本流glassdocの撮影後表示は「構図確認のみ」「無操作で保存・画質未検証」です。

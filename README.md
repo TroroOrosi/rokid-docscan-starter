@@ -53,8 +53,9 @@ Rokid Glasses（AnswerView） ← answer-bundle
 保存してから送信します。中断資料と直近答案は明示的に選んで再開できます。
 
 資料は全文OCRのMarkdown＋大問のページ画像が既定で、結合画像/PDFも比較できます。
-図付き答案と、撮影に並行する録音・スマホ内VAD/ASRも実装しています。
-設定・操作・未検証の範囲は[グラス撮影と端末内ASR](docs/multimodal-scan.md)を参照してください。
+図付き答案と、撮影に並行する録音も実装しています。主経路は画像・音声の原本をGPTへ渡し、
+OCR全文・ローカル文字起こしの送信やASR完了待ちは行いません。
+設定・操作・未検証の範囲は[グラス撮影と原本資料](docs/multimodal-scan.md)を参照してください。
 新しいAPKでの物理LED、3秒表示、画角、消灯/復帰、スマホAP上の完走と精度比較は未検証です。
 
 ### 実際に通したことがある経路（フォールバック。凍結）
@@ -115,7 +116,7 @@ risk があります。**利用者の判断で選択した経路です（詳細�
 CXR-L の実装境界は
 [CXR-L / Global Hi Rokid integration](docs/cxr-l-integration.md)です。
 
-現在のバージョン: **Server APP 0.36.0 / API 1.22.0 / Android client 0.3.17 / Glasses View 1.18.0 / Solver API 1.7.1**。
+現在のバージョン: **Server APP 0.37.0 / API 1.23.0 / Android client 0.3.17 / Glasses View 1.18.0 / Solver API 1.7.1**。
 版数の正本は `app/version.py` です。他の資料は版数を書かず、この行だけが
 `tests/test_documentation_contract.py` で実装と照合されます。
 Solver API は、記入用解答の全文保持・資料不足の分離を行う `answer_only` モードを含みます。

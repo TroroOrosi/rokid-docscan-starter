@@ -506,3 +506,77 @@ Runs on: まずWindows PC。実機作業はここに記載しただけでは再�
    RP-11/12/15の資料不足・分割・答案追加取得を作業表から落とさない。
 3. 実機でしか答えられない問いは、通常の着席姿勢・同じ紙位置で標準／Camera2を比較できる
    撮影だけの経路を準備してから具体化する。新しいAPKは未導入。測距・後退を必須にしない。
+
+## 2026-09-23 目的と手段を分けた全工程の再点検（最新）
+
+Runs on: Windows PC。実機操作・撮影・導入・GPT送信は実施していない。停止指示を維持する。
+
+利用者の最新訂正: 「全体を見ろ」。OCRは判読性／画像登録の評価に使う手段であり、GPTへの
+全文入力が目的ではない。音声もGPTへ原音を渡し、ローカル文字起こしを必須にしない。
+前のQNだけでは全体の無駄を除去できていなかった。以下が旧OCR優先・ASR必須方針に優先する。
+
+### 本流を追った結果と今回の変更
+
+Runs on: 本checkoutのJava/Python実ソースとオフライン試験。graphは古いためcoverageで変更済み・未追跡を確認し直接読んだ。
+
+| 工程 | 確認した事実・今回の対応 | 残る成立条件 |
+|---|---|---|
+| 姿勢・撮影 | HUDの未校正「40〜60cm離す」を除去。前のAE収束待ちは維持 | 普段の席での画角・細字・明るさ。3枚ごとの再測光・撮影の時間／電力は未測定 |
+| OCR・登録 | 実際は`handlePhoto`→OCR callback→`stageCaptureReview`→確認3秒→`confirmPendingCaptureNow`→保存／送信。OCRより先に本登録する順序ではないが、判読合否で登録を止めていない | CQ-5〜8。ゼロOCR候補の破棄・反復、全画面縮小、紙面／図表の判定不足。認識終了と品質合格を同一にしない |
+| 資料入力 | `document.md`、OCR本文／補正文、ASR文字起こし、本文400文字のlocatorを主経路から除去。全画像・原音を保持 | 画像結合後のモデル内部縮小と原音利用能力／正答は未測定 |
+| 準備・送信 | 内容hashで入力を識別。同一会話の確認済み原本は画像を再符号化せず既存添付を使う。原本変更・会話変更・未確認時は再準備 | 毎問の原本hash読取は残す。端末速度改善の秒数は未測定。画像全体を永続メモリcacheしない |
+| リスニング | 主経路のASR設定・推論・完了待ちを除去。チャンク保存・hash／sample／時計・欠番・再送・原音結合は維持。通常の音声upload入口もASRを起動しない | 原音を扱わない現行API adapterへ、文字起こし無しのまま自動fallbackしない。音声欠損で質問を続けない |
+| 設問・解答 | OCRが取りこぼした選択肢数でGPTの原本ラベルを範囲外とし再質問する処理を止めた | `segment_problems`のOCR依存は残る。`問1…\n(A)…\n(B)…`が3問になる問題は未修正。原本上の解答欄との対応が必要 |
+| 表示・復旧 | 既存の小問別保存、CLOSED、原音／写真再送と送信結果不明時の停止を維持 | `finalize-reading`が全問を同期処理してから返し、Activityはbundleを1回取得する。RP-15の逐次表示は未完 |
+| 運用・開発 | 同じ準備処理を小問ごとに実行しない回帰を追加。全体レビューから外していた入口・fallbackも修正 | AP通し・長時間・容量・着脱復旧は未検証。CIのpush＋pull_request二重起動は別の低優先課題として残す |
+
+図表や選択肢の構文を新しい推測で分類し直す、未校正confidence閾値を品質合格にする、停止中の実機で
+設計不足を埋める、という変更は行っていない。既存8枚の距離・姿勢・撮影群は引き続き不明。
+非ブラウザの互換経路は既存ASRを保持する。新依存・DB schema・撮影寸法／retry／gesture変更なし。
+
+### 5方向の判定
+
+Runs on: Windows PCの差分・現行ソース・既存測定記録。実資料の新しい外部送信はない。
+
+- **目的達成:** 原本から記入用答案を得る目的に対し、不要なOCR入力・ASR待ち・再符号化・再質問を除去。
+  文字の判読、必要資料、全小問対応、表示までの達成は未完了。PRをDraftのままにする。
+- **全体への影響:** ChatGPT入口、旧画像／音声入口、音声受信・完了、fallback、HUDの再開文言まで確認。
+  原本保存・整合性・再送・送信結果不明時の停止を弱めず、画像の大問絞り込みによる共通資料欠落も除去。
+- **事実確認:** 登録前にOCR処理自体は存在するが品質ゲートではない。画像hash変更で会話を変え、
+  OCR/ASR文字列変更だけでは会話を変えない回帰を実行。モデルが原本を読める／高精度とは断言しない。
+- **未確認事項:** 実ML Kitの判読、校正、登録ゲート、OCR依存の設問分割、途中答案、原音利用、AP通し・電池・熱。
+  Tesseractの33文字比較、PC試験、buildをこれらの実証にしない。
+- **指示漏れ:** 全体の目的から要否を見直す指示を局所最適へ狭めたことを訂正。停止・後退不能・未校正距離を
+  守り、旧ASR準備を主経路の前提として再要求しない。計画・task・runbookを同じ方針へ更新。
+
+### PCでの確認
+
+Runs on: `C:\rokid-docscan-starter`。Python 3.12、JDK 17.0.20.1+1、SDK Platform 36／build-tools 36.0.0、wrapper Gradle 9.4.1。
+
+- 初回の回帰: `py -3.12 -m pytest -q tests/test_source_bundle.py tests/test_chatgpt_web_solver.py tests/test_listening_chunks.py`
+  → `11 failed, 63 passed`。OCR資料、再生成、ASR必須を旧実装で再現し、修正後`74 passed`。
+- 別入口の欠損原本／OCR本文回帰 → `3 failed`から修正。OCR由来の再質問、音声を失うfallbackも各1件REDから修正。
+- 最終 `py -3.12 -m pytest -q` → `825 passed, 1 skipped, 1 warning in 102.51s`、exit 0。
+  LIVE=0、新規TEMPのROKID_DATA_DIR。skipは実送信、warningは既存Starlette/httpx非推奨。
+- `py -3.12 -m ruff check .` → `All checks passed!`。`git diff --check` → whitespace errorなし、exit 0。
+- 最終 `.\android-relay\gradlew.bat --no-daemon test testDebugUnitTest assembleDebug`
+  → `BUILD SUCCESSFUL in 1m 20s`、`199 actionable tasks: 19 executed, 180 up-to-date`。
+  JUnit XML集計 → `tests:400, failures:0, errors:0, skipped:0`。
+- `aapt2 dump badging <glassdoc-debug.apk>` → package `dev.rokid.docscanglass.doc`、activity `dev.rokid.docscanglass.doc.DocScanGlassActivity`。
+  `apksigner verify --verbose --print-certs <同APK>` → `Verifies`、v2=true、既存証明書SHA-256
+  `906307478018e09e2937cfd8042a674d27598767577e08a304472aae407ccacc`と一致。
+- `Get-FileHash -Algorithm SHA256 <同APK>` → `f8ce7cefabac0c2c55b9a226418b57f56e51d391270d89d1cdb75381e02f9135`。
+  APKは本checkoutで生成した未導入成果物。前節のAPK hashと混同しない。
+- 未修正の分割を `segment_problems([(0, '問1 Choose one\n(A) apple\n(B) orange')])` で再現:
+  `problem_count: 3 extra_labels: ['(A)', '(B)']`。これを修正済み・品質合格としていない。
+
+### 再開時の判断順
+
+Runs on: まずWindows PCの現行本流と保存原本。以下は実機・GPT送信の再開許可ではない。
+
+1. 「OCRすること」ではなく、保存した原本の判読性を登録前に評価できるかをCQ-5〜8で確かめる。
+   校正されていない指標を閾値だけ足してゲートにしない。候補保全・正式登録の区別を全経路へ接続する。
+2. OCRを正解問題一覧の根拠にし続けない。原本上の小問／解答欄・共通資料を基準にRP-12を設計し、
+   既存の小問別保存をRP-15の追加取得へ届ける。入力の不足をGPTの待ち時間で補わない。
+3. 原音利用・実画像の判読など実機／実モデルでしか確かめられない問いは、停止を維持したまま
+   同一条件で比較できる手順と合格基準を具体化する。距離を測らせたり、後退を前提にしたりしない。

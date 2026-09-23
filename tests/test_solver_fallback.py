@@ -1,3 +1,5 @@
+import pytest
+
 from app.solvers import (
     Question,
     SolveResult,
@@ -107,10 +109,38 @@ def test_out_of_range_choice_is_retried_once_with_the_valid_labels():
     assert served.name == "out-of-range-tier"
     assert result.answer == "B: 青"
     assert result.extras["choice_retry"] == "recovered"
-    # Exactly one re-ask, and it stated the labels rather than repeating blind.
+    # Exactly one re-ask, with the valid labels.
     assert len(solver.prompts) == 2
     assert solver.prompts[0] is None
     assert "A〜C" in solver.prompts[1]
+
+
+def test_browser_original_labels_are_not_retried_against_incomplete_ocr(monkeypatch):
+    from app.solvers import registry
+
+    solver = _OutOfRange()
+    solver.name = "chatgpt-web"
+    monkeypatch.setitem(registry._registry._items, solver.name, solver)
+    result, _ = solve_with_fallback(
+        Question(body_text="OCR missed choices", choices=["one choice"],
+                 image_path="original.png", answer_only=True), tiers=[solver.name])
+    assert result.answer == "F"
+    assert solver.prompts == [None]
+    assert "choice_out_of_range" not in result.extras
+
+
+def test_original_audio_does_not_fall_back_to_an_image_only_adapter(monkeypatch):
+    from app.solvers import registry
+
+    browser = _Raises()
+    browser.name = "chatgpt-web"
+    fallback = _Good()
+    monkeypatch.setitem(registry._registry._items, browser.name, browser)
+    monkeypatch.setitem(registry._registry._items, fallback.name, fallback)
+    monkeypatch.setattr(fallback, "solve", lambda **kw: pytest.fail("original audio would be lost"))
+    with pytest.raises(RuntimeError, match="no configured solver"):
+        solve_with_fallback(Question(audio_path="original.wav", answer_only=True),
+                            tiers=[browser.name, fallback.name])
 
 
 def test_persistent_out_of_range_answer_is_kept_and_flagged_not_dropped():

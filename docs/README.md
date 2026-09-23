@@ -43,7 +43,7 @@ silently applying that exception. `.agents/progress/` remains in scope.
   status: route, frozen, probe or shared. `tests/test_surface_inventory.py`
   fails when a surface is missing from it, so a second implementation of an
   existing role has to be declared rather than merely appear.
-- `docs/multimodal-scan.md` — standalone capture, diagrams, source attachments and local listening ASR; physical acceptance pending.
+- `docs/multimodal-scan.md` — standalone capture, diagrams, original image/audio input; ASR only on the compatibility route; physical acceptance pending.
 - `README.md` — project entrypoint: what this is for, setup, and the HTTP API.
 - `CLAUDE.md` — engineering invariants. The contract that governs changes:
   real-device rules, answer routes, capture/input/server invariants, build and

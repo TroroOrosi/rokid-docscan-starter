@@ -150,25 +150,23 @@ def _read_image(path: str | None) -> bytes | None:
 
 
 def _read_images(question: Question) -> list[bytes]:
-    """Every readable page image of the question's 大問, in reading order.
-
-    Falls back to the single `image_path` so a question built the old way still
-    carries its page. Unreadable paths are skipped rather than failing the
-    solve: a missing page is worse answered than not answered at all.
-    """
-    paths = list(question.image_paths) or ([question.image_path] if question.image_path else [])
-    return [data for data in (_read_image(p) for p in paths) if data]
+    """Every declared original for the browser route; never skip a missing page."""
+    paths = (list(question.document_image_paths) or list(question.image_paths)
+             or ([question.image_path] if question.image_path else []))
+    if not set(question.required_image_paths).issubset(paths):
+        raise ValueError("required page image is unavailable")
+    images = [_read_image(path) for path in paths]
+    if any(not image for image in images):
+        raise ValueError("original page image is unavailable")
+    return images
 
 
 def _read_audio(question: Question) -> tuple[str, bytes] | None:
-    """The listening recording as (filename, bytes), or None.
-
-    Unreadable paths are skipped exactly as page images are: a listening
-    question still has its transcript, so losing the recording degrades the
-    answer rather than failing the solve.
-    """
+    """Original recording for the browser route; declared audio must be readable."""
     path = getattr(question, "audio_path", None)
     data = _read_image(path)
+    if path and not data:
+        raise ValueError("original listening audio unavailable")
     return (Path(path).name, data) if data else None
 
 

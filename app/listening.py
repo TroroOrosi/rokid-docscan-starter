@@ -1,4 +1,4 @@
-"""Durable original WAV chunks and their local ASR, keyed by document/sample index."""
+"""Durable original WAV chunks; optional ASR for the non-browser compatibility route."""
 
 import hashlib
 import json
@@ -14,13 +14,19 @@ CHUNK_SAMPLES = 30 * 16000
 OVERLAP_SAMPLES = 16000
 
 
+def requires_transcript():
+    from .solvers.registry import _tier_names
+
+    return _tier_names(None)[0] != "chatgpt-web"
+
+
 def folder(document_id):
     if type(document_id) is not int or document_id < 1:
         raise ValueError("invalid document identity")
     return config.AUDIO_DIR / f"document-{document_id}"
 
 
-def store_chunk(document_id, sequence, start_sample, captured_at_ms, raw):
+def store_chunk(document_id, sequence, start_sample, captured_at_ms, raw, *, transcribe=True):
     if (not 0 <= sequence < 600 or start_sample != max(0, sequence * CHUNK_SAMPLES - OVERLAP_SAMPLES)
             or captured_at_ms < 1 or len(raw) > 1_100_000):
         raise ValueError("invalid recording chunk metadata")
@@ -60,7 +66,8 @@ def store_chunk(document_id, sequence, start_sample, captured_at_ms, raw):
             pending.unlink(missing_ok=True)
             raise ValueError("invalid recording WAV") from None
         pending.replace(path)  # keep original even when ASR fails below
-        result = transcribe_chunk(path, start_sample=start_sample)
+        result = (transcribe_chunk(path, start_sample=start_sample) if transcribe else
+                  {"segments": [], "samples": count, "asr_seconds": 0, "real_time_factor": 0})
         metadata = {**result, "sequence": sequence, "start_sample": start_sample,
                     "captured_at_ms": captured_at_ms, "sha256": digest,
                     "audio_file": path.name, "overlap_ms": 1000 if sequence else 0}
@@ -85,7 +92,7 @@ def complete_recording(document_id, expected_chunks, total_samples):
         for sequence in range(expected_chunks):
             meta = directory / f"{sequence:04d}.json"
             if not meta.is_file():
-                raise ValueError("recording has missing or untranscribed chunks")
+                raise ValueError("recording has missing chunks")
             row = json.loads(meta.read_text(encoding="utf-8"))
             chunk_path = directory / f"{sequence:04d}.wav"
             if (row["sequence"] != sequence or row["start_sample"] != max(0, sequence * CHUNK_SAMPLES - OVERLAP_SAMPLES)
@@ -125,11 +132,13 @@ def complete_recording(document_id, expected_chunks, total_samples):
         return manifest
 
 
-def recording_transcript(document_id):
+def recording_transcript(document_id, *, require_transcript=True):
     manifest_path = folder(document_id) / "complete.json"
     if not manifest_path.is_file():
-        raise ValueError("finish recording and transcribe every chunk before analysis")
+        raise ValueError("finish recording and retain every chunk before analysis")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if not require_transcript:
+        return manifest["audio_path"], ""
     lines = ["# English listening transcript", f"document_id: {document_id}",
              "Times refer to original.wav; adjacent chunks overlap by 1 second.",
              "ASR is imperfect. Match spoken question numbers and content to OCR question_ids;",

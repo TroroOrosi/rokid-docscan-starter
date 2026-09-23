@@ -620,7 +620,7 @@ public final class DocScanGlassActivity extends Activity
             main.post(() -> {
                 if (audioStopRequested && !finishingAudio) {
                     wakeForResult();
-                    hud.showLines(List.of("録音・文字起こしを確認", "原音は保存済み", "ダブルタップで再試行"));
+                    hud.showLines(List.of("録音・転送を確認", "原音は保存済み", "ダブルタップで再試行"));
                 } else {
                     hud.showLines(GlassesHudText.adapt(hudLines));
                     waitWithDisplayOff();
@@ -738,7 +738,7 @@ public final class DocScanGlassActivity extends Activity
                     if (!(error instanceof ListeningRecorder.DocumentPending)) stopService(new Intent(this, ListeningService.class));
                     wakeForResult();
                     if (controller.getState() == RelayState.LISTENING || controller.getState() == RelayState.ERROR) {
-                        hud.showLines(List.of("録音・文字起こしを確認", "原音は保存済み", "ダブルタップで再試行"));
+                        hud.showLines(List.of("録音・転送を確認", "原音は保存済み", "ダブルタップで再試行"));
                     }
                 });
             }

@@ -137,6 +137,12 @@ def solve_with_fallback(
         if question.required_image_paths and not getattr(solver, "accepts_images", False):
             skipped.append(f"{name}:images_unsupported")
             continue
+        # The current API adapters send an image, not original audio. After
+        # bypassing local ASR for the browser route, they have no substitute.
+        if (names[0] == "chatgpt-web" and name != "chatgpt-web"
+                and question.audio_path and not question.audio_transcript):
+            skipped.append(f"{name}:original_audio_unsupported")
+            continue
         try:
             result = solver.solve(question=question, max_answer_len=max_answer_len)
         except ChatGptWebUncertain:
@@ -144,7 +150,12 @@ def solve_with_fallback(
         except Exception:  # noqa: BLE001 - one tier failing must not 500
             skipped.append(f"{name}:error")
             continue
-        if choice_out_of_range(result.answer, question.choices):
+        # Original-image answers use printed labels. Incomplete OCR choices
+        # cannot justify another GPT send or replacing a valid printed answer.
+        original_labels = name == "chatgpt-web" and (
+            question.document_pages or question.document_image_paths
+            or question.image_paths or question.image_path)
+        if not original_labels and choice_out_of_range(result.answer, question.choices):
             result = _retry_out_of_range(solver, question, result, max_answer_len)
         last_result = result
         if question.answer_only:

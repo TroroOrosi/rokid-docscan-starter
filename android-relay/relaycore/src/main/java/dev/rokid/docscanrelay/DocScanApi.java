@@ -64,7 +64,7 @@ public final class DocScanApi {
     }
 
     public void requireLocalAsr() throws IOException, JSONException {
-        if (!get("/v1/listening-ready").getBoolean("ready")) throw new IOException("端末内ASRが未設定です");
+        if (!get("/v1/listening-ready").getBoolean("ready")) throw new IOException("録音の受信準備ができていません");
     }
 
     public JSONObject createDocument(String title) throws IOException, JSONException {
