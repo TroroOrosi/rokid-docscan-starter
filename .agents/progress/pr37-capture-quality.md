@@ -614,3 +614,69 @@ Runs on: Windows PCの現行ソース・保存原本。実機操作・追加撮�
 中断・終了の接続へ戻る。実機だけで分かる疑問は、対象・通常姿勢・比較箇所・原本対応・判定／中止条件を
 明記した限定測定にする。保存8枚の距離・姿勢を推定し直さず、最新2枚を着席基準にしない。
 今回の保存は実装完了・画質改善・会場受け入れを意味しない。
+
+## 2026-09-23 再開: 原寸・縮小・分割の探索比較
+
+Runs on: Windows PC `C:\rokid-docscan-starter`。branch `feature/capture-quality-readiness`、
+開始HEAD `b7855d801838385b25db97094738489b4123e97c`、継続先PR #38。
+
+利用者の「作業を再開し、試行錯誤」に基づき、本記録全文と全体整理を読んでCQ-5の比較から再開した。
+実機操作・追加撮影・導入・GPT送信の停止は維持。既存8枚の条件不明、後退を前提にしない訂正も維持した。
+変更はPC比較関数・回帰試験と既存資料6ファイル。Android、本流のOCR／撮影／登録、HTTP schema、依存は変更していない。
+
+### 試行と採否
+
+Runs on: 既存標準JPEG、PC Tesseract。グラスのML Kitではない。
+
+前回の33文字と同じ原本で3領域109文字を先に転記し、7方式を比較した。
+結果は[研究資料](../../docs/rokid-capture-research.md#2026-09-23-3領域で縮小補正分割を比較)へ集約。
+原寸21、縮小82、縮小後補間26、明暗補正21、上下分割67、64px重なり分割80、左右分割33の編集誤り。
+上下連結の順序・重複を問題として、縦書きの右→左連結を試したが、3領域目で原寸6→20に悪化した。
+補正・単純分割は本流に採用しない。原寸も誤りが残り、校正／品質合格・全文評価とはしない。
+エージェントの目視転記であり利用者確認済みgoldでも独立test資料でもない。数式・図・綴じ目は未評価。
+
+既存 `capture_evaluation.py` に `compare_text` を追加して実験で使用した。
+記号・上付き・順序・重複を保持したNFC編集距離で、評価前後2048文字を上限とする。
+比較処理は合否を返さない。実験側で行った日本語列の空白除去を記録し、一般の数式評価へ流用しない。
+過去の英数字だけの比較が符号を評価できなかった範囲を補うが、過去の測定結果は書き換えない。
+
+私有資料: `data/device-setup/pr37-camera-baseline-20260922-225825/region-trials/`。
+原本・参照・各OCR結果・派生画像・実験スクリプトはGit対象外。
+`run_compare.py` SHA-256: `c7234dfe65a9e628c9bed007c2890ea32451d461aca0323cd202b6fe4acf9410`。
+
+### 実行した検証
+
+Runs on: Python 3.12のPC試験。Android変更なしのためbuildや実機試験を繰り返さない。
+
+- `py -3.12 -m pytest -q tests/test_capture_evaluation.py -k text_comparison`
+  → 実装前 `16 failed, 24 deselected`。追加のNFC展開上限は修正前 `2 failed, 16 passed, 24 deselected`。
+- `py -3.12 -X utf8 -m pytest -q tests/test_capture_evaluation.py`
+  → 最終 `43 passed in 0.15s`、exit 0。
+- `py -3.12 -X utf8 data/device-setup/pr37-camera-baseline-20260922-225825/region-trials/run_compare.py`
+  → 3領域×7方式の21結果、`original_unchanged: true`、上の誤り数、exit 0。
+  末尾 `split-x` の追加試行もexit 0、`results-x.json` に保存。
+- `py -3.12 -X utf8 -` で既存 `native-metadata.json` の全SHAと原本を照合
+  → `originals_unchanged 8 / 8`、exit 0。元metadataは書き換えない。
+- `py -3.12 -X utf8 -m pytest -q`
+  → `844 passed, 1 skipped, 1 warning in 97.50s (0:01:37)`、exit 0。
+  LIVE=0、新規TEMPのROKID_DATA_DIR。skipは実送信、warningは既存Starlette/httpx非推奨。
+- `py -3.12 -m ruff check .` → `All checks passed!`、exit 0。
+- `py -3.12 -X utf8 -m pytest -q tests/test_capture_documentation.py tests/test_documentation_contract.py tests/test_surface_inventory.py tests/test_versioning.py`
+  → `38 passed in 2.12s`、exit 0（本記録追記前）。
+- `git diff --check` → whitespace errorなし、exit 0（LF/CRLF警告のみ）。
+
+構造探索はcodebase-memoryから開始したが、索引世代2026-09-14T07:22:29Zは古い。
+coverageでnot_tracked/metadata_changedを確認し、JapaneseOcr・DocScanController・PC比較部品と試験を実ソースで照合。
+Agent Skillsのincremental/TDD、codebase-memory、git-workflow、code-review-and-quality、progress-checkpointを使用。
+自己レビューでNFC後の文字数増加による上限漏れを追加検証・修正した。再委任はしていない。
+
+### 次の作業と未完条件
+
+Runs on: まずPC。実機・GPT送信の再開許可は本節に含まれない。
+
+1. CQ-5: 109文字の同一資料を増やすだけで校正にしない。周辺・長い列・数式・図を含む参照と、
+   原本で読める／原本から読めない例を分ける。Tesseractの値をML Kitの合格閾値に移さない。
+2. CQ-6〜8: 原本と同じ領域・回転・版に結びつく証拠を、候補保全と正式登録の境界へ接続する。
+   現在の空OCR破棄・反復、品質未検証の3秒登録は未修正。retry変更の事前承認条件を維持する。
+3. RP-11/12/15の資料不足・偽小問・保存答案の追加取得を未完として保持する。
+   撮影側を測る場合は送信しない限定測定の対象・比較条件・中止条件を先に具体化する。
