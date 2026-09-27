@@ -60,9 +60,10 @@ class _Locator:
     def click(self):
         self._page.events.append(("click", self._selector))
         if self._selector == chatgpt_web.SEND_SEL:
-            self._page.turns += 1
+            self._page.sent()
         if self._selector == chatgpt_web.NEW_CHAT_SEL:
             self._page.turns = 0
+            self._page.url = "https://chatgpt.com/"
 
     def fill(self, text):
         self._page.events.append(("fill", text))
@@ -123,7 +124,7 @@ class _Keyboard:
     def press(self, key):
         self._page.events.append(("press", key))
         if key == "Enter":
-            self._page.turns += 1
+            self._page.sent()
 
 
 class _StubPage:
@@ -148,7 +149,16 @@ class _StubPage:
         self.thumbnail_baseline = thumbnail_baseline
         self.missing = set(missing)
         self.poll = 0
+        self.chats = 0
         self.keyboard = _Keyboard(self)
+
+    def sent(self):
+        # chatgpt.com moves a new chat to /c/<id> once its first message is sent;
+        # later messages in that chat leave the URL alone.
+        self.turns += 1
+        if "/c/" not in self.url:
+            self.chats += 1
+            self.url = f"https://chatgpt.com/c/chat-{self.chats}"
 
     def next_attach_succeeds(self) -> bool:
         if self.thumbnail_script is None:
@@ -157,6 +167,8 @@ class _StubPage:
 
     def goto(self, *args, **kwargs):
         self.events.append(("goto", args[0] if args else ""))
+        if args:
+            self.url = args[0]
 
     def close(self):
         self.events.append(("close", None))
@@ -703,7 +715,7 @@ def test_a_subject_scoped_deck_opens_one_chat_not_one_per_question(monkeypatch):
     assert len(_sends(page)) == 2, "both questions asked"
 
 
-def test_the_next_subject_gets_its_own_chat(monkeypatch):
+def test_the_next_subject_gets_its_own_chat(monkeypatch, tmp_path):
     monkeypatch.setattr(chatgpt_web, "CHAT_SCOPE", "subject")
     monkeypatch.setattr(chatgpt_web, "POLL_S", 0)
     page = _StubPage(["答", "答"])
@@ -714,6 +726,11 @@ def test_the_next_subject_gets_its_own_chat(monkeypatch):
     client._ask_with_retries(ctx, "問1", [], chat_key="subject:物理")
 
     assert len(_clicks(page, chatgpt_web.NEW_CHAT_SEL)) == 2
+    assert not [k for k, _ in page.events if k == "goto"], "a new key is not sent back"
+    # Only the current key is kept: the new subject's chat replaced the old one.
+    record = (tmp_path / "browser-state" / "chats.json").read_text(encoding="utf-8")
+    kept = json.dumps(json.loads(record), ensure_ascii=False)
+    assert "物理" in kept and "数学" not in kept
 
 
 def test_a_page_already_in_this_chat_is_not_uploaded_again(monkeypatch):
@@ -851,7 +868,7 @@ def test_document_route_counts_audio_and_reuses_confirmed_files(tmp_path, monkey
     assert len([k for k, _ in browser.events if k == "upload"]) == count
 
 
-def test_confirmed_booklet_is_not_encoded_again_until_chat_changes(monkeypatch):
+def test_confirmed_booklet_is_not_encoded_again_until_the_key_changes(monkeypatch):
     monkeypatch.setattr(chatgpt_web, "POLL_S", 0)
     browser = _StubPage(["2", "2"])
     client = chatgpt_web.ChatGptWebClient()
@@ -865,11 +882,13 @@ def test_confirmed_booklet_is_not_encoded_again_until_chat_changes(monkeypatch):
     client._ask_with_retries(context, "問1", [], files=prepare, chat_key="original-1")
     client._ask_with_retries(context, "問2", [], files=prepare, chat_key="original-1")
     assert len(builds) == 1
+    # The tab wandering off does not change which chat holds the booklet: the
+    # route goes back there, and the booklet is already in it.
     browser.url = "https://chatgpt.com/c/operator-changed-chat"
     client._ask_with_retries(context, "問3", [], files=prepare, chat_key="original-1")
-    assert len(builds) == 2
+    assert len(builds) == 1
     client._ask_with_retries(context, "問3", [], files=prepare, chat_key="retaken-page")
-    assert len(builds) == 3
+    assert len(builds) == 2
 
 
 def test_unconfirmed_document_files_never_send_a_question(monkeypatch):
@@ -969,15 +988,180 @@ def test_other_browser_client_is_rejected_before_any_page_operation(monkeypatch,
     assert page.events == []
 
 
-def test_navigation_invalidates_attachment_reuse(monkeypatch):
-    monkeypatch.setattr(chatgpt_web, "POLL_S", 0)
-    page = _StubPage(["answer"])
-    ctx = _OneTabContext(page)
+# --- one chat per 科目 survives failures, retries and restarts ------------------
+# 9/14: every retry and every restart opened a new chat and re-attached every
+# page. A subject's chat, once it exists, is the only place its questions go.
+
+
+def _gotos(page):
+    return [v for kind, v in page.events if kind == "goto"]
+
+
+def _subject_chat(monkeypatch, page, key="subject:数学"):
+    """Ask once under ``key`` so a chat exists; return the client and its URL."""
+    for name, value in (("POLL_S", 0), ("RETRY_BACKOFF_S", 0), ("UPLOAD_TIMEOUT_S", 0)):
+        monkeypatch.setattr(chatgpt_web, name, value)
     client = chatgpt_web.ChatGptWebClient()
-    client._ask_with_retries(ctx, "first", [PNG], chat_key="same-input")
+    client._ask_with_retries(_OneTabContext(page), "問1", [PNG], chat_key=key)
+    assert "/c/" in page.url
+    return client, page.url
+
+
+def test_a_tab_on_another_chat_is_taken_back_to_the_subject_chat(monkeypatch):
+    page = _StubPage(["answer", "answer"])
+    client, chat = _subject_chat(monkeypatch, page, key="same-input")
     page.url = "https://chatgpt.com/c/some-other-chat"
-    client._ask_with_retries(ctx, "second", [PNG], chat_key="same-input")
-    assert len(page.uploads) == 2
+
+    client._ask_with_retries(_OneTabContext(page), "second", [PNG], chat_key="same-input")
+
+    assert _gotos(page) == [chat], "navigated back, not a new chat"
+    assert len(_clicks(page, chatgpt_web.NEW_CHAT_SEL)) == 1
+    assert len(page.uploads) == 1, "the page is already in that chat"
+    assert len(_sends(page)) == 2
+
+
+def test_a_failure_after_the_chat_exists_retries_in_that_chat(monkeypatch):
+    # q1 attaches PNG; q2's first write of JPEG never lands, its retry does.
+    page = _StubPage(["70度", "70度"], thumbnail_appears=[True, False, True])
+    client, chat = _subject_chat(monkeypatch, page)
+
+    reply = client._ask_with_retries(_OneTabContext(page), "問2", [PNG, JPEG],
+                                     chat_key="subject:数学")
+
+    assert reply == "70度"
+    assert len(_clicks(page, chatgpt_web.NEW_CHAT_SEL)) == 1, "only q1 opened a chat"
+    # The retry reloads the chat so a half-attached composer is dropped.
+    assert _gotos(page) == [chat]
+    assert page.url == chat
+    uploaded = [p["buffer"] for payload in page.uploads for p in payload]
+    assert uploaded == [PNG, JPEG, JPEG], "the confirmed page is never uploaded again"
+
+
+def test_a_restarted_server_returns_to_the_recorded_chat(monkeypatch, tmp_path):
+    page = _StubPage(["答", "答"])
+    _, chat = _subject_chat(monkeypatch, page)
+    page.url = "https://chatgpt.com/"
+
+    # A new process: nothing in memory, the same DATA_DIR.
+    chatgpt_web.ChatGptWebClient()._ask_with_retries(
+        _OneTabContext(page), "問2", [PNG], chat_key="subject:数学")
+
+    assert _gotos(page) == [chat]
+    assert len(_clicks(page, chatgpt_web.NEW_CHAT_SEL)) == 1
+    assert len(page.uploads) == 1, "nothing already confirmed is uploaded again"
+    record = json.loads((tmp_path / "browser-state" / "chats.json").read_text(encoding="utf-8"))
+    kept = json.dumps(record, ensure_ascii=False)
+    assert chat in kept and "問" not in kept and "答" not in kept, "no prompt or answer is kept"
+
+
+@pytest.mark.parametrize("unreachable", ["redirected", "load fails", "no composer"])
+def test_an_unreachable_subject_chat_fails_without_opening_another(monkeypatch, unreachable):
+    page = _StubPage(["答", "答"])
+    client, chat = _subject_chat(monkeypatch, page)
+    monkeypatch.setattr(chatgpt_web, "ATTEMPTS", 2)
+    monkeypatch.setattr(chatgpt_web, "READY_TIMEOUT_S", 0)
+    page.url = "https://chatgpt.com/"
+    loaded = []
+
+    def goto(url, **_kw):
+        loaded.append(url)
+        if unreachable == "load fails":
+            raise TimeoutError(f"{url} did not load")
+        # A deleted chat lands on the home page instead.
+        page.url = "https://chatgpt.com/" if unreachable == "redirected" else url
+
+    page.goto = goto
+    if unreachable == "no composer":
+        page.missing.add(chatgpt_web.COMPOSER_SEL)
+
+    with pytest.raises(ChatGptWebError, match="no new chat was opened") as raised:
+        client._ask_with_retries(_OneTabContext(page), "問2", [PNG], chat_key="subject:数学")
+
+    assert chat not in str(raised.value), "the chat URL is never put in a message"
+    assert loaded == [chat, chat], "every attempt tried the recorded chat"
+    assert len(_clicks(page, chatgpt_web.NEW_CHAT_SEL)) == 1
+    assert len(_sends(page)) == 1, "nothing sent anywhere else"
+
+
+def test_a_key_with_no_chat_yet_still_opens_a_new_one_on_retry(monkeypatch):
+    monkeypatch.setattr(chatgpt_web, "RETRY_BACKOFF_S", 0)
+    monkeypatch.setattr(chatgpt_web, "UPLOAD_TIMEOUT_S", 0)
+    monkeypatch.setattr(chatgpt_web, "POLL_S", 0)
+    page = _StubPage(["答", "答"], thumbnail_appears=[False, True])
+
+    chatgpt_web.ChatGptWebClient()._ask_with_retries(
+        _OneTabContext(page), "問1", [PNG], chat_key="subject:数学")
+
+    # Nothing was sent before the retry, so there was no conversation to lose.
+    assert len(_clicks(page, chatgpt_web.NEW_CHAT_SEL)) == 2
+    assert not _gotos(page)
+
+
+@pytest.mark.parametrize("record", [
+    "{not json",
+    '{"key": "subject:数学", "url": "https://chatgpt.com.example/c/x", "attached": []}',
+])
+def test_a_record_that_is_not_a_chatgpt_chat_counts_as_none(monkeypatch, tmp_path, record):
+    # Only an outside edit makes one. Blocking the subject over it would cost
+    # the venue every answer; opening one chat costs one chat. Never go there.
+    monkeypatch.setattr(chatgpt_web, "POLL_S", 0)
+    (tmp_path / "browser-state").mkdir()
+    (tmp_path / "browser-state" / "chats.json").write_text(record, encoding="utf-8")
+    page = _StubPage(["答"])
+
+    chatgpt_web.ChatGptWebClient()._ask_with_retries(
+        _OneTabContext(page), "問1", [], chat_key="subject:数学")
+
+    assert not _gotos(page)
+    assert len(_clicks(page, chatgpt_web.NEW_CHAT_SEL)) == 1
+    kept = json.loads((tmp_path / "browser-state" / "chats.json").read_text(encoding="utf-8"))
+    assert kept["url"] == page.url, "replaced by the chat that now exists"
+
+
+@pytest.mark.parametrize("outcome", ["uncertain", "rate limit"])
+def test_an_unanswered_send_keeps_the_subject_chat(monkeypatch, tmp_path, outcome):
+    from app.browser_guard import BrowserGuard
+
+    page = _StubPage(["答", "答"])
+    client, chat = _subject_chat(monkeypatch, page)
+    real_submit = chatgpt_web.submit
+    if outcome == "uncertain":
+        def lost(p):
+            real_submit(p)
+            raise TimeoutError("submission reply lost")
+
+        monkeypatch.setattr(chatgpt_web, "submit", lost)
+        expected = chatgpt_web.ChatGptWebUncertain
+    else:
+        page.replies, page.poll = ["使用制限に達しました"], 0
+        monkeypatch.setattr(chatgpt_web, "STABLE_POLLS", 1)
+        expected = chatgpt_web.ChatGptWebRateLimit
+
+    with pytest.raises(expected):
+        client._ask_with_retries(_OneTabContext(page), "問2", [JPEG], chat_key="subject:数学")
+
+    monkeypatch.setattr(chatgpt_web, "submit", real_submit)
+    if outcome == "uncertain":
+        # Keeping the chat does not loosen the guard: nothing is sent until the
+        # operator has reconciled the uncertain message.
+        sends = len(_sends(page))
+        with pytest.raises(chatgpt_web.ChatGptWebUncertain):
+            client._ask_with_retries(_OneTabContext(page), "問3", [JPEG], chat_key="subject:数学")
+        assert len(_sends(page)) == sends
+    chatgpt_web._slow_streak = 0  # the limit has cleared
+    with BrowserGuard(tmp_path) as guard:
+        if guard.status()["state"] == "uncertain":
+            guard.acknowledge(guard.status()["request_id"])  # the operator reconciled
+    page.replies, page.poll = ["答"], 0
+    page.url = "https://chatgpt.com/"
+
+    client._ask_with_retries(_OneTabContext(page), "問3", [JPEG], chat_key="subject:数学")
+
+    assert _gotos(page) == [chat], "the same chat after the limit or reconciliation"
+    assert len(_clicks(page, chatgpt_web.NEW_CHAT_SEL)) == 1
+    # An unanswered message does not vouch for its attachment, so JPEG goes again,
+    # into the same chat.
+    assert [p["buffer"] for payload in page.uploads for p in payload][-1] == JPEG
 
 
 def test_previous_assistant_reply_is_not_the_new_answer(monkeypatch):
