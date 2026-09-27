@@ -11,7 +11,9 @@ Runs on: Windows PC `C:\rokid-docscan-starter`。実機の状態を変える操�
 - 判断は目的で行う。「その画像からGPTが正答し、グラスで読めるか」。OCR文字数・枠・Tesseract値は判断に使わない。
 - 計画を書く前に実物を見る（画像・DB・ログ・コード）。単純な方法を先に試す。9/27、暗い原本は明るさの引き伸ばし1行で読めた。それまで数週間、診断部品と文書を積んでいた。
 - 新しい文書・計画を増やさない。更新は本ファイルだけ（130行以内）。下の「決定済み」を利用者に再質問しない。
-- 1セッション1役割にする（撮影／サーバとChatGPT／整理）。長い会話は精度が落ちる（利用者の指摘）。
+- 1セッション1役割にする（撮影／サーバとChatGPT／整理）。長い会話は精度が落ちる（利用者の指摘）。役割を終えたら本ファイルを直し、次のチャットへ移る。
+- 実装は委譲し、別の担当が「次の実機・GPT実行のコマンド」と2節に照らして監査してから報告する。制約は直す。注意書きで利用者に回避させない。
+  stubで配管を確かめたことを、目的の確認として書かない（9/27、`83bcc28` の棄却）。
 - **PCだけで完結する作業（4節の1〜3）は、質問せずに始めて終える。** 承認を求めるのは実機・スマホ・GPT送信の直前だけ。
   そのときも一つの yes/no にし、実行するコマンドを添える。判断が要る点は選択肢を並べず、自分の推奨を書いて進める。
 - 終わる前に、自分で閉じる：全試験・CIの結果・本ファイルの更新・次の一手。待ち状態を利用者に残さない。
@@ -63,16 +65,23 @@ Runs on: Windows PC `C:\rokid-docscan-starter`。実機の状態を変える操�
 - スマホのサーバは、記録上 9/16 の `3e4b777` が最後の導入。RP-12/15 と `30269eb` は入っていない。9/22以降の更新記録は無い（要確認）。
   そのとき、ログにsocket.acceptの `Errno 22` が92回出ている。
 - スマホの起動スクリプトは無い（設定はスマホ内の env にだけある）。
-- 4節1は済み（下）。JPEGのupload→`finalize-reading?solve=background`→answer-bundle をPCからHTTPで通せる。実solverでは未実行。
+- PCからスマホのサーバへ、glassdocと同じ経路で投入する手段はまだ無い（`83bcc28` は棄却、4節1）。
 
 ## 4. 次の作業（この順）
 
 Runs on は各項目に書く。1〜3はPCだけで完結する。4以降は承認が要る。
 
-1. **済み（9/27）。** Runs on: PC。`scripts/run_exam_deck.py` に `--images DIR --rotation N`・`--background [--timeout]`・`--server URL`（鍵は `ROKID_API_KEY`）。
-   原本は `<run>/originals` なので、DB・報告名は `<run>-originals`。4で使う形：
-   `py -3.12 scripts/run_exam_deck.py --images data/device-setup/<run>/originals --subject 物理基礎 --background --server http://<phone>:8000`
-   確認：PC上のuvicorn（鍵付き、`_list_questions`/`solve_with_fallback` をstub）へ実原本2枚→409を待ち→2/2 ready、鍵なしは401、報告に鍵なし。実モデルでは未実行。
+1. **作り直す。** 9/27の `83bcc28` は利用者が棄却した。Runs on: PC。合格は、次の2コマンドがそのまま4a・4bになること（鍵は `ROKID_API_KEY`）。
+   - 4a：`py -3.12 scripts/run_exam_deck.py --pdf C:/rokid-exam-materials/kyotsu/butsuri_kiso.pdf --pages 1-4 --server http://<phone>:8000`
+   - 4b：`py -3.12 scripts/run_exam_deck.py --images data/device-setup/<run>/originals --server http://<phone>:8000`
+   - `--server` があれば、glassdocと同じ1経路に固定する。JPEGで `ocr_text` なし、`finalize-reading?solve=background`、answer-bundle をpollする。PDFは約5px/mmで、隣り合う2頁を1画像にする。
+   - 待ちの上限は置かない。answer-bundle の `revision` が、1回答の上限（`app/solvers/chatgpt_web.py` の `TIMEOUT_S`、既定180s）を超えて変わらなければ止め、理由を出す。
+   - `--server` なしの従来の `--pdf`（PCの部品比較）は変えない。`--images` は `--server` 必須。
+   - 棄却の理由：
+     - フラグが独立しており、壊れた組合せがあった（`--background` なしの `--images` は小問0件、`--server` なしはPCのChrome）。
+     - PDFが単頁のままで、pdfminerの本文も付けていた。
+     - 制約を注意書きで利用者に渡した。
+     - stubでの確認を「確認」と報告した。
 2. Runs on: PC。小さな修正を、それぞれ試験付きで入れる。
    - 失敗・再試行・再起動でも新規チャットを作らない。同じチャットURLへ戻り、戻れなければ止めて理由を返す。
    - `/v1/settings` の500。
@@ -115,4 +124,4 @@ Runs on は各項目に書く。1〜3はPCだけで完結する。4以降は承�
 
 - 検証：`py -3.12 -X utf8 -m pytest -q` → 858 passed, 1 skipped。`py -3.12 -m ruff check .` → All checks passed!（4節1の作業ツリー）。
 - APK：`6149beb`（AE収束待ち）を含む versionCode 20 はビルド済み・未導入（SHA-256 `4d81deaf…2b42`）。2の修正後に作り直す。
-- PR #38 は Draft。`83bcc28`（4節1）のCIは全件 pass（build・lint・test 3.10〜3.12・windows-predevice ほか）。mainへの統合は、4節4aで正答を確認してから提案する。
+- PR #38 は Draft。`83bcc28`（棄却した4節1）のCIは全件 pass（build・lint・test 3.10〜3.12・windows-predevice ほか）。mainへの統合は、4節4aで正答を確認してから提案する。
