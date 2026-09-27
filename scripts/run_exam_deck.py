@@ -103,6 +103,20 @@ def call(step: str, func, *args, **kwargs):
         return None
 
 
+def _upload_timeout(client) -> dict:
+    """PAGE_UPLOAD_TIMEOUT_S, but only for the real remote httpx.Client.
+
+    fastapi.testclient.TestClient subclasses httpx.Client (same MRO), so
+    isinstance() would wrongly match it too -- and it warns
+    (StarletteDeprecationWarning) on ANY timeout kwarg, even a short one.
+    Checking the exact class instead matches only the one client that
+    legitimately needs a longer-than-default timeout for this one call.
+    """
+    import httpx
+
+    return {"timeout": PAGE_UPLOAD_TIMEOUT_S} if type(client) is httpx.Client else {}
+
+
 def render_pages(pdf: Path, pages: range, scale: float) -> list[tuple[bytes, str]]:
     """(PNG bytes, page text) per page, in reading order.
 
@@ -228,6 +242,23 @@ def _load_photos(src: Path, span: range) -> list[tuple[bytes, str]] | None:
         return None
 
 
+def _finish_pages(pages: list[tuple[bytes, str]] | None, src: Path):
+    """The "pages read -> ok/FAIL" tail shared by both routes.
+
+    None in means a bad file already printed its own FAIL (from
+    _load_photos); an empty read is its own FAIL here. Either way the
+    caller's contract is the same: None back means stop and return 1.
+    """
+    if pages is None:
+        return None
+    if not pages:
+        print(f"FAIL  no pages read from {src}")
+        return None
+    print(f"ok    pages          {len(pages)} read, "
+          f"{sum(len(t) for _, t in pages)} chars of text")
+    return pages
+
+
 def mark_daimon(
     pages: list[tuple[bytes, str]], spec: str, offset: int
 ) -> list[tuple[bytes, str]]:
@@ -312,14 +343,15 @@ def build_client(data_dir: Path, solver: str):
 def remote_client(server: str, key: str | None):
     """The phone's server, reached over HTTP the way the glasses reach it.
 
-    No client-wide timeout: each call sets its own -- REQUEST_TIMEOUT_S for a
-    plain JSON round trip, PAGE_UPLOAD_TIMEOUT_S for the one call that sends
-    megabytes.
+    REQUEST_TIMEOUT_S is this client's own default, so an ordinary call needs
+    no timeout kwarg at all; only the page-upload call overrides it, via
+    _upload_timeout(), with PAGE_UPLOAD_TIMEOUT_S.
     """
     import httpx
 
     headers = {"Authorization": f"Bearer {key}"} if key else {}
-    return httpx.Client(base_url=server.rstrip("/"), headers=headers)
+    return httpx.Client(
+        base_url=server.rstrip("/"), headers=headers, timeout=REQUEST_TIMEOUT_S)
 
 
 def wait_for_answers(
@@ -341,8 +373,7 @@ def wait_for_answers(
     listed = False
     while True:
         try:
-            r = client.get(
-                f"/v1/exam-sessions/{session_id}/answer-bundle", timeout=REQUEST_TIMEOUT_S)
+            r = client.get(f"/v1/exam-sessions/{session_id}/answer-bundle")
         except httpx.TransportError as error:
             print(f"..    no response: {type(error).__name__}")
             if clock() - since > stall_s:
@@ -465,14 +496,12 @@ def run(args) -> int:
     if report_path.exists() and not args.force:
         print(f"skip  {report_path} already exists (--force to redo)")
         return 0
-    report_path.parent.mkdir(parents=True, exist_ok=True)
-
     span = parse_pages(args.pages)
 
     if args.server:
         key = args.key or os.environ.get("ROKID_API_KEY")
         client = remote_client(args.server, key)
-        r = call("settings", client.get, "/v1/settings", timeout=REQUEST_TIMEOUT_S)
+        r = call("settings", client.get, "/v1/settings")
         if r is None:
             return 1
         if r.status_code != 200:
@@ -486,14 +515,10 @@ def run(args) -> int:
               f"(ready={solver_info['ready']})")
 
         pages = render_spreads(src, span) if args.pdf else _load_photos(src, span)
+        rotation = 0 if args.pdf else GLASSDOC_ROTATION
+        pages = _finish_pages(pages, src)
         if pages is None:
             return 1
-        rotation = 0 if args.pdf else GLASSDOC_ROTATION
-        if not pages:
-            print(f"FAIL  no pages read from {src}")
-            return 1
-        print(f"ok    pages          {len(pages)} read, "
-              f"{sum(len(t) for _, t in pages)} chars of text")
     else:
         # Read/render pages BEFORE touching the data directory: a bad --pdf
         # or --images path must leave no rundata/<stem> behind.
@@ -506,19 +531,16 @@ def run(args) -> int:
         rotation = 0 if args.pdf else GLASSDOC_ROTATION
         if args.daimon:
             pages = mark_daimon(pages, args.daimon, span.start)
-        if not pages:
-            print(f"FAIL  no pages read from {src}")
+        pages = _finish_pages(pages, src)
+        if pages is None:
             return 1
-        print(f"ok    pages          {len(pages)} read, "
-              f"{sum(len(t) for _, t in pages)} chars of text")
 
         data_dir = deck_data_dir(args.data_dir or "C:/rokid-exam-materials/rundata", src)
         print(f"ok    data dir       {data_dir}")
         solver_name = args.solver or "chatgpt-web"
         client = build_client(data_dir, solver_name)
 
-    r = call("documents", client.post, "/v1/documents", json={"title": name},
-              timeout=REQUEST_TIMEOUT_S)
+    r = call("documents", client.post, "/v1/documents", json={"title": name})
     if r is None:
         return 1
     if r.status_code != 201:
@@ -535,15 +557,14 @@ def run(args) -> int:
             data=fields,
             files={"image": (f"p{index:02d}.{'jpg' if jpeg else 'png'}", image,
                              "image/jpeg" if jpeg else "image/png")},
-            timeout=PAGE_UPLOAD_TIMEOUT_S,
+            **_upload_timeout(client),
         )
         if r is None:
             return 1
         if r.status_code != 201:
             print(f"FAIL  page {index}: {r.status_code} {r.text[:200]}")
             return 1
-    r = call("finalize", client.post, f"/v1/documents/{doc_id}/finalize",
-              timeout=REQUEST_TIMEOUT_S)
+    r = call("finalize", client.post, f"/v1/documents/{doc_id}/finalize")
     if r is None:
         return 1
     if r.status_code != 200:
@@ -559,7 +580,6 @@ def run(args) -> int:
             "exam_type": "listening" if listening else "written",
             "answer_format": "mark",
         },
-        timeout=REQUEST_TIMEOUT_S,
     )
     if r is None:
         return 1
@@ -585,7 +605,7 @@ def run(args) -> int:
     if args.server:
         r = call(
             "finalize-reading", client.post, f"/v1/exam-sessions/{session_id}/finalize-reading",
-            params={"solve": "background"}, timeout=REQUEST_TIMEOUT_S,
+            params={"solve": "background"},
         )
         if r is None:
             return 1
@@ -602,7 +622,7 @@ def run(args) -> int:
     else:
         r = call(
             "finalize-reading", client.post,
-            f"/v1/exam-sessions/{session_id}/finalize-reading", timeout=REQUEST_TIMEOUT_S,
+            f"/v1/exam-sessions/{session_id}/finalize-reading",
         )
         if r is None:
             return 1
@@ -644,6 +664,7 @@ def run(args) -> int:
         "stopped": reason,
         "bundle": body,
     }
+    report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"ok    report         {report_path}")
     return 0 if ready and not reason else 2

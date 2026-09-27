@@ -26,6 +26,14 @@ from scripts.run_exam_deck import (  # noqa: E402
     wait_for_answers,
 )
 
+# Importing this here, at collection time, fires the one StarletteDeprecation-
+# Warning that "install httpx2 instead" always prints on the FIRST import of
+# starlette.testclient -- while collection's own warnings context has no
+# per-test @pytest.mark.filterwarnings("error") applied yet. Without this, a
+# later test that IS marked "error" would be the first to trigger it and fail
+# on a warning this task did not introduce.
+import fastapi.testclient  # noqa: E402, F401
+
 FULL_SPAN = range(0, 10_000)
 
 ROOT = Path("C:/rokid-exam-materials/rundata")
@@ -127,6 +135,27 @@ def _pdf(path, pages, size=(515.9, 728.5)):
     doc = pdfium.PdfDocument.new()
     for _ in range(pages):
         doc.new_page(*size)
+    doc.save(str(path))
+
+
+def _pdf_with_text(path, texts, size=(515.9, 728.5)):
+    """A PDF whose pages pdfminer can actually read back, unlike _pdf()'s
+    blank pages -- needed to reach a segmented (non-0-problem) deck.
+    """
+    import ctypes
+
+    import pypdfium2 as pdfium
+
+    doc = pdfium.PdfDocument.new()
+    raw = pdfium.raw
+    for text in texts:
+        page = doc.new_page(*size)
+        textobj_raw = raw.FPDFPageObj_NewTextObj(doc.raw, b"Helvetica", 24.0)
+        buf = (text + chr(0)).encode("utf-16-le")
+        assert raw.FPDFText_SetText(textobj_raw, ctypes.cast(buf, ctypes.POINTER(ctypes.c_ushort)))
+        raw.FPDFPageObj_Transform(textobj_raw, 1, 0, 0, 1, 50, 300)
+        page.insert_obj(pdfium.PdfObject(textobj_raw, pdf=doc))
+        page.gen_content()
     doc.save(str(path))
 
 
@@ -320,12 +349,14 @@ def test_key_without_server_exits_2():
 
 
 def test_a_bad_pdf_path_creates_no_data_directory(tmp_path):
-    """Pages are read before the data directory is touched (in-process route)."""
-    bad = tmp_path / "missing.pdf"
+    """Pages are read before the data directory OR reports/ is touched
+    (in-process route)."""
+    bad = tmp_path / "kyotsu" / "missing.pdf"
     data_root = tmp_path / "rundata"
     with pytest.raises(FileNotFoundError):
         main(["--pdf", str(bad), "--data-dir", str(data_root)])
     assert not data_root.exists()
+    assert not (tmp_path / "reports").exists()
 
 
 @pytest.mark.parametrize("flag,value", [
@@ -339,6 +370,35 @@ def test_server_incompatible_flags_exit_2(flag, value):
     with pytest.raises(SystemExit) as excinfo:
         main(["--pdf", "paper.pdf", "--server", "http://phone:8000", flag, value])
     assert excinfo.value.code == 2
+
+
+@pytest.mark.filterwarnings("error")
+def test_in_process_route_reaches_the_real_build_client_with_no_timeout_warning(
+        tmp_path, monkeypatch):
+    """build_client() returns a real fastapi TestClient. Every call site in
+    the in-process route must reach it with no `timeout` kwarg at all, or
+    this fails on StarletteDeprecationWarning turned into an error.
+
+    build_client() overwrites os.environ["ROKID_DATA_DIR"/"ROKID_SOLVER"]
+    itself; setenv first so monkeypatch restores the pre-test values after.
+    """
+    monkeypatch.setenv("ROKID_DATA_DIR", str(tmp_path / "unused"))
+    monkeypatch.setenv("ROKID_SOLVER", "local")
+
+    pdf = tmp_path / "paper.pdf"
+    _pdf_with_text(pdf, ["問1 two plus two", "問2 three plus three"])
+    out = tmp_path / "reports" / "paper.json"
+
+    code = main([
+        "--pdf", str(pdf), "--solver", "local",
+        "--data-dir", str(tmp_path / "rundata"), "--out", str(out),
+    ])
+
+    # local deliberately never solves (app/solvers/local_placeholder.py), so
+    # the deck stays pending and the run reports 2, not 0 -- this is
+    # end-to-end plumbing through the real TestClient, not a solved deck.
+    assert code == 2
+    assert out.exists()
 
 
 # -- plumbing through the real FastAPI app, model replaced --------------------
@@ -367,6 +427,7 @@ def server_app(tmp_path, monkeypatch):
     return main, TestClient(main.app)
 
 
+@pytest.mark.filterwarnings("error")
 def test_server_route_uploads_two_spreads_with_no_ocr_text(server_app, tmp_path, monkeypatch):
     """Plumbing check with the model replaced: no network, no phone, no ChatGPT."""
     main, client = server_app
@@ -405,6 +466,7 @@ def test_server_route_uploads_two_spreads_with_no_ocr_text(server_app, tmp_path,
     assert out.exists()
 
 
+@pytest.mark.filterwarnings("error")
 def test_server_route_stops_before_polling_when_the_phone_solver_is_local(
         server_app, tmp_path, monkeypatch, capsys):
     main, client = server_app
@@ -429,6 +491,7 @@ def test_server_route_stops_before_polling_when_the_phone_solver_is_local(
     assert not out.exists()
 
 
+@pytest.mark.filterwarnings("error")
 def test_server_route_writes_the_default_report_path(server_app, tmp_path, monkeypatch):
     """No --out: <name>-p<pages>-server.json next to a reports/ sibling of the
     PDF's own directory. The PDF lives under tmp_path/kyotsu/ so that sibling
