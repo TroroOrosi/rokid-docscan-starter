@@ -186,6 +186,15 @@ class ChatGptWebUncertain(ChatGptWebError):
     """A send may have landed. Never retry it automatically."""
 
 
+class ChatGptWebChatLost(ChatGptWebError):
+    """The subject's chat cannot be reached, and no new one was opened in its place.
+
+    Separate so the batch stops and says so: every later question of the
+    subject would fail the same way, and a generic tier failure reads as
+    "解析に失敗しました" on the glasses. Never carries the chat URL.
+    """
+
+
 class ChatGptWebRateLimit(ChatGptWebError):
     """Raised when the account is throttled, or was on its way to being.
 
@@ -457,9 +466,9 @@ def return_to_chat(page, url: str, *, reload: bool, ready_timeout_s: float | Non
     except Exception as exc:  # noqa: BLE001 - navigation and waits raise broadly
         # Our own errors carry no URL; a navigation error can, so it stays in the cause.
         detail = f": {exc}" if isinstance(exc, ChatGptWebError) else ""
-        raise ChatGptWebError(_NO_RETURN + detail) from exc
+        raise ChatGptWebChatLost(_NO_RETURN + detail) from exc
     if not landed:
-        raise ChatGptWebError(_NO_RETURN + ": loading it ended on a different page")
+        raise ChatGptWebChatLost(_NO_RETURN + ": loading it ended on a different page")
     return composer
 
 
@@ -673,7 +682,8 @@ class ChatGptWebClient:
         self.last_image_attached: bool | None = None
         #: The subject's chat under CHAT_SCOPE="subject", as recorded in
         #: CHATS_FILE and re-read at every call (see _load_chat). A URL of None
-        #: means nothing has been sent under _chat_key yet.
+        #: means nothing has been sent under _chat_key yet; a URL without /c/
+        #: is a chat ChatGPT never gave an address, kept in memory only.
         self._chat_key: str | None = None
         self._chat_url: str | None = None
         #: Digests of the pages already attached inside that chat, so a 大問 is
@@ -683,6 +693,9 @@ class ChatGptWebClient:
         #: Load the recorded chat before using it. A new process, or a failed
         #: attempt, cannot vouch for what the composer still holds.
         self._reload = True
+        #: This process knows the chat and the file does not: it has no
+        #: address, or its write failed after an answer (see _keep_chat).
+        self._unsaved = False
 
     def complete(
         self,
@@ -744,7 +757,7 @@ class ChatGptWebClient:
         except OSError as error:
             raise ChatGptWebUncertain("browser state could not be saved; no automatic retry") from error
 
-    def _load_chat(self, guard) -> None:
+    def _load_chat(self, guard, chat_key) -> None:
         """Read the recorded chat, so a restarted server resumes it.
 
         Read at every call under the guard: the file, not this object, is what
@@ -752,7 +765,16 @@ class ChatGptWebClient:
         none. Only _keep_chat writes it, atomically, so only an outside edit can
         break it, and failing every question at a venue with no PC to repair it
         would cost more than one extra chat.
+
+        The exception is a chat for this key that only this process knows. One
+        whose write failed is written now, before anything is sent; if that
+        fails again, the OSError fails the call closed.
         """
+        if self._unsaved and chat_key is not None and chat_key == self._chat_key:
+            if _is_chat_url(self._chat_url or ""):
+                self._save_chat(guard)
+            return
+        self._unsaved = False
         self._chat_key = self._chat_url = None
         self._attached_in_chat, self._source_attached = set(), False
         try:
@@ -766,23 +788,44 @@ class ChatGptWebClient:
             self._attached_in_chat = attached
             self._source_attached = record.get("source_attached") is True
 
-    def _keep_chat(self, guard, chat_key, url: str, digests=(), *, source=False) -> None:
+    def _keep_chat(self, guard, chat_key, url: str, digests=(), *, booklet=None) -> None:
         """Record the chat a sent message lives in, so no later attempt opens another.
 
         Only a sent message calls this. An answered one also records what it
         attached; a rate-limited or uncertain one keeps the chat but not its
         attachments, because a message without an answer does not vouch for
-        them. One key only: a new key replaces the record. No prompt, answer or
-        credential goes in, and the URL is never logged.
+        them. ``booklet`` holds the digests of the booklet this call prepared;
+        the booklet counts as attached only once all of them are in this chat.
+
+        A chat with no /c/ address is kept in memory only: a restart cannot find
+        it again, but c0acf40 kept asking in it and so does this. A failed write
+        keeps the answer: the record stays in memory and the next call for the
+        key writes it before it sends anything.
         """
-        if chat_key is None or not _is_chat_url(url):
+        if chat_key is None or not url:
             return
-        if (chat_key, url) != (self._chat_key, self._chat_url):
+        if url != self._chat_url:
+            # Not the chat the record describes (a first message, or ChatGPT
+            # answered elsewhere): only what this message carried is in it.
             self._attached_in_chat, self._source_attached = set(), False
         self._chat_key, self._chat_url = chat_key, url
         self._attached_in_chat |= set(digests)
-        self._source_attached = self._source_attached or source
-        record = {"key": chat_key, "url": url, "attached": sorted(self._attached_in_chat),
+        if booklet is not None:
+            self._source_attached = all(d in self._attached_in_chat for d in booklet)
+        self._unsaved = True
+        if _is_chat_url(url):
+            try:
+                self._save_chat(guard)
+            except OSError:
+                pass  # kept in memory; _load_chat writes it before the next send
+
+    def _save_chat(self, guard) -> None:
+        """Write the record. One key only: a new key replaces it.
+
+        No prompt, answer or credential goes in, and the URL is never logged.
+        """
+        record = {"key": self._chat_key, "url": self._chat_url,
+                  "attached": sorted(self._attached_in_chat),
                   "source_attached": self._source_attached}
         # Same write as BrowserGuard's journal: temp file, fsync, replace, then
         # the directory, so a power cut leaves the old record or the new one.
@@ -801,14 +844,23 @@ class ChatGptWebClient:
                     os.close(directory_fd)
         finally:
             Path(temporary).unlink(missing_ok=True)
+        self._unsaved = False
 
     def _ask_locked(self, context, text: str, pages: list[bytes], *, guard,
                     audio=None, bundle_pdf=None, chat_key=None, files=None) -> str:
         """Retry preparation only. Once submit is attempted, ambiguity is durable."""
         last_error: Exception | None = None
-        self._load_chat(guard)
+        self._load_chat(guard, chat_key)
         page = reuse_page(context)
         for attempt in range(1, ATTEMPTS + 1):
+            recorded = chat_key is not None and chat_key == self._chat_key and self._chat_url
+            if recorded and not _is_chat_url(self._chat_url) and (
+                    self._reload or _url_of(page) != self._chat_url):
+                # Sent in, but ChatGPT never gave the chat a /c/ address. The
+                # tab has left it, or its composer holds a failed attempt, and
+                # neither a reload nor a navigation reaches it again. Stop now:
+                # another attempt cannot change that, and a new chat is 9/14.
+                raise ChatGptWebChatLost(_NO_RETURN + ": it has no address to go back to")
             if attempt > 1:
                 # Backing off at the top covers every way the previous attempt
                 # ended. Retrying a throttled upload immediately is the case
@@ -823,7 +875,10 @@ class ChatGptWebClient:
                 sent = True
 
             try:
-                if chat_key is not None and chat_key == self._chat_key and self._chat_url:
+                if recorded and not _is_chat_url(self._chat_url):
+                    # Still on the address-less chat, composer clean: ask there.
+                    composer = wait_for_composer(page)
+                elif recorded:
                     # The subject already has a chat holding its messages and
                     # originals. Every attempt, retry and restart goes back
                     # there or fails: opening another per attempt is what filled
@@ -872,6 +927,9 @@ class ChatGptWebClient:
                 reply = send_and_read(page, text, composer=composer, before_submit=before_submit)
                 guard.acknowledge(request_id)
             except ChatGptWebRateLimit:
+                # The brake refuses after the attach step, so the composer can
+                # still hold this question's files: load the chat again first.
+                self._reload = True
                 # A received rate-limit reply is known, not an uncertain send.
                 if sent:
                     guard.acknowledge(request_id)
@@ -892,7 +950,9 @@ class ChatGptWebClient:
                     ) from exc
                 last_error = exc
                 if attempt >= ATTEMPTS:
-                    raise ChatGptWebError(
+                    # A lost chat stays a lost chat, so the batch stops on it.
+                    lost = isinstance(exc, ChatGptWebChatLost)
+                    raise (ChatGptWebChatLost if lost else ChatGptWebError)(
                         f"ChatGPT web failed {ATTEMPTS} times; last: {exc}"
                     ) from exc
             else:
@@ -901,7 +961,9 @@ class ChatGptWebClient:
                 digests += [_digest(f["buffer"]) for f in pending_files]
                 if pending_audio:
                     digests.append(_digest(pending_audio[1]))
-                self._keep_chat(guard, chat_key, _url_of(page), digests, source=callable(files))
+                booklet = ([_digest(f["buffer"]) for f in current_files]
+                           if callable(files) and current_files else None)
+                self._keep_chat(guard, chat_key, _url_of(page), digests, booklet=booklet)
                 self._reload = False
                 self.last_image_attached = attached
                 return reply

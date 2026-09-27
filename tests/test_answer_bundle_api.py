@@ -305,6 +305,28 @@ def test_uncertain_browser_send_stops_batch_before_other_questions(client, monke
     assert any(item["status"] == "pending" for item in body["items"][1:])
 
 
+CHAT_LOST_ISSUE = "教科のチャットへ戻れません。新しいチャットは作っていません"
+
+
+def test_a_lost_subject_chat_stops_the_batch_and_says_why(client, monkeypatch):
+    # Every later question would cost ATTEMPTS page loads and end the same way.
+    from app import main
+    from app.solvers.chatgpt_web import ChatGptWebChatLost
+    _, session_id = _session_with(client, ["問1 2+2を求めよ。\n問2 3+3を求めよ。"])
+    monkeypatch.setenv("ROKID_SOLVER", "test-provider")
+    calls = []
+    def lost(**_):
+        calls.append(1)
+        raise ChatGptWebChatLost("could not return to the subject's chat")
+    monkeypatch.setattr(main, "solve_with_fallback", lost)
+    assert client.post(f"/v1/exam-sessions/{session_id}/finalize-reading").status_code == 200
+    assert len(calls) == 1
+    body = client.get(f"/v1/exam-sessions/{session_id}/answer-bundle").json()
+    assert body["items"][0]["status"] == "failed"
+    assert body["items"][0]["issue"] == CHAT_LOST_ISSUE
+    assert any(item["status"] == "pending" for item in body["items"][1:])
+
+
 def test_bundle_keeps_items_and_revision_in_one_snapshot(client, monkeypatch):
     """Concurrent committed answers cannot lend their revision to older items.
 
@@ -488,3 +510,21 @@ def test_uncertain_question_list_send_stops_the_browser(client, monkeypatch):
     bundle = _background_finalize_and_wait(
         client, session_id, lambda items: items[0]["status"] == "failed")
     assert "再送" in bundle["items"][0]["issue"] and calls == []
+
+
+def test_a_lost_subject_chat_at_the_question_list_stops_the_browser(client, monkeypatch):
+    from app import main
+    from app.solvers.chatgpt_web import ChatGptWebChatLost
+
+    _, session_id = _session_with(client, ["問1 2+2を求めよ。\n問2 3+3を求めよ。"])
+    monkeypatch.setenv("ROKID_SOLVER", "test-provider")
+    calls = []
+
+    def list_questions(question):
+        raise ChatGptWebChatLost("could not return to the subject's chat")
+
+    monkeypatch.setattr(main, "_list_questions", list_questions)
+    monkeypatch.setattr(main, "solve_with_fallback", lambda **_: calls.append(1))
+    bundle = _background_finalize_and_wait(
+        client, session_id, lambda items: items[0]["status"] == "failed")
+    assert bundle["items"][0]["issue"] == CHAT_LOST_ISSUE and calls == []

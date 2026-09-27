@@ -18,7 +18,7 @@ from .. import config
 from ..llm import ADAPTER_PROVIDERS
 from ..provider_registry import ProviderRegistry
 from .base import Solver
-from .chatgpt_web import ChatGptWebSolver, ChatGptWebUncertain
+from .chatgpt_web import ChatGptWebChatLost, ChatGptWebSolver, ChatGptWebUncertain
 from .llm_adapter import LLMSolver, choice_label, choice_out_of_range
 from .local_placeholder import LocalPlaceholderSolver
 
@@ -147,6 +147,10 @@ def solve_with_fallback(
             result = solver.solve(question=question, max_answer_len=max_answer_len)
         except ChatGptWebUncertain:
             raise  # Another provider would still duplicate a possibly submitted question.
+        except ChatGptWebChatLost:
+            # The subject's chat is gone and no new one was opened. Another tier
+            # would hide that behind a generic failure; the batch stops and says why.
+            raise
         except Exception:  # noqa: BLE001 - one tier failing must not 500
             skipped.append(f"{name}:error")
             continue

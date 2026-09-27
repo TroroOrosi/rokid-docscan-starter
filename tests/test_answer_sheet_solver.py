@@ -84,3 +84,16 @@ def test_uncertain_browser_submission_never_falls_through_to_another_provider(mo
     with pytest.raises(ChatGptWebUncertain):
         solve_with_fallback(Question(body_text="question", answer_only=True),
                             tiers=["answer-sheet-test", "local"])
+
+
+def test_a_lost_subject_chat_is_reported_not_hidden_behind_another_tier(monkeypatch):
+    # The operator has to learn the subject's chat is gone, not "解析に失敗しました".
+    from app.solvers.chatgpt_web import ChatGptWebChatLost
+    failing = solver_for({"answer": "not used", "status": "ready"})
+    def lost(**_):
+        raise ChatGptWebChatLost("could not return to the subject's chat")
+    monkeypatch.setattr(failing, "solve", lost)
+    register_solver(failing, replace=True)
+    with pytest.raises(ChatGptWebChatLost):
+        solve_with_fallback(Question(body_text="question", answer_only=True),
+                            tiers=["answer-sheet-test", "local"])

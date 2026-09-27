@@ -80,7 +80,7 @@ from .page_pdf import images_to_pdf
 from .retrieval import retrieve_context
 from .solvers import Question, get_solver
 from .solvers.llm_adapter import paste_prompt
-from .solvers.chatgpt_web import ChatGptWebUncertain
+from .solvers.chatgpt_web import ChatGptWebChatLost, ChatGptWebUncertain
 from .solvers.registry import solve_with_fallback
 from .subjects import detect_subject
 from .version import APP_VERSION, HUD_CONTRACT_VERSION, version_info
@@ -2493,7 +2493,9 @@ def _record_solve_failure(conn, row, error: Exception) -> None:
         metadata = {}
     metadata["solve_failures"] = int(metadata.get("solve_failures", 0)) + 1
     metadata["solve_failure"] = {"code": "browser_outcome_unknown"
-                                 if isinstance(error, ChatGptWebUncertain) else "solver_failed"}
+                                 if isinstance(error, ChatGptWebUncertain)
+                                 else "chat_lost" if isinstance(error, ChatGptWebChatLost)
+                                 else "solver_failed"}
     conn.execute("UPDATE questions SET structure_json = ? WHERE id = ?",
                  (json.dumps(metadata, ensure_ascii=False), row["id"]))
     conn.commit()
@@ -2522,6 +2524,7 @@ def _answer_bundle_item(conn, group: dict, row) -> dict:
         code = (failure or inherited).get("code")
         status = "failed" if failure else "pending"
         issue = ("送信結果の確認待ち。自動再送は停止しています" if code == "browser_outcome_unknown"
+                 else "教科のチャットへ戻れません。新しいチャットは作っていません" if code == "chat_lost"
                  else "解析に失敗しました。資料は保持しています" if code == "solver_failed" else "未解答")
     elif needs_input:
         status, issue = "needs_input", str(metadata.get("missing_material") or "資料が不足しています")[:1000]
@@ -2802,7 +2805,8 @@ def _model_problems(items: list | None, page_count: int) -> list[ProblemUnit]:
 def _list_deck(conn, session, session_id: int, doc_id: int) -> bool:
     """RP-12: the model names the 小問 from the originals; OCR is the fallback.
 
-    Returns False after an uncertain browser send, so nothing else is sent.
+    Returns False after an uncertain browser send or a lost subject chat, so
+    nothing else is sent.
     """
     source_pages = _document_source_pages(conn, doc_id, session_id)
     question = Question(
@@ -2816,21 +2820,21 @@ def _list_deck(conn, session, session_id: int, doc_id: int) -> bool:
         page_numbers=[p["page_number"] for p in source_pages],
         answer_only=True,
     )
-    uncertain = False
+    stopped: Exception | None = None
     try:
         problems = _model_problems(_list_questions(question), len(source_pages))
-    except ChatGptWebUncertain:
-        problems, uncertain = [], True
+    except (ChatGptWebUncertain, ChatGptWebChatLost) as error:
+        problems, stopped = [], error
     except Exception:  # noqa: BLE001 - any unusable list falls back to OCR
         problems = []
     problems = problems or _ocr_problems(conn, doc_id) or [
         ProblemUnit(None, "", start_page_index=0, page_indexes=list(range(len(source_pages))))]
     _insert_deck(conn, session_id, doc_id, problems)
     conn.commit()
-    if uncertain:
+    if stopped is not None:
         first = _answer_groups(conn, session_id)[0]["items"][0]
-        _record_solve_failure(conn, first, ChatGptWebUncertain("question list send"))
-    return not uncertain
+        _record_solve_failure(conn, first, stopped)
+    return stopped is None
 
 
 def _solve_deck(conn, session, session_id: int, doc_id: int, *, bundle_items: bool = False) -> int:
@@ -2914,8 +2918,10 @@ def _solve_deck(conn, session, session_id: int, doc_id: int, *, bundle_items: bo
                     result, solver = solve_with_fallback(question=question)
                 except Exception as error:  # noqa: BLE001 - retain resumable failures
                     _record_solve_failure(conn, row, error)
-                    if isinstance(error, ChatGptWebUncertain):
-                        break  # Do not touch the browser for the remaining questions.
+                    if isinstance(error, (ChatGptWebUncertain, ChatGptWebChatLost)):
+                        # Do not touch the browser for the remaining questions:
+                        # after a lost chat each would fail the same way.
+                        break
                     continue
             served_by = result.extras.get("served_by", solver.name)
             if served_by == "local":
