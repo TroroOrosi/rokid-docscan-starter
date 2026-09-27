@@ -115,4 +115,4 @@ Runs on は各項目に書く。1〜3はPCだけで完結する。4以降は承�
 
 - 検証：`py -3.12 -X utf8 -m pytest -q` → 858 passed, 1 skipped。`py -3.12 -m ruff check .` → All checks passed!（4節1の作業ツリー）。
 - APK：`6149beb`（AE収束待ち）を含む versionCode 20 はビルド済み・未導入（SHA-256 `4d81deaf…2b42`）。2の修正後に作り直す。
-- PR #38 は Draft。`9aecf3d` のCI（CI、Android relay）はどちらも success。mainへの統合は、4節4aで正答を確認してから提案する。
+- PR #38 は Draft。`83bcc28`（4節1）のCIは全件 pass（build・lint・test 3.10〜3.12・windows-predevice ほか）。mainへの統合は、4節4aで正答を確認してから提案する。
