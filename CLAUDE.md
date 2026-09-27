@@ -1,6 +1,13 @@
 # rokid-docscan-starter development guide
 
-Status: Current engineering contract. Updated 2026-09-23.
+Status: Current engineering contract. Updated 2026-09-27.
+
+**Start at `.agents/progress/current.md`.** It lists the operator's decisions,
+the verified state and the next steps. Do not re-ask what it settles. Keep the
+prohibitions below. Treat this file's measurements and "the platform cannot"
+statements as past observations: check them against the artifact before relying
+on them. Judge every change by one test: does ChatGPT answer correctly from the
+image, and can the answer be read on the glasses?
 
 ## What this repository is
 
