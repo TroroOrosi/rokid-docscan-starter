@@ -1,78 +1,78 @@
 # 現行の継続記録（再開入口）
 
-Status: Internal progress。2026-09-23作成。branch `feature/capture-quality-readiness`、Draft [PR #38](https://github.com/TroroOrosi/rokid-docscan-starter/pull/38)。
+Status: Internal progress。2026-09-27更新。branch `feature/capture-quality-readiness`、Draft [PR #38](https://github.com/TroroOrosi/rokid-docscan-starter/pull/38)。
 旧PR37の記録6件は `.agents/progress/archive/` に退避済み（利用者承認 2026-09-23）。測定値の一次記録として参照し、全文通読は不要。
-Runs on: Windows PC `C:\rokid-docscan-starter`。実機・GPT送信は下の停止条件に従う。
+Runs on: Windows PC `C:\rokid-docscan-starter`。実機・GPT送信は段階ごとの事前登録カードの承認後だけ。
 
 ## 目的（利用者、2026-09-23）
 
 グラスで撮った問題画像を正確にGPTへ送り、解答用紙に書く内容をグラスで読む。
-自動スキャン、OCR、紙を合わせる枠、画像の切出し・拡大・明るさ補正は、この目的のための手段・利便機能にすぎない。
-OCRの文字数・枠判定を画質や合格の根拠にしない。
+自動スキャン、OCR、紙を合わせる枠、画像の切出し・拡大・明るさ補正は手段。OCRの文字数・枠判定を画質や合格の根拠にしない。
 
-## 遅延の原因（利用者の指摘と記録の実測が一致）
+## 2026-09-27 承認済みの打開計画
 
-- 正確でない指標（OCR・枠）を基準に、実機確認を繰り返した。目的と追加機能が混ざった。
-- 旧スマホ経路（CXR-L `takePhoto(1920,1080,80)`、2026-08-28）の画像は読めた。用紙が画面の幅いっぱい（本文幅52%）、紙の輝度196。
-  出典: `docs/hardware-measurements.md` §C-2／C-2b。
-- 現在のglassdoc（camera2で最大JPEG 4032×3024を即時撮影、2026-09-22）は見開き＋背景が入り、全画面の輝度p50=35。
-  最終metadataは露出10ms・ISO 50、`ae_state=1`（SEARCHING）。同じ席の標準カメラは露出16.6〜25ms・ISO 191〜318。
-  出典: `.agents/progress/archive/pr37-capture-quality.md`。
-- 機能全体を確認しないまま局所の作業を続け、記録が長期化して肥大した。
+利用者が承認（2026-09-27）。前回案は「依頼済み機能を確認せず省いた／見開き・単ページ未考慮／全体の確認と整理が無い」で差し戻し。
+承認版は依頼済み55機能すべてを段階に割り当てる。機能の一覧と割当は Phase 1 で `docs/requirements-audit.md` に置く。
 
-規則: 撮影の変更は「保存画像が旧経路または標準カメラの同じページと同程度に読めるか」で判断する。
-画角と露出を先に直し、機能の追加はその後に行う。記録は本ファイルに短く追記する。
+停滞の原因（記録・ソース・保存原本で確認）:
+- グラス経由で実ページから答えが出た例は0件。9/15以降の実機10回はすべて撮影で失敗し、代理指標（OCR等）で診断を重ねた。
+- 自動burstはOCR 0文字・文字枠欠けで写真を破棄する（`DocScanController.java:2261-2281`）。図だけの頁も捨てられる。
+- 撮影の主因は露出：glassdoc原本 p50=35・p90=74・p99=83、標準カメラ8枚 p90=194〜235。zoom・crop・AE lockの設定は無い。
+- 良い入力でも下流が完走していない（9/14 物理基礎 3/14 ready）。原因は下の Phase 0 結果。
+
+段階（各段階の出口を満たすまで次へ進まない）:
+- P0 前提の確定（PC）。P1 リポジトリ整理（PC、削除・退避は承認後）。P2 測定用の切替を実装（PC）。
+- P3 スマホFastAPI＋スマホChromeで下流の正答と見開きの送信形式（GPT）。P4 グラスで撮影設定（露出・zoom・見開き）。
+- P5 会場経路で1大問を一周。P6 残りの依頼機能。P7 構造の整理（振る舞いは変えない）。
+
+規則: 合格は「公式正解と照合した小問の正答がグラスで読める」だけ。GPTは1回≤7生成・1日≤20・間隔≥30分、40秒超かrate-limit文言で当日中止。
+実機・GPT送信の各段階は、問い／入力／変数／合否・中止条件／最大送信数／Runs on を書いたカードを本ファイルに置き、承認後に実施する。
+
+## Phase 0 の結果（2026-09-27、PCの読み取りのみ）
+
+Runs on: Windows PC。`C:\rokid-exam-materials\rundata\docscan.db` を読み取り専用で開いた。
+
+- 9/14 の pending 11 は、遅延ブレーキによる送信停止と判断した（推定。停止を示すログは残っていない）。
+  session 36 は17行、solutions は4件（見出し「第1問」を含む）。保存間隔は60〜75秒。
+  ブレーキ `3b91d47`（04:38 JST）は実行時刻（05:19 JST）より前に入っていた。
+  当日は100生成超の後で遅延が43→48→130秒と伸びていた（`subject-separation-harness.md`）。
+  当時は問ごとに新チャット・頁の再添付の不具合があった（`chatgpt-web-solver.md` の Root causes、修正済み）。
+- 結論: モデルの失敗ではない。下流は、生成数と間隔を管理すれば測れる。
+- 未決: PR #38 の扱い（利用者判断）。
+
+## 旧記録の訂正（2026-09-27）
+
+- 旧版の「旧スマホ経路の画像は読めた」は誤り。C-2b（`docs/hardware-measurements.md`）は紙196／墨155でコントラスト16%、
+  「致命的に低い」と記録している。旧経路で読めたのは用紙が画面幅いっぱいという構図であり、画質ではない。
+- 旧版の「紙の輝度196」と「全画面p50=35」は同じ条件の比較ではない（紙のみと、背景込みの全画面）。
+  以後は同じ紙領域で比べる。
 
 ## 有効な決定・停止
 
-- 実機操作・追加撮影・APK導入・GPT送信は、対象と判定条件を具体化して承認を得るまで停止する。
+- 実機操作・追加撮影・APK導入・GPT送信は、段階ごとのカードの承認まで行わない。
 - 着席姿勢を前提にする。後退や正確な測距を必須にしない。LEDの外部観測は不要（2026-09-15）。
 - ChatGPT web UIの自動操作は利用規約違反であり、利用者の決定として継続する。自動再送はしない。
 - 小問一覧はモデルが原本から作る（RP-12、2026-09-23）。OCR分割はその失敗時の予備。
 - 主経路は原本画像と原音を送る。ローカルのASRとOCR本文は送らない。
+- 撮影は見開きを既定とする（9/16）。送信形式（見開き1枚か頁ごとの切出しか）はP3の正答で決める。
 
 ## このPRで完了したこと（PCのみ、実機未検証）
 
 | commit | 内容 |
 |---|---|
+| `6149beb` | 測光→AE収束待ち→JPEG。実機未確認 |
 | `5568316` | RP-15: `finalize-reading?solve=background` で即時に返す。glassdocはPENDINGの間だけbundleをGETする |
 | `bfd6366` | RP-12a: 問N直下の行頭`(A)`は選択肢として扱う |
-| `6ec02a3` | RP-12: solverが原本から小問一覧を1回作る。大問見出しは解かない。設問指定は「第2問 問1」。一覧作成中の409を再試行する |
+| `6ec02a3` | RP-12: solverが原本から小問一覧を1回作る。大問見出しは解かない。設問指定は「第2問 問1」 |
 
-検証（`6ec02a3`の作業ツリー）:
-- `py -3.12 -X utf8 -m pytest -q` → `852 passed, 1 skipped`。`ruff check .` → pass。
-- `gradlew --no-daemon test testDebugUnitTest assembleDebug` → `BUILD SUCCESSFUL`。JUnit 402件、失敗0件。
-- glassdoc APK は versionCode 20 / 0.17.0、`DocScanGlassActivity`。apksigner Verifies、証明書 `906307478018…ccacc`。
-  SHA-256 `4d81deafc259e7a8f5ccf9151d196b0fb002288767b947ce0863a8f562082b42`。未導入。
+検証（`6ec02a3`の作業ツリー）: pytest `852 passed, 1 skipped`、ruff pass、gradle `BUILD SUCCESSFUL`（JUnit 402件、失敗0）。
+glassdoc APK versionCode 20 / 0.17.0、SHA-256 `4d81deafc259e7a8f5ccf9151d196b0fb002288767b947ce0863a8f562082b42`。未導入。
 
-## 次の作業
+## Next steps
 
-### 1. 画角と露出を旧経路と同等にする
+Runs on: 利用者の判断待ち → Windows PC（P1・P2）。P3以降はカードの承認後。
 
-Runs on: Windows PC（保存画像の比較と実装）。実機の撮影寸法や倍率を変える前に利用者の承認を得る（CLAUDE.md）。
-
-- 旧経路の実写（`pending-capture-v1.bin` から取り出した1080×1920）とglassdocの原本を同じ基準で比較する。
-  用紙が画面に占める割合と紙の輝度を測り、必要な倍率またはcropを算出する。
-  保存dumpの `zoomRatioRange=[1,8]`。露出の収束待ちは `6149beb` で実装済みだが実機では未検証。
-- 表示枠は、算出した撮影範囲に合わせるか、表示しない。未校正の枠を案内に使わない。
-
-### 2. 限定した実機確認（1回）
-
-Runs on: glassdoc＋既存Wi-Fi。GPT送信なし。承認後のみ実施する。
-
-- 同じページを着席姿勢で撮る。新しいAPKと標準カメラで各1〜2枚。
-- 判定: 用紙が画面幅の半分以上を占める。紙の輝度が旧経路（196）と標準カメラに近い。そうでなければ中止して原因を調べる。
-
-### 3. 残り
-
-Runs on: Windows PC。
-
-- RP-15: 送信結果が不明になった後や、サーバの再起動後に残るPENDINGの表示。
-- RP-12: 実冊子でのモデル一覧の過不足。
-- CQ-8: 未検証の3秒登録と候補保全の境界。
-
-## 退避した記録
-
-`.agents/progress/archive/` にある以下の6件（内容は変更なし。パスとリンクだけ更新）:
-`pr37-capture-quality.md`（PR37〜38の測定と訂正の全履歴）、`pr37-objective-review.md`、`pr37-camera-research.md`、
-`pr37-offline-remediation.md`、`pr37-predevice-handoff.md`、`multimodal-scan.md`。
+1. 利用者の判断8点：P1を先に行うか、下流をスマホで測るか（サーバ更新を含む）、最初の一周は `auto=false`、
+   見開きを既定にする、印刷物（物理基礎 第1問 p1-4、B5）、GPT予算、PR #38、P1の削除・退避候補。
+2. P1: 文書の入口を3本（CLAUDE.md、本ファイル、requirements-audit）・約600行へ。不要エンドポイント等は承認後に削除。
+3. P2: ハーネス（JPEG・background・スマホへHTTP・密度指定）、`/v1/settings` の500、zoom・AE lock・`auto=false`、答案promptの導出抑止、スマホ起動スクリプト。
