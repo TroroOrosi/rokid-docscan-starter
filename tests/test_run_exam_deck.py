@@ -162,6 +162,7 @@ def _pdf_with_text(path, texts, size=(515.9, 728.5)):
 def test_render_spreads_pairs_pdf_pages_at_glasses_density(tmp_path):
     import io
 
+    pytest.importorskip("pypdfium2")
     from PIL import Image
 
     pdf = tmp_path / "paper.pdf"
@@ -382,6 +383,8 @@ def test_in_process_route_reaches_the_real_build_client_with_no_timeout_warning(
     build_client() overwrites os.environ["ROKID_DATA_DIR"/"ROKID_SOLVER"]
     itself; setenv first so monkeypatch restores the pre-test values after.
     """
+    pytest.importorskip("pypdfium2")
+    pytest.importorskip("pdfminer")
     monkeypatch.setenv("ROKID_DATA_DIR", str(tmp_path / "unused"))
     monkeypatch.setenv("ROKID_SOLVER", "local")
 
@@ -427,9 +430,10 @@ def server_app(tmp_path, monkeypatch):
     return main, TestClient(main.app)
 
 
-@pytest.mark.filterwarnings("error")
+@pytest.mark.filterwarnings("error:You should not use the 'timeout' argument")
 def test_server_route_uploads_two_spreads_with_no_ocr_text(server_app, tmp_path, monkeypatch):
     """Plumbing check with the model replaced: no network, no phone, no ChatGPT."""
+    pytest.importorskip("pypdfium2")
     main, client = server_app
     monkeypatch.setenv("ROKID_SOLVER", "test-provider")
     monkeypatch.setattr(run_exam_deck, "remote_client", lambda server, key: client)
@@ -466,9 +470,14 @@ def test_server_route_uploads_two_spreads_with_no_ocr_text(server_app, tmp_path,
     assert out.exists()
 
 
-@pytest.mark.filterwarnings("error")
+@pytest.mark.filterwarnings("error:You should not use the 'timeout' argument")
 def test_server_route_stops_before_polling_when_the_phone_solver_is_local(
         server_app, tmp_path, monkeypatch, capsys):
+    """No PDF here: this test's subject is the local-solver stop, not PDF
+    rendering, so it uses --images (Pillow JPEGs) and needs no pypdfium2.
+    """
+    from PIL import Image
+
     main, client = server_app
     monkeypatch.setenv("ROKID_SOLVER", "local")
     monkeypatch.setattr(run_exam_deck, "remote_client", lambda server, key: client)
@@ -479,25 +488,30 @@ def test_server_route_stops_before_polling_when_the_phone_solver_is_local(
 
     monkeypatch.setattr(run_exam_deck, "wait_for_answers", must_not_poll)
 
-    pdf = tmp_path / "kokugo.pdf"
-    _pdf(pdf, 2)
+    images = tmp_path / "kokugo" / "originals"
+    images.mkdir(parents=True)
+    Image.new("RGB", (200, 100), "red").save(images / "img-1.jpg")
+    Image.new("RGB", (200, 100), "blue").save(images / "img-2.jpg")
     out = tmp_path / "reports" / "kokugo-server.json"
 
     code = run_exam_deck.main(
-        ["--pdf", str(pdf), "--server", "http://phone.example:8000", "--out", str(out)])
+        ["--images", str(images), "--server", "http://phone.example:8000", "--out", str(out)])
 
     assert code == 1
     assert "background solve" in capsys.readouterr().out
     assert not out.exists()
 
 
-@pytest.mark.filterwarnings("error")
+@pytest.mark.filterwarnings("error:You should not use the 'timeout' argument")
 def test_server_route_writes_the_default_report_path(server_app, tmp_path, monkeypatch):
     """No --out: <name>-p<pages>-server.json next to a reports/ sibling of the
-    PDF's own directory. The PDF lives under tmp_path/kyotsu/ so that sibling
-    (src.parent.parent / "reports") resolves inside tmp_path, never under
-    C:/rokid-exam-materials.
+    images directory. The images live under tmp_path/kyotsu/originals/ so that
+    sibling (src.parent.parent / "reports") resolves inside tmp_path, never
+    under C:/rokid-exam-materials. Not the PDF rendering test's subject, so it
+    uses --images (Pillow JPEGs) and needs no pypdfium2.
     """
+    from PIL import Image
+
     main, client = server_app
     # "test-provider" is not a registered solver name: get_solver() would
     # silently fall back to "local" and this test would not catch a
@@ -521,15 +535,16 @@ def test_server_route_writes_the_default_report_path(server_app, tmp_path, monke
     monkeypatch.setattr(main, "_list_questions", list_questions)
     monkeypatch.setattr(main, "solve_with_fallback", solve)
 
-    pdf = tmp_path / "kyotsu" / "paper.pdf"
-    pdf.parent.mkdir()
-    _pdf(pdf, 4)
+    images = tmp_path / "kyotsu" / "originals"
+    images.mkdir(parents=True)
+    for i in range(1, 5):
+        Image.new("RGB", (200, 100), "red").save(images / f"img-{i}.jpg")
 
     code = run_exam_deck.main(
-        ["--pdf", str(pdf), "--pages", "1-4", "--server", "http://phone.example:8000"])
+        ["--images", str(images), "--pages", "1-4", "--server", "http://phone.example:8000"])
 
     assert code == 0
-    report_path = tmp_path / "reports" / "paper-p1-4-server.json"
+    report_path = tmp_path / "reports" / "kyotsu-originals-p1-4-server.json"
     assert report_path.exists()
     report = json.loads(report_path.read_text(encoding="utf-8"))
     assert report["server_solver"] == "openai"

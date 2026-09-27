@@ -124,6 +124,8 @@ def render_pages(pdf: Path, pages: range, scale: float) -> list[tuple[bytes, str
     segments into questions, which is the same split the relay produces: a
     photo plus the phone's OCR of it. In-process route only.
     """
+    if not pdf.exists():  # tested before the pypdfium2 import: bench-only dep
+        raise FileNotFoundError(str(pdf))
     import pypdfium2 as pdfium
     from pdfminer.high_level import extract_text
     from pdfminer.layout import LAParams
@@ -180,6 +182,8 @@ def render_spreads(pdf: Path, span: range) -> list[tuple[bytes, str]]:
     paired by pair_spreads. No OCR text travels on this route: the server's
     own ROKID_SOLVER reads the images directly, as the glasses do.
     """
+    if not pdf.exists():  # tested before the pypdfium2 import: bench-only dep
+        raise FileNotFoundError(str(pdf))
     import pypdfium2 as pdfium
 
     doc = pdfium.PdfDocument(str(pdf))
