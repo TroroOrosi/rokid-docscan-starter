@@ -63,16 +63,16 @@ Runs on: Windows PC `C:\rokid-docscan-starter`。実機の状態を変える操�
 - スマホのサーバは、記録上 9/16 の `3e4b777` が最後の導入。RP-12/15 と `30269eb` は入っていない。9/22以降の更新記録は無い（要確認）。
   そのとき、ログにsocket.acceptの `Errno 22` が92回出ている。
 - スマホの起動スクリプトは無い（設定はスマホ内の env にだけある）。
-  JPEGのupload→`finalize-reading?solve=background`→実solver→answer-bundle を通すハーネス・試験も無い（`scripts/run_exam_deck.py` は同期finalize）。
+- 4節1は済み（下）。JPEGのupload→`finalize-reading?solve=background`→answer-bundle をPCからHTTPで通せる。実solverでは未実行。
 
 ## 4. 次の作業（この順）
 
 Runs on は各項目に書く。1〜3はPCだけで完結する。4以降は承認が要る。
 
-1. Runs on: PC。`scripts/run_exam_deck.py` に、画像ディレクトリ入力と、送信ありの非同期実行を足す。
-   - `--images DIR --rotation N`：glassdocと同じmultipart、`ocr_text` は空。
-   - `--background`：answer-bundle をpollする。409は一覧の作成中。
-   - `--server URL --key`：`httpx.Client` を使い、スマホのサーバへPCから投入する。
+1. **済み（9/27）。** Runs on: PC。`scripts/run_exam_deck.py` に `--images DIR --rotation N`・`--background [--timeout]`・`--server URL`（鍵は `ROKID_API_KEY`）。
+   原本は `<run>/originals` なので、DB・報告名は `<run>-originals`。4で使う形：
+   `py -3.12 scripts/run_exam_deck.py --images data/device-setup/<run>/originals --subject 物理基礎 --background --server http://<phone>:8000`
+   確認：PC上のuvicorn（鍵付き、`_list_questions`/`solve_with_fallback` をstub）へ実原本2枚→409を待ち→2/2 ready、鍵なしは401、報告に鍵なし。実モデルでは未実行。
 2. Runs on: PC。小さな修正を、それぞれ試験付きで入れる。
    - 失敗・再試行・再起動でも新規チャットを作らない。同じチャットURLへ戻り、戻れなければ止めて理由を返す。
    - `/v1/settings` の500。
@@ -113,6 +113,6 @@ Runs on は各項目に書く。1〜3はPCだけで完結する。4以降は承�
 
 ## 7. 状態
 
-- 検証：`py -3.12 -X utf8 -m pytest -q` → 853 passed, 1 skipped。`py -3.12 -m ruff check .` → All checks passed!（`30269eb`の作業ツリー）。
+- 検証：`py -3.12 -X utf8 -m pytest -q` → 858 passed, 1 skipped。`py -3.12 -m ruff check .` → All checks passed!（4節1の作業ツリー）。
 - APK：`6149beb`（AE収束待ち）を含む versionCode 20 はビルド済み・未導入（SHA-256 `4d81deaf…2b42`）。2の修正後に作り直す。
 - PR #38 は Draft。`9aecf3d` のCI（CI、Android relay）はどちらも success。mainへの統合は、4節4aで正答を確認してから提案する。

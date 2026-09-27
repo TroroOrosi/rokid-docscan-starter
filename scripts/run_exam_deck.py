@@ -20,9 +20,18 @@ need the real model.
     py -3.12 scripts/run_exam_deck.py --pdf .../eigo_listening.pdf --subject 英語 \
         --audio .../eigo_listening_audio.mp3
 
-Needs `pip install pypdfium2 pdfminer.six` (bench only; the server itself never
-reads a PDF). The exam material is copyrighted: keep it, and these reports, out
-of the repository.
+--images DIR sends glassdoc's own originals instead: each photo as the glasses
+upload it, with no OCR text. --background asks for the glassdoc finalize
+(`?solve=background`) and polls answer-bundle as the reader does. --server
+drives the phone's server over HTTP instead of an in-process one; the key comes
+from --key or ROKID_API_KEY and is never printed.
+
+    py -3.12 scripts/run_exam_deck.py --images data/device-setup/<run>/originals \
+        --subject 物理基礎 --background --server http://<phone>:8000
+
+Needs `pip install pypdfium2 pdfminer.six` for --pdf (bench only; the server
+itself never reads a PDF). The exam material is copyrighted: keep it, and these
+reports, out of the repository.
 """
 
 from __future__ import annotations
@@ -67,6 +76,20 @@ def render_pages(pdf: Path, pages: range, scale: float) -> list[tuple[bytes, str
     return out
 
 
+_IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png"}
+
+
+def load_images(directory: Path | str) -> list[tuple[bytes, str]]:
+    """(image bytes, no text) per photo, in file-name order.
+
+    This is what glassdoc uploads on the chatgpt-web route: the original still
+    and no OCR. Its originals are named by capture time, so name order is page
+    order.
+    """
+    files = sorted(p for p in Path(directory).iterdir() if p.suffix.lower() in _IMAGE_SUFFIXES)
+    return [(p.read_bytes(), "") for p in files]
+
+
 def mark_daimon(
     pages: list[tuple[bytes, str]], spec: str, offset: int
 ) -> list[tuple[bytes, str]]:
@@ -101,6 +124,16 @@ def parse_pages(spec: str | None) -> range:
 _UNSAFE = set('<>:"/|?*' + chr(92))
 
 
+def source_name(source: Path | str) -> str:
+    """A PDF's stem, or `<run>-<dir>` for a photo directory.
+
+    glassdoc keeps a run's photos in <run>/originals: name the run, or every
+    run would share one `originals` database and report.
+    """
+    source = Path(source)
+    return f"{source.parent.name}-{source.name}" if source.is_dir() else source.stem
+
+
 def deck_data_dir(root: Path | str, pdf: Path | str) -> Path:
     """This paper's OWN database directory, under the run root.
 
@@ -109,7 +142,7 @@ def deck_data_dir(root: Path | str, pdf: Path | str) -> Path:
     on 2026-09-14. One paper is one directory; the same PDF resolves to the
     same directory, so a re-run of that paper still resumes in place.
     """
-    stem = Path(pdf).stem.strip()
+    stem = source_name(pdf).strip()
     safe = "".join("_" if c in _UNSAFE or ord(c) < 32 else c for c in stem)
     return Path(root) / (safe or "unnamed")
 
@@ -136,32 +169,88 @@ def build_client(data_dir: Path, solver: str):
     return TestClient(main.app)
 
 
+def remote_client(server: str, key: str | None):
+    """The phone's server, reached over HTTP the way the glasses reach it."""
+    import httpx
+
+    headers = {"Authorization": f"Bearer {key}"} if key else {}
+    # One ceiling for every call. A synchronous finalize-reading over a long
+    # paper can outlast it; --background returns at once and polls instead.
+    return httpx.Client(base_url=server.rstrip("/"), headers=headers, timeout=600)
+
+
+def wait_for_answers(client, session_id: int, timeout: float, interval: float = 5.0):
+    """Poll answer-bundle as glassdoc does, until no 小問 is pending.
+
+    The 409 served while the model is still listing the 小問 is polled
+    through; any other non-200 is the result. Items can stay pending after
+    the batch has stopped (the glasses would poll on), so the wait ends at
+    ``timeout`` and returns the last response as it is.
+    """
+    deadline = time.monotonic() + timeout
+    shown = None
+    while True:
+        r = client.get(f"/v1/exam-sessions/{session_id}/answer-bundle")
+        listing = r.status_code == 409 and "being made" in r.text
+        if r.status_code != 200 and not listing:
+            return r
+        pending = 0
+        if r.status_code == 200:
+            statuses = [i["status"] for i in r.json()["items"]]
+            pending = statuses.count("pending")
+            if statuses != shown:
+                shown = statuses
+                print(f"..    answers        {statuses.count('ready')}/{len(statuses)} ready, "
+                      f"{pending} pending")
+            if not pending:
+                return r
+        if time.monotonic() >= deadline:
+            print(f"WARN  stopped waiting after {timeout:.0f}s "
+                  f"({'still listing' if listing else f'{pending} pending'})")
+            return r
+        time.sleep(interval)
+
+
 def run(args) -> int:
-    pdf = Path(args.pdf)
-    report_path = Path(args.out or (pdf.parent.parent / "reports" / f"{pdf.stem}.json"))
+    src = Path(args.pdf or args.images)
+    name = source_name(src)
+    report_path = Path(args.out or (src.parent.parent / "reports" / f"{name}.json"))
     if report_path.exists() and not args.force:
         print(f"skip  {report_path} already exists (--force to redo)")
         return 0
     report_path.parent.mkdir(parents=True, exist_ok=True)
 
-    pages = render_pages(pdf, parse_pages(args.pages), args.scale)
+    span = parse_pages(args.pages)
+    if args.pdf:
+        pages = render_pages(src, span, args.scale)
+    else:
+        pages = load_images(src)[span.start:span.stop]
     if args.daimon:
-        pages = mark_daimon(pages, args.daimon, parse_pages(args.pages).start)
+        pages = mark_daimon(pages, args.daimon, span.start)
     if not pages:
-        print(f"FAIL  no pages rendered from {pdf}")
+        print(f"FAIL  no pages read from {src}")
         return 1
-    print(f"ok    pages          {len(pages)} rendered, "
+    print(f"ok    pages          {len(pages)} read, "
           f"{sum(len(t) for _, t in pages)} chars of text")
 
-    data_dir = deck_data_dir(args.data_dir, pdf)
-    print(f"ok    data dir       {data_dir}")
-    client = build_client(data_dir, args.solver)
-    doc_id = client.post("/v1/documents", json={"title": pdf.stem}).json()["document_id"]
-    for index, (png, text) in enumerate(pages):
+    if args.server:
+        print(f"ok    server         {args.server} (its own ROKID_SOLVER answers)")
+        client = remote_client(args.server, args.key)
+    else:
+        data_dir = deck_data_dir(args.data_dir, src)
+        print(f"ok    data dir       {data_dir}")
+        client = build_client(data_dir, args.solver)
+    doc_id = client.post("/v1/documents", json={"title": name}).json()["document_id"]
+    for index, (image, text) in enumerate(pages):
+        jpeg = image[:2] == b"\xff\xd8"
+        fields = {"page_index": index, "image_rotation": args.rotation}
+        if text:
+            fields["ocr_text"] = text
         r = client.post(
             f"/v1/documents/{doc_id}/pages",
-            data={"page_index": index, "ocr_text": text},
-            files={"image": (f"p{index:02d}.png", png, "image/png")},
+            data=fields,
+            files={"image": (f"p{index:02d}.{'jpg' if jpeg else 'png'}", image,
+                             "image/jpeg" if jpeg else "image/png")},
         )
         if r.status_code != 201:
             print(f"FAIL  page {index}: {r.status_code} {r.text[:200]}")
@@ -194,15 +283,22 @@ def run(args) -> int:
             return 1
         print(f"ok    audio          {Path(args.audio).name} attached to the session")
 
-    print(f"..    solving        {args.solver} (this is where the generations are spent)")
+    solver = "the server's solver" if args.server else args.solver
+    print(f"..    solving        {solver} (this is where the generations are spent)")
     started = time.monotonic()
-    r = client.post(f"/v1/exam-sessions/{session_id}/finalize-reading")
-    elapsed = time.monotonic() - started
+    r = client.post(
+        f"/v1/exam-sessions/{session_id}/finalize-reading",
+        params={"solve": "background"} if args.background else None,
+    )
     if r.status_code != 200:
         print(f"FAIL  finalize-reading: {r.status_code} {r.text[:300]}")
         return 1
 
-    bundle = client.get(f"/v1/exam-sessions/{session_id}/answer-bundle")
+    if args.background:
+        bundle = wait_for_answers(client, session_id, args.timeout)
+    else:
+        bundle = client.get(f"/v1/exam-sessions/{session_id}/answer-bundle")
+    elapsed = time.monotonic() - started
     if bundle.status_code != 200:
         print(f"FAIL  answer-bundle: {bundle.status_code} {bundle.text[:200]}")
         return 1
@@ -212,16 +308,18 @@ def run(args) -> int:
     per_question = elapsed / len(items) if items else 0.0
     print(f"ok    answers        {len(ready)}/{len(items)} ready in {elapsed:.1f}s "
           f"({per_question:.1f}s per question)")
-    if per_question > 40 and args.solver != "local":
+    if per_question > 40 and (args.server or args.solver != "local"):
         print("WARN  per-question time is in the range that preceded the 2026-09-14 "
               "rate limit (7-13s clean). Stop rather than starting the next subject.")
     for item in items[:5]:
         print(f"      {item['question_label']:<10} {item['answer'] or item['issue']}")
 
     report = {
-        "pdf": str(pdf),
+        "source": str(src),
         "subject": args.subject,
-        "solver": args.solver,
+        "solver": None if args.server else args.solver,
+        "server": args.server,
+        "background": args.background,
         "pages": len(pages),
         "audio": args.audio,
         "elapsed_s": round(elapsed, 1),
@@ -235,7 +333,23 @@ def run(args) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--pdf", required=True)
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--pdf")
+    source.add_argument("--images", help="directory of glassdoc originals, sent in name order")
+    parser.add_argument(
+        "--rotation", type=int, choices=(0, 90, 180, 270), default=0,
+        help="image_rotation sent with each page, as glassdoc does",
+    )
+    parser.add_argument(
+        "--background", action="store_true",
+        help="finalize-reading?solve=background, then poll answer-bundle",
+    )
+    parser.add_argument("--timeout", type=float, default=900, help="seconds to poll for")
+    parser.add_argument("--server", default=None, help="e.g. http://<phone>:8000")
+    parser.add_argument(
+        "--key", default=os.environ.get("ROKID_API_KEY"),
+        help="the server's API key (default: ROKID_API_KEY; keeps it out of shell history)",
+    )
     parser.add_argument("--subject", default="")
     parser.add_argument("--audio", default=None, help="listening recording to send too")
     parser.add_argument("--pages", default=None, help="1-based inclusive, e.g. 1-8")
