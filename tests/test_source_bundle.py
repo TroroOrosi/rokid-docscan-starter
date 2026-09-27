@@ -47,6 +47,20 @@ def test_no_renumbering_or_silent_missing_images(tmp_path):
         source_bundle(pages)
 
 
+def test_dark_photo_is_brightened_and_trimmed_to_the_paper(tmp_path):
+    """A dark shot of a page on a blue map, as the glasses took it on 2026-09-22."""
+    photo = Image.new("RGB", (800, 1000), (10, 20, 70))
+    photo.paste((80, 80, 80), (200, 300, 600, 700))
+    photo.paste((12, 12, 12), (250, 400, 550, 410))
+    path = tmp_path / "dark.png"
+    photo.save(path)
+    before = path.read_bytes()
+    sent = Image.open(io.BytesIO(source_bundle([{"page_number": 1, "image_path": str(path)}])[0]["buffer"]))
+    assert 400 <= sent.width < 800 and 400 < sent.height < 1000
+    assert min(sent.getpixel((sent.width // 2, sent.height // 2))) > 200
+    assert path.read_bytes() == before
+
+
 def test_oversized_png_uses_full_size_jpeg(tmp_path, monkeypatch):
     import random
     import app.source_bundle as source

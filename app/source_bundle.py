@@ -5,7 +5,7 @@ import io
 import math
 from pathlib import Path
 
-from PIL import Image, ImageDraw
+from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageOps
 
 from .page_pdf import images_to_pdf
 
@@ -14,6 +14,40 @@ MAX_IMAGE_BYTES = 20 * 1024 * 1024
 
 def _payload(name, mime, data):
     return {"name": name, "mimeType": mime, "buffer": data}
+
+
+def _readable(photo: Image.Image) -> Image.Image:
+    """Stretch the levels and trim what surrounds the paper. Adds no detail.
+
+    Glasses photos arrive dark and include the desk. On 2026-09-22 the whole-frame
+    p99 was 83. The paper is the bright, unsaturated region. A 4% margin keeps
+    its darker, vignetted edges. The stored page image is never changed.
+    """
+    photo = ImageOps.autocontrast(photo, cutoff=(1, 1))
+    if min(photo.size) < 400:
+        return photo
+    small = photo.reduce(8)
+    _, saturation, value = small.convert("HSV").split()
+    histogram, seen = value.histogram(), 0
+    for level, count in enumerate(histogram):
+        seen += count
+        if seen >= small.width * small.height * 0.99:
+            break
+    bright = value.point(lambda x, t=level * 0.55: 255 if x > t else 0)
+    plain = saturation.point(lambda x: 255 if x < 70 else 0)
+    mask = ImageChops.multiply(bright, plain).filter(ImageFilter.MinFilter(7)).filter(ImageFilter.MaxFilter(7))
+    box = mask.getbbox()
+    if not box:
+        return photo
+    # ponytail: brightness/saturation heuristic. On a white desk the box covers too
+    # much and the full frame is kept. Use a page-edge detector if that happens often.
+    mx, my = small.width * 0.04, small.height * 0.04
+    box = (max(0, box[0] - mx), max(0, box[1] - my),
+           min(small.width, box[2] + mx), min(small.height, box[3] + my))
+    if not 0.15 <= (box[2] - box[0]) * (box[3] - box[1]) / (small.width * small.height) <= 0.9:
+        return photo
+    return photo.crop(tuple(min(int(c * 8), limit) for c, limit in
+                            zip(box, (photo.width, photo.height, photo.width, photo.height))))
 
 
 def source_bundle(pages: list[dict], *, mode: str = "images",
@@ -49,7 +83,7 @@ def source_bundle(pages: list[dict], *, mode: str = "images",
             for page in group:
                 try:
                     with Image.open(page["image_path"]) as source:
-                        images.append(source.convert("RGB"))
+                        images.append(_readable(source.convert("RGB")))
                 except (OSError, TypeError) as error:
                     raise ValueError(f"Page {page['page_number']:03d} image unavailable") from error
             width = max(i.width for i in images)
