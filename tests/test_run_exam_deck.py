@@ -16,6 +16,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import scripts.run_exam_deck as run_exam_deck  # noqa: E402
 from scripts.run_exam_deck import (  # noqa: E402
+    answer_ceiling_s,
+    call,
     deck_data_dir,
     load_images,
     main,
@@ -24,7 +26,44 @@ from scripts.run_exam_deck import (  # noqa: E402
     wait_for_answers,
 )
 
+FULL_SPAN = range(0, 10_000)
+
 ROOT = Path("C:/rokid-exam-materials/rundata")
+
+
+# -- the stall bound wait_for_answers is given -------------------------------
+
+def test_answer_ceiling_s_matches_the_chatgpt_web_worst_case():
+    assert answer_ceiling_s() == 375.0
+
+
+def test_answer_ceiling_s_grows_when_attempts_grows(monkeypatch):
+    from app.solvers import chatgpt_web
+
+    base = answer_ceiling_s()
+    monkeypatch.setattr(chatgpt_web, "ATTEMPTS", chatgpt_web.ATTEMPTS + 1)
+    assert answer_ceiling_s() > base
+
+
+# -- transport errors on a server-route call ----------------------------------
+
+def test_a_transport_error_prints_fail_and_never_raises(capsys):
+    import httpx
+
+    def boom(*_a, **_k):
+        raise httpx.ConnectError("refused")
+
+    result = call("settings", boom)
+
+    assert result is None
+    assert "FAIL  settings: no response (ConnectError)" in capsys.readouterr().out
+
+
+def test_a_successful_call_passes_through_args_and_kwargs():
+    def echo(*a, **k):
+        return (a, k)
+
+    assert call("step", echo, 1, 2, key="value") == ((1, 2), {"key": "value"})
 
 
 # -- per-paper isolation (existing) ------------------------------------------
@@ -114,12 +153,17 @@ def test_render_spreads_pairs_pdf_pages_at_glasses_density(tmp_path):
 def test_photos_load_in_name_order_without_text(tmp_path):
     from PIL import Image
 
-    Image.new("RGB", (200, 100), "red").save(tmp_path / "img-2.jpg")
-    Image.new("RGB", (200, 100), "blue").save(tmp_path / "img-1.jpg")
+    p2, p1 = tmp_path / "img-2.jpg", tmp_path / "img-1.jpg"
+    Image.new("RGB", (200, 100), "red").save(p2)
+    Image.new("RGB", (200, 100), "blue").save(p1)
     (tmp_path / "notes.txt").write_text("not a page")
-    pages = load_images(tmp_path)
+
+    pages = load_images(tmp_path, FULL_SPAN)
+
     assert [text for _, text in pages] == ["", ""]
-    assert pages[0][0][:2] == b"\xff\xd8" and pages[1][0][:2] == b"\xff\xd8"
+    # name order is img-1 then img-2, not upload/creation order
+    assert pages[0][0] == p1.read_bytes()
+    assert pages[1][0] == p2.read_bytes()
 
 
 def test_a_portrait_photo_is_rejected_by_name(tmp_path):
@@ -127,7 +171,24 @@ def test_a_portrait_photo_is_rejected_by_name(tmp_path):
 
     Image.new("RGB", (100, 200), "red").save(tmp_path / "img-1.jpg")
     with pytest.raises(ValueError, match="img-1.jpg"):
-        load_images(tmp_path)
+        load_images(tmp_path, FULL_SPAN)
+
+
+def test_an_unreadable_file_is_rejected_by_name(tmp_path):
+    (tmp_path / "img-1.jpg").write_bytes(b"not an image")
+    with pytest.raises(ValueError, match="img-1.jpg"):
+        load_images(tmp_path, FULL_SPAN)
+
+
+def test_a_bad_file_outside_the_span_does_not_fail_the_run(tmp_path):
+    from PIL import Image
+
+    Image.new("RGB", (200, 100), "blue").save(tmp_path / "img-1.jpg")
+    (tmp_path / "img-2.jpg").write_bytes(b"not an image")
+
+    pages = load_images(tmp_path, range(0, 1))
+
+    assert len(pages) == 1
 
 
 # -- wait_for_answers: scripted fake client + fake clock ----------------------
@@ -165,7 +226,7 @@ class _Server:
     def __init__(self, responses):
         self.responses = list(responses)
 
-    def get(self, url):
+    def get(self, url, **kwargs):
         response = self.responses.pop(0)
         if isinstance(response, Exception):
             raise response
@@ -182,6 +243,18 @@ def test_wait_polls_through_a_listing_then_pending_then_ready():
     ])
     got, reason = wait_for_answers(server, 1, 60, interval=0, clock=clock, sleep=clock.sleep)
     assert got.status_code == 200 and reason is None and server.responses == []
+
+
+def test_a_long_listing_prints_the_listing_line_only_once(capsys):
+    clock = _Clock()
+    responses = [_Response(409, {"detail": "the question list is being made"}) for _ in range(3)]
+    responses.append(_bundle("ready", revision=1))
+    server = _Server(responses)
+    wait_for_answers(server, 1, 2, interval=1, clock=clock, sleep=clock.sleep)
+    out = capsys.readouterr().out
+    # The line itself says "listing" twice ("listing" the step name, "is
+    # listing the" in the message) -- count lines, not substring hits.
+    assert sum(1 for line in out.splitlines() if "listing" in line) == 1
 
 
 def test_wait_stops_at_once_on_any_other_conflict():
@@ -238,6 +311,21 @@ def test_images_without_server_exits_2(tmp_path):
     with pytest.raises(SystemExit) as excinfo:
         main(["--images", str(tmp_path)])
     assert excinfo.value.code == 2
+
+
+def test_key_without_server_exits_2():
+    with pytest.raises(SystemExit) as excinfo:
+        main(["--pdf", "paper.pdf", "--key", "secret"])
+    assert excinfo.value.code == 2
+
+
+def test_a_bad_pdf_path_creates_no_data_directory(tmp_path):
+    """Pages are read before the data directory is touched (in-process route)."""
+    bad = tmp_path / "missing.pdf"
+    data_root = tmp_path / "rundata"
+    with pytest.raises(FileNotFoundError):
+        main(["--pdf", str(bad), "--data-dir", str(data_root)])
+    assert not data_root.exists()
 
 
 @pytest.mark.parametrize("flag,value", [
@@ -339,3 +427,47 @@ def test_server_route_stops_before_polling_when_the_phone_solver_is_local(
     assert code == 1
     assert "background solve" in capsys.readouterr().out
     assert not out.exists()
+
+
+def test_server_route_writes_the_default_report_path(server_app, tmp_path, monkeypatch):
+    """No --out: <name>-p<pages>-server.json next to a reports/ sibling of the
+    PDF's own directory. The PDF lives under tmp_path/kyotsu/ so that sibling
+    (src.parent.parent / "reports") resolves inside tmp_path, never under
+    C:/rokid-exam-materials.
+    """
+    main, client = server_app
+    # "test-provider" is not a registered solver name: get_solver() would
+    # silently fall back to "local" and this test would not catch a
+    # server_solver regression. "openai" is registered (app/llm.py
+    # ADAPTER_PROVIDERS) and its .info() needs no credentials or network.
+    monkeypatch.setenv("ROKID_SOLVER", "openai")
+    monkeypatch.setattr(run_exam_deck, "remote_client", lambda server, key: client)
+    monkeypatch.setattr(run_exam_deck, "POLL_S", 0)
+
+    def list_questions(question):
+        return [{"group": "第1問", "label": "問1", "pages": [1]}]
+
+    class _Solver:
+        name = "openai"
+
+    def solve(*, question, **_kw):
+        from app.solvers.base import SolveResult
+
+        return SolveResult(answer="x"), _Solver()
+
+    monkeypatch.setattr(main, "_list_questions", list_questions)
+    monkeypatch.setattr(main, "solve_with_fallback", solve)
+
+    pdf = tmp_path / "kyotsu" / "paper.pdf"
+    pdf.parent.mkdir()
+    _pdf(pdf, 4)
+
+    code = run_exam_deck.main(
+        ["--pdf", str(pdf), "--pages", "1-4", "--server", "http://phone.example:8000"])
+
+    assert code == 0
+    report_path = tmp_path / "reports" / "paper-p1-4-server.json"
+    assert report_path.exists()
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["server_solver"] == "openai"
+    assert report["stopped"] is None

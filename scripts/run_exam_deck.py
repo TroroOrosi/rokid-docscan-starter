@@ -56,6 +56,52 @@ GLASSDOC_ROTATION = 270
 # How often wait_for_answers polls answer-bundle. Tests set interval=0.
 POLL_S = 5.0
 
+# Per-call ceiling for a plain JSON round trip, well below the stall bound
+# wait_for_answers uses across many such calls.
+REQUEST_TIMEOUT_S = 30.0
+# The one call that legitimately takes longer: a multi-megabyte spread sent
+# over the phone's own Wi-Fi.
+PAGE_UPLOAD_TIMEOUT_S = 600.0
+
+
+def answer_ceiling_s() -> float:
+    """The longest one chatgpt-web solve can legitimately take.
+
+    ATTEMPTS preparation attempts (ChatGptWebClient._ask_locked), each up to
+    READY_TIMEOUT_S + UPLOAD_TIMEOUT_S, plus their RETRY_BACKOFF_S back-offs
+    (arithmetic series, sum 0..ATTEMPTS-1), plus one generation (TIMEOUT_S),
+    plus one page load (cdp.DEFAULT_TIMEOUT_S). 375s with defaults.
+
+    ponytail: this reads the PC's env, not the phone's; if the phone
+    overrides ROKID_CHATGPT_TIMEOUT_S, /v1/settings would have to publish it
+    for this bound to track that override.
+    """
+    from app.solvers.cdp import DEFAULT_TIMEOUT_S
+    from app.solvers.chatgpt_web import (
+        ATTEMPTS, READY_TIMEOUT_S, RETRY_BACKOFF_S, TIMEOUT_S, UPLOAD_TIMEOUT_S,
+    )
+
+    return (
+        ATTEMPTS * (READY_TIMEOUT_S + UPLOAD_TIMEOUT_S)
+        + RETRY_BACKOFF_S * ATTEMPTS * (ATTEMPTS - 1) / 2
+        + TIMEOUT_S
+        + DEFAULT_TIMEOUT_S
+    )
+
+
+def call(step: str, func, *args, **kwargs):
+    """One server-route HTTP call: a dropped connection prints FAIL and stops
+    the run instead of a bare traceback. Never prints the key -- only the
+    exception's class name, never its text or the request.
+    """
+    import httpx
+
+    try:
+        return func(*args, **kwargs)
+    except httpx.TransportError as error:
+        print(f"FAIL  {step}: no response ({type(error).__name__})")
+        return None
+
 
 def render_pages(pdf: Path, pages: range, scale: float) -> list[tuple[bytes, str]]:
     """(PNG bytes, page text) per page, in reading order.
@@ -122,7 +168,6 @@ def render_spreads(pdf: Path, span: range) -> list[tuple[bytes, str]]:
     """
     import pypdfium2 as pdfium
 
-    logging.disable(logging.WARNING)  # the DNC PDFs carry a no-extract flag
     doc = pdfium.PdfDocument(str(pdf))
     scale = PX_PER_MM * 25.4 / 72
     pages = []
@@ -141,27 +186,46 @@ def render_spreads(pdf: Path, span: range) -> list[tuple[bytes, str]]:
 _IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png"}
 
 
-def load_images(directory: Path | str) -> list[tuple[bytes, str]]:
-    """(image bytes, no text) per photo, in file-name order.
+def load_images(directory: Path | str, span: range) -> list[tuple[bytes, str]]:
+    """(image bytes, no text) per photo, in file-name order, for pages in span.
 
     This is what glassdoc uploads on the chatgpt-web route: the original
     still and no OCR. Its originals are named by capture time, so name order
-    is page order. camera2's still is landscape; a portrait file is not a
-    glassdoc original, and sending it with image_rotation=270 (glassdoc's own
-    value) would put the page sideways, so it is rejected instead of guessed.
+    is page order. Only the files inside span are opened and validated, so a
+    bad file the run never touches cannot fail it. camera2's still is
+    landscape; a portrait file is not a glassdoc original, and sending it
+    with image_rotation=270 (glassdoc's own value) would put the page
+    sideways, so it is rejected instead of guessed.
     """
-    from PIL import Image
+    from PIL import Image, UnidentifiedImageError
 
     files = sorted(p for p in Path(directory).iterdir() if p.suffix.lower() in _IMAGE_SUFFIXES)
     out: list[tuple[bytes, str]] = []
-    for path in files:
+    for path in files[span.start:span.stop]:
         data = path.read_bytes()
-        with Image.open(io.BytesIO(data)) as image:
-            if image.height > image.width:
-                raise ValueError(
-                    f"{path} is portrait; glassdoc originals are landscape (4032x3024)")
+        try:
+            with Image.open(io.BytesIO(data)) as image:
+                portrait = image.height > image.width
+        except (OSError, UnidentifiedImageError) as error:
+            raise ValueError(f"{path} is not a readable image ({error})") from error
+        if portrait:
+            raise ValueError(
+                f"{path} is portrait; glassdoc originals are landscape (4032x3024)")
         out.append((data, ""))
     return out
+
+
+def _load_photos(src: Path, span: range) -> list[tuple[bytes, str]] | None:
+    """load_images, with the FAIL print run() gives every other bad-input path.
+
+    None (already printed) on a bad file inside the span; run() must check
+    for it and stop, same as any other FAIL.
+    """
+    try:
+        return load_images(src, span)
+    except ValueError as error:
+        print(f"FAIL  {error}")
+        return None
 
 
 def mark_daimon(
@@ -246,13 +310,16 @@ def build_client(data_dir: Path, solver: str):
 
 
 def remote_client(server: str, key: str | None):
-    """The phone's server, reached over HTTP the way the glasses reach it."""
+    """The phone's server, reached over HTTP the way the glasses reach it.
+
+    No client-wide timeout: each call sets its own -- REQUEST_TIMEOUT_S for a
+    plain JSON round trip, PAGE_UPLOAD_TIMEOUT_S for the one call that sends
+    megabytes.
+    """
     import httpx
 
     headers = {"Authorization": f"Bearer {key}"} if key else {}
-    # One ceiling per HTTP call, well under wait_for_answers' own stall bound;
-    # that function keeps polling across many such calls.
-    return httpx.Client(base_url=server.rstrip("/"), headers=headers, timeout=600)
+    return httpx.Client(base_url=server.rstrip("/"), headers=headers)
 
 
 def wait_for_answers(
@@ -271,9 +338,11 @@ def wait_for_answers(
     since = clock()
     last_good = None
     last_revision = None
+    listed = False
     while True:
         try:
-            r = client.get(f"/v1/exam-sessions/{session_id}/answer-bundle")
+            r = client.get(
+                f"/v1/exam-sessions/{session_id}/answer-bundle", timeout=REQUEST_TIMEOUT_S)
         except httpx.TransportError as error:
             print(f"..    no response: {type(error).__name__}")
             if clock() - since > stall_s:
@@ -285,6 +354,9 @@ def wait_for_answers(
             # The model is listing the 小問. The server ends a listing itself
             # (the background batch always leaves _background_solves, success
             # or failure), so this adds no limit of its own.
+            if not listed:
+                print("..    listing        the model is listing the 小問")
+                listed = True
             since = clock()
             sleep(interval)
             continue
@@ -329,15 +401,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--server", default=None, help="e.g. http://<phone>:8000")
     parser.add_argument(
-        "--key", default=os.environ.get("ROKID_API_KEY"),
-        help="the server's API key (default: ROKID_API_KEY; keeps it out of shell history)",
+        "--key", default=None,
+        help="the server's API key (server route only; default ROKID_API_KEY, "
+             "which keeps it out of shell history)",
     )
     parser.add_argument("--subject", default="")
     parser.add_argument(
         "--audio", default=None,
         help="listening recording to send too (in-process route only)",
     )
-    parser.add_argument("--pages", default=None, help="1-based inclusive, e.g. 1-8")
+    parser.add_argument(
+        "--pages", default=None,
+        help="1-based inclusive, e.g. 1-8; with --server spreads pair from the first "
+             "page of the span, so the span must start on a left-hand page",
+    )
     parser.add_argument(
         "--daimon", default=None,
         help="1-based pages where a 大問 starts, e.g. 1,7,13 (in-process route only; "
@@ -364,6 +441,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     args = parser.parse_args(argv)
     if args.images and not args.server:
         parser.error("--images requires --server: photos only go the glassdoc route")
+    if args.key is not None and not args.server:
+        parser.error("--key requires --server: the in-process route has no server API key")
     if args.server:
         for dest, flag in _SERVER_INCOMPATIBLE:
             if getattr(args, dest) is not None:
@@ -391,8 +470,11 @@ def run(args) -> int:
     span = parse_pages(args.pages)
 
     if args.server:
-        client = remote_client(args.server, args.key)
-        r = client.get("/v1/settings")
+        key = args.key or os.environ.get("ROKID_API_KEY")
+        client = remote_client(args.server, key)
+        r = call("settings", client.get, "/v1/settings", timeout=REQUEST_TIMEOUT_S)
+        if r is None:
+            return 1
         if r.status_code != 200:
             print(f"FAIL  settings: {r.status_code} {r.text[:200]}")
             return 1
@@ -402,32 +484,43 @@ def run(args) -> int:
         print(f"ok    settings       {args.server} app "
               f"{settings['versions']['app_version']} solver {solver_name} "
               f"(ready={solver_info['ready']})")
+
+        pages = render_spreads(src, span) if args.pdf else _load_photos(src, span)
+        if pages is None:
+            return 1
+        rotation = 0 if args.pdf else GLASSDOC_ROTATION
+        if not pages:
+            print(f"FAIL  no pages read from {src}")
+            return 1
+        print(f"ok    pages          {len(pages)} read, "
+              f"{sum(len(t) for _, t in pages)} chars of text")
     else:
+        # Read/render pages BEFORE touching the data directory: a bad --pdf
+        # or --images path must leave no rundata/<stem> behind.
+        if args.pdf:
+            pages = render_pages(src, span, args.scale if args.scale is not None else 2.0)
+        else:
+            pages = _load_photos(src, span)
+            if pages is None:
+                return 1
+        rotation = 0 if args.pdf else GLASSDOC_ROTATION
+        if args.daimon:
+            pages = mark_daimon(pages, args.daimon, span.start)
+        if not pages:
+            print(f"FAIL  no pages read from {src}")
+            return 1
+        print(f"ok    pages          {len(pages)} read, "
+              f"{sum(len(t) for _, t in pages)} chars of text")
+
         data_dir = deck_data_dir(args.data_dir or "C:/rokid-exam-materials/rundata", src)
         print(f"ok    data dir       {data_dir}")
         solver_name = args.solver or "chatgpt-web"
         client = build_client(data_dir, solver_name)
 
-    if args.pdf:
-        pages = render_spreads(src, span) if args.server else render_pages(
-            src, span, args.scale if args.scale is not None else 2.0)
-        rotation = 0
-    else:
-        try:
-            pages = load_images(src)[span.start:span.stop]
-        except ValueError as error:
-            print(f"FAIL  {error}")
-            return 1
-        rotation = GLASSDOC_ROTATION
-    if args.daimon:
-        pages = mark_daimon(pages, args.daimon, span.start)
-    if not pages:
-        print(f"FAIL  no pages read from {src}")
+    r = call("documents", client.post, "/v1/documents", json={"title": name},
+              timeout=REQUEST_TIMEOUT_S)
+    if r is None:
         return 1
-    print(f"ok    pages          {len(pages)} read, "
-          f"{sum(len(t) for _, t in pages)} chars of text")
-
-    r = client.post("/v1/documents", json={"title": name})
     if r.status_code != 201:
         print(f"FAIL  documents: {r.status_code} {r.text[:200]}")
         return 1
@@ -437,30 +530,39 @@ def run(args) -> int:
         fields = {"page_index": index, "image_rotation": rotation}
         if text:
             fields["ocr_text"] = text
-        r = client.post(
-            f"/v1/documents/{doc_id}/pages",
+        r = call(
+            f"page {index}", client.post, f"/v1/documents/{doc_id}/pages",
             data=fields,
             files={"image": (f"p{index:02d}.{'jpg' if jpeg else 'png'}", image,
                              "image/jpeg" if jpeg else "image/png")},
+            timeout=PAGE_UPLOAD_TIMEOUT_S,
         )
+        if r is None:
+            return 1
         if r.status_code != 201:
             print(f"FAIL  page {index}: {r.status_code} {r.text[:200]}")
             return 1
-    r = client.post(f"/v1/documents/{doc_id}/finalize")
+    r = call("finalize", client.post, f"/v1/documents/{doc_id}/finalize",
+              timeout=REQUEST_TIMEOUT_S)
+    if r is None:
+        return 1
     if r.status_code != 200:
         print(f"FAIL  finalize: {r.status_code} {r.text[:200]}")
         return 1
 
     listening = bool(args.audio)
-    r = client.post(
-        "/v1/exam-sessions",
+    r = call(
+        "exam-sessions", client.post, "/v1/exam-sessions",
         json={
             "mode": "study",
             "document_id": doc_id,
             "exam_type": "listening" if listening else "written",
             "answer_format": "mark",
         },
+        timeout=REQUEST_TIMEOUT_S,
     )
+    if r is None:
+        return 1
     if r.status_code not in (200, 201):
         print(f"FAIL  exam-sessions: {r.status_code} {r.text[:200]}")
         return 1
@@ -481,10 +583,12 @@ def run(args) -> int:
     started = time.monotonic()
     reason = None
     if args.server:
-        r = client.post(
-            f"/v1/exam-sessions/{session_id}/finalize-reading",
-            params={"solve": "background"},
+        r = call(
+            "finalize-reading", client.post, f"/v1/exam-sessions/{session_id}/finalize-reading",
+            params={"solve": "background"}, timeout=REQUEST_TIMEOUT_S,
         )
+        if r is None:
+            return 1
         if r.status_code != 200:
             print(f"FAIL  finalize-reading: {r.status_code} {r.text[:300]}")
             return 1
@@ -494,17 +598,14 @@ def run(args) -> int:
                   f"(status {finalize_body.get('status')}); is ROKID_SOLVER on the "
                   "server unset or local?")
             return 1
-        # One answer is a composer wait plus one generation, both the
-        # server's own ceilings; imported lazily, it is a cheap import.
-        from app.solvers.chatgpt_web import READY_TIMEOUT_S, TIMEOUT_S
-
-        stall_s = READY_TIMEOUT_S + TIMEOUT_S
-        # ponytail: this reads the PC's env, not the phone's; if the phone
-        # overrides ROKID_CHATGPT_TIMEOUT_S, /v1/settings would have to
-        # publish it for this bound to track that override.
-        bundle, reason = wait_for_answers(client, session_id, stall_s, interval=POLL_S)
+        bundle, reason = wait_for_answers(client, session_id, answer_ceiling_s(), interval=POLL_S)
     else:
-        r = client.post(f"/v1/exam-sessions/{session_id}/finalize-reading")
+        r = call(
+            "finalize-reading", client.post,
+            f"/v1/exam-sessions/{session_id}/finalize-reading", timeout=REQUEST_TIMEOUT_S,
+        )
+        if r is None:
+            return 1
         if r.status_code != 200:
             print(f"FAIL  finalize-reading: {r.status_code} {r.text[:300]}")
             return 1
@@ -524,7 +625,7 @@ def run(args) -> int:
     per_question = elapsed / len(items) if items else 0.0
     print(f"ok    answers        {len(ready)}/{len(items)} ready in {elapsed:.1f}s "
           f"({per_question:.1f}s per question)")
-    if per_question > 40 and solver_name != "local":
+    if reason is None and per_question > 40 and solver_name != "local":
         print("WARN  per-question time is in the range that preceded the 2026-09-14 "
               "rate limit (7-13s clean). Stop rather than starting the next subject.")
     for item in items[:5]:
