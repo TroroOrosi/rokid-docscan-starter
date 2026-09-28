@@ -146,8 +146,12 @@ READY_TIMEOUT_S = float(os.environ.get("ROKID_CHATGPT_READY_S", "30"))
 CHAT_SCOPE = os.environ.get("ROKID_CHATGPT_CHAT_SCOPE", "subject").strip().lower()
 # Where that chat is recorded, beside BrowserGuard's journal in
 # DATA_DIR/browser-state, so a restarted server goes back to it instead of
-# opening another. Written only under the guard; only the current key is kept.
+# opening another. Written only under the guard.
 CHATS_FILE = "chats.json"
+# How many keys the record holds, least recently used dropped first. Two
+# sessions can be answered at once; when the record held one key, each question
+# replaced the other session's chat, and interleaving opened a chat per question.
+CHATS_KEPT = 8
 ATTEMPTS = int(os.environ.get("ROKID_CHATGPT_ATTEMPTS", "3"))
 RETRY_BACKOFF_S = float(os.environ.get("ROKID_CHATGPT_RETRY_S", "5"))
 # A throttled account is refused in the message body, not by an exception, so a
@@ -444,6 +448,20 @@ def _url_of(page) -> str:
         return page.url
     except Exception:  # noqa: BLE001 - a closing page has no url
         return ""
+
+
+def _read_chats(directory: Path) -> dict:
+    """The recorded chats by key, least recently used first; unreadable is none.
+
+    The file written before the map held one record, which reads as a
+    one-entry map, so an upgraded server still returns to that chat.
+    """
+    try:
+        record = json.loads((directory / CHATS_FILE).read_text(encoding="utf-8"))
+        chats = record["chats"] if "chats" in record else {record["key"]: record}
+    except (FileNotFoundError, ValueError, KeyError, TypeError):
+        return {}
+    return chats if isinstance(chats, dict) else {}
 
 
 _NO_RETURN = "could not return to the subject's chat; no new chat was opened"
@@ -777,16 +795,16 @@ class ChatGptWebClient:
         self._unsaved = False
         self._chat_key = self._chat_url = None
         self._attached_in_chat, self._source_attached = set(), False
+        entry = _read_chats(guard.directory).get(chat_key)
         try:
-            record = json.loads((guard.directory / CHATS_FILE).read_text(encoding="utf-8"))
-            key, url = record["key"], record["url"]
-            attached = {str(d) for d in record["attached"]}
-        except (FileNotFoundError, ValueError, KeyError, TypeError):
+            url = entry["url"]
+            attached = {str(d) for d in entry["attached"]}
+        except (KeyError, TypeError):
             return
-        if isinstance(key, str) and isinstance(url, str) and _is_chat_url(url):
-            self._chat_key, self._chat_url = key, url
+        if isinstance(url, str) and _is_chat_url(url):
+            self._chat_key, self._chat_url = chat_key, url
             self._attached_in_chat = attached
-            self._source_attached = record.get("source_attached") is True
+            self._source_attached = entry.get("source_attached") is True
 
     def _keep_chat(self, guard, chat_key, url: str, digests=(), *, booklet=None) -> None:
         """Record the chat a sent message lives in, so no later attempt opens another.
@@ -820,19 +838,24 @@ class ChatGptWebClient:
                 pass  # kept in memory; _load_chat writes it before the next send
 
     def _save_chat(self, guard) -> None:
-        """Write the record. One key only: a new key replaces it.
+        """Write this key's entry, as the most recently used of CHATS_KEPT.
 
         No prompt, answer or credential goes in, and the URL is never logged.
         """
-        record = {"key": self._chat_key, "url": self._chat_url,
-                  "attached": sorted(self._attached_in_chat),
-                  "source_attached": self._source_attached}
+        chats = _read_chats(guard.directory)
+        # The map's order is the use order, oldest first: move this key last.
+        chats.pop(self._chat_key, None)
+        chats[self._chat_key] = {"url": self._chat_url,
+                                 "attached": sorted(self._attached_in_chat),
+                                 "source_attached": self._source_attached}
+        # Not sort_keys: that would reorder the map and lose which is oldest.
+        record = {"chats": dict(list(chats.items())[-CHATS_KEPT:])}
         # Same write as BrowserGuard's journal: temp file, fsync, replace, then
         # the directory, so a power cut leaves the old record or the new one.
         fd, temporary = tempfile.mkstemp(prefix="chats-", suffix=".tmp", dir=guard.directory)
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as target:
-                json.dump(record, target, sort_keys=True)
+                json.dump(record, target)
                 target.flush()
                 os.fsync(target.fileno())
             os.replace(temporary, guard.directory / CHATS_FILE)

@@ -742,10 +742,9 @@ def test_the_next_subject_gets_its_own_chat(monkeypatch, tmp_path):
 
     assert len(_clicks(page, chatgpt_web.NEW_CHAT_SEL)) == 2
     assert not [k for k, _ in page.events if k == "goto"], "a new key is not sent back"
-    # Only the current key is kept: the new subject's chat replaced the old one.
-    record = (tmp_path / "browser-state" / "chats.json").read_text(encoding="utf-8")
-    kept = json.dumps(json.loads(record), ensure_ascii=False)
-    assert "物理" in kept and "数学" not in kept
+    # Both are kept: the new subject's chat does not replace the old one.
+    record = json.loads((tmp_path / "browser-state" / "chats.json").read_text(encoding="utf-8"))
+    assert list(record["chats"]) == ["subject:数学", "subject:物理"]
 
 
 def test_a_page_already_in_this_chat_is_not_uploaded_again(monkeypatch):
@@ -1134,7 +1133,7 @@ def test_a_record_that_is_not_a_chatgpt_chat_counts_as_none(monkeypatch, tmp_pat
     assert not _gotos(page)
     assert len(_clicks(page, chatgpt_web.NEW_CHAT_SEL)) == 1
     kept = json.loads((tmp_path / "browser-state" / "chats.json").read_text(encoding="utf-8"))
-    assert kept["url"] == page.url, "replaced by the chat that now exists"
+    assert kept["chats"]["subject:数学"]["url"] == page.url, "replaced by the chat that now exists"
 
 
 @pytest.mark.parametrize("first", [True, False], ids=["first message", "later message"])
@@ -1307,7 +1306,75 @@ def test_an_answer_survives_a_failed_record_write(monkeypatch, tmp_path):
     assert len(_clicks(page, chatgpt_web.NEW_CHAT_SEL)) == 1
     assert len(page.uploads) == 1 and len(_sends(page)) == 2
     record = json.loads((tmp_path / "browser-state" / "chats.json").read_text(encoding="utf-8"))
-    assert record["url"] == page.url
+    assert record["chats"]["subject:数学"]["url"] == page.url
+
+
+def _chats(tmp_path):
+    return json.loads((tmp_path / "browser-state" / "chats.json").read_text(encoding="utf-8"))["chats"]
+
+
+def test_interleaved_sessions_each_go_back_to_their_own_chat(monkeypatch, tmp_path):
+    """Two sessions answered in turn: one chat and one booklet each, not one per question.
+
+    With one recorded key, each switch replaced the other session's record, so
+    the next question of that session opened another chat and built its
+    booklet again: 6 chats for 6 questions in the reviewer's probe.
+    """
+    _fast(monkeypatch)
+    page = _StubPage(["答"] * 6)
+    client = chatgpt_web.ChatGptWebClient()
+    ctx = _OneTabContext(page)
+    builds = []
+
+    def booklet():
+        builds.append(1)
+        return [{"name": "page001.png", "mimeType": "image/png", "buffer": PNG}]
+
+    for n in range(3):
+        for key in ("session:1", "session:2"):
+            client._ask_with_retries(ctx, f"問{n + 1}", [], files=booklet, chat_key=key)
+
+    assert len(_clicks(page, chatgpt_web.NEW_CHAT_SEL)) == 2
+    assert len(builds) == 2
+    assert len(_sends(page)) == 6
+    assert set(_chats(tmp_path)) == {"session:1", "session:2"}
+
+
+def test_the_record_keeps_the_eight_most_recently_used_chats(monkeypatch, tmp_path):
+    _fast(monkeypatch)
+    page = _StubPage(["答"] * 10)
+    client = chatgpt_web.ChatGptWebClient()
+    ctx = _OneTabContext(page)
+    keys = [f"session:{n}" for n in range(9)]
+    for key in keys[:8]:
+        client._ask_with_retries(ctx, "問1", [], chat_key=key)
+    # session:0 is the oldest written, but it is used again, so session:1 is
+    # now the least recently used one.
+    client._ask_with_retries(ctx, "問2", [], chat_key=keys[0])
+    client._ask_with_retries(ctx, "問1", [], chat_key=keys[8])
+
+    assert list(_chats(tmp_path)) == keys[2:8] + [keys[0], keys[8]]
+    assert len(_clicks(page, chatgpt_web.NEW_CHAT_SEL)) == 9
+
+
+def test_a_single_record_file_is_read_as_one_chat(monkeypatch, tmp_path):
+    """The file written before the map existed still sends its subject back."""
+    _fast(monkeypatch)
+    chat = "https://chatgpt.com/c/recorded"
+    (tmp_path / "browser-state").mkdir()
+    (tmp_path / "browser-state" / "chats.json").write_text(json.dumps({
+        "key": "subject:数学", "url": chat,
+        "attached": [chatgpt_web._digest(PNG)], "source_attached": False,
+    }), encoding="utf-8")
+    page = _StubPage(["答"])
+
+    chatgpt_web.ChatGptWebClient()._ask_with_retries(
+        _OneTabContext(page), "問2", [PNG], chat_key="subject:数学")
+
+    assert _gotos(page) == [chat]
+    assert not _clicks(page, chatgpt_web.NEW_CHAT_SEL)
+    assert not page.uploads, "the recorded attachment is still in that chat"
+    assert _chats(tmp_path)["subject:数学"]["url"] == chat
 
 
 def test_previous_assistant_reply_is_not_the_new_answer(monkeypatch):
