@@ -63,7 +63,7 @@ Runs on: Windows PC `C:\rokid-docscan-starter`。実機の状態を変える操�
 
 1〜3（PC）は完了：`scripts/run_exam_deck.py --server`、上の修正、`scripts/phone_serve.sh`。CIは7節。
 4. **先に直す（PC、利用者の決定 9/29）**：(1) 返答が完全に終わるまで次を送らない。スマホの実画面で思考中・生成中・完了のDOMを読み（送信なし）、判定をそれに合わせる。
-   (2) 送信を「1大問1通」か「全問1通」にまとめる（小問ごとの送信をやめる）。返答を小問に分けてanswer-bundleへ入れる。
+   (2) **全問を1通で送る**（利用者の決定 9/29。大問の区切りを誤ると崩れるため、大問ごと・小問ごとの送信はしない）。返答を小問に分けてanswer-bundleへ入れる。
    直したら下の手順で4aをやり直す。
    Runs on: スマホFastAPI＋スマホChrome、PCからHTTPで投入。**承認後。**
    - 準備（スマホ、利用者）：Termuxで `termux-wake-lock; sshd`。サーバを `61b3288` へ更新（`~/rokid-server`）。
