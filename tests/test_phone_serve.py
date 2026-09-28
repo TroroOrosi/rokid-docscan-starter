@@ -71,39 +71,46 @@ def _shims(tmp_path: Path, ip_line: str, omit: tuple[str, ...] = ()) -> tuple[Pa
 
 
 def _env_file(tmp_path: Path, mode: int) -> Path:
-    home = tmp_path / "home"
-    home.mkdir(exist_ok=True)
-    env_file = home / ".rokid.env"
-    env_file.write_text("ROKID_SOLVER=chatgpt-web\n")
+    """The script's default env file, where the phone's server env is recorded
+    (data/device-setup/apply_phone.py), in its `export NAME=value` form."""
+    env_file = tmp_path / "home" / "rokid-server" / "multimodal.env"
+    env_file.parent.mkdir(parents=True, exist_ok=True)
+    env_file.write_text("export ROKID_SOLVER=chatgpt-web\n")
     os.chmod(env_file, mode)
     return env_file
 
 
-_BLOCKED_TOOLS = ("termux-wake-lock", "adb", "ip", "python")
+# What the script runs before its preflight: the shebang's `env` finds `bash`
+# on PATH, and the mode check calls `stat`.
+_NEEDED_BEFORE_PREFLIGHT = ("env", "bash", "stat")
 
 
-def _safe_ambient_path(raw_path: str | None = None) -> str:
-    """Ambient PATH entries with none of the script's four tools reachable
-    in them, so a test that omits a shim (to exercise the preflight check)
-    can never fall through to a real adb/ip/python/termux-wake-lock on this
-    host or CI runner (task-4-fix-2 item 2)."""
-    raw_path = os.environ["PATH"] if raw_path is None else raw_path
+def _holds(directory: str, tool: str) -> bool:
     exts = [""] + os.environ.get("PATHEXT", "").split(os.pathsep) if sys.platform == "win32" else [""]
-    safe_dirs = []
-    for d in raw_path.split(os.pathsep):
-        if not d:
+    return any(os.path.exists(os.path.join(directory, tool + ext)) for ext in exts)
+
+
+def _test_path(bin_dir: Path, ambient: str | None = None, *, without: str | None = None) -> str:
+    """The shim dir first, then the ambient PATH, never an empty entry (cwd).
+
+    The shims come first and shadow the script's tools, so a happy path keeps
+    the whole ambient PATH. Filtering it by tool name dropped /usr/bin on
+    Linux, which holds `ip`, and the script lost env, bash and stat with it.
+    Only a test that omits one shim (`without`) drops the ambient directories
+    holding that tool, so its preflight can never reach a real one; if such a
+    directory also holds what the script needs first, that test is skipped.
+    """
+    ambient = os.environ["PATH"] if ambient is None else ambient
+    kept = []
+    for directory in filter(None, ambient.split(os.pathsep)):
+        if without and _holds(directory, without):
+            needed = [t for t in _NEEDED_BEFORE_PREFLIGHT if _holds(directory, t)]
+            if needed:
+                pytest.skip(f"{directory} holds {without} and also {', '.join(needed)}, "
+                            "which the script needs before its preflight")
             continue
-        blocked = any(
-            os.path.exists(os.path.join(d, tool + ext)) for tool in _BLOCKED_TOOLS for ext in exts
-        )
-        if not blocked:
-            safe_dirs.append(d)
-    return os.pathsep.join(safe_dirs)
-
-
-def _test_path(bin_dir: Path, ambient: str | None = None) -> str:
-    """The shim dir first, then only the ambient PATH entries safe to keep."""
-    return str(bin_dir) + os.pathsep + _safe_ambient_path(ambient)
+        kept.append(directory)
+    return os.pathsep.join([str(bin_dir), *kept])
 
 
 def _run(args, tmp_path: Path, path_value: str, home: Path, umask: str | None = None):
@@ -232,7 +239,7 @@ def test_preflight_missing_adb_names_it_and_exits_nonzero(tmp_path):
     )
     home = tmp_path / "home"
     _env_file(tmp_path, 0o600)
-    path_value = _test_path(bin_dir)
+    path_value = _test_path(bin_dir, without="adb")
 
     result = _run(["wlan0"], tmp_path, path_value, home, umask="077")
 
@@ -332,7 +339,7 @@ def test_adb_connect_banner_then_failure_is_refused(tmp_path):
 @requires_bash
 def test_missing_adb_preflight_never_reaches_real_adb_on_ambient_path(tmp_path):
     """A directory on the *ambient* PATH could hide a real adb; _test_path
-    must strip any ambient entry that shadows one of the four tools so the
+    must strip any ambient entry holding the omitted tool so the
     preflight-missing-adb case never falls through to it (task-4-fix-2 item 2)."""
     real_bin = tmp_path / "real_bin"
     real_bin.mkdir()
@@ -347,7 +354,7 @@ def test_missing_adb_preflight_never_reaches_real_adb_on_ambient_path(tmp_path):
     home = tmp_path / "home"
     _env_file(tmp_path, 0o600)
     ambient = str(real_bin) + os.pathsep + os.environ["PATH"]
-    path_value = _test_path(bin_dir, ambient)
+    path_value = _test_path(bin_dir, ambient, without="adb")
 
     result = _run(["wlan0"], tmp_path, path_value, home, umask="077")
 
@@ -355,3 +362,59 @@ def test_missing_adb_preflight_never_reaches_real_adb_on_ambient_path(tmp_path):
     assert "adb not found" in result.stderr
     assert not marker.exists()
     assert not log.exists() or log.read_text() == ""
+
+
+def test_a_happy_path_keeps_an_ambient_directory_that_holds_ip(tmp_path):
+    """Ubuntu's /usr/bin holds ip beside env, bash and stat."""
+    usr_bin = tmp_path / "usr_bin"
+    usr_bin.mkdir()
+    for name in ("ip", "env", "bash", "stat"):
+        (usr_bin / name).write_text("")
+    bin_dir = tmp_path / "bin"
+
+    assert _test_path(bin_dir, str(usr_bin) + os.pathsep).split(os.pathsep) == [
+        str(bin_dir), str(usr_bin)]
+
+
+def test_a_missing_tool_beside_bash_skips_that_test_and_names_the_directory(tmp_path):
+    usr_bin = tmp_path / "usr_bin"
+    usr_bin.mkdir()
+    for name in ("adb", "bash"):
+        (usr_bin / name).write_text("")
+
+    with pytest.raises(pytest.skip.Exception, match=re.escape(str(usr_bin))):
+        _test_path(tmp_path / "bin", str(usr_bin), without="adb")
+
+
+@requires_bash
+def test_preflight_missing_wake_lock_names_termux_tools(tmp_path):
+    bin_dir, log = _shims(
+        tmp_path, "2: wlan0    inet 192.168.1.23/24 brd 192.168.1.255 scope global wlan0",
+        omit=("termux-wake-lock",),
+    )
+    home = tmp_path / "home"
+    _env_file(tmp_path, 0o600)
+    path_value = _test_path(bin_dir, without="termux-wake-lock")
+
+    result = _run(["wlan0"], tmp_path, path_value, home, umask="077")
+
+    assert result.returncode != 0
+    assert "termux-wake-lock not found: pkg install termux-tools" in result.stderr
+    assert not log.exists() or log.read_text() == ""
+
+
+@requires_bash
+def test_the_recorded_phone_env_file_reaches_the_server(tmp_path):
+    """The default file uses `export` lines; `set -a; .` loads them all the same."""
+    bin_dir, log = _shims(
+        tmp_path, "2: wlan0    inet 192.168.1.23/24 brd 192.168.1.255 scope global wlan0",
+        omit=("python",),
+    )
+    _write_shim(bin_dir, "python", log, 'echo "solver=$ROKID_SOLVER"')
+    home = tmp_path / "home"
+    _env_file(tmp_path, 0o600)
+
+    result = _run(["wlan0"], tmp_path, _test_path(bin_dir), home, umask="077")
+
+    assert result.returncode == 0, result.stderr
+    assert "solver=chatgpt-web" in result.stdout

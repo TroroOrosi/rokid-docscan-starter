@@ -13,7 +13,10 @@ set -euo pipefail
 
 interface="${1:?usage: phone_serve.sh <wifi-interface>}"
 
-env_file="${ROKID_ENV_FILE:-$HOME/.rokid.env}"
+# The default is where the phone's server env is already recorded
+# (data/device-setup/apply_phone.py). Its lines are `export NAME=value`, which
+# `set -a; .` below loads the same as plain NAME=value.
+env_file="${ROKID_ENV_FILE:-$HOME/rokid-server/multimodal.env}"
 if [[ ! -f "$env_file" ]]; then
     echo "phone_serve: env file not found: $env_file" >&2
     exit 1
@@ -31,7 +34,8 @@ set +a
 for tool in termux-wake-lock adb ip python; do
     if ! command -v "$tool" >/dev/null 2>&1; then
         case "$tool" in
-            termux-wake-lock) hint="pkg install termux-api" ;;
+            # termux-wake-lock ships in termux-tools, not termux-api.
+            termux-wake-lock) hint="pkg install termux-tools" ;;
             adb) hint="pkg install android-tools" ;;
             ip) hint="pkg install iproute2" ;;
             python) hint="pkg install python" ;;
