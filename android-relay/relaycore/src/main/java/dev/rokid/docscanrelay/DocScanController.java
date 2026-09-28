@@ -2,6 +2,8 @@ package dev.rokid.docscanrelay;
 
 import android.content.Context;
 import android.content.SharedPreferences;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -165,6 +167,8 @@ public final class DocScanController implements AutoCloseable {
     private CaptureReviewStore.Pending autoBest;
     private double autoBestScore;
     private String lastRegisteredPageText = "";
+    // Process-local like the text: after a restart the first shot is never a duplicate.
+    private PageImageSimilarity.Luma lastRegisteredThumb;
     private int duplicateBurstsSeen;
     private int unreadableBurstsSeen;
     private volatile long sessionId;
@@ -496,6 +500,7 @@ public final class DocScanController implements AutoCloseable {
                 autoShotsRemaining = 0;
                 autoBest = null;
                 lastRegisteredPageText = "";
+                lastRegisteredThumb = null;
                 listeningMode = listening;
                 listeningComplete = listeningFailed = finishCaptureRequested = false;
                 listener.onCaptureReviewCleared();
@@ -1729,6 +1734,7 @@ public final class DocScanController implements AutoCloseable {
         try { captureReviewPersistence.clearAfterCommit(); }
         catch (IOException ignored) { /* Recovery compares the retained pending file with the committed revision. */ }
         lastRegisteredPageText = pending.ocrText;
+        lastRegisteredThumb = thumbnail(pending.jpeg);
         manualCaptureRequested = false;
         listener.onCaptureReviewCleared();
         publish(RelayState.READING, List.of(nextPageIndex + "枚保存済み", "次のページへ", "ダブルタップで撮影終了"),
@@ -1971,6 +1977,7 @@ public final class DocScanController implements AutoCloseable {
                                 + (replaced ? " (replaced)" : "")
                                 + persistenceWarning);
                 lastRegisteredPageText = pending.ocrText;
+                lastRegisteredThumb = thumbnail(pending.jpeg);
                 manualCaptureRequested = false;
                 if (link.supportsLocalCaptureReview() && finishCaptureRequested) {
                     finishReadingNow();
@@ -2258,10 +2265,11 @@ public final class DocScanController implements AutoCloseable {
         CaptureReviewStore.Pending best = autoBest;
         autoBest = null;
         autoBestScore = 0;
-        if (best == null || best.ocrCharacters() == 0 || best.hasOcrFailure()
-                || best.isFramingFailing()) {
-            // Nothing was read, so there is nothing to register and nothing to
-            // wait for: go straight back and shoot again. Only after several
+        if (best == null || best.isFramingFailing()) {
+            // No photo, or the page ran outside the frame: nothing worth
+            // reviewing, so go straight back and shoot again. A photo OCR could
+            // not read is not dropped here; GPT reads the original image, so it
+            // goes to the same review as any other. Only after several
             // consecutive failures does the interval open up, because a camera
             // firing continuously keeps the privacy LED lit and heats the
             // glasses.
@@ -2281,7 +2289,7 @@ public final class DocScanController implements AutoCloseable {
             return;
         }
         unreadableBurstsSeen = 0;
-        if (PageTextSimilarity.isSamePage(lastRegisteredPageText, best.ocrText)) {
+        if (isRegisteredPage(best)) {
             duplicateBurstsSeen++;
             if (duplicateBurstsSeen >= AUTO_DUPLICATE_BURST_LIMIT) {
                 stopAutoCaptureNow(
@@ -2310,6 +2318,57 @@ public final class DocScanController implements AutoCloseable {
         }
         listener.onCaptureReview(best);
         publishCaptureReview(best, "Review selected automatic frame", true);
+    }
+
+    /**
+     * Text decides when both sides read enough to judge; otherwise the images
+     * do. Self-similarity is 0 exactly when {@link PageTextSimilarity} finds a
+     * text too short to judge.
+     */
+    private boolean isRegisteredPage(CaptureReviewStore.Pending shot) {
+        if (PageTextSimilarity.similarity(lastRegisteredPageText, lastRegisteredPageText) > 0
+                && PageTextSimilarity.similarity(shot.ocrText, shot.ocrText) > 0) {
+            return PageTextSimilarity.isSamePage(lastRegisteredPageText, shot.ocrText);
+        }
+        return lastRegisteredThumb != null
+                && PageImageSimilarity.isSamePage(lastRegisteredThumb, thumbnail(shot.jpeg));
+    }
+
+    /** Longest thumbnail edge for the same-page check; the comparison grid is 32x24. */
+    private static final int THUMBNAIL_EDGE_PIXELS = 64;
+
+    /**
+     * The photo decoded at a power-of-two reduction to at most
+     * {@link #THUMBNAIL_EDGE_PIXELS} on its long side, as luminance. Null when
+     * the bytes do not decode, which compares as a different page. Never
+     * throws: it runs inside both commit paths, after the photo is saved.
+     */
+    static PageImageSimilarity.Luma thumbnail(byte[] jpeg) {
+        if (jpeg == null || jpeg.length == 0) return null;
+        try {
+            BitmapFactory.Options options = new BitmapFactory.Options();
+            options.inJustDecodeBounds = true;
+            BitmapFactory.decodeByteArray(jpeg, 0, jpeg.length, options);
+            int longEdge = Math.max(options.outWidth, options.outHeight);
+            if (longEdge <= 0) return null;
+            options = new BitmapFactory.Options();
+            options.inSampleSize = 1;
+            while (longEdge / options.inSampleSize > THUMBNAIL_EDGE_PIXELS) options.inSampleSize *= 2;
+            Bitmap bitmap = BitmapFactory.decodeByteArray(jpeg, 0, jpeg.length, options);
+            if (bitmap == null) return null;
+            int width = bitmap.getWidth();
+            int height = bitmap.getHeight();
+            int[] pixels = new int[width * height];
+            bitmap.getPixels(pixels, 0, width, 0, 0, width, height);
+            bitmap.recycle();
+            for (int i = 0; i < pixels.length; i++) {
+                int c = pixels[i];
+                pixels[i] = (299 * ((c >> 16) & 0xff) + 587 * ((c >> 8) & 0xff) + 114 * (c & 0xff)) / 1000;
+            }
+            return new PageImageSimilarity.Luma(width, height, pixels);
+        } catch (RuntimeException | OutOfMemoryError error) {
+            return null;
+        }
     }
 
     private void publishAutoWaiting(String first, String second, String diagnostic) {
