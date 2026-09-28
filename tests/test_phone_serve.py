@@ -418,3 +418,24 @@ def test_the_recorded_phone_env_file_reaches_the_server(tmp_path):
 
     assert result.returncode == 0, result.stderr
     assert "solver=chatgpt-web" in result.stdout
+
+
+@requires_bash
+def test_an_address_argument_needs_no_ip_tool(tmp_path):
+    """Termux on the F-51F has no `ip` (measured 2026-09-29: command not found).
+
+    An IPv4 address given as the argument is bound as is, and `ip` is neither
+    required by the preflight nor called.
+    """
+    bin_dir, log = _shims(tmp_path, "", omit=("ip",))
+    home = tmp_path / "home"
+    _env_file(tmp_path, 0o600)
+    path_value = _test_path(bin_dir, without="ip")
+
+    result = _run(["127.0.0.1"], tmp_path, path_value, home, umask="077")
+
+    assert result.returncode == 0, result.stderr
+    names = [line.split()[0] for line in log.read_text().splitlines()]
+    assert names == ["termux-wake-lock", "adb", "adb", "python"]
+    assert "--host 127.0.0.1" in log.read_text().splitlines()[-1]
+    assert "http://127.0.0.1:8000" in result.stdout

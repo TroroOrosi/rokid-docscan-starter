@@ -11,7 +11,16 @@
 # is refused before anything touches adb.
 set -euo pipefail
 
-interface="${1:?usage: phone_serve.sh <wifi-interface>}"
+target="${1:?usage: phone_serve.sh <wifi-interface | IPv4 address>}"
+# Termux on the F-51F has no `ip` (measured 2026-09-29), so an address can be
+# given directly; only an interface name needs `ip` to resolve it.
+if [[ "$target" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    address="$target"
+    tools="termux-wake-lock adb python"
+else
+    address=""
+    tools="termux-wake-lock adb ip python"
+fi
 
 # The default is where the phone's server env is already recorded
 # (data/device-setup/apply_phone.py). Its lines are `export NAME=value`, which
@@ -31,7 +40,7 @@ set -a
 . "$env_file"
 set +a
 
-for tool in termux-wake-lock adb ip python; do
+for tool in $tools; do
     if ! command -v "$tool" >/dev/null 2>&1; then
         case "$tool" in
             # termux-wake-lock ships in termux-tools, not termux-api.
@@ -74,10 +83,12 @@ fi
 adb -s 127.0.0.1:5555 forward tcp:9222 localabstract:chrome_devtools_remote
 echo "phone_serve: keep Chrome in the foreground -- the DevTools socket disappears otherwise." >&2
 
-address="$(ip -4 -o addr show dev "$interface" | awk '{sub(/\/.*/, "", $4); print $4; exit}')"
 if [[ -z "$address" ]]; then
-    echo "phone_serve: no IPv4 address found on interface $interface" >&2
-    exit 1
+    address="$(ip -4 -o addr show dev "$target" | awk '{sub(/\/.*/, "", $4); print $4; exit}')"
+    if [[ -z "$address" ]]; then
+        echo "phone_serve: no IPv4 address found on interface $target" >&2
+        exit 1
+    fi
 fi
 
 echo "phone_serve: glasses should use http://$address:8000"
