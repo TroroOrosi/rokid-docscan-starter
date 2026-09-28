@@ -7,6 +7,8 @@
 #   adb tcpip 5555
 # This script then connects to the phone's own loopback adbd and forwards
 # Chrome's DevTools socket so app/solvers/cdp.py can reach it.
+# Step order: the env file is checked before wake-lock/adb, so a bad env file
+# is refused before anything touches adb.
 set -euo pipefail
 
 interface="${1:?usage: phone_serve.sh <wifi-interface>}"
@@ -26,18 +28,40 @@ set -a
 . "$env_file"
 set +a
 
+for tool in termux-wake-lock adb ip python; do
+    if ! command -v "$tool" >/dev/null 2>&1; then
+        case "$tool" in
+            termux-wake-lock) hint="pkg install termux-api" ;;
+            adb) hint="pkg install android-tools" ;;
+            ip) hint="pkg install iproute2" ;;
+            python) hint="pkg install python" ;;
+        esac
+        echo "phone_serve: $tool not found: $hint" >&2
+        exit 1
+    fi
+done
+
 termux-wake-lock
 
-if ! adb connect 127.0.0.1:5555; then
-    echo "phone_serve: adb connect failed. Put adbd in TCP mode from a PC first, after every phone reboot:" >&2
-    echo "  adb tcpip 5555" >&2
-    exit 1
-fi
+# adb commonly prints "failed to connect ..." and still exits 0, so only the
+# exit code cannot be trusted. Capture the output, show it, and only proceed
+# on a "connected to" / "already connected to" prefix.
+connect_output="$(adb connect 127.0.0.1:5555 2>&1)" || true
+echo "$connect_output"
+case "$connect_output" in
+    "connected to "*|"already connected to "*)
+        ;;
+    *)
+        echo "phone_serve: adb connect did not report success. Put adbd in TCP mode from a PC first, after every phone reboot:" >&2
+        echo "  adb tcpip 5555" >&2
+        exit 1
+        ;;
+esac
 
 adb -s 127.0.0.1:5555 forward tcp:9222 localabstract:chrome_devtools_remote
 echo "phone_serve: keep Chrome in the foreground -- the DevTools socket disappears otherwise." >&2
 
-address="$(ip -4 -o addr show dev "$interface" | awk '{print $4}' | cut -d/ -f1 | head -n1)"
+address="$(ip -4 -o addr show dev "$interface" | awk '{sub(/\/.*/, "", $4); print $4; exit}')"
 if [[ -z "$address" ]]; then
     echo "phone_serve: no IPv4 address found on interface $interface" >&2
     exit 1

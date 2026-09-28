@@ -47,14 +47,26 @@ def _write_shim(bin_dir: Path, name: str, log: Path, body: str) -> None:
     os.chmod(path, 0o755)
 
 
-def _shims(tmp_path: Path, ip_line: str) -> tuple[Path, Path]:
+def _shims(tmp_path: Path, ip_line: str, omit: tuple[str, ...] = ()) -> tuple[Path, Path]:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     log = tmp_path / "calls.log"
-    _write_shim(bin_dir, "termux-wake-lock", log, "exit 0")
-    _write_shim(bin_dir, "adb", log, "exit 0")
-    _write_shim(bin_dir, "ip", log, f"echo {ip_line!r}")
-    _write_shim(bin_dir, "python", log, "exit 0")
+    if "termux-wake-lock" not in omit:
+        _write_shim(bin_dir, "termux-wake-lock", log, "exit 0")
+    if "adb" not in omit:
+        # Real adb prints "connected to <addr>" / "already connected to <addr>"
+        # on success and commonly exits 0 even on failure text -- the shim
+        # mirrors that shape so the script's own output-based check is real.
+        _write_shim(bin_dir, "adb", log, 'if [[ "$1" == "connect" ]]; then echo "connected to $2"; fi\nexit 0')
+    if "ip" not in omit:
+        # ip_line may hold multiple "\n"-joined lines (to simulate several
+        # inet lines); emit each as its own echo so the shim's stdout has
+        # real newlines, not a literal backslash-n.
+        lines = ip_line.split("\n") if ip_line else []
+        body = "\n".join(f"echo {line!r}" for line in lines) or "true"
+        _write_shim(bin_dir, "ip", log, body)
+    if "python" not in omit:
+        _write_shim(bin_dir, "python", log, "exit 0")
     return bin_dir, log
 
 
@@ -146,3 +158,75 @@ def test_interface_without_address_fails(tmp_path):
     names = [line.split()[0] for line in log.read_text().splitlines()]
     assert names == ["termux-wake-lock", "adb", "adb", "ip"]
     assert "python" not in result.stdout
+
+
+@requires_bash
+def test_adb_connect_failure_text_with_exit_zero_is_refused(tmp_path):
+    """adb commonly prints "failed to connect ..." and still exits 0; the
+    script must key off the output, not the exit code (task-4-fix-1 item 1)."""
+    bin_dir, log = _shims(
+        tmp_path, "2: wlan0    inet 192.168.1.23/24 brd 192.168.1.255 scope global wlan0", omit=("adb",)
+    )
+    _write_shim(bin_dir, "adb", log, 'if [[ "$1" == "connect" ]]; then echo "failed to connect to 127.0.0.1:5555"; fi\nexit 0')
+    home = tmp_path / "home"
+    _env_file(tmp_path, 0o600)
+    path_value = str(bin_dir) + os.pathsep + os.environ["PATH"]
+
+    result = _run(["wlan0"], tmp_path, path_value, home, umask="077")
+
+    assert result.returncode != 0
+    assert "adb tcpip 5555" in result.stderr
+    assert "failed to connect" in result.stdout
+    names = [line.split()[0] for line in log.read_text().splitlines()]
+    assert names == ["termux-wake-lock", "adb"]
+    assert "python" not in result.stdout
+
+
+@requires_bash
+def test_adb_already_connected_proceeds(tmp_path):
+    bin_dir, log = _shims(
+        tmp_path, "2: wlan0    inet 192.168.1.23/24 brd 192.168.1.255 scope global wlan0", omit=("adb",)
+    )
+    _write_shim(bin_dir, "adb", log, 'if [[ "$1" == "connect" ]]; then echo "already connected to $2"; fi\nexit 0')
+    home = tmp_path / "home"
+    _env_file(tmp_path, 0o600)
+    path_value = str(bin_dir) + os.pathsep + os.environ["PATH"]
+
+    result = _run(["wlan0"], tmp_path, path_value, home, umask="077")
+
+    assert result.returncode == 0, result.stderr
+    assert "http://192.168.1.23:8000" in result.stdout
+
+
+@requires_bash
+def test_preflight_missing_adb_names_it_and_exits_nonzero(tmp_path):
+    bin_dir, log = _shims(
+        tmp_path, "2: wlan0    inet 192.168.1.23/24 brd 192.168.1.255 scope global wlan0", omit=("adb",)
+    )
+    home = tmp_path / "home"
+    _env_file(tmp_path, 0o600)
+    path_value = str(bin_dir) + os.pathsep + os.environ["PATH"]
+
+    result = _run(["wlan0"], tmp_path, path_value, home, umask="077")
+
+    assert result.returncode != 0
+    assert "adb not found" in result.stderr
+    assert not log.exists() or log.read_text() == ""
+
+
+@requires_bash
+def test_ip_two_inet_lines_uses_first_address(tmp_path):
+    ip_output = "\n".join([
+        "2: wlan0    inet 192.168.1.23/24 brd 192.168.1.255 scope global wlan0",
+        "3: wlan0    inet 10.0.0.5/24 brd 10.0.0.255 scope global secondary wlan0",
+    ])
+    bin_dir, log = _shims(tmp_path, ip_output)
+    home = tmp_path / "home"
+    _env_file(tmp_path, 0o600)
+    path_value = str(bin_dir) + os.pathsep + os.environ["PATH"]
+
+    result = _run(["wlan0"], tmp_path, path_value, home, umask="077")
+
+    assert result.returncode == 0, result.stderr
+    assert "http://192.168.1.23:8000" in result.stdout
+    assert "10.0.0.5" not in result.stdout
