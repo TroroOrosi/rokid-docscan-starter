@@ -56,6 +56,19 @@ GLASSDOC_ROTATION = 270
 # How often wait_for_answers polls answer-bundle. Tests set interval=0.
 POLL_S = 5.0
 
+# answer-bundle's item `issue` for browser_outcome_unknown and chat_lost
+# (app/main.py _answer_bundle_item), the only place the bundle names them.
+# After either the server's batch sends nothing more for the session, so the
+# rest stay pending and only the stall bound would end the wait.
+SERVER_STOPPED_ISSUES = (
+    "送信結果の確認待ち。自動再送は停止しています",
+    "教科のチャットへ戻れません。新しいチャットは作っていません",
+)
+
+# Printed after a FAIL or STOP once the session exists: the chat key is the
+# session, so running again opens another chat and uploads the pages again.
+RERUN_NOTE = "      a re-run creates a new session, and so a new chat for this subject"
+
 # Per-call ceiling for a plain JSON round trip, well below the stall bound
 # wait_for_answers uses across many such calls.
 REQUEST_TIMEOUT_S = 30.0
@@ -366,8 +379,9 @@ def wait_for_answers(
 
     Returns (last_good_response_or_None, reason_or_None). There is no overall
     ceiling: a listing 409 or a changing revision can run indefinitely. The
-    wait ends only when the server has visibly stopped -- the revision hasn't
-    moved for `stall_s`, or nothing has answered at all for `stall_s`.
+    wait ends only when the server has visibly stopped -- an item names one of
+    SERVER_STOPPED_ISSUES, the revision hasn't moved for `stall_s`, or nothing
+    has answered at all for `stall_s`.
     """
     import httpx
 
@@ -401,6 +415,10 @@ def wait_for_answers(
         last_good = r
         body = r.json()
         items = body["items"]
+        stopped = next(
+            (item["issue"] for item in items if item.get("issue") in SERVER_STOPPED_ISSUES), None)
+        if stopped:
+            return r, f"the server stopped the batch: {stopped}"
         pending = sum(1 for item in items if item["status"] == "pending")
         if not pending:
             return r, None
@@ -488,6 +506,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return args
 
 
+def _failed_after_session() -> int:
+    """run()'s exit code for a FAIL printed once the session exists."""
+    print(RERUN_NOTE)
+    return 1
+
+
 def run(args) -> int:
     src = Path(args.pdf or args.images)
     name = source_name(src)
@@ -514,9 +538,18 @@ def run(args) -> int:
         settings = r.json()
         solver_info = settings["providers"]["solver"]
         solver_name = solver_info["name"]
+        if not solver_info["ready"]:
+            # Stop before the upload: the server would take every page and
+            # only then refuse finalize with a 500. On the phone the usual
+            # cause is Chrome leaving the foreground (hardware-measurements
+            # §F-6-1).
+            print(f"FAIL  settings: solver {solver_name} not ready: "
+                  f"{solver_info.get('message') or 'the server gave no reason'}")
+            print("      keep Chrome in the foreground on the phone "
+                  "(Termux in front removes its DevTools socket)")
+            return 1
         print(f"ok    settings       {args.server} app "
-              f"{settings['versions']['app_version']} solver {solver_name} "
-              f"(ready={solver_info['ready']})")
+              f"{settings['versions']['app_version']} solver {solver_name}")
 
         pages = render_spreads(src, span) if args.pdf else _load_photos(src, span)
         rotation = 0 if args.pdf else GLASSDOC_ROTATION
@@ -524,15 +557,11 @@ def run(args) -> int:
         if pages is None:
             return 1
     else:
-        # Read/render pages BEFORE touching the data directory: a bad --pdf
-        # or --images path must leave no rundata/<stem> behind.
-        if args.pdf:
-            pages = render_pages(src, span, args.scale if args.scale is not None else 2.0)
-        else:
-            pages = _load_photos(src, span)
-            if pages is None:
-                return 1
-        rotation = 0 if args.pdf else GLASSDOC_ROTATION
+        # Render pages BEFORE touching the data directory: a bad --pdf path
+        # must leave no rundata/<stem> behind. --images never gets here
+        # (parse_args requires --server for it).
+        pages = render_pages(src, span, args.scale if args.scale is not None else 2.0)
+        rotation = 0
         if args.daimon:
             pages = mark_daimon(pages, args.daimon, span.start)
         pages = _finish_pages(pages, src)
@@ -591,6 +620,7 @@ def run(args) -> int:
         print(f"FAIL  exam-sessions: {r.status_code} {r.text[:200]}")
         return 1
     session_id = r.json()["session_id"]
+    print(f"ok    session        {session_id}")
     if listening:
         # The recording travels with the pages: a transcript flattens speaker
         # turns and the numbers the questions turn on.
@@ -600,7 +630,7 @@ def run(args) -> int:
         )
         if r.status_code != 200:
             print(f"FAIL  audio: {r.status_code} {r.text[:200]}")
-            return 1
+            return _failed_after_session()
         print(f"ok    audio          {Path(args.audio).name} attached to the session")
 
     print(f"..    solving        {solver_name} (this is where the generations are spent)")
@@ -612,16 +642,16 @@ def run(args) -> int:
             params={"solve": "background"},
         )
         if r is None:
-            return 1
+            return _failed_after_session()
         if r.status_code != 200:
             print(f"FAIL  finalize-reading: {r.status_code} {r.text[:300]}")
-            return 1
+            return _failed_after_session()
         finalize_body = r.json()
         if finalize_body.get("solving") != "background":
             print(f"FAIL  the server did not start a background solve "
                   f"(status {finalize_body.get('status')}); is ROKID_SOLVER on the "
                   "server unset or local?")
-            return 1
+            return _failed_after_session()
         bundle, reason = wait_for_answers(client, session_id, answer_ceiling_s(), interval=POLL_S)
     else:
         r = call(
@@ -629,10 +659,10 @@ def run(args) -> int:
             f"/v1/exam-sessions/{session_id}/finalize-reading",
         )
         if r is None:
-            return 1
+            return _failed_after_session()
         if r.status_code != 200:
             print(f"FAIL  finalize-reading: {r.status_code} {r.text[:300]}")
-            return 1
+            return _failed_after_session()
         bundle = client.get(f"/v1/exam-sessions/{session_id}/answer-bundle")
 
     elapsed = time.monotonic() - started
@@ -642,7 +672,9 @@ def run(args) -> int:
         status = bundle.status_code if bundle is not None else "no response"
         snippet = bundle.text[:200] if bundle is not None else ""
         print(f"FAIL  answer-bundle: {status} {snippet}")
-        return 1
+        return _failed_after_session()
+    if reason:
+        print(RERUN_NOTE)
     body = bundle.json()
     items = body["items"]
     ready = [i for i in items if i["status"] == "ready"]

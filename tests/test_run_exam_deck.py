@@ -7,7 +7,9 @@ previous paper's rows (observed while diagnosing on 2026-09-14).
 """
 
 import json
+import re
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -325,6 +327,22 @@ def test_a_long_listing_does_not_stop_the_wait():
     assert clock.now > 2
 
 
+def test_wait_stops_at_once_when_the_server_stopped_its_batch():
+    """After an uncertain send or a lost chat the server sends nothing more for
+    this session, so the rest stay pending and only the stall bound, minutes
+    later, would end the wait."""
+    clock = _Clock()
+    issue = "送信結果の確認待ち。自動再送は停止しています"
+    server = _Server([_Response(200, {"revision": 1, "items": [
+        {"status": "failed", "issue": issue},
+        {"status": "pending", "issue": "未解答"},
+    ]})])
+    got, reason = wait_for_answers(server, 1, 60, interval=1, clock=clock, sleep=clock.sleep)
+    assert got.status_code == 200
+    assert reason == f"the server stopped the batch: {issue}"
+    assert clock.now == 0
+
+
 def test_a_transport_error_keeps_the_last_good_response_then_gives_up():
     import httpx
 
@@ -498,8 +516,93 @@ def test_server_route_stops_before_polling_when_the_phone_solver_is_local(
         ["--images", str(images), "--server", "http://phone.example:8000", "--out", str(out)])
 
     assert code == 1
-    assert "background solve" in capsys.readouterr().out
+    printed = capsys.readouterr().out
+    assert "background solve" in printed
+    assert re.search(r"^ok    session        \d+$", printed, re.MULTILINE)
+    assert f"\n{RERUN_NOTE}\n" in printed, "a FAIL after the session says what a re-run costs"
     assert not out.exists()
+
+
+RERUN_NOTE = "      a re-run creates a new session, and so a new chat for this subject"
+
+
+def _one_photo(tmp_path):
+    from PIL import Image
+
+    images = tmp_path / "kokugo" / "originals"
+    images.mkdir(parents=True)
+    Image.new("RGB", (200, 100), "red").save(images / "img-1.jpg")
+    return images
+
+
+@pytest.mark.filterwarnings("error:You should not use the 'timeout' argument")
+def test_server_route_stops_before_any_upload_when_the_phone_solver_is_not_ready(
+        server_app, tmp_path, monkeypatch, capsys):
+    """It used to upload the whole booklet and then fail with `finalize: 500`."""
+    main, client = server_app
+    monkeypatch.setattr(main, "provider_status", lambda: {
+        "analyzer": {"name": "local", "ready": True},
+        "solver": {"name": "chatgpt-web", "ready": False, "message": "no DevTools endpoint"},
+    })
+    monkeypatch.setattr(run_exam_deck, "remote_client", lambda server, key: client)
+    posted = []
+    real_post = client.post
+    monkeypatch.setattr(client, "post", lambda url, *a, **kw: posted.append(url) or real_post(url, *a, **kw))
+    out = tmp_path / "reports" / "kokugo-server.json"
+
+    code = run_exam_deck.main(["--images", str(_one_photo(tmp_path)),
+                               "--server", "http://phone.example:8000", "--out", str(out)])
+
+    printed = capsys.readouterr().out
+    assert code == 1
+    assert posted == [], "nothing uploaded"
+    assert ("FAIL  settings: solver chatgpt-web not ready: no DevTools endpoint\n"
+            "      keep Chrome in the foreground on the phone "
+            "(Termux in front removes its DevTools socket)\n") in printed
+    assert RERUN_NOTE not in printed, "no session exists yet"
+    assert not out.exists()
+
+
+@pytest.mark.filterwarnings("error:You should not use the 'timeout' argument")
+def test_server_route_stops_at_once_when_the_server_batch_loses_the_chat(
+        server_app, tmp_path, monkeypatch, capsys):
+    from app.solvers.chatgpt_web import ChatGptWebChatLost
+
+    from app.solvers.registry import _registry
+
+    main, client = server_app
+    # `local` never starts a background solve, so the batch needs another
+    # registered name; the model itself is replaced below.
+    monkeypatch.setenv("ROKID_SOLVER", "openai")
+    monkeypatch.setattr(_registry.get("openai"), "ready", lambda: True)
+    monkeypatch.setattr(run_exam_deck, "remote_client", lambda server, key: client)
+    monkeypatch.setattr(run_exam_deck, "POLL_S", 0)
+    # A stall-bound stop would take this long; a stop at once takes a moment.
+    monkeypatch.setattr(run_exam_deck, "answer_ceiling_s", lambda: 30.0)
+
+    def list_questions(question):
+        return [{"group": "第1問", "label": "問1", "pages": [1]},
+                {"group": "第1問", "label": "問2", "pages": [1]}]
+
+    def solve(*, question, **_kw):
+        raise ChatGptWebChatLost("could not return to the subject's chat")
+
+    monkeypatch.setattr(main, "_list_questions", list_questions)
+    monkeypatch.setattr(main, "solve_with_fallback", solve)
+    out = tmp_path / "reports" / "kokugo-server.json"
+    started = time.monotonic()
+
+    code = run_exam_deck.main(["--images", str(_one_photo(tmp_path)),
+                               "--server", "http://phone.example:8000", "--out", str(out)])
+
+    printed = capsys.readouterr().out
+    assert time.monotonic() - started < 15, "stopped at once, not at the stall bound"
+    assert code == 2
+    assert ("STOP  the server stopped the batch: "
+            "教科のチャットへ戻れません。新しいチャットは作っていません\n"
+            f"{RERUN_NOTE}\n") in printed
+    assert json.loads(out.read_text(encoding="utf-8"))["stopped"].startswith(
+        "the server stopped the batch")
 
 
 @pytest.mark.filterwarnings("error:You should not use the 'timeout' argument")
@@ -517,7 +620,12 @@ def test_server_route_writes_the_default_report_path(server_app, tmp_path, monke
     # silently fall back to "local" and this test would not catch a
     # server_solver regression. "openai" is registered (app/llm.py
     # ADAPTER_PROVIDERS) and its .info() needs no credentials or network.
+    # Without a key it reports ready=false, which now stops the bench at
+    # settings, so it is made ready here; the model is replaced below.
+    from app.solvers.registry import _registry
+
     monkeypatch.setenv("ROKID_SOLVER", "openai")
+    monkeypatch.setattr(_registry.get("openai"), "ready", lambda: True)
     monkeypatch.setattr(run_exam_deck, "remote_client", lambda server, key: client)
     monkeypatch.setattr(run_exam_deck, "POLL_S", 0)
 
