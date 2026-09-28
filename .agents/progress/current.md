@@ -1,6 +1,6 @@
 # 再開入口：次のセッションはここだけ読めば始められる
 
-Status: Internal progress。2026-09-29更新。branch `feature/capture-quality-readiness`、Draft [PR #38](https://github.com/TroroOrosi/rokid-docscan-starter/pull/38)。
+Status: Internal progress。2026-09-29更新（4aは途中停止、4節4の先頭を読む）。branch `feature/capture-quality-readiness`、Draft [PR #38](https://github.com/TroroOrosi/rokid-docscan-starter/pull/38)。
 Runs on: Windows PC `C:\rokid-docscan-starter`。実機の状態を変える操作・APK導入・スマホのサーバ更新は、利用者の承認後だけ（hookでも強制）。
 
 ## 0. 読み方（前提と資料に引きずられないため）
@@ -50,13 +50,22 @@ Runs on: Windows PC `C:\rokid-docscan-starter`。実機の状態を変える操�
   - 自動burstで、OCR 0文字・OCR失敗の写真も3秒の確認表示へ回す（`0f776c3`、`fad3dd6`）。ログに `kept although OCR read nothing` が出る。
     同じ頁の判定はOCR文字だけ。画像での判定は実物19枚で成り立たなかった（同じ見開き0.14〜0.70、別の見開き0.23〜0.79）。
     そのため、めくっていない読めない頁は毎回もう一度登録される（抜けはしない）。
-- スマホのサーバは、記録上 9/16 の `3e4b777` が最後の導入。9/22以降は未確認。9/28、スマホのsshd（8022）は止まっていた。
+- **9/29 4a（途中で利用者が停止）**：スマホのサーバを `e0b8263`（0.40.0）へ更新し、`phone_serve.sh 127.0.0.1` で起動、PCからssh tunnelで投入。
+  1チャット（`/c/6abaa969…`）で、小問一覧は4問（冊子と一致）、問1＝④（**正解**、101=4）。問2送信後に停止。新規チャット・再添付・再送は0。
+  **欠陥（利用者の観察）：前の返答が思考表示の段階で次を送っていた。** 完了判定（`send_and_read`、`chatgpt_web.py:649-690`）は
+  stop-button が見えない場合に文字の1秒不変へ落ちる。その場合、コメントが記す「思考中」表示を答えと誤認する経路になる。
+  スマホのモバイル版で stop-button の selector が一致しているかは未確認（最有力の見立て。実画面で確かめる）。
+- 停止時の状態：スマホのサーバは停止。送信記録は問2が `uncertain`（request_id `8e3ceee6…`）。次の送信前に、利用者の了承を得て解除する。
+  Termuxに `ip` は無い（`phone_serve.sh` はIPv4を直接受ける、`e0b8263`）。サーバ起動はChromeが前景でないと失敗する（REAL_MODEの起動検査）。
 - 部品の実測（§F-6-9、§I）：スマホだけでテキストの答えが19.5秒。スマホAP経由は一度も通していない。
 
 ## 4. 次の作業（この順）
 
 1〜3（PC）は完了：`scripts/run_exam_deck.py --server`、上の修正、`scripts/phone_serve.sh`。CIは7節。
-4. Runs on: スマホFastAPI＋スマホChrome、PCからHTTPで投入。**承認後。**
+4. **先に直す（PC、利用者の決定 9/29）**：(1) 返答が完全に終わるまで次を送らない。スマホの実画面で思考中・生成中・完了のDOMを読み（送信なし）、判定をそれに合わせる。
+   (2) 送信を「1大問1通」か「全問1通」にまとめる（小問ごとの送信をやめる）。返答を小問に分けてanswer-bundleへ入れる。
+   直したら下の手順で4aをやり直す。
+   Runs on: スマホFastAPI＋スマホChrome、PCからHTTPで投入。**承認後。**
    - 準備（スマホ、利用者）：Termuxで `termux-wake-lock; sshd`。サーバを `61b3288` へ更新（`~/rokid-server`）。
      起動は `bash scripts/phone_serve.sh wlan0`（env は `~/rokid-server/multimodal.env`、0600。表示されたURLを控える）。
      起動後は **Chromeを前景に戻す**（Termuxが前だとCDPが消える）。旧ローカルモデルの重みが残っていれば、容量を確認してから消す。
@@ -101,7 +110,7 @@ hotspotを切った状態での閲覧、音声案内を録音に入れない、*
 
 ## 7. 状態
 
-- 検証（`61b3288`）：`py -3.12 -X utf8 -m pytest -q` → 931 passed, 2 skipped。`py -3.12 -m ruff check .` → All checks passed!
+- 検証（`61b3288`、`e0b8263` は phone_serve の試験 17 passed）：`py -3.12 -X utf8 -m pytest -q` → 931 passed, 2 skipped。`py -3.12 -m ruff check .` → All checks passed!
   `./android-relay/gradlew --no-daemon test testDebugUnitTest assembleDebug` → BUILD SUCCESSFUL（199 tasks）。
 - CI：`61b3288` で4件成功（CI push 36458873545、CI PR 36458879461、Android relay push 36458873367・PR 36458879560）。
   Linux上の `tests/test_phone_serve.py` もここで初めて通った。
