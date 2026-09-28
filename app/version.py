@@ -177,7 +177,9 @@ from __future__ import annotations
 # Original-image/audio browser input; no local transcription gate or repeated bundle encoding.
 # finalize-reading can return after segmentation and solve in the background.
 # A background batch asks the model for the 小問 before solving (RP-12).
-APP_VERSION = "0.39.0"
+# Concurrent sessions keep their own chats; the phone start script and deck bench
+# stop early with the reason. See API 1.26.0 and GLASSES_VIEW_CONTRACT 1.19.0.
+APP_VERSION = "0.40.0"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.
@@ -258,7 +260,12 @@ APP_VERSION = "0.39.0"
 #        from the originals (OCR segmentation is the fallback), solves only the
 #        items answer-bundle shows, and answer-bundle answers 409 "the question
 #        list is being made" until the list exists.
-API_VERSION = "1.25.0"
+# 1.26.0: /v1/settings no longer returns 500 when a provider check raises or
+#        ROKID_REAL_MODE rejects the selection: the provider entry reports
+#        ready:false with a `message`. answer-bundle names a new stop, the
+#        `chat_lost` failure ("教科のチャットへ戻れません…"): the subject's chat
+#        could not be reached, no new chat was opened, and the batch stopped.
+API_VERSION = "1.26.0"
 
 # Matching algorithm identity. Bump when thresholds or hashing change so a
 # re-index/eval is triggered. Mirrors thresholds in app/matching.py.
@@ -371,7 +378,8 @@ EXPLAINER_API_VERSION = "1.1.0"
 # Failed CLOSED persistence keeps the answer and shows a retry notice.
 # Composition-only review and bounded clipped-shot ranking; 3s timing unchanged.
 # Local capture waits for AE convergence within the existing total deadline.
-GLASSES_VIEW_CONTRACT_VERSION = "1.18.0"
+# A local best shot OCR read nothing (or failed on) reaches the 3s review instead of a retry.
+GLASSES_VIEW_CONTRACT_VERSION = "1.19.0"
 
 # Answer-area overlay payload (box + short answer; 2D image-anchored).
 # 1.1.0: added tracking metadata (tracking/fixed_ar/anchor_hint).

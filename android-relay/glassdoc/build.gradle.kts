@@ -70,8 +70,9 @@ android {
         // 15 handles Camera2 delivery failures and records numeric diagnostics.
         // Capture settings and physical acceptance gates remain unchanged.
         // Meter before the single JPEG; convergence is not a readability certificate.
-        versionCode = 20
-        versionName = "0.17.0"
+        // 21 sends a best shot OCR could not read to the 3 s review instead of shooting again.
+        versionCode = 21
+        versionName = "0.18.0"
     }
 
     // Same reasoning as `:glassapp`: a vendor installer that reads JAR
