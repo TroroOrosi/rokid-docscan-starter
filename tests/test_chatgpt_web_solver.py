@@ -25,6 +25,7 @@ from app.solvers.chatgpt_web import (
     ask_page,
     cdp_available,
     image_payload,
+    locator_prompt,
 )
 
 
@@ -320,6 +321,18 @@ def test_a_missing_stop_button_still_falls_back_to_text_stability():
 def test_cdp_probe_reports_unavailable_rather_than_raising():
     # Closed port: ready() must answer False, not blow up a pre-flight.
     assert cdp_available("http://127.0.0.1:9", timeout=0.2) is None
+
+
+def test_locator_prompt_keeps_the_derivation_for_a_written_solution():
+    """"説明・理由・見出し・前置きは含めません" would strip a 記述式 math
+    proof's own derivation, which is the operator's decision -- it has to be
+    on the answer sheet for credit. Same exception as _ANSWER_ONLY_SYSTEM.
+    """
+    prompt = locator_prompt(Question(question_no="問1"))
+
+    assert "記述式" in prompt
+    # Still excludes explanations/headings for everything else.
+    assert "説明・理由" in prompt
 
 
 class _FakeClient:

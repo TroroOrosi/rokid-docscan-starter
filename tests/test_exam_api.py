@@ -461,3 +461,33 @@ def test_settings_expose_a_selected_but_unusable_analyzer(client, monkeypatch):
     assert analyzer["name"] == "claude"
     assert analyzer["offline"] is False
     assert analyzer["ready"] is False
+
+
+def test_settings_report_an_unready_real_mode_provider_instead_of_failing(client, monkeypatch):
+    """The glasses call /v1/settings at connect and read any failure as
+    "サーバへ接続できません" (DocScanController.java:864, :978). Under
+    ROKID_REAL_MODE=1, get_solver()/get_analyzer() raise for an unready
+    provider (config.require_real_provider) -- that must not become a 500;
+    it has to be reported so the operator learns it before the session, not
+    mid-session. Solving itself still has to refuse.
+    """
+    import app.config as config
+
+    monkeypatch.setenv("ROKID_SOLVER", "claude")
+    for key in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GOOGLE_API_KEY"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setattr(config, "REAL_MODE", True)
+
+    r = client.get("/v1/settings")
+
+    assert r.status_code == 200
+    solver = r.json()["providers"]["solver"]
+    assert solver["name"] == "claude"
+    assert solver["ready"] is False
+    assert "claude" in solver["message"]
+    assert "ROKID_REAL_MODE" in solver["message"]
+
+    from app.solvers import get_solver
+
+    with pytest.raises(RuntimeError):
+        get_solver()

@@ -402,14 +402,27 @@ def provider_status() -> dict:
     The relay photographs a physical page before anything is analyzed. If the
     configured cloud analyzer has no credential it degrades to the offline
     placeholder silently, so without this block the operator only discovers it
-    after the session. This reports the state; it does not reject anything.
+    after the session. This reports the state; it does not reject anything --
+    including a provider ``config.require_real_provider`` would refuse under
+    ROKID_REAL_MODE=1. The glasses treat any /v1/settings failure as
+    unreachable, so that rejection must become a reported entry, not a 500.
+    Solving itself still goes through get_analyzer()/get_solver() and still
+    refuses.
     """
     from .analyzers import get_analyzer
+    from .analyzers.registry import _registry as analyzer_registry
     from .solvers import get_solver
+    from .solvers.registry import _registry as solver_registry
+
+    def _status(getter, registry) -> dict:
+        try:
+            return getter().info()
+        except RuntimeError as error:
+            return {**registry.get().info(), "ready": False, "message": str(error)}
 
     return {
-        "analyzer": get_analyzer().info(),
-        "solver": get_solver().info(),
+        "analyzer": _status(get_analyzer, analyzer_registry),
+        "solver": _status(get_solver, solver_registry),
     }
 
 

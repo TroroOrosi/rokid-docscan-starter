@@ -7,7 +7,19 @@ import pytest
 
 from app.llm import LLMClient
 from app.solvers import Question, register_solver, solve_with_fallback
-from app.solvers.llm_adapter import LLMSolver
+from app.solvers.llm_adapter import _ANSWER_ONLY_SYSTEM, LLMSolver
+
+
+def test_answer_only_system_keeps_the_derivation_for_a_written_solution():
+    """The operator's decision: the answer is the full content written on the
+    answer sheet; a 記述式 mathematics answer includes the derivation needed
+    for credit. This must not be conditioned on the question "explicitly"
+    asking for a proof -- a 記述式 answer format implies it. Asserted on the
+    prompt constant itself, not on model output.
+    """
+    assert "記述式" in _ANSWER_ONLY_SYSTEM
+    assert "derivation" in _ANSWER_ONLY_SYSTEM
+    assert "full credit" in _ANSWER_ONLY_SYSTEM
 
 
 def solver_for(payload):
