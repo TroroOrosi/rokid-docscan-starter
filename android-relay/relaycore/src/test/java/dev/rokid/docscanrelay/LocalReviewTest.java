@@ -19,7 +19,6 @@ import org.junit.runner.RunWith;
 import org.robolectric.RobolectricTestRunner;
 import org.robolectric.RuntimeEnvironment;
 import org.robolectric.annotation.Config;
-import org.robolectric.annotation.GraphicsMode;
 
 /** Exercises the real controller: no unseen photo, no stale timer after a retake. */
 @RunWith(RobolectricTestRunner.class)
@@ -454,12 +453,11 @@ public class LocalReviewTest {
         }
     }
 
-    @GraphicsMode(GraphicsMode.Mode.NATIVE) // real JPEG encode and decode for the thumbnail
-    @Test public void unreadBurstIsReviewedAndTheSameSheetAgainIsSkipped() throws Exception {
+    @Test public void unreadBurstIsReviewedAndTheSameUnreadSheetAgainIsNotSkipped() throws Exception {
         Context context = RuntimeEnvironment.getApplication();
         Surface surface = new Surface();
         List<String> diagnostics = new java.util.concurrent.CopyOnWriteArrayList<>();
-        byte[] sheet = sheetJpeg(1.0, false), darkerSheet = sheetJpeg(0.3, false), nextSheet = sheetJpeg(0.3, true);
+        byte[] sheet = {1, 2, 3};
         CountDownLatch release = new CountDownLatch(1);
         try (MockWebServer server = new MockWebServer()) {
             // The upload queued by the commit stays parked, so it cannot change state under the test.
@@ -482,6 +480,7 @@ public class LocalReviewTest {
                 set(controller, "autoShotsRemaining", 1);
                 call(controller, "stageCaptureReview", shot, new CaptureReviewStore.Pending(0, sheet, "", 0, ""), null);
                 assertEquals(RelayState.CAPTURE_REVIEW, controller.getState());
+                assertTrue(diagnostics.contains("Review selected automatic frame, kept although OCR read nothing"));
                 surface.visible = true;
                 controller.onCustomViewAvailable(1, "capture-review");
                 barrier(controller);
@@ -491,44 +490,18 @@ public class LocalReviewTest {
                 LocalCaptureSession saved = (LocalCaptureSession) get(controller, "localSession");
                 assertEquals(1, saved.pageCount());
 
-                // Not turned yet: the next burst sees the same sheet, darker, and OCR fails outright.
+                // Not turned yet, and OCR fails outright on the same JPEG. With no text to compare,
+                // it is reviewed again: a duplicate the model can ignore, never a skipped page.
                 set(controller, "autoShotsRemaining", 1);
-                call(controller, "stageCaptureReview", shot, new CaptureReviewStore.Pending(1, darkerSheet, "", 0, "OCR error"), null);
-                assertEquals(1, saved.pageCount());
-                assertFalse(((CaptureReviewStore) get(controller, "captureReview")).hasPending());
-                assertEquals(1, (int) get(controller, "duplicateBurstsSeen"));
-                assertTrue(diagnostics.stream().anyMatch(d -> d.contains("skipped as a duplicate")));
-
-                // A turned sheet that also reads nothing is reviewed, not skipped.
-                set(controller, "autoShotsRemaining", 1);
-                call(controller, "stageCaptureReview", shot, new CaptureReviewStore.Pending(1, nextSheet, "", 0, ""), null);
+                call(controller, "stageCaptureReview", shot, new CaptureReviewStore.Pending(1, sheet, "", 0, "OCR error"), null);
                 assertEquals(RelayState.CAPTURE_REVIEW, controller.getState());
+                assertTrue(((CaptureReviewStore) get(controller, "captureReview")).hasPending());
+                assertEquals(0, (int) get(controller, "duplicateBurstsSeen"));
+                assertFalse(diagnostics.stream().anyMatch(d -> d.contains("skipped as a duplicate")));
+                assertTrue(diagnostics.contains("Review selected automatic frame, kept although OCR read nothing (OCR failed)"));
                 assertEquals(0, surface.photos);
             } finally { release.countDown(); controller.close(); }
         }
-    }
-
-    /** A 640x480 photo of a sheet with grey text blocks; {@code exposure} scales every grey level. */
-    private static byte[] sheetJpeg(double exposure, boolean twoColumns) {
-        double[][] rectangles = twoColumns
-                ? new double[][]{{0.10, 0.05, 0.90, 0.95, 200}, {0.15, 0.24, 0.48, 0.90, 120}, {0.52, 0.24, 0.85, 0.90, 120}}
-                : new double[][]{{0.10, 0.05, 0.90, 0.95, 200}, {0.15, 0.10, 0.85, 0.18, 110},
-                        {0.15, 0.24, 0.85, 0.52, 120}, {0.65, 0.58, 0.85, 0.90, 80}};
-        int width = 640, height = 480;
-        int[] argb = new int[width * height];
-        for (int y = 0; y < height; y++) {
-            for (int x = 0; x < width; x++) {
-                double fx = (x + 0.5) / width, fy = (y + 0.5) / height, grey = 40;
-                for (double[] r : rectangles) if (fx >= r[0] && fx < r[2] && fy >= r[1] && fy < r[3]) grey = r[4];
-                int v = (int) Math.round(grey * exposure);
-                argb[y * width + x] = 0xff000000 | v << 16 | v << 8 | v;
-            }
-        }
-        android.graphics.Bitmap bitmap = android.graphics.Bitmap.createBitmap(argb, width, height, android.graphics.Bitmap.Config.ARGB_8888);
-        java.io.ByteArrayOutputStream jpeg = new java.io.ByteArrayOutputStream();
-        bitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG, 90, jpeg);
-        bitmap.recycle();
-        return jpeg.toByteArray();
     }
 
     private static final class Surface implements CaptureSurface {
