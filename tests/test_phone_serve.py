@@ -79,6 +79,33 @@ def _env_file(tmp_path: Path, mode: int) -> Path:
     return env_file
 
 
+_BLOCKED_TOOLS = ("termux-wake-lock", "adb", "ip", "python")
+
+
+def _safe_ambient_path(raw_path: str | None = None) -> str:
+    """Ambient PATH entries with none of the script's four tools reachable
+    in them, so a test that omits a shim (to exercise the preflight check)
+    can never fall through to a real adb/ip/python/termux-wake-lock on this
+    host or CI runner (task-4-fix-2 item 2)."""
+    raw_path = os.environ["PATH"] if raw_path is None else raw_path
+    exts = [""] + os.environ.get("PATHEXT", "").split(os.pathsep) if sys.platform == "win32" else [""]
+    safe_dirs = []
+    for d in raw_path.split(os.pathsep):
+        if not d:
+            continue
+        blocked = any(
+            os.path.exists(os.path.join(d, tool + ext)) for tool in _BLOCKED_TOOLS for ext in exts
+        )
+        if not blocked:
+            safe_dirs.append(d)
+    return os.pathsep.join(safe_dirs)
+
+
+def _test_path(bin_dir: Path, ambient: str | None = None) -> str:
+    """The shim dir first, then only the ambient PATH entries safe to keep."""
+    return str(bin_dir) + os.pathsep + _safe_ambient_path(ambient)
+
+
 def _run(args, tmp_path: Path, path_value: str, home: Path, umask: str | None = None):
     """Invoke the script with fake shims first on PATH.
 
@@ -106,7 +133,7 @@ def test_happy_path_calls_shims_in_order_and_prints_url(tmp_path):
     bin_dir, log = _shims(tmp_path, "2: wlan0    inet 192.168.1.23/24 brd 192.168.1.255 scope global wlan0")
     home = tmp_path / "home"
     _env_file(tmp_path, 0o600)
-    path_value = str(bin_dir) + os.pathsep + os.environ["PATH"]
+    path_value = _test_path(bin_dir)
 
     result = _run(["wlan0"], tmp_path, path_value, home, umask="077")
 
@@ -136,7 +163,7 @@ def test_env_file_with_wrong_mode_is_refused_before_any_adb_call(tmp_path):
     bin_dir, log = _shims(tmp_path, "2: wlan0    inet 192.168.1.23/24 brd 192.168.1.255 scope global wlan0")
     home = tmp_path / "home"
     _env_file(tmp_path, 0o644)
-    path_value = str(bin_dir) + os.pathsep + os.environ["PATH"]
+    path_value = _test_path(bin_dir)
 
     result = _run(["wlan0"], tmp_path, path_value, home)
 
@@ -150,7 +177,7 @@ def test_interface_without_address_fails(tmp_path):
     bin_dir, log = _shims(tmp_path, "")
     home = tmp_path / "home"
     _env_file(tmp_path, 0o600)
-    path_value = str(bin_dir) + os.pathsep + os.environ["PATH"]
+    path_value = _test_path(bin_dir)
 
     result = _run(["wlan0"], tmp_path, path_value, home, umask="077")
 
@@ -170,7 +197,7 @@ def test_adb_connect_failure_text_with_exit_zero_is_refused(tmp_path):
     _write_shim(bin_dir, "adb", log, 'if [[ "$1" == "connect" ]]; then echo "failed to connect to 127.0.0.1:5555"; fi\nexit 0')
     home = tmp_path / "home"
     _env_file(tmp_path, 0o600)
-    path_value = str(bin_dir) + os.pathsep + os.environ["PATH"]
+    path_value = _test_path(bin_dir)
 
     result = _run(["wlan0"], tmp_path, path_value, home, umask="077")
 
@@ -190,7 +217,7 @@ def test_adb_already_connected_proceeds(tmp_path):
     _write_shim(bin_dir, "adb", log, 'if [[ "$1" == "connect" ]]; then echo "already connected to $2"; fi\nexit 0')
     home = tmp_path / "home"
     _env_file(tmp_path, 0o600)
-    path_value = str(bin_dir) + os.pathsep + os.environ["PATH"]
+    path_value = _test_path(bin_dir)
 
     result = _run(["wlan0"], tmp_path, path_value, home, umask="077")
 
@@ -205,7 +232,7 @@ def test_preflight_missing_adb_names_it_and_exits_nonzero(tmp_path):
     )
     home = tmp_path / "home"
     _env_file(tmp_path, 0o600)
-    path_value = str(bin_dir) + os.pathsep + os.environ["PATH"]
+    path_value = _test_path(bin_dir)
 
     result = _run(["wlan0"], tmp_path, path_value, home, umask="077")
 
@@ -223,10 +250,108 @@ def test_ip_two_inet_lines_uses_first_address(tmp_path):
     bin_dir, log = _shims(tmp_path, ip_output)
     home = tmp_path / "home"
     _env_file(tmp_path, 0o600)
-    path_value = str(bin_dir) + os.pathsep + os.environ["PATH"]
+    path_value = _test_path(bin_dir)
 
     result = _run(["wlan0"], tmp_path, path_value, home, umask="077")
 
     assert result.returncode == 0, result.stderr
     assert "http://192.168.1.23:8000" in result.stdout
     assert "10.0.0.5" not in result.stdout
+
+
+@requires_bash
+def test_adb_connect_daemon_banner_before_success_proceeds(tmp_path):
+    """First connect after a phone reboot: adb starts its own server and
+    prints banner lines before the result line (task-4-fix-2 item 1)."""
+    bin_dir, log = _shims(
+        tmp_path, "2: wlan0    inet 192.168.1.23/24 brd 192.168.1.255 scope global wlan0", omit=("adb",)
+    )
+    body = (
+        'if [[ "$1" == "connect" ]]; then\n'
+        '    echo "* daemon not running; starting now at tcp:5037"\n'
+        '    echo "* daemon started successfully"\n'
+        '    echo "connected to $2"\n'
+        "fi\n"
+        "exit 0"
+    )
+    _write_shim(bin_dir, "adb", log, body)
+    home = tmp_path / "home"
+    _env_file(tmp_path, 0o600)
+    path_value = _test_path(bin_dir)
+
+    result = _run(["wlan0"], tmp_path, path_value, home, umask="077")
+
+    assert result.returncode == 0, result.stderr
+    assert "http://192.168.1.23:8000" in result.stdout
+
+
+@requires_bash
+def test_adb_connect_empty_output_is_refused(tmp_path):
+    bin_dir, log = _shims(
+        tmp_path, "2: wlan0    inet 192.168.1.23/24 brd 192.168.1.255 scope global wlan0", omit=("adb",)
+    )
+    _write_shim(bin_dir, "adb", log, "exit 0")  # connect prints nothing at all
+    home = tmp_path / "home"
+    _env_file(tmp_path, 0o600)
+    path_value = _test_path(bin_dir)
+
+    result = _run(["wlan0"], tmp_path, path_value, home, umask="077")
+
+    assert result.returncode != 0
+    assert "adb tcpip 5555" in result.stderr
+    names = [line.split()[0] for line in log.read_text().splitlines()]
+    assert names == ["termux-wake-lock", "adb"]
+
+
+@requires_bash
+def test_adb_connect_banner_then_failure_is_refused(tmp_path):
+    bin_dir, log = _shims(
+        tmp_path, "2: wlan0    inet 192.168.1.23/24 brd 192.168.1.255 scope global wlan0", omit=("adb",)
+    )
+    body = (
+        'if [[ "$1" == "connect" ]]; then\n'
+        '    echo "* daemon not running; starting now at tcp:5037"\n'
+        '    echo "* daemon started successfully"\n'
+        '    echo "failed to connect: Connection refused"\n'
+        "fi\n"
+        "exit 0"
+    )
+    _write_shim(bin_dir, "adb", log, body)
+    home = tmp_path / "home"
+    _env_file(tmp_path, 0o600)
+    path_value = _test_path(bin_dir)
+
+    result = _run(["wlan0"], tmp_path, path_value, home, umask="077")
+
+    assert result.returncode != 0
+    assert "adb tcpip 5555" in result.stderr
+    names = [line.split()[0] for line in log.read_text().splitlines()]
+    assert names == ["termux-wake-lock", "adb"]
+
+
+@requires_bash
+def test_missing_adb_preflight_never_reaches_real_adb_on_ambient_path(tmp_path):
+    """A directory on the *ambient* PATH could hide a real adb; _test_path
+    must strip any ambient entry that shadows one of the four tools so the
+    preflight-missing-adb case never falls through to it (task-4-fix-2 item 2)."""
+    real_bin = tmp_path / "real_bin"
+    real_bin.mkdir()
+    marker = tmp_path / "real_adb_invoked"
+    real_adb = real_bin / "adb"
+    real_adb.write_text(f"#!/usr/bin/env bash\ntouch {str(marker)!r}\nexit 1\n")
+    os.chmod(real_adb, 0o755)
+
+    bin_dir, log = _shims(
+        tmp_path, "2: wlan0    inet 192.168.1.23/24 brd 192.168.1.255 scope global wlan0", omit=("adb",)
+    )
+    home = tmp_path / "home"
+    _env_file(tmp_path, 0o600)
+    ambient = str(real_bin) + os.pathsep + os.environ["PATH"]
+    path_value = _test_path(bin_dir, ambient)
+
+    result = _run(["wlan0"], tmp_path, path_value, home, umask="077")
+
+    assert result.returncode != 0
+    assert "adb not found" in result.stderr
+    assert not marker.exists()
+    assert not log.exists() or log.read_text() == ""

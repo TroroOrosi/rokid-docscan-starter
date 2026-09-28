@@ -44,19 +44,28 @@ done
 termux-wake-lock
 
 # adb commonly prints "failed to connect ..." and still exits 0, so only the
-# exit code cannot be trusted. Capture the output, show it, and only proceed
-# on a "connected to" / "already connected to" prefix.
+# exit code cannot be trusted. It can also print daemon-start banner lines
+# before the real result on the first connect after a reboot, so judge line
+# by line: success needs some line starting "connected to " / "already
+# connected to " AND no line starting "failed"/"unable"/"cannot" (adb's own
+# casing). Capture the output and show it either way.
 connect_output="$(adb connect 127.0.0.1:5555 2>&1)" || true
 echo "$connect_output"
-case "$connect_output" in
-    "connected to "*|"already connected to "*)
-        ;;
-    *)
-        echo "phone_serve: adb connect did not report success. Put adbd in TCP mode from a PC first, after every phone reboot:" >&2
-        echo "  adb tcpip 5555" >&2
-        exit 1
-        ;;
-esac
+connect_succeeded=0
+connect_failed=0
+while IFS= read -r line; do
+    case "$line" in
+        "connected to "*|"already connected to "*) connect_succeeded=1 ;;
+    esac
+    case "$line" in
+        failed*|unable*|cannot*) connect_failed=1 ;;
+    esac
+done <<< "$connect_output"
+if [[ "$connect_succeeded" != 1 || "$connect_failed" == 1 ]]; then
+    echo "phone_serve: adb connect did not report success. Put adbd in TCP mode from a PC first, after every phone reboot:" >&2
+    echo "  adb tcpip 5555" >&2
+    exit 1
+fi
 
 adb -s 127.0.0.1:5555 forward tcp:9222 localabstract:chrome_devtools_remote
 echo "phone_serve: keep Chrome in the foreground -- the DevTools socket disappears otherwise." >&2
