@@ -406,23 +406,40 @@ def provider_status() -> dict:
     including a provider ``config.require_real_provider`` would refuse under
     ROKID_REAL_MODE=1. The glasses treat any /v1/settings failure as
     unreachable, so that rejection must become a reported entry, not a 500.
-    Solving itself still goes through get_analyzer()/get_solver() and still
-    refuses.
+    Solving itself still goes through get_analyzer()/get_solver() (and
+    require_real_provider, unmodified) and still refuses.
+
+    Reads the selected provider straight from its registry rather than
+    through get_analyzer()/get_solver(), and calls ``.info()`` exactly once:
+    ``.info()`` can be expensive (chatgpt-web's ``ready()`` probes CDP with
+    retries), and calling it once via require_real_provider and again here to
+    build the report made an unready chatgpt-web selection take 10+ seconds.
+    The REAL_MODE verdict is derived from that one ``info`` with
+    ``config.real_mode_rejection`` -- the exact rule require_real_provider
+    uses. ``.info()`` itself is guarded: a provider whose ``.info()`` raises
+    (e.g. a probe returning something unexpected) must not 500 the endpoint,
+    and the exception text is never surfaced (it could carry a URL) --
+    only its class name.
     """
-    from .analyzers import get_analyzer
     from .analyzers.registry import _registry as analyzer_registry
-    from .solvers import get_solver
     from .solvers.registry import _registry as solver_registry
 
-    def _status(getter, registry) -> dict:
+    def _status(kind: str, registry) -> dict:
+        provider = registry.get()
         try:
-            return getter().info()
-        except RuntimeError as error:
-            return {**registry.get().info(), "ready": False, "message": str(error)}
+            info = provider.info()
+        except Exception as error:  # noqa: BLE001 - a pre-flight report must not 500
+            return {"name": provider.name, "ready": False,
+                    "message": f"{type(error).__name__} while checking"}
+        if config.REAL_MODE:
+            message = config.real_mode_rejection(kind, provider, info)
+            if message:
+                return {**info, "ready": False, "message": message}
+        return info
 
     return {
-        "analyzer": _status(get_analyzer, analyzer_registry),
-        "solver": _status(get_solver, solver_registry),
+        "analyzer": _status("analyzer", analyzer_registry),
+        "solver": _status("solver", solver_registry),
     }
 
 

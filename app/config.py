@@ -32,16 +32,31 @@ ENABLE_EMBEDDING = os.environ.get("ROKID_ENABLE_EMBEDDING", "0") == "1"
 REAL_MODE = os.environ.get("ROKID_REAL_MODE", "0") == "1"
 
 
+def real_mode_rejection(kind: str, provider, info: dict) -> str | None:
+    """The message ``require_real_provider`` would raise for this already-computed
+    ``info``, or None if it would be accepted.
+
+    Split out so a caller that already has ``info`` (the ``/v1/settings``
+    pre-flight in ``app.main.provider_status``) can learn the verdict without
+    calling ``provider.info()`` a second time -- ``info()`` is not free
+    (``ready()`` can probe a live endpoint, as the chatgpt-web CDP check
+    does). Does not check ``REAL_MODE`` itself; callers gate that.
+    """
+    if getattr(provider, "placeholder", info.get("offline")) or not info.get("ready"):
+        return (
+            "ROKID_REAL_MODE=1 rejects placeholder or unready "
+            f"{kind} provider '{info.get('name', 'unknown')}'"
+        )
+    return None
+
+
 def require_real_provider(kind: str, provider):
     """Reject placeholder or unready providers in a physical-device session."""
     if not REAL_MODE:
         return provider
-    info = provider.info()
-    if getattr(provider, "placeholder", info.get("offline")) or not info.get("ready"):
-        raise RuntimeError(
-            "ROKID_REAL_MODE=1 rejects placeholder or unready "
-            f"{kind} provider '{info.get('name', 'unknown')}'"
-        )
+    message = real_mode_rejection(kind, provider, provider.info())
+    if message:
+        raise RuntimeError(message)
     return provider
 
 # Explainer adapter selection (explain-sessions).

@@ -481,13 +481,85 @@ def test_settings_report_an_unready_real_mode_provider_instead_of_failing(client
     r = client.get("/v1/settings")
 
     assert r.status_code == 200
-    solver = r.json()["providers"]["solver"]
+    providers = r.json()["providers"]
+    solver = providers["solver"]
     assert solver["name"] == "claude"
     assert solver["ready"] is False
     assert "claude" in solver["message"]
     assert "ROKID_REAL_MODE" in solver["message"]
+    # The default analyzer ("local") is an offline placeholder, which
+    # ROKID_REAL_MODE=1 rejects too -- must be reported, not just the solver.
+    analyzer = providers["analyzer"]
+    assert analyzer["ready"] is False
+    assert "message" in analyzer
 
     from app.solvers import get_solver
 
     with pytest.raises(RuntimeError):
         get_solver()
+
+
+def test_settings_reports_a_provider_whose_info_raises_without_failing(client, monkeypatch):
+    """.info() itself can raise (e.g. a CDP probe returning something
+    unexpected). That must not 500 the pre-flight, and the exception text
+    must never reach the client -- it could carry a URL or other detail.
+
+    Injected via the registry's ``_items`` dict (monkeypatch-scoped, like
+    tests/test_real_mode.py) rather than register_analyzer(), which would
+    leave this always-raising analyzer permanently registered and break every
+    other test that lists all analyzers (list_analyzers(), /v1/version).
+    """
+    from app.analyzers import registry as analyzer_registry_mod
+
+    class _ExplodingAnalyzer:
+        name = "settings-test-exploding"
+
+        def info(self):
+            raise AttributeError("http://internal.example/secret-path leaked here")
+
+    items = dict(analyzer_registry_mod._registry._items)
+    items["settings-test-exploding"] = _ExplodingAnalyzer()
+    monkeypatch.setattr(analyzer_registry_mod._registry, "_items", items)
+    monkeypatch.setenv("ROKID_ANALYZER", "settings-test-exploding")
+
+    r = client.get("/v1/settings")
+
+    assert r.status_code == 200
+    analyzer = r.json()["providers"]["analyzer"]
+    assert analyzer["name"] == "settings-test-exploding"
+    assert analyzer["ready"] is False
+    assert analyzer["message"] == "AttributeError while checking"
+    assert "secret" not in analyzer["message"]
+    assert "internal.example" not in analyzer["message"]
+
+
+def test_settings_calls_info_once_per_provider_even_when_real_mode_rejects_it(client, monkeypatch):
+    """The earlier implementation called .info() once inside
+    require_real_provider and again to build the report -- doubling the cost
+    of a probing ready() (chatgpt-web's CDP check took 10+ seconds for this).
+    """
+    import app.config as config
+    from app.solvers import registry as solver_registry_mod
+
+    class _CountingSolver:
+        name = "settings-test-counting"
+        calls = 0
+
+        def info(self):
+            type(self).calls += 1
+            return {"name": self.name, "offline": False, "ready": False,
+                    "provider_version": "test"}
+
+    items = dict(solver_registry_mod._registry._items)
+    items["settings-test-counting"] = _CountingSolver()
+    monkeypatch.setattr(solver_registry_mod._registry, "_items", items)
+    monkeypatch.setenv("ROKID_SOLVER", "settings-test-counting")
+    monkeypatch.setattr(config, "REAL_MODE", True)
+
+    r = client.get("/v1/settings")
+
+    assert r.status_code == 200
+    solver = r.json()["providers"]["solver"]
+    assert solver["ready"] is False
+    assert "message" in solver
+    assert _CountingSolver.calls == 1
