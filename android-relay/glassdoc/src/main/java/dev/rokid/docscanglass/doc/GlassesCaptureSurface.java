@@ -111,12 +111,14 @@ final class GlassesCaptureSurface implements CaptureSurface {
     @Override
     public long showCaptureReview(byte[] jpeg, int rotationDegrees, List<String> lines) {
         if (closed) return NO_VIEW_GENERATION;
-        Bitmap still = decodePreview(jpeg, rotationDegrees);
+        Bitmap still = PaperCrop.apply(decodePreview(jpeg, rotationDegrees));
         if (still == null) return NO_VIEW_GENERATION;
+        // One short line under the photo: the page. The photo gets the rest.
+        List<String> footer = lines == null || lines.isEmpty() ? List.of() : lines.subList(0, 1);
         return show("capture-review", () -> {
             Bitmap previous = preview;
             preview = still;
-            hud.showReview(still, GlassesHudText.adapt(lines));
+            hud.showReview(still, GlassesHudText.adapt(footer));
             recycle(previous);
         }, still);
     }
@@ -212,11 +214,9 @@ final class GlassesCaptureSurface implements CaptureSurface {
      */
     private static List<String> aimingLines(
             int pageNumber, boolean retake, boolean stabilizing) {
-        String title = "P" + pageNumber + (retake ? " 撮り直し" : " 撮影");
-        if (stabilizing) {
-            return List.of(title, "そのまま静止");
-        }
-        return List.of(title, "十字は方向の目安・撮影枠ではありません", "タップで撮影");
+        // Nothing over the page while aiming (operator, 2026-09-30): the cross
+        // alone says where the camera points, and it clears too.
+        return List.of();
     }
 
     /**

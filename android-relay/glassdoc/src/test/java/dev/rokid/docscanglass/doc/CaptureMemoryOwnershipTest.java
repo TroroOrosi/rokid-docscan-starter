@@ -96,7 +96,8 @@ public class CaptureMemoryOwnershipTest {
         assertTrue((Boolean) ReflectionHelpers.getField(hud, "frameReported"));
         assertTrue(surface.isCaptureReviewVisible(generation));
         List<String> lines = ReflectionHelpers.getField(hud, "lines");
-        assertEquals("確認後に撮影終了・操作せず待つ", lines.get(2));
+        // The review keeps one line (the page); the end notice takes its place.
+        assertEquals(List.of("確認後に撮影終了・操作せず待つ"), lines);
         surface.showCaptureEndRequested();
         surface.showHud(List.of("保存済み"));
         ShadowLooper.runUiThreadTasksIncludingDelayedTasks();

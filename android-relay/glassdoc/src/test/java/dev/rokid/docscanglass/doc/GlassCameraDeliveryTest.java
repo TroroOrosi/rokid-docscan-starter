@@ -123,6 +123,34 @@ public class GlassCameraDeliveryTest {
         assertNull(ReflectionHelpers.getField(camera, "reader"));
         assertTrue((Boolean) ReflectionHelpers.getField(camera, "unknown"));
     }
+    @Test public void meteringBuffersDrainImmediatelyAndCloseEvenIfJpegReaderCloseFails() {
+        ImageReader metering = Shadow.newInstanceOf(ImageReader.class);
+        ReaderShadow meteringShadow = Shadow.extract(metering);
+        meteringShadow.events = events;
+        meteringShadow.closeEvent = "metering.close";
+        meteringShadow.image = new DocScanTestImage(events);
+        ReflectionHelpers.setField(camera, "meteringReader", metering);
+        ReflectionHelpers.callInstanceMethod(camera, "drainMeteringImage",
+                ClassParameter.from(ImageReader.class, metering));
+        assertEquals(List.of("image.close"), events);
+        assertEquals(1, meteringShadow.latestAcquisitions);
+        readerShadow.throwOnClose = true;
+        deliver();
+        assertEquals(List.of("image.close", "image.close", "reader.close", "metering.close"), events);
+        assertNull(ReflectionHelpers.getField(camera, "meteringReader"));
+        assertEquals(0, delivered);
+        assertEquals(1, failures.size());
+    }
+    @Test public void successfulJpegReleasesMeteringBeforeConsumer() {
+        ImageReader metering = Shadow.newInstanceOf(ImageReader.class);
+        ReaderShadow meteringShadow = Shadow.extract(metering);
+        meteringShadow.events = events;
+        meteringShadow.closeEvent = "metering.close";
+        ReflectionHelpers.setField(camera, "meteringReader", metering);
+        deliver();
+        assertEquals(List.of("image.close", "reader.close", "metering.close", "delivered"), events);
+        assertEquals(1, delivered);
+    }
     @Test public void definitiveCaptureFailureDoesNotWaitForTimeout() {
         captureEvents(1).onCaptureFailed(null, null, failure(false));
         assertEquals(1, failures.size());
@@ -183,9 +211,12 @@ public class GlassCameraDeliveryTest {
         Image image;
         List<String> events;
         boolean throwOnClose;
+        int latestAcquisitions;
+        String closeEvent = "reader.close";
         @Implementation protected Image acquireNextImage() { return image; }
+        @Implementation protected Image acquireLatestImage() { latestAcquisitions++; return image; }
         @Implementation protected void close() {
-            events.add("reader.close");
+            events.add(closeEvent);
             if (throwOnClose) throw new IllegalStateException("synthetic close failure");
         }
     }

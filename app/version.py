@@ -201,7 +201,10 @@ from __future__ import annotations
 # finds the glasses among the phone hotspot clients. See GLASSES_VIEW 1.23.0.
 # 0.46.2: capture text and the aim mark clear after 1.5s; "answers" opens a
 # server session's answers on the glasses without a capture.
-APP_VERSION = "0.46.3"
+# 0.47.0: the glasses meter with the preview running under the still (3s cap),
+# wait for the head to be still, show no text while aiming, and show the
+# review photo cropped to the paper. See GLASSES_VIEW_CONTRACT 1.25.0.
+APP_VERSION = "0.47.0"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.
@@ -427,7 +430,8 @@ EXPLAINER_API_VERSION = "1.1.0"
 # Local capture is a JPEG-only session with an untouched still request again:
 # the 9/23 metering stream never returned a still on the glasses (2026-09-30).
 # Capture waiting text and the aim mark clear after HudView.FADE_MILLIS.
-GLASSES_VIEW_CONTRACT_VERSION = "1.24.0"
+# No text while aiming; review is the photo cropped to the paper plus one line.
+GLASSES_VIEW_CONTRACT_VERSION = "1.25.0"
 
 # Answer-area overlay payload (box + short answer; 2D image-anchored).
 # 1.1.0: added tracking metadata (tracking/fixed_ar/anchor_hint).

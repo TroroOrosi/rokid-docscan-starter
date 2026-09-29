@@ -211,9 +211,6 @@ final class HudView extends View {
         guidePaint.setStrokeWidth(2f);
         canvas.drawLine(x - radius, y, x + radius, y, guidePaint);
         canvas.drawLine(x, y - radius, x, y + radius, guidePaint);
-        paint.setTextSize(22);
-        canvas.drawText(spreadGuide ? "B5 見開き" : "B5 1ページ", 8, 26, paint);
-        canvas.drawText("紙面へ顔を向ける", 8, 54, paint);
     }
 
     /** Show the complete capture once, with no inset or label covering the paper. */
