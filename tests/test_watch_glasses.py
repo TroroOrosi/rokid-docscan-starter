@@ -67,16 +67,21 @@ def test_auto_finds_the_glasses_among_the_hotspot_clients(monkeypatch):
                "10.248.83.167:5555": "glasses"}
 
     def adb(serial, *args):
-        if serial == watch_glasses.PHONE:
-            return tethering
         result = serials[serial]
         if isinstance(result, Exception):
             raise result
         return result
 
     connects = []
+
+    def run(args, **_):
+        if args[-2:] == ["dumpsys", "tethering"]:
+            # The real dump carries "Exception" in its history (2026-09-30).
+            return subprocess.CompletedProcess(args, 0, tethering + " IllegalStateException", "")
+        connects.append(args[-1])
+
     monkeypatch.setattr(watch_glasses, "adb", adb)
-    monkeypatch.setattr(watch_glasses.subprocess, "run", lambda args, **_: connects.append(args[-1]))
+    monkeypatch.setattr(watch_glasses.subprocess, "run", run)
 
     assert watch_glasses.target("auto", "glasses") == "10.248.83.167:5555"
     assert connects == ["10.248.83.1:5555", "10.248.83.167:5555"]

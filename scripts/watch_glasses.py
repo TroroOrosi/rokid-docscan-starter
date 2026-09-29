@@ -18,7 +18,10 @@ def hotspot_clients() -> list[str]:
     The hotspot picks the glasses' address, and 2026-09-30 showed the app can
     fail before it ever talks to the server, so the phone is the one source.
     """
-    return _CLIENT.findall(adb(PHONE, "shell", "dumpsys", "tethering"))
+    # Not adb(): the dump's own history contains the word "Exception".
+    result = subprocess.run(["adb", "-s", PHONE, "shell", "dumpsys", "tethering"],
+                            check=True, capture_output=True, text=True, timeout=10)
+    return _CLIENT.findall(result.stdout)
 
 
 def target(serial: str, expected_serial: str) -> str:
