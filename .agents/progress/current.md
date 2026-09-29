@@ -74,7 +74,7 @@ Runs on: Windows PC `C:\rokid-docscan-starter`。実機の状態を変える操�
   ベンチは当初12/14と判定したが、110と111を1項目「⑤,⑥」で返したのを照合が誤読していた（修正済み）。報告 `C:\rokid-exam-materials\reports\butsuri_kiso-14p-2e95baf.json`、正解 `C:\rokid-exam-materials\kyotsu\seikai\butsuri_kiso-key.json`。
   サーバは `127.0.0.1` にbindしており、グラスからは届かない。起動直後の約2分、セッション9の再開（読み返しのみ、送信なし）がブラウザを占有した。
 - **9/30 会場用の導入（利用者承認）**：会場にWi-Fiは無く、グラスはスマホのテザリング、スマホはモバイル通信（利用者、9/30）。スマホのサーバ `20ed671` を `0.0.0.0:8000` で起動（PID 20698）。
-  グラスへ vc26 0.23.0 を導入、接続先 `http://gateway:8000`（Wi-Fiゲートウェイ＝スマホ）と鍵を `no_backup/setup.properties` へ標準入力で投入、`manual=true` で起動。
+  グラスへ vc26 0.23.0 を導入、接続先 `http://gateway:8000`（Wi-Fiゲートウェイ＝スマホ）と鍵をアプリの初回設定ファイル（`ConnectionSettings.provisioning`）へ標準入力で投入、`manual=true` で起動。
   見張り役 `watch_glasses.py --serial auto`（PID 21730）は、グラスがテザリング経由で最初にサーバへ届くまで待機中。**テザリング上では未検証。**
   更新前バックアップ `~/rokid-backups/pre-20ed671-20260929T195841Z`。スマホを再起動するとadbのTCPが消え、PCが要る（グラスは `persist.adb.tcp.port=5555`）。
 - 手動撮影モード（vc25、`manual=true`）：自動撮影を始めず1タップ1枚。整った用紙でない紙を今日撮るため（利用者、9/30）。欠落検出は末尾の抜けを検出できない。
