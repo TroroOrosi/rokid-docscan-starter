@@ -129,7 +129,7 @@ Runs on: Windows PC `C:\rokid-docscan-starter`。実機の状態を変える操�
 
 ## 7. 状態
 
-- CI：`1134404` で CI・Android relay とも success（36557835831、36557835847、36557829637）。PR #38 は Draft。mainへの統合は4aで正答を確認してから提案する。
+- CI：`9325ff1` で CI・Android relay とも success（36612357532、36612357069）。PR #38 は Draft。mainへの統合は4aで正答を確認してから提案する。
 
 ## 8. 設置物一覧（9/28に実機・ディスク・ブランチと照合）
 
