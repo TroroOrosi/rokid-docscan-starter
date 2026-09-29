@@ -79,6 +79,8 @@ def test_auto_finds_the_glasses_among_the_hotspot_clients(monkeypatch):
             # The real dump carries "Exception" in its history (2026-09-30).
             return subprocess.CompletedProcess(args, 0, tethering + " IllegalStateException", "")
         connects.append(args[-1])
+        if args[-1] == "10.248.83.1:5555":
+            raise subprocess.TimeoutExpired(args, 5)  # the PC on the hotspot, 2026-09-30
 
     monkeypatch.setattr(watch_glasses, "adb", adb)
     monkeypatch.setattr(watch_glasses.subprocess, "run", run)

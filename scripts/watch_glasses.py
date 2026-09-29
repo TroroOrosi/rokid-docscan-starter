@@ -30,8 +30,9 @@ def target(serial: str, expected_serial: str) -> str:
         return serial
     for address in hotspot_clients():
         candidate = f"{address}:5555"
-        subprocess.run(["adb", "connect", candidate], capture_output=True, timeout=10)
         try:
+            # A PC on the hotspot has no adbd, and its connect times out.
+            subprocess.run(["adb", "connect", candidate], capture_output=True, timeout=5)
             if adb(candidate, "shell", "getprop", "ro.serialno") == expected_serial:
                 return candidate
         except (subprocess.SubprocessError, OSError):
