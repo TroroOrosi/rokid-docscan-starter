@@ -717,3 +717,18 @@ def test_the_bench_fails_when_only_some_questions_came_back_ready(
         ["--pdf", str(pdf), "--server", "http://phone.example:8000", "--out", str(out)])
 
     assert code == 2
+
+
+def test_one_question_that_fills_two_answer_numbers_is_graded_per_number():
+    """Run 4c (2026-09-30): 問2 answered 解答番号 110 and 111 as one item, "⑤,⑥".
+    Read as one answer for both numbers it failed twice against a correct reply."""
+    items = [{"question_label": "問1", "answer_no": [109], "answer": "⑤", "status": "ready"},
+             {"question_label": "問2", "answer_no": [110, 111], "answer": "⑤,⑥",
+              "status": "ready"}]
+    key = {109: "5", 110: "5", 111: "6"}
+
+    assert run_exam_deck.grade(items, key) == []
+    # A part count that does not match the numbers stays visible, not guessed.
+    assert run_exam_deck.grade(
+        [{"question_label": "問2", "answer_no": [110, 111], "answer": "⑤", "status": "ready"}],
+        {110: "5", 111: "6"}) == [(111, "6", "⑤")]

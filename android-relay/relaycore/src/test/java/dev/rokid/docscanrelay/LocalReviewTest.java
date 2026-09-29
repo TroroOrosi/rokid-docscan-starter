@@ -536,6 +536,47 @@ public class LocalReviewTest {
         }
     }
 
+    /** Manual mode never opens the camera on its own; a tap takes one photo. */
+    @Test public void manualCaptureTakesNoPhotoUntilTheOperatorTaps() throws Exception {
+        Context context = RuntimeEnvironment.getApplication();
+        Surface surface = new Surface();
+        List<String> diagnostics = new java.util.ArrayList<>();
+        try (MockWebServer server = new MockWebServer()) {
+            DocScanController controller = new DocScanController(context, surface, null,
+                    (state, lines, diagnostic) -> diagnostics.add(diagnostic == null ? "" : diagnostic),
+                    new ClientIdentity("test", "test", "test"));
+            try {
+                controller.setManualCapture(true);
+                controller.configureForLocalStart(server.url("/").toString(), "", 270);
+                controller.startLocalSession(false);
+                barrier(controller);
+
+                assertFalse("no automatic burst", controller.isAutoCaptureEnabled());
+                assertEquals("no photo before a tap", 0, surface.photos);
+                assertTrue(diagnostics.stream().anyMatch(d -> d.contains("Manual capture")));
+
+                // The tap arms the page; the photo still waits for the visible guide.
+                call(controller, "manualCaptureNow", new Class<?>[]{});
+                barrier(controller);
+                assertEquals(RelayState.AIMING, controller.getState());
+                assertEquals(0, surface.photos);
+
+                // The shutter then waits out SHUTTER_STABILIZATION_MILLIS, so this
+                // stops at the state; the photo itself is covered by the tests above.
+                set(controller, "captureGuideAcknowledged", true);
+                call(controller, "triggerArmedCaptureNow", new Class<?>[]{});
+                barrier(controller);
+                assertEquals("the tap is the shutter", RelayState.STABILIZING, controller.getState());
+                assertFalse("still no automatic burst", controller.isAutoCaptureEnabled());
+
+                // The listening recorder's start request is refused the same way.
+                controller.startAutoCapture();
+                barrier(controller);
+                assertFalse(controller.isAutoCaptureEnabled());
+            } finally { controller.close(); }
+        }
+    }
+
     private static final class Surface implements CaptureSurface {
         boolean visible;
         int photos;

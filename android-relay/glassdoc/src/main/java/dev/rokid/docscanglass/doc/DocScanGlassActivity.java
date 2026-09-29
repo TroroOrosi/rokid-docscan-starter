@@ -62,6 +62,8 @@ public final class DocScanGlassActivity extends Activity
     private static final String EXTRA_KEY = "key";
     private static final String EXTRA_GUIDE = "guide";
     private static final String EXTRA_SPREAD = "spread";
+    /** One tap, one photo. Set once with an Intent extra; it then persists. */
+    private static final String EXTRA_MANUAL = "manual";
     private static final int CAMERA_PERMISSION_REQUEST = 7401;
     private static final int AUDIO_PERMISSION_REQUEST = 7402;
     private boolean listeningMode;
@@ -230,6 +232,11 @@ public final class DocScanGlassActivity extends Activity
                     ? intent.getBooleanExtra("listening", false) : getPreferences(MODE_PRIVATE).getBoolean("listening", false);
             getPreferences(MODE_PRIVATE).edit().putBoolean("listening", listeningMode).apply();
             if (!choosingSession) controller.setListeningMode(listeningMode);
+            boolean manual = intent != null && intent.hasExtra(EXTRA_MANUAL)
+                    ? intent.getBooleanExtra(EXTRA_MANUAL, false)
+                    : getPreferences(MODE_PRIVATE).getBoolean(EXTRA_MANUAL, false);
+            getPreferences(MODE_PRIVATE).edit().putBoolean(EXTRA_MANUAL, manual).apply();
+            controller.setManualCapture(manual);
         }
         if (intent != null && intent.hasExtra(EXTRA_GUIDE)) {
             float fraction = intent.getFloatExtra(

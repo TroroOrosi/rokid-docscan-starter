@@ -191,7 +191,10 @@ from __future__ import annotations
 # skipped becomes a failed row instead of vanishing, and automatic capture
 # rests the camera after 30s without a registered page. See API 1.30.0 and
 # GLASSES_VIEW_CONTRACT 1.21.0.
-APP_VERSION = "0.44.0"
+# 0.45.0: manual capture mode (one tap, one photo) for pages the recogniser
+# cannot judge, and the bench grades a 問 that fills several 解答番号 per
+# number. See GLASSES_VIEW_CONTRACT 1.22.0; API unchanged.
+APP_VERSION = "0.45.0"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.
@@ -412,7 +415,9 @@ EXPLAINER_API_VERSION = "1.1.0"
 # 409 wakes and says why. A replacement deck of the same input is accepted.
 # Automatic capture rests the camera after 30s with no page registered and
 # shows "撮影を休止 / タップで再開"; the shutter tap resumes it.
-GLASSES_VIEW_CONTRACT_VERSION = "1.21.0"
+# Manual capture mode ("manual" Intent extra, persisted): no automatic burst,
+# one tap one photo, "手動撮影 / 1タップ＝1枚".
+GLASSES_VIEW_CONTRACT_VERSION = "1.22.0"
 
 # Answer-area overlay payload (box + short answer; 2D image-anchored).
 # 1.1.0: added tracking metadata (tracking/fixed_ar/anchor_hint).

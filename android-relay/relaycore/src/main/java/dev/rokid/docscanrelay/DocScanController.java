@@ -135,6 +135,14 @@ public final class DocScanController implements AutoCloseable {
     private boolean linkReady;
     private volatile long documentId;
     private volatile boolean listeningMode;
+    /**
+     * Every photo is an explicit tap. The automatic burst decides what to keep
+     * and what to skip from the recogniser's reading of the page, and on the 22
+     * real captures measured 2026-09-29 that reading was not dependable: 7 read
+     * no characters at all and 3 frames with no paper in them were judged
+     * complete. A page that is not a clean exam sheet is exactly that case.
+     */
+    private volatile boolean manualOnly;
     private boolean listeningComplete;
     private boolean listeningFailed;
     private int nextPageIndex;
@@ -589,6 +597,10 @@ public final class DocScanController implements AutoCloseable {
     }
 
     public void setListeningMode(boolean enabled) { listeningMode = enabled && link.supportsLocalCaptureReview(); }
+
+    public void setManualCapture(boolean enabled) { manualOnly = enabled; }
+
+    public boolean isManualCapture() { return manualOnly; }
 
     public void completeListening() {
         serial.execute(() -> { if (!listeningFailed) { listeningComplete = true; finishReadingNow(); } });
@@ -2138,6 +2150,12 @@ public final class DocScanController implements AutoCloseable {
     private void startAutoCaptureNow() {
         if (!link.supportsLocalCaptureReview()) {
             publish(state, currentHudLines, "Automatic capture is disabled; use explicit phone controls");
+            return;
+        }
+        // Here, not at each caller: the listening recorder starts capture too.
+        if (manualOnly) {
+            publishAutoWaiting("手動撮影", "1タップ＝1枚",
+                    "Manual capture: the automatic burst is disabled for this session");
             return;
         }
         if (autoCaptureEnabled || captureLease.isUnresolved()

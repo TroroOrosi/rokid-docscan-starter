@@ -37,6 +37,7 @@ import io
 import json
 import logging
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -455,6 +456,25 @@ def load_answer_key(path: str) -> dict[int, str]:
     return {int(number): str(answer) for number, answer in raw.items()}
 
 
+# One 問 often fills several 解答番号 at once: run 4c (2026-09-30) answered
+# 110 and 111 as one item reading "⑤,⑥". Split on what a written list uses.
+_ANSWER_PARTS = re.compile(r"[、,，・/／\s]+")
+
+
+def answers_by_number(item: dict) -> dict[int, str]:
+    """The item's answer against each 解答番号 it fills.
+
+    When the answer names one part per number, they pair in order; otherwise
+    the whole answer stands against every number, which is what a single-number
+    item wants and what makes a mismatched count visible instead of silent.
+    """
+    numbers = [n for n in item.get("answer_no", []) if isinstance(n, int)]
+    parts = [part for part in _ANSWER_PARTS.split(str(item["answer"]).strip()) if part]
+    if len(numbers) > 1 and len(parts) == len(numbers):
+        return dict(zip(numbers, parts))
+    return {number: item["answer"] for number in numbers}
+
+
 def grade(items: list[dict], key: dict[int, str]) -> list[tuple[int, str, str]]:
     """(解答番号, official, given) for every number that did not match.
 
@@ -462,9 +482,10 @@ def grade(items: list[dict], key: dict[int, str]) -> list[tuple[int, str, str]]:
     answer sheet the operator would write, not the model's own question order.
     A number the reply never answered is reported as missing, not skipped.
     """
-    given = {number: item["answer"] for item in items
-             if item["status"] in ("ready", "needs_review")
-             for number in item.get("answer_no", [])}
+    given: dict[int, str] = {}
+    for item in items:
+        if item["status"] in ("ready", "needs_review"):
+            given.update(answers_by_number(item))
     return [(number, official, given.get(number, ""))
             for number, official in sorted(key.items())
             if normalize_answer(given.get(number, "")) != normalize_answer(official)]
