@@ -1,6 +1,6 @@
 # 再開入口：次のセッションはここだけ読めば始められる
 
-Status: Internal progress。2026-09-29更新（1教科1通の経路をPCで実装し、監査2回の指摘を反映済み。4aは未再実行）。branch `feature/capture-quality-readiness`、Draft [PR #38](https://github.com/TroroOrosi/rokid-docscan-starter/pull/38)。
+Status: Internal progress。2026-09-29更新（4aを1教科1通で再実行し、4問すべて正解。次は4b）。branch `feature/capture-quality-readiness`、Draft [PR #38](https://github.com/TroroOrosi/rokid-docscan-starter/pull/38)。
 Runs on: Windows PC `C:\rokid-docscan-starter`。実機の状態を変える操作・APK導入・スマホのサーバ更新・GPT送信は、利用者の承認後だけ（hookでも強制）。
 
 ## 0. 読み方（前提と資料に引きずられないため）
@@ -37,7 +37,10 @@ Runs on: Windows PC `C:\rokid-docscan-starter`。実機の状態を変える操�
 ## 3. 確認済みの事実（HEAD `1134404`、APP 0.43.0 / API 1.29.0 / glassdoc vc23 0.20.0）
 
 - 9/29 4a（`e0b8263`、旧方式）：一覧1通→小問ごとに1通。1通目の返答は一覧だけで答えが無く、次々に送った。利用者が停止。問1＝④は正解。
-- 9/29にPCで作り直した（`4552ea1`、`61ad481`、`e12e155`、`1134404`。単体試験・stubだけで確認。実機・ChatGPTでは未確認）：
+- **9/29 4a再実行（`1134404`、スマホのサーバ、PCからssh tunnel）：4問すべて正解**（④②④②＝101=4、102=2、103=4、104=2）。102.6秒。
+  セッション7、チャット `/c/6abbcf5d…` は送信1通（画像2枚）・返答1通だけ（CDPで読み取り確認）。送信記録はidle、サーバのTracebackは0。
+  報告 `C:\rokid-exam-materials\reports\butsuri_kiso-p1-4-server.json`。入力は公式PDFの描画で、グラスの写真ではない。
+- 9/29にPCで作り直した（`4552ea1`、`61ad481`、`e12e155`、`1134404`。上の4aで1通送信と正答を実機確認。他の失敗経路は単体試験・stubだけ）：
   - 1通送信。完了は返答の中身（期待したJSONが揃う）と停止ボタンの消失で判定。文字の不変での判定・40秒の制動・180秒の打ち切りは削除。上限は150分。
   - 送信後300秒たっても返答が始まらなければ失敗。送る前の失敗は150秒おきに最大5回、再開は3回まで。送信済みのチャットがある教科は二度と送らず、読み返して答えを拾う。
   - サーバ起動時の再開は3時間以内のセッションだけ（過去の未解答セッションを送らない）。
@@ -48,17 +51,16 @@ Runs on: Windows PC `C:\rokid-docscan-starter`。実機の状態を変える操�
 - スマホ版ChatGPTの停止ボタンは一致する（§F-6-10：送信直後から stop=1、返答欄は130.4秒後）。
 - 未確認の前提：ChatGPT webが録音ファイルを聞くか（公式FAQに音声の記載なし）、実機でのJPEG添付。
 - 実写22枚の測定（9/29、PC）：グラスOCRは撮影判断に使えない（7枚が0文字、紙の無い3枚を「完全」と判定）。紙の最大成分の面積0.06未満で紙なしを分けられた（該当3枚のみ）。
-- スマホの状態：サーバは `e0b8263` のまま停止。送信記録に問2の `uncertain`（request_id `8e3ceee6…`）が残る。Termuxに `ip` は無い。
+- スマホの状態：サーバは `1134404`（0.43.0）で `phone_serve.sh 127.0.0.1` により起動中。送信記録はidle（`8e3ceee6…` は9/29に利用者が解除）。
+  更新前のバックアップ `~/rokid-backups/pre-1134404-20260929T234008`。送信記録の解除は自動判定で拒否されるので、利用者が `!` で実行する。
 
 ## 4. 次の作業（この順）
 
 1. 済：独立監査2回（`4552ea1`、`4552ea1..e12e155`）の指摘を `61ad481`〜`1134404` で反映。
-2. 4a（Runs on: スマホFastAPI＋スマホChrome、PCからHTTPで投入。**承認後**。承認は次の3つをまとめて1回）：
-   - スマホのサーバを監査後のHEADへ更新する。送信記録 `8e3ceee6…` を解除する。
-   - 起動は `bash scripts/phone_serve.sh <スマホのIPv4>`。起動後はChromeを前景に戻す。
-   - `py -3.12 scripts/run_exam_deck.py --pdf C:/rokid-exam-materials/kyotsu/butsuri_kiso.pdf --pages 1-4 --server http://<phone>:8000`
-     正解：`C:\rokid-exam-materials\kyotsu\seikai\rika_kiso.pdf` 1頁、第1問 101=4、102=2、103=4、104=2。送信は1通であること。
-3. 4b（Runs on: 同上。**承認後**）：`--images data/device-setup/glassdoc-kokugo-20260927/originals`（見開き原本2枚。答えは利用者が確認）。
+2. 済：4a（3節）。起動はスマホで `bash scripts/phone_serve.sh 127.0.0.1`、PCから `ssh -L 8000:127.0.0.1:8000` で投入した。
+3. 4b（Runs on: スマホFastAPI＋スマホChrome、PCからHTTPで投入。**承認後**）：
+   `py -3.12 scripts/run_exam_deck.py --images data/device-setup/glassdoc-kokugo-20260927/originals --server http://127.0.0.1:8000`
+   （グラスの見開き原本2枚。9/22の1枚は鮮明、9/16の1枚はぼやけている。答えは利用者が確認）。
 4. Runs on: glassdoc＋スマホ。**承認後。** APK vc23を導入し、B5印刷の頁を着席で撮り、同じ経路で解かせる。
 5. Runs on: 会場経路（スマホAP）。**承認後。** 撮影からグラス表示まで通す。最初の目的達成。
 
