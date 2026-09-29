@@ -1,6 +1,6 @@
 # 再開入口：次のセッションはここだけ読めば始められる
 
-Status: Internal progress。2026-09-29更新（1教科1通の経路をPCで実装・監査中。4aは未再実行）。branch `feature/capture-quality-readiness`、Draft [PR #38](https://github.com/TroroOrosi/rokid-docscan-starter/pull/38)。
+Status: Internal progress。2026-09-29更新（1教科1通の経路をPCで実装し、監査2回の指摘を反映済み。4aは未再実行）。branch `feature/capture-quality-readiness`、Draft [PR #38](https://github.com/TroroOrosi/rokid-docscan-starter/pull/38)。
 Runs on: Windows PC `C:\rokid-docscan-starter`。実機の状態を変える操作・APK導入・スマホのサーバ更新・GPT送信は、利用者の承認後だけ（hookでも強制）。
 
 ## 0. 読み方（前提と資料に引きずられないため）
@@ -34,16 +34,17 @@ Runs on: Windows PC `C:\rokid-docscan-starter`。実機の状態を変える操�
   撮影終了後は答えが出るまで画面オフ、閉じるときも画面オフ（9/15）。30秒進展がなければカメラ休止（9/9）。
 - リスニングの実機試験は後回し。LEDの外部観測は不要。LEDを操作するコードは書かない。依頼済みの機能は省かない（5節）。
 
-## 3. 確認済みの事実（HEAD `e12e155`、APP 0.42.0 / API 1.28.0 / glassdoc vc23 0.20.0）
+## 3. 確認済みの事実（HEAD `1134404`、APP 0.43.0 / API 1.29.0 / glassdoc vc23 0.20.0）
 
 - 9/29 4a（`e0b8263`、旧方式）：一覧1通→小問ごとに1通。1通目の返答は一覧だけで答えが無く、次々に送った。利用者が停止。問1＝④は正解。
-- 9/29にPCで作り直した（`4552ea1`、`61ad481`、`e12e155`。単体試験・stubだけで確認。実機・ChatGPTでは未確認）：
+- 9/29にPCで作り直した（`4552ea1`、`61ad481`、`e12e155`、`1134404`。単体試験・stubだけで確認。実機・ChatGPTでは未確認）：
   - 1通送信。完了は返答の中身（期待したJSONが揃う）と停止ボタンの消失で判定。文字の不変での判定・40秒の制動・180秒の打ち切りは削除。上限は150分。
-  - 送信後120秒たっても返答欄が出なければ失敗。送る前の失敗は150秒おきに最大5回やり直す。送信結果が不明なときは再送せず、チャットを読み返して答えを拾う。
+  - 送信後300秒たっても返答が始まらなければ失敗。送る前の失敗は150秒おきに最大5回、再開は3回まで。送信済みのチャットがある教科は二度と送らず、読み返して答えを拾う。
+  - サーバ起動時の再開は3時間以内のセッションだけ（過去の未解答セッションを送らない）。
   - 添付はJPEG q92を1ファイルずつ（CDPの受信上限100MB対策）。サーバ再起動後は解析を再開。グラスは409「解析中」の間は画面オフで30秒おきに問い合わせる。
   - 利用制限は専用の表示。PDF経路・`pages.pdf`・`INPUT_MODE` は削除。
-- 検証（`e12e155`）：`py -3.12 -X utf8 -m pytest -q` → 941 passed, 2 skipped。`py -3.12 -m ruff check .` → All checks passed!
-  gradle `test testDebugUnitTest assembleDebug` → BUILD SUCCESSFUL（199 tasks）。glassdoc debug APK SHA-256 `584e526c534849da4558457b7533c8ca6c6b5016bc1645c24e0b59d382621d69`。
+- 検証（`1134404`）：`py -3.12 -X utf8 -m pytest -q` → 956 passed, 2 skipped。`py -3.12 -m ruff check .` → All checks passed!
+  gradle（`e12e155`、以後Java変更なし）→ BUILD SUCCESSFUL（199 tasks）。glassdoc debug APK SHA-256 `584e526c534849da4558457b7533c8ca6c6b5016bc1645c24e0b59d382621d69`。
 - スマホ版ChatGPTの停止ボタンは一致する（§F-6-10：送信直後から stop=1、返答欄は130.4秒後）。
 - 未確認の前提：ChatGPT webが録音ファイルを聞くか（公式FAQに音声の記載なし）、実機でのJPEG添付。
 - 実写22枚の測定（9/29、PC）：グラスOCRは撮影判断に使えない（7枚が0文字、紙の無い3枚を「完全」と判定）。紙の最大成分の面積0.06未満で紙なしを分けられた（該当3枚のみ）。
@@ -51,7 +52,7 @@ Runs on: Windows PC `C:\rokid-docscan-starter`。実機の状態を変える操�
 
 ## 4. 次の作業（この順）
 
-1. 監査の反映（PC）。`4552ea1..e12e155` の独立監査を実行中。指摘は担当に直させ、全試験を通す。
+1. 済：独立監査2回（`4552ea1`、`4552ea1..e12e155`）の指摘を `61ad481`〜`1134404` で反映。
 2. 4a（Runs on: スマホFastAPI＋スマホChrome、PCからHTTPで投入。**承認後**。承認は次の3つをまとめて1回）：
    - スマホのサーバを監査後のHEADへ更新する。送信記録 `8e3ceee6…` を解除する。
    - 起動は `bash scripts/phone_serve.sh <スマホのIPv4>`。起動後はChromeを前景に戻す。
@@ -92,7 +93,7 @@ Runs on: Windows PC `C:\rokid-docscan-starter`。実機の状態を変える操�
 
 ## 7. 状態
 
-- CI：`e12e155` の結果は未確認。PR #38 は Draft。mainへの統合は4aで正答を確認してから提案する。
+- CI：`1134404` で CI・Android relay とも success（36557835831、36557835847、36557829637）。PR #38 は Draft。mainへの統合は4aで正答を確認してから提案する。
 
 ## 8. 設置物一覧（9/28に実機・ディスク・ブランチと照合）
 
