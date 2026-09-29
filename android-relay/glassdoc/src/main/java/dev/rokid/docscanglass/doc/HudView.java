@@ -24,6 +24,13 @@ import java.util.List;
  */
 final class HudView extends View {
     private static final int GREEN = Color.rgb(0x40, 0xFF, 0x5E);
+    /**
+     * Capture text and the aim mark sit in the operator's line of sight over
+     * the page (2026-09-30: "the text made it hard to shoot"). They clear this
+     * long after appearing; black is transparent on the glasses and draws no
+     * power. The still under review never clears: it must be seen.
+     */
+    static final long FADE_MILLIS = 1500;
 
     private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint guidePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -94,6 +101,24 @@ final class HudView extends View {
     /** Aiming: a direction cue, not an outline to fit the physical page into. */
     void showAiming(List<String> newLines) {
         set(newLines, null, true);
+        fadeSoon();
+    }
+
+    private Runnable fade;
+
+    /** Clear what is shown now after FADE_MILLIS, unless something else replaces it first. */
+    void fadeSoon() {
+        List<String> shown = lines;
+        boolean guide = aiming;
+        if (fade != null) removeCallbacks(fade);
+        fade = () -> {
+            if (preview == null && aiming == guide && lines.equals(shown)) {
+                lines = Collections.emptyList();
+                aiming = false;
+                invalidate();
+            }
+        };
+        postDelayed(fade, FADE_MILLIS);
     }
 
     /**

@@ -1,23 +1,39 @@
 """Run in phone Termux: reopen the chooser after the glasses unfold."""
 
 import argparse
+import re
 import subprocess
 import time
-from pathlib import Path
 
 COMPONENT = "dev.rokid.docscanglass.doc/.DocScanGlassActivity"
-# Written by the server (app/main.py _remember_glasses_address) from the
-# glasses' own requests: the phone hotspot picks their address.
-ADDRESS_FILE = Path(__file__).resolve().parent.parent / "data" / "glasses-address"
+# phone_serve.sh connects this, the phone's own adbd, before the server starts.
+PHONE = "127.0.0.1:5555"
+# `dumpsys tethering` lists each hotspot client as "client: /10.248.83.167 (mac)".
+_CLIENT = re.compile(r"client: /(\d+\.\d+\.\d+\.\d+) ")
 
 
-def target(serial: str) -> str:
-    """The adb target; "auto" connects to the address the server last saw."""
+def hotspot_clients() -> list[str]:
+    """Addresses the phone's hotspot has handed out, as the phone itself reports.
+
+    The hotspot picks the glasses' address, and 2026-09-30 showed the app can
+    fail before it ever talks to the server, so the phone is the one source.
+    """
+    return _CLIENT.findall(adb(PHONE, "shell", "dumpsys", "tethering"))
+
+
+def target(serial: str, expected_serial: str) -> str:
+    """The adb target; "auto" is the hotspot client whose serial matches."""
     if serial != "auto":
         return serial
-    address = ADDRESS_FILE.read_text(encoding="ascii").strip()
-    subprocess.run(["adb", "connect", f"{address}:5555"], capture_output=True, timeout=10)
-    return f"{address}:5555"
+    for address in hotspot_clients():
+        candidate = f"{address}:5555"
+        subprocess.run(["adb", "connect", candidate], capture_output=True, timeout=10)
+        try:
+            if adb(candidate, "shell", "getprop", "ro.serialno") == expected_serial:
+                return candidate
+        except (subprocess.SubprocessError, OSError):
+            continue  # a PC or another client on the hotspot
+    raise subprocess.CalledProcessError(1, "adb connect")
 
 
 def adb(serial: str, *args: str) -> str:
@@ -40,7 +56,7 @@ def watch(requested: str, expected_serial: str, interval: float) -> None:
     while True:
         try:
             if not verified:
-                serial = target(requested)
+                serial = target(requested, expected_serial)
                 if adb(serial, "shell", "getprop", "ro.serialno") != expected_serial:
                     raise SystemExit("Glasses identity mismatch; watcher stopped")
                 verified = True
@@ -70,7 +86,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--serial", required=True,
-        help='Existing authorized phone adb target, or "auto" for the address the server last saw')
+        help='Existing authorized phone adb target, or "auto" to find it among the hotspot clients')
     parser.add_argument("--expected-serial", required=True, help="Glasses ro.serialno")
     parser.add_argument("--interval", type=float, default=0.5, help="Fold polling interval in seconds")
     args = parser.parse_args()

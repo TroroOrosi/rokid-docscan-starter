@@ -197,7 +197,11 @@ from __future__ import annotations
 # 0.46.0: venue networking. The server host "gateway" resolves to the Wi-Fi
 # gateway (the phone hotspot), the server remembers the glasses' address
 # for the fold watcher, and a large sheet may arrive in sections.
-APP_VERSION = "0.46.0"
+# 0.46.1: the glasses capture as measured before 9/23, and the fold watcher
+# finds the glasses among the phone hotspot clients. See GLASSES_VIEW 1.23.0.
+# 0.46.2: capture text and the aim mark clear after 1.5s; "answers" opens a
+# server session's answers on the glasses without a capture.
+APP_VERSION = "0.46.2"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.
@@ -420,7 +424,10 @@ EXPLAINER_API_VERSION = "1.1.0"
 # shows "撮影を休止 / タップで再開"; the shutter tap resumes it.
 # Manual capture mode ("manual" Intent extra, persisted): no automatic burst,
 # one tap one photo, "手動撮影 / 1タップ＝1枚".
-GLASSES_VIEW_CONTRACT_VERSION = "1.22.0"
+# Local capture is a JPEG-only session with an untouched still request again:
+# the 9/23 metering stream never returned a still on the glasses (2026-09-30).
+# Capture waiting text and the aim mark clear after HudView.FADE_MILLIS.
+GLASSES_VIEW_CONTRACT_VERSION = "1.24.0"
 
 # Answer-area overlay payload (box + short answer; 2D image-anchored).
 # 1.1.0: added tracking metadata (tracking/fixed_ar/anchor_hint).

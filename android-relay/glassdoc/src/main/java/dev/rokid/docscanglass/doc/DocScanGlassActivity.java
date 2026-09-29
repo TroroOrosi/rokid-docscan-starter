@@ -64,6 +64,8 @@ public final class DocScanGlassActivity extends Activity
     private static final String EXTRA_SPREAD = "spread";
     /** One tap, one photo. Set once with an Intent extra; it then persists. */
     private static final String EXTRA_MANUAL = "manual";
+    /** Open this server session's answers directly: checks the answer display without a capture. */
+    private static final String EXTRA_ANSWERS = "answers";
     private static final int CAMERA_PERMISSION_REQUEST = 7401;
     private static final int AUDIO_PERMISSION_REQUEST = 7402;
     private boolean listeningMode;
@@ -207,7 +209,15 @@ public final class DocScanGlassActivity extends Activity
         applyIntent(getIntent(), true);
         startupSelection = listeningMode ? 1 : 0;
         startupAnswers = loadSavedAnswers();
-        showStartupChoices();
+        long answersSession = getIntent() == null ? 0 : getIntent().getLongExtra(EXTRA_ANSWERS, 0);
+        if (answersSession > 0) {
+            choosingSession = false;
+            viewingPreviousAnswers = true;
+            hud.showLines(List.of("答案を取得中", "", ""));
+            fetchAnswers(answersSession);
+        } else {
+            showStartupChoices();
+        }
         if (!hasCamera()) {
             requestPermissions(
                     new String[] {Manifest.permission.CAMERA}, CAMERA_PERMISSION_REQUEST);
@@ -665,7 +675,11 @@ public final class DocScanGlassActivity extends Activity
                 || state == RelayState.CAPTURE_REVIEW) {
             return;
         }
-        main.post(() -> hud.showLines(GlassesHudText.adapt(hudLines)));
+        main.post(() -> {
+            hud.showLines(GlassesHudText.adapt(hudLines));
+            // Waiting to shoot: nothing here needs reading, and the page is behind it.
+            if (state == RelayState.READY || state == RelayState.READING) hud.fadeSoon();
+        });
     }
 
     @Override public void onListeningReady(File directory, long documentId, boolean resume) {

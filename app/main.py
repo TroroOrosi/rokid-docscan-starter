@@ -146,30 +146,8 @@ async def _auth_middleware(request: Request, call_next):
         provided = request.headers.get("authorization", "").encode("utf-8")
         if not hmac.compare_digest(provided, expected):
             return JSONResponse({"detail": "unauthorized"}, status_code=401)
-        _remember_glasses_address(request)
     return await call_next(request)
 
-
-_glasses_address = ""
-
-
-def _remember_glasses_address(request: Request) -> None:
-    """Keep the last authenticated non-loopback client address in DATA_DIR.
-
-    At the venue the phone's hotspot hands the glasses an address nobody set,
-    and scripts/watch_glasses.py needs it to reopen the app after the temples
-    are folded and opened. Only the glasses reach this server from another
-    host there, and only with the key.
-    """
-    global _glasses_address
-    host = request.client.host if request.client else ""
-    if not host or host == _glasses_address or host.startswith("127."):
-        return
-    try:
-        (config.DATA_DIR / "glasses-address").write_text(host, encoding="ascii")
-        _glasses_address = host
-    except OSError:
-        pass  # the watcher waits; the request itself must not fail for this
 
 
 # --- request/response models ------------------------------------------------

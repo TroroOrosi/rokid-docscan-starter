@@ -55,14 +55,29 @@ def test_unknown_launch_is_not_retried_while_the_glasses_stay_open(monkeypatch):
     assert len(launches) == 1
 
 
-def test_auto_connects_to_the_address_the_server_last_saw(monkeypatch, tmp_path):
-    """At the venue the phone hotspot chooses the glasses' address."""
-    address = tmp_path / "glasses-address"
-    address.write_text("192.168.51.23", encoding="ascii")
-    monkeypatch.setattr(watch_glasses, "ADDRESS_FILE", address)
-    calls = []
-    monkeypatch.setattr(watch_glasses.subprocess, "run", lambda args, **_: calls.append(args))
 
-    assert watch_glasses.target("auto") == "192.168.51.23:5555"
-    assert calls == [["adb", "connect", "192.168.51.23:5555"]]
-    assert watch_glasses.target("192.168.0.31:5555") == "192.168.0.31:5555"
+def test_auto_finds_the_glasses_among_the_hotspot_clients(monkeypatch):
+    """2026-09-30: the app failed before talking to the server, so the watcher
+    never learned the address and unfolding brought back the home screen."""
+    tethering = ("{android.net.ip.IpServer@99d6002={/10.248.83.1=downstream: 306 "
+                 "(9e:9f:64:05:5e:3f), client: /10.248.83.1 (ec:4c:8c:74:88:3f), "
+                 "/10.248.83.167=downstream: 306 (9e:9f:64:05:5e:3f), "
+                 "client: /10.248.83.167 (ac:86:d1:5b:e3:66)}}")
+    serials = {"10.248.83.1:5555": subprocess.CalledProcessError(1, "adb"),
+               "10.248.83.167:5555": "glasses"}
+
+    def adb(serial, *args):
+        if serial == watch_glasses.PHONE:
+            return tethering
+        result = serials[serial]
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    connects = []
+    monkeypatch.setattr(watch_glasses, "adb", adb)
+    monkeypatch.setattr(watch_glasses.subprocess, "run", lambda args, **_: connects.append(args[-1]))
+
+    assert watch_glasses.target("auto", "glasses") == "10.248.83.167:5555"
+    assert connects == ["10.248.83.1:5555", "10.248.83.167:5555"]
+    assert watch_glasses.target("192.168.0.31:5555", "glasses") == "192.168.0.31:5555"
