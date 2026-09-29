@@ -501,6 +501,22 @@ def test_the_reply_shape_the_model_may_use_still_lands_on_the_right_rows(client,
         ("第2問", "問1", "ready", "⑤"), ("第3問", "全問", "ready", "図")]
 
 
+def test_a_kanji_numbered_group_stays_a_group(client, monkeypatch):
+    """Run 4b (2026-09-30): "第一問" was folded into its labels and shown as one 全体."""
+    from app import main
+
+    _, session_id = _session_with(client, ["問1 2+2を求めよ。"])
+    monkeypatch.setenv("ROKID_SOLVER", "test-provider")
+    monkeypatch.setattr(main, "_answer_all", lambda question: _replies(
+        ("第一問", "問一（一）", [1], "4"), ("第一問", "問一（二）", [1], "2"),
+        ("大問二", "問1", [1], "⑤")))
+    monkeypatch.setattr(main, "solve_with_fallback", lambda **_: pytest.fail("per-question send"))
+    bundle = _background_finalize_and_wait(
+        client, session_id, lambda items: items and all(i["status"] != "pending" for i in items))
+    assert [(i["group_label"], i["question_label"], i["answer"]) for i in bundle["items"]] == [
+        ("第一問", "問一（一）", "4"), ("第一問", "問一（二）", "2"), ("大問二", "問1", "⑤")]
+
+
 @pytest.mark.parametrize("error, status, issue", [
     ("limit", "failed", "ChatGPTの利用制限です。解除後に再開してください"),
     ("busy", "pending", "別の解析がブラウザを使用中です。自動で再試行します"),

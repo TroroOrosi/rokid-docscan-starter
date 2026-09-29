@@ -185,7 +185,9 @@ from __future__ import annotations
 # PDF path. See API 1.28.0 and GLASSES_VIEW_CONTRACT 1.20.0.
 # A booklet already in its chat is read back, never sent again; resume is
 # limited to recent sessions and to RESUME_LIMIT failed batches. See API 1.29.0.
-APP_VERSION = "0.43.0"
+# A spread photo reaches ChatGPT as its right page, then its left, one page per
+# image; a kanji-numbered 大問 stays a group. See API 1.29.1.
+APP_VERSION = "0.43.1"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.
@@ -283,7 +285,9 @@ APP_VERSION = "0.43.0"
 # 1.29.0: answer-bundle names browser_blocked (another send still unconfirmed)
 #        as retrying; a retrying failure becomes `failed` with a plain reason
 #        after RESUME_LIMIT batches. Only sessions under RESUME_WINDOW_S resume.
-API_VERSION = "1.29.0"
+# 1.29.1: answer-bundle keeps a kanji-numbered 大問 ("第一問", "大問二") as its
+#        group instead of folding it into the labels under one 全体 group.
+API_VERSION = "1.29.1"
 
 # Matching algorithm identity. Bump when thresholds or hashing change so a
 # re-index/eval is triggered. Mirrors thresholds in app/matching.py.

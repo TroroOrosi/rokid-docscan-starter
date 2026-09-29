@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import io
+import itertools
 import math
 
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageOps
@@ -50,6 +51,55 @@ def _readable(photo: Image.Image) -> Image.Image:
                             zip(box, (photo.width, photo.height, photo.width, photo.height))))
 
 
+def _gutter(photo: Image.Image) -> int | None:
+    """x of the fold of a two-page spread, or None to keep the photo whole.
+
+    The darkest column band (shadow and fold) within 15% of the paper box centre;
+    the trimmed photo is that box plus an even margin. A column's median over the
+    middle half ignores most text, and the blur thins a text column more than a
+    fold. A fold must lie 40 below the paper within 4% on each side, and 15 below
+    every other column in the window, which a repeating text column never is.
+    Glasses photos on this PC, 2026-09-30: the two 4b folds 56 and 75 deep, 27
+    below the rest; any other landscape photo at most 32 deep.
+    """
+    if photo.width <= photo.height or min(photo.size) < 400:
+        return None
+    gray = photo.convert("L")
+    gray.thumbnail((320, 320))
+    gray = gray.filter(ImageFilter.BoxBlur(1))
+    w, h = gray.size
+    band = gray.crop((0, h // 4, w, h - h // 4)).tobytes()
+    column = [sorted(band[x::w])[len(band) // w // 2] for x in range(w)]
+    lo, hi, near = round(w * 0.35), round(w * 0.65), round(w * 0.04)
+    x = min(range(lo, hi), key=column.__getitem__)
+    depth = min(max(column[x - near:x]), max(column[x + 1:x + near + 1])) - column[x]
+    runner_up = min(column[i] for i in range(lo, hi) if abs(i - x) > near)
+    # ponytail: fixed levels. A flat, evenly lit spread with only a thin fold line
+    # (32 deep on 2026-09-16) stays whole, as before; a line detector would split it.
+    if depth < 40 or runner_up - column[x] < 15:
+        return None
+    return round((x + 0.5) * photo.width / w)
+
+
+def _page_images(pages: list[dict]):
+    """(label, readable image) in capture order; a spread is its right page, then its left."""
+    for page in pages:
+        number = f"{page['page_number']:03d}"
+        try:
+            with Image.open(page["image_path"]) as source:
+                photo = _readable(source.convert("RGB"))
+        except (OSError, TypeError) as error:
+            raise ValueError(f"Page {number} image unavailable") from error
+        x = _gutter(photo)
+        if x is None:
+            yield number, photo
+            continue
+        with photo:  # Japanese booklets read right to left
+            right, left = photo.crop((x, 0, photo.width, photo.height)), photo.crop((0, 0, x, photo.height))
+        yield f"{number} R", right
+        yield f"{number} L", left
+
+
 def source_bundle(pages: list[dict], *, max_files: int = 20) -> list[dict]:
     """Keep all source pages, including shared material that OCR did not identify.
 
@@ -67,27 +117,24 @@ def source_bundle(pages: list[dict], *, max_files: int = 20) -> list[dict]:
     selected = sorted(pages, key=lambda page: page["page_number"])
     if not selected:
         raise ValueError("no source pages")
+    # One image per page: fitting a whole spread in 768 px blurred its text in
+    # run 4b (2026-09-30); one page at 768 px wide read clearly. Counted first,
+    # so each photo is decoded twice, but no more than a group is held at once.
+    count = sum(1 for _ in _page_images(selected))
     files = []
-    group_size = max(1, math.ceil(len(selected) / max_files))
+    group_size = max(1, math.ceil(count / max_files))
     if group_size > 3:
         raise ValueError("too many pages for a complete image bundle")
-    for start in range(0, len(selected), group_size):
-        group = selected[start:start + group_size]
-        images = []
+    parts = _page_images(selected)
+    while group := list(itertools.islice(parts, group_size)):
         try:
-            for page in group:
-                try:
-                    with Image.open(page["image_path"]) as source:
-                        images.append(_readable(source.convert("RGB")))
-                except (OSError, TypeError) as error:
-                    raise ValueError(f"Page {page['page_number']:03d} image unavailable") from error
-            width = max(i.width for i in images)
+            width = max(photo.width for _, photo in group)
             header = max(24, width // 24)
-            with Image.new("RGB", (width, sum(i.height + header for i in images)), "white") as sheet:
+            with Image.new("RGB", (width, sum(p.height + header for _, p in group)), "white") as sheet:
                 y = 0
-                for page, photo in zip(group, images):
+                for text, photo in group:
                     with Image.new("RGB", (100, 20), "white") as label:
-                        ImageDraw.Draw(label).text((2, 2), f"Page {page['page_number']:03d}", fill="black")
+                        ImageDraw.Draw(label).text((2, 2), f"Page {text}", fill="black")
                         label.thumbnail((width, header))
                         label_width = min(width, header * 5)
                         with label.resize((label_width, header)) as scaled:
@@ -106,9 +153,9 @@ def source_bundle(pages: list[dict], *, max_files: int = 20) -> list[dict]:
                 extension, mime = ".jpg", "image/jpeg"
             if len(data) > MAX_IMAGE_BYTES:
                 raise ValueError("image attachment exceeds 20MB; use individual page images")
-            name = "page" + "-".join(f"{p['page_number']:03d}" for p in group) + extension
+            name = "page" + "-".join(text.replace(" ", "") for text, _ in group) + extension
             files.append(_payload(name, mime, data))
         finally:
-            for photo in images:
+            for _, photo in group:
                 photo.close()
     return files

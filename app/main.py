@@ -2359,8 +2359,9 @@ def _exam_deck(conn, session_id: int) -> list[dict]:
     return deck
 
 
-# 大問 headings, as the segmenter emits them (app/layout.py:64).
-_GROUP_NO_RE = re.compile(r"^(?:大問\s*[0-9０-９]+|第\s*[0-9０-９]+\s*問)")
+# 大問 headings, as the segmenter emits them (app/layout.py:64) and as the model
+# copies them from a 国語 booklet ("第一問", run 4b, 2026-09-30).
+_GROUP_NO_RE = re.compile(r"^(?:大問\s*[0-9０-９一二三四五六七八九十]+|第\s*[0-9０-９一二三四五六七八九十]+\s*問)")
 
 
 def _answer_groups(conn, session_id: int) -> list[dict]:
