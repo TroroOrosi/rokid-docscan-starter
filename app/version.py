@@ -204,7 +204,9 @@ from __future__ import annotations
 # 0.47.0: the glasses meter with the preview running under the still (3s cap),
 # wait for the head to be still, show no text while aiming, and show the
 # review photo cropped to the paper. See GLASSES_VIEW_CONTRACT 1.25.0.
-APP_VERSION = "0.47.0"
+# 0.47.1: the glasses go back to the untouched still (vc29): this HAL returns
+# no JPEG while any preview stream runs or has run. The 0.47.0 view changes stay.
+APP_VERSION = "0.47.1"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.
