@@ -852,7 +852,14 @@ public final class DocScanGlassActivity extends Activity
                 return;
             }
             try {
-                AnswerBundle bundle = controller.api().answerBundle(sessionId);
+                // configureForLocalStart is asynchronous; a fetch at launch can beat it.
+                DocScanApi api = controller.api();
+                for (int waited = 0; api == null && waited < 50; waited++) {
+                    Thread.sleep(100);
+                    api = controller.api();
+                }
+                if (api == null) throw new IllegalStateException("server not configured");
+                AnswerBundle bundle = api.answerBundle(sessionId);
                 answerFetchFailing = false;
                 answerStore.start(bundle);
                 main.post(() -> openAnswers(bundle, bundle.items.get(0).questionId, 0));

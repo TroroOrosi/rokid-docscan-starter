@@ -201,7 +201,7 @@ from __future__ import annotations
 # finds the glasses among the phone hotspot clients. See GLASSES_VIEW 1.23.0.
 # 0.46.2: capture text and the aim mark clear after 1.5s; "answers" opens a
 # server session's answers on the glasses without a capture.
-APP_VERSION = "0.46.2"
+APP_VERSION = "0.46.3"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.
