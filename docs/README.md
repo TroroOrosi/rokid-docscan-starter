@@ -51,6 +51,7 @@ silently applying that exception. `.agents/progress/` remains in scope.
   existing role has to be declared rather than merely appear.
 - `docs/multimodal-scan.md` — standalone capture, diagrams, original image/audio input; ASR only on the compatibility route; physical acceptance pending.
 - `README.md` — project entrypoint: what this is for, setup, and the HTTP API.
+- `AGENTS.md` — agent entrypoint for every harness: read order and the rules past sessions broke.
 - `CLAUDE.md` — engineering invariants. The contract that governs changes:
   real-device rules, answer routes, capture/input/server invariants, build and
   device gates, and the documentation rules above.
