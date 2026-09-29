@@ -843,3 +843,56 @@ def test_another_sessions_unconfirmed_send_is_waited_out_not_final(client, monke
         client, session_id, lambda items: items and items[0]["issue"])
     assert bundle["items"][0]["status"] == "pending"
     assert bundle["items"][0]["issue"] == "前の送信の結果確認待ちです。自動で再試行します"
+
+
+def _numbered(*rows):
+    """Items in the reply's own shape, answered through the real rules.
+
+    Unlike :func:`_replies` this builds the SolveResult from the item, so the
+    printed 解答番号 travels the path it travels in a session.
+    """
+    from app.solvers.llm_adapter import answer_sheet_result
+
+    items = [{"group": group, "label": label, "answer_no": numbers, "pages": [1],
+              "status": "ready", "answer": answer}
+             for group, label, numbers, answer in rows]
+    return [(item, answer_sheet_result(item, subject=None, extras={})) for item in items]
+
+
+def test_a_skipped_answer_number_is_shown_instead_of_dropped(client, monkeypatch):
+    """9/30: a 小問 missing from the one reply left no row at all, so a booklet
+    the model had mostly dropped still finalized as a complete deck."""
+    from app import main
+
+    _, session_id = _session_with(client, ["問1 2+2を求めよ。"])
+    monkeypatch.setenv("ROKID_SOLVER", "test-provider")
+    monkeypatch.setattr(main, "_answer_all", lambda question: _numbered(
+        ("第1問", "問1", [101], "④"), ("第1問", "問4", [104], "②")))
+    monkeypatch.setattr(main, "solve_with_fallback", lambda **_: pytest.fail("per-question send"))
+
+    bundle = _background_finalize_and_wait(
+        client, session_id, lambda items: items and all(i["status"] != "pending" for i in items))
+
+    assert [(i["question_label"], i["status"], i["answer"] or i["issue"], i.get("answer_no"))
+            for i in bundle["items"]] == [
+        ("問1", "ready", "④", [101]),
+        ("問4", "ready", "②", [104]),
+        ("解答番号102", "failed", "この解答番号の答えが返答にありません", None),
+        ("解答番号103", "failed", "この解答番号の答えが返答にありません", None)]
+
+
+def test_a_booklet_that_prints_no_answer_numbers_keeps_its_deck(client, monkeypatch):
+    """Only printed numbers can name a gap; without them nothing is invented."""
+    from app import main
+
+    _, session_id = _session_with(client, ["問1 2+2を求めよ。"])
+    monkeypatch.setenv("ROKID_SOLVER", "test-provider")
+    monkeypatch.setattr(main, "_answer_all", lambda question: _numbered(
+        ("第1問", "問1", [], "④"), ("第1問", "問2", [], "②")))
+    monkeypatch.setattr(main, "solve_with_fallback", lambda **_: pytest.fail("per-question send"))
+
+    bundle = _background_finalize_and_wait(
+        client, session_id, lambda items: items and all(i["status"] != "pending" for i in items))
+
+    assert [(i["question_label"], i["status"]) for i in bundle["items"]] == [
+        ("問1", "ready"), ("問2", "ready")]

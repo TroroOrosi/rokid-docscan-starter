@@ -1,6 +1,6 @@
 # 再開入口：次のセッションはここだけ読めば始められる
 
-Status: Internal progress。2026-09-30更新（4bは分割後の送信だけ確認して停止。欠落検出とベンチ判定の欠陥を発見、次はその修正）。branch `feature/capture-quality-readiness`、HEAD `1ed9588`、Draft [PR #38](https://github.com/TroroOrosi/rokid-docscan-starter/pull/38)。
+Status: Internal progress。2026-09-30更新（欠陥2件を修正し、カメラ休止を実装。次は実機の物理基礎14頁）。branch `feature/capture-quality-readiness`、Draft [PR #38](https://github.com/TroroOrosi/rokid-docscan-starter/pull/38)。
 Runs on: Windows PC `C:\rokid-docscan-starter`。実機の状態を変える操作・APK導入・スマホのサーバ更新・GPT送信は、利用者の承認後だけ（hookでも強制）。
 
 ## 0. 読み方（前提と資料に引きずられないため）
@@ -38,7 +38,7 @@ Runs on: Windows PC `C:\rokid-docscan-starter`。実機の状態を変える操�
 - リスニングの実機試験は後回し。LEDの外部観測は不要。LEDを操作するコードは書かない。依頼済みの機能は省かない（5節）。
 - 9/30の4b再実行：問題用紙が全て揃っていないため、送信確認までで停止する（利用者）。同じ不完全な2枚の再送で正答を試さない。
 
-## 3. 確認済みの事実（HEAD時点：APP 0.43.1 / API 1.29.1 / glassdoc vc23 0.20.0）
+## 3. 確認済みの事実（HEAD時点：APP 0.44.0 / API 1.30.0 / glassdoc vc24 0.21.0）
 
 - 9/29 4a旧方式（`e0b8263`）：一覧だけの1通のあと小問ごとに送り、利用者が停止。これを受けて1教科1通へ作り直した（`4552ea1`〜`1134404`、監査2回を反映）。
 - **9/29 4a（`1134404`、スマホのサーバ）：4問すべて正解**（④②④②＝101〜104）。送信1通（画像2枚）・返答1通・102.6秒。入力は公式PDFの描画でグラスの写真ではない。
@@ -65,7 +65,12 @@ Runs on: Windows PC `C:\rokid-docscan-starter`。実機の状態を変える操�
   ChatGPT webは添付画像を長辺2048へ縮小していた（page001R 1377x2428 → 1155x2048。計4枚とも長辺2048）。
   その後、ベンチとサーバを強制終了、`port_8000_closed=true`、送信記録は `uncertain`（session 9、`2217c5ce…`）のまま。証拠は `data/device-setup/reports/4b-f89a761-*`。
   ベンチのHTTP応答に断続的な `RemoteProtocolError`（4a・セッション8でも出ている。別接続の `/health` は200。原因未調査）。
-- **9/30に確かめた欠陥2件（Codexの指摘を私が再現）**：
+- **9/30 修正（PC、未コミット→下記コミット）**：返答の各小問が印刷された解答番号（`answer_no`）を持ち、飛ばされた番号は `解答番号N` の `failed` 項目として残る。
+  ベンチは `--answer-key`（JSON `{"101":"4"}`）で公式正解と全番号を照合し、1つでも違えば exit 2。鍵が無い場合も全問readyでなければ exit 2（旧: 1問readyで exit 0）。
+  30秒1頁も登録されなければ自動撮影がカメラを休止し「撮影を休止／タップで再開」を出す。単タップがそのまま再開。録音は止めない。
+  検証：`py -3.12 -X utf8 -m pytest -q` → 970 passed, 2 skipped。`ruff` → All checks passed!。`gradlew test testDebugUnitTest assembleDebug` → BUILD SUCCESSFUL、199 tasks。**実機・GPTでは未確認。**
+  注意：`--key` はサーバのAPIキーで既に使われていたため、公式正解の受け取りは `--answer-key` にした（4節の記述を置き換えた）。
+- **9/30に確かめた欠陥2件（Codexの指摘を私が再現。上で修正済み）**：
   - **返答に無い小問は、黙って消える。** 冊子の解答欄と返答を照合する処理がどこにも無い（`chatgpt_web.py` の検査は `questions` キーと各答えの形だけ）。モデルが1問しか返しても「完了」になる。
   - **ベンチは1問でも ready なら exit 0**（`run_exam_deck.py:695`）。公式正解との照合もしない。4aの「4問すべて正解」は私が手で照合した結果であり、ベンチの判定ではない。
 - スマホの状態：サーバソースは `f89a761`、**プロセスは停止中**。更新前バックアップは `~/rokid-backups/pre-f89a761-4b-20260929T161503Z`（app・scripts・DB・browser-state・env）。試験時はChrome前景・Awake、Chrome `153.0.8010.52`、F-51F fingerprint `FCNT/F-51F/F-51F:16/W1VHS36H.80-34-2-2-1-5/64c964-a8f54:user/release-keys`。
@@ -79,14 +84,10 @@ Runs on: Windows PC `C:\rokid-docscan-starter`。実機の状態を変える操�
 1. 済：独立監査2回（`4552ea1`、`4552ea1..e12e155`）の指摘を `61ad481`〜`1134404` で反映。
 2. 済：4a（3節）。起動はスマホで `bash scripts/phone_serve.sh 127.0.0.1`、PCから `ssh -L 8000:127.0.0.1:8000` で投入した。
 3. 済：4bは送信だけ確認して停止（3節）。同じ不完全な2枚を送り直さない。
-4. **次（PC、質問せずに進める）**：上の欠陥2件を直す。両方とも、返答の各小問に冊子に印刷された解答番号（例101）を持たせれば済む。
-   - 解答番号が印刷された冊子では、番号の抜けを検出し、その番号を `failed`（「解答番号Nの答えがありません」）としてグラスに出す。送信は1通のまま増やさない。
-   - ベンチは `--key` で公式正解（解答番号→答え）を受け取り、全番号が一致したときだけ exit 0。表示も先頭5件だけでなく全件にする。
-   - 30秒進展がなければカメラを休止する（2節の依頼済み）。
-   受け入れ条件：全pytestとruffが通る。9/29の4aの返答（④②④②）と正解101〜104を与えたベンチが exit 0、1つ違えば exit 2 になることを試験で示す。
-   実装と監査は別の担当に分ける。スマホ・グラス・GPTには触れない。
+4. 済：欠陥2件の修正とカメラ休止（3節）。受け入れ条件（4aの④②④②と正解101〜104で exit 0、1つ違えば exit 2）は
+   `tests/test_run_exam_deck.py::test_the_bench_passes_only_when_every_official_answer_matches` で示した。監査は未実施。
 5. **その後（実機、承認後）**：Runs on: スマホFastAPI＋スマホChrome、PCからHTTP。先にセッション9の送信記録 `uncertain` を利用者が解除する（下の判断1）。
-   正解のある物理基礎の全14頁（`C:/rokid-exam-materials/kyotsu/butsuri_kiso.pdf`、正解 `C:/rokid-exam-materials/kyotsu/seikai/rika_kiso.pdf` 101〜114）を1通で送り、ベンチの `--key` で全問を照合する。
+   正解のある物理基礎の全14頁（`C:/rokid-exam-materials/kyotsu/butsuri_kiso.pdf`、正解 `C:/rokid-exam-materials/kyotsu/seikai/rika_kiso.pdf` 101〜114）を1通で送り、ベンチの `--answer-key`（JSONを先に作る）で全問を照合する。
    不完全な資料（国語の見開き2枚など）は送らない。
 6. Runs on: glassdoc＋スマホ。**承認後。** APK vc23を導入し、B5印刷の頁を着席で撮り、同じ経路で解かせる。
 7. Runs on: 会場経路（スマホAP）。**承認後。** 撮影からグラス表示まで通す。最初の目的達成。

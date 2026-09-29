@@ -646,3 +646,74 @@ def test_the_reason_a_pending_item_waits_is_printed(capsys):
     server = _Server([retrying, _bundle("ready", revision=4)])
     wait_for_answers(server, 1, 60, interval=0, clock=clock, sleep=clock.sleep)
     assert "ChatGPTへ送れませんでした。自動で再試行します" in capsys.readouterr().out
+
+
+def _graded(*rows):
+    """answer_all's shape, built through the real answer rules like a session."""
+    from app.solvers.llm_adapter import answer_sheet_result
+
+    items = [{"group": "第1問", "label": label, "answer_no": [number], "pages": [1],
+              "status": "ready", "answer": answer}
+             for label, number, answer in rows]
+    return [(item, answer_sheet_result(item, subject=None, extras={})) for item in items]
+
+
+# The 2026-09-29 4a reply and the official key for 物理基礎 101-104.
+_RUN_4A = (("問1", 101, "④"), ("問2", 102, "②"), ("問3", 103, "④"), ("問4", 104, "②"))
+_KEY_4A = {"101": "4", "102": "2", "103": "4", "104": "2"}
+
+
+@pytest.mark.parametrize("key, expected", [
+    (_KEY_4A, 0),
+    ({**_KEY_4A, "103": "1"}, 2),   # one official answer differs
+    ({**_KEY_4A, "105": "3"}, 2),   # a 解答番号 the reply never answered
+])
+def test_the_bench_passes_only_when_every_official_answer_matches(
+        server_app, tmp_path, monkeypatch, key, expected):
+    """9/30: one ready item was enough to exit 0, and nothing compared the
+    answers with the official key. The 4a reply (④②④②) is the fixture."""
+    pytest.importorskip("pypdfium2")
+    main, client = server_app
+    monkeypatch.setenv("ROKID_SOLVER", "test-provider")
+    monkeypatch.setattr(run_exam_deck, "remote_client", lambda server, k: client)
+    monkeypatch.setattr(run_exam_deck, "POLL_S", 0)
+    monkeypatch.setattr(main, "_answer_all", lambda question: _graded(*_RUN_4A))
+    monkeypatch.setattr(main, "solve_with_fallback",
+                        lambda **_: pytest.fail("per-question send"))
+
+    pdf = tmp_path / "butsuri.pdf"
+    _pdf(pdf, 4)
+    key_path = tmp_path / "key.json"
+    key_path.write_text(json.dumps(key), encoding="utf-8")
+    out = tmp_path / "reports" / "butsuri-server.json"
+
+    code = run_exam_deck.main(
+        ["--pdf", str(pdf), "--server", "http://phone.example:8000",
+         "--answer-key", str(key_path), "--out", str(out)])
+
+    assert code == expected
+    assert len(json.loads(out.read_text(encoding="utf-8"))["wrong"]) == (0 if not expected else 1)
+
+
+def test_the_bench_fails_when_only_some_questions_came_back_ready(
+        server_app, tmp_path, monkeypatch):
+    """Without a key it can still refuse a deck that is only partly answered."""
+    pytest.importorskip("pypdfium2")
+    main, client = server_app
+    monkeypatch.setenv("ROKID_SOLVER", "test-provider")
+    monkeypatch.setattr(run_exam_deck, "remote_client", lambda server, k: client)
+    monkeypatch.setattr(run_exam_deck, "POLL_S", 0)
+    monkeypatch.setattr(main, "_answer_all", lambda question: _graded(
+        ("問1", 101, "④")) + [({"group": "第1問", "label": "問2", "pages": [1]},
+                               ValueError("no answer"))])
+    monkeypatch.setattr(main, "solve_with_fallback",
+                        lambda **_: pytest.fail("per-question send"))
+
+    pdf = tmp_path / "butsuri.pdf"
+    _pdf(pdf, 4)
+    out = tmp_path / "reports" / "butsuri-server.json"
+
+    code = run_exam_deck.main(
+        ["--pdf", str(pdf), "--server", "http://phone.example:8000", "--out", str(out)])
+
+    assert code == 2

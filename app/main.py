@@ -78,7 +78,7 @@ from .matching import verdict as match_verdict
 from .overlay import build_overlay
 from .retrieval import retrieve_context
 from .solvers import Question, SolveResult, get_solver
-from .solvers.llm_adapter import paste_prompt
+from .solvers.llm_adapter import answer_numbers, paste_prompt
 from .solvers.chatgpt_web import (
     ChatGptWebBlocked, ChatGptWebBusy, ChatGptWebChatLost, ChatGptWebError, ChatGptWebRateLimit,
     ChatGptWebUncertain,
@@ -2476,7 +2476,12 @@ def _solve_failure(row) -> dict:
         return {}
 
 
+class AnswerMissing(ValueError):
+    """The one reply never answered a 解答番号 the booklet prints."""
+
+
 _FAILURE_CODES = (
+    (AnswerMissing, "answer_missing"),
     (ChatGptWebUncertain, "browser_outcome_unknown"),
     (ChatGptWebChatLost, "chat_lost"),
     (ChatGptWebRateLimit, "rate_limited"),
@@ -2547,6 +2552,7 @@ def _answer_bundle_item(conn, group: dict, row) -> dict:
         needs_input = metadata.get("answer_status") == "needs_input"
     except (ValueError, TypeError, AttributeError):
         metadata, needs_input = {}, False
+    numbers = answer_numbers(metadata.get("answer_no") or [])
     if sol is None:
         failure = _solve_failure(row)
         inherited = _solve_failure(group.get("heading"))
@@ -2560,6 +2566,7 @@ def _answer_bundle_item(conn, group: dict, row) -> dict:
                  else "ChatGPTの利用制限です。解除後に再開してください" if code == "rate_limited"
                  else _RETRYING_ISSUES[code] if retrying
                  else _GAVE_UP_ISSUES[code] if code in _GAVE_UP_ISSUES
+                 else "この解答番号の答えが返答にありません" if code == "answer_missing"
                  else "解析に失敗しました。資料は保持しています" if code == "solver_failed" else "未解答")
     elif needs_input:
         status, issue = "needs_input", str(metadata.get("missing_material") or "資料が不足しています")[:1000]
@@ -2584,6 +2591,7 @@ def _answer_bundle_item(conn, group: dict, row) -> dict:
         "answer": answer if status in ("ready", "needs_review") else "",
         "status": status,
         "issue": issue,
+        **({"answer_no": numbers} if numbers else {}),
         **({"diagrams": diagrams} if diagrams else {}),
     }
 
@@ -2867,6 +2875,28 @@ def _model_problems(items: list | None, page_count: int) -> list[ProblemUnit]:
     return unique_question_numbers(problems)
 
 
+def _missing_answer_numbers(items: list | None) -> list[int]:
+    """解答番号 the booklet prints between the answered ones and the reply skipped.
+
+    The model both sorts and answers the booklet, so a 小問 it forgets leaves
+    no deck row at all and the session looks complete. The printed numbers run
+    consecutively, so the gaps in what came back name exactly what is missing.
+    Returns [] for a booklet that prints no numbers, or a span too wide to be
+    a real answer sheet.
+    """
+    seen = sorted({number for item in (items or []) if isinstance(item, dict)
+                   for number in answer_numbers(item.get("answer_no"))})
+    if len(seen) < 2 or seen[-1] - seen[0] > 300:
+        return []
+    return sorted(set(range(seen[0], seen[-1] + 1)) - set(seen))
+
+
+def _missing_answer_problem(number: int, page_count: int) -> ProblemUnit:
+    """The deck row that shows a skipped 解答番号 instead of hiding it."""
+    return ProblemUnit(f"解答番号{number}", f"解答番号{number}",
+                       start_page_index=0, page_indexes=list(range(page_count)))
+
+
 def _fallback_problems(conn, doc_id: int, page_count: int) -> list:
     """OCR segments, else one row for the whole document."""
     return _ocr_problems(conn, doc_id) or [
@@ -2910,6 +2940,8 @@ def _answer_deck(conn, session, session_id: int, doc_id: int) -> bool:
     if replies is None:
         return False
     problems = _model_problems([item for item, _ in replies], len(source_pages))
+    missing = _missing_answer_numbers([item for item, _ in replies])
+    problems += [_missing_answer_problem(number, len(source_pages)) for number in missing]
     carried = 0
     if problems and items and not any(_latest_solution_row(conn, row["id"]) for row in items):
         # Only the whole-booklet row of a failed message: the model's list replaces it.
@@ -2941,6 +2973,8 @@ def _answer_deck(conn, session, session_id: int, doc_id: int) -> bool:
     results: dict[str, list[SolveResult | Exception]] = {}
     for item, result in replies:
         results.setdefault(" ".join(filter(None, _item_labels(item))), []).append(result)
+    for number in missing:
+        results[f"解答番号{number}"] = [AnswerMissing(str(number))]
     for row in items:
         if _latest_solution_row(conn, row["id"]) is not None:
             continue
@@ -2988,7 +3022,9 @@ def _save_solution(conn, row, result, solver_name: str, *, commit: bool = True) 
             result.raw_reasoning,
             result.extras.get("served_by", solver_name),
             json.dumps(result.diagrams, ensure_ascii=False),
-            json.dumps({k: result.extras.get(k) for k in ("answer_status", "missing_material")}, ensure_ascii=False),
+            json.dumps({k: result.extras.get(k)
+                        for k in ("answer_status", "missing_material", "answer_no")},
+                       ensure_ascii=False),
             row["id"],
         ),
     )

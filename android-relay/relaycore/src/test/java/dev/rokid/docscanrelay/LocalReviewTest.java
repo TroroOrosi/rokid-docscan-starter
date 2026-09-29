@@ -504,6 +504,38 @@ public class LocalReviewTest {
         }
     }
 
+    /** 30s with no page registered rests the camera; the shutter tap restarts it. */
+    @Test public void automaticReadingPausesWhenNothingHasBeenRegisteredForThirtySeconds() throws Exception {
+        Context context = RuntimeEnvironment.getApplication();
+        Surface surface = new Surface();
+        List<String> diagnostics = new java.util.ArrayList<>();
+        try (MockWebServer server = new MockWebServer()) {
+            DocScanController controller = new DocScanController(context, surface, null,
+                    (state, lines, diagnostic) -> diagnostics.add(diagnostic == null ? "" : diagnostic),
+                    new ClientIdentity("test", "test", "test"));
+            try {
+                controller.configureForLocalStart(server.url("/").toString(), "", 270);
+                controller.startLocalSession(false);
+                barrier(controller);
+                set(controller, "autoShotsRemaining", 0);
+                int shotsBeforeTheStall = surface.photos;
+
+                org.robolectric.shadows.ShadowSystemClock.advanceBy(java.time.Duration.ofSeconds(30));
+                call(controller, "beginAutoBurst", new Class<?>[]{});
+
+                assertEquals(shotsBeforeTheStall, surface.photos);
+                assertTrue(diagnostics.stream().anyMatch(
+                        d -> d.contains("Automatic reading paused after 30000ms")));
+
+                // A tap is the shutter and the resume: the burst runs again.
+                diagnostics.clear();
+                call(controller, "manualCaptureNow", new Class<?>[]{});
+                call(controller, "beginAutoBurst", new Class<?>[]{});
+                assertFalse(diagnostics.stream().anyMatch(d -> d.contains("paused")));
+            } finally { controller.close(); }
+        }
+    }
+
     private static final class Surface implements CaptureSurface {
         boolean visible;
         int photos;

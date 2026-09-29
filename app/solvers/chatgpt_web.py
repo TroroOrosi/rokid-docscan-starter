@@ -1134,12 +1134,15 @@ def locator_prompt(question) -> str:
 _ALL_TASK = (
     "Answer EVERY question in the attached booklet in this one reply. List, in booklet "
     "order, every question whose answer is written on the answer sheet, with its printed "
-    "major label (such as 第1問, or empty), its printed question label (such as 問1) and "
-    "the capture page numbers it uses. Choices, passages and figures are not questions. "
+    "major label (such as 第1問, or empty), its printed question label (such as 問1), the "
+    "printed answer-sheet numbers it fills (解答番号, such as [101,102]; [] when the booklet "
+    "prints none) and the capture page numbers it uses. A 解答番号 the booklet prints must "
+    "appear exactly once in the list, even when its question is unreadable. "
+    "Choices, passages and figures are not questions. "
     "Apply the rules above to each question's status, answer, missing_material and "
     "diagrams. Reply with ONE JSON object and nothing else: "
-    '{"questions":[{"group":"第1問","label":"問1","pages":[1],"status":"ready",'
-    '"answer":"","missing_material":"","diagrams":[]}]}.'
+    '{"questions":[{"group":"第1問","label":"問1","answer_no":[101],"pages":[1],'
+    '"status":"ready","answer":"","missing_material":"","diagrams":[]}]}.'
 )
 
 

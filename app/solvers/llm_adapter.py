@@ -173,6 +173,24 @@ def _read_audio(question: Question) -> tuple[str, bytes] | None:
     return (Path(path).name, data) if data else None
 
 
+def answer_numbers(value) -> list[int]:
+    """The 解答番号 printed beside one question's blanks; [] when none is printed.
+
+    Accepts a single number or a list. These numbers, not the model's own
+    ordering, are what says whether the one reply answered the whole booklet.
+    """
+    values = value if isinstance(value, list) else [value]
+    numbers: list[int] = []
+    for item in values[:20]:
+        try:
+            number = int(str(item).strip())
+        except (TypeError, ValueError):
+            continue
+        if 1 <= number <= 999 and number not in numbers:
+            numbers.append(number)
+    return numbers
+
+
 def answer_sheet_result(data: dict, *, subject: str | None, extras: dict) -> SolveResult:
     """One answer-only reply as a SolveResult; ValueError when it breaks the rules.
 
@@ -191,6 +209,7 @@ def answer_sheet_result(data: dict, *, subject: str | None, extras: dict) -> Sol
         subject=subject,
         diagrams=diagrams if status == "ready" else [],
         extras={**extras, "answer_status": status,
+                "answer_no": answer_numbers(data.get("answer_no")),
                 "missing_material": str(data.get("missing_material", ""))
                 if status == "needs_input" else ""},
     )

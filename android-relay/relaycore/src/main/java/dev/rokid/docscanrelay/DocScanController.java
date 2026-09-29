@@ -90,6 +90,15 @@ public final class DocScanController implements AutoCloseable {
      */
     private static final int AUTO_UNREADABLE_RETRY_LIMIT = 40;
     private static final long AUTO_UNREADABLE_BACKOFF_MILLIS = 1200;
+    /**
+     * No page registered for this long and the camera stops firing until the
+     * operator taps. The unreadable and duplicate limits only end a stall the
+     * recogniser can see; glasses set down on the desk, or a booklet closed
+     * mid-session, keep the sensor and the privacy LED running to the end of
+     * the session. Auto capture stays on, so the tap that resumes it is the
+     * shutter tap the operator already has.
+     */
+    private static final long AUTO_IDLE_PAUSE_MILLIS = 30_000;
     private static final String KEY_PHOTO_WIDTH = "photo_width";
     private static final String KEY_PHOTO_HEIGHT = "photo_height";
     private static final String KEY_PHOTO_QUALITY = "photo_quality";
@@ -162,6 +171,7 @@ public final class DocScanController implements AutoCloseable {
     private static final long LOCAL_REVIEW_MILLIS = 3000;
     private int autoShotsRemaining;
     private int autoShotsTaken;
+    private long autoProgressAtMillis;
     private CaptureReviewStore.Pending autoBest;
     private double autoBestScore;
     private String lastRegisteredPageText = "";
@@ -608,6 +618,9 @@ public final class DocScanController implements AutoCloseable {
         if ((finishCaptureRequested && state != RelayState.CAPTURE_REVIEW) || captureLease.isTimedOut()
                 || state == RelayState.FINALIZING || state == RelayState.UPLOADING) return;
         if (state == RelayState.CAPTURE_REVIEW) finishCaptureRequested = false;
+        // The tap is the shutter, and it also ends an idle pause: the shot it
+        // takes registers a page, and that restarts the loop on its own.
+        autoProgressAtMillis = android.os.SystemClock.elapsedRealtime();
         manualCaptureRequested = true;
         autoRunGeneration++;
         autoCommitArmed = false;
@@ -1729,6 +1742,7 @@ public final class DocScanController implements AutoCloseable {
         try { captureReviewPersistence.clearAfterCommit(); }
         catch (IOException ignored) { /* Recovery compares the retained pending file with the committed revision. */ }
         lastRegisteredPageText = pending.ocrText;
+        autoProgressAtMillis = android.os.SystemClock.elapsedRealtime();
         manualCaptureRequested = false;
         listener.onCaptureReviewCleared();
         publish(RelayState.READING, List.of(nextPageIndex + "枚保存済み", "次のページへ", "ダブルタップで撮影終了"),
@@ -1971,6 +1985,7 @@ public final class DocScanController implements AutoCloseable {
                                 + (replaced ? " (replaced)" : "")
                                 + persistenceWarning);
                 lastRegisteredPageText = pending.ocrText;
+                autoProgressAtMillis = android.os.SystemClock.elapsedRealtime();
                 manualCaptureRequested = false;
                 if (link.supportsLocalCaptureReview() && finishCaptureRequested) {
                     finishReadingNow();
@@ -2130,6 +2145,7 @@ public final class DocScanController implements AutoCloseable {
         finishCaptureRequested = false;
         manualCaptureRequested = false;
         autoCaptureEnabled = true;
+        autoProgressAtMillis = android.os.SystemClock.elapsedRealtime();
         autoRunGeneration++;
         listener.onAutoCaptureChanged(true);
         beginAutoBurst();
@@ -2154,6 +2170,16 @@ public final class DocScanController implements AutoCloseable {
 
     private void beginAutoBurst() {
         if (!autoCaptureEnabled || finishCaptureRequested || captureLease.isUnresolved()) {
+            return;
+        }
+        if (android.os.SystemClock.elapsedRealtime() - autoProgressAtMillis
+                >= AUTO_IDLE_PAUSE_MILLIS) {
+            // Nothing is scheduled here: the camera rests until a tap.
+            publishAutoWaiting(
+                    "撮影を休止",
+                    "タップで再開",
+                    "Automatic reading paused after " + AUTO_IDLE_PAUSE_MILLIS
+                            + "ms without a registered page");
             return;
         }
         autoShotsRemaining = AUTO_BURST_SHOTS;

@@ -436,6 +436,40 @@ _SERVER_INCOMPATIBLE = (
 )
 
 
+# ①..⑳ and fullwidth digits are the same answer as the plain digit: the
+# official key prints 4, a model writes ④, and neither is more correct.
+_SAME_ANSWER = {**{chr(0x2460 + i): str(i + 1) for i in range(20)},
+                **{chr(0xFF10 + d): str(d) for d in range(10)}}
+
+
+def normalize_answer(text: str) -> str:
+    """One written answer, in the form the official key is compared against."""
+    return "".join(str(text).translate(str.maketrans(_SAME_ANSWER)).split())
+
+
+def load_answer_key(path: str) -> dict[int, str]:
+    """{解答番号: official answer} from a JSON file, e.g. {"101": "4", "102": "2"}."""
+    raw = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(raw, dict) or not raw:
+        raise ValueError("the answer key must be a non-empty JSON object")
+    return {int(number): str(answer) for number, answer in raw.items()}
+
+
+def grade(items: list[dict], key: dict[int, str]) -> list[tuple[int, str, str]]:
+    """(解答番号, official, given) for every number that did not match.
+
+    The bundle carries the numbers printed in the booklet, so this compares the
+    answer sheet the operator would write, not the model's own question order.
+    A number the reply never answered is reported as missing, not skipped.
+    """
+    given = {number: item["answer"] for item in items
+             if item["status"] in ("ready", "needs_review")
+             for number in item.get("answer_no", [])}
+    return [(number, official, given.get(number, ""))
+            for number, official in sorted(key.items())
+            if normalize_answer(given.get(number, "")) != normalize_answer(official)]
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     source = parser.add_mutually_exclusive_group(required=True)
@@ -449,6 +483,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--key", default=None,
         help="the server's API key (server route only; default ROKID_API_KEY, "
              "which keeps it out of shell history)",
+    )
+    parser.add_argument(
+        "--answer-key", default=None,
+        help="JSON file of the official answers keyed by 解答番号, e.g. "
+             '{"101": "4", "102": "2"}. The run passes only when every one of '
+             "them matches (--key is the server's API key, not this)",
     )
     parser.add_argument("--subject", default="")
     parser.add_argument(
@@ -517,6 +557,8 @@ def run(args) -> int:
         print(f"skip  {report_path} already exists (--force to redo)")
         return 0
     span = parse_pages(args.pages)
+    # Before the upload: a malformed key file must not cost a generation.
+    official_key = load_answer_key(args.answer_key) if args.answer_key else {}
 
     if args.server:
         key = args.key or os.environ.get("ROKID_API_KEY")
@@ -673,8 +715,17 @@ def run(args) -> int:
     per_question = elapsed / len(items) if items else 0.0
     print(f"ok    answers        {len(ready)}/{len(items)} ready in {elapsed:.1f}s "
           f"({per_question:.1f}s per question)")
-    for item in items[:5]:
-        print(f"      {item['question_label']:<10} {item['answer'] or item['issue']}")
+    for item in items:
+        numbers = "/".join(str(n) for n in item.get("answer_no", []))
+        print(f"      {item['question_label']:<10} {numbers:<8} "
+              f"{item['answer'] or item['issue']}")
+    wrong = grade(items, official_key)
+    if official_key:
+        for number, official, got in wrong:
+            print(f"FAIL  key {number}        expected {official}, got {got or '(no answer)'}")
+        print(f"{'ok   ' if not wrong else 'FAIL '} key            "
+              f"{len(official_key) - len(wrong)}/{len(official_key)} "
+              "match the official answers")
 
     report = {
         "source": str(src),
@@ -687,12 +738,20 @@ def run(args) -> int:
         "elapsed_s": round(elapsed, 1),
         "seconds_per_question": round(per_question, 1),
         "stopped": reason,
+        "answer_key": args.answer_key,
+        "wrong": [{"answer_no": n, "official": official, "given": got}
+                  for n, official, got in wrong],
         "bundle": body,
     }
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"ok    report         {report_path}")
-    return 0 if ready and not reason else 2
+    if reason or wrong:
+        return 2
+    # Without a key nothing here knows a right answer from a wrong one, so the
+    # most this can say is that every question came back ready. One ready item
+    # used to be enough, which passed a booklet the model had mostly dropped.
+    return 0 if items and len(ready) == len(items) else 2
 
 
 def main(argv: list[str] | None = None) -> int:
