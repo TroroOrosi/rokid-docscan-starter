@@ -83,7 +83,8 @@ def answer_ceiling_s() -> float:
     ATTEMPTS preparation attempts (ChatGptWebClient._ask_locked), each up to
     READY_TIMEOUT_S + UPLOAD_TIMEOUT_S, plus their RETRY_BACKOFF_S back-offs
     (arithmetic series, sum 0..ATTEMPTS-1), plus one generation (TIMEOUT_S),
-    plus one page load (cdp.DEFAULT_TIMEOUT_S). 375s with defaults.
+    plus one page load (cdp.DEFAULT_TIMEOUT_S). 9195s with defaults: the generation
+    bound is the 150-minute session, not an analysis budget.
 
     ponytail: this reads the PC's env, not the phone's; if the phone
     overrides ROKID_CHATGPT_TIMEOUT_S, /v1/settings would have to publish it
@@ -400,11 +401,11 @@ def wait_for_answers(
             continue
 
         if r.status_code == 409 and "being made" in r.text:
-            # The model is listing the 小問. The server ends a listing itself
-            # (the background batch always leaves _background_solves, success
-            # or failure), so this adds no limit of its own.
+            # One message is being answered for the whole booklet. The server
+            # ends it itself (the background batch always leaves
+            # _background_solves, success or failure), so this adds no limit.
             if not listed:
-                print("..    listing        the model is listing the 小問")
+                print("..    analysing      one message answers every 小問")
                 listed = True
             since = clock()
             sleep(interval)

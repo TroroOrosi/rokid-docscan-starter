@@ -44,7 +44,7 @@ ROOT = Path("C:/rokid-exam-materials/rundata")
 # -- the stall bound wait_for_answers is given -------------------------------
 
 def test_answer_ceiling_s_matches_the_chatgpt_web_worst_case():
-    assert answer_ceiling_s() == 375.0
+    assert answer_ceiling_s() == 9195.0
 
 
 def test_answer_ceiling_s_grows_when_attempts_grows(monkeypatch):
@@ -268,7 +268,7 @@ class _Server:
 def test_wait_polls_through_a_listing_then_pending_then_ready():
     clock = _Clock()
     server = _Server([
-        _Response(409, {"detail": "the question list is being made"}),
+        _Response(409, {"detail": "the answers are being made"}),
         _bundle("pending", "pending", revision=1),
         _bundle("ready", "pending", revision=2),
         _bundle("ready", "ready", revision=3),
@@ -279,14 +279,12 @@ def test_wait_polls_through_a_listing_then_pending_then_ready():
 
 def test_a_long_listing_prints_the_listing_line_only_once(capsys):
     clock = _Clock()
-    responses = [_Response(409, {"detail": "the question list is being made"}) for _ in range(3)]
+    responses = [_Response(409, {"detail": "the answers are being made"}) for _ in range(3)]
     responses.append(_bundle("ready", revision=1))
     server = _Server(responses)
     wait_for_answers(server, 1, 2, interval=1, clock=clock, sleep=clock.sleep)
     out = capsys.readouterr().out
-    # The line itself says "listing" twice ("listing" the step name, "is
-    # listing the" in the message) -- count lines, not substring hits.
-    assert sum(1 for line in out.splitlines() if "listing" in line) == 1
+    assert sum(1 for line in out.splitlines() if "analysing" in line) == 1
 
 
 def test_wait_stops_at_once_on_any_other_conflict():
@@ -319,7 +317,7 @@ def test_wait_follows_a_changing_revision_well_past_the_stall_bound():
 
 def test_a_long_listing_does_not_stop_the_wait():
     clock = _Clock()
-    responses = [_Response(409, {"detail": "the question list is being made"}) for _ in range(10)]
+    responses = [_Response(409, {"detail": "the answers are being made"}) for _ in range(10)]
     responses.append(_bundle("ready", revision=1))
     server = _Server(responses)
     got, reason = wait_for_answers(server, 1, 2, interval=1, clock=clock, sleep=clock.sleep)
@@ -424,8 +422,8 @@ def test_in_process_route_reaches_the_real_build_client_with_no_timeout_warning(
 
 # -- plumbing through the real FastAPI app, model replaced --------------------
 # No network, no phone, no ChatGPT: ROKID_SOLVER=test-provider and
-# main._list_questions/main.solve_with_fallback are monkeypatched (the pattern
-# in tests/test_answer_bundle_api.py::test_model_question_list_defines_the_deck);
+# main._answer_all/main.solve_with_fallback are monkeypatched (the pattern in
+# tests/test_answer_bundle_api.py::test_one_message_names_and_answers_the_whole_deck);
 # run_exam_deck.remote_client returns the in-process TestClient instead of
 # reaching an actual host.
 
@@ -459,20 +457,17 @@ def test_server_route_uploads_two_spreads_with_no_ocr_text(server_app, tmp_path,
 
     received = []
 
-    def list_questions(question):
-        received.append(question.document_pages)
-        return [{"group": "第1問", "label": "問1", "pages": [1]},
-                {"group": "第1問", "label": "問2", "pages": [2]}]
-
-    class _Solver:
-        name = "test-provider"
-
-    def solve(*, question, **_kw):
+    def answer_all(question):
         from app.solvers.base import SolveResult
 
-        return SolveResult(answer="x"), _Solver()
+        received.append(question.document_pages)
+        return [({"group": "第1問", "label": "問1", "pages": [1]}, SolveResult(answer="x")),
+                ({"group": "第1問", "label": "問2", "pages": [2]}, SolveResult(answer="y"))]
 
-    monkeypatch.setattr(main, "_list_questions", list_questions)
+    def solve(*, question, **_kw):
+        raise AssertionError("one message answers the booklet; nothing is sent per question")
+
+    monkeypatch.setattr(main, "_answer_all", answer_all)
     monkeypatch.setattr(main, "solve_with_fallback", solve)
 
     pdf = tmp_path / "butsuri.pdf"
@@ -580,15 +575,10 @@ def test_server_route_stops_at_once_when_the_server_batch_loses_the_chat(
     # A stall-bound stop would take this long; a stop at once takes a moment.
     monkeypatch.setattr(run_exam_deck, "answer_ceiling_s", lambda: 30.0)
 
-    def list_questions(question):
-        return [{"group": "第1問", "label": "問1", "pages": [1]},
-                {"group": "第1問", "label": "問2", "pages": [1]}]
-
-    def solve(*, question, **_kw):
+    def answer_all(question):
         raise ChatGptWebChatLost("could not return to the subject's chat")
 
-    monkeypatch.setattr(main, "_list_questions", list_questions)
-    monkeypatch.setattr(main, "solve_with_fallback", solve)
+    monkeypatch.setattr(main, "_answer_all", answer_all)
     out = tmp_path / "reports" / "kokugo-server.json"
     started = time.monotonic()
 
@@ -629,9 +619,6 @@ def test_server_route_writes_the_default_report_path(server_app, tmp_path, monke
     monkeypatch.setattr(run_exam_deck, "remote_client", lambda server, key: client)
     monkeypatch.setattr(run_exam_deck, "POLL_S", 0)
 
-    def list_questions(question):
-        return [{"group": "第1問", "label": "問1", "pages": [1]}]
-
     class _Solver:
         name = "openai"
 
@@ -640,7 +627,6 @@ def test_server_route_writes_the_default_report_path(server_app, tmp_path, monke
 
         return SolveResult(answer="x"), _Solver()
 
-    monkeypatch.setattr(main, "_list_questions", list_questions)
     monkeypatch.setattr(main, "solve_with_fallback", solve)
 
     images = tmp_path / "kyotsu" / "originals"

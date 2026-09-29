@@ -106,10 +106,10 @@ ROKID_EXPLAINER = os.environ.get("ROKID_EXPLAINER", "local")
 #   ROKID_CHATGPT_UPLOAD_S            default 20 (a confirmed upload took 0.11s)
 #   ROKID_CHATGPT_ATTEMPTS            default 3 tries per question, fresh chat
 #   ROKID_CHATGPT_RETRY_S             default 5, multiplied by the attempt
-#   ROKID_CHATGPT_TIMEOUT_S           default 180
+#   ROKID_CHATGPT_TIMEOUT_S           default 9000 (the session; never an analysis budget)
 #   ROKID_CHATGPT_READY_S             default 30 (composer mount wait)
-#   ROKID_CHATGPT_POLL_S              default 0.25
-#   ROKID_CHATGPT_STABLE_POLLS        default 4  (0.25 x 4 = 1s of silence)
+#   ROKID_CHATGPT_POLL_S              default 1.0 (a reply ends on its content,
+#                                     never on N quiet polls)
 # Use a DEDICATED --user-data-dir and sign in there once. Passing the flag to an
 # already-running Chrome only opens a tab in it and never opens the port, and a
 # signed-out chatgpt.com serves a placeholder shell with no composer at all.

@@ -123,8 +123,10 @@ socket into `127.0.0.1:9222`. Measured, with the source and device evidence, in
 `docs/hardware-measurements.md` §F.
 
 A throttled account is refused in the message *body*, not by an exception. The
-solver's rate-limit markers and slow-generation brake exist because a retry loop
-read a refusal as a bad answer and turned one block into many on 2026-09-14.
+solver's rate-limit markers exist because a retry loop read a refusal as a bad
+answer and turned one block into many on 2026-09-14. The slow-generation brake
+beside them was removed on 2026-09-29: a background session now sends one
+message for the whole booklet, so a long generation is normal.
 
 ## Real-device contract
 

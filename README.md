@@ -119,7 +119,7 @@ risk があります。**利用者の判断で選択した経路です（詳細�
 CXR-L の実装境界は
 [CXR-L / Global Hi Rokid integration](docs/cxr-l-integration.md)です。
 
-現在のバージョン: **Server APP 0.40.0 / API 1.26.0 / Android client 0.3.17 / Glasses View 1.19.0 / Solver API 1.7.1**。
+現在のバージョン: **Server APP 0.41.0 / API 1.27.0 / Android client 0.3.17 / Glasses View 1.19.0 / Solver API 1.7.1**。
 版数の正本は `app/version.py` です。他の資料は版数を書かず、この行だけが
 `tests/test_documentation_contract.py` で実装と照合されます。
 Solver API は、記入用解答の全文保持・資料不足の分離を行う `answer_only` モードを含みます。
@@ -615,10 +615,10 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
   - 返答が使用制限の通知だった場合は `ChatGptWebRateLimit` で即座に打ち切り、
     再試行しません（新しいチャットを開いて再質問するのが悪化の原因でした）。
     検出語は `ROKID_CHATGPT_RATE_LIMIT_MARKERS`（`|` 区切り）で変更できます。
-  - 生成時間が `ROKID_CHATGPT_SLOW_S`（既定40秒）を超えた回が
-    `ROKID_CHATGPT_SLOW_STREAK`（既定2）回続くと、次の送信を拒否します。
-    実測のスロットリング兆候は「正常 7-13秒 → 43秒 → 48秒 → 130秒 → ブロック」
-    でした。`ROKID_CHATGPT_SLOW_STREAK=0` で無効化できます。
+  - 遅い生成が続くと送信を拒否するブレーキは、2026-09-29 に削除しました。
+    background解析は冊子全体を1通で送り、その返答に小問の一覧と全解答が入るため、
+    長い生成は正常です。返答は、期待したJSONが揃うか停止ボタンが消えたときに
+    完了とし、文字が止まっただけでは完了としません。
 - **教科ごとに1チャット**（任意、既定は問題ごと）: `ROKID_CHATGPT_CHAT_SCOPE=subject`
   で1科目が1チャットを共有します。全教科デックでチャット数が小問数から教科数に
   減り、同じ大問のページは**その科目で1回だけ**アップロードされます（同一バイト

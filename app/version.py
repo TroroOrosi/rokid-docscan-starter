@@ -179,7 +179,8 @@ from __future__ import annotations
 # A background batch asks the model for the 小問 before solving (RP-12).
 # Concurrent sessions keep their own chats; the phone start script and deck bench
 # stop early with the reason. See API 1.26.0 and GLASSES_VIEW_CONTRACT 1.19.0.
-APP_VERSION = "0.40.0"
+# A background session sends one message for the whole booklet; see API 1.27.0.
+APP_VERSION = "0.41.0"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.
@@ -265,7 +266,10 @@ APP_VERSION = "0.40.0"
 #        ready:false with a `message`. answer-bundle names a new stop, the
 #        `chat_lost` failure ("教科のチャットへ戻れません…"): the subject's chat
 #        could not be reached, no new chat was opened, and the batch stopped.
-API_VERSION = "1.26.0"
+# 1.27.0: a background solve on chatgpt-web sends ONE message: the reply names
+#        every 小問 and answers it, and nothing is sent per 小問. answer-bundle
+#        answers 409 "the answers are being made" until that reply is in.
+API_VERSION = "1.27.0"
 
 # Matching algorithm identity. Bump when thresholds or hashing change so a
 # re-index/eval is triggered. Mirrors thresholds in app/matching.py.

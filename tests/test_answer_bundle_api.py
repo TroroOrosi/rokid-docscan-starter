@@ -393,7 +393,7 @@ def test_background_finalize_publishes_each_answer_before_the_batch_ends(client,
     assert body["status"] == "reviewing" and body["solving"] == "background"
 
     def statuses():
-        response = client.get(url)  # 409 while the question list is being made
+        response = client.get(url)  # 409 while the answers are being made
         return [item["status"] for item in response.json()["items"]] if response.status_code == 200 else []
 
     deadline = time.monotonic() + 5
@@ -442,89 +442,89 @@ def _background_finalize_and_wait(client, session_id, done):
     raise AssertionError("background batch did not finish")
 
 
-def test_model_question_list_defines_the_deck(client, monkeypatch):
-    from app import main
+def _replies(*rows):
+    """answer_all's shape: (item, SolveResult or the error that item raised)."""
     from app.solvers.base import SolveResult
+
+    return [({"group": group, "label": label, "pages": pages},
+             SolveResult(answer=answer) if isinstance(answer, str) else answer)
+            for group, label, pages, answer in rows]
+
+
+def test_one_message_names_and_answers_the_whole_deck(client, monkeypatch):
+    """9/29: the next message went out before anything was answered. Now one does it all."""
+    from app import main
 
     _, session_id = _session_with(client, ["問1 Choose\n(1) a\n(2) b"])
     monkeypatch.setenv("ROKID_SOLVER", "test-provider")
-    listed, asked = [], []
+    asked, per_question = [], []
 
-    def list_questions(question):
-        listed.append(question)
-        return [{"group": "第1問", "label": "問1", "pages": [1]},
-                {"group": "第1問", "label": "問2", "pages": [1, 99]},
-                {"group": "第2問", "label": "問1", "pages": []},
-                {"group": "", "label": "", "pages": [1]}]
+    def answer_all(question):
+        asked.append(question)
+        return _replies(("第1問", "問1", [1], "④"), ("第1問", "問2", [1, 99], "②"),
+                        ("第2問", "問1", [], "③"), ("", "", [1], "x"))
 
-    class Solver:
-        name = "test-provider"
-
-    def solve(*, question):
-        asked.append(question.question_no)
-        return SolveResult(answer="x"), Solver()
-
-    monkeypatch.setattr(main, "_list_questions", list_questions)
-    monkeypatch.setattr(main, "solve_with_fallback", solve)
+    monkeypatch.setattr(main, "_answer_all", answer_all)
+    monkeypatch.setattr(main, "solve_with_fallback", lambda **_: per_question.append(1))
     bundle = _background_finalize_and_wait(
         client, session_id, lambda items: all(i["status"] == "ready" for i in items))
-    assert [(i["group_label"], i["question_label"]) for i in bundle["items"]] == [
-        ("第1問", "問1"), ("第1問", "問2"), ("第2問", "問1(2)")]
-    assert asked == ["第1問 問1", "第1問 問2", "第2問 問1"]
-    assert listed[0].chat_key == f"session:{session_id}" and listed[0].document_pages
+    assert [(i["group_label"], i["question_label"], i["answer"]) for i in bundle["items"]] == [
+        ("第1問", "問1", "④"), ("第1問", "問2", "②"), ("第2問", "問1(2)", "③")]
+    assert len(asked) == 1 and per_question == []
+    assert asked[0].chat_key == f"session:{session_id}" and asked[0].document_pages
+
+    # A repeated finalize after the answers are in asks nothing again.
+    _background_finalize_and_wait(
+        client, session_id, lambda items: all(i["status"] == "ready" for i in items))
+    assert len(asked) == 1
 
 
-def test_unusable_model_list_falls_back_to_ocr_segments(client, monkeypatch):
+def test_an_item_without_a_valid_answer_fails_alone(client, monkeypatch):
     from app import main
-    from app.solvers.base import SolveResult
+
+    _, session_id = _session_with(client, ["問1 2+2を求めよ。"])
+    monkeypatch.setenv("ROKID_SOLVER", "test-provider")
+    monkeypatch.setattr(main, "_answer_all", lambda question: _replies(
+        ("第1問", "問1", [1], "4"), ("第1問", "問2", [1], ValueError("empty answer"))))
+    monkeypatch.setattr(main, "solve_with_fallback", lambda **_: pytest.fail("per-question send"))
+    bundle = _background_finalize_and_wait(
+        client, session_id, lambda items: all(i["status"] != "pending" for i in items))
+    assert [(i["question_label"], i["status"]) for i in bundle["items"]] == [
+        ("問1", "ready"), ("問2", "failed")]
+
+
+def test_an_unusable_reply_fails_the_deck_without_another_send(client, monkeypatch):
+    from app import main
 
     _, session_id = _session_with(client, ["問1 2+2を求めよ。\n問2 3+3を求めよ。"])
     monkeypatch.setenv("ROKID_SOLVER", "test-provider")
 
-    def list_questions(question):
+    def answer_all(question):
         raise ValueError("no JSON")
 
-    class Solver:
-        name = "test-provider"
-
-    monkeypatch.setattr(main, "_list_questions", list_questions)
-    monkeypatch.setattr(main, "solve_with_fallback", lambda **_: (SolveResult(answer="4"), Solver()))
+    monkeypatch.setattr(main, "_answer_all", answer_all)
+    monkeypatch.setattr(main, "solve_with_fallback", lambda **_: pytest.fail("per-question send"))
     bundle = _background_finalize_and_wait(
-        client, session_id, lambda items: all(i["status"] == "ready" for i in items))
+        client, session_id, lambda items: items[0]["status"] == "failed")
     assert [i["question_label"] for i in bundle["items"]] == ["問1", "問2"]
+    assert bundle["items"][0]["issue"] == "解析に失敗しました。資料は保持しています"
 
 
-def test_uncertain_question_list_send_stops_the_browser(client, monkeypatch):
+@pytest.mark.parametrize("error, issue", [
+    ("uncertain", "再送"), ("lost", CHAT_LOST_ISSUE)])
+def test_an_uncertain_or_lost_chat_stops_the_one_message(client, monkeypatch, error, issue):
     from app import main
-    from app.solvers.chatgpt_web import ChatGptWebUncertain
+    from app.solvers.chatgpt_web import ChatGptWebChatLost, ChatGptWebUncertain
 
     _, session_id = _session_with(client, ["問1 2+2を求めよ。\n問2 3+3を求めよ。"])
     monkeypatch.setenv("ROKID_SOLVER", "test-provider")
-    calls = []
 
-    def list_questions(question):
-        raise ChatGptWebUncertain("send needs inspection")
+    def answer_all(question):
+        raise (ChatGptWebUncertain("send needs inspection") if error == "uncertain"
+               else ChatGptWebChatLost("could not return to the subject's chat"))
 
-    monkeypatch.setattr(main, "_list_questions", list_questions)
-    monkeypatch.setattr(main, "solve_with_fallback", lambda **_: calls.append(1))
+    monkeypatch.setattr(main, "_answer_all", answer_all)
+    monkeypatch.setattr(main, "solve_with_fallback", lambda **_: pytest.fail("per-question send"))
     bundle = _background_finalize_and_wait(
         client, session_id, lambda items: items[0]["status"] == "failed")
-    assert "再送" in bundle["items"][0]["issue"] and calls == []
-
-
-def test_a_lost_subject_chat_at_the_question_list_stops_the_browser(client, monkeypatch):
-    from app import main
-    from app.solvers.chatgpt_web import ChatGptWebChatLost
-
-    _, session_id = _session_with(client, ["問1 2+2を求めよ。\n問2 3+3を求めよ。"])
-    monkeypatch.setenv("ROKID_SOLVER", "test-provider")
-    calls = []
-
-    def list_questions(question):
-        raise ChatGptWebChatLost("could not return to the subject's chat")
-
-    monkeypatch.setattr(main, "_list_questions", list_questions)
-    monkeypatch.setattr(main, "solve_with_fallback", lambda **_: calls.append(1))
-    bundle = _background_finalize_and_wait(
-        client, session_id, lambda items: items[0]["status"] == "failed")
-    assert bundle["items"][0]["issue"] == CHAT_LOST_ISSUE and calls == []
+    assert issue in bundle["items"][0]["issue"]

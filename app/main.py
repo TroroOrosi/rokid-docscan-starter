@@ -78,7 +78,7 @@ from .matching import verdict as match_verdict
 from .overlay import build_overlay
 from .page_pdf import images_to_pdf
 from .retrieval import retrieve_context
-from .solvers import Question, get_solver
+from .solvers import Question, SolveResult, get_solver
 from .solvers.llm_adapter import paste_prompt
 from .solvers.chatgpt_web import ChatGptWebChatLost, ChatGptWebUncertain
 from .solvers.registry import solve_with_fallback
@@ -2800,10 +2800,10 @@ def _insert_deck(conn, session_id: int, doc_id: int, problems: list) -> None:
         )
 
 
-def _list_questions(question) -> list | None:
-    """The configured solver's index of the originals, when it can make one."""
-    lister = getattr(get_solver(os.environ.get("ROKID_SOLVER")), "list_questions", None)
-    return lister(question=question) if lister else None
+def _answer_all(question) -> list | None:
+    """The routed solver's one-message answer for the booklet; None if it has none."""
+    answer_all = getattr(get_solver(os.environ.get("ROKID_SOLVER")), "answer_all", None)
+    return answer_all(question=question) if answer_all else None
 
 
 def _model_problems(items: list | None, page_count: int) -> list[ProblemUnit]:
@@ -2832,12 +2832,23 @@ def _model_problems(items: list | None, page_count: int) -> list[ProblemUnit]:
     return unique_question_numbers(problems)
 
 
-def _list_deck(conn, session, session_id: int, doc_id: int) -> bool:
-    """RP-12: the model names the 小問 from the originals; OCR is the fallback.
+def _fallback_problems(conn, doc_id: int, page_count: int) -> list:
+    """OCR segments, else one row for the whole document."""
+    return _ocr_problems(conn, doc_id) or [
+        ProblemUnit(None, "", start_page_index=0, page_indexes=list(range(page_count)))]
 
-    Returns False after an uncertain browser send or a lost subject chat, so
-    nothing else is sent.
+
+def _answer_deck(conn, session, session_id: int, doc_id: int) -> bool:
+    """The whole booklet in ONE message when the routed solver can take it.
+
+    Returns False when the solver answers per question instead. Otherwise the
+    one reply both names the 小問 (RP-12) and answers them, and nothing else is
+    sent, on success or failure: on 9/29 a list-only reply followed by one
+    message per 小問 sent the next message before anything was answered.
     """
+    items = [row for group in _answer_groups(conn, session_id) for row in group["items"]]
+    if items and all(_latest_solution_row(conn, row["id"]) for row in items):
+        return True  # a repeated finalize must not ask again
     source_pages = _document_source_pages(conn, doc_id, session_id)
     question = Question(
         question_no=None,
@@ -2846,25 +2857,86 @@ def _list_deck(conn, session, session_id: int, doc_id: int) -> bool:
         document_image_paths=_document_image_paths(conn, doc_id),
         document_pages=source_pages,
         document_id=str(doc_id),
-        question_id="question-list",
+        question_id="booklet",
         page_numbers=[p["page_number"] for p in source_pages],
         answer_only=True,
     )
-    stopped: Exception | None = None
+    failed: Exception | None = None
     try:
-        problems = _model_problems(_list_questions(question), len(source_pages))
-    except (ChatGptWebUncertain, ChatGptWebChatLost) as error:
-        problems, stopped = [], error
-    except Exception:  # noqa: BLE001 - any unusable list falls back to OCR
-        problems = []
-    problems = problems or _ocr_problems(conn, doc_id) or [
-        ProblemUnit(None, "", start_page_index=0, page_indexes=list(range(len(source_pages))))]
-    _insert_deck(conn, session_id, doc_id, problems)
+        replies = _answer_all(question)
+    except Exception as error:  # noqa: BLE001 - recorded on the deck, never resent
+        replies, failed = [], error
+    if replies is None:
+        return False
+    if not items:
+        problems = _model_problems([item for item, _ in replies], len(source_pages))
+        _insert_deck(conn, session_id, doc_id,
+                     problems or _fallback_problems(conn, doc_id, len(source_pages)))
+        conn.commit()
+        items = [row for group in _answer_groups(conn, session_id) for row in group["items"]]
+    if failed is not None:
+        _record_solve_failure(conn, items[0], failed)
+        return True
+    # A row the model named carries "第1問 問1" as its body (_model_problems),
+    # untouched by the 問1(2) suffix that keeps question_no unique.
+    # ponytail: a retry after a failed first message matches only rows the
+    # model named; an OCR fallback deck is not re-keyed from a later reply.
+    results: dict[str, SolveResult | Exception] = {}
+    for item, result in replies:
+        key = " ".join(filter(None, [str(item.get("group") or "").strip()[:60],
+                                     str(item.get("label") or "").strip()[:60]]))
+        results.setdefault(key, result)
+    for row in items:
+        if _latest_solution_row(conn, row["id"]) is not None:
+            continue
+        result = results.get(row["body_text"])
+        if isinstance(result, SolveResult):
+            _save_solution(conn, row, result, "chatgpt-web")
+        else:
+            _record_solve_failure(conn, row, result or ValueError("no answer for this question"))
+    return True
+
+
+def _save_solution(conn, row, result, solver_name: str) -> bool:
+    """Store ``result`` unless the row already has an answer; True when stored.
+
+    Onboard ingest may answer while the paid call is in flight. The conditional
+    insert preserves that earlier answer.
+    """
+    evidence_pages, evidence_refs = _prepare_result_evidence(
+        result,
+        fallback_pages=_question_evidence_pages(conn, row["id"]),
+        fallback_refs=_question_evidence_refs(conn, row["id"]),
+    )
+    cur = conn.execute(
+        """INSERT INTO solutions
+           (question_id, solver_name, answer, solution_steps_json,
+            rationale, cautions, answer_conf, rationale_conf,
+            evidence_pages_json, evidence_refs_json,
+            raw_reasoning, served_by, diagrams_json, answer_metadata_json)
+           SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+           WHERE NOT EXISTS
+               (SELECT 1 FROM solutions WHERE question_id = ?)""",
+        (
+            row["id"],
+            solver_name,
+            result.answer,
+            json.dumps(result.solution_steps, ensure_ascii=False),
+            result.rationale,
+            result.cautions,
+            result.answer_confidence,
+            result.rationale_confidence,
+            json.dumps(evidence_pages),
+            _evidence_refs_storage_value(result),
+            result.raw_reasoning,
+            result.extras.get("served_by", solver_name),
+            json.dumps(result.diagrams, ensure_ascii=False),
+            json.dumps({k: result.extras.get(k) for k in ("answer_status", "missing_material")}, ensure_ascii=False),
+            row["id"],
+        ),
+    )
     conn.commit()
-    if stopped is not None:
-        first = _answer_groups(conn, session_id)[0]["items"][0]
-        _record_solve_failure(conn, first, stopped)
-    return stopped is None
+    return bool(cur.rowcount)
 
 
 def _solve_deck(conn, session, session_id: int, doc_id: int, *, bundle_items: bool = False) -> int:
@@ -2959,44 +3031,7 @@ def _solve_deck(conn, session, session_id: int, doc_id: int, *, bundle_items: bo
                 # placeholder. Release the claim for a future retry,
                 # but never mark placeholder output as solved.
                 continue
-            evidence_pages, evidence_refs = _prepare_result_evidence(
-                result,
-                fallback_pages=_question_evidence_pages(conn, row["id"]),
-                fallback_refs=_question_evidence_refs(conn, row["id"]),
-            )
-            # Onboard ingest may answer while the paid call is in
-            # flight. The conditional insert preserves that earlier
-            # answer; the DB claim above already prevented a second
-            # server request (and its duplicate charge).
-            cur = conn.execute(
-                """INSERT INTO solutions
-                   (question_id, solver_name, answer, solution_steps_json,
-                    rationale, cautions, answer_conf, rationale_conf,
-                    evidence_pages_json, evidence_refs_json,
-                    raw_reasoning, served_by, diagrams_json, answer_metadata_json)
-                   SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-                   WHERE NOT EXISTS
-                       (SELECT 1 FROM solutions WHERE question_id = ?)""",
-                (
-                    row["id"],
-                    solver.name,
-                    result.answer,
-                    json.dumps(result.solution_steps, ensure_ascii=False),
-                    result.rationale,
-                    result.cautions,
-                    result.answer_confidence,
-                    result.rationale_confidence,
-                    json.dumps(evidence_pages),
-                    _evidence_refs_storage_value(result),
-                    result.raw_reasoning,
-                    served_by,
-                    json.dumps(result.diagrams, ensure_ascii=False),
-                    json.dumps({k: result.extras.get(k) for k in ("answer_status", "missing_material")}, ensure_ascii=False),
-                    row["id"],
-                ),
-            )
-            conn.commit()
-            if cur.rowcount:
+            if _save_solution(conn, row, result, solver.name):
                 server_solved += 1
         finally:
             _release_server_solve(conn, row["id"], claim_token)
@@ -3013,8 +3048,13 @@ def _solve_deck_in_background(session_id: int, doc_id: int) -> None:
     conn = db.connect()
     try:
         session = _exam_session_or_404(conn, session_id)
-        if _deck_question_rows(conn, session_id) or _list_deck(conn, session, session_id, doc_id):
-            _solve_deck(conn, session, session_id, doc_id, bundle_items=True)
+        if _answer_deck(conn, session, session_id, doc_id):
+            return
+        if not _deck_question_rows(conn, session_id):
+            _insert_deck(conn, session_id, doc_id, _fallback_problems(
+                conn, doc_id, _exam_total_pages(conn, doc_id)))
+            conn.commit()
+        _solve_deck(conn, session, session_id, doc_id, bundle_items=True)
     finally:
         conn.close()
         with _background_solves_lock:
@@ -3427,7 +3467,7 @@ def exam_answer_bundle(session_id: int) -> dict:
         if not groups:
             raise HTTPException(
                 status_code=409,
-                detail="the question list is being made" if session_id in _background_solves
+                detail="the answers are being made" if session_id in _background_solves
                 else "no problems were detected in this document",
             )
         items = [

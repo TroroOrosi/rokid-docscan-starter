@@ -397,7 +397,7 @@ public class DocScanGlassActivityAnswerReadingTest {
         assertEquals("nothing pending, so no further requests", 2, fetches.get());
     }
 
-    /** RP-12: the server lists the 小問 first; the reader waits for it without a new REVIEW. */
+    /** The server answers the whole booklet in one message; the reader waits without a new REVIEW. */
     @Test
     public void aBundleStillBeingListedIsFetchedAgainWithoutAnotherPublish() throws Exception {
         AtomicInteger attempts = new AtomicInteger();
@@ -409,12 +409,12 @@ public class DocScanGlassActivityAnswerReadingTest {
                     return new MockResponse().setResponseCode(404).setBody("unexpected test request");
                 }
                 return attempts.incrementAndGet() == 1
-                        ? json("{\"detail\":\"the question list is being made\"}").setResponseCode(409)
+                        ? json("{\"detail\":\"the answers are being made\"}").setResponseCode(409)
                         : json(bundleForSession(SESSION_ID).toJson());
             }
         });
         activity.onUpdate(RelayState.REVIEW, List.of("a"), "review");
-        awaitTrue(() -> "問題一覧を作成中".equals(
+        awaitTrue(() -> "解析中".equals(
                 ((List<?>) getField(getField(activity, "hud"), "lines")).get(0)));
         assertNull(getField(activity, "reader"));
         Shadows.shadowOf(Looper.getMainLooper()).idleFor(java.time.Duration.ofSeconds(6));

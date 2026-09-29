@@ -172,6 +172,29 @@ def _read_audio(question: Question) -> tuple[str, bytes] | None:
     return (Path(path).name, data) if data else None
 
 
+def answer_sheet_result(data: dict, *, subject: str | None, extras: dict) -> SolveResult:
+    """One answer-only reply as a SolveResult; ValueError when it breaks the rules.
+
+    Shared by the per-question solve and the one-message booklet answer, so a
+    小問 is held to the same rules whichever message carried it.
+    """
+    status = data.get("status", "ready")
+    if status not in ("ready", "needs_input"):
+        raise ValueError("invalid answer-sheet status")
+    answer = data.get("answer")
+    diagrams = validate_diagrams(data.get("diagrams", []))
+    if status == "ready" and (not isinstance(answer, str) or not (answer.strip() or diagrams)):
+        raise ValueError("written answer must be a non-empty string")
+    return SolveResult(
+        answer=answer.strip() if status == "ready" else "",
+        subject=subject,
+        diagrams=diagrams if status == "ready" else [],
+        extras={**extras, "answer_status": status,
+                "missing_material": str(data.get("missing_material", ""))
+                if status == "needs_input" else ""},
+    )
+
+
 class LLMSolver(Solver):
     offline = False
     accepts_images = True
@@ -224,22 +247,9 @@ class LLMSolver(Solver):
             question=question,
         )
         if question.answer_only:
-            status = data.get("status", "ready")
-            if status not in ("ready", "needs_input"):
-                raise ValueError("invalid answer-sheet status")
-            answer = data.get("answer")
-            diagrams = validate_diagrams(data.get("diagrams", []))
-            if status == "ready" and (not isinstance(answer, str) or not (answer.strip() or diagrams)):
-                raise ValueError("written answer must be a non-empty string")
-            return SolveResult(
-                answer=answer.strip() if status == "ready" else "",
-                subject=question.subject,
-                diagrams=diagrams if status == "ready" else [],
-                extras={"source": self.name, "provider": self.provider, "model": client.model,
-                        "answer_status": status,
-                        "missing_material": str(data.get("missing_material", ""))
-                        if status == "needs_input" else ""},
-            )
+            return answer_sheet_result(
+                data, subject=question.subject,
+                extras={"source": self.name, "provider": self.provider, "model": client.model})
         answer = str(data.get("answer", "")).strip()[:max_answer_len]
         return SolveResult(
             answer=answer,

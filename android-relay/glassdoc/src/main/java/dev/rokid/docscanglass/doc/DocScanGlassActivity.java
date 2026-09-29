@@ -843,8 +843,9 @@ public final class DocScanGlassActivity extends Activity
                 // could start; only a fetch that already finished (here)
                 // reopens the door.
                 answersFetchedForSession = -1;
-                // 409: the server is still listing the 小問 (RP-12). Keep the
-                // display asleep for that; wake only for the first real failure.
+                // 409: the server is still analysing: one message carries the
+                // whole booklet and its answers arrive together. Keep the display
+                // asleep for that; wake only for the first real failure.
                 boolean listing = error instanceof DocScanApi.ApiException
                         && ((DocScanApi.ApiException) error).getStatusCode() == 409;
                 main.post(() -> {
@@ -853,7 +854,7 @@ public final class DocScanGlassActivity extends Activity
                     }
                     if (!listing && !answerFetchFailing) wakeForResult();
                     answerFetchFailing = !listing;
-                    hud.showLines(listing ? List.of("問題一覧を作成中", "答案を待っています", "")
+                    hud.showLines(listing ? List.of("解析中", "答案を待っています", "")
                             : List.of("答案を取得できません", "通信を確認", ""));
                     // Retry on a timer too: in local mode nothing republishes REVIEW.
                     main.postDelayed(() -> {

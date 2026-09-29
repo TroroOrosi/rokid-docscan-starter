@@ -266,8 +266,7 @@ exam-session(document_id, exam_type, answer_format)
 - **タブの再利用** — 質問ごとに `chatgpt.com` を読み込み直さず、1 枚のタブを使い回します。
 - **使用制限への防御** — 制限はメッセージ本文で通知され例外になりません。
   `ROKID_CHATGPT_RATE_LIMIT_MARKERS` に当たった返答は即座に打ち切り、再試行しません。
-  加えて、`ROKID_CHATGPT_SLOW_S` を超える生成が
-  `ROKID_CHATGPT_SLOW_STREAK` 回続いたら次の送信を止めます。
+  遅い生成で送信を止めるブレーキは 2026-09-29 に削除しました（1教科1通のため）。
 - **未確定の答えを確定させない** — 生成中の表示（thinking プレースホルダ）を
   解答として確定しません。
 

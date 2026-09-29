@@ -34,18 +34,11 @@ JPEG = b"\xff\xd8\xff" + b"fake page photo"
 
 
 @pytest.fixture(autouse=True)
-def _reset_throttle_streak(tmp_path, monkeypatch):
-    """The slow-generation brake is process state; a test must not inherit it.
-
-    Several tests drive the page with a jumping fake clock, which reads as a
-    slow generation. Real runs use the real clock, so only here does the streak
-    need clearing between cases.
-    """
+def _isolate(tmp_path, monkeypatch):
+    """Browser state under tmp_path, and no real sleep between page polls."""
     from app import config
     monkeypatch.setattr(config, "DATA_DIR", tmp_path)
-    chatgpt_web._slow_streak = 0
-    yield
-    chatgpt_web._slow_streak = 0
+    monkeypatch.setattr(chatgpt_web, "POLL_S", 0)
 
 
 class _Locator:
@@ -136,7 +129,7 @@ class _StubPage:
     addresses = True
 
     def __init__(self, reply_frames, *, thumbnail_appears=True, thumbnail_baseline=1,
-                 missing=(), streaming=()):
+                 missing=(), streaming=(True, False)):
         self.replies = reply_frames
         self.turns = 0
         self.events = []
@@ -159,6 +152,7 @@ class _StubPage:
         # chatgpt.com moves a new chat to /c/<id> once its first message is sent;
         # later messages in that chat leave the URL alone.
         self.turns += 1
+        self.stop_poll = 0  # each reply runs its own stop-button script
         if self.addresses and "/c/" not in self.url:
             self.chats += 1
             self.url = f"https://chatgpt.com/c/chat-{self.chats}"
@@ -195,12 +189,15 @@ def _sends(page):
 
 def _ask(page, text="問1 2x+3=7 を解け", **kw):
     kw.setdefault("sleep", lambda _s: None)
-    return ask_page(page, text, poll_s=0, stable_polls=2, **kw)
+    return ask_page(page, text, poll_s=0, **kw)
 
 
-def test_reply_is_returned_once_the_stream_stops_growing():
-    page = _StubPage(["解", '{"status":"ready",', '{"status":"ready","answer":"x=2"}'])
-    assert _ask(page) == ('{"status":"ready","answer":"x=2"}', None)
+def test_without_a_stop_button_only_the_whole_json_ends_the_wait():
+    # A half-streamed reply already holds complete inner objects; only the
+    # object with the expected top-level keys is the finished answer.
+    page = _StubPage(["解", '{"status":"ready","diagrams":[{"alt":"a"}', '{"status":"ready",',
+                      '{"status":"ready","answer":"x=2"}'], streaming=[])
+    assert _ask(page, expect=("answer",)) == ('{"status":"ready","answer":"x=2"}', None)
 
 
 def test_prompt_is_filled_whole_so_a_newline_does_not_send_it_early():
@@ -219,7 +216,7 @@ def test_prompt_is_filled_whole_so_a_newline_does_not_send_it_early():
 def test_a_reply_that_never_settles_raises_instead_of_returning_a_partial():
     # Every frame differs, so the text never stabilises: a truncated answer
     # must not be passed off as the finished one.
-    page = _StubPage([f"partial {i}" for i in range(50)])
+    page = _StubPage([f"partial {i}" for i in range(50)], streaming=[True])
     ticks = iter([0.0, 1.0, 2.0, 3.0])
     with pytest.raises(ChatGptWebError, match="still streaming"):
         _ask(page, timeout_s=3, now=lambda: next(ticks, 99.0))
@@ -298,24 +295,27 @@ def test_a_signed_out_page_fails_with_the_reason_not_a_selector_timeout():
     assert page.events == []
 
 
-def test_a_vanished_stop_button_ends_the_wait_before_text_stability_can():
-    # Measured live: the stop button went at 7.89s and text stability would not
-    # have confirmed until 8.92s. Ending on the button saves that second, so it
-    # has to win over the stability count, not merely agree with it.
+def test_a_vanished_stop_button_ends_the_wait():
+    # Seen streaming and now gone is a settled reply, whatever its text.
     page = _StubPage(["answer", "answer", "answer", "answer", "answer"],
                      streaming=[True, True, False])
-    reply, _ = ask_page(page, "問1", poll_s=0, stable_polls=99, sleep=lambda _s: None)
+    reply, _ = ask_page(page, "問1", poll_s=0, sleep=lambda _s: None)
 
     assert reply == "answer"
 
 
-def test_a_missing_stop_button_still_falls_back_to_text_stability():
-    # The selector is OpenAI's. If it moves, the reply must still be returned
-    # rather than waiting out the full timeout.
-    page = _StubPage(["answer", "answer", "answer"], streaming=[])
-    reply, _ = ask_page(page, "問1", poll_s=0, stable_polls=2, sleep=lambda _s: None)
+def test_a_held_thinking_placeholder_is_not_returned_without_a_stop_button():
+    """9/29: the next message went out while replies were still being worked on.
 
-    assert reply == "answer"
+    With the stop button missing (a moved selector), holding still for many
+    polls says nothing; only the whole expected JSON ends the wait.
+    """
+    page = _StubPage(["思考中"] * 40 + ['{"questions":[],"done":true}'], streaming=[])
+    reply, _ = ask_page(page, "全問", poll_s=0, expect=("questions", "done"),
+                        sleep=lambda _s: None)
+
+    assert reply == '{"questions":[],"done":true}'
+    assert page.poll == 41
 
 
 def test_cdp_probe_reports_unavailable_rather_than_raising():
@@ -346,8 +346,9 @@ class _FakeClient:
         self.last_image_attached = attached
 
     def complete_json(self, *, system, prompt, image=None, images=None, audio=None,
-                      bundle_pdf=None, chat_key=None, files=None):
+                      bundle_pdf=None, chat_key=None, files=None, expect=None):
         self.seen = {
+            "expect": expect,
             "system": system,
             "prompt": prompt,
             "image": image,
@@ -510,7 +511,7 @@ def test_a_thinking_placeholder_is_never_returned_as_the_answer():
         streaming=[True, True, True, True, True, True, False],
     )
 
-    reply, _ = ask_page(page, "第1問", poll_s=0, stable_polls=2, sleep=lambda _s: None)
+    reply, _ = ask_page(page, "第1問", poll_s=0, sleep=lambda _s: None)
 
     assert reply == '{"status":"ready","answer":"70度"}'
 
@@ -523,7 +524,7 @@ def test_a_pause_inside_the_stream_does_not_end_the_wait():
         streaming=[True, True, True, True, False],
     )
 
-    reply, _ = ask_page(page, "第1問", poll_s=0, stable_polls=2, sleep=lambda _s: None)
+    reply, _ = ask_page(page, "第1問", poll_s=0, sleep=lambda _s: None)
 
     assert reply == "解答は 70度"
 
@@ -631,8 +632,6 @@ def test_a_usage_limit_reply_is_never_retried(monkeypatch):
     turned into a block. It ends the question instead, still as a
     ChatGptWebError so solve_with_fallback drops to the next tier.
     """
-    monkeypatch.setattr(chatgpt_web, "POLL_S", 0)
-    monkeypatch.setattr(chatgpt_web, "STABLE_POLLS", 1)
     monkeypatch.setattr(chatgpt_web, "RETRY_BACKOFF_S", 0)
     limit = "使用制限に達しました。しばらくしてからもう一度お試しください。"
     page = _StubPage([limit, limit])
@@ -642,47 +641,6 @@ def test_a_usage_limit_reply_is_never_retried(monkeypatch):
 
     assert len(_sends(page)) == 1, "no retry after a limit"
     assert isinstance(chatgpt_web.ChatGptWebRateLimit("x"), ChatGptWebError)
-
-
-def test_two_slow_generations_in_a_row_refuse_the_next_send(monkeypatch):
-    """The documented throttle signal is the per-question time, so enforce it.
-
-    Measured before the block: 7-13s clean, then 43s, 48s, 130s while the run
-    kept going. The brake stops the third send rather than leaving it to the
-    operator to notice.
-    """
-    monkeypatch.setattr(chatgpt_web, "SLOW_S", 1)
-    monkeypatch.setattr(chatgpt_web, "SLOW_STREAK", 2)
-    ticks = itertools.count(0, 10)
-
-    def one_slow_solve():
-        return chatgpt_web.send_and_read(
-            _StubPage(["x=2", "x=2"]),
-            "問1",
-            poll_s=0,
-            stable_polls=1,
-            sleep=lambda _s: None,
-            now=lambda: next(ticks),
-        )
-
-    assert one_slow_solve() == "x=2"
-    assert one_slow_solve() == "x=2"
-    with pytest.raises(chatgpt_web.ChatGptWebRateLimit, match="longer than"):
-        one_slow_solve()
-
-
-def test_a_fast_generation_clears_the_slow_streak(monkeypatch):
-    monkeypatch.setattr(chatgpt_web, "SLOW_S", 1)
-    monkeypatch.setattr(chatgpt_web, "SLOW_STREAK", 2)
-    chatgpt_web._slow_streak = 1
-    ticks = itertools.count(0, 0)
-
-    chatgpt_web.send_and_read(
-        _StubPage(["x=2", "x=2"]), "問1", poll_s=0, stable_polls=1,
-        sleep=lambda _s: None, now=lambda: next(ticks),
-    )
-
-    assert chatgpt_web._slow_streak == 0
 
 
 def _real_png(colour: int) -> bytes:
@@ -1158,7 +1116,6 @@ def test_an_unanswered_send_keeps_the_subject_chat(monkeypatch, tmp_path, outcom
         expected = chatgpt_web.ChatGptWebUncertain
     else:
         page.replies, page.poll = ["使用制限に達しました"], 0
-        monkeypatch.setattr(chatgpt_web, "STABLE_POLLS", 1)
         expected = chatgpt_web.ChatGptWebRateLimit
 
     with pytest.raises(expected):
@@ -1174,7 +1131,6 @@ def test_an_unanswered_send_keeps_the_subject_chat(monkeypatch, tmp_path, outcom
         with pytest.raises(chatgpt_web.ChatGptWebUncertain):
             client._ask_with_retries(_OneTabContext(page), "問3", [JPEG], chat_key="subject:数学")
         assert len(_sends(page)) == sends
-    chatgpt_web._slow_streak = 0  # the limit has cleared
     with BrowserGuard(tmp_path) as guard:
         if guard.status()["state"] == "uncertain":
             guard.acknowledge(guard.status()["request_id"])  # the operator reconciled
@@ -1263,23 +1219,6 @@ def test_a_chat_that_moved_is_not_assumed_to_hold_the_booklet(monkeypatch):
     assert len(builds) == 2, "the booklet is prepared again for the chat that lacks it"
     assert len(page.uploads) == 2
     assert page.url == "https://chatgpt.com/c/elsewhere"
-
-
-def test_a_throttle_refusal_reloads_the_chat_before_the_next_attach(monkeypatch):
-    # The brake refuses after the attach step, so the composer still holds JPEG.
-    page = _StubPage(["答", "答"])
-    client, chat = _subject_chat(monkeypatch, page)
-    monkeypatch.setattr(chatgpt_web, "SLOW_STREAK", 2)
-    chatgpt_web._slow_streak = 2
-    with pytest.raises(chatgpt_web.ChatGptWebRateLimit, match="longer than"):
-        client._ask_with_retries(_OneTabContext(page), "問2", [JPEG], chat_key="subject:数学")
-    chatgpt_web._slow_streak = 0
-
-    client._ask_with_retries(_OneTabContext(page), "問2", [JPEG], chat_key="subject:数学")
-
-    steps = [(k, v) for k, v in page.events if k in ("upload", "goto")]
-    assert [k for k, _ in steps] == ["upload", "upload", "goto", "upload"]
-    assert steps[2] == ("goto", chat), "reloaded before JPEG goes in a second time"
 
 
 def test_an_answer_survives_a_failed_record_write(monkeypatch, tmp_path):
@@ -1387,8 +1326,7 @@ def test_previous_assistant_reply_is_not_the_new_answer(monkeypatch):
     monkeypatch.setattr(_Locator, "count", fixed_count)
     ticks = itertools.count(0, 0.1)
     with pytest.raises(ChatGptWebError):
-        chatgpt_web.send_and_read(page, "next question", poll_s=0,
-                                 stable_polls=1, timeout_s=2,
+        chatgpt_web.send_and_read(page, "next question", poll_s=0, timeout_s=2,
                                  now=lambda: next(ticks), sleep=lambda _: None)
 
 
@@ -1407,25 +1345,32 @@ def test_a_later_identical_submission_gets_a_distinct_reconciliation_id(monkeypa
     assert ids[0] != ids[1], "an old acknowledgment must not clear a later submission"
 
 
-def test_question_list_reads_the_originals_in_the_answer_chat(tmp_path):
-    """RP-12: the model, not OCR, names the 小問; the booklet stays in the chat."""
+def test_one_message_lists_and_answers_the_booklet_in_the_answer_chat(tmp_path):
+    """The model names the 小問 from the originals AND answers them in one reply."""
     page_path = tmp_path / "page.png"
     page_path.write_bytes(_real_png(80))
     pages = [{"page_number": 1, "image_path": str(page_path), "ocr_text": ""}]
-    fake = _FakeClient('{"questions":[{"group":"第1問","label":"問1","pages":[1]},"bad"]}',
-                       attached=True)
-    question = Question(question_no=None, question_id="question-list", answer_only=True,
+    fake = _FakeClient(json.dumps({"questions": [
+        {"group": "第1問", "label": "問1", "pages": [1], "status": "ready", "answer": "④"},
+        {"group": "第1問", "label": "問2", "pages": [1], "status": "ready", "answer": ""},
+        "bad"], "done": True}), attached=True)
+    question = Question(question_no=None, question_id="booklet", answer_only=True,
                         document_pages=pages, document_id="1", page_numbers=[1],
                         chat_key="session:1")
-    listed = ChatGptWebSolver(client=fake).list_questions(question=question)
-    assert listed == [{"group": "第1問", "label": "問1", "pages": [1]}]
-    assert "Do not answer" in fake.seen["prompt"] and fake.seen["files"]
-    solve = Question(question_no="第1問 問1", question_id="q1", answer_only=True,
-                     document_pages=pages, document_id="1", page_numbers=[1], chat_key="session:1")
-    listing_key = fake.seen["chat_key"]
+
+    replies = ChatGptWebSolver(client=fake).answer_all(question=question)
+
+    (first, answered), (second, broken) = replies
+    assert (first["label"], answered.answer, answered.extras["image_attached"]) == ("問1", "④", True)
+    assert second["label"] == "問2" and isinstance(broken, ValueError)
+    assert "Answer EVERY question" in fake.seen["prompt"] and fake.seen["files"]
+    assert "ONLY what belongs on" in fake.seen["system"]
+    assert fake.seen["expect"] == ("questions", "done")
+    booklet_key = fake.seen["chat_key"]
     fake.payload = '{"status":"ready","answer":"2"}'
-    ChatGptWebSolver(client=fake).solve(question=solve)
-    assert fake.seen["chat_key"] == listing_key
-    fake.payload = '{"status":"ready","answer":"2"}'
+    ChatGptWebSolver(client=fake).solve(question=Question(
+        question_no="第1問 問1", question_id="q1", answer_only=True, document_pages=pages,
+        document_id="1", page_numbers=[1], chat_key="session:1"))
+    assert fake.seen["chat_key"] == booklet_key and fake.seen["expect"] == ("answer",)
     with pytest.raises(ValueError):
-        ChatGptWebSolver(client=fake).list_questions(question=question)
+        ChatGptWebSolver(client=fake).answer_all(question=question)
