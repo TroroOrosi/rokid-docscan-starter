@@ -1,6 +1,6 @@
 # 再開入口：次のセッションはここだけ読めば始められる
 
-Status: Internal progress。2026-09-29更新（4aを1教科1通で再実行し、4問すべて正解。次は4b）。branch `feature/capture-quality-readiness`、Draft [PR #38](https://github.com/TroroOrosi/rokid-docscan-starter/pull/38)。
+Status: Internal progress。2026-09-30更新（4a合格、4bは写真が読めず不合格→見開きの分割を実装。次は4bの再実行）。branch `feature/capture-quality-readiness`、Draft [PR #38](https://github.com/TroroOrosi/rokid-docscan-starter/pull/38)。
 Runs on: Windows PC `C:\rokid-docscan-starter`。実機の状態を変える操作・APK導入・スマホのサーバ更新・GPT送信は、利用者の承認後だけ（hookでも強制）。
 
 ## 0. 読み方（前提と資料に引きずられないため）
@@ -51,16 +51,29 @@ Runs on: Windows PC `C:\rokid-docscan-starter`。実機の状態を変える操�
 - スマホ版ChatGPTの停止ボタンは一致する（§F-6-10：送信直後から stop=1、返答欄は130.4秒後）。
 - 未確認の前提：ChatGPT webが録音ファイルを聞くか（公式FAQに音声の記載なし）、実機でのJPEG添付。
 - 実写22枚の測定（9/29、PC）：グラスOCRは撮影判断に使えない（7枚が0文字、紙の無い3枚を「完全」と判定）。紙の最大成分の面積0.06未満で紙なしを分けられた（該当3枚のみ）。
-- スマホの状態：サーバは `1134404`（0.43.0）で `phone_serve.sh 127.0.0.1` により起動中。送信記録はidle（`8e3ceee6…` は9/29に利用者が解除）。
+- **9/30 4b（`1134404`、グラスの見開き原本2枚）：不合格。** 送信1通・解析578秒・6問すべて `needs_input`（「ピンぼけで判読できない」）。
+  送信・待機・理由表示・ベンチ終了は正常（セッション8、チャット `/c/6abbd310…`、送信記録idle）。報告 `data\device-setup\reports\glassdoc-kokugo-20260927-originals-server.json`。
+  原因（写真を目視）：9/16の1枚は元からピンぼけで人も読めない（撮影側）。9/22の1枚は目では読めるが、見開き1枚だとモデルの縮小で1頁の画素が半分になる。
+  APIの縮小規則（2048に収め短辺768）で再現すると見開きは842x768でカタカナが潰れ、頁ごとに切ると1頁768幅で読めた（ChatGPT webの規則は非公開）。
+  「第一問」の漢数字が大問として認識されず、グラスで「全体」1群になっていた。
+- **`f89a761`（APP 0.43.1 / API 1.29.1）**：見開きを綴じ目で右頁→左頁に分けて別画像で送る（`source_bundle._gutter`、分けられない写真は1枚のまま）。
+  実物2枚で綴じ目を正しく検出（幅の0.489、0.470）。20ファイル上限と縦積み（2・3枚）は維持。漢数字の大問名を認識。
+  検証：`py -3.12 -X utf8 -m pytest -q` → 964 passed, 2 skipped。`ruff` → All checks passed!。**ChatGPTが分割頁を読めるかは未確認。**
+  注意：分割で画像数が倍になり、見開き約30枚超（分割後60頁超）は3枚結合の上限を超えて失敗する（以前は見開きのまま送れた）。
+- スマホの状態：サーバは `1134404`（0.43.0、分割なし）で `phone_serve.sh 127.0.0.1` により起動中。送信記録はidle（`8e3ceee6…` は9/29に利用者が解除）。
   更新前のバックアップ `~/rokid-backups/pre-1134404-20260929T234008`。送信記録の解除は自動判定で拒否されるので、利用者が `!` で実行する。
+  更新手順（9/29実績）：バックアップ（app・scripts・docscan.db・browser-state）→ `git archive <commit> app scripts | ssh ... 'cd ~/rokid-server; rm -rf app scripts; tar -x'`
+  → 旧サーバ停止 → `nohup bash scripts/phone_serve.sh 127.0.0.1 > data/server-<commit>.log 2>&1 &`。PCからは `ssh -f -N -L 8000:127.0.0.1:8000 ...`（ssh `-i ~/.ssh/f51f_key -p 8022 u0_a26@192.168.0.6`）。
+  ベンチの鍵は `ROKID_API_KEY` をスマホの env から読んで渡す（画面に出さない）。
 
 ## 4. 次の作業（この順）
 
 1. 済：独立監査2回（`4552ea1`、`4552ea1..e12e155`）の指摘を `61ad481`〜`1134404` で反映。
 2. 済：4a（3節）。起動はスマホで `bash scripts/phone_serve.sh 127.0.0.1`、PCから `ssh -L 8000:127.0.0.1:8000` で投入した。
-3. 4b（Runs on: スマホFastAPI＋スマホChrome、PCからHTTPで投入。**承認後**）：
-   `py -3.12 scripts/run_exam_deck.py --images data/device-setup/glassdoc-kokugo-20260927/originals --server http://127.0.0.1:8000`
-   （グラスの見開き原本2枚。9/22の1枚は鮮明、9/16の1枚はぼやけている。答えは利用者が確認）。
+3. **4bの再実行**（Runs on: スマホFastAPI＋スマホChrome、PCからHTTPで投入。**承認後**。9/30に承認を依頼したまま、利用者の回答前に引き継ぎ）：
+   - スマホのサーバを `f89a761` 以降へ更新して再起動（上の手順）。起動後はChromeを前景に。
+   - `py -3.12 scripts/run_exam_deck.py --images data/device-setup/glassdoc-kokugo-20260927/originals --server http://127.0.0.1:8000`
+   - 判断材料：9/22の写真にある問一（漢字5問）に答えられるか。9/16の写真は分割しても読めない見込み（問二は本文が要る）。答えは利用者が確認する。
 4. Runs on: glassdoc＋スマホ。**承認後。** APK vc23を導入し、B5印刷の頁を着席で撮り、同じ経路で解かせる。
 5. Runs on: 会場経路（スマホAP）。**承認後。** 撮影からグラス表示まで通す。最初の目的達成。
 
