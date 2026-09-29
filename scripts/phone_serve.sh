@@ -39,6 +39,10 @@ set -a
 # shellcheck disable=SC1090
 . "$env_file"
 set +a
+# The phone env predates one-message answering and may still pin a 180s reply
+# timeout or a fast poll. The code defaults (the 150-minute session, a 1s poll)
+# are the decided ones, so an old value never reaches the server.
+unset ROKID_CHATGPT_TIMEOUT_S ROKID_CHATGPT_POLL_S
 
 for tool in $tools; do
     if ! command -v "$tool" >/dev/null 2>&1; then

@@ -18,7 +18,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import scripts.run_exam_deck as run_exam_deck  # noqa: E402
 from scripts.run_exam_deck import (  # noqa: E402
-    answer_ceiling_s,
     call,
     deck_data_dir,
     load_images,
@@ -39,20 +38,6 @@ import fastapi.testclient  # noqa: E402, F401
 FULL_SPAN = range(0, 10_000)
 
 ROOT = Path("C:/rokid-exam-materials/rundata")
-
-
-# -- the stall bound wait_for_answers is given -------------------------------
-
-def test_answer_ceiling_s_matches_the_chatgpt_web_worst_case():
-    assert answer_ceiling_s() == 9195.0
-
-
-def test_answer_ceiling_s_grows_when_attempts_grows(monkeypatch):
-    from app.solvers import chatgpt_web
-
-    base = answer_ceiling_s()
-    monkeypatch.setattr(chatgpt_web, "ATTEMPTS", chatgpt_web.ATTEMPTS + 1)
-    assert answer_ceiling_s() > base
 
 
 # -- transport errors on a server-route call ----------------------------------
@@ -265,7 +250,7 @@ class _Server:
         return response
 
 
-def test_wait_polls_through_a_listing_then_pending_then_ready():
+def test_wait_polls_through_analysis_then_pending_then_ready():
     clock = _Clock()
     server = _Server([
         _Response(409, {"detail": "the answers are being made"}),
@@ -277,7 +262,7 @@ def test_wait_polls_through_a_listing_then_pending_then_ready():
     assert got.status_code == 200 and reason is None and server.responses == []
 
 
-def test_a_long_listing_prints_the_listing_line_only_once(capsys):
+def test_a_long_analysis_prints_its_line_only_once(capsys):
     clock = _Clock()
     responses = [_Response(409, {"detail": "the answers are being made"}) for _ in range(3)]
     responses.append(_bundle("ready", revision=1))
@@ -315,7 +300,7 @@ def test_wait_follows_a_changing_revision_well_past_the_stall_bound():
     assert clock.now > 2  # no overall ceiling
 
 
-def test_a_long_listing_does_not_stop_the_wait():
+def test_a_long_analysis_does_not_stop_the_wait():
     clock = _Clock()
     responses = [_Response(409, {"detail": "the answers are being made"}) for _ in range(10)]
     responses.append(_bundle("ready", revision=1))
@@ -573,7 +558,7 @@ def test_server_route_stops_at_once_when_the_server_batch_loses_the_chat(
     monkeypatch.setattr(run_exam_deck, "remote_client", lambda server, key: client)
     monkeypatch.setattr(run_exam_deck, "POLL_S", 0)
     # A stall-bound stop would take this long; a stop at once takes a moment.
-    monkeypatch.setattr(run_exam_deck, "answer_ceiling_s", lambda: 30.0)
+    monkeypatch.setattr(run_exam_deck, "STALL_S", 30.0)
 
     def answer_all(question):
         raise ChatGptWebChatLost("could not return to the subject's chat")
@@ -643,3 +628,12 @@ def test_server_route_writes_the_default_report_path(server_app, tmp_path, monke
     report = json.loads(report_path.read_text(encoding="utf-8"))
     assert report["server_solver"] == "openai"
     assert report["stopped"] is None
+
+
+def test_a_pending_item_the_server_is_retrying_does_not_stall_the_wait():
+    clock = _Clock()
+    retrying = _Response(200, {"revision": 3, "items": [
+        {"status": "pending", "issue": "ChatGPTへ送れませんでした。自動で再試行します"}]})
+    server = _Server([retrying] * 10 + [_bundle("ready", revision=4)])
+    got, reason = wait_for_answers(server, 1, 2, interval=1, clock=clock, sleep=clock.sleep)
+    assert got.status_code == 200 and reason is None and clock.now > 2

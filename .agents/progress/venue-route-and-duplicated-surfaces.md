@@ -179,6 +179,7 @@ PC 上の Chrome に対する実行は**経路の検証にならない**。
    2026-09-15 に送った自作画像（白地・三角形・潰れた数字）は安全性チェックを引き、
    所要時間の参考にならなかった。`ROKID_CHATGPT_TIMEOUT_S` と
    `SLOW_S`/`SLOW_STREAK` の妥当性はこの測定の後に判断する。**送信前に利用者へ確認。**
+   （2026-09-29追記：SLOW_S/SLOW_STREAKは削除。1教科1通になり長い生成が正常になったため。）
 
 4. **`:glassdoc` を sideload し、AP を通して経路を1本通す。** 撮影 → OCR →
    アップロード → chatgpt-web → `answer-bundle` → `AnswerView` を1冊分。

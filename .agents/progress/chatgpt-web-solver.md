@@ -180,7 +180,9 @@ The account was rate-limited and the user stopped the work. The cause was the
 verification method, not the solver: whole-sweep runs over 16 subjects, re-run
 after every failure, plus separate probes — well over a hundred generations in
 an afternoon. Per-question time had degraded 7-13s -> 43s -> 48s -> 130s before
-the block, and that slowdown was the signal to stop.
+the block. (2026-09-29: that per-question signal no longer applies. One message
+now answers a whole subject, so a long generation is normal; stop only on a
+limit notice in the reply.)
 
 Budget rules are in [subject-separation-harness.md](subject-separation-harness.md).
 One or two questions per change. Never re-run a sweep to chase one failure.
@@ -245,6 +247,8 @@ was making it worse in three ways. All three are now closed, with stub tests
    43/48/130s before the block) now refuse the next send
    (`ROKID_CHATGPT_SLOW_STREAK=0` disables). The streak is process state, so a
    sweep script stops itself rather than relying on the operator watching.
+   (Removed 2026-09-29: one message now answers a whole subject, so a long
+   generation is normal and the brake would refuse the day's third subject.)
 
 `ask_page` still exists with the same signature and behaviour; it is now
 `wait_for_composer` + `attach_images` + `send_and_read` composed.
@@ -256,7 +260,8 @@ was making it worse in three ways. All three are now closed, with stub tests
 the photo input (which is `accept="image/*"` and would reject a PDF). Built
 during the rate limit, so **no live run has shown whether a figure survives the
 PDF route**; the image-per-page route is the measured one. Verify with a single
-figure-only question before using it. `app/page_pdf.py` holds the conversion.
+figure-only question before using it. (Removed 2026-09-29 with its conversion
+module: outside Enterprise, ChatGPT discards a PDF's images.)
 
 ### The phone path gained its missing half
 

@@ -469,7 +469,7 @@ def test_one_message_names_and_answers_the_whole_deck(client, monkeypatch):
     bundle = _background_finalize_and_wait(
         client, session_id, lambda items: all(i["status"] == "ready" for i in items))
     assert [(i["group_label"], i["question_label"], i["answer"]) for i in bundle["items"]] == [
-        ("第1問", "問1", "④"), ("第1問", "問2", "②"), ("第2問", "問1(2)", "③")]
+        ("第1問", "問1", "④"), ("第1問", "問2", "②"), ("第2問", "問1", "③")]
     assert len(asked) == 1 and per_question == []
     assert asked[0].chat_key == f"session:{session_id}" and asked[0].document_pages
 
@@ -477,6 +477,125 @@ def test_one_message_names_and_answers_the_whole_deck(client, monkeypatch):
     _background_finalize_and_wait(
         client, session_id, lambda items: all(i["status"] == "ready" for i in items))
     assert len(asked) == 1
+
+
+def test_the_reply_shape_the_model_may_use_still_lands_on_the_right_rows(client, monkeypatch):
+    """Audit 2026-09-29: one 問 with two answer slots, the 大問 repeated in the
+    label, and an answer for a whole 大問 with no label of its own."""
+    from app import main
+
+    _, session_id = _session_with(client, ["問1 2+2を求めよ。"])
+    monkeypatch.setenv("ROKID_SOLVER", "test-provider")
+    monkeypatch.setattr(main, "_answer_all", lambda question: _replies(
+        ("第1問", "問3", [1], "4"), ("第1問", "問3", [1], "2"),
+        ("第2問", "第2問 問1", [1], "⑤"), ("第3問", "", [1], "図")))
+    monkeypatch.setattr(main, "solve_with_fallback", lambda **_: pytest.fail("per-question send"))
+    bundle = _background_finalize_and_wait(
+        client, session_id, lambda items: items and all(i["status"] != "pending" for i in items))
+    assert [(i["group_label"], i["question_label"], i["status"], i["answer"])
+            for i in bundle["items"]] == [
+        ("第1問", "問3", "ready", "4"), ("第1問", "問3", "ready", "2"),
+        ("第2問", "問1", "ready", "⑤"), ("第3問", "全問", "ready", "図")]
+
+
+@pytest.mark.parametrize("error, status, issue", [
+    ("limit", "failed", "ChatGPTの利用制限です。解除後に再開してください"),
+    ("busy", "pending", "別の解析がブラウザを使用中です。自動で再試行します"),
+    ("no chrome", "pending", "ChatGPTへ送れませんでした。自動で再試行します")])
+def test_a_limit_or_a_busy_browser_says_so_on_the_glasses(client, monkeypatch, error, status, issue):
+    from app import main
+    from app.solvers.chatgpt_web import ChatGptWebBusy, ChatGptWebError, ChatGptWebRateLimit
+
+    monkeypatch.setattr(main, "PRESEND_RETRY_S", 0)  # nothing sent: tried again, then shown
+    _, session_id = _session_with(client, ["問1 2+2を求めよ。"])
+    monkeypatch.setenv("ROKID_SOLVER", "test-provider")
+
+    def answer_all(question):
+        raise (ChatGptWebRateLimit("usage limit") if error == "limit"
+               else ChatGptWebBusy("browser is busy; no message sent") if error == "busy"
+               else ChatGptWebError("no Chrome on http://127.0.0.1:9222"))
+
+    monkeypatch.setattr(main, "_answer_all", answer_all)
+    bundle = _background_finalize_and_wait(
+        client, session_id, lambda items: items[0]["issue"] == issue)
+    assert bundle["items"][0]["status"] == status
+
+
+def test_a_failure_before_anything_was_sent_is_tried_again(client, monkeypatch):
+    """No PC at the venue: an unreachable Chrome must not cost the subject."""
+    from app import main
+    from app.solvers.chatgpt_web import ChatGptWebError, ChatGptWebUncertain
+
+    monkeypatch.setattr(main, "PRESEND_RETRY_S", 0)
+    _, session_id = _session_with(client, ["問1 2+2を求めよ。"])
+    monkeypatch.setenv("ROKID_SOLVER", "test-provider")
+    calls = []
+
+    def answer_all(question):
+        calls.append(1)
+        if len(calls) < 3:
+            raise ChatGptWebError("no Chrome on http://127.0.0.1:9222")
+        return _replies(("第1問", "問1", [1], "4"))
+
+    monkeypatch.setattr(main, "_answer_all", answer_all)
+    bundle = _background_finalize_and_wait(
+        client, session_id, lambda items: items and all(i["status"] == "ready" for i in items))
+    assert len(calls) == 3 and bundle["items"][0]["answer"] == "4"
+
+    # After a send whose outcome is unknown, never again.
+    _, session_id = _session_with(client, ["問1 2+2を求めよ。"])
+    calls.clear()
+
+    def uncertain(question):
+        calls.append(1)
+        raise ChatGptWebUncertain("send outcome unknown")
+
+    monkeypatch.setattr(main, "_answer_all", uncertain)
+    _background_finalize_and_wait(client, session_id, lambda items: items[0]["status"] == "failed")
+    assert len(calls) == 1
+
+
+def test_a_failure_that_sent_nothing_is_answered_later_without_the_operator(client, monkeypatch):
+    """Chrome was away for the whole batch; the glasses' next poll starts it again."""
+    from app import main
+    from app.solvers.chatgpt_web import ChatGptWebError
+
+    monkeypatch.setattr(main, "PRESEND_RETRY_S", 0)
+    _, session_id = _session_with(client, ["問1 2+2を求めよ。"])
+    monkeypatch.setenv("ROKID_SOLVER", "test-provider")
+    chrome = []
+
+    def answer_all(question):
+        if not chrome:
+            raise ChatGptWebError("no Chrome on http://127.0.0.1:9222")
+        return _replies(("第1問", "問1", [1], "4"), ("第1問", "問2", [1], "6"))
+
+    monkeypatch.setattr(main, "_answer_all", answer_all)
+    _background_finalize_and_wait(client, session_id,
+                                  lambda items: items[0]["status"] == "pending" and items[0]["issue"])
+    chrome.append(True)
+    bundle = _background_finalize_and_wait(
+        client, session_id, lambda items: items and all(i["status"] == "ready" for i in items))
+    assert [i["answer"] for i in bundle["items"]] == ["4", "6"]
+
+
+def test_a_restart_that_lost_the_batch_starts_it_again(client, monkeypatch):
+    """A reviewing session with no deck and no batch running is picked up again."""
+    import time
+
+    from app import main, db
+
+    _, session_id = _session_with(client, ["問1 2+2を求めよ。"])
+    monkeypatch.setenv("ROKID_SOLVER", "test-provider")
+    with db.connect() as conn:  # what a restart mid-analysis leaves behind
+        conn.execute("UPDATE exam_sessions SET status = 'reviewing' WHERE id = ?", (session_id,))
+    monkeypatch.setattr(main, "_answer_all", lambda question: _replies(("第1問", "問1", [1], "4")))
+    main._resume_all_answers()
+    url = f"/v1/exam-sessions/{session_id}/answer-bundle"
+    deadline = time.monotonic() + 5
+    while client.get(url).status_code != 200 and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert client.get(url).json()["items"][0]["answer"] == "4"
 
 
 def test_an_item_without_a_valid_answer_fails_alone(client, monkeypatch):
@@ -506,8 +625,16 @@ def test_an_unusable_reply_fails_the_deck_without_another_send(client, monkeypat
     monkeypatch.setattr(main, "solve_with_fallback", lambda **_: pytest.fail("per-question send"))
     bundle = _background_finalize_and_wait(
         client, session_id, lambda items: items[0]["status"] == "failed")
-    assert [i["question_label"] for i in bundle["items"]] == ["問1", "問2"]
+    # OCR does not sort the questions: one row for the booklet carries the reason.
+    assert [i["question_label"] for i in bundle["items"]] == ["全体"]
     assert bundle["items"][0]["issue"] == "解析に失敗しました。資料は保持しています"
+
+    # A retry that is answered replaces that row with the model's questions.
+    monkeypatch.setattr(main, "_answer_all", lambda question: _replies(
+        ("第1問", "問1", [1], "4"), ("第1問", "問2", [1], "6")))
+    bundle = _background_finalize_and_wait(
+        client, session_id, lambda items: items and all(i["status"] == "ready" for i in items))
+    assert [(i["question_label"], i["answer"]) for i in bundle["items"]] == [("問1", "4"), ("問2", "6")]
 
 
 @pytest.mark.parametrize("error, issue", [

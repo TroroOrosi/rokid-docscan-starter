@@ -47,7 +47,7 @@ A surface listed here is not automatically wanted. Each row carries a status:
 |---|---|---|
 | `app/main.py` / `app/db.py` / `app/config.py` / `app/input_identity.py` / `app/glassdoc_contract.py` | route | API、永続化、実運用設定、入力版とグラス契約。finalizeは設問ごとに保存するがHTTPは全問待ち |
 | `app/layout.py` / `app/subjects.py` | route | 現状のOCR由来の小問・教科推定。原本の設問一覧としての正確性は未達、RP-12の整理対象 |
-| `app/source_bundle.py` / `app/page_pdf.py` | route | 原本画像・原音の添付生成。全画像が既定、PDFは比較用。同じ確認済み会話では再生成を省く |
+| `app/source_bundle.py` | route | 原本画像・原音の添付生成。画像のみ（20枚を超えると2〜3頁を1枚に結合）。PDFは使わない。同じ確認済み会話では再生成を省く |
 | `app/solvers/chatgpt_web.py` / `app/solvers/cdp.py` / `app/browser_guard.py` | route | ログイン済みChromeへの送信、応答・添付確認、送信不明／制限時の停止。ブラウザpoolは作らない |
 | `app/listening.py` / `app/audio_formats.py` | route | chunk保存・連続性・完了・原音。主経路はASRを起動・待機しない。原音がGPTで利用されたかは別評価 |
 | `app/answer_text.py` / `app/answer_diagrams.py` | route | 表示可能な答案・図の検査。配送はanswer-bundle、表示はAnswerView。生成内容の正答を保証する検査ではない |

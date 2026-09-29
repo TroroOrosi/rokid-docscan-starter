@@ -104,9 +104,12 @@ ROKID_EXPLAINER = os.environ.get("ROKID_EXPLAINER", "local")
 #                                     phase, so nothing on screen is the answer
 #                                     while it exists
 #   ROKID_CHATGPT_UPLOAD_S            default 20 (a confirmed upload took 0.11s)
-#   ROKID_CHATGPT_ATTEMPTS            default 3 tries per question, fresh chat
+#   ROKID_CHATGPT_ATTEMPTS            default 3 preparation tries before a send;
+#                                     never a second send
 #   ROKID_CHATGPT_RETRY_S             default 5, multiplied by the attempt
 #   ROKID_CHATGPT_TIMEOUT_S           default 9000 (the session; never an analysis budget)
+#   ROKID_CHATGPT_REPLY_START_S       default 120 (no reply turn at all = failed send)
+#   ROKID_CHATGPT_SETTLE_POLLS        default 10 (stop button gone this long = finished)
 #   ROKID_CHATGPT_READY_S             default 30 (composer mount wait)
 #   ROKID_CHATGPT_POLL_S              default 1.0 (a reply ends on its content,
 #                                     never on N quiet polls)

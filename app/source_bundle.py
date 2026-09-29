@@ -3,13 +3,13 @@ from __future__ import annotations
 
 import io
 import math
-from pathlib import Path
 
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageOps
 
-from .page_pdf import images_to_pdf
 
 MAX_IMAGE_BYTES = 20 * 1024 * 1024
+# The first that fits MAX_IMAGE_BYTES is sent; resolution is never reduced.
+JPEG_QUALITIES = (92, 85, 75)
 
 
 def _payload(name, mime, data):
@@ -50,16 +50,17 @@ def _readable(photo: Image.Image) -> Image.Image:
                             zip(box, (photo.width, photo.height, photo.width, photo.height))))
 
 
-def source_bundle(pages: list[dict], *, mode: str = "images",
-                  max_files: int = 20) -> list[dict]:
+def source_bundle(pages: list[dict], *, max_files: int = 20) -> list[dict]:
     """Keep all source pages, including shared material that OCR did not identify.
 
     Merging keeps source resolution. Oversized PNGs use high-quality JPEG. It cannot prevent
     a model from resizing the image internally. Missing selected images fail closed.
     """
-    # Old settings remain readable, but cannot re-enable OCR-first input.
-    if mode not in ("images", "ocr-images", "merged-images", "pdf") or not 1 <= max_files <= 20:
-        raise ValueError("invalid source bundle mode or attachment budget")
+    # Images only. A PDF is not an option: outside Enterprise, ChatGPT reads a
+    # PDF's text layer and discards its images (OpenAI File Uploads FAQ), and a
+    # photographed page has no text layer.
+    if not 1 <= max_files <= 20:
+        raise ValueError("invalid attachment budget")
     numbers = [p["page_number"] for p in pages]
     if any(type(n) is not int or n < 1 for n in numbers) or len(set(numbers)) != len(numbers):
         raise ValueError("page numbers must be unique positive integers")
@@ -67,12 +68,6 @@ def source_bundle(pages: list[dict], *, mode: str = "images",
     if not selected:
         raise ValueError("no source pages")
     files = []
-    if mode == "pdf":
-        try:
-            raw = [Path(p["image_path"]).read_bytes() for p in selected]
-        except (OSError, TypeError) as error:
-            raise ValueError("PDF source image missing") from error
-        return [_payload("pages.pdf", "application/pdf", images_to_pdf(raw))]
     group_size = max(1, math.ceil(len(selected) / max_files))
     if group_size > 3:
         raise ValueError("too many pages for a complete image bundle")
@@ -99,18 +94,16 @@ def source_bundle(pages: list[dict], *, mode: str = "images",
                             sheet.paste(scaled, (0, y))
                     sheet.paste(photo, (0, y + header))
                     y += photo.height + header
-                output = io.BytesIO()
-                sheet.save(output, format="PNG")
-                data = output.getvalue()
-                extension, mime = ".png", "image/png"
-                if len(data) > MAX_IMAGE_BYTES:
-                    for quality in (98, 95, 92):
-                        output = io.BytesIO()
-                        sheet.save(output, format="JPEG", quality=quality, subsampling=0)
-                        data = output.getvalue()
-                        extension, mime = ".jpg", "image/jpeg"
-                        if len(data) <= MAX_IMAGE_BYTES:
-                            break
+                # Full resolution, JPEG. PNG was 227 MB for 20 stored pages,
+                # 303 MB as base64, over the 100 MB DevTools receive buffer;
+                # quality 92 averages about 3.45 MB a page.
+                for quality in JPEG_QUALITIES:
+                    output = io.BytesIO()
+                    sheet.save(output, format="JPEG", quality=quality)
+                    data = output.getvalue()
+                    if len(data) <= MAX_IMAGE_BYTES:
+                        break
+                extension, mime = ".jpg", "image/jpeg"
             if len(data) > MAX_IMAGE_BYTES:
                 raise ValueError("image attachment exceeds 20MB; use individual page images")
             name = "page" + "-".join(f"{p['page_number']:03d}" for p in group) + extension

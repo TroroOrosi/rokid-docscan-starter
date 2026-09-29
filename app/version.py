@@ -180,7 +180,10 @@ from __future__ import annotations
 # Concurrent sessions keep their own chats; the phone start script and deck bench
 # stop early with the reason. See API 1.26.0 and GLASSES_VIEW_CONTRACT 1.19.0.
 # A background session sends one message for the whole booklet; see API 1.27.0.
-APP_VERSION = "0.41.0"
+# Audit fixes: completion by content, JPEG attachments one per DevTools message,
+# pre-send retries and read-back after an uncertain send, restart resume, no
+# PDF path. See API 1.28.0 and GLASSES_VIEW_CONTRACT 1.20.0.
+APP_VERSION = "0.42.0"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.
@@ -269,7 +272,13 @@ APP_VERSION = "0.41.0"
 # 1.27.0: a background solve on chatgpt-web sends ONE message: the reply names
 #        every 小問 and answers it, and nothing is sent per 小問. answer-bundle
 #        answers 409 "the answers are being made" until that reply is in.
-API_VERSION = "1.27.0"
+# 1.28.0: GET .../pages.pdf and paste-prompt's `pages_pdf_url` are removed
+#        (outside Enterprise ChatGPT discards a PDF's images). answer-bundle
+#        names new failures: rate_limited is shown as failed; not_sent and
+#        browser_busy stay pending with "…自動で再試行します" while the server
+#        tries again. question_label is the printed number ("問1", not "問1(2)").
+#        answer-bundle restarts a reviewing session's lost background batch.
+API_VERSION = "1.28.0"
 
 # Matching algorithm identity. Bump when thresholds or hashing change so a
 # re-index/eval is triggered. Mirrors thresholds in app/matching.py.
@@ -383,7 +392,9 @@ EXPLAINER_API_VERSION = "1.1.0"
 # Composition-only review and bounded clipped-shot ranking; 3s timing unchanged.
 # Local capture waits for AE convergence within the existing total deadline.
 # A local best shot OCR read nothing (or failed on) reaches the 3s review instead of a retry.
-GLASSES_VIEW_CONTRACT_VERSION = "1.19.0"
+# Only a 409 "being made" is analysis (read every 30s, display asleep); any other
+# 409 wakes and says why. A replacement deck of the same input is accepted.
+GLASSES_VIEW_CONTRACT_VERSION = "1.20.0"
 
 # Answer-area overlay payload (box + short answer; 2D image-anchored).
 # 1.1.0: added tracking metadata (tracking/fixed_ar/anchor_hint).

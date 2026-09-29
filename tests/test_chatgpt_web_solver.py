@@ -295,13 +295,34 @@ def test_a_signed_out_page_fails_with_the_reason_not_a_selector_timeout():
     assert page.events == []
 
 
-def test_a_vanished_stop_button_ends_the_wait():
-    # Seen streaming and now gone is a settled reply, whatever its text.
-    page = _StubPage(["answer", "answer", "answer", "answer", "answer"],
-                     streaming=[True, True, False])
-    reply, _ = ask_page(page, "問1", poll_s=0, sleep=lambda _s: None)
+def test_a_stop_button_gone_for_good_returns_a_reply_that_is_not_the_json():
+    # A refusal in prose is finished too. Returned once the button has stayed
+    # gone, so the parse fails visibly instead of the wait running 150 minutes.
+    page = _StubPage(["I cannot read the pages."], streaming=[True, False])
+    reply, _ = ask_page(page, "全問", poll_s=0, expect=("questions",), sleep=lambda _s: None)
 
-    assert reply == "answer"
+    assert reply == "I cannot read the pages."
+    assert page.poll == 1 + chatgpt_web.SETTLE_POLLS
+
+
+def test_a_blink_of_the_stop_button_does_not_return_half_the_json():
+    # Between thinking and writing the button can vanish for a frame. The half
+    # reply already holds a complete inner object; it must not be returned.
+    page = _StubPage(['{"questions":[{"label":"問1"},', '{"questions":[{"label":"問1"},',
+                      '{"questions":[{"label":"問1"},', '{"questions":[{"label":"問1"}]}'],
+                     streaming=[True, False, True, False])
+    reply, _ = ask_page(page, "全問", poll_s=0, expect=("questions",), sleep=lambda _s: None)
+
+    assert reply == '{"questions":[{"label":"問1"}]}'
+
+
+def test_a_send_that_starts_no_reply_is_reported_not_waited_out():
+    # A limit banner or an error outside the reply: no turn, no stop button.
+    page = _StubPage([], streaming=[])
+    ticks = iter([0.0, 0.0, 60.0, chatgpt_web.REPLY_START_S + 1])
+    with pytest.raises(ChatGptWebError, match="no reply started"):
+        ask_page(page, "全問", poll_s=0, expect=("questions",), sleep=lambda _s: None,
+                 now=lambda: next(ticks, 9999.0))
 
 
 def test_a_held_thinking_placeholder_is_not_returned_without_a_stop_button():
@@ -310,11 +331,10 @@ def test_a_held_thinking_placeholder_is_not_returned_without_a_stop_button():
     With the stop button missing (a moved selector), holding still for many
     polls says nothing; only the whole expected JSON ends the wait.
     """
-    page = _StubPage(["思考中"] * 40 + ['{"questions":[],"done":true}'], streaming=[])
-    reply, _ = ask_page(page, "全問", poll_s=0, expect=("questions", "done"),
-                        sleep=lambda _s: None)
+    page = _StubPage(["思考中"] * 40 + ['{"questions":[]}'], streaming=[])
+    reply, _ = ask_page(page, "全問", poll_s=0, expect=("questions",), sleep=lambda _s: None)
 
-    assert reply == '{"questions":[],"done":true}'
+    assert reply == '{"questions":[]}'
     assert page.poll == 41
 
 
@@ -346,7 +366,7 @@ class _FakeClient:
         self.last_image_attached = attached
 
     def complete_json(self, *, system, prompt, image=None, images=None, audio=None,
-                      bundle_pdf=None, chat_key=None, files=None, expect=None):
+                      chat_key=None, files=None, expect=None):
         self.seen = {
             "expect": expect,
             "system": system,
@@ -354,7 +374,6 @@ class _FakeClient:
             "image": image,
             "images": images,
             "audio": audio,
-            "bundle_pdf": bundle_pdf,
             "chat_key": chat_key,
             "files": files() if callable(files) else files,
         }
@@ -651,25 +670,6 @@ def _real_png(colour: int) -> bytes:
     return buffer.getvalue()
 
 
-def test_the_pages_can_be_bundled_into_one_pdf_upload(monkeypatch):
-    """Opt-in: one document instead of one upload per page.
-
-    UNVERIFIED against the live page -- this pins our side only: one payload,
-    a PDF through the file input rather than the image-only photo input.
-    """
-    monkeypatch.setattr(chatgpt_web, "BUNDLE_PDF", True)
-    page = _StubPage(["70度"])
-
-    assert chatgpt_web.attach_images(page, [_real_png(10), _real_png(200)]) is True
-
-    (payload,) = page.uploads
-    assert len(payload) == 1, "two pages, one upload"
-    assert payload[0]["name"].endswith(".pdf")
-    assert payload[0]["mimeType"] == "application/pdf"
-    assert payload[0]["buffer"].startswith(b"%PDF")
-    assert page.upload_selectors == [chatgpt_web.FILE_UPLOAD_SEL]
-
-
 # --- one chat per 科目 (CHAT_SCOPE="subject") ---------------------------------
 
 
@@ -815,7 +815,7 @@ def test_document_route_counts_audio_and_reuses_confirmed_files(tmp_path, monkey
     ChatGptWebSolver(client=fake).solve(question=question)
     files, first_key = fake.seen["files"], fake.seen["chat_key"]
     assert len(files) <= 20
-    assert len(files) == 15 and files[-2]["name"] == "page040.png", "shared pages cannot be lost"
+    assert len(files) == 15 and files[-2]["name"] == "page040.jpg", "shared pages cannot be lost"
     assert files[0]["mimeType"].startswith("image/") and files[-1]["name"] == "original.wav"
     assert all(f["name"] != "document.md" for f in files)
     assert "Question two" not in fake.seen["prompt"] and "q9" in fake.seen["prompt"]
@@ -1353,7 +1353,7 @@ def test_one_message_lists_and_answers_the_booklet_in_the_answer_chat(tmp_path):
     fake = _FakeClient(json.dumps({"questions": [
         {"group": "第1問", "label": "問1", "pages": [1], "status": "ready", "answer": "④"},
         {"group": "第1問", "label": "問2", "pages": [1], "status": "ready", "answer": ""},
-        "bad"], "done": True}), attached=True)
+        "bad"]}), attached=True)
     question = Question(question_no=None, question_id="booklet", answer_only=True,
                         document_pages=pages, document_id="1", page_numbers=[1],
                         chat_key="session:1")
@@ -1365,7 +1365,7 @@ def test_one_message_lists_and_answers_the_booklet_in_the_answer_chat(tmp_path):
     assert second["label"] == "問2" and isinstance(broken, ValueError)
     assert "Answer EVERY question" in fake.seen["prompt"] and fake.seen["files"]
     assert "ONLY what belongs on" in fake.seen["system"]
-    assert fake.seen["expect"] == ("questions", "done")
+    assert fake.seen["expect"] == ("questions",)
     booklet_key = fake.seen["chat_key"]
     fake.payload = '{"status":"ready","answer":"2"}'
     ChatGptWebSolver(client=fake).solve(question=Question(
@@ -1374,3 +1374,98 @@ def test_one_message_lists_and_answers_the_booklet_in_the_answer_chat(tmp_path):
     assert fake.seen["chat_key"] == booklet_key and fake.seen["expect"] == ("answer",)
     with pytest.raises(ValueError):
         ChatGptWebSolver(client=fake).answer_all(question=question)
+
+
+def _uncertain_chat(tmp_path, key="session:1:x", url="https://chatgpt.com/c/abc"):
+    """A pending send recorded in the guard, and the chat recorded for ``key``."""
+    from app.browser_guard import BrowserGuard
+
+    with BrowserGuard(tmp_path) as guard:
+        guard.mark_sending("a" * 64)
+        (guard.directory / chatgpt_web.CHATS_FILE).write_text(json.dumps(
+            {"chats": {key: {"url": url, "attached": [], "source_attached": True}}}))
+    return key
+
+
+class _Browser:
+    def __init__(self, page):
+        self.contexts = [_OneTabContext(page)]
+
+    def close(self):
+        pass
+
+
+def _recover(monkeypatch, page, key):
+    from app.solvers import cdp
+
+    page.turns = 1
+    monkeypatch.setattr(cdp, "connect_over_cdp", lambda endpoint: _Browser(page))
+    return chatgpt_web.ChatGptWebClient().recover(chat_key=key, expect=("questions",))
+
+
+def _guard_state(tmp_path):
+    from app.browser_guard import BrowserGuard
+
+    with BrowserGuard(tmp_path) as guard:
+        return guard.status()["state"]
+
+
+def test_an_uncertain_send_whose_reply_finished_is_read_back_not_resent(monkeypatch, tmp_path):
+    key = _uncertain_chat(tmp_path)
+    page = _StubPage(['{"questions":[{"label":"問1","answer":"4"}]}'], streaming=[])
+
+    text = _recover(monkeypatch, page, key)
+
+    assert json.loads(text)["questions"][0]["answer"] == "4"
+    assert _guard_state(tmp_path) == "idle"
+    assert not _sends(page) and page.url == "https://chatgpt.com/c/abc"
+
+
+@pytest.mark.parametrize("frames, streaming", [
+    (['{"questions":[{"label":"問1"}'], []),  # cut off
+    (['{"questions":[]}'], [True]),  # still generating
+])
+def test_an_unfinished_reply_leaves_the_send_uncertain(monkeypatch, tmp_path, frames, streaming):
+    key = _uncertain_chat(tmp_path)
+    page = _StubPage(frames, streaming=streaming)
+
+    assert _recover(monkeypatch, page, key) is None
+    assert _guard_state(tmp_path) == "uncertain"
+    assert not _sends(page)
+
+
+def test_answer_all_reads_the_booklet_chat_back_after_an_uncertain_send(tmp_path):
+    from app.solvers.chatgpt_web import ChatGptWebUncertain
+
+    page_path = tmp_path / "page.png"
+    page_path.write_bytes(_real_png(80))
+    pages = [{"page_number": 1, "image_path": str(page_path), "ocr_text": ""}]
+    asked = []
+
+    class Client(_FakeClient):
+        def complete_json(self, **kw):
+            raise ChatGptWebUncertain("send outcome unknown")
+
+        def recover(self, *, chat_key, expect):
+            asked.append((chat_key, expect))
+            return '{"questions":[{"group":"第1問","label":"問1","status":"ready","answer":"④"}]}'
+
+    question = Question(question_no=None, question_id="booklet", answer_only=True,
+                        document_pages=pages, document_id="1", page_numbers=[1],
+                        chat_key="session:1")
+    ((item, result),) = ChatGptWebSolver(client=Client("{}")).answer_all(question=question)
+
+    assert result.answer == "④"
+    assert asked[0][0].startswith("session:1:") and asked[0][1] == ("questions",)
+
+
+def test_an_answer_that_quotes_a_limit_phrase_is_still_the_answer():
+    reply = '{"questions":[{"label":"問1","answer":"上限に達した時刻は3時"}]}'
+    page = _StubPage([reply], streaming=[])
+    assert ask_page(page, "全問", poll_s=0, expect=("questions",), sleep=lambda _s: None)[0] == reply
+
+
+def test_a_limit_notice_instead_of_the_json_still_stops():
+    page = _StubPage(["使用制限に達しました"], streaming=[])
+    with pytest.raises(chatgpt_web.ChatGptWebRateLimit):
+        ask_page(page, "全問", poll_s=0, expect=("questions",), sleep=lambda _s: None)

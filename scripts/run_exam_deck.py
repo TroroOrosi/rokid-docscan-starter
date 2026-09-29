@@ -56,14 +56,19 @@ GLASSDOC_ROTATION = 270
 # How often wait_for_answers polls answer-bundle. Tests set interval=0.
 POLL_S = 5.0
 
-# answer-bundle's item `issue` for browser_outcome_unknown and chat_lost
-# (app/main.py _answer_bundle_item), the only place the bundle names them.
-# After either the server's batch sends nothing more for the session, so the
-# rest stay pending and only the stall bound would end the wait.
+# answer-bundle's item `issue` for browser_outcome_unknown, chat_lost and
+# rate_limited (app/main.py _answer_bundle_item), the only place the bundle
+# names them. After any of these the server's batch sends nothing more for
+# the session, so waiting on cannot change the outcome.
 SERVER_STOPPED_ISSUES = (
     "送信結果の確認待ち。自動再送は停止しています",
     "教科のチャットへ戻れません。新しいチャットは作っていません",
+    "ChatGPTの利用制限です。解除後に再開してください",
 )
+
+# The end of every issue the server gives a pending item it is trying again
+# after sending nothing (app/main.py _RETRYING_ISSUES).
+RETRYING_MARK = "自動で再試行します"
 
 # Printed after a FAIL or STOP once the session exists: the chat key is the
 # session, so running again opens another chat and uploads the pages again.
@@ -77,30 +82,10 @@ REQUEST_TIMEOUT_S = 30.0
 PAGE_UPLOAD_TIMEOUT_S = 600.0
 
 
-def answer_ceiling_s() -> float:
-    """The longest one chatgpt-web solve can legitimately take.
-
-    ATTEMPTS preparation attempts (ChatGptWebClient._ask_locked), each up to
-    READY_TIMEOUT_S + UPLOAD_TIMEOUT_S, plus their RETRY_BACKOFF_S back-offs
-    (arithmetic series, sum 0..ATTEMPTS-1), plus one generation (TIMEOUT_S),
-    plus one page load (cdp.DEFAULT_TIMEOUT_S). 9195s with defaults: the generation
-    bound is the 150-minute session, not an analysis budget.
-
-    ponytail: this reads the PC's env, not the phone's; if the phone
-    overrides ROKID_CHATGPT_TIMEOUT_S, /v1/settings would have to publish it
-    for this bound to track that override.
-    """
-    from app.solvers.cdp import DEFAULT_TIMEOUT_S
-    from app.solvers.chatgpt_web import (
-        ATTEMPTS, READY_TIMEOUT_S, RETRY_BACKOFF_S, TIMEOUT_S, UPLOAD_TIMEOUT_S,
-    )
-
-    return (
-        ATTEMPTS * (READY_TIMEOUT_S + UPLOAD_TIMEOUT_S)
-        + RETRY_BACKOFF_S * ATTEMPTS * (ATTEMPTS - 1) / 2
-        + TIMEOUT_S
-        + DEFAULT_TIMEOUT_S
-    )
+# How long the wait survives a server that does not answer, or a per-question
+# batch whose revision stops moving. A 409 "being made" is never timed: one
+# message is answering the whole booklet, and a poor photo takes it longer.
+STALL_S = 300.0
 
 
 def call(step: str, func, *args, **kwargs):
@@ -379,7 +364,7 @@ def wait_for_answers(
     """Poll answer-bundle as glassdoc does, until stopped or nothing pending.
 
     Returns (last_good_response_or_None, reason_or_None). There is no overall
-    ceiling: a listing 409 or a changing revision can run indefinitely. The
+    ceiling: an analysing 409 or a changing revision can run indefinitely. The
     wait ends only when the server has visibly stopped -- an item names one of
     SERVER_STOPPED_ISSUES, the revision hasn't moved for `stall_s`, or nothing
     has answered at all for `stall_s`.
@@ -389,7 +374,7 @@ def wait_for_answers(
     since = clock()
     last_good = None
     last_revision = None
-    listed = False
+    analysing = False
     while True:
         try:
             r = client.get(f"/v1/exam-sessions/{session_id}/answer-bundle")
@@ -404,9 +389,9 @@ def wait_for_answers(
             # One message is being answered for the whole booklet. The server
             # ends it itself (the background batch always leaves
             # _background_solves, success or failure), so this adds no limit.
-            if not listed:
+            if not analysing:
                 print("..    analysing      one message answers every 小問")
-                listed = True
+                analysing = True
             since = clock()
             sleep(interval)
             continue
@@ -424,6 +409,10 @@ def wait_for_answers(
         if not pending:
             return r, None
         revision = body.get("revision")
+        if any(item["status"] == "pending" and RETRYING_MARK in item.get("issue", "") for item in items):
+            # Nothing was sent, and the server is trying again by itself
+            # (Chrome unreachable, browser busy): it is still working.
+            since = clock()
         if revision != last_revision:
             last_revision = revision
             since = clock()
@@ -653,7 +642,7 @@ def run(args) -> int:
                   f"(status {finalize_body.get('status')}); is ROKID_SOLVER on the "
                   "server unset or local?")
             return _failed_after_session()
-        bundle, reason = wait_for_answers(client, session_id, answer_ceiling_s(), interval=POLL_S)
+        bundle, reason = wait_for_answers(client, session_id, STALL_S, interval=POLL_S)
     else:
         r = call(
             "finalize-reading", client.post,
@@ -682,9 +671,6 @@ def run(args) -> int:
     per_question = elapsed / len(items) if items else 0.0
     print(f"ok    answers        {len(ready)}/{len(items)} ready in {elapsed:.1f}s "
           f"({per_question:.1f}s per question)")
-    if reason is None and per_question > 40 and solver_name != "local":
-        print("WARN  per-question time is in the range that preceded the 2026-09-14 "
-              "rate limit (7-13s clean). Stop rather than starting the next subject.")
     for item in items[:5]:
         print(f"      {item['question_label']:<10} {item['answer'] or item['issue']}")
 

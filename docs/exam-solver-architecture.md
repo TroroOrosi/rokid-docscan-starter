@@ -17,9 +17,9 @@ Runs on: 会場はglassdocとスマホAP／FastAPI／Chrome。PC試験は部品�
                           ↓ スマホAP
 スマホFastAPI:
   写真は向き補正・正規化PNG、音声は連続性確認・原音を保存
-  finalize-reading → OCR由来のsegment_problems → 小問を順にsolve・保存
-    source_bundle: 冊子の全画像＋原音
-    ChatGptWebSolver → Chrome CDP → 同じ会話で確認済み資料を再利用
+  finalize-reading?solve=background → 冊子全体を1通で送信（小問の一覧と全解答を1つの返答に）
+    source_bundle: 冊子の全画像（JPEG、20枚超は2〜3頁結合）＋原音
+    ChatGptWebSolver → Chrome CDP → 1教科1チャット。返答の小問をdeckの行にして一度に保存
   answer-bundle（入力digest・revision・各小問の状態／答案）
                           ↓
 グラス: bundle取得 → AnswerStore → AnswerReader → AnswerView / AnswerLayout
@@ -29,10 +29,10 @@ Runs on: 会場はglassdocとスマホAP／FastAPI／Chrome。PC試験は部品�
 
 - **品質の空白**: OCRは登録前だが、認識完了・文字数・文字枠は判読合格ではない。
   PCの品質部品は正式登録ゲートに未接続。撮影前の紙面検出・画角校正も未完（CQ-5～9）。
-- **設問の空白**: OCRは依然として分割・小問一覧に使われ、選択肢の偽小問化が残る。
-  画像を全ページ渡しても、小問一覧の誤りは自動で解消しない（RP-12）。
-- **配送の空白**: 小問別に保存するが、finalize-readingのHTTPは全問処理を待つ。
-  Activityはbundleを1回取得し、追加取得からAnswerReader.acceptへの接続は未完（RP-15）。
+- **設問の空白**: background経路の小問一覧はモデルが原本から作る。OCRは分割に使わない
+  （同期finalizeの互換経路だけがOCR分割）。実冊子での一覧の過不足は未測定（RP-12）。
+- **配送**: 解析中のanswer-bundleは409「being made」、答えは返答が揃ってから一度に届く。
+  glassdocは30秒ごとに再取得し、AnswerReader.acceptで新しいdeckを受け入れる。
 - **受け入れの空白**: AP全経路、文字・数式・図表の正答、原音の実利用、実表示と長時間運用は未検証。
   カメラAPIの終了は物理LED状態の測定ではない。
 
@@ -40,8 +40,8 @@ Runs on: 会場はglassdocとスマホAP／FastAPI／Chrome。PC試験は部品�
 
 | 対象 | 現在の扱い |
 |---|---|
-| GPTへの資料 | 全ページ画像＋リスニング原音。OCR全文・補正文・ローカル文字起こしは送らない。質問には小問を示す番号等を使う |
-| 画像添付 | 既定はimages。旧ocr-images／merged-images値も画像経路。添付数に応じ結合し、PDFは比較用。欠落原本や未確認添付のまま質問を続けない |
+| GPTへの資料 | 全ページ画像＋リスニング原音を1通で送る。OCR全文・補正文・ローカル文字起こしは送らない |
+| 画像添付 | 画像のみ（フル解像度JPEG）。20枚超は2〜3頁を1枚に結合。PDFは使わない。欠落原本や未確認添付のまま送らない |
 | 同じ会話 | 原本の内容・ページ・原音・入力方式で同一性を判定。確認済み会話では添付生成を省く。原本／会話の変更と送信結果不明を同じ扱いにしない |
 | リスニング | 主経路はASRを起動・待機しない。原音保存・hash・sample・欠番・完了検査は残す。他provider向けASRは互換機能 |
 | solver | chatgpt-webが選択された主経路。API key経路は設定によるfallback。必要な音声を失うfallbackで成功扱いしない。REAL_MODEでplaceholderを許可しない |
@@ -257,8 +257,8 @@ exam-session(document_id, exam_type, answer_format)
   **exam セッション**（`session:{id}` ＝ 1 冊＝ 1 科目）で、行ごとの
   `detect_subject` ではありません。ページを 1 回添付すればそのチャットの間ずっと
   残るので、小問ごとに上げ直さずに済みます。
-- **資料の添付** — 既定は全文OCR Markdown＋対象大問のページ画像です。
-  `ROKID_CHATGPT_INPUT_MODE=merged-images|pdf`で同じ資料の比較ができます。
+- **資料の添付** — 冊子の原本画像だけを送ります（OCR本文は送りません）。20枚を
+  超えると2〜3頁を1枚に結合します。PDFは使いません（Enterprise 以外は画像を捨てる）。
   リスニングの原音を含め20添付を数え、未確認添付のまま質問を送りません。
   図は検証したベクトルを保存し、answer-bundle schema 2で配送します。
   録音はglassdoc、端末内VAD/ASRはスマホ。設定とAPIは

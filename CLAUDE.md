@@ -79,7 +79,7 @@ Which of each duplicated surface is the route, decided 2026-09-14:
 |---|---|---|
 | Capture + OCR | `android-relay/glassdoc` | `android-relay/app` (phone relay) |
 | Answer display | `AnswerView` + `AnswerLayout` (measures the real font) | `app/glasses_view.py` wrapping (estimates 18 columns), `app/hud.py` (`/v1/match` only) |
-| Answer delivery | `GET /v1/exam-sessions/{id}/answer-bundle` | `/v1/exam-sessions/{id}/paste-prompt` (already rejected), `/v1/exam-sessions/{id}/pages.pdf` (kept: chatgpt-web attaches it) |
+| Answer delivery | `GET /v1/exam-sessions/{id}/answer-bundle` | `/v1/exam-sessions/{id}/paste-prompt` (already rejected; `pages.pdf` beside it was removed on 2026-09-29, since outside Enterprise ChatGPT discards a PDF's images) |
 
 Frozen means the code stays and its tests keep running. It does not get new
 features, and a measurement taken on it does not validate the decided route.
@@ -93,7 +93,7 @@ is now the intended topology and is still unexercised.
 |---|---|
 | `ROKID_SOLVER=chatgpt-web` | **Current primary.** Drives the operator's own signed-in ChatGPT web session over CDP. |
 | On-phone local model (F-51F, llama.cpp) | **Not the route.** The operator chose chatgpt-web on 2026-09-14. Its measurements are kept as evidence in `docs/hardware-measurements.md` §E; no further work is scheduled on it. |
-| `openai` / `gemini` / `claude` API keys | Supported and config-only. Kept as a fallback tier via `ROKID_SOLVER_TIERS`. |
+| `openai` / `gemini` / `claude` API keys | Supported and config-only. The per-question routes can fall back through `ROKID_SOLVER_TIERS`; the background one-message route uses `ROKID_SOLVER` alone and has no fallback tier. |
 | Local OpenAI-compatible HTTP (`app/llm_http.py`) | Reaches an on-phone `llama-server` without the openai SDK. |
 
 Settled decisions. Do not re-argue them:
@@ -160,8 +160,10 @@ message for the whole booklet, so a long generation is normal.
 - The public CXR-L AIDL surface does not expose arbitrary recognition or
   answer text from the AI running on the glasses. The current production path
   uses a configured server solver; glassdoc performs its OCR on the glasses,
-  while the frozen relay performs OCR on the phone. OCR is intended as quality
-  evidence, but currently also drives server segmentation; this remains RP-12 work.
+  while the frozen relay performs OCR on the phone. On the background
+  chatgpt-web route the model lists and answers the questions from the original
+  images in one message and OCR does not segment; the glasses capture loop
+  still uses OCR for framing, burst choice and same-page skipping.
 - Use the official `com.rokid.cxr:client-l:1.1.1` dependency. Do not commit,
   copy, or redistribute Rokid AAR files.
 - Global Hi Rokid uses package `com.rokid.sprite.global.aiapp`. Keep the

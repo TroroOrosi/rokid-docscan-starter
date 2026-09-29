@@ -421,6 +421,26 @@ def test_the_recorded_phone_env_file_reaches_the_server(tmp_path):
 
 
 @requires_bash
+def test_an_old_reply_timeout_in_the_phone_env_never_reaches_the_server(tmp_path):
+    """A 180s value left in multimodal.env would cut a whole-booklet reply short."""
+    bin_dir, log = _shims(
+        tmp_path, "2: wlan0    inet 192.168.1.23/24 brd 192.168.1.255 scope global wlan0",
+        omit=("python",),
+    )
+    _write_shim(bin_dir, "python", log,
+                'echo "timeout=${ROKID_CHATGPT_TIMEOUT_S-unset} poll=${ROKID_CHATGPT_POLL_S-unset}"')
+    home = tmp_path / "home"
+    env_file = _env_file(tmp_path, 0o600)
+    env_file.write_text("export ROKID_SOLVER=chatgpt-web\nexport ROKID_CHATGPT_TIMEOUT_S=180\n"
+                        "export ROKID_CHATGPT_POLL_S=0.25\n")
+
+    result = _run(["wlan0"], tmp_path, _test_path(bin_dir), home, umask="077")
+
+    assert result.returncode == 0, result.stderr
+    assert "timeout=unset poll=unset" in result.stdout
+
+
+@requires_bash
 def test_an_address_argument_needs_no_ip_tool(tmp_path):
     """Termux on the F-51F has no `ip` (measured 2026-09-29: command not found).
 

@@ -119,7 +119,7 @@ risk があります。**利用者の判断で選択した経路です（詳細�
 CXR-L の実装境界は
 [CXR-L / Global Hi Rokid integration](docs/cxr-l-integration.md)です。
 
-現在のバージョン: **Server APP 0.41.0 / API 1.27.0 / Android client 0.3.17 / Glasses View 1.19.0 / Solver API 1.7.1**。
+現在のバージョン: **Server APP 0.42.0 / API 1.28.0 / Android client 0.3.17 / Glasses View 1.20.0 / Solver API 1.7.1**。
 版数の正本は `app/version.py` です。他の資料は版数を書かず、この行だけが
 `tests/test_documentation_contract.py` で実装と照合されます。
 Solver API は、記入用解答の全文保持・資料不足の分離を行う `answer_only` モードを含みます。
@@ -160,7 +160,6 @@ rokid-docscan-starter/
 │   ├── llm.py         # ★実 AI ブリッジ（openai/gemini/claude、遅延import・注入可）
 │   ├── llm_http.py    # OpenAI互換HTTPクライアント（端末内 llama-server 用・SDK不要）
 │   ├── provider_registry.py # 4ポート共通のアダプタ登録・選択
-│   ├── page_pdf.py    # 撮影ページを1つのPDFへ束ねる（chatgpt-web の一括添付用）
 │   ├── audio_formats.py # 音声MIME・保存suffix・provider対応の共通定義
 │   ├── version.py     # 各契約バージョンの正本（上記の版数一覧と連動）
 │   ├── config.py      # 保存先・フィーチャーフラグ（ROKID_* / ANTHROPIC_API_KEY / ROKID_TRANSCRIBER）
@@ -598,11 +597,13 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
   `needs_input`（「角a、角bの大きさが不足」）、2枚で `70度` と正答しました。
   ページは1回の `set_input_files` で送るため読み順が保たれます。全ページの
   サムネイルが揃って初めて `image_attached` が true になります。
-- 応答完了は `stop-button` の消滅で判定します。**このボタンは思考フェーズを
-  含む生成中ずっと存在する**ため、表示されている間は何も確定しません。推論
-  モデルは「思考中」を1秒以上静止表示するので、テキスト安定判定だけだと長文
-  5問中4問でこれを解答として確定していました。安定判定はセレクタ消失時の
-  フォールバックに限定しています。
+- 応答完了は、`stop-button` が無く、かつ返答が期待したJSONとして完結したときに
+  判定します。**このボタンは思考フェーズを含む生成中ずっと存在する**ため、表示
+  されている間は何も確定しません。推論モデルは「思考中」を1秒以上静止表示する
+  ので、文字が止まっただけでは完了としません（テキスト安定判定は削除済み）。
+  ボタンが一度出て消えたまま `ROKID_CHATGPT_SETTLE_POLLS`（既定10回）続いたら、
+  JSONでなくても返し、解析失敗として表示します。送信後
+  `ROKID_CHATGPT_REPLY_START_S`（既定120秒）以内に返答が始まらなければ失敗です。
 - 本文の長さは **34,205字まで欠落なし**を実測（末尾に置いた合言葉が全長で
   返る）。`composer.fill()` は1回で全量を入れるため途中送信も起きません。
 - 連続実行はflakeします（16問連続でアップロード未確認1件、composer操作
@@ -617,24 +618,20 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
     検出語は `ROKID_CHATGPT_RATE_LIMIT_MARKERS`（`|` 区切り）で変更できます。
   - 遅い生成が続くと送信を拒否するブレーキは、2026-09-29 に削除しました。
     background解析は冊子全体を1通で送り、その返答に小問の一覧と全解答が入るため、
-    長い生成は正常です。返答は、期待したJSONが揃うか停止ボタンが消えたときに
-    完了とし、文字が止まっただけでは完了としません。
-- **教科ごとに1チャット**（任意、既定は問題ごと）: `ROKID_CHATGPT_CHAT_SCOPE=subject`
-  で1科目が1チャットを共有します。全教科デックでチャット数が小問数から教科数に
-  減り、同じ大問のページは**その科目で1回だけ**アップロードされます（同一バイト
-  列を SHA-256 で判定）。代償は、同じ科目の前問の解答が文脈に残ることです。
-  既定の `question` は測定済みの挙動（1問1チャット）を維持します。
+    長い生成は正常です。
+- **教科ごとに1チャット**（既定）: `ROKID_CHATGPT_CHAT_SCOPE=subject` で1科目が
+  1チャットを共有し、再試行・再起動でも同じチャットへ戻ります。冊子の画像は
+  **その科目で1回だけ**アップロードされます（同一バイト列を SHA-256 で判定）。
+  `question` は問題ごとに新しいチャットを開く互換設定です。
 - **リスニング音声は資料と同じメッセージに添付されます。** `Question.audio_path`
   が録音ファイルを運び、写真用 input は `accept="image/*"` のため
   `ROKID_CHATGPT_FILE_UPLOAD_SEL`（汎用ファイル input）から送ります。文字起こしは
   従来どおり本文に入るため、音声が読めない場合も解答は失われません。音声も
   チャット内で重複アップロードしません。
-- **複数ページを1つの PDF にまとめて送る**（任意、既定オフ）:
-  `ROKID_CHATGPT_BUNDLE_PDF=1` で大問の全ページを1つの PDF にして
-  `ROKID_CHATGPT_FILE_UPLOAD_SEL`（既定 `input[data-testid="upload-files-input"]`）
-  から送ります。アップロード回数が1回になりますが、**実ページでは未検証**
-  です（制限中に実装したため）。図がPDF経路でも読めるかを1問で確認してから
-  使ってください。画像1枚ずつの経路のみが実測済みです。
+- **PDFでは送りません。** OpenAI の File Uploads FAQ のとおり、Enterprise 以外の
+  プランは PDF の文字層だけを読み、画像を捨てます。撮影した頁には文字層が無い
+  ため、画像のまま送り、20枚を超えるときは2〜3頁を1枚に結合します
+  （`app/source_bundle.py`）。
 
 注意点:
 
@@ -658,19 +655,11 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```bash
 # 1問ごと: 貼り付け用の本文と ChatGPT の事前入力リンク
 curl "$BASE/v1/exam-sessions/$SID/paste-prompt"
-# -> {"text": "...", "url": "https://chatgpt.com/?q=...",
-#     "pages_pdf_url": "/v1/exam-sessions/$SID/pages.pdf", ...}
-
-# セッション中1回: 撮影した全ページを1つの PDF で取得し、チャットに添付
-curl -o pages.pdf "$BASE/v1/exam-sessions/$SID/pages.pdf"
+# -> {"text": "...", "url": "https://chatgpt.com/?q=...", ...}
 ```
 
-- 写真を1枚ずつ手で添付する作業が実運用で破綻する部分なので、**資料は1
-  ファイル**にまとめます。ページは撮影順（reading order）で並びます。
-- 画像を持たないページ（テキストのみ取り込み）は含めません。全ページが
-  テキストのみなら 404 を返します（空の PDF は「図を送った」と誤読されます）。
-- この経路では OCR 本文が `text`、図は PDF 添付という分担になります。図が
-  PDF 経由でどこまで読めるかは**未検証**です。
+- 全頁をPDFで返していた `pages.pdf` は2026-09-29に削除しました。Enterprise 以外の
+  ChatGPT は PDF の画像を捨てるため、撮影した頁は読まれません。
 - Chrome が未起動・未ログインなら `answer_only` はプレースホルダーに落ちず
   明示的に失敗します。
 
