@@ -143,6 +143,7 @@ public final class DocScanController implements AutoCloseable {
      * complete. A page that is not a clean exam sheet is exactly that case.
      */
     private volatile boolean manualOnly;
+    private final Context context;
     private boolean listeningComplete;
     private boolean listeningFailed;
     private int nextPageIndex;
@@ -204,6 +205,7 @@ public final class DocScanController implements AutoCloseable {
         this.ocr = ocr;
         this.listener = listener;
         this.client = client;
+        this.context = context.getApplicationContext();
         preferences = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
         localRoot = new File(context.getFilesDir(), "local-scans");
         String localId = preferences.getString(KEY_LOCAL_SESSION, "");
@@ -916,7 +918,7 @@ public final class DocScanController implements AutoCloseable {
             throw new IllegalStateException(
                     "写真の確認または撮影処理中です。登録か撮り直しを選んでください");
         }
-        DocScanApi candidate = new DocScanApi(serverUrl, apiKey, client);
+        DocScanApi candidate = new DocScanApi(serverUrl, apiKey, client, context);
         String previousServer = preferences.getString(KEY_SERVER, "");
         String normalizedServer = serverUrl.trim().replaceAll("/+$", "");
         if (localStartup && localSession == null && !normalizedServer.equals(previousServer)

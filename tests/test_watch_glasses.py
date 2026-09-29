@@ -53,3 +53,16 @@ def test_unknown_launch_is_not_retried_while_the_glasses_stay_open(monkeypatch):
     with pytest.raises(StopIteration):
         watch_glasses.watch("glasses:5555", "expected", 0.5)
     assert len(launches) == 1
+
+
+def test_auto_connects_to_the_address_the_server_last_saw(monkeypatch, tmp_path):
+    """At the venue the phone hotspot chooses the glasses' address."""
+    address = tmp_path / "glasses-address"
+    address.write_text("192.168.51.23", encoding="ascii")
+    monkeypatch.setattr(watch_glasses, "ADDRESS_FILE", address)
+    calls = []
+    monkeypatch.setattr(watch_glasses.subprocess, "run", lambda args, **_: calls.append(args))
+
+    assert watch_glasses.target("auto") == "192.168.51.23:5555"
+    assert calls == [["adb", "connect", "192.168.51.23:5555"]]
+    assert watch_glasses.target("192.168.0.31:5555") == "192.168.0.31:5555"

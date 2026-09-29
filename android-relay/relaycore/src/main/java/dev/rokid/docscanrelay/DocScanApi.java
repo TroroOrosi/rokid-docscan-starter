@@ -4,11 +4,23 @@ import dev.rokid.docscanrelay.study.AnswerBundle;
 import org.json.JSONException;
 import org.json.JSONObject;
 
+import android.content.Context;
+import android.net.ConnectivityManager;
+import android.net.LinkProperties;
+import android.net.Network;
+import android.net.NetworkCapabilities;
+import android.net.RouteInfo;
+
 import java.io.IOException;
 import java.io.File;
+import java.net.Inet4Address;
+import java.net.InetAddress;
+import java.net.UnknownHostException;
+import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.TimeUnit;
 
+import okhttp3.Dns;
 import okhttp3.HttpUrl;
 import okhttp3.MediaType;
 import okhttp3.MultipartBody;
@@ -26,18 +38,35 @@ public final class DocScanApi {
     private static final MediaType EMPTY =
             Objects.requireNonNull(MediaType.parse("application/octet-stream"));
 
-    private final OkHttpClient http = new OkHttpClient.Builder()
-            .connectTimeout(15, TimeUnit.SECONDS)
-            .readTimeout(4, TimeUnit.MINUTES)
-            .writeTimeout(60, TimeUnit.SECONDS)
-            .callTimeout(5, TimeUnit.MINUTES)
-            .retryOnConnectionFailure(true)
-            .build();
+    /**
+     * The server host that means "whatever Wi-Fi this device is on, its
+     * gateway". At the venue there is no Wi-Fi but the phone's own hotspot, so
+     * the phone is the gateway and its address is chosen by the phone each
+     * time the hotspot starts. Resolved per connection, so the saved server
+     * URL (and every local session bound to it) never has to change.
+     */
+    public static final String GATEWAY_HOST = "gateway";
+
+    private final OkHttpClient http;
     private final String baseUrl;
     private final String apiKey;
     private final ClientIdentity client;
 
     public DocScanApi(String baseUrl, String apiKey, ClientIdentity client) {
+        this(baseUrl, apiKey, client, null);
+    }
+
+    public DocScanApi(String baseUrl, String apiKey, ClientIdentity client, Context context) {
+        Context app = context == null ? null : context.getApplicationContext();
+        http = new OkHttpClient.Builder()
+                .connectTimeout(15, TimeUnit.SECONDS)
+                .readTimeout(4, TimeUnit.MINUTES)
+                .writeTimeout(60, TimeUnit.SECONDS)
+                .callTimeout(5, TimeUnit.MINUTES)
+                .retryOnConnectionFailure(true)
+                .dns(host -> GATEWAY_HOST.equals(host) && app != null
+                        ? List.of(wifiGateway(app)) : Dns.SYSTEM.lookup(host))
+                .build();
         String normalized = baseUrl == null ? "" : baseUrl.trim();
         while (normalized.endsWith("/")) {
             normalized = normalized.substring(0, normalized.length() - 1);
@@ -53,6 +82,26 @@ public final class DocScanApi {
             throw new IllegalArgumentException("クライアント識別子が必要です");
         }
         this.client = client;
+    }
+
+    /** IPv4 default gateway of the Wi-Fi network this device is joined to. */
+    @SuppressWarnings("deprecation") // getAllNetworks: the only list on API 28, the glasses' floor.
+    static InetAddress wifiGateway(Context context) throws UnknownHostException {
+        ConnectivityManager networks = context.getSystemService(ConnectivityManager.class);
+        if (networks != null) {
+            for (Network network : networks.getAllNetworks()) {
+                NetworkCapabilities capabilities = networks.getNetworkCapabilities(network);
+                LinkProperties link = networks.getLinkProperties(network);
+                if (capabilities == null || link == null
+                        || !capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) continue;
+                for (RouteInfo route : link.getRoutes()) {
+                    if (route.isDefaultRoute() && route.getGateway() instanceof Inet4Address) {
+                        return route.getGateway();
+                    }
+                }
+            }
+        }
+        throw new UnknownHostException("スマホのテザリングに接続されていません");
     }
 
     public JSONObject health() throws IOException, JSONException {

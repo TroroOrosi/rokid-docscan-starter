@@ -194,7 +194,10 @@ from __future__ import annotations
 # 0.45.0: manual capture mode (one tap, one photo) for pages the recogniser
 # cannot judge, and the bench grades a 問 that fills several 解答番号 per
 # number. See GLASSES_VIEW_CONTRACT 1.22.0; API unchanged.
-APP_VERSION = "0.45.0"
+# 0.46.0: venue networking. The server host "gateway" resolves to the Wi-Fi
+# gateway (the phone hotspot), the server remembers the glasses' address
+# for the fold watcher, and a large sheet may arrive in sections.
+APP_VERSION = "0.46.0"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.

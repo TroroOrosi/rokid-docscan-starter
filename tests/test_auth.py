@@ -62,3 +62,18 @@ def test_auth_non_ascii_header_is_401_not_500(tmp_path, monkeypatch):
         headers={"Authorization": "Bearer sécrét".encode("latin-1")},
     )
     assert r.status_code == 401
+
+
+def test_the_glasses_address_is_kept_only_for_an_authenticated_remote_client(tmp_path, monkeypatch):
+    """The venue hotspot picks the glasses' address; the fold watcher reads it here."""
+    c = _make_client(tmp_path, monkeypatch, api_key="secret")
+    kept = tmp_path / "glasses-address"
+
+    # /v1/settings is open for discovery, so it proves nothing about the caller.
+    c.get("/v1/settings")
+    c.get("/v1/solutions", headers={"Authorization": "Bearer nope"})
+    assert not kept.exists()
+
+    # TestClient reports its peer as "testclient", a non-loopback name.
+    c.get("/v1/solutions", headers={"Authorization": "Bearer secret"})
+    assert kept.read_text(encoding="ascii") == "testclient"
