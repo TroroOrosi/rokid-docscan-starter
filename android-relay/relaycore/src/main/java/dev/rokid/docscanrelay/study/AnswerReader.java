@@ -75,14 +75,31 @@ public final class AnswerReader {
 
     public boolean accept(AnswerBundle next) {
         if (!bundle.sessionId.equals(next.sessionId) || !bundle.inputDigest.equals(next.inputDigest)
-                || next.revision <= bundle.revision || next.items.size() != bundle.items.size()) return false;
-        for (int i = 0; i < bundle.items.size(); i++) {
+                || next.revision <= bundle.revision) return false;
+        boolean sameShape = next.items.size() == bundle.items.size();
+        for (int i = 0; sameShape && i < bundle.items.size(); i++) {
             AnswerItem old = bundle.items.get(i);
             AnswerItem item = next.items.get(i);
-            if (!old.questionId.equals(item.questionId) || !old.groupId.equals(item.groupId)
-                    || !old.groupLabel.equals(item.groupLabel) || !old.questionLabel.equals(item.questionLabel)) {
-                return false;
+            sameShape = old.questionId.equals(item.questionId) && old.groupId.equals(item.groupId)
+                    && old.groupLabel.equals(item.groupLabel) && old.questionLabel.equals(item.questionLabel);
+        }
+        if (!sameShape) {
+            // The same questions never change order or identity. A deck with none
+            // of the old question ids is a replacement: the one row a failed
+            // message left, replaced by the model's list on a retry.
+            for (AnswerItem item : next.items) {
+                for (AnswerItem old : bundle.items) {
+                    if (old.questionId.equals(item.questionId)) return false;
+                }
             }
+            bundle = next;
+            questionIndex = 0;
+            anchorOffset = 0;
+            screen = Screen.ANSWER;
+            menuIndex = 0;
+            menuGroup = null;
+            reflow();
+            return true;
         }
         boolean changed = !current().answer.equals(next.items.get(questionIndex).answer)
                 || current().status != next.items.get(questionIndex).status

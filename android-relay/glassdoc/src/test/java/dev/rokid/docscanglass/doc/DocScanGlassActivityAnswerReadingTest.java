@@ -399,7 +399,7 @@ public class DocScanGlassActivityAnswerReadingTest {
 
     /** The server answers the whole booklet in one message; the reader waits without a new REVIEW. */
     @Test
-    public void aBundleStillBeingListedIsFetchedAgainWithoutAnotherPublish() throws Exception {
+    public void aBundleStillBeingAnalysedIsFetchedAgainWithoutAnotherPublish() throws Exception {
         AtomicInteger attempts = new AtomicInteger();
         server.setDispatcher(new Dispatcher() {
             @Override
@@ -418,8 +418,59 @@ public class DocScanGlassActivityAnswerReadingTest {
                 ((List<?>) getField(getField(activity, "hud"), "lines")).get(0)));
         assertNull(getField(activity, "reader"));
         Shadows.shadowOf(Looper.getMainLooper()).idleFor(java.time.Duration.ofSeconds(6));
-        awaitTrue("listed bundle opened", () -> getField(activity, "reader") != null);
+        Thread.sleep(200);
+        assertEquals("analysing is read every 30s, not every 5s", 1, attempts.get());
+        Shadows.shadowOf(Looper.getMainLooper()).idleFor(java.time.Duration.ofSeconds(25));
+        awaitTrue("analysed bundle opened", () -> getField(activity, "reader") != null);
         assertEquals(2, attempts.get());
+    }
+
+    /** A 409 that waiting cannot end is shown, not dressed up as analysis. */
+    @Test
+    public void aSessionWithNothingDetectedSaysSoInsteadOfAnalysing() throws Exception {
+        server.setDispatcher(new Dispatcher() {
+            @Override
+            public MockResponse dispatch(RecordedRequest request) {
+                return json("{\"detail\":\"no problems were detected in this document\"}")
+                        .setResponseCode(409);
+            }
+        });
+        activity.onUpdate(RelayState.REVIEW, List.of("a"), "review");
+        awaitTrue(() -> "解答がありません".equals(
+                ((List<?>) getField(getField(activity, "hud"), "lines")).get(0)));
+        assertEquals("問題を検出できません",
+                ((List<?>) getField(getField(activity, "hud"), "lines")).get(1));
+    }
+
+    /** Nothing was sent; the server retries. Read every 30s, and take the model's deck when it comes. */
+    @Test
+    public void aRetryingSessionIsReadRarelyAndItsNewDeckReplacesTheFailedRow() throws Exception {
+        AtomicInteger fetches = new AtomicInteger();
+        server.setDispatcher(new Dispatcher() {
+            @Override
+            public MockResponse dispatch(RecordedRequest request) {
+                String path = request.getPath();
+                if (path == null || !path.endsWith("/answer-bundle")) {
+                    return new MockResponse().setResponseCode(404).setBody("unexpected test request");
+                }
+                AnswerBundle bundle = fetches.incrementAndGet() == 1
+                        ? new AnswerBundle(Long.toString(SESSION_ID), "a".repeat(64), 2, List.of(
+                                new AnswerItem("g1", "全体", "q5", "全問", "", AnswerItem.Status.PENDING,
+                                        "ChatGPTへ送れませんでした。自動で再試行します")))
+                        : new AnswerBundle(Long.toString(SESSION_ID), "a".repeat(64), 3,
+                                bundleForSession(SESSION_ID).items);
+                return json(bundle.toJson());
+            }
+        });
+        activity.onUpdate(RelayState.REVIEW, List.of("a"), "review");
+        awaitTrue(() -> getField(activity, "reader") != null);
+        AnswerReader reader = (AnswerReader) getField(activity, "reader");
+        Shadows.shadowOf(Looper.getMainLooper()).idleFor(java.time.Duration.ofSeconds(6));
+        Thread.sleep(200);
+        assertEquals("a retrying session is not read every 5s", 1, fetches.get());
+        Shadows.shadowOf(Looper.getMainLooper()).idleFor(java.time.Duration.ofSeconds(25));
+        awaitTrue("the model's deck replaced the failed row", () -> reader.bundle().revision == 3);
+        assertEquals("q10", reader.current().questionId);
     }
 
     private static AnswerBundle bundleForSession(long sessionId) {

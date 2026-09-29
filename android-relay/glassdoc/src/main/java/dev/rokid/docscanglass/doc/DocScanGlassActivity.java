@@ -91,6 +91,11 @@ public final class DocScanGlassActivity extends Activity
     private static final long EXIT_NOTICE_MILLIS = 2_000;
     // ponytail: fixed interval, measured cost on the AP route may call for backoff.
     private static final long PENDING_ANSWER_POLL_MILLIS = 5_000;
+    // A 409 means the server holds the session: one message is answering the
+    // whole booklet, and its answers arrive together minutes later. Reading
+    // that less often loses at most this long and lets the CPU sleep between.
+    private static final long ANALYSING_POLL_MILLIS = 30_000;
+    private static final String RETRYING_MARK = "自動で再試行します";
 
     private final GlassesInputNormalizer normalizer = new GlassesInputNormalizer();
     private final BackExitPolicy backExit = new BackExitPolicy();
@@ -843,18 +848,22 @@ public final class DocScanGlassActivity extends Activity
                 // could start; only a fetch that already finished (here)
                 // reopens the door.
                 answersFetchedForSession = -1;
-                // 409: the server is still analysing: one message carries the
-                // whole booklet and its answers arrive together. Keep the display
-                // asleep for that; wake only for the first real failure.
-                boolean listing = error instanceof DocScanApi.ApiException
+                // 409 "being made": the server is still analysing; one message
+                // carries the whole booklet and its answers arrive together. Keep
+                // the display asleep for that. Any other 409 (nothing detected,
+                // locked, not finalized) will not end by waiting: wake and say so.
+                boolean conflict = error instanceof DocScanApi.ApiException
                         && ((DocScanApi.ApiException) error).getStatusCode() == 409;
+                boolean analysing = conflict && String.valueOf(error.getMessage()).contains("being made");
+                String reason = String.valueOf(error.getMessage());
                 main.post(() -> {
                     if (isFinishing() || isDestroyed()) {
                         return;
                     }
-                    if (!listing && !answerFetchFailing) wakeForResult();
-                    answerFetchFailing = !listing;
-                    hud.showLines(listing ? List.of("解析中", "答案を待っています", "")
+                    if (!analysing && !answerFetchFailing) wakeForResult();
+                    answerFetchFailing = !analysing;
+                    hud.showLines(analysing ? List.of("解析中", "答案を待っています", "")
+                            : conflict ? List.of("解答がありません", noAnswerReason(reason), "")
                             : List.of("答案を取得できません", "通信を確認", ""));
                     // Retry on a timer too: in local mode nothing republishes REVIEW.
                     main.postDelayed(() -> {
@@ -864,10 +873,18 @@ public final class DocScanGlassActivity extends Activity
                         }
                         answersFetchedForSession = sessionId;
                         fetchAnswers(sessionId);
-                    }, PENDING_ANSWER_POLL_MILLIS);
+                    }, conflict ? ANALYSING_POLL_MILLIS : PENDING_ANSWER_POLL_MILLIS);
                 });
             }
         }, "answer-bundle").start();
+    }
+
+    /** The server's 409 detail as one short HUD line. */
+    static String noAnswerReason(String detail) {
+        if (detail.contains("no problems")) return "問題を検出できません";
+        if (detail.contains("locked")) return "本番モードでは表示不可";
+        if (detail.contains("finalize-reading")) return "撮影が終わっていません";
+        return "サーバを確認";
     }
 
     private AnswerStore.Saved loadSavedAnswers() {
@@ -914,6 +931,11 @@ public final class DocScanGlassActivity extends Activity
      * Stops when the reader closes or is replaced.
      */
     private void refreshPendingAnswers(AnswerReader shown) {
+        // The server names a pending item it is trying again after sending
+        // nothing (Chrome away, browser busy, app/main.py _RETRYING_ISSUES);
+        // that takes minutes, so it is read as rarely as an analysis.
+        boolean retrying = shown.bundle().items.stream().filter(i -> i.status == AnswerItem.Status.PENDING)
+                .allMatch(i -> i.issue.contains(RETRYING_MARK));
         main.postDelayed(() -> {
             if (reader != shown || sessionClosed || isFinishing() || isDestroyed()) return;
             AnswerBundle current = shown.bundle();
@@ -937,7 +959,7 @@ public final class DocScanGlassActivity extends Activity
                     refreshPendingAnswers(shown);
                 });
             }, "answer-refresh").start();
-        }, PENDING_ANSWER_POLL_MILLIS);
+        }, retrying ? ANALYSING_POLL_MILLIS : PENDING_ANSWER_POLL_MILLIS);
     }
 
     private boolean closeAnswers() {
