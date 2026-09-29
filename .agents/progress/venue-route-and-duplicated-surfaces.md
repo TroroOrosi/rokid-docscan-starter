@@ -65,7 +65,7 @@ Rokid Glasses（AnswerView） ← answer-bundle
 |---|---|---|
 | 撮影と OCR | `android-relay/glassdoc`（`DocScanGlassActivity` + `GlassCamera` + `JapaneseOcr`） | `android-relay/app`（スマホリレー） |
 | 解答表示 | `AnswerView` + `AnswerLayout`（実フォント計測） | `app/glasses_view.py` の折り返し（18桁は推定）、`app/hud.py`（`/v1/match` 専用） |
-| 解答の配送 | `GET /v1/exam-sessions/{id}/answer-bundle` | `/v1/exam-sessions/{id}/paste-prompt`（却下済み）、`/v1/exam-sessions/{id}/pages.pdf`（chatgpt-web が内部で使うので残す） |
+| 解答の配送 | `GET /v1/exam-sessions/{id}/answer-bundle` | `/v1/exam-sessions/{id}/paste-prompt`（却下済み）、`/v1/exam-sessions/{id}/pages.pdf`（2026-09-29削除：Enterprise以外のChatGPTはPDFの画像を捨てる。chatgpt-webは使っていなかった） |
 
 凍結はコードを消すことではない。テストも回り続ける。新機能を載せないという意味であり、
 凍結側での測定は決定経路の検証にならない。
@@ -100,7 +100,7 @@ Rokid Glasses（AnswerView） ← answer-bundle
 | 自動確定 | **実装済み。** `AUTO_COMMIT_COMPLETE_MILLIS=4000` / 未検証時 `12000`。ただし CUSTOMVIEW の ack に紐づく |
 | 無効化 | `adf12ee`（2026-09-01）が `startAutoCapture()` を拒否へ。理由は CUSTOMVIEW 経路の入力欠如で、**経路固有** |
 | 実画像3秒＋単タップ取り直し（R3/R4） | **未実装。** グラス側の面に作る必要がある |
-| 冊子を1PDFで1教科1チャット | **実装済み。** `document_image_paths` → `images_to_pdf`、`CHAT_SCOPE=subject` 既定、`chat_key=session:{id}` |
+| 冊子を1PDFで1教科1チャット | 2026-09-29時点：PDFは削除。冊子の原本画像（20枚超は2〜3頁結合）を1教科1通で送る。`CHAT_SCOPE=subject` 既定、`chat_key=session:{id}` |
 | 解答用紙の内容のみ | **実装済み。** `answer_only=True` |
 | `OPERATION_CONTRACT` | サーバは今も全項目 `phone` を公示（`app/glasses_view.py:119`）。グラス経路へは未対応 |
 

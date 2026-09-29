@@ -113,11 +113,12 @@ POLL_S = float(os.environ.get("ROKID_CHATGPT_POLL_S", "1.0"))
 # takes the model longer, and a reply still in progress is never cut off; this
 # only ends a wait on a page that has stopped answering altogether.
 TIMEOUT_S = float(os.environ.get("ROKID_CHATGPT_TIMEOUT_S", "9000"))
-# A reply must at least START within this long of the send, as a new assistant
-# turn or a stop button. Nothing at all means a banner, an error or a lost send,
-# not a slow answer. Measured from the send; a reply that has started is never
-# timed by it. Retune if the mobile page mounts its turn late.
-REPLY_START_S = float(os.environ.get("ROKID_CHATGPT_REPLY_START_S", "120"))
+# A reply must at least START within this long of the send, as a stop button
+# OR a new assistant turn. Nothing at all means a banner, an error or a lost
+# send, not a slow answer. A reply that has started is never timed by it.
+# Measured on F-51F (§F-6-10): the stop button at t+0.0s, the assistant node
+# only at t+130.4s, so the turn alone is not the start.
+REPLY_START_S = float(os.environ.get("ROKID_CHATGPT_REPLY_START_S", "300"))
 # The stop button can blink out between thinking and writing. Seen and then
 # gone for this many polls in a row (about 10s at POLL_S) is a finished reply
 # even when it is not the expected JSON; that fails visibly and is never resent.
@@ -185,6 +186,10 @@ class ChatGptWebUncertain(ChatGptWebError):
 
 class ChatGptWebBusy(ChatGptWebError):
     """Another session holds the browser. Nothing was sent; try again later."""
+
+
+class ChatGptWebBlocked(ChatGptWebError):
+    """An earlier send, not this one, is still unconfirmed. Nothing was sent."""
 
 
 class ChatGptWebChatLost(ChatGptWebError):
@@ -585,6 +590,7 @@ def send_and_read(
     sleep=time.sleep,
     now=time.monotonic,
     before_submit=None,
+    on_chat_url=None,
 ) -> str:
     """Type the prompt, send it, and return the finished reply.
 
@@ -618,8 +624,14 @@ def send_and_read(
     turn = False
     streaming_started = False
     gone = 0
+    url_recorded = on_chat_url is None
     while (elapsed := now() - started) < timeout_s:
         sleep(poll_s)
+        if not url_recorded and _is_chat_url(_url_of(page)):
+            # The chat has its address now. Recorded at once, not after the
+            # reply: a restart mid-reply must still find the chat to read back.
+            on_chat_url(_url_of(page))
+            url_recorded = True
         # The stop button exists for the WHOLE generation, thinking phase
         # included. While it is there, nothing on screen is the answer: the
         # turn shows the placeholder, then goes briefly EMPTY before the real
@@ -638,16 +650,22 @@ def send_and_read(
             )
         current = replies.last.inner_text() if new_turn else ""
         seen = seen or bool(current.strip())
-        if streaming or not current.strip():
+        if streaming:
             continue
-        if _complete_json(current, expect):
-            # Checked before the limit markers: an answer may quote "上限に達し".
+        if current.strip() and _complete_json(current, expect):
+            # Before the limit markers: an answer may quote "上限に達し".
             return current.strip()
-        if _limited(current):
+        settled = gone >= SETTLE_POLLS
+        if settled and streaming_started and not current.strip():
+            raise ChatGptWebError(
+                "the reply stopped without any text; the page may show an error outside it"
+            )
+        # Only once settled: a blink of the button can show half a sentence.
+        if settled and _limited(current):
             raise ChatGptWebRateLimit(
                 f"ChatGPT answered with a usage limit instead of an answer: {current[:120]!r}"
             )
-        if streaming_started and gone >= SETTLE_POLLS:
+        if settled and streaming_started:
             return current.strip()
     state = "still streaming" if seen else "no reply appeared"
     raise ChatGptWebError(f"ChatGPT web reply did not finish within {timeout_s:g}s ({state})")
@@ -684,6 +702,9 @@ class ChatGptWebClient:
         #: This process knows the chat and the file does not: it has no
         #: address, or its write failed after an answer (see _keep_chat).
         self._unsaved = False
+        #: The request id of a send in this chat whose outcome is not known yet,
+        #: written with the chat entry so recover acknowledges only its own.
+        self._pending: str | None = None
 
     def complete(
         self,
@@ -736,7 +757,10 @@ class ChatGptWebClient:
         """Serialize all tab interaction; a restart cannot erase an uncertain send."""
         try:
             with BrowserGuard() as guard:
-                guard.require_clear()
+                try:
+                    guard.require_clear()
+                except BrowserGuardError as error:
+                    raise ChatGptWebBlocked(str(error)) from error
                 self.last_image_attached = None
                 return self._ask_locked(context, text, pages, guard=guard, audio=audio,
                                         chat_key=chat_key, files=files, expect=expect)
@@ -819,7 +843,8 @@ class ChatGptWebClient:
         chats.pop(self._chat_key, None)
         chats[self._chat_key] = {"url": self._chat_url,
                                  "attached": sorted(self._attached_in_chat),
-                                 "source_attached": self._source_attached}
+                                 "source_attached": self._source_attached,
+                                 "pending": self._pending}
         # Not sort_keys: that would reorder the map and lose which is oldest.
         record = {"chats": dict(list(chats.items())[-CHATS_KEPT:])}
         # Same write as BrowserGuard's journal: temp file, fsync, replace, then
@@ -868,6 +893,11 @@ class ChatGptWebClient:
                 nonlocal sent
                 guard.mark_sending(request_id)
                 sent = True
+
+            def on_chat_url(url, request_id=request_id):
+                # Nothing it carried is vouched for yet; only the chat and the send.
+                self._pending = request_id
+                self._keep_chat(guard, chat_key, url)
 
             try:
                 if recorded and not _is_chat_url(self._chat_url):
@@ -920,8 +950,9 @@ class ChatGptWebClient:
                 if (pages or audio or files) and attached is not True:
                     raise ChatGptWebError("source attachments were not confirmed; no question sent")
                 reply = send_and_read(page, text, composer=composer, expect=expect,
-                                      before_submit=before_submit)
+                                      before_submit=before_submit, on_chat_url=on_chat_url)
                 guard.acknowledge(request_id)
+                self._pending = None
             except ChatGptWebRateLimit:
                 # Load the chat again before the next attach: the page after a
                 # refusal is not a composer this route vouches for.
@@ -929,6 +960,7 @@ class ChatGptWebClient:
                 # A received rate-limit reply is known, not an uncertain send.
                 if sent:
                     guard.acknowledge(request_id)
+                    self._pending = None
                     # The message is in the chat; once the limit clears, the
                     # subject continues there.
                     self._keep_chat(guard, chat_key, _url_of(page))
@@ -940,6 +972,7 @@ class ChatGptWebClient:
                 if sent:
                     # The guard blocks every send until this one is reconciled;
                     # after that the subject continues in this same chat.
+                    self._pending = request_id
                     self._keep_chat(guard, chat_key, _url_of(page))
                     raise ChatGptWebUncertain(
                         "send outcome unknown; retained for inspection, no automatic resend"
@@ -965,14 +998,21 @@ class ChatGptWebClient:
                 return reply
         raise ChatGptWebError(f"ChatGPT web failed {ATTEMPTS} times; last: {last_error}")
 
-    def recover(self, *, chat_key: str | None, expect: tuple[str, ...]) -> str | None:
-        """After an uncertain send, the finished reply in the recorded chat, if any.
+    def recorded(self, chat_key: str | None) -> bool:
+        """Whether ``chat_key`` already has a chat with an address on record."""
+        url = (_read_chats(BrowserGuard().directory).get(chat_key) or {}).get("url") if chat_key else None
+        return isinstance(url, str) and _is_chat_url(url)
 
-        Reads only. Loads the chat recorded for ``chat_key`` and takes its last
-        assistant turn when nothing is generating, no user turn is left without a
-        reply, and the turn is the whole expected JSON. Only then is the pending
-        send acknowledged. Anything else returns None and leaves the guard as it
-        was, so the operator still decides.
+    def recover(self, *, chat_key: str | None, expect: tuple[str, ...],
+                sleep=time.sleep, now=time.monotonic) -> str | None:
+        """The finished reply in ``chat_key``'s recorded chat, read and never sent.
+
+        Loads the chat and waits, read-only, while it is still generating (up
+        to TIMEOUT_S) or has not rendered its turns yet (up to REPLY_START_S).
+        Then takes the last assistant turn if every user turn has a reply and
+        that turn is the whole expected JSON. A pending send is acknowledged
+        only when the chat entry names that same request: another session's
+        uncertain send is left for the operator. Anything else returns None.
 
         ponytail: the last turn could answer an earlier message of the same
         booklet chat if the uncertain one never landed. Same booklet, same
@@ -985,8 +1025,9 @@ class ChatGptWebClient:
         try:
             with BrowserGuard() as guard:
                 status = guard.status()
-                url = (_read_chats(guard.directory).get(chat_key) or {}).get("url")
-                if status["state"] != "uncertain" or not (isinstance(url, str) and _is_chat_url(url)):
+                entry = _read_chats(guard.directory).get(chat_key) or {}
+                url = entry.get("url")
+                if not (isinstance(url, str) and _is_chat_url(url)):
                     return None
                 browser = connect_over_cdp(self.endpoint)
                 try:
@@ -994,14 +1035,24 @@ class ChatGptWebClient:
                     page = reuse_page(context)
                     return_to_chat(page, url, reload=True)
                     replies = page.locator(ASSISTANT_SEL)
-                    answered = replies.count()
-                    if (page.locator(STOP_SEL).count() or not answered
-                            or page.locator(USER_SEL).count() > answered):
-                        return None
+                    started = idle_since = now()
+                    while True:
+                        if page.locator(STOP_SEL).count():
+                            idle_since = now()
+                        else:
+                            users, answered = page.locator(USER_SEL).count(), replies.count()
+                            if users and users <= answered:
+                                break
+                            if now() - idle_since > REPLY_START_S:
+                                return None
+                        if now() - started > TIMEOUT_S:
+                            return None
+                        sleep(POLL_S)
                     text = replies.last.inner_text()
                     if not _complete_json(text, expect):
                         return None
-                    guard.acknowledge(status["request_id"])
+                    if status["state"] == "uncertain" and entry.get("pending") == status.get("request_id"):
+                        guard.acknowledge(status["request_id"])
                     return text.strip()
                 finally:
                     browser.close()
@@ -1118,7 +1169,7 @@ class ChatGptWebSolver(LLMSolver):
         self.provider_version = "web-ui"
 
     def _complete(self, client, *, system: str, prompt: str, question, task: str | None = None,
-                  expect: tuple[str, ...] = ("answer",)) -> dict:
+                  expect: tuple[str, ...] = ("answer",), booklet_key: str | None = None) -> dict:
         """Send original evidence; document sessions retain the whole booklet."""
         if question.document_pages:
             from ..source_bundle import source_bundle  # noqa: PLC0415
@@ -1144,7 +1195,7 @@ class ChatGptWebSolver(LLMSolver):
                 f"question_id={question.question_id}; Pages {question.page_numbers}. "
                 + (question.retry_hint or "")))
             return client.complete_json(system=system, prompt=prompt, files=files,
-                                        chat_key=_booklet_chat_key(question, audio),
+                                        chat_key=booklet_key or _booklet_chat_key(question, audio),
                                         expect=expect)
         pages = _read_images(question)
         audio = _read_audio(question)
@@ -1169,17 +1220,31 @@ class ChatGptWebSolver(LLMSolver):
         """
         if not question.document_pages:
             raise ValueError("answering the booklet needs the original pages")
-        try:
-            data = self._complete(self._client, system=_ANSWER_ONLY_SYSTEM, prompt="",
-                                  question=question, task=_ALL_TASK, expect=("questions",))
-        except ChatGptWebUncertain:
-            # The one message may have been answered after all: read, never resend.
-            recover = getattr(self._client, "recover", None)
-            text = recover(chat_key=_booklet_chat_key(question, _read_audio(question)),
-                           expect=("questions",)) if recover else None
+        key = _booklet_chat_key(question, _read_audio(question))
+        recover = getattr(self._client, "recover", None)
+        recorded = getattr(self._client, "recorded", None)
+        if key and recover and recorded and recorded(key):
+            # This booklet's one message is already in its chat: a repeated
+            # finalize, a restart, or a save that failed after the answer.
+            # Read that reply; never send the booklet a second time.
+            text = recover(chat_key=key, expect=("questions",))
             if text is None:
-                raise
+                raise ChatGptWebUncertain(
+                    "the booklet was already sent to its chat and its reply could not be "
+                    "read; nothing is sent again")
             data = extract_json(text)
+        else:
+            try:
+                data = self._complete(self._client, system=_ANSWER_ONLY_SYSTEM, prompt="",
+                                      question=question, task=_ALL_TASK, expect=("questions",),
+                                      booklet_key=key)
+            except ChatGptWebUncertain:
+                # Our own send may have been answered after all. (Another
+                # session's pending send raises ChatGptWebBlocked instead.)
+                text = recover(chat_key=key, expect=("questions",)) if recover else None
+                if text is None:
+                    raise
+                data = extract_json(text)
         items = data.get("questions")
         if not isinstance(items, list):
             raise ValueError("the reply carried no question list")

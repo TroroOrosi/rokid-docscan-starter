@@ -2,6 +2,9 @@
 docs/superpowers/specs/2026-09-11-glasses-offline-answer-bundle-design.md)."""
 
 import importlib
+import json
+import sqlite3
+import time
 
 import pytest
 from fastapi.testclient import TestClient
@@ -655,3 +658,172 @@ def test_an_uncertain_or_lost_chat_stops_the_one_message(client, monkeypatch, er
     bundle = _background_finalize_and_wait(
         client, session_id, lambda items: items[0]["status"] == "failed")
     assert issue in bundle["items"][0]["issue"]
+
+
+class _BookletChat:
+    """ChatGptWebSolver's client, counting sends; the chat holds its one reply."""
+
+    model = "chatgpt-web"
+    last_image_attached = None
+
+    def __init__(self, reply):
+        self.reply, self.sends, self.chats = reply, 0, set()
+
+    def complete_json(self, *, chat_key, **kw):
+        self.sends += 1
+        self.chats.add(chat_key)
+        return json.loads(self.reply)
+
+    def recorded(self, chat_key):
+        return chat_key in self.chats
+
+    def recover(self, *, chat_key, expect):
+        return self.reply
+
+
+def _booklet_solver(monkeypatch, reply):
+    from app import main
+    from app.solvers import chatgpt_web
+
+    chat = _BookletChat(reply)
+    solver = chatgpt_web.ChatGptWebSolver(client=chat)
+    monkeypatch.setattr(chatgpt_web, "_booklet_chat_key", lambda question, audio: "session:booklet")
+    monkeypatch.setattr(main, "_answer_all", lambda question: solver.answer_all(question=question))
+    return chat
+
+
+def test_a_repeated_finalize_reads_the_booklet_chat_and_never_sends_again(client, monkeypatch):
+    """glassdoc finalizes again after a restart; one item's answer was invalid."""
+    chat = _booklet_solver(monkeypatch, json.dumps({"questions": [
+        {"group": "第1問", "label": "問1", "status": "ready", "answer": "4"},
+        {"group": "第1問", "label": "問2", "status": "ready", "answer": ""}]}))
+    _, session_id = _session_with(client, ["問1 2+2を求めよ。"])
+    monkeypatch.setenv("ROKID_SOLVER", "test-provider")
+    done = lambda items: items and all(i["status"] != "pending" for i in items)  # noqa: E731
+
+    _background_finalize_and_wait(client, session_id, done)
+    bundle = _background_finalize_and_wait(client, session_id, done)
+
+    assert chat.sends == 1
+    assert [i["status"] for i in bundle["items"]] == ["ready", "failed"]
+
+
+@pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")
+def test_answers_lost_before_their_commit_are_read_back_not_sent_again(client, monkeypatch):
+    """A kill or a locked database after the reply: the resume reads the chat."""
+    import time
+
+    from app import main
+
+    chat = _booklet_solver(monkeypatch, json.dumps({"questions": [
+        {"group": "第1問", "label": "問1", "status": "ready", "answer": "4"}]}))
+    _, session_id = _session_with(client, ["問1 2+2を求めよ。"])
+    monkeypatch.setenv("ROKID_SOLVER", "test-provider")
+    real_save = main._save_solution
+    failures = []
+
+    def save(*args, **kwargs):
+        if not failures:
+            failures.append(1)
+            raise sqlite3.OperationalError("database is locked")
+        return real_save(*args, **kwargs)
+
+    monkeypatch.setattr(main, "_save_solution", save)
+    client.post(f"/v1/exam-sessions/{session_id}/finalize-reading?solve=background")
+    url = f"/v1/exam-sessions/{session_id}/answer-bundle"
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        response = client.get(url)  # the poll that resumes the lost batch
+        if response.status_code == 200 and response.json()["items"][0]["status"] == "ready":
+            break
+        time.sleep(0.01)
+    assert client.get(url).json()["items"][0]["answer"] == "4"
+    assert chat.sends == 1 and failures == [1]
+
+
+def test_an_old_reviewing_session_is_never_resumed(client, monkeypatch):
+    """B1: the phone DB holds earlier sessions; startup must not send any of them."""
+    from app import main, db
+
+    _, session_id = _session_with(client, ["問1 2+2を求めよ。"])
+    monkeypatch.setenv("ROKID_SOLVER", "test-provider")
+    with db.connect() as conn:
+        conn.execute("UPDATE exam_sessions SET status = 'reviewing', "
+                     "created_at = datetime('now', '-4 hours') WHERE id = ?", (session_id,))
+    calls = []
+    monkeypatch.setattr(main, "_answer_all", lambda question: calls.append(1))
+    main._resume_all_answers()
+    assert client.get(f"/v1/exam-sessions/{session_id}/answer-bundle").status_code == 409
+    time.sleep(0.2)
+    assert calls == []
+
+
+def test_retries_that_never_send_stop_and_say_why(client, monkeypatch):
+    """M5: after RESUME_LIMIT batches that sent nothing, the deck stops waiting."""
+    import time
+
+    from app import main
+    from app.solvers.chatgpt_web import ChatGptWebError
+
+    monkeypatch.setattr(main, "PRESEND_RETRY_S", 0)
+    monkeypatch.setattr(main, "PRESEND_TRIES", 1)
+    _, session_id = _session_with(client, ["問1 2+2を求めよ。"])
+    monkeypatch.setenv("ROKID_SOLVER", "test-provider")
+    calls = []
+
+    def answer_all(question):
+        calls.append(1)
+        raise ChatGptWebError("no Chrome on http://127.0.0.1:9222")
+
+    monkeypatch.setattr(main, "_answer_all", answer_all)
+    bundle = _background_finalize_and_wait(
+        client, session_id, lambda items: items and items[0]["status"] == "failed")
+    assert bundle["items"][0]["issue"] == "ChatGPTへ送れませんでした。Chromeを確認して読取完了をやり直してください"
+    time.sleep(0.2)
+    client.get(f"/v1/exam-sessions/{session_id}/answer-bundle")
+    time.sleep(0.2)
+    assert len(calls) == main.RESUME_LIMIT
+
+
+def test_the_revision_still_rises_when_the_failed_row_is_replaced(client, monkeypatch):
+    """m3: the glasses refuse an older revision, so the failures carry over."""
+    from app import main
+    from app.solvers.chatgpt_web import ChatGptWebError
+
+    monkeypatch.setattr(main, "PRESEND_RETRY_S", 0)
+    monkeypatch.setattr(main, "PRESEND_TRIES", 1)
+    _, session_id = _session_with(client, ["問1 2+2を求めよ。"])
+    monkeypatch.setenv("ROKID_SOLVER", "test-provider")
+    chrome = []
+
+    def answer_all(question):
+        if not chrome:
+            raise ChatGptWebError("no Chrome on http://127.0.0.1:9222")
+        return _replies(("第1問", "問1", [1], "4"))
+
+    monkeypatch.setattr(main, "_answer_all", answer_all)
+    failed = _background_finalize_and_wait(
+        client, session_id, lambda items: items and items[0]["issue"].endswith("自動で再試行します"))
+    chrome.append(True)
+    answered = _background_finalize_and_wait(
+        client, session_id, lambda items: items and items[0]["status"] == "ready")
+    assert answered["revision"] > failed["revision"]
+
+
+def test_another_sessions_unconfirmed_send_is_waited_out_not_final(client, monkeypatch):
+    """m4: blocked by someone else's pending send is retried, not 'uncertain'."""
+    from app import main
+    from app.solvers.chatgpt_web import ChatGptWebBlocked
+
+    monkeypatch.setattr(main, "PRESEND_RETRY_S", 0)
+    _, session_id = _session_with(client, ["問1 2+2を求めよ。"])
+    monkeypatch.setenv("ROKID_SOLVER", "test-provider")
+
+    def answer_all(question):
+        raise ChatGptWebBlocked("previous send outcome is unknown")
+
+    monkeypatch.setattr(main, "_answer_all", answer_all)
+    bundle = _background_finalize_and_wait(
+        client, session_id, lambda items: items and items[0]["issue"])
+    assert bundle["items"][0]["status"] == "pending"
+    assert bundle["items"][0]["issue"] == "前の送信の結果確認待ちです。自動で再試行します"

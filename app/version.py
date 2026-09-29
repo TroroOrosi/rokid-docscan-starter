@@ -183,7 +183,9 @@ from __future__ import annotations
 # Audit fixes: completion by content, JPEG attachments one per DevTools message,
 # pre-send retries and read-back after an uncertain send, restart resume, no
 # PDF path. See API 1.28.0 and GLASSES_VIEW_CONTRACT 1.20.0.
-APP_VERSION = "0.42.0"
+# A booklet already in its chat is read back, never sent again; resume is
+# limited to recent sessions and to RESUME_LIMIT failed batches. See API 1.29.0.
+APP_VERSION = "0.43.0"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.
@@ -278,7 +280,10 @@ APP_VERSION = "0.42.0"
 #        browser_busy stay pending with "…自動で再試行します" while the server
 #        tries again. question_label is the printed number ("問1", not "問1(2)").
 #        answer-bundle restarts a reviewing session's lost background batch.
-API_VERSION = "1.28.0"
+# 1.29.0: answer-bundle names browser_blocked (another send still unconfirmed)
+#        as retrying; a retrying failure becomes `failed` with a plain reason
+#        after RESUME_LIMIT batches. Only sessions under RESUME_WINDOW_S resume.
+API_VERSION = "1.29.0"
 
 # Matching algorithm identity. Bump when thresholds or hashing change so a
 # re-index/eval is triggered. Mirrors thresholds in app/matching.py.

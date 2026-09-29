@@ -1128,7 +1128,7 @@ def test_an_unanswered_send_keeps_the_subject_chat(monkeypatch, tmp_path, outcom
         # Keeping the chat does not loosen the guard: nothing is sent until the
         # operator has reconciled the uncertain message.
         sends = len(_sends(page))
-        with pytest.raises(chatgpt_web.ChatGptWebUncertain):
+        with pytest.raises(chatgpt_web.ChatGptWebBlocked):
             client._ask_with_retries(_OneTabContext(page), "問3", [JPEG], chat_key="subject:数学")
         assert len(_sends(page)) == sends
     with BrowserGuard(tmp_path) as guard:
@@ -1376,14 +1376,16 @@ def test_one_message_lists_and_answers_the_booklet_in_the_answer_chat(tmp_path):
         ChatGptWebSolver(client=fake).answer_all(question=question)
 
 
-def _uncertain_chat(tmp_path, key="session:1:x", url="https://chatgpt.com/c/abc"):
+def _uncertain_chat(tmp_path, key="session:1:x", url="https://chatgpt.com/c/abc",
+                    pending="a" * 64):
     """A pending send recorded in the guard, and the chat recorded for ``key``."""
     from app.browser_guard import BrowserGuard
 
     with BrowserGuard(tmp_path) as guard:
         guard.mark_sending("a" * 64)
         (guard.directory / chatgpt_web.CHATS_FILE).write_text(json.dumps(
-            {"chats": {key: {"url": url, "attached": [], "source_attached": True}}}))
+            {"chats": {key: {"url": url, "attached": [], "source_attached": True,
+                             "pending": pending}}}))
     return key
 
 
@@ -1395,12 +1397,24 @@ class _Browser:
         pass
 
 
-def _recover(monkeypatch, page, key):
+class _Tick:
+    """A clock that moves one second per read, so a read-only wait ends in tests."""
+
+    def __init__(self):
+        self.now = 0.0
+
+    def __call__(self):
+        self.now += 1.0
+        return self.now
+
+
+def _recover(monkeypatch, page, key, turns=1):
     from app.solvers import cdp
 
-    page.turns = 1
+    page.turns = turns
     monkeypatch.setattr(cdp, "connect_over_cdp", lambda endpoint: _Browser(page))
-    return chatgpt_web.ChatGptWebClient().recover(chat_key=key, expect=("questions",))
+    return chatgpt_web.ChatGptWebClient().recover(
+        chat_key=key, expect=("questions",), sleep=lambda _s: None, now=_Tick())
 
 
 def _guard_state(tmp_path):
@@ -1421,11 +1435,29 @@ def test_an_uncertain_send_whose_reply_finished_is_read_back_not_resent(monkeypa
     assert not _sends(page) and page.url == "https://chatgpt.com/c/abc"
 
 
+def test_a_reply_still_generating_is_waited_for_read_only(monkeypatch, tmp_path):
+    key = _uncertain_chat(tmp_path)
+    page = _StubPage(['{"questions":[{"label":"問1","answer":"4"}]}'],
+                     streaming=[True] * 30 + [False])
+
+    assert _recover(monkeypatch, page, key) is not None
+    assert page.stop_poll > 30 and not _sends(page)
+
+
+def test_another_sessions_pending_send_is_never_acknowledged(monkeypatch, tmp_path):
+    key = _uncertain_chat(tmp_path, pending="b" * 64)
+    page = _StubPage(['{"questions":[]}'], streaming=[])
+
+    assert _recover(monkeypatch, page, key) == '{"questions":[]}'
+    assert _guard_state(tmp_path) == "uncertain"
+
+
 @pytest.mark.parametrize("frames, streaming", [
     (['{"questions":[{"label":"問1"}'], []),  # cut off
-    (['{"questions":[]}'], [True]),  # still generating
+    (['{"questions":[]}'], [True]),  # generating past the session
 ])
 def test_an_unfinished_reply_leaves_the_send_uncertain(monkeypatch, tmp_path, frames, streaming):
+    monkeypatch.setattr(chatgpt_web, "TIMEOUT_S", 20)
     key = _uncertain_chat(tmp_path)
     page = _StubPage(frames, streaming=streaming)
 
@@ -1469,3 +1501,94 @@ def test_a_limit_notice_instead_of_the_json_still_stops():
     page = _StubPage(["使用制限に達しました"], streaming=[])
     with pytest.raises(chatgpt_web.ChatGptWebRateLimit):
         ask_page(page, "全問", poll_s=0, expect=("questions",), sleep=lambda _s: None)
+
+
+def test_a_chat_with_no_turns_rendered_is_not_judged(monkeypatch, tmp_path):
+    """Right after a load the turns may not exist yet; nothing is read until they do."""
+    key = _uncertain_chat(tmp_path)
+    page = _StubPage([], streaming=[])
+
+    assert _recover(monkeypatch, page, key, turns=0) is None
+    assert _guard_state(tmp_path) == "uncertain"
+
+
+def test_a_booklet_with_a_recorded_chat_is_read_back_never_sent_again(tmp_path):
+    """A repeated finalize or a restart after the answer: the booklet is not sent twice."""
+    page_path = tmp_path / "page.png"
+    page_path.write_bytes(_real_png(80))
+    pages = [{"page_number": 1, "image_path": str(page_path), "ocr_text": ""}]
+    sent, read = [], []
+
+    class Client(_FakeClient):
+        def complete_json(self, **kw):
+            sent.append(kw)
+            return {}
+
+        def recorded(self, chat_key):
+            return True
+
+        def recover(self, *, chat_key, expect):
+            read.append(chat_key)
+            return '{"questions":[{"group":"第1問","label":"問1","status":"ready","answer":"④"}]}'
+
+    question = Question(question_no=None, question_id="booklet", answer_only=True,
+                        document_pages=pages, document_id="1", page_numbers=[1],
+                        chat_key="session:1")
+    ((_, result),) = ChatGptWebSolver(client=Client("{}")).answer_all(question=question)
+
+    assert result.answer == "④" and sent == [] and read[0].startswith("session:1:")
+
+    class Unreadable(Client):
+        def recover(self, *, chat_key, expect):
+            return None
+
+    with pytest.raises(chatgpt_web.ChatGptWebUncertain, match="nothing is sent again"):
+        ChatGptWebSolver(client=Unreadable("{}")).answer_all(question=question)
+    assert sent == []
+
+
+def test_the_chat_address_is_recorded_while_the_reply_is_still_coming(monkeypatch, tmp_path):
+    """A restart mid-reply must find the chat: it is written before the reply ends."""
+    from app.browser_guard import BrowserGuard
+
+    writes = []
+    real_save = chatgpt_web.ChatGptWebClient._save_chat
+
+    def save(self, guard):
+        writes.append((self._chat_url, self._pending, page.stop_poll))
+        real_save(self, guard)
+
+    monkeypatch.setattr(chatgpt_web.ChatGptWebClient, "_save_chat", save)
+    page = _StubPage(['{"status":"ready","answer":"4"}'], streaming=[True, True, True, False])
+    chatgpt_web.ChatGptWebClient()._ask_with_retries(
+        _OneTabContext(page), "問1", [], chat_key="session:9", expect=("answer",))
+
+    (url, pending, polls), last = writes[0], writes[-1]
+    assert url == "https://chatgpt.com/c/chat-1" and pending and polls < 3, "written mid-reply"
+    assert last[1] is None
+    assert chatgpt_web._read_chats(BrowserGuard(tmp_path).directory)["session:9"]["pending"] is None
+
+
+def test_another_sessions_pending_send_blocks_without_being_read_back(monkeypatch, tmp_path):
+    from app.browser_guard import BrowserGuard
+
+    with BrowserGuard(tmp_path) as guard:
+        guard.mark_sending("c" * 64)
+    page = _StubPage(["x"])
+    with pytest.raises(chatgpt_web.ChatGptWebBlocked):
+        chatgpt_web.ChatGptWebClient()._ask_with_retries(_OneTabContext(page), "問1", [])
+    assert page.events == []
+
+
+def test_a_reply_that_stops_with_no_text_fails_instead_of_waiting_the_session(monkeypatch):
+    page = _StubPage([""], streaming=[True, False])
+    with pytest.raises(ChatGptWebError, match="without any text"):
+        ask_page(page, "全問", poll_s=0, expect=("questions",), sleep=lambda _s: None)
+    assert page.stop_poll == 1 + chatgpt_web.SETTLE_POLLS
+
+
+def test_a_limit_phrase_seen_in_a_blink_is_not_a_limit():
+    page = _StubPage(["上限に達し", '{"questions":[{"answer":"上限に達した"}]}'],
+                     streaming=[True, False, True, False])
+    reply, _ = ask_page(page, "全問", poll_s=0, expect=("questions",), sleep=lambda _s: None)
+    assert reply == '{"questions":[{"answer":"上限に達した"}]}'

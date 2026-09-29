@@ -637,3 +637,12 @@ def test_a_pending_item_the_server_is_retrying_does_not_stall_the_wait():
     server = _Server([retrying] * 10 + [_bundle("ready", revision=4)])
     got, reason = wait_for_answers(server, 1, 2, interval=1, clock=clock, sleep=clock.sleep)
     assert got.status_code == 200 and reason is None and clock.now > 2
+
+
+def test_the_reason_a_pending_item_waits_is_printed(capsys):
+    clock = _Clock()
+    retrying = _Response(200, {"revision": 3, "items": [
+        {"status": "pending", "issue": "ChatGPTへ送れませんでした。自動で再試行します"}]})
+    server = _Server([retrying, _bundle("ready", revision=4)])
+    wait_for_answers(server, 1, 60, interval=0, clock=clock, sleep=clock.sleep)
+    assert "ChatGPTへ送れませんでした。自動で再試行します" in capsys.readouterr().out

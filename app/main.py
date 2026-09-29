@@ -80,7 +80,8 @@ from .retrieval import retrieve_context
 from .solvers import Question, SolveResult, get_solver
 from .solvers.llm_adapter import paste_prompt
 from .solvers.chatgpt_web import (
-    ChatGptWebBusy, ChatGptWebChatLost, ChatGptWebError, ChatGptWebRateLimit, ChatGptWebUncertain,
+    ChatGptWebBlocked, ChatGptWebBusy, ChatGptWebChatLost, ChatGptWebError, ChatGptWebRateLimit,
+    ChatGptWebUncertain,
 )
 from .solvers.registry import solve_with_fallback
 from .subjects import detect_subject
@@ -2420,11 +2421,7 @@ def _page_image_paths(conn, doc_id: int, page_indexes: list[int] | None) -> list
 
 
 def _document_image_paths(conn, doc_id: int) -> list[str]:
-    """Every page image of the document, in reading order.
-
-    The browser route attaches the whole booklet once as a single PDF, so the
-    question text does not have to be retyped into every message.
-    """
+    """Every page image of the document, in reading order."""
     rows = conn.execute(
         "SELECT image_path FROM pages WHERE document_id = ? ORDER BY page_index",
         (doc_id,),
@@ -2483,13 +2480,37 @@ _FAILURE_CODES = (
     (ChatGptWebChatLost, "chat_lost"),
     (ChatGptWebRateLimit, "rate_limited"),
     (ChatGptWebBusy, "browser_busy"),
+    (ChatGptWebBlocked, "browser_blocked"),
 )
 # Nothing was sent for these, so the server tries again on its own (see
-# _resume_answers) and the glasses keep waiting instead of showing a dead end.
+# _resume_answers) and the glasses keep waiting instead of showing a dead end,
+# until RESUME_LIMIT batches have failed the same way.
 _RETRYING_ISSUES = {
     "not_sent": "ChatGPTへ送れませんでした。自動で再試行します",
     "browser_busy": "別の解析がブラウザを使用中です。自動で再試行します",
+    "browser_blocked": "前の送信の結果確認待ちです。自動で再試行します",
 }
+# The same failures once the retries have run out: said plainly, not waited on.
+_GAVE_UP_ISSUES = {
+    "not_sent": "ChatGPTへ送れませんでした。Chromeを確認して読取完了をやり直してください",
+    "browser_busy": "ブラウザが使用中のままです。送信していません",
+    "browser_blocked": "前の送信の結果確認待ちです。確認後に読取完了をやり直してください",
+}
+# Batches a session may fail without sending before it stops resuming. Each
+# batch is PRESEND_TRIES tries, so three are at least half an hour.
+RESUME_LIMIT = 3
+
+
+def _failure_count(row) -> int:
+    try:
+        return max(0, int(json.loads(row["structure_json"] or "{}").get("solve_failures", 0)))
+    except (ValueError, TypeError, AttributeError):
+        return 0
+
+
+def _retrying(row) -> bool:
+    return (_solve_failure(row).get("code") in _RETRYING_ISSUES
+            and _failure_count(row) < RESUME_LIMIT)
 
 
 def _record_solve_failure(conn, row, error: Exception, *, commit: bool = True) -> None:
@@ -2530,12 +2551,14 @@ def _answer_bundle_item(conn, group: dict, row) -> dict:
         inherited = _solve_failure(group.get("heading"))
         code = (failure or inherited).get("code")
         status = "failed" if failure else "pending"
-        if code in _RETRYING_ISSUES:
+        retrying = _retrying(row if failure else group.get("heading"))
+        if retrying:
             status = "pending"
         issue = ("送信結果の確認待ち。自動再送は停止しています" if code == "browser_outcome_unknown"
                  else "教科のチャットへ戻れません。新しいチャットは作っていません" if code == "chat_lost"
                  else "ChatGPTの利用制限です。解除後に再開してください" if code == "rate_limited"
-                 else _RETRYING_ISSUES[code] if code in _RETRYING_ISSUES
+                 else _RETRYING_ISSUES[code] if retrying
+                 else _GAVE_UP_ISSUES[code] if code in _GAVE_UP_ISSUES
                  else "解析に失敗しました。資料は保持しています" if code == "solver_failed" else "未解答")
     elif needs_input:
         status, issue = "needs_input", str(metadata.get("missing_material") or "資料が不足しています")[:1000]
@@ -2782,9 +2805,10 @@ def _insert_deck(conn, session_id: int, doc_id: int, problems: list) -> None:
         )
 
 
-# Nothing was sent: Chrome was unreachable, an attachment never confirmed, or
-# another session held the browser. No PC is at the venue to start it again,
-# so one such blip must not cost the subject: try again for about ten minutes.
+# Nothing was sent: Chrome was unreachable, an attachment never confirmed,
+# another session held the browser, or an earlier send was still unconfirmed.
+# No PC is at the venue to start it again, so one such blip must not cost the
+# subject. Five tries 150s apart: at least ten minutes, plus each try's own time.
 PRESEND_TRIES = 5
 PRESEND_RETRY_S = 150.0
 
@@ -2792,7 +2816,7 @@ PRESEND_RETRY_S = 150.0
 def _nothing_sent(error: Exception) -> bool:
     """The client raises the bare base class only before a send. After one it
     raises ChatGptWebUncertain, and a limit or a lost chat has its own class."""
-    return isinstance(error, ChatGptWebBusy) or type(error) is ChatGptWebError
+    return isinstance(error, (ChatGptWebBusy, ChatGptWebBlocked)) or type(error) is ChatGptWebError
 
 
 def _answer_all(question) -> list | None:
@@ -2885,16 +2909,24 @@ def _answer_deck(conn, session, session_id: int, doc_id: int) -> bool:
     if replies is None:
         return False
     problems = _model_problems([item for item, _ in replies], len(source_pages))
+    carried = 0
     if problems and items and not any(_latest_solution_row(conn, row["id"]) for row in items):
         # Only the whole-booklet row of a failed message: the model's list replaces it.
-        conn.executemany("DELETE FROM questions WHERE id = ?",
-                         [(row["id"],) for row in _deck_question_rows(conn, session_id)])
+        replaced = _deck_question_rows(conn, session_id)
+        carried = sum(_failure_count(row) for row in replaced)
+        conn.executemany("DELETE FROM questions WHERE id = ?", [(row["id"],) for row in replaced])
         items = []
     if not items:
         # The model sorts the questions. OCR never does on this route: a failure
         # gets one row for the whole booklet, which only carries the reason.
         _insert_deck(conn, session_id, doc_id, problems or [ProblemUnit(
             None, "", start_page_index=0, page_indexes=list(range(len(source_pages))))])
+        if carried:
+            # The revision counts failures; dropping them with the old row would
+            # move it backwards, and the glasses refuse an older snapshot.
+            first = _deck_question_rows(conn, session_id)[0]
+            conn.execute("UPDATE questions SET structure_json = ? WHERE id = ?", (json.dumps(
+                {**json.loads(first["structure_json"]), "solve_failures": carried}), first["id"]))
         items = [row for group in _answer_groups(conn, session_id) for row in group["items"]]
     # The rows and every answer land in ONE commit: the glasses never read a
     # deck whose rows exist and whose answers are not saved yet.
@@ -3069,14 +3101,21 @@ _background_solves: set[int] = set()
 _background_solves_lock = threading.Lock()
 
 
+# Only a session started this long ago or less is resumed: one venue session
+# is 150 minutes. Older reviewing sessions in the phone DB are history, and
+# resuming them at startup would send each one before the next real run.
+RESUME_WINDOW_S = 3 * 3600
+
+
 def _resume_answers(conn, session) -> bool:
     """Start the background batch again when nothing is answering this session.
 
     A restart ends the batch thread, and a failure that sent nothing leaves only
     the reason on the deck; with no PC at the venue neither may cost the
-    subject. Only a session with no deck rows, or one whose deck carries a
-    retrying failure and no answer, is restarted. The browser guard still
-    stops any second send after an uncertain one. True when a batch is running.
+    subject. Only a recent session with no deck rows, or one whose deck carries
+    a retrying failure and no answer, is restarted. A booklet already in its
+    chat is read back, never sent again (ChatGptWebSolver.answer_all). True
+    when a batch is running.
     """
     session_id = session["id"]
     solver_env = (os.environ.get("ROKID_SOLVER") or "").strip()
@@ -3084,9 +3123,14 @@ def _resume_answers(conn, session) -> bool:
             or solver_env in ("", "local")
             or (session["mode"] == "real" and not config.ALLOW_REAL_EXAM_SOLVE)):
         return False
+    recent = conn.execute(
+        "SELECT created_at >= datetime('now', ?) FROM exam_sessions WHERE id = ?",
+        (f"-{int(RESUME_WINDOW_S)} seconds", session_id)).fetchone()
+    if not (recent and recent[0]):
+        return False
     rows = _deck_question_rows(conn, session_id)
     if rows and (any(_latest_solution_row(conn, row["id"]) for row in rows)
-                 or not any(_solve_failure(row).get("code") in _RETRYING_ISSUES for row in rows)):
+                 or not any(_retrying(row) for row in rows)):
         return False
     with _background_solves_lock:
         if session_id in _background_solves:

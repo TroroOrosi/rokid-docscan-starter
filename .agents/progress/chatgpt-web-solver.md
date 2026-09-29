@@ -265,6 +265,10 @@ module: outside Enterprise, ChatGPT discards a PDF's images.)
 
 ### The phone path gained its missing half
 
+(Removed 2026-09-29: `pages.pdf` and `pages_pdf_url` no longer exist. Outside
+Enterprise, ChatGPT reads a PDF's text layer and discards its images, so a
+photographed booklet sent as a PDF carries nothing. The record below is history.)
+
 `GET /v1/exam-sessions/{id}/pages.pdf` returns the whole captured document as
 one PDF, and `paste-prompt` now carries `pages_pdf_url`. The hand-paste route
 was rejected as the *primary* path and still is; this is for running a session

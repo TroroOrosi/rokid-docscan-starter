@@ -32,9 +32,9 @@ import urllib.request
 
 DEFAULT_TIMEOUT_S = 30.0
 
-#: CDP carries the page bytes as base64 inside a JSON message, so a bundled
-#: booklet PDF arrives as one multi-megabyte frame. `websockets` defaults to a
-#: 1 MiB ceiling and would close the connection instead of delivering it.
+#: CDP carries the page bytes as base64 inside a JSON message, one page image
+#: (several MB) per message. `websockets` defaults to a 1 MiB ceiling and would
+#: close the connection instead of delivering it.
 MAX_MESSAGE_BYTES = 256 * 1024 * 1024
 
 

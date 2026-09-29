@@ -419,6 +419,8 @@ def wait_for_answers(
             ready = sum(1 for item in items if item["status"] == "ready")
             print(f"..    answers        {ready}/{len(items)} ready, "
                   f"{pending} pending (revision {revision})")
+            for issue in sorted({i.get("issue") for i in items if i["status"] == "pending"} - {None, "", "未解答"}):
+                print(f"..    pending        {issue}")
         if clock() - since > stall_s:
             return r, (f"revision {revision} unchanged for {stall_s:.0f}s with "
                        f"{pending} pending: the server's batch has stopped")
