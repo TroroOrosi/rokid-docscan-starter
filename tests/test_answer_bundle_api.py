@@ -794,7 +794,7 @@ def test_retries_that_never_send_stop_and_say_why(client, monkeypatch):
     monkeypatch.setattr(main, "_answer_all", answer_all)
     bundle = _background_finalize_and_wait(
         client, session_id, lambda items: items and items[0]["status"] == "failed")
-    assert bundle["items"][0]["issue"] == "ChatGPTへ送れませんでした。Chromeを確認して読取完了をやり直してください"
+    assert bundle["items"][0]["issue"] == "ChatGPTへ送れませんでした。ブラウザを確認して読取完了をやり直してください"
     time.sleep(0.2)
     client.get(f"/v1/exam-sessions/{session_id}/answer-bundle")
     time.sleep(0.2)

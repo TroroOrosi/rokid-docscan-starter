@@ -1,6 +1,6 @@
 # rokid-docscan-starter development guide
 
-Status: Current engineering contract. Updated 2026-09-27.
+Status: Current engineering contract. Updated 2026-09-30.
 
 **Start at `.agents/progress/current.md`.** It lists the operator's decisions,
 the verified state and the next steps. Do not re-ask what it settles. Keep the
@@ -26,12 +26,17 @@ The intended session, from `tasks/plan.md`:
   2026-09-14, also serves a Wi-Fi AP that carries the glasses; the operator
   confirmed this is available. The server process therefore runs on the phone.
   Nothing auto-terminates at 150 minutes.
-- **Chrome has to stay in the foreground on the phone**, and the server runs
-  behind it. Measured 2026-09-15 (`docs/hardware-measurements.md` §F-6-1):
+- **The current implementation uses Termux Chromium**, a private persistent
+  profile and loopback CDP. Initial visible login uses Termux:X11; later runs
+  are headless and supervised with FastAPI and the watcher by Termux services
+  and Termux:Boot. First unlock and available tethering are prerequisites.
+  Login persistence and venue operation still need physical acceptance.
+  The previous Android Chrome route was measured 2026-09-15
+  (`docs/hardware-measurements.md` §F-6-1):
   foregrounding Termux removed `@chrome_devtools_remote` outright, and
   foregrounding Chrome rebuilt it under a new inode in about 2s, with the
   screen awake throughout. The operator's 2026-09-15 decision to keep the
-  screen on and the phone face down therefore fixes the foreground app too.
+  screen on and the phone face down applied to that earlier route.
   The endpoint also refuses the first probes and then answers (§F-6-2), so one
   refusal is not an absent browser; both `cdp_available()` and
   `app/solvers/cdp.py` retry.
@@ -48,7 +53,7 @@ session; the glasses' own tap/swipe drive it.
 
 ```text
 Rokid Glasses (:glassdoc APK) -> phone Wi-Fi AP -> FastAPI on the phone
-                                                -> Chrome CDP on the phone -> ChatGPT web
+                                                -> Termux Chromium CDP -> ChatGPT web
 Rokid Glasses (:glassdoc AnswerView) <- answer-bundle
 ```
 
@@ -77,7 +82,7 @@ Which of each duplicated surface is the route, decided 2026-09-14:
 
 | Role | Route | Kept but frozen |
 |---|---|---|
-| Capture + OCR | `android-relay/glassdoc` | `android-relay/app` (phone relay) |
+| Capture + page-change observation | `android-relay/glassdoc` | `android-relay/app` (phone relay + OCR) |
 | Answer display | `AnswerView` + `AnswerLayout` (measures the real font) | `app/glasses_view.py` wrapping (estimates 18 columns), `app/hud.py` (`/v1/match` only) |
 | Answer delivery | `GET /v1/exam-sessions/{id}/answer-bundle` | `/v1/exam-sessions/{id}/paste-prompt` (already rejected; `pages.pdf` beside it was removed on 2026-09-29, since outside Enterprise ChatGPT discards a PDF's images) |
 
@@ -93,7 +98,7 @@ is now the intended topology and is still unexercised.
 |---|---|
 | `ROKID_SOLVER=chatgpt-web` | **Current primary.** Drives the operator's own signed-in ChatGPT web session over CDP. |
 | On-phone local model (F-51F, llama.cpp) | **Not the route.** The operator chose chatgpt-web on 2026-09-14. Its measurements are kept as evidence in `docs/hardware-measurements.md` §E; no further work is scheduled on it. |
-| `openai` / `gemini` / `claude` API keys | Supported and config-only. The per-question routes can fall back through `ROKID_SOLVER_TIERS`; the background one-message route uses `ROKID_SOLVER` alone and has no fallback tier. |
+| `openai` / `gemini` / `claude` API keys | Supported and config-only. The per-question routes can fall back through `ROKID_SOLVER_TIERS`; the background booklet route uses `ROKID_SOLVER` alone and has no fallback tier. |
 | Local OpenAI-compatible HTTP (`app/llm_http.py`) | Reaches an on-phone `llama-server` without the openai SDK. |
 
 Settled decisions. Do not re-argue them:
@@ -113,25 +118,28 @@ component measurements, not a glasses → phone AP → answer-bundle session.
 That full route, the new capture/power behavior and the model's use of original listening audio remain
 unvalidated on hardware. Do not describe chatgpt-web as venue-ready.
 
-Chrome for Android does not hand out a CDP endpoint the way a PC does, and the
-difference is not a configuration detail. It listens only on a unix
-abstract-namespace socket, never on TCP, and it authorizes the connecting
-process by peer UID: `root`, `shell`, or its own. A phone-side app is neither,
-and SELinux gives each app its own MCS categories on top of that. The route
-therefore needs an on-device `adb forward` (adbd runs as `shell`) to turn that
-socket into `127.0.0.1:9222`. Measured, with the source and device evidence, in
-`docs/hardware-measurements.md` §F.
+The earlier Android Chrome build used an abstract unix CDP socket and an
+on-device forward. Those source/device observations remain in
+`docs/hardware-measurements.md` §F. The current Termux Chromium launcher opens
+loopback CDP directly and does not use a phone-to-itself connection. Verify
+visible login, headless login persistence and actual model selection before
+switching the physical route.
 
 A throttled account is refused in the message *body*, not by an exception. The
 solver's rate-limit markers exist because a retry loop read a refusal as a bad
 answer and turned one block into many on 2026-09-14. The slow-generation brake
-beside them was removed on 2026-09-29: a background session now sends one
-message for the whole booklet, so a long generation is normal.
+beside them was removed on 2026-09-29. A booklet now sends single-page JPEGs
+in the same chat in batches of at most 20 files including audio. Completed
+intermediate receipts precede the next batch; the final batch requests every
+answer. Durable progress and the existing uncertain-send guard prevent a
+restart from repeating a confirmed or uncertain send. Long generation is normal.
+The actual selector must show GPT-5.6 Sol at extreme effort or GPT-6 Pro before
+each send; missing or different selection stops submission.
 
 ## Real-device contract
 
 - Photographing the physical page is the primary input path. On the decided
-  route `:glassdoc` opens `camera2` on the glasses and OCRs there; on the
+  route `:glassdoc` opens `camera2` on the glasses and observes image change; on the
   fallback relay route the phone calls CXR-L `takePhoto`, receives the JPEG,
   performs bundled Japanese ML Kit OCR, and uploads both JPEG and OCR. Both go
   through `relaycore`'s `DocScanController`.
@@ -140,8 +148,11 @@ message for the whole booklet, so a long generation is normal.
   shoot on their own, the captured image is shown for 3 seconds, a single tap
   in that window retakes, no input commits it and moves to the next page, and a
   double tap ends the capture phase. Zero phone operations after setup.
-- **The existing loop is enabled only on `:glassdoc`.** It still uses three shots,
-  the existing intervals, ShotScore/PageFraming and duplicate/unreadable limits.
+- **The existing loop is enabled only on `:glassdoc`.** Page change is latched
+  until stillness permits one shot; OCR character count and burst scoring are
+  not capture conditions. Actual review lasts three seconds, then local save
+  waits for another page change. Thirty seconds without progress pauses the
+  camera. A previous `manual=true` does not carry over to a normal launch.
   The frozen CUSTOMVIEW route keeps explicit phone controls. The original
   `adf12ee` disable decision belonged to the route without operator taps.
 - On the local surface the captured still is drawn after camera closure; a
@@ -155,15 +166,23 @@ message for the whole booklet, so a long generation is normal.
   local VAD/ASR. ASR remains for compatible non-browser provider paths.
   Diagram answers use validated vectors and the existing AnswerReader/Canvas.
   These new behaviors have not passed physical acceptance on the current APK.
+- Answer reading is continuous: pack short items on one screen, keep full
+  derivations and diagrams, and retain printed answer numbers and position.
+  The first reader double tap persists writing completion and sleeps inside
+  the app; only two further double taps within three seconds exit to home.
+  Authenticated device/session/generation/sequence state lets the phone watcher
+  request sleep/wake. A completed or closed generation ignores late answers.
+  Keep microphone input while muting output. Do not hold the glasses CPU for
+  indefinite analysis or poll answers there; bounded upload work may retain CPU
+  only until its timeout or completion. Physical silence and timing are pending.
 - Text-only page upload remains an API compatibility path. Do not describe it
   as the real-device primary path.
 - The public CXR-L AIDL surface does not expose arbitrary recognition or
   answer text from the AI running on the glasses. The current production path
-  uses a configured server solver; glassdoc performs its OCR on the glasses,
+  uses a configured server solver; glassdoc observes page images,
   while the frozen relay performs OCR on the phone. On the background
   chatgpt-web route the model lists and answers the questions from the original
-  images in one message and OCR does not segment; the glasses capture loop
-  still uses OCR for framing, burst choice and same-page skipping.
+  images after ordered attachment receipts and OCR does not segment or gate capture.
 - Use the official `com.rokid.cxr:client-l:1.1.1` dependency. Do not commit,
   copy, or redistribute Rokid AAR files.
 - Global Hi Rokid uses package `com.rokid.sprite.global.aiapp`. Keep the
@@ -294,6 +313,10 @@ Only four gestures reach an ordinary app; the rest are system-reserved in
 - Pass the originating page image to image-capable solvers.
 - Keep document finalization idempotent and page replacement keyed by
   `(document_id, page_index)`.
+- `/v1/glasses/state` always requires a configured API key. Store monotonic
+  generation/sequence and terminal states atomically. Use the authenticated
+  request's source address for watcher discovery, then check `ro.serialno`
+  before device control. Forwarded headers must not select the target.
 - `ROKID_REAL_MODE=1` must reject placeholder analyzer/solver combinations and
   fail explicitly rather than fall back silently.
 - Never send unsupported media to a provider: OGG/FLAC are not handed to OpenAI

@@ -19,9 +19,19 @@ public final class AnswerReader {
     private Screen screen = Screen.ANSWER;
     private int menuIndex;
     private String menuGroup;
+    private final boolean continuous;
+    private final List<Integer> pageQuestions = new ArrayList<>();
+    private final List<Integer> pageOffsets = new ArrayList<>();
+    private final List<AnswerDiagram> pageDiagrams = new ArrayList<>();
 
     public AnswerReader(AnswerBundle bundle, float width, int lines, AnswerLayout.Measurer measurer) {
+        this(bundle, width, lines, measurer, false);
+    }
+
+    public AnswerReader(AnswerBundle bundle, float width, int lines, AnswerLayout.Measurer measurer,
+                        boolean continuous) {
         this.bundle = bundle;
+        this.continuous = continuous;
         viewport(width, lines, measurer);
     }
 
@@ -30,14 +40,16 @@ public final class AnswerReader {
     public Screen screen() { return screen; }
     public int offset() { return anchorOffset; }
     public int pageNumber() { return pageIndex + 1; }
-    public int pageCount() { return textPageCount + current().diagrams.size(); }
+    public int pageCount() { return continuous ? pages.size() : textPageCount + current().diagrams.size(); }
     public AnswerLayout.Page page() { return pages.get(Math.min(pageIndex, pages.size()-1)); }
     public AnswerDiagram diagram() {
+        if (continuous) return screen == Screen.ANSWER ? pageDiagrams.get(pageIndex) : null;
         return screen == Screen.ANSWER && pageIndex >= textPageCount
                 ? current().diagrams.get(pageIndex - textPageCount) : null;
     }
 
     private int pageStart() {
+        if (continuous) return pageOffsets.get(pageIndex);
         return pageIndex < textPageCount ? pages.get(pageIndex).start
                 : contentLength + 1 + pageIndex - textPageCount;
     }
@@ -50,7 +62,21 @@ public final class AnswerReader {
     }
 
     private void reflow() {
+        if (continuous) { reflowContinuous(); return; }
         AnswerItem item = current();
+        String content = content(item);
+        pages = AnswerLayout.paginate(content, width, lines, measurer);
+        contentLength = content.length();
+        textPageCount = content.isEmpty() && !item.diagrams.isEmpty() ? 0 : pages.size();
+        pageIndex = 0;
+        if (anchorOffset > contentLength && !item.diagrams.isEmpty()) {
+            pageIndex = textPageCount + Math.min(item.diagrams.size()-1, anchorOffset-contentLength-1);
+        } else {
+            while (pageIndex + 1 < textPageCount && pages.get(pageIndex).end <= anchorOffset) pageIndex++;
+        }
+    }
+
+    private static String content(AnswerItem item) {
         String content;
         switch (item.status) {
             case READY: content = item.answer; break;
@@ -62,15 +88,59 @@ public final class AnswerReader {
             default: content = "解析中"; break;
         }
         for (int i = 0; i < item.diagrams.size(); i++) content += item.diagrams.get(i).readingText(i + 1);
-        pages = AnswerLayout.paginate(content, width, lines, measurer);
-        contentLength = content.length();
-        textPageCount = content.isEmpty() && !item.diagrams.isEmpty() ? 0 : pages.size();
-        pageIndex = 0;
-        if (anchorOffset > contentLength && !item.diagrams.isEmpty()) {
-            pageIndex = textPageCount + Math.min(item.diagrams.size()-1, anchorOffset-contentLength-1);
-        } else {
-            while (pageIndex + 1 < textPageCount && pages.get(pageIndex).end <= anchorOffset) pageIndex++;
+        return content;
+    }
+
+    /** Pack adjacent text answers; figures remain separate pages in their original order. */
+    private void reflowContinuous() {
+        int targetQuestion = questionIndex;
+        int targetOffset = anchorOffset;
+        pages = new ArrayList<>();
+        pageQuestions.clear(); pageOffsets.clear(); pageDiagrams.clear();
+        int first = 0;
+        while (first < bundle.items.size()) {
+            int last = first;
+            while (last + 1 < bundle.items.size() && bundle.items.get(last).diagrams.isEmpty()) last++;
+            StringBuilder text = new StringBuilder();
+            List<Integer> starts = new ArrayList<>();
+            List<Integer> bodyStarts = new ArrayList<>();
+            for (int i = first; i <= last; i++) {
+                AnswerItem item = bundle.items.get(i);
+                starts.add(text.length());
+                text.append(item.readingLabel()).append(' ');
+                bodyStarts.add(text.length());
+                text.append(content(item));
+                if (i < last) text.append('\n');
+            }
+            for (AnswerLayout.Page page : AnswerLayout.paginate(text.toString(), width, lines, measurer)) {
+                int owner = 0;
+                while (owner + 1 < starts.size() && starts.get(owner + 1) <= page.start) owner++;
+                pages.add(page);
+                pageQuestions.add(first + owner);
+                pageOffsets.add(Math.max(0, page.start - bodyStarts.get(owner)));
+                pageDiagrams.add(null);
+            }
+            AnswerItem item = bundle.items.get(last);
+            for (int d = 0; d < item.diagrams.size(); d++) {
+                pages.add(AnswerLayout.paginate("", width, lines, measurer).get(0));
+                pageQuestions.add(last);
+                pageOffsets.add(content(item).length() + 1 + d);
+                pageDiagrams.add(item.diagrams.get(d));
+            }
+            first = last + 1;
         }
+        pageIndex = 0;
+        for (int p = 0; p < pages.size(); p++) {
+            if (pageQuestions.get(p) < targetQuestion || (pageQuestions.get(p) == targetQuestion
+                    && pageOffsets.get(p) <= targetOffset)) pageIndex = p;
+        }
+        questionIndex = targetQuestion;
+        anchorOffset = targetOffset;
+    }
+
+    private void selectContinuousPage() {
+        questionIndex = pageQuestions.get(pageIndex);
+        anchorOffset = pageOffsets.get(pageIndex);
     }
 
     public boolean accept(AnswerBundle next) {
@@ -106,7 +176,7 @@ public final class AnswerReader {
                 || !current().issue.equals(next.items.get(questionIndex).issue)
                 || !current().diagrams.equals(next.items.get(questionIndex).diagrams);
         bundle = next;
-        if (changed) reflow();
+        if (changed || continuous) reflow();
         return true;
     }
 
@@ -116,6 +186,7 @@ public final class AnswerReader {
                 questionIndex = i;
                 anchorOffset = Math.max(0, offset);
                 reflow();
+                if (continuous) return;
                 anchorOffset = Math.min(anchorOffset, contentLength + current().diagrams.size());
                 return;
             }
@@ -127,8 +198,9 @@ public final class AnswerReader {
             menuIndex = Math.min(menuIndex + 1, menuChoices().size() - 1);
         } else if (pageIndex + 1 < pageCount()) {
             pageIndex++;
+            if (continuous) { selectContinuousPage(); return; }
             anchorOffset = pageStart();
-        } else if (questionIndex + 1 < bundle.items.size()) {
+        } else if (!continuous && questionIndex + 1 < bundle.items.size()) {
             questionIndex++;
             anchorOffset = 0;
             reflow();
@@ -140,8 +212,9 @@ public final class AnswerReader {
             menuIndex = Math.max(menuIndex - 1, 0);
         } else if (pageIndex > 0) {
             pageIndex--;
+            if (continuous) { selectContinuousPage(); return; }
             anchorOffset = pageStart();
-        } else if (questionIndex > 0) {
+        } else if (!continuous && questionIndex > 0) {
             questionIndex--;
             reflow();
             pageIndex = pageCount() - 1;

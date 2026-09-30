@@ -1,6 +1,6 @@
 # 再開入口：次のセッションはここだけ読めば始められる
 
-Status: Internal progress。2026-09-30更新（欠陥2件を修正し、カメラ休止を実装。次は実機の物理基礎14頁）。branch `feature/capture-quality-readiness`、Draft [PR #38](https://github.com/TroroOrosi/rokid-docscan-starter/pull/38)。
+Status: Internal progress。2026-09-30計画のPC実装・独立監査を完了。`py -3.12 -X utf8 -m pytest -q` →1030 passed, 1 skipped、`py -3.12 -X utf8 -m ruff check .` →All checks passed!、`gradlew.bat --no-daemon test testDebugUnitTest assembleDebug` →BUILD SUCCESSFUL・420 tests/失敗0。ログ・hash・監査は `data/device-setup/reports/venue-pc-20260930/`。branch `feature/capture-quality-readiness`、Draft [PR #38](https://github.com/TroroOrosi/rokid-docscan-starter/pull/38)。実機未検証。
 Runs on: Windows PC `C:\rokid-docscan-starter`。実機の状態を変える操作・APK導入・スマホのサーバ更新・GPT送信は、利用者の承認後だけ（hookでも強制）。
 
 ## 0. 読み方（前提と資料に引きずられないため）
@@ -24,6 +24,7 @@ Runs on: Windows PC `C:\rokid-docscan-starter`。実機の状態を変える操�
 合格：公式正解（`C:\rokid-exam-materials\kyotsu\seikai\`）と照合して正しい答えが、会場経路でグラスに表示される。一度も達成していない。
 
 ## 2. 利用者の決定（再質問しない）
+- 最新計画（9/30）は以下の旧方式に優先：Termux Chromium永続profile＋初回可視login後headless、Boot/services、スマホ自己ADBなし、頁画像を20添付以内で同一chatへ順送信し中間受領確認→最後に全答案、OCRを撮影条件から外し頁変化→静止→1枚→実画像3秒保存、答案を連続表示、最初の閲覧double tapは記入終了＋消灯、その後3秒以内2回でapp終了。実機変更・導入・GPT送信の承認は今回未取得。
 
 - 会場：グラス（`:glassdoc`）→スマホAP→スマホ上のFastAPI→スマホChrome（CDP）→ChatGPT web→answer-bundle→AnswerView。PCは持ち込まない。
   スマホは画面点灯・伏せ置き・Chrome前景（9/15）。ChatGPT webの自動操作は規約違反と承知のうえで選んだ。APIキーは使わない。
@@ -38,7 +39,7 @@ Runs on: Windows PC `C:\rokid-docscan-starter`。実機の状態を変える操�
 - リスニングの実機試験は後回し。LEDの外部観測は不要。LEDを操作するコードは書かない。依頼済みの機能は省かない（5節）。
 - 9/30の4b再実行：問題用紙が全て揃っていないため、送信確認までで停止する（利用者）。同じ不完全な2枚の再送で正答を試さない。
 
-## 3. 確認済みの事実（HEAD時点：APP 0.45.0 / API 1.30.0 / glassdoc vc25 0.22.0）
+## 3. 過去の測定記録（以下の版・条件に限定。現行PC作業のログ・比較・監査は `data/device-setup/reports/venue-pc-20260930/`）
 
 - 9/29 4a旧方式（`e0b8263`）：一覧だけの1通のあと小問ごとに送り、利用者が停止。これを受けて1教科1通へ作り直した（`4552ea1`〜`1134404`、監査2回を反映）。
 - **9/29 4a（`1134404`、スマホのサーバ）：4問すべて正解**（④②④②＝101〜104）。送信1通（画像2枚）・返答1通・102.6秒。入力は公式PDFの描画でグラスの写真ではない。
@@ -87,7 +88,7 @@ Runs on: Windows PC `C:\rokid-docscan-starter`。実機の状態を変える操�
   → 旧サーバ停止 → `nohup bash scripts/phone_serve.sh 127.0.0.1 > data/server-<commit>.log 2>&1 &`。PCからは `ssh -f -N -L 8000:127.0.0.1:8000 ...`（ssh `-i ~/.ssh/f51f_key -p 8022 u0_a26@192.168.0.6`）。
   ベンチの鍵は `ROKID_API_KEY` をスマホの env から読んで渡す（画面に出さない）。
 
-## 4. 次の作業（この順）
+## 4. 次の作業：Runs on F-51FのTermux。まず本人が `sshd` を起動する操作の承認を求める（現在SSH:8022接続拒否）。導入は既存DB・不確定記録を保持し、対象・正確なコマンドを提示して承認後に実施。新ブラウザのlogin/headless維持・実モデル選択と会場経路を確認する。GPT送信は完全な資料を指定して別承認。以下は旧計画の経緯で、今回の実機実行指示ではない。
 
 1. 済：独立監査2回（`4552ea1`、`4552ea1..e12e155`）の指摘を `61ad481`〜`1134404` で反映。
 2. 済：4a（3節）。起動はスマホで `bash scripts/phone_serve.sh 127.0.0.1`、PCから `ssh -L 8000:127.0.0.1:8000` で投入した。

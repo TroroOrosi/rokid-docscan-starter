@@ -48,8 +48,13 @@ def test_settings_distinguish_local_glasses_and_frozen_phone_controls(client):
     assert local["startup"]["requires_selection"] is True
     assert local["capture"]["review_visible_seconds"] == 3
     assert local["capture"]["commit"] == "local_before_http"
-    assert local["answers"]["menu_back"] == "double_tap"
-    assert local["answers"]["exit"] == "two_double_taps_within_3_seconds"
+    assert local["capture"]["trigger"] == "observed_page_change_then_still"
+    assert local["capture"]["ocr_characters_required"] is False
+    assert local["answers"]["writing_done"] == "one_double_tap_then_display_sleep"
+    assert local["answers"]["writing_done_counts_toward_exit"] is False
+    assert local["answers"]["exit"] == "two_more_double_taps_within_3_seconds_while_waiting"
+    assert local["answers"]["layout"] == "continuous_full_answers"
+    assert local["answer_wake"] == "active_session_and_generation_only"
     assert local["physical_acceptance"] == "pending"
 
 

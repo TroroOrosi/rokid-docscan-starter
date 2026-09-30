@@ -37,6 +37,7 @@ public class DisplaySleepTest {
         setTimeout(TEN_DAYS);
         Activity activity = activity();
         activity.getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        activity.setTurnScreenOn(true);
         DisplaySleep sleep = new DisplaySleep();
 
         assertEquals(DisplaySleep.Result.SLEEPING, sleep.sleep(activity));
@@ -44,6 +45,7 @@ public class DisplaySleepTest {
         assertEquals(DisplaySleep.SHORT_TIMEOUT_MILLIS, timeout());
         int flags = activity.getWindow().getAttributes().flags;
         assertEquals(0, flags & WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        assertFalse(org.robolectric.Shadows.shadowOf(activity).getTurnScreenOn());
     }
 
     @Test public void theOperatorsOwnTimeoutComesBackOnTheNextStart() {
@@ -87,12 +89,14 @@ public class DisplaySleepTest {
         });
         Activity activity = activity();
         activity.getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        activity.setTurnScreenOn(true);
 
         assertEquals(DisplaySleep.Result.NOT_PERMITTED, sleep.sleep(activity));
 
         assertEquals(TEN_DAYS, timeout());
         int flags = activity.getWindow().getAttributes().flags;
         assertNotEquals(0, flags & WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        assertFalse("the phone may sleep even if local timeout permission is refused", org.robolectric.Shadows.shadowOf(activity).getTurnScreenOn());
     }
 
     @Test public void nothingIsRestoredWhenNothingWasShortened() {

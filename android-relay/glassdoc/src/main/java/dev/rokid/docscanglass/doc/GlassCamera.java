@@ -3,6 +3,7 @@ package dev.rokid.docscanglass.doc;
 import android.Manifest;
 import android.content.Context;
 import android.graphics.ImageFormat;
+import android.graphics.Bitmap;
 import android.hardware.camera2.CameraAccessException;
 import android.hardware.camera2.CameraCaptureSession;
 import android.hardware.camera2.CameraCharacteristics;
@@ -50,6 +51,8 @@ final class GlassCamera {
         void onCaptured(byte[] jpeg, int width, int height, long elapsedMillis);
 
         void onCaptureFailed(String reason);
+
+        default void onPreview(Bitmap frame) { frame.recycle(); }
     }
 
     private final Context context;
@@ -65,6 +68,25 @@ final class GlassCamera {
     private boolean closed;
     private boolean unknown;
     private long generation;
+    private CameraDevice previewDevice;
+    private CameraCaptureSession previewSession;
+    private ImageReader previewReader;
+    private boolean previewRequested;
+    private long previewGeneration;
+    private boolean previewClosing;
+    private boolean previewOpening;
+    private Runnable afterPreviewClosed;
+    private Runnable pageReady;
+    private PageChange pageChange = new PageChange();
+    private long previewAt;
+    private boolean capturePending;
+    private final Runnable previewCloseTimeout = () -> {
+        if (afterPreviewClosed != null && !closed && !unknown) {
+            afterPreviewClosed = null;
+            capturePending = false;
+            previewFailed();
+        }
+    };
 
     private final Runnable timeout = () -> fail("CAMERA TIMEOUT");
 
@@ -78,7 +100,165 @@ final class GlassCamera {
     /** Opens the rear camera and captures exactly one JPEG at its largest size. */
     @RequiresPermission(Manifest.permission.CAMERA)
     void captureOnce() {
-        handler.post(() -> stillness.await(handler, this::captureOnHandler));
+        handler.post(() -> {
+            if (closed || unknown || capturePending) return;
+            capturePending = true;
+            stillness.await(handler, () -> stopPreview(this::captureOnHandler));
+        });
+    }
+
+    void resetPages() { handler.post(() -> pageChange = new PageChange()); }
+
+    void awaitNextPage(Runnable ready) {
+        handler.post(() -> {
+            if (closed || unknown) return;
+            pageReady = ready;
+            previewRequested = true;
+            startPreview();
+        });
+    }
+
+    void preview() {
+        handler.post(() -> { previewRequested = true; startPreview(); });
+    }
+
+    void pausePreview() {
+        handler.post(() -> {
+            previewRequested = false;
+            pageReady = null;
+            if (!capturePending) stillness.cancel();
+            stopPreview(null);
+        });
+    }
+
+    /** Close preview completely before the existing JPEG-only capture opens a fresh CameraDevice. */
+    @RequiresPermission(Manifest.permission.CAMERA)
+    private void startPreview() {
+        if (!previewRequested || closed || unknown || previewReader != null || previewClosing
+                || (generation > 0 && !settled)) return;
+        long token = ++previewGeneration;
+        try {
+            CameraManager manager = (CameraManager) context.getSystemService(Context.CAMERA_SERVICE);
+            String id = rearCameraId(manager);
+            StreamConfigurationMap map = manager.getCameraCharacteristics(id)
+                    .get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
+            Size[] sizes = map == null ? null : map.getOutputSizes(ImageFormat.YUV_420_888);
+            if (sizes == null || sizes.length == 0) throw new IllegalStateException("no YUV preview");
+            Size size = sizes[0];
+            for (Size candidate : sizes) {
+                if (candidate.getWidth() >= 320 && candidate.getHeight() >= 240
+                        && (size.getWidth() < 320 || (long) candidate.getWidth() * candidate.getHeight()
+                        < (long) size.getWidth() * size.getHeight())) size = candidate;
+            }
+            previewReader = ImageReader.newInstance(size.getWidth(), size.getHeight(), ImageFormat.YUV_420_888, 2);
+            previewReader.setOnImageAvailableListener(source -> previewFrame(source, token), handler);
+            previewOpening = true;
+            manager.openCamera(id, new CameraDevice.StateCallback() {
+                @Override public void onOpened(CameraDevice opened) {
+                    previewOpening = false;
+                    if (token != previewGeneration || !previewRequested || closed) {
+                        previewClosing = true;
+                        opened.close(); return;
+                    }
+                    previewDevice = opened;
+                    try {
+                        opened.createCaptureSession(Collections.singletonList(previewReader.getSurface()),
+                                new CameraCaptureSession.StateCallback() {
+                            @Override public void onConfigured(CameraCaptureSession configured) {
+                                if (token != previewGeneration || !previewRequested || closed) { configured.close(); return; }
+                                previewSession = configured;
+                                try {
+                                    CaptureRequest.Builder request = opened.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW);
+                                    request.addTarget(previewReader.getSurface());
+                                    configured.setRepeatingRequest(request.build(), null, handler);
+                                } catch (CameraAccessException | RuntimeException error) { previewFailed(); }
+                            }
+                            @Override public void onConfigureFailed(CameraCaptureSession failed) {
+                                failed.close(); if (token == previewGeneration) previewFailed();
+                            }
+                        }, handler);
+                    } catch (CameraAccessException | RuntimeException error) { previewFailed(); }
+                }
+                @Override public void onDisconnected(CameraDevice disconnected) {
+                    previewOpening = false;
+                    disconnected.close(); if (token == previewGeneration) previewFailed();
+                }
+                @Override public void onError(CameraDevice errored, int code) {
+                    previewOpening = false;
+                    errored.close(); if (token == previewGeneration) previewFailed();
+                }
+                @Override public void onClosed(CameraDevice closedDevice) {
+                    previewClosed();
+                }
+            }, handler);
+        } catch (CameraAccessException | RuntimeException | OutOfMemoryError error) { previewFailed(); }
+    }
+
+    private void previewFrame(ImageReader source, long token) {
+        try (Image image = source.acquireLatestImage()) {
+            if (image == null || token != previewGeneration || closed) return;
+            long now = SystemClock.elapsedRealtime();
+            if (now - previewAt < 100) return;
+            previewAt = now;
+            Image.Plane luma = image.getPlanes()[0];
+            ByteBuffer pixels = luma.getBuffer();
+            int row = luma.getRowStride(), step = luma.getPixelStride();
+            byte[] thumbnail = new byte[32 * 24];
+            for (int y = 0; y < 24; y++) for (int x = 0; x < 32; x++) {
+                thumbnail[y * 32 + x] = pixels.get(y * image.getHeight() / 24 * row + x * image.getWidth() / 32 * step);
+            }
+            pageChange.observe(thumbnail, now);
+            int width = Math.min(320, image.getWidth()), height = Math.max(1, width * image.getHeight() / image.getWidth());
+            int[] display = new int[width * height];
+            for (int y = 0; y < height; y++) for (int x = 0; x < width; x++) {
+                int gray = pixels.get(y * image.getHeight() / height * row + x * image.getWidth() / width * step) & 255;
+                display[y * width + x] = 0xFF000000 | (gray << 8);
+            }
+            callback.onPreview(Bitmap.createBitmap(display, width, height, Bitmap.Config.RGB_565));
+            if (pageReady != null && pageChange.ready(now)) {
+                Runnable ready = pageReady;
+                pageReady = null;
+                ready.run();
+            }
+        } catch (RuntimeException | OutOfMemoryError error) { previewFailed(); }
+    }
+
+    private void stopPreview(Runnable next) {
+        ++previewGeneration;
+        if (next != null) {
+            afterPreviewClosed = next;
+            handler.removeCallbacks(previewCloseTimeout);
+            handler.postDelayed(previewCloseTimeout, CAPTURE_TIMEOUT_MILLIS);
+        }
+        closeResource(previewSession); previewSession = null;
+        closeResource(previewReader); previewReader = null;
+        CameraDevice opened = previewDevice; previewDevice = null;
+        if (opened != null) { previewClosing = true; closeResource(opened); }
+        else if (previewOpening) { previewClosing = true; }
+        else if (!previewClosing && next != null && !closed && !unknown) {
+            afterPreviewClosed = null;
+            handler.removeCallbacks(previewCloseTimeout);
+            next.run();
+        }
+    }
+
+    private void previewClosed() {
+        if (!previewClosing) return;
+        previewClosing = false;
+        handler.removeCallbacks(previewCloseTimeout);
+        Runnable next = afterPreviewClosed;
+        afterPreviewClosed = null;
+        if (next != null && !closed && !unknown) next.run();
+        else startPreview();
+    }
+
+    private void previewFailed() {
+        if (closed) return;
+        previewRequested = false;
+        previewOpening = false;
+        unknown = true;
+        stopPreview(null);
+        callback.onCaptureFailed("preview unavailable");
     }
 
     @RequiresPermission(Manifest.permission.CAMERA)
@@ -86,6 +266,7 @@ final class GlassCamera {
         if (closed || unknown || (generation > 0 && !settled)) return;
         long current = ++generation;
         settled = false;
+        pageChange.consumed();
         startedAtMillis = SystemClock.elapsedRealtime();
         CameraManager manager =
                 (CameraManager) context.getSystemService(Context.CAMERA_SERVICE);
@@ -125,7 +306,13 @@ final class GlassCamera {
             closed = true;
             settled = true;
             generation++;
+            previewRequested = false;
+            pageReady = null;
+            afterPreviewClosed = null;
+            stillness.cancel();
+            stopPreview(null);
             handler.removeCallbacks(timeout);
+            handler.removeCallbacks(previewCloseTimeout);
             release();
         });
     }
@@ -151,6 +338,10 @@ final class GlassCamera {
                 if (closed || settled || current != generation) { closeResource(errored); return; }
                 device = errored;
                 fail("camera error " + error);
+            }
+
+            @Override public void onClosed(CameraDevice closedDevice) {
+                if (current == generation && settled) startPreview();
             }
         };
     }
@@ -271,6 +462,7 @@ final class GlassCamera {
             return;
         }
         settled = true;
+        capturePending = false;
         handler.removeCallbacks(timeout);
         long elapsed = SystemClock.elapsedRealtime() - startedAtMillis;
         Log.i(TAG, "captured " + width + "x" + height
@@ -289,6 +481,7 @@ final class GlassCamera {
             return;
         }
         settled = true;
+        capturePending = false;
         unknown = true;
         handler.removeCallbacks(timeout);
         release();

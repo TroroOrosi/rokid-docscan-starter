@@ -30,10 +30,11 @@ def test_primary_bundle_keeps_shared_pages_without_ocr_or_transcript(tmp_path):
     assert _near(image.getpixel((0, image.height - 1)), (6, 50, 100))
 
 
-@pytest.mark.parametrize("count", [19, 20, 21, 39, 40, 55])
-def test_merged_bundle_preserves_every_page_pixel(tmp_path, count):
+@pytest.mark.parametrize("count", [19, 20, 21, 39, 40, 55, 61])
+def test_each_page_keeps_its_own_image_without_a_booklet_limit(tmp_path, count):
     files = source_bundle(pages_at(tmp_path, count))
-    assert len(files) <= 20
+    assert len(files) == count
+    assert all(Image.open(io.BytesIO(item["buffer"])).size == (32, 48) for item in files)
     pixels = []
     for item in files:
         image = Image.open(io.BytesIO(item["buffer"]))
@@ -52,7 +53,7 @@ def test_no_renumbering_or_silent_missing_images(tmp_path):
         source_bundle(pages)
 
 
-def test_dark_photo_is_brightened_and_trimmed_to_the_paper(tmp_path):
+def test_shadow_correction_keeps_dark_paper_edges_and_the_original(tmp_path):
     """A dark shot of a page on a blue map, as the glasses took it on 2026-09-22."""
     photo = Image.new("RGB", (800, 1000), (10, 20, 70))
     photo.paste((80, 80, 80), (200, 300, 600, 700))
@@ -61,8 +62,8 @@ def test_dark_photo_is_brightened_and_trimmed_to_the_paper(tmp_path):
     photo.save(path)
     before = path.read_bytes()
     sent = Image.open(io.BytesIO(source_bundle([{"page_number": 1, "image_path": str(path)}])[0]["buffer"]))
-    assert 400 <= sent.width < 800 and 400 < sent.height < 1000
-    assert min(sent.getpixel((sent.width // 2, sent.height // 2))) > 200
+    assert sent.size == photo.size
+    assert min(sent.getpixel((sent.width // 2, sent.height // 2))) > 80
     assert path.read_bytes() == before
 
 
@@ -76,7 +77,7 @@ def test_an_oversized_page_drops_jpeg_quality_never_resolution(tmp_path, monkeyp
     monkeypatch.setattr(source, "MAX_IMAGE_BYTES", len(first) - 1)
     files = source_bundle([{"page_number": 1, "image_path": str(path)}])
     assert files[0]["mimeType"] == "image/jpeg" and len(files[0]["buffer"]) < len(first)
-    assert Image.open(io.BytesIO(files[0]["buffer"])).size == (640, 666)
+    assert Image.open(io.BytesIO(files[0]["buffer"])).size == (640, 640)
     assert path.read_bytes().startswith(b"\x89PNG")
 
 
@@ -104,6 +105,19 @@ def test_a_spread_is_sent_as_its_right_page_then_its_left(tmp_path):
     assert abs(right.width - 520) <= 12 and right.width + left.width == 1200
 
 
+def test_a_spread_inside_a_portrait_photo_splits_without_trimming_dark_edges(tmp_path):
+    spread = Image.open(spread_at(tmp_path))
+    photo = Image.new("RGB", (1400, 1800), (10, 20, 70))
+    photo.paste(spread, (100, 700))
+    path = tmp_path / "portrait-with-spread.png"
+    photo.save(path)
+    files = source_bundle([{"page_number": 1, "image_path": str(path)}])
+    assert [f["name"] for f in files] == ["page001R.jpg", "page001L.jpg"]
+    images = [Image.open(io.BytesIO(f["buffer"])) for f in files]
+    assert sum(p.width for p in images) == photo.width
+    assert {p.height for p in images} == {photo.height}
+
+
 @pytest.mark.parametrize("size, fold", [((800, 1200), 400), ((1200, 800), None)])
 def test_a_single_page_is_sent_whole(tmp_path, size, fold):
     files = source_bundle([{"page_number": 1, "image_path": str(spread_at(tmp_path, size, fold))}])
@@ -111,19 +125,13 @@ def test_a_single_page_is_sent_whole(tmp_path, size, fold):
     assert Image.open(io.BytesIO(files[0]["buffer"])).width == size[0]
 
 
-@pytest.mark.parametrize("photos, max_files, per_file", [(15, 20, 2), (15, 19, 2), (25, 20, 3), (40, 20, None)])
-def test_split_pages_keep_the_budget_order_and_page_width(tmp_path, photos, max_files, per_file):
+@pytest.mark.parametrize("photos", [15, 25, 40])
+def test_split_pages_keep_their_order_and_page_width(tmp_path, photos):
     """Every third photo is a single page; the rest are spreads."""
     spread, single = spread_at(tmp_path), spread_at(tmp_path, (800, 1200), None)
     pages = [{"page_number": n, "image_path": str(spread if n % 3 else single)}
              for n in range(1, photos + 1)]
-    if per_file is None:
-        with pytest.raises(ValueError, match="too many pages"):
-            source_bundle(pages, max_files=max_files)
-        return
-    files = source_bundle(pages, max_files=max_files)
-    labels = [f["name"][4:-4].split("-") for f in files]
-    assert len(files) <= max_files and {len(group) for group in labels[:-1]} == {per_file}
-    assert [label for group in labels for label in group] == [
+    files = source_bundle(pages)
+    assert [f["name"][4:-4] for f in files] == [
         f"{n:03d}{side}" for n in range(1, photos + 1) for side in (("R", "L") if n % 3 else ("",))]
     assert all(Image.open(io.BytesIO(f["buffer"])).width <= 800 for f in files)

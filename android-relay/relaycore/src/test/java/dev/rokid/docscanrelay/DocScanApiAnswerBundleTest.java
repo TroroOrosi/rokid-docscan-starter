@@ -68,4 +68,46 @@ public class DocScanApiAnswerBundleTest {
             assertTrue(error.getMessage().contains("call finalize-reading first"));
         }
     }
+
+    @Test public void stateNotificationCarriesAuthenticationAndNullableSessionIdentity() throws Exception {
+        try (MockWebServer server = new MockWebServer()) {
+            server.enqueue(new MockResponse().setBody("{}"));
+            DocScanApi api = new DocScanApi(server.url("/").toString(), "test-secret",
+                    new ClientIdentity("test", "test", "test"));
+            api.glassesState("glasses-1", null, 2, 1, "capturing");
+            RecordedRequest request = server.takeRequest();
+            assertEquals("/v1/glasses/state", request.getPath());
+            assertEquals("POST", request.getMethod());
+            assertEquals("Bearer test-secret", request.getHeader("Authorization"));
+            org.json.JSONObject state = new org.json.JSONObject(request.getBody().readUtf8());
+            assertTrue(state.isNull("session_id"));
+            assertEquals(2, state.getLong("generation"));
+            assertEquals(1, state.getLong("sequence"));
+            assertEquals("capturing", state.getString("phase"));
+        }
+    }
+    @Test public void exitNotificationSurvivesCancellingThePhotoRequests() throws Exception {
+        java.util.concurrent.CountDownLatch received = new java.util.concurrent.CountDownLatch(1);
+        java.util.concurrent.CountDownLatch release = new java.util.concurrent.CountDownLatch(1);
+        java.util.concurrent.ExecutorService notify = java.util.concurrent.Executors.newSingleThreadExecutor();
+        try (MockWebServer server = new MockWebServer()) {
+            server.setDispatcher(new okhttp3.mockwebserver.Dispatcher() {
+                @Override public MockResponse dispatch(RecordedRequest request) throws InterruptedException {
+                    received.countDown();
+                    release.await(2, java.util.concurrent.TimeUnit.SECONDS);
+                    return new MockResponse().setBody("{}");
+                }
+            });
+            DocScanApi api = api(server);
+            java.util.concurrent.Future<?> state = notify.submit(() -> {
+                try { api.glassesState("glasses-1", 7L, 2, 3, "closed"); }
+                catch (Exception error) { throw new RuntimeException(error); }
+            });
+            assertTrue(received.await(2, java.util.concurrent.TimeUnit.SECONDS));
+            api.cancelRequests();
+            release.countDown();
+            state.get(2, java.util.concurrent.TimeUnit.SECONDS);
+        } finally { release.countDown(); notify.shutdownNow(); }
+    }
+
 }

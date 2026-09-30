@@ -1,6 +1,6 @@
 # Implementation surfaces
 
-Status: Current repository map and runnable-surface inventory. Updated 2026-09-23; source baseline `7a05928`.
+Status: Current repository map and runnable-surface inventory. Updated 2026-09-30; the standalone venue implementation remains physically unverified.
 
 **Read this before adding anything.** It exists because the same role kept
 getting a second implementation: a session would grasp the feature it was asked
@@ -30,7 +30,8 @@ A surface listed here is not automatically wanted. Each row carries a status:
 | `scripts/check_capture_memory.py` | probe | PCの保存画像によるメモリ条件検査。グラスの実撮影精度・電池の証明ではない |
 | `scripts/eval_exam.py` / `scripts/eval_fast_scan.py` / `scripts/evaluate.py` / `scripts/run_exam_deck.py` / `scripts/make_sample_pages.py` | probe | 合成資料作成・部品／答案評価。実providerを呼ぶ設定とオフライン検査を区別し、送信停止中に実モデル試験を実行しない |
 | `scripts/prepare_local_asr.py` / `scripts/build_local_asr.sh` / `scripts/benchmark_local_asr.py` | probe | 互換ASRの準備・測定。chatgpt-webの起動・解析の必須条件ではない |
-| `scripts/watch_glasses.py` | probe | スマホ側での再装着・起動の部分測定。実機状態を変更し得るため、リポジトリ点検で起動しない |
+| `scripts/phone_browser.sh` / `scripts/phone_serve.sh` / `scripts/phone_watch.sh` / `scripts/phone_services.sh` / `scripts/phone_env.sh` | route | Termux Chromium・FastAPI・グラス監視とBoot/services。専用profile、初回可視login後headless。実機導入・有効化は承認後 |
+| `scripts/watch_glasses.py` | route | 認証付き接続元IPとserial照合でグラスの消灯・回答到着・開閉復帰を制御。実機状態を変更し得るため、リポジトリ点検で起動しない |
 | `app/devtools/rokid_led.py` / `scripts/rokid_led.py` | frozen | デバイスコマンドを持たないstub。インジケータを操作する経路に戻さない |
 | `tests/` / Android各moduleの `src/test/` | shared | PC／CIの回帰、fixture、契約検査。合成試験と実資料正答率・物理受け入れを区別する |
 | `.github/workflows/` | shared | Python、スマホ依存stack、Windows、Androidの検査と成果物保存。端末導入・会場検証ではない |
@@ -45,10 +46,10 @@ A surface listed here is not automatically wanted. Each row carries a status:
 
 | 実装 | Status | 接続と制限 |
 |---|---|---|
-| `app/main.py` / `app/db.py` / `app/config.py` / `app/input_identity.py` / `app/glassdoc_contract.py` | route | API、永続化、実運用設定、入力版とグラス契約。finalizeは設問ごとに保存するがHTTPは全問待ち |
+| `app/main.py` / `app/db.py` / `app/config.py` / `app/input_identity.py` / `app/glassdoc_contract.py` / `app/glasses_state.py` | route | API、永続化、実運用設定、入力版とグラス契約、認証付き端末/セッション/世代/状態通知。finalizeは設問ごとに保存するがHTTPは全問待ち |
 | `app/layout.py` / `app/subjects.py` | route | 現状のOCR由来の小問・教科推定。原本の設問一覧としての正確性は未達、RP-12の整理対象 |
-| `app/source_bundle.py` | route | 原本画像・原音の添付生成。画像のみ（20枚を超えると2〜3頁を1枚に結合）。PDFは使わない。同じ確認済み会話では再生成を省く |
-| `app/solvers/chatgpt_web.py` / `app/solvers/cdp.py` / `app/browser_guard.py` | route | ログイン済みChromeへの送信、応答・添付確認、送信不明／制限時の停止。ブラウザpoolは作らない |
+| `app/source_bundle.py` | route | 原本の頁ごとのJPEG生成。PDF・縦結合を使わず、同じチャットへ添付枠内で順次送信する。確認済みの頁を再送しない |
+| `app/solvers/chatgpt_web.py` / `app/solvers/cdp.py` / `app/browser_guard.py` | route | ログイン済みChromiumへの分割送信、選択モデル・応答・添付確認、送信不明／制限時の停止。ブラウザpoolは作らない |
 | `app/listening.py` / `app/audio_formats.py` | route | chunk保存・連続性・完了・原音。主経路はASRを起動・待機しない。原音がGPTで利用されたかは別評価 |
 | `app/answer_text.py` / `app/answer_diagrams.py` | route | 表示可能な答案・図の検査。配送はanswer-bundle、表示はAnswerView。生成内容の正答を保証する検査ではない |
 | `app/provider_registry.py` / `app/solvers/registry.py` / `app/solvers/base.py` | shared | provider選択・共通契約。互換fallbackで必要な画像・音声を落とさない |

@@ -51,6 +51,7 @@ public final class DocScanApi {
     private final String baseUrl;
     private final String apiKey;
     private final ClientIdentity client;
+    private final OkHttpClient stateHttp;
 
     public DocScanApi(String baseUrl, String apiKey, ClientIdentity client) {
         this(baseUrl, apiKey, client, null);
@@ -67,6 +68,9 @@ public final class DocScanApi {
                 .dns(host -> GATEWAY_HOST.equals(host) && app != null
                         ? List.of(wifiGateway(app)) : Dns.SYSTEM.lookup(host))
                 .build();
+        // Exit notification must survive cancelling photo/audio work during Activity destruction.
+        stateHttp = http.newBuilder().dispatcher(new okhttp3.Dispatcher())
+                .callTimeout(5, TimeUnit.SECONDS).build();
         String normalized = baseUrl == null ? "" : baseUrl.trim();
         while (normalized.endsWith("/")) {
             normalized = normalized.substring(0, normalized.length() - 1);
@@ -180,9 +184,8 @@ public final class DocScanApi {
     }
 
     /**
-     * Returns once the deck is segmented; the server solves in the background and
-     * the reader polls answer-bundle (RP-15). The long deadline stays for servers
-     * older than that, which still solve before answering.
+     * Returns once the deck is segmented; the server solves in the background.
+     * The phone watcher notifies the glasses when the complete bundle is ready.
      */
     public JSONObject finalizeReadingLocal(long sessionId) throws IOException, JSONException {
         return execute(new Request.Builder().url(baseUrl + "/v1/exam-sessions/" + sessionId
@@ -228,6 +231,15 @@ public final class DocScanApi {
                 get("/v1/exam-sessions/" + sessionId + "/answer-bundle").toString());
     }
 
+    public void glassesState(String deviceId, Long sessionId, long generation, long sequence, String phase)
+            throws IOException, JSONException {
+        JSONObject payload = new JSONObject().put("device_id", deviceId)
+                .put("session_id", sessionId == null ? JSONObject.NULL : sessionId)
+                .put("generation", generation).put("sequence", sequence).put("phase", phase);
+        execute(new Request.Builder().url(baseUrl + "/v1/glasses/state")
+                .post(RequestBody.create(payload.toString(), JSON)), stateHttp);
+    }
+
     private JSONObject get(String path) throws IOException, JSONException {
         return execute(new Request.Builder().url(baseUrl + path).get());
     }
@@ -250,12 +262,15 @@ public final class DocScanApi {
     }
 
     private JSONObject execute(Request.Builder builder, boolean longRunning) throws IOException, JSONException {
+        return execute(builder, longRunning ? http.newBuilder().readTimeout(120, TimeUnit.SECONDS)
+                .callTimeout(120, TimeUnit.SECONDS).build() : http);
+    }
+
+    private JSONObject execute(Request.Builder builder, OkHttpClient transport) throws IOException, JSONException {
         if (!apiKey.isEmpty()) {
             builder.header("Authorization", "Bearer " + apiKey);
         }
         builder.header("Accept", "application/json");
-        OkHttpClient transport = longRunning ? http.newBuilder().readTimeout(0, TimeUnit.SECONDS)
-                .callTimeout(0, TimeUnit.SECONDS).build() : http;
         try (Response response = transport.newCall(builder.build()).execute()) {
             String body = response.body() == null ? "" : response.body().string();
             if (!response.isSuccessful()) {

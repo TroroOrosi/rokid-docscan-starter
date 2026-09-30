@@ -1,11 +1,11 @@
 # Rokid DocScan（入試問題を撮影して解答するサーバ）
 
-Status: Current project entrypoint. Updated 2026-09-23.
+Status: Current project entrypoint. Updated 2026-09-30.
 
 撮影後のグラス表示は**構図確認のみ**です。無操作で保存しても画質は未検証です。
 保存写真の [原寸点検・補正候補・登録条件評価](docs/capture-quality.md) はPC用部品で、
 撮影・正式登録本流の品質ゲートは未接続です。既存の実機試験停止は継続しています。
-glassdocには撮影要求ごとの露出収束待ちを追加しました。暗さ・文字精度の改善は実機未確認です。
+glassdocは撮影中の映像で頁変化を観測し、静止後に1枚撮ります。プレビュー用Deviceを完全に閉じてからJPEGを撮る実装で、暗さ・文字精度の改善は実機未確認です。
 
 ## このリポジトリの目的
 
@@ -34,7 +34,7 @@ Android スマホを中継し、Windows PC をサーバーとして使う実機�
 
 ```text
 Rokid Glasses（:glassdoc） → スマホの Wi-Fi AP → スマホ上の FastAPI
-                                              → スマホ上の Chrome CDP → ChatGPT ウェブ
+                                              → Termux内の Chromium CDP → ChatGPT ウェブ
 Rokid Glasses（AnswerView） ← answer-bundle
 ```
 
@@ -52,10 +52,13 @@ Rokid Glasses（AnswerView） ← answer-bundle
 現行実装は**glassdocだけで自動スキャンを有効化**し、待機中の単タップを手動撮影、
 静止画表示後3秒以内の単タップを取り直しに割り当てます。既存の自動ループを再利用し、
 凍結したphone/CUSTOMVIEWの明示操作は維持します。
+OCR文字数で撮影を決めず、確認中の頁めくりも保持します。同頁を連写せず、30秒進展がなければカメラを休止します。
 起動時は通常／リスニングを選びます。通常撮影は通信を待たずに進め、確定写真をグラス内に
 保存してから送信します。中断資料と直近答案は明示的に選んで再開できます。
+答案は短答を一画面へ詰めて連続表示し、長答・導出・図を全文保持します。閲覧中の最初のダブルタップで記入終了を保存して消灯し、その後3秒以内のダブルタップ2回でホームへ戻って消灯します。
 
-資料は冊子の全ページ画像が既定で、添付数に応じた結合画像と比較用PDFを扱います。
+資料は一頁一画像のJPEGを基本に、添付枠を超えたら同じチャットへ順番に分割して送ります。
+途中の受領確認が完了してから次を送り、最後に全頁の答案を求めます。確認済みの頁と進捗を保存します。
 図付き答案と、撮影に並行する録音も実装しています。主経路は画像・音声の原本をGPTへ渡し、
 OCR全文・ローカル文字起こしの送信やASR完了待ちは行いません。
 設定・操作・未検証の範囲は[グラス撮影と原本資料](docs/multimodal-scan.md)を参照してください。
@@ -109,17 +112,16 @@ submodule、AARコピーは不要です。
 **ChatGPT ウェブ UI の自動操作は OpenAI の利用規約に反し、アカウントが制限される
 risk があります。**利用者の判断で選択した経路です（詳細は下の「実モデル接続」）。
 
-**未解決:** chatgpt-web の実測はすべて PC 上の Chrome に対するものです。現場は PC を
-置かない前提なので、スマホ側のブラウザへ `ROKID_CHATGPT_CDP` を向ける必要があります。
-設計上は塞がっていませんが**一度も実行していません**。chatgpt-web を現場対応済みとは
-書かないでください。
+**未検証:** Termux内の新しいChromiumでのログイン維持・実際のChatGPT操作、スマホ再起動後の
+自動開始、テザリング上の撮影から答案まで、実機での即消灯・無音・電池持続です。
+以前のスマホChromeでの部分測定は `docs/hardware-measurements.md` に残しています。
 
 導入の正本は
 [Windows + Androidスマホ中継による実機運用](docs/windows-android-real-device-setup.md)、
 CXR-L の実装境界は
 [CXR-L / Global Hi Rokid integration](docs/cxr-l-integration.md)です。
 
-現在のバージョン: **Server APP 0.47.1 / API 1.30.0 / Android client 0.3.17 / Glasses View 1.25.0 / Solver API 1.7.1**。
+現在のバージョン: **Server APP 0.48.0 / API 1.31.0 / Android client 0.3.17 / Glasses View 1.26.0 / Solver API 1.8.0**。
 版数の正本は `app/version.py` です。他の資料は版数を書かず、この行だけが
 `tests/test_documentation_contract.py` で実装と照合されます。
 Solver API は、記入用解答の全文保持・資料不足の分離を行う `answer_only` モードを含みます。
@@ -554,26 +556,32 @@ uvicorn app.main:app --port 8000
 | `ROKID_TRANSCRIBER` | （なし） | リスニング録音の書き起こし `openai\|gemini`（未設定=与えた transcript を使用） |
 | `ROKID_TRANSCRIBE_MODEL` | `gpt-4o-transcribe` | openai の書き起こしモデル（gemini は `ROKID_LLM_MODEL`） |
 | `ROKID_SOLVER_TIERS` | （単一） | 二段フォールバック順（例 `openai,local`） |
-| `ROKID_CHATGPT_CDP` | `http://127.0.0.1:9222` | `ROKID_SOLVER=chatgpt-web` 時に接続する Chrome の DevTools ポート |
+| `ROKID_CHATGPT_CDP` | `http://127.0.0.1:9222` | `ROKID_SOLVER=chatgpt-web` 時に接続する Chromium のDevToolsポート。Termux起動ではloopbackへ固定 |
 | `ROKID_KEYMAP` | （なし） | gesture→KeyCode の上書き（JSON、`/v1/settings.input`。既定 KeyCode は旧機由来・未実測） |
 | `ROKID_API_KEY` | （なし） | 設定時に Bearer 認証（発見系は開放） |
 
 
 ### API キー無しの GPT 経路（`ROKID_SOLVER=chatgpt-web`）
 
-サブスクリプションのみで解答させる経路です。サーバがログイン済み Chrome を
+サブスクリプションのみで解答させる経路です。サーバがログイン済み Chromium を
 DevTools プロトコル経由で操作し、ChatGPT ウェブ UI に問題文を入力して返答を
-読み取ります。撮影 → OCR → 解答 → HUD までスマホの手動操作は不要です。
+読み取ります。撮影画像の保存・転送から答案表示までグラスで操作します。
+
+スマホでは専用の永続プロファイルを使う `scripts/phone_browser.sh` がローカルCDPを公開します。
+初回だけ可視ブラウザで本人がログインし、その後はヘッドレスで起動します。
+`scripts/phone_services.sh` はTermux:Bootとtermux-servicesのブラウザ・API・監視を準備します。
+スマホ自身へのADB接続とChromeの前景維持はこの起動経路に含めません。
+可視ログインにはTermux:X11、再起動後の自動開始にはTermux:BootとTermuxサービスを準備します。
+準備コマンドと承認境界は[会場経路の準備](docs/real-device-operation.md)を参照してください。
+初回ロック解除とテザリング利用開始後が対象です。新ブラウザのログイン維持・実際の送信を
+確認してからサービスを有効化します。端末への導入・実行には別途承認が必要です。
 
 ```bash
-pip install playwright            # `playwright install` は不要（実 Chrome に接続）
-# 専用プロファイルで Chrome を起動し、そこで ChatGPT に一度ログインしておく
-chrome.exe --remote-debugging-port=9222 --user-data-dir="C:\chrome-rokid-profile"
-
-export ROKID_SOLVER=chatgpt-web
-py -3.12 -m app.solvers.chatgpt_web   # ライブ確認（セレクタが現行 UI に合うか）
-py -3.12 -m app.solvers.chatgpt_web "図の角度を求めよ" data/images/p01.png  # 画像経路も
-uvicorn app.main:app --host 0.0.0.0 --port 8000
+# 承認後、スマホのTermuxで実行する準備用コマンド
+bash scripts/phone_browser.sh login       # 可視ブラウザで本人がログイン
+bash scripts/phone_services.sh install   # サービス定義を準備
+# Chromiumでのログイン維持・実際の送信を確認してから有効化
+bash scripts/phone_services.sh enable
 ```
 
 実測値（Chrome 152.0.7977.83 / 2026-09-13）と注意点:
@@ -584,7 +592,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 - **ログアウト状態では別 DOM が出ます。** `lightweight-shell` というプレース
   ホルダーで、composer も `data-testid` も存在しません。専用プロファイルで
   一度ログインする必要があります（毎問の手動操作は不要）。
-- **実機検証済み**（2026-09-13、ログイン済みセッション）。1問あたり実測
+- **PC上のChromeでの測定**（2026-09-13、ログイン済みセッション）。1問あたり実測
   **テキストのみ 7.58秒 / 画像付き 8.98秒**。内訳は遷移+composer 2.0秒、
   添付 0.11秒、残りが生成時間です。ブラウザ接続自体は 0.61秒
   （playwright 0.23 / CDP 0.03 / 遷移 0.28）で律速ではないため、接続プールは
@@ -614,24 +622,26 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
   送信済みの解答を捨てて再質問しており、1問あたり最大3生成でした）。
 - **使用制限への防御**（2026-09-14 にアカウントが制限された経験から）:
   - 返答が使用制限の通知だった場合は `ChatGptWebRateLimit` で即座に打ち切り、
-    再試行しません（新しいチャットを開いて再質問するのが悪化の原因でした）。
+    同じ呼出では再試行しません（新しいチャットを開いて再質問するのが悪化の原因でした）。
     検出語は `ROKID_CHATGPT_RATE_LIMIT_MARKERS`（`|` 区切り）で変更できます。
   - 遅い生成が続くと送信を拒否するブレーキは、2026-09-29 に削除しました。
-    background解析は冊子全体を1通で送り、その返答に小問の一覧と全解答が入るため、
-    長い生成は正常です。
+  background解析は資料の受領確認を順番に終えてから全問の一覧と答案を求めます。
+  生成中の返答には解析時間の打ち切りを設けません。
 - **教科ごとに1チャット**（既定）: `ROKID_CHATGPT_CHAT_SCOPE=subject` で1科目が
   1チャットを共有し、再試行・再起動でも同じチャットへ戻ります。冊子の画像は
   **その科目で1回だけ**アップロードされます（同一バイト列を SHA-256 で判定）。
   `question` は問題ごとに新しいチャットを開く互換設定です。
-- **リスニング音声は資料と同じメッセージに添付されます。** `Question.audio_path`
+- **リスニング原音は資料と同じチャットの最後の組に添付されます。** `Question.audio_path`
   が録音ファイルを運び、写真用 input は `accept="image/*"` のため
   `ROKID_CHATGPT_FILE_UPLOAD_SEL`（汎用ファイル input）から送ります。文字起こしは
-  従来どおり本文に入るため、音声が読めない場合も解答は失われません。音声も
-  チャット内で重複アップロードしません。
-- **PDFでは送りません。** OpenAI の File Uploads FAQ のとおり、Enterprise 以外の
+  主経路では送信せず、原音を添付します。音声もチャット内で重複アップロードしません。
+  ChatGPT Webが原音を利用できるか、実録音で正答できるかは未検証です。
+- **PDFでは送りません。** OpenAIの[File Uploads FAQ](https://help.openai.com/en/articles/8555545-file-uploads-faq)（2026-09-30確認）のとおり、Enterprise以外の
   プランは PDF の文字層だけを読み、画像を捨てます。撮影した頁には文字層が無い
-  ため、画像のまま送り、20枚を超えるときは2〜3頁を1枚に結合します
-  （`app/source_bundle.py`）。
+  ため、頁ごとのJPEGを使います。20枚を超えたら同じチャットに分割送信し、
+  途中は受領確認だけを求め、最後に全問の答案を求めます。原音の添付も各通の枠内へ収めます。
+  確認済みの頁と送信途中の記録を保存し、未確定の送信を自動で送り直しません。
+  一通の分割とは別に、アカウントの時間枠・容量の上限があります。上限拒否時は資料を残して停止します。
 
 注意点:
 
@@ -640,16 +650,15 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 - ページ構造は OpenAI のもので予告なく変わります。壊れた場合は
   `ROKID_CHATGPT_COMPOSER_SEL` / `ROKID_CHATGPT_ASSISTANT_SEL` を再設定します
   （コード変更は不要）。`py -3.12 -m app.solvers.chatgpt_web` が切り分け用です。
-- **画像とテキストは別パートとして送られます。** ページ画像を添付し、OCR
-  テキストを本文に入力するため、図・グラフ・数式は OCR を経ずに渡ります
-  （API solver と同じ扱い）。添付が確認できたかは解答の
+- **撮影画像の内容を直接読みます。** 主経路にはOCR本文を入力しません。
+  図・グラフ・数式は頁画像に含めて渡します。添付が確認できたかは解答の
   `extras["image_attached"]` に記録されます。画像経路の確認は
   `py -3.12 -m app.solvers.chatgpt_web "<問題文>" <画像パス>`。
 
 #### スマホの ChatGPT で解く経路（PC の Chrome を使わない）
 
 以下の貼り付けAPIは凍結した互換経路で、利用者が選択した会場運用には使いません。
-現行はスマホFastAPIからスマホChrome CDPを操作します。以下の手作業では
+現行はスマホFastAPIからTermux内のChromium CDPを操作します。以下の手作業では
 サーバは解答を受け取らず、HUDも駆動されません。
 
 ```bash
@@ -660,7 +669,7 @@ curl "$BASE/v1/exam-sessions/$SID/paste-prompt"
 
 - 全頁をPDFで返していた `pages.pdf` は2026-09-29に削除しました。Enterprise 以外の
   ChatGPT は PDF の画像を捨てるため、撮影した頁は読まれません。
-- Chrome が未起動・未ログインなら `answer_only` はプレースホルダーに落ちず
+- Chromiumが未起動・未ログインなら `answer_only` はプレースホルダーに落ちず
   明示的に失敗します。
 
 全変数の雛形は [`.env.example`](.env.example)、一覧は

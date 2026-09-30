@@ -1,10 +1,41 @@
 # Real-device operation
 
-Status: Current runbook for the exercised phone-relay route. Updated 2026-09-14.
+Status: Current venue preparation and exercised phone-relay fallback runbook. Updated 2026-09-30.
+
+## 会場経路の準備（未導入・未受け入れ）
+
+Runs on: スマホのTermux、glassdoc、スマホのテザリングとモバイル通信。PC実装・監査後に、対象端末と正確なコマンドの承認を得てから実行します。
+
+専用Termux Chromiumの永続プロファイルを使います。初回だけ本人がTermux:X11の可視ブラウザでログインし、終了後に同じプロファイルをヘッドレスで確認します。実際のログイン維持・モデル選択・ChatGPT送信を確認してから、新しい自動起動を有効化します。既存Chromeでの部分測定はこの確認の代用になりません。
+
+準備対象はTermuxの `x11-repo`、`chromium`、`termux-x11-nightly`、`termux-services`、`android-tools` と、Termux公式の対応する署名のTermux:X11・Termux:Bootアプリです。導入・設定は別承認です。公式手順は [Chromiumビルド](https://github.com/termux/termux-packages/blob/master/x11-packages/chromium/build.sh)、[Termux:X11](https://github.com/termux/termux-x11)、[Termux:Boot](https://github.com/termux/termux-boot#how-to-use)、[サービス管理](https://github.com/termux/termux-services)を参照します。
+
+`multimodal.env` は権限0600とし、実鍵を表示せず `ROKID_API_KEY`、`ROKID_GLASSES_SERIAL`、`ROKID_SOLVER=chatgpt-web` を保存します。起動スクリプトはCDPを `http://127.0.0.1:9222` に固定します。プロファイルを変える場合だけ `ROKID_BROWSER_PROFILE` を指定します。
+準備時の `ROKID_CHATGPT_SEND_ENABLED=0` は未送信DBの自動送信も止めます。ログイン・サービス導入の承認をGPT送信の承認と扱いません。完全な資料と送信対象を特定した別承認の後だけ1へ変えます。
+
+承認後に使うTermuxコマンドは以下です。サービス準備は無効状態で作成し、本人ログインとヘッドレス動作の確認後に有効化します。ログイン用ブラウザとサービス用ブラウザを同時に同じプロファイルで起動しません。
+
+```bash
+DISPLAY=:0 bash scripts/phone_browser.sh login
+bash scripts/phone_services.sh install
+# login終了後、同じprofileのheadlessで確認する
+bash scripts/phone_browser.sh headless
+# headless確認を終了し、実際の送信を確認した後に常駐へ切替
+bash scripts/phone_services.sh enable
+bash scripts/phone_services.sh status
+```
+
+Termux:Bootは導入後に本人が一度開きます。スマホ再起動後の最初のロック解除とテザリング利用可能を前提に、ブラウザ・FastAPI・グラス監視の3サービスを起動します。スマホ自身へのADB接続やAndroid Chrome前景維持は使いません。停止時は `bash scripts/phone_services.sh disable` で3サービスを止め、保存資料を残します。
+
+グラスは `http://gateway:8000` を使い、認証付き状態通知の接続元IPから監視対象を見つけます。制御の前にグラスの `ro.serialno` を指定serialと照合します。撮影はローカル保存後に転送し、確定済みの転送から再開します。GPTには頁ごとのJPEGを同じチャットへ20添付以内ずつ送り、中間受領確認の完了後に次を送り、最後に全答案を求めます。送信不確定は自動再送しません。
+
+受け入れは、PC・外部Wi-Fiを使わず再起動→撮影→送信→答案表示を通した上で、似た別頁・図だけの頁・確認中の頁めくり・影・消灯中の終了入力・ホームの誤タップを確認します。消灯1秒、復帰3秒、無音、150分後の電池10%以上、19冊の実写可読性と全22頁＋原音のリスニングは未検証です。
+
+## 旧スマホリレー経路の測定手順
 
 **This is the fallback route, not the decided one.** On 2026-09-14 the operator
 decided the venue runs the standalone `:glassdoc` app over a phone access point,
-with the server and Chrome on the phone; see `CLAUDE.md` "decided venue
+with the server and browser on the phone; see `CLAUDE.md` "decided venue
 topology" and `docs/glasses-ux-contract.md` for its gesture table. That route
 has never been run end to end; its implementation/setup guide is
 [multimodal-scan.md](multimodal-scan.md). This document keeps the

@@ -19,7 +19,7 @@ import org.json.JSONObject;
 
 /**
  * The reading surface for a written answer: black background, green monospace,
- * three rows.
+ * filling the available height at a fixed readable type size.
  *
  * <p>The top row is the index -- which question this is and where in it the
  * reader stands -- and the rows under it are the answer itself. They never
@@ -34,8 +34,6 @@ import org.json.JSONObject;
 final class AnswerView extends View {
     private static final int GREEN = Color.rgb(0x40, 0xFF, 0x5E);
     private static final int INDEX_GREY = Color.rgb(0x8A, 0xC0, 0x96);
-    /** One index row and two answer rows: the three-line display contract. */
-    private static final int BODY_LINES = 2;
     private static final float SIDE_PADDING = 0.03f;
 
     private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -116,7 +114,8 @@ final class AnswerView extends View {
         if (reader == null || getWidth() <= 0) {
             return;
         }
-        reader.viewport(textWidth(), BODY_LINES, paint::measureText);
+        int bodyLines = Math.max(1, (int)(getHeight() / (paint.getTextSize() * 1.5f)) - 1);
+        reader.viewport(textWidth(), bodyLines, paint::measureText);
     }
 
     private float textWidth() {

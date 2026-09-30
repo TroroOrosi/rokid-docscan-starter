@@ -227,6 +227,20 @@ public class DocScanGlassActivityIntentTest {
         Field serial = DocScanController.class.getDeclaredField("serial");
         serial.setAccessible(true);
         ((java.util.concurrent.ExecutorService) serial.get(controller)).submit(() -> {}).get(5, TimeUnit.SECONDS);
+        ((java.util.concurrent.ExecutorService) serial.get(controller)).submit(() -> {}).get(5, TimeUnit.SECONDS);
+    }
+
+    @Test public void ordinaryLaunchNeverInheritsThePreviousManualOverride() throws Exception {
+        activity.getPreferences(Context.MODE_PRIVATE).edit().putBoolean("manual", true).commit();
+        java.lang.reflect.Method apply = DocScanGlassActivity.class.getDeclaredMethod("applyIntent", Intent.class, boolean.class);
+        apply.setAccessible(true);
+        apply.invoke(activity, new Intent(), true);
+        assertFalse(controller.isManualCapture());
+        assertFalse(activity.getPreferences(Context.MODE_PRIVATE).contains("manual"));
+        apply.invoke(activity, new Intent().putExtra("manual", true), true);
+        assertTrue(controller.isManualCapture());
+        apply.invoke(activity, new Intent(), true);
+        assertFalse(controller.isManualCapture());
     }
 
     @Test @Config(sdk = 28, manifest = Config.NONE)
@@ -311,6 +325,57 @@ public class DocScanGlassActivityIntentTest {
         // This queues after any Intent configuration, then publishes a diagnostic.
         controller.restoreGlassesViewAfterMenuExit();
         updates.awaitDiagnostic("Restored DocScan glasses view after system-menu exit");
+    }
+
+    @Test public void playbackMutePreservesMicrophoneAndDisablesTouchSounds() throws Exception {
+        android.media.AudioManager audio = (android.media.AudioManager)activity.getSystemService(Context.AUDIO_SERVICE);
+        java.lang.reflect.Method mute = DocScanGlassActivity.class.getDeclaredMethod("muteOutput");
+        mute.setAccessible(true);
+        for (boolean microphoneMuted : new boolean[]{false, true}) {
+            audio.setMicrophoneMute(microphoneMuted);
+            audio.setStreamVolume(android.media.AudioManager.STREAM_MUSIC, 2, 0);
+            audio.setStreamVolume(android.media.AudioManager.STREAM_SYSTEM, 2, 0);
+            mute.invoke(activity);
+            assertEquals(0, audio.getStreamVolume(android.media.AudioManager.STREAM_MUSIC));
+            assertEquals(0, audio.getStreamVolume(android.media.AudioManager.STREAM_SYSTEM));
+            assertEquals(microphoneMuted, audio.isMicrophoneMute());
+        }
+        assertEquals(0, android.provider.Settings.System.getInt(activity.getContentResolver(),
+                android.provider.Settings.System.SOUND_EFFECTS_ENABLED, -1));
+    }
+
+    @Test public void newRunInvalidatesThePreviousNotificationGeneration() throws Exception {
+        java.lang.reflect.Method begin = DocScanGlassActivity.class.getDeclaredMethod("beginPowerGeneration");
+        begin.setAccessible(true);
+        java.lang.reflect.Method accept = DocScanGlassActivity.class.getDeclaredMethod("acceptsWake", Intent.class);
+        accept.setAccessible(true);
+        begin.invoke(activity);
+        long generation = activity.getPreferences(Context.MODE_PRIVATE).getLong("power_generation", -1);
+        setField(activity, "powerSession", 7L);
+        setField(activity, "powerPhase", "analyzing");
+        Intent wake = new Intent().putExtra("wake_session_id", 7).putExtra("wake_generation", generation);
+        assertTrue((boolean)accept.invoke(activity, wake));
+        begin.invoke(activity);
+        assertEquals(generation + 1, activity.getPreferences(Context.MODE_PRIVATE).getLong("power_generation", -1));
+        assertFalse((boolean)accept.invoke(activity, wake));
+    }
+
+    @Test public void staleWakeCannotCreateAChooserAfterTheProcessWasStopped() throws Exception {
+        activity.getPreferences(Context.MODE_PRIVATE).edit().putLong("power_generation", 3)
+                .putLong("power_session", 7).putString("power_phase", "writing_done").commit();
+        org.robolectric.android.controller.ActivityController<DocScanGlassActivity> stopped =
+                Robolectric.buildActivity(DocScanGlassActivity.class,
+                        new Intent().putExtra("wake_session_id", 7).putExtra("wake_generation", 3L)).create();
+        try {
+            assertTrue("a stale answer wake ends before any capture or chooser UI is created", stopped.get().isFinishing());
+            assertNull(org.robolectric.util.ReflectionHelpers.getField(stopped.get(), "camera"));
+            assertNull(org.robolectric.util.ReflectionHelpers.getField(stopped.get(), "hud"));
+            stopped.start().resume();
+            assertFalse(Shadows.shadowOf(stopped.get()).getTurnScreenOn());
+            assertEquals(0, stopped.get().getWindow().getAttributes().flags
+                    & android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+            assertEquals(3, activity.getPreferences(Context.MODE_PRIVATE).getLong("power_generation", -1));
+        } finally { stopped.destroy(); }
     }
 
     private double guideFraction() throws Exception {

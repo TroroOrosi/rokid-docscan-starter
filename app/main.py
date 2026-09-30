@@ -38,6 +38,7 @@ from .explainer import ExplainRequest, ExplainResult
 from .explainers import get_explainer, list_explainers
 from .extractors import detect_media, get_extractor
 from .glassdoc_contract import GLASSDOC_OPERATION_CONTRACT
+from .glasses_state import GlassesState, list_states, read_state, record_state
 from .glasses_view import (
     CAPTURE_CONTRACT,
     EXPLAIN_STAGES,
@@ -80,8 +81,10 @@ from .retrieval import retrieve_context
 from .solvers import Question, SolveResult, get_solver
 from .solvers.llm_adapter import answer_numbers, paste_prompt
 from .solvers.chatgpt_web import (
-    ChatGptWebBlocked, ChatGptWebBusy, ChatGptWebChatLost, ChatGptWebError, ChatGptWebRateLimit,
-    ChatGptWebUncertain,
+    ChatGptWebAttachmentFailed, ChatGptWebAuthenticationRequired,
+    ChatGptWebBlocked, ChatGptWebBrowserUnavailable, ChatGptWebBusy,
+    ChatGptWebChatLost, ChatGptWebError, ChatGptWebModelMismatch, ChatGptWebRateLimit,
+    ChatGptWebSendNotAuthorized, ChatGptWebUncertain, chatgpt_send_enabled,
 )
 from .solvers.registry import solve_with_fallback
 from .subjects import detect_subject
@@ -115,9 +118,8 @@ async def lifespan(app: FastAPI):
         get_analyzer()
         if (os.environ.get("ROKID_SOLVER") or "").strip() != "chatgpt-web":
             get_solver()
-        # chatgpt-web is registered and never a placeholder. Its readiness is
-        # Chrome's DevTools socket, which is gone while Termux is in front, as it
-        # is when this server starts (§F-6-1); it is checked when a message is sent.
+        # The separately supervised Termux Chromium may still be starting.
+        # Its loopback CDP and authentication are checked before sending.
     _resume_all_answers()
     yield
 
@@ -139,14 +141,57 @@ async def _auth_middleware(request: Request, call_next):
     # (a client appending a slash to a discovery URL must not be locked out
     # before it can negotiate contracts).
     path = request.url.path.rstrip("/") or "/"
+    if path == "/v1/glasses/state" and not config.API_KEY:
+        return JSONResponse({"detail": "authentication_not_configured",
+                             "code": "authentication_failed"}, status_code=503)
     if config.API_KEY and path not in config.AUTH_EXEMPT_PATHS:
         # Constant-time compare over bytes: str-compare leaks length/prefix
         # timing, and compare_digest rejects non-ASCII str inputs.
         expected = f"Bearer {config.API_KEY}".encode("utf-8")
         provided = request.headers.get("authorization", "").encode("utf-8")
         if not hmac.compare_digest(provided, expected):
-            return JSONResponse({"detail": "unauthorized"}, status_code=401)
+            return JSONResponse({"detail": "unauthorized", "code": "authentication_failed"}, status_code=401)
     return await call_next(request)
+
+
+@app.post("/v1/glasses/state")
+def glasses_notify(state: GlassesState, request: Request) -> dict:
+    try:
+        return {"accepted": record_state(state, request.client.host)}
+    except (OSError, ValueError, TypeError, KeyError):
+        raise HTTPException(status_code=503, detail="state_unavailable") from None
+
+
+@app.get("/v1/glasses/state")
+def glasses_status(device_id: str | None = None) -> dict:
+    try:
+        if device_id is None:
+            return {"devices": [{**state, "answer_ready": False} for state in list_states()]}
+        state = read_state(device_id)
+    except (OSError, ValueError, TypeError, KeyError):
+        raise HTTPException(status_code=503, detail="state_unavailable") from None
+    if state is None:
+        raise HTTPException(status_code=404, detail="no_glasses_state")
+    ready = False
+    if state["phase"] == "analyzing" and state["session_id"] is not None:
+        try:
+            # Also resumes a pre-send failure on the phone, without glasses polling.
+            items = exam_answer_bundle(state["session_id"])["items"]
+            ready = bool(items) and all(item["status"] != "pending" for item in items)
+        except HTTPException as error:
+            if error.status_code not in (404, 409):
+                raise
+    # A writing-done notification may commit while the bundle is being read.
+    # Return the newer phase instead of a wake permission for an ended run.
+    try:
+        latest = read_state(device_id)
+    except (OSError, ValueError, TypeError, KeyError):
+        raise HTTPException(status_code=503, detail="state_unavailable") from None
+    if latest is None:
+        raise HTTPException(status_code=503, detail="state_unavailable")
+    if latest != state:
+        return {**latest, "answer_ready": False}
+    return {**state, "answer_ready": ready}
 
 
 
@@ -434,11 +479,18 @@ def provider_status() -> dict:
 
     def _status(kind: str, registry) -> dict:
         provider = registry.get()
+        if provider.name == "chatgpt-web" and not chatgpt_send_enabled():
+            return {"name": provider.name, "ready": False, "code": "send_not_authorized",
+                    "message": "GPT submission has not been authorized for this runtime"}
         try:
             info = provider.info()
         except Exception as error:  # noqa: BLE001 - a pre-flight report must not 500
             return {"name": provider.name, "ready": False,
+                    "code": next((code for kind, code in _FAILURE_CODES if isinstance(error, kind)),
+                                 "provider_unavailable"),
                     "message": f"{type(error).__name__} while checking"}
+        if provider.name == "chatgpt-web" and not info.get("ready"):
+            info = {**info, "code": "browser_unavailable"}
         if config.REAL_MODE:
             message = config.real_mode_rejection(kind, provider, info)
             if message:
@@ -2483,6 +2535,11 @@ class AnswerMissing(ValueError):
 
 _FAILURE_CODES = (
     (AnswerMissing, "answer_missing"),
+    (ChatGptWebSendNotAuthorized, "send_not_authorized"),
+    (ChatGptWebAuthenticationRequired, "authentication_failed"),
+    (ChatGptWebBrowserUnavailable, "browser_unavailable"),
+    (ChatGptWebAttachmentFailed, "attachment_failed"),
+    (ChatGptWebModelMismatch, "model_mismatch"),
     (ChatGptWebUncertain, "browser_outcome_unknown"),
     (ChatGptWebChatLost, "chat_lost"),
     (ChatGptWebRateLimit, "rate_limited"),
@@ -2494,12 +2551,20 @@ _FAILURE_CODES = (
 # until RESUME_LIMIT batches have failed the same way.
 _RETRYING_ISSUES = {
     "not_sent": "ChatGPTへ送れませんでした。自動で再試行します",
+    "authentication_failed": "ChatGPTのログイン確認待ちです。資料は保持しています",
+    "browser_unavailable": "ブラウザに未接続です。復旧後に自動で再試行します",
+    "attachment_failed": "画像・原音を添付できませんでした。自動で再試行します",
+    "model_mismatch": "指定モデルの確認待ちです。資料は保持しています",
     "browser_busy": "別の解析がブラウザを使用中です。自動で再試行します",
     "browser_blocked": "前の送信の結果確認待ちです。自動で再試行します",
 }
 # The same failures once the retries have run out: said plainly, not waited on.
 _GAVE_UP_ISSUES = {
-    "not_sent": "ChatGPTへ送れませんでした。Chromeを確認して読取完了をやり直してください",
+    "not_sent": "ChatGPTへ送れませんでした。ブラウザを確認して読取完了をやり直してください",
+    "authentication_failed": "ChatGPTの認証に失敗しました。本人のログインを確認してください",
+    "browser_unavailable": "ブラウザに接続できませんでした。資料は保持しています",
+    "attachment_failed": "画像・原音の添付に失敗しました。資料は保持しています",
+    "model_mismatch": "指定モデルとWeb画面の選択が一致しません。送信していません",
     "browser_busy": "ブラウザが使用中のままです。送信していません",
     "browser_blocked": "前の送信の結果確認待ちです。確認後に読取完了をやり直してください",
 }
@@ -2521,6 +2586,8 @@ def _retrying(row) -> bool:
 
 
 def _record_solve_failure(conn, row, error: Exception, *, commit: bool = True) -> None:
+    if isinstance(error, ChatGptWebSendNotAuthorized):
+        return  # Setup is a pause: preserve pending rows and retry counts.
     # Keep only a fixed code, never a provider exception containing source or keys.
     current = conn.execute("SELECT structure_json FROM questions WHERE id = ?", (row["id"],)).fetchone()
     metadata = json.loads(current["structure_json"] or "{}")
@@ -2826,17 +2893,21 @@ PRESEND_RETRY_S = 150.0
 def _nothing_sent(error: Exception) -> bool:
     """The client raises the bare base class only before a send. After one it
     raises ChatGptWebUncertain, and a limit or a lost chat has its own class."""
-    return isinstance(error, (ChatGptWebBusy, ChatGptWebBlocked)) or type(error) is ChatGptWebError
+    return isinstance(error, (ChatGptWebBusy, ChatGptWebBlocked,
+                              ChatGptWebAuthenticationRequired, ChatGptWebBrowserUnavailable,
+                              ChatGptWebAttachmentFailed, ChatGptWebModelMismatch)) or type(error) is ChatGptWebError
 
 
 def _answer_all(question) -> list | None:
     """The routed solver's one-message answer for the booklet; None if it has none."""
     try:
         solver = get_solver(os.environ.get("ROKID_SOLVER"))
+    except ChatGptWebError:
+        raise
     except RuntimeError as error:
-        # REAL_MODE refuses an unready browser here, before anything is sent:
-        # Chrome may only be behind another app for a moment.
-        raise ChatGptWebError(str(error)) from error
+        # REAL_MODE can refuse CDP while the supervised browser is restarting.
+        kind = ChatGptWebBrowserUnavailable if os.environ.get("ROKID_SOLVER") == "chatgpt-web" else ChatGptWebError
+        raise kind("provider is unavailable before send") from error
     answer_all = getattr(solver, "answer_all", None)
     return answer_all(question=question) if answer_all else None
 
@@ -2912,6 +2983,8 @@ def _answer_deck(conn, session, session_id: int, doc_id: int) -> bool:
     sent, on success or failure: on 9/29 a list-only reply followed by one
     message per 小問 sent the next message before anything was answered.
     """
+    if os.environ.get("ROKID_SOLVER", "").strip() == "chatgpt-web" and not chatgpt_send_enabled():
+        return True  # Keep the reviewing session and originals for later permission.
     items = [row for group in _answer_groups(conn, session_id) for row in group["items"]]
     if items and all(_latest_solution_row(conn, row["id"]) for row in items):
         return True  # a repeated finalize must not ask again
@@ -2935,6 +3008,8 @@ def _answer_deck(conn, session, session_id: int, doc_id: int) -> bool:
             replies, failed = _answer_all(question), None
             break
         except Exception as error:  # noqa: BLE001 - recorded on the deck, never resent
+            if isinstance(error, ChatGptWebSendNotAuthorized):
+                return True
             replies, failed = [], error
             if not _nothing_sent(error):
                 break
@@ -3042,6 +3117,8 @@ def _solve_deck(conn, session, session_id: int, doc_id: int, *, bundle_items: bo
     (the glassdoc route) solves only what answer-bundle shows and names the 大問
     in the locator; the frozen /review route keeps solving every deck row.
     """
+    if os.environ.get("ROKID_SOLVER", "").strip() == "chatgpt-web" and not chatgpt_send_enabled():
+        return 0
     server_solved = 0
     # Context is scoped to each problem's own 大問 (plan.md contract 1),
     # not the whole document: every prompt is prefilled per question, so
@@ -3159,6 +3236,7 @@ def _resume_answers(conn, session) -> bool:
     solver_env = (os.environ.get("ROKID_SOLVER") or "").strip()
     if (not session["document_id"] or _session_phase(session) == "reading"
             or solver_env in ("", "local")
+            or (solver_env == "chatgpt-web" and not chatgpt_send_enabled())
             or (session["mode"] == "real" and not config.ALLOW_REAL_EXAM_SOLVE)):
         return False
     recent = conn.execute(

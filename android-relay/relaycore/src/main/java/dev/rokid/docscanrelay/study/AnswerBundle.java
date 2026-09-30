@@ -80,7 +80,8 @@ public final class AnswerBundle {
                     .put("group_id", item.groupId).put("group_label", item.groupLabel)
                     .put("question_id", item.questionId).put("question_label", item.questionLabel)
                     .put("answer", item.answer).put("status", item.status.name().toLowerCase(Locale.ROOT))
-                    .put("issue", item.issue).put("diagrams", AnswerDiagram.encode(item.diagrams)));
+                    .put("issue", item.issue).put("diagrams", AnswerDiagram.encode(item.diagrams))
+                    .put("answer_no", new JSONArray(item.answerNumbers)));
             boolean hasDiagrams = false;
             for (AnswerItem item : items) hasDiagrams |= !item.diagrams.isEmpty();
             String json = new JSONObject().put("schema_version", hasDiagrams ? 2 : SCHEMA_VERSION)
@@ -114,10 +115,22 @@ public final class AnswerBundle {
                     string(item, "question_id"), string(item, "question_label"), string(item, "answer"),
                     AnswerItem.Status.valueOf(string(item, "status").toUpperCase(Locale.ROOT)),
                     string(item, "issue"), AnswerDiagram.parse(item.has("diagrams")
-                            ? item.getJSONArray("diagrams") : null)));
+                            ? item.getJSONArray("diagrams") : null), answerNumbers(item)));
         }
         return new AnswerBundle(string(root, "session_id"), string(root, "input_digest"),
                 number(root, "revision"), items);
+    }
+
+    private static List<Integer> answerNumbers(JSONObject item) throws JSONException {
+        List<Integer> numbers = new ArrayList<>();
+        if (!item.has("answer_no")) return numbers;
+        JSONArray array = item.getJSONArray("answer_no");
+        for (int i = 0; i < array.length(); i++) {
+            Object value = array.get(i);
+            if (!(value instanceof Integer)) throw new JSONException("invalid answer number");
+            numbers.add((Integer) value);
+        }
+        return numbers;
     }
 
     static String string(JSONObject object, String key) throws JSONException {

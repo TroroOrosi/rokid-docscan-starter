@@ -66,6 +66,8 @@ final class DisplaySleep {
 
     /** Shortens the timeout and releases the screen, or reports why it did not. */
     Result sleep(Activity activity) {
+        // A late start/resume must not reuse an earlier accepted answer's wake request.
+        activity.setTurnScreenOn(false);
         int previous = current(activity);
         if (!write(activity, SHORT_TIMEOUT_MILLIS)) {
             return Result.NOT_PERMITTED;

@@ -41,6 +41,23 @@ def _isolate(tmp_path, monkeypatch):
     monkeypatch.setattr(chatgpt_web, "POLL_S", 0)
 
 
+@pytest.mark.parametrize("method", ["complete", "complete_json"])
+def test_disabled_sending_stops_before_browser_connection_or_attachment_build(monkeypatch, tmp_path, method):
+    from app.solvers import cdp
+
+    monkeypatch.setenv("ROKID_CHATGPT_SEND_ENABLED", "0")
+    def no_browser(_endpoint):
+        pytest.fail("a disabled sender must not connect to the browser")
+    def no_files():
+        pytest.fail("a disabled sender must not build attachments")
+    monkeypatch.setattr(cdp, "connect_over_cdp", no_browser)
+    with pytest.raises(ChatGptWebError, match="send.*authorized"):
+        getattr(chatgpt_web.ChatGptWebClient(), method)(
+            system="Answer only", prompt="Answer every question", files=no_files,
+            chat_key="session:1", expect=("questions",), booklet=True)
+    assert not (tmp_path / "browser-state").exists()
+
+
 class _Locator:
     def __init__(self, page, selector):
         self._page = page
@@ -127,6 +144,8 @@ class _StubPage:
     url = "https://chatgpt.com/"
     #: False for a page whose chats never get a /c/ address.
     addresses = True
+    selected_model = "GPT-6 Pro"
+    selected_effort = ""
 
     def __init__(self, reply_frames, *, thumbnail_appears=True, thumbnail_baseline=1,
                  missing=(), streaming=(True, False)):
@@ -173,6 +192,11 @@ class _StubPage:
     def locator(self, selector):
         return _Locator(self, selector)
 
+    def evaluate(self, expression):
+        if "signed_out" in expression:
+            return {"signed_out": getattr(self, "signed_out", False)}
+        return {"models": [self.selected_model], "efforts": [self.selected_effort]}
+
 
 def _kinds(page):
     """Event kinds with the send click named as such, so a sequence reads."""
@@ -198,6 +222,23 @@ def test_without_a_stop_button_only_the_whole_json_ends_the_wait():
     page = _StubPage(["解", '{"status":"ready","diagrams":[{"alt":"a"}', '{"status":"ready",',
                       '{"status":"ready","answer":"x=2"}'], streaming=[])
     assert _ask(page, expect=("answer",)) == ('{"status":"ready","answer":"x=2"}', None)
+
+
+@pytest.mark.parametrize("model, effort, allowed", [
+    ("GPT-6 Pro", "", True), ("GPT-5.6 Sol", "極高", True),
+    ("GPT-5.6 Sol", "高", False), ("GPT-5.6 Sol", "", False),
+    ("GPT-6", "極高", False), ("", "", False),
+])
+def test_only_the_requested_actual_model_and_effort_can_be_sent(model, effort, allowed):
+    page = _StubPage(['{"answer":"4"}'])
+    page.selected_model, page.selected_effort = model, effort
+    if allowed:
+        _ask(page, expect=("answer",))
+        assert len(_sends(page)) == 1
+    else:
+        with pytest.raises(chatgpt_web.ChatGptWebModelMismatch):
+            _ask(page, expect=("answer",))
+        assert not _sends(page)
 
 
 def test_prompt_is_filled_whole_so_a_newline_does_not_send_it_early():
@@ -287,8 +328,9 @@ def test_a_signed_out_page_fails_with_the_reason_not_a_selector_timeout():
     # all. That is a sign-in problem, and the error has to say so rather than
     # sending the operator to retune a selector that was never wrong.
     page = _StubPage(["done"], missing={chatgpt_web.COMPOSER_SEL})
+    page.signed_out = True
 
-    with pytest.raises(ChatGptWebError, match="signed-out"):
+    with pytest.raises(chatgpt_web.ChatGptWebAuthenticationRequired, match="signed-out"):
         _ask(page)
 
     # Nothing was typed or sent into a page that was not ready.
@@ -366,7 +408,7 @@ class _FakeClient:
         self.last_image_attached = attached
 
     def complete_json(self, *, system, prompt, image=None, images=None, audio=None,
-                      chat_key=None, files=None, expect=None):
+                      chat_key=None, files=None, expect=None, booklet=False):
         self.seen = {
             "expect": expect,
             "system": system,
@@ -375,7 +417,8 @@ class _FakeClient:
             "images": images,
             "audio": audio,
             "chat_key": chat_key,
-            "files": files() if callable(files) else files,
+            "files": list(files()) if callable(files) else files,
+            "booklet": booklet,
         }
         return json.loads(self.payload)
 
@@ -814,8 +857,7 @@ def test_document_route_counts_audio_and_reuses_confirmed_files(tmp_path, monkey
                         audio_path=str(recording), audio_transcript="[30000..31000ms] Question two", chat_key="session:1")
     ChatGptWebSolver(client=fake).solve(question=question)
     files, first_key = fake.seen["files"], fake.seen["chat_key"]
-    assert len(files) <= 20
-    assert len(files) == 15 and files[-2]["name"] == "page040.jpg", "shared pages cannot be lost"
+    assert len(files) == 41 and files[-2]["name"] == "page040.jpg", "shared pages cannot be lost"
     assert files[0]["mimeType"].startswith("image/") and files[-1]["name"] == "original.wav"
     assert all(f["name"] != "document.md" for f in files)
     assert "Question two" not in fake.seen["prompt"] and "q9" in fake.seen["prompt"]
@@ -834,9 +876,9 @@ def test_document_route_counts_audio_and_reuses_confirmed_files(tmp_path, monkey
     browser = _StubPage(["2", "2"])
     client = chatgpt_web.ChatGptWebClient()
     ctx = _OneTabContext(browser)
-    client._ask_with_retries(ctx, "問2", [], files=files, chat_key=first_key)
+    client._ask_with_retries(ctx, "問2", [], files=files[:20], chat_key=first_key)
     count = len([k for k, _ in browser.events if k == "upload"])
-    client._ask_with_retries(ctx, "問3", [], files=files, chat_key=first_key)
+    client._ask_with_retries(ctx, "問3", [], files=files[:20], chat_key=first_key)
     assert len([k for k, _ in browser.events if k == "upload"]) == count
 
 
@@ -1252,6 +1294,395 @@ def _chats(tmp_path):
     return json.loads((tmp_path / "browser-state" / "chats.json").read_text(encoding="utf-8"))["chats"]
 
 
+class _BatchPage(_StubPage):
+    """A local composer receiving distinct files and echoing the requested receipt."""
+
+    def __init__(self, **kw):
+        super().__init__([], **kw)
+        self.receipts = []
+        self.reply_override = None
+        self.user_text = ""
+
+    def locator(self, selector):
+        page = self
+
+        class Locator(_Locator):
+            def count(self):
+                if self._selector == chatgpt_web.USER_SEL:
+                    return page.turns
+                return super().count()
+
+            def inner_text(self):
+                if self._selector == chatgpt_web.USER_SEL:
+                    return page.user_text
+                return super().inner_text()
+
+        return Locator(self, selector)
+
+    def sent(self):
+        super().sent()
+        text = [v for k, v in self.events if k == "fill"][-1]
+        self.user_text = text
+        receipt = json.loads(text.rsplit("\nTransfer receipt:\n", 1)[1])
+        self.receipts.append(receipt)
+        if "received" in receipt:
+            reply = receipt
+        else:
+            reply = {"batch_id": receipt["batch_id"], "questions": [{
+                "label": "問1", "answer": "4", "status": "ready", "pages": [1]}]}
+        self.replies = [json.dumps(self.reply_override or reply)]
+        self.poll = 0
+        self.confirmed_files = 0
+
+
+def _batch_files(count=47, audio=False):
+    files = [{"name": f"page{n:03d}.jpg", "mimeType": "image/jpeg",
+              "buffer": JPEG + str(n).encode()} for n in range(1, count + 1)]
+    if audio:
+        files.append(chatgpt_web.audio_payload("original.wav", b"RIFF original audio"))
+    return files
+
+
+def _booklet(client, page, files, key="session:batch"):
+    return client._ask_with_retries(_OneTabContext(page), "Answer EVERY question", [],
+                                    chat_key=key, files=lambda: iter(files),
+                                    expect=("questions",), booklet=True)
+
+
+def test_booklet_uses_ordered_receipts_then_one_whole_answer(monkeypatch, tmp_path):
+    _fast(monkeypatch)
+    files = _batch_files(61, audio=True)
+    page = _BatchPage()
+    reply = json.loads(_booklet(chatgpt_web.ChatGptWebClient(), page, files))
+    assert reply["questions"][0]["answer"] == "4"
+    assert [len(r.get("received", [])) for r in page.receipts] == [20, 20, 20, 0]
+    assert len(_clicks(page, chatgpt_web.NEW_CHAT_SEL)) == 1
+    assert [f["name"] for payload in page.uploads for f in payload] == [f["name"] for f in files]
+    transfer = _chats(tmp_path)["session:batch"]["transfer"]
+    assert transfer["pages"] == [f["name"] for f in files]
+    assert len(transfer["completed"]) == 4 and transfer["final"] == reply["batch_id"]
+    assert transfer["pending"] is None and _guard_state(tmp_path) == "idle"
+
+
+def test_restarting_after_attachment_failure_skips_acknowledged_pages(monkeypatch, tmp_path):
+    _fast(monkeypatch)
+    files = _batch_files()
+    page = _BatchPage(thumbnail_appears=[True] + [False] * 10)
+    with pytest.raises(chatgpt_web.ChatGptWebAttachmentFailed):
+        _booklet(chatgpt_web.ChatGptWebClient(), page, files)
+    assert len(_sends(page)) == 1
+    assert _chats(tmp_path)["session:batch"]["transfer"]["pages"] == [f["name"] for f in files[:20]]
+    page.thumbnail_script = None
+    page.thumbnail_appears = True
+    page.uploads.clear()
+    assert json.loads(_booklet(chatgpt_web.ChatGptWebClient(), page, files))["questions"]
+    assert [f["name"] for payload in page.uploads for f in payload] == [f["name"] for f in files[20:]]
+    assert len(_sends(page)) == 3
+
+
+def test_wrong_final_receipt_cannot_clear_the_send_or_start_another(monkeypatch, tmp_path):
+    _fast(monkeypatch)
+    page = _BatchPage()
+    page.reply_override = {"batch_id": "an earlier answer", "questions": []}
+    files = _batch_files(1)
+    for _ in range(2):
+        with pytest.raises(chatgpt_web.ChatGptWebUncertain):
+            _booklet(chatgpt_web.ChatGptWebClient(), page, files)
+    assert len(_sends(page)) == 1 and _guard_state(tmp_path) == "uncertain"
+
+
+def test_an_uncertain_batch_is_read_back_before_continuing(monkeypatch, tmp_path):
+    _fast(monkeypatch)
+    page = _BatchPage()
+    files = _batch_files()
+    original_submit = chatgpt_web.submit
+    def disconnect(p):
+        original_submit(p)
+        raise TimeoutError("CDP reply lost after the click")
+    monkeypatch.setattr(chatgpt_web, "submit", disconnect)
+    with pytest.raises(chatgpt_web.ChatGptWebUncertain):
+        _booklet(chatgpt_web.ChatGptWebClient(), page, files)
+    monkeypatch.setattr(chatgpt_web, "submit", original_submit)
+    assert json.loads(_booklet(chatgpt_web.ChatGptWebClient(), page, files))["questions"]
+    assert len(_sends(page)) == 3
+    assert [f["name"] for payload in page.uploads for f in payload] == [f["name"] for f in files]
+    assert _guard_state(tmp_path) == "idle"
+
+
+def test_a_crash_after_progress_save_but_before_guard_ack_does_not_resend(monkeypatch, tmp_path):
+    from app.browser_guard import BrowserGuard
+
+    _fast(monkeypatch)
+    page = _BatchPage()
+    files = _batch_files()
+    real_ack = BrowserGuard.acknowledge
+    def crash(self, request_id):
+        raise OSError("power loss after the received pages were saved")
+    monkeypatch.setattr(BrowserGuard, "acknowledge", crash)
+    with pytest.raises(chatgpt_web.ChatGptWebUncertain):
+        _booklet(chatgpt_web.ChatGptWebClient(), page, files)
+    transfer = _chats(tmp_path)["session:batch"]["transfer"]
+    assert len(transfer["completed"]) == 1 and transfer["pending"]
+    assert _guard_state(tmp_path) == "uncertain"
+    monkeypatch.setattr(BrowserGuard, "acknowledge", real_ack)
+    assert json.loads(_booklet(chatgpt_web.ChatGptWebClient(), page, files))["questions"]
+    assert len(_sends(page)) == 3
+    assert [f["name"] for payload in page.uploads for f in payload] == [f["name"] for f in files]
+    assert len(_chats(tmp_path)["session:batch"]["transfer"]["pages"]) == 47
+
+
+def test_a_finished_booklet_is_read_back_without_building_or_sending_files(monkeypatch):
+    _fast(monkeypatch)
+    page = _BatchPage()
+    files = _batch_files()
+    expected = _booklet(chatgpt_web.ChatGptWebClient(), page, files)
+    def no_files():
+        pytest.fail("acknowledged original pages must not be encoded again")
+    actual = chatgpt_web.ChatGptWebClient()._ask_with_retries(
+        _OneTabContext(page), "Answer EVERY question", [], files=no_files,
+        chat_key="session:batch", expect=("questions",), booklet=True)
+    assert actual == expected and len(_sends(page)) == 3
+
+
+def test_no_second_batch_is_sent_while_the_first_reply_is_still_streaming(monkeypatch):
+    _fast(monkeypatch)
+    page = _BatchPage(streaming=[True])
+    monkeypatch.setattr(chatgpt_web, "TIMEOUT_S", 0.02)
+    with pytest.raises(chatgpt_web.ChatGptWebUncertain):
+        _booklet(chatgpt_web.ChatGptWebClient(), page, _batch_files())
+    assert len(_sends(page)) == 1
+
+
+@pytest.mark.parametrize("refused_batch", [1, 2])
+def test_an_explicit_retry_after_a_limit_resumes_only_unacknowledged_batches(monkeypatch, tmp_path, refused_batch):
+    _fast(monkeypatch)
+    page = _BatchPage()
+    files = _batch_files()
+    real_sent = page.sent
+    def limited():
+        real_sent()
+        if len(page.receipts) == refused_batch:
+            page.replies = ["使用制限に達しました。しばらくお待ちください。"]
+    page.sent = limited
+    with pytest.raises(chatgpt_web.ChatGptWebRateLimit):
+        _booklet(chatgpt_web.ChatGptWebClient(), page, files)
+    assert len(_sends(page)) == refused_batch and _guard_state(tmp_path) == "idle"
+    assert _chats(tmp_path)["session:batch"]["transfer"]["pending"] is None
+    page.sent = real_sent  # The operator explicitly retries after the limit clears.
+    page.uploads.clear()
+    assert json.loads(_booklet(chatgpt_web.ChatGptWebClient(), page, files))["questions"]
+    assert len(_clicks(page, chatgpt_web.NEW_CHAT_SEL)) == 1
+    assert [f["name"] for payload in page.uploads for f in payload] == [
+        f["name"] for f in files[(refused_batch - 1) * 20:]]
+
+
+@pytest.mark.parametrize("crash_window", ["before_ack", "after_ack"])
+@pytest.mark.parametrize("refused_batch", [1, 2, 3])
+def test_a_limit_crash_is_reconciled_read_only_before_a_later_explicit_retry(
+        monkeypatch, tmp_path, crash_window, refused_batch):
+    from app.browser_guard import BrowserGuard
+
+    _fast(monkeypatch)
+    page, files = _BatchPage(), _batch_files()
+    real_sent, real_ack = page.sent, BrowserGuard.acknowledge
+    def limited():
+        real_sent()
+        if len(page.receipts) == refused_batch:
+            page.replies = ["使用制限に達しました。しばらくお待ちください。"]
+    def crash(self, request_id):
+        if chatgpt_web._limited(page.replies[-1]):
+            if crash_window == "after_ack":
+                real_ack(self, request_id)
+            raise SystemExit("power loss while clearing the known refused submission")
+        return real_ack(self, request_id)
+    page.sent = limited
+    monkeypatch.setattr(BrowserGuard, "acknowledge", crash)
+    with pytest.raises(SystemExit):
+        _booklet(chatgpt_web.ChatGptWebClient(), page, files)
+    assert _guard_state(tmp_path) == ("idle" if crash_window == "after_ack" else "uncertain")
+    assert _chats(tmp_path)["session:batch"]["transfer"]["pending"]
+    assert len(_sends(page)) == refused_batch
+
+    monkeypatch.setattr(BrowserGuard, "acknowledge", real_ack)
+    page.sent = real_sent  # The usage limit has cleared; the old refusal remains visible.
+    with pytest.raises(chatgpt_web.ChatGptWebRateLimit):
+        _booklet(chatgpt_web.ChatGptWebClient(), page, files)
+    assert len(_sends(page)) == refused_batch and _guard_state(tmp_path) == "idle"
+    transfer = _chats(tmp_path)["session:batch"]["transfer"]
+    assert transfer["pending"] is None and len(transfer["completed"]) == refused_batch - 1
+    page.uploads.clear()
+    assert json.loads(_booklet(chatgpt_web.ChatGptWebClient(), page, files))["questions"]
+    assert len(_clicks(page, chatgpt_web.NEW_CHAT_SEL)) == 1
+    assert [f["name"] for payload in page.uploads for f in payload] == [
+        f["name"] for f in files[(refused_batch - 1) * 20:]]
+
+
+@pytest.mark.parametrize("changed", ["user_message", "later_turn", "streaming", "other_request"])
+def test_a_limit_crash_cannot_acknowledge_a_different_or_unfinished_turn(monkeypatch, tmp_path, changed):
+    from app.browser_guard import BrowserGuard
+
+    _fast(monkeypatch)
+    page, files = _BatchPage(), _batch_files()
+    real_sent, real_ack = page.sent, BrowserGuard.acknowledge
+    def limited():
+        real_sent()
+        page.replies = ["使用制限に達しました。しばらくお待ちください。"]
+    def crash(self, request_id):
+        raise SystemExit("power loss before acknowledging the refusal")
+    page.sent = limited
+    monkeypatch.setattr(BrowserGuard, "acknowledge", crash)
+    with pytest.raises(SystemExit):
+        _booklet(chatgpt_web.ChatGptWebClient(), page, files)
+    monkeypatch.setattr(BrowserGuard, "acknowledge", real_ack)
+    if changed == "user_message":
+        page.user_text = "a later message without the pending batch identity"
+    elif changed == "later_turn":
+        page.turns += 1
+    elif changed == "streaming":
+        page.streaming, page.stop_poll = [False, True], 0
+    else:
+        with BrowserGuard() as guard:
+            guard._write({"schema": 1, "state": "uncertain", "request_id": "f" * 64})
+    with pytest.raises((chatgpt_web.ChatGptWebUncertain, chatgpt_web.ChatGptWebBlocked)):
+        _booklet(chatgpt_web.ChatGptWebClient(), page, files)
+    assert len(_sends(page)) == 1 and _guard_state(tmp_path) == "uncertain"
+    assert _chats(tmp_path)["session:batch"]["transfer"]["pending"]
+
+
+@pytest.mark.parametrize("questions", [None, "bad", [], [7], [{"label": "問1", "answer": "4"}, 7],
+                                       [{}], [{"label": "", "group": "", "answer": "4"}]])
+def test_a_structurally_invalid_question_list_never_acknowledges_the_final_send(monkeypatch, tmp_path, questions):
+    _fast(monkeypatch)
+    page = _BatchPage()
+    real_sent = page.sent
+    def invalid():
+        real_sent()
+        reply = json.loads(page.replies[0])
+        reply["questions"] = questions
+        page.replies = [json.dumps(reply)]
+    page.sent = invalid
+    with pytest.raises(chatgpt_web.ChatGptWebUncertain):
+        _booklet(chatgpt_web.ChatGptWebClient(), page, _batch_files(1))
+    transfer = _chats(tmp_path)["session:batch"]["transfer"]
+    assert transfer["final"] is None and transfer["completed"] == [] and transfer["pending"]
+    assert _guard_state(tmp_path) == "uncertain" and len(_sends(page)) == 1
+    with pytest.raises(chatgpt_web.ChatGptWebUncertain):
+        _booklet(chatgpt_web.ChatGptWebClient(), page, _batch_files(1))
+    assert _guard_state(tmp_path) == "uncertain" and len(_sends(page)) == 1
+
+
+def test_reading_back_a_recorded_final_still_requires_a_valid_question_list(monkeypatch):
+    _fast(monkeypatch)
+    page = _BatchPage()
+    _booklet(chatgpt_web.ChatGptWebClient(), page, _batch_files(1))
+    reply = json.loads(page.replies[0])
+    reply["questions"] = []
+    page.replies = [json.dumps(reply)]
+    def no_files():
+        pytest.fail("a recorded final must be read back without preparing a resend")
+    with pytest.raises(chatgpt_web.ChatGptWebUncertain):
+        chatgpt_web.ChatGptWebClient()._ask_with_retries(
+            _OneTabContext(page), "Answer every question", [], files=no_files,
+            chat_key="session:batch", expect=("questions",), booklet=True)
+    assert len(_sends(page)) == 1
+
+
+def test_individual_answer_errors_remain_visible_beside_ready_and_needs_input(tmp_path):
+    page_path = tmp_path / "page.png"
+    page_path.write_bytes(_real_png(80))
+    questions = [
+        {"label": "問1", "status": "ready", "answer": "4"},
+        {"label": "問2", "status": "needs_input", "answer": "", "missing_material": "図が不足"},
+        {"label": "問3", "status": "ready", "answer": 7},
+        {"label": "問4", "status": "invented", "answer": "4"},
+        {"label": 7, "status": "ready", "answer": "4"},
+    ]
+    data = {"batch_id": "final-id", "questions": questions}
+    batch = {"id": "final-id", "final": True, "expect": ["questions"]}
+    assert chatgpt_web.ChatGptWebClient._valid_batch(json.dumps(data), batch)
+    question = Question(document_pages=[{"page_number": 1, "image_path": str(page_path)}],
+                        document_id="1", chat_key="session:1", answer_only=True)
+    replies = ChatGptWebSolver(client=_FakeClient(json.dumps(data))).answer_all(question=question)
+    assert len(replies) == len(questions)
+    assert replies[0][1].answer == "4" and replies[1][1].extras["missing_material"] == "図が不足"
+    assert all(isinstance(result, ValueError) for _, result in replies[2:])
+
+
+def test_a_whole_major_question_answer_can_use_its_heading_without_a_minor_label(tmp_path):
+    page_path = tmp_path / "page.png"
+    page_path.write_bytes(_real_png(80))
+    item = {"group": "第1問", "label": "", "status": "ready", "answer": "x=2"}
+    question = Question(document_pages=[{"page_number": 1, "image_path": str(page_path)}],
+                        document_id="1", chat_key="session:1", answer_only=True)
+    replies = ChatGptWebSolver(client=_FakeClient(json.dumps({"questions": [item]}))).answer_all(question=question)
+    assert replies[0][0] == item and replies[0][1].answer == "x=2"
+
+
+@pytest.mark.parametrize("disconnect_path", ["navigation", "composer"])
+def test_a_cdp_disconnect_returning_to_an_acknowledged_chat_is_retryable(monkeypatch, tmp_path, disconnect_path):
+    from app.solvers.cdp import CdpError
+
+    _fast(monkeypatch)
+    page = _BatchPage(thumbnail_appears=[True] + [False] * 10)
+    files = _batch_files()
+    with pytest.raises(chatgpt_web.ChatGptWebAttachmentFailed):
+        _booklet(chatgpt_web.ChatGptWebClient(), page, files)
+    real_goto = page.goto
+    real_wait = _Locator.wait_for
+    def disconnect(url, **kw):
+        raise CdpError("CDP websocket disconnected before navigation")
+    if disconnect_path == "navigation":
+        page.goto = disconnect
+    else:
+        monkeypatch.setattr(_Locator, "wait_for", lambda self, **kw: disconnect(None))
+    with pytest.raises(chatgpt_web.ChatGptWebBrowserUnavailable):
+        _booklet(chatgpt_web.ChatGptWebClient(), page, files)
+    assert len(_sends(page)) == 1 and _guard_state(tmp_path) == "idle"
+    page.goto = real_goto
+    monkeypatch.setattr(_Locator, "wait_for", real_wait)
+    page.thumbnail_script, page.thumbnail_appears = None, True
+    page.uploads.clear()
+    assert json.loads(_booklet(chatgpt_web.ChatGptWebClient(), page, files))["questions"]
+    assert len(_clicks(page, chatgpt_web.NEW_CHAT_SEL)) == 1
+    assert [f["name"] for payload in page.uploads for f in payload] == [f["name"] for f in files[20:]]
+
+
+def test_a_cdp_disconnect_reading_an_uncertain_batch_keeps_it_retryable(monkeypatch, tmp_path):
+    from app.solvers.cdp import CdpError
+
+    _fast(monkeypatch)
+    page = _BatchPage()
+    real_submit = chatgpt_web.submit
+    def lost(p):
+        real_submit(p)
+        raise TimeoutError("submission acknowledgement lost")
+    monkeypatch.setattr(chatgpt_web, "submit", lost)
+    with pytest.raises(chatgpt_web.ChatGptWebUncertain):
+        _booklet(chatgpt_web.ChatGptWebClient(), page, _batch_files())
+    monkeypatch.setattr(chatgpt_web, "submit", real_submit)
+    def disconnect(url, **kw):
+        raise CdpError("CDP websocket disconnected during read-only recovery")
+    page.goto = disconnect
+    with pytest.raises(chatgpt_web.ChatGptWebBrowserUnavailable):
+        _booklet(chatgpt_web.ChatGptWebClient(), page, _batch_files())
+    assert _guard_state(tmp_path) == "uncertain" and len(_sends(page)) == 1
+
+
+def test_an_input_refusal_without_a_receipt_preserves_uncertainty(monkeypatch, tmp_path):
+    _fast(monkeypatch)
+    page = _BatchPage()
+    real_sent = page.sent
+    def refused():
+        real_sent()
+        page.replies = ["The source attachment could not be received."]
+    page.sent = refused
+    with pytest.raises(chatgpt_web.ChatGptWebUncertain):
+        _booklet(chatgpt_web.ChatGptWebClient(), page, _batch_files())
+    transfer = _chats(tmp_path)["session:batch"]["transfer"]
+    assert transfer["pending"] and not transfer["completed"]
+    assert _guard_state(tmp_path) == "uncertain" and len(_sends(page)) == 1
+
+
 def test_interleaved_sessions_each_go_back_to_their_own_chat(monkeypatch, tmp_path):
     """Two sessions answered in turn: one chat and one booklet each, not one per question.
 
@@ -1352,8 +1783,7 @@ def test_one_message_lists_and_answers_the_booklet_in_the_answer_chat(tmp_path):
     pages = [{"page_number": 1, "image_path": str(page_path), "ocr_text": ""}]
     fake = _FakeClient(json.dumps({"questions": [
         {"group": "第1問", "label": "問1", "pages": [1], "status": "ready", "answer": "④"},
-        {"group": "第1問", "label": "問2", "pages": [1], "status": "ready", "answer": ""},
-        "bad"]}), attached=True)
+        {"group": "第1問", "label": "問2", "pages": [1], "status": "ready", "answer": ""}]}), attached=True)
     question = Question(question_no=None, question_id="booklet", answer_only=True,
                         document_pages=pages, document_id="1", page_numbers=[1],
                         chat_key="session:1")
@@ -1446,9 +1876,10 @@ def test_a_reply_still_generating_is_waited_for_read_only(monkeypatch, tmp_path)
 
 def test_another_sessions_pending_send_is_never_acknowledged(monkeypatch, tmp_path):
     key = _uncertain_chat(tmp_path, pending="b" * 64)
-    page = _StubPage(['{"questions":[]}'], streaming=[])
+    reply = '{"questions":[{"label":"問1","answer":"4"}]}'
+    page = _StubPage([reply], streaming=[])
 
-    assert _recover(monkeypatch, page, key) == '{"questions":[]}'
+    assert _recover(monkeypatch, page, key) == reply
     assert _guard_state(tmp_path) == "uncertain"
 
 
@@ -1464,6 +1895,14 @@ def test_an_unfinished_reply_leaves_the_send_uncertain(monkeypatch, tmp_path, fr
     assert _recover(monkeypatch, page, key) is None
     assert _guard_state(tmp_path) == "uncertain"
     assert not _sends(page)
+
+
+@pytest.mark.parametrize("questions", [None, "bad", [], [7]])
+def test_reading_back_a_legacy_invalid_final_never_acknowledges_it(monkeypatch, tmp_path, questions):
+    key = _uncertain_chat(tmp_path)
+    page = _StubPage([json.dumps({"questions": questions})], streaming=[])
+    assert _recover(monkeypatch, page, key) is None
+    assert _guard_state(tmp_path) == "uncertain" and not _sends(page)
 
 
 def test_answer_all_reads_the_booklet_chat_back_after_an_uncertain_send(tmp_path):

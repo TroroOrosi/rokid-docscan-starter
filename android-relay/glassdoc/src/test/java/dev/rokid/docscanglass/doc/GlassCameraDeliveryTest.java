@@ -170,6 +170,22 @@ public class GlassCameraDeliveryTest {
         assertEquals(List.of("CAMERA TIMEOUT"), failures);
     }
 
+    @Test public void stillWaitsForPreviewDeviceCloseAndTimeoutCannotStartItLater() {
+        java.util.concurrent.atomic.AtomicInteger stillRequests = new java.util.concurrent.atomic.AtomicInteger();
+        ReflectionHelpers.setField(camera, "previewOpening", true);
+        ReflectionHelpers.callInstanceMethod(camera, "stopPreview", ClassParameter.from(Runnable.class, stillRequests::incrementAndGet));
+        assertEquals("an in-flight preview open must settle before a JPEG-only open", 0, stillRequests.get());
+        ReflectionHelpers.callInstanceMethod(camera, "previewClosed");
+        assertEquals(1, stillRequests.get());
+
+        ReflectionHelpers.setField(camera, "previewOpening", true);
+        ReflectionHelpers.callInstanceMethod(camera, "stopPreview", ClassParameter.from(Runnable.class, stillRequests::incrementAndGet));
+        shadowOf(Looper.getMainLooper()).idleFor(Duration.ofSeconds(15));
+        assertTrue((Boolean)ReflectionHelpers.getField(camera, "unknown"));
+        ReflectionHelpers.callInstanceMethod(camera, "previewClosed");
+        assertEquals("a late close must not authorize another photograph after UNKNOWN", 1, stillRequests.get());
+    }
+
 
     @Implements(CaptureFailure.class)
     public static class FailureShadow {

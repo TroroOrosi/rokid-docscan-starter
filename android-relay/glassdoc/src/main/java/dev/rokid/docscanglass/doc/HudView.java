@@ -16,7 +16,7 @@ import java.util.List;
 
 /**
  * The glasses display: black background, green monospace text, and either the
- * aiming mark or the still that was just taken.
+ * live camera image or the still that was just taken.
  *
  * <p>It holds no session state. What to show is decided by the shared
  * {@code DocScanController} and arrives through {@link GlassesCaptureSurface},
@@ -35,9 +35,12 @@ final class HudView extends View {
     private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint guidePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint previewPaint = new Paint(Paint.FILTER_BITMAP_FLAG);
+    private final Paint livePaint = new Paint(Paint.FILTER_BITMAP_FLAG);
 
     private List<String> lines = Collections.emptyList();
     private Bitmap preview;
+    private Bitmap livePreview;
+    private boolean capturing;
     private boolean aiming;
     private double guideFraction = FramingGuide.UNCALIBRATED_FRACTION;
     private boolean spreadGuide;
@@ -47,6 +50,19 @@ final class HudView extends View {
     private boolean recording;
 
     void showRecording(boolean active) { recording = active; invalidate(); }
+
+    void capturePreview(boolean active) {
+        capturing = active;
+        if (!active && livePreview != null) { livePreview.recycle(); livePreview = null; }
+        invalidate();
+    }
+
+    void showLivePreview(Bitmap bitmap) {
+        Bitmap previous = livePreview;
+        livePreview = bitmap;
+        if (previous != null && previous != bitmap && !previous.isRecycled()) previous.recycle();
+        invalidate();
+    }
 
     void onVisibleFrame(Runnable shown, Runnable hidden) {
         visibleFrame = shown;
@@ -98,10 +114,9 @@ final class HudView extends View {
         set(newLines, null, false);
     }
 
-    /** Aiming: a direction cue, not an outline to fit the physical page into. */
+    /** Aiming keeps the live image and its frame visible throughout capture. */
     void showAiming(List<String> newLines) {
         set(newLines, null, true);
-        fadeSoon();
     }
 
     private Runnable fade;
@@ -124,9 +139,8 @@ final class HudView extends View {
     /**
      * Review: the still fills the upper band and the text sits under it.
      *
-     * <p>This is the substitute for a viewfinder. A live preview would hold
-     * the camera streaming, and the privacy indicator stays lit for exactly as
-     * long as the camera streams.</p>
+     * <p>The captured image stays visible for review while the live stream
+     * observes any page turn for the next capture.</p>
      */
     void showReview(Bitmap still, List<String> newLines) {
         previewPaint.setColorFilter(reviewContrast(still));
@@ -167,6 +181,10 @@ final class HudView extends View {
         Bitmap still = preview;
         if (still != null && !still.isRecycled()) {
             textTop = drawPreview(canvas, still);
+        } else if (capturing && livePreview != null && !livePreview.isRecycled()) {
+            drawPreview(canvas, livePreview);
+            drawGuide(canvas);
+            textTop = Math.max(0, getHeight() - (lines.size() + 1) * 26f);
         } else if (aiming) {
             drawGuide(canvas);
             textTop = Math.max(0, getHeight() - (lines.size() + 1) * 26f);
@@ -205,29 +223,29 @@ final class HudView extends View {
         if (guide.width() <= 0) {
             return;
         }
-        float radius = Math.max(4f, Math.min(guide.width(), guide.height()) * 0.03f);
-        float x = getWidth() / 2f;
-        float y = getHeight() / 2f;
         guidePaint.setStrokeWidth(2f);
-        canvas.drawLine(x - radius, y, x + radius, y, guidePaint);
-        canvas.drawLine(x, y - radius, x, y + radius, guidePaint);
+        Bitmap frame = livePreview;
+        if (frame == null || frame.isRecycled()) return;
+        RectF bounds = imageBounds(frame, Math.max(1, getHeight() - (lines.size() + 1) * 26f));
+        canvas.drawRect(bounds, guidePaint);
     }
 
     /** Show the complete capture once, with no inset or label covering the paper. */
     private float drawPreview(Canvas canvas, Bitmap still) {
         float band = Math.max(1, getHeight() - (lines.size() + 1) * 26f);
-        float scale = Math.min(
-                getWidth() / (float) still.getWidth(), band / still.getHeight());
-        float width = still.getWidth() * scale;
-        float height = still.getHeight() * scale;
-        RectF target = new RectF(
-                (getWidth() - width) / 2f, (band - height) / 2f,
-                (getWidth() + width) / 2f, (band + height) / 2f);
+        RectF target = imageBounds(still, band);
         canvas.save();
         canvas.clipRect(0, 0, getWidth(), band);
-        canvas.drawBitmap(still, null, target, previewPaint);
+        canvas.drawBitmap(still, null, target, still == livePreview ? livePaint : previewPaint);
         canvas.restore();
         return band;
+    }
+
+    private RectF imageBounds(Bitmap image, float band) {
+        float scale = Math.min(getWidth() / (float) image.getWidth(), band / image.getHeight());
+        float width = image.getWidth() * scale, height = image.getHeight() * scale;
+        return new RectF((getWidth() - width) / 2f, (band - height) / 2f,
+                (getWidth() + width) / 2f, (band + height) / 2f);
     }
 
     /** Display-only green contrast stretch; JPEG, OCR and uploaded pixels stay untouched. */

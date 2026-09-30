@@ -65,21 +65,23 @@ public class HudViewTest {
         screen.recycle();
     }
 
-    @Test public void aimingShowsACenterMarkWithoutPretendingToOutlineThePaper() {
+    @Test public void aimingFramesTheActualCameraImageAndRemovesItOutsideCapture() {
         HudView view = new HudView(RuntimeEnvironment.getApplication());
         view.layout(0, 0, 480, 640);
         Bitmap screen = Bitmap.createBitmap(480, 640, Bitmap.Config.ARGB_8888);
-        for (boolean spread : new boolean[]{false, true}) {
-            view.showSpreadGuide(spread);
-            view.showAiming(List.of("P1 撮影", "タップで撮影"));
-            view.draw(new Canvas(screen));
-            assertTrue("the center must be visible", Color.green(screen.getPixel(240, 320)) > 200);
-            for (int y = 120; y < 500; y++) for (int x = 0; x < 480; x++) {
-                if (Math.abs(x - 240) <= 20 && Math.abs(y - 320) <= 20) continue;
-                assertEquals("no page-shaped corners or outline", Color.BLACK, screen.getPixel(x, y));
-            }
-            assertEquals("no bottom page corner", Color.BLACK, screen.getPixel(40, 638));
-        }
+        Bitmap camera = Bitmap.createBitmap(320, 240, Bitmap.Config.ARGB_8888);
+        camera.eraseColor(Color.rgb(0, 80, 0));
+        view.showLivePreview(camera);
+        view.capturePreview(true);
+        view.showAiming(List.of());
+        view.draw(new Canvas(screen));
+        assertEquals("source pixels and frame share the same transform", 80, Color.green(screen.getPixel(240, 300)));
+        assertTrue("the image boundary is visible", Color.green(screen.getPixel(0, 140)) > 200);
+        view.capturePreview(false);
+        view.showLines(List.of());
+        view.draw(new Canvas(screen));
+        assertEquals(Color.BLACK, screen.getPixel(240, 300));
+        assertTrue(camera.isRecycled());
         screen.recycle();
     }
 }

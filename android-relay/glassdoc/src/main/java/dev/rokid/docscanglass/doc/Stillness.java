@@ -30,6 +30,7 @@ final class Stillness implements SensorEventListener {
     private final SensorManager sensors;
     private final Sensor gyroscope;
     private volatile long movingAt;
+    private long generation;
 
     Stillness(Context context) {
         sensors = (SensorManager) context.getSystemService(Context.SENSOR_SERVICE);
@@ -42,6 +43,7 @@ final class Stillness implements SensorEventListener {
 
     /** Runs {@code then} on {@code handler} once still, or at once without a gyroscope. */
     void await(Handler handler, Runnable then) {
+        long token = ++generation;
         if (gyroscope == null) {
             then.run();
             return;
@@ -51,6 +53,7 @@ final class Stillness implements SensorEventListener {
         sensors.registerListener(this, gyroscope, SensorManager.SENSOR_DELAY_GAME, handler);
         handler.postDelayed(new Runnable() {
             @Override public void run() {
+                if (token != generation) return;
                 if (ready(SystemClock.elapsedRealtime(), startedAt, movingAt)) {
                     sensors.unregisterListener(Stillness.this);
                     then.run();
@@ -59,6 +62,11 @@ final class Stillness implements SensorEventListener {
                 }
             }
         }, 50);
+    }
+
+    void cancel() {
+        generation++;
+        if (sensors != null) sensors.unregisterListener(this);
     }
 
     @Override

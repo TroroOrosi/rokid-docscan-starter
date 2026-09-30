@@ -57,7 +57,7 @@ public class AnswerViewTest {
                 AnswerItem.ready("g1", "大問1", "q1", "(1)", text))), 400, 2, String::length);
     }
 
-    @Test public void longAnswerUsesThreeLinePagesAndKeepsItsReadableFontSize() {
+    @Test public void longAnswerUsesTheAvailableScreenAndKeepsItsReadableFontSize() {
         AnswerView view = new AnswerView(RuntimeEnvironment.getApplication());
         view.layout(0, 0, 480, 640);
         float fontSize = view.bodyTextSize();
@@ -69,7 +69,8 @@ public class AnswerViewTest {
         assertTrue(count > 1);
         for (int i = 0; i < count; i++) {
             view.refresh();
-            assertTrue(view.getContentDescription().toString().split("\n", -1).length <= 3);
+            int rows = view.getContentDescription().toString().split("\n", -1).length + 1;
+            assertTrue("every line stays within the display", rows * fontSize * 1.5f <= view.getHeight());
             restored.append(text, reader.page().start, reader.page().end);
             reader.forward();
         }
