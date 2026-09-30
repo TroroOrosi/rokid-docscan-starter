@@ -19,7 +19,14 @@ def _client(tmp_path, monkeypatch, key="test-key"):
         importlib.reload(module)
     main.ensure_dirs()
     main.db.init_db()
-    return TestClient(main.app, client=("10.0.0.12", 54321))
+    application = main.app
+
+    async def app_with_peer(scope, receive, send):
+        if scope["type"] == "http":
+            scope = {**scope, "client": ("10.0.0.12", 54321)}
+        await application(scope, receive, send)
+
+    return TestClient(app_with_peer)
 
 
 HEADERS = {"Authorization": "Bearer test-key"}

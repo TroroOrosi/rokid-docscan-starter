@@ -1,6 +1,6 @@
 # 再開入口：次のセッションはここだけ読めば始められる
 
-Status: Internal progress。2026-09-30計画のPC実装・独立監査を完了。`py -3.12 -X utf8 -m pytest -q` →1030 passed, 1 skipped、`py -3.12 -X utf8 -m ruff check .` →All checks passed!、`gradlew.bat --no-daemon test testDebugUnitTest assembleDebug` →BUILD SUCCESSFUL・420 tests/失敗0。ログ・hash・監査は `data/device-setup/reports/venue-pc-20260930/`。branch `feature/capture-quality-readiness`、Draft [PR #38](https://github.com/TroroOrosi/rokid-docscan-starter/pull/38)。実機未検証。
+Status: Internal progress。2026-09-30計画のPC実装・独立監査を完了。`py -3.12 -X utf8 -m pytest -q` →1030 passed, 1 skipped、`py -3.12 -X utf8 -m ruff check .` →All checks passed!、`gradlew.bat --no-daemon test testDebugUnitTest assembleDebug` →BUILD SUCCESSFUL・420 tests/失敗0。旧API構成のfixtureを修正し、clean venvの `python -X utf8 -m pytest -q` →1023 passed, 8 skipped。コマンド全文・最終CI・hash・監査は `data/device-setup/reports/venue-pc-20260930/`。branch `feature/capture-quality-readiness`、Draft [PR #38](https://github.com/TroroOrosi/rokid-docscan-starter/pull/38)。実機未検証。
 Runs on: Windows PC `C:\rokid-docscan-starter`。実機の状態を変える操作・APK導入・スマホのサーバ更新・GPT送信は、利用者の承認後だけ（hookでも強制）。
 
 ## 0. 読み方（前提と資料に引きずられないため）
@@ -88,7 +88,7 @@ Runs on: Windows PC `C:\rokid-docscan-starter`。実機の状態を変える操�
   → 旧サーバ停止 → `nohup bash scripts/phone_serve.sh 127.0.0.1 > data/server-<commit>.log 2>&1 &`。PCからは `ssh -f -N -L 8000:127.0.0.1:8000 ...`（ssh `-i ~/.ssh/f51f_key -p 8022 u0_a26@192.168.0.6`）。
   ベンチの鍵は `ROKID_API_KEY` をスマホの env から読んで渡す（画面に出さない）。
 
-## 4. 次の作業：Runs on F-51FのTermux。まず本人が `sshd` を起動する操作の承認を求める（現在SSH:8022接続拒否）。導入は既存DB・不確定記録を保持し、対象・正確なコマンドを提示して承認後に実施。新ブラウザのlogin/headless維持・実モデル選択と会場経路を確認する。GPT送信は完全な資料を指定して別承認。以下は旧計画の経緯で、今回の実機実行指示ではない。
+## 4. 次の作業：Runs on PC→F-51FのTermux。reportsの最終CI合格を確認後、本人が `sshd` を起動する操作の承認を求める（現在SSH:8022接続拒否）。導入は既存DB・不確定記録を保持し、対象・正確なコマンドを提示して承認後に実施。新ブラウザのlogin/headless維持・実モデル選択と会場経路を確認する。GPT送信は完全な資料を指定して別承認。以下は旧計画の経緯で、今回の実機実行指示ではない。
 
 1. 済：独立監査2回（`4552ea1`、`4552ea1..e12e155`）の指摘を `61ad481`〜`1134404` で反映。
 2. 済：4a（3節）。起動はスマホで `bash scripts/phone_serve.sh 127.0.0.1`、PCから `ssh -L 8000:127.0.0.1:8000` で投入した。
