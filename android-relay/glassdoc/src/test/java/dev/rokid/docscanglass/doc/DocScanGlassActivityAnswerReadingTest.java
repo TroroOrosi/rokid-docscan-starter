@@ -67,6 +67,7 @@ public class DocScanGlassActivityAnswerReadingTest {
     private DocScanGlassActivity activity;
     private MockWebServer server;
     private DocScanController controller;
+    private boolean activityDisposed;
     // Captured once: Robolectric's Context.getFilesDir() is not guaranteed to
     // return the same File across separate calls (AnswerSurfaceTest avoids
     // this the same way, by capturing its directory into a local once).
@@ -105,12 +106,17 @@ public class DocScanGlassActivityAnswerReadingTest {
 
     @After
     public void tearDown() throws Exception {
-        if (controller != null) {
-            controller.close();
-        }
+        disposeActivity();
         if (server != null) {
             server.shutdown();
         }
+    }
+
+    private void disposeActivity() {
+        if (activityDisposed) return;
+        activityDisposed = true;
+        // The production lifecycle invalidates callbacks before closing the controller's queue.
+        activity.onDestroy();
     }
 
     @Test
@@ -827,6 +833,49 @@ public class DocScanGlassActivityAnswerReadingTest {
         }
     }
 
+    @Test public void lateAudioCompletionAfterFixtureDisposalCannotReachTheClosedController() throws Exception {
+        java.util.concurrent.CountDownLatch completionRequested = new java.util.concurrent.CountDownLatch(1);
+        java.util.concurrent.CountDownLatch releaseCompletion = new java.util.concurrent.CountDownLatch(1);
+        java.util.concurrent.CountDownLatch completionPosted = new java.util.concurrent.CountDownLatch(1);
+        server.setDispatcher(new Dispatcher() {
+            @Override public MockResponse dispatch(RecordedRequest request) throws InterruptedException {
+                if (request.getPath().endsWith("/audio-complete")) {
+                    completionRequested.countDown();
+                    if (!releaseCompletion.await(5, TimeUnit.SECONDS)) return json("{}").setResponseCode(503);
+                }
+                return json("{}");
+            }
+        });
+        controllerBarrier();
+        setField(activity, "main", new android.os.Handler(Looper.getMainLooper()) {
+            @Override public boolean sendMessageAtTime(android.os.Message message, long uptimeMillis) {
+                boolean accepted = super.sendMessageAtTime(message, uptimeMillis);
+                if (accepted && message.getCallback() != null
+                        && "listening-finish".equals(Thread.currentThread().getName())) completionPosted.countDown();
+                return accepted;
+            }
+        });
+        ListeningRecorder recording = stoppedRecording(new File(filesDir, "late-completion"), 18, controller);
+        setField(activity, "listening", recording);
+        setField(activity, "listeningMode", true);
+        try {
+            Method finish = DocScanGlassActivity.class.getDeclaredMethod("finishAudio");
+            finish.setAccessible(true); finish.invoke(activity);
+            assertTrue("hold the actual HTTP completion before it posts its Activity callback",
+                    completionRequested.await(5, TimeUnit.SECONDS));
+            disposeActivity();
+            releaseCompletion.countDown();
+            assertTrue("the real completion callback must arrive after disposal", completionPosted.await(5, TimeUnit.SECONDS));
+            Shadows.shadowOf(Looper.getMainLooper()).idle();
+            assertTrue((boolean)getField(activity, "sessionClosed"));
+            assertTrue(((ExecutorService)getField(controller, "serial")).isShutdown());
+            assertFalse("a late completion cannot mutate the closed controller", (boolean)getField(controller, "listeningComplete"));
+        } finally {
+            releaseCompletion.countDown();
+            recording.close();
+        }
+    }
+
     @Test public void stoppedAudioCompletesWhenDocumentBindingArrivesWithoutStartingAnotherRecorder() throws Exception {
         java.util.concurrent.CountDownLatch complete = new java.util.concurrent.CountDownLatch(1);
         server.setDispatcher(new Dispatcher() {
@@ -855,6 +904,9 @@ public class DocScanGlassActivityAnswerReadingTest {
             assertNotNull("saved audio must have a foreground service during retry", resumedService);
             assertTrue(resumedService.getBooleanExtra(ListeningService.FINISHING, false));
             assertTrue(complete.await(3, TimeUnit.SECONDS));
+            awaitTrue("audio completion must reach the controller before recorder disposal",
+                    () -> (boolean)getField(controller, "listeningComplete"));
+            controllerBarrier();
             assertEquals("/v1/documents/18/audio-chunks", server.takeRequest().getPath());
             assertEquals("/v1/documents/18/audio-complete", server.takeRequest().getPath());
             assertTrue(recording == getField(activity, "listening"));

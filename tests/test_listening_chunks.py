@@ -14,6 +14,25 @@ def wav(samples, value=b"\x01\x00"):
     return output.getvalue()
 
 
+@pytest.mark.parametrize("stage", ["completion", "verification"])
+def test_original_audio_hashes_without_python311_file_digest(saved_audio, monkeypatch, stage):
+    raw = wav(16000)
+    listening.store_chunk(1, 0, 0, 1000, raw, transcribe=False)
+    if stage == "verification":
+        manifest = listening.complete_recording(1, 1, 16000)
+    monkeypatch.delattr(listening.hashlib, "file_digest", raising=False)
+    if stage == "completion":
+        manifest = listening.complete_recording(1, 1, 16000)
+    assert manifest["audio_sha256"] == listening.hashlib.sha256(raw).hexdigest()
+    path, transcript = listening.recording_transcript(1, require_transcript=False, verify_original=True)
+    assert path == manifest["audio_path"] and transcript == ""
+    original = listening.folder(1) / "original.wav"
+    original.write_bytes(wav(16000, b"\x02\x00"))  # Same path and size, different PCM.
+    with pytest.raises(ValueError, match="integrity"):
+        listening.recording_transcript(1, require_transcript=False, verify_original=True)
+    assert (listening.folder(1) / "0000.wav").read_bytes() == raw
+
+
 def test_chatgpt_audio_receives_original_without_asr_or_transcript(tmp_path, monkeypatch):
     import importlib
     from fastapi.testclient import TestClient

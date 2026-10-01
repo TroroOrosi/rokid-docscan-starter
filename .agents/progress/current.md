@@ -1,6 +1,6 @@
 # 再開入口：次のセッションはここだけ読めば始められる
 
-Status: Internal progress。10/2追加要件のPC実装・独立監査はR0/O0。Git Bash PATH先頭で py -3.12 -X utf8 -m pytest -q →1122 passed, 1 skipped, 2 warnings、py -3.12 -X utf8 -m ruff check . →All checks passed!。旧phone依存版のPC Python3.12／3.14.6試験は各103 passed（native phoneでは未実行）。JDK17で .\gradlew.bat --no-daemon test testDebugUnitTest assembleDebug →BUILD SUCCESSFUL、77 suites／480 tests／failure0。aapt2／apksigner／Get-FileHashで対象APKを照合。証跡はcombined-exam-pc-verification-20261002.json。branch feature/capture-quality-readiness、Draft [PR #38](https://github.com/TroroOrosi/rokid-docscan-starter/pull/38)。phone反映・装着／消灯／撮影精度／原音／会場／電池は未検証。
+Status: Internal progress。10/2追加要件は55c1256へcheckpoint済み。CIのPython3.10 hash互換／Android前テスト後着callbackを元担当が最小修正し、py -3.12 -X utf8 -m pytest -q →1124 passed, 1 skipped, 3 warnings、ruff →All checks passed!、旧phone依存PC3.12／3.14.6試験は各105 passed。JDK17全体buildの480passに加え、修正後 .\gradlew.bat :glassdoc:testDebugUnitTest --console=plain →BUILD SUCCESSFUL／154 tests。Android本体16pinsとAPKは不変。証跡はcombined-exam-pc-verification-20261002.json／ci-repair-root-verification-20261002.json／android-ci-reader-lifecycle-pc-20261002.json。独立再監査、新checkpointのCI・79files archive／manifest照合は同JSONで最新結果を確認する。branch feature/capture-quality-readiness、Draft [PR #38](https://github.com/TroroOrosi/rokid-docscan-starter/pull/38)。実機変更／GPT0、phone反映・装着／消灯／撮影精度／原音／会場／電池は未検証。
 Runs on: Windows PC `C:\rokid-docscan-starter`。実機の状態を変える操作・APK導入・スマホのサーバ更新・GPT送信は、利用者の承認後だけ（hookでも強制）。
 
 ## 0. 読み方（前提と資料に引きずられないため）
@@ -89,7 +89,7 @@ Runs on: Windows PC `C:\rokid-docscan-starter`。実機の状態を変える操�
   → 旧サーバ停止 → `nohup bash scripts/phone_serve.sh 127.0.0.1 > data/server-<commit>.log 2>&1 &`。PCからは `ssh -f -N -L 8000:127.0.0.1:8000 ...`（ssh `-i ~/.ssh/f51f_key -p 8022 u0_a26@192.168.0.6`）。
   ベンチの鍵は `ROKID_API_KEY` をスマホの env から読んで渡す（画面に出さない）。
 
-## 4. 次の作業（Runs on: Windows PC→承認後F-51F／glassdoc）：PC検証済み変更をcommit／pushし、新版79filesのLF archiveと準備manifestを固定する。次はphone-headless-stop-20261002.py --execute-approved-headless-validation-and-stopの対象・exact commandを本人へ提示し、承認後にログイン維持／Latest＋Extra Highを確認して同じ実行で自分のbrowserだけ正常終了する。続いて新source／APK／Boot・services／SEND有効化を個別のexact commandで承認後に反映し、装着だけのchooser・5秒実消灯・再使用を実機確認する。旧headless承認commandは1回実行済みでbrowser起動前exit2、frozen物は無変更。以下は旧経緯で現在の実機実行指示ではない。
+## 4. 次の作業（Runs on: Windows PC→承認後F-51F／glassdoc）：CI修正の独立監査と新checkpointの全CI・79files全LF archive／manifest照合をJSONで確認する。PC作業完了後、phone-headless-stop-20261002.py --execute-approved-headless-validation-and-stopの対象・exact commandを本人へ提示し、承認後にログイン維持／Latest＋Extra Highを確認して同じ実行で自分のbrowserだけ正常終了する。続いて新source／APK／Boot・services／SEND有効化を個別のexact commandで承認後に反映し、装着だけのchooser・5秒実消灯・再使用を実機確認する。旧headless承認commandは1回実行済みでbrowser起動前exit2、frozen物は無変更。以下は旧経緯で現在の実機実行指示ではない。
 
 1. 済：独立監査2回（`4552ea1`、`4552ea1..e12e155`）の指摘を `61ad481`〜`1134404` で反映。
 2. 済：4a（3節）。起動はスマホで `bash scripts/phone_serve.sh 127.0.0.1`、PCから `ssh -L 8000:127.0.0.1:8000` で投入した。

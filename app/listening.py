@@ -6,6 +6,7 @@ import threading
 import wave
 
 from . import config
+from .input_identity import file_sha256
 from .local_asr import transcribe_chunk, wav_samples
 
 # ponytail: single phone recording; serialize chunk writes and completion, not camera uploads.
@@ -100,8 +101,9 @@ def complete_recording(document_id, expected_chunks, total_samples):
         pending.replace(output)
         manifest = {"document_id": document_id, "chunks": expected_chunks,
                     "total_samples": total_samples, "audio_path": str(output), "segments": rows}
-        with output.open("rb") as source:
-            manifest["audio_sha256"] = hashlib.file_digest(source, "sha256").hexdigest()
+        manifest["audio_sha256"] = file_sha256(output)
+        if manifest["audio_sha256"] == "missing":
+            raise FileNotFoundError(output)
         pending_manifest = directory / "complete.pending"
         pending_manifest.write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
         pending_manifest.replace(complete)
@@ -152,8 +154,7 @@ def _verified_recording(document_id):
             rows = _verified_chunks(directory, chunks, samples)
             if rows != manifest["segments"]:
                 raise ValueError("completed recording metadata changed")
-            with output.open("rb") as source:
-                digest = hashlib.file_digest(source, "sha256").hexdigest()
+            digest = file_sha256(output)
             if manifest.get("audio_sha256") and manifest["audio_sha256"] != digest:
                 raise ValueError("completed original audio changed")
             # Legacy manifests did not hash original.wav. Verify its actual PCM
