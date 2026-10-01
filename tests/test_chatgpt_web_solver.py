@@ -1647,6 +1647,151 @@ def test_a_finished_booklet_is_read_back_without_building_or_sending_files(monke
     assert actual == expected and len(_sends(page)) == 3
 
 
+class _MixedBatchPage(_BatchPage):
+    stage = "reading"
+
+    def sent(self):
+        super().sent()
+        reply = json.loads(self.replies[0])
+        if "questions" not in reply:
+            return
+        if self.stage == "reading":
+            reply["questions"] = [
+                {"group": "Reading", "label": "問1", "answer_no": [1], "pages": [1],
+                 "requires_audio": False, "status": "ready", "answer": "4"},
+                {"group": "Listening", "label": "問2", "answer_no": [2], "pages": [2],
+                 "requires_audio": True, "status": "pending_audio", "answer": ""},
+            ]
+        else:
+            reply["questions"] = [
+                {"question_id": "q2", "group": "Listening", "label": "問2", "answer_no": [2],
+                 "pages": [2], "requires_audio": True, "status": "ready", "answer": "3"},
+            ]
+        self.replies = [json.dumps(reply)]
+
+
+def _mixed_booklet(client, page, files, stage):
+    page.stage = stage
+    return client._ask_with_retries(
+        _OneTabContext(page), "Answer only this stage", [], chat_key="session:mixed",
+        files=lambda: iter(files), expect=("questions",), booklet=True, booklet_stage=stage,
+        stage_audio_digest=chatgpt_web._digest(files[0]["buffer"]) if stage == "listening" else None,
+        stage_question_ids=["q2"] if stage == "listening" else None,
+    )
+
+
+def test_mixed_stages_share_one_chat_and_restart_sends_only_original_audio(monkeypatch, tmp_path):
+    _fast(monkeypatch)
+    page = _MixedBatchPage()
+    images = _batch_files(41)
+    first = json.loads(_mixed_booklet(chatgpt_web.ChatGptWebClient(), page, images, "reading"))
+    assert first["questions"][1]["status"] == "pending_audio"
+    page.uploads.clear()
+    audio = [chatgpt_web.audio_payload("original.wav", b"RIFF captured original")]
+    second = json.loads(_mixed_booklet(chatgpt_web.ChatGptWebClient(), page, audio, "listening"))
+    assert second["questions"][0]["answer"] == "3"
+    assert [f["name"] for upload in page.uploads for f in upload] == ["original.wav"]
+    assert len(_sends(page)) == 4 and len(_clicks(page, chatgpt_web.NEW_CHAT_SEL)) == 1
+    transfer = _chats(tmp_path)["session:mixed"]["transfer"]
+    assert set(transfer["finals"]) == {"reading", "listening"}
+    assert transfer["pending"] is None and _guard_state(tmp_path) == "idle"
+    assert json.loads(_mixed_booklet(chatgpt_web.ChatGptWebClient(), page, audio, "listening")) == second
+    assert len(_sends(page)) == 4 and len(page.uploads) == 1
+
+
+def test_mixed_audio_cannot_precede_the_images_reply_or_cross_an_uncertain_send(monkeypatch):
+    _fast(monkeypatch)
+    page = _MixedBatchPage()
+    audio = [chatgpt_web.audio_payload("original.wav", b"RIFF captured original")]
+    with pytest.raises(chatgpt_web.ChatGptWebBlocked):
+        _mixed_booklet(chatgpt_web.ChatGptWebClient(), page, audio, "listening")
+    assert not _sends(page) and not page.uploads
+    page.reply_override = {"batch_id": "wrong", "received": []}
+    with pytest.raises(chatgpt_web.ChatGptWebUncertain):
+        _mixed_booklet(chatgpt_web.ChatGptWebClient(), page, _batch_files(21), "reading")
+    sends, uploads = len(_sends(page)), len(page.uploads)
+    with pytest.raises(chatgpt_web.ChatGptWebUncertain):
+        _mixed_booklet(chatgpt_web.ChatGptWebClient(), page, audio, "listening")
+    assert len(_sends(page)) == sends and len(page.uploads) == uploads
+
+
+def test_mixed_audio_digest_cannot_inherit_a_different_recording_receipt(monkeypatch):
+    _fast(monkeypatch)
+    page = _MixedBatchPage()
+    _mixed_booklet(chatgpt_web.ChatGptWebClient(), page, _batch_files(1), "reading")
+    audio = [chatgpt_web.audio_payload("original.wav", b"RIFF original")]
+    _mixed_booklet(chatgpt_web.ChatGptWebClient(), page, audio, "listening")
+    with pytest.raises(chatgpt_web.ChatGptWebBlocked):
+        _mixed_booklet(chatgpt_web.ChatGptWebClient(), page,
+                       [chatgpt_web.audio_payload("original.wav", b"RIFF changed")], "listening")
+    assert len(_sends(page)) == 2
+
+
+def test_mixed_pending_audio_is_a_valid_inventory_entry_without_a_solution():
+    data = {"questions": [{"label": "問1", "requires_audio": True,
+                           "status": "pending_audio", "answer": ""}]}
+    replies = chatgpt_web._booklet_replies(data, subject=None, extras={}, stage="reading")
+    assert replies == [(data["questions"][0], None)]
+    data["questions"][0]["answer"] = "a guessed answer"
+    with pytest.raises(ValueError):
+        chatgpt_web._booklet_replies(data, subject=None, extras={}, stage="reading")
+
+
+@pytest.mark.parametrize("field", ["label", "group"])
+def test_mixed_pending_audio_requires_printed_text_labels(field):
+    item = {"label": "問1", "requires_audio": True, "status": "pending_audio", "answer": "", field: 123}
+    with pytest.raises(ValueError, match="printed question label"):
+        chatgpt_web._booklet_replies({"questions": [item]}, subject=None, extras={}, stage="reading")
+
+
+def test_mixed_chat_identity_keeps_the_original_images_when_audio_arrives(tmp_path):
+    from app.solvers.base import Question
+    original = tmp_path / "page.png"
+    original.write_bytes(PNG)
+    question = Question(chat_key="session:1", document_pages=[{"page_number": 1, "image_path": str(original)}])
+    written = chatgpt_web._booklet_chat_key(question, None)
+    assert written != chatgpt_web._booklet_chat_key(question, ("original.wav", b"audio"))
+    question.booklet_stage = "reading"
+    reading = chatgpt_web._booklet_chat_key(question, None)
+    question.booklet_stage = "listening"
+    assert reading == chatgpt_web._booklet_chat_key(question, ("original.wav", b"audio"))
+
+
+def test_mixed_solver_sends_images_before_audio_and_keeps_early_answer_rules(tmp_path):
+    original = tmp_path / "page.png"
+    original.write_bytes(_real_png(80))
+    recording = tmp_path / "original.wav"
+    recording.write_bytes(b"RIFF original captured audio")
+    calls = []
+
+    class Client:
+        model = "test"
+
+        def complete_json(self, **kwargs):
+            files = list(kwargs.pop("files")())
+            calls.append((kwargs, files))
+            if kwargs["booklet_stage"] == "reading":
+                return {"questions": [{"label": "問1", "requires_audio": True,
+                                       "status": "pending_audio", "answer": ""}]}
+            return {"questions": [{"question_id": "q1", "label": "問1", "status": "needs_input",
+                                   "answer": "", "missing_material": "audio started after the question"}]}
+
+    question = Question(chat_key="session:1", booklet_stage="reading", audio_path=str(recording),
+                        document_pages=[{"page_number": 1, "image_path": str(original)}])
+    solver = ChatGptWebSolver(client=Client())
+    assert solver.answer_all(question=question)[0][1] is None
+    question.booklet_stage = "listening"
+    question.booklet_questions = [{"question_id": "q1", "label": "問1", "answer_no": [1]}]
+    result = solver.answer_all(question=question)[0][1]
+    assert result.extras["answer_status"] == "needs_input"
+    assert all(file["mimeType"] == "image/jpeg" for file in calls[0][1])
+    assert [file["buffer"] for file in calls[1][1]] == [recording.read_bytes()]
+    assert calls[0][0]["chat_key"] == calls[1][0]["chat_key"]
+    assert "pending_audio" in calls[0][0]["prompt"]
+    assert '"question_id": "q1"' in calls[1][0]["prompt"]
+    assert "never invent" in calls[1][0]["prompt"].lower()
+
+
 def test_no_second_batch_is_sent_while_the_first_reply_is_still_streaming(monkeypatch):
     _fast(monkeypatch)
     page = _BatchPage(streaming=[True])

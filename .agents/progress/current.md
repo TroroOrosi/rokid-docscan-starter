@@ -1,6 +1,6 @@
 # 再開入口：次のセッションはここだけ読めば始められる
 
-Status: Internal progress。10/1 Latest＋Extra High/new contenteditable・属性別添付inputの追加改修はPC固定・独立監査Required0/Optional0。py -3.12 -X utf8 -m pytest -q →1056 passed, 1 skipped、py -3.12 -X utf8 -m ruff check . →All checks passed!、6file SHA固定（phone-new-ui-pc-verification-20261001.json、phone-new-ui-source-audit-20261001.json）。撮影枠・写真だけ3秒確認・固定答案スライド・消灯設定保持の既測定は usability-pc-20261001.json（Android BUILD SUCCESSFUL・429tests/失敗0）；追加はPythonだけでAndroid sourceの9af5e46比較exit0。branch feature/capture-quality-readiness、Draft [PR #38](https://github.com/TroroOrosi/rokid-docscan-starter/pull/38)。phone source更新・APK反映・実添付/回答表示/撮影/消灯/無音/電池/会場/リスニングは未検証。
+Status: Internal progress。10/2追加要件のPC実装・独立監査はR0/O0。Git Bash PATH先頭で py -3.12 -X utf8 -m pytest -q →1122 passed, 1 skipped, 2 warnings、py -3.12 -X utf8 -m ruff check . →All checks passed!。旧phone依存版のPC Python3.12／3.14.6試験は各103 passed（native phoneでは未実行）。JDK17で .\gradlew.bat --no-daemon test testDebugUnitTest assembleDebug →BUILD SUCCESSFUL、77 suites／480 tests／failure0。aapt2／apksigner／Get-FileHashで対象APKを照合。証跡はcombined-exam-pc-verification-20261002.json。branch feature/capture-quality-readiness、Draft [PR #38](https://github.com/TroroOrosi/rokid-docscan-starter/pull/38)。phone反映・装着／消灯／撮影精度／原音／会場／電池は未検証。
 Runs on: Windows PC `C:\rokid-docscan-starter`。実機の状態を変える操作・APK導入・スマホのサーバ更新・GPT送信は、利用者の承認後だけ（hookでも強制）。
 
 ## 0. 読み方（前提と資料に引きずられないため）
@@ -24,6 +24,7 @@ Runs on: Windows PC `C:\rokid-docscan-starter`。実機の状態を変える操�
 合格：公式正解（`C:\rokid-exam-materials\kyotsu\seikai\`）と照合して正しい答えが、会場経路でグラスに表示される。一度も達成していない。
 
 ## 2. 利用者の決定（再質問しない）
+- 10/1追加指示は旧待機規則より優先：装着直後に最初の画面、撮影／実写真3秒／答案表示以外は5秒無操作で消灯。合同英語は用紙を先に撮り、途中でも録音開始、撮影終了で画像だけ先に解答、原音完了後に同一chatへ音声を追加する。細字・数式・図表・縦書きの自動撮影を改善する。本人は共通テスト・東大二次の実紙試験を後日と指定し、今回はその精度を求める場合へ対応するPC実装を依頼した。最新追記は全機能の実装・確認後に準備を完了し、常時オンのスマホのテザリングへ接続したグラスを装着するだけでいつでも使える状態にすること。
 - 最新指示（10/1）は以下の旧方式に優先：撮影・実画像3秒確認・答案閲覧中は点灯、解析待機・記入終了・終了時は消灯。写真へ案内文字を重ねず、答案は記入用全文と必要な導出・図を保つ固定一画面スライド、短答を詰めて操作を減らす。自動撮影の精度と表示枠より広く写る画角を修正し合理化する。本人は今回アプリを実行したがGPT出力が見えず、音量増加は本人の操作ミスで割当を明るさへ変更して解決、端末の自動消灯は「無し」にする予定。9/30のChromium永続profile/Boot/services/同一chatへの20添付以内順送信/自動撮影/記入終了後の終了操作を維持。本人はテザリング＋Wi-Fi中でsshd実行済み。旧初回導入と10/1新ネットワーク可視loginは承認済み・実行済みでlinker errorにより停止。その後libc++のみ29→30＋既存profile/SEND0で可視login retryのexact commandも本人「よいです」で承認・実行済み（両step exit0）。本人は「ログインしました」と報告、readonly画面取得exit0でログイン後ホームを確認（従来と違う理由を説明済み）。続くNew chatのexact commandは本人「はい」で承認・1回実行済み（5step/全体exit0）。続くモデルmenuのexact commandも本人「はい」で承認・1回実行済み（5step/全体exit0）。本人の最新説明「latestがモデル名はありませんが、実質的な最新のモデルということです。」を受け、readonly exit0で選択済みLatest＋Extra Highを確認、この組合せを維持する。services/headless・source更新・glasses変更・GPT送信は別承認。
 
 - 会場：グラス（`:glassdoc`）→スマホAP→スマホ上のFastAPI→スマホChrome（CDP）→ChatGPT web→answer-bundle→AnswerView。PCは持ち込まない。
@@ -88,7 +89,7 @@ Runs on: Windows PC `C:\rokid-docscan-starter`。実機の状態を変える操�
   → 旧サーバ停止 → `nohup bash scripts/phone_serve.sh 127.0.0.1 > data/server-<commit>.log 2>&1 &`。PCからは `ssh -f -N -L 8000:127.0.0.1:8000 ...`（ssh `-i ~/.ssh/f51f_key -p 8022 u0_a26@192.168.0.6`）。
   ベンチの鍵は `ROKID_API_KEY` をスマホの env から読んで渡す（画面に出さない）。
 
-## 4. 次の作業（Runs on: PC、本人F-51F ZY22LWGDCV）：承認済みmodel-menu commandは1回/5step exit0・click1、readonlyでchecked Latest＋Extra High（本人のlatest説明を反映、phone-model-menu-applied-20261001.json）。PC新UI対応は全pytest1056passed1skip/ruff/独立監査R0O0まで完了、root commit/archive/次承認payload準備中。最新readonly inventoryは4step exit0・8000/9222両閉、native proc denied1020なのでown runtime不在とはせず、追加shell ps exit0でUID10026はcom.termuxだけ・lock PID3424無し。新productionの実画面probeはport前提exit1でinput0；元source-update quiet guardは実readonly exit2 own-UID process snapshot unavailable、変更/迂回/prepare0。次は既存永続profile/privateSEND0/0600/旧source79を保持したheadless起動＋保存login/公開model読取の最小exact commandをPC検証・独立監査して本人承認後に実行。source更新・API/watch/services・APK vc33・GPT送信は未承認。visible login/New chat/menu/旧4起動runnerは再実行しない。以前のGPT非表示の停止箇所、headless保持/Boot/実添付/撮影/消灯/無音/電池/会場は実機未検証。以下は旧計画の経緯で今回の実機実行指示ではない。
+## 4. 次の作業（Runs on: Windows PC→承認後F-51F／glassdoc）：PC検証済み変更をcommit／pushし、新版79filesのLF archiveと準備manifestを固定する。次はphone-headless-stop-20261002.py --execute-approved-headless-validation-and-stopの対象・exact commandを本人へ提示し、承認後にログイン維持／Latest＋Extra Highを確認して同じ実行で自分のbrowserだけ正常終了する。続いて新source／APK／Boot・services／SEND有効化を個別のexact commandで承認後に反映し、装着だけのchooser・5秒実消灯・再使用を実機確認する。旧headless承認commandは1回実行済みでbrowser起動前exit2、frozen物は無変更。以下は旧経緯で現在の実機実行指示ではない。
 
 1. 済：独立監査2回（`4552ea1`、`4552ea1..e12e155`）の指摘を `61ad481`〜`1134404` で反映。
 2. 済：4a（3節）。起動はスマホで `bash scripts/phone_serve.sh 127.0.0.1`、PCから `ssh -L 8000:127.0.0.1:8000` で投入した。

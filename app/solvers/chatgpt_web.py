@@ -879,6 +879,9 @@ class ChatGptWebClient:
         files: list[dict] | Callable[[], Iterable[dict]] | None = None,
         expect: tuple[str, ...] | None = None,
         booklet: bool = False,
+        booklet_stage: str = "single",
+        stage_audio_digest: str | None = None,
+        stage_question_ids: list[str] | None = None,
     ) -> str:
         if not chatgpt_send_enabled():
             raise ChatGptWebSendNotAuthorized("ChatGPT send is not authorized")
@@ -910,12 +913,16 @@ class ChatGptWebClient:
                 files=files,
                 expect=expect,
                 booklet=booklet,
+                booklet_stage=booklet_stage,
+                stage_audio_digest=stage_audio_digest,
+                stage_question_ids=stage_question_ids,
             )
         finally:
             browser.close()
 
     def _ask_with_retries(self, context, text: str, pages: list[bytes], *,
-                          audio=None, chat_key=None, files=None, expect=None, booklet=False) -> str:
+                          audio=None, chat_key=None, files=None, expect=None, booklet=False,
+                          booklet_stage="single", stage_audio_digest=None, stage_question_ids=None) -> str:
         """Serialize all tab interaction; a restart cannot erase an uncertain send."""
         from .cdp import CdpError  # noqa: PLC0415
 
@@ -924,7 +931,8 @@ class ChatGptWebClient:
                 self.last_image_attached = None
                 if booklet:
                     return self._booklet_locked(context, text, guard=guard, files=files,
-                                                chat_key=chat_key, expect=expect)
+                                                chat_key=chat_key, expect=expect, stage=booklet_stage,
+                                                audio_digest=stage_audio_digest, question_ids=stage_question_ids)
                 try:
                     guard.require_clear()
                 except BrowserGuardError as error:
@@ -1040,29 +1048,47 @@ class ChatGptWebClient:
             Path(temporary).unlink(missing_ok=True)
         self._unsaved = False
 
-    def _booklet_locked(self, context, text: str, *, guard, files, chat_key, expect) -> str:
+    def _booklet_locked(self, context, text: str, *, guard, files, chat_key, expect,
+                        stage="single", audio_digest=None, question_ids=None) -> str:
         """At most twenty attachments per message; only a matching receipt advances."""
         if not chat_key:
             raise ChatGptWebError("a booklet needs a persistent session chat key; nothing sent")
+        if stage not in ("single", "reading", "listening"):
+            raise ValueError("invalid booklet stage")
         self._load_chat(guard, chat_key)
         status = guard.status()
         if status["state"] == "uncertain" and self._pending != status.get("request_id"):
             raise ChatGptWebBlocked("another send is unconfirmed; nothing sent")
         if self._chat_url and self._transfer is None:
+            if stage != "single":
+                raise ChatGptWebBlocked("a mixed stage cannot reuse an unverified legacy booklet")
             # Previously completed single-message booklets stay read-only after upgrade.
             reply = self._recover_locked(context, guard, expect=expect)
             if reply is None:
                 raise ChatGptWebUncertain("the recorded booklet reply could not be read; nothing is sent again")
             return reply
         if self._transfer is None:
+            if stage == "listening":
+                raise ChatGptWebBlocked("the images reply must be saved before sending audio")
             self._transfer = {"completed": [], "pages": [], "final": None, "pending": None}
+            if stage == "reading":
+                self._transfer["finals"] = {}
         pending = self._transfer.get("pending")
         if pending:
             reply = self._recover_locked(context, guard, expect=tuple(pending["expect"]), batch=pending)
             if reply is None:
                 raise ChatGptWebUncertain("batch outcome unknown; read-only recovery found no matching receipt")
-        if self._transfer.get("final"):
-            reply = self._recover_locked(context, guard, expect=expect, batch=self._transfer["last"])
+        if stage == "listening":
+            if not self._transfer.get("finals", {}).get("reading") or not _is_chat_url(self._chat_url or ""):
+                raise ChatGptWebBlocked("the images reply must be saved in the same chat before sending audio")
+            if not audio_digest or not question_ids:
+                raise ChatGptWebBlocked("original audio and pending question identities are required")
+            previous_digest = self._transfer.get("audio_digest")
+            if previous_digest and previous_digest != audio_digest:
+                raise ChatGptWebBlocked("the original recording changed; its receipt cannot be reused")
+        final_batch = (self._transfer.get("last") if self._transfer.get("final") else None) if stage == "single" else self._transfer.get("finals", {}).get(stage)
+        if final_batch:
+            reply = self._recover_locked(context, guard, expect=expect, batch=final_batch)
             if reply is None:
                 raise ChatGptWebUncertain("the final reply could not be read; nothing is sent again")
             self.last_image_attached = True
@@ -1070,7 +1096,7 @@ class ChatGptWebClient:
         source = iter(files() if callable(files) else files or [])
         first = next(source, None)
         if first is None:
-            raise ChatGptWebAttachmentFailed("no source images; nothing sent")
+            raise ChatGptWebAttachmentFailed("no original evidence; nothing sent")
         number = 0
         while first is not None:
             number += 1
@@ -1078,17 +1104,29 @@ class ChatGptWebClient:
             first = next(source, None)
             names = [f["name"] for f in attachments]
             digests = [_digest(f["buffer"]) for f in attachments]
-            batch_id = _digest(json.dumps([chat_key, number, names, digests], separators=(",", ":")).encode())
+            if stage == "listening":
+                if first is not None or len(attachments) != 1 or not attachments[0]["mimeType"].startswith("audio/") or digests != [audio_digest]:
+                    raise ChatGptWebBlocked("the listening stage must attach only the pinned original audio")
+                self._transfer["audio_digest"] = audio_digest
+                self._save_chat(guard)
+            identity = [chat_key, number, names, digests]
+            if stage != "single":
+                identity.append(stage)
+            batch_id = _digest(json.dumps(identity, separators=(",", ":")).encode())
             if batch_id in self._transfer["completed"]:
                 continue
             final = first is None
             expected = tuple(expect or ()) if final else ("received",)
             batch = {"id": batch_id, "number": number, "names": names, "digests": digests,
-                     "final": final, "expect": list(expected)}
+                      "final": final, "expect": list(expected)}
+            if stage != "single":
+                batch.update(stage=stage, question_ids=question_ids or [])
             if final:
                 receipt = {"batch_id": batch_id, **{key: [] for key in expected}}
-                message = (text + "\nAll previous received batches and these files form ONE booklet. "
-                           "Now answer every question from the complete booklet in one reply. "
+                instruction = ("Now answer every question from the complete booklet in one reply. " if stage == "single"
+                               else "Complete only the requested analysis stage in one reply; retain the earlier evidence and answers. ")
+                message = (text + "\nAll previous received batches and these files belong to ONE paper in this chat. "
+                           + instruction +
                            "Include the exact batch_id below in the final JSON. The other keys below "
                            "show its shape, not empty answers.")
             else:
@@ -1111,7 +1149,8 @@ class ChatGptWebClient:
             return False
         if batch["final"] and "questions" in batch["expect"]:
             try:
-                _booklet_replies(data, subject=None, extras={})
+                _booklet_replies(data, subject=None, extras={}, stage=batch.get("stage", "single"),
+                                 question_ids=batch.get("question_ids"))
             except ValueError:
                 return False
         return (isinstance(data, dict) and data.get("batch_id") == batch["id"]
@@ -1127,7 +1166,10 @@ class ChatGptWebClient:
             self._transfer["pages"].extend(batch["names"])
         self._transfer["last"] = batch
         if batch["final"]:
-            self._transfer["final"] = batch["id"]
+            if batch.get("stage", "single") == "single":
+                self._transfer["final"] = batch["id"]
+            else:
+                self._transfer.setdefault("finals", {})[batch["stage"]] = dict(batch)
             self._source_attached = True
         self._attached_in_chat.update(batch["digests"])
         self._save_chat(guard)  # Progress is durable BEFORE the uncertain barrier is cleared.
@@ -1191,7 +1233,9 @@ class ChatGptWebClient:
             return None
         if "questions" in (expect or ()):
             try:
-                _booklet_replies(extract_json(reply), subject=None, extras={})
+                _booklet_replies(extract_json(reply), subject=None, extras={},
+                                 stage=batch.get("stage", "single") if batch else "single",
+                                 question_ids=batch.get("question_ids") if batch else None)
             except ValueError:
                 return None
         if batch is not None:
@@ -1362,7 +1406,7 @@ class ChatGptWebClient:
         return isinstance(url, str) and _is_chat_url(url)
 
     def recover(self, *, chat_key: str | None, expect: tuple[str, ...],
-                sleep=time.sleep, now=time.monotonic) -> str | None:
+                booklet_stage="single", sleep=time.sleep, now=time.monotonic) -> str | None:
         """Read only. A batch receipt cannot stand in for the final booklet answer."""
         from .cdp import CdpError, connect_over_cdp  # noqa: PLC0415
 
@@ -1378,7 +1422,13 @@ class ChatGptWebClient:
                     context = browser.contexts[0] if browser.contexts else browser.new_context()
                     batch = None
                     if self._transfer:
-                        batch = self._transfer.get("pending") or self._transfer.get("last")
+                        pending = self._transfer.get("pending")
+                        if booklet_stage != "single":
+                            if pending and pending.get("stage") != booklet_stage:
+                                return None
+                            batch = pending or self._transfer.get("finals", {}).get(booklet_stage)
+                        else:
+                            batch = pending or self._transfer.get("last")
                         if not batch or not batch.get("final"):
                             return None
                         status = guard.status()
@@ -1403,6 +1453,9 @@ class ChatGptWebClient:
         files: list[dict] | Callable[[], Iterable[dict]] | None = None,
         expect: tuple[str, ...] | None = None,
         booklet: bool = False,
+        booklet_stage: str = "single",
+        stage_audio_digest: str | None = None,
+        stage_question_ids: list[str] | None = None,
     ) -> dict:
         return extract_json(
             self.complete(
@@ -1415,6 +1468,9 @@ class ChatGptWebClient:
                 files=files,
                 expect=expect,
                 booklet=booklet,
+                booklet_stage=booklet_stage,
+                stage_audio_digest=stage_audio_digest,
+                stage_question_ids=stage_question_ids,
             )
         )
 
@@ -1479,6 +1535,30 @@ _ALL_TASK = (
     '"status":"ready","answer":"","missing_material":"","diagrams":[]}]}.'
 )
 
+_READING_TASK = (
+    "This is stage 1 of a mixed reading/listening paper. All original page images are supplied now; "
+    "original audio will arrive later in THIS chat. Enumerate EVERY answer-sheet question in booklet "
+    "order with group, label, answer_no and pages as below. Set requires_audio to a JSON boolean for "
+    "EVERY question. Solve only questions that do not require audio, using ready or needs_input. "
+    "For audio-dependent questions, use requires_audio=true, status=pending_audio, answer=\"\", "
+    "diagrams=[]; do not guess from choices or invent audio. Return ONE JSON object: "
+    '{"questions":[{"group":"第1問","label":"問1","answer_no":[1],"pages":[1],'
+    '"requires_audio":false,"status":"ready","answer":"","missing_material":"","diagrams":[]},'
+    '{"group":"Listening","label":"問2","answer_no":[2],"pages":[2],"requires_audio":true,'
+    '"status":"pending_audio","answer":"","missing_material":"","diagrams":[]}]}.'
+)
+
+_LISTENING_TASK = (
+    "This is stage 2 of the SAME mixed paper. Keep every earlier reading answer unchanged. "
+    "The only new attachment is the original captured audio; the complete page images remain in "
+    "this chat. Answer ONLY the pending audio-dependent question slots listed below, exactly once "
+    "each, preserving question_id, group, label, answer_no and pages. Reply with ONE JSON object "
+    "whose questions array uses ready or needs_input, answer, missing_material and diagrams. "
+    "Recording may have started late: never invent unheard speech or missing audio. If the recorded "
+    "audio cannot establish an answer, return needs_input and explain the missing material. "
+    "Do not re-answer reading questions. Pending original question slots:\n"
+)
+
 
 def _booklet_chat_key(question, audio) -> str | None:
     """The chat of this exact booklet: the session's key plus the originals' hash.
@@ -1493,11 +1573,11 @@ def _booklet_chat_key(question, audio) -> str | None:
                  for p in question.document_pages]
     # "images" is the only bundle now; kept so an existing chat's key stays.
     identity = _digest(json.dumps(["images", sorted(originals)]).encode()
-                       + (_digest(audio[1]).encode() if audio else b""))
+                       + (_digest(audio[1]).encode() if audio and question.booklet_stage == "single" else b""))
     return f"{key}:{identity}"
 
 
-def _booklet_replies(data, *, subject, extras) -> list[tuple[dict, SolveResult | Exception]]:
+def _booklet_replies(data, *, subject, extras, stage="single", question_ids=None) -> list[tuple[dict, SolveResult | Exception | None]]:
     """Validate the envelope once; retain each question's own answer failure."""
     items = data.get("questions") if isinstance(data, dict) else None
     if not isinstance(items, list) or not items or any(not isinstance(item, dict) for item in items):
@@ -1505,11 +1585,25 @@ def _booklet_replies(data, *, subject, extras) -> list[tuple[dict, SolveResult |
     if any(not str(item.get("label") or "").strip() and not str(item.get("group") or "").strip()
            for item in items):
         raise ValueError("a question has neither a printed label nor a major heading")
+    if stage == "reading" and any(type(item.get("requires_audio")) is not bool for item in items):
+        raise ValueError("every mixed question must classify its audio requirement")
+    if stage == "listening":
+        ids = [item.get("question_id") for item in items]
+        if not question_ids or any(not isinstance(qid, str) for qid in ids) or len(ids) != len(set(ids)) or set(ids) != set(question_ids):
+            raise ValueError("the audio reply must match every pending question identity exactly once")
     replies = []
     for item in items:
+        invalid_label = (item.get("label") is not None and not isinstance(item["label"], str)
+                         or item.get("group") is not None and not isinstance(item["group"], str))
+        if stage == "reading" and item["requires_audio"]:
+            if invalid_label:
+                raise ValueError("invalid printed question label")
+            if item.get("status") != "pending_audio" or item.get("answer") != "" or item.get("diagrams"):
+                raise ValueError("audio-dependent questions must remain unanswered until original audio arrives")
+            replies.append((item, None))
+            continue
         try:
-            if (item.get("label") is not None and not isinstance(item["label"], str)
-                    or item.get("group") is not None and not isinstance(item["group"], str)):
+            if invalid_label:
                 raise ValueError("invalid printed question label")
             result = answer_sheet_result(item, subject=subject, extras=dict(extras))
         except ValueError as error:
@@ -1532,10 +1626,14 @@ class ChatGptWebSolver(LLMSolver):
         if question.document_pages:
             from ..source_bundle import source_bundle, source_images  # noqa: PLC0415
 
-            audio = _read_audio(question)
+            stage = question.booklet_stage
+            audio = None if stage == "reading" else _read_audio(question)
+            if stage == "listening" and not audio:
+                raise ChatGptWebAttachmentFailed("the completed original recording is required")
 
             def files():
-                attachments = (source_images(question.document_pages) if task == _ALL_TASK
+                attachments = (iter(()) if stage == "listening" else
+                               source_images(question.document_pages) if task in (_ALL_TASK, _READING_TASK)
                                else iter(source_bundle(question.document_pages)))
                 return itertools.chain(attachments, [audio_payload(*audio)] if audio else [])
 
@@ -1555,9 +1653,14 @@ class ChatGptWebSolver(LLMSolver):
                 f"Solve {question.question_no or 'the question'}; "
                 f"question_id={question.question_id}; Pages {question.page_numbers}. "
                 + (question.retry_hint or "")))
+            stage_options = {} if stage == "single" else {
+                "booklet_stage": stage, "stage_audio_digest": _digest(audio[1]) if audio else None,
+                "stage_question_ids": [item["question_id"] for item in question.booklet_questions],
+            }
             return client.complete_json(system=system, prompt=prompt, files=files,
-                                        chat_key=booklet_key or _booklet_chat_key(question, audio),
-                                        expect=expect, booklet=task == _ALL_TASK)
+                                         chat_key=booklet_key or _booklet_chat_key(question, audio),
+                                        expect=expect, booklet=task == _ALL_TASK or stage != "single",
+                                        **stage_options)
         pages = _read_images(question)
         audio = _read_audio(question)
         if pages or audio:
@@ -1571,14 +1674,17 @@ class ChatGptWebSolver(LLMSolver):
             expect=expect,
         )
 
-    def answer_all(self, *, question) -> list[tuple[dict, SolveResult | Exception]]:
+    def answer_all(self, *, question) -> list[tuple[dict, SolveResult | Exception | None]]:
         """Receive ordered batches, then name and answer every 小問 in one reply."""
         if not question.document_pages:
             raise ValueError("answering the booklet needs the original pages")
-        key = _booklet_chat_key(question, _read_audio(question))
+        stage = question.booklet_stage
+        key = _booklet_chat_key(question, None if stage == "reading" else _read_audio(question))
+        task = (_READING_TASK if stage == "reading" else _LISTENING_TASK + json.dumps(
+            question.booklet_questions, ensure_ascii=False) if stage == "listening" else _ALL_TASK)
         recover = getattr(self._client, "recover", None)
         recorded = getattr(self._client, "recorded", None)
-        if (not isinstance(self._client, ChatGptWebClient)
+        if (stage == "single" and not isinstance(self._client, ChatGptWebClient)
                 and key and recover and recorded and recorded(key)):
             # This booklet's one message is already in its chat: a repeated
             # finalize, a restart, or a save that failed after the answer.
@@ -1592,12 +1698,13 @@ class ChatGptWebSolver(LLMSolver):
         else:
             try:
                 data = self._complete(self._client, system=_ANSWER_ONLY_SYSTEM, prompt="",
-                                      question=question, task=_ALL_TASK, expect=("questions",),
+                                      question=question, task=task, expect=("questions",),
                                       booklet_key=key)
             except ChatGptWebUncertain:
                 # Our own send may have been answered after all. (Another
                 # session's pending send raises ChatGptWebBlocked instead.)
-                text = recover(chat_key=key, expect=("questions",)) if recover else None
+                recovery_options = {} if stage == "single" else {"booklet_stage": stage}
+                text = recover(chat_key=key, expect=("questions",), **recovery_options) if recover else None
                 if text is None:
                     raise
                 data = extract_json(text)
@@ -1605,7 +1712,8 @@ class ChatGptWebSolver(LLMSolver):
         attached = getattr(self._client, "last_image_attached", None)
         if attached is not None:
             extras["image_attached"] = attached
-        return _booklet_replies(data, subject=question.subject, extras=extras)
+        return _booklet_replies(data, subject=question.subject, extras=extras, stage=stage,
+                                question_ids=[item["question_id"] for item in question.booklet_questions])
 
     def solve(self, *, question, max_answer_len: int = 64):
         """Inherit the answer-only contract, then record how the figures fared.

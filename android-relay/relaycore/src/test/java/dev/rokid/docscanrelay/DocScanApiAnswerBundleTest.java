@@ -110,4 +110,30 @@ public class DocScanApiAnswerBundleTest {
         } finally { release.countDown(); notify.shutdownNow(); }
     }
 
+    @Test public void receivedRevisionAndWearEntryAreExplicitAuthenticatedStateFields() throws Exception {
+        try (MockWebServer server = new MockWebServer()) {
+            server.enqueue(new MockResponse().setBody("{}"));
+            server.enqueue(new MockResponse().setBody("{}"));
+            DocScanApi api = new DocScanApi(server.url("/").toString(), "test-key",
+                    new ClientIdentity("test", "test", "test"));
+            api.glassesState("glasses-1", 7L, 3, 4, "waiting", "sleep", null, 1L);
+            RecordedRequest receipt = server.takeRequest();
+            org.json.JSONObject body = new org.json.JSONObject(receipt.getBody().readUtf8());
+            assertEquals("Bearer test-key", receipt.getHeader("Authorization"));
+            assertEquals(1, body.getLong("ack_answer_revision"));
+            assertEquals(7, body.getLong("session_id"));
+            assertEquals("sleep", body.getString("display_request"));
+            api.glassesState("glasses-1", null, 4, 1, "chooser", "wake", "chooser");
+            org.json.JSONObject wear = new org.json.JSONObject(server.takeRequest().getBody().readUtf8());
+            assertEquals("chooser", wear.getString("entry_request"));
+            assertTrue(wear.isNull("session_id"));
+            assertTrue(wear.isNull("ack_answer_revision"));
+            assertThrows(IllegalArgumentException.class,
+                    () -> api.glassesState("glasses-1", null, 4, 2, "chooser", "wake", null, 1L));
+            assertThrows(IllegalArgumentException.class,
+                    () -> api.glassesState("glasses-1", 7L, 4, 2, "reading", "sleep"));
+            assertEquals(2, server.getRequestCount());
+        }
+    }
+
 }

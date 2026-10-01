@@ -166,18 +166,25 @@ def glasses_notify(state: GlassesState, request: Request) -> dict:
 def glasses_status(device_id: str | None = None) -> dict:
     try:
         if device_id is None:
-            return {"devices": [{**state, "answer_ready": False} for state in list_states()]}
+            return {"devices": [{**state, "answer_ready": False,
+                                 "available_stage": "none", "answer_revision": 0}
+                                for state in list_states()]}
         state = read_state(device_id)
     except (OSError, ValueError, TypeError, KeyError):
         raise HTTPException(status_code=503, detail="state_unavailable") from None
     if state is None:
         raise HTTPException(status_code=404, detail="no_glasses_state")
     ready = False
-    if state["phase"] == "analyzing" and state["session_id"] is not None:
+    available, revision = "none", 0
+    if state["phase"] in ("analyzing", "waiting", "reading") and state["session_id"] is not None:
         try:
             # Also resumes a pre-send failure on the phone, without glasses polling.
-            items = exam_answer_bundle(state["session_id"])["items"]
-            ready = bool(items) and all(item["status"] != "pending" for item in items)
+            bundle = exam_answer_bundle(state["session_id"])
+            items = bundle["items"]
+            available = bundle.get("available_stage", "complete" if items and all(
+                item["status"] != "pending" for item in items) else "none")
+            revision = bundle.get("revision", 0)
+            ready = bool(items) and available in ("reading", "complete")
         except HTTPException as error:
             if error.status_code not in (404, 409):
                 raise
@@ -190,8 +197,8 @@ def glasses_status(device_id: str | None = None) -> dict:
     if latest is None:
         raise HTTPException(status_code=503, detail="state_unavailable")
     if latest != state:
-        return {**latest, "answer_ready": False}
-    return {**state, "answer_ready": ready}
+        return {**latest, "answer_ready": False, "available_stage": "none", "answer_revision": 0}
+    return {**state, "answer_ready": ready, "available_stage": available, "answer_revision": revision}
 
 
 
@@ -1288,7 +1295,7 @@ class CreateExamSession(BaseModel):
 
 
 # Valid enum values for the document page-move exam.
-_EXAM_TYPES = {"written", "listening"}
+_EXAM_TYPES = {"written", "listening", "mixed"}
 _ANSWER_FORMATS = {"mark", "written"}
 
 # Answer-format instruction folded into the solver context so a real model
@@ -1524,8 +1531,8 @@ def create_exam_session(payload: CreateExamSession) -> dict:
             _require_dense_page_indexes(conn, payload.document_id)
         cur = conn.execute(
             "INSERT INTO exam_sessions "
-            "(mode, voice_enabled, subject_hint, document_id, exam_type, answer_format) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
+            "(mode, voice_enabled, subject_hint, document_id, exam_type, answer_format, analysis_stage) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
             (
                 payload.mode,
                 int(payload.voice_enabled),
@@ -1533,6 +1540,7 @@ def create_exam_session(payload: CreateExamSession) -> dict:
                 payload.document_id,
                 payload.exam_type,
                 payload.answer_format,
+                "reading" if payload.exam_type == "mixed" else "single",
             ),
         )
         conn.commit()
@@ -1543,6 +1551,7 @@ def create_exam_session(payload: CreateExamSession) -> dict:
             "subject_hint": payload.subject_hint,
             "document_id": payload.document_id,
             "exam_type": payload.exam_type,
+            "analysis_stage": "reading" if payload.exam_type == "mixed" else "single",
             "answer_format": payload.answer_format,
             "current_page_index": 0,
             "total_pages": _exam_total_pages(conn, payload.document_id),
@@ -1847,6 +1856,7 @@ def get_exam_session(session_id: int) -> dict:
             "phase": _session_phase(session),
             "document_id": session["document_id"],
             "exam_type": session["exam_type"],
+            "analysis_stage": session["analysis_stage"],
             "answer_format": session["answer_format"],
             "current_page_index": session["current_page_index"],
             "total_pages": _exam_total_pages(conn, session["document_id"]),
@@ -2178,16 +2188,22 @@ class ExamMode(BaseModel):
 
 @app.post("/v1/exam-sessions/{session_id}/mode")
 def exam_set_mode(session_id: int, payload: ExamMode) -> dict:
-    """Switch 筆記(written) ⇄ リスニング(listening). Doable from glasses or phone."""
+    """Switch exam type; a mixed analysis keeps its original mode."""
     if payload.exam_type not in _EXAM_TYPES:
         raise HTTPException(status_code=400, detail=f"exam_type must be one of {_EXAM_TYPES}")
     conn = db.connect()
     try:
         session = _exam_session_or_404(conn, session_id)
-        conn.execute(
-            "UPDATE exam_sessions SET exam_type = ? WHERE id = ?",
-            (payload.exam_type, session_id),
+        if _session_phase(session) == "reviewing" and "mixed" in (session["exam_type"], payload.exam_type):
+            raise HTTPException(status_code=409, detail="a mixed analysis keeps its original mode")
+        changed = conn.execute(
+            "UPDATE exam_sessions SET exam_type = ?, analysis_stage = ? WHERE id = ? "
+            "AND (status != 'reviewing' OR (exam_type != 'mixed' AND ? != 'mixed'))",
+            (payload.exam_type, "reading" if payload.exam_type == "mixed" else "single", session_id,
+             payload.exam_type),
         )
+        if changed.rowcount != 1:
+            raise HTTPException(status_code=409, detail="a mixed analysis keeps its original mode")
         conn.commit()
         return {
             "session_id": session_id,
@@ -2264,18 +2280,24 @@ def exam_document_audio(session_id: int) -> dict:
     with db.connect() as conn:
         session = _exam_session_or_404(conn, session_id)
         doc_id = _require_document_exam(session)
-        if session["exam_type"] != "listening":
+        mixed = session["exam_type"] == "mixed"
+        if session["exam_type"] not in ("listening", "mixed"):
             raise HTTPException(status_code=409, detail="listening session required")
         try:
-            path, text = recording_transcript(doc_id, require_transcript=requires_transcript())
+            path, text = recording_transcript(doc_id, require_transcript=not mixed and requires_transcript(),
+                                              verify_original=mixed)
         except ValueError as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
+        condition = ("(audio_path IS NULL OR (audio_path = ? AND transcript = ?))" if mixed else
+                     "(status != 'reviewing' OR (audio_path = ? AND transcript = ?))")
         updated = conn.execute(
-            "UPDATE exam_sessions SET audio_path = ?, transcript = ? WHERE id = ? "
-            "AND (status != 'reviewing' OR (audio_path = ? AND transcript = ?))",
+            "UPDATE exam_sessions SET audio_path = ?, transcript = ? WHERE id = ? AND " + condition,
             (path, text, session_id, path, text))
         if updated.rowcount != 1:
             raise HTTPException(status_code=409, detail="reviewed audio is immutable; start a new document")
+        conn.commit()
+        if mixed:
+            _resume_answers(conn, _exam_session_or_404(conn, session_id))
         return {"status": "complete", "audio_stored": True}
 
 
@@ -2620,7 +2642,11 @@ def _answer_bundle_item(conn, group: dict, row) -> dict:
         needs_input = metadata.get("answer_status") == "needs_input"
     except (ValueError, TypeError, AttributeError):
         metadata, needs_input = {}, False
-    numbers = answer_numbers(metadata.get("answer_no") or [])
+    try:
+        original_numbers = json.loads(row["structure_json"] or "{}").get("answer_no", [])
+    except (ValueError, TypeError, AttributeError):
+        original_numbers = []
+    numbers = answer_numbers(original_numbers or metadata.get("answer_no") or [])
     if sol is None:
         failure = _solve_failure(row)
         inherited = _solve_failure(group.get("heading"))
@@ -2685,8 +2711,12 @@ def _answer_input_digest(conn, session) -> str:
         pages = [{"question_id": r["id"], "body_text": r["body_text"] or ""}
                  for r in _deck_question_rows(conn, session["id"])]
     material = {"identity_schema": 2, "pages": pages,
-                "audio_sha256": file_sha256(session["audio_path"]),
-                "transcript": session["transcript"] or ""}
+                "audio_sha256": file_sha256(session["audio_path"]) if session["exam_type"] != "mixed" else "",
+                "transcript": (session["transcript"] or "") if session["exam_type"] != "mixed" else ""}
+    if session["exam_type"] == "mixed":
+        material = {"identity_schema": 3,
+                    "pages": [{"page_index": page["page_index"], "image_sha256": page["image_sha256"]}
+                              for page in pages]}
     encoded = json.dumps(material, ensure_ascii=False, sort_keys=True,
                          separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
@@ -2708,7 +2738,9 @@ def _answer_revision(conn, session_id: int) -> int:
             failures += max(0, int(metadata.get("solve_failures", 0)))
         except (ValueError, TypeError, AttributeError):
             pass
-    return (row["latest"] or 0) + 1 + failures
+    stage = conn.execute("SELECT analysis_stage FROM exam_sessions WHERE id=?", (session_id,)).fetchone()
+    stage_revision = {"awaiting_audio": 1, "listening": 1, "complete": 2}.get(stage[0], 0) if stage else 0
+    return (row["latest"] or 0) + 1 + failures + stage_revision
 
 
 def _review_operations() -> dict:
@@ -2985,6 +3017,8 @@ def _answer_deck(conn, session, session_id: int, doc_id: int) -> bool:
     """
     if os.environ.get("ROKID_SOLVER", "").strip() == "chatgpt-web" and not chatgpt_send_enabled():
         return True  # Keep the reviewing session and originals for later permission.
+    if session["exam_type"] == "mixed":
+        return _answer_mixed_deck(conn, session, session_id, doc_id)
     items = [row for group in _answer_groups(conn, session_id) for row in group["items"]]
     if items and all(_latest_solution_row(conn, row["id"]) for row in items):
         return True  # a repeated finalize must not ask again
@@ -3060,6 +3094,170 @@ def _answer_deck(conn, session, session_id: int, doc_id: int) -> bool:
         else:
             _record_solve_failure(conn, row, result or ValueError("no answer for this question"),
                                   commit=False)
+    conn.commit()
+    return True
+
+
+def _mixed_audio_rows(conn, session_id):
+    return [row for row in _deck_question_rows(conn, session_id)
+            if json.loads(row["structure_json"] or "{}").get("requires_audio") is True]
+
+
+def _answer_mixed_deck(conn, session, session_id: int, doc_id: int) -> bool:
+    """Commit the image-only inventory and reading answers before audio can run."""
+    from .solvers.base import Question, SolveResult
+
+    if session["analysis_stage"] in ("awaiting_audio", "listening"):
+        return _answer_mixed_audio(conn, session, session_id, doc_id)
+    if session["analysis_stage"] != "reading":
+        return True
+    if not _mixed_work_pending(conn, session):
+        return True  # A terminal first-stage failure cannot start another image or audio send.
+    source_pages = _document_source_pages(conn, doc_id, session_id)
+    question = Question(chat_key=f"session:{session_id}", booklet_stage="reading",
+                        document_pages=source_pages, document_id=str(doc_id),
+                        question_id="booklet", answer_only=True)
+    failed, replies = None, []
+    for attempt in range(PRESEND_TRIES):
+        if attempt:
+            time.sleep(PRESEND_RETRY_S)
+        try:
+            replies = _answer_all(question)
+            if (not replies or len(replies) > 300
+                    or any(type(item.get("requires_audio")) is not bool
+                           or (item["requires_audio"] and result is not None)
+                           or (not item["requires_audio"] and result is None)
+                           for item, result in replies)):
+                raise ValueError("mixed analysis requires an explicit complete audio classification")
+            failed = None
+            break
+        except Exception as error:  # noqa: BLE001 - never resend an uncertain stage
+            if isinstance(error, ChatGptWebSendNotAuthorized):
+                return True
+            replies, failed = [], error
+            if not _nothing_sent(error):
+                break
+    old_rows = _deck_question_rows(conn, session_id)
+    carried = sum(_failure_count(row) for row in old_rows)
+    if failed is not None:
+        if not old_rows:
+            _insert_deck(conn, session_id, doc_id, [ProblemUnit(
+                None, "", start_page_index=0, page_indexes=list(range(len(source_pages))))])
+            old_rows = _deck_question_rows(conn, session_id)
+        _record_solve_failure(conn, old_rows[0], failed, commit=False)
+        conn.commit()
+        return True
+    if any(_latest_solution_row(conn, row["id"]) for row in old_rows):
+        raise ValueError("mixed reading inventory cannot replace saved answers")
+    conn.executemany("DELETE FROM questions WHERE id=?", [(row["id"],) for row in old_rows])
+    missing = _missing_answer_numbers([item for item, _ in replies])
+    _insert_deck(conn, session_id, doc_id, _model_problems([item for item, _ in replies], len(source_pages))
+                 + [_missing_answer_problem(number, len(source_pages)) for number in missing])
+    results = {}
+    for item, result in replies:
+        results.setdefault(" ".join(filter(None, _item_labels(item))), []).append((item, result))
+    items = [row for group in _answer_groups(conn, session_id) for row in group["items"]]
+    for index, row in enumerate(items):
+        metadata = json.loads(row["structure_json"])
+        if carried and index == 0:
+            metadata["solve_failures"] = carried
+        matched = results.get(row["body_text"])
+        item, result = matched.pop(0) if matched else ({}, AnswerMissing(row["question_no"]))
+        metadata.update(requires_audio=item.get("requires_audio") is True,
+                        answer_no=answer_numbers(item.get("answer_no")),
+                        booklet_item={"group": _item_labels(item)[0], "label": _item_labels(item)[1],
+                                      "answer_no": answer_numbers(item.get("answer_no")),
+                                      "pages": [p + 1 for p in metadata["page_indexes"]]})
+        conn.execute("UPDATE questions SET structure_json=? WHERE id=?", (json.dumps(metadata), row["id"]))
+        if isinstance(result, SolveResult):
+            result.extras["answer_no"] = metadata["answer_no"]
+            _save_solution(conn, row, result, "chatgpt-web", commit=False)
+        elif result is not None:
+            refreshed = conn.execute("SELECT * FROM questions WHERE id=?", (row["id"],)).fetchone()
+            _record_solve_failure(conn, refreshed, result, commit=False)
+    stage = "awaiting_audio" if _mixed_audio_rows(conn, session_id) else "complete"
+    conn.execute("UPDATE exam_sessions SET analysis_stage=? WHERE id=?", (stage, session_id))
+    conn.commit()
+    return True
+
+
+def _available_stage(session, items):
+    """Display availability, including failure reasons; never a correctness label."""
+    if session["exam_type"] == "mixed":
+        stage = session["analysis_stage"]
+        if stage == "complete":
+            return "complete"
+        if stage in ("awaiting_audio", "listening") or (
+                stage == "reading" and items and all(item["status"] != "pending" for item in items)):
+            return "reading"
+        return "none"
+    return "complete" if items and all(item["status"] != "pending" for item in items) else "none"
+
+
+def _mixed_work_pending(conn, session):
+    rows = _deck_question_rows(conn, session["id"])
+    if session["analysis_stage"] == "reading":
+        return not rows or (not any(_latest_solution_row(conn, row["id"]) for row in rows)
+                            and any(_retrying(row) for row in rows))
+    if session["analysis_stage"] not in ("awaiting_audio", "listening") or not session["audio_path"]:
+        return False
+    audio_rows = [row for row in _mixed_audio_rows(conn, session["id"])
+                  if _latest_solution_row(conn, row["id"]) is None]
+    return bool(audio_rows) and not any(_solve_failure(row) and not _retrying(row) for row in audio_rows)
+
+
+def _answer_mixed_audio(conn, session, session_id, doc_id):
+    """Add only the verified original recording; preserve every existing question and answer."""
+    from .listening import recording_transcript
+    from .solvers.base import Question, SolveResult
+
+    if not _mixed_work_pending(conn, session):
+        return True
+    rows = [row for row in _mixed_audio_rows(conn, session_id) if _latest_solution_row(conn, row["id"]) is None]
+    slots = [{"question_id": f"q{row['id']}", **json.loads(row["structure_json"])["booklet_item"]}
+             for row in rows]
+    conn.execute("UPDATE exam_sessions SET analysis_stage='listening' WHERE id=?", (session_id,))
+    conn.commit()
+    question = Question(chat_key=f"session:{session_id}", booklet_stage="listening",
+                        booklet_questions=slots, audio_path=session["audio_path"],
+                        document_pages=_document_source_pages(conn, doc_id, session_id),
+                        document_id=str(doc_id), question_id="booklet", answer_only=True)
+    failed, replies = None, []
+    for attempt in range(PRESEND_TRIES):
+        if attempt:
+            time.sleep(PRESEND_RETRY_S)
+        try:
+            path, _ = recording_transcript(doc_id, require_transcript=False, verify_original=True)
+            if path != session["audio_path"]:
+                raise ValueError("completed original audio identity changed")
+            replies = _answer_all(question)
+            ids = [item.get("question_id") for item, _ in (replies or [])]
+            if (any(not isinstance(qid, str) for qid in ids) or len(ids) != len(set(ids))
+                    or set(ids) != {slot["question_id"] for slot in slots}
+                    or any(result is None for _, result in replies or [])):
+                raise ValueError("audio answers must match the pending original question identities")
+            failed = None
+            break
+        except Exception as error:  # noqa: BLE001 - the uncertain barrier stays in force
+            if isinstance(error, ChatGptWebSendNotAuthorized):
+                return True
+            replies, failed = [], error
+            if not _nothing_sent(error):
+                break
+    if failed is not None:
+        for row in rows:
+            _record_solve_failure(conn, row, failed, commit=False)
+        conn.commit()
+        return True
+    results = {item["question_id"]: result for item, result in replies}
+    for row in rows:
+        result = results[f"q{row['id']}"]
+        if isinstance(result, SolveResult):
+            result.extras["answer_no"] = json.loads(row["structure_json"])["answer_no"]
+            _save_solution(conn, row, result, "chatgpt-web", commit=False)
+        else:
+            _record_solve_failure(conn, row, result, commit=False)
+    conn.execute("UPDATE exam_sessions SET analysis_stage='complete' WHERE id=?", (session_id,))
     conn.commit()
     return True
 
@@ -3245,8 +3443,11 @@ def _resume_answers(conn, session) -> bool:
     if not (recent and recent[0]):
         return False
     rows = _deck_question_rows(conn, session_id)
-    if rows and (any(_latest_solution_row(conn, row["id"]) for row in rows)
-                 or not any(_retrying(row) for row in rows)):
+    if session["exam_type"] == "mixed":
+        if not _mixed_work_pending(conn, session):
+            return False
+    elif rows and (any(_latest_solution_row(conn, row["id"]) for row in rows)
+                   or not any(_retrying(row) for row in rows)):
         return False
     with _background_solves_lock:
         if session_id in _background_solves:
@@ -3271,18 +3472,32 @@ def _resume_all_answers() -> None:
 def _solve_deck_in_background(session_id: int, doc_id: int) -> None:
     conn = db.connect()
     try:
-        session = _exam_session_or_404(conn, session_id)
-        if _answer_deck(conn, session, session_id, doc_id):
-            return
+        while True:
+            session = _exam_session_or_404(conn, session_id)
+            if not _answer_deck(conn, session, session_id, doc_id):
+                break
+            latest = _exam_session_or_404(conn, session_id)
+            if (latest["exam_type"] != "mixed" or latest["analysis_stage"] != "awaiting_audio"
+                    or not _mixed_work_pending(conn, latest)):
+                return
         if not _deck_question_rows(conn, session_id):
             _insert_deck(conn, session_id, doc_id, _fallback_problems(
                 conn, doc_id, _exam_total_pages(conn, doc_id)))
             conn.commit()
         _solve_deck(conn, session, session_id, doc_id, bundle_items=True)
     finally:
-        conn.close()
         with _background_solves_lock:
             _background_solves.discard(session_id)
+        # A bind may have observed the old worker just before it ended. Release
+        # ownership, then read committed state once: it or the bind starts the
+        # next worker, while the per-session set prevents a duplicate.
+        try:
+            conn.rollback()
+            latest = _exam_session_or_404(conn, session_id)
+            if latest["exam_type"] == "mixed" and latest["analysis_stage"] == "awaiting_audio" and latest["audio_path"]:
+                _resume_answers(conn, latest)
+        finally:
+            conn.close()
 
 @app.post("/v1/exam-sessions/{session_id}/finalize-reading")
 def exam_finalize_reading(session_id: int, solve: Literal["background"] | None = None) -> dict:
@@ -3313,12 +3528,14 @@ def exam_finalize_reading(session_id: int, solve: Literal["background"] | None =
     """
     conn = db.connect()
     try:
+        # Claim the mode before reading it, so a concurrent switch cannot select another solver path.
+        conn.execute("BEGIN IMMEDIATE")
         session = _exam_session_or_404(conn, session_id)
         doc_id = _require_document_exam(session)
         total_pages = _exam_total_pages(conn, doc_id)
         locked = session["mode"] == "real" and not config.ALLOW_REAL_EXAM_SOLVE
         solver_env = (os.environ.get("ROKID_SOLVER") or "").strip()
-        background = (solve == "background" and not locked and total_pages > 0
+        background = ((solve == "background" or session["exam_type"] == "mixed") and not locked and total_pages > 0
                       and solver_env not in ("", "local"))
         # A batch still analysing has no deck rows yet, so the claim below would
         # take the session again; a running batch owns it instead.
@@ -3353,7 +3570,7 @@ def exam_finalize_reading(session_id: int, solve: Literal["background"] | None =
         if already_finalized:
             conn.rollback()  # nothing claimed; end the implicit transaction
         else:
-            if not background:
+            if not background and session["exam_type"] != "mixed":
                 # Segment and insert the deck in the SAME transaction as the claim.
                 # (A background batch asks the model for the 小問 instead, RP-12.)
                 problems = _ocr_problems(conn, doc_id)
@@ -3705,6 +3922,8 @@ def exam_answer_bundle(session_id: int) -> dict:
             "session_id": str(session_id),
             "input_digest": _answer_input_digest(conn, session),
             "revision": _answer_revision(conn, session_id),
+            "analysis_stage": session["analysis_stage"],
+            "available_stage": _available_stage(session, items),
             "items": items,
         }
     finally:

@@ -166,7 +166,8 @@ public final class AnswerReader {
             AnswerItem old = bundle.items.get(i);
             AnswerItem item = next.items.get(i);
             sameShape = old.questionId.equals(item.questionId) && old.groupId.equals(item.groupId)
-                    && old.groupLabel.equals(item.groupLabel) && old.questionLabel.equals(item.questionLabel);
+                    && old.groupLabel.equals(item.groupLabel) && old.questionLabel.equals(item.questionLabel)
+                    && old.answerNumbers.equals(item.answerNumbers);
         }
         if (!sameShape) {
             // The same questions never change order or identity. A deck with none

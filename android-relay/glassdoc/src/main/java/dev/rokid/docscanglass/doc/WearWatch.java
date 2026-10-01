@@ -6,6 +6,9 @@ import android.hardware.SensorEvent;
 import android.hardware.SensorEventListener;
 import android.hardware.SensorManager;
 import android.os.SystemClock;
+import android.os.Handler;
+import android.os.Looper;
+import android.os.PowerManager;
 import android.util.Log;
 import dev.rokid.docscanglass.input.WearTransition;
 
@@ -23,18 +26,27 @@ final class WearWatch implements SensorEventListener {
     private static final String TAG = "WearWatch";
 
     interface OnWornAgain {
-        void wornAgain();
+        void wornAgain(boolean initial);
     }
 
     private final SensorManager sensors;
     private final Sensor proximity;
     private final WearTransition transition = new WearTransition();
     private final OnWornAgain callback;
+    private final Handler handler = new Handler(Looper.getMainLooper());
+    private final PowerManager.WakeLock settleLock;
+    private final Runnable settle = this::confirm;
+    private void confirm() {
+        if (transition.confirm(SystemClock.elapsedRealtime())) callback.wornAgain(transition.initialWear());
+        releaseSettleLock();
+    }
 
     WearWatch(Context context, OnWornAgain callback) {
         this.callback = callback;
         sensors = (SensorManager) context.getSystemService(Context.SENSOR_SERVICE);
         proximity = sensors == null ? null : sensors.getDefaultSensor(Sensor.TYPE_PROXIMITY, true);
+        PowerManager power = (PowerManager)context.getSystemService(Context.POWER_SERVICE);
+        settleLock = power == null ? null : power.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "docscan:wear-settle");
     }
 
     /** @return false when this device exposes no proximity sensor to watch. */
@@ -47,6 +59,8 @@ final class WearWatch implements SensorEventListener {
     }
 
     void stop() {
+        handler.removeCallbacks(settle);
+        releaseSettleLock();
         if (sensors != null) {
             sensors.unregisterListener(this);
         }
@@ -54,11 +68,18 @@ final class WearWatch implements SensorEventListener {
 
     @Override
     public void onSensorChanged(SensorEvent event) {
-        if (event.values.length > 0
-                && transition.onReading(event.values[0], SystemClock.elapsedRealtime())) {
-            callback.wornAgain();
-        }
+        if (event.values.length == 0) return;
+        long now = SystemClock.elapsedRealtime();
+        if (transition.onReading(event.values[0], now)) callback.wornAgain(transition.initialWear());
+        handler.removeCallbacks(settle);
+        long delay = transition.delayUntilSettled(now);
+        if (delay >= 0) {
+            if (settleLock != null) { releaseSettleLock(); settleLock.acquire(delay + 500); }
+            handler.postDelayed(settle, delay);
+        } else releaseSettleLock();
     }
+
+    private void releaseSettleLock() { if (settleLock != null && settleLock.isHeld()) settleLock.release(); }
 
     @Override
     public void onAccuracyChanged(Sensor sensor, int accuracy) {

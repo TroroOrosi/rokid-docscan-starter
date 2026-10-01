@@ -18,6 +18,7 @@ import urllib.request
 
 COMPONENT = "dev.rokid.docscanglass.doc/.DocScanGlassActivity"
 SERVER = "http://127.0.0.1:8000"
+ANSWER_RETRY_SECONDS = 5.0
 
 
 class StateUnavailable(RuntimeError):
@@ -49,9 +50,20 @@ def fetch_state(server: str, device_id: str | None) -> dict:
             if (not isinstance(item["device_id"], str) or (device_id and item["device_id"] != device_id)
                 or type(item["generation"]) is not int
                 or type(item["sequence"]) is not int or item["generation"] < 0 or item["sequence"] < 0
-                or item["phase"] not in ("capturing", "analyzing", "reading", "writing_done", "closed")
-                or type(item["answer_ready"]) is not bool):
+                or item["phase"] not in ("chooser", "waiting", "capturing", "analyzing", "reading", "writing_done", "closed")
+                or type(item["answer_ready"]) is not bool
+                or item.get("display_request") not in (None, "wake", "sleep")
+                or (item.get("display_request") == "sleep" and item["phase"] in ("capturing", "reading"))
+                or item.get("entry_request") not in (None, "chooser")
+                or (item.get("entry_request") and (item["phase"] != "chooser"
+                    or item.get("session_id") is not None or item.get("display_request") != "wake"))
+                or item.get("available_stage", "complete") not in ("none", "reading", "complete")
+                or type(item.get("answer_revision", 0)) is not int or item.get("answer_revision", 0) < 0):
                 raise ValueError("invalid state")
+            ack = item.get("ack_answer_revision")
+            if ack is not None and (type(ack) is not int or not 0 <= ack <= 2**63 - 1
+                                    or item.get("session_id") is None):
+                raise ValueError("invalid received revision")
         return state
     except urllib.error.HTTPError as error:
         code = "authentication_failed" if error.code in (401, 403) else (
@@ -82,6 +94,23 @@ def adb(serial: str, *args: str) -> str:
     if "Error:" in output or "Exception" in output:
         raise subprocess.CalledProcessError(1, "device command")
     return result.stdout.strip()
+
+
+def app_running(serial: str) -> bool:
+    """Only a clean pidof miss counts as stopped; transport errors are unknown."""
+    result = subprocess.run(["adb", "-s", serial, "shell", "pidof", "dev.rokid.docscanglass.doc"],
+                            capture_output=True, text=True, timeout=10)
+    if result.returncode == 0 and re.fullmatch(r"[0-9]+(?:\s+[0-9]+)*", result.stdout.strip()) and not result.stderr.strip():
+        return True
+    if result.returncode == 1 and not result.stdout.strip() and not result.stderr.strip():
+        return False
+    raise subprocess.CalledProcessError(result.returncode or 1, "application process unavailable")
+
+
+def answer_unreceived(state: dict) -> bool:
+    ack = state.get("ack_answer_revision")
+    return (state["phase"] in ("analyzing", "waiting", "reading") and state["answer_ready"]
+            and bool(state["session_id"]) and (ack is None or ack < state.get("answer_revision", 0)))
 
 
 def mute(serial: str) -> None:
@@ -125,6 +154,10 @@ def watch(requested: str, expected_serial: str, interval: float, server: str = S
     seen_issue = None
     sleep_key = None
     woken = None
+    next_answer_retry = 0.0
+    newest = (-1, -1)
+    worn_entry = None
+    bootstrapped = False
     last_volume_check = 0.0
     selected = device_id or os.environ.get("ROKID_GLASSES_DEVICE_ID")
     while True:
@@ -157,8 +190,16 @@ def watch(requested: str, expected_serial: str, interval: float, server: str = S
             if seen_issue:
                 print("Glasses/server connection restored", flush=True)
                 seen_issue = None
+                # A delivered intent is not proof the Activity fetched it.
+                # It rejects already-read/closed revisions itself; recovery
+                # must also give an interrupted fetch another notification.
+                woken = None
+            order = (state["generation"], state["sequence"])
+            stale = order < newest
+            newest = max(newest, order)
             if spread == "0":
                 folded = True
+                bootstrapped = False
             elif folded:
                 # Consume before side effects: a lost reply must not relaunch.
                 folded = False
@@ -168,20 +209,47 @@ def watch(requested: str, expected_serial: str, interval: float, server: str = S
                 print("Glasses unfolded: chooser started", flush=True)
             else:
                 key = (state["generation"], state["session_id"])
-                if state["phase"] == "analyzing" and state["answer_ready"] and state["session_id"]:
-                    if woken != key:
+                request = state.get("display_request")
+                answer_key = (*key, state.get("available_stage"), state.get("answer_revision"))
+                running = app_running(serial)
+                if running:
+                    bootstrapped = False
+                if not stale and state.get("entry_request") == "chooser":
+                    if worn_entry != order:
+                        worn_entry = order # unknown launch is consumed; never duplicate one wear event
+                        adb(serial, "shell", "am", "start", "-W", "-n", COMPONENT, "--ez", "chooser", "true",
+                            "--ez", "wear_origin", "true", "--el", "wear_generation", str(state["generation"]))
+                elif not bootstrapped and not running:
+                    bootstrapped = True
+                    # Arms open is only an entrance for the actual proximity sensor.
+                    adb(serial, "shell", "am", "start", "-W", "-n", COMPONENT,
+                        "--ez", "chooser", "true", "--ez", "wear_bootstrap", "true")
+                elif not stale and answer_unreceived(state):
+                    retry = "ack_answer_revision" in state and time.monotonic() >= next_answer_retry
+                    if woken != answer_key or retry:
                         mute(serial)
                         # The Activity validates its current phase/session/generation before lighting.
                         # A completed run can race the phone's earlier ready snapshot.
+                        revision = ("--el", "answer_revision", str(state["answer_revision"])) if "answer_revision" in state else ()
                         adb(serial, "shell", "am", "start", "-W", "-n", COMPONENT,
                             "--ei", "wake_session_id", str(state["session_id"]),
-                            "--el", "wake_generation", str(state["generation"]))
-                        woken = key
-                elif state["phase"] in ("analyzing", "writing_done", "closed"):
-                    next_sleep = (*key, state["phase"])
+                            "--el", "wake_generation", str(state["generation"]), *revision)
+                        woken = answer_key
+                        next_answer_retry = time.monotonic() + ANSWER_RETRY_SECONDS
+                elif not stale and (request == "sleep" or (request is None and state["phase"] in ("analyzing", "writing_done", "closed"))):
+                    next_sleep = (*key, state["phase"], state["sequence"] if request else None)
                     if sleep_key != next_sleep:
-                        adb(serial, "shell", "input", "-d", "0", "keyevent", "KEYCODE_SLEEP")
-                        sleep_key = next_sleep
+                        # A user may start capture after our first GET. Re-read
+                        # authenticated intent immediately before a new sleep.
+                        # Physical ADB delivery cannot be atomic with this GET.
+                        current = fetch_state(server, selected) if request else state
+                        newest = max(newest, (current["generation"], current["sequence"]))
+                        fields = ("device_id", "generation", "sequence", "session_id", "phase", "display_request", "ack_answer_revision")
+                        if (all(current.get(field) == state.get(field) for field in fields)
+                            and current["phase"] not in ("capturing", "reading")
+                            and not answer_unreceived(current)):
+                            adb(serial, "shell", "input", "-d", "0", "keyevent", "KEYCODE_SLEEP")
+                            sleep_key = next_sleep
             if time.monotonic() - last_volume_check >= 1:
                 last_volume_check = time.monotonic()
                 check_volume(serial)

@@ -171,10 +171,15 @@ public final class DocScanApi {
     }
 
     public JSONObject createExamSession(long documentId, boolean listening) throws IOException, JSONException {
+        return createExamSession(documentId, listening ? "listening" : "written");
+    }
+
+    public JSONObject createExamSession(long documentId, String examType) throws IOException, JSONException {
+        if (!java.util.List.of("written", "listening", "mixed").contains(examType)) throw new IllegalArgumentException("invalid exam type");
         JSONObject payload = new JSONObject()
                 .put("mode", "study")
                 .put("document_id", documentId)
-                .put("exam_type", listening ? "listening" : "written")
+                .put("exam_type", examType)
                 .put("answer_format", "mark");
         return postJson("/v1/exam-sessions", payload);
     }
@@ -233,9 +238,35 @@ public final class DocScanApi {
 
     public void glassesState(String deviceId, Long sessionId, long generation, long sequence, String phase)
             throws IOException, JSONException {
+        glassesState(deviceId, sessionId, generation, sequence, phase, null);
+    }
+
+    public void glassesState(String deviceId, Long sessionId, long generation, long sequence, String phase,
+                             String displayRequest) throws IOException, JSONException {
+        glassesState(deviceId, sessionId, generation, sequence, phase, displayRequest, null);
+    }
+
+    public void glassesState(String deviceId, Long sessionId, long generation, long sequence, String phase,
+                             String displayRequest, String entryRequest) throws IOException, JSONException {
+        glassesState(deviceId, sessionId, generation, sequence, phase, displayRequest, entryRequest, null);
+    }
+
+    public void glassesState(String deviceId, Long sessionId, long generation, long sequence, String phase,
+                             String displayRequest, String entryRequest, Long ackAnswerRevision) throws IOException, JSONException {
+        if ("sleep".equals(displayRequest) && ("capturing".equals(phase) || "reading".equals(phase))) {
+            throw new IllegalArgumentException("an active display cannot request sleep");
+        }
+        if (entryRequest != null && (!"chooser".equals(entryRequest) || !"chooser".equals(phase)
+                || sessionId != null || !"wake".equals(displayRequest))) throw new IllegalArgumentException("invalid wear entry");
+        if (ackAnswerRevision != null && (ackAnswerRevision < 0 || sessionId == null)) {
+            throw new IllegalArgumentException("invalid received answer revision");
+        }
         JSONObject payload = new JSONObject().put("device_id", deviceId)
                 .put("session_id", sessionId == null ? JSONObject.NULL : sessionId)
-                .put("generation", generation).put("sequence", sequence).put("phase", phase);
+                .put("generation", generation).put("sequence", sequence).put("phase", phase)
+                .put("display_request", displayRequest == null ? JSONObject.NULL : displayRequest)
+                .put("entry_request", entryRequest == null ? JSONObject.NULL : entryRequest)
+                .put("ack_answer_revision", ackAnswerRevision == null ? JSONObject.NULL : ackAnswerRevision);
         execute(new Request.Builder().url(baseUrl + "/v1/glasses/state")
                 .post(RequestBody.create(payload.toString(), JSON)), stateHttp);
     }

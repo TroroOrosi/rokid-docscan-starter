@@ -83,6 +83,14 @@ public class AnswerReaderTest {
         assertEquals("g1-q1", reader.current().questionId);
     }
 
+    @Test public void aLaterListeningRevisionCannotChangePrintedAnswerNumbers() {
+        AnswerItem reading = new AnswerItem("g1", "読解", "q1", "問1", "A", AnswerItem.Status.READY, "", List.of(), List.of(101));
+        AnswerReader reader = new AnswerReader(new AnswerBundle("session", "a".repeat(64), 1, List.of(reading)), 40, 3, String::length);
+        AnswerItem changed = new AnswerItem("g1", "読解", "q1", "問1", "A", AnswerItem.Status.READY, "", List.of(), List.of(102));
+        assertFalse(reader.accept(new AnswerBundle("session", "a".repeat(64), 2, List.of(changed))));
+        assertEquals(List.of(101), reader.current().answerNumbers);
+    }
+
     @Test public void aRetryThatReplacesTheFailedRowWithTheModelsQuestionsIsShown() {
         AnswerBundle failed = new AnswerBundle("session", "a".repeat(64), 2, List.of(
                 new AnswerItem("g1", "全体", "q5", "全問", "", AnswerItem.Status.PENDING,

@@ -119,6 +119,9 @@ public class DocScanGlassActivityAnswerReadingTest {
         activity.setContentView((HudView) getField(activity, "hud"));
         activity.onUpdate(RelayState.FINALIZING, List.of("資料読み込み中"), "waiting");
         Shadows.shadowOf(Looper.getMainLooper()).idle();
+        assertTrue("analysis enters a five-second idle window", (activity.getWindow().getAttributes().flags
+                & android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) != 0);
+        Shadows.shadowOf(Looper.getMainLooper()).idleFor(java.time.Duration.ofSeconds(5));
         assertEquals(0, activity.getWindow().getAttributes().flags
                 & android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
 
@@ -369,6 +372,7 @@ public class DocScanGlassActivityAnswerReadingTest {
     @Test public void analysisWaitNeedsAMatchingNotificationRatherThanATimer() throws Exception {
         setField(activity, "resolvedOfflineAnswersAtStartup", true);
         setField(activity, "powerGeneration", 3L);
+        PowerState.forContext(activity).begin(2);
         setField(activity, "powerSession", SESSION_ID);
         setField(activity, "powerPhase", "analyzing");
         activity.onUpdate(RelayState.REVIEW, List.of("a"), "waiting");

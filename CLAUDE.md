@@ -1,6 +1,6 @@
 # rokid-docscan-starter development guide
 
-Status: Current engineering contract. Updated 2026-10-01.
+Status: Current engineering contract. Updated 2026-10-02.
 
 **Start at `.agents/progress/current.md`.** It lists the operator's decisions,
 the verified state and the next steps. Do not re-ask what it settles. Keep the
@@ -156,6 +156,9 @@ submission. Close and confirm only a popup the verification itself opened.
   not capture conditions. Actual review lasts three seconds, then local save
   waits for another page change. Thirty seconds without progress pauses the
   camera. A previous `manual=true` does not carry over to a normal launch.
+  The same preview camera/session supplies the full-size JPEG after fresh
+  native focus/exposure and stillness checks. Expired preparation fails instead
+  of forcing a moving shot. Physical character accuracy remains unverified.
   The frozen CUSTOMVIEW route keeps explicit phone controls. The original
   `adf12ee` disable decision belonged to the route without operator taps.
 - On the local surface the captured still is drawn after camera closure; a
@@ -163,26 +166,41 @@ submission. Close and confirm only a popup the verification itself opened.
   no input commits, BACK ends capture after the last review. Hidden or stale
   views cannot commit. A waiting tap requests a manual shot without starting
   a second request in flight. See `docs/multimodal-scan.md`.
-- The standalone app records listening PCM while capturing. The phone preserves
-  originals and waits for all chunks before final analysis. The chatgpt-web route
+- The standalone app keeps the previous listening-only flow and adds mixed
+  English: capture paper first, solve reading from images, then send completed
+  original audio to the same chat after the reading reply is durably saved.
+  Audio-dependent questions remain pending before audio; missing recording is
+  never inferred. Capture/review swipes and reader/analysis/waiting single taps
+  toggle mixed recording without shifting answer position. A waiting swipe
+  returns to saved reading answers. The phone preserves and verifies all chunks
+  before audio analysis. The chatgpt-web route
   sends original images/audio, not OCR or local transcripts, and does not require
   local VAD/ASR. ASR remains for compatible non-browser provider paths.
   Diagram answers use validated vectors and the existing AnswerReader/Canvas.
   These new behaviors have not passed physical acceptance on the current APK.
 - Answer reading is continuous: pack short items on one screen, keep full
   derivations and diagrams, and retain printed answer numbers and position.
-  The first reader double tap persists writing completion and sleeps inside
-  the app; only two further double taps within three seconds exit to home.
+  The first final-reader double tap persists writing completion and sleeps
+  inside the app; only two further double taps within three seconds exit to home.
+  Mixed intermediate reading completion returns to audio waiting and keeps
+  recording; a later answer revision updates the same question identities.
   Authenticated device/session/generation/sequence state lets the phone watcher
   request sleep/wake. A completed or closed generation ignores late answers.
+  The phone repeats an answer notification until `ack_answer_revision` confirms
+  a bundle saved and displayed by that client; generated revisions are not
+  receipt acknowledgements. The client suppresses concurrent and duplicate loads.
   Keep microphone input while muting output. Do not hold the glasses CPU for
   indefinite analysis or poll answers there; bounded upload work may retain CPU
   only until its timeout or completion. Physical silence and timing are pending.
 - Ordinary still review shows the image without text covering it. Keep the
   three-second visible review and the existing retake/end gestures. Preserve
   the operator's system screen-off timeout, including disabled auto-off:
-  capture/review/reading hold the app window on; standby/exit release that
-  ownership and use authenticated phone-watcher sleep requests. Never restore
+  capture/review/reading hold the app window on. Chooser, recording-only,
+  uploading, analysis and other waiting sleep after five seconds without user
+  input; network refreshes do not extend that timer. Authenticated phone-watcher
+  requests handle sleep/wake; ordinary chooser updates are not app-entry requests.
+  Confirmed wear requests use a fresh persistent generation and an explicit
+  chooser entry with no old answer-wake extras. Never restore
   a saved timeout over a later operator choice. Hardware acceptance is pending.
 - Text-only page upload remains an API compatibility path. Do not describe it
   as the real-device primary path.

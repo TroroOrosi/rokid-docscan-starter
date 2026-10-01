@@ -211,7 +211,9 @@ from __future__ import annotations
 # 0.49.0: unobstructed still review, aligned preview geometry, compact fixed
 #        answer pages and display control preserving the system timeout.
 # 0.49.1: measured ChatGPT composer and checked Latest/Extra High selection.
-APP_VERSION = "0.49.1"
+# 0.50.0: mixed English solves paper before original audio; idle displays rest
+#         after five seconds while capture, photo review and answers stay visible.
+APP_VERSION = "0.50.0"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.
@@ -318,7 +320,9 @@ APP_VERSION = "0.49.1"
 #        so the phone can request display changes without waking a finished session.
 # 1.31.1: answer-bundle preserves meaningful braces in written sets and code.
 # 1.31.2: browser solving recognizes the operator-selected Latest/Extra High UI.
-API_VERSION = "1.31.2"
+# 1.32.0: mixed analysis stages and partial answer availability; authenticated
+#         chooser/waiting display requests preserve protected visible work.
+API_VERSION = "1.32.0"
 
 # Matching algorithm identity. Bump when thresholds or hashing change so a
 # re-index/eval is triggered. Mirrors thresholds in app/matching.py.
@@ -379,7 +383,9 @@ ANALYZER_API_VERSION = "1.0.0"
 #        Adapters that cannot take audio ignore it (additive/back-compat).
 # 1.8.0: original page images are acknowledged in ordered batches in one chat;
 #        the final message requests all answers after every source was received.
-SOLVER_API_VERSION = "1.8.0"
+# 1.9.0: mixed reading and listening stages share the original paper/chat
+#        identity and retain completed reading answers when audio arrives.
+SOLVER_API_VERSION = "1.9.0"
 
 # Media-extractor plugin interface (formula/figure/graph/table).
 EXTRACTOR_API_VERSION = "1.0.0"
@@ -448,7 +454,9 @@ EXPLAINER_API_VERSION = "1.1.0"
 #        writing-done standby and generation-bound phone display requests.
 # 1.27.0: ordinary still review shows the photo without text; window display
 #        ownership preserves the system timeout; compact answers use fixed pages.
-GLASSES_VIEW_CONTRACT_VERSION = "1.27.0"
+# 1.28.0: five-second idle display requests, fresh wear chooser entry and
+#         mixed recording controls with staged answer revisions.
+GLASSES_VIEW_CONTRACT_VERSION = "1.28.0"
 
 # Answer-area overlay payload (box + short answer; 2D image-anchored).
 # 1.1.0: added tracking metadata (tracking/fixed_ar/anchor_hint).

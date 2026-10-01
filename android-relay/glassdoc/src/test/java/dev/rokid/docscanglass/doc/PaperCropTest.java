@@ -29,9 +29,10 @@ public class PaperCropTest {
         assertNull(PaperCrop.box(frame(48, 64, 1, 1, 47, 63), 48, 64));
     }
 
-    @Test public void stillnessWaitsForQuietThenGivesUpAtTheCeiling() {
+    @Test public void stillnessNeverTreatsElapsedWaitAsPermissionToShootWhileMoving() {
         org.junit.Assert.assertFalse(Stillness.ready(1_200, 1_000, 1_000));
         org.junit.Assert.assertTrue(Stillness.ready(1_300, 1_000, 1_000));
-        org.junit.Assert.assertTrue(Stillness.ready(6_000, 1_000, 5_999));
+        org.junit.Assert.assertFalse(Stillness.ready(6_000, 1_000, 5_999));
+        org.junit.Assert.assertFalse(Stillness.ready(60_000, 1_000, 59_999));
     }
 }

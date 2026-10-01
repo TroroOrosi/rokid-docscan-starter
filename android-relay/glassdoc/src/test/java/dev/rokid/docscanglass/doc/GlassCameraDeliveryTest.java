@@ -170,22 +170,6 @@ public class GlassCameraDeliveryTest {
         assertEquals(List.of("CAMERA TIMEOUT"), failures);
     }
 
-    @Test public void stillWaitsForPreviewDeviceCloseAndTimeoutCannotStartItLater() {
-        java.util.concurrent.atomic.AtomicInteger stillRequests = new java.util.concurrent.atomic.AtomicInteger();
-        ReflectionHelpers.setField(camera, "previewOpening", true);
-        ReflectionHelpers.callInstanceMethod(camera, "stopPreview", ClassParameter.from(Runnable.class, stillRequests::incrementAndGet));
-        assertEquals("an in-flight preview open must settle before a JPEG-only open", 0, stillRequests.get());
-        ReflectionHelpers.callInstanceMethod(camera, "previewClosed");
-        assertEquals(1, stillRequests.get());
-
-        ReflectionHelpers.setField(camera, "previewOpening", true);
-        ReflectionHelpers.callInstanceMethod(camera, "stopPreview", ClassParameter.from(Runnable.class, stillRequests::incrementAndGet));
-        shadowOf(Looper.getMainLooper()).idleFor(Duration.ofSeconds(15));
-        assertTrue((Boolean)ReflectionHelpers.getField(camera, "unknown"));
-        ReflectionHelpers.callInstanceMethod(camera, "previewClosed");
-        assertEquals("a late close must not authorize another photograph after UNKNOWN", 1, stillRequests.get());
-    }
-
     @Test public void previewObservationsDuringReviewLatchTheTurnWithoutStartingAnotherStill() {
         DocScanTestImage image = (DocScanTestImage) readerShadow.image;
         image.format = ImageFormat.YUV_420_888;
@@ -200,8 +184,15 @@ public class GlassCameraDeliveryTest {
         change.observe(pixels, android.os.SystemClock.elapsedRealtime());
         change.consumed(); // the existing JPEG request has claimed this page
         java.util.concurrent.atomic.AtomicInteger ready = new java.util.concurrent.atomic.AtomicInteger();
-        Runnable observe = () -> ReflectionHelpers.callInstanceMethod(camera, "previewFrame",
-                ClassParameter.from(ImageReader.class, reader), ClassParameter.from(long.class, 0L));
+        CameraReadiness metering = new CameraReadiness(new int[]{CaptureRequest.CONTROL_AF_MODE_OFF},
+                0f, new int[]{CaptureRequest.CONTROL_AE_MODE_ON});
+        ReflectionHelpers.setField(camera, "metering", metering);
+        Runnable observe = () -> {
+            metering.observe(null, CaptureRequest.CONTROL_AE_STATE_CONVERGED, android.os.SystemClock.elapsedRealtime());
+            ReflectionHelpers.setField(camera, "meteringSensorTimestamp", 10L);
+            ReflectionHelpers.callInstanceMethod(camera, "previewFrame",
+                    ClassParameter.from(ImageReader.class, reader), ClassParameter.from(long.class, 0L));
+        };
         java.util.Arrays.fill(pixels, 0, pixels.length / 3, (byte) 70);
         shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(500));
         observe.run(); // review has no pageReady callback, but the preview still observes

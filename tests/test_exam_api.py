@@ -53,9 +53,25 @@ def test_settings_distinguish_local_glasses_and_frozen_phone_controls(client):
     assert local["answers"]["writing_done"] == "one_double_tap_then_display_sleep"
     assert local["answers"]["writing_done_counts_toward_exit"] is False
     assert local["answers"]["exit"] == "two_more_double_taps_within_3_seconds_while_waiting"
-    assert local["answers"]["layout"] == "continuous_full_answers"
-    assert local["answer_wake"] == "active_session_and_generation_only"
+    assert local["answers"]["layout"] == "fixed_full_answer_slides"
+    assert local["answer_wake"] == "active_session_generation_and_new_answer_revision"
     assert local["physical_acceptance"] == "pending"
+
+
+def test_settings_publish_mixed_recording_and_idle_wear_controls(client):
+    local = client.get("/v1/settings").json()["operation_routes"]["glassdoc"]
+    assert local["startup"]["modes"] == ["normal", "mixed", "listening"]
+    assert local["startup"]["wear_entry"] == "authenticated_fresh_generation_chooser_request"
+    assert local["display_idle"] == {"seconds": 5, "reset_by": "user_input_only",
+                                     "protected": ["capturing", "photo_review", "reading"],
+                                     "request": "authenticated_display_sleep"}
+    mixed = local["mixed"]
+    assert mixed["record_toggle"] == {"capturing": "swipe_either_direction", "photo_review": "swipe_either_direction",
+                                      "analyzing": "single_tap", "waiting": "single_tap", "reading": "single_tap"}
+    assert mixed["audio_analysis"] == "same_chat_after_reading_reply_saved_and_original_audio_complete"
+    assert mixed["reading_done"] == "one_double_tap_to_waiting_keep_microphone"
+    assert mixed["return_to_reading"] == "swipe_while_analyzing_or_waiting_if_saved"
+    assert mixed["available_stage"] == "display_availability_including_failure_reasons"
 
 
 def test_settings_advertise_silent_contract(client):

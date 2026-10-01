@@ -84,6 +84,8 @@ public class DocScanGlassActivityIntentTest {
         if (server != null) {
             server.shutdown();
         }
+        ((java.util.concurrent.ExecutorService)org.robolectric.util.ReflectionHelpers.getField(activity, "stateExecutor")).shutdownNow();
+        ((android.os.Handler)org.robolectric.util.ReflectionHelpers.getField(activity, "main")).removeCallbacksAndMessages(null);
         // onCreate was not called, so no camera/Activity lifecycle cleanup is owed.
     }
 
@@ -265,7 +267,7 @@ public class DocScanGlassActivityIntentTest {
         setField(activity, "answerStore", answers);
         setField(activity, "startupAnswers", answers.load());
         setField(activity, "choosingSession", true);
-        setField(activity, "startupSelection", 3);
+        setField(activity, "startupSelection", 4);
         java.lang.reflect.Method action = DocScanGlassActivity.class.getDeclaredMethod("onAction", GlassesInputAction.class, long.class);
         action.setAccessible(true);
         action.invoke(activity, GlassesInputAction.SHORT_TAP, 1000L);
@@ -351,6 +353,8 @@ public class DocScanGlassActivityIntentTest {
         accept.setAccessible(true);
         begin.invoke(activity);
         long generation = activity.getPreferences(Context.MODE_PRIVATE).getLong("power_generation", -1);
+        assertEquals("the resident service must read the same counter as the Activity", generation,
+                PowerState.forContext(activity).load().generation);
         setField(activity, "powerSession", 7L);
         setField(activity, "powerPhase", "analyzing");
         Intent wake = new Intent().putExtra("wake_session_id", 7).putExtra("wake_generation", generation);
@@ -358,6 +362,85 @@ public class DocScanGlassActivityIntentTest {
         begin.invoke(activity);
         assertEquals(generation + 1, activity.getPreferences(Context.MODE_PRIVATE).getLong("power_generation", -1));
         assertFalse((boolean)accept.invoke(activity, wake));
+    }
+
+    @Test public void aConfirmedWearEntryDiscardsAllPreviousAnswerWakeAndCredentialExtras() throws Exception {
+        PowerState store = PowerState.forContext(activity);
+        long generation = store.begin(0).generation;
+        store.publish(generation, 0, "chooser", "wake");
+        PowerState.Snapshot entry = store.wear(true, -1);
+        activity.setIntent(new Intent().putExtra("wake_session_id", 7).putExtra("answer_revision", 1L));
+        activity.onNewIntent(new Intent().putExtra("chooser", true).putExtra("wear_origin", true)
+                .putExtra("wear_generation", entry.generation).putExtra("wake_session_id", 7)
+                .putExtra("wake_generation", generation).putExtra("answer_revision", 2L).putExtra("key", "test-key"));
+        assertTrue(activity.getIntent().getBooleanExtra("chooser", false));
+        assertFalse(activity.getIntent().hasExtra("wake_session_id"));
+        assertFalse(activity.getIntent().hasExtra("wake_generation"));
+        assertFalse(activity.getIntent().hasExtra("answer_revision"));
+        assertFalse(activity.getIntent().hasExtra("key"));
+    }
+
+    @Test public void aStaleWearRequestCannotReplaceTheCurrentIntentOrGeneration() throws Exception {
+        PowerState store = PowerState.forContext(activity);
+        long generation = store.begin(0).generation;
+        Intent current = new Intent().putExtra("retained", "current");
+        activity.setIntent(current);
+        activity.onNewIntent(new Intent().putExtra("chooser", true).putExtra("wear_origin", true)
+                .putExtra("wear_generation", generation - 1));
+        assertSame(current, activity.getIntent());
+        assertEquals(generation, store.load().generation);
+    }
+
+    @Test public void aServiceWearGenerationRejectsAnOldAnswerWakeBeforeTheFreshChooserIntentArrives() throws Exception {
+        java.lang.reflect.Method begin = DocScanGlassActivity.class.getDeclaredMethod("beginPowerGeneration");
+        begin.setAccessible(true); begin.invoke(activity);
+        PowerState store = PowerState.forContext(activity);
+        long generation = store.load().generation;
+        store.publish(generation, 7, "analyzing", "sleep");
+        setField(activity, "powerSession", 7L);
+        setField(activity, "powerPhase", "analyzing");
+        java.lang.reflect.Method accept = DocScanGlassActivity.class.getDeclaredMethod("acceptsWake", Intent.class);
+        accept.setAccessible(true);
+        Intent old = new Intent().putExtra("wake_session_id", 7).putExtra("wake_generation", generation);
+        assertTrue((boolean)accept.invoke(activity, old));
+        store.wear(false, -1);
+        assertFalse("the shared generation changes before the Activity receives the chooser intent",
+                (boolean)accept.invoke(activity, old));
+    }
+
+    @Test public void resumingAfterASupersededWearGenerationCannotHoldOrWakeTheOldDisplay() throws Exception {
+        java.lang.reflect.Method begin = DocScanGlassActivity.class.getDeclaredMethod("beginPowerGeneration");
+        begin.setAccessible(true); begin.invoke(activity);
+        PowerState store = PowerState.forContext(activity);
+        long generation = store.load().generation;
+        store.publish(generation, 7, "analyzing", "wake");
+        setField(activity, "powerSession", 7L);
+        setField(activity, "powerPhase", "analyzing");
+        setField(activity, "awaitingAnswers", true);
+        setField(activity, "idleAsleep", false);
+        int keepOn = android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON;
+        activity.onResume();
+        assertTrue("the current generation still holds its display before idle sleep",
+                (activity.getWindow().getAttributes().flags & keepOn) != 0);
+        long wearGeneration = store.wear(false, -1).generation;
+        activity.getWindow().clearFlags(keepOn);
+        activity.setTurnScreenOn(false);
+        activity.onNewIntent(new Intent().putExtra("wake_session_id", 7)
+                .putExtra("wake_generation", generation).putExtra("answer_revision", 1L));
+        assertFalse(Shadows.shadowOf(activity).getTurnScreenOn());
+        activity.onResume();
+        assertEquals("onResume cannot restore the service-superseded display hold", 0,
+                activity.getWindow().getAttributes().flags & keepOn);
+        assertFalse(Shadows.shadowOf(activity).getTurnScreenOn());
+        assertEquals("a stale resume must not allocate a generation", wearGeneration, store.load().generation);
+        assertEquals(0, server.getRequestCount());
+    }
+
+    @Test public void startupDistinguishesMixedEnglishFromLegacyListening() throws Exception {
+        java.lang.reflect.Method options = DocScanGlassActivity.class.getDeclaredMethod("startupOptions");
+        options.setAccessible(true);
+        @SuppressWarnings("unchecked") List<String> modes = (List<String>)options.invoke(activity);
+        assertEquals(List.of("通常の読取", "合同英語（読解＋音声）", "リスニング"), modes.subList(0, 3));
     }
 
     @Test public void resumingKeepsActiveViewsAwakeButNeverKeepsWaitingOrCompletedSessionsAwake() throws Exception {
@@ -368,9 +451,11 @@ public class DocScanGlassActivityIntentTest {
         assertTrue("an active chooser, capture or reader must hold its display",
                 (activity.getWindow().getAttributes().flags & keepOn) != 0);
         setField(activity, "awaitingAnswers", true);
+        setField(activity, "idleAsleep", true);
         activity.onResume();
         assertEquals(0, activity.getWindow().getAttributes().flags & keepOn);
         setField(activity, "awaitingAnswers", false);
+        setField(activity, "idleAsleep", false);
         setField(activity, "writingDone", true);
         activity.getWindow().addFlags(keepOn);
         activity.onResume();
@@ -382,6 +467,53 @@ public class DocScanGlassActivityIntentTest {
         assertEquals(0, activity.getWindow().getAttributes().flags & keepOn);
         assertEquals(0, android.provider.Settings.System.getInt(activity.getContentResolver(),
                 android.provider.Settings.System.SCREEN_OFF_TIMEOUT, -1));
+    }
+
+    @Test public void chooserIdleSleepsAtFiveSecondsWithoutChangingTheSystemTimeout() throws Exception {
+        android.provider.Settings.System.putInt(activity.getContentResolver(),
+                android.provider.Settings.System.SCREEN_OFF_TIMEOUT, 0);
+        setField(activity, "choosingSession", true);
+        activity.onResume();
+        java.lang.reflect.Method choices = DocScanGlassActivity.class.getDeclaredMethod("showStartupChoices");
+        choices.setAccessible(true);
+        choices.invoke(activity);
+        int keepOn = android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON;
+        Shadows.shadowOf(android.os.Looper.getMainLooper()).idleFor(java.time.Duration.ofMillis(4_999));
+        assertTrue((activity.getWindow().getAttributes().flags & keepOn) != 0);
+        activity.onUpdate(RelayState.READY, List.of("network update"), "background status");
+        Shadows.shadowOf(android.os.Looper.getMainLooper()).idleFor(java.time.Duration.ofMillis(1));
+        assertEquals("background updates must not extend chooser inactivity", 0,
+                activity.getWindow().getAttributes().flags & keepOn);
+        assertEquals(0, android.provider.Settings.System.getInt(activity.getContentResolver(),
+                android.provider.Settings.System.SCREEN_OFF_TIMEOUT, -1));
+    }
+
+    @Test public void aChooserSwipeRestartsTheIdleClockAndAStoppedCameraCanSleep() throws Exception {
+        setField(activity, "choosingSession", true);
+        activity.onResume();
+        java.lang.reflect.Method choices = DocScanGlassActivity.class.getDeclaredMethod("showStartupChoices");
+        choices.setAccessible(true);
+        choices.invoke(activity);
+        int keepOn = android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON;
+        Shadows.shadowOf(android.os.Looper.getMainLooper()).idleFor(java.time.Duration.ofSeconds(4));
+        java.lang.reflect.Method action = DocScanGlassActivity.class.getDeclaredMethod("onAction", GlassesInputAction.class, long.class);
+        action.setAccessible(true);
+        action.invoke(activity, GlassesInputAction.SWIPE_FORWARD, android.os.SystemClock.elapsedRealtime());
+        Shadows.shadowOf(android.os.Looper.getMainLooper()).idleFor(java.time.Duration.ofSeconds(4));
+        assertTrue((activity.getWindow().getAttributes().flags & keepOn) != 0);
+        Shadows.shadowOf(android.os.Looper.getMainLooper()).idleFor(java.time.Duration.ofSeconds(1));
+        assertEquals(0, activity.getWindow().getAttributes().flags & keepOn);
+
+        setField(activity, "choosingSession", false);
+        activity.onAutoCaptureChanged(true);
+        Shadows.shadowOf(android.os.Looper.getMainLooper()).idle();
+        Shadows.shadowOf(android.os.Looper.getMainLooper()).idleFor(java.time.Duration.ofSeconds(10));
+        assertTrue("the camera's active preview must stay visible", (activity.getWindow().getAttributes().flags & keepOn) != 0);
+        activity.onAutoCaptureChanged(false);
+        Shadows.shadowOf(android.os.Looper.getMainLooper()).idle();
+        Shadows.shadowOf(android.os.Looper.getMainLooper()).idleFor(java.time.Duration.ofSeconds(5));
+        assertEquals("the camera's idle pause is an ordinary waiting screen", 0,
+                activity.getWindow().getAttributes().flags & keepOn);
     }
 
     @Test public void staleWakeCannotCreateAChooserAfterTheProcessWasStopped() throws Exception {
@@ -400,6 +532,219 @@ public class DocScanGlassActivityIntentTest {
                     & android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
             assertEquals(3, activity.getPreferences(Context.MODE_PRIVATE).getLong("power_generation", -1));
         } finally { stopped.destroy(); }
+    }
+
+    @Test @Config(sdk = 28, manifest = Config.NONE)
+    public void mixedInterimDoneKeepsTheSessionAndRecordingOpenForTheFinalRevision() throws Exception {
+        AnswerStore store = new AnswerStore(activity.getFilesDir());
+        org.json.JSONObject json = new org.json.JSONObject(new AnswerBundle("7", "a".repeat(64), 1,
+                List.of(AnswerItem.ready("g1", "読解", "q1", "問1", "A"),
+                        new AnswerItem("g2", "音声", "q2", "問2", "", AnswerItem.Status.PENDING, "原音待ち"))).toJson())
+                .put("analysis_stage", "awaiting_audio").put("available_stage", "reading");
+        AnswerBundle bundle = AnswerBundle.fromJson(json.toString());
+        store.start(bundle);
+        setField(activity, "answerStore", store);
+        ListeningRecorder recorder = new ListeningRecorder(activity.getFilesDir(), 7, controller.api(), () -> {});
+        setField(activity, "listening", recorder);
+        java.lang.reflect.Method open = DocScanGlassActivity.class.getDeclaredMethod("openAnswers", AnswerBundle.class, String.class, int.class);
+        open.setAccessible(true);
+        open.invoke(activity, bundle, "q1", 0);
+        java.lang.reflect.Method action = DocScanGlassActivity.class.getDeclaredMethod("onAction", GlassesInputAction.class, long.class);
+        action.setAccessible(true);
+        try {
+            action.invoke(activity, GlassesInputAction.BACK, 1000L);
+            assertFalse("reading completion cannot close a mixed session awaiting audio", store.load().closed);
+            assertFalse(org.robolectric.util.ReflectionHelpers.getField(activity, "writingDone"));
+            assertSame(recorder, org.robolectric.util.ReflectionHelpers.getField(activity, "listening"));
+            assertFalse(org.robolectric.util.ReflectionHelpers.getField(recorder, "closed"));
+            assertNull(org.robolectric.util.ReflectionHelpers.getField(activity, "reader"));
+            assertEquals("waiting", org.robolectric.util.ReflectionHelpers.getField(activity, "powerPhase"));
+            assertEquals("intermediate waiting keeps only the revision actually received", 1,
+                    activity.getPreferences(Context.MODE_PRIVATE).getLong("power_ack_revision", -1));
+        } finally { recorder.close(); }
+    }
+
+    @Test @Config(sdk = 28, manifest = Config.NONE)
+    public void aFinalRevisionNotificationFetchesBeyondTheSavedReadingBundle() throws Exception {
+        AnswerStore store = new AnswerStore(activity.getFilesDir());
+        AnswerBundle old = new AnswerBundle("7", "a".repeat(64), 1, List.of(
+                AnswerItem.ready("g1", "第1問", "q1", "問1", "前の答え"),
+                new AnswerItem("g1", "第1問", "q2", "問2", "", AnswerItem.Status.PENDING, "原音待ち")));
+        AnswerBundle next = old.withAnswer(AnswerItem.ready("g1", "第1問", "q2", "問2", "音声の答え"));
+        store.start(old);
+        store.save(old, "q2", 0, false);
+        setField(activity, "answerStore", store);
+        setField(activity, "powerPhase", "reading");
+        setField(activity, "powerSession", 7L);
+        setField(activity, "powerGeneration", 3L);
+        PowerState.forContext(activity).begin(2);
+        setField(activity, "answersFetchedForSession", 7L);
+        server.setDispatcher(new Dispatcher() {
+            @Override public MockResponse dispatch(RecordedRequest request) {
+                return new MockResponse().setBody(next.toJson());
+            }
+        });
+        activity.onNewIntent(new Intent().putExtra("wake_session_id", 7)
+                .putExtra("wake_generation", 3L).putExtra("answer_revision", 2L));
+        RecordedRequest request = server.takeRequest(2, TimeUnit.SECONDS);
+        assertNotNull("a saved stage1 must not block fetching a newer final revision", request);
+        assertEquals("/v1/exam-sessions/7/answer-bundle", request.getPath());
+        for (int attempt = 0; attempt < 100 && store.load().bundle.revision < 2; attempt++) Thread.sleep(10);
+        Shadows.shadowOf(android.os.Looper.getMainLooper()).idle();
+        assertEquals(2, store.load().bundle.revision);
+        assertEquals("q2", store.load().questionId);
+        assertEquals("音声の答え", store.load().bundle.items.get(1).answer);
+    }
+
+    @Test @Config(sdk = 28, manifest = Config.NONE)
+    public void repeatedRevisionDuringFetchDoesNotStartASecondGetAndOnlyDisplayedSavedAnswersAreAcknowledged() throws Exception {
+        AnswerStore store = new AnswerStore(activity.getFilesDir());
+        setField(activity, "answerStore", store);
+        java.lang.reflect.Method begin = DocScanGlassActivity.class.getDeclaredMethod("beginPowerGeneration");
+        begin.setAccessible(true);
+        begin.invoke(activity);
+        long generation = PowerState.forContext(activity).load().generation;
+        PowerState.forContext(activity).publish(generation, 7, "analyzing", "sleep");
+        setField(activity, "powerSession", 7L);
+        setField(activity, "powerPhase", "analyzing");
+        AnswerBundle bundle = new AnswerBundle("7", "a".repeat(64), 1,
+                List.of(AnswerItem.ready("g1", "読解", "q1", "問1", "A")));
+        java.util.concurrent.CountDownLatch release = new java.util.concurrent.CountDownLatch(1);
+        server.setDispatcher(new Dispatcher() {
+            @Override public MockResponse dispatch(RecordedRequest request) throws InterruptedException {
+                assertTrue(release.await(5, TimeUnit.SECONDS));
+                return new MockResponse().setBody(bundle.toJson());
+            }
+        });
+        Intent notification = new Intent().putExtra("wake_session_id", 7)
+                .putExtra("wake_generation", generation).putExtra("answer_revision", 1L);
+        try {
+            activity.onNewIntent(notification);
+            assertNotNull(server.takeRequest(2, TimeUnit.SECONDS));
+            activity.onNewIntent(notification);
+            assertNull("a repeated notification while the GET is in flight must not issue a second GET",
+                    server.takeRequest(100, TimeUnit.MILLISECONDS));
+            assertEquals(-1, activity.getPreferences(Context.MODE_PRIVATE).getLong("power_ack_revision", -1));
+        } finally { release.countDown(); }
+        for (int attempt = 0; attempt < 100 && store.load() == null; attempt++) Thread.sleep(10);
+        Shadows.shadowOf(android.os.Looper.getMainLooper()).idle();
+        assertEquals("only a saved and visible bundle may acknowledge receipt", 1,
+                activity.getPreferences(Context.MODE_PRIVATE).getLong("power_ack_revision", -1));
+        long sequence = PowerState.forContext(activity).load().sequence;
+        activity.onNewIntent(notification);
+        assertEquals(1, server.getRequestCount());
+        assertEquals("an already-read notification only retries its state ACK; no display update",
+                sequence, PowerState.forContext(activity).load().sequence);
+    }
+
+    @Test @Config(sdk = 28, manifest = Config.NONE)
+    public void anAlreadyReadNotificationRetriesALostReceiptWithoutFetchingOrLightingAgain() throws Exception {
+        AnswerStore store = new AnswerStore(activity.getFilesDir());
+        AnswerBundle bundle = new AnswerBundle("7", "a".repeat(64), 1,
+                List.of(AnswerItem.ready("g1", "読解", "q1", "問1", "A")));
+        store.start(bundle);
+        setField(activity, "answerStore", store);
+        java.lang.reflect.Method begin = DocScanGlassActivity.class.getDeclaredMethod("beginPowerGeneration");
+        begin.setAccessible(true); begin.invoke(activity);
+        java.lang.reflect.Method open = DocScanGlassActivity.class.getDeclaredMethod("openAnswers", AnswerBundle.class, String.class, int.class);
+        open.setAccessible(true); open.invoke(activity, bundle, "q1", 0);
+        long generation = PowerState.forContext(activity).load().generation;
+        long sequence = PowerState.forContext(activity).load().sequence;
+        server.setDispatcher(new Dispatcher() {
+            int calls;
+            @Override public MockResponse dispatch(RecordedRequest request) {
+                assertEquals("/v1/glasses/state", request.getPath());
+                return new MockResponse().setResponseCode(++calls == 1 ? 500 : 200).setBody("{}");
+            }
+        });
+        setField(activity, "deviceId", "test-android-id");
+        activity.setTurnScreenOn(false);
+        Intent notification = new Intent().putExtra("wake_session_id", 7)
+                .putExtra("wake_generation", generation).putExtra("answer_revision", 1L);
+        activity.onNewIntent(notification);
+        RecordedRequest first = server.takeRequest(2, TimeUnit.SECONDS);
+        assertNotNull(first);
+        ((java.util.concurrent.ExecutorService)org.robolectric.util.ReflectionHelpers.getField(activity, "stateExecutor"))
+                .submit(() -> {}).get(2, TimeUnit.SECONDS);
+        activity.onNewIntent(notification);
+        RecordedRequest retry = server.takeRequest(2, TimeUnit.SECONDS);
+        assertNotNull(retry);
+        org.json.JSONObject receipt = new org.json.JSONObject(retry.getBody().readUtf8());
+        assertEquals("Bearer original-test-key", retry.getHeader("Authorization"));
+        assertEquals(1, receipt.getLong("ack_answer_revision"));
+        assertEquals(generation, receipt.getLong("generation"));
+        assertEquals(sequence, receipt.getLong("sequence"));
+        assertEquals(2, server.getRequestCount());
+        assertFalse(Shadows.shadowOf(activity).getTurnScreenOn());
+        assertEquals(sequence, PowerState.forContext(activity).load().sequence);
+    }
+
+    @Test @Config(sdk = 28, manifest = Config.NONE)
+    public void aWearGenerationAlsoCancelsAnOldAnswerGetAlreadyInFlight() throws Exception {
+        AnswerStore store = new AnswerStore(activity.getFilesDir());
+        setField(activity, "answerStore", store);
+        java.lang.reflect.Method begin = DocScanGlassActivity.class.getDeclaredMethod("beginPowerGeneration");
+        begin.setAccessible(true); begin.invoke(activity);
+        PowerState power = PowerState.forContext(activity);
+        long generation = power.load().generation;
+        power.publish(generation, 7, "analyzing", "sleep");
+        setField(activity, "powerSession", 7L); setField(activity, "powerPhase", "analyzing");
+        AnswerBundle bundle = new AnswerBundle("7", "a".repeat(64), 1,
+                List.of(AnswerItem.ready("g1", "読解", "q1", "問1", "A")));
+        server.setDispatcher(new Dispatcher() {
+            @Override public MockResponse dispatch(RecordedRequest request) {
+                return new MockResponse().setBody(bundle.toJson()).setBodyDelay(250, TimeUnit.MILLISECONDS);
+            }
+        });
+        activity.onNewIntent(new Intent().putExtra("wake_session_id", 7)
+                .putExtra("wake_generation", generation).putExtra("answer_revision", 1L));
+        assertNotNull(server.takeRequest(2, TimeUnit.SECONDS));
+        power.wear(false, -1);
+        activity.setTurnScreenOn(false);
+        for (int attempt = 0; attempt < 200; attempt++) {
+            Shadows.shadowOf(android.os.Looper.getMainLooper()).idle();
+            if ((long)org.robolectric.util.ReflectionHelpers.getField(activity, "answersFetchSession") < 0) break;
+            Thread.sleep(10);
+        }
+        assertNull("an old generation may neither persist nor display a late answer", store.load());
+        assertNull(org.robolectric.util.ReflectionHelpers.getField(activity, "reader"));
+        assertFalse(Shadows.shadowOf(activity).getTurnScreenOn());
+    }
+
+    @Test @Config(sdk = 28, manifest = Config.NONE)
+    public void anAllFailedMixedReplyShowsTheReasonAndStillSleepsAtFiveSeconds() throws Exception {
+        AnswerStore store = new AnswerStore(activity.getFilesDir());
+        AnswerBundle bundle = new AnswerBundle("7", "a".repeat(64), 1,
+                List.of(new AnswerItem("g1", "読解", "q1", "問1", "", AnswerItem.Status.FAILED, "送信結果を確認できません")),
+                "reading", "reading");
+        store.start(bundle);
+        setField(activity, "answerStore", store);
+        java.lang.reflect.Method open = DocScanGlassActivity.class.getDeclaredMethod("openAnswers", AnswerBundle.class, String.class, int.class);
+        open.setAccessible(true);
+        open.invoke(activity, bundle, "q1", 0);
+        assertNotNull(org.robolectric.util.ReflectionHelpers.getField(activity, "reader"));
+        Shadows.shadowOf(android.os.Looper.getMainLooper()).idleFor(java.time.Duration.ofSeconds(5));
+        assertEquals(0, activity.getWindow().getAttributes().flags & android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+            assertEquals("waiting", org.robolectric.util.ReflectionHelpers.getField(activity, "powerPhase"));
+        assertFalse(store.load().closed);
+        assertEquals("送信結果を確認できません", store.load().bundle.items.get(0).issue);
+    }
+
+    @Test public void mixedReviewSwipeStopsAudioWithoutRetakingOrMovingTheStill() throws Exception {
+        setField(activity, "mixedMode", true);
+        setField(activity, "listeningDirectory", activity.getFilesDir());
+        setField(controller, "state", RelayState.CAPTURE_REVIEW);
+        ListeningRecorder recorder = new ListeningRecorder(activity.getFilesDir(), 0, controller.api(), () -> {});
+        setField(recorder, "running", true);
+        setField(activity, "listening", recorder);
+        java.lang.reflect.Method action = DocScanGlassActivity.class.getDeclaredMethod("onAction", GlassesInputAction.class, long.class);
+        action.setAccessible(true);
+        try {
+            action.invoke(activity, GlassesInputAction.SWIPE_FORWARD, 1_000L);
+            assertFalse((boolean)org.robolectric.util.ReflectionHelpers.getField(recorder, "running"));
+            assertEquals(RelayState.CAPTURE_REVIEW, controller.getState());
+            assertTrue((boolean)org.robolectric.util.ReflectionHelpers.getField(activity, "audioStopRequested"));
+        } finally { recorder.close(); }
     }
 
     private double guideFraction() throws Exception {

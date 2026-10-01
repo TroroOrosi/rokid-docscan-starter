@@ -1,6 +1,6 @@
 # タスク：起動から記入用答案まで
 
-Status: Current implementation task list。2026-09-23、実機前の全体整理を反映。部品の完了と経路の受け入れを分離。
+Status: Current implementation task list。2026-10-02、追加要件のPC実装と自動試験を確認。実紙・実機の受け入れはU7以降。
 Runs on: 開発・自動試験はWindows。実機受け入れはglassdocとF-51F AP／FastAPI／Chrome。
 
 仕様は[plan](plan.md)、採否と旧IDの対応は[requirements-audit](../docs/requirements-audit.md)。
@@ -8,6 +8,19 @@ Runs on: 開発・自動試験はWindows。実機受け入れはglassdocとF-51F
 実機の英語リスニング試験は利用者の追加指示で後回し。用紙から答案までを優先する。
 再開順と全機能の現状は[全体整理](../docs/requirements-audit.md)を参照する。
 下のA～Cの配置順や「早期試験」は停止解除の指示ではない。PC準備を先行し、実機は対象と判定条件を具体化してから扱う。
+
+## 10/1追加要件の実装（最新）
+
+Runs on: Windows PC。共通テスト・東大二次の実紙試験は利用者の指定で後日。仕様はplanの10/1追加要件。
+
+- [x] U1: chooser／待機の5秒無操作timerと認証付きdisplay_request。networkで延長せず、撮影／レビュー／答案中は保護する。
+- [x] U2: 初回・単発proximity通知、待機／閲覧時の再装着、watcher起動入口、fresh chooser intent。stale wakeは拒否する。
+- [x] U3: mixedの画像先行→reading答案→確定原音→listening答案を同一chatで処理。stable IDと既存答案、≤20添付／ACK／uncertain guardを保持する。
+- [x] U4: 撮影途中／答案中／待機中の録音操作と中間記入終了。新revisionの表示・位置保持、最終終了で遅着を無視する。
+- [x] U5: 時間切れ強制撮影を除去し静止・AF/AE・camera同一deviceのfocusを保持。OCRなしの頁変化／図／似た別頁と同時1枚を保つ。
+- [x] U6: 独立監査、pytest／ruff／Android全build、対象APKのidentity／signature／SHA照合。mockと実紙・実機を区別して報告する。
+- [ ] U7・個別承認: 対象APKとphone source反映、browser／API／watch常駐、装着だけのchooserと5秒実消灯、再使用・待機復帰を確認して使用準備を完了する。
+- [ ] 後日・個別承認: 細字・数式・表・図・縦書きの共通テスト／東大実紙、合同英語の原音と全問答案、電池。
 
 ## 目的から全工程を再点検（2026-09-23）
 

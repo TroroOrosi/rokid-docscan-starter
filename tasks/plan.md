@@ -1,7 +1,67 @@
 # 実装計画：起動から記入用答案まで
 
-Status: Current implementation plan。2026-09-23、実機前の全体整理を反映。実機操作・導入・GPT送信は停止中。
+Status: Current implementation plan。2026-10-02、装着・5秒待機消灯・合同英語・細字の自動撮影・答案受信確認を追加。実機操作・導入・GPT送信は個別承認後。
 Runs on: 開発と自動試験はWindows。会場はglassdoc → スマホAP → スマホFastAPI／Chrome CDP。
+
+## 10/1追加要件（以下の旧計画より優先）
+
+Runs on: 実装・自動試験・独立監査はWindows PC。実紙の共通テスト・東大二次は利用者の指定で後日。
+
+目的は、細字・数式・表・図・縦書きも読める原画像を少ない操作で取得し、記入用答案をグラスへ表示すること。
+今回の対象は共通テストの国語／公共・倫理／数学ⅠA・ⅡBC／物理／化学／英語／情報Ⅰと、
+東大二次理科の国語／数学ⅠⅡⅢABC／物理基礎・物理／化学基礎・化学／英語を扱える操作・入力経路。
+科目別の正答率・実紙の一文字精度・原音の利用・実装着・実消灯・電池はPC検証と区別する。
+最終準備は、全機能の実装・確認後に常時オンのスマホでbrowser／API／watchを常駐させ、
+テザリングへ接続したグラスを装着するだけでいつでも最初の画面から使える状態にする。
+PCのbuildだけでこの準備を完了としない。実機反映と動作確認は対象・正確なcommandの個別承認後に行う。
+
+### 入力から答案までの追加動作
+
+- 装着したら最初の選択画面へ戻る。つる開閉と実装着を別の事象とし、初回nearと単発proximity通知も処理する。
+  可視Activityから最小のwear foreground serviceを開始し、終了後も近接だけを監視する。無期限CPU保持は使わない。
+  foldによるforce-stop後は認証済みスマホwatcherが監視入口を復元する。新しいchooser intentへ過去の答案wake情報を渡さない。
+- chooser、録音だけ、アップロード・解析・その他待機は状態入場または利用者操作から5秒無操作で消灯を要求する。
+  network更新で5秒を延長しない。撮影・実写真3秒レビュー・答案表示中は点灯を保持し、OSの消灯設定「無し」を変更しない。
+- `GlassesState` に `chooser`／`waiting` と任意の `display_request=wake|sleep` を追加する。
+  端末・session（chooserはnull）・generation・sequenceの認証とterminal拒否を維持し、撮影／閲覧状態のsleepは受け付けない。
+  wearからの `entry_request=chooser` は新generation／chooser／session=null／wakeだけで受け付ける。
+  通常chooser通知には入口要求を付けず、watcherは各wear要求を一度だけ実行する。Activity/service採番は共用し重複起動を防ぐ。
+  旧clientのrequest未指定は既存動作を保つ。実消灯はスマホwatcherが直前の状態を再確認し、黒表示を消灯の証拠にしない。
+- `exam_type=mixed` を追加し、既存written/listening・study/mock/realは維持する。合同英語は紙の自動撮影を先に開始し、
+  音声が始まったら撮影途中・解析待機・答案閲覧中にも録音開始でき、終了操作で原音を確定する。
+  撮影・レビューの未使用swipeと閲覧の未使用single tapを最小限の録音操作に使い、既存の撮影／終了／答案移動を保つ。
+  操作案内は選択／待機画面へ置き、確認写真に重ねない。
+- 紙の撮影終了で録音を待たず画像だけを同じChatGPTへ送る。第1段は全設問を列挙し、音声不要問題を解答、
+  音声依存問題を `requires_audio=true` のpendingとして残し、音声なしの答えを作らない。
+- `exam_sessions.analysis_stage` を1列追加（既存single、mixedはreading→awaiting_audio→listening→complete）。
+  録音の原本・chunkの連続性・hashを確定して既存audio attachへ渡し、第1段の有効答案保存後だけ第2段を開始する。
+  第2段は既存チャットへ原音だけを送り、音声依存問題を更新する。原画像のinput digest／question ID／answer_noは固定し、
+  第1段の答案を上書きしない。原音が早く到着・遅く到着・サーバ再起動のいずれでも順序と重複防止を守る。
+- `AnswerBundle` に `analysis_stage` と `available_stage=none|reading|complete` を追加する。
+  watcherは段階とrevision単位で答案到着を通知し、clientは同じsessionの新revisionを保存・表示、閲覧位置を維持する。
+  実保存・表示したrevisionだけを `ack_answer_revision` で返す。watcherは同session／generationの受信確認まで通知を再試行し、
+  clientは同revisionの並列取得と重複表示を抑止する。中間revisionの受信を最終revisionの確認に流用しない。
+  中間答案の記入終了は音声待機へ戻り録音を継続する。最終答案の記入終了／アプリ終了だけterminal扱いとし、遅着で再点灯しない。
+- 原画像／原音を20添付以内で順に送り、中間受領が完了してから次を送る。画像をPDFやOCR本文へ置き換えない。
+  各段階の送信記録・受領・replyを永続化し、confirmedやuncertainを再送しない。途中からの録音で欠けた原音は推測しない。
+
+### 自動撮影の精度
+
+- 5秒経過だけで動いていても撮るfallbackを廃止し、静止・頁変化・新鮮なAF/AE結果から撮影を判断する。
+  同じcamera device/sessionの準備済みfocusを本撮影へ引き継ぎ、能力が固定focus等の場合は実際のmetadataを使う。
+- 原寸の撮影寸法、共有の回転／crop／表示枠、同時1枚、callback不明時の停止、レビュー3秒と頁変化latchを維持する。
+  図だけの頁・似た別頁をOCR文字数で捨てない。未校正のsharpness値や3秒無操作を全字判読合格としない。
+- 不鮮明時は自動撮影条件を再評価し、known callback後だけ必要な再取得を行う。永続連写・原本の消去・生成による文字補完をしない。
+  原画像の端・細字を削らず、ハードウェアのfocus能力と普段の席での校正余地を残す。
+
+### 実装順と検証
+
+1. server段階/API契約とclient5秒電力を並行実装し、既存API・terminal・timerの回帰を通す。
+2. 合同英語の音声early/late/restartと同一chat段階進行を接続し、中間閲覧・最終revision・元答案保持を通す。
+3. 装着入口、静止／focusとcameraの同一device処理を接続する。実動作を独立担当がsource・testで監査する。
+4. `py -3.12 -X utf8 -m pytest -q`／`py -3.12 -X utf8 -m ruff check .`／
+   `android-relay/gradlew.bat --no-daemon test testDebugUnitTest assembleDebug`、APK identity/signature/SHAを照合する。
+   source配布／APK導入／実機操作／GPT送信はこのPC検証後に正確なcommandで承認を得る。
 
 ## この改訂の扱い
 

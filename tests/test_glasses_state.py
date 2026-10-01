@@ -48,7 +48,8 @@ def test_latest_state_and_real_connection_address_survive_a_server_restart(tmp_p
     assert response.status_code == 200
     client = _client(tmp_path, monkeypatch)
     body = client.get("/v1/glasses/state?device_id=glasses-serial", headers=HEADERS).json()
-    assert body == {**STATE, "source_ip": "10.0.0.12", "answer_ready": False}
+    assert body == {**STATE, "display_request": None, "entry_request": None, "ack_answer_revision": None, "source_ip": "10.0.0.12", "answer_ready": False,
+                    "available_stage": "none", "answer_revision": 0}
     assert client.get("/v1/glasses/state?device_id=other", headers=HEADERS).status_code == 404
 
 
@@ -97,7 +98,9 @@ def test_authenticated_discovery_does_not_need_android_identity_to_be_its_serial
     client.post("/v1/glasses/state", json=android_state, headers=HEADERS)
     response = client.get("/v1/glasses/state", headers=HEADERS)
     assert response.status_code == 200
-    assert response.json() == {"devices": [{**android_state, "source_ip": "10.0.0.12", "answer_ready": False}]}
+    assert response.json() == {"devices": [{**android_state, "display_request": None, "entry_request": None, "ack_answer_revision": None,
+                                            "source_ip": "10.0.0.12", "answer_ready": False,
+                                            "available_stage": "none", "answer_revision": 0}]}
 
 
 def test_corrupt_state_never_turns_into_an_active_session(tmp_path, monkeypatch):
@@ -123,6 +126,125 @@ def test_writing_done_during_bundle_read_revokes_a_pending_wake(tmp_path, monkey
     monkeypatch.setattr(main, "exam_answer_bundle", bundle)
     response = client.get("/v1/glasses/state?device_id=glasses-serial", headers=HEADERS).json()
     assert response["phase"] == "writing_done" and response["answer_ready"] is False
+
+
+@pytest.mark.parametrize("phase", ["chooser", "waiting"])
+def test_idle_display_request_survives_restart_without_a_session(tmp_path, monkeypatch, phase):
+    client = _client(tmp_path, monkeypatch)
+    state = {**STATE, "phase": phase, "display_request": "sleep"}
+    assert client.post("/v1/glasses/state", json=state, headers=HEADERS).status_code == 200
+    client = _client(tmp_path, monkeypatch)
+    saved = client.get("/v1/glasses/state?device_id=glasses-serial", headers=HEADERS).json()
+    assert saved["phase"] == phase and saved["display_request"] == "sleep"
+    assert saved["answer_ready"] is False
+
+
+@pytest.mark.parametrize("phase", ["capturing", "reading"])
+def test_active_capture_and_answer_reading_reject_a_sleep_request(tmp_path, monkeypatch, phase):
+    client = _client(tmp_path, monkeypatch)
+    assert client.post("/v1/glasses/state", json=STATE, headers=HEADERS).status_code == 200
+    response = client.post("/v1/glasses/state", headers=HEADERS,
+                           json={**STATE, "phase": phase, "sequence": 2, "display_request": "sleep"})
+    assert response.status_code == 422
+    saved = client.get("/v1/glasses/state?device_id=glasses-serial", headers=HEADERS).json()
+    assert saved["sequence"] == 1
+
+
+def test_mixed_reading_snapshot_is_available_while_listening_is_pending(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    from app import main
+    monkeypatch.setattr(main, "exam_answer_bundle", lambda _: {
+        "available_stage": "reading", "revision": 4,
+        "items": [{"status": "ready"}, {"status": "pending"}],
+    })
+    client.post("/v1/glasses/state", headers=HEADERS,
+                json={**STATE, "session_id": 7, "phase": "waiting", "display_request": "sleep"})
+    saved = client.get("/v1/glasses/state?device_id=glasses-serial", headers=HEADERS).json()
+    assert saved["answer_ready"] is True
+    assert saved["available_stage"] == "reading" and saved["answer_revision"] == 4
+
+
+@pytest.mark.parametrize("ack", [-1, True, "1", 2**63])
+def test_received_revision_is_a_strict_nonnegative_counter(tmp_path, monkeypatch, ack):
+    client = _client(tmp_path, monkeypatch)
+    response = client.post("/v1/glasses/state", headers=HEADERS,
+                           json={**STATE, "session_id": 7, "ack_answer_revision": ack})
+    assert response.status_code == 422
+
+
+def test_received_revision_requires_a_session_and_is_never_inferred_from_server_output(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    from app import main
+    assert client.post("/v1/glasses/state", headers=HEADERS,
+                       json={**STATE, "ack_answer_revision": 1}).status_code == 422
+    monkeypatch.setattr(main, "exam_answer_bundle", lambda _: {
+        "available_stage": "complete", "revision": 2, "items": [{"status": "ready"}],
+    })
+    waiting = {**STATE, "session_id": 7, "phase": "waiting"}
+    client.post("/v1/glasses/state", headers=HEADERS, json=waiting)
+    url = "/v1/glasses/state?device_id=glasses-serial"
+    assert client.get(url, headers=HEADERS).json()["ack_answer_revision"] is None
+    client.post("/v1/glasses/state", headers=HEADERS,
+                json={**waiting, "sequence": 2, "ack_answer_revision": 1})
+    restarted = _client(tmp_path, monkeypatch)
+    monkeypatch.setattr(main, "exam_answer_bundle", lambda _: {
+        "available_stage": "complete", "revision": 2, "items": [{"status": "ready"}],
+    })
+    restored = restarted.get(url, headers=HEADERS).json()
+    assert restored["ack_answer_revision"] == 1
+    assert restored["answer_revision"] == 2
+
+
+def test_received_revision_never_regresses_within_a_session_or_leaks_into_a_new_generation(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    reading = {**STATE, "session_id": 7, "phase": "reading", "ack_answer_revision": 2}
+    client.post("/v1/glasses/state", headers=HEADERS, json=reading)
+    url = "/v1/glasses/state?device_id=glasses-serial"
+    for sequence, ack in [(2, 1), (3, None)]:
+        client.post("/v1/glasses/state", headers=HEADERS,
+                    json={**reading, "phase": "waiting", "sequence": sequence, "ack_answer_revision": ack})
+        assert client.get(url, headers=HEADERS).json()["ack_answer_revision"] == 2
+    client.post("/v1/glasses/state", headers=HEADERS, json={**STATE, "generation": 4, "phase": "chooser"})
+    assert client.get(url, headers=HEADERS).json()["ack_answer_revision"] is None
+
+
+@pytest.mark.parametrize("changed", [
+    {"phase": "capturing"}, {"session_id": 7}, {"display_request": "sleep"},
+    {"display_request": None}, {"entry_request": "other"},
+])
+def test_chooser_entry_request_requires_a_fresh_visible_sessionless_chooser(tmp_path, monkeypatch, changed):
+    client = _client(tmp_path, monkeypatch)
+    entry = {**STATE, "phase": "chooser", "display_request": "wake", "entry_request": "chooser"}
+    assert client.post("/v1/glasses/state", headers=HEADERS, json={**entry, **changed}).status_code == 422
+    assert client.get("/v1/glasses/state", headers=HEADERS).json() == {"devices": []}
+
+
+def test_wear_entry_needs_a_new_generation_after_a_closed_run(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    client.post("/v1/glasses/state", headers=HEADERS, json={**STATE, "phase": "closed"})
+    entry = {**STATE, "phase": "chooser", "sequence": 2, "display_request": "wake", "entry_request": "chooser"}
+    assert client.post("/v1/glasses/state", headers=HEADERS, json=entry).json()["accepted"] is False
+    assert client.post("/v1/glasses/state", headers=HEADERS,
+                       json={**entry, "generation": 4}).json()["accepted"] is True
+    saved = client.get("/v1/glasses/state?device_id=glasses-serial", headers=HEADERS).json()
+    assert saved["entry_request"] == "chooser" and saved["generation"] == 4
+
+
+def test_new_generation_during_partial_bundle_read_revokes_the_old_wake(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    from app import main
+    from app.glasses_state import GlassesState, record_state
+    waiting = {**STATE, "session_id": 7, "phase": "waiting"}
+    client.post("/v1/glasses/state", headers=HEADERS, json=waiting)
+
+    def bundle(_):
+        record_state(GlassesState(**{**STATE, "generation": 4, "phase": "chooser"}), "10.0.0.12")
+        return {"items": [{"status": "ready"}, {"status": "pending"}], "revision": 4, "available_stage": "reading"}
+
+    monkeypatch.setattr(main, "exam_answer_bundle", bundle)
+    saved = client.get("/v1/glasses/state?device_id=glasses-serial", headers=HEADERS).json()
+    assert saved["generation"] == 4 and saved["phase"] == "chooser"
+    assert saved["answer_ready"] is False and saved["answer_revision"] == 0 and saved["available_stage"] == "none"
 
 
 @pytest.mark.parametrize(("kind", "code", "resumable"), [

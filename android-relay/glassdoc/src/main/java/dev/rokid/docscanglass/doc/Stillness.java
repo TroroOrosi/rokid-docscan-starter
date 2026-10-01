@@ -7,6 +7,7 @@ import android.hardware.SensorEventListener;
 import android.hardware.SensorManager;
 import android.os.Handler;
 import android.os.SystemClock;
+import java.util.function.BooleanSupplier;
 
 /**
  * Holds the shutter until the head is still. 2026-09-30 on the glasses a
@@ -24,12 +25,10 @@ final class Stillness implements SensorEventListener {
      */
     static final float MOVING_RAD_S = 0.12f;
     static final long STILL_MILLIS = 300;
-    /** Shoot anyway after this: the review still lets the operator retake. */
-    static final long MAX_WAIT_MILLIS = 5000;
-
     private final SensorManager sensors;
     private final Sensor gyroscope;
     private volatile long movingAt;
+    private volatile long observedAt = -1;
     private long generation;
 
     Stillness(Context context) {
@@ -38,24 +37,25 @@ final class Stillness implements SensorEventListener {
     }
 
     static boolean ready(long now, long startedAt, long movingAt) {
-        return now - movingAt >= STILL_MILLIS || now - startedAt >= MAX_WAIT_MILLIS;
+        return now >= startedAt && now >= movingAt && now - movingAt >= STILL_MILLIS;
     }
 
-    /** Runs {@code then} on {@code handler} once still, or at once without a gyroscope. */
-    void await(Handler handler, Runnable then) {
+    /** Keep measuring motion until the camera is also ready; elapsed wait never authorizes a shot. */
+    void await(Handler handler, BooleanSupplier cameraReady, Runnable then) {
         long token = ++generation;
-        if (gyroscope == null) {
-            then.run();
-            return;
-        }
         long startedAt = SystemClock.elapsedRealtime();
         movingAt = startedAt; // a full STILL_MILLIS of readings is required
-        sensors.registerListener(this, gyroscope, SensorManager.SENSOR_DELAY_GAME, handler);
+        observedAt = -1;
+        boolean measured = gyroscope != null
+                && sensors.registerListener(this, gyroscope, SensorManager.SENSOR_DELAY_GAME, handler);
         handler.postDelayed(new Runnable() {
             @Override public void run() {
                 if (token != generation) return;
-                if (ready(SystemClock.elapsedRealtime(), startedAt, movingAt)) {
-                    sensors.unregisterListener(Stillness.this);
+                long now = SystemClock.elapsedRealtime();
+                if (cameraReady.getAsBoolean() && (!measured || (observedAt >= startedAt
+                        && now >= observedAt && now - observedAt <= CameraReadiness.FRESH_MILLIS
+                        && ready(now, startedAt, movingAt)))) {
+                    if (sensors != null) sensors.unregisterListener(Stillness.this);
                     then.run();
                 } else {
                     handler.postDelayed(this, 50);
@@ -71,6 +71,13 @@ final class Stillness implements SensorEventListener {
 
     @Override
     public void onSensorChanged(SensorEvent event) {
+        observedAt = SystemClock.elapsedRealtime();
+        if (event.values.length < 3 || !Float.isFinite(event.values[0])
+                || !Float.isFinite(event.values[1]) || !Float.isFinite(event.values[2])) {
+            movingAt = observedAt;
+            observedAt = -1;
+            return;
+        }
         float x = event.values[0];
         float y = event.values[1];
         float z = event.values[2];

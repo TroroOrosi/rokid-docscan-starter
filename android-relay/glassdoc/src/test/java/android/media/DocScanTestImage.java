@@ -13,12 +13,13 @@ public final class DocScanTestImage extends Image {
     public int height = 3024;
     public int rowStride;
     public int pixelStride;
+    public long timestamp = 10L;
     public boolean memoryFailure;
     public DocScanTestImage(List<String> events) { this.events = events; }
     @Override public int getFormat() { return format; }
     @Override public int getWidth() { return width; }
     @Override public int getHeight() { return height; }
-    @Override public long getTimestamp() { return 10L; }
+    @Override public long getTimestamp() { return timestamp; }
     @Override public void setTimestamp(long timestamp) { }
     @Override public void close() { events.add("image.close"); }
     @Override public Plane[] getPlanes() {
