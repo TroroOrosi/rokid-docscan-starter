@@ -140,16 +140,11 @@ final class GlassCamera {
         try {
             CameraManager manager = (CameraManager) context.getSystemService(Context.CAMERA_SERVICE);
             String id = rearCameraId(manager);
-            StreamConfigurationMap map = manager.getCameraCharacteristics(id)
-                    .get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
+            CameraCharacteristics characteristics = manager.getCameraCharacteristics(id);
+            StreamConfigurationMap map = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
             Size[] sizes = map == null ? null : map.getOutputSizes(ImageFormat.YUV_420_888);
-            if (sizes == null || sizes.length == 0) throw new IllegalStateException("no YUV preview");
-            Size size = sizes[0];
-            for (Size candidate : sizes) {
-                if (candidate.getWidth() >= 320 && candidate.getHeight() >= 240
-                        && (size.getWidth() < 320 || (long) candidate.getWidth() * candidate.getHeight()
-                        < (long) size.getWidth() * size.getHeight())) size = candidate;
-            }
+            Size size = previewSize(sizes, largestJpegSize(characteristics));
+            if (size == null) throw new IllegalStateException("no YUV preview matches JPEG aspect");
             previewReader = ImageReader.newInstance(size.getWidth(), size.getHeight(), ImageFormat.YUV_420_888, 2);
             previewReader.setOnImageAvailableListener(source -> previewFrame(source, token), handler);
             previewOpening = true;
@@ -543,5 +538,19 @@ final class GlassCamera {
             }
         }
         return largest;
+    }
+
+    /** Different stream aspects are centre-cropped by Camera2; a guide must show the full JPEG. */
+    private static Size previewSize(Size[] sizes, Size jpeg) {
+        if (sizes == null || jpeg == null) return null;
+        Size smallest = null;
+        for (Size candidate : sizes) {
+            if (candidate.getWidth() < 320 || candidate.getHeight() < 240
+                    || (long) candidate.getWidth() * jpeg.getHeight()
+                    != (long) candidate.getHeight() * jpeg.getWidth()) continue;
+            if (smallest == null || (long) candidate.getWidth() * candidate.getHeight()
+                    < (long) smallest.getWidth() * smallest.getHeight()) smallest = candidate;
+        }
+        return smallest;
     }
 }

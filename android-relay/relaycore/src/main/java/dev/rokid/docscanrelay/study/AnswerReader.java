@@ -104,13 +104,28 @@ public final class AnswerReader {
             StringBuilder text = new StringBuilder();
             List<Integer> starts = new ArrayList<>();
             List<Integer> bodyStarts = new ArrayList<>();
+            int lineStart = 0;
+            boolean previousCompact = false;
             for (int i = first; i <= last; i++) {
                 AnswerItem item = bundle.items.get(i);
+                String body = content(item);
+                String entry = item.readingLabel() + " " + body;
+                boolean compact = item.status == AnswerItem.Status.READY && item.diagrams.isEmpty()
+                        && !body.contains("\n") && !body.contains("\r") && measurer.width(entry) <= width;
+                if (i > first) {
+                    if (previousCompact && compact
+                            && measurer.width(text.substring(lineStart) + "　" + entry) <= width) {
+                        text.append('　');
+                    } else {
+                        text.append('\n');
+                        lineStart = text.length();
+                    }
+                }
                 starts.add(text.length());
                 text.append(item.readingLabel()).append(' ');
                 bodyStarts.add(text.length());
-                text.append(content(item));
-                if (i < last) text.append('\n');
+                text.append(body);
+                previousCompact = compact;
             }
             for (AnswerLayout.Page page : AnswerLayout.paginate(text.toString(), width, lines, measurer)) {
                 int owner = 0;
@@ -223,6 +238,7 @@ public final class AnswerReader {
     }
 
     public void tap() {
+        if (continuous) return;
         if (screen == Screen.ANSWER) {
             screen = Screen.GROUPS;
             menuIndex = groupIds().indexOf(current().groupId);

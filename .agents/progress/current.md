@@ -1,6 +1,6 @@
 # 再開入口：次のセッションはここだけ読めば始められる
 
-Status: Internal progress。2026-09-30計画のPC実装・独立監査を完了。`py -3.12 -X utf8 -m pytest -q` →1030 passed, 1 skipped、`py -3.12 -X utf8 -m ruff check .` →All checks passed!、`gradlew.bat --no-daemon test testDebugUnitTest assembleDebug` →BUILD SUCCESSFUL・420 tests/失敗0。旧API構成のfixtureを修正し、clean venvの `python -X utf8 -m pytest -q` →1023 passed, 8 skipped。コマンド全文・最終CI・hash・監査は `data/device-setup/reports/venue-pc-20260930/`。branch `feature/capture-quality-readiness`、Draft [PR #38](https://github.com/TroroOrosi/rokid-docscan-starter/pull/38)。実機未検証。
+Status: Internal progress。10/1追加改修のPC検証：py -3.12 -X utf8 -m pytest -q →1034 passed, 1 skipped、py -3.12 -X utf8 -m ruff check . →All checks passed!、android-relay/gradlew.bat --no-daemon test testDebugUnitTest assembleDebug →BUILD SUCCESSFUL・429 tests/失敗0。撮影枠の同aspect化・明暗変動/配列再利用の頁変化修正・写真のみ確認・固定答案スライド・システム消灯設定保持・答案brace保全を実装。独立最終監査の現物照合Required0、コマンド/output/APK hashは data/device-setup/reports/venue-pc-20260930/usability-pc-20261001.json、監査は usability-android-audit-20261001.json。branch feature/capture-quality-readiness、Draft [PR #38](https://github.com/TroroOrosi/rokid-docscan-starter/pull/38)。今回APK/sourceは実機未反映、撮影・回答表示・消灯・無音・電池・会場経路は実機未検証。
 Runs on: Windows PC `C:\rokid-docscan-starter`。実機の状態を変える操作・APK導入・スマホのサーバ更新・GPT送信は、利用者の承認後だけ（hookでも強制）。
 
 ## 0. 読み方（前提と資料に引きずられないため）
@@ -24,7 +24,7 @@ Runs on: Windows PC `C:\rokid-docscan-starter`。実機の状態を変える操�
 合格：公式正解（`C:\rokid-exam-materials\kyotsu\seikai\`）と照合して正しい答えが、会場経路でグラスに表示される。一度も達成していない。
 
 ## 2. 利用者の決定（再質問しない）
-- 最新計画（9/30）は以下の旧方式に優先：Termux Chromium永続profile＋初回可視login後headless、Boot/services、スマホ自己ADBなし、頁画像を20添付以内で同一chatへ順送信し中間受領確認→最後に全答案、OCRを撮影条件から外し頁変化→静止→1枚→実画像3秒保存、答案を連続表示、最初の閲覧double tapは記入終了＋消灯、その後3秒以内2回でapp終了。実機変更・導入・GPT送信の承認は今回未取得。
+- 最新指示（10/1）は以下の旧方式に優先：撮影・実画像3秒確認・答案閲覧中は点灯、解析待機・記入終了・終了時は消灯。写真へ案内文字を重ねず、答案は記入用全文と必要な導出・図を保つ固定一画面スライド、短答を詰めて操作を減らす。自動撮影の精度と表示枠より広く写る画角を修正し合理化する。本人は今回アプリを実行したがGPT出力が見えず、音量増加は本人の操作ミスで割当を明るさへ変更して解決、端末の自動消灯は「無し」にする予定。9/30のChromium永続profile/Boot/services/同一chatへの20添付以内順送信/自動撮影/記入終了後の終了操作を維持。本人はテザリング＋Wi-Fi中でsshd実行済み。旧初回導入と旧可視login exact commandは承認済み、新ネットワーク入口・services・glasses変更・GPT送信は別承認。
 
 - 会場：グラス（`:glassdoc`）→スマホAP→スマホ上のFastAPI→スマホChrome（CDP）→ChatGPT web→answer-bundle→AnswerView。PCは持ち込まない。
   スマホは画面点灯・伏せ置き・Chrome前景（9/15）。ChatGPT webの自動操作は規約違反と承知のうえで選んだ。APIキーは使わない。
@@ -88,7 +88,7 @@ Runs on: Windows PC `C:\rokid-docscan-starter`。実機の状態を変える操�
   → 旧サーバ停止 → `nohup bash scripts/phone_serve.sh 127.0.0.1 > data/server-<commit>.log 2>&1 &`。PCからは `ssh -f -N -L 8000:127.0.0.1:8000 ...`（ssh `-i ~/.ssh/f51f_key -p 8022 u0_a26@192.168.0.6`）。
   ベンチの鍵は `ROKID_API_KEY` をスマホの env から読んで渡す（画面に出さない）。
 
-## 4. 次の作業：Runs on PC→F-51FのTermux。reportsの最終CI合格を確認後、本人が `sshd` を起動する操作の承認を求める（現在SSH:8022接続拒否）。導入は既存DB・不確定記録を保持し、対象・正確なコマンドを提示して承認後に実施。新ブラウザのlogin/headless維持・実モデル選択と会場経路を確認する。GPT送信は完全な資料を指定して別承認。以下は旧計画の経緯で、今回の実機実行指示ではない。
+## 4. 次の作業：PC追加改修の検証・独立監査後、新UI-only exact commandを提示し承認後fresh readonly条件再確認→可視loginを開始する。初回phone導入反映済み。10/1 readonlyで新mDNS/SSH192.168.0.5を本人F-51F ZY22LWGDCVと照合、旧head67f8576のsource79/DB/env/送信記録を保持。API/browser/watchは停止、標準Termux managerは存在し旧source更新guardはexit2のまま。別UI-only入口のPC独立監査はRequired0（phone-visible-login-network-audit-20261001.json）、新runner159873/commands75e3は未承認・4起動操作未実行。追加改修APK vc33とAPI1.31.1は別途対象/commandsを確定し承認後に反映。回答非表示の試行停止箇所・撮影/消灯/無音/電池/会場は実機未検証。以下は旧計画の経緯で、今回の実機実行指示ではない。
 
 1. 済：独立監査2回（`4552ea1`、`4552ea1..e12e155`）の指摘を `61ad481`〜`1134404` で反映。
 2. 済：4a（3節）。起動はスマホで `bash scripts/phone_serve.sh 127.0.0.1`、PCから `ssh -L 8000:127.0.0.1:8000` で投入した。

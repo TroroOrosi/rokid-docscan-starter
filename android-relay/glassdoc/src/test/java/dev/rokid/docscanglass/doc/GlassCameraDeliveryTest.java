@@ -186,6 +186,41 @@ public class GlassCameraDeliveryTest {
         assertEquals("a late close must not authorize another photograph after UNKNOWN", 1, stillRequests.get());
     }
 
+    @Test public void previewObservationsDuringReviewLatchTheTurnWithoutStartingAnotherStill() {
+        DocScanTestImage image = (DocScanTestImage) readerShadow.image;
+        image.format = ImageFormat.YUV_420_888;
+        image.width = 32;
+        image.height = 24;
+        image.rowStride = 32;
+        image.pixelStride = 1;
+        byte[] pixels = new byte[32 * 24];
+        java.util.Arrays.fill(pixels, (byte) 180);
+        image.buffer = ByteBuffer.wrap(pixels);
+        PageChange change = ReflectionHelpers.getField(camera, "pageChange");
+        change.observe(pixels, android.os.SystemClock.elapsedRealtime());
+        change.consumed(); // the existing JPEG request has claimed this page
+        java.util.concurrent.atomic.AtomicInteger ready = new java.util.concurrent.atomic.AtomicInteger();
+        Runnable observe = () -> ReflectionHelpers.callInstanceMethod(camera, "previewFrame",
+                ClassParameter.from(ImageReader.class, reader), ClassParameter.from(long.class, 0L));
+        java.util.Arrays.fill(pixels, 0, pixels.length / 3, (byte) 70);
+        shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(500));
+        observe.run(); // review has no pageReady callback, but the preview still observes
+        java.util.Arrays.fill(pixels, (byte) 180); // a similar next page
+        shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(300));
+        observe.run();
+        assertEquals(0, ready.get());
+        assertEquals(0, delivered);
+        ReflectionHelpers.setField(camera, "pageReady", (Runnable) ready::incrementAndGet);
+        shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(400));
+        observe.run();
+        assertEquals("the observed turn remains ready when review finishes", 1, ready.get());
+        shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(400));
+        observe.run();
+        assertEquals("the ready callback must only be delivered once", 1, ready.get());
+        assertEquals(0, delivered);
+        assertTrue(failures.isEmpty());
+    }
+
 
     @Implements(CaptureFailure.class)
     public static class FailureShadow {
@@ -200,6 +235,7 @@ public class GlassCameraDeliveryTest {
         List<String> events;
         boolean throwOnClose;
         @Implementation protected Image acquireNextImage() { return image; }
+        @Implementation protected Image acquireLatestImage() { return image; }
         @Implementation protected void close() {
             events.add("reader.close");
             if (throwOnClose) throw new IllegalStateException("synthetic close failure");

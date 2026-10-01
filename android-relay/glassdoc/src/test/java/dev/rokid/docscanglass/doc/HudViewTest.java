@@ -18,6 +18,27 @@ import org.robolectric.annotation.GraphicsMode;
 @Config(sdk = 32, manifest = Config.NONE)
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 public class HudViewTest {
+    @Test public void aReviewWithoutInstructionsUsesTheWholeDisplayHeight() {
+        Bitmap photo = Bitmap.createBitmap(240, 480, Bitmap.Config.ARGB_8888);
+        photo.eraseColor(Color.rgb(90, 90, 90));
+        HudView view = new HudView(RuntimeEnvironment.getApplication());
+        view.layout(0, 0, 480, 640);
+        view.showReview(photo, List.of());
+        Bitmap screen = Bitmap.createBitmap(480, 640, Bitmap.Config.ARGB_8888);
+        view.draw(new Canvas(screen));
+        assertTrue("the photo must reach the bottom rather than reserve an empty footer",
+                Color.green(screen.getPixel(240, 630)) > 80);
+        view.showRecording(true);
+        Bitmap recordingScreen = Bitmap.createBitmap(480, 640, Bitmap.Config.ARGB_8888);
+        view.draw(new Canvas(recordingScreen));
+        assertTrue("recording must not add text over the three-second photo review",
+                screen.sameAs(recordingScreen));
+        assertEquals(Color.rgb(90, 90, 90), photo.getPixel(120, 470));
+        photo.recycle();
+        screen.recycle();
+        recordingScreen.recycle();
+    }
+
     @Test public void reviewShowsTheWholePhotoWithoutAnOverviewCoveringIt() {
         Bitmap photo = Bitmap.createBitmap(800, 600, Bitmap.Config.ARGB_8888);
         photo.eraseColor(Color.rgb(10, 10, 10));

@@ -216,6 +216,20 @@ def test_a_latex_fraction_reaches_the_operator_as_writable_text(client):
     assert item["answer"] == "1/2"
 
 
+@pytest.mark.parametrize("answer, expected", [
+    ("{−1, 1}", "{−1, 1}"),
+    ("function f() { return 1; }", "function f() { return 1; }"),
+    (r"\text{速さ} = 2 \mathrm{m/s}", "速さ = 2 m/s"),
+    (r"\frac{\mathrm{kg}}{2}", "(kg)/2"),
+])
+def test_answer_bundle_preserves_braces_and_removes_only_latex_groups(client, answer, expected):
+    _, session_id = _session_with(client, [PAGE])
+    item = _ingest(client, session_id, answer)
+    assert item["status"] == "ready"
+    assert item["answer"] == expected
+    assert item["issue"] == ""
+
+
 def test_an_answer_with_a_table_is_not_reported_ready(client):
     """The HUD renders characters, not columns. Reporting this ready would put
     a row of pipes in front of the operator and call it an answer."""

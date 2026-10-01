@@ -6,9 +6,8 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
-    <!-- Special access: the exit shortens Settings.System.SCREEN_OFF_TIMEOUT to
-         sleep the display. Measured 2026-09-10: this build has no
-         android.software.device_admin, so lockNow is unavailable. -->
+    <!-- Special access: mute system touch sounds (SOUND_EFFECTS_ENABLED).
+         The app preserves the operator's SCREEN_OFF_TIMEOUT setting. -->
     <uses-permission android:name="android.permission.WRITE_SETTINGS" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.INTERNET" />

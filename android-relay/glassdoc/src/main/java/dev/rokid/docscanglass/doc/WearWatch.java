@@ -16,7 +16,8 @@ import dev.rokid.docscanglass.input.WearTransition;
  * <p>The decision lives in {@link WearTransition}, which is plain Java and
  * tested; this is only the binding. The wakeup form of the sensor is preferred
  * because the display is asleep when the reading that matters arrives -- that
- * is the state {@link DisplaySleep} leaves behind.</p>
+ * is the state the phone watcher requests after {@link DisplaySleep} releases
+ * the app's display hold.</p>
  */
 final class WearWatch implements SensorEventListener {
     private static final String TAG = "WearWatch";

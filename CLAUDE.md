@@ -1,6 +1,6 @@
 # rokid-docscan-starter development guide
 
-Status: Current engineering contract. Updated 2026-09-30.
+Status: Current engineering contract. Updated 2026-10-01.
 
 **Start at `.agents/progress/current.md`.** It lists the operator's decisions,
 the verified state and the next steps. Do not re-ask what it settles. Keep the
@@ -175,6 +175,12 @@ each send; missing or different selection stops submission.
   Keep microphone input while muting output. Do not hold the glasses CPU for
   indefinite analysis or poll answers there; bounded upload work may retain CPU
   only until its timeout or completion. Physical silence and timing are pending.
+- Ordinary still review shows the image without text covering it. Keep the
+  three-second visible review and the existing retake/end gestures. Preserve
+  the operator's system screen-off timeout, including disabled auto-off:
+  capture/review/reading hold the app window on; standby/exit release that
+  ownership and use authenticated phone-watcher sleep requests. Never restore
+  a saved timeout over a later operator choice. Hardware acceptance is pending.
 - Text-only page upload remains an API compatibility path. Do not describe it
   as the real-device primary path.
 - The public CXR-L AIDL surface does not expose arbitrary recognition or
@@ -261,8 +267,8 @@ with no device commands, `tests/test_rokid_led.py` enforces that, and the
 procedures are deliberately not kept anywhere in this repository.
 
 OCR文字枠の内側判定は `TEXT_BOUNDS_ONLY`（旧保存token `COMPLETE` も同義）であり、
-紙面・未認識文字・図表の合格ではない。glassdocの確認表示は「構図確認のみ」
-「無操作で保存・画質未検証」とし、3秒の無操作を品質承認と説明しない。
+紙面・未認識文字・図表の合格ではない。glassdocの通常確認は実画像だけを3秒表示し、
+無操作で保存する。これは構図の確認で、3秒の無操作を品質承認と説明しない。
 PC用の原寸点検・登録条件・比較部品は `docs/capture-quality.md`。画像由来の証拠生成と
 撮影／正式登録本流の品質ゲートは未接続。既存の実機試験・導入・送信停止を維持する。
 

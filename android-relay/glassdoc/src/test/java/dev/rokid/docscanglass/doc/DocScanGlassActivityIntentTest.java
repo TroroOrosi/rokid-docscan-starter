@@ -360,6 +360,30 @@ public class DocScanGlassActivityIntentTest {
         assertFalse((boolean)accept.invoke(activity, wake));
     }
 
+    @Test public void resumingKeepsActiveViewsAwakeButNeverKeepsWaitingOrCompletedSessionsAwake() throws Exception {
+        android.provider.Settings.System.putInt(activity.getContentResolver(),
+                android.provider.Settings.System.SCREEN_OFF_TIMEOUT, 0);
+        int keepOn = android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON;
+        activity.onResume();
+        assertTrue("an active chooser, capture or reader must hold its display",
+                (activity.getWindow().getAttributes().flags & keepOn) != 0);
+        setField(activity, "awaitingAnswers", true);
+        activity.onResume();
+        assertEquals(0, activity.getWindow().getAttributes().flags & keepOn);
+        setField(activity, "awaitingAnswers", false);
+        setField(activity, "writingDone", true);
+        activity.getWindow().addFlags(keepOn);
+        activity.onResume();
+        assertEquals(0, activity.getWindow().getAttributes().flags & keepOn);
+        setField(activity, "writingDone", false);
+        setField(activity, "sessionClosed", true);
+        activity.getWindow().addFlags(keepOn);
+        activity.onResume();
+        assertEquals(0, activity.getWindow().getAttributes().flags & keepOn);
+        assertEquals(0, android.provider.Settings.System.getInt(activity.getContentResolver(),
+                android.provider.Settings.System.SCREEN_OFF_TIMEOUT, -1));
+    }
+
     @Test public void staleWakeCannotCreateAChooserAfterTheProcessWasStopped() throws Exception {
         activity.getPreferences(Context.MODE_PRIVATE).edit().putLong("power_generation", 3)
                 .putLong("power_session", 7).putString("power_phase", "writing_done").commit();

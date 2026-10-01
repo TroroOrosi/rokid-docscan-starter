@@ -191,12 +191,7 @@ public final class DocScanGlassActivity extends Activity
             return;
         }
         if (!restoringWake) beginPowerGeneration();
-        // A previous exit may have shortened the screen-off timeout to leave
-        // the display asleep; give the operator their own value back first.
-        displaySleep.restore(this);
-        // Measured 2026-09-10: the stock timeout on these glasses is
-        // 864000000 ms, ten days, so the screen never sleeps on its own. The
-        // flag still matters, because DisplaySleep releases it to exit.
+        // Hold only the active app window; the operator's display timeout stays intact.
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
 
         hud = new HudView(this);
@@ -362,9 +357,7 @@ public final class DocScanGlassActivity extends Activity
             stopCaptureHardware();
             notifyPhase("closed", activeSession());
             Log.i(TAG, "exit confirmed");
-            if (displaySleep.sleep(this) == DisplaySleep.Result.NOT_PERMITTED) {
-                Log.w(TAG, "local sleep refused; phone watcher must turn display off");
-            }
+            displaySleep.sleep(this);
             startActivity(new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME)
                     .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
             finish();
@@ -380,6 +373,8 @@ public final class DocScanGlassActivity extends Activity
     @Override protected void onResume() {
         super.onResume();
         muteOutput();
+        if (sessionClosed || writingDone || awaitingAnswers || isFinishing() || isDestroyed()) displaySleep.sleep(this);
+        else getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
     }
 
     @Override
@@ -495,6 +490,7 @@ public final class DocScanGlassActivity extends Activity
             return;
         }
         if (reader != null) {
+            if (action == GlassesInputAction.SHORT_TAP) return;
             if (action == GlassesInputAction.BACK) {
                 if (reader.screen() != AnswerReader.Screen.ANSWER) {
                     reader.back();
@@ -1011,15 +1007,14 @@ public final class DocScanGlassActivity extends Activity
         awaitingAnswers = true;
         stopCaptureHardware();
         notifyPhase("analyzing", controller.sessionId());
-        getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
-        if (displaySleep.sleep(this) == DisplaySleep.Result.NOT_PERMITTED) {
-            hud.showLines(List.of("解析中", "スマホへ消灯を要求中", ""));
-        }
+        displaySleep.sleep(this);
+        hud.showLines(List.of("解析中", "スマホへ消灯を要求中", ""));
     }
 
     private void wakeForResult() {
         if (sessionClosed || writingDone) return;
         if (awaitingAnswers && !displaySleep.wake(this)) Log.w(TAG, "answer display wake request refused");
+        getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         awaitingAnswers = false;
     }
 

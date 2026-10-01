@@ -137,12 +137,10 @@ final class GlassesCaptureSurface implements CaptureSurface {
         this.rotationDegrees = rotationDegrees;
         Bitmap still = decodePreview(jpeg, rotationDegrees);
         if (still == null) return NO_VIEW_GENERATION;
-        // One short line under the photo: the page. The photo gets the rest.
-        List<String> footer = lines == null || lines.isEmpty() ? List.of() : lines.subList(0, 1);
         return show("capture-review", () -> {
             Bitmap previous = preview;
             preview = still;
-            hud.showReview(still, GlassesHudText.adapt(footer));
+            hud.showReview(still, List.of());
             recycle(previous);
         }, still);
     }

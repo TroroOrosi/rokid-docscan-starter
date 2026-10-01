@@ -3,6 +3,7 @@ package dev.rokid.docscanglass.doc;
 import static org.junit.Assert.*;
 
 import android.app.Activity;
+import android.content.Context;
 import android.provider.Settings;
 import android.view.WindowManager;
 import org.junit.Test;
@@ -10,13 +11,12 @@ import org.junit.runner.RunWith;
 import org.robolectric.Robolectric;
 import org.robolectric.RobolectricTestRunner;
 import org.robolectric.RuntimeEnvironment;
+import org.robolectric.Shadows;
 import org.robolectric.annotation.Config;
 
 @RunWith(RobolectricTestRunner.class)
 @Config(sdk = 32, manifest = Config.NONE)
 public class DisplaySleepTest {
-    private static final int TEN_DAYS = 864_000_000;
-
     private Activity activity() {
         return Robolectric.buildActivity(Activity.class).create().get();
     }
@@ -24,7 +24,7 @@ public class DisplaySleepTest {
     private int timeout() {
         return Settings.System.getInt(
                 RuntimeEnvironment.getApplication().getContentResolver(),
-                Settings.System.SCREEN_OFF_TIMEOUT, -1);
+                Settings.System.SCREEN_OFF_TIMEOUT, -2);
     }
 
     private void setTimeout(int millis) {
@@ -33,75 +33,46 @@ public class DisplaySleepTest {
                 Settings.System.SCREEN_OFF_TIMEOUT, millis);
     }
 
-    @Test public void sleepShortensTheTimeoutAndStopsHoldingTheScreenOn() {
-        setTimeout(TEN_DAYS);
+    @Test public void sleepReleasesTheWindowWithoutChangingAnyOperatorTimeout() {
+        for (int timeout : new int[]{-1, 0, 60_000, 864_000_000}) {
+            setTimeout(timeout);
+            Activity activity = activity();
+            activity.getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+            activity.setTurnScreenOn(true);
+
+            new DisplaySleep().sleep(activity);
+
+            assertEquals(timeout, timeout());
+            assertEquals(0, activity.getWindow().getAttributes().flags
+                    & WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+            assertFalse(Shadows.shadowOf(activity).getTurnScreenOn());
+        }
+    }
+
+    @Test public void wakingCannotRestoreAStaleTimeoutOverTheOperatorsNewChoice() {
+        Context context = RuntimeEnvironment.getApplication();
+        context.getSharedPreferences("display-sleep", Context.MODE_PRIVATE).edit()
+                .putInt("previous_timeout_millis", 15_000).commit();
+        setTimeout(0);
         Activity activity = activity();
-        activity.getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
-        activity.setTurnScreenOn(true);
-        DisplaySleep sleep = new DisplaySleep();
 
-        assertEquals(DisplaySleep.Result.SLEEPING, sleep.sleep(activity));
+        assertTrue(new DisplaySleep().wake(activity));
 
-        assertEquals(DisplaySleep.SHORT_TIMEOUT_MILLIS, timeout());
-        int flags = activity.getWindow().getAttributes().flags;
-        assertEquals(0, flags & WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
-        assertFalse(org.robolectric.Shadows.shadowOf(activity).getTurnScreenOn());
+        assertEquals(0, timeout());
+        assertNotEquals(0, activity.getWindow().getAttributes().flags
+                & WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
     }
 
-    @Test public void theOperatorsOwnTimeoutComesBackOnTheNextStart() {
-        setTimeout(TEN_DAYS);
-        DisplaySleep sleep = new DisplaySleep();
-        sleep.sleep(activity());
-        assertEquals(DisplaySleep.SHORT_TIMEOUT_MILLIS, timeout());
-
-        // A separate instance: folding the arms force-stops the process.
-        new DisplaySleep().restore(RuntimeEnvironment.getApplication());
-
-        assertEquals(TEN_DAYS, timeout());
-    }
-
-    @Test public void restoringTwiceDoesNotOverwriteALaterChoice() {
-        setTimeout(TEN_DAYS);
-        DisplaySleep sleep = new DisplaySleep();
-        sleep.sleep(activity());
-        sleep.restore(RuntimeEnvironment.getApplication());
-
-        setTimeout(60_000);
-        sleep.restore(RuntimeEnvironment.getApplication());
-
-        assertEquals(60_000, timeout());
-    }
-
-    @Test public void repeatedSleepPreservesTheOriginalTimeout() {
-        setTimeout(TEN_DAYS);
-        DisplaySleep sleep = new DisplaySleep();
-        sleep.sleep(activity());
-        sleep.sleep(activity());
-        sleep.restore(RuntimeEnvironment.getApplication());
-        assertEquals(TEN_DAYS, timeout());
-    }
-
-    @Test public void aRefusedWriteIsReportedInsteadOfPretendingToSleep() {
-        setTimeout(TEN_DAYS);
-        DisplaySleep sleep = new DisplaySleep();
-        sleep.writerForTest((resolver, millis) -> {
-            throw new SecurityException("WRITE_SETTINGS not granted");
-        });
+    @Test public void repeatedSleepAndWakeKeepTheOperatorsSetting() {
+        setTimeout(864_000_000);
         Activity activity = activity();
-        activity.getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
-        activity.setTurnScreenOn(true);
-
-        assertEquals(DisplaySleep.Result.NOT_PERMITTED, sleep.sleep(activity));
-
-        assertEquals(TEN_DAYS, timeout());
-        int flags = activity.getWindow().getAttributes().flags;
-        assertNotEquals(0, flags & WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
-        assertFalse("the phone may sleep even if local timeout permission is refused", org.robolectric.Shadows.shadowOf(activity).getTurnScreenOn());
-    }
-
-    @Test public void nothingIsRestoredWhenNothingWasShortened() {
-        setTimeout(TEN_DAYS);
-        new DisplaySleep().restore(RuntimeEnvironment.getApplication());
-        assertEquals(TEN_DAYS, timeout());
+        DisplaySleep sleep = new DisplaySleep();
+        sleep.sleep(activity);
+        sleep.sleep(activity);
+        assertTrue(sleep.wake(activity));
+        setTimeout(0);
+        sleep.sleep(activity);
+        assertTrue(new DisplaySleep().wake(activity));
+        assertEquals(0, timeout());
     }
 }

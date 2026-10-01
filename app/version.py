@@ -208,7 +208,9 @@ from __future__ import annotations
 # metering. That observation is not a HAL guarantee. The 0.47.0 view changes stay.
 # 0.48.0: phone-owned Chromium and services; ordered image batches in one chat,
 #        image-based page changes, continuous answers and explicit display requests.
-APP_VERSION = "0.48.0"
+# 0.49.0: unobstructed still review, aligned preview geometry, compact fixed
+#        answer pages and display control preserving the system timeout.
+APP_VERSION = "0.49.0"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.
@@ -313,7 +315,8 @@ APP_VERSION = "0.48.0"
 #        番号 the one reply never answered gets its own failed item.
 # 1.31.0: authenticated glasses state carries device/session/generation/sequence
 #        so the phone can request display changes without waking a finished session.
-API_VERSION = "1.31.0"
+# 1.31.1: answer-bundle preserves meaningful braces in written sets and code.
+API_VERSION = "1.31.1"
 
 # Matching algorithm identity. Bump when thresholds or hashing change so a
 # re-index/eval is triggered. Mirrors thresholds in app/matching.py.
@@ -441,7 +444,9 @@ EXPLAINER_API_VERSION = "1.1.0"
 # No text while aiming; review is the photo cropped to the paper plus one line.
 # 1.26.0: automatic one-shot page-change capture, continuous answer reading,
 #        writing-done standby and generation-bound phone display requests.
-GLASSES_VIEW_CONTRACT_VERSION = "1.26.0"
+# 1.27.0: ordinary still review shows the photo without text; window display
+#        ownership preserves the system timeout; compact answers use fixed pages.
+GLASSES_VIEW_CONTRACT_VERSION = "1.27.0"
 
 # Answer-area overlay payload (box + short answer; 2D image-anchored).
 # 1.1.0: added tracking metadata (tracking/fixed_ar/anchor_hint).

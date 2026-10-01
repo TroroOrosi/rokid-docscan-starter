@@ -137,7 +137,7 @@ final class HudView extends View {
     }
 
     /**
-     * Review: the still fills the upper band and the text sits under it.
+     * Review: the actual still fills the display, with no routine instructions.
      *
      * <p>The captured image stays visible for review while the live stream
      * observes any page turn for the next capture.</p>
@@ -149,10 +149,8 @@ final class HudView extends View {
 
     /** Change only the footer: the same image/frame and its 3s clock stay valid. */
     void showReviewNotice(String notice) {
-        if (preview == null || preview.isRecycled() || lines.isEmpty()) return;
-        List<String> updated = new ArrayList<>(lines);
-        updated.set(updated.size() - 1, notice);
-        lines = updated;
+        if (preview == null || preview.isRecycled()) return;
+        lines = List.of(notice);
         invalidate();
     }
 
@@ -189,7 +187,7 @@ final class HudView extends View {
             drawGuide(canvas);
             textTop = Math.max(0, getHeight() - (lines.size() + 1) * 26f);
         }
-        if (recording) {
+        if (recording && still == null) {
             paint.setTextSize(22);
             canvas.drawText("REC", Math.max(8, getWidth() - 62), getHeight() - 8, paint);
         }
@@ -226,19 +224,23 @@ final class HudView extends View {
         guidePaint.setStrokeWidth(2f);
         Bitmap frame = livePreview;
         if (frame == null || frame.isRecycled()) return;
-        RectF bounds = imageBounds(frame, Math.max(1, getHeight() - (lines.size() + 1) * 26f));
+        RectF bounds = imageBounds(frame, imageBand());
         canvas.drawRect(bounds, guidePaint);
     }
 
     /** Show the complete capture once, with no inset or label covering the paper. */
     private float drawPreview(Canvas canvas, Bitmap still) {
-        float band = Math.max(1, getHeight() - (lines.size() + 1) * 26f);
+        float band = imageBand();
         RectF target = imageBounds(still, band);
         canvas.save();
         canvas.clipRect(0, 0, getWidth(), band);
         canvas.drawBitmap(still, null, target, still == livePreview ? livePaint : previewPaint);
         canvas.restore();
         return band;
+    }
+
+    private float imageBand() {
+        return Math.max(1, getHeight() - (lines.isEmpty() ? 0 : lines.size() + 1) * 26f);
     }
 
     private RectF imageBounds(Bitmap image, float band) {

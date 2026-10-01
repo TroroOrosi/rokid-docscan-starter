@@ -150,18 +150,15 @@ public class DocScanGlassActivityAnswerReadingTest {
     }
 
     @Test
-    public void menuBackReturnsOneLevelAndFocusLossDisarmsExit() throws Exception {
+    public void readerTapsKeepTheSlideAndFocusLossDisarmsExitAfterWritingCompletion() throws Exception {
         new AnswerStore(filesDir).start(bundleForSession(SESSION_ID));
         invokeOpenAnswers(bundleForSession(SESSION_ID), "q10", 0);
         AnswerReader reader = (AnswerReader) getField(activity, "reader");
         invokeOnAction(GlassesInputAction.SHORT_TAP);
         invokeOnAction(GlassesInputAction.SHORT_TAP);
-        assertEquals(AnswerReader.Screen.QUESTIONS, reader.screen());
-        invokeOnAction(GlassesInputAction.BACK);
-        assertEquals(AnswerReader.Screen.GROUPS, reader.screen());
-        assertFalse(backExit().isArmed());
-        invokeOnAction(GlassesInputAction.BACK);
         assertEquals(AnswerReader.Screen.ANSWER, reader.screen());
+        assertTrue("the reader stays lit until writing completion", (activity.getWindow().getAttributes().flags
+                & android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) != 0);
         assertFalse(backExit().isArmed());
         invokeOnAction(GlassesInputAction.BACK);
         assertFalse(backExit().isArmed());
@@ -557,7 +554,7 @@ public class DocScanGlassActivityAnswerReadingTest {
         readyUpdate(activity, List.of("a"), "review-1");
         awaitTrue("first activity reader", () -> getField(activity, "reader") != null);
         AnswerReader reader = (AnswerReader) getField(activity, "reader");
-        reader.viewport(40, 1, String::length);
+        reader.viewport(16, 1, String::length); // force two slides even when short answers can share a row
         int guard = 0;
         while (!"q11".equals(reader.current().questionId) && guard++ < 50) {
             invokeOnAction(GlassesInputAction.SWIPE_FORWARD);
@@ -592,7 +589,7 @@ public class DocScanGlassActivityAnswerReadingTest {
         awaitTrue(() -> getField(activity, "reader") != null);
         AnswerReader reader = (AnswerReader) getField(activity, "reader");
         assertEquals("q10", reader.current().questionId);
-        reader.viewport(40, 1, String::length);
+        reader.viewport(16, 1, String::length); // force a real page change to persist
 
         int guard = 0;
         while (!"q11".equals(reader.current().questionId) && guard++ < 50) {
