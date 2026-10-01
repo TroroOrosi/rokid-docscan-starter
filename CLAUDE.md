@@ -133,8 +133,11 @@ in the same chat in batches of at most 20 files including audio. Completed
 intermediate receipts precede the next batch; the final batch requests every
 answer. Durable progress and the existing uncertain-send guard prevent a
 restart from repeating a confirmed or uncertain send. Long generation is normal.
-The actual selector must show GPT-5.6 Sol at extreme effort or GPT-6 Pro before
-each send; missing or different selection stops submission.
+Before each send, verify the operator's selected Latest radio with Extra High
+in the visible effort menu; Latest is a displayed setting, not an inferred
+backend model name. The earlier GPT-5.6 Sol at extreme effort and GPT-6 Pro
+controls remain supported. Unknown, unchecked or lower-effort selections stop
+submission. Close and confirm only a popup the verification itself opened.
 
 ## Real-device contract
 

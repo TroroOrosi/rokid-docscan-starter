@@ -101,6 +101,9 @@ class _Locator:
             # A real chatgpt.com composer already matches the default selector
             # once with nothing attached, so the stub carries that baseline too.
             return self._page.thumbnail_baseline + self._page.confirmed_files
+        if self._selector in {chatgpt_web.FILE_INPUT_SEL, chatgpt_web.FILE_UPLOAD_SEL}:
+            # The composer has one of each even before its first assistant reply.
+            return 0 if self._selector in self._page.missing else 1
         if self._selector == chatgpt_web.NEW_CHAT_SEL:
             return 1
         if self._selector == chatgpt_web.SEND_SEL:
@@ -208,7 +211,8 @@ def _kinds(page):
 
 def _sends(page):
     """Every submitted message. The button is normal; Enter is the fallback."""
-    return [k for k in _kinds(page) if k in ("send", "press")]
+    return [k for (_, value), k in zip(page.events, _kinds(page), strict=True)
+            if k == "send" or k == "press" and value == "Enter"]
 
 
 def _ask(page, text="問1 2x+3=7 を解け", **kw):
@@ -239,6 +243,134 @@ def test_only_the_requested_actual_model_and_effort_can_be_sent(model, effort, a
         with pytest.raises(chatgpt_web.ChatGptWebModelMismatch):
             _ask(page, expect=("answer",))
         assert not _sends(page)
+
+
+class _CurrentUiPage(_StubPage):
+    """Public snapshot from the idless composer and its effort popup, no browser."""
+
+    def __init__(self, *, opened=False, radios=None, effort="Extra High", enabled=True, hit=True,
+                 escape_closes=True):
+        super().__init__(['{"answer":"4"}'])
+        self.opened, self.effort, self.enabled, self.hit = opened, effort, enabled, hit
+        self.radios = radios if radios is not None else [
+            {"known_label_lines": ["Latest"], "aria_checked": "true"},
+            {"known_label_lines": ["GPT-5.6 Sol"], "aria_checked": "false"},
+            {"known_label_lines": ["GPT-5.5"], "aria_checked": "false"},
+        ]
+        parent = self
+
+        class Keyboard(_Keyboard):
+            def press(self, key):
+                super().press(key)
+                if key == "Escape" and escape_closes:
+                    parent.opened = False
+
+        self.keyboard = Keyboard(self)
+
+    def evaluate(self, expression):
+        if "models: text(" in expression:
+            return {"models": [], "efforts": []}
+        if "menuitemradio" in expression:
+            return {"trigger_count": 1, "expanded": str(self.opened).lower(),
+                    "enabled": self.enabled, "can_click": self.hit, "x": 120, "y": 60,
+                    "menu_count": int(self.opened), "radios": self.radios if self.opened else [],
+                    "efforts": [self.effort] if self.opened else []}
+        return super().evaluate(expression)
+
+    def send(self, method, params):
+        assert method == "Input.dispatchMouseEvent"
+        self.events.append(("mouse", params))
+        if params["type"] == "mouseReleased":
+            self.opened = True
+
+
+@pytest.mark.parametrize("opened", [False, True])
+def test_current_ui_checks_latest_and_closes_only_its_own_popup(opened):
+    page = _CurrentUiPage(opened=opened)
+    assert chatgpt_web.verify_selected_model(page) == "Latest"
+    assert page.opened is opened
+    assert not _sends(page)
+    assert not any(kind in {"fill", "upload"} for kind, _ in page.events)
+    assert [value["type"] for kind, value in page.events if kind == "mouse"] == (
+        [] if opened else ["mousePressed", "mouseReleased"])
+    assert [value for kind, value in page.events if kind == "press"] == ([] if opened else ["Escape"])
+
+
+@pytest.mark.parametrize("radios,effort", [
+    ([{"known_label_lines": ["Latest"], "aria_checked": "false"}], "Extra High"),
+    ([{"known_label_lines": ["GPT-5.5"], "aria_checked": "true"}], "Extra High"),
+    ([{"known_label_lines": [], "aria_checked": "true"}], "Extra High"),
+    ([{"known_label_lines": ["Latest"], "aria_checked": "true"},
+      {"known_label_lines": ["GPT-5.6 Sol"], "aria_checked": "true"}], "Extra High"),
+    ([{"known_label_lines": ["Latest"], "aria_checked": "true"}], "High"),
+])
+def test_current_ui_unknown_unchecked_or_low_effort_never_submits(radios, effort):
+    page = _CurrentUiPage(radios=radios, effort=effort)
+    with pytest.raises(chatgpt_web.ChatGptWebModelMismatch):
+        _ask(page, expect=("answer",))
+    assert not _sends(page)
+    assert page.opened is False
+
+
+@pytest.mark.parametrize("enabled,hit", [(False, True), (True, False)])
+def test_current_ui_never_opens_a_disabled_or_obscured_effort_trigger(enabled, hit):
+    page = _CurrentUiPage(enabled=enabled, hit=hit)
+    with pytest.raises(chatgpt_web.ChatGptWebModelMismatch):
+        _ask(page, expect=("answer",))
+    assert not _sends(page)
+    assert not any(kind == "mouse" for kind, _ in page.events)
+
+
+def test_latest_from_a_legacy_control_or_stub_is_not_checked_menu_evidence():
+    page = _StubPage(['{"answer":"4"}'])
+    page.selected_model, page.selected_effort = "Latest", "Extra High"
+    with pytest.raises(chatgpt_web.ChatGptWebModelMismatch):
+        _ask(page, expect=("answer",))
+    assert not _sends(page)
+
+
+def test_current_ui_rechecks_effort_before_every_submit():
+    page = _CurrentUiPage()
+    assert _ask(page, expect=("answer",))[0] == '{"answer":"4"}'
+    page.effort = "High"
+    with pytest.raises(chatgpt_web.ChatGptWebModelMismatch):
+        _ask(page, expect=("answer",))
+    assert len(_sends(page)) == 1
+
+
+def test_current_ui_cannot_submit_if_its_own_popup_stays_open_after_escape():
+    page = _CurrentUiPage(escape_closes=False)
+    with pytest.raises(chatgpt_web.ChatGptWebModelMismatch):
+        _ask(page, expect=("answer",))
+    assert page.opened is True
+    assert not _sends(page)
+
+
+def test_idless_composer_uses_existing_css_locator_and_contenteditable_fill():
+    from app.solvers import cdp
+
+    observed = 'div[role="textbox"][contenteditable="true"][aria-label="Ask ChatGPT"]'
+
+    class IdlessPage(cdp.Page):
+        def __init__(self):
+            self.events = []
+
+        def evaluate(self, expression):
+            self.events.append(("evaluate", expression))
+            if "signed_out" in expression:
+                return {"signed_out": False}
+            # The recorded DIV has no id; only its measured attribute selector matches.
+            return observed in expression
+
+        def send(self, method, params):
+            self.events.append((method, params))
+
+    page = IdlessPage()
+    composer = chatgpt_web.wait_for_composer(page, ready_timeout_s=0)
+    composer.fill("question\nsecond line")
+    assert page.events[-1] == ("Input.insertText", {"text": "question\nsecond line"})
+    assert "#prompt-textarea" in composer._selector
+    assert not any("has-text" in value for kind, value in page.events if kind == "evaluate")
 
 
 def test_prompt_is_filled_whole_so_a_newline_does_not_send_it_early():
@@ -824,6 +956,77 @@ def test_an_audio_only_question_still_attaches():
 
     assert page.upload_selectors == [chatgpt_web.FILE_UPLOAD_SEL]
     assert page.uploads[0][0]["mimeType"] == "audio/mp4"
+
+
+class _IdlessUploadPage(_StubPage):
+    """Three public input attributes measured on the sole 2026-10-01 composer form."""
+
+    def __init__(self, *, forms=1, old_inputs=False, accepts=("image/*,video/*", "image/*", None),
+                 thumbnail_appears=True):
+        super().__init__(["answer"], thumbnail_appears=thumbnail_appears)
+        self.forms, self.old_inputs, self.accepts = forms, old_inputs, accepts
+
+    def locator(self, selector):
+        page = self
+
+        class Locator(_Locator):
+            def count(self):
+                if selector in {chatgpt_web.FILE_INPUT_SEL, chatgpt_web.FILE_UPLOAD_SEL}:
+                    return int(page.old_inputs)
+                if selector.startswith('form:has(div[role="textbox"][contenteditable="true"][aria-label="Ask ChatGPT"])'):
+                    if selector.endswith('input[type="file"][accept="image/*"]'):
+                        return page.forms * page.accepts.count("image/*")
+                    if selector.endswith('input[type="file"]:not([accept])'):
+                        return page.forms * page.accepts.count(None)
+                    return page.forms
+                return super().count()
+
+        return Locator(self, selector)
+
+
+def test_idless_composer_uses_distinct_image_and_general_inputs_without_generated_ids():
+    page = _IdlessUploadPage()
+    assert chatgpt_web.attach_images(page, [PNG, JPEG], audio=("rec.mp3", b"ID3rec")) is True
+    assert len(page.uploads) == 2
+    assert [f["mimeType"] for f in page.uploads[0]] == ["image/png", "image/jpeg"]
+    assert page.uploads[1][0]["mimeType"] == "audio/mpeg"
+    assert page.upload_selectors[0].endswith('input[type="file"][accept="image/*"]')
+    assert page.upload_selectors[1].endswith('input[type="file"]:not([accept])')
+    assert all("_r_" not in selector and "has-text" not in selector for selector in page.upload_selectors)
+
+
+def test_existing_upload_selectors_remain_preferred():
+    page = _IdlessUploadPage(forms=2, old_inputs=True)
+    assert chatgpt_web.attach_images(page, [PNG], audio=("rec.mp3", b"ID3rec")) is True
+    assert page.upload_selectors == [chatgpt_web.FILE_INPUT_SEL, chatgpt_web.FILE_UPLOAD_SEL]
+
+
+@pytest.mark.parametrize("forms,accepts", [
+    (0, ("image/*", None)), (2, ("image/*", None)),
+    (1, ("image/*,video/*", None)), (1, ("image/*", "image/*", None)),
+])
+def test_idless_upload_refuses_missing_or_ambiguous_composer_photo_input(forms, accepts):
+    page = _IdlessUploadPage(forms=forms, accepts=accepts)
+    with pytest.raises(chatgpt_web.ChatGptWebAttachmentFailed):
+        chatgpt_web.attach_images(page, [PNG])
+    assert not page.uploads and not _sends(page)
+
+
+@pytest.mark.parametrize("accepts", [("image/*", ""), ("image/*", None, None)])
+def test_idless_audio_refuses_inputs_without_one_measured_general_file_input(accepts):
+    page = _IdlessUploadPage(accepts=accepts)
+    with pytest.raises(chatgpt_web.ChatGptWebAttachmentFailed):
+        chatgpt_web.attach_images(page, [], audio=("rec.mp3", b"ID3rec"))
+    assert not page.uploads and not _sends(page)
+
+
+def test_idless_upload_still_requires_every_attachment_thumbnail():
+    page = _IdlessUploadPage(thumbnail_appears=[True, False])
+    assert chatgpt_web.attach_images(
+        page, [PNG], audio=("rec.mp3", b"ID3rec"), now=_ticks(), sleep=lambda _s: None) is False
+    assert page.confirmed_files == 1
+    assert len(page.uploads) == 2  # Partial arrival must not repeat the first page.
+    assert not _sends(page)
 
 
 def test_the_recording_reaches_the_solver_from_the_question(tmp_path):

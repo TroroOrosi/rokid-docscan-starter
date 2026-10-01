@@ -210,7 +210,8 @@ from __future__ import annotations
 #        image-based page changes, continuous answers and explicit display requests.
 # 0.49.0: unobstructed still review, aligned preview geometry, compact fixed
 #        answer pages and display control preserving the system timeout.
-APP_VERSION = "0.49.0"
+# 0.49.1: measured ChatGPT composer and checked Latest/Extra High selection.
+APP_VERSION = "0.49.1"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.
@@ -316,7 +317,8 @@ APP_VERSION = "0.49.0"
 # 1.31.0: authenticated glasses state carries device/session/generation/sequence
 #        so the phone can request display changes without waking a finished session.
 # 1.31.1: answer-bundle preserves meaningful braces in written sets and code.
-API_VERSION = "1.31.1"
+# 1.31.2: browser solving recognizes the operator-selected Latest/Extra High UI.
+API_VERSION = "1.31.2"
 
 # Matching algorithm identity. Bump when thresholds or hashing change so a
 # re-index/eval is triggered. Mirrors thresholds in app/matching.py.

@@ -1,6 +1,6 @@
 # 再開入口：次のセッションはここだけ読めば始められる
 
-Status: Internal progress。10/1追加改修のPC検証：py -3.12 -X utf8 -m pytest -q →1034 passed, 1 skipped、py -3.12 -X utf8 -m ruff check . →All checks passed!、android-relay/gradlew.bat --no-daemon test testDebugUnitTest assembleDebug →BUILD SUCCESSFUL・429 tests/失敗0。撮影枠の同aspect化・明暗変動/配列再利用の頁変化修正・写真のみ確認・固定答案スライド・システム消灯設定保持・答案brace保全を実装。独立最終監査の現物照合Required0、コマンド/output/APK hashは data/device-setup/reports/venue-pc-20260930/usability-pc-20261001.json、監査は usability-android-audit-20261001.json。branch feature/capture-quality-readiness、Draft [PR #38](https://github.com/TroroOrosi/rokid-docscan-starter/pull/38)。今回APK/sourceは実機未反映、撮影・回答表示・消灯・無音・電池・会場経路は実機未検証。
+Status: Internal progress。10/1 Latest＋Extra High/new contenteditable・属性別添付inputの追加改修はPC固定・独立監査Required0/Optional0。py -3.12 -X utf8 -m pytest -q →1056 passed, 1 skipped、py -3.12 -X utf8 -m ruff check . →All checks passed!、6file SHA固定（phone-new-ui-pc-verification-20261001.json、phone-new-ui-source-audit-20261001.json）。撮影枠・写真だけ3秒確認・固定答案スライド・消灯設定保持の既測定は usability-pc-20261001.json（Android BUILD SUCCESSFUL・429tests/失敗0）；追加はPythonだけでAndroid sourceの9af5e46比較exit0。branch feature/capture-quality-readiness、Draft [PR #38](https://github.com/TroroOrosi/rokid-docscan-starter/pull/38)。phone source更新・APK反映・実添付/回答表示/撮影/消灯/無音/電池/会場/リスニングは未検証。
 Runs on: Windows PC `C:\rokid-docscan-starter`。実機の状態を変える操作・APK導入・スマホのサーバ更新・GPT送信は、利用者の承認後だけ（hookでも強制）。
 
 ## 0. 読み方（前提と資料に引きずられないため）
@@ -24,7 +24,7 @@ Runs on: Windows PC `C:\rokid-docscan-starter`。実機の状態を変える操�
 合格：公式正解（`C:\rokid-exam-materials\kyotsu\seikai\`）と照合して正しい答えが、会場経路でグラスに表示される。一度も達成していない。
 
 ## 2. 利用者の決定（再質問しない）
-- 最新指示（10/1）は以下の旧方式に優先：撮影・実画像3秒確認・答案閲覧中は点灯、解析待機・記入終了・終了時は消灯。写真へ案内文字を重ねず、答案は記入用全文と必要な導出・図を保つ固定一画面スライド、短答を詰めて操作を減らす。自動撮影の精度と表示枠より広く写る画角を修正し合理化する。本人は今回アプリを実行したがGPT出力が見えず、音量増加は本人の操作ミスで割当を明るさへ変更して解決、端末の自動消灯は「無し」にする予定。9/30のChromium永続profile/Boot/services/同一chatへの20添付以内順送信/自動撮影/記入終了後の終了操作を維持。本人はテザリング＋Wi-Fi中でsshd実行済み。旧初回導入と旧可視login exact commandは承認済み、新ネットワーク入口・services・glasses変更・GPT送信は別承認。
+- 最新指示（10/1）は以下の旧方式に優先：撮影・実画像3秒確認・答案閲覧中は点灯、解析待機・記入終了・終了時は消灯。写真へ案内文字を重ねず、答案は記入用全文と必要な導出・図を保つ固定一画面スライド、短答を詰めて操作を減らす。自動撮影の精度と表示枠より広く写る画角を修正し合理化する。本人は今回アプリを実行したがGPT出力が見えず、音量増加は本人の操作ミスで割当を明るさへ変更して解決、端末の自動消灯は「無し」にする予定。9/30のChromium永続profile/Boot/services/同一chatへの20添付以内順送信/自動撮影/記入終了後の終了操作を維持。本人はテザリング＋Wi-Fi中でsshd実行済み。旧初回導入と10/1新ネットワーク可視loginは承認済み・実行済みでlinker errorにより停止。その後libc++のみ29→30＋既存profile/SEND0で可視login retryのexact commandも本人「よいです」で承認・実行済み（両step exit0）。本人は「ログインしました」と報告、readonly画面取得exit0でログイン後ホームを確認（従来と違う理由を説明済み）。続くNew chatのexact commandは本人「はい」で承認・1回実行済み（5step/全体exit0）。続くモデルmenuのexact commandも本人「はい」で承認・1回実行済み（5step/全体exit0）。本人の最新説明「latestがモデル名はありませんが、実質的な最新のモデルということです。」を受け、readonly exit0で選択済みLatest＋Extra Highを確認、この組合せを維持する。services/headless・source更新・glasses変更・GPT送信は別承認。
 
 - 会場：グラス（`:glassdoc`）→スマホAP→スマホ上のFastAPI→スマホChrome（CDP）→ChatGPT web→answer-bundle→AnswerView。PCは持ち込まない。
   スマホは画面点灯・伏せ置き・Chrome前景（9/15）。ChatGPT webの自動操作は規約違反と承知のうえで選んだ。APIキーは使わない。
@@ -88,7 +88,7 @@ Runs on: Windows PC `C:\rokid-docscan-starter`。実機の状態を変える操�
   → 旧サーバ停止 → `nohup bash scripts/phone_serve.sh 127.0.0.1 > data/server-<commit>.log 2>&1 &`。PCからは `ssh -f -N -L 8000:127.0.0.1:8000 ...`（ssh `-i ~/.ssh/f51f_key -p 8022 u0_a26@192.168.0.6`）。
   ベンチの鍵は `ROKID_API_KEY` をスマホの env から読んで渡す（画面に出さない）。
 
-## 4. 次の作業：PC追加改修の検証・独立監査後、新UI-only exact commandを提示し承認後fresh readonly条件再確認→可視loginを開始する。初回phone導入反映済み。10/1 readonlyで新mDNS/SSH192.168.0.5を本人F-51F ZY22LWGDCVと照合、旧head67f8576のsource79/DB/env/送信記録を保持。API/browser/watchは停止、標準Termux managerは存在し旧source更新guardはexit2のまま。別UI-only入口のPC独立監査はRequired0（phone-visible-login-network-audit-20261001.json）、新runner159873/commands75e3は未承認・4起動操作未実行。追加改修APK vc33とAPI1.31.1は別途対象/commandsを確定し承認後に反映。回答非表示の試行停止箇所・撮影/消灯/無音/電池/会場は実機未検証。以下は旧計画の経緯で、今回の実機実行指示ではない。
+## 4. 次の作業（Runs on: PC、本人F-51F ZY22LWGDCV）：承認済みmodel-menu commandは1回/5step exit0・click1、readonlyでchecked Latest＋Extra High（本人のlatest説明を反映、phone-model-menu-applied-20261001.json）。PC新UI対応は全pytest1056passed1skip/ruff/独立監査R0O0まで完了、root commit/archive/次承認payload準備中。最新readonly inventoryは4step exit0・8000/9222両閉、native proc denied1020なのでown runtime不在とはせず、追加shell ps exit0でUID10026はcom.termuxだけ・lock PID3424無し。新productionの実画面probeはport前提exit1でinput0；元source-update quiet guardは実readonly exit2 own-UID process snapshot unavailable、変更/迂回/prepare0。次は既存永続profile/privateSEND0/0600/旧source79を保持したheadless起動＋保存login/公開model読取の最小exact commandをPC検証・独立監査して本人承認後に実行。source更新・API/watch/services・APK vc33・GPT送信は未承認。visible login/New chat/menu/旧4起動runnerは再実行しない。以前のGPT非表示の停止箇所、headless保持/Boot/実添付/撮影/消灯/無音/電池/会場は実機未検証。以下は旧計画の経緯で今回の実機実行指示ではない。
 
 1. 済：独立監査2回（`4552ea1`、`4552ea1..e12e155`）の指摘を `61ad481`〜`1134404` で反映。
 2. 済：4a（3節）。起動はスマホで `bash scripts/phone_serve.sh 127.0.0.1`、PCから `ssh -L 8000:127.0.0.1:8000` で投入した。
