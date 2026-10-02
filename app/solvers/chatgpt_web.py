@@ -599,8 +599,8 @@ def _selected_model_in_effort_menu(page) -> dict:
             page.locator('[role="menu"] [role="menuitemradio"]').wait_for(
                 state="visible", timeout=READY_TIMEOUT_S * 1000)
             state = page.evaluate(_MODEL_MENU_STATE_JS)
-        if (not isinstance(state, dict) or state.get("trigger_count") != 1
-                or state.get("expanded") != "true" or state.get("menu_count") != 1):
+        # Read the visible menu; its trigger may rerender after the click.
+        if not isinstance(state, dict) or state.get("menu_count") != 1:
             raise ChatGptWebModelMismatch("model selection menu is unreadable; nothing sent")
         checked = [row for row in state.get("radios", []) if row.get("aria_checked") == "true"]
         if len(checked) != 1 or len(checked[0].get("known_label_lines", [])) != 1:

@@ -296,6 +296,23 @@ def test_current_ui_checks_latest_and_closes_only_its_own_popup(opened):
     assert [value for kind, value in page.events if kind == "press"] == ([] if opened else ["Escape"])
 
 
+def test_current_ui_reads_the_menu_when_its_trigger_rerenders():
+    class RerenderedTriggerPage(_CurrentUiPage):
+        def evaluate(self, expression):
+            state = super().evaluate(expression)
+            if self.opened and "menuitemradio" in expression:
+                state.update(trigger_count=0, expanded=None)
+            return state
+
+    page = RerenderedTriggerPage()
+    assert chatgpt_web.verify_selected_model(page) == "Latest"
+    assert page.opened is False
+    assert not _sends(page)
+    assert [value["type"] for kind, value in page.events if kind == "mouse"] == [
+        "mousePressed", "mouseReleased"]
+    assert [value for kind, value in page.events if kind == "press"] == ["Escape"]
+
+
 @pytest.mark.parametrize("radios,effort", [
     ([{"known_label_lines": ["Latest"], "aria_checked": "false"}], "Extra High"),
     ([{"known_label_lines": ["GPT-5.5"], "aria_checked": "true"}], "Extra High"),

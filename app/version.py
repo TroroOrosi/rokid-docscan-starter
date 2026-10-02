@@ -213,7 +213,8 @@ from __future__ import annotations
 # 0.49.1: measured ChatGPT composer and checked Latest/Extra High selection.
 # 0.50.0: mixed English solves paper before original audio; idle displays rest
 #         after five seconds while capture, photo review and answers stay visible.
-APP_VERSION = "0.50.0"
+# 0.50.1: read the checked model from the visible menu after its trigger redraws.
+APP_VERSION = "0.50.1"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.
