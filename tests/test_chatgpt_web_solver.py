@@ -349,7 +349,7 @@ def test_model_reader_runs_on_changed_local_dom_without_the_previous_labels(monk
     import tempfile
     from pathlib import Path
 
-    browser = next((p for p in [shutil.which("chromium"), shutil.which("google-chrome"),
+    browser = next((p for p in [shutil.which("google-chrome"), shutil.which("chromium"),
                     "C:/Program Files/Google/Chrome/Application/chrome.exe"] if p and Path(p).is_file()), None)
     if browser is None:
         pytest.skip("local Chromium is not installed; no browser is downloaded")
@@ -393,7 +393,8 @@ def test_model_reader_runs_on_changed_local_dom_without_the_previous_labels(monk
             browser, "--headless", "--dump-dom", "--disable-background-networking", "--disable-component-update",
             "--disable-sync", "--no-first-run", "--no-default-browser-check", "--host-resolver-rules=MAP * ~NOTFOUND",
             "--user-data-dir=" + str(Path(directory) / "profile"), fixture.as_uri(),
-        ], capture_output=True, text=True, encoding="utf-8", timeout=30, check=True)
+        ], capture_output=True, text=True, encoding="utf-8", timeout=30, check=False)
+    assert result.returncode == 0, f"{browser} exited {result.returncode}: {result.stderr}"
     snapshots = json.loads(html.unescape(result.stdout.split('<pre id="states">', 1)[1].split("</pre>", 1)[0]))
     states = [snapshot["menu"] for snapshot in snapshots]
     assert [(state["radios"][0]["label_lines"][0], state["efforts"]) for state in states[:3]] == [
