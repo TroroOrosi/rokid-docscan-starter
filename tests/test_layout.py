@@ -295,3 +295,16 @@ def test_a_repeated_shoumon_number_under_two_daimon_stays_two_problems():
     ])
 
     assert [p.question_no for p in problems] == ["第1問", "問1", "第2問", "問1(2)"]
+
+
+def test_letter_choices_under_a_small_question_stay_choices():
+    """RP-12a: (A)(B) lines under 問N are its choices, not extra deck problems."""
+    units = segment_problems([(0, "問1 Choose one\n(A) apple\n（Ｂ） orange\n問2 Next")])
+    assert [p.question_no for p in units] == ["問1", "問2"]
+    assert units[0].choices == ["(A) apple", "（Ｂ） orange"]
+
+
+def test_letter_markers_directly_under_a_major_question_still_split():
+    # 東大英語 1(A)/1(B) are separate problems of one 大問.
+    units = segment_problems([(0, "第1問\n(A) 要約せよ。\n(B) 和訳せよ。")])
+    assert [p.question_no for p in units] == ["第1問", "(A)", "(B)"]

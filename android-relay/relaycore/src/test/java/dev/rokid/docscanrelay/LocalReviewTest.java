@@ -24,6 +24,232 @@ import org.robolectric.annotation.Config;
 @RunWith(RobolectricTestRunner.class)
 @Config(sdk = 32, manifest = Config.NONE)
 public class LocalReviewTest {
+    @Test public void earlyMixedAudioCompletionDoesNotEndCaptureAndSurvivesRestartUntilImagesAreSubmitted() throws Exception {
+        Context context = RuntimeEnvironment.getApplication();
+        List<String> requests = new java.util.concurrent.CopyOnWriteArrayList<>();
+        try (MockWebServer server = new MockWebServer()) {
+            server.setDispatcher(new Dispatcher() {
+                @Override public MockResponse dispatch(RecordedRequest request) {
+                    requests.add(request.getPath());
+                    if ("/v1/documents".equals(request.getPath())) return new MockResponse().setBody("{\"document_id\":17}");
+                    if ("/v1/exam-sessions".equals(request.getPath())) return new MockResponse().setBody("{\"session_id\":7}");
+                    return new MockResponse().setBody("{\"status\":\"reviewing\"}");
+                }
+            });
+            String address = server.url("/").toString().replaceAll("/+$", "");
+            LocalCaptureSession saved = LocalCaptureSession.create(new File(context.getFilesDir(), "local-scans"), address, "mixed");
+            saved.commit(new CaptureReviewStore.Pending(0, new byte[]{1, 2, 3}, "", 270, ""));
+            for (int run = 0; run < 2; run++) {
+                Surface surface = new Surface(); surface.holdForPage = true;
+                DocScanController controller = new DocScanController(context, surface, null,
+                        (state, lines, diagnostic) -> {}, new ClientIdentity("test", "test", "test"));
+                try {
+                    controller.configureForLocalStart(address, "", 270); barrier(controller);
+                    controller.resumeLocalSession(saved.id()); barrier(controller);
+                    if (run == 0) {
+                        controller.completeListening(); barrier(controller);
+                        ((ExecutorService)get(controller, "localNetwork")).submit(() -> {}).get(5, TimeUnit.SECONDS);
+                        barrier(controller);
+                        LocalCaptureSession restored = LocalCaptureSession.load(new File(context.getFilesDir(), "local-scans"), saved.id());
+                        assertTrue(restored.audioComplete());
+                        assertEquals(LocalCaptureSession.Phase.CAPTURE, restored.phase());
+                        assertTrue(controller.isAutoCaptureEnabled());
+                        assertFalse(requests.stream().anyMatch(path -> path.contains("finalize-reading") || path.contains("document-audio")));
+                    } else {
+                        controller.finishReading(); barrier(controller);
+                        ((ExecutorService)get(controller, "localNetwork")).submit(() -> {}).get(5, TimeUnit.SECONDS);
+                        barrier(controller);
+                        assertEquals(1, java.util.Collections.frequency(requests, "/v1/exam-sessions/7/finalize-reading?solve=background"));
+                        assertEquals(1, java.util.Collections.frequency(requests, "/v1/exam-sessions/7/document-audio"));
+                    }
+                } finally { controller.close(); }
+            }
+        }
+    }
+
+    @Test public void aMixedRecordingFailureKeepsPaperCaptureReviewAndStageOneUsableWithoutAttachingBrokenAudio() throws Exception {
+        Context context = RuntimeEnvironment.getApplication();
+        Surface surface = new Surface(); surface.holdForPage = true;
+        List<String> requests = new java.util.concurrent.CopyOnWriteArrayList<>();
+        try (MockWebServer server = new MockWebServer()) {
+            server.setDispatcher(new Dispatcher() {
+                @Override public MockResponse dispatch(RecordedRequest request) {
+                    requests.add(request.getPath());
+                    if ("/v1/documents".equals(request.getPath())) return new MockResponse().setBody("{\"document_id\":17}");
+                    if ("/v1/exam-sessions".equals(request.getPath())) return new MockResponse().setBody("{\"session_id\":7}");
+                    return new MockResponse().setBody("{\"status\":\"reviewing\"}");
+                }
+            });
+            DocScanController controller = new DocScanController(context, surface, null,
+                    (state, lines, diagnostic) -> {}, new ClientIdentity("test", "test", "test"));
+            try {
+                controller.configureForLocalStart(server.url("/").toString(), "", 270);
+                controller.startLocalSession("mixed", accepted -> assertTrue(accepted));
+                barrier(controller);
+                controller.onListeningError(); barrier(controller);
+                assertTrue("a recording failure cannot stop the independent paper capture", controller.isAutoCaptureEnabled());
+                CaptureReviewStore.Pending photo = new CaptureReviewStore.Pending(0, new byte[]{1, 2, 3}, "", 270, "");
+                call(controller, "stageCaptureReview", new Class<?>[]{CaptureReviewStore.Pending.class, OcrQuality.class}, photo, null);
+                assertEquals(RelayState.CAPTURE_REVIEW, controller.getState());
+                surface.visible = true;
+                controller.onCustomViewAvailable(1, "capture-review"); barrier(controller);
+                controller.onGlassesAction(GlassesInputAction.BACK, android.os.SystemClock.elapsedRealtime()); barrier(controller);
+                long generation = (long)get(controller, "reviewGeneration");
+                org.robolectric.shadows.ShadowSystemClock.advanceBy(java.time.Duration.ofSeconds(3));
+                call(controller, "enqueueAutoCommit", new Class<?>[]{long.class}, generation);
+                barrier(controller);
+                ((ExecutorService)get(controller, "localNetwork")).submit(() -> {}).get(5, TimeUnit.SECONDS);
+                barrier(controller);
+                controller.completeListening(); barrier(controller);
+                ((ExecutorService)get(controller, "localNetwork")).submit(() -> {}).get(5, TimeUnit.SECONDS);
+                assertTrue(requests.contains("/v1/exam-sessions/7/finalize-reading?solve=background"));
+                assertFalse(requests.contains("/v1/exam-sessions/7/document-audio"));
+                assertTrue(((LocalCaptureSession)get(controller, "localSession")).contains(photo));
+                assertFalse(((LocalCaptureSession)get(controller, "localSession")).audioComplete());
+            } finally { controller.close(); }
+        }
+    }
+
+    @Test public void mixedImagesFinalizeBeforeAudioAndCompletedAudioAttachesOnce() throws Exception {
+        Context context = RuntimeEnvironment.getApplication();
+        Surface surface = new Surface();
+        surface.holdForPage = true;
+        List<String> requests = new java.util.concurrent.CopyOnWriteArrayList<>();
+        try (MockWebServer server = new MockWebServer()) {
+            server.setDispatcher(new Dispatcher() {
+                @Override public MockResponse dispatch(RecordedRequest request) {
+                    requests.add(request.getPath());
+                    if ("/v1/documents".equals(request.getPath())) return new MockResponse().setBody("{\"document_id\":17}");
+                    if ("/v1/exam-sessions".equals(request.getPath())) {
+                        assertTrue(request.getBody().readUtf8().contains("\"exam_type\":\"mixed\""));
+                        return new MockResponse().setBody("{\"session_id\":7}");
+                    }
+                    return new MockResponse().setBody("{\"status\":\"reviewing\"}");
+                }
+            });
+            String address = server.url("/").toString().replaceAll("/+$", "");
+            LocalCaptureSession saved = LocalCaptureSession.create(new File(context.getFilesDir(), "local-scans"), address, true);
+            File file = new File(saved.directory(), "state.properties");
+            java.util.Properties properties = new java.util.Properties();
+            try (java.io.InputStream input = new java.io.FileInputStream(file)) { properties.load(input); }
+            properties.setProperty("exam_type", "mixed");
+            try (java.io.OutputStream output = new java.io.FileOutputStream(file)) { properties.store(output, "mixed test"); }
+            saved = LocalCaptureSession.load(new File(context.getFilesDir(), "local-scans"), saved.id());
+            CaptureReviewStore.Pending photo = new CaptureReviewStore.Pending(0, new byte[]{1, 2, 3}, "", 270, "");
+            saved.commit(photo);
+            DocScanController controller = new DocScanController(context, surface, null,
+                    (state, lines, diagnostic) -> {}, new ClientIdentity("test", "test", "test"));
+            try {
+                controller.configureForLocalStart(address, "", 270);
+                barrier(controller);
+                controller.resumeLocalSession(saved.id());
+                barrier(controller);
+                assertTrue("mixed capture begins without waiting for microphone samples", controller.isAutoCaptureEnabled());
+                controller.finishReading();
+                barrier(controller);
+                ((ExecutorService)get(controller, "localNetwork")).submit(() -> {}).get(5, TimeUnit.SECONDS);
+                barrier(controller);
+                assertTrue(requests.contains("/v1/exam-sessions/7/finalize-reading?solve=background"));
+                assertFalse(requests.contains("/v1/exam-sessions/7/document-audio"));
+                assertEquals(7, controller.sessionId());
+                controller.completeListening();
+                barrier(controller);
+                ((ExecutorService)get(controller, "localNetwork")).submit(() -> {}).get(5, TimeUnit.SECONDS);
+                barrier(controller);
+                controller.completeListening();
+                barrier(controller);
+                ((ExecutorService)get(controller, "localNetwork")).submit(() -> {}).get(5, TimeUnit.SECONDS);
+                assertEquals(1, java.util.Collections.frequency(requests, "/v1/exam-sessions/7/document-audio"));
+                assertEquals(1, java.util.Collections.frequency(requests, "/v1/exam-sessions/7/finalize-reading?solve=background"));
+                assertTrue(LocalCaptureSession.load(new File(context.getFilesDir(), "local-scans"), saved.id()).contains(photo));
+            } finally { controller.close(); }
+        }
+    }
+
+    @Test public void earlyCompletedMixedAudioRetriesAfterTransientFailureWithoutRepeatingReadingAnalysis() throws Exception {
+        assertMixedAudioRetriesAfterTransientFailure(true);
+    }
+
+    @Test public void lateCompletedMixedAudioRetriesAfterTransientFailureWithoutRepeatingReadingAnalysis() throws Exception {
+        assertMixedAudioRetriesAfterTransientFailure(false);
+    }
+
+    private void assertMixedAudioRetriesAfterTransientFailure(boolean early) throws Exception {
+        Context context = RuntimeEnvironment.getApplication();
+        File root = new File(context.getFilesDir(), "local-scans");
+        List<String> requests = new java.util.concurrent.CopyOnWriteArrayList<>();
+        CountDownLatch retried = new CountDownLatch(1);
+        try (MockWebServer server = new MockWebServer()) {
+            server.setDispatcher(new Dispatcher() {
+                private int attachments;
+                @Override public MockResponse dispatch(RecordedRequest request) {
+                    requests.add(request.getPath());
+                    if ("/v1/exam-sessions/7/document-audio".equals(request.getPath())) {
+                        if (++attachments == 1) return new MockResponse().setResponseCode(503).setBody("{}");
+                        retried.countDown();
+                    }
+                    return new MockResponse().setBody("{\"status\":\"reviewing\"}");
+                }
+            });
+            String address = server.url("/").toString().replaceAll("/+$", "");
+            LocalCaptureSession saved = LocalCaptureSession.create(root, address, "mixed");
+            CaptureReviewStore.Pending photo = new CaptureReviewStore.Pending(0, new byte[]{1, 2, 3}, "", 270, "");
+            saved.commit(photo);
+            saved.acknowledge(saved.page(0));
+            saved.bindDocument(17);
+            saved.bindSession(7);
+            saved.setPhase(early ? LocalCaptureSession.Phase.ANALYSIS : LocalCaptureSession.Phase.REVIEW);
+            byte[] originalAudio = {4, 5, 6, 7};
+            File audio = new File(saved.directory(), "original-audio-test.pcm");
+            java.nio.file.Files.write(audio.toPath(), originalAudio);
+            if (early) saved.completeAudio();
+            Surface surface = new Surface(); surface.holdForPage = true;
+            DocScanController controller = new DocScanController(context, surface, null,
+                    (state, lines, diagnostic) -> {}, new ClientIdentity("test", "test", "test"));
+            try {
+                controller.configureForLocalStart(address, "", 270); barrier(controller);
+                controller.resumeLocalSession(saved.id()); barrier(controller);
+                ((ExecutorService)get(controller, "localNetwork")).submit(() -> {}).get(5, TimeUnit.SECONDS);
+                barrier(controller);
+                if (!early) {
+                    controller.completeListening(); barrier(controller);
+                    ((ExecutorService)get(controller, "localNetwork")).submit(() -> {}).get(5, TimeUnit.SECONDS);
+                    barrier(controller);
+                }
+                LocalCaptureSession retained = LocalCaptureSession.load(root, saved.id());
+                assertTrue(retained.audioAttachPending());
+                assertArrayEquals(originalAudio, java.nio.file.Files.readAllBytes(audio.toPath()));
+                assertFalse("only the idempotent audio attach may be retried after a transient failure",
+                        (boolean)get(controller, "localUploadBlocked"));
+                assertEquals("reading stays available during an audio retry", RelayState.REVIEW, controller.getState());
+                assertTrue("the existing five-second retry tick must resume the saved audio", retried.await(8, TimeUnit.SECONDS));
+                ((ExecutorService)get(controller, "localNetwork")).submit(() -> {}).get(5, TimeUnit.SECONDS);
+                barrier(controller);
+                retained = LocalCaptureSession.load(root, saved.id());
+                assertFalse(retained.audioAttachPending());
+                assertTrue(retained.contains(photo));
+                assertArrayEquals(originalAudio, java.nio.file.Files.readAllBytes(audio.toPath()));
+                controller.completeListening(); barrier(controller);
+                ((ExecutorService)get(controller, "localNetwork")).submit(() -> {}).get(5, TimeUnit.SECONDS);
+                barrier(controller);
+            } finally { controller.close(); }
+
+            DocScanController restarted = new DocScanController(context, surface, null,
+                    (state, lines, diagnostic) -> {}, new ClientIdentity("test", "test", "test"));
+            try {
+                restarted.configureForLocalStart(address, "", 270); barrier(restarted);
+                restarted.resumeLocalSession(saved.id()); barrier(restarted);
+                ((ExecutorService)get(restarted, "localNetwork")).submit(() -> {}).get(5, TimeUnit.SECONDS);
+                barrier(restarted);
+                assertEquals("one failed attach and one success; receipt persists across restart", 2,
+                        java.util.Collections.frequency(requests, "/v1/exam-sessions/7/document-audio"));
+                assertEquals("audio retry must never repeat stage one", early ? 1 : 0,
+                        java.util.Collections.frequency(requests, "/v1/exam-sessions/7/finalize-reading?solve=background"));
+                assertEquals(0, java.util.Collections.frequency(requests, "/v1/exam-sessions"));
+            } finally { restarted.close(); }
+        }
+    }
+
     @Test public void tapStartedBeforeDeadlineRetakesSamePageAfterFirmwareClassification() throws Exception {
         Context context = RuntimeEnvironment.getApplication();
         Surface surface = new Surface();
@@ -34,7 +260,7 @@ public class LocalReviewTest {
                 controller.configureForLocalStart(server.url("/").toString(), "", 270);
                 controller.startLocalSession(false);
                 barrier(controller);
-                set(controller, "autoShotsRemaining", 0);
+
                 // A real pending page, including local persistence and the visible ACK.
                 CaptureReviewStore.Pending photo = new CaptureReviewStore.Pending(0, new byte[]{1, 2, 3}, "page", 270, "");
                 call(controller, "stageCaptureReview", new Class<?>[]{CaptureReviewStore.Pending.class, OcrQuality.class}, photo, null);
@@ -279,6 +505,42 @@ public class LocalReviewTest {
         }
     }
 
+    @Test public void assignedSessionIsPublishedBeforeFinalizationCanPutTheCpuToSleep() throws Exception {
+        Context context = RuntimeEnvironment.getApplication();
+        CountDownLatch finalizing = new CountDownLatch(1), release = new CountDownLatch(1);
+        List<RelayState> updates = new java.util.concurrent.CopyOnWriteArrayList<>();
+        try (MockWebServer server = new MockWebServer()) {
+            server.setDispatcher(new Dispatcher() {
+                @Override public MockResponse dispatch(RecordedRequest request) throws InterruptedException {
+                    if (request.getPath().equals("/v1/exam-sessions")) return new MockResponse().setBody("{\"session_id\":7}");
+                    if (request.getPath().contains("finalize-reading")) {
+                        finalizing.countDown(); release.await(3, TimeUnit.SECONDS);
+                        return new MockResponse().setBody("{\"status\":\"solving\",\"review_total\":1}");
+                    }
+                    return new MockResponse().setBody("{}");
+                }
+            });
+            LocalCaptureSession saved = LocalCaptureSession.create(new File(context.getFilesDir(), "local-scans"),
+                    server.url("/").toString().replaceAll("/+$", ""), false);
+            saved.bindDocument(17);
+            saved.commit(new CaptureReviewStore.Pending(0, new byte[]{1, 2, 3}, "", 270, ""));
+            saved.acknowledge(saved.nextUnsent());
+            saved.setPhase(LocalCaptureSession.Phase.ANALYSIS);
+            DocScanController controller = new DocScanController(context, new Surface(), null,
+                    (state, lines, diagnostic) -> updates.add(state), new ClientIdentity("test", "test", "test"));
+            try {
+                controller.configureForLocalStart(server.url("/").toString(), "", 270);
+                barrier(controller);
+                set(controller, "localSession", saved);
+                call(controller, "queueLocalUpload", new Class<?>[]{});
+                assertTrue(finalizing.await(2, TimeUnit.SECONDS));
+                barrier(controller);
+                assertEquals("watch must know the server session before the long request returns", 7, controller.sessionId());
+                assertTrue(updates.contains(RelayState.FINALIZING));
+            } finally { release.countDown(); controller.close(); }
+        }
+    }
+
     @Test public void committedPhotoDoesNotBlockNextGestureOnSlowHttpAndSurvivesRestart() throws Exception {
         Context context = RuntimeEnvironment.getApplication();
         Surface surface = new Surface();
@@ -305,7 +567,7 @@ public class LocalReviewTest {
                 barrier(controller);
                 assertEquals(RelayState.AIMING, controller.getState());
                 assertEquals("No health or document creation before capture", 0, server.getRequestCount());
-                set(controller, "autoShotsRemaining", 0);
+
                 CaptureReviewStore.Pending photo = new CaptureReviewStore.Pending(0, new byte[]{1, 2, 3}, "実資料", 180, "");
                 call(controller, "stageCaptureReview", new Class<?>[]{CaptureReviewStore.Pending.class, OcrQuality.class}, photo, null);
                 assertEquals(0, server.getRequestCount());
@@ -319,6 +581,11 @@ public class LocalReviewTest {
                 org.robolectric.shadows.ShadowSystemClock.advanceBy(java.time.Duration.ofSeconds(3));
                 call(controller, "enqueueAutoCommit", new Class<?>[]{long.class}, (long)get(controller, "reviewGeneration"));
                 assertTrue(uploading.await(5, TimeUnit.SECONDS));
+                android.os.PowerManager.WakeLock transferLock = org.robolectric.shadows.ShadowPowerManager.getLatestWakeLock();
+                assertNotNull("a stored image's transfer needs a bounded CPU lease", transferLock);
+                assertTrue(transferLock.isHeld());
+                org.robolectric.shadows.ShadowSystemClock.advanceBy(java.time.Duration.ofSeconds(121));
+                assertFalse("transfer cannot retain CPU past two minutes", transferLock.isHeld());
                 controller.onGlassesAction(GlassesInputAction.SHORT_TAP);
                 barrier(controller); // Times out if the capture executor still performs HTTP.
                 assertEquals(RelayState.AIMING, controller.getState());
@@ -342,6 +609,7 @@ public class LocalReviewTest {
                     barrier(restarted);
                     ((ExecutorService)get(restarted, "localNetwork")).submit(() -> {}).get(5, TimeUnit.SECONDS);
                     barrier(restarted);
+                    assertFalse("successful transfer releases the CPU before answer analysis", org.robolectric.shadows.ShadowPowerManager.getLatestWakeLock().isHeld());
                     RecordedRequest create = server.takeRequest(5, TimeUnit.SECONDS);
                     RecordedRequest first = server.takeRequest(5, TimeUnit.SECONDS);
                     RecordedRequest retry = server.takeRequest(5, TimeUnit.SECONDS);
@@ -382,21 +650,100 @@ public class LocalReviewTest {
         } finally { controller.close(); }
     }
 
-    @Test public void tapBetweenBurstShotsReviewsTheAlreadyCapturedFrame() throws Exception {
+    @Test public void aDiagramOnlyPhotoIsReviewedWithoutCallingOcr() throws Exception {
         Surface surface = new Surface();
         DocScanController controller = new DocScanController(RuntimeEnvironment.getApplication(), surface, null,
                 (state, lines, diagnostic) -> {}, new ClientIdentity("test", "test", "test"));
         try {
-            set(controller, "state", RelayState.OCR);
-            set(controller, "autoCaptureEnabled", true);
-            set(controller, "autoShotsRemaining", 2);
-            set(controller, "autoBest", new CaptureReviewStore.Pending(0, new byte[]{1, 2}, "wide image", 0, ""));
-            controller.onGlassesAction(GlassesInputAction.SHORT_TAP);
+            ((CaptureLease)get(controller, "captureLease")).begin(0);
+            set(controller, "state", RelayState.CAPTURING);
+            controller.onPhoto(new byte[]{1, 2, 3});
             barrier(controller);
             assertEquals(RelayState.CAPTURE_REVIEW, controller.getState());
+            CaptureReviewStore.Pending photo = ((CaptureReviewStore)get(controller, "captureReview")).peek();
+            assertArrayEquals(new byte[]{1, 2, 3}, photo.jpeg);
+            assertEquals("", photo.ocrText);
             assertEquals(0, surface.photos);
-            assertEquals(0, (int)get(controller, "autoShotsRemaining"));
         } finally { controller.close(); }
+    }
+
+    @Test public void previewFailureBeforeAnyPhotoStopsAutomaticCaptureAndKeepsOriginals() throws Exception {
+        Surface surface = new Surface();
+        surface.holdForPage = true;
+        List<Boolean> running = new java.util.concurrent.CopyOnWriteArrayList<>();
+        DocScanController.Listener updates = new DocScanController.Listener() {
+            public void onUpdate(RelayState state, List<String> lines, String diagnostic) { }
+            public void onAutoCaptureChanged(boolean active) { running.add(active); }
+        };
+        try (MockWebServer server = new MockWebServer()) {
+            DocScanController controller = new DocScanController(RuntimeEnvironment.getApplication(), surface, null,
+                    updates, new ClientIdentity("test", "test", "test"));
+            try {
+                controller.configureForLocalStart(server.url("/").toString(), "", 270);
+                controller.startLocalSession(false);
+                barrier(controller);
+                LocalCaptureSession saved = (LocalCaptureSession)get(controller, "localSession");
+                CaptureReviewStore.Pending original = new CaptureReviewStore.Pending(0, new byte[]{1, 2, 3}, "", 270, "");
+                saved.commit(original);
+                assertTrue(controller.isAutoCaptureEnabled());
+                assertFalse(((CaptureLease)get(controller, "captureLease")).isUnresolved());
+                assertEquals(RelayState.READY, controller.getState());
+                controller.onPhotoError("preview unavailable", null);
+                barrier(controller);
+                assertEquals(RelayState.ERROR, controller.getState());
+                assertFalse(controller.isAutoCaptureEnabled());
+                assertTrue(surface.pauses > 0);
+                assertEquals(Boolean.FALSE, running.get(running.size() - 1));
+                surface.pageReady.run(); // a late preview callback cannot restart the failed camera
+                barrier(controller);
+                assertEquals(RelayState.ERROR, controller.getState());
+                assertEquals(0, surface.photos);
+                assertTrue(saved.contains(original));
+            } finally { controller.close(); }
+        }
+    }
+
+    @Test public void microphoneFailureStopsLivePreviewAndKeepsThePendingOriginal() throws Exception {
+        Surface surface = new Surface();
+        List<Boolean> running = new java.util.concurrent.CopyOnWriteArrayList<>();
+        DocScanController.Listener updates = new DocScanController.Listener() {
+            public void onUpdate(RelayState state, List<String> lines, String diagnostic) { }
+            public void onAutoCaptureChanged(boolean active) { running.add(active); }
+        };
+        DocScanController controller = new DocScanController(RuntimeEnvironment.getApplication(), surface, null,
+                updates, new ClientIdentity("test", "test", "test"));
+        try {
+            CaptureReviewStore.Pending original = new CaptureReviewStore.Pending(0, new byte[]{1, 2, 3}, "", 270, "");
+            call(controller, "stageCaptureReview", new Class<?>[]{CaptureReviewStore.Pending.class, OcrQuality.class}, original, null);
+            set(controller, "autoCaptureEnabled", true);
+            controller.onListeningError();
+            barrier(controller);
+            assertEquals(RelayState.ERROR, controller.getState());
+            assertFalse(controller.isAutoCaptureEnabled());
+            assertTrue(surface.pauses > 0);
+            assertEquals(Boolean.FALSE, running.get(running.size() - 1));
+            assertArrayEquals(original.jpeg, ((CaptureReviewStore)get(controller, "captureReview")).peek().jpeg);
+        } finally { controller.close(); }
+    }
+
+    @Test public void localShutterHudDoesNotCoverThePaperWithCoaching() throws Exception {
+        Surface surface = new Surface();
+        surface.holdForPage = true;
+        List<List<String>> captureHud = new java.util.concurrent.CopyOnWriteArrayList<>();
+        try (MockWebServer server = new MockWebServer()) {
+            DocScanController controller = new DocScanController(RuntimeEnvironment.getApplication(), surface, null,
+                    (state, lines, diagnostic) -> { if (state == RelayState.CAPTURING) captureHud.add(lines); },
+                    new ClientIdentity("test", "test", "test"));
+            try {
+                controller.configureForLocalStart(server.url("/").toString(), "", 270);
+                controller.startLocalSession(false);
+                barrier(controller);
+                set(controller, "state", RelayState.STABILIZING);
+                call(controller, "requestPhotoAt", new Class<?>[]{int.class, boolean.class}, 0, false);
+                assertEquals(1, surface.photos);
+                assertEquals(List.of("撮影中", "", ""), captureHud.get(0));
+            } finally { controller.close(); }
+        }
     }
 
     @Test public void localCameraFailureRemainsUnknownAndBlocksAnotherPhoto() throws Exception {
@@ -453,9 +800,137 @@ public class LocalReviewTest {
         }
     }
 
+    @Test public void unreadPhotoIsReviewedWithoutAnyTextSimilarityGate() throws Exception {
+        Context context = RuntimeEnvironment.getApplication();
+        Surface surface = new Surface();
+        List<String> diagnostics = new java.util.concurrent.CopyOnWriteArrayList<>();
+        byte[] sheet = {1, 2, 3};
+        CountDownLatch release = new CountDownLatch(1);
+        try (MockWebServer server = new MockWebServer()) {
+            // The upload queued by the commit stays parked, so it cannot change state under the test.
+            server.setDispatcher(new Dispatcher() {
+                @Override public MockResponse dispatch(RecordedRequest request) throws InterruptedException {
+                    release.await(10, TimeUnit.SECONDS);
+                    return new MockResponse().setResponseCode(503);
+                }
+            });
+            server.start();
+            DocScanController controller = new DocScanController(context, surface, null,
+                    (state, lines, diagnostic) -> diagnostics.add(diagnostic), new ClientIdentity("test", "test", "test"));
+            try {
+                controller.configureForLocalStart(server.url("/").toString(), "", 0);
+                controller.startLocalSession(false);
+                barrier(controller);
+                assertTrue((boolean) get(controller, "autoCaptureEnabled"));
+                Class<?>[] shot = {CaptureReviewStore.Pending.class, OcrQuality.class};
+                // A diagram-only image is kept for the model to read.
+
+                call(controller, "stageCaptureReview", shot, new CaptureReviewStore.Pending(0, sheet, "", 0, ""), null);
+                assertEquals(RelayState.CAPTURE_REVIEW, controller.getState());
+                surface.visible = true;
+                controller.onCustomViewAvailable(1, "capture-review");
+                barrier(controller);
+                org.robolectric.shadows.ShadowSystemClock.advanceBy(java.time.Duration.ofSeconds(3));
+                call(controller, "enqueueAutoCommit", new Class<?>[]{long.class}, (long) get(controller, "reviewGeneration"));
+                barrier(controller);
+                LocalCaptureSession saved = (LocalCaptureSession) get(controller, "localSession");
+                assertEquals(1, saved.pageCount());
+
+                // Not turned yet, and OCR fails outright on the same JPEG. With no text to compare,
+                // it is reviewed again: a duplicate the model can ignore, never a skipped page.
+
+                call(controller, "stageCaptureReview", shot, new CaptureReviewStore.Pending(1, sheet, "", 0, "OCR error"), null);
+                assertEquals(RelayState.CAPTURE_REVIEW, controller.getState());
+                assertTrue(((CaptureReviewStore) get(controller, "captureReview")).hasPending());
+
+                assertFalse(diagnostics.stream().anyMatch(d -> d.contains("skipped as a duplicate")));
+                assertEquals(0, surface.photos);
+            } finally { release.countDown(); controller.close(); }
+        }
+    }
+
+    /** 30s with no page registered rests the camera; the shutter tap restarts it. */
+    @Test public void automaticReadingPausesWhenNothingHasBeenRegisteredForThirtySeconds() throws Exception {
+        Context context = RuntimeEnvironment.getApplication();
+        Surface surface = new Surface();
+        List<String> diagnostics = new java.util.ArrayList<>();
+        try (MockWebServer server = new MockWebServer()) {
+            DocScanController controller = new DocScanController(context, surface, null,
+                    (state, lines, diagnostic) -> diagnostics.add(diagnostic == null ? "" : diagnostic),
+                    new ClientIdentity("test", "test", "test"));
+            try {
+                controller.configureForLocalStart(server.url("/").toString(), "", 270);
+                controller.startLocalSession(false);
+                barrier(controller);
+
+                int shotsBeforeTheStall = surface.photos;
+
+                org.robolectric.shadows.ShadowSystemClock.advanceBy(java.time.Duration.ofSeconds(30));
+                call(controller, "waitForNextPage", new Class<?>[]{});
+
+                assertEquals(shotsBeforeTheStall, surface.photos);
+                assertTrue("idle capture closes the preview rather than only changing the HUD", surface.pauses > 0);
+                assertTrue(diagnostics.stream().anyMatch(
+                        d -> d.contains("Automatic reading paused after 30000ms")));
+
+                // A tap is the shutter and the resume.
+                diagnostics.clear();
+                call(controller, "manualCaptureNow", new Class<?>[]{});
+                call(controller, "waitForNextPage", new Class<?>[]{});
+                assertFalse(diagnostics.stream().anyMatch(d -> d.contains("paused")));
+            } finally { controller.close(); }
+        }
+    }
+
+    /** Manual mode never opens the camera on its own; a tap takes one photo. */
+    @Test public void manualCaptureTakesNoPhotoUntilTheOperatorTaps() throws Exception {
+        Context context = RuntimeEnvironment.getApplication();
+        Surface surface = new Surface();
+        List<String> diagnostics = new java.util.ArrayList<>();
+        try (MockWebServer server = new MockWebServer()) {
+            DocScanController controller = new DocScanController(context, surface, null,
+                    (state, lines, diagnostic) -> diagnostics.add(diagnostic == null ? "" : diagnostic),
+                    new ClientIdentity("test", "test", "test"));
+            try {
+                controller.setManualCapture(true);
+                controller.configureForLocalStart(server.url("/").toString(), "", 270);
+                controller.startLocalSession(false);
+                barrier(controller);
+
+                assertFalse("no automatic loop", controller.isAutoCaptureEnabled());
+                assertEquals("no photo before a tap", 0, surface.photos);
+                assertTrue(diagnostics.stream().anyMatch(d -> d.contains("Manual capture")));
+
+                // The tap arms the page; the photo still waits for the visible guide.
+                call(controller, "manualCaptureNow", new Class<?>[]{});
+                barrier(controller);
+                assertEquals(RelayState.AIMING, controller.getState());
+                assertEquals(0, surface.photos);
+
+                // The shutter then waits out SHUTTER_STABILIZATION_MILLIS, so this
+                // stops at the state; the photo itself is covered by the tests above.
+                set(controller, "captureGuideAcknowledged", true);
+                call(controller, "triggerArmedCaptureNow", new Class<?>[]{});
+                barrier(controller);
+                assertEquals("the tap is the shutter", RelayState.STABILIZING, controller.getState());
+                assertFalse("still no automatic loop", controller.isAutoCaptureEnabled());
+
+                // The listening recorder's start request is refused the same way.
+                controller.startAutoCapture();
+                barrier(controller);
+                assertFalse(controller.isAutoCaptureEnabled());
+            } finally { controller.close(); }
+        }
+    }
+
     private static final class Surface implements CaptureSurface {
         boolean visible;
         int photos;
+        int pauses;
+        boolean holdForPage;
+        Runnable pageReady;
+        public void awaitNextPage(Runnable ready) { if (holdForPage) pageReady = ready; else ready.run(); }
+        public void pausePreview() { pauses++; }
         public boolean supportsLocalCaptureReview() { return true; }
         public boolean isCaptureReviewVisible(long generation) { return visible && generation == 1; }
         public PhotoStartResult takePhoto(int w, int h, int q) { photos++; return PhotoStartResult.STARTED; }
@@ -481,6 +956,7 @@ public class LocalReviewTest {
         }).get(5, TimeUnit.SECONDS);
     }
     private static void barrier(Object object) throws Exception {
+        ((ExecutorService) get(object, "serial")).submit(() -> {}).get(5, TimeUnit.SECONDS);
         ((ExecutorService) get(object, "serial")).submit(() -> {}).get(5, TimeUnit.SECONDS);
     }
 }

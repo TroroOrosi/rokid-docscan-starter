@@ -12,9 +12,9 @@ All tracked source was inventoried; focused manual review covered the active cap
 input/lifecycle, persistence, upload, audio, browser guard and answer-delivery boundaries.
 This is not a claim that every line or every possible race was independently verified.
 
-Read this record first, then `.agents/progress/pr37-camera-research.md`,
-`.agents/progress/pr37-offline-remediation.md`, `CLAUDE.md`,
-`.agents/progress/pr37-predevice-handoff.md` and `.agents/progress/multimodal-scan.md`
+Read this record first, then `.agents/progress/archive/pr37-camera-research.md`,
+`.agents/progress/archive/pr37-offline-remediation.md`, `CLAUDE.md`,
+`.agents/progress/archive/pr37-predevice-handoff.md` and `.agents/progress/archive/multimodal-scan.md`
 **in full, including their final stop records**, and the current RP sections of
 `tasks/plan.md` and `tasks/todo.md`.
 

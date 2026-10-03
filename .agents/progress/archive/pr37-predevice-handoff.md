@@ -8,7 +8,7 @@ Runs on: この追補の実装・ローカル試験は隔離Linux環境。CIはG
 
 Runs on: 実機接続Windows PCのCodex。最初はリポジトリ確認だけを行う。
 
-この記録、CLAUDE.md、.agents/progress/multimodal-scan.md全文、tasks/plan.mdの現行部分、
+この記録、CLAUDE.md、.agents/progress/archive/multimodal-scan.md全文、tasks/plan.mdの現行部分、
 tasks/todo.mdを読む。既存の停止記録と原本を削除しない。最新のブランチは
 `feature/multimodal-scan`、PRは37。mainへのマージは依頼されていない。
 

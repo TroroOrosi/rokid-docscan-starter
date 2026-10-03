@@ -1,11 +1,13 @@
 # 自動スキャン・同時リスニング：確定した撮影方式
 
-Status: Implementation plan and adoption decisions. Updated 2026-09-15.
+Status: Implementation plan and adoption decisions. Updated 2026-09-23; D/E/Xは当時の判断を保持。
 
 現行実装は既存自動ループをglassdocで有効化し、単タップ手動撮影と実画像表示後3秒の
-取り直しを併用します。録音とスマホ内VAD/ASR、図付き答案も実装しています。
+取り直しを併用します。録音と図付き答案も実装しています。スマホ内VAD/ASRは互換経路に限定し、
+主経路は全画像と原音をGPTへ渡します。OCR全文・文字起こし入力とASR必須待ちは撤回しました。
 操作・制約は[multimodal-scan.md](multimodal-scan.md)、現行計画は`tasks/plan.md`冒頭を参照。
 以下のD/E/X表は採否判断・追加検証の計画で、実装完了や実機受け入れを意味しません。
+実機前の現在の優先順・採否は[全体整理](requirements-audit.md)に集約し、実機・導入・GPT送信停止を維持します。
 
 **2026-09-15 全体見直し:** 起動時の通常／リスニング二択、選択後の即取得、保存と通信の分離、
 完成小問からの閲覧、終了と再装着も対象に含めます。現行の採用／統合／保留／廃止は

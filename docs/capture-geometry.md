@@ -46,4 +46,4 @@ py -3.12 -m pytest -q
 今回すでに追加した `scripts/capture_geometry.py` を照合し、パッチを無条件に重ねないでください。
 
 上記は部分導入時の記録です。現在の取り込み範囲・検証・未接続要件は
-[pr37-capture-quality](../.agents/progress/pr37-capture-quality.md) を参照してください。
+[pr37-capture-quality](../.agents/progress/archive/pr37-capture-quality.md) を参照してください。

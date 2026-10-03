@@ -1,0 +1,155 @@
+# 再開入口：次のセッションはここだけ読めば始められる
+
+Status: Internal progress。最新本人の保存モデル・表示名／Web変化の要望を共通送信前確認へ実装、py -3.12 -X utf8 -m pytest -q →1128 passed, 1 skipped、ruff check . →All checks passed!、独立監査Required0／Optional0（phone-model-ui-resilience-pc-20261003.json）。保存選択を変えず名称不一致のみで停止しない。旧caadd6aの実機model確認1回exit0／4steps0（原本a7171368）は維持するが新修正の実機根拠ではない。phone source67f／envSEND0／servicesdown／Androidソース・固定APK不変。次は同profileの正常終了→headless1回確認→自身正常終了の候補を新sourceASTへ揃え別監査後に新exact承認。solver・headless・装着だけの常時利用・会場・撮影精度・5秒実消灯・原音・電池は未検証／未達。branch feature/capture-quality-readiness、Draft [PR #38](https://github.com/TroroOrosi/rokid-docscan-starter/pull/38)。
+Runs on: Windows PC `C:\rokid-docscan-starter`。実機の状態を変える操作・APK導入・スマホのサーバ更新・GPT送信は、利用者の承認後だけ（hookでも強制）。
+
+## 0. 読み方（前提と資料に引きずられないため）
+
+- 最初に読むのは本ファイルだけ。`tasks/plan.md`・`tasks/todo.md`・`docs/requirements-audit.md`・archive・`docs/hardware-measurements.md` は過去の記録で、誤りを含む。
+- 設計の前に、利用者の過去の指示を読む。Claudeの記録（このプロジェクトの `~/.claude/projects/` 配下）、Codexの記録（`~/.codex/sessions/**/rollout-*.jsonl`、role user）、
+  承認済み計画 `C:\Users\pupu_\.claude\plans\zany-churning-goblet.md`。利用者の案は要件として扱う。9/29、送信設計の指示（9/13・9/14・9/15）を忘れて作り直していた。
+- 判断は目的で行う。「その画像からGPTが正答し、グラスで読めるか」。規則より合理的な判断を優先する（利用者、9/28）。
+- 会場の1セッション（撮影→送信→解析待ち→閲覧130分→終了→付け直し）を利用者の立場で通して考える。電池・画面・カメラ・録音・容量・PCなしを含める。
+- 公式資料で分かることは検索で確かめる。GPTへの試験送信で確かめない。
+- 1セッション1役割。実装は担当エージェントに任せ、別の担当が次の実機・GPT実行に照らして監査する。stubでの確認を目的の確認と書かない。
+- 置き換えた経路は、そのフラグ・試験・文書ごと同じ変更で消す。記録だけのコミットは作らない。新しい文書を増やさない。
+- PCだけで完結する作業は質問せずに終える。承認を求めるのは、実機・スマホ・GPT送信の直前と、下の「利用者の判断が要るもの」だけ。
+- 利用者が伝えたことは事実として書く。「不明」「断定しない」と書かない（9/30、利用者が停止した4bを「誰が止めたか断定しない」と記録した）。
+- 他のエージェント（Codex、別モデル）の記録を引き写さない。書く前に実物（共有チャット・ログ・コード・端末）で確かめる。監査の提案は利用者の決定ではない。
+- 本ファイルは1回の実行につき4行まで。PID・ハッシュ・ログは `data/device-setup/reports/` に置く。Codexにも同じ規則を `AGENTS.md` で渡している。
+
+## 1. 目的と合格
+
+目的：グラスで撮った問題ページの画像を、読める状態でChatGPTへ送り、小問ごとに解答用紙へ書く内容をグラスで読む。
+合格：公式正解（`C:\rokid-exam-materials\kyotsu\seikai\`）と照合して正しい答えが、会場経路でグラスに表示される。一度も達成していない。
+
+## 2. 利用者の決定（再質問しない）
+- 10/1追加指示は旧待機規則より優先：装着直後に最初の画面、撮影／実写真3秒／答案表示以外は5秒無操作で消灯。合同英語は用紙を先に撮り、途中でも録音開始、撮影終了で画像だけ先に解答、原音完了後に同一chatへ音声を追加する。細字・数式・図表・縦書きの自動撮影を改善する。本人は共通テスト・東大二次の実紙試験を後日と指定し、今回はその精度を求める場合へ対応するPC実装を依頼した。最新追記は全機能の実装・確認後に準備を完了し、常時オンのスマホのテザリングへ接続したグラスを装着するだけでいつでも使える状態にすること。
+- 最新指示（10/1）は以下の旧方式に優先：撮影・実画像3秒確認・答案閲覧中は点灯、解析待機・記入終了・終了時は消灯。写真へ案内文字を重ねず、答案は記入用全文と必要な導出・図を保つ固定一画面スライド、短答を詰めて操作を減らす。自動撮影の精度と表示枠より広く写る画角を修正し合理化する。本人は今回アプリを実行したがGPT出力が見えず、音量増加は本人の操作ミスで割当を明るさへ変更して解決、端末の自動消灯は「無し」にする予定。9/30のChromium永続profile/Boot/services/同一chatへの20添付以内順送信/自動撮影/記入終了後の終了操作を維持。本人はテザリング＋Wi-Fi中でsshd実行済み。旧初回導入と10/1新ネットワーク可視loginは承認済み・実行済みでlinker errorにより停止。その後libc++のみ29→30＋既存profile/SEND0で可視login retryのexact commandも本人「よいです」で承認・実行済み（両step exit0）。本人は「ログインしました」と報告、readonly画面取得exit0でログイン後ホームを確認（従来と違う理由を説明済み）。続くNew chatのexact commandは本人「はい」で承認・1回実行済み（5step/全体exit0）。続くモデルmenuのexact commandも本人「はい」で承認・1回実行済み（5step/全体exit0）。本人の最新説明「latestがモデル名はありませんが、実質的な最新のモデルということです。」を受け、readonly exit0で選択済みLatest＋Extra Highを確認、この組合せを維持する。services/headless・source更新・glasses変更・GPT送信は別承認。 10/2本人「はい」で旧phone-headless-stop-20261002.pyを1回実行host exit1（初期化NameError／browser前）、次の本人「はい」でv4を1回実行host exit1（browser後preflight）、readonlyで現在HTTP403／Cloudflare確認画面と判明。さらに最新本人「はい」でF-51F（ZY22LWGDCV）のphone-owned-browser-close-20261002.py --execute-approved-close-owned-browserを1回実行host exit1／native exit2 RuntimeError、Browser.close要求前に停止、GPT0。承認済み試行の自動再実行なし。続く本人「はい」で新phone-owned-browser-close-v2-20261002.py --execute-approved-close-owned-browserを1回実行host exit0／全4steps exit0、Browser.close1、対象消失・8000／9222閉・lock不在・protected／source／env／services不変。旧child exitcodeはunavailable、GPT0。可視起動は新phone-visible-browser-recovery-20261002.pyのPC preview／self-check12条件／明示ruffがexit0、V-EXIT-1修正済・独立Required0／Optional0まで準備済み。続く最新本人「はい」でF-51F（ZY22LWGDCV）のphone-visible-browser-recovery-20261002.py --execute-approved-visible-recoveryを1回実行host exit1／3identity exit0／native exit2、visible_startupで新child exit1 available=true、GPT0・UI入力0。再実行／headless起動・source／APK／Boot・services／SEND変更は未承認。 続く最新本人「はい」で復旧v2のphone-visible-browser-recovery-v2-20261003.py --execute-approved-visible-recoveryをexact承認し1回実行host exit0／全6steps exit0、X11＋CDP browser startup・preservedを確認、home3件のため認証／model／solver未確認、GPT0。承認は1回分消費済み、追加の起動／close／UI入力／モデル変更／GPT／source／APK／services／SEND変更は未承認。 続く最新本人「はい」でphone-visible-model-popup-verification-20261003.py --execute-approved-model-popup-verificationをexact承認し1回実行host exit1／steps0,0,0,2、ChatGptWebModelMismatchで停止。自身popup閉鎖・保全確認、モデル確認失敗、設定変更／GPT0。承認は消費済み、追加操作は未承認。本人は「モデル名が変更になったりUIが変更されても対応できるようになっていますか。」と質問した。 続く本人「はい」でphone-visible-model-popup-diagnosis-20261003.py --execute-approved-model-popup-diagnosisをexact承認し1回実行host exit0／4steps0、Latest checked／Extra Highとopened_menu_structure_unreadableを観測。自身popup閉鎖・保全確認、設定変更／GPT0。承認は消費済みで追加操作は未承認。 続く最新本人「はい」でphone-visible-model-popup-verification-v2-20261003.py --execute-approved-model-popup-verificationをexact承認し1回実行host exit0／4steps0、修正後functionでLatest＋Extra Highの選択・自身popup閉鎖・保全を確認。設定変更／GPT0、phone source／APK／Boot・services不変。承認は1回分消費済み、追加操作は未承認。 最新本人（10/3）は「起動しても前回設定したモデルになる」「今後モデルの表示名が変わる可能性がある」と述べ、急なWeb変更でも停止しない柔軟な使用を依頼した。旧未知表示名のみで停止する方針を更新し、保存選択・名称／UI変化へのPC対応を実装・別監査する。
+
+- 会場：グラス（`:glassdoc`）→スマホAP→スマホ上のFastAPI→スマホChrome（CDP）→ChatGPT web→answer-bundle→AnswerView。PCは持ち込まない。
+  スマホは画面点灯・伏せ置き・Chrome前景（9/15）。ChatGPT webの自動操作は規約違反と承知のうえで選んだ。APIキーは使わない。
+- **1教科1チャット・1教科1通**（9/29）。冊子の全画像を1通で送り、1通の返答で小問の仕分けと全部の答えを受け取る。小問ごと・大問ごと・一覧だけの送信はしない。
+  仕分けはGPTが行い、グラスのOCRは使わない（9/29）。前の返答が完了する前に次を送らない（9/13）。解析時間に打ち切りを設けない（9/29）。
+- 添付は1通20ファイルまで。20枚を超えたら2枚ずつ、40枚以上は3枚ずつ結合（利用者の案、9/15。`app/source_bundle.py`）。
+  PDFは使わない：Enterprise以外のプランはPDFの文字だけを読み、画像を捨てる（OpenAI File Uploads FAQ、9/29確認）。
+- 送るのは原本の画像と原音。OCR本文や文字起こしは送らない（9/23）。明るさ・切出しの処理はしてよい（9/27）。
+- 答えは解答用紙に書く内容の全文。記述式の数学は導出を含める。着席、B5、見開き撮影が既定。
+- 操作：起動時に通常かリスニングの二択。自動撮影、実画像を3秒表示、単タップで取り直し、ダブルタップで撮影終了。セッション中スマホは触らない。
+  撮影終了後は答えが出るまで画面オフ、閉じるときも画面オフ（9/15）。30秒進展がなければカメラ休止（9/9）。
+- リスニングの実機試験は後回し。LEDの外部観測は不要。LEDを操作するコードは書かない。依頼済みの機能は省かない（5節）。
+- 9/30の4b再実行：問題用紙が全て揃っていないため、送信確認までで停止する（利用者）。同じ不完全な2枚の再送で正答を試さない。
+
+## 3. 過去の測定記録（以下の版・条件に限定。現行PC作業のログ・比較・監査は `data/device-setup/reports/venue-pc-20260930/`）
+
+- 9/29 4a旧方式（`e0b8263`）：一覧だけの1通のあと小問ごとに送り、利用者が停止。これを受けて1教科1通へ作り直した（`4552ea1`〜`1134404`、監査2回を反映）。
+- **9/29 4a（`1134404`、スマホのサーバ）：4問すべて正解**（④②④②＝101〜104）。送信1通（画像2枚）・返答1通・102.6秒。入力は公式PDFの描画でグラスの写真ではない。
+  報告 `C:\rokid-exam-materials\reports\butsuri_kiso-p1-4-server.json`。正誤はベンチではなく手で照合した。
+- 1通の経路の要点：完了は返答の中身（JSON）と停止ボタンで判定、上限150分。送信済みのチャットがある教科は二度と送らず読み返す。再開は3時間以内のセッションだけ。
+  添付はJPEG q92を1ファイルずつ。PDF経路は削除（Enterprise以外は画像を捨てる）。失敗経路は単体試験・stubだけで確認。
+  glassdoc debug APK vc23 SHA-256 `584e526c534849da4558457b7533c8ca6c6b5016bc1645c24e0b59d382621d69`（`e12e155` でビルド、以後Java変更なし、未導入）。
+- スマホ版ChatGPTの停止ボタンは一致する（§F-6-10：送信直後から stop=1、返答欄は130.4秒後）。
+- 未確認の前提：ChatGPT webが録音ファイルを聞くか（公式FAQに音声の記載なし）、実機でのJPEG添付。
+- 実写22枚の測定（9/29、PC）：グラスOCRは撮影判断に使えない（7枚が0文字、紙の無い3枚を「完全」と判定）。紙の最大成分の面積0.06未満で紙なしを分けられた（該当3枚のみ）。
+- **9/30 4b（`1134404`、グラスの見開き原本2枚）：不合格。** 送信1通・解析578秒・6問すべて `needs_input`（「ピンぼけで判読できない」）。
+  送信・待機・理由表示・ベンチ終了は正常（セッション8、チャット `/c/6abbd310…`、送信記録idle）。報告 `data\device-setup\reports\glassdoc-kokugo-20260927-originals-server.json`。
+  原因（写真を目視）：9/16の1枚は元からピンぼけで人も読めない（撮影側）。9/22の1枚は目では読めるが、見開き1枚だとモデルの縮小で1頁の画素が半分になる。
+  APIの縮小規則（2048に収め短辺768）で再現すると見開きは842x768でカタカナが潰れ、頁ごとに切ると1頁768幅で読めた（ChatGPT webの規則は非公開）。
+  「第一問」の漢数字が大問として認識されず、グラスで「全体」1群になっていた。
+- **`f89a761`（APP 0.43.1 / API 1.29.1）**：見開きを綴じ目で右頁→左頁に分けて別画像で送る（`source_bundle._gutter`、分けられない写真は1枚のまま）。
+  実物2枚で綴じ目を正しく検出（幅の0.489、0.470）。20ファイル上限と縦積み（2・3枚）は維持。漢数字の大問名を認識。
+  検証：`py -3.12 -X utf8 -m pytest -q` → 964 passed, 2 skipped。`ruff` → All checks passed!。**分割頁の送信は下記4bで確認。判読・正答は未確認。**
+  注意：分割で画像数が倍になり、見開き約30枚超（分割後60頁超）は3枚結合の上限を超えて失敗する（以前は見開きのまま送れた）。
+- **9/30 4b（`f89a761`、分割あり）：送信だけ確認して利用者が停止**（問題用紙が揃っていないため）。写真2枚→**4画像**→1通（セッション9、チャット `/c/6abbe44b…`）。
+  Codexが実施。配布tarのSHA-256とファイル内容を端末で照合、`solver_ready=true`、更新直後（送信前）は送信記録idle。**分割した頁が実際に送られることだけ確認。判読・正答・答案受信は未確認。**
+  **生成は利用者がChatGPTの画面で停止した**（共有 `https://chatgpt.com/share/6abbf455-589c-83e8-9602-5b50b9fbd93f`、「Thinking を停止しました」）。
+  停止までの約190秒、モデルは思考中にPythonで4画像を90度回転・拡大し、tesseractで縦書きを読もうとしていた。失敗ではない。
+  ChatGPT webは添付画像を長辺2048へ縮小していた（page001R 1377x2428 → 1155x2048。計4枚とも長辺2048）。
+  その後、ベンチとサーバを強制終了、`port_8000_closed=true`、送信記録は `uncertain`（session 9、`2217c5ce…`）のまま。証拠は `data/device-setup/reports/4b-f89a761-*`。
+  ベンチのHTTP応答に断続的な `RemoteProtocolError`（4a・セッション8でも出ている。別接続の `/health` は200。原因未調査）。
+- **9/30 修正（PC、未コミット→下記コミット）**：返答の各小問が印刷された解答番号（`answer_no`）を持ち、飛ばされた番号は `解答番号N` の `failed` 項目として残る。
+  ベンチは `--answer-key`（JSON `{"101":"4"}`）で公式正解と全番号を照合し、1つでも違えば exit 2。鍵が無い場合も全問readyでなければ exit 2（旧: 1問readyで exit 0）。
+  30秒1頁も登録されなければ自動撮影がカメラを休止し「撮影を休止／タップで再開」を出す。単タップがそのまま再開。録音は止めない。
+  検証：`py -3.12 -X utf8 -m pytest -q` → 970 passed, 2 skipped。`ruff` → All checks passed!。`gradlew test testDebugUnitTest assembleDebug` → BUILD SUCCESSFUL、199 tasks。**実機・GPTでは未確認。**
+  注意：`--key` はサーバのAPIキーで既に使われていたため、公式正解の受け取りは `--answer-key` にした（4節の記述を置き換えた）。
+- **9/30 4c（スマホのサーバ `2e95baf`、物理基礎PDF全14頁＝見開き7枚、1通）：14/14正解**（101〜114、234.8秒）。入力はPDF描画でグラスの写真ではない。
+  ベンチは当初12/14と判定したが、110と111を1項目「⑤,⑥」で返したのを照合が誤読していた（修正済み）。報告 `C:\rokid-exam-materials\reports\butsuri_kiso-14p-2e95baf.json`、正解 `C:\rokid-exam-materials\kyotsu\seikai\butsuri_kiso-key.json`。
+  サーバは `127.0.0.1` にbindしており、グラスからは届かない。起動直後の約2分、セッション9の再開（読み返しのみ、送信なし）がブラウザを占有した。
+- **9/30 会場用の導入（利用者承認）**：会場にWi-Fiは無く、グラスはスマホのテザリング、スマホはモバイル通信（利用者、9/30）。スマホのサーバ `20ed671` を `0.0.0.0:8000` で起動（PID 20698）。
+  グラスへ vc26 0.23.0 を導入、接続先 `http://gateway:8000`（Wi-Fiゲートウェイ＝スマホ）と鍵をアプリの初回設定ファイル（`ConnectionSettings.provisioning`）へ標準入力で投入、`manual=true` で起動。
+  見張り役 `watch_glasses.py --serial auto`（PID 21730）は、グラスがテザリング経由で最初にサーバへ届くまで待機中。**テザリング上では未検証。**
+  更新前バックアップ `~/rokid-backups/pre-20ed671-20260929T195841Z`。スマホを再起動するとadbのTCPが消え、PCが要る（グラスは `persist.adb.tcp.port=5555`）。
+- 手動撮影モード（vc25、`manual=true`）：自動撮影を始めず1タップ1枚。整った用紙でない紙を今日撮るため（利用者、9/30）。欠落検出は末尾の抜けを検出できない。
+- **9/30に確かめた欠陥2件（Codexの指摘を私が再現。上で修正済み）**：
+  - **返答に無い小問は、黙って消える。** 冊子の解答欄と返答を照合する処理がどこにも無い（`chatgpt_web.py` の検査は `questions` キーと各答えの形だけ）。モデルが1問しか返しても「完了」になる。
+  - **ベンチは1問でも ready なら exit 0**（`run_exam_deck.py:695`）。公式正解との照合もしない。4aの「4問すべて正解」は私が手で照合した結果であり、ベンチの判定ではない。
+- スマホの状態：サーバソースは `f89a761`、**プロセスは停止中**。更新前バックアップは `~/rokid-backups/pre-f89a761-4b-20260929T161503Z`（app・scripts・DB・browser-state・env）。試験時はChrome前景・Awake、Chrome `153.0.8010.52`、F-51F fingerprint `FCNT/F-51F/F-51F:16/W1VHS36H.80-34-2-2-1-5/64c964-a8f54:user/release-keys`。
+  更新前のバックアップ `~/rokid-backups/pre-1134404-20260929T234008`。送信記録の解除は自動判定で拒否されるので、利用者が `!` で実行する。
+  更新手順（9/29実績）：バックアップ（app・scripts・docscan.db・browser-state）→ `git archive <commit> app scripts | ssh ... 'cd ~/rokid-server; rm -rf app scripts; tar -x'`
+  → 旧サーバ停止 → `nohup bash scripts/phone_serve.sh 127.0.0.1 > data/server-<commit>.log 2>&1 &`。PCからは `ssh -f -N -L 8000:127.0.0.1:8000 ...`（ssh `-i ~/.ssh/f51f_key -p 8022 u0_a26@192.168.0.6`）。
+  ベンチの鍵は `ROKID_API_KEY` をスマホの env から読んで渡す（画面に出さない）。
+
+## 4. 次の作業（Runs on: Windows PC→新exact承認後F-51F／glassdoc）：保存選択・改名・role／aria UIを共通確認で読む新sourceは全体pytest1128pass／1skip、ruff exit0、独立Required0／Optional0、phone-model-ui-resilience-pc-20261003.jsonに固定。言語menuの誤読・矛盾effort・未選択Maximum誤読の3境界を修正確認。既存submit／auth／添付／uncertain／retryは不変。旧actual popup（caadd6a、原本a7171368、host exit0／4steps0）は設定変更／GPT0で本人承認1回分消費済み。phone-headless-saved-login-verification-20261003.pyを新commitのASTとJSへ最小更新し、既存owner／shutdown／finally guardを維持、PC preview・4pipeline条件・timeout履歴・別監査後に新exact承認を求める。既存visible21047の正常終了でログインprofile保存→同profileheadless1回起動→公開auth／403とLatest＋Extra Highの確認→自分の新browser正常終了・保全確認だけを対象とする。source／APK／Boot・services／SEND変更・GPT送信・追加操作は未承認。旧stale17844／fa4 prepareと旧model固定snapshotを再使用しない。phone source67f／envSEND0／servicesdown、solver／headless／U7は未達。以下は旧経緯で現在の実機実行指示ではない。
+
+1. 済：独立監査2回（`4552ea1`、`4552ea1..e12e155`）の指摘を `61ad481`〜`1134404` で反映。
+2. 済：4a（3節）。起動はスマホで `bash scripts/phone_serve.sh 127.0.0.1`、PCから `ssh -L 8000:127.0.0.1:8000` で投入した。
+3. 済：4bは送信だけ確認して停止（3節）。同じ不完全な2枚を送り直さない。
+4. 済：欠陥2件の修正とカメラ休止（3節）。受け入れ条件（4aの④②④②と正解101〜104で exit 0、1つ違えば exit 2）は
+   `tests/test_run_exam_deck.py::test_the_bench_passes_only_when_every_official_answer_matches` で示した。監査は未実施。
+5. **その後（実機、承認後）**：Runs on: スマホFastAPI＋スマホChrome、PCからHTTP。先にセッション9の送信記録 `uncertain` を利用者が解除する（下の判断1）。
+   正解のある物理基礎の全14頁（`C:/rokid-exam-materials/kyotsu/butsuri_kiso.pdf`、正解 `C:/rokid-exam-materials/kyotsu/seikai/rika_kiso.pdf` 101〜114）を1通で送り、ベンチの `--answer-key`（JSONを先に作る）で全問を照合する。
+   不完全な資料（国語の見開き2枚など）は送らない。
+6. Runs on: glassdoc＋スマホ。**承認後。** APK vc23を導入し、B5印刷の頁を着席で撮り、同じ経路で解かせる。
+7. Runs on: 会場経路（スマホAP）。**承認後。** 撮影からグラス表示まで通す。最初の目的達成。
+
+利用者の判断が要るもの（承認の境界に当たるものだけ）：
+1. セッション9の送信記録 `uncertain` の解除。利用者が生成を停止したので返答は無い（共有チャットで確認済み）。解除は自動判定で拒否されるため利用者が `!` で実行する。
+   解除しないと次の送信がすべて止まる。
+2. 撮影の判断からOCRを外す（1枚撮影と「紙が写っているか」の判定。CLAUDE.mdは撮り直し方針の変更に確認を求める）。読めない撮り直しに上限を設ける。
+3. 閲覧中は画面を消し、タップで点灯する（監査の提案。依頼済みではない）。4. 失敗した教科をグラス操作で送り直す（新しい操作割当＋新規送信）。
+5. サーバの保存画像をPNGからJPEGへ（CLAUDE.mdの不変条件）。6. スマホ単体でadb（端末の安全設定）。7. 録音を聞けるかの短い試験送信1回。
+8. 未使用のエンドポイント・モジュール・古い文書の削除、Codexが残した一時ファイル（PCの `data/device-setup/{apply-phone-f89a761-4b.py,probe-4b-counts.py,server-f89a761-4b.tar}`、
+   スマホの `~/rokid-server/data/server-*.tar` と古い `*.pid`）の削除（9/28の取り決め）。
+（9/30訂正：Opus 5が「判断待ち8項目は監査の提案で、カメラ休止と消灯は依頼済み」と書き、撮影からOCRを外す件を承認不要に移した。
+カメラ休止と解析中の消灯は依頼済みだが、閲覧中の消灯は依頼に無く、OCRの除去と撮り直しの上限はCLAUDE.mdにより確認が要る。）
+
+## 5. 依頼済み機能（全55項目の要約。細目は承認済み計画）
+
+| 群 | 機能 | 現状 |
+|---|---|---|
+| 起動 | 二択で即開始、前回選択の強調、中断再開と前回答案は任意、HTTPを待たない開始 | 実装。実機は一部 |
+| 撮影 | 自動撮影、単タップ手動、実画像3秒・取り直し、無操作で保存して次頁、ダブルタップ終了 | 実装。撮影の判断がOCR依存で機能していない（9/29実測。置換は判断2） |
+| 撮影 | B5、見開き／単ページ、画角、露出、着席、傾き、同じ紙と似た別紙、図だけの頁、過去頁の訂正 | 露出は送信側で補正。重複判定は機能していない。傾き・過去頁は無 |
+| 保存・転送 | 保存してから独立送信、容量不足で写真を止める | 前者は実装、後者は無（グラスに125MBが残る） |
+| リスニング | 連続録音、二段階終了、末尾回収・再送 | 実装。マイク未試験。GPTが音声を聞くか未確認 |
+| 資料→GPT | 原本だけ、1教科1チャット・1通、モデルの仕分け、添付上限と結合 | 実装（9/29） |
+| 答案 | 記入用の全文と導出、試験形式別、図、表、資料不足の明示 | 導出は実装。表は部分的 |
+| 閲覧 | 位置保持、大問→小問メニュー、BACKで一段戻る、前回答案をオフラインで | 実装。解析中の消灯は実装。閲覧中の消灯は未実装で、依頼済みではない（判断3） |
+| 終了 | ダブルタップ2回で閉じて消灯、解析中の消灯と復帰、遅着で再点灯しない、再装着でchooser | 解析中は画面オフ（9/29）。即消灯は未達 |
+| 会場 | スマホAP、スマホ操作0回、Chrome前景、PCなしで再起動 | AP経由は未実施。スマホ再起動後はadbにPCが要る（判断6） |
+| 目標 | 撮影10分・解析10分・閲覧130分、150分で電池10%、1秒消灯・3秒、精度目標、反復 | 未測定 |
+
+記録が1か所にしか無い要求：撮影終了の保留を表示、`(1)`形式の誤分割、1頁に収まらない共通資料、hotspotを切った状態での閲覧、
+音声案内を録音に入れない、取消後もOCR 0文字で確認画像を待つ、操作応答p95 150ms以内、実写200頁で欠けた画像の誤採用0（`tasks/plan.md:632,638`）。
+
+## 6. 古い資料のうち誤り・古いもの
+
+- CQ-5〜9（OCRの校正、品質ゲート部品）は目的に対して優先度が低い。撮影判断からOCRを外す件（判断2）と合わせて扱う。
+- `plan.md` と `todo.md` の `<details>` は履歴。そこに書かれた「現行」「再開」は作業指示ではない。
+
+## 7. 状態
+
+- CI：`9325ff1` で CI・Android relay とも success（36612357532、36612357069）。PR #38 は Draft。mainへの統合は4aで正答を確認してから提案する。
+
+## 8. 設置物一覧（9/28に実機・ディスク・ブランチと照合）
+
+| 場所 | 物 | 扱い |
+|---|---|---|
+| グラス `1904092623381086` | `dev.rokid.docscanglass.doc` 0.14.2（vc17） | 使用中。4でvc23へ更新 |
+| グラス | `:glassdoc` 内 `files/local-scans` 15回分125MB | 残す。古い回を消す仕組みは無い（容量不足の機能と合わせて扱う） |
+| スマホ F-51F | `dev.rokid.docscanrelay` 0.3.16、`com.termux` 0.118.3、`com.rokid.sprite.global.aiapp` | 凍結の予備経路／サーバ実行環境／Hi Rokid |
+| スマホ Termux | `~/rokid-server`（9/30に`f89a761`へ更新）、env、旧ローカルモデルの重み（9/14不採用） | 重みは容量を確認してから、承認を得て消す |
+| PC | `C:\rokid-docscan-starter`、`C:\Users\Public\rokid-build-tools-20260901`（JDK17） | 使用中 |
+| PC | `data\device-setup\`（Git管理外の原本・APK・ログ） | 原本は残す。古いAPKは整理の役割で扱う |
+| リポジトリ | `:glassapp`、`:glassprobe`（アプリは削除済み、CIで毎回ビルド） | 削除候補（判断8） |
+| GitHub | `main`、`feature/capture-quality-readiness` のみ | 統合済みブランチ5本は9/28削除 |

@@ -1,6 +1,6 @@
-# PR #37 撮影品質部品の統合
+# 撮影品質の継続記録（PR #37 → PR #38）
 
-Status: Internal progress。2026-09-22、撮影品質は未解決。標準JPEG8枚を回収したが距離・姿勢は未確認。利用者の5方向の再点検と席の制約を優先し、追加撮影・GPT・APK更新・通常読取を停止。本流の不足と測定方法を研究資料・plan・todoへ反映。
+Status: Internal progress。2026-09-23、PR37はmerge済み。**最新はRP-15節（末尾）。**利用者の新PR・必要作業の依頼に基づくPR38の画像比較・露出準備は末尾参照。撮影品質は未解決。標準JPEG8枚の距離・姿勢は未確認。追加撮影・GPT・APK更新・通常読取は停止を維持。
 Runs on: Windows PC `C:\rokid-docscan-starter`。前段の実機試験はglassdocとF-51F上のサーバ・Chrome（既存Wi-Fi、スマホAPではない）。最新節はPCでの再点検。
 
 ## 再開点と権限（実装時点。後続の実機承認は末尾参照）
@@ -29,7 +29,7 @@ Runs on: Windows PC `C:\rokid-docscan-starter`。前段の実機試験はglassdo
 
 | # | ファイル | 状態 | 根拠・対応内容 |
 |---|---|---|---|
-| 1 | `.agents/progress/pr37-capture-quality.md` | 今回統合 | 本記録。停止、台帳、検証、残作業 |
+| 1 | `.agents/progress/archive/pr37-capture-quality.md` | 今回統合 | 本記録。停止、台帳、検証、残作業 |
 | 2 | `CLAUDE.md` | 今回統合 | 文字枠の限界とPC品質ゲート未接続 |
 | 3 | `README.md` | 今回統合 | 正本の版tuple更新、PC部品と本流の区別 |
 | 4 | `android-relay/glassdoc/build.gradle.kts` | 今回統合 | versionName/code更新、依存・署名設定不変 |
@@ -78,7 +78,7 @@ PCでは既存Pillowとgeometryだけで原寸タイル、任意の明るさ・�
 カメラ、OCR、モデル、ネットワーク呼出しは加えていない。パケットは常時hold。
 admissionは渡された証拠の評価だけで生成・認証をしない。検証済みprofileは既定で空。
 evaluationは参照ラベル付きtest記録の集計だけで、方式選択・本番profile承認はしない。
-詳しい入力契約は [capture-quality.md](../../docs/capture-quality.md) に集約する。
+詳しい入力契約は [capture-quality.md](../../../docs/capture-quality.md) に集約する。
 
 ## 保存写真への適用
 
@@ -180,7 +180,7 @@ codebase-memory、progress-checkpoint。最終差分はcode-review-and-quality�
 Runs on: 当面の実装・検証はWindows PC。会場本流はglassdoc → スマホAP → スマホAPIであり、PC試験はその実機受け入れを代替しない。
 
 1. PR #37本文のcommit・push・CI結果を読む。ソースが同一なら上記ローカル全体試験・APK検査を繰り返さない。
-2. [tasks/todo.md](../../tasks/todo.md) CQ-5: 保存原本から紙面・文字・数式・図表の根拠を生成し、参照ラベルで校正する。自動profile承認はしない。
+2. [tasks/todo.md](../../../tasks/todo.md) CQ-5: 保存原本から紙面・文字・数式・図表の根拠を生成し、参照ラベルで校正する。自動profile承認はしない。
 3. CQ-6: 新鮮な撮影前プレビュー、紙面四隅・余白・安定、同時出力/メモリ。撮影後burstを撮影前検査と呼ばない。
 4. CQ-7: 同じ本撮影原本で再検査しcapture_id/source_sha256/rotation/policy/profile版を対応付ける。
 5. CQ-8: 手動・自動・終了時・復元時の候補保全と正式登録を分離し、confirm/upload/サーバの全境界に同じゲートを接続する。遅延・timeout・不明はhold。
@@ -353,7 +353,7 @@ PC処理は `5981c3a` でPRへ反映済み。`gh pr checks 37` → 全16 checks 
 `verifying-premises` → `find-docs`を使用。Context7のCamera2 IDを解決してAE資料を取得し、
 Android公式のAPI 21からの状態定義、Rokidの現行FAQ・独公式製品詳細・公式撮影記事を開いた。
 旧global製品URLは404のため別の公式地域ページへ照合。公式資料・現物・推論は
-[研究資料の2026-09-22節](../../docs/rokid-capture-research.md)で区別した。
+[研究資料の2026-09-22節](../../../docs/rokid-capture-research.md)で区別した。
 固定焦点・34cm〜∞の公称範囲、撮影109°と表示30°、標準LLHDRを確認した。
 この公称値は手元の細字可読性やCamera2での同じ処理を保証しない。
 
@@ -406,7 +406,7 @@ Runs on: 標準撮影は利用者の物理操作。回収・診断はPC。会場
 
 Runs on: PCの現行ソース `5981c3a`。グラフ2026-09-14のcoverageは古いため対象ソースへフォールバック。
 
-[研究資料](../../docs/rokid-capture-research.md)に5方向の事実・根拠・未確認を記録した。
+[研究資料](../../../docs/rokid-capture-research.md)に5方向の事実・根拠・未確認を記録した。
 主な不足は、表示だけのguide/spread、背景込み半分OCR、撮影前の紙面／細字判定なし、
 OCRゼロの自動撮影反復、品質ゲートなしの保存・送信、選択肢の偽問題化、全問待ち後の1回bundle取得。
 `segment_problems`の合成入力「問1＋(A)＋(B)」→3問題。実写真での誤分割原因を確定したものではない。
@@ -422,3 +422,293 @@ OCRゼロの自動撮影反復、品質ゲートなしの保存・送信、選�
 → `24 passed in 4.09s`、exit 0。`py -3.12 -m ruff check .` → `All checks passed!`、exit 0。
 `git diff --check` → 空白エラーなし、exit 0（WindowsのLF/CRLF変換警告のみ）。
 変更は既存の研究・plan・todo・本進捗の4ファイル。製品コード未変更につきAndroid再build・実機再試験なし。
+
+## PR38: 同一文字の比較と露出準備（2026-09-23）
+
+Runs on: Windows PC `C:\rokid-docscan-starter`。実機導入・撮影・通常読取・GPT送信は再開していない。
+
+利用者「マージしました。新しくPRを作成し、必要な作業を行ってください。作業の方向性もぶれないように
+整理してから行ってください」に基づく。PR37のmerge commitは `c8835ac0cbdc3d1863ff29153a19322a32d9efab`、
+旧headとのtree差分なしを確認して `feature/capture-quality-readiness` を作成。
+`0619251` にplan/todoのQN-1〜3と合格範囲を先に保存・pushし、
+[PR38](https://github.com/TroroOrosi/rokid-docscan-starter/pull/38)をdraft作成した。
+対象remoteは `https://github.com/TroroOrosi/rokid-docscan-starter.git`。このPRの通常commit/pushは依頼範囲。
+最終commitはPR本文で確定する。冒頭の「別PR対象外」はPR37実装時点の履歴であり、今回の依頼が更新する。
+
+### 変更と5方向の再点検
+
+Runs on: 現ソースのCamera2準備経路とPC上の既存画像。物理カメラの改善は未検証。
+
+| 方向 | このPRの到達点と残る境界 |
+|---|---|
+| 目的達成 | 原寸／半分／補間を同じ33文字で比較。誤り6/29/7/7。画素を保持する優先度の根拠であり全文精度ではない。露出未収束でも即時JPEGを要求する箇所を修正。 |
+| 全体への影響 | 撮影入口GlassCameraだけに測光を接続。最大JPEG・回転・burst・retry・操作・正式登録・凍結relayは不変。露出準備の時間・電力・メモリが増え得るため実機受け入れは保留。 |
+| 事実確認 | Camera2公式のAE/同時出力/ImageReader契約、保存dumpのzoomRatioRange=[1,8]・YUV640×480、原本hash8/8を照合。「列挙範囲未確認」を訂正。 |
+| 未確認事項 | 最新2枚は席の基準ではない。ML Kit精度、紙面／細字／数式全体、実カメラの収束と最終JPEG、同時出力PSS、スマホAP経路は未確認。 |
+| 指示漏れ | 後退・正確な測距を必須にしない。CQ-5〜9、資料不足・過去ページ訂正・分割RP-11/12、答案追加取得RP-15、録音復元・冪等性・終了保存待ちを未完で保持。 |
+
+実装は列挙からJPEGと同じ縦横比、640×480画素以下のYUVを選び、AE CONVERGED後にJPEGを1回要求する。
+測光状態の変化と経過時間だけを数値診断へ記録。null/SEARCHING/LOCKED/FLASH_REQUIREDは合格にしない。
+全体15秒の期限を延長せず、timeoutはUNKNOWNを保ち再要求しない。測光Imageは即close、
+成功・失敗・明示closeで全資源を解放。世代違い・重複・測光停止echoから撮影を増やさない。
+previewの露出収束を画質合格・最終JPEGの収束保証にはしない。依存・schema・署名鍵の変更なし。
+
+比較の原本hash・座標・方式・参照の限界・一次資料URLは
+[研究の2026-09-23節](../../../docs/rokid-capture-research.md)に集約。
+一律拡大は原寸より良くならず不採用。原寸全文Bitmap化と自動明暗補正も採用しない。
+私有出力は `data/device-setup/pr37-camera-baseline-20260922-225825/text-comparison/`。
+元画像・OCR本文・参照本文をGitへ追加していない。
+
+### PC検証
+
+Runs on: ASCIIパスの本checkout、JDK 17.0.20.1+1 / SDK Platform 36・build-tools 36.0.0 / Gradle wrapper 9.4.1。
+
+- 回帰RED: `.\android-relay\gradlew.bat --no-daemon :glassdoc:testDebugUnitTest --tests '*GlassCameraExposureTest'`
+  → 模擬HALの準備を修正した後、旧実装の即時JPEGで `3 tests completed, 3 failed`、`BUILD FAILED in 23s`。
+- 最初のGREEN: `:glassdoc:testDebugUnitTest --tests '*GlassCamera*Test'` → `BUILD SUCCESSFUL in 26s`。
+- 追加した試験のCameraCharacteristics二重setが全体試験で失敗。模擬カメラを置き換えるよう試験側を修正し、
+  `test testDebugUnitTest assembleDebug` → `BUILD SUCCESSFUL in 38s`、199 tasks、JUnit400件／失敗0。
+- `py -3.12 -m pytest -q` → `819 passed, 1 skipped, 1 warning in 111.57s`、exit 0。
+  LIVE=0、新規TEMPのROKID_DATA_DIR。skipは実送信、warningは既存Starlette/httpx非推奨。
+- `py -3.12 -m ruff check .` → `All checks passed!`、exit 0。
+- `compare_text.py` → 6/33・29/33・7/33・7/33、`original_unchanged: true`、exit 0。
+  全8原本のSHA再照合 → `originals_unchanged 8 / 8`、exit 0。
+
+最終コード（AE状態変化の数値診断を追加後）:
+
+- `.\android-relay\gradlew.bat --no-daemon test testDebugUnitTest assembleDebug`
+  → `BUILD SUCCESSFUL in 46s`、`199 actionable tasks: 7 executed, 192 up-to-date`、exit 0。
+  JUnit XML集計 → `tests:400, failures:0, errors:0, skipped:0`。
+- 研究資料の私有パス2件を修正し、
+  `py -3.12 -m pytest -q tests/test_capture_documentation.py tests/test_documentation_contract.py tests/test_versioning.py`
+  → `33 passed in 0.90s`、exit 0。`git diff --check` → 空白エラーなし、exit 0。
+- `aapt2 dump badging android-relay/glassdoc/build/outputs/apk/debug/glassdoc-debug.apk`
+  → package `dev.rokid.docscanglass.doc`、activity `dev.rokid.docscanglass.doc.DocScanGlassActivity`。
+- `apksigner verify --verbose --print-certs <同APK>` → `Verifies`、v2=true、certificate SHA-256
+  `906307478018e09e2937cfd8042a674d27598767577e08a304472aae407ccacc`。既存署名と一致。
+- `Get-FileHash -Algorithm SHA256 <同APK>` →
+  `4c96a139e1fe916ce4417e345038fe78634529689229f841a14dab873d80510f`。
+
+これは本checkoutのPC成果物。端末にあるAPKの置換や、新しい実機動作の確認ではない。
+
+グラフ索引は古く、coverageの変更済み／未追跡ファイルを直接読んだ。差分レビュー用graphも旧SHAのため、
+未追跡ExposureTestを含む実ソースとGlassCameraのActivity生成箇所で補った。
+Agent Skills router → planning/incremental/TDD、verifying-premises/find-docs、code-review-and-quality、
+progress-checkpointを使用。サブエージェントやクラウドCodexへ再委任していない。
+
+### 次に戻る作業
+
+Runs on: まずWindows PC。実機作業はここに記載しただけでは再開しない。
+
+1. QNのPC成果とCQ全体の未完を区別する。原寸領域OCRを既存メモリ上限で扱う方法を、領域境界の欠落・
+   重複・文字順と一緒に比較する。33文字だけで既定方式を承認しない。
+2. 同じ原本の紙面・文字の証拠を、候補保全／正式登録の全経路へ接続する（CQ-6〜8）。
+   RP-11/12/15の資料不足・分割・答案追加取得を作業表から落とさない。
+3. 実機でしか答えられない問いは、通常の着席姿勢・同じ紙位置で標準／Camera2を比較できる
+   撮影だけの経路を準備してから具体化する。新しいAPKは未導入。測距・後退を必須にしない。
+
+## 2026-09-23 目的と手段を分けた全工程の再点検（最新）
+
+Runs on: Windows PC。実機操作・撮影・導入・GPT送信は実施していない。停止指示を維持する。
+
+利用者の最新訂正: 「全体を見ろ」。OCRは判読性／画像登録の評価に使う手段であり、GPTへの
+全文入力が目的ではない。音声もGPTへ原音を渡し、ローカル文字起こしを必須にしない。
+前のQNだけでは全体の無駄を除去できていなかった。以下が旧OCR優先・ASR必須方針に優先する。
+
+### 本流を追った結果と今回の変更
+
+Runs on: 本checkoutのJava/Python実ソースとオフライン試験。graphは古いためcoverageで変更済み・未追跡を確認し直接読んだ。
+
+| 工程 | 確認した事実・今回の対応 | 残る成立条件 |
+|---|---|---|
+| 姿勢・撮影 | HUDの未校正「40〜60cm離す」を除去。前のAE収束待ちは維持 | 普段の席での画角・細字・明るさ。3枚ごとの再測光・撮影の時間／電力は未測定 |
+| OCR・登録 | 実際は`handlePhoto`→OCR callback→`stageCaptureReview`→確認3秒→`confirmPendingCaptureNow`→保存／送信。OCRより先に本登録する順序ではないが、判読合否で登録を止めていない | CQ-5〜8。ゼロOCR候補の破棄・反復、全画面縮小、紙面／図表の判定不足。認識終了と品質合格を同一にしない |
+| 資料入力 | `document.md`、OCR本文／補正文、ASR文字起こし、本文400文字のlocatorを主経路から除去。全画像・原音を保持 | 画像結合後のモデル内部縮小と原音利用能力／正答は未測定 |
+| 準備・送信 | 内容hashで入力を識別。同一会話の確認済み原本は画像を再符号化せず既存添付を使う。原本変更・会話変更・未確認時は再準備 | 毎問の原本hash読取は残す。端末速度改善の秒数は未測定。画像全体を永続メモリcacheしない |
+| リスニング | 主経路のASR設定・推論・完了待ちを除去。チャンク保存・hash／sample／時計・欠番・再送・原音結合は維持。通常の音声upload入口もASRを起動しない | 原音を扱わない現行API adapterへ、文字起こし無しのまま自動fallbackしない。音声欠損で質問を続けない |
+| 設問・解答 | OCRが取りこぼした選択肢数でGPTの原本ラベルを範囲外とし再質問する処理を止めた | `segment_problems`のOCR依存は残る。`問1…\n(A)…\n(B)…`が3問になる問題は未修正。原本上の解答欄との対応が必要 |
+| 表示・復旧 | 既存の小問別保存、CLOSED、原音／写真再送と送信結果不明時の停止を維持 | `finalize-reading`が全問を同期処理してから返し、Activityはbundleを1回取得する。RP-15の逐次表示は未完 |
+| 運用・開発 | 同じ準備処理を小問ごとに実行しない回帰を追加。全体レビューから外していた入口・fallbackも修正 | AP通し・長時間・容量・着脱復旧は未検証。CIのpush＋pull_request二重起動は別の低優先課題として残す |
+
+図表や選択肢の構文を新しい推測で分類し直す、未校正confidence閾値を品質合格にする、停止中の実機で
+設計不足を埋める、という変更は行っていない。既存8枚の距離・姿勢・撮影群は引き続き不明。
+非ブラウザの互換経路は既存ASRを保持する。新依存・DB schema・撮影寸法／retry／gesture変更なし。
+
+### 5方向の判定
+
+Runs on: Windows PCの差分・現行ソース・既存測定記録。実資料の新しい外部送信はない。
+
+- **目的達成:** 原本から記入用答案を得る目的に対し、不要なOCR入力・ASR待ち・再符号化・再質問を除去。
+  文字の判読、必要資料、全小問対応、表示までの達成は未完了。PRをDraftのままにする。
+- **全体への影響:** ChatGPT入口、旧画像／音声入口、音声受信・完了、fallback、HUDの再開文言まで確認。
+  原本保存・整合性・再送・送信結果不明時の停止を弱めず、画像の大問絞り込みによる共通資料欠落も除去。
+- **事実確認:** 登録前にOCR処理自体は存在するが品質ゲートではない。画像hash変更で会話を変え、
+  OCR/ASR文字列変更だけでは会話を変えない回帰を実行。モデルが原本を読める／高精度とは断言しない。
+- **未確認事項:** 実ML Kitの判読、校正、登録ゲート、OCR依存の設問分割、途中答案、原音利用、AP通し・電池・熱。
+  Tesseractの33文字比較、PC試験、buildをこれらの実証にしない。
+- **指示漏れ:** 全体の目的から要否を見直す指示を局所最適へ狭めたことを訂正。停止・後退不能・未校正距離を
+  守り、旧ASR準備を主経路の前提として再要求しない。計画・task・runbookを同じ方針へ更新。
+
+### PCでの確認
+
+Runs on: `C:\rokid-docscan-starter`。Python 3.12、JDK 17.0.20.1+1、SDK Platform 36／build-tools 36.0.0、wrapper Gradle 9.4.1。
+
+- 初回の回帰: `py -3.12 -m pytest -q tests/test_source_bundle.py tests/test_chatgpt_web_solver.py tests/test_listening_chunks.py`
+  → `11 failed, 63 passed`。OCR資料、再生成、ASR必須を旧実装で再現し、修正後`74 passed`。
+- 別入口の欠損原本／OCR本文回帰 → `3 failed`から修正。OCR由来の再質問、音声を失うfallbackも各1件REDから修正。
+- 最終 `py -3.12 -m pytest -q` → `825 passed, 1 skipped, 1 warning in 102.51s`、exit 0。
+  LIVE=0、新規TEMPのROKID_DATA_DIR。skipは実送信、warningは既存Starlette/httpx非推奨。
+- `py -3.12 -m ruff check .` → `All checks passed!`。`git diff --check` → whitespace errorなし、exit 0。
+- 最終 `.\android-relay\gradlew.bat --no-daemon test testDebugUnitTest assembleDebug`
+  → `BUILD SUCCESSFUL in 1m 20s`、`199 actionable tasks: 19 executed, 180 up-to-date`。
+  JUnit XML集計 → `tests:400, failures:0, errors:0, skipped:0`。
+- `aapt2 dump badging <glassdoc-debug.apk>` → package `dev.rokid.docscanglass.doc`、activity `dev.rokid.docscanglass.doc.DocScanGlassActivity`。
+  `apksigner verify --verbose --print-certs <同APK>` → `Verifies`、v2=true、既存証明書SHA-256
+  `906307478018e09e2937cfd8042a674d27598767577e08a304472aae407ccacc`と一致。
+- `Get-FileHash -Algorithm SHA256 <同APK>` → `f8ce7cefabac0c2c55b9a226418b57f56e51d391270d89d1cdb75381e02f9135`。
+  APKは本checkoutで生成した未導入成果物。前節のAPK hashと混同しない。
+- 未修正の分割を `segment_problems([(0, '問1 Choose one\n(A) apple\n(B) orange')])` で再現:
+  `problem_count: 3 extra_labels: ['(A)', '(B)']`。これを修正済み・品質合格としていない。
+
+### 再開時の判断順
+
+Runs on: まずWindows PCの現行本流と保存原本。以下は実機・GPT送信の再開許可ではない。
+
+1. 「OCRすること」ではなく、保存した原本の判読性を登録前に評価できるかをCQ-5〜8で確かめる。
+   校正されていない指標を閾値だけ足してゲートにしない。候補保全・正式登録の区別を全経路へ接続する。
+2. OCRを正解問題一覧の根拠にし続けない。原本上の小問／解答欄・共通資料を基準にRP-12を設計し、
+   既存の小問別保存をRP-15の追加取得へ届ける。入力の不足をGPTの待ち時間で補わない。
+3. 原音利用・実画像の判読など実機／実モデルでしか確かめられない問いは、停止を維持したまま
+   同一条件で比較できる手順と合格基準を具体化する。距離を測らせたり、後退を前提にしたりしない。
+
+## 2026-09-23 実機前のリポジトリ全体整理を保存（最新）
+
+Runs on: Windows PCのみ。対象branchはfeature/capture-quality-readiness、継続先はPR #38。
+
+利用者の依頼は「実機確認を行う前にリポジトリ全体や目的・機能の整理を行い保存」。
+基準実装 `7a05928` を変えず、既存文書の役割・現状・履歴を整理した。
+
+- `docs/requirements-audit.md`: 目的と使用条件、取得から終了・会場運用までの10項目、採否、
+  CQ/RPへの対応、測定前の順序と5方向の点検を現行入口にする。旧FS/R/S/Xの対応と当時の証拠は保持。
+- `docs/implementation-surfaces.md`: Androidだけでなく、サーバ、scripts、試験、CI、設定、
+  作業資料まで所在を分類。部品があることと本流への接続・実機合格を区別する。
+- `docs/exam-solver-architecture.md`: 全画像・原音経路と品質／小問／配送の未接続を冒頭へ。
+  旧OCR優先／ASR／phone HUDの構成説明は履歴へ分離。README・CLAUDE・plan・todo・索引・決定記録も整合。
+- 現行taskにも残っていた「全文OCR＋関連画像を比較基準」「ASR状態を準備条件」を修正。
+  原本・原音、必要な小問、保存済み答案の表示を基準にする。CQ-5～9と未完RPは完了にしていない。
+
+検査:
+
+- `py -3.12 -m pytest -q tests/test_documentation_contract.py tests/test_surface_inventory.py tests/test_capture_documentation.py tests/test_versioning.py`
+  → 初回 `38 passed in 1.20s`、最終 `38 passed in 2.85s`、exit 0。
+- `git diff --check` → whitespace errorなし、exit 0。
+- グラフcoverageの鮮度は古いため、現行ソース・tracked file一覧と照合。
+  Python／scriptの宣言一覧は `py -3.12 -X utf8 -` でASTを読むだけとし、CLI・サーバ・実providerは起動していない。
+- 文書のみの変更。全pytest／Android build／APK照合は前節の `7a05928` の証拠を保持し、今回は再実行しない。
+
+### 次回の入口と停止条件
+
+Runs on: Windows PCの現行ソース・保存原本。実機操作・追加撮影・APK導入・GPT送信は停止を維持。
+
+まず全体整理を読み、判読・登録（CQ-5～8）→資料・小問・逐次答案（RP-11/12/14/15/16）→
+中断・終了の接続へ戻る。実機だけで分かる疑問は、対象・通常姿勢・比較箇所・原本対応・判定／中止条件を
+明記した限定測定にする。保存8枚の距離・姿勢を推定し直さず、最新2枚を着席基準にしない。
+今回の保存は実装完了・画質改善・会場受け入れを意味しない。
+
+## 2026-09-23 再開: 原寸・縮小・分割の探索比較
+
+Runs on: Windows PC `C:\rokid-docscan-starter`。branch `feature/capture-quality-readiness`、
+開始HEAD `b7855d801838385b25db97094738489b4123e97c`、継続先PR #38。
+
+利用者の「作業を再開し、試行錯誤」に基づき、本記録全文と全体整理を読んでCQ-5の比較から再開した。
+実機操作・追加撮影・導入・GPT送信の停止は維持。既存8枚の条件不明、後退を前提にしない訂正も維持した。
+変更はPC比較関数・回帰試験と既存資料6ファイル。Android、本流のOCR／撮影／登録、HTTP schema、依存は変更していない。
+
+### 試行と採否
+
+Runs on: 既存標準JPEG、PC Tesseract。グラスのML Kitではない。
+
+前回の33文字と同じ原本で3領域109文字を先に転記し、7方式を比較した。
+結果は[研究資料](../../../docs/rokid-capture-research.md#2026-09-23-3領域で縮小補正分割を比較)へ集約。
+原寸21、縮小82、縮小後補間26、明暗補正21、上下分割67、64px重なり分割80、左右分割33の編集誤り。
+上下連結の順序・重複を問題として、縦書きの右→左連結を試したが、3領域目で原寸6→20に悪化した。
+補正・単純分割は本流に採用しない。原寸も誤りが残り、校正／品質合格・全文評価とはしない。
+エージェントの目視転記であり利用者確認済みgoldでも独立test資料でもない。数式・図・綴じ目は未評価。
+
+既存 `capture_evaluation.py` に `compare_text` を追加して実験で使用した。
+記号・上付き・順序・重複を保持したNFC編集距離で、評価前後2048文字を上限とする。
+比較処理は合否を返さない。実験側で行った日本語列の空白除去を記録し、一般の数式評価へ流用しない。
+過去の英数字だけの比較が符号を評価できなかった範囲を補うが、過去の測定結果は書き換えない。
+
+私有資料: `data/device-setup/pr37-camera-baseline-20260922-225825/region-trials/`。
+原本・参照・各OCR結果・派生画像・実験スクリプトはGit対象外。
+`run_compare.py` SHA-256: `c7234dfe65a9e628c9bed007c2890ea32451d461aca0323cd202b6fe4acf9410`。
+
+### 実行した検証
+
+Runs on: Python 3.12のPC試験。Android変更なしのためbuildや実機試験を繰り返さない。
+
+- `py -3.12 -m pytest -q tests/test_capture_evaluation.py -k text_comparison`
+  → 実装前 `16 failed, 24 deselected`。追加のNFC展開上限は修正前 `2 failed, 16 passed, 24 deselected`。
+- `py -3.12 -X utf8 -m pytest -q tests/test_capture_evaluation.py`
+  → 最終 `43 passed in 0.15s`、exit 0。
+- `py -3.12 -X utf8 data/device-setup/pr37-camera-baseline-20260922-225825/region-trials/run_compare.py`
+  → 3領域×7方式の21結果、`original_unchanged: true`、上の誤り数、exit 0。
+  末尾 `split-x` の追加試行もexit 0、`results-x.json` に保存。
+- `py -3.12 -X utf8 -` で既存 `native-metadata.json` の全SHAと原本を照合
+  → `originals_unchanged 8 / 8`、exit 0。元metadataは書き換えない。
+- `py -3.12 -X utf8 -m pytest -q`
+  → `844 passed, 1 skipped, 1 warning in 97.50s (0:01:37)`、exit 0。
+  LIVE=0、新規TEMPのROKID_DATA_DIR。skipは実送信、warningは既存Starlette/httpx非推奨。
+- `py -3.12 -m ruff check .` → `All checks passed!`、exit 0。
+- `py -3.12 -X utf8 -m pytest -q tests/test_capture_documentation.py tests/test_documentation_contract.py tests/test_surface_inventory.py tests/test_versioning.py`
+  → `38 passed in 2.12s`、exit 0（本記録追記前）。
+- `git diff --check` → whitespace errorなし、exit 0（LF/CRLF警告のみ）。
+
+構造探索はcodebase-memoryから開始したが、索引世代2026-09-14T07:22:29Zは古い。
+coverageでnot_tracked/metadata_changedを確認し、JapaneseOcr・DocScanController・PC比較部品と試験を実ソースで照合。
+Agent Skillsのincremental/TDD、codebase-memory、git-workflow、code-review-and-quality、progress-checkpointを使用。
+自己レビューでNFC後の文字数増加による上限漏れを追加検証・修正した。再委任はしていない。
+
+### 次の作業と未完条件
+
+Runs on: まずPC。実機・GPT送信の再開許可は本節に含まれない。
+
+1. CQ-5: 109文字の同一資料を増やすだけで校正にしない。周辺・長い列・数式・図を含む参照と、
+   原本で読める／原本から読めない例を分ける。Tesseractの値をML Kitの合格閾値に移さない。
+2. CQ-6〜8: 原本と同じ領域・回転・版に結びつく証拠を、候補保全と正式登録の境界へ接続する。
+   現在の空OCR破棄・反復、品質未検証の3秒登録は未修正。retry変更の事前承認条件を維持する。
+3. RP-11/12/15の資料不足・偽小問・保存答案の追加取得を未完として保持する。
+   撮影側を測る場合は送信しない限定測定の対象・比較条件・中止条件を先に具体化する。
+
+## 2026-09-23 遅延原因の是正とRP-15（最新）
+
+Runs on: Windows PC `C:\rokid-docscan-starter`。開始HEAD `4845295`、PR #38（Draft、開始時CI 15件success）。実機・GPT送信・導入は停止のまま。
+
+利用者「作業の続き、リポジトリ全体の合理性、目的達成に時間がかかる原因への対処を確認・改善してから作業」。
+
+原因（根拠つき）: 9/22〜23はTesseract比較（33→109文字、ML Kitへ移せないと本記録が明記）と文書再整理2回。
+実機・GPT不要の本流欠陥RP-15/RP-12a/CQ-8接続が未着手。9/14以降の追加行の約35%がmd（6,524 / 12,253非md）。
+対処: todo冒頭に「PCで完結し会場の一周を妨げる欠陥を先に、CQ-5は参照ラベル取得後」と、更新文書を作業表・本記録・版の正本に限る規則を記載。
+
+RP-15（PCで完結する部分）:
+- サーバ: 解答ループを`_solve_deck`へ抽出。`finalize-reading?solve=background`は分割commit後にdaemon threadで同じclaim・保存処理を実行し即返る（`solving: "background"`）。1セッション1本（`_background_solves`）。引数なしは従来どおり同期。
+- glassdoc: `finalizeReadingLocal`がbackgroundを要求。`openAnswers`後、PENDINGが残る間だけ5秒ごとにbundleをGETし`accept`→`refresh`→位置保存。finalize再送はしない。閉じる／別reader／別sessionで停止。
+- 版: APP 0.38.0 / API 1.24.0 / glassdoc 19・0.16.0。凍結relayは同期のまま。
+
+検証:
+- RED: `pytest tests/test_answer_bundle_api.py -k background` → `1 failed, 1 passed`。Android新試験 → `pendingAnswersAreRefreshedUntilNoneRemain FAILED`。
+- `py -3.12 -X utf8 -m pytest -q`（LIVE=0、新規TEMP DATA_DIR） → `846 passed, 1 skipped, 1 warning in 80.92s`。`ruff check .` → `All checks passed!`。`git diff --check` → exit 0。
+- `gradlew --no-daemon test testDebugUnitTest assembleDebug` → `BUILD SUCCESSFUL in 49s`、199 tasks。版更新前の同コマンドでJUnit 401 / failures 0 / errors 0 / skipped 0。
+- glassdoc APK: aapt2 → versionCode 19 / 0.16.0、`DocScanGlassActivity`。apksigner → Verifies、v2、証明書 `906307478018…ccacc` 一致。SHA-256 `520aa6d6b36ad4a4abc5ba36527382c9b7286bf7dc92a8dca965da4cc2a1c8a2`。未導入。
+
+未解決: (1) `ChatGptWebUncertain`で処理が止まった後やサーバ再起動後のPENDINGは解答者不在で「解析中」のまま、glassdocはGETを続ける（再送しない）。表示で区別する設計が要る。(2) 5秒間隔の電力・AP通信量は未測定。(3) 実機・AP経路未検証。
+
+RP-12a（一部）: `parse_layout`で、直前の単位が`問N`のときだけ行頭の英字`(A)`/`（Ｂ）`を行ごと選択肢に保持。
+`segment_problems([(0, '問1 Choose one
+(A) apple
+(B) orange')])` → `['問1']`（従来3問）。大問直下の`(A)`（東大1(A)）と`(1)`は区切りのまま。
+RED `1 failed, 26 passed` → `27 passed`。全体 `848 passed, 1 skipped`、ruff pass。`5568316`のCIは16件pass。
+`(1)`形式の選択肢と小問は文字列だけでは区別できず未修正。原本上の小問・解答欄との対応（RP-12本体）は設計判断が要る。
+
+次: CQ-8（品質未検証の3秒登録と候補保全の分離）とRP-12本体の方針を利用者と確認。Runs on: Windows PC。

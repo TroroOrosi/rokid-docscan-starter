@@ -85,6 +85,8 @@ public class CaptureMemoryOwnershipTest {
         GlassesCaptureSurface surface = surface(hud, new Handler(Looper.getMainLooper()));
         long generation = surface.showCaptureReview(jpeg(), 270, List.of("P1", "3秒以内", "無操作で確定"));
         ShadowLooper.runUiThreadTasksIncludingDelayedTasks();
+        assertEquals("ordinary review shows only the actual photo", List.of(),
+                ReflectionHelpers.getField(hud, "lines"));
         Bitmap image = ReflectionHelpers.getField(hud, "preview");
         Object frame = ReflectionHelpers.getField(hud, "visibleFrame");
         ReflectionHelpers.setField(hud, "frameReported", true);
@@ -96,7 +98,8 @@ public class CaptureMemoryOwnershipTest {
         assertTrue((Boolean) ReflectionHelpers.getField(hud, "frameReported"));
         assertTrue(surface.isCaptureReviewVisible(generation));
         List<String> lines = ReflectionHelpers.getField(hud, "lines");
-        assertEquals("確認後に撮影終了・操作せず待つ", lines.get(2));
+        // Only an explicit end gesture adds a notice; it does not restart review.
+        assertEquals(List.of("確認後に撮影終了・操作せず待つ"), lines);
         surface.showCaptureEndRequested();
         surface.showHud(List.of("保存済み"));
         ShadowLooper.runUiThreadTasksIncludingDelayedTasks();

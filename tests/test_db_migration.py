@@ -165,3 +165,18 @@ def test_legacy_evidence_semantics_are_preserved(tmp_path, monkeypatch):
     ).fetchone()
     assert json.loads(sol2["evidence_pages_json"]) == [1, 2]
     conn.close()
+
+
+def test_analysis_stage_is_additive_and_preserves_an_existing_session(tmp_path, monkeypatch):
+    db_file = tmp_path / "legacy.db"
+    _make_legacy_db(db_file)
+    with sqlite3.connect(db_file) as conn:
+        conn.execute("INSERT INTO exam_sessions(id, mode) VALUES (7, 'mock')")
+    monkeypatch.setenv("ROKID_DATA_DIR", str(tmp_path))
+    from app import config, db
+    importlib.reload(config)
+    importlib.reload(db)
+    db.init_db(db_path=db_file)
+    db.init_db(db_path=db_file)
+    with sqlite3.connect(db_file) as conn:
+        assert conn.execute("SELECT mode, analysis_stage FROM exam_sessions WHERE id=7").fetchone() == ("mock", "single")

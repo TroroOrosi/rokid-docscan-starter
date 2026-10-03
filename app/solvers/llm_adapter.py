@@ -50,9 +50,12 @@ _ANSWER_ONLY_SYSTEM = (
     "and missing_material (string). The answer must contain ONLY what belongs on "
     "the answer sheet: the requested choice label, value, expression, or written text. "
     "Follow the question's required language, units, precision and length. Do not add "
-    "an answer heading, supplementary explanations, confidence or working. When the "
-    "question explicitly requests a proof, reason or derivation, include that complete "
-    "written response in answer. Never shorten an answer to fit a display. "
+    "an answer heading, supplementary explanations, confidence or working, unless the "
+    "answer sheet itself expects a written solution. When the answer format is written "
+    "(記述式), such as a mathematics calculation or proof, the answer is that complete "
+    "written solution, including the derivation needed for full credit. Never shorten "
+    "an answer to fit a display. Write mathematics as plain text with Unicode symbols "
+    "(x², √3, π, ≤, a/b); never LaTeX, because the answer is shown as text on glasses. "
     "If required material is missing or unreadable, return status needs_input, an "
     "empty answer and identify the missing material separately; do not guess. "
     "For questions requiring a drawing, include diagrams (array, at most 4). Each has "
@@ -150,26 +153,66 @@ def _read_image(path: str | None) -> bytes | None:
 
 
 def _read_images(question: Question) -> list[bytes]:
-    """Every readable page image of the question's 大問, in reading order.
-
-    Falls back to the single `image_path` so a question built the old way still
-    carries its page. Unreadable paths are skipped rather than failing the
-    solve: a missing page is worse answered than not answered at all.
-    """
-    paths = list(question.image_paths) or ([question.image_path] if question.image_path else [])
-    return [data for data in (_read_image(p) for p in paths) if data]
+    """Every declared original for the browser route; never skip a missing page."""
+    paths = (list(question.document_image_paths) or list(question.image_paths)
+             or ([question.image_path] if question.image_path else []))
+    if not set(question.required_image_paths).issubset(paths):
+        raise ValueError("required page image is unavailable")
+    images = [_read_image(path) for path in paths]
+    if any(not image for image in images):
+        raise ValueError("original page image is unavailable")
+    return images
 
 
 def _read_audio(question: Question) -> tuple[str, bytes] | None:
-    """The listening recording as (filename, bytes), or None.
-
-    Unreadable paths are skipped exactly as page images are: a listening
-    question still has its transcript, so losing the recording degrades the
-    answer rather than failing the solve.
-    """
+    """Original recording for the browser route; declared audio must be readable."""
     path = getattr(question, "audio_path", None)
     data = _read_image(path)
+    if path and not data:
+        raise ValueError("original listening audio unavailable")
     return (Path(path).name, data) if data else None
+
+
+def answer_numbers(value) -> list[int]:
+    """The 解答番号 printed beside one question's blanks; [] when none is printed.
+
+    Accepts a single number or a list. These numbers, not the model's own
+    ordering, are what says whether the one reply answered the whole booklet.
+    """
+    values = value if isinstance(value, list) else [value]
+    numbers: list[int] = []
+    for item in values[:20]:
+        try:
+            number = int(str(item).strip())
+        except (TypeError, ValueError):
+            continue
+        if 1 <= number <= 999 and number not in numbers:
+            numbers.append(number)
+    return numbers
+
+
+def answer_sheet_result(data: dict, *, subject: str | None, extras: dict) -> SolveResult:
+    """One answer-only reply as a SolveResult; ValueError when it breaks the rules.
+
+    Shared by the per-question solve and the one-message booklet answer, so a
+    小問 is held to the same rules whichever message carried it.
+    """
+    status = data.get("status", "ready")
+    if status not in ("ready", "needs_input"):
+        raise ValueError("invalid answer-sheet status")
+    answer = data.get("answer")
+    diagrams = validate_diagrams(data.get("diagrams", []))
+    if status == "ready" and (not isinstance(answer, str) or not (answer.strip() or diagrams)):
+        raise ValueError("written answer must be a non-empty string")
+    return SolveResult(
+        answer=answer.strip() if status == "ready" else "",
+        subject=subject,
+        diagrams=diagrams if status == "ready" else [],
+        extras={**extras, "answer_status": status,
+                "answer_no": answer_numbers(data.get("answer_no")),
+                "missing_material": str(data.get("missing_material", ""))
+                if status == "needs_input" else ""},
+    )
 
 
 class LLMSolver(Solver):
@@ -224,22 +267,9 @@ class LLMSolver(Solver):
             question=question,
         )
         if question.answer_only:
-            status = data.get("status", "ready")
-            if status not in ("ready", "needs_input"):
-                raise ValueError("invalid answer-sheet status")
-            answer = data.get("answer")
-            diagrams = validate_diagrams(data.get("diagrams", []))
-            if status == "ready" and (not isinstance(answer, str) or not (answer.strip() or diagrams)):
-                raise ValueError("written answer must be a non-empty string")
-            return SolveResult(
-                answer=answer.strip() if status == "ready" else "",
-                subject=question.subject,
-                diagrams=diagrams if status == "ready" else [],
-                extras={"source": self.name, "provider": self.provider, "model": client.model,
-                        "answer_status": status,
-                        "missing_material": str(data.get("missing_material", ""))
-                        if status == "needs_input" else ""},
-            )
+            return answer_sheet_result(
+                data, subject=question.subject,
+                extras={"source": self.name, "provider": self.provider, "model": client.model})
         answer = str(data.get("answer", "")).strip()[:max_answer_len]
         return SolveResult(
             answer=answer,

@@ -1,19 +1,67 @@
-"""The deck bench's per-paper isolation.
+"""The deck bench's per-paper isolation, spread rendering, photo input, and
+server-route polling.
 
 The bench writes each run into a database directory. It used to write every
 paper into ONE --data-dir, so a query issued after a later run read the
 previous paper's rows (observed while diagnosing on 2026-09-14).
 """
 
+import json
+import re
 import sys
+import time
 from pathlib import Path
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from scripts.run_exam_deck import deck_data_dir  # noqa: E402
+import scripts.run_exam_deck as run_exam_deck  # noqa: E402
+from scripts.run_exam_deck import (  # noqa: E402
+    call,
+    deck_data_dir,
+    load_images,
+    main,
+    pair_spreads,
+    render_spreads,
+    wait_for_answers,
+)
+
+# Importing this here, at collection time, fires the one StarletteDeprecation-
+# Warning that "install httpx2 instead" always prints on the FIRST import of
+# starlette.testclient -- while collection's own warnings context has no
+# per-test @pytest.mark.filterwarnings("error") applied yet. Without this, a
+# later test that IS marked "error" would be the first to trigger it and fail
+# on a warning this task did not introduce.
+import fastapi.testclient  # noqa: E402, F401
+
+FULL_SPAN = range(0, 10_000)
 
 ROOT = Path("C:/rokid-exam-materials/rundata")
 
+
+# -- transport errors on a server-route call ----------------------------------
+
+def test_a_transport_error_prints_fail_and_never_raises(capsys):
+    import httpx
+
+    def boom(*_a, **_k):
+        raise httpx.ConnectError("refused")
+
+    result = call("settings", boom)
+
+    assert result is None
+    assert "FAIL  settings: no response (ConnectError)" in capsys.readouterr().out
+
+
+def test_a_successful_call_passes_through_args_and_kwargs():
+    def echo(*a, **k):
+        return (a, k)
+
+    assert call("step", echo, 1, 2, key="value") == ((1, 2), {"key": "value"})
+
+
+# -- per-paper isolation (existing) ------------------------------------------
 
 def test_two_papers_never_share_a_database():
     a = deck_data_dir(ROOT, Path("C:/m/kyotsu/sugaku1A.pdf"))
@@ -37,3 +85,650 @@ def test_a_japanese_paper_name_is_kept_but_made_path_safe():
 
 def test_a_blank_stem_still_yields_a_directory():
     assert deck_data_dir(ROOT, Path("C:/m/   .pdf")).name == "unnamed"
+
+
+def test_two_glassdoc_runs_never_share_a_database(tmp_path):
+    """Each run keeps its photos in <run>/originals; the run names the database."""
+    a, b = tmp_path / "run-a" / "originals", tmp_path / "run-b" / "originals"
+    a.mkdir(parents=True)
+    b.mkdir(parents=True)
+    assert deck_data_dir(ROOT, a).name == "run-a-originals"
+    assert deck_data_dir(ROOT, a) != deck_data_dir(ROOT, b)
+
+
+# -- spreads: pairing and PDF rendering ---------------------------------------
+
+def _solid(width, height, color):
+    from PIL import Image
+
+    return Image.new("RGB", (width, height), color)
+
+
+def test_pair_spreads_puts_the_earlier_page_on_the_left():
+    red, blue, green = (
+        _solid(100, 200, "red"), _solid(140, 200, "blue"), _solid(80, 150, "green"))
+    spreads = pair_spreads([red, blue, green])
+    assert len(spreads) == 2
+    first = spreads[0]
+    assert first.size == (240, 200)
+    assert first.getpixel((0, 0)) == (255, 0, 0)
+    assert first.getpixel((239, 0)) == (0, 0, 255)
+    assert spreads[1] is green
+
+
+def _pdf(path, pages, size=(515.9, 728.5)):
+    import pypdfium2 as pdfium
+
+    doc = pdfium.PdfDocument.new()
+    for _ in range(pages):
+        doc.new_page(*size)
+    doc.save(str(path))
+
+
+def _pdf_with_text(path, texts, size=(515.9, 728.5)):
+    """A PDF whose pages pdfminer can actually read back, unlike _pdf()'s
+    blank pages -- needed to reach a segmented (non-0-problem) deck.
+    """
+    import ctypes
+
+    import pypdfium2 as pdfium
+
+    doc = pdfium.PdfDocument.new()
+    raw = pdfium.raw
+    for text in texts:
+        page = doc.new_page(*size)
+        textobj_raw = raw.FPDFPageObj_NewTextObj(doc.raw, b"Helvetica", 24.0)
+        buf = (text + chr(0)).encode("utf-16-le")
+        assert raw.FPDFText_SetText(textobj_raw, ctypes.cast(buf, ctypes.POINTER(ctypes.c_ushort)))
+        raw.FPDFPageObj_Transform(textobj_raw, 1, 0, 0, 1, 50, 300)
+        page.insert_obj(pdfium.PdfObject(textobj_raw, pdf=doc))
+        page.gen_content()
+    doc.save(str(path))
+
+
+def test_render_spreads_pairs_pdf_pages_at_glasses_density(tmp_path):
+    import io
+
+    pytest.importorskip("pypdfium2")
+    from PIL import Image
+
+    pdf = tmp_path / "paper.pdf"
+    _pdf(pdf, 3)
+    spreads = render_spreads(pdf, range(0, 10_000))  # clipped to the 3 pages
+    assert len(spreads) == 2
+    for jpeg, text in spreads:
+        assert jpeg[:2] == b"\xff\xd8"
+        assert text == ""
+    first = Image.open(io.BytesIO(spreads[0][0]))
+    second = Image.open(io.BytesIO(spreads[1][0]))
+    assert abs(first.size[0] - 1820) <= 2 and abs(first.size[1] - 1285) <= 2
+    assert abs(second.size[0] - 910) <= 2 and abs(second.size[1] - 1285) <= 2
+
+
+# -- glassdoc originals: load_images ------------------------------------------
+
+def test_photos_load_in_name_order_without_text(tmp_path):
+    from PIL import Image
+
+    p2, p1 = tmp_path / "img-2.jpg", tmp_path / "img-1.jpg"
+    Image.new("RGB", (200, 100), "red").save(p2)
+    Image.new("RGB", (200, 100), "blue").save(p1)
+    (tmp_path / "notes.txt").write_text("not a page")
+
+    pages = load_images(tmp_path, FULL_SPAN)
+
+    assert [text for _, text in pages] == ["", ""]
+    # name order is img-1 then img-2, not upload/creation order
+    assert pages[0][0] == p1.read_bytes()
+    assert pages[1][0] == p2.read_bytes()
+
+
+def test_a_portrait_photo_is_rejected_by_name(tmp_path):
+    from PIL import Image
+
+    Image.new("RGB", (100, 200), "red").save(tmp_path / "img-1.jpg")
+    with pytest.raises(ValueError, match="img-1.jpg"):
+        load_images(tmp_path, FULL_SPAN)
+
+
+def test_an_unreadable_file_is_rejected_by_name(tmp_path):
+    (tmp_path / "img-1.jpg").write_bytes(b"not an image")
+    with pytest.raises(ValueError, match="img-1.jpg"):
+        load_images(tmp_path, FULL_SPAN)
+
+
+def test_a_bad_file_outside_the_span_does_not_fail_the_run(tmp_path):
+    from PIL import Image
+
+    Image.new("RGB", (200, 100), "blue").save(tmp_path / "img-1.jpg")
+    (tmp_path / "img-2.jpg").write_bytes(b"not an image")
+
+    pages = load_images(tmp_path, range(0, 1))
+
+    assert len(pages) == 1
+
+
+# -- wait_for_answers: scripted fake client + fake clock ----------------------
+
+class _Clock:
+    """A monotonic clock driven only by `sleep`, so a test never really waits."""
+
+    def __init__(self):
+        self.now = 0.0
+
+    def __call__(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.now += seconds
+
+
+class _Response:
+    def __init__(self, status_code, body):
+        self.status_code = status_code
+        self._body = body
+        self.text = json.dumps(body)
+
+    def json(self):
+        return self._body
+
+
+def _bundle(*statuses, revision=1):
+    return _Response(200, {"revision": revision, "items": [{"status": s} for s in statuses]})
+
+
+class _Server:
+    """answer-bundle as the background batch serves it, one response per poll."""
+
+    def __init__(self, responses):
+        self.responses = list(responses)
+
+    def get(self, url, **kwargs):
+        response = self.responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+
+def test_wait_polls_through_analysis_then_pending_then_ready():
+    clock = _Clock()
+    server = _Server([
+        _Response(409, {"detail": "the answers are being made"}),
+        _bundle("pending", "pending", revision=1),
+        _bundle("ready", "pending", revision=2),
+        _bundle("ready", "ready", revision=3),
+    ])
+    got, reason = wait_for_answers(server, 1, 60, interval=0, clock=clock, sleep=clock.sleep)
+    assert got.status_code == 200 and reason is None and server.responses == []
+
+
+def test_a_long_analysis_prints_its_line_only_once(capsys):
+    clock = _Clock()
+    responses = [_Response(409, {"detail": "the answers are being made"}) for _ in range(3)]
+    responses.append(_bundle("ready", revision=1))
+    server = _Server(responses)
+    wait_for_answers(server, 1, 2, interval=1, clock=clock, sleep=clock.sleep)
+    out = capsys.readouterr().out
+    assert sum(1 for line in out.splitlines() if "analysing" in line) == 1
+
+
+def test_wait_stops_at_once_on_any_other_conflict():
+    clock = _Clock()
+    server = _Server([_Response(409, {"detail": "no problems were detected"})])
+    got, reason = wait_for_answers(server, 1, 60, interval=0, clock=clock, sleep=clock.sleep)
+    assert got.status_code == 409 and reason is None
+
+
+def test_wait_reports_a_stall_only_after_the_bound_has_passed():
+    clock = _Clock()
+    # Every poll repeats the same revision; interval=1 lets the fake clock
+    # advance, so the stall check can actually cross stall_s.
+    server = _Server([_bundle("pending", revision=7) for _ in range(20)])
+    got, reason = wait_for_answers(server, 1, 5, interval=1, clock=clock, sleep=clock.sleep)
+    assert got.status_code == 200
+    assert reason is not None and "unchanged" in reason
+    assert clock.now >= 5  # not cut short before the bound passed
+
+
+def test_wait_follows_a_changing_revision_well_past_the_stall_bound():
+    clock = _Clock()
+    responses = [_bundle("pending", "pending", revision=n) for n in range(1, 20)]
+    responses.append(_bundle("ready", "ready", revision=20))
+    server = _Server(responses)
+    got, reason = wait_for_answers(server, 1, 2, interval=1, clock=clock, sleep=clock.sleep)
+    assert got.status_code == 200 and reason is None
+    assert clock.now > 2  # no overall ceiling
+
+
+def test_a_long_analysis_does_not_stop_the_wait():
+    clock = _Clock()
+    responses = [_Response(409, {"detail": "the answers are being made"}) for _ in range(10)]
+    responses.append(_bundle("ready", revision=1))
+    server = _Server(responses)
+    got, reason = wait_for_answers(server, 1, 2, interval=1, clock=clock, sleep=clock.sleep)
+    assert got.status_code == 200 and reason is None
+    assert clock.now > 2
+
+
+def test_wait_stops_at_once_when_the_server_stopped_its_batch():
+    """After an uncertain send or a lost chat the server sends nothing more for
+    this session, so the rest stay pending and only the stall bound, minutes
+    later, would end the wait."""
+    clock = _Clock()
+    issue = "送信結果の確認待ち。自動再送は停止しています"
+    server = _Server([_Response(200, {"revision": 1, "items": [
+        {"status": "failed", "issue": issue},
+        {"status": "pending", "issue": "未解答"},
+    ]})])
+    got, reason = wait_for_answers(server, 1, 60, interval=1, clock=clock, sleep=clock.sleep)
+    assert got.status_code == 200
+    assert reason == f"the server stopped the batch: {issue}"
+    assert clock.now == 0
+
+
+def test_a_transport_error_keeps_the_last_good_response_then_gives_up():
+    import httpx
+
+    clock = _Clock()
+    good = _bundle("pending", revision=1)
+    server = _Server([good] + [httpx.ConnectError("refused") for _ in range(10)])
+    got, reason = wait_for_answers(server, 1, 5, interval=1, clock=clock, sleep=clock.sleep)
+    assert got is good and reason is not None and "no response" in reason
+
+
+# -- CLI validation ------------------------------------------------------------
+
+def test_images_without_server_exits_2(tmp_path):
+    with pytest.raises(SystemExit) as excinfo:
+        main(["--images", str(tmp_path)])
+    assert excinfo.value.code == 2
+
+
+def test_key_without_server_exits_2():
+    with pytest.raises(SystemExit) as excinfo:
+        main(["--pdf", "paper.pdf", "--key", "secret"])
+    assert excinfo.value.code == 2
+
+
+def test_a_bad_pdf_path_creates_no_data_directory(tmp_path):
+    """Pages are read before the data directory OR reports/ is touched
+    (in-process route)."""
+    bad = tmp_path / "kyotsu" / "missing.pdf"
+    data_root = tmp_path / "rundata"
+    with pytest.raises(FileNotFoundError):
+        main(["--pdf", str(bad), "--data-dir", str(data_root)])
+    assert not data_root.exists()
+    assert not (tmp_path / "reports").exists()
+
+
+@pytest.mark.parametrize("flag,value", [
+    ("--daimon", "1,7"),
+    ("--solver", "local"),
+    ("--scale", "3.0"),
+    ("--data-dir", "C:/somewhere"),
+    ("--audio", "a.mp3"),
+])
+def test_server_incompatible_flags_exit_2(flag, value):
+    with pytest.raises(SystemExit) as excinfo:
+        main(["--pdf", "paper.pdf", "--server", "http://phone:8000", flag, value])
+    assert excinfo.value.code == 2
+
+
+@pytest.mark.filterwarnings("error")
+def test_in_process_route_reaches_the_real_build_client_with_no_timeout_warning(
+        tmp_path, monkeypatch):
+    """build_client() returns a real fastapi TestClient. Every call site in
+    the in-process route must reach it with no `timeout` kwarg at all, or
+    this fails on StarletteDeprecationWarning turned into an error.
+
+    build_client() overwrites os.environ["ROKID_DATA_DIR"/"ROKID_SOLVER"]
+    itself; setenv first so monkeypatch restores the pre-test values after.
+    """
+    pytest.importorskip("pypdfium2")
+    pytest.importorskip("pdfminer")
+    monkeypatch.setenv("ROKID_DATA_DIR", str(tmp_path / "unused"))
+    monkeypatch.setenv("ROKID_SOLVER", "local")
+
+    pdf = tmp_path / "paper.pdf"
+    _pdf_with_text(pdf, ["問1 two plus two", "問2 three plus three"])
+    out = tmp_path / "reports" / "paper.json"
+
+    code = main([
+        "--pdf", str(pdf), "--solver", "local",
+        "--data-dir", str(tmp_path / "rundata"), "--out", str(out),
+    ])
+
+    # local deliberately never solves (app/solvers/local_placeholder.py), so
+    # the deck stays pending and the run reports 2, not 0 -- this is
+    # end-to-end plumbing through the real TestClient, not a solved deck.
+    assert code == 2
+    assert out.exists()
+
+
+# -- plumbing through the real FastAPI app, model replaced --------------------
+# No network, no phone, no ChatGPT: ROKID_SOLVER=test-provider and
+# main._answer_all/main.solve_with_fallback are monkeypatched (the pattern in
+# tests/test_answer_bundle_api.py::test_one_message_names_and_answers_the_whole_deck);
+# run_exam_deck.remote_client returns the in-process TestClient instead of
+# reaching an actual host.
+
+@pytest.fixture
+def server_app(tmp_path, monkeypatch):
+    """The real FastAPI app, in-process, standing in for the phone's server."""
+    import importlib
+
+    monkeypatch.setenv("ROKID_DATA_DIR", str(tmp_path / "serverdata"))
+    monkeypatch.delenv("ROKID_ALLOW_REAL_EXAM_SOLVE", raising=False)
+    import app.config as config
+    importlib.reload(config)
+    import app.db as db
+    importlib.reload(db)
+    import app.main as main
+    importlib.reload(main)
+    main.ensure_dirs()
+    main.db.init_db()
+    from fastapi.testclient import TestClient
+    return main, TestClient(main.app)
+
+
+@pytest.mark.filterwarnings("error:You should not use the 'timeout' argument")
+def test_server_route_uploads_two_spreads_with_no_ocr_text(server_app, tmp_path, monkeypatch):
+    """Plumbing check with the model replaced: no network, no phone, no ChatGPT."""
+    pytest.importorskip("pypdfium2")
+    main, client = server_app
+    monkeypatch.setenv("ROKID_SOLVER", "test-provider")
+    monkeypatch.setattr(run_exam_deck, "remote_client", lambda server, key: client)
+    monkeypatch.setattr(run_exam_deck, "POLL_S", 0)
+
+    received = []
+
+    def answer_all(question):
+        from app.solvers.base import SolveResult
+
+        received.append(question.document_pages)
+        return [({"group": "第1問", "label": "問1", "pages": [1]}, SolveResult(answer="x")),
+                ({"group": "第1問", "label": "問2", "pages": [2]}, SolveResult(answer="y"))]
+
+    def solve(*, question, **_kw):
+        raise AssertionError("one message answers the booklet; nothing is sent per question")
+
+    monkeypatch.setattr(main, "_answer_all", answer_all)
+    monkeypatch.setattr(main, "solve_with_fallback", solve)
+
+    pdf = tmp_path / "butsuri.pdf"
+    _pdf(pdf, 4)
+    out = tmp_path / "reports" / "butsuri-server.json"
+
+    code = run_exam_deck.main(
+        ["--pdf", str(pdf), "--server", "http://phone.example:8000", "--out", str(out)])
+
+    assert code == 0
+    assert len(received) == 1 and len(received[0]) == 2
+    assert all(page["ocr_text"] == "" for page in received[0])
+    assert out.exists()
+
+
+@pytest.mark.filterwarnings("error:You should not use the 'timeout' argument")
+def test_server_route_stops_before_polling_when_the_phone_solver_is_local(
+        server_app, tmp_path, monkeypatch, capsys):
+    """No PDF here: this test's subject is the local-solver stop, not PDF
+    rendering, so it uses --images (Pillow JPEGs) and needs no pypdfium2.
+    """
+    from PIL import Image
+
+    main, client = server_app
+    monkeypatch.setenv("ROKID_SOLVER", "local")
+    monkeypatch.setattr(run_exam_deck, "remote_client", lambda server, key: client)
+    monkeypatch.setattr(run_exam_deck, "POLL_S", 0)
+
+    def must_not_poll(*_a, **_k):
+        raise AssertionError("answer-bundle must not be polled: no background solve started")
+
+    monkeypatch.setattr(run_exam_deck, "wait_for_answers", must_not_poll)
+
+    images = tmp_path / "kokugo" / "originals"
+    images.mkdir(parents=True)
+    Image.new("RGB", (200, 100), "red").save(images / "img-1.jpg")
+    Image.new("RGB", (200, 100), "blue").save(images / "img-2.jpg")
+    out = tmp_path / "reports" / "kokugo-server.json"
+
+    code = run_exam_deck.main(
+        ["--images", str(images), "--server", "http://phone.example:8000", "--out", str(out)])
+
+    assert code == 1
+    printed = capsys.readouterr().out
+    assert "background solve" in printed
+    assert re.search(r"^ok    session        \d+$", printed, re.MULTILINE)
+    assert f"\n{RERUN_NOTE}\n" in printed, "a FAIL after the session says what a re-run costs"
+    assert not out.exists()
+
+
+RERUN_NOTE = "      a re-run creates a new session, and so a new chat for this subject"
+
+
+def _one_photo(tmp_path):
+    from PIL import Image
+
+    images = tmp_path / "kokugo" / "originals"
+    images.mkdir(parents=True)
+    Image.new("RGB", (200, 100), "red").save(images / "img-1.jpg")
+    return images
+
+
+@pytest.mark.filterwarnings("error:You should not use the 'timeout' argument")
+def test_server_route_stops_before_any_upload_when_the_phone_solver_is_not_ready(
+        server_app, tmp_path, monkeypatch, capsys):
+    """It used to upload the whole booklet and then fail with `finalize: 500`."""
+    main, client = server_app
+    monkeypatch.setattr(main, "provider_status", lambda: {
+        "analyzer": {"name": "local", "ready": True},
+        "solver": {"name": "chatgpt-web", "ready": False, "message": "no DevTools endpoint"},
+    })
+    monkeypatch.setattr(run_exam_deck, "remote_client", lambda server, key: client)
+    posted = []
+    real_post = client.post
+    monkeypatch.setattr(client, "post", lambda url, *a, **kw: posted.append(url) or real_post(url, *a, **kw))
+    out = tmp_path / "reports" / "kokugo-server.json"
+
+    code = run_exam_deck.main(["--images", str(_one_photo(tmp_path)),
+                               "--server", "http://phone.example:8000", "--out", str(out)])
+
+    printed = capsys.readouterr().out
+    assert code == 1
+    assert posted == [], "nothing uploaded"
+    assert ("FAIL  settings: solver chatgpt-web not ready: no DevTools endpoint\n"
+            "      keep Chrome in the foreground on the phone "
+            "(Termux in front removes its DevTools socket)\n") in printed
+    assert RERUN_NOTE not in printed, "no session exists yet"
+    assert not out.exists()
+
+
+@pytest.mark.filterwarnings("error:You should not use the 'timeout' argument")
+def test_server_route_stops_at_once_when_the_server_batch_loses_the_chat(
+        server_app, tmp_path, monkeypatch, capsys):
+    from app.solvers.chatgpt_web import ChatGptWebChatLost
+
+    from app.solvers.registry import _registry
+
+    main, client = server_app
+    # `local` never starts a background solve, so the batch needs another
+    # registered name; the model itself is replaced below.
+    monkeypatch.setenv("ROKID_SOLVER", "openai")
+    monkeypatch.setattr(_registry.get("openai"), "ready", lambda: True)
+    monkeypatch.setattr(run_exam_deck, "remote_client", lambda server, key: client)
+    monkeypatch.setattr(run_exam_deck, "POLL_S", 0)
+    # A stall-bound stop would take this long; a stop at once takes a moment.
+    monkeypatch.setattr(run_exam_deck, "STALL_S", 30.0)
+
+    def answer_all(question):
+        raise ChatGptWebChatLost("could not return to the subject's chat")
+
+    monkeypatch.setattr(main, "_answer_all", answer_all)
+    out = tmp_path / "reports" / "kokugo-server.json"
+    started = time.monotonic()
+
+    code = run_exam_deck.main(["--images", str(_one_photo(tmp_path)),
+                               "--server", "http://phone.example:8000", "--out", str(out)])
+
+    printed = capsys.readouterr().out
+    assert time.monotonic() - started < 15, "stopped at once, not at the stall bound"
+    assert code == 2
+    assert ("STOP  the server stopped the batch: "
+            "教科のチャットへ戻れません。新しいチャットは作っていません\n"
+            f"{RERUN_NOTE}\n") in printed
+    assert json.loads(out.read_text(encoding="utf-8"))["stopped"].startswith(
+        "the server stopped the batch")
+
+
+@pytest.mark.filterwarnings("error:You should not use the 'timeout' argument")
+def test_server_route_writes_the_default_report_path(server_app, tmp_path, monkeypatch):
+    """No --out: <name>-p<pages>-server.json next to a reports/ sibling of the
+    images directory. The images live under tmp_path/kyotsu/originals/ so that
+    sibling (src.parent.parent / "reports") resolves inside tmp_path, never
+    under C:/rokid-exam-materials. Not the PDF rendering test's subject, so it
+    uses --images (Pillow JPEGs) and needs no pypdfium2.
+    """
+    from PIL import Image
+
+    main, client = server_app
+    # "test-provider" is not a registered solver name: get_solver() would
+    # silently fall back to "local" and this test would not catch a
+    # server_solver regression. "openai" is registered (app/llm.py
+    # ADAPTER_PROVIDERS) and its .info() needs no credentials or network.
+    # Without a key it reports ready=false, which now stops the bench at
+    # settings, so it is made ready here; the model is replaced below.
+    from app.solvers.registry import _registry
+
+    monkeypatch.setenv("ROKID_SOLVER", "openai")
+    monkeypatch.setattr(_registry.get("openai"), "ready", lambda: True)
+    monkeypatch.setattr(run_exam_deck, "remote_client", lambda server, key: client)
+    monkeypatch.setattr(run_exam_deck, "POLL_S", 0)
+
+    class _Solver:
+        name = "openai"
+
+    def solve(*, question, **_kw):
+        from app.solvers.base import SolveResult
+
+        return SolveResult(answer="x"), _Solver()
+
+    monkeypatch.setattr(main, "solve_with_fallback", solve)
+
+    images = tmp_path / "kyotsu" / "originals"
+    images.mkdir(parents=True)
+    for i in range(1, 5):
+        Image.new("RGB", (200, 100), "red").save(images / f"img-{i}.jpg")
+
+    code = run_exam_deck.main(
+        ["--images", str(images), "--pages", "1-4", "--server", "http://phone.example:8000"])
+
+    assert code == 0
+    report_path = tmp_path / "reports" / "kyotsu-originals-p1-4-server.json"
+    assert report_path.exists()
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["server_solver"] == "openai"
+    assert report["stopped"] is None
+
+
+def test_a_pending_item_the_server_is_retrying_does_not_stall_the_wait():
+    clock = _Clock()
+    retrying = _Response(200, {"revision": 3, "items": [
+        {"status": "pending", "issue": "ChatGPTへ送れませんでした。自動で再試行します"}]})
+    server = _Server([retrying] * 10 + [_bundle("ready", revision=4)])
+    got, reason = wait_for_answers(server, 1, 2, interval=1, clock=clock, sleep=clock.sleep)
+    assert got.status_code == 200 and reason is None and clock.now > 2
+
+
+def test_the_reason_a_pending_item_waits_is_printed(capsys):
+    clock = _Clock()
+    retrying = _Response(200, {"revision": 3, "items": [
+        {"status": "pending", "issue": "ChatGPTへ送れませんでした。自動で再試行します"}]})
+    server = _Server([retrying, _bundle("ready", revision=4)])
+    wait_for_answers(server, 1, 60, interval=0, clock=clock, sleep=clock.sleep)
+    assert "ChatGPTへ送れませんでした。自動で再試行します" in capsys.readouterr().out
+
+
+def _graded(*rows):
+    """answer_all's shape, built through the real answer rules like a session."""
+    from app.solvers.llm_adapter import answer_sheet_result
+
+    items = [{"group": "第1問", "label": label, "answer_no": [number], "pages": [1],
+              "status": "ready", "answer": answer}
+             for label, number, answer in rows]
+    return [(item, answer_sheet_result(item, subject=None, extras={})) for item in items]
+
+
+# The 2026-09-29 4a reply and the official key for 物理基礎 101-104.
+_RUN_4A = (("問1", 101, "④"), ("問2", 102, "②"), ("問3", 103, "④"), ("問4", 104, "②"))
+_KEY_4A = {"101": "4", "102": "2", "103": "4", "104": "2"}
+
+
+@pytest.mark.parametrize("key, expected", [
+    (_KEY_4A, 0),
+    ({**_KEY_4A, "103": "1"}, 2),   # one official answer differs
+    ({**_KEY_4A, "105": "3"}, 2),   # a 解答番号 the reply never answered
+])
+def test_the_bench_passes_only_when_every_official_answer_matches(
+        server_app, tmp_path, monkeypatch, key, expected):
+    """9/30: one ready item was enough to exit 0, and nothing compared the
+    answers with the official key. The 4a reply (④②④②) is the fixture."""
+    pytest.importorskip("pypdfium2")
+    main, client = server_app
+    monkeypatch.setenv("ROKID_SOLVER", "test-provider")
+    monkeypatch.setattr(run_exam_deck, "remote_client", lambda server, k: client)
+    monkeypatch.setattr(run_exam_deck, "POLL_S", 0)
+    monkeypatch.setattr(main, "_answer_all", lambda question: _graded(*_RUN_4A))
+    monkeypatch.setattr(main, "solve_with_fallback",
+                        lambda **_: pytest.fail("per-question send"))
+
+    pdf = tmp_path / "butsuri.pdf"
+    _pdf(pdf, 4)
+    key_path = tmp_path / "key.json"
+    key_path.write_text(json.dumps(key), encoding="utf-8")
+    out = tmp_path / "reports" / "butsuri-server.json"
+
+    code = run_exam_deck.main(
+        ["--pdf", str(pdf), "--server", "http://phone.example:8000",
+         "--answer-key", str(key_path), "--out", str(out)])
+
+    assert code == expected
+    assert len(json.loads(out.read_text(encoding="utf-8"))["wrong"]) == (0 if not expected else 1)
+
+
+def test_the_bench_fails_when_only_some_questions_came_back_ready(
+        server_app, tmp_path, monkeypatch):
+    """Without a key it can still refuse a deck that is only partly answered."""
+    pytest.importorskip("pypdfium2")
+    main, client = server_app
+    monkeypatch.setenv("ROKID_SOLVER", "test-provider")
+    monkeypatch.setattr(run_exam_deck, "remote_client", lambda server, k: client)
+    monkeypatch.setattr(run_exam_deck, "POLL_S", 0)
+    monkeypatch.setattr(main, "_answer_all", lambda question: _graded(
+        ("問1", 101, "④")) + [({"group": "第1問", "label": "問2", "pages": [1]},
+                               ValueError("no answer"))])
+    monkeypatch.setattr(main, "solve_with_fallback",
+                        lambda **_: pytest.fail("per-question send"))
+
+    pdf = tmp_path / "butsuri.pdf"
+    _pdf(pdf, 4)
+    out = tmp_path / "reports" / "butsuri-server.json"
+
+    code = run_exam_deck.main(
+        ["--pdf", str(pdf), "--server", "http://phone.example:8000", "--out", str(out)])
+
+    assert code == 2
+
+
+def test_one_question_that_fills_two_answer_numbers_is_graded_per_number():
+    """Run 4c (2026-09-30): 問2 answered 解答番号 110 and 111 as one item, "⑤,⑥".
+    Read as one answer for both numbers it failed twice against a correct reply."""
+    items = [{"question_label": "問1", "answer_no": [109], "answer": "⑤", "status": "ready"},
+             {"question_label": "問2", "answer_no": [110, 111], "answer": "⑤,⑥",
+              "status": "ready"}]
+    key = {109: "5", 110: "5", 111: "6"}
+
+    assert run_exam_deck.grade(items, key) == []
+    # A part count that does not match the numbers stays visible, not guessed.
+    assert run_exam_deck.grade(
+        [{"question_label": "問2", "answer_no": [110, 111], "answer": "⑤", "status": "ready"}],
+        {110: "5", 111: "6"}) == [(111, "6", "⑤")]

@@ -21,9 +21,10 @@ import urllib.parse
 import uuid
 from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
+from typing import Literal
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse
 from PIL import Image, UnidentifiedImageError
 from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
@@ -37,6 +38,7 @@ from .explainer import ExplainRequest, ExplainResult
 from .explainers import get_explainer, list_explainers
 from .extractors import detect_media, get_extractor
 from .glassdoc_contract import GLASSDOC_OPERATION_CONTRACT
+from .glasses_state import GlassesState, list_states, read_state, record_state
 from .glasses_view import (
     CAPTURE_CONTRACT,
     EXPLAIN_STAGES,
@@ -57,7 +59,13 @@ from .glasses_view import (
 )
 from .hud import build_hud
 from .input_identity import file_sha256
-from .layout import parse_layout, primary_question, segment_problems
+from .layout import (
+    ProblemUnit,
+    parse_layout,
+    primary_question,
+    segment_problems,
+    unique_question_numbers,
+)
 from .llm import clamp01
 from .matching import (
     Candidate,
@@ -69,11 +77,15 @@ from .matching import (
 )
 from .matching import verdict as match_verdict
 from .overlay import build_overlay
-from .page_pdf import images_to_pdf
 from .retrieval import retrieve_context
-from .solvers import Question, get_solver
-from .solvers.llm_adapter import paste_prompt
-from .solvers.chatgpt_web import ChatGptWebUncertain
+from .solvers import Question, SolveResult, get_solver
+from .solvers.llm_adapter import answer_numbers, paste_prompt
+from .solvers.chatgpt_web import (
+    ChatGptWebAttachmentFailed, ChatGptWebAuthenticationRequired,
+    ChatGptWebBlocked, ChatGptWebBrowserUnavailable, ChatGptWebBusy,
+    ChatGptWebChatLost, ChatGptWebError, ChatGptWebModelMismatch, ChatGptWebRateLimit,
+    ChatGptWebSendNotAuthorized, ChatGptWebUncertain, chatgpt_send_enabled,
+)
 from .solvers.registry import solve_with_fallback
 from .subjects import detect_subject
 from .version import APP_VERSION, HUD_CONTRACT_VERSION, version_info
@@ -104,7 +116,11 @@ async def lifespan(app: FastAPI):
         from .solvers import get_solver  # noqa: PLC0415
 
         get_analyzer()
-        get_solver()
+        if (os.environ.get("ROKID_SOLVER") or "").strip() != "chatgpt-web":
+            get_solver()
+        # The separately supervised Termux Chromium may still be starting.
+        # Its loopback CDP and authentication are checked before sending.
+    _resume_all_answers()
     yield
 
 
@@ -125,14 +141,65 @@ async def _auth_middleware(request: Request, call_next):
     # (a client appending a slash to a discovery URL must not be locked out
     # before it can negotiate contracts).
     path = request.url.path.rstrip("/") or "/"
+    if path == "/v1/glasses/state" and not config.API_KEY:
+        return JSONResponse({"detail": "authentication_not_configured",
+                             "code": "authentication_failed"}, status_code=503)
     if config.API_KEY and path not in config.AUTH_EXEMPT_PATHS:
         # Constant-time compare over bytes: str-compare leaks length/prefix
         # timing, and compare_digest rejects non-ASCII str inputs.
         expected = f"Bearer {config.API_KEY}".encode("utf-8")
         provided = request.headers.get("authorization", "").encode("utf-8")
         if not hmac.compare_digest(provided, expected):
-            return JSONResponse({"detail": "unauthorized"}, status_code=401)
+            return JSONResponse({"detail": "unauthorized", "code": "authentication_failed"}, status_code=401)
     return await call_next(request)
+
+
+@app.post("/v1/glasses/state")
+def glasses_notify(state: GlassesState, request: Request) -> dict:
+    try:
+        return {"accepted": record_state(state, request.client.host)}
+    except (OSError, ValueError, TypeError, KeyError):
+        raise HTTPException(status_code=503, detail="state_unavailable") from None
+
+
+@app.get("/v1/glasses/state")
+def glasses_status(device_id: str | None = None) -> dict:
+    try:
+        if device_id is None:
+            return {"devices": [{**state, "answer_ready": False,
+                                 "available_stage": "none", "answer_revision": 0}
+                                for state in list_states()]}
+        state = read_state(device_id)
+    except (OSError, ValueError, TypeError, KeyError):
+        raise HTTPException(status_code=503, detail="state_unavailable") from None
+    if state is None:
+        raise HTTPException(status_code=404, detail="no_glasses_state")
+    ready = False
+    available, revision = "none", 0
+    if state["phase"] in ("analyzing", "waiting", "reading") and state["session_id"] is not None:
+        try:
+            # Also resumes a pre-send failure on the phone, without glasses polling.
+            bundle = exam_answer_bundle(state["session_id"])
+            items = bundle["items"]
+            available = bundle.get("available_stage", "complete" if items and all(
+                item["status"] != "pending" for item in items) else "none")
+            revision = bundle.get("revision", 0)
+            ready = bool(items) and available in ("reading", "complete")
+        except HTTPException as error:
+            if error.status_code not in (404, 409):
+                raise
+    # A writing-done notification may commit while the bundle is being read.
+    # Return the newer phase instead of a wake permission for an ended run.
+    try:
+        latest = read_state(device_id)
+    except (OSError, ValueError, TypeError, KeyError):
+        raise HTTPException(status_code=503, detail="state_unavailable") from None
+    if latest is None:
+        raise HTTPException(status_code=503, detail="state_unavailable")
+    if latest != state:
+        return {**latest, "answer_ready": False, "available_stage": "none", "answer_revision": 0}
+    return {**state, "answer_ready": ready, "available_stage": available, "answer_revision": revision}
+
 
 
 # --- request/response models ------------------------------------------------
@@ -395,14 +462,51 @@ def provider_status() -> dict:
     The relay photographs a physical page before anything is analyzed. If the
     configured cloud analyzer has no credential it degrades to the offline
     placeholder silently, so without this block the operator only discovers it
-    after the session. This reports the state; it does not reject anything.
+    after the session. This reports the state; it does not reject anything --
+    including a provider ``config.require_real_provider`` would refuse under
+    ROKID_REAL_MODE=1. The glasses treat any /v1/settings failure as
+    unreachable, so that rejection must become a reported entry, not a 500.
+    Solving itself still goes through get_analyzer()/get_solver() (and
+    require_real_provider, unmodified) and still refuses.
+
+    Reads the selected provider straight from its registry rather than
+    through get_analyzer()/get_solver(), and calls ``.info()`` exactly once:
+    ``.info()`` can be expensive (chatgpt-web's ``ready()`` probes CDP with
+    retries), and calling it once via require_real_provider and again here to
+    build the report made an unready chatgpt-web selection take 10+ seconds.
+    The REAL_MODE verdict is derived from that one ``info`` with
+    ``config.real_mode_rejection`` -- the exact rule require_real_provider
+    uses. ``.info()`` itself is guarded: a provider whose ``.info()`` raises
+    (e.g. a probe returning something unexpected) must not 500 the endpoint,
+    and the exception text is never surfaced (it could carry a URL) --
+    only its class name.
     """
-    from .analyzers import get_analyzer
-    from .solvers import get_solver
+    from .analyzers.registry import _registry as analyzer_registry
+    from .solvers.registry import _registry as solver_registry
+
+    def _status(kind: str, registry) -> dict:
+        provider = registry.get()
+        if provider.name == "chatgpt-web" and not chatgpt_send_enabled():
+            return {"name": provider.name, "ready": False, "code": "send_not_authorized",
+                    "message": "GPT submission has not been authorized for this runtime"}
+        try:
+            info = provider.info()
+        except Exception as error:  # noqa: BLE001 - a pre-flight report must not 500
+            return {"name": provider.name, "ready": False,
+                    "code": next((code for kind, code in _FAILURE_CODES if isinstance(error, kind)),
+                                 "provider_unavailable"),
+                    "message": f"{type(error).__name__} while checking"}
+        if provider.name == "chatgpt-web" and not info.get("ready"):
+            info = {**info, "code": "browser_unavailable"}
+        if config.REAL_MODE:
+            message = config.real_mode_rejection(kind, provider, info)
+            if message:
+                return {**info, "ready": False, "message": message}
+        return info
 
     return {
-        "analyzer": get_analyzer().info(),
-        "solver": get_solver().info(),
+        "analyzer": _status("analyzer", analyzer_registry),
+        "solver": _status("solver", solver_registry),
     }
 
 
@@ -1191,7 +1295,7 @@ class CreateExamSession(BaseModel):
 
 
 # Valid enum values for the document page-move exam.
-_EXAM_TYPES = {"written", "listening"}
+_EXAM_TYPES = {"written", "listening", "mixed"}
 _ANSWER_FORMATS = {"mark", "written"}
 
 # Answer-format instruction folded into the solver context so a real model
@@ -1427,8 +1531,8 @@ def create_exam_session(payload: CreateExamSession) -> dict:
             _require_dense_page_indexes(conn, payload.document_id)
         cur = conn.execute(
             "INSERT INTO exam_sessions "
-            "(mode, voice_enabled, subject_hint, document_id, exam_type, answer_format) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
+            "(mode, voice_enabled, subject_hint, document_id, exam_type, answer_format, analysis_stage) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
             (
                 payload.mode,
                 int(payload.voice_enabled),
@@ -1436,6 +1540,7 @@ def create_exam_session(payload: CreateExamSession) -> dict:
                 payload.document_id,
                 payload.exam_type,
                 payload.answer_format,
+                "reading" if payload.exam_type == "mixed" else "single",
             ),
         )
         conn.commit()
@@ -1446,6 +1551,7 @@ def create_exam_session(payload: CreateExamSession) -> dict:
             "subject_hint": payload.subject_hint,
             "document_id": payload.document_id,
             "exam_type": payload.exam_type,
+            "analysis_stage": "reading" if payload.exam_type == "mixed" else "single",
             "answer_format": payload.answer_format,
             "current_page_index": 0,
             "total_pages": _exam_total_pages(conn, payload.document_id),
@@ -1750,6 +1856,7 @@ def get_exam_session(session_id: int) -> dict:
             "phase": _session_phase(session),
             "document_id": session["document_id"],
             "exam_type": session["exam_type"],
+            "analysis_stage": session["analysis_stage"],
             "answer_format": session["answer_format"],
             "current_page_index": session["current_page_index"],
             "total_pages": _exam_total_pages(conn, session["document_id"]),
@@ -1946,50 +2053,7 @@ def exam_paste_prompt(session_id: int) -> dict:
             "text": text,
             "url": "https://chatgpt.com/?q=" + urllib.parse.quote(text, safe=""),
             "has_image": bool(page_row["image_path"]),
-            # The phone path's missing half: the prompt could be pasted, but the
-            # pages could not be attached one photo at a time by hand. One PDF
-            # of the whole captured document can.
-            "pages_pdf_url": f"/v1/exam-sessions/{session_id}/pages.pdf",
         }
-    finally:
-        conn.close()
-
-
-@app.get("/v1/exam-sessions/{session_id}/pages.pdf")
-def exam_pages_pdf(session_id: int) -> Response:
-    """Every captured page of this session's document as ONE PDF.
-
-    For the phone path: the operator opens ``paste-prompt``'s ``url`` in the
-    ChatGPT app, attaches this single file once, and asks each question against
-    it. Attaching a dozen photos by hand is the step that does not survive a
-    real session; attaching one file does. Pages keep their reading order.
-
-    Text-only pages are skipped -- they carry nothing an image would add. The
-    solver path is unchanged: it attaches the page images themselves unless
-    ROKID_CHATGPT_BUNDLE_PDF is set.
-    """
-    conn = db.connect()
-    try:
-        session = _exam_session_or_404(conn, session_id)
-        doc_id = _require_document_exam(session)
-        rows = conn.execute(
-            "SELECT image_path FROM pages WHERE document_id = ? ORDER BY page_index",
-            (doc_id,),
-        ).fetchall()
-        images = [
-            Path(row["image_path"]).read_bytes()
-            for row in rows
-            if row["image_path"] and Path(row["image_path"]).exists()
-        ]
-        if not images:
-            raise HTTPException(status_code=404, detail="no page images to bundle")
-        return Response(
-            content=images_to_pdf(images),
-            media_type="application/pdf",
-            headers={
-                "Content-Disposition": f'inline; filename="session{session_id}-pages.pdf"'
-            },
-        )
     finally:
         conn.close()
 
@@ -2124,16 +2188,22 @@ class ExamMode(BaseModel):
 
 @app.post("/v1/exam-sessions/{session_id}/mode")
 def exam_set_mode(session_id: int, payload: ExamMode) -> dict:
-    """Switch 筆記(written) ⇄ リスニング(listening). Doable from glasses or phone."""
+    """Switch exam type; a mixed analysis keeps its original mode."""
     if payload.exam_type not in _EXAM_TYPES:
         raise HTTPException(status_code=400, detail=f"exam_type must be one of {_EXAM_TYPES}")
     conn = db.connect()
     try:
         session = _exam_session_or_404(conn, session_id)
-        conn.execute(
-            "UPDATE exam_sessions SET exam_type = ? WHERE id = ?",
-            (payload.exam_type, session_id),
+        if _session_phase(session) == "reviewing" and "mixed" in (session["exam_type"], payload.exam_type):
+            raise HTTPException(status_code=409, detail="a mixed analysis keeps its original mode")
+        changed = conn.execute(
+            "UPDATE exam_sessions SET exam_type = ?, analysis_stage = ? WHERE id = ? "
+            "AND (status != 'reviewing' OR (exam_type != 'mixed' AND ? != 'mixed'))",
+            (payload.exam_type, "reading" if payload.exam_type == "mixed" else "single", session_id,
+             payload.exam_type),
         )
+        if changed.rowcount != 1:
+            raise HTTPException(status_code=409, detail="a mixed analysis keeps its original mode")
         conn.commit()
         return {
             "session_id": session_id,
@@ -2153,8 +2223,11 @@ def exam_set_mode(session_id: int, payload: ExamMode) -> dict:
 
 @app.get("/v1/listening-ready")
 def listening_ready() -> dict:
+    from .listening import requires_transcript
     from .local_asr import local_asr_settings
 
+    if not requires_transcript():
+        return {"ready": True, "asr": "disabled", "sample_rate": 16000}
     try:
         local_asr_settings()
     except ValueError as error:
@@ -2167,13 +2240,14 @@ async def document_audio_chunk(
     document_id: int, sequence: int = Form(...), start_sample: int = Form(...),
     captured_at_ms: int = Form(...), audio: UploadFile = File(...),
 ) -> dict:
-    from .listening import store_chunk
+    from .listening import requires_transcript, store_chunk
 
     with db.connect() as conn:
         _doc_or_404(conn, document_id)
     raw = await _read_upload_limited(audio)
     try:
-        result = await run_in_threadpool(store_chunk, document_id, sequence, start_sample, captured_at_ms, raw)
+        result = await run_in_threadpool(store_chunk, document_id, sequence, start_sample, captured_at_ms, raw,
+                                         transcribe=requires_transcript())
         # Transcript contents remain on the server; the glasses need only progress/timing.
         return {"sequence": result["sequence"], "samples": result["samples"],
                 "asr_seconds": result["asr_seconds"], "real_time_factor": result["real_time_factor"]}
@@ -2201,23 +2275,29 @@ def document_audio_complete(document_id: int, payload: CompleteRecording) -> dic
 
 @app.post("/v1/exam-sessions/{session_id}/document-audio")
 def exam_document_audio(session_id: int) -> dict:
-    from .listening import recording_transcript
+    from .listening import recording_transcript, requires_transcript
 
     with db.connect() as conn:
         session = _exam_session_or_404(conn, session_id)
         doc_id = _require_document_exam(session)
-        if session["exam_type"] != "listening":
+        mixed = session["exam_type"] == "mixed"
+        if session["exam_type"] not in ("listening", "mixed"):
             raise HTTPException(status_code=409, detail="listening session required")
         try:
-            path, text = recording_transcript(doc_id)
+            path, text = recording_transcript(doc_id, require_transcript=not mixed and requires_transcript(),
+                                              verify_original=mixed)
         except ValueError as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
+        condition = ("(audio_path IS NULL OR (audio_path = ? AND transcript = ?))" if mixed else
+                     "(status != 'reviewing' OR (audio_path = ? AND transcript = ?))")
         updated = conn.execute(
-            "UPDATE exam_sessions SET audio_path = ?, transcript = ? WHERE id = ? "
-            "AND (status != 'reviewing' OR (audio_path = ? AND transcript = ?))",
+            "UPDATE exam_sessions SET audio_path = ?, transcript = ? WHERE id = ? AND " + condition,
             (path, text, session_id, path, text))
         if updated.rowcount != 1:
             raise HTTPException(status_code=409, detail="reviewed audio is immutable; start a new document")
+        conn.commit()
+        if mixed:
+            _resume_answers(conn, _exam_session_or_404(conn, session_id))
         return {"status": "complete", "audio_stored": True}
 
 
@@ -2227,16 +2307,20 @@ async def exam_upload_audio(
     audio: UploadFile | None = File(None),
     transcript: str | None = Form(None),
 ) -> dict:
-    """Listening mode: record the audio on the spot and store its transcript.
+    """Retain original audio; the browser route does not transcribe it locally.
 
-    Saves the uploaded recording to data/audio/ and transcribes it via the
+    The non-browser compatibility route transcribes the saved recording via the
     configured ROKID_TRANSCRIBER (openai|gemini). With no transcriber (or on
     failure/offline) the client-provided ``transcript`` is stored as-is, so
     listening works without any ASR credential. Either ``audio`` or
     ``transcript`` must be supplied.
     """
     from .transcribe import transcribe_audio
+    from .listening import requires_transcript
 
+    transcribe = requires_transcript()
+    if not transcribe and (audio is None or not getattr(audio, "filename", None)):
+        raise HTTPException(status_code=400, detail="original listening audio required")
     if (audio is None or not getattr(audio, "filename", None)) and not (
         transcript and transcript.strip()
     ):
@@ -2261,7 +2345,7 @@ async def exam_upload_audio(
             fpath.write_bytes(raw)
             audio_path = str(fpath)
 
-        text = transcribe_audio(audio_path, provided_transcript=transcript)
+        text = transcribe_audio(audio_path, provided_transcript=transcript) if transcribe else ""
         updated = conn.execute(
             "UPDATE exam_sessions SET audio_path = ?, transcript = ? WHERE id = ? AND status != 'reviewing' "
             "AND audio_path IS ? AND transcript IS ?",
@@ -2350,8 +2434,9 @@ def _exam_deck(conn, session_id: int) -> list[dict]:
     return deck
 
 
-# 大問 headings, as the segmenter emits them (app/layout.py:64).
-_GROUP_NO_RE = re.compile(r"^(?:大問\s*[0-9０-９]+|第\s*[0-9０-９]+\s*問)")
+# 大問 headings, as the segmenter emits them (app/layout.py:64) and as the model
+# copies them from a 国語 booklet ("第一問", run 4b, 2026-09-30).
+_GROUP_NO_RE = re.compile(r"^(?:大問\s*[0-9０-９一二三四五六七八九十]+|第\s*[0-9０-９一二三四五六七八九十]+\s*問)")
 
 
 def _answer_groups(conn, session_id: int) -> list[dict]:
@@ -2412,11 +2497,7 @@ def _page_image_paths(conn, doc_id: int, page_indexes: list[int] | None) -> list
 
 
 def _document_image_paths(conn, doc_id: int) -> list[str]:
-    """Every page image of the document, in reading order.
-
-    The browser route attaches the whole booklet once as a single PDF, so the
-    question text does not have to be retyped into every message.
-    """
+    """Every page image of the document, in reading order."""
     rows = conn.execute(
         "SELECT image_path FROM pages WHERE document_id = ? ORDER BY page_index",
         (doc_id,),
@@ -2470,18 +2551,78 @@ def _solve_failure(row) -> dict:
         return {}
 
 
-def _record_solve_failure(conn, row, error: Exception) -> None:
+class AnswerMissing(ValueError):
+    """The one reply never answered a 解答番号 the booklet prints."""
+
+
+_FAILURE_CODES = (
+    (AnswerMissing, "answer_missing"),
+    (ChatGptWebSendNotAuthorized, "send_not_authorized"),
+    (ChatGptWebAuthenticationRequired, "authentication_failed"),
+    (ChatGptWebBrowserUnavailable, "browser_unavailable"),
+    (ChatGptWebAttachmentFailed, "attachment_failed"),
+    (ChatGptWebModelMismatch, "model_mismatch"),
+    (ChatGptWebUncertain, "browser_outcome_unknown"),
+    (ChatGptWebChatLost, "chat_lost"),
+    (ChatGptWebRateLimit, "rate_limited"),
+    (ChatGptWebBusy, "browser_busy"),
+    (ChatGptWebBlocked, "browser_blocked"),
+)
+# Nothing was sent for these, so the server tries again on its own (see
+# _resume_answers) and the glasses keep waiting instead of showing a dead end,
+# until RESUME_LIMIT batches have failed the same way.
+_RETRYING_ISSUES = {
+    "not_sent": "ChatGPTへ送れませんでした。自動で再試行します",
+    "authentication_failed": "ChatGPTのログイン確認待ちです。資料は保持しています",
+    "browser_unavailable": "ブラウザに未接続です。復旧後に自動で再試行します",
+    "attachment_failed": "画像・原音を添付できませんでした。自動で再試行します",
+    "model_mismatch": "指定モデルの確認待ちです。資料は保持しています",
+    "browser_busy": "別の解析がブラウザを使用中です。自動で再試行します",
+    "browser_blocked": "前の送信の結果確認待ちです。自動で再試行します",
+}
+# The same failures once the retries have run out: said plainly, not waited on.
+_GAVE_UP_ISSUES = {
+    "not_sent": "ChatGPTへ送れませんでした。ブラウザを確認して読取完了をやり直してください",
+    "authentication_failed": "ChatGPTの認証に失敗しました。本人のログインを確認してください",
+    "browser_unavailable": "ブラウザに接続できませんでした。資料は保持しています",
+    "attachment_failed": "画像・原音の添付に失敗しました。資料は保持しています",
+    "model_mismatch": "指定モデルとWeb画面の選択が一致しません。送信していません",
+    "browser_busy": "ブラウザが使用中のままです。送信していません",
+    "browser_blocked": "前の送信の結果確認待ちです。確認後に読取完了をやり直してください",
+}
+# Batches a session may fail without sending before it stops resuming. Each
+# batch is PRESEND_TRIES tries, so three are at least half an hour.
+RESUME_LIMIT = 3
+
+
+def _failure_count(row) -> int:
+    try:
+        return max(0, int(json.loads(row["structure_json"] or "{}").get("solve_failures", 0)))
+    except (ValueError, TypeError, AttributeError):
+        return 0
+
+
+def _retrying(row) -> bool:
+    return (_solve_failure(row).get("code") in _RETRYING_ISSUES
+            and _failure_count(row) < RESUME_LIMIT)
+
+
+def _record_solve_failure(conn, row, error: Exception, *, commit: bool = True) -> None:
+    if isinstance(error, ChatGptWebSendNotAuthorized):
+        return  # Setup is a pause: preserve pending rows and retry counts.
     # Keep only a fixed code, never a provider exception containing source or keys.
     current = conn.execute("SELECT structure_json FROM questions WHERE id = ?", (row["id"],)).fetchone()
     metadata = json.loads(current["structure_json"] or "{}")
     if not isinstance(metadata, dict):
         metadata = {}
     metadata["solve_failures"] = int(metadata.get("solve_failures", 0)) + 1
-    metadata["solve_failure"] = {"code": "browser_outcome_unknown"
-                                 if isinstance(error, ChatGptWebUncertain) else "solver_failed"}
+    metadata["solve_failure"] = {"code": next(
+        (code for kind, code in _FAILURE_CODES if isinstance(error, kind)),
+        "not_sent" if _nothing_sent(error) else "solver_failed")}
     conn.execute("UPDATE questions SET structure_json = ? WHERE id = ?",
                  (json.dumps(metadata, ensure_ascii=False), row["id"]))
-    conn.commit()
+    if commit:
+        conn.commit()
 
 
 def _answer_bundle_item(conn, group: dict, row) -> dict:
@@ -2501,12 +2642,25 @@ def _answer_bundle_item(conn, group: dict, row) -> dict:
         needs_input = metadata.get("answer_status") == "needs_input"
     except (ValueError, TypeError, AttributeError):
         metadata, needs_input = {}, False
+    try:
+        original_numbers = json.loads(row["structure_json"] or "{}").get("answer_no", [])
+    except (ValueError, TypeError, AttributeError):
+        original_numbers = []
+    numbers = answer_numbers(original_numbers or metadata.get("answer_no") or [])
     if sol is None:
         failure = _solve_failure(row)
         inherited = _solve_failure(group.get("heading"))
         code = (failure or inherited).get("code")
         status = "failed" if failure else "pending"
+        retrying = _retrying(row if failure else group.get("heading"))
+        if retrying:
+            status = "pending"
         issue = ("送信結果の確認待ち。自動再送は停止しています" if code == "browser_outcome_unknown"
+                 else "教科のチャットへ戻れません。新しいチャットは作っていません" if code == "chat_lost"
+                 else "ChatGPTの利用制限です。解除後に再開してください" if code == "rate_limited"
+                 else _RETRYING_ISSUES[code] if retrying
+                 else _GAVE_UP_ISSUES[code] if code in _GAVE_UP_ISSUES
+                 else "この解答番号の答えが返答にありません" if code == "answer_missing"
                  else "解析に失敗しました。資料は保持しています" if code == "solver_failed" else "未解答")
     elif needs_input:
         status, issue = "needs_input", str(metadata.get("missing_material") or "資料が不足しています")[:1000]
@@ -2521,7 +2675,8 @@ def _answer_bundle_item(conn, group: dict, row) -> dict:
         # reported ready. The converted text still reaches the operator.
         status = "needs_review"
         issue = "表示できない要素: " + "、".join(display.unsupported)
-    label = "全問" if group["whole"] else (row["question_no"] or "全問")
+    # "問1(2)" keeps question_no unique; the glasses show the printed "問1".
+    label = "全問" if group["whole"] else (_base_problem_no(row["question_no"]) or "全問")
     return {
         "group_id": group["id"],
         "group_label": group["label"][:120],
@@ -2530,6 +2685,7 @@ def _answer_bundle_item(conn, group: dict, row) -> dict:
         "answer": answer if status in ("ready", "needs_review") else "",
         "status": status,
         "issue": issue,
+        **({"answer_no": numbers} if numbers else {}),
         **({"diagrams": diagrams} if diagrams else {}),
     }
 
@@ -2555,8 +2711,12 @@ def _answer_input_digest(conn, session) -> str:
         pages = [{"question_id": r["id"], "body_text": r["body_text"] or ""}
                  for r in _deck_question_rows(conn, session["id"])]
     material = {"identity_schema": 2, "pages": pages,
-                "audio_sha256": file_sha256(session["audio_path"]),
-                "transcript": session["transcript"] or ""}
+                "audio_sha256": file_sha256(session["audio_path"]) if session["exam_type"] != "mixed" else "",
+                "transcript": (session["transcript"] or "") if session["exam_type"] != "mixed" else ""}
+    if session["exam_type"] == "mixed":
+        material = {"identity_schema": 3,
+                    "pages": [{"page_index": page["page_index"], "image_sha256": page["image_sha256"]}
+                              for page in pages]}
     encoded = json.dumps(material, ensure_ascii=False, sort_keys=True,
                          separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
@@ -2578,7 +2738,9 @@ def _answer_revision(conn, session_id: int) -> int:
             failures += max(0, int(metadata.get("solve_failures", 0)))
         except (ValueError, TypeError, AttributeError):
             pass
-    return (row["latest"] or 0) + 1 + failures
+    stage = conn.execute("SELECT analysis_stage FROM exam_sessions WHERE id=?", (session_id,)).fetchone()
+    stage_revision = {"awaiting_audio": 1, "listening": 1, "complete": 2}.get(stage[0], 0) if stage else 0
+    return (row["latest"] or 0) + 1 + failures + stage_revision
 
 
 def _review_operations() -> dict:
@@ -2692,8 +2854,653 @@ def _release_server_solve(conn, question_id: int, owner_token: str) -> None:
     conn.commit()
 
 
+def _ocr_problems(conn, doc_id: int) -> list:
+    page_rows = conn.execute(
+        "SELECT page_index, ocr_text, vision_text, image_path FROM pages "
+        "WHERE document_id = ? ORDER BY page_index",
+        (doc_id,),
+    ).fetchall()
+    return segment_problems(
+        [
+            # Body drives boundaries; the figure reading is appended
+            # to the owning problem so its labels don't split it.
+            (r["page_index"], r["ocr_text"] or "", r["vision_text"] or (
+                f"Page {r['page_index'] + 1}: OCR unavailable. "
+                "Read the questions and diagrams from the original page image."
+                if r["image_path"] and not (r["ocr_text"] or "").strip()
+                and (config.REAL_MODE or os.environ.get("ROKID_ANALYZER") == "client-ocr")
+                else None
+            ))
+            for r in page_rows
+        ]
+    )
+
+
+def _insert_deck(conn, session_id: int, doc_id: int, problems: list) -> None:
+    """One questions row per problem; the caller commits."""
+    for prob in problems:
+        subject, subj_conf = detect_subject(prob.body_text)
+        primary_page = conn.execute(
+            "SELECT image_path FROM pages "
+            "WHERE document_id = ? AND page_index = ?",
+            (doc_id, prob.start_page_index),
+        ).fetchone()
+        primary_image_path = (
+            primary_page["image_path"] if primary_page is not None else None
+        )
+        conn.execute(
+            """INSERT INTO questions
+               (session_id, question_no, body_text, choices_json, subject,
+                read_conf, page_number, structure_json, image_path)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                session_id,
+                # The boundary-less fallback problem gets a stable
+                # synthesized id so the onboard ingest can address it
+                # (a NULL problem_no would be unreachable by name).
+                prob.question_no or "全体",
+                prob.body_text,
+                json.dumps(prob.choices, ensure_ascii=False),
+                subject,
+                round(min(1.0, 0.5 + subj_conf / 2), 3)
+                if normalize_ocr_text(prob.body_text)
+                else 0.0,
+                prob.start_page_index + 1,
+                json.dumps(
+                    {"page_indexes": prob.page_indexes, "deck": True}
+                ),
+                primary_image_path,
+            ),
+        )
+
+
+# Nothing was sent: Chrome was unreachable, an attachment never confirmed,
+# another session held the browser, or an earlier send was still unconfirmed.
+# No PC is at the venue to start it again, so one such blip must not cost the
+# subject. Five tries 150s apart: at least ten minutes, plus each try's own time.
+PRESEND_TRIES = 5
+PRESEND_RETRY_S = 150.0
+
+
+def _nothing_sent(error: Exception) -> bool:
+    """The client raises the bare base class only before a send. After one it
+    raises ChatGptWebUncertain, and a limit or a lost chat has its own class."""
+    return isinstance(error, (ChatGptWebBusy, ChatGptWebBlocked,
+                              ChatGptWebAuthenticationRequired, ChatGptWebBrowserUnavailable,
+                              ChatGptWebAttachmentFailed, ChatGptWebModelMismatch)) or type(error) is ChatGptWebError
+
+
+def _answer_all(question) -> list | None:
+    """The routed solver's one-message answer for the booklet; None if it has none."""
+    try:
+        solver = get_solver(os.environ.get("ROKID_SOLVER"))
+    except ChatGptWebError:
+        raise
+    except RuntimeError as error:
+        # REAL_MODE can refuse CDP while the supervised browser is restarting.
+        kind = ChatGptWebBrowserUnavailable if os.environ.get("ROKID_SOLVER") == "chatgpt-web" else ChatGptWebError
+        raise kind("provider is unavailable before send") from error
+    answer_all = getattr(solver, "answer_all", None)
+    return answer_all(question=question) if answer_all else None
+
+
+def _item_labels(item: dict) -> tuple[str, str]:
+    """(group, label) of a model item, without the group repeated in the label."""
+    group = str(item.get("group") or "").strip()[:60]
+    label = str(item.get("label") or "").strip()[:60]
+    if group and label.startswith(group):
+        label = label[len(group):].strip()  # "第1問 問1" under 第1問
+    return group, label
+
+
+def _model_problems(items: list | None, page_count: int) -> list[ProblemUnit]:
+    """Validated model list -> deck problems, with 大問 heading rows where printed."""
+    problems: list[ProblemUnit] = []
+    heading: ProblemUnit | None = None
+    for item in (items or [])[:300]:
+        group, label = _item_labels(item)
+        if not (label or group):
+            continue
+        raw_pages = item.get("pages") if isinstance(item.get("pages"), list) else []
+        pages = sorted({p - 1 for p in raw_pages
+                        if isinstance(p, int) and 1 <= p <= page_count}) or list(range(page_count))
+        if group and not _GROUP_NO_RE.match(group):
+            label, group = f"{group} {label}".strip(), ""
+        if group and (heading is None or heading.question_no != group):
+            heading = ProblemUnit(group, group, start_page_index=pages[0], page_indexes=[])
+            problems.append(heading)
+        elif not group:
+            heading = None
+        if heading is not None:
+            heading.page_indexes = sorted(set(heading.page_indexes) | set(pages))
+        if label:  # no label: the answer is the whole 大問's, on its heading row
+            problems.append(ProblemUnit(label, f"{group} {label}".strip(),
+                                        start_page_index=pages[0], page_indexes=pages))
+    return unique_question_numbers(problems)
+
+
+def _missing_answer_numbers(items: list | None) -> list[int]:
+    """解答番号 the booklet prints between the answered ones and the reply skipped.
+
+    The model both sorts and answers the booklet, so a 小問 it forgets leaves
+    no deck row at all and the session looks complete. The printed numbers run
+    consecutively, so the gaps in what came back name exactly what is missing.
+    Returns [] for a booklet that prints no numbers, or a span too wide to be
+    a real answer sheet.
+    """
+    seen = sorted({number for item in (items or []) if isinstance(item, dict)
+                   for number in answer_numbers(item.get("answer_no"))})
+    if len(seen) < 2 or seen[-1] - seen[0] > 300:
+        return []
+    return sorted(set(range(seen[0], seen[-1] + 1)) - set(seen))
+
+
+def _missing_answer_problem(number: int, page_count: int) -> ProblemUnit:
+    """The deck row that shows a skipped 解答番号 instead of hiding it."""
+    return ProblemUnit(f"解答番号{number}", f"解答番号{number}",
+                       start_page_index=0, page_indexes=list(range(page_count)))
+
+
+def _fallback_problems(conn, doc_id: int, page_count: int) -> list:
+    """OCR segments, else one row for the whole document."""
+    return _ocr_problems(conn, doc_id) or [
+        ProblemUnit(None, "", start_page_index=0, page_indexes=list(range(page_count)))]
+
+
+def _answer_deck(conn, session, session_id: int, doc_id: int) -> bool:
+    """The whole booklet in ONE message when the routed solver can take it.
+
+    Returns False when the solver answers per question instead. Otherwise the
+    one reply both names the 小問 (RP-12) and answers them, and nothing else is
+    sent, on success or failure: on 9/29 a list-only reply followed by one
+    message per 小問 sent the next message before anything was answered.
+    """
+    if os.environ.get("ROKID_SOLVER", "").strip() == "chatgpt-web" and not chatgpt_send_enabled():
+        return True  # Keep the reviewing session and originals for later permission.
+    if session["exam_type"] == "mixed":
+        return _answer_mixed_deck(conn, session, session_id, doc_id)
+    items = [row for group in _answer_groups(conn, session_id) for row in group["items"]]
+    if items and all(_latest_solution_row(conn, row["id"]) for row in items):
+        return True  # a repeated finalize must not ask again
+    source_pages = _document_source_pages(conn, doc_id, session_id)
+    question = Question(
+        question_no=None,
+        audio_path=session["audio_path"],
+        chat_key=f"session:{session_id}",
+        document_image_paths=_document_image_paths(conn, doc_id),
+        document_pages=source_pages,
+        document_id=str(doc_id),
+        question_id="booklet",
+        page_numbers=[p["page_number"] for p in source_pages],
+        answer_only=True,
+    )
+    failed: Exception | None = None
+    for attempt in range(PRESEND_TRIES):
+        if attempt:
+            time.sleep(PRESEND_RETRY_S)
+        try:
+            replies, failed = _answer_all(question), None
+            break
+        except Exception as error:  # noqa: BLE001 - recorded on the deck, never resent
+            if isinstance(error, ChatGptWebSendNotAuthorized):
+                return True
+            replies, failed = [], error
+            if not _nothing_sent(error):
+                break
+    if replies is None:
+        return False
+    problems = _model_problems([item for item, _ in replies], len(source_pages))
+    missing = _missing_answer_numbers([item for item, _ in replies])
+    problems += [_missing_answer_problem(number, len(source_pages)) for number in missing]
+    carried = 0
+    if problems and items and not any(_latest_solution_row(conn, row["id"]) for row in items):
+        # Only the whole-booklet row of a failed message: the model's list replaces it.
+        replaced = _deck_question_rows(conn, session_id)
+        carried = sum(_failure_count(row) for row in replaced)
+        conn.executemany("DELETE FROM questions WHERE id = ?", [(row["id"],) for row in replaced])
+        items = []
+    if not items:
+        # The model sorts the questions. OCR never does on this route: a failure
+        # gets one row for the whole booklet, which only carries the reason.
+        _insert_deck(conn, session_id, doc_id, problems or [ProblemUnit(
+            None, "", start_page_index=0, page_indexes=list(range(len(source_pages))))])
+        if carried:
+            # The revision counts failures; dropping them with the old row would
+            # move it backwards, and the glasses refuse an older snapshot.
+            first = _deck_question_rows(conn, session_id)[0]
+            conn.execute("UPDATE questions SET structure_json = ? WHERE id = ?", (json.dumps(
+                {**json.loads(first["structure_json"]), "solve_failures": carried}), first["id"]))
+        items = [row for group in _answer_groups(conn, session_id) for row in group["items"]]
+    # The rows and every answer land in ONE commit: the glasses never read a
+    # deck whose rows exist and whose answers are not saved yet.
+    if failed is not None:
+        _record_solve_failure(conn, items[0], failed, commit=False)
+        conn.commit()
+        return True
+    # A row the model named carries "第1問 問1" as its body (_model_problems),
+    # untouched by the 問1(2) suffix that keeps question_no unique. One label
+    # given twice (two answer slots of one 問) keeps reply order.
+    results: dict[str, list[SolveResult | Exception]] = {}
+    for item, result in replies:
+        results.setdefault(" ".join(filter(None, _item_labels(item))), []).append(result)
+    for number in missing:
+        results[f"解答番号{number}"] = [AnswerMissing(str(number))]
+    for row in items:
+        if _latest_solution_row(conn, row["id"]) is not None:
+            continue
+        result = (results.get(row["body_text"]) or [None]).pop(0)
+        if isinstance(result, SolveResult):
+            _save_solution(conn, row, result, "chatgpt-web", commit=False)
+        else:
+            _record_solve_failure(conn, row, result or ValueError("no answer for this question"),
+                                  commit=False)
+    conn.commit()
+    return True
+
+
+def _mixed_audio_rows(conn, session_id):
+    return [row for row in _deck_question_rows(conn, session_id)
+            if json.loads(row["structure_json"] or "{}").get("requires_audio") is True]
+
+
+def _answer_mixed_deck(conn, session, session_id: int, doc_id: int) -> bool:
+    """Commit the image-only inventory and reading answers before audio can run."""
+    from .solvers.base import Question, SolveResult
+
+    if session["analysis_stage"] in ("awaiting_audio", "listening"):
+        return _answer_mixed_audio(conn, session, session_id, doc_id)
+    if session["analysis_stage"] != "reading":
+        return True
+    if not _mixed_work_pending(conn, session):
+        return True  # A terminal first-stage failure cannot start another image or audio send.
+    source_pages = _document_source_pages(conn, doc_id, session_id)
+    question = Question(chat_key=f"session:{session_id}", booklet_stage="reading",
+                        document_pages=source_pages, document_id=str(doc_id),
+                        question_id="booklet", answer_only=True)
+    failed, replies = None, []
+    for attempt in range(PRESEND_TRIES):
+        if attempt:
+            time.sleep(PRESEND_RETRY_S)
+        try:
+            replies = _answer_all(question)
+            if (not replies or len(replies) > 300
+                    or any(type(item.get("requires_audio")) is not bool
+                           or (item["requires_audio"] and result is not None)
+                           or (not item["requires_audio"] and result is None)
+                           for item, result in replies)):
+                raise ValueError("mixed analysis requires an explicit complete audio classification")
+            failed = None
+            break
+        except Exception as error:  # noqa: BLE001 - never resend an uncertain stage
+            if isinstance(error, ChatGptWebSendNotAuthorized):
+                return True
+            replies, failed = [], error
+            if not _nothing_sent(error):
+                break
+    old_rows = _deck_question_rows(conn, session_id)
+    carried = sum(_failure_count(row) for row in old_rows)
+    if failed is not None:
+        if not old_rows:
+            _insert_deck(conn, session_id, doc_id, [ProblemUnit(
+                None, "", start_page_index=0, page_indexes=list(range(len(source_pages))))])
+            old_rows = _deck_question_rows(conn, session_id)
+        _record_solve_failure(conn, old_rows[0], failed, commit=False)
+        conn.commit()
+        return True
+    if any(_latest_solution_row(conn, row["id"]) for row in old_rows):
+        raise ValueError("mixed reading inventory cannot replace saved answers")
+    conn.executemany("DELETE FROM questions WHERE id=?", [(row["id"],) for row in old_rows])
+    missing = _missing_answer_numbers([item for item, _ in replies])
+    _insert_deck(conn, session_id, doc_id, _model_problems([item for item, _ in replies], len(source_pages))
+                 + [_missing_answer_problem(number, len(source_pages)) for number in missing])
+    results = {}
+    for item, result in replies:
+        results.setdefault(" ".join(filter(None, _item_labels(item))), []).append((item, result))
+    items = [row for group in _answer_groups(conn, session_id) for row in group["items"]]
+    for index, row in enumerate(items):
+        metadata = json.loads(row["structure_json"])
+        if carried and index == 0:
+            metadata["solve_failures"] = carried
+        matched = results.get(row["body_text"])
+        item, result = matched.pop(0) if matched else ({}, AnswerMissing(row["question_no"]))
+        metadata.update(requires_audio=item.get("requires_audio") is True,
+                        answer_no=answer_numbers(item.get("answer_no")),
+                        booklet_item={"group": _item_labels(item)[0], "label": _item_labels(item)[1],
+                                      "answer_no": answer_numbers(item.get("answer_no")),
+                                      "pages": [p + 1 for p in metadata["page_indexes"]]})
+        conn.execute("UPDATE questions SET structure_json=? WHERE id=?", (json.dumps(metadata), row["id"]))
+        if isinstance(result, SolveResult):
+            result.extras["answer_no"] = metadata["answer_no"]
+            _save_solution(conn, row, result, "chatgpt-web", commit=False)
+        elif result is not None:
+            refreshed = conn.execute("SELECT * FROM questions WHERE id=?", (row["id"],)).fetchone()
+            _record_solve_failure(conn, refreshed, result, commit=False)
+    stage = "awaiting_audio" if _mixed_audio_rows(conn, session_id) else "complete"
+    conn.execute("UPDATE exam_sessions SET analysis_stage=? WHERE id=?", (stage, session_id))
+    conn.commit()
+    return True
+
+
+def _available_stage(session, items):
+    """Display availability, including failure reasons; never a correctness label."""
+    if session["exam_type"] == "mixed":
+        stage = session["analysis_stage"]
+        if stage == "complete":
+            return "complete"
+        if stage in ("awaiting_audio", "listening") or (
+                stage == "reading" and items and all(item["status"] != "pending" for item in items)):
+            return "reading"
+        return "none"
+    return "complete" if items and all(item["status"] != "pending" for item in items) else "none"
+
+
+def _mixed_work_pending(conn, session):
+    rows = _deck_question_rows(conn, session["id"])
+    if session["analysis_stage"] == "reading":
+        return not rows or (not any(_latest_solution_row(conn, row["id"]) for row in rows)
+                            and any(_retrying(row) for row in rows))
+    if session["analysis_stage"] not in ("awaiting_audio", "listening") or not session["audio_path"]:
+        return False
+    audio_rows = [row for row in _mixed_audio_rows(conn, session["id"])
+                  if _latest_solution_row(conn, row["id"]) is None]
+    return bool(audio_rows) and not any(_solve_failure(row) and not _retrying(row) for row in audio_rows)
+
+
+def _answer_mixed_audio(conn, session, session_id, doc_id):
+    """Add only the verified original recording; preserve every existing question and answer."""
+    from .listening import recording_transcript
+    from .solvers.base import Question, SolveResult
+
+    if not _mixed_work_pending(conn, session):
+        return True
+    rows = [row for row in _mixed_audio_rows(conn, session_id) if _latest_solution_row(conn, row["id"]) is None]
+    slots = [{"question_id": f"q{row['id']}", **json.loads(row["structure_json"])["booklet_item"]}
+             for row in rows]
+    conn.execute("UPDATE exam_sessions SET analysis_stage='listening' WHERE id=?", (session_id,))
+    conn.commit()
+    question = Question(chat_key=f"session:{session_id}", booklet_stage="listening",
+                        booklet_questions=slots, audio_path=session["audio_path"],
+                        document_pages=_document_source_pages(conn, doc_id, session_id),
+                        document_id=str(doc_id), question_id="booklet", answer_only=True)
+    failed, replies = None, []
+    for attempt in range(PRESEND_TRIES):
+        if attempt:
+            time.sleep(PRESEND_RETRY_S)
+        try:
+            path, _ = recording_transcript(doc_id, require_transcript=False, verify_original=True)
+            if path != session["audio_path"]:
+                raise ValueError("completed original audio identity changed")
+            replies = _answer_all(question)
+            ids = [item.get("question_id") for item, _ in (replies or [])]
+            if (any(not isinstance(qid, str) for qid in ids) or len(ids) != len(set(ids))
+                    or set(ids) != {slot["question_id"] for slot in slots}
+                    or any(result is None for _, result in replies or [])):
+                raise ValueError("audio answers must match the pending original question identities")
+            failed = None
+            break
+        except Exception as error:  # noqa: BLE001 - the uncertain barrier stays in force
+            if isinstance(error, ChatGptWebSendNotAuthorized):
+                return True
+            replies, failed = [], error
+            if not _nothing_sent(error):
+                break
+    if failed is not None:
+        for row in rows:
+            _record_solve_failure(conn, row, failed, commit=False)
+        conn.commit()
+        return True
+    results = {item["question_id"]: result for item, result in replies}
+    for row in rows:
+        result = results[f"q{row['id']}"]
+        if isinstance(result, SolveResult):
+            result.extras["answer_no"] = json.loads(row["structure_json"])["answer_no"]
+            _save_solution(conn, row, result, "chatgpt-web", commit=False)
+        else:
+            _record_solve_failure(conn, row, result, commit=False)
+    conn.execute("UPDATE exam_sessions SET analysis_stage='complete' WHERE id=?", (session_id,))
+    conn.commit()
+    return True
+
+
+def _save_solution(conn, row, result, solver_name: str, *, commit: bool = True) -> bool:
+    """Store ``result`` unless the row already has an answer; True when stored.
+
+    Onboard ingest may answer while the paid call is in flight. The conditional
+    insert preserves that earlier answer.
+    """
+    evidence_pages, evidence_refs = _prepare_result_evidence(
+        result,
+        fallback_pages=_question_evidence_pages(conn, row["id"]),
+        fallback_refs=_question_evidence_refs(conn, row["id"]),
+    )
+    cur = conn.execute(
+        """INSERT INTO solutions
+           (question_id, solver_name, answer, solution_steps_json,
+            rationale, cautions, answer_conf, rationale_conf,
+            evidence_pages_json, evidence_refs_json,
+            raw_reasoning, served_by, diagrams_json, answer_metadata_json)
+           SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+           WHERE NOT EXISTS
+               (SELECT 1 FROM solutions WHERE question_id = ?)""",
+        (
+            row["id"],
+            solver_name,
+            result.answer,
+            json.dumps(result.solution_steps, ensure_ascii=False),
+            result.rationale,
+            result.cautions,
+            result.answer_confidence,
+            result.rationale_confidence,
+            json.dumps(evidence_pages),
+            _evidence_refs_storage_value(result),
+            result.raw_reasoning,
+            result.extras.get("served_by", solver_name),
+            json.dumps(result.diagrams, ensure_ascii=False),
+            json.dumps({k: result.extras.get(k)
+                        for k in ("answer_status", "missing_material", "answer_no")},
+                       ensure_ascii=False),
+            row["id"],
+        ),
+    )
+    if commit:
+        conn.commit()
+    return bool(cur.rowcount)
+
+
+def _solve_deck(conn, session, session_id: int, doc_id: int, *, bundle_items: bool = False) -> int:
+    """Solve every deck problem that has no solution yet; return how many were saved.
+
+    Resumable and claim-guarded, so a synchronous call and a background batch
+    for the same session never pay for the same problem twice. ``bundle_items``
+    (the glassdoc route) solves only what answer-bundle shows and names the 大問
+    in the locator; the frozen /review route keeps solving every deck row.
+    """
+    if os.environ.get("ROKID_SOLVER", "").strip() == "chatgpt-web" and not chatgpt_send_enabled():
+        return 0
+    server_solved = 0
+    # Context is scoped to each problem's own 大問 (plan.md contract 1),
+    # not the whole document: every prompt is prefilled per question, so
+    # the whole booklet per 小問 is paid for once per 小問.
+    page_windows = _group_page_indexes(conn, session_id)
+    source_pages = _document_source_pages(conn, doc_id, session_id)
+    # "第2問 問1", not "問1(2)": the suffix is a deck id the booklet never prints.
+    locators = {
+        row["id"]: " ".join(filter(None, [
+            group["label"] if not group["whole"] and _GROUP_NO_RE.match(group["label"]) else "",
+            re.sub(r"\(\d+\)$", "", row["question_no"] or ""),
+        ]))
+        for group in _answer_groups(conn, session_id) for row in group["items"]
+    }
+    for row in _deck_question_rows(conn, session_id):
+        # A 大問 heading with 小問 under it is a label, not a question: sending
+        # it cost one extra browser message per 大問 that nothing displayed.
+        if (bundle_items and row["id"] not in locators) or _latest_solution_row(conn, row["id"]) is not None:
+            continue
+        claim_token = _claim_server_solve(conn, row["id"])
+        if not claim_token:
+            continue
+        try:
+            with _claim_heartbeat(
+                lambda: _renew_server_solve_claim(row["id"], claim_token),
+                name=f"solve-claim-{row['id']}",
+            ):
+                start_index = (row["page_number"] or 1) - 1
+                doc_material = _document_material(
+                    conn, doc_id, start_index, page_windows.get(row["id"])
+                )
+                retrieved = retrieve_context(conn, row["body_text"])
+                context = _exam_prompt_context(
+                    session, doc_material, retrieved["context"]
+                )
+                window = page_windows.get(row["id"]) or _row_page_indexes(row)
+                question = Question(
+                    question_no=(bundle_items and locators.get(row["id"])) or row["question_no"],
+                    body_text=row["body_text"],
+                    choices=json.loads(row["choices_json"] or "[]"),
+                    subject=row["subject"],
+                    context=context,
+                    image_path=row["image_path"],
+                    image_paths=_page_image_paths(conn, doc_id, window),
+                    required_image_paths=[
+                        p["image_path"] for p in source_pages
+                        if p["page_number"] - 1 in (window or []) and p["image_path"]
+                        and not _page_material(p["ocr_text"], p["vision_text"])
+                    ],
+                    # Listening: the recording itself, not only its
+                    # transcript. A solver that takes audio hears the
+                    # speaker turns and numbers a transcript flattens.
+                    audio_path=session["audio_path"],
+                    # One session is one paper, so one chat. Never the
+                    # row's `subject`: that is a per-row heuristic.
+                    chat_key=f"session:{session_id}",
+                    # The whole booklet, attached once per chat, and
+                    # where this question sits inside it.
+                    document_image_paths=_document_image_paths(conn, doc_id),
+                    document_pages=source_pages,
+                    document_id=str(doc_id),
+                    audio_transcript=session["transcript"] or "",
+                    question_id=f"q{row['id']}",
+                    page_numbers=[i + 1 for i in (window or [])],
+                    # What the operator writes on the answer sheet, and
+                    # nothing else. This is the documented contract
+                    # (Solver 1.3.0) and was never set on this path.
+                    answer_only=True,
+                )
+                try:
+                    result, solver = solve_with_fallback(question=question)
+                except Exception as error:  # noqa: BLE001 - retain resumable failures
+                    _record_solve_failure(conn, row, error)
+                    if isinstance(error, (ChatGptWebUncertain, ChatGptWebChatLost)):
+                        # Do not touch the browser for the remaining questions:
+                        # after a lost chat each would fail the same way.
+                        break
+                    continue
+            served_by = result.extras.get("served_by", solver.name)
+            if served_by == "local":
+                # A failed/missing cloud adapter fell back to the
+                # placeholder. Release the claim for a future retry,
+                # but never mark placeholder output as solved.
+                continue
+            if _save_solution(conn, row, result, solver.name):
+                server_solved += 1
+        finally:
+            _release_server_solve(conn, row["id"], claim_token)
+    return server_solved
+
+
+# One background batch per session: the browser solver drives a single chat,
+# and a second concurrent batch would type into it at the same time.
+_background_solves: set[int] = set()
+_background_solves_lock = threading.Lock()
+
+
+# Only a session started this long ago or less is resumed: one venue session
+# is 150 minutes. Older reviewing sessions in the phone DB are history, and
+# resuming them at startup would send each one before the next real run.
+RESUME_WINDOW_S = 3 * 3600
+
+
+def _resume_answers(conn, session) -> bool:
+    """Start the background batch again when nothing is answering this session.
+
+    A restart ends the batch thread, and a failure that sent nothing leaves only
+    the reason on the deck; with no PC at the venue neither may cost the
+    subject. Only a recent session with no deck rows, or one whose deck carries
+    a retrying failure and no answer, is restarted. A booklet already in its
+    chat is read back, never sent again (ChatGptWebSolver.answer_all). True
+    when a batch is running.
+    """
+    session_id = session["id"]
+    solver_env = (os.environ.get("ROKID_SOLVER") or "").strip()
+    if (not session["document_id"] or _session_phase(session) == "reading"
+            or solver_env in ("", "local")
+            or (solver_env == "chatgpt-web" and not chatgpt_send_enabled())
+            or (session["mode"] == "real" and not config.ALLOW_REAL_EXAM_SOLVE)):
+        return False
+    recent = conn.execute(
+        "SELECT created_at >= datetime('now', ?) FROM exam_sessions WHERE id = ?",
+        (f"-{int(RESUME_WINDOW_S)} seconds", session_id)).fetchone()
+    if not (recent and recent[0]):
+        return False
+    rows = _deck_question_rows(conn, session_id)
+    if session["exam_type"] == "mixed":
+        if not _mixed_work_pending(conn, session):
+            return False
+    elif rows and (any(_latest_solution_row(conn, row["id"]) for row in rows)
+                   or not any(_retrying(row) for row in rows)):
+        return False
+    with _background_solves_lock:
+        if session_id in _background_solves:
+            return True
+        _background_solves.add(session_id)
+    threading.Thread(target=_solve_deck_in_background, args=(session_id, session["document_id"]),
+                     name=f"solve-session-{session_id}", daemon=True).start()
+    return True
+
+
+def _resume_all_answers() -> None:
+    """At startup: every reviewing session a restart left without its answers."""
+    conn = db.connect()
+    try:
+        for session in conn.execute(
+                "SELECT * FROM exam_sessions WHERE status = 'reviewing' AND document_id IS NOT NULL"):
+            _resume_answers(conn, session)
+    finally:
+        conn.close()
+
+
+def _solve_deck_in_background(session_id: int, doc_id: int) -> None:
+    conn = db.connect()
+    try:
+        while True:
+            session = _exam_session_or_404(conn, session_id)
+            if not _answer_deck(conn, session, session_id, doc_id):
+                break
+            latest = _exam_session_or_404(conn, session_id)
+            if (latest["exam_type"] != "mixed" or latest["analysis_stage"] != "awaiting_audio"
+                    or not _mixed_work_pending(conn, latest)):
+                return
+        if not _deck_question_rows(conn, session_id):
+            _insert_deck(conn, session_id, doc_id, _fallback_problems(
+                conn, doc_id, _exam_total_pages(conn, doc_id)))
+            conn.commit()
+        _solve_deck(conn, session, session_id, doc_id, bundle_items=True)
+    finally:
+        with _background_solves_lock:
+            _background_solves.discard(session_id)
+        # A bind may have observed the old worker just before it ended. Release
+        # ownership, then read committed state once: it or the bind starts the
+        # next worker, while the per-session set prevents a duplicate.
+        try:
+            conn.rollback()
+            latest = _exam_session_or_404(conn, session_id)
+            if latest["exam_type"] == "mixed" and latest["analysis_stage"] == "awaiting_audio" and latest["audio_path"]:
+                _resume_answers(conn, latest)
+        finally:
+            conn.close()
+
 @app.post("/v1/exam-sessions/{session_id}/finalize-reading")
-def exam_finalize_reading(session_id: int) -> dict:
+def exam_finalize_reading(session_id: int, solve: Literal["background"] | None = None) -> dict:
     """Declare 読取完了 (finish_reading = double tap): the reading phase is over.
 
     From here the camera stays closed, so the privacy LED is dark for the
@@ -2721,10 +3528,21 @@ def exam_finalize_reading(session_id: int) -> dict:
     """
     conn = db.connect()
     try:
+        # Claim the mode before reading it, so a concurrent switch cannot select another solver path.
+        conn.execute("BEGIN IMMEDIATE")
         session = _exam_session_or_404(conn, session_id)
         doc_id = _require_document_exam(session)
         total_pages = _exam_total_pages(conn, doc_id)
         locked = session["mode"] == "real" and not config.ALLOW_REAL_EXAM_SOLVE
+        solver_env = (os.environ.get("ROKID_SOLVER") or "").strip()
+        background = ((solve == "background" or session["exam_type"] == "mixed") and not locked and total_pages > 0
+                      and solver_env not in ("", "local"))
+        # A batch still analysing has no deck rows yet, so the claim below would
+        # take the session again; a running batch owns it instead.
+        with _background_solves_lock:
+            busy = session_id in _background_solves
+            if background and not busy:
+                _background_solves.add(session_id)
 
         # Atomically claim the transition: the guarded UPDATE takes SQLite's
         # write lock, so of two racing requests exactly one sees rowcount==1
@@ -2735,86 +3553,39 @@ def exam_finalize_reading(session_id: int) -> dict:
         # The deck predicate must mirror _deck_question_rows: legacy deck rows
         # carry only {"page_indexes": ...} (no "deck" key) and still count —
         # missing them here would re-segment a finalized session's deck.
-        claim = conn.execute(
-            "UPDATE exam_sessions SET status = 'reviewing' "
-            "WHERE id = ? AND (status != 'reviewing' "
-            "  OR NOT EXISTS (SELECT 1 FROM questions q "
-            "                 WHERE q.session_id = exam_sessions.id "
-            "                 AND (q.structure_json LIKE '%\"deck\"%' "
-            "                      OR q.structure_json LIKE '%\"page_indexes\"%')))",
-            (session_id,),
-        )
-        already_finalized = claim.rowcount == 0
+        already_finalized = True
+        if not busy:
+            claim = conn.execute(
+                "UPDATE exam_sessions SET status = 'reviewing' "
+                "WHERE id = ? AND (status != 'reviewing' "
+                "  OR NOT EXISTS (SELECT 1 FROM questions q "
+                "                 WHERE q.session_id = exam_sessions.id "
+                "                 AND (q.structure_json LIKE '%\"deck\"%' "
+                "                      OR q.structure_json LIKE '%\"page_indexes\"%')))",
+                (session_id,),
+            )
+            already_finalized = claim.rowcount == 0
         reverted = False
 
         if already_finalized:
             conn.rollback()  # nothing claimed; end the implicit transaction
         else:
-            # Segment and insert the deck in the SAME transaction as the claim.
-            page_rows = conn.execute(
-                "SELECT page_index, ocr_text, vision_text, image_path FROM pages "
-                "WHERE document_id = ? ORDER BY page_index",
-                (doc_id,),
-            ).fetchall()
-            problems = segment_problems(
-                [
-                    # Body drives boundaries; the figure reading is appended
-                    # to the owning problem so its labels don't split it.
-                    (r["page_index"], r["ocr_text"] or "", r["vision_text"] or (
-                        f"Page {r['page_index'] + 1}: OCR unavailable. "
-                        "Read the questions and diagrams from the original page image."
-                        if r["image_path"] and not (r["ocr_text"] or "").strip()
-                        and (config.REAL_MODE or os.environ.get("ROKID_ANALYZER") == "client-ocr")
-                        else None
-                    ))
-                    for r in page_rows
-                ]
-            )
-            if not problems:
-                # Nothing recognizable was read: give the claim back in the
-                # SAME transaction so the session stays in the reading phase —
-                # the ack's 再読取 guidance is then actually possible (re-scan
-                # the pages, double-tap again). Racing double-fires serialize
-                # on the write lock and revert identically (idempotent).
-                conn.execute(
-                    "UPDATE exam_sessions SET status = 'open' WHERE id = ?",
-                    (session_id,),
-                )
-                reverted = True
-            for prob in problems:
-                subject, subj_conf = detect_subject(prob.body_text)
-                primary_page = conn.execute(
-                    "SELECT image_path FROM pages "
-                    "WHERE document_id = ? AND page_index = ?",
-                    (doc_id, prob.start_page_index),
-                ).fetchone()
-                primary_image_path = (
-                    primary_page["image_path"] if primary_page is not None else None
-                )
-                conn.execute(
-                    """INSERT INTO questions
-                       (session_id, question_no, body_text, choices_json, subject,
-                        read_conf, page_number, structure_json, image_path)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (
-                        session_id,
-                        # The boundary-less fallback problem gets a stable
-                        # synthesized id so the onboard ingest can address it
-                        # (a NULL problem_no would be unreachable by name).
-                        prob.question_no or "全体",
-                        prob.body_text,
-                        json.dumps(prob.choices, ensure_ascii=False),
-                        subject,
-                        round(min(1.0, 0.5 + subj_conf / 2), 3)
-                        if normalize_ocr_text(prob.body_text)
-                        else 0.0,
-                        prob.start_page_index + 1,
-                        json.dumps(
-                            {"page_indexes": prob.page_indexes, "deck": True}
-                        ),
-                        primary_image_path,
-                    ),
-                )
+            if not background and session["exam_type"] != "mixed":
+                # Segment and insert the deck in the SAME transaction as the claim.
+                # (A background batch asks the model for the 小問 instead, RP-12.)
+                problems = _ocr_problems(conn, doc_id)
+                if not problems:
+                    # Nothing recognizable was read: give the claim back in the
+                    # SAME transaction so the session stays in the reading phase —
+                    # the ack's 再読取 guidance is then actually possible (re-scan
+                    # the pages, double-tap again). Racing double-fires serialize
+                    # on the write lock and revert identically (idempotent).
+                    conn.execute(
+                        "UPDATE exam_sessions SET status = 'open' WHERE id = ?",
+                        (session_id,),
+                    )
+                    reverted = True
+                _insert_deck(conn, session_id, doc_id, problems)
             conn.commit()
 
         # Optional server-side solve-all — resumable: solve every deck problem
@@ -2823,120 +3594,18 @@ def exam_finalize_reading(session_id: int) -> dict:
         # unset or 'local': the placeholder does not really solve, and junk
         # rows would mark problems "solved" and shadow the onboard ingest.
         server_solved = 0
-        solver_env = (os.environ.get("ROKID_SOLVER") or "").strip()
-        if not locked and solver_env and solver_env != "local":
-            # Context is scoped to each problem's own 大問 (plan.md contract 1),
-            # not the whole document: every prompt is prefilled per question, so
-            # the whole booklet per 小問 is paid for once per 小問.
-            page_windows = _group_page_indexes(conn, session_id)
-            source_pages = _document_source_pages(conn, doc_id, session_id)
-            for row in _deck_question_rows(conn, session_id):
-                if _latest_solution_row(conn, row["id"]) is not None:
-                    continue
-                claim_token = _claim_server_solve(conn, row["id"])
-                if not claim_token:
-                    continue
-                try:
-                    with _claim_heartbeat(
-                        lambda: _renew_server_solve_claim(row["id"], claim_token),
-                        name=f"solve-claim-{row['id']}",
-                    ):
-                        start_index = (row["page_number"] or 1) - 1
-                        doc_material = _document_material(
-                            conn, doc_id, start_index, page_windows.get(row["id"])
-                        )
-                        retrieved = retrieve_context(conn, row["body_text"])
-                        context = _exam_prompt_context(
-                            session, doc_material, retrieved["context"]
-                        )
-                        window = page_windows.get(row["id"]) or _row_page_indexes(row)
-                        question = Question(
-                            question_no=row["question_no"],
-                            body_text=row["body_text"],
-                            choices=json.loads(row["choices_json"] or "[]"),
-                            subject=row["subject"],
-                            context=context,
-                            image_path=row["image_path"],
-                            image_paths=_page_image_paths(conn, doc_id, window),
-                            required_image_paths=[
-                                p["image_path"] for p in source_pages
-                                if p["page_number"] - 1 in (window or []) and p["image_path"]
-                                and not _page_material(p["ocr_text"], p["vision_text"])
-                            ],
-                            # Listening: the recording itself, not only its
-                            # transcript. A solver that takes audio hears the
-                            # speaker turns and numbers a transcript flattens.
-                            audio_path=session["audio_path"],
-                            # One session is one paper, so one chat. Never the
-                            # row's `subject`: that is a per-row heuristic.
-                            chat_key=f"session:{session_id}",
-                            # The whole booklet, attached once per chat, and
-                            # where this question sits inside it.
-                            document_image_paths=_document_image_paths(conn, doc_id),
-                            document_pages=source_pages,
-                            document_id=str(doc_id),
-                            audio_transcript=session["transcript"] or "",
-                            question_id=f"q{row['id']}",
-                            page_numbers=[i + 1 for i in (window or [])],
-                            # What the operator writes on the answer sheet, and
-                            # nothing else. This is the documented contract
-                            # (Solver 1.3.0) and was never set on this path.
-                            answer_only=True,
-                        )
-                        try:
-                            result, solver = solve_with_fallback(question=question)
-                        except Exception as error:  # noqa: BLE001 - retain resumable failures
-                            _record_solve_failure(conn, row, error)
-                            if isinstance(error, ChatGptWebUncertain):
-                                break  # Do not touch the browser for the remaining questions.
-                            continue
-                    served_by = result.extras.get("served_by", solver.name)
-                    if served_by == "local":
-                        # A failed/missing cloud adapter fell back to the
-                        # placeholder. Release the claim for a future retry,
-                        # but never mark placeholder output as solved.
-                        continue
-                    evidence_pages, evidence_refs = _prepare_result_evidence(
-                        result,
-                        fallback_pages=_question_evidence_pages(conn, row["id"]),
-                        fallback_refs=_question_evidence_refs(conn, row["id"]),
-                    )
-                    # Onboard ingest may answer while the paid call is in
-                    # flight. The conditional insert preserves that earlier
-                    # answer; the DB claim above already prevented a second
-                    # server request (and its duplicate charge).
-                    cur = conn.execute(
-                        """INSERT INTO solutions
-                           (question_id, solver_name, answer, solution_steps_json,
-                            rationale, cautions, answer_conf, rationale_conf,
-                            evidence_pages_json, evidence_refs_json,
-                            raw_reasoning, served_by, diagrams_json, answer_metadata_json)
-                           SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-                           WHERE NOT EXISTS
-                               (SELECT 1 FROM solutions WHERE question_id = ?)""",
-                        (
-                            row["id"],
-                            solver.name,
-                            result.answer,
-                            json.dumps(result.solution_steps, ensure_ascii=False),
-                            result.rationale,
-                            result.cautions,
-                            result.answer_confidence,
-                            result.rationale_confidence,
-                            json.dumps(evidence_pages),
-                            _evidence_refs_storage_value(result),
-                            result.raw_reasoning,
-                            served_by,
-                            json.dumps(result.diagrams, ensure_ascii=False),
-                            json.dumps({k: result.extras.get(k) for k in ("answer_status", "missing_material")}, ensure_ascii=False),
-                            row["id"],
-                        ),
-                    )
-                    conn.commit()
-                    if cur.rowcount:
-                        server_solved += 1
-                finally:
-                    _release_server_solve(conn, row["id"], claim_token)
+        solving = None
+        if background or (busy and solve == "background"):
+            # RP-15: return at once; the glasses poll answer-bundle and read
+            # each 小問 as it is saved.
+            solving = "background"
+            if not busy:
+                threading.Thread(
+                    target=_solve_deck_in_background, args=(session_id, doc_id),
+                    name=f"solve-session-{session_id}", daemon=True,
+                ).start()
+        elif not locked and not busy and solver_env not in ("", "local"):
+            server_solved = _solve_deck(conn, session, session_id, doc_id)
 
         deck = _exam_deck(conn, session_id)
         if locked:
@@ -2957,6 +3626,7 @@ def exam_finalize_reading(session_id: int) -> dict:
             "total_pages": total_pages,
             "problem_count": len(deck),
             "server_solved": server_solved,
+            **({"solving": solving} if solving else {}),
             "locked": locked,
             "problems": deck,
             # The camera is off either way at this instant (the double tap
@@ -3235,10 +3905,12 @@ def exam_answer_bundle(session_id: int) -> dict:
         if session["mode"] == "real" and not config.ALLOW_REAL_EXAM_SOLVE:
             raise HTTPException(status_code=409, detail="real-mode answers are locked")
         groups = _answer_groups(conn, session_id)
+        running = _resume_answers(conn, session)
         if not groups:
             raise HTTPException(
                 status_code=409,
-                detail="no problems were detected in this document",
+                detail="the answers are being made" if running or session_id in _background_solves
+                else "no problems were detected in this document",
             )
         items = [
             _answer_bundle_item(conn, group, row)
@@ -3250,6 +3922,8 @@ def exam_answer_bundle(session_id: int) -> dict:
             "session_id": str(session_id),
             "input_digest": _answer_input_digest(conn, session),
             "revision": _answer_revision(conn, session_id),
+            "analysis_stage": session["analysis_stage"],
+            "available_stage": _available_stage(session, items),
             "items": items,
         }
     finally:

@@ -14,8 +14,8 @@ package dev.rokid.docscanglass.input;
  * side reports the same state repeatedly. Both are why the transition is held
  * for {@link #SETTLE_MILLIS} before it is believed.</p>
  *
- * <p>Folding the temple arms force-stops the process, so the first reading
- * after a start is a state to record, never a re-wear on its own.</p>
+ * <p>The first near reading also settles. The caller decides whether this
+ * initial synchronization still belongs to its bootstrap chooser.</p>
  */
 public final class WearTransition {
     /** How long a new state must hold before it counts. */
@@ -27,6 +27,7 @@ public final class WearTransition {
     private Boolean worn;
     private Boolean pending;
     private long pendingSinceMillis;
+    private boolean initialWear;
 
     /**
      * Feeds one reading.
@@ -34,13 +35,9 @@ public final class WearTransition {
      * @return true exactly once per off-to-on crossing that settled.
      */
     public synchronized boolean onReading(float centimetres, long elapsedMillis) {
+        if (!Float.isFinite(centimetres) || centimetres < 0) return false;
         boolean nowWorn = centimetres <= WORN_CENTIMETRES;
-        if (worn == null) {
-            // First reading after a start: record it, never act on it.
-            worn = nowWorn;
-            return false;
-        }
-        if (nowWorn == worn) {
+        if (worn != null && nowWorn == worn) {
             pending = null;
             return false;
         }
@@ -49,12 +46,22 @@ public final class WearTransition {
             pendingSinceMillis = elapsedMillis;
             return false;
         }
-        if (elapsedMillis - pendingSinceMillis < SETTLE_MILLIS) {
-            return false;
-        }
-        worn = nowWorn;
+        return confirm(elapsedMillis);
+    }
+
+    /** On-change sensors may emit only one sample; confirm that sample at its deadline. */
+    public synchronized boolean confirm(long elapsedMillis) {
+        if (pending == null || elapsedMillis < pendingSinceMillis
+                || elapsedMillis - pendingSinceMillis < SETTLE_MILLIS) return false;
+        initialWear = worn == null;
+        worn = pending;
         pending = null;
-        return nowWorn;
+        return worn;
+    }
+
+    public synchronized boolean initialWear() { return initialWear; }
+    public synchronized long delayUntilSettled(long now) {
+        return pending == null ? -1 : Math.max(0, SETTLE_MILLIS - Math.max(0, now - pendingSinceMillis));
     }
 
     /** The last settled state, or null before the first reading. */

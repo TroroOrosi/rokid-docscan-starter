@@ -19,12 +19,18 @@ final class LocalCaptureSession {
     }
 
     static LocalCaptureSession create(File root, String server, boolean listening) throws IOException {
+        return create(root, server, listening ? "listening" : "written");
+    }
+
+    static LocalCaptureSession create(File root, String server, String examType) throws IOException {
         if (server == null || server.trim().isEmpty() || server.length() > 4096) throw new IOException("接続先が未設定です");
+        if (!java.util.List.of("written", "listening", "mixed").contains(examType)) throw new IOException("試験形式が不正です");
         File directory = new File(root, UUID.randomUUID().toString());
         Properties state = new Properties();
         state.setProperty("version", "1");
         state.setProperty("server", server);
-        state.setProperty("listening", Boolean.toString(listening));
+        state.setProperty("listening", Boolean.toString(!"written".equals(examType)));
+        state.setProperty("exam_type", examType);
         state.setProperty("document", "0");
         state.setProperty("session", "0");
         state.setProperty("count", "0");
@@ -52,6 +58,8 @@ final class LocalCaptureSession {
                 throw new IOException("保存記録の番号が不正です");
             }
             result.phase();
+            if (!java.util.List.of("written", "listening", "mixed").contains(result.examType())
+                    || result.listening() != !"written".equals(result.examType())) throw new IOException("試験形式が不正です");
             Phase.valueOf(state.getProperty("resume_phase"));
             for (int index = 0; index < result.pageCount(); index++) result.page(index);
             return result;
@@ -64,12 +72,19 @@ final class LocalCaptureSession {
     File directory() { return directory; }
     synchronized String server() { return state.getProperty("server"); }
     synchronized boolean listening() { return Boolean.parseBoolean(state.getProperty("listening")); }
+    synchronized String examType() { return state.getProperty("exam_type", listening() ? "listening" : "written"); }
+    synchronized boolean mixed() { return "mixed".equals(examType()); }
+    synchronized boolean audioComplete() { return Boolean.parseBoolean(state.getProperty("audio_complete", "false")); }
+    synchronized void completeAudio() throws IOException { update("audio_complete", "true"); }
+    synchronized boolean audioAttachPending() { return mixed() && audioComplete() && sessionId() > 0 && !Boolean.parseBoolean(state.getProperty("audio_attached", "false")); }
+    synchronized void acknowledgeAudio() throws IOException { update("audio_attached", "true"); }
     synchronized int pageCount() { return Integer.parseInt(state.getProperty("count")); }
     synchronized long documentId() { return Long.parseLong(state.getProperty("document")); }
     synchronized long sessionId() { return Long.parseLong(state.getProperty("session")); }
     synchronized Phase phase() { return Phase.valueOf(state.getProperty("phase")); }
     synchronized boolean unfinished() {
-        return (phase() == Phase.CLOSED ? Phase.valueOf(state.getProperty("resume_phase")) : phase()) != Phase.REVIEW;
+        return (phase() == Phase.CLOSED ? Phase.valueOf(state.getProperty("resume_phase")) : phase()) != Phase.REVIEW
+                || (mixed() && !Boolean.parseBoolean(state.getProperty("audio_attached", "false")));
     }
 
     synchronized void bindDocument(long id) throws IOException { bind("document", id); }

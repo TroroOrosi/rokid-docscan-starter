@@ -17,6 +17,32 @@ import dev.rokid.docscanrelay.study.AnswerReader;
 public class AnswerViewTest {
     @Test
     @org.robolectric.annotation.GraphicsMode(org.robolectric.annotation.GraphicsMode.Mode.NATIVE)
+    public void fixedSlideFitsMoreWritingWithoutShrinkingAndNeverScrollsOnItsOwn() {
+        AnswerView view = new AnswerView(RuntimeEnvironment.getApplication());
+        view.layout(0, 0, 480, 640);
+        String text = java.util.stream.IntStream.rangeClosed(1, 14)
+                .mapToObj(number -> "導出 " + number).collect(java.util.stream.Collectors.joining("\n"));
+        AnswerReader reader = reader(text);
+        view.bind(reader);
+        assertEquals("the complete writing fits on one static slide", 1, reader.pageCount());
+        assertEquals(32f, view.bodyTextSize(), .01f);
+        assertEquals(text, view.getContentDescription().toString());
+        android.graphics.Bitmap first = android.graphics.Bitmap.createBitmap(480, 640, android.graphics.Bitmap.Config.ARGB_8888);
+        view.draw(new android.graphics.Canvas(first));
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idleFor(java.time.Duration.ofMinutes(5));
+        android.graphics.Bitmap later = android.graphics.Bitmap.createBitmap(480, 640, android.graphics.Bitmap.Config.ARGB_8888);
+        view.draw(new android.graphics.Canvas(later));
+        assertTrue("time alone must not move a slide", first.sameAs(later));
+        for (int x = 0; x < 480; x++) {
+            assertEquals("top safe margin", android.graphics.Color.BLACK, first.getPixel(x, 5));
+            assertEquals("bottom safe margin", android.graphics.Color.BLACK, first.getPixel(x, 635));
+        }
+        first.recycle();
+        later.recycle();
+    }
+
+    @Test
+    @org.robolectric.annotation.GraphicsMode(org.robolectric.annotation.GraphicsMode.Mode.NATIVE)
     public void diagramAndBoundaryLabelAreVisibleAndFullyReadable() throws Exception {
         String longLabel = "boundary label ".repeat(5);
         org.json.JSONObject figure = new org.json.JSONObject()
@@ -57,7 +83,7 @@ public class AnswerViewTest {
                 AnswerItem.ready("g1", "大問1", "q1", "(1)", text))), 400, 2, String::length);
     }
 
-    @Test public void longAnswerUsesThreeLinePagesAndKeepsItsReadableFontSize() {
+    @Test public void longAnswerUsesTheAvailableScreenAndKeepsItsReadableFontSize() {
         AnswerView view = new AnswerView(RuntimeEnvironment.getApplication());
         view.layout(0, 0, 480, 640);
         float fontSize = view.bodyTextSize();
@@ -69,7 +95,8 @@ public class AnswerViewTest {
         assertTrue(count > 1);
         for (int i = 0; i < count; i++) {
             view.refresh();
-            assertTrue(view.getContentDescription().toString().split("\n", -1).length <= 3);
+            int rows = view.getContentDescription().toString().split("\n", -1).length + 1;
+            assertTrue("every line stays within the display", rows * fontSize * 1.25f <= view.getHeight());
             restored.append(text, reader.page().start, reader.page().end);
             reader.forward();
         }

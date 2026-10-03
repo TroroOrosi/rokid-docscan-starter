@@ -32,9 +32,9 @@ import urllib.request
 
 DEFAULT_TIMEOUT_S = 30.0
 
-#: CDP carries the page bytes as base64 inside a JSON message, so a bundled
-#: booklet PDF arrives as one multi-megabyte frame. `websockets` defaults to a
-#: 1 MiB ceiling and would close the connection instead of delivering it.
+#: CDP carries the page bytes as base64 inside a JSON message, one page image
+#: (several MB) per message. `websockets` defaults to a 1 MiB ceiling and would
+#: close the connection instead of delivering it.
 MAX_MESSAGE_BYTES = 256 * 1024 * 1024
 
 
@@ -257,22 +257,29 @@ class Locator:
         files are the server's, so the bytes travel in the message instead.
 
         Each payload is Playwright's shape: ``{name, mimeType, buffer}``.
+
+        One ``Runtime.evaluate`` per file, then one that attaches them all. The
+        DevTools websocket takes at most 100 MB per message
+        (``devtools_http_handler.cc``), and a booklet in one message exceeded it.
         """
-        files = [
-            {
+        staged = "window.__rokidFiles"
+        self._page.evaluate(f"(() => {{ {staged} = []; return true; }})()")
+        for payload in payloads:
+            file = {
                 "name": payload["name"],
                 "type": payload.get("mimeType", "application/octet-stream"),
                 "data": base64.b64encode(payload["buffer"]).decode("ascii"),
             }
-            for payload in payloads
-        ]
+            self._page.evaluate(
+                f"(() => {{ const f = {json.dumps(file)}; const bin = atob(f.data); "
+                "const bytes = new Uint8Array(bin.length); "
+                "for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i); "
+                f"{staged}.push(new File([bytes], f.name, {{type: f.type}})); return true; }})()"
+            )
         attached = self._page.evaluate(
-            f"(() => {{ const e = {self._element_js()}; if (!e) return false; "
-            f"const files = {json.dumps(files)}; const dt = new DataTransfer(); "
-            "for (const f of files) { const bin = atob(f.data); "
-            "const bytes = new Uint8Array(bin.length); "
-            "for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i); "
-            "dt.items.add(new File([bytes], f.name, {type: f.type})); } "
+            f"(() => {{ const staged = {staged} || []; delete {staged}; "
+            f"const e = {self._element_js()}; if (!e) return false; "
+            "const dt = new DataTransfer(); for (const f of staged) dt.items.add(f); "
             "e.files = dt.files; "
             "e.dispatchEvent(new Event('change', {bubbles: true})); "
             "return true; })()"
