@@ -1,6 +1,6 @@
 # rokid-docscan-starter development guide
 
-Status: Current engineering contract. Updated 2026-10-02.
+Status: Current engineering contract. Updated 2026-10-03.
 
 **Start at `.agents/progress/current.md`.** It lists the operator's decisions,
 the verified state and the next steps. Do not re-ask what it settles. Keep the
@@ -133,11 +133,14 @@ in the same chat in batches of at most 20 files including audio. Completed
 intermediate receipts precede the next batch; the final batch requests every
 answer. Durable progress and the existing uncertain-send guard prevent a
 restart from repeating a confirmed or uncertain send. Long generation is normal.
-Before each send, verify the operator's selected Latest radio with Extra High
-in the visible effort menu; Latest is a displayed setting, not an inferred
-backend model name. The earlier GPT-5.6 Sol at extreme effort and GPT-6 Pro
-controls remain supported. Unknown, unchecked or lower-effort selections stop
-submission. Close and confirm only a popup the verification itself opened.
+Before each send, read the browser's saved selection without changing it.
+Latest means the operator's latest-model choice, not a fixed backend name.
+Model names and configured selectors are hints: renamed checked selections
+remain usable. Read public checked/selected state and accessible controls as
+well as the original selectors. A readable lower-effort choice, ambiguous
+selection, obstructed click or unclosed popup still stops submission.
+Close and confirm only a popup the verification itself opened. Login, attachment
+and uncertain-send safeguards remain independent of model-name fallback.
 
 ## Real-device contract
 

@@ -555,26 +555,49 @@ _MODEL_MENU_STATE_JS = r"""(() => {
         return r.width > 0 && r.height > 0 && e.getClientRects().length > 0 &&
             s.visibility !== 'hidden' && s.display !== 'none' && s.opacity !== '0';
     };
-    const triggers = [...document.querySelectorAll('button[aria-haspopup="menu"]')]
-        .filter(visible).filter(e => (e.innerText || '').trim() === 'Extra High');
+    const label = e => (e.innerText || e.getAttribute('aria-label') || '').trim();
+    const primary = e => label(e).split(/\n/)[0].trim();
+    const effort = /^(extra[ -]?high|xhigh|extreme|maximum|maximal|high|medium|low|standard|light|極高|超高|最高|高|中|低|標準)$/i;
+    const controls = [...document.querySelectorAll(
+        '[data-testid="model-switcher-dropdown-button"], [data-testid="thinking-effort-dropdown-button"], ' +
+        '[data-testid="thinking-effort-dropdown"], button[aria-haspopup="menu"], ' +
+        'button[aria-haspopup="listbox"], [role="combobox"]')].filter(visible);
+    const named = controls.filter(e => /model|thinking-effort/.test(e.getAttribute('data-testid') || '') ||
+        /model|モデル|thinking|思考|effort|GPT|Latest/i.test(
+            label(e) + ' ' + (e.getAttribute('aria-label') || '')) || effort.test(label(e)));
+    const modelControls = named.filter(e => /model|モデル|GPT|Latest/i.test(
+        label(e) + ' ' + (e.getAttribute('aria-label') || '')));
+    const triggers = modelControls.length ? modelControls : named;
     const trigger = triggers.length === 1 ? triggers[0] : null;
     const r = trigger?.getBoundingClientRect();
     const x = r ? r.x + r.width / 2 : 0, y = r ? r.y + r.height / 2 : 0;
     const enabled = !!trigger && !trigger.disabled && trigger.getAttribute('aria-disabled') !== 'true';
     const canClick = enabled && x >= 0 && y >= 0 && x < innerWidth && y < innerHeight &&
         trigger.contains(document.elementFromPoint(x, y));
-    const menus = [...document.querySelectorAll('[role="menu"]')].filter(visible);
-    const known = /^(Latest|GPT-5\.6 Sol|GPT-6 Pro)$/;
+    const menus = [...document.querySelectorAll('[role="menu"], [role="listbox"], [role="radiogroup"]')].filter(visible);
+    const modelMenus = menus.filter(m => /model|モデル|thinking|思考|effort/i.test(m.getAttribute('aria-label') || '') ||
+        named.some(e => (m.id && (e.getAttribute('aria-controls') || '').split(/\s+/).includes(m.id)) ||
+            (e.id && (m.getAttribute('aria-labelledby') || '').split(/\s+/).includes(e.id))) ||
+        [...m.querySelectorAll('[role="menuitemradio"], [role="radio"], [role="option"]')]
+            .some(e => /^(Latest|GPT[ -]?\d)/i.test(primary(e))));
+    const readingMenus = modelMenus.length ? modelMenus : menus;
+    const rows = [...new Set(readingMenus.flatMap(m => [...m.querySelectorAll(
+        '[role="menuitemradio"], [role="radio"], [role="option"], [role="menuitemcheckbox"]')]))].filter(visible);
+    const checked = e => e.getAttribute('aria-checked') === 'true' || e.getAttribute('aria-selected') === 'true' ||
+        e.getAttribute('data-state') === 'checked';
+    const selectedEfforts = rows.filter(checked).map(primary).filter(t => effort.test(t));
+    const controlEfforts = controls.map(primary).filter(t => effort.test(t));
+    const menuEfforts = [...new Set(readingMenus.flatMap(m => [...m.querySelectorAll('[role="menuitem"]')]
+        .filter(visible).map(primary).filter(t => effort.test(t))))];
     return {
         trigger_count: triggers.length, expanded: trigger?.getAttribute('aria-expanded'),
-        enabled, can_click: canClick, x, y, menu_count: menus.length,
-        radios: menus.flatMap(m => [...m.querySelectorAll('[role="menuitemradio"]')]
-            .filter(visible).map(e => ({
-                known_label_lines: (e.innerText || '').split(/\n/).map(t => t.trim()).filter(t => known.test(t)),
-                aria_checked: e.getAttribute('aria-checked')
-            }))),
-        efforts: menus.flatMap(m => [...m.querySelectorAll('[role="menuitem"]')]
-            .filter(visible).map(e => (e.innerText || '').trim()).filter(t => t === 'Extra High'))
+        enabled, can_click: canClick, x, y, menu_count: menus.length, model_menu_associated: modelMenus.length > 0,
+        radios: rows.filter(e => !effort.test(primary(e))).map(e => ({
+            label_lines: label(e).split(/\n/).map(t => t.trim()).filter(Boolean),
+            aria_checked: String(checked(e))
+        })),
+        efforts: [...new Set(selectedEfforts.length ? selectedEfforts : controlEfforts.length ? controlEfforts :
+            menuEfforts.length === 1 ? menuEfforts : [])]
     };
 })()"""
 
@@ -582,13 +605,12 @@ _MODEL_MENU_STATE_JS = r"""(() => {
 def _selected_model_in_effort_menu(page) -> dict:
     """Read checked public menu rows; close only a popup this check opened."""
     state = page.evaluate(_MODEL_MENU_STATE_JS)
-    if (not isinstance(state, dict) or state.get("trigger_count") != 1
-            or state.get("enabled") is not True or state.get("expanded") not in {"true", "false"}):
+    if not isinstance(state, dict):
         raise ChatGptWebModelMismatch("actual ChatGPT model selection is unreadable; nothing sent")
     opened = False
     try:
-        if state["expanded"] == "false":
-            if state.get("menu_count") != 0 or state.get("can_click") is not True:
+        if state.get("menu_count") == 0:
+            if state.get("enabled") is not True or state.get("can_click") is not True:
                 raise ChatGptWebModelMismatch("model selection menu is not usable; nothing sent")
             opened = True
             for event_type in ("mousePressed", "mouseReleased"):
@@ -596,54 +618,62 @@ def _selected_model_in_effort_menu(page) -> dict:
                     "type": event_type, "x": state["x"], "y": state["y"],
                     "button": "left", "clickCount": 1,
                 })
-            page.locator('[role="menu"] [role="menuitemradio"]').wait_for(
-                state="visible", timeout=READY_TIMEOUT_S * 1000)
-            state = page.evaluate(_MODEL_MENU_STATE_JS)
+            deadline = time.monotonic() + READY_TIMEOUT_S
+            while True:
+                state = page.evaluate(_MODEL_MENU_STATE_JS)
+                if isinstance(state, dict) and state.get("radios"):
+                    break
+                if time.monotonic() >= deadline:
+                    raise ChatGptWebModelMismatch("model selection menu did not appear; nothing sent")
+                time.sleep(0.1)
         # Read the visible menu; its trigger may rerender after the click.
-        if not isinstance(state, dict) or state.get("menu_count") != 1:
+        if (not isinstance(state, dict) or not state.get("menu_count")
+                or not opened and state.get("model_menu_associated") is not True):
             raise ChatGptWebModelMismatch("model selection menu is unreadable; nothing sent")
         checked = [row for row in state.get("radios", []) if row.get("aria_checked") == "true"]
-        if len(checked) != 1 or len(checked[0].get("known_label_lines", [])) != 1:
-            raise ChatGptWebModelMismatch("actual selected model is unknown; nothing sent")
-        return {"models": checked[0]["known_label_lines"], "efforts": state.get("efforts", [])}
+        if len(checked) != 1 or not checked[0].get("label_lines"):
+            raise ChatGptWebModelMismatch("actual selected model is unreadable; nothing sent")
+        return {"models": checked[0]["label_lines"][:1], "efforts": state.get("efforts", [])}
     finally:
         if opened:
             page.keyboard.press("Escape")
             closed = page.evaluate(_MODEL_MENU_STATE_JS)
-            if (not isinstance(closed, dict) or closed.get("trigger_count") != 1
-                    or closed.get("expanded") != "false" or closed.get("menu_count") != 0):
+            if not isinstance(closed, dict) or closed.get("menu_count") != 0:
                 raise ChatGptWebModelMismatch("model selection popup did not close; nothing sent")
 
 
 def verify_selected_model(page) -> str:
-    """Read visible selection controls just before submit; unknown never authorizes a send."""
+    """Use the profile's actual selection; changing display names is not a mismatch."""
     state = page.evaluate("""(() => {
+        const visible = e => e.getClientRects().length > 0 && getComputedStyle(e).visibility !== 'hidden';
+        const primary = e => (e.innerText || e.textContent || e.getAttribute('aria-label') || '').trim().split(/\\n/)[0];
         const text = selector => [...document.querySelectorAll(selector)]
-            .filter(e => e.getClientRects().length > 0 && getComputedStyle(e).visibility !== 'hidden')
-            .map(e => ((e.textContent || '') + ' ' + (e.getAttribute('aria-label') || '')).trim());
+            .filter(visible).flatMap(e => {
+                const selected = [...e.querySelectorAll('[aria-checked="true"], [aria-selected="true"]')].filter(visible);
+                const control = e.matches('button, [role="combobox"]') ? e :
+                    [...e.querySelectorAll('button, [role="combobox"]')].find(visible);
+                return (selected.length ? selected : [control || e]).map(primary);
+            });
         return {models: text(%s), efforts: text(%s)};
     })()""" % (json.dumps(MODEL_SEL), json.dumps(EFFORT_SEL)))
-    # The 2026-10-01 idless UI exposes the selected model only as a checked
-    # menu radio. A button caption or an unchecked Latest option is insufficient.
-    menu_selected = isinstance(state, dict) and state.get("models") == []
-    if menu_selected:
+    # The idless UI exposes selection in a checked menu row. Preserve that
+    # choice even if an old ROKID_CHATGPT_MODEL no longer matches its name.
+    if isinstance(state, dict) and not state.get("models"):
         state = _selected_model_in_effort_menu(page)
     if not isinstance(state, dict) or len(state.get("models", [])) != 1:
         raise ChatGptWebModelMismatch("actual ChatGPT model selection is unreadable; nothing sent")
-    model = re.sub(r"[\s_–—-]+", " ", str(state["models"][0])).strip().lower()
-    effort = " ".join(str(t).lower() for t in state.get("efforts", []))
-    if menu_selected and model == "latest" and effort == "extra high":
-        selected = "Latest"  # Operator's selected label; no backend model is inferred.
-    elif re.search(r"\bgpt\s*6\s+pro\b", model):
-        selected = "GPT-6 Pro"
-    elif re.search(r"\bgpt\s*5\.6\s+sol\b", model) and re.search(
-            r"極高|超高|\bxhigh\b|\bextra[ -]?high\b", effort):
-        selected = "GPT-5.6 Sol"
-    else:
-        raise ChatGptWebModelMismatch("select Latest Extra High, GPT-5.6 Sol 極高 or GPT-6 Pro; nothing sent")
-    requested = re.sub(r"[\s_-]+", " ", os.environ.get("ROKID_CHATGPT_MODEL", "")).strip().lower()
-    if requested and requested != selected.lower():
-        raise ChatGptWebModelMismatch("the actual selected model differs from ROKID_CHATGPT_MODEL; nothing sent")
+    selected = str(state["models"][0]).strip().split("\n")[0]
+    if not selected:
+        raise ChatGptWebModelMismatch("actual ChatGPT model selection is unreadable; nothing sent")
+    model = re.sub(r"[\s_–—-]+", " ", selected).strip().lower()
+    efforts = {re.sub(r"[\s_–—-]+", " ", str(t)).strip().lower() for t in state.get("efforts", []) if str(t).strip()}
+    if len(efforts) > 1:
+        raise ChatGptWebModelMismatch("actual thinking effort selection is ambiguous; nothing sent")
+    effort = next(iter(efforts), "")
+    highest = re.search(r"極高|超高|最高|\bxhigh\b|\bextra[ -]?high\b|\bextreme\b|\bmax(?:imum|imal)?\b", effort)
+    if not highest and (re.search(r"\b(?:high|medium|low|standard|light)\b|^(?:高|中|低|標準)$", effort)
+                        or re.search(r"\bgpt\s*5\.6\s+sol\b", model)):
+        raise ChatGptWebModelMismatch("selected thinking effort is lower than the requested maximum; nothing sent")
     return selected
 
 

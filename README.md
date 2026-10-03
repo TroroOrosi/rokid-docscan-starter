@@ -1,6 +1,6 @@
 # Rokid DocScan（入試問題を撮影して解答するサーバ）
 
-Status: Current project entrypoint. Updated 2026-10-02.
+Status: Current project entrypoint. Updated 2026-10-03.
 
 撮影後は実画像を3秒表示し、通常は写真に文字を重ねません。確認できるのは**構図のみ**で、無操作で保存しても画質は未検証です。
 保存写真の [原寸点検・補正候補・登録条件評価](docs/capture-quality.md) はPC用部品で、
@@ -126,7 +126,7 @@ risk があります。**利用者の判断で選択した経路です（詳細�
 CXR-L の実装境界は
 [CXR-L / Global Hi Rokid integration](docs/cxr-l-integration.md)です。
 
-現在のバージョン: **Server APP 0.50.1 / API 1.32.0 / Android client 0.3.17 / Glasses View 1.28.0 / Solver API 1.9.0**。
+現在のバージョン: **Server APP 0.50.2 / API 1.32.0 / Android client 0.3.17 / Glasses View 1.28.0 / Solver API 1.9.0**。
 版数の正本は `app/version.py` です。他の資料は版数を書かず、この行だけが
 `tests/test_documentation_contract.py` で実装と照合されます。
 Solver API は、記入用解答の全文保持・資料不足の分離を行う `answer_only` モードを含みます。
@@ -650,6 +650,7 @@ bash scripts/phone_services.sh enable
 
 注意点:
 
+- モデルはブラウザに保存された実際の選択を使います。旧モデル名の設定との不一致だけでは停止せず、表示名の変更やメニューの選択状態にも対応します。選択が複数ある場合、読める推論設定が低い場合、確認用メニューを閉じられない場合は送信を止めます。
 - **ChatGPT ウェブ UI の自動操作は OpenAI の利用規約に反します。** アカウント
   停止のリスクを負う経路で、API 経路にはこのリスクはありません。
 - ページ構造は OpenAI のもので予告なく変わります。壊れた場合は

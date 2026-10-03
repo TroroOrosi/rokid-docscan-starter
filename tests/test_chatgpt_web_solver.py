@@ -231,9 +231,9 @@ def test_without_a_stop_button_only_the_whole_json_ends_the_wait():
 @pytest.mark.parametrize("model, effort, allowed", [
     ("GPT-6 Pro", "", True), ("GPT-5.6 Sol", "極高", True),
     ("GPT-5.6 Sol", "高", False), ("GPT-5.6 Sol", "", False),
-    ("GPT-6", "極高", False), ("", "", False),
+    ("GPT-6", "極高", True), ("", "", False),
 ])
-def test_only_the_requested_actual_model_and_effort_can_be_sent(model, effort, allowed):
+def test_saved_actual_model_and_known_highest_effort_are_respected(model, effort, allowed):
     page = _StubPage(['{"answer":"4"}'])
     page.selected_model, page.selected_effort = model, effort
     if allowed:
@@ -253,9 +253,9 @@ class _CurrentUiPage(_StubPage):
         super().__init__(['{"answer":"4"}'])
         self.opened, self.effort, self.enabled, self.hit = opened, effort, enabled, hit
         self.radios = radios if radios is not None else [
-            {"known_label_lines": ["Latest"], "aria_checked": "true"},
-            {"known_label_lines": ["GPT-5.6 Sol"], "aria_checked": "false"},
-            {"known_label_lines": ["GPT-5.5"], "aria_checked": "false"},
+            {"label_lines": ["Latest"], "aria_checked": "true"},
+            {"label_lines": ["GPT-5.6 Sol"], "aria_checked": "false"},
+            {"label_lines": ["GPT-5.5"], "aria_checked": "false"},
         ]
         parent = self
 
@@ -273,7 +273,8 @@ class _CurrentUiPage(_StubPage):
         if "menuitemradio" in expression:
             return {"trigger_count": 1, "expanded": str(self.opened).lower(),
                     "enabled": self.enabled, "can_click": self.hit, "x": 120, "y": 60,
-                    "menu_count": int(self.opened), "radios": self.radios if self.opened else [],
+                    "menu_count": int(self.opened), "model_menu_associated": True,
+                    "radios": self.radios if self.opened else [],
                     "efforts": [self.effort] if self.opened else []}
         return super().evaluate(expression)
 
@@ -313,15 +314,115 @@ def test_current_ui_reads_the_menu_when_its_trigger_rerenders():
     assert [value for kind, value in page.events if kind == "press"] == ["Escape"]
 
 
+@pytest.mark.parametrize("model,effort", [("GPT-7 Reasoning", "Extra High"), ("Aurora Pro", "Maximum")])
+def test_renamed_saved_selection_survives_a_stale_model_setting(monkeypatch, model, effort):
+    monkeypatch.setenv("ROKID_CHATGPT_MODEL", "GPT-6 Pro")
+    page = _CurrentUiPage(
+        radios=[{"label_lines": [model, "Description of the current model"], "aria_checked": "true"}],
+        effort=effort,
+    )
+    assert _ask(page, expect=("answer",))[0] == '{"answer":"4"}'
+    assert len(_sends(page)) == 1
+    assert page.opened is False
+    assert chatgpt_web.verify_selected_model(page) == model
+
+
+def test_checked_selection_survives_trigger_count_and_expanded_attribute_changes():
+    class ChangedMenuPage(_CurrentUiPage):
+        def evaluate(self, expression):
+            state = super().evaluate(expression)
+            if "menuitemradio" in expression:
+                state.update(trigger_count=2 if not self.opened else 0, expanded=None)
+            return state
+
+    page = ChangedMenuPage()
+    page.missing.add('[role="menuitemradio"], [role="radio"], [role="option"], [role="menuitemcheckbox"]')
+    assert _ask(page, expect=("answer",))[0] == '{"answer":"4"}'
+    assert len(_sends(page)) == 1
+    assert page.opened is False
+
+
+def test_model_reader_runs_on_changed_local_dom_without_the_previous_labels(monkeypatch):
+    import html
+    import shutil
+    import subprocess
+    import tempfile
+    from pathlib import Path
+
+    browser = next((p for p in [shutil.which("chromium"), shutil.which("google-chrome"),
+                    "C:/Program Files/Google/Chrome/Application/chrome.exe"] if p and Path(p).is_file()), None)
+    if browser is None:
+        pytest.skip("local Chromium is not installed; no browser is downloaded")
+    expressions = []
+
+    class CaptureSelectionPage(_StubPage):
+        def evaluate(self, expression):
+            expressions.append(expression)
+            return super().evaluate(expression)
+
+    chatgpt_web.verify_selected_model(CaptureSelectionPage([]))
+    fixtures = [
+        '<button aria-haspopup="listbox" aria-label="Choose model" aria-controls="models">Aurora Pro</button>'
+        '<button aria-haspopup="menu" aria-label="Thinking effort">Maximum</button>'
+        '<div role="radio" style="display:none" aria-checked="true">Hidden previous item</div>'
+        '<div role="listbox" id="models"><div role="option" aria-selected="true">Aurora Pro<br>New description</div>'
+        '<div role="option" aria-selected="false">Previous model</div>'
+        '<div role="menuitem">Maximum</div></div>',
+        '<div role="menu"><div role="menuitemradio" aria-checked="true">Latest</div>'
+        '<div role="menuitem">Extra High</div></div>',
+        '<button aria-haspopup="menu" aria-expanded="false">Extra High</button>'
+        '<div role="menu" aria-label="Language"><div role="menuitemradio" aria-checked="true">Japanese</div></div>',
+        '<header><button aria-haspopup="listbox" aria-label="Choose language">Japanese</button></header>',
+        '<div role="menu" aria-label="Model"><div role="menuitemradio" aria-checked="true">Latest</div>'
+        '<div role="radio" aria-checked="true">Low</div><div role="radio" aria-checked="true">Extra High</div></div>',
+        '<button data-testid="model-switcher-dropdown-button" aria-haspopup="menu">Latest</button>'
+        '<div data-testid="thinking-effort-dropdown"><button aria-haspopup="menu" aria-expanded="true">High</button>'
+        '<div role="menu" aria-label="Thinking effort"><div role="menuitem">Maximum</div></div></div>',
+        '<div role="menu" aria-label="Model"><div role="menuitemradio" aria-checked="true">Latest</div>'
+        '<div role="radio" aria-checked="true">High<br>Description of selected effort</div>'
+        '<div role="menuitem">Maximum</div></div>',
+    ]
+    script = "const states = " + json.dumps(fixtures) + ".map(source => { document.body.innerHTML = source; return {menu: "
+    script += chatgpt_web._MODEL_MENU_STATE_JS + ", controls: " + expressions[0]
+    script += "}; }); document.body.innerHTML = '<pre id=states></pre>';"
+    script += "document.getElementById('states').textContent = JSON.stringify(states);"
+    with tempfile.TemporaryDirectory(prefix="rokid-model-dom-") as directory:
+        fixture = Path(directory) / "fixture.html"
+        fixture.write_text('<meta charset="utf-8"><body><script>' + script + "</script>", encoding="utf-8")
+        result = subprocess.run([
+            browser, "--headless", "--dump-dom", "--disable-background-networking", "--disable-component-update",
+            "--disable-sync", "--no-first-run", "--no-default-browser-check", "--host-resolver-rules=MAP * ~NOTFOUND",
+            "--user-data-dir=" + str(Path(directory) / "profile"), fixture.as_uri(),
+        ], capture_output=True, text=True, encoding="utf-8", timeout=30, check=True)
+    snapshots = json.loads(html.unescape(result.stdout.split('<pre id="states">', 1)[1].split("</pre>", 1)[0]))
+    states = [snapshot["menu"] for snapshot in snapshots]
+    assert [(state["radios"][0]["label_lines"][0], state["efforts"]) for state in states[:3]] == [
+        ("Aurora Pro", ["Maximum"]), ("Latest", ["Extra High"]), ("Japanese", ["Extra High"])]
+    assert states[0]["trigger_count"] == 1
+    assert states[3]["trigger_count"] == 0
+    assert states[4]["efforts"] == ["Low", "Extra High"]
+    monkeypatch.setenv("ROKID_CHATGPT_MODEL", "GPT-6 Pro")
+
+    class DomStatePage(_CurrentUiPage):
+        def evaluate(self, expression):
+            return snapshot["menu"] if "menuitemradio" in expression else snapshot["controls"]
+
+    for snapshot, expected in zip(snapshots, ["Aurora Pro", "Latest", None, None, None, None, None], strict=True):
+        if expected is None:
+            with pytest.raises(chatgpt_web.ChatGptWebModelMismatch):
+                chatgpt_web.verify_selected_model(DomStatePage(opened=True))
+        else:
+            assert chatgpt_web.verify_selected_model(DomStatePage(opened=True)) == expected
+
+
 @pytest.mark.parametrize("radios,effort", [
-    ([{"known_label_lines": ["Latest"], "aria_checked": "false"}], "Extra High"),
-    ([{"known_label_lines": ["GPT-5.5"], "aria_checked": "true"}], "Extra High"),
-    ([{"known_label_lines": [], "aria_checked": "true"}], "Extra High"),
-    ([{"known_label_lines": ["Latest"], "aria_checked": "true"},
-      {"known_label_lines": ["GPT-5.6 Sol"], "aria_checked": "true"}], "Extra High"),
-    ([{"known_label_lines": ["Latest"], "aria_checked": "true"}], "High"),
+    ([{"label_lines": ["Latest"], "aria_checked": "false"}], "Extra High"),
+    ([{"label_lines": [], "aria_checked": "true"}], "Extra High"),
+    ([{"label_lines": ["Latest"], "aria_checked": "true"},
+      {"label_lines": ["GPT-5.6 Sol"], "aria_checked": "true"}], "Extra High"),
+    ([{"label_lines": ["Latest"], "aria_checked": "true"}], "High"),
 ])
-def test_current_ui_unknown_unchecked_or_low_effort_never_submits(radios, effort):
+def test_current_ui_unreadable_unchecked_or_low_effort_never_submits(radios, effort):
     page = _CurrentUiPage(radios=radios, effort=effort)
     with pytest.raises(chatgpt_web.ChatGptWebModelMismatch):
         _ask(page, expect=("answer",))
@@ -338,12 +439,11 @@ def test_current_ui_never_opens_a_disabled_or_obscured_effort_trigger(enabled, h
     assert not any(kind == "mouse" for kind, _ in page.events)
 
 
-def test_latest_from_a_legacy_control_or_stub_is_not_checked_menu_evidence():
+def test_latest_from_a_visible_selection_control_survives_a_changed_menu():
     page = _StubPage(['{"answer":"4"}'])
     page.selected_model, page.selected_effort = "Latest", "Extra High"
-    with pytest.raises(chatgpt_web.ChatGptWebModelMismatch):
-        _ask(page, expect=("answer",))
-    assert not _sends(page)
+    assert _ask(page, expect=("answer",))[0] == '{"answer":"4"}'
+    assert len(_sends(page)) == 1
 
 
 def test_current_ui_rechecks_effort_before_every_submit():
