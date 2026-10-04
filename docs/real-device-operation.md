@@ -1,6 +1,6 @@
 # Real-device operation
 
-Status: Current venue preparation and exercised phone-relay fallback runbook. Updated 2026-09-30.
+Status: Current venue preparation and exercised phone-relay fallback runbook. Updated 2026-10-04.
 
 ## 会場経路の準備（未導入・未受け入れ）
 
@@ -12,6 +12,9 @@ Runs on: スマホのTermux、glassdoc、スマホのテザリングとモバイ
 
 `multimodal.env` は権限0600とし、実鍵を表示せず `ROKID_API_KEY`、`ROKID_GLASSES_SERIAL`、`ROKID_SOLVER=chatgpt-web` を保存します。起動スクリプトはCDPを `http://127.0.0.1:9222` に固定します。プロファイルを変える場合だけ `ROKID_BROWSER_PROFILE` を指定します。
 準備時の `ROKID_CHATGPT_SEND_ENABLED=0` は未送信DBの自動送信も止めます。ログイン・サービス導入の承認をGPT送信の承認と扱いません。完全な資料と送信対象を特定した別承認の後だけ1へ変えます。
+
+初回セットアップ済みのスマホのソース更新は、確認済みの端末・ブラウザ所有・配布物をGit管理外のmanifestへ固定します。Windows PCで `py -3.12 -X utf8 scripts/phone_update.py --manifest <manifest.json> --manifest-sha256 <確認済みSHA256>` のプレビューを確認します。プレビューは端末に接続せず、引数なしでは必要なmanifest情報だけを表示します。`--inspect-readonly` で更新条件を読み取り、正確な `--execute-approved-source-update` コマンドの承認後だけ更新します。更新処理は配布対象のソースファイルに限り、保存済み写真・答案・Chromiumプロファイル・秘密設定・Git情報を保ちます。
+更新時は送信停止とAPI・監視・サービスの停止を確認し、既存のログイン用ブラウザとX11の所有を再確認します。例外時は、この更新で保存した元のソースから復旧します。接続切断や強制終了で完了を確認できなければ記録とバックアップを残し、再実行を停止します。APK導入・サービス有効化・GPT送信にはそれぞれ別の確認と承認が必要です。この更新の実行と会場経路の受け入れは別です。
 
 承認後に使うTermuxコマンドは以下です。サービス準備は無効状態で作成し、本人ログインとヘッドレス動作の確認後に有効化します。ログイン用ブラウザとサービス用ブラウザを同時に同じプロファイルで起動しません。
 

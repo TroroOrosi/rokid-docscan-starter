@@ -31,6 +31,7 @@ A surface listed here is not automatically wanted. Each row carries a status:
 | `scripts/eval_exam.py` / `scripts/eval_fast_scan.py` / `scripts/evaluate.py` / `scripts/run_exam_deck.py` / `scripts/make_sample_pages.py` | probe | 合成資料作成・部品／答案評価。実providerを呼ぶ設定とオフライン検査を区別し、送信停止中に実モデル試験を実行しない |
 | `scripts/prepare_local_asr.py` / `scripts/build_local_asr.sh` / `scripts/benchmark_local_asr.py` | probe | 互換ASRの準備・測定。chatgpt-webの起動・解析の必須条件ではない |
 | `scripts/phone_browser.sh` / `scripts/phone_serve.sh` / `scripts/phone_watch.sh` / `scripts/phone_services.sh` / `scripts/phone_env.sh` | route | Termux Chromium・FastAPI・グラス監視とBoot/services。専用profile、初回可視login後headless。実機導入・有効化は承認後 |
+| `scripts/phone_update.py` | shared | Windows PCからの承認付きsource-only更新。固定配布物・旧ソース・端末/既存browser所有を照合し、sourceのみ原子置換と復旧。写真・profile・秘密設定・Gitを保持し、APK/サービス/Boot/SEND/GPTは変更しない |
 | `scripts/watch_glasses.py` | route | 認証付き接続元IPとserial照合でグラスの消灯・回答到着・開閉復帰を制御。実機状態を変更し得るため、リポジトリ点検で起動しない |
 | `app/devtools/rokid_led.py` / `scripts/rokid_led.py` | frozen | デバイスコマンドを持たないstub。インジケータを操作する経路に戻さない |
 | `tests/` / Android各moduleの `src/test/` | shared | PC／CIの回帰、fixture、契約検査。合成試験と実資料正答率・物理受け入れを区別する |
