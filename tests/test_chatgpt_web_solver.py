@@ -198,6 +198,10 @@ class _StubPage:
     def evaluate(self, expression):
         if "signed_out" in expression:
             return {"signed_out": getattr(self, "signed_out", False)}
+        if "menuitemradio" in expression:
+            return {"menu_count": 1, "model_menu_associated": True, "model_groups": 1,
+                    "radios": [{"label_lines": [self.selected_model] if self.selected_model else [],
+                                "aria_checked": "true"}], "efforts": [self.selected_effort]}
         return {"models": [self.selected_model], "efforts": [self.selected_effort]}
 
 
@@ -249,7 +253,7 @@ class _CurrentUiPage(_StubPage):
     """Public snapshot from the idless composer and its effort popup, no browser."""
 
     def __init__(self, *, opened=False, radios=None, effort="Extra High", enabled=True, hit=True,
-                 escape_closes=True):
+                 escape_closes=True, selection_works=True):
         super().__init__(['{"answer":"4"}'])
         self.opened, self.effort, self.enabled, self.hit = opened, effort, enabled, hit
         self.radios = radios if radios is not None else [
@@ -257,6 +261,9 @@ class _CurrentUiPage(_StubPage):
             {"label_lines": ["GPT-5.6 Sol"], "aria_checked": "false"},
             {"label_lines": ["GPT-5.5"], "aria_checked": "false"},
         ]
+        self.radios = [{"enabled": True, "can_click": True, "x": 120, "y": 120 + i * 40, **row}
+                       for i, row in enumerate(self.radios)]
+        self.selection_works = selection_works
         parent = self
 
         class Keyboard(_Keyboard):
@@ -268,12 +275,10 @@ class _CurrentUiPage(_StubPage):
         self.keyboard = Keyboard(self)
 
     def evaluate(self, expression):
-        if "models: text(" in expression:
-            return {"models": [], "efforts": []}
         if "menuitemradio" in expression:
             return {"trigger_count": 1, "expanded": str(self.opened).lower(),
                     "enabled": self.enabled, "can_click": self.hit, "x": 120, "y": 60,
-                    "menu_count": int(self.opened), "model_menu_associated": True,
+                    "menu_count": int(self.opened), "model_menu_associated": True, "model_groups": 1,
                     "radios": self.radios if self.opened else [],
                     "efforts": [self.effort] if self.opened else []}
         return super().evaluate(expression)
@@ -282,7 +287,12 @@ class _CurrentUiPage(_StubPage):
         assert method == "Input.dispatchMouseEvent"
         self.events.append(("mouse", params))
         if params["type"] == "mouseReleased":
-            self.opened = True
+            if params["y"] == 60:
+                self.opened = True
+            elif self.selection_works:
+                for row in self.radios:
+                    row["aria_checked"] = str(row["y"] == params["y"]).lower()
+                self.opened = False
 
 
 @pytest.mark.parametrize("opened", [False, True])
@@ -327,6 +337,125 @@ def test_renamed_saved_selection_survives_a_stale_model_setting(monkeypatch, mod
     assert chatgpt_web.verify_selected_model(page) == model
 
 
+@pytest.mark.parametrize("name", ["Latest", "GPT-6", "Aurora Reasoning"])
+def test_the_same_model_position_replaces_a_different_saved_selection_after_a_rename(name):
+    page = _CurrentUiPage(radios=[
+        {"label_lines": [name], "aria_checked": "false"},
+        {"label_lines": ["GPT-5.6 Sol"], "aria_checked": "true"},
+    ])
+    assert _ask(page, expect=("answer",))[0] == '{"answer":"4"}'
+    assert chatgpt_web.verify_selected_model(page) == name
+    assert len(_sends(page)) == 1
+    assert page.opened is False
+    assert [params["y"] for kind, params in page.events if kind == "mouse" and
+            params["type"] == "mouseReleased" and params["y"] != 60] == [120]
+
+
+@pytest.mark.parametrize("row_state,selection_works", [
+    ({"enabled": False}, True), ({"can_click": False}, True), ({}, False),
+])
+def test_unusable_or_unconfirmed_model_position_never_submits(monkeypatch, row_state, selection_works):
+    monkeypatch.setattr(chatgpt_web, "READY_TIMEOUT_S", 0)
+    page = _CurrentUiPage(radios=[
+        {"label_lines": ["GPT-6"], "aria_checked": "false", **row_state},
+        {"label_lines": ["GPT-5.6 Sol"], "aria_checked": "true"},
+    ], selection_works=selection_works)
+    with pytest.raises(chatgpt_web.ChatGptWebModelMismatch):
+        _ask(page, expect=("answer",))
+    assert not _sends(page)
+    assert page.opened is False
+
+
+def test_model_selection_waits_for_delayed_checked_state_without_clicking_twice():
+    class DelayedSelectionPage(_CurrentUiPage):
+        pending_reads = None
+
+        def send(self, method, params):
+            super().send(method, params)
+            if params["type"] == "mouseReleased" and params["y"] != 60:
+                self.pending_reads = 2
+
+        def evaluate(self, expression):
+            if self.pending_reads is not None and "menuitemradio" in expression:
+                self.pending_reads -= 1
+                if self.pending_reads == 0:
+                    self.radios[0]["aria_checked"] = "true"
+                    self.radios[1]["aria_checked"] = "false"
+                    self.pending_reads = None
+            return super().evaluate(expression)
+
+    page = DelayedSelectionPage(radios=[
+        {"label_lines": ["GPT-6"], "aria_checked": "false"},
+        {"label_lines": ["GPT-5.6 Sol"], "aria_checked": "true"},
+    ], selection_works=False)
+    assert _ask(page, expect=("answer",))[0] == '{"answer":"4"}'
+    assert [params["y"] for kind, params in page.events if kind == "mouse" and
+            params["type"] == "mouseReleased" and params["y"] != 60] == [120]
+
+
+def test_model_selection_finishes_before_the_composer_uploads_or_fills():
+    class RebuiltComposerPage(_CurrentUiPage):
+        def send(self, method, params):
+            super().send(method, params)
+            if params["type"] == "mouseReleased" and params["y"] != 60:
+                self.uploads.clear()
+                self.confirmed_files = 0
+                self.events.append(("composer_reset", None))
+
+    page = RebuiltComposerPage(radios=[
+        {"label_lines": ["GPT-6"], "aria_checked": "false"},
+        {"label_lines": ["GPT-5.6 Sol"], "aria_checked": "true"},
+    ])
+    assert _ask(page, images=[PNG], expect=("answer",)) == ('{"answer":"4"}', True)
+    kinds = _kinds(page)
+    assert kinds.index("composer_reset") < kinds.index("upload") < kinds.index("fill") < kinds.index("send")
+    assert len(page.uploads) == 1
+
+
+def test_final_model_verification_cannot_change_a_prepared_message():
+    page = _CurrentUiPage(radios=[
+        {"label_lines": ["GPT-6"], "aria_checked": "false"},
+        {"label_lines": ["GPT-5.6 Sol"], "aria_checked": "true"},
+    ])
+    with pytest.raises(chatgpt_web.ChatGptWebModelMismatch):
+        chatgpt_web.send_and_read(page, "prepared message")
+    assert not _sends(page)
+    assert not any(kind == "mouse" and params["y"] != 60 for kind, params in page.events)
+
+
+def test_a_model_change_cannot_move_the_subject_to_a_different_chat():
+    class RedirectedModelPage(_CurrentUiPage):
+        def send(self, method, params):
+            super().send(method, params)
+            if params["type"] == "mouseReleased" and params["y"] != 60:
+                self.url = "https://chatgpt.com/"
+
+    page = RedirectedModelPage(radios=[
+        {"label_lines": ["GPT-6"], "aria_checked": "false"},
+        {"label_lines": ["GPT-5.6 Sol"], "aria_checked": "true"},
+    ])
+    page.url = "https://chatgpt.com/c/subject"
+    with pytest.raises(chatgpt_web.ChatGptWebChatLost):
+        _ask(page, images=[PNG], expect=("answer",))
+    assert not _sends(page)
+    assert not page.uploads
+
+
+def test_separate_model_option_groups_cannot_select_a_position():
+    class MultipleMenusPage(_CurrentUiPage):
+        def evaluate(self, expression):
+            state = super().evaluate(expression)
+            if "menuitemradio" in expression:
+                state["model_groups"] = 2
+            return state
+
+    page = MultipleMenusPage()
+    with pytest.raises(chatgpt_web.ChatGptWebModelMismatch):
+        _ask(page, expect=("answer",))
+    assert not _sends(page)
+    assert not any(kind == "mouse" and params["y"] != 60 for kind, params in page.events)
+
+
 def test_checked_selection_survives_trigger_count_and_expanded_attribute_changes():
     class ChangedMenuPage(_CurrentUiPage):
         def evaluate(self, expression):
@@ -353,14 +482,6 @@ def test_model_reader_runs_on_changed_local_dom_without_the_previous_labels(monk
                     "C:/Program Files/Google/Chrome/Application/chrome.exe"] if p and Path(p).is_file()), None)
     if browser is None:
         pytest.skip("local Chromium is not installed; no browser is downloaded")
-    expressions = []
-
-    class CaptureSelectionPage(_StubPage):
-        def evaluate(self, expression):
-            expressions.append(expression)
-            return super().evaluate(expression)
-
-    chatgpt_web.verify_selected_model(CaptureSelectionPage([]))
     fixtures = [
         '<button aria-haspopup="listbox" aria-label="Choose model" aria-controls="models">Aurora Pro</button>'
         '<button aria-haspopup="menu" aria-label="Thinking effort">Maximum</button>'
@@ -381,10 +502,15 @@ def test_model_reader_runs_on_changed_local_dom_without_the_previous_labels(monk
         '<div role="menu" aria-label="Model"><div role="menuitemradio" aria-checked="true">Latest</div>'
         '<div role="radio" aria-checked="true">High<br>Description of selected effort</div>'
         '<div role="menuitem">Maximum</div></div>',
+        '<button data-testid="model-switcher-dropdown-button" aria-haspopup="menu">Aurora Reasoning</button>'
+        '<button data-testid="thinking-effort-dropdown-button" aria-haspopup="menu">Extra High</button>'
+        '<div role="menu" aria-label="Model"><div role="menuitemradio" aria-checked="false" '
+        'style="position:fixed;top:180px">Previous model</div>'
+        '<div role="menuitemradio" aria-checked="true" style="position:fixed;top:120px">Aurora Reasoning</div>'
+        '<div role="menuitemcheckbox" aria-checked="true">Automatic switch</div></div>',
     ]
-    script = "const states = " + json.dumps(fixtures) + ".map(source => { document.body.innerHTML = source; return {menu: "
-    script += chatgpt_web._MODEL_MENU_STATE_JS + ", controls: " + expressions[0]
-    script += "}; }); document.body.innerHTML = '<pre id=states></pre>';"
+    script = "const states = " + json.dumps(fixtures) + ".map(source => { document.body.innerHTML = source; return "
+    script += chatgpt_web._MODEL_MENU_STATE_JS + "; }); document.body.innerHTML = '<pre id=states></pre>';"
     script += "document.getElementById('states').textContent = JSON.stringify(states);"
     with tempfile.TemporaryDirectory(prefix="rokid-model-dom-") as directory:
         fixture = Path(directory) / "fixture.html"
@@ -396,19 +522,22 @@ def test_model_reader_runs_on_changed_local_dom_without_the_previous_labels(monk
         ], capture_output=True, text=True, encoding="utf-8", timeout=30, check=False)
     assert result.returncode == 0, f"{browser} exited {result.returncode}: {result.stderr}"
     snapshots = json.loads(html.unescape(result.stdout.split('<pre id="states">', 1)[1].split("</pre>", 1)[0]))
-    states = [snapshot["menu"] for snapshot in snapshots]
+    states = snapshots
     assert [(state["radios"][0]["label_lines"][0], state["efforts"]) for state in states[:3]] == [
         ("Aurora Pro", ["Maximum"]), ("Latest", ["Extra High"]), ("Japanese", ["Extra High"])]
     assert states[0]["trigger_count"] == 1
     assert states[3]["trigger_count"] == 0
     assert states[4]["efforts"] == ["Low", "Extra High"]
+    assert states[7]["trigger_count"] == 1
+    assert [row["label_lines"][0] for row in states[7]["radios"]] == ["Aurora Reasoning", "Previous model"]
     monkeypatch.setenv("ROKID_CHATGPT_MODEL", "GPT-6 Pro")
 
     class DomStatePage(_CurrentUiPage):
         def evaluate(self, expression):
-            return snapshot["menu"] if "menuitemradio" in expression else snapshot["controls"]
+            return snapshot
 
-    for snapshot, expected in zip(snapshots, ["Aurora Pro", "Latest", None, None, None, None, None], strict=True):
+    for snapshot, expected in zip(snapshots, ["Aurora Pro", "Latest", None, None, None, None, None,
+                                             "Aurora Reasoning"], strict=True):
         if expected is None:
             with pytest.raises(chatgpt_web.ChatGptWebModelMismatch):
                 chatgpt_web.verify_selected_model(DomStatePage(opened=True))

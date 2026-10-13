@@ -133,11 +133,11 @@ in the same chat in batches of at most 20 files including audio. Completed
 intermediate receipts precede the next batch; the final batch requests every
 answer. Durable progress and the existing uncertain-send guard prevent a
 restart from repeating a confirmed or uncertain send. Long generation is normal.
-Before each send, read the browser's saved selection without changing it.
-Latest means the operator's latest-model choice, not a fixed backend name.
-Model names and configured selectors are hints: renamed checked selections
-remain usable. Read public checked/selected state and accessible controls as
-well as the original selectors. A readable lower-effort choice, ambiguous
+Before attaching files, select the first visible model option: the position
+previously named Latest, now GPT-6. The operator wants this same position after
+future display-name changes. Immediately before sending, confirm its public
+checked/selected state without another model click. Model names and configured
+selectors are hints. A readable lower-effort choice, ambiguous
 selection, obstructed click or unclosed popup still stops submission.
 Close and confirm only a popup the verification itself opened. Login, attachment
 and uncertain-send safeguards remain independent of model-name fallback.

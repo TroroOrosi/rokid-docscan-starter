@@ -30,7 +30,7 @@ def test_primary_bundle_keeps_shared_pages_without_ocr_or_transcript(tmp_path):
     assert _near(image.getpixel((0, image.height - 1)), (6, 50, 100))
 
 
-@pytest.mark.parametrize("count", [19, 20, 21, 39, 40, 55, 61])
+@pytest.mark.parametrize("count", [19, 20, 21, 39, 40, 55, 61, 120])
 def test_each_page_keeps_its_own_image_without_a_booklet_limit(tmp_path, count):
     files = source_bundle(pages_at(tmp_path, count))
     assert len(files) == count

@@ -215,7 +215,8 @@ from __future__ import annotations
 #         after five seconds while capture, photo review and answers stay visible.
 # 0.50.1: read the checked model from the visible menu after its trigger redraws.
 # 0.50.2: keep the browser's saved model selection across display-name changes.
-APP_VERSION = "0.50.2"
+# 0.50.3: select the original Latest menu position even after its label changes.
+APP_VERSION = "0.50.3"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.
