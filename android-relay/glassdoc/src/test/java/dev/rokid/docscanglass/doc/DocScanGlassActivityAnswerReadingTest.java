@@ -67,6 +67,7 @@ public class DocScanGlassActivityAnswerReadingTest {
     private DocScanGlassActivity activity;
     private MockWebServer server;
     private DocScanController controller;
+    private boolean activityDisposed;
     // Captured once: Robolectric's Context.getFilesDir() is not guaranteed to
     // return the same File across separate calls (AnswerSurfaceTest avoids
     // this the same way, by capturing its directory into a local once).
@@ -105,12 +106,17 @@ public class DocScanGlassActivityAnswerReadingTest {
 
     @After
     public void tearDown() throws Exception {
-        if (controller != null) {
-            controller.close();
-        }
+        disposeActivity();
         if (server != null) {
             server.shutdown();
         }
+    }
+
+    private void disposeActivity() {
+        if (activityDisposed) return;
+        activityDisposed = true;
+        // The production lifecycle invalidates callbacks before closing the controller's queue.
+        activity.onDestroy();
     }
 
     @Test
@@ -119,22 +125,22 @@ public class DocScanGlassActivityAnswerReadingTest {
         activity.setContentView((HudView) getField(activity, "hud"));
         activity.onUpdate(RelayState.FINALIZING, List.of("資料読み込み中"), "waiting");
         Shadows.shadowOf(Looper.getMainLooper()).idle();
-        android.os.PowerManager.WakeLock pending =
-                (android.os.PowerManager.WakeLock) getField(activity, "analysisWakeLock");
-        assertNotNull(pending);
+        assertTrue("analysis enters a five-second idle window", (activity.getWindow().getAttributes().flags
+                & android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) != 0);
+        Shadows.shadowOf(Looper.getMainLooper()).idleFor(java.time.Duration.ofSeconds(5));
+        assertEquals(0, activity.getWindow().getAttributes().flags
+                & android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
 
         invokeOnAction(GlassesInputAction.BACK, 1000);
         assertEquals("もう一度ダブルタップで終了",
                 ((List<?>) getField(getField(activity, "hud"), "lines")).get(0));
         assertTrue((boolean) getField(activity, "awaitingAnswers"));
-        assertTrue("showing the confirmation must not cancel analysis", pending.isHeld());
         assertFalse((boolean) getField(activity, "sessionClosed"));
 
         invokeOnAction(GlassesInputAction.BACK, 2000);
         assertTrue((boolean) getField(activity, "sessionClosed"));
         assertTrue((boolean) getField(controller, "closed"));
-        assertFalse(pending.isHeld());
-        activity.onUpdate(RelayState.REVIEW, List.of("late result"), "late");
+        readyUpdate(activity, List.of("late result"), "late");
         Shadows.shadowOf(Looper.getMainLooper()).idle();
         assertEquals("exit must suppress a late answer fetch", 0, server.getRequestCount());
         assertNull(getField(activity, "reader"));
@@ -147,45 +153,43 @@ public class DocScanGlassActivityAnswerReadingTest {
         invokeOpenAnswers(bundleForSession(SESSION_ID), "q10", 0);
         invokeOnAction(GlassesInputAction.BACK, 1000);
         invokeOnAction(GlassesInputAction.BACK, 5000);
-        assertNotNull("events four seconds apart cannot confirm exit", getField(activity, "reader"));
+        assertFalse("completion does not count toward exit", (boolean)getField(activity, "sessionClosed"));
         invokeOnAction(GlassesInputAction.BACK, 5500);
         assertNull(getField(activity, "reader"));
     }
 
     @Test
-    public void menuBackReturnsOneLevelAndFocusLossDisarmsExit() throws Exception {
+    public void readerTapsKeepTheSlideAndFocusLossDisarmsExitAfterWritingCompletion() throws Exception {
+        new AnswerStore(filesDir).start(bundleForSession(SESSION_ID));
         invokeOpenAnswers(bundleForSession(SESSION_ID), "q10", 0);
         AnswerReader reader = (AnswerReader) getField(activity, "reader");
         invokeOnAction(GlassesInputAction.SHORT_TAP);
         invokeOnAction(GlassesInputAction.SHORT_TAP);
-        assertEquals(AnswerReader.Screen.QUESTIONS, reader.screen());
-        invokeOnAction(GlassesInputAction.BACK);
-        assertEquals(AnswerReader.Screen.GROUPS, reader.screen());
-        assertFalse(backExit().isArmed());
-        invokeOnAction(GlassesInputAction.BACK);
         assertEquals(AnswerReader.Screen.ANSWER, reader.screen());
+        assertTrue("the reader stays lit until writing completion", (activity.getWindow().getAttributes().flags
+                & android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) != 0);
         assertFalse(backExit().isArmed());
         invokeOnAction(GlassesInputAction.BACK);
-        assertTrue(backExit().isArmed());
+        assertFalse(backExit().isArmed());
+        assertTrue((boolean)getField(activity, "writingDone"));
         activity.onWindowFocusChanged(false);
         activity.onWindowFocusChanged(true);
         assertFalse(backExit().isArmed());
         invokeOnAction(GlassesInputAction.BACK);
-        assertNotNull(getField(activity, "reader"));
+        assertNull(getField(activity, "reader"));
         assertTrue(backExit().isArmed());
     }
 
     @Test
     public void theBundleIsFetchedOnceAndClosingTheReaderDoesNotReopenOrRefetchIt()
             throws Exception {
-        activity.onUpdate(RelayState.REVIEW, List.of("a", "b", "c"), "review-1");
+        readyUpdate(activity, List.of("a", "b", "c"), "review-1");
         awaitTrue(() -> getField(activity, "reader") != null);
         assertEquals("one HTTP request for the bundle", 1, server.getRequestCount());
 
         invokeOnAction(GlassesInputAction.BACK);
-        assertNotNull(getField(activity, "reader"));
-        invokeOnAction(GlassesInputAction.BACK);
-        assertNull("closing must release screen ownership", getField(activity, "reader"));
+        assertFalse(backExit().isArmed());
+        assertNull("completion must release screen ownership", getField(activity, "reader"));
         AnswerStore.Saved closed = new AnswerStore(filesDir).load();
         assertNotNull(closed);
         assertTrue("closeAnswers must persist CLOSED", closed.closed);
@@ -193,7 +197,7 @@ public class DocScanGlassActivityAnswerReadingTest {
         // A REVIEW publish after the operator left the reader (e.g. the
         // controller's own nextReviewItem/previousReviewItem republishing
         // REVIEW) must not re-fetch or hand the screen back to the reader.
-        activity.onUpdate(RelayState.REVIEW, List.of("d", "e", "f"), "review-2");
+        readyUpdate(activity, List.of("d", "e", "f"), "review-2");
         Thread.sleep(200);
         Shadows.shadowOf(Looper.getMainLooper()).idle();
         assertEquals("no second request after close", 1, server.getRequestCount());
@@ -226,7 +230,7 @@ public class DocScanGlassActivityAnswerReadingTest {
             }
         });
 
-        activity.onUpdate(RelayState.REVIEW, List.of("a"), "review-1");
+        readyUpdate(activity, List.of("a"), "review-1");
         awaitTrue(() -> bundleAttempts.get() >= 1);
         Thread.sleep(200);
         Shadows.shadowOf(Looper.getMainLooper()).idle();
@@ -235,13 +239,13 @@ public class DocScanGlassActivityAnswerReadingTest {
 
         // A later REVIEW publish -- e.g. nextReviewItem/previousReviewItem
         // republishing it -- must retry, not be permanently skipped.
-        activity.onUpdate(RelayState.REVIEW, List.of("b"), "review-2");
+        readyUpdate(activity, List.of("b"), "review-2");
         awaitTrue(() -> getField(activity, "reader") != null);
         assertEquals("the failed attempt must be retried exactly once more",
                 2, bundleAttempts.get());
 
         // A successful fetch must not be retried by a further REVIEW publish.
-        activity.onUpdate(RelayState.REVIEW, List.of("c"), "review-3");
+        readyUpdate(activity, List.of("c"), "review-3");
         Thread.sleep(200);
         Shadows.shadowOf(Looper.getMainLooper()).idle();
         assertEquals("a successful fetch must not be retried again",
@@ -261,7 +265,7 @@ public class DocScanGlassActivityAnswerReadingTest {
         // silently pass even if resume's offset were ignored entirely.
         preSeeded.save(bundle, "q11", 3, false);
 
-        activity.onUpdate(RelayState.REVIEW, List.of("a"), "review-1");
+        readyUpdate(activity, List.of("a"), "review-1");
         awaitTrue(() -> getField(activity, "reader") != null);
 
         assertEquals("resume must not touch the network", 0, server.getRequestCount());
@@ -286,7 +290,7 @@ public class DocScanGlassActivityAnswerReadingTest {
         preSeeded.start(staleBundle);
         preSeeded.save(staleBundle, "q11", 3, false);
 
-        activity.onUpdate(RelayState.REVIEW, List.of("a"), "review-1");
+        readyUpdate(activity, List.of("a"), "review-1");
         awaitTrue(() -> getField(activity, "reader") != null);
 
         assertEquals("a session mismatch must fall through to a fresh fetch",
@@ -312,7 +316,7 @@ public class DocScanGlassActivityAnswerReadingTest {
         preSeeded.start(bundle);
         preSeeded.save(bundle, "q11", 3, true);
 
-        activity.onUpdate(RelayState.REVIEW, List.of("a"), "review-1");
+        readyUpdate(activity, List.of("a"), "review-1");
         Thread.sleep(200);
         Shadows.shadowOf(Looper.getMainLooper()).idle();
 
@@ -355,6 +359,108 @@ public class DocScanGlassActivityAnswerReadingTest {
         AnswerReader reader = (AnswerReader) getField(activity, "reader");
         assertEquals("q11", reader.current().questionId);
         assertEquals(3, reader.offset());
+    }
+
+    /**
+     * RP-15: the server answers 小問 one at a time, so the first snapshot can
+     * still hold PENDING items. The reader refreshes only while one remains,
+     * with GET only -- never a finalize that could resend a failed question.
+     */
+    @Test public void completedAnswersNeverPollInTheBackground() throws Exception {
+        readyUpdate(activity, List.of("a"), "ready");
+        awaitTrue(() -> getField(activity, "reader") != null);
+        Shadows.shadowOf(Looper.getMainLooper()).idleFor(java.time.Duration.ofMinutes(2));
+        Thread.sleep(100);
+        assertEquals(1, answerBundleRequests.get());
+    }
+
+    /** The server answers the whole booklet in one message; the reader waits without a new REVIEW. */
+    @Test public void analysisWaitNeedsAMatchingNotificationRatherThanATimer() throws Exception {
+        setField(activity, "resolvedOfflineAnswersAtStartup", true);
+        setField(activity, "powerGeneration", 3L);
+        PowerState.forContext(activity).begin(2);
+        setField(activity, "powerSession", SESSION_ID);
+        setField(activity, "powerPhase", "analyzing");
+        activity.onUpdate(RelayState.REVIEW, List.of("a"), "waiting");
+        Shadows.shadowOf(Looper.getMainLooper()).idleFor(java.time.Duration.ofMinutes(2));
+        assertNull(getField(activity, "reader"));
+        assertEquals(0, answerBundleRequests.get());
+        activity.onNewIntent(new android.content.Intent().putExtra("wake_session_id", (int)SESSION_ID)
+                .putExtra("wake_generation", 2L));
+        activity.onResume();
+        assertFalse(Shadows.shadowOf(activity).getTurnScreenOn());
+        assertEquals(0, answerBundleRequests.get());
+        activity.onNewIntent(new android.content.Intent().putExtra("wake_session_id", (int)SESSION_ID + 1)
+                .putExtra("wake_generation", 3L));
+        activity.onResume();
+        assertFalse(Shadows.shadowOf(activity).getTurnScreenOn());
+        assertEquals(0, answerBundleRequests.get());
+        activity.onNewIntent(new android.content.Intent().putExtra("wake_session_id", (int)SESSION_ID)
+                .putExtra("wake_generation", 3L));
+        assertTrue("only the accepted active notification requests the screen on", Shadows.shadowOf(activity).getTurnScreenOn());
+        awaitTrue(() -> getField(activity, "reader") != null);
+        assertEquals(1, answerBundleRequests.get());
+    }
+
+    /** A 409 that waiting cannot end is shown, not dressed up as analysis. */
+    @Test
+    public void aSessionWithNothingDetectedSaysSoInsteadOfAnalysing() throws Exception {
+        server.setDispatcher(new Dispatcher() {
+            @Override
+            public MockResponse dispatch(RecordedRequest request) {
+                return json("{\"detail\":\"no problems were detected in this document\"}")
+                        .setResponseCode(409);
+            }
+        });
+        readyUpdate(activity, List.of("a"), "review");
+        awaitTrue(() -> {
+            List<?> lines = (List<?>)getField(getField(activity, "hud"), "lines");
+            return !lines.isEmpty() && "解答がありません".equals(lines.get(0));
+        });
+        assertEquals("問題を検出できません",
+                ((List<?>) getField(getField(activity, "hud"), "lines")).get(1));
+    }
+
+    /** Nothing was sent; the server retries. Read every 30s, and take the model's deck when it comes. */
+    @Test public void writingDoneSuppressesLateAnswerNotificationsAndRequiresTwoAdditionalBacks() throws Exception {
+        readyUpdate(activity, List.of("a"), "ready");
+        awaitTrue(() -> getField(activity, "reader") != null);
+        assertTrue(Shadows.shadowOf(activity).getTurnScreenOn());
+        invokeOnAction(GlassesInputAction.BACK, 1000);
+        assertFalse("completion removes the resume wake request", Shadows.shadowOf(activity).getTurnScreenOn());
+        assertNull(getField(activity, "reader"));
+        assertTrue((boolean)getField(activity, "writingDone"));
+        assertTrue(new AnswerStore(filesDir).load().closed);
+        assertFalse(backExit().isArmed());
+        activity.onNewIntent(new android.content.Intent().putExtra("wake_session_id", (int)SESSION_ID)
+                .putExtra("wake_generation", (long)getField(activity, "powerGeneration")));
+        activity.onResume();
+        assertFalse("a stale GET snapshot must not relight writing_done", Shadows.shadowOf(activity).getTurnScreenOn());
+        readyUpdate(activity, List.of("late"), "late");
+        Shadows.shadowOf(Looper.getMainLooper()).idle();
+        assertNull(getField(activity, "reader"));
+        assertEquals(1, answerBundleRequests.get());
+        invokeOnAction(GlassesInputAction.BACK, 2000);
+        assertFalse((boolean)getField(activity, "sessionClosed"));
+        assertTrue(backExit().isArmed());
+        invokeOnAction(GlassesInputAction.BACK, 2500);
+        assertTrue((boolean)getField(activity, "sessionClosed"));
+        activity.onNewIntent(new android.content.Intent().putExtra("wake_session_id", (int)SESSION_ID)
+                .putExtra("wake_generation", (long)getField(activity, "powerGeneration")));
+        activity.onResume();
+        assertFalse("a closed run cannot relight on the old notification", Shadows.shadowOf(activity).getTurnScreenOn());
+        assertEquals(1, answerBundleRequests.get());
+    }
+
+    private void readyUpdate(DocScanGlassActivity target, List<String> lines, String diagnostic) throws Exception {
+        target.onUpdate(RelayState.REVIEW, lines, diagnostic);
+        Shadows.shadowOf(Looper.getMainLooper()).idle();
+        if ((boolean)getField(target, "writingDone") || (boolean)getField(target, "sessionClosed")) return;
+        DocScanController active = (DocScanController)getField(target, "controller");
+        setField(target, "powerSession", active.sessionId());
+        setField(target, "powerPhase", "analyzing");
+        target.onNewIntent(new android.content.Intent().putExtra("wake_session_id", (int)active.sessionId())
+                .putExtra("wake_generation", (long)getField(target, "powerGeneration")));
     }
 
     private static AnswerBundle bundleForSession(long sessionId) {
@@ -408,7 +514,7 @@ public class DocScanGlassActivityAnswerReadingTest {
      */
     @Test
     public void aSecondSessionInTheSameActivityInstanceFetchesAgain() throws Exception {
-        activity.onUpdate(RelayState.REVIEW, List.of("a"), "review-1");
+        readyUpdate(activity, List.of("a"), "review-1");
         awaitTrue(() -> getField(activity, "reader") != null);
         assertEquals("first session fetches once", 1, answerBundleRequests.get());
 
@@ -422,9 +528,17 @@ public class DocScanGlassActivityAnswerReadingTest {
                     + "second session id from preferences, not the first",
                     secondSessionId, controller2.sessionId());
 
+            // A fresh chosen run needs its own generation and phone notification.
+            Method close = DocScanGlassActivity.class.getDeclaredMethod("closeAnswers");
+            close.setAccessible(true);
+            assertTrue((boolean)close.invoke(activity));
+            Method generation = DocScanGlassActivity.class.getDeclaredMethod("beginPowerGeneration");
+            generation.setAccessible(true);
+            generation.invoke(activity);
             setField(activity, "controller", controller2);
             controller2.configureAndResume(server.url("/").toString(), "test-key", 180);
-
+            awaitTrue(() -> controller2.getState() == RelayState.REVIEW);
+            readyUpdate(activity, List.of("new session"), "second-session");
             awaitTrue(() -> answerBundleRequests.get() >= 2);
             assertEquals("the second session must be fetched too, not silently "
                     + "skipped by a guard still keyed to the first session",
@@ -447,9 +561,10 @@ public class DocScanGlassActivityAnswerReadingTest {
      */
     @Test
     public void fetchThenPersistThenANewActivityResumesWithoutRefetching() throws Exception {
-        activity.onUpdate(RelayState.REVIEW, List.of("a"), "review-1");
+        readyUpdate(activity, List.of("a"), "review-1");
         awaitTrue("first activity reader", () -> getField(activity, "reader") != null);
         AnswerReader reader = (AnswerReader) getField(activity, "reader");
+        reader.viewport(16, 1, String::length); // force two slides even when short answers can share a row
         int guard = 0;
         while (!"q11".equals(reader.current().questionId) && guard++ < 50) {
             invokeOnAction(GlassesInputAction.SWIPE_FORWARD);
@@ -468,7 +583,7 @@ public class DocScanGlassActivityAnswerReadingTest {
         setField(activity2, "answerStore", new AnswerStore(filesDir));
         setField(activity2, "controller", controller);
 
-        activity2.onUpdate(RelayState.REVIEW, List.of("a"), "review-1");
+        readyUpdate(activity2, List.of("a"), "review-1");
         awaitTrue("resumed activity reader", () -> getField(activity2, "reader") != null);
 
         assertEquals("resuming from the saved state must not re-fetch",
@@ -480,10 +595,11 @@ public class DocScanGlassActivityAnswerReadingTest {
 
     @Test
     public void eachMovingGesturePersistsTheReaderPosition() throws Exception {
-        activity.onUpdate(RelayState.REVIEW, List.of("a"), "review-1");
+        readyUpdate(activity, List.of("a"), "review-1");
         awaitTrue(() -> getField(activity, "reader") != null);
         AnswerReader reader = (AnswerReader) getField(activity, "reader");
         assertEquals("q10", reader.current().questionId);
+        reader.viewport(16, 1, String::length); // force a real page change to persist
 
         int guard = 0;
         while (!"q11".equals(reader.current().questionId) && guard++ < 50) {
@@ -512,14 +628,13 @@ public class DocScanGlassActivityAnswerReadingTest {
      */
     @Test
     public void closingRightAfterMovingPersistsClosedNotAStalePosition() throws Exception {
-        activity.onUpdate(RelayState.REVIEW, List.of("a"), "review-1");
+        readyUpdate(activity, List.of("a"), "review-1");
         awaitTrue(() -> getField(activity, "reader") != null);
 
         invokeOnAction(GlassesInputAction.SWIPE_FORWARD);
         invokeOnAction(GlassesInputAction.SWIPE_FORWARD);
         invokeOnAction(GlassesInputAction.BACK);
-        assertNotNull(getField(activity, "reader"));
-        invokeOnAction(GlassesInputAction.BACK);
+        assertNull(getField(activity, "reader"));
 
         AnswerStore.Saved saved = new AnswerStore(filesDir).load();
         assertNotNull(saved);
@@ -554,13 +669,50 @@ public class DocScanGlassActivityAnswerReadingTest {
     @Test
     public void backPressWhileTheReaderOwnsTheScreenDoesNotArmTheExitConfirmation()
             throws Exception {
-        activity.onUpdate(RelayState.REVIEW, List.of("a"), "review-1");
+        readyUpdate(activity, List.of("a"), "review-1");
         awaitTrue(() -> getField(activity, "reader") != null);
 
         pressBack();
 
         assertFalse("leaving the reader must not also arm the exit confirmation",
                 backExit().isArmed());
+    }
+
+    @Test
+    @Config(shadows = FirmwareKeyNames.class)
+    public void oneFirmwareDoubleTapEndsWritingAndDoesNotCountAgainOnKeyUp() throws Exception {
+        new AnswerStore(filesDir).start(bundleForSession(SESSION_ID));
+        invokeOpenAnswers(bundleForSession(SESSION_ID), "q10", 0);
+        doubleTapKeys(1000);
+        assertTrue((boolean)getField(activity, "writingDone"));
+        assertNull(getField(activity, "reader"));
+        assertFalse("the completion gesture never starts an exit window", backExit().isArmed());
+        doubleTapKeys(2000);
+        assertTrue(backExit().isArmed());
+        assertFalse("DOWN and UP of the next gesture are one confirmation", (boolean)getField(activity, "sessionClosed"));
+        doubleTapKeys(2600);
+        assertTrue((boolean)getField(activity, "sessionClosed"));
+    }
+
+    private void doubleTapKeys(long started) {
+        keyPair(KeyEvent.KEYCODE_NOTIFICATION, started);
+        keyPair(KeyEvent.KEYCODE_NOTIFICATION, started + 200);
+        keyPair(KeyEvent.KEYCODE_BACK, started + 400);
+    }
+
+    private void keyPair(int key, long time) {
+        assertTrue(activity.onKeyDown(key, new KeyEvent(time, time, KeyEvent.ACTION_DOWN, key, 0)));
+        assertTrue(activity.onKeyUp(key, new KeyEvent(time, time + 30, KeyEvent.ACTION_UP, key, 0,
+                0, -1, 0, KeyEvent.FLAG_TRACKING)));
+    }
+
+    @org.robolectric.annotation.Implements(KeyEvent.class)
+    public static class FirmwareKeyNames {
+        @org.robolectric.annotation.Implementation
+        protected static String keyCodeToString(int key) {
+            return key == KeyEvent.KEYCODE_NOTIFICATION ? "KEYCODE_NOTIFICATION"
+                    : key == KeyEvent.KEYCODE_BACK ? "KEYCODE_BACK" : Integer.toString(key);
+        }
     }
 
     /**
@@ -681,6 +833,49 @@ public class DocScanGlassActivityAnswerReadingTest {
         }
     }
 
+    @Test public void lateAudioCompletionAfterFixtureDisposalCannotReachTheClosedController() throws Exception {
+        java.util.concurrent.CountDownLatch completionRequested = new java.util.concurrent.CountDownLatch(1);
+        java.util.concurrent.CountDownLatch releaseCompletion = new java.util.concurrent.CountDownLatch(1);
+        java.util.concurrent.CountDownLatch completionPosted = new java.util.concurrent.CountDownLatch(1);
+        server.setDispatcher(new Dispatcher() {
+            @Override public MockResponse dispatch(RecordedRequest request) throws InterruptedException {
+                if (request.getPath().endsWith("/audio-complete")) {
+                    completionRequested.countDown();
+                    if (!releaseCompletion.await(5, TimeUnit.SECONDS)) return json("{}").setResponseCode(503);
+                }
+                return json("{}");
+            }
+        });
+        controllerBarrier();
+        setField(activity, "main", new android.os.Handler(Looper.getMainLooper()) {
+            @Override public boolean sendMessageAtTime(android.os.Message message, long uptimeMillis) {
+                boolean accepted = super.sendMessageAtTime(message, uptimeMillis);
+                if (accepted && message.getCallback() != null
+                        && "listening-finish".equals(Thread.currentThread().getName())) completionPosted.countDown();
+                return accepted;
+            }
+        });
+        ListeningRecorder recording = stoppedRecording(new File(filesDir, "late-completion"), 18, controller);
+        setField(activity, "listening", recording);
+        setField(activity, "listeningMode", true);
+        try {
+            Method finish = DocScanGlassActivity.class.getDeclaredMethod("finishAudio");
+            finish.setAccessible(true); finish.invoke(activity);
+            assertTrue("hold the actual HTTP completion before it posts its Activity callback",
+                    completionRequested.await(5, TimeUnit.SECONDS));
+            disposeActivity();
+            releaseCompletion.countDown();
+            assertTrue("the real completion callback must arrive after disposal", completionPosted.await(5, TimeUnit.SECONDS));
+            Shadows.shadowOf(Looper.getMainLooper()).idle();
+            assertTrue((boolean)getField(activity, "sessionClosed"));
+            assertTrue(((ExecutorService)getField(controller, "serial")).isShutdown());
+            assertFalse("a late completion cannot mutate the closed controller", (boolean)getField(controller, "listeningComplete"));
+        } finally {
+            releaseCompletion.countDown();
+            recording.close();
+        }
+    }
+
     @Test public void stoppedAudioCompletesWhenDocumentBindingArrivesWithoutStartingAnotherRecorder() throws Exception {
         java.util.concurrent.CountDownLatch complete = new java.util.concurrent.CountDownLatch(1);
         server.setDispatcher(new Dispatcher() {
@@ -709,6 +904,9 @@ public class DocScanGlassActivityAnswerReadingTest {
             assertNotNull("saved audio must have a foreground service during retry", resumedService);
             assertTrue(resumedService.getBooleanExtra(ListeningService.FINISHING, false));
             assertTrue(complete.await(3, TimeUnit.SECONDS));
+            awaitTrue("audio completion must reach the controller before recorder disposal",
+                    () -> (boolean)getField(controller, "listeningComplete"));
+            controllerBarrier();
             assertEquals("/v1/documents/18/audio-chunks", server.takeRequest().getPath());
             assertEquals("/v1/documents/18/audio-complete", server.takeRequest().getPath());
             assertTrue(recording == getField(activity, "listening"));

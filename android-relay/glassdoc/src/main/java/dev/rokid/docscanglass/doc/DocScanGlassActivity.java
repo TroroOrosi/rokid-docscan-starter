@@ -10,6 +10,8 @@ import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.Looper;
 import android.os.PowerManager;
+import android.media.AudioManager;
+import android.provider.Settings;
 import android.os.SystemClock;
 import android.util.Log;
 import android.view.KeyEvent;
@@ -32,10 +34,12 @@ import dev.rokid.docscanglass.input.GlassesInputAction;
 import dev.rokid.docscanglass.input.GlassesInputNormalizer;
 import dev.rokid.docscanglass.input.InputSignal;
 import dev.rokid.docscanrelay.ClientIdentity;
+import dev.rokid.docscanrelay.DocScanApi;
 import dev.rokid.docscanrelay.DocScanController;
 import dev.rokid.docscanrelay.JapaneseOcr;
 import dev.rokid.docscanrelay.RelayState;
 import dev.rokid.docscanrelay.study.AnswerBundle;
+import dev.rokid.docscanrelay.study.AnswerItem;
 import dev.rokid.docscanrelay.study.AnswerReader;
 import dev.rokid.docscanrelay.study.AnswerStore;
 
@@ -60,9 +64,14 @@ public final class DocScanGlassActivity extends Activity
     private static final String EXTRA_KEY = "key";
     private static final String EXTRA_GUIDE = "guide";
     private static final String EXTRA_SPREAD = "spread";
+    /** Diagnostic override for this launch only; normal launches always capture automatically. */
+    private static final String EXTRA_MANUAL = "manual";
+    /** Open this server session's answers directly: checks the answer display without a capture. */
+    private static final String EXTRA_ANSWERS = "answers";
     private static final int CAMERA_PERMISSION_REQUEST = 7401;
     private static final int AUDIO_PERMISSION_REQUEST = 7402;
     private boolean listeningMode;
+    private boolean mixedMode;
     private boolean choosingSession;
     private int startupSelection;
     private AnswerStore.Saved startupAnswers;
@@ -85,17 +94,33 @@ public final class DocScanGlassActivity extends Activity
      */
     private static final int MEASURED_ROTATION_DEGREES = 270;
 
-    /** Long enough to read why the display stayed on before the session ends. */
-    private static final long EXIT_NOTICE_MILLIS = 2_000;
+    private static final String WAKE_SESSION = "wake_session_id";
+    private static final String WAKE_GENERATION = "wake_generation";
+    private String deviceId;
+    private volatile long powerGeneration;
+    private volatile long powerSequence;
+    private long powerSession;
+    private String powerPhase = "capturing";
+    private volatile boolean writingDone;
+    private final ExecutorService stateExecutor = Executors.newSingleThreadExecutor(runnable -> {
+        Thread thread = new Thread(runnable, "glasses-state");
+        thread.setDaemon(true);
+        return thread;
+    });
 
     private final GlassesInputNormalizer normalizer = new GlassesInputNormalizer();
     private final BackExitPolicy backExit = new BackExitPolicy();
     private final DisplaySleep displaySleep = new DisplaySleep();
-    private WearWatch wearWatch;
-    private PowerManager.WakeLock analysisWakeLock;
     private boolean awaitingAnswers;
-    private boolean sessionClosed;
+    private volatile boolean sessionClosed;
     private final Handler main = new Handler(Looper.getMainLooper());
+    private static final long DISPLAY_IDLE_MILLIS = 5_000;
+    private Runnable displayIdle;
+    private long displayIdleToken;
+    private boolean idleAsleep;
+    private boolean captureDisplayActive;
+    private String displayRequest;
+    private RelayState displayedState;
 
     private HandlerThread cameraThread;
     private GlassCamera camera;
@@ -130,11 +155,15 @@ public final class DocScanGlassActivity extends Activity
     // no reader and no error. volatile: read and written from the
     // controller's serial-executor thread, matching the convention
     // DocScanController itself uses for its own cross-thread fields. Also
-    // reset back to -1 on a failed fetch (see fetchAnswers), so the next
-    // REVIEW publish -- nextReviewItem/previousReviewItem republish it on
-    // every page turn -- retries instead of forfeiting the session's
-    // answers to one bad request.
+    // reset back to -1 on a failed fetch, so the next matching phone
+    // notification can retry after the connection recovers.
     private volatile long answersFetchedForSession = -1;
+    private volatile long answersFetchedRevision;
+    private long answersFetchSession = -1, answersFetchGeneration = -1, answersFetchRevision = -1;
+    private long pendingAnswerRevision = -1;
+    private long acknowledgedSession, acknowledgedRevision = -1;
+    // Wakes the display once per run of failed fetches, not once per retry.
+    private volatile boolean answerFetchFailing;
     // True once this Activity instance has checked AnswerStore for a saved
     // reader without waiting on RelayState.REVIEW, which needs the network
     // to ever be published (see fetchAnswers's own comment). Read and
@@ -143,7 +172,7 @@ public final class DocScanGlassActivity extends Activity
     // tests -- the same single-caller convention answersFetchedForSession
     // already relies on.
     private boolean resolvedOfflineAnswersAtStartup;
-    // True while the reader owned the screen when the most recent
+    // True while the app owned the screen when the most recent
     // KEYCODE_BACK DOWN was processed. Read again by the matching UP: onAction
     // (called from the DOWN phase, below) may itself close the reader --
     // setting `reader` to null -- as a side effect of that same press, so the
@@ -154,12 +183,33 @@ public final class DocScanGlassActivity extends Activity
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        // A previous exit may have shortened the screen-off timeout to leave
-        // the display asleep; give the operator their own value back first.
-        displaySleep.restore(this);
-        // Measured 2026-09-10: the stock timeout on these glasses is
-        // 864000000 ms, ten days, so the screen never sleeps on its own. The
-        // flag still matters, because DisplaySleep releases it to exit.
+        muteOutput();
+        deviceId = Settings.Secure.getString(getContentResolver(), Settings.Secure.ANDROID_ID);
+        if (deviceId == null || deviceId.isEmpty()) {
+            deviceId = getPreferences(MODE_PRIVATE).getString("device_id", "");
+            if (deviceId.isEmpty()) deviceId = java.util.UUID.randomUUID().toString();
+            getPreferences(MODE_PRIVATE).edit().putString("device_id", deviceId).commit();
+        }
+        powerGeneration = getPreferences(MODE_PRIVATE).getLong("power_generation", 0);
+        powerSequence = getPreferences(MODE_PRIVATE).getLong("power_sequence", 0);
+        powerSession = getPreferences(MODE_PRIVATE).getLong("power_session", 0);
+        powerPhase = getPreferences(MODE_PRIVATE).getString("power_phase", "capturing");
+        displayRequest = getPreferences(MODE_PRIVATE).getString("power_display", null);
+        acknowledgedSession = powerSession;
+        acknowledgedRevision = getPreferences(MODE_PRIVATE).getLong("power_ack_revision", -1);
+        if (getIntent() != null && getIntent().getBooleanExtra("wear_origin", false)) {
+            if (!acceptsWearEntry(getIntent())) { displaySleep.sleep(this); finish(); return; }
+            setIntent(new Intent(this, DocScanGlassActivity.class).putExtra("chooser", true));
+        }
+        boolean restoringWake = acceptsWake(getIntent());
+        if (getIntent() != null && getIntent().hasExtra(WAKE_SESSION) && !restoringWake) {
+            Log.i(TAG, "stale answer wake rejected before opening a screen");
+            displaySleep.sleep(this);
+            finish();
+            return;
+        }
+        if (!restoringWake) beginPowerGeneration();
+        // Hold only the active app window; the operator's display timeout stays intact.
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
 
         hud = new HudView(this);
@@ -168,10 +218,6 @@ public final class DocScanGlassActivity extends Activity
         connectionSettings = new ConnectionSettings(new File(getNoBackupFilesDir(), "connection.bin"));
         choosingSession = true;
         resolvedOfflineAnswersAtStartup = true;
-        // Putting the glasses back on wakes the display and the session with
-        // it. Nothing restarts while they stay on the operator's face.
-        wearWatch = new WearWatch(this, this::wornAgain);
-        wearWatch.start();
         hud.calibrateGuide(getPreferences(MODE_PRIVATE).getFloat(
                 EXTRA_GUIDE, (float) FramingGuide.UNCALIBRATED_FRACTION));
         hud.showSpreadGuide(getPreferences(MODE_PRIVATE).getBoolean(EXTRA_SPREAD, true));
@@ -192,9 +238,21 @@ public final class DocScanGlassActivity extends Activity
                         "camera2/no-cxr"));
 
         applyIntent(getIntent(), true);
-        startupSelection = listeningMode ? 1 : 0;
+        startupSelection = mixedMode ? 1 : listeningMode ? 2 : 0;
         startupAnswers = loadSavedAnswers();
-        showStartupChoices();
+        long answersSession = getIntent() == null ? 0 : getIntent().getLongExtra(EXTRA_ANSWERS, 0);
+        if (restoringWake) {
+            choosingSession = false;
+            awaitingAnswers = true;
+            receiveWake(getIntent());
+        } else if (answersSession > 0) {
+            choosingSession = false;
+            viewingPreviousAnswers = true;
+            hud.showLines(List.of("答案を取得中", "", ""));
+            fetchAnswers(answersSession);
+        } else {
+            showStartupChoices();
+        }
         if (!hasCamera()) {
             requestPermissions(
                     new String[] {Manifest.permission.CAMERA}, CAMERA_PERMISSION_REQUEST);
@@ -204,7 +262,20 @@ public final class DocScanGlassActivity extends Activity
     @Override
     protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
+        if (intent != null && intent.getBooleanExtra("wear_origin", false)) {
+            if (!acceptsWearEntry(intent)) return;
+            intent = new Intent(this, DocScanGlassActivity.class).putExtra("chooser", true);
+        }
         setIntent(intent);
+        muteOutput();
+        if (intent != null && intent.hasExtra(WAKE_SESSION)) { receiveWake(intent); return; }
+        if (intent != null && intent.getBooleanExtra("chooser", false)) {
+            stopCaptureHardware();
+            persistAnswerPosition(false);
+            setIntent(new Intent(this, DocScanGlassActivity.class).putExtra("chooser", true));
+            recreate();
+            return;
+        }
         applyIntent(intent, false);
     }
 
@@ -217,8 +288,14 @@ public final class DocScanGlassActivity extends Activity
         if (starting) {
             listeningMode = intent != null && intent.hasExtra("listening")
                     ? intent.getBooleanExtra("listening", false) : getPreferences(MODE_PRIVATE).getBoolean("listening", false);
+            mixedMode = intent != null && intent.hasExtra("mixed") ? intent.getBooleanExtra("mixed", false)
+                    : "mixed".equals(getPreferences(MODE_PRIVATE).getString("exam_type", ""));
+            if (mixedMode) listeningMode = true;
             getPreferences(MODE_PRIVATE).edit().putBoolean("listening", listeningMode).apply();
             if (!choosingSession) controller.setListeningMode(listeningMode);
+            boolean manual = intent != null && intent.getBooleanExtra(EXTRA_MANUAL, false);
+            getPreferences(MODE_PRIVATE).edit().remove(EXTRA_MANUAL).apply();
+            controller.setManualCapture(manual);
         }
         if (intent != null && intent.hasExtra(EXTRA_GUIDE)) {
             float fraction = intent.getFloatExtra(
@@ -287,11 +364,7 @@ public final class DocScanGlassActivity extends Activity
     @SuppressLint("GestureBackNavigation")
     @SuppressWarnings("deprecation")
     public void onBackPressed() {
-        if (backExit.onBack(SystemClock.elapsedRealtime()) == BackExitPolicy.Decision.EXIT) {
-            exitSession();
-            return;
-        }
-        hud.showLines(List.of("もう一度で終了", "", ""));
+        onAction(GlassesInputAction.BACK, SystemClock.elapsedRealtime());
     }
 
     private void exitSession() {
@@ -302,28 +375,25 @@ public final class DocScanGlassActivity extends Activity
             }
             if (reader != null && !closeAnswers()) return;
             sessionClosed = true;
-            releaseAnalysisWakeLock();
+            stopCaptureHardware();
+            notifyPhase("closed", activeSession());
             Log.i(TAG, "exit confirmed");
-            if (displaySleep.sleep(this) == DisplaySleep.Result.NOT_PERMITTED) {
-                // Never claim an exit that left the display lit.
-                Log.w(TAG, "display stays on: WRITE_SETTINGS is not granted");
-                hud.showLines(List.of("終了しました", "消灯できません", "設定の許可が必要"));
-                main.postDelayed(this::finish, EXIT_NOTICE_MILLIS);
-                return;
-            }
+            displaySleep.sleep(this);
+            startActivity(new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
             finish();
     }
 
-    /**
-     * The glasses came back on after an exit that put the display to sleep.
-     * The process is still alive -- only the screen slept -- so the operator's
-     * own timeout goes back and the session is held awake again.
-     */
-    private void wornAgain() {
-        if (awaitingAnswers || sessionClosed) return;
-        Log.i(TAG, "worn again");
-        displaySleep.restore(this);
-        getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+    @Override protected void onResume() {
+        super.onResume();
+        muteOutput();
+        if (sessionClosed || writingDone || idleAsleep || isFinishing() || isDestroyed()
+                || !isCurrentPowerGeneration(powerGeneration)) displaySleep.sleep(this);
+        else getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        if (deviceId != null && !isFinishing() && !isDestroyed()) {
+            try { startForegroundService(new Intent(this, WearService.class)); }
+            catch (RuntimeException error) { Log.w(TAG, "wear monitoring unavailable: " + error.getClass().getSimpleName()); }
+        }
     }
 
     @Override
@@ -342,7 +412,7 @@ public final class DocScanGlassActivity extends Activity
     @Override
     protected void onDestroy() {
         sessionClosed = true;
-        releaseAnalysisWakeLock();
+        cancelDisplayIdle();
         if (listening != null) listening.close();
         stopService(new Intent(this, ListeningService.class));
         // Folding the temple arms force-stops this process through the
@@ -351,14 +421,13 @@ public final class DocScanGlassActivity extends Activity
         // pending capture, which is what makes that survivable.
         normalizer.reset();
         backExit.reset();
-        if (wearWatch != null) {
-            wearWatch.stop();
-        }
-        controller.close();
-        surface.close();
-        camera.close();
-        ocr.close();
-        cameraThread.quitSafely();
+        if (controller != null) controller.close();
+        if (surface != null) surface.close();
+        if (camera != null) camera.close();
+        if (ocr != null) ocr.close();
+        if (cameraThread != null) cameraThread.quitSafely();
+        stateExecutor.shutdown();
+        answerPersistExecutor.shutdown();
         super.onDestroy();
     }
 
@@ -384,8 +453,7 @@ public final class DocScanGlassActivity extends Activity
         if (isBackKey && "DOWN".equals(phase)) {
             // Captured before onAction (below) runs, and before it has a
             // chance to close the reader as a side effect of this very press.
-            backOwnedByReader = reader != null || (controller != null
-                    && controller.getState() != RelayState.REVIEW);
+            backOwnedByReader = !sessionClosed;
         }
         // KeyEvent uses uptime; convert to the controller's elapsed clock,
         // preserving the event's age if the main thread delivered it late.
@@ -403,10 +471,8 @@ public final class DocScanGlassActivity extends Activity
             action.ifPresent(value -> onAction(value, elapsedMillis));
         }
         if (isBackKey && backOwnedByReader) {
-            // The reader owned the screen when this press began: BACK is its
-            // gesture, not the two-stage exit's. Consuming it here (for both
-            // the DOWN and the matching UP) keeps it from also reaching
-            // onBackPressed and arming the exit confirmation.
+            // DOWN and its matching UP belong to one app gesture. Do not let
+            // the framework's onBackPressed count that same gesture again.
             return true;
         }
         // Consume every gesture key the firmware delivers except BACK, so the
@@ -416,6 +482,15 @@ public final class DocScanGlassActivity extends Activity
 
     private void onAction(GlassesInputAction action, long elapsedMillis) {
         if (sessionClosed) return;
+        muteOutput();
+        if (!writingDone) {
+            if (displayProtected()) keepDisplayActive();
+            else {
+                keepDisplayActive();
+                notifyPhase(choosingSession ? "chooser" : awaitingAnswers ? "analyzing" : "waiting", activeSession(), "wake");
+                scheduleDisplayIdle();
+            }
+        }
         if (action != GlassesInputAction.BACK) {
             backExit.reset();
         }
@@ -431,7 +506,7 @@ public final class DocScanGlassActivity extends Activity
             } else if (action == GlassesInputAction.BACK) {
                 if (startupCaptures != null) {
                     startupCaptures = null;
-                    startupSelection = 2;
+                    startupSelection = 3;
                     backExit.reset();
                     showStartupChoices();
                 } else if (backExit.onBack(elapsedMillis) == BackExitPolicy.Decision.EXIT) exitSession();
@@ -440,15 +515,30 @@ public final class DocScanGlassActivity extends Activity
             return;
         }
         if (reader != null) {
+            if (action == GlassesInputAction.SHORT_TAP) { if (mixedMode) toggleAudio(); return; }
             if (action == GlassesInputAction.BACK) {
                 if (reader.screen() != AnswerReader.Screen.ANSWER) {
                     reader.back();
                     backExit.reset();
                     answers.refresh();
-                } else if (backExit.onBack(elapsedMillis) == BackExitPolicy.Decision.EXIT) {
-                    exitSession();
                 } else {
-                    answers.announceExit();
+                    boolean interim = reader.bundle().intermediate();
+                    if (!closeAnswers(!interim)) return;
+                    if (interim) {
+                        backExit.reset();
+                        awaitingAnswers = true;
+                        enterIdleDisplay("waiting", activeSession());
+                        hud.showLines(List.of("読解の記入終了", "音声答案を待っています", "タップで録音開始・終了"));
+                        return;
+                    }
+                    writingDone = true;
+                    backExit.reset(); // the completion gesture never arms the exit window
+                    stopCaptureHardware();
+                    notifyPhase("writing_done", activeSession());
+                    awaitingAnswers = false;
+                    getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+                    hud.showLines(List.of("記入終了", "", ""));
+                    displaySleep.sleep(this);
                 }
                 return;
             }
@@ -460,8 +550,26 @@ public final class DocScanGlassActivity extends Activity
             answers.refresh();
             return;
         }
+        if (writingDone) {
+            if (action == GlassesInputAction.BACK) {
+                if (backExit.onBack(elapsedMillis) == BackExitPolicy.Decision.EXIT) exitSession();
+                // Stay asleep while arming the second confirmation.
+            }
+            return;
+        }
+        if (mixedMode) {
+            boolean swipe = action == GlassesInputAction.SWIPE_FORWARD || action == GlassesInputAction.SWIPE_BACK;
+            if (awaitingAnswers && swipe) {
+                AnswerStore.Saved saved = loadSavedAnswers();
+                if (saved != null && !saved.closed && saved.bundle.sessionId.equals(Long.toString(activeSession()))) {
+                    openAnswers(saved.bundle, saved.questionId, saved.offset);
+                }
+                return;
+            }
+            if (swipe || (awaitingAnswers && action == GlassesInputAction.SHORT_TAP)) { toggleAudio(); return; }
+        }
         if (controller.getState() == RelayState.ERROR
-                || (listeningMode && listening == null && controller.getState() != RelayState.REVIEW)) {
+                || (listeningMode && !mixedMode && listening == null && controller.getState() != RelayState.REVIEW)) {
             if (action == GlassesInputAction.BACK) {
                 if (backExit.onBack(elapsedMillis) == BackExitPolicy.Decision.EXIT) exitSession();
                 else hud.showLines(List.of("もう一度ダブルタップで終了", "保存した資料は保持します", ""));
@@ -473,7 +581,7 @@ public final class DocScanGlassActivity extends Activity
                 && controller.getState() == RelayState.CAPTURE_REVIEW) {
             surface.showCaptureEndRequested();
         }
-        if (listeningMode && action == GlassesInputAction.BACK && (!awaitingAnswers || !audioStopRequested)) {
+        if (listeningMode && !mixedMode && action == GlassesInputAction.BACK && (!awaitingAnswers || !audioStopRequested)) {
             boolean stopAudio = captureEndRequested || controller.getState() == RelayState.LISTENING;
             captureEndRequested = true;
             controller.onGlassesAction(action, elapsedMillis);
@@ -492,13 +600,14 @@ public final class DocScanGlassActivity extends Activity
     }
 
     private List<String> startupOptions() {
-        List<String> options = new ArrayList<>(List.of("通常の読取", "リスニング"));
+        List<String> options = new ArrayList<>(List.of("通常の読取", "合同英語（読解＋音声）", "リスニング"));
         if (controller.hasSavedWorkflow()) options.add("中断した読取");
         if (startupAnswers != null) options.add("前回の答案");
         return options;
     }
 
     private void showStartupChoices() {
+        enterIdleDisplay("chooser", 0);
         if (startupCaptures != null) {
             DocScanController.SavedCapture selected = startupCaptures.get(startupSelection);
             hud.showLines(List.of("中断した読取 " + (startupSelection + 1) + "/" + startupCaptures.size(),
@@ -529,6 +638,7 @@ public final class DocScanGlassActivity extends Activity
             try {
                 AnswerStore.Saved saved = answerStore.resume();
                 if (saved == null) return;
+                beginPowerGeneration();
                 choosingSession = false;
                 viewingPreviousAnswers = true;
                 openAnswers(saved.bundle, saved.questionId, saved.offset);
@@ -544,11 +654,14 @@ public final class DocScanGlassActivity extends Activity
         if (startupCaptures != null) {
             DocScanController.SavedCapture saved = startupCaptures.get(startupSelection);
             listeningMode = saved.listening;
+            mixedMode = saved.mixed;
             controller.resumeLocalSession(saved.id, this::onStartupSelected);
         } else {
-            listeningMode = startupSelection == 1;
-            getPreferences(MODE_PRIVATE).edit().putBoolean("listening", listeningMode).apply();
-            controller.startLocalSession(listeningMode, this::onStartupSelected);
+            mixedMode = startupSelection == 1;
+            listeningMode = mixedMode || startupSelection == 2;
+            String examType = mixedMode ? "mixed" : listeningMode ? "listening" : "written";
+            getPreferences(MODE_PRIVATE).edit().putBoolean("listening", listeningMode).putString("exam_type", examType).apply();
+            controller.startLocalSession(examType, this::onStartupSelected);
         }
     }
 
@@ -560,9 +673,12 @@ public final class DocScanGlassActivity extends Activity
                 hud.showLines(List.of("開始・再開できません", "接続先と保存記録を確認", "ダブルタップで戻る"));
                 return;
             }
+            beginPowerGeneration();
             choosingSession = false;
             startupCaptures = null;
+            notifyPhase("capturing", controller.sessionId());
             answersFetchedForSession = -1;
+            answersFetchedRevision = 0;
             onUpdate(controller.getState(), List.of("読取を開始", "", ""), "Local selection accepted");
         });
     }
@@ -575,6 +691,11 @@ public final class DocScanGlassActivity extends Activity
             public void onCaptured(byte[] jpeg, int width, int height, long elapsedMillis) {
                 Log.i(TAG, "captured " + width + "x" + height + " in " + elapsedMillis + " ms");
                 controller.onPhoto(jpeg);
+            }
+
+            @Override public void onPreview(android.graphics.Bitmap frame) {
+                if (surface == null) frame.recycle();
+                else surface.showLivePreview(frame);
             }
 
             @Override
@@ -596,6 +717,17 @@ public final class DocScanGlassActivity extends Activity
         connectionSettings.save(server, key);
     }
 
+    @Override public void onAutoCaptureChanged(boolean running) {
+        main.post(() -> {
+            if (sessionClosed || writingDone) return;
+            captureDisplayActive = running;
+            if (running) {
+                keepDisplayActive();
+                notifyPhase("capturing", controller.sessionId(), "wake");
+            } else if (!displayProtected()) enterIdleDisplay(awaitingAnswers ? "analyzing" : "waiting", activeSession());
+        });
+    }
+
     @Override
     public void onConfigurationRejected(String message) {
         main.post(() -> Toast.makeText(this, message, Toast.LENGTH_LONG).show());
@@ -614,13 +746,19 @@ public final class DocScanGlassActivity extends Activity
     @Override
     public void onUpdate(RelayState state, List<String> hudLines, String diagnostic) {
         Log.i(TAG, state + ": " + diagnostic);
-        if (sessionClosed || choosingSession) return;
+        if (sessionClosed || writingDone || choosingSession) return;
+        main.post(() -> {
+            if (sessionClosed || writingDone || choosingSession || displayedState == state) return;
+            displayedState = state;
+            if (displayProtected()) keepDisplayActive();
+            else enterIdleDisplay(awaitingAnswers ? "analyzing" : "waiting", activeSession());
+        });
         maybeOpenSavedAnswersOffline();
         if (state == RelayState.LISTENING) {
             main.post(() -> {
                 if (audioStopRequested && !finishingAudio) {
                     wakeForResult();
-                    hud.showLines(List.of("録音・文字起こしを確認", "原音は保存済み", "ダブルタップで再試行"));
+                    hud.showLines(List.of("録音・転送を確認", "原音は保存済み", "ダブルタップで再試行"));
                 } else {
                     hud.showLines(GlassesHudText.adapt(hudLines));
                     waitWithDisplayOff();
@@ -633,11 +771,11 @@ public final class DocScanGlassActivity extends Activity
             main.post(() -> { if (awaitingAnswers) wakeForResult(); });
         }
         if (state == RelayState.REVIEW) {
-            long sessionId = controller.sessionId();
-            if (sessionId != answersFetchedForSession) {
-                answersFetchedForSession = sessionId;
-                fetchAnswers(sessionId);
-            }
+            main.post(() -> {
+                if (reader == null) waitWithDisplayOff();
+                if (reader != null) notifyPhase("reading", controller.sessionId());
+            });
+            return;
         }
         // AIMING, STABILIZING and CAPTURE_REVIEW each own the screen through
         // their own surface call -- the guide brackets, and the still. Redrawing
@@ -647,7 +785,11 @@ public final class DocScanGlassActivity extends Activity
                 || state == RelayState.CAPTURE_REVIEW) {
             return;
         }
-        main.post(() -> hud.showLines(GlassesHudText.adapt(hudLines)));
+        main.post(() -> {
+            hud.showLines(GlassesHudText.adapt(hudLines));
+            // Waiting to shoot: nothing here needs reading, and the page is behind it.
+            if (state == RelayState.READY || state == RelayState.READING) hud.fadeSoon();
+        });
     }
 
     @Override public void onListeningReady(File directory, long documentId, boolean resume) {
@@ -672,6 +814,7 @@ public final class DocScanGlassActivity extends Activity
             listeningDocument = documentId;
             listeningDirectory = directory;
             resumingListening = resume;
+            if (mixedMode && !resume) return; // images start now; the operator starts audio when it begins
             if (!resume && checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
                 requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, AUDIO_PERMISSION_REQUEST);
                 return;
@@ -687,7 +830,10 @@ public final class DocScanGlassActivity extends Activity
                 main.post(() -> { wakeForResult(); stopService(new Intent(this, ListeningService.class)); });
             });
             if (resumingListening) {
-                if (!listening.restore()) throw new IOException("再開する録音がありません");
+                if (!listening.restore()) {
+                    if (!mixedMode) throw new IOException("再開する録音がありません");
+                    listening.close(); listening = null; resumingListening = false; return;
+                }
                 if (listening.isInterrupted()) controller.onListeningError();
                 finishAudio();
                 return;
@@ -699,7 +845,7 @@ public final class DocScanGlassActivity extends Activity
                 hud.showRecording(active);
                 if (active) {
                     startService(new Intent(this, ListeningService.class).putExtra(ListeningService.RECORDING, true));
-                    controller.startAutoCapture();
+                    if (!mixedMode) controller.startAutoCapture();
                 } else if (finishingAudio && !recording.isInterrupted()) {
                     startService(new Intent(this, ListeningService.class).putExtra(ListeningService.FINISHING, true));
                 } else stopService(new Intent(this, ListeningService.class));
@@ -738,7 +884,7 @@ public final class DocScanGlassActivity extends Activity
                     if (!(error instanceof ListeningRecorder.DocumentPending)) stopService(new Intent(this, ListeningService.class));
                     wakeForResult();
                     if (controller.getState() == RelayState.LISTENING || controller.getState() == RelayState.ERROR) {
-                        hud.showLines(List.of("録音・文字起こしを確認", "原音は保存済み", "ダブルタップで再試行"));
+                        hud.showLines(List.of("録音・転送を確認", "原音は保存済み", "ダブルタップで再試行"));
                     }
                 });
             }
@@ -804,47 +950,122 @@ public final class DocScanGlassActivity extends Activity
      * may be true only before the exam starts.
      */
     private void fetchAnswers(long sessionId) {
+        fetchAnswers(sessionId, 0);
+    }
+
+    private void toggleAudio() {
+        if (!mixedMode || sessionClosed || writingDone || listeningDirectory == null) return;
+        if (listening != null) {
+            if (!finishingAudio) finishAudio();
+            return;
+        }
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, AUDIO_PERMISSION_REQUEST);
+            return;
+        }
+        startListening();
+    }
+
+    private synchronized void fetchAnswers(long sessionId, long requestedRevision) {
+        long generationAtRequest = powerGeneration;
+        if (answersFetchGeneration == generationAtRequest && answersFetchSession == sessionId) {
+            pendingAnswerRevision = Math.max(pendingAnswerRevision, requestedRevision);
+            return;
+        }
+        answersFetchGeneration = generationAtRequest;
+        answersFetchSession = sessionId;
+        answersFetchRevision = requestedRevision;
+        pendingAnswerRevision = -1;
         new Thread(() -> {
+            try {
             AnswerStore.Saved saved = loadSavedAnswers();
             if (saved != null && saved.bundle.sessionId.equals(Long.toString(sessionId))) {
                 // Saved state belongs to this session. CLOSED must stop here,
                 // not fall through to a fresh fetch: a fetch would open a new
                 // reader on the same session's answers, silently undoing the
                 // close it was supposed to respect.
-                if (!saved.closed) {
-                    main.post(() -> openAnswers(saved.bundle, saved.questionId, saved.offset));
+                if (!saved.closed && saved.bundle.revision >= requestedRevision) {
+                    main.post(() -> {
+                        if (isCurrentPowerGeneration(generationAtRequest)) openAnswers(saved.bundle, saved.questionId, saved.offset);
+                    });
                 }
-                return;
+                if (saved.closed || saved.bundle.revision >= requestedRevision) return;
             }
             if (sessionId <= 0) {
                 return;
             }
             try {
-                AnswerBundle bundle = controller.api().answerBundle(sessionId);
-                answerStore.start(bundle);
-                main.post(() -> openAnswers(bundle, bundle.items.get(0).questionId, 0));
-            } catch (Exception error) {
-                Log.w(TAG, "answer bundle unavailable", error);
-                // The likeliest failure at a venue: the hotspot is not yet
-                // up when REVIEW is first published. Roll the guard back to
-                // its unfetched sentinel so the next REVIEW publish --
-                // nextReviewItem/previousReviewItem republish it on every
-                // page turn -- retries, instead of one failed request
-                // forfeiting the whole session's answers with no operator
-                // gesture to recover. While this fetch was in flight the
-                // guard stayed equal to sessionId, so no concurrent retry
-                // could start; only a fetch that already finished (here)
-                // reopens the door.
-                answersFetchedForSession = -1;
+                // configureForLocalStart is asynchronous; a fetch at launch can beat it.
+                DocScanApi api = controller.api();
+                for (int waited = 0; api == null && waited < 50; waited++) {
+                    Thread.sleep(100);
+                    api = controller.api();
+                }
+                if (api == null) throw new IllegalStateException("server not configured");
+                AnswerBundle bundle = api.answerBundle(sessionId);
+                if (!isCurrentPowerGeneration(generationAtRequest) || writingDone || sessionClosed) return;
+                if (bundle.revision < requestedRevision) throw new IOException("requested answer revision unavailable");
+                answerFetchFailing = false;
+                String question = bundle.items.get(0).questionId;
+                int offset = 0;
+                if (saved != null && saved.bundle.sessionId.equals(bundle.sessionId)) {
+                    AnswerReader validation = new AnswerReader(saved.bundle, 1f, 2, text -> 0f, true);
+                    validation.restore(saved.questionId, saved.offset);
+                    if (!validation.accept(bundle)) throw new IOException("answer identity changed");
+                    question = validation.current().questionId;
+                    offset = validation.offset();
+                    answerStore.save(bundle, question, offset, false);
+                } else answerStore.start(bundle);
+                String restoreQuestion = question;
+                int restoreOffset = offset;
                 main.post(() -> {
-                    if (isFinishing() || isDestroyed()) {
-                        return;
+                    if (isCurrentPowerGeneration(generationAtRequest)) openAnswers(bundle, restoreQuestion, restoreOffset);
+                });
+            } catch (Exception error) {
+                if (!isCurrentPowerGeneration(generationAtRequest) || writingDone || sessionClosed) return;
+                Log.w(TAG, "answer bundle unavailable", error);
+                // A matching phone notification may retry after the connection recovers.
+                answersFetchedForSession = -1;
+                // 409 "being made": the server is still analysing; one message
+                // carries the whole booklet and its answers arrive together. Keep
+                // the display asleep for that. Any other 409 (nothing detected,
+                // locked, not finalized) will not end by waiting: wake and say so.
+                boolean conflict = error instanceof DocScanApi.ApiException
+                        && ((DocScanApi.ApiException) error).getStatusCode() == 409;
+                boolean analysing = conflict && String.valueOf(error.getMessage()).contains("being made");
+                String reason = String.valueOf(error.getMessage());
+                main.post(() -> {
+                    if (!isCurrentPowerGeneration(generationAtRequest) || writingDone || sessionClosed
+                            || isFinishing() || isDestroyed()) return;
+                    if (!analysing && !answerFetchFailing) wakeForResult();
+                    answerFetchFailing = !analysing;
+                    hud.showLines(analysing ? List.of("解析中", "答案を待っています", "")
+                            : conflict ? List.of("解答がありません", noAnswerReason(reason), "")
+                            : List.of("答案を取得できません", "通信を確認", ""));
+                });
+            }
+            } finally {
+                main.post(() -> {
+                    synchronized (DocScanGlassActivity.this) {
+                        if (answersFetchGeneration != generationAtRequest || answersFetchSession != sessionId
+                                || answersFetchRevision != requestedRevision) return;
+                        long newer = pendingAnswerRevision;
+                        answersFetchSession = -1;
+                        pendingAnswerRevision = -1;
+                        if (newer > requestedRevision && isCurrentPowerGeneration(generationAtRequest)
+                                && !writingDone && !sessionClosed && !isDestroyed()) fetchAnswers(sessionId, newer);
                     }
-                    wakeForResult();
-                    hud.showLines(List.of("答案を取得できません", "通信を確認", ""));
                 });
             }
         }, "answer-bundle").start();
+    }
+
+    /** The server's 409 detail as one short HUD line. */
+    static String noAnswerReason(String detail) {
+        if (detail.contains("no problems")) return "問題を検出できません";
+        if (detail.contains("locked")) return "本番モードでは表示不可";
+        if (detail.contains("finalize-reading")) return "撮影が終わっていません";
+        return "サーバを確認";
     }
 
     private AnswerStore.Saved loadSavedAnswers() {
@@ -857,13 +1078,29 @@ public final class DocScanGlassActivity extends Activity
     }
 
     private void openAnswers(AnswerBundle bundle, String questionId, int offset) {
-        if (sessionClosed || isFinishing() || isDestroyed()) {
+        if (sessionClosed || writingDone || isFinishing() || isDestroyed() || !isCurrentPowerGeneration(powerGeneration)) {
             // The fetch (or a resume) completed after the two-stage exit
             // already finished this Activity. Nothing to show, and nothing
             // left to leak a View or a reader into.
             return;
         }
+        if (reader != null && reader.bundle().sessionId.equals(bundle.sessionId)
+                && reader.bundle().inputDigest.equals(bundle.inputDigest) && reader.bundle().revision >= bundle.revision) {
+            acknowledgeDisplayedAnswers();
+            retryAcknowledgement();
+            return;
+        }
         wakeForResult();
+        try { answersFetchedForSession = Long.parseLong(bundle.sessionId); } catch (NumberFormatException ignored) { }
+        answersFetchedRevision = bundle.revision;
+        if (reader != null && reader.accept(bundle)) {
+            persistAnswerPosition(false);
+            answers.refresh();
+            acknowledgeDisplayedAnswers();
+            if (hasWrittenAnswers()) { keepDisplayActive(); notifyPhase("reading", activeSession()); }
+            else enterIdleDisplay("waiting", activeSession());
+            return;
+        }
         answers = new AnswerView(this);
         // A placeholder viewport: AnswerView.onSizeChanged calls
         // reader.viewport with its own Paint as soon as it is laid out, and
@@ -877,14 +1114,23 @@ public final class DocScanGlassActivity extends Activity
         // main.post callback -- uncaught, and permanent, since the bundle
         // is already saved to disk by the time this runs and the next
         // launch takes the same saved-state branch into the same crash.
-        reader = new AnswerReader(bundle, 1f, 2, text -> 0f);
+        reader = new AnswerReader(bundle, 1f, 2, text -> 0f, true);
         reader.restore(questionId, offset);
         answers.bind(reader);
         setContentView(answers);
+        acknowledgeDisplayedAnswers();
+        if (hasWrittenAnswers()) {
+            keepDisplayActive();
+            notifyPhase("reading", activeSession());
+        } else enterIdleDisplay("waiting", activeSession());
     }
 
     private boolean closeAnswers() {
-        if (!persistAnswerPosition(true)) {
+        return closeAnswers(true);
+    }
+
+    private boolean closeAnswers(boolean terminal) {
+        if (!persistAnswerPosition(terminal, true)) {
             // A failed durable CLOSED write is not an exit. Keep the answer
             // and the same input route so the operator can retry explicitly.
             backExit.reset();
@@ -898,30 +1144,211 @@ public final class DocScanGlassActivity extends Activity
     }
 
     private void waitWithDisplayOff() {
-        if (awaitingAnswers || sessionClosed || isFinishing()) return;
+        if (sessionClosed || writingDone || isFinishing()) return;
+        if (reader != null && hasWrittenAnswers()) return;
         awaitingAnswers = true;
-        PowerManager power = (PowerManager) getSystemService(POWER_SERVICE);
-        if (power != null) {
-            analysisWakeLock = power.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "docscan:analysis");
-            analysisWakeLock.acquire(); // held only until result, error or explicit exit
-        }
-        if (displaySleep.sleep(this) == DisplaySleep.Result.NOT_PERMITTED) {
-            hud.showLines(List.of("解析中", "消灯には設定の許可が必要", ""));
-        }
+        stopCaptureHardware();
+        enterIdleDisplay("analyzing", controller.sessionId());
+        hud.showLines(List.of("解析中", "", ""));
     }
 
     private void wakeForResult() {
-        if (sessionClosed) return;
-        if (awaitingAnswers && !displaySleep.wake(this)) {
-            Log.w(TAG, "answer display wake request refused");
-        }
+        if (sessionClosed || writingDone) return;
+        if (awaitingAnswers && !displaySleep.wake(this)) Log.w(TAG, "answer display wake request refused");
+        keepDisplayActive();
         awaitingAnswers = false;
-        releaseAnalysisWakeLock();
+        if (!displayProtected()) {
+            notifyPhase("waiting", activeSession(), "wake");
+            scheduleDisplayIdle();
+        }
     }
 
-    private void releaseAnalysisWakeLock() {
-        if (analysisWakeLock != null && analysisWakeLock.isHeld()) analysisWakeLock.release();
-        analysisWakeLock = null;
+    private void stopCaptureHardware() {
+        captureDisplayActive = false;
+        if (camera != null) camera.pausePreview();
+        if (hud != null) hud.capturePreview(false);
+    }
+
+    private boolean displayProtected() {
+        if ((reader != null && hasWrittenAnswers()) || captureDisplayActive) return true;
+        RelayState state = controller == null ? null : controller.getState();
+        return state == RelayState.AIMING || state == RelayState.STABILIZING
+                || state == RelayState.CAPTURING || state == RelayState.CAPTURE_REVIEW;
+    }
+
+    private boolean hasWrittenAnswers() {
+        if (reader == null) return false;
+        for (AnswerItem item : reader.bundle().items) if (!item.answer.isBlank() || !item.diagrams.isEmpty()) return true;
+        return false;
+    }
+
+    private void acknowledgeDisplayedAnswers() {
+        if (reader == null || answerStore == null) return;
+        AnswerBundle shown = reader.bundle();
+        AnswerStore.Saved saved = loadSavedAnswers();
+        if (saved == null || saved.closed || saved.bundle.revision < shown.revision
+                || !saved.bundle.sessionId.equals(shown.sessionId) || !saved.bundle.inputDigest.equals(shown.inputDigest)) return;
+        try {
+            long session = Long.parseLong(shown.sessionId);
+            if (session <= 0) return;
+            acknowledgedRevision = acknowledgedSession == session ? Math.max(acknowledgedRevision, shown.revision) : shown.revision;
+            acknowledgedSession = session;
+        } catch (NumberFormatException ignored) { }
+    }
+
+    private void retryAcknowledgement() {
+        if (deviceId != null && acknowledgedSession == powerSession && acknowledgedRevision >= 0)
+            transmitState(powerGeneration, powerSequence, powerPhase, powerSession, displayRequest, acknowledgedRevision);
+    }
+
+    private void cancelDisplayIdle() {
+        displayIdleToken++;
+        if (displayIdle != null) main.removeCallbacks(displayIdle);
+        displayIdle = null;
+    }
+
+    private void keepDisplayActive() {
+        cancelDisplayIdle();
+        if (idleAsleep) displaySleep.wake(this);
+        idleAsleep = false;
+        getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+    }
+
+    private void enterIdleDisplay(String phase, long session) {
+        boolean entering = !phase.equals(powerPhase) || session != powerSession;
+        if (entering || (displayIdle == null && !idleAsleep)) {
+            keepDisplayActive();
+            scheduleDisplayIdle();
+        }
+        notifyPhase(phase, session, idleAsleep ? "sleep" : "wake");
+    }
+
+    private void scheduleDisplayIdle() {
+        cancelDisplayIdle();
+        long token = displayIdleToken;
+        long generation = powerGeneration;
+        displayIdle = () -> {
+            if (token != displayIdleToken || generation != powerGeneration || sessionClosed || writingDone
+                    || isFinishing() || isDestroyed() || displayProtected()) return;
+            displayIdle = null;
+            idleAsleep = true;
+            displaySleep.sleep(this);
+            notifyPhase(List.of("chooser", "analyzing", "waiting").contains(powerPhase) ? powerPhase : "waiting", activeSession(), "sleep");
+        };
+        main.postDelayed(displayIdle, DISPLAY_IDLE_MILLIS);
+    }
+
+    private long activeSession() {
+        if (reader != null) {
+            try { return Long.parseLong(reader.bundle().sessionId); } catch (NumberFormatException ignored) { }
+        }
+        return powerSession > 0 ? powerSession : controller == null ? 0 : controller.sessionId();
+    }
+
+    private void beginPowerGeneration() {
+        cancelDisplayIdle();
+        idleAsleep = false;
+        try { powerGeneration = new PowerState(getPreferences(MODE_PRIVATE)).begin(powerGeneration).generation; }
+        catch (IOException error) { sessionClosed = true; displaySleep.sleep(this); finish(); return; }
+        powerSequence = 0;
+        powerSession = 0;
+        acknowledgedSession = 0;
+        acknowledgedRevision = -1;
+        powerPhase = "capturing";
+        writingDone = false;
+        awaitingAnswers = false;
+    }
+
+    private boolean acceptsWearEntry(Intent intent) {
+        PowerState.Snapshot current = new PowerState(getPreferences(MODE_PRIVATE)).load();
+        return intent != null && intent.getBooleanExtra("wear_origin", false)
+                && intent.getBooleanExtra("chooser", false) && intent.getLongExtra("wear_generation", -1) == current.generation
+                && "chooser".equals(current.entry) && "chooser".equals(current.phase)
+                && current.session == 0 && "wake".equals(current.display);
+    }
+
+    private boolean acceptsWake(Intent intent) {
+        return intent != null && intent.hasExtra(WAKE_SESSION) && !sessionClosed && !writingDone
+                && isCurrentPowerGeneration(powerGeneration)
+                && List.of("analyzing", "waiting", "reading").contains(powerPhase) && powerSession > 0
+                && intent.getIntExtra(WAKE_SESSION, 0) == powerSession
+                && intent.getLongExtra(WAKE_GENERATION, -1) == powerGeneration;
+    }
+
+    private boolean isCurrentPowerGeneration(long generation) {
+        return generation == powerGeneration && new PowerState(getPreferences(MODE_PRIVATE)).load().generation == generation;
+    }
+
+    private void receiveWake(Intent intent) {
+        if (!acceptsWake(intent)) return;
+        long revision = intent.getLongExtra("answer_revision", 0);
+        if (answersFetchedForSession == powerSession && revision <= answersFetchedRevision) {
+            retryAcknowledgement();
+            return;
+        }
+        // Keep the phone's snapshot advisory: only this still-active run may turn the display on.
+        setTurnScreenOn(true);
+        choosingSession = false;
+        answersFetchedForSession = powerSession;
+        fetchAnswers(powerSession, revision);
+    }
+
+    private void notifyPhase(String phase, long session) {
+        notifyPhase(phase, session, phase.equals("capturing") || phase.equals("reading") ? "wake" : null);
+    }
+
+    private void notifyPhase(String phase, long session, String request) {
+        Long ack = session > 0 && acknowledgedSession == session && acknowledgedRevision >= 0 ? acknowledgedRevision : null;
+        if (phase.equals(powerPhase) && session == powerSession && powerSequence > 0
+                && java.util.Objects.equals(displayRequest, request)
+                && java.util.Objects.equals(new PowerState(getPreferences(MODE_PRIVATE)).load().answerRevision, ack)) return;
+        displayRequest = request;
+        powerPhase = phase;
+        powerSession = session;
+        long gen = powerGeneration;
+        long seq;
+        try {
+            PowerState.Snapshot next = new PowerState(getPreferences(MODE_PRIVATE)).publish(gen, session, phase, request, ack);
+            if (next == null) return;
+            seq = powerSequence = next.sequence;
+        } catch (IOException error) { Log.w(TAG, "display state not saved"); return; }
+        if (deviceId != null) transmitState(gen, seq, phase, session, request, ack);
+    }
+
+    private void transmitState(long gen, long seq, String phase, long session, String request, Long ack) {
+        try { stateExecutor.execute(() -> {
+            if (!isCurrentPowerGeneration(gen) || seq != powerSequence) return;
+            PowerManager power = (PowerManager)getSystemService(POWER_SERVICE);
+            PowerManager.WakeLock stateLock = power == null ? null
+                    : power.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "docscan:state-notify");
+            try {
+                if (stateLock != null) stateLock.acquire(5_000);
+                DocScanApi api = controller.api();
+                if (api == null) throw new IOException("server not configured");
+                api.glassesState(deviceId, session > 0 ? session : null, gen, seq, phase, request, null, ack);
+            } catch (Exception error) {
+                Log.w(TAG, "state notification paused: " + error.getClass().getSimpleName());
+                main.postDelayed(() -> {
+                    if (!isDestroyed() && isCurrentPowerGeneration(gen) && seq == powerSequence) transmitState(gen, seq, phase, session, request, ack);
+                }, 5000);
+            } finally {
+                if (stateLock != null && stateLock.isHeld()) stateLock.release();
+            }
+        }); } catch (java.util.concurrent.RejectedExecutionException ignored) { }
+    }
+
+    /** Mute output streams only. Recording deliberately never changes microphone mute. */
+    private void muteOutput() {
+        AudioManager audio = (AudioManager) getSystemService(AUDIO_SERVICE);
+        if (audio == null) return;
+        for (int stream : new int[]{AudioManager.STREAM_SYSTEM, AudioManager.STREAM_MUSIC,
+                AudioManager.STREAM_RING, AudioManager.STREAM_NOTIFICATION, AudioManager.STREAM_ALARM,
+                AudioManager.STREAM_VOICE_CALL, AudioManager.STREAM_DTMF}) {
+            try { audio.setStreamVolume(stream, 0, 0); }
+            catch (SecurityException denied) { Log.w(TAG, "output mute refused for stream=" + stream); }
+        }
+        try { Settings.System.putInt(getContentResolver(), Settings.System.SOUND_EFFECTS_ENABLED, 0); }
+        catch (SecurityException denied) { Log.w(TAG, "touch sound setting refused"); }
     }
 
     /**
@@ -935,6 +1362,10 @@ public final class DocScanGlassActivity extends Activity
      * durable before {@code closeAnswers} swaps the screen back to the HUD.
      */
     private boolean persistAnswerPosition(boolean closed) {
+        return persistAnswerPosition(closed, closed);
+    }
+
+    private boolean persistAnswerPosition(boolean closed, boolean wait) {
         if (reader == null) {
             return true;
         }
@@ -943,7 +1374,7 @@ public final class DocScanGlassActivity extends Activity
         int offset = reader.offset();
         Future<Boolean> queued = answerPersistExecutor.submit(
                 () -> writeAnswerPosition(bundle, questionId, offset, closed));
-        if (closed) {
+        if (wait) {
             try {
                 return queued.get();
             } catch (InterruptedException error) {

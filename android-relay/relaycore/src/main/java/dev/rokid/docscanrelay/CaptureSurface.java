@@ -45,6 +45,14 @@ public interface CaptureSurface {
     /** True only while this exact still remains visible, not merely requested. */
     default boolean isCaptureReviewVisible(long generation) { return false; }
 
+    /** Camera preview gate. The callback fires once after a page change becomes still. */
+    default void awaitNextPage(Runnable ready) { ready.run(); }
+
+    /** Stops the viewfinder and its sensors outside capture or during an idle pause. */
+    default void pausePreview() { }
+
+    default void resetPageDetection() { }
+
     /**
      * Retires an ambiguous view callback stream after an acknowledgement
      * timeout. An implementation that owns its own display has nothing to

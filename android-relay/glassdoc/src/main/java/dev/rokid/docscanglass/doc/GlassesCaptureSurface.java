@@ -51,6 +51,7 @@ final class GlassesCaptureSurface implements CaptureSurface {
     private Runnable waitingDraw;
     private volatile long visibleReview = NO_VIEW_GENERATION;
     private volatile boolean closed;
+    private int rotationDegrees = 270;
 
     @Override
     public boolean supportsLocalCaptureReview() { return true; }
@@ -58,6 +59,26 @@ final class GlassesCaptureSurface implements CaptureSurface {
     @Override
     public boolean isCaptureReviewVisible(long generation) {
         return generation == visibleReview && visibleReview != NO_VIEW_GENERATION;
+    }
+
+    @Override public void awaitNextPage(Runnable ready) {
+        if (camera != null) camera.awaitNextPage(ready);
+        main.post(() -> hud.capturePreview(true));
+    }
+
+    @Override public void pausePreview() {
+        if (camera != null) camera.pausePreview();
+        main.post(() -> hud.capturePreview(false));
+    }
+
+    @Override public void resetPageDetection() { if (camera != null) camera.resetPages(); }
+
+    void showLivePreview(Bitmap bitmap) {
+        Bitmap rotated = orient(bitmap, rotationDegrees);
+        main.post(() -> {
+            if (closed) recycle(rotated);
+            else hud.showLivePreview(rotated);
+        });
     }
 
     GlassesCaptureSurface(
@@ -102,6 +123,8 @@ final class GlassesCaptureSurface implements CaptureSurface {
 
     @Override
     public long showCaptureAiming(int pageNumber, boolean retake, boolean stabilizing) {
+        if (camera != null) camera.preview();
+        main.post(() -> hud.capturePreview(true));
         List<String> lines = aimingLines(pageNumber, retake, stabilizing);
         return show(
                 stabilizing ? "capture-stabilizing" : "capture-aiming",
@@ -111,12 +134,13 @@ final class GlassesCaptureSurface implements CaptureSurface {
     @Override
     public long showCaptureReview(byte[] jpeg, int rotationDegrees, List<String> lines) {
         if (closed) return NO_VIEW_GENERATION;
+        this.rotationDegrees = rotationDegrees;
         Bitmap still = decodePreview(jpeg, rotationDegrees);
         if (still == null) return NO_VIEW_GENERATION;
         return show("capture-review", () -> {
             Bitmap previous = preview;
             preview = still;
-            hud.showReview(still, GlassesHudText.adapt(lines));
+            hud.showReview(still, List.of());
             recycle(previous);
         }, still);
     }
@@ -141,6 +165,8 @@ final class GlassesCaptureSurface implements CaptureSurface {
         waitingPreview = null;
         visibleReview = NO_VIEW_GENERATION;
         generations.incrementAndGet();
+        if (camera != null) camera.pausePreview();
+        hud.capturePreview(false);
         hud.onVisibleFrame(null, null);
         hud.showLines(List.of());
         Bitmap held = preview;
@@ -212,11 +238,8 @@ final class GlassesCaptureSurface implements CaptureSurface {
      */
     private static List<String> aimingLines(
             int pageNumber, boolean retake, boolean stabilizing) {
-        String title = "P" + pageNumber + (retake ? " 撮り直し" : " 撮影");
-        if (stabilizing) {
-            return List.of(title, "そのまま静止");
-        }
-        return List.of(title, "十字は方向の目安・撮影枠ではありません", "タップで撮影");
+        // The live camera image and its frame carry aiming; no text covers the paper.
+        return List.of();
     }
 
     /**
@@ -243,18 +266,22 @@ final class GlassesCaptureSurface implements CaptureSurface {
         Bitmap decoded = null;
         try {
             decoded = BitmapFactory.decodeByteArray(jpeg, 0, jpeg.length, options);
-            if (decoded == null || rotationDegrees % 360 == 0) return decoded;
-            Matrix matrix = new Matrix();
-            matrix.postRotate(rotationDegrees);
-            Bitmap rotated = Bitmap.createBitmap(
-                    decoded, 0, 0, decoded.getWidth(), decoded.getHeight(), matrix, true);
-            if (rotated != decoded) recycle(decoded);
-            return rotated;
+            return orient(decoded, rotationDegrees);
         } catch (OutOfMemoryError error) {
             // Rotation allocates too. Failure must not strand the first bitmap.
             recycle(decoded);
             return null;
         }
+    }
+
+    /** Shared live/still transform; originals carry this same rotation in their upload metadata. */
+    static Bitmap orient(Bitmap decoded, int rotationDegrees) {
+        if (decoded == null || rotationDegrees % 360 == 0) return decoded;
+        Matrix matrix = new Matrix();
+        matrix.postRotate(rotationDegrees);
+        Bitmap rotated = Bitmap.createBitmap(decoded, 0, 0, decoded.getWidth(), decoded.getHeight(), matrix, true);
+        if (rotated != decoded) recycle(decoded);
+        return rotated;
     }
 
     private static void recycle(Bitmap bitmap) {

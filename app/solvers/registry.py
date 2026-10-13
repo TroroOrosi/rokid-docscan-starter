@@ -18,7 +18,7 @@ from .. import config
 from ..llm import ADAPTER_PROVIDERS
 from ..provider_registry import ProviderRegistry
 from .base import Solver
-from .chatgpt_web import ChatGptWebSolver, ChatGptWebUncertain
+from .chatgpt_web import ChatGptWebChatLost, ChatGptWebSolver, ChatGptWebUncertain
 from .llm_adapter import LLMSolver, choice_label, choice_out_of_range
 from .local_placeholder import LocalPlaceholderSolver
 
@@ -137,14 +137,29 @@ def solve_with_fallback(
         if question.required_image_paths and not getattr(solver, "accepts_images", False):
             skipped.append(f"{name}:images_unsupported")
             continue
+        # The current API adapters send an image, not original audio. After
+        # bypassing local ASR for the browser route, they have no substitute.
+        if (names[0] == "chatgpt-web" and name != "chatgpt-web"
+                and question.audio_path and not question.audio_transcript):
+            skipped.append(f"{name}:original_audio_unsupported")
+            continue
         try:
             result = solver.solve(question=question, max_answer_len=max_answer_len)
         except ChatGptWebUncertain:
             raise  # Another provider would still duplicate a possibly submitted question.
+        except ChatGptWebChatLost:
+            # The subject's chat is gone and no new one was opened. Another tier
+            # would hide that behind a generic failure; the batch stops and says why.
+            raise
         except Exception:  # noqa: BLE001 - one tier failing must not 500
             skipped.append(f"{name}:error")
             continue
-        if choice_out_of_range(result.answer, question.choices):
+        # Original-image answers use printed labels. Incomplete OCR choices
+        # cannot justify another GPT send or replacing a valid printed answer.
+        original_labels = name == "chatgpt-web" and (
+            question.document_pages or question.document_image_paths
+            or question.image_paths or question.image_path)
+        if not original_labels and choice_out_of_range(result.answer, question.choices):
             result = _retry_out_of_range(solver, question, result, max_answer_len)
         last_result = result
         if question.answer_only:

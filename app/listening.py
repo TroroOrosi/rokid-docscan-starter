@@ -1,4 +1,4 @@
-"""Durable original WAV chunks and their local ASR, keyed by document/sample index."""
+"""Durable original WAV chunks; optional ASR for the non-browser compatibility route."""
 
 import hashlib
 import json
@@ -6,6 +6,7 @@ import threading
 import wave
 
 from . import config
+from .input_identity import file_sha256
 from .local_asr import transcribe_chunk, wav_samples
 
 # ponytail: single phone recording; serialize chunk writes and completion, not camera uploads.
@@ -14,13 +15,19 @@ CHUNK_SAMPLES = 30 * 16000
 OVERLAP_SAMPLES = 16000
 
 
+def requires_transcript():
+    from .solvers.registry import _tier_names
+
+    return _tier_names(None)[0] != "chatgpt-web"
+
+
 def folder(document_id):
     if type(document_id) is not int or document_id < 1:
         raise ValueError("invalid document identity")
     return config.AUDIO_DIR / f"document-{document_id}"
 
 
-def store_chunk(document_id, sequence, start_sample, captured_at_ms, raw):
+def store_chunk(document_id, sequence, start_sample, captured_at_ms, raw, *, transcribe=True):
     if (not 0 <= sequence < 600 or start_sample != max(0, sequence * CHUNK_SAMPLES - OVERLAP_SAMPLES)
             or captured_at_ms < 1 or len(raw) > 1_100_000):
         raise ValueError("invalid recording chunk metadata")
@@ -60,7 +67,8 @@ def store_chunk(document_id, sequence, start_sample, captured_at_ms, raw):
             pending.unlink(missing_ok=True)
             raise ValueError("invalid recording WAV") from None
         pending.replace(path)  # keep original even when ASR fails below
-        result = transcribe_chunk(path, start_sample=start_sample)
+        result = (transcribe_chunk(path, start_sample=start_sample) if transcribe else
+                  {"segments": [], "samples": count, "asr_seconds": 0, "real_time_factor": 0})
         metadata = {**result, "sequence": sequence, "start_sample": start_sample,
                     "captured_at_ms": captured_at_ms, "sha256": digest,
                     "audio_file": path.name, "overlap_ms": 1000 if sequence else 0}
@@ -81,33 +89,7 @@ def complete_recording(document_id, expected_chunks, total_samples):
             if (manifest["chunks"], manifest["total_samples"]) != (expected_chunks, total_samples):
                 raise ValueError("recording completion conflict")
             return manifest
-        rows = []
-        for sequence in range(expected_chunks):
-            meta = directory / f"{sequence:04d}.json"
-            if not meta.is_file():
-                raise ValueError("recording has missing or untranscribed chunks")
-            row = json.loads(meta.read_text(encoding="utf-8"))
-            chunk_path = directory / f"{sequence:04d}.wav"
-            if (row["sequence"] != sequence or row["start_sample"] != max(0, sequence * CHUNK_SAMPLES - OVERLAP_SAMPLES)
-                    or not chunk_path.is_file() or hashlib.sha256(chunk_path.read_bytes()).hexdigest() != row["sha256"]
-                    or wav_samples(chunk_path) != row["samples"]):
-                raise ValueError("recording chunk integrity check failed")
-            if rows and row["captured_at_ms"] - row["start_sample"] // 16 != rows[0]["captured_at_ms"]:
-                raise ValueError("recording has a clock discontinuity")
-            expected = min(CHUNK_SAMPLES, total_samples - sequence * CHUNK_SAMPLES)
-            if sequence:
-                expected += OVERLAP_SAMPLES
-            if expected <= 0 or row["samples"] != expected:
-                raise ValueError("recording has a sample gap or truncated chunk")
-            rows.append(row)
-        # Uploads may arrive out of order. Checking only the immediately next
-        # number would silently finalize a prefix while a later original (or
-        # its metadata) still belongs to this recording.
-        for retained in directory.iterdir():
-            if (retained.suffix in (".wav", ".json") and len(retained.stem) == 4
-                    and retained.stem.isascii() and retained.stem.isdigit()
-                    and int(retained.stem) >= expected_chunks):
-                raise ValueError("recording completion would omit a chunk")
+        rows = _verified_chunks(directory, expected_chunks, total_samples)
         output = directory / "original.wav"
         pending = directory / "original.pending"
         with wave.open(str(pending), "wb") as target:
@@ -119,17 +101,87 @@ def complete_recording(document_id, expected_chunks, total_samples):
         pending.replace(output)
         manifest = {"document_id": document_id, "chunks": expected_chunks,
                     "total_samples": total_samples, "audio_path": str(output), "segments": rows}
+        manifest["audio_sha256"] = file_sha256(output)
+        if manifest["audio_sha256"] == "missing":
+            raise FileNotFoundError(output)
         pending_manifest = directory / "complete.pending"
         pending_manifest.write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
         pending_manifest.replace(complete)
         return manifest
 
 
-def recording_transcript(document_id):
+def _verified_chunks(directory, expected_chunks, total_samples):
+    rows = []
+    for sequence in range(expected_chunks):
+        meta = directory / f"{sequence:04d}.json"
+        if not meta.is_file():
+            raise ValueError("recording has missing chunks")
+        row = json.loads(meta.read_text(encoding="utf-8"))
+        chunk_path = directory / f"{sequence:04d}.wav"
+        if (row["sequence"] != sequence or row["start_sample"] != max(0, sequence * CHUNK_SAMPLES - OVERLAP_SAMPLES)
+                or not chunk_path.is_file() or hashlib.sha256(chunk_path.read_bytes()).hexdigest() != row["sha256"]
+                or wav_samples(chunk_path) != row["samples"]):
+            raise ValueError("recording chunk integrity check failed")
+        if rows and row["captured_at_ms"] - row["start_sample"] // 16 != rows[0]["captured_at_ms"]:
+            raise ValueError("recording has a clock discontinuity")
+        expected = min(CHUNK_SAMPLES, total_samples - sequence * CHUNK_SAMPLES)
+        if sequence:
+            expected += OVERLAP_SAMPLES
+        if expected <= 0 or row["samples"] != expected:
+            raise ValueError("recording has a sample gap or truncated chunk")
+        rows.append(row)
+    # Every retained original belongs to this recording, including out-of-order arrivals.
+    for retained in directory.iterdir():
+        if (retained.suffix in (".wav", ".json") and len(retained.stem) == 4
+                and retained.stem.isascii() and retained.stem.isdigit()
+                and int(retained.stem) >= expected_chunks):
+            raise ValueError("recording completion would omit a chunk")
+    return rows
+
+
+def _verified_recording(document_id):
+    """Read-only verification before a mixed stage binds or sends completed original audio."""
+    with _LOCK:
+        directory = folder(document_id)
+        try:
+            manifest = json.loads((directory / "complete.json").read_text(encoding="utf-8"))
+            chunks, samples = manifest["chunks"], manifest["total_samples"]
+            output = directory / "original.wav"
+            if (type(chunks) is not int or not 1 <= chunks <= 600 or type(samples) is not int
+                    or not 0 < samples <= chunks * CHUNK_SAMPLES or manifest["document_id"] != document_id
+                    or manifest["audio_path"] != str(output)):
+                raise ValueError("invalid completed recording identity")
+            rows = _verified_chunks(directory, chunks, samples)
+            if rows != manifest["segments"]:
+                raise ValueError("completed recording metadata changed")
+            digest = file_sha256(output)
+            if manifest.get("audio_sha256") and manifest["audio_sha256"] != digest:
+                raise ValueError("completed original audio changed")
+            # Legacy manifests did not hash original.wav. Verify its actual PCM
+            # against every retained chunk without assembling another large WAV.
+            with wave.open(str(output), "rb") as joined:
+                if (joined.getnchannels(), joined.getsampwidth(), joined.getframerate(), joined.getnframes()) != (1, 2, 16000, samples):
+                    raise ValueError("invalid completed original WAV")
+                for row in rows:
+                    with wave.open(str(directory / f"{row['sequence']:04d}.wav"), "rb") as source:
+                        data = source.readframes(source.getnframes())
+                    if row["sequence"]:
+                        data = data[OVERLAP_SAMPLES * 2:]
+                    if joined.readframes(len(data) // 2) != data:
+                        raise ValueError("completed audio does not retain every original chunk")
+            return manifest
+        except (OSError, KeyError, TypeError, ValueError, wave.Error, EOFError):
+            raise ValueError("completed original audio integrity check failed; originals retained") from None
+
+
+def recording_transcript(document_id, *, require_transcript=True, verify_original=False):
     manifest_path = folder(document_id) / "complete.json"
     if not manifest_path.is_file():
-        raise ValueError("finish recording and transcribe every chunk before analysis")
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        raise ValueError("finish recording and retain every chunk before analysis")
+    manifest = (_verified_recording(document_id) if verify_original else
+                json.loads(manifest_path.read_text(encoding="utf-8")))
+    if not require_transcript:
+        return manifest["audio_path"], ""
     lines = ["# English listening transcript", f"document_id: {document_id}",
              "Times refer to original.wav; adjacent chunks overlap by 1 second.",
              "ASR is imperfect. Match spoken question numbers and content to OCR question_ids;",

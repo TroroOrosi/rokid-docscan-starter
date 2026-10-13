@@ -18,6 +18,27 @@ import org.robolectric.annotation.GraphicsMode;
 @Config(sdk = 32, manifest = Config.NONE)
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 public class HudViewTest {
+    @Test public void aReviewWithoutInstructionsUsesTheWholeDisplayHeight() {
+        Bitmap photo = Bitmap.createBitmap(240, 480, Bitmap.Config.ARGB_8888);
+        photo.eraseColor(Color.rgb(90, 90, 90));
+        HudView view = new HudView(RuntimeEnvironment.getApplication());
+        view.layout(0, 0, 480, 640);
+        view.showReview(photo, List.of());
+        Bitmap screen = Bitmap.createBitmap(480, 640, Bitmap.Config.ARGB_8888);
+        view.draw(new Canvas(screen));
+        assertTrue("the photo must reach the bottom rather than reserve an empty footer",
+                Color.green(screen.getPixel(240, 630)) > 80);
+        view.showRecording(true);
+        Bitmap recordingScreen = Bitmap.createBitmap(480, 640, Bitmap.Config.ARGB_8888);
+        view.draw(new Canvas(recordingScreen));
+        assertTrue("recording must not add text over the three-second photo review",
+                screen.sameAs(recordingScreen));
+        assertEquals(Color.rgb(90, 90, 90), photo.getPixel(120, 470));
+        photo.recycle();
+        screen.recycle();
+        recordingScreen.recycle();
+    }
+
     @Test public void reviewShowsTheWholePhotoWithoutAnOverviewCoveringIt() {
         Bitmap photo = Bitmap.createBitmap(800, 600, Bitmap.Config.ARGB_8888);
         photo.eraseColor(Color.rgb(10, 10, 10));
@@ -65,21 +86,23 @@ public class HudViewTest {
         screen.recycle();
     }
 
-    @Test public void aimingShowsACenterMarkWithoutPretendingToOutlineThePaper() {
+    @Test public void aimingFramesTheActualCameraImageAndRemovesItOutsideCapture() {
         HudView view = new HudView(RuntimeEnvironment.getApplication());
         view.layout(0, 0, 480, 640);
         Bitmap screen = Bitmap.createBitmap(480, 640, Bitmap.Config.ARGB_8888);
-        for (boolean spread : new boolean[]{false, true}) {
-            view.showSpreadGuide(spread);
-            view.showAiming(List.of("P1 撮影", "タップで撮影"));
-            view.draw(new Canvas(screen));
-            assertTrue("the center must be visible", Color.green(screen.getPixel(240, 320)) > 200);
-            for (int y = 120; y < 500; y++) for (int x = 0; x < 480; x++) {
-                if (Math.abs(x - 240) <= 20 && Math.abs(y - 320) <= 20) continue;
-                assertEquals("no page-shaped corners or outline", Color.BLACK, screen.getPixel(x, y));
-            }
-            assertEquals("no bottom page corner", Color.BLACK, screen.getPixel(40, 638));
-        }
+        Bitmap camera = Bitmap.createBitmap(320, 240, Bitmap.Config.ARGB_8888);
+        camera.eraseColor(Color.rgb(0, 80, 0));
+        view.showLivePreview(camera);
+        view.capturePreview(true);
+        view.showAiming(List.of());
+        view.draw(new Canvas(screen));
+        assertEquals("source pixels and frame share the same transform", 80, Color.green(screen.getPixel(240, 300)));
+        assertTrue("the image boundary is visible", Color.green(screen.getPixel(0, 140)) > 200);
+        view.capturePreview(false);
+        view.showLines(List.of());
+        view.draw(new Canvas(screen));
+        assertEquals(Color.BLACK, screen.getPixel(240, 300));
+        assertTrue(camera.isRecycled());
         screen.recycle();
     }
 }

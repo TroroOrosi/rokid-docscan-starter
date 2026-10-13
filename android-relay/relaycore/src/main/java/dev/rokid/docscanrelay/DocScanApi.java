@@ -4,11 +4,23 @@ import dev.rokid.docscanrelay.study.AnswerBundle;
 import org.json.JSONException;
 import org.json.JSONObject;
 
+import android.content.Context;
+import android.net.ConnectivityManager;
+import android.net.LinkProperties;
+import android.net.Network;
+import android.net.NetworkCapabilities;
+import android.net.RouteInfo;
+
 import java.io.IOException;
 import java.io.File;
+import java.net.Inet4Address;
+import java.net.InetAddress;
+import java.net.UnknownHostException;
+import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.TimeUnit;
 
+import okhttp3.Dns;
 import okhttp3.HttpUrl;
 import okhttp3.MediaType;
 import okhttp3.MultipartBody;
@@ -26,18 +38,39 @@ public final class DocScanApi {
     private static final MediaType EMPTY =
             Objects.requireNonNull(MediaType.parse("application/octet-stream"));
 
-    private final OkHttpClient http = new OkHttpClient.Builder()
-            .connectTimeout(15, TimeUnit.SECONDS)
-            .readTimeout(4, TimeUnit.MINUTES)
-            .writeTimeout(60, TimeUnit.SECONDS)
-            .callTimeout(5, TimeUnit.MINUTES)
-            .retryOnConnectionFailure(true)
-            .build();
+    /**
+     * The server host that means "whatever Wi-Fi this device is on, its
+     * gateway". At the venue there is no Wi-Fi but the phone's own hotspot, so
+     * the phone is the gateway and its address is chosen by the phone each
+     * time the hotspot starts. Resolved per connection, so the saved server
+     * URL (and every local session bound to it) never has to change.
+     */
+    public static final String GATEWAY_HOST = "gateway";
+
+    private final OkHttpClient http;
     private final String baseUrl;
     private final String apiKey;
     private final ClientIdentity client;
+    private final OkHttpClient stateHttp;
 
     public DocScanApi(String baseUrl, String apiKey, ClientIdentity client) {
+        this(baseUrl, apiKey, client, null);
+    }
+
+    public DocScanApi(String baseUrl, String apiKey, ClientIdentity client, Context context) {
+        Context app = context == null ? null : context.getApplicationContext();
+        http = new OkHttpClient.Builder()
+                .connectTimeout(15, TimeUnit.SECONDS)
+                .readTimeout(4, TimeUnit.MINUTES)
+                .writeTimeout(60, TimeUnit.SECONDS)
+                .callTimeout(5, TimeUnit.MINUTES)
+                .retryOnConnectionFailure(true)
+                .dns(host -> GATEWAY_HOST.equals(host) && app != null
+                        ? List.of(wifiGateway(app)) : Dns.SYSTEM.lookup(host))
+                .build();
+        // Exit notification must survive cancelling photo/audio work during Activity destruction.
+        stateHttp = http.newBuilder().dispatcher(new okhttp3.Dispatcher())
+                .callTimeout(5, TimeUnit.SECONDS).build();
         String normalized = baseUrl == null ? "" : baseUrl.trim();
         while (normalized.endsWith("/")) {
             normalized = normalized.substring(0, normalized.length() - 1);
@@ -55,6 +88,26 @@ public final class DocScanApi {
         this.client = client;
     }
 
+    /** IPv4 default gateway of the Wi-Fi network this device is joined to. */
+    @SuppressWarnings("deprecation") // getAllNetworks: the only list on API 28, the glasses' floor.
+    static InetAddress wifiGateway(Context context) throws UnknownHostException {
+        ConnectivityManager networks = context.getSystemService(ConnectivityManager.class);
+        if (networks != null) {
+            for (Network network : networks.getAllNetworks()) {
+                NetworkCapabilities capabilities = networks.getNetworkCapabilities(network);
+                LinkProperties link = networks.getLinkProperties(network);
+                if (capabilities == null || link == null
+                        || !capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) continue;
+                for (RouteInfo route : link.getRoutes()) {
+                    if (route.isDefaultRoute() && route.getGateway() instanceof Inet4Address) {
+                        return route.getGateway();
+                    }
+                }
+            }
+        }
+        throw new UnknownHostException("スマホのテザリングに接続されていません");
+    }
+
     public JSONObject health() throws IOException, JSONException {
         return get("/health");
     }
@@ -64,7 +117,7 @@ public final class DocScanApi {
     }
 
     public void requireLocalAsr() throws IOException, JSONException {
-        if (!get("/v1/listening-ready").getBoolean("ready")) throw new IOException("端末内ASRが未設定です");
+        if (!get("/v1/listening-ready").getBoolean("ready")) throw new IOException("録音の受信準備ができていません");
     }
 
     public JSONObject createDocument(String title) throws IOException, JSONException {
@@ -118,10 +171,15 @@ public final class DocScanApi {
     }
 
     public JSONObject createExamSession(long documentId, boolean listening) throws IOException, JSONException {
+        return createExamSession(documentId, listening ? "listening" : "written");
+    }
+
+    public JSONObject createExamSession(long documentId, String examType) throws IOException, JSONException {
+        if (!java.util.List.of("written", "listening", "mixed").contains(examType)) throw new IllegalArgumentException("invalid exam type");
         JSONObject payload = new JSONObject()
                 .put("mode", "study")
                 .put("document_id", documentId)
-                .put("exam_type", listening ? "listening" : "written")
+                .put("exam_type", examType)
                 .put("answer_format", "mark");
         return postJson("/v1/exam-sessions", payload);
     }
@@ -130,9 +188,13 @@ public final class DocScanApi {
         return postEmpty("/v1/exam-sessions/" + sessionId + "/finalize-reading");
     }
 
-    /** Analysis outlives the usual five-minute upload deadline; server solver has its own brakes. */
+    /**
+     * Returns once the deck is segmented; the server solves in the background.
+     * The phone watcher notifies the glasses when the complete bundle is ready.
+     */
     public JSONObject finalizeReadingLocal(long sessionId) throws IOException, JSONException {
-        return execute(new Request.Builder().url(baseUrl + "/v1/exam-sessions/" + sessionId + "/finalize-reading")
+        return execute(new Request.Builder().url(baseUrl + "/v1/exam-sessions/" + sessionId
+                        + "/finalize-reading?solve=background")
                 .post(RequestBody.create(new byte[0], EMPTY)), true);
     }
 
@@ -174,6 +236,41 @@ public final class DocScanApi {
                 get("/v1/exam-sessions/" + sessionId + "/answer-bundle").toString());
     }
 
+    public void glassesState(String deviceId, Long sessionId, long generation, long sequence, String phase)
+            throws IOException, JSONException {
+        glassesState(deviceId, sessionId, generation, sequence, phase, null);
+    }
+
+    public void glassesState(String deviceId, Long sessionId, long generation, long sequence, String phase,
+                             String displayRequest) throws IOException, JSONException {
+        glassesState(deviceId, sessionId, generation, sequence, phase, displayRequest, null);
+    }
+
+    public void glassesState(String deviceId, Long sessionId, long generation, long sequence, String phase,
+                             String displayRequest, String entryRequest) throws IOException, JSONException {
+        glassesState(deviceId, sessionId, generation, sequence, phase, displayRequest, entryRequest, null);
+    }
+
+    public void glassesState(String deviceId, Long sessionId, long generation, long sequence, String phase,
+                             String displayRequest, String entryRequest, Long ackAnswerRevision) throws IOException, JSONException {
+        if ("sleep".equals(displayRequest) && ("capturing".equals(phase) || "reading".equals(phase))) {
+            throw new IllegalArgumentException("an active display cannot request sleep");
+        }
+        if (entryRequest != null && (!"chooser".equals(entryRequest) || !"chooser".equals(phase)
+                || sessionId != null || !"wake".equals(displayRequest))) throw new IllegalArgumentException("invalid wear entry");
+        if (ackAnswerRevision != null && (ackAnswerRevision < 0 || sessionId == null)) {
+            throw new IllegalArgumentException("invalid received answer revision");
+        }
+        JSONObject payload = new JSONObject().put("device_id", deviceId)
+                .put("session_id", sessionId == null ? JSONObject.NULL : sessionId)
+                .put("generation", generation).put("sequence", sequence).put("phase", phase)
+                .put("display_request", displayRequest == null ? JSONObject.NULL : displayRequest)
+                .put("entry_request", entryRequest == null ? JSONObject.NULL : entryRequest)
+                .put("ack_answer_revision", ackAnswerRevision == null ? JSONObject.NULL : ackAnswerRevision);
+        execute(new Request.Builder().url(baseUrl + "/v1/glasses/state")
+                .post(RequestBody.create(payload.toString(), JSON)), stateHttp);
+    }
+
     private JSONObject get(String path) throws IOException, JSONException {
         return execute(new Request.Builder().url(baseUrl + path).get());
     }
@@ -196,12 +293,15 @@ public final class DocScanApi {
     }
 
     private JSONObject execute(Request.Builder builder, boolean longRunning) throws IOException, JSONException {
+        return execute(builder, longRunning ? http.newBuilder().readTimeout(120, TimeUnit.SECONDS)
+                .callTimeout(120, TimeUnit.SECONDS).build() : http);
+    }
+
+    private JSONObject execute(Request.Builder builder, OkHttpClient transport) throws IOException, JSONException {
         if (!apiKey.isEmpty()) {
             builder.header("Authorization", "Bearer " + apiKey);
         }
         builder.header("Accept", "application/json");
-        OkHttpClient transport = longRunning ? http.newBuilder().readTimeout(0, TimeUnit.SECONDS)
-                .callTimeout(0, TimeUnit.SECONDS).build() : http;
         try (Response response = transport.newCall(builder.build()).execute()) {
             String body = response.body() == null ? "" : response.body().string();
             if (!response.isSuccessful()) {

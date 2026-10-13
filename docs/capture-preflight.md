@@ -107,5 +107,5 @@ Runs on: まずWindowsで原本・派生画像・自動試験を比較。実機�
 家庭Wi-FiやPC上の試験を会場経路の合格へ転記しません。
 
 残るRPタスクは `tasks/todo.md`、最新の再開入口は
-`.agents/progress/pr37-camera-research.md`。長時間解析の受付/進捗分離、設問階層、
+`.agents/progress/archive/pr37-camera-research.md`。長時間解析の受付/進捗分離、設問階層、
 答案の追加取得、完全なexactly-once、自動紙面校正などは今回の完成範囲ではありません。

@@ -20,6 +20,7 @@ final class CameraDiagnostics {
                     + " af_modes=" + ints(c.get(CameraCharacteristics.CONTROL_AF_AVAILABLE_MODES))
                     + " min_focus=" + value(c.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE))
                     + " focus_calibration=" + value(c.get(CameraCharacteristics.LENS_INFO_FOCUS_DISTANCE_CALIBRATION))
+                    + " ae_modes=" + ints(c.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_MODES))
                     + " ae_comp_range=" + value(c.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_RANGE))
                     + " ae_comp_step=" + value(c.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_STEP))
                     + " exposure_range_ns=" + value(c.get(CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE))

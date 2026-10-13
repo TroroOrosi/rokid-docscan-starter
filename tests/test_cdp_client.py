@@ -68,17 +68,28 @@ def test_fill_refuses_when_no_element_matched():
 
 
 def test_set_input_files_carries_the_bytes_name_and_type():
-    page = FakePage(values=[True])
+    page = FakePage(values=[True, True, True])
     page.locator("input#upload-files").set_input_files(
-        [{"name": "pages.pdf", "mimeType": "application/pdf", "buffer": b"%PDF-1.4 body"}]
+        [{"name": "page001.jpg", "mimeType": "image/jpeg", "buffer": b"jpeg body"}]
     )
-    script = page.evaluated[0]
-    payload = json.loads(script[script.index("[{") : script.index("}]") + 2])
-    assert payload[0]["name"] == "pages.pdf"
-    assert payload[0]["type"] == "application/pdf"
-    assert base64.b64decode(payload[0]["data"]) == b"%PDF-1.4 body"
-    assert "new DataTransfer()" in script and "e.files = dt.files" in script
+    script = page.evaluated[1]
+    payload = json.loads(script[script.index("{\"name\"") : script.index("}; const bin") + 1])
+    assert payload["name"] == "page001.jpg"
+    assert payload["type"] == "image/jpeg"
+    assert base64.b64decode(payload["data"]) == b"jpeg body"
+    assert "new DataTransfer()" in page.evaluated[-1] and "e.files = dt.files" in page.evaluated[-1]
 
+
+def test_no_single_evaluate_carries_more_than_one_file():
+    """The DevTools websocket takes 100 MB per message; 20 pages in one exceeded it."""
+    page = FakePage(values=[True] * 5)
+    buffers = [bytes([i]) * 1000 for i in range(3)]
+    page.locator("input").set_input_files(
+        [{"name": f"p{i}.jpg", "mimeType": "image/jpeg", "buffer": b} for i, b in enumerate(buffers)]
+    )
+    encoded = [base64.b64encode(b).decode() for b in buffers]
+    carried = [sum(e in script for e in encoded) for script in page.evaluated]
+    assert carried == [0, 1, 1, 1, 0]
 
 def test_press_enter_sends_a_real_key_event_pair():
     page = FakePage()

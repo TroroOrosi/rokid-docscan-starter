@@ -1,6 +1,6 @@
 # Glasses operator contracts
 
-Status: Current phone and standalone surface contracts. Updated 2026-09-16.
+Status: Current phone and standalone surface contracts. Updated 2026-09-30.
 
 The intended startup and complete operator flow are in the current section of
 [`tasks/plan.md`](../tasks/plan.md). The on-glasses mode chooser and normal-mode
@@ -10,7 +10,7 @@ chooser after one physical fold/unfold; wearing-only and disconnected transition
 remain unverified (see the runbook for its limits).
 [`requirements-audit.md`](requirements-audit.md) retains the pre-change audit;
 the current implementation and checks are recorded in
-[`multimodal-scan.md`](../.agents/progress/multimodal-scan.md).
+[`multimodal-scan.md`](../.agents/progress/archive/multimodal-scan.md).
 
 **The `:glassdoc` table below is the decided operator surface** (operator,
 2026-09-14): the venue runs the standalone app over a phone access point and the
@@ -49,8 +49,11 @@ The standalone `:glassdoc` APK has a separate local input adapter
 Automatic capture is enabled only on `:glassdoc`. A tap requests a manual shot while
 waiting; during the visible still review it retakes. No input commits after 3 seconds.
 BACK ends capture after the last review; in listening mode a later BACK ends audio.
-Two BACK gestures within three seconds exit answer reading. Reader-menu BACK returns
-one level. Distinct rapid KeyEvent gestures are retained; physical correlation is
+The first BACK during answer reading saves writing completion and sleeps inside
+the app. Two further BACK gestures within three seconds exit to home and sleep;
+the writing-completion gesture does not count toward exit. Short answers share
+one screen in a continuous reader, with full long answers and diagrams preserved.
+Distinct rapid KeyEvent gestures are retained; physical correlation is
 still unverified on the new APK. A second BACK during the last photo review ends
 audio while preserving the still. Retaking does not restart audio. Event-time
 cancellation across the commit boundary is pending.
@@ -63,10 +66,19 @@ Starting another capture preserves earlier records and their pending photos.
 Normal-mode photos are committed locally before background HTTP upload, and
 unacknowledged revisions remain available after restart. Storage errors retain
 originals and stop processing; transient upload failures retry separately from capture.
+Image-based page change is held through stillness and review before a single
+shot; no OCR-count gate or same-page burst is used. A normal launch does not
+inherit an earlier manual-mode preference. Thirty seconds without progress
+pauses the camera until a tap resumes it.
 Listening starts locally before the server document is available. REC appears only
 after valid PCM samples arrive; natural zero-valued samples remain valid audio.
 Missing samples, read failures, OS silencing, or an observed input-device change stop
 recording and preserve the interrupted originals. These checks need hardware calibration.
+Authenticated state notifications identify device, session, generation and
+sequence. The phone watcher requests sleep/wake explicitly; a late answer cannot
+wake a completed or closed generation. Glasses answer polling and indefinite
+CPU wake locks are removed. Output muting preserves microphone input; silence,
+sleep timing and gestures with the display off remain physically unverified.
 
 Launching without a `server` extra reuses the saved URL. A new Intent applies
 explicit `server`/`key` overrides; a guide-only Intent updates and saves the

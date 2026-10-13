@@ -39,11 +39,12 @@ _COMMANDS = {
     "phi": "\u03c6", "omega": "\u03c9", "Omega": "\u03a9", "Delta": "\u0394",
     "Sigma": "\u03a3", "circ": "\u00b0", "degree": "\u00b0",
     # Layout-only commands carry no answer content.
-    "left": "", "right": "", "displaystyle": "", "text": "", "mathrm": "",
+    "left": "", "right": "", "displaystyle": "",
     "quad": " ", "qquad": " ",
 }
 
 _CASES = re.compile(r"\\begin\{cases\}(.*?)\\end\{cases\}", re.DOTALL)
+_TEXT_GROUP = re.compile(r"\\(?:text|mathrm)\s*\{([^{}]*)\}")
 _FRAC = re.compile(r"\\[dt]?frac\s*\{([^{}]*)\}\s*\{([^{}]*)\}")
 _SQRT = re.compile(r"\\sqrt\s*\{([^{}]*)\}")
 _POWER = re.compile(r"\^\s*\{([^{}]*)\}|\^(\w)")
@@ -118,8 +119,9 @@ def to_display_answer(answer: str) -> DisplayAnswer:
         text = _CODE_FENCE.sub("", text)
 
     text = _CASES.sub(_cases, text)
-    for _ in range(4):  # a nested \frac{\frac{a}{b}}{c} needs one pass per level
-        converted = _FRAC.sub(lambda m: f"{_atom(m.group(1))}/{_atom(m.group(2))}", text)
+    for _ in range(4):  # nested LaTeX groups need one pass per level
+        converted = _TEXT_GROUP.sub(r"\1", text)
+        converted = _FRAC.sub(lambda m: f"{_atom(m.group(1))}/{_atom(m.group(2))}", converted)
         if converted == text:
             break
         text = converted
@@ -128,15 +130,13 @@ def to_display_answer(answer: str) -> DisplayAnswer:
     text = _INDEX.sub(lambda m: _script(m, _SUBSCRIPT, "_({0})"), text)
     text = _COMMAND.sub(lambda m: _COMMANDS.get(m.group(1), "\\" + m.group(1)), text)
 
-    # Name what is left BEFORE the braces go, or `\begin{cases}` is reported as
-    # the run-together `\begincasesx` instead of `\begin`.
+    # Keep unknown commands and meaningful braces in sets and code intact.
     leftover = sorted(set(_LEFTOVER.findall(text)))
     if leftover:
         unsupported.append(_NOTATION_LABEL + " ".join(leftover[:5]))
 
     for delimiter in _MATH_DELIMITERS:
         text = text.replace(delimiter, "")
-    text = text.replace("{", "").replace("}", "")
 
     text = re.sub(r"[ \t]+", " ", text).strip()
     return DisplayAnswer(text, tuple(unsupported))
