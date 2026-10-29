@@ -95,7 +95,7 @@ def _page_images(pages: list[dict]):
 
 
 def source_images(pages: list[dict]):
-    """One full-resolution JPEG per page, in order; no booklet-size limit."""
+    """One full-resolution colour JPEG per page; no booklet-size limit."""
     numbers = [p["page_number"] for p in pages]
     if any(type(n) is not int or n < 1 for n in numbers) or len(set(numbers)) != len(numbers):
         raise ValueError("page numbers must be unique positive integers")
@@ -106,7 +106,9 @@ def source_images(pages: list[dict]):
         with photo:
             for quality in JPEG_QUALITIES:
                 output = io.BytesIO()
-                photo.save(output, format="JPEG", quality=quality)
+                # Keep fine coloured labels and graph lines at native chroma
+                # resolution; the encoder's default subsampling blends them.
+                photo.save(output, format="JPEG", quality=quality, subsampling=0)
                 data = output.getvalue()
                 if len(data) <= MAX_IMAGE_BYTES:
                     break

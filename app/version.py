@@ -218,7 +218,9 @@ from __future__ import annotations
 # 0.50.3: select the original Latest menu position even after its label changes.
 # 0.51.0: source-bound phone image inspection, compact capture HUD and opt-in
 #         durable Work jobs. Cloud connection and physical acceptance remain separate.
-APP_VERSION = "0.51.0"
+# 0.51.1: retain native chroma in outgoing JPEGs and native capture provenance
+#         through local review and durable page storage.
+APP_VERSION = "0.51.1"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.

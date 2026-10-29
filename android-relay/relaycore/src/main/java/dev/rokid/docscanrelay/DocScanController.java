@@ -1471,14 +1471,18 @@ public final class DocScanController implements AutoCloseable {
     }
 
     public void onPhoto(byte[] jpeg) {
+        onPhoto(jpeg, null);
+    }
+
+    public void onPhoto(byte[] jpeg, CaptureProvenance provenance) {
         try {
-            serial.execute(() -> handlePhoto(jpeg));
+            serial.execute(() -> handlePhoto(jpeg, provenance));
         } catch (RejectedExecutionException ignored) {
             // The activity closed while the Binder callback was arriving.
         }
     }
 
-    private void handlePhoto(byte[] jpeg) {
+    private void handlePhoto(byte[] jpeg, CaptureProvenance provenance) {
         if (link.supportsLocalCaptureReview() && captureLease.isTimedOut()) return;
         CaptureLease.Completion completion = captureLease.complete();
         if (listeningFailed && !mixedMode) return;
@@ -1517,7 +1521,16 @@ public final class DocScanController implements AutoCloseable {
         final int uploadIndex = completion.pageIndex;
         final int uploadRotation = imageRotation;
         if (link.supportsLocalCaptureReview()) {
-            stageCaptureReview(uploadIndex, jpeg, "", uploadRotation, "", PageFraming.UNKNOWN, null);
+            try {
+                CaptureProvenance source = provenance == null || localSession == null ? provenance
+                        : provenance.bind(localSession.id(), uploadIndex, uploadRotation);
+                stageCaptureReview(new CaptureReviewStore.Pending(uploadIndex, jpeg, "", uploadRotation,
+                        "", PageFraming.UNKNOWN, photoRequestedAtMillis, source), null);
+            } catch (IllegalArgumentException invalid) {
+                CaptureReviewStore.Pending previous = captureReview.peek();
+                if (previous != null) publishCaptureReview(previous, "Native capture association rejected; previous review retained");
+                else fail("撮影元を確認できません", invalid);
+            }
             return;
         }
         publish(

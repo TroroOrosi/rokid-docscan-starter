@@ -5,6 +5,8 @@ import android.graphics.ImageFormat;
 import android.hardware.camera2.CameraCaptureSession;
 import android.hardware.camera2.CaptureFailure;
 import android.hardware.camera2.CaptureRequest;
+import android.hardware.camera2.CaptureResult;
+import android.hardware.camera2.TotalCaptureResult;
 import android.media.Image;
 import android.media.DocScanTestImage;
 import android.media.ImageReader;
@@ -24,6 +26,9 @@ import org.robolectric.annotation.Config;
 import org.robolectric.annotation.Implementation;
 import org.robolectric.annotation.Implements;
 import org.robolectric.shadow.api.Shadow;
+import org.robolectric.shadows.ShadowCaptureResult;
+import org.robolectric.shadows.ShadowTotalCaptureResult;
+import dev.rokid.docscanrelay.CaptureProvenance;
 import org.robolectric.util.ReflectionHelpers;
 import org.robolectric.util.ReflectionHelpers.ClassParameter;
 
@@ -41,10 +46,15 @@ public class GlassCameraDeliveryTest {
     private byte[] deliveredBytes;
     private int deliveredWidth;
     private int deliveredHeight;
+    private CaptureProvenance deliveredProvenance;
 
     @Before public void setup() {
         camera = new GlassCamera(RuntimeEnvironment.getApplication(),
                 new Handler(Looper.getMainLooper()), new GlassCamera.Callback() {
+                    @Override public void onCaptured(GlassCamera.Captured captured) {
+                        deliveredProvenance = captured.provenance;
+                        GlassCamera.Callback.super.onCaptured(captured);
+                    }
                     @Override public void onCaptured(byte[] bytes, int width, int height, long elapsed) {
                         events.add("delivered");
                         delivered++;
@@ -78,6 +88,55 @@ public class GlassCameraDeliveryTest {
         CaptureFailure failure = Shadow.newInstanceOf(CaptureFailure.class);
         ((FailureShadow) Shadow.extract(failure)).imageCaptured = imageCaptured;
         return failure;
+    }
+    private static TotalCaptureResult metadata(long timestamp) {
+        TotalCaptureResult result = ShadowTotalCaptureResult.newTotalCaptureResult();
+        ShadowCaptureResult values = Shadow.extract(result);
+        values.set(CaptureResult.SENSOR_TIMESTAMP, timestamp);
+        values.set(CaptureResult.SENSOR_EXPOSURE_TIME, 25_000_000L);
+        values.set(CaptureResult.SENSOR_SENSITIVITY, 400);
+        values.set(CaptureResult.CONTROL_AF_STATE, 0);
+        values.set(CaptureResult.CONTROL_AE_STATE, 2);
+        return result;
+    }
+
+    @Test public void matchingNativeStillResultTravelsWithTheOriginalJpeg() {
+        captureEvents(1).onCaptureCompleted(null, null, metadata(10));
+        deliver();
+        assertEquals("native_still", deliveredProvenance.sourceKind);
+        assertEquals(4032, deliveredProvenance.width);
+        assertEquals(3024, deliveredProvenance.height);
+        assertEquals(Long.valueOf(10), deliveredProvenance.imageTimestampNanos);
+        assertEquals(Long.valueOf(10), deliveredProvenance.resultTimestampNanos);
+        assertEquals(Long.valueOf(25_000_000), deliveredProvenance.exposureNanos);
+        assertEquals(Integer.valueOf(400), deliveredProvenance.sensitivityIso);
+        assertEquals(Integer.valueOf(0), deliveredProvenance.afState);
+        assertEquals(Integer.valueOf(2), deliveredProvenance.aeState);
+        assertEquals("039058c6f2c0cb492c533b0a4d14ef77cc0f78abccced5287d84a1a2011cfb81", deliveredProvenance.jpegSha256);
+        assertArrayEquals(new byte[]{1, 2, 3}, deliveredBytes);
+    }
+
+    @Test public void mismatchedStillResultCannotBeBorrowedFromPreviewOrAnotherImage() {
+        ReflectionHelpers.setField(camera, "meteringExposureNanos", 9_000_000L);
+        captureEvents(1).onCaptureCompleted(null, null, metadata(11));
+        deliver();
+        assertEquals(Long.valueOf(10), deliveredProvenance.imageTimestampNanos);
+        assertNull(deliveredProvenance.resultTimestampNanos);
+        assertNull(deliveredProvenance.exposureNanos);
+        assertNull(deliveredProvenance.sensitivityIso);
+        assertTrue(failures.isEmpty());
+    }
+
+    @Test public void previousGenerationAndLateResultsCannotRebindDeliveredProvenance() {
+        captureEvents(0).onCaptureCompleted(null, null, metadata(10));
+        deliver();
+        CaptureProvenance original = deliveredProvenance;
+        assertNull(original.resultTimestampNanos);
+        captureEvents(1).onCaptureCompleted(null, null, metadata(10));
+        assertSame(original, deliveredProvenance);
+        assertNull(original.exposureNanos);
+        assertEquals(1, delivered);
+        assertTrue(failures.isEmpty());
     }
     @Test public void imageIsClosedBeforeReaderAndConsumer() {
         deliver();

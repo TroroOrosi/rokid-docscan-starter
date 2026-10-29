@@ -53,6 +53,25 @@ def test_no_renumbering_or_silent_missing_images(tmp_path):
         source_bundle(pages)
 
 
+def test_fine_coloured_lines_keep_their_separate_colours(tmp_path):
+    photo = Image.new("RGB", (96, 144), "white")
+    draw = ImageDraw.Draw(photo)
+    for x in range(24, 72):
+        draw.line((x, 24, x, 120), fill=(240, 48, 48) if x % 2 == 0 else (48, 48, 240))
+    path = tmp_path / "fine-coloured-lines.png"
+    photo.save(path)
+    before = path.read_bytes()
+
+    payload = source_bundle([{"page_number": 1, "image_path": str(path)}])[0]
+    with Image.open(io.BytesIO(payload["buffer"])) as sent:
+        red = sent.getpixel((40, 72))
+        blue = sent.getpixel((41, 72))
+        assert red[0] - red[2] > 140
+        assert blue[2] - blue[0] > 140
+        assert sent.size == photo.size
+    assert path.read_bytes() == before
+
+
 def test_shadow_correction_keeps_dark_paper_edges_and_the_original(tmp_path):
     """A dark shot of a page on a blue map, as the glasses took it on 2026-09-22."""
     photo = Image.new("RGB", (800, 1000), (10, 20, 70))

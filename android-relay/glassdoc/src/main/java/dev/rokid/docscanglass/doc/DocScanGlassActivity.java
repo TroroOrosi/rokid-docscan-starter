@@ -687,6 +687,12 @@ public final class DocScanGlassActivity extends Activity
 
     private GlassCamera.Callback cameraCallback() {
         return new GlassCamera.Callback() {
+            @Override public void onCaptured(GlassCamera.Captured captured) {
+                Log.i(TAG, "captured " + captured.width + "x" + captured.height
+                        + " in " + captured.elapsedMillis + " ms");
+                controller.onPhoto(captured.jpeg, captured.provenance);
+            }
+
             @Override
             public void onCaptured(byte[] jpeg, int width, int height, long elapsedMillis) {
                 Log.i(TAG, "captured " + width + "x" + height + " in " + elapsedMillis + " ms");

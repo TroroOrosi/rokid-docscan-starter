@@ -24,6 +24,69 @@ import org.robolectric.annotation.Config;
 @RunWith(RobolectricTestRunner.class)
 @Config(sdk = 32, manifest = Config.NONE)
 public class LocalReviewTest {
+    @Test public void nativePhotoIdentitySurvivesRetakeVisibleReviewCommitAndRestart() throws Exception {
+        Context context = RuntimeEnvironment.getApplication();
+        Surface surface = new Surface();
+        surface.holdForPage = true;
+        DocScanController controller = new DocScanController(context, surface, null,
+                (state, lines, diagnostic) -> {}, new ClientIdentity("test", "test", "test"));
+        try {
+            controller.configureForLocalStart("http://phone:8000", "", 270);
+            controller.startLocalSession(false);
+            barrier(controller);
+            set(controller, "localNetworkBusy", true); // Test local persistence without a transfer.
+            LocalCaptureSession session = (LocalCaptureSession)get(controller, "localSession");
+            CaptureLease lease = (CaptureLease)get(controller, "captureLease");
+            byte[] jpeg = {1, 2, 3}, retake = {4, 5, 6};
+            CaptureProvenance first = CaptureProvenance.nativeStill(jpeg, 4032, 3024,
+                    10L, 10L, 5L, 25_000_000L, 400, 0, 2);
+            lease.begin(0);
+            set(controller, "state", RelayState.CAPTURING);
+            controller.onPhoto(jpeg, first);
+            barrier(controller);
+            CaptureReviewStore store = (CaptureReviewStore)get(controller, "captureReview");
+            CaptureProvenance associatedFirst = store.peek().provenance;
+            assertEquals(session.id(), associatedFirst.localSessionId);
+            assertEquals(first.captureId, associatedFirst.captureId);
+            assertEquals(0, associatedFirst.pageIndex);
+            assertEquals(270, associatedFirst.rotationDegrees);
+            long firstReview = (long)get(controller, "reviewGeneration");
+
+            CaptureProvenance second = CaptureProvenance.nativeStill(retake, 4032, 3024,
+                    20L, null, null, null, null, null, null);
+            lease.begin(0);
+            set(controller, "state", RelayState.CAPTURING);
+            controller.onPhoto(retake, second);
+            barrier(controller);
+            CaptureReviewStore.Pending selected = store.peek();
+            assertEquals(second.captureId, selected.provenance.captureId);
+            assertNull(selected.provenance.exposureNanos);
+            controller.onPhoto(jpeg, first); // Duplicate after completion has no capture lease.
+            barrier(controller);
+            assertSame(selected, store.peek());
+            call(controller, "enqueueAutoCommit", new Class<?>[]{long.class}, firstReview);
+            assertEquals(0, session.pageCount());
+            assertEquals(selected.provenance, new CaptureReviewPersistence(
+                    new File(session.directory(), "pending.bin")).readPending().provenance);
+
+            surface.visible = true;
+            controller.onCustomViewAvailable(1, "capture-review");
+            barrier(controller);
+            controller.confirmPendingCapture();
+            barrier(controller);
+            assertEquals("the existing visible 3s review still applies", 0, session.pageCount());
+            org.robolectric.shadows.ShadowSystemClock.advanceBy(java.time.Duration.ofSeconds(3));
+            call(controller, "enqueueAutoCommit", new Class<?>[]{long.class}, (long)get(controller, "reviewGeneration"));
+            barrier(controller);
+            LocalCaptureSession restarted = LocalCaptureSession.load(new File(context.getFilesDir(), "local-scans"), session.id());
+            assertEquals(1, restarted.pageCount());
+            CaptureReviewStore.Pending restored = restarted.read(restarted.nextUnsent());
+            assertArrayEquals(retake, restored.jpeg);
+            assertEquals(selected.provenance, restored.provenance);
+            assertNotEquals(associatedFirst.captureId, restored.provenance.captureId);
+        } finally { controller.close(); }
+    }
+
     @Test public void earlyMixedAudioCompletionDoesNotEndCaptureAndSurvivesRestartUntilImagesAreSubmitted() throws Exception {
         Context context = RuntimeEnvironment.getApplication();
         List<String> requests = new java.util.concurrent.CopyOnWriteArrayList<>();

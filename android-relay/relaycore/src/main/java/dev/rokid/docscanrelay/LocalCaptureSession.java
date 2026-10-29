@@ -137,6 +137,7 @@ final class LocalCaptureSession {
     synchronized void commit(CaptureReviewStore.Pending pending) throws IOException {
         if (phase() == Phase.CLOSED || pending.pageIndex < 0 || pending.pageIndex > pageCount()
                 || pending.pageIndex >= 1000) throw new IOException("この状態では写真を保存できません");
+        checkProvenance(pending);
         File incoming = new File(directory, "incoming-" + UUID.randomUUID() + ".bin");
         new CaptureReviewPersistence(incoming).save(pending);
         if (!new CaptureReviewPersistence(incoming).matches(pending)) {
@@ -147,7 +148,8 @@ final class LocalCaptureSession {
         Properties next = copy();
         next.setProperty("page." + pending.pageIndex, name);
         next.setProperty("count", Integer.toString(Math.max(pageCount(), pending.pageIndex + 1)));
-        // An old revision remains on disk. Only the atomic manifest chooses the current revision.
+        // The revision hash includes native provenance when present. Old revisions remain;
+        // only the atomic manifest chooses the current original and its exact association.
         save(next);
     }
 
@@ -161,7 +163,16 @@ final class LocalCaptureSession {
         if (!page.fileName.equals("p-" + page.index + "-" + digest(file) + ".bin")) throw new IOException("保存画像の破損を検出しました");
         CaptureReviewStore.Pending result = new CaptureReviewPersistence(file).readPending();
         if (result.pageIndex != page.index) throw new IOException("保存画像の番号が不正です");
+        checkProvenance(result);
         return result;
+    }
+
+    private void checkProvenance(CaptureReviewStore.Pending pending) throws IOException {
+        CaptureProvenance source = pending.provenance;
+        if (source != null && (!id().equals(source.localSessionId)
+                || !source.matches(pending.jpeg, pending.pageIndex, pending.rotationDegrees))) {
+            throw new IOException("保存画像の撮影元が一致しません");
+        }
     }
 
     synchronized boolean contains(CaptureReviewStore.Pending pending) throws IOException {

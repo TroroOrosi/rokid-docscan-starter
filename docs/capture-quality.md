@@ -1,10 +1,14 @@
 # 保存写真の原寸点検と登録条件（PC用）
 
-Status: Current runbook。PC用部品は実装済み。撮影・登録本流の品質ゲートは未接続、実機受け入れは未了。
-Runs on: 以下のCLIはWindows PCで保存済みJPEG/PNGを点検。追加のPython runtimeはスマホ上で画像bytesを扱い、PCの常時稼働や有線接続を要求しない。実AI・撮影／登録本流は未接続。
+Status: Current runbook。PC用部品とスマホ側Work検査受付は実装済み。カメラ撮影・登録本流の品質ゲートと実AIは未接続、実機受け入れは未了。
+Runs on: 以下のCLIはWindows PCで保存済みJPEG/PNGを点検。Python runtimeとWorkStoreはスマホ上で画像bytesを扱い、PCの常時稼働や有線接続を要求しない。10/30は本人の未接続指定に従い端末へ接続しない。
 
 `app/capture_quality.py` は原画像bytesから概観と全域の原画素タイルを作り、明示的に注入したcheckerの返答をsession・capture・generation・頁めくり・revision・SHA・rotationへ照合します。
 遅延した別頁の返答、異常JSON、checker未設定・失敗、未検証profileは保留です。読取はcheckerの申告として保存し、独立した視認証明にしません。既定の `validated_profiles=()` は空で、校正済みprofileを自己申告して承認できません。
+
+`app/work_bridge.py` の検査要求・返答受付・結果受付にはこの判定が接続済みです。現在は全域タイルと全画像のeligibleを要求する方式で、実AI／Work Cloud transportが接続済みという意味ではありません。ここでのidentityはサーバ保存PNG・順序に基づき、元のセンサー撮影時刻・頁めくりの履歴ではありません。全タイル方式を最終採用とせず、原画像取得後に疑わしい原寸領域だけを検査する方法と処理量・誤受入を比較します。部分領域の検査や取得receiptを全文視認済みに昇格させません。
+
+10/30のAndroid側では、原本JPEGのSHA・capture UUID・寸法・撮影時刻を確認表示→ローカル保存→復元へ通しました。同じ撮影世代かつImageとSENSOR_TIMESTAMPが一致した結果だけに露光・感度・AF/AEを結び、未到着・不一致は不明のまま保持します。local session・頁位置・回転へ一度だけ結び、既存の内容hash付き保存revisionを使います。これは原本の取り違えを防ぐ局所の配線で、スマホへのmetadata転送、未撮影頁の検出、AIの品質選択、複数候補・録画・ZSLは未接続です。
 
 ## グラスで確認できる範囲
 

@@ -27,6 +27,7 @@ final class CaptureReviewStore {
         final String ocrFailure;
         final PageFraming framing;
         final long capturedAtMillis;
+        final CaptureProvenance provenance;
 
         Pending(
                 int pageIndex,
@@ -51,6 +52,11 @@ final class CaptureReviewStore {
 
         Pending(int pageIndex, byte[] jpeg, String ocrText, int rotationDegrees,
                 String ocrFailure, PageFraming framing, long capturedAtMillis) {
+            this(pageIndex, jpeg, ocrText, rotationDegrees, ocrFailure, framing, capturedAtMillis, null);
+        }
+
+        Pending(int pageIndex, byte[] jpeg, String ocrText, int rotationDegrees,
+                String ocrFailure, PageFraming framing, long capturedAtMillis, CaptureProvenance provenance) {
             this.pageIndex = pageIndex;
             this.jpeg = jpeg;
             this.ocrText = ocrText == null ? "" : ocrText;
@@ -58,6 +64,7 @@ final class CaptureReviewStore {
             this.ocrFailure = ocrFailure == null ? "" : ocrFailure;
             this.framing = framing == null ? PageFraming.UNKNOWN : framing;
             this.capturedAtMillis = capturedAtMillis;
+            this.provenance = provenance;
         }
 
         int ocrCharacters() {

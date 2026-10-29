@@ -26,6 +26,7 @@ import androidx.annotation.RequiresPermission;
 
 import java.nio.ByteBuffer;
 import java.util.Arrays;
+import dev.rokid.docscanrelay.CaptureProvenance;
 
 /**
  * One still per request, straight from {@code android.hardware.camera2}.
@@ -54,9 +55,44 @@ final class GlassCamera {
     interface Callback {
         void onCaptured(byte[] jpeg, int width, int height, long elapsedMillis);
 
+        default void onCaptured(Captured captured) {
+            onCaptured(captured.jpeg, captured.width, captured.height, captured.elapsedMillis);
+        }
+
         void onCaptureFailed(String reason);
 
         default void onPreview(Bitmap frame) { frame.recycle(); }
+    }
+
+    static final class Captured {
+        final byte[] jpeg;
+        final int width, height;
+        final long elapsedMillis;
+        final CaptureProvenance provenance;
+
+        Captured(byte[] jpeg, int width, int height, long elapsedMillis, CaptureProvenance provenance) {
+            this.jpeg = jpeg;
+            this.width = width;
+            this.height = height;
+            this.elapsedMillis = elapsedMillis;
+            this.provenance = provenance;
+        }
+    }
+
+    /** A still result is never borrowed from preview metering or a previous generation. */
+    private static final class StillResult {
+        final long generation;
+        final Long timestamp, frame, exposure;
+        final Integer iso, af, ae;
+        StillResult(long generation, TotalCaptureResult result) {
+            this.generation = generation;
+            timestamp = result.get(CaptureResult.SENSOR_TIMESTAMP);
+            frame = result.getFrameNumber();
+            exposure = result.get(CaptureResult.SENSOR_EXPOSURE_TIME);
+            iso = result.get(CaptureResult.SENSOR_SENSITIVITY);
+            af = result.get(CaptureResult.CONTROL_AF_STATE);
+            ae = result.get(CaptureResult.CONTROL_AE_STATE);
+        }
     }
 
     private final Context context;
@@ -68,6 +104,7 @@ final class GlassCamera {
     private CameraCaptureSession session;
     private ImageReader reader;
     private long startedAtMillis;
+    private StillResult stillResult;
     private boolean settled;
     private boolean closed;
     private boolean unknown;
@@ -374,6 +411,7 @@ final class GlassCamera {
     private void captureOnHandler() {
         if (closed || unknown || !capturePending || !cameraReady() || (generation > 0 && !settled)) return;
         long current = ++generation;
+        stillResult = null;
         settled = false;
         pageChange.consumed();
         startedAtMillis = SystemClock.elapsedRealtime();
@@ -456,6 +494,10 @@ final class GlassCamera {
                 if (current == generation && !closed && !unknown) {
                     CameraDiagnostics.result(current, result);
                 }
+                if (active(current) && !unknown && result != null) {
+                    try { stillResult = new StillResult(current, result); }
+                    catch (RuntimeException unavailable) { stillResult = null; }
+                }
             }
         };
     }
@@ -464,12 +506,14 @@ final class GlassCamera {
         final byte[] jpeg;
         final int width;
         final int height;
+        final long sensorTimestamp;
         try (Image image = source.acquireNextImage()) {
             if (image == null || image.getFormat() != ImageFormat.JPEG) {
                 throw new RejectedJpeg("missing JPEG image");
             }
             width = image.getWidth();
             height = image.getHeight();
+            sensorTimestamp = image.getTimestamp();
             if (width <= 0 || height <= 0) throw new RejectedJpeg("invalid JPEG dimensions");
             Image.Plane[] planes = image.getPlanes();
             if (planes.length != 1) throw new RejectedJpeg("invalid JPEG planes");
@@ -501,7 +545,12 @@ final class GlassCamera {
                 + " " + jpeg.length + "B in " + elapsed + "ms gen=" + generation);
         // The consumer may queue another allocation. No native Image/reader is held.
         // Consumer exceptions must not re-label a delivered image as a camera failure.
-        callback.onCaptured(jpeg, width, height, elapsed);
+        StillResult result = stillResult != null && stillResult.generation == generation ? stillResult : null;
+        CaptureProvenance provenance = CaptureProvenance.nativeStill(jpeg, width, height, sensorTimestamp,
+                result == null ? null : result.timestamp, result == null ? null : result.frame,
+                result == null ? null : result.exposure, result == null ? null : result.iso,
+                result == null ? null : result.af, result == null ? null : result.ae);
+        callback.onCaptured(new Captured(jpeg, width, height, elapsed, provenance));
     }
 
     private static final class RejectedJpeg extends RuntimeException {
