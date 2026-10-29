@@ -188,8 +188,10 @@ public class GlassCameraDeliveryTest {
                 0f, new int[]{CaptureRequest.CONTROL_AE_MODE_ON});
         ReflectionHelpers.setField(camera, "metering", metering);
         Runnable observe = () -> {
+            // Each simulated capture has a new sensor timestamp shared by image and metadata.
+            image.timestamp = android.os.SystemClock.elapsedRealtimeNanos();
             metering.observe(null, CaptureRequest.CONTROL_AE_STATE_CONVERGED, android.os.SystemClock.elapsedRealtime());
-            ReflectionHelpers.setField(camera, "meteringSensorTimestamp", 10L);
+            ReflectionHelpers.setField(camera, "meteringSensorTimestamp", image.timestamp);
             ReflectionHelpers.callInstanceMethod(camera, "previewFrame",
                     ClassParameter.from(ImageReader.class, reader), ClassParameter.from(long.class, 0L));
         };

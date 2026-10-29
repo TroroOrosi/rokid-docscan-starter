@@ -1,11 +1,11 @@
 # Rokid DocScan（入試問題を撮影して解答するサーバ）
 
-Status: Current project entrypoint. Updated 2026-10-03.
+Status: Current project entrypoint. Updated 2026-10-29.
 
 撮影後は実画像を3秒表示し、通常は写真に文字を重ねません。確認できるのは**構図のみ**で、無操作で保存しても画質は未検証です。
 保存写真の [原寸点検・補正候補・登録条件評価](docs/capture-quality.md) はPC用部品で、
 撮影・正式登録本流の品質ゲートは未接続です。既存の実機試験停止は継続しています。
-glassdocは撮影中の映像で頁変化を観測し、静止と新鮮なピント・露出の結果を確認して、同じカメラのJPEGを1枚撮ります。時間経過だけで動いている用紙を撮りません。実機のピント・暗さ・一文字の精度は未確認です。
+現行glassdocは撮影中の映像で頁変化を観測し、静止と端末が対応する焦点・露出の状態を確認して、同じカメラのJPEGを1枚撮ります。固定焦点の端末でAFによる改善を保証するものではありません。録画・複数候補・AIとの組合せは比較中で、既存方式の維持を採用済みとはしません。実機の暗さ・一文字の精度は未確認です。
 
 ## このリポジトリの目的
 
@@ -111,6 +111,7 @@ submodule、AARコピーは不要です。
 | 経路 | 位置づけ |
 |---|---|
 | `ROKID_SOLVER=chatgpt-web` | **現行の主経路。** 利用者のログイン済み ChatGPT ウェブセッションを CDP 経由で操作します |
+| `ROKID_SOLVER=chatgpt-work` | スマホ側の原画像job・品質検査・答案受領を実装中。Work Cloudへの接続・自動開始は未接続で、運用切替前です |
 | スマホ内ローカルモデル（F-51F、llama.cpp） | **不採用**（2026-09-14、利用者の決定）。実測は `docs/hardware-measurements.md` E 節に証拠として残しますが、新規作業はありません |
 | `openai` / `gemini` / `claude` | API キーがあれば設定だけで動きます。`ROKID_SOLVER_TIERS` のフォールバック段として残します |
 
@@ -121,12 +122,16 @@ risk があります。**利用者の判断で選択した経路です（詳細�
 自動開始、テザリング上の撮影から答案まで、実機での即消灯・無音・電池持続です。
 以前のスマホChromeでの部分測定は `docs/hardware-measurements.md` に残しています。
 
+最新の対象はChatGPTアプリ／WebのWorkです。実利用は常時オンのスマホとテザリング接続グラスだけで、PC・有線・毎回の接続操作を要求しません。
+Work向けの画像jobは、向き補正済みサーバPNGのbytesとSHA・順序を保持し、原画素の検査と答案を同じ入力へ照合します。フォルダ名・画像一覧・データ配信記録を、AIが全画像を読めた証明にしません。
+Driveへ置く場合も全件列挙と各原画像取得が必要で、添付20枚制限から外れることと全頁を正しく読めることは別です。[公式MCP Events](https://developers.openai.com/plugins/build/mcp-events)・[Secure MCP Tunnel](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels)は接続候補であり、このアカウント／スマホでの接続・購読・自動復旧は未検証です。
+
 導入の正本は
 [Windows + Androidスマホ中継による実機運用](docs/windows-android-real-device-setup.md)、
 CXR-L の実装境界は
 [CXR-L / Global Hi Rokid integration](docs/cxr-l-integration.md)です。
 
-現在のバージョン: **Server APP 0.50.3 / API 1.32.0 / Android client 0.3.17 / Glasses View 1.28.0 / Solver API 1.9.0**。
+現在のバージョン: **Server APP 0.51.0 / API 1.33.0 / Android client 0.3.17 / Glasses View 1.29.0 / Solver API 1.9.0**。
 版数の正本は `app/version.py` です。他の資料は版数を書かず、この行だけが
 `tests/test_documentation_contract.py` で実装と照合されます。
 Solver API は、記入用解答の全文保持・資料不足の分離を行う `answer_only` モードを含みます。

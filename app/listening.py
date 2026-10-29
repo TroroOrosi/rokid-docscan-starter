@@ -18,7 +18,7 @@ OVERLAP_SAMPLES = 16000
 def requires_transcript():
     from .solvers.registry import _tier_names
 
-    return _tier_names(None)[0] != "chatgpt-web"
+    return _tier_names(None)[0] not in ("chatgpt-web", "chatgpt-work")
 
 
 def folder(document_id):

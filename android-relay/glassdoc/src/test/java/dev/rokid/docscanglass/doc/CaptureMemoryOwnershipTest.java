@@ -99,7 +99,7 @@ public class CaptureMemoryOwnershipTest {
         assertTrue(surface.isCaptureReviewVisible(generation));
         List<String> lines = ReflectionHelpers.getField(hud, "lines");
         // Only an explicit end gesture adds a notice; it does not restart review.
-        assertEquals(List.of("確認後に撮影終了・操作せず待つ"), lines);
+        assertEquals(List.of("終了待ち"), lines);
         surface.showCaptureEndRequested();
         surface.showHud(List.of("保存済み"));
         ShadowLooper.runUiThreadTasksIncludingDelayedTasks();

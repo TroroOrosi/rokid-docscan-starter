@@ -16,7 +16,7 @@ import java.util.List;
 
 /**
  * The glasses display: black background, green monospace text, and either the
- * live camera image or the still that was just taken.
+ * live camera image or the still that was just taken in a small corner.
  *
  * <p>It holds no session state. What to show is decided by the shared
  * {@code DocScanController} and arrives through {@link GlassesCaptureSurface},
@@ -28,9 +28,11 @@ final class HudView extends View {
      * Capture text and the aim mark sit in the operator's line of sight over
      * the page (2026-09-30: "the text made it hard to shoot"). They clear this
      * long after appearing; black is transparent on the glasses and draws no
-     * power. The still under review never clears: it must be seen.
+     * power. The corner still under review remains visible until commit.
      */
     static final long FADE_MILLIS = 1500;
+    private static final float CAPTURE_FRACTION = .30f;
+    private static final float CAPTURE_MARGIN = 8f;
 
     private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint guidePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -137,7 +139,7 @@ final class HudView extends View {
     }
 
     /**
-     * Review: the actual still fills the display, with no routine instructions.
+     * Review: the complete still stays in the capture corner, without instructions.
      *
      * <p>The captured image stays visible for review while the live stream
      * observes any page turn for the next capture.</p>
@@ -147,7 +149,7 @@ final class HudView extends View {
         set(newLines, still, false);
     }
 
-    /** Change only the footer: the same image/frame and its 3s clock stay valid. */
+    /** Change only the corner status: the same image/frame and its 3s clock stay valid. */
     void showReviewNotice(String notice) {
         if (preview == null || preview.isRecycled()) return;
         lines = List.of(notice);
@@ -175,30 +177,30 @@ final class HudView extends View {
             });
         }
 
-        float textTop = 0;
         Bitmap still = preview;
         if (still != null && !still.isRecycled()) {
-            textTop = drawPreview(canvas, still);
+            drawPreview(canvas, still);
         } else if (capturing && livePreview != null && !livePreview.isRecycled()) {
             drawPreview(canvas, livePreview);
             drawGuide(canvas);
-            textTop = Math.max(0, getHeight() - (lines.size() + 1) * 26f);
         } else if (aiming) {
             drawGuide(canvas);
-            textTop = Math.max(0, getHeight() - (lines.size() + 1) * 26f);
         }
         if (recording && still == null) {
-            paint.setTextSize(22);
-            canvas.drawText("REC", Math.max(8, getWidth() - 62), getHeight() - 8, paint);
+            RectF area = captureArea();
+            canvas.drawCircle(area.right - 3f, area.top - 12f, 3f, paint);
         }
         if (lines.isEmpty()) {
             return;
         }
 
-        float available = getHeight() - textTop;
         boolean compact = aiming || still != null;
-        float lineHeight = compact ? 26f : available / (float) (lines.size() + 1);
-        float textSize = compact ? 22f : lineHeight * 0.55f;
+        if (compact) {
+            drawCaptureStatus(canvas);
+            return;
+        }
+        float lineHeight = getHeight() / (float) (lines.size() + 1);
+        float textSize = lineHeight * 0.55f;
         paint.setTextSize(textSize);
         float widest = 0;
         for (String line : lines) {
@@ -208,7 +210,7 @@ final class HudView extends View {
         if (widest > textWidth) {
             paint.setTextSize(textSize * textWidth / widest);
         }
-        float y = textTop + lineHeight;
+        float y = lineHeight;
         for (String line : lines) {
             canvas.drawText(line == null ? "" : line, lineHeight * 0.2f, y, paint);
             y += lineHeight;
@@ -224,30 +226,42 @@ final class HudView extends View {
         guidePaint.setStrokeWidth(2f);
         Bitmap frame = livePreview;
         if (frame == null || frame.isRecycled()) return;
-        RectF bounds = imageBounds(frame, imageBand());
+        RectF bounds = imageBounds(frame);
         canvas.drawRect(bounds, guidePaint);
     }
 
-    /** Show the complete capture once, with no inset or label covering the paper. */
-    private float drawPreview(Canvas canvas, Bitmap still) {
-        float band = imageBand();
-        RectF target = imageBounds(still, band);
+    /** Show the entire photograph in one corner; status never covers it. */
+    private void drawPreview(Canvas canvas, Bitmap still) {
+        RectF target = imageBounds(still);
         canvas.save();
-        canvas.clipRect(0, 0, getWidth(), band);
+        canvas.clipRect(captureArea());
         canvas.drawBitmap(still, null, target, still == livePreview ? livePaint : previewPaint);
         canvas.restore();
-        return band;
     }
 
-    private float imageBand() {
-        return Math.max(1, getHeight() - (lines.isEmpty() ? 0 : lines.size() + 1) * 26f);
+    private RectF captureArea() {
+        float right = Math.max(1, getWidth() - CAPTURE_MARGIN);
+        float bottom = Math.max(1, getHeight() - CAPTURE_MARGIN);
+        return new RectF(Math.max(0, right - getWidth() * CAPTURE_FRACTION),
+                Math.max(0, bottom - getHeight() * CAPTURE_FRACTION), right, bottom);
     }
 
-    private RectF imageBounds(Bitmap image, float band) {
-        float scale = Math.min(getWidth() / (float) image.getWidth(), band / image.getHeight());
+    private RectF imageBounds(Bitmap image) {
+        RectF area = captureArea();
+        float scale = Math.min(area.width() / image.getWidth(), area.height() / image.getHeight());
         float width = image.getWidth() * scale, height = image.getHeight() * scale;
-        return new RectF((getWidth() - width) / 2f, (band - height) / 2f,
-                (getWidth() + width) / 2f, (band + height) / 2f);
+        return new RectF(area.centerX() - width / 2f, area.centerY() - height / 2f,
+                area.centerX() + width / 2f, area.centerY() + height / 2f);
+    }
+
+    private void drawCaptureStatus(Canvas canvas) {
+        RectF area = captureArea();
+        String text = lines.get(0) == null ? "" : lines.get(0);
+        paint.setTextSize(18f);
+        float available = Math.max(1, area.width() - 14f);
+        float width = paint.measureText(text);
+        if (width > available) paint.setTextSize(18f * available / width);
+        canvas.drawText(text, area.left, area.top - 7f, paint);
     }
 
     /** Display-only green contrast stretch; JPEG, OCR and uploaded pixels stay untouched. */

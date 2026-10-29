@@ -82,10 +82,14 @@ final class GlassCamera {
     private Runnable pageReady;
     private PageChange pageChange = new PageChange();
     private long previewAt;
+    private long previewDisplayAt;
     private boolean capturePending;
     private CameraReadiness metering;
     private long meteringSensorTimestamp;
+    private long lastMeteringSensorTimestamp;
+    private long meteringExposureNanos;
     private long previewSensorTimestamp;
+    private long lastPreviewSensorTimestamp;
     private boolean autoFocusStarted;
     private long autoFocusSensorTimestamp;
     private PageChange previewMotion = new PageChange();
@@ -110,7 +114,7 @@ final class GlassCamera {
             handler.postDelayed(prepareTimeout, PREPARE_TIMEOUT_MILLIS);
             startPreview();
             if (closed || unknown) return;
-            stillness.await(handler, this::cameraReady, this::captureOnHandler);
+            stillness.await(handler, this::cameraReady, this::motionExposureNanos, this::captureOnHandler);
         });
     }
 
@@ -157,8 +161,12 @@ final class GlassCamera {
                     characteristics.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_MODES));
             previewMotion = new PageChange();
             previewAt = 0;
+            previewDisplayAt = 0;
             meteringSensorTimestamp = 0;
+            lastMeteringSensorTimestamp = 0;
+            meteringExposureNanos = 0;
             previewSensorTimestamp = 0;
+            lastPreviewSensorTimestamp = 0;
             autoFocusStarted = false;
             autoFocusSensorTimestamp = 0;
             CameraDiagnostics.capabilities(generation + 1, characteristics, jpegSize);
@@ -220,9 +228,15 @@ final class GlassCamera {
         try (Image image = source.acquireLatestImage()) {
             if (image == null || token != previewGeneration || closed) return;
             long now = SystemClock.elapsedRealtime();
-            if (now - previewAt < 100) return;
+            long timestamp = image.getTimestamp();
+            if (timestamp <= 0 || timestamp <= lastPreviewSensorTimestamp) {
+                // Do not refresh readiness or invent a turn from an old/invalid buffer.
+                previewSensorTimestamp = 0;
+                return;
+            }
+            lastPreviewSensorTimestamp = timestamp;
+            previewSensorTimestamp = timestamp;
             previewAt = now;
-            previewSensorTimestamp = image.getTimestamp();
             Image.Plane luma = image.getPlanes()[0];
             ByteBuffer pixels = luma.getBuffer();
             int row = luma.getRowStride(), step = luma.getPixelStride();
@@ -234,13 +248,17 @@ final class GlassCamera {
             previewMotion.observe(thumbnail, now);
             // AUTO/MACRO must start before pageReady can require a focused result.
             if (capturePending || (pageReady != null && pageChange.ready(now))) startAutoFocus();
-            int width = Math.min(320, image.getWidth()), height = Math.max(1, width * image.getHeight() / image.getWidth());
-            int[] display = new int[width * height];
-            for (int y = 0; y < height; y++) for (int x = 0; x < width; x++) {
-                int gray = pixels.get(y * image.getHeight() / height * row + x * image.getWidth() / width * step) & 255;
-                display[y * width + x] = 0xFF000000 | (gray << 8);
+            // Observe every received frame; only the HUD bitmap is limited to 10 Hz.
+            if (now - previewDisplayAt >= 100) {
+                previewDisplayAt = now;
+                int width = Math.min(320, image.getWidth()), height = Math.max(1, width * image.getHeight() / image.getWidth());
+                int[] display = new int[width * height];
+                for (int y = 0; y < height; y++) for (int x = 0; x < width; x++) {
+                    int gray = pixels.get(y * image.getHeight() / height * row + x * image.getWidth() / width * step) & 255;
+                    display[y * width + x] = 0xFF000000 | (gray << 8);
+                }
+                callback.onPreview(Bitmap.createBitmap(display, width, height, Bitmap.Config.RGB_565));
             }
-            callback.onPreview(Bitmap.createBitmap(display, width, height, Bitmap.Config.RGB_565));
             if (pageReady != null && pageChange.ready(now) && meteredFrame(now)) {
                 Runnable ready = pageReady;
                 pageReady = null;
@@ -251,6 +269,7 @@ final class GlassCamera {
 
     private void stopPreview() {
         ++previewGeneration;
+        meteringExposureNanos = 0;
         closeResource(previewSession); previewSession = null;
         closeResource(previewReader); previewReader = null;
         if (device == null) { closeResource(reader); reader = null; }
@@ -282,8 +301,16 @@ final class GlassCamera {
     private boolean cameraReady() {
         long now = SystemClock.elapsedRealtime();
         return !closed && !unknown && previewDevice != null && previewSession != null
-                && meteredFrame(now) && previewMotion.ready(now)
+                && meteringExposureNanos > 0 && meteredFrame(now) && previewMotion.ready(now)
                 && now >= previewAt && now - previewAt <= CameraReadiness.FRESH_MILLIS;
+    }
+
+    /** The preview's actual exposure, never a request setting or an old session's result. */
+    private long motionExposureNanos() {
+        long now = SystemClock.elapsedRealtime();
+        return !closed && !unknown && previewDevice != null && previewSession != null
+                && meteredFrame(now) && now >= previewAt
+                && now - previewAt <= CameraReadiness.FRESH_MILLIS ? meteringExposureNanos : 0;
     }
 
     private boolean meteredFrame(long now) {
@@ -303,12 +330,16 @@ final class GlassCamera {
                 try {
                     Long timestamp = result.get(CaptureResult.SENSOR_TIMESTAMP);
                     if (timestamp == null || timestamp <= 0) {
+                        meteringExposureNanos = 0;
                         meteringSensorTimestamp = 0; return;
                     }
                     // Fence old LOCKED metadata until this START has reached the native pipeline.
                     if (focusTrigger) autoFocusSensorTimestamp = timestamp;
-                    if (timestamp <= meteringSensorTimestamp) return;
+                    if (timestamp <= lastMeteringSensorTimestamp) return;
+                    lastMeteringSensorTimestamp = timestamp;
                     meteringSensorTimestamp = timestamp;
+                    Long exposure = result.get(CaptureResult.SENSOR_EXPOSURE_TIME);
+                    meteringExposureNanos = exposure != null && exposure > 0 ? exposure : 0;
                     metering.observe(result.get(CaptureResult.CONTROL_AF_STATE),
                             result.get(CaptureResult.CONTROL_AE_STATE), SystemClock.elapsedRealtime());
                 } catch (RuntimeException error) { previewFailed("camera metering unavailable"); }

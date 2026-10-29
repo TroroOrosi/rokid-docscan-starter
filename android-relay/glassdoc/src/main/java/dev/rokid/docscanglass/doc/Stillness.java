@@ -8,6 +8,7 @@ import android.hardware.SensorManager;
 import android.os.Handler;
 import android.os.SystemClock;
 import java.util.function.BooleanSupplier;
+import java.util.function.LongSupplier;
 
 /**
  * Holds the shutter until the head is still. 2026-09-30 on the glasses a
@@ -19,17 +20,21 @@ import java.util.function.BooleanSupplier;
  */
 final class Stillness implements SensorEventListener {
     /**
-     * Calibration knob. At the measured 8-10ms exposure, 0.12 rad/s moves the
-     * 4032px, roughly 70-degree frame about 4px, about 2px once ChatGPT fits
-     * the image to 2048. Raise it if the shutter waits too long in practice.
+     * Retain the old angular-speed ceiling at exposures up to 10ms. Longer
+     * preview exposures tighten it proportionally; this is a motion safeguard,
+     * not a calibrated pixel-blur or character-readability guarantee.
      */
     static final float MOVING_RAD_S = 0.12f;
+    static final long REFERENCE_EXPOSURE_NANOS = 10_000_000;
     static final long STILL_MILLIS = 300;
     private final SensorManager sensors;
     private final Sensor gyroscope;
     private volatile long movingAt;
     private volatile long observedAt = -1;
+    private float motionSquared = Float.POSITIVE_INFINITY;
+    private float quietMotionSquared;
     private long generation;
+    private LongSupplier exposureNanos = () -> 0;
 
     Stillness(Context context) {
         sensors = (SensorManager) context.getSystemService(Context.SENSOR_SERVICE);
@@ -41,18 +46,27 @@ final class Stillness implements SensorEventListener {
     }
 
     /** Keep measuring motion until the camera is also ready; elapsed wait never authorizes a shot. */
-    void await(Handler handler, BooleanSupplier cameraReady, Runnable then) {
+    void await(Handler handler, BooleanSupplier cameraReady, LongSupplier exposure, Runnable then) {
         long token = ++generation;
+        exposureNanos = exposure;
         long startedAt = SystemClock.elapsedRealtime();
         movingAt = startedAt; // a full STILL_MILLIS of readings is required
         observedAt = -1;
+        motionSquared = Float.POSITIVE_INFINITY;
+        quietMotionSquared = 0;
         boolean measured = gyroscope != null
                 && sensors.registerListener(this, gyroscope, SensorManager.SENSOR_DELAY_GAME, handler);
         handler.postDelayed(new Runnable() {
             @Override public void run() {
                 if (token != generation) return;
                 long now = SystemClock.elapsedRealtime();
-                if (cameraReady.getAsBoolean() && (!measured || (observedAt >= startedAt
+                float limit = motionLimit();
+                if (limit <= 0 || (measured && (motionSquared > limit * limit
+                        || quietMotionSquared > limit * limit))) {
+                    movingAt = now;
+                    quietMotionSquared = 0;
+                }
+                if (limit > 0 && cameraReady.getAsBoolean() && (!measured || (observedAt >= startedAt
                         && now >= observedAt && now - observedAt <= CameraReadiness.FRESH_MILLIS
                         && ready(now, startedAt, movingAt)))) {
                     if (sensors != null) sensors.unregisterListener(Stillness.this);
@@ -66,7 +80,14 @@ final class Stillness implements SensorEventListener {
 
     void cancel() {
         generation++;
+        exposureNanos = () -> 0;
         if (sensors != null) sensors.unregisterListener(this);
+    }
+
+    private float motionLimit() {
+        long exposure = exposureNanos.getAsLong();
+        return exposure <= 0 ? 0 : (float)(MOVING_RAD_S
+                * Math.min(1d, (double)REFERENCE_EXPOSURE_NANOS / exposure));
     }
 
     @Override
@@ -81,8 +102,14 @@ final class Stillness implements SensorEventListener {
         float x = event.values[0];
         float y = event.values[1];
         float z = event.values[2];
-        if (x * x + y * y + z * z > MOVING_RAD_S * MOVING_RAD_S) {
+        motionSquared = x * x + y * y + z * z;
+        float limit = motionLimit();
+        if (limit <= 0 || motionSquared > limit * limit) {
             movingAt = SystemClock.elapsedRealtime();
+            quietMotionSquared = 0;
+        } else {
+            // Recheck this window against later exposure without resetting for harmless AE jitter.
+            quietMotionSquared = Math.max(quietMotionSquared, motionSquared);
         }
     }
 

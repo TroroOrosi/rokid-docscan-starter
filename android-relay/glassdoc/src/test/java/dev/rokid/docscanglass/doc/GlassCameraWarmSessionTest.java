@@ -4,7 +4,11 @@ import static org.junit.Assert.*;
 import static org.robolectric.Shadows.shadowOf;
 import static android.hardware.camera2.CameraMetadata.*;
 
+import android.graphics.Bitmap;
 import android.graphics.ImageFormat;
+import android.hardware.Sensor;
+import android.hardware.SensorEvent;
+import android.hardware.SensorManager;
 import android.hardware.camera2.*;
 import android.hardware.camera2.params.StreamConfigurationMap;
 import android.media.DocScanTestImage;
@@ -33,6 +37,8 @@ import org.robolectric.annotation.Implements;
 import org.robolectric.shadow.api.Shadow;
 import org.robolectric.shadows.ShadowCaptureResult;
 import org.robolectric.shadows.ShadowTotalCaptureResult;
+import org.robolectric.shadows.ShadowSensor;
+import org.robolectric.shadows.ShadowSensorManager;
 import org.robolectric.util.ReflectionHelpers;
 
 /** Runs the real preview -> metering -> JPEG path against a fake HAL, never a camera. */
@@ -45,17 +51,23 @@ public class GlassCameraWarmSessionTest {
     private GlassCamera camera;
     private final List<String> failures = new ArrayList<>();
     private int delivered;
+    private int displayed;
+    private Long exposureNanos = 10_000_000L;
 
     @Before public void setup() {
         ManagerShadow.devices.clear(); ReaderShadow.readers.clear();
         ManagerShadow.refuseSession = false; CharacteristicsShadow.fixedFocus = false;
         CharacteristicsShadow.afMode = CONTROL_AF_MODE_CONTINUOUS_PICTURE;
+        createCamera();
+    }
+    private void createCamera() {
         camera = new GlassCamera(RuntimeEnvironment.getApplication(), new Handler(Looper.getMainLooper()),
                 new GlassCamera.Callback() {
                     @Override public void onCaptured(byte[] bytes, int w, int h, long elapsed) {
                         assertEquals(4032, w); assertEquals(3024, h); delivered++;
                     }
                     @Override public void onCaptureFailed(String reason) { failures.add(reason); }
+                    @Override public void onPreview(Bitmap frame) { displayed++; frame.recycle(); }
                 });
     }
     private void idle(long millis) { shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(millis)); }
@@ -69,13 +81,15 @@ public class GlassCameraWarmSessionTest {
     }
     private void frame(int value) { frame(value, false); }
     private void frame(int value, boolean turning) {
-        ReaderShadow reader = currentReader(ImageFormat.YUV_420_888);
+        frame(currentReader(ImageFormat.YUV_420_888), value, turning, SystemClock.elapsedRealtimeNanos());
+    }
+    private void frame(ReaderShadow reader, int value, boolean turning, long sensorTimestamp) {
         DocScanTestImage image = new DocScanTestImage(new ArrayList<>());
         image.format = ImageFormat.YUV_420_888; image.width = 32; image.height = 24;
         image.rowStride = 32; image.pixelStride = 1;
         byte[] pixels = new byte[32 * 24]; java.util.Arrays.fill(pixels, (byte) value);
         if (turning) java.util.Arrays.fill(pixels, 0, pixels.length / 3, (byte) 70);
-        image.timestamp = SystemClock.elapsedRealtimeNanos();
+        image.timestamp = sensorTimestamp;
         image.buffer = ByteBuffer.wrap(pixels); reader.image = image;
         reader.listener.onImageAvailable(reader.reader);
     }
@@ -89,11 +103,146 @@ public class GlassCameraWarmSessionTest {
         ShadowCaptureResult values = Shadow.extract(result);
         values.set(CaptureResult.CONTROL_AF_STATE, af); values.set(CaptureResult.CONTROL_AE_STATE, ae);
         values.set(CaptureResult.SENSOR_TIMESTAMP, sensorTimestamp);
+        values.set(CaptureResult.SENSOR_EXPOSURE_TIME, exposureNanos);
         assertEquals(Integer.valueOf(af), result.get(CaptureResult.CONTROL_AF_STATE));
         assertEquals(Integer.valueOf(ae), result.get(CaptureResult.CONTROL_AE_STATE));
         return result;
     }
     private void readyFrame() { idle(100); result(CONTROL_AF_STATE_PASSIVE_FOCUSED, CONTROL_AE_STATE_CONVERGED); frame(180); }
+
+    @Test public void missingOrInvalidExposureCannotAuthorizeAStillAfterMeteringConverges() {
+        camera.captureOnce(); idle(100); frame(180); idle(500);
+        for (Long value : new Long[]{null, 0L, -1L}) {
+            exposureNanos = value;
+            result(CONTROL_AF_STATE_PASSIVE_FOCUSED, CONTROL_AE_STATE_CONVERGED); frame(180); idle(50);
+            assertEquals(0, firstDevice().session.captures);
+        }
+        exposureNanos = 25_000_000L;
+        result(CONTROL_AF_STATE_PASSIVE_FOCUSED, CONTROL_AE_STATE_CONVERGED); frame(180); idle(50);
+        assertEquals(1, firstDevice().session.captures); assertTrue(failures.isEmpty());
+    }
+
+    @Test public void longExposureWaitsForSlowerHeadMotionOnTheRealPreparationPath() {
+        SensorManager manager = (SensorManager)RuntimeEnvironment.getApplication()
+                .getSystemService(android.content.Context.SENSOR_SERVICE);
+        ShadowSensorManager sensors = shadowOf(manager);
+        sensors.addSensor(ShadowSensor.newInstance(Sensor.TYPE_GYROSCOPE));
+        createCamera();
+        exposureNanos = 25_000_000L;
+        camera.captureOnce(); idle(0);
+        motionFrames(sensors, 0.1f, 14);
+        assertEquals("25ms must not reuse the 10ms angular-speed allowance", 0, firstDevice().session.captures);
+        motionFrames(sensors, 0.02f, 8);
+        assertEquals(1, firstDevice().session.captures); assertTrue(failures.isEmpty());
+    }
+
+    @Test public void invalidMetadataCannotMakeAnOldExposureResultFreshAgain() {
+        camera.captureOnce(); idle(100); frame(180); idle(400);
+        long acceptedAt = SystemClock.elapsedRealtimeNanos();
+        result(CONTROL_AF_STATE_PASSIVE_FOCUSED, CONTROL_AE_STATE_CONVERGED, acceptedAt); frame(180);
+        result(CONTROL_AF_STATE_PASSIVE_FOCUSED, CONTROL_AE_STATE_CONVERGED, 0);
+        result(CONTROL_AF_STATE_PASSIVE_FOCUSED, CONTROL_AE_STATE_CONVERGED, acceptedAt); idle(50);
+        assertEquals(0, firstDevice().session.captures);
+        result(CONTROL_AF_STATE_PASSIVE_FOCUSED, CONTROL_AE_STATE_CONVERGED); frame(180); idle(50);
+        assertEquals(1, firstDevice().session.captures); assertTrue(failures.isEmpty());
+    }
+
+    @Test public void aPriorPreviewGenerationCannotSupplyTheNextShotsExposure() {
+        camera.preview(); idle(100);
+        var old = currentDevice().session;
+        result(CONTROL_AF_STATE_PASSIVE_FOCUSED, CONTROL_AE_STATE_CONVERGED); frame(180);
+        camera.pausePreview(); idle(0); camera.captureOnce(); idle(100); frame(180); idle(400);
+        old.previewCallback.onCaptureCompleted(old, old.repeating,
+                metadata(CONTROL_AF_STATE_PASSIVE_FOCUSED, CONTROL_AE_STATE_CONVERGED, SystemClock.elapsedRealtimeNanos()));
+        frame(180); idle(50);
+        assertEquals(0, currentDevice().session.captures);
+        result(CONTROL_AF_STATE_PASSIVE_FOCUSED, CONTROL_AE_STATE_CONVERGED); frame(180); idle(50);
+        assertEquals(1, currentDevice().session.captures); assertTrue(failures.isEmpty());
+    }
+
+    @Test public void staleExposureCannotBeRefreshedByNewImagesOrDuplicateResults() {
+        camera.captureOnce(); idle(100);
+        long acceptedAt = SystemClock.elapsedRealtimeNanos();
+        result(CONTROL_AF_STATE_PASSIVE_FOCUSED, CONTROL_AE_STATE_CONVERGED, acceptedAt); frame(180);
+        // Keep moving until the initial metadata expires; do not permit an earlier valid shot.
+        idle(250); frame(180, true); idle(100); frame(180); idle(400);
+        result(CONTROL_AF_STATE_PASSIVE_FOCUSED, CONTROL_AE_STATE_CONVERGED, acceptedAt); frame(180); idle(50);
+        assertEquals(0, firstDevice().session.captures);
+        result(CONTROL_AF_STATE_PASSIVE_FOCUSED, CONTROL_AE_STATE_CONVERGED); frame(180); idle(50);
+        assertEquals(1, firstDevice().session.captures); assertTrue(failures.isEmpty());
+    }
+
+    private void motionFrames(ShadowSensorManager sensors, float speed, int readings) {
+        for (int i = 0; i < readings; i++) {
+            SensorEvent event = ShadowSensorManager.createSensorEvent(3);
+            event.values[0] = speed;
+            sensors.sendSensorEventToListeners(event);
+            idle(50); result(CONTROL_AF_STATE_PASSIVE_FOCUSED, CONTROL_AE_STATE_CONVERGED); frame(180);
+        }
+    }
+
+    @Test public void aShortTurnBetweenHudUpdatesStillReleasesTheSimilarNextPage() {
+        camera.preview(); idle(100);
+        result(CONTROL_AF_STATE_PASSIVE_FOCUSED, CONTROL_AE_STATE_CONVERGED); frame(180);
+        PageChange pages = ReflectionHelpers.getField(camera, "pageChange"); pages.consumed();
+        AtomicInteger ready = new AtomicInteger(); camera.awaitNextPage(ready::incrementAndGet); idle(0);
+        assertEquals(1, displayed);
+
+        // Both the turn and the next, visually similar page arrive inside one HUD interval.
+        idle(30); frame(180, true); idle(30); frame(180);
+        assertEquals(1, displayed); assertEquals(0, ready.get());
+        idle(399); result(CONTROL_AF_STATE_PASSIVE_FOCUSED, CONTROL_AE_STATE_CONVERGED); frame(180);
+        assertEquals(0, ready.get()); assertEquals(2, displayed);
+        idle(1); frame(180);
+        assertEquals(1, ready.get()); assertEquals(2, displayed);
+        idle(100); frame(180); assertEquals(1, ready.get());
+        assertTrue(failures.isEmpty());
+    }
+
+    @Test public void motionBetweenHudUpdatesRestartsTheNativeCaptureStillnessWait() {
+        camera.preview(); idle(100);
+        result(CONTROL_AF_STATE_PASSIVE_FOCUSED, CONTROL_AE_STATE_CONVERGED); frame(180);
+        idle(400); result(CONTROL_AF_STATE_PASSIVE_FOCUSED, CONTROL_AE_STATE_CONVERGED); frame(180);
+        idle(30); frame(180, true); idle(30); frame(180);
+        assertEquals(2, displayed);
+
+        camera.captureOnce(); idle(350);
+        assertEquals(0, firstDevice().session.captures);
+        idle(50);
+        assertEquals(1, firstDevice().session.captures);
+        assertEquals(2, displayed); assertTrue(failures.isEmpty());
+    }
+
+    @Test public void invalidDuplicateAndReversedFramesCannotBecomeNewPageObservations() {
+        camera.preview(); idle(100); frame(180);
+        ReaderShadow preview = currentReader(ImageFormat.YUV_420_888);
+        long acceptedAt = SystemClock.elapsedRealtimeNanos();
+        PageChange pages = ReflectionHelpers.getField(camera, "pageChange"); pages.consumed();
+        AtomicInteger ready = new AtomicInteger(); camera.awaitNextPage(ready::incrementAndGet); idle(0);
+        idle(100); frame(preview, 180, true, 0);
+        idle(100); frame(preview, 180, true, acceptedAt - 1);
+        idle(100); frame(preview, 180, true, acceptedAt);
+        assertEquals(1, displayed);
+        idle(400); result(CONTROL_AF_STATE_PASSIVE_FOCUSED, CONTROL_AE_STATE_CONVERGED); frame(180);
+        assertEquals(0, ready.get()); assertEquals(2, displayed);
+
+        idle(30); frame(180, true); idle(30); frame(180); idle(400);
+        result(CONTROL_AF_STATE_PASSIVE_FOCUSED, CONTROL_AE_STATE_CONVERGED); frame(180);
+        assertEquals(1, ready.get()); assertTrue(failures.isEmpty());
+    }
+
+    @Test public void aLateFrameFromAClosedPreviewCannotAffectTheReopenedSession() {
+        camera.preview(); idle(100); frame(180);
+        ReaderShadow old = currentReader(ImageFormat.YUV_420_888);
+        camera.pausePreview(); idle(0); camera.preview(); idle(100); frame(180);
+        PageChange pages = ReflectionHelpers.getField(camera, "pageChange"); pages.consumed();
+        int before = displayed;
+        idle(100); frame(old, 180, true, SystemClock.elapsedRealtimeNanos());
+        assertEquals(before, displayed);
+        AtomicInteger ready = new AtomicInteger(); camera.awaitNextPage(ready::incrementAndGet); idle(400);
+        result(CONTROL_AF_STATE_PASSIVE_FOCUSED, CONTROL_AE_STATE_CONVERGED); frame(180);
+        assertEquals(0, ready.get()); assertTrue(failures.isEmpty());
+    }
 
     @Test public void autoOnlyHardwareStartsFocusBeforeTheFirstAutomaticPageCallback() {
         firstAutomaticPage(CONTROL_AF_MODE_AUTO);

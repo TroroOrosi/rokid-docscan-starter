@@ -24,9 +24,9 @@ from pathlib import Path
 from typing import Literal
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from PIL import Image, UnidentifiedImageError
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, StrictInt, StrictStr
 from starlette.concurrency import run_in_threadpool
 
 from . import config, db
@@ -38,7 +38,7 @@ from .explainer import ExplainRequest, ExplainResult
 from .explainers import get_explainer, list_explainers
 from .extractors import detect_media, get_extractor
 from .glassdoc_contract import GLASSDOC_OPERATION_CONTRACT
-from .glasses_state import GlassesState, list_states, read_state, record_state
+from .glasses_state import GlassesState, list_states, read_state, record_state, state_guard
 from .glasses_view import (
     CAPTURE_CONTRACT,
     EXPLAIN_STAGES,
@@ -87,6 +87,8 @@ from .solvers.chatgpt_web import (
     ChatGptWebSendNotAuthorized, ChatGptWebUncertain, chatgpt_send_enabled,
 )
 from .solvers.registry import solve_with_fallback
+from .solvers.chatgpt_work import work_binding
+from .work_bridge import WorkConflict, WorkPending, WorkStore, configured_work_store
 from .subjects import detect_subject
 from .version import APP_VERSION, HUD_CONTRACT_VERSION, version_info
 
@@ -141,7 +143,7 @@ async def _auth_middleware(request: Request, call_next):
     # (a client appending a slash to a discovery URL must not be locked out
     # before it can negotiate contracts).
     path = request.url.path.rstrip("/") or "/"
-    if path == "/v1/glasses/state" and not config.API_KEY:
+    if (path == "/v1/glasses/state" or path.startswith("/v1/work/")) and not config.API_KEY:
         return JSONResponse({"detail": "authentication_not_configured",
                              "code": "authentication_failed"}, status_code=503)
     if config.API_KEY and path not in config.AUTH_EXEMPT_PATHS:
@@ -152,6 +154,155 @@ async def _auth_middleware(request: Request, call_next):
         if not hmac.compare_digest(provided, expected):
             return JSONResponse({"detail": "unauthorized", "code": "authentication_failed"}, status_code=401)
     return await call_next(request)
+
+
+def _work_current_job(job_id: str) -> tuple[WorkStore, dict]:
+    """A sealed input and still-active glasses generation authorize write-back."""
+    store = configured_work_store()
+    try:
+        job = store.get(job_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Work job not found") from None
+    conn = db.connect()
+    try:
+        session = _exam_session_or_404(conn, job["session_id"])
+        if (_session_phase(session) != "reviewing" or not session["document_id"]
+                or (session["mode"] == "real" and not config.ALLOW_REAL_EXAM_SOLVE)):
+            raise WorkConflict("the Work session is not open for answers")
+        device_id, generation = work_binding(job["session_id"])
+        if device_id != job["device_id"] or generation != job["generation"]:
+            raise WorkConflict("the glasses generation changed")
+        images = [source for source in job["sources"] if "page_number" in source]
+        current = _document_source_pages(conn, session["document_id"], job["session_id"])
+        if ([(item["page_number"], item["sha256"]) for item in images]
+                != [(item["page_number"], item["image_sha256"]) for item in current]):
+            raise WorkConflict("the original document identity changed")
+    except (WorkConflict, ValueError) as error:
+        raise HTTPException(status_code=409, detail=str(error)) from None
+    finally:
+        conn.close()
+    return store, job
+
+
+@app.get("/v1/work/jobs")
+def work_jobs(cursor: int = 0, limit: int = 100) -> dict:
+    """Phone-local transport queue; an official Work connector is still required."""
+    try:
+        return configured_work_store().list_jobs(cursor=cursor, limit=limit)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from None
+
+
+@app.get("/v1/work/jobs/{job_id}")
+def work_job(job_id: str) -> dict:
+    _, job = _work_current_job(job_id)
+    return job
+
+
+@app.get("/v1/work/jobs/{job_id}/sources/{source_id}")
+def work_original(job_id: str, source_id: str) -> Response:
+    store, _ = _work_current_job(job_id)
+    try:
+        data, metadata = store.read_source(job_id, source_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Work original not found") from None
+    except WorkConflict as error:
+        raise HTTPException(status_code=409, detail=str(error)) from None
+    return Response(data, media_type=metadata["mime_type"], headers={
+        "X-Work-Source-SHA256": metadata["sha256"],
+        "X-Work-Source-Receipt": metadata["receipt"], "Cache-Control": "no-store"})
+
+
+class WorkInspectionReceipt(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    image_id: StrictStr
+    sha256: StrictStr
+    receipt: StrictStr
+
+
+class WorkSourceReceipt(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    source_id: StrictStr
+    sha256: StrictStr
+    receipt: StrictStr
+    delivery: Literal["original_bytes"] = "original_bytes"
+
+
+class WorkTileSourceReceipt(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    source_id: StrictStr
+    sha256: StrictStr
+    delivery: Literal["native_tiles"]
+    inspection_manifest_sha256: StrictStr
+    image_receipts: list[WorkInspectionReceipt]
+
+
+class WorkAnswerPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    manifest_sha256: StrictStr
+    generation: StrictInt
+    conversation_id: StrictStr
+    source_receipts: list[WorkSourceReceipt | WorkTileSourceReceipt]
+    result: dict
+
+
+class WorkQualityPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    response: dict
+    image_receipts: list[WorkInspectionReceipt]
+
+
+@app.get("/v1/work/jobs/{job_id}/sources/{source_id}/quality")
+def work_quality_request(job_id: str, source_id: str) -> dict:
+    store, _ = _work_current_job(job_id)
+    try:
+        return store.quality_request(job_id, source_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Work image not found") from None
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from None
+
+
+@app.get("/v1/work/jobs/{job_id}/sources/{source_id}/quality/images/{image_id}")
+def work_quality_image(job_id: str, source_id: str, image_id: str) -> Response:
+    store, _ = _work_current_job(job_id)
+    try:
+        data, metadata = store.read_quality_image(job_id, source_id, image_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Work inspection image not found") from None
+    except WorkConflict as error:
+        raise HTTPException(status_code=409, detail=str(error)) from None
+    return Response(data, media_type="image/png", headers={
+        "X-Work-Source-SHA256": metadata["sha256"],
+        "X-Work-Source-Receipt": metadata["receipt"], "Cache-Control": "no-store"})
+
+
+@app.post("/v1/work/jobs/{job_id}/sources/{source_id}/quality")
+def work_quality_result(job_id: str, source_id: str, payload: WorkQualityPayload) -> dict:
+    with state_guard():
+        store, _ = _work_current_job(job_id)
+        try:
+            return store.submit_quality(job_id, source_id, **payload.model_dump())
+        except (ValueError, KeyError) as error:
+            raise HTTPException(status_code=409, detail=str(error)) from None
+
+
+@app.post("/v1/work/jobs/{job_id}/result")
+def work_answer(job_id: str, payload: WorkAnswerPayload) -> dict:
+    with state_guard():
+        store, job = _work_current_job(job_id)
+        try:
+            accepted = store.submit_result(job_id, **payload.model_dump())
+        except (ValueError, WorkConflict) as error:
+            raise HTTPException(status_code=409, detail=str(error)) from None
+        conn = db.connect()
+        try:
+            # Reuse the existing claim/atomic answer-deck commit. Scheduling is
+            # local; the worker checks this generation again before consuming.
+            _resume_answers(conn, _exam_session_or_404(conn, job["session_id"]))
+        finally:
+            conn.close()
+        return accepted
 
 
 @app.post("/v1/glasses/state")
@@ -2937,6 +3088,8 @@ def _answer_all(question) -> list | None:
     except ChatGptWebError:
         raise
     except RuntimeError as error:
+        if os.environ.get("ROKID_SOLVER") == "chatgpt-work":
+            raise WorkPending("provider_unavailable_before_queue") from error
         # REAL_MODE can refuse CDP while the supervised browser is restarting.
         kind = ChatGptWebBrowserUnavailable if os.environ.get("ROKID_SOLVER") == "chatgpt-web" else ChatGptWebError
         raise kind("provider is unavailable before send") from error
@@ -3007,6 +3160,55 @@ def _fallback_problems(conn, doc_id: int, page_count: int) -> list:
         ProblemUnit(None, "", start_page_index=0, page_indexes=list(range(page_count)))]
 
 
+@contextmanager
+def _work_reply_commit_guard(session_id: int, replies, *, failed_attempt=None):
+    """Bind only the local deck commit, after all provider work has returned."""
+    if os.environ.get("ROKID_SOLVER", "").strip() != "chatgpt-work":
+        yield
+        return
+    if failed_attempt is not None:
+        # Preparation errors have no completed Work job. Still fence their
+        # visible failure against a changed input, closed session or new wearer.
+        with state_guard():
+            conn = db.connect()
+            try:
+                session = _exam_session_or_404(conn, session_id)
+                if (_session_phase(session) != "reviewing" or not session["document_id"]
+                        or (session["mode"] == "real" and not config.ALLOW_REAL_EXAM_SOLVE)):
+                    raise WorkConflict("the Work session is not open for failures")
+                current = Question(document_id=str(session["document_id"]),
+                    booklet_stage=session["analysis_stage"], audio_path=session["audio_path"],
+                    document_pages=_document_source_pages(conn, session["document_id"], session_id))
+                if _work_attempt_identity(session_id, current) != failed_attempt:
+                    raise WorkConflict("the failed Work input is no longer current")
+            finally:
+                conn.close()
+            yield
+        return
+    identities = {item.get("_work_job_id") for item, _ in replies}
+    if len(identities) != 1 or None in identities:
+        raise WorkConflict("the Work reply has no sealed job identity")
+    with state_guard():
+        try:
+            _, job = _work_current_job(identities.pop())
+        except HTTPException as error:
+            raise WorkConflict("the Work reply is no longer current") from error
+        if job["session_id"] != session_id or job["status"] != "completed":
+            raise WorkConflict("the Work reply is not committed for this session")
+        yield
+
+
+def _work_attempt_identity(session_id: int, question):
+    """Snapshot existing input hashes before provider work; never hold its lock."""
+    if os.environ.get("ROKID_SOLVER", "").strip() != "chatgpt-work":
+        return None
+    with state_guard():
+        audio = None if question.booklet_stage == "reading" else question.audio_path
+        return (work_binding(session_id), question.document_id, question.booklet_stage,
+                tuple((page["page_number"], page["image_path"], page["image_sha256"])
+                      for page in question.document_pages), audio, file_sha256(audio))
+
+
 def _answer_deck(conn, session, session_id: int, doc_id: int) -> bool:
     """The whole booklet in ONE message when the routed solver can take it.
 
@@ -3034,6 +3236,10 @@ def _answer_deck(conn, session, session_id: int, doc_id: int) -> bool:
         page_numbers=[p["page_number"] for p in source_pages],
         answer_only=True,
     )
+    try:
+        work_attempt = _work_attempt_identity(session_id, question)
+    except WorkConflict:
+        return True
     failed: Exception | None = None
     for attempt in range(PRESEND_TRIES):
         if attempt:
@@ -3042,60 +3248,66 @@ def _answer_deck(conn, session, session_id: int, doc_id: int) -> bool:
             replies, failed = _answer_all(question), None
             break
         except Exception as error:  # noqa: BLE001 - recorded on the deck, never resent
-            if isinstance(error, ChatGptWebSendNotAuthorized):
+            if isinstance(error, (ChatGptWebSendNotAuthorized, WorkPending, WorkConflict)):
                 return True
             replies, failed = [], error
             if not _nothing_sent(error):
                 break
     if replies is None:
         return False
-    problems = _model_problems([item for item, _ in replies], len(source_pages))
-    missing = _missing_answer_numbers([item for item, _ in replies])
-    problems += [_missing_answer_problem(number, len(source_pages)) for number in missing]
-    carried = 0
-    if problems and items and not any(_latest_solution_row(conn, row["id"]) for row in items):
-        # Only the whole-booklet row of a failed message: the model's list replaces it.
-        replaced = _deck_question_rows(conn, session_id)
-        carried = sum(_failure_count(row) for row in replaced)
-        conn.executemany("DELETE FROM questions WHERE id = ?", [(row["id"],) for row in replaced])
-        items = []
-    if not items:
-        # The model sorts the questions. OCR never does on this route: a failure
-        # gets one row for the whole booklet, which only carries the reason.
-        _insert_deck(conn, session_id, doc_id, problems or [ProblemUnit(
-            None, "", start_page_index=0, page_indexes=list(range(len(source_pages))))])
-        if carried:
-            # The revision counts failures; dropping them with the old row would
-            # move it backwards, and the glasses refuse an older snapshot.
-            first = _deck_question_rows(conn, session_id)[0]
-            conn.execute("UPDATE questions SET structure_json = ? WHERE id = ?", (json.dumps(
-                {**json.loads(first["structure_json"]), "solve_failures": carried}), first["id"]))
-        items = [row for group in _answer_groups(conn, session_id) for row in group["items"]]
-    # The rows and every answer land in ONE commit: the glasses never read a
-    # deck whose rows exist and whose answers are not saved yet.
-    if failed is not None:
-        _record_solve_failure(conn, items[0], failed, commit=False)
-        conn.commit()
+    try:
+        with _work_reply_commit_guard(session_id, replies, failed_attempt=work_attempt if failed else None):
+            problems = _model_problems([item for item, _ in replies], len(source_pages))
+            missing = _missing_answer_numbers([item for item, _ in replies])
+            problems += [_missing_answer_problem(number, len(source_pages)) for number in missing]
+            carried = 0
+            if problems and items and not any(_latest_solution_row(conn, row["id"]) for row in items):
+                # Only the whole-booklet row of a failed message: the model's list replaces it.
+                replaced = _deck_question_rows(conn, session_id)
+                carried = sum(_failure_count(row) for row in replaced)
+                conn.executemany("DELETE FROM questions WHERE id = ?", [(row["id"],) for row in replaced])
+                items = []
+            if not items:
+                # The model sorts the questions. OCR never does on this route: a failure
+                # gets one row for the whole booklet, which only carries the reason.
+                _insert_deck(conn, session_id, doc_id, problems or [ProblemUnit(
+                    None, "", start_page_index=0, page_indexes=list(range(len(source_pages))))])
+                if carried:
+                    # The revision counts failures; dropping them with the old row would
+                    # move it backwards, and the glasses refuse an older snapshot.
+                    first = _deck_question_rows(conn, session_id)[0]
+                    conn.execute("UPDATE questions SET structure_json = ? WHERE id = ?", (json.dumps(
+                        {**json.loads(first["structure_json"]), "solve_failures": carried}), first["id"]))
+                items = [row for group in _answer_groups(conn, session_id) for row in group["items"]]
+            # The rows and every answer land in ONE commit: the glasses never read a
+            # deck whose rows exist and whose answers are not saved yet.
+            if failed is not None:
+                _record_solve_failure(conn, items[0], failed, commit=False)
+                conn.commit()
+                return True
+            # A row the model named carries "第1問 問1" as its body (_model_problems),
+            # untouched by the 問1(2) suffix that keeps question_no unique. One label
+            # given twice (two answer slots of one 問) keeps reply order.
+            results: dict[str, list[SolveResult | Exception]] = {}
+            for item, result in replies:
+                results.setdefault(" ".join(filter(None, _item_labels(item))), []).append(result)
+            for number in missing:
+                results[f"解答番号{number}"] = [AnswerMissing(str(number))]
+            for row in items:
+                if _latest_solution_row(conn, row["id"]) is not None:
+                    continue
+                result = (results.get(row["body_text"]) or [None]).pop(0)
+                if isinstance(result, SolveResult):
+                    _save_solution(conn, row, result, os.environ.get("ROKID_SOLVER", "chatgpt-web").strip(), commit=False)
+                else:
+                    _record_solve_failure(conn, row, result or ValueError("no answer for this question"),
+                                          commit=False)
+            conn.commit()
+            return True
+    except WorkConflict:
+        conn.rollback()
         return True
-    # A row the model named carries "第1問 問1" as its body (_model_problems),
-    # untouched by the 問1(2) suffix that keeps question_no unique. One label
-    # given twice (two answer slots of one 問) keeps reply order.
-    results: dict[str, list[SolveResult | Exception]] = {}
-    for item, result in replies:
-        results.setdefault(" ".join(filter(None, _item_labels(item))), []).append(result)
-    for number in missing:
-        results[f"解答番号{number}"] = [AnswerMissing(str(number))]
-    for row in items:
-        if _latest_solution_row(conn, row["id"]) is not None:
-            continue
-        result = (results.get(row["body_text"]) or [None]).pop(0)
-        if isinstance(result, SolveResult):
-            _save_solution(conn, row, result, "chatgpt-web", commit=False)
-        else:
-            _record_solve_failure(conn, row, result or ValueError("no answer for this question"),
-                                  commit=False)
-    conn.commit()
-    return True
+
 
 
 def _mixed_audio_rows(conn, session_id):
@@ -3117,6 +3329,10 @@ def _answer_mixed_deck(conn, session, session_id: int, doc_id: int) -> bool:
     question = Question(chat_key=f"session:{session_id}", booklet_stage="reading",
                         document_pages=source_pages, document_id=str(doc_id),
                         question_id="booklet", answer_only=True)
+    try:
+        work_attempt = _work_attempt_identity(session_id, question)
+    except WorkConflict:
+        return True
     failed, replies = None, []
     for attempt in range(PRESEND_TRIES):
         if attempt:
@@ -3132,53 +3348,59 @@ def _answer_mixed_deck(conn, session, session_id: int, doc_id: int) -> bool:
             failed = None
             break
         except Exception as error:  # noqa: BLE001 - never resend an uncertain stage
-            if isinstance(error, ChatGptWebSendNotAuthorized):
+            if isinstance(error, (ChatGptWebSendNotAuthorized, WorkPending, WorkConflict)):
                 return True
             replies, failed = [], error
             if not _nothing_sent(error):
                 break
-    old_rows = _deck_question_rows(conn, session_id)
-    carried = sum(_failure_count(row) for row in old_rows)
-    if failed is not None:
-        if not old_rows:
-            _insert_deck(conn, session_id, doc_id, [ProblemUnit(
-                None, "", start_page_index=0, page_indexes=list(range(len(source_pages))))])
+    try:
+        with _work_reply_commit_guard(session_id, replies, failed_attempt=work_attempt if failed else None):
             old_rows = _deck_question_rows(conn, session_id)
-        _record_solve_failure(conn, old_rows[0], failed, commit=False)
-        conn.commit()
+            carried = sum(_failure_count(row) for row in old_rows)
+            if failed is not None:
+                if not old_rows:
+                    _insert_deck(conn, session_id, doc_id, [ProblemUnit(
+                        None, "", start_page_index=0, page_indexes=list(range(len(source_pages))))])
+                    old_rows = _deck_question_rows(conn, session_id)
+                _record_solve_failure(conn, old_rows[0], failed, commit=False)
+                conn.commit()
+                return True
+            if any(_latest_solution_row(conn, row["id"]) for row in old_rows):
+                raise ValueError("mixed reading inventory cannot replace saved answers")
+            conn.executemany("DELETE FROM questions WHERE id=?", [(row["id"],) for row in old_rows])
+            missing = _missing_answer_numbers([item for item, _ in replies])
+            _insert_deck(conn, session_id, doc_id, _model_problems([item for item, _ in replies], len(source_pages))
+                         + [_missing_answer_problem(number, len(source_pages)) for number in missing])
+            results = {}
+            for item, result in replies:
+                results.setdefault(" ".join(filter(None, _item_labels(item))), []).append((item, result))
+            items = [row for group in _answer_groups(conn, session_id) for row in group["items"]]
+            for index, row in enumerate(items):
+                metadata = json.loads(row["structure_json"])
+                if carried and index == 0:
+                    metadata["solve_failures"] = carried
+                matched = results.get(row["body_text"])
+                item, result = matched.pop(0) if matched else ({}, AnswerMissing(row["question_no"]))
+                metadata.update(requires_audio=item.get("requires_audio") is True,
+                                answer_no=answer_numbers(item.get("answer_no")),
+                                booklet_item={"group": _item_labels(item)[0], "label": _item_labels(item)[1],
+                                              "answer_no": answer_numbers(item.get("answer_no")),
+                                              "pages": [p + 1 for p in metadata["page_indexes"]]})
+                conn.execute("UPDATE questions SET structure_json=? WHERE id=?", (json.dumps(metadata), row["id"]))
+                if isinstance(result, SolveResult):
+                    result.extras["answer_no"] = metadata["answer_no"]
+                    _save_solution(conn, row, result, os.environ.get("ROKID_SOLVER", "chatgpt-web").strip(), commit=False)
+                elif result is not None:
+                    refreshed = conn.execute("SELECT * FROM questions WHERE id=?", (row["id"],)).fetchone()
+                    _record_solve_failure(conn, refreshed, result, commit=False)
+            stage = "awaiting_audio" if _mixed_audio_rows(conn, session_id) else "complete"
+            conn.execute("UPDATE exam_sessions SET analysis_stage=? WHERE id=?", (stage, session_id))
+            conn.commit()
+            return True
+    except WorkConflict:
+        conn.rollback()
         return True
-    if any(_latest_solution_row(conn, row["id"]) for row in old_rows):
-        raise ValueError("mixed reading inventory cannot replace saved answers")
-    conn.executemany("DELETE FROM questions WHERE id=?", [(row["id"],) for row in old_rows])
-    missing = _missing_answer_numbers([item for item, _ in replies])
-    _insert_deck(conn, session_id, doc_id, _model_problems([item for item, _ in replies], len(source_pages))
-                 + [_missing_answer_problem(number, len(source_pages)) for number in missing])
-    results = {}
-    for item, result in replies:
-        results.setdefault(" ".join(filter(None, _item_labels(item))), []).append((item, result))
-    items = [row for group in _answer_groups(conn, session_id) for row in group["items"]]
-    for index, row in enumerate(items):
-        metadata = json.loads(row["structure_json"])
-        if carried and index == 0:
-            metadata["solve_failures"] = carried
-        matched = results.get(row["body_text"])
-        item, result = matched.pop(0) if matched else ({}, AnswerMissing(row["question_no"]))
-        metadata.update(requires_audio=item.get("requires_audio") is True,
-                        answer_no=answer_numbers(item.get("answer_no")),
-                        booklet_item={"group": _item_labels(item)[0], "label": _item_labels(item)[1],
-                                      "answer_no": answer_numbers(item.get("answer_no")),
-                                      "pages": [p + 1 for p in metadata["page_indexes"]]})
-        conn.execute("UPDATE questions SET structure_json=? WHERE id=?", (json.dumps(metadata), row["id"]))
-        if isinstance(result, SolveResult):
-            result.extras["answer_no"] = metadata["answer_no"]
-            _save_solution(conn, row, result, "chatgpt-web", commit=False)
-        elif result is not None:
-            refreshed = conn.execute("SELECT * FROM questions WHERE id=?", (row["id"],)).fetchone()
-            _record_solve_failure(conn, refreshed, result, commit=False)
-    stage = "awaiting_audio" if _mixed_audio_rows(conn, session_id) else "complete"
-    conn.execute("UPDATE exam_sessions SET analysis_stage=? WHERE id=?", (stage, session_id))
-    conn.commit()
-    return True
+
 
 
 def _available_stage(session, items):
@@ -3222,6 +3444,10 @@ def _answer_mixed_audio(conn, session, session_id, doc_id):
                         booklet_questions=slots, audio_path=session["audio_path"],
                         document_pages=_document_source_pages(conn, doc_id, session_id),
                         document_id=str(doc_id), question_id="booklet", answer_only=True)
+    try:
+        work_attempt = _work_attempt_identity(session_id, question)
+    except WorkConflict:
+        return True
     failed, replies = None, []
     for attempt in range(PRESEND_TRIES):
         if attempt:
@@ -3239,27 +3465,33 @@ def _answer_mixed_audio(conn, session, session_id, doc_id):
             failed = None
             break
         except Exception as error:  # noqa: BLE001 - the uncertain barrier stays in force
-            if isinstance(error, ChatGptWebSendNotAuthorized):
+            if isinstance(error, (ChatGptWebSendNotAuthorized, WorkPending, WorkConflict)):
                 return True
             replies, failed = [], error
             if not _nothing_sent(error):
                 break
-    if failed is not None:
-        for row in rows:
-            _record_solve_failure(conn, row, failed, commit=False)
-        conn.commit()
+    try:
+        with _work_reply_commit_guard(session_id, replies, failed_attempt=work_attempt if failed else None):
+            if failed is not None:
+                for row in rows:
+                    _record_solve_failure(conn, row, failed, commit=False)
+                conn.commit()
+                return True
+            results = {item["question_id"]: result for item, result in replies}
+            for row in rows:
+                result = results[f"q{row['id']}"]
+                if isinstance(result, SolveResult):
+                    result.extras["answer_no"] = json.loads(row["structure_json"])["answer_no"]
+                    _save_solution(conn, row, result, os.environ.get("ROKID_SOLVER", "chatgpt-web").strip(), commit=False)
+                else:
+                    _record_solve_failure(conn, row, result, commit=False)
+            conn.execute("UPDATE exam_sessions SET analysis_stage='complete' WHERE id=?", (session_id,))
+            conn.commit()
+            return True
+    except WorkConflict:
+        conn.rollback()
         return True
-    results = {item["question_id"]: result for item, result in replies}
-    for row in rows:
-        result = results[f"q{row['id']}"]
-        if isinstance(result, SolveResult):
-            result.extras["answer_no"] = json.loads(row["structure_json"])["answer_no"]
-            _save_solution(conn, row, result, "chatgpt-web", commit=False)
-        else:
-            _record_solve_failure(conn, row, result, commit=False)
-    conn.execute("UPDATE exam_sessions SET analysis_stage='complete' WHERE id=?", (session_id,))
-    conn.commit()
-    return True
+
 
 
 def _save_solution(conn, row, result, solver_name: str, *, commit: bool = True) -> bool:
@@ -3472,6 +3704,11 @@ def _resume_all_answers() -> None:
 def _solve_deck_in_background(session_id: int, doc_id: int) -> None:
     conn = db.connect()
     try:
+        if os.environ.get("ROKID_SOLVER", "").strip() == "chatgpt-work":
+            try:
+                work_binding(session_id)
+            except WorkConflict:
+                return
         while True:
             session = _exam_session_or_404(conn, session_id)
             if not _answer_deck(conn, session, session_id, doc_id):
@@ -3494,7 +3731,13 @@ def _solve_deck_in_background(session_id: int, doc_id: int) -> None:
         try:
             conn.rollback()
             latest = _exam_session_or_404(conn, session_id)
-            if latest["exam_type"] == "mixed" and latest["analysis_stage"] == "awaiting_audio" and latest["audio_path"]:
+            active = True
+            if os.environ.get("ROKID_SOLVER", "").strip() == "chatgpt-work":
+                try:
+                    work_binding(session_id)
+                except WorkConflict:
+                    active = False
+            if active and latest["exam_type"] == "mixed" and latest["analysis_stage"] == "awaiting_audio" and latest["audio_path"]:
                 _resume_answers(conn, latest)
         finally:
             conn.close()

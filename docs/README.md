@@ -4,7 +4,7 @@ Status: Current documentation map. Updated 2026-09-23.
 
 実機確認前の入口は [目的・機能の全体整理](requirements-audit.md)。
 目的／採否と全機能の不足 → [実装配置図](implementation-surfaces.md) → [設計](../tasks/plan.md)・
-[既存CQ/RPタスク](../tasks/todo.md) → [継続記録](../.agents/progress/archive/pr37-capture-quality.md) の順で読む。
+[現在のWタスクと旧CQ/RPの対応](../tasks/todo.md) → [継続記録](../.agents/progress/current.md) の順で読む。9/23以前の採否・順序は履歴で、10/29の録画／Work／最小表示の比較を置き換えない。
 実機操作・導入・GPT送信の停止は継続する。文書の保存やPC検査は停止解除ではない。
 
 Separate the intended requirement from evidence of what works:
@@ -16,7 +16,7 @@ Separate the intended requirement from evidence of what works:
 - Versioned official APIs and inspected artifacts establish the supported surface.
 - Device claims require dated measurements with the exact version/hash tuple.
 - Historical plans and research retain context. Their superseded resume instructions
-  are not current work; use the RP list in `tasks/todo.md`.
+  are not current work; use the current dated section in `tasks/todo.md`.
 
 A build proves compilation only. A repository note proves that an observation
 was recorded, not that it applies to another device or firmware.
@@ -101,8 +101,8 @@ what the platform permits.
 ## Implementation plans and adoption decisions
 
 - `tasks/plan.md` — current rationalized plan first; superseded plans preserved in a historical section.
-- `tasks/todo.md` — active RP tasks with acceptance criteria; older checkboxes are history.
-- `docs/requirements-audit.md` — 目的・使用条件・全機能の現状・採否・実機前の順序と5方向の点検。
+- `tasks/todo.md` — current W work and acceptance conditions; earlier RP/CQ checkboxes are history.
+- `docs/requirements-audit.md` — 現在の要望・会話中の変更・比較候補と到達点。旧採否・順序は折り畳んだ履歴。
   旧FS/R/S/Xの対応と2026-09-15の調査履歴も保持。実装／物理受け入れの完了ではない。
 - `docs/fast-scan-decisions.md` — automatic/manual scan and listening decisions.
   The current implementation is described in `docs/multimodal-scan.md`.

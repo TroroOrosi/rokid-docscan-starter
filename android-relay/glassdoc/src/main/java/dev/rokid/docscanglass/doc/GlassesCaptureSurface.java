@@ -125,7 +125,7 @@ final class GlassesCaptureSurface implements CaptureSurface {
     public long showCaptureAiming(int pageNumber, boolean retake, boolean stabilizing) {
         if (camera != null) camera.preview();
         main.post(() -> hud.capturePreview(true));
-        List<String> lines = aimingLines(pageNumber, retake, stabilizing);
+        List<String> lines = List.of(Integer.toString(pageNumber));
         return show(
                 stabilizing ? "capture-stabilizing" : "capture-aiming",
                 () -> hud.showAiming(lines));
@@ -226,20 +226,9 @@ final class GlassesCaptureSurface implements CaptureSurface {
         main.post(() -> {
             if (!closed && generation == generations.get() && preview != null
                     && visibleReview == generation) {
-                hud.showReviewNotice("確認後に撮影終了・操作せず待つ");
+                hud.showReviewNotice("終了待ち");
             }
         });
-    }
-
-    /**
-     * The aiming text. Deliberately not the relay's: on the phone the shutter
-     * is a button and the operator looks at a preview, while here the shutter
-     * is a tap on the temple and this is the only thing the operator sees.
-     */
-    private static List<String> aimingLines(
-            int pageNumber, boolean retake, boolean stabilizing) {
-        // The live camera image and its frame carry aiming; no text covers the paper.
-        return List.of();
     }
 
     /**

@@ -1,6 +1,6 @@
 # rokid-docscan-starter development guide
 
-Status: Current engineering contract. Updated 2026-10-03.
+Status: Current engineering contract. Updated 2026-10-29.
 
 **Start at `.agents/progress/current.md`.** It lists the operator's decisions,
 the verified state and the next steps. Do not re-ask what it settles. Keep the
@@ -10,6 +10,23 @@ on them. Judge every change by one test: does ChatGPT answer correctly from the
 image, and can the answer be read on the glasses?
 
 ## What this repository is
+
+The operator's 2026-10-29 requirements in `tasks/plan.md` take precedence over
+older model, review-display and power preferences below. Venue operation uses
+only the always-on phone and glasses on its hotspot: no PC, wired connection or
+repeated connection procedure. PC commands in development records are not the
+venue topology. Prioritize accurate, fast automatic capture/quality inspection,
+ChatGPT app/web Work with every original image and answer return, and minimal
+HUD, before subject/year benchmarks. Compare recording/frame selection, native
+stills and their combinations, rather than assuming the existing still loop is
+the selected design. There is no operator-specified fixed order among capture,
+Work and HUD improvements. Work Cloud is under investigation; Drive, the phone's
+existing browser and official external triggers must be compared before adopting
+a transport. PC-local Work is not a venue alternative. Do not present a component
+test as proof that this complete route works. Read the conversation's corrections
+and the current section of `docs/requirements-audit.md`; earlier proposals and
+historical implementation states are not current decisions. Continue independent
+PC work while a manual action remains pending.
 
 Photograph an exam booklet (共通テスト and similar), and let the operator read,
 per 小問, **what to write on the answer sheet** on Rokid Glasses.
@@ -97,6 +114,7 @@ is now the intended topology and is still unexercised.
 | Route | Status |
 |---|---|
 | `ROKID_SOLVER=chatgpt-web` | **Current primary.** Drives the operator's own signed-in ChatGPT web session over CDP. |
+| `ROKID_SOLVER=chatgpt-work` | Phone-side original-image jobs, inspection and result receipts are in development. Work Cloud authentication/transport, automatic invocation and account acceptance are not connected; do not switch the venue route or report it ready. |
 | On-phone local model (F-51F, llama.cpp) | **Not the route.** The operator chose chatgpt-web on 2026-09-14. Its measurements are kept as evidence in `docs/hardware-measurements.md` §E; no further work is scheduled on it. |
 | `openai` / `gemini` / `claude` API keys | Supported and config-only. The per-question routes can fall back through `ROKID_SOLVER_TIERS`; the background booklet route uses `ROKID_SOLVER` alone and has no fallback tier. |
 | Local OpenAI-compatible HTTP (`app/llm_http.py`) | Reaches an on-phone `llama-server` without the openai SDK. |
@@ -160,7 +178,8 @@ and uncertain-send safeguards remain independent of model-name fallback.
   waits for another page change. Thirty seconds without progress pauses the
   camera. A previous `manual=true` does not carry over to a normal launch.
   The same preview camera/session supplies the full-size JPEG after fresh
-  native focus/exposure and stillness checks. Expired preparation fails instead
+  supported focus/exposure and stillness checks. Fixed-focus hardware does not
+  gain autofocus from an AF trigger. Expired preparation fails instead
   of forcing a moving shot. Physical character accuracy remains unverified.
   The frozen CUSTOMVIEW route keeps explicit phone controls. The original
   `adf12ee` disable decision belonged to the route without operator taps.

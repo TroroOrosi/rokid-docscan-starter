@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from contextlib import contextmanager
 from pathlib import Path
 import re
 import tempfile
@@ -18,6 +19,18 @@ from . import config
 _LOCK = threading.RLock()
 _COUNTER = conint(strict=True, ge=0, le=2**63 - 1)
 _SESSION = conint(strict=True, gt=0, le=2**31 - 1)
+
+
+@contextmanager
+def state_guard():
+    """Serialize a short local state-bound commit against notifications.
+
+    Acquire before document/Work database transactions. Never hold this guard
+    across a network request or external model call. The phone runs one worker;
+    the reentrant lock also covers read_state/list_states/record_state below.
+    """
+    with _LOCK:
+        yield
 
 
 class GlassesState(BaseModel):

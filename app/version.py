@@ -216,7 +216,9 @@ from __future__ import annotations
 # 0.50.1: read the checked model from the visible menu after its trigger redraws.
 # 0.50.2: keep the browser's saved model selection across display-name changes.
 # 0.50.3: select the original Latest menu position even after its label changes.
-APP_VERSION = "0.50.3"
+# 0.51.0: source-bound phone image inspection, compact capture HUD and opt-in
+#         durable Work jobs. Cloud connection and physical acceptance remain separate.
+APP_VERSION = "0.51.0"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.
@@ -325,7 +327,8 @@ APP_VERSION = "0.50.3"
 # 1.31.2: browser solving recognizes the operator-selected Latest/Extra High UI.
 # 1.32.0: mixed analysis stages and partial answer availability; authenticated
 #         chooser/waiting display requests preserve protected visible work.
-API_VERSION = "1.32.0"
+# 1.33.0: authenticated Work job manifests, original-image reads and result receipts.
+API_VERSION = "1.33.0"
 
 # Matching algorithm identity. Bump when thresholds or hashing change so a
 # re-index/eval is triggered. Mirrors thresholds in app/matching.py.
@@ -459,7 +462,9 @@ EXPLAINER_API_VERSION = "1.1.0"
 #        ownership preserves the system timeout; compact answers use fixed pages.
 # 1.28.0: five-second idle display requests, fresh wear chooser entry and
 #         mixed recording controls with staged answer revisions.
-GLASSES_VIEW_CONTRACT_VERSION = "1.28.0"
+# 1.29.0: capture preview/review occupy a shared corner viewport; answer text
+#         and the visible-acknowledged review/commit interval are preserved.
+GLASSES_VIEW_CONTRACT_VERSION = "1.29.0"
 
 # Answer-area overlay payload (box + short answer; 2D image-anchored).
 # 1.1.0: added tracking metadata (tracking/fixed_ar/anchor_hint).
