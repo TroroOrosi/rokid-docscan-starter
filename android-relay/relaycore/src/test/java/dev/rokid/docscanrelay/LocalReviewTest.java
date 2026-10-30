@@ -680,6 +680,32 @@ public class LocalReviewTest {
         }
     }
 
+    @Test public void comparisonBindingReadsOnlyTheCurrentDurableLocalIdentityWithoutCreatingServerIds() throws Exception {
+        Context context=RuntimeEnvironment.getApplication();
+        File root=new File(context.getFilesDir(),"local-scans");
+        try (MockWebServer server=new MockWebServer()) {
+            String address=server.url("/").toString().replaceAll("/+$","");
+            LocalCaptureSession saved=LocalCaptureSession.create(root,address,false);
+            DocScanController controller=new DocScanController(context,new Surface(),null,
+                    (state,lines,diagnostic) -> {},new ClientIdentity("test","test","test"));
+            try {
+                controller.configureForLocalStart(address,"",270); barrier(controller);
+                set(controller,"localSession",saved);
+                var first=controller.localCaptureBinding(); assertNotNull(first);
+                assertEquals(saved.id(),first.localId); assertEquals(0,first.documentId); assertEquals(0,first.sessionId);
+                saved.bindDocument(9); saved.bindSession(7);
+                var bound=controller.localCaptureBinding(); assertEquals(first.localId,bound.localId);
+                assertEquals(9,bound.documentId); assertEquals(7,bound.sessionId); assertSame(controller.api(),bound.api);
+                assertEquals(0,first.documentId); // immutable snapshot, no invented first binding
+                set(controller,"localSession",LocalCaptureSession.create(root,"http://other.invalid",false));
+                assertNull(controller.localCaptureBinding());
+                set(controller,"localSession",saved); saved.close();
+                assertNull(controller.localCaptureBinding()); assertEquals(0,server.getRequestCount());
+            } finally { controller.close(); }
+            assertNull(controller.localCaptureBinding());
+        }
+    }
+
     @Test public void listeningSelectionHandsOffLocalRecordingBeforeAnyHttpResponse() throws Exception {
         Context context = RuntimeEnvironment.getApplication();
         CountDownLatch selected = new CountDownLatch(1), response = new CountDownLatch(1);

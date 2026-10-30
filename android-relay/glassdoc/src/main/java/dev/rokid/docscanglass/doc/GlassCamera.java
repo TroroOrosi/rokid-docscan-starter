@@ -73,6 +73,8 @@ final class GlassCamera {
         void onCaptureFailed(String reason);
 
         default void onPreview(Bitmap frame) { frame.recycle(); }
+        default CaptureVideoTransfer.Origin comparisonVideoOrigin(CaptureVideoRecording.Options options) { return null; }
+        default void onVideoSealed() {}
     }
 
     static final class Captured {
@@ -345,6 +347,7 @@ final class GlassCamera {
                         ? new CaptureVideoRecording(context.getFilesDir(), handler, videoOptions)
                         : new CaptureVideoRecording(context.getFilesDir(), handler, videoOptions, inputWorker, videoFactory);
                 CaptureVideoRecording pending = video;
+                pending.comparisonTransferOrigin(callback.comparisonVideoOrigin(videoOptions));
                 pending.prepare(characteristics, jpegSize, () -> {
                     videoPreparing = false;
                     if (video == pending && token == previewGeneration && !closed && !unknown && previewRequested) startPreview();
@@ -1087,6 +1090,7 @@ final class GlassCamera {
                 completeCloseCallbacks(); return;
             }
             videoClose = null;
+            callback.onVideoSealed(); // Enqueues comparison work only; never waits for network.
             futureIdle(); startPreview();
             completeCloseCallbacks();
         });

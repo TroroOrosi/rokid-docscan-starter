@@ -68,6 +68,7 @@ public final class DocScanGlassActivity extends Activity
     private static final String EXTRA_MANUAL = "manual";
     private static final String EXTRA_ZSL_EVALUATION = "zsl_evaluation";
     private static final String EXTRA_VIDEO_EVALUATION = "video_evaluation";
+    private static final String EXTRA_VIDEO_TRANSFER_EVALUATION = "video_transfer_evaluation";
     /** Open this server session's answers directly: checks the answer display without a capture. */
     private static final String EXTRA_ANSWERS = "answers";
     private static final int CAMERA_PERMISSION_REQUEST = 7401;
@@ -126,7 +127,9 @@ public final class DocScanGlassActivity extends Activity
 
     private HandlerThread cameraThread;
     private GlassCamera camera;
-    private boolean evaluationRestarting;
+    private volatile boolean evaluationRestarting;
+    private volatile boolean comparisonTransferEnabled;
+    private volatile CaptureVideoTransfer videoTransfer;
     private GlassesCaptureSurface surface;
     private JapaneseOcr ocr;
     private DocScanController controller;
@@ -230,6 +233,7 @@ public final class DocScanGlassActivity extends Activity
         try {
             cameraMode = evaluationMode(getIntent());
             recordingOptions = videoOptions(getIntent(), deviceId, powerGeneration);
+            comparisonTransferEnabled = videoTransferEvaluation(getIntent());
         } catch (IllegalArgumentException invalid) {
             hud.showLines(List.of("撮影評価を開始できません", invalid.getMessage(), ""));
             Log.w(TAG, "explicit camera evaluation rejected: " + invalid.getMessage());
@@ -250,6 +254,8 @@ public final class DocScanGlassActivity extends Activity
                         "rokid-glasses-camera2",
                         "glassdoc/" + BuildConfig.VERSION_NAME,
                         "camera2/no-cxr"));
+
+        if (comparisonTransferEnabled) videoTransfer=new CaptureVideoTransfer(getFilesDir(),this::comparisonVideoSnapshot,this);
 
         applyIntent(getIntent(), true);
         startupSelection = mixedMode ? 1 : listeningMode ? 2 : 0;
@@ -283,7 +289,8 @@ public final class DocScanGlassActivity extends Activity
         if (intent != null && intent.hasExtra(WAKE_SESSION)) {
             setIntent(intent); muteOutput(); receiveWake(intent); return;
         }
-        if (intent != null && (intent.hasExtra(EXTRA_VIDEO_EVALUATION) || intent.hasExtra(EXTRA_ZSL_EVALUATION))) {
+        if (intent != null && (intent.hasExtra(EXTRA_VIDEO_EVALUATION) || intent.hasExtra(EXTRA_ZSL_EVALUATION)
+                || intent.hasExtra(EXTRA_VIDEO_TRANSFER_EVALUATION))) {
             if (evaluationRestarting) return;
             try { evaluationMode(intent); videoOptions(intent, deviceId == null ? "evaluation" : deviceId, powerGeneration); }
             catch (IllegalArgumentException invalid) {
@@ -298,6 +305,8 @@ public final class DocScanGlassActivity extends Activity
             if (camera != null) camera.close(restart); else restart.run();
             return;
         }
+        comparisonTransferEnabled = false;
+        if (videoTransfer != null) { videoTransfer.close(); videoTransfer=null; }
         setIntent(intent);
         muteOutput();
         if (intent != null && intent.getBooleanExtra("chooser", false)) {
@@ -443,6 +452,7 @@ public final class DocScanGlassActivity extends Activity
     @Override
     protected void onDestroy() {
         sessionClosed = true;
+        if (videoTransfer != null) videoTransfer.close();
         cancelDisplayIdle();
         if (listening != null) listening.close();
         stopService(new Intent(this, ListeningService.class));
@@ -720,6 +730,12 @@ public final class DocScanGlassActivity extends Activity
 
     private GlassCamera.Callback cameraCallback() {
         return new GlassCamera.Callback() {
+            @Override public CaptureVideoTransfer.Origin comparisonVideoOrigin(CaptureVideoRecording.Options options) {
+                return comparisonTransferEnabled ? CaptureVideoTransfer.origin(comparisonVideoSnapshot(),options) : null;
+            }
+            @Override public void onVideoSealed() {
+                CaptureVideoTransfer transfer=videoTransfer; if (transfer != null) transfer.request();
+            }
             @Override public void onCaptured(GlassCamera.Captured captured) {
                 Log.i(TAG, "captured " + captured.width + "x" + captured.height
                         + " in " + captured.elapsedMillis + " ms");
@@ -1287,8 +1303,25 @@ public final class DocScanGlassActivity extends Activity
     static GlassCamera.Mode evaluationMode(Intent intent) {
         boolean zsl = evaluationFlag(intent, EXTRA_ZSL_EVALUATION);
         boolean video = evaluationFlag(intent, EXTRA_VIDEO_EVALUATION);
+        videoTransferEvaluation(intent);
         if (zsl && video) throw new IllegalArgumentException("ZSLと録画評価は同時指定できません");
         return video ? GlassCamera.Mode.VIDEO_EVALUATION : zsl ? GlassCamera.Mode.ZSL_EVALUATION_YUV : GlassCamera.Mode.NATIVE_STILL;
+    }
+
+    static boolean videoTransferEvaluation(Intent intent) {
+        boolean enabled=evaluationFlag(intent,EXTRA_VIDEO_TRANSFER_EVALUATION);
+        if (enabled && !evaluationFlag(intent,EXTRA_VIDEO_EVALUATION))
+            throw new IllegalArgumentException("原動画の比較転送には録画評価の明示指定が必要です");
+        return enabled;
+    }
+
+    private CaptureVideoTransfer.Snapshot comparisonVideoSnapshot() {
+        if (!comparisonTransferEnabled || sessionClosed || writingDone || evaluationRestarting || controller == null) return null;
+        DocScanController.LocalCaptureBinding binding=controller.localCaptureBinding();
+        PowerState.Snapshot power=new PowerState(getPreferences(MODE_PRIVATE)).load();
+        if (binding == null || power.generation != powerGeneration) return null;
+        return new CaptureVideoTransfer.Snapshot(binding.localId,binding.server,binding.documentId,binding.sessionId,
+                deviceId,power.generation,power.session,power.phase,binding.api);
     }
 
     static CaptureVideoRecording.Options videoOptions(Intent intent, String deviceId, long generation) {
@@ -1396,6 +1429,7 @@ public final class DocScanGlassActivity extends Activity
                 DocScanApi api = controller.api();
                 if (api == null) throw new IOException("server not configured");
                 api.glassesState(deviceId, session > 0 ? session : null, gen, seq, phase, request, null, ack);
+                CaptureVideoTransfer transfer=videoTransfer; if (transfer != null) transfer.request();
             } catch (Exception error) {
                 Log.w(TAG, "state notification paused: " + error.getClass().getSimpleName());
                 main.postDelayed(() -> {

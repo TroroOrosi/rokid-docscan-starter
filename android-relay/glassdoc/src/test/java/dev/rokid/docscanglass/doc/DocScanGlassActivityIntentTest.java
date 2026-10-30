@@ -111,6 +111,19 @@ public class DocScanGlassActivityIntentTest {
         assertEquals(0, server.getRequestCount());
     }
 
+    @Test public void ordinaryNewIntentRevokesComparisonTransferWithoutCarryingAnySavedFlag() throws Exception {
+        CaptureVideoTransfer transfer=new CaptureVideoTransfer(activity.getFilesDir(),() -> null,null);
+        setField(activity,"videoTransfer",transfer); setField(activity,"comparisonTransferEnabled",true);
+        activity.getPreferences(Context.MODE_PRIVATE).edit().putBoolean("video_transfer_evaluation",true).commit();
+        try {
+            activity.onNewIntent(new Intent().putExtra("guide",0.61f));
+            assertFalse((Boolean)org.robolectric.util.ReflectionHelpers.getField(activity,"comparisonTransferEnabled"));
+            assertNull(org.robolectric.util.ReflectionHelpers.getField(activity,"videoTransfer"));
+            assertTrue((Boolean)org.robolectric.util.ReflectionHelpers.getField(transfer,"closed"));
+            assertFalse(DocScanGlassActivity.videoTransferEvaluation(new Intent()));
+        } finally { transfer.close(); }
+    }
+
     @Test
     public void intentWithoutGuidePreservesExistingCalibration() throws Exception {
         activity.onNewIntent(new Intent().putExtra("guide", 0.61f));

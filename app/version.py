@@ -238,7 +238,8 @@ from __future__ import annotations
 # 0.58.1: reject malformed Work URLs consistently across supported Python versions.
 # 0.59.0: evaluate an original-video and maximum-JPEG hybrid with a recorder stop barrier.
 # 0.60.0: retain authenticated original-video comparison uploads with durable receipts.
-APP_VERSION = "0.60.0"
+# 0.61.0: transfer explicit comparison videos with persistent origin and receipt checks.
+APP_VERSION = "0.61.0"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.
@@ -504,7 +505,8 @@ EXPLAINER_API_VERSION = "1.1.0"
 # 1.34.0: active local capture keeps observing pages after idle waits without a resume tap.
 # 1.35.0: opt-in ZSL evaluation preserves scene/quiet pairing and unresolved originals.
 # 1.36.0: opt-in recording evaluation retains originals and fences finalization with native capture.
-GLASSES_VIEW_CONTRACT_VERSION = "1.36.0"
+# 1.37.0: opt-in comparison transfer binds original clips to one local/device generation.
+GLASSES_VIEW_CONTRACT_VERSION = "1.37.0"
 
 # Answer-area overlay payload (box + short answer; 2D image-anchored).
 # 1.1.0: added tracking metadata (tracking/fixed_ar/anchor_hint).

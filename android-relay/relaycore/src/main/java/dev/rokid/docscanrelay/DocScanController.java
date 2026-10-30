@@ -407,6 +407,25 @@ public final class DocScanController implements AutoCloseable {
         return saved.directory();
     }
 
+    /** Read-only durable binding; comparison media never creates or changes server IDs. */
+    public static final class LocalCaptureBinding {
+        public final String localId, server;
+        public final long documentId, sessionId;
+        public final DocScanApi api;
+        private LocalCaptureBinding(LocalCaptureSession saved, DocScanApi api) {
+            localId=saved.id(); server=saved.server(); documentId=saved.documentId(); sessionId=saved.sessionId(); this.api=api;
+        }
+    }
+    public LocalCaptureBinding localCaptureBinding() {
+        LocalCaptureSession saved=localSession; DocScanApi target=api;
+        if (closed || saved == null || target == null) return null;
+        synchronized (saved) {
+            if (saved.phase() == LocalCaptureSession.Phase.CLOSED || !saved.server().equals(target.serverUrl())) return null;
+            LocalCaptureBinding binding=new LocalCaptureBinding(saved,target);
+            return closed || saved != localSession || target != api ? null : binding;
+        }
+    }
+
     public static final class SavedCapture {
         public final String id;
         public final String label;

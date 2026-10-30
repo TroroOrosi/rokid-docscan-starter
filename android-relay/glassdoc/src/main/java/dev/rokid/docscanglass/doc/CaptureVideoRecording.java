@@ -118,6 +118,7 @@ final class CaptureVideoRecording {
     private Size maximumJpeg;
     private Integer sensorTimestampSource, videoStabilization, opticalStabilization;
     private Rect latestCrop;
+    private CaptureVideoTransfer.Origin comparisonOrigin;
 
     CaptureVideoRecording(File filesDir, Handler handler, Options options) {
         this(filesDir, handler, options, Executors.newSingleThreadExecutor(task -> {
@@ -136,6 +137,11 @@ final class CaptureVideoRecording {
     boolean recording() { return recording && !closing && !failed; }
     boolean finalizedSuccessfully() { return finished && success; }
 
+    void comparisonTransferOrigin(CaptureVideoTransfer.Origin origin) {
+        if (preparing || closing) throw new IllegalStateException("recording origin must precede prepare");
+        comparisonOrigin=origin;
+    }
+
     void prepare(CameraCharacteristics characteristics, Size jpeg, Runnable ready, Consumer<String> failure) {
         if (preparing || closing) return;
         preparing = true;
@@ -145,6 +151,10 @@ final class CaptureVideoRecording {
             try {
                 if (!directory.mkdirs()) throw new IOException("new recording directory unavailable");
                 if (!original.createNewFile()) throw new IOException("new recording file unavailable");
+                if (comparisonOrigin != null) {
+                    try { comparisonOrigin.write(directory); }
+                    catch (IOException error) { android.util.Log.w("GlassVideoTransfer","comparison origin unavailable; original retained"); }
+                }
                 if (characteristics != null) sensorTimestampSource = characteristics.get(CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE);
                 transition("preparing"); persist();
                 port = factory.create();

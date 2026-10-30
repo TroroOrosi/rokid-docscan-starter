@@ -199,7 +199,14 @@ and uncertain-send safeguards remain independent of model-name fallback.
   stop acknowledgement waits for finalization and retains uncertain originals.
   Its private journal separates selected profiles, actual container metadata,
   camera scene timestamps and unknown video PTS correspondence. The bounded
-  local clip is not an automatic whole-booklet recording or phone upload route.
+  local clip is not an automatic whole-booklet recording. An additional explicit
+  `video_transfer_evaluation=true` launch enables comparison transfer, without
+  persisting that choice or changing the journal's `auto_upload_allowed=false`.
+  A separate origin binds the local session, device and generation before
+  recorder preparation, then binds the matching server IDs once. A dedicated
+  worker streams the sealed original and retains the exact envelope and receipt.
+  Stale generations, changed local artifacts and uncertain responses cannot
+  acknowledge a transfer. Camera stop and ordinary page uploads do not wait for it.
   PRIVATE reprocessing and live AI inspection remain comparison candidates;
   neither evaluation has physical image-quality or performance acceptance yet.
   The frozen CUSTOMVIEW route keeps explicit phone controls. The original
@@ -405,7 +412,8 @@ Only four gestures reach an ordinary app; the rest are system-reserved in
   current device/session/generation and matching document, verifies stored bytes,
   and publishes a durable receipt only after no-clobber storage succeeds.
   Stored means quality is unevaluated; it does not register pages or invoke Work.
-  Android transfer and physical video quality still need end-to-end acceptance.
+  The explicit Android transfer client and physical video quality still need
+  end-to-end acceptance on the glasses and phone.
 - Persist analyzer-derived text before segmenting problems.
 - Pass the originating page image to image-capable solvers.
 - Keep document finalization idempotent and page replacement keyed by
