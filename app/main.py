@@ -35,6 +35,7 @@ from .analyzers import get_analyzer
 from .answer_text import to_display_answer
 from .config import IMAGE_DIR, ensure_dirs
 from .capture_provenance import parse_capture_metadata, parse_capture_provenance
+from .capture_video_upload import receive_capture_video
 from .explainer import ExplainRequest, ExplainResult
 from .explainers import get_explainer, list_explainers
 from .extractors import detect_media, get_extractor
@@ -146,7 +147,7 @@ async def _auth_middleware(request: Request, call_next):
     # (a client appending a slash to a discovery URL must not be locked out
     # before it can negotiate contracts).
     path = request.url.path.rstrip("/") or "/"
-    if (path == "/v1/glasses/state" or path.startswith("/v1/work/")) and not config.API_KEY:
+    if (path in ("/v1/glasses/state", "/v1/capture-videos") or path.startswith("/v1/work/")) and not config.API_KEY:
         return JSONResponse({"detail": "authentication_not_configured",
                              "code": "authentication_failed"}, status_code=503)
     if config.API_KEY and path not in config.AUTH_EXEMPT_PATHS:
@@ -411,6 +412,12 @@ def glasses_notify(state: GlassesState, request: Request) -> dict:
         return {"accepted": record_state(state, request.client.host)}
     except (OSError, ValueError, TypeError, KeyError):
         raise HTTPException(status_code=503, detail="state_unavailable") from None
+
+
+@app.post("/v1/capture-videos")
+async def capture_video_upload(request: Request, video: UploadFile = File(...), metadata: str = Form(...)) -> JSONResponse:
+    receipt, created = await receive_capture_video(video, metadata, request.client.host if request.client else "")
+    return JSONResponse(receipt, status_code=201 if created else 200)
 
 
 @app.get("/v1/glasses/state")

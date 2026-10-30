@@ -400,6 +400,12 @@ Only four gestures reach an ordinary app; the rest are system-reserved in
 - A configured cloud analyzer may transcribe/correct OCR and describe diagrams
   from the image. Finalization must fail clearly if a photo has no usable text
   and no image-capable analyzer is configured.
+- The explicit comparison-video receipt endpoint keeps the original MP4 and
+  exact metadata envelope separately from page PNGs. It requires an authenticated,
+  current device/session/generation and matching document, verifies stored bytes,
+  and publishes a durable receipt only after no-clobber storage succeeds.
+  Stored means quality is unevaluated; it does not register pages or invoke Work.
+  Android transfer and physical video quality still need end-to-end acceptance.
 - Persist analyzer-derived text before segmenting problems.
 - Pass the originating page image to image-capable solvers.
 - Keep document finalization idempotent and page replacement keyed by

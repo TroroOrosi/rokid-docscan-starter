@@ -237,7 +237,8 @@ from __future__ import annotations
 # 0.58.0: compare exact original-video frames without changing ordinary capture.
 # 0.58.1: reject malformed Work URLs consistently across supported Python versions.
 # 0.59.0: evaluate an original-video and maximum-JPEG hybrid with a recorder stop barrier.
-APP_VERSION = "0.59.0"
+# 0.60.0: retain authenticated original-video comparison uploads with durable receipts.
+APP_VERSION = "0.60.0"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.
@@ -355,7 +356,8 @@ APP_VERSION = "0.59.0"
 # 1.36.0: optional native capture provenance is validated against uploaded JPEG
 #         bytes and acknowledged with the canonical PNG identity.
 # 1.37.0: explicitly identified ZSL originals require matching positive sensor timestamps.
-API_VERSION = "1.37.0"
+# 1.38.0: /capture-videos accepts sealed original-video comparison clips and their journals.
+API_VERSION = "1.38.0"
 
 # Matching algorithm identity. Bump when thresholds or hashing change so a
 # re-index/eval is triggered. Mirrors thresholds in app/matching.py.

@@ -1,7 +1,7 @@
 # 再開入口：次のセッションはここだけ読めば始められる
 
-最終更新: 2026-10-31続行 — 4d2814f実CI/Android success、3.10/3.11/3.12/phone各1762pass57skip。録画V1修正/独立R0・現full Android622pass、APK照合済/導入0。原動画受領V1/V2各72pass/関連309pass、別監査中。詳細phone-work-connected-root-20261030.json。
-Runs on: PC開発・独立監査、phone F51F/ZY22LWGDCV。会場は常時オンphone AP＋装着glassesのみ、PC/USB/毎回接続不要。本人「確認せずそのまま」継続。phone b2eb＋2script/4run保全、最終X11 exec到達/X1なし。Loader差はログ定型のみ・APK一致、app_process/同UIDlookup正常。GPT3/Drive原PNG21/folder1、glasses/実紙受入0。
+最終更新: 2026-10-31続行 — 録画677199cは独立R0/full Android622pass/APK照合済/導入0、実CI再実行success。原動画受領R1修正/独立R0、全Python通常1895pass1skip・phone互換1878pass18skip。Android比較転送client実装中。詳細phone-work-connected-root-20261030.json。
+Runs on: PC開発・独立監査、phone F51F/ZY22LWGDCV。会場は常時オンphone AP＋装着glassesのみ、PC/USB/毎回接続不要。本人「確認せずそのまま」継続。phone b2eb＋2script/4run保全、最終X11 exec到達/X1なし。Loader意味差なし・APK一致、privateDEX診断はPC準備/別監査中・実行0。GPT3/Drive原PNG21/folder1、glasses/実紙受入0。
 
 ## 0. 読み方（前提と資料に引きずられないため）
 
@@ -90,7 +90,7 @@ Runs on: PC開発・独立監査、phone F51F/ZY22LWGDCV。会場は常時オン
   → 旧サーバ停止 → `nohup bash scripts/phone_serve.sh 127.0.0.1 > data/server-<commit>.log 2>&1 &`。PCからは `ssh -f -N -L 8000:127.0.0.1:8000 ...`（ssh `-i ~/.ssh/f51f_key -p 8022 u0_a26@192.168.0.6`）。
   ベンチの鍵は `ROKID_API_KEY` をスマホの env から読んで渡す（画面に出さない）。
 
-## 4. 次の作業（Runs on: 開発PC＋接続F51F）：録画checkpoint→Android原動画転送。phone Java入口/実Loader診断をPC準備・別監査→限定実行→X11/browser→Work通常unmount実測/互換。原動画受領別監査・API版/全Python確認→AIfeedback・可変紙面を教科計測より先に継続。以下は旧経緯。
+## 4. 次の作業（Runs on: 開発PC＋接続F51F）：受領API checkpoint/配布準備。phone Java入口/実Loader診断をPC凍結・別R0後1回→X11/browser→Work通常unmount実測/互換。Android明示比較転送・原本origin/受領照合→別監査/build、AIfeedback・可変紙面を教科計測より先に継続。以下は旧経緯。
 
 1. 済：独立監査2回（`4552ea1`、`4552ea1..e12e155`）の指摘を `61ad481`〜`1134404` で反映。
 2. 済：4a（3節）。起動はスマホで `bash scripts/phone_serve.sh 127.0.0.1`、PCから `ssh -L 8000:127.0.0.1:8000` で投入した。

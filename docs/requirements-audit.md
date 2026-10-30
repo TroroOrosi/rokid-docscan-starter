@@ -53,7 +53,9 @@ Runs on: 整理・調査・実装・自動試験は開発PC。利用は常時オ
 
 原動画の比較は `app/capture_video.py` と `scripts/capture_video.py` を使い、既存のffprobeで時刻を読み、ffmpegの一回の選択decodeで照合する。原MP4全体と指定した候補を残し、近い時刻へのseek、拡大・切出しや自動登録は行わない。128MiB・60秒・1800フレーム・指定12候補等は今回の比較処理の予算であり、冊子頁数の上限ではない。合成VFR・Bフレーム・開始PTS非0で番号・時刻・PNG画素を照合したが、圧縮で失われた細字、phoneのdecoder速度、全文字・全頁の合格は別に評価する。
 
-グラスの `video_evaluation=true` も局所比較用で、60秒・128MiBの到達は不明状態として停止する。AVC/HEVC・寸法・fps・bitrateを明示し、対応不明を無言の縮小や別codecで置き換えない。動画音声は無効で、リスニングの原音とは別にする。原MP4の保存完了は動画コンテナだけの完了であり、紙面の欠け・目線との画角・センサー時刻と動画PTSの対応・全冊の連続取得を合格にしない。phoneへの原動画転送、自動候補選定、AIによる撮影調整は後続の接続作業である。
+グラスの `video_evaluation=true` も局所比較用で、60秒・128MiBの到達は不明状態として停止する。AVC/HEVC・寸法・fps・bitrateを明示し、対応不明を無言の縮小や別codecで置き換えない。動画音声は無効で、リスニングの原音とは別にする。原MP4の保存完了は動画コンテナだけの完了であり、紙面の欠け・目線との画角・センサー時刻と動画PTSの対応・全冊の連続取得を合格にしない。
+
+phoneの `POST /v1/capture-videos` は認証付きの比較原動画受領用で、原MP4と送られた記録をそのまま保全する。端末・session・generation・実際の接続元と文書の対応を確認し、保存した実物と受領票を照合する。品質は未評価で、自動解析・頁登録・Work送信を開始しない。64KiB単位の保存と128MiBの比較clip上限は受領原本の制限であり、FastAPIのmultipart解析前にHTTP全体を制限するものではない。Androidからの転送、自動候補選定、AIによる撮影調整は後続の接続作業である。
 
 モデルはSol 6.1／xhigh／Fastを解答役候補として維持し、Lunaの限定検査、Terraの曖昧な視覚領域の再確認を別に比較する。Lunaのlowは速度候補で、公式Workの開始推奨highも比較対象とする。Fastとeffortは別設定で、Sol 6.1固有の速度倍率や全問正答を未実測で断定しない。APIの画像数・bytes・寸法規則をWork/Driveの能力へ転用しない。根拠は[Workモデル](https://learn.chatgpt.com/docs/models)、[speed](https://learn.chatgpt.com/docs/agent-configuration/speed)、[画像入力](https://developers.openai.com/api/docs/guides/images-vision)、[Camera2再処理](https://developer.android.com/reference/android/hardware/camera2/CameraDevice)。原音の利用は別経路の確認が必要で、reading先行と同一会話への確定音声追加を保持する。
 
