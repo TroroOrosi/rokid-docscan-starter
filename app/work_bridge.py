@@ -388,17 +388,18 @@ class WorkStore:
                 else:
                     raise WorkConflict("unknown original image delivery kind")
                 claims.append({**item, "delivery": delivery})
-            for source in job["sources"]:
-                if "page_number" not in source:
-                    continue
-                quality = job["quality"].get(source["source_id"])
-                if job["stage"] == "listening":
-                    prior = self._public(conn, self._row(conn, job["previous_job_id"]))
-                    quality = prior["quality"].get(source["source_id"])
-                if (not quality or quality["decision"] != "eligible"
-                        or quality.get("evidence", {}).get("profile_id") not in self.validated_profiles):
-                    raise WorkConflict("every original image requires eligible source-bound quality evidence")
             self._validate_result(job, result)
+            if not self._non_answering_stop(result):
+                for source in job["sources"]:
+                    if "page_number" not in source:
+                        continue
+                    quality = job["quality"].get(source["source_id"])
+                    if job["stage"] == "listening":
+                        prior = self._public(conn, self._row(conn, job["previous_job_id"]))
+                        quality = prior["quality"].get(source["source_id"])
+                    if (not quality or quality["decision"] != "eligible"
+                            or quality.get("evidence", {}).get("profile_id") not in self.validated_profiles):
+                        raise WorkConflict("every original image requires eligible source-bound quality evidence")
             # These are transport acknowledgements, not proof that the model saw
             # the pixels. A local original GET alone never records cloud delivery.
             submission = _json({"result": result, "conversation_id": conversation_id,
@@ -410,6 +411,24 @@ class WorkStore:
             conn.execute("UPDATE jobs SET result_json=?,submission_json=?,conversation_id=? WHERE job_id=?",
                          (encoded, submission, conversation_id, job_id))
             return self._public(conn, self._row(conn, job_id))
+
+    @staticmethod
+    def _non_answering_stop(result: dict) -> bool:
+        # Called only after validation. A stop can describe unreadable material,
+        # but cannot carry answers through extra blocks, derivations or diagrams.
+        if set(result) != {"questions"}:
+            return False
+        fields = {"group", "label", "pages", "answer_no", "status", "answer",
+                  "missing_material", "diagrams", "requires_audio", "question_id"}
+        items = result["questions"]
+        return (any(item.get("status") == "needs_input" for item in items)
+                and all(set(item) <= fields
+                        and item.get("status") in ("needs_input", "pending_audio")
+                        and item.get("answer") == "" and item.get("diagrams", []) == []
+                        and (item.get("status") != "needs_input"
+                             or (isinstance(item.get("missing_material"), str)
+                                 and bool(item["missing_material"].strip())))
+                        for item in items))
 
     @staticmethod
     def _validate_result(job: dict, result: dict) -> None:

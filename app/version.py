@@ -221,7 +221,8 @@ from __future__ import annotations
 # 0.51.1: retain native chroma in outgoing JPEGs and native capture provenance
 #         through local review and durable page storage.
 # 0.51.2: keep non-answer status and chooser text in a compact display region.
-APP_VERSION = "0.51.2"
+# 0.51.3: return non-answering Work needs_input results when image quality fails.
+APP_VERSION = "0.51.3"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.
@@ -331,7 +332,8 @@ APP_VERSION = "0.51.2"
 # 1.32.0: mixed analysis stages and partial answer availability; authenticated
 #         chooser/waiting display requests preserve protected visible work.
 # 1.33.0: authenticated Work job manifests, original-image reads and result receipts.
-API_VERSION = "1.33.0"
+# 1.33.1: quality failures allow validated stop results, while answers stay gated.
+API_VERSION = "1.33.1"
 
 # Matching algorithm identity. Bump when thresholds or hashing change so a
 # re-index/eval is triggered. Mirrors thresholds in app/matching.py.

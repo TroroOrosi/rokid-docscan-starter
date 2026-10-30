@@ -33,6 +33,12 @@ def answer(label="問1", text="x=2", pages=None):
                            "missing_material": "", "diagrams": []}]}
 
 
+def needs_input():
+    result = answer(text="")
+    result["questions"][0].update(status="needs_input", missing_material="P1の文字が判読できません")
+    return result
+
+
 def queue(store, count=1, **extra):
     return store.enqueue(session_id=1, conversation_key="session:1", stage="single",
                          sources=sources(count), system="write answers only", prompt="all questions",
@@ -105,21 +111,25 @@ def test_one_missing_original_cannot_be_called_a_completed_booklet(tmp_path):
     assert store.get(job["job_id"])["status"] == "pending"
 
 
-@pytest.mark.parametrize("change", ["hash", "generation", "receipt", "duplicate", "answer"])
-def test_wrong_identity_or_invalid_answer_is_not_committed(tmp_path, change):
+@pytest.mark.parametrize("change", ["hash", "generation", "receipt", "source_hash", "duplicate", "answer"])
+@pytest.mark.parametrize("stop", [False, True])
+def test_wrong_identity_or_invalid_answer_is_not_committed(tmp_path, change, stop):
     from app.work_bridge import WorkConflict, WorkStore
 
     store = WorkStore(tmp_path, validated_profiles=("fixture",))
     job = queue(store)
-    acquired = [receipt(store, job, "p1")]
+    acquired = [receipt(store, job, "p1", quality=not stop)]
     options = dict(manifest_sha256=job["manifest_sha256"], generation=job["generation"],
-                   conversation_id="work-chat-1", source_receipts=acquired, result=answer())
+                   conversation_id="work-chat-1", source_receipts=acquired,
+                   result=needs_input() if stop else answer())
     if change == "hash":
         options["manifest_sha256"] = "a" * 64
     elif change == "generation":
         options["generation"] += 1
     elif change == "receipt":
         acquired[0]["receipt"] = "not-a-source-receipt"
+    elif change == "source_hash":
+        acquired[0]["sha256"] = "a" * 64
     elif change == "duplicate":
         acquired.append(acquired[0])
     else:
@@ -202,6 +212,107 @@ def test_known_bad_quality_cannot_be_turned_into_a_completed_answer(tmp_path):
     assert assessed["decision"] == "retake"
     with pytest.raises(WorkConflict, match="quality evidence"):
         complete(store, job, [fetched])
+
+
+@pytest.mark.parametrize("decision", ["retake", "hold"])
+def test_non_answering_needs_input_survives_quality_failure_and_restart(tmp_path, decision):
+    from app.work_bridge import WorkStore
+
+    profiles = ("fixture",) if decision == "retake" else ()
+    store = WorkStore(tmp_path, validated_profiles=profiles)
+    job = queue(store)
+    fetched = receipt(store, job, "p1", quality=False)
+    request = store.quality_request(job["job_id"], "p1")
+    delivered = [store.read_quality_image(job["job_id"], "p1", part["image_id"])[1]
+                 for part in request["images"]]
+    response = quality_reply(request)
+    if decision == "retake":
+        response["evidence"]["pages"][0]["regions"][0]["readability"] = "fail"
+    assessed = store.submit_quality(job["job_id"], "p1", response=response, image_receipts=delivered)
+    assert assessed["decision"] == decision
+
+    result = needs_input()
+    saved = complete(store, job, [fetched], result)
+    assert saved["status"] == "completed"
+    restarted = WorkStore(tmp_path, validated_profiles=profiles)
+    assert restarted.result(job["job_id"]) == result
+    assert restarted.get(job["job_id"])["quality"]["p1"] == assessed
+    assert complete(restarted, job, [fetched], result) == saved
+
+
+@pytest.mark.parametrize("field,value,level", [
+    ("answer", "推測値 x=2", "question"),
+    ("diagrams", [{"alt": "推測図", "aspect_ratio": 1,
+                   "elements": [{"type": "text", "x": 0.5, "y": 0.5, "text": "x=2"}]}], "question"),
+    ("answer_blocks", [{"text": "x=2"}], "question"),
+    ("derivation", "x+1=3 より x=2", "question"),
+    ("solution_steps", ["x=2"], "question"),
+    ("missing_material", "", "question"),
+    ("missing_material", {"answer": "x=2"}, "question"),
+    ("blocks", [{"text": "x=2"}], "result"),
+    ("derivation", "x=2", "result"),
+])
+def test_needs_input_cannot_hide_answers_from_the_quality_guard(tmp_path, field, value, level):
+    from app.work_bridge import WorkConflict, WorkStore
+
+    store = WorkStore(tmp_path)
+    job = queue(store)
+    fetched = receipt(store, job, "p1", quality=False)
+    result = needs_input()
+    target = result["questions"][0] if level == "question" else result
+    target[field] = value
+    with pytest.raises(WorkConflict, match="quality evidence"):
+        complete(store, job, [fetched], result)
+    assert store.result(job["job_id"]) is None
+
+
+def test_ready_answer_beside_needs_input_still_requires_every_original_quality(tmp_path):
+    from app.work_bridge import WorkConflict, WorkStore
+
+    store = WorkStore(tmp_path, validated_profiles=("fixture",))
+    job = queue(store, 2)
+    fetched = [receipt(store, job, "p1"), receipt(store, job, "p2", quality=False)]
+    result = answer(pages=[1])
+    result["questions"].append(dict(needs_input()["questions"][0], label="問2", pages=[2], answer_no=[2]))
+    with pytest.raises(WorkConflict, match="quality evidence"):
+        complete(store, job, fetched, result)
+    assert store.result(job["job_id"]) is None
+
+
+@pytest.mark.parametrize("change", ["empty", "status", "page", "label"])
+def test_non_answering_stop_still_validates_the_result_envelope(tmp_path, change):
+    from app.work_bridge import WorkStore
+
+    store = WorkStore(tmp_path)
+    job = queue(store)
+    fetched = receipt(store, job, "p1", quality=False)
+    result = needs_input()
+    if change == "empty":
+        result["questions"] = []
+    elif change == "status":
+        result["questions"][0]["status"] = "pending_audio"
+    elif change == "page":
+        result["questions"][0]["pages"] = [2]
+    else:
+        result["questions"][0]["label"] = False
+    with pytest.raises(ValueError):
+        complete(store, job, [fetched], result)
+    assert store.result(job["job_id"]) is None
+
+
+def test_unreadable_reading_stop_can_keep_listening_unanswered(tmp_path):
+    from app.work_bridge import WorkStore
+
+    store = WorkStore(tmp_path)
+    job = store.enqueue(session_id=1, conversation_key="session:1", stage="reading",
+                        sources=sources(), system="answer", prompt="reading")
+    fetched = receipt(store, job, "p1", quality=False)
+    result = needs_input()
+    result["questions"][0]["requires_audio"] = False
+    result["questions"].append({"group": "Listening", "label": "問2", "pages": [1], "answer_no": [2],
+                                "requires_audio": True, "status": "pending_audio", "answer": "", "diagrams": []})
+    complete(store, job, [fetched], result)
+    assert store.result(job["job_id"]) == result
 
 
 def tile_receipt(store, job, source_id):
@@ -362,6 +473,18 @@ def api_complete(client, job, acquired, result):
         "conversation_id": "cloud-work-chat", "source_receipts": acquired, "result": result})
 
 
+def test_phone_api_returns_non_answering_stop_in_existing_answer_bundle(client):
+    _, session, job = api_session(client)
+    delivered = [api_tile_receipt(client, job, submit_quality=False)]
+    response = api_complete(client, job, delivered, needs_input())
+    assert response.status_code == 200, response.text
+    bundle = wait_for(lambda: data if (data := client.get(
+        f"/v1/exam-sessions/{session}/answer-bundle").json()).get("items") else None)
+    assert [(item["status"], item["answer"], item.get("diagrams", [])) for item in bundle["items"]] == [
+        ("needs_input", "", [])]
+    assert bundle["items"][0]["issue"] == "P1の文字が判読できません"
+
+
 def test_phone_api_auto_queues_images_and_returns_work_answers_in_the_existing_bundle(client):
     doc = client.post("/v1/documents", json={"title": "local Work test"}).json()["document_id"]
     for index in range(21):
@@ -464,16 +587,17 @@ def test_phone_api_mixed_work_roundtrip_keeps_original_audio_and_committed_readi
 
 
 @pytest.mark.parametrize("change", ["generation", "closed"])
-def test_phone_api_rejects_stale_work_results_and_image_reads(client, change):
+@pytest.mark.parametrize("stop", [False, True])
+def test_phone_api_rejects_stale_work_results_and_image_reads(client, change, stop):
     _, session, job = api_session(client, generation=7)
-    delivered = [api_tile_receipt(client, job)]
+    delivered = [api_tile_receipt(client, job, submit_quality=not stop)]
     update = {"device_id": "fixture-glasses", "session_id": session, "generation": 7, "sequence": 2,
               "phase": "closed" if change == "closed" else "analyzing"}
     if change == "generation":
         update["generation"] = 8
     assert client.post("/v1/glasses/state", json=update).json()["accepted"]
     assert client.get(f"/v1/work/jobs/{job['job_id']}/sources/p1").status_code == 409
-    assert api_complete(client, job, delivered, answer()).status_code == 409
+    assert api_complete(client, job, delivered, needs_input() if stop else answer()).status_code == 409
     from app.work_bridge import configured_work_store
     assert configured_work_store().result(job["job_id"]) is None
 
