@@ -243,6 +243,12 @@ class WorkStore:
         with self._connect() as conn:
             return self._public(conn, self._row(conn, job_id))
 
+    def session_jobs(self, session_id: int) -> list[dict]:
+        """Resolve immutable browser ownership, including a concurrently sealed job."""
+        with self._connect() as conn:
+            return [self._public(conn, row) for row in conn.execute(
+                "SELECT * FROM jobs WHERE session_id=? ORDER BY seq", (session_id,))]
+
     def list_jobs(self, *, cursor: int = 0, limit: int = 100) -> dict:
         if type(cursor) is not int or not 0 <= cursor < 2**63 or type(limit) is not int or not 1 <= limit <= 100:
             raise ValueError("invalid Work job pagination")

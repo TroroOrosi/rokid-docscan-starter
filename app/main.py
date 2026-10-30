@@ -211,6 +211,55 @@ def _commit_work_browser_result(job_id: str, **payload) -> dict:
         return store.submit_browser_result(job_id, **payload)
 
 
+@contextmanager
+def _expired_work_job_guard(job_id: str):
+    """Authorize only journal retirement, never an old answer or another send."""
+    with state_guard():
+        try:
+            job = configured_work_store().get(job_id)
+        except KeyError:
+            raise WorkConflict("the expired Work owner is unavailable") from None
+        with _background_solves_lock:
+            if job["session_id"] in _background_solves:
+                raise WorkPending(job_id)
+            states = list_states()
+            owners = [state for state in states if state["device_id"] == job["device_id"]]
+            if (not job["device_id"] or len(owners) != 1
+                    or sum(state["session_id"] == job["session_id"] for state in states) > 1):
+                raise WorkConflict("the expired Work wearer is unavailable or ambiguous")
+            owner = owners[0]
+            if owner["generation"] < job["generation"]:
+                raise WorkConflict("the Work wearer generation is not established")
+            expired = (owner["generation"] > job["generation"]
+                       or owner["session_id"] != job["session_id"]
+                       or owner["phase"] in ("closed", "writing_done"))
+            conn = db.connect()
+            try:
+                session = _exam_session_or_404(conn, job["session_id"])
+                if not expired:
+                    if not session["document_id"]:
+                        raise WorkConflict("the Work input identity is unavailable")
+                    pages = _document_source_pages(conn, session["document_id"], job["session_id"])
+                    if not pages or any(not re.fullmatch(r"[a-f0-9]{64}", page["image_sha256"]) for page in pages):
+                        raise WorkConflict("the Work input identity is unavailable")
+                    images = [source for source in job["sources"] if "page_number" in source]
+                    expired = ([(page["page_number"], page["image_sha256"]) for page in pages]
+                               != [(source["page_number"], source["sha256"]) for source in images])
+                    recordings = [source for source in job["sources"] if "page_number" not in source]
+                    if recordings:
+                        current_audio = file_sha256(session["audio_path"])
+                        if len(recordings) != 1 or not re.fullmatch(r"[a-f0-9]{64}", current_audio):
+                            raise WorkConflict("the Work audio identity is unavailable")
+                        expired = expired or current_audio != recordings[0]["sha256"]
+            except HTTPException as error:
+                raise WorkConflict("the expired Work session is unavailable") from error
+            finally:
+                conn.close()
+            if not expired:
+                raise WorkConflict("the Work job is still current")
+            yield job
+
+
 @app.get("/v1/work/jobs")
 def work_jobs(cursor: int = 0, limit: int = 100) -> dict:
     """Phone-local transport queue; an official Work connector is still required."""

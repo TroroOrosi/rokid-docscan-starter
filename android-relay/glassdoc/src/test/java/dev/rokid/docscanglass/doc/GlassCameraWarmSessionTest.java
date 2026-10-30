@@ -50,6 +50,7 @@ import org.robolectric.util.ReflectionHelpers;
 public class GlassCameraWarmSessionTest {
     private GlassCamera camera;
     private final List<String> failures = new ArrayList<>();
+    private final List<GlassCamera.Captured> originals = new ArrayList<>();
     private int delivered;
     private int displayed;
     private Long exposureNanos = 10_000_000L;
@@ -63,6 +64,9 @@ public class GlassCameraWarmSessionTest {
     private void createCamera() {
         camera = new GlassCamera(RuntimeEnvironment.getApplication(), new Handler(Looper.getMainLooper()),
                 new GlassCamera.Callback() {
+                    @Override public void onCaptured(GlassCamera.Captured captured) {
+                        originals.add(captured); GlassCamera.Callback.super.onCaptured(captured);
+                    }
                     @Override public void onCaptured(byte[] bytes, int w, int h, long elapsed) {
                         assertEquals(4032, w); assertEquals(3024, h); delivered++;
                     }
@@ -259,7 +263,7 @@ public class GlassCameraWarmSessionTest {
         idle(100); result(CONTROL_AF_STATE_INACTIVE, CONTROL_AE_STATE_CONVERGED); frame(180);
         assertEquals(0, currentDevice().session.captures);
         idle(400); result(CONTROL_AF_STATE_INACTIVE, CONTROL_AE_STATE_CONVERGED); frame(180);
-        finishAutoFocusThenOneJpeg(mode, ready);
+        finishAutoFocusThenOneJpeg(mode, ready, 0);
         assertEquals(1, ManagerShadow.devices.size()); assertTrue(failures.isEmpty());
     }
 
@@ -273,31 +277,41 @@ public class GlassCameraWarmSessionTest {
 
     private void nextAutomaticPage(int mode) {
         CharacteristicsShadow.afMode = mode;
-        // A manual first shot reaches the review/new-preview seam even before C1 is fixed.
+        // The next page must run a new AF cycle even when the native session stays open.
         camera.captureOnce(); idle(100); frame(180); idle(400); frame(180);
         var first = currentDevice().session;
         assertEquals(1, first.captures);
+        var oldFocusCallback = first.captureCallback;
+        var oldFocusRequest = first.captured;
         first.captureCallback.onCaptureCompleted(first, first.captured,
                 metadata(CONTROL_AF_STATE_ACTIVE_SCAN, CONTROL_AE_STATE_CONVERGED, SystemClock.elapsedRealtimeNanos()));
         idle(100); result(CONTROL_AF_STATE_FOCUSED_LOCKED, CONTROL_AE_STATE_CONVERGED); frame(180); idle(50);
         assertEquals(2, first.captures);
         ReaderShadow jpeg = currentReader(ImageFormat.JPEG);
         jpeg.image = new DocScanTestImage(new ArrayList<>()); jpeg.listener.onImageAvailable(jpeg.reader); idle(0);
-        assertEquals(1, delivered); assertEquals(2, ManagerShadow.devices.size());
+        assertEquals(1, delivered); assertEquals(1, ManagerShadow.devices.size());
 
         // The turn happens during review, before awaitNextPage is registered.
         idle(100); frame(180); idle(100); frame(180, true); idle(100); frame(180);
         AtomicInteger ready = new AtomicInteger();
         camera.awaitNextPage(() -> { ready.incrementAndGet(); camera.captureOnce(); }); idle(0);
-        assertEquals(0, currentDevice().session.captures);
+        assertEquals(2, currentDevice().session.captures);
         idle(400); result(CONTROL_AF_STATE_INACTIVE, CONTROL_AE_STATE_CONVERGED); frame(180);
-        finishAutoFocusThenOneJpeg(mode, ready);
-        assertEquals(2, ManagerShadow.devices.size()); assertTrue(failures.isEmpty());
+        assertEquals(3, first.captures);
+        idle(100);
+        oldFocusCallback.onCaptureCompleted(first, oldFocusRequest,
+                metadata(CONTROL_AF_STATE_FOCUSED_LOCKED, CONTROL_AE_STATE_CONVERGED, SystemClock.elapsedRealtimeNanos()));
+        frame(180); idle(50);
+        assertEquals("the previous page's AF callback cannot acknowledge the new START", 0, ready.get());
+        oldFocusCallback.onCaptureFailed(first, oldFocusRequest, null);
+        assertTrue("the previous page's AF failure cannot cancel the new page", failures.isEmpty());
+        finishAutoFocusThenOneJpeg(mode, ready, 2);
+        assertEquals(1, ManagerShadow.devices.size()); assertTrue(failures.isEmpty());
     }
 
-    private void finishAutoFocusThenOneJpeg(int mode, AtomicInteger ready) {
+    private void finishAutoFocusThenOneJpeg(int mode, AtomicInteger ready, int precedingCaptures) {
         var session = currentDevice().session;
-        assertEquals("one AF START before pageReady", 1, session.captures);
+        assertEquals("one AF START before pageReady", precedingCaptures + 1, session.captures);
         RequestShadow trigger = Shadow.extract(session.captured);
         assertEquals(CameraDevice.TEMPLATE_PREVIEW, trigger.template);
         assertEquals(mode, trigger.values.get(CaptureRequest.CONTROL_AF_MODE.getName()));
@@ -310,16 +324,16 @@ public class GlassCameraWarmSessionTest {
         idle(100);
         long oldLockedAt = SystemClock.elapsedRealtimeNanos();
         result(CONTROL_AF_STATE_FOCUSED_LOCKED, CONTROL_AE_STATE_CONVERGED, oldLockedAt); frame(180);
-        assertEquals(0, ready.get()); assertEquals(1, session.captures);
+        assertEquals(0, ready.get()); assertEquals(precedingCaptures + 1, session.captures);
         idle(100);
         triggerCallback.onCaptureCompleted(session, triggerRequest,
                 metadata(CONTROL_AF_STATE_ACTIVE_SCAN, CONTROL_AE_STATE_CONVERGED, SystemClock.elapsedRealtimeNanos()));
         idle(100); result(CONTROL_AF_STATE_FOCUSED_LOCKED, CONTROL_AE_STATE_CONVERGED, oldLockedAt); frame(180);
-        assertEquals(0, ready.get()); assertEquals(1, session.captures);
+        assertEquals(0, ready.get()); assertEquals(precedingCaptures + 1, session.captures);
         idle(100); result(CONTROL_AF_STATE_FOCUSED_LOCKED, CONTROL_AE_STATE_SEARCHING); frame(180);
-        assertEquals(0, ready.get()); assertEquals(1, session.captures);
+        assertEquals(0, ready.get()); assertEquals(precedingCaptures + 1, session.captures);
         idle(100); result(CONTROL_AF_STATE_FOCUSED_LOCKED, CONTROL_AE_STATE_CONVERGED); frame(180); idle(50);
-        assertEquals(1, ready.get()); assertEquals(2, session.captures);
+        assertEquals(1, ready.get()); assertEquals(precedingCaptures + 2, session.captures);
         assertEquals(CameraDevice.TEMPLATE_STILL_CAPTURE, ((RequestShadow)Shadow.extract(session.captured)).template);
         assertEquals(1, currentDevice().configurations);
     }
@@ -330,7 +344,7 @@ public class GlassCameraWarmSessionTest {
         camera.captureOnce(); camera.captureOnce(); idle(400); readyFrame(); idle(50);
         assertEquals(1, ManagerShadow.devices.size()); assertEquals(1, device.configurations);
         assertEquals(2, device.outputs.size()); assertEquals(1, device.session.captures);
-        assertFalse(device.closed); assertTrue(device.session.repeatingStopped);
+        assertFalse(device.closed); assertFalse(device.session.repeatingStopped);
         RequestShadow request = Shadow.extract(device.session.captured);
         assertEquals(CameraDevice.TEMPLATE_STILL_CAPTURE, request.template);
         assertEquals(0, request.values.get(CaptureRequest.JPEG_ORIENTATION.getName()));
@@ -339,9 +353,136 @@ public class GlassCameraWarmSessionTest {
         ReaderShadow jpeg = originalReader(ImageFormat.JPEG);
         jpeg.image = new DocScanTestImage(new ArrayList<>());
         jpeg.listener.onImageAvailable(jpeg.reader); idle(0);
-        assertEquals(1, delivered); assertTrue(device.closed); assertTrue(jpeg.closed);
+        assertEquals(1, delivered); assertFalse(device.closed); assertFalse(jpeg.closed);
+        assertFalse(originalReader(ImageFormat.YUV_420_888).closed);
+        camera.pausePreview(); idle(0);
+        assertTrue(device.closed); assertTrue(device.session.closed); assertTrue(jpeg.closed);
         assertTrue(originalReader(ImageFormat.YUV_420_888).closed);
+        assertEquals(1, ManagerShadow.devices.size());
         assertTrue(failures.isEmpty());
+    }
+
+    @Test public void aTurnDuringTheJpegWaitRemainsAvailableAfterTheVisibleReview() {
+        camera.captureOnce(); idle(100); readyFrame(); idle(400); readyFrame(); idle(50);
+        var device = firstDevice();
+        int before = displayed;
+        idle(100); frame(180, true); idle(30); frame(180);
+        assertTrue("received frames must still be observed while JPEG is pending", displayed > before);
+        assertFalse(device.session.repeatingStopped);
+        ReaderShadow jpeg = originalReader(ImageFormat.JPEG);
+        jpeg.image = new DocScanTestImage(new ArrayList<>());
+        jpeg.listener.onImageAvailable(jpeg.reader); idle(3000);
+        AtomicInteger ready = new AtomicInteger(); camera.awaitNextPage(ready::incrementAndGet); idle(0);
+        assertEquals(0, ready.get());
+        readyFrame(); assertEquals(1, ready.get());
+        assertEquals(1, delivered); assertEquals(1, device.session.captures);
+        assertEquals(1, ManagerShadow.devices.size()); assertEquals(1, device.configurations);
+        assertFalse(jpeg.closed); assertFalse(originalReader(ImageFormat.YUV_420_888).closed);
+        assertTrue(failures.isEmpty());
+    }
+
+    @Test public void theRetainedJpegReaderDrainsOldBuffersWithoutRebindingTheNextOriginal() {
+        camera.captureOnce(); idle(100); readyFrame(); idle(400); readyFrame(); idle(50);
+        var session = firstDevice().session;
+        var oldCallback = session.captureCallback; var oldRequest = session.captured;
+        ReaderShadow jpeg = originalReader(ImageFormat.JPEG);
+        jpeg.image = new DocScanTestImage(new ArrayList<>());
+        jpeg.listener.onImageAvailable(jpeg.reader); idle(0);
+        assertEquals(1, delivered); assertFalse(jpeg.closed);
+
+        List<String> inactiveEvents = new ArrayList<>();
+        DocScanTestImage inactive = new DocScanTestImage(inactiveEvents); inactive.memoryFailure = true;
+        jpeg.image = inactive; jpeg.listener.onImageAvailable(jpeg.reader);
+        assertEquals(List.of("image.close"), inactiveEvents); assertTrue(failures.isEmpty());
+        camera.captureOnce(); camera.captureOnce(); idle(0); readyFrame(); idle(50);
+        assertEquals(2, session.captures);
+        oldCallback.onCaptureSequenceAborted(session, 1);
+        oldCallback.onCaptureCompleted(session, oldRequest,
+                metadata(CONTROL_AF_STATE_PASSIVE_FOCUSED, CONTROL_AE_STATE_CONVERGED, 20L));
+        List<String> staleEvents = new ArrayList<>();
+        DocScanTestImage stale = new DocScanTestImage(staleEvents); stale.memoryFailure = true;
+        jpeg.image = stale; jpeg.listener.onImageAvailable(jpeg.reader);
+        assertEquals(List.of("image.close"), staleEvents); assertEquals(1, delivered);
+
+        // Native ZSL may predate the latest YUV frame; compare JPEGs, not wall/preview time.
+        DocScanTestImage fresh = new DocScanTestImage(new ArrayList<>());
+        fresh.timestamp = 20L; fresh.buffer = ByteBuffer.wrap(new byte[]{4, 5, 6});
+        jpeg.image = fresh; jpeg.listener.onImageAvailable(jpeg.reader); idle(15000);
+        assertEquals(2, delivered); assertEquals(1, ManagerShadow.devices.size());
+        assertArrayEquals(new byte[]{4, 5, 6}, originals.get(1).jpeg);
+        assertEquals(Long.valueOf(20), originals.get(1).provenance.imageTimestampNanos);
+        assertNull("the previous request's result cannot become this JPEG's metadata",
+                originals.get(1).provenance.resultTimestampNanos);
+        assertNotEquals(originals.get(0).provenance.captureId, originals.get(1).provenance.captureId);
+        assertNotEquals(originals.get(0).provenance.jpegSha256, originals.get(1).provenance.jpegSha256);
+        assertTrue(failures.isEmpty());
+    }
+
+    @Test public void aRetainedPreviewFailureSettlesAnInFlightStillOnlyOnce() {
+        camera.captureOnce(); idle(100); readyFrame(); idle(400); readyFrame(); idle(50);
+        var device = firstDevice();
+        var jpeg = originalReader(ImageFormat.JPEG);
+        device.session.previewCallback.onCaptureFailed(device.session, device.session.repeating, null);
+        assertEquals(List.of("camera metering failed"), failures);
+        jpeg.image = new DocScanTestImage(new ArrayList<>()); jpeg.listener.onImageAvailable(jpeg.reader);
+        camera.captureOnce(); idle(15000);
+        assertEquals(1, failures.size()); assertEquals(0, delivered);
+        assertEquals(1, device.session.captures); assertEquals(1, ManagerShadow.devices.size());
+        assertTrue(device.closed); assertTrue(jpeg.closed);
+        assertTrue((Boolean)ReflectionHelpers.getField(camera, "unknown"));
+    }
+
+    @Test public void anInactiveJpegAcquireFailureClosesTheRetainedCameraOnlyOnce() {
+        inactiveJpegFailureClosesRetainedCamera(false);
+    }
+
+    @Test public void anInactiveJpegCloseMemoryFailureClosesTheRetainedCameraOnlyOnce() {
+        inactiveJpegFailureClosesRetainedCamera(true);
+    }
+
+    private void inactiveJpegFailureClosesRetainedCamera(boolean closeFailure) {
+        camera.captureOnce(); idle(100); readyFrame(); idle(400); readyFrame(); idle(50);
+        var device = firstDevice();
+        var jpeg = originalReader(ImageFormat.JPEG);
+        var yuv = originalReader(ImageFormat.YUV_420_888);
+        jpeg.image = new DocScanTestImage(new ArrayList<>());
+        jpeg.listener.onImageAvailable(jpeg.reader); idle(0);
+        assertEquals(1, delivered); assertFalse(device.closed);
+
+        if (closeFailure) {
+            // This HAL buffer's close delegates to the event sink; fail at that boundary.
+            jpeg.image = new DocScanTestImage(new ArrayList<String>() {
+                @Override public boolean add(String event) {
+                    throw new OutOfMemoryError("synthetic native Image.close failure");
+                }
+            });
+        } else {
+            jpeg.acquireFailure = new IllegalStateException("synthetic native acquire failure");
+        }
+        jpeg.listener.onImageAvailable(jpeg.reader);
+        assertEquals(List.of(closeFailure ? "image OutOfMemoryError" : "image IllegalStateException"), failures);
+        assertTrue((Boolean)ReflectionHelpers.getField(camera, "unknown"));
+        assertTrue(device.closed); assertTrue(device.session.closed); assertTrue(jpeg.closed); assertTrue(yuv.closed);
+        assertNull(ReflectionHelpers.getField(camera, "reader"));
+        assertNull(ReflectionHelpers.getField(camera, "previewReader"));
+
+        jpeg.listener.onImageAvailable(jpeg.reader);
+        device.session.previewCallback.onCaptureFailed(device.session, device.session.repeating, null);
+        camera.captureOnce(); camera.preview(); camera.awaitNextPage(() -> fail("UNKNOWN cannot become ready"));
+        idle(15000);
+        assertEquals(1, failures.size()); assertEquals(1, delivered);
+        assertEquals(1, ManagerShadow.devices.size()); assertEquals(1, device.session.captures);
+    }
+
+    @Test public void pausingAnInFlightStillClosesTheRetainedSessionAfterTheImage() {
+        camera.captureOnce(); idle(100); readyFrame(); idle(400); readyFrame(); idle(50);
+        var device = firstDevice();
+        camera.pausePreview(); idle(0); assertFalse(device.closed);
+        var jpeg = originalReader(ImageFormat.JPEG);
+        jpeg.image = new DocScanTestImage(new ArrayList<>()); jpeg.listener.onImageAvailable(jpeg.reader); idle(0);
+        assertEquals(1, delivered); assertTrue(device.closed); assertTrue(device.session.closed);
+        assertTrue(jpeg.closed); assertTrue(originalReader(ImageFormat.YUV_420_888).closed);
+        assertEquals(1, ManagerShadow.devices.size()); assertTrue(failures.isEmpty());
     }
 
     @Test public void aColdManualShotAlsoWaitsForFreshStablePreviewAndMetering() {
@@ -440,7 +581,7 @@ public class GlassCameraWarmSessionTest {
     }
     @Implements(ImageReader.class) public static class ReaderShadow {
         static final List<ReaderShadow> readers = new ArrayList<>();
-        ImageReader reader; int format; Image image; boolean closed;
+        ImageReader reader; int format; Image image; boolean closed; RuntimeException acquireFailure;
         Surface surface = Shadow.newInstanceOf(Surface.class); ImageReader.OnImageAvailableListener listener;
         @Implementation protected static ImageReader newInstance(int width, int height, int format, int maxImages) {
             ImageReader reader = Shadow.newInstanceOf(ImageReader.class);
@@ -449,7 +590,10 @@ public class GlassCameraWarmSessionTest {
         @Implementation protected Surface getSurface() { return surface; }
         @Implementation protected void setOnImageAvailableListener(ImageReader.OnImageAvailableListener l, Handler h) { listener = l; }
         @Implementation protected Image acquireLatestImage() { return image; }
-        @Implementation protected Image acquireNextImage() { return image; }
+        @Implementation protected Image acquireNextImage() {
+            if (acquireFailure != null) throw acquireFailure;
+            return image;
+        }
         @Implementation protected void close() { closed = true; }
     }
     @Implements(CaptureRequest.Builder.class) public static class BuilderShadow {

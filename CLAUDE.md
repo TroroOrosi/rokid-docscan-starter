@@ -1,6 +1,6 @@
 # rokid-docscan-starter development guide
 
-Status: Current engineering contract. Updated 2026-10-29.
+Status: Current engineering contract. Updated 2026-10-30.
 
 **Start at `.agents/progress/current.md`.** It lists the operator's decisions,
 the verified state and the next steps. Do not re-ask what it settles. Keep the
@@ -44,9 +44,11 @@ The intended session, from `tasks/plan.md`:
   confirmed this is available. The server process therefore runs on the phone.
   Nothing auto-terminates at 150 minutes.
 - **The current implementation uses Termux Chromium**, a private persistent
-  profile and loopback CDP. Initial visible login uses Termux:X11; later runs
-  are headless and supervised with FastAPI and the watcher by Termux services
-  and Termux:Boot. First unlock and available tethering are prerequisites.
+  profile and loopback CDP. Visible login and later runs use Termux:X11.
+  Four Termux services supervise X11, the browser, FastAPI and the watcher,
+  with Termux:Boot after first unlock and available tethering. On the measured
+  phone headless starts encountered HTTP403; visible Work completed original-image
+  technical fixtures. This does not establish a platform-wide headless restriction.
   Login persistence and venue operation still need physical acceptance.
   The previous Android Chrome route was measured 2026-09-15
   (`docs/hardware-measurements.md` §F-6-1):
@@ -140,7 +142,7 @@ The earlier Android Chrome build used an abstract unix CDP socket and an
 on-device forward. Those source/device observations remain in
 `docs/hardware-measurements.md` §F. The current Termux Chromium launcher opens
 loopback CDP directly and does not use a phone-to-itself connection. Verify
-visible login, headless login persistence and actual model selection before
+visible login persistence and actual public model/effort/speed selection before
 switching the physical route.
 
 A throttled account is refused in the message *body*, not by an exception. The
@@ -183,7 +185,9 @@ and uncertain-send safeguards remain independent of model-name fallback.
   of forcing a moving shot. Physical character accuracy remains unverified.
   The frozen CUSTOMVIEW route keeps explicit phone controls. The original
   `adf12ee` disable decision belonged to the route without operator taps.
-- On the local surface the captured still is drawn after camera closure; a
+- On the local surface the captured still is drawn after its native image is
+  closed. The preview session continues observing page changes until pause,
+  capture end or failure; physical frame continuity remains unverified. A
   visible acknowledgement starts a fresh 3000ms review. A single tap retakes,
   no input commits, BACK ends capture after the last review. Hidden or stale
   views cannot commit. A waiting tap requests a manual shot without starting

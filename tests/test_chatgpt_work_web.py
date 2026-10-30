@@ -306,7 +306,8 @@ class _Context:
 
 def _booklet(client, page, files, **kwargs):
     return client._ask_with_retries(_Context(page), "Answer the entire paper", [],
-        files=files, chat_key="work:local-fixture", expect=("questions",), booklet=True, **kwargs)
+        files=files, chat_key=kwargs.pop("chat_key", "work:local-fixture"),
+        expect=("questions",), booklet=True, **kwargs)
 
 
 def _guard_state():
@@ -342,6 +343,182 @@ def test_late_work_final_clears_only_own_uncertain_send_on_restart(page):
     page.evaluate("window.finish()")
     assert json.loads(_booklet(work.WorkWebClient(), tab, lambda: []))["questions"]
     assert page.evaluate("window.sent") == 1 and _guard_state() == "idle"
+
+
+def test_expired_work_batch_is_read_only_until_its_matching_final_arrives(page, monkeypatch):
+    from contextlib import contextmanager
+
+    _upload_composer(page)
+    page.evaluate("window.suppressFinal = true")
+    key = "session:1:browser:" + "a" * 64
+    tab = _VenueTab(page)
+    with pytest.raises(chatgpt_web.ChatGptWebUncertain):
+        _booklet(work.WorkWebClient(), tab, lambda: [_payload()], chat_key=key)
+    client = work.WorkWebClient()
+    checks = []
+    held = False
+
+    @contextmanager
+    def expired():
+        nonlocal held
+        checks.append(True)
+        held = True
+        try:
+            yield
+        finally:
+            held = False
+
+    original_read = work.work_reply_state
+    def read(*args):
+        assert not held, "the notification-state guard must not span a CDP request"
+        return original_read(*args)
+    monkeypatch.setattr(work, "work_reply_state", read)
+
+    for name in ("_ask_locked", "_attach_images", "_verify_model", "_start_new_chat",
+                 "_send_and_read", "_wait_for_composer"):
+        monkeypatch.setattr(client, name, lambda *a, **kw: pytest.fail("read-only recovery entered sending"))
+    from app.solvers import cdp
+    monkeypatch.setattr(cdp, "connect_over_cdp", lambda endpoint: type("Browser", (), {
+        "contexts": [_Context(tab)], "close": lambda self: None})())
+    assert client.pending_work_owner() == {"chat_key": key, "stage": "single"}
+    assert client.retire_expired_batch(chat_key=key, booklet_stage="single", expired_guard=expired) is False
+    assert checks == [True] and _guard_state() == "uncertain"
+    page.evaluate("window.finish()")
+    assert client.retire_expired_batch(chat_key=key, booklet_stage="single", expired_guard=expired) is True
+    assert checks == [True, True, True] and _guard_state() == "idle"
+    assert page.evaluate("window.sent") == 1 and page.evaluate("window.uploaded") == ["originals.zip"]
+
+
+@pytest.mark.parametrize("stage", ["single", "reading"])
+def test_retiring_an_expired_intermediate_ack_never_sends_the_next_batch(page, monkeypatch, stage):
+    from contextlib import nullcontext
+    from app import config
+    from app.solvers import cdp
+
+    _upload_composer(page)
+    page.evaluate("window.suppressFinal = true")
+    monkeypatch.setattr(work.WorkWebClient, "transfer_batch_bytes", 40)
+    key = "session:1:browser:" + "a" * 64
+    tab = _VenueTab(page)
+    files = [_payload(f"part{number}.zip", bytes([number]) * 20) for number in range(3)]
+    with pytest.raises(chatgpt_web.ChatGptWebUncertain):
+        _booklet(work.WorkWebClient(), tab, lambda: iter(files), chat_key=key, booklet_stage=stage)
+    page.evaluate("window.finish()")
+    monkeypatch.setattr(cdp, "connect_over_cdp", lambda endpoint: type("Browser", (), {
+        "contexts": [_Context(tab)], "close": lambda self: None})())
+    assert work.WorkWebClient().retire_expired_batch(chat_key=key,
+        booklet_stage=stage, expired_guard=nullcontext)
+    assert page.evaluate("window.sent") == 1 and _guard_state() == "idle"
+    assert page.evaluate("window.uploaded") == ["part0.zip", "part1.zip"]
+    transfer = json.loads((config.DATA_DIR / "browser-state/chats.json").read_text())["chats"][key]["transfer"]
+    assert transfer["pending"] is None and len(transfer["completed"]) == 1
+    assert transfer.get("final") is None and not transfer.get("finals")
+
+
+@pytest.mark.parametrize("fault", ["generic_chat", "ambiguous", "request_id", "nonce", "url", "url_type"])
+def test_expired_recovery_never_claims_unknown_or_ambiguous_owners(page, monkeypatch, fault):
+    from app import config
+    from app.solvers import cdp
+
+    _upload_composer(page)
+    page.evaluate("window.suppressFinal = true")
+    key = "session:1:browser:" + "a" * 64
+    with pytest.raises(chatgpt_web.ChatGptWebUncertain):
+        _booklet(work.WorkWebClient(), _VenueTab(page), lambda: [_payload()], chat_key=key)
+    page.evaluate("window.finish()")
+    chats_path = config.DATA_DIR / "browser-state/chats.json"
+    record = json.loads(chats_path.read_text())
+    entry = record["chats"][key]
+    if fault == "generic_chat":
+        record["chats"] = {"chat:legacy": entry}
+    elif fault == "ambiguous":
+        record["chats"]["session:2:browser:" + "b" * 64] = entry
+    elif fault == "request_id":
+        entry["pending"] = "b" * 64
+    elif fault == "nonce":
+        entry["transfer"]["pending"]["id"] = "b" * 64
+    else:
+        entry["url"] = {"wrong": "type"} if fault == "url_type" else "https://chatgpt.com/"
+    chats_path.write_text(json.dumps(record))
+    before = chats_path.read_bytes()
+    journal = (chats_path.parent / "submission.json").read_bytes()
+    monkeypatch.setattr(cdp, "connect_over_cdp", lambda endpoint: pytest.fail("unknown owner reached browser"))
+    client = work.WorkWebClient()
+    assert client.pending_work_owner() is None
+    assert client.retire_expired_batch(chat_key=key, booklet_stage="single",
+        expired_guard=lambda: pytest.fail("unknown owner requested expiry")) is False
+    assert chats_path.read_bytes() == before
+    assert (chats_path.parent / "submission.json").read_bytes() == journal
+    assert page.evaluate("window.sent") == 1 and _guard_state() == "uncertain"
+
+
+@pytest.mark.parametrize("fault", ["streaming", "ambiguous_final", "wrong_batch", "wrong_batch_limit",
+                                   "json_error_limit", "unknown_body", "foreign_refusal", "refusal", "revoked"])
+def test_expired_recovery_acknowledges_only_a_completed_owned_turn(page, monkeypatch, fault):
+    from contextlib import contextmanager
+    from app.solvers import cdp
+    from app.work_bridge import WorkConflict
+
+    _upload_composer(page)
+    page.evaluate("window.suppressFinal = true; window.stopped = 0")
+    key = "session:1:browser:" + "a" * 64
+    tab = _VenueTab(page)
+    with pytest.raises(chatgpt_web.ChatGptWebUncertain):
+        _booklet(work.WorkWebClient(), tab, lambda: [_payload()], chat_key=key)
+    page.evaluate("window.finish()")
+    if fault == "streaming":
+        page.evaluate("document.querySelector('main').insertAdjacentHTML('beforeend', "
+            "'<button aria-label=Stop onclick=\"window.stopped++\">Stop</button>')")
+    elif fault == "ambiguous_final":
+        page.evaluate("(() => {let e=document.querySelector('[data-local-conversation-final-assistant]'); "
+            "e.parentNode.append(e.cloneNode(true))})()")
+    elif fault in ("wrong_batch", "wrong_batch_limit", "json_error_limit"):
+        body = ("{batch_id:'wrong', error:'usage limit'}" if fault == "json_error_limit" else
+                "{...JSON.parse(e.textContent), batch_id:'wrong'" +
+                (", error:'usage limit'}" if fault == "wrong_batch_limit" else "}"))
+        page.evaluate("(() => {let e=document.querySelector('[data-local-conversation-final-assistant] div'); "
+            "e.textContent=JSON.stringify(" + body + ")})()")
+    elif fault in ("unknown_body", "refusal", "foreign_refusal"):
+        page.evaluate("document.querySelector('[data-local-conversation-final-assistant] div').textContent = "
+            + json.dumps("usage limit" if "refusal" in fault else "unrecognized final body"))
+        if fault == "foreign_refusal":
+            page.evaluate("(() => {let other=document.createElement('main'); document.body.append(other); "
+                "other.append(document.querySelector('[data-local-conversation-final-assistant]'))})()")
+    checks = []
+    @contextmanager
+    def expired():
+        checks.append(True)
+        if fault == "revoked" and len(checks) == 2:
+            raise WorkConflict("the old job is no longer proven expired")
+        yield
+    monkeypatch.setattr(cdp, "connect_over_cdp", lambda endpoint: type("Browser", (), {
+        "contexts": [_Context(tab)], "close": lambda self: None})())
+    assert work.WorkWebClient().retire_expired_batch(chat_key=key,
+        booklet_stage="single", expired_guard=expired) is (fault == "refusal")
+    assert _guard_state() == ("idle" if fault == "refusal" else "uncertain")
+    assert page.evaluate("window.sent") == 1 and page.evaluate("window.stopped") == 0
+    assert page.evaluate("window.uploaded") == ["originals.zip"]
+
+
+def test_expired_recovery_never_reads_the_browser_while_another_writer_owns_it(page, monkeypatch):
+    from contextlib import nullcontext
+    from app.browser_guard import BrowserGuard
+    from app.solvers import cdp
+
+    _upload_composer(page)
+    page.evaluate("window.suppressFinal = true")
+    key = "session:1:browser:" + "a" * 64
+    with pytest.raises(chatgpt_web.ChatGptWebUncertain):
+        _booklet(work.WorkWebClient(), _VenueTab(page), lambda: [_payload()], chat_key=key)
+    page.evaluate("window.finish()")
+    monkeypatch.setattr(cdp, "connect_over_cdp", lambda endpoint: pytest.fail("busy writer reached browser"))
+    client = work.WorkWebClient()
+    with BrowserGuard():
+        with pytest.raises(chatgpt_web.ChatGptWebBusy):
+            client.pending_work_owner()
+        with pytest.raises(chatgpt_web.ChatGptWebBusy):
+            client.retire_expired_batch(chat_key=key, booklet_stage="single", expired_guard=nullcontext)
+    assert _guard_state() == "uncertain" and page.evaluate("window.sent") == 1
 
 
 def test_large_booklet_ack_then_plain_user_followup_and_restart_keep_the_same_chat(page, monkeypatch):

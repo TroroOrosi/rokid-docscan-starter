@@ -1,7 +1,7 @@
 # 再開入口：次のセッションはここだけ読めば始められる
 
-最終更新: 2026-10-30続行 — phone Work/Sol6.1/Extra High/Fastの21原PNG ZIP/Drive比較はZIP84/84・Drive83/84。同chat再添付なし追試は21nonce hashと新39値全一致。Work consumerと現在jobの送信後回収を統合、PC関連92＋428testpass・別監査R0/O0。旧世代barrier/原音Work/実紙は未受入。詳細phone-work-connected-root-20261030.json。
-Runs on: 開発・独立監査はWindows PC、接続phoneはF51F/ZY22LWGDCV。会場は常時オンphone AP＋装着glassesだけでPC/USB/毎回接続不要。本人の最新「確認せずにそのまま進めてください」に従い同一復旧・要望内の通常準備で承認を繰り返さない。技術fixture GPT送信3/Drive原PNG upload21・private folder1、phone source/APK/API/env/Boot/services更新0、手動glasses受入0。
+最終更新: 2026-10-30続行 — phone Work原PNG21枚ZIP/Drive＋同chat再添付なし追試を実測。旧Work不確定のread-only整理、可視X11自動起動、撮影後preview保持を実装・別監査R0/O0。PC全pytest1526pass/1skip/3warn、ruff0、Android全199tasks成功/XML517fail0。会場全経路は未受入。詳細phone-work-connected-root-20261030.json。
+Runs on: 開発・独立監査はWindows PC、接続phoneはF51F/ZY22LWGDCV。会場は常時オンphone AP＋装着glassesだけでPC/USB/毎回接続不要。本人の最新「確認せずにそのまま進めてください」に従い通常準備で承認を繰り返さない。技術fixture GPT3/Drive原PNG21/private folder1、fresh snapshot v4は87source/15protected/同browser・X11。phone source/APK/API/env/Boot/services更新0、手動glasses受入0。
 
 ## 0. 読み方（前提と資料に引きずられないため）
 
@@ -90,7 +90,7 @@ Runs on: 開発・独立監査はWindows PC、接続phoneはF51F/ZY22LWGDCV。�
   → 旧サーバ停止 → `nohup bash scripts/phone_serve.sh 127.0.0.1 > data/server-<commit>.log 2>&1 &`。PCからは `ssh -f -N -L 8000:127.0.0.1:8000 ...`（ssh `-i ~/.ssh/f51f_key -p 8022 u0_a26@192.168.0.6`）。
   ベンチの鍵は `ROKID_API_KEY` をスマホの env から読んで渡す（画面に出さない）。
 
-## 4. 次の作業（Runs on: 開発PC＋接続F51F）：Work実DOM/model/Fast/ZIP順送/結果seal＋現在jobの送信後read回収をPC検証・別監査済み（f75bb0/a5e712/d7c733 exit0）。全tile校正済外部route維持、browser判読は未校正。次は更新器schema2/visible-X11自動起動の検証・独立監査→固定commit archive＋fresh snapshot→phone source導入・API/Work/services起動。撮影担当は既存原寸JPEGとpreviewを同sessionで保つ空白短縮をPC実装中。旧世代uncertain整理/録画ZSL/実AIfeedback/原音Work/glasses会場全経路は未受入。以下は旧経緯。
+## 4. 次の作業（Runs on: 開発PC＋接続F51F）：Work旧journal整理・更新器schema2・可視4services・retained previewをPC実装/全検証/別監査済み（91d55b/a09ddb/0c6fe9 exit0）。固定commitの87source archive＋v4 snapshotを照合しphone source-only導入→Workenv/SEND0・4services無効準備→owned browser/X11 handover・API/Work/services起動。原本・鍵・設定・profileを保持する。録画/ZSL・Luna含む実AI feedback・可変紙面/細字・原音Work・glasses会場全経路は継続実装/未受入。以下は旧経緯。
 
 1. 済：独立監査2回（`4552ea1`、`4552ea1..e12e155`）の指摘を `61ad481`〜`1134404` で反映。
 2. 済：4a（3節）。起動はスマホで `bash scripts/phone_serve.sh 127.0.0.1`、PCから `ssh -L 8000:127.0.0.1:8000` で投入した。

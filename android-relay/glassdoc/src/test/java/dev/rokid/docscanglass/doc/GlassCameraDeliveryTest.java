@@ -167,6 +167,14 @@ public class GlassCameraDeliveryTest {
         assertEquals(0, delivered);
         assertEquals(1, failures.size());
     }
+    @Test public void aJpegWithoutASensorTimestampCannotBeBoundToAReusedReaderGeneration() {
+        ((DocScanTestImage) readerShadow.image).timestamp = 0;
+        deliver();
+        assertEquals(0, delivered);
+        assertEquals(List.of("invalid JPEG timestamp"), failures);
+        assertEquals(List.of("image.close", "reader.close"), events);
+        assertTrue((Boolean)ReflectionHelpers.getField(camera, "unknown"));
+    }
     @Test public void memoryFailureClosesTheImageAndSettlesOnce() {
         ((DocScanTestImage) readerShadow.image).memoryFailure = true;
         deliver();

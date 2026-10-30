@@ -1,38 +1,35 @@
 # Real-device operation
 
-Status: Current venue preparation and exercised phone-relay fallback runbook. Updated 2026-10-04.
+Status: Current venue preparation and exercised phone-relay fallback runbook. Updated 2026-10-30.
 
 ## 会場経路の準備（未導入・未受け入れ）
 
-Runs on: スマホのTermux、glassdoc、スマホのテザリングとモバイル通信。PC実装・監査後に、対象端末と正確なコマンドの承認を得てから実行します。
+Runs on: スマホのTermux、glassdoc、スマホのテザリングとモバイル通信。PCは開発・監査に使い、会場の実行には不要です。端末操作は対象とコマンドを固定し、本人の承認範囲内で進めます。
 
-専用Termux Chromiumの永続プロファイルを使います。初回だけ本人がTermux:X11の可視ブラウザでログインし、終了後に同じプロファイルをヘッドレスで確認します。実際のログイン維持・モデル選択・ChatGPT送信を確認してから、新しい自動起動を有効化します。既存Chromeでの部分測定はこの確認の代用になりません。
+専用Termux Chromiumの永続プロファイルとTermux:X11の可視環境を継続使用します。この端末ではヘッドレス時にHTTP403を観測し、可視WorkのSol 6.1・Extra High・Fastで21原PNG入りZIPの送信と返答を確認しました。これは技術fixtureの部品測定で、実紙・グラス表示・再起動後の自動開始の受け入れではありません。既存の手動起動を所有確認して正常に閉じた後、同じプロファイルをサービスへ引き継ぎます。
 
 準備対象はTermuxの `x11-repo`、`chromium`、`termux-x11-nightly`、`termux-services`、`android-tools` と、Termux公式の対応する署名のTermux:X11・Termux:Bootアプリです。導入・設定は別承認です。公式手順は [Chromiumビルド](https://github.com/termux/termux-packages/blob/master/x11-packages/chromium/build.sh)、[Termux:X11](https://github.com/termux/termux-x11)、[Termux:Boot](https://github.com/termux/termux-boot#how-to-use)、[サービス管理](https://github.com/termux/termux-services)を参照します。
 
-`multimodal.env` は権限0600とし、実鍵を表示せず `ROKID_API_KEY`、`ROKID_GLASSES_SERIAL`、`ROKID_SOLVER=chatgpt-web` を保存します。起動スクリプトはCDPを `http://127.0.0.1:9222` に固定します。プロファイルを変える場合だけ `ROKID_BROWSER_PROFILE` を指定します。
+環境設定ファイルは権限0600とし、実鍵を表示せず `ROKID_API_KEY`、`ROKID_GLASSES_SERIAL` を保存します。Work経路は `ROKID_SOLVER=chatgpt-work`、`ROKID_WORK_MODEL=gpt-6.1-sol`、`ROKID_WORK_EFFORT=xhigh`、`ROKID_WORK_SPEED=fast` を使用します。旧Chat互換経路は `chatgpt-web` です。起動スクリプトはCDPを `http://127.0.0.1:9222`、X11表示先を専用の `:1` に固定します。プロファイルを変える場合だけ `ROKID_BROWSER_PROFILE` を指定します。
 準備時の `ROKID_CHATGPT_SEND_ENABLED=0` は未送信DBの自動送信も止めます。ログイン・サービス導入の承認をGPT送信の承認と扱いません。完全な資料と送信対象を特定した別承認の後だけ1へ変えます。
 
 初回セットアップ済みのスマホのソース更新は、確認済みの端末・ブラウザ所有・配布物をGit管理外のmanifestへ固定します。Windows PCで `py -3.12 -X utf8 scripts/phone_update.py --manifest <manifest.json> --manifest-sha256 <確認済みSHA256>` のプレビューを確認します。プレビューは端末に接続せず、引数なしでは必要なmanifest情報だけを表示します。`--inspect-readonly` で更新条件を読み取り、正確な `--execute-approved-source-update` コマンドの承認後だけ更新します。更新処理は配布対象のソースファイルに限り、保存済み写真・答案・Chromiumプロファイル・秘密設定・Git情報を保ちます。
 更新時は送信停止とAPI・監視・サービスの停止を確認し、既存のログイン用ブラウザとX11の所有を再確認します。例外時は、この更新で保存した元のソースから復旧します。接続切断や強制終了で完了を確認できなければ記録とバックアップを残し、再実行を停止します。APK導入・サービス有効化・GPT送信にはそれぞれ別の確認と承認が必要です。この更新の実行と会場経路の受け入れは別です。
 
-承認後に使うTermuxコマンドは以下です。サービス準備は無効状態で作成し、本人ログインとヘッドレス動作の確認後に有効化します。ログイン用ブラウザとサービス用ブラウザを同時に同じプロファイルで起動しません。
+Termuxコマンドは以下です。サービス準備は無効状態で作成します。既存のブラウザ・X11がある場合は、PID・起動時刻・端末起動世代とプロファイルの所有を確かめ、正常終了とポート解放を確認してから有効化します。未知のプロセスやロックを削除して進めません。初回ログイン時の `bash scripts/phone_browser.sh login` も、専用X11の起動と同じプロファイルのブラウザが存在しないことが前提です。
 
 ```bash
-DISPLAY=:0 bash scripts/phone_browser.sh login
 bash scripts/phone_services.sh install
-# login終了後、同じprofileのheadlessで確認する
-bash scripts/phone_browser.sh headless
-# headless確認を終了し、実際の送信を確認した後に常駐へ切替
+# 既存の手動起動を引き継ぎ、ログイン・モデル選択・送信経路を確認後
 bash scripts/phone_services.sh enable
 bash scripts/phone_services.sh status
 ```
 
-Termux:Bootは導入後に本人が一度開きます。スマホ再起動後の最初のロック解除とテザリング利用可能を前提に、ブラウザ・FastAPI・グラス監視の3サービスを起動します。スマホ自身へのADB接続やAndroid Chrome前景維持は使いません。停止時は `bash scripts/phone_services.sh disable` で3サービスを止め、保存資料を残します。
+Termux:Bootは導入後に本人が一度開きます。現在の接続端末には導入・初回起動済みです。スマホ再起動後の最初のロック解除とテザリング利用可能を前提に、X11→ブラウザ→FastAPI→グラス監視の4サービスを有効化します。この順序は起動要求の順序で、全サービスの準備完了を保証しません。スマホ自身へのADB接続やAndroid Chrome前景維持は使いません。停止時は `bash scripts/phone_services.sh disable` で逆順に止め、保存資料を残します。残存するChromiumのSingletonLockは起動を止めるため、全クラッシュからの自動復旧は未実装です。
 
-グラスは `http://gateway:8000` を使い、認証付き状態通知の接続元IPから監視対象を見つけます。制御の前にグラスの `ro.serialno` を指定serialと照合します。撮影はローカル保存後に転送し、確定済みの転送から再開します。GPTには頁ごとのJPEGを同じチャットへ20添付以内ずつ送り、中間受領確認の完了後に次を送り、最後に全答案を求めます。送信不確定は自動再送しません。
+グラスは `http://gateway:8000` を使い、認証付き状態通知の接続元IPから監視対象を見つけます。制御の前にグラスの `ro.serialno` を指定serialと照合します。撮影はローカル保存後に転送し、確定済みの転送から再開します。Workにはサーバの原画像PNGをZIPにまとめ、20添付・メッセージ容量内で同じチャットへ順番に送ります。中間受領確認の完了後に次を送り、最後に全答案を求めます。PDFへの変換や頁数だけの上限は設けません。合同英語は保存済みの読解返答の後に、完成した原音だけを同じチャットへ追加します。送信不確定は照合可能な返答を読み取って回収し、確認できない送信を自動で繰り返しません。
 
-受け入れは、PC・外部Wi-Fiを使わず再起動→撮影→送信→答案表示を通した上で、似た別頁・図だけの頁・確認中の頁めくり・影・消灯中の終了入力・ホームの誤タップを確認します。消灯1秒、復帰3秒、無音、150分後の電池10%以上、19冊の実写可読性と全22頁＋原音のリスニングは未検証です。
+受け入れは、PC・外部Wi-Fiを使わず再起動→撮影→送信→答案表示を通し、似た別頁・図だけの頁・確認中の頁めくり・影・細字・数式・縦書き・可変紙寸法と見落としを確認します。撮影・実写真確認・答案表示以外は5秒無操作で消灯し、答案は必要な記述を固定一画面へ収めます。録画のフレーム選択・高解像度静止画・AI点検・Work/Drive・最小HUDを、セッション全体の精度・速度・操作数で比較してから教科別の複数年度計測へ進みます。画面以外の節電で精度・速度を落としません。これらの実機精度、消灯・復帰時間、無音、原音の使用は未受け入れです。
 
 ## 旧スマホリレー経路の測定手順
 

@@ -23,34 +23,33 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 import zlib
 
 ROOT = Path(__file__).resolve().parents[1]
 REPORTS = ROOT / 'data/device-setup/reports/venue-pc-20260930'
 ADB = str(Path(os.environ.get('LOCALAPPDATA', Path.home() / 'AppData/Local')) / 'Android/Sdk/platform-tools/adb.exe')
-DEFAULT_MANIFEST = REPORTS / 'phone-source-update-manifest-20261004.json'
+DEFAULT_MANIFEST = REPORTS / 'phone-source-update-manifest-20261030.json'
 TARGET = SERIAL = MODEL = ''
 PHONE_UID = 0
 EXECUTE_FLAG = '--execute-approved-source-update'
 INSPECT_FLAG = '--inspect-readonly'
-NEW_ARCHIVE = 'venue-phone-c9deb74-20261003-source.tar'
-OLD_ARCHIVE = 'venue-phone-67f8576.tar'
-NEW_ARCHIVE_SHA = '21d770bd7eab68c33813cdd4a973dcdb5c9df6381a2816bd6d7ebb4f3d0ec290'
-OLD_ARCHIVE_SHA = ''
-SOURCE_COMMIT = 'c9deb74eb3f4d95a7c2ce6d56b52bcc28d49d137'
-SOURCE_HEAD = 'b94be6ef5d4af8ec41c73922b87b4d0e1f071ee6'
+MAX_BUNDLE_BYTES = 8 * 1024 * 1024
+MAX_WIRE_BYTES = 32 * 1024 * 1024
+WIRE_LENGTH = 0
+SOURCE_COMMIT = NEW_ARCHIVE_SHA = SNAPSHOT_SHA = MANIFEST_SHA = ''
+MANIFEST_CONTENT = SNAPSHOT_CONTENT = b''
+ARCHIVE = SNAPSHOT = {}
+GUARD_ENV = ''
 PHONE_HOME = Path('/data/data/com.termux/files/home')
 PHONE_PREFIX = Path('/data/data/com.termux/files/usr')
 PHONE_REPO = PHONE_HOME / 'rokid-server'
 PROFILE = PHONE_REPO / 'data/chromium-profile'
-HELPER = PHONE_HOME / 'rokid-deploy-67f8576-20261001/phone-deploy-20261001.py'
-HELPER_SHA = CDP_SHA = BOOT_SHA = LOGGER_SHA = PRESERVED_SHA = ''
+BOOT_SHA = ''
 BROWSER_BINDING = {}
 X11_BINDING = {}
-BACKUP = PHONE_HOME / 'rokid-backups/pre-c9deb74-source-20261004'
+BACKUP = PHONE_HOME / 'rokid-backups/unconfigured'
 LOGGER_TARGET = PHONE_PREFIX / 'share/termux-services/svlogger'
-LOGGER_LEAVES = {PHONE_PREFIX / 'var/service' / name / 'log/run'
-                 for name in ('ssh-agent', 'sshd', 'tx11', 'tx11-xfce4')}
 ROOT_FILES = {'requirements-phone.txt', 'constraints-phone.txt'}
 stage = 'native_input'
 transaction_state = {'phase': 'not_started', 'source_writes': 0, 'restored': False}
@@ -71,8 +70,8 @@ def source_path(raw: str) -> bool:
             and (name.parts[0] in {'app', 'scripts'} or raw in ROOT_FILES))
 
 
-def load_bundle(content: bytes, expected_sha: str) -> dict[str, bytes]:
-    if len(content) > 2 * 1024 * 1024 or hashlib.sha256(content).hexdigest() != expected_sha:
+def load_bundle(content: bytes, expected_sha: str, expected_files: dict) -> dict[str, bytes]:
+    if len(content) > MAX_BUNDLE_BYTES or hashlib.sha256(content).hexdigest() != expected_sha:
         raise RuntimeError('bundle_checksum_or_size')
     files = {}
     seen = set()
@@ -86,21 +85,28 @@ def load_bundle(content: bytes, expected_sha: str) -> dict[str, bytes]:
             if member.isdir():
                 directories.add(member.name)
                 continue  # metadata only; never extracted or created from tar
-            if not member.isfile() or member.size < 0 or member.size > 2 * 1024 * 1024:
+            if not member.isfile() or member.size < 0 or member.size > MAX_BUNDLE_BYTES:
                 raise RuntimeError('unsafe_bundle_member')
             total += member.size
-            if total > 2 * 1024 * 1024:
+            if total > MAX_BUNDLE_BYTES:
                 raise RuntimeError('bundle_total_size')
             stream = archive.extractfile(member)
             if stream is None:
                 raise RuntimeError('unreadable_bundle_member')
             data = stream.read()
+            expected = expected_files.get(member.name)
+            if (not isinstance(expected, dict) or set(expected) != {'sha256', 'size', 'mode'}
+                    or type(expected['size']) is not int or type(expected['mode']) is not int
+                    or expected['mode'] not in {0o644, 0o755} or member.size != expected['size']
+                    or hashlib.sha256(data).hexdigest() != expected['sha256']
+                    or (member.mode & ~0o020) != expected['mode']):
+                raise RuntimeError('bundle_manifest_mismatch')
             if member.name.endswith('.py'):
                 compile(data, member.name, 'exec')
             if member.name.endswith('.sh') and b'\r' in data:
                 raise RuntimeError('non_LF_shell')
             files[member.name] = data
-    if len(files) != 79 or not ROOT_FILES.issubset(files):
+    if not files or set(files) != set(expected_files) or not ROOT_FILES.issubset(files):
         raise RuntimeError('bundle_scope')
     parents = {str(parent) for name in files for parent in PurePosixPath(name).parents if str(parent) != '.'}
     if not directories.issubset(parents):
@@ -130,7 +136,7 @@ def sync_directories(directory: Path) -> None:
             os.close(descriptor)
 
 
-def atomic_bytes(path: Path, content: bytes, mode: int) -> None:
+def atomic_bytes(path: Path, content: bytes, mode: int, *, exclusive: bool = False) -> None:
     # The preparer's file-fsync, atomic replace and directory-fsync method.
     plain(path)
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -141,50 +147,86 @@ def atomic_bytes(path: Path, content: bytes, mode: int) -> None:
             stream.flush()
             os.chmod(temporary, mode)
             os.fsync(stream.fileno())
-        os.replace(temporary, path)
+        if exclusive:
+            os.link(temporary, path)  # Atomic no-clobber publication of a complete private file.
+        else:
+            os.replace(temporary, path)
         sync_directories(path.parent)
     finally:
         Path(temporary).unlink(missing_ok=True)  # only this call's own temporary
 
 
-def source_hashes(repo: Path, names) -> dict[str, str]:
+def path_metadata(path: Path) -> dict:
+    """lstat without opening directories, links, sockets or FIFOs."""
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return {'exists': False}
+    row = {'exists': True, 'uid': info.st_uid, 'mode': stat.S_IMODE(info.st_mode), 'size': info.st_size}
+    if stat.S_ISREG(info.st_mode):
+        row.update(type='file', sha256=sha(path))
+    elif stat.S_ISDIR(info.st_mode):
+        row['type'] = 'directory'
+    elif stat.S_ISLNK(info.st_mode):
+        row.update(type='symlink', link_text=os.readlink(path))
+    elif stat.S_ISSOCK(info.st_mode):
+        row['type'] = 'socket'
+    elif stat.S_ISFIFO(info.st_mode):
+        row['type'] = 'fifo'
+    else:
+        raise RuntimeError('unsupported_metadata_type')
+    return row
+
+
+def source_metadata(repo: Path, names) -> dict:
     result = {}
     for name in names:
         if not source_path(name):
             raise RuntimeError('unsafe_source_path')
         path = repo / name
         plain(path)
-        if not path.is_file():
-            raise RuntimeError('missing_source')
-        result[name] = sha(path)
+        row = path_metadata(path)
+        if row['exists'] and (row['type'] != 'file' or row['uid'] != PHONE_UID or row['mode'] & 0o022):
+            raise RuntimeError('unsafe_source_metadata')
+        result[name] = row
     return result
 
 
-def update_sources(repo: Path, backup: Path, files: dict[str, bytes], old_hashes: dict[str, str],
-                   guard, write=atomic_bytes) -> dict:
+def file_identity(path: Path) -> tuple[int, int]:
+    info = path.lstat()
+    return info.st_dev, info.st_ino
+
+
+def update_sources(repo: Path, backup: Path, files: dict[str, bytes], previous_sources: dict,
+                   guard, *, new_modes: dict[str, int], write=atomic_bytes) -> dict:
     """One transaction. An existing/partial journal is never resumed or overwritten."""
     global stage
-    if set(files) != set(old_hashes) or len(files) != 79:
+    if (not files or set(files) != set(previous_sources) or set(files) != set(new_modes)
+            or any(type(mode) is not int or mode not in {0o600, 0o700} for mode in new_modes.values())):
         raise RuntimeError('source_scope')
     plain(repo)
     plain(backup)
     if backup.exists():
         raise RuntimeError('transaction_already_exists')
     stage = 'source_update_preflight'
-    before = guard(old_hashes)
-    if source_hashes(repo, files) != old_hashes:
+    before = guard(previous_sources)
+    if source_metadata(repo, files) != previous_sources:
         raise RuntimeError('unknown_old_source')
-    previous = {name: {'sha256': old_hashes[name], 'mode': stat.S_IMODE((repo / name).stat().st_mode),
-                       'new_sha256': hashlib.sha256(data).hexdigest()}
-                for name, data in files.items()}
-    needed = sum(len(data) + (repo / name).stat().st_size for name, data in files.items()) + 16 * 1024 * 1024
+    previous = {}
+    for name, data in files.items():
+        private_directory((repo / name).parent)
+        row = previous_sources[name]
+        previous[name] = {'before': row, 'after': {
+            'exists': True, 'type': 'file', 'sha256': hashlib.sha256(data).hexdigest(), 'size': len(data),
+            'mode': row['mode'] if row['exists'] else new_modes[name], 'uid': PHONE_UID}}
+    needed = sum(len(data) + previous_sources[name].get('size', 0) for name, data in files.items()) + 16 * 1024 * 1024
     if shutil.disk_usage(repo).free < needed:
         raise RuntimeError('backup_space')
     os.umask(0o077)
     backup.mkdir(parents=True, mode=0o700)
     receipt = {'phase': 'backing_up', 'source_bundle_commit': SOURCE_COMMIT,
-               'reference_runtime_commit': SOURCE_HEAD, 'archive_sha256': NEW_ARCHIVE_SHA,
-               'old_archive_sha256': OLD_ARCHIVE_SHA, 'sources': previous,
+               'snapshot_sha256': SNAPSHOT_SHA, 'archive_sha256': NEW_ARCHIVE_SHA,
+               'sources': previous,
                'protected_and_owner': before, 'source_writes': 0,
                'phone_git_metadata_updated': False}
     journal = backup / 'manifest.json'
@@ -194,30 +236,38 @@ def update_sources(repo: Path, backup: Path, files: dict[str, bytes], old_hashes
 
     save()
     for name in files:
+        if not previous_sources[name]['exists']:
+            continue
         target = backup / 'source' / name
         write(target, (repo / name).read_bytes(), 0o600)
-        if sha(target) != old_hashes[name]:
+        if sha(target) != previous_sources[name]['sha256']:
             raise RuntimeError('backup_checksum')
-    if guard(old_hashes) != before:
+    if source_metadata(repo, files) != previous_sources or guard(previous_sources) != before:
         raise RuntimeError('pre_update_state_changed')
     receipt['phase'] = 'applying'
     transaction_state['phase'] = 'applying'
     save()
+    created = {}
     try:
         stage = 'atomic_source_update'
         for name, payload in files.items():
             # No private root or whole app/scripts tree is renamed.
             plain(repo / name)
-            if (sha(repo / name) != old_hashes[name]
-                    or stat.S_IMODE((repo / name).stat().st_mode) != previous[name]['mode']):
+            if path_metadata(repo / name) != previous_sources[name]:
                 raise RuntimeError('source_changed_during_update')
-            write(repo / name, payload, previous[name]['mode'])
+            row = previous[name]
+            if row['before']['exists']:
+                write(repo / name, payload, row['after']['mode'])
+            else:
+                write(repo / name, payload, row['after']['mode'], exclusive=True)
+                created[name] = file_identity(repo / name)
+                row['created_identity'] = list(created[name])
             receipt['source_writes'] += 1
             transaction_state['source_writes'] = receipt['source_writes']
             save()
         stage = 'source_update_final_guard'
-        new_hashes = {name: row['new_sha256'] for name, row in previous.items()}
-        if source_hashes(repo, files) != new_hashes or guard(new_hashes) != before:
+        expected_sources = {name: row['after'] for name, row in previous.items()}
+        if source_metadata(repo, files) != expected_sources or guard(expected_sources) != before:
             raise RuntimeError('post_update_state_changed')
         receipt['phase'] = 'source_prepared_send0'
         save()
@@ -226,25 +276,36 @@ def update_sources(repo: Path, backup: Path, files: dict[str, bytes], old_hashes
     except BaseException:
         stage = 'source_transaction_restore_preflight'
         try:
-            current = source_hashes(repo, files)
-            if any(current[name] not in {row['sha256'], row['new_sha256']}
-                   for name, row in previous.items()):
-                raise RuntimeError('unknown_partial_source')
+            current = source_metadata(repo, files)
+            for name, row in previous.items():
+                if current[name] not in (row['before'], row['after']):
+                    raise RuntimeError('unknown_partial_source')
+                if (not row['before']['exists'] and current[name]['exists']
+                        and (name not in created or file_identity(repo / name) != created[name])):
+                    raise RuntimeError('unknown_created_source')
             if guard(current) != before:
                 raise RuntimeError('restore_owner_or_protected_changed')
             for name in files:
+                if not previous_sources[name]['exists']:
+                    continue
                 target = backup / 'source' / name
                 plain(target)
-                if sha(target) != old_hashes[name]:
+                if sha(target) != previous_sources[name]['sha256']:
                     raise RuntimeError('restore_backup_changed')
             stage = 'restore_this_transaction_sources'
             for name, row in previous.items():
                 plain(repo / name)
-                if (sha(repo / name) not in {row['sha256'], row['new_sha256']}
-                        or stat.S_IMODE((repo / name).stat().st_mode) != row['mode']):
+                current_row = path_metadata(repo / name)
+                if current_row not in (row['before'], row['after']):
                     raise RuntimeError('source_changed_before_restore')
-                write(repo / name, (backup / 'source' / name).read_bytes(), row['mode'])
-            if source_hashes(repo, files) != old_hashes or guard(old_hashes) != before:
+                if row['before']['exists']:
+                    write(repo / name, (backup / 'source' / name).read_bytes(), row['before']['mode'])
+                elif current_row['exists']:
+                    if name not in created or file_identity(repo / name) != created[name]:
+                        raise RuntimeError('created_source_changed_before_restore')
+                    (repo / name).unlink()
+                    sync_directories((repo / name).parent)
+            if source_metadata(repo, files) != previous_sources or guard(previous_sources) != before:
                 raise RuntimeError('restore_verification_failed')
             receipt['phase'] = 'rolled_back'
             transaction_state.update(phase='rolled_back', restored=True)
@@ -257,41 +318,43 @@ def update_sources(repo: Path, backup: Path, files: dict[str, bytes], old_hashes
         raise
 
 
-def process_binding(pid: int) -> tuple[dict, list[str]]:
-    if type(pid) is not int or pid <= 0 or sha(Path('/proc/sys/kernel/random/boot_id')) != BOOT_SHA:
-        raise RuntimeError('process_boot_or_pid')
-    process = Path('/proc') / str(pid)
-    start = int((process / 'stat').read_text().rsplit(')', 1)[1].split()[19])
-    arguments = [data.decode('utf-8', 'replace') for data in (process / 'cmdline').read_bytes().split(b'\0') if data]
-    return {'pid': pid, 'uid': process.stat().st_uid, 'starttime': start,
-            'boot_id_sha256': BOOT_SHA}, arguments
+def normalized_metadata(row: dict, *, dynamic: bool = False) -> dict:
+    result = dict(row)
+    if result.get('type') != 'file':
+        result.pop('size', None)
+    if dynamic and result.get('type') == 'file':
+        result.pop('size', None)
+        result.pop('sha256', None)
+    return result
 
 
-def snapshot_logger(leaf: Path, cache: dict) -> dict:
-    if leaf not in LOGGER_LEAVES:
-        raise RuntimeError('unexpected_logger_leaf')
-    plain(leaf.parent)
-    parent = leaf.parent.stat()
-    link = leaf.lstat()
-    if (not leaf.parent.is_dir() or parent.st_uid != PHONE_UID or stat.S_IMODE(parent.st_mode) != 0o700
-            or not stat.S_ISLNK(link.st_mode) or link.st_uid != PHONE_UID or stat.S_IMODE(link.st_mode) != 0o777
-            or os.readlink(leaf) != str(LOGGER_TARGET) or leaf.resolve(strict=True) != LOGGER_TARGET):
-        raise RuntimeError('service_logger_link')
-    plain(LOGGER_TARGET)
-    if LOGGER_TARGET not in cache:
-        info = LOGGER_TARGET.stat()
-        if (not stat.S_ISREG(info.st_mode) or info.st_uid != PHONE_UID
-                or stat.S_IMODE(info.st_mode) != 0o700 or sha(LOGGER_TARGET) != LOGGER_SHA):
-            raise RuntimeError('service_logger_target')
-        owner = subprocess.run([str(PHONE_PREFIX / 'bin/dpkg-query'), '-S', str(LOGGER_TARGET)],
-                               capture_output=True, text=True, timeout=5, check=False)
-        if owner.returncode or owner.stdout.strip() != 'termux-services: ' + str(LOGGER_TARGET):
-            raise RuntimeError('service_logger_package')
-        cache[LOGGER_TARGET] = {'target': str(LOGGER_TARGET), 'target_sha256': LOGGER_SHA,
-                                'target_uid': info.st_uid, 'target_mode': stat.S_IMODE(info.st_mode),
-                                'target_package': 'termux-services'}
-    return {'kind': 'symlink', 'link_text': str(LOGGER_TARGET), 'uid': link.st_uid, 'mode': stat.S_IMODE(link.st_mode),
-            'parent_uid': parent.st_uid, 'parent_mode': stat.S_IMODE(parent.st_mode), **cache[LOGGER_TARGET]}
+def inventory(root: Path) -> dict:
+    plain(root)
+    result = {'.': path_metadata(root)}
+    if not result['.']['exists']:
+        return result
+    if result['.']['type'] != 'directory':
+        raise RuntimeError('inventory_root_type')
+    def failed(error):
+        raise error
+    for directory, dirs, files in os.walk(root, followlinks=False, onerror=failed):
+        for name in sorted(dirs + files):
+            path = Path(directory) / name
+            result[path.relative_to(root).as_posix()] = path_metadata(path)
+    return result
+
+
+def check_inventory(actual: dict, expected: dict, *, service: bool = False) -> dict:
+    if set(actual) != set(expected):
+        raise RuntimeError('inventory_path_set_changed')
+    stable = {}
+    for name, row in actual.items():
+        dynamic = (service and 'supervise' in PurePosixPath(name).parts
+                   and PurePosixPath(name).name in {'pid', 'stat', 'status'})
+        stable[name] = normalized_metadata(row, dynamic=dynamic)
+        if stable[name] != normalized_metadata(expected[name], dynamic=dynamic):
+            raise RuntimeError('inventory_metadata_changed')
+    return stable
 
 
 def private_directory(path: Path) -> None:
@@ -301,20 +364,33 @@ def private_directory(path: Path) -> None:
         raise RuntimeError('private_directory_owner')
 
 
+def process_binding(pid: int) -> tuple[dict, list[str]]:
+    if type(pid) is not int or pid <= 0 or sha(Path('/proc/sys/kernel/random/boot_id')) != BOOT_SHA:
+        raise RuntimeError('process_boot_or_pid')
+    process = Path('/proc') / str(pid)
+    if process.stat().st_uid != PHONE_UID:
+        raise RuntimeError('process_owner_changed')
+    start = int((process / 'stat').read_text().rsplit(')', 1)[1].split()[19])
+    arguments = [part.decode('utf-8', 'replace') for part in (process / 'cmdline').read_bytes().split(b'\0') if part]
+    return {'pid': pid, 'starttime': start, 'boot': BOOT_SHA}, arguments
+
+
 def retained_owner(browser) -> dict:
     global stage
     stage = 'retained_browser_x11'
-    private_directory(PHONE_HOME)
-    private_directory(PHONE_REPO)
+    runtime = SNAPSHOT['runtime']
     plain(PROFILE)
-    info = PROFILE.stat()
-    if not stat.S_ISDIR(info.st_mode) or info.st_uid != PHONE_UID or stat.S_IMODE(info.st_mode) != 0o700:
-        raise RuntimeError('private_profile')
-    for path, mode, kind in ((PHONE_PREFIX / 'tmp', 0o700, stat.S_ISDIR),
-                             (PHONE_PREFIX / 'tmp/.X11-unix', 0o1777, stat.S_ISDIR),
-                             (PHONE_PREFIX / 'tmp/.X11-unix/X1', 0o777, stat.S_ISSOCK)):
-        info = path.lstat()
-        if info.st_uid != PHONE_UID or stat.S_IMODE(info.st_mode) != mode or not kind(info.st_mode):
+    if normalized_metadata(path_metadata(PROFILE)) != normalized_metadata(runtime['profile_directory']):
+        raise RuntimeError('private_profile_changed')
+    lock = PROFILE / 'SingletonLock'
+    if normalized_metadata(path_metadata(lock)) != normalized_metadata(runtime['profile_lock']):
+        raise RuntimeError('profile_lock_changed')
+    allowed_sockets = {str(PHONE_PREFIX / 'tmp'), str(PHONE_PREFIX / 'tmp/.X11-unix'),
+                       str(PHONE_PREFIX / 'tmp/.X11-unix/X1')}
+    if set(runtime['X11_socket_metadata']) != allowed_sockets:
+        raise RuntimeError('x11_socket_scope')
+    for name, expected in runtime['X11_socket_metadata'].items():
+        if normalized_metadata(path_metadata(Path(name))) != normalized_metadata(expected):
             raise RuntimeError('x11_socket_metadata')
     with socket.socket(socket.AF_UNIX) as connection:
         connection.settimeout(1)
@@ -329,194 +405,169 @@ def retained_owner(browser) -> dict:
     if (binding != BROWSER_BINDING or any(a.startswith('--headless') for a in arguments)
             or '--user-data-dir=' + str(PROFILE) not in arguments
             or '--remote-debugging-address=127.0.0.1' not in arguments
-            or '--remote-debugging-port=9222' not in arguments):
+            or '--remote-debugging-port=9222' not in arguments
+            or os.readlink(lock).rsplit('-', 1)[-1] != str(binding['pid'])):
         raise RuntimeError('visible_browser_owner')
-    lock = PROFILE / 'SingletonLock'
-    info = lock.lstat()
-    if not stat.S_ISLNK(info.st_mode) or info.st_uid != PHONE_UID or os.readlink(lock).rsplit('-', 1)[-1] != str(binding['pid']):
-        raise RuntimeError('profile_lock_owner')
     x11, _ = process_binding(X11_BINDING['pid'])
     if x11 != X11_BINDING:
         raise RuntimeError('x11_owner')
-    version = browser._connection.send('Browser.getVersion')
-    processes = browser._connection.send('SystemInfo.getProcessInfo')
-    if not isinstance(version, dict) or version.get('product') != 'Chrome/149.0.7827.155':
-        raise RuntimeError('browser_version')
-    if not isinstance(processes, dict) or not isinstance(processes.get('processInfo'), list):
-        raise RuntimeError('cdp_process_shape')
-    matches = [p for p in processes['processInfo'] if isinstance(p, dict) and p.get('type') == 'browser']
-    if len(matches) != 1 or type(matches[0].get('id')) is not int or matches[0]['id'] != binding['pid']:
-        raise RuntimeError('cdp_browser_owner')
-    if process_binding(binding['pid'])[0] != binding or process_binding(x11['pid'])[0] != x11:
+    if browser is not None:
+        version = browser._connection.send('Browser.getVersion')
+        processes = browser._connection.send('SystemInfo.getProcessInfo')
+        if not isinstance(version, dict) or version.get('product') != runtime['CDP_product']:
+            raise RuntimeError('browser_version')
+        if not isinstance(processes, dict) or not isinstance(processes.get('processInfo'), list):
+            raise RuntimeError('cdp_process_shape')
+        matches = [row for row in processes['processInfo'] if isinstance(row, dict) and row.get('type') == 'browser']
+        if len(matches) != 1 or type(matches[0].get('id')) is not int or matches[0]['id'] != binding['pid']:
+            raise RuntimeError('cdp_browser_owner')
+    if (process_binding(binding['pid'])[0] != binding or process_binding(x11['pid'])[0] != x11
+            or normalized_metadata(path_metadata(lock)) != normalized_metadata(runtime['profile_lock'])):
         raise RuntimeError('owner_changed')
-    if os.readlink(lock).rsplit('-', 1)[-1] != str(binding['pid']):
-        raise RuntimeError('lock_changed')
     return {'browser': binding, 'x11': x11}
 
 
-def quiet_services(old) -> dict:
+def quiet_services() -> dict:
     global stage
     stage = 'quiet_services'
     root = PHONE_PREFIX / 'var/service'
-    plain(root)
-    if {p.name for p in root.iterdir()} != {'cupsd', 'ssh-agent', 'sshd', 'tx11', 'tx11-xfce4'}:
-        raise RuntimeError('service_inventory')
-    services, targets = {}, {}
-    for service in root.iterdir():
-        plain(service)
-        info = service.stat()
-        if not service.is_dir() or info.st_uid != PHONE_UID or not (service / 'down').is_file():
-            raise RuntimeError('service_not_disabled')
-        files = {}
-        for name in ('down', 'run', 'log/run'):
-            path = service / name
-            if path in LOGGER_LEAVES:
-                files[name] = snapshot_logger(path, targets)
-            else:
-                old['plain'](path)
-                if path.exists():
-                    info = path.stat()
-                    if not stat.S_ISREG(info.st_mode) or info.st_uid != PHONE_UID:
-                        raise RuntimeError('service_file_owner')
-                    files[name] = {'sha256': sha(path), 'uid': info.st_uid, 'mode': stat.S_IMODE(info.st_mode)}
-        services[service.name] = {'uid': service.stat().st_uid,
-                                  'mode': stat.S_IMODE(service.stat().st_mode), 'files': files}
-    blocked = {'uvicorn', 'runsv', 'runsvdir', 'watch_glasses.py', 'watch_reply.py',
-               'run_exam_deck.py', 'live_one.py', 'live_image.py', 'probe_send.py',
-               'phone_serve.sh', 'phone_watch.sh'}
-    process_list = subprocess.run(['/system/bin/ps', '-u', str(PHONE_UID), '-o', 'UID,PID'],
-                                  capture_output=True, timeout=5, check=False)
-    if type(process_list.returncode) is not int or process_list.returncode != 0 or process_list.stderr:
+    services = check_inventory(inventory(root), SNAPSHOT['service_inventory'], service=True)
+    for name, row in services.items():
+        if name != '.' and '/' not in name and row.get('type') == 'directory':
+            if services.get(name + '/down', {}).get('type') != 'file':
+                raise RuntimeError('service_not_disabled')
+        if row.get('type') == 'symlink':
+            if (not name.endswith('/log/run') or row.get('link_text') != str(LOGGER_TARGET)
+                    or (root / name).resolve(strict=True) != LOGGER_TARGET):
+                raise RuntimeError('service_logger_link')
+    expected_logger = {key: value for key, value in SNAPSHOT['logger_target'].items() if key != 'path'}
+    plain(LOGGER_TARGET)
+    if path_metadata(LOGGER_TARGET) != expected_logger:
+        raise RuntimeError('service_logger_target')
+    owner = subprocess.run([str(PHONE_PREFIX / 'bin/dpkg-query'), '-S', str(LOGGER_TARGET)],
+                           capture_output=True, text=True, timeout=5, check=False)
+    if owner.returncode != 0 or owner.stdout.strip() != 'termux-services: ' + str(LOGGER_TARGET):
+        raise RuntimeError('service_logger_package')
+    blocked = {'uvicorn', 'watch_glasses.py', 'watch_reply.py', 'run_exam_deck.py', 'live_one.py',
+               'live_image.py', 'probe_send.py', 'phone_serve.sh', 'phone_watch.sh',
+               'app.main', 'app.main:app', 'app.work_mcp', 'work_mcp.py'}
+    processes = subprocess.run(['/system/bin/ps', '-u', str(PHONE_UID), '-o', 'UID,PID,ARGS'],
+                               capture_output=True, timeout=5, check=False)
+    if processes.returncode != 0 or processes.stderr:
         raise RuntimeError('process_snapshot_failed')
-    try:
-        rows = process_list.stdout.decode('ascii').splitlines()
-    except UnicodeDecodeError:
-        raise RuntimeError('process_snapshot_shape') from None
-    if not rows or rows[0].split() != ['UID', 'PID']:
+    rows = processes.stdout.decode('utf-8').splitlines()
+    if not rows or rows[0].split()[:2] != ['UID', 'PID']:
         raise RuntimeError('process_snapshot_shape')
-    pids = set()
+    seen = set()
     for row in rows[1:]:
-        fields = row.split()
-        if len(fields) != 2 or not all(field.isdigit() for field in fields):
+        fields = row.split(None, 2)
+        if len(fields) != 3 or not fields[0].isdigit() or not fields[1].isdigit():
             raise RuntimeError('process_snapshot_shape')
-        uid, pid = map(int, fields)
-        if uid != PHONE_UID or pid <= 0 or pid in pids:
+        uid, pid = int(fields[0]), int(fields[1])
+        if uid != PHONE_UID or pid <= 0 or pid in seen:
             raise RuntimeError('process_snapshot_owner_or_duplicate')
-        pids.add(pid)
-    if not {os.getpid(), BROWSER_BINDING['pid'], X11_BINDING['pid']} <= pids:
+        seen.add(pid)
+        if pid != os.getpid() and {PurePosixPath(word).name for word in fields[2].split()} & blocked:
+            raise RuntimeError('api_watch_or_producer_active')
+    if not {os.getpid(), BROWSER_BINDING['pid'], X11_BINDING['pid']} <= seen:
         raise RuntimeError('process_snapshot_incomplete')
-    for pid in sorted(pids):
-        if pid == os.getpid():
-            continue
-        directory = Path('/proc') / str(pid)
-        try:
-            if directory.stat().st_uid != PHONE_UID:
-                raise RuntimeError('process_owner_changed')
-            names = {Path(a.decode('utf-8', 'replace')).name for a in (directory / 'cmdline').read_bytes().split(b'\0') if a}
-        except FileNotFoundError:
-            continue
-        if names & blocked:
-            raise RuntimeError('api_watch_or_supervisor_active')
     return services
 
 
-def git_metadata_digest() -> str | None:
-    root = PHONE_REPO / '.git'
-    try:
-        root.lstat()
-    except FileNotFoundError:
-        return None
-    private_directory(root)
-    records = {}
-    for path in sorted(root.rglob('*')):
-        plain(path)
-        info = path.stat()
-        if info.st_uid != PHONE_UID:
-            raise RuntimeError('git_owner')
-        records[path.relative_to(root).as_posix()] = {
-            'mode': stat.S_IMODE(info.st_mode), 'sha256': sha(path) if path.is_file() else None}
-    return hashlib.sha256(json.dumps(records, sort_keys=True).encode()).hexdigest()
-
-
-def native_guard(old, record: dict, browser, expected_sources: dict) -> dict:
+def native_guard(expected_sources: dict, browser=None) -> dict:
     global stage
     stage = 'protected_source_env'
-    old['require_phone']()
-    protected = old['protected_hashes']()
-    if protected != record['protected']:
-        raise RuntimeError('protected_bytes_changed')
-    env = old['ENV_COPY']
-    plain(env)
-    if sha(env) != record['env_copy_sha256'] or stat.S_IMODE(env.stat().st_mode) != 0o600:
+    if source_metadata(PHONE_REPO, expected_sources) != expected_sources:
+        raise RuntimeError('unexpected_source_metadata')
+    parents = {}
+    required_parents = {str(PHONE_HOME), str(PHONE_REPO), str(PHONE_HOME / 'rokid-backups')}
+    if set(SNAPSHOT['parent_directories']) != required_parents:
+        raise RuntimeError('parent_directory_scope')
+    for name, row in SNAPSHOT['parent_directories'].items():
+        private_directory(Path(name))
+        actual = normalized_metadata(path_metadata(Path(name)))
+        if actual != normalized_metadata(row):
+            raise RuntimeError('parent_directory_changed')
+        parents[name] = actual
+    protected = {}
+    for name, row in SNAPSHOT['protected_paths'].items():
+        path = Path(name)
+        if not path.is_relative_to(PHONE_REPO) or path == PHONE_REPO:
+            raise RuntimeError('protected_scope')
+        plain(path)
+        protected[name] = path_metadata(path)
+        if protected[name] != row:
+            raise RuntimeError('protected_bytes_changed')
+    source_inventory = {}
+    for root_name in ('app', 'scripts'):
+        expected = dict(SNAPSHOT['source_inventory'][root_name])
+        for name, row in expected_sources.items():
+            parts = PurePosixPath(name).parts
+            if parts[0] != root_name:
+                continue
+            relative = '/'.join(parts[1:])
+            if row['exists']:
+                expected[relative] = row
+            else:
+                expected.pop(relative, None)
+        check_inventory(inventory(PHONE_REPO / root_name), expected)
+        source_inventory[root_name] = hashlib.sha256(json.dumps(SNAPSHOT['source_inventory'][root_name], sort_keys=True).encode()).hexdigest()
+    boot = check_inventory(inventory(PHONE_HOME / '.termux/boot'), SNAPSHOT['boot_inventory'])
+    git = check_inventory(inventory(PHONE_REPO / '.git'), SNAPSHOT['git_inventory'])
+    env = PHONE_REPO / GUARD_ENV
+    if protected.get(str(env), {}).get('mode') != 0o600:
         raise RuntimeError('private_env_changed')
-    # Only the already pinned private copy is sourced; no values leave the process.
     validation = ('set -a; . "$1"; test "$ROKID_CHATGPT_SEND_ENABLED" = 0 && '
-                  'test "$ROKID_DATA_DIR" = "$2" && test -n "${ROKID_API_KEY:-}" && '
+                  'test "$ROKID_REAL_MODE" = 1 && test "$ROKID_DATA_DIR" = "$2" && '
+                  'test -n "${ROKID_API_KEY:-}" && '
                   'test "${ROKID_BROWSER_PROFILE:-$2/chromium-profile}" = "$2/chromium-profile"')
-    check = subprocess.run([str(PHONE_PREFIX / 'bin/bash'), '--noprofile', '--norc', '-c', validation,
-                            'private-env-check', str(env), str(PHONE_REPO / 'data')],
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5, check=False)
-    if check.returncode:
+    checked = subprocess.run([str(PHONE_PREFIX / 'bin/bash'), '--noprofile', '--norc', '-c', validation,
+                              'private-env-check', str(env), str(PHONE_REPO / 'data')],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5, check=False)
+    if checked.returncode != 0:
         raise RuntimeError('private_send0')
-    if source_hashes(PHONE_REPO, expected_sources) != expected_sources:
-        raise RuntimeError('unexpected_source_bytes')
-    if any((PHONE_REPO / name).stat().st_uid != PHONE_UID for name in expected_sources):
-        raise RuntimeError('source_owner')
-    services = quiet_services(old)
-    original = {name: row['new_sha256'] for name, row in record['sources'].items()}
-    snapshot = {'protected': protected, 'env_sha256': sha(env), 'sources': original,
-                'services': services, 'helper_sha256': sha(HELPER)}
-    if hashlib.sha256(json.dumps(snapshot, sort_keys=True).encode()).hexdigest() != PRESERVED_SHA:
-        raise RuntimeError('frozen_preservation_changed')
+    services = quiet_services()
     owner = retained_owner(browser)
-    return {'preserved_sha256': PRESERVED_SHA, 'git_metadata_sha256': git_metadata_digest(), **owner}
+    return {'protected': protected, 'parents': parents, 'services': services, 'boot': boot, 'git': git,
+            'source_inventory': source_inventory, **owner}
 
 
 def native_main() -> dict:
     global stage
+    request = read_request(sys.stdin.buffer, WIRE_LENGTH)
+    if not isinstance(request, dict) or set(request) != {'action', 'archive', 'manifest', 'snapshot'} or request['action'] not in {'inspect', 'update'}:
+        raise RuntimeError('request_shape')
+    manifest_content = base64.b64decode(request['manifest'], validate=True)
+    if hashlib.sha256(manifest_content).hexdigest() != MANIFEST_SHA:
+        raise RuntimeError('request_manifest_changed')
+    set_configuration(json.loads(manifest_content), base64.b64decode(request['snapshot'], validate=True))
     if os.name != 'posix' or os.getuid() != PHONE_UID:
         raise RuntimeError('phone_uid')
-    request = json.loads(sys.stdin.buffer.read(2 * 1024 * 1024 + 1))
-    if not isinstance(request, dict) or set(request) != {'action', 'archive', 'old_hashes'} or request['action'] not in {'inspect', 'update'}:
-        raise RuntimeError('request_shape')
-    files = load_bundle(base64.b64decode(request['archive'], validate=True), NEW_ARCHIVE_SHA)
-    old_hashes = request['old_hashes']
-    if (not isinstance(old_hashes, dict) or set(old_hashes) != set(files)
-            or any(not isinstance(value, str) or len(value) != 64 or set(value) - set('0123456789abcdef') for value in old_hashes.values())):
-        raise RuntimeError('old_source_manifest_shape')
-    stage = 'immutable_guard_code'
-    plain(HELPER)
-    cdp_source = PHONE_REPO / 'app/solvers/cdp.py'
-    if sha(HELPER) != HELPER_SHA or sha(cdp_source) != CDP_SHA:
-        raise RuntimeError('guard_code_changed')
-    old = runpy.run_path(str(HELPER))
-    plain(old['BACKUP'] / 'manifest.json')
-    record = json.loads((old['BACKUP'] / 'manifest.json').read_text())
-    if (record['commit'] != '67f8576' or record['phase'] != 'source_prepared_send0'
-            or record['archive_sha256'] != OLD_ARCHIVE_SHA
-            or {name: row['new_sha256'] for name, row in record['sources'].items()} != old_hashes):
-        raise RuntimeError('original_receipt_changed')
+    content = base64.b64decode(request['archive'], validate=True)
+    if len(content) != ARCHIVE['size']:
+        raise RuntimeError('archive_size')
+    files = load_bundle(content, NEW_ARCHIVE_SHA, ARCHIVE['files'])
+    old_sources = SNAPSHOT['source_paths']
+    native_guard(old_sources)
     plain(BACKUP)
     private_directory(BACKUP.parent)
     if BACKUP.exists():
         raise RuntimeError('transaction_already_exists')
     stage = 'existing_cdp_connect'
-    cdp = runpy.run_path(str(cdp_source))
+    cdp = runpy.run_path(str(PHONE_REPO / 'app/solvers/cdp.py'))
     browser = cdp['connect_over_cdp']('http://127.0.0.1:9222', timeout_s=8)
     try:
         def guard(expected):
-            return native_guard(old, record, browser, expected)
-
-        guard(old_hashes)
+            return native_guard(expected, browser)
+        guard(old_sources)
         if request['action'] == 'update':
-            receipt = update_sources(PHONE_REPO, BACKUP, files, old_hashes, guard)
-            receipt_sha = sha(BACKUP / 'manifest.json')
-            writes = receipt['source_writes']
-            phase = 'source_prepared_send0'
+            receipt = update_sources(PHONE_REPO, BACKUP, files, old_sources, guard,
+                new_modes={name: 0o700 if row['mode'] & 0o111 else 0o600 for name, row in ARCHIVE['files'].items()})
+            receipt_sha, writes, phase = sha(BACKUP / 'manifest.json'), receipt['source_writes'], 'source_prepared_send0'
         else:
             receipt_sha, writes, phase = None, 0, 'source_update_readonly_preflight'
         stage = 'complete'
-        return {'phase': phase, 'stage': stage, 'source_files': 79, 'source_writes': writes,
+        return {'phase': phase, 'stage': stage, 'source_files': len(files), 'source_writes': writes,
                 'source_bundle_commit': SOURCE_COMMIT, 'archive_sha256': NEW_ARCHIVE_SHA,
                 'receipt_sha256': receipt_sha, 'protected_bytes_unchanged': True,
                 'browser_x11_retained': True, 'phone_git_metadata_updated': False,
@@ -524,7 +575,7 @@ def native_main() -> dict:
                 'browser_launch_attempts': 0, 'browser_close_attempts': 0,
                 'services_changed': 0, 'APK_installs': 0, 'Input_calls': 0, 'GPT_submissions': 0}
     finally:
-        browser._connection.close()  # CDP client socket only; not Browser.close protocol
+        browser._connection.close()  # Disconnect this client; do not close the browser.
 
 
 def public_failure(error: Exception) -> dict:
@@ -542,90 +593,205 @@ def is_sha(value) -> bool:
     return isinstance(value, str) and len(value) == 64 and not set(value) - set('0123456789abcdef')
 
 
-def configure(manifest: Path, manifest_sha: str) -> dict:
-    """Binding/private hashes stay in an ignored, explicitly SHA-pinned manifest."""
-    global TARGET, SERIAL, MODEL, PHONE_UID, BROWSER_BINDING, X11_BINDING, BOOT_SHA
-    global OLD_ARCHIVE_SHA, HELPER_SHA, CDP_SHA, LOGGER_SHA, PRESERVED_SHA
-    plain(manifest)
-    if (not is_sha(manifest_sha) or not manifest.resolve().is_relative_to(REPORTS.resolve())
-            or manifest.stat().st_size > 32768 or sha(manifest) != manifest_sha):
-        raise RuntimeError('untrusted_local_manifest')
-    value = json.loads(manifest.read_bytes())
-    if (not isinstance(value, dict) or set(value) != {'schema', 'device', 'browser', 'x11', 'pins', 'auth_report'}
-            or type(value['schema']) is not int or value['schema'] != 1):
-        raise RuntimeError('manifest_schema')
-    device, pins = value['device'], value['pins']
-    pin_keys = {'boot', 'helper', 'cdp', 'logger', 'preserved', 'old_archive', 'new_archive', 'auth_report'}
+def artifact_name(value, suffix: str = '') -> bool:
+    return (isinstance(value, str) and 0 < len(value) <= 160 and value.endswith(suffix)
+            and value not in {'.', '..'} and all(c.isascii() and (c.isalnum() or c in '._-') for c in value))
+
+
+def validate_device(device: dict) -> None:
     if (not isinstance(device, dict) or set(device) != {'target', 'serial', 'model', 'uid'}
-            or not isinstance(pins, dict) or set(pins) != pin_keys or not all(is_sha(pins[k]) for k in pins)
-            or pins['new_archive'] != NEW_ARCHIVE_SHA or type(device['uid']) is not int or device['uid'] <= 0
+            or type(device['uid']) is not int or device['uid'] <= 0
             or not all(isinstance(device[k], str) and device[k].isascii() and 0 < len(device[k]) <= 256
                        and not any(c.isspace() for c in device[k]) for k in ('target', 'serial', 'model'))
-            or not device['serial'].isalnum()
-            or not device['target'].startswith('adb-' + device['serial'] + '-')
+            or not device['serial'].isalnum() or not device['target'].startswith('adb-' + device['serial'] + '-')
             or not device['target'].endswith('._adb-tls-connect._tcp')):
-        raise RuntimeError('manifest_device_or_pins')
-    for binding in (value['browser'], value['x11']):
-        if (not isinstance(binding, dict) or set(binding) != {'pid', 'uid', 'starttime', 'boot_id_sha256'}
-                or any(type(binding[k]) is not int or binding[k] <= 0 for k in ('pid', 'uid', 'starttime'))
-                or binding['uid'] != device['uid'] or binding['boot_id_sha256'] != pins['boot']):
-            raise RuntimeError('manifest_owner_binding')
-    if value['browser']['pid'] == value['x11']['pid']:
-        raise RuntimeError('manifest_distinct_owners')
-    name = value['auth_report']
-    if not isinstance(name, str) or Path(name).name != name or not name.endswith('.json'):
-        raise RuntimeError('auth_report_path')
-    proof = REPORTS / name
-    plain(proof)
-    if sha(proof) != pins['auth_report']:
-        raise RuntimeError('auth_report_pin')
-    rows = json.loads(proof.read_bytes())['results']
-    result = json.loads(rows[-1]['stdout'])
-    if (len(rows) != 4 or any(type(row['exit_code']) is not int or row['exit_code'] != 0 for row in rows)
-            or result['authentication_verified'] is not True or result['model_and_effort_verified'] is not True
-            or result['browser_binding'] != value['browser'] or result['x11_binding'] != value['x11']
-            or rows[1]['stdout'].strip() != device['serial'] or rows[2]['stdout'].strip() != device['model']
-            or rows[1]['command'][2] != device['target']):
-        raise RuntimeError('auth_report_binding')
+        raise RuntimeError('manifest_device')
+
+
+def set_configuration(value: dict, snapshot_content: bytes) -> None:
+    global TARGET, SERIAL, MODEL, PHONE_UID, BROWSER_BINDING, X11_BINDING, BOOT_SHA
+    global SOURCE_COMMIT, NEW_ARCHIVE_SHA, SNAPSHOT_SHA, ARCHIVE, SNAPSHOT, GUARD_ENV, BACKUP
+    if (not isinstance(value, dict) or set(value) !=
+            {'schema', 'device', 'source_commit', 'archive', 'snapshot', 'guard_env', 'backup'}
+            or type(value['schema']) is not int or value['schema'] != 2):
+        raise RuntimeError('manifest_schema')
+    device, archive, pin = value['device'], value['archive'], value['snapshot']
+    validate_device(device)
+    commit = value['source_commit']
+    if (not isinstance(commit, str) or len(commit) != 40 or set(commit) - set('0123456789abcdef')
+            or not isinstance(archive, dict) or set(archive) != {'file', 'sha256', 'size', 'files'}
+            or not artifact_name(archive['file'], '.tar') or not is_sha(archive['sha256'])
+            or type(archive['size']) is not int or not 0 < archive['size'] <= MAX_BUNDLE_BYTES
+            or not isinstance(archive['files'], dict) or not ROOT_FILES.issubset(archive['files'])
+            or not isinstance(pin, dict) or set(pin) != {'file', 'sha256'}
+            or not artifact_name(pin['file'], '.json') or not is_sha(pin['sha256'])
+            or hashlib.sha256(snapshot_content).hexdigest() != pin['sha256']
+            or not artifact_name(value['backup']) or not artifact_name(value['guard_env'], '.env')):
+        raise RuntimeError('manifest_source_or_snapshot')
+    for name, row in archive['files'].items():
+        if (not source_path(name) or not isinstance(row, dict) or set(row) != {'sha256', 'size', 'mode'}
+                or not is_sha(row['sha256']) or type(row['size']) is not int or not 0 <= row['size'] <= MAX_BUNDLE_BYTES
+                or type(row['mode']) is not int or row['mode'] not in {0o644, 0o755}):
+            raise RuntimeError('manifest_archive_file')
+    snapshot_report = json.loads(snapshot_content)
+    if (not isinstance(snapshot_report, dict) or type(snapshot_report.get('exit_code')) is not int
+            or snapshot_report['exit_code'] != 0 or snapshot_report.get('result', {}).get('ok') is not True):
+        raise RuntimeError('snapshot_report_failed')
+    snapshot = snapshot_report['result'].get('public')
+    needed = {'device', 'source_paths', 'source_inventory', 'protected_paths', 'service_inventory',
+              'boot_inventory', 'git_inventory', 'logger_target', 'env_flags', 'runtime',
+              'parent_directories', 'owned_process_inventory', 'logger_package_owner'}
+    if (not isinstance(snapshot, dict) or not needed.issubset(snapshot) or snapshot.get('read_only') is not True
+            or type(snapshot.get('UI_input_calls')) is not int or snapshot['UI_input_calls'] != 0
+            or snapshot['device'] != device or set(snapshot['source_paths']) != set(archive['files'])):
+        raise RuntimeError('snapshot_scope_or_device')
+    required_protected = {'multimodal.env', value['guard_env'], 'requirements.txt', *ROOT_FILES,
+                          'data/browser-state/submission.json', 'data/browser-state/chats.json',
+                          *(name + suffix for name in ('data/docscan.db', 'data/work-jobs.db')
+                            for suffix in ('', '-wal', '-shm', '-journal'))}
+    if set(snapshot['protected_paths']) != {str(PHONE_REPO / name) for name in required_protected}:
+        raise RuntimeError('snapshot_protected_scope')
+    if (set(snapshot['source_inventory']) != {'app', 'scripts'}
+            or snapshot['logger_target'].get('path') != str(LOGGER_TARGET)
+            or snapshot['logger_package_owner'].get('exit_code') != 0
+            or snapshot['logger_package_owner'].get('package') != 'termux-services'
+            or snapshot['logger_package_owner'].get('path') != str(LOGGER_TARGET)
+            or snapshot['owned_process_inventory'].get('exit_code') != 0
+            or snapshot['owned_process_inventory'].get('producer_matches') != []):
+        raise RuntimeError('snapshot_service_or_inventory_scope')
+    for row in snapshot['source_paths'].values():
+        if row == {'exists': False}:
+            continue
+        if (not isinstance(row, dict) or set(row) != {'exists', 'type', 'sha256', 'size', 'mode', 'uid'}
+                or row['exists'] is not True or row['type'] != 'file' or row['uid'] != device['uid']
+                or not is_sha(row['sha256']) or type(row['size']) is not int or row['size'] < 0
+                or type(row['mode']) is not int or not 0 <= row['mode'] <= 0o777 or row['mode'] & 0o022):
+            raise RuntimeError('snapshot_source_metadata')
+    for name in ROOT_FILES:
+        if snapshot['source_paths'][name].get('sha256') != archive['files'][name]['sha256']:
+            raise RuntimeError('dependency_file_change_out_of_scope')
+    flags = snapshot['env_flags'].get(value['guard_env'], {})
+    if (flags.get('ROKID_CHATGPT_SEND_ENABLED') != '0' or flags.get('ROKID_REAL_MODE') != '1'
+            or flags.get('API_key_present') is not True):
+        raise RuntimeError('snapshot_send0_env')
+    runtime = snapshot['runtime']
+    for binding in (runtime['browser'], runtime['x11']):
+        if (not isinstance(binding, dict) or set(binding) != {'pid', 'starttime', 'boot'}
+                or any(type(binding[k]) is not int or binding[k] <= 0 for k in ('pid', 'starttime'))
+                or not is_sha(binding['boot'])):
+            raise RuntimeError('snapshot_owner_binding')
+    if (runtime['browser']['pid'] == runtime['x11']['pid'] or runtime['browser']['boot'] != runtime['x11']['boot']
+            or not isinstance(runtime['CDP_product'], str) or not runtime['CDP_product'].startswith('Chrome/')
+            or runtime['ports'] != {'8000_open': False, '9222_open': True}):
+        raise RuntimeError('snapshot_runtime')
     TARGET, SERIAL, MODEL, PHONE_UID = (device[k] for k in ('target', 'serial', 'model', 'uid'))
-    BROWSER_BINDING, X11_BINDING, BOOT_SHA = value['browser'], value['x11'], pins['boot']
-    OLD_ARCHIVE_SHA, HELPER_SHA, CDP_SHA = (pins[k] for k in ('old_archive', 'helper', 'cdp'))
-    LOGGER_SHA, PRESERVED_SHA = pins['logger'], pins['preserved']
-    return {'manifest_sha256': manifest_sha, 'auth_report_sha256': pins['auth_report']}
+    SOURCE_COMMIT, NEW_ARCHIVE_SHA, SNAPSHOT_SHA = commit, archive['sha256'], pin['sha256']
+    ARCHIVE, SNAPSHOT = archive, snapshot
+    BROWSER_BINDING, X11_BINDING, BOOT_SHA = runtime['browser'], runtime['x11'], runtime['browser']['boot']
+    GUARD_ENV, BACKUP = value['guard_env'], PHONE_HOME / 'rokid-backups' / value['backup']
+
+
+def configure(manifest: Path, manifest_sha: str) -> dict:
+    """The pinned manifest names both a fixed commit and a fresh snapshot."""
+    global MANIFEST_SHA, MANIFEST_CONTENT, SNAPSHOT_CONTENT
+    plain(manifest)
+    if (not is_sha(manifest_sha) or not manifest.resolve().is_relative_to(REPORTS.resolve())
+            or manifest.stat().st_size > 1024 * 1024 or sha(manifest) != manifest_sha):
+        raise RuntimeError('untrusted_local_manifest')
+    content = manifest.read_bytes()
+    value = json.loads(content)
+    name = value.get('snapshot', {}).get('file') if isinstance(value, dict) else None
+    if not artifact_name(name, '.json'):
+        raise RuntimeError('snapshot_artifact_path')
+    path = REPORTS / name
+    plain(path)
+    if path.stat().st_size > 4 * 1024 * 1024:
+        raise RuntimeError('snapshot_artifact_size')
+    snapshot_content = path.read_bytes()
+    set_configuration(value, snapshot_content)
+    MANIFEST_SHA, MANIFEST_CONTENT, SNAPSHOT_CONTENT = manifest_sha, content, snapshot_content
+    return {'manifest_sha256': manifest_sha, 'snapshot_sha256': SNAPSHOT_SHA}
+
+
+def read_request(stream, count: int) -> dict:
+    if type(count) is not int or not 0 < count <= MAX_WIRE_BYTES:
+        raise RuntimeError('request_size')
+    parts, remaining = [], count
+    while remaining:
+        chunk = stream.read(remaining)
+        if not chunk or not isinstance(chunk, bytes):
+            raise RuntimeError('truncated_request')
+        parts.append(chunk)
+        remaining -= len(chunk)
+    return json.loads(base64.b64decode(b''.join(parts), validate=True))
+
+
+def verify_git_archive(files: dict[str, bytes]) -> None:
+    def git(*args, input=None):
+        result = subprocess.run(['git', '-C', str(ROOT), *args], input=input,
+                                capture_output=True, timeout=30, check=False)
+        if result.returncode != 0:
+            raise RuntimeError('fixed_commit_unavailable')
+        return result.stdout
+    if git('rev-parse', '--verify', SOURCE_COMMIT + '^{commit}').decode('ascii').strip() != SOURCE_COMMIT:
+        raise RuntimeError('fixed_commit_not_commit')
+    listing = git('ls-tree', '-r', '-l', '-z', SOURCE_COMMIT, '--', 'app', 'scripts', *sorted(ROOT_FILES))
+    entries = []
+    for record in listing.split(b'\0'):
+        if not record:
+            continue
+        header, raw_name = record.split(b'\t', 1)
+        mode, kind, oid, size = header.split()
+        name = raw_name.decode('utf-8')
+        expected = ARCHIVE['files'].get(name)
+        if (kind != b'blob' or mode not in {b'100644', b'100755'} or name not in files
+                or expected is None or int(size) != expected['size']
+                or int(mode, 8) & 0o777 != expected['mode']):
+            raise RuntimeError('archive_git_path_size_or_mode')
+        entries.append((name, oid, int(size)))
+    if len(entries) != len(files) or {entry[0] for entry in entries} != set(files):
+        raise RuntimeError('archive_git_path_set')
+    output = io.BytesIO(git('cat-file', '--batch', input=b''.join(oid + b'\n' for _, oid, _ in entries)))
+    for name, oid, size in entries:
+        if output.readline().split() != [oid, b'blob', str(size).encode('ascii')]:
+            raise RuntimeError('archive_git_blob_header')
+        if output.read(size) != files[name] or output.read(1) != b'\n':
+            raise RuntimeError('archive_git_blob_bytes')
+    if output.read(1):
+        raise RuntimeError('archive_git_blob_extra')
 
 
 def prepare(provenance: dict, action: str = 'update') -> tuple[bytes, list[list[str]], dict]:
-    """PC-only: validate two fixed bundles and compile, without executing, native code."""
+    """PC-only fixed-commit proof and compilation; execution is separate."""
     if not TARGET or action not in {'inspect', 'update'}:
         raise RuntimeError('unconfigured_prepare')
-    content = (REPORTS / NEW_ARCHIVE).read_bytes()
-    files = load_bundle(content, NEW_ARCHIVE_SHA)
-    original = load_bundle((REPORTS / OLD_ARCHIVE).read_bytes(), OLD_ARCHIVE_SHA)
-    if set(files) != set(original):
-        raise RuntimeError('old_new_path_set')
-    old_hashes = {name: hashlib.sha256(data).hexdigest() for name, data in original.items()}
+    archive_path = REPORTS / ARCHIVE['file']
+    plain(archive_path)
+    if archive_path.stat().st_size != ARCHIVE['size']:
+        raise RuntimeError('archive_size')
+    content = archive_path.read_bytes()
+    files = load_bundle(content, NEW_ARCHIVE_SHA, ARCHIVE['files'])
+    verify_git_archive(files)
+    request = base64.b64encode(json.dumps({'action': action, 'archive': base64.b64encode(content).decode('ascii'),
+        'manifest': base64.b64encode(MANIFEST_CONTENT).decode('ascii'),
+        'snapshot': base64.b64encode(SNAPSHOT_CONTENT).decode('ascii')}, sort_keys=True).encode('ascii'))
+    if len(request) > MAX_WIRE_BYTES:
+        raise RuntimeError('request_size')
     functions = {'sha', 'source_path', 'load_bundle', 'plain', 'sync_directories', 'atomic_bytes',
-                 'source_hashes', 'update_sources', 'process_binding', 'snapshot_logger',
-                 'private_directory', 'retained_owner', 'quiet_services', 'git_metadata_digest',
-                 'native_guard', 'native_main', 'public_failure'}
-    constants = ('PHONE_HOME', 'PHONE_PREFIX', 'PHONE_REPO', 'PROFILE', 'HELPER', 'HELPER_SHA', 'CDP_SHA',
-                 'BOOT_SHA', 'BROWSER_BINDING', 'X11_BINDING', 'PHONE_UID', 'BACKUP', 'LOGGER_TARGET',
-                 'LOGGER_LEAVES', 'LOGGER_SHA', 'PRESERVED_SHA', 'ROOT_FILES', 'OLD_ARCHIVE_SHA',
-                 'NEW_ARCHIVE_SHA', 'SOURCE_COMMIT', 'SOURCE_HEAD')
+        'path_metadata', 'source_metadata', 'file_identity', 'update_sources',
+        'normalized_metadata', 'inventory', 'check_inventory', 'process_binding', 'private_directory',
+        'retained_owner', 'quiet_services', 'native_guard', 'native_main', 'public_failure', 'is_sha', 'artifact_name',
+        'validate_device', 'set_configuration', 'read_request'}
+    constants = ('PHONE_HOME', 'PHONE_PREFIX', 'PHONE_REPO', 'PROFILE', 'LOGGER_TARGET', 'ROOT_FILES',
+                 'MAX_BUNDLE_BYTES', 'MAX_WIRE_BYTES', 'MANIFEST_SHA')
     tree = ast.parse(Path(__file__).read_text(encoding='utf-8'))
-    imports = [n for n in tree.body if isinstance(n, (ast.Import, ast.ImportFrom))]
-    body = '\n'.join(ast.unparse(n) for n in imports)
+    body = '\n'.join(ast.unparse(n) for n in tree.body if isinstance(n, (ast.Import, ast.ImportFrom)))
     for name in constants:
         item = globals()[name]
-        if isinstance(item, Path):
-            literal = 'Path(' + repr(item.as_posix()) + ')'
-        elif name == 'LOGGER_LEAVES':
-            literal = '{' + ','.join('Path(' + repr(p.as_posix()) + ')' for p in sorted(item)) + '}'
-        elif name == 'ROOT_FILES':
-            literal = '{' + ','.join(repr(value) for value in sorted(item)) + '}'
-        else:
-            literal = repr(item)
+        literal = 'Path(' + repr(item.as_posix()) + ')' if isinstance(item, Path) else (
+            '{' + ','.join(repr(value) for value in sorted(item)) + '}' if isinstance(item, set) else repr(item))
         body += '\n' + name + ' = ' + literal
+    body += "\nWIRE_LENGTH = " + str(len(request))
     body += "\nstage = 'native_input'\ntransaction_state = {'phase':'not_started','source_writes':0,'restored':False}\n"
     definitions = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in functions]
     if len(definitions) != len(functions):
@@ -644,19 +810,16 @@ def prepare(provenance: dict, action: str = 'update') -> tuple[bytes, list[list[
     wire = len(subprocess.list2cmdline(commands[-1]))
     if wire >= 32767:
         raise RuntimeError('windows_command_limit')
-    request = json.dumps({'action': action, 'archive': base64.b64encode(content).decode(),
-                          'old_hashes': old_hashes}, sort_keys=True).encode()
     metadata = {'phase': 'pc_source_update_prepared', 'approval_received': False, 'actual_runtime_executions': 0,
-                'action': action, 'source_files': 79, 'archive_sha256': NEW_ARCHIVE_SHA,
-                'source_bundle_commit': SOURCE_COMMIT, 'reference_runtime_commit': SOURCE_HEAD,
-                'git_blob_comparison_performed': False,
-                'native_sha256': hashlib.sha256(body.encode()).hexdigest(), 'native_bytes': len(body.encode()),
-                'bootstrap_sha256': hashlib.sha256(bootstrap.encode()).hexdigest(), 'bootstrap_bytes': len(bootstrap.encode()),
-                'wire_characters': wire, 'request_sha256': hashlib.sha256(request).hexdigest(),
-                'request_bytes': len(request), 'host_rows': 4, 'phone_git_metadata_updated': False,
-                'planned_services_changes': 0, 'planned_APK_installs': 0, 'planned_Input_calls': 0,
-                'planned_GPT_submissions': 0, 'planned_browser_starts_or_closes': 0,
-                'profile_normal_browser_writes_allowed': True, 'unknown_partial_update_auto_resume': False, **provenance}
+        'action': action, 'source_files': len(files), 'archive_sha256': NEW_ARCHIVE_SHA,
+        'source_bundle_commit': SOURCE_COMMIT, 'git_blob_comparison_performed': True,
+        'native_sha256': hashlib.sha256(body.encode()).hexdigest(), 'native_bytes': len(body.encode()),
+        'bootstrap_sha256': hashlib.sha256(bootstrap.encode()).hexdigest(), 'bootstrap_bytes': len(bootstrap.encode()),
+        'wire_characters': wire, 'request_sha256': hashlib.sha256(request).hexdigest(), 'request_bytes': len(request),
+        'host_rows': 4, 'phone_git_metadata_updated': False, 'planned_services_changes': 0,
+        'planned_APK_installs': 0, 'planned_Input_calls': 0, 'planned_GPT_submissions': 0,
+        'planned_browser_starts_or_closes': 0, 'profile_normal_browser_writes_allowed': True,
+        'unknown_partial_update_auto_resume': False, **provenance}
     return request, commands, metadata
 
 
@@ -667,10 +830,10 @@ def validate_public(result: dict, action: str) -> None:
     if result.get('phase') == 'source_update_stopped':
         if (set(result) != failure_keys or result['transaction_phase'] not in
                 {'not_started', 'applying', 'rolled_back', 'rollback_blocked', 'source_prepared_send0'}
-                or type(result['source_writes']) is not int or not 0 <= result['source_writes'] <= 79
+                or type(result['source_writes']) is not int or not 0 <= result['source_writes'] <= len(ARCHIVE['files'])
                 or type(result['restored']) is not bool):
             raise RuntimeError('native_failure_shape')
-        labels = {'native_input', 'immutable_guard_code', 'existing_cdp_connect', 'protected_source_env',
+        labels = {'native_input', 'existing_cdp_connect', 'protected_source_env',
                   'quiet_services', 'retained_browser_x11', 'source_update_preflight', 'atomic_source_update',
                   'source_update_final_guard', 'source_transaction_restore_preflight', 'restore_this_transaction_sources', 'complete'}
         if (result['stage'] not in labels or result['error_type'] not in
@@ -684,14 +847,38 @@ def validate_public(result: dict, action: str) -> None:
             'SEND_enabled', 'solver_verified', *counters}
     expected_phase = 'source_prepared_send0' if action == 'update' else 'source_update_readonly_preflight'
     if (set(result) != keys or result['phase'] != expected_phase or result['stage'] != 'complete'
-            or type(result['source_files']) is not int or result['source_files'] != 79
-            or type(result['source_writes']) is not int or result['source_writes'] != (79 if action == 'update' else 0)
+            or type(result['source_files']) is not int or result['source_files'] != len(ARCHIVE['files'])
+            or type(result['source_writes']) is not int or result['source_writes'] != (len(ARCHIVE['files']) if action == 'update' else 0)
             or result['source_bundle_commit'] != SOURCE_COMMIT or result['archive_sha256'] != NEW_ARCHIVE_SHA
             or result['protected_bytes_unchanged'] is not True or result['browser_x11_retained'] is not True
             or any(result[k] is not False for k in ('phone_git_metadata_updated', 'SEND_enabled', 'solver_verified'))
             or any(type(result[k]) is not int or result[k] != 0 for k in counters)
             or (not is_sha(result['receipt_sha256']) if action == 'update' else result['receipt_sha256'] is not None)):
         raise RuntimeError('native_completion_contract')
+
+
+def dispatch_native(command: list[str], request: bytes):
+    """One process/input; bounded waits keep the original 180-second deadline."""
+    process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    deadline = time.monotonic() + 180
+    pending_input = request
+    try:
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(command, 180)
+            try:
+                stdout, stderr = process.communicate(input=pending_input, timeout=min(5, remaining))
+                return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+            except subprocess.TimeoutExpired:
+                pending_input = None  # communicate resumes its existing buffered input; no new process/send.
+    finally:
+        if process.poll() is None:
+            process.kill()
+            try:
+                process.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
 
 
 def execute(request: bytes, commands: list[list[str]], metadata: dict) -> int:
@@ -704,8 +891,8 @@ def execute(request: bytes, commands: list[list[str]], metadata: dict) -> int:
             results.append(row)
             if index == 3:
                 execution.update(phase='native_dispatch', native_attempts=1)
-            output = subprocess.run(command, input=request if index == 3 else None,
-                                    capture_output=True, timeout=180 if index == 3 else 15, check=False)
+            output = dispatch_native(command, request) if index == 3 else subprocess.run(
+                command, capture_output=True, timeout=15, check=False)
             row.update(exit_code=output.returncode, stdout_bytes=len(output.stdout), stderr_bytes=len(output.stderr))
             if index == 3:
                 result = json.loads(output.stdout)

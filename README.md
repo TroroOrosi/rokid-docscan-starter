@@ -111,7 +111,7 @@ submodule、AARコピーは不要です。
 
 | 経路 | 位置づけ |
 |---|---|
-| `ROKID_SOLVER=chatgpt-web` | **現行の主経路。** 利用者のログイン済み ChatGPT ウェブセッションを CDP 経由で操作します |
+| `ROKID_SOLVER=chatgpt-web` | スマホに残る従来のChat経路。ログイン済みウェブセッションをCDP経由で操作します |
 | `ROKID_SOLVER=chatgpt-work` | スマホ内のWorkブラウザへ原PNGのZIPを分割送信し、同じ会話の回答を受領する経路。実装・PC検証と、スマホへの導入・会場受入を分けて確認します |
 | スマホ内ローカルモデル（F-51F、llama.cpp） | **不採用**（2026-09-14、利用者の決定）。実測は `docs/hardware-measurements.md` E 節に証拠として残しますが、新規作業はありません |
 | `openai` / `gemini` / `claude` | API キーがあれば設定だけで動きます。`ROKID_SOLVER_TIERS` のフォールバック段として残します |
@@ -127,7 +127,7 @@ risk があります。**利用者の判断で選択した経路です（詳細�
 最新の対象はChatGPTアプリ／WebのWorkです。実利用は常時オンのスマホとテザリング接続グラスだけで、PC・有線・毎回の接続操作を要求しません。
 Work向けの画像jobは、向き補正済みサーバPNGのbytesとSHA・順序を保持し、原画素の検査と答案を同じ入力へ照合します。フォルダ名・画像一覧・データ配信記録を、AIが全画像を読めた証明にしません。
 ブラウザ経路はPNGを再圧縮せずZIPへ格納し、容量と添付数で区切って受領を待ち、最後に全問を解かせます。送信台帳を使って同じ会話へ復帰し、結果不確定の送信を自動で繰り返しません。各原画像のhash・寸法・順序と未校正の判読レビューを照合し、判読不能・不確実な画像に基づく答案は受け付けません。モデルの判読レビューは全文字の正確さの証明ではありません。外部MCPの校正済み品質条件は別に維持します。
-Workの送信後に通信が切れた場合も、同じ処理の原画像・原音・端末世代を確認して、監視から既存の送信結果を回収します。過去のChat送信をWorkへ送り直すことはありません。終了した旧世代に不確定な送信が残る場合の整理と、実機での復旧受入は未完了です。
+Workの送信後に通信が切れた場合も、同じ処理の原画像・原音・端末世代を確認して、監視から既存の送信結果を回収します。終了した旧Workも一意に照合できる返答だけを読み取り、旧答案の保存・点灯・再送をせず送信記録を整理します。生成中や処理中は次の利用の再試行回数を消費せず待ちます。未知の記録は保持し、過去のChat送信をWorkへ送り直しません。実機での復旧受け入れは未検証です。
 Driveへ置く場合も全件列挙と各原画像取得が必要で、添付20枚制限から外れることと全頁を正しく読めることは別です。[公式MCP Events](https://developers.openai.com/plugins/build/mcp-events)・[Secure MCP Tunnel](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels)は接続候補であり、このアカウント／スマホでの接続・購読・自動復旧は未検証です。
 
 導入の正本は
@@ -135,7 +135,7 @@ Driveへ置く場合も全件列挙と各原画像取得が必要で、添付20�
 CXR-L の実装境界は
 [CXR-L / Global Hi Rokid integration](docs/cxr-l-integration.md)です。
 
-現在のバージョン: **Server APP 0.52.0 / API 1.34.0 / Android client 0.3.17 / Glasses View 1.30.0 / Solver API 1.9.0**。
+現在のバージョン: **Server APP 0.53.0 / API 1.35.0 / Android client 0.3.17 / Glasses View 1.31.0 / Solver API 1.9.0**。
 版数の正本は `app/version.py` です。他の資料は版数を書かず、この行だけが
 `tests/test_documentation_contract.py` で実装と照合されます。
 Solver API は、記入用解答の全文保持・資料不足の分離を行う `answer_only` モードを含みます。
@@ -570,7 +570,8 @@ uvicorn app.main:app --port 8000
 | `ROKID_TRANSCRIBER` | （なし） | リスニング録音の書き起こし `openai\|gemini`（未設定=与えた transcript を使用） |
 | `ROKID_TRANSCRIBE_MODEL` | `gpt-4o-transcribe` | openai の書き起こしモデル（gemini は `ROKID_LLM_MODEL`） |
 | `ROKID_SOLVER_TIERS` | （単一） | 二段フォールバック順（例 `openai,local`） |
-| `ROKID_CHATGPT_CDP` | `http://127.0.0.1:9222` | `ROKID_SOLVER=chatgpt-web` 時に接続する Chromium のDevToolsポート。Termux起動ではloopbackへ固定 |
+| `ROKID_CHATGPT_CDP` | `http://127.0.0.1:9222` | `chatgpt-web` / `chatgpt-work` が接続する Chromium のDevToolsポート。Termux起動ではloopbackへ固定 |
+| `ROKID_WORK_MODEL` / `ROKID_WORK_EFFORT` / `ROKID_WORK_SPEED` | `gpt-6.1-sol` / `xhigh` / `fast` | Workで送信前に確認するモデル・推論量・速度。設定値と公開UIの選択を照合 |
 | `ROKID_KEYMAP` | （なし） | gesture→KeyCode の上書き（JSON、`/v1/settings.input`。既定 KeyCode は旧機由来・未実測） |
 | `ROKID_API_KEY` | （なし） | 設定時に Bearer 認証（発見系は開放） |
 
@@ -582,19 +583,20 @@ DevTools プロトコル経由で操作し、ChatGPT ウェブ UI に問題文�
 読み取ります。撮影画像の保存・転送から答案表示までグラスで操作します。
 
 スマホでは専用の永続プロファイルを使う `scripts/phone_browser.sh` がローカルCDPを公開します。
-初回だけ可視ブラウザで本人がログインし、その後はヘッドレスで起動します。
-`scripts/phone_services.sh` はTermux:Bootとtermux-servicesのブラウザ・API・監視を準備します。
+初回は本人がTermux:X11の可視ブラウザでログインし、以後も同じ可視環境とプロファイルを使います。
+今回の端末ではヘッドレス起動時にHTTP403が観測され、可視Workで原画像の送信・返答を確認しました。
+`scripts/phone_services.sh` はTermux:Bootとtermux-servicesのX11・ブラウザ・API・監視を準備します。
 スマホ自身へのADB接続とChromeの前景維持はこの起動経路に含めません。
 可視ログインにはTermux:X11、再起動後の自動開始にはTermux:BootとTermuxサービスを準備します。
 準備コマンドと承認境界は[会場経路の準備](docs/real-device-operation.md)を参照してください。
-初回ロック解除とテザリング利用開始後が対象です。新ブラウザのログイン維持・実際の送信を
-確認してからサービスを有効化します。端末への導入・実行には別途承認が必要です。
+初回ロック解除とテザリング利用開始後が対象です。サービス定義は無効状態で作成し、
+既存の手動起動ブラウザとX11を所有確認のうえ引き継いでから有効化します。
+スマホ再起動後の自動復旧とグラスからの一連の使用は未検証です。端末操作は承認範囲内で行います。
 
 ```bash
-# 承認後、スマホのTermuxで実行する準備用コマンド
-bash scripts/phone_browser.sh login       # 可視ブラウザで本人がログイン
-bash scripts/phone_services.sh install   # サービス定義を準備
-# Chromiumでのログイン維持・実際の送信を確認してから有効化
+# スマホのTermux用。既存プロセスの引き継ぎ条件は会場経路の準備を参照
+bash scripts/phone_services.sh install   # 4サービスを無効状態で準備
+# 既存ブラウザとの競合を解消し、認証・設定・送信経路を確認してから有効化
 bash scripts/phone_services.sh enable
 ```
 

@@ -381,3 +381,156 @@ def test_state_poll_recovers_the_real_local_work_dom_without_a_second_send(clien
     assert len(page.evaluate("window.uploaded")) == 1
     bundle = client.get(f"/v1/exam-sessions/{session}/answer-bundle").json()
     assert [(item["status"], item["answer"]) for item in bundle["items"]] == [("ready", "4")]
+
+
+def test_new_session_retires_an_expired_work_send_without_old_answers_or_another_old_send(client, page, monkeypatch):
+    import json
+    from types import SimpleNamespace
+
+    from app.solvers import cdp, chatgpt_web
+    from app.solvers.chatgpt_work import ChatGptWorkSolver
+    from app.solvers.chatgpt_work_web import WorkWebClient
+    from app.work_bridge import configured_work_store
+    from tests.test_chatgpt_work import BrowserReply
+    from tests.test_chatgpt_work_web import _Context, _VenueTab, _guard_state, _upload_composer
+
+    doc, session, old = api_session(client, generation=7)
+    wait_for(lambda: session not in main._background_solves)
+    _upload_composer(page)
+    page.evaluate("window.suppressFinal = true")
+    tab = _VenueTab(page)
+
+    class LocalWork(WorkWebClient):
+        def complete_json(self, **options):
+            body = BrowserReply().complete_json(**options)
+            page.evaluate("window.boundReply = " + json.dumps(body) + "; true")
+            page.evaluate("""window.finish = function() {
+                const users = document.querySelectorAll('[data-user-message-bubble=true]');
+                const receipt = JSON.parse(users[users.length-1].textContent.split('Transfer receipt:\\n').at(-1));
+                const owner = document.createElement('div');
+                owner.setAttribute('data-local-conversation-final-assistant','true');
+                const final = document.createElement('div');
+                final.setAttribute('data-markdown-text-style','assistant-message');
+                final.textContent = JSON.stringify({...window.boundReply, batch_id:receipt.batch_id});
+                owner.append(final); document.getElementById('conversation').append(owner);
+            }; true""")
+            return super().complete_json(**options)
+
+    monkeypatch.setenv("ROKID_CHATGPT_SEND_ENABLED", "1")
+    monkeypatch.setattr(cdp, "connect_over_cdp", lambda endpoint: SimpleNamespace(
+        contexts=[_Context(tab)], close=lambda: None))
+    monkeypatch.setattr(chatgpt_web, "POLL_S", 0.001)
+    monkeypatch.setattr(chatgpt_web, "TIMEOUT_S", 0.2)
+    monkeypatch.setattr(chatgpt_web, "REPLY_START_S", 0.05)
+    monkeypatch.setattr(main, "PRESEND_TRIES", 1)
+    monkeypatch.setattr(main, "get_solver", lambda *args: ChatGptWorkSolver(client=LocalWork()))
+    main._solve_deck_in_background(session, doc)
+    assert page.evaluate("window.sent") == 1 and _guard_state() == "uncertain"
+    with main.db.connect() as conn:
+        old_revision = main._answer_revision(conn, session)
+    assert client.post("/v1/glasses/state", json={"device_id": "fixture-glasses", "session_id": session,
+        "generation": 7, "sequence": 2, "phase": "closed"}).json()["accepted"]
+    assert client.get("/v1/glasses/state?device_id=fixture-glasses").json()["answer_ready"] is False
+
+    monkeypatch.setenv("ROKID_CHATGPT_SEND_ENABLED", "0")
+    _, newer, _ = api_session(client, generation=8)
+    store = configured_work_store()
+    queued = wait_for(lambda: next((job for job in store.list_jobs()["jobs"] if job["session_id"] == newer), None))
+    wait_for(lambda: newer not in main._background_solves)
+    original_read = type(store).read_source
+    def read_source(instance, job_id, source_id):
+        assert job_id != old["job_id"], "retirement must not reopen or rebuild the old originals"
+        return original_read(instance, job_id, source_id)
+    monkeypatch.setattr(type(store), "read_source", read_source)
+    monkeypatch.setenv("ROKID_CHATGPT_SEND_ENABLED", "1")
+    # An unfinished known stale owner remains pending across more than the
+    # ordinary preparation-failure budget, without pretending the new job sent.
+    for _ in range(main.RESUME_LIMIT + 1):
+        assert client.get("/v1/glasses/state?device_id=fixture-glasses").status_code == 200
+        wait_for(lambda: newer not in main._background_solves)
+    with main.db.connect() as conn:
+        assert not any(main._solve_failure(row) for row in main._deck_question_rows(conn, newer))
+    from app.browser_guard import BrowserGuard
+    navigations = len(tab.navigations)
+    with BrowserGuard():
+        for _ in range(main.RESUME_LIMIT + 1):
+            assert client.get("/v1/glasses/state?device_id=fixture-glasses").status_code == 200
+            wait_for(lambda: newer not in main._background_solves)
+        with main.db.connect() as conn:
+            assert not any(main._solve_failure(row) for row in main._deck_question_rows(conn, newer))
+    with main._background_solves_lock:
+        main._background_solves.add(session)
+    try:
+        for _ in range(main.RESUME_LIMIT + 1):
+            assert client.get("/v1/glasses/state?device_id=fixture-glasses").status_code == 200
+            wait_for(lambda: newer not in main._background_solves)
+        with main.db.connect() as conn:
+            assert not any(main._solve_failure(row) for row in main._deck_question_rows(conn, newer))
+    finally:
+        with main._background_solves_lock:
+            main._background_solves.discard(session)
+    assert len(tab.navigations) == navigations
+    assert page.evaluate("window.sent") == 1 and _guard_state() == "uncertain"
+    page.evaluate("window.finish(); window.suppressFinal = false")
+    assert client.get("/v1/glasses/state?device_id=fixture-glasses").status_code == 200
+    wait_for(lambda: store.result(queued["job_id"]))
+    wait_for(lambda: newer not in main._background_solves)
+    assert page.evaluate("window.sent") == 2 and _guard_state() == "idle"
+    assert len(page.evaluate("window.uploaded")) == 2
+    assert store.result(old["job_id"]) is None
+    with main.db.connect() as conn:
+        assert main._answer_revision(conn, session) == old_revision
+        assert not any(main._latest_solution_row(conn, row["id"]) for row in main._deck_question_rows(conn, session))
+    bundle = client.get(f"/v1/exam-sessions/{newer}/answer-bundle").json()
+    assert [(item["status"], item["answer"]) for item in bundle["items"]] == [("ready", "4")]
+
+
+@pytest.mark.parametrize("change", ["generation", "closed", "writing_done", "original", "current",
+                                   "missing_image", "missing_owner", "ambiguous_owner", "active", "policy"])
+def test_expired_work_guard_requires_positive_expiry_and_an_inactive_known_wearer(client, monkeypatch, change):
+    from pathlib import Path
+    from app import config, glasses_state
+    from app.work_bridge import WorkPending
+    from tests.test_chatgpt_work import picture
+
+    doc, session, job = api_session(client, generation=7)
+    wait_for(lambda: session not in main._background_solves)
+    if change in ("generation", "closed", "writing_done", "active"):
+        state = glasses_state.GlassesState(device_id="fixture-glasses", session_id=session,
+            generation=8 if change == "generation" else 7, sequence=2,
+            phase=change if change in ("closed", "writing_done") else "analyzing")
+        assert glasses_state.record_state(state, "127.0.0.1")
+    elif change in ("original", "missing_image"):
+        with main.db.connect() as conn:
+            image = Path(main._document_source_pages(conn, doc, session)[0]["image_path"])
+        if change == "original":
+            image.write_bytes(picture(99))
+        else:
+            image.unlink()
+    elif change == "missing_owner":
+        for path in (config.DATA_DIR / "glasses-state").glob("*.json"):
+            path.unlink()
+    elif change == "ambiguous_owner":
+        assert glasses_state.record_state(glasses_state.GlassesState(device_id="other-glasses", session_id=session,
+            generation=1, sequence=1, phase="analyzing"), "127.0.0.1")
+    elif change == "policy":
+        with main.db.connect() as conn:
+            conn.execute("UPDATE exam_sessions SET mode='real' WHERE id=?", (session,))
+        monkeypatch.setattr(config, "ALLOW_REAL_EXAM_SOLVE", False)
+        with pytest.raises(HTTPException) as error:
+            main._work_current_job(job["job_id"])
+        assert error.value.status_code == 409
+    if change == "active":
+        with main._background_solves_lock:
+            main._background_solves.add(session)
+    try:
+        if change in ("generation", "closed", "writing_done", "original"):
+            with main._expired_work_job_guard(job["job_id"]) as expired:
+                assert expired["job_id"] == job["job_id"]
+        else:
+            with pytest.raises(WorkPending if change == "active" else WorkConflict):
+                with main._expired_work_job_guard(job["job_id"]):
+                    pytest.fail("a live/unknown Work input authorized retirement")
+    finally:
+        with main._background_solves_lock:
+            main._background_solves.discard(session)

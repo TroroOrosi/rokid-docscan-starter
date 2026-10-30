@@ -8,6 +8,7 @@ import json
 import os
 import re
 import zipfile
+from contextlib import contextmanager
 from pathlib import Path
 
 from PIL import Image
@@ -18,7 +19,7 @@ from ..glasses_state import list_states
 from ..work_bridge import WorkConflict, WorkPending, browser_source_name, configured_work_store
 from .base import SolveResult, Solver
 from .chatgpt_web import (
-    CDP_ENDPOINT, ChatGptWebClient, ChatGptWebUncertain, _ALL_TASK, _LISTENING_TASK, _READING_TASK, _booklet_replies,
+    CDP_ENDPOINT, ChatGptWebBusy, ChatGptWebClient, ChatGptWebUncertain, _ALL_TASK, _LISTENING_TASK, _READING_TASK, _booklet_replies,
     cdp_available, chatgpt_send_enabled,
 )
 from .llm_adapter import _ANSWER_ONLY_SYSTEM
@@ -240,6 +241,7 @@ class ChatGptWorkSolver(Solver):
         if self._client is None:
             from .chatgpt_work_web import WorkWebClient  # noqa: PLC0415
             self._client = WorkWebClient()
+        self._retire_expired_browser_send(store, job)
         files, receipts = _browser_inputs(store, job)
         audio = next((source for source in job["sources"] if "page_number" not in source), None)
         try:
@@ -260,6 +262,42 @@ class ChatGptWorkSolver(Solver):
             generation=job["generation"], conversation_id=self._client.conversation_id,
             source_receipts=receipts, result={"questions": envelope.get("questions")},
             extraction=envelope.get("extraction"), readability=envelope.get("readability"))
+
+    def _retire_expired_browser_send(self, store, current_job):
+        from ..main import _expired_work_job_guard  # noqa: PLC0415
+        from .chatgpt_work_web import WorkWebClient  # noqa: PLC0415
+
+        if not isinstance(self._client, WorkWebClient):
+            return
+        try:
+            owner = self._client.pending_work_owner()
+        except ChatGptWebBusy as error:
+            raise WorkPending(current_job["job_id"]) from error
+        if owner is None:
+            return
+        session_id = int(owner["chat_key"].split(":", 2)[1])
+        jobs = [job for job in store.session_jobs(session_id)
+                if job["stage"] == owner["stage"] and _browser_chat_key(job) == owner["chat_key"]]
+        if len(jobs) != 1 or jobs[0]["job_id"] == current_job["job_id"]:
+            return
+        known_expired = False
+
+        @contextmanager
+        def expired():
+            nonlocal known_expired
+            with _expired_work_job_guard(jobs[0]["job_id"]):
+                known_expired = True
+                yield
+
+        try:
+            retired = self._client.retire_expired_batch(chat_key=owner["chat_key"],
+                booklet_stage=owner["stage"], expired_guard=expired)
+        except ChatGptWebBusy as error:
+            raise WorkPending(current_job["job_id"]) from error
+        if not retired and known_expired:
+            # This new job has not sent. A late old body must not exhaust its
+            # preparation/restart budget or be recorded as its uncertain send.
+            raise WorkPending(current_job["job_id"])
 
     def solve(self, *, question, max_answer_len: int = 64):
         replies = self.answer_all(question=question)

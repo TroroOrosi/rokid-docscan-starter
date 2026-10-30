@@ -4,8 +4,10 @@ import base64
 import hashlib
 import io
 import json
+import os
 from pathlib import Path
 import shlex
+import stat
 import subprocess
 import tarfile
 from types import SimpleNamespace
@@ -13,338 +15,582 @@ import zlib
 
 import pytest
 
-from app.solvers import cdp
 from scripts import phone_update as update
 
+FIXTURE_TARGET = 'adb-FIXTURE001-example._adb-tls-connect._tcp'
 
-def test_source_transaction_and_public_boundary(tmp_path, monkeypatch, capsys):
-    monkeypatch.delattr(hashlib, 'file_digest', raising=False)  # Python 3.10 compatibility
-    # CI has no ignored/private artifacts; the separate manifest preview pins those.
-    original = {'requirements-phone.txt': b'# requirements\n', 'constraints-phone.txt': b'# constraints\n',
-                'app/main.py': b'VERSION = 1\n', 'scripts/phone_env.sh': b':\n',
-                **{f'app/fixture{i:03d}.py': b'VALUE = 1\n' for i in range(75)}}
-    new = {name: content + b'# updated\n' for name, content in original.items()}
-    reports = tmp_path / 'reports'
+
+@pytest.fixture
+def private_filesystem(tmp_path, monkeypatch):
+    """Replay POSIX private modes/uid on the Windows development filesystem."""
+    actual_stat, actual_lstat = Path.stat, Path.lstat
+    actual_chmod, actual_replace, actual_link = os.chmod, os.replace, os.link
+    modes = {}
+    def metadata(path, original, *args, **kwargs):
+        info = original(path, *args, **kwargs)
+        if path.is_relative_to(tmp_path):
+            fields = list(info)
+            fields[0] = (info.st_mode & ~0o7777) | modes.get(str(path), 0o700 if stat.S_ISDIR(info.st_mode) else 0o600)
+            fields[4] = 123
+            return os.stat_result(fields)
+        return info
+    def chmod(path, mode, *args, **kwargs):
+        actual_chmod(path, mode, *args, **kwargs)
+        modes[str(path)] = mode
+    def replace(source, target, *args, **kwargs):
+        actual_replace(source, target, *args, **kwargs)
+        modes[str(target)] = modes.pop(str(source), 0o600)
+    def link(source, target, *args, **kwargs):
+        actual_link(source, target, *args, **kwargs)
+        modes[str(target)] = modes.get(str(source), 0o600)
+    monkeypatch.setattr(Path, 'stat', lambda path, *a, **k: metadata(path, actual_stat, *a, **k))
+    monkeypatch.setattr(Path, 'lstat', lambda path, *a, **k: metadata(path, actual_lstat, *a, **k))
+    monkeypatch.setattr(os, 'chmod', chmod)
+    monkeypatch.setattr(os, 'replace', replace)
+    monkeypatch.setattr(os, 'link', link)
+    monkeypatch.setattr(update, 'PHONE_UID', 123)
+    return modes
+
+
+def test_source_transaction_accepts_new_files_and_preserves_private_modes(tmp_path, private_filesystem):
+    repo = tmp_path / 'repo'
+    (repo / 'app').mkdir(parents=True)
+    (repo / 'scripts').mkdir()
+    (repo / 'app/main.py').write_bytes(b'OLD = 1\n')
+    old = update.path_metadata(repo / 'app/main.py')
+    files = {'app/main.py': b'NEW = 2\n', 'app/work_bridge.py': b'VALUE = 3\n',
+             'scripts/new_run.sh': b'#!/bin/sh\n:\n'}
+    snapshot = {'app/main.py': old, 'app/work_bridge.py': {'exists': False},
+                'scripts/new_run.sh': {'exists': False}}
+    protected = repo / 'multimodal.env'
+    protected.write_bytes(b'PRIVATE-FIXTURE\n')
+    def guard(expected):
+        return {'protected': hashlib.sha256(protected.read_bytes()).hexdigest()}
+    receipt = update.update_sources(repo, tmp_path / 'backup', files, snapshot, guard,
+                                    new_modes={'app/main.py': 0o600, 'app/work_bridge.py': 0o600,
+                                               'scripts/new_run.sh': 0o700})
+    assert receipt['source_writes'] == 3
+    assert receipt['phase'] == 'source_prepared_send0'
+    assert (repo / 'app/main.py').read_bytes() == b'NEW = 2\n'
+    assert (repo / 'app/work_bridge.py').read_bytes() == b'VALUE = 3\n'
+    assert (repo / 'scripts/new_run.sh').read_bytes() == b'#!/bin/sh\n:\n'
+    assert update.path_metadata(repo / 'app/main.py')['mode'] == old['mode']
+    assert update.path_metadata(repo / 'app/work_bridge.py')['mode'] == 0o600
+    assert update.path_metadata(repo / 'scripts/new_run.sh')['mode'] == 0o700
+    assert protected.read_bytes() == b'PRIVATE-FIXTURE\n'
+    assert not (tmp_path / 'backup/source/app/work_bridge.py').exists()
+
+
+@pytest.mark.parametrize('foreign', [None, 'bytes', 'identity'])
+def test_rollback_removes_only_this_transactions_unchanged_new_files(tmp_path, private_filesystem, foreign):
+    repo, backup = tmp_path / 'repo', tmp_path / 'backup'
+    (repo / 'app').mkdir(parents=True)
+    (repo / 'scripts').mkdir()
+    (repo / 'app/main.py').write_bytes(b'OLD = 1\n')
+    (repo / 'app/last.py').write_bytes(b'OLD = 2\n')
+    files = {'app/main.py': b'NEW = 3\n', 'app/new.py': b'NEW = 4\n',
+             'scripts/new_run.sh': b'#!/bin/sh\n:\n', 'app/last.py': b'NEW = 5\n'}
+    snapshot = {name: update.path_metadata(repo / name) for name in files}
+    def fail_last(path, content, mode, **kwargs):
+        if path == repo / 'app/last.py' and content == b'NEW = 5\n':
+            if foreign == 'bytes':
+                (repo / 'app/new.py').write_bytes(b'UNRELATED = 6\n')
+            elif foreign == 'identity':
+                other = repo / 'app/foreign.tmp'
+                other.write_bytes(b'NEW = 4\n')
+                os.replace(other, repo / 'app/new.py')
+            raise OSError('fixture-write-failure')
+        update.atomic_bytes(path, content, mode, **kwargs)
+    with pytest.raises((RuntimeError, OSError)):
+        update.update_sources(repo, backup, files, snapshot, lambda expected: {'protected': 'stable'},
+                              new_modes={name: 0o600 for name in files}, write=fail_last)
+    receipt = json.loads((backup / 'manifest.json').read_bytes())
+    if foreign is None:
+        assert receipt['phase'] == 'rolled_back'
+        assert (repo / 'app/main.py').read_bytes() == b'OLD = 1\n'
+        assert (repo / 'app/last.py').read_bytes() == b'OLD = 2\n'
+        assert not (repo / 'app/new.py').exists() and not (repo / 'scripts/new_run.sh').exists()
+    else:
+        assert receipt['phase'] == 'rollback_blocked'
+        assert (repo / 'app/new.py').read_bytes() == (b'UNRELATED = 6\n' if foreign == 'bytes' else b'NEW = 4\n')
+        assert (repo / 'scripts/new_run.sh').read_bytes() == b'#!/bin/sh\n:\n'
+
+
+@pytest.fixture
+def deployment(tmp_path, monkeypatch, private_filesystem):
+    home, prefix, source, reports = (tmp_path / name for name in ('home', 'prefix', 'source', 'reports'))
+    repo = home / 'rokid-server'
+    repo.mkdir(parents=True)
+    (home / 'rokid-backups').mkdir()
+    source.mkdir()
     reports.mkdir()
-    for name, payload in ((update.OLD_ARCHIVE, original), (update.NEW_ARCHIVE, new)):
-        with tarfile.open(reports / name, 'w:') as archive:
-            for directory in ('app', 'scripts'):
-                member = tarfile.TarInfo(directory)
-                member.type = tarfile.DIRTYPE
-                archive.addfile(member)
-            for path, data in payload.items():
-                member = tarfile.TarInfo(path)
-                member.size = len(data)
-                archive.addfile(member, io.BytesIO(data))
-    old_content = (reports / update.OLD_ARCHIVE).read_bytes()
-    old_pin = hashlib.sha256(old_content).hexdigest()
-    monkeypatch.setattr(update, 'NEW_ARCHIVE_SHA', update.sha(reports / update.NEW_ARCHIVE))
-    assert update.load_bundle(old_content, old_pin) == original
-    assert update.load_bundle((reports / update.NEW_ARCHIVE).read_bytes(), update.NEW_ARCHIVE_SHA) == new
-    old_hashes = {name: hashlib.sha256(data).hexdigest() for name, data in original.items()}
-    binding = {'pid': 12, 'uid': 123, 'starttime': 456, 'boot_id_sha256': '0' * 64}
-    x11 = {**binding, 'pid': 13, 'starttime': 457}
-    target = 'adb-FIXTURE001-example._adb-tls-connect._tcp'
-    proof = {'results': [{'exit_code': 0}, {'exit_code': 0, 'stdout': 'FIXTURE001\n', 'command': ['adb', '-s', target]},
-                         {'exit_code': 0, 'stdout': 'F-51F\n'}, {'exit_code': 0, 'stdout': json.dumps({
-                             'authentication_verified': True, 'model_and_effort_verified': True,
-                             'browser_binding': binding, 'x11_binding': x11})}]}
-    proof_path = reports / 'auth.json'
-    proof_path.write_text(json.dumps(proof), encoding='utf-8')
-    manifest = {'schema': 1, 'device': {'target': target, 'serial': 'FIXTURE001', 'model': 'F-51F', 'uid': 123},
-                'browser': binding, 'x11': x11, 'auth_report': 'auth.json', 'pins': {
-                    'boot': '0' * 64, 'helper': '0' * 64, 'cdp': '0' * 64, 'logger': '0' * 64,
-                    'preserved': '0' * 64, 'old_archive': old_pin, 'new_archive': update.NEW_ARCHIVE_SHA,
-                    'auth_report': update.sha(proof_path)}}
-    manifest_path = reports / 'manifest.json'
-    manifest_path.write_text(json.dumps(manifest), encoding='utf-8')
-    monkeypatch.setattr(update, 'REPORTS', reports)
-    provenance = update.configure(manifest_path, update.sha(manifest_path))
-    request, commands, metadata = update.prepare(provenance)
+    files = {'requirements-phone.txt': b'# same dependencies\n', 'constraints-phone.txt': b'# same pins\n',
+             'app/main.py': b'NEW = 2\n', 'app/solvers/cdp.py': b'VALUE = 1\n',
+             'app/work_bridge.py': b'VALUE = 3\n', 'app/binary.bin': b'\x00\x1a\r\n\xff',
+             'scripts/runner.sh': b'#!/bin/sh\n:\n'}
+    for name, data in files.items():
+        path = source / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+        if name not in {'app/work_bridge.py', 'app/binary.bin'}:
+            destination = repo / name
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(b'OLD = 1\n' if name == 'app/main.py' else data)
+    (repo / 'app/retained.py').write_bytes(b'OLD_ONLY = 1\n')
+    for path in ('multimodal.env', 'send0.env', 'requirements.txt', 'data/docscan.db', 'data/browser-state/submission.json',
+                 'data/browser-state/chats.json'):
+        destination = repo / path
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(b'PRIVATE-FIXTURE\n')
+    service = prefix / 'var/service/sshd'
+    (service / 'log/supervise').mkdir(parents=True)
+    for name in ('down', 'run', 'log/run', 'log/supervise/pid', 'log/supervise/status'):
+        (service / name).write_bytes(b'fixture\n')
+    logger = prefix / 'share/termux-services/svlogger'
+    logger.parent.mkdir(parents=True)
+    logger.write_bytes(b'#!/bin/sh\n:\n')
+    os.chmod(logger, 0o700)
+    def tree(root):
+        if not root.exists():
+            return {'.': {'exists': False}}
+        return {'.': update.path_metadata(root), **{path.relative_to(root).as_posix(): update.path_metadata(path)
+                                                    for path in root.rglob('*')}}
+    device = {'target': FIXTURE_TARGET, 'serial': 'FIXTURE001', 'model': 'F-51F', 'uid': 123}
+    runtime = {'browser': {'pid': 12, 'starttime': 456, 'boot': '0' * 64},
+               'x11': {'pid': 13, 'starttime': 457, 'boot': '0' * 64}, 'CDP_product': 'Chrome/999.1.2.3',
+               'profile_directory': {'exists': True, 'type': 'directory', 'uid': 123, 'mode': 0o700, 'size': 1},
+               'profile_lock': {'exists': True, 'type': 'symlink', 'uid': 123, 'mode': 0o777,
+                                'size': 12, 'link_text': 'localhost-12'},
+               'X11_socket_metadata': {}, 'ports': {'8000_open': False, '9222_open': True}}
+    snapshot = {'read_only': True, 'UI_input_calls': 0, 'device': device,
+                'source_paths': {name: update.path_metadata(repo / name) for name in files},
+                'source_inventory': {name: tree(repo / name) for name in ('app', 'scripts')},
+                'protected_paths': {str(repo / name): update.path_metadata(repo / name) for name in
+                    ('multimodal.env', 'send0.env', 'requirements.txt', *update.ROOT_FILES,
+                     'data/docscan.db', 'data/docscan.db-wal', 'data/docscan.db-shm', 'data/docscan.db-journal',
+                     'data/work-jobs.db', 'data/work-jobs.db-wal', 'data/work-jobs.db-shm', 'data/work-jobs.db-journal',
+                     'data/browser-state/submission.json', 'data/browser-state/chats.json')},
+                'service_inventory': tree(prefix / 'var/service'), 'boot_inventory': tree(home / '.termux/boot'),
+                'git_inventory': tree(repo / '.git'), 'logger_target': {'path': str(logger), **update.path_metadata(logger)},
+                'env_flags': {'send0.env': {'ROKID_CHATGPT_SEND_ENABLED': '0', 'ROKID_REAL_MODE': '1',
+                                           'API_key_present': True}}, 'runtime': runtime,
+                'parent_directories': {str(path): update.path_metadata(path) for path in (home, repo, home / 'rokid-backups')},
+                'owned_process_inventory': {'exit_code': 0, 'producer_matches': []},
+                'logger_package_owner': {'exit_code': 0, 'package': 'termux-services', 'path': str(logger)}}
+    snapshot_file = reports / 'snapshot.json'
+    snapshot_file.write_text(json.dumps({'exit_code': 0, 'result': {'ok': True, 'public': snapshot}}), encoding='utf-8')
+    def git(*args):
+        return subprocess.run(['git', '-C', str(source), *args], capture_output=True, check=True).stdout
+    git('init', '-q')
+    (source / '.gitattributes').write_bytes(b'* -text\n')
+    git('add', '.')
+    git('update-index', '--chmod=+x', 'scripts/runner.sh')
+    git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'fixture')
+    commit = git('rev-parse', 'HEAD').decode().strip()
+    archive = reports / 'source.tar'
+    archive.write_bytes(git('archive', '--format=tar', commit, 'app', 'scripts', *sorted(update.ROOT_FILES)))
+    manifest = {'schema': 2, 'device': device, 'source_commit': commit,
+                'archive': {'file': archive.name, 'sha256': update.sha(archive), 'size': archive.stat().st_size,
+                    'files': {name: {'sha256': hashlib.sha256(data).hexdigest(), 'size': len(data),
+                                      'mode': 0o755 if name.endswith('.sh') else 0o644} for name, data in files.items()}},
+                'snapshot': {'file': snapshot_file.name, 'sha256': update.sha(snapshot_file)},
+                'guard_env': 'send0.env', 'backup': 'pre-source-fixture'}
+    manifest_file = reports / 'manifest.json'
+    manifest_file.write_text(json.dumps(manifest), encoding='utf-8')
+    for name, value in {'ROOT': source, 'REPORTS': reports, 'PHONE_HOME': home, 'PHONE_PREFIX': prefix,
+                        'PHONE_REPO': repo, 'PROFILE': repo / 'data/chromium-profile', 'LOGGER_TARGET': logger}.items():
+        monkeypatch.setattr(update, name, value)
+    return SimpleNamespace(repo=repo, home=home, prefix=prefix, source=source, reports=reports, files=files,
+                           manifest=manifest, path=manifest_file, snapshot=snapshot, snapshot_path=snapshot_file, git=git)
+
+
+def generated(deployment, action='update'):
+    provenance = update.configure(deployment.path, update.sha(deployment.path))
+    wire, commands, metadata = update.prepare(provenance, action)
     bootstrap = shlex.split(commands[-1][-1])[-1]
     encoded = next(n.value for n in ast.walk(ast.parse(bootstrap)) if isinstance(n, ast.Constant)
                    and isinstance(n.value, str) and len(n.value) > 500)
     native = zlib.decompress(base64.b64decode(encoded)).decode()
     assert hashlib.sha256(native.encode()).hexdigest() == metadata['native_sha256']
-    assert metadata['wire_characters'] < 32767 and metadata['approval_received'] is False
-    assert len(commands) == 4 and len(json.loads(request)['old_hashes']) == 79
-    # Execute the real generated definitions, excluding only the device entry call.
     tree = ast.parse(native)
-    root_files = next(n.value for n in tree.body if isinstance(n, ast.Assign)
-                      and any(isinstance(t, ast.Name) and t.id == 'ROOT_FILES' for t in n.targets))
-    assert isinstance(root_files, ast.Set) and [n.value for n in root_files.elts] == sorted(update.ROOT_FILES)
     tree.body.pop()
-    ns = {}
-    exec(compile(tree, '<generated-phone-update-definitions>', 'exec'), ns)
-    assert ast.dump(ast.parse(ast.get_source_segment(native, next(n for n in tree.body
-                    if isinstance(n, ast.FunctionDef) and n.name == 'update_sources')))) == ast.dump(
-                        ast.parse(ast.get_source_segment(Path(update.__file__).read_text(), next(n for n in
-                                  ast.parse(Path(update.__file__).read_text()).body
-                                  if isinstance(n, ast.FunctionDef) and n.name == 'update_sources'))))
+    namespace = {}
+    exec(compile(tree, '<generated-update-definitions>', 'exec'), namespace)
+    return wire, commands, metadata, namespace
 
-    golden_sha = '24744f87ec1567c53f38ed9bdbc66f938638c1675081d9ce09e003f5e4289dc9'
-    assert hashlib.sha256(b'{"fixture": true}').hexdigest() == golden_sha
-    guard_definition = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == 'native_guard')
-    comparison = next(n.test for n in guard_definition.body if isinstance(n, ast.If)
-                      and isinstance(n.test, ast.Compare) and any(isinstance(c, ast.Name)
-                          and c.id == 'PRESERVED_SHA' for c in n.test.comparators))
-    assert eval(compile(ast.Expression(comparison), '<actual-native-preserved-comparison>', 'eval'), ns,
-                {'snapshot': {'fixture': True}, 'PRESERVED_SHA': golden_sha}) is False
 
-    native_main = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == 'native_main')
-    browser_assignment = next(n for n in native_main.body if isinstance(n, ast.Assign)
-                              and any(isinstance(t, ast.Name) and t.id == 'browser' for t in n.targets))
-    transport_calls = []
-    def fixture_http(url, timeout_s):
-        transport_calls.append(('http', url, timeout_s))
-        return {'webSocketDebuggerUrl': 'ws://fixture.invalid/browser'}
-    def fixture_connection(url, *, timeout_s):
-        transport_calls.append(('connection', url, timeout_s))
-        return SimpleNamespace(close=lambda: transport_calls.append(('client_close',)))
-    with monkeypatch.context() as transport:
-        transport.setattr(cdp, '_http_json', fixture_http)
-        transport.setattr(cdp, '_Connection', fixture_connection)
-        browser = eval(compile(ast.Expression(browser_assignment.value), '<actual-native-cdp-connect>', 'eval'),
-                       {'cdp': vars(cdp)})
-        assert isinstance(browser, cdp.Browser)
-        disconnect = next(n.finalbody[0].value for n in native_main.body if isinstance(n, ast.Try))
-        eval(compile(ast.Expression(disconnect), '<actual-native-client-disconnect>', 'eval'), {'browser': browser})
-    assert transport_calls == [('http', 'http://127.0.0.1:9222/json/version', 8),
-                               ('connection', 'ws://fixture.invalid/browser', 8), ('client_close',)]
+def test_prepare_verifies_the_fixed_git_blobs_and_frames_ascii_without_an_eof_read(deployment):
+    wire, commands, metadata, namespace = generated(deployment)
+    assert wire.isascii() and not set(wire) - set(b'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=')
+    request = json.loads(base64.b64decode(wire, validate=True))
+    assert base64.b64decode(request['archive'], validate=True) == (deployment.reports / 'source.tar').read_bytes()
+    assert metadata['source_files'] == 7 and metadata['git_blob_comparison_performed'] is True
+    assert metadata['approval_received'] is False and metadata['actual_runtime_executions'] == 0
+    class NoEofStream:
+        def __init__(self):
+            self.position = 0
+        def read(self, count):
+            assert 0 < count <= len(wire) - self.position
+            result = wire[self.position:self.position + min(count, 7)]
+            self.position += len(result)
+            return result
+    assert namespace['read_request'](NoEofStream(), len(wire)) == request
+    assert namespace['load_bundle'](base64.b64decode(request['archive']),
+                                   deployment.manifest['archive']['sha256'],
+                                   deployment.manifest['archive']['files']) == deployment.files
 
-    def layout(name):
-        repo = tmp_path / name
-        for path, content in original.items():
-            destination = repo / path
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            destination.write_bytes(content)
-        for path in ('data/chromium-profile/state', '.git/HEAD', 'multimodal.env'):
-            destination = repo / path
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            destination.write_bytes(b'private-fixture-unchanged')
-        return repo
 
-    quiet_prefix = tmp_path / 'quiet-prefix'
-    for service in ('cupsd', 'ssh-agent', 'sshd', 'tx11', 'tx11-xfce4'):
-        directory = quiet_prefix / 'var/service' / service
-        (directory / 'log').mkdir(parents=True)
-        for name in ('down', 'run', 'log/run'):
-            (directory / name).write_bytes(b'# fixture\n')
-    actual_stat, actual_read, actual_iterdir = Path.stat, Path.read_bytes, Path.iterdir
-    process_case = {'fault': 'ok'}
-    ps_calls = []
-
-    def own_stat(path, *args, **kwargs):
-        if path.parent == Path('/proc'):
-            if path.name == '1':
-                raise PermissionError('foreign-process-private-error')
-            return SimpleNamespace(st_uid=124 if process_case['fault'] == 'owner' else 123)
-        info = actual_stat(path, *args, **kwargs)
-        if path.is_relative_to(quiet_prefix):
-            fields = list(info)
-            fields[4] = 123
-            return ns['os'].stat_result(fields)
-        return info
-
-    def own_cmdline(path):
-        if path.parent.parent == Path('/proc'):
-            if path.parent.name == '14':
-                raise FileNotFoundError('ps-already-exited')
-            if process_case['fault'] == 'permission':
-                raise PermissionError('own-process-private-error')
-            return b'uvicorn\0' if process_case['fault'] == 'blocked' else b'chrome\0'
-        return actual_read(path)
-
-    def proc_inventory(path):
-        return iter([path / '1']) if path == Path('/proc') else actual_iterdir(path)
-
-    def owned_ps(command, **kwargs):
-        ps_calls.append(command)
-        assert command == ['/system/bin/ps', '-u', '123', '-o', 'UID,PID']
-        assert kwargs == {'capture_output': True, 'timeout': 5, 'check': False}
-        stdout = b'UID PID\n123 45\n123 12\n123 13\n123 14\n'
-        stdout = {'malformed': b'UID PID\n123 invalid\n', 'header': b'USER PID\n123 45\n',
-                  'duplicate': stdout + b'123 12\n', 'uid': stdout + b'124 15\n',
-                  'missing': b'UID PID\n123 45\n123 12\n'}.get(process_case['fault'], stdout)
-        return SimpleNamespace(returncode=1 if process_case['fault'] == 'failed' else 0,
-                               stdout=stdout, stderr=b'private-ps-error' if process_case['fault'] == 'stderr' else b'')
-
-    with monkeypatch.context() as processes:
-        processes.setitem(ns, 'PHONE_PREFIX', quiet_prefix)
-        processes.setitem(ns, 'LOGGER_LEAVES', set())
-        processes.setattr(Path, 'stat', own_stat)
-        processes.setattr(Path, 'read_bytes', own_cmdline)
-        processes.setattr(Path, 'iterdir', proc_inventory)
-        processes.setattr(ns['os'], 'getpid', lambda: 45)
-        processes.setattr(ns['subprocess'], 'run', owned_ps)
-        snapshot = ns['quiet_services']({'plain': ns['plain']})
-        assert set(snapshot) == {'cupsd', 'ssh-agent', 'sshd', 'tx11', 'tx11-xfce4'}
-        assert ps_calls == [['/system/bin/ps', '-u', '123', '-o', 'UID,PID']]
-        for fault in ('blocked', 'permission', 'owner', 'malformed', 'header', 'duplicate', 'uid',
-                      'missing', 'failed', 'stderr'):
-            process_case['fault'] = fault
-            ns['transaction_state'] = {'phase': 'not_started', 'source_writes': 0, 'restored': False}
-            repo = layout('quiet-' + fault)
-            backup = tmp_path / ('quiet-' + fault + '-backup')
-            with pytest.raises((RuntimeError, PermissionError)) as failure:
-                ns['update_sources'](repo, backup, new, old_hashes,
-                                     lambda expected: ns['quiet_services']({'plain': ns['plain']}))
-            assert not backup.exists() and ns['source_hashes'](repo, original) == old_hashes
-            assert ns['transaction_state']['source_writes'] == 0
-            assert 'private' not in json.dumps(ns['public_failure'](failure.value))
-
-    git_repo = layout('git-transition')
-    git_root = git_repo / '.git'
-    (git_root / 'HEAD').unlink()
-    git_root.rmdir()  # Only the newly created local fixture; no phone or repository metadata.
-    git_calls = 0
-
-    def git_stat(path, *args, **kwargs):
-        info = actual_stat(path, *args, **kwargs)
-        if path.is_relative_to(git_root):
-            fields = list(info)
-            fields[4] = 123
-            fields[0] = (fields[0] & ~0o777) | 0o700
-            return ns['os'].stat_result(fields)
-        return info
-
-    def changed_git_guard(expected):
-        nonlocal git_calls
-        git_calls += 1
-        if git_calls == 2:
-            git_root.mkdir()
-            (git_root / 'HEAD').write_bytes(b'fixture-third-party-metadata')
-        return {'git_metadata_sha256': ns['git_metadata_digest']()}
-
-    with monkeypatch.context() as git:
-        git.setitem(ns, 'PHONE_REPO', git_repo)
-        git.setattr(Path, 'stat', git_stat)
-        assert ns['git_metadata_digest']() is None
-        ns['transaction_state'] = {'phase': 'not_started', 'source_writes': 0, 'restored': False}
-        with pytest.raises(RuntimeError):
-            ns['update_sources'](git_repo, tmp_path / 'git-transition-backup', new, old_hashes, changed_git_guard)
-        assert isinstance(ns['git_metadata_digest'](), str) and git_root.is_dir()
-        assert ns['source_hashes'](git_repo, original) == old_hashes
-        assert ns['transaction_state']['source_writes'] == 0
-
-    stable = {'owner': 'fixture', 'private': 'unchanged'}
-    def guard(expected):
-        return stable
-    repo = layout('success')
-    before = {p: (repo / p).read_bytes() for p in ('data/chromium-profile/state', '.git/HEAD', 'multimodal.env')}
-    receipt = ns['update_sources'](repo, tmp_path / 'ok-backup', new, old_hashes, guard)
-    assert receipt['phase'] == 'source_prepared_send0' and receipt['source_writes'] == 79
-    assert ns['source_hashes'](repo, new) == {k: hashlib.sha256(v).hexdigest() for k, v in new.items()}
-    assert all((repo / p).read_bytes() == content for p, content in before.items())
-    assert len(list((tmp_path / 'ok-backup/source').rglob('*.*'))) >= 79
-    assert not (tmp_path / 'ok-backup/protected').exists()
-    returned = next(n for n in ast.walk(next(n for n in tree.body if isinstance(n, ast.FunctionDef)
-                                            and n.name == 'native_main')) if isinstance(n, ast.Return))
-    completion = eval(compile(ast.Expression(returned.value), '<actual-native-public-return>', 'eval'), ns,
-                      {'phase': 'source_prepared_send0', 'writes': 79,
-                       'receipt_sha': ns['sha'](tmp_path / 'ok-backup/manifest.json'), 'stage': 'complete'})
-    update.validate_public(completion, 'update')
-    for counter in ('source_files', 'source_writes', 'GPT_submissions', 'Input_calls'):
-        for invalid in (False, float(completion[counter])):
-            with pytest.raises(RuntimeError):
-                update.validate_public({**completion, counter: invalid}, 'update')
-    with pytest.raises(RuntimeError):
-        update.validate_public({**completion, 'private_unknown': 'must-not-be-logged'}, 'update')
-    with pytest.raises(RuntimeError):
-        update.configure(manifest_path, '0' * 64)
-    with pytest.raises(RuntimeError, match='transaction_already_exists'):
-        ns['update_sources'](repo, tmp_path / 'ok-backup', new, old_hashes, guard)
-    for changed_by_third_party in (False, True):
-        ns['transaction_state'] = {'phase': 'not_started', 'source_writes': 0, 'restored': False}
-        repo = layout('changed' if changed_by_third_party else 'restore')
-        backup = tmp_path / ('changed-backup' if changed_by_third_party else 'restore-backup')
-        calls = 0
-
-        def fail_midway(path, content, mode):
-            nonlocal calls
-            if path.is_relative_to(repo):
-                calls += 1
-                if calls == 4:
-                    if changed_by_third_party:
-                        (repo / next(iter(original))).write_bytes(b'foreign-change')
-                    raise OSError('private-error-must-not-be-output')
-            ns['atomic_bytes'](path, content, mode)
-
-        with pytest.raises((OSError, RuntimeError)):
-            ns['update_sources'](repo, backup, new, old_hashes, guard, write=fail_midway)
-        saved = json.loads((backup / 'manifest.json').read_bytes())
-        assert saved['phase'] == ('rollback_blocked' if changed_by_third_party else 'rolled_back')
-        if not changed_by_third_party:
-            assert ns['source_hashes'](repo, original) == old_hashes
-        else:
-            assert (repo / next(iter(original))).read_bytes() == b'foreign-change'
-    for kind in ('unknown', 'unsafe', 'precondition'):
-        repo = layout(kind)
-        paths, hashes = dict(new), dict(old_hashes)
-        if kind == 'unknown':
-            (repo / next(iter(original))).write_bytes(b'unknown-old')
-        if kind == 'unsafe':
-            paths['../multimodal.env'] = paths.pop(next(iter(paths)))
-            hashes['../multimodal.env'] = hashes.pop(next(iter(hashes)))
-
-        def precondition(expected):
-            if kind == 'precondition':
-                raise RuntimeError('owner_changed')
-            return stable
-
-        with pytest.raises(RuntimeError):
-            ns['update_sources'](repo, tmp_path / (kind + '-backup'), paths, hashes, precondition)
-        assert not (tmp_path / (kind + '-backup')).exists()
-    for member_name, member_type in (('../outside', tarfile.REGTYPE), ('app/link', tarfile.SYMTYPE)):
-        buffer = io.BytesIO()
-        with tarfile.open(fileobj=buffer, mode='w:') as archive:
-            member = tarfile.TarInfo(member_name)
-            member.type = member_type
-            archive.addfile(member)
-        data = buffer.getvalue()
-        with pytest.raises(RuntimeError):
-            ns['load_bundle'](data, hashlib.sha256(data).hexdigest())
-
-    # One host timeout: attempted row 4 and all completed identity rows survive.
+def replay_runtime(namespace, deployment, monkeypatch):
+    """Real source/protected guards; process/CDP edges are local fixtures."""
+    actual_getpid = os.getpid
+    def run(command, **kwargs):
+        if command[0].endswith('dpkg-query'):
+            return SimpleNamespace(returncode=0, stdout='termux-services: ' + str(update.LOGGER_TARGET) + '\n', stderr='')
+        if command[0] == '/system/bin/ps':
+            return SimpleNamespace(returncode=0,
+                stdout=f'UID PID ARGS\n123 {actual_getpid()} python\n123 12 chromium\n123 13 x11\n123 99 runsv sshd/log\n'.encode(), stderr=b'')
+        assert command[0].endswith('bash') and kwargs['stdout'] == subprocess.DEVNULL
+        return SimpleNamespace(returncode=0)
+    monkeypatch.setattr(subprocess, 'run', run)
+    namespace['retained_owner'] = lambda browser: {name: deployment.snapshot['runtime'][name] for name in ('browser', 'x11')}
+    namespace['sync_directories'] = lambda directory: None  # Directory fsync needs the Android/POSIX filesystem.
+    namespace['os'] = SimpleNamespace(**{**vars(os), 'name': 'posix', 'getuid': lambda: 123})
     calls = []
-    ns['transaction_state'] = {'phase': 'source_prepared_send0', 'source_writes': 79, 'restored': False}
-    ns['stage'] = 'source_update_final_guard'
-    receipt_failure = ns['public_failure'](OSError('private-receipt-read-error'))
-    update.validate_public(receipt_failure, 'update')
+    browser = SimpleNamespace(_connection=SimpleNamespace(close=lambda: calls.append('client_disconnect')))
+    def connect(url, *, timeout_s):
+        calls.append((url, timeout_s))
+        return browser
+    namespace['runpy'] = SimpleNamespace(run_path=lambda path: {'connect_over_cdp': connect})
+    return calls
 
-    def fake_run(command, **kwargs):
+
+@pytest.mark.parametrize('action', ['inspect', 'update'])
+def test_generated_entry_preserves_source_extras_private_state_and_existing_runtime(deployment, monkeypatch, action):
+    wire, commands, metadata, namespace = generated(deployment, action)
+    calls = replay_runtime(namespace, deployment, monkeypatch)
+    namespace['sys'] = SimpleNamespace(stdin=SimpleNamespace(buffer=io.BytesIO(wire)))
+    result = namespace['native_main']()
+    update.validate_public(result, action)
+    assert result['source_files'] == 7 and result['source_writes'] == (7 if action == 'update' else 0)
+    assert calls == [('http://127.0.0.1:9222', 8), 'client_disconnect']
+    assert (deployment.repo / 'app/retained.py').read_bytes() == b'OLD_ONLY = 1\n'
+    assert all(update.path_metadata(Path(path)) == row for path, row in deployment.snapshot['protected_paths'].items())
+    assert not (deployment.repo / '.git').exists() and not (deployment.home / '.termux/boot').exists()
+    if action == 'update':
+        assert all((deployment.repo / name).read_bytes() == data for name, data in deployment.files.items())
+        assert update.path_metadata(deployment.repo / 'app/work_bridge.py')['mode'] == 0o600
+    else:
+        assert not (deployment.repo / 'app/work_bridge.py').exists()
+        assert not (deployment.home / 'rokid-backups/pre-source-fixture').exists()
+
+
+@pytest.mark.parametrize('changed', ['database', 'ledger', 'old_only', 'service', 'boot', 'git'])
+def test_current_protected_or_inventory_changes_stop_before_any_source_write(deployment, monkeypatch, changed):
+    wire, commands, metadata, namespace = generated(deployment)
+    calls = replay_runtime(namespace, deployment, monkeypatch)
+    path = {'database': deployment.repo / 'data/docscan.db',
+            'ledger': deployment.repo / 'data/browser-state/chats.json',
+            'old_only': deployment.repo / 'app/retained.py',
+            'service': deployment.prefix / 'var/service/sshd/run',
+            'boot': deployment.home / '.termux/boot/new.sh', 'git': deployment.repo / '.git/HEAD'}[changed]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b'UNRELATED-CHANGE\n')
+    namespace['sys'] = SimpleNamespace(stdin=SimpleNamespace(buffer=io.BytesIO(wire)))
+    with pytest.raises(RuntimeError):
+        namespace['native_main']()
+    assert not calls and (deployment.repo / 'app/main.py').read_bytes() == b'OLD = 1\n'
+    assert not (deployment.repo / 'app/work_bridge.py').exists()
+    assert not (deployment.home / 'rokid-backups/pre-source-fixture').exists()
+
+
+def test_dynamic_logger_status_is_not_a_source_or_service_configuration_change(deployment, monkeypatch):
+    wire, commands, metadata, namespace = generated(deployment, 'inspect')
+    replay_runtime(namespace, deployment, monkeypatch)
+    (deployment.prefix / 'var/service/sshd/log/supervise/status').write_bytes(b'normal-runtime-transition\n')
+    namespace['sys'] = SimpleNamespace(stdin=SimpleNamespace(buffer=io.BytesIO(wire)))
+    assert namespace['native_main']()['source_writes'] == 0
+
+
+@pytest.mark.parametrize('expires', [False, True])
+def test_native_dispatch_waits_in_bounded_intervals_without_sending_twice(monkeypatch, expires):
+    calls = []
+    class Process:
+        returncode = None
+        def communicate(self, input=None, timeout=None):
+            calls.append(('communicate', input, timeout))
+            if len(calls) == 2:
+                raise subprocess.TimeoutExpired('fixture', timeout, output=b'PRIVATE-PARTIAL')
+            self.returncode = 0
+            return b'PUBLIC', b''
+        def poll(self):
+            return self.returncode
+        def kill(self):
+            calls.append(('kill',))
+            self.returncode = -9
+    process = Process()
+    def popen(command, **kwargs):
+        calls.append(('spawn', command))
+        assert kwargs == {'stdin': subprocess.PIPE, 'stdout': subprocess.PIPE, 'stderr': subprocess.PIPE}
+        return process
+    monkeypatch.setattr(subprocess, 'Popen', popen)
+    clock = iter([0, 0, 181 if expires else 5, 5])
+    monkeypatch.setattr(update, 'time', SimpleNamespace(monotonic=lambda: next(clock)))
+    if expires:
+        with pytest.raises(subprocess.TimeoutExpired):
+            update.dispatch_native(['LOCAL-FIXTURE'], b'ASCII-REQUEST')
+        assert ('kill',) in calls
+    else:
+        result = update.dispatch_native(['LOCAL-FIXTURE'], b'ASCII-REQUEST')
+        assert result.stdout == b'PUBLIC'
+    assert sum(row[0] == 'spawn' for row in calls) == 1
+    assert sum(row[:2] == ('communicate', b'ASCII-REQUEST') for row in calls) == 1
+    assert all(row[2] <= 5 for row in calls if row[0] == 'communicate')
+
+
+def repin(deployment):
+    deployment.snapshot_path.write_text(json.dumps({'exit_code': 0, 'result': {'ok': True,
+        'public': deployment.snapshot}}), encoding='utf-8')
+    deployment.manifest['snapshot']['sha256'] = update.sha(deployment.snapshot_path)
+    deployment.path.write_text(json.dumps(deployment.manifest), encoding='utf-8')
+    return update.configure(deployment.path, update.sha(deployment.path))
+
+
+def test_manifest_cannot_omit_an_existing_database_from_preservation(deployment):
+    deployment.snapshot['protected_paths'].pop(str(deployment.repo / 'data/docscan.db'))
+    with pytest.raises(RuntimeError, match='protected_scope'):
+        repin(deployment)
+
+
+def test_consistently_forged_archive_and_manifest_cannot_replace_fixed_commit_blobs(deployment):
+    path = deployment.reports / 'source.tar'
+    entries = []
+    with tarfile.open(path, 'r:') as original:
+        for member in original:
+            entries.append((member, original.extractfile(member).read() if member.isfile() else None))
+    with tarfile.open(path, 'w:') as forged:
+        for member, content in entries:
+            if member.name == 'app/main.py':
+                content = b'FORGED = 9\n'
+                member.size = len(content)
+                deployment.manifest['archive']['files'][member.name].update(
+                    size=len(content), sha256=hashlib.sha256(content).hexdigest())
+            forged.addfile(member, io.BytesIO(content) if content is not None else None)
+    deployment.manifest['archive'].update(sha256=update.sha(path), size=path.stat().st_size)
+    with pytest.raises(RuntimeError, match='archive_git_'):
+        update.prepare(repin(deployment))
+    assert (deployment.repo / 'app/main.py').read_bytes() == b'OLD = 1\n'
+
+
+@pytest.mark.parametrize('name, kind', [('../outside', tarfile.REGTYPE), ('app/link', tarfile.SYMTYPE),
+                                       ('app/fifo', tarfile.FIFOTYPE), ('app/../outside', tarfile.REGTYPE)])
+def test_unsafe_archives_never_extract_or_create_any_member(deployment, name, kind):
+    output = io.BytesIO()
+    with tarfile.open(fileobj=output, mode='w:') as archive:
+        member = tarfile.TarInfo(name)
+        member.type = kind
+        archive.addfile(member)
+    content = output.getvalue()
+    with pytest.raises(RuntimeError):
+        update.load_bundle(content, hashlib.sha256(content).hexdigest(), deployment.manifest['archive']['files'])
+    assert not (deployment.repo / 'app/link').exists() and not (deployment.home / 'outside').exists()
+
+
+@pytest.mark.parametrize('mode', [0o600, 0o444])
+def test_archive_permissions_must_match_git_intent_except_export_group_write(deployment, mode):
+    output = io.BytesIO()
+    with tarfile.open(deployment.reports / 'source.tar', 'r:') as original:
+        with tarfile.open(fileobj=output, mode='w:') as archive:
+            for member in original:
+                content = original.extractfile(member).read() if member.isfile() else None
+                if member.name == 'app/main.py':
+                    member.mode = mode
+                archive.addfile(member, io.BytesIO(content) if content is not None else None)
+    content = output.getvalue()
+    with pytest.raises(RuntimeError, match='bundle_manifest_mismatch'):
+        update.load_bundle(content, hashlib.sha256(content).hexdigest(), deployment.manifest['archive']['files'])
+
+
+def test_new_source_publication_never_overwrites_a_racing_foreign_file(tmp_path, private_filesystem):
+    repo, backup = tmp_path / 'repo', tmp_path / 'backup'
+    (repo / 'app').mkdir(parents=True)
+    def race(path, content, mode, **kwargs):
+        if path == repo / 'app/new.py':
+            path.write_bytes(b'FOREIGN = 1\n')
+        update.atomic_bytes(path, content, mode, **kwargs)
+    with pytest.raises(RuntimeError):
+        update.update_sources(repo, backup, {'app/new.py': b'NEW = 2\n'}, {'app/new.py': {'exists': False}},
+            lambda expected: {'stable': True}, new_modes={'app/new.py': 0o600}, write=race)
+    assert (repo / 'app/new.py').read_bytes() == b'FOREIGN = 1\n'
+    assert json.loads((backup / 'manifest.json').read_bytes())['phase'] == 'rollback_blocked'
+
+
+@pytest.mark.parametrize('count', [86, 87])
+def test_current_source_archive_installs_without_an_old_archive_or_fixed_count(deployment, monkeypatch, count):
+    for number in range(count - 7):
+        name, data = f'app/extra_{number:03d}.py', f'VALUE = {number}\n'.encode()
+        (deployment.source / name).write_bytes(data)
+        deployment.files[name] = data
+        deployment.snapshot['source_paths'][name] = {'exists': False}
+        deployment.manifest['archive']['files'][name] = {'sha256': hashlib.sha256(data).hexdigest(),
+                                                        'size': len(data), 'mode': 0o644}
+    deployment.git('add', '.')
+    deployment.git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'more source')
+    commit = deployment.git('rev-parse', 'HEAD').decode().strip()
+    path = deployment.reports / 'source.tar'
+    path.write_bytes(deployment.git('archive', '--format=tar', commit, 'app', 'scripts', *sorted(update.ROOT_FILES)))
+    deployment.manifest['source_commit'] = commit
+    deployment.manifest['archive'].update(sha256=update.sha(path), size=path.stat().st_size)
+    repin(deployment)
+    wire, commands, metadata, namespace = generated(deployment)
+    replay_runtime(namespace, deployment, monkeypatch)
+    namespace['sys'] = SimpleNamespace(stdin=SimpleNamespace(buffer=io.BytesIO(wire)))
+    result = namespace['native_main']()
+    update.validate_public(result, 'update')
+    assert result['source_files'] == result['source_writes'] == count
+    assert all((deployment.repo / name).read_bytes() == data for name, data in deployment.files.items())
+
+
+@pytest.mark.parametrize('change', ['hash', 'mode', 'uid', 'new_exists'])
+def test_source_snapshot_difference_stops_before_backup_or_cdp(deployment, monkeypatch, private_filesystem, change):
+    wire, commands, metadata, namespace = generated(deployment)
+    calls = replay_runtime(namespace, deployment, monkeypatch)
+    path = deployment.repo / ('app/work_bridge.py' if change == 'new_exists' else 'app/main.py')
+    if change in {'hash', 'new_exists'}:
+        path.write_bytes(b'UNRELATED = 9\n')
+    elif change == 'mode':
+        os.chmod(path, 0o700)
+    else:
+        real_lstat = Path.lstat
+        def foreign_owner(candidate, *args, **kwargs):
+            info = real_lstat(candidate, *args, **kwargs)
+            if candidate == path:
+                fields = list(info)
+                fields[4] = 124
+                return os.stat_result(fields)
+            return info
+        monkeypatch.setattr(Path, 'lstat', foreign_owner)
+    namespace['sys'] = SimpleNamespace(stdin=SimpleNamespace(buffer=io.BytesIO(wire)))
+    with pytest.raises(RuntimeError):
+        namespace['native_main']()
+    assert not calls and not (deployment.home / 'rokid-backups/pre-source-fixture').exists()
+
+
+@pytest.mark.parametrize('fault', ['producer', 'missing_owner', 'malformed', 'permission'])
+def test_dynamic_owned_process_proof_refuses_producers_without_reading_unrelated_proc(deployment, monkeypatch, fault):
+    wire, commands, metadata, namespace = generated(deployment, 'inspect')
+    calls = replay_runtime(namespace, deployment, monkeypatch)
+    ordinary_run = subprocess.run
+    def run(command, **kwargs):
+        result = ordinary_run(command, **kwargs)
+        if command[0] == '/system/bin/ps':
+            if fault == 'producer':
+                result.stdout += b'123 98 python -m app.work_mcp\n'
+            elif fault == 'missing_owner':
+                result.stdout = result.stdout.replace(b'123 12 chromium\n', b'')
+            elif fault == 'malformed':
+                result.stdout += b'123 invalid opaque\n'
+            else:
+                result.returncode, result.stderr = 1, b'PRIVATE-PROCESS-ERROR'
+        return result
+    monkeypatch.setattr(subprocess, 'run', run)
+    namespace['sys'] = SimpleNamespace(stdin=SimpleNamespace(buffer=io.BytesIO(wire)))
+    with pytest.raises(RuntimeError):
+        namespace['native_main']()
+    assert not calls and not (deployment.home / 'rokid-backups/pre-source-fixture').exists()
+
+
+@pytest.mark.parametrize('fault', ['identity', 'timeout', 'malformed', 'private_failure'])
+def test_host_dispatch_keeps_the_attempt_and_publishes_only_allowed_evidence(deployment, monkeypatch, capsys, fault):
+    wire, commands, metadata, namespace = generated(deployment)
+    calls = []
+    def identities(command, **kwargs):
         calls.append(command)
-        if len(calls) == 4:
-            raise subprocess.TimeoutExpired(command, 180, output=b'private-output')
-        stdout = (f'List of devices attached\n{target} device model:F_51F\n' if len(calls) == 1
-                  else 'FIXTURE001\n' if len(calls) == 2 else 'F-51F\n')
-        return SimpleNamespace(returncode=0, stdout=stdout.encode(), stderr=b'')
-
-    monkeypatch.setattr(update.subprocess, 'run', fake_run)
-    def receipt_read_failure(command, **kwargs):
-        if len(calls) == 3:
-            calls.append(command)
-            return SimpleNamespace(returncode=2, stdout=json.dumps(receipt_failure).encode(), stderr=b'')
-        return fake_run(command, **kwargs)
-
-    monkeypatch.setattr(update.subprocess, 'run', receipt_read_failure)
-    assert update.execute(request, commands, metadata) == 2
-    stored = json.loads(next(reports.glob('phone-source-update-*.json')).read_bytes())
-    assert stored['results'][-1]['public_result'] == receipt_failure
-    assert stored['results'][-1]['exit_code'] == 2 and receipt_failure['source_writes'] == 79
-    assert receipt_failure['transaction_phase'] == 'source_prepared_send0' and receipt_failure['restored'] is False
-    calls.clear()
-    monkeypatch.setattr(update.subprocess, 'run', fake_run)
-    assert update.execute(request, commands, metadata) == 2
-    saved = next(value for p in reports.glob('phone-source-update-*.json')
-                 if (value := json.loads(p.read_bytes()))['execution']['error_type'] == 'TimeoutExpired')
-    assert len(saved['results']) == 4 and saved['results'][-1] == {'command': commands[-1], 'exit_code': None}
-    assert saved['execution']['native_attempts'] == 1 and saved['execution']['error_type'] == 'TimeoutExpired'
-    assert saved['invocation_flag'] == update.EXECUTE_FLAG and saved['read_only'] is False
-    assert 'private-output' not in json.dumps(saved) and len(calls) == 4
-    assert update.main([]) == 0 and len(calls) == 4
-    for invalid_flag in ('--execute-approved-source', '--execute'):
+        index = len(calls) - 1
+        output = [f'List of devices attached\n{FIXTURE_TARGET} device\n', 'FIXTURE001\n', 'F-51F\n'][index]
+        if fault == 'identity' and index == 1:
+            output = 'DIFFERENT\n'
+        return SimpleNamespace(returncode=0, stdout=output.encode(), stderr=b'')
+    def dispatch(command, request):
+        calls.append(command)
+        assert request == wire
+        if fault == 'timeout':
+            raise subprocess.TimeoutExpired(command, 180, output=b'PRIVATE-OUTPUT')
+        if fault == 'malformed':
+            return SimpleNamespace(returncode=2, stdout=b'PRIVATE-OUTPUT', stderr=b'PRIVATE-ERROR')
+        namespace['stage'] = 'source_update_final_guard'
+        namespace['transaction_state'] = {'phase': 'source_prepared_send0', 'source_writes': 7, 'restored': False}
+        failure = namespace['public_failure'](OSError('PRIVATE-ERROR'))
+        return SimpleNamespace(returncode=2, stdout=json.dumps(failure).encode(), stderr=b'')
+    monkeypatch.setattr(subprocess, 'run', identities)
+    monkeypatch.setattr(update, 'dispatch_native', dispatch)
+    assert update.execute(wire, commands, metadata) == 2
+    report = json.loads(next(deployment.reports.glob('phone-source-update-*.json')).read_bytes())
+    assert report['execution']['native_attempts'] == (0 if fault == 'identity' else 1)
+    assert len(report['results']) == (2 if fault == 'identity' else 4)
+    assert len(calls) == (2 if fault == 'identity' else 4)
+    if fault == 'timeout':
+        assert report['results'][-1] == {'command': commands[-1], 'exit_code': None}
+    if fault == 'private_failure':
+        assert report['results'][-1]['public_result']['source_writes'] == 7
+    assert 'PRIVATE' not in json.dumps(report) and 'PRIVATE' not in capsys.readouterr().out
+    assert update.main([]) == 0
+    for flag in ('--execute-approved-source', '--execute'):
         with pytest.raises(SystemExit):
-            update.main([invalid_flag])
-    assert len(calls) == 4
-    assert 'private-error-must-not-be-output' not in capsys.readouterr().out
+            update.main([flag])
+    assert len(calls) == (2 if fault == 'identity' else 4)
+
+
+@pytest.mark.parametrize('fault', [None, 'version', 'late_owner', 'profile'])
+def test_retained_browser_uses_the_snapshot_product_and_fences_owner_changes(deployment, fault):
+    runtime = deployment.snapshot['runtime']
+    for name, kind, mode in [('tmp', 'directory', 0o700), ('tmp/.X11-unix', 'directory', 0o1777),
+                              ('tmp/.X11-unix/X1', 'socket', 0o777)]:
+        runtime['X11_socket_metadata'][str(deployment.prefix / name)] = {
+            'exists': True, 'type': kind, 'uid': 123, 'mode': mode}
+    repin(deployment)
+    wire, commands, metadata, namespace = generated(deployment)
+    namespace['set_configuration'](deployment.manifest, deployment.snapshot_path.read_bytes())
+    profile = deployment.repo / 'data/chromium-profile'
+    profile.mkdir()
+    original_metadata = namespace['path_metadata']
+    def path_metadata(path):
+        if path == profile:
+            return {**runtime['profile_directory'], 'uid': 124 if fault == 'profile' else 123}
+        if path == profile / 'SingletonLock':
+            return runtime['profile_lock']
+        if str(path) in runtime['X11_socket_metadata']:
+            return runtime['X11_socket_metadata'][str(path)]
+        return original_metadata(path)
+    namespace['path_metadata'] = path_metadata
+    namespace['os'] = SimpleNamespace(**{**vars(os), 'readlink': lambda path: 'localhost-12'})
+    class Socket:
+        def __enter__(self):
+            return self
+        def __exit__(self, *unused):
+            return False
+        def settimeout(self, seconds):
+            assert seconds == 1
+        def connect_ex(self, address):
+            return 1 if address == ('127.0.0.1', 8000) else 0
+    namespace['socket'] = SimpleNamespace(AF_UNIX=1, socket=lambda *args: Socket())
+    process_reads = []
+    def binding(pid):
+        process_reads.append(pid)
+        result = dict(runtime['browser' if pid == 12 else 'x11'])
+        if fault == 'late_owner' and len(process_reads) > 2 and pid == 12:
+            result['starttime'] += 1
+        return result, ['--user-data-dir=' + str(profile), '--remote-debugging-address=127.0.0.1',
+                        '--remote-debugging-port=9222']
+    namespace['process_binding'] = binding
+    protocol = []
+    def send(method):
+        protocol.append(method)
+        return ({'product': 'Chrome/changed' if fault == 'version' else 'Chrome/999.1.2.3'}
+                if method == 'Browser.getVersion' else {'processInfo': [{'type': 'browser', 'id': 12}]})
+    browser = SimpleNamespace(_connection=SimpleNamespace(send=send))
+    if fault:
+        with pytest.raises(RuntimeError):
+            namespace['retained_owner'](browser)
+    else:
+        assert namespace['retained_owner'](browser) == {'browser': runtime['browser'], 'x11': runtime['x11']}
+    assert protocol == ([] if fault == 'profile' else ['Browser.getVersion', 'SystemInfo.getProcessInfo'])

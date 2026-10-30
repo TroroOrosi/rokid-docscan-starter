@@ -350,6 +350,45 @@ _SEND_JS = r"""((click, expected) => {
 })""" % json.dumps(COMPOSER_SEL)
 
 
+def _pending_work_send(guard):
+    """Identify one journal-owned Work batch without trusting a reply body."""
+    status = guard.status()
+    if status["state"] != "uncertain":
+        return None
+    matches = [(key, entry) for key, entry in chat._read_chats(guard.directory).items()
+               if isinstance(entry, dict) and entry.get("pending") == status["request_id"]]
+    if len(matches) != 1:
+        return None
+    key, entry = matches[0]
+    transfer = entry.get("transfer")
+    batch = transfer.get("pending") if isinstance(transfer, dict) else None
+    if (not isinstance(key, str) or not re.fullmatch(r"session:[1-9][0-9]*:browser:[a-f0-9]{64}", key)
+            or _conversation_id(entry.get("url")) is None or not isinstance(batch, dict)):
+        return None
+    stage = batch.get("stage", "single")
+    names, digests, expect = (batch.get(field) for field in ("names", "digests", "expect"))
+    if (stage not in ("single", "reading", "listening")
+            or type(batch.get("number")) is not int or batch["number"] < 1
+            or type(batch.get("final")) is not bool
+            or any(type(batch.get(field)) is not int or batch[field] < 0 for field in ("users", "replies"))
+            or not isinstance(names, list) or not 1 <= len(names) <= 20
+            or any(not isinstance(name, str) or not name or "/" in name or "\\" in name or "\0" in name for name in names)
+            or len(set(names)) != len(names) or not isinstance(digests, list) or len(digests) != len(names)
+            or any(not isinstance(digest, str) or not re.fullmatch(r"[a-f0-9]{64}", digest) for digest in digests)
+            or not isinstance(expect, list) or not expect or any(not isinstance(field, str) for field in expect)
+            or (not batch["final"] and expect != ["received"])
+            or (batch["final"] and "questions" not in expect)
+            or any(not isinstance(transfer.get(field), list) for field in ("completed", "pages"))
+            or not isinstance(entry.get("attached"), list)):
+        return None
+    identity = [key, batch["number"], names, digests]
+    if stage != "single":
+        identity.append(stage)
+    if chat._digest(json.dumps(identity, separators=(",", ":")).encode()) != batch.get("id"):
+        return None
+    return key, stage, batch
+
+
 class WorkWebClient(chat.ChatGptWebClient):
     """Work controls/final reader; BrowserGuard and batch journal stay shared."""
 
@@ -374,6 +413,82 @@ class WorkWebClient(chat.ChatGptWebClient):
     @property
     def conversation_id(self):
         return getattr(self._observed, "conversation_id", _conversation_id(self._chat_url))
+
+    def pending_work_owner(self):
+        """Return only a unique Work owner; unknown/legacy sends stay blocked."""
+        try:
+            with chat.BrowserGuard() as guard:
+                pending = _pending_work_send(guard)
+                return {"chat_key": pending[0], "stage": pending[1]} if pending else None
+        except chat.BrowserBusy as error:
+            raise chat.ChatGptWebBusy("browser is busy; nothing sent") from error
+        except (chat.BrowserGuardError, OSError, ValueError, TypeError, KeyError):
+            return None
+
+    def retire_expired_batch(self, *, chat_key, booklet_stage, expired_guard, sleep=time.sleep):
+        """Read a stale owner's matching final/ACK and retire that send only.
+
+        This does not enter complete/recover/ask: none of their preparation,
+        model, attachment, next-batch or answer-sealing paths are reachable.
+        """
+        from .cdp import CdpError, connect_over_cdp  # noqa: PLC0415
+
+        try:
+            with chat.BrowserGuard() as guard:
+                pending = _pending_work_send(guard)
+                if not pending or pending[:2] != (chat_key, booklet_stage):
+                    return False
+                self._load_chat(guard, chat_key)
+                batch = pending[2]
+                with expired_guard():
+                    pass  # Verify expiry and inactive ownership BEFORE browser reads.
+                browser = connect_over_cdp(self.endpoint)
+                try:
+                    if not browser.contexts:
+                        return False
+                    pages = [page for page in browser.contexts[0].pages
+                             if urlsplit(chat._url_of(page)).scheme == "https"
+                             and urlsplit(chat._url_of(page)).netloc == "chatgpt.com"]
+                    exact = [page for page in pages if chat._url_of(page) == self._chat_url]
+                    choices = exact or pages
+                    if len(choices) != 1:
+                        return False
+                    page = choices[0]
+                    page.goto(self._chat_url, wait_until="domcontentloaded")
+                    if chat._url_of(page) != self._chat_url:
+                        return False
+                    state = work_reply_state(page, batch["id"])
+                    if not state["found"] or state["ambiguous"] or state["streaming"] or not state["reply"]:
+                        return False
+                    reply = state["reply"]
+                    received = self._valid_batch(reply, batch)
+                    if not received:
+                        if not chat._limited(reply):
+                            return False
+                        try:
+                            chat.extract_json(reply)
+                        except ValueError:
+                            pass
+                        else:
+                            return False  # A mismatched JSON answer is not a proven refusal.
+                        for _ in range(max(0, chat.SETTLE_POLLS - 1)):
+                            sleep(chat.POLL_S)
+                            if work_reply_state(page, batch["id"]) != state:
+                                return False
+                    if work_reply_state(page, batch["id"]) != state:
+                        return False
+                    with expired_guard():
+                        if received:
+                            self._accept_batch(guard, reply, batch, self._pending)
+                        else:
+                            self._clear_refused_batch(guard, self._pending, self._chat_url)
+                    return True
+                finally:
+                    browser.close()
+        except chat.BrowserBusy as error:
+            raise chat.ChatGptWebBusy("browser is busy; nothing sent") from error
+        except (chat.BrowserGuardError, CdpError, chat.ChatGptWebError, OSError, ValueError, TypeError, KeyError):
+            return False
 
     def _wait_for_composer(self, page, *, ready_timeout_s=None):
         return chat.wait_for_composer(page, ready_timeout_s=ready_timeout_s, composer_selector=COMPOSER_SEL)

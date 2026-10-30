@@ -100,9 +100,8 @@ final class GlassCamera {
     private final Callback callback;
     private final Stillness stillness;
 
-    private CameraDevice device;
-    private CameraCaptureSession session;
     private ImageReader reader;
+    private long lastJpegSensorTimestamp;
     private long startedAtMillis;
     private StillResult stillResult;
     private boolean settled;
@@ -206,10 +205,11 @@ final class GlassCamera {
             lastPreviewSensorTimestamp = 0;
             autoFocusStarted = false;
             autoFocusSensorTimestamp = 0;
+            lastJpegSensorTimestamp = 0;
             CameraDiagnostics.capabilities(generation + 1, characteristics, jpegSize);
             reader = ImageReader.newInstance(jpegSize.getWidth(), jpegSize.getHeight(), ImageFormat.JPEG, 1);
             reader.setOnImageAvailableListener(source -> {
-                if (source == reader && generation > 0 && active(generation)) onImageAvailable(source);
+                if (source == reader) onImageAvailable(source);
             }, handler);
             previewReader = ImageReader.newInstance(size.getWidth(), size.getHeight(), ImageFormat.YUV_420_888, 2);
             previewReader.setOnImageAvailableListener(source -> previewFrame(source, token), handler);
@@ -246,12 +246,12 @@ final class GlassCamera {
                 }
                 @Override public void onDisconnected(CameraDevice disconnected) {
                     previewOpening = false;
-                    if (disconnected == device && active(generation)) fail("camera disconnected");
+                    if (disconnected == previewDevice && generation > 0 && active(generation)) fail("camera disconnected");
                     else { disconnected.close(); if (token == previewGeneration) previewFailed(); }
                 }
                 @Override public void onError(CameraDevice errored, int code) {
                     previewOpening = false;
-                    if (errored == device && active(generation)) fail("camera error " + code);
+                    if (errored == previewDevice && generation > 0 && active(generation)) fail("camera error " + code);
                     else { errored.close(); if (token == previewGeneration) previewFailed(); }
                 }
                 @Override public void onClosed(CameraDevice closedDevice) {
@@ -296,7 +296,7 @@ final class GlassCamera {
                 }
                 callback.onPreview(Bitmap.createBitmap(display, width, height, Bitmap.Config.RGB_565));
             }
-            if (pageReady != null && pageChange.ready(now) && meteredFrame(now)) {
+            if (!capturePending && pageReady != null && pageChange.ready(now) && meteredFrame(now)) {
                 Runnable ready = pageReady;
                 pageReady = null;
                 ready.run();
@@ -305,14 +305,7 @@ final class GlassCamera {
     }
 
     private void stopPreview() {
-        ++previewGeneration;
-        meteringExposureNanos = 0;
-        closeResource(previewSession); previewSession = null;
-        closeResource(previewReader); previewReader = null;
-        if (device == null) { closeResource(reader); reader = null; }
-        CameraDevice opened = previewDevice; previewDevice = null;
-        if (opened != null) { previewClosing = true; closeResource(opened); }
-        else if (previewOpening) { previewClosing = true; }
+        release();
     }
 
     private void previewClosed() {
@@ -325,6 +318,7 @@ final class GlassCamera {
 
     private void previewFailed(String reason) {
         if (closed || unknown) return;
+        if (generation > 0 && active(generation)) { fail(reason); return; }
         previewRequested = false;
         previewOpening = false;
         unknown = true;
@@ -360,10 +354,15 @@ final class GlassCamera {
     }
 
     private CameraCaptureSession.CaptureCallback previewResults(long token, boolean focusTrigger) {
+        long focusGeneration = generation;
         return new CameraCaptureSession.CaptureCallback() {
+            private boolean current() {
+                return token == previewGeneration && !closed && !unknown
+                        && (!focusTrigger || (focusGeneration == generation && autoFocusStarted));
+            }
             @Override public void onCaptureCompleted(CameraCaptureSession source,
                     CaptureRequest request, TotalCaptureResult result) {
-                if (token != previewGeneration || closed || unknown || result == null) return;
+                if (!current() || result == null) return;
                 try {
                     Long timestamp = result.get(CaptureResult.SENSOR_TIMESTAMP);
                     if (timestamp == null || timestamp <= 0) {
@@ -383,7 +382,7 @@ final class GlassCamera {
             }
             @Override public void onCaptureFailed(CameraCaptureSession source,
                     CaptureRequest request, CaptureFailure failure) {
-                if (token == previewGeneration) previewFailed("camera metering failed");
+                if (current()) previewFailed("camera metering failed");
             }
         };
     }
@@ -415,10 +414,6 @@ final class GlassCamera {
         settled = false;
         pageChange.consumed();
         startedAtMillis = SystemClock.elapsedRealtime();
-        device = previewDevice; previewDevice = null;
-        session = previewSession; previewSession = null;
-        previewClosing = true;
-        ++previewGeneration;
         handler.removeCallbacks(prepareTimeout);
         handler.postDelayed(timeout, CAPTURE_TIMEOUT_MILLIS);
         requestStill(current);
@@ -435,14 +430,13 @@ final class GlassCamera {
             stopPreview();
             handler.removeCallbacks(timeout);
             handler.removeCallbacks(prepareTimeout);
-            release();
         });
     }
 
     private void requestStill(long current) {
         try {
             CaptureRequest.Builder request =
-                    device.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE);
+                    previewDevice.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE);
             request.addTarget(reader.getSurface());
             // No rotation is baked into the JPEG. The server owns the
             // orientation-corrected PNG and is told the rotation separately,
@@ -459,8 +453,8 @@ final class GlassCamera {
             // Native AF/AE convergence now precedes this request in the same
             // session; the older timeout does not establish its cause.
             applyMetering(request);
-            session.stopRepeating();
-            session.capture(request.build(), captureCallback(current), handler);
+            // capture() takes priority over repeating preview without stopping its next frames.
+            previewSession.capture(request.build(), captureCallback(current), handler);
         } catch (CameraAccessException | RuntimeException | OutOfMemoryError error) {
             fail("capture " + error.getClass().getSimpleName());
         }
@@ -508,12 +502,18 @@ final class GlassCamera {
         final int height;
         final long sensorTimestamp;
         try (Image image = source.acquireNextImage()) {
+            // A retained reader must drain late notifications even between requests.
+            if (source != reader || generation <= 0 || !active(generation)) return;
             if (image == null || image.getFormat() != ImageFormat.JPEG) {
                 throw new RejectedJpeg("missing JPEG image");
             }
             width = image.getWidth();
             height = image.getHeight();
             sensorTimestamp = image.getTimestamp();
+            if (sensorTimestamp <= 0) throw new RejectedJpeg("invalid JPEG timestamp");
+            // One JPEG is in flight. A previous original cannot satisfy the next request.
+            // Device ZSL may predate preview, so only compare this reader's JPEG timestamps.
+            if (sensorTimestamp <= lastJpegSensorTimestamp) return;
             if (width <= 0 || height <= 0) throw new RejectedJpeg("invalid JPEG dimensions");
             Image.Plane[] planes = image.getPlanes();
             if (planes.length != 1) throw new RejectedJpeg("invalid JPEG planes");
@@ -528,22 +528,26 @@ final class GlassCamera {
             fail(error.getMessage());
             return;
         } catch (RuntimeException | OutOfMemoryError error) {
-            // The Image has already closed before the reader can be released by fail().
-            fail("image " + error.getClass().getSimpleName());
+            // A settled JPEG reader still owns the live preview camera while it drains.
+            previewFailed("image " + error.getClass().getSimpleName());
             return;
         }
         if (settled || closed) return;
-        if (!release()) {
+        if (!previewRequested && !release()) {
             fail("camera close failed");
             return;
         }
         settled = true;
         capturePending = false;
+        lastJpegSensorTimestamp = sensorTimestamp;
+        autoFocusStarted = false;
+        autoFocusSensorTimestamp = 0;
         handler.removeCallbacks(timeout);
         long elapsed = SystemClock.elapsedRealtime() - startedAtMillis;
         Log.i(TAG, "captured " + width + "x" + height
                 + " " + jpeg.length + "B in " + elapsed + "ms gen=" + generation);
-        // The consumer may queue another allocation. No native Image/reader is held.
+        // No native Image is held when the consumer queues another allocation.
+        // Reuse the configured readers/session until pause, close or failure.
         // Consumer exceptions must not re-label a delivered image as a camera failure.
         StillResult result = stillResult != null && stillResult.generation == generation ? stillResult : null;
         CaptureProvenance provenance = CaptureProvenance.nativeStill(jpeg, width, height, sensorTimestamp,
@@ -564,7 +568,11 @@ final class GlassCamera {
         settled = true;
         capturePending = false;
         unknown = true;
+        previewRequested = false;
+        pageReady = null;
+        stillness.cancel();
         handler.removeCallbacks(timeout);
+        handler.removeCallbacks(prepareTimeout);
         release();
         Log.w(TAG, "capture failed: " + reason);
         callback.onCaptureFailed(reason);
@@ -572,14 +580,17 @@ final class GlassCamera {
 
     private boolean release() {
         // Detach ownership first, then attempt every close even if one fails.
-        CameraCaptureSession oldSession = session;
-        CameraDevice oldDevice = device;
+        CameraCaptureSession oldSession = previewSession;
+        CameraDevice oldDevice = previewDevice;
         ImageReader oldReader = reader;
         ImageReader oldPreviewReader = previewReader;
-        session = null;
-        device = null;
+        previewSession = null;
+        previewDevice = null;
         reader = null;
         previewReader = null;
+        ++previewGeneration;
+        meteringExposureNanos = 0;
+        if (oldDevice != null || previewOpening) previewClosing = true;
         boolean ok = closeResource(oldSession);
         ok = closeResource(oldDevice) && ok;
         ok = closeResource(oldReader) && ok;

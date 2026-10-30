@@ -224,7 +224,9 @@ from __future__ import annotations
 # 0.51.3: return non-answering Work needs_input results when image quality fails.
 # 0.52.0: phone-local Work browser delivery of original PNG ZIPs with durable
 #         batches, source-bound uncalibrated readability and staged original audio.
-APP_VERSION = "0.52.0"
+# 0.53.0: visible phone services and retained capture preview; expired Work
+#         receipts can release their own barrier without replaying a send.
+APP_VERSION = "0.53.0"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.
@@ -337,7 +339,9 @@ APP_VERSION = "0.52.0"
 # 1.33.1: quality failures allow validated stop results, while answers stay gated.
 # 1.34.0: local browser Work results retain source/readability provenance, and
 #         rejected readability has a visible failure without automatic resending.
-API_VERSION = "1.34.0"
+# 1.35.0: an expired Work send may remain pending until its matching receipt
+#         is recovered; waiting does not consume the current session retry budget.
+API_VERSION = "1.35.0"
 
 # Matching algorithm identity. Bump when thresholds or hashing change so a
 # re-index/eval is triggered. Mirrors thresholds in app/matching.py.
@@ -475,7 +479,9 @@ EXPLAINER_API_VERSION = "1.1.0"
 #         and the visible-acknowledged review/commit interval are preserved.
 # 1.30.0: ordinary status and chooser lines use a compact display region;
 #         full answer pages and the capture/review viewport stay unchanged.
-GLASSES_VIEW_CONTRACT_VERSION = "1.30.0"
+# 1.31.0: retain page-change preview through successful still capture and review;
+#         any native drain failure closes the camera and requires a new generation.
+GLASSES_VIEW_CONTRACT_VERSION = "1.31.0"
 
 # Answer-area overlay payload (box + short answer; 2D image-anchored).
 # 1.1.0: added tracking metadata (tracking/fixed_ar/anchor_hint).

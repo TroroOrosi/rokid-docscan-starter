@@ -21,6 +21,10 @@ fi
 # A stale phone env must not shorten a whole-booklet reply or redirect CDP.
 unset ROKID_CHATGPT_TIMEOUT_S ROKID_CHATGPT_POLL_S
 export ROKID_CHATGPT_CDP="http://127.0.0.1:9222"
+# The supervised X server and browser must use the same local display even
+# when an interactive shell or an older env file selected another display.
+export DISPLAY=:1
+export TMPDIR="${TMPDIR:-${PREFIX:?Termux PREFIX is required}/tmp}"
 # Enabling services is separate from permission to submit a photographed booklet.
 export ROKID_CHATGPT_SEND_ENABLED="${ROKID_CHATGPT_SEND_ENABLED:-0}"
 cd "$repo_root"

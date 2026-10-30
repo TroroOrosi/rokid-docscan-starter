@@ -71,8 +71,8 @@ android {
         // Capture settings and physical acceptance gates remain unchanged.
         // Meter before the single JPEG; convergence is not a readability certificate.
         // 21 sends a best shot OCR could not read to the 3 s review instead of shooting again.
-        versionCode = 37
-        versionName = "0.29.0"
+        versionCode = 38
+        versionName = "0.29.1"
     }
 
     // Same reasoning as `:glassapp`: a vendor installer that reads JAR
