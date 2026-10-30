@@ -169,6 +169,12 @@ public final class DocScanApi {
     public JSONObject uploadPage(long documentId, int pageIndex, byte[] jpeg, String ocrText,
                                  int imageRotation, long capturedAtMillis, CaptureProvenance provenance)
             throws IOException, JSONException {
+        return uploadPage(documentId, pageIndex, jpeg, ocrText, imageRotation, capturedAtMillis, provenance, null);
+    }
+
+    public JSONObject uploadPage(long documentId, int pageIndex, byte[] jpeg, String ocrText,
+                                 int imageRotation, long capturedAtMillis, CaptureProvenance provenance,
+                                 CaptureInspectionOrigin inspectionOrigin) throws IOException, JSONException {
         JSONObject capture = provenance == null ? null : provenance.toUploadJson(jpeg, pageIndex, imageRotation);
         MultipartBody.Builder multipart = new MultipartBody.Builder()
                 .setType(MultipartBody.FORM)
@@ -183,6 +189,8 @@ public final class DocScanApi {
             multipart.addFormDataPart("ocr_text", ocrText.trim());
         }
         if (capture != null) multipart.addFormDataPart("capture_provenance", capture.toString());
+        JSONObject origin = inspectionOrigin == null ? null : inspectionOrigin.forUpload(documentId, provenance);
+        if (origin != null) multipart.addFormDataPart("inspection_origin", origin.toString());
         JSONObject response = execute(new Request.Builder()
                 .url(baseUrl + "/v1/documents/" + documentId + "/pages")
                 .post(multipart.build()));

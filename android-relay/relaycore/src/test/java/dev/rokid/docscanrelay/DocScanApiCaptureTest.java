@@ -23,6 +23,56 @@ public class DocScanApiCaptureTest {
     private static final String JPEG_SHA = "039058c6f2c0cb492c533b0a4d14ef77cc0f78abccced5287d84a1a2011cfb81";
     private static final String SESSION = "11111111-2222-3333-4444-555555555555";
 
+    @Test public void optionalInspectionOriginKeepsTheOriginalReceiptContract() throws Exception {
+        CaptureProvenance source = knownSource();
+        CaptureInspectionOrigin origin = new CaptureInspectionOrigin(
+                new CaptureInspectionOrigin.Context("glasses:1", Long.MAX_VALUE), source, 17);
+        try (MockWebServer server = new MockWebServer()) {
+            // The diagnostic is disabled/unbound, or absent on an old server: image ACK still succeeds.
+            server.enqueue(new MockResponse().setBody(receipt(source).put("capture_inspection",
+                    new JSONObject().put("status", "unbound").put("applicable", false)).toString()));
+            api(server).uploadPage(17, 2, ORIGINAL, "", 90, 1234, source, origin);
+            RecordedRequest request = server.takeRequest();
+            JSONObject sent = new JSONObject(new String(part(request, "inspection_origin"), StandardCharsets.UTF_8));
+            assertEquals(6, sent.length());
+            assertEquals(1, sent.getInt("schema"));
+            assertEquals("glasses:1", sent.getString("device_id"));
+            assertEquals(Long.MAX_VALUE, sent.getLong("generation"));
+            assertEquals(17, sent.getLong("document_id"));
+            assertEquals(SESSION, sent.getString("local_session_id"));
+            assertEquals(source.captureId, sent.getString("capture_id"));
+            assertArrayEquals(ORIGINAL, part(request, "image"));
+            assertTrue(part(request, "inspection_origin").length <= 2048);
+            JSONObject badImageReceipt = receipt(source);
+            badImageReceipt.remove("canonical_image_sha256");
+            badImageReceipt.put("capture_inspection", new JSONObject().put("status", "queued"));
+            server.enqueue(new MockResponse().setBody(badImageReceipt.toString()));
+            assertThrows(JSONException.class,
+                    () -> api(server).uploadPage(17, 2, ORIGINAL, "", 90, 1234, source, origin));
+        }
+    }
+
+    @Test public void aForeignOrMissingDiagnosticOriginIsOmittedWithoutBlockingTheImage() throws Exception {
+        CaptureProvenance source = knownSource();
+        CaptureInspectionOrigin.Context context = new CaptureInspectionOrigin.Context("glasses", 0);
+        CaptureInspectionOrigin foreignDocument = new CaptureInspectionOrigin(context, source, 18);
+        CaptureInspectionOrigin foreignCapture = new CaptureInspectionOrigin(context, knownSource(), 17);
+        try (MockWebServer server = new MockWebServer()) {
+            for (CaptureInspectionOrigin origin : new CaptureInspectionOrigin[]{null, foreignDocument, foreignCapture}) {
+                server.enqueue(new MockResponse().setBody(receipt(source).toString()));
+                api(server).uploadPage(17, 2, ORIGINAL, "", 90, 1234, source, origin);
+                RecordedRequest request = server.takeRequest();
+                assertFalse(request.getBody().clone().readUtf8().contains("name=\"inspection_origin\""));
+                assertArrayEquals(ORIGINAL, part(request, "image"));
+            }
+        }
+        assertThrows(IllegalArgumentException.class, () -> new CaptureInspectionOrigin(context, source, 0));
+        assertThrows(IllegalArgumentException.class,
+                () -> new CaptureInspectionOrigin(context, source, 1L + Integer.MAX_VALUE));
+        assertThrows(IllegalArgumentException.class, () -> new CaptureInspectionOrigin.Context("bad device", 1));
+        assertThrows(IllegalArgumentException.class, () -> new CaptureInspectionOrigin.Context("glasses", -1));
+    }
+
     @Test public void nativeMultipartCarriesTheExactOriginalAndSevenExplicitUnknowns() throws Exception {
         CaptureProvenance source = CaptureProvenance.nativeStill(ORIGINAL, 4032, 3024,
                 null, null, null, null, null, null, null).bind(SESSION, 2, 90);

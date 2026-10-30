@@ -53,6 +53,35 @@ public class DocScanGlassActivityIntentTest {
     private MockWebServer server;
     private final Updates updates = new Updates();
 
+    @Test public void inspectionContextUsesOnlyThePersistedCurrentWearGeneration() throws Exception {
+        setField(activity, "deviceId", "test-glasses");
+        setField(activity, "powerGeneration", 12L);
+        activity.getPreferences(Context.MODE_PRIVATE).edit().putLong("power_generation", 12)
+                .putString("power_phase", "capturing").commit();
+        var current = activity.captureInspectionContext();
+        assertNotNull(current); assertEquals("test-glasses", current.deviceId); assertEquals(12, current.generation);
+        activity.getPreferences(Context.MODE_PRIVATE).edit().putLong("power_generation", 13).commit();
+        assertNull("a newer wear run fences the old Activity", activity.captureInspectionContext());
+        setField(activity, "powerGeneration", 13L);
+        assertEquals(13, activity.captureInspectionContext().generation);
+        activity.getPreferences(Context.MODE_PRIVATE).edit().putString("power_phase", "writing_done").commit();
+        assertNull(activity.captureInspectionContext());
+        activity.getPreferences(Context.MODE_PRIVATE).edit().putString("power_phase", "closed").commit();
+        assertNull(activity.captureInspectionContext());
+    }
+
+    @Test public void terminalOrUnavailableInspectionContextDoesNotCreateANewGeneration() throws Exception {
+        setField(activity, "deviceId", "test-glasses"); setField(activity, "powerGeneration", 12L);
+        activity.getPreferences(Context.MODE_PRIVATE).edit().putLong("power_generation", 12)
+                .putString("power_phase", "capturing").commit();
+        setField(activity, "sessionClosed", true); assertNull(activity.captureInspectionContext());
+        setField(activity, "sessionClosed", false); setField(activity, "writingDone", true);
+        assertNull(activity.captureInspectionContext());
+        setField(activity, "writingDone", false); setField(activity, "deviceId", "invalid device");
+        assertNull(activity.captureInspectionContext());
+        assertEquals(12, activity.getPreferences(Context.MODE_PRIVATE).getLong("power_generation", -1));
+    }
+
     @Before
     public void setUp() throws Exception {
         // buildActivity attaches a real Context before onCreate. Inject the two

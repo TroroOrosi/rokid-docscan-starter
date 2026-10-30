@@ -207,8 +207,13 @@ and uncertain-send safeguards remain independent of model-name fallback.
   worker streams the sealed original and retains the exact envelope and receipt.
   Stale generations, changed local artifacts and uncertain responses cannot
   acknowledge a transfer. Camera stop and ordinary page uploads do not wait for it.
-  PRIVATE reprocessing and live AI inspection remain comparison candidates;
-  neither evaluation has physical image-quality or performance acceptance yet.
+  Optional phone-side capture inspection uses source references, one overview
+  and at most four native-pixel regions through the existing Work writer and
+  uncertain-send journal. Exact decoded-video candidates share that diagnostic
+  queue. A current-run origin is fixed before capture; restored legacy originals
+  remain usable without invented generations. Results never authorize automatic
+  retakes, quality acceptance or wake. PRIVATE reprocessing and live AI inspection
+  remain comparison candidates without physical quality or performance acceptance.
   The frozen CUSTOMVIEW route keeps explicit phone controls. The original
   `adf12ee` disable decision belonged to the route without operator taps.
 - On the local surface the captured still is drawn after its native image is

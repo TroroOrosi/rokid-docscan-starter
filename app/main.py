@@ -36,6 +36,7 @@ from .answer_text import to_display_answer
 from .config import IMAGE_DIR, ensure_dirs
 from .capture_provenance import parse_capture_metadata, parse_capture_provenance
 from .capture_video_upload import receive_capture_video
+from .capture_inspection import read_inspection, register_native, register_video, registration_summary, stop_worker, wake_worker
 from .explainer import ExplainRequest, ExplainResult
 from .explainers import get_explainer, list_explainers
 from .extractors import detect_media, get_extractor
@@ -127,7 +128,11 @@ async def lifespan(app: FastAPI):
         # The separately supervised Termux Chromium may still be starting.
         # Its loopback CDP and authentication are checked before sending.
     _resume_all_answers()
-    yield
+    wake_worker()
+    try:
+        yield
+    finally:
+        stop_worker()
 
 
 app = FastAPI(title="Rokid DocScan", version=APP_VERSION, lifespan=lifespan)
@@ -147,7 +152,7 @@ async def _auth_middleware(request: Request, call_next):
     # (a client appending a slash to a discovery URL must not be locked out
     # before it can negotiate contracts).
     path = request.url.path.rstrip("/") or "/"
-    if (path in ("/v1/glasses/state", "/v1/capture-videos") or path.startswith("/v1/work/")) and not config.API_KEY:
+    if (path in ("/v1/glasses/state", "/v1/capture-videos", "/v1/capture-inspections") or path.startswith(("/v1/work/", "/v1/capture-inspections/"))) and not config.API_KEY:
         return JSONResponse({"detail": "authentication_not_configured",
                              "code": "authentication_failed"}, status_code=503)
     if config.API_KEY and path not in config.AUTH_EXEMPT_PATHS:
@@ -417,7 +422,25 @@ def glasses_notify(state: GlassesState, request: Request) -> dict:
 @app.post("/v1/capture-videos")
 async def capture_video_upload(request: Request, video: UploadFile = File(...), metadata: str = Form(...)) -> JSONResponse:
     receipt, created = await receive_capture_video(video, metadata, request.client.host if request.client else "")
+    await run_in_threadpool(register_video, receipt)
     return JSONResponse(receipt, status_code=201 if created else 200)
+
+
+@app.get("/v1/capture-inspections")
+def capture_inspection_lookup(device_id: str, generation: int, capture_id: str) -> dict:
+    return capture_inspection_status(None, device_id, generation, capture_id)
+
+
+@app.get("/v1/capture-inspections/{inspection_id}")
+def capture_inspection_status(inspection_id: str | None, device_id: str, generation: int, capture_id: str) -> dict:
+    try:
+        return read_inspection(inspection_id, device_id=device_id, generation=generation, capture_id=capture_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="capture inspection not found") from None
+    except WorkConflict as error:
+        raise HTTPException(status_code=409, detail=str(error)) from None
+    except (OSError, ValueError, TypeError, sqlite3.Error):
+        raise HTTPException(status_code=503, detail="capture inspection unavailable") from None
 
 
 @app.get("/v1/glasses/state")
@@ -844,6 +867,7 @@ async def add_page(
     vision_text: str | None = Form(None),
     total_pages: int | None = Form(None),
     capture_provenance: str | None = Form(None),
+    inspection_origin: str | None = Form(None),
 ) -> dict:
     """Record one photographed page or a text-only compatibility page.
 
@@ -1060,6 +1084,8 @@ async def add_page(
             total_pages=effective_total,
         )
 
+        diagnostic = await run_in_threadpool(register_native, document_id, page_index, inspection_origin,
+                                             request.client.host if request.client else "", not native_replay)
         return {
             "page_id": page_id,
             "document_id": document_id,
@@ -1073,6 +1099,7 @@ async def add_page(
             "canonical_image_sha256": native_metadata["canonical_image_sha256"] if native_metadata else None,
             "has_vision_text": bool(vision_text and vision_text.strip()),
             "scan_ack": ack,
+            "capture_inspection": registration_summary(diagnostic),
         }
     finally:
         conn.close()

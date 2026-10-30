@@ -35,7 +35,7 @@ ASSISTANT_SEL = 'div[data-markdown-text-style="assistant-message"]'
 MODEL = "GPT-6.1 Sol"
 _MODEL_PATTERN = (r"(?:gpt[\s_–—-]*)?(?:([0-9]+(?:\.[0-9]+)*)[\s_–—-]*([a-z]+)"
                   r"|([a-z]+)[\s_–—-]*([0-9]+(?:\.[0-9]+)*))")
-_EFFORT_LEVELS = {"extrahigh": 3, "xhigh": 3, "high": 2, "medium": 1, "light": 0,
+_EFFORT_LEVELS = {"extrahigh": 3, "xhigh": 3, "high": 2, "medium": 1, "light": 0, "low": 0,
                   "極高": 3, "超高": 3, "高": 2, "中": 1, "軽量": 0}
 
 
@@ -45,6 +45,17 @@ class _Settings:
     level: int  # Semantic effort order, never a slider coordinate.
     effort: str
     speed: str
+
+
+@dataclass(frozen=True)
+class _InspectionPurpose:
+    inspection_id: str
+    manifest_sha256: str
+
+    @property
+    def contract(self):
+        return {"purpose": "capture_inspection", "inspection_id": self.inspection_id,
+                "manifest_sha256": self.manifest_sha256}
 
 
 def _normalise(value):
@@ -68,7 +79,7 @@ def _requested_settings(settings=None):
     model = values["model"].strip()
     if _model_identity(model) is None:
         raise chat.ChatGptWebModelMismatch("Work requires an explicit model family/version/variant")
-    effort = {"light": (0, "Light"), "medium": (1, "Medium"), "high": (2, "High"),
+    effort = {"light": (0, "Light"), "low": (0, "Light"), "medium": (1, "Medium"), "high": (2, "High"),
               "xhigh": (3, "Extra High"), "extrahigh": (3, "Extra High")}.get(_normalise(values["effort"]))
     speed = _normalise(values["speed"])
     if effort is None or speed not in ("fast", "standard"):
@@ -213,7 +224,7 @@ def _controls(page, action="state", *, model=MODEL, level=3, allow_unlinked=Fals
 
 
 def _effort_levels(text):
-    tokens = re.findall(r"extra[ -]?high|\bxhigh\b|\bhigh\b|\bmedium\b|\blight\b|極高|超高|(?<!\w)(?:軽量|高|中)(?!\w)", text, re.I)
+    tokens = re.findall(r"extra[ -]?high|\bxhigh\b|\bhigh\b|\bmedium\b|\blight\b|\blow\b|極高|超高|(?<!\w)(?:軽量|高|中)(?!\w)", text, re.I)
     return {_EFFORT_LEVELS[token] if token in _EFFORT_LEVELS else _EFFORT_LEVELS[_normalise(token)] for token in tokens}
 
 
@@ -500,7 +511,7 @@ _SEND_JS = r"""((click, expected) => {
 })""" % json.dumps(COMPOSER_SEL)
 
 
-def _pending_work_send(guard):
+def _pending_work_send(guard, *, purpose="answer"):
     """Identify one journal-owned Work batch without trusting a reply body."""
     status = guard.status()
     if status["state"] != "uncertain":
@@ -512,7 +523,9 @@ def _pending_work_send(guard):
     key, entry = matches[0]
     transfer = entry.get("transfer")
     batch = transfer.get("pending") if isinstance(transfer, dict) else None
-    if (not isinstance(key, str) or not re.fullmatch(r"session:[1-9][0-9]*:browser:[a-f0-9]{64}", key)
+    inspection = purpose == "capture_inspection"
+    pattern = r"inspection:[a-f0-9]{64}" if inspection else r"session:[1-9][0-9]*:browser:[a-f0-9]{64}"
+    if (purpose not in ("answer", "capture_inspection") or not isinstance(key, str) or not re.fullmatch(pattern, key)
             or _conversation_id(entry.get("url")) is None or not isinstance(batch, dict)):
         return None
     stage = batch.get("stage", "single")
@@ -527,11 +540,22 @@ def _pending_work_send(guard):
             or any(not isinstance(digest, str) or not re.fullmatch(r"[a-f0-9]{64}", digest) for digest in digests)
             or not isinstance(expect, list) or not expect or any(not isinstance(field, str) for field in expect)
             or (not batch["final"] and expect != ["received"])
-            or (batch["final"] and "questions" not in expect)
+            or (batch["final"] and not inspection and "questions" not in expect)
             or any(not isinstance(transfer.get(field), list) for field in ("completed", "pages"))
             or not isinstance(entry.get("attached"), list)):
         return None
     identity = [key, batch["number"], names, digests]
+    if inspection:
+        contract = {field: batch.get(field) for field in ("purpose", "inspection_id", "manifest_sha256")}
+        if (stage != "single" or batch["number"] != 1 or not batch["final"]
+                or contract["purpose"] != "capture_inspection" or key != "inspection:" + str(contract["inspection_id"])
+                or type(contract["manifest_sha256"]) is not str
+                or re.fullmatch(r"[a-f0-9]{64}", contract["manifest_sha256"]) is None
+                or expect != ["inspection_id", "manifest_sha256", "inspection"]):
+            return None
+        identity.append(contract)
+    elif "purpose" in batch:
+        return None
     if stage != "single":
         identity.append(stage)
     if chat._digest(json.dumps(identity, separators=(",", ":")).encode()) != batch.get("id"):
@@ -547,9 +571,14 @@ class WorkWebClient(chat.ChatGptWebClient):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self._requested = ContextVar("work_requested_settings", default=None)
+        self._inspection = ContextVar("work_capture_inspection", default=None)
         self._observed = threading.local()
 
     def complete(self, *, requested_settings=None, **kwargs):
+        # A known diagnostic owns this shared uncertain send. Answers wait for
+        # its read-only retirement instead of being recorded as failed answers.
+        if self._inspection.get() is None and self.pending_inspection_owner() is not None:
+            raise chat.ChatGptWebBusy("a diagnostic reply is pending; answer has priority after readback")
         token = self._requested.set(_requested_settings(requested_settings))
         self._observed.conversation_id = None
         try:
@@ -559,6 +588,86 @@ class WorkWebClient(chat.ChatGptWebClient):
 
     def complete_json(self, *, requested_settings=None, **kwargs):
         return chat.extract_json(self.complete(requested_settings=requested_settings, **kwargs))
+
+    def complete_inspection(self, *, inspection_id, manifest_sha256, prompt, files, before_submit=None, requested_settings=None):
+        """A distinct diagnostic purpose on the SAME writer and send journal.
+
+        One bounded packet, one final, one stable chat. It never enters the
+        answer-stage instructions or represents an inspection as questions.
+        """
+        if any(type(value) is not str or re.fullmatch(r"[a-f0-9]{64}", value) is None
+               for value in (inspection_id, manifest_sha256)):
+            raise ValueError("invalid inspection identity")
+        token = self._inspection.set(_InspectionPurpose(inspection_id, manifest_sha256))
+        try:
+            return self.complete_json(system="Inspect supplied image regions only. Never solve, guess missing text, or certify a page.",
+                prompt=prompt, files=files, chat_key="inspection:" + inspection_id, booklet=True,
+                expect=("inspection_id", "manifest_sha256", "inspection"), before_submit=before_submit,
+                requested_settings=requested_settings or {"model": "gpt-6-luna", "effort": "high", "speed": "fast"})
+        finally:
+            self._inspection.reset(token)
+
+    def _booklet_locked(self, context, text, *, guard, files, chat_key, expect, **kwargs):
+        purpose = self._inspection.get()
+        if purpose is None:
+            return super()._booklet_locked(context, text, guard=guard, files=files, chat_key=chat_key,
+                                           expect=expect, **kwargs)
+        contract = purpose.contract
+        self._load_chat(guard, chat_key)
+        status = guard.status()
+        if status["state"] == "uncertain" and self._pending != status.get("request_id"):
+            raise chat.ChatGptWebBlocked("another send is unconfirmed; nothing sent")
+        if self._transfer is None:
+            if self._chat_url:
+                raise chat.ChatGptWebBlocked("inspection cannot adopt an unrelated legacy chat")
+            self._transfer = {"completed": [], "pages": [], "final": None, "pending": None}
+        batch = self._transfer.get("pending") or (self._transfer.get("last") if self._transfer.get("final") else None)
+        if batch is not None:
+            if any(batch.get(key) != value for key, value in contract.items()):
+                raise chat.ChatGptWebBlocked("inspection receipt owner changed; nothing sent")
+            reply = self._recover_locked(context, guard, expect=expect, batch=batch)
+            if reply is None:
+                raise chat.ChatGptWebUncertain("inspection outcome unknown; read the same chat only")
+            return reply
+        guard.require_clear()
+        iterator = iter(files() if callable(files) else files or [])
+        attachment, extra = next(iterator, None), next(iterator, None)
+        if (attachment is None or extra is not None or type(attachment.get("buffer")) is not bytes
+                or attachment.get("mimeType") != "application/zip" or len(attachment["buffer"]) > 16 * 1024 * 1024):
+            raise chat.ChatGptWebAttachmentFailed("inspection requires one bounded ZIP packet")
+        names, digests = [attachment["name"]], [chat._digest(attachment["buffer"])]
+        batch_id = chat._digest(json.dumps([chat_key, 1, names, digests, contract], separators=(",", ":")).encode())
+        batch = {"id": batch_id, "number": 1, "names": names, "digests": digests,
+                 "final": True, "expect": list(expect), **contract}
+        receipt = {"batch_id": batch_id, "inspection_id": contract["inspection_id"],
+                   "manifest_sha256": contract["manifest_sha256"], "inspection": {"observations": []}}
+        message = (text + "\nReturn only the diagnostic JSON below, preserving both identities and batch_id. "
+                   "Each supplied image needs an observation; the empty shape is not a finding.\nTransfer receipt:\n"
+                   + json.dumps(receipt, ensure_ascii=False))
+        return self._ask_locked(context, message, [], guard=guard, files=[attachment], chat_key=chat_key,
+                                expect=(*expect, "batch_id"), batch=batch, before_submit=kwargs.get("before_submit"))
+
+    @staticmethod
+    def _valid_batch(reply, batch):
+        if batch.get("purpose") != "capture_inspection":
+            return chat.ChatGptWebClient._valid_batch(reply, batch)
+        try:
+            value = chat.extract_json(reply)
+        except ValueError:
+            return False
+        return (type(value) is dict and set(value) == {"batch_id", "inspection_id", "manifest_sha256", "inspection"}
+                and value["batch_id"] == batch["id"] and value["inspection_id"] == batch["inspection_id"]
+                and value["manifest_sha256"] == batch["manifest_sha256"] and type(value["inspection"]) is dict)
+
+    def pending_inspection_owner(self):
+        try:
+            with chat.BrowserGuard() as guard:
+                pending = _pending_work_send(guard, purpose="capture_inspection")
+                return pending[2]["inspection_id"] if pending else None
+        except chat.BrowserBusy as error:
+            raise chat.ChatGptWebBusy("browser is busy; nothing sent") from error
+        except (chat.BrowserGuardError, OSError, ValueError, TypeError, KeyError):
+            return None
 
     @property
     def conversation_id(self):
@@ -575,7 +684,7 @@ class WorkWebClient(chat.ChatGptWebClient):
         except (chat.BrowserGuardError, OSError, ValueError, TypeError, KeyError):
             return None
 
-    def retire_expired_batch(self, *, chat_key, booklet_stage, expired_guard, sleep=time.sleep):
+    def retire_expired_batch(self, *, chat_key, booklet_stage, expired_guard, sleep=time.sleep, purpose="answer"):
         """Read a stale owner's matching final/ACK and retire that send only.
 
         This does not enter complete/recover/ask: none of their preparation,
@@ -585,7 +694,7 @@ class WorkWebClient(chat.ChatGptWebClient):
 
         try:
             with chat.BrowserGuard() as guard:
-                pending = _pending_work_send(guard)
+                pending = _pending_work_send(guard, purpose=purpose)
                 if not pending or pending[:2] != (chat_key, booklet_stage):
                     return False
                 self._load_chat(guard, chat_key)

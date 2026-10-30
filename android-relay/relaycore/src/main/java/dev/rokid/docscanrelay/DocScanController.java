@@ -91,6 +91,14 @@ public final class DocScanController implements AutoCloseable {
     private boolean localUploadBlocked;
     private volatile boolean closed;
     private final RetryCursor retryCursor = new RetryCursor();
+    private volatile java.util.function.Supplier<CaptureInspectionOrigin.Context> inspectionContext = () -> null;
+    // Metadata only: one selected local session, at most its 1000 pages and two future candidates.
+    private final java.util.concurrent.ConcurrentHashMap<String, InspectionCapture> inspectionCaptures =
+            new java.util.concurrent.ConcurrentHashMap<>();
+    private InspectionRequest inspectionRequest;
+    private record InspectionRequest(CaptureInspectionOrigin.Context context, LocalCaptureSession saved,
+                                     DocScanApi target, long document, int page) { }
+    private record InspectionCapture(InspectionRequest request, CaptureProvenance source) { }
 
     private volatile RelayState state = RelayState.DISCONNECTED;
     private volatile PhotoCaptureSettings photoSettings = PhotoCaptureSettings.DEFAULT;
@@ -273,6 +281,50 @@ public final class DocScanController implements AutoCloseable {
     /** The configured client, so a caller never builds an unconfigured one. */
     public DocScanApi api() {
         return api;
+    }
+
+    /** Optional current-run diagnostic context; legacy/restored images do not gain an invented origin. */
+    public void setCaptureInspectionContextProvider(
+            java.util.function.Supplier<CaptureInspectionOrigin.Context> provider) {
+        inspectionContext = provider == null ? () -> null : provider;
+    }
+
+    private CaptureInspectionOrigin.Context inspectionContext() {
+        try { return closed ? null : inspectionContext.get(); }
+        catch (RuntimeException unavailable) { return null; }
+    }
+
+    private InspectionRequest inspectionRequest(LocalCaptureSession saved, int page) {
+        CaptureInspectionOrigin.Context run = inspectionContext();
+        DocScanApi target = api;
+        if (run == null || saved == null || saved != localSession || target == null) return null;
+        synchronized (saved) {
+            return saved.phase() != LocalCaptureSession.Phase.CAPTURE || !saved.server().equals(target.serverUrl())
+                    ? null : new InspectionRequest(run, saved, target, saved.documentId(), page);
+        }
+    }
+
+    private void rememberInspection(InspectionRequest request, CaptureProvenance source) {
+        if (request == null || source == null || closed || localCameraUnknown
+                || request.saved != localSession || request.target != api || (request.page >= 0 && request.page != source.pageIndex)
+                || !request.saved.id().equals(source.localSessionId) || !request.context.equals(inspectionContext())) return;
+        // Retakes replace only the optional run association, never an original or its upload cursor.
+        inspectionCaptures.entrySet().removeIf(entry -> entry.getValue().request.saved == request.saved
+                && entry.getValue().source.pageIndex == source.pageIndex);
+        inspectionCaptures.put(source.captureId, new InspectionCapture(request, source));
+    }
+
+    private CaptureInspectionOrigin inspectionOrigin(LocalCaptureSession saved, DocScanApi target,
+                                                     CaptureProvenance source) {
+        if (source == null) return null;
+        InspectionCapture capture = inspectionCaptures.get(source.captureId);
+        if (capture == null || closed || localCameraUnknown || !capture.source.equals(source)) return null;
+        InspectionRequest request = capture.request;
+        long document = saved.documentId();
+        if (request.saved != saved || saved != localSession || request.target != target || target != api
+                || !request.context.equals(inspectionContext()) || document <= 0 || document > Integer.MAX_VALUE
+                || (request.document != 0 && request.document != document)) return null;
+        return new CaptureInspectionOrigin(request.context, source, document);
     }
 
     /**
@@ -498,6 +550,7 @@ public final class DocScanController implements AutoCloseable {
                         .remove(KEY_COMMITTED_JPEG_SHA256).commit()) throw new IOException("読取記録を選択できません");
                 // The previous session and its pending file stay in their original directory.
                 localSession = next;
+                inspectionCaptures.clear();
                 localRestoreError = null;
                 localUploadBlocked = false;
                 captureReviewPersistence = new CaptureReviewPersistence(new File(next.directory(), "pending.bin"));
@@ -558,6 +611,7 @@ public final class DocScanController implements AutoCloseable {
                 }
                 saved.resume();
                 localSession = saved;
+                inspectionCaptures.clear();
                 localRestoreError = null;
                 localUploadBlocked = false;
                 captureReviewPersistence = persistence;
@@ -1467,6 +1521,7 @@ public final class DocScanController implements AutoCloseable {
                     "Requesting glasses photo for page index " + pageIndex
                             + " (" + settings.describe() + ")");
             photoRequestedAtMillis = System.currentTimeMillis();
+            inspectionRequest = inspectionRequest(localSession, pageIndex);
             CaptureSurface.PhotoStartResult startResult =
                     link.takePhoto(settings.width, settings.height, settings.quality);
             if (startResult == CaptureSurface.PhotoStartResult.REJECTED) {
@@ -1483,6 +1538,7 @@ public final class DocScanController implements AutoCloseable {
                     CAPTURE_TIMEOUT_SECONDS,
                     TimeUnit.SECONDS);
         } catch (Exception error) {
+            inspectionRequest = null;
             if (attempt != CaptureLease.NO_TOKEN) {
                 if (photoRequestMayBeActive) {
                     captureLease.markStartUnknown(attempt);
@@ -1524,6 +1580,8 @@ public final class DocScanController implements AutoCloseable {
     private void handlePhoto(byte[] jpeg, CaptureProvenance provenance, boolean associationResolved) {
         if (link.supportsLocalCaptureReview() && captureLease.isTimedOut()) return;
         CaptureLease.Completion completion = captureLease.complete();
+        InspectionRequest issuedInspection = inspectionRequest;
+        inspectionRequest = null;
         if (listeningFailed && !mixedMode) return;
         if (completion == null) {
             return;
@@ -1566,6 +1624,7 @@ public final class DocScanController implements AutoCloseable {
                 stageCaptureReview(new CaptureReviewStore.Pending(uploadIndex, jpeg, "", uploadRotation,
                         associationResolved ? "" : CaptureReviewStore.Pending.SCENE_TIMESTAMP_UNRESOLVED,
                         PageFraming.UNKNOWN, photoRequestedAtMillis, source), null);
+                if (associationResolved) rememberInspection(issuedInspection, source);
                 if (!associationResolved && localSession != null) {
                     try { localSession.markCaptureGap(); }
                     catch (IOException error) { fail("撮影の対応を安全保存できません", error); }
@@ -1615,6 +1674,7 @@ public final class DocScanController implements AutoCloseable {
         try {
             serial.execute(() -> {
                 if (link.supportsLocalCaptureReview()) {
+                    inspectionRequest = null;
                     localCameraUnknown = true;
                     captureLease.markUnknown();
                     autoCaptureEnabled = false;
@@ -1656,6 +1716,7 @@ public final class DocScanController implements AutoCloseable {
                 if (!captureLease.markTimedOut(attempt)) {
                     return;
                 }
+                inspectionRequest = null;
                 // The request that produced no callback is the measurement the
                 // capture sweep is after, so it has to survive the failure.
                 fail(
@@ -1847,11 +1908,20 @@ public final class DocScanController implements AutoCloseable {
         long epoch = futureCaptureEpoch;
         int rotation = imageRotation;
         link.observeFuturePages(2 - saved.candidateCount(), new CaptureSurface.FuturePageListener() {
+            private InspectionRequest issuedInspection;
             @Override public boolean onCaptureStarting() {
-                try { saved.beginCandidate(); return true; }
+                try {
+                    // The existing candidate store assigns its page after capture; do not reread a full pending image here.
+                    InspectionRequest before = inspectionRequest(saved, -1);
+                    saved.beginCandidate();
+                    issuedInspection = before;
+                    return true;
+                }
                 catch (IOException error) { return false; }
             }
             @Override public void onCandidate(byte[] jpeg, CaptureProvenance source, boolean sceneMatched) {
+                InspectionRequest issued = issuedInspection;
+                issuedInspection = null;
                 boolean stored = false;
                 try {
                     // Persist before queueing UI work: close/shutdown must not lose an issued original.
@@ -1861,6 +1931,7 @@ public final class DocScanController implements AutoCloseable {
                         saved.retainCandidate(new CaptureReviewStore.Pending(index, jpeg, "", rotation,
                                 sceneMatched ? "" : CaptureReviewStore.Pending.SCENE_TIMESTAMP_UNRESOLVED, PageFraming.UNKNOWN,
                                 System.currentTimeMillis(), associated));
+                        if (sceneMatched && epoch == futureCaptureEpoch) rememberInspection(issued, associated);
                         stored = true;
                     }
                 } catch (IOException | IllegalArgumentException error) {
@@ -1962,9 +2033,11 @@ public final class DocScanController implements AutoCloseable {
                     CaptureReviewStore.Pending photo = saved.read(page);
                     httpInProgress = true;
                     destination.uploadPage(saved.documentId(), photo.pageIndex, photo.jpeg, photo.ocrText,
-                            photo.rotationDegrees, photo.capturedAtMillis, photo.provenance);
+                            photo.rotationDegrees, photo.capturedAtMillis, photo.provenance,
+                            inspectionOrigin(saved, destination, photo.provenance));
                     httpInProgress = false;
                     saved.acknowledge(page);
+                    if (photo.provenance != null) inspectionCaptures.remove(photo.provenance.captureId);
                     page = saved.nextUnsent();
                 }
                 if (!closed && saved.phase() == LocalCaptureSession.Phase.ANALYSIS && saved.documentId() > 0) {

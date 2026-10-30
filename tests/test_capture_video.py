@@ -67,6 +67,53 @@ def prepare(source, output, **kwargs):
                                             rotation=270, frame_indices=(0, 2, 5), **kwargs)
 
 
+def test_automatic_nomination_keeps_temporal_returns_and_every_unknown_interval(tmp_path):
+    from app.capture_video_candidates import group_proxy_frames
+    # Similar or flat frames are not proof of the same physical page.
+    frames = [{"pts": 100 + index * 40} for index in range(12)]
+    data = [bytes([value]) * (96 * 72) for value in [60] * 3 + [170] * 3 + [60] * 3 + [240] * 3]
+    proxy = tmp_path / "proxy.gray"
+    proxy.write_bytes(b"".join(data))
+    groups = group_proxy_frames(proxy, frames, "1/1000")
+    assert [(group["first_index"], group["last_index"]) for group in groups] == [(0, 2), (3, 5), (6, 8), (9, 11)]
+    assert all(group["coverage"] == "unknown" and not group["calibrated"] for group in groups)
+    assert {index for group in groups for index in range(group["first_index"], group["last_index"] + 1)} == set(range(12))
+
+
+def test_auto_nomination_without_decoder_keeps_original_and_returns_unknown(tmp_path, monkeypatch):
+    from app import capture_video_candidates as candidates
+    source = tmp_path / "sealed.mp4"
+    source.write_bytes(b"retained sealed bytes; no decoding is attempted")
+    monkeypatch.setattr(candidates.shutil, "which", lambda name: None)
+    result = candidates.nominate_video_frames(source, tmp_path / "no-packet",
+        source_sha256=hashlib.sha256(source.read_bytes()).hexdigest(), owner={})
+    assert result["status"] == "unknown" and result["reasons"] == ["decoder_unavailable"]
+    assert result["all_pages_or_characters_verified"] is False and result["comparison"] is None
+    assert source.read_bytes() == b"retained sealed bytes; no decoding is attempted"
+    assert not (tmp_path / "no-packet").exists()
+
+
+def test_real_video_auto_nomination_reuses_exact_pts_extractor_and_preserves_source(movie, tmp_path):
+    from app.capture_video_candidates import nominate_video_frames
+    source, _, probe = movie
+    digest = hashlib.sha256(source.read_bytes()).hexdigest()
+    result = nominate_video_frames(source, tmp_path, source_sha256=digest,
+        owner={"session_id": 1, "clip_id": "video-clip", "generation": 2, "rotation": 270})
+    assert result["status"] == "nominated", result
+    assert result["all_pages_or_characters_verified"] is False
+    candidates = result["comparison"]["candidates"]
+    assert 1 <= len(candidates) <= 12
+    for candidate in candidates:
+        assert candidate["pts"] == probe["frames"][candidate["decoded_index"]]["pts"]
+        assert candidate["time_base"] == probe["streams"][0]["time_base"]
+    inspected = {candidate["decoded_index"] for candidate in candidates}
+    deferred = {index for interval in result["uninspected_intervals"]
+                for index in range(interval["first_index"], interval["last_index"] + 1)}
+    assert inspected | deferred == set(range(6))
+    assert not inspected & deferred
+    assert hashlib.sha256(source.read_bytes()).hexdigest() == digest
+
+
 def test_real_vfr_b_frames_keep_full_original_and_exact_index_pts_pixels(movie, tmp_path):
     source, references, probe = movie
     original = source.read_bytes()

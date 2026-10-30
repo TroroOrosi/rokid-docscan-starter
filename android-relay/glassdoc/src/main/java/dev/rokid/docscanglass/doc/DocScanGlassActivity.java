@@ -36,6 +36,7 @@ import dev.rokid.docscanglass.input.InputSignal;
 import dev.rokid.docscanrelay.ClientIdentity;
 import dev.rokid.docscanrelay.DocScanApi;
 import dev.rokid.docscanrelay.DocScanController;
+import dev.rokid.docscanrelay.CaptureInspectionOrigin;
 import dev.rokid.docscanrelay.JapaneseOcr;
 import dev.rokid.docscanrelay.RelayState;
 import dev.rokid.docscanrelay.study.AnswerBundle;
@@ -254,6 +255,7 @@ public final class DocScanGlassActivity extends Activity
                         "rokid-glasses-camera2",
                         "glassdoc/" + BuildConfig.VERSION_NAME,
                         "camera2/no-cxr"));
+        controller.setCaptureInspectionContextProvider(this::captureInspectionContext);
 
         if (comparisonTransferEnabled) videoTransfer=new CaptureVideoTransfer(getFilesDir(),this::comparisonVideoSnapshot,this);
 
@@ -1322,6 +1324,14 @@ public final class DocScanGlassActivity extends Activity
         if (binding == null || power.generation != powerGeneration) return null;
         return new CaptureVideoTransfer.Snapshot(binding.localId,binding.server,binding.documentId,binding.sessionId,
                 deviceId,power.generation,power.session,power.phase,binding.api);
+    }
+
+    CaptureInspectionOrigin.Context captureInspectionContext() {
+        if (deviceId == null || sessionClosed || writingDone || evaluationRestarting || isFinishing() || isDestroyed()) return null;
+        PowerState.Snapshot power = new PowerState(getPreferences(MODE_PRIVATE)).load();
+        if (power.generation != powerGeneration || List.of("closed", "writing_done").contains(power.phase)) return null;
+        try { return new CaptureInspectionOrigin.Context(deviceId, powerGeneration); }
+        catch (IllegalArgumentException unavailable) { return null; }
     }
 
     static CaptureVideoRecording.Options videoOptions(Intent intent, String deviceId, long generation) {

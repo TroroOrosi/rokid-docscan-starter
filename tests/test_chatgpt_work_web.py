@@ -495,6 +495,110 @@ def _payload(name="originals.zip", data=b"unmodified ZIP bytes"):
     return {"name": name, "mimeType": "application/zip", "buffer": data}
 
 
+def _inspection_call(page, monkeypatch, client=None):
+    from app.solvers import cdp
+
+    class LocalBrowser:
+        contexts = [_Context(_VenueTab(page))]
+
+        def close(self):
+            pass
+
+    monkeypatch.setenv("ROKID_CHATGPT_SEND_ENABLED", "1")
+    monkeypatch.setattr(cdp, "connect_over_cdp", lambda endpoint: LocalBrowser())
+    return (client or work.WorkWebClient()).complete_inspection(
+        inspection_id="a" * 64, manifest_sha256="b" * 64,
+        prompt="Inspect only these bounded regions; never solve.", files=lambda: [_payload()])
+
+
+def _diagnostic_composer(page):
+    _upload_composer(page)
+    page.evaluate("""document.getElementById('sol').textContent='GPT-6 Luna';
+      document.querySelector('[aria-label="Select ChatGPT model"]').textContent='GPT-6 Luna';
+      document.querySelector('[role=menuitem]').innerHTML='GPT-6 Luna <span id="effort">High</span>';
+      document.querySelector('[role=slider]').setAttribute('aria-valuenow','2');
+      window.finish = function() {
+        const users=document.querySelectorAll('[data-user-message-bubble=true]');
+        const text=users[users.length-1].textContent;
+        const receipt=JSON.parse(text.split('Transfer receipt:\\n').at(-1));
+        const request=text.includes('\\nInspection request:\\n')
+          ? JSON.parse(text.split('\\nInspection request:\\n')[1].split('\\nReturn only the diagnostic JSON')[0]) : null;
+        const observations=request ? request.images.map(image=>({image_id:image.image_id,
+          status:'no_issue_observed',image_viewer_used:true,reasons:[]})) : [];
+        const owner=document.createElement('div'); owner.setAttribute('data-local-conversation-final-assistant','true');
+        const final=document.createElement('div'); final.setAttribute('data-markdown-text-style','assistant-message');
+        final.textContent=JSON.stringify({...receipt,inspection:{observations}});
+        owner.append(final); document.getElementById('conversation').append(owner);
+      }; true""")
+
+
+def test_inspection_uses_explicit_purpose_and_restart_reads_same_chat_without_resending(page, monkeypatch):
+    _diagnostic_composer(page)
+    first = _inspection_call(page, monkeypatch)
+    assert first["inspection_id"] == "a" * 64 and first["manifest_sha256"] == "b" * 64
+    assert page.evaluate("window.sent") == 1 and _guard_state() == "idle"
+    assert "answer every question" not in page.locator(work.USER_SEL).last.inner_text().lower()
+    assert _inspection_call(page, monkeypatch) == first
+    assert page.evaluate("window.sent") == 1
+
+
+def test_inspection_unknown_send_has_typed_owner_and_read_only_late_recovery(page, monkeypatch):
+    _diagnostic_composer(page)
+    page.evaluate("window.suppressFinal=true")
+    with pytest.raises(chatgpt_web.ChatGptWebUncertain):
+        _inspection_call(page, monkeypatch)
+    assert _guard_state() == "uncertain"
+    client = work.WorkWebClient()
+    assert client.pending_work_owner() is None
+    assert client.pending_inspection_owner() == "a" * 64
+    page.evaluate("window.finish()")
+    assert _inspection_call(page, monkeypatch)["inspection_id"] == "a" * 64
+    assert page.evaluate("window.sent") == 1 and _guard_state() == "idle"
+
+
+def test_stale_inspection_retirement_reads_only_its_typed_reply(page, monkeypatch):
+    from contextlib import nullcontext
+    _diagnostic_composer(page)
+    page.evaluate("window.suppressFinal=true")
+    with pytest.raises(chatgpt_web.ChatGptWebUncertain):
+        _inspection_call(page, monkeypatch)
+    client = work.WorkWebClient()
+    for name in ("_ask_locked", "_attach_images", "_verify_model", "_start_new_chat", "_send_and_read"):
+        monkeypatch.setattr(client, name, lambda *args, **kwargs: pytest.fail("inspection retirement attempted a send"))
+    arguments = {"chat_key": "inspection:" + "a" * 64, "booklet_stage": "single",
+                 "expired_guard": nullcontext, "purpose": "capture_inspection"}
+    assert client.retire_expired_batch(**arguments) is False
+    assert _guard_state() == "uncertain"
+    page.evaluate("window.finish()")
+    assert client.retire_expired_batch(**arguments)
+    assert page.evaluate("window.sent") == 1 and _guard_state() == "idle"
+    assert client.pending_inspection_owner() is None
+
+
+def test_low_alias_still_verifies_the_public_light_control(page):
+    _controls(page, selected="GPT-6.1 Sol", power=0, fast=True)
+    assert work.verify_work_model(page, select=True, requested_settings={"model": "GPT-6.1 Sol", "effort": "low", "speed": "fast"}) == "GPT-6.1 Sol / Light / Fast"
+
+
+def test_answer_waits_for_known_inspection_send_without_becoming_a_failed_answer(page, monkeypatch):
+    from app.solvers import cdp
+    _diagnostic_composer(page)
+    page.evaluate("window.suppressFinal=true")
+    with pytest.raises(chatgpt_web.ChatGptWebUncertain):
+        _inspection_call(page, monkeypatch)
+    monkeypatch.setattr(cdp, "connect_over_cdp", lambda endpoint: pytest.fail("answer used browser before inspection readback"))
+    with pytest.raises(chatgpt_web.ChatGptWebBusy):
+        work.WorkWebClient().complete(system="solve", prompt="complete paper", chat_key="session:2:browser:" + "b" * 64)
+    assert page.evaluate("window.sent") == 1 and _guard_state() == "uncertain"
+
+
+def test_public_low_label_and_requested_light_have_same_verified_meaning(page):
+    _controls(page, selected="GPT-6.1 Sol", power=0, fast=True)
+    page.evaluate("document.getElementById('effort').textContent='Low'; true")
+    assert work.verify_work_model(page, select=True,
+        requested_settings={"model": "GPT-6.1 Sol", "effort": "light", "speed": "fast"}) == "GPT-6.1 Sol / Light / Fast"
+
+
 def test_attachment_confirmation_requires_the_card_and_enabled_send_not_input_files(page):
     _upload_composer(page)
     assert work.attach_work_files(page, [_payload()], endpoint="http://127.0.0.1:9222") is True

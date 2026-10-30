@@ -15,6 +15,39 @@ from app.capture_quality import (
 )
 
 
+def test_diagnostic_packet_is_bounded_lossless_and_cannot_admit_a_page(tmp_path, monkeypatch):
+    from app import capture_quality as quality
+    source = tmp_path / "original.png"
+    with Image.new("RGB", (2200, 1700), "white") as image:
+        image.putpixel((2199, 1699), (17, 29, 31))
+        image.save(source)
+    digest = hashlib.sha256(source.read_bytes()).hexdigest()
+    monkeypatch.setattr(quality, "tile_boxes", lambda *a, **k: pytest.fail("all tiles allocated"))
+    packet = quality.prepare_diagnostic_image(source, tmp_path / "packet", source_sha256=digest,
+                                              owner={"capture_id": "actual-capture"}, rotation=0)
+    assert 2 <= len(packet["images"]) <= 5
+    assert packet["scope"] == "bounded_regions_only"
+    assert packet["guarantees_all_content"] is False
+    assert packet["auto_registration_allowed"] is False
+    assert sum((tmp_path / "packet" / item["file"]).stat().st_size for item in packet["images"]) <= 16 * 1024 * 1024
+    with Image.open(source) as original:
+        for item in packet["images"][1:]:
+            with Image.open(tmp_path / "packet" / item["file"]) as roi, original.crop(item["box_upright_pixels"]) as crop:
+                assert max(roi.size) <= 1024
+                assert ImageChops.difference(roi, crop).getbbox() is None
+    assert hashlib.sha256(source.read_bytes()).hexdigest() == digest
+
+
+def test_diagnostic_packet_rejects_changed_source_and_invalid_roi_before_output(tmp_path):
+    from app import capture_quality as quality
+    source = tmp_path / "original.png"
+    source.write_bytes(photo())
+    with pytest.raises(ValueError, match="hash"):
+        quality.prepare_diagnostic_image(source, tmp_path / "bad", source_sha256="0" * 64,
+                                          owner={}, rotation=0)
+    assert not (tmp_path / "bad").exists()
+
+
 def photo():
     with Image.new("RGB", (537, 301)) as image:
         image.putdata([(x % 256, y % 256, (x + y) % 256)

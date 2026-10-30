@@ -1,7 +1,7 @@
 # 再開入口：次のセッションはここだけ読めば始められる
 
-最終更新: 2026-10-31続行 — Android原動画転送301f04aは独立R0/全644pass87suite/APK44識別・署名・SHA照合/remote CI+Android success、導入0。phone環境source2＋root3は独立R0/68case GREEN、pytest85pass23.82s/Ruff/bash-n/diffcheck0で小patch準備。AI診断・Android origin接続を別担当で並行。詳細phone-work-connected-root-20261030.json。
-Runs on: PC開発・別監査＋phone F51F/ZY22LWGDCV。会場は常時オンphone AP＋装着glassesのみ、PC/有線/毎回接続不要。本人「確認せずそのまま」継続。公開Android7envでJava3event/X1接続、6秒後ownTERM1、補助proc EACCESはUNKNOWN。常設反映は未実行、phone ffmpeg/ffprobe8.1.2 version exit0をreadonly確認。GPT3/Drive21/folder1、glasses実紙受入0。
+最終更新: 2026-10-31続行 — 任意AI診断とAndroid originを接続、旧動画が答案をBusyに残すI1を修正/独立R0。全pytest1956pass1skip・互換1939pass18skip/Ruff0、全Android655pass87suite/APK45識別・署名・SHA照合、導入0。phone起動修正f79fc82のraw91file配布を準備/別監査中。詳細phone-work-connected-root-20261030.json。
+Runs on: PC開発・別監査＋phone F51F/ZY22LWGDCV。会場は常時オンphone AP＋装着glassesのみ、PC/有線/毎回接続不要。本人「確認せずそのまま」継続。fresh ROで対象4quiet・他5継続/14出生保持、source-only更新後に公開Android7env/target4起動を別取引で反映予定。phone ffmpeg/ffprobe8.1.2 version exit0、GPT3/Drive21/folder1、glasses実紙受入0。
 
 ## 0. 読み方（前提と資料に引きずられないため）
 
@@ -90,7 +90,7 @@ Runs on: PC開発・別監査＋phone F51F/ZY22LWGDCV。会場は常時オンpho
   → 旧サーバ停止 → `nohup bash scripts/phone_serve.sh 127.0.0.1 > data/server-<commit>.log 2>&1 &`。PCからは `ssh -f -N -L 8000:127.0.0.1:8000 ...`（ssh `-i ~/.ssh/f51f_key -p 8022 u0_a26@192.168.0.6`）。
   ベンチの鍵は `ROKID_API_KEY` をスマホの env から読んで渡す（画面に出さない）。
 
-## 4. 次の作業（Runs on: 開発PC＋接続F51F）：phone環境patch checkpoint/rawGit配布/freshsnapshot→別監査したhelperをroot実行し、既存5サービスを保ち4rolesへ公開envを反映→browser/Work通常unmount観測。実originをpage送信へ接続、自動動画候補・bounded AI診断を別監査。可変紙面/最小HUDを教科計測より先に継続。以下は旧経緯。
+## 4. 次の作業（Runs on: 開発PC＋接続F51F）：AI診断/origin checkpoint後、固定f79のsource-only helperを別R0→root1回実行、公開Android7env＋既存target4だけ起動も別R0→browser/Work通常unmount観測。中央細字に届かない四隅固定ROIを原PNG同梱などと比較し、可変紙面/最小HUDを教科計測より先に改善。実紙/装着/会場は未検証。以下は旧経緯。
 
 1. 済：独立監査2回（`4552ea1`、`4552ea1..e12e155`）の指摘を `61ad481`〜`1134404` で反映。
 2. 済：4a（3節）。起動はスマホで `bash scripts/phone_serve.sh 127.0.0.1`、PCから `ssh -L 8000:127.0.0.1:8000` で投入した。

@@ -86,8 +86,9 @@ class WorkStore:
     existing document schema, and no schema/credential migration is performed.
     """
 
-    def __init__(self, directory: Path, *, validated_profiles=()):
+    def __init__(self, directory: Path, *, validated_profiles=(), read_only=False):
         self.path = Path(directory) / "work-jobs.db"
+        self._read_only = read_only
         if (not isinstance(validated_profiles, (tuple, list, set, frozenset))
                 or any(type(p) is not str or not p.strip() or len(p) > 80 for p in validated_profiles)):
             raise ValueError("invalid caller-validated capture profiles")
@@ -103,6 +104,10 @@ class WorkStore:
             conn.close()
 
     def _new_connection(self):
+        if self._read_only:
+            conn = sqlite3.connect(self.path.resolve().as_uri() + "?mode=ro", uri=True, timeout=30)
+            conn.row_factory = sqlite3.Row
+            return conn
         self.path.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(self.path, timeout=30)
         conn.row_factory = sqlite3.Row
@@ -131,8 +136,201 @@ class WorkStore:
                 data BLOB NOT NULL, sha256 TEXT NOT NULL, receipt TEXT,
                 PRIMARY KEY(job_id, source_id, image_id)
             );
+            CREATE TABLE IF NOT EXISTS capture_inspection_heads (
+                device_id TEXT PRIMARY KEY, generation INTEGER NOT NULL,
+                current_id TEXT, accepted INTEGER NOT NULL DEFAULT 0,
+                overflow INTEGER NOT NULL DEFAULT 0, capacity INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE IF NOT EXISTS capture_inspections (
+                seq INTEGER PRIMARY KEY, inspection_id TEXT NOT NULL UNIQUE,
+                device_id TEXT NOT NULL, generation INTEGER NOT NULL,
+                owner_json TEXT NOT NULL, source_json TEXT NOT NULL,
+                state TEXT NOT NULL, reason TEXT, request_json TEXT, result_json TEXT
+            );
+            CREATE TABLE IF NOT EXISTS capture_inspection_origins (
+                local_session_id TEXT PRIMARY KEY, identity_json TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS capture_inspection_parts (
+                part_id TEXT PRIMARY KEY, inspection_id TEXT NOT NULL,
+                request_json TEXT NOT NULL, result_json TEXT
+            );
         """)
         return conn
+
+    def bind_capture_inspection_origin(self, origin: dict) -> None:
+        identity = {key: origin[key] for key in ("device_id", "generation", "document_id", "local_session_id")}
+        encoded = _json(identity)
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            old = conn.execute("SELECT identity_json FROM capture_inspection_origins WHERE local_session_id=?", (identity["local_session_id"],)).fetchone()
+            if old:
+                if old[0] != encoded:
+                    raise WorkConflict("local capture UUID is already bound differently")
+            else:
+                if conn.execute("SELECT COUNT(*) FROM capture_inspection_origins").fetchone()[0] >= 4096:
+                    raise WorkConflict("diagnostic origin reference capacity reached")
+                conn.execute("INSERT INTO capture_inspection_origins VALUES(?,?)", (identity["local_session_id"], encoded))
+
+    def prepare_capture_inspection_part(self, identity: str, part_id: str, request: dict) -> None:
+        encoded = _json(request)
+        if (type(part_id) is not str or re.fullmatch(r"[a-f0-9]{64}", part_id) is None
+                or len(encoded.encode()) > 64 * 1024):
+            raise ValueError("invalid diagnostic part")
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if conn.execute("SELECT 1 FROM capture_inspections WHERE inspection_id=?", (identity,)).fetchone() is None:
+                raise KeyError(identity)
+            old = conn.execute("SELECT * FROM capture_inspection_parts WHERE part_id=?", (part_id,)).fetchone()
+            if old:
+                if old["inspection_id"] != identity or old["request_json"] != encoded:
+                    raise WorkConflict("diagnostic part identity changed")
+            else:
+                if conn.execute("SELECT COUNT(*) FROM capture_inspection_parts WHERE inspection_id=?", (identity,)).fetchone()[0] >= 12:
+                    raise WorkConflict("diagnostic part capacity reached")
+                conn.execute("INSERT INTO capture_inspection_parts VALUES(?,?,?,NULL)", (part_id, identity, encoded))
+
+    def get_capture_inspection_part(self, part_id: str) -> dict | None:
+        with self._connect() as conn:
+            row = conn.execute("SELECT * FROM capture_inspection_parts WHERE part_id=?", (part_id,)).fetchone()
+            return ({"part_id": part_id, "inspection_id": row["inspection_id"],
+                     "request": json.loads(row["request_json"]),
+                     "result": json.loads(row["result_json"]) if row["result_json"] else None} if row else None)
+
+    def finish_capture_inspection_part(self, part_id: str, result: dict) -> None:
+        encoded = _json(result)
+        if len(encoded.encode()) > 256 * 1024:
+            raise ValueError("diagnostic result budget exceeded")
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT result_json FROM capture_inspection_parts WHERE part_id=?", (part_id,)).fetchone()
+            if row is None:
+                raise KeyError(part_id)
+            if row[0] is not None and row[0] != encoded:
+                raise WorkConflict("diagnostic part result was already sealed")
+            conn.execute("UPDATE capture_inspection_parts SET result_json=? WHERE part_id=?", (encoded, part_id))
+
+    def enqueue_capture_inspection(self, *, owner: dict, source: dict) -> dict:
+        """Bounded source references, independent of immutable answer stages.
+
+        The caller must bind real persisted provenance and authenticated origin
+        before calling. A repeated source never becomes current again. At most
+        128 compact records per device generation and three queued/in-flight
+        references are admitted; overflow does not discard the original.
+        """
+        encoded_owner, encoded_source = _json(owner), _json(source)
+        if len(encoded_owner.encode()) > 16 * 1024 or len(encoded_source.encode()) > 16 * 1024:
+            raise ValueError("capture inspection reference budget exceeded")
+        device, generation = _identifier(owner.get("device_id"), "device"), owner.get("generation")
+        if type(generation) is not int or not 0 <= generation < 2**63:
+            raise ValueError("invalid capture inspection generation")
+        identity = _sha(_json({"purpose": "capture_inspection", "owner": owner, "source": source}).encode())
+        held = {"inspection_id": None, "owner": owner, "status": "deferred_capacity", "result": None}
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            head = conn.execute("SELECT * FROM capture_inspection_heads WHERE device_id=?", (device,)).fetchone()
+            if head and generation < head["generation"]:
+                return {**held, "status": "stale_generation"}
+            existing = conn.execute("SELECT * FROM capture_inspections WHERE inspection_id=?", (identity,)).fetchone()
+            if existing:
+                return self._capture_inspection_public(existing)
+            if head is None:
+                if conn.execute("SELECT COUNT(*) FROM capture_inspection_heads").fetchone()[0] >= 64:
+                    return held
+                conn.execute("INSERT INTO capture_inspection_heads(device_id,generation) VALUES(?,?)", (device, generation))
+            elif generation > head["generation"]:
+                # Old pending sends remain recoverable. Other records are safe
+                # to retire: old generations are rejected above, not requeued.
+                conn.execute("DELETE FROM capture_inspection_parts WHERE inspection_id IN "
+                             "(SELECT inspection_id FROM capture_inspections WHERE device_id=? AND state NOT IN ('processing','uncertain'))", (device,))
+                conn.execute("DELETE FROM capture_inspections WHERE device_id=? AND state NOT IN ('processing','uncertain')", (device,))
+                conn.execute("UPDATE capture_inspection_heads SET generation=?,current_id=NULL,accepted=0,overflow=0,capacity=0 WHERE device_id=?", (generation, device))
+            head = conn.execute("SELECT * FROM capture_inspection_heads WHERE device_id=?", (device,)).fetchone()
+            if head["accepted"] >= 128:
+                conn.execute("UPDATE capture_inspection_heads SET current_id=NULL,capacity=MIN(capacity+1,2147483647) WHERE device_id=?", (device,))
+                return held
+            active = conn.execute("SELECT COUNT(*) FROM capture_inspections WHERE state IN ('queued','processing','uncertain')").fetchone()[0]
+            state = "queued" if active < 3 else "deferred_queue_full"
+            conn.execute("INSERT INTO capture_inspections(inspection_id,device_id,generation,owner_json,source_json,state) VALUES(?,?,?,?,?,?)",
+                         (identity, device, generation, encoded_owner, encoded_source, state))
+            conn.execute("UPDATE capture_inspection_heads SET current_id=?,accepted=accepted+1,overflow=overflow+? WHERE device_id=?",
+                         (identity, int(state == "deferred_queue_full"), device))
+            return self._capture_inspection_public(conn.execute("SELECT * FROM capture_inspections WHERE inspection_id=?", (identity,)).fetchone())
+
+    @staticmethod
+    def _capture_inspection_public(row):
+        return {"inspection_id": row["inspection_id"], "owner": json.loads(row["owner_json"]),
+                "source": json.loads(row["source_json"]), "status": row["state"], "reason": row["reason"],
+                "request": json.loads(row["request_json"]) if row["request_json"] else None,
+                "result": json.loads(row["result_json"]) if row["result_json"] else None}
+
+    def get_capture_inspection(self, identity: str) -> dict:
+        if type(identity) is not str or re.fullmatch(r"[a-f0-9]{64}", identity) is None:
+            raise KeyError(identity)
+        with self._connect() as conn:
+            row = conn.execute("SELECT * FROM capture_inspections WHERE inspection_id=?", (identity,)).fetchone()
+            if row is None:
+                raise KeyError(identity)
+            return self._capture_inspection_public(row)
+
+    def current_capture_inspection(self, identity: str) -> bool:
+        with self._connect() as conn:
+            return conn.execute("SELECT 1 FROM capture_inspection_heads WHERE current_id=?", (identity,)).fetchone() is not None
+
+    def invalidate_capture_document(self, document_id: int, metadata: dict | None) -> None:
+        """A new unbound source can invalidate, but can never authorize, a wearer."""
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            for row in conn.execute("SELECT head.device_id,task.owner_json FROM capture_inspection_heads AS head JOIN capture_inspections AS task ON head.current_id=task.inspection_id").fetchall():
+                owner = json.loads(row["owner_json"])
+                if owner["document_id"] != document_id or owner["kind"] != "native_capture":
+                    continue
+                old = {key: owner[key] for key in ("capture_provenance", "canonical_image_sha256")}
+                if old != metadata:
+                    conn.execute("UPDATE capture_inspection_heads SET current_id=NULL WHERE device_id=?", (row["device_id"],))
+
+    def capture_inspection_counts(self, device_id: str) -> dict:
+        with self._connect() as conn:
+            row = conn.execute("SELECT accepted,overflow,capacity FROM capture_inspection_heads WHERE device_id=?", (device_id,)).fetchone()
+            return dict(row) if row else {"accepted": 0, "overflow": 0, "capacity": 0}
+
+    def capture_inspection_queue(self) -> list[dict]:
+        with self._connect() as conn:
+            return [self._capture_inspection_public(row) for row in conn.execute(
+                "SELECT task.* FROM capture_inspections AS task LEFT JOIN capture_inspection_heads AS head "
+                "ON task.device_id=head.device_id WHERE state IN ('queued','processing','uncertain','deferred_browser','deferred_answers','deferred_send_disabled','deferred_queue_full') "
+                "ORDER BY CASE WHEN state IN ('uncertain','processing') THEN 0 WHEN task.inspection_id=head.current_id THEN 1 ELSE 2 END, seq DESC LIMIT 3")]
+
+    def prepare_capture_inspection(self, identity: str, request: dict) -> dict:
+        encoded = _json(request)
+        if len(encoded.encode()) > 64 * 1024:
+            raise ValueError("capture inspection manifest budget exceeded")
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT * FROM capture_inspections WHERE inspection_id=?", (identity,)).fetchone()
+            if row is None:
+                raise KeyError(identity)
+            if row["request_json"] is not None and row["request_json"] != encoded:
+                raise WorkConflict("the diagnostic packet changed; nothing requeued")
+            conn.execute("UPDATE capture_inspections SET request_json=?,state='processing',reason=NULL WHERE inspection_id=? AND result_json IS NULL", (encoded, identity))
+        return self.get_capture_inspection(identity)
+
+    def finish_capture_inspection(self, identity: str, *, status: str, result=None, reason=None) -> dict:
+        if status not in ("completed", "unknown", "uncertain", "processing", "deferred_browser", "deferred_answers", "deferred_send_disabled"):
+            raise ValueError("invalid diagnostic status")
+        encoded = _json(result) if result is not None else None
+        if encoded and len(encoded.encode()) > 256 * 1024:
+            raise ValueError("capture inspection result budget exceeded")
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT * FROM capture_inspections WHERE inspection_id=?", (identity,)).fetchone()
+            if row is None:
+                raise KeyError(identity)
+            if row["result_json"] is not None:
+                if row["result_json"] != encoded or row["state"] != status:
+                    raise WorkConflict("the diagnostic result was already sealed")
+            else:
+                conn.execute("UPDATE capture_inspections SET state=?,reason=?,result_json=? WHERE inspection_id=?", (status, reason, encoded, identity))
+        return self.get_capture_inspection(identity)
 
     def enqueue(self, *, session_id: int, conversation_key: str, stage: str,
                 sources: list[dict], system: str, prompt: str, question_ids=(),

@@ -28,6 +28,201 @@ import org.robolectric.annotation.Config;
 @RunWith(RobolectricTestRunner.class)
 @Config(sdk = 32, manifest = Config.NONE)
 public class LocalReviewTest {
+    @Test public void nativeInspectionOriginBindsTheIssuedRunAndTheActualLateDocumentId() throws Exception {
+        Surface surface = new Surface(); surface.holdForPage = true;
+        var run = new java.util.concurrent.atomic.AtomicReference<>(new CaptureInspectionOrigin.Context("glasses:one", 42));
+        try (MockWebServer server = inspectionServer()) {
+            DocScanController controller = inspectionController(server, surface, run);
+            try {
+                byte[] jpeg = {1, 2, 3}; CaptureProvenance source = nativeSource(jpeg, 100);
+                issueInspectionPhoto(controller, 0, false); controller.onPhoto(jpeg, source); barrier(controller);
+                LocalCaptureSession saved = (LocalCaptureSession)get(controller, "localSession");
+                assertEquals("server document is not guessed at capture", 0, saved.documentId());
+                commitVisible(controller, surface);
+                List<RecordedRequest> pages = uploadInspectionPages(controller, server);
+                assertEquals(1, pages.size());
+                JSONObject origin = new JSONObject(new String(uploadPart(pages.get(0), "inspection_origin"), StandardCharsets.UTF_8));
+                assertEquals(6, origin.length()); assertEquals(17, origin.getLong("document_id"));
+                assertEquals("glasses:one", origin.getString("device_id")); assertEquals(42, origin.getLong("generation"));
+                assertEquals(saved.id(), origin.getString("local_session_id"));
+                assertEquals(source.captureId, origin.getString("capture_id"));
+                assertArrayEquals(jpeg, uploadPart(pages.get(0), "image")); assertNull(saved.nextUnsent());
+            } finally { controller.close(); }
+        }
+    }
+
+    @Test public void changingTheDeviceOrGenerationCannotRelabelAnIssuedOriginal() throws Exception {
+        for (boolean changeBeforeCallback : new boolean[]{true, false}) {
+            Surface surface = new Surface(); surface.holdForPage = true;
+            var run = new java.util.concurrent.atomic.AtomicReference<>(new CaptureInspectionOrigin.Context("glasses:one", 42));
+            try (MockWebServer server = inspectionServer()) {
+                DocScanController controller = inspectionController(server, surface, run);
+                try {
+                    byte[] jpeg = {1, 2, 3}; issueInspectionPhoto(controller, 0, false);
+                    if (changeBeforeCallback) run.set(new CaptureInspectionOrigin.Context("glasses:two", 42));
+                    controller.onPhoto(jpeg, nativeSource(jpeg, 100)); barrier(controller);
+                    if (!changeBeforeCallback) run.set(new CaptureInspectionOrigin.Context("glasses:one", 43));
+                    commitVisible(controller, surface);
+                    List<RecordedRequest> pages = uploadInspectionPages(controller, server);
+                    assertEquals(1, pages.size());
+                    assertFalse(pages.get(0).getBody().clone().readUtf8().contains("name=\"inspection_origin\""));
+                    assertArrayEquals(jpeg, uploadPart(pages.get(0), "image"));
+                    assertNull(((LocalCaptureSession)get(controller, "localSession")).nextUnsent());
+                } finally { controller.close(); }
+            }
+        }
+    }
+
+    @Test public void retakeInspectionUsesOnlyTheNewCaptureAndItsOwnPreRequestRun() throws Exception {
+        Surface surface = new Surface(); surface.holdForPage = true;
+        var run = new java.util.concurrent.atomic.AtomicReference<>(new CaptureInspectionOrigin.Context("glasses", 1));
+        try (MockWebServer server = inspectionServer()) {
+            DocScanController controller = inspectionController(server, surface, run);
+            try {
+                byte[] first = {1, 2, 3}, second = {4, 5, 6};
+                CaptureProvenance discarded = nativeSource(first, 100), kept = nativeSource(second, 200);
+                issueInspectionPhoto(controller, 0, false); controller.onPhoto(first, discarded); barrier(controller);
+                run.set(new CaptureInspectionOrigin.Context("glasses", 2));
+                issueInspectionPhoto(controller, 0, true); controller.onPhoto(second, kept); barrier(controller);
+                commitVisible(controller, surface);
+                List<RecordedRequest> pages = uploadInspectionPages(controller, server);
+                assertEquals(1, pages.size());
+                JSONObject origin = new JSONObject(new String(uploadPart(pages.get(0), "inspection_origin"), StandardCharsets.UTF_8));
+                assertEquals(kept.captureId, origin.getString("capture_id"));
+                assertNotEquals(discarded.captureId, origin.getString("capture_id")); assertEquals(2, origin.getLong("generation"));
+                assertArrayEquals(second, uploadPart(pages.get(0), "image"));
+            } finally { controller.close(); }
+        }
+    }
+
+    @Test public void futureInspectionRequiresItsOwnNativeStartAndStillCurrentRun() throws Exception {
+        for (boolean changeAfterStart : new boolean[]{false, true}) {
+            Surface surface = new Surface(); surface.holdForPage = true; surface.futureEnabled = true;
+            var run = new java.util.concurrent.atomic.AtomicReference<>(new CaptureInspectionOrigin.Context("glasses", 1));
+            try (MockWebServer server = inspectionServer()) {
+                DocScanController controller = inspectionController(server, surface, run);
+                try {
+                    byte[] first = {1, 2, 3}, second = {4, 5, 6};
+                    issueInspectionPhoto(controller, 0, false); controller.onPhoto(first, nativeSource(first, 100)); barrier(controller);
+                    surface.visible = true; controller.onCustomViewAvailable(1, "capture-review"); barrier(controller);
+                    assertNotNull(surface.future); assertTrue(surface.future.onCaptureStarting());
+                    if (changeAfterStart) run.set(new CaptureInspectionOrigin.Context("glasses", 2));
+                    CaptureProvenance kept = nativeSource(second, 200);
+                    surface.future.onCandidate(second, kept, true); barrier(controller);
+                    commitVisible(controller, surface); commitVisible(controller, surface);
+                    List<RecordedRequest> pages = uploadInspectionPages(controller, server);
+                    assertEquals(2, pages.size());
+                    assertArrayEquals(second, uploadPart(pages.get(1), "image"));
+                    String body = pages.get(1).getBody().clone().readUtf8();
+                    if (changeAfterStart) assertFalse(body.contains("name=\"inspection_origin\""));
+                    else {
+                        JSONObject origin = new JSONObject(new String(uploadPart(pages.get(1), "inspection_origin"), StandardCharsets.UTF_8));
+                        assertEquals(kept.captureId, origin.getString("capture_id")); assertEquals(1, origin.getLong("generation"));
+                    }
+                } finally { controller.close(); }
+            }
+        }
+    }
+
+    @Test public void timedOutNativeCallbackCannotPublishAnInspectionOrUpload() throws Exception {
+        Surface surface = new Surface(); surface.holdForPage = true;
+        var run = new java.util.concurrent.atomic.AtomicReference<>(new CaptureInspectionOrigin.Context("glasses", 1));
+        try (MockWebServer server = inspectionServer()) {
+            DocScanController controller = inspectionController(server, surface, run);
+            try {
+                issueInspectionPhoto(controller, 0, false);
+                call(controller, "enqueueCaptureTimeout", new Class<?>[]{long.class}, 1L); barrier(controller);
+                controller.onPhoto(new byte[]{1, 2, 3}, nativeSource(new byte[]{1, 2, 3}, 100)); barrier(controller);
+                assertEquals(RelayState.ERROR, controller.getState());
+                assertNull(((CaptureReviewStore)get(controller, "captureReview")).peek());
+                assertNull(((LocalCaptureSession)get(controller, "localSession")).nextUnsent());
+                assertEquals(0, server.getRequestCount());
+            } finally { controller.close(); }
+        }
+    }
+
+    @Test public void aFutureOriginalWithoutItsOwnNativeStartCannotBorrowTheReviewOrigin() throws Exception {
+        Surface surface = new Surface(); surface.holdForPage = true; surface.futureEnabled = true;
+        var run = new java.util.concurrent.atomic.AtomicReference<>(new CaptureInspectionOrigin.Context("glasses", 1));
+        try (MockWebServer server = inspectionServer()) {
+            DocScanController controller = inspectionController(server, surface, run);
+            try {
+                byte[] first = {1, 2, 3}, second = {4, 5, 6};
+                issueInspectionPhoto(controller, 0, false); controller.onPhoto(first, nativeSource(first, 100)); barrier(controller);
+                surface.visible = true; controller.onCustomViewAvailable(1, "capture-review"); barrier(controller);
+                surface.future.onCandidate(second, nativeSource(second, 200), true); barrier(controller);
+                commitVisible(controller, surface); commitVisible(controller, surface);
+                List<RecordedRequest> pages = uploadInspectionPages(controller, server);
+                assertEquals(2, pages.size());
+                assertTrue(pages.get(0).getBody().clone().readUtf8().contains("name=\"inspection_origin\""));
+                assertFalse(pages.get(1).getBody().clone().readUtf8().contains("name=\"inspection_origin\""));
+                assertArrayEquals(second, uploadPart(pages.get(1), "image"));
+            } finally { controller.close(); }
+        }
+    }
+
+    @Test public void anUnavailableOptionalContextCannotFailOrdinaryNativeUpload() throws Exception {
+        Surface surface = new Surface(); surface.holdForPage = true;
+        var run = new java.util.concurrent.atomic.AtomicReference<>(new CaptureInspectionOrigin.Context("glasses", 1));
+        try (MockWebServer server = inspectionServer()) {
+            DocScanController controller = inspectionController(server, surface, run);
+            try {
+                controller.setCaptureInspectionContextProvider(() -> { throw new IllegalStateException("context unavailable"); });
+                byte[] jpeg = {1, 2, 3}; issueInspectionPhoto(controller, 0, false);
+                controller.onPhoto(jpeg, nativeSource(jpeg, 100)); barrier(controller); commitVisible(controller, surface);
+                List<RecordedRequest> pages = uploadInspectionPages(controller, server);
+                assertEquals(1, pages.size());
+                assertFalse(pages.get(0).getBody().clone().readUtf8().contains("name=\"inspection_origin\""));
+                assertArrayEquals(jpeg, uploadPart(pages.get(0), "image"));
+                assertNull(((LocalCaptureSession)get(controller, "localSession")).nextUnsent());
+            } finally { controller.close(); }
+        }
+    }
+
+    private static MockWebServer inspectionServer() throws Exception {
+        MockWebServer server = new MockWebServer();
+        server.setDispatcher(new Dispatcher() {
+            @Override public MockResponse dispatch(RecordedRequest request) {
+                try {
+                    if ("/v1/documents".equals(request.getPath())) return new MockResponse().setBody("{\"document_id\":17}");
+                    if ("/v1/documents/17/pages".equals(request.getPath())) {
+                        JSONObject metadata = new JSONObject(new String(uploadPart(request, "capture_provenance"), StandardCharsets.UTF_8));
+                        return new MockResponse().setBody(new JSONObject().put("document_id", 17)
+                                .put("page_index", metadata.getInt("page_index")).put("capture_provenance", metadata)
+                                .put("canonical_image_sha256", "c".repeat(64)).toString());
+                    }
+                    return new MockResponse().setResponseCode(404);
+                } catch (Exception error) { return new MockResponse().setResponseCode(500); }
+            }
+        });
+        server.start(); return server;
+    }
+
+    private static DocScanController inspectionController(MockWebServer server, Surface surface,
+            java.util.concurrent.atomic.AtomicReference<CaptureInspectionOrigin.Context> run) throws Exception {
+        DocScanController controller = new DocScanController(RuntimeEnvironment.getApplication(), surface, null,
+                (state, lines, diagnostic) -> {}, new ClientIdentity("test", "test", "test"));
+        controller.setCaptureInspectionContextProvider(run::get);
+        controller.configureForLocalStart(server.url("/").toString(), "", 270);
+        controller.startLocalSession(false); barrier(controller);
+        set(controller, "localNetworkBusy", true); return controller;
+    }
+
+    private static void issueInspectionPhoto(DocScanController controller, int page, boolean retake) throws Exception {
+        set(controller, "state", RelayState.STABILIZING);
+        call(controller, "requestPhotoAt", new Class<?>[]{int.class, boolean.class}, page, retake); barrier(controller);
+        assertEquals(RelayState.CAPTURING, controller.getState());
+    }
+
+    private static List<RecordedRequest> uploadInspectionPages(DocScanController controller, MockWebServer server) throws Exception {
+        set(controller, "localNetworkBusy", false); call(controller, "queueLocalUpload", new Class<?>[]{}); waitForUpload(controller);
+        List<RecordedRequest> pages = new java.util.ArrayList<>();
+        RecordedRequest request;
+        while ((request = server.takeRequest(50, TimeUnit.MILLISECONDS)) != null)
+            if ("/v1/documents/17/pages".equals(request.getPath())) pages.add(request);
+        return pages;
+    }
+
     @Test public void mismatchedZslJpegIsPreservedUnresolvedAndCannotUploadAfterRestart() throws Exception {
         Context context = RuntimeEnvironment.getApplication();
         Surface surface = new Surface(); surface.holdForPage = true;
@@ -528,6 +723,7 @@ public class LocalReviewTest {
             DocScanController restarted = new DocScanController(context, surface, null,
                     (state, lines, diagnostic) -> {}, new ClientIdentity("test", "test", "test"));
             try {
+                restarted.setCaptureInspectionContextProvider(() -> new CaptureInspectionOrigin.Context("new-run", 999));
                 restarted.configureForLocalStart(address, "", 270); barrier(restarted);
                 restarted.resumeLocalSession(saved.id()); barrier(restarted);
                 ((ExecutorService)get(restarted, "localNetwork")).submit(() -> {}).get(5, TimeUnit.SECONDS);
@@ -1444,6 +1640,8 @@ public class LocalReviewTest {
                 assertNotNull(retry);
                 assertArrayEquals(uploadPart(attempted, "capture_provenance"), uploadPart(retry, "capture_provenance"));
                 assertArrayEquals(jpeg, uploadPart(retry, "image"));
+                assertFalse("restored original must not borrow the current display generation",
+                        retry.getBody().clone().readUtf8().contains("name=\"inspection_origin\""));
                 assertEquals(2, server.getRequestCount());
             } finally { restarted.close(); }
         }

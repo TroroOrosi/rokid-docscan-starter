@@ -240,7 +240,8 @@ from __future__ import annotations
 # 0.60.0: retain authenticated original-video comparison uploads with durable receipts.
 # 0.61.0: transfer explicit comparison videos with persistent origin and receipt checks.
 # 0.61.1: preserve complete current Android runtime values across supervised phone services.
-APP_VERSION = "0.61.1"
+# 0.62.0: connect bounded Work capture diagnostics and exact decoded-video candidates.
+APP_VERSION = "0.62.0"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.
@@ -359,7 +360,8 @@ APP_VERSION = "0.61.1"
 #         bytes and acknowledged with the canonical PNG identity.
 # 1.37.0: explicitly identified ZSL originals require matching positive sensor timestamps.
 # 1.38.0: /capture-videos accepts sealed original-video comparison clips and their journals.
-API_VERSION = "1.38.0"
+# 1.39.0: optional capture inspection origins and authenticated diagnostic result lookups.
+API_VERSION = "1.39.0"
 
 # Matching algorithm identity. Bump when thresholds or hashing change so a
 # re-index/eval is triggered. Mirrors thresholds in app/matching.py.
@@ -507,7 +509,8 @@ EXPLAINER_API_VERSION = "1.1.0"
 # 1.35.0: opt-in ZSL evaluation preserves scene/quiet pairing and unresolved originals.
 # 1.36.0: opt-in recording evaluation retains originals and fences finalization with native capture.
 # 1.37.0: opt-in comparison transfer binds original clips to one local/device generation.
-GLASSES_VIEW_CONTRACT_VERSION = "1.37.0"
+# 1.38.0: current-run native uploads may include their pre-capture diagnostic origin.
+GLASSES_VIEW_CONTRACT_VERSION = "1.38.0"
 
 # Answer-area overlay payload (box + short answer; 2D image-anchored).
 # 1.1.0: added tracking metadata (tracking/fixed_ar/anchor_hint).
