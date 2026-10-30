@@ -20,7 +20,7 @@ from ..provider_registry import ProviderRegistry
 from .base import Solver
 from .chatgpt_web import ChatGptWebChatLost, ChatGptWebSolver, ChatGptWebUncertain
 from .chatgpt_work import ChatGptWorkSolver
-from ..work_bridge import WorkConflict, WorkPending
+from ..work_bridge import WorkBrowserResultRejected, WorkConflict, WorkPending
 from .llm_adapter import LLMSolver, choice_label, choice_out_of_range
 from .local_placeholder import LocalPlaceholderSolver
 
@@ -147,7 +147,7 @@ def solve_with_fallback(
             continue
         try:
             result = solver.solve(question=question, max_answer_len=max_answer_len)
-        except (ChatGptWebUncertain, WorkPending, WorkConflict):
+        except (ChatGptWebUncertain, WorkPending, WorkConflict, WorkBrowserResultRejected):
             raise  # Another provider would still duplicate a possibly submitted question.
         except ChatGptWebChatLost:
             # The subject's chat is gone and no new one was opened. Another tier

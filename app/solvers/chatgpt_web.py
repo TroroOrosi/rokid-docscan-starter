@@ -156,6 +156,9 @@ CHATS_FILE = "chats.json"
 # sessions can be answered at once; when the record held one key, each question
 # replaced the other session's chat, and interleaving opened a chat per question.
 CHATS_KEPT = 8
+# Technical memory/transport budget per acknowledged message, not a booklet
+# size limit or a claim about the service's account-specific upload allowance.
+TRANSFER_BATCH_BYTES = 96 * 1024 * 1024
 ATTEMPTS = int(os.environ.get("ROKID_CHATGPT_ATTEMPTS", "3"))
 RETRY_BACKOFF_S = float(os.environ.get("ROKID_CHATGPT_RETRY_S", "5"))
 # A throttled account is refused in the message body, not by an exception, so a
@@ -441,7 +444,7 @@ def reuse_page(context):
     return page
 
 
-def start_new_chat(page, *, ready_timeout_s: float | None = None):
+def start_new_chat(page, *, ready_timeout_s: float | None = None, wait_composer=None):
     """Clear the composer for the next question without reloading the page.
 
     A fresh thread per question is required -- earlier turns would become
@@ -459,7 +462,7 @@ def start_new_chat(page, *, ready_timeout_s: float | None = None):
             page.goto(CHAT_URL, wait_until="domcontentloaded")
     except Exception:  # noqa: BLE001 - any click failure is worth one reload
         page.goto(CHAT_URL, wait_until="domcontentloaded")
-    return wait_for_composer(page, ready_timeout_s=ready_timeout_s)
+    return (wait_composer or wait_for_composer)(page, ready_timeout_s=ready_timeout_s)
 
 
 def _is_chat_url(url: str) -> bool:
@@ -492,7 +495,7 @@ def _read_chats(directory: Path) -> dict:
 _NO_RETURN = "could not return to the subject's chat; no new chat was opened"
 
 
-def return_to_chat(page, url: str, *, reload: bool, ready_timeout_s: float | None = None):
+def return_to_chat(page, url: str, *, reload: bool, ready_timeout_s: float | None = None, wait_composer=None):
     """Put the tab back in a subject's recorded chat, or fail. Never open another.
 
     On 2026-09-14 every retry and every restart opened a new chat and attached
@@ -506,7 +509,7 @@ def return_to_chat(page, url: str, *, reload: bool, ready_timeout_s: float | Non
     try:
         if reload or page.url != url:
             page.goto(url, wait_until="domcontentloaded")
-        composer = wait_for_composer(page, ready_timeout_s=ready_timeout_s)
+        composer = (wait_composer or wait_for_composer)(page, ready_timeout_s=ready_timeout_s)
         landed = page.url == url
     except Exception as exc:  # noqa: BLE001 - navigation and waits raise broadly
         if isinstance(exc, (ChatGptWebAuthenticationRequired, CdpError)):
@@ -519,7 +522,7 @@ def return_to_chat(page, url: str, *, reload: bool, ready_timeout_s: float | Non
     return composer
 
 
-def wait_for_composer(page, *, ready_timeout_s: float | None = None):
+def wait_for_composer(page, *, ready_timeout_s: float | None = None, composer_selector=None):
     """Return the composer once it is usable, or say why it is not.
 
     Kept apart from the sending so the caller can get the page ready, attach
@@ -532,8 +535,26 @@ def wait_for_composer(page, *, ready_timeout_s: float | None = None):
     signed_out = isinstance(state, dict) and state.get("signed_out") is True
     if signed_out:
         raise ChatGptWebAuthenticationRequired("browser is signed-out; sign in with the persistent phone profile")
-    composer = page.locator(COMPOSER_SEL)
+    custom_selector = composer_selector is not None
+    composer_selector = COMPOSER_SEL if composer_selector is None else composer_selector
+    composer = page.locator(composer_selector)
     try:
+        if custom_selector:
+            # Work can leave a hidden Chat composer mounted in another main.
+            # Resolve the unique visible input, never the first hidden match.
+            deadline = time.monotonic() + ready_timeout_s
+            while True:
+                indices = page.evaluate(f"""(() => {{
+                  const nodes = [...document.querySelectorAll({json.dumps(composer_selector)})];
+                  return nodes.flatMap((e, i) => e.getClientRects().length ? [i] : []);
+                }})()""")
+                if len(indices) == 1:
+                    return composer.nth(indices[0])
+                if len(indices) > 1:
+                    raise ChatGptWebError("source composer is ambiguous; nothing sent")
+                if time.monotonic() >= deadline:
+                    raise ChatGptWebError("source composer did not appear; nothing sent")
+                time.sleep(0.1)
         composer.wait_for(state="visible", timeout=ready_timeout_s * 1000)
     except Exception as exc:  # noqa: BLE001 - the wait raises its own timeout
         from .cdp import CdpError  # noqa: PLC0415
@@ -541,7 +562,7 @@ def wait_for_composer(page, *, ready_timeout_s: float | None = None):
         if isinstance(exc, CdpError):
             raise
         raise ChatGptWebError(
-            f"composer {COMPOSER_SEL!r} never appeared within {ready_timeout_s:g}s. "
+            f"composer {composer_selector!r} never appeared within {ready_timeout_s:g}s. "
             "A signed-out chatgpt.com serves a placeholder shell without it: "
             "check the browser profile is signed in, else retune "
             "ROKID_CHATGPT_COMPOSER_SEL"
@@ -889,6 +910,10 @@ class ChatGptWebClient:
     inherited rather than restated here.
     """
 
+    # Keep legacy Chat batch identities stable across restarts. Work opts into
+    # a byte budget for its large original-image ZIPs on this same journal.
+    transfer_batch_bytes: int | None = None
+
     def __init__(self, *, endpoint: str = CDP_ENDPOINT, model: str = "chatgpt-web"):
         self.endpoint = endpoint
         self.model = model
@@ -917,6 +942,27 @@ class ChatGptWebClient:
         self._pending: str | None = None
         self._transfer: dict | None = None
 
+    def _start_new_chat(self, page):
+        return start_new_chat(page)
+
+    def _return_to_chat(self, page, url, *, reload):
+        return return_to_chat(page, url, reload=reload)
+
+    def _wait_for_composer(self, page):
+        return wait_for_composer(page)
+
+    def _verify_model(self, page, *, select=False):
+        return verify_selected_model(page, select=select)
+
+    def _attach_images(self, page, images, **kwargs):
+        return attach_images(page, images, **kwargs)
+
+    def _send_and_read(self, page, text, **kwargs):
+        return send_and_read(page, text, **kwargs)
+
+    def _turn_counts(self, page):
+        return page.locator(USER_SEL).count(), page.locator(ASSISTANT_SEL).count()
+
     def complete(
         self,
         *,
@@ -932,6 +978,7 @@ class ChatGptWebClient:
         booklet_stage: str = "single",
         stage_audio_digest: str | None = None,
         stage_question_ids: list[str] | None = None,
+        before_submit: Callable[[], None] | None = None,
     ) -> str:
         if not chatgpt_send_enabled():
             raise ChatGptWebSendNotAuthorized("ChatGPT send is not authorized")
@@ -966,13 +1013,15 @@ class ChatGptWebClient:
                 booklet_stage=booklet_stage,
                 stage_audio_digest=stage_audio_digest,
                 stage_question_ids=stage_question_ids,
+                before_submit=before_submit,
             )
         finally:
             browser.close()
 
     def _ask_with_retries(self, context, text: str, pages: list[bytes], *,
                           audio=None, chat_key=None, files=None, expect=None, booklet=False,
-                          booklet_stage="single", stage_audio_digest=None, stage_question_ids=None) -> str:
+                          booklet_stage="single", stage_audio_digest=None, stage_question_ids=None,
+                          before_submit=None) -> str:
         """Serialize all tab interaction; a restart cannot erase an uncertain send."""
         from .cdp import CdpError  # noqa: PLC0415
 
@@ -982,13 +1031,14 @@ class ChatGptWebClient:
                 if booklet:
                     return self._booklet_locked(context, text, guard=guard, files=files,
                                                 chat_key=chat_key, expect=expect, stage=booklet_stage,
-                                                audio_digest=stage_audio_digest, question_ids=stage_question_ids)
+                                                audio_digest=stage_audio_digest, question_ids=stage_question_ids,
+                                                before_submit=before_submit)
                 try:
                     guard.require_clear()
                 except BrowserGuardError as error:
                     raise ChatGptWebBlocked(str(error)) from error
                 return self._ask_locked(context, text, pages, guard=guard, audio=audio,
-                                        chat_key=chat_key, files=files, expect=expect)
+                                        chat_key=chat_key, files=files, expect=expect, before_submit=before_submit)
         except BrowserBusy as error:
             raise ChatGptWebBusy(str(error)) from error
         except BrowserGuardError as error:
@@ -1099,8 +1149,8 @@ class ChatGptWebClient:
         self._unsaved = False
 
     def _booklet_locked(self, context, text: str, *, guard, files, chat_key, expect,
-                        stage="single", audio_digest=None, question_ids=None) -> str:
-        """At most twenty attachments per message; only a matching receipt advances."""
+                        stage="single", audio_digest=None, question_ids=None, before_submit=None) -> str:
+        """Bound each message by bytes/count; only a matching receipt advances."""
         if not chat_key:
             raise ChatGptWebError("a booklet needs a persistent session chat key; nothing sent")
         if stage not in ("single", "reading", "listening"):
@@ -1150,8 +1200,25 @@ class ChatGptWebClient:
         number = 0
         while first is not None:
             number += 1
-            attachments = [first, *itertools.islice(source, 19)]
-            first = next(source, None)
+            attachments = [first]
+            size = len(first["buffer"])
+            if self.transfer_batch_bytes is not None and size > self.transfer_batch_bytes:
+                raise ChatGptWebAttachmentFailed("one original file exceeds the transfer batch budget; nothing sent")
+            # The iterator holds at most this batch and one next-file lookahead;
+            # do not materialise a booklet of large original-image ZIPs.
+            first = None
+            while len(attachments) < 20:
+                candidate = next(source, None)
+                if candidate is None:
+                    break
+                if (self.transfer_batch_bytes is not None
+                        and size + len(candidate["buffer"]) > self.transfer_batch_bytes):
+                    first = candidate
+                    break
+                attachments.append(candidate)
+                size += len(candidate["buffer"])
+            if len(attachments) == 20:
+                first = next(source, None)
             names = [f["name"] for f in attachments]
             digests = [_digest(f["buffer"]) for f in attachments]
             if stage == "listening":
@@ -1186,7 +1253,8 @@ class ChatGptWebClient:
                            "After receiving ALL these files, reply with exactly the receipt JSON below.")
             message += "\nTransfer receipt:\n" + json.dumps(receipt, ensure_ascii=False)
             reply = self._ask_locked(context, message, [], guard=guard, files=attachments,
-                                     chat_key=chat_key, expect=(*expected, "batch_id"), batch=batch)
+                                     chat_key=chat_key, expect=(*expected, "batch_id"), batch=batch,
+                                     before_submit=before_submit)
             if final:
                 return reply
         raise ChatGptWebUncertain("a booklet has receipts but no final answer; nothing sent again")
@@ -1299,7 +1367,7 @@ class ChatGptWebClient:
         return reply
 
     def _ask_locked(self, context, text: str, pages: list[bytes], *, guard,
-                    audio=None, chat_key=None, files=None, expect=None, batch=None) -> str:
+                    audio=None, chat_key=None, files=None, expect=None, batch=None, before_submit=None) -> str:
         """Retry preparation only. Once submit is attempted, ambiguity is durable."""
         from .cdp import CdpError  # noqa: PLC0415
 
@@ -1324,13 +1392,17 @@ class ChatGptWebClient:
             sent = False
             request_id = secrets.token_hex(32)
 
-            def before_submit():
+            def mark_sending():
                 nonlocal sent
+                if before_submit is not None:
+                    try:
+                        before_submit()
+                    except Exception as error:
+                        raise ChatGptWebBlocked("source binding changed before send; nothing sent") from error
                 guard.mark_sending(request_id)
                 sent = True
                 if batch is not None:
-                    batch["users"] = page.locator(USER_SEL).count()
-                    batch["replies"] = page.locator(ASSISTANT_SEL).count()
+                    batch["users"], batch["replies"] = self._turn_counts(page)
                     self._pending = request_id
                     self._transfer["pending"] = batch
                     self._chat_key, self._chat_url = chat_key, _url_of(page)
@@ -1344,22 +1416,22 @@ class ChatGptWebClient:
             try:
                 if recorded and not _is_chat_url(self._chat_url):
                     # Still on the address-less chat, composer clean: ask there.
-                    composer = wait_for_composer(page)
+                    composer = self._wait_for_composer(page)
                 elif recorded:
                     # The subject already has a chat holding its messages and
                     # originals. Every attempt, retry and restart goes back
                     # there or fails: opening another per attempt is what filled
                     # the sidebar and the rate limit on 2026-09-14.
-                    composer = return_to_chat(page, self._chat_url, reload=self._reload)
+                    composer = self._return_to_chat(page, self._chat_url, reload=self._reload)
                 else:
                     # Nothing has been sent under this key, so there is no
                     # conversation to lose: a fresh chat, on a retry too, which
                     # also drops whatever the failed attempt left in the composer.
-                    composer = start_new_chat(page)
+                    composer = self._start_new_chat(page)
                     self._chat_key, self._chat_url = chat_key, None
                     self._attached_in_chat, self._source_attached = set(), False
                 # Selecting a model may rebuild the composer; do it before attaching files.
-                verify_selected_model(page, select=True)
+                self._verify_model(page, select=True)
                 pending = [p for p in pages if _digest(p) not in self._attached_in_chat]
                 # Prepare a booklet only when this chat needs it. Do not retain
                 # a second copy of all image bytes between questions on the phone.
@@ -1373,7 +1445,7 @@ class ChatGptWebClient:
                     audio if audio and _digest(audio[1]) not in self._attached_in_chat else None
                 )
                 attached = (
-                    attach_images(
+                    self._attach_images(
                         page, pending, audio=pending_audio, poll_s=POLL_S,
                         files=pending_files,
                     )
@@ -1393,8 +1465,8 @@ class ChatGptWebClient:
                     continue
                 if (pages or audio or files) and attached is not True:
                     raise ChatGptWebAttachmentFailed("source attachments were not confirmed; no question sent")
-                reply = send_and_read(page, text, composer=composer, expect=expect,
-                                      before_submit=before_submit, on_chat_url=on_chat_url,
+                reply = self._send_and_read(page, text, composer=composer, expect=expect,
+                                      before_submit=mark_sending, on_chat_url=on_chat_url,
                                       on_model=lambda model: setattr(self, "model", model))
                 if batch is not None:
                     self._accept_batch(guard, reply, batch, request_id)
@@ -1427,7 +1499,7 @@ class ChatGptWebClient:
                         "send outcome unknown; retained for inspection, no automatic resend"
                     ) from exc
                 last_error = exc
-                if isinstance(exc, (ChatGptWebAuthenticationRequired, ChatGptWebModelMismatch)):
+                if isinstance(exc, (ChatGptWebAuthenticationRequired, ChatGptWebModelMismatch, ChatGptWebBlocked)):
                     raise
                 if isinstance(exc, CdpError):
                     raise ChatGptWebBrowserUnavailable("local Chromium CDP disconnected; nothing sent") from exc
@@ -1508,6 +1580,7 @@ class ChatGptWebClient:
         booklet_stage: str = "single",
         stage_audio_digest: str | None = None,
         stage_question_ids: list[str] | None = None,
+        before_submit: Callable[[], None] | None = None,
     ) -> dict:
         return extract_json(
             self.complete(
@@ -1523,6 +1596,7 @@ class ChatGptWebClient:
                 booklet_stage=booklet_stage,
                 stage_audio_digest=stage_audio_digest,
                 stage_question_ids=stage_question_ids,
+                before_submit=before_submit,
             )
         )
 

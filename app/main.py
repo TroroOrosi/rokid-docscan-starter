@@ -87,8 +87,10 @@ from .solvers.chatgpt_web import (
     ChatGptWebSendNotAuthorized, ChatGptWebUncertain, chatgpt_send_enabled,
 )
 from .solvers.registry import solve_with_fallback
-from .solvers.chatgpt_work import work_binding
-from .work_bridge import WorkConflict, WorkPending, WorkStore, configured_work_store
+from .solvers.chatgpt_work import WorkBrowserUncertain, work_binding
+from .work_bridge import (
+    WorkBrowserResultRejected, WorkConflict, WorkPending, WorkReadabilityRejected, WorkStore, configured_work_store,
+)
 from .subjects import detect_subject
 from .version import APP_VERSION, HUD_CONTRACT_VERSION, version_info
 
@@ -118,7 +120,7 @@ async def lifespan(app: FastAPI):
         from .solvers import get_solver  # noqa: PLC0415
 
         get_analyzer()
-        if (os.environ.get("ROKID_SOLVER") or "").strip() != "chatgpt-web":
+        if (os.environ.get("ROKID_SOLVER") or "").strip() not in ("chatgpt-web", "chatgpt-work"):
             get_solver()
         # The separately supervised Termux Chromium may still be starting.
         # Its loopback CDP and authentication are checked before sending.
@@ -177,11 +179,36 @@ def _work_current_job(job_id: str) -> tuple[WorkStore, dict]:
         if ([(item["page_number"], item["sha256"]) for item in images]
                 != [(item["page_number"], item["image_sha256"]) for item in current]):
             raise WorkConflict("the original document identity changed")
+        recordings = [source for source in job["sources"] if "page_number" not in source]
+        if recordings and (len(recordings) != 1
+                or file_sha256(session["audio_path"]) != recordings[0]["sha256"]):
+            raise WorkConflict("the completed original recording identity changed")
     except (WorkConflict, ValueError) as error:
         raise HTTPException(status_code=409, detail=str(error)) from None
     finally:
         conn.close()
     return store, job
+
+
+def _commit_work_browser_result(job_id: str, **payload) -> dict:
+    """Seal an internal browser result while its input/wearer is still current.
+
+    This is not an HTTP transport selector. The public result endpoint retains
+    its separate calibrated inspection requirements. Browser/network work must
+    finish before entering this short notification-state critical section.
+    """
+    with state_guard():
+        try:
+            store, job = _work_current_job(job_id)
+        except HTTPException as error:
+            raise WorkConflict("the Work browser input is no longer current") from error
+        # Another authorized consumer can finish while the browser is working.
+        # Its already validated immutable answer wins over a late browser body.
+        if job["status"] == "completed":
+            return job
+        if payload.get("manifest_sha256") != job["manifest_sha256"]:
+            raise WorkBrowserResultRejected("the browser result does not match the sealed original manifest")
+        return store.submit_browser_result(job_id, **payload)
 
 
 @app.get("/v1/work/jobs")
@@ -2708,6 +2735,8 @@ class AnswerMissing(ValueError):
 
 _FAILURE_CODES = (
     (AnswerMissing, "answer_missing"),
+    (WorkReadabilityRejected, "image_review_rejected"),
+    (WorkBrowserResultRejected, "work_result_rejected"),
     (ChatGptWebSendNotAuthorized, "send_not_authorized"),
     (ChatGptWebAuthenticationRequired, "authentication_failed"),
     (ChatGptWebBrowserUnavailable, "browser_unavailable"),
@@ -2753,15 +2782,25 @@ def _failure_count(row) -> int:
         return 0
 
 
+def _work_recovery_job_id(row) -> str | None:
+    failure = _solve_failure(row)
+    job_id = failure.get("work_job_id")
+    if (os.environ.get("ROKID_SOLVER", "").strip() == "chatgpt-work"
+            and failure.get("code") == "browser_outcome_unknown"
+            and isinstance(job_id, str) and re.fullmatch(r"[a-f0-9]{64}", job_id)):
+        return job_id
+    return None
+
+
 def _retrying(row) -> bool:
-    return (_solve_failure(row).get("code") in _RETRYING_ISSUES
+    return bool(_work_recovery_job_id(row)) or (_solve_failure(row).get("code") in _RETRYING_ISSUES
             and _failure_count(row) < RESUME_LIMIT)
 
 
 def _record_solve_failure(conn, row, error: Exception, *, commit: bool = True) -> None:
     if isinstance(error, ChatGptWebSendNotAuthorized):
         return  # Setup is a pause: preserve pending rows and retry counts.
-    # Keep only a fixed code, never a provider exception containing source or keys.
+    # Keep a fixed code and optional local job identity, never provider messages.
     current = conn.execute("SELECT structure_json FROM questions WHERE id = ?", (row["id"],)).fetchone()
     metadata = json.loads(current["structure_json"] or "{}")
     if not isinstance(metadata, dict):
@@ -2770,6 +2809,8 @@ def _record_solve_failure(conn, row, error: Exception, *, commit: bool = True) -
     metadata["solve_failure"] = {"code": next(
         (code for kind, code in _FAILURE_CODES if isinstance(error, kind)),
         "not_sent" if _nothing_sent(error) else "solver_failed")}
+    if isinstance(error, WorkBrowserUncertain):
+        metadata["solve_failure"]["work_job_id"] = error.work_job_id
     conn.execute("UPDATE questions SET structure_json = ? WHERE id = ?",
                  (json.dumps(metadata, ensure_ascii=False), row["id"]))
     if commit:
@@ -2812,6 +2853,8 @@ def _answer_bundle_item(conn, group: dict, row) -> dict:
                  else _RETRYING_ISSUES[code] if retrying
                  else _GAVE_UP_ISSUES[code] if code in _GAVE_UP_ISSUES
                  else "この解答番号の答えが返答にありません" if code == "answer_missing"
+                 else "画像の判読確認と回答が一致しません。資料は保持しています" if code == "image_review_rejected"
+                 else "Workの返答と原画像の照合に失敗しました。資料は保持しています" if code == "work_result_rejected"
                  else "解析に失敗しました。資料は保持しています" if code == "solver_failed" else "未解答")
     elif needs_input:
         status, issue = "needs_input", str(metadata.get("missing_material") or "資料が不足しています")[:1000]
@@ -3681,6 +3724,20 @@ def _resume_answers(conn, session) -> bool:
     elif rows and (any(_latest_solution_row(conn, row["id"]) for row in rows)
                    or not any(_retrying(row) for row in rows)):
         return False
+    with _background_solves_lock:
+        if session_id in _background_solves:
+            return True
+    recovery_jobs = {_work_recovery_job_id(row) for row in rows
+                     if _latest_solution_row(conn, row["id"]) is None and _work_recovery_job_id(row)}
+    if recovery_jobs:
+        if len(recovery_jobs) != 1:
+            return False
+        try:
+            _, job = _work_current_job(next(iter(recovery_jobs)))
+        except HTTPException:
+            return False
+        if job["session_id"] != session_id:
+            return False
     with _background_solves_lock:
         if session_id in _background_solves:
             return True

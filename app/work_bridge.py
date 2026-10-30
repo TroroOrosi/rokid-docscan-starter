@@ -9,12 +9,15 @@ still has to be connected before physical use.
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 import re
 import secrets
 import sqlite3
 from contextlib import contextmanager
+
+from PIL import Image
 from pathlib import Path
 
 
@@ -24,6 +27,14 @@ class WorkPending(RuntimeError):
 
 class WorkConflict(ValueError):
     """A handoff does not belong to the immutable job or its current stage."""
+
+
+class WorkBrowserResultRejected(ValueError):
+    """A completed browser reply failed validation; never silently keep waiting."""
+
+
+class WorkReadabilityRejected(WorkBrowserResultRejected):
+    """A known browser reply attempted answers from unreadable/uncertain pages."""
 
 
 def _json(value) -> str:
@@ -46,6 +57,17 @@ def _identifier(value, field: str) -> str:
     if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,256}", value):
         raise ValueError(f"invalid {field}")
     return value
+
+
+def browser_source_name(source: dict) -> str:
+    """Stable flat names for the browser's unchanged canonical originals."""
+    if "page_number" in source:
+        if source["mime_type"] != "image/png":
+            raise WorkConflict("browser image delivery requires canonical PNG originals")
+        return f"page_{source['page_number']:03d}.png"
+    suffix = {"audio/wav": "wav", "audio/mpeg": "mp3", "audio/mp4": "m4a",
+              "audio/ogg": "ogg", "audio/flac": "flac"}[source["mime_type"]]
+    return f"original_audio.{suffix}"
 
 
 def configured_work_store() -> WorkStore:
@@ -213,7 +235,8 @@ class WorkStore:
                 "model_selection_verified": False, "visual_reading_verified": False,
                 "quality": qualities,
                 "delivery_acknowledgements": {"kind": "transport_acknowledgement_claim", "sources": deliveries},
-                "transport": "phone_authenticated_http",
+                **({"browser_review": submitted["browser_review"]} if "browser_review" in submitted else {}),
+                "transport": "phone_local_browser" if "browser_review" in submitted else "phone_authenticated_http",
                 "cloud_transport_connected": False}
 
     def get(self, job_id: str) -> dict:
@@ -346,6 +369,25 @@ class WorkStore:
 
     def submit_result(self, job_id: str, *, manifest_sha256: str, generation: int,
                       conversation_id: str, source_receipts: list[dict], result: dict) -> dict:
+        """External/MCP results retain the calibrated all-native-tile admission."""
+        return self._submit_result(job_id, manifest_sha256=manifest_sha256, generation=generation,
+            conversation_id=conversation_id, source_receipts=source_receipts, result=result)
+
+    def submit_browser_result(self, job_id: str, *, manifest_sha256: str, generation: int,
+                              conversation_id: str, source_receipts: list[dict], result: dict,
+                              extraction: dict, readability: list[dict]) -> dict:
+        """Internal local-CDP path; no HTTP request can select this admission.
+
+        Full-original readability is an uncalibrated model judgement, never an
+        eligible capture profile or proof of character accuracy/visual reading.
+        """
+        return self._submit_result(job_id, manifest_sha256=manifest_sha256, generation=generation,
+            conversation_id=conversation_id, source_receipts=source_receipts, result=result,
+            browser_evidence=(extraction, readability))
+
+    def _submit_result(self, job_id: str, *, manifest_sha256: str, generation: int,
+                       conversation_id: str, source_receipts: list[dict], result: dict,
+                       browser_evidence=None) -> dict:
         _identifier(conversation_id, "Work conversation identity")
         encoded = _json(result)
         if len(encoded.encode()) > 8 * 1024 * 1024:
@@ -389,7 +431,17 @@ class WorkStore:
                     raise WorkConflict("unknown original image delivery kind")
                 claims.append({**item, "delivery": delivery})
             self._validate_result(job, result)
-            if not self._non_answering_stop(result):
+            browser_review = (self._browser_review(conn, job, *browser_evidence)
+                              if browser_evidence is not None else None)
+            if browser_review is not None:
+                if not self._non_answering_stop(result):
+                    if len(browser_review["images"]) != sum("page_number" in p for p in job["sources"]):
+                        raise WorkBrowserResultRejected("every browser original requires its original readability review")
+                    if any(p["status"] != "readable" for p in browser_review["images"]):
+                        if any(item.get("status") == "ready" for item in result["questions"]):
+                            raise WorkReadabilityRejected("browser readability review does not support answering")
+                        raise WorkBrowserResultRejected("every browser original must be readable before accepting answers")
+            elif not self._non_answering_stop(result):
                 for source in job["sources"]:
                     if "page_number" not in source:
                         continue
@@ -403,7 +455,8 @@ class WorkStore:
             # These are transport acknowledgements, not proof that the model saw
             # the pixels. A local original GET alone never records cloud delivery.
             submission = _json({"result": result, "conversation_id": conversation_id,
-                                "source_receipts": sorted(claims, key=lambda item: item["source_id"])})
+                                "source_receipts": sorted(claims, key=lambda item: item["source_id"]),
+                                **({"browser_review": browser_review} if browser_review is not None else {})})
             if row["result_json"] is not None:
                 if row["submission_json"] != submission:
                     raise WorkConflict("the Work answer was already committed")
@@ -411,6 +464,62 @@ class WorkStore:
             conn.execute("UPDATE jobs SET result_json=?,submission_json=?,conversation_id=? WHERE job_id=?",
                          (encoded, submission, conversation_id, job_id))
             return self._public(conn, self._row(conn, job_id))
+
+    def _browser_review(self, conn, job: dict, extraction: dict, readability: list[dict]) -> dict:
+        expected = []
+        for source in job["sources"]:
+            if source["source_id"] not in job["new_source_ids"]:
+                continue
+            item = {"source_id": source["source_id"], "file_name": browser_source_name(source),
+                    "sha256": source["sha256"]}
+            if "page_number" in source:
+                raw = conn.execute("SELECT data FROM sources WHERE job_id=? AND source_id=?",
+                                   (job["job_id"], source["source_id"])).fetchone()["data"]
+                if _sha(raw) != source["sha256"]:
+                    raise WorkConflict("the stored original hash changed")
+                try:
+                    with Image.open(io.BytesIO(raw)) as image:
+                        if image.format != "PNG":
+                            raise ValueError("not canonical PNG")
+                        item.update(width=image.width, height=image.height)
+                        image.verify()
+                except (OSError, ValueError) as error:
+                    raise WorkConflict("the canonical original image is unavailable") from error
+            expected.append(item)
+        if (not isinstance(extraction, dict) or set(extraction) != {"status", "files"}
+                or extraction["status"] != "ok" or extraction["files"] != expected
+                or any(type(item.get(axis)) is not int for item in extraction["files"]
+                       for axis in ("width", "height") if axis in item)):
+            raise WorkBrowserResultRejected("browser extraction must match every original hash, dimension and order")
+        if job["stage"] == "listening":
+            if readability != []:
+                raise WorkBrowserResultRejected("listening must retain the original image review")
+            prior = self._public(conn, self._row(conn, job["previous_job_id"]))
+            images = prior.get("browser_review", {}).get("images", [])
+        else:
+            originals = [p for p in expected if "width" in p]
+            if (not isinstance(readability, list) or len(readability) != len(originals)
+                    or any(not isinstance(review, dict) or set(review) != {
+                        "source_id", "status", "image_viewer_used", "reasons"}
+                           for review in readability)):
+                raise WorkBrowserResultRejected("every original requires its own browser readability review")
+            images = []
+            for original, review in zip(originals, readability, strict=True):
+                reasons, status = review["reasons"], review["status"]
+                if (review["source_id"] != original["source_id"]
+                        or status not in ("readable", "unreadable", "uncertain")
+                        or type(review["image_viewer_used"]) is not bool
+                        or (status == "readable" and not review["image_viewer_used"])
+                        or not isinstance(reasons, list) or len(reasons) > 16
+                        or any(not isinstance(reason, str) or not reason.strip() or len(reason) > 500
+                               for reason in reasons)
+                        or (status != "readable" and not reasons)):
+                    raise WorkBrowserResultRejected("invalid or incomplete browser readability review")
+                images.append({"source_id": original["source_id"], "source_sha256": original["sha256"],
+                               "width": original["width"], "height": original["height"],
+                               **{key: review[key] for key in ("status", "image_viewer_used", "reasons")}})
+        return {"kind": "uncalibrated_browser_readability", "calibrated": False,
+                "visual_reading_verified": False, "images": images}
 
     @staticmethod
     def _non_answering_stop(result: dict) -> bool:

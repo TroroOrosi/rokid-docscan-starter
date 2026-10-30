@@ -1814,6 +1814,51 @@ def test_booklet_uses_ordered_receipts_then_one_whole_answer(monkeypatch, tmp_pa
     assert transfer["pending"] is None and _guard_state(tmp_path) == "idle"
 
 
+def test_booklet_limits_batch_bytes_and_waits_for_ack_before_reading_the_next_batch(monkeypatch):
+    _fast(monkeypatch)
+    monkeypatch.setattr(chatgpt_web.ChatGptWebClient, "transfer_batch_bytes", 12)
+    page = _BatchPage()
+    payloads = [{"name": f"part{index}.zip", "mimeType": "application/zip", "buffer": bytes([index]) * 6}
+                for index in range(5)]
+    consumed = []
+
+    def files():
+        for index, item in enumerate(payloads):
+            # One lookahead is necessary to tell final from intermediate batches.
+            if index >= 3:
+                assert len(page.receipts) >= 1
+            consumed.append(index)
+            yield item
+
+    result = chatgpt_web.ChatGptWebClient()._ask_with_retries(
+        _OneTabContext(page), "Answer every question", [], chat_key="session:bytes",
+        files=files, expect=("questions",), booklet=True,
+    )
+    assert json.loads(result)["questions"]
+    assert [sum(len(item["buffer"]) for item in upload) for upload in page.uploads] == [12, 12, 6]
+    assert consumed == list(range(5)) and len(page.receipts) == 3
+
+
+def test_changed_source_binding_stops_before_durable_send_and_is_not_retried(monkeypatch, tmp_path):
+    _fast(monkeypatch)
+    page = _BatchPage()
+    checks = []
+
+    def changed():
+        checks.append(len(page.uploads))
+        assert not _sends(page)
+        raise ValueError("source generation changed")
+
+    with pytest.raises(chatgpt_web.ChatGptWebBlocked, match="binding"):
+        chatgpt_web.ChatGptWebClient()._ask_with_retries(
+            _OneTabContext(page), "Answer every question", [],
+            chat_key="session:binding", files=lambda: _batch_files(1),
+            expect=("questions",), booklet=True, before_submit=changed,
+        )
+    assert checks == [1] and not _sends(page)
+    assert _guard_state(tmp_path) == "idle"
+
+
 def test_restarting_after_attachment_failure_skips_acknowledged_pages(monkeypatch, tmp_path):
     _fast(monkeypatch)
     files = _batch_files()

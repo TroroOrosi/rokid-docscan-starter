@@ -1,7 +1,7 @@
 # 再開入口：次のセッションはここだけ読めば始められる
 
-最終更新: 2026-10-30続行 — 可視起動の初回preflight失敗を固定alias/直前UID一覧guardで修正。PC33check/別監査R0/O0後、再実行7steps全0でphone X11/browser各1起動。Work/Sol6.1/Extra High/Fastと既存Drive plugin選択を公開UIで確認。品質failでも非回答needs_inputを返すPC修正は別監査R0/O0、関連pytest195pass/ruff0。実GPT送信/Drive原画像取得・実AI撮影feedback・会場経路は未受入。詳細phone-work-connected-root-20261030.json。
-Runs on: 開発・独立監査はWindows PC、接続phoneはF51F/ZY22LWGDCV。会場は常時オンphone AP＋装着glassesだけでPC/USB/毎回接続不要。本人の最新「確認せずにそのまま進めてください」を受領し、同一復旧・要望内の通常準備で承認を繰り返さない。source/APK/API/env/Boot/services更新・GPT送信は今回まだ0、手動glasses受入は未実施。
+最終更新: 2026-10-30続行 — phone Work/Sol6.1/Extra High/Fastの21原PNG ZIP/Drive比較はZIP84/84・Drive83/84。同chat再添付なし追試は21nonce hashと新39値全一致。Work consumerと現在jobの送信後回収を統合、PC関連92＋428testpass・別監査R0/O0。旧世代barrier/原音Work/実紙は未受入。詳細phone-work-connected-root-20261030.json。
+Runs on: 開発・独立監査はWindows PC、接続phoneはF51F/ZY22LWGDCV。会場は常時オンphone AP＋装着glassesだけでPC/USB/毎回接続不要。本人の最新「確認せずにそのまま進めてください」に従い同一復旧・要望内の通常準備で承認を繰り返さない。技術fixture GPT送信3/Drive原PNG upload21・private folder1、phone source/APK/API/env/Boot/services更新0、手動glasses受入0。
 
 ## 0. 読み方（前提と資料に引きずられないため）
 
@@ -90,7 +90,7 @@ Runs on: 開発・独立監査はWindows PC、接続phoneはF51F/ZY22LWGDCV。�
   → 旧サーバ停止 → `nohup bash scripts/phone_serve.sh 127.0.0.1 > data/server-<commit>.log 2>&1 &`。PCからは `ssh -f -N -L 8000:127.0.0.1:8000 ...`（ssh `-i ~/.ssh/f51f_key -p 8022 u0_a26@192.168.0.6`）。
   ベンチの鍵は `ROKID_API_KEY` をスマホの env から読んで渡す（画面に出さない）。
 
-## 4. 次の作業（Runs on: 開発PC＋接続F51F）：Work/Sol6.1/Extra High(power3/5)/Fastチェックtrue・Drive pluginチェックtrueを読取確認済み。Cloud実行・Drive原画像取得・結果本文返却は未検証、Open desktop appはFiles等と並ぶツールバーボタン。Choose project/Cloud経路を確認してから完全な技術fixtureで画像伝達を検証する。Work ready=False/実caller未接続は維持。品質fail時の純粋needs_input返却修正を保存し、原本metadataのDB橋渡しは先行させずcanonical PNG identityで検査を結ぶ。旧更新器は79file/旧chain/全path既存等が不適合、既存器内で現snapshotへ直す。全tile常時検査/未使用ROI層/別台帳を増やさない。録画/ZSL/実AIfeedback・glasses/会場全経路は未受入。以下は旧経緯。
+## 4. 次の作業（Runs on: 開発PC＋接続F51F）：Work実DOM/model/Fast/ZIP順送/結果seal＋現在jobの送信後read回収をPC検証・別監査済み（f75bb0/a5e712/d7c733 exit0）。全tile校正済外部route維持、browser判読は未校正。次は更新器schema2/visible-X11自動起動の検証・独立監査→固定commit archive＋fresh snapshot→phone source導入・API/Work/services起動。撮影担当は既存原寸JPEGとpreviewを同sessionで保つ空白短縮をPC実装中。旧世代uncertain整理/録画ZSL/実AIfeedback/原音Work/glasses会場全経路は未受入。以下は旧経緯。
 
 1. 済：独立監査2回（`4552ea1`、`4552ea1..e12e155`）の指摘を `61ad481`〜`1134404` で反映。
 2. 済：4a（3節）。起動はスマホで `bash scripts/phone_serve.sh 127.0.0.1`、PCから `ssh -L 8000:127.0.0.1:8000` で投入した。

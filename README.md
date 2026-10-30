@@ -112,19 +112,22 @@ submodule、AARコピーは不要です。
 | 経路 | 位置づけ |
 |---|---|
 | `ROKID_SOLVER=chatgpt-web` | **現行の主経路。** 利用者のログイン済み ChatGPT ウェブセッションを CDP 経由で操作します |
-| `ROKID_SOLVER=chatgpt-work` | スマホ側の原画像job・品質検査・答案受領を実装中。Work Cloudへの接続・自動開始は未接続で、運用切替前です |
+| `ROKID_SOLVER=chatgpt-work` | スマホ内のWorkブラウザへ原PNGのZIPを分割送信し、同じ会話の回答を受領する経路。実装・PC検証と、スマホへの導入・会場受入を分けて確認します |
 | スマホ内ローカルモデル（F-51F、llama.cpp） | **不採用**（2026-09-14、利用者の決定）。実測は `docs/hardware-measurements.md` E 節に証拠として残しますが、新規作業はありません |
 | `openai` / `gemini` / `claude` | API キーがあれば設定だけで動きます。`ROKID_SOLVER_TIERS` のフォールバック段として残します |
 
 **ChatGPT ウェブ UI の自動操作は OpenAI の利用規約に反し、アカウントが制限される
 risk があります。**利用者の判断で選択した経路です（詳細は下の「実モデル接続」）。
 
-**未検証:** Termux内の新しいChromiumでのログイン維持・実際のChatGPT操作、スマホ再起動後の
-自動開始、テザリング上の撮影から答案まで、実機での即消灯・無音・電池持続です。
+**未検証:** スマホ再起動後のログイン維持・自動開始、テザリング上の撮影から答案まで、
+実機での即消灯・無音・電池持続です。Termux ChromiumのWorkから合成画像21枚を送受信した
+技術検査は、実紙の撮影精度や答案の正答を保証しません。
 以前のスマホChromeでの部分測定は `docs/hardware-measurements.md` に残しています。
 
 最新の対象はChatGPTアプリ／WebのWorkです。実利用は常時オンのスマホとテザリング接続グラスだけで、PC・有線・毎回の接続操作を要求しません。
 Work向けの画像jobは、向き補正済みサーバPNGのbytesとSHA・順序を保持し、原画素の検査と答案を同じ入力へ照合します。フォルダ名・画像一覧・データ配信記録を、AIが全画像を読めた証明にしません。
+ブラウザ経路はPNGを再圧縮せずZIPへ格納し、容量と添付数で区切って受領を待ち、最後に全問を解かせます。送信台帳を使って同じ会話へ復帰し、結果不確定の送信を自動で繰り返しません。各原画像のhash・寸法・順序と未校正の判読レビューを照合し、判読不能・不確実な画像に基づく答案は受け付けません。モデルの判読レビューは全文字の正確さの証明ではありません。外部MCPの校正済み品質条件は別に維持します。
+Workの送信後に通信が切れた場合も、同じ処理の原画像・原音・端末世代を確認して、監視から既存の送信結果を回収します。過去のChat送信をWorkへ送り直すことはありません。終了した旧世代に不確定な送信が残る場合の整理と、実機での復旧受入は未完了です。
 Driveへ置く場合も全件列挙と各原画像取得が必要で、添付20枚制限から外れることと全頁を正しく読めることは別です。[公式MCP Events](https://developers.openai.com/plugins/build/mcp-events)・[Secure MCP Tunnel](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels)は接続候補であり、このアカウント／スマホでの接続・購読・自動復旧は未検証です。
 
 導入の正本は
@@ -132,7 +135,7 @@ Driveへ置く場合も全件列挙と各原画像取得が必要で、添付20�
 CXR-L の実装境界は
 [CXR-L / Global Hi Rokid integration](docs/cxr-l-integration.md)です。
 
-現在のバージョン: **Server APP 0.51.3 / API 1.33.1 / Android client 0.3.17 / Glasses View 1.30.0 / Solver API 1.9.0**。
+現在のバージョン: **Server APP 0.52.0 / API 1.34.0 / Android client 0.3.17 / Glasses View 1.30.0 / Solver API 1.9.0**。
 版数の正本は `app/version.py` です。他の資料は版数を書かず、この行だけが
 `tests/test_documentation_contract.py` で実装と照合されます。
 Solver API は、記入用解答の全文保持・資料不足の分離を行う `answer_only` モードを含みます。

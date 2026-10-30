@@ -1,12 +1,14 @@
 # 保存写真の原寸点検と登録条件（PC用）
 
-Status: Current runbook。PC用部品とスマホ側Work検査受付は実装済み。カメラ撮影・登録本流の品質ゲートと実AIは未接続、実機受け入れは未了。
+Status: Current runbook。PC用部品、外部Work検査受付、スマホ内ブラウザの未校正判読レビューを実装。撮影中のAI選別・自動再取得と実機受け入れは未了。
 Runs on: 以下のCLIはWindows PCで保存済みJPEG/PNGを点検。Python runtimeとWorkStoreはスマホ上で画像bytesを扱い、PCの常時稼働や有線接続を要求しない。最新の端末接続・実行状態は[継続記録](../.agents/progress/current.md)で確認する。
 
 `app/capture_quality.py` は原画像bytesから概観と全域の原画素タイルを作り、明示的に注入したcheckerの返答をsession・capture・generation・頁めくり・revision・SHA・rotationへ照合します。
 遅延した別頁の返答、異常JSON、checker未設定・失敗、未検証profileは保留です。読取はcheckerの申告として保存し、独立した視認証明にしません。既定の `validated_profiles=()` は空で、校正済みprofileを自己申告して承認できません。
 
-`app/work_bridge.py` の検査要求・返答受付・結果受付にはこの判定が接続済みです。現在は全域タイルと全画像のeligibleを要求する方式で、実AI／Work Cloud transportが接続済みという意味ではありません。ここでのidentityはサーバ保存PNG・順序に基づき、元のセンサー撮影時刻・頁めくりの履歴ではありません。全タイル方式を最終採用とせず、原画像取得後に疑わしい原寸領域だけを検査する方法と処理量・誤受入を比較します。部分領域の検査や取得receiptを全文視認済みに昇格させません。
+`app/work_bridge.py` の外部HTTP/MCP検査要求・返答受付・結果受付にはこの判定が接続済みです。外部経路は全域タイルと全画像のeligibleを要求します。スマホ内ブラウザ経路は、原PNGのZIPをWorkへ送り、原画像のhash・寸法・順序と各頁の判読レビューを照合します。このレビューは`uncalibrated_browser_readability`で、校正済み・全文字合格・実ツール視認証明として扱いません。判読不能・不確実なら純粋な資料不足結果だけを受領し、readyを混ぜた返答は採用せず理由を表示します。外部POSTでこの内部受付へ切り替えることはできません。
+
+ここでのidentityはサーバ保存PNG・順序に基づき、元のセンサー撮影時刻・頁めくりの履歴ではありません。全タイル方式を最終採用とせず、原画像取得後に疑わしい原寸領域だけを検査する方法と処理量・誤受入を比較します。部分領域の検査や取得receiptを全文視認済みに昇格させません。実際の接続・試験の範囲は継続記録と実行reportで区別します。
 
 10/30のAndroid側では、原本JPEGのSHA・capture UUID・寸法・撮影時刻を確認表示→ローカル保存→復元へ通しました。同じ撮影世代かつImageとSENSOR_TIMESTAMPが一致した結果だけに露光・感度・AF/AEを結び、未到着・不一致は不明のまま保持します。local session・頁位置・回転へ一度だけ結び、既存の内容hash付き保存revisionを使います。これは原本の取り違えを防ぐ局所の配線で、スマホへのmetadata転送、未撮影頁の検出、AIの品質選択、複数候補・録画・ZSLは未接続です。
 

@@ -222,7 +222,9 @@ from __future__ import annotations
 #         through local review and durable page storage.
 # 0.51.2: keep non-answer status and chooser text in a compact display region.
 # 0.51.3: return non-answering Work needs_input results when image quality fails.
-APP_VERSION = "0.51.3"
+# 0.52.0: phone-local Work browser delivery of original PNG ZIPs with durable
+#         batches, source-bound uncalibrated readability and staged original audio.
+APP_VERSION = "0.52.0"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.
@@ -333,7 +335,9 @@ APP_VERSION = "0.51.3"
 #         chooser/waiting display requests preserve protected visible work.
 # 1.33.0: authenticated Work job manifests, original-image reads and result receipts.
 # 1.33.1: quality failures allow validated stop results, while answers stay gated.
-API_VERSION = "1.33.1"
+# 1.34.0: local browser Work results retain source/readability provenance, and
+#         rejected readability has a visible failure without automatic resending.
+API_VERSION = "1.34.0"
 
 # Matching algorithm identity. Bump when thresholds or hashing change so a
 # re-index/eval is triggered. Mirrors thresholds in app/matching.py.

@@ -1,16 +1,13 @@
-"""Original-image booklet handoff, serviced by an authorized Work transport.
-
-No browser or OpenAI API is invoked here. The phone queues once and returns
-immediately while a Work job is pending. The official cloud transport and its
-account enrollment are not implemented by this adapter.
-"""
+"""Sealed original-image jobs delivered by the phone's authorized Work browser."""
 
 from __future__ import annotations
 
 import io
+import hashlib
 import json
 import os
 import re
+import zipfile
 from pathlib import Path
 
 from PIL import Image
@@ -18,10 +15,104 @@ from PIL import Image
 from .. import config
 from ..audio_formats import detect_audio_format
 from ..glasses_state import list_states
-from ..work_bridge import WorkConflict, WorkPending, configured_work_store
+from ..work_bridge import WorkConflict, WorkPending, browser_source_name, configured_work_store
 from .base import SolveResult, Solver
-from .chatgpt_web import _ALL_TASK, _LISTENING_TASK, _READING_TASK, _booklet_replies
+from .chatgpt_web import (
+    CDP_ENDPOINT, ChatGptWebClient, ChatGptWebUncertain, _ALL_TASK, _LISTENING_TASK, _READING_TASK, _booklet_replies,
+    cdp_available, chatgpt_send_enabled,
+)
 from .llm_adapter import _ANSWER_ONLY_SYSTEM
+
+
+MAX_BROWSER_FILE_BYTES = 64 * 1024 * 1024
+MAX_BROWSER_ZIP_BYTES = 32 * 1024 * 1024
+
+
+class WorkBrowserUncertain(ChatGptWebUncertain):
+    """Only this immutable Work job may re-enter its durable browser journal."""
+
+    def __init__(self, job_id: str):
+        super().__init__("the Work browser result requires recovery")
+        self.work_job_id = job_id
+
+
+def _browser_inputs(store, job):
+    images = [source for source in job["sources"] if source["source_id"] in job["new_source_ids"]
+              and "page_number" in source]
+    selected = [source for source in job["sources"] if source["source_id"] in job["new_source_ids"]]
+    # A large page stays whole in one archive. Bound each file, not the paper's
+    # page count or aggregate bytes; the Web client batches and ACKs the stream.
+    if any(source["bytes"] + 512 > MAX_BROWSER_FILE_BYTES for source in selected):
+        raise WorkConflict("the original browser package exceeds the bounded upload budget")
+    receipts = []
+    for source in selected:
+        raw, metadata = store.read_source(job["job_id"], source["source_id"])
+        receipts.append({key: metadata[key] for key in ("source_id", "sha256", "receipt")})
+        del raw  # A recovered final reply can seal without rebuilding old ZIPs.
+
+    def package(group, number):
+        zipped = io.BytesIO()
+        with zipfile.ZipFile(zipped, "w", compression=zipfile.ZIP_STORED) as archive:
+            for source in group:
+                raw, _ = store.read_source(job["job_id"], source["source_id"])
+                name = browser_source_name(source)
+                entry = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+                entry.create_system = 3
+                entry.external_attr = 0o100644 << 16
+                archive.writestr(entry, raw)
+        return {"name": f"pages_{job['manifest_sha256']}_{number:03d}.zip",
+                "mimeType": "application/zip", "buffer": zipped.getvalue()}
+
+    def files():
+        group, size, number = [], 0, 1
+        for source in images:
+            cost = source["bytes"] + 512
+            if group and size + cost > MAX_BROWSER_ZIP_BYTES:
+                yield package(group, number)
+                group, size, number = [], 0, number + 1
+            group.append(source)
+            size += cost
+        if group:
+            yield package(group, number)
+        for source in selected:
+            if "page_number" not in source:
+                raw, _ = store.read_source(job["job_id"], source["source_id"])
+                yield {"name": browser_source_name(source), "mimeType": source["mime_type"], "buffer": raw}
+    return files, receipts
+
+
+def _browser_chat_key(job):
+    # Audio changes stage, not the established paper's conversation.
+    images = [source for source in job["sources"] if "page_number" in source]
+    identity = [job["conversation_key"], job["device_id"], job["generation"], images]
+    digest = hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    return f"{job['conversation_key']}:browser:{digest}"
+
+
+def _browser_prompt(job):
+    manifest = [{"source_id": source["source_id"], "file_name": browser_source_name(source),
+                 **({"page_number": source["page_number"]} if "page_number" in source else {})}
+                for source in job["sources"] if source["source_id"] in job["new_source_ids"]]
+    return (job["prompt"] + "\nThe ZIP archives contain exactly one unchanged original PNG per capture page. "
+        "Extract every archive and compute each file's actual SHA256 and image width/height from its bytes; "
+        "do not echo or invent measurements. Open EVERY original PNG individually with an image/vision "
+        "tool. OCR, thumbnails, listing files or scanning image bytes in code do not replace viewing. "
+        "After viewing the entire original, inspect necessary fine-text/figure areas before judging "
+        "readability. This is an UNCALIBRATED source-bound readability review, not a calibrated capture "
+        "pass or proof that every character is correct. Review each new image as readable, unreadable "
+        "or uncertain; give reasons for missing areas, blur, occlusion, exposure or uncertain detail. "
+        "If an image tool is unavailable use uncertain and image_viewer_used=false. Never infer unseen "
+        "text/figures or missing audio. An unreadable/uncertain image cannot support a ready answer; "
+        "return only unanswered needs_input slots (plus pending_audio in reading), with empty answer "
+        "and diagrams, and specific missing_material. Do not fabricate a ready answer. "
+        "For listening, only the new original audio is attached; retain the same chat's original "
+        "images and reading answers and return readability=[] (do not reassess/reupload images). "
+        "Return the requested questions plus manifest_sha256 and extraction={status:'ok',files:["
+        "{source_id,file_name,sha256,width,height}]} in exact manifest order (omit width/height for "
+        "audio), and readability=[{source_id,status,image_viewer_used,reasons:[]}]. If extraction "
+        "fails, report it instead of guessing.\nmanifest_sha256=" + job["manifest_sha256"] +
+        "\nNew original manifest (expected hashes/dimensions are intentionally not supplied):\n" +
+        json.dumps(manifest, ensure_ascii=False))
 
 
 def work_binding(session_id: int) -> tuple[str | None, int]:
@@ -41,18 +132,24 @@ def work_binding(session_id: int) -> tuple[str | None, int]:
 
 class ChatGptWorkSolver(Solver):
     name = "chatgpt-work"
-    provider_version = "phone-work-handoff-v1"
+    provider_version = "phone-work-browser-v1"
     offline = False
     placeholder = False
     accepts_images = True
     accepts_audio = True
 
+    def __init__(self, client=None):
+        self._client = client
+
     def ready(self) -> bool:
-        # HTTP queue availability is not proof that Work Cloud can reach it.
-        return False
+        if self._client is not None and not isinstance(self._client, ChatGptWebClient):
+            return True  # Explicitly injected component-test client.
+        endpoint = self._client.endpoint if self._client is not None else CDP_ENDPOINT
+        return chatgpt_send_enabled() and cdp_available(endpoint) is not None
 
     def info(self) -> dict:
-        return {**super().info(), "unready_reason": "cloud_work_transport_not_connected",
+        info = super().info()
+        return {**info, "unready_reason": None if info["ready"] else "phone_work_browser_unavailable",
                 "requires_pc_at_venue": False, "requires_usb_at_venue": False}
 
     def answer_all(self, *, question):
@@ -98,20 +195,71 @@ class ChatGptWorkSolver(Solver):
                             requested_settings={"model": os.environ.get("ROKID_WORK_MODEL") or "gpt-6.1-sol",
                                                 "effort": os.environ.get("ROKID_WORK_EFFORT") or "xhigh",
                                                 "speed": os.environ.get("ROKID_WORK_SPEED") or "fast"})
+        # enqueue has durably stored the originals. Browser batching must not
+        # retain a second complete paper in memory throughout a long reply.
+        del originals, data
+        if question.audio_path and stage != "reading":
+            del audio
         data = store.result(job["job_id"])
         if data is None:
-            raise WorkPending(job["job_id"])
-        deliveries = store.get(job["job_id"])["delivery_acknowledgements"]
+            if not chatgpt_send_enabled():
+                raise WorkPending(job["job_id"])
+            self._consume_browser(store, job)
+            data = store.result(job["job_id"])
+        saved = store.get(job["job_id"])
+        deliveries = saved["delivery_acknowledgements"]
         replies = _booklet_replies(data, subject=question.subject, stage=stage,
                                    question_ids=job["question_ids"], extras={
                                     "source": self.name, "provider": self.name,
                                     "requested_settings": job["requested_settings"],
                                     "model_selection_verified": False, "visual_reading_verified": False,
                                     "source_delivery_acknowledgements": deliveries,
+                                     **({"browser_review": saved["browser_review"]} if "browser_review" in saved else {}),
                                     "work_job_id": job["job_id"]})
         for item, _ in replies:
             item["_work_job_id"] = job["job_id"]  # Local binding, never trusted from model output.
         return replies
+
+    def _consume_browser(self, store, job):
+        # Reuse the exact API/source/generation guards, without holding the state
+        # lock across browser interaction. The final helper locks and rechecks.
+        from fastapi import HTTPException  # noqa: PLC0415
+        from ..glasses_state import state_guard  # noqa: PLC0415
+        from ..main import _commit_work_browser_result, _work_current_job  # noqa: PLC0415
+
+        def current():
+            with state_guard():
+                try:
+                    _, latest = _work_current_job(job["job_id"])
+                    if latest["status"] == "completed":
+                        raise WorkPending(job["job_id"])
+                except HTTPException as error:
+                    raise WorkConflict("the original Work input is no longer current") from error
+
+        current()
+        if self._client is None:
+            from .chatgpt_work_web import WorkWebClient  # noqa: PLC0415
+            self._client = WorkWebClient()
+        files, receipts = _browser_inputs(store, job)
+        audio = next((source for source in job["sources"] if "page_number" not in source), None)
+        try:
+            envelope = self._client.complete_json(system=job["system"], prompt=_browser_prompt(job),
+                files=files, chat_key=_browser_chat_key(job),
+                expect=("questions", "manifest_sha256", "extraction", "readability"), booklet=True,
+                booklet_stage=job["stage"], stage_audio_digest=audio["sha256"] if audio else None,
+                stage_question_ids=job["question_ids"], before_submit=current,
+                requested_settings=job["requested_settings"])
+        except ChatGptWebUncertain as error:
+            # A generic/old Chat failure must never authorize a new Work send.
+            # The trusted job binding is local; no model body supplies it.
+            raise WorkBrowserUncertain(job["job_id"]) from error
+        # Validate the body only after the atomic current/completed check: a
+        # concurrent valid seal must not be replaced by this late reply's error.
+        envelope = envelope if isinstance(envelope, dict) else {}
+        _commit_work_browser_result(job["job_id"], manifest_sha256=envelope.get("manifest_sha256"),
+            generation=job["generation"], conversation_id=self._client.conversation_id,
+            source_receipts=receipts, result={"questions": envelope.get("questions")},
+            extraction=envelope.get("extraction"), readability=envelope.get("readability"))
 
     def solve(self, *, question, max_answer_len: int = 64):
         replies = self.answer_all(question=question)

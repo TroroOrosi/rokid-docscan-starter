@@ -81,6 +81,119 @@ def complete(store, job, receipts, result=None, **extra):
                                source_receipts=receipts, result=result or answer(), **extra)
 
 
+def browser_observations(job, *, statuses=None):
+    statuses = statuses or ["readable"] * len(job["sources"])
+    files, reviews = [], []
+    for source, status in zip(job["sources"], statuses, strict=True):
+        number = source["page_number"]
+        files.append({"source_id": source["source_id"], "file_name": f"page_{number:03d}.png",
+                      "sha256": source["sha256"], "width": 24, "height": 32})
+        reviews.append({"source_id": source["source_id"], "status": status,
+                        "image_viewer_used": True,
+                        "reasons": [] if status == "readable" else ["small text is blurred"]})
+    return {"status": "ok", "files": files}, reviews
+
+
+def test_browser_original_review_can_return_answers_without_claiming_calibration(tmp_path):
+    from app.work_bridge import WorkConflict, WorkStore
+
+    store = WorkStore(tmp_path)
+    job = queue(store, 2)
+    acquired = [receipt(store, job, source["source_id"], quality=False) for source in job["sources"]]
+    extraction, readability = browser_observations(job)
+    saved = store.submit_browser_result(job["job_id"], manifest_sha256=job["manifest_sha256"],
+        generation=job["generation"], conversation_id="browser-chat-1", source_receipts=acquired,
+        result=answer(pages=[1, 2]), extraction=extraction, readability=readability)
+    assert saved["status"] == "completed"
+    review = saved["browser_review"]
+    assert review["kind"] == "uncalibrated_browser_readability"
+    assert review["calibrated"] is False and review["visual_reading_verified"] is False
+    assert [item["source_sha256"] for item in review["images"]] == [source["sha256"] for source in job["sources"]]
+    assert saved["quality"] == {} and saved["visual_reading_verified"] is False
+    restarted = WorkStore(tmp_path)
+    assert restarted.get(job["job_id"])["browser_review"] == review
+    assert restarted.result(job["job_id"]) == answer(pages=[1, 2])
+    # The external/MCP result route still requires its original calibrated evidence.
+    with pytest.raises(WorkConflict, match="eligible"):
+        restarted.submit_result(job["job_id"], manifest_sha256=job["manifest_sha256"],
+            generation=job["generation"], conversation_id="browser-chat-1", source_receipts=acquired,
+            result=answer(pages=[1, 2]))
+
+
+@pytest.mark.parametrize("change", ["hash", "dimension", "float_dimension", "missing", "extra", "order",
+    "review_missing", "review_order", "viewer_false", "status", "calibration_claim", "reason"])
+def test_browser_evidence_is_bound_to_every_original_and_cannot_claim_calibrated_quality(tmp_path, change):
+    from app.work_bridge import WorkBrowserResultRejected, WorkStore
+
+    store = WorkStore(tmp_path)
+    job = queue(store, 2)
+    acquired = [receipt(store, job, source["source_id"], quality=False) for source in job["sources"]]
+    extraction, review = browser_observations(job)
+    if change == "hash":
+        extraction["files"][0]["sha256"] = "0" * 64
+    elif change == "dimension":
+        extraction["files"][0]["width"] += 1
+    elif change == "float_dimension":
+        extraction["files"][0]["width"] = 24.0
+    elif change == "missing":
+        extraction["files"].pop()
+    elif change == "extra":
+        extraction["files"].append(extraction["files"][0])
+    elif change == "order":
+        extraction["files"].reverse()
+    elif change == "review_missing":
+        review.pop()
+    elif change == "review_order":
+        review.reverse()
+    elif change == "viewer_false":
+        review[0]["image_viewer_used"] = False
+    elif change == "status":
+        review[0]["status"] = "eligible"
+    elif change == "calibration_claim":
+        review[0]["profile_id"] = "fixture"
+    else:
+        review[0].update(status="uncertain", reasons=[])
+    with pytest.raises(WorkBrowserResultRejected):
+        store.submit_browser_result(job["job_id"], manifest_sha256=job["manifest_sha256"],
+            generation=job["generation"], conversation_id="browser-chat", source_receipts=acquired,
+            result=answer(), extraction=extraction, readability=review)
+    assert store.result(job["job_id"]) is None
+
+
+@pytest.mark.parametrize("status", ["unreadable", "uncertain"])
+@pytest.mark.parametrize("kind", ["ready", "stop", "mixed", "hidden_answer"])
+def test_browser_uncertain_pages_return_only_genuine_non_answering_stops(tmp_path, status, kind):
+    from app.work_bridge import WorkBrowserResultRejected, WorkConflict, WorkReadabilityRejected, WorkStore
+
+    store = WorkStore(tmp_path)
+    job = queue(store, 2)
+    acquired = [receipt(store, job, source["source_id"], quality=False) for source in job["sources"]]
+    extraction, review = browser_observations(job, statuses=["readable", status])
+    result = answer() if kind == "ready" else needs_input()
+    if kind == "mixed":
+        ready = answer(label="問2")["questions"][0]
+        ready["answer_no"] = [2]
+        result["questions"].append(ready)
+    elif kind == "hidden_answer":
+        result["questions"][0]["derivation"] = "hidden answer: x=2"
+    def submit():
+        return store.submit_browser_result(job["job_id"], manifest_sha256=job["manifest_sha256"],
+            generation=job["generation"], conversation_id="browser-chat", source_receipts=acquired,
+            result=result, extraction=extraction, readability=review)
+    if kind == "stop":
+        assert submit()["status"] == "completed"
+        assert store.result(job["job_id"]) == needs_input()
+        assert submit()["browser_review"]["images"][1]["status"] == status
+    else:
+        expected = WorkReadabilityRejected if kind in ("ready", "mixed") else WorkBrowserResultRejected
+        with pytest.raises(expected) as error:
+            submit()
+        if kind in ("ready", "mixed"):
+            assert str(error.value) == "browser readability review does not support answering"
+            assert not isinstance(error.value, WorkConflict)
+        assert store.result(job["job_id"]) is None
+
+
 def test_120_originals_are_ordered_immutable_and_restart_reuses_the_job(tmp_path):
     from app.work_bridge import WorkStore
 
@@ -408,6 +521,7 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setenv("ROKID_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("ROKID_API_KEY", "local-test-key")
     monkeypatch.setenv("ROKID_SOLVER", "chatgpt-work")
+    monkeypatch.setenv("ROKID_CHATGPT_SEND_ENABLED", "0")
     # Synthetic profile for the local API fixture; no production profile is approved.
     monkeypatch.setenv("ROKID_CAPTURE_VALIDATED_PROFILES", "fixture")
     monkeypatch.delenv("ROKID_REAL_MODE", raising=False)
@@ -471,6 +585,22 @@ def api_complete(client, job, acquired, result):
     return client.post(f"/v1/work/jobs/{job['job_id']}/result", json={
         "manifest_sha256": job["manifest_sha256"], "generation": job["generation"],
         "conversation_id": "cloud-work-chat", "source_receipts": acquired, "result": result})
+
+
+def test_external_post_cannot_select_uncalibrated_browser_admission(client):
+    _, _, job = api_session(client)
+    response = client.get(f"/v1/work/jobs/{job['job_id']}/sources/p1")
+    acquired = {"source_id": "p1", "sha256": hashlib.sha256(response.content).hexdigest(),
+                "receipt": response.headers["x-work-source-receipt"]}
+    extraction, readability = browser_observations(job)
+    reply = client.post(f"/v1/work/jobs/{job['job_id']}/result", json={
+        "manifest_sha256": job["manifest_sha256"], "generation": job["generation"],
+        "conversation_id": "browser-chat", "source_receipts": [acquired], "result": answer(),
+        "extraction": extraction, "readability": readability,
+        "browser_review": {"kind": "uncalibrated_browser_readability", "images": readability}})
+    assert reply.status_code in (409, 422), reply.text
+    from app.work_bridge import configured_work_store
+    assert configured_work_store().result(job["job_id"]) is None
 
 
 def test_phone_api_returns_non_answering_stop_in_existing_answer_bundle(client):
@@ -849,13 +979,14 @@ def test_work_original_audio_does_not_require_a_local_transcript(monkeypatch, so
     assert requires_transcript() is expected
 
 
-@pytest.mark.parametrize("reason", ["pending", "stale"])
+@pytest.mark.parametrize("reason", ["pending", "stale", "readability", "browser_result"])
 def test_pending_or_stale_work_job_never_falls_through_to_another_solver(monkeypatch, reason):
     from app.solvers import Question, Solver
     from app.solvers import registry
-    from app.work_bridge import WorkConflict, WorkPending
+    from app.work_bridge import WorkBrowserResultRejected, WorkConflict, WorkPending, WorkReadabilityRejected
 
-    error = WorkPending if reason == "pending" else WorkConflict
+    error = {"pending": WorkPending, "stale": WorkConflict, "readability": WorkReadabilityRejected,
+             "browser_result": WorkBrowserResultRejected}[reason]
 
     class Pending(Solver):
         name = "chatgpt-work"
