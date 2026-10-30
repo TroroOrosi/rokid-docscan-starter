@@ -177,8 +177,10 @@ and uncertain-send safeguards remain independent of model-name fallback.
 - **The existing loop is enabled only on `:glassdoc`.** Page change is latched
   until stillness permits one shot; OCR character count and burst scoring are
   not capture conditions. Actual review lasts three seconds, then local save
-  waits for another page change. Thirty seconds without progress pauses the
-  camera. A previous `manual=true` does not carry over to a normal launch.
+  waits for another page change. While local capture remains active, page
+  observation continues across idle waits without a resume tap. Explicit end,
+  lifecycle stop and failure boundaries still stop the camera. A previous
+  `manual=true` does not carry over to a normal launch.
   The same preview camera/session supplies the full-size JPEG after fresh
   supported focus/exposure and stillness checks. Fixed-focus hardware does not
   gain autofocus from an AF trigger. Expired preparation fails instead

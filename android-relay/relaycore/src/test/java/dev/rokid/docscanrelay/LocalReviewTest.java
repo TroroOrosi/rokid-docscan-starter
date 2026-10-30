@@ -7,6 +7,8 @@ import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import okhttp3.mockwebserver.MockWebServer;
 import okhttp3.mockwebserver.MockResponse;
@@ -1105,37 +1107,104 @@ public class LocalReviewTest {
         }
     }
 
-    /** 30s with no page registered rests the camera; the shutter tap restarts it. */
-    @Test public void automaticReadingPausesWhenNothingHasBeenRegisteredForThirtySeconds() throws Exception {
-        Context context = RuntimeEnvironment.getApplication();
+    @Test public void automaticReadingStillCapturesAPageAfterThirtySecondsWithoutAChange() throws Exception {
         Surface surface = new Surface();
-        List<String> diagnostics = new java.util.ArrayList<>();
-        try (MockWebServer server = new MockWebServer()) {
-            DocScanController controller = new DocScanController(context, surface, null,
-                    (state, lines, diagnostic) -> diagnostics.add(diagnostic == null ? "" : diagnostic),
-                    new ClientIdentity("test", "test", "test"));
-            try {
-                controller.configureForLocalStart(server.url("/").toString(), "", 270);
-                controller.startLocalSession(false);
-                barrier(controller);
+        surface.holdForPage = true;
+        DocScanController controller = waitingLocalController(surface);
+        ClockedWatchdog clock = installClockedWatchdog(controller);
+        try {
+            controller.startLocalSession(false); barrier(controller);
+            assertNotNull(surface.pageReady);
+            int pausesBeforeWaiting = surface.pauses;
+            clock.advanceBy(controller, 31_000);
+            assertEquals("waiting for a page must keep observation active", pausesBeforeWaiting, surface.pauses);
+            assertTrue(controller.isAutoCaptureEnabled());
+            assertEquals(0, surface.photos);
 
-                int shotsBeforeTheStall = surface.photos;
+            captureObservedPage(controller, surface, clock);
+            assertEquals(RelayState.CAPTURING, controller.getState());
+            assertEquals("a page change takes one photo without a resume tap", 1, surface.photos);
+        } finally { controller.close(); }
+    }
 
-                org.robolectric.shadows.ShadowSystemClock.advanceBy(java.time.Duration.ofSeconds(30));
-                call(controller, "waitForNextPage", new Class<?>[]{});
+    @Test public void finishedCaptureDoesNotResumeOnALatePageAfterThirtySeconds() throws Exception {
+        Surface surface = new Surface();
+        surface.holdForPage = true;
+        DocScanController controller = waitingLocalController(surface);
+        ClockedWatchdog clock = installClockedWatchdog(controller);
+        try {
+            controller.startLocalSession(false); barrier(controller);
+            Runnable latePage = surface.pageReady;
+            controller.onGlassesAction(GlassesInputAction.BACK); barrier(controller);
+            assertTrue((boolean)get(controller, "finishCaptureRequested"));
+            assertFalse(controller.isAutoCaptureEnabled());
+            int pausesAfterFinishing = surface.pauses;
+            clock.advanceBy(controller, 31_000);
+            latePage.run(); barrier(controller);
+            assertEquals(0, surface.photos);
+            assertEquals(pausesAfterFinishing, surface.pauses);
+            assertTrue((boolean)get(controller, "finishCaptureRequested"));
+        } finally { controller.close(); }
+    }
 
-                assertEquals(shotsBeforeTheStall, surface.photos);
-                assertTrue("idle capture closes the preview rather than only changing the HUD", surface.pauses > 0);
-                assertTrue(diagnostics.stream().anyMatch(
-                        d -> d.contains("Automatic reading paused after 30000ms")));
+    @Test public void stoppedOrClosedCaptureDoesNotResumeOnALatePageAfterThirtySeconds() throws Exception {
+        Surface surface = new Surface();
+        surface.holdForPage = true;
+        DocScanController controller = waitingLocalController(surface);
+        ClockedWatchdog clock = installClockedWatchdog(controller);
+        try {
+            controller.startLocalSession(false); barrier(controller);
+            Runnable latePage = surface.pageReady;
+            controller.stopAutoCapture(); barrier(controller);
+            clock.advanceBy(controller, 31_000);
+            latePage.run(); barrier(controller);
+            assertFalse(controller.isAutoCaptureEnabled());
+            assertEquals(RelayState.READY, controller.getState());
+            assertEquals(0, surface.photos);
+            controller.close();
+            latePage.run();
+            assertEquals(0, surface.photos);
+        } finally { controller.close(); }
+    }
 
-                // A tap is the shutter and the resume.
-                diagnostics.clear();
-                call(controller, "manualCaptureNow", new Class<?>[]{});
-                call(controller, "waitForNextPage", new Class<?>[]{});
-                assertFalse(diagnostics.stream().anyMatch(d -> d.contains("paused")));
-            } finally { controller.close(); }
-        }
+    @Test public void unknownCaptureDoesNotShootAgainAfterThirtySecondsAndALatePage() throws Exception {
+        Surface surface = new Surface();
+        surface.holdForPage = true;
+        surface.photoStart = CaptureSurface.PhotoStartResult.UNKNOWN;
+        DocScanController controller = waitingLocalController(surface);
+        ClockedWatchdog clock = installClockedWatchdog(controller);
+        try {
+            controller.startLocalSession(false); barrier(controller);
+            Runnable latePage = surface.pageReady;
+            captureObservedPage(controller, surface, clock);
+            assertEquals(1, surface.photos);
+            assertEquals(RelayState.ERROR, controller.getState());
+            assertTrue(controller.isCaptureReconnectRequired());
+            clock.advanceBy(controller, 31_000);
+            latePage.run(); barrier(controller);
+            assertEquals(1, surface.photos);
+            assertFalse(controller.isAutoCaptureEnabled());
+            assertTrue(controller.isCaptureReconnectRequired());
+        } finally { controller.close(); }
+    }
+
+    @Test public void missingPhotoStillTimesOutAndDoesNotRestartOnALatePage() throws Exception {
+        Surface surface = new Surface();
+        surface.holdForPage = true;
+        DocScanController controller = waitingLocalController(surface);
+        ClockedWatchdog clock = installClockedWatchdog(controller);
+        try {
+            controller.startLocalSession(false); barrier(controller);
+            Runnable latePage = surface.pageReady;
+            captureObservedPage(controller, surface, clock);
+            assertEquals(RelayState.CAPTURING, controller.getState());
+            clock.advanceBy(controller, 31_000);
+            assertEquals(RelayState.ERROR, controller.getState());
+            assertTrue(controller.isCaptureReconnectRequired());
+            latePage.run(); barrier(controller);
+            assertEquals(1, surface.photos);
+            assertFalse(controller.isAutoCaptureEnabled());
+        } finally { controller.close(); }
     }
 
     /** Manual mode never opens the camera on its own; a tap takes one photo. */
@@ -1402,15 +1471,63 @@ public class LocalReviewTest {
         int pauses;
         boolean holdForPage;
         Runnable pageReady;
+        PhotoStartResult photoStart = PhotoStartResult.STARTED;
         public void awaitNextPage(Runnable ready) { if (holdForPage) pageReady = ready; else ready.run(); }
         public void pausePreview() { pauses++; }
         public boolean supportsLocalCaptureReview() { return true; }
         public boolean isCaptureReviewVisible(long generation) { return visible && generation == 1; }
-        public PhotoStartResult takePhoto(int w, int h, int q) { photos++; return PhotoStartResult.STARTED; }
+        public PhotoStartResult takePhoto(int w, int h, int q) { photos++; return photoStart; }
         public long showHud(List<String> lines) { return 2; }
         public long showCaptureAiming(int page, boolean retake, boolean stable) { return 3; }
         public long showCaptureReview(byte[] jpeg, int rotation, List<String> lines) { return 1; }
         public void fenceCustomViewEpoch(long generation, String reason) { }
+    }
+
+    private static DocScanController waitingLocalController(Surface surface) throws Exception {
+        DocScanController controller = new DocScanController(RuntimeEnvironment.getApplication(), surface, null,
+                (state, lines, diagnostic) -> {}, new ClientIdentity("test", "test", "test"));
+        controller.configureForLocalStart("http://phone:8000", "", 270); barrier(controller);
+        return controller;
+    }
+
+    private static void captureObservedPage(DocScanController controller, Surface surface, ClockedWatchdog clock) throws Exception {
+        surface.pageReady.run(); barrier(controller);
+        assertEquals(RelayState.AIMING, controller.getState());
+        controller.onCustomViewAvailable(3, "capture-aiming"); barrier(controller);
+        assertEquals(RelayState.STABILIZING, controller.getState());
+        controller.onCustomViewAvailable(3, "capture-stabilizing"); barrier(controller);
+        clock.advanceBy(controller, 1500);
+    }
+
+    private static ClockedWatchdog installClockedWatchdog(DocScanController controller) throws Exception {
+        ((ExecutorService)get(controller, "watchdog")).shutdownNow();
+        ClockedWatchdog clock = new ClockedWatchdog();
+        set(controller, "watchdog", clock);
+        return clock;
+    }
+
+    /** Runs the real controller's delayed callbacks against the same clock as its deadlines. */
+    private static final class ClockedWatchdog extends ScheduledThreadPoolExecutor {
+        private final java.util.Map<ScheduledFuture<?>, Long> deadlines = new java.util.LinkedHashMap<>();
+        ClockedWatchdog() { super(1); }
+        @Override public synchronized ScheduledFuture<?> schedule(Runnable task, long delay, TimeUnit unit) {
+            ScheduledFuture<?> future = super.schedule(task, 1, TimeUnit.DAYS);
+            deadlines.put(future, android.os.SystemClock.elapsedRealtime() + unit.toMillis(delay));
+            return future;
+        }
+        void advanceBy(DocScanController controller, long millis) throws Exception {
+            org.robolectric.shadows.ShadowSystemClock.advanceBy(java.time.Duration.ofMillis(millis));
+            java.util.List<Runnable> ready = new java.util.ArrayList<>();
+            synchronized (this) {
+                deadlines.entrySet().removeIf(entry -> {
+                    if (entry.getValue() > android.os.SystemClock.elapsedRealtime()) return false;
+                    ready.add((Runnable)entry.getKey());
+                    return true;
+                });
+            }
+            for (Runnable task : ready) task.run();
+            barrier(controller);
+        }
     }
     private static Object get(Object object, String name) throws Exception {
         Field field = object.getClass().getDeclaredField(name); field.setAccessible(true);

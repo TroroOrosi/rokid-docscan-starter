@@ -3,6 +3,7 @@
 import errno
 import os
 from pathlib import Path
+import shlex
 import shutil
 import socket
 import stat
@@ -14,7 +15,9 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 BASH = shutil.which("bash")
+SH = shutil.which("sh")
 requires_bash = pytest.mark.skipif(BASH is None, reason="bash not on PATH")
+requires_sh = pytest.mark.skipif(SH is None, reason="POSIX sh not on PATH")
 
 
 def _environment(tmp_path):
@@ -35,6 +38,12 @@ def _environment(tmp_path):
                         "export ROKID_CHATGPT_CDP=http://invalid.example:9222\n")
     os.chmod(env_file, 0o600)
     prefix = tmp_path / "prefix"
+    prefix_bin = prefix / "bin"
+    prefix_bin.mkdir(parents=True)
+    absolute_bash = prefix_bin / "bash"
+    absolute_bash.write_text('#!/bin/sh\nexport PATH="$(cd "$PHONE_TEST_BIN" && pwd):$PATH"\numask 077\n'
+                             'exec bash "$@"\n')
+    os.chmod(absolute_bash, 0o755)
     startup = prefix / "etc/profile.d/start-services.sh"
     startup.parent.mkdir(parents=True)
     startup.write_text(":\n")
@@ -152,6 +161,65 @@ def test_service_install_keeps_x11_browser_api_and_watch_down_until_explicit_ena
     assert _run("phone_services.sh", env, "disable").returncode == 0
     assert log.read_text().splitlines() == ["sv-disable", "rokid-watch", "sv-disable", "rokid-api",
                                           "sv-disable", "rokid-browser", "sv-disable", "rokid-x11"]
+
+
+@requires_bash
+@requires_sh
+@pytest.mark.parametrize("role,body,argument", [
+    ("x11", "phone_x11.sh", ""),
+    ("browser", "phone_browser.sh", "visible"),
+    ("api", "phone_serve.sh", "0.0.0.0"),
+    ("watch", "phone_watch.sh", ""),
+])
+def test_service_runs_in_sh_with_fixed_env_absolute_bash_and_logged_child_errors(tmp_path, role, body, argument):
+    fixture = tmp_path / "phone path's"
+    fixture.mkdir()
+    env, log = _environment(fixture)
+    assert _run("phone_services.sh", env, "install").returncode == 0
+    run = Path(env["PREFIX"]) / f"var/service/rokid-{role}/run"
+    received = fixture / "received.txt"
+    absolute_bash = Path(env["PREFIX"]) / "bin/bash"
+    absolute_bash.write_text("#!/bin/sh\n" +
+                             f"printf '%s\\n' \"$ROKID_ENV_FILE\" \"$@\" > {shlex.quote(received.as_posix())}\n" +
+                             "printf 'child-diagnostic\\n' >&2\nexit 37\n")
+    poison = fixture / "bin/bash"
+    poison.write_text("#!/bin/sh\nprintf 'unexpected PATH bash\\n' >&2\nexit 91\n")
+    os.chmod(poison, 0o755)
+    child_env = {**env, "ROKID_ENV_FILE": "/unrelated/previous.env"}
+    syntax = subprocess.run([SH, "-n", str(run)], capture_output=True, text=True, timeout=15)
+    assert syntax.returncode == 0, syntax.stderr
+    result = subprocess.run([SH, "-c",
+                             'export PATH="$(cd "$PHONE_TEST_BIN" && pwd):$PATH"; '
+                             'umask 077; exec sh "$1"', "service-sh-test", str(run)],
+                            env=child_env, cwd=run.parent, capture_output=True, text=True, timeout=15)
+    assert result.returncode == 37, result.stderr
+    root = subprocess.run([BASH, "--noprofile", "--norc", "-c", 'cd "$1" && pwd', "fixture-root", str(ROOT)],
+                          capture_output=True, text=True, check=True, timeout=15).stdout.strip()
+    assert received.read_text().splitlines() == [env["ROKID_ENV_FILE"], f"{root}/scripts/{body}", argument]
+    assert result.stdout == "child-diagnostic\n" and result.stderr == ""
+    assert run.read_text().splitlines()[0] == f"#!{env['PREFIX']}/bin/sh"
+    assert not log.exists()
+
+
+@requires_bash
+@pytest.mark.parametrize("activity_exit", [0, 23])
+def test_x11_reports_activity_failure_without_publishing_child_output(tmp_path, activity_exit):
+    env, log = _environment(tmp_path)
+    activity = tmp_path / "bin/am"
+    activity.write_text(activity.read_text() + "printf 'private-activity-stdout\\n'\n"
+                        "printf 'private-activity-stderr\\n' >&2\n" + f"exit {activity_exit}\n")
+    result = _run("phone_x11.sh", env)
+    commands = ["python", "-", "am", "start", "--user", "0", "-n",
+                "com.termux.x11/com.termux.x11.MainActivity"]
+    if activity_exit:
+        assert result.returncode != 0
+        assert result.stderr == "phone_x11: activity_start_failed\n"
+    else:
+        assert result.returncode == 0, result.stderr
+        assert result.stderr == ""
+        commands += ["termux-x11", ":1"]
+    assert result.stdout == ""
+    assert log.read_text().splitlines() == commands
 
 
 @requires_bash

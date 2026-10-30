@@ -33,18 +33,27 @@ USER_SEL = ('div[data-user-message-bubble="true"], '
             ':not([data-user-message-bubble="true"] *)')
 ASSISTANT_SEL = 'div[data-markdown-text-style="assistant-message"]'
 MODEL = "GPT-6.1 Sol"
+_MODEL_PATTERN = (r"(?:gpt[\s_–—-]*)?(?:([0-9]+(?:\.[0-9]+)*)[\s_–—-]*([a-z]+)"
+                  r"|([a-z]+)[\s_–—-]*([0-9]+(?:\.[0-9]+)*))")
+_EFFORT_LEVELS = {"extrahigh": 3, "xhigh": 3, "high": 2, "medium": 1, "light": 0,
+                  "極高": 3, "超高": 3, "高": 2, "中": 1, "軽量": 0}
 
 
 @dataclass(frozen=True)
 class _Settings:
     model: str
-    power: int
+    level: int  # Semantic effort order, never a slider coordinate.
     effort: str
     speed: str
 
 
 def _normalise(value):
     return re.sub(r"[^a-z0-9]", "", unicodedata.normalize("NFKC", value).lower())
+
+
+def _model_identity(value):
+    match = re.fullmatch(_MODEL_PATTERN, unicodedata.normalize("NFKC", value).strip().lower())
+    return f"{match[1] or match[4]}:{match[2] or match[3]}" if match else None
 
 
 def _requested_settings(settings=None):
@@ -57,7 +66,7 @@ def _requested_settings(settings=None):
             or any(not isinstance(value, str) or not value.strip() for value in values.values())):
         raise chat.ChatGptWebModelMismatch("Work requested settings are invalid; nothing sent")
     model = values["model"].strip()
-    if not re.fullmatch(r"gpt\d+[a-z0-9]+", _normalise(model)):
+    if _model_identity(model) is None:
         raise chat.ChatGptWebModelMismatch("Work requires an explicit model family/version/variant")
     effort = {"light": (0, "Light"), "medium": (1, "Medium"), "high": (2, "High"),
               "xhigh": (3, "Extra High"), "extrahigh": (3, "Extra High")}.get(_normalise(values["effort"]))
@@ -68,75 +77,179 @@ def _requested_settings(settings=None):
 
 # Only public controls are returned. A checked Default radio plus a Sol summary
 # is deliberately insufficient: Default may choose a different model later.
-_CONTROLS_JS = r"""((action, requested) => {
+_CONTROLS_JS = r"""(function inspect(action, requested, requestedLevel, allowUnlinked, closedOwner) {
   const visible = e => !!e && e.getClientRects().length > 0;
   const norm = s => (s || '').normalize('NFKC').toLowerCase().replace(/[^a-z0-9]/g, '');
+  const phrase = s => (s || '').normalize('NFKC').toLowerCase().replace(/[\s_–—-]/g, '');
+  const modelPattern = new RegExp('^' + __MODEL_PATTERN__ + '$');
+  const modelPrefix = new RegExp('^' + __MODEL_PATTERN__ + '(?=\\s|$)');
+  const modelKey = text => {
+    const m = (text || '').normalize('NFKC').trim().toLowerCase().match(modelPattern);
+    return m ? (m[1] || m[4]) + ':' + (m[2] || m[3]) : null;
+  };
   const label = e => (e.getAttribute('aria-label') || e.innerText || '').trim();
+  const effortLevels = __EFFORT_LEVELS__;
+  const effortLevel = e => {
+    const value = effortLevels[phrase(label(e).split('\n')[0])];
+    return Number.isInteger(value) ? value : null;
+  };
   const enabled = e => !e.disabled && e.getAttribute('aria-disabled') !== 'true';
-  const all = (selector, root=document) => [...root.querySelectorAll(selector)].filter(visible);
-  const work = all('button[aria-pressed]').filter(e => norm(label(e)) === 'work');
-  const triggers = all('button[aria-haspopup]').filter(e => {
-    if (norm(e.getAttribute('aria-label')) === 'selectchatgptmodel') return true;
-    const controlled = document.getElementById(e.getAttribute('aria-controls') || '');
-    return !!controlled && !!controlled.querySelector('[role=menuitemradio], [role=radio], [role=option]') &&
-      /model/i.test((e.getAttribute('aria-label') || '') + ' ' + (controlled.getAttribute('aria-label') || ''));
-  });
-  const menus = all('[role=menu], [role=listbox]').filter(e =>
-    all('[role=menuitemradio], [role=radio], [role=option]', e).some(r => /^gpt\d/.test(norm(label(r)))));
+  const all = (selector, root=document) => [...root.querySelectorAll(selector)].filter(e =>
+    closedOwner && root === closedOwner.menu || visible(e));
+  const radioSelector = '[role=menuitemradio], [role=radio], [role=option]';
+  const menuSelector = '[role=menu], [role=listbox]';
+  const proofSelector = radioSelector + ', [role=slider], [role=menuitem], [role=menuitemcheckbox], ' +
+    '[role=checkbox], [role=switch], button[aria-pressed]';
+  const hasModels = e => [...e.querySelectorAll(radioSelector)].some(r => modelKey(label(r).split('\n')[0]));
+  const outermost = elements => elements.filter(e => !elements.some(other => other !== e && other.contains(e)));
+  const associated = trigger => {
+    const ids = (trigger.getAttribute('aria-controls') || '').trim().split(/\s+/).filter(Boolean);
+    return outermost(ids.flatMap(id => {
+      const root = document.getElementById(id);
+      return !root ? [] : root.matches(menuSelector) ? [root] : [...root.querySelectorAll(menuSelector)];
+    }).filter(hasModels));
+  };
+  const work = all('button[aria-pressed], [role=tab][aria-selected]').filter(e =>
+    ['work', 'chatgptwork', 'ワーク', '作業'].includes(phrase(label(e))));
+  const triggers = all('[aria-haspopup]').filter(e =>
+    norm(e.getAttribute('aria-label')) === 'selectchatgptmodel' || associated(e).length > 0);
+  const unlinked = outermost(all(menuSelector).filter(hasModels));
+  const linked = triggers.length === 1 && triggers[0].hasAttribute('aria-controls');
+  let menus = [];
+  if (triggers.length === 1) {
+    menus = linked ? associated(triggers[0]).filter(visible) : allowUnlinked ? unlinked : [];
+    if (closedOwner && triggers[0] === closedOwner.trigger) {
+      const roots = linked ? associated(triggers[0]) :
+        outermost([...document.querySelectorAll(menuSelector)].filter(hasModels));
+      menus = roots.filter(e => e === closedOwner.menu && e.isConnected);
+    }
+  }
+  const speedKind = e => {
+    const name = phrase(label(e));
+    if (name === 'enablefastmode') return 'enablefast';
+    if (name === 'enablestandardmode') return 'enablestandard';
+    return ['fast', 'fastmode', '高速', '高速モード'].includes(name) ? 'fast' : null;
+  };
+  const speedState = e => {
+    const checked = e.getAttribute('aria-checked') || e.getAttribute('aria-pressed');
+    if (!['true', 'false'].includes(checked)) return null;
+    const kind = speedKind(e);
+    if (kind === 'enablefast') return checked === 'false' ? 'standard' : null;
+    if (kind === 'enablestandard') return checked === 'true' ? 'fast' : null;
+    return kind === 'fast' ? (checked === 'true' ? 'fast' : 'standard') : null;
+  };
   const menu = menus.length === 1 ? menus[0] : null;
-  const radios = menu ? all('[role=menuitemradio], [role=radio], [role=option]', menu) : [];
-  const matching = radios.filter(e => norm(label(e).split('\n')[0]) === norm(requested));
+  const choices = menu ? all(radioSelector, menu) : [];
+  const efforts = choices.filter(e => effortLevel(e) !== null);
+  const radios = choices.filter(e => effortLevel(e) === null);
+  const matching = radios.filter(e => modelKey(label(e).split('\n')[0]) === modelKey(requested));
+  const matchingEffort = efforts.filter(e => effortLevel(e) === requestedLevel);
+  const checked = radios.filter(e => e.getAttribute('aria-checked') === 'true' || e.getAttribute('aria-selected') === 'true')
+    .map(e => modelKey(label(e).split('\n')[0]) || norm(label(e).split('\n')[0]));
+  const selected = checked.length === 1 && checked[0] === modelKey(requested);
   const sliders = menu ? all('[role=slider]', menu) : [];
-  const speed = menu ? all('[role=menuitemcheckbox]', menu).filter(e =>
-    ['enablefastmode', 'enablestandardmode'].includes(norm(e.getAttribute('aria-label')))) : [];
+  const power = sliders.length === 1 ? {value:sliders[0].getAttribute('aria-valuenow'),
+    min:sliders[0].getAttribute('aria-valuemin'), max:sliders[0].getAttribute('aria-valuemax')} : null;
+  const speed = menu ? all('[role=menuitemcheckbox], [role=checkbox], [role=switch], button[aria-pressed]', menu).filter(speedKind) : [];
   let acted = false;
   if (action === 'work' && work.length === 1 && enabled(work[0])) {
     work[0].click(); acted = true;
-  } else if (['open', 'close'].includes(action) && triggers.length === 1 && enabled(triggers[0])) {
+  } else if (action === 'open' && !menus.length && !unlinked.length && triggers.length === 1 && enabled(triggers[0])) {
     triggers[0].click(); acted = true;
+  } else if (action === 'close' && menu && triggers.length === 1 && enabled(triggers[0])) {
+    // Keep live node identity across our own close, without reopening or retaining page globals.
+    const owner = {menu, trigger:triggers[0], work:work[0], nodes:[...menu.querySelectorAll(proofSelector)]};
+    triggers[0].click();
+    return new Promise(resolve => {
+      const deadline = Date.now() + 5000;
+      const read = () => {
+        const state = inspect('closed', requested, requestedLevel, allowUnlinked, owner);
+        if (state.closed || !state.owner_valid || Date.now() >= deadline) resolve({...state, acted:true});
+        else setTimeout(read, 50);
+      };
+      read();
+    });
   } else if (action === 'model' && matching.length === 1 && enabled(matching[0])) {
     matching[0].click(); acted = true;
-  } else if (action === 'fast' && speed.length === 1 && enabled(speed[0]) &&
-      speed[0].getAttribute('aria-checked') === 'false' && norm(label(speed[0])) === 'enablefastmode') {
+  } else if (action === 'effort' && selected && matchingEffort.length === 1 && enabled(matchingEffort[0])) {
+    matchingEffort[0].click(); acted = true;
+  } else if (['fast', 'standard'].includes(action) && selected && speed.length === 1 && enabled(speed[0]) &&
+      speedState(speed[0]) === (action === 'fast' ? 'standard' : 'fast')) {
     speed[0].click(); acted = true;
-  } else if (action === 'standard' && speed.length === 1 && enabled(speed[0]) &&
-      speed[0].getAttribute('aria-checked') === 'true' && norm(label(speed[0])) === 'enablestandardmode') {
-    speed[0].click(); acted = true;
-  } else if (['left', 'right'].includes(action) && sliders.length === 1 && enabled(sliders[0]) &&
-      sliders[0].getAttribute('aria-valuemin') === '0' && sliders[0].getAttribute('aria-valuemax') === '5') {
+  } else if (['left', 'right'].includes(action) && selected && sliders.length === 1 && enabled(sliders[0]) &&
+      Object.values(power).every(v => v !== null && /^-?\d+$/.test(v) && Number.isSafeInteger(Number(v))) &&
+      Number(power.max) - Number(power.min) <= 16 &&
+      Number(power.value) + (action === 'right' ? 1 : -1) >= Number(power.min) &&
+      Number(power.value) + (action === 'right' ? 1 : -1) <= Number(power.max)) {
     const key = action === 'right' ? 'ArrowRight' : 'ArrowLeft';
     sliders[0].focus();
     sliders[0].dispatchEvent(new KeyboardEvent('keydown', {key, code:key, bubbles:true})); acted = true;
   }
-  const summary = menu ? all('[role=menuitem][aria-label="Select model"]', menu).map(e => e.innerText).join(' ') : '';
-  return {acted, work_count:work.length, work_active:work.length === 1 && work[0].getAttribute('aria-pressed') === 'true',
-    trigger_count:triggers.length, menu_count:menus.length, model_matches:matching.length,
-    checked:radios.filter(e => e.getAttribute('aria-checked') === 'true' || e.getAttribute('aria-selected') === 'true').map(e => norm(label(e).split('\n')[0])),
-    power:sliders.length === 1 ? {value:sliders[0].getAttribute('aria-valuenow'), min:sliders[0].getAttribute('aria-valuemin'), max:sliders[0].getAttribute('aria-valuemax')} : null,
+  const summary = menu && selected ? all('[role=menuitem]', menu).map(e => {
+    const text = (e.innerText || '').normalize('NFKC').trim().toLowerCase();
+    const prefix = text.match(modelPrefix);
+    return prefix && modelKey(prefix[0]) === modelKey(requested) ? text.slice(prefix[0].length) : '';
+  }).join(' ') : '';
+  const nodes = menu ? [...menu.querySelectorAll(proofSelector)] : [];
+  const ownerValid = !!closedOwner && menu === closedOwner.menu && menu.isConnected &&
+    triggers.length === 1 && triggers[0] === closedOwner.trigger && work[0] === closedOwner.work &&
+    nodes.length === closedOwner.nodes.length && nodes.every((e, i) => e === closedOwner.nodes[i] && e.isConnected);
+  return {acted, work_count:work.length, work_active:work.length === 1 &&
+      (work[0].getAttribute('aria-pressed') || work[0].getAttribute('aria-selected')) === 'true',
+    trigger_count:triggers.length, linked, unlinked_count:unlinked.length,
+    menu_count:menus.length, model_matches:matching.length, owner_valid:ownerValid,
+    closed:ownerValid && !visible(menu) && unlinked.length === 0,
+    checked, power, slider_count:sliders.length, effort_count:efforts.length, effort_matches:matchingEffort.length,
+    effort_checked:efforts.filter(e => e.getAttribute('aria-checked') === 'true' || e.getAttribute('aria-selected') === 'true').map(effortLevel),
+    slider_text:sliders.length === 1 ? sliders[0].getAttribute('aria-valuetext') || '' : '',
     effort_text:summary + ' ' + (sliders.length === 1 ? sliders[0].getAttribute('aria-valuetext') || '' : ''),
-    fast:speed.length === 1 && speed[0].getAttribute('aria-checked') === 'true' && norm(label(speed[0])) === 'enablestandardmode',
-    standard:speed.length === 1 && speed[0].getAttribute('aria-checked') === 'false' && norm(label(speed[0])) === 'enablefastmode'};
-})"""
+    fast:speed.length === 1 && speedState(speed[0]) === 'fast',
+    standard:speed.length === 1 && speedState(speed[0]) === 'standard'};
+})""".replace("__MODEL_PATTERN__", json.dumps(_MODEL_PATTERN)).replace("__EFFORT_LEVELS__", json.dumps(_EFFORT_LEVELS))
 
 
-def _controls(page, action="state", *, model=MODEL):
-    return page.evaluate(f"{_CONTROLS_JS}({json.dumps(action)}, {json.dumps(model)})")
+def _controls(page, action="state", *, model=MODEL, level=3, allow_unlinked=False):
+    return page.evaluate(f"{_CONTROLS_JS}({json.dumps(action)}, {json.dumps(model)}, {level}, {json.dumps(allow_unlinked)})")
 
 
-def _effort_matches(text, requested):
-    tokens = re.findall(r"extra[ -]?high|\bxhigh\b|\bhigh\b|\bmedium\b|\blight\b|極高|超高", text, re.I)
-    aliases = {"extrahigh": "extrahigh", "xhigh": "extrahigh", "high": "high", "medium": "medium", "light": "light"}
-    actual = {"extrahigh" if token in ("極高", "超高") else aliases.get(_normalise(token)) for token in tokens}
-    return actual == {_normalise(requested)}
+def _effort_levels(text):
+    tokens = re.findall(r"extra[ -]?high|\bxhigh\b|\bhigh\b|\bmedium\b|\blight\b|極高|超高|(?<!\w)(?:軽量|高|中)(?!\w)", text, re.I)
+    return {_EFFORT_LEVELS[token] if token in _EFFORT_LEVELS else _EFFORT_LEVELS[_normalise(token)] for token in tokens}
+
+
+def _slider_position(power):
+    if (not power or any(not isinstance(power.get(key), str) or not re.fullmatch(r"-?[0-9]+", power[key])
+                         for key in ("value", "min", "max"))):
+        raise chat.ChatGptWebModelMismatch("Work power position is unreadable; nothing sent")
+    value, low, high = (int(power[key]) for key in ("value", "min", "max"))
+    if not low <= value <= high or high - low > 16:
+        raise chat.ChatGptWebModelMismatch("Work power range is invalid or exceeds bounded inspection")
+    return value, low, high
+
+
+def _current_effort(state):
+    checked = state["effort_checked"]
+    if state["slider_count"] > 1 or (state["effort_count"] and len(checked) != 1):
+        return None
+    if state["slider_count"] == 1:
+        _slider_position(state["power"])
+        slider_text = unicodedata.normalize("NFKC", state["slider_text"]).strip().lower()
+        if slider_text and re.sub(r"[\s_–—-]", "", slider_text) not in _EFFORT_LEVELS:
+            return None
+    elif not checked:
+        return None
+    levels = _effort_levels(state["effort_text"]) | set(checked)
+    return levels.pop() if len(levels) == 1 else None
 
 
 def verify_work_model(page, *, select=False, requested_settings=None, sleep=time.sleep, now=time.monotonic) -> str:
     """Inspect actual radios, power and speed; only preparation changes values."""
     settings = requested_settings if isinstance(requested_settings, _Settings) else _requested_settings(requested_settings)
-    model_key = _normalise(settings.model)
+    model_key = _model_identity(settings.model)
+    allow_unlinked = False
 
     def controls(action="state"):
-        return _controls(page, action, model=settings.model)
+        return _controls(page, action, model=settings.model, level=settings.level, allow_unlinked=allow_unlinked)
 
     def read_until(predicate):
         deadline = now() + min(5.0, chat.READY_TIMEOUT_S)
@@ -148,7 +261,14 @@ def verify_work_model(page, *, select=False, requested_settings=None, sleep=time
                 raise chat.ChatGptWebModelMismatch("Work controls did not confirm the requested model/settings")
             sleep(0.05)
 
+    def require_selected(state):
+        if (state["menu_count"] != 1 or state["model_matches"] != 1 or state["checked"] != [model_key]
+                or not state["work_active"]):
+            raise chat.ChatGptWebModelMismatch("Work controls no longer select the requested model")
+
     state = controls()
+    if state["menu_count"] or state["unlinked_count"]:
+        raise chat.ChatGptWebModelMismatch("an existing Work popup is not owned by this verification")
     if state["work_count"] != 1:
         raise chat.ChatGptWebModelMismatch("Work entry is missing or ambiguous")
     if not state["work_active"]:
@@ -157,10 +277,12 @@ def verify_work_model(page, *, select=False, requested_settings=None, sleep=time
         state = read_until(lambda s: s["work_active"])
     opened = verified = False
     try:
-        if state["menu_count"] == 0:
-            if not controls("open")["acted"]:
-                raise chat.ChatGptWebModelMismatch("Work model control is missing or ambiguous")
-            opened = True
+        if state["menu_count"] or state["unlinked_count"]:
+            raise chat.ChatGptWebModelMismatch("Work mode navigation left an unowned popup open")
+        if not controls("open")["acted"]:
+            raise chat.ChatGptWebModelMismatch("Work model control is missing or ambiguous")
+        opened = True
+        allow_unlinked = not state["linked"]
         state = read_until(lambda s: s["menu_count"] > 0)
         if state["menu_count"] != 1 or state["model_matches"] != 1:
             raise chat.ChatGptWebModelMismatch("the requested Work model radio is missing or ambiguous")
@@ -172,29 +294,55 @@ def verify_work_model(page, *, select=False, requested_settings=None, sleep=time
                 if not controls("open")["acted"]:
                     raise chat.ChatGptWebModelMismatch("could not inspect the selected Work model")
             state = read_until(lambda s: s["checked"] == [model_key])
-        power = state["power"]
-        if not power or power["min"] != "0" or power["max"] != "5" or power["value"] not in tuple(map(str, range(6))):
-            raise chat.ChatGptWebModelMismatch("Work power control changed; nothing sent")
-        for _ in range(abs(settings.power - int(power["value"]))):
+        require_selected(state)
+        if _current_effort(state) != settings.level and state["effort_matches"] == 1:
+            if not select or not controls("effort")["acted"]:
+                raise chat.ChatGptWebModelMismatch("Work effort differs from the sealed request")
+
+            def effort_selected(state):
+                require_selected(state)
+                return _current_effort(state) == settings.level
+
+            state = read_until(effort_selected)
+        visited = set()
+        while _current_effort(state) != settings.level:
             if not select:
                 raise chat.ChatGptWebModelMismatch("Work power differs from the sealed request")
-            current = int(state["power"]["value"])
-            direction = "right" if current < settings.power else "left"
+            level = _current_effort(state)
+            current, low, high = _slider_position(state["power"])
+            if level is None or current in visited:
+                raise chat.ChatGptWebModelMismatch("Work effort meaning is missing or changed order")
+            visited.add(current)
+            step = 1 if level < settings.level else -1
+            if not low <= current + step <= high:
+                raise chat.ChatGptWebModelMismatch("the requested Work effort was not found")
+            direction = "right" if step > 0 else "left"
             if not controls(direction)["acted"]:
                 raise chat.ChatGptWebModelMismatch("could not adjust Work power")
-            state = read_until(lambda s: s["power"] is not None and int(s["power"]["value"]) == current + (1 if current < settings.power else -1))
+
+            def moved(state):
+                require_selected(state)
+                return _slider_position(state["power"])[0] == current + step
+
+            state = read_until(moved)
         if not state[settings.speed]:
             if not select or not controls(settings.speed)["acted"]:
                 raise chat.ChatGptWebModelMismatch("Work speed differs from the sealed request")
             state = read_until(lambda s: s[settings.speed])
-        if (state["checked"] != [model_key] or state["power"] != {"value": str(settings.power), "min": "0", "max": "5"}
-                or not _effort_matches(state["effort_text"], settings.effort) or not state["work_active"]):
+        require_selected(state)
+        if _current_effort(state) != settings.level:
             raise chat.ChatGptWebModelMismatch("Work model, effort and speed were not jointly confirmed")
         verified = True
         return settings.model + " / " + settings.effort + " / " + settings.speed.title()
     finally:
-        if (opened or verified) and controls()["menu_count"] == 1:
-            controls("close")
+        if opened and (controls()["menu_count"] == 1 or verified):
+            state = controls("close")
+            if not state["acted"] or not state["closed"]:
+                raise chat.ChatGptWebModelMismatch("Work model popup could not close; nothing sent")
+            if verified:
+                require_selected(state)
+                if _current_effort(state) != settings.level or not state[settings.speed]:
+                    raise chat.ChatGptWebModelMismatch("Work settings changed while closing the model popup; nothing sent")
 
 
 _REPLY_STATE_JS = r"""(batchId => {

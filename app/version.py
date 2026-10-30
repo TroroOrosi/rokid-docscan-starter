@@ -231,7 +231,8 @@ from __future__ import annotations
 # 0.54.0: retain two native future-page candidates through visible review and
 #         persist unresolved observation before starting the native producer.
 # 0.55.0: bind native JPEG provenance to page receipts and unchanged Work sources.
-APP_VERSION = "0.55.0"
+# 0.56.0: keep active page observation, adapt semantic Work controls and pin service Bash.
+APP_VERSION = "0.56.0"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.
@@ -492,7 +493,8 @@ EXPLAINER_API_VERSION = "1.1.0"
 #         order and require each candidate's fresh visible review before commit.
 # 1.33.0: a native original remains unacknowledged until its complete provenance
 #         is echoed with the server's canonical image identity.
-GLASSES_VIEW_CONTRACT_VERSION = "1.33.0"
+# 1.34.0: active local capture keeps observing pages after idle waits without a resume tap.
+GLASSES_VIEW_CONTRACT_VERSION = "1.34.0"
 
 # Answer-area overlay payload (box + short answer; 2D image-anchored).
 # 1.1.0: added tracking metadata (tracking/fixed_ar/anchor_hint).

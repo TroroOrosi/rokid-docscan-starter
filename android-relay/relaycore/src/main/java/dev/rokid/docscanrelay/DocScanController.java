@@ -68,15 +68,6 @@ public final class DocScanController implements AutoCloseable {
     // enough to be tapped away.
     private static final long AUTO_COMMIT_COMPLETE_MILLIS = 4000;
     private static final long AUTO_COMMIT_UNVERIFIED_MILLIS = 12000;
-    /**
-     * No page registered for this long and the camera stops firing until the
-     * operator taps. The unreadable and duplicate limits only end a stall the
-     * recogniser can see; glasses set down on the desk, or a booklet closed
-     * mid-session, keep the sensor and the privacy LED running to the end of
-     * the session. Auto capture stays on, so the tap that resumes it is the
-     * shutter tap the operator already has.
-     */
-    private static final long AUTO_IDLE_PAUSE_MILLIS = 30_000;
     private static final String KEY_PHOTO_WIDTH = "photo_width";
     private static final String KEY_PHOTO_HEIGHT = "photo_height";
     private static final String KEY_PHOTO_QUALITY = "photo_quality";
@@ -162,7 +153,6 @@ public final class DocScanController implements AutoCloseable {
     private boolean reacquiringCaptureGap;
     private boolean localCameraUnknown;
     private static final long LOCAL_REVIEW_MILLIS = 3000;
-    private long autoProgressAtMillis;
     private volatile long sessionId;
     private int reviewIndex;
     private int reviewViewPage;
@@ -641,9 +631,6 @@ public final class DocScanController implements AutoCloseable {
         if (localCameraUnknown || futureStopping || (finishCaptureRequested && state != RelayState.CAPTURE_REVIEW) || captureLease.isTimedOut()
                 || state == RelayState.FINALIZING || state == RelayState.UPLOADING) return;
         if (state == RelayState.CAPTURE_REVIEW) finishCaptureRequested = false;
-        // The tap is the shutter, and it also ends an idle pause: the shot it
-        // takes registers a page, and that restarts the loop on its own.
-        autoProgressAtMillis = android.os.SystemClock.elapsedRealtime();
         manualCaptureRequested = true;
         autoRunGeneration++;
         autoCommitArmed = false;
@@ -1789,7 +1776,6 @@ public final class DocScanController implements AutoCloseable {
         try { captureReviewPersistence.clearAfterCommit(); }
         catch (IOException ignored) { /* Recovery compares the retained pending file with the committed revision. */ }
 
-        autoProgressAtMillis = android.os.SystemClock.elapsedRealtime();
         manualCaptureRequested = false;
         listener.onCaptureReviewCleared();
         publish(RelayState.READING, List.of(nextPageIndex + "枚保存済み", "次のページへ", "ダブルタップで撮影終了"),
@@ -2173,7 +2159,6 @@ public final class DocScanController implements AutoCloseable {
                                 + (replaced ? " (replaced)" : "")
                                 + persistenceWarning);
 
-                autoProgressAtMillis = android.os.SystemClock.elapsedRealtime();
                 manualCaptureRequested = false;
                 if (link.supportsLocalCaptureReview() && finishCaptureRequested) {
                     finishReadingNow();
@@ -2340,7 +2325,6 @@ public final class DocScanController implements AutoCloseable {
         finishCaptureRequested = false;
         manualCaptureRequested = false;
         autoCaptureEnabled = true;
-        autoProgressAtMillis = android.os.SystemClock.elapsedRealtime();
         autoRunGeneration++;
         listener.onAutoCaptureChanged(true);
         link.resetPageDetection();
@@ -2364,13 +2348,8 @@ public final class DocScanController implements AutoCloseable {
 
     private void waitForNextPage() {
         if (!autoCaptureEnabled || finishCaptureRequested || captureLease.isUnresolved()) return;
-        if (android.os.SystemClock.elapsedRealtime() - autoProgressAtMillis >= AUTO_IDLE_PAUSE_MILLIS) {
-            autoRunGeneration++;
-            link.pausePreview();
-            listener.onAutoCaptureChanged(false);
-            publishAutoWaiting("撮影を休止", "タップで再開", "Automatic reading paused after 30000ms without a registered page");
-            return;
-        }
+        // Keep observing throughout capture; only an explicit stop or a fault
+        // ends the wait. An unchanged page does not require a resume gesture.
         long run = autoRunGeneration;
         if (futureWatching) observeFutureCandidates();
         else link.awaitNextPage(() -> {
@@ -2380,35 +2359,6 @@ public final class DocScanController implements AutoCloseable {
                 armCaptureAt(nextPageIndex, false);
             }); } catch (RejectedExecutionException ignored) { }
         });
-        scheduleAuto(() -> {
-            if (android.os.SystemClock.elapsedRealtime() - autoProgressAtMillis >= AUTO_IDLE_PAUSE_MILLIS) {
-                autoRunGeneration++;
-                link.pausePreview();
-                listener.onAutoCaptureChanged(false);
-                publishAutoWaiting("撮影を休止", "タップで再開", "Automatic reading paused after 30000ms without a registered page");
-            }
-        }, AUTO_IDLE_PAUSE_MILLIS);
-    }
-
-    private void scheduleAuto(Runnable action, long delayMillis) {
-        long generation = autoRunGeneration;
-        try {
-            watchdog.schedule(
-                    () -> {
-                        try {
-                            serial.execute(() -> {
-                                if (autoCaptureEnabled && !finishCaptureRequested
-                                        && generation == autoRunGeneration) action.run();
-                            });
-                        } catch (RejectedExecutionException ignored) {
-                            // The activity closed while the cycle was waiting.
-                        }
-                    },
-                    delayMillis,
-                    TimeUnit.MILLISECONDS);
-        } catch (RejectedExecutionException ignored) {
-            // The activity is already closing.
-        }
     }
 
     private void publishAutoWaiting(String first, String second, String diagnostic) {

@@ -44,5 +44,8 @@ PY
 phone_need am "Termux:X11 Android app must be installed"
 # Do not inherit an unrelated desktop session from an interactive shell.
 unset TERMUX_X11_XSTARTUP
-am start --user 0 -n com.termux.x11/com.termux.x11.MainActivity >/dev/null
+if ! am start --user 0 -n com.termux.x11/com.termux.x11.MainActivity >/dev/null 2>&1; then
+    echo "phone_x11: activity_start_failed" >&2
+    exit 1
+fi
 exec termux-x11 "$DISPLAY"

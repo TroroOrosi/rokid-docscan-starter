@@ -54,9 +54,10 @@ case "$action" in
                 watch) script=phone_watch.sh; argument="" ;;
             esac
             {
-                printf '#!%s/bin/bash\n# rokid-managed\nexec 2>&1\n' "$PREFIX"
-                printf 'export ROKID_ENV_FILE=%q\n' "$env_file"
-                printf 'exec bash %q %q\n' "$repo_root/scripts/$script" "$argument"
+                printf '#!%s/bin/sh\n# rokid-managed\nexec 2>&1\n' "$PREFIX"
+                printf "export ROKID_ENV_FILE='%s'\n" "${env_file//\'/\'\\\'\'}"
+                printf "exec '%s/bin/bash' '%s/scripts/%s' '%s'\n" \
+                    "${PREFIX//\'/\'\\\'\'}" "${repo_root//\'/\'\\\'\'}" "$script" "$argument"
             } > "$service/run"
             {
                 printf '#!%s/bin/sh\n# rokid-managed\n' "$PREFIX"

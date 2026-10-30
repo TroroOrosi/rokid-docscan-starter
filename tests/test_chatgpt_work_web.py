@@ -121,7 +121,10 @@ def test_unavailable_or_ambiguous_model_never_uses_an_ordinal_fallback(page):
 
 def test_work_environment_settings_and_changed_trigger_label_use_real_controls(page, monkeypatch):
     _controls(page, fast=True)
-    page.evaluate("document.querySelector('button[aria-controls]').setAttribute('aria-label','Choose engine')")
+    page.evaluate("""document.querySelector('button[aria-controls]').setAttribute('aria-label','Choose engine');
+      document.getElementById('terra').addEventListener('click',()=>{
+        document.querySelector('[aria-label="Select model"]').firstChild.textContent='GPT-6.1 Terra ';
+      }); true""")
     monkeypatch.setenv("ROKID_WORK_MODEL", "gpt_6.1_terra")
     monkeypatch.setenv("ROKID_WORK_EFFORT", "high")
     monkeypatch.setenv("ROKID_WORK_SPEED", "standard")
@@ -129,6 +132,272 @@ def test_work_environment_settings_and_changed_trigger_label_use_real_controls(p
     assert page.evaluate("document.getElementById('terra').getAttribute('aria-checked')") == "true"
     assert page.evaluate("document.querySelector('[role=slider]').getAttribute('aria-valuenow')") == "2"
     assert page.evaluate("document.querySelector('[role=menuitemcheckbox]').getAttribute('aria-checked')") == "false"
+
+
+@pytest.mark.parametrize("linked", [True, False])
+def test_the_same_model_accepts_an_omitted_display_prefix(page, linked):
+    _controls(page, selected="GPT-6.1 Sol", power=3, fast=True)
+    page.evaluate("""document.getElementById('work').setAttribute('aria-pressed','true');
+      document.getElementById('sol').textContent='Sol 6.1'; true""")
+    if not linked:
+        page.evaluate("document.querySelector('button[aria-controls]').removeAttribute('aria-controls'); true")
+    assert work.verify_work_model(page) == "GPT-6.1 Sol / Extra High / Fast"
+    assert page.evaluate("document.getElementById('sol').getAttribute('aria-checked')") == "true"
+
+
+def test_a_different_decimal_version_is_not_the_requested_model(page):
+    _controls(page, selected="GPT-6.1 Sol", power=3, fast=True)
+    page.evaluate("""document.getElementById('work').setAttribute('aria-pressed','true');
+      document.getElementById('sol').textContent='GPT-61 Sol'; true""")
+    with pytest.raises(chatgpt_web.ChatGptWebModelMismatch):
+        work.verify_work_model(page)
+    assert page.evaluate("document.getElementById('sol').textContent") == "GPT-61 Sol"
+
+
+def test_associated_controls_use_roles_and_their_visible_meaning(page):
+    _controls(page, selected="GPT-6.1 Sol", power=3)
+    page.evaluate("""(() => {const mode=document.getElementById('work');
+      mode.removeAttribute('aria-pressed'); mode.setAttribute('role','tab');
+      mode.setAttribute('aria-selected','false'); mode.textContent='ワーク';
+      mode.onclick=function(){this.setAttribute('aria-selected','true')};
+      document.querySelector('button[aria-controls]').setAttribute('aria-label','処理設定');
+      document.getElementById('models').setAttribute('aria-label','実行設定');
+      document.querySelector('[aria-label="Select model"]').setAttribute('aria-label','モデル');
+      document.querySelector('[role=slider]').setAttribute('aria-valuetext','極高');
+      const speed=document.querySelector('[role=menuitemcheckbox]');
+      speed.setAttribute('role','switch'); speed.setAttribute('aria-label','高速モード');
+      speed.onclick=function(){this.setAttribute('aria-checked',String(this.getAttribute('aria-checked')!=='true'))}; return true})()""")
+    assert work.verify_work_model(page, select=True) == "GPT-6.1 Sol / Extra High / Fast"
+    assert page.evaluate("document.getElementById('work').getAttribute('aria-selected')") == "true"
+    assert page.evaluate("document.querySelector('[role=switch]').getAttribute('aria-checked')") == "true"
+    assert page.evaluate("document.getElementById('models').hidden") is True
+
+
+@pytest.mark.parametrize("select", [False, True])
+def test_an_existing_associated_popup_is_left_untouched(page, select):
+    _upload_composer(page)
+    page.evaluate("""document.getElementById('models').hidden=false;
+      document.getElementById('work').setAttribute('aria-pressed',String(!""" + json.dumps(select) + """));
+      window.controlClicks=0; document.addEventListener('click',()=>window.controlClicks++,{once:true}); true""")
+    with pytest.raises(chatgpt_web.ChatGptWebModelMismatch):
+        work.verify_work_model(page, select=select)
+    assert page.evaluate("document.getElementById('models').hidden") is False
+    assert page.evaluate("document.getElementById('work').getAttribute('aria-pressed')") == str(not select).lower()
+    assert page.evaluate("window.controlClicks") == 0
+    assert page.evaluate("window.sent") == 0 and page.evaluate("window.uploaded") == []
+
+
+def test_a_popup_opened_by_mode_navigation_is_not_claimed_or_closed(page):
+    _controls(page, selected="GPT-6.1 Sol", power=3, fast=True)
+    page.evaluate("""document.getElementById('work').onclick=function(){
+      this.setAttribute('aria-pressed','true'); document.getElementById('models').hidden=false;
+    }; true""")
+    with pytest.raises(chatgpt_web.ChatGptWebModelMismatch):
+        work.verify_work_model(page, select=True)
+    assert page.evaluate("document.getElementById('models').hidden") is False
+
+
+@pytest.mark.parametrize("linked", [True, False])
+def test_an_unrelated_open_menu_cannot_supply_the_selected_model(page, linked):
+    _controls(page, power=3, fast=True)
+    page.evaluate("""(() => {document.getElementById('work').setAttribute('aria-pressed','true');
+      const other=document.getElementById('models').cloneNode(true); other.id='other'; other.hidden=false;
+      other.querySelector('#default').setAttribute('aria-checked','false');
+      other.querySelector('#sol').setAttribute('aria-checked','true'); document.body.append(other); return true})()""")
+    if not linked:
+        page.evaluate("document.querySelector('button[aria-controls]').removeAttribute('aria-controls'); true")
+    with pytest.raises(chatgpt_web.ChatGptWebModelMismatch):
+        work.verify_work_model(page)
+    assert page.evaluate("document.getElementById('default').getAttribute('aria-checked')") == "true"
+    assert page.evaluate("document.getElementById('models').hidden") is True
+    assert page.evaluate("document.getElementById('other').hidden") is False
+
+
+def test_effort_uses_meaning_after_slider_numbers_and_labels_change(page):
+    _controls(page, selected="GPT-6.1 Sol", power=1, fast=True)
+    page.evaluate("""(() => {document.getElementById('work').setAttribute('aria-pressed','true');
+      document.querySelector('[aria-label="Select model"]').setAttribute('aria-label','現在の設定');
+      const slider=document.querySelector('[role=slider]');
+      slider.setAttribute('aria-valuemin','10'); slider.setAttribute('aria-valuemax','14');
+      slider.setAttribute('aria-valuenow','11'); slider.setAttribute('aria-valuetext','中');
+      slider.onkeydown=function(event){
+        const n=Number(this.getAttribute('aria-valuenow'))+(event.key==='ArrowRight'?1:-1);
+        this.setAttribute('aria-valuenow',String(n));
+        this.setAttribute('aria-valuetext',({10:'軽量',11:'中',12:'高',13:'極高',14:'最大'})[n]);
+        document.getElementById('effort').textContent=({10:'Light',11:'Medium',12:'High',13:'Extra High',14:'Maximum'})[n];
+      }; return true})()""")
+    assert work.verify_work_model(page, select=True) == "GPT-6.1 Sol / Extra High / Fast"
+    assert page.evaluate("document.querySelector('[role=slider]').getAttribute('aria-valuenow')") == "13"
+    assert page.evaluate("document.querySelector('[role=slider]').getAttribute('aria-valuetext')") == "極高"
+
+
+@pytest.mark.parametrize("unknown", ["Maximum", "最上位", "Balanced"])
+def test_an_unknown_slider_meaning_is_not_replaced_by_a_stale_summary(page, unknown):
+    _upload_composer(page)
+    page.evaluate("""document.querySelector('[role=slider]').setAttribute('aria-valuenow','4');
+      document.querySelector('[role=slider]').setAttribute('aria-valuetext',""" + json.dumps(unknown) + "); true")
+    with pytest.raises(chatgpt_web.ChatGptWebModelMismatch):
+        work.verify_work_model(page, select=True)
+    assert page.evaluate("document.querySelector('[role=slider]').getAttribute('aria-valuenow')") == "4"
+    assert page.evaluate("document.getElementById('models').hidden") is True
+    assert page.evaluate("window.sent") == 0 and page.evaluate("window.uploaded") == []
+
+
+@pytest.mark.parametrize("summary_label", ["Select model", "モデルの説明"])
+def test_another_model_summary_cannot_prove_the_selected_model_effort(page, summary_label):
+    _upload_composer(page)
+    page.evaluate("""document.querySelector('[role=slider]').setAttribute('aria-valuenow','1');
+      document.querySelector('[aria-label="Select model"]').textContent='GPT-6.1 Terra Extra High';
+      document.querySelector('[aria-label="Select model"]').setAttribute('aria-label',""" + json.dumps(summary_label) + "); true")
+    with pytest.raises(chatgpt_web.ChatGptWebModelMismatch):
+        work.verify_work_model(page)
+    assert page.evaluate("document.getElementById('sol').getAttribute('aria-checked')") == "true"
+    assert page.evaluate("window.sent") == 0 and page.evaluate("window.uploaded") == []
+
+
+def test_a_power_preset_changing_model_stops_before_another_adjustment_or_upload(page):
+    _upload_composer(page)
+    page.evaluate("""(() => {const slider=document.querySelector('[role=slider]');
+      slider.setAttribute('aria-valuenow','0'); document.getElementById('effort').textContent='Light';
+      slider.onkeydown=function(event){
+        const n=Number(this.getAttribute('aria-valuenow'))+1; this.setAttribute('aria-valuenow',String(n));
+        document.getElementById('effort').textContent=['Light','Medium','High','Extra High'][n];
+        document.getElementById('sol').setAttribute('aria-checked','false');
+        document.getElementById('terra').setAttribute('aria-checked','true');
+      }; return true})()""")
+    with pytest.raises(chatgpt_web.ChatGptWebModelMismatch):
+        _booklet(work.WorkWebClient(), _VenueTab(page), lambda: [_payload()])
+    assert page.evaluate("document.querySelector('[role=slider]').getAttribute('aria-valuenow')") == "1"
+    assert page.evaluate("window.sent") == 0 and page.evaluate("window.uploaded") == []
+
+
+def test_named_effort_choices_keep_model_and_effort_groups_distinct(page):
+    _controls(page, selected="GPT-6.1 Sol", power=2, fast=True)
+    page.evaluate("""(() => {document.getElementById('work').setAttribute('aria-pressed','true');
+      document.querySelector('[role=slider]').remove();
+      document.getElementById('models').insertAdjacentHTML('beforeend',
+        '<div role="radiogroup" id="depth" aria-label="深さ"><div role="radio" aria-checked="true">高</div><div role="radio" aria-checked="false">極高</div></div>');
+      for(const option of document.querySelectorAll('#depth [role=radio]')) option.onclick=function(){
+        document.querySelectorAll('#depth [role=radio]').forEach(e=>e.setAttribute('aria-checked',String(e===this)));
+        document.getElementById('effort').textContent=this.textContent;
+      }; return true})()""")
+    assert work.verify_work_model(page, select=True) == "GPT-6.1 Sol / Extra High / Fast"
+    assert page.evaluate("document.querySelector('#depth [aria-checked=true]').textContent") == "極高"
+    assert page.evaluate("document.getElementById('sol').getAttribute('aria-checked')") == "true"
+
+
+@pytest.mark.parametrize("fault", ["unknown-speed", "missing-effort", "popup-not-closing"])
+def test_unproved_controls_or_popup_closure_never_submit(page, fault):
+    _upload_composer(page)
+    if fault == "unknown-speed":
+        page.evaluate("document.querySelector('[role=menuitemcheckbox]').setAttribute('aria-label','Unrelated option'); true")
+    elif fault == "missing-effort":
+        page.evaluate("document.querySelector('[role=slider]').remove(); true")
+    else:
+        page.evaluate("document.querySelector('button[aria-controls]').onclick=function(){document.getElementById('models').hidden=false}; true")
+    with pytest.raises(chatgpt_web.ChatGptWebModelMismatch):
+        _booklet(work.WorkWebClient(), _VenueTab(page), lambda: [_payload()])
+    assert page.evaluate("window.sent") == 0 and page.evaluate("window.uploaded") == []
+    assert _guard_state() == "idle"
+
+
+def test_final_verification_preserves_a_changed_setting_instead_of_reselecting(page):
+    _upload_composer(page)
+    page.evaluate("""document.getElementById('sol').textContent='Sol 6.1';
+      document.getElementById('files').addEventListener('change',function(){
+        document.querySelector('[role=slider]').setAttribute('aria-valuenow','1');
+        document.getElementById('effort').textContent='Medium';
+      }); true""")
+    with pytest.raises(chatgpt_web.ChatGptWebModelMismatch):
+        _booklet(work.WorkWebClient(), _VenueTab(page), lambda: [_payload()])
+    assert page.evaluate("document.querySelector('[role=slider]').getAttribute('aria-valuenow')") == "1"
+    assert page.evaluate("window.sent") == 0 and page.evaluate("window.uploaded") == ["originals.zip"]
+    assert _guard_state() == "idle"
+
+
+@pytest.mark.parametrize("change", ["model", "effort", "speed", "work", "remove-menu", "replace-menu", "replace-control"])
+def test_own_popup_closure_must_preserve_live_settings_before_the_submission_boundary(page, change):
+    _upload_composer(page)
+    changes = {
+        "model": "document.getElementById('sol').setAttribute('aria-checked','false');"
+                 "document.getElementById('terra').setAttribute('aria-checked','true');",
+        "effort": "document.querySelector('[role=slider]').setAttribute('aria-valuenow','1');"
+                  "document.getElementById('effort').textContent='Medium';",
+        "speed": "document.querySelector('[role=menuitemcheckbox]').setAttribute('aria-checked','false');"
+                 "document.querySelector('[role=menuitemcheckbox]').setAttribute('aria-label','Enable fast mode');",
+        "work": "document.getElementById('work').setAttribute('aria-pressed','false');",
+        "remove-menu": "menu.remove();",
+        "replace-menu": "menu.replaceWith(menu.cloneNode(true));",
+        "replace-control": "document.getElementById('sol').outerHTML=document.getElementById('sol').outerHTML;",
+    }
+    page.evaluate("""window.popupClicks=0; document.getElementById('send').disabled=false;
+      document.querySelector('button[aria-haspopup]').onclick=function(){
+        window.popupClicks++; const menu=document.getElementById('models'); menu.hidden=!menu.hidden;
+        if(menu.hidden){""" + changes[change] + """}
+      }; true""")
+    reached = []
+
+    def before_submit():
+        reached.append(True)
+        raise AssertionError("changed or replaced controls reached the send journal")
+
+    with pytest.raises(chatgpt_web.ChatGptWebModelMismatch):
+        work.WorkWebClient()._send_and_read(page,
+            'Local fixture\nTransfer receipt:\n{"batch_id":"local-boundary"}', composer=None,
+            expect=("questions",), before_submit=before_submit,
+            on_chat_url=lambda value: None, on_model=lambda value: None)
+    assert reached == [] and page.evaluate("window.sent") == 0
+    assert page.evaluate("window.popupClicks") == 2
+
+
+def test_asynchronous_owned_closure_only_reads_until_the_same_menu_closes(page):
+    _controls(page, selected="GPT-6.1 Sol", power=3, fast=True)
+    page.evaluate("""document.getElementById('work').setAttribute('aria-pressed','true');
+      window.popupClicks=0; document.querySelector('button[aria-haspopup]').onclick=function(){
+        window.popupClicks++; const menu=document.getElementById('models');
+        if(menu.hidden) menu.hidden=false; else setTimeout(()=>{menu.hidden=true},20);
+      }; true""")
+    assert work.verify_work_model(page) == "GPT-6.1 Sol / Extra High / Fast"
+    assert page.evaluate("window.popupClicks") == 2
+    assert page.evaluate("document.getElementById('models').hidden") is True
+
+
+@pytest.mark.parametrize("remove", [False, True])
+def test_observed_dismissal_before_own_close_cannot_skip_submission_verification(page, remove):
+    _upload_composer(page)
+    page.evaluate("document.getElementById('send').disabled=false; true")
+
+    class PendingDismissal:
+        state_reads = 0
+        dismissed = False
+
+        def evaluate(self, expression):
+            if expression.startswith(work._CONTROLS_JS + '("state",'):
+                self.state_reads += 1
+                if self.state_reads == 3:
+                    action = "remove()" if remove else "setAttribute('hidden','')"
+                    page.evaluate("document.getElementById('models')." + action + ";"
+                        "document.getElementById('sol')?.setAttribute('aria-checked','false');"
+                        "document.getElementById('terra')?.setAttribute('aria-checked','true'); true")
+                    self.dismissed = True
+            return page.evaluate(expression)
+
+        def __getattr__(self, name):
+            return getattr(page, name)
+
+    reached = []
+
+    def before_submit():
+        reached.append(True)
+        raise AssertionError("an observed dismissal reached the send journal")
+
+    proxy = PendingDismissal()
+    with pytest.raises(chatgpt_web.ChatGptWebModelMismatch):
+        work.WorkWebClient()._send_and_read(proxy,
+            'Local fixture\nTransfer receipt:\n{"batch_id":"dismissal-boundary"}', composer=None,
+            expect=("questions",), before_submit=before_submit,
+            on_chat_url=lambda value: None, on_model=lambda value: None)
+    assert proxy.dismissed and reached == [] and page.evaluate("window.sent") == 0
 
 
 def _conversation(page, *, later_user=False, final=True, stop=False):

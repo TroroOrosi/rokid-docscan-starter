@@ -73,8 +73,9 @@ android {
         // 21 sends a best shot OCR could not read to the 3 s review instead of shooting again.
         // 39 retains up to two future-page originals during visible review.
         // 40 verifies native capture provenance before acknowledging an upload.
-        versionCode = 40
-        versionName = "0.31.0"
+        // 41 keeps active page observation across idle waits without a resume tap.
+        versionCode = 41
+        versionName = "0.32.0"
     }
 
     // Same reasoning as `:glassapp`: a vendor installer that reads JAR
