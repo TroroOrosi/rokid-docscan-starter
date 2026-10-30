@@ -14,6 +14,8 @@ import okhttp3.mockwebserver.RecordedRequest;
 import okhttp3.mockwebserver.Dispatcher;
 import java.util.concurrent.CountDownLatch;
 import java.io.File;
+import java.nio.charset.StandardCharsets;
+import org.json.JSONObject;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.robolectric.RobolectricTestRunner;
@@ -1243,6 +1245,148 @@ public class LocalReviewTest {
             assertFalse("a normal idle stop needs no recapture", LocalCaptureSession.load(root, saved.id()).captureGap());
         } finally { controller.close(); }
         assertFalse("a later close cannot restore a resolved observation", LocalCaptureSession.load(root, saved.id()).captureGap());
+    }
+
+    @Test public void aNativeUploadWithoutItsReceiptRemainsUnsentAfterRestart() throws Exception {
+        Context context = RuntimeEnvironment.getApplication();
+        File root = new File(context.getFilesDir(), "local-scans");
+        try (MockWebServer server = new MockWebServer()) {
+            server.enqueue(new MockResponse().setBody("{\"document_id\":17,\"page_index\":0}"));
+            String address = server.url("/").toString().replaceAll("/+$", "");
+            LocalCaptureSession saved = LocalCaptureSession.create(root, address, false);
+            saved.bindDocument(17);
+            byte[] jpeg = {1, 2, 3};
+            CaptureProvenance source = nativeSource(jpeg, 100).bind(saved.id(), 0, 270);
+            saved.commit(new CaptureReviewStore.Pending(0, jpeg, "", 270, "", PageFraming.UNKNOWN, 1000L, source));
+            Surface surface = new Surface(); surface.holdForPage = true;
+            DocScanController controller = new DocScanController(context, surface, null,
+                    (state, lines, diagnostic) -> {}, new ClientIdentity("test", "test", "test"));
+            try {
+                controller.configureForLocalStart(address, "", 270); barrier(controller);
+                controller.resumeLocalSession(saved.id()); barrier(controller);
+                ((ExecutorService)get(controller, "localNetwork")).submit(() -> {}).get(5, TimeUnit.SECONDS);
+                barrier(controller);
+                LocalCaptureSession restored = LocalCaptureSession.load(root, saved.id());
+                assertNotNull("HTTP success without the native receipt must not acknowledge the original", restored.nextUnsent());
+                assertEquals(source, restored.read(restored.nextUnsent()).provenance);
+                assertArrayEquals(jpeg, restored.read(restored.nextUnsent()).jpeg);
+                assertEquals(RelayState.ERROR, controller.getState());
+                assertEquals(1, server.getRequestCount());
+            } finally { controller.close(); }
+        }
+    }
+
+    @Test public void nativeUploadResumesWithTheSameOriginalAndCaptureIdentity() throws Exception {
+        Context context = RuntimeEnvironment.getApplication();
+        File root = new File(context.getFilesDir(), "local-scans");
+        try (MockWebServer server = new MockWebServer()) {
+            server.enqueue(new MockResponse().setBody("{}"));
+            String address = server.url("/").toString().replaceAll("/+$", "");
+            LocalCaptureSession saved = LocalCaptureSession.create(root, address, false);
+            saved.bindDocument(17);
+            byte[] jpeg = {1, 2, 3};
+            CaptureProvenance source = CaptureProvenance.nativeStill(jpeg, 4032, 3024,
+                    100L, null, null, null, null, null, null).bind(saved.id(), 0, 270);
+            saved.commit(new CaptureReviewStore.Pending(0, jpeg, "", 270, "", PageFraming.UNKNOWN, 1000L, source));
+            Surface surface = new Surface(); surface.holdForPage = true;
+            DocScanController first = new DocScanController(context, surface, null,
+                    (state, lines, diagnostic) -> {}, new ClientIdentity("test", "test", "test"));
+            RecordedRequest attempted;
+            try {
+                first.configureForLocalStart(address, "", 270); barrier(first);
+                first.resumeLocalSession(saved.id()); waitForUpload(first);
+                assertNotNull(LocalCaptureSession.load(root, saved.id()).nextUnsent());
+                attempted = server.takeRequest(5, TimeUnit.SECONDS);
+                assertNotNull(attempted);
+            } finally { first.close(); }
+            JSONObject metadata = new JSONObject(new String(uploadPart(attempted, "capture_provenance"), StandardCharsets.UTF_8));
+            assertEquals(source.captureId, metadata.getString("capture_id"));
+            assertEquals(source.jpegSha256, metadata.getString("jpeg_sha256"));
+            assertEquals(saved.id(), metadata.getString("local_session_id"));
+            assertSame(JSONObject.NULL, metadata.get("result_timestamp_ns"));
+            server.enqueue(new MockResponse().setBody(new JSONObject().put("document_id", 17).put("page_index", 0)
+                    .put("capture_provenance", metadata).put("canonical_image_sha256", "c".repeat(64)).toString()));
+            DocScanController restarted = new DocScanController(context, surface, null,
+                    (state, lines, diagnostic) -> {}, new ClientIdentity("test", "test", "test"));
+            try {
+                restarted.configureForLocalStart(address, "", 270); barrier(restarted);
+                restarted.resumeLocalSession(saved.id()); waitForUpload(restarted);
+                assertNull(LocalCaptureSession.load(root, saved.id()).nextUnsent());
+                RecordedRequest retry = server.takeRequest(5, TimeUnit.SECONDS);
+                assertNotNull(retry);
+                assertArrayEquals(uploadPart(attempted, "capture_provenance"), uploadPart(retry, "capture_provenance"));
+                assertArrayEquals(jpeg, uploadPart(retry, "image"));
+                assertEquals(2, server.getRequestCount());
+            } finally { restarted.close(); }
+        }
+    }
+
+    @Test public void anOldHttpReceiptCannotAcknowledgeANewerNativeRevisionOfTheSamePixels() throws Exception {
+        Context context = RuntimeEnvironment.getApplication();
+        File root = new File(context.getFilesDir(), "local-scans");
+        CountDownLatch uploading = new CountDownLatch(1), release = new CountDownLatch(1);
+        java.util.concurrent.atomic.AtomicReference<String> oldReceipt = new java.util.concurrent.atomic.AtomicReference<>();
+        try (MockWebServer server = new MockWebServer()) {
+            server.setDispatcher(new Dispatcher() {
+                @Override public MockResponse dispatch(RecordedRequest request) throws InterruptedException {
+                    uploading.countDown(); release.await(5, TimeUnit.SECONDS);
+                    return new MockResponse().setBody(oldReceipt.get());
+                }
+            });
+            String address = server.url("/").toString().replaceAll("/+$", "");
+            LocalCaptureSession saved = LocalCaptureSession.create(root, address, false);
+            saved.bindDocument(17);
+            byte[] jpeg = {1, 2, 3};
+            CaptureProvenance firstSource = nativeSource(jpeg, 100).bind(saved.id(), 0, 270);
+            saved.commit(new CaptureReviewStore.Pending(0, jpeg, "", 270, "", PageFraming.UNKNOWN, 1000L, firstSource));
+            LocalCaptureSession.Page firstRevision = saved.nextUnsent();
+            Surface surface = new Surface(); surface.holdForPage = true;
+            DocScanController controller = new DocScanController(context, surface, null,
+                    (state, lines, diagnostic) -> {}, new ClientIdentity("test", "test", "test"));
+            try {
+                controller.configureForLocalStart(address, "", 270); barrier(controller);
+                controller.resumeLocalSession(saved.id()); barrier(controller);
+                assertTrue(uploading.await(5, TimeUnit.SECONDS));
+                RecordedRequest firstRequest = server.takeRequest(5, TimeUnit.SECONDS);
+                JSONObject firstMetadata = new JSONObject(new String(uploadPart(firstRequest, "capture_provenance"), StandardCharsets.UTF_8));
+                oldReceipt.set(new JSONObject().put("document_id", 17).put("page_index", 0)
+                        .put("capture_provenance", firstMetadata).put("canonical_image_sha256", "c".repeat(64)).toString());
+                LocalCaptureSession active = (LocalCaptureSession)get(controller, "localSession");
+                CaptureProvenance retake = nativeSource(jpeg, 200).bind(saved.id(), 0, 270);
+                active.commit(new CaptureReviewStore.Pending(0, jpeg, "", 270, "", PageFraming.UNKNOWN, 2000L, retake));
+                assertNotEquals(firstRevision.fileName, active.nextUnsent().fileName);
+                release.countDown(); waitForUpload(controller);
+                LocalCaptureSession restored = LocalCaptureSession.load(root, saved.id());
+                assertNotNull("the old receipt must leave the newer revision unacknowledged", restored.nextUnsent());
+                assertEquals(retake, restored.read(restored.nextUnsent()).provenance);
+                assertEquals(firstSource, restored.read(firstRevision).provenance);
+                RecordedRequest secondRequest = server.takeRequest(5, TimeUnit.SECONDS);
+                JSONObject secondMetadata = new JSONObject(new String(uploadPart(secondRequest, "capture_provenance"), StandardCharsets.UTF_8));
+                assertEquals(retake.captureId, secondMetadata.getString("capture_id"));
+                assertNotEquals(firstMetadata.getString("capture_id"), secondMetadata.getString("capture_id"));
+                assertArrayEquals(jpeg, uploadPart(secondRequest, "image"));
+                assertEquals(RelayState.ERROR, controller.getState());
+                assertEquals(2, server.getRequestCount());
+            } finally { release.countDown(); controller.close(); }
+        }
+    }
+
+    private static void waitForUpload(DocScanController controller) throws Exception {
+        barrier(controller);
+        ((ExecutorService)get(controller, "localNetwork")).submit(() -> {}).get(5, TimeUnit.SECONDS);
+        barrier(controller);
+    }
+
+    private static byte[] uploadPart(RecordedRequest request, String name) {
+        assertNotNull(request);
+        String boundary = request.getHeader("Content-Type").split("boundary=", 2)[1];
+        String body = request.getBody().clone().readString(StandardCharsets.ISO_8859_1);
+        int header = body.indexOf("Content-Disposition: form-data; name=\"" + name + "\"");
+        assertTrue("multipart field missing: " + name, header >= 0);
+        int start = body.indexOf("\r\n\r\n", header) + 4;
+        int end = body.indexOf("\r\n--" + boundary, start);
+        assertTrue(end >= start);
+        return body.substring(start, end).getBytes(StandardCharsets.ISO_8859_1);
     }
 
     private static final class Surface implements CaptureSurface {

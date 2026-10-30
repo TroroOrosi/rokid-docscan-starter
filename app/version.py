@@ -230,7 +230,8 @@ from __future__ import annotations
 # 0.53.2: preflight atomic no-clobber phone publication and preserve failure diagnostics.
 # 0.54.0: retain two native future-page candidates through visible review and
 #         persist unresolved observation before starting the native producer.
-APP_VERSION = "0.54.0"
+# 0.55.0: bind native JPEG provenance to page receipts and unchanged Work sources.
+APP_VERSION = "0.55.0"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.
@@ -345,7 +346,9 @@ APP_VERSION = "0.54.0"
 #         rejected readability has a visible failure without automatic resending.
 # 1.35.0: an expired Work send may remain pending until its matching receipt
 #         is recovered; waiting does not consume the current session retry budget.
-API_VERSION = "1.35.0"
+# 1.36.0: optional native capture provenance is validated against uploaded JPEG
+#         bytes and acknowledged with the canonical PNG identity.
+API_VERSION = "1.36.0"
 
 # Matching algorithm identity. Bump when thresholds or hashing change so a
 # re-index/eval is triggered. Mirrors thresholds in app/matching.py.
@@ -487,7 +490,9 @@ EXPLAINER_API_VERSION = "1.1.0"
 #         any native drain failure closes the camera and requires a new generation.
 # 1.32.0: preserve up to two future-page originals while reviewing; promote in
 #         order and require each candidate's fresh visible review before commit.
-GLASSES_VIEW_CONTRACT_VERSION = "1.32.0"
+# 1.33.0: a native original remains unacknowledged until its complete provenance
+#         is echoed with the server's canonical image identity.
+GLASSES_VIEW_CONTRACT_VERSION = "1.33.0"
 
 # Answer-area overlay payload (box + short answer; 2D image-anchored).
 # 1.1.0: added tracking metadata (tracking/fixed_ar/anchor_hint).

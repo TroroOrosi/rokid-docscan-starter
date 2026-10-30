@@ -116,7 +116,7 @@ is now the intended topology and is still unexercised.
 | Route | Status |
 |---|---|
 | `ROKID_SOLVER=chatgpt-web` | **Current primary.** Drives the operator's own signed-in ChatGPT web session over CDP. |
-| `ROKID_SOLVER=chatgpt-work` | The phone-local browser consumer sends unchanged PNG ZIPs, verifies source receipts and returns staged answers. Work technical fixtures passed on the signed-in phone. Source and a separate SEND0 environment with four disabled services are prepared; production invocation and venue acceptance remain unverified. |
+| `ROKID_SOLVER=chatgpt-work` | The phone-local browser consumer sends unchanged PNG ZIPs, verifies source receipts and returns staged answers. Work technical fixtures passed on the signed-in phone. Source, a separate SEND0 environment and four services are prepared; successful service handover, production invocation and venue acceptance remain unverified. |
 | On-phone local model (F-51F, llama.cpp) | **Not the route.** The operator chose chatgpt-web on 2026-09-14. Its measurements are kept as evidence in `docs/hardware-measurements.md` §E; no further work is scheduled on it. |
 | `openai` / `gemini` / `claude` API keys | Supported and config-only. The per-question routes can fall back through `ROKID_SOLVER_TIERS`; the background booklet route uses `ROKID_SOLVER` alone and has no fallback tier. |
 | Local OpenAI-compatible HTTP (`app/llm_http.py`) | Reaches an on-phone `llama-server` without the openai SDK. |
@@ -366,6 +366,12 @@ Only four gestures reach an ordinary app; the rest are system-reserved in
 - Store the orientation-corrected, normalized PNG as the authoritative server
   image. The relay upload may be a JPEG, but the raw upload bytes are not
   persisted. Never claim raw JPEG is persisted when it is not.
+- Optional native capture provenance must match the received JPEG's actual
+  hash, dimensions, page and rotation before persistence. Keep its correspondence
+  with the canonical PNG hash on that page and in the sealed Work manifest.
+  Native clients require the complete provenance echo before acknowledging an
+  upload. Legacy images stay usable without invented sensor metadata. These
+  bindings are not physical image-quality or multi-client upload-order proofs.
 - A configured cloud analyzer may transcribe/correct OCR and describe diagrams
   from the image. Finalization must fail clearly if a photo has no usable text
   and no image-capable analyzer is configured.

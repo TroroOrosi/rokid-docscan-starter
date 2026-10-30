@@ -34,6 +34,7 @@ from .audio_formats import safe_audio_suffix
 from .analyzers import get_analyzer
 from .answer_text import to_display_answer
 from .config import IMAGE_DIR, ensure_dirs
+from .capture_provenance import parse_capture_metadata, parse_capture_provenance
 from .explainer import ExplainRequest, ExplainResult
 from .explainers import get_explainer, list_explainers
 from .extractors import detect_media, get_extractor
@@ -176,8 +177,10 @@ def _work_current_job(job_id: str) -> tuple[WorkStore, dict]:
             raise WorkConflict("the glasses generation changed")
         images = [source for source in job["sources"] if "page_number" in source]
         current = _document_source_pages(conn, session["document_id"], job["session_id"])
-        if ([(item["page_number"], item["sha256"]) for item in images]
-                != [(item["page_number"], item["image_sha256"]) for item in current]):
+        if ([(item["page_number"], item["sha256"], item.get("capture_provenance"),
+              item.get("canonical_image_sha256")) for item in images]
+                != [(item["page_number"], item["image_sha256"], item.get("capture_provenance"),
+                     item.get("canonical_image_sha256")) for item in current]):
             raise WorkConflict("the original document identity changed")
         recordings = [source for source in job["sources"] if "page_number" not in source]
         if recordings and (len(recordings) != 1
@@ -778,9 +781,33 @@ def create_document(payload: CreateDocument) -> dict:
         conn.close()
 
 
+def _native_capture_retry(conn, document_id: int, page_index: int, source: dict, existing) -> dict | None:
+    """Current native IDs bind once; an exact replay cannot rewrite its receipt."""
+    receipt = None
+    for row in conn.execute("SELECT document_id, page_index, capture_metadata_json FROM pages "
+                            "WHERE capture_metadata_json IS NOT NULL"):
+        try:
+            metadata = parse_capture_metadata(row["capture_metadata_json"])
+        except ValueError:
+            raise HTTPException(status_code=409, detail="saved native capture metadata is invalid") from None
+        if metadata["capture_provenance"]["capture_id"] != source["capture_id"]:
+            continue
+        if (row["document_id"] != document_id or row["page_index"] != page_index
+                or metadata["capture_provenance"] != source):
+            raise HTTPException(status_code=409, detail="native capture identity is already bound differently")
+        try:
+            if existing is None or file_sha256(existing["image_path"]) != metadata["canonical_image_sha256"]:
+                raise ValueError("canonical image differs")
+        except (OSError, ValueError):
+            raise HTTPException(status_code=409, detail="saved native canonical image is unavailable or changed") from None
+        receipt = metadata
+    return receipt
+
+
 @app.post("/v1/documents/{document_id}/pages", status_code=201)
 async def add_page(
     document_id: int,
+    request: Request,
     page_index: int = Form(...),
     image: UploadFile | None = File(None),
     image_rotation: int = Form(0),
@@ -788,6 +815,7 @@ async def add_page(
     ocr_text: str | None = Form(None),
     vision_text: str | None = Form(None),
     total_pages: int | None = Form(None),
+    capture_provenance: str | None = Form(None),
 ) -> dict:
     """Record one photographed page or a text-only compatibility page.
 
@@ -815,22 +843,54 @@ async def add_page(
             status_code=400,
             detail="image_rotation must be one of 0, 90, 180, or 270",
         )
+    native_source = None
+    if capture_provenance is not None:
+        try:
+            native_source = parse_capture_provenance(capture_provenance)
+        except (ValueError, UnicodeError, RecursionError):
+            raise HTTPException(status_code=400, detail="invalid capture_provenance") from None
+    elif "capture_provenance" in await request.form():
+        raise HTTPException(status_code=400, detail="empty capture_provenance")
+    if native_source is not None and not has_image:
+        raise HTTPException(status_code=400, detail="native capture_provenance requires its JPEG")
     pending_image_path: Path | None = None
     image_persisted = False
+    native_metadata = None
+    native_replay = False
     conn = db.connect()
     try:
         doc = _doc_or_404(conn, document_id)
+        existing = conn.execute(
+            "SELECT * FROM pages WHERE document_id = ? AND page_index = ?",
+            (document_id, page_index),
+        ).fetchone()
 
         if has_image:
             raw = await _read_upload_limited(image)
-            img = _rotate_image_for_ocr(_load_image(raw), image_rotation)
-            ph = phash_hex(img)
-            omd5 = _fallback_md5(ocr_md5(ocr_text), raw)
-            fname = f"{document_id}_{page_index}_{uuid.uuid4().hex[:8]}.png"
-            fpath: Path | None = IMAGE_DIR / fname
-            pending_image_path = fpath
-            img.convert("RGB").save(fpath, format="PNG")
-            image_path = str(fpath)
+            img = _load_image(raw)
+            if native_source is not None:
+                if (img.format != "JPEG" or native_source["jpeg_sha256"] != hashlib.sha256(raw).hexdigest()
+                        or (native_source["width"], native_source["height"]) != img.size
+                        or native_source["page_index"] != page_index
+                        or native_source["rotation_degrees"] != image_rotation):
+                    raise HTTPException(status_code=400, detail="capture_provenance does not match the uploaded JPEG")
+                native_metadata = _native_capture_retry(conn, document_id, page_index, native_source, existing)
+                native_replay = native_metadata is not None
+            if native_replay:
+                ph, omd5, image_path = existing["phash"], existing["ocr_md5"], existing["image_path"]
+                vision_text = existing["vision_text"]
+            else:
+                img = _rotate_image_for_ocr(img, image_rotation)
+                ph = phash_hex(img)
+                omd5 = _fallback_md5(ocr_md5(ocr_text), raw)
+                fname = f"{document_id}_{page_index}_{uuid.uuid4().hex[:8]}.png"
+                fpath: Path | None = IMAGE_DIR / fname
+                pending_image_path = fpath
+                img.convert("RGB").save(fpath, format="PNG")
+                image_path = str(fpath)
+                if native_source is not None:
+                    native_metadata = {"capture_provenance": native_source,
+                                       "canonical_image_sha256": file_sha256(fpath)}
         else:
             # Text-only compatibility input has no image/pHash. OCR-MD5 hashes
             # the full body + figure description for exact matching.
@@ -839,12 +899,10 @@ async def add_page(
             omd5 = ocr_md5(dedupe_src) or hashlib.md5(dedupe_src.encode()).hexdigest()
             image_path = None
 
-        existing = conn.execute(
-            "SELECT id, image_path FROM pages "
-            "WHERE document_id = ? AND page_index = ?",
-            (document_id, page_index),
-        ).fetchone()
-        if existing is not None:
+        metadata_json = json.dumps(native_metadata, ensure_ascii=False, sort_keys=True) if native_metadata else None
+        if native_replay:
+            page_id, replaced = existing["id"], False
+        elif existing is not None:
             # 再読取: replace this page's recognition. Frozen once a bound
             # exam session finished reading — its deck was segmented from
             # the OLD text and replacing underneath it would diverge them.
@@ -865,7 +923,7 @@ async def add_page(
                 )
             updated = conn.execute(
                 "UPDATE pages SET image_path = ?, phash = ?, ocr_text = ?, "
-                "vision_text = ?, ocr_md5 = ?, captured_at_ms = ?, summary = NULL WHERE id = ? "
+                "vision_text = ?, ocr_md5 = ?, captured_at_ms = ?, capture_metadata_json = ?, summary = NULL WHERE id = ? "
                 "AND NOT EXISTS ("
                 "  SELECT 1 FROM exam_sessions "
                 "  WHERE document_id = ? AND status = 'reviewing'"
@@ -877,6 +935,7 @@ async def add_page(
                     vision_text,
                     omd5,
                     captured_at_ms or None,
+                    metadata_json,
                     existing["id"],
                     document_id,
                 ),
@@ -912,8 +971,8 @@ async def add_page(
                 cur = conn.execute(
                     """INSERT INTO pages
                        (document_id, page_index, image_path, phash, ocr_text,
-                        vision_text, ocr_md5, captured_at_ms)
-                       SELECT ?, ?, ?, ?, ?, ?, ?, ?
+                         vision_text, ocr_md5, captured_at_ms, capture_metadata_json)
+                        SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?
                        WHERE EXISTS (
                            SELECT 1 FROM documents
                            WHERE id = ? AND status = 'open'
@@ -927,6 +986,7 @@ async def add_page(
                         vision_text,
                         omd5,
                         captured_at_ms or None,
+                        metadata_json,
                         document_id,
                     ),
                 )
@@ -981,6 +1041,8 @@ async def add_page(
             "ocr_md5": omd5,
             "image_path": image_path,
             "image_rotation": image_rotation,
+            "capture_provenance": native_metadata["capture_provenance"] if native_metadata else None,
+            "canonical_image_sha256": native_metadata["canonical_image_sha256"] if native_metadata else None,
             "has_vision_text": bool(vision_text and vision_text.strip()),
             "scan_ack": ack,
         }
@@ -2737,16 +2799,20 @@ def _document_source_pages(conn, doc_id: int, session_id: int) -> list[dict]:
     for question in _deck_question_rows(conn, session_id):
         for index in _row_page_indexes(question):
             refs.setdefault(index, []).append(f"q{question['id']}")
-    return [
-        {"page_number": row["page_index"] + 1, "image_path": row["image_path"],
-         "image_sha256": file_sha256(row["image_path"]),
+    pages = []
+    for row in conn.execute("SELECT * FROM pages WHERE document_id = ? ORDER BY page_index", (doc_id,)):
+        sha = file_sha256(row["image_path"])
+        metadata = parse_capture_metadata(row["capture_metadata_json"])
+        if metadata is not None and (metadata["canonical_image_sha256"] != sha
+                or metadata["capture_provenance"]["page_index"] != row["page_index"]):
+            raise ValueError("saved native capture does not match its canonical page")
+        pages.append({"page_number": row["page_index"] + 1, "image_path": row["image_path"],
+         "image_sha256": sha,
          "ocr_text": row["ocr_text"] or "", "vision_text": row["vision_text"] or "",
          "question_ids": refs.get(row["page_index"], []),
-         "captured_at": row["captured_at_ms"] or "unknown; server received at " + row["created_at"]}
-        for row in conn.execute(
-            "SELECT * FROM pages WHERE document_id = ? ORDER BY page_index", (doc_id,)
-        )
-    ]
+         "captured_at": row["captured_at_ms"] or "unknown; server received at " + row["created_at"],
+         **(metadata or {})})
+    return pages
 
 
 def _group_page_indexes(conn, session_id: int) -> dict[int, list[int]]:
@@ -3291,13 +3357,15 @@ def _work_reply_commit_guard(session_id: int, replies, *, failed_attempt=None):
 
 
 def _work_attempt_identity(session_id: int, question):
-    """Snapshot existing input hashes before provider work; never hold its lock."""
+    """Snapshot input hashes and native identity before provider work begins."""
     if os.environ.get("ROKID_SOLVER", "").strip() != "chatgpt-work":
         return None
     with state_guard():
         audio = None if question.booklet_stage == "reading" else question.audio_path
         return (work_binding(session_id), question.document_id, question.booklet_stage,
-                tuple((page["page_number"], page["image_path"], page["image_sha256"])
+                tuple((page["page_number"], page["image_path"], page["image_sha256"],
+                       json.dumps(page.get("capture_provenance"), sort_keys=True, separators=(",", ":")),
+                       page.get("canonical_image_sha256"))
                       for page in question.document_pages), audio, file_sha256(audio))
 
 

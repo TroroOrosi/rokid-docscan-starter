@@ -1948,7 +1948,7 @@ public final class DocScanController implements AutoCloseable {
                     CaptureReviewStore.Pending photo = saved.read(page);
                     httpInProgress = true;
                     destination.uploadPage(saved.documentId(), photo.pageIndex, photo.jpeg, photo.ocrText,
-                            photo.rotationDegrees, photo.capturedAtMillis);
+                            photo.rotationDegrees, photo.capturedAtMillis, photo.provenance);
                     httpInProgress = false;
                     saved.acknowledge(page);
                     page = saved.nextUnsent();
@@ -2085,7 +2085,8 @@ public final class DocScanController implements AutoCloseable {
                     pending.jpeg,
                     pending.ocrText,
                     pending.rotationDegrees,
-                    pending.capturedAtMillis);
+                    pending.capturedAtMillis,
+                    pending.provenance);
         } catch (Exception error) {
             publishCaptureReview(
                     pending,

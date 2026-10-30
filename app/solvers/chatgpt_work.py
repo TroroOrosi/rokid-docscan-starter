@@ -168,8 +168,12 @@ class ChatGptWorkSolver(Solver):
                     image.verify()
             except (OSError, TypeError, KeyError, ValueError) as error:
                 raise ValueError("an original Work page image is unavailable") from error
-            originals.append({"source_id": f"p{page['page_number']}", "page_number": page["page_number"],
-                              "mime_type": mime, "data": data})
+            original = {"source_id": f"p{page['page_number']}", "page_number": page["page_number"],
+                        "mime_type": mime, "data": data}
+            for key in ("capture_provenance", "canonical_image_sha256"):
+                if key in page:
+                    original[key] = page[key]
+            originals.append(original)
         stage = question.booklet_stage
         if question.audio_path and stage != "reading":
             audio = Path(question.audio_path).read_bytes()

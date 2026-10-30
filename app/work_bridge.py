@@ -20,6 +20,8 @@ from contextlib import contextmanager
 from PIL import Image
 from pathlib import Path
 
+from .capture_provenance import validate_capture_metadata
+
 
 class WorkPending(RuntimeError):
     """An immutable job is waiting; never fall through to another paid solver."""
@@ -161,6 +163,21 @@ class WorkStore:
                 if type(number) is not int or number < 1:
                     raise ValueError("invalid original page number")
                 item["page_number"] = number
+            if "capture_provenance" in source or "canonical_image_sha256" in source:
+                metadata = validate_capture_metadata({key: source[key] for key in
+                    ("capture_provenance", "canonical_image_sha256") if key in source})
+                native = metadata["capture_provenance"]
+                size = (native["width"], native["height"])
+                if native["rotation_degrees"] in (90, 270):
+                    size = size[::-1]
+                if (mime != "image/png" or metadata["canonical_image_sha256"] != item["sha256"]
+                        or native["page_index"] + 1 != item.get("page_number")):
+                    raise ValueError("native capture metadata does not match its canonical original")
+                with Image.open(io.BytesIO(data)) as canonical:
+                    if canonical.format != "PNG" or canonical.size != size:
+                        raise ValueError("native capture dimensions do not match the canonical PNG")
+                    canonical.verify()
+                item.update(metadata)
             manifest.append(item)
         numbers = [item["page_number"] for item in manifest if "page_number" in item]
         if numbers != list(range(1, len(numbers) + 1)):

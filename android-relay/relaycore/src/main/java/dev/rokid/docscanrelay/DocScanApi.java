@@ -141,6 +141,13 @@ public final class DocScanApi {
 
     public JSONObject uploadPage(long documentId, int pageIndex, byte[] jpeg, String ocrText,
                                  int imageRotation, long capturedAtMillis) throws IOException, JSONException {
+        return uploadPage(documentId, pageIndex, jpeg, ocrText, imageRotation, capturedAtMillis, null);
+    }
+
+    public JSONObject uploadPage(long documentId, int pageIndex, byte[] jpeg, String ocrText,
+                                 int imageRotation, long capturedAtMillis, CaptureProvenance provenance)
+            throws IOException, JSONException {
+        JSONObject capture = provenance == null ? null : provenance.toUploadJson(jpeg, pageIndex, imageRotation);
         MultipartBody.Builder multipart = new MultipartBody.Builder()
                 .setType(MultipartBody.FORM)
                 .addFormDataPart("page_index", Integer.toString(pageIndex))
@@ -153,9 +160,24 @@ public final class DocScanApi {
         if (ocrText != null && !ocrText.trim().isEmpty()) {
             multipart.addFormDataPart("ocr_text", ocrText.trim());
         }
-        return execute(new Request.Builder()
+        if (capture != null) multipart.addFormDataPart("capture_provenance", capture.toString());
+        JSONObject response = execute(new Request.Builder()
                 .url(baseUrl + "/v1/documents/" + documentId + "/pages")
                 .post(multipart.build()));
+        if (provenance != null) {
+            if (!receiptInteger(response.opt("document_id"), documentId)
+                    || !receiptInteger(response.opt("page_index"), pageIndex)
+                    || !(response.opt("canonical_image_sha256") instanceof String)
+                    || !((String)response.get("canonical_image_sha256")).matches("[0-9a-f]{64}")) {
+                throw new JSONException("撮影情報の受領を確認できません");
+            }
+            provenance.requireUploadEcho(response.optJSONObject("capture_provenance"));
+        }
+        return response;
+    }
+
+    private static boolean receiptInteger(Object value, long expected) {
+        return (value instanceof Integer || value instanceof Long) && ((Number)value).longValue() == expected;
     }
 
     public JSONObject scanStatus(long documentId) throws IOException, JSONException {

@@ -3,13 +3,18 @@ package dev.rokid.docscanrelay;
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.util.Iterator;
 import java.util.Objects;
 import java.util.UUID;
+import org.json.JSONException;
+import org.json.JSONObject;
 
 /** Identity of an observed native original, not a verdict about its image quality. */
 public final class CaptureProvenance {
+    private static final int MAX_HTTP_BYTES = 8 * 1024;
     public final String sourceKind = "native_still";
     public final String captureId;
     public final String jpegSha256;
@@ -76,6 +81,51 @@ public final class CaptureProvenance {
     boolean matches(byte[] jpeg, int page, int rotation) {
         return jpeg != null && jpegSha256.equals(sha256(jpeg))
                 && (localSessionId == null || (pageIndex == page && rotationDegrees == rotation));
+    }
+
+    JSONObject toUploadJson(byte[] jpeg, int page, int rotation) throws JSONException {
+        if (!validUuid(localSessionId) || !matches(jpeg, page, rotation)) {
+            throw new IllegalArgumentException("撮影情報と原本が一致しません");
+        }
+        JSONObject json = httpMetadata();
+        requireHttpSize(json);
+        return json;
+    }
+
+    void requireUploadEcho(JSONObject received) throws JSONException {
+        JSONObject expected = httpMetadata();
+        if (received == null || received.length() != expected.length()) {
+            throw new JSONException("撮影情報の受領を確認できません");
+        }
+        requireHttpSize(received);
+        for (Iterator<String> keys = expected.keys(); keys.hasNext();) {
+            String key = keys.next();
+            Object wanted = expected.get(key), actual = received.opt(key);
+            boolean matches = wanted instanceof Number
+                    ? (actual instanceof Integer || actual instanceof Long)
+                        && ((Number)wanted).longValue() == ((Number)actual).longValue()
+                    : wanted == JSONObject.NULL ? actual == JSONObject.NULL : wanted.equals(actual);
+            if (!matches) throw new JSONException("撮影情報の受領を確認できません");
+        }
+    }
+
+    private JSONObject httpMetadata() throws JSONException {
+        return new JSONObject().put("schema", 1).put("source_kind", sourceKind)
+                .put("capture_id", captureId).put("jpeg_sha256", jpegSha256)
+                .put("width", width).put("height", height).put("local_session_id", localSessionId)
+                .put("page_index", pageIndex).put("rotation_degrees", rotationDegrees)
+                .put("image_timestamp_ns", nullable(imageTimestampNanos))
+                .put("result_timestamp_ns", nullable(resultTimestampNanos))
+                .put("frame_number", nullable(frameNumber)).put("exposure_ns", nullable(exposureNanos))
+                .put("sensitivity_iso", nullable(sensitivityIso)).put("af_state", nullable(afState))
+                .put("ae_state", nullable(aeState));
+    }
+
+    private static Object nullable(Object value) { return value == null ? JSONObject.NULL : value; }
+    private static void requireHttpSize(JSONObject json) throws JSONException {
+        if (json.toString().getBytes(StandardCharsets.UTF_8).length > MAX_HTTP_BYTES) {
+            throw new JSONException("撮影情報が大きすぎます");
+        }
     }
 
     void writeTo(DataOutputStream data) throws IOException {

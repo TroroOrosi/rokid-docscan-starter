@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS pages (
     -- (TEXT, not an image). Combined with ocr_text when solving so figure-
     -- dependent and page-spanning problems are answered from the whole material.
     vision_text TEXT,
+    capture_metadata_json TEXT,
     ocr_md5     TEXT,
     summary     TEXT,
     created_at  TEXT NOT NULL DEFAULT (datetime('now')),
@@ -284,6 +285,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
     pcols = {r[1] for r in conn.execute("PRAGMA table_info(pages)")}
     if "captured_at_ms" not in pcols:
         conn.execute("ALTER TABLE pages ADD COLUMN captured_at_ms INTEGER")
+    if "capture_metadata_json" not in pcols:
+        conn.execute("ALTER TABLE pages ADD COLUMN capture_metadata_json TEXT")
 
 
 def init_db(db_path: Path | None = None) -> None:
