@@ -15,11 +15,15 @@ public final class DocScanTestImage extends Image {
     public int pixelStride;
     public long timestamp = 10L;
     public boolean memoryFailure;
+    public boolean timestampMemoryFailure;
     public DocScanTestImage(List<String> events) { this.events = events; }
     @Override public int getFormat() { return format; }
     @Override public int getWidth() { return width; }
     @Override public int getHeight() { return height; }
-    @Override public long getTimestamp() { return timestamp; }
+    @Override public long getTimestamp() {
+        if (timestampMemoryFailure) throw new OutOfMemoryError("synthetic timestamp failure");
+        return timestamp;
+    }
     @Override public void setTimestamp(long timestamp) { }
     @Override public void close() { events.add("image.close"); }
     @Override public Plane[] getPlanes() {

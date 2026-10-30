@@ -74,8 +74,9 @@ android {
         // 39 retains up to two future-page originals during visible review.
         // 40 verifies native capture provenance before acknowledging an upload.
         // 41 keeps active page observation across idle waits without a resume tap.
-        versionCode = 41
-        versionName = "0.32.0"
+        // 42 adds explicit full-resolution ZSL evaluation, without changing the native default.
+        versionCode = 42
+        versionName = "0.33.0"
     }
 
     // Same reasoning as `:glassapp`: a vendor installer that reads JAR

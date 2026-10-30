@@ -19,8 +19,8 @@ import java.security.NoSuchAlgorithmException;
 /** Atomically persists one unregistered capture across activity/process restarts. */
 final class CaptureReviewPersistence {
     private static final int MAGIC = 0x44534350; // DSCP
-    /** 4 adds optional native provenance; records without it retain the frozen v3 format. */
-    private static final int VERSION = 4;
+    /** v4 adds native provenance; v5 stores its producer. Metadata-free writes stay frozen at v3. */
+    private static final int VERSION = 5;
     private static final int COMMIT_MAGIC = 0x44534343; // DSCC
     private static final int COMMIT_VERSION = 1;
     private static final int SHA_256_BYTES = 32;
@@ -80,7 +80,7 @@ final class CaptureReviewPersistence {
             writeBytes(data, framing);
             writeBytes(data, pending.jpeg);
             data.writeLong(pending.capturedAtMillis);
-            if (pending.provenance != null) pending.provenance.writeTo(data);
+            if (pending.provenance != null) pending.provenance.writeToV5(data);
             data.flush();
             output.getFD().sync();
         }
@@ -213,7 +213,8 @@ final class CaptureReviewPersistence {
                 jpeg = same ? expectedJpeg : null;
             }
             long capturedAt = recordVersion >= 3 ? data.readLong() : 0;
-            CaptureProvenance provenance = recordVersion >= 4 ? CaptureProvenance.readFrom(data) : null;
+            CaptureProvenance provenance = recordVersion >= 5 ? CaptureProvenance.readFromV5(data)
+                    : recordVersion == 4 ? CaptureProvenance.readFrom(data) : null;
             if (capturedAt < 0 || data.read() != -1) {
                 throw new IOException("invalid pending capture payload");
             }

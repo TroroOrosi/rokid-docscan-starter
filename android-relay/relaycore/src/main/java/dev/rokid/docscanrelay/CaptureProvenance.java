@@ -15,7 +15,7 @@ import org.json.JSONObject;
 /** Identity of an observed native original, not a verdict about its image quality. */
 public final class CaptureProvenance {
     private static final int MAX_HTTP_BYTES = 8 * 1024;
-    public final String sourceKind = "native_still";
+    public final String sourceKind;
     public final String captureId;
     public final String jpegSha256;
     public final int width, height;
@@ -24,10 +24,11 @@ public final class CaptureProvenance {
     public final String localSessionId;
     public final int pageIndex, rotationDegrees;
 
-    private CaptureProvenance(String captureId, String jpegSha256, int width, int height,
+    private CaptureProvenance(String sourceKind, String captureId, String jpegSha256, int width, int height,
             Long imageTimestampNanos, Long resultTimestampNanos, Long frameNumber, Long exposureNanos,
             Integer sensitivityIso, Integer afState, Integer aeState,
             String localSessionId, int pageIndex, int rotationDegrees) {
+        this.sourceKind = sourceKind;
         this.captureId = captureId;
         this.jpegSha256 = jpegSha256;
         this.width = width;
@@ -48,12 +49,30 @@ public final class CaptureProvenance {
     public static CaptureProvenance nativeStill(byte[] jpeg, int width, int height,
             Long imageTimestamp, Long resultTimestamp, Long frameNumber, Long exposureNanos,
             Integer sensitivityIso, Integer afState, Integer aeState) {
+        return captured("native_still", jpeg, width, height, imageTimestamp, resultTimestamp,
+                frameNumber, exposureNanos, sensitivityIso, afState, aeState);
+    }
+
+    /** A reprocessed original must retain the selected source exposure's exact result. */
+    public static CaptureProvenance zslReprocess(byte[] jpeg, int width, int height,
+            Long imageTimestamp, Long resultTimestamp, Long frameNumber, Long exposureNanos,
+            Integer sensitivityIso, Integer afState, Integer aeState) {
+        if (positive(imageTimestamp) == null || !imageTimestamp.equals(positive(resultTimestamp))) {
+            throw new IllegalArgumentException("ZSL source exposure must match its image");
+        }
+        return captured("zsl_reprocess", jpeg, width, height, imageTimestamp, resultTimestamp,
+                frameNumber, exposureNanos, sensitivityIso, afState, aeState);
+    }
+
+    private static CaptureProvenance captured(String sourceKind, byte[] jpeg, int width, int height,
+            Long imageTimestamp, Long resultTimestamp, Long frameNumber, Long exposureNanos,
+            Integer sensitivityIso, Integer afState, Integer aeState) {
         if (jpeg == null || jpeg.length == 0 || width <= 0 || height <= 0) {
             throw new IllegalArgumentException("native original is required");
         }
         Long timestamp = positive(imageTimestamp);
         boolean matched = timestamp != null && timestamp.equals(positive(resultTimestamp));
-        return new CaptureProvenance(UUID.randomUUID().toString(), sha256(jpeg), width, height,
+        return new CaptureProvenance(sourceKind, UUID.randomUUID().toString(), sha256(jpeg), width, height,
                 timestamp, matched ? timestamp : null,
                 matched && frameNumber != null && frameNumber >= 0 ? frameNumber : null,
                 matched ? positive(exposureNanos) : null,
@@ -73,7 +92,7 @@ public final class CaptureProvenance {
             }
             return this;
         }
-        return new CaptureProvenance(captureId, jpegSha256, width, height, imageTimestampNanos,
+        return new CaptureProvenance(sourceKind, captureId, jpegSha256, width, height, imageTimestampNanos,
                 resultTimestampNanos, frameNumber, exposureNanos, sensitivityIso, afState, aeState,
                 sessionId, pageIndex, rotationDegrees);
     }
@@ -129,6 +148,18 @@ public final class CaptureProvenance {
     }
 
     void writeTo(DataOutputStream data) throws IOException {
+        if (!sourceKind.equals("native_still")) {
+            throw new IOException("capture producer requires pending record v5");
+        }
+        writeFields(data);
+    }
+
+    void writeToV5(DataOutputStream data) throws IOException {
+        data.writeUTF(sourceKind);
+        writeFields(data);
+    }
+
+    private void writeFields(DataOutputStream data) throws IOException {
         data.writeUTF(captureId);
         data.writeUTF(jpegSha256);
         data.writeInt(width);
@@ -146,6 +177,18 @@ public final class CaptureProvenance {
     }
 
     static CaptureProvenance readFrom(DataInputStream data) throws IOException {
+        return readFields(data, "native_still");
+    }
+
+    static CaptureProvenance readFromV5(DataInputStream data) throws IOException {
+        String sourceKind = data.readUTF();
+        if (!sourceKind.equals("native_still") && !sourceKind.equals("zsl_reprocess")) {
+            throw new IOException("unsupported capture producer");
+        }
+        return readFields(data, sourceKind);
+    }
+
+    private static CaptureProvenance readFields(DataInputStream data, String sourceKind) throws IOException {
         String captureId = data.readUTF(), sha = data.readUTF();
         int width = data.readInt(), height = data.readInt();
         Long timestamp = readLong(data), resultTimestamp = readLong(data);
@@ -156,6 +199,7 @@ public final class CaptureProvenance {
         boolean matched = timestamp != null && timestamp.equals(resultTimestamp);
         if (!validUuid(captureId) || !sha.matches("[0-9a-f]{64}") || width <= 0 || height <= 0
                 || (timestamp != null && timestamp <= 0) || (resultTimestamp != null && !matched)
+                || (sourceKind.equals("zsl_reprocess") && !matched)
                 || (frame != null && (frame < 0 || !matched))
                 || (exposure != null && (exposure <= 0 || !matched))
                 || (iso != null && (iso <= 0 || !matched))
@@ -164,7 +208,7 @@ public final class CaptureProvenance {
                     : !validUuid(session) || page < 0 || !validRotation(rotation))) {
             throw new IOException("invalid native capture provenance");
         }
-        return new CaptureProvenance(captureId, sha, width, height, timestamp, resultTimestamp,
+        return new CaptureProvenance(sourceKind, captureId, sha, width, height, timestamp, resultTimestamp,
                 frame, exposure, iso, af, ae, session.isEmpty() ? null : session, page, rotation);
     }
 
@@ -199,7 +243,8 @@ public final class CaptureProvenance {
     @Override public boolean equals(Object other) {
         if (!(other instanceof CaptureProvenance)) return false;
         CaptureProvenance value = (CaptureProvenance) other;
-        return captureId.equals(value.captureId) && jpegSha256.equals(value.jpegSha256)
+        return sourceKind.equals(value.sourceKind) && captureId.equals(value.captureId)
+                && jpegSha256.equals(value.jpegSha256)
                 && width == value.width && height == value.height
                 && Objects.equals(imageTimestampNanos, value.imageTimestampNanos)
                 && Objects.equals(resultTimestampNanos, value.resultTimestampNanos)
@@ -208,5 +253,5 @@ public final class CaptureProvenance {
                 && Objects.equals(aeState, value.aeState) && Objects.equals(localSessionId, value.localSessionId)
                 && pageIndex == value.pageIndex && rotationDegrees == value.rotationDegrees;
     }
-    @Override public int hashCode() { return captureId.hashCode(); }
+    @Override public int hashCode() { return Objects.hash(sourceKind, captureId); }
 }

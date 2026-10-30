@@ -31,6 +31,7 @@ final class Stillness implements SensorEventListener {
     private final Sensor gyroscope;
     private volatile long movingAt;
     private volatile long observedAt = -1;
+    private long quietSinceNanos;
     private float motionSquared = Float.POSITIVE_INFINITY;
     private float quietMotionSquared;
     private long generation;
@@ -50,6 +51,7 @@ final class Stillness implements SensorEventListener {
         long token = ++generation;
         exposureNanos = exposure;
         long startedAt = SystemClock.elapsedRealtime();
+        quietSinceNanos = SystemClock.elapsedRealtimeNanos();
         movingAt = startedAt; // a full STILL_MILLIS of readings is required
         observedAt = -1;
         motionSquared = Float.POSITIVE_INFINITY;
@@ -64,6 +66,7 @@ final class Stillness implements SensorEventListener {
                 if (limit <= 0 || (measured && (motionSquared > limit * limit
                         || quietMotionSquared > limit * limit))) {
                     movingAt = now;
+                    quietSinceNanos = SystemClock.elapsedRealtimeNanos();
                     quietMotionSquared = 0;
                 }
                 if (limit > 0 && cameraReady.getAsBoolean() && (!measured || (observedAt >= startedAt
@@ -81,8 +84,12 @@ final class Stillness implements SensorEventListener {
     void cancel() {
         generation++;
         exposureNanos = () -> 0;
+        quietSinceNanos = 0;
         if (sensors != null) sensors.unregisterListener(this);
     }
+
+    /** Only REALTIME camera timestamps may be compared with this measured interval. */
+    long quietSinceNanos() { return quietSinceNanos; }
 
     private float motionLimit() {
         long exposure = exposureNanos.getAsLong();
@@ -96,6 +103,7 @@ final class Stillness implements SensorEventListener {
         if (event.values.length < 3 || !Float.isFinite(event.values[0])
                 || !Float.isFinite(event.values[1]) || !Float.isFinite(event.values[2])) {
             movingAt = observedAt;
+            quietSinceNanos = SystemClock.elapsedRealtimeNanos();
             observedAt = -1;
             return;
         }
@@ -106,6 +114,7 @@ final class Stillness implements SensorEventListener {
         float limit = motionLimit();
         if (limit <= 0 || motionSquared > limit * limit) {
             movingAt = SystemClock.elapsedRealtime();
+            quietSinceNanos = SystemClock.elapsedRealtimeNanos();
             quietMotionSquared = 0;
         } else {
             // Recheck this window against later exposure without resetting for harmless AE jitter.

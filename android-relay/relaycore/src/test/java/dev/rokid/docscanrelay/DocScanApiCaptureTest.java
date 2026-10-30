@@ -116,6 +116,36 @@ public class DocScanApiCaptureTest {
         }
     }
 
+    @Test public void zslMultipartRequiresTheSameKindAndExactSourceExposureInItsReceipt() throws Exception {
+        CaptureProvenance source = CaptureProvenance.zslReprocess(ORIGINAL, 4032, 3024,
+                9_007_199_254_740_993L, 9_007_199_254_740_993L, null, null, null, null, null)
+                .bind(SESSION, 2, 90);
+        try (MockWebServer server = new MockWebServer()) {
+            server.enqueue(new MockResponse().setBody(receipt(source).toString()));
+            api(server).uploadPage(17, 2, ORIGINAL, "", 90, 1234, source);
+            RecordedRequest request = server.takeRequest();
+            assertArrayEquals(ORIGINAL, part(request, "image"));
+            JSONObject sent = new JSONObject(new String(
+                    part(request, "capture_provenance"), StandardCharsets.UTF_8));
+            assertEquals(16, sent.length());
+            assertEquals("zsl_reprocess", sent.getString("source_kind"));
+            assertEquals(9_007_199_254_740_993L, sent.getLong("image_timestamp_ns"));
+            assertEquals(9_007_199_254_740_993L, sent.getLong("result_timestamp_ns"));
+            for (String key : List.of("frame_number", "exposure_ns", "sensitivity_iso", "af_state", "ae_state")) {
+                assertSame(JSONObject.NULL, sent.get(key));
+            }
+            for (String field : List.of("source_kind", "result_timestamp_ns")) {
+                JSONObject wrong = receipt(source);
+                wrong.getJSONObject("capture_provenance").put(field,
+                        field.equals("source_kind") ? "native_still" : JSONObject.NULL);
+                server.enqueue(new MockResponse().setBody(wrong.toString()));
+                assertThrows(JSONException.class, () -> api(server).uploadPage(
+                        17, 2, ORIGINAL, "", 90, 1234, source));
+                assertNotNull(server.takeRequest());
+            }
+        }
+    }
+
     @Test public void aDifferentOriginalOrAssociationIsRejectedBeforeAnyHttp() throws Exception {
         CaptureProvenance source = knownSource();
         CaptureProvenance unbound = CaptureProvenance.nativeStill(ORIGINAL, 4032, 3024,
@@ -152,7 +182,7 @@ public class DocScanApiCaptureTest {
     }
 
     private static JSONObject receipt(CaptureProvenance source) throws JSONException {
-        JSONObject nativeCapture = new JSONObject().put("schema", 1).put("source_kind", "native_still")
+        JSONObject nativeCapture = new JSONObject().put("schema", 1).put("source_kind", source.sourceKind)
                 .put("capture_id", source.captureId).put("jpeg_sha256", JPEG_SHA)
                 .put("width", 4032).put("height", 3024).put("local_session_id", SESSION)
                 .put("page_index", 2).put("rotation_degrees", 90)

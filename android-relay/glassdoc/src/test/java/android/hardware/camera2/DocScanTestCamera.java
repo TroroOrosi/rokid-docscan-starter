@@ -17,12 +17,16 @@ public final class DocScanTestCamera extends CameraDevice {
     public int configurations;
     public boolean closed;
     public boolean refuseSession;
+    public InputConfiguration inputConfiguration;
+    public TotalCaptureResult reprocessSource;
+    public Runnable onClose = () -> { };
 
     public DocScanTestCamera(IntFunction<CaptureRequest.Builder> requests) { this.requests = requests; }
     @Override public String getId() { return "0"; }
     @Override public void close() {
         if (closed) return;
         closed = true;
+        onClose.run();
         handler.post(() -> state.onClosed(this));
     }
     @Override public CaptureRequest.Builder createCaptureRequest(int template) { return requests.apply(template); }
@@ -33,8 +37,12 @@ public final class DocScanTestCamera extends CameraDevice {
     }
     @Override public void createCaptureSessionByOutputConfigurations(List<OutputConfiguration> o, CameraCaptureSession.StateCallback c, Handler h) { throw new UnsupportedOperationException(); }
     @Override public void createConstrainedHighSpeedCaptureSession(List<Surface> o, CameraCaptureSession.StateCallback c, Handler h) { throw new UnsupportedOperationException(); }
-    @Override public CaptureRequest.Builder createReprocessCaptureRequest(TotalCaptureResult r) { throw new UnsupportedOperationException(); }
-    @Override public void createReprocessableCaptureSession(InputConfiguration i, List<Surface> o, CameraCaptureSession.StateCallback c, Handler h) { throw new UnsupportedOperationException(); }
+    @Override public CaptureRequest.Builder createReprocessCaptureRequest(TotalCaptureResult r) {
+        reprocessSource = r; return requests.apply(CameraDevice.TEMPLATE_ZERO_SHUTTER_LAG);
+    }
+    @Override public void createReprocessableCaptureSession(InputConfiguration i, List<Surface> o, CameraCaptureSession.StateCallback c, Handler h) {
+        inputConfiguration = i; createCaptureSession(o, c, h);
+    }
     @Override public void createReprocessableCaptureSessionByConfigurations(InputConfiguration i, List<OutputConfiguration> o, CameraCaptureSession.StateCallback c, Handler h) { throw new UnsupportedOperationException(); }
 
     public final class TestSession extends CameraCaptureSession {
@@ -54,8 +62,8 @@ public final class DocScanTestCamera extends CameraDevice {
         @Override public void stopRepeating() { repeatingStopped = true; }
         @Override public void close() { closed = true; }
         @Override public CameraDevice getDevice() { return DocScanTestCamera.this; }
-        @Override public Surface getInputSurface() { return null; }
-        @Override public boolean isReprocessable() { return false; }
+        @Override public Surface getInputSurface() { return inputConfiguration == null ? null : outputs.get(0); }
+        @Override public boolean isReprocessable() { return inputConfiguration != null; }
         @Override public void prepare(Surface s) { }
         @Override public void abortCaptures() { }
         @Override public int captureBurst(List<CaptureRequest> r, CaptureCallback c, Handler h) { throw new UnsupportedOperationException(); }

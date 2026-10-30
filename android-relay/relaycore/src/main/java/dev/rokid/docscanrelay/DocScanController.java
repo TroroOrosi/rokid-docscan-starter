@@ -1491,14 +1491,18 @@ public final class DocScanController implements AutoCloseable {
     }
 
     public void onPhoto(byte[] jpeg, CaptureProvenance provenance) {
+        onPhoto(jpeg, provenance, true);
+    }
+
+    public void onPhoto(byte[] jpeg, CaptureProvenance provenance, boolean associationResolved) {
         try {
-            serial.execute(() -> handlePhoto(jpeg, provenance));
+            serial.execute(() -> handlePhoto(jpeg, provenance, associationResolved));
         } catch (RejectedExecutionException ignored) {
             // The activity closed while the Binder callback was arriving.
         }
     }
 
-    private void handlePhoto(byte[] jpeg, CaptureProvenance provenance) {
+    private void handlePhoto(byte[] jpeg, CaptureProvenance provenance, boolean associationResolved) {
         if (link.supportsLocalCaptureReview() && captureLease.isTimedOut()) return;
         CaptureLease.Completion completion = captureLease.complete();
         if (listeningFailed && !mixedMode) return;
@@ -1541,7 +1545,12 @@ public final class DocScanController implements AutoCloseable {
                 CaptureProvenance source = provenance == null || localSession == null ? provenance
                         : provenance.bind(localSession.id(), uploadIndex, uploadRotation);
                 stageCaptureReview(new CaptureReviewStore.Pending(uploadIndex, jpeg, "", uploadRotation,
-                        "", PageFraming.UNKNOWN, photoRequestedAtMillis, source), null);
+                        associationResolved ? "" : CaptureReviewStore.Pending.SCENE_TIMESTAMP_UNRESOLVED,
+                        PageFraming.UNKNOWN, photoRequestedAtMillis, source), null);
+                if (!associationResolved && localSession != null) {
+                    try { localSession.markCaptureGap(); }
+                    catch (IOException error) { fail("撮影の対応を安全保存できません", error); }
+                }
             } catch (IllegalArgumentException invalid) {
                 CaptureReviewStore.Pending previous = captureReview.peek();
                 if (previous != null) publishCaptureReview(previous, "Native capture association rejected; previous review retained");
@@ -1829,7 +1838,7 @@ public final class DocScanController implements AutoCloseable {
                     // Persist before queueing UI work: close/shutdown must not lose an issued original.
                     synchronized (saved) {
                         int index = saved.nextCandidatePageIndex();
-                        CaptureProvenance associated = source.bind(saved.id(), index, rotation);
+                        CaptureProvenance associated = source == null ? null : source.bind(saved.id(), index, rotation);
                         saved.retainCandidate(new CaptureReviewStore.Pending(index, jpeg, "", rotation,
                                 sceneMatched ? "" : CaptureReviewStore.Pending.SCENE_TIMESTAMP_UNRESOLVED, PageFraming.UNKNOWN,
                                 System.currentTimeMillis(), associated));

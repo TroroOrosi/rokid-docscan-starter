@@ -101,4 +101,17 @@ public class StillnessTest {
         motion(0f, 4); assertEquals(0, shots.get());
         motion(0f, 2); assertEquals(1, shots.get());
     }
+
+    @Test public void sourceExposureCannotReuseTheQuietIntervalFromBeforeMovementOrCancel() {
+        stillness.await(new Handler(Looper.getMainLooper()), () -> false, exposureNanos::get, shots::incrementAndGet);
+        motion(0f, 8);
+        long first = stillness.quietSinceNanos();
+        assertTrue(first > 0);
+        motion(0.5f, 1);
+        assertTrue(stillness.quietSinceNanos() > first);
+        stillness.cancel();
+        assertEquals(0, stillness.quietSinceNanos());
+        stillness.await(new Handler(Looper.getMainLooper()), () -> false, exposureNanos::get, shots::incrementAndGet);
+        assertTrue(stillness.quietSinceNanos() > first);
+    }
 }

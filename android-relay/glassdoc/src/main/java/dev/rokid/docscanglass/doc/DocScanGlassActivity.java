@@ -66,6 +66,7 @@ public final class DocScanGlassActivity extends Activity
     private static final String EXTRA_SPREAD = "spread";
     /** Diagnostic override for this launch only; normal launches always capture automatically. */
     private static final String EXTRA_MANUAL = "manual";
+    private static final String EXTRA_ZSL_EVALUATION = "zsl_evaluation";
     /** Open this server session's answers directly: checks the answer display without a capture. */
     private static final String EXTRA_ANSWERS = "answers";
     private static final int CAMERA_PERMISSION_REQUEST = 7401;
@@ -224,7 +225,9 @@ public final class DocScanGlassActivity extends Activity
 
         cameraThread = new HandlerThread("glass-camera");
         cameraThread.start();
-        camera = new GlassCamera(this, new Handler(cameraThread.getLooper()), cameraCallback());
+        camera = new GlassCamera(this, new Handler(cameraThread.getLooper()), cameraCallback(),
+                getIntent() != null && getIntent().getBooleanExtra(EXTRA_ZSL_EVALUATION, false)
+                        ? GlassCamera.Mode.ZSL_EVALUATION_YUV : GlassCamera.Mode.NATIVE_STILL);
         surface = new GlassesCaptureSurface(this, camera, hud, main, this);
         ocr = new JapaneseOcr();
         controller = new DocScanController(
@@ -690,7 +693,7 @@ public final class DocScanGlassActivity extends Activity
             @Override public void onCaptured(GlassCamera.Captured captured) {
                 Log.i(TAG, "captured " + captured.width + "x" + captured.height
                         + " in " + captured.elapsedMillis + " ms");
-                controller.onPhoto(captured.jpeg, captured.provenance);
+                controller.onPhoto(captured.jpeg, captured.provenance, captured.associationResolved);
             }
 
             @Override

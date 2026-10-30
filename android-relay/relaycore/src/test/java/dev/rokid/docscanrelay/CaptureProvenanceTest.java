@@ -41,6 +41,37 @@ public class CaptureProvenanceTest {
         assertNull(unknown.resultTimestampNanos);
     }
 
+    @Test public void zslRetainsItsSourceExposureAndRejectsMissingOrMismatchedResults() throws Exception {
+        byte[] jpeg = {1, 2, 3};
+        CaptureProvenance source = CaptureProvenance.zslReprocess(jpeg, 4032, 3024,
+                Long.MAX_VALUE, Long.MAX_VALUE, 5L, 25_000_000L, 400, 0, 2)
+                .bind(UUID.randomUUID().toString(), 0, 270);
+        CaptureReviewPersistence disk = new CaptureReviewPersistence(new File(folder.getRoot(), "zsl.bin"));
+        disk.save(pending(jpeg, source));
+        assertEquals("zsl_reprocess", source.sourceKind);
+        assertEquals(Long.valueOf(Long.MAX_VALUE), source.imageTimestampNanos);
+        assertEquals(source.imageTimestampNanos, source.resultTimestampNanos);
+        assertEquals(source, disk.readPending().provenance);
+        assertTrue(disk.matches(pending(jpeg, source)));
+        try (java.io.DataInputStream data = new java.io.DataInputStream(new java.io.FileInputStream(
+                new File(folder.getRoot(), "zsl.bin")))) {
+            data.readInt();
+            assertEquals(5, data.readInt());
+        }
+        for (Long[] timestamps : new Long[][]{{null, null}, {10L, null}, {null, 10L},
+                {0L, 0L}, {-1L, -1L}, {10L, 11L}}) {
+            assertThrows(IllegalArgumentException.class, () -> CaptureProvenance.zslReprocess(
+                    jpeg, 4032, 3024, timestamps[0], timestamps[1], null, null, null, null, null));
+        }
+        CaptureProvenance unknownResultFields = CaptureProvenance.zslReprocess(jpeg, 4032, 3024,
+                10L, 10L, null, null, null, null, null);
+        assertNull(unknownResultFields.frameNumber);
+        assertNull(unknownResultFields.exposureNanos);
+        assertNull(unknownResultFields.sensitivityIso);
+        assertNull(unknownResultFields.afState);
+        assertNull(unknownResultFields.aeState);
+    }
+
     @Test public void unknownMetadataSurvivesRestartAndLegacyCapturesKeepTheirFormat() throws Exception {
         byte[] jpeg = {1, 2, 3};
         CaptureReviewPersistence disk = new CaptureReviewPersistence(new File(folder.getRoot(), "pending.bin"));
@@ -72,12 +103,17 @@ public class CaptureProvenanceTest {
     }
 
     @Test public void localRestartRetakeAndLateAcknowledgementRetainEachExactAssociation() throws Exception {
+        assertLocalRestartRetakeAndLateAcknowledgement(false);
+        assertLocalRestartRetakeAndLateAcknowledgement(true);
+    }
+
+    private void assertLocalRestartRetakeAndLateAcknowledgement(boolean reprocessed) throws Exception {
         LocalCaptureSession session = LocalCaptureSession.create(folder.getRoot(), "http://phone:8000", false);
         byte[] firstJpeg = {1, 2, 3}, nextJpeg = {4, 5, 6};
-        CaptureProvenance first = nativeSource(firstJpeg).bind(session.id(), 0, 270);
+        CaptureProvenance first = source(firstJpeg, reprocessed).bind(session.id(), 0, 270);
         session.commit(pending(firstJpeg, first));
         LocalCaptureSession.Page old = session.nextUnsent();
-        CaptureProvenance next = nativeSource(nextJpeg).bind(session.id(), 0, 270);
+        CaptureProvenance next = source(nextJpeg, reprocessed).bind(session.id(), 0, 270);
         session.commit(pending(nextJpeg, next));
         LocalCaptureSession restarted = LocalCaptureSession.load(folder.getRoot(), session.id());
         restarted.acknowledge(old);
@@ -92,6 +128,10 @@ public class CaptureProvenanceTest {
 
     private static CaptureProvenance nativeSource(byte[] jpeg) {
         return CaptureProvenance.nativeStill(jpeg, 4032, 3024, 10L, 10L, 5L, 25_000_000L, 400, 0, 2);
+    }
+    private static CaptureProvenance source(byte[] jpeg, boolean reprocessed) {
+        return reprocessed ? CaptureProvenance.zslReprocess(
+                jpeg, 4032, 3024, 10L, 10L, 5L, 25_000_000L, 400, 0, 2) : nativeSource(jpeg);
     }
     private static CaptureReviewStore.Pending pending(byte[] jpeg, CaptureProvenance source) {
         return new CaptureReviewStore.Pending(0, jpeg, "", 270, "", PageFraming.UNKNOWN, 1000L, source);

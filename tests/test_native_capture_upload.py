@@ -64,7 +64,8 @@ def test_native_receipt_preserves_metadata_and_exact_canonical_hash_after_db_rei
 
 @pytest.mark.parametrize(("field", "value"), [
     ("schema", True), ("schema", "1"), ("schema", 1.0), ("schema", 2),
-    ("source_kind", "unknown"), ("capture_id", "AAAAAAAA-1111-4111-8111-111111111111"),
+    ("source_kind", "unknown"), ("source_kind", None), ("source_kind", True), ("source_kind", []),
+    ("capture_id", "AAAAAAAA-1111-4111-8111-111111111111"),
     ("local_session_id", "bad"), ("jpeg_sha256", "A" * 64),
     ("width", True), ("width", "24"), ("height", 32.0), ("width", 2**31),
     ("page_index", -1), ("rotation_degrees", 360), ("image_timestamp_ns", 0),
@@ -263,11 +264,12 @@ def test_native_replacement_db_failure_keeps_old_png_and_metadata(client, monkey
 @pytest.mark.parametrize("field", ["image_timestamp_ns", "result_timestamp_ns", "frame_number", "exposure_ns",
                                   "sensitivity_iso", "af_state", "ae_state"])
 @pytest.mark.parametrize("bad", [True, 1.0, "1"])
-def test_every_nullable_native_integer_is_strict(field, bad):
+@pytest.mark.parametrize("source_kind", ["native_still", "zsl_reprocess"])
+def test_every_nullable_native_integer_is_strict(field, bad, source_kind):
     from app.capture_provenance import validate_capture_provenance
 
     with pytest.raises(ValueError):
-        validate_capture_provenance(provenance(native_image(), **{field: bad}))
+        validate_capture_provenance(provenance(native_image(), source_kind=source_kind, **{field: bad}))
 
 
 def test_native_integer_bounds_and_upload_json_size_are_inclusive(client):
@@ -280,3 +282,58 @@ def test_native_integer_bounds_and_upload_json_size_are_inclusive(client):
     encoded = json.dumps(meta)
     assert upload(client, create_document(client), native_image(), encoded + " " * (8192 - len(encoded))).status_code == 201
     assert upload(client, create_document(client), native_image(), "").status_code == 400
+
+
+def test_zsl_receipt_keeps_kind_canonical_png_and_exact_retry_after_db_restart(client, monkeypatch):
+    from app import main
+
+    raw, document = native_image(), create_document(client)
+    meta = provenance(raw, source_kind="zsl_reprocess")
+    first = upload(client, document, raw, meta)
+    assert first.status_code == 201, first.text
+    receipt = first.json()
+    assert receipt["capture_provenance"] == meta
+    assert len(meta) == 16
+    image = Path(receipt["image_path"])
+    assert receipt["canonical_image_sha256"] == hashlib.sha256(image.read_bytes()).hexdigest()
+    with Image.open(image) as saved:
+        assert saved.format == "PNG" and saved.size == (32, 24)
+    main.db.init_db()
+    with main.db.connect() as conn:
+        before = dict(conn.execute("SELECT * FROM pages WHERE document_id=?", (document,)).fetchone())
+    assert json.loads(before["capture_metadata_json"])["capture_provenance"] == meta
+    image_mtime = image.stat().st_mtime_ns
+    monkeypatch.setattr(main.Image.Image, "save", lambda *a, **kw: pytest.fail("ZSL replay rewrote the PNG"))
+    retry = upload(client, document, raw, meta)
+    assert retry.status_code == 201 and retry.json()["capture_provenance"] == meta
+    assert image.stat().st_mtime_ns == image_mtime
+    assert list(image.parent.iterdir()) == [image]
+    with main.db.connect() as conn:
+        assert dict(conn.execute("SELECT * FROM pages WHERE document_id=?", (document,)).fetchone()) == before
+    changed_kind = upload(client, document, raw, {**meta, "source_kind": "native_still"})
+    assert changed_kind.status_code == 409
+
+
+@pytest.mark.parametrize(("image_ts", "result_ts"), [(None, None), (100, None), (None, 100),
+                                                     (0, 0), (-1, -1), (100, 101)])
+def test_zsl_requires_the_exact_positive_source_exposure(client, image_ts, result_ts):
+    from app import main
+
+    raw, document = native_image(), create_document(client)
+    meta = provenance(raw, source_kind="zsl_reprocess", image_timestamp_ns=image_ts,
+                      result_timestamp_ns=result_ts, frame_number=None, exposure_ns=None,
+                      sensitivity_iso=None, af_state=None, ae_state=None)
+    result = upload(client, document, raw, meta)
+    assert result.status_code == 400, result.text
+    with main.db.connect() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM pages").fetchone()[0] == 0
+    assert list(main.IMAGE_DIR.iterdir()) == []
+
+
+def test_zsl_keeps_unobserved_optional_result_fields_explicitly_null(client):
+    raw = native_image()
+    meta = provenance(raw, source_kind="zsl_reprocess", frame_number=None, exposure_ns=None,
+                      sensitivity_iso=None, af_state=None, ae_state=None)
+    result = upload(client, create_document(client), raw, meta)
+    assert result.status_code == 201, result.text
+    assert result.json()["capture_provenance"] == meta

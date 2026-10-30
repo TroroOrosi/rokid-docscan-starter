@@ -185,6 +185,15 @@ and uncertain-send safeguards remain independent of model-name fallback.
   supported focus/exposure and stillness checks. Fixed-focus hardware does not
   gain autofocus from an AF trigger. Expired preparation fails instead
   of forcing a moving shot. Physical character accuracy remains unverified.
+  An explicit `zsl_evaluation=true` launch evaluates full-resolution YUV
+  reprocessing on cameras advertising the required reprocessing, burst and
+  realtime timestamp capabilities. It pairs input frames with their own session's
+  capture results and the current scene/quiet interval. Default native stills
+  remain the ordinary route. Unsupported evaluation is reported instead of
+  silently mixing native samples into the measurement. Queue and close work
+  must not block the camera handler or falsely acknowledge a completed stop.
+  Recording, PRIVATE inputs and AI inspection remain comparison candidates;
+  this evaluation has no physical image-quality or performance acceptance yet.
   The frozen CUSTOMVIEW route keeps explicit phone controls. The original
   `adf12ee` disable decision belonged to the route without operator taps.
 - On the local surface the captured still is drawn after its native image is
@@ -374,6 +383,12 @@ Only four gestures reach an ordinary app; the rest are system-reserved in
   Native clients require the complete provenance echo before acknowledging an
   upload. Legacy images stay usable without invented sensor metadata. These
   bindings are not physical image-quality or multi-client upload-order proofs.
+  Explicit ZSL provenance uses `source_kind=zsl_reprocess` and requires matching
+  positive image/result timestamps. The same sixteen-key receipt and canonical
+  PNG binding apply. Pending-image format v5 preserves the source kind while
+  loading v4 as native and keeping v1-v3 compatibility; missing metadata is not
+  invented for legacy images. A ZSL association failure retains the JPEG as an
+  unresolved local original and must remain ineligible for upload after restart.
 - A configured cloud analyzer may transcribe/correct OCR and describe diagrams
   from the image. Finalization must fail clearly if a photo has no usable text
   and no image-capable analyzer is configured.

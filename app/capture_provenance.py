@@ -25,7 +25,9 @@ def _integer(value, minimum: int, maximum: int) -> bool:
 def validate_capture_provenance(value: object) -> dict:
     if type(value) is not dict or set(value) != _FIELDS:
         raise ValueError("capture_provenance requires exactly the schema 1 fields")
-    if type(value["schema"]) is not int or value["schema"] != 1 or value["source_kind"] != "native_still":
+    if (type(value["schema"]) is not int or value["schema"] != 1
+            or type(value["source_kind"]) is not str
+            or value["source_kind"] not in ("native_still", "zsl_reprocess")):
         raise ValueError("unsupported capture_provenance schema or source kind")
     for key, pattern in (("capture_id", _UUID), ("local_session_id", _UUID), ("jpeg_sha256", _SHA256)):
         if type(value[key]) is not str or re.fullmatch(pattern, value[key]) is None:
@@ -41,6 +43,8 @@ def validate_capture_provenance(value: object) -> dict:
     result = value["result_timestamp_ns"]
     if result is not None and result != value["image_timestamp_ns"]:
         raise ValueError("native result timestamp does not match its image")
+    if value["source_kind"] == "zsl_reprocess" and result is None:
+        raise ValueError("ZSL provenance requires its matching source exposure")
     if result is None and any(value[key] is not None for key in _NULLABLE_INTS
                               if key not in ("image_timestamp_ns", "result_timestamp_ns")):
         raise ValueError("native result metadata requires a matching result timestamp")

@@ -738,9 +738,9 @@ def test_a_repeated_finalize_reads_the_booklet_chat_and_never_sends_again(client
     assert [i["status"] for i in bundle["items"]] == ["ready", "failed"]
 
 
-@pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")
 def test_answers_lost_before_their_commit_are_read_back_not_sent_again(client, monkeypatch):
     """A kill or a locked database after the reply: the resume reads the chat."""
+    import threading
     import time
 
     from app import main
@@ -750,25 +750,50 @@ def test_answers_lost_before_their_commit_are_read_back_not_sent_again(client, m
     _, session_id = _session_with(client, ["問1 2+2を求めよ。"])
     monkeypatch.setenv("ROKID_SOLVER", "test-provider")
     real_save = main._save_solution
+    real_worker = main._solve_deck_in_background
+    injected_error = sqlite3.OperationalError("database is locked")
     failures = []
+    workers, worker_errors = [], []
+    first_worker_finished = threading.Event()
 
     def save(*args, **kwargs):
         if not failures:
             failures.append(1)
-            raise sqlite3.OperationalError("database is locked")
+            raise injected_error
         return real_save(*args, **kwargs)
 
+    def worker(*args, **kwargs):
+        workers.append(threading.current_thread())
+        try:
+            real_worker(*args, **kwargs)
+        except BaseException as error:
+            # Only this test's injected failure is expected; propagate others below.
+            worker_errors.append(error)
+        finally:
+            first_worker_finished.set()
+
     monkeypatch.setattr(main, "_save_solution", save)
-    client.post(f"/v1/exam-sessions/{session_id}/finalize-reading?solve=background")
+    monkeypatch.setattr(main, "_solve_deck_in_background", worker)
     url = f"/v1/exam-sessions/{session_id}/answer-bundle"
-    deadline = time.monotonic() + 5
-    while time.monotonic() < deadline:
-        response = client.get(url)  # the poll that resumes the lost batch
-        if response.status_code == 200 and response.json()["items"][0]["status"] == "ready":
-            break
-        time.sleep(0.01)
+    try:
+        assert client.post(f"/v1/exam-sessions/{session_id}/finalize-reading?solve=background").status_code == 200
+        assert first_worker_finished.wait(5), "the injected worker did not finish"
+        assert worker_errors == [injected_error]
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            response = client.get(url)  # the poll that resumes the lost batch
+            if response.status_code == 200 and response.json()["items"][0]["status"] == "ready":
+                break
+            time.sleep(0.01)
+    finally:
+        for started_worker in workers:
+            started_worker.join(5)
+        for error in worker_errors:
+            if error is not injected_error:
+                raise error
+        assert all(not started_worker.is_alive() for started_worker in workers)
     assert client.get(url).json()["items"][0]["answer"] == "4"
-    assert chat.sends == 1 and failures == [1]
+    assert chat.sends == 1 and failures == [1] and worker_errors == [injected_error]
 
 
 def test_an_old_reviewing_session_is_never_resumed(client, monkeypatch):

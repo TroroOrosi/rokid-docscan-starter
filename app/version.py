@@ -232,7 +232,8 @@ from __future__ import annotations
 #         persist unresolved observation before starting the native producer.
 # 0.55.0: bind native JPEG provenance to page receipts and unchanged Work sources.
 # 0.56.0: keep active page observation, adapt semantic Work controls and pin service Bash.
-APP_VERSION = "0.56.0"
+# 0.57.0: evaluate timestamp-paired full-resolution ZSL with durable source-kind provenance.
+APP_VERSION = "0.57.0"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.
@@ -349,7 +350,8 @@ APP_VERSION = "0.56.0"
 #         is recovered; waiting does not consume the current session retry budget.
 # 1.36.0: optional native capture provenance is validated against uploaded JPEG
 #         bytes and acknowledged with the canonical PNG identity.
-API_VERSION = "1.36.0"
+# 1.37.0: explicitly identified ZSL originals require matching positive sensor timestamps.
+API_VERSION = "1.37.0"
 
 # Matching algorithm identity. Bump when thresholds or hashing change so a
 # re-index/eval is triggered. Mirrors thresholds in app/matching.py.
@@ -494,7 +496,8 @@ EXPLAINER_API_VERSION = "1.1.0"
 # 1.33.0: a native original remains unacknowledged until its complete provenance
 #         is echoed with the server's canonical image identity.
 # 1.34.0: active local capture keeps observing pages after idle waits without a resume tap.
-GLASSES_VIEW_CONTRACT_VERSION = "1.34.0"
+# 1.35.0: opt-in ZSL evaluation preserves scene/quiet pairing and unresolved originals.
+GLASSES_VIEW_CONTRACT_VERSION = "1.35.0"
 
 # Answer-area overlay payload (box + short answer; 2D image-anchored).
 # 1.1.0: added tracking metadata (tracking/fixed_ar/anchor_hint).

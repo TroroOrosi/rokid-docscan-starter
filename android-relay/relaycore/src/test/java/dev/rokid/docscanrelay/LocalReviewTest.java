@@ -28,6 +28,39 @@ import org.robolectric.annotation.Config;
 @RunWith(RobolectricTestRunner.class)
 @Config(sdk = 32, manifest = Config.NONE)
 public class LocalReviewTest {
+    @Test public void mismatchedZslJpegIsPreservedUnresolvedAndCannotUploadAfterRestart() throws Exception {
+        Context context = RuntimeEnvironment.getApplication();
+        Surface surface = new Surface(); surface.holdForPage = true;
+        DocScanController controller = localWithOriginal(context, surface);
+        byte[] jpeg = {7, 8, 9}; String sessionId;
+        try {
+            sessionId = ((LocalCaptureSession)get(controller, "localSession")).id();
+            ((CaptureLease)get(controller, "captureLease")).begin(0);
+            set(controller, "state", RelayState.CAPTURING);
+            controller.onPhoto(jpeg, null, false); barrier(controller);
+            CaptureReviewStore.Pending held = ((CaptureReviewStore)get(controller, "captureReview")).peek();
+            assertArrayEquals(jpeg, held.jpeg); assertNull(held.provenance); assertTrue(held.needsSceneRecapture());
+            commitVisible(controller, surface);
+            controller.onGlassesAction(GlassesInputAction.BACK); barrier(controller);
+            controller.confirmPendingCapture(); barrier(controller);
+            LocalCaptureSession saved = (LocalCaptureSession)get(controller, "localSession");
+            assertEquals(0, saved.pageCount()); assertNull(saved.nextUnsent()); assertTrue(saved.captureGap());
+        } finally { controller.close(); }
+        Surface restoredSurface = new Surface(); restoredSurface.holdForPage = true;
+        DocScanController restored = new DocScanController(context, restoredSurface, null,
+                (state, lines, diagnostic) -> {}, new ClientIdentity("test", "test", "test"));
+        try {
+            restored.configureForLocalStart("http://phone:8000", "", 270); barrier(restored);
+            set(restored, "localNetworkBusy", true);
+            restored.showPendingCaptureReview(); barrier(restored);
+            CaptureReviewStore.Pending held = ((CaptureReviewStore)get(restored, "captureReview")).peek();
+            assertArrayEquals(jpeg, held.jpeg); assertTrue(held.needsSceneRecapture()); assertNull(held.provenance);
+            commitVisible(restored, restoredSurface); restored.confirmPendingCapture(); barrier(restored);
+            LocalCaptureSession saved = (LocalCaptureSession)get(restored, "localSession");
+            assertEquals(sessionId, saved.id()); assertEquals(0, saved.pageCount()); assertNull(saved.nextUnsent());
+        } finally { restored.close(); }
+    }
+
     @Test public void reviewKeepsTwoUnseenOriginalsAndEachGetsItsOwnVisibleThreeSecondsAfterRestart() throws Exception {
         Context context = RuntimeEnvironment.getApplication();
         Surface surface = new Surface(); surface.futureEnabled = true; surface.holdForPage = true;
