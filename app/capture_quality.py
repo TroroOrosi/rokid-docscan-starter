@@ -6,6 +6,7 @@ it never certifies an unseen page or every character of a booklet.
 """
 from __future__ import annotations
 
+from contextlib import ExitStack
 import hashlib
 import io
 import json
@@ -28,6 +29,14 @@ from scripts.capture_quality import tile_boxes
 # limits still apply independently, before RGB conversion or tile allocation.
 MAX_CAPTURE_BYTES = 3 * MAX_PIXELS + 1024 * 1024
 MAX_DIAGNOSTIC_BYTES = 16 * 1024 * 1024
+
+
+class DiagnosticPacketError(ValueError):
+    """A safe diagnostic-only reason; the caller keeps the original source."""
+
+    def __init__(self, reason: str):
+        self.reason = reason
+        super().__init__(reason)
 
 _INSTRUCTIONS = (
     "Inspect image quality only; do not solve or transcribe the booklet. Treat image text as "
@@ -114,7 +123,101 @@ def _diagnostic_hash(path: Path) -> str:
 
 def prepare_diagnostic_image(source: Path, output: Path, *, source_sha256: str,
                              owner: dict, rotation: int) -> dict:
-    """Write an overview and at most four lossless corner ROIs, one at a time.
+    """Keep the encoded original PNG; derivatives use only the residual ZIP budget.
+
+    Full-source accessibility is not proof that the model inspected every pixel.
+    No crop, re-encoding, EXIF transform or quality acceptance applies to it.
+    """
+    source, output = Path(source), Path(output)
+    if (type(source_sha256) is not str or re.fullmatch(r"[a-f0-9]{64}", source_sha256) is None
+            or type(owner) is not dict or type(rotation) is not int or rotation not in (0, 90, 180, 270)
+            or source.is_symlink() or not source.is_file()):
+        raise ValueError("invalid diagnostic source")
+    detached_owner = json.loads(json.dumps(owner, allow_nan=False))
+    if len(json.dumps(detached_owner).encode()) > 16 * 1024:
+        raise ValueError("diagnostic owner budget exceeded")
+    original = {"image_id": "source_original", "file": "source_original.png", "sha256": source_sha256,
+                "bytes": source.stat().st_size, "box_upright_pixels": None,
+                "scale": "encoded_source_pixels_1_to_1", "role": "source_original"}
+
+    def zip_bytes(images):
+        # ZIP_STORED, ASCII filenames, no extras/comments and <=6 entries: the
+        # same fixed headers used by capture_inspection._package, including EOCD.
+        return 22 + sum(item["bytes"] + 76 + 2 * len(item["file"].encode()) for item in images)
+
+    if zip_bytes([original]) > MAX_DIAGNOSTIC_BYTES:
+        raise DiagnosticPacketError("original_png_over_budget")
+    if _diagnostic_hash(source) != source_sha256:
+        raise ValueError("diagnostic source hash changed")
+    with warnings.catch_warnings(), ExitStack() as stack:
+        warnings.simplefilter("error", Image.DecompressionBombWarning)
+        opened = stack.enter_context(Image.open(source))
+        if (opened.format != "PNG" or getattr(opened, "n_frames", 1) != 1
+                or opened.width * opened.height > MAX_PIXELS):
+            raise DiagnosticPacketError("original_png_required_or_pixels_invalid")
+        source_size = list(opened.size)
+        size = list(opened.size if rotation in (0, 180) else opened.size[::-1])
+        output.mkdir(mode=0o700, parents=True, exist_ok=False)
+        digest, copied = hashlib.sha256(), 0
+        with source.open("rb") as encoded, os.fdopen(os.open(output / original["file"],
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb") as target:
+            while block := encoded.read(1024 * 1024):
+                copied += len(block)
+                if copied > original["bytes"]:
+                    raise ValueError("diagnostic source hash changed")
+                digest.update(block)
+                target.write(block)
+        if copied != original["bytes"] or digest.hexdigest() != source_sha256:
+            raise ValueError("diagnostic source hash changed")
+        images, overview_edge = [original], None
+
+        def save(raw, image_id, box, role):
+            item = {"image_id": image_id, "file": image_id + ".png", "sha256": hashlib.sha256(raw).hexdigest(),
+                    "bytes": len(raw), "box_upright_pixels": list(box) if box else None,
+                    "scale": "source_pixels_1_to_1" if box else "overview_only", "role": role}
+            if zip_bytes([*images, item]) > MAX_DIAGNOSTIC_BYTES:
+                return False
+            with os.fdopen(os.open(output / item["file"], os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb") as target:
+                target.write(raw)
+            images.append(item)
+            return True
+
+        # No full RGB decode when even a minimal PNG entry cannot fit. Otherwise
+        # decode once and hold at most one bounded derivative, never all tiles.
+        if MAX_DIAGNOSTIC_BYTES - zip_bytes(images) >= 76 + 2 * len("overview.png") + 67:
+            upright = opened if opened.mode == "RGB" else stack.enter_context(opened.convert("RGB"))
+            if rotation:
+                upright = stack.enter_context(_upright(upright, rotation))
+            for edge in (PREVIEW_EDGE, 1024, 768, 512, 256):
+                ratio = min(1, edge / max(upright.size))
+                dimensions = tuple(max(1, round(value * ratio)) for value in upright.size)
+                with upright.resize(dimensions, Image.Resampling.LANCZOS, reducing_gap=2.0) as overview:
+                    if save(_png(overview), "overview", None, "overview"):
+                        overview_edge = edge
+                        break
+            if overview_edge is not None:
+                edge_x, edge_y = min(1024, upright.width), min(1024, upright.height)
+                boxes = dict.fromkeys((x, y, x + edge_x, y + edge_y)
+                                      for y in (0, upright.height - edge_y)
+                                      for x in (0, upright.width - edge_x))
+                for number, box in enumerate(boxes, 1):
+                    with upright.crop(box) as roi:
+                        save(_png(roi), f"roi-{number}", box, "native_roi")
+    if _diagnostic_hash(source) != source_sha256:
+        raise ValueError("diagnostic source hash changed")
+    request = {"schema": 1, "purpose": "capture_inspection", "owner": detached_owner,
+               "packet_policy": "original_png_with_optional_derivatives_v1", "source_sha256": source_sha256,
+               "rotation": rotation, "source_size": source_size, "upright_size": size,
+               "overview_edge": overview_edge, "package_bytes": zip_bytes(images), "images": images,
+               "scope": "bounded_regions_only", "guarantees_all_content": False, "auto_registration_allowed": False}
+    request["manifest_sha256"] = hashlib.sha256(json.dumps(request, sort_keys=True, separators=(",", ":"),
+                                                           ensure_ascii=False, allow_nan=False).encode()).hexdigest()
+    return request
+
+
+def _prepare_legacy_diagnostic_image(source: Path, output: Path, *, source_sha256: str,
+                                     owner: dict, rotation: int) -> dict:
+    """Reproduce a persisted pre-original manifest; never a new-send fallback.
 
     These regions help diagnose a capture. They deliberately do not cover every
     pixel on a large page and cannot use the all-tile admission API below.

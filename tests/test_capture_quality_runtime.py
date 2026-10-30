@@ -4,6 +4,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import io
+import zipfile
 
 import pytest
 from PIL import Image, ImageChops
@@ -20,22 +21,134 @@ def test_diagnostic_packet_is_bounded_lossless_and_cannot_admit_a_page(tmp_path,
     source = tmp_path / "original.png"
     with Image.new("RGB", (2200, 1700), "white") as image:
         image.putpixel((2199, 1699), (17, 29, 31))
+        image.putpixel((1100, 850), (73, 91, 117))
         image.save(source)
     digest = hashlib.sha256(source.read_bytes()).hexdigest()
     monkeypatch.setattr(quality, "tile_boxes", lambda *a, **k: pytest.fail("all tiles allocated"))
     packet = quality.prepare_diagnostic_image(source, tmp_path / "packet", source_sha256=digest,
                                               owner={"capture_id": "actual-capture"}, rotation=0)
-    assert 2 <= len(packet["images"]) <= 5
+    assert 2 <= len(packet["images"]) <= 6
     assert packet["scope"] == "bounded_regions_only"
     assert packet["guarantees_all_content"] is False
     assert packet["auto_registration_allowed"] is False
     assert sum((tmp_path / "packet" / item["file"]).stat().st_size for item in packet["images"]) <= 16 * 1024 * 1024
+    original_entry = packet["images"][0]
+    assert original_entry["role"] == "source_original"
+    assert original_entry["sha256"] == digest
+    assert (tmp_path / "packet" / original_entry["file"]).read_bytes() == source.read_bytes()
     with Image.open(source) as original:
-        for item in packet["images"][1:]:
+        for item in packet["images"]:
+            if item["role"] != "native_roi":
+                continue
             with Image.open(tmp_path / "packet" / item["file"]) as roi, original.crop(item["box_upright_pixels"]) as crop:
                 assert max(roi.size) <= 1024
                 assert ImageChops.difference(roi, crop).getbbox() is None
+        assert not any(item["box_upright_pixels"][0] <= 1100 < item["box_upright_pixels"][2]
+                       and item["box_upright_pixels"][1] <= 850 < item["box_upright_pixels"][3]
+                       for item in packet["images"] if item["role"] == "native_roi")
+    from app.capture_inspection import _package
+    file = list(_package(packet, tmp_path / "packet"))[0]
+    assert len(file["buffer"]) == packet["package_bytes"]
+    with zipfile.ZipFile(io.BytesIO(file["buffer"])) as archive:
+        raw = archive.read(original_entry["file"])
+        assert raw == source.read_bytes()
+        with Image.open(io.BytesIO(raw)) as reachable:
+            assert reachable.getpixel((1100, 850)) == (73, 91, 117)
     assert hashlib.sha256(source.read_bytes()).hexdigest() == digest
+
+
+def test_diagnostic_budget_shrinks_only_overview_and_omits_optional_rois(tmp_path, monkeypatch):
+    from app import capture_quality as quality, capture_inspection as inspection
+    source = tmp_path / "original.png"
+    with Image.effect_noise((1600, 1200), 64).convert("RGB") as image:
+        image.save(source)
+    raw = source.read_bytes()
+    digest = hashlib.sha256(raw).hexdigest()
+    full = quality.prepare_diagnostic_image(source, tmp_path / "full", source_sha256=digest, owner={}, rotation=0)
+    overview = next(item for item in full["images"] if item["role"] == "overview")
+    original = full["images"][0]
+    # ZIP_STORED: EOCD=22, each local+central entry=76+2*filename bytes.
+    budget = 22 + sum(item["bytes"] + 76 + 2 * len(item["file"].encode())
+                      for item in (original, overview)) - 1
+    monkeypatch.setattr(quality, "MAX_DIAGNOSTIC_BYTES", budget)
+    monkeypatch.setattr(inspection, "MAX_DIAGNOSTIC_BYTES", budget)
+    packet = quality.prepare_diagnostic_image(source, tmp_path / "bounded", source_sha256=digest, owner={}, rotation=0)
+    assert [item["role"] for item in packet["images"]] == ["source_original", "overview"]
+    overview = packet["images"][1]
+    with Image.open(tmp_path / "bounded" / overview["file"]) as image:
+        assert max(image.size) == 1024
+    assert (tmp_path / "bounded" / original["file"]).read_bytes() == raw
+    assert len(list(inspection._package(packet, tmp_path / "bounded"))[0]["buffer"]) <= budget
+
+
+def test_diagnostic_original_zip_boundary_is_checked_before_decode(tmp_path, monkeypatch):
+    from app import capture_quality as quality, capture_inspection as inspection
+    source = tmp_path / "original.png"
+    source.write_bytes(photo())
+    raw = source.read_bytes()
+    digest = hashlib.sha256(raw).hexdigest()
+    exact = len(raw) + 22 + 76 + 2 * len("source_original.png")
+    monkeypatch.setattr(quality, "MAX_DIAGNOSTIC_BYTES", exact)
+    monkeypatch.setattr(inspection, "MAX_DIAGNOSTIC_BYTES", exact)
+    packet = quality.prepare_diagnostic_image(source, tmp_path / "exact", source_sha256=digest, owner={}, rotation=0)
+    assert [item["role"] for item in packet["images"]] == ["source_original"]
+    assert len(list(inspection._package(packet, tmp_path / "exact"))[0]["buffer"]) == exact
+    monkeypatch.setattr(quality, "MAX_DIAGNOSTIC_BYTES", exact - 1)
+    monkeypatch.setattr(quality.Image, "open", lambda *a, **k: pytest.fail("over-budget original decoded"))
+    with pytest.raises(ValueError, match="original_png_over_budget"):
+        quality.prepare_diagnostic_image(source, tmp_path / "over", source_sha256=digest, owner={}, rotation=0)
+    assert not (tmp_path / "over").exists()
+    assert source.read_bytes() == raw
+
+
+@pytest.mark.parametrize("rotation,transpose", [
+    (0, None), (90, Image.Transpose.ROTATE_270),
+    (180, Image.Transpose.ROTATE_180), (270, Image.Transpose.ROTATE_90),
+])
+def test_diagnostic_rotation_changes_derivatives_but_never_original_png(tmp_path, rotation, transpose):
+    from app import capture_quality as quality
+    source = tmp_path / "original.png"
+    raw = photo()  # Contains EXIF rotation=6, which must not be applied again.
+    source.write_bytes(raw)
+    packet = quality.prepare_diagnostic_image(source, tmp_path / "packet", source_sha256=hashlib.sha256(raw).hexdigest(),
+                                              owner={}, rotation=rotation)
+    assert (tmp_path / "packet" / packet["images"][0]["file"]).read_bytes() == raw
+    assert packet["rotation"] == rotation and packet["source_size"] == [537, 301]
+    with Image.open(io.BytesIO(raw)) as original:
+        with original.transpose(transpose) if transpose else original.copy() as upright:
+            assert packet["upright_size"] == list(upright.size)
+            for item in packet["images"][1:]:
+                with Image.open(tmp_path / "packet" / item["file"]) as image:
+                    assert ImageChops.difference(image, upright).getbbox() is None
+
+
+def test_diagnostic_remaining_budget_can_include_one_optional_native_roi(tmp_path, monkeypatch):
+    from app import capture_quality as quality, capture_inspection as inspection
+    source = tmp_path / "original.png"
+    with Image.new("RGB", (2200, 1700), "white") as image:
+        image.putpixel((1100, 850), (20, 33, 90))
+        image.save(source)
+    digest = hashlib.sha256(source.read_bytes()).hexdigest()
+    full = quality.prepare_diagnostic_image(source, tmp_path / "full", source_sha256=digest, owner={}, rotation=0)
+    budget = 22 + sum(item["bytes"] + 76 + 2 * len(item["file"].encode()) for item in full["images"][:3])
+    monkeypatch.setattr(quality, "MAX_DIAGNOSTIC_BYTES", budget)
+    monkeypatch.setattr(inspection, "MAX_DIAGNOSTIC_BYTES", budget)
+    packet = quality.prepare_diagnostic_image(source, tmp_path / "bounded", source_sha256=digest, owner={}, rotation=0)
+    assert [item["role"] for item in packet["images"]] == ["source_original", "overview", "native_roi"]
+    assert packet["images"][0]["sha256"] == digest
+    assert len(list(inspection._package(packet, tmp_path / "bounded"))[0]["buffer"]) == budget
+
+
+def test_diagnostic_will_not_replace_original_jpeg_with_a_converted_png(tmp_path):
+    from app import capture_quality as quality
+    source = tmp_path / "source.jpg"
+    with Image.new("RGB", (32, 24), "white") as image:
+        image.save(source)
+    raw = source.read_bytes()
+    with pytest.raises(ValueError, match="original_png_required"):
+        quality.prepare_diagnostic_image(source, tmp_path / "packet", source_sha256=hashlib.sha256(raw).hexdigest(),
+                                          owner={}, rotation=0)
+    assert source.read_bytes() == raw and not (tmp_path / "packet").exists()
 
 
 def test_diagnostic_packet_rejects_changed_source_and_invalid_roi_before_output(tmp_path):

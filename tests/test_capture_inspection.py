@@ -1,11 +1,14 @@
 """Opt-in source-bound diagnostics; no device, account or model calls."""
 import hashlib
+import io
 import json
 from pathlib import Path
 import sqlite3
 import threading
+import zipfile
 
 import pytest
+from PIL import Image
 
 from app.work_bridge import WorkStore
 from tests.test_work_bridge import client as _client_fixture
@@ -165,6 +168,92 @@ def test_native_worker_inspects_during_capture_and_result_is_never_quality_appro
     assert not service.process_one()
 
 
+def test_native_diagnostic_zip_exposes_the_unchanged_original_in_one_call(native_task):
+    from app import capture_inspection as inspection
+    _, config, receipt, _, task = native_task
+    raw = Path(receipt["image_path"]).read_bytes()
+
+    class OriginalClient(DiagnosticClient):
+        def complete_inspection(self, **kwargs):
+            request = json.loads(kwargs["prompt"].split("\nInspection request:\n")[1])
+            assert "source_original" in kwargs["prompt"]
+            assert "zoom" in kwargs["prompt"]
+            original = request["images"][0]
+            assert original["role"] == "source_original"
+            assert original["sha256"] == receipt["canonical_image_sha256"]
+            files = list(kwargs["files"]())
+            assert len(files) == 1
+            assert len(files[0]["buffer"]) == request["package_bytes"]
+            with zipfile.ZipFile(io.BytesIO(files[0]["buffer"])) as archive:
+                assert archive.read(original["file"]) == raw
+            return super().complete_inspection(**kwargs)
+
+    checker = OriginalClient()
+    service = inspection.InspectionService(WorkStore(config.DATA_DIR), client_factory=lambda: checker, answer_pending=lambda: False)
+    assert service.process_one()
+    result = service.store.get_capture_inspection(task["inspection_id"])
+    assert checker.calls == 1 and result["status"] == "completed"
+    assert result["result"]["all_pages_or_characters_verified"] is False
+    assert service.store.list_jobs()["jobs"] == []
+    assert Path(receipt["image_path"]).read_bytes() == raw
+
+
+def _legacy_native_request(receipt, capture_owner):
+    """Historical v1 shape: the tiny fixture's overview and sole ROI are identical."""
+    from app import capture_inspection as inspection
+    raw = Path(receipt["image_path"]).read_bytes()
+    with Image.open(io.BytesIO(raw)) as source:
+        assert max(source.size) < 1024 and source.mode == "RGB"
+        size = list(source.size)
+    images = [{"image_id": name, "file": name + ".png", "sha256": hashlib.sha256(raw).hexdigest(),
+               "bytes": len(raw), "box_upright_pixels": [0, 0, *size] if name == "roi-1" else None,
+               "scale": "source_pixels_1_to_1" if name == "roi-1" else "overview_only"}
+              for name in ("overview", "roi-1")]
+    request = {"schema": 1, "purpose": "capture_inspection", "owner": capture_owner,
+               "source_sha256": receipt["canonical_image_sha256"], "rotation": 0, "upright_size": size,
+               "images": images, "scope": "bounded_regions_only", "guarantees_all_content": False,
+               "auto_registration_allowed": False,
+               "requested_settings": {"model": "gpt-6-luna", "effort": "high", "speed": "fast"}}
+    return {**request, "manifest_sha256": inspection._sha(request)}
+
+
+def test_legacy_prepared_manifest_is_reproduced_without_inserting_an_original(native_task):
+    from app import capture_inspection as inspection
+    _, config, receipt, _, task = native_task
+    store = WorkStore(config.DATA_DIR)
+    old = _legacy_native_request(receipt, task["owner"])
+    part_id = inspection._sha({"inspection_id": task["inspection_id"], "owner": task["owner"]})
+    store.prepare_capture_inspection_part(task["inspection_id"], part_id, old)
+
+    class LegacyClient(DiagnosticClient):
+        def complete_inspection(self, **kwargs):
+            request = json.loads(kwargs["prompt"].split("\nInspection request:\n")[1])
+            assert request == old
+            assert "ONLY the supplied overview and bounded native-pixel regions" in kwargs["prompt"]
+            return super().complete_inspection(**kwargs)
+
+    checker = LegacyClient()
+    assert inspection.InspectionService(store, client_factory=lambda: checker, answer_pending=lambda: False).process_one()
+    assert checker.calls == 1
+    assert store.get_capture_inspection(task["inspection_id"])["status"] == "completed"
+    assert store.get_capture_inspection_part(part_id)["request"] == old
+
+
+def test_over_budget_original_is_unknown_without_sending_or_modifying_source(native_task, monkeypatch):
+    from app import capture_inspection as inspection, capture_quality as quality
+    _, config, receipt, _, task = native_task
+    source = Path(receipt["image_path"])
+    raw = source.read_bytes()
+    monkeypatch.setattr(quality, "MAX_DIAGNOSTIC_BYTES", len(raw) + 22 + 76 + 2 * len("source_original.png") - 1)
+    checker = DiagnosticClient()
+    service = inspection.InspectionService(WorkStore(config.DATA_DIR), client_factory=lambda: checker, answer_pending=lambda: False)
+    assert service.process_one()
+    result = service.store.get_capture_inspection(task["inspection_id"])
+    assert result["status"] == "unknown" and result["reason"] == "original_png_over_budget"
+    assert checker.calls == 0 and source.read_bytes() == raw
+    assert service.store.list_jobs()["jobs"] == []
+
+
 def test_postcommit_queue_reaches_shared_work_writer_and_bound_get_on_local_dom(native_task, page, monkeypatch):
     from app import capture_inspection as inspection
     from app.solvers import cdp, chatgpt_web
@@ -214,6 +303,34 @@ def test_pending_stale_inspection_retires_late_reply_without_another_local_send(
     assert service.process_one()
     saved = service.store.get_capture_inspection(task["inspection_id"])
     assert saved["status"] == "unknown" and saved["reason"] == "retired_read_only"
+    assert page.evaluate("window.sent") == 1 and _guard_state() == "idle"
+
+
+@pytest.mark.parametrize("legacy", [True, False])
+def test_uncertain_diagnostic_replays_exact_prepared_manifest_without_another_send(native_task, page, monkeypatch, legacy):
+    from app import capture_inspection as inspection
+    from app.solvers import cdp, chatgpt_web
+    from tests.test_chatgpt_work_web import _Context, _VenueTab, _diagnostic_composer, _guard_state
+    _, config, receipt, _, task = native_task
+    store = WorkStore(config.DATA_DIR)
+    part_id = inspection._sha({"inspection_id": task["inspection_id"], "owner": task["owner"]})
+    if legacy:
+        store.prepare_capture_inspection_part(task["inspection_id"], part_id, _legacy_native_request(receipt, task["owner"]))
+    _diagnostic_composer(page)
+    page.evaluate("window.suppressFinal=true")
+    for name, value in (("POLL_S", 0.001), ("RETRY_BACKOFF_S", 0), ("TIMEOUT_S", 0.2), ("REPLY_START_S", 0.05)):
+        monkeypatch.setattr(chatgpt_web, name, value)
+    monkeypatch.setattr(cdp, "connect_over_cdp", lambda endpoint: type("LocalBrowser", (), {
+        "contexts": [_Context(_VenueTab(page))], "close": lambda self: None})())
+    assert inspection.InspectionService(store, answer_pending=lambda: False).process_one() is False
+    prepared = store.get_capture_inspection_part(part_id)["request"]
+    assert ("packet_policy" not in prepared) is legacy
+    assert store.get_capture_inspection(task["inspection_id"])["status"] == "uncertain"
+    assert page.evaluate("window.sent") == 1 and _guard_state() == "uncertain"
+    page.evaluate("window.finish()")
+    assert inspection.InspectionService(store, answer_pending=lambda: False).process_one()
+    assert store.get_capture_inspection(task["inspection_id"])["status"] == "completed"
+    assert store.get_capture_inspection_part(part_id)["request"] == prepared
     assert page.evaluate("window.sent") == 1 and _guard_state() == "idle"
 
 

@@ -207,9 +207,12 @@ and uncertain-send safeguards remain independent of model-name fallback.
   worker streams the sealed original and retains the exact envelope and receipt.
   Stale generations, changed local artifacts and uncertain responses cannot
   acknowledge a transfer. Camera stop and ordinary page uploads do not wait for it.
-  Optional phone-side capture inspection uses source references, one overview
-  and at most four native-pixel regions through the existing Work writer and
-  uncertain-send journal. Exact decoded-video candidates share that diagnostic
+  Optional phone-side capture inspection keeps the unchanged original PNG in
+  each new diagnostic packet, with one overview and at most four native-pixel
+  regions when the bounded packet budget permits. An original exceeding that
+  comparison budget is retained as unknown; prepared or uncertain old manifests
+  are preserved. It uses the existing Work writer and uncertain-send journal.
+  Exact decoded-video candidates share that diagnostic
   queue. A current-run origin is fixed before capture; restored legacy originals
   remain usable without invented generations. Results never authorize automatic
   retakes, quality acceptance or wake. PRIVATE reprocessing and live AI inspection
