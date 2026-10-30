@@ -73,6 +73,16 @@ final class GlassesCaptureSurface implements CaptureSurface {
 
     @Override public void resetPageDetection() { if (camera != null) camera.resetPages(); }
 
+    @Override public boolean supportsFuturePages() { return camera != null; }
+
+    @Override public void observeFuturePages(int capacity, FuturePageListener listener) {
+        if (camera != null && !closed) camera.observeFuturePages(capacity, listener);
+    }
+
+    @Override public void stopFuturePages(Runnable idle) {
+        if (camera == null) idle.run(); else camera.stopFuturePages(idle);
+    }
+
     void showLivePreview(Bitmap bitmap) {
         Bitmap rotated = orient(bitmap, rotationDegrees);
         main.post(() -> {
@@ -222,11 +232,15 @@ final class GlassesCaptureSurface implements CaptureSurface {
 
     /** Acknowledges an observed end gesture without re-decoding or re-arming review. */
     void showCaptureEndRequested() {
+        showCaptureReviewNotice("終了待ち");
+    }
+
+    @Override public void showCaptureReviewNotice(String notice) {
         long generation = generations.get();
         main.post(() -> {
             if (!closed && generation == generations.get() && preview != null
                     && visibleReview == generation) {
-                hud.showReviewNotice("終了待ち");
+                hud.showReviewNotice(notice);
             }
         });
     }

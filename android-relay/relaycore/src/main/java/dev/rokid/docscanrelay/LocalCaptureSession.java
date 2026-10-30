@@ -62,6 +62,13 @@ final class LocalCaptureSession {
                     || result.listening() != !"written".equals(result.examType())) throw new IOException("試験形式が不正です");
             Phase.valueOf(state.getProperty("resume_phase"));
             for (int index = 0; index < result.pageCount(); index++) result.page(index);
+            if (result.candidateCount() < 0 || result.candidateCount() > 2) throw new IOException("保存候補数が不正です");
+            for (int index = 0; index < result.candidateCount(); index++) result.candidateName(index);
+            if (Boolean.parseBoolean(state.getProperty("candidate.issued", "false"))
+                    || Boolean.parseBoolean(state.getProperty("candidate.observing", "false"))) {
+                // Observation/preparation may already have missed a scene before a native request exists.
+                state.setProperty("capture.gap", "true");
+            }
             return result;
         } catch (IllegalArgumentException | NullPointerException invalid) {
             throw new IOException("保存記録の形式が不正です");
@@ -79,11 +86,51 @@ final class LocalCaptureSession {
     synchronized boolean audioAttachPending() { return mixed() && audioComplete() && sessionId() > 0 && !Boolean.parseBoolean(state.getProperty("audio_attached", "false")); }
     synchronized void acknowledgeAudio() throws IOException { update("audio_attached", "true"); }
     synchronized int pageCount() { return Integer.parseInt(state.getProperty("count")); }
+    synchronized int candidateCount() { return Integer.parseInt(state.getProperty("candidate.count", "0")); }
+    synchronized boolean captureGap() { return Boolean.parseBoolean(state.getProperty("capture.gap", "false")); }
+    synchronized void markCaptureGap() throws IOException {
+        try { update("capture.gap", "true"); }
+        finally { state.setProperty("capture.gap", "true"); }
+    }
+    synchronized void resolveCaptureGap() throws IOException {
+        Properties next = copy();
+        next.setProperty("capture.gap", "false");
+        next.remove("candidate.issued");
+        next.remove("candidate.observing");
+        save(next);
+    }
+
+    synchronized void beginCandidateObservation() throws IOException {
+        if (phase() != Phase.CAPTURE || captureGap()) throw new IOException("撮影候補の観測を開始できません");
+        if (!Boolean.parseBoolean(state.getProperty("candidate.observing", "false"))) {
+            update("candidate.observing", "true");
+        }
+    }
+
+    /** Only the camera's successful idle barrier may resolve an uninterrupted observation. */
+    synchronized void finishCandidateObservation() throws IOException {
+        if (captureGap() || !Boolean.parseBoolean(state.getProperty("candidate.observing", "false"))) return;
+        if (Boolean.parseBoolean(state.getProperty("candidate.issued", "false"))) {
+            throw new IOException("撮影候補の原本保存が未確認です");
+        }
+        Properties next = copy();
+        next.remove("candidate.observing");
+        save(next);
+    }
+
+    synchronized void beginCandidate() throws IOException {
+        if (phase() != Phase.CAPTURE || captureGap() || candidateCount() >= 2
+                || Boolean.parseBoolean(state.getProperty("candidate.issued", "false"))) {
+            throw new IOException("撮影候補を開始できません");
+        }
+        update("candidate.issued", "true");
+    }
     synchronized long documentId() { return Long.parseLong(state.getProperty("document")); }
     synchronized long sessionId() { return Long.parseLong(state.getProperty("session")); }
     synchronized Phase phase() { return Phase.valueOf(state.getProperty("phase")); }
     synchronized boolean unfinished() {
-        return (phase() == Phase.CLOSED ? Phase.valueOf(state.getProperty("resume_phase")) : phase()) != Phase.REVIEW
+        return candidateCount() > 0 || captureGap()
+                || (phase() == Phase.CLOSED ? Phase.valueOf(state.getProperty("resume_phase")) : phase()) != Phase.REVIEW
                 || (mixed() && !Boolean.parseBoolean(state.getProperty("audio_attached", "false")));
     }
 
@@ -151,6 +198,95 @@ final class LocalCaptureSession {
         // The revision hash includes native provenance when present. Old revisions remain;
         // only the atomic manifest chooses the current original and its exact association.
         save(next);
+    }
+
+    /** Candidate files use the unchanged review record; only accepted pages reach page.*. */
+    synchronized void retainCandidate(CaptureReviewStore.Pending pending) throws IOException {
+        checkProvenance(pending);
+        File incoming = new File(directory, "incoming-" + UUID.randomUUID() + ".bin");
+        CaptureReviewPersistence persistence = new CaptureReviewPersistence(incoming);
+        persistence.save(pending);
+        if (!persistence.matches(pending)) throw new IOException("撮影候補の保存検証に失敗しました");
+        String name = "c-" + pending.pageIndex + "-" + digest(incoming) + ".bin";
+        CaptureReviewPersistence.moveReplacing(incoming, new File(directory, name));
+        Properties next = copy();
+        next.remove("candidate.issued");
+        if (candidateCount() >= 2) {
+            // An unexpected late original is retained too, but cannot bypass the bounded review queue.
+            next.setProperty("capture.gap", "true");
+            next.setProperty("candidate.unresolved", name);
+            save(next);
+            throw new IOException("撮影候補が満杯です。原本は保持しています");
+        }
+        next.setProperty("candidate." + candidateCount(), name);
+        next.setProperty("candidate.count", Integer.toString(candidateCount() + 1));
+        if (pending.hasOcrFailure() || phase() != Phase.CAPTURE) next.setProperty("capture.gap", "true");
+        save(next);
+    }
+
+    synchronized int nextCandidatePageIndex() throws IOException {
+        int index = pageCount();
+        if (candidateCount() > 0) index = Math.max(index, readCandidate(candidateCount() - 1).pageIndex + 1);
+        File pendingFile = new File(directory, "pending.bin");
+        if (pendingFile.isFile()) {
+            CaptureReviewStore.Pending pending = new CaptureReviewPersistence(pendingFile).readPending();
+            index = Math.max(index, pending.pageIndex + 1);
+        }
+        if (index >= 1000) throw new IOException("撮影候補のページ数が上限です");
+        return index;
+    }
+
+    synchronized CaptureReviewStore.Pending promoteCandidate() throws IOException {
+        if (phase() != Phase.CAPTURE || candidateCount() == 0) return null;
+        File pendingFile = new File(directory, "pending.bin");
+        if (pendingFile.isFile() && !contains(new CaptureReviewPersistence(pendingFile).readPending())) {
+            throw new IOException("表示中の写真を先に確認してください");
+        }
+        CaptureReviewStore.Pending pending = readCandidate(0);
+        if (pending.pageIndex != pageCount()) throw new IOException("撮影候補の順序を確認してください");
+        new CaptureReviewPersistence(pendingFile).save(pending);
+        removeFirstCandidate();
+        return pending;
+    }
+
+    /** A crash between the pending rename and atomic state update must not show a candidate twice. */
+    synchronized void reconcileCandidates() throws IOException {
+        if (candidateCount() == 0) return;
+        File pendingFile = new File(directory, "pending.bin");
+        CaptureReviewPersistence displayed = new CaptureReviewPersistence(pendingFile);
+        while (candidateCount() > 0) {
+            CaptureReviewStore.Pending first = readCandidate(0);
+            if (!contains(first) && (!pendingFile.isFile() || !displayed.matches(first))) break;
+            removeFirstCandidate();
+        }
+    }
+
+    private void removeFirstCandidate() throws IOException {
+        Properties next = copy();
+        int count = candidateCount();
+        for (int index = 1; index < count; index++) next.setProperty("candidate." + (index - 1), candidateName(index));
+        next.remove("candidate." + (count - 1));
+        next.setProperty("candidate.count", Integer.toString(count - 1));
+        save(next);
+    }
+
+    private String candidateName(int slot) throws IOException {
+        String name = state.getProperty("candidate." + slot, "");
+        if (slot < 0 || slot >= candidateCount() || !name.matches("c-[0-9]{1,3}-[0-9a-f]{64}\\.bin")) {
+            throw new IOException("撮影候補の参照が不正です");
+        }
+        return name;
+    }
+
+    private CaptureReviewStore.Pending readCandidate(int slot) throws IOException {
+        String name = candidateName(slot);
+        File file = new File(directory, name);
+        CaptureReviewStore.Pending pending = new CaptureReviewPersistence(file).readPending();
+        if (!name.equals("c-" + pending.pageIndex + "-" + digest(file) + ".bin")) {
+            throw new IOException("撮影候補の破損を検出しました");
+        }
+        checkProvenance(pending);
+        return pending;
     }
 
     synchronized void acknowledge(Page page) throws IOException {

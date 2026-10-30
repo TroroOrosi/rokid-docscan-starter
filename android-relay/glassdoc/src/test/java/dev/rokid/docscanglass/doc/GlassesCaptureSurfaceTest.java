@@ -26,6 +26,26 @@ import org.robolectric.util.ReflectionHelpers;
 @Config(sdk = 32, manifest = Config.NONE)
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 public class GlassesCaptureSurfaceTest {
+    @Test public void anUnresolvedSceneNoticeKeepsTheOriginalAndItsExistingVisibilityAcknowledgement() {
+        Bitmap source = Bitmap.createBitmap(80, 120, Bitmap.Config.RGB_565);
+        ByteArrayOutputStream encoded = new ByteArrayOutputStream();
+        source.compress(Bitmap.CompressFormat.JPEG, 80, encoded); source.recycle();
+        HudView hud = new HudView(RuntimeEnvironment.getApplication());
+        GlassesCaptureSurface surface = new GlassesCaptureSurface(RuntimeEnvironment.getApplication(), null, hud,
+                new Handler(Looper.getMainLooper()), (generation, purpose) -> { });
+        long generation = surface.showCaptureReview(encoded.toByteArray(), 270, List.of());
+        ShadowLooper.runUiThreadTasksIncludingDelayedTasks();
+        Bitmap displayed = ReflectionHelpers.getField(hud, "preview");
+        Object frame = ReflectionHelpers.getField(hud, "visibleFrame");
+        ReflectionHelpers.setField(surface, "visibleReview", generation);
+        surface.showCaptureReviewNotice("タップで撮り直し");
+        ShadowLooper.runUiThreadTasksIncludingDelayedTasks();
+        org.junit.Assert.assertSame(displayed, ReflectionHelpers.getField(hud, "preview"));
+        org.junit.Assert.assertSame(frame, ReflectionHelpers.getField(hud, "visibleFrame"));
+        assertTrue(surface.isCaptureReviewVisible(generation));
+        assertEquals(List.of("タップで撮り直し"), ReflectionHelpers.getField(hud, "lines"));
+        surface.close();
+    }
     @Test public void liveAndReviewKeepTheSameFourCornersAfterEverySupportedRotation() {
         Bitmap source = Bitmap.createBitmap(320, 240, Bitmap.Config.ARGB_8888);
         Canvas canvas = new Canvas(source);

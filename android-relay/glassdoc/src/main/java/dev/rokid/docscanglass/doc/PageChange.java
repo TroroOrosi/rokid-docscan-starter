@@ -8,9 +8,10 @@ final class PageChange {
     private byte[] previous;
     private long changedAt;
     private boolean pending = true;
+    private long sequence;
 
     void observe(byte[] pixels, long now) {
-        if (previous == null || previous.length != pixels.length) changedAt = now;
+        if (previous == null || previous.length != pixels.length) { changedAt = now; sequence++; }
         else {
             long sum = 0;
             for (int i = 0; i < pixels.length; i++) sum += (pixels[i] & 255) - (previous[i] & 255);
@@ -22,6 +23,7 @@ final class PageChange {
             if (changed * 5 >= pixels.length) {
                 pending = true;
                 changedAt = now;
+                sequence++;
             }
         }
         // Preview producers may reuse their array after this observation.
@@ -31,4 +33,5 @@ final class PageChange {
 
     boolean ready(long now) { return previous != null && pending && now - changedAt >= STILL_MILLIS; }
     void consumed() { pending = false; }
+    long sequence() { return sequence; }
 }

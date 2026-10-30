@@ -24,6 +24,197 @@ import org.robolectric.annotation.Config;
 @RunWith(RobolectricTestRunner.class)
 @Config(sdk = 32, manifest = Config.NONE)
 public class LocalReviewTest {
+    @Test public void reviewKeepsTwoUnseenOriginalsAndEachGetsItsOwnVisibleThreeSecondsAfterRestart() throws Exception {
+        Context context = RuntimeEnvironment.getApplication();
+        Surface surface = new Surface(); surface.futureEnabled = true; surface.holdForPage = true;
+        DocScanController controller = localWithOriginal(context, surface);
+        String id = ((LocalCaptureSession)get(controller, "localSession")).id();
+        byte[] second = {4, 5, 6}, third = {7, 8, 9};
+        CaptureProvenance b = nativeSource(second, 200), c = nativeSource(third, 300);
+        try {
+            surface.visible = true; controller.onCustomViewAvailable(1, "capture-review"); barrier(controller);
+            assertNotNull("review ACK starts native future observation", surface.future);
+            assertTrue(surface.future.onCaptureStarting());
+            surface.future.onCandidate(second, b, true); barrier(controller);
+            assertTrue(surface.future.onCaptureStarting());
+            surface.future.onCandidate(third, c, true); barrier(controller);
+            LocalCaptureSession saved = (LocalCaptureSession)get(controller, "localSession");
+            assertEquals(2, saved.candidateCount()); assertEquals(0, saved.pageCount());
+            assertArrayEquals(new byte[]{1, 2, 3}, ((CaptureReviewStore)get(controller, "captureReview")).peek().jpeg);
+            assertNull(saved.nextUnsent());
+            // A newly loaded session cannot assume the still-running observer stopped without a missed scene.
+            assertTrue(LocalCaptureSession.load(new File(context.getFilesDir(), "local-scans"), id).captureGap());
+            commitVisible(controller, surface);
+            assertEquals(1, saved.pageCount());
+            assertArrayEquals(second, ((CaptureReviewStore)get(controller, "captureReview")).peek().jpeg);
+            assertEquals(1, saved.candidateCount());
+        } finally { controller.close(); }
+        Surface restoredSurface = new Surface(); restoredSurface.futureEnabled = true; restoredSurface.holdForPage = true;
+        DocScanController restored = new DocScanController(context, restoredSurface, null,
+                (state, lines, diagnostic) -> {}, new ClientIdentity("test", "test", "test"));
+        try {
+            restored.configureForLocalStart("http://phone:8000", "", 270); barrier(restored);
+            set(restored, "localNetworkBusy", true);
+            restored.showPendingCaptureReview(); barrier(restored);
+            LocalCaptureSession saved = (LocalCaptureSession)get(restored, "localSession");
+            assertEquals(id, saved.id());
+            CaptureReviewStore.Pending pending = ((CaptureReviewStore)get(restored, "captureReview")).peek();
+            assertEquals(b.captureId, pending.provenance.captureId);
+            assertEquals(b.jpegSha256, pending.provenance.jpegSha256);
+            assertEquals(b.imageTimestampNanos, pending.provenance.imageTimestampNanos);
+            restored.confirmPendingCapture(); barrier(restored);
+            assertEquals(1, saved.pageCount());
+            commitVisible(restored, restoredSurface);
+            assertEquals(2, saved.pageCount());
+            assertEquals(c.captureId, ((CaptureReviewStore)get(restored, "captureReview")).peek().provenance.captureId);
+            assertEquals("C is still unregistered", 2, saved.pageCount());
+            commitVisible(restored, restoredSurface); assertEquals(3, saved.pageCount());
+            assertArrayEquals(third, saved.read(saved.page(2)).jpeg);
+        } finally { restored.close(); }
+    }
+
+    @Test public void overflowAndOldSceneCannotSilentlyFinishOrReplaceTheTwoPreservedCandidates() throws Exception {
+        Surface surface = new Surface(); surface.futureEnabled = true; surface.holdForPage = true;
+        DocScanController controller = localWithOriginal(RuntimeEnvironment.getApplication(), surface);
+        try {
+            surface.visible = true; controller.onCustomViewAvailable(1, "capture-review"); barrier(controller);
+            assertTrue(surface.future.onCaptureStarting());
+            surface.future.onCandidate(new byte[]{4, 5, 6}, nativeSource(new byte[]{4, 5, 6}, 200), true);
+            barrier(controller);
+            assertTrue(surface.future.onCaptureStarting());
+            surface.future.onCandidate(new byte[]{7, 8, 9}, nativeSource(new byte[]{7, 8, 9}, 300), true);
+            barrier(controller); surface.future.onPageMissed(); barrier(controller);
+            LocalCaptureSession saved = (LocalCaptureSession)get(controller, "localSession");
+            assertTrue(saved.captureGap()); assertEquals(2, saved.candidateCount());
+            controller.onGlassesAction(GlassesInputAction.BACK); barrier(controller);
+            commitVisible(controller, surface); commitVisible(controller, surface); commitVisible(controller, surface);
+            assertEquals(3, saved.pageCount());
+            assertEquals(LocalCaptureSession.Phase.CAPTURE, saved.phase());
+            assertEquals(RelayState.READING, controller.getState());
+            assertTrue(saved.captureGap());
+            controller.finishReading(); barrier(controller);
+            assertEquals(LocalCaptureSession.Phase.CAPTURE, saved.phase());
+            assertEquals(0, surface.photos);
+        } finally { controller.close(); }
+    }
+
+    @Test public void aRetakeWaitsForTheNativeCandidateAndFailureFencesLateDeliveryWithoutErasingIt() throws Exception {
+        Surface surface = new Surface(); surface.futureEnabled = true; surface.holdForPage = true;
+        DocScanController controller = localWithOriginal(RuntimeEnvironment.getApplication(), surface);
+        try {
+            surface.visible = true; controller.onCustomViewAvailable(1, "capture-review"); barrier(controller);
+            CaptureSurface.FuturePageListener future = surface.future;
+            assertTrue(future.onCaptureStarting());
+            surface.deferFutureStop = true;
+            controller.onGlassesAction(GlassesInputAction.SHORT_TAP); barrier(controller);
+            assertEquals("retake cannot overlap an already-issued future still", RelayState.CAPTURE_REVIEW, controller.getState());
+            future.onCandidate(new byte[]{4, 5, 6}, nativeSource(new byte[]{4, 5, 6}, 200), true);
+            barrier(controller); surface.futureStopped.run(); barrier(controller);
+            assertEquals(RelayState.AIMING, controller.getState());
+            LocalCaptureSession saved = (LocalCaptureSession)get(controller, "localSession");
+            assertEquals(1, saved.candidateCount()); assertEquals(0, saved.pageCount());
+            controller.onPhotoError("native failure", null); barrier(controller);
+            future.onCandidate(new byte[]{7, 8, 9}, nativeSource(new byte[]{7, 8, 9}, 300), true);
+            barrier(controller);
+            assertEquals(RelayState.ERROR, controller.getState()); assertEquals(2, saved.candidateCount());
+            assertTrue(controller.isCaptureReconnectRequired());
+            controller.onGlassesAction(GlassesInputAction.SHORT_TAP); barrier(controller);
+            assertEquals(0, surface.photos); assertEquals(0, saved.pageCount());
+        } finally { controller.close(); }
+    }
+
+    @Test public void anUnresolvedSceneOriginalIsVisibleButNeitherItsAckNorEndMayRegisterIt() throws Exception {
+        Surface surface = new Surface(); surface.futureEnabled = true; surface.holdForPage = true;
+        DocScanController controller = localWithOriginal(RuntimeEnvironment.getApplication(), surface);
+        try {
+            surface.visible = true; controller.onCustomViewAvailable(1, "capture-review"); barrier(controller);
+            assertTrue(surface.future.onCaptureStarting());
+            surface.future.onCandidate(new byte[]{4, 5, 6}, nativeSource(new byte[]{4, 5, 6}, 101), false);
+            barrier(controller); commitVisible(controller, surface);
+            LocalCaptureSession saved = (LocalCaptureSession)get(controller, "localSession");
+            assertEquals(1, saved.pageCount()); assertTrue(saved.captureGap());
+            CaptureReviewStore.Pending held = ((CaptureReviewStore)get(controller, "captureReview")).peek();
+            assertArrayEquals(new byte[]{4, 5, 6}, held.jpeg);
+            controller.onGlassesAction(GlassesInputAction.BACK); barrier(controller);
+            commitVisible(controller, surface); controller.confirmPendingCapture(); barrier(controller);
+            assertEquals("finish cannot turn an unverified scene association into acceptance", 1, saved.pageCount());
+            assertSame(held, ((CaptureReviewStore)get(controller, "captureReview")).peek());
+            assertEquals(LocalCaptureSession.Phase.CAPTURE, saved.phase());
+        } finally { controller.close(); }
+    }
+
+    @Test public void manualTapAfterCommitWaitsForIssuedFutureThenReviewsItsOriginal() throws Exception {
+        Surface surface = new Surface(); surface.futureEnabled = true; surface.holdForPage = true;
+        DocScanController controller = localWithOriginal(RuntimeEnvironment.getApplication(), surface);
+        try {
+            surface.visible = true; controller.onCustomViewAvailable(1, "capture-review"); barrier(controller);
+            CaptureSurface.FuturePageListener future = surface.future;
+            assertTrue(future.onCaptureStarting());
+            surface.deferFutureStop = true;
+            commitVisible(controller, surface);
+            assertEquals(RelayState.READING, controller.getState());
+            controller.captureNextPage(); barrier(controller);
+            assertEquals("public capture cannot overlap the issued future still", RelayState.READING, controller.getState());
+            controller.onGlassesAction(GlassesInputAction.SHORT_TAP); barrier(controller);
+            assertEquals(RelayState.READING, controller.getState());
+            assertNotNull(surface.futureStopped);
+            Runnable stopped = surface.futureStopped;
+            controller.onGlassesAction(GlassesInputAction.SHORT_TAP); barrier(controller);
+            assertSame("repeated tap does not replace the first stop barrier", stopped, surface.futureStopped);
+            byte[] second = {4, 5, 6};
+            CaptureProvenance source = nativeSource(second, 200);
+            future.onCandidate(second, source, true); barrier(controller);
+            stopped.run(); barrier(controller);
+            assertEquals(RelayState.CAPTURE_REVIEW, controller.getState());
+            CaptureReviewStore.Pending pending = ((CaptureReviewStore)get(controller, "captureReview")).peek();
+            assertEquals(source.captureId, pending.provenance.captureId);
+            assertArrayEquals(second, pending.jpeg);
+            assertEquals(1, pending.pageIndex);
+            assertEquals(0, surface.photos);
+            assertFalse(((CaptureLease)get(controller, "captureLease")).isUnresolved());
+            commitVisible(controller, surface);
+            assertEquals(2, ((LocalCaptureSession)get(controller, "localSession")).pageCount());
+        } finally { controller.close(); }
+    }
+
+    @Test public void manualTapWhileFutureObserverIsIdleStillArmsOneVisibleShot() throws Exception {
+        Surface surface = new Surface(); surface.futureEnabled = true; surface.holdForPage = true;
+        DocScanController controller = localWithOriginal(RuntimeEnvironment.getApplication(), surface);
+        try {
+            commitVisible(controller, surface);
+            assertTrue((boolean)get(controller, "futureWatching"));
+            controller.onGlassesAction(GlassesInputAction.SHORT_TAP); barrier(controller);
+            assertEquals(RelayState.AIMING, controller.getState());
+            assertFalse((boolean)get(controller, "futureWatching"));
+            assertFalse((boolean)get(controller, "futureStopping"));
+            assertEquals(0, surface.photos); // The new guide must become visible first.
+        } finally { controller.close(); }
+    }
+
+    private static CaptureProvenance nativeSource(byte[] jpeg, long timestamp) {
+        return CaptureProvenance.nativeStill(jpeg, 4032, 3024, timestamp, timestamp, timestamp,
+                10_000_000L, 100, 0, 2);
+    }
+
+    private static DocScanController localWithOriginal(Context context, Surface surface) throws Exception {
+        DocScanController controller = new DocScanController(context, surface, null,
+                (state, lines, diagnostic) -> {}, new ClientIdentity("test", "test", "test"));
+        controller.configureForLocalStart("http://phone:8000", "", 270);
+        controller.startLocalSession(false); barrier(controller);
+        set(controller, "localNetworkBusy", true);
+        ((CaptureLease)get(controller, "captureLease")).begin(0);
+        set(controller, "state", RelayState.CAPTURING);
+        controller.onPhoto(new byte[]{1, 2, 3}, nativeSource(new byte[]{1, 2, 3}, 100)); barrier(controller);
+        return controller;
+    }
+
+    private static void commitVisible(DocScanController controller, Surface surface) throws Exception {
+        surface.visible = true; controller.onCustomViewAvailable(1, "capture-review"); barrier(controller);
+        org.robolectric.shadows.ShadowSystemClock.advanceBy(java.time.Duration.ofSeconds(3));
+        call(controller, "enqueueAutoCommit", new Class<?>[]{long.class}, (long)get(controller, "reviewGeneration"));
+        barrier(controller);
+    }
+
     @Test public void nativePhotoIdentitySurvivesRetakeVisibleReviewCommitAndRestart() throws Exception {
         Context context = RuntimeEnvironment.getApplication();
         Surface surface = new Surface();
@@ -986,7 +1177,82 @@ public class LocalReviewTest {
         }
     }
 
+    @Test public void failedGapWriteCannotEraseAnObservedMissingSceneOnRestart() throws Exception {
+        Context context = RuntimeEnvironment.getApplication();
+        Surface surface = new Surface(); surface.futureEnabled = true; surface.holdForPage = true;
+        DocScanController controller = localWithOriginal(context, surface);
+        LocalCaptureSession saved = (LocalCaptureSession)get(controller, "localSession");
+        File blocker = new File(saved.directory(), "state.properties.tmp");
+        try {
+            surface.visible = true; controller.onCustomViewAvailable(1, "capture-review"); barrier(controller);
+            assertTrue(surface.future.onCaptureStarting());
+            surface.future.onCandidate(new byte[]{4, 5, 6}, nativeSource(new byte[]{4, 5, 6}, 200), true);
+            barrier(controller);
+            assertTrue(surface.future.onCaptureStarting());
+            surface.future.onCandidate(new byte[]{7, 8, 9}, nativeSource(new byte[]{7, 8, 9}, 300), true);
+            barrier(controller);
+            assertFalse(saved.captureGap()); assertEquals(2, saved.candidateCount());
+            assertTrue(blocker.mkdir());
+            surface.future.onPageMissed(); barrier(controller);
+            assertTrue(controller.isCaptureReconnectRequired());
+            controller.finishReading(); barrier(controller);
+            assertEquals(LocalCaptureSession.Phase.CAPTURE, saved.phase());
+        } finally {
+            controller.close();
+            assertEquals(0, java.util.Objects.requireNonNull(blocker.list()).length);
+            java.nio.file.Files.delete(blocker.toPath());
+        }
+        LocalCaptureSession restored = LocalCaptureSession.load(new File(context.getFilesDir(), "local-scans"), saved.id());
+        assertTrue("gap-write failure must not erase a missed scene", restored.captureGap());
+        assertEquals(2, restored.candidateCount()); assertNull(restored.nextUnsent());
+    }
+
+    @Test public void futurePreparationUnknownBeforeNativeIssueRemainsUnresolvedOnRestart() throws Exception {
+        Context context = RuntimeEnvironment.getApplication();
+        Surface surface = new Surface(); surface.futureEnabled = true; surface.holdForPage = true;
+        DocScanController controller = localWithOriginal(context, surface);
+        LocalCaptureSession saved = (LocalCaptureSession)get(controller, "localSession");
+        try {
+            surface.visible = true; controller.onCustomViewAvailable(1, "capture-review"); barrier(controller);
+            assertNotNull(surface.future);
+            // The observer may already be preparing B; no native onCaptureStarting has occurred.
+            controller.onPhotoError("future scene changed during preparation", null); barrier(controller);
+            assertTrue(controller.isCaptureReconnectRequired());
+            controller.finishReading(); barrier(controller);
+            assertEquals(LocalCaptureSession.Phase.CAPTURE, saved.phase());
+            assertEquals(0, saved.candidateCount()); assertEquals(0, surface.photos);
+        } finally { controller.close(); }
+        LocalCaptureSession restored = LocalCaptureSession.load(new File(context.getFilesDir(), "local-scans"), saved.id());
+        assertTrue("preparation failure is unresolved even before a native request was issued", restored.captureGap());
+        assertNull(restored.nextUnsent());
+    }
+
+    @Test public void futureObservationIsResolvedOnlyAfterItsSuccessfulIdleBarrier() throws Exception {
+        Context context = RuntimeEnvironment.getApplication();
+        Surface surface = new Surface(); surface.futureEnabled = true; surface.holdForPage = true;
+        DocScanController controller = localWithOriginal(context, surface);
+        LocalCaptureSession saved = (LocalCaptureSession)get(controller, "localSession");
+        File root = new File(context.getFilesDir(), "local-scans");
+        try {
+            surface.visible = true; controller.onCustomViewAvailable(1, "capture-review"); barrier(controller);
+            surface.deferFutureStop = true;
+            call(controller, "stopFutureObservation", new Class<?>[]{Runnable.class}, (Runnable)() -> {});
+            barrier(controller);
+            assertTrue("an unacknowledged stop is still unresolved", LocalCaptureSession.load(root, saved.id()).captureGap());
+            assertNotNull(surface.futureStopped); surface.futureStopped.run(); barrier(controller);
+            assertFalse("a normal idle stop needs no recapture", LocalCaptureSession.load(root, saved.id()).captureGap());
+        } finally { controller.close(); }
+        assertFalse("a later close cannot restore a resolved observation", LocalCaptureSession.load(root, saved.id()).captureGap());
+    }
+
     private static final class Surface implements CaptureSurface {
+        boolean futureEnabled;
+        boolean deferFutureStop;
+        FuturePageListener future;
+        Runnable futureStopped;
+        public boolean supportsFuturePages() { return futureEnabled; }
+        public void observeFuturePages(int capacity, FuturePageListener listener) { future = listener; }
+        public void stopFuturePages(Runnable idle) { if (deferFutureStop) futureStopped = idle; else idle.run(); }
         boolean visible;
         int photos;
         int pauses;

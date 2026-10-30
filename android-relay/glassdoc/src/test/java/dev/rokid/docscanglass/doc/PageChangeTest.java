@@ -75,6 +75,24 @@ public class PageChangeTest {
         assertFalse(change.ready(1500));
     }
 
+    @Test public void positiveChangesHaveDistinctSequencesButOnlyQuietScenesBecomeCandidates() {
+        PageChange change = new PageChange(); byte[] page = photographedPage();
+        change.observe(page, 0); change.observe(page, 400);
+        long initial = change.sequence(); change.consumed();
+        byte[] brighter = page.clone();
+        for (int i = 0; i < brighter.length; i++) brighter[i] = (byte)((brighter[i] & 255) + 15);
+        change.observe(brighter, 600);
+        assertEquals("gain alone does not create scene identity", initial, change.sequence());
+        byte[] turning = page.clone(); Arrays.fill(turning, 0, turning.length / 3, (byte)160);
+        change.observe(turning, 800);
+        long moving = change.sequence(); assertTrue(moving > initial); assertFalse(change.ready(1000));
+        change.observe(page, 1000); assertTrue(change.sequence() > moving);
+        assertFalse("positive motion is not a stable-page assertion", change.ready(1399));
+        assertTrue(change.ready(1400)); change.consumed();
+        change.observe(turning, 1500); change.observe(page, 1600); assertTrue(change.ready(2000));
+        assertTrue("A to B to A retains separate positive observations", change.sequence() > moving + 1);
+    }
+
     @Test public void wholeFrameExposureStepDoesNotCaptureTheSamePhotographedPageAgain() {
         PageChange change = new PageChange();
         byte[] page = photographedPage();

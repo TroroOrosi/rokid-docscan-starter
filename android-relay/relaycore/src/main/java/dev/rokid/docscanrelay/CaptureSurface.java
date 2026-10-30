@@ -39,6 +39,8 @@ public interface CaptureSurface {
 
     long showCaptureReview(byte[] jpeg, int rotationDegrees, List<String> lines);
 
+    default void showCaptureReviewNotice(String notice) { }
+
     /** Only an app-owned surface with verified gestures may register automatically. */
     default boolean supportsLocalCaptureReview() { return false; }
 
@@ -47,6 +49,20 @@ public interface CaptureSurface {
 
     /** Camera preview gate. The callback fires once after a page change becomes still. */
     default void awaitNextPage(Runnable ready) { ready.run(); }
+
+    interface FuturePageListener {
+        default boolean onCaptureStarting() { return true; }
+        void onCandidate(byte[] jpeg, CaptureProvenance source, boolean sceneMatched);
+        void onPageMissed();
+    }
+
+    default boolean supportsFuturePages() { return false; }
+
+    /** Capacity excludes the displayed photo; an issued still reserves one slot. */
+    default void observeFuturePages(int capacity, FuturePageListener listener) { }
+
+    /** Stop observing, then report idle only after any issued original has been delivered. */
+    default void stopFuturePages(Runnable idle) { idle.run(); }
 
     /** Stops the viewfinder and its sensors outside capture or during an idle pause. */
     default void pausePreview() { }

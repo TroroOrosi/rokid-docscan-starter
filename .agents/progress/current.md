@@ -1,7 +1,7 @@
 # 再開入口：次のセッションはここだけ読めば始められる
 
-最終更新: 2026-10-31続行 — PC全pytest1526pass/1skip/3warn・AndroidXML517fail0を保持。phone更新1回os.link欠如→11更新後復元、87source/15protected旧一致。公開no-clobber事前probe/元失敗保存を60test/ruff0/別監査R0へ修正、A準備も6test/6scenario/実Bash3・R0。撮影2候補123pass後の独立R1/R2修正中。会場未受入。詳細phone-work-connected-root-20261030.json。
-Runs on: 開発・独立監査はWindows PC、接続phone F51F/ZY22LWGDCV。会場は常時オンphone AP＋装着glassesのみ、PC/USB/毎回接続不要。本人「確認せずにそのまま進めてください」を継続適用。技術GPT3/Drive原PNG21/private folder1。source試行1/11書込後復元確認、APK/API/env/Boot/services更新0、glasses操作/受入0。
+最終更新: 2026-10-31続行 — phone b2eb87source・A Workenv/SEND0/4services無効/Boot準備exit0/別R0。撮影future2候補R1/R2修正/別R0、全Android540pass/build成功/vc39APK照合/未導入。B handover別監査R1(PID出生再照合)修正中/実行0。会場未受入。詳細phone-work-connected-root-20261030.json。
+Runs on: PC開発・独立監査、phone F51F/ZY22LWGDCV。会場は常時オンphone AP＋装着glassesのみ、PC/USB/毎回接続不要。本人「確認せずにそのまま進めてください」を継続適用。技術GPT3/Drive原PNG21/folder1。source試行2(旧1復元/新1成功)、env/Boot/4services無効準備各1、API/APK/glasses操作/受入0。
 
 ## 0. 読み方（前提と資料に引きずられないため）
 
@@ -90,7 +90,7 @@ Runs on: 開発・独立監査はWindows PC、接続phone F51F/ZY22LWGDCV。会�
   → 旧サーバ停止 → `nohup bash scripts/phone_serve.sh 127.0.0.1 > data/server-<commit>.log 2>&1 &`。PCからは `ssh -f -N -L 8000:127.0.0.1:8000 ...`（ssh `-i ~/.ssh/f51f_key -p 8022 u0_a26@192.168.0.6`）。
   ベンチの鍵は `ROKID_API_KEY` をスマホの env から読んで渡す（画面に出さない）。
 
-## 4. 次の作業（Runs on: 開発PC＋接続F51F）：最終R0 updaterの新commit/rawGit87archiveを別照合→新backupでsource更新→R0 A helperでWorkenv/SEND0・4services無効準備→B owned browser/X11 handover・API/Work/services起動をPC作成/別監査後に実施。旧失敗backup保持/再利用なし。撮影future-scene2候補のmanualbarrier/欠落の永続予約R1R2を分担修正中。録画/ZSL/AIfeedback/可変紙面/原音Work/glasses全経路は継続/未受入。以下は旧経緯。
+## 4. 次の作業（Runs on: 開発PC＋接続F51F）：A Workenv/SEND0・4services無効/Boot準備済。B owned browser/X11 handover R1修正→別再監査/PCpreview→API/Work/services起動。撮影future2候補540pass/APK vc39照合→source checkpoint、実機未導入。旧backup保持/再利用なし。native provenance/AIfeedback/可変紙面/録画ZSL/原音Work/glasses全経路を継続、会場未受入。以下は旧経緯。
 
 1. 済：独立監査2回（`4552ea1`、`4552ea1..e12e155`）の指摘を `61ad481`〜`1134404` で反映。
 2. 済：4a（3節）。起動はスマホで `bash scripts/phone_serve.sh 127.0.0.1`、PCから `ssh -L 8000:127.0.0.1:8000` で投入した。

@@ -26,6 +26,8 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
+import dev.rokid.docscanrelay.CaptureSurface;
+import dev.rokid.docscanrelay.CaptureProvenance;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -113,6 +115,156 @@ public class GlassCameraWarmSessionTest {
         return result;
     }
     private void readyFrame() { idle(100); result(CONTROL_AF_STATE_PASSIVE_FOCUSED, CONTROL_AE_STATE_CONVERGED); frame(180); }
+
+    @Test public void twoStableFutureScenesUseNativeOriginalsWithoutReplacingTheVisibleReview() {
+        warmOriginal();
+        List<byte[]> candidates = new ArrayList<>();
+        List<CaptureProvenance> sources = new ArrayList<>();
+        AtomicInteger gaps = new AtomicInteger();
+        camera.observeFuturePages(2, new CaptureSurface.FuturePageListener() {
+            public void onCandidate(byte[] jpeg, CaptureProvenance source, boolean sceneMatched) {
+                assertTrue(sceneMatched); candidates.add(jpeg); sources.add(source);
+            }
+            public void onPageMissed() { gaps.incrementAndGet(); }
+        }); idle(0);
+        stableTurn();
+        assertEquals(2, firstDevice().session.captures);
+        byte[] second = {4, 5, 6}; long secondAt = SystemClock.elapsedRealtimeNanos();
+        deliverOriginal(second, secondAt);
+        // The coarse image returns to A, but a positive turn separates this future scene.
+        stableTurn();
+        assertEquals(3, firstDevice().session.captures);
+        byte[] third = {7, 8, 9}; long thirdAt = SystemClock.elapsedRealtimeNanos();
+        deliverOriginal(third, thirdAt);
+        assertEquals(1, delivered);
+        assertEquals(2, candidates.size()); assertArrayEquals(second, candidates.get(0));
+        assertArrayEquals(third, candidates.get(1));
+        assertEquals(Long.valueOf(secondAt), sources.get(0).imageTimestampNanos);
+        assertEquals(Long.valueOf(thirdAt), sources.get(1).imageTimestampNanos);
+        assertNotEquals(sources.get(0).captureId, sources.get(1).captureId);
+        assertNotEquals(sources.get(0).jpegSha256, sources.get(1).jpegSha256);
+        for (int i = 0; i < 10; i++) readyFrame();
+        assertEquals("an unchanged page cannot consume another native request", 3, firstDevice().session.captures);
+        stableTurn();
+        assertEquals(1, gaps.get()); assertEquals(3, firstDevice().session.captures);
+        stableTurn(); assertEquals(1, gaps.get());
+        assertTrue(failures.isEmpty()); assertEquals(1, ManagerShadow.devices.size());
+    }
+
+    @Test public void anOldZslSourceIsPreservedAsUnresolvedInsteadOfBecomingTheNextScene() {
+        long firstAt = warmOriginal();
+        List<byte[]> retained = new ArrayList<>();
+        List<Boolean> matched = new ArrayList<>();
+        camera.observeFuturePages(2, new CaptureSurface.FuturePageListener() {
+            public void onCandidate(byte[] jpeg, CaptureProvenance source, boolean sceneMatched) {
+                retained.add(jpeg); matched.add(sceneMatched);
+                assertEquals(Long.valueOf(firstAt + 1), source.imageTimestampNanos);
+            }
+            public void onPageMissed() { fail("the original must be delivered with its uncertainty"); }
+        }); idle(0); stableTurn();
+        deliverOriginal(new byte[]{9, 9, 9}, firstAt + 1);
+        assertEquals(List.of(false), matched); assertArrayEquals(new byte[]{9, 9, 9}, retained.get(0));
+        stableTurn(); idle(15000);
+        assertEquals("one unresolved scene must not trigger an unbounded retry", 2, firstDevice().session.captures);
+        assertEquals(1, delivered);
+    }
+
+    @Test public void stoppingFutureCaptureWaitsForTheInFlightOriginalAndDoesNotStartAnother() {
+        warmOriginal();
+        List<String> order = new ArrayList<>();
+        camera.observeFuturePages(2, new CaptureSurface.FuturePageListener() {
+            public void onCandidate(byte[] jpeg, CaptureProvenance source, boolean sceneMatched) { order.add("original"); }
+            public void onPageMissed() { fail("end is not an overflow"); }
+        }); idle(0); stableTurn();
+        camera.stopFuturePages(() -> order.add("idle")); idle(0);
+        assertTrue(order.isEmpty());
+        deliverOriginal(new byte[]{4, 4, 4}, SystemClock.elapsedRealtimeNanos());
+        assertEquals(List.of("original", "idle"), order);
+        stableTurn(); assertEquals(2, firstDevice().session.captures); assertEquals(1, delivered);
+    }
+
+    @Test public void aStableSceneThatLeavesDuringAnotherNativeRequestCannotBeCollapsedIntoTheLatestScene() {
+        warmOriginal();
+        AtomicInteger gaps = new AtomicInteger();
+        List<Boolean> matched = new ArrayList<>();
+        camera.observeFuturePages(2, new CaptureSurface.FuturePageListener() {
+            public void onCandidate(byte[] jpeg, CaptureProvenance source, boolean sceneMatched) { matched.add(sceneMatched); }
+            public void onPageMissed() { gaps.incrementAndGet(); }
+        }); idle(0); stableTurn();
+        long bTimestamp = SystemClock.elapsedRealtimeNanos();
+        stableTurn(); // C was stable while the only native request still belonged to B.
+        idle(30); frame(180, true); // C leaves before it could be photographed.
+        assertEquals(1, gaps.get());
+        deliverOriginal(new byte[]{4, 5, 6}, bTimestamp);
+        assertEquals(List.of(true), matched);
+        idle(30); frame(180); idle(400); readyFrame(); idle(50);
+        assertEquals("the lost intermediate scene cannot silently become D", 2, firstDevice().session.captures);
+    }
+
+    @Test public void aFutureNativeFailureIsUnknownAndUnblocksStopOnlyAfterFailureWithoutAnotherStill() {
+        warmOriginal(); AtomicInteger stopped = new AtomicInteger();
+        camera.observeFuturePages(2, new CaptureSurface.FuturePageListener() {
+            public void onCandidate(byte[] jpeg, CaptureProvenance source, boolean sceneMatched) { fail("failed JPEG cannot be delivered"); }
+            public void onPageMissed() { fail("native failure is not overflow"); }
+        }); idle(0); stableTurn();
+        camera.stopFuturePages(stopped::incrementAndGet); idle(0);
+        assertEquals(0, stopped.get());
+        var session = firstDevice().session;
+        session.previewCallback.onCaptureFailed(session, session.repeating, null);
+        assertEquals(1, stopped.get()); assertEquals(1, failures.size());
+        assertTrue((Boolean)ReflectionHelpers.getField(camera, "unknown"));
+        camera.captureOnce(); camera.observeFuturePages(2, new CaptureSurface.FuturePageListener() {
+            public void onCandidate(byte[] jpeg, CaptureProvenance source, boolean sceneMatched) { fail(); }
+            public void onPageMissed() { fail(); }
+        }); idle(15000);
+        assertEquals(2, session.captures); assertEquals(1, delivered);
+    }
+
+    @Test public void aFailedDurableReservationPreventsTheFutureNativeRequest() {
+        warmOriginal();
+        camera.observeFuturePages(2, new CaptureSurface.FuturePageListener() {
+            public boolean onCaptureStarting() { return false; }
+            public void onCandidate(byte[] jpeg, CaptureProvenance source, boolean sceneMatched) { fail("reservation was rejected"); }
+            public void onPageMissed() { fail("storage failure is not a missed scene"); }
+        }); idle(0); stableTurn();
+        assertEquals("native still cannot precede its durable reservation", 1, firstDevice().session.captures);
+        assertEquals(1, failures.size()); assertTrue((Boolean)ReflectionHelpers.getField(camera, "unknown"));
+    }
+
+    @Test public void aDurableReservationCannotAuthorizeMeteringThatExpiredDuringTheWrite() {
+        warmOriginal();
+        camera.observeFuturePages(2, new CaptureSurface.FuturePageListener() {
+            public boolean onCaptureStarting() {
+                org.robolectric.shadows.ShadowSystemClock.advanceBy(Duration.ofMillis(600)); return true;
+            }
+            public void onCandidate(byte[] jpeg, CaptureProvenance source, boolean sceneMatched) { fail("stale AF/AE"); }
+            public void onPageMissed() { fail(); }
+        }); idle(0); stableTurn();
+        assertEquals("the durable write cannot extend the native AF/AE freshness window", 1, firstDevice().session.captures);
+        assertEquals(1, failures.size()); assertTrue((Boolean)ReflectionHelpers.getField(camera, "unknown"));
+    }
+
+    private long warmOriginal() {
+        camera.captureOnce(); idle(100); readyFrame(); idle(400); readyFrame(); idle(50);
+        long timestamp = SystemClock.elapsedRealtimeNanos();
+        deliverOriginal(new byte[]{1, 2, 3}, timestamp);
+        assertEquals(1, delivered); return timestamp;
+    }
+
+    private void stableTurn() {
+        idle(30); frame(180, true); idle(30); frame(180);
+        idle(400); readyFrame(); idle(50);
+    }
+
+    private void deliverOriginal(byte[] bytes, long timestamp) {
+        var jpeg = currentReader(ImageFormat.JPEG);
+        var session = currentDevice().session;
+        session.captureCallback.onCaptureCompleted(session, session.captured,
+                metadata(CONTROL_AF_STATE_PASSIVE_FOCUSED, CONTROL_AE_STATE_CONVERGED, timestamp));
+        DocScanTestImage image = new DocScanTestImage(new ArrayList<>());
+        image.timestamp = timestamp; image.buffer = ByteBuffer.wrap(bytes);
+        jpeg.image = image; jpeg.listener.onImageAvailable(jpeg.reader); idle(0);
+    }
 
     @Test public void missingOrInvalidExposureCannotAuthorizeAStillAfterMeteringConverges() {
         camera.captureOnce(); idle(100); frame(180); idle(500);

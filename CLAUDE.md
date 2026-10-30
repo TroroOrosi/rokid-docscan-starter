@@ -116,7 +116,7 @@ is now the intended topology and is still unexercised.
 | Route | Status |
 |---|---|
 | `ROKID_SOLVER=chatgpt-web` | **Current primary.** Drives the operator's own signed-in ChatGPT web session over CDP. |
-| `ROKID_SOLVER=chatgpt-work` | Phone-side original-image jobs, inspection and result receipts are in development. Work Cloud authentication/transport, automatic invocation and account acceptance are not connected; do not switch the venue route or report it ready. |
+| `ROKID_SOLVER=chatgpt-work` | The phone-local browser consumer sends unchanged PNG ZIPs, verifies source receipts and returns staged answers. Work technical fixtures passed on the signed-in phone. Source and a separate SEND0 environment with four disabled services are prepared; production invocation and venue acceptance remain unverified. |
 | On-phone local model (F-51F, llama.cpp) | **Not the route.** The operator chose chatgpt-web on 2026-09-14. Its measurements are kept as evidence in `docs/hardware-measurements.md` §E; no further work is scheduled on it. |
 | `openai` / `gemini` / `claude` API keys | Supported and config-only. The per-question routes can fall back through `ROKID_SOLVER_TIERS`; the background booklet route uses `ROKID_SOLVER` alone and has no fallback tier. |
 | Local OpenAI-compatible HTTP (`app/llm_http.py`) | Reaches an on-phone `llama-server` without the openai SDK. |
@@ -188,10 +188,17 @@ and uncertain-send safeguards remain independent of model-name fallback.
 - On the local surface the captured still is drawn after its native image is
   closed. The preview session continues observing page changes until pause,
   capture end or failure; physical frame continuity remains unverified. A
-  visible acknowledgement starts a fresh 3000ms review. A single tap retakes,
-  no input commits, BACK ends capture after the last review. Hidden or stale
-  views cannot commit. A waiting tap requests a manual shot without starting
-  a second request in flight. See `docs/multimodal-scan.md`.
+  visible acknowledgement starts a fresh 3000ms review. During review, at most
+  two future-page originals are retained locally and promoted in order; each
+  requires its own visible acknowledgement and review before upload. Observation
+  is reserved durably before native start. Unknown captures, failed persistence
+  and suspected gaps survive restart; only an acknowledged ordinary stop can
+  clear a resolved observation. A single tap retakes, no input commits, BACK ends
+  capture after the last review. Hidden or stale views cannot commit. A waiting
+  tap first waits for the native stop barrier and promotes any saved candidate
+  before requesting a manual shot. One photo remains in flight at most. This
+  does not establish whole-booklet coverage or physical readability. See
+  `docs/multimodal-scan.md`.
 - The standalone app keeps the previous listening-only flow and adds mixed
   English: capture paper first, solve reading from images, then send completed
   original audio to the same chat after the reading reply is durably saved.

@@ -26,7 +26,10 @@ import androidx.annotation.RequiresPermission;
 
 import java.nio.ByteBuffer;
 import java.util.Arrays;
+import java.util.ArrayList;
+import java.util.List;
 import dev.rokid.docscanrelay.CaptureProvenance;
+import dev.rokid.docscanrelay.CaptureSurface;
 
 /**
  * One still per request, straight from {@code android.hardware.camera2}.
@@ -120,6 +123,15 @@ final class GlassCamera {
     private long previewAt;
     private long previewDisplayAt;
     private boolean capturePending;
+    private CaptureSurface.FuturePageListener futurePages;
+    private CaptureSurface.FuturePageListener activeFuturePage;
+    private int futureCapacity;
+    private long sceneStartTimestamp;
+    private long futureSceneSequence;
+    private long futureSceneStartTimestamp;
+    private long futureSceneEndTimestamp;
+    private long waitingStableScene;
+    private final List<Runnable> futureStops = new ArrayList<>();
     private CameraReadiness metering;
     private long meteringSensorTimestamp;
     private long lastMeteringSensorTimestamp;
@@ -156,6 +168,39 @@ final class GlassCamera {
 
     void resetPages() { handler.post(() -> pageChange = new PageChange()); }
 
+    void observeFuturePages(int capacity, CaptureSurface.FuturePageListener listener) {
+        if (capacity < 0 || capacity > 2 || listener == null) throw new IllegalArgumentException("future capacity 0..2 required");
+        handler.post(() -> {
+            if (closed || unknown) return;
+            futurePages = listener;
+            futureCapacity = Math.max(0, capacity - (activeFuturePage == null ? 0 : 1));
+            previewRequested = true;
+            startPreview();
+        });
+    }
+
+    void stopFuturePages(Runnable idle) {
+        handler.post(() -> {
+            futurePages = null;
+            futureCapacity = 0;
+            waitingStableScene = 0;
+            if (activeFuturePage != null && (generation == 0 || settled)) {
+                // Preparation has not issued a native request, so it can be cancelled safely.
+                activeFuturePage = null;
+                capturePending = false;
+                stillness.cancel();
+                handler.removeCallbacks(prepareTimeout);
+            }
+            if (activeFuturePage == null) idle.run(); else futureStops.add(idle);
+        });
+    }
+
+    private void futureIdle() {
+        List<Runnable> idle = new ArrayList<>(futureStops);
+        futureStops.clear();
+        for (Runnable ready : idle) ready.run();
+    }
+
     void awaitNextPage(Runnable ready) {
         handler.post(() -> {
             if (closed || unknown) return;
@@ -173,6 +218,7 @@ final class GlassCamera {
         handler.post(() -> {
             previewRequested = false;
             pageReady = null;
+            futurePages = null;
             if (!capturePending) { stillness.cancel(); stopPreview(); }
         });
     }
@@ -281,10 +327,20 @@ final class GlassCamera {
             for (int y = 0; y < 24; y++) for (int x = 0; x < 32; x++) {
                 thumbnail[y * 32 + x] = pixels.get(y * image.getHeight() / 24 * row + x * image.getWidth() / 32 * step);
             }
+            long previousScene = pageChange.sequence();
             pageChange.observe(thumbnail, now);
+            if (previousScene != pageChange.sequence()) {
+                sceneStartTimestamp = timestamp;
+                if (activeFuturePage != null && futureSceneEndTimestamp == Long.MAX_VALUE) {
+                    futureSceneEndTimestamp = timestamp;
+                }
+                if (futurePages != null && waitingStableScene != 0
+                        && waitingStableScene != futureSceneSequence) futurePageMissed();
+                waitingStableScene = 0;
+            }
             previewMotion.observe(thumbnail, now);
             // AUTO/MACRO must start before pageReady can require a focused result.
-            if (capturePending || (pageReady != null && pageChange.ready(now))) startAutoFocus();
+            if (capturePending || ((pageReady != null || futurePages != null) && pageChange.ready(now))) startAutoFocus();
             // Observe every received frame; only the HUD bitmap is limited to 10 Hz.
             if (now - previewDisplayAt >= 100) {
                 previewDisplayAt = now;
@@ -301,7 +357,30 @@ final class GlassCamera {
                 pageReady = null;
                 ready.run();
             }
+            if (futurePages != null && pageChange.ready(now) && meteredFrame(now)) {
+                waitingStableScene = pageChange.sequence();
+                if (!capturePending) {
+                    if (futureCapacity == 0) futurePageMissed();
+                    else {
+                        activeFuturePage = futurePages;
+                        futureCapacity--;
+                        futureSceneSequence = pageChange.sequence();
+                        futureSceneStartTimestamp = sceneStartTimestamp;
+                        futureSceneEndTimestamp = Long.MAX_VALUE;
+                        capturePending = true;
+                        handler.postDelayed(prepareTimeout, PREPARE_TIMEOUT_MILLIS);
+                        stillness.await(handler, this::cameraReady, this::motionExposureNanos, this::captureOnHandler);
+                    }
+                }
+            }
         } catch (RuntimeException | OutOfMemoryError error) { previewFailed(); }
+    }
+
+    private void futurePageMissed() {
+        CaptureSurface.FuturePageListener observer = futurePages;
+        futurePages = null;
+        futureCapacity = 0;
+        if (observer != null) observer.onPageMissed();
     }
 
     private void stopPreview() {
@@ -323,15 +402,20 @@ final class GlassCamera {
         previewOpening = false;
         unknown = true;
         capturePending = false;
+        futurePages = null;
+        activeFuturePage = null;
         stillness.cancel();
         handler.removeCallbacks(prepareTimeout);
         stopPreview();
         callback.onCaptureFailed(reason);
+        futureIdle();
     }
 
     private boolean cameraReady() {
         long now = SystemClock.elapsedRealtime();
         return !closed && !unknown && previewDevice != null && previewSession != null
+                && (activeFuturePage == null || (futureSceneSequence == pageChange.sequence()
+                && pageChange.ready(now)))
                 && meteringExposureNanos > 0 && meteredFrame(now) && previewMotion.ready(now)
                 && now >= previewAt && now - previewAt <= CameraReadiness.FRESH_MILLIS;
     }
@@ -409,6 +493,14 @@ final class GlassCamera {
     @RequiresPermission(Manifest.permission.CAMERA)
     private void captureOnHandler() {
         if (closed || unknown || !capturePending || !cameraReady() || (generation > 0 && !settled)) return;
+        if (activeFuturePage != null && !activeFuturePage.onCaptureStarting()) {
+            previewFailed("future original reservation failed");
+            return;
+        }
+        if (!cameraReady()) {
+            previewFailed("future original reservation outlived camera readiness");
+            return;
+        }
         long current = ++generation;
         stillResult = null;
         settled = false;
@@ -426,10 +518,13 @@ final class GlassCamera {
             generation++;
             previewRequested = false;
             pageReady = null;
+            futurePages = null;
+            activeFuturePage = null;
             stillness.cancel();
             stopPreview();
             handler.removeCallbacks(timeout);
             handler.removeCallbacks(prepareTimeout);
+            futureIdle();
         });
     }
 
@@ -554,7 +649,16 @@ final class GlassCamera {
                 result == null ? null : result.timestamp, result == null ? null : result.frame,
                 result == null ? null : result.exposure, result == null ? null : result.iso,
                 result == null ? null : result.af, result == null ? null : result.ae);
-        callback.onCaptured(new Captured(jpeg, width, height, elapsed, provenance));
+        CaptureSurface.FuturePageListener future = activeFuturePage;
+        activeFuturePage = null;
+        if (future == null) callback.onCaptured(new Captured(jpeg, width, height, elapsed, provenance));
+        else {
+            boolean sceneMatched = sensorTimestamp >= futureSceneStartTimestamp
+                    && sensorTimestamp < futureSceneEndTimestamp;
+            if (!sceneMatched) { futurePages = null; futureCapacity = 0; }
+            future.onCandidate(jpeg, provenance, sceneMatched);
+        }
+        futureIdle();
     }
 
     private static final class RejectedJpeg extends RuntimeException {
@@ -570,12 +674,15 @@ final class GlassCamera {
         unknown = true;
         previewRequested = false;
         pageReady = null;
+        futurePages = null;
+        activeFuturePage = null;
         stillness.cancel();
         handler.removeCallbacks(timeout);
         handler.removeCallbacks(prepareTimeout);
         release();
         Log.w(TAG, "capture failed: " + reason);
         callback.onCaptureFailed(reason);
+        futureIdle();
     }
 
     private boolean release() {

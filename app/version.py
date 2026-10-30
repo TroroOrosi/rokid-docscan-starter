@@ -228,7 +228,9 @@ from __future__ import annotations
 #         receipts can release their own barrier without replaying a send.
 # 0.53.1: compare native phone paths as POSIX strings during Windows update preparation.
 # 0.53.2: preflight atomic no-clobber phone publication and preserve failure diagnostics.
-APP_VERSION = "0.53.2"
+# 0.54.0: retain two native future-page candidates through visible review and
+#         persist unresolved observation before starting the native producer.
+APP_VERSION = "0.54.0"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.
@@ -483,7 +485,9 @@ EXPLAINER_API_VERSION = "1.1.0"
 #         full answer pages and the capture/review viewport stay unchanged.
 # 1.31.0: retain page-change preview through successful still capture and review;
 #         any native drain failure closes the camera and requires a new generation.
-GLASSES_VIEW_CONTRACT_VERSION = "1.31.0"
+# 1.32.0: preserve up to two future-page originals while reviewing; promote in
+#         order and require each candidate's fresh visible review before commit.
+GLASSES_VIEW_CONTRACT_VERSION = "1.32.0"
 
 # Answer-area overlay payload (box + short answer; 2D image-anchored).
 # 1.1.0: added tracking metadata (tracking/fixed_ar/anchor_hint).
