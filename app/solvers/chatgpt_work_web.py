@@ -416,6 +416,8 @@ def _wait_for_reply(page, batch_id, *, expect, on_chat_url=None, timeout_s=None,
 
 
 def _conversation_id(url):
+    if not isinstance(url, str):
+        return None
     try:
         parsed = urlsplit(url or "")
         match = re.fullmatch(r"/c/([A-Za-z0-9-]{8,128})/?", parsed.path)

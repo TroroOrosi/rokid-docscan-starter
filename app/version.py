@@ -235,7 +235,8 @@ from __future__ import annotations
 # 0.57.0: evaluate timestamp-paired full-resolution ZSL with durable source-kind provenance.
 # 0.57.1: preserve strict Work MCP inputs on the phone's legacy Pydantic stack.
 # 0.58.0: compare exact original-video frames without changing ordinary capture.
-APP_VERSION = "0.58.0"
+# 0.58.1: reject malformed Work URLs consistently across supported Python versions.
+APP_VERSION = "0.58.1"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.

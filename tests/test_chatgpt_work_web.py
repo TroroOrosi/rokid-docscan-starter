@@ -684,7 +684,18 @@ def test_retiring_an_expired_intermediate_ack_never_sends_the_next_batch(page, m
     assert transfer.get("final") is None and not transfer.get("finals")
 
 
-@pytest.mark.parametrize("fault", ["generic_chat", "ambiguous", "request_id", "nonce", "url", "url_type"])
+@pytest.mark.parametrize("url", [None, False, True, 0, 1, 1.5, b"https://chatgpt.com/c/abcdefgh",
+                                 bytearray(b"url"), [], ["url"], {}, {"wrong": "type"}, Path("url"), object()])
+def test_conversation_identity_rejects_non_string_urls_before_parsing(monkeypatch, url):
+    def unexpected_parse(value):
+        raise AssertionError("non-string conversation URL reached the parser")
+
+    monkeypatch.setattr(work, "urlsplit", unexpected_parse)
+    assert work._conversation_id(url) is None
+
+
+@pytest.mark.parametrize("fault", ["generic_chat", "ambiguous", "request_id", "nonce", "url", "url_type",
+                                   "url_null", "url_list", "url_number", "url_bool"])
 def test_expired_recovery_never_claims_unknown_or_ambiguous_owners(page, monkeypatch, fault):
     from app import config
     from app.solvers import cdp
@@ -706,8 +717,11 @@ def test_expired_recovery_never_claims_unknown_or_ambiguous_owners(page, monkeyp
         entry["pending"] = "b" * 64
     elif fault == "nonce":
         entry["transfer"]["pending"]["id"] = "b" * 64
+    elif fault == "url":
+        entry["url"] = "https://chatgpt.com/"
     else:
-        entry["url"] = {"wrong": "type"} if fault == "url_type" else "https://chatgpt.com/"
+        entry["url"] = {"url_type": {"wrong": "type"}, "url_null": None, "url_list": ["url"],
+                        "url_number": 1, "url_bool": True}[fault]
     chats_path.write_text(json.dumps(record))
     before = chats_path.read_bytes()
     journal = (chats_path.parent / "submission.json").read_bytes()

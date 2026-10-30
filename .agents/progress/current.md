@@ -1,7 +1,7 @@
 # 再開入口：次のセッションはここだけ読めば始められる
 
-最終更新: 2026-10-31続行 — CI互換/WorkHTTP修正2facaaaを保存、原動画frame比較も別監査Required0でscope別保存。全tree pytest通常1800pass/1skip・phone構成1783pass/18skip（録画42含む）、両ruff/版・文書33pass。まとめてpush/再CIへ。Android579pass/vc42・未導入。詳細phone-work-connected-root-20261030.json。
-Runs on: PC開発・独立監査、phone F51F/ZY22LWGDCV。会場は常時オンphone AP＋装着glassesのみ、PC/USB/毎回接続不要。本人「確認せずそのまま」継続。GPT3/Drive原PNG21/folder1。phone b2eb＋2script/4runを保全。direct診断は/proc補助観測拒否でUNKNOWN、本体exec未取得。own child不在/X1拒否を読取、設定/GPT0、glasses/実紙受入0。
+最終更新: 2026-10-31続行 — b8ebc52実CIのdecoder不在test/3.10 URL型を最小修正し別監査Required0、関連132passを通常/phone両構成・版文書23pass/ruff0。先行全tree1800/1783passは保持。Android録画hybridは実装/監査中、vc42未導入。詳細phone-work-connected-root-20261030.json。
+Runs on: PC開発・独立監査、phone F51F/ZY22LWGDCV。会場は常時オンphone AP＋装着glassesのみ、PC/USB/毎回接続不要。本人「確認せずそのまま」継続。GPT3/Drive原PNG21/folder1。phone b2eb＋2script/4run保全。direct v2はexec拒否なし・自然exit0/697ms、X1なし、/proc補助不足でUNKNOWN。glasses/実紙受入0。
 
 ## 0. 読み方（前提と資料に引きずられないため）
 
@@ -90,7 +90,7 @@ Runs on: PC開発・独立監査、phone F51F/ZY22LWGDCV。会場は常時オン
   → 旧サーバ停止 → `nohup bash scripts/phone_serve.sh 127.0.0.1 > data/server-<commit>.log 2>&1 &`。PCからは `ssh -f -N -L 8000:127.0.0.1:8000 ...`（ssh `-i ~/.ssh/f51f_key -p 8022 u0_a26@192.168.0.6`）。
   ベンチの鍵は `ROKID_API_KEY` をスマホの env から読んで渡す（画面に出さない）。
 
-## 4. 次の作業（Runs on: 開発PC＋接続F51F）：CI互換修正と録画frame比較をscope別保存→まとめてpush/実CI。phone新v2診断で補助/proc不完全を分けexec結果→browser→Work通常unmount実測/互換。native録画hybrid実装、phone動画転送・AIfeedback・可変紙面を教科計測より先に継続。以下は旧経緯。
+## 4. 次の作業（Runs on: 開発PC＋接続F51F）：CI修正をscope別commit/push・実matrix確認。phone body固定stage診断→X11/browser→Work通常unmount実測/互換。native録画hybrid独立監査/build、phone動画転送・AIfeedback・可変紙面を教科計測より先に継続。以下は旧経緯。
 
 1. 済：独立監査2回（`4552ea1`、`4552ea1..e12e155`）の指摘を `61ad481`〜`1134404` で反映。
 2. 済：4a（3節）。起動はスマホで `bash scripts/phone_serve.sh 127.0.0.1`、PCから `ssh -L 8000:127.0.0.1:8000` で投入した。

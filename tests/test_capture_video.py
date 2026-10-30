@@ -134,12 +134,15 @@ def test_external_url_and_source_parent_output_are_rejected(movie, tmp_path):
     assert source.is_file()
 
 
-def test_missing_decoder_holds_without_install_or_output(movie, tmp_path, monkeypatch):
-    source, _, _ = movie
+def test_missing_decoder_holds_without_install_or_output(tmp_path, monkeypatch):
+    source = tmp_path / "original.mp4"
+    source.write_bytes(b"unopened movie")
+    output = tmp_path / "no-packets"
     monkeypatch.setattr(video().shutil, "which", lambda name: None)
-    result = prepare(source, tmp_path)
+    result = prepare(source, output)
     assert result["decision"] == "hold" and result["reasons"] == ["decoder_unavailable"]
-    assert list(tmp_path.iterdir()) == []
+    assert result["packet_dir"] is None and result["candidates"] == []
+    assert not output.exists() and source.read_bytes() == b"unopened movie"
 
 
 def test_one_probe_and_one_selected_decode_for_many_candidates(movie, tmp_path, monkeypatch):
@@ -367,13 +370,25 @@ def test_scene_timebase_or_sensor_mapping_is_never_guessed(movie, tmp_path, muta
     assert result["candidates"] == []
 
 
-def test_corrupt_movie_is_retained_and_unavailable_identity_creates_no_packet(tmp_path):
+def test_corrupt_movie_is_retained_and_unavailable_identity_creates_no_packet(tmp_path, monkeypatch):
     source = tmp_path / "broken.mp4"
     source.write_bytes(b"not an MP4")
+    commands = []
+
+    def corrupt_probe(argv, **kwargs):
+        commands.append(argv)
+        assert argv[0] == "fixture-ffprobe"
+        assert Path(argv[-1]).read_bytes() == b"not an MP4"
+        raise video()._Hold("decoder_failed")
+
+    # Exercise failed probing after snapshotting, independently of installed tools.
+    monkeypatch.setattr(video().shutil, "which", lambda name: "fixture-" + name)
+    monkeypatch.setattr(video(), "_run", corrupt_probe)
     result = prepare(source, tmp_path / "packets")
-    assert result["decision"] == "hold"
+    assert result["decision"] == "hold" and result["reasons"] == ["decoder_failed"]
     assert (Path(result["packet_dir"]) / "original.mp4").read_bytes() == b"not an MP4"
-    assert result["candidates"] == []
+    assert source.read_bytes() == b"not an MP4" and result["candidates"] == []
+    assert len(commands) == 1
 
     def unavailable():
         raise RuntimeError("session disappeared")
@@ -381,6 +396,7 @@ def test_corrupt_movie_is_retained_and_unavailable_identity_creates_no_packet(tm
     result = prepare(source, tmp_path / "no-packets", current_identity=unavailable)
     assert result["reasons"] == ["current_identity_unavailable"]
     assert not (tmp_path / "no-packets").exists()
+    assert len(commands) == 1
 
 
 def test_output_traversal_never_writes_outside_the_selected_root(movie, tmp_path):
