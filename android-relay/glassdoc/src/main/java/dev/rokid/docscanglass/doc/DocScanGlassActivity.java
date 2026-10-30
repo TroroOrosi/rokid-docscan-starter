@@ -67,6 +67,7 @@ public final class DocScanGlassActivity extends Activity
     /** Diagnostic override for this launch only; normal launches always capture automatically. */
     private static final String EXTRA_MANUAL = "manual";
     private static final String EXTRA_ZSL_EVALUATION = "zsl_evaluation";
+    private static final String EXTRA_VIDEO_EVALUATION = "video_evaluation";
     /** Open this server session's answers directly: checks the answer display without a capture. */
     private static final String EXTRA_ANSWERS = "answers";
     private static final int CAMERA_PERMISSION_REQUEST = 7401;
@@ -125,6 +126,7 @@ public final class DocScanGlassActivity extends Activity
 
     private HandlerThread cameraThread;
     private GlassCamera camera;
+    private boolean evaluationRestarting;
     private GlassesCaptureSurface surface;
     private JapaneseOcr ocr;
     private DocScanController controller;
@@ -223,11 +225,20 @@ public final class DocScanGlassActivity extends Activity
                 EXTRA_GUIDE, (float) FramingGuide.UNCALIBRATED_FRACTION));
         hud.showSpreadGuide(getPreferences(MODE_PRIVATE).getBoolean(EXTRA_SPREAD, true));
 
+        final GlassCamera.Mode cameraMode;
+        final CaptureVideoRecording.Options recordingOptions;
+        try {
+            cameraMode = evaluationMode(getIntent());
+            recordingOptions = videoOptions(getIntent(), deviceId, powerGeneration);
+        } catch (IllegalArgumentException invalid) {
+            hud.showLines(List.of("撮影評価を開始できません", invalid.getMessage(), ""));
+            Log.w(TAG, "explicit camera evaluation rejected: " + invalid.getMessage());
+            finish(); return;
+        }
         cameraThread = new HandlerThread("glass-camera");
         cameraThread.start();
         camera = new GlassCamera(this, new Handler(cameraThread.getLooper()), cameraCallback(),
-                getIntent() != null && getIntent().getBooleanExtra(EXTRA_ZSL_EVALUATION, false)
-                        ? GlassCamera.Mode.ZSL_EVALUATION_YUV : GlassCamera.Mode.NATIVE_STILL);
+                cameraMode, null, null, recordingOptions, null);
         surface = new GlassesCaptureSurface(this, camera, hud, main, this);
         ocr = new JapaneseOcr();
         controller = new DocScanController(
@@ -269,9 +280,26 @@ public final class DocScanGlassActivity extends Activity
             if (!acceptsWearEntry(intent)) return;
             intent = new Intent(this, DocScanGlassActivity.class).putExtra("chooser", true);
         }
+        if (intent != null && intent.hasExtra(WAKE_SESSION)) {
+            setIntent(intent); muteOutput(); receiveWake(intent); return;
+        }
+        if (intent != null && (intent.hasExtra(EXTRA_VIDEO_EVALUATION) || intent.hasExtra(EXTRA_ZSL_EVALUATION))) {
+            if (evaluationRestarting) return;
+            try { evaluationMode(intent); videoOptions(intent, deviceId == null ? "evaluation" : deviceId, powerGeneration); }
+            catch (IllegalArgumentException invalid) {
+                Log.w(TAG, "explicit camera evaluation rejected: " + invalid.getMessage());
+                if (hud != null) hud.showLines(List.of("撮影評価を開始できません", invalid.getMessage(), ""));
+                return;
+            }
+            evaluationRestarting = true;
+            setIntent(intent);
+            stopCaptureHardware();
+            Runnable restart = () -> main.post(() -> { if (!isFinishing() && !isDestroyed()) recreate(); });
+            if (camera != null) camera.close(restart); else restart.run();
+            return;
+        }
         setIntent(intent);
         muteOutput();
-        if (intent != null && intent.hasExtra(WAKE_SESSION)) { receiveWake(intent); return; }
         if (intent != null && intent.getBooleanExtra("chooser", false)) {
             stopCaptureHardware();
             persistAnswerPosition(false);
@@ -426,9 +454,11 @@ public final class DocScanGlassActivity extends Activity
         backExit.reset();
         if (controller != null) controller.close();
         if (surface != null) surface.close();
-        if (camera != null) camera.close();
+        boolean videoEnding = camera != null && camera.videoEvaluation();
+        if (videoEnding) camera.close(() -> { if (cameraThread != null) cameraThread.quitSafely(); });
+        else if (camera != null) camera.close();
         if (ocr != null) ocr.close();
-        if (cameraThread != null) cameraThread.quitSafely();
+        if (!videoEnding && cameraThread != null) cameraThread.quitSafely();
         stateExecutor.shutdown();
         answerPersistExecutor.shutdown();
         super.onDestroy();
@@ -1254,12 +1284,43 @@ public final class DocScanGlassActivity extends Activity
         return powerSession > 0 ? powerSession : controller == null ? 0 : controller.sessionId();
     }
 
+    static GlassCamera.Mode evaluationMode(Intent intent) {
+        boolean zsl = evaluationFlag(intent, EXTRA_ZSL_EVALUATION);
+        boolean video = evaluationFlag(intent, EXTRA_VIDEO_EVALUATION);
+        if (zsl && video) throw new IllegalArgumentException("ZSLと録画評価は同時指定できません");
+        return video ? GlassCamera.Mode.VIDEO_EVALUATION : zsl ? GlassCamera.Mode.ZSL_EVALUATION_YUV : GlassCamera.Mode.NATIVE_STILL;
+    }
+
+    static CaptureVideoRecording.Options videoOptions(Intent intent, String deviceId, long generation) {
+        if (!evaluationFlag(intent, EXTRA_VIDEO_EVALUATION))
+            return CaptureVideoRecording.Options.defaults("inactive-evaluation", generation, MEASURED_ROTATION_DEGREES);
+        return new CaptureVideoRecording.Options(deviceId, generation, MEASURED_ROTATION_DEGREES,
+                intent.hasExtra("video_codec") ? intent.getStringExtra("video_codec") : "avc",
+                evaluationInteger(intent, "video_width", 4032), evaluationInteger(intent, "video_height", 3024),
+                evaluationInteger(intent, "video_fps", 30), evaluationInteger(intent, "video_bitrate", 20_000_000));
+    }
+
+    private static boolean evaluationFlag(Intent intent, String key) {
+        if (intent == null || !intent.hasExtra(key)) return false;
+        Object value = intent.getExtras().get(key);
+        if (!(value instanceof Boolean)) throw new IllegalArgumentException("evaluation flag must be boolean: " + key);
+        return (Boolean)value;
+    }
+
+    private static int evaluationInteger(Intent intent, String key, int fallback) {
+        if (!intent.hasExtra(key)) return fallback;
+        Object value = intent.getExtras().get(key);
+        if (!(value instanceof Integer)) throw new IllegalArgumentException("evaluation value must be integer: " + key);
+        return (Integer)value;
+    }
+
     private void beginPowerGeneration() {
         cancelDisplayIdle();
         idleAsleep = false;
         try { powerGeneration = new PowerState(getPreferences(MODE_PRIVATE)).begin(powerGeneration).generation; }
         catch (IOException error) { sessionClosed = true; displaySleep.sleep(this); finish(); return; }
         powerSequence = 0;
+        if (camera != null) camera.videoGeneration(powerGeneration);
         powerSession = 0;
         acknowledgedSession = 0;
         acknowledgedRevision = -1;

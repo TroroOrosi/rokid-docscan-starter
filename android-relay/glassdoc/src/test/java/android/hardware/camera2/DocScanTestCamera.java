@@ -2,6 +2,7 @@ package android.hardware.camera2;
 
 import android.hardware.camera2.params.InputConfiguration;
 import android.hardware.camera2.params.OutputConfiguration;
+import android.hardware.camera2.params.SessionConfiguration;
 import android.os.Handler;
 import android.view.Surface;
 import java.util.List;
@@ -16,7 +17,11 @@ public final class DocScanTestCamera extends CameraDevice {
     public List<Surface> outputs;
     public int configurations;
     public boolean closed;
+    public boolean suppressCloseCallback;
     public boolean refuseSession;
+    public boolean supportsExactSession = true;
+    public boolean sessionQueryUnsupported;
+    public SessionConfiguration queriedConfiguration;
     public InputConfiguration inputConfiguration;
     public TotalCaptureResult reprocessSource;
     public Runnable onClose = () -> { };
@@ -27,9 +32,14 @@ public final class DocScanTestCamera extends CameraDevice {
         if (closed) return;
         closed = true;
         onClose.run();
-        handler.post(() -> state.onClosed(this));
+        if (!suppressCloseCallback) handler.post(() -> state.onClosed(this));
     }
     @Override public CaptureRequest.Builder createCaptureRequest(int template) { return requests.apply(template); }
+    @Override public boolean isSessionConfigurationSupported(SessionConfiguration configuration) {
+        queriedConfiguration = configuration;
+        if (sessionQueryUnsupported) throw new UnsupportedOperationException("test query unavailable");
+        return supportsExactSession;
+    }
     @Override public void createCaptureSession(List<Surface> surfaces, CameraCaptureSession.StateCallback callback, Handler h) {
         configurations++;
         outputs = surfaces;

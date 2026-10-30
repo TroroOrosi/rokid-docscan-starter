@@ -192,8 +192,16 @@ and uncertain-send safeguards remain independent of model-name fallback.
   remain the ordinary route. Unsupported evaluation is reported instead of
   silently mixing native samples into the measurement. Queue and close work
   must not block the camera handler or falsely acknowledge a completed stop.
-  Recording, PRIVATE inputs and AI inspection remain comparison candidates;
-  this evaluation has no physical image-quality or performance acceptance yet.
+  An explicit `video_evaluation=true` comparison keeps maximum native JPEGs
+  beside a silent original MP4. It queries MediaRecorder sizes, AVC/HEVC
+  encoder capabilities and the exact three-output session without a silent
+  profile fallback. Recorder preparation/finalization run off the camera handler;
+  stop acknowledgement waits for finalization and retains uncertain originals.
+  Its private journal separates selected profiles, actual container metadata,
+  camera scene timestamps and unknown video PTS correspondence. The bounded
+  local clip is not an automatic whole-booklet recording or phone upload route.
+  PRIVATE reprocessing and live AI inspection remain comparison candidates;
+  neither evaluation has physical image-quality or performance acceptance yet.
   The frozen CUSTOMVIEW route keeps explicit phone controls. The original
   `adf12ee` disable decision belonged to the route without operator taps.
 - On the local surface the captured still is drawn after its native image is

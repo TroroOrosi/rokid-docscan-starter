@@ -75,8 +75,9 @@ android {
         // 40 verifies native capture provenance before acknowledging an upload.
         // 41 keeps active page observation across idle waits without a resume tap.
         // 42 adds explicit full-resolution ZSL evaluation, without changing the native default.
-        versionCode = 42
-        versionName = "0.33.0"
+        // 43 adds explicit original-video/MAX-JPEG evaluation and a recorder stop barrier.
+        versionCode = 43
+        versionName = "0.34.0"
     }
 
     // Same reasoning as `:glassapp`: a vendor installer that reads JAR

@@ -15,12 +15,15 @@ import android.hardware.camera2.CaptureResult;
 import android.hardware.camera2.TotalCaptureResult;
 import android.hardware.camera2.params.StreamConfigurationMap;
 import android.hardware.camera2.params.InputConfiguration;
+import android.hardware.camera2.params.OutputConfiguration;
+import android.hardware.camera2.params.SessionConfiguration;
 import android.media.Image;
 import android.media.ImageReader;
 import android.os.Handler;
 import android.os.SystemClock;
 import android.util.Log;
 import android.util.Size;
+import android.util.Range;
 import android.view.Surface;
 
 import androidx.annotation.RequiresPermission;
@@ -51,7 +54,7 @@ import dev.rokid.docscanrelay.CaptureSurface;
  */
 final class GlassCamera {
 
-    enum Mode { NATIVE_STILL, ZSL_EVALUATION_YUV }
+    enum Mode { NATIVE_STILL, ZSL_EVALUATION_YUV, VIDEO_EVALUATION }
 
     private static final String TAG = "DocScanGlassDoc";
     private static final long CAPTURE_TIMEOUT_MILLIS = 15_000;
@@ -117,6 +120,35 @@ final class GlassCamera {
     private final Mode mode;
     private final Executor inputWorker;
     private final ZslInputTransfer.Factory inputFactory;
+    private CaptureVideoRecording.Options videoOptions;
+    private final CaptureVideoRecording.Factory videoFactory;
+    private CaptureVideoRecording video;
+    private boolean videoPreparing;
+    private String videoCameraId;
+    private Size videoJpegSize;
+    private boolean videoSceneObserved;
+    private VideoClose videoClose;
+    private final List<Runnable> closeCallbacks = new ArrayList<>();
+    private final class VideoClose {
+        final CaptureVideoRecording recording;
+        final long token;
+        final Runnable deadline;
+        boolean resourcesClosed, cameraClosed, finishQueued, recorderFinished;
+        VideoClose(CaptureVideoRecording recording, long token, boolean cameraClosed) {
+            this.recording = recording; this.token = token; this.cameraClosed = cameraClosed;
+            deadline = () -> {
+                if (videoClose != this) return;
+                recording.abort("camera_or_recorder_close_timeout", GlassCamera.this::previewFailed);
+                previewFailed("video evaluation close barrier unresolved");
+                unknown = true;
+                recording.finish(false, "close_timeout", ignored -> {
+                    if (videoClose != this) return;
+                    recorderFinished = true;
+                    completeCloseCallbacks();
+                });
+            };
+        }
+    }
     private ImageReader zslReader;
     private ZslFrameBuffer zslFrames;
     private ZslFrameBuffer.Selection selectedInput;
@@ -177,14 +209,34 @@ final class GlassCamera {
 
     GlassCamera(Context context, Handler handler, Callback callback, Mode mode,
                 Executor worker, ZslInputTransfer.Factory factory) {
+        this(context, handler, callback, mode, worker, factory,
+                CaptureVideoRecording.Options.defaults("unbound-evaluation", 0, 270), null);
+    }
+
+    GlassCamera(Context context, Handler handler, Callback callback, Mode mode,
+                Executor worker, ZslInputTransfer.Factory factory,
+                CaptureVideoRecording.Options videoOptions, CaptureVideoRecording.Factory videoFactory) {
         this.context = context;
         this.handler = handler;
         this.callback = callback;
         this.mode = mode;
         inputWorker = worker;
         inputFactory = factory;
+        this.videoOptions = videoOptions;
+        this.videoFactory = videoFactory;
         stillness = new Stillness(context);
     }
+
+    void videoGeneration(long next) {
+        if (mode != Mode.VIDEO_EVALUATION) return;
+        handler.post(() -> {
+            if (videoOptions.generation == next) return;
+            videoOptions = videoOptions.generation(next);
+            if (video != null || videoClose != null) previewFailed("video evaluation generation changed");
+        });
+    }
+
+    boolean videoEvaluation() { return mode == Mode.VIDEO_EVALUATION; }
 
     /** Opens the rear camera and captures exactly one JPEG at its largest size. */
     @RequiresPermission(Manifest.permission.CAMERA)
@@ -225,11 +277,17 @@ final class GlassCamera {
                 stillness.cancel();
                 handler.removeCallbacks(prepareTimeout);
             }
+            if (mode == Mode.VIDEO_EVALUATION) {
+                previewRequested = false; pageReady = null;
+                if (!capturePending && activeFuturePage == null) stopPreview();
+            }
             if (activeFuturePage == null && inputIdle()) idle.run(); else futureStops.add(idle);
         });
     }
 
     private void futureIdle() {
+        if (mode == Mode.VIDEO_EVALUATION && !previewRequested && !capturePending
+                && activeFuturePage == null && video != null) stopPreview();
         if (activeFuturePage != null || !inputIdle()) return;
         List<Runnable> idle = new ArrayList<>(futureStops);
         futureStops.clear();
@@ -237,7 +295,8 @@ final class GlassCamera {
     }
 
     private boolean inputIdle() {
-        return mode == Mode.NATIVE_STILL || (zslCloseComplete && (inputTransfer == null || inputTransfer.idle()));
+        if (mode == Mode.VIDEO_EVALUATION) return video == null && videoClose == null;
+        return mode != Mode.ZSL_EVALUATION_YUV || (zslCloseComplete && (inputTransfer == null || inputTransfer.idle()));
     }
 
     void awaitNextPage(Runnable ready) {
@@ -265,7 +324,7 @@ final class GlassCamera {
     /** Prepare YUV and the full-size JPEG in the same session, retaining metered focus. */
     @RequiresPermission(Manifest.permission.CAMERA)
     private void startPreview() {
-        if (!previewRequested || closed || unknown || previewReader != null || previewClosing || zslClosing
+        if (!previewRequested || closed || unknown || previewReader != null || previewClosing || zslClosing || videoClose != null || videoPreparing
                 || (generation > 0 && !settled)) return;
         long token = ++previewGeneration;
         try {
@@ -278,6 +337,22 @@ final class GlassCamera {
             Size size = previewSize(sizes, jpegSize);
             if (size == null) throw new IllegalStateException("no YUV preview matches JPEG aspect");
             if (mode == Mode.ZSL_EVALUATION_YUV) requireZsl(characteristics, map, jpegSize);
+            if (mode == Mode.VIDEO_EVALUATION && video == null) {
+                videoCameraId = id; videoJpegSize = jpegSize;
+                videoSceneObserved = false;
+                videoPreparing = true;
+                video = videoFactory == null
+                        ? new CaptureVideoRecording(context.getFilesDir(), handler, videoOptions)
+                        : new CaptureVideoRecording(context.getFilesDir(), handler, videoOptions, inputWorker, videoFactory);
+                CaptureVideoRecording pending = video;
+                pending.prepare(characteristics, jpegSize, () -> {
+                    videoPreparing = false;
+                    if (video == pending && token == previewGeneration && !closed && !unknown && previewRequested) startPreview();
+                }, reason -> { videoPreparing = false; if (video == pending) previewFailed(reason); });
+                return;
+            }
+            if (mode == Mode.VIDEO_EVALUATION && (!id.equals(videoCameraId) || !jpegSize.equals(videoJpegSize)))
+                throw new IllegalStateException("video evaluation camera identity changed during prepare");
             metering = new CameraReadiness(characteristics.get(CameraCharacteristics.CONTROL_AF_AVAILABLE_MODES),
                     characteristics.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE),
                     characteristics.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_MODES));
@@ -324,8 +399,10 @@ final class GlassCamera {
                                     if (!metering.supported()) {
                                         previewFailed("camera AF/AE capabilities unsupported"); return;
                                     }
-                                    CaptureRequest.Builder request = opened.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW);
+                                    CaptureRequest.Builder request = opened.createCaptureRequest(mode == Mode.VIDEO_EVALUATION
+                                            ? CameraDevice.TEMPLATE_RECORD : CameraDevice.TEMPLATE_PREVIEW);
                                     request.addTarget(previewReader.getSurface());
+                                    if (mode == Mode.VIDEO_EVALUATION) addVideoTarget(request);
                                     if (mode == Mode.ZSL_EVALUATION_YUV) {
                                         if (!configured.isReprocessable() || configured.getInputSurface() == null)
                                             throw new IllegalStateException("ZSL session has no input");
@@ -341,16 +418,38 @@ final class GlassCamera {
                                     }
                                     applyMetering(request);
                                     configured.setRepeatingRequest(request.build(), previewResults(token, false), handler);
+                                    if (mode == Mode.VIDEO_EVALUATION) {
+                                        CaptureVideoRecording activeVideo = video;
+                                        activeVideo.start(() -> {}, reason -> { if (video == activeVideo) previewFailed(reason); });
+                                    }
                                 } catch (CameraAccessException | RuntimeException error) { previewFailed(); }
                             }
                             @Override public void onConfigureFailed(CameraCaptureSession failed) {
-                                failed.close(); if (token == previewGeneration) previewFailed("camera YUV/JPEG session refused");
+                                failed.close(); if (token == previewGeneration) previewFailed(mode == Mode.VIDEO_EVALUATION
+                                        ? "video evaluation exact YUV/MAX-JPEG/recorder session refused" : "camera YUV/JPEG session refused");
                             }
                         };
                         if (mode == Mode.ZSL_EVALUATION_YUV) {
                             opened.createReprocessableCaptureSession(new InputConfiguration(jpegSize.getWidth(), jpegSize.getHeight(),
                                     ImageFormat.YUV_420_888), Arrays.asList(previewReader.getSurface(),
                                     zslReader.getSurface(), reader.getSurface()), sessionCallback, handler);
+                        } else if (mode == Mode.VIDEO_EVALUATION) {
+                            List<Surface> outputs = Arrays.asList(previewReader.getSurface(), reader.getSurface(), video.surface());
+                            List<OutputConfiguration> configuration = new ArrayList<>();
+                            for (Surface output : outputs) configuration.add(new OutputConfiguration(output));
+                            SessionConfiguration exact = new SessionConfiguration(SessionConfiguration.SESSION_REGULAR,
+                                    configuration, handler::post, sessionCallback);
+                            try {
+                                if (!opened.isSessionConfigurationSupported(exact)) {
+                                    video.sessionSupport("unsupported_exact_configuration");
+                                    previewFailed("video evaluation exact session unsupported"); return;
+                                }
+                            } catch (UnsupportedOperationException unavailable) {
+                                video.sessionSupport("unknown_query_not_supported");
+                                previewFailed("video evaluation exact session support unknown"); return;
+                            }
+                            video.sessionSupport("advertised_supported_not_throughput_verified");
+                            opened.createCaptureSession(outputs, sessionCallback, handler);
                         } else {
                             opened.createCaptureSession(Arrays.asList(previewReader.getSurface(), reader.getSurface()),
                                     sessionCallback, handler);
@@ -368,7 +467,7 @@ final class GlassCamera {
                     else { errored.close(); if (token == previewGeneration) previewFailed(); }
                 }
                 @Override public void onClosed(CameraDevice closedDevice) {
-                    previewClosed();
+                    previewClosed(token);
                 }
             }, handler);
         } catch (CameraAccessException | RuntimeException | OutOfMemoryError error) { previewFailed(); }
@@ -396,6 +495,9 @@ final class GlassCamera {
             }
             long previousScene = pageChange.sequence();
             pageChange.observe(thumbnail, now);
+            if (video != null && (!videoSceneObserved || previousScene != pageChange.sequence())) {
+                videoSceneObserved = true; video.scene(pageChange.sequence(), timestamp, now);
+            }
             if (previousScene != pageChange.sequence()) {
                 sceneStartTimestamp = timestamp;
                 if (activeFuturePage != null && futureSceneEndTimestamp == Long.MAX_VALUE) {
@@ -444,6 +546,7 @@ final class GlassCamera {
     }
 
     private void futurePageMissed() {
+        if (video != null) video.gap("native_future_original_scene_or_capacity_gap");
         CaptureSurface.FuturePageListener observer = futurePages;
         futurePages = null;
         futureCapacity = 0;
@@ -454,7 +557,13 @@ final class GlassCamera {
         release();
     }
 
-    private void previewClosed() {
+    private void previewClosed(long token) {
+        if (videoClose != null && videoClose.token == token) {
+            videoClose.cameraClosed = true;
+            previewClosing = false; previewOpening = false;
+            finishVideoClose(videoClose);
+            return;
+        }
         if (!previewClosing) return;
         previewClosing = false;
         startPreview();
@@ -464,6 +573,7 @@ final class GlassCamera {
 
     private void previewFailed(String reason) {
         if (closed || unknown) return;
+        if (video != null) video.gap(reason);
         if (generation > 0 && active(generation)) { fail(reason); return; }
         previewRequested = false;
         previewOpening = false;
@@ -485,7 +595,8 @@ final class GlassCamera {
                 && pageChange.ready(now)))
                 && meteringExposureNanos > 0 && meteredFrame(now) && previewMotion.ready(now)
                 && now >= previewAt && now - previewAt <= CameraReadiness.FRESH_MILLIS
-                && (mode == Mode.NATIVE_STILL || (inputTransfer != null && inputTransfer.ready() && zslCandidate() != null));
+                && (mode != Mode.ZSL_EVALUATION_YUV || (inputTransfer != null && inputTransfer.ready() && zslCandidate() != null))
+                && (mode != Mode.VIDEO_EVALUATION || (video != null && video.recording()));
     }
 
     private void inputReleased() {
@@ -499,7 +610,7 @@ final class GlassCamera {
         long exposure = !closed && !unknown && previewDevice != null && previewSession != null
                 && meteredFrame(now) && now >= previewAt
                 && now - previewAt <= CameraReadiness.FRESH_MILLIS ? meteringExposureNanos : 0;
-        if (exposure <= 0 || mode == Mode.NATIVE_STILL) return exposure;
+        if (exposure <= 0 || mode != Mode.ZSL_EVALUATION_YUV) return exposure;
         ZslFrameBuffer.Selection candidate = zslCandidate();
         return candidate == null ? exposure : Math.max(exposure, candidate.result.get(CaptureResult.SENSOR_EXPOSURE_TIME));
     }
@@ -526,6 +637,9 @@ final class GlassCamera {
                 try {
                     if (!focusTrigger && zslFrames != null) zslFrames.result(result);
                     Long timestamp = result.get(CaptureResult.SENSOR_TIMESTAMP);
+                    if (video != null && timestamp != null) video.frame(timestamp, result.getFrameNumber(),
+                            result.get(CaptureResult.SCALER_CROP_REGION), result.get(CaptureResult.CONTROL_VIDEO_STABILIZATION_MODE),
+                            result.get(CaptureResult.LENS_OPTICAL_STABILIZATION_MODE));
                     if (timestamp == null || timestamp <= 0) {
                         meteringExposureNanos = 0;
                         meteringSensorTimestamp = 0; return;
@@ -595,6 +709,7 @@ final class GlassCamera {
         try {
             CaptureRequest.Builder trigger = previewDevice.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW);
             trigger.addTarget(previewReader.getSurface());
+            if (mode == Mode.VIDEO_EVALUATION) addVideoTarget(trigger);
             applyMetering(trigger);
             trigger.set(CaptureRequest.CONTROL_AF_TRIGGER, CaptureRequest.CONTROL_AF_TRIGGER_START);
             autoFocusStarted = true;
@@ -624,7 +739,7 @@ final class GlassCamera {
         startedAtMillis = SystemClock.elapsedRealtime();
         handler.removeCallbacks(prepareTimeout);
         handler.postDelayed(timeout, CAPTURE_TIMEOUT_MILLIS);
-        if (mode == Mode.NATIVE_STILL) requestStill(current);
+        if (mode != Mode.ZSL_EVALUATION_YUV) requestStill(current);
         else {
             Log.i(TAG, "producer=zsl_evaluation_yuv gen=" + current + " source_age_ns="
                     + (SystemClock.elapsedRealtimeNanos() - selectedInput.timestamp) + " raw_ring=" + zslFrames.size());
@@ -640,8 +755,15 @@ final class GlassCamera {
         }
     }
 
-    void close() {
+    void close() { close(null); }
+
+    void close(Runnable completed) {
         handler.post(() -> {
+            if (completed != null) closeCallbacks.add(completed);
+            if (mode == Mode.VIDEO_EVALUATION && video != null && generation > 0 && !settled) {
+                video.gap("generation_end_native_original_unresolved");
+                unknown = true;
+            }
             closed = true;
             settled = true;
             generation++;
@@ -654,7 +776,15 @@ final class GlassCamera {
             handler.removeCallbacks(timeout);
             handler.removeCallbacks(prepareTimeout);
             futureIdle();
+            if ((videoClose == null || videoClose.recorderFinished)
+                    && (mode != Mode.ZSL_EVALUATION_YUV || zslCloseComplete)) completeCloseCallbacks();
         });
+    }
+
+    private void completeCloseCallbacks() {
+        if (videoClose != null && !videoClose.recorderFinished) return;
+        List<Runnable> callbacks = new ArrayList<>(closeCallbacks); closeCallbacks.clear();
+        for (Runnable ready : callbacks) ready.run();
     }
 
     private void requestStill(long current) {
@@ -662,6 +792,10 @@ final class GlassCamera {
             CaptureRequest.Builder request =
                     previewDevice.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE);
             request.addTarget(reader.getSurface());
+            if (mode == Mode.VIDEO_EVALUATION) {
+                addVideoTarget(request);
+                video.stillRequested(current);
+            }
             // No rotation is baked into the JPEG. The server owns the
             // orientation-corrected PNG and is told the rotation separately,
             // so exactly one component rotates the page.
@@ -749,7 +883,7 @@ final class GlassCamera {
             if (sensorTimestamp <= 0) throw new RejectedJpeg("invalid JPEG timestamp");
             // One JPEG is in flight. A previous original cannot satisfy the next request.
             // Device ZSL may predate preview, so only compare this reader's JPEG timestamps.
-            if (mode == Mode.NATIVE_STILL && sensorTimestamp <= lastJpegSensorTimestamp) return;
+            if (mode != Mode.ZSL_EVALUATION_YUV && sensorTimestamp <= lastJpegSensorTimestamp) return;
             if (width <= 0 || height <= 0) throw new RejectedJpeg("invalid JPEG dimensions");
             Image.Plane[] planes = image.getPlanes();
             if (planes.length != 1) throw new RejectedJpeg("invalid JPEG planes");
@@ -787,10 +921,10 @@ final class GlassCamera {
         // Reuse the configured readers/session until pause, close or failure.
         // Consumer exceptions must not re-label a delivered image as a camera failure.
         StillResult result = stillResult != null && stillResult.generation == generation ? stillResult : null;
-        boolean associationResolved = mode == Mode.NATIVE_STILL || (outputSource != null
+        boolean associationResolved = mode != Mode.ZSL_EVALUATION_YUV || (outputSource != null
                 && sensorTimestamp == outputSource.timestamp);
         CaptureProvenance provenance;
-        if (mode == Mode.NATIVE_STILL) {
+        if (mode != Mode.ZSL_EVALUATION_YUV) {
             provenance = CaptureProvenance.nativeStill(jpeg, width, height, sensorTimestamp,
                     result == null ? null : result.timestamp, result == null ? null : result.frame,
                     result == null ? null : result.exposure, result == null ? null : result.iso,
@@ -805,6 +939,9 @@ final class GlassCamera {
             provenance = null;
         }
         selectedInput = null;
+        CaptureVideoRecording receiptVideo = video != null ? video : videoClose == null ? null : videoClose.recording;
+        if (receiptVideo != null) receiptVideo.stillDelivered(generation, sensorTimestamp, width, height,
+                provenance == null ? "unknown" : provenance.jpegSha256);
         CaptureSurface.FuturePageListener future = activeFuturePage;
         activeFuturePage = null;
         if (future == null) callback.onCaptured(new Captured(jpeg, width, height, elapsed, provenance, associationResolved));
@@ -827,6 +964,7 @@ final class GlassCamera {
             return;
         }
         settled = true;
+        if (video != null) video.gap(reason);
         capturePending = false;
         unknown = true;
         previewRequested = false;
@@ -851,6 +989,7 @@ final class GlassCamera {
         ImageReader oldZslReader = zslReader;
         ZslFrameBuffer oldFrames = zslFrames;
         ZslInputTransfer oldInput = inputTransfer;
+        long oldPreviewGeneration = previewGeneration;
         previewSession = null;
         previewDevice = null;
         reader = null;
@@ -862,6 +1001,32 @@ final class GlassCamera {
         ++previewGeneration;
         meteringExposureNanos = 0;
         if (oldDevice != null || previewOpening) previewClosing = true;
+        if (mode == Mode.VIDEO_EVALUATION) {
+            if (videoClose != null) return true;
+            if (video == null) return true;
+            CaptureVideoRecording oldVideo = video; video = null; videoPreparing = false;
+            oldVideo.requestClose(closed ? "generation_end" : unknown ? "camera_unknown" : "capture_end");
+            VideoClose ending = new VideoClose(oldVideo, oldPreviewGeneration, oldDevice == null && !previewOpening);
+            videoClose = ending;
+            handler.postDelayed(ending.deadline, CAPTURE_TIMEOUT_MILLIS);
+            Thread closer = new Thread(() -> {
+                boolean ok = closeResource(oldSession);
+                ok = closeResource(oldDevice) && ok;
+                ok = closeResource(oldReader) && ok;
+                ok = closeResource(oldPreviewReader) && ok;
+                boolean success = ok;
+                handler.post(() -> {
+                    if (videoClose != ending) return;
+                    if (!success) {
+                        oldVideo.abort("camera_close_failed", GlassCamera.this::previewFailed);
+                        previewFailed("video evaluation camera close failed"); return;
+                    }
+                    ending.resourcesClosed = true; finishVideoClose(ending);
+                });
+            }, "glass-video-camera-close");
+            closer.setDaemon(true); closer.start();
+            return true;
+        }
         if (mode == Mode.ZSL_EVALUATION_YUV) {
             if (zslClosing) return true;
             zslClosing = true; zslCloseComplete = false;
@@ -870,6 +1035,7 @@ final class GlassCamera {
                 if (!finished[0] || !finished[1]) return;
                 zslClosing = false; zslCloseComplete = true;
                 inputReleased(); startPreview();
+                if (closed) completeCloseCallbacks();
             };
             // Stop the consumer independently; a blocked native input cannot starve its own cleanup.
             Thread closer = new Thread(() -> {
@@ -901,6 +1067,29 @@ final class GlassCamera {
         ok = closeResource(oldDevice) && ok;
         ok = closeResource(oldReader) && ok;
         return closeResource(oldPreviewReader) && ok;
+    }
+
+    private void addVideoTarget(CaptureRequest.Builder request) {
+        if (video == null || video.surface() == null) throw new IllegalStateException("video evaluation surface unavailable");
+        request.addTarget(video.surface());
+        request.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, new Range<>(videoOptions.fps, videoOptions.fps));
+    }
+
+    private void finishVideoClose(VideoClose ending) {
+        if (videoClose != ending || !ending.resourcesClosed || !ending.cameraClosed || ending.finishQueued) return;
+        ending.finishQueued = true;
+        ending.recording.finish(!unknown, closed ? "generation_end" : "capture_end", ok -> {
+            if (videoClose != ending) return;
+            ending.recorderFinished = true;
+            handler.removeCallbacks(ending.deadline);
+            if (!ok || unknown) {
+                previewFailed("video evaluation finalization unresolved");
+                completeCloseCallbacks(); return;
+            }
+            videoClose = null;
+            futureIdle(); startPreview();
+            completeCloseCallbacks();
+        });
     }
 
     private static void requireZsl(CameraCharacteristics characteristics, StreamConfigurationMap map, Size size) {

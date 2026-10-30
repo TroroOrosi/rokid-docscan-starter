@@ -236,7 +236,8 @@ from __future__ import annotations
 # 0.57.1: preserve strict Work MCP inputs on the phone's legacy Pydantic stack.
 # 0.58.0: compare exact original-video frames without changing ordinary capture.
 # 0.58.1: reject malformed Work URLs consistently across supported Python versions.
-APP_VERSION = "0.58.1"
+# 0.59.0: evaluate an original-video and maximum-JPEG hybrid with a recorder stop barrier.
+APP_VERSION = "0.59.0"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.
@@ -500,7 +501,8 @@ EXPLAINER_API_VERSION = "1.1.0"
 #         is echoed with the server's canonical image identity.
 # 1.34.0: active local capture keeps observing pages after idle waits without a resume tap.
 # 1.35.0: opt-in ZSL evaluation preserves scene/quiet pairing and unresolved originals.
-GLASSES_VIEW_CONTRACT_VERSION = "1.35.0"
+# 1.36.0: opt-in recording evaluation retains originals and fences finalization with native capture.
+GLASSES_VIEW_CONTRACT_VERSION = "1.36.0"
 
 # Answer-area overlay payload (box + short answer; 2D image-anchored).
 # 1.1.0: added tracking metadata (tracking/fixed_ar/anchor_hint).
