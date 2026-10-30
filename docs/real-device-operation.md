@@ -15,6 +15,7 @@ Runs on: スマホのTermux、glassdoc、スマホのテザリングとモバイ
 
 初回セットアップ済みのスマホのソース更新は、確認済みの端末・ブラウザ所有・配布物をGit管理外のmanifestへ固定します。Windows PCで `py -3.12 -X utf8 scripts/phone_update.py --manifest <manifest.json> --manifest-sha256 <確認済みSHA256>` のプレビューを確認します。プレビューは端末に接続せず、引数なしでは必要なmanifest情報だけを表示します。`--inspect-readonly` で更新条件を読み取り、正確な `--execute-approved-source-update` コマンドの承認後だけ更新します。更新処理は配布対象のソースファイルに限り、保存済み写真・答案・Chromiumプロファイル・秘密設定・Git情報を保ちます。
 配布物は固定commitのraw Git blobから生成し、全ファイルのbytes・mode・path集合を照合します。Windowsの改行変換が混入した配布物は更新器が拒否します。Androidの絶対パスはPC側でもPOSIX表記で検証し、既存の依存ファイルと保存設定を一致させます。
+新規ファイルの公開は既存ファイルを上書きしない原子的な方法を使い、ソース更新前に対応するAPIと保存先での動作を検査します。Pythonのhard link APIがない環境では、公開Bionic APIの [renameat2とRENAME_NOREPLACE](https://android.googlesource.com/platform/bionic/+/e0848bbf/libc/include/stdio.h)を使用します。対応しない場合はソースを書き込む前に止めます。復旧処理の結果と、最初に失敗した段階・例外型・errnoは分けて記録し、例外メッセージや設定内容は出力しません。
 更新時は送信停止とAPI・監視・サービスの停止を確認し、既存のログイン用ブラウザとX11の所有を再確認します。例外時は、この更新で保存した元のソースから復旧します。接続切断や強制終了で完了を確認できなければ記録とバックアップを残し、再実行を停止します。APK導入・サービス有効化・GPT送信にはそれぞれ別の確認と承認が必要です。この更新の実行と会場経路の受け入れは別です。
 
 Termuxコマンドは以下です。サービス準備は無効状態で作成します。既存のブラウザ・X11がある場合は、PID・起動時刻・端末起動世代とプロファイルの所有を確かめ、正常終了とポート解放を確認してから有効化します。未知のプロセスやロックを削除して進めません。初回ログイン時の `bash scripts/phone_browser.sh login` も、専用X11の起動と同じプロファイルのブラウザが存在しないことが前提です。

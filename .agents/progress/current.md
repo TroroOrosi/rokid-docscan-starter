@@ -1,7 +1,7 @@
 # 再開入口：次のセッションはここだけ読めば始められる
 
-最終更新: 2026-10-30続行 — Work旧journal整理/可視4services/撮影後preview保持をPC全pytest1526pass/1skip/3warn・ruff0・Android199tasks/XML517fail0で検証。更新前検査でWindows nativepath/改行変換2不備を発見し、updater49test＋87rawGitblob照合で修正・別監査R0/O0。phone source/会場全経路は未受入。詳細phone-work-connected-root-20261030.json。
-Runs on: 開発・独立監査はWindows PC、接続phoneはF51F/ZY22LWGDCV。会場は常時オンphone AP＋装着glassesだけでPC/USB/毎回接続不要。本人の最新「確認せずにそのまま進めてください」に従い通常準備で承認を繰り返さない。技術fixture GPT3/Drive原PNG21/private folder1、fresh snapshot v4は87source/15protected/同browser・X11。phone source/APK/API/env/Boot/services更新0、手動glasses受入0。
+最終更新: 2026-10-31続行 — PC全pytest1526pass/1skip/3warn・AndroidXML517fail0を保持。phone更新1回os.link欠如→11更新後復元、87source/15protected旧一致。公開no-clobber事前probe/元失敗保存を60test/ruff0/別監査R0へ修正、A準備も6test/6scenario/実Bash3・R0。撮影2候補123pass後の独立R1/R2修正中。会場未受入。詳細phone-work-connected-root-20261030.json。
+Runs on: 開発・独立監査はWindows PC、接続phone F51F/ZY22LWGDCV。会場は常時オンphone AP＋装着glassesのみ、PC/USB/毎回接続不要。本人「確認せずにそのまま進めてください」を継続適用。技術GPT3/Drive原PNG21/private folder1。source試行1/11書込後復元確認、APK/API/env/Boot/services更新0、glasses操作/受入0。
 
 ## 0. 読み方（前提と資料に引きずられないため）
 
@@ -90,7 +90,7 @@ Runs on: 開発・独立監査はWindows PC、接続phoneはF51F/ZY22LWGDCV。�
   → 旧サーバ停止 → `nohup bash scripts/phone_serve.sh 127.0.0.1 > data/server-<commit>.log 2>&1 &`。PCからは `ssh -f -N -L 8000:127.0.0.1:8000 ...`（ssh `-i ~/.ssh/f51f_key -p 8022 u0_a26@192.168.0.6`）。
   ベンチの鍵は `ROKID_API_KEY` をスマホの env から読んで渡す（画面に出さない）。
 
-## 4. 次の作業（Runs on: 開発PC＋接続F51F）：修正済updaterを新commitへ固定しrawGit87blob archive＋v4snapshotを独立照合→phone source-only導入→Workenv/SEND0・4services無効準備→owned browser/X11 handover・API/Work/services起動。旧e50archiveはCRLF変換で使用中止(実機0)、RAW proofは全87byte一致/R1境界6test pass。原本・鍵・設定・profileを保持する。撮影future-scene2候補のPC縦sliceを並行実装中、録画/ZSL/AIfeedback/可変紙面/原音Work/glasses全経路は継続/未受入。以下は旧経緯。
+## 4. 次の作業（Runs on: 開発PC＋接続F51F）：最終R0 updaterの新commit/rawGit87archiveを別照合→新backupでsource更新→R0 A helperでWorkenv/SEND0・4services無効準備→B owned browser/X11 handover・API/Work/services起動をPC作成/別監査後に実施。旧失敗backup保持/再利用なし。撮影future-scene2候補のmanualbarrier/欠落の永続予約R1R2を分担修正中。録画/ZSL/AIfeedback/可変紙面/原音Work/glasses全経路は継続/未受入。以下は旧経緯。
 
 1. 済：独立監査2回（`4552ea1`、`4552ea1..e12e155`）の指摘を `61ad481`〜`1134404` で反映。
 2. 済：4a（3節）。起動はスマホで `bash scripts/phone_serve.sh 127.0.0.1`、PCから `ssh -L 8000:127.0.0.1:8000` で投入した。

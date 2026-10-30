@@ -9,6 +9,7 @@ import argparse
 import ast
 import base64
 from datetime import datetime, timezone
+import errno
 import hashlib
 import io
 import json
@@ -51,6 +52,15 @@ X11_BINDING = {}
 BACKUP = PHONE_HOME / 'rokid-backups/unconfigured'
 LOGGER_TARGET = PHONE_PREFIX / 'share/termux-services/svlogger'
 ROOT_FILES = {'requirements-phone.txt', 'constraints-phone.txt'}
+NEW_FILE_PUBLISHER = None
+FAILURE_TYPES = {'AssertionError', 'CdpError', 'RuntimeError', 'ValueError', 'TypeError',
+                 'OSError', 'FileNotFoundError', 'FileExistsError', 'PermissionError', 'JSONDecodeError',
+                 'TimeoutExpired', 'TimeoutError', 'SyntaxError', 'AttributeError', 'NotImplementedError', 'other'}
+SOURCE_STAGES = {'native_input', 'existing_cdp_connect', 'protected_source_env',
+                 'quiet_services', 'retained_browser_x11', 'source_update_preflight', 'atomic_source_update',
+                 'exclusive_publication_preflight', 'exclusive_source_publication', 'record_new_source_identity',
+                 'source_update_receipt', 'source_update_final_guard', 'source_transaction_restore_preflight',
+                 'restore_this_transaction_sources', 'complete', 'other'}
 stage = 'native_input'
 transaction_state = {'phase': 'not_started', 'source_writes': 0, 'restored': False}
 
@@ -136,9 +146,41 @@ def sync_directories(directory: Path) -> None:
             os.close(descriptor)
 
 
+def select_exclusive_publisher():
+    """Select a no-clobber primitive; symbol presence still needs an FS probe."""
+    link = getattr(os, 'link', None)
+    if callable(link):
+        return 'os_link', link
+    try:
+        import ctypes
+        rename = ctypes.CDLL(None, use_errno=True).renameat2
+    except (ImportError, AttributeError, OSError, TypeError):
+        raise RuntimeError('exclusive_publication_unavailable') from None
+    if not callable(rename):
+        raise RuntimeError('exclusive_publication_unavailable')
+    # Bionic's public stdio.h: renameat2 (API 30), RENAME_NOREPLACE = 1.
+    # The measured Python build target is not a runtime API-level check.
+    rename.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+    rename.restype = ctypes.c_int
+    def publish(source, target):
+        source, target = Path(source), Path(target)
+        if source.parent != target.parent:
+            raise RuntimeError('exclusive_publication_directory')
+        old, new = os.fsencode(source), os.fsencode(target)
+        if b'\0' in old or b'\0' in new:
+            raise RuntimeError('exclusive_publication_path')
+        ctypes.set_errno(0)
+        if rename(-100, old, -100, new, 1) != 0:  # AT_FDCWD, RENAME_NOREPLACE only.
+            code = ctypes.get_errno()
+            raise OSError(code if type(code) is int and 0 < code <= 4095 else errno.EIO,
+                          'exclusive_publication_failed')
+    return 'bionic_renameat2', publish
+
+
 def atomic_bytes(path: Path, content: bytes, mode: int, *, exclusive: bool = False) -> None:
     # The preparer's file-fsync, atomic replace and directory-fsync method.
     plain(path)
+    publisher = (NEW_FILE_PUBLISHER or select_exclusive_publisher()[1]) if exclusive else None
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     descriptor, temporary = tempfile.mkstemp(prefix='.rokid-deploy-', dir=path.parent)
     try:
@@ -148,7 +190,7 @@ def atomic_bytes(path: Path, content: bytes, mode: int, *, exclusive: bool = Fal
             os.chmod(temporary, mode)
             os.fsync(stream.fileno())
         if exclusive:
-            os.link(temporary, path)  # Atomic no-clobber publication of a complete private file.
+            publisher(temporary, path)  # Publish a complete private file without replacing an existing name.
         else:
             os.replace(temporary, path)
         sync_directories(path.parent)
@@ -197,6 +239,95 @@ def file_identity(path: Path) -> tuple[int, int]:
     return info.st_dev, info.st_ino
 
 
+def failure_details(error: BaseException) -> dict:
+    kind, code = type(error).__name__, getattr(error, 'errno', None)
+    return {'stage': stage if stage in SOURCE_STAGES else 'other',
+            'error_type': kind if kind in FAILURE_TYPES else 'other',
+            'errno': code if type(code) is int and 0 < code <= 4095 else None}
+
+
+def remember_failure(error: BaseException) -> dict:
+    if transaction_state.get('original_failure') is None:
+        transaction_state['original_failure'] = failure_details(error)
+    return transaction_state['original_failure']
+
+
+def probe_exclusive_publication(parents, verify) -> None:
+    """Only owned private probe names; never try a publication on user data."""
+    global NEW_FILE_PUBLISHER, stage
+    stage = 'exclusive_publication_preflight'
+    proof = {'method': 'not_needed', 'parents_probed': 0, 'complete': False}
+    transaction_state['publication_probe'] = proof
+    if parents:
+        proof['method'] = 'unselected'
+        method, publisher = select_exclusive_publisher()
+        NEW_FILE_PUBLISHER, proof['method'] = publisher, method
+        for parent in sorted(parents, key=str):
+            stage = 'exclusive_publication_preflight'
+            private_directory(parent)
+            proof['parents_probed'] += 1
+            directory = Path(tempfile.mkdtemp(prefix='.rokid-publish-probe-', dir=parent))
+            identity = file_identity(directory)
+            names, known = ('source', 'target', 'collision'), {}
+            def create(name, payload):
+                path = directory / name
+                descriptor = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+                with os.fdopen(descriptor, 'wb') as stream:
+                    info = os.fstat(stream.fileno())
+                    known[(info.st_dev, info.st_ino)] = {
+                        hashlib.sha256(payload[:size]).hexdigest() for size in range(len(payload) + 1)}
+                    stream.write(payload)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                return path
+            try:
+                os.chmod(directory, 0o700)
+                private_directory(directory)
+                source = create('source', b'publication-probe\n')
+                source_identity = file_identity(source)
+                target = directory / 'target'
+                publisher(source, target)
+                if file_identity(target) != source_identity or sha(target) != hashlib.sha256(b'publication-probe\n').hexdigest():
+                    raise RuntimeError('publication_probe_not_complete')
+                collision = create('collision', b'collision-probe\n')
+                collision_identity = file_identity(collision)
+                try:
+                    publisher(collision, target)
+                except OSError as error:
+                    if error.errno != errno.EEXIST:
+                        raise
+                else:
+                    raise RuntimeError('publication_probe_clobbered')
+                if (file_identity(target) != source_identity or file_identity(collision) != collision_identity
+                        or sha(target) != hashlib.sha256(b'publication-probe\n').hexdigest()
+                        or sha(collision) != hashlib.sha256(b'collision-probe\n').hexdigest()):
+                    raise RuntimeError('publication_probe_collision_changed')
+            except BaseException as error:
+                remember_failure(error)
+                raise
+            finally:
+                # No recursive cleanup, and an unknown inode/content is retained.
+                if file_identity(directory) != identity or {item.name for item in directory.iterdir()} - set(names):
+                    raise RuntimeError('publication_probe_cleanup_blocked')
+                private_directory(directory)
+                for name in names:
+                    path = directory / name
+                    if not path.exists() and not path.is_symlink():
+                        continue
+                    info = path.lstat()
+                    item_identity = (info.st_dev, info.st_ino)
+                    if (not stat.S_ISREG(info.st_mode) or info.st_uid != PHONE_UID or stat.S_IMODE(info.st_mode) != 0o600
+                            or item_identity not in known or sha(path) not in known[item_identity]):
+                        raise RuntimeError('publication_probe_cleanup_blocked')
+                    path.unlink()
+                directory.rmdir()
+                sync_directories(parent)
+            verify()
+    else:
+        verify()
+    proof['complete'] = True
+
+
 def update_sources(repo: Path, backup: Path, files: dict[str, bytes], previous_sources: dict,
                    guard, *, new_modes: dict[str, int], write=atomic_bytes) -> dict:
     """One transaction. An existing/partial journal is never resumed or overwritten."""
@@ -219,6 +350,11 @@ def update_sources(repo: Path, backup: Path, files: dict[str, bytes], previous_s
         previous[name] = {'before': row, 'after': {
             'exists': True, 'type': 'file', 'sha256': hashlib.sha256(data).hexdigest(), 'size': len(data),
             'mode': row['mode'] if row['exists'] else new_modes[name], 'uid': PHONE_UID}}
+    def verify_probe_state():
+        if source_metadata(repo, files) != previous_sources or guard(previous_sources) != before:
+            raise RuntimeError('publication_preflight_state_changed')
+    probe_exclusive_publication({(repo / name).parent for name, row in previous_sources.items() if not row['exists']},
+                                verify_probe_state)
     needed = sum(len(data) + previous_sources[name].get('size', 0) for name, data in files.items()) + 16 * 1024 * 1024
     if shutil.disk_usage(repo).free < needed:
         raise RuntimeError('backup_space')
@@ -257,13 +393,17 @@ def update_sources(repo: Path, backup: Path, files: dict[str, bytes], previous_s
                 raise RuntimeError('source_changed_during_update')
             row = previous[name]
             if row['before']['exists']:
+                stage = 'atomic_source_update'
                 write(repo / name, payload, row['after']['mode'])
             else:
+                stage = 'exclusive_source_publication'
                 write(repo / name, payload, row['after']['mode'], exclusive=True)
+                stage = 'record_new_source_identity'
                 created[name] = file_identity(repo / name)
                 row['created_identity'] = list(created[name])
             receipt['source_writes'] += 1
             transaction_state['source_writes'] = receipt['source_writes']
+            stage = 'source_update_receipt'
             save()
         stage = 'source_update_final_guard'
         expected_sources = {name: row['after'] for name, row in previous.items()}
@@ -273,7 +413,10 @@ def update_sources(repo: Path, backup: Path, files: dict[str, bytes], previous_s
         save()
         transaction_state['phase'] = receipt['phase']
         return receipt
-    except BaseException:
+    except BaseException as error:
+        # Preserve the initiating failure before recovery calls change stage or
+        # raise their own error. The outcome journal persists this same record.
+        receipt['original_failure'] = dict(remember_failure(error))
         stage = 'source_transaction_restore_preflight'
         try:
             current = source_metadata(repo, files)
@@ -573,20 +716,22 @@ def native_main() -> dict:
                 'browser_x11_retained': True, 'phone_git_metadata_updated': False,
                 'SEND_enabled': False, 'solver_verified': False,
                 'browser_launch_attempts': 0, 'browser_close_attempts': 0,
-                'services_changed': 0, 'APK_installs': 0, 'Input_calls': 0, 'GPT_submissions': 0}
+                'services_changed': 0, 'APK_installs': 0, 'Input_calls': 0, 'GPT_submissions': 0,
+                'publication_probe': dict(transaction_state.get('publication_probe',
+                    {'method': 'unselected', 'parents_probed': 0, 'complete': False}))}
     finally:
         browser._connection.close()  # Disconnect this client; do not close the browser.
 
 
 def public_failure(error: Exception) -> dict:
-    allowed = {'AssertionError', 'CdpError', 'RuntimeError', 'ValueError', 'TypeError',
-               'OSError', 'FileNotFoundError', 'PermissionError', 'JSONDecodeError',
-               'TimeoutExpired', 'TimeoutError', 'SyntaxError'}
-    kind = type(error).__name__
-    return {'phase': 'source_update_stopped', 'stage': stage,
-            'error_type': kind if kind in allowed else 'other',
+    current = failure_details(error)
+    return {'phase': 'source_update_stopped', 'stage': current['stage'],
+            'error_type': current['error_type'],
             'transaction_phase': transaction_state['phase'],
-            'source_writes': transaction_state['source_writes'], 'restored': transaction_state['restored']}
+            'source_writes': transaction_state['source_writes'], 'restored': transaction_state['restored'],
+            'original_failure': dict(transaction_state.get('original_failure') or current),
+            'publication_probe': dict(transaction_state.get('publication_probe',
+                {'method': 'unselected', 'parents_probed': 0, 'complete': False}))}
 
 
 def is_sha(value) -> bool:
@@ -778,16 +923,17 @@ def prepare(provenance: dict, action: str = 'update') -> tuple[bytes, list[list[
     if len(request) > MAX_WIRE_BYTES:
         raise RuntimeError('request_size')
     functions = {'sha', 'source_path', 'load_bundle', 'plain', 'sync_directories', 'atomic_bytes',
+        'select_exclusive_publisher', 'probe_exclusive_publication', 'failure_details', 'remember_failure',
         'path_metadata', 'source_metadata', 'file_identity', 'update_sources',
         'normalized_metadata', 'inventory', 'check_inventory', 'process_binding', 'private_directory',
         'retained_owner', 'quiet_services', 'native_guard', 'native_main', 'public_failure', 'is_sha', 'artifact_name',
         'validate_device', 'set_configuration', 'read_request'}
     constants = ('PHONE_HOME', 'PHONE_PREFIX', 'PHONE_REPO', 'PROFILE', 'LOGGER_TARGET', 'ROOT_FILES',
-                 'MAX_BUNDLE_BYTES', 'MAX_WIRE_BYTES', 'MANIFEST_SHA')
+                 'MAX_BUNDLE_BYTES', 'MAX_WIRE_BYTES', 'MANIFEST_SHA', 'NEW_FILE_PUBLISHER', 'FAILURE_TYPES', 'SOURCE_STAGES')
     tree = ast.parse(Path(__file__).read_text(encoding='utf-8'))
     body = '\n'.join(ast.unparse(n) for n in tree.body if isinstance(n, (ast.Import, ast.ImportFrom)))
     for name in constants:
-        item = globals()[name]
+        item = None if name == 'NEW_FILE_PUBLISHER' else globals()[name]
         literal = 'Path(' + repr(item.as_posix()) + ')' if isinstance(item, Path) else (
             '{' + ','.join(repr(value) for value in sorted(item)) + '}' if isinstance(item, set) else repr(item))
         body += '\n' + name + ' = ' + literal
@@ -826,25 +972,32 @@ def prepare(provenance: dict, action: str = 'update') -> tuple[bytes, list[list[
 def validate_public(result: dict, action: str) -> None:
     if not isinstance(result, dict):
         raise RuntimeError('native_public_shape')
-    failure_keys = {'phase', 'stage', 'error_type', 'transaction_phase', 'source_writes', 'restored'}
+    probe = result.get('publication_probe')
+    if (not isinstance(probe, dict) or set(probe) != {'method', 'parents_probed', 'complete'}
+            or probe['method'] not in {'unselected', 'not_needed', 'os_link', 'bionic_renameat2'}
+            or type(probe['parents_probed']) is not int or not 0 <= probe['parents_probed'] <= len(ARCHIVE['files'])
+            or type(probe['complete']) is not bool):
+        raise RuntimeError('native_publication_probe_shape')
+    failure_keys = {'phase', 'stage', 'error_type', 'transaction_phase', 'source_writes', 'restored',
+                    'original_failure', 'publication_probe'}
     if result.get('phase') == 'source_update_stopped':
         if (set(result) != failure_keys or result['transaction_phase'] not in
                 {'not_started', 'applying', 'rolled_back', 'rollback_blocked', 'source_prepared_send0'}
                 or type(result['source_writes']) is not int or not 0 <= result['source_writes'] <= len(ARCHIVE['files'])
                 or type(result['restored']) is not bool):
             raise RuntimeError('native_failure_shape')
-        labels = {'native_input', 'existing_cdp_connect', 'protected_source_env',
-                  'quiet_services', 'retained_browser_x11', 'source_update_preflight', 'atomic_source_update',
-                  'source_update_final_guard', 'source_transaction_restore_preflight', 'restore_this_transaction_sources', 'complete'}
-        if (result['stage'] not in labels or result['error_type'] not in
-                {'AssertionError', 'CdpError', 'RuntimeError', 'ValueError', 'TypeError', 'OSError',
-                 'FileNotFoundError', 'PermissionError', 'JSONDecodeError', 'TimeoutExpired', 'TimeoutError', 'SyntaxError', 'other'}):
+        original = result['original_failure']
+        if (result['stage'] not in SOURCE_STAGES or result['error_type'] not in FAILURE_TYPES
+                or not isinstance(original, dict) or set(original) != {'stage', 'error_type', 'errno'}
+                or original['stage'] not in SOURCE_STAGES or original['error_type'] not in FAILURE_TYPES
+                or (original['errno'] is not None and
+                    (type(original['errno']) is not int or not 0 < original['errno'] <= 4095))):
             raise RuntimeError('native_failure_enum')
         return
     counters = ('browser_launch_attempts', 'browser_close_attempts', 'services_changed', 'APK_installs', 'Input_calls', 'GPT_submissions')
     keys = {'phase', 'stage', 'source_files', 'source_writes', 'source_bundle_commit', 'archive_sha256',
             'receipt_sha256', 'protected_bytes_unchanged', 'browser_x11_retained', 'phone_git_metadata_updated',
-            'SEND_enabled', 'solver_verified', *counters}
+            'SEND_enabled', 'solver_verified', 'publication_probe', *counters}
     expected_phase = 'source_prepared_send0' if action == 'update' else 'source_update_readonly_preflight'
     if (set(result) != keys or result['phase'] != expected_phase or result['stage'] != 'complete'
             or type(result['source_files']) is not int or result['source_files'] != len(ARCHIVE['files'])
@@ -855,6 +1008,14 @@ def validate_public(result: dict, action: str) -> None:
             or any(type(result[k]) is not int or result[k] != 0 for k in counters)
             or (not is_sha(result['receipt_sha256']) if action == 'update' else result['receipt_sha256'] is not None)):
         raise RuntimeError('native_completion_contract')
+    parents = {str(PurePosixPath(name).parent) for name, row in SNAPSHOT['source_paths'].items() if not row['exists']}
+    if action == 'inspect':
+        valid_probe = probe == {'method': 'unselected', 'parents_probed': 0, 'complete': False}
+    else:
+        valid_probe = (probe['complete'] is True and probe['parents_probed'] == len(parents)
+                       and probe['method'] in ({'os_link', 'bionic_renameat2'} if parents else {'not_needed'}))
+    if not valid_probe:
+        raise RuntimeError('native_publication_probe_contract')
 
 
 def dispatch_native(command: list[str], request: bytes):

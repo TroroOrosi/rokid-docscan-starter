@@ -227,7 +227,8 @@ from __future__ import annotations
 # 0.53.0: visible phone services and retained capture preview; expired Work
 #         receipts can release their own barrier without replaying a send.
 # 0.53.1: compare native phone paths as POSIX strings during Windows update preparation.
-APP_VERSION = "0.53.1"
+# 0.53.2: preflight atomic no-clobber phone publication and preserve failure diagnostics.
+APP_VERSION = "0.53.2"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.

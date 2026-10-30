@@ -1,6 +1,8 @@
 """One local replay; no phone, browser, CDP or real subprocess connections."""
 import ast
 import base64
+import ctypes
+import errno
 import hashlib
 import io
 import json
@@ -18,6 +20,36 @@ import pytest
 from scripts import phone_update as update
 
 FIXTURE_TARGET = 'adb-FIXTURE001-example._adb-tls-connect._tcp'
+
+
+def bionic_publisher(monkeypatch, *, failure=None):
+    """Exercise the documented C ABI; emulate its filesystem result locally."""
+    link = os.link
+    calls = []
+    class RenameAt2:
+        def __call__(self, old_fd, old, new_fd, new, flags):
+            assert (old_fd, new_fd, flags) == (-100, -100, 1)
+            assert self.argtypes == [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+            assert self.restype is ctypes.c_int
+            calls.append((old, new))
+            if failure is not None:
+                ctypes.set_errno(failure)
+                return -1
+            try:
+                source, target = Path(os.fsdecode(old)), Path(os.fsdecode(new))
+                link(source, target)
+                source.unlink()
+            except OSError as error:
+                ctypes.set_errno(error.errno)
+                return -1
+            return 0
+    function = RenameAt2()
+    def library(name, *, use_errno):
+        assert name is None and use_errno is True
+        return SimpleNamespace(renameat2=function)
+    monkeypatch.setattr(ctypes, 'CDLL', library)
+    monkeypatch.delattr(os, 'link')
+    return calls
 
 
 @pytest.fixture
@@ -51,6 +83,8 @@ def private_filesystem(tmp_path, monkeypatch):
     monkeypatch.setattr(os, 'replace', replace)
     monkeypatch.setattr(os, 'link', link)
     monkeypatch.setattr(update, 'PHONE_UID', 123)
+    monkeypatch.setattr(update, 'NEW_FILE_PUBLISHER', None)
+    monkeypatch.setattr(update, 'transaction_state', {'phase': 'not_started', 'source_writes': 0, 'restored': False})
     return modes
 
 
@@ -83,6 +117,153 @@ def test_source_transaction_accepts_new_files_and_preserves_private_modes(tmp_pa
     assert not (tmp_path / 'backup/source/app/work_bridge.py').exists()
 
 
+@pytest.mark.parametrize('mode', [0o600, 0o700])
+def test_exclusive_publication_uses_bionic_when_python_has_no_link_and_never_clobbers(tmp_path, private_filesystem, monkeypatch, mode):
+    calls = bionic_publisher(monkeypatch)
+    target = tmp_path / 'new.py'
+    update.atomic_bytes(target, b'COMPLETE = 1\n', mode, exclusive=True)
+    identity = update.file_identity(target)
+    assert target.read_bytes() == b'COMPLETE = 1\n' and update.path_metadata(target)['mode'] == mode
+    with pytest.raises(FileExistsError):
+        update.atomic_bytes(target, b'FOREIGN = 2\n', 0o600, exclusive=True)
+    assert target.read_bytes() == b'COMPLETE = 1\n' and update.file_identity(target) == identity
+    assert len(calls) == 2 and {path.name for path in tmp_path.iterdir()} == {'new.py'}
+
+
+@pytest.mark.parametrize('fault', [None, 'missing_symbol', 'filesystem_unsupported', 'python_not_implemented'])
+def test_native_publication_probe_precedes_source_writes_and_restores_its_inventory(deployment, monkeypatch, fault):
+    if fault == 'python_not_implemented':
+        def unsupported(*args, **kwargs):
+            raise NotImplementedError('PRIVATE-UNSUPPORTED')
+        monkeypatch.setattr(os, 'link', unsupported)
+    else:
+        bionic_publisher(monkeypatch, failure=errno.ENOSYS if fault == 'filesystem_unsupported' else None)
+        if fault == 'missing_symbol':
+            monkeypatch.setattr(ctypes, 'CDLL', lambda *args, **kwargs: SimpleNamespace())
+    wire, _, _, namespace = generated(deployment)
+    replay_runtime(namespace, deployment, monkeypatch)
+    namespace['sys'] = SimpleNamespace(stdin=SimpleNamespace(buffer=io.BytesIO(wire)))
+    if fault:
+        with pytest.raises((RuntimeError, OSError, NotImplementedError)) as failure:
+            namespace['native_main']()
+        public = namespace['public_failure'](failure.value)
+        update.validate_public(public, 'update')
+        assert public['source_writes'] == 0 and public['transaction_phase'] == 'not_started'
+        assert not (deployment.home / 'rokid-backups/pre-source-fixture').exists()
+        assert (deployment.repo / 'app/main.py').read_bytes() == b'OLD = 1\n'
+        assert not (deployment.repo / 'app/work_bridge.py').exists()
+        assert public['publication_probe']['complete'] is False
+        assert public['original_failure']['stage'] == 'exclusive_publication_preflight'
+        if fault == 'filesystem_unsupported':
+            assert public['original_failure']['errno'] == errno.ENOSYS
+    else:
+        public = namespace['native_main']()
+        update.validate_public(public, 'update')
+        assert public['publication_probe'] == {'method': 'bionic_renameat2', 'parents_probed': 1, 'complete': True}
+        assert public['source_writes'] == 7 and (deployment.repo / 'app/work_bridge.py').read_bytes() == b'VALUE = 3\n'
+    assert not list(deployment.repo.rglob('.rokid-publish-probe-*'))
+
+
+def test_publication_probe_rechecks_the_original_inventory_after_each_parent(tmp_path, private_filesystem, monkeypatch):
+    repo, backup = tmp_path / 'repo', tmp_path / 'backup'
+    (repo / 'app').mkdir(parents=True)
+    (repo / 'scripts').mkdir()
+    retained = repo / 'app/retained.py'
+    retained.write_bytes(b'UNRELATED = 1\n')
+    files = {'app/new.py': b'NEW = 2\n', 'scripts/new.sh': b'#!/bin/sh\n:\n'}
+    original = update.inventory(repo)
+    publisher, parents = os.link, []
+    def publish(source, target):
+        parent = Path(target).parent.parent
+        if parent not in parents:
+            parents.append(parent)
+        publisher(source, target)
+        retained.write_bytes(b'UNRELATED = 3\n')
+    monkeypatch.setattr(os, 'link', publish)
+    def guard(expected):
+        return update.check_inventory(update.inventory(repo), original)
+    with pytest.raises(RuntimeError, match='inventory_metadata_changed'):
+        update.update_sources(repo, backup, files, {name: {'exists': False} for name in files}, guard,
+                              new_modes={name: 0o600 for name in files})
+    assert parents == [repo / 'app']
+    assert update.transaction_state['source_writes'] == 0 and not backup.exists()
+    assert not any((repo / name).exists() for name in files)
+    assert retained.read_bytes() == b'UNRELATED = 3\n'
+    assert not list(repo.rglob('.rokid-publish-probe-*'))
+
+
+def test_later_parent_publication_failure_retains_its_stage_after_guard_changes_it(tmp_path, private_filesystem, monkeypatch):
+    repo, backup = tmp_path / 'repo', tmp_path / 'backup'
+    (repo / 'app').mkdir(parents=True)
+    (repo / 'scripts').mkdir()
+    files = {'app/new.py': b'NEW = 2\n', 'scripts/new.sh': b'#!/bin/sh\n:\n'}
+    publisher, parents = os.link, []
+    def publish(source, target):
+        parent = Path(target).parent.parent
+        if parent not in parents:
+            parents.append(parent)
+        if parent == repo / 'scripts':
+            raise OSError(errno.ENOSYS, 'PRIVATE-LATER-PARENT-FAILURE')
+        publisher(source, target)
+    monkeypatch.setattr(os, 'link', publish)
+    def guard(expected):
+        update.stage = 'retained_browser_x11'
+        return {'protected': 'stable'}
+    with pytest.raises(OSError) as failure:
+        update.update_sources(repo, backup, files, {name: {'exists': False} for name in files}, guard,
+                              new_modes={'app/new.py': 0o600, 'scripts/new.sh': 0o700})
+    assert parents == [repo / 'app', repo / 'scripts']
+    public = update.public_failure(failure.value)
+    assert public['original_failure'] == {'stage': 'exclusive_publication_preflight',
+                                           'error_type': 'OSError', 'errno': errno.ENOSYS}
+    assert public['publication_probe'] == {'method': 'os_link', 'parents_probed': 2, 'complete': False}
+    assert public['source_writes'] == 0 and not backup.exists()
+    assert not any((repo / name).exists() for name in files)
+    assert not list(repo.rglob('.rokid-publish-probe-*'))
+    assert 'PRIVATE' not in json.dumps(public)
+
+
+@pytest.mark.parametrize('foreign', ['extra_name', 'same_name_foreign_inode'])
+def test_publication_probe_never_cleans_up_unknown_entries(tmp_path, private_filesystem, monkeypatch, foreign):
+    repo, backup = tmp_path / 'repo', tmp_path / 'backup'
+    (repo / 'app').mkdir(parents=True)
+    unknown = []
+    def publish(source, target):
+        path = Path(target).parent / ('foreign' if foreign == 'extra_name' else 'target')
+        path.write_bytes(b'UNRELATED = 1\n')
+        unknown.append((path, update.file_identity(path)))
+        raise OSError(errno.ENOSYS, 'PRIVATE-PUBLISH-FAILURE')
+    monkeypatch.setattr(os, 'link', publish)
+    with pytest.raises(RuntimeError, match='publication_probe_cleanup_blocked') as failure:
+        update.update_sources(repo, backup, {'app/new.py': b'NEW = 2\n'}, {'app/new.py': {'exists': False}},
+                              lambda expected: {'protected': 'stable'}, new_modes={'app/new.py': 0o600})
+    assert update.transaction_state['source_writes'] == 0 and not backup.exists()
+    assert not (repo / 'app/new.py').exists()
+    assert len(unknown) == 1
+    path, identity = unknown[0]
+    assert path.read_bytes() == b'UNRELATED = 1\n' and update.file_identity(path) == identity
+    public = update.public_failure(failure.value)
+    assert public['original_failure'] == {'stage': 'exclusive_publication_preflight',
+                                           'error_type': 'OSError', 'errno': errno.ENOSYS}
+    assert 'PRIVATE' not in json.dumps(public)
+
+
+def test_publication_probe_removes_its_known_empty_directory_when_mode_setup_fails(tmp_path, private_filesystem, monkeypatch):
+    repo, backup = tmp_path / 'repo', tmp_path / 'backup'
+    (repo / 'app').mkdir(parents=True)
+    chmod = os.chmod
+    def fail_mode(path, mode, *args, **kwargs):
+        if Path(path).name.startswith('.rokid-publish-probe-'):
+            raise PermissionError(errno.EPERM, 'PRIVATE-MODE-FAILURE')
+        return chmod(path, mode, *args, **kwargs)
+    monkeypatch.setattr(os, 'chmod', fail_mode)
+    with pytest.raises(PermissionError):
+        update.update_sources(repo, backup, {'app/new.py': b'NEW = 2\n'}, {'app/new.py': {'exists': False}},
+                              lambda expected: {'protected': 'stable'}, new_modes={'app/new.py': 0o600})
+    assert update.transaction_state['source_writes'] == 0 and not backup.exists()
+    assert not list(repo.rglob('.rokid-publish-probe-*'))
+
+
 @pytest.mark.parametrize('foreign', [None, 'bytes', 'identity'])
 def test_rollback_removes_only_this_transactions_unchanged_new_files(tmp_path, private_filesystem, foreign):
     repo, backup = tmp_path / 'repo', tmp_path / 'backup'
@@ -101,12 +282,20 @@ def test_rollback_removes_only_this_transactions_unchanged_new_files(tmp_path, p
                 other = repo / 'app/foreign.tmp'
                 other.write_bytes(b'NEW = 4\n')
                 os.replace(other, repo / 'app/new.py')
-            raise OSError('fixture-write-failure')
+            raise OSError(errno.ENOSPC, 'PRIVATE-WRITE-FAILURE')
         update.atomic_bytes(path, content, mode, **kwargs)
-    with pytest.raises((RuntimeError, OSError)):
-        update.update_sources(repo, backup, files, snapshot, lambda expected: {'protected': 'stable'},
+    def guard(expected):
+        update.stage = 'retained_browser_x11'
+        return {'protected': 'stable'}
+    with pytest.raises((RuntimeError, OSError)) as failure:
+        update.update_sources(repo, backup, files, snapshot, guard,
                               new_modes={name: 0o600 for name in files}, write=fail_last)
     receipt = json.loads((backup / 'manifest.json').read_bytes())
+    expected_failure = {'stage': 'atomic_source_update', 'error_type': 'OSError', 'errno': errno.ENOSPC}
+    public = update.public_failure(failure.value)
+    assert receipt['original_failure'] == public['original_failure'] == expected_failure
+    assert public['stage'] != expected_failure['stage']
+    assert 'PRIVATE' not in json.dumps(public) + json.dumps(receipt)
     if foreign is None:
         assert receipt['phase'] == 'rolled_back'
         assert (repo / 'app/main.py').read_bytes() == b'OLD = 1\n'
