@@ -649,13 +649,13 @@ def set_configuration(value: dict, snapshot_content: bytes) -> None:
                           'data/browser-state/submission.json', 'data/browser-state/chats.json',
                           *(name + suffix for name in ('data/docscan.db', 'data/work-jobs.db')
                             for suffix in ('', '-wal', '-shm', '-journal'))}
-    if set(snapshot['protected_paths']) != {str(PHONE_REPO / name) for name in required_protected}:
+    if set(snapshot['protected_paths']) != {(PHONE_REPO / name).as_posix() for name in required_protected}:
         raise RuntimeError('snapshot_protected_scope')
     if (set(snapshot['source_inventory']) != {'app', 'scripts'}
-            or snapshot['logger_target'].get('path') != str(LOGGER_TARGET)
+            or snapshot['logger_target'].get('path') != LOGGER_TARGET.as_posix()
             or snapshot['logger_package_owner'].get('exit_code') != 0
             or snapshot['logger_package_owner'].get('package') != 'termux-services'
-            or snapshot['logger_package_owner'].get('path') != str(LOGGER_TARGET)
+            or snapshot['logger_package_owner'].get('path') != LOGGER_TARGET.as_posix()
             or snapshot['owned_process_inventory'].get('exit_code') != 0
             or snapshot['owned_process_inventory'].get('producer_matches') != []):
         raise RuntimeError('snapshot_service_or_inventory_scope')

@@ -1,6 +1,6 @@
 # 再開入口：次のセッションはここだけ読めば始められる
 
-最終更新: 2026-10-30続行 — phone Work原PNG21枚ZIP/Drive＋同chat再添付なし追試を実測。旧Work不確定のread-only整理、可視X11自動起動、撮影後preview保持を実装・別監査R0/O0。PC全pytest1526pass/1skip/3warn、ruff0、Android全199tasks成功/XML517fail0。会場全経路は未受入。詳細phone-work-connected-root-20261030.json。
+最終更新: 2026-10-30続行 — Work旧journal整理/可視4services/撮影後preview保持をPC全pytest1526pass/1skip/3warn・ruff0・Android199tasks/XML517fail0で検証。更新前検査でWindows nativepath/改行変換2不備を発見し、updater49test＋87rawGitblob照合で修正・別監査R0/O0。phone source/会場全経路は未受入。詳細phone-work-connected-root-20261030.json。
 Runs on: 開発・独立監査はWindows PC、接続phoneはF51F/ZY22LWGDCV。会場は常時オンphone AP＋装着glassesだけでPC/USB/毎回接続不要。本人の最新「確認せずにそのまま進めてください」に従い通常準備で承認を繰り返さない。技術fixture GPT3/Drive原PNG21/private folder1、fresh snapshot v4は87source/15protected/同browser・X11。phone source/APK/API/env/Boot/services更新0、手動glasses受入0。
 
 ## 0. 読み方（前提と資料に引きずられないため）
@@ -90,7 +90,7 @@ Runs on: 開発・独立監査はWindows PC、接続phoneはF51F/ZY22LWGDCV。�
   → 旧サーバ停止 → `nohup bash scripts/phone_serve.sh 127.0.0.1 > data/server-<commit>.log 2>&1 &`。PCからは `ssh -f -N -L 8000:127.0.0.1:8000 ...`（ssh `-i ~/.ssh/f51f_key -p 8022 u0_a26@192.168.0.6`）。
   ベンチの鍵は `ROKID_API_KEY` をスマホの env から読んで渡す（画面に出さない）。
 
-## 4. 次の作業（Runs on: 開発PC＋接続F51F）：Work旧journal整理・更新器schema2・可視4services・retained previewをPC実装/全検証/別監査済み（91d55b/a09ddb/0c6fe9 exit0）。固定commitの87source archive＋v4 snapshotを照合しphone source-only導入→Workenv/SEND0・4services無効準備→owned browser/X11 handover・API/Work/services起動。原本・鍵・設定・profileを保持する。録画/ZSL・Luna含む実AI feedback・可変紙面/細字・原音Work・glasses会場全経路は継続実装/未受入。以下は旧経緯。
+## 4. 次の作業（Runs on: 開発PC＋接続F51F）：修正済updaterを新commitへ固定しrawGit87blob archive＋v4snapshotを独立照合→phone source-only導入→Workenv/SEND0・4services無効準備→owned browser/X11 handover・API/Work/services起動。旧e50archiveはCRLF変換で使用中止(実機0)、RAW proofは全87byte一致/R1境界6test pass。原本・鍵・設定・profileを保持する。撮影future-scene2候補のPC縦sliceを並行実装中、録画/ZSL/AIfeedback/可変紙面/原音Work/glasses全経路は継続/未受入。以下は旧経緯。
 
 1. 済：独立監査2回（`4552ea1`、`4552ea1..e12e155`）の指摘を `61ad481`〜`1134404` で反映。
 2. 済：4a（3節）。起動はスマホで `bash scripts/phone_serve.sh 127.0.0.1`、PCから `ssh -L 8000:127.0.0.1:8000` で投入した。

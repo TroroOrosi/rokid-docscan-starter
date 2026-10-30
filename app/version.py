@@ -226,7 +226,8 @@ from __future__ import annotations
 #         batches, source-bound uncalibrated readability and staged original audio.
 # 0.53.0: visible phone services and retained capture preview; expired Work
 #         receipts can release their own barrier without replaying a send.
-APP_VERSION = "0.53.0"
+# 0.53.1: compare native phone paths as POSIX strings during Windows update preparation.
+APP_VERSION = "0.53.1"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.

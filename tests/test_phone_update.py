@@ -5,7 +5,7 @@ import hashlib
 import io
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import shlex
 import stat
 import subprocess
@@ -26,23 +26,25 @@ def private_filesystem(tmp_path, monkeypatch):
     actual_stat, actual_lstat = Path.stat, Path.lstat
     actual_chmod, actual_replace, actual_link = os.chmod, os.replace, os.link
     modes = {}
+    def key(path):
+        return Path(path).as_posix()
     def metadata(path, original, *args, **kwargs):
         info = original(path, *args, **kwargs)
         if path.is_relative_to(tmp_path):
             fields = list(info)
-            fields[0] = (info.st_mode & ~0o7777) | modes.get(str(path), 0o700 if stat.S_ISDIR(info.st_mode) else 0o600)
+            fields[0] = (info.st_mode & ~0o7777) | modes.get(key(path), 0o700 if stat.S_ISDIR(info.st_mode) else 0o600)
             fields[4] = 123
             return os.stat_result(fields)
         return info
     def chmod(path, mode, *args, **kwargs):
         actual_chmod(path, mode, *args, **kwargs)
-        modes[str(path)] = mode
+        modes[key(path)] = mode
     def replace(source, target, *args, **kwargs):
         actual_replace(source, target, *args, **kwargs)
-        modes[str(target)] = modes.pop(str(source), 0o600)
+        modes[key(target)] = modes.pop(key(source), 0o600)
     def link(source, target, *args, **kwargs):
         actual_link(source, target, *args, **kwargs)
-        modes[str(target)] = modes.get(str(source), 0o600)
+        modes[key(target)] = modes.get(key(source), 0o600)
     monkeypatch.setattr(Path, 'stat', lambda path, *a, **k: metadata(path, actual_stat, *a, **k))
     monkeypatch.setattr(Path, 'lstat', lambda path, *a, **k: metadata(path, actual_lstat, *a, **k))
     monkeypatch.setattr(os, 'chmod', chmod)
@@ -165,18 +167,18 @@ def deployment(tmp_path, monkeypatch, private_filesystem):
     snapshot = {'read_only': True, 'UI_input_calls': 0, 'device': device,
                 'source_paths': {name: update.path_metadata(repo / name) for name in files},
                 'source_inventory': {name: tree(repo / name) for name in ('app', 'scripts')},
-                'protected_paths': {str(repo / name): update.path_metadata(repo / name) for name in
+                'protected_paths': {(repo / name).as_posix(): update.path_metadata(repo / name) for name in
                     ('multimodal.env', 'send0.env', 'requirements.txt', *update.ROOT_FILES,
                      'data/docscan.db', 'data/docscan.db-wal', 'data/docscan.db-shm', 'data/docscan.db-journal',
                      'data/work-jobs.db', 'data/work-jobs.db-wal', 'data/work-jobs.db-shm', 'data/work-jobs.db-journal',
                      'data/browser-state/submission.json', 'data/browser-state/chats.json')},
                 'service_inventory': tree(prefix / 'var/service'), 'boot_inventory': tree(home / '.termux/boot'),
-                'git_inventory': tree(repo / '.git'), 'logger_target': {'path': str(logger), **update.path_metadata(logger)},
+                'git_inventory': tree(repo / '.git'), 'logger_target': {'path': logger.as_posix(), **update.path_metadata(logger)},
                 'env_flags': {'send0.env': {'ROKID_CHATGPT_SEND_ENABLED': '0', 'ROKID_REAL_MODE': '1',
                                            'API_key_present': True}}, 'runtime': runtime,
-                'parent_directories': {str(path): update.path_metadata(path) for path in (home, repo, home / 'rokid-backups')},
+                'parent_directories': {path.as_posix(): update.path_metadata(path) for path in (home, repo, home / 'rokid-backups')},
                 'owned_process_inventory': {'exit_code': 0, 'producer_matches': []},
-                'logger_package_owner': {'exit_code': 0, 'package': 'termux-services', 'path': str(logger)}}
+                'logger_package_owner': {'exit_code': 0, 'package': 'termux-services', 'path': logger.as_posix()}}
     snapshot_file = reports / 'snapshot.json'
     snapshot_file.write_text(json.dumps({'exit_code': 0, 'result': {'ok': True, 'public': snapshot}}), encoding='utf-8')
     def git(*args):
@@ -216,6 +218,14 @@ def generated(deployment, action='update'):
     tree.body.pop()
     namespace = {}
     exec(compile(tree, '<generated-update-definitions>', 'exec'), namespace)
+    # This replay already emulates POSIX uid/mode. Render its local Windows
+    # paths as the native POSIX code does, without relaxing production inputs.
+    class NativePath(type(Path())):
+        def __str__(self):
+            return super().__str__().replace('\\', '/')
+    namespace['Path'] = NativePath
+    for name in ('PHONE_HOME', 'PHONE_PREFIX', 'PHONE_REPO', 'PROFILE', 'LOGGER_TARGET'):
+        namespace[name] = NativePath(namespace[name])
     return wire, commands, metadata, namespace
 
 
@@ -240,12 +250,60 @@ def test_prepare_verifies_the_fixed_git_blobs_and_frames_ascii_without_an_eof_re
                                    deployment.manifest['archive']['files']) == deployment.files
 
 
+@pytest.mark.parametrize('fault', [None, 'backslash', 'other_root', 'traversal', 'logger_target', 'logger_owner'])
+def test_host_prepares_a_native_posix_snapshot_without_rewriting_its_paths(deployment, monkeypatch, fault):
+    """The phone reports POSIX absolute keys even when the preparer is Windows."""
+    native_home = PurePosixPath('/data/data/com.termux/files/home')
+    native_prefix = PurePosixPath('/data/data/com.termux/files/usr')
+    native_repo = native_home / 'rokid-server'
+    logger = native_prefix / 'share/termux-services/svlogger'
+    original_repo = deployment.repo
+    deployment.snapshot['protected_paths'] = {
+        str(native_repo / Path(name).relative_to(original_repo).as_posix()): row
+        for name, row in deployment.snapshot['protected_paths'].items()}
+    deployment.snapshot['logger_target']['path'] = str(logger)
+    deployment.snapshot['logger_package_owner']['path'] = str(logger)
+    deployment.snapshot['parent_directories'] = {
+        str(native_home / Path(name).relative_to(deployment.home).as_posix()): row
+        for name, row in deployment.snapshot['parent_directories'].items()}
+    for name, value in {'PHONE_HOME': native_home, 'PHONE_PREFIX': native_prefix,
+                        'PHONE_REPO': native_repo, 'PROFILE': native_repo / 'data/chromium-profile',
+                        'LOGGER_TARGET': logger}.items():
+        monkeypatch.setattr(update, name, Path(value))
+    if fault in {'backslash', 'other_root', 'traversal'}:
+        name = next(iter(deployment.snapshot['protected_paths']))
+        changed = (name.replace('/', '\\') if fault == 'backslash' else
+                   name.replace('/rokid-server/', '/unrelated/' if fault == 'other_root'
+                                else '/rokid-server/../rokid-server/', 1))
+        deployment.snapshot['protected_paths'][changed] = deployment.snapshot['protected_paths'].pop(name)
+    elif fault in {'logger_target', 'logger_owner'}:
+        section = 'logger_target' if fault == 'logger_target' else 'logger_package_owner'
+        deployment.snapshot[section]['path'] = str(logger).replace('/', '\\')
+    if fault:
+        reason = 'snapshot_service_or_inventory_scope' if fault.startswith('logger') else 'snapshot_protected_scope'
+        with pytest.raises(RuntimeError, match=reason):
+            repin(deployment)
+        return
+    provenance = repin(deployment)
+    wire, commands, metadata = update.prepare(provenance)
+    request = json.loads(base64.b64decode(wire, validate=True))
+    snapshot = json.loads(base64.b64decode(request['snapshot'], validate=True))['result']['public']
+    assert snapshot == deployment.snapshot
+    assert all(name.startswith('/data/data/com.termux/files/home/rokid-server/')
+               and '\\' not in name for name in snapshot['protected_paths'])
+    assert snapshot['logger_target']['path'] == str(logger)
+    assert metadata['source_files'] == 7 and metadata['git_blob_comparison_performed'] is True
+    assert metadata['actual_runtime_executions'] == 0
+    assert 'HOME=/data/data/com.termux/files/home' in commands[-1][-1]
+    assert 'PREFIX=/data/data/com.termux/files/usr' in commands[-1][-1]
+
+
 def replay_runtime(namespace, deployment, monkeypatch):
     """Real source/protected guards; process/CDP edges are local fixtures."""
     actual_getpid = os.getpid
     def run(command, **kwargs):
         if command[0].endswith('dpkg-query'):
-            return SimpleNamespace(returncode=0, stdout='termux-services: ' + str(update.LOGGER_TARGET) + '\n', stderr='')
+            return SimpleNamespace(returncode=0, stdout='termux-services: ' + update.LOGGER_TARGET.as_posix() + '\n', stderr='')
         if command[0] == '/system/bin/ps':
             return SimpleNamespace(returncode=0,
                 stdout=f'UID PID ARGS\n123 {actual_getpid()} python\n123 12 chromium\n123 13 x11\n123 99 runsv sshd/log\n'.encode(), stderr=b'')
@@ -356,7 +414,7 @@ def repin(deployment):
 
 
 def test_manifest_cannot_omit_an_existing_database_from_preservation(deployment):
-    deployment.snapshot['protected_paths'].pop(str(deployment.repo / 'data/docscan.db'))
+    deployment.snapshot['protected_paths'].pop((deployment.repo / 'data/docscan.db').as_posix())
     with pytest.raises(RuntimeError, match='protected_scope'):
         repin(deployment)
 
@@ -463,7 +521,7 @@ def test_source_snapshot_difference_stops_before_backup_or_cdp(deployment, monke
         real_lstat = Path.lstat
         def foreign_owner(candidate, *args, **kwargs):
             info = real_lstat(candidate, *args, **kwargs)
-            if candidate == path:
+            if candidate.as_posix() == path.as_posix():
                 fields = list(info)
                 fields[4] = 124
                 return os.stat_result(fields)
@@ -545,7 +603,7 @@ def test_retained_browser_uses_the_snapshot_product_and_fences_owner_changes(dep
     runtime = deployment.snapshot['runtime']
     for name, kind, mode in [('tmp', 'directory', 0o700), ('tmp/.X11-unix', 'directory', 0o1777),
                               ('tmp/.X11-unix/X1', 'socket', 0o777)]:
-        runtime['X11_socket_metadata'][str(deployment.prefix / name)] = {
+        runtime['X11_socket_metadata'][(deployment.prefix / name).as_posix()] = {
             'exists': True, 'type': kind, 'uid': 123, 'mode': mode}
     repin(deployment)
     wire, commands, metadata, namespace = generated(deployment)
@@ -554,9 +612,9 @@ def test_retained_browser_uses_the_snapshot_product_and_fences_owner_changes(dep
     profile.mkdir()
     original_metadata = namespace['path_metadata']
     def path_metadata(path):
-        if path == profile:
+        if path.as_posix() == profile.as_posix():
             return {**runtime['profile_directory'], 'uid': 124 if fault == 'profile' else 123}
-        if path == profile / 'SingletonLock':
+        if path.as_posix() == (profile / 'SingletonLock').as_posix():
             return runtime['profile_lock']
         if str(path) in runtime['X11_socket_metadata']:
             return runtime['X11_socket_metadata'][str(path)]
@@ -579,7 +637,7 @@ def test_retained_browser_uses_the_snapshot_product_and_fences_owner_changes(dep
         result = dict(runtime['browser' if pid == 12 else 'x11'])
         if fault == 'late_owner' and len(process_reads) > 2 and pid == 12:
             result['starttime'] += 1
-        return result, ['--user-data-dir=' + str(profile), '--remote-debugging-address=127.0.0.1',
+        return result, ['--user-data-dir=' + profile.as_posix(), '--remote-debugging-address=127.0.0.1',
                         '--remote-debugging-port=9222']
     namespace['process_binding'] = binding
     protocol = []
