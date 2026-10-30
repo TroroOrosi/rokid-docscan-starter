@@ -1,6 +1,6 @@
 # 再開入口：次のセッションはここだけ読めば始められる
 
-最終更新: 2026-10-31続行 — cd26e09以後のCI互換/WorkHTTP修正と録画原frame比較は別監査Required0。全tree pytest通常1800pass/1skip・phone構成1783pass/18skip（録画42含む）、両ruff/文書23pass。Android579pass/vc42署名照合・未導入。詳細phone-work-connected-root-20261030.json。
+最終更新: 2026-10-31続行 — CI互換/WorkHTTP修正2facaaaを保存、原動画frame比較も別監査Required0でscope別保存。全tree pytest通常1800pass/1skip・phone構成1783pass/18skip（録画42含む）、両ruff/版・文書33pass。まとめてpush/再CIへ。Android579pass/vc42・未導入。詳細phone-work-connected-root-20261030.json。
 Runs on: PC開発・独立監査、phone F51F/ZY22LWGDCV。会場は常時オンphone AP＋装着glassesのみ、PC/USB/毎回接続不要。本人「確認せずそのまま」継続。GPT3/Drive原PNG21/folder1。phone b2eb＋2script/4runを保全。direct診断は/proc補助観測拒否でUNKNOWN、本体exec未取得。own child不在/X1拒否を読取、設定/GPT0、glasses/実紙受入0。
 
 ## 0. 読み方（前提と資料に引きずられないため）
