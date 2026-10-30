@@ -8,7 +8,9 @@ import pytest
 from fastapi import HTTPException
 
 from tests.test_native_capture_upload import create_document, native_image, provenance, upload
-from tests.test_work_bridge import client as client, picture, wait_for
+from tests.test_work_bridge import client as _client_fixture, picture, wait_for
+
+client = _client_fixture
 
 
 def native_job(client, source_kind="native_still"):

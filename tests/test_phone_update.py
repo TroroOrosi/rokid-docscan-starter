@@ -680,7 +680,8 @@ def test_current_source_archive_installs_without_an_old_archive_or_fixed_count(d
         deployment.snapshot['source_paths'][name] = {'exists': False}
         deployment.manifest['archive']['files'][name] = {'sha256': hashlib.sha256(data).hexdigest(),
                                                         'size': len(data), 'mode': 0o644}
-    deployment.git('add', '.')
+    # Keep the runner's index-only executable bit while staging these new app files.
+    deployment.git('-c', 'core.fileMode=true', 'add', 'app')
     deployment.git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'more source')
     commit = deployment.git('rev-parse', 'HEAD').decode().strip()
     path = deployment.reports / 'source.tar'

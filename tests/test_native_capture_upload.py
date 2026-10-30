@@ -8,7 +8,9 @@ from pathlib import Path
 import pytest
 from PIL import Image
 
-from tests.test_work_bridge import client as client
+from tests.test_work_bridge import client as _client_fixture
+
+client = _client_fixture
 
 
 def native_image():
@@ -234,12 +236,17 @@ def test_native_exact_replay_checks_all_current_rows_for_restored_id_collisions(
 
 def test_native_replacement_db_failure_keeps_old_png_and_metadata(client, monkeypatch):
     from app import main
+    try:
+        from builtins import BaseExceptionGroup
+    except ImportError:  # Python 3.10: the group type used by AnyIO's existing backport.
+        from exceptiongroup import BaseExceptionGroup
 
     document, raw = create_document(client), native_image()
     first = upload(client, document, raw, provenance(raw)).json()
     original_connect = main.db.connect
     with original_connect() as conn:
         before = dict(conn.execute("SELECT * FROM pages WHERE document_id=?", (document,)).fetchone())
+    write_error = main.db.sqlite3.OperationalError("local write failure")
 
     class FailedUpdate:
         def __init__(self):
@@ -250,12 +257,20 @@ def test_native_replacement_db_failure_keeps_old_png_and_metadata(client, monkey
 
         def execute(self, sql, *args):
             if sql.startswith("UPDATE pages"):
-                raise main.db.sqlite3.OperationalError("local write failure")
+                raise write_error
             return self.connection.execute(sql, *args)
 
     monkeypatch.setattr(main.db, "connect", FailedUpdate)
-    with pytest.raises(main.db.sqlite3.OperationalError, match="local write failure"):
+    with pytest.raises((main.db.sqlite3.OperationalError, BaseExceptionGroup)) as failure:
         upload(client, document, raw, provenance(raw, capture_id="33333333-3333-4333-8333-333333333333"))
+
+    def leaves(error):
+        if isinstance(error, BaseExceptionGroup):
+            return [leaf for nested in error.exceptions for leaf in leaves(nested)]
+        return [error]
+
+    # Old Starlette wraps worker errors; no unrelated leaf may be swallowed.
+    assert leaves(failure.value) == [write_error]
     with original_connect() as conn:
         assert dict(conn.execute("SELECT * FROM pages WHERE document_id=?", (document,)).fetchone()) == before
     assert list(main.IMAGE_DIR.iterdir()) == [Path(first["image_path"])]

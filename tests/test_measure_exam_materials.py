@@ -1,5 +1,6 @@
 import ctypes
 import json
+import sys
 from contextlib import closing
 
 import pytest
@@ -134,7 +135,8 @@ def test_image_pdf_has_no_glyph_geometry_and_retains_image_measurements(pdf, tmp
     assert "PDF文字領域なし (0/1頁の文字領域)" in (output / "glyph-height.svg").read_text(encoding="utf-8")
 
 
-def test_cli_rejects_bad_json_without_creating_output_or_printing_its_contents(tmp_path, capsys):
+def test_cli_rejects_bad_json_without_creating_output_or_printing_its_contents(tmp_path, capsys, monkeypatch):
+    monkeypatch.setitem(sys.modules, "pypdfium2", None)
     manifest = tmp_path / "bad.json"
     manifest.write_text("{", encoding="utf-8")
     output = tmp_path / "measurement"

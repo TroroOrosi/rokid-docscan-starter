@@ -10,7 +10,9 @@ from pathlib import Path
 import pytest
 from PIL import Image
 
-from tests.test_work_bridge import api_session, client as client, picture, wait_for
+from tests.test_work_bridge import api_session, client as _client_fixture, picture, wait_for
+
+client = _client_fixture
 
 
 @pytest.mark.parametrize("available", [False, True])

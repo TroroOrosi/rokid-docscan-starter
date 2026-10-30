@@ -1027,3 +1027,90 @@ def test_work_queue_accepts_the_largest_sqlite_cursor(client):
     response = client.get("/v1/work/jobs", params={"cursor": 2**63 - 1})
     assert response.status_code == 200
     assert response.json() == {"jobs": [], "next_cursor": None}
+
+
+def _work_api_payload(kind):
+    image_receipt = {"image_id": "tile-1", "sha256": "a" * 64, "receipt": "image-receipt"}
+    if kind == "quality":
+        return {"response": {"schema": 1}, "image_receipts": [image_receipt]}
+    return {"manifest_sha256": "b" * 64, "generation": 7, "conversation_id": "same-chat",
+            "source_receipts": [{"source_id": "p1", "sha256": "a" * 64, "receipt": "source-receipt"}],
+            "result": answer()}
+
+
+@pytest.mark.parametrize(("kind", "changes"), [
+    ("quality", None), ("answer", None),  # A list of pairs is not a JSON object.
+    ("quality", {"extra": True}), ("answer", {"extra": True}),
+    ("quality", {"response": []}), ("quality", {"response": [["schema", 1]]}),
+    ("answer", {"result": []}), ("answer", {"result": [["questions", []]]}),
+    ("answer", {"generation": True}), ("answer", {"generation": 7.0}),
+    ("answer", {"generation": "7"}), ("answer", {"manifest_sha256": 123}),
+    ("answer", {"conversation_id": 123}),
+    ("quality", {"image_receipts": {}}), ("answer", {"source_receipts": {}}),
+    ("quality", {"image_receipts": [[["image_id", "tile-1"], ["sha256", "a" * 64],
+                                       ["receipt", "image-receipt"]]]}),
+    ("answer", {"source_receipts": [[["source_id", "p1"], ["sha256", "a" * 64],
+                                       ["receipt", "source-receipt"]]]}),
+    ("quality", {"image_receipts": [{"image_id": 1, "sha256": "a" * 64, "receipt": "token"}]}),
+    ("quality", {"image_receipts": [{"image_id": "tile-1", "sha256": "a" * 64,
+                                    "receipt": "token", "extra": True}]}),
+    ("answer", {"source_receipts": [{"source_id": "p1", "sha256": "a" * 64,
+                                    "receipt": "token", "extra": True}]}),
+    ("answer", {"source_receipts": [{"source_id": "p1", "sha256": "a" * 64,
+                                    "delivery": "native_tiles", "inspection_manifest_sha256": "b" * 64,
+                                    "image_receipts": [[["image_id", "tile-1"], ["sha256", "a" * 64],
+                                                        ["receipt", "token"]]]}]}),
+])
+def test_work_api_rejects_invalid_payloads_before_authorizing_a_job(client, monkeypatch, kind, changes):
+    from app import main
+
+    def unexpected_job_access(job_id):
+        raise main.HTTPException(status_code=418, detail="invalid Work input reached job authorization")
+
+    monkeypatch.setattr(main, "_work_current_job", unexpected_job_access)
+    payload = _work_api_payload(kind)
+    if changes is None:
+        payload = list(payload.items())
+    else:
+        payload.update(changes)
+    route = "sources/p1/quality" if kind == "quality" else "result"
+    response = client.post(f"/v1/work/jobs/unused/{route}", json=payload)
+    assert response.status_code == 422, response.text
+
+
+@pytest.mark.parametrize("kind", ["quality", "original", "native_tiles"])
+def test_work_api_passes_only_validated_plain_payloads_to_the_store(client, monkeypatch, kind):
+    from app import main
+
+    received = []
+
+    class Store:
+        def submit_quality(self, *args, **kwargs):
+            received.append((args, kwargs))
+            return {"accepted": True}
+
+        submit_result = submit_quality
+
+    monkeypatch.setattr(main, "_work_current_job", lambda job_id: (Store(), {"session_id": 1}))
+    monkeypatch.setattr(main, "_exam_session_or_404", lambda *args: {})
+    monkeypatch.setattr(main, "_resume_answers", lambda *args: None)
+    payload = _work_api_payload("quality" if kind == "quality" else "answer")
+    if kind == "native_tiles":
+        payload["source_receipts"] = [{"source_id": "p1", "sha256": "a" * 64,
+                                       "delivery": "native_tiles", "inspection_manifest_sha256": "b" * 64,
+                                       "image_receipts": _work_api_payload("quality")["image_receipts"]}]
+    route = "sources/p1/quality" if kind == "quality" else "result"
+    response = client.post(f"/v1/work/jobs/fixture/{route}", json=payload)
+    assert response.status_code == 200, response.text
+    assert response.json() == {"accepted": True}
+    if kind == "original":
+        payload["source_receipts"][0]["delivery"] = "original_bytes"
+    assert received == [(("fixture", "p1") if kind == "quality" else ("fixture",), payload)]
+
+
+def test_work_api_schema_forbids_extra_fields_without_publishing_model_configuration(client):
+    schemas = client.get("/openapi.json").json()["components"]["schemas"]
+    for name in ("WorkInspectionReceipt", "WorkSourceReceipt", "WorkTileSourceReceipt",
+                 "WorkAnswerPayload", "WorkQualityPayload"):
+        assert schemas[name]["additionalProperties"] is False
+        assert "model_config" not in schemas[name]["properties"]

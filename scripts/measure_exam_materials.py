@@ -104,8 +104,6 @@ def _chart(path, materials, key, title):
 
 
 def measure_materials(manifest: Path, output: Path) -> dict:
-    import pypdfium2 as pdfium
-
     manifest = Path(manifest).resolve()
     manifest_bytes = manifest.read_bytes()
     spec = json.loads(manifest_bytes)
@@ -132,6 +130,8 @@ def measure_materials(manifest: Path, output: Path) -> dict:
             raise ValueError("pages must be increasing unique positive PDF page numbers")
         if not (manifest.parent / entry["path"]).is_file():
             raise FileNotFoundError(entry["path"])
+    import pypdfium2 as pdfium
+
     output = Path(output).resolve()
     output.mkdir(parents=True, exist_ok=False)  # A new directory protects inputs and previous measurements.
     report = {

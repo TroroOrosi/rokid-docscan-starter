@@ -11,8 +11,11 @@ from fastapi import HTTPException
 from app import main
 from app.glasses_state import state_guard
 from app.work_bridge import WorkConflict
-from tests.test_chatgpt_work_web import browser_page as browser_page, page as page
-from tests.test_work_bridge import api_session, client as client, wait_for
+from tests.test_chatgpt_work_web import browser_page as browser_page, page as _page_fixture
+from tests.test_work_bridge import api_session, client as _client_fixture, wait_for
+
+client = _client_fixture
+page = _page_fixture
 
 
 def test_internal_browser_commit_rejects_a_stale_job_before_sealing(monkeypatch):

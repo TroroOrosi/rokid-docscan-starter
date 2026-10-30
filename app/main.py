@@ -26,7 +26,7 @@ from typing import Literal
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse, Response
 from PIL import Image, UnidentifiedImageError
-from pydantic import BaseModel, ConfigDict, StrictInt, StrictStr
+from pydantic import BaseModel, ConfigDict, StrictInt, StrictStr, validator
 from starlette.concurrency import run_in_threadpool
 
 from . import config, db
@@ -292,23 +292,46 @@ def work_original(job_id: str, source_id: str) -> Response:
         "X-Work-Source-Receipt": metadata["receipt"], "Cache-Control": "no-store"})
 
 
-class WorkInspectionReceipt(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+class _WorkPayload(BaseModel):
+    if hasattr(BaseModel, "model_dump"):
+        model_config = ConfigDict(extra="forbid")
+    else:
+        class Config:
+            extra = "forbid"
+
+        @classmethod
+        def validate(cls, value):
+            # V1 otherwise coerces pair arrays into objects, including receipts.
+            if not isinstance(value, (dict, cls)):
+                raise ValueError("expected an object")
+            return super().validate(value)
+
+        @validator("response", "result", pre=True, check_fields=False, allow_reuse=True)
+        def _strict_object(cls, value):
+            if type(value) is not dict:
+                raise ValueError("expected an object")
+            return value
+
+    def transport_dict(self) -> dict:
+        if hasattr(self, "model_dump"):
+            return self.model_dump()
+        return self.dict()
+
+
+class WorkInspectionReceipt(_WorkPayload):
     image_id: StrictStr
     sha256: StrictStr
     receipt: StrictStr
 
 
-class WorkSourceReceipt(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+class WorkSourceReceipt(_WorkPayload):
     source_id: StrictStr
     sha256: StrictStr
     receipt: StrictStr
     delivery: Literal["original_bytes"] = "original_bytes"
 
 
-class WorkTileSourceReceipt(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+class WorkTileSourceReceipt(_WorkPayload):
     source_id: StrictStr
     sha256: StrictStr
     delivery: Literal["native_tiles"]
@@ -316,8 +339,7 @@ class WorkTileSourceReceipt(BaseModel):
     image_receipts: list[WorkInspectionReceipt]
 
 
-class WorkAnswerPayload(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+class WorkAnswerPayload(_WorkPayload):
     manifest_sha256: StrictStr
     generation: StrictInt
     conversation_id: StrictStr
@@ -325,8 +347,7 @@ class WorkAnswerPayload(BaseModel):
     result: dict
 
 
-class WorkQualityPayload(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+class WorkQualityPayload(_WorkPayload):
     response: dict
     image_receipts: list[WorkInspectionReceipt]
 
@@ -361,7 +382,7 @@ def work_quality_result(job_id: str, source_id: str, payload: WorkQualityPayload
     with state_guard():
         store, _ = _work_current_job(job_id)
         try:
-            return store.submit_quality(job_id, source_id, **payload.model_dump())
+            return store.submit_quality(job_id, source_id, **payload.transport_dict())
         except (ValueError, KeyError) as error:
             raise HTTPException(status_code=409, detail=str(error)) from None
 
@@ -371,7 +392,7 @@ def work_answer(job_id: str, payload: WorkAnswerPayload) -> dict:
     with state_guard():
         store, job = _work_current_job(job_id)
         try:
-            accepted = store.submit_result(job_id, **payload.model_dump())
+            accepted = store.submit_result(job_id, **payload.transport_dict())
         except (ValueError, WorkConflict) as error:
             raise HTTPException(status_code=409, detail=str(error)) from None
         conn = db.connect()

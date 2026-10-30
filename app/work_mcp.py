@@ -20,9 +20,10 @@ import os
 import re
 import sys
 import time
-from typing import Annotated, BinaryIO, Literal
+from typing import BinaryIO, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationError
+# Both supported majors expose this API, including the recorded phone's 1.10.26.
+from pydantic.v1 import BaseModel, Field, ValidationError, conint, constr, validator
 
 from .version import APP_VERSION
 
@@ -37,18 +38,41 @@ MAX_REQUEST_BYTES = 4 * 1024 * 1024
 MAX_JSON_BYTES = 6 * 1024 * 1024
 MAX_MEDIA_BYTES = 6 * 1024 * 1024
 _ID_PATTERN = r"[A-Za-z0-9_][A-Za-z0-9_.:-]{0,255}"
-Identifier = Annotated[str, StringConstraints(pattern=r"^" + _ID_PATTERN + r"$", max_length=256)]
-Digest = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
-Token = Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9_-]{1,256}$")]
+Identifier = constr(strict=True, regex=r"^" + _ID_PATTERN + r"$", max_length=256)
+Digest = constr(strict=True, regex=r"^[0-9a-f]{64}$")
+Token = constr(strict=True, regex=r"^[A-Za-z0-9_-]{1,256}$")
+NonNegativeInteger = conint(strict=True, ge=0)
+JobLimit = conint(strict=True, ge=1, le=100)
 
 
 class _Strict(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
+    class Config:
+        extra = "forbid"
+
+    @validator("response", "result", pre=True, check_fields=False)
+    def _strict_object(cls, value):
+        if type(value) is not dict:
+            raise ValueError("expected an object")
+        return value
+
+    @validator("image_receipts", "source_receipts", pre=True, check_fields=False)
+    def _strict_receipts(cls, value):
+        if type(value) is not list or any(type(receipt) is not dict for receipt in value):
+            raise ValueError("expected a list of receipt objects")
+        return value
+
+    @validator("*")
+    def _full_pattern(cls, value, field):
+        # Python's `$` also matches before a final newline; a receipt must match entirely.
+        pattern = getattr(field.type_, "regex", None)
+        if pattern is not None and pattern.fullmatch(value) is None:
+            raise ValueError("invalid identifier, digest or receipt")
+        return value
 
 
 class _ListJobs(_Strict):
-    cursor: int = Field(default=0, ge=0)
-    limit: int = Field(default=20, ge=1, le=100)
+    cursor: NonNegativeInteger = 0
+    limit: JobLimit = 20
 
 
 class _Job(_Strict):
@@ -81,21 +105,21 @@ class _TileReceipt(_Strict):
     sha256: Digest
     delivery: Literal["native_tiles"]
     inspection_manifest_sha256: Digest
-    image_receipts: list[_ImageReceipt] = Field(min_length=1, max_length=97)
+    image_receipts: list[_ImageReceipt] = Field(min_items=1, max_items=97)
 
 
 class _Quality(_Source):
     # Domain evidence is validated by the authoritative phone implementation;
     # this adapter must not translate it or invent a second approval policy.
     response: dict = Field(description="Exact source-bound checker response from get_quality instructions; phone validates all evidence.")
-    image_receipts: list[_ImageReceipt] = Field(min_length=1, max_length=97)
+    image_receipts: list[_ImageReceipt] = Field(min_items=1, max_items=97)
 
 
 class _Answers(_Job):
     manifest_sha256: Digest
-    generation: int = Field(ge=0)
+    generation: NonNegativeInteger
     conversation_id: Identifier
-    source_receipts: list[_OriginalReceipt | _TileReceipt] = Field(min_length=1, max_length=1000)
+    source_receipts: list[_OriginalReceipt | _TileReceipt] = Field(min_items=1, max_items=1000)
     result: dict = Field(description="Complete questions object specified by the job prompt; phone validates answer/diagram/stage schema.")
 
 
@@ -281,7 +305,7 @@ class LocalWorkClient:
         return source, quality
 
     def call(self, name: str, args: _Strict):
-        values = args.model_dump()
+        values = args.dict()
         job_id, source_id = values.get("job_id"), values.get("source_id")
         root = f"/v1/work/jobs/{job_id}"
         if name == "rokid_list_jobs":
@@ -410,7 +434,7 @@ class StdioServer:
         elif method == "tools/list":
             if set(params) - {"_meta"}:
                 return _error(rid, -32602, "Invalid params")
-            result = {"tools": [{"name": name, "description": description, "inputSchema": model.model_json_schema(),
+            result = {"tools": [{"name": name, "description": description, "inputSchema": model.schema(),
                                  "annotations": {"readOnlyHint": read_only, "destructiveHint": False,
                                                  "idempotentHint": True, "openWorldHint": False}}
                                 for name, (model, read_only, description) in _TOOLS.items()]}
@@ -420,7 +444,7 @@ class StdioServer:
                     or name not in _TOOLS or type(arguments) is not dict):
                 return _error(rid, -32602, "Invalid tool call")
             try:
-                args = _TOOLS[name][0].model_validate(arguments)
+                args = _TOOLS[name][0].parse_obj(arguments)
                 result = self.client.call(name, args)
             except ValidationError:
                 result = _text({"error": "invalid_tool_arguments"}, error=True)

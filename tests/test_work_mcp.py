@@ -173,6 +173,106 @@ def test_strict_tool_arguments_never_reach_http(arguments):
         assert calls == []
 
 
+@pytest.mark.parametrize("name,arguments", [
+    ("rokid_list_jobs", {"cursor": True}),
+    ("rokid_list_jobs", {"cursor": "0"}),
+    ("rokid_list_jobs", {"cursor": 0.0}),
+    ("rokid_list_jobs", {"limit": False}),
+    ("rokid_list_jobs", {"limit": 0}),
+    ("rokid_list_jobs", {"limit": 101}),
+    ("rokid_get_job", {"job_id": 1}),
+    ("rokid_get_job", {"job_id": JOB + "\n"}),
+    ("rokid_submit_quality", {"job_id": JOB, "source_id": SOURCE, "response": [], "image_receipts": []}),
+])
+def test_strict_tool_primitives_and_quality_containers_never_reach_http(name, arguments):
+    with phone({}) as (client, calls):
+        server = work_mcp.StdioServer(client)
+        initialize(server)
+        result = call(server, name, arguments)["result"]
+        assert json.loads(result["content"][0]["text"]) == {"error": "invalid_tool_arguments"}
+        assert result["isError"] is True and calls == []
+
+
+def _answer_arguments():
+    return {"job_id": JOB, "manifest_sha256": "a" * 64, "generation": 2, "conversation_id": "chat",
+            "source_receipts": [{"source_id": SOURCE, "sha256": "b" * 64, "receipt": "test-receipt"}],
+            "result": {"questions": []}}
+
+
+@pytest.mark.parametrize("field,value", [
+    ("response", []), ("response", [["approved", True]]),
+    ("image_receipts", {}), ("image_receipts", []),
+    ("image_receipts", [[["image_id", "tile-1"], ["sha256", "d" * 64], ["receipt", "test-receipt"]]]),
+])
+def test_quality_objects_and_receipt_objects_are_not_coerced(field, value):
+    arguments = {"job_id": JOB, "source_id": SOURCE, "response": {"observed": True},
+                  "image_receipts": [{"image_id": "tile-1", "sha256": "d" * 64, "receipt": "test-receipt"}],
+                  field: value}
+    with phone({}) as (client, calls):
+        server = work_mcp.StdioServer(client)
+        initialize(server)
+        result = call(server, "rokid_submit_quality", arguments)["result"]
+        assert json.loads(result["content"][0]["text"]) == {"error": "invalid_tool_arguments"}
+        assert result["isError"] is True and calls == []
+
+
+@pytest.mark.parametrize("field,value", [
+    ("generation", True), ("generation", "2"), ("generation", 2.0),
+    ("conversation_id", 1), ("result", []), ("result", [["questions", []]]),
+    ("source_receipts", []), ("source_receipts", {}),
+    ("source_receipts", [[["source_id", SOURCE], ["sha256", "b" * 64], ["receipt", "test-receipt"]]]),
+    ("source_receipts", [{"source_id": SOURCE, "sha256": "b" * 64 + "\n", "receipt": "test-receipt"}]),
+    ("source_receipts", [{"source_id": SOURCE, "sha256": "b" * 64, "receipt": "test-receipt\n"}]),
+    ("source_receipts", [{"source_id": SOURCE, "sha256": "b" * 64, "receipt": 123}]),
+    ("source_receipts", [{"source_id": SOURCE, "sha256": "b" * 64, "receipt": "ok", "extra": 1}]),
+])
+def test_strict_answer_receipts_reject_coercion_before_any_http(field, value):
+    with phone({}) as (client, calls):
+        server = work_mcp.StdioServer(client)
+        initialize(server)
+        arguments = {**_answer_arguments(), field: value}
+        result = call(server, "rokid_submit_answers", arguments)["result"]
+        assert json.loads(result["content"][0]["text"]) == {"error": "invalid_tool_arguments"}
+        assert result["isError"] is True and calls == []
+
+
+@pytest.mark.parametrize("images", [
+    [], {}, [[["image_id", "tile-1"], ["sha256", "d" * 64], ["receipt", "test-receipt"]]],
+    [{"image_id": "tile-1", "sha256": "d" * 64, "receipt": "ok", "extra": 1}],
+])
+def test_tile_receipts_retain_strict_container_and_nested_extra_rules(images):
+    arguments = _answer_arguments()
+    arguments["source_receipts"] = [{"source_id": SOURCE, "sha256": "b" * 64,
+        "delivery": "native_tiles", "inspection_manifest_sha256": "c" * 64, "image_receipts": images}]
+    with phone({}) as (client, calls):
+        server = work_mcp.StdioServer(client)
+        initialize(server)
+        result = call(server, "rokid_submit_answers", arguments)["result"]
+        assert json.loads(result["content"][0]["text"]) == {"error": "invalid_tool_arguments"}
+        assert result["isError"] is True and calls == []
+
+
+def test_native_tile_receipts_keep_their_exact_schema_and_serialized_fields():
+    arguments = _answer_arguments()
+    arguments["source_receipts"] = [{"source_id": SOURCE, "sha256": "b" * 64,
+        "delivery": "native_tiles", "inspection_manifest_sha256": "c" * 64,
+        "image_receipts": [{"image_id": "tile-1", "sha256": "d" * 64, "receipt": "tile-receipt"}]}]
+    routes = routes_for_image()
+    routes["POST", f"/v1/work/jobs/{JOB}/result"] = 200, {}, {"accepted": True}
+    with phone(routes) as (client, calls):
+        server = work_mcp.StdioServer(client)
+        initialize(server)
+        tools = wire(server, request("tools/list"))[0]["result"]["tools"]
+        schemas = {tool["name"]: tool["inputSchema"] for tool in tools}
+        receipts = schemas["rokid_submit_answers"]["properties"]["source_receipts"]
+        assert receipts["type"] == "array" and receipts["minItems"] == 1 and receipts["maxItems"] == 1000
+        assert schemas["rokid_list_jobs"]["properties"]["limit"]["maximum"] == 100
+        result = call(server, "rokid_submit_answers", arguments)["result"]
+        assert result["isError"] is False
+        posted = [json.loads(body) for method, _, _, body in calls if method == "POST"]
+        assert posted == [{key: value for key, value in arguments.items() if key != "job_id"}]
+
+
 def test_unknown_image_is_never_fetched():
     with phone(routes_for_image()) as (client, calls):
         server = work_mcp.StdioServer(client)
