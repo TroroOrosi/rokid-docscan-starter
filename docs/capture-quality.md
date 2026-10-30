@@ -1,7 +1,7 @@
 # 保存写真の原寸点検と登録条件（PC用）
 
 Status: Current runbook。PC用部品とスマホ側Work検査受付は実装済み。カメラ撮影・登録本流の品質ゲートと実AIは未接続、実機受け入れは未了。
-Runs on: 以下のCLIはWindows PCで保存済みJPEG/PNGを点検。Python runtimeとWorkStoreはスマホ上で画像bytesを扱い、PCの常時稼働や有線接続を要求しない。10/30は本人の未接続指定に従い端末へ接続しない。
+Runs on: 以下のCLIはWindows PCで保存済みJPEG/PNGを点検。Python runtimeとWorkStoreはスマホ上で画像bytesを扱い、PCの常時稼働や有線接続を要求しない。最新の端末接続・実行状態は[継続記録](../.agents/progress/current.md)で確認する。
 
 `app/capture_quality.py` は原画像bytesから概観と全域の原画素タイルを作り、明示的に注入したcheckerの返答をsession・capture・generation・頁めくり・revision・SHA・rotationへ照合します。
 遅延した別頁の返答、異常JSON、checker未設定・失敗、未検証profileは保留です。読取はcheckerの申告として保存し、独立した視認証明にしません。既定の `validated_profiles=()` は空で、校正済みprofileを自己申告して承認できません。
@@ -15,6 +15,7 @@ Runs on: 以下のCLIはWindows PCで保存済みJPEG/PNGを点検。Python runt
 グラスの撮影後表示は「構図確認のみ」「無操作で保存・画質未検証」とする。
 3秒は可視ACKからの取消期間であり、全文・数式・図表の品質承認ではない。
 撮影前は原本と同じ縦横比のライブプレビューを隅に示します。物理的な紙面四隅の検査は未実装です。
+選択・転送・解析などの通常案内は左下の小領域に収め、右下の撮影映像から分けます。答案本文は専用の一画面表示を保ちます。実装着での可読性は未確認です。
 距離と照明を確認する案内に、未校正の固定距離を使わない。
 
 PCの明暗補正は可視性を改善する候補であり、OCRの正答率改善とは区別する。

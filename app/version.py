@@ -220,7 +220,8 @@ from __future__ import annotations
 #         durable Work jobs. Cloud connection and physical acceptance remain separate.
 # 0.51.1: retain native chroma in outgoing JPEGs and native capture provenance
 #         through local review and durable page storage.
-APP_VERSION = "0.51.1"
+# 0.51.2: keep non-answer status and chooser text in a compact display region.
+APP_VERSION = "0.51.2"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.
@@ -466,7 +467,9 @@ EXPLAINER_API_VERSION = "1.1.0"
 #         mixed recording controls with staged answer revisions.
 # 1.29.0: capture preview/review occupy a shared corner viewport; answer text
 #         and the visible-acknowledged review/commit interval are preserved.
-GLASSES_VIEW_CONTRACT_VERSION = "1.29.0"
+# 1.30.0: ordinary status and chooser lines use a compact display region;
+#         full answer pages and the capture/review viewport stay unchanged.
+GLASSES_VIEW_CONTRACT_VERSION = "1.30.0"
 
 # Answer-area overlay payload (box + short answer; 2D image-anchored).
 # 1.1.0: added tracking metadata (tracking/fixed_ar/anchor_hint).

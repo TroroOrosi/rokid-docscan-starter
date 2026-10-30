@@ -6,6 +6,10 @@ import static org.junit.Assert.assertTrue;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.Color;
+import android.graphics.Paint;
+import android.graphics.Rect;
+import android.graphics.RectF;
+import java.util.Arrays;
 import java.util.List;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -18,6 +22,160 @@ import org.robolectric.annotation.GraphicsMode;
 @Config(sdk = 32, manifest = Config.NONE)
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 public class HudViewTest {
+    @Test public void waitingStatusLeavesTheCentreClearWithoutEnlargingShortMessages() {
+        for (int[] size : new int[][]{{480, 640}, {640, 480}}) {
+            HudView view = new HudView(RuntimeEnvironment.getApplication());
+            view.layout(0, 0, size[0], size[1]);
+            view.showLines(List.of("解析中", "答案を待っています", ""));
+            Bitmap screen = Bitmap.createBitmap(size[0], size[1], Bitmap.Config.ARGB_8888);
+            TextCanvas canvas = new TextCanvas(screen);
+            view.draw(canvas);
+            assertEquals("status content must remain visible", "解析中答案を待っています", canvas.text.toString());
+            assertStatusOnly(screen);
+            assertTrue("short status must not be enlarged across the display", canvas.largestTextSize <= 20f);
+            screen.recycle();
+        }
+    }
+
+    @Test public void compactStatusKeepsEveryChoiceAndTheInstructionReadable() {
+        List<String> choices = List.of("　 通常の読取", "▶ 合同英語（読解＋音声）", "　 リスニング",
+                "　 中断した読取", "　 前回の答案", "スワイプで選択・タップで開始");
+        assertReadableStatus(choices);
+    }
+
+    @Test public void compactFailureWrapsTheCompleteReasonAndRecoveryAction() {
+        assertReadableStatus(List.of("開始・再開できません",
+                "接続先と保存記録を確認してください。撮影した問題用紙と原音は保存されています。",
+                "ダブルタップで戻る"));
+    }
+
+    private static void assertReadableStatus(List<String> lines) {
+        for (int[] size : new int[][]{{480, 640}, {640, 480}}) {
+            HudView view = new HudView(RuntimeEnvironment.getApplication());
+            view.layout(0, 0, size[0], size[1]);
+            view.showLines(lines);
+            Bitmap screen = Bitmap.createBitmap(size[0], size[1], Bitmap.Config.ARGB_8888);
+            TextCanvas canvas = new TextCanvas(screen);
+            view.draw(canvas);
+            assertEquals("no choice, failure detail or action may be omitted", String.join("", lines), canvas.text.toString());
+            if (size[0] == 480) {
+                assertTrue("ordinary choices and wrapped failure details must stay readable", canvas.smallestTextSize >= 18f);
+            }
+            assertStatusOnly(screen);
+            screen.recycle();
+        }
+    }
+
+    @Test public void emptyAndSmallStatusKeepDrawingWithinTheDisplay() {
+        HudView view = new HudView(RuntimeEnvironment.getApplication());
+        view.layout(0, 0, 96, 64);
+        List<List<String>> emptyInputs = Arrays.asList(null, List.of(), Arrays.asList(null, "", null));
+        for (List<String> input : emptyInputs) {
+            view.showLines(input);
+            Bitmap screen = Bitmap.createBitmap(96, 64, Bitmap.Config.ARGB_8888);
+            TextCanvas canvas = new TextCanvas(screen);
+            view.draw(canvas);
+            assertEquals("empty or null status must not leave a stale text draw", "", canvas.text.toString());
+            for (int y = 0; y < 64; y++) for (int x = 0; x < 96; x++) {
+                assertEquals(Color.BLACK, screen.getPixel(x, y));
+            }
+            screen.recycle();
+        }
+        for (int[] size : new int[][]{{96, 64}, {64, 96}}) {
+            view.layout(0, 0, size[0], size[1]);
+            view.showLines(Arrays.asList(null, "解析中", ""));
+            Bitmap screen = Bitmap.createBitmap(size[0], size[1], Bitmap.Config.ARGB_8888);
+            TextCanvas canvas = new TextCanvas(screen);
+            view.draw(canvas);
+            assertEquals("small views may shrink text but must keep the complete status", "解析中", canvas.text.toString());
+            assertStatusOnly(screen);
+            screen.recycle();
+        }
+    }
+
+    private static void assertStatusOnly(Bitmap screen) {
+        int visible = 0;
+        for (int y = 0; y < screen.getHeight(); y++) for (int x = 0; x < screen.getWidth(); x++) {
+            if (screen.getPixel(x, y) != Color.BLACK) {
+                visible++;
+                assertTrue("status must stay in a small lower-left area, leaving the page ahead clear",
+                        x <= screen.getWidth() * .65f && y >= screen.getHeight() * .65f);
+            }
+        }
+        assertTrue("the compact status must actually be drawn", visible > 0);
+    }
+
+    private static final class TextCanvas extends Canvas {
+        final StringBuilder text = new StringBuilder();
+        float smallestTextSize = Float.MAX_VALUE;
+        float largestTextSize;
+
+        TextCanvas(Bitmap bitmap) { super(bitmap); }
+
+        private void record(CharSequence drawn, float x, float y, Paint paint) {
+            text.append(drawn);
+            smallestTextSize = Math.min(smallestTextSize, paint.getTextSize());
+            largestTextSize = Math.max(largestTextSize, paint.getTextSize());
+            String value = drawn.toString();
+            Rect ink = new Rect();
+            paint.getTextBounds(value, 0, value.length(), ink);
+            if (!ink.isEmpty()) {
+                Rect clip = new Rect();
+                assertTrue("text ink must have a visible canvas clip", getClipBounds(clip));
+                RectF positionedInk = new RectF(ink);
+                positionedInk.offset(x, y);
+                assertTrue("text ink must fit its clip: view=" + getWidth() + "x" + getHeight()
+                                + ", size=" + paint.getTextSize() + ", ink=" + positionedInk
+                                + ", clip=" + clip + ", origin=" + x + "," + y + ", text=" + value,
+                        new RectF(clip).contains(positionedInk));
+            }
+        }
+
+        @Override public void drawText(String text, float x, float y, Paint paint) {
+            record(text, x, y, paint);
+            super.drawText(text, x, y, paint);
+        }
+
+        @Override public void drawText(CharSequence text, int start, int end, float x, float y, Paint paint) {
+            record(text.subSequence(start, end), x, y, paint);
+            super.drawText(text, start, end, x, y, paint);
+        }
+
+        @Override public void drawTextRun(char[] text, int index, int count, int contextIndex, int contextCount,
+                                          float x, float y, boolean isRtl, Paint paint) {
+            record(new String(text, index, count), x, y, paint);
+            super.drawTextRun(text, index, count, contextIndex, contextCount, x, y, isRtl, paint);
+        }
+
+        @Override public void drawTextRun(CharSequence text, int start, int end, int contextStart, int contextEnd,
+                                          float x, float y, boolean isRtl, Paint paint) {
+            record(text.subSequence(start, end), x, y, paint);
+            super.drawTextRun(text, start, end, contextStart, contextEnd, x, y, isRtl, paint);
+        }
+    }
+
+    @Test public void ordinaryCaptureStatusDoesNotCoverTheExistingLiveImage() {
+        HudView view = new HudView(RuntimeEnvironment.getApplication());
+        view.layout(0, 0, 480, 640);
+        Bitmap camera = Bitmap.createBitmap(320, 240, Bitmap.Config.ARGB_8888);
+        camera.eraseColor(Color.rgb(0, 80, 0));
+        view.showLivePreview(camera);
+        view.capturePreview(true);
+        view.showAiming(List.of());
+        Bitmap before = Bitmap.createBitmap(480, 640, Bitmap.Config.ARGB_8888);
+        view.draw(new Canvas(before));
+        view.showLines(List.of("撮影中", "", ""));
+        Bitmap after = Bitmap.createBitmap(480, 640, Bitmap.Config.ARGB_8888);
+        view.draw(new Canvas(after));
+        for (int y = 440; y < 640; y++) for (int x = 320; x < 480; x++) {
+            assertEquals("ordinary status must neither move nor obscure the live image and its frame",
+                    before.getPixel(x, y), after.getPixel(x, y));
+        }
+        view.capturePreview(false);
+        before.recycle();
+        after.recycle();
+    }
+
     @Test public void reviewStaysInTheCornerAndLeavesThePageInFrontOfTheOperatorClear() {
         Bitmap photo = Bitmap.createBitmap(240, 480, Bitmap.Config.ARGB_8888);
         photo.eraseColor(Color.rgb(90, 90, 90));

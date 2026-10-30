@@ -8,6 +8,9 @@ import android.graphics.ColorMatrixColorFilter;
 import android.graphics.Paint;
 import android.graphics.RectF;
 import android.graphics.Typeface;
+import android.text.Layout;
+import android.text.StaticLayout;
+import android.text.TextPaint;
 import android.view.View;
 
 import java.util.ArrayList;
@@ -35,6 +38,7 @@ final class HudView extends View {
     private static final float CAPTURE_MARGIN = 8f;
 
     private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final TextPaint statusPaint = new TextPaint(Paint.ANTI_ALIAS_FLAG);
     private final Paint guidePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint previewPaint = new Paint(Paint.FILTER_BITMAP_FLAG);
     private final Paint livePaint = new Paint(Paint.FILTER_BITMAP_FLAG);
@@ -96,6 +100,7 @@ final class HudView extends View {
         super(context);
         paint.setColor(GREEN);
         paint.setTypeface(Typeface.MONOSPACE);
+        statusPaint.set(paint);
         guidePaint.setColor(GREEN);
         guidePaint.setStyle(Paint.Style.STROKE);
     }
@@ -199,22 +204,42 @@ final class HudView extends View {
             drawCaptureStatus(canvas);
             return;
         }
-        float lineHeight = getHeight() / (float) (lines.size() + 1);
-        float textSize = lineHeight * 0.55f;
-        paint.setTextSize(textSize);
-        float widest = 0;
+        drawStatus(canvas);
+    }
+
+    private void drawStatus(Canvas canvas) {
+        StringBuilder text = new StringBuilder();
         for (String line : lines) {
-            widest = Math.max(widest, paint.measureText(line == null ? "" : line));
+            if (text.length() > 0) text.append('\n');
+            if (line != null) text.append(line);
         }
-        float textWidth = Math.max(1, getWidth() - lineHeight * 0.4f);
-        if (widest > textWidth) {
-            paint.setTextSize(textSize * textWidth / widest);
+        while (text.length() > 0 && text.charAt(text.length() - 1) == '\n') text.setLength(text.length() - 1);
+        if (text.length() == 0 || getWidth() <= 0 || getHeight() <= 0) return;
+
+        // Leave the centre clear and the existing lower-right camera image unobstructed.
+        float bottom = Math.max(1f, getHeight() - CAPTURE_MARGIN);
+        float height = Math.max(1f, getHeight() * .30f - CAPTURE_MARGIN);
+        int width = Math.max(1, (int) (getWidth() * .60f - CAPTURE_MARGIN));
+        statusPaint.setTextSize(18f);
+        StaticLayout layout = statusLayout(text, width);
+        while (layout.getHeight() > height && statusPaint.getTextSize() > 1f) {
+            statusPaint.setTextSize(Math.max(1f, statusPaint.getTextSize() * height / layout.getHeight() - .5f));
+            layout = statusLayout(text, width);
         }
-        float y = lineHeight;
-        for (String line : lines) {
-            canvas.drawText(line == null ? "" : line, lineHeight * 0.2f, y, paint);
-            y += lineHeight;
-        }
+        canvas.save();
+        canvas.clipRect(CAPTURE_MARGIN, bottom - height, CAPTURE_MARGIN + width, bottom);
+        canvas.translate(CAPTURE_MARGIN, bottom - layout.getHeight());
+        layout.draw(canvas);
+        canvas.restore();
+    }
+
+    private StaticLayout statusLayout(CharSequence text, int width) {
+        return StaticLayout.Builder.obtain(text, 0, text.length(), statusPaint, width)
+                .setAlignment(Layout.Alignment.ALIGN_NORMAL)
+                .setIncludePad(true)
+                .setBreakStrategy(Layout.BREAK_STRATEGY_SIMPLE)
+                .setHyphenationFrequency(Layout.HYPHENATION_FREQUENCY_NONE)
+                .build();
     }
 
     /** The display bounds are not a calibrated camera field of view. */
