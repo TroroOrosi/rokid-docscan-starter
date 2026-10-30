@@ -239,7 +239,8 @@ from __future__ import annotations
 # 0.59.0: evaluate an original-video and maximum-JPEG hybrid with a recorder stop barrier.
 # 0.60.0: retain authenticated original-video comparison uploads with durable receipts.
 # 0.61.0: transfer explicit comparison videos with persistent origin and receipt checks.
-APP_VERSION = "0.61.0"
+# 0.61.1: preserve complete current Android runtime values across supervised phone services.
+APP_VERSION = "0.61.1"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.

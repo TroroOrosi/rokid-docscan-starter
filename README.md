@@ -137,7 +137,7 @@ Driveへ置く場合も全件列挙と各原画像取得が必要で、添付20�
 CXR-L の実装境界は
 [CXR-L / Global Hi Rokid integration](docs/cxr-l-integration.md)です。
 
-現在のバージョン: **Server APP 0.61.0 / API 1.38.0 / Android client 0.3.17 / Glasses View 1.37.0 / Solver API 1.9.0**。
+現在のバージョン: **Server APP 0.61.1 / API 1.38.0 / Android client 0.3.17 / Glasses View 1.37.0 / Solver API 1.9.0**。
 版数の正本は `app/version.py` です。他の資料は版数を書かず、この行だけが
 `tests/test_documentation_contract.py` で実装と照合されます。
 Solver API は、記入用解答の全文保持・資料不足の分離を行う `answer_only` モードを含みます。
@@ -593,6 +593,10 @@ DevTools プロトコル経由で操作し、ChatGPT ウェブ UI に問題文�
 準備コマンドと承認境界は[会場経路の準備](docs/real-device-operation.md)を参照してください。
 初回ロック解除とテザリング利用開始後が対象です。サービス定義は無効状態で作成し、
 既存の手動起動ブラウザとX11を所有確認のうえ引き継いでから有効化します。
+4サービスの共通起動処理は、OSから継承した完全なAndroid実行環境7項目を優先します。
+継承が全て無い場合は専用の非公開設定ファイルに保存した完全な組を使い、
+一部欠落した値を混ぜて起動せず、固定エラーを返します。これらの環境値を設定しても、
+ログイン維持や再起動後の自動復旧を確認したことにはなりません。
 スマホ再起動後の自動復旧とグラスからの一連の使用は未検証です。端末操作は承認範囲内で行います。
 
 ```bash

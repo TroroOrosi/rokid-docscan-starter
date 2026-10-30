@@ -10,10 +10,43 @@ if [[ "$(stat -c '%a' "$env_file")" != "600" ]]; then
     echo "phone: env file must have mode 0600" >&2
     exit 1
 fi
+# Android boot values belong to one OS generation. A complete inherited set
+# wins over a cached private env; a partial set must never be mixed with it.
+phone_android_runtime_keys=(ANDROID_ART_ROOT ANDROID_I18N_ROOT ANDROID_TZDATA_ROOT
+                            ANDROID_ROOT ANDROID_DATA BOOTCLASSPATH DEX2OATBOOTCLASSPATH)
+phone_android_runtime_values=()
+phone_android_runtime_validate() {
+    local name seen=0 missing=0
+    for name in "${phone_android_runtime_keys[@]}"; do
+        if [[ -v "$name" ]]; then seen=1; fi
+        if [[ -z "${!name-}" ]]; then missing=1; fi
+    done
+    if (( seen && missing )) ||
+        { (( seen )) && [[ "$BOOTCLASSPATH" != "$DEX2OATBOOTCLASSPATH" &&
+                           "$BOOTCLASSPATH" != "${DEX2OATBOOTCLASSPATH}:"* ]]; } ||
+        { (( ! seen )) && test -x /system/bin/app_process && test -d /apex/com.android.art; }; then
+        echo "phone: incomplete Android runtime environment" >&2
+        exit 1
+    fi
+}
+for phone_android_runtime_name in "${phone_android_runtime_keys[@]}"; do
+    if [[ -v "$phone_android_runtime_name" ]]; then
+        phone_android_runtime_values+=("${!phone_android_runtime_name}")
+    fi
+done
+if (( ${#phone_android_runtime_values[@]} )); then phone_android_runtime_validate; fi
 set -a
 # shellcheck disable=SC1090
 . "$env_file"
 set +a
+if (( ${#phone_android_runtime_values[@]} )); then
+    for phone_android_runtime_index in "${!phone_android_runtime_keys[@]}"; do
+        export "${phone_android_runtime_keys[$phone_android_runtime_index]}=${phone_android_runtime_values[$phone_android_runtime_index]}"
+    done
+fi
+phone_android_runtime_validate
+unset phone_android_runtime_keys phone_android_runtime_values phone_android_runtime_name phone_android_runtime_index
+unset -f phone_android_runtime_validate
 if [[ -z "${ROKID_API_KEY:-}" ]]; then
     echo "phone: authentication_failed; ROKID_API_KEY is required" >&2
     exit 1

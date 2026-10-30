@@ -250,6 +250,107 @@ def test_shared_env_preserves_the_work_settings_and_auth_file_for_the_watcher(tm
     assert env_file.read_bytes() == before
 
 
+def _android_runtime_values(label):
+    return {
+        "ANDROID_ART_ROOT": "/apex/com.android.art",
+        "ANDROID_I18N_ROOT": "/apex/com.android.i18n",
+        "ANDROID_TZDATA_ROOT": "/apex/com.android.tzdata",
+        "ANDROID_ROOT": "/system",
+        "ANDROID_DATA": "/data",
+        "BOOTCLASSPATH": f"/system/framework/{label}.jar:/system/framework/extension.jar",
+        "DEX2OATBOOTCLASSPATH": f"/system/framework/{label}.jar",
+    }
+
+
+def _android_runtime_probe(tmp_path, env, fallback):
+    env_file = Path(env["ROKID_ENV_FILE"])
+    with env_file.open("a") as output:
+        output.write("export ROKID_SOLVER=chatgpt-work\nexport ROKID_CHATGPT_SEND_ENABLED=0\n")
+        for name, value in fallback.items():
+            output.write(f"export {name}={shlex.quote(value)}\n")
+    python = tmp_path / "bin/python"
+    names = list(_android_runtime_values("unused"))
+    python.write_text(python.read_text() + "printf '%s\\n' "
+                      + " ".join(f'"${{{name}-unset}}"' for name in names)
+                      + ' "$ROKID_SOLVER" "$ROKID_CHATGPT_SEND_ENABLED"\n'
+                      + 'test "$ROKID_API_KEY" = test-key || exit 91\n')
+    return env_file.read_bytes(), names
+
+
+@requires_bash
+@pytest.mark.parametrize("inherited,same_classpaths", [(False, False), (True, False), (True, True)])
+def test_android_runtime_uses_one_complete_set_and_preserves_new_os_classpaths(tmp_path, inherited, same_classpaths):
+    env, log = _environment(tmp_path)
+    fallback, current = _android_runtime_values("old-os"), _android_runtime_values("new-os")
+    if same_classpaths:
+        current["BOOTCLASSPATH"] = current["DEX2OATBOOTCLASSPATH"]
+    for name in current:
+        env.pop(name, None)
+    if inherited:
+        env.update(current)
+    before, names = _android_runtime_probe(tmp_path, env, fallback)
+    result = _run("phone_serve.sh", env)
+    assert result.returncode == 0, result.stderr
+    expected = current if inherited else fallback
+    assert result.stdout.splitlines()[-len(names) - 2:] == [expected[name] for name in names] + ["chatgpt-work", "0"]
+    assert Path(env["ROKID_ENV_FILE"]).read_bytes() == before
+    assert log.read_text().splitlines()[0] == "termux-wake-lock"
+    assert "test-key" not in result.stdout + result.stderr
+
+
+@requires_bash
+@pytest.mark.parametrize("boundary", ["partial_os", "empty_os", "partial_fallback", "empty_fallback", "mixed_classpaths"])
+def test_android_runtime_never_mixes_partial_os_with_cached_values_or_starts_a_body(tmp_path, boundary):
+    env, log = _environment(tmp_path)
+    current = _android_runtime_values("new-os")
+    fallback = _android_runtime_values("old-os")
+    for name in current:
+        env.pop(name, None)
+    if boundary == "partial_os":
+        env["BOOTCLASSPATH"] = current["BOOTCLASSPATH"]
+    elif boundary == "empty_os":
+        env.update(current | {"ANDROID_ART_ROOT": ""})
+    elif boundary == "partial_fallback":
+        del fallback["ANDROID_ART_ROOT"]
+    elif boundary == "empty_fallback":
+        fallback["ANDROID_ART_ROOT"] = ""
+    else:
+        fallback["DEX2OATBOOTCLASSPATH"] = current["DEX2OATBOOTCLASSPATH"]
+    before, _names = _android_runtime_probe(tmp_path, env, fallback)
+    result = _run("phone_serve.sh", env)
+    assert result.returncode != 0
+    assert result.stderr == "phone: incomplete Android runtime environment\n"
+    assert result.stdout == ""
+    assert not log.exists()
+    assert Path(env["ROKID_ENV_FILE"]).read_bytes() == before
+
+
+@requires_bash
+def test_android_without_runtime_values_fails_before_body_but_host_fixture_remains_compatible(tmp_path):
+    env, log = _environment(tmp_path)
+    for name in _android_runtime_values("unused"):
+        env.pop(name, None)
+    before = Path(env["ROKID_ENV_FILE"]).read_bytes()
+    # Only the two Android filesystem checks are emulated. The real launcher,
+    # private env loader and body-command boundary still run in Bash.
+    hook = tmp_path / "android-filesystem.sh"
+    hook.write_text("test() {\n"
+                    "  case \"$*\" in\n"
+                    "    '-x /system/bin/app_process'|'-d /apex/com.android.art') return 0 ;;\n"
+                    "    *) builtin test \"$@\" ;;\n"
+                    "  esac\n}\n")
+    env["BASH_ENV"] = hook.as_posix()
+    result = _run("phone_serve.sh", env)
+    assert result.returncode != 0
+    assert result.stderr == "phone: incomplete Android runtime environment\n"
+    assert result.stdout == "" and not log.exists()
+    assert Path(env["ROKID_ENV_FILE"]).read_bytes() == before
+    del env["BASH_ENV"]
+    result = _run("phone_serve.sh", env)
+    assert result.returncode == 0, result.stderr
+    assert log.read_text().splitlines()[0] == "termux-wake-lock"
+
+
 @requires_bash
 def test_nonprivate_env_fails_before_any_browser_or_activity_start(tmp_path):
     env, log = _environment(tmp_path)
