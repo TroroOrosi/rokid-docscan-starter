@@ -19,8 +19,8 @@ import java.security.NoSuchAlgorithmException;
 /** Atomically persists one unregistered capture across activity/process restarts. */
 final class CaptureReviewPersistence {
     private static final int MAGIC = 0x44534350; // DSCP
-    /** 3 adds the glasses' shutter-request epoch; old records retain unknown (0). */
-    private static final int VERSION = 3;
+    /** v4 adds native provenance; v5 stores its producer. Metadata-free writes stay frozen at v3. */
+    private static final int VERSION = 5;
     private static final int COMMIT_MAGIC = 0x44534343; // DSCC
     private static final int COMMIT_VERSION = 1;
     private static final int SHA_256_BYTES = 32;
@@ -54,6 +54,10 @@ final class CaptureReviewPersistence {
                 || pending.jpeg.length == 0 || pending.jpeg.length > MAX_JPEG_BYTES) {
             throw new IOException("invalid pending capture payload");
         }
+        if (pending.provenance != null
+                && !pending.provenance.matches(pending.jpeg, pending.pageIndex, pending.rotationDegrees)) {
+            throw new IOException("native capture provenance does not match original");
+        }
         byte[] text = pending.ocrText.getBytes(StandardCharsets.UTF_8);
         byte[] failure = pending.ocrFailure.getBytes(StandardCharsets.UTF_8);
         byte[] framing = pending.framing.toToken().getBytes(StandardCharsets.UTF_8);
@@ -68,7 +72,7 @@ final class CaptureReviewPersistence {
         try (FileOutputStream output = new FileOutputStream(temporaryFile);
              DataOutputStream data = new DataOutputStream(new BufferedOutputStream(output))) {
             data.writeInt(MAGIC);
-            data.writeInt(VERSION);
+            data.writeInt(pending.provenance == null ? 3 : VERSION);
             data.writeInt(pending.pageIndex);
             data.writeInt(pending.rotationDegrees);
             writeBytes(data, text);
@@ -76,6 +80,7 @@ final class CaptureReviewPersistence {
             writeBytes(data, framing);
             writeBytes(data, pending.jpeg);
             data.writeLong(pending.capturedAtMillis);
+            if (pending.provenance != null) pending.provenance.writeToV5(data);
             data.flush();
             output.getFD().sync();
         }
@@ -149,6 +154,7 @@ final class CaptureReviewPersistence {
         return stored != null && stored.pageIndex == expected.pageIndex
                 && stored.rotationDegrees == expected.rotationDegrees
                 && stored.capturedAtMillis == expected.capturedAtMillis
+                && java.util.Objects.equals(stored.provenance, expected.provenance)
                 && stored.ocrText.equals(expected.ocrText)
                 && stored.ocrFailure.equals(expected.ocrFailure)
                 && stored.framing.toToken().equals(expected.framing.toToken());
@@ -207,12 +213,17 @@ final class CaptureReviewPersistence {
                 jpeg = same ? expectedJpeg : null;
             }
             long capturedAt = recordVersion >= 3 ? data.readLong() : 0;
+            CaptureProvenance provenance = recordVersion >= 5 ? CaptureProvenance.readFromV5(data)
+                    : recordVersion == 4 ? CaptureProvenance.readFrom(data) : null;
             if (capturedAt < 0 || data.read() != -1) {
                 throw new IOException("invalid pending capture payload");
             }
             if (jpeg == null) return null;
+            if (provenance != null && !provenance.matches(jpeg, pageIndex, rotationDegrees)) {
+                throw new IOException("native capture provenance does not match original");
+            }
             return new CaptureReviewStore.Pending(
-                    pageIndex, jpeg, ocrText, rotationDegrees, ocrFailure, framing, capturedAt);
+                    pageIndex, jpeg, ocrText, rotationDegrees, ocrFailure, framing, capturedAt, provenance);
         }
     }
 

@@ -45,6 +45,12 @@ public final class GlassesInputNormalizer {
 
     public synchronized Optional<GlassesInputAction> accept(InputSignal signal) {
         Objects.requireNonNull(signal, "signal");
+        // UP does not participate in recognition. Separate uptime/elapsed
+        // samples can put it 1 ms before DOWN; it must not erase that prefix
+        // or advance the clock against which the next DOWN is checked.
+        if (signal.source() == InputSignal.Source.KEY_EVENT && !"DOWN".equals(signal.phase())) {
+            return Optional.empty();
+        }
         long now = signal.elapsedMillis();
         if (now < lastSeenMillis) {
             clearPending();
@@ -57,9 +63,6 @@ public final class GlassesInputNormalizer {
         }
         if (signal.source() == InputSignal.Source.BROADCAST) {
             return acceptBroadcast(signal.name(), now);
-        }
-        if (!"DOWN".equals(signal.phase())) {
-            return Optional.empty();
         }
         return acceptKey(signal.name(), now);
     }

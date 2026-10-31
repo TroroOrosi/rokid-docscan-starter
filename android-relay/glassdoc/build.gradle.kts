@@ -69,8 +69,18 @@ android {
         // Review end feedback never changes the visible-frame clock or capture policy.
         // 15 handles Camera2 delivery failures and records numeric diagnostics.
         // Capture settings and physical acceptance gates remain unchanged.
-        versionCode = 17
-        versionName = "0.14.2"
+        // Meter before the single JPEG; convergence is not a readability certificate.
+        // 21 sends a best shot OCR could not read to the 3 s review instead of shooting again.
+        // 39 retains up to two future-page originals during visible review.
+        // 40 verifies native capture provenance before acknowledging an upload.
+        // 41 keeps active page observation across idle waits without a resume tap.
+        // 42 adds explicit full-resolution ZSL evaluation, without changing the native default.
+        // 43 adds explicit original-video/MAX-JPEG evaluation and a recorder stop barrier.
+        // 44 adds opt-in comparison transfer with persistent origin and receipt binding.
+        // 46 adds explicit provisional paper/AE comparison and respects Y-plane buffer origins.
+        // 48 fences stale power callbacks and consumes bounded current-capture feedback.
+        versionCode = 50
+        versionName = "0.41.0"
     }
 
     // Same reasoning as `:glassapp`: a vendor installer that reads JAR

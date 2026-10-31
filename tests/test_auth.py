@@ -62,3 +62,4 @@ def test_auth_non_ascii_header_is_401_not_500(tmp_path, monkeypatch):
         headers={"Authorization": "Bearer sécrét".encode("latin-1")},
     )
     assert r.status_code == 401
+

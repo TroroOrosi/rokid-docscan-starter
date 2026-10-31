@@ -34,3 +34,8 @@ httpx>=0.27
 # the phone. `websockets` is pure Python and installs under Termux.
 #   pip install websockets
 # websockets>=12.0
+
+# Phone-only cold-start discovery uses python-zeroconf when the ADB server's
+# mDNS service is unavailable. The pinned phone requirements include it;
+# SKIP_CYTHON=1 avoids optional accelerators when building from source.
+# zeroconf==0.151.6

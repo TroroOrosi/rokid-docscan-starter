@@ -20,6 +20,7 @@ final class CaptureReviewStore {
     }
 
     static final class Pending {
+        static final String SCENE_TIMESTAMP_UNRESOLVED = "SCENE_TIMESTAMP_UNRESOLVED";
         final int pageIndex;
         final byte[] jpeg;
         final String ocrText;
@@ -27,6 +28,7 @@ final class CaptureReviewStore {
         final String ocrFailure;
         final PageFraming framing;
         final long capturedAtMillis;
+        final CaptureProvenance provenance;
 
         Pending(
                 int pageIndex,
@@ -51,6 +53,11 @@ final class CaptureReviewStore {
 
         Pending(int pageIndex, byte[] jpeg, String ocrText, int rotationDegrees,
                 String ocrFailure, PageFraming framing, long capturedAtMillis) {
+            this(pageIndex, jpeg, ocrText, rotationDegrees, ocrFailure, framing, capturedAtMillis, null);
+        }
+
+        Pending(int pageIndex, byte[] jpeg, String ocrText, int rotationDegrees,
+                String ocrFailure, PageFraming framing, long capturedAtMillis, CaptureProvenance provenance) {
             this.pageIndex = pageIndex;
             this.jpeg = jpeg;
             this.ocrText = ocrText == null ? "" : ocrText;
@@ -58,6 +65,7 @@ final class CaptureReviewStore {
             this.ocrFailure = ocrFailure == null ? "" : ocrFailure;
             this.framing = framing == null ? PageFraming.UNKNOWN : framing;
             this.capturedAtMillis = capturedAtMillis;
+            this.provenance = provenance;
         }
 
         int ocrCharacters() {
@@ -67,6 +75,8 @@ final class CaptureReviewStore {
         boolean hasOcrFailure() {
             return !ocrFailure.isEmpty();
         }
+
+        boolean needsSceneRecapture() { return SCENE_TIMESTAMP_UNRESOLVED.equals(ocrFailure); }
 
         /** True when the framing check says the page ran outside the frame. */
         boolean isFramingFailing() {

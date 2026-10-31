@@ -1,28 +1,33 @@
 #!/usr/bin/env python3
-"""Run ONE exam subject through the whole server flow, from a PDF (PC bench).
+"""Run ONE exam subject through the whole server flow (PC bench).
 
-The real input is the glasses camera. This stands in for it so the route can be
-checked without hardware: each PDF page is rendered to a PNG exactly as a
-photographed page would arrive, its text is extracted as the relay's ML Kit OCR
-would provide it, and the document then goes through the ordinary endpoints --
-pages -> finalize -> exam session -> finalize-reading (which is where the
-solver, and therefore ChatGPT, actually runs) -> answer-bundle, the same
-snapshot the glasses read.
+Two routes:
+
+- Without --server: an in-process FastAPI server, for comparing PC-side
+  pieces (solver, PDF text extraction, --daimon, --audio, --scale). Each PDF
+  page is rendered to a PNG with its pdfminer text attached, exactly as
+  before.
+- With --server: drives the PHONE's own server over HTTP, along the exact
+  glassdoc route -- JPEG pages, no OCR text, `finalize-reading?solve=
+  background`, then polling answer-bundle. A PDF is rendered into spreads
+  (two pages per image, at glasses-photo density) because glassdoc never
+  uploads a single page; --images sends glassdoc's own originals unchanged.
+  The key comes from --key or ROKID_API_KEY and is never printed.
 
 One subject per invocation, on purpose. A sweep over every subject in one run
 is what rate-limited the account on 2026-09-14; see
 .agents/progress/subject-separation-harness.md. Use --pages to run a single 大問
-while checking a change, and keep --solver local for anything that does not
-need the real model.
+while checking a change, and keep --solver local (in-process route only) for
+anything that does not need the real model.
 
-    py -3.12 scripts/run_exam_deck.py --pdf C:/rokid-exam-materials/kyotsu/sugaku1A.pdf \
-        --subject 数学 --pages 1-8 --solver local
-    py -3.12 scripts/run_exam_deck.py --pdf .../eigo_listening.pdf --subject 英語 \
-        --audio .../eigo_listening_audio.mp3
+    py -3.12 scripts/run_exam_deck.py --pdf C:/rokid-exam-materials/kyotsu/butsuri_kiso.pdf \
+        --pages 1-4 --server http://<phone>:8000
+    py -3.12 scripts/run_exam_deck.py --images data/device-setup/glassdoc-kokugo-20260927/originals \
+        --server http://<phone>:8000
 
-Needs `pip install pypdfium2 pdfminer.six` (bench only; the server itself never
-reads a PDF). The exam material is copyrighted: keep it, and these reports, out
-of the repository.
+Needs `pip install pypdfium2 pdfminer.six` for --pdf (bench only; the server
+itself never reads a PDF). The exam material is copyrighted: keep it, and
+these reports, out of the repository.
 """
 
 from __future__ import annotations
@@ -32,11 +37,84 @@ import io
 import json
 import logging
 import os
+import re
 import sys
 import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+# A glasses still of a B5 spread covers about this pixel density; PDF spreads
+# are rendered to match it instead of the sharper (and unrealistic) --scale
+# used for the in-process PC-comparison route.
+PX_PER_MM = 5
+
+# glassdoc's camera2 still is landscape 4032x3024 and it sends this rotation
+# (DocScanGlassActivity.MEASURED_ROTATION_DEGREES). A PDF spread is already
+# built upright, so it goes with rotation 0.
+GLASSDOC_ROTATION = 270
+
+# How often wait_for_answers polls answer-bundle. Tests set interval=0.
+POLL_S = 5.0
+
+# answer-bundle's item `issue` for browser_outcome_unknown, chat_lost and
+# rate_limited (app/main.py _answer_bundle_item), the only place the bundle
+# names them. After any of these the server's batch sends nothing more for
+# the session, so waiting on cannot change the outcome.
+SERVER_STOPPED_ISSUES = (
+    "送信結果の確認待ち。自動再送は停止しています",
+    "教科のチャットへ戻れません。新しいチャットは作っていません",
+    "ChatGPTの利用制限です。解除後に再開してください",
+)
+
+# The end of every issue the server gives a pending item it is trying again
+# after sending nothing (app/main.py _RETRYING_ISSUES).
+RETRYING_MARK = "自動で再試行します"
+
+# Printed after a FAIL or STOP once the session exists: the chat key is the
+# session, so running again opens another chat and uploads the pages again.
+RERUN_NOTE = "      a re-run creates a new session, and so a new chat for this subject"
+
+# Per-call ceiling for a plain JSON round trip, well below the stall bound
+# wait_for_answers uses across many such calls.
+REQUEST_TIMEOUT_S = 30.0
+# The one call that legitimately takes longer: a multi-megabyte spread sent
+# over the phone's own Wi-Fi.
+PAGE_UPLOAD_TIMEOUT_S = 600.0
+
+
+# How long the wait survives a server that does not answer, or a per-question
+# batch whose revision stops moving. A 409 "being made" is never timed: one
+# message is answering the whole booklet, and a poor photo takes it longer.
+STALL_S = 300.0
+
+
+def call(step: str, func, *args, **kwargs):
+    """One server-route HTTP call: a dropped connection prints FAIL and stops
+    the run instead of a bare traceback. Never prints the key -- only the
+    exception's class name, never its text or the request.
+    """
+    import httpx
+
+    try:
+        return func(*args, **kwargs)
+    except httpx.TransportError as error:
+        print(f"FAIL  {step}: no response ({type(error).__name__})")
+        return None
+
+
+def _upload_timeout(client) -> dict:
+    """PAGE_UPLOAD_TIMEOUT_S, but only for the real remote httpx.Client.
+
+    fastapi.testclient.TestClient subclasses httpx.Client (same MRO), so
+    isinstance() would wrongly match it too -- and it warns
+    (StarletteDeprecationWarning) on ANY timeout kwarg, even a short one.
+    Checking the exact class instead matches only the one client that
+    legitimately needs a longer-than-default timeout for this one call.
+    """
+    import httpx
+
+    return {"timeout": PAGE_UPLOAD_TIMEOUT_S} if type(client) is httpx.Client else {}
 
 
 def render_pages(pdf: Path, pages: range, scale: float) -> list[tuple[bytes, str]]:
@@ -44,8 +122,10 @@ def render_pages(pdf: Path, pages: range, scale: float) -> list[tuple[bytes, str
 
     The image is what the model looks at and the text is what the server
     segments into questions, which is the same split the relay produces: a
-    photo plus the phone's OCR of it.
+    photo plus the phone's OCR of it. In-process route only.
     """
+    if not pdf.exists():  # tested before the pypdfium2 import: bench-only dep
+        raise FileNotFoundError(str(pdf))
     import pypdfium2 as pdfium
     from pdfminer.high_level import extract_text
     from pdfminer.layout import LAParams
@@ -67,6 +147,122 @@ def render_pages(pdf: Path, pages: range, scale: float) -> list[tuple[bytes, str
     return out
 
 
+def pair_spreads(images: list) -> list:
+    """Pair consecutive pages into one spread image, earlier page on the LEFT.
+
+    White RGB canvas, width = sum of both widths, height = the taller one; an
+    odd last page stands alone. Why left: 共通テスト 理科 booklets are 横書き
+    and left-bound (the thumb tab prints on the later/right page).
+
+    ponytail: a 縦書き booklet (国語) opens the other way and would need the
+    pair mirrored; not built until a 国語 paper actually needs this route.
+    """
+    from PIL import Image
+
+    out = []
+    for i in range(0, len(images), 2):
+        pair = images[i:i + 2]
+        if len(pair) == 1:
+            out.append(pair[0])
+            continue
+        left, right = pair
+        canvas = Image.new(
+            "RGB", (left.width + right.width, max(left.height, right.height)), "white")
+        canvas.paste(left, (0, 0))
+        canvas.paste(right, (left.width, 0))
+        out.append(canvas)
+    return out
+
+
+def render_spreads(pdf: Path, span: range) -> list[tuple[bytes, str]]:
+    """(JPEG bytes, "") per spread -- two consecutive pages side by side.
+
+    Rendered at PX_PER_MM (5 px/mm; a B5 page, 515.9 x 728.5 pt, becomes about
+    910 x 1285 px, the density a glasses still of a B5 spread covers) and
+    paired by pair_spreads. No OCR text travels on this route: the server's
+    own ROKID_SOLVER reads the images directly, as the glasses do.
+    """
+    if not pdf.exists():  # tested before the pypdfium2 import: bench-only dep
+        raise FileNotFoundError(str(pdf))
+    import pypdfium2 as pdfium
+
+    doc = pdfium.PdfDocument(str(pdf))
+    scale = PX_PER_MM * 25.4 / 72
+    pages = []
+    for index in span:
+        if index >= len(doc):  # clipped to the document length
+            break
+        pages.append(doc[index].render(scale=scale).to_pil().convert("RGB"))
+    out = []
+    for spread in pair_spreads(pages):
+        buffer = io.BytesIO()
+        spread.save(buffer, format="JPEG", quality=90)
+        out.append((buffer.getvalue(), ""))
+    return out
+
+
+_IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png"}
+
+
+def load_images(directory: Path | str, span: range) -> list[tuple[bytes, str]]:
+    """(image bytes, no text) per photo, in file-name order, for pages in span.
+
+    This is what glassdoc uploads on the chatgpt-web route: the original
+    still and no OCR. Its originals are named by capture time, so name order
+    is page order. Only the files inside span are opened and validated, so a
+    bad file the run never touches cannot fail it. camera2's still is
+    landscape; a portrait file is not a glassdoc original, and sending it
+    with image_rotation=270 (glassdoc's own value) would put the page
+    sideways, so it is rejected instead of guessed.
+    """
+    from PIL import Image, UnidentifiedImageError
+
+    files = sorted(p for p in Path(directory).iterdir() if p.suffix.lower() in _IMAGE_SUFFIXES)
+    out: list[tuple[bytes, str]] = []
+    for path in files[span.start:span.stop]:
+        data = path.read_bytes()
+        try:
+            with Image.open(io.BytesIO(data)) as image:
+                portrait = image.height > image.width
+        except (OSError, UnidentifiedImageError) as error:
+            raise ValueError(f"{path} is not a readable image ({error})") from error
+        if portrait:
+            raise ValueError(
+                f"{path} is portrait; glassdoc originals are landscape (4032x3024)")
+        out.append((data, ""))
+    return out
+
+
+def _load_photos(src: Path, span: range) -> list[tuple[bytes, str]] | None:
+    """load_images, with the FAIL print run() gives every other bad-input path.
+
+    None (already printed) on a bad file inside the span; run() must check
+    for it and stop, same as any other FAIL.
+    """
+    try:
+        return load_images(src, span)
+    except ValueError as error:
+        print(f"FAIL  {error}")
+        return None
+
+
+def _finish_pages(pages: list[tuple[bytes, str]] | None, src: Path):
+    """The "pages read -> ok/FAIL" tail shared by both routes.
+
+    None in means a bad file already printed its own FAIL (from
+    _load_photos); an empty read is its own FAIL here. Either way the
+    caller's contract is the same: None back means stop and return 1.
+    """
+    if pages is None:
+        return None
+    if not pages:
+        print(f"FAIL  no pages read from {src}")
+        return None
+    print(f"ok    pages          {len(pages)} read, "
+          f"{sum(len(t) for _, t in pages)} chars of text")
+    return pages
+
+
 def mark_daimon(
     pages: list[tuple[bytes, str]], spec: str, offset: int
 ) -> list[tuple[bytes, str]]:
@@ -77,7 +273,7 @@ def mark_daimon(
     国語/地歴 booklets carry no extractable marker at all, so the boundary
     cannot come from the text. On the real path the phone OCRs the printed
     page and reads the heading normally; this option does not paper over that,
-    it stands in for a reading this PDF cannot give.
+    it stands in for a reading this PDF cannot give. In-process route only.
     """
     starts = [int(p) - 1 for p in spec.replace(" ", "").split(",") if p]
     marked = []
@@ -101,21 +297,33 @@ def parse_pages(spec: str | None) -> range:
 _UNSAFE = set('<>:"/|?*' + chr(92))
 
 
+def source_name(source: Path | str) -> str:
+    """A PDF's stem, or `<run>-<dir>` for a photo directory.
+
+    glassdoc keeps a run's photos in <run>/originals: name the run, or every
+    run would share one `originals` database and report.
+    """
+    source = Path(source)
+    return f"{source.parent.name}-{source.name}" if source.is_dir() else source.stem
+
+
 def deck_data_dir(root: Path | str, pdf: Path | str) -> Path:
-    """This paper's OWN database directory, under the run root.
+    """This paper's OWN database directory, under the run root. In-process
+    route only -- the server route never opens a database on this machine.
 
     Every paper used to be written into one --data-dir, so a query run after a
     later paper read the earlier paper's rows. That happened while diagnosing
     on 2026-09-14. One paper is one directory; the same PDF resolves to the
     same directory, so a re-run of that paper still resumes in place.
     """
-    stem = Path(pdf).stem.strip()
+    stem = source_name(pdf).strip()
     safe = "".join("_" if c in _UNSAFE or ord(c) < 32 else c for c in stem)
     return Path(root) / (safe or "unnamed")
 
 
 def build_client(data_dir: Path, solver: str):
-    """A server bound to its own data directory, so runs cannot collide."""
+    """A server bound to its own data directory, so runs cannot collide.
+    In-process route only."""
     import importlib
 
     os.environ["ROKID_DATA_DIR"] = str(data_dir)
@@ -136,44 +344,324 @@ def build_client(data_dir: Path, solver: str):
     return TestClient(main.app)
 
 
+def remote_client(server: str, key: str | None):
+    """The phone's server, reached over HTTP the way the glasses reach it.
+
+    REQUEST_TIMEOUT_S is this client's own default, so an ordinary call needs
+    no timeout kwarg at all; only the page-upload call overrides it, via
+    _upload_timeout(), with PAGE_UPLOAD_TIMEOUT_S.
+    """
+    import httpx
+
+    headers = {"Authorization": f"Bearer {key}"} if key else {}
+    return httpx.Client(
+        base_url=server.rstrip("/"), headers=headers, timeout=REQUEST_TIMEOUT_S)
+
+
+def wait_for_answers(
+    client, session_id: int, stall_s: float, *,
+    interval: float = POLL_S, clock=time.monotonic, sleep=time.sleep,
+):
+    """Poll answer-bundle as glassdoc does, until stopped or nothing pending.
+
+    Returns (last_good_response_or_None, reason_or_None). There is no overall
+    ceiling: an analysing 409 or a changing revision can run indefinitely. The
+    wait ends only when the server has visibly stopped -- an item names one of
+    SERVER_STOPPED_ISSUES, the revision hasn't moved for `stall_s`, or nothing
+    has answered at all for `stall_s`.
+    """
+    import httpx
+
+    since = clock()
+    last_good = None
+    last_revision = None
+    analysing = False
+    while True:
+        try:
+            r = client.get(f"/v1/exam-sessions/{session_id}/answer-bundle")
+        except httpx.TransportError as error:
+            print(f"..    no response: {type(error).__name__}")
+            if clock() - since > stall_s:
+                return last_good, f"no response from the server for {stall_s:.0f}s"
+            sleep(interval)
+            continue
+
+        if r.status_code == 409 and "being made" in r.text:
+            # One message is being answered for the whole booklet. The server
+            # ends it itself (the background batch always leaves
+            # _background_solves, success or failure), so this adds no limit.
+            if not analysing:
+                print("..    analysing      one message answers every 小問")
+                analysing = True
+            since = clock()
+            sleep(interval)
+            continue
+        if r.status_code != 200:
+            return r, None
+
+        last_good = r
+        body = r.json()
+        items = body["items"]
+        stopped = next(
+            (item["issue"] for item in items if item.get("issue") in SERVER_STOPPED_ISSUES), None)
+        if stopped:
+            return r, f"the server stopped the batch: {stopped}"
+        pending = sum(1 for item in items if item["status"] == "pending")
+        if not pending:
+            return r, None
+        revision = body.get("revision")
+        if any(item["status"] == "pending" and RETRYING_MARK in item.get("issue", "") for item in items):
+            # Nothing was sent, and the server is trying again by itself
+            # (Chrome unreachable, browser busy): it is still working.
+            since = clock()
+        if revision != last_revision:
+            last_revision = revision
+            since = clock()
+            ready = sum(1 for item in items if item["status"] == "ready")
+            print(f"..    answers        {ready}/{len(items)} ready, "
+                  f"{pending} pending (revision {revision})")
+            for issue in sorted({i.get("issue") for i in items if i["status"] == "pending"} - {None, "", "未解答"}):
+                print(f"..    pending        {issue}")
+        if clock() - since > stall_s:
+            return r, (f"revision {revision} unchanged for {stall_s:.0f}s with "
+                       f"{pending} pending: the server's batch has stopped")
+        sleep(interval)
+
+
+_SERVER_INCOMPATIBLE = (
+    ("daimon", "--daimon"),
+    ("solver", "--solver"),
+    ("scale", "--scale"),
+    ("data_dir", "--data-dir"),
+    ("audio", "--audio"),
+)
+
+
+# ①..⑳ and fullwidth digits are the same answer as the plain digit: the
+# official key prints 4, a model writes ④, and neither is more correct.
+_SAME_ANSWER = {**{chr(0x2460 + i): str(i + 1) for i in range(20)},
+                **{chr(0xFF10 + d): str(d) for d in range(10)}}
+
+
+def normalize_answer(text: str) -> str:
+    """One written answer, in the form the official key is compared against."""
+    return "".join(str(text).translate(str.maketrans(_SAME_ANSWER)).split())
+
+
+def load_answer_key(path: str) -> dict[int, str]:
+    """{解答番号: official answer} from a JSON file, e.g. {"101": "4", "102": "2"}."""
+    raw = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(raw, dict) or not raw:
+        raise ValueError("the answer key must be a non-empty JSON object")
+    return {int(number): str(answer) for number, answer in raw.items()}
+
+
+# One 問 often fills several 解答番号 at once: run 4c (2026-09-30) answered
+# 110 and 111 as one item reading "⑤,⑥". Split on what a written list uses.
+_ANSWER_PARTS = re.compile(r"[、,，・/／\s]+")
+
+
+def answers_by_number(item: dict) -> dict[int, str]:
+    """The item's answer against each 解答番号 it fills.
+
+    When the answer names one part per number, they pair in order; otherwise
+    the whole answer stands against every number, which is what a single-number
+    item wants and what makes a mismatched count visible instead of silent.
+    """
+    numbers = [n for n in item.get("answer_no", []) if isinstance(n, int)]
+    parts = [part for part in _ANSWER_PARTS.split(str(item["answer"]).strip()) if part]
+    if len(numbers) > 1 and len(parts) == len(numbers):
+        return dict(zip(numbers, parts))
+    return {number: item["answer"] for number in numbers}
+
+
+def grade(items: list[dict], key: dict[int, str]) -> list[tuple[int, str, str]]:
+    """(解答番号, official, given) for every number that did not match.
+
+    The bundle carries the numbers printed in the booklet, so this compares the
+    answer sheet the operator would write, not the model's own question order.
+    A number the reply never answered is reported as missing, not skipped.
+    """
+    given: dict[int, str] = {}
+    for item in items:
+        if item["status"] in ("ready", "needs_review"):
+            given.update(answers_by_number(item))
+    return [(number, official, given.get(number, ""))
+            for number, official in sorted(key.items())
+            if normalize_answer(given.get(number, "")) != normalize_answer(official)]
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--pdf")
+    source.add_argument(
+        "--images",
+        help="directory of glassdoc originals, sent in name order (requires --server)",
+    )
+    parser.add_argument("--server", default=None, help="e.g. http://<phone>:8000")
+    parser.add_argument(
+        "--key", default=None,
+        help="the server's API key (server route only; default ROKID_API_KEY, "
+             "which keeps it out of shell history)",
+    )
+    parser.add_argument(
+        "--answer-key", default=None,
+        help="JSON file of the official answers keyed by 解答番号, e.g. "
+             '{"101": "4", "102": "2"}. The run passes only when every one of '
+             "them matches (--key is the server's API key, not this)",
+    )
+    parser.add_argument("--subject", default="")
+    parser.add_argument(
+        "--audio", default=None,
+        help="listening recording to send too (in-process route only)",
+    )
+    parser.add_argument(
+        "--pages", default=None,
+        help="1-based inclusive, e.g. 1-8; with --server spreads pair from the first "
+             "page of the span, so the span must start on a left-hand page",
+    )
+    parser.add_argument(
+        "--daimon", default=None,
+        help="1-based pages where a 大問 starts, e.g. 1,7,13 (in-process route only; "
+             "for PDFs whose printed numbers are unmapped glyphs)",
+    )
+    parser.add_argument(
+        "--solver", default=None, help="in-process route only (default chatgpt-web)")
+    parser.add_argument(
+        "--scale", type=float, default=None,
+        help="render scale, in-process route only (default 2.0)")
+    parser.add_argument("--out", default=None)
+    parser.add_argument(
+        "--data-dir", default=None,
+        help="run ROOT, in-process route only (default C:/rokid-exam-materials/rundata). "
+             "Each paper gets its own subdirectory named after the PDF, so one paper's "
+             "rows are never read back for another",
+    )
+    parser.add_argument("--force", action="store_true")
+    return parser
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.images and not args.server:
+        parser.error("--images requires --server: photos only go the glassdoc route")
+    if args.key is not None and not args.server:
+        parser.error("--key requires --server: the in-process route has no server API key")
+    if args.server:
+        for dest, flag in _SERVER_INCOMPATIBLE:
+            if getattr(args, dest) is not None:
+                parser.error(
+                    f"{flag} is not compatible with --server: that route sends only "
+                    "photos and the phone's own solver answers"
+                )
+    return args
+
+
+def _failed_after_session() -> int:
+    """run()'s exit code for a FAIL printed once the session exists."""
+    print(RERUN_NOTE)
+    return 1
+
+
 def run(args) -> int:
-    pdf = Path(args.pdf)
-    report_path = Path(args.out or (pdf.parent.parent / "reports" / f"{pdf.stem}.json"))
+    src = Path(args.pdf or args.images)
+    name = source_name(src)
+    if args.out:
+        report_path = Path(args.out)
+    else:
+        suffix = f"-p{args.pages}" if args.pages else ""
+        filename = f"{name}{suffix}-server.json" if args.server else f"{name}.json"
+        report_path = src.parent.parent / "reports" / filename
     if report_path.exists() and not args.force:
         print(f"skip  {report_path} already exists (--force to redo)")
         return 0
-    report_path.parent.mkdir(parents=True, exist_ok=True)
+    span = parse_pages(args.pages)
+    # Before the upload: a malformed key file must not cost a generation.
+    official_key = load_answer_key(args.answer_key) if args.answer_key else {}
 
-    pages = render_pages(pdf, parse_pages(args.pages), args.scale)
-    if args.daimon:
-        pages = mark_daimon(pages, args.daimon, parse_pages(args.pages).start)
-    if not pages:
-        print(f"FAIL  no pages rendered from {pdf}")
+    if args.server:
+        key = args.key or os.environ.get("ROKID_API_KEY")
+        client = remote_client(args.server, key)
+        r = call("settings", client.get, "/v1/settings")
+        if r is None:
+            return 1
+        if r.status_code != 200:
+            print(f"FAIL  settings: {r.status_code} {r.text[:200]}")
+            return 1
+        settings = r.json()
+        solver_info = settings["providers"]["solver"]
+        solver_name = solver_info["name"]
+        if not solver_info["ready"]:
+            # Stop before the upload: the server would take every page and
+            # only then refuse finalize with a 500. On the phone the usual
+            # cause is Chrome leaving the foreground (hardware-measurements
+            # §F-6-1).
+            print(f"FAIL  settings: solver {solver_name} not ready: "
+                  f"{solver_info.get('message') or 'the server gave no reason'}")
+            print("      keep Chrome in the foreground on the phone "
+                  "(Termux in front removes its DevTools socket)")
+            return 1
+        print(f"ok    settings       {args.server} app "
+              f"{settings['versions']['app_version']} solver {solver_name}")
+
+        pages = render_spreads(src, span) if args.pdf else _load_photos(src, span)
+        rotation = 0 if args.pdf else GLASSDOC_ROTATION
+        pages = _finish_pages(pages, src)
+        if pages is None:
+            return 1
+    else:
+        # Render pages BEFORE touching the data directory: a bad --pdf path
+        # must leave no rundata/<stem> behind. --images never gets here
+        # (parse_args requires --server for it).
+        pages = render_pages(src, span, args.scale if args.scale is not None else 2.0)
+        rotation = 0
+        if args.daimon:
+            pages = mark_daimon(pages, args.daimon, span.start)
+        pages = _finish_pages(pages, src)
+        if pages is None:
+            return 1
+
+        data_dir = deck_data_dir(args.data_dir or "C:/rokid-exam-materials/rundata", src)
+        print(f"ok    data dir       {data_dir}")
+        solver_name = args.solver or "chatgpt-web"
+        client = build_client(data_dir, solver_name)
+
+    r = call("documents", client.post, "/v1/documents", json={"title": name})
+    if r is None:
         return 1
-    print(f"ok    pages          {len(pages)} rendered, "
-          f"{sum(len(t) for _, t in pages)} chars of text")
-
-    data_dir = deck_data_dir(args.data_dir, pdf)
-    print(f"ok    data dir       {data_dir}")
-    client = build_client(data_dir, args.solver)
-    doc_id = client.post("/v1/documents", json={"title": pdf.stem}).json()["document_id"]
-    for index, (png, text) in enumerate(pages):
-        r = client.post(
-            f"/v1/documents/{doc_id}/pages",
-            data={"page_index": index, "ocr_text": text},
-            files={"image": (f"p{index:02d}.png", png, "image/png")},
+    if r.status_code != 201:
+        print(f"FAIL  documents: {r.status_code} {r.text[:200]}")
+        return 1
+    doc_id = r.json()["document_id"]
+    for index, (image, text) in enumerate(pages):
+        jpeg = image[:2] == b"\xff\xd8"
+        fields = {"page_index": index, "image_rotation": rotation}
+        if text:
+            fields["ocr_text"] = text
+        r = call(
+            f"page {index}", client.post, f"/v1/documents/{doc_id}/pages",
+            data=fields,
+            files={"image": (f"p{index:02d}.{'jpg' if jpeg else 'png'}", image,
+                             "image/jpeg" if jpeg else "image/png")},
+            **_upload_timeout(client),
         )
+        if r is None:
+            return 1
         if r.status_code != 201:
             print(f"FAIL  page {index}: {r.status_code} {r.text[:200]}")
             return 1
-    r = client.post(f"/v1/documents/{doc_id}/finalize")
+    r = call("finalize", client.post, f"/v1/documents/{doc_id}/finalize")
+    if r is None:
+        return 1
     if r.status_code != 200:
         print(f"FAIL  finalize: {r.status_code} {r.text[:200]}")
         return 1
 
     listening = bool(args.audio)
-    r = client.post(
-        "/v1/exam-sessions",
+    r = call(
+        "exam-sessions", client.post, "/v1/exam-sessions",
         json={
             "mode": "study",
             "document_id": doc_id,
@@ -181,7 +669,13 @@ def run(args) -> int:
             "answer_format": "mark",
         },
     )
+    if r is None:
+        return 1
+    if r.status_code not in (200, 201):
+        print(f"FAIL  exam-sessions: {r.status_code} {r.text[:200]}")
+        return 1
     session_id = r.json()["session_id"]
+    print(f"ok    session        {session_id}")
     if listening:
         # The recording travels with the pages: a transcript flattens speaker
         # turns and the numbers the questions turn on.
@@ -191,71 +685,98 @@ def run(args) -> int:
         )
         if r.status_code != 200:
             print(f"FAIL  audio: {r.status_code} {r.text[:200]}")
-            return 1
+            return _failed_after_session()
         print(f"ok    audio          {Path(args.audio).name} attached to the session")
 
-    print(f"..    solving        {args.solver} (this is where the generations are spent)")
+    print(f"..    solving        {solver_name} (this is where the generations are spent)")
     started = time.monotonic()
-    r = client.post(f"/v1/exam-sessions/{session_id}/finalize-reading")
-    elapsed = time.monotonic() - started
-    if r.status_code != 200:
-        print(f"FAIL  finalize-reading: {r.status_code} {r.text[:300]}")
-        return 1
+    reason = None
+    if args.server:
+        r = call(
+            "finalize-reading", client.post, f"/v1/exam-sessions/{session_id}/finalize-reading",
+            params={"solve": "background"},
+        )
+        if r is None:
+            return _failed_after_session()
+        if r.status_code != 200:
+            print(f"FAIL  finalize-reading: {r.status_code} {r.text[:300]}")
+            return _failed_after_session()
+        finalize_body = r.json()
+        if finalize_body.get("solving") != "background":
+            print(f"FAIL  the server did not start a background solve "
+                  f"(status {finalize_body.get('status')}); is ROKID_SOLVER on the "
+                  "server unset or local?")
+            return _failed_after_session()
+        bundle, reason = wait_for_answers(client, session_id, STALL_S, interval=POLL_S)
+    else:
+        r = call(
+            "finalize-reading", client.post,
+            f"/v1/exam-sessions/{session_id}/finalize-reading",
+        )
+        if r is None:
+            return _failed_after_session()
+        if r.status_code != 200:
+            print(f"FAIL  finalize-reading: {r.status_code} {r.text[:300]}")
+            return _failed_after_session()
+        bundle = client.get(f"/v1/exam-sessions/{session_id}/answer-bundle")
 
-    bundle = client.get(f"/v1/exam-sessions/{session_id}/answer-bundle")
-    if bundle.status_code != 200:
-        print(f"FAIL  answer-bundle: {bundle.status_code} {bundle.text[:200]}")
-        return 1
+    elapsed = time.monotonic() - started
+    if reason:
+        print(f"STOP  {reason}")
+    if bundle is None or bundle.status_code != 200:
+        status = bundle.status_code if bundle is not None else "no response"
+        snippet = bundle.text[:200] if bundle is not None else ""
+        print(f"FAIL  answer-bundle: {status} {snippet}")
+        return _failed_after_session()
+    if reason:
+        print(RERUN_NOTE)
     body = bundle.json()
     items = body["items"]
     ready = [i for i in items if i["status"] == "ready"]
     per_question = elapsed / len(items) if items else 0.0
     print(f"ok    answers        {len(ready)}/{len(items)} ready in {elapsed:.1f}s "
           f"({per_question:.1f}s per question)")
-    if per_question > 40 and args.solver != "local":
-        print("WARN  per-question time is in the range that preceded the 2026-09-14 "
-              "rate limit (7-13s clean). Stop rather than starting the next subject.")
-    for item in items[:5]:
-        print(f"      {item['question_label']:<10} {item['answer'] or item['issue']}")
+    for item in items:
+        numbers = "/".join(str(n) for n in item.get("answer_no", []))
+        print(f"      {item['question_label']:<10} {numbers:<8} "
+              f"{item['answer'] or item['issue']}")
+    wrong = grade(items, official_key)
+    if official_key:
+        for number, official, got in wrong:
+            print(f"FAIL  key {number}        expected {official}, got {got or '(no answer)'}")
+        print(f"{'ok   ' if not wrong else 'FAIL '} key            "
+              f"{len(official_key) - len(wrong)}/{len(official_key)} "
+              "match the official answers")
 
     report = {
-        "pdf": str(pdf),
+        "source": str(src),
         "subject": args.subject,
-        "solver": args.solver,
+        "solver": None if args.server else solver_name,
+        "server": args.server,
+        "server_solver": solver_name if args.server else None,
         "pages": len(pages),
         "audio": args.audio,
         "elapsed_s": round(elapsed, 1),
         "seconds_per_question": round(per_question, 1),
+        "stopped": reason,
+        "answer_key": args.answer_key,
+        "wrong": [{"answer_no": n, "official": official, "given": got}
+                  for n, official, got in wrong],
         "bundle": body,
     }
+    report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"ok    report         {report_path}")
-    return 0 if ready else 2
+    if reason or wrong:
+        return 2
+    # Without a key nothing here knows a right answer from a wrong one, so the
+    # most this can say is that every question came back ready. One ready item
+    # used to be enough, which passed a booklet the model had mostly dropped.
+    return 0 if items and len(ready) == len(items) else 2
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--pdf", required=True)
-    parser.add_argument("--subject", default="")
-    parser.add_argument("--audio", default=None, help="listening recording to send too")
-    parser.add_argument("--pages", default=None, help="1-based inclusive, e.g. 1-8")
-    parser.add_argument(
-        "--daimon",
-        default=None,
-        help="1-based pages where a 大問 starts, e.g. 1,7,13 (for PDFs whose "
-             "printed numbers are unmapped glyphs; the real path reads them via OCR)",
-    )
-    parser.add_argument("--solver", default="chatgpt-web")
-    parser.add_argument("--scale", type=float, default=2.0, help="render scale")
-    parser.add_argument("--out", default=None)
-    parser.add_argument(
-        "--data-dir",
-        default="C:/rokid-exam-materials/rundata",
-        help="run ROOT. Each paper gets its own subdirectory named after the "
-             "PDF, so one paper's rows are never read back for another",
-    )
-    parser.add_argument("--force", action="store_true")
-    return run(parser.parse_args())
+def main(argv: list[str] | None = None) -> int:
+    return run(parse_args(argv))
 
 
 if __name__ == "__main__":

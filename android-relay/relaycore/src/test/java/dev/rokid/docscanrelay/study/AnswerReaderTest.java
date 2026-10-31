@@ -83,6 +83,29 @@ public class AnswerReaderTest {
         assertEquals("g1-q1", reader.current().questionId);
     }
 
+    @Test public void aLaterListeningRevisionCannotChangePrintedAnswerNumbers() {
+        AnswerItem reading = new AnswerItem("g1", "読解", "q1", "問1", "A", AnswerItem.Status.READY, "", List.of(), List.of(101));
+        AnswerReader reader = new AnswerReader(new AnswerBundle("session", "a".repeat(64), 1, List.of(reading)), 40, 3, String::length);
+        AnswerItem changed = new AnswerItem("g1", "読解", "q1", "問1", "A", AnswerItem.Status.READY, "", List.of(), List.of(102));
+        assertFalse(reader.accept(new AnswerBundle("session", "a".repeat(64), 2, List.of(changed))));
+        assertEquals(List.of(101), reader.current().answerNumbers);
+    }
+
+    @Test public void aRetryThatReplacesTheFailedRowWithTheModelsQuestionsIsShown() {
+        AnswerBundle failed = new AnswerBundle("session", "a".repeat(64), 2, List.of(
+                new AnswerItem("g1", "全体", "q5", "全問", "", AnswerItem.Status.PENDING,
+                        "ChatGPTへ送れませんでした。自動で再試行します")));
+        AnswerReader reader = new AnswerReader(failed, 4, 2, String::length);
+        AnswerBundle answered = new AnswerBundle("session", "a".repeat(64), 5, List.of(
+                AnswerItem.ready("g1", "第1問", "q6", "問1", "4"),
+                AnswerItem.ready("g1", "第1問", "q7", "問2", "2")));
+        assertTrue(reader.accept(answered));
+        assertEquals("q6", reader.current().questionId);
+        assertEquals("4", reader.current().answer);
+        assertFalse("an older snapshot never replaces it back",
+                reader.accept(new AnswerBundle("session", "a".repeat(64), 4, failed.items)));
+    }
+
     @Test public void anAnswerNeedingReviewWarnsFirstAndStillShowsTheAnswer() {
         AnswerBundle bundle = new AnswerBundle("session", "a".repeat(64), 1, List.of(
                 new AnswerItem("g1", "大問1", "g1-q1", "(1)", "12",

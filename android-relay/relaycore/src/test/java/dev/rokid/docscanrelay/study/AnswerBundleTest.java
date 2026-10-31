@@ -14,6 +14,19 @@ import org.robolectric.annotation.Config;
 public class AnswerBundleTest {
     private final String digest = "a".repeat(64);
 
+    @Test public void mixedReadingStageSurvivesOfflinePersistenceUntilAudioAnswersArrive() throws Exception {
+        JSONObject json = new JSONObject(new AnswerBundle("7", digest, 1, List.of(
+                AnswerItem.ready("g1", "読解", "q1", "問1", "A"),
+                new AnswerItem("g2", "音声", "q2", "問2", "", AnswerItem.Status.PENDING, "原音待ち"))).toJson())
+                .put("analysis_stage", "awaiting_audio").put("available_stage", "reading");
+        AnswerBundle restored = AnswerBundle.fromJson(json.toString());
+        JSONObject saved = new JSONObject(restored.toJson());
+        assertEquals("awaiting_audio", saved.getString("analysis_stage"));
+        assertEquals("reading", saved.getString("available_stage"));
+        assertFalse(restored.finished());
+        assertEquals("q2", restored.items.get(1).questionId);
+    }
+
     @Test public void completeWrittenAnswersRoundTripWithRepeatedSmallQuestionLabels() throws Exception {
         String proof = "対応する角は等しい。\n".repeat(100);
         AnswerBundle bundle = new AnswerBundle("session-1", digest, 1, List.of(

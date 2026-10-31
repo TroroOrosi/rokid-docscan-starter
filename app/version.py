@@ -173,7 +173,87 @@ from __future__ import annotations
 # Predevice hardening: exact input identity and durable browser send guard.
 # Snapshot reads and recording-retry integrity; no HTTP envelope change.
 # Capture evidence diagnostics and honest text-bounds/review labels; HTTP unchanged.
-APP_VERSION = "0.35.3"
+# Bounded Camera2 metering before glassdoc JPEG capture; physical quality unverified.
+# Original-image/audio browser input; no local transcription gate or repeated bundle encoding.
+# finalize-reading can return after segmentation and solve in the background.
+# A background batch asks the model for the 小問 before solving (RP-12).
+# Concurrent sessions keep their own chats; the phone start script and deck bench
+# stop early with the reason. See API 1.26.0 and GLASSES_VIEW_CONTRACT 1.19.0.
+# A background session sends one message for the whole booklet; see API 1.27.0.
+# Audit fixes: completion by content, JPEG attachments one per DevTools message,
+# pre-send retries and read-back after an uncertain send, restart resume, no
+# PDF path. See API 1.28.0 and GLASSES_VIEW_CONTRACT 1.20.0.
+# A booklet already in its chat is read back, never sent again; resume is
+# limited to recent sessions and to RESUME_LIMIT failed batches. See API 1.29.0.
+# A spread photo reaches ChatGPT as its right page, then its left, one page per
+# image; a kanji-numbered 大問 stays a group. See API 1.29.1.
+# 0.44.0: the one reply carries each question's printed 解答番号, a number it
+# skipped becomes a failed row instead of vanishing, and automatic capture
+# rests the camera after 30s without a registered page. See API 1.30.0 and
+# GLASSES_VIEW_CONTRACT 1.21.0.
+# 0.45.0: manual capture mode (one tap, one photo) for pages the recogniser
+# cannot judge, and the bench grades a 問 that fills several 解答番号 per
+# number. See GLASSES_VIEW_CONTRACT 1.22.0; API unchanged.
+# 0.46.0: venue networking. The server host "gateway" resolves to the Wi-Fi
+# gateway (the phone hotspot), the server remembers the glasses' address
+# for the fold watcher, and a large sheet may arrive in sections.
+# 0.46.1: the glasses capture as measured before 9/23, and the fold watcher
+# finds the glasses among the phone hotspot clients. See GLASSES_VIEW 1.23.0.
+# 0.46.2: capture text and the aim mark clear after 1.5s; "answers" opens a
+# server session's answers on the glasses without a capture.
+# 0.47.0: the glasses meter with the preview running under the still (3s cap),
+# wait for the head to be still, show no text while aiming, and show the
+# review photo cropped to the paper. See GLASSES_VIEW_CONTRACT 1.25.0.
+# 0.47.1: untouched still (vc29): the measured session returned no JPEG after
+# metering. That observation is not a HAL guarantee. The 0.47.0 view changes stay.
+# 0.48.0: phone-owned Chromium and services; ordered image batches in one chat,
+#        image-based page changes, continuous answers and explicit display requests.
+# 0.49.0: unobstructed still review, aligned preview geometry, compact fixed
+#        answer pages and display control preserving the system timeout.
+# 0.49.1: measured ChatGPT composer and checked Latest/Extra High selection.
+# 0.50.0: mixed English solves paper before original audio; idle displays rest
+#         after five seconds while capture, photo review and answers stay visible.
+# 0.50.1: read the checked model from the visible menu after its trigger redraws.
+# 0.50.2: keep the browser's saved model selection across display-name changes.
+# 0.50.3: select the original Latest menu position even after its label changes.
+# 0.51.0: source-bound phone image inspection, compact capture HUD and opt-in
+#         durable Work jobs. Cloud connection and physical acceptance remain separate.
+# 0.51.1: retain native chroma in outgoing JPEGs and native capture provenance
+#         through local review and durable page storage.
+# 0.51.2: keep non-answer status and chooser text in a compact display region.
+# 0.51.3: return non-answering Work needs_input results when image quality fails.
+# 0.52.0: phone-local Work browser delivery of original PNG ZIPs with durable
+#         batches, source-bound uncalibrated readability and staged original audio.
+# 0.53.0: visible phone services and retained capture preview; expired Work
+#         receipts can release their own barrier without replaying a send.
+# 0.53.1: compare native phone paths as POSIX strings during Windows update preparation.
+# 0.53.2: preflight atomic no-clobber phone publication and preserve failure diagnostics.
+# 0.54.0: retain two native future-page candidates through visible review and
+#         persist unresolved observation before starting the native producer.
+# 0.55.0: bind native JPEG provenance to page receipts and unchanged Work sources.
+# 0.56.0: keep active page observation, adapt semantic Work controls and pin service Bash.
+# 0.57.0: evaluate timestamp-paired full-resolution ZSL with durable source-kind provenance.
+# 0.57.1: preserve strict Work MCP inputs on the phone's legacy Pydantic stack.
+# 0.58.0: compare exact original-video frames without changing ordinary capture.
+# 0.58.1: reject malformed Work URLs consistently across supported Python versions.
+# 0.59.0: evaluate an original-video and maximum-JPEG hybrid with a recorder stop barrier.
+# 0.60.0: retain authenticated original-video comparison uploads with durable receipts.
+# 0.61.0: transfer explicit comparison videos with persistent origin and receipt checks.
+# 0.61.1: preserve complete current Android runtime values across supervised phone services.
+# 0.62.0: connect bounded Work capture diagnostics and exact decoded-video candidates.
+# 0.62.1: retain the unchanged original PNG in bounded capture diagnostic packets.
+# 0.63.0: handle owned Work-menu unmounts and seal new jobs to a public family model.
+# 0.64.0: close owned Work menus with real Escape and live selection evidence.
+# 0.65.0: discover serial-verified glasses after hotspot address changes and cold starts.
+# 0.65.1: bounded phone-local unicast DNS-SD when the ADB mDNS service is unavailable.
+# 0.65.2: respect protected glasses windows when a delayed phone sleep arrives.
+# 0.66.0: evaluate pre-upload selection between two retained native originals;
+#         prioritize a verified running app's explicit sleep over diagnostics.
+# 0.66.1: bounded monotonic timing metadata for phone-side display delivery diagnosis.
+# 0.66.2: include watcher work in its polling interval instead of adding fixed delay.
+# 0.66.3: retain unlabelled questions and nonconsecutive printed answer numbers.
+# 0.66.4: share capture context with Work and supplement coarse page-change evidence.
+APP_VERSION = "0.66.4"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.
@@ -244,7 +324,57 @@ APP_VERSION = "0.35.3"
 #        updated; relaycore 0.3.17 does.
 # Adds operation_routes and explicit client-OCR/image-only real-mode behavior.
 # Content digest v2; persisted solve failures change the existing bundle revision.
-API_VERSION = "1.22.0"
+# Browser listening accepts complete original audio without requiring ASR.
+# 1.24.0: finalize-reading?solve=background returns after segmentation with
+#        `solving: "background"`; answer-bundle shows each 小問 as it is saved.
+#        Without the parameter the call still solves before answering. Additive.
+#        A (A)-style letter line under 問N is now that question's choice, not a
+#        separate deck problem (fewer problems for such pages).
+# 1.25.0: a background finalize-reading lists the 小問 with the configured solver
+#        from the originals (OCR segmentation is the fallback), solves only the
+#        items answer-bundle shows, and answer-bundle answers 409 "the question
+#        list is being made" until the list exists.
+# 1.26.0: /v1/settings no longer returns 500 when a provider check raises or
+#        ROKID_REAL_MODE rejects the selection: the provider entry reports
+#        ready:false with a `message`. answer-bundle names a new stop, the
+#        `chat_lost` failure ("教科のチャットへ戻れません…"): the subject's chat
+#        could not be reached, no new chat was opened, and the batch stopped.
+# 1.27.0: a background solve on chatgpt-web sends ONE message: the reply names
+#        every 小問 and answers it, and nothing is sent per 小問. answer-bundle
+#        answers 409 "the answers are being made" until that reply is in.
+# 1.28.0: GET .../pages.pdf and paste-prompt's `pages_pdf_url` are removed
+#        (outside Enterprise ChatGPT discards a PDF's images). answer-bundle
+#        names new failures: rate_limited is shown as failed; not_sent and
+#        browser_busy stay pending with "…自動で再試行します" while the server
+#        tries again. question_label is the printed number ("問1", not "問1(2)").
+#        answer-bundle restarts a reviewing session's lost background batch.
+# 1.29.0: answer-bundle names browser_blocked (another send still unconfirmed)
+#        as retrying; a retrying failure becomes `failed` with a plain reason
+#        after RESUME_LIMIT batches. Only sessions under RESUME_WINDOW_S resume.
+# 1.29.1: answer-bundle keeps a kanji-numbered 大問 ("第一問", "大問二") as its
+#        group instead of folding it into the labels under one 全体 group.
+# 1.30.0: an answer-bundle item carries the printed 解答番号 it fills
+#        ("answer_no", additive, omitted when the booklet prints none), and a
+#        番号 the one reply never answered gets its own failed item.
+# 1.31.0: authenticated glasses state carries device/session/generation/sequence
+#        so the phone can request display changes without waking a finished session.
+# 1.31.1: answer-bundle preserves meaningful braces in written sets and code.
+# 1.31.2: browser solving recognizes the operator-selected Latest/Extra High UI.
+# 1.32.0: mixed analysis stages and partial answer availability; authenticated
+#         chooser/waiting display requests preserve protected visible work.
+# 1.33.0: authenticated Work job manifests, original-image reads and result receipts.
+# 1.33.1: quality failures allow validated stop results, while answers stay gated.
+# 1.34.0: local browser Work results retain source/readability provenance, and
+#         rejected readability has a visible failure without automatic resending.
+# 1.35.0: an expired Work send may remain pending until its matching receipt
+#         is recovered; waiting does not consume the current session retry budget.
+# 1.36.0: optional native capture provenance is validated against uploaded JPEG
+#         bytes and acknowledged with the canonical PNG identity.
+# 1.37.0: explicitly identified ZSL originals require matching positive sensor timestamps.
+# 1.38.0: /capture-videos accepts sealed original-video comparison clips and their journals.
+# 1.39.0: optional capture inspection origins and authenticated diagnostic result lookups.
+# 1.39.1: source-position labels for unlabelled questions; do not invent numeric gaps.
+API_VERSION = "1.39.1"
 
 # Matching algorithm identity. Bump when thresholds or hashing change so a
 # re-index/eval is triggered. Mirrors thresholds in app/matching.py.
@@ -303,7 +433,11 @@ ANALYZER_API_VERSION = "1.0.0"
 # 1.6.0: Question gained the optional `audio_path` field, so a listening
 #        question can carry the recording itself and not only its transcript.
 #        Adapters that cannot take audio ignore it (additive/back-compat).
-SOLVER_API_VERSION = "1.7.1"
+# 1.8.0: original page images are acknowledged in ordered batches in one chat;
+#        the final message requests all answers after every source was received.
+# 1.9.0: mixed reading and listening stages share the original paper/chat
+#        identity and retain completed reading answers when audio arrives.
+SOLVER_API_VERSION = "1.9.0"
 
 # Media-extractor plugin interface (formula/figure/graph/table).
 EXTRACTOR_API_VERSION = "1.0.0"
@@ -356,7 +490,43 @@ EXPLAINER_API_VERSION = "1.1.0"
 # Upright, magnified still review and phone-side unfold-to-chooser startup.
 # Failed CLOSED persistence keeps the answer and shows a retry notice.
 # Composition-only review and bounded clipped-shot ranking; 3s timing unchanged.
-GLASSES_VIEW_CONTRACT_VERSION = "1.17.2"
+# Local capture waits for AE convergence within the existing total deadline.
+# A local best shot OCR read nothing (or failed on) reaches the 3s review instead of a retry.
+# Only a 409 "being made" is analysis (read every 30s, display asleep); any other
+# 409 wakes and says why. A replacement deck of the same input is accepted.
+# Automatic capture rests the camera after 30s with no page registered and
+# shows "撮影を休止 / タップで再開"; the shutter tap resumes it.
+# Manual capture mode ("manual" Intent extra, persisted): no automatic burst,
+# one tap one photo, "手動撮影 / 1タップ＝1枚".
+# Local capture is a JPEG-only session with an untouched still request again:
+# the 9/23 metering stream never returned a still on the glasses (2026-09-30).
+# Capture waiting text and the aim mark clear after HudView.FADE_MILLIS.
+# No text while aiming; review is the photo cropped to the paper plus one line.
+# 1.26.0: automatic one-shot page-change capture, continuous answer reading,
+#        writing-done standby and generation-bound phone display requests.
+# 1.27.0: ordinary still review shows the photo without text; window display
+#        ownership preserves the system timeout; compact answers use fixed pages.
+# 1.28.0: five-second idle display requests, fresh wear chooser entry and
+#         mixed recording controls with staged answer revisions.
+# 1.29.0: capture preview/review occupy a shared corner viewport; answer text
+#         and the visible-acknowledged review/commit interval are preserved.
+# 1.30.0: ordinary status and chooser lines use a compact display region;
+#         full answer pages and the capture/review viewport stay unchanged.
+# 1.31.0: retain page-change preview through successful still capture and review;
+#         any native drain failure closes the camera and requires a new generation.
+# 1.32.0: preserve up to two future-page originals while reviewing; promote in
+#         order and require each candidate's fresh visible review before commit.
+# 1.33.0: a native original remains unacknowledged until its complete provenance
+#         is echoed with the server's canonical image identity.
+# 1.34.0: active local capture keeps observing pages after idle waits without a resume tap.
+# 1.35.0: opt-in ZSL evaluation preserves scene/quiet pairing and unresolved originals.
+# 1.36.0: opt-in recording evaluation retains originals and fences finalization with native capture.
+# 1.37.0: opt-in comparison transfer binds original clips to one local/device generation.
+# 1.38.0: current-run native uploads may include their pre-capture diagnostic origin.
+# 1.39.0: fence stale power generations and show bounded, identity-bound capture feedback.
+# 1.40.0: opt-in native A/B selection retains both originals and reviews the chosen image.
+# 1.41.0: bounded fine-detail page-change evidence with coherent preview registration.
+GLASSES_VIEW_CONTRACT_VERSION = "1.41.0"
 
 # Answer-area overlay payload (box + short answer; 2D image-anchored).
 # 1.1.0: added tracking metadata (tracking/fixed_ar/anchor_hint).

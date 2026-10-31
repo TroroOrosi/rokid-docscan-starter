@@ -4,8 +4,9 @@ The venue runs the server on the phone, and Playwright does not run there:
 Termux has no wheel for it, and a manylinux wheel plus ``PLAYWRIGHT_NODEJS_PATH``
 still fails because the driver reports ``Error: Unsupported platform: android``
 (`docs/hardware-measurements.md` §F-5). The page automation itself is not the
-problem -- Chrome for Android answers CDP perfectly well once an on-device
-``adb forward`` exposes its abstract socket as ``127.0.0.1:9222``.
+problem. The venue uses Termux Chromium's local debugging port on the same
+phone; no ADB connection or PC is required at runtime. Earlier Android Chrome
+measurements used an ADB-forwarded socket instead.
 
 So this module reimplements the handful of Playwright calls
 :mod:`app.solvers.chatgpt_web` actually makes, and nothing else. It is not a
@@ -17,24 +18,25 @@ events, because ChatGPT's composer is a ProseMirror instance: it rebuilds its
 model from input events, and a synthetic ``KeyboardEvent`` does not produce one.
 ``Input.insertText`` is what a keyboard does, in one call regardless of length.
 
-File attachment cannot use ``DOM.setFileInputFiles``: that names paths on the
-*browser's* filesystem, and Chrome for Android cannot read the server's files.
-The bytes are handed to the page instead, as a ``DataTransfer``.
+File paths are available when Python and Termux Chromium share the same UID
+and filesystem. ``set_input_paths`` uses that topology explicitly. A browser
+on another filesystem receives bounded byte chunks via ``DataTransfer``.
 """
 
 from __future__ import annotations
 
 import base64
 import json
+from pathlib import PurePosixPath
 import time
 import urllib.error
 import urllib.request
 
 DEFAULT_TIMEOUT_S = 30.0
 
-#: CDP carries the page bytes as base64 inside a JSON message, so a bundled
-#: booklet PDF arrives as one multi-megabyte frame. `websockets` defaults to a
-#: 1 MiB ceiling and would close the connection instead of delivering it.
+#: CDP carries the page bytes as base64 inside a JSON message, one page image
+#: (several MB) per message. `websockets` defaults to a 1 MiB ceiling and would
+#: close the connection instead of delivering it.
 MAX_MESSAGE_BYTES = 256 * 1024 * 1024
 
 
@@ -175,6 +177,9 @@ class Locator:
     def last(self) -> "Locator":
         return Locator(self._page, self._selector, -1)
 
+    def nth(self, index: int) -> "Locator":
+        return Locator(self._page, self._selector, index)
+
     def count(self) -> int:
         return int(self._page.evaluate(f"document.querySelectorAll({self._selector!r}).length"))
 
@@ -252,33 +257,79 @@ class Locator:
     def set_input_files(self, payloads: list[dict]) -> None:
         """Hand file bytes to an ``<input type=file>`` without a shared filesystem.
 
-        ``DOM.setFileInputFiles`` would need the paths to exist for the browser
-        process. On the venue topology the browser is Chrome for Android and the
-        files are the server's, so the bytes travel in the message instead.
+        Use ``set_input_paths`` instead when browser and caller share files.
 
         Each payload is Playwright's shape: ``{name, mimeType, buffer}``.
+
+        Large files are chunked so no base64 message approaches the DevTools
+        websocket's 100 MB limit. This bounds messages, not total browser memory.
         """
-        files = [
-            {
-                "name": payload["name"],
-                "type": payload.get("mimeType", "application/octet-stream"),
-                "data": base64.b64encode(payload["buffer"]).decode("ascii"),
-            }
-            for payload in payloads
-        ]
-        attached = self._page.evaluate(
-            f"(() => {{ const e = {self._element_js()}; if (!e) return false; "
-            f"const files = {json.dumps(files)}; const dt = new DataTransfer(); "
-            "for (const f of files) { const bin = atob(f.data); "
-            "const bytes = new Uint8Array(bin.length); "
-            "for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i); "
-            "dt.items.add(new File([bytes], f.name, {type: f.type})); } "
-            "e.files = dt.files; "
-            "e.dispatchEvent(new Event('change', {bubbles: true})); "
-            "return true; })()"
-        )
-        if not attached:
-            raise CdpError(f"cannot attach files to {self._selector!r}: no element matched")
+        staged = "window.__rokidFiles"
+        try:
+            self._page.evaluate(f"(() => {{ {staged} = []; return true; }})()")
+            for payload in payloads:
+                if len(payload["buffer"]) > 512 * 1024:
+                    self._page.evaluate("window.__rokidChunks = []")
+                    for offset in range(0, len(payload["buffer"]), 512 * 1024):
+                        chunk = base64.b64encode(payload["buffer"][offset:offset + 512 * 1024]).decode("ascii")
+                        self._page.evaluate(
+                            f"(() => {{ const chunk = {json.dumps(chunk)}; const bin = atob(chunk); "
+                            "const bytes = new Uint8Array(bin.length); "
+                            "for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i); "
+                            "window.__rokidChunks.push(bytes); return true; })()"
+                        )
+                    self._page.evaluate(
+                        f"(() => {{ {staged}.push(new File(window.__rokidChunks, "
+                        f"{json.dumps(payload['name'])}, {{type: {json.dumps(payload.get('mimeType', 'application/octet-stream'))}}})); "
+                        "delete window.__rokidChunks; return true; })()"
+                    )
+                    continue
+                file = {
+                    "name": payload["name"],
+                    "type": payload.get("mimeType", "application/octet-stream"),
+                    "data": base64.b64encode(payload["buffer"]).decode("ascii"),
+                }
+                self._page.evaluate(
+                    f"(() => {{ const f = {json.dumps(file)}; const bin = atob(f.data); "
+                    "const bytes = new Uint8Array(bin.length); "
+                    "for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i); "
+                    f"{staged}.push(new File([bytes], f.name, {{type: f.type}})); return true; }})()"
+                )
+            attached = self._page.evaluate(
+                f"(() => {{ const staged = {staged} || []; delete {staged}; "
+                f"const e = {self._element_js()}; if (!e) return false; "
+                "const dt = new DataTransfer(); for (const f of staged) dt.items.add(f); "
+                "e.files = dt.files; "
+                "e.dispatchEvent(new Event('change', {bubbles: true})); "
+                "return true; })()"
+            )
+            if not attached:
+                raise CdpError(f"cannot attach files to {self._selector!r}: no element matched")
+        except Exception:
+            try:
+                self._page.evaluate("delete window.__rokidFiles; delete window.__rokidChunks; true")
+            except Exception:  # The original transport/allocation failure is authoritative.
+                pass
+            raise
+
+
+    def set_input_paths(self, paths: list[str]) -> None:
+        """Attach existing absolute paths on the browser's own filesystem."""
+        if not paths or any(not isinstance(path, str) or not PurePosixPath(path).is_absolute()
+                            or "\0" in path for path in paths):
+            raise CdpError("file attachment needs absolute browser paths")
+        root = self._page.send("DOM.getDocument", {"depth": 1})["root"]["nodeId"]
+        nodes = self._page.send("DOM.querySelectorAll", {"nodeId": root, "selector": self._selector})["nodeIds"]
+        if self._index is None:
+            if len(nodes) != 1:
+                raise CdpError("file input is missing or ambiguous")
+            node = nodes[0]
+        else:
+            try:
+                node = nodes[self._index]
+            except IndexError as error:
+                raise CdpError("file input is missing") from error
+        self._page.send("DOM.setFileInputFiles", {"nodeId": node, "files": paths})
 
 
 class Page:

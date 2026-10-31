@@ -21,9 +21,16 @@ public final class AnswerBundle {
     public final String inputDigest;
     /** Result snapshot revision; input identity is independently fixed by inputDigest. */
     public final long revision;
+    public final String analysisStage;
+    public final String availableStage;
     public final List<AnswerItem> items;
 
     public AnswerBundle(String sessionId, String inputDigest, long revision, List<AnswerItem> items) {
+        this(sessionId, inputDigest, revision, items, "single", "complete");
+    }
+
+    public AnswerBundle(String sessionId, String inputDigest, long revision, List<AnswerItem> items,
+                        String analysisStage, String availableStage) {
         this.sessionId = AnswerItem.identifier(sessionId);
         if (inputDigest == null || !inputDigest.matches("[a-f0-9]{64}") || revision < 1
                 || items == null || items.isEmpty() || items.size() > 2000) {
@@ -31,6 +38,12 @@ public final class AnswerBundle {
         }
         this.inputDigest = inputDigest;
         this.revision = revision;
+        if (!List.of("single", "reading", "awaiting_audio", "listening", "complete").contains(analysisStage)
+                || !List.of("none", "reading", "complete").contains(availableStage)) {
+            throw new IllegalArgumentException("invalid answer stage");
+        }
+        this.analysisStage = analysisStage;
+        this.availableStage = availableStage;
         Set<String> ids = new HashSet<>();
         Map<String, String> labels = new HashMap<>();
         long chars = 0;
@@ -58,6 +71,8 @@ public final class AnswerBundle {
         return true;
     }
 
+    public boolean intermediate() { return !"single".equals(analysisStage) && !"complete".equals(availableStage); }
+
     public AnswerBundle withAnswer(AnswerItem replacement) {
         List<AnswerItem> next = new ArrayList<>(items);
         for (int i = 0; i < next.size(); i++) {
@@ -68,7 +83,7 @@ public final class AnswerBundle {
                 throw new IllegalArgumentException("answer does not belong to this question");
             }
             next.set(i, replacement);
-            return new AnswerBundle(sessionId, inputDigest, Math.addExact(revision, 1), next);
+            return new AnswerBundle(sessionId, inputDigest, Math.addExact(revision, 1), next, analysisStage, availableStage);
         }
         throw new IllegalArgumentException("unknown question identity");
     }
@@ -80,12 +95,14 @@ public final class AnswerBundle {
                     .put("group_id", item.groupId).put("group_label", item.groupLabel)
                     .put("question_id", item.questionId).put("question_label", item.questionLabel)
                     .put("answer", item.answer).put("status", item.status.name().toLowerCase(Locale.ROOT))
-                    .put("issue", item.issue).put("diagrams", AnswerDiagram.encode(item.diagrams)));
+                    .put("issue", item.issue).put("diagrams", AnswerDiagram.encode(item.diagrams))
+                    .put("answer_no", new JSONArray(item.answerNumbers)));
             boolean hasDiagrams = false;
             for (AnswerItem item : items) hasDiagrams |= !item.diagrams.isEmpty();
             String json = new JSONObject().put("schema_version", hasDiagrams ? 2 : SCHEMA_VERSION)
                     .put("session_id", sessionId).put("input_digest", inputDigest)
-                    .put("revision", revision).put("items", array).toString();
+                    .put("revision", revision).put("analysis_stage", analysisStage)
+                    .put("available_stage", availableStage).put("items", array).toString();
             if (json.getBytes(StandardCharsets.UTF_8).length > MAX_JSON_BYTES) {
                 throw new IllegalArgumentException("answer bundle too large");
             }
@@ -114,10 +131,23 @@ public final class AnswerBundle {
                     string(item, "question_id"), string(item, "question_label"), string(item, "answer"),
                     AnswerItem.Status.valueOf(string(item, "status").toUpperCase(Locale.ROOT)),
                     string(item, "issue"), AnswerDiagram.parse(item.has("diagrams")
-                            ? item.getJSONArray("diagrams") : null)));
+                            ? item.getJSONArray("diagrams") : null), answerNumbers(item)));
         }
         return new AnswerBundle(string(root, "session_id"), string(root, "input_digest"),
-                number(root, "revision"), items);
+                number(root, "revision"), items, root.has("analysis_stage") ? string(root, "analysis_stage") : "single",
+                root.has("available_stage") ? string(root, "available_stage") : "complete");
+    }
+
+    private static List<Integer> answerNumbers(JSONObject item) throws JSONException {
+        List<Integer> numbers = new ArrayList<>();
+        if (!item.has("answer_no")) return numbers;
+        JSONArray array = item.getJSONArray("answer_no");
+        for (int i = 0; i < array.length(); i++) {
+            Object value = array.get(i);
+            if (!(value instanceof Integer)) throw new JSONException("invalid answer number");
+            numbers.add((Integer) value);
+        }
+        return numbers;
     }
 
     static String string(JSONObject object, String key) throws JSONException {

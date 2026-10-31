@@ -1,0 +1,1033 @@
+"""Work UI adapter sharing Chat's durable send/receipt journal.
+
+The venue process runs beside Termux Chromium. Original images travel in ZIPs;
+a completed upload is transport evidence, not proof of visual readability.
+Work's plain-Markdown final message has different semantics from Chat's turns.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+from contextvars import ContextVar
+from dataclasses import dataclass
+from pathlib import Path
+import re
+import sys
+import tempfile
+import threading
+import time
+import unicodedata
+from urllib.parse import urlsplit
+
+from ..work_model_policy import WorkModelPolicyError, resolve_work_model
+from . import chatgpt_web as chat
+
+
+MAX_FILE_BYTES = 64 * 1024 * 1024
+MAX_TOTAL_BYTES = 96 * 1024 * 1024
+FILE_INPUT_SEL = 'input[type="file"][multiple]:not([disabled]):is([accept=""],:not([accept]))'
+COMPOSER_SEL = (chat.COMPOSER_SEL + ', div[role="textbox"][contenteditable="true"]'
+                '[aria-label="Work with ChatGPT"]')
+USER_SEL = ('div[data-user-message-bubble="true"], '
+            'div.rich-text-user-turn[data-markdown-text-tone="user-message"]'
+            ':not([data-user-message-bubble="true"] *)')
+ASSISTANT_SEL = 'div[data-markdown-text-style="assistant-message"]'
+MODEL = "GPT-6.1 Sol"
+_MODEL_PATTERN = (r"(?:gpt[\s_–—-]*)?(?:([0-9]+(?:\.[0-9]+)*)[\s_–—-]*([a-z]+)"
+                  r"|([a-z]+)[\s_–—-]*([0-9]+(?:\.[0-9]+)*))")
+_EFFORT_LEVELS = {"extrahigh": 3, "xhigh": 3, "high": 2, "medium": 1, "light": 0, "low": 0,
+                  "極高": 3, "超高": 3, "高": 2, "中": 1, "軽量": 0}
+
+
+@dataclass(frozen=True)
+class _Settings:
+    model: str
+    level: int  # Semantic effort order, never a slider coordinate.
+    effort: str
+    speed: str
+
+
+@dataclass(frozen=True)
+class _InspectionPurpose:
+    inspection_id: str
+    manifest_sha256: str
+
+    @property
+    def contract(self):
+        return {"purpose": "capture_inspection", "inspection_id": self.inspection_id,
+                "manifest_sha256": self.manifest_sha256}
+
+
+def _normalise(value):
+    return re.sub(r"[^a-z0-9]", "", unicodedata.normalize("NFKC", value).lower())
+
+
+def _model_identity(value):
+    match = re.fullmatch(_MODEL_PATTERN, unicodedata.normalize("NFKC", value).strip().lower())
+    return f"{match[1] or match[4]}:{match[2] or match[3]}" if match else None
+
+
+def _requested_settings(settings=None):
+    values = settings if settings is not None else {
+        "model": os.environ.get("ROKID_WORK_MODEL") or MODEL,
+        "effort": os.environ.get("ROKID_WORK_EFFORT") or "xhigh",
+        "speed": os.environ.get("ROKID_WORK_SPEED") or "fast",
+    }
+    if (not isinstance(values, dict) or set(values) != {"model", "effort", "speed"}
+            or any(not isinstance(value, str) or not value.strip() for value in values.values())):
+        raise chat.ChatGptWebModelMismatch("Work requested settings are invalid; nothing sent")
+    model = values["model"].strip()
+    if _model_identity(model) is None:
+        raise chat.ChatGptWebModelMismatch("Work requires an explicit model family/version/variant")
+    effort = {"light": (0, "Light"), "low": (0, "Light"), "medium": (1, "Medium"), "high": (2, "High"),
+              "xhigh": (3, "Extra High"), "extrahigh": (3, "Extra High")}.get(_normalise(values["effort"]))
+    speed = _normalise(values["speed"])
+    if effort is None or speed not in ("fast", "standard"):
+        raise chat.ChatGptWebModelMismatch("Work effort/speed has no validated control mapping; nothing sent")
+    return _Settings(model, *effort, speed)
+
+# Only public controls are returned. A checked Default radio plus a Sol summary
+# is deliberately insufficient: Default may choose a different model later.
+_CONTROLS_JS = r"""(function inspect(action, requested, requestedLevel, allowUnlinked, closedOwner) {
+  const visible = e => !!e && e.getClientRects().length > 0;
+  const norm = s => (s || '').normalize('NFKC').toLowerCase().replace(/[^a-z0-9]/g, '');
+  const phrase = s => (s || '').normalize('NFKC').toLowerCase().replace(/[\s_–—-]/g, '');
+  const modelPattern = new RegExp('^' + __MODEL_PATTERN__ + '$');
+  const modelPrefix = new RegExp('^' + __MODEL_PATTERN__ + '(?=\\s|$)');
+  const modelKey = text => {
+    const m = (text || '').normalize('NFKC').trim().toLowerCase().match(modelPattern);
+    return m ? (m[1] || m[4]) + ':' + (m[2] || m[3]) : null;
+  };
+  const label = e => (e.getAttribute('aria-label') || e.innerText || '').trim();
+  const effortLevels = __EFFORT_LEVELS__;
+  const effortLevel = e => {
+    const value = effortLevels[phrase(label(e).split('\n')[0])];
+    return Number.isInteger(value) ? value : null;
+  };
+  const enabled = e => !e.disabled && e.getAttribute('aria-disabled') !== 'true';
+  const all = (selector, root=document) => [...root.querySelectorAll(selector)].filter(e =>
+    closedOwner && root === closedOwner.menu || visible(e));
+  const radioSelector = '[role=menuitemradio], [role=radio], [role=option]';
+  const menuSelector = '[role=menu], [role=listbox]';
+  const proofSelector = radioSelector + ', [role=slider], [role=menuitem], [role=menuitemcheckbox], ' +
+    '[role=checkbox], [role=switch], button[aria-pressed]';
+  const hasModels = e => [...e.querySelectorAll(radioSelector)].some(r => modelKey(label(r).split('\n')[0]));
+  const outermost = elements => elements.filter(e => !elements.some(other => other !== e && other.contains(e)));
+  const associated = trigger => {
+    const ids = (trigger.getAttribute('aria-controls') || '').trim().split(/\s+/).filter(Boolean);
+    return outermost(ids.flatMap(id => {
+      const root = document.getElementById(id);
+      return !root ? [] : root.matches(menuSelector) ? [root] : [...root.querySelectorAll(menuSelector)];
+    }).filter(hasModels));
+  };
+  const work = all('button[aria-pressed], [role=tab][aria-selected]').filter(e =>
+    ['work', 'chatgptwork', 'ワーク', '作業'].includes(phrase(label(e))));
+  const triggers = all('[aria-haspopup]').filter(e =>
+    norm(e.getAttribute('aria-label')) === 'selectchatgptmodel' || associated(e).length > 0);
+  const unlinked = outermost(all(menuSelector).filter(hasModels));
+  const linked = triggers.length === 1 && triggers[0].hasAttribute('aria-controls');
+  let menus = [];
+  if (triggers.length === 1) {
+    menus = linked ? associated(triggers[0]).filter(visible) : allowUnlinked ? unlinked : [];
+    if (closedOwner && triggers[0] === closedOwner.trigger) {
+      const roots = linked ? associated(triggers[0]) :
+        outermost([...document.querySelectorAll(menuSelector)].filter(hasModels));
+      menus = roots.filter(e => e === closedOwner.menu && e.isConnected);
+    }
+  }
+  const speedKind = e => {
+    const name = phrase(label(e));
+    if (name === 'enablefastmode') return 'enablefast';
+    if (name === 'enablestandardmode') return 'enablestandard';
+    return ['fast', 'fastmode', '高速', '高速モード'].includes(name) ? 'fast' : null;
+  };
+  const speedState = e => {
+    const checked = e.getAttribute('aria-checked') || e.getAttribute('aria-pressed');
+    if (!['true', 'false'].includes(checked)) return null;
+    const kind = speedKind(e);
+    if (kind === 'enablefast') return checked === 'false' ? 'standard' : null;
+    if (kind === 'enablestandard') return checked === 'true' ? 'fast' : null;
+    return kind === 'fast' ? (checked === 'true' ? 'fast' : 'standard') : null;
+  };
+  const menu = menus.length === 1 ? menus[0] : null;
+  const choices = menu ? all(radioSelector, menu) : [];
+  const efforts = choices.filter(e => effortLevel(e) !== null);
+  const radios = choices.filter(e => effortLevel(e) === null);
+  const matching = radios.filter(e => modelKey(label(e).split('\n')[0]) === modelKey(requested));
+  const matchingEffort = efforts.filter(e => effortLevel(e) === requestedLevel);
+  const checked = radios.filter(e => e.getAttribute('aria-checked') === 'true' || e.getAttribute('aria-selected') === 'true')
+    .map(e => modelKey(label(e).split('\n')[0]) || norm(label(e).split('\n')[0]));
+  const selected = checked.length === 1 && checked[0] === modelKey(requested);
+  const sliders = menu ? all('[role=slider]', menu) : [];
+  const power = sliders.length === 1 ? {value:sliders[0].getAttribute('aria-valuenow'),
+    min:sliders[0].getAttribute('aria-valuemin'), max:sliders[0].getAttribute('aria-valuemax')} : null;
+  const speed = menu ? all('[role=menuitemcheckbox], [role=checkbox], [role=switch], button[aria-pressed]', menu).filter(speedKind) : [];
+  let acted = false;
+  if (action === 'work' && work.length === 1 && enabled(work[0])) {
+    work[0].click(); acted = true;
+  } else if (action === 'open' && !menus.length && !unlinked.length && triggers.length === 1 && enabled(triggers[0])) {
+    triggers[0].click(); acted = true;
+  } else if (action === 'close' && menu && triggers.length === 1 && enabled(triggers[0])) {
+    // This snapshot is live immediately BEFORE our close, never a detached selection proof.
+    const owner = {menu, trigger:triggers[0], work:work[0], nodes:[...menu.querySelectorAll(proofSelector)],
+      before:inspect('state', requested, requestedLevel, allowUnlinked), changed:false};
+    const originalNodes = new Set();
+    const walker = document.createTreeWalker(menu, NodeFilter.SHOW_ALL);
+    do { originalNodes.add(walker.currentNode); } while (walker.nextNode());
+    let detached = false;
+    const deadline = Date.now() + 5000;
+    let observer, cleanupTimer, stopped = false;
+    const disconnect = () => {
+      if (!stopped) { observer.disconnect(); clearTimeout(cleanupTimer); stopped = true; }
+    };
+    const observeChanges = records => {
+      if (Date.now() >= deadline) { disconnect(); return; }
+      for (const record of records) {
+        if (record.type === 'childList' && [...record.removedNodes].some(e => e === menu || e.contains(menu))) {
+          detached = true;
+        } else if (!detached && originalNodes.has(record.target)) {
+          owner.changed = true;
+        }
+      }
+    };
+    observer = new MutationObserver(observeChanges);
+    observer.observe(menu, {subtree:true, childList:true, characterData:true, attributes:true,
+      attributeFilter:['role', 'aria-label', 'aria-checked', 'aria-selected', 'aria-pressed',
+        'aria-valuenow', 'aria-valuemin', 'aria-valuemax', 'aria-valuetext']});
+    // Observe ancestor removal in the same ordered stream; don't watch unrelated subtrees.
+    for (let parent = menu.parentNode; parent; parent = parent.parentNode) observer.observe(parent, {childList:true});
+    cleanupTimer = setTimeout(disconnect, 5000);
+    const current = () => {
+      observeChanges(observer.takeRecords());
+      const state = inspect('closed', requested, requestedLevel, allowUnlinked, owner);
+      return stopped ? {...state, closed:false, close_context_valid:false} : state;
+    };
+    // The remote object keeps this exact owner and observer alive across the
+    // real CDP Escape. No document/window state or synthetic key event is used.
+    return {
+      prepare() {
+        const state = current();
+        return {...state, ready:!stopped && !owner.changed && state.owner_valid &&
+          state.close_context_valid && !state.closed && state.foreign_popup_count === 0 && visible(menu)};
+      },
+      read() {
+        return new Promise((resolve, reject) => {
+          const read = () => {
+            try {
+              const state = current();
+              if (stopped || state.closed || !state.close_context_valid || owner.changed ||
+                  state.foreign_popup_count || Date.now() >= deadline) {
+                disconnect(); resolve({...state, acted:true});
+              } else setTimeout(read, 50);
+            } catch (error) { disconnect(); reject(error); }
+          };
+          read();
+        });
+      },
+      cancel() { disconnect(); return true; }
+    };
+  } else if (action === 'model' && matching.length === 1 && enabled(matching[0])) {
+    matching[0].click(); acted = true;
+  } else if (action === 'effort' && selected && matchingEffort.length === 1 && enabled(matchingEffort[0])) {
+    matchingEffort[0].click(); acted = true;
+  } else if (['fast', 'standard'].includes(action) && selected && speed.length === 1 && enabled(speed[0]) &&
+      speedState(speed[0]) === (action === 'fast' ? 'standard' : 'fast')) {
+    speed[0].click(); acted = true;
+  } else if (['left', 'right'].includes(action) && selected && sliders.length === 1 && enabled(sliders[0]) &&
+      Object.values(power).every(v => v !== null && /^-?\d+$/.test(v) && Number.isSafeInteger(Number(v))) &&
+      Number(power.max) - Number(power.min) <= 16 &&
+      Number(power.value) + (action === 'right' ? 1 : -1) >= Number(power.min) &&
+      Number(power.value) + (action === 'right' ? 1 : -1) <= Number(power.max)) {
+    const key = action === 'right' ? 'ArrowRight' : 'ArrowLeft';
+    sliders[0].focus();
+    sliders[0].dispatchEvent(new KeyboardEvent('keydown', {key, code:key, bubbles:true})); acted = true;
+  }
+  const summary = menu && selected ? all('[role=menuitem]', menu).map(e => {
+    const text = (e.innerText || '').normalize('NFKC').trim().toLowerCase();
+    const prefix = text.match(modelPrefix);
+    return prefix && modelKey(prefix[0]) === modelKey(requested) ? text.slice(prefix[0].length) : '';
+  }).join(' ') : '';
+  const nodes = menu ? [...menu.querySelectorAll(proofSelector)] : [];
+  const sameContext = !!closedOwner && triggers.length === 1 && triggers[0] === closedOwner.trigger &&
+    work.length === 1 && work[0] === closedOwner.work && visible(triggers[0]) && visible(work[0]) &&
+    enabled(triggers[0]) && (work[0].getAttribute('aria-pressed') || work[0].getAttribute('aria-selected')) === 'true';
+  const ownerValid = sameContext && menu === closedOwner.menu && menu.isConnected &&
+    nodes.length === closedOwner.nodes.length && nodes.every((e, i) => e === closedOwner.nodes[i] && e.isConnected);
+  const foreignPopups = closedOwner ? outermost(all(menuSelector)).filter(e => e !== closedOwner.menu).length : 0;
+  const unmounted = sameContext && !closedOwner.menu.isConnected &&
+    closedOwner.nodes.every(e => !e.isConnected) && triggers[0].getAttribute('aria-expanded') === 'false' &&
+    associated(triggers[0]).length === 0 && ![...document.querySelectorAll(menuSelector)].some(hasModels);
+  return {acted, work_count:work.length, work_active:work.length === 1 &&
+      (work[0].getAttribute('aria-pressed') || work[0].getAttribute('aria-selected')) === 'true',
+    trigger_count:triggers.length, linked, unlinked_count:unlinked.length,
+    menu_count:menus.length, model_matches:matching.length, owner_valid:ownerValid,
+     close_context_valid:sameContext && (ownerValid || unmounted), foreign_popup_count:foreignPopups,
+    closed:!!closedOwner && !closedOwner.changed && foreignPopups === 0 &&
+      (ownerValid && !visible(menu) || unmounted),
+    close_evidence:unmounted ? 'unmounted_after_live_confirmation' : 'retained_controls_rechecked',
+    before_close:closedOwner ? closedOwner.before : null, close_mutated:!!closedOwner && closedOwner.changed,
+    closed_joint_selection_proven:false,
+    model_labels:radios.map(e => label(e).split('\n')[0]),
+    checked, power, slider_count:sliders.length, effort_count:efforts.length, effort_matches:matchingEffort.length,
+    effort_checked:efforts.filter(e => e.getAttribute('aria-checked') === 'true' || e.getAttribute('aria-selected') === 'true').map(effortLevel),
+    slider_text:sliders.length === 1 ? sliders[0].getAttribute('aria-valuetext') || '' : '',
+    effort_text:summary + ' ' + (sliders.length === 1 ? sliders[0].getAttribute('aria-valuetext') || '' : ''),
+    fast:speed.length === 1 && speedState(speed[0]) === 'fast',
+    standard:speed.length === 1 && speedState(speed[0]) === 'standard'};
+})""".replace("__MODEL_PATTERN__", json.dumps(_MODEL_PATTERN)).replace("__EFFORT_LEVELS__", json.dumps(_EFFORT_LEVELS))
+
+
+def _controls(page, action="state", *, model=MODEL, level=3, allow_unlinked=False, close_check=None):
+    expression = f"{_CONTROLS_JS}({json.dumps(action)}, {json.dumps(model)}, {level}, {json.dumps(allow_unlinked)})"
+    if action == "close":
+        return _close_controls(page, expression, close_check=close_check)
+    return page.evaluate(expression)
+
+
+def _close_controls(page, expression, *, close_check):
+    """Keep the owner/observer remote through one real Escape and bounded readback."""
+    object_id = None
+
+    def call(function, *, promise=False):
+        reply = page.send("Runtime.callFunctionOn", {"objectId": object_id, "functionDeclaration": function,
+            "returnByValue": True, "awaitPromise": promise})
+        value = reply.get("result", {}).get("value")
+        if reply.get("exceptionDetails") or not isinstance(value, dict):
+            raise chat.ChatGptWebModelMismatch("Work close proof is unreadable; nothing sent")
+        return value
+
+    try:
+        handle = page.send("Runtime.evaluate", {"expression": expression, "returnByValue": False, "awaitPromise": False})
+        object_id = handle.get("result", {}).get("objectId")
+        if handle.get("exceptionDetails") or not isinstance(object_id, str) or not object_id:
+            raise chat.ChatGptWebModelMismatch("Work close owner is unavailable; nothing sent")
+        prepared = call("function(){return this.prepare();}")
+        if prepared.get("ready") is not True:
+            raise chat.ChatGptWebModelMismatch("Work popup ownership changed before closing; nothing sent")
+        if close_check is not None:
+            close_check(prepared["before_close"])
+        page.keyboard.press("Escape")
+        return call("function(){return this.read();}", promise=True)
+    finally:
+        failed = sys.exc_info()[0] is not None
+        cleanup_error = None
+        if isinstance(object_id, str) and object_id:
+            try:
+                reply = page.send("Runtime.callFunctionOn", {"objectId": object_id,
+                    "functionDeclaration": "function(){return this.cancel();}", "returnByValue": True})
+                if reply.get("exceptionDetails") or reply.get("result", {}).get("value") is not True:
+                    raise chat.ChatGptWebModelMismatch("Work close observer cleanup is unconfirmed; nothing sent")
+            except Exception as error:
+                cleanup_error = error
+            try:
+                page.send("Runtime.releaseObject", {"objectId": object_id})
+            except Exception as error:
+                cleanup_error = cleanup_error or error
+            if cleanup_error is not None and not failed:
+                raise cleanup_error
+
+
+def _effort_levels(text):
+    tokens = re.findall(r"extra[ -]?high|\bxhigh\b|\bhigh\b|\bmedium\b|\blight\b|\blow\b|極高|超高|(?<!\w)(?:軽量|高|中)(?!\w)", text, re.I)
+    return {_EFFORT_LEVELS[token] if token in _EFFORT_LEVELS else _EFFORT_LEVELS[_normalise(token)] for token in tokens}
+
+
+def _slider_position(power):
+    if (not power or any(not isinstance(power.get(key), str) or not re.fullmatch(r"-?[0-9]+", power[key])
+                         for key in ("value", "min", "max"))):
+        raise chat.ChatGptWebModelMismatch("Work power position is unreadable; nothing sent")
+    value, low, high = (int(power[key]) for key in ("value", "min", "max"))
+    if not low <= value <= high or high - low > 16:
+        raise chat.ChatGptWebModelMismatch("Work power range is invalid or exceeds bounded inspection")
+    return value, low, high
+
+
+def _current_effort(state):
+    checked = state["effort_checked"]
+    if state["slider_count"] > 1 or (state["effort_count"] and len(checked) != 1):
+        return None
+    if state["slider_count"] == 1:
+        _slider_position(state["power"])
+        slider_text = unicodedata.normalize("NFKC", state["slider_text"]).strip().lower()
+        if slider_text and re.sub(r"[\s_–—-]", "", slider_text) not in _EFFORT_LEVELS:
+            return None
+    elif not checked:
+        return None
+    levels = _effort_levels(state["effort_text"]) | set(checked)
+    return levels.pop() if len(levels) == 1 else None
+
+
+def verify_work_model(page, *, select=False, requested_settings=None, sleep=time.sleep, now=time.monotonic) -> str:
+    """Confirm live settings before own close, then its context; only preparation changes values."""
+    settings = requested_settings if isinstance(requested_settings, _Settings) else _requested_settings(requested_settings)
+    model_key = _model_identity(settings.model)
+    allow_unlinked = False
+    opened = verified = False
+
+    def controls(action="state"):
+        return _controls(page, action, model=settings.model, level=settings.level, allow_unlinked=allow_unlinked,
+                         close_check=require_joint if action == "close" and verified else None)
+
+    def read_until(predicate):
+        deadline = now() + min(5.0, chat.READY_TIMEOUT_S)
+        while True:
+            state = controls()
+            if predicate(state):
+                return state
+            if now() >= deadline:
+                raise chat.ChatGptWebModelMismatch("Work controls did not confirm the requested model/settings")
+            sleep(0.05)
+
+    def require_selected(state):
+        if (state["menu_count"] != 1 or state["model_matches"] != 1 or state["checked"] != [model_key]
+                or not state["work_active"]):
+            raise chat.ChatGptWebModelMismatch("Work controls no longer select the requested model")
+
+    def require_joint(state):
+        require_selected(state)
+        if _current_effort(state) != settings.level or not state[settings.speed]:
+            raise chat.ChatGptWebModelMismatch("Work settings changed before closing; nothing sent")
+
+    state = controls()
+    if state["menu_count"] or state["unlinked_count"]:
+        raise chat.ChatGptWebModelMismatch("an existing Work popup is not owned by this verification")
+    if state["work_count"] != 1:
+        raise chat.ChatGptWebModelMismatch("Work entry is missing or ambiguous")
+    if not state["work_active"]:
+        if not select or not controls("work")["acted"]:
+            raise chat.ChatGptWebModelMismatch("Work is not selected")
+        state = read_until(lambda s: s["work_active"])
+    try:
+        if state["menu_count"] or state["unlinked_count"]:
+            raise chat.ChatGptWebModelMismatch("Work mode navigation left an unowned popup open")
+        if not controls("open")["acted"]:
+            raise chat.ChatGptWebModelMismatch("Work model control is missing or ambiguous")
+        opened = True
+        allow_unlinked = not state["linked"]
+        state = read_until(lambda s: s["menu_count"] > 0)
+        if state["menu_count"] != 1 or state["model_matches"] != 1:
+            raise chat.ChatGptWebModelMismatch("the requested Work model radio is missing or ambiguous")
+        if state["checked"] != [model_key]:
+            if not select or not controls("model")["acted"]:
+                raise chat.ChatGptWebModelMismatch("the selected Work model differs from the sealed request")
+            state = controls()
+            if state["menu_count"] == 0:
+                if not controls("open")["acted"]:
+                    raise chat.ChatGptWebModelMismatch("could not inspect the selected Work model")
+            state = read_until(lambda s: s["checked"] == [model_key])
+        require_selected(state)
+        if _current_effort(state) != settings.level and state["effort_matches"] == 1:
+            if not select or not controls("effort")["acted"]:
+                raise chat.ChatGptWebModelMismatch("Work effort differs from the sealed request")
+
+            def effort_selected(state):
+                require_selected(state)
+                return _current_effort(state) == settings.level
+
+            state = read_until(effort_selected)
+        visited = set()
+        while _current_effort(state) != settings.level:
+            if not select:
+                raise chat.ChatGptWebModelMismatch("Work power differs from the sealed request")
+            level = _current_effort(state)
+            current, low, high = _slider_position(state["power"])
+            if level is None or current in visited:
+                raise chat.ChatGptWebModelMismatch("Work effort meaning is missing or changed order")
+            visited.add(current)
+            step = 1 if level < settings.level else -1
+            if not low <= current + step <= high:
+                raise chat.ChatGptWebModelMismatch("the requested Work effort was not found")
+            direction = "right" if step > 0 else "left"
+            if not controls(direction)["acted"]:
+                raise chat.ChatGptWebModelMismatch("could not adjust Work power")
+
+            def moved(state):
+                require_selected(state)
+                return _slider_position(state["power"])[0] == current + step
+
+            state = read_until(moved)
+        if not state[settings.speed]:
+            if not select or not controls(settings.speed)["acted"]:
+                raise chat.ChatGptWebModelMismatch("Work speed differs from the sealed request")
+            state = read_until(lambda s: s[settings.speed])
+        require_selected(state)
+        if _current_effort(state) != settings.level:
+            raise chat.ChatGptWebModelMismatch("Work model, effort and speed were not jointly confirmed")
+        verified = True
+        return settings.model + " / " + settings.effort + " / " + settings.speed.title()
+    finally:
+        primary_error = sys.exc_info()[1]
+        try:
+            if opened and (controls()["menu_count"] == 1 or verified):
+                state = controls("close")
+                if not state["acted"] or not state["closed"]:
+                    raise chat.ChatGptWebModelMismatch("Work model popup could not close; nothing sent")
+                if verified:
+                    # An unmounted popup has no current public radios. Validate the fresh
+                    # pre-close snapshot plus the close transition, never detached values.
+                    confirmed = (state["before_close"] if state["close_evidence"] == "unmounted_after_live_confirmation"
+                                 else state)
+                    require_selected(confirmed)
+                    if _current_effort(confirmed) != settings.level or not confirmed[settings.speed]:
+                        raise chat.ChatGptWebModelMismatch("Work settings changed while closing the model popup; nothing sent")
+        except Exception:
+            if primary_error is None:
+                raise
+
+
+def resolve_work_model_settings(page, *, requested_settings, follow_family=False, sleep=time.sleep, now=time.monotonic):
+    """Read public candidates for a NEW job; this does not select a model."""
+    settings = _requested_settings(requested_settings)
+    if type(follow_family) is not bool:
+        raise chat.ChatGptWebModelMismatch("Work model resolution policy is invalid; nothing sent")
+    allow_unlinked = False
+
+    def controls(action="state"):
+        return _controls(page, action, model=settings.model, level=settings.level, allow_unlinked=allow_unlinked)
+
+    def read_until(predicate):
+        deadline = now() + min(5.0, chat.READY_TIMEOUT_S)
+        while True:
+            state = controls()
+            if predicate(state):
+                return state
+            if now() >= deadline:
+                raise chat.ChatGptWebModelMismatch("Work model inventory did not become readable; nothing sent")
+            sleep(0.05)
+
+    state = controls()
+    if state["menu_count"] or state["unlinked_count"] or state["work_count"] != 1:
+        raise chat.ChatGptWebModelMismatch("Work inventory has missing or unowned controls; nothing sent")
+    if not state["work_active"]:
+        if not controls("work")["acted"]:
+            raise chat.ChatGptWebModelMismatch("Work inventory cannot open Work; nothing sent")
+        state = read_until(lambda value: value["work_active"])
+    if state["menu_count"] or state["unlinked_count"]:
+        raise chat.ChatGptWebModelMismatch("Work navigation left an unowned popup; nothing sent")
+    opened, labels = False, None
+    try:
+        if not controls("open")["acted"]:
+            raise chat.ChatGptWebModelMismatch("Work inventory trigger is missing or ambiguous; nothing sent")
+        opened = True
+        allow_unlinked = not state["linked"]
+        state = read_until(lambda value: value["menu_count"] > 0)
+        if state["menu_count"] != 1 or not state["work_active"]:
+            raise chat.ChatGptWebModelMismatch("Work model inventory is ambiguous; nothing sent")
+        labels = state["model_labels"]
+        if not 1 <= len(labels) <= 64 or any(not label or len(label) > 160 for label in labels):
+            raise chat.ChatGptWebModelMismatch("Work model inventory exceeds bounded inspection; nothing sent")
+        try:
+            resolved = resolve_work_model(labels, settings.model, follow_family=follow_family)
+        except WorkModelPolicyError as error:
+            raise chat.ChatGptWebModelMismatch("Work inventory cannot establish a permitted model; nothing sent") from error
+        return {**requested_settings, "model": resolved}
+    finally:
+        if opened and (controls()["menu_count"] == 1 or labels is not None):
+            closed = controls("close")
+            if (not closed["acted"] or not closed["closed"] or labels is not None
+                    and closed["before_close"]["model_labels"] != labels):
+                raise chat.ChatGptWebModelMismatch("Work inventory changed or could not close; nothing sent")
+
+
+_REPLY_STATE_JS = r"""(batchId => {
+  const empty = {found:false, ambiguous:false, streaming:false, reply:'', started:false};
+  const userSelector = %s;
+  const users = [...document.querySelectorAll(userSelector)].filter(e => e.getClientRects().length);
+  const matches = users.filter(e => {
+    const text = e.textContent || ''; const pos = text.lastIndexOf('Transfer receipt:');
+    if (pos < 0) return false;
+    try { return JSON.parse(text.slice(pos + 'Transfer receipt:'.length).trim()).batch_id === batchId; }
+    catch { return false; }
+  });
+  if (matches.length !== 1) return {...empty, ambiguous:matches.length > 1};
+  const user = matches[0]; const main = user.closest('main');
+  if (!main) return empty;
+  const regions = [...main.querySelectorAll('[role=region][aria-label="Conversation"]')].filter(e => e.contains(user));
+  if (regions.length > 1) return {...empty, ambiguous:true};
+  const scope = regions[0] || main;
+  const ownUsers = users.filter(e => scope.contains(e));
+  if (ownUsers.at(-1) !== user) return empty;
+  const after = e => !!(user.compareDocumentPosition(e) & Node.DOCUMENT_POSITION_FOLLOWING);
+  const assistants = [...scope.querySelectorAll('div[data-markdown-text-style="assistant-message"]')].filter(after);
+  const final = assistants.filter(e => {
+    const owner = e.closest('[data-local-conversation-final-assistant="true"]');
+    return owner && !owner.contains(user) && !owner.querySelector(userSelector);
+  });
+  const streaming = [...main.querySelectorAll('button[aria-label="Stop"], [data-testid="stop-button"]')].some(e => e.getClientRects().length);
+  return {found:true, ambiguous:final.length > 1, streaming, started:streaming || assistants.length > 0,
+    reply:final.length === 1 ? (final[0].textContent || '').trim() : ''};
+})""" % json.dumps(USER_SEL)
+
+
+def work_reply_state(page, batch_id):
+    """Read only the final assistant following this exact transfer marker."""
+    return page.evaluate(f"{_REPLY_STATE_JS}({json.dumps(batch_id)})")
+
+
+def _wait_for_reply(page, batch_id, *, expect, on_chat_url=None, timeout_s=None,
+                    poll_s=None, sleep=time.sleep, now=time.monotonic):
+    deadline = now() + (chat.TIMEOUT_S if timeout_s is None else timeout_s)
+    started = now()
+    url_saved = False
+    gone = 0
+    while now() < deadline:
+        if not url_saved and _conversation_id(chat._url_of(page)):
+            if on_chat_url is not None:
+                on_chat_url(chat._url_of(page))
+            url_saved = True
+        state = work_reply_state(page, batch_id)
+        if state["ambiguous"]:
+            raise chat.ChatGptWebError("Work task/final is ambiguous; no automatic resend")
+        if state["streaming"]:
+            gone = 0
+        else:
+            gone += 1
+            reply = state["reply"]
+            if reply and chat._complete_json(reply, expect):
+                try:
+                    if chat.extract_json(reply).get("batch_id") == batch_id:
+                        return reply
+                except (ValueError, AttributeError):
+                    pass
+            if reply and gone >= chat.SETTLE_POLLS:
+                if chat._limited(reply):
+                    raise chat.ChatGptWebRateLimit("the recorded Work task received a usage limit")
+                raise chat.ChatGptWebError("Work final did not contain this batch's complete JSON")
+        if not state["started"] and now() - started > chat.REPLY_START_S:
+            raise chat.ChatGptWebError("the recorded Work task did not start; no automatic resend")
+        sleep(chat.POLL_S if poll_s is None else poll_s)
+    raise chat.ChatGptWebError("Work task did not finish; no automatic resend")
+
+
+def _conversation_id(url):
+    if not isinstance(url, str):
+        return None
+    try:
+        parsed = urlsplit(url or "")
+        match = re.fullmatch(r"/c/([A-Za-z0-9-]{8,128})/?", parsed.path)
+        return match[1] if parsed.scheme == "https" and parsed.netloc == "chatgpt.com" and match else None
+    except ValueError:
+        return None
+
+
+_UPLOAD_STATE_JS = r"""(names => {
+  const visible = e => e.getClientRects().length > 0;
+  const composers = [...document.querySelectorAll(%s)].filter(visible);
+  if (composers.length !== 1) return {ready:false, ambiguous:true, counts:[], error:false};
+  const scope = composers[0].closest('form') || composers[0].closest('main');
+  if (!scope) return {ready:false, ambiguous:true, counts:[], error:false};
+  const cards = [...scope.querySelectorAll('span.truncate')].filter(e => !e.querySelector('span.truncate'));
+  const counts = names.map(name => cards.filter(e => e.textContent.trim() === name).length);
+  const error = [...scope.querySelectorAll('[role=alert], [data-state=error]')].some(visible);
+  const busy = [...scope.querySelectorAll('[role=progressbar], [aria-busy=true], [data-state=uploading]')].some(visible);
+  const sends = [...scope.querySelectorAll('button[data-testid="send-button"], button[type="submit"][aria-label="Send prompt"], button[type="submit"][aria-label="Send"]')].filter(visible);
+  return {counts, error, ambiguous:false, ready:!busy && !error && counts.every(n => n === 1) &&
+    sends.length === 1 && !sends[0].disabled && sends[0].getAttribute('aria-disabled') !== 'true'};
+})""" % json.dumps(COMPOSER_SEL)
+
+
+def _shared_filesystem(endpoint):
+    return (os.name == "posix" and sys.executable.startswith("/data/data/com.termux/files/usr/")
+            and urlsplit(endpoint).hostname in ("127.0.0.1", "localhost", "::1"))
+
+
+def attach_work_files(page, files, *, endpoint, timeout_s=None, poll_s=None, sleep=time.sleep, now=time.monotonic):
+    names = [item["name"] for item in files]
+    if (not files or len(files) > 20 or len(names) != len(set(names))
+            or any(not isinstance(name, str) or not name or Path(name).name != name or "/" in name or "\\" in name or "\0" in name for name in names)
+            or any(not isinstance(item["buffer"], bytes) or not item["buffer"] or len(item["buffer"]) > MAX_FILE_BYTES for item in files)
+            or any(item.get("mimeType") != "application/zip" and not item.get("mimeType", "").startswith("audio/") for item in files)
+            or sum(len(item["buffer"]) for item in files) > MAX_TOTAL_BYTES):
+        raise chat.ChatGptWebAttachmentFailed("Work source files exceed the bounded attachment contract")
+    target = page.locator(FILE_INPUT_SEL)
+    if target.count() != 1:
+        raise chat.ChatGptWebAttachmentFailed("Work generic file input is missing or ambiguous")
+    state_js = f"{_UPLOAD_STATE_JS}({json.dumps(names)})"
+    state = page.evaluate(state_js)
+    if state["ambiguous"] or state["error"] or any(state["counts"]):
+        raise chat.ChatGptWebAttachmentFailed("Work composer already has these files or an upload error")
+    # Keep private local files alive until the remote upload is confirmed.
+    with tempfile.TemporaryDirectory(prefix="rokid-work-upload-") as directory:
+        if _shared_filesystem(endpoint):
+            os.chmod(directory, 0o700)
+            paths = []
+            for item in files:
+                path = Path(directory) / item["name"]
+                with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb") as stream:
+                    stream.write(item["buffer"])
+                paths.append(str(path))
+            target.set_input_paths(paths)
+        else:
+            target.set_input_files(files)
+        deadline = now() + (chat.UPLOAD_TIMEOUT_S if timeout_s is None else timeout_s)
+        while True:
+            state = page.evaluate(state_js)
+            if state["error"] or state["ambiguous"] or any(n > 1 for n in state["counts"]):
+                raise chat.ChatGptWebAttachmentFailed("Work file upload failed or became ambiguous")
+            if state["ready"]:
+                return True
+            if now() >= deadline:
+                raise chat.ChatGptWebAttachmentFailed("Work files did not finish uploading; nothing sent")
+            sleep(chat.POLL_S if poll_s is None else poll_s)
+
+
+_SEND_JS = r"""((click, expected) => {
+  const composers = [...document.querySelectorAll(%s)].filter(e => e.getClientRects().length);
+  const norm = text => (text || '').replace(/\s+/g, ' ').trim();
+  if (composers.length !== 1 || norm(composers[0].innerText) !== norm(expected)) return false;
+  const form = composers[0].closest('form');
+  if (!form) return false;
+  const buttons = [...form.querySelectorAll('button[data-testid="send-button"], button[type="submit"][aria-label="Send prompt"], button[type="submit"][aria-label="Send"]')].filter(e => e.getClientRects().length);
+  if (buttons.length !== 1 || buttons[0].disabled || buttons[0].getAttribute('aria-disabled') === 'true') return false;
+  if (click) buttons[0].click();
+  return true;
+})""" % json.dumps(COMPOSER_SEL)
+
+
+def _pending_work_send(guard, *, purpose="answer"):
+    """Identify one journal-owned Work batch without trusting a reply body."""
+    status = guard.status()
+    if status["state"] != "uncertain":
+        return None
+    matches = [(key, entry) for key, entry in chat._read_chats(guard.directory).items()
+               if isinstance(entry, dict) and entry.get("pending") == status["request_id"]]
+    if len(matches) != 1:
+        return None
+    key, entry = matches[0]
+    transfer = entry.get("transfer")
+    batch = transfer.get("pending") if isinstance(transfer, dict) else None
+    inspection = purpose == "capture_inspection"
+    pattern = r"inspection:[a-f0-9]{64}" if inspection else r"session:[1-9][0-9]*:browser:[a-f0-9]{64}"
+    if (purpose not in ("answer", "capture_inspection") or not isinstance(key, str) or not re.fullmatch(pattern, key)
+            or _conversation_id(entry.get("url")) is None or not isinstance(batch, dict)):
+        return None
+    stage = batch.get("stage", "single")
+    names, digests, expect = (batch.get(field) for field in ("names", "digests", "expect"))
+    if (stage not in ("single", "reading", "listening")
+            or type(batch.get("number")) is not int or batch["number"] < 1
+            or type(batch.get("final")) is not bool
+            or any(type(batch.get(field)) is not int or batch[field] < 0 for field in ("users", "replies"))
+            or not isinstance(names, list) or not 1 <= len(names) <= 20
+            or any(not isinstance(name, str) or not name or "/" in name or "\\" in name or "\0" in name for name in names)
+            or len(set(names)) != len(names) or not isinstance(digests, list) or len(digests) != len(names)
+            or any(not isinstance(digest, str) or not re.fullmatch(r"[a-f0-9]{64}", digest) for digest in digests)
+            or not isinstance(expect, list) or not expect or any(not isinstance(field, str) for field in expect)
+            or (not batch["final"] and expect != ["received"])
+            or (batch["final"] and not inspection and "questions" not in expect)
+            or any(not isinstance(transfer.get(field), list) for field in ("completed", "pages"))
+            or not isinstance(entry.get("attached"), list)):
+        return None
+    identity = [key, batch["number"], names, digests]
+    if inspection:
+        contract = {field: batch.get(field) for field in ("purpose", "inspection_id", "manifest_sha256")}
+        if (stage != "single" or batch["number"] != 1 or not batch["final"]
+                or contract["purpose"] != "capture_inspection" or key != "inspection:" + str(contract["inspection_id"])
+                or type(contract["manifest_sha256"]) is not str
+                or re.fullmatch(r"[a-f0-9]{64}", contract["manifest_sha256"]) is None
+                or expect != ["inspection_id", "manifest_sha256", "inspection"]):
+            return None
+        identity.append(contract)
+    elif "purpose" in batch:
+        return None
+    if stage != "single":
+        identity.append(stage)
+    if chat._digest(json.dumps(identity, separators=(",", ":")).encode()) != batch.get("id"):
+        return None
+    return key, stage, batch
+
+
+class WorkWebClient(chat.ChatGptWebClient):
+    """Work controls/final reader; BrowserGuard and batch journal stay shared."""
+
+    transfer_batch_bytes = chat.TRANSFER_BATCH_BYTES
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self._requested = ContextVar("work_requested_settings", default=None)
+        self._inspection = ContextVar("work_capture_inspection", default=None)
+        self._observed = threading.local()
+
+    def resolve_new_job_settings(self, *, requested_settings, follow_family=True):
+        """One guarded inventory read; no Send, chat record or selection claim."""
+        from .cdp import CdpError, connect_over_cdp  # noqa: PLC0415
+
+        _requested_settings(requested_settings)
+        if type(follow_family) is not bool:
+            raise chat.ChatGptWebModelMismatch("Work model resolution policy is invalid; nothing sent")
+        if not chat.chatgpt_send_enabled():
+            raise chat.ChatGptWebSendNotAuthorized("ChatGPT browser preparation is not authorized")
+        try:
+            with chat.BrowserGuard() as guard:
+                guard.require_clear()  # A pending/unknown owner cannot be touched.
+                browser = connect_over_cdp(self.endpoint)
+                try:
+                    pages = []
+                    for context in browser.contexts:
+                        for page in context.pages:
+                            url = chat._url_of(page)
+                            try:
+                                parsed = urlsplit(url) if isinstance(url, str) else None
+                            except ValueError:
+                                continue
+                            if parsed and parsed.scheme == "https" and parsed.netloc == "chatgpt.com":
+                                pages.append(page)
+                    if len(pages) != 1:
+                        raise chat.ChatGptWebBrowserUnavailable("a unique existing ChatGPT tab is required for inventory")
+                    self._wait_for_composer(pages[0])
+                    return resolve_work_model_settings(pages[0], requested_settings=requested_settings,
+                                                       follow_family=follow_family)
+                finally:
+                    browser.close()
+        except chat.BrowserBusy as error:
+            raise chat.ChatGptWebBusy("browser is busy; inventory was not read") from error
+        except chat.BrowserGuardError as error:
+            raise chat.ChatGptWebBlocked("another browser send is unconfirmed; inventory was not read") from error
+        except (CdpError, OSError) as error:
+            raise chat.ChatGptWebBrowserUnavailable("local Work inventory is unavailable; nothing sent") from error
+
+    def complete(self, *, requested_settings=None, **kwargs):
+        # A known diagnostic owns this shared uncertain send. Answers wait for
+        # its read-only retirement instead of being recorded as failed answers.
+        if self._inspection.get() is None and self.pending_inspection_owner() is not None:
+            raise chat.ChatGptWebBusy("a diagnostic reply is pending; answer has priority after readback")
+        token = self._requested.set(_requested_settings(requested_settings))
+        self._observed.conversation_id = None
+        try:
+            return super().complete(**kwargs)
+        finally:
+            self._requested.reset(token)
+
+    def complete_json(self, *, requested_settings=None, **kwargs):
+        return chat.extract_json(self.complete(requested_settings=requested_settings, **kwargs))
+
+    def complete_inspection(self, *, inspection_id, manifest_sha256, prompt, files, before_submit=None, requested_settings=None):
+        """A distinct diagnostic purpose on the SAME writer and send journal.
+
+        One bounded packet, one final, one stable chat. It never enters the
+        answer-stage instructions or represents an inspection as questions.
+        """
+        if any(type(value) is not str or re.fullmatch(r"[a-f0-9]{64}", value) is None
+               for value in (inspection_id, manifest_sha256)):
+            raise ValueError("invalid inspection identity")
+        token = self._inspection.set(_InspectionPurpose(inspection_id, manifest_sha256))
+        try:
+            return self.complete_json(system="Inspect supplied image regions only. Never solve, guess missing text, or certify a page.",
+                prompt=prompt, files=files, chat_key="inspection:" + inspection_id, booklet=True,
+                expect=("inspection_id", "manifest_sha256", "inspection"), before_submit=before_submit,
+                requested_settings=requested_settings or {"model": "gpt-6-luna", "effort": "high", "speed": "fast"})
+        finally:
+            self._inspection.reset(token)
+
+    def _booklet_locked(self, context, text, *, guard, files, chat_key, expect, **kwargs):
+        purpose = self._inspection.get()
+        if purpose is None:
+            return super()._booklet_locked(context, text, guard=guard, files=files, chat_key=chat_key,
+                                           expect=expect, **kwargs)
+        contract = purpose.contract
+        self._load_chat(guard, chat_key)
+        status = guard.status()
+        if status["state"] == "uncertain" and self._pending != status.get("request_id"):
+            raise chat.ChatGptWebBlocked("another send is unconfirmed; nothing sent")
+        if self._transfer is None:
+            if self._chat_url:
+                raise chat.ChatGptWebBlocked("inspection cannot adopt an unrelated legacy chat")
+            self._transfer = {"completed": [], "pages": [], "final": None, "pending": None}
+        batch = self._transfer.get("pending") or (self._transfer.get("last") if self._transfer.get("final") else None)
+        if batch is not None:
+            if any(batch.get(key) != value for key, value in contract.items()):
+                raise chat.ChatGptWebBlocked("inspection receipt owner changed; nothing sent")
+            reply = self._recover_locked(context, guard, expect=expect, batch=batch)
+            if reply is None:
+                raise chat.ChatGptWebUncertain("inspection outcome unknown; read the same chat only")
+            return reply
+        guard.require_clear()
+        iterator = iter(files() if callable(files) else files or [])
+        attachment, extra = next(iterator, None), next(iterator, None)
+        if (attachment is None or extra is not None or type(attachment.get("buffer")) is not bytes
+                or attachment.get("mimeType") != "application/zip" or len(attachment["buffer"]) > 16 * 1024 * 1024):
+            raise chat.ChatGptWebAttachmentFailed("inspection requires one bounded ZIP packet")
+        names, digests = [attachment["name"]], [chat._digest(attachment["buffer"])]
+        batch_id = chat._digest(json.dumps([chat_key, 1, names, digests, contract], separators=(",", ":")).encode())
+        batch = {"id": batch_id, "number": 1, "names": names, "digests": digests,
+                 "final": True, "expect": list(expect), **contract}
+        receipt = {"batch_id": batch_id, "inspection_id": contract["inspection_id"],
+                   "manifest_sha256": contract["manifest_sha256"], "inspection": {"observations": []}}
+        message = (text + "\nReturn only the diagnostic JSON below, preserving both identities and batch_id. "
+                   "Each supplied image needs an observation; the empty shape is not a finding.\nTransfer receipt:\n"
+                   + json.dumps(receipt, ensure_ascii=False))
+        return self._ask_locked(context, message, [], guard=guard, files=[attachment], chat_key=chat_key,
+                                expect=(*expect, "batch_id"), batch=batch, before_submit=kwargs.get("before_submit"))
+
+    @staticmethod
+    def _valid_batch(reply, batch):
+        if batch.get("purpose") != "capture_inspection":
+            return chat.ChatGptWebClient._valid_batch(reply, batch)
+        try:
+            value = chat.extract_json(reply)
+        except ValueError:
+            return False
+        return (type(value) is dict and set(value) == {"batch_id", "inspection_id", "manifest_sha256", "inspection"}
+                and value["batch_id"] == batch["id"] and value["inspection_id"] == batch["inspection_id"]
+                and value["manifest_sha256"] == batch["manifest_sha256"] and type(value["inspection"]) is dict)
+
+    def pending_inspection_owner(self):
+        try:
+            with chat.BrowserGuard() as guard:
+                pending = _pending_work_send(guard, purpose="capture_inspection")
+                return pending[2]["inspection_id"] if pending else None
+        except chat.BrowserBusy as error:
+            raise chat.ChatGptWebBusy("browser is busy; nothing sent") from error
+        except (chat.BrowserGuardError, OSError, ValueError, TypeError, KeyError):
+            return None
+
+    @property
+    def conversation_id(self):
+        return getattr(self._observed, "conversation_id", _conversation_id(self._chat_url))
+
+    def pending_work_owner(self):
+        """Return only a unique Work owner; unknown/legacy sends stay blocked."""
+        try:
+            with chat.BrowserGuard() as guard:
+                pending = _pending_work_send(guard)
+                return {"chat_key": pending[0], "stage": pending[1]} if pending else None
+        except chat.BrowserBusy as error:
+            raise chat.ChatGptWebBusy("browser is busy; nothing sent") from error
+        except (chat.BrowserGuardError, OSError, ValueError, TypeError, KeyError):
+            return None
+
+    def retire_expired_batch(self, *, chat_key, booklet_stage, expired_guard, sleep=time.sleep, purpose="answer"):
+        """Read a stale owner's matching final/ACK and retire that send only.
+
+        This does not enter complete/recover/ask: none of their preparation,
+        model, attachment, next-batch or answer-sealing paths are reachable.
+        """
+        from .cdp import CdpError, connect_over_cdp  # noqa: PLC0415
+
+        try:
+            with chat.BrowserGuard() as guard:
+                pending = _pending_work_send(guard, purpose=purpose)
+                if not pending or pending[:2] != (chat_key, booklet_stage):
+                    return False
+                self._load_chat(guard, chat_key)
+                batch = pending[2]
+                with expired_guard():
+                    pass  # Verify expiry and inactive ownership BEFORE browser reads.
+                browser = connect_over_cdp(self.endpoint)
+                try:
+                    if not browser.contexts:
+                        return False
+                    pages = [page for page in browser.contexts[0].pages
+                             if urlsplit(chat._url_of(page)).scheme == "https"
+                             and urlsplit(chat._url_of(page)).netloc == "chatgpt.com"]
+                    exact = [page for page in pages if chat._url_of(page) == self._chat_url]
+                    choices = exact or pages
+                    if len(choices) != 1:
+                        return False
+                    page = choices[0]
+                    page.goto(self._chat_url, wait_until="domcontentloaded")
+                    if chat._url_of(page) != self._chat_url:
+                        return False
+                    state = work_reply_state(page, batch["id"])
+                    if not state["found"] or state["ambiguous"] or state["streaming"] or not state["reply"]:
+                        return False
+                    reply = state["reply"]
+                    received = self._valid_batch(reply, batch)
+                    if not received:
+                        if not chat._limited(reply):
+                            return False
+                        try:
+                            chat.extract_json(reply)
+                        except ValueError:
+                            pass
+                        else:
+                            return False  # A mismatched JSON answer is not a proven refusal.
+                        for _ in range(max(0, chat.SETTLE_POLLS - 1)):
+                            sleep(chat.POLL_S)
+                            if work_reply_state(page, batch["id"]) != state:
+                                return False
+                    if work_reply_state(page, batch["id"]) != state:
+                        return False
+                    with expired_guard():
+                        if received:
+                            self._accept_batch(guard, reply, batch, self._pending)
+                        else:
+                            self._clear_refused_batch(guard, self._pending, self._chat_url)
+                    return True
+                finally:
+                    browser.close()
+        except chat.BrowserBusy as error:
+            raise chat.ChatGptWebBusy("browser is busy; nothing sent") from error
+        except (chat.BrowserGuardError, CdpError, chat.ChatGptWebError, OSError, ValueError, TypeError, KeyError):
+            return False
+
+    def _wait_for_composer(self, page, *, ready_timeout_s=None):
+        return chat.wait_for_composer(page, ready_timeout_s=ready_timeout_s, composer_selector=COMPOSER_SEL)
+
+    def _start_new_chat(self, page):
+        return chat.start_new_chat(page, wait_composer=self._wait_for_composer)
+
+    def _verify_model(self, page, *, select=False):
+        return verify_work_model(page, select=select, requested_settings=self._requested.get())
+
+    def _attach_images(self, page, images, *, files=None, audio=None, **kwargs):
+        if images or audio:
+            raise chat.ChatGptWebAttachmentFailed("Work expects original ZIP/audio file payloads")
+        return attach_work_files(page, files or [], endpoint=self.endpoint, **kwargs)
+
+    def _turn_counts(self, page):
+        return page.locator(USER_SEL).count(), page.locator(ASSISTANT_SEL).count()
+
+    def _send_and_read(self, page, text, *, composer, expect, before_submit, on_chat_url, on_model):
+        try:
+            receipt = json.loads(text.rsplit("\nTransfer receipt:\n", 1)[1])
+            batch_id = receipt["batch_id"]
+        except (ValueError, IndexError, KeyError) as error:
+            raise chat.ChatGptWebBlocked("Work requires the durable booklet batch marker") from error
+        composer = self._wait_for_composer(page)
+        composer.click()
+        composer.fill(text)
+        on_model(self._verify_model(page))
+        if " ".join(composer.inner_text().split()) != " ".join(text.split()):
+            raise chat.ChatGptWebBlocked("Work draft changed before send; nothing sent")
+        send = page.evaluate(f"{_SEND_JS}(false, {json.dumps(text)})")
+        if not send:
+            raise chat.ChatGptWebAttachmentFailed("Work send control is disabled or ambiguous")
+        before_submit()
+        # No Enter fallback: an unknown control must not turn into a blind send.
+        if not page.evaluate(f"{_SEND_JS}(true, {json.dumps(text)})"):
+            raise chat.ChatGptWebError("Work send control changed after journaling; no automatic resend")
+        def observed(url):
+            on_chat_url(url)
+            self._observed.conversation_id = _conversation_id(url)
+
+        return _wait_for_reply(page, batch_id, expect=expect, on_chat_url=observed)
+
+    def _return_to_chat(self, page, url, *, reload):
+        if _conversation_id(url) is None:
+            raise chat.ChatGptWebChatLost("Work conversation address is invalid; nothing sent")
+        return chat.return_to_chat(page, url, reload=reload, wait_composer=self._wait_for_composer)
+
+    def _recover_locked(self, context, guard, *, expect, batch=None, sleep=time.sleep, now=time.monotonic):
+        if not batch or not self._chat_url:
+            return None
+        page = chat.reuse_page(context)
+        if _conversation_id(self._chat_url):
+            self._return_to_chat(page, self._chat_url, reload=True)
+        elif not _conversation_id(chat._url_of(page)):
+            return None
+        try:
+            reply = _wait_for_reply(page, batch["id"], expect=expect, sleep=sleep, now=now)
+        except chat.ChatGptWebRateLimit:
+            if self._pending and self._transfer.get("pending") == batch:
+                self._clear_refused_batch(guard, self._pending, chat._url_of(page))
+            raise
+        except chat.ChatGptWebError:
+            return None
+        if not self._valid_batch(reply, batch):
+            return None
+        if self._transfer.get("pending"):
+            self._chat_url = chat._url_of(page)
+            self._accept_batch(guard, reply, batch, self._pending)
+        self._observed.conversation_id = _conversation_id(chat._url_of(page))
+        return reply

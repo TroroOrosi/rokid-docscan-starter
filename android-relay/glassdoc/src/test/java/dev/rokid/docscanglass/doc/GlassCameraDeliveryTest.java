@@ -5,6 +5,8 @@ import android.graphics.ImageFormat;
 import android.hardware.camera2.CameraCaptureSession;
 import android.hardware.camera2.CaptureFailure;
 import android.hardware.camera2.CaptureRequest;
+import android.hardware.camera2.CaptureResult;
+import android.hardware.camera2.TotalCaptureResult;
 import android.media.Image;
 import android.media.DocScanTestImage;
 import android.media.ImageReader;
@@ -24,6 +26,9 @@ import org.robolectric.annotation.Config;
 import org.robolectric.annotation.Implementation;
 import org.robolectric.annotation.Implements;
 import org.robolectric.shadow.api.Shadow;
+import org.robolectric.shadows.ShadowCaptureResult;
+import org.robolectric.shadows.ShadowTotalCaptureResult;
+import dev.rokid.docscanrelay.CaptureProvenance;
 import org.robolectric.util.ReflectionHelpers;
 import org.robolectric.util.ReflectionHelpers.ClassParameter;
 
@@ -41,10 +46,15 @@ public class GlassCameraDeliveryTest {
     private byte[] deliveredBytes;
     private int deliveredWidth;
     private int deliveredHeight;
+    private CaptureProvenance deliveredProvenance;
 
     @Before public void setup() {
         camera = new GlassCamera(RuntimeEnvironment.getApplication(),
                 new Handler(Looper.getMainLooper()), new GlassCamera.Callback() {
+                    @Override public void onCaptured(GlassCamera.Captured captured) {
+                        deliveredProvenance = captured.provenance;
+                        GlassCamera.Callback.super.onCaptured(captured);
+                    }
                     @Override public void onCaptured(byte[] bytes, int width, int height, long elapsed) {
                         events.add("delivered");
                         delivered++;
@@ -79,6 +89,55 @@ public class GlassCameraDeliveryTest {
         ((FailureShadow) Shadow.extract(failure)).imageCaptured = imageCaptured;
         return failure;
     }
+    private static TotalCaptureResult metadata(long timestamp) {
+        TotalCaptureResult result = ShadowTotalCaptureResult.newTotalCaptureResult();
+        ShadowCaptureResult values = Shadow.extract(result);
+        values.set(CaptureResult.SENSOR_TIMESTAMP, timestamp);
+        values.set(CaptureResult.SENSOR_EXPOSURE_TIME, 25_000_000L);
+        values.set(CaptureResult.SENSOR_SENSITIVITY, 400);
+        values.set(CaptureResult.CONTROL_AF_STATE, 0);
+        values.set(CaptureResult.CONTROL_AE_STATE, 2);
+        return result;
+    }
+
+    @Test public void matchingNativeStillResultTravelsWithTheOriginalJpeg() {
+        captureEvents(1).onCaptureCompleted(null, null, metadata(10));
+        deliver();
+        assertEquals("native_still", deliveredProvenance.sourceKind);
+        assertEquals(4032, deliveredProvenance.width);
+        assertEquals(3024, deliveredProvenance.height);
+        assertEquals(Long.valueOf(10), deliveredProvenance.imageTimestampNanos);
+        assertEquals(Long.valueOf(10), deliveredProvenance.resultTimestampNanos);
+        assertEquals(Long.valueOf(25_000_000), deliveredProvenance.exposureNanos);
+        assertEquals(Integer.valueOf(400), deliveredProvenance.sensitivityIso);
+        assertEquals(Integer.valueOf(0), deliveredProvenance.afState);
+        assertEquals(Integer.valueOf(2), deliveredProvenance.aeState);
+        assertEquals("039058c6f2c0cb492c533b0a4d14ef77cc0f78abccced5287d84a1a2011cfb81", deliveredProvenance.jpegSha256);
+        assertArrayEquals(new byte[]{1, 2, 3}, deliveredBytes);
+    }
+
+    @Test public void mismatchedStillResultCannotBeBorrowedFromPreviewOrAnotherImage() {
+        ReflectionHelpers.setField(camera, "meteringExposureNanos", 9_000_000L);
+        captureEvents(1).onCaptureCompleted(null, null, metadata(11));
+        deliver();
+        assertEquals(Long.valueOf(10), deliveredProvenance.imageTimestampNanos);
+        assertNull(deliveredProvenance.resultTimestampNanos);
+        assertNull(deliveredProvenance.exposureNanos);
+        assertNull(deliveredProvenance.sensitivityIso);
+        assertTrue(failures.isEmpty());
+    }
+
+    @Test public void previousGenerationAndLateResultsCannotRebindDeliveredProvenance() {
+        captureEvents(0).onCaptureCompleted(null, null, metadata(10));
+        deliver();
+        CaptureProvenance original = deliveredProvenance;
+        assertNull(original.resultTimestampNanos);
+        captureEvents(1).onCaptureCompleted(null, null, metadata(10));
+        assertSame(original, deliveredProvenance);
+        assertNull(original.exposureNanos);
+        assertEquals(1, delivered);
+        assertTrue(failures.isEmpty());
+    }
     @Test public void imageIsClosedBeforeReaderAndConsumer() {
         deliver();
         assertEquals(List.of("image.close", "reader.close", "delivered"), events);
@@ -107,6 +166,14 @@ public class GlassCameraDeliveryTest {
         deliver();
         assertEquals(0, delivered);
         assertEquals(1, failures.size());
+    }
+    @Test public void aJpegWithoutASensorTimestampCannotBeBoundToAReusedReaderGeneration() {
+        ((DocScanTestImage) readerShadow.image).timestamp = 0;
+        deliver();
+        assertEquals(0, delivered);
+        assertEquals(List.of("invalid JPEG timestamp"), failures);
+        assertEquals(List.of("image.close", "reader.close"), events);
+        assertTrue((Boolean)ReflectionHelpers.getField(camera, "unknown"));
     }
     @Test public void memoryFailureClosesTheImageAndSettlesOnce() {
         ((DocScanTestImage) readerShadow.image).memoryFailure = true;
@@ -170,6 +237,50 @@ public class GlassCameraDeliveryTest {
         assertEquals(List.of("CAMERA TIMEOUT"), failures);
     }
 
+    @Test public void previewObservationsDuringReviewLatchTheTurnWithoutStartingAnotherStill() {
+        DocScanTestImage image = (DocScanTestImage) readerShadow.image;
+        image.format = ImageFormat.YUV_420_888;
+        image.width = 32;
+        image.height = 24;
+        image.rowStride = 32;
+        image.pixelStride = 1;
+        byte[] pixels = new byte[32 * 24];
+        java.util.Arrays.fill(pixels, (byte) 180);
+        image.buffer = ByteBuffer.wrap(pixels);
+        PageChange change = ReflectionHelpers.getField(camera, "pageChange");
+        change.observe(pixels, android.os.SystemClock.elapsedRealtime());
+        change.consumed(); // the existing JPEG request has claimed this page
+        java.util.concurrent.atomic.AtomicInteger ready = new java.util.concurrent.atomic.AtomicInteger();
+        CameraReadiness metering = new CameraReadiness(new int[]{CaptureRequest.CONTROL_AF_MODE_OFF},
+                0f, new int[]{CaptureRequest.CONTROL_AE_MODE_ON});
+        ReflectionHelpers.setField(camera, "metering", metering);
+        Runnable observe = () -> {
+            // Each simulated capture has a new sensor timestamp shared by image and metadata.
+            image.timestamp = android.os.SystemClock.elapsedRealtimeNanos();
+            metering.observe(null, CaptureRequest.CONTROL_AE_STATE_CONVERGED, android.os.SystemClock.elapsedRealtime());
+            ReflectionHelpers.setField(camera, "meteringSensorTimestamp", image.timestamp);
+            ReflectionHelpers.callInstanceMethod(camera, "previewFrame",
+                    ClassParameter.from(ImageReader.class, reader), ClassParameter.from(long.class, 0L));
+        };
+        java.util.Arrays.fill(pixels, 0, pixels.length / 3, (byte) 70);
+        shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(500));
+        observe.run(); // review has no pageReady callback, but the preview still observes
+        java.util.Arrays.fill(pixels, (byte) 180); // a similar next page
+        shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(300));
+        observe.run();
+        assertEquals(0, ready.get());
+        assertEquals(0, delivered);
+        ReflectionHelpers.setField(camera, "pageReady", (Runnable) ready::incrementAndGet);
+        shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(400));
+        observe.run();
+        assertEquals("the observed turn remains ready when review finishes", 1, ready.get());
+        shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(400));
+        observe.run();
+        assertEquals("the ready callback must only be delivered once", 1, ready.get());
+        assertEquals(0, delivered);
+        assertTrue(failures.isEmpty());
+    }
+
 
     @Implements(CaptureFailure.class)
     public static class FailureShadow {
@@ -184,6 +295,7 @@ public class GlassCameraDeliveryTest {
         List<String> events;
         boolean throwOnClose;
         @Implementation protected Image acquireNextImage() { return image; }
+        @Implementation protected Image acquireLatestImage() { return image; }
         @Implementation protected void close() {
             events.add("reader.close");
             if (throwOnClose) throw new IllegalStateException("synthetic close failure");

@@ -48,9 +48,30 @@ def test_settings_distinguish_local_glasses_and_frozen_phone_controls(client):
     assert local["startup"]["requires_selection"] is True
     assert local["capture"]["review_visible_seconds"] == 3
     assert local["capture"]["commit"] == "local_before_http"
-    assert local["answers"]["menu_back"] == "double_tap"
-    assert local["answers"]["exit"] == "two_double_taps_within_3_seconds"
+    assert local["capture"]["trigger"] == "observed_page_change_then_still"
+    assert local["capture"]["ocr_characters_required"] is False
+    assert local["answers"]["writing_done"] == "one_double_tap_then_display_sleep"
+    assert local["answers"]["writing_done_counts_toward_exit"] is False
+    assert local["answers"]["exit"] == "two_more_double_taps_within_3_seconds_while_waiting"
+    assert local["answers"]["layout"] == "fixed_full_answer_slides"
+    assert local["answer_wake"] == "active_session_generation_and_new_answer_revision"
     assert local["physical_acceptance"] == "pending"
+
+
+def test_settings_publish_mixed_recording_and_idle_wear_controls(client):
+    local = client.get("/v1/settings").json()["operation_routes"]["glassdoc"]
+    assert local["startup"]["modes"] == ["normal", "mixed", "listening"]
+    assert local["startup"]["wear_entry"] == "authenticated_fresh_generation_chooser_request"
+    assert local["display_idle"] == {"seconds": 5, "reset_by": "user_input_only",
+                                     "protected": ["capturing", "photo_review", "reading"],
+                                     "request": "authenticated_display_sleep"}
+    mixed = local["mixed"]
+    assert mixed["record_toggle"] == {"capturing": "swipe_either_direction", "photo_review": "swipe_either_direction",
+                                      "analyzing": "single_tap", "waiting": "single_tap", "reading": "single_tap"}
+    assert mixed["audio_analysis"] == "same_chat_after_reading_reply_saved_and_original_audio_complete"
+    assert mixed["reading_done"] == "one_double_tap_to_waiting_keep_microphone"
+    assert mixed["return_to_reading"] == "swipe_while_analyzing_or_waiting_if_saved"
+    assert mixed["available_stage"] == "display_availability_including_failure_reasons"
 
 
 def test_settings_advertise_silent_contract(client):
@@ -461,3 +482,105 @@ def test_settings_expose_a_selected_but_unusable_analyzer(client, monkeypatch):
     assert analyzer["name"] == "claude"
     assert analyzer["offline"] is False
     assert analyzer["ready"] is False
+
+
+def test_settings_report_an_unready_real_mode_provider_instead_of_failing(client, monkeypatch):
+    """The glasses call /v1/settings at connect and read any failure as
+    "サーバへ接続できません" (DocScanController.java:864, :978). Under
+    ROKID_REAL_MODE=1, get_solver()/get_analyzer() raise for an unready
+    provider (config.require_real_provider) -- that must not become a 500;
+    it has to be reported so the operator learns it before the session, not
+    mid-session. Solving itself still has to refuse.
+    """
+    import app.config as config
+
+    monkeypatch.setenv("ROKID_SOLVER", "claude")
+    for key in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GOOGLE_API_KEY"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setattr(config, "REAL_MODE", True)
+
+    r = client.get("/v1/settings")
+
+    assert r.status_code == 200
+    providers = r.json()["providers"]
+    solver = providers["solver"]
+    assert solver["name"] == "claude"
+    assert solver["ready"] is False
+    assert "claude" in solver["message"]
+    assert "ROKID_REAL_MODE" in solver["message"]
+    # The default analyzer ("local") is an offline placeholder, which
+    # ROKID_REAL_MODE=1 rejects too -- must be reported, not just the solver.
+    analyzer = providers["analyzer"]
+    assert analyzer["ready"] is False
+    assert "message" in analyzer
+
+    from app.solvers import get_solver
+
+    with pytest.raises(RuntimeError):
+        get_solver()
+
+
+def test_settings_reports_a_provider_whose_info_raises_without_failing(client, monkeypatch):
+    """.info() itself can raise (e.g. a CDP probe returning something
+    unexpected). That must not 500 the pre-flight, and the exception text
+    must never reach the client -- it could carry a URL or other detail.
+
+    Injected via the registry's ``_items`` dict (monkeypatch-scoped, like
+    tests/test_real_mode.py) rather than register_analyzer(), which would
+    leave this always-raising analyzer permanently registered and break every
+    other test that lists all analyzers (list_analyzers(), /v1/version).
+    """
+    from app.analyzers import registry as analyzer_registry_mod
+
+    class _ExplodingAnalyzer:
+        name = "settings-test-exploding"
+
+        def info(self):
+            raise AttributeError("http://internal.example/secret-path leaked here")
+
+    items = dict(analyzer_registry_mod._registry._items)
+    items["settings-test-exploding"] = _ExplodingAnalyzer()
+    monkeypatch.setattr(analyzer_registry_mod._registry, "_items", items)
+    monkeypatch.setenv("ROKID_ANALYZER", "settings-test-exploding")
+
+    r = client.get("/v1/settings")
+
+    assert r.status_code == 200
+    analyzer = r.json()["providers"]["analyzer"]
+    assert analyzer["name"] == "settings-test-exploding"
+    assert analyzer["ready"] is False
+    assert analyzer["message"] == "AttributeError while checking"
+    assert "secret" not in analyzer["message"]
+    assert "internal.example" not in analyzer["message"]
+
+
+def test_settings_calls_info_once_per_provider_even_when_real_mode_rejects_it(client, monkeypatch):
+    """The earlier implementation called .info() once inside
+    require_real_provider and again to build the report -- doubling the cost
+    of a probing ready() (chatgpt-web's CDP check took 10+ seconds for this).
+    """
+    import app.config as config
+    from app.solvers import registry as solver_registry_mod
+
+    class _CountingSolver:
+        name = "settings-test-counting"
+        calls = 0
+
+        def info(self):
+            type(self).calls += 1
+            return {"name": self.name, "offline": False, "ready": False,
+                    "provider_version": "test"}
+
+    items = dict(solver_registry_mod._registry._items)
+    items["settings-test-counting"] = _CountingSolver()
+    monkeypatch.setattr(solver_registry_mod._registry, "_items", items)
+    monkeypatch.setenv("ROKID_SOLVER", "settings-test-counting")
+    monkeypatch.setattr(config, "REAL_MODE", True)
+
+    r = client.get("/v1/settings")
+
+    assert r.status_code == 200
+    solver = r.json()["providers"]["solver"]
+    assert solver["ready"] is False
+    assert "message" in solver
+    assert _CountingSolver.calls == 1
