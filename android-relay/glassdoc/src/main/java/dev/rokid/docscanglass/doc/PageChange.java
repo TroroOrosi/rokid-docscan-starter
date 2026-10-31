@@ -1,5 +1,7 @@
 package dev.rokid.docscanglass.doc;
 
+import java.nio.ByteBuffer;
+
 /** Temporal change latch: two visually similar pages are kept if a turn was seen. */
 final class PageChange {
     // ponytail: coarse spatial change; head motion/gain changes still need real-page calibration.
@@ -13,8 +15,21 @@ final class PageChange {
     private long changedAt;
     private boolean pending = true;
     private long sequence;
+    private LumaPageEvidence fine = new LumaPageEvidence();
+    private long lastFrameTimestamp, lastFrameAt;
 
-    void observe(byte[] pixels, long now) {
+    void observe(byte[] pixels, long now) { observe(pixels, now, false); }
+
+    void observeFrame(byte[] pixels, ByteBuffer luma, int width, int height, int row, int step,
+            long timestamp, long now) {
+        if (timestamp <= 0 || timestamp <= lastFrameTimestamp || now < lastFrameAt) {
+            fine.invalidate("stale_frame"); return;
+        }
+        lastFrameTimestamp = timestamp; lastFrameAt = now;
+        if (!fine.sample(luma, width, height, row, step, now)) return;
+        observe(pixels, now, true);
+    }
+    private void observe(byte[] pixels, long now, boolean fullFrame) {
         boolean changed = reference == null || reference.length != pixels.length;
         if (!changed) {
             changed = differs(pixels, 0, 0);
@@ -28,13 +43,19 @@ final class PageChange {
                 }
             }
         }
+        // A captured-page rescue needs one native phase to explain every point and both mean scales.
+        boolean samePhase = fullFrame && changed && capturedReference && fine.sameNativePhase(pixels);
+        if (samePhase) changed = false;
+        if (fullFrame && !changed && !samePhase) changed = fine.changed(capturedReference, now);
         if (changed) {
+            if (fullFrame) fine.acceptScene();
             pending = true;
             changedAt = now;
             sequence++;
             if (reference == null || reference.length != pixels.length) reference = pixels.clone();
             else System.arraycopy(pixels, 0, reference, 0, pixels.length);
         }
+        if (fullFrame) fine.prime();
         // Keep the spatial reference until positive change or shutter issue.
         // Adjacent-only comparison loses slow turns; summing motion would count jitter.
         // Preview producers may reuse their array after this observation.
@@ -63,10 +84,16 @@ final class PageChange {
     boolean ready(long now) { return reference != null && pending && now - changedAt >= STILL_MILLIS; }
     void consumed() {
         pending = false;
+        fine.consumed();
         if (latest != null) {
             System.arraycopy(latest, 0, reference, 0, latest.length);
             capturedReference = true;
         }
+    }
+    boolean fineMotionReady(long now) { return fine.motionReady(now); }
+    String fineStatus() { return fine.status(); }
+    void restartStream() {
+        fine = new LumaPageEvidence(); lastFrameTimestamp = lastFrameAt = 0;
     }
     long sequence() { return sequence; }
 }

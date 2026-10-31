@@ -252,7 +252,8 @@ from __future__ import annotations
 # 0.66.1: bounded monotonic timing metadata for phone-side display delivery diagnosis.
 # 0.66.2: include watcher work in its polling interval instead of adding fixed delay.
 # 0.66.3: retain unlabelled questions and nonconsecutive printed answer numbers.
-APP_VERSION = "0.66.3"
+# 0.66.4: share capture context with Work and supplement coarse page-change evidence.
+APP_VERSION = "0.66.4"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.
@@ -524,7 +525,8 @@ EXPLAINER_API_VERSION = "1.1.0"
 # 1.38.0: current-run native uploads may include their pre-capture diagnostic origin.
 # 1.39.0: fence stale power generations and show bounded, identity-bound capture feedback.
 # 1.40.0: opt-in native A/B selection retains both originals and reviews the chosen image.
-GLASSES_VIEW_CONTRACT_VERSION = "1.40.0"
+# 1.41.0: bounded fine-detail page-change evidence with coherent preview registration.
+GLASSES_VIEW_CONTRACT_VERSION = "1.41.0"
 
 # Answer-area overlay payload (box + short answer; 2D image-anchored).
 # 1.1.0: added tracking metadata (tracking/fixed_ar/anchor_hint).

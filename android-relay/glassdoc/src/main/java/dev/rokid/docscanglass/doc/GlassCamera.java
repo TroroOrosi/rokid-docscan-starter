@@ -166,6 +166,7 @@ final class GlassCamera {
     private long lastJpegSensorTimestamp;
     private long startedAtMillis;
     private StillResult stillResult;
+    private final CameraDiagnostics.Framing framing = new CameraDiagnostics.Framing();
     private boolean settled;
     private boolean closed;
     private boolean unknown;
@@ -430,6 +431,7 @@ final class GlassCamera {
             paperExposure = paperGeometryEvaluation && metering.afMode == CaptureRequest.CONTROL_AF_MODE_OFF
                     ? PaperExposure.create(characteristics, size, token) : null;
             previewMotion = new PageChange();
+            pageChange.restartStream();
             previewAt = 0;
             previewDisplayAt = 0;
             meteringSensorTimestamp = 0;
@@ -570,7 +572,8 @@ final class GlassCamera {
                 thumbnail[y * 32 + x] = pixels.get(origin + y * image.getHeight() / 24 * row + x * image.getWidth() / 32 * step);
             }
             long previousScene = pageChange.sequence();
-            pageChange.observe(thumbnail, now);
+            pageChange.observeFrame(thumbnail, pixels, image.getWidth(), image.getHeight(), row, step, timestamp, now);
+            framing.fine(pageChange.fineStatus(), image.getWidth(), image.getHeight());
             if (video != null && (!videoSceneObserved || previousScene != pageChange.sequence())) {
                 videoSceneObserved = true; video.scene(pageChange.sequence(), timestamp, now);
             }
@@ -688,7 +691,7 @@ final class GlassCamera {
         return !closed && !unknown && previewDevice != null && previewSession != null
                 && (activeFuturePage == null || (futureSceneSequence == pageChange.sequence()
                 && pageChange.ready(now)))
-                && meteringExposureNanos > 0 && meteredFrame(now) && previewMotion.ready(now)
+                && meteringExposureNanos > 0 && meteredFrame(now) && previewMotion.ready(now) && pageChange.fineMotionReady(now)
                 && now >= previewAt && now - previewAt <= CameraReadiness.FRESH_MILLIS
                 && (mode != Mode.ZSL_EVALUATION_YUV || (inputTransfer != null && inputTransfer.ready() && zslCandidate() != null))
                 && (mode != Mode.VIDEO_EVALUATION || (video != null && video.recording()));
@@ -730,6 +733,7 @@ final class GlassCamera {
                     CaptureRequest request, TotalCaptureResult result) {
                 if (!current() || source != previewSession || result == null) return;
                 try {
+                    if (!focusTrigger) framing.preview(token, result);
                     if (!focusTrigger && zslFrames != null) zslFrames.result(result);
                     Long timestamp = result.get(CaptureResult.SENSOR_TIMESTAMP);
                     if (video != null && timestamp != null) video.frame(timestamp, result.getFrameNumber(),
@@ -913,6 +917,7 @@ final class GlassCamera {
             if (selectedInput == null) { previewFailed("ZSL source expired before issue"); return; }
         }
         long current = ++generation;
+        framing.arm(current, previewGeneration);
         stillResult = null;
         settled = false;
         captureStream = previewGeneration;
@@ -1048,6 +1053,7 @@ final class GlassCamera {
                 // late result is diagnostic only, never a success or a retry trigger.
                 if (current == generation && !closed && !unknown) {
                     CameraDiagnostics.result(current, result);
+                    framing.result(current, captureStream, result);
                 }
                 if (active(current) && !unknown && result != null) {
                     try { stillResult = new StillResult(current, result); }
@@ -1094,6 +1100,7 @@ final class GlassCamera {
             return;
         }
         if (settled || closed) return;
+        framing.jpeg(generation, captureStream, sensorTimestamp);
         ZslFrameBuffer.Selection outputSource = selectedInput;
         if (!previewRequested && !release()) {
             fail("camera close failed");
@@ -1206,6 +1213,7 @@ final class GlassCamera {
         ImageReader oldZslReader = zslReader;
         ZslFrameBuffer oldFrames = zslFrames;
         ZslInputTransfer oldInput = inputTransfer;
+        framing.clear();
         long oldPreviewGeneration = previewGeneration;
         previewSession = null;
         previewDevice = null;

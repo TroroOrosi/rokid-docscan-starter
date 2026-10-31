@@ -125,6 +125,41 @@ def question_for(doc, session, *, stage="single", **extra):
     return Question(chat_key=f"session:{session}", document_pages=pages, booklet_stage=stage, **extra)
 
 
+@pytest.mark.parametrize("stage", ["single", "reading"])
+def test_capture_context_reaches_the_sealed_work_job_and_browser_prompt(client, monkeypatch, stage):
+    from app import main
+    from app.solvers.chatgpt_work import ChatGptWorkSolver
+    from app.work_bridge import configured_work_store
+
+    doc = client.post("/v1/documents", json={"title": "overview and overlapping sections"}).json()["document_id"]
+    for number in range(3):
+        assert client.post(f"/v1/documents/{doc}/pages", data={"page_index": number},
+            files={"image": ("page.png", picture(number), "image/png")}).status_code == 201
+    assert client.post(f"/v1/documents/{doc}/finalize").status_code == 200
+    session = client.post("/v1/exam-sessions", json={"document_id": doc, "mode": "study",
+        "exam_type": "mixed" if stage == "reading" else "written"}).json()["session_id"]
+    assert client.post(f"/v1/exam-sessions/{session}/finalize-reading?solve=background").status_code == 200
+    job = wait_for(lambda: (configured_work_store().list_jobs()["jobs"] or [None])[0])
+    wait_for(lambda: session not in main._background_solves)
+    fake = BrowserReply()
+    monkeypatch.setenv("ROKID_CHATGPT_SEND_ENABLED", "1")
+    ChatGptWorkSolver(client=fake).answer_all(question=question_for(doc, session, stage=stage))
+
+    assert len(fake.calls) == 1
+    prompt = fake.calls[0]["prompt"]
+    assert job["prompt"] in prompt
+    assert prompt.count("capture order, not printed page numbers") == 1
+    assert "overlapping sections" in prompt and "each question once" in prompt
+    assert "Do not merge distinct questions" in prompt and "uncaptured" in prompt
+    entries = {}
+    for payload in fake.calls[0]["files"]:
+        with zipfile.ZipFile(io.BytesIO(payload["buffer"])) as archive:
+            entries.update({name: archive.read(name) for name in archive.namelist()})
+    assert list(entries) == [f"page_{number:03d}.png" for number in (1, 2, 3)]
+    for page in question_for(doc, session, stage=stage).document_pages:
+        assert entries[f"page_{page['page_number']:03d}.png"] == Path(page["image_path"]).read_bytes()
+
+
 @pytest.mark.parametrize(("count", "soft_limit"), [(21, None), (47, 1), (21, 1250)])
 def test_canonical_pages_remain_byte_exact_in_bounded_deterministic_zips_after_interruption(
         client, monkeypatch, count, soft_limit):

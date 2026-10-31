@@ -2446,6 +2446,40 @@ def test_a_later_identical_submission_gets_a_distinct_reconciliation_id(monkeypa
     assert ids[0] != ids[1], "an old acknowledgment must not clear a later submission"
 
 
+@pytest.mark.parametrize("stage", ["single", "reading", "question"])
+def test_capture_context_reaches_chat_booklet_and_individual_question_prompts(tmp_path, stage):
+    pages = []
+    for number in (1, 2, 3):
+        original = tmp_path / f"capture-{number}.png"
+        original.write_bytes(_real_png(80 + number))
+        pages.append({"page_number": number, "image_path": str(original)})
+    calls = []
+
+    class Client:
+        model = "test"
+
+        def complete_json(self, **options):
+            calls.append({**options, "files": list(options["files"]())})
+            item = {"group": "", "label": "", "pages": [1, 2, 3], "answer_no": [],
+                    "status": "needs_input", "answer": "", "missing_material": "uncaptured diagram"}
+            if stage == "reading":
+                item["requires_audio"] = False
+            return item if stage == "question" else {"questions": [item]}
+
+    question = Question(document_pages=pages, chat_key="session:1", answer_only=True,
+                        booklet_stage="single" if stage == "question" else stage)
+    solver = ChatGptWebSolver(client=Client())
+    if stage == "question":
+        solver.solve(question=question)
+    else:
+        solver.answer_all(question=question)
+    assert len(calls) == 1 and len(calls[0]["files"]) == 3
+    prompt = calls[0]["prompt"]
+    assert prompt.count("capture order, not printed page numbers") == 1
+    assert "overlapping sections" in prompt and "each question once" in prompt
+    assert "Do not merge distinct questions" in prompt and "uncaptured" in prompt
+
+
 def test_one_message_lists_and_answers_the_booklet_in_the_answer_chat(tmp_path):
     """The model names the 小問 from the originals AND answers them in one reply."""
     page_path = tmp_path / "page.png"

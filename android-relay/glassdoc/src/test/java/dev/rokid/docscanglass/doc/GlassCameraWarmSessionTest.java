@@ -66,6 +66,7 @@ public class GlassCameraWarmSessionTest {
         ManagerShadow.refuseSession = false; CharacteristicsShadow.fixedFocus = false;
         CharacteristicsShadow.aeRegions = 0; // AGENT_APPROVED=1: explicit comparison test setup.
         CharacteristicsShadow.strictPublicApi = false;
+        MapShadow.previewSize = new Size(320, 240);
         CharacteristicsShadow.afMode = CONTROL_AF_MODE_CONTINUOUS_PICTURE;
         createCamera();
     }
@@ -151,6 +152,160 @@ public class GlassCameraWarmSessionTest {
         DocScanTestImage image = new DocScanTestImage(new ArrayList<>());
         image.timestamp = timestamp; image.buffer = ByteBuffer.wrap(bytes); jpeg.image = image;
         jpeg.listener.onImageAvailable(jpeg.reader); idle(0);
+    }
+
+
+    private byte[] fineGlyphPage(boolean alternate) {
+        byte[] pixels = new byte[320 * 240]; java.util.Arrays.fill(pixels, (byte)235);
+        String[] glyph = alternate
+                ? new String[]{"00100", "01100", "00100", "00100", "00100", "00100", "01110"}
+                : new String[]{"01110", "11011", "11011", "11011", "11011", "11011", "01110"};
+        for (int cy = 0; cy < 23; cy++) for (int cx = 0; cx < 31; cx++)
+            for (int y = 0; y < 7; y++) for (int x = 0; x < 5; x++)
+                if (glyph[y].charAt(x) == '1') pixels[(cy * 10 + y + 1) * 320 + cx * 10 + x + 1] = 30;
+        return pixels;
+    }
+    private void fineFrame(byte[] luma) {
+        DocScanTestImage image = new DocScanTestImage(new ArrayList<>());
+        image.format = ImageFormat.YUV_420_888;
+        image.width = luma.length == 640 * 480 ? 640 : 320; image.height = luma.length / image.width;
+        image.rowStride = image.width * 2 + 7; image.pixelStride = 2;
+        byte[] storage = new byte[7 + image.rowStride * image.height]; java.util.Arrays.fill(storage, (byte)9);
+        for (int y = 0; y < image.height; y++) for (int x = 0; x < image.width; x++)
+            storage[7 + y * image.rowStride + x * 2] = luma[y * image.width + x];
+        image.buffer = ByteBuffer.wrap(storage); image.buffer.position(7);
+        image.timestamp = SystemClock.elapsedRealtimeNanos();
+        ReaderShadow reader = currentReader(ImageFormat.YUV_420_888);
+        reader.image = image; reader.listener.onImageAvailable(reader.reader);
+    }
+    private void fineReadyFrame(byte[] luma) {
+        idle(100); result(CONTROL_AF_STATE_PASSIVE_FOCUSED, CONTROL_AE_STATE_CONVERGED); fineFrame(luma);
+    }
+    private void fineClock(java.util.function.LongSupplier clock) {
+        PageChange pages = ReflectionHelpers.getField(camera, "pageChange");
+        // Functional camera fixtures control work time; separate tests exercise the real deadline.
+        ReflectionHelpers.setField(pages, "fine", new LumaPageEvidence(clock));
+    }
+    private void fineNextPage(byte[] first, byte[] second) {
+        camera.captureOnce(); idle(0); fineClock(() -> 0L);
+        for (int i = 0; i < 8; i++) fineReadyFrame(first);
+        assertEquals("one original before a turn", 1, firstDevice().session.captures);
+        selectionJpeg(new byte[]{1, 2, 3});
+        AtomicInteger next = new AtomicInteger(); camera.awaitNextPage(next::incrementAndGet); idle(0);
+        for (int i = 0; i < 8; i++) fineReadyFrame(second);
+        assertEquals("changed native-area content must reach the real next-page callback", 1, next.get());
+        assertTrue(failures.isEmpty()); camera.close(); idle(0);
+    }
+    @Test public void fineGlyphChangesBetweenTheCoarsePointsReachTheNextPageCallback() {
+        fineNextPage(fineGlyphPage(false), fineGlyphPage(true));
+    }
+    @Test public void aLocalizedSixthOfThePageReachesTheNextPageCallback() {
+        byte[] first = new byte[320 * 240]; java.util.Arrays.fill(first, (byte)220);
+        byte[] second = first.clone(); java.util.Arrays.fill(second, 80 * 320, 120 * 320, (byte)160);
+        fineNextPage(first, second);
+    }
+
+    @Test public void fineOnlyMotionRestartsTheRealShutterWaitEvenWhenThePageIdentityMatches() {
+        byte[] page = fineGlyphPage(false);
+        camera.captureOnce(); idle(0); fineClock(() -> 0L);
+        for (int i = 0; i < 8; i++) fineReadyFrame(page);
+        selectionJpeg(new byte[]{1, 2, 3});
+        PageChange pages = ReflectionHelpers.getField(camera, "pageChange"); long scene = pages.sequence();
+        byte[] shifted = page.clone();
+        for (int y = 0; y < 240; y++) for (int x = 0; x < 320; x++)
+            shifted[y * 320 + x] = page[Math.min(239, y + 1) * 320 + Math.min(319, x + 1)];
+        fineReadyFrame(shifted); assertEquals(scene, pages.sequence());
+        camera.captureOnce(); idle(350);
+        assertEquals("registered page motion still needs its own quiet interval", 1, firstDevice().session.captures);
+        fineReadyFrame(shifted); idle(0); assertEquals(2, firstDevice().session.captures);
+        assertTrue(failures.isEmpty()); camera.close(); idle(0);
+    }
+    @Test public void fineOnlyABATurnsKeepTwoFutureOriginalsWithoutReplacingTheVisibleOriginal() {
+        fineFutureABA(fineGlyphPage(false), fineGlyphPage(true));
+    }
+    private void fineFutureABA(byte[] a, byte[] b) {
+        camera.captureOnce(); idle(0); fineClock(() -> 0L);
+        for (int i = 0; i < 8; i++) fineReadyFrame(a);
+        selectionJpeg(new byte[]{1, 2, 3});
+        List<byte[]> originals = new ArrayList<>(); AtomicInteger gaps = new AtomicInteger();
+        camera.observeFuturePages(2, new CaptureSurface.FuturePageListener() {
+            public void onCandidate(byte[] jpeg, CaptureProvenance source, boolean matched) {
+                assertTrue(matched); assertNotNull(source); originals.add(jpeg);
+            }
+            public void onPageMissed() { gaps.incrementAndGet(); }
+        }); idle(0);
+        for (int i = 0; i < 8; i++) fineReadyFrame(b);
+        assertEquals(2, firstDevice().session.captures); selectionJpeg(new byte[]{4, 5, 6});
+        for (int i = 0; i < 8; i++) fineReadyFrame(a);
+        assertEquals(3, firstDevice().session.captures); selectionJpeg(new byte[]{7, 8, 9});
+        assertEquals(0, gaps.get());
+        for (int i = 0; i < 8; i++) fineReadyFrame(b);
+        assertEquals(3, firstDevice().session.captures); assertEquals(1, gaps.get());
+        assertEquals(1, delivered); assertEquals(2, originals.size());
+        assertArrayEquals(new byte[]{4, 5, 6}, originals.get(0));
+        assertArrayEquals(new byte[]{7, 8, 9}, originals.get(1));
+        assertTrue(failures.isEmpty()); camera.close(); idle(0);
+    }
+
+    private byte[] fineGlyph640(boolean alternate) {
+        byte[] small = fineGlyphPage(alternate), large = new byte[640 * 480];
+        for (int y = 0; y < 480; y++) for (int x = 0; x < 640; x++) large[y * 640 + x] = small[(y / 2) * 320 + x / 2];
+        return large;
+    }
+    @Test public void fine640GlyphsUseTheHalChosenPreviewWithoutChangingItsRequestedDimensions() {
+        MapShadow.previewSize = new Size(640, 480);
+        fineNextPage(fineGlyph640(false), fineGlyph640(true));
+        ReaderShadow preview = originalReader(ImageFormat.YUV_420_888);
+        assertEquals(640, preview.width); assertEquals(480, preview.height);
+    }
+    @Test public void fine640ABATurnsKeepTwoFutureOriginalsAtTheExistingCapacity() {
+        MapShadow.previewSize = new Size(640, 480); fineFutureABA(fineGlyph640(false), fineGlyph640(true));
+    }
+    @Test public void fine640LocalizedSixthStillReachesTheNextPageCallback() {
+        MapShadow.previewSize = new Size(640, 480);
+        byte[] first = new byte[640 * 480]; java.util.Arrays.fill(first, (byte)220);
+        byte[] second = first.clone(); java.util.Arrays.fill(second, 160 * 640, 240 * 640, (byte)160);
+        fineNextPage(first, second);
+    }
+
+    @Test public void twoIncompleteComparisonsRetainTheOriginalAndStillWaitFourHundredMillisAfterPositive() {
+        MapShadow.previewSize = new Size(640, 480);
+        camera.captureOnce(); idle(0);
+        final class WorkClock implements java.util.function.LongSupplier {
+            boolean expired; int reads;
+            @Override public long getAsLong() {
+                return expired && reads++ > 0 ? LumaPageEvidence.MAX_COMPARE_NANOS : 0L;
+            }
+        }
+        WorkClock clock = new WorkClock(); fineClock(clock);
+        byte[] a = fineGlyph640(false), b = fineGlyph640(true), original = new byte[]{1, 2, 3};
+        for (int i = 0; i < 8; i++) fineReadyFrame(a);
+        assertEquals(1, firstDevice().session.captures); selectionJpeg(original);
+        PageChange pages = ReflectionHelpers.getField(camera, "pageChange");
+        LumaPageEvidence fine = ReflectionHelpers.getField(pages, "fine"); long initial = pages.sequence();
+        AtomicInteger next = new AtomicInteger(); camera.awaitNextPage(next::incrementAndGet); idle(0);
+        clock.expired = true; int unknown = 0;
+        for (int i = 0; i < 4; i++) {
+            clock.reads = 0; fineReadyFrame(b);
+            if (fine.status().equals("time_budget")) unknown++;
+            assertEquals(initial, pages.sequence()); assertEquals(0, next.get());
+            assertEquals(1, firstDevice().session.captures); assertEquals(1, originals.size());
+            assertArrayEquals(original, originals.get(0).jpeg);
+        }
+        assertEquals("exactly two eligible searches exhausted their work budget", 2, unknown);
+        clock.expired = false;
+        fineReadyFrame(b); assertEquals(initial, pages.sequence()); // The intervening frame remains throttled.
+        fineReadyFrame(b); assertEquals("different", fine.status()); assertEquals(6561, fine.evaluatedOffsets());
+        assertEquals(initial + 1, pages.sequence()); assertEquals(0, next.get());
+        long positiveAt = SystemClock.elapsedRealtime();
+        idle(399); result(CONTROL_AF_STATE_PASSIVE_FOCUSED, CONTROL_AE_STATE_CONVERGED); fineFrame(b);
+        assertEquals(positiveAt + 399, SystemClock.elapsedRealtime());
+        assertFalse(pages.ready(SystemClock.elapsedRealtime())); assertEquals(0, next.get());
+        idle(1); result(CONTROL_AF_STATE_PASSIVE_FOCUSED, CONTROL_AE_STATE_CONVERGED); fineFrame(b);
+        assertTrue(pages.ready(SystemClock.elapsedRealtime())); assertEquals(1, next.get());
+        assertEquals(1, firstDevice().session.captures); assertEquals(1, delivered);
+        assertArrayEquals(original, originals.get(0).jpeg); assertTrue(failures.isEmpty());
+        camera.close(); idle(0);
     }
 
     private static final class Alternative implements CaptureSurface.NativeAlternative {
@@ -1026,17 +1181,19 @@ public class GlassCameraWarmSessionTest {
         }
     }
     @Implements(StreamConfigurationMap.class) public static class MapShadow {
+        static Size previewSize = new Size(320, 240);
         @Implementation protected Size[] getOutputSizes(int format) {
-            return new Size[]{format == ImageFormat.JPEG ? new Size(4032, 3024) : new Size(320, 240)};
+            return new Size[]{format == ImageFormat.JPEG ? new Size(4032, 3024) : previewSize};
         }
     }
     @Implements(ImageReader.class) public static class ReaderShadow {
         static final List<ReaderShadow> readers = new ArrayList<>();
-        ImageReader reader; int format; Image image; boolean closed; RuntimeException acquireFailure;
+        ImageReader reader; int format, width, height; Image image; boolean closed; RuntimeException acquireFailure;
         Surface surface = Shadow.newInstanceOf(Surface.class); ImageReader.OnImageAvailableListener listener;
         @Implementation protected static ImageReader newInstance(int width, int height, int format, int maxImages) {
             ImageReader reader = Shadow.newInstanceOf(ImageReader.class);
-            ReaderShadow shadow = Shadow.extract(reader); shadow.reader = reader; shadow.format = format; readers.add(shadow); return reader;
+            ReaderShadow shadow = Shadow.extract(reader); shadow.reader = reader; shadow.format = format;
+            shadow.width = width; shadow.height = height; readers.add(shadow); return reader;
         }
         @Implementation protected Surface getSurface() { return surface; }
         @Implementation protected void setOnImageAvailableListener(ImageReader.OnImageAvailableListener l, Handler h) { listener = l; }
