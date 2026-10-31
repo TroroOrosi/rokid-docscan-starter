@@ -68,8 +68,8 @@ def test_analyzing_sleeps_and_one_final_answer_wakes_only_the_matching_run(monke
     done = {**answer, "phase": "writing_done", "sequence": 3}
     commands = _watch(monkeypatch, [STATE, waiting, waiting, answer, answer, done, done])
     power = [c for c in commands if "keyevent" in c]
-    assert power == [("shell", "input", "-d", "0", "keyevent", "KEYCODE_SLEEP"),
-                     ("shell", "input", "-d", "0", "keyevent", "KEYCODE_SLEEP")]
+    assert power == [("shell", "input", "-d", "0", "keyevent", "KEYCODE_SOFT_SLEEP"),
+                     ("shell", "input", "-d", "0", "keyevent", "KEYCODE_SOFT_SLEEP")]
     launches = [c for c in commands if "am" in c]
     assert launches == [("shell", "am", "start", "-W", "-n", watch_glasses.COMPONENT,
                          "--ei", "wake_session_id", "7", "--el", "wake_generation", "3")]
@@ -127,7 +127,7 @@ def test_fold_then_open_relaunches_chooser_once_and_an_unknown_launch_is_not_rep
         ("shell", "am", "start", "-W", "-n", watch_glasses.COMPONENT, "--ez", "chooser", "true")]
 
 
-@pytest.mark.parametrize("operation", ["KEYCODE_SLEEP", "wake_session_id"])
+@pytest.mark.parametrize("operation", ["KEYCODE_SOFT_SLEEP", "wake_session_id"])
 def test_failed_delivery_retries_the_same_run_after_reconnection(monkeypatch, operation):
     state = {**STATE, "phase": "analyzing", "answer_ready": operation == "wake_session_id"}
     commands = _watch(monkeypatch, [state] * 3, fail_once=operation)
@@ -204,7 +204,7 @@ def test_explicit_chooser_waits_for_sleep_and_same_phase_can_sleep_again_after_i
     awake_again = {**awake, "sequence": 3}
     asleep_again = {**asleep, "sequence": 4}
     commands = _watch(monkeypatch, [awake, awake, asleep, asleep, awake_again, asleep_again, asleep_again])
-    assert len([c for c in commands if "KEYCODE_SLEEP" in c]) == 2
+    assert len([c for c in commands if "KEYCODE_SOFT_SLEEP" in c]) == 2
     assert not any("am" in c for c in commands), "ordinary wake is never a chooser-entry command"
 
 
@@ -213,7 +213,7 @@ def test_a_new_active_phase_cancels_a_sleep_snapshot_before_device_input(monkeyp
     sleep = {**STATE, "phase": "analyzing", "display_request": "sleep"}
     active = {**sleep, "phase": phase, "sequence": 2, "display_request": "wake"}
     commands = _watch(monkeypatch, [sleep, active])
-    assert not any("KEYCODE_SLEEP" in c for c in commands)
+    assert not any("KEYCODE_SOFT_SLEEP" in c for c in commands)
 
 
 def test_mixed_answers_notify_each_new_revision_even_while_the_reader_is_open(monkeypatch):
@@ -254,7 +254,7 @@ def test_interim_reading_done_sleeps_after_its_received_revision_but_a_new_revis
                 "available_stage": "reading", "answer_revision": 1, "ack_answer_revision": 1}
     final = {**received, "sequence": 3, "available_stage": "complete", "answer_revision": 2}
     commands = _watch(monkeypatch, [received, received, final, final], tick=0.5)
-    assert len([command for command in commands if "KEYCODE_SLEEP" in command]) == 1
+    assert len([command for command in commands if "KEYCODE_SOFT_SLEEP" in command]) == 1
     assert len([command for command in commands if "wake_session_id" in command]) == 1
 
 
@@ -262,13 +262,74 @@ def test_an_older_generation_or_sequence_never_applies_a_late_display_request(mo
     active = {**STATE, "phase": "reading", "generation": 4, "sequence": 5, "display_request": "wake"}
     stale = {**active, "phase": "analyzing", "generation": 3, "sequence": 99, "display_request": "sleep"}
     commands = _watch(monkeypatch, [active, stale])
-    assert not any("KEYCODE_SLEEP" in c for c in commands)
+    assert not any("KEYCODE_SOFT_SLEEP" in c for c in commands)
 
 
 def test_sleep_readback_failure_is_unknown_and_does_not_change_the_display(monkeypatch):
     sleep = {**STATE, "phase": "analyzing", "display_request": "sleep"}
     commands = _watch(monkeypatch, [sleep, watch_glasses.StateUnavailable("server_stopped"), STATE])
-    assert not any("KEYCODE_SLEEP" in c for c in commands)
+    assert not any("KEYCODE_SOFT_SLEEP" in c for c in commands)
+
+
+def test_sleep_dispatch_and_cancellation_report_only_fixed_power_metadata(monkeypatch, capsys):
+    asleep = {**STATE, "phase": "chooser", "session_id": None, "display_request": "sleep"}
+    commands = _watch(monkeypatch, [asleep, asleep])
+    assert len([command for command in commands if "KEYCODE_SOFT_SLEEP" in command]) == 1
+    output = capsys.readouterr().out
+    assert "Display action=sleep outcome=dispatched generation=3 sequence=1 phase=chooser" in output
+    assert "expected" not in output and "10.0.0.10" not in output
+
+    active = {**asleep, "phase": "reading", "sequence": 2, "display_request": "wake"}
+    commands = _watch(monkeypatch, [asleep, active])
+    assert not any("KEYCODE_SOFT_SLEEP" in command for command in commands)
+    assert "Display action=sleep outcome=suppressed generation=3 sequence=1 phase=chooser" in capsys.readouterr().out
+
+
+def test_unknown_sleep_delivery_is_logged_without_claiming_display_off(monkeypatch, capsys):
+    asleep = {**STATE, "phase": "chooser", "session_id": None, "display_request": "sleep"}
+    _watch(monkeypatch, [asleep, asleep], fail_once="KEYCODE_SOFT_SLEEP")
+    output = capsys.readouterr().out
+    assert "Display action=sleep outcome=unknown generation=3 sequence=1 phase=chooser" in output
+    assert "outcome=dispatched" not in output
+
+
+@pytest.mark.parametrize("protected_phase", ["capturing", "reading", "chooser"])
+def test_sleep_delivery_respects_the_os_display_hold_after_the_final_http_read(monkeypatch, protected_phase):
+    asleep = {**STATE, "phase": "waiting", "display_request": "sleep"}
+    active = {**asleep, "phase": protected_phase, "sequence": 2, "display_request": "wake"}
+    snapshots = iter([asleep, asleep, active])
+    reads = 0
+    holding = False
+    interactive = True
+
+    def fetch(*args):
+        nonlocal reads, holding
+        snapshot = next(snapshots)
+        reads += 1
+        if reads == 2:
+            # The Activity enters capture/reading after the last GET: PMS must
+            # evaluate its current WindowManager screen hold when handling input.
+            holding = True
+        return snapshot
+
+    def adb(serial, *args):
+        nonlocal interactive
+        if args == ("shell", "getprop", "ro.serialno"):
+            return "expected"
+        if args == ("shell", "getprop", "vendor.rkd.glasses.is_spread"):
+            return "1"
+        if "keyevent" in args:
+            if "KEYCODE_SLEEP" in args or ("KEYCODE_SOFT_SLEEP" in args and not holding):
+                interactive = False
+        return ""
+
+    monkeypatch.setattr(watch_glasses, "fetch_state", fetch)
+    monkeypatch.setattr(watch_glasses, "adb", adb)
+    monkeypatch.setattr(watch_glasses, "app_running", lambda serial: True)
+    monkeypatch.setattr(watch_glasses.time, "sleep", lambda _: None)
+    with pytest.raises(StopIteration):
+        watch_glasses.watch("glasses:5555", "expected", 0.5)
+    assert interactive, "a late sleep must respect the hold at input delivery, not the old HTTP snapshot"
 
 
 def test_initial_already_spread_bootstraps_a_stopped_app_once_without_claiming_wear(monkeypatch):

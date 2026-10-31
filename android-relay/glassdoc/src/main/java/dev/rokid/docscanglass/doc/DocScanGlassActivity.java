@@ -207,6 +207,7 @@ public final class DocScanGlassActivity extends Activity
         acknowledgedRevision = getPreferences(MODE_PRIVATE).getLong("power_ack_revision", -1);
         if (getIntent() != null && getIntent().getBooleanExtra("wear_origin", false)) {
             if (!acceptsWearEntry(getIntent())) { displaySleep.sleep(this); finish(); return; }
+            if (!displaySleep.wake(this)) Log.w(TAG, "wear display wake request refused");
             setIntent(new Intent(this, DocScanGlassActivity.class).putExtra("chooser", true));
         }
         boolean restoringWake = acceptsWake(getIntent());
@@ -289,6 +290,7 @@ public final class DocScanGlassActivity extends Activity
         super.onNewIntent(intent);
         if (intent != null && intent.getBooleanExtra("wear_origin", false)) {
             if (!acceptsWearEntry(intent)) return;
+            if (!displaySleep.wake(this)) Log.w(TAG, "wear display wake request refused");
             intent = new Intent(this, DocScanGlassActivity.class).putExtra("chooser", true);
         }
         if (intent != null && intent.hasExtra(WAKE_SESSION)) {
@@ -784,7 +786,7 @@ public final class DocScanGlassActivity extends Activity
 
     @Override public void onAutoCaptureChanged(boolean running) {
         main.post(() -> {
-            if (sessionClosed || writingDone) return;
+            if (sessionClosed || writingDone || !isCurrentPowerGeneration(powerGeneration)) return;
             captureDisplayActive = running;
             if (running) {
                 keepDisplayActive();
@@ -1218,7 +1220,8 @@ public final class DocScanGlassActivity extends Activity
     }
 
     private void wakeForResult() {
-        if (sessionClosed || writingDone) return;
+        if (sessionClosed || writingDone || isFinishing() || isDestroyed()
+                || !isCurrentPowerGeneration(powerGeneration)) return;
         if (awaitingAnswers && !displaySleep.wake(this)) Log.w(TAG, "answer display wake request refused");
         keepDisplayActive();
         awaitingAnswers = false;
@@ -1273,6 +1276,8 @@ public final class DocScanGlassActivity extends Activity
     }
 
     private void keepDisplayActive() {
+        if (sessionClosed || writingDone || isFinishing() || isDestroyed()
+                || !isCurrentPowerGeneration(powerGeneration)) return;
         cancelDisplayIdle();
         if (idleAsleep) displaySleep.wake(this);
         idleAsleep = false;
@@ -1294,7 +1299,7 @@ public final class DocScanGlassActivity extends Activity
         long generation = powerGeneration;
         displayIdle = () -> {
             if (token != displayIdleToken || generation != powerGeneration || sessionClosed || writingDone
-                    || isFinishing() || isDestroyed() || displayProtected()) return;
+                    || !isCurrentPowerGeneration(generation) || isFinishing() || isDestroyed() || displayProtected()) return;
             displayIdle = null;
             idleAsleep = true;
             displaySleep.sleep(this);
@@ -1427,6 +1432,7 @@ public final class DocScanGlassActivity extends Activity
     }
 
     private void notifyPhase(String phase, long session, String request) {
+        if (!isCurrentPowerGeneration(powerGeneration)) return;
         Long ack = session > 0 && acknowledgedSession == session && acknowledgedRevision >= 0 ? acknowledgedRevision : null;
         if (phase.equals(powerPhase) && session == powerSession && powerSequence > 0
                 && java.util.Objects.equals(displayRequest, request)
@@ -1441,6 +1447,8 @@ public final class DocScanGlassActivity extends Activity
             if (next == null) return;
             seq = powerSequence = next.sequence;
         } catch (IOException error) { Log.w(TAG, "display state not saved"); return; }
+        Log.i(TAG, "display_request generation=" + gen + " sequence=" + seq
+                + " phase=" + phase + " request=" + request);
         if (deviceId != null) transmitState(gen, seq, phase, session, request, ack);
     }
 

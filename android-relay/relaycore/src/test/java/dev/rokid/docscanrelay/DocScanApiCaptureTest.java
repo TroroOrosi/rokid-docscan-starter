@@ -261,4 +261,212 @@ public class DocScanApiCaptureTest {
         assertTrue(end >= start);
         return body.substring(start, end).getBytes(StandardCharsets.ISO_8859_1);
     }
+
+    // AGENT_APPROVED=1: diagnostic feedback never changes the native image receipt.
+    @Test public void diagnosticResultRequiresTheExactCaptureAndKeepsNoIssueNeutral() throws Exception {
+        CaptureProvenance source = knownSource();
+        var context = new CaptureInspectionOrigin.Context("glasses:1", 42);
+        var binding = CaptureInspectionFeedback.Binding.fromReceipt(context, source, 17,
+                receipt(source).put("capture_inspection", feedbackRegistration("queued")));
+        assertNotNull(binding);
+        JSONObject completed = feedbackReply(receipt(source).getJSONObject("capture_provenance"), context, 17, "c".repeat(64), "issue");
+        assertEquals(CaptureInspectionFeedback.Outcome.ISSUE, binding.decode(completed));
+        completed.getJSONObject("result").getJSONArray("parts").getJSONObject(0)
+                .getJSONArray("observations").getJSONObject(0).put("status", "no_issue_observed");
+        assertEquals(CaptureInspectionFeedback.Outcome.NO_ISSUE_OBSERVED, binding.decode(completed));
+        assertEquals("", new CaptureInspectionFeedback.Notice(binding, CaptureInspectionFeedback.Outcome.NO_ISSUE_OBSERVED).text());
+        assertEquals("P3 要確認", new CaptureInspectionFeedback.Notice(binding, CaptureInspectionFeedback.Outcome.ISSUE).text());
+        assertEquals("P3 未確認", new CaptureInspectionFeedback.Notice(binding, CaptureInspectionFeedback.Outcome.UNKNOWN).text());
+        for (String key : List.of("device_id", "generation", "document_id", "local_session_id", "capture_id", "canonical_image_sha256")) {
+            JSONObject wrong = new JSONObject(completed.toString());
+            Object old = wrong.getJSONObject("owner").get(key);
+            wrong.getJSONObject("owner").put(key, old instanceof Number ? ((Number) old).longValue() + 1 : "different");
+            assertThrows(key, JSONException.class, () -> binding.decode(wrong));
+        }
+        JSONObject wrongHash = new JSONObject(completed.toString());
+        wrongHash.getJSONObject("result").getJSONArray("parts").getJSONObject(0)
+                .getJSONObject("owner").put("canonical_image_sha256", "d".repeat(64));
+        assertThrows(JSONException.class, () -> binding.decode(wrongHash));
+        completed.put("applicable", false);
+        assertEquals(CaptureInspectionFeedback.Outcome.UNKNOWN, binding.decode(completed));
+    }
+
+    @Test public void diagnosticClaimsAndTypedIdentityCannotAuthorizeOrSilentlyCoerce() throws Exception {
+        CaptureProvenance source = knownSource(); var context = new CaptureInspectionOrigin.Context("glasses:1", 42);
+        var binding = CaptureInspectionFeedback.Binding.fromReceipt(context, source, 17,
+                receipt(source).put("capture_inspection", feedbackRegistration("queued")));
+        for (String key : List.of("generation", "document_id")) for (Object replacement : List.of("42", 42.0, true)) {
+            JSONObject wrong = feedbackReply(receipt(source).getJSONObject("capture_provenance"), context, 17, "c".repeat(64), "issue");
+            wrong.getJSONObject("owner").put(key, replacement);
+            assertThrows(JSONException.class, () -> binding.decode(wrong));
+        }
+        for (String key : List.of("can_authorize_capture", "all_pages_or_characters_verified", "auto_registration_allowed")) {
+            JSONObject wrong = feedbackReply(receipt(source).getJSONObject("capture_provenance"), context, 17, "c".repeat(64), "issue");
+            wrong.put(key, true);
+            assertThrows(JSONException.class, () -> binding.decode(wrong));
+        }
+        JSONObject noViewer = feedbackReply(receipt(source).getJSONObject("capture_provenance"), context, 17, "c".repeat(64), "no_issue_observed");
+        noViewer.getJSONObject("result").getJSONArray("parts").getJSONObject(0).getJSONArray("observations")
+                .getJSONObject(0).put("image_viewer_used", false);
+        assertThrows(JSONException.class, () -> binding.decode(noViewer));
+        assertNull(CaptureInspectionFeedback.Binding.fromReceipt(context, source, 17, receipt(source)));
+        assertNull(CaptureInspectionFeedback.Binding.fromReceipt(context, source, 17,
+                receipt(source).put("capture_inspection", feedbackRegistration("disabled").put("inspection_id", JSONObject.NULL))));
+    }
+
+    @Test public void inspectionGetIsAuthenticatedBoundedAndDoesNotRetryOrFollowRedirects() throws Exception {
+        CaptureProvenance source = knownSource(); var context = new CaptureInspectionOrigin.Context("glasses:1", 42);
+        var binding = CaptureInspectionFeedback.Binding.fromReceipt(context, source, 17,
+                receipt(source).put("capture_inspection", feedbackRegistration("queued")));
+        try (MockWebServer server = new MockWebServer()) {
+            DocScanApi destination = new DocScanApi(server.url("/").toString(), "test-key", new ClientIdentity("test", "test", "test"));
+            server.enqueue(new MockResponse().setBody(feedbackReply(receipt(source).getJSONObject("capture_provenance"), context, 17, "c".repeat(64), "issue").toString()));
+            assertEquals(CaptureInspectionFeedback.Outcome.ISSUE, binding.decode(destination.captureInspection(binding).execute()));
+            RecordedRequest request = server.takeRequest();
+            assertEquals("GET", request.getMethod());
+            assertEquals("Bearer test-key", request.getHeader("Authorization"));
+            assertEquals("glasses:1", request.getRequestUrl().queryParameter("device_id"));
+            assertEquals("42", request.getRequestUrl().queryParameter("generation"));
+            assertEquals(source.captureId, request.getRequestUrl().queryParameter("capture_id"));
+            server.enqueue(new MockResponse().setBody(" ".repeat(CaptureInspectionFeedback.MAX_RESPONSE_BYTES + 1)));
+            assertThrows(java.io.IOException.class, () -> destination.captureInspection(binding).execute());
+            server.enqueue(new MockResponse().setResponseCode(302).setHeader("Location", server.url("/unexpected")));
+            assertThrows(java.io.IOException.class, () -> destination.captureInspection(binding).execute());
+            assertEquals(3, server.getRequestCount());
+        }
+    }
+
+    @Test public void finiteDiagnosticReaderStopsPendingWorkAndDiscardsLateCaptureResults() throws Exception {
+        CaptureProvenance source = knownSource(); var context = new CaptureInspectionOrigin.Context("glasses:1", 42);
+        var binding = CaptureInspectionFeedback.Binding.fromReceipt(context, source, 17,
+                receipt(source).put("capture_inspection", feedbackRegistration("queued")));
+        var notices = new java.util.concurrent.LinkedBlockingQueue<CaptureInspectionFeedback.Notice>();
+        var reads = new java.util.concurrent.atomic.AtomicInteger();
+        try (var feedback = new CaptureInspectionFeedback(java.util.concurrent.Executors.newSingleThreadScheduledExecutor(),
+                System::nanoTime, 2, 1, 5000)) {
+            feedback.start(binding, ignored -> new CaptureInspectionFeedback.Query() {
+                public JSONObject execute() throws Exception {
+                    reads.incrementAndGet();
+                    return feedbackReply(receipt(source).getJSONObject("capture_provenance"), context, 17, "c".repeat(64), "issue")
+                            .put("status", "queued").put("applicable", false).put("result", JSONObject.NULL);
+                }
+                public void cancel() { }
+            }, () -> true, notices::add);
+            assertEquals(CaptureInspectionFeedback.Outcome.UNKNOWN, notices.poll(3, java.util.concurrent.TimeUnit.SECONDS).outcome);
+            assertEquals(2, reads.get());
+        }
+        java.util.concurrent.CountDownLatch reading = new java.util.concurrent.CountDownLatch(1), finish = new java.util.concurrent.CountDownLatch(1);
+        var current = new java.util.concurrent.atomic.AtomicBoolean(true);
+        var cancellations = new java.util.concurrent.atomic.AtomicInteger(); notices.clear();
+        try (var feedback = new CaptureInspectionFeedback()) {
+            feedback.start(binding, ignored -> new CaptureInspectionFeedback.Query() {
+                public JSONObject execute() throws Exception {
+                    reading.countDown(); finish.await(2, java.util.concurrent.TimeUnit.SECONDS);
+                    return feedbackReply(receipt(source).getJSONObject("capture_provenance"), context, 17, "c".repeat(64), "issue");
+                }
+                public void cancel() { cancellations.incrementAndGet(); finish.countDown(); }
+            }, current::get, notices::add);
+            assertTrue(reading.await(2, java.util.concurrent.TimeUnit.SECONDS));
+            current.set(false); feedback.clear();
+            assertNull(notices.poll(100, java.util.concurrent.TimeUnit.MILLISECONDS));
+            assertEquals(1, cancellations.get());
+        }
+    }
+
+    static JSONObject feedbackRegistration(String status) throws JSONException {
+        return new JSONObject().put("inspection_id", "a".repeat(64)).put("status", status).put("reason", JSONObject.NULL)
+                .put("scope", "diagnostic_only").put("applicable", false)
+                .put("all_pages_or_characters_verified", false).put("auto_registration_allowed", false);
+    }
+
+    static JSONObject feedbackReply(JSONObject capture, CaptureInspectionOrigin.Context context, long document,
+                                    String canonical, String observation) throws JSONException {
+        JSONObject owner = new JSONObject().put("kind", "native_capture").put("policy", "bounded_diagnostic_v1")
+                .put("source_ip", "testclient").put("device_id", context.deviceId).put("generation", context.generation)
+                .put("document_id", document).put("local_session_id", capture.getString("local_session_id"))
+                .put("capture_id", capture.getString("capture_id")).put("capture_provenance", capture)
+                .put("canonical_image_sha256", canonical);
+        JSONObject part = new JSONObject().put("inspection_id", "b".repeat(64)).put("manifest_sha256", "d".repeat(64))
+                .put("owner", new JSONObject(owner.toString())).put("scope", "bounded_regions_only")
+                .put("independently_verified", false).put("calibrated", false)
+                .put("all_pages_or_characters_verified", false).put("auto_registration_allowed", false)
+                .put("observations", new org.json.JSONArray().put(new JSONObject().put("image_id", "source_original")
+                        .put("status", observation).put("image_viewer_used", true)
+                        .put("reasons", new org.json.JSONArray().put("private AI reason must never reach HUD"))));
+        return feedbackRegistration("completed").put("applicable", true).put("can_authorize_capture", false)
+                .put("owner", owner).put("result", new JSONObject().put("parts", new org.json.JSONArray().put(part))
+                        .put("all_pages_or_characters_verified", false).put("auto_registration_allowed", false));
+    }
+
+    @Test public void replacingTheLatestDiagnosticKeepsOneInFlightAndNeverEmitsTheOldReply() throws Exception {
+        var context = new CaptureInspectionOrigin.Context("glasses:1", 42);
+        CaptureProvenance first = knownSource(), second = knownSource();
+        var a = CaptureInspectionFeedback.Binding.fromReceipt(context, first, 17, receipt(first).put("capture_inspection", feedbackRegistration("queued")));
+        var b = CaptureInspectionFeedback.Binding.fromReceipt(context, second, 17, receipt(second).put("capture_inspection", feedbackRegistration("queued")));
+        var entered = new java.util.concurrent.CountDownLatch(1); var release = new java.util.concurrent.CountDownLatch(1);
+        var running = new java.util.concurrent.atomic.AtomicInteger(); var peak = new java.util.concurrent.atomic.AtomicInteger();
+        var notices = new java.util.concurrent.LinkedBlockingQueue<CaptureInspectionFeedback.Notice>();
+        try (var feedback = new CaptureInspectionFeedback()) {
+            CaptureInspectionFeedback.Reader reader = binding -> new CaptureInspectionFeedback.Query() {
+                public JSONObject execute() throws Exception {
+                    peak.accumulateAndGet(running.incrementAndGet(), Math::max);
+                    try {
+                        if (binding == a) { entered.countDown(); release.await(2, java.util.concurrent.TimeUnit.SECONDS); }
+                        return feedbackReply(receipt(binding.source).getJSONObject("capture_provenance"), context, 17, "c".repeat(64), "issue");
+                    } finally { running.decrementAndGet(); }
+                }
+                public void cancel() { release.countDown(); }
+            };
+            feedback.start(a, reader, () -> true, notices::add); assertTrue(entered.await(2, java.util.concurrent.TimeUnit.SECONDS));
+            feedback.start(b, reader, () -> true, notices::add);
+            assertSame(b, notices.poll(2, java.util.concurrent.TimeUnit.SECONDS).binding);
+            assertEquals(1, peak.get()); assertNull(notices.poll(100, java.util.concurrent.TimeUnit.MILLISECONDS));
+        }
+    }
+
+    @Test public void processingDiagnosticWaitsForItsBoundCompletedResult() throws Exception {
+        for (String pending : List.of("processing", "deferred_answers", "deferred_queue_full")) {
+            CaptureProvenance source = knownSource();
+            var context = new CaptureInspectionOrigin.Context("glasses:1", 42);
+            var binding = CaptureInspectionFeedback.Binding.fromReceipt(context, source, 17,
+                    receipt(source).put("capture_inspection", feedbackRegistration("queued")));
+            var notices = new java.util.concurrent.LinkedBlockingQueue<CaptureInspectionFeedback.Notice>();
+            try (MockWebServer server = new MockWebServer();
+                    var feedback = new CaptureInspectionFeedback(java.util.concurrent.Executors.newSingleThreadScheduledExecutor(),
+                            System::nanoTime, 8, 1, 5000)) {
+                DocScanApi destination = new DocScanApi(server.url("/").toString(), "test-key", new ClientIdentity("test", "test", "test"));
+                JSONObject completed = feedbackReply(receipt(source).getJSONObject("capture_provenance"), context, 17, "c".repeat(64), "issue");
+                // WorkStore.prepare_capture_inspection writes processing before running Work.
+                server.enqueue(new MockResponse().setBody(new JSONObject(completed.toString())
+                        .put("status", pending).put("applicable", false).put("result", JSONObject.NULL).toString()));
+                server.enqueue(new MockResponse().setBody(completed.toString()));
+                feedback.start(binding, destination::captureInspection, () -> true, notices::add);
+                CaptureInspectionFeedback.Notice result = notices.poll(3, java.util.concurrent.TimeUnit.SECONDS);
+                assertNotNull(result);
+                assertEquals(CaptureInspectionFeedback.Outcome.ISSUE, result.outcome);
+                assertSame(binding, result.binding);
+                assertEquals(2, server.getRequestCount());
+                assertNull(notices.poll(100, java.util.concurrent.TimeUnit.MILLISECONDS));
+            }
+        }
+    }
+
+    @Test public void elapsedDiagnosticBudgetDoesNotScheduleAnotherRead() throws Exception {
+        CaptureProvenance source = knownSource(); var context = new CaptureInspectionOrigin.Context("glasses:1", 42);
+        var binding = CaptureInspectionFeedback.Binding.fromReceipt(context, source, 17, receipt(source).put("capture_inspection", feedbackRegistration("queued")));
+        var clock = new java.util.concurrent.atomic.AtomicLong(); var reads = new java.util.concurrent.atomic.AtomicInteger();
+        var notices = new java.util.concurrent.LinkedBlockingQueue<CaptureInspectionFeedback.Notice>();
+        try (var feedback = new CaptureInspectionFeedback(java.util.concurrent.Executors.newSingleThreadScheduledExecutor(), clock::get, 8, 0, 120_000)) {
+            feedback.start(binding, ignored -> new CaptureInspectionFeedback.Query() {
+                public JSONObject execute() throws Exception {
+                    reads.incrementAndGet(); clock.set(java.util.concurrent.TimeUnit.SECONDS.toNanos(121));
+                    return feedbackReply(receipt(source).getJSONObject("capture_provenance"), context, 17, "c".repeat(64), "issue")
+                            .put("status", "queued").put("applicable", false).put("result", JSONObject.NULL);
+                }
+                public void cancel() { }
+            }, () -> true, notices::add);
+            assertEquals(CaptureInspectionFeedback.Outcome.UNKNOWN, notices.poll(2, java.util.concurrent.TimeUnit.SECONDS).outcome);
+            assertEquals(1, reads.get());
+        }
+    }
 }

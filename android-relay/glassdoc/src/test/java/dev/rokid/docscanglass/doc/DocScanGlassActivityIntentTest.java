@@ -530,6 +530,101 @@ public class DocScanGlassActivityIntentTest {
                 android.provider.Settings.System.SCREEN_OFF_TIMEOUT, -1));
     }
 
+    @Test public void aNewWearGenerationInvalidatesAnAlreadyQueuedIdleTimer() throws Exception {
+        android.provider.Settings.System.putInt(activity.getContentResolver(),
+                android.provider.Settings.System.SCREEN_OFF_TIMEOUT, 0);
+        setField(activity, "choosingSession", true);
+        java.lang.reflect.Method choices = DocScanGlassActivity.class.getDeclaredMethod("showStartupChoices");
+        choices.setAccessible(true);
+        choices.invoke(activity);
+        Shadows.shadowOf(android.os.Looper.getMainLooper()).idleFor(java.time.Duration.ofMillis(4_999));
+        PowerState store = PowerState.forContext(activity);
+        long nextGeneration = store.wear(false, -1).generation;
+
+        Shadows.shadowOf(android.os.Looper.getMainLooper()).idleFor(java.time.Duration.ofMillis(1));
+
+        assertTrue("the old Activity's idle timer cannot release the new wear entry's display",
+                (activity.getWindow().getAttributes().flags
+                        & android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) != 0);
+        assertEquals(nextGeneration, store.load().generation);
+        assertEquals("wake", store.load().display);
+        assertEquals(0, android.provider.Settings.System.getInt(activity.getContentResolver(),
+                android.provider.Settings.System.SCREEN_OFF_TIMEOUT, -1));
+    }
+
+    @Test public void aQueuedOldCaptureCallbackCannotReacquireTheNewWearGenerationsDisplay() throws Exception {
+        activity.onAutoCaptureChanged(true);
+        PowerState.forContext(activity).wear(false, -1);
+        int keepOn = android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON;
+        activity.getWindow().clearFlags(keepOn);
+
+        Shadows.shadowOf(android.os.Looper.getMainLooper()).idle();
+
+        assertEquals("a callback from the superseded Activity cannot hold the display", 0,
+                activity.getWindow().getAttributes().flags & keepOn);
+    }
+
+    @Test public void onlyAnAcceptedWearEntryExplicitlyWakesAnAsleepChooser() throws Exception {
+        android.os.PowerManager power = activity.getSystemService(android.os.PowerManager.class);
+        Shadows.shadowOf(power).setIsInteractive(false);
+        org.robolectric.shadows.ShadowPowerManager.clearWakeLocks();
+        PowerState.Snapshot entry = PowerState.forContext(activity).wear(false, -1);
+        Intent wear = new Intent().putExtra("chooser", true).putExtra("wear_origin", true)
+                .putExtra("wear_generation", entry.generation);
+
+        activity.onNewIntent(wear);
+
+        android.os.PowerManager.WakeLock wake = org.robolectric.shadows.ShadowPowerManager.getLatestWakeLock();
+        assertNotNull("KEEP_SCREEN_ON alone cannot light a noninteractive display on confirmed wear", wake);
+        assertEquals("docscan:answer-display", Shadows.shadowOf(wake).getTag());
+        assertFalse("the bounded wake request never leaves a CPU/display lock held", wake.isHeld());
+    }
+
+    @Test public void staleWearAndOrdinaryChooserRefreshCannotWakeTheDisplay() throws Exception {
+        android.os.PowerManager power = activity.getSystemService(android.os.PowerManager.class);
+        Shadows.shadowOf(power).setIsInteractive(false);
+        org.robolectric.shadows.ShadowPowerManager.clearWakeLocks();
+        PowerState.Snapshot entry = PowerState.forContext(activity).wear(false, -1);
+        activity.onNewIntent(new Intent().putExtra("chooser", true).putExtra("wear_origin", true)
+                .putExtra("wear_generation", entry.generation - 1));
+        setField(activity, "powerGeneration", entry.generation);
+        java.lang.reflect.Method choices = DocScanGlassActivity.class.getDeclaredMethod("showStartupChoices");
+        choices.setAccessible(true);
+        choices.invoke(activity);
+        assertNull(org.robolectric.shadows.ShadowPowerManager.getLatestWakeLock());
+    }
+
+    @Test public void captureReviewAndWrittenAnswersKeepTheirDisplayBeyondFiveSeconds() throws Exception {
+        android.provider.Settings.System.putInt(activity.getContentResolver(),
+                android.provider.Settings.System.SCREEN_OFF_TIMEOUT, 0);
+        int keepOn = android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON;
+        java.lang.reflect.Method idle = DocScanGlassActivity.class.getDeclaredMethod("enterIdleDisplay", String.class, long.class);
+        idle.setAccessible(true);
+        for (RelayState state : List.of(RelayState.AIMING, RelayState.STABILIZING,
+                RelayState.CAPTURING, RelayState.CAPTURE_REVIEW)) {
+            idle.invoke(activity, "waiting", 0L);
+            setField(controller, "state", state);
+            activity.onUpdate(state, List.of("capture"), "test capture state");
+            Shadows.shadowOf(android.os.Looper.getMainLooper()).idleFor(java.time.Duration.ofSeconds(6));
+            assertTrue(state.name(), (activity.getWindow().getAttributes().flags & keepOn) != 0);
+        }
+        setField(controller, "state", RelayState.READY);
+        AnswerStore store = new AnswerStore(activity.getFilesDir());
+        AnswerBundle bundle = new AnswerBundle("7", "a".repeat(64), 1,
+                List.of(AnswerItem.ready("g1", "読解", "q1", "問1", "保存済み答案")));
+        store.start(bundle);
+        setField(activity, "answerStore", store);
+        java.lang.reflect.Method open = DocScanGlassActivity.class.getDeclaredMethod("openAnswers", AnswerBundle.class, String.class, int.class);
+        open.setAccessible(true);
+        open.invoke(activity, bundle, "q1", 0);
+        Shadows.shadowOf(android.os.Looper.getMainLooper()).idleFor(java.time.Duration.ofSeconds(30));
+        assertTrue((activity.getWindow().getAttributes().flags & keepOn) != 0);
+        assertEquals("reading", PowerState.forContext(activity).load().phase);
+        assertEquals(0, android.provider.Settings.System.getInt(activity.getContentResolver(),
+                android.provider.Settings.System.SCREEN_OFF_TIMEOUT, -1));
+        assertEquals(0, server.getRequestCount());
+    }
+
     @Test public void aChooserSwipeRestartsTheIdleClockAndAStoppedCameraCanSleep() throws Exception {
         setField(activity, "choosingSession", true);
         activity.onResume();

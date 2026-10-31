@@ -96,8 +96,11 @@ public final class DocScanController implements AutoCloseable {
     private final java.util.concurrent.ConcurrentHashMap<String, InspectionCapture> inspectionCaptures =
             new java.util.concurrent.ConcurrentHashMap<>();
     private InspectionRequest inspectionRequest;
+    // latest native feedback is metadata-only, separate from the upload/answer worker.
+    private final CaptureInspectionFeedback inspectionFeedback = new CaptureInspectionFeedback();
+    private final java.util.concurrent.atomic.AtomicLong inspectionEpoch = new java.util.concurrent.atomic.AtomicLong();
     private record InspectionRequest(CaptureInspectionOrigin.Context context, LocalCaptureSession saved,
-                                     DocScanApi target, long document, int page) { }
+                                     DocScanApi target, long document, int page, long feedbackEpoch) { }
     private record InspectionCapture(InspectionRequest request, CaptureProvenance source) { }
 
     private volatile RelayState state = RelayState.DISCONNECTED;
@@ -153,13 +156,13 @@ public final class DocScanController implements AutoCloseable {
     private boolean autoCaptureEnabled;
     private boolean manualCaptureRequested;
     private boolean ocrInFlight;
-    private boolean finishCaptureRequested;
+    private volatile boolean finishCaptureRequested;
     private long autoRunGeneration;
     private long futureCaptureEpoch;
     private boolean futureWatching;
     private boolean futureStopping;
     private boolean reacquiringCaptureGap;
-    private boolean localCameraUnknown;
+    private volatile boolean localCameraUnknown;
     private static final long LOCAL_REVIEW_MILLIS = 3000;
     private volatile long sessionId;
     private int reviewIndex;
@@ -295,12 +298,13 @@ public final class DocScanController implements AutoCloseable {
     }
 
     private InspectionRequest inspectionRequest(LocalCaptureSession saved, int page) {
+        long feedbackEpoch = invalidateInspectionFeedback();
         CaptureInspectionOrigin.Context run = inspectionContext();
         DocScanApi target = api;
         if (run == null || saved == null || saved != localSession || target == null) return null;
         synchronized (saved) {
             return saved.phase() != LocalCaptureSession.Phase.CAPTURE || !saved.server().equals(target.serverUrl())
-                    ? null : new InspectionRequest(run, saved, target, saved.documentId(), page);
+                    ? null : new InspectionRequest(run, saved, target, saved.documentId(), page, feedbackEpoch);
         }
     }
 
@@ -325,6 +329,43 @@ public final class DocScanController implements AutoCloseable {
                 || !request.context.equals(inspectionContext()) || document <= 0 || document > Integer.MAX_VALUE
                 || (request.document != 0 && request.document != document)) return null;
         return new CaptureInspectionOrigin(request.context, source, document);
+    }
+
+    private long invalidateInspectionFeedback() {
+        long epoch = inspectionEpoch.incrementAndGet();
+        inspectionFeedback.clear();
+        if (link.supportsLocalCaptureReview()) link.showCaptureInspectionFeedback(null, () -> false);
+        return epoch;
+    }
+
+    private boolean inspectionFeedbackCurrent(InspectionCapture capture, LocalCaptureSession.Page page) {
+        if (capture == null || closed || localCameraUnknown || finishCaptureRequested) return false;
+        InspectionRequest request = capture.request;
+        if (request.feedbackEpoch != inspectionEpoch.get() || request.saved != localSession || request.target != api
+                || !request.context.equals(inspectionContext())) return false;
+        if (state != RelayState.READING && state != RelayState.AIMING && state != RelayState.STABILIZING
+                && state != RelayState.CAPTURING && state != RelayState.CAPTURE_REVIEW) return false;
+        synchronized (request.saved) {
+            try {
+                return request.saved.phase() == LocalCaptureSession.Phase.CAPTURE && !request.saved.captureGap()
+                        && page.fileName.equals(request.saved.page(page.index).fileName);
+            } catch (IOException unavailable) { return false; }
+        }
+    }
+
+    private void startInspectionFeedback(InspectionCapture capture, LocalCaptureSession.Page page, JSONObject receipt) {
+        if (!inspectionFeedbackCurrent(capture, page)) return;
+        try {
+            InspectionRequest request = capture.request;
+            CaptureInspectionFeedback.Binding binding = CaptureInspectionFeedback.Binding.fromReceipt(
+                    request.context, capture.source, request.saved.documentId(), receipt);
+            if (binding == null) return;
+            java.util.function.BooleanSupplier current = () -> inspectionFeedbackCurrent(capture, page);
+            inspectionFeedback.start(binding, request.target::captureInspection, current,
+                    notice -> link.showCaptureInspectionFeedback(notice, current));
+        } catch (org.json.JSONException | RuntimeException unavailable) {
+            // Optional diagnosis is independent of the already persisted image ACK.
+        }
     }
 
     /**
@@ -551,6 +592,7 @@ public final class DocScanController implements AutoCloseable {
                 // The previous session and its pending file stay in their original directory.
                 localSession = next;
                 inspectionCaptures.clear();
+                invalidateInspectionFeedback();
                 localRestoreError = null;
                 localUploadBlocked = false;
                 captureReviewPersistence = new CaptureReviewPersistence(new File(next.directory(), "pending.bin"));
@@ -612,6 +654,7 @@ public final class DocScanController implements AutoCloseable {
                 saved.resume();
                 localSession = saved;
                 inspectionCaptures.clear();
+                invalidateInspectionFeedback();
                 localRestoreError = null;
                 localUploadBlocked = false;
                 captureReviewPersistence = persistence;
@@ -737,6 +780,7 @@ public final class DocScanController implements AutoCloseable {
     }
 
     private void finishLocalCaptureNow() {
+        invalidateInspectionFeedback();
         finishCaptureRequested = true;
         autoRunGeneration++;
         stopFutureObservation(this::finishLocalCaptureWhenCameraIdle);
@@ -1018,6 +1062,7 @@ public final class DocScanController implements AutoCloseable {
         configuredServer = normalizedServer;
         configuredKey = apiKey == null ? "" : apiKey.trim();
         imageRotation = JapaneseOcr.normalizeRotation(rotationDegrees);
+        invalidateInspectionFeedback();
         api = candidate;
         if (!beforeSelection && !captureReview.hasPending()
                 && !previousServer.isEmpty()
@@ -1266,6 +1311,7 @@ public final class DocScanController implements AutoCloseable {
 
     private void armCaptureAt(int pageIndex, boolean replacingPending) {
         if (localCameraUnknown || futureWatching || futureStopping) return;
+        invalidateInspectionFeedback();
         if (committedRecoveryBlocked && !retryCommittedRecoverySynchronously()) {
             publishCommittedPendingLocked(
                     captureReview.peek(),
@@ -2032,11 +2078,13 @@ public final class DocScanController implements AutoCloseable {
                 while (!closed && page != null) {
                     CaptureReviewStore.Pending photo = saved.read(page);
                     httpInProgress = true;
-                    destination.uploadPage(saved.documentId(), photo.pageIndex, photo.jpeg, photo.ocrText,
-                            photo.rotationDegrees, photo.capturedAtMillis, photo.provenance,
-                            inspectionOrigin(saved, destination, photo.provenance));
+                    InspectionCapture diagnostic = photo.provenance == null ? null : inspectionCaptures.get(photo.provenance.captureId);
+                    CaptureInspectionOrigin origin = inspectionOrigin(saved, destination, photo.provenance);
+                    JSONObject receipt = destination.uploadPage(saved.documentId(), photo.pageIndex, photo.jpeg, photo.ocrText,
+                            photo.rotationDegrees, photo.capturedAtMillis, photo.provenance, origin);
                     httpInProgress = false;
                     saved.acknowledge(page);
+                    if (origin != null) startInspectionFeedback(diagnostic, page, receipt);
                     if (photo.provenance != null) inspectionCaptures.remove(photo.provenance.captureId);
                     page = saved.nextUnsent();
                 }
@@ -2433,6 +2481,7 @@ public final class DocScanController implements AutoCloseable {
     }
 
     private void stopAutoCaptureNow(String reason) {
+        invalidateInspectionFeedback();
         if (!autoCaptureEnabled) {
             return;
         }
@@ -2592,6 +2641,7 @@ public final class DocScanController implements AutoCloseable {
     }
 
     private void finishReadingNow() {
+        invalidateInspectionFeedback();
         if (link.supportsFuturePages() && (futureWatching || futureStopping)) {
             finishLocalCaptureNow();
             return;
@@ -2831,6 +2881,9 @@ public final class DocScanController implements AutoCloseable {
 
     private void publish(RelayState next, List<String> lines, String diagnostic) {
         if (closed) return;
+        if (next != RelayState.READY && next != RelayState.READING && next != RelayState.AIMING
+                && next != RelayState.STABILIZING && next != RelayState.CAPTURING && next != RelayState.CAPTURE_REVIEW)
+            invalidateInspectionFeedback();
         state = next;
         List<String> safeLines = lines == null || lines.isEmpty()
                 ? List.of(next.name(), "", "")
@@ -3038,6 +3091,8 @@ public final class DocScanController implements AutoCloseable {
     @Override
     public void close() {
         closed = true;
+        inspectionFeedback.close();
+        invalidateInspectionFeedback();
         link.pausePreview();
         if (link.supportsLocalCaptureReview() && api != null) api.cancelRequests();
         clearArmedCapture();

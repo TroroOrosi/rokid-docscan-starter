@@ -41,6 +41,10 @@ public interface CaptureSurface {
 
     default void showCaptureReviewNotice(String notice) { }
 
+    /** Diagnostic-only, outside photos and answers. Recheck current again on the UI thread/draw. */
+    default void showCaptureInspectionFeedback(CaptureInspectionFeedback.Notice notice,
+                                               java.util.function.BooleanSupplier current) { }
+
     /** Only an app-owned surface with verified gestures may register automatically. */
     default boolean supportsLocalCaptureReview() { return false; }
 

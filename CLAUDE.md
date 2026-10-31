@@ -265,9 +265,12 @@ and uncertain-send safeguards remain independent of model-name fallback.
   capture/review/reading hold the app window on. Chooser, recording-only,
   uploading, analysis and other waiting sleep after five seconds without user
   input; network refreshes do not extend that timer. Authenticated phone-watcher
-  requests handle sleep/wake; ordinary chooser updates are not app-entry requests.
+  requests handle sleep/wake. Sleep uses Android's soft-sleep key so the window's
+  current screen wake lock is checked when a delayed request reaches the device.
+  Old persistent generations cannot release or reacquire the current window's
+  display hold. Ordinary chooser updates are not app-entry requests.
   Confirmed wear requests use a fresh persistent generation and an explicit
-  chooser entry with no old answer-wake extras. Never restore
+  chooser entry, explicit wake and no old answer-wake extras. Never restore
   a saved timeout over a later operator choice. Hardware acceptance is pending.
 - Text-only page upload remains an API compatibility path. Do not describe it
   as the real-device primary path.
@@ -457,9 +460,10 @@ Build and inspect before touching a device:
 
 Then, on a device:
 
-- Enumerate devices read-only first and name the serial in every command. Stop
-  on multiple devices, signature mismatch, version downgrade, unknown callback
-  state.
+- Enumerate devices read-only first and name the selected transport in every
+  command, checking its actual serial. Refuse ambiguous target identity,
+  signature mismatch, version downgrade or unknown callback state. Multiple
+  listed transports alone do not make an explicitly verified target ambiguous.
 - Record the exact phone / glasses / Hi Rokid / service / relay tuple.
 - Report the LED result only from external physical observation.
 - Ask before uninstalling apps or changing phone security settings.

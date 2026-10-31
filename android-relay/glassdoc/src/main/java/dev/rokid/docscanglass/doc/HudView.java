@@ -46,7 +46,7 @@ final class HudView extends View {
     private List<String> lines = Collections.emptyList();
     private Bitmap preview;
     private Bitmap livePreview;
-    private PaperGeometry.Box paperProposal; // AGENT_APPROVED=1: provisional comparison, never a crop.
+    private PaperGeometry.Box paperProposal; // provisional comparison, never a crop.
     private boolean capturing;
     private boolean aiming;
     private double guideFraction = FramingGuide.UNCALIBRATED_FRACTION;
@@ -55,6 +55,15 @@ final class HudView extends View {
     private Runnable hiddenFrame;
     private boolean frameReported;
     private boolean recording;
+    // metadata-only latest-capture notice; no review/answer or power callback.
+    private String inspectionNotice = "";
+    private java.util.function.BooleanSupplier inspectionCurrent = () -> false;
+
+    void showInspectionNotice(String text, java.util.function.BooleanSupplier current) {
+        inspectionNotice = text == null || text.length() > 24 ? "" : text;
+        inspectionCurrent = current == null ? () -> false : current;
+        invalidate();
+    }
 
     void showRecording(boolean active) { recording = active; invalidate(); }
 
@@ -201,6 +210,18 @@ final class HudView extends View {
         if (recording && still == null) {
             RectF area = captureArea();
             canvas.drawCircle(area.right - 3f, area.top - 12f, 3f, paint);
+        }
+        if (still == null && capturing && !inspectionNotice.isEmpty()) {
+            boolean current;
+            try { current = inspectionCurrent.getAsBoolean(); }
+            catch (RuntimeException unavailable) { current = false; }
+            if (current) {
+                RectF area = captureArea();
+                paint.setTextSize(16f);
+                float width = paint.measureText(inspectionNotice);
+                if (width > area.width()) paint.setTextSize(16f * area.width() / width);
+                canvas.drawText(inspectionNotice, area.left, area.top - 25f, paint);
+            } else inspectionNotice = "";
         }
         if (lines.isEmpty()) {
             return;

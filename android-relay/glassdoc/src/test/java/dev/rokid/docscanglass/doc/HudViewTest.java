@@ -300,4 +300,39 @@ public class HudViewTest {
             }
         }
     }
+
+    // AGENT_APPROVED=1: diagnostic notice stays outside the photo and never replaces review/answers.
+    @Test public void nativeDiagnosticNoticeIsSmallCaptureOnlyAndRechecksItsOwnerAtDraw() {
+        HudView view = new HudView(RuntimeEnvironment.getApplication()); view.layout(0, 0, 480, 640);
+        Bitmap screen = Bitmap.createBitmap(480, 640, Bitmap.Config.ARGB_8888);
+        Bitmap photo = Bitmap.createBitmap(320, 240, Bitmap.Config.ARGB_8888); photo.eraseColor(Color.GREEN);
+        var current = new java.util.concurrent.atomic.AtomicBoolean(true);
+        view.capturePreview(true); view.showAiming(List.of());
+        view.showInspectionNotice("P3 要確認", current::get);
+        TextCanvas aiming = new TextCanvas(screen); view.draw(aiming);
+        assertEquals("P3 要確認", aiming.text.toString()); assertTrue(aiming.largestTextSize <= 16f);
+        view.showReview(photo, List.of());
+        TextCanvas review = new TextCanvas(screen); view.draw(review); assertEquals("", review.text.toString());
+        view.showAiming(List.of()); current.set(false);
+        TextCanvas stale = new TextCanvas(screen); view.draw(stale); assertEquals("", stale.text.toString());
+        current.set(true); view.showInspectionNotice("P3 未確認", current::get);
+        view.capturePreview(false); view.showLines(List.of("答案"));
+        TextCanvas answer = new TextCanvas(screen); view.draw(answer); assertEquals("答案", answer.text.toString());
+        photo.recycle(); screen.recycle();
+    }
+
+    @Test public void nativeDiagnosticIsVisibleDuringTheRealFutureWaitAfterReviewCommit() {
+        HudView view = new HudView(RuntimeEnvironment.getApplication()); view.layout(0,0,480,640);
+        Bitmap original = Bitmap.createBitmap(320,240,Bitmap.Config.ARGB_8888);
+        Bitmap screen = Bitmap.createBitmap(480,640,Bitmap.Config.ARGB_8888);
+        view.capturePreview(true); view.showReview(original,List.of());
+        // commitLocalPhoto -> publish(READING) -> showHud. futureWatching continues the existing preview.
+        view.showLines(List.of("1枚保存済み")); view.showInspectionNotice("P1 要確認",()->true);
+        TextCanvas waiting = new TextCanvas(screen); view.draw(waiting);
+        assertTrue("feedback must draw in the normal future-observation branch",waiting.text.toString().contains("P1 要確認"));
+        view.capturePreview(false);
+        TextCanvas stopped = new TextCanvas(screen); view.draw(stopped);
+        assertTrue("stopping capture must hide the notice",!stopped.text.toString().contains("P1 要確認"));
+        original.recycle();screen.recycle();
+    }
 }

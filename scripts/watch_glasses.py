@@ -333,6 +333,13 @@ def check_volume(serial: str) -> None:
         print("Glasses volume reset observed; playback muted again", flush=True)
 
 
+def power_event(action: str, outcome: str, state: dict) -> None:
+    """Dispatch metadata only; delivery is not proof of the physical light state."""
+    method = "soft_sleep" if action == "sleep" else "validated_answer_intent"
+    print(f"Display action={action} outcome={outcome} generation={state['generation']} "
+          f"sequence={state['sequence']} phase={state['phase']} method={method}", flush=True)
+
+
 def watch(requested: str, expected_serial: str, interval: float, server: str = SERVER,
           device_id: str | None = None) -> None:
     folded = False
@@ -421,9 +428,14 @@ def watch(requested: str, expected_serial: str, interval: float, server: str = S
                         # The Activity validates its current phase/session/generation before lighting.
                         # A completed run can race the phone's earlier ready snapshot.
                         revision = ("--el", "answer_revision", str(state["answer_revision"])) if "answer_revision" in state else ()
-                        adb(serial, "shell", "am", "start", "-W", "-n", COMPONENT,
-                            "--ei", "wake_session_id", str(state["session_id"]),
-                            "--el", "wake_generation", str(state["generation"]), *revision)
+                        try:
+                            adb(serial, "shell", "am", "start", "-W", "-n", COMPONENT,
+                                "--ei", "wake_session_id", str(state["session_id"]),
+                                "--el", "wake_generation", str(state["generation"]), *revision)
+                        except (subprocess.SubprocessError, OSError):
+                            power_event("wake", "unknown", state)
+                            raise
+                        power_event("wake", "dispatched", state)
                         woken = answer_key
                         next_answer_retry = time.monotonic() + ANSWER_RETRY_SECONDS
                 elif not stale and (request == "sleep" or (request is None and state["phase"] in ("analyzing", "writing_done", "closed"))):
@@ -432,14 +444,23 @@ def watch(requested: str, expected_serial: str, interval: float, server: str = S
                         # A user may start capture after our first GET. Re-read
                         # authenticated intent immediately before a new sleep.
                         # Physical ADB delivery cannot be atomic with this GET.
+                        # SOFT_SLEEP lets Android recheck the current window's
+                        # screen wake lock if capture/reading starts meanwhile.
                         current = fetch_state(server, selected) if request else state
                         newest = max(newest, (current["generation"], current["sequence"]))
                         fields = ("device_id", "generation", "sequence", "session_id", "phase", "display_request", "ack_answer_revision")
                         if (all(current.get(field) == state.get(field) for field in fields)
                             and current["phase"] not in ("capturing", "reading")
                             and not answer_unreceived(current)):
-                            adb(serial, "shell", "input", "-d", "0", "keyevent", "KEYCODE_SLEEP")
+                            try:
+                                adb(serial, "shell", "input", "-d", "0", "keyevent", "KEYCODE_SOFT_SLEEP")
+                            except (subprocess.SubprocessError, OSError):
+                                power_event("sleep", "unknown", state)
+                                raise
+                            power_event("sleep", "dispatched", state)
                             sleep_key = next_sleep
+                        else:
+                            power_event("sleep", "suppressed", state)
             if time.monotonic() - last_volume_check >= 1:
                 last_volume_check = time.monotonic()
                 check_volume(serial)

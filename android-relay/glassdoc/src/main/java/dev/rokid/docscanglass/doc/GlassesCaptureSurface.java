@@ -12,6 +12,7 @@ import java.util.List;
 import java.util.concurrent.atomic.AtomicLong;
 
 import dev.rokid.docscanrelay.CaptureSurface;
+import dev.rokid.docscanrelay.CaptureInspectionFeedback;
 
 /**
  * The glasses-side {@link CaptureSurface}: camera2 for the still, this
@@ -44,6 +45,7 @@ final class GlassesCaptureSurface implements CaptureSurface {
     private final Handler main;
     private final Listener listener;
     private final AtomicLong generations = new AtomicLong();
+    private final AtomicLong inspectionNotices = new AtomicLong();
 
     private Bitmap preview;
     // Owned by the queued draw until it transfers to preview on the UI thread.
@@ -84,7 +86,7 @@ final class GlassesCaptureSurface implements CaptureSurface {
     }
 
     void showLivePreview(Bitmap bitmap) {
-        showLivePreview(bitmap, null); // AGENT_APPROVED=1: same full image, optional comparison corners.
+        showLivePreview(bitmap, null); // same full image, optional comparison corners.
     }
 
     void showLivePreview(Bitmap bitmap, PaperGeometry.Box proposal) {
@@ -161,6 +163,16 @@ final class GlassesCaptureSurface implements CaptureSurface {
         }, still);
     }
 
+    @Override public void showCaptureInspectionFeedback(CaptureInspectionFeedback.Notice notice,
+            java.util.function.BooleanSupplier current) {
+        long revision = inspectionNotices.incrementAndGet();
+        main.post(() -> {
+            if (closed || revision != inspectionNotices.get()) return;
+            hud.showInspectionNotice(notice == null ? "" : notice.text(),
+                    () -> !closed && revision == inspectionNotices.get() && current.getAsBoolean());
+        });
+    }
+
     /**
      * {@inheritDoc}
      *
@@ -175,6 +187,7 @@ final class GlassesCaptureSurface implements CaptureSurface {
     /** Releases the review thumbnail. The activity calls this on destruction. */
     synchronized void close() {
         closed = true;
+        inspectionNotices.incrementAndGet();
         if (waitingDraw != null) main.removeCallbacks(waitingDraw);
         waitingDraw = null;
         recycle(waitingPreview);

@@ -66,6 +66,7 @@ public final class DocScanApi {
     private final ClientIdentity client;
     private final OkHttpClient stateHttp;
     private final OkHttpClient videoHttp;
+    private final OkHttpClient inspectionHttp;
     private final Object videoCallLock = new Object();
     private final Set<okhttp3.Call> videoCalls = new HashSet<>();
     private boolean videoTransportClosed;
@@ -93,6 +94,11 @@ public final class DocScanApi {
                 .connectTimeout(5, TimeUnit.SECONDS).readTimeout(30, TimeUnit.SECONDS)
                 .writeTimeout(90, TimeUnit.SECONDS).callTimeout(120, TimeUnit.SECONDS)
                 .retryOnConnectionFailure(false).followRedirects(false).followSslRedirects(false).build();
+        // bounded read-only feedback cannot occupy the upload/answer client.
+        inspectionHttp = http.newBuilder().dispatcher(new okhttp3.Dispatcher())
+                .connectTimeout(5, TimeUnit.SECONDS).readTimeout(5, TimeUnit.SECONDS)
+                .callTimeout(5, TimeUnit.SECONDS).retryOnConnectionFailure(false)
+                .followRedirects(false).followSslRedirects(false).build();
         String normalized = baseUrl == null ? "" : baseUrl.trim();
         while (normalized.endsWith("/")) {
             normalized = normalized.substring(0, normalized.length() - 1);
@@ -268,6 +274,42 @@ public final class DocScanApi {
 
     public void attachDocumentAudio(long sessionId) throws IOException, JSONException {
         postEmpty("/v1/exam-sessions/" + sessionId + "/document-audio");
+    }
+
+    /** A single cancellable read, never an upload, retry, redirect, or Work send. */
+    public CaptureInspectionFeedback.Query captureInspection(CaptureInspectionFeedback.Binding binding) {
+        HttpUrl url = requireUrl(baseUrl + "/v1/capture-inspections/" + binding.inspectionId).newBuilder()
+                .addQueryParameter("device_id", binding.context.deviceId)
+                .addQueryParameter("generation", Long.toString(binding.context.generation))
+                .addQueryParameter("capture_id", binding.source.captureId).build();
+        Request.Builder request = new Request.Builder().url(url).get().header("Accept", "application/json");
+        if (!apiKey.isEmpty()) request.header("Authorization", "Bearer " + apiKey);
+        okhttp3.Call call = inspectionHttp.newCall(request.build());
+        return new CaptureInspectionFeedback.Query() {
+            @Override public JSONObject execute() throws IOException, JSONException {
+                try (Response response = call.execute()) {
+                    if (!response.isSuccessful() || response.body() == null)
+                        throw new IOException("撮影診断を取得できません (HTTP " + response.code() + ")");
+                    if (response.body().contentLength() > CaptureInspectionFeedback.MAX_RESPONSE_BYTES)
+                        throw new IOException("撮影診断が大きすぎます");
+                    ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+                    java.io.InputStream input = response.body().byteStream();
+                    byte[] block = new byte[4096]; int count;
+                    while ((count = input.read(block, 0, Math.min(block.length,
+                            CaptureInspectionFeedback.MAX_RESPONSE_BYTES + 1 - bytes.size()))) != -1) {
+                        bytes.write(block, 0, count);
+                        if (bytes.size() > CaptureInspectionFeedback.MAX_RESPONSE_BYTES)
+                            throw new IOException("撮影診断が大きすぎます");
+                    }
+                    String json = StandardCharsets.UTF_8.newDecoder()
+                            .onMalformedInput(java.nio.charset.CodingErrorAction.REPORT)
+                            .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPORT)
+                            .decode(java.nio.ByteBuffer.wrap(bytes.toByteArray())).toString();
+                    return new JSONObject(json);
+                }
+            }
+            @Override public void cancel() { call.cancel(); }
+        };
     }
 
     public void cancelRequests() { http.dispatcher().cancelAll(); }

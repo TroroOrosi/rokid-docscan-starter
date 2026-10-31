@@ -1737,6 +1737,13 @@ public class LocalReviewTest {
         public long showHud(List<String> lines) { return 2; }
         public long showCaptureAiming(int page, boolean retake, boolean stable) { return 3; }
         public long showCaptureReview(byte[] jpeg, int rotation, List<String> lines) { return 1; }
+        volatile CaptureInspectionFeedback.Notice inspectionNotice;
+        final CountDownLatch inspectionShown = new CountDownLatch(1);
+        public void showCaptureInspectionFeedback(CaptureInspectionFeedback.Notice notice,
+                java.util.function.BooleanSupplier current) {
+            if (notice == null) inspectionNotice = null;
+            else if (current.getAsBoolean()) { inspectionNotice = notice; inspectionShown.countDown(); }
+        }
         public void fenceCustomViewEpoch(long generation, String reason) { }
     }
 
@@ -1805,5 +1812,108 @@ public class LocalReviewTest {
     private static void barrier(Object object) throws Exception {
         ((ExecutorService) get(object, "serial")).submit(() -> {}).get(5, TimeUnit.SECONDS);
         ((ExecutorService) get(object, "serial")).submit(() -> {}).get(5, TimeUnit.SECONDS);
+    }
+
+    // AGENT_APPROVED=1: exercise real upload -> strict ACK -> diagnostic GET -> capture surface.
+    @Test public void diagnosticFeedbackReadsAfterImageAckWithoutAnotherCapture() throws Exception {
+        Surface surface = new Surface(); surface.holdForPage = true;
+        var run = new java.util.concurrent.atomic.AtomicReference<>(new CaptureInspectionOrigin.Context("glasses:one", 42));
+        var savedRef = new java.util.concurrent.atomic.AtomicReference<LocalCaptureSession>();
+        var ackBeforeRead = new java.util.concurrent.atomic.AtomicBoolean();
+        try (MockWebServer server = feedbackServer(run.get(), null, null, savedRef, ackBeforeRead)) {
+            DocScanController controller = inspectionController(server, surface, run);
+            try {
+                byte[] jpeg = {1,2,3};
+                issueInspectionPhoto(controller, 0, false); controller.onPhoto(jpeg, nativeSource(jpeg, 100)); barrier(controller);
+                LocalCaptureSession saved = (LocalCaptureSession)get(controller, "localSession"); savedRef.set(saved);
+                commitVisible(controller, surface); uploadInspectionPages(controller, server);
+                assertTrue("capture-bound diagnosis must reach the real surface", surface.inspectionShown.await(2, TimeUnit.SECONDS));
+                assertEquals("P1 要確認", surface.inspectionNotice.text());
+                assertTrue("diagnostic is independent of native ACK", ackBeforeRead.get());
+                assertNull(saved.nextUnsent()); assertEquals(1, saved.pageCount()); assertEquals(1, surface.photos);
+                assertEquals(RelayState.READING, controller.getState());
+            } finally { controller.close(); }
+        }
+    }
+
+    @Test public void lateDiagnosticCannotApplyToANewPhotoRetakeGenerationOrFinishedRun() throws Exception {
+        for (String change : List.of("new_photo", "retake", "generation", "finish")) {
+            Surface surface = new Surface(); surface.holdForPage = true;
+            var run = new java.util.concurrent.atomic.AtomicReference<>(new CaptureInspectionOrigin.Context("glasses:one", 42));
+            CountDownLatch started = new CountDownLatch(1), release = new CountDownLatch(1);
+            var savedRef = new java.util.concurrent.atomic.AtomicReference<LocalCaptureSession>();
+            try (MockWebServer server = feedbackServer(run.get(), started, release, savedRef, new java.util.concurrent.atomic.AtomicBoolean())) {
+                DocScanController controller = inspectionController(server, surface, run);
+                try {
+                    byte[] jpeg = {1,2,3};
+                    issueInspectionPhoto(controller, 0, false); controller.onPhoto(jpeg, nativeSource(jpeg, 100)); barrier(controller);
+                    LocalCaptureSession saved = (LocalCaptureSession)get(controller, "localSession"); savedRef.set(saved);
+                    commitVisible(controller, surface); uploadInspectionPages(controller, server);
+                    assertTrue("read must not block upload/serial: " + change, started.await(2, TimeUnit.SECONDS));
+                    assertNull(saved.nextUnsent());
+                    if (change.equals("generation")) run.set(new CaptureInspectionOrigin.Context("glasses:one", 43));
+                    else if (change.equals("finish")) call(controller, "finishLocalCaptureNow", new Class<?>[]{});
+                    else issueInspectionPhoto(controller, change.equals("retake") ? 0 : 1, change.equals("retake"));
+                    release.countDown();
+                    assertFalse("old AI result must not reach later context: " + change, surface.inspectionShown.await(150, TimeUnit.MILLISECONDS));
+                    assertNull(surface.inspectionNotice);
+                    assertEquals(1, saved.pageCount());
+                } finally { release.countDown(); controller.close(); }
+            }
+        }
+    }
+
+    private static MockWebServer feedbackServer(CaptureInspectionOrigin.Context context, CountDownLatch started,
+            CountDownLatch release, java.util.concurrent.atomic.AtomicReference<LocalCaptureSession> saved,
+            java.util.concurrent.atomic.AtomicBoolean ackBeforeRead) throws Exception {
+        return feedbackServer(context, started, release, saved, ackBeforeRead, false);
+    }
+
+    private static MockWebServer feedbackServer(CaptureInspectionOrigin.Context context, CountDownLatch started,
+            CountDownLatch release, java.util.concurrent.atomic.AtomicReference<LocalCaptureSession> saved,
+            java.util.concurrent.atomic.AtomicBoolean ackBeforeRead, boolean malformedRegistration) throws Exception {
+        MockWebServer server = new MockWebServer();
+        var capture = new java.util.concurrent.atomic.AtomicReference<JSONObject>();
+        server.setDispatcher(new Dispatcher() {
+            @Override public MockResponse dispatch(RecordedRequest request) {
+                try {
+                    if ("/v1/documents".equals(request.getPath())) return new MockResponse().setBody("{\"document_id\":17}");
+                    if ("/v1/documents/17/pages".equals(request.getPath())) {
+                        JSONObject metadata = new JSONObject(new String(uploadPart(request, "capture_provenance"), StandardCharsets.UTF_8));
+                        capture.set(metadata);
+                        return new MockResponse().setBody(new JSONObject().put("document_id",17).put("page_index",metadata.getInt("page_index"))
+                                .put("capture_provenance", metadata).put("canonical_image_sha256", "c".repeat(64))
+                                .put("capture_inspection", DocScanApiCaptureTest.feedbackRegistration("queued")
+                                        .put("inspection_id", malformedRegistration ? true : "a".repeat(64))).toString());
+                    }
+                    if (request.getPath().startsWith("/v1/capture-inspections/")) {
+                        ackBeforeRead.set(saved.get().nextUnsent() == null);
+                        if (started != null) started.countDown();
+                        if (release != null) release.await(3, TimeUnit.SECONDS);
+                        return new MockResponse().setBody(DocScanApiCaptureTest.feedbackReply(capture.get(), context, 17, "c".repeat(64), "issue").toString());
+                    }
+                    return new MockResponse().setResponseCode(404);
+                } catch (Exception error) { return new MockResponse().setResponseCode(500); }
+            }
+        });
+        server.start(); return server;
+    }
+
+    @Test public void malformedOptionalDiagnosticDoesNotUndoTheStrictImageAck() throws Exception {
+        Surface surface = new Surface(); surface.holdForPage = true;
+        var run = new java.util.concurrent.atomic.AtomicReference<>(new CaptureInspectionOrigin.Context("glasses:one", 42));
+        var savedRef = new java.util.concurrent.atomic.AtomicReference<LocalCaptureSession>();
+        try (MockWebServer server = feedbackServer(run.get(), null, null, savedRef, new java.util.concurrent.atomic.AtomicBoolean(), true)) {
+            DocScanController controller = inspectionController(server, surface, run);
+            try {
+                byte[] jpeg = {1,2,3};
+                issueInspectionPhoto(controller, 0, false); controller.onPhoto(jpeg, nativeSource(jpeg, 100)); barrier(controller);
+                LocalCaptureSession saved = (LocalCaptureSession)get(controller, "localSession"); savedRef.set(saved);
+                commitVisible(controller, surface); uploadInspectionPages(controller, server);
+                assertNull(saved.nextUnsent()); assertEquals(1, saved.pageCount());
+                assertFalse(surface.inspectionShown.await(100, TimeUnit.MILLISECONDS));
+                assertEquals(1, surface.photos); assertEquals(RelayState.READING, controller.getState());
+            } finally { controller.close(); }
+        }
     }
 }

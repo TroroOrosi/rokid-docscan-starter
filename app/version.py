@@ -246,7 +246,8 @@ from __future__ import annotations
 # 0.64.0: close owned Work menus with real Escape and live selection evidence.
 # 0.65.0: discover serial-verified glasses after hotspot address changes and cold starts.
 # 0.65.1: bounded phone-local unicast DNS-SD when the ADB mDNS service is unavailable.
-APP_VERSION = "0.65.1"
+# 0.65.2: respect protected glasses windows when a delayed phone sleep arrives.
+APP_VERSION = "0.65.2"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.
@@ -515,7 +516,8 @@ EXPLAINER_API_VERSION = "1.1.0"
 # 1.36.0: opt-in recording evaluation retains originals and fences finalization with native capture.
 # 1.37.0: opt-in comparison transfer binds original clips to one local/device generation.
 # 1.38.0: current-run native uploads may include their pre-capture diagnostic origin.
-GLASSES_VIEW_CONTRACT_VERSION = "1.38.0"
+# 1.39.0: fence stale power generations and show bounded, identity-bound capture feedback.
+GLASSES_VIEW_CONTRACT_VERSION = "1.39.0"
 
 # Answer-area overlay payload (box + short answer; 2D image-anchored).
 # 1.1.0: added tracking metadata (tracking/fixed_ar/anchor_hint).
