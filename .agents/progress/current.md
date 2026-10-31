@@ -1,7 +1,7 @@
 # 再開入口：次のセッションはここだけ読めば始められる
 
-最終更新: 2026-10-31続行 — APP.64PC: owned realEscape修正source25571e、134pass/V1重点10pass/独立3pass・両軸R0、版docs23pass/全ruff良。phone ace94/GUI/env/SEND0保持、旧model診断9c1bccはtrigger不閉鎖で不合格。新checkpoint/raw94→別監査配布→無送信prod確認へ。詳細phone-work-connected-root-20261030.json。
-Runs on: PC開発・別監査＋phone F51F/ZY22LWGDCV。会場は常時オンphone AP＋装着glassesのみ、PC/有線/毎回接続不要。本人「確認せずそのまま」継続。phone sourceace94/env7/SEND0・GUI/4health/auth保持、APP.64修正はPCまで。新GPT0/累計3、Drive21/folder1、実紙受入0、APK45導入0。
+最終更新: 2026-10-31続行 — phone APP.64/source002/raw94後、A exactCLI cb09fb exit0/actual724f2d: SEND1・API/watch新birth・GUI旧birth保持/別actual5bb968 R0。watch新IP/no-state入口PC43+別3/R0・version/docs33・Ruff良、APP.65配布準備。prod Sol6.1/Extra High/Fast確認済。詳細phone-work-connected-root-20261030.json。
+Runs on: PC開発・別監査＋phone F51F/ZY22LWGDCV。会場は常時オンphone AP＋装着glassesのみ、PC/有線/毎回接続不要。本人『確認せずそのまま』継続。phone source002/raw94/SEND1/env413af3/GUI保持。helper直接GPT0/累計3、Drive21/folder1、実紙受入0、APK45はphone stage/hash一致・glasses導入0。
 
 ## 0. 読み方（前提と資料に引きずられないため）
 
@@ -90,7 +90,7 @@ Runs on: PC開発・別監査＋phone F51F/ZY22LWGDCV。会場は常時オンpho
   → 旧サーバ停止 → `nohup bash scripts/phone_serve.sh 127.0.0.1 > data/server-<commit>.log 2>&1 &`。PCからは `ssh -f -N -L 8000:127.0.0.1:8000 ...`（ssh `-i ~/.ssh/f51f_key -p 8022 u0_a26@192.168.0.6`）。
   ベンチの鍵は `ROKID_API_KEY` をスマホの env から読んで渡す（画面に出さない）。
 
-## 4. 次の作業（Runs on: 開発PC＋接続F51F）：ownedEscape source25571e/134pass/独立3passR0のAPP.64をcheckpoint/raw94化→現ace94/receipt ecdb58f/API30028-watch30038から新updater最終結合/別監査→root SEND0更新/新無送信prod確認。旧probe/sourcejournal再実行0。glasses一覧はsocket情報不足で未照会(null)、未接続とは扱わない。APK45/実紙/装着/音声/再起動/会場未検証。以下は旧経緯。
+## 4. 次の作業（Runs on: 開発PC＋接続F51F）：SEND A cb09fb exit0/actual724f2d・別5bb968 R0。watch9554c34e/test4eea/別541826 R0→APP.65 commit/raw配布を準備。新pure mDNS99e72dはguard前後真/response socket_protocol（backend/端末不在判定0）、一次実装差を調査。APK45 phone stageのみ。旧once再実行0/実紙・装着・音声・再起動・会場未検証。以下は旧経緯。
 
 1. 済：独立監査2回（`4552ea1`、`4552ea1..e12e155`）の指摘を `61ad481`〜`1134404` で反映。
 2. 済：4a（3節）。起動はスマホで `bash scripts/phone_serve.sh 127.0.0.1`、PCから `ssh -L 8000:127.0.0.1:8000` で投入した。

@@ -116,7 +116,7 @@ is now the intended topology and is still unexercised.
 | Route | Status |
 |---|---|
 | `ROKID_SOLVER=chatgpt-web` | The existing Chat route drives the operator's own signed-in ChatGPT web session over CDP. |
-| `ROKID_SOLVER=chatgpt-work` | The requested phone-local Work consumer sends unchanged PNG ZIPs, verifies source receipts and returns staged answers. Work technical fixtures passed on the signed-in phone. The four services were restored with SEND0 and authenticated health checks. A public menu observation confirmed Sol / Extra High / Fast and normal menu unmount; production invocation, restart and venue acceptance remain unverified. |
+| `ROKID_SOLVER=chatgpt-work` | The requested phone-local Work consumer sends unchanged PNG ZIPs, verifies source receipts and returns staged answers. Work technical fixtures passed on the signed-in phone. The production model verifier confirmed Sol / Extra High / Fast and its owned-menu closure. Common SEND1 and restarted API/watcher readiness were checked while retaining the browser/X11; this activation sent no diagnostic material. Full restart and venue acceptance remain unverified. |
 | On-phone local model (F-51F, llama.cpp) | **Not the route.** The operator chose chatgpt-web on 2026-09-14. Its measurements are kept as evidence in `docs/hardware-measurements.md` §E; no further work is scheduled on it. |
 | `openai` / `gemini` / `claude` API keys | Supported and config-only. The per-question routes can fall back through `ROKID_SOLVER_TIERS`; the background booklet route uses `ROKID_SOLVER` alone and has no fallback tier. |
 | Local OpenAI-compatible HTTP (`app/llm_http.py`) | Reaches an on-phone `llama-server` without the openai SDK. |
@@ -429,7 +429,10 @@ Only four gestures reach an ordinary app; the rest are system-reserved in
 - `/v1/glasses/state` always requires a configured API key. Store monotonic
   generation/sequence and terminal states atomically. Use the authenticated
   request's source address for watcher discovery, then check `ro.serialno`
-  before device control. Forwarded headers must not select the target.
+  before device control. If that address is unreachable or state is absent,
+  bounded legacy mDNS discovery may identify a candidate for serial-verified
+  stopped-app bootstrap only; it must not fabricate authenticated state or a
+  session generation. Forwarded headers must not select the target.
 - `ROKID_REAL_MODE=1` must reject placeholder analyzer/solver combinations and
   fail explicitly rather than fall back silently.
 - Never send unsupported media to a provider: OGG/FLAC are not handed to OpenAI

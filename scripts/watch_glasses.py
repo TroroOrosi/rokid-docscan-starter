@@ -1,4 +1,4 @@
-"""Run in Termux: control the authenticated glasses, without phone-side ADB.
+"""Run in Termux: control serial-verified glasses over the phone's hotspot.
 
 Device writes are executed only when this watcher is explicitly enabled after
 operator approval. Unit tests use fake device calls; physical acceptance is pending.
@@ -10,7 +10,9 @@ import json
 import os
 from pathlib import Path
 import re
+import socket
 import subprocess
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -19,6 +21,11 @@ import urllib.request
 COMPONENT = "dev.rokid.docscanglass.doc/.DocScanGlassActivity"
 SERVER = "http://127.0.0.1:8000"
 ANSWER_RETRY_SECONDS = 5.0
+MDNS_MAX_BYTES = 8192
+MDNS_MAX_CANDIDATES = 4
+MDNS_TIMEOUT_SECONDS = 4.0
+DISCOVERY_TIMEOUT_SECONDS = 12.0
+DISCOVERY_RETRY_SECONDS = 15.0
 
 
 class StateUnavailable(RuntimeError):
@@ -87,13 +94,83 @@ def target(serial: str, expected_serial: str, state: dict) -> str:
     return candidate
 
 
-def adb(serial: str, *args: str) -> str:
+def adb(serial: str, *args: str, timeout: float = 10) -> str:
     result = subprocess.run(["adb", "-s", serial, *args], check=True, capture_output=True,
-                            text=True, timeout=10)
+                            text=True, timeout=timeout)
     output = result.stdout + result.stderr
     if "Error:" in output or "Exception" in output:
         raise subprocess.CalledProcessError(1, "device command")
     return result.stdout.strip()
+
+
+def mdns_services() -> str:
+    """Bound CLI bytes and time; this kills only our short-lived CLI on expiry."""
+    with subprocess.Popen(["adb", "mdns", "services"], stdout=subprocess.PIPE,
+                          stderr=subprocess.DEVNULL) as process:
+        timer = threading.Timer(MDNS_TIMEOUT_SECONDS, process.kill)
+        timer.daemon = True
+        timer.start()
+        try:
+            raw = process.stdout.read(MDNS_MAX_BYTES + 1)
+            if len(raw) > MDNS_MAX_BYTES:
+                raise StateUnavailable("glasses_discovery_unavailable")
+            if process.wait(timeout=1) != 0:
+                raise StateUnavailable("glasses_discovery_unavailable")
+            return raw.decode("utf-8")
+        finally:
+            timer.cancel()
+            if process.poll() is None:
+                process.kill()
+                process.wait(timeout=1)
+
+
+def mdns_target(expected_serial: str) -> str:
+    """A legacy advertisement is only a candidate, never authenticated app state."""
+    deadline = time.monotonic() + DISCOVERY_TIMEOUT_SECONDS
+    lines = mdns_services().splitlines()
+    if len(lines) > 65:
+        raise StateUnavailable("glasses_discovery_unavailable")
+    candidates = []
+    for line in lines:
+        fields = line.split()
+        if len(fields) != 3 or fields[1] not in ("_adb._tcp", "_adb._tcp."):
+            continue  # TLS pairing/connect, unknown formats and names are not targets.
+        match = re.fullmatch(r"([0-9.]+):5555", fields[2])
+        if not match:
+            continue
+        try:
+            address = ipaddress.IPv4Address(match[1])
+        except ValueError:
+            continue
+        if address.is_loopback or address.is_unspecified or address.is_multicast or address.is_reserved or address.is_link_local:
+            continue
+        candidate = f"{address}:5555"
+        if candidate not in candidates:
+            candidates.append(candidate)
+    if len(candidates) > MDNS_MAX_CANDIDATES:
+        raise StateUnavailable("glasses_discovery_unavailable")
+    for candidate in candidates:
+        try:
+            # UDP connect selects a local route without sending a packet. Never
+            # ADB-connect to the phone's own interface, even if it advertises.
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as route:
+                route.connect((candidate.rsplit(":", 1)[0], 5555))
+                if route.getsockname()[0] == candidate.rsplit(":", 1)[0]:
+                    continue
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            subprocess.run(["adb", "connect", candidate], check=True, capture_output=True,
+                           timeout=min(3, remaining))
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            if adb(candidate, "shell", "getprop", "ro.serialno", timeout=min(3, remaining)) == expected_serial:
+                return candidate
+        except (subprocess.SubprocessError, OSError, ValueError):
+            continue
+    # Empty also covers an unavailable vendor mDNS receiver, not physical absence.
+    raise StateUnavailable("glasses_discovery_unavailable")
 
 
 def app_running(serial: str) -> bool:
@@ -158,9 +235,11 @@ def watch(requested: str, expected_serial: str, interval: float, server: str = S
     newest = (-1, -1)
     worn_entry = None
     bootstrapped = False
+    next_discovery = 0.0
     last_volume_check = 0.0
     selected = device_id or os.environ.get("ROKID_GLASSES_DEVICE_ID")
     while True:
+        connection_ready = False
         try:
             state = fetch_state(server, selected)
             if "devices" in state:
@@ -187,6 +266,7 @@ def watch(requested: str, expected_serial: str, interval: float, server: str = S
             spread = adb(serial, "shell", "getprop", "vendor.rkd.glasses.is_spread")
             if spread not in ("0", "1"):
                 raise subprocess.CalledProcessError(1, "getprop")
+            connection_ready = True
             if seen_issue:
                 print("Glasses/server connection restored", flush=True)
                 seen_issue = None
@@ -260,6 +340,30 @@ def watch(requested: str, expected_serial: str, interval: float, server: str = S
             if code != seen_issue:
                 print(f"Watcher: {code}; waiting", flush=True)
                 seen_issue = code
+            discover = code == "waiting_for_glasses" or not isinstance(error, StateUnavailable)
+            if requested == "auto" and not connection_ready and discover and time.monotonic() >= next_discovery:
+                next_discovery = time.monotonic() + DISCOVERY_RETRY_SECONDS
+                if code == "waiting_for_glasses":
+                    selected = None  # Select only a subsequent real authenticated notification.
+                try:
+                    discovered = mdns_target(expected_serial)
+                    spread = adb(discovered, "shell", "getprop", "vendor.rkd.glasses.is_spread")
+                    if spread == "0":
+                        folded = True
+                        bootstrapped = False
+                    elif spread == "1":
+                        running = app_running(discovered)
+                        if running:
+                            bootstrapped = False
+                        elif not bootstrapped:
+                            folded = False  # This open was consumed by the bootstrap, before its reply.
+                            bootstrapped = True  # Consume before an uncertain am result, including IP changes.
+                            adb(discovered, "shell", "am", "start", "-W", "-n", COMPONENT,
+                                "--ez", "chooser", "true", "--ez", "wear_bootstrap", "true")
+                    else:
+                        raise ValueError("unknown fold state")
+                except (StateUnavailable, subprocess.SubprocessError, OSError, ValueError):
+                    print("Watcher: glasses_discovery_unavailable; waiting", flush=True)
         time.sleep(interval)
 
 

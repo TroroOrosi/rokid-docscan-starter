@@ -1,12 +1,17 @@
 """Watcher checks run only against fake HTTP state and fake device calls."""
 
 import subprocess
+import io
+import socket
+import sys
+import time
 
 import pytest
 
 from scripts import watch_glasses
 
 _REAL_APP_RUNNING = watch_glasses.app_running
+_REAL_POPEN = subprocess.Popen
 
 
 def _watch(monkeypatch, states, spread=None, fail_launch=False, fail_once=None, app_running=True, tick=0.5):
@@ -293,3 +298,183 @@ def test_only_a_clean_process_miss_authorizes_the_bootstrap(monkeypatch):
     assert not watch_glasses.app_running("glasses:5555")
     with pytest.raises(subprocess.SubprocessError):
         watch_glasses.app_running("glasses:5555")
+
+
+def _discovery_watch(monkeypatch, states, rows, *, launch_unknown=False, identities=None, ticks=20, spreads=None):
+    """Exercise the watcher through HTTP/ADB/socket boundaries, without devices."""
+    observations = iter(states)
+    advertisements = iter([rows] * len(states) if isinstance(rows, str) else rows)
+    calls, selections = [], []
+    elapsed, running = [0.0], [False]
+    spread_values = iter(spreads) if spreads else None
+
+    class DiscoveryProcess:
+        def __init__(self, args, **kwargs):
+            assert args == ["adb", "mdns", "services"]
+            assert kwargs["stdout"] == subprocess.PIPE and kwargs["stderr"] == subprocess.DEVNULL
+            calls.append(tuple(args))
+            self.stdout = io.BytesIO(next(advertisements).encode())
+            self.returncode = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            self.stdout.close()
+
+        def poll(self):
+            return self.returncode
+
+        def kill(self):
+            self.returncode = -9
+
+        def wait(self, **kwargs):
+            return self.returncode
+
+    class RouteSocket:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def connect(self, address):
+            pass  # UDP route lookup only; no packet is sent.
+
+        def getsockname(self):
+            return ("10.248.83.1", 35000)
+
+    def fetch(server, selected):
+        selections.append(selected)
+        calls.append(("fetch", selected))
+        state = next(observations)
+        if isinstance(state, Exception):
+            raise state
+        return state
+
+    def run(args, **kwargs):
+        calls.append(tuple(args))
+        if args[:2] == ["adb", "connect"] and args[2] == "10.0.0.10:5555":
+            raise subprocess.TimeoutExpired("old source", kwargs["timeout"])
+        output, code = "", 0
+        if "ro.serialno" in args:
+            output = (identities or {}).get(args[2], "expected")
+            if isinstance(output, Exception):
+                raise output
+        elif "vendor.rkd.glasses.is_spread" in args:
+            output = next(spread_values) if spread_values else "1"
+        elif "pidof" in args:
+            output, code = ("123", 0) if running[0] else ("", 1)
+        elif "wear_bootstrap" in args:
+            if launch_unknown:
+                raise subprocess.TimeoutExpired("launch", kwargs["timeout"])
+            running[0] = True
+        return subprocess.CompletedProcess(args, code, output, "")
+
+    monkeypatch.setattr(watch_glasses.subprocess, "Popen", DiscoveryProcess)
+    monkeypatch.setattr(watch_glasses.subprocess, "run", run)
+    monkeypatch.setattr(socket, "socket", lambda *args: RouteSocket())
+    monkeypatch.setattr(watch_glasses, "fetch_state", fetch)
+    monkeypatch.setattr(watch_glasses.time, "monotonic", lambda: elapsed[0])
+    monkeypatch.setattr(watch_glasses.time, "sleep", lambda _: elapsed.__setitem__(0, elapsed[0] + ticks))
+    with pytest.raises(StopIteration):
+        watch_glasses.watch("auto", "expected", 0.5)
+    return calls, selections
+
+
+@pytest.mark.parametrize("first", [{"devices": [STATE]}, {"devices": []},
+                                   watch_glasses.StateUnavailable("waiting_for_glasses")])
+def test_missing_or_old_source_discovers_serial_before_bootstrap_then_uses_real_state(monkeypatch, first):
+    real = {**STATE, "device_id": "real-android-id", "source_ip": "10.248.83.42", "generation": 9}
+    calls, selections = _discovery_watch(monkeypatch, [first, {"devices": [real]}, real, real],
+                                         "List of discovered mdns services\nnot-an-android-id\t_adb._tcp\t10.248.83.42:5555\n")
+    launches = [call for call in calls if "am" in call]
+    assert launches == [("adb", "-s", "10.248.83.42:5555", "shell", "am", "start", "-W", "-n",
+                         watch_glasses.COMPONENT, "--ez", "chooser", "true", "--ez", "wear_bootstrap", "true")]
+    assert ("adb", "mdns", "services") in calls
+    assert calls.index(launches[0]) < [i for i, call in enumerate(calls) if call[0] == "fetch"][1]
+    assert calls.index(("adb", "-s", "10.248.83.42:5555", "shell", "getprop", "ro.serialno")) < calls.index(launches[0])
+    assert "real-android-id" in selections and "not-an-android-id" not in selections
+    assert not any("wear_origin" in call or "wake_session_id" in call for call in calls)
+
+
+def test_mdns_never_controls_tls_self_wrong_port_or_serial_mismatch(monkeypatch):
+    rows = ("phone\t_adb._tcp\t10.248.83.1:5555\n"
+            "tls\t_adb-tls-connect._tcp\t10.248.83.43:5555\n"
+            "pair\t_adb-tls-pairing._tcp\t10.248.83.44:5555\n"
+            "v6\t_adb._tcp\t[::1]:5555\n"
+            "other-port\t_adb._tcp\t10.248.83.45:4444\n"
+            "loopback\t_adb._tcp\t127.0.0.1:5555\n"
+            "wrong\t_adb._tcp\t10.248.83.46:5555\n"
+            "right\t_adb._tcp.\t10.248.83.42:5555\n"
+            "duplicate\t_adb._tcp\t10.248.83.42:5555\n")
+    calls, _ = _discovery_watch(monkeypatch, [{"devices": []}], rows,
+                                 identities={"10.248.83.46:5555": "different"})
+    assert [c for c in calls if c[:2] == ("adb", "connect")] == [
+        ("adb", "connect", "10.248.83.46:5555"), ("adb", "connect", "10.248.83.42:5555")]
+    controls = [c for c in calls if "am" in c or "settings" in c or "keyevent" in c or "volume" in c]
+    assert len(controls) == 1 and controls[0][2] == "10.248.83.42:5555"
+
+
+@pytest.mark.parametrize("identity", ["different", subprocess.TimeoutExpired("identity", 3)])
+def test_unknown_or_mismatched_discovery_identity_has_no_device_control(monkeypatch, identity):
+    calls, _ = _discovery_watch(monkeypatch, [{"devices": []}], "candidate\t_adb._tcp\t10.248.83.42:5555\n",
+                                 identities={"10.248.83.42:5555": identity})
+    assert not any("am" in c or "keyevent" in c or "settings" in c or "volume" in c or "pidof" in c for c in calls)
+
+
+def test_unknown_bootstrap_is_not_repeated_when_advertised_IP_changes(monkeypatch):
+    calls, selections = _discovery_watch(monkeypatch, [{"devices": []}] * 2,
+                                           [f"same-device\t_adb._tcp\t10.248.83.{n}:5555\n" for n in (42, 43)],
+                                           launch_unknown=True)
+    assert len([c for c in calls if "ro.serialno" in c]) == 2
+    assert len([c for c in calls if "wear_bootstrap" in c]) == 1
+    assert set(selections) == {None}
+    assert not any("KEYCODE_WAKEUP" in c or "wake_session_id" in c or "wear_origin" in c for c in calls)
+
+
+def test_discovered_fold_open_bootstrap_does_not_repeat_chooser_after_authenticated_notice(monkeypatch):
+    real = {**STATE, "source_ip": "10.248.83.42"}
+    calls, _ = _discovery_watch(monkeypatch, [{"devices": []}, {"devices": []}, {"devices": [real]}, real],
+                                 "glasses\t_adb._tcp\t10.248.83.42:5555\n", spreads=["0", "1", "1"])
+    launches = [c for c in calls if "am" in c]
+    assert len(launches) == 1 and "wear_bootstrap" in launches[0]
+    assert not any("KEYCODE_WAKEUP" in c for c in calls)
+
+
+def test_reachable_authenticated_source_does_not_query_mdns(monkeypatch):
+    state = {**STATE, "source_ip": "10.248.83.42"}
+    calls, _ = _discovery_watch(monkeypatch, [state, state], "must not be read")
+    assert ("adb", "mdns", "services") not in calls
+
+
+@pytest.mark.parametrize("code", ["authentication_failed", "server_stopped", "state_unavailable"])
+def test_api_authentication_or_unknown_state_failure_does_not_start_discovery(monkeypatch, code):
+    calls, _ = _discovery_watch(monkeypatch, [watch_glasses.StateUnavailable(code)], "must not be read")
+    assert not any(call[0] == "adb" for call in calls)
+
+
+@pytest.mark.parametrize("rows", ["x" * 8193,
+                                  "\n".join(f"c{n}\t_adb._tcp\t10.248.83.{n}:5555" for n in range(10, 15)),
+                                  "not a service\n" * 66, "List of discovered mdns services\n"],
+                         ids=["oversized", "too_many_candidates", "too_many_rows", "empty_or_unsupported"])
+def test_unavailable_overflow_or_too_many_advertisements_never_guess_a_target(monkeypatch, rows):
+    calls, _ = _discovery_watch(monkeypatch, [{"devices": []}], rows)
+    assert not any(call[:2] == ("adb", "connect") for call in calls)
+
+
+@pytest.mark.parametrize("script", ["import time;time.sleep(30)",
+                                    "import sys,time;sys.stdout.buffer.write(b'x'*8193);sys.stdout.flush();time.sleep(30)"])
+def test_mdns_output_and_time_limits_reap_only_the_owned_short_lived_cli(monkeypatch, script):
+    children = []
+    def popen(args, **kwargs):
+        assert args == ["adb", "mdns", "services"]
+        child = _REAL_POPEN([sys.executable, "-B", "-c", script], **kwargs)
+        children.append(child)
+        return child
+    monkeypatch.setattr(watch_glasses.subprocess, "Popen", popen)
+    monkeypatch.setattr(watch_glasses, "MDNS_TIMEOUT_SECONDS", 0.2)
+    started = time.monotonic()
+    with pytest.raises(watch_glasses.StateUnavailable, match="discovery_unavailable"):
+        watch_glasses.mdns_services()
+    assert time.monotonic() - started < 3 and len(children) == 1 and children[0].poll() is not None
