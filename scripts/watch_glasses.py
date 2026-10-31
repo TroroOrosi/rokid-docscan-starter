@@ -446,6 +446,7 @@ def watch(requested: str, expected_serial: str, interval: float, server: str = S
             power_event("sleep", "suppressed", state)
 
     while True:
+        loop_started = time.monotonic()
         connection_ready = False
         try:
             state = fetch_state(server, selected)
@@ -577,7 +578,7 @@ def watch(requested: str, expected_serial: str, interval: float, server: str = S
                         raise ValueError("unknown fold state")
                 except (StateUnavailable, subprocess.SubprocessError, OSError, ValueError):
                     print("Watcher: glasses_discovery_unavailable; waiting", flush=True)
-        time.sleep(interval)
+        time.sleep(max(0.0, interval - (time.monotonic() - loop_started)))
 
 
 if __name__ == "__main__":

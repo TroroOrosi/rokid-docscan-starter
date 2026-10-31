@@ -908,3 +908,71 @@ def test_only_first_read_of_each_new_order_is_logged_including_sleep_cancel_read
     assert all(set(event) == {"event", "generation", "sequence", "phase", "display_request", "read_ns"}
                and type(event["read_ns"]) is int for event in events)
     assert "PRIVATE" not in output
+
+
+def _watch_poll_cadence(monkeypatch, request_seconds, unavailable=False):
+    """Run the real watch/HTTP/ADB paths; fake only HTTP, processes and time."""
+    now = [0.0]
+    reads, pauses, commands = [], [], []
+
+    def open_url(request, timeout):
+        assert timeout == 3
+        assert request.full_url == "http://127.0.0.1:8000/v1/glasses/state?device_id=expected"
+        if len(reads) == 3:
+            raise StopIteration
+        reads.append(now[0])
+        now[0] += request_seconds
+        if unavailable:
+            raise watch_glasses.urllib.error.URLError("test server unavailable")
+        return io.BytesIO(json.dumps(STATE).encode())
+
+    def run(argv, **kwargs):
+        assert argv[:3] == ["adb", "-s", "glasses:5555"]
+        commands.append(tuple(argv[3:]))
+        output = ""
+        if "ro.serialno" in argv:
+            output = "expected"
+        elif "vendor.rkd.glasses.is_spread" in argv:
+            output = "1"
+        elif "pidof" in argv:
+            output = "123"
+        elif "--get" in argv:
+            output = "volume is 0"
+        return subprocess.CompletedProcess(argv, 0, output, "")
+
+    def pause(seconds):
+        assert seconds >= 0
+        pauses.append(seconds)
+        now[0] += seconds
+
+    monkeypatch.setenv("ROKID_API_KEY", "test-key-not-a-secret")
+    monkeypatch.setattr(watch_glasses.urllib.request, "urlopen", open_url)
+    monkeypatch.setattr(watch_glasses.subprocess, "run", run)
+    monkeypatch.setattr(watch_glasses.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(watch_glasses.time, "monotonic_ns", lambda: int(now[0] * 1_000_000_000))
+    monkeypatch.setattr(watch_glasses.time, "sleep", pause)
+    with pytest.raises(StopIteration):
+        watch_glasses.watch("glasses:5555", "expected", 0.5, device_id="expected")
+    return reads, pauses, commands
+
+
+@pytest.mark.parametrize("request_seconds,expected_reads,expected_pauses", [
+    (0.125, [0.0, 0.5, 1.0], [0.375, 0.375, 0.375]),
+    (0.8, [0.0, 0.8, 1.6], [0.0, 0.0, 0.0]),
+])
+def test_watch_poll_cadence_includes_work_instead_of_an_extra_full_wait(
+    monkeypatch, request_seconds, expected_reads, expected_pauses,
+):
+    reads, pauses, commands = _watch_poll_cadence(monkeypatch, request_seconds)
+    assert reads == pytest.approx(expected_reads)
+    assert pauses == pytest.approx(expected_pauses)
+    assert sum("ro.serialno" in command for command in commands) == 1
+    assert sum("pidof" in command for command in commands) == 3
+    assert not any("input" in command or "am" in command for command in commands)
+
+
+def test_watch_poll_cadence_keeps_the_remaining_wait_after_a_short_http_failure(monkeypatch):
+    reads, pauses, commands = _watch_poll_cadence(monkeypatch, 0.125, unavailable=True)
+    assert reads == pytest.approx([0.0, 0.5, 1.0])
+    assert pauses == pytest.approx([0.375, 0.375, 0.375])
+    assert commands == []
