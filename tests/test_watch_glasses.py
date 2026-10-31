@@ -208,6 +208,103 @@ def test_explicit_chooser_waits_for_sleep_and_same_phase_can_sleep_again_after_i
     assert not any("am" in c for c in commands), "ordinary wake is never a chooser-entry command"
 
 
+def test_a_verified_idle_request_precedes_slow_fold_and_process_diagnostics(monkeypatch):
+    """Use real watch/adb/pidof; only the process, HTTP and clock boundaries are fake."""
+    awake = {**STATE, "phase": "chooser", "session_id": None, "display_request": "wake"}
+    asleep = {**awake, "sequence": 2, "display_request": "sleep"}
+    elapsed = [0.0]
+    observed = []
+    delivered = []
+    events = []
+
+    class Delivered(BaseException):
+        pass
+
+    def fetch(*args):
+        if not elapsed[0]:
+            return awake
+        if not observed:
+            observed.append(elapsed[0])
+        return asleep
+
+    def run(argv, **kwargs):
+        if "ro.serialno" in argv:
+            output = "expected"
+        elif "vendor.rkd.glasses.is_spread" in argv or "pidof" in argv:
+            events.append(("diagnostic", elapsed[0]))
+            if observed:
+                elapsed[0] += 2.0  # A slow device read must not delay an already-received intent.
+            output = "1000" if "pidof" in argv else "1"
+        elif "KEYCODE_SOFT_SLEEP" in argv:
+            delivered.append(elapsed[0])
+            events.append(("soft_sleep", elapsed[0]))
+            raise Delivered()
+        else:
+            output = "volume is 0" if "--get" in argv else ""
+        return subprocess.CompletedProcess(argv, 0, output, "")
+
+    def pause(_):
+        elapsed[0] = 5.0
+
+    monkeypatch.setattr(watch_glasses, "fetch_state", fetch)
+    monkeypatch.setattr(watch_glasses.subprocess, "run", run)
+    monkeypatch.setattr(watch_glasses, "app_running", _REAL_APP_RUNNING)
+    monkeypatch.setattr(watch_glasses.time, "monotonic", lambda: elapsed[0])
+    monkeypatch.setattr(watch_glasses.time, "sleep", pause)
+    with pytest.raises(Delivered):
+        watch_glasses.watch("glasses:5555", "expected", 0.5)
+    assert delivered[0] - observed[0] < 0.5, events
+
+
+def test_a_priority_sleep_readback_still_cancels_for_a_new_reader(monkeypatch):
+    awake = {**STATE, "phase": "chooser", "session_id": None, "display_request": "wake"}
+    asleep = {**awake, "sequence": 2, "display_request": "sleep"}
+    reading = {**asleep, "sequence": 3, "phase": "reading", "display_request": "wake"}
+    commands = _watch(monkeypatch, [awake, asleep, reading])
+    assert not any("KEYCODE_SOFT_SLEEP" in command for command in commands)
+
+
+def test_a_known_fold_keeps_the_unfold_chooser_ahead_of_an_old_sleep(monkeypatch):
+    awake = {**STATE, "phase": "chooser", "session_id": None, "display_request": "wake"}
+    asleep = {**awake, "sequence": 2, "display_request": "sleep"}
+    commands = _watch(monkeypatch, [awake, asleep], spread=["0", "1"])
+    assert not any("KEYCODE_SOFT_SLEEP" in command for command in commands)
+    assert len([command for command in commands if "am" in command]) == 1
+
+
+def test_a_priority_sleep_with_unknown_delivery_does_not_start_discovery(monkeypatch):
+    awake = {**STATE, "phase": "chooser", "session_id": None, "display_request": "wake"}
+    asleep = {**awake, "sequence": 2, "display_request": "sleep"}
+    snapshots = iter([awake, asleep, asleep])
+    monkeypatch.setattr(watch_glasses, "fetch_state", lambda *args: next(snapshots))
+    monkeypatch.setattr(watch_glasses, "target", lambda *args: "10.0.0.10:5555")
+    monkeypatch.setattr(watch_glasses, "app_running", lambda serial: True)
+    monkeypatch.setattr(watch_glasses.time, "sleep", lambda _: None)
+    attempts = []
+    discoveries = []
+
+    def adb(serial, *args):
+        assert serial == "10.0.0.10:5555"
+        if "ro.serialno" in args:
+            return "expected"
+        if "vendor.rkd.glasses.is_spread" in args:
+            return "1"
+        if "KEYCODE_SOFT_SLEEP" in args:
+            attempts.append(args)
+            raise subprocess.TimeoutExpired("input", 10)
+        return ""
+
+    monkeypatch.setattr(watch_glasses, "adb", adb)
+    def discover(serial):
+        discoveries.append(serial)
+        raise watch_glasses.StateUnavailable("glasses_discovery_unavailable")
+    monkeypatch.setattr(watch_glasses, "mdns_target", discover)
+    with pytest.raises(StopIteration):
+        watch_glasses.watch("auto", "expected", 0.5)
+    assert len(attempts) == 1
+    assert not discoveries, "unknown display input on a known target is not an identity-discovery request"
+
+
 @pytest.mark.parametrize("phase", ["capturing", "reading"])
 def test_a_new_active_phase_cancels_a_sleep_snapshot_before_device_input(monkeypatch, phase):
     sleep = {**STATE, "phase": "analyzing", "display_request": "sleep"}

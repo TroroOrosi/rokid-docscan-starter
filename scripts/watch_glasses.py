@@ -354,7 +354,33 @@ def watch(requested: str, expected_serial: str, interval: float, server: str = S
     bootstrapped = False
     next_discovery = 0.0
     last_volume_check = 0.0
+    last_running = False
     selected = device_id or os.environ.get("ROKID_GLASSES_DEVICE_ID")
+
+    def sleep_current(state: dict) -> None:
+        nonlocal newest, sleep_key
+        request = state.get("display_request")
+        next_sleep = (state["generation"], state["session_id"], state["phase"], state["sequence"] if request else None)
+        if sleep_key == next_sleep:
+            return
+        # Recheck the authenticated intent immediately before input. Android's
+        # SOFT_SLEEP then respects a window hold acquired after this GET.
+        current = fetch_state(server, selected) if request else state
+        newest = max(newest, (current["generation"], current["sequence"]))
+        fields = ("device_id", "generation", "sequence", "session_id", "phase", "display_request", "ack_answer_revision")
+        if (all(current.get(field) == state.get(field) for field in fields)
+            and current["phase"] not in ("capturing", "reading")
+            and not answer_unreceived(current)):
+            try:
+                adb(serial, "shell", "input", "-d", "0", "keyevent", "KEYCODE_SOFT_SLEEP")
+            except (subprocess.SubprocessError, OSError):
+                power_event("sleep", "unknown", state)
+                raise
+            power_event("sleep", "dispatched", state)
+            sleep_key = next_sleep
+        else:
+            power_event("sleep", "suppressed", state)
+
     while True:
         connection_ready = False
         try:
@@ -375,11 +401,24 @@ def watch(requested: str, expected_serial: str, interval: float, server: str = S
             if requested == "auto" and serial != f"{ipaddress.IPv4Address(state['source_ip'])}:5555":
                 verified = False
             if not verified:
+                last_running = False
                 serial = target(requested, expected_serial, state)
                 if adb(serial, "shell", "getprop", "ro.serialno") != expected_serial:
                     raise SystemExit("Glasses identity mismatch; watcher stopped")
                 verified = True
                 mute(serial)
+            order = (state["generation"], state["sequence"])
+            stale = order < newest
+            newest = max(newest, order)
+            sleep_checked = False
+            if (last_running and not folded and not stale and state.get("display_request") == "sleep"
+                and state.get("entry_request") != "chooser" and not answer_unreceived(state)):
+                # An already-running app's explicit idle request has priority
+                # over slow fold/pidof/audio diagnostics. Cold bootstrap and a
+                # known fold still take their ordinary entry path below.
+                connection_ready = True  # An uncertain input is not a new discovery request.
+                sleep_current(state)
+                sleep_checked = True
             spread = adb(serial, "shell", "getprop", "vendor.rkd.glasses.is_spread")
             if spread not in ("0", "1"):
                 raise subprocess.CalledProcessError(1, "getprop")
@@ -391,12 +430,10 @@ def watch(requested: str, expected_serial: str, interval: float, server: str = S
                 # It rejects already-read/closed revisions itself; recovery
                 # must also give an interrupted fetch another notification.
                 woken = None
-            order = (state["generation"], state["sequence"])
-            stale = order < newest
-            newest = max(newest, order)
             if spread == "0":
                 folded = True
                 bootstrapped = False
+                last_running = False
             elif folded:
                 # Consume before side effects: a lost reply must not relaunch.
                 folded = False
@@ -409,6 +446,7 @@ def watch(requested: str, expected_serial: str, interval: float, server: str = S
                 request = state.get("display_request")
                 answer_key = (*key, state.get("available_stage"), state.get("answer_revision"))
                 running = app_running(serial)
+                last_running = running
                 if running:
                     bootstrapped = False
                 if not stale and state.get("entry_request") == "chooser":
@@ -438,29 +476,8 @@ def watch(requested: str, expected_serial: str, interval: float, server: str = S
                         power_event("wake", "dispatched", state)
                         woken = answer_key
                         next_answer_retry = time.monotonic() + ANSWER_RETRY_SECONDS
-                elif not stale and (request == "sleep" or (request is None and state["phase"] in ("analyzing", "writing_done", "closed"))):
-                    next_sleep = (*key, state["phase"], state["sequence"] if request else None)
-                    if sleep_key != next_sleep:
-                        # A user may start capture after our first GET. Re-read
-                        # authenticated intent immediately before a new sleep.
-                        # Physical ADB delivery cannot be atomic with this GET.
-                        # SOFT_SLEEP lets Android recheck the current window's
-                        # screen wake lock if capture/reading starts meanwhile.
-                        current = fetch_state(server, selected) if request else state
-                        newest = max(newest, (current["generation"], current["sequence"]))
-                        fields = ("device_id", "generation", "sequence", "session_id", "phase", "display_request", "ack_answer_revision")
-                        if (all(current.get(field) == state.get(field) for field in fields)
-                            and current["phase"] not in ("capturing", "reading")
-                            and not answer_unreceived(current)):
-                            try:
-                                adb(serial, "shell", "input", "-d", "0", "keyevent", "KEYCODE_SOFT_SLEEP")
-                            except (subprocess.SubprocessError, OSError):
-                                power_event("sleep", "unknown", state)
-                                raise
-                            power_event("sleep", "dispatched", state)
-                            sleep_key = next_sleep
-                        else:
-                            power_event("sleep", "suppressed", state)
+                elif not stale and not sleep_checked and (request == "sleep" or (request is None and state["phase"] in ("analyzing", "writing_done", "closed"))):
+                    sleep_current(state)
             if time.monotonic() - last_volume_check >= 1:
                 last_volume_check = time.monotonic()
                 check_volume(serial)

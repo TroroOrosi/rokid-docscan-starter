@@ -87,6 +87,8 @@ public final class DocScanController implements AutoCloseable {
     private volatile LocalCaptureSession localSession;
     private String localRestoreError;
     private final ExecutorService localNetwork = Executors.newSingleThreadExecutor();
+    private final ExecutorService nativeQuality = Executors.newSingleThreadExecutor();
+    private final java.util.concurrent.atomic.AtomicBoolean nativeQualityBusy = new java.util.concurrent.atomic.AtomicBoolean();
     private boolean localNetworkBusy;
     private boolean localUploadBlocked;
     private volatile boolean closed;
@@ -160,7 +162,7 @@ public final class DocScanController implements AutoCloseable {
     private long autoRunGeneration;
     private long futureCaptureEpoch;
     private boolean futureWatching;
-    private boolean futureStopping;
+    private volatile boolean futureStopping;
     private boolean reacquiringCaptureGap;
     private volatile boolean localCameraUnknown;
     private static final long LOCAL_REVIEW_MILLIS = 3000;
@@ -2582,6 +2584,93 @@ public final class DocScanController implements AutoCloseable {
                         + " delay=" + delayMillis + "ms"
                         + " framing=" + pending.framing);
         observeFutureCandidates();
+        requestNativeSelection(pending);
+    }
+
+    /** A is already visible and durable; neither its timer nor next-page observation waits for optional B. */
+    private void requestNativeSelection(CaptureReviewStore.Pending a) {
+        LocalCaptureSession saved = localSession;
+        CaptureInspectionOrigin.Context run = inspectionContext();
+        CaptureSurface.NativeScene scene = a.provenance == null ? null : link.nativeSelectionScene(a.provenance);
+        long review = reviewGeneration;
+        if (saved == null || run == null || scene == null || !qualityCurrent(saved, a, review, run, scene)) return;
+        if (!nativeQualityBusy.compareAndSet(false, true)) return;
+        try { nativeQuality.execute(() -> prepareNativeSelection(saved, a, review, run, scene)); }
+        catch (RejectedExecutionException stopped) { nativeQualityBusy.set(false); }
+    }
+
+    /** One optional analysis at a time, independent of camera, visible-review timer and answer/network work. */
+    private void prepareNativeSelection(LocalCaptureSession saved, CaptureReviewStore.Pending a, long review,
+                                        CaptureInspectionOrigin.Context run, CaptureSurface.NativeScene scene) {
+        boolean requested = false;
+        try {
+            if (!qualityCurrent(saved, a, review, run, scene)) return;
+            final NativeImageQuality.Sample first;
+            if (!saved.beginQualitySelection(a, scene, run.generation)) return;
+            first = link.sampleNativeImage(a.jpeg, a.provenance);
+            if (first == null || !qualityCurrent(saved, a, review, run, scene)) return;
+            java.util.concurrent.atomic.AtomicBoolean started = new java.util.concurrent.atomic.AtomicBoolean();
+            java.util.concurrent.atomic.AtomicBoolean delivered = new java.util.concurrent.atomic.AtomicBoolean();
+            link.requestNativeAlternative(scene, new CaptureSurface.NativeAlternative() {
+                @Override public boolean onStarting() {
+                    return started.compareAndSet(false, true) && qualityCurrent(saved, a, review, run, scene);
+                }
+                @Override public void onSkipped() { nativeQualityBusy.set(false); }
+                @Override public void onOriginal(byte[] jpeg, CaptureProvenance source, boolean sameScene) {
+                    if (!delivered.compareAndSet(false, true)) return;
+                    CaptureProvenance bound = null;
+                    try { if (source != null) bound = source.bind(saved.id(), a.pageIndex, a.rotationDegrees); }
+                    catch (IllegalArgumentException invalid) { sameScene = false; }
+                    boolean matched = sameScene && started.get() && bound != null
+                            && bound.resultTimestampNanos != null && bound.matches(jpeg, a.pageIndex, a.rotationDegrees);
+                    CaptureReviewStore.Pending b = new CaptureReviewStore.Pending(a.pageIndex, jpeg, "", a.rotationDegrees,
+                            matched ? "" : CaptureReviewStore.Pending.SCENE_TIMESTAMP_UNRESOLVED,
+                            PageFraming.UNKNOWN, System.currentTimeMillis(), bound);
+                    try { saved.retainQualityAlternative(a, b); }
+                    catch (IOException | RuntimeException failure) {
+                        try { saved.markCaptureGap(); } catch (IOException ignored) { }
+                        onPhotoError("optional native original persistence unresolved", null);
+                        nativeQualityBusy.set(false);
+                        return;
+                    }
+                    try { nativeQuality.execute(() -> rankNativeAlternative(saved, a, b, review, run, scene, first, matched)); }
+                    catch (RejectedExecutionException ignored) { nativeQualityBusy.set(false); }
+                }
+            });
+            requested = true;
+        } catch (IOException | RuntimeException unavailable) { /* No replacement; reservation remains consumed. */ }
+        finally { if (!requested) nativeQualityBusy.set(false); }
+    }
+
+    private void rankNativeAlternative(LocalCaptureSession saved, CaptureReviewStore.Pending a, CaptureReviewStore.Pending b,
+                                       long review, CaptureInspectionOrigin.Context run, CaptureSurface.NativeScene scene,
+                                       NativeImageQuality.Sample first, boolean matched) {
+        try {
+            // Late originals remain in q-* even when their page, run or camera scene has retired.
+            if (!matched || !qualityCurrent(saved, a, review, run, scene)) return;
+            NativeImageQuality.Decision measured = NativeImageQuality.choose(first, link.sampleNativeImage(b.jpeg, b.provenance));
+            serial.execute(() -> {
+                try {
+                    if (!qualityCurrent(saved, a, review, run, scene)) return;
+                    CaptureReviewStore.Pending selected = saved.qualityDecision(a, measured);
+                    if (measured != NativeImageQuality.Decision.SELECT_B || !qualityCurrent(saved, a, review, run, scene)) return;
+                    InspectionCapture capture = inspectionCaptures.get(a.provenance.captureId);
+                    stageCaptureReview(selected, null); // A new visible ACK and full ordinary 3-second review are required.
+                    if (captureReview.peek() == selected && capture != null) rememberInspection(capture.request, selected.provenance);
+                } catch (IOException | RuntimeException unavailable) { /* A is never silently displaced. */ }
+            });
+        } catch (RuntimeException unavailable) { /* Both originals remain UNKNOWN. */ }
+        finally { nativeQualityBusy.set(false); }
+    }
+
+    private boolean qualityCurrent(LocalCaptureSession saved, CaptureReviewStore.Pending a, long review,
+                                   CaptureInspectionOrigin.Context run, CaptureSurface.NativeScene scene) {
+        return !closed && !localCameraUnknown && !finishCaptureRequested && !futureStopping
+                && localSession == saved && saved.phase() == LocalCaptureSession.Phase.CAPTURE && !saved.captureGap()
+                && review == reviewGeneration && state == RelayState.CAPTURE_REVIEW && captureReview.peek() == a
+                && reviewDeadlineMillis > 0 && android.os.SystemClock.elapsedRealtime() < reviewDeadlineMillis
+                && !captureLease.isUnresolved() && run.equals(inspectionContext())
+                && link.isNativeSelectionSceneCurrent(scene);
     }
 
     private void enqueueAutoCommit(long generationAtSchedule) {
@@ -3100,6 +3189,7 @@ public final class DocScanController implements AutoCloseable {
         watchdog.shutdownNow();
         serial.shutdownNow();
         localNetwork.shutdownNow();
+        nativeQuality.shutdownNow();
     }
 
     static final class FallbackCommitMarker {

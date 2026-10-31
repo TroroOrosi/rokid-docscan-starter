@@ -28,6 +28,103 @@ import org.robolectric.annotation.Config;
 @RunWith(RobolectricTestRunner.class)
 @Config(sdk = 32, manifest = Config.NONE)
 public class LocalReviewTest {
+    @Test public void optionalNativeAnalysisCannotBlockTheOrdinaryAReviewCommitOrStartAfterItsDeadline() throws Exception {
+        Surface surface = new Surface(); surface.holdForPage = true; surface.futureEnabled = true; surface.qualityEnabled = true;
+        surface.qualitySampling = new CountDownLatch(1); surface.qualityRelease = new CountDownLatch(1);
+        var run = new java.util.concurrent.atomic.AtomicReference<>(new CaptureInspectionOrigin.Context("glasses",42));
+        try (MockWebServer server = inspectionServer()) {
+            DocScanController controller = inspectionController(server, surface, run);
+            try {
+                byte[] a = {1,2,3};
+                issueInspectionPhoto(controller,0,false); controller.onPhoto(a,nativeSource(a,100)); barrier(controller);
+                surface.visible = true; controller.onCustomViewAvailable(1,"capture-review"); barrier(controller);
+                assertTrue(surface.qualitySampling.await(5,TimeUnit.SECONDS));
+                commitVisible(controller,surface);
+                var saved = (LocalCaptureSession)get(controller,"localSession");
+                assertArrayEquals(a,saved.read(saved.page(0)).jpeg);
+                assertFalse("normal commit must complete while optional analysis is still waiting",surface.qualityWaitExpired);
+                assertEquals(1,surface.qualityRelease.getCount()); assertNotNull(surface.future);
+                surface.qualityRelease.countDown(); qualityBarrier(controller);
+                assertEquals(0,surface.alternatives);
+            } finally { surface.qualityRelease.countDown(); controller.close(); }
+        }
+    }
+
+    @Test public void selectedNativeBPassesItsOwnReviewAndTheRealLocalUploadWithExactProvenance() throws Exception {
+        Surface surface = new Surface(); surface.holdForPage = true; surface.futureEnabled = true; surface.qualityEnabled = true;
+        var run = new java.util.concurrent.atomic.AtomicReference<>(new CaptureInspectionOrigin.Context("glasses", 42));
+        try (MockWebServer server = inspectionServer()) {
+            DocScanController controller = inspectionController(server, surface, run);
+            try {
+                byte[] a = {1,2,3}, b = {4,5,6};
+                issueInspectionPhoto(controller, 0, false); controller.onPhoto(a, nativeSource(a, 100)); barrier(controller);
+                assertArrayEquals(a, ((CaptureReviewStore)get(controller,"captureReview")).peek().jpeg);
+                surface.visible = true; controller.onCustomViewAvailable(1,"capture-review"); barrier(controller);
+                qualityBarrier(controller);
+                assertEquals(1, surface.alternatives); assertTrue(surface.futureObservedBeforeAlternative);
+                long oldReview = (long)get(controller,"reviewGeneration");
+                long oldView = (long)get(controller,"reviewViewGeneration");
+                assertTrue(surface.alternative.onStarting());
+                surface.alternative.onOriginal(b, nativeSource(b, 200), true); barrier(controller);
+                qualityBarrier(controller);
+                var saved = (LocalCaptureSession)get(controller,"localSession");
+                var selected = ((CaptureReviewStore)get(controller,"captureReview")).peek();
+                assertArrayEquals(b, selected.jpeg); assertEquals(0, saved.pageCount());
+                assertArrayEquals(a, saved.qualityOriginal(0,false).jpeg);
+                assertArrayEquals(b, saved.qualityOriginal(0,true).jpeg);
+                assertNotEquals(oldView, (long)get(controller,"reviewViewGeneration"));
+                controller.onCustomViewAvailable(oldView,"capture-review"); barrier(controller);
+                assertFalse("A's visible ACK cannot schedule B", (boolean)get(controller,"autoCommitScheduled"));
+                assertEquals(0L, (long)get(controller,"reviewDeadlineMillis"));
+                org.robolectric.shadows.ShadowSystemClock.advanceBy(java.time.Duration.ofSeconds(3));
+                call(controller,"enqueueAutoCommit",new Class<?>[]{long.class},oldReview); barrier(controller);
+                assertEquals("A timer cannot commit unacknowledged B",0,saved.pageCount());
+                commitVisible(controller,surface);
+                var uploads = uploadInspectionPages(controller,server); assertEquals(1, uploads.size());
+                assertArrayEquals(b, uploadPart(uploads.get(0),"image"));
+                JSONObject provenance = new JSONObject(new String(uploadPart(uploads.get(0),"capture_provenance"),StandardCharsets.UTF_8));
+                assertEquals(16, provenance.length()); assertEquals(selected.provenance.jpegSha256,provenance.getString("jpeg_sha256"));
+                assertEquals(selected.provenance.captureId,provenance.getString("capture_id")); assertNull(saved.nextUnsent());
+                JSONObject origin = new JSONObject(new String(uploadPart(uploads.get(0),"inspection_origin"),StandardCharsets.UTF_8));
+                assertEquals(selected.provenance.captureId,origin.getString("capture_id"));
+                assertEquals(42,origin.getLong("generation"));
+                assertEquals(1,surface.alternatives);
+            } finally { controller.close(); }
+        }
+    }
+
+    @Test public void lateAlternativeAfterTurnGenerationEndOrCommitRemainsAnUnselectedOriginal() throws Exception {
+        for (String change : List.of("turn_return", "generation", "end", "commit", "unknown", "deadline")) {
+            Surface surface = new Surface(); surface.holdForPage = true; surface.qualityEnabled = true;
+            var run = new java.util.concurrent.atomic.AtomicReference<>(new CaptureInspectionOrigin.Context("glasses",42));
+            try (MockWebServer server = inspectionServer()) {
+                DocScanController controller = inspectionController(server,surface,run);
+                try {
+                    byte[] a={1,2,3}, b={4,5,6};
+                    issueInspectionPhoto(controller,0,false); controller.onPhoto(a,nativeSource(a,100)); barrier(controller);
+                    surface.visible=true; controller.onCustomViewAvailable(1,"capture-review"); barrier(controller);
+                    qualityBarrier(controller);
+                    assertNotNull(surface.alternative); assertTrue(surface.alternative.onStarting());
+                    if (change.equals("turn_return")) surface.sceneCurrent=false; // same-looking A cannot restore a monotonic token.
+                    if (change.equals("generation")) run.set(new CaptureInspectionOrigin.Context("glasses",43));
+                    if (change.equals("end")) set(controller,"finishCaptureRequested",true);
+                    if (change.equals("commit")) commitVisible(controller,surface);
+                    if (change.equals("deadline")) org.robolectric.shadows.ShadowSystemClock.advanceBy(java.time.Duration.ofMillis(3001));
+                    surface.alternative.onOriginal(b,nativeSource(b,200),!change.equals("unknown")); barrier(controller);
+                    qualityBarrier(controller);
+                    var saved=(LocalCaptureSession)get(controller,"localSession");
+                    assertArrayEquals(b,saved.qualityOriginal(0,true).jpeg);
+                    if (change.equals("commit")) assertArrayEquals(a,saved.read(saved.page(0)).jpeg);
+                    else assertArrayEquals(a,((CaptureReviewStore)get(controller,"captureReview")).peek().jpeg);
+                    assertEquals(1,surface.alternatives);
+                } finally { controller.close(); }
+            }
+        }
+    }
+    private static void qualityBarrier(DocScanController controller) throws Exception {
+        ((ExecutorService)get(controller,"nativeQuality")).submit(() -> { }).get(5,TimeUnit.SECONDS);
+        barrier(controller);
+    }
     @Test public void nativeInspectionOriginBindsTheIssuedRunAndTheActualLateDocumentId() throws Exception {
         Surface surface = new Surface(); surface.holdForPage = true;
         var run = new java.util.concurrent.atomic.AtomicReference<>(new CaptureInspectionOrigin.Context("glasses:one", 42));
@@ -441,7 +538,7 @@ public class LocalReviewTest {
     }
 
     private static void commitVisible(DocScanController controller, Surface surface) throws Exception {
-        surface.visible = true; controller.onCustomViewAvailable(1, "capture-review"); barrier(controller);
+        surface.visible = true; controller.onCustomViewAvailable((long)get(controller,"reviewViewGeneration"), "capture-review"); barrier(controller);
         org.robolectric.shadows.ShadowSystemClock.advanceBy(java.time.Duration.ofSeconds(3));
         call(controller, "enqueueAutoCommit", new Class<?>[]{long.class}, (long)get(controller, "reviewGeneration"));
         barrier(controller);
@@ -1716,6 +1813,27 @@ public class LocalReviewTest {
     }
 
     private static final class Surface implements CaptureSurface {
+        boolean qualityEnabled, sceneCurrent = true, futureObservedBeforeAlternative;
+        long qualityView;
+        int alternatives;
+        NativeAlternative alternative;
+        CountDownLatch qualitySampling, qualityRelease;
+        volatile boolean qualityWaitExpired;
+        public NativeScene nativeSelectionScene(CaptureProvenance source) {
+            return !qualityEnabled ? null : new NativeScene("00000000-0000-0000-0000-000000000001",1,3,source.captureId,source.jpegSha256);
+        }
+        public boolean isNativeSelectionSceneCurrent(NativeScene scene) { return qualityEnabled && sceneCurrent; }
+        public NativeImageQuality.Sample sampleNativeImage(byte[] jpeg, CaptureProvenance source) {
+            if (qualitySampling != null) {
+                qualitySampling.countDown();
+                try { if (!qualityRelease.await(5,TimeUnit.SECONDS)) qualityWaitExpired = true; }
+                catch (InterruptedException stopped) { Thread.currentThread().interrupt(); return null; }
+            }
+            return new NativeImageQuality.Sample(4032,3024,NativeImageQualityTest.page(jpeg[0] == 1,0));
+        }
+        public void requestNativeAlternative(NativeScene scene, NativeAlternative result) {
+            alternatives++; alternative=result; futureObservedBeforeAlternative=future != null;
+        }
         boolean futureEnabled;
         boolean deferFutureStop;
         FuturePageListener future;
@@ -1732,11 +1850,11 @@ public class LocalReviewTest {
         public void awaitNextPage(Runnable ready) { if (holdForPage) pageReady = ready; else ready.run(); }
         public void pausePreview() { pauses++; }
         public boolean supportsLocalCaptureReview() { return true; }
-        public boolean isCaptureReviewVisible(long generation) { return visible && generation == 1; }
+        public boolean isCaptureReviewVisible(long generation) { return visible && generation == (qualityEnabled ? qualityView : 1); }
         public PhotoStartResult takePhoto(int w, int h, int q) { photos++; return photoStart; }
         public long showHud(List<String> lines) { return 2; }
         public long showCaptureAiming(int page, boolean retake, boolean stable) { return 3; }
-        public long showCaptureReview(byte[] jpeg, int rotation, List<String> lines) { return 1; }
+        public long showCaptureReview(byte[] jpeg, int rotation, List<String> lines) { return qualityEnabled ? ++qualityView : 1; }
         volatile CaptureInspectionFeedback.Notice inspectionNotice;
         final CountDownLatch inspectionShown = new CountDownLatch(1);
         public void showCaptureInspectionFeedback(CaptureInspectionFeedback.Notice notice,

@@ -131,6 +131,112 @@ public class GlassCameraWarmSessionTest {
     }
     private void readyFrame() { idle(100); result(CONTROL_AF_STATE_PASSIVE_FOCUSED, CONTROL_AE_STATE_CONVERGED); frame(180); }
 
+    private void selectionOriginal() {
+        SensorManager manager = (SensorManager)RuntimeEnvironment.getApplication().getSystemService(android.content.Context.SENSOR_SERVICE);
+        ShadowSensorManager sensors = shadowOf(manager);
+        sensors.addSensor(ShadowSensor.newInstance(Sensor.TYPE_GYROSCOPE));
+        createCamera(); camera.nativeSelection(true); camera.captureOnce(); idle(100);
+        motionFrames(sensors, 0f, 12);
+        assertEquals(1, firstDevice().session.captures);
+        selectionJpeg(new byte[]{1, 2, 3});
+    }
+
+    private void selectionJpeg(byte[] bytes) {
+        idle(1); // Distinct real sensor timestamps, including an immediately issued optional still.
+        long timestamp = SystemClock.elapsedRealtimeNanos();
+        var session = firstDevice().session;
+        session.captureCallback.onCaptureCompleted(session, session.captured,
+                metadata(CONTROL_AF_STATE_PASSIVE_FOCUSED, CONTROL_AE_STATE_CONVERGED, timestamp));
+        var jpeg = currentReader(ImageFormat.JPEG);
+        DocScanTestImage image = new DocScanTestImage(new ArrayList<>());
+        image.timestamp = timestamp; image.buffer = ByteBuffer.wrap(bytes); jpeg.image = image;
+        jpeg.listener.onImageAvailable(jpeg.reader); idle(0);
+    }
+
+    private static final class Alternative implements CaptureSurface.NativeAlternative {
+        int starting, skipped, delivered;
+        boolean matched;
+        byte[] bytes;
+        CaptureProvenance source;
+        @Override public boolean onStarting() { starting++; return true; }
+        @Override public void onSkipped() { skipped++; }
+        @Override public void onOriginal(byte[] jpeg, CaptureProvenance provenance, boolean sameScene) {
+            delivered++; bytes = jpeg; source = provenance; matched = sameScene;
+        }
+    }
+
+    @Test public void nativeSelectionIsAnExplicitNativeOnlyNonpersistentGate() {
+        assertFalse(DocScanGlassActivity.nativeSelection(new android.content.Intent()));
+        assertTrue(DocScanGlassActivity.nativeSelection(new android.content.Intent().putExtra("native_selection", true)));
+        assertEquals(GlassCamera.Mode.NATIVE_STILL, DocScanGlassActivity.evaluationMode(new android.content.Intent()
+                .putExtra("native_selection", true)));
+        assertEquals(GlassCamera.Mode.NATIVE_STILL, DocScanGlassActivity.evaluationMode(new android.content.Intent()
+                .putExtra("paper_geometry_evaluation", true)));
+        for (String other : new String[]{"zsl_evaluation", "video_evaluation", "video_transfer_evaluation",
+                "paper_geometry_evaluation", "wrong_type"}) {
+            android.content.Intent intent = new android.content.Intent().putExtra("native_selection", true);
+            if (other.equals("wrong_type")) intent.putExtra("native_selection", "true"); else intent.putExtra(other, true);
+            assertThrows(IllegalArgumentException.class, () -> DocScanGlassActivity.evaluationMode(intent));
+        }
+        assertNull(camera.nativeSelectionScene(CaptureProvenance.nativeStill(new byte[]{1}, 4032, 3024, 1L, 1L, 1L,
+                10_000_000L, 100, 0, 2)));
+    }
+
+    @Test public void optionalNativeOriginalUsesOneReadyShotAndTheEndBarrierWaitsForItsBytes() {
+        selectionOriginal();
+        CaptureSurface.NativeScene scene = camera.nativeSelectionScene(originals.get(0).provenance);
+        assertNotNull(scene); assertTrue(camera.isNativeSelectionSceneCurrent(scene));
+        Alternative b = new Alternative(); camera.requestNativeAlternative(scene, b); idle(0);
+        assertEquals(1, b.starting); assertEquals(2, firstDevice().session.captures);
+        assertEquals(1, delivered); // first review did not wait for B
+        AtomicInteger idle = new AtomicInteger(); camera.stopFuturePages(idle::incrementAndGet); idle(0);
+        assertEquals(0, idle.get());
+        selectionJpeg(new byte[]{4, 5, 6});
+        assertEquals(1, b.delivered); assertTrue(b.matched);
+        assertArrayEquals(new byte[]{4, 5, 6}, b.bytes);
+        assertEquals(CaptureProvenance.nativeStill(b.bytes, 4032, 3024, 1L, 1L, 1L,
+                10_000_000L, 100, 0, 2).jpegSha256, b.source.jpegSha256);
+        assertEquals(1, delivered); assertEquals(1, idle.get());
+        Alternative third = new Alternative(); camera.requestNativeAlternative(scene, third); idle(0);
+        assertEquals(0, third.starting); assertEquals(1, third.skipped);
+        assertFalse(((PageChange)ReflectionHelpers.getField(camera, "pageChange")).ready(SystemClock.elapsedRealtime()));
+        assertTrue(failures.isEmpty());
+    }
+
+    @Test public void aTurnAndReturnDuringTheOptionalShotRetainsBytesButNeverReusesTheOldScene() {
+        selectionOriginal();
+        CaptureSurface.NativeScene scene = camera.nativeSelectionScene(originals.get(0).provenance);
+        Alternative b = new Alternative(); camera.requestNativeAlternative(scene, b); idle(0);
+        idle(30); frame(180, true); idle(30); frame(180); idle(400);
+        assertFalse(camera.isNativeSelectionSceneCurrent(scene));
+        selectionJpeg(new byte[]{4, 5, 6});
+        assertEquals(1, b.delivered); assertFalse(b.matched);
+        assertEquals(1, delivered);
+        assertTrue(((PageChange)ReflectionHelpers.getField(camera, "pageChange")).ready(SystemClock.elapsedRealtime()));
+        assertTrue(failures.isEmpty());
+    }
+
+    @Test public void missingFreshGyroOrANextPageNeverStartsAnOptionalPreparationWait() {
+        selectionOriginal();
+        CaptureSurface.NativeScene scene = camera.nativeSelectionScene(originals.get(0).provenance);
+        idle(CameraReadiness.FRESH_MILLIS + 1);
+        Alternative stale = new Alternative(); camera.requestNativeAlternative(scene, stale); idle(0);
+        assertEquals(0, stale.starting); assertEquals(1, stale.skipped);
+        assertEquals(1, firstDevice().session.captures);
+        camera.observeFuturePages(1, new CaptureSurface.FuturePageListener() {
+            @Override public boolean onCaptureStarting() { return true; }
+            @Override public void onCandidate(byte[] jpeg, CaptureProvenance source, boolean sameScene) { }
+            @Override public void onPageMissed() { fail("available next-page capacity must be retained"); }
+        }); idle(0);
+        frame(180, true); idle(30); frame(180);
+        SensorManager manager = (SensorManager)RuntimeEnvironment.getApplication().getSystemService(android.content.Context.SENSOR_SERVICE);
+        motionFrames(shadowOf(manager), 0f, 10);
+        Alternative late = new Alternative(); camera.requestNativeAlternative(scene, late); idle(0);
+        assertEquals(0, late.starting); assertEquals(1, late.skipped);
+        assertNotNull(ReflectionHelpers.getField(camera, "activeFuturePage"));
+        assertTrue(failures.isEmpty());
+    }
+
     private void paperFrame() {
         paperFrame(20); // AGENT_APPROVED=1: same paper, independently changing surrounding scene.
     }

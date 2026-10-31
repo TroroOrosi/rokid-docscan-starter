@@ -11,6 +11,7 @@ import java.util.UUID;
 final class LocalCaptureSession {
     enum Phase { CAPTURE, LISTENING, ANALYSIS, REVIEW, CLOSED }
     private final File directory;
+    private boolean freshProcess = true;
     private Properties state;
 
     private LocalCaptureSession(File directory, Properties state) {
@@ -54,6 +55,7 @@ final class LocalCaptureSession {
                 throw new IOException("保存記録の形式が不正です");
             }
             LocalCaptureSession result = new LocalCaptureSession(directory, state);
+            result.freshProcess = false; // Optional extra requests are never reconstructed after restart.
             if (result.documentId() < 0 || result.sessionId() < 0 || result.pageCount() < 0 || result.pageCount() > 1000) {
                 throw new IOException("保存記録の番号が不正です");
             }
@@ -195,9 +197,92 @@ final class LocalCaptureSession {
         Properties next = copy();
         next.setProperty("page." + pending.pageIndex, name);
         next.setProperty("count", Integer.toString(Math.max(pageCount(), pending.pageIndex + 1)));
+        String quality = "quality." + pending.pageIndex + ".";
+        if (state.containsKey(quality + "attempted")) {
+            String sha = pending.provenance == null ? "" : pending.provenance.jpegSha256;
+            next.setProperty(quality + "committed", sha.equals(state.getProperty(quality + "a_sha")) ? "A"
+                    : sha.equals(state.getProperty(quality + "b_sha")) ? "B" : "OTHER");
+        }
         // The revision hash includes native provenance when present. Old revisions remain;
         // only the atomic manifest chooses the current original and its exact association.
         save(next);
+    }
+
+    /** Persist A and the one-extra reservation before any optional native request. Never uses next-page slots. */
+    synchronized boolean beginQualitySelection(CaptureReviewStore.Pending a, CaptureSurface.NativeScene scene,
+                                               long generation) throws IOException {
+        String key = "quality." + a.pageIndex + ".";
+        if (!freshProcess || phase() != Phase.CAPTURE || captureGap() || a.pageIndex != pageCount()
+                || state.containsKey(key + "attempted") || generation <= 0 || scene == null
+                || !scene.matches(a.provenance) || a.hasOcrFailure()) return false;
+        String name = retainQualityOriginal(a);
+        Properties next = copy();
+        next.setProperty(key + "a", name);
+        next.setProperty(key + "a_sha", a.provenance.jpegSha256);
+        next.setProperty(key + "attempted", "true");
+        next.setProperty(key + "generation", Long.toString(generation));
+        next.setProperty(key + "camera", scene.camera());
+        next.setProperty(key + "stream", Long.toString(scene.stream()));
+        next.setProperty(key + "scene", Long.toString(scene.sequence()));
+        next.setProperty(key + "decision", NativeImageQuality.Decision.UNKNOWN.name());
+        save(next);
+        return true;
+    }
+
+    /** Called at delivery, including after end/turn. It does not register or acknowledge a page. */
+    synchronized void retainQualityAlternative(CaptureReviewStore.Pending a, CaptureReviewStore.Pending b) throws IOException {
+        String key = "quality." + a.pageIndex + ".";
+        if (!"true".equals(state.getProperty(key + "attempted")) || a.provenance == null
+                || !a.provenance.jpegSha256.equals(state.getProperty(key + "a_sha"))
+                || b.pageIndex != a.pageIndex
+                || (b.provenance != null && (!"native_still".equals(b.provenance.sourceKind)
+                || a.provenance.captureId.equals(b.provenance.captureId))) || state.containsKey(key + "b"))
+            throw new IOException("native alternative identity");
+        String name = retainQualityOriginal(b);
+        Properties next = copy();
+        next.setProperty(key + "b", name);
+        next.setProperty(key + "b_sha", b.provenance == null ? "" : b.provenance.jpegSha256);
+        next.setProperty(key + "decision", NativeImageQuality.Decision.UNKNOWN.name());
+        save(next);
+    }
+
+    synchronized CaptureReviewStore.Pending qualityDecision(CaptureReviewStore.Pending a,
+                                                            NativeImageQuality.Decision decision) throws IOException {
+        String key = "quality." + a.pageIndex + ".";
+        CaptureReviewStore.Pending original = qualityOriginal(a.pageIndex, false);
+        if (a.provenance == null || !a.provenance.equals(original.provenance)) throw new IOException("native selection A changed");
+        CaptureReviewStore.Pending chosen = original;
+        if (decision == NativeImageQuality.Decision.SELECT_B) {
+            if (phase() != Phase.CAPTURE || captureGap() || pageCount() != a.pageIndex)
+                throw new IOException("native selection no longer pending");
+            chosen = qualityOriginal(a.pageIndex, true);
+            if (chosen.hasOcrFailure()) throw new IOException("native selection scene unknown");
+        }
+        Properties next = copy();
+        next.setProperty(key + "decision", decision.name());
+        save(next);
+        return chosen;
+    }
+
+    synchronized CaptureReviewStore.Pending qualityOriginal(int page, boolean alternative) throws IOException {
+        String name = state.getProperty("quality." + page + (alternative ? ".b" : ".a"), "");
+        if (!name.matches("q-" + page + "-[0-9a-f]{64}\\.bin")) throw new IOException("native original reference");
+        File file = new File(directory, name);
+        if (!name.equals("q-" + page + "-" + digest(file) + ".bin")) throw new IOException("native original hash");
+        CaptureReviewStore.Pending pending = new CaptureReviewPersistence(file).readPending();
+        checkProvenance(pending);
+        return pending;
+    }
+
+    private String retainQualityOriginal(CaptureReviewStore.Pending pending) throws IOException {
+        checkProvenance(pending);
+        File incoming = new File(directory, "incoming-" + UUID.randomUUID() + ".bin");
+        CaptureReviewPersistence record = new CaptureReviewPersistence(incoming);
+        record.save(pending);
+        if (!record.matches(pending)) throw new IOException("native original persistence");
+        String name = "q-" + pending.pageIndex + "-" + digest(incoming) + ".bin";
+        CaptureReviewPersistence.moveReplacing(incoming, new File(directory, name));
+        return name;
     }
 
     /** Candidate files use the unchanged review record; only accepted pages reach page.*. */

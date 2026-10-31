@@ -114,4 +114,16 @@ public class StillnessTest {
         stillness.await(new Handler(Looper.getMainLooper()), () -> false, exposureNanos::get, shots::incrementAndGet);
         assertTrue(stillness.quietSinceNanos() > first);
     }
+
+    @Test public void optionalShotUsesRetainedFreshMeasurementsWithoutStartingAnotherWait() {
+        stillness.retainMeasurements(true);
+        stillness.await(new Handler(Looper.getMainLooper()), () -> true, exposureNanos::get, shots::incrementAndGet);
+        motion(0f, 10); assertEquals(1, shots.get()); assertTrue(sensors.hasListener(stillness));
+        assertTrue(stillness.readyNow());
+        motion(0.5f, 1); assertFalse(stillness.readyNow());
+        motion(0f, 6); assertTrue(stillness.readyNow());
+        shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(CameraReadiness.FRESH_MILLIS + 1));
+        assertFalse(stillness.readyNow());
+        stillness.cancel(); assertFalse(stillness.readyNow()); assertFalse(sensors.hasListener(stillness));
+    }
 }

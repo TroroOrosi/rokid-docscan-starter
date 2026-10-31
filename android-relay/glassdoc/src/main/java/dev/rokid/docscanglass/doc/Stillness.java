@@ -34,6 +34,9 @@ final class Stillness implements SensorEventListener {
     private long quietSinceNanos;
     private float motionSquared = Float.POSITIVE_INFINITY;
     private float quietMotionSquared;
+    private boolean retainMeasurements;
+    private boolean measuring;
+    private long measurementStartedAt;
     private long generation;
     private LongSupplier exposureNanos = () -> 0;
 
@@ -46,11 +49,24 @@ final class Stillness implements SensorEventListener {
         return now >= startedAt && now >= movingAt && now - movingAt >= STILL_MILLIS;
     }
 
+    /** Opt-in native A/B uses only readings already available; it never starts a second wait. */
+    void retainMeasurements(boolean retain) { retainMeasurements = retain; }
+
+    boolean readyNow() {
+        long now = SystemClock.elapsedRealtime();
+        float limit = motionLimit();
+        return measuring && limit > 0 && observedAt >= measurementStartedAt
+                && now >= observedAt && now - observedAt <= CameraReadiness.FRESH_MILLIS
+                && ready(now, measurementStartedAt, movingAt)
+                && motionSquared <= limit * limit && quietMotionSquared <= limit * limit;
+    }
+
     /** Keep measuring motion until the camera is also ready; elapsed wait never authorizes a shot. */
     void await(Handler handler, BooleanSupplier cameraReady, LongSupplier exposure, Runnable then) {
         long token = ++generation;
         exposureNanos = exposure;
         long startedAt = SystemClock.elapsedRealtime();
+        measurementStartedAt = startedAt;
         quietSinceNanos = SystemClock.elapsedRealtimeNanos();
         movingAt = startedAt; // a full STILL_MILLIS of readings is required
         observedAt = -1;
@@ -58,6 +74,7 @@ final class Stillness implements SensorEventListener {
         quietMotionSquared = 0;
         boolean measured = gyroscope != null
                 && sensors.registerListener(this, gyroscope, SensorManager.SENSOR_DELAY_GAME, handler);
+        measuring = measured;
         handler.postDelayed(new Runnable() {
             @Override public void run() {
                 if (token != generation) return;
@@ -72,7 +89,10 @@ final class Stillness implements SensorEventListener {
                 if (limit > 0 && cameraReady.getAsBoolean() && (!measured || (observedAt >= startedAt
                         && now >= observedAt && now - observedAt <= CameraReadiness.FRESH_MILLIS
                         && ready(now, startedAt, movingAt)))) {
-                    if (sensors != null) sensors.unregisterListener(Stillness.this);
+                    if (!retainMeasurements) {
+                        if (sensors != null) sensors.unregisterListener(Stillness.this);
+                        measuring = false;
+                    }
                     then.run();
                 } else {
                     handler.postDelayed(this, 50);
@@ -85,6 +105,7 @@ final class Stillness implements SensorEventListener {
         generation++;
         exposureNanos = () -> 0;
         quietSinceNanos = 0;
+        measuring = false;
         if (sensors != null) sensors.unregisterListener(this);
     }
 

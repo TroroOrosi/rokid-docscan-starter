@@ -9,6 +9,9 @@ import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
+import android.graphics.BitmapFactory;
+import android.graphics.BitmapRegionDecoder;
+import android.graphics.Rect;
 import android.os.Handler;
 import android.os.Looper;
 import java.io.ByteArrayOutputStream;
@@ -19,6 +22,9 @@ import org.robolectric.RobolectricTestRunner;
 import org.robolectric.RuntimeEnvironment;
 import org.robolectric.annotation.Config;
 import org.robolectric.annotation.GraphicsMode;
+import org.robolectric.annotation.Implements;
+import org.robolectric.annotation.Implementation;
+import org.robolectric.shadow.api.Shadow;
 import org.robolectric.shadows.ShadowLooper;
 import org.robolectric.util.ReflectionHelpers;
 
@@ -26,6 +32,55 @@ import org.robolectric.util.ReflectionHelpers;
 @Config(sdk = 32, manifest = Config.NONE)
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 public class GlassesCaptureSurfaceTest {
+    @Test @Config(shadows = RegionDecoder.class)
+    public void nativeQualitySamplesExactSmallNativeRegionsWithoutChangingTheOriginal() {
+        Bitmap bitmap = Bitmap.createBitmap(576, 384, Bitmap.Config.ARGB_8888);
+        for (int y = 0; y < bitmap.getHeight(); y++) for (int x = 0; x < bitmap.getWidth(); x++) {
+            int gray = 40 + (x * 3 + y * 7) % 160;
+            bitmap.setPixel(x, y, Color.rgb(gray, gray, gray));
+        }
+        ByteArrayOutputStream encoded = new ByteArrayOutputStream();
+        bitmap.compress(Bitmap.CompressFormat.JPEG, 100, encoded); bitmap.recycle();
+        byte[] jpeg = encoded.toByteArray(), original = jpeg.clone();
+        var source = dev.rokid.docscanrelay.CaptureProvenance.nativeStill(jpeg, 576, 384, 10L, 10L, 1L,
+                10_000_000L, 100, 0, 2);
+        GlassesCaptureSurface surface = new GlassesCaptureSurface(RuntimeEnvironment.getApplication(), null,
+                new HudView(RuntimeEnvironment.getApplication()), new Handler(Looper.getMainLooper()), (g, p) -> { });
+        var sample = surface.sampleNativeImage(jpeg, source);
+        org.junit.Assert.assertNotNull(sample);
+        assertEquals(576, sample.width); assertEquals(384, sample.height);
+        Bitmap decoded = android.graphics.BitmapFactory.decodeByteArray(jpeg, 0, jpeg.length);
+        byte[] pixels = ReflectionHelpers.getField(sample, "pixels");
+        for (int region = 0; region < 9; region++) {
+            int left = (2 * (region % 3) + 1) * 576 / 6 - 32;
+            int top = (2 * (region / 3) + 1) * 384 / 6 - 32;
+            int c = decoded.getPixel(left + 19, top + 23);
+            int expected = (77 * Color.red(c) + 150 * Color.green(c) + 29 * Color.blue(c)) >> 8;
+            assertEquals(expected, pixels[region * 4096 + 23 * 64 + 19] & 255);
+        }
+        decoded.recycle(); assertArrayEquals(original, jpeg);
+        jpeg[20] ^= 1; org.junit.Assert.assertNull(surface.sampleNativeImage(jpeg, source));
+        surface.close();
+    }
+
+    /** Robolectric 4.14's built-in region shadow returns a blank bitmap; only this decode boundary is replaced. */
+    @Implements(BitmapRegionDecoder.class)
+    public static class RegionDecoder {
+        Bitmap original;
+        @Implementation protected static BitmapRegionDecoder newInstance(byte[] bytes, int offset, int length, boolean shareable) {
+            BitmapRegionDecoder result = Shadow.newInstanceOf(BitmapRegionDecoder.class);
+            ((RegionDecoder)Shadow.extract(result)).original = BitmapFactory.decodeByteArray(bytes, offset, length);
+            return result;
+        }
+        @Implementation protected int getWidth() { return original.getWidth(); }
+        @Implementation protected int getHeight() { return original.getHeight(); }
+        @Implementation protected Bitmap decodeRegion(Rect rect, BitmapFactory.Options options) {
+            assertEquals(1, options.inSampleSize); assertEquals(64, rect.width()); assertEquals(64, rect.height());
+            return Bitmap.createBitmap(original, rect.left, rect.top, rect.width(), rect.height());
+        }
+        @Implementation protected void recycle() { original.recycle(); }
+    }
+
     // AGENT_APPROVED=1: explicit paper proposal stays within the existing small HUD preview.
     @Test public void paperCornersRotateWithTheWholeLiveImageAndDisappearOnUncertainty() {
         HudView hud = new HudView(RuntimeEnvironment.getApplication()); hud.layout(0, 0, 1000, 800);

@@ -73,6 +73,31 @@ public interface CaptureSurface {
 
     default void resetPageDetection() { }
 
+    /** Internal camera identity, deliberately separate from the unchanged upload provenance schema. */
+    record NativeScene(String camera, long stream, long sequence, String captureId, String sha256) {
+        public NativeScene {
+            if (camera == null || !camera.matches("[0-9a-f-]{36}") || stream <= 0 || sequence <= 0
+                    || captureId == null || !captureId.matches("[0-9a-f-]{36}")
+                    || sha256 == null || !sha256.matches("[0-9a-f]{64}"))
+                throw new IllegalArgumentException("native scene identity");
+        }
+        public boolean matches(CaptureProvenance source) {
+            return source != null && "native_still".equals(source.sourceKind)
+                    && captureId.equals(source.captureId) && sha256.equals(source.jpegSha256);
+        }
+    }
+
+    /** Disabled by default. An optional issued JPEG must be retained even after scene/end invalidation. */
+    interface NativeAlternative {
+        boolean onStarting();
+        void onOriginal(byte[] jpeg, CaptureProvenance source, boolean sameScene);
+        void onSkipped();
+    }
+    default NativeScene nativeSelectionScene(CaptureProvenance source) { return null; }
+    default boolean isNativeSelectionSceneCurrent(NativeScene scene) { return false; }
+    default NativeImageQuality.Sample sampleNativeImage(byte[] jpeg, CaptureProvenance source) { return null; }
+    default void requestNativeAlternative(NativeScene scene, NativeAlternative result) { result.onSkipped(); }
+
     /**
      * Retires an ambiguous view callback stream after an acknowledgement
      * timeout. An implementation that owns its own display has nothing to

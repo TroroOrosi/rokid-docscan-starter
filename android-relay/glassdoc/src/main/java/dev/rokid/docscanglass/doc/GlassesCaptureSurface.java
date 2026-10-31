@@ -5,6 +5,8 @@ import android.content.Context;
 import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
+import android.graphics.BitmapRegionDecoder;
+import android.graphics.Rect;
 import android.graphics.Matrix;
 import android.os.Handler;
 
@@ -13,6 +15,8 @@ import java.util.concurrent.atomic.AtomicLong;
 
 import dev.rokid.docscanrelay.CaptureSurface;
 import dev.rokid.docscanrelay.CaptureInspectionFeedback;
+import dev.rokid.docscanrelay.CaptureProvenance;
+import dev.rokid.docscanrelay.NativeImageQuality;
 
 /**
  * The glasses-side {@link CaptureSurface}: camera2 for the still, this
@@ -74,6 +78,65 @@ final class GlassesCaptureSurface implements CaptureSurface {
     }
 
     @Override public void resetPageDetection() { if (camera != null) camera.resetPages(); }
+
+    @Override public NativeScene nativeSelectionScene(CaptureProvenance source) {
+        return closed || camera == null ? null : camera.nativeSelectionScene(source);
+    }
+
+    @Override public boolean isNativeSelectionSceneCurrent(NativeScene scene) {
+        return !closed && camera != null && camera.isNativeSelectionSceneCurrent(scene);
+    }
+
+    @Override public void requestNativeAlternative(NativeScene scene, NativeAlternative result) {
+        if (closed || camera == null) result.onSkipped(); else camera.requestNativeAlternative(scene, result);
+    }
+
+    /** Nine full-resolution 64px patches, decoded one at a time off the camera handler. No resized original. */
+    @Override public NativeImageQuality.Sample sampleNativeImage(byte[] jpeg, CaptureProvenance source) {
+        if (closed || source == null || !"native_still".equals(source.sourceKind)
+                || jpeg == null || jpeg.length < 2 || jpeg.length > GlassCamera.MAX_JPEG_BYTES
+                || jpeg[0] != (byte)0xff || jpeg[1] != (byte)0xd8
+                || !source.jpegSha256.equals(originalSha256(jpeg))) return null;
+        BitmapRegionDecoder decoder = null;
+        Bitmap patch = null;
+        try {
+            decoder = BitmapRegionDecoder.newInstance(jpeg, 0, jpeg.length, false);
+            int width = decoder.getWidth(), height = decoder.getHeight(), edge = NativeImageQuality.EDGE;
+            if (width != source.width || height != source.height || width < edge * 3 || height < edge * 3) return null;
+            byte[] pixels = new byte[NativeImageQuality.REGIONS * edge * edge];
+            int[] colors = new int[edge * edge];
+            BitmapFactory.Options options = new BitmapFactory.Options();
+            options.inSampleSize = 1; options.inPreferredConfig = Bitmap.Config.ARGB_8888;
+            for (int region = 0; region < NativeImageQuality.REGIONS; region++) {
+                int left = (2 * (region % 3) + 1) * width / 6 - edge / 2;
+                int top = (2 * (region / 3) + 1) * height / 6 - edge / 2;
+                patch = decoder.decodeRegion(new Rect(left, top, left + edge, top + edge), options);
+                if (patch == null || patch.getWidth() != edge || patch.getHeight() != edge) return null;
+                patch.getPixels(colors, 0, edge, 0, 0, edge, edge);
+                for (int i = 0; i < colors.length; i++) {
+                    int c = colors[i];
+                    pixels[region * edge * edge + i] = (byte)((77 * ((c >>> 16) & 255)
+                            + 150 * ((c >>> 8) & 255) + 29 * (c & 255)) >>> 8);
+                }
+                patch.recycle(); patch = null;
+            }
+            return new NativeImageQuality.Sample(width, height, pixels);
+        } catch (java.io.IOException | RuntimeException | OutOfMemoryError unavailable) {
+            return null;
+        } finally {
+            recycle(patch);
+            if (decoder != null) decoder.recycle();
+        }
+    }
+
+    private static String originalSha256(byte[] jpeg) {
+        try {
+            byte[] digest = java.security.MessageDigest.getInstance("SHA-256").digest(jpeg);
+            StringBuilder hex = new StringBuilder(64);
+            for (byte b : digest) hex.append(Character.forDigit((b >>> 4) & 15, 16)).append(Character.forDigit(b & 15, 16));
+            return hex.toString();
+        } catch (java.security.NoSuchAlgorithmException impossible) { throw new IllegalStateException(impossible); }
+    }
 
     @Override public boolean supportsFuturePages() { return camera != null; }
 

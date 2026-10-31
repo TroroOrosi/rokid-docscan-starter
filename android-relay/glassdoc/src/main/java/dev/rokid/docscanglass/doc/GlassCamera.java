@@ -64,7 +64,7 @@ final class GlassCamera {
     // Preparation plus JPEG deadline remains below the controller's 30s capture lease.
     private static final long PREPARE_TIMEOUT_MILLIS = 10_000;
     // Same bound as CaptureReviewPersistence; reject before allocating a second buffer.
-    private static final int MAX_JPEG_BYTES = 8 * 1024 * 1024;
+    static final int MAX_JPEG_BYTES = 8 * 1024 * 1024;
 
     interface Callback {
         void onCaptured(byte[] jpeg, int width, int height, long elapsedMillis);
@@ -190,6 +190,15 @@ final class GlassCamera {
     private long futureSceneStartTimestamp;
     private long futureSceneEndTimestamp;
     private long waitingStableScene;
+    // Nonpersistent opt-in. A monotonic observed scene is never revived by an A-B-A return.
+    private final String cameraRun = java.util.UUID.randomUUID().toString();
+    private volatile boolean nativeSelection;
+    private volatile CaptureSurface.NativeScene selectionScene;
+    private boolean selectionAttempted;
+    private CaptureSurface.NativeAlternative activeAlternative;
+    private CaptureSurface.NativeScene alternativeScene;
+    private long captureStream, captureScene, captureSceneStart, captureSceneEnd;
+    private boolean captureSceneUncertain;
     private final List<Runnable> futureStops = new ArrayList<>();
     private CameraReadiness metering;
     private long meteringSensorTimestamp;
@@ -259,6 +268,40 @@ final class GlassCamera {
     boolean videoEvaluation() { return mode == Mode.VIDEO_EVALUATION; }
     boolean paperGeometryEvaluation() { return paperGeometryEvaluation; } // AGENT_APPROVED=1
 
+    void nativeSelection(boolean enabled) {
+        if (enabled && mode != Mode.NATIVE_STILL)
+            throw new IllegalArgumentException("native selection requires native stills");
+        nativeSelection = enabled;
+        stillness.retainMeasurements(enabled);
+        if (!enabled) selectionScene = null;
+    }
+
+    CaptureSurface.NativeScene nativeSelectionScene(CaptureProvenance source) {
+        CaptureSurface.NativeScene scene = selectionScene;
+        return scene != null && scene.matches(source) && isNativeSelectionSceneCurrent(scene) ? scene : null;
+    }
+
+    boolean isNativeSelectionSceneCurrent(CaptureSurface.NativeScene scene) {
+        return nativeSelection && scene != null && scene.equals(selectionScene);
+    }
+
+    /** Never await/prepare an optional shot: the next-page observer and current readings take priority. */
+    void requestNativeAlternative(CaptureSurface.NativeScene scene, CaptureSurface.NativeAlternative result) {
+        handler.post(() -> {
+            if (!isNativeSelectionSceneCurrent(scene) || selectionAttempted) { result.onSkipped(); return; }
+            selectionAttempted = true;
+            if (capturePending || activeFuturePage != null || pageReady != null
+                    || pageChange.sequence() != scene.sequence() || pageChange.ready(SystemClock.elapsedRealtime())
+                    || !cameraReady() || !stillness.readyNow()) { result.onSkipped(); return; }
+            if (!result.onStarting() || !isNativeSelectionSceneCurrent(scene)
+                    || !cameraReady() || !stillness.readyNow()) { result.onSkipped(); return; }
+            activeAlternative = result;
+            alternativeScene = scene;
+            capturePending = true;
+            captureOnHandler();
+        });
+    }
+
     /** Opens the rear camera and captures exactly one JPEG at its largest size. */
     @RequiresPermission(Manifest.permission.CAMERA)
     void captureOnce() {
@@ -274,6 +317,7 @@ final class GlassCamera {
     }
 
     void resetPages() { handler.post(() -> {
+        selectionScene = null;
         pageChange = new PageChange();
         if (paperGeometryEvaluation) paperTracker = new PaperGeometry.Tracker();
     }); }
@@ -305,14 +349,14 @@ final class GlassCamera {
                 previewRequested = false; pageReady = null;
                 if (!capturePending && activeFuturePage == null) stopPreview();
             }
-            if (activeFuturePage == null && inputIdle()) idle.run(); else futureStops.add(idle);
+            if (activeFuturePage == null && activeAlternative == null && inputIdle()) idle.run(); else futureStops.add(idle);
         });
     }
 
     private void futureIdle() {
         if (mode == Mode.VIDEO_EVALUATION && !previewRequested && !capturePending
                 && activeFuturePage == null && video != null) stopPreview();
-        if (activeFuturePage != null || !inputIdle()) return;
+        if (activeFuturePage != null || activeAlternative != null || !inputIdle()) return;
         List<Runnable> idle = new ArrayList<>(futureStops);
         futureStops.clear();
         for (Runnable ready : idle) ready.run();
@@ -338,6 +382,7 @@ final class GlassCamera {
 
     void pausePreview() {
         handler.post(() -> {
+            selectionScene = null;
             previewRequested = false;
             pageReady = null;
             futurePages = null;
@@ -509,6 +554,8 @@ final class GlassCamera {
             if (timestamp <= 0 || timestamp <= lastPreviewSensorTimestamp) {
                 // Do not refresh readiness or invent a turn from an old/invalid buffer.
                 previewSensorTimestamp = 0;
+                selectionScene = null;
+                captureSceneUncertain = true;
                 return;
             }
             lastPreviewSensorTimestamp = timestamp;
@@ -529,6 +576,8 @@ final class GlassCamera {
             }
             if (previousScene != pageChange.sequence()) {
                 sceneStartTimestamp = timestamp;
+                selectionScene = null;
+                if (capturePending && captureSceneEnd == Long.MAX_VALUE) captureSceneEnd = timestamp;
                 if (activeFuturePage != null && futureSceneEndTimestamp == Long.MAX_VALUE) {
                     futureSceneEndTimestamp = timestamp;
                 }
@@ -621,6 +670,9 @@ final class GlassCamera {
         previewRequested = false;
         previewOpening = false;
         unknown = true;
+        selectionScene = null;
+        activeAlternative = null;
+        alternativeScene = null;
         capturePending = false;
         futurePages = null;
         activeFuturePage = null;
@@ -840,7 +892,14 @@ final class GlassCamera {
 
     @RequiresPermission(Manifest.permission.CAMERA)
     private void captureOnHandler() {
-        if (closed || unknown || !capturePending || !cameraReady() || (generation > 0 && !settled)) return;
+        if (closed || unknown || !capturePending || !cameraReady() || (generation > 0 && !settled)) {
+            if (activeAlternative != null) {
+                CaptureSurface.NativeAlternative skipped = activeAlternative;
+                activeAlternative = null; alternativeScene = null; capturePending = false;
+                skipped.onSkipped(); futureIdle();
+            }
+            return;
+        }
         if (activeFuturePage != null && !activeFuturePage.onCaptureStarting()) {
             previewFailed("future original reservation failed");
             return;
@@ -856,7 +915,15 @@ final class GlassCamera {
         long current = ++generation;
         stillResult = null;
         settled = false;
-        pageChange.consumed();
+        captureStream = previewGeneration;
+        captureScene = pageChange.sequence();
+        captureSceneStart = sceneStartTimestamp;
+        captureSceneEnd = Long.MAX_VALUE;
+        captureSceneUncertain = previewSensorTimestamp <= 0;
+        if (activeAlternative == null) {
+            selectionScene = null;
+            pageChange.consumed();
+        }
         startedAtMillis = SystemClock.elapsedRealtime();
         handler.removeCallbacks(prepareTimeout);
         handler.postDelayed(timeout, CAPTURE_TIMEOUT_MILLIS);
@@ -886,6 +953,9 @@ final class GlassCamera {
                 unknown = true;
             }
             closed = true;
+            selectionScene = null;
+            activeAlternative = null;
+            alternativeScene = null;
             settled = true;
             generation++;
             previewRequested = false;
@@ -1065,11 +1135,33 @@ final class GlassCamera {
                 provenance == null ? "unknown" : provenance.jpegSha256);
         CaptureSurface.FuturePageListener future = activeFuturePage;
         activeFuturePage = null;
-        if (future == null) callback.onCaptured(new Captured(jpeg, width, height, elapsed, provenance, associationResolved));
+        CaptureSurface.NativeAlternative alternative = activeAlternative;
+        activeAlternative = null;
+        CaptureSurface.NativeScene origin = alternativeScene;
+        alternativeScene = null;
+        boolean nativeSceneMatched = nativeSelection && mode == Mode.NATIVE_STILL && !captureSceneUncertain
+                && captureStream == previewGeneration && captureScene == pageChange.sequence()
+                && captureScene > 0 && captureSceneStart > 0 && sensorTimestamp >= captureSceneStart
+                && sensorTimestamp < captureSceneEnd && provenance != null && provenance.resultTimestampNanos != null;
+        if (alternative != null) {
+            alternative.onOriginal(jpeg, provenance, nativeSceneMatched && isNativeSelectionSceneCurrent(origin));
+        } else if (future == null) {
+            if (nativeSceneMatched) {
+                selectionScene = new CaptureSurface.NativeScene(cameraRun, captureStream, captureScene,
+                        provenance.captureId, provenance.jpegSha256);
+                selectionAttempted = false;
+            }
+            callback.onCaptured(new Captured(jpeg, width, height, elapsed, provenance, associationResolved));
+        }
         else {
             boolean sceneMatched = associationResolved && sensorTimestamp >= futureSceneStartTimestamp
                     && sensorTimestamp < futureSceneEndTimestamp;
             if (!sceneMatched) { futurePages = null; futureCapacity = 0; }
+            if (nativeSceneMatched) {
+                selectionScene = new CaptureSurface.NativeScene(cameraRun, captureStream, captureScene,
+                        provenance.captureId, provenance.jpegSha256);
+                selectionAttempted = false;
+            }
             future.onCandidate(jpeg, provenance, sceneMatched);
         }
         if (!associationResolved) previewFailed("ZSL original timestamp mismatch");
@@ -1088,6 +1180,9 @@ final class GlassCamera {
         if (video != null) video.gap(reason);
         capturePending = false;
         unknown = true;
+        selectionScene = null;
+        activeAlternative = null;
+        alternativeScene = null;
         previewRequested = false;
         pageReady = null;
         futurePages = null;
@@ -1102,6 +1197,7 @@ final class GlassCamera {
     }
 
     private boolean release() {
+        selectionScene = null;
         // Detach ownership first, then attempt every close even if one fails.
         CameraCaptureSession oldSession = previewSession;
         CameraDevice oldDevice = previewDevice;

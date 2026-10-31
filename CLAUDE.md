@@ -219,6 +219,16 @@ and uncertain-send safeguards remain independent of model-name fallback.
   remain comparison candidates without physical quality or performance acceptance.
   The frozen CUSTOMVIEW route keeps explicit phone controls. The original
   `adf12ee` disable decision belonged to the route without operator taps.
+- An explicit, nonpersistent `native_selection=true` comparison launch may take
+  one additional maximum-size native JPEG only when the same scene is already
+  ready, without waiting for preparation or taking priority over a next page.
+  Retain both originals and their provenance before comparing bounded native-pixel
+  regions. Unknown or tied comparisons retain the first image. A selected second
+  image must receive its own fresh three-second visible review before ordinary
+  upload; stale scenes, expired review, generation changes and terminal states
+  cannot replace it. Restart must not repeat the extra request. This comparison
+  is default-off and exclusive with ZSL, recording and paper-geometry evaluation.
+  Physical character accuracy and additional latency are not accepted yet.
 - On the local surface the captured still is drawn after its native image is
   closed. The preview session continues observing page changes until pause,
   capture end or failure; physical frame continuity remains unverified. A
@@ -271,7 +281,14 @@ and uncertain-send safeguards remain independent of model-name fallback.
   display hold. Ordinary chooser updates are not app-entry requests.
   Confirmed wear requests use a fresh persistent generation and an explicit
   chooser entry, explicit wake and no old answer-wake extras. Never restore
-  a saved timeout over a later operator choice. Hardware acceptance is pending.
+  a saved timeout over a later operator choice. For a serial-verified, previously
+  running app, a fresh explicit sleep request precedes fold/process diagnostics;
+  cold-start and prior in-flight work can still delay delivery. A saved-answer
+  hardware trial retained display and cursor through the12.297-second observation
+  after SOFT_SLEEP (`GL48-saved-reader-display-hold-20261031.py
+  --execute-approved-once`, exit0; independently audited). The operator also
+  confirmed that the answer stays visible and readable. Five-second physical
+  idle sleep, restart acceptance and full-duration operation remain pending.
 - Text-only page upload remains an API compatibility path. Do not describe it
   as the real-device primary path.
 - The public CXR-L AIDL surface does not expose arbitrary recognition or
