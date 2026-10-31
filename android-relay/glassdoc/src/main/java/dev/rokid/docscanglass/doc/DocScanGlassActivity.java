@@ -70,6 +70,7 @@ public final class DocScanGlassActivity extends Activity
     private static final String EXTRA_ZSL_EVALUATION = "zsl_evaluation";
     private static final String EXTRA_VIDEO_EVALUATION = "video_evaluation";
     private static final String EXTRA_VIDEO_TRANSFER_EVALUATION = "video_transfer_evaluation";
+    private static final String EXTRA_PAPER_GEOMETRY_EVALUATION = "paper_geometry_evaluation"; // AGENT_APPROVED=1
     /** Open this server session's answers directly: checks the answer display without a capture. */
     private static final String EXTRA_ANSWERS = "answers";
     private static final int CAMERA_PERMISSION_REQUEST = 7401;
@@ -231,10 +232,12 @@ public final class DocScanGlassActivity extends Activity
 
         final GlassCamera.Mode cameraMode;
         final CaptureVideoRecording.Options recordingOptions;
+        final boolean paperGeometry;
         try {
             cameraMode = evaluationMode(getIntent());
             recordingOptions = videoOptions(getIntent(), deviceId, powerGeneration);
             comparisonTransferEnabled = videoTransferEvaluation(getIntent());
+            paperGeometry = paperGeometryEvaluation(getIntent());
         } catch (IllegalArgumentException invalid) {
             hud.showLines(List.of("撮影評価を開始できません", invalid.getMessage(), ""));
             Log.w(TAG, "explicit camera evaluation rejected: " + invalid.getMessage());
@@ -243,7 +246,7 @@ public final class DocScanGlassActivity extends Activity
         cameraThread = new HandlerThread("glass-camera");
         cameraThread.start();
         camera = new GlassCamera(this, new Handler(cameraThread.getLooper()), cameraCallback(),
-                cameraMode, null, null, recordingOptions, null);
+                cameraMode, null, null, recordingOptions, null, paperGeometry);
         surface = new GlassesCaptureSurface(this, camera, hud, main, this);
         ocr = new JapaneseOcr();
         controller = new DocScanController(
@@ -292,7 +295,8 @@ public final class DocScanGlassActivity extends Activity
             setIntent(intent); muteOutput(); receiveWake(intent); return;
         }
         if (intent != null && (intent.hasExtra(EXTRA_VIDEO_EVALUATION) || intent.hasExtra(EXTRA_ZSL_EVALUATION)
-                || intent.hasExtra(EXTRA_VIDEO_TRANSFER_EVALUATION))) {
+                || intent.hasExtra(EXTRA_VIDEO_TRANSFER_EVALUATION) || intent.hasExtra(EXTRA_PAPER_GEOMETRY_EVALUATION)
+                || (camera != null && camera.paperGeometryEvaluation()))) {
             if (evaluationRestarting) return;
             try { evaluationMode(intent); videoOptions(intent, deviceId == null ? "evaluation" : deviceId, powerGeneration); }
             catch (IllegalArgumentException invalid) {
@@ -751,8 +755,12 @@ public final class DocScanGlassActivity extends Activity
             }
 
             @Override public void onPreview(android.graphics.Bitmap frame) {
+                onPreview(frame, null);
+            }
+
+            @Override public void onPreview(android.graphics.Bitmap frame, PaperGeometry.Box proposal) {
                 if (surface == null) frame.recycle();
-                else surface.showLivePreview(frame);
+                else surface.showLivePreview(frame, proposal);
             }
 
             @Override
@@ -1306,8 +1314,16 @@ public final class DocScanGlassActivity extends Activity
         boolean zsl = evaluationFlag(intent, EXTRA_ZSL_EVALUATION);
         boolean video = evaluationFlag(intent, EXTRA_VIDEO_EVALUATION);
         videoTransferEvaluation(intent);
+        paperGeometryEvaluation(intent);
         if (zsl && video) throw new IllegalArgumentException("ZSLと録画評価は同時指定できません");
         return video ? GlassCamera.Mode.VIDEO_EVALUATION : zsl ? GlassCamera.Mode.ZSL_EVALUATION_YUV : GlassCamera.Mode.NATIVE_STILL;
+    }
+
+    static boolean paperGeometryEvaluation(Intent intent) {
+        boolean enabled = evaluationFlag(intent, EXTRA_PAPER_GEOMETRY_EVALUATION);
+        if (enabled && (evaluationFlag(intent, EXTRA_ZSL_EVALUATION) || evaluationFlag(intent, EXTRA_VIDEO_EVALUATION)))
+            throw new IllegalArgumentException("paper geometry comparison requires native stills");
+        return enabled;
     }
 
     static boolean videoTransferEvaluation(Intent intent) {

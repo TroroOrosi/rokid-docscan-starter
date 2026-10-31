@@ -77,8 +77,9 @@ android {
         // 42 adds explicit full-resolution ZSL evaluation, without changing the native default.
         // 43 adds explicit original-video/MAX-JPEG evaluation and a recorder stop barrier.
         // 44 adds opt-in comparison transfer with persistent origin and receipt binding.
-        versionCode = 45
-        versionName = "0.36.0"
+        // 46 adds explicit provisional paper/AE comparison and respects Y-plane buffer origins.
+        versionCode = 46
+        versionName = "0.37.0"
     }
 
     // Same reasoning as `:glassapp`: a vendor installer that reads JAR

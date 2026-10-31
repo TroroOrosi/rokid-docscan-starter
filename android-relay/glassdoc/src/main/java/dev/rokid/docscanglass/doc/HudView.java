@@ -46,6 +46,7 @@ final class HudView extends View {
     private List<String> lines = Collections.emptyList();
     private Bitmap preview;
     private Bitmap livePreview;
+    private PaperGeometry.Box paperProposal; // AGENT_APPROVED=1: provisional comparison, never a crop.
     private boolean capturing;
     private boolean aiming;
     private double guideFraction = FramingGuide.UNCALIBRATED_FRACTION;
@@ -59,13 +60,19 @@ final class HudView extends View {
 
     void capturePreview(boolean active) {
         capturing = active;
+        if (!active) paperProposal = null;
         if (!active && livePreview != null) { livePreview.recycle(); livePreview = null; }
         invalidate();
     }
 
     void showLivePreview(Bitmap bitmap) {
+        showLivePreview(bitmap, null);
+    }
+
+    void showLivePreview(Bitmap bitmap, PaperGeometry.Box proposal) {
         Bitmap previous = livePreview;
         livePreview = bitmap;
+        paperProposal = proposal;
         if (previous != null && previous != bitmap && !previous.isRecycled()) previous.recycle();
         invalidate();
     }
@@ -252,7 +259,21 @@ final class HudView extends View {
         Bitmap frame = livePreview;
         if (frame == null || frame.isRecycled()) return;
         RectF bounds = imageBounds(frame);
-        canvas.drawRect(bounds, guidePaint);
+        PaperGeometry.Box proposal = paperProposal;
+        if (proposal == null) { canvas.drawRect(bounds, guidePaint); return; }
+        float left = bounds.left + bounds.width() * proposal.left / proposal.width;
+        float top = bounds.top + bounds.height() * proposal.top / proposal.height;
+        float right = bounds.left + bounds.width() * proposal.right / proposal.width;
+        float bottom = bounds.top + bounds.height() * proposal.bottom / proposal.height;
+        float length = Math.min(10f, Math.min(right - left, bottom - top) / 5f);
+        canvas.save(); canvas.clipRect(bounds);
+        for (int corner = 0; corner < 4; corner++) {
+            boolean isLeft = corner % 2 == 0, isTop = corner < 2;
+            float x = isLeft ? left : right, y = isTop ? top : bottom;
+            canvas.drawLine(x, y, x + (isLeft ? length : -length), y, guidePaint);
+            canvas.drawLine(x, y, x, y + (isTop ? length : -length), guidePaint);
+        }
+        canvas.restore();
     }
 
     /** Show the entire photograph in one corner; status never covers it. */

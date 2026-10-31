@@ -6,11 +6,13 @@ import static android.hardware.camera2.CameraMetadata.*;
 
 import android.graphics.Bitmap;
 import android.graphics.ImageFormat;
+import android.graphics.Rect;
 import android.hardware.Sensor;
 import android.hardware.SensorEvent;
 import android.hardware.SensorManager;
 import android.hardware.camera2.*;
 import android.hardware.camera2.params.StreamConfigurationMap;
+import android.hardware.camera2.params.MeteringRectangle;
 import android.media.DocScanTestImage;
 import android.media.Image;
 import android.media.ImageReader;
@@ -55,15 +57,22 @@ public class GlassCameraWarmSessionTest {
     private final List<GlassCamera.Captured> originals = new ArrayList<>();
     private int delivered;
     private int displayed;
+    private PaperGeometry.Box displayedPaper;
+    private int displayedCenter;
     private Long exposureNanos = 10_000_000L;
 
     @Before public void setup() {
         ManagerShadow.devices.clear(); ReaderShadow.readers.clear();
         ManagerShadow.refuseSession = false; CharacteristicsShadow.fixedFocus = false;
+        CharacteristicsShadow.aeRegions = 0; // AGENT_APPROVED=1: explicit comparison test setup.
+        CharacteristicsShadow.strictPublicApi = false;
         CharacteristicsShadow.afMode = CONTROL_AF_MODE_CONTINUOUS_PICTURE;
         createCamera();
     }
     private void createCamera() {
+        createCamera(false);
+    }
+    private void createCamera(boolean paperEvaluation) {
         camera = new GlassCamera(RuntimeEnvironment.getApplication(), new Handler(Looper.getMainLooper()),
                 new GlassCamera.Callback() {
                     @Override public void onCaptured(GlassCamera.Captured captured) {
@@ -74,7 +83,13 @@ public class GlassCameraWarmSessionTest {
                     }
                     @Override public void onCaptureFailed(String reason) { failures.add(reason); }
                     @Override public void onPreview(Bitmap frame) { displayed++; frame.recycle(); }
-                });
+                    @Override public void onPreview(Bitmap frame, PaperGeometry.Box paper) {
+                        displayedPaper = paper; displayedCenter = android.graphics.Color.green(
+                                frame.getPixel(frame.getWidth() / 2, frame.getHeight() / 2));
+                        onPreview(frame);
+                    }
+                }, GlassCamera.Mode.NATIVE_STILL, null, null,
+                CaptureVideoRecording.Options.defaults("test", 0, 270), null, paperEvaluation);
     }
     private void idle(long millis) { shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(millis)); }
     private DocScanTestCamera firstDevice() { return ManagerShadow.devices.get(0); }
@@ -115,6 +130,174 @@ public class GlassCameraWarmSessionTest {
         return result;
     }
     private void readyFrame() { idle(100); result(CONTROL_AF_STATE_PASSIVE_FOCUSED, CONTROL_AE_STATE_CONVERGED); frame(180); }
+
+    private void paperFrame() {
+        paperFrame(20); // AGENT_APPROVED=1: same paper, independently changing surrounding scene.
+    }
+    private void paperFrame(int background) {
+        DocScanTestImage image = new DocScanTestImage(new ArrayList<>());
+        image.format = ImageFormat.YUV_420_888; image.width = 32; image.height = 24;
+        image.rowStride = 32; image.pixelStride = 1;
+        byte[] pixels = new byte[32 * 24]; java.util.Arrays.fill(pixels, (byte)background);
+        for (int y = 6; y < 18; y++) java.util.Arrays.fill(pixels, y * 32 + 8, y * 32 + 24, (byte)220);
+        image.timestamp = SystemClock.elapsedRealtimeNanos(); image.buffer = ByteBuffer.wrap(pixels);
+        var reader = currentReader(ImageFormat.YUV_420_888); reader.image = image;
+        reader.listener.onImageAvailable(reader.reader);
+    }
+
+    private void paperResult(CaptureRequest request, MeteringRectangle[] regions) {
+        paperResult(request, regions, null);
+    }
+    private void paperResult(CaptureRequest request, MeteringRectangle[] regions, Float zoom) {
+        paperResult(request, regions, zoom, SystemClock.elapsedRealtimeNanos()); // AGENT_APPROVED=1
+    }
+    private void paperResult(CaptureRequest request, MeteringRectangle[] regions, Float zoom, long timestamp) {
+        TotalCaptureResult result = metadata(CONTROL_AF_STATE_INACTIVE, CONTROL_AE_STATE_CONVERGED,
+                timestamp);
+        ShadowCaptureResult values = Shadow.extract(result);
+        values.set(CaptureResult.SCALER_CROP_REGION, new Rect(0, 0, 4032, 3024));
+        values.set(CaptureResult.CONTROL_AE_REGIONS, regions);
+        if (zoom != null) values.set(CaptureResult.CONTROL_ZOOM_RATIO, zoom);
+        var session = currentDevice().session;
+        session.previewCallback.onCaptureCompleted(session, request, result);
+    }
+
+    @Test public void paperAeComparisonWaitsForTheSameRevisionAndActualReturnedRegion() {
+        CharacteristicsShadow.fixedFocus = true; CharacteristicsShadow.aeRegions = 1; createCamera(true);
+        camera.captureOnce(); idle(100);
+        var session = firstDevice().session;
+        CaptureRequest initial = session.repeating;
+        MeteringRectangle[] whole = {new MeteringRectangle(0, 0, 4032, 3024, 0)};
+        paperResult(initial, whole); paperFrame(); idle(100);
+        paperResult(session.repeating, whole); paperFrame();
+        CaptureRequest proposed = session.repeating;
+        MeteringRectangle[] region = proposed.get(CaptureRequest.CONTROL_AE_REGIONS);
+        assertArrayEquals(new MeteringRectangle[]{new MeteringRectangle(882, 630, 2268, 1764, 1000)}, region);
+        assertNotSame(initial, proposed); assertEquals(0, session.captures);
+        idle(400); paperResult(initial, whole); paperFrame(); idle(50);
+        assertEquals("late full-frame metadata cannot authorize the new paper region", 0, session.captures);
+        paperResult(proposed, whole); paperFrame(); idle(50);
+        assertEquals("an unreturned AE region cannot authorize a shutter", 0, session.captures);
+        idle(700);
+        paperResult(proposed, region, null, SystemClock.elapsedRealtimeNanos() - 700_000_000L); paperFrame(); idle(50);
+        assertEquals("the right region with stale sensor timing is insufficient", 0, session.captures);
+        paperResult(proposed, region); paperFrame(); idle(50);
+        assertEquals(1, session.captures);
+        RequestShadow still = Shadow.extract(session.captured);
+        assertEquals(CONTROL_AF_MODE_OFF, still.values.get(CaptureRequest.CONTROL_AF_MODE.getName()));
+        assertArrayEquals(region, session.captured.get(CaptureRequest.CONTROL_AE_REGIONS));
+        assertNull(session.captured.get(CaptureRequest.SCALER_CROP_REGION));
+        assertNull(session.captured.get(CaptureRequest.CONTROL_ZOOM_RATIO));
+        assertEquals(0, still.values.get(CaptureRequest.JPEG_ORIENTATION.getName()));
+    }
+
+    @Test public void paperProposalWithoutAeCapabilityKeepsFullFrameNativeReadiness() {
+        CharacteristicsShadow.fixedFocus = true; createCamera(true);
+        camera.captureOnce(); idle(100); result(CONTROL_AF_STATE_INACTIVE, CONTROL_AE_STATE_CONVERGED); paperFrame();
+        idle(400); result(CONTROL_AF_STATE_INACTIVE, CONTROL_AE_STATE_CONVERGED); paperFrame(); idle(50);
+        assertEquals(1, firstDevice().session.captures);
+        assertNull(firstDevice().session.captured.get(CaptureRequest.CONTROL_AE_REGIONS));
+        assertNull(firstDevice().session.captured.getTag());
+    }
+
+    @Test @Config(sdk = {28, 30, 31})
+    public void paperAeComparisonUsesOnlyTransformKeysAvailableOnThatAndroidApi() {
+        CharacteristicsShadow.strictPublicApi = true; // Android-all also contains hidden keys; enforce the public HAL boundary.
+        CharacteristicsShadow.fixedFocus = true; CharacteristicsShadow.aeRegions = 1; createCamera(true); // AGENT_APPROVED=1
+        camera.captureOnce(); idle(100);
+        for (int n = 0; n < 8; n++) {
+            idle(100); CaptureRequest request = firstDevice().session.repeating;
+            paperResult(request, request.get(CaptureRequest.CONTROL_AE_REGIONS)); paperFrame();
+        }
+        assertEquals(1, firstDevice().session.captures); assertTrue(failures.isEmpty());
+    }
+
+    @Test public void paperGeometryComparisonIsExplicitAndCannotCombineOtherProducers() {
+        assertFalse(DocScanGlassActivity.paperGeometryEvaluation(new android.content.Intent())); // AGENT_APPROVED=1
+        assertTrue(DocScanGlassActivity.paperGeometryEvaluation(new android.content.Intent().putExtra("paper_geometry_evaluation", true)));
+        for (String other : new String[]{"zsl_evaluation", "video_evaluation"}) {
+            try {
+                DocScanGlassActivity.evaluationMode(new android.content.Intent()
+                        .putExtra("paper_geometry_evaluation", true).putExtra(other, true));
+                fail("independent comparison producers cannot be combined implicitly");
+            } catch (IllegalArgumentException expected) { }
+        }
+        try {
+            DocScanGlassActivity.paperGeometryEvaluation(new android.content.Intent().putExtra("paper_geometry_evaluation", "true"));
+            fail("comparison must require a boolean opt-in");
+        } catch (IllegalArgumentException expected) { }
+    }
+
+    @Test public void paperProposalAndWholePreviewHonorTheSamePaddedPlaneOrigin() {
+        createCamera(true); camera.preview(); // AGENT_APPROVED=1: actual Y-plane/display seam, no camera hardware.
+        for (int n = 0; n < 2; n++) {
+            idle(100);
+            DocScanTestImage image = new DocScanTestImage(new ArrayList<>());
+            image.format = ImageFormat.YUV_420_888; image.width = 32; image.height = 24;
+            image.rowStride = 71; image.pixelStride = 2;
+            byte[] pixels = new byte[7 + 24 * 71]; java.util.Arrays.fill(pixels, (byte)4);
+            for (int y = 0; y < 24; y++) for (int x = 0; x < 32; x++)
+                pixels[7 + y * 71 + x * 2] = (byte)(x >= 8 && x < 24 && y >= 6 && y < 18 ? 220 : 20);
+            image.timestamp = SystemClock.elapsedRealtimeNanos(); image.buffer = ByteBuffer.wrap(pixels); image.buffer.position(7);
+            var reader = currentReader(ImageFormat.YUV_420_888); reader.image = image; reader.listener.onImageAvailable(reader.reader);
+        }
+        assertArrayEquals(new int[]{7, 5, 25, 19}, displayedPaper.edges());
+        assertEquals("the guide and the visible paper use the same plane origin", 220, displayedCenter);
+        assertTrue(failures.isEmpty());
+    }
+
+    @Test public void paperComparisonKeepsFullFrameAToBToATurnsDuringReviewAndAllOriginalBytes() {
+        CharacteristicsShadow.fixedFocus = true; CharacteristicsShadow.aeRegions = 1; createCamera(true);
+        camera.captureOnce(); idle(100);
+        for (int n = 0; n < 8; n++) {
+            idle(100); var request = firstDevice().session.repeating;
+            paperResult(request, request.get(CaptureRequest.CONTROL_AE_REGIONS)); paperFrame();
+        }
+        assertEquals(1, firstDevice().session.captures);
+        byte[] first = {1, 2, 3}; deliverOriginal(first, SystemClock.elapsedRealtimeNanos());
+        assertArrayEquals(first, originals.get(0).jpeg);
+        List<byte[]> future = new ArrayList<>();
+        camera.observeFuturePages(2, new CaptureSurface.FuturePageListener() {
+            public void onCandidate(byte[] jpeg, CaptureProvenance p, boolean matched) {
+                assertTrue(matched); future.add(jpeg);
+            }
+            public void onPageMissed() { fail("these two stable scenes fit the existing two slots"); }
+        }); idle(0);
+        // Only the surround changes; the same apparent paper rectangle cannot suppress a turn.
+        for (int background : new int[]{100, 20}) {
+            int before = firstDevice().session.captures;
+            for (int n = 0; n < 8; n++) {
+                idle(100); var request = firstDevice().session.repeating;
+                paperResult(request, request.get(CaptureRequest.CONTROL_AE_REGIONS)); paperFrame(background);
+            }
+            assertEquals(before + 1, firstDevice().session.captures);
+            deliverOriginal(new byte[]{(byte)background, 4, 5}, SystemClock.elapsedRealtimeNanos());
+        }
+        assertEquals(2, future.size()); assertArrayEquals(new byte[]{100, 4, 5}, future.get(0));
+        assertArrayEquals(new byte[]{20, 4, 5}, future.get(1));
+        camera.stopFuturePages(() -> {}); idle(0); idle(600);
+        assertEquals(3, firstDevice().session.captures); assertTrue(failures.isEmpty());
+    }
+
+    @Test public void anUnknownTransformReturnsToFreshFullFrameAeWithoutChangingZoomOrCropping() {
+        CharacteristicsShadow.fixedFocus = true; CharacteristicsShadow.aeRegions = 1; createCamera(true);
+        camera.preview(); idle(100);
+        for (int n = 0; n < 3; n++) {
+            idle(100); var request = firstDevice().session.repeating;
+            paperResult(request, request.get(CaptureRequest.CONTROL_AE_REGIONS)); paperFrame();
+        }
+        var session = firstDevice().session;
+        CaptureRequest region = session.repeating;
+        paperResult(region, region.get(CaptureRequest.CONTROL_AE_REGIONS), 2f); idle(100); paperFrame();
+        CaptureRequest fallback = session.repeating;
+        assertNotSame(region, fallback);
+        assertEquals(0, fallback.get(CaptureRequest.CONTROL_AE_REGIONS)[0].getMeteringWeight());
+        camera.captureOnce(); idle(0); idle(100);
+        paperResult(fallback, fallback.get(CaptureRequest.CONTROL_AE_REGIONS), 2f); paperFrame(); idle(50);
+        assertEquals(1, session.captures);
+        assertNull(session.captured.get(CaptureRequest.CONTROL_ZOOM_RATIO));
+        assertNull(session.captured.get(CaptureRequest.SCALER_CROP_REGION));
+    }
 
     @Test public void twoStableFutureScenesUseNativeOriginalsWithoutReplacingTheVisibleReview() {
         warmOriginal();
@@ -717,11 +900,21 @@ public class GlassCameraWarmSessionTest {
     @Implements(CameraCharacteristics.class) public static class CharacteristicsShadow {
         static boolean fixedFocus;
         static int afMode;
+        static int aeRegions;
+        static boolean strictPublicApi;
         @Implementation protected <T> T get(CameraCharacteristics.Key<T> key) {
+            if (strictPublicApi && ((android.os.Build.VERSION.SDK_INT < 30
+                    && key.getName().equals("android.control.zoomRatioRange"))
+                    || (android.os.Build.VERSION.SDK_INT < 31
+                    && key.getName().equals("android.scaler.availableRotateAndCropModes"))))
+                throw new AssertionError("transform key unavailable at this public API level");
             Object value = key.equals(CameraCharacteristics.LENS_FACING) ? LENS_FACING_BACK
                     : key.equals(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP) ? Shadow.newInstanceOf(StreamConfigurationMap.class)
                     : key.equals(CameraCharacteristics.CONTROL_AF_AVAILABLE_MODES) ? new int[]{CONTROL_AF_MODE_OFF, afMode}
                     : key.equals(CameraCharacteristics.CONTROL_AE_AVAILABLE_MODES) ? new int[]{CONTROL_AE_MODE_ON}
+                    : key.equals(CameraCharacteristics.CONTROL_MAX_REGIONS_AE) ? aeRegions
+                    : key.equals(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE) ? new Rect(0, 0, 4032, 3024)
+                    : key.equals(CameraCharacteristics.SENSOR_INFO_PRE_CORRECTION_ACTIVE_ARRAY_SIZE) ? new Rect(0, 0, 4032, 3024)
                     : key.equals(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE) ? fixedFocus ? 0f : 8f : null;
             @SuppressWarnings("unchecked") T typed = (T)value; return typed;
         }
@@ -750,15 +943,22 @@ public class GlassCameraWarmSessionTest {
     }
     @Implements(CaptureRequest.Builder.class) public static class BuilderShadow {
         int template; final Map<String,Object> values = new HashMap<>(); final List<Surface> targets = new ArrayList<>();
+        Object tag;
+        @Implementation protected void setTag(Object value) { tag = value; }
         @Implementation protected <T> void set(CaptureRequest.Key<T> key, T value) { values.put(key.getName(), value); }
         @Implementation protected void addTarget(Surface target) { targets.add(target); }
         @Implementation protected CaptureRequest build() {
             CaptureRequest request = Shadow.newInstanceOf(CaptureRequest.class);
             RequestShadow shadow = Shadow.extract(request); shadow.template = template;
-            shadow.values.putAll(values); shadow.targets.addAll(targets); return request;
+            shadow.values.putAll(values); shadow.targets.addAll(targets); shadow.tag = tag; return request;
         }
     }
     @Implements(CaptureRequest.class) public static class RequestShadow {
         int template; final Map<String,Object> values = new HashMap<>(); final List<Surface> targets = new ArrayList<>();
+        Object tag;
+        @Implementation protected Object getTag() { return tag; }
+        @Implementation protected <T> T get(CaptureRequest.Key<T> key) {
+            @SuppressWarnings("unchecked") T value = (T)values.get(key.getName()); return value;
+        }
     }
 }

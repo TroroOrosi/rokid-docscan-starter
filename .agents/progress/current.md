@@ -1,7 +1,7 @@
 # 再開入口：次のセッションはここだけ読めば始められる
 
-最終更新: 2026-10-31続行 — phone APP.64/SEND1・GUI保持。.65.1 watchはPC59＋別3件R0、版/docs/update93・Ruff良。f40 CIの3.10だけ1failからasyncio例外1行を修正、再59件＋別R0で新配布候補へ。公式依存phone配布と新source取引を並行。詳細phone-work-connected-root-20261030.json。
-Runs on: PC開発・別監査＋phone F51F/ZY22LWGDCV。会場は常時オンphone AP＋装着glassesのみ、PC/有線/毎回接続不要。本人「確認せずそのまま」継続。phone source002/raw94/SEND1、APK45はphone stageのみ。現在glasses SN未確認、候補のtimeoutから不在とは判定しない。実紙受入0。
+最終更新: 2026-10-31続行 — phone99/.65.1/source94のAPI/watch復帰actual別監査R0。新ROはinitial_guard/native2で停止、現在状態は未判定・再送0。可変紙面比較APK46/.37全Android build成功、XML669件失敗0・ruff通過、Spec/Standards別監査R0。詳細phone-work-connected-root-20261030.json。
+Runs on: PC開発/別監査＋phone F51F。会場はphone AP＋装着glassesだけ。本人「確認せずそのまま」継続。APK46はPC照合済・未導入、45はphone stageのみ。現在GL SN未観測、実紙/装着/会場受入0。
 
 ## 0. 読み方（前提と資料に引きずられないため）
 
@@ -90,7 +90,7 @@ Runs on: PC開発・別監査＋phone F51F/ZY22LWGDCV。会場は常時オンpho
   → 旧サーバ停止 → `nohup bash scripts/phone_serve.sh 127.0.0.1 > data/server-<commit>.log 2>&1 &`。PCからは `ssh -f -N -L 8000:127.0.0.1:8000 ...`（ssh `-i ~/.ssh/f51f_key -p 8022 u0_a26@192.168.0.6`）。
   ベンチの鍵は `ROKID_API_KEY` をスマホの env から読んで渡す（画面に出さない）。
 
-## 4. 次の作業（Runs on: 開発PC＋接続F51F）：.65.1例外互換fixをcommit/raw94/新SEND1 carrierへ結合し再CI。公式5入力のphone内offline build/installはcore17＋別5件R0、薄carrier別監査後rootのみ実行→新source配布→実DNS-SD/SN確認。現在のglasses SN未観測、実紙/装着は未達。旧endpoint/消費済once再試行0。手動実機以外を続行。以下は旧経緯。
+次の実行: 新RO initial_guardの世代束縛をPC再現→最小修正/別監査後に有限ROで実観測、旧once/IP再試行禁止。PCは可変紙面比較の狭いcommit/push/CI。実SN一致後のみGL更新、撮影/答案/装着/音声/会場受入をビルド合格と混同しない。
 
 1. 済：独立監査2回（`4552ea1`、`4552ea1..e12e155`）の指摘を `61ad481`〜`1134404` で反映。
 2. 済：4a（3節）。起動はスマホで `bash scripts/phone_serve.sh 127.0.0.1`、PCから `ssh -L 8000:127.0.0.1:8000` で投入した。

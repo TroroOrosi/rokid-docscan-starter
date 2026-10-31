@@ -4,6 +4,7 @@ import android.Manifest;
 import android.content.Context;
 import android.graphics.ImageFormat;
 import android.graphics.Bitmap;
+import android.graphics.Rect;
 import android.hardware.camera2.CameraAccessException;
 import android.hardware.camera2.CameraCaptureSession;
 import android.hardware.camera2.CameraCharacteristics;
@@ -17,8 +18,10 @@ import android.hardware.camera2.params.StreamConfigurationMap;
 import android.hardware.camera2.params.InputConfiguration;
 import android.hardware.camera2.params.OutputConfiguration;
 import android.hardware.camera2.params.SessionConfiguration;
+import android.hardware.camera2.params.MeteringRectangle;
 import android.media.Image;
 import android.media.ImageReader;
+import android.os.Build;
 import android.os.Handler;
 import android.os.SystemClock;
 import android.util.Log;
@@ -73,6 +76,7 @@ final class GlassCamera {
         void onCaptureFailed(String reason);
 
         default void onPreview(Bitmap frame) { frame.recycle(); }
+        default void onPreview(Bitmap frame, PaperGeometry.Box proposal) { onPreview(frame); }
         default CaptureVideoTransfer.Origin comparisonVideoOrigin(CaptureVideoRecording.Options options) { return null; }
         default void onVideoSealed() {}
     }
@@ -196,6 +200,10 @@ final class GlassCamera {
     private boolean autoFocusStarted;
     private long autoFocusSensorTimestamp;
     private PageChange previewMotion = new PageChange();
+    // AGENT_APPROVED=1: opt-in comparison only; never changes the saved JPEG bounds.
+    private final boolean paperGeometryEvaluation;
+    private PaperGeometry.Tracker paperTracker;
+    private PaperExposure paperExposure;
     private final Runnable prepareTimeout = () -> previewFailed("camera not still or AF/AE not ready");
     private final Runnable inputReleaseTimeout = () -> previewFailed("ZSL input release timeout");
 
@@ -218,6 +226,15 @@ final class GlassCamera {
     GlassCamera(Context context, Handler handler, Callback callback, Mode mode,
                 Executor worker, ZslInputTransfer.Factory factory,
                 CaptureVideoRecording.Options videoOptions, CaptureVideoRecording.Factory videoFactory) {
+        this(context, handler, callback, mode, worker, factory, videoOptions, videoFactory, false);
+    }
+
+    GlassCamera(Context context, Handler handler, Callback callback, Mode mode,
+                Executor worker, ZslInputTransfer.Factory factory,
+                CaptureVideoRecording.Options videoOptions, CaptureVideoRecording.Factory videoFactory,
+                boolean paperGeometryEvaluation) {
+        if (paperGeometryEvaluation && mode != Mode.NATIVE_STILL)
+            throw new IllegalArgumentException("paper geometry comparison requires native stills");
         this.context = context;
         this.handler = handler;
         this.callback = callback;
@@ -226,6 +243,7 @@ final class GlassCamera {
         inputFactory = factory;
         this.videoOptions = videoOptions;
         this.videoFactory = videoFactory;
+        this.paperGeometryEvaluation = paperGeometryEvaluation;
         stillness = new Stillness(context);
     }
 
@@ -239,6 +257,7 @@ final class GlassCamera {
     }
 
     boolean videoEvaluation() { return mode == Mode.VIDEO_EVALUATION; }
+    boolean paperGeometryEvaluation() { return paperGeometryEvaluation; } // AGENT_APPROVED=1
 
     /** Opens the rear camera and captures exactly one JPEG at its largest size. */
     @RequiresPermission(Manifest.permission.CAMERA)
@@ -254,7 +273,10 @@ final class GlassCamera {
         });
     }
 
-    void resetPages() { handler.post(() -> pageChange = new PageChange()); }
+    void resetPages() { handler.post(() -> {
+        pageChange = new PageChange();
+        if (paperGeometryEvaluation) paperTracker = new PaperGeometry.Tracker();
+    }); }
 
     void observeFuturePages(int capacity, CaptureSurface.FuturePageListener listener) {
         if (capacity < 0 || capacity > 2 || listener == null) throw new IllegalArgumentException("future capacity 0..2 required");
@@ -359,6 +381,9 @@ final class GlassCamera {
             metering = new CameraReadiness(characteristics.get(CameraCharacteristics.CONTROL_AF_AVAILABLE_MODES),
                     characteristics.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE),
                     characteristics.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_MODES));
+            paperTracker = paperGeometryEvaluation ? new PaperGeometry.Tracker() : null;
+            paperExposure = paperGeometryEvaluation && metering.afMode == CaptureRequest.CONTROL_AF_MODE_OFF
+                    ? PaperExposure.create(characteristics, size, token) : null;
             previewMotion = new PageChange();
             previewAt = 0;
             previewDisplayAt = 0;
@@ -492,9 +517,10 @@ final class GlassCamera {
             Image.Plane luma = image.getPlanes()[0];
             ByteBuffer pixels = luma.getBuffer();
             int row = luma.getRowStride(), step = luma.getPixelStride();
+            int origin = pixels.position(); // AGENT_APPROVED=1: same Y-plane origin for observation, guide and preview.
             byte[] thumbnail = new byte[32 * 24];
             for (int y = 0; y < 24; y++) for (int x = 0; x < 32; x++) {
-                thumbnail[y * 32 + x] = pixels.get(y * image.getHeight() / 24 * row + x * image.getWidth() / 32 * step);
+                thumbnail[y * 32 + x] = pixels.get(origin + y * image.getHeight() / 24 * row + x * image.getWidth() / 32 * step);
             }
             long previousScene = pageChange.sequence();
             pageChange.observe(thumbnail, now);
@@ -511,6 +537,19 @@ final class GlassCamera {
                 waitingStableScene = 0;
             }
             previewMotion.observe(thumbnail, now);
+            PaperGeometry.Box paper = paperTracker == null ? null : paperTracker.observe(
+                    PaperGeometry.candidate(pixels, image.getWidth(), image.getHeight(), row, step), pageChange.sequence());
+            if (paperExposure != null && paperExposure.propose(paper, pageChange.sequence())) {
+                // A new scene/region must receive its own actual, fresh AE result before shutter.
+                meteringSensorTimestamp = 0; meteringExposureNanos = 0;
+                try {
+                    CaptureRequest.Builder request = previewDevice.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW);
+                    request.addTarget(previewReader.getSurface()); applyMetering(request);
+                    previewSession.setRepeatingRequest(request.build(), previewResults(token, false), handler);
+                } catch (CameraAccessException | RuntimeException failure) {
+                    previewFailed("paper comparison metering unavailable"); return;
+                }
+            }
             // AUTO/MACRO must start before pageReady can require a focused result.
             if (capturePending || ((pageReady != null || futurePages != null) && pageChange.ready(now))) startAutoFocus();
             // Observe every received frame; only the HUD bitmap is limited to 10 Hz.
@@ -519,10 +558,11 @@ final class GlassCamera {
                 int width = Math.min(320, image.getWidth()), height = Math.max(1, width * image.getHeight() / image.getWidth());
                 int[] display = new int[width * height];
                 for (int y = 0; y < height; y++) for (int x = 0; x < width; x++) {
-                    int gray = pixels.get(y * image.getHeight() / height * row + x * image.getWidth() / width * step) & 255;
+                    int gray = pixels.get(origin + y * image.getHeight() / height * row + x * image.getWidth() / width * step) & 255;
                     display[y * width + x] = 0xFF000000 | (gray << 8);
                 }
-                callback.onPreview(Bitmap.createBitmap(display, width, height, Bitmap.Config.RGB_565));
+                Bitmap frame = Bitmap.createBitmap(display, width, height, Bitmap.Config.RGB_565);
+                if (paperGeometryEvaluation) callback.onPreview(frame, paper); else callback.onPreview(frame);
             }
             if (!capturePending && pageReady != null && pageChange.ready(now) && meteredFrame(now)) {
                 Runnable ready = pageReady;
@@ -647,6 +687,13 @@ final class GlassCamera {
                         meteringExposureNanos = 0;
                         meteringSensorTimestamp = 0; return;
                     }
+                    if (paperExposure != null && !paperExposure.observe(request, result)) {
+                        // Old request revisions cannot refresh, or replace, current-region readiness.
+                        if (request.getTag() == paperExposure.stamp) {
+                            meteringExposureNanos = 0; meteringSensorTimestamp = 0;
+                        }
+                        return;
+                    }
                     // Fence old LOCKED metadata until this START has reached the native pipeline.
                     if (focusTrigger) autoFocusSensorTimestamp = timestamp;
                     if (timestamp <= lastMeteringSensorTimestamp) return;
@@ -703,6 +750,77 @@ final class GlassCamera {
     private void applyMetering(CaptureRequest.Builder request) {
         request.set(CaptureRequest.CONTROL_AF_MODE, metering.afMode);
         request.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON);
+        if (paperExposure != null) paperExposure.apply(request);
+    }
+
+    /** Camera2 request/result correspondence for one explicitly enabled, fixed-focus comparison. */
+    private static final class PaperExposure {
+        final Rect active;
+        final Size stream;
+        final boolean zoomReported, rotateReported;
+        Rect crop;
+        Stamp stamp;
+        private static final class Stamp {
+            final long generation, scene, revision;
+            final Rect crop;
+            final MeteringRectangle region;
+            Stamp(long generation, long scene, long revision, Rect crop, MeteringRectangle region) {
+                this.generation = generation; this.scene = scene; this.revision = revision;
+                this.crop = crop == null ? null : new Rect(crop); this.region = region;
+            }
+        }
+        private PaperExposure(Rect active, Size stream, long generation, boolean zoom, boolean rotate) {
+            this.active = new Rect(active); this.stream = stream;
+            zoomReported = zoom; rotateReported = rotate;
+            stamp = new Stamp(generation, 0, 0, null, null);
+        }
+        static PaperExposure create(CameraCharacteristics c, Size stream, long generation) {
+            Integer max = c.get(CameraCharacteristics.CONTROL_MAX_REGIONS_AE);
+            Rect active = c.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE);
+            Rect uncorrected = c.get(CameraCharacteristics.SENSOR_INFO_PRE_CORRECTION_ACTIVE_ARRAY_SIZE);
+            int[] distortion = c.get(CameraCharacteristics.DISTORTION_CORRECTION_AVAILABLE_MODES);
+            // Do not guess a distortion transform. The inspected fixed-focus HAL has equal arrays.
+            if (max == null || max < 1 || active == null || active.isEmpty() || active.left != 0 || active.top != 0
+                    || (distortion != null && !active.equals(uncorrected))) return null;
+            return new PaperExposure(active, stream, generation,
+                    Build.VERSION.SDK_INT >= 30 && c.get(CameraCharacteristics.CONTROL_ZOOM_RATIO_RANGE) != null,
+                    Build.VERSION.SDK_INT >= 31 && c.get(CameraCharacteristics.SCALER_AVAILABLE_ROTATE_AND_CROP_MODES) != null);
+        }
+        void apply(CaptureRequest.Builder request) {
+            request.setTag(stamp);
+            request.set(CaptureRequest.CONTROL_AE_REGIONS, new MeteringRectangle[]{stamp.region != null
+                    ? stamp.region : new MeteringRectangle(active, 0)});
+        }
+        boolean propose(PaperGeometry.Box paper, long scene) {
+            MeteringRectangle region = null;
+            if (paper != null && crop != null) {
+                int[] box = paper.sensorRegion(crop.left, crop.top, crop.right, crop.bottom,
+                        stream.getWidth(), stream.getHeight());
+                if (box != null) region = new MeteringRectangle(new Rect(box[0], box[1], box[2], box[3]), 1000);
+            }
+            Rect basis = region == null ? null : crop;
+            if (scene == stamp.scene && java.util.Objects.equals(region, stamp.region)
+                    && java.util.Objects.equals(basis, stamp.crop)) return false;
+            stamp = new Stamp(stamp.generation, scene, stamp.revision + 1, basis, region);
+            return true;
+        }
+        boolean observe(CaptureRequest request, TotalCaptureResult result) {
+            if (request == null || request.getTag() != stamp) return false;
+            Rect returned = result.get(CaptureResult.SCALER_CROP_REGION);
+            Float zoom = Build.VERSION.SDK_INT >= 30 ? result.get(CaptureResult.CONTROL_ZOOM_RATIO) : null;
+            Integer rotate = Build.VERSION.SDK_INT >= 31 ? result.get(CaptureResult.SCALER_ROTATE_AND_CROP) : null;
+            boolean mapping = returned != null && !returned.isEmpty() && active.contains(returned)
+                    && (zoom == null ? !zoomReported : Float.compare(zoom, 1f) == 0)
+                    && (rotate == null ? !rotateReported : rotate == CaptureRequest.SCALER_ROTATE_AND_CROP_NONE);
+            crop = mapping ? new Rect(returned) : null;
+            MeteringRectangle[] regions = result.get(CaptureResult.CONTROL_AE_REGIONS);
+            if (regions == null) return false;
+            if (stamp.region == null) {
+                for (MeteringRectangle region : regions) if (region == null || region.getMeteringWeight() != 0) return false;
+                return true;
+            }
+            return mapping && stamp.crop.equals(returned) && regions.length == 1 && stamp.region.equals(regions[0]);
+        }
     }
 
     private void startAutoFocus() {

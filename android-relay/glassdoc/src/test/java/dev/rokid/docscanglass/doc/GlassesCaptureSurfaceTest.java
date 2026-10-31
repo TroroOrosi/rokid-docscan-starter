@@ -26,6 +26,31 @@ import org.robolectric.util.ReflectionHelpers;
 @Config(sdk = 32, manifest = Config.NONE)
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 public class GlassesCaptureSurfaceTest {
+    // AGENT_APPROVED=1: explicit paper proposal stays within the existing small HUD preview.
+    @Test public void paperCornersRotateWithTheWholeLiveImageAndDisappearOnUncertainty() {
+        HudView hud = new HudView(RuntimeEnvironment.getApplication()); hud.layout(0, 0, 1000, 800);
+        GlassesCaptureSurface surface = new GlassesCaptureSurface(RuntimeEnvironment.getApplication(), null, hud,
+                new Handler(Looper.getMainLooper()), (generation, purpose) -> { });
+        surface.showCaptureAiming(1, true, true);
+        ReflectionHelpers.setField(surface, "rotationDegrees", 90);
+        surface.showLivePreview(Bitmap.createBitmap(320, 240, Bitmap.Config.ARGB_8888),
+                new PaperGeometry.Box(8, 6, 48, 36, 64, 48));
+        ShadowLooper.runUiThreadTasksIncludingDelayedTasks();
+        Bitmap live = ReflectionHelpers.getField(hud, "livePreview");
+        assertEquals(240, live.getWidth()); assertEquals(320, live.getHeight());
+        PaperGeometry.Box proposal = ReflectionHelpers.getField(hud, "paperProposal");
+        assertArrayEquals(new int[]{12, 8, 42, 48}, proposal.edges());
+        Bitmap screen = Bitmap.createBitmap(1000, 800, Bitmap.Config.ARGB_8888); hud.draw(new Canvas(screen));
+        // Fit-centred 240x320 image: [752,552,932,792]. Rotated proposal: [797,582,909.5,732].
+        assertTrue(Color.green(screen.getPixel(797, 582)) > 180);
+        assertEquals("a corner guide must leave its side centre clear", 0, Color.green(screen.getPixel(850, 582)));
+        assertEquals("the main field of view stays empty", Color.BLACK, screen.getPixel(500, 400));
+        surface.showLivePreview(Bitmap.createBitmap(320, 240, Bitmap.Config.ARGB_8888), null);
+        ShadowLooper.runUiThreadTasksIncludingDelayedTasks();
+        org.junit.Assert.assertNull(ReflectionHelpers.getField(hud, "paperProposal"));
+        surface.close(); screen.recycle();
+    }
+
     @Test public void anUnresolvedSceneNoticeKeepsTheOriginalAndItsExistingVisibilityAcknowledgement() {
         Bitmap source = Bitmap.createBitmap(80, 120, Bitmap.Config.RGB_565);
         ByteArrayOutputStream encoded = new ByteArrayOutputStream();

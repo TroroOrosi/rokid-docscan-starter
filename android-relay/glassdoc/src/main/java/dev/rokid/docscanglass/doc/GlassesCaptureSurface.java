@@ -84,10 +84,16 @@ final class GlassesCaptureSurface implements CaptureSurface {
     }
 
     void showLivePreview(Bitmap bitmap) {
-        Bitmap rotated = orient(bitmap, rotationDegrees);
+        showLivePreview(bitmap, null); // AGENT_APPROVED=1: same full image, optional comparison corners.
+    }
+
+    void showLivePreview(Bitmap bitmap, PaperGeometry.Box proposal) {
+        int rotation = rotationDegrees;
+        Bitmap rotated = orient(bitmap, rotation);
+        PaperGeometry.Box transformed = proposal == null ? null : proposal.rotate(rotation);
         main.post(() -> {
             if (closed) recycle(rotated);
-            else hud.showLivePreview(rotated);
+            else hud.showLivePreview(rotated, transformed);
         });
     }
 
