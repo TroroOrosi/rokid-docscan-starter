@@ -5,6 +5,7 @@ operator approval. Unit tests use fake device calls; physical acceptance is pend
 """
 
 import argparse
+import asyncio
 import ipaddress
 import json
 import os
@@ -12,6 +13,8 @@ from pathlib import Path
 import re
 import socket
 import subprocess
+import struct
+import sys
 import threading
 import time
 import urllib.error
@@ -26,10 +29,15 @@ MDNS_MAX_CANDIDATES = 4
 MDNS_TIMEOUT_SECONDS = 4.0
 DISCOVERY_TIMEOUT_SECONDS = 12.0
 DISCOVERY_RETRY_SECONDS = 15.0
+MDNS_CHILD_FLAG = "--mdns-unicast-child"
 
 
 class StateUnavailable(RuntimeError):
     """A fixed diagnostic code, never source, a key or a provider URL."""
+
+
+class _DiscoveryProcessUnavailable(StateUnavailable):
+    """A missing, failed or timed-out discovery process; not output overflow."""
 
 
 def fetch_state(server: str, device_id: str | None) -> dict:
@@ -103,11 +111,11 @@ def adb(serial: str, *args: str, timeout: float = 10) -> str:
     return result.stdout.strip()
 
 
-def mdns_services() -> str:
-    """Bound CLI bytes and time; this kills only our short-lived CLI on expiry."""
-    with subprocess.Popen(["adb", "mdns", "services"], stdout=subprocess.PIPE,
+def _mdns_output(command: list[str], timeout: float) -> bytes:
+    """Bound output and kill only this short-lived child, including stuck cleanup."""
+    with subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                           stderr=subprocess.DEVNULL) as process:
-        timer = threading.Timer(MDNS_TIMEOUT_SECONDS, process.kill)
+        timer = threading.Timer(timeout, process.kill)
         timer.daemon = True
         timer.start()
         try:
@@ -115,8 +123,8 @@ def mdns_services() -> str:
             if len(raw) > MDNS_MAX_BYTES:
                 raise StateUnavailable("glasses_discovery_unavailable")
             if process.wait(timeout=1) != 0:
-                raise StateUnavailable("glasses_discovery_unavailable")
-            return raw.decode("utf-8")
+                raise _DiscoveryProcessUnavailable("glasses_discovery_unavailable")
+            return raw
         finally:
             timer.cancel()
             if process.poll() is None:
@@ -124,10 +132,116 @@ def mdns_services() -> str:
                 process.wait(timeout=1)
 
 
+def mdns_services() -> str:
+    return _mdns_output(["adb", "mdns", "services"], MDNS_TIMEOUT_SECONDS).decode("utf-8")
+
+
+def _legacy_endpoint(value: str) -> str | None:
+    match = re.fullmatch(r"([0-9.]+):5555", value)
+    if match:
+        try:
+            address = ipaddress.IPv4Address(match[1])
+            if not (address.is_loopback or address.is_unspecified or address.is_multicast
+                    or address.is_reserved or address.is_link_local):
+                return f"{address}:5555"
+        except ValueError:
+            pass
+    return None
+
+
+def _hotspot_ipv4() -> str:
+    """F-51F's measured AP interface; obtain its current address on every attempt."""
+    import fcntl  # Android/Linux only; do not enumerate restricted interfaces.
+
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as route:
+        raw = fcntl.ioctl(route.fileno(), 0x8915, struct.pack("256s", b"ap0"))
+        if len(raw) < 24 or struct.unpack("H", raw[16:18])[0] != socket.AF_INET:
+            raise StateUnavailable("glasses_discovery_unavailable")
+        address = socket.inet_ntoa(raw[20:24])
+        if not _legacy_endpoint(f"{address}:5555"):
+            raise StateUnavailable("glasses_discovery_unavailable")
+        route.bind((address, 0))
+        return address
+
+
+async def _unicast_services(address: str) -> list[str]:
+    import zeroconf
+    from zeroconf import IPVersion, ServiceStateChange
+    from zeroconf.asyncio import AsyncServiceBrowser, AsyncZeroconf
+
+    if zeroconf.__version__ != "0.151.6":
+        raise StateUnavailable("glasses_discovery_unavailable")
+    service = "_adb._tcp.local."
+    pending = asyncio.Queue(maxsize=64)
+    seen, live, resolved = set(), set(), {}
+    overflow = False
+
+    def changed(zeroconf, service_type, name, state_change):
+        nonlocal overflow
+        if (overflow or service_type != service or not isinstance(name, str)
+            or not name.endswith("." + service) or len(name) > 255):
+            return
+        if state_change is ServiceStateChange.Removed:
+            live.discard(name)
+            resolved.pop(name, None)
+        elif state_change in (ServiceStateChange.Added, ServiceStateChange.Updated):
+            if name not in seen:
+                if len(seen) >= 64:
+                    overflow = True
+                    return
+                else:
+                    seen.add(name)
+                    pending.put_nowait(name)
+            live.add(name)
+
+    client = AsyncZeroconf(interfaces=[address], ip_version=IPVersion.V4Only, unicast=True)
+    browser = None
+    try:
+        browser = AsyncServiceBrowser(client.zeroconf, service, handlers=[changed])
+        deadline = asyncio.get_running_loop().time() + 2.5
+        while not overflow:
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                break
+            try:
+                name = await asyncio.wait_for(pending.get(), remaining)
+            except TimeoutError:
+                break
+            info = await client.async_get_service_info(service, name, timeout=max(1, min(500, int(remaining * 1000))))
+            if info is not None and info.port == 5555 and name in live:
+                resolved[name] = {endpoint for ip in info.parsed_addresses(IPVersion.V4Only)
+                                  if ip != address and (endpoint := _legacy_endpoint(f"{ip}:5555"))}
+            if len(set().union(*resolved.values())) > MDNS_MAX_CANDIDATES:
+                overflow = True
+        if overflow:
+            raise StateUnavailable("glasses_discovery_unavailable")
+        return sorted(set().union(*resolved.values()))
+    finally:
+        if browser is not None:
+            await browser.async_cancel()
+        await client.async_close()  # Parent hard timeout also bounds library cleanup.
+
+
+def unicast_mdns_candidates(timeout: float) -> list[str]:
+    raw = _mdns_output([sys.executable, "-B", str(Path(__file__).resolve()), MDNS_CHILD_FLAG], timeout)
+    try:
+        candidates = json.loads(raw.decode("utf-8"))
+        if (not isinstance(candidates, list) or len(candidates) > MDNS_MAX_CANDIDATES
+            or any(not isinstance(item, str) or _legacy_endpoint(item) != item for item in candidates)
+            or len(set(candidates)) != len(candidates)):
+            raise ValueError("invalid candidates")
+        return candidates
+    except (ValueError, TypeError):
+        raise StateUnavailable("glasses_discovery_unavailable") from None
+
+
 def mdns_target(expected_serial: str) -> str:
     """A legacy advertisement is only a candidate, never authenticated app state."""
     deadline = time.monotonic() + DISCOVERY_TIMEOUT_SECONDS
-    lines = mdns_services().splitlines()
+    try:
+        lines = mdns_services().splitlines()
+    except (_DiscoveryProcessUnavailable, OSError):
+        lines = []
     if len(lines) > 65:
         raise StateUnavailable("glasses_discovery_unavailable")
     candidates = []
@@ -135,20 +249,16 @@ def mdns_target(expected_serial: str) -> str:
         fields = line.split()
         if len(fields) != 3 or fields[1] not in ("_adb._tcp", "_adb._tcp."):
             continue  # TLS pairing/connect, unknown formats and names are not targets.
-        match = re.fullmatch(r"([0-9.]+):5555", fields[2])
-        if not match:
-            continue
-        try:
-            address = ipaddress.IPv4Address(match[1])
-        except ValueError:
-            continue
-        if address.is_loopback or address.is_unspecified or address.is_multicast or address.is_reserved or address.is_link_local:
-            continue
-        candidate = f"{address}:5555"
-        if candidate not in candidates:
+        candidate = _legacy_endpoint(fields[2])
+        if candidate and candidate not in candidates:
             candidates.append(candidate)
     if len(candidates) > MDNS_MAX_CANDIDATES:
         raise StateUnavailable("glasses_discovery_unavailable")
+    if not candidates:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise StateUnavailable("glasses_discovery_unavailable")
+        candidates = unicast_mdns_candidates(min(MDNS_TIMEOUT_SECONDS, remaining))
     for candidate in candidates:
         try:
             # UDP connect selects a local route without sending a packet. Never
@@ -368,6 +478,12 @@ def watch(requested: str, expected_serial: str, interval: float, server: str = S
 
 
 if __name__ == "__main__":
+    if sys.argv[1:] == [MDNS_CHILD_FLAG]:
+        try:
+            print(json.dumps(asyncio.run(_unicast_services(_hotspot_ipv4())), separators=(",", ":")), flush=True)
+        except Exception:
+            sys.exit(2)  # Fixed failure only; no environment, library log or traceback.
+        sys.exit(0)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--serial", required=True,
                         help='Authorized glasses target, or "auto" for the authenticated source IP')

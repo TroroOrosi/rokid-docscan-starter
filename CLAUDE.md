@@ -432,7 +432,10 @@ Only four gestures reach an ordinary app; the rest are system-reserved in
   before device control. If that address is unreachable or state is absent,
   bounded legacy mDNS discovery may identify a candidate for serial-verified
   stopped-app bootstrap only; it must not fabricate authenticated state or a
-  session generation. Forwarded headers must not select the target.
+  session generation. If the native ADB service is unavailable or empty, a bounded
+  python-zeroconf child uses the current hotspot IPv4 directly. The measured
+  F-51F interface is `ap0`; other phones and actual advertisement reception remain
+  unverified. Forwarded headers must not select the target.
 - `ROKID_REAL_MODE=1` must reject placeholder analyzer/solver combinations and
   fail explicitly rather than fall back silently.
 - Never send unsupported media to a provider: OGG/FLAC are not handed to OpenAI

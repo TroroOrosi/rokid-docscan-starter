@@ -245,7 +245,8 @@ from __future__ import annotations
 # 0.63.0: handle owned Work-menu unmounts and seal new jobs to a public family model.
 # 0.64.0: close owned Work menus with real Escape and live selection evidence.
 # 0.65.0: discover serial-verified glasses after hotspot address changes and cold starts.
-APP_VERSION = "0.65.0"
+# 0.65.1: bounded phone-local unicast DNS-SD when the ADB mDNS service is unavailable.
+APP_VERSION = "0.65.1"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.

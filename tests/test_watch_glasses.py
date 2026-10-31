@@ -1,10 +1,14 @@
 """Watcher checks run only against fake HTTP state and fake device calls."""
 
 import subprocess
+import asyncio
 import io
+import json
 import socket
+import struct
 import sys
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -300,7 +304,8 @@ def test_only_a_clean_process_miss_authorizes_the_bootstrap(monkeypatch):
         watch_glasses.app_running("glasses:5555")
 
 
-def _discovery_watch(monkeypatch, states, rows, *, launch_unknown=False, identities=None, ticks=20, spreads=None):
+def _discovery_watch(monkeypatch, states, rows, *, launch_unknown=False, identities=None, ticks=20, spreads=None,
+                     fallback=None, native_code=0):
     """Exercise the watcher through HTTP/ADB/socket boundaries, without devices."""
     observations = iter(states)
     advertisements = iter([rows] * len(states) if isinstance(rows, str) else rows)
@@ -310,11 +315,15 @@ def _discovery_watch(monkeypatch, states, rows, *, launch_unknown=False, identit
 
     class DiscoveryProcess:
         def __init__(self, args, **kwargs):
-            assert args == ["adb", "mdns", "services"]
             assert kwargs["stdout"] == subprocess.PIPE and kwargs["stderr"] == subprocess.DEVNULL
             calls.append(tuple(args))
-            self.stdout = io.BytesIO(next(advertisements).encode())
-            self.returncode = 0
+            if args == ["adb", "mdns", "services"]:
+                raw, self.returncode = next(advertisements).encode(), native_code
+            else:
+                assert args == [sys.executable, "-B", str(watch_glasses.Path(watch_glasses.__file__).resolve()),
+                                "--mdns-unicast-child"]
+                raw, self.returncode = json.dumps(fallback or []).encode(), 0
+            self.stdout = io.BytesIO(raw)
 
         def __enter__(self):
             return self
@@ -478,3 +487,124 @@ def test_mdns_output_and_time_limits_reap_only_the_owned_short_lived_cli(monkeyp
     with pytest.raises(watch_glasses.StateUnavailable, match="discovery_unavailable"):
         watch_glasses.mdns_services()
     assert time.monotonic() - started < 3 and len(children) == 1 and children[0].poll() is not None
+
+
+@pytest.mark.parametrize("native_code", [0, 1])
+def test_native_empty_or_unavailable_uses_child_before_serial_verified_bootstrap(monkeypatch, native_code):
+    calls, selections = _discovery_watch(monkeypatch, [{"devices": []}], "", native_code=native_code,
+                                         fallback=["10.248.83.42:5555"])
+    child = next(c for c in calls if "--mdns-unicast-child" in c)
+    identity = ("adb", "-s", "10.248.83.42:5555", "shell", "getprop", "ro.serialno")
+    launch = next(c for c in calls if "wear_bootstrap" in c)
+    assert calls.index(child) < calls.index(identity) < calls.index(launch)
+    assert selections == [None, None]
+
+
+def test_native_candidate_does_not_start_library_after_serial_mismatch(monkeypatch):
+    calls, _ = _discovery_watch(monkeypatch, [{"devices": []}], "candidate\t_adb._tcp\t10.248.83.42:5555\n",
+                                 fallback=["10.248.83.43:5555"], identities={"10.248.83.42:5555": "other"})
+    assert not any("--mdns-unicast-child" in c or "wear_bootstrap" in c for c in calls)
+
+
+def test_hotspot_address_is_read_again_without_interface_enumeration(monkeypatch):
+    addresses = iter(["10.129.169.180", "10.248.83.1"])
+    bindings = []
+
+    def ioctl(fd, request, data):
+        assert fd == 7 and request == 0x8915 and data == struct.pack("256s", b"ap0")
+        return b"\0" * 16 + struct.pack("H", socket.AF_INET) + b"\0\0" + socket.inet_aton(next(addresses))
+
+    class AP:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def fileno(self):
+            return 7
+
+        def bind(self, address):
+            bindings.append(address)
+
+    monkeypatch.setitem(sys.modules, "fcntl", SimpleNamespace(ioctl=ioctl))
+    monkeypatch.setattr(socket, "socket", lambda *args: AP())
+    monkeypatch.setattr(socket, "if_nameindex", lambda: pytest.fail("restricted enumeration"))
+    assert watch_glasses._hotspot_ipv4() == "10.129.169.180"
+    assert watch_glasses._hotspot_ipv4() == "10.248.83.1"
+    assert bindings == [("10.129.169.180", 0), ("10.248.83.1", 0)]
+
+
+@pytest.mark.parametrize("raw", [b'log\n["10.248.83.42:5555"]', b'[]\nlog', b'{}',
+                                 b'["127.0.0.1:5555"]', b'["10.248.83.42:4444"]',
+                                 b'["10.248.83.42:5555", "10.248.83.42:5555"]',
+                                 json.dumps([f"10.248.83.{n}:5555" for n in range(10, 15)]).encode()])
+def test_unicast_child_rejects_pollution_shape_and_candidate_overflow(monkeypatch, raw):
+    monkeypatch.setattr(watch_glasses, "_mdns_output", lambda *args: raw)
+    with pytest.raises(watch_glasses.StateUnavailable, match="discovery_unavailable"):
+        watch_glasses.unicast_mdns_candidates(4)
+
+
+@pytest.mark.parametrize("script", ["import time;time.sleep(30)",
+                                    "import sys,time;sys.stdout.buffer.write(b'x'*8193);sys.stdout.flush();time.sleep(30)"])
+def test_unicast_timeout_or_overflow_kills_only_owned_library_child(monkeypatch, script):
+    children = []
+
+    def popen(args, **kwargs):
+        assert args == [sys.executable, "-B", str(watch_glasses.Path(watch_glasses.__file__).resolve()),
+                        "--mdns-unicast-child"]
+        child = _REAL_POPEN([sys.executable, "-B", "-c", script], **kwargs)
+        children.append(child)
+        return child
+
+    monkeypatch.setattr(watch_glasses.subprocess, "Popen", popen)
+    started = time.monotonic()
+    with pytest.raises(watch_glasses.StateUnavailable, match="discovery_unavailable"):
+        watch_glasses.unicast_mdns_candidates(0.2)
+    assert time.monotonic() - started < 3 and len(children) == 1 and children[0].poll() is not None
+
+
+@pytest.mark.parametrize("overflow", [None, "candidates", "services"])
+def test_library_explicit_ipv4_unicast_resolves_only_legacy_port_and_excludes_self(monkeypatch, overflow):
+    added, removed = object(), object()
+    events = []
+    state = SimpleNamespace(Added=added, Updated=object(), Removed=removed)
+    version = SimpleNamespace(V4Only=object())
+
+    class Client:
+        def __init__(self, **kwargs):
+            assert kwargs == {"interfaces": ["10.129.169.180"], "ip_version": version.V4Only, "unicast": True}
+            self.zeroconf = self
+
+        async def async_get_service_info(self, service, name, timeout):
+            assert service == "_adb._tcp.local." and 0 < timeout <= 500
+            events.append(name)
+            addresses = ([f"10.129.169.{n}" for n in range(10, 15)] if overflow == "candidates"
+                         else ["10.129.169.180", "10.129.169.42", "127.0.0.1", "::1"])
+            return SimpleNamespace(port=5555 if name.startswith("right") else 4444,
+                                   parsed_addresses=lambda v: addresses)
+
+        async def async_close(self):
+            events.append("closed")
+
+    class Browser:
+        def __init__(self, zc, service, handlers):
+            assert service == "_adb._tcp.local."
+            names = ([f"right{n}._adb._tcp.local." for n in range(65)] if overflow == "services"
+                     else ["wrong._adb._tcp.local.", "right._adb._tcp.local."])
+            for name in names:
+                handlers[0](zeroconf=zc, service_type=service, name=name, state_change=added)
+
+        async def async_cancel(self):
+            events.append("cancelled")
+
+    monkeypatch.setitem(sys.modules, "zeroconf", SimpleNamespace(__version__="0.151.6", IPVersion=version,
+                                                                ServiceStateChange=state))
+    monkeypatch.setitem(sys.modules, "zeroconf.asyncio", SimpleNamespace(AsyncZeroconf=Client, AsyncServiceBrowser=Browser))
+    if overflow:
+        with pytest.raises(watch_glasses.StateUnavailable, match="discovery_unavailable"):
+            asyncio.run(watch_glasses._unicast_services("10.129.169.180"))
+        assert events[-2:] == ["cancelled", "closed"]
+    else:
+        assert asyncio.run(watch_glasses._unicast_services("10.129.169.180")) == ["10.129.169.42:5555"]
+        assert events == ["wrong._adb._tcp.local.", "right._adb._tcp.local.", "cancelled", "closed"]

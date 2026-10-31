@@ -57,6 +57,8 @@ jobs:
         with:
           python-version: "3.12"
       - name: Test the recorded phone API stack (not Android wheel installation)
+        env:
+          SKIP_CYTHON: "1"
         run: |
           python -m pip install -r requirements-phone.txt -c constraints-phone.txt pytest httpx pyyaml
           python -m pytest -q
