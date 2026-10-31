@@ -20,6 +20,7 @@ import time
 import unicodedata
 from urllib.parse import urlsplit
 
+from ..work_model_policy import WorkModelPolicyError, resolve_work_model
 from . import chatgpt_web as chat
 
 
@@ -168,17 +169,41 @@ _CONTROLS_JS = r"""(function inspect(action, requested, requestedLevel, allowUnl
   } else if (action === 'open' && !menus.length && !unlinked.length && triggers.length === 1 && enabled(triggers[0])) {
     triggers[0].click(); acted = true;
   } else if (action === 'close' && menu && triggers.length === 1 && enabled(triggers[0])) {
-    // Keep live node identity across our own close, without reopening or retaining page globals.
-    const owner = {menu, trigger:triggers[0], work:work[0], nodes:[...menu.querySelectorAll(proofSelector)]};
-    triggers[0].click();
-    return new Promise(resolve => {
+    // This snapshot is live immediately BEFORE our close, never a detached selection proof.
+    const owner = {menu, trigger:triggers[0], work:work[0], nodes:[...menu.querySelectorAll(proofSelector)],
+      before:inspect('state', requested, requestedLevel, allowUnlinked), changed:false};
+    const originalNodes = new Set();
+    const walker = document.createTreeWalker(menu, NodeFilter.SHOW_ALL);
+    do { originalNodes.add(walker.currentNode); } while (walker.nextNode());
+    let detached = false;
+    const observeChanges = records => {
+      for (const record of records) {
+        if (record.type === 'childList' && [...record.removedNodes].some(e => e === menu || e.contains(menu))) {
+          detached = true;
+        } else if (!detached && originalNodes.has(record.target)) {
+          owner.changed = true;
+        }
+      }
+    };
+    const observer = new MutationObserver(observeChanges);
+    observer.observe(menu, {subtree:true, childList:true, characterData:true, attributes:true,
+      attributeFilter:['role', 'aria-label', 'aria-checked', 'aria-selected', 'aria-pressed',
+        'aria-valuenow', 'aria-valuemin', 'aria-valuemax', 'aria-valuetext']});
+    // Observe ancestor removal in the same ordered stream; don't watch unrelated subtrees.
+    for (let parent = menu.parentNode; parent; parent = parent.parentNode) observer.observe(parent, {childList:true});
+    return new Promise((resolve, reject) => {
       const deadline = Date.now() + 5000;
       const read = () => {
-        const state = inspect('closed', requested, requestedLevel, allowUnlinked, owner);
-        if (state.closed || !state.owner_valid || Date.now() >= deadline) resolve({...state, acted:true});
-        else setTimeout(read, 50);
+        try {
+          observeChanges(observer.takeRecords());
+          const state = inspect('closed', requested, requestedLevel, allowUnlinked, owner);
+          if (state.closed || !state.close_context_valid || owner.changed || Date.now() >= deadline) {
+            observer.disconnect(); resolve({...state, acted:true});
+          } else setTimeout(read, 50);
+        } catch (error) { observer.disconnect(); reject(error); }
       };
-      read();
+      try { owner.trigger.click(); read(); }
+      catch (error) { observer.disconnect(); reject(error); }
     });
   } else if (action === 'model' && matching.length === 1 && enabled(matching[0])) {
     matching[0].click(); acted = true;
@@ -202,14 +227,26 @@ _CONTROLS_JS = r"""(function inspect(action, requested, requestedLevel, allowUnl
     return prefix && modelKey(prefix[0]) === modelKey(requested) ? text.slice(prefix[0].length) : '';
   }).join(' ') : '';
   const nodes = menu ? [...menu.querySelectorAll(proofSelector)] : [];
-  const ownerValid = !!closedOwner && menu === closedOwner.menu && menu.isConnected &&
-    triggers.length === 1 && triggers[0] === closedOwner.trigger && work[0] === closedOwner.work &&
+  const sameContext = !!closedOwner && triggers.length === 1 && triggers[0] === closedOwner.trigger &&
+    work.length === 1 && work[0] === closedOwner.work && visible(triggers[0]) && visible(work[0]) &&
+    enabled(triggers[0]) && (work[0].getAttribute('aria-pressed') || work[0].getAttribute('aria-selected')) === 'true';
+  const ownerValid = sameContext && menu === closedOwner.menu && menu.isConnected &&
     nodes.length === closedOwner.nodes.length && nodes.every((e, i) => e === closedOwner.nodes[i] && e.isConnected);
+  const foreignPopups = closedOwner ? outermost(all(menuSelector)).filter(e => e !== closedOwner.menu).length : 0;
+  const unmounted = sameContext && !closedOwner.menu.isConnected &&
+    closedOwner.nodes.every(e => !e.isConnected) && triggers[0].getAttribute('aria-expanded') === 'false' &&
+    associated(triggers[0]).length === 0 && ![...document.querySelectorAll(menuSelector)].some(hasModels);
   return {acted, work_count:work.length, work_active:work.length === 1 &&
       (work[0].getAttribute('aria-pressed') || work[0].getAttribute('aria-selected')) === 'true',
     trigger_count:triggers.length, linked, unlinked_count:unlinked.length,
     menu_count:menus.length, model_matches:matching.length, owner_valid:ownerValid,
-    closed:ownerValid && !visible(menu) && unlinked.length === 0,
+    close_context_valid:sameContext && (ownerValid || unmounted),
+    closed:!!closedOwner && !closedOwner.changed && foreignPopups === 0 &&
+      (ownerValid && !visible(menu) || unmounted),
+    close_evidence:unmounted ? 'unmounted_after_live_confirmation' : 'retained_controls_rechecked',
+    before_close:closedOwner ? closedOwner.before : null, close_mutated:!!closedOwner && closedOwner.changed,
+    closed_joint_selection_proven:false,
+    model_labels:radios.map(e => label(e).split('\n')[0]),
     checked, power, slider_count:sliders.length, effort_count:efforts.length, effort_matches:matchingEffort.length,
     effort_checked:efforts.filter(e => e.getAttribute('aria-checked') === 'true' || e.getAttribute('aria-selected') === 'true').map(effortLevel),
     slider_text:sliders.length === 1 ? sliders[0].getAttribute('aria-valuetext') || '' : '',
@@ -254,7 +291,7 @@ def _current_effort(state):
 
 
 def verify_work_model(page, *, select=False, requested_settings=None, sleep=time.sleep, now=time.monotonic) -> str:
-    """Inspect actual radios, power and speed; only preparation changes values."""
+    """Confirm live settings before own close, then its context; only preparation changes values."""
     settings = requested_settings if isinstance(requested_settings, _Settings) else _requested_settings(requested_settings)
     model_key = _model_identity(settings.model)
     allow_unlinked = False
@@ -351,9 +388,67 @@ def verify_work_model(page, *, select=False, requested_settings=None, sleep=time
             if not state["acted"] or not state["closed"]:
                 raise chat.ChatGptWebModelMismatch("Work model popup could not close; nothing sent")
             if verified:
-                require_selected(state)
-                if _current_effort(state) != settings.level or not state[settings.speed]:
+                # An unmounted popup has no current public radios. Validate the fresh
+                # pre-close snapshot plus the close transition, never detached values.
+                confirmed = (state["before_close"] if state["close_evidence"] == "unmounted_after_live_confirmation"
+                             else state)
+                require_selected(confirmed)
+                if _current_effort(confirmed) != settings.level or not confirmed[settings.speed]:
                     raise chat.ChatGptWebModelMismatch("Work settings changed while closing the model popup; nothing sent")
+
+
+def resolve_work_model_settings(page, *, requested_settings, follow_family=False, sleep=time.sleep, now=time.monotonic):
+    """Read public candidates for a NEW job; this does not select a model."""
+    settings = _requested_settings(requested_settings)
+    if type(follow_family) is not bool:
+        raise chat.ChatGptWebModelMismatch("Work model resolution policy is invalid; nothing sent")
+    allow_unlinked = False
+
+    def controls(action="state"):
+        return _controls(page, action, model=settings.model, level=settings.level, allow_unlinked=allow_unlinked)
+
+    def read_until(predicate):
+        deadline = now() + min(5.0, chat.READY_TIMEOUT_S)
+        while True:
+            state = controls()
+            if predicate(state):
+                return state
+            if now() >= deadline:
+                raise chat.ChatGptWebModelMismatch("Work model inventory did not become readable; nothing sent")
+            sleep(0.05)
+
+    state = controls()
+    if state["menu_count"] or state["unlinked_count"] or state["work_count"] != 1:
+        raise chat.ChatGptWebModelMismatch("Work inventory has missing or unowned controls; nothing sent")
+    if not state["work_active"]:
+        if not controls("work")["acted"]:
+            raise chat.ChatGptWebModelMismatch("Work inventory cannot open Work; nothing sent")
+        state = read_until(lambda value: value["work_active"])
+    if state["menu_count"] or state["unlinked_count"]:
+        raise chat.ChatGptWebModelMismatch("Work navigation left an unowned popup; nothing sent")
+    opened, labels = False, None
+    try:
+        if not controls("open")["acted"]:
+            raise chat.ChatGptWebModelMismatch("Work inventory trigger is missing or ambiguous; nothing sent")
+        opened = True
+        allow_unlinked = not state["linked"]
+        state = read_until(lambda value: value["menu_count"] > 0)
+        if state["menu_count"] != 1 or not state["work_active"]:
+            raise chat.ChatGptWebModelMismatch("Work model inventory is ambiguous; nothing sent")
+        labels = state["model_labels"]
+        if not 1 <= len(labels) <= 64 or any(not label or len(label) > 160 for label in labels):
+            raise chat.ChatGptWebModelMismatch("Work model inventory exceeds bounded inspection; nothing sent")
+        try:
+            resolved = resolve_work_model(labels, settings.model, follow_family=follow_family)
+        except WorkModelPolicyError as error:
+            raise chat.ChatGptWebModelMismatch("Work inventory cannot establish a permitted model; nothing sent") from error
+        return {**requested_settings, "model": resolved}
+    finally:
+        if opened and (controls()["menu_count"] == 1 or labels is not None):
+            closed = controls("close")
+            if (not closed["acted"] or not closed["closed"] or labels is not None
+                    and closed["before_close"]["model_labels"] != labels):
+                raise chat.ChatGptWebModelMismatch("Work inventory changed or could not close; nothing sent")
 
 
 _REPLY_STATE_JS = r"""(batchId => {
@@ -573,6 +668,44 @@ class WorkWebClient(chat.ChatGptWebClient):
         self._requested = ContextVar("work_requested_settings", default=None)
         self._inspection = ContextVar("work_capture_inspection", default=None)
         self._observed = threading.local()
+
+    def resolve_new_job_settings(self, *, requested_settings, follow_family=True):
+        """One guarded inventory read; no Send, chat record or selection claim."""
+        from .cdp import CdpError, connect_over_cdp  # noqa: PLC0415
+
+        _requested_settings(requested_settings)
+        if type(follow_family) is not bool:
+            raise chat.ChatGptWebModelMismatch("Work model resolution policy is invalid; nothing sent")
+        if not chat.chatgpt_send_enabled():
+            raise chat.ChatGptWebSendNotAuthorized("ChatGPT browser preparation is not authorized")
+        try:
+            with chat.BrowserGuard() as guard:
+                guard.require_clear()  # A pending/unknown owner cannot be touched.
+                browser = connect_over_cdp(self.endpoint)
+                try:
+                    pages = []
+                    for context in browser.contexts:
+                        for page in context.pages:
+                            url = chat._url_of(page)
+                            try:
+                                parsed = urlsplit(url) if isinstance(url, str) else None
+                            except ValueError:
+                                continue
+                            if parsed and parsed.scheme == "https" and parsed.netloc == "chatgpt.com":
+                                pages.append(page)
+                    if len(pages) != 1:
+                        raise chat.ChatGptWebBrowserUnavailable("a unique existing ChatGPT tab is required for inventory")
+                    self._wait_for_composer(pages[0])
+                    return resolve_work_model_settings(pages[0], requested_settings=requested_settings,
+                                                       follow_family=follow_family)
+                finally:
+                    browser.close()
+        except chat.BrowserBusy as error:
+            raise chat.ChatGptWebBusy("browser is busy; inventory was not read") from error
+        except chat.BrowserGuardError as error:
+            raise chat.ChatGptWebBlocked("another browser send is unconfirmed; inventory was not read") from error
+        except (CdpError, OSError) as error:
+            raise chat.ChatGptWebBrowserUnavailable("local Work inventory is unavailable; nothing sent") from error
 
     def complete(self, *, requested_settings=None, **kwargs):
         # A known diagnostic owns this shared uncertain send. Answers wait for

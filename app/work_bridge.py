@@ -389,18 +389,20 @@ class WorkStore:
                 or any(not isinstance(q, str) or not q for q in question_ids)
                 or len(set(question_ids)) != len(question_ids)):
             raise ValueError("invalid Work instruction or question identities")
-        requested_settings = requested_settings or {"model": "gpt-6.1-sol", "effort": "xhigh", "speed": "fast"}
-        if (set(requested_settings) != {"model", "effort", "speed"}
-                or any(not isinstance(v, str) or not v.strip() for v in requested_settings.values())):
-            raise ValueError("invalid requested model settings")
-        identity = {"session_id": session_id, "device_id": device_id, "generation": generation,
-                    "conversation_key": conversation_key, "stage": stage, "sources": manifest,
-                    "system": system, "prompt": prompt, "question_ids": list(question_ids),
-                    "requested_settings": requested_settings}
-        encoded = _json(identity)
-        job_id, manifest_sha256 = _sha(encoded.encode()), _sha(_json(manifest).encode())
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            prior = conn.execute("SELECT * FROM jobs WHERE session_id=? AND stage='reading'", (session_id,)).fetchone() if stage == "listening" else None
+            requested_settings = requested_settings or (json.loads(prior["spec_json"])["requested_settings"] if prior
+                                                       else {"model": "gpt-6.1-sol", "effort": "xhigh", "speed": "fast"})
+            if (set(requested_settings) != {"model", "effort", "speed"}
+                    or any(not isinstance(v, str) or not v.strip() for v in requested_settings.values())):
+                raise ValueError("invalid requested model settings")
+            identity = {"session_id": session_id, "device_id": device_id, "generation": generation,
+                        "conversation_key": conversation_key, "stage": stage, "sources": manifest,
+                        "system": system, "prompt": prompt, "question_ids": list(question_ids),
+                        "requested_settings": requested_settings}
+            encoded = _json(identity)
+            job_id, manifest_sha256 = _sha(encoded.encode()), _sha(_json(manifest).encode())
             previous = conn.execute("SELECT * FROM jobs WHERE session_id=? AND stage=?", (session_id, stage)).fetchone()
             if previous:
                 if previous["identity_json"] != encoded:
@@ -408,10 +410,11 @@ class WorkStore:
                 return self._public(conn, previous)
             previous_job_id, conversation_id, new_ids = None, None, [p["source_id"] for p in manifest]
             if stage == "listening":
-                prior = conn.execute("SELECT * FROM jobs WHERE session_id=? AND stage='reading'", (session_id,)).fetchone()
                 if not prior or prior["result_json"] is None or prior["conversation_key"] != conversation_key:
                     raise WorkConflict("the completed reading conversation is required first")
                 old = json.loads(prior["spec_json"])
+                if requested_settings != old["requested_settings"]:
+                    raise WorkConflict("the listening model settings differ from the sealed reading job")
                 if ([p for p in manifest if "page_number" in p] != old["sources"]
                         or prior["generation"] != generation or old["device_id"] != device_id):
                     raise WorkConflict("the listening original image identity changed")

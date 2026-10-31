@@ -242,7 +242,8 @@ from __future__ import annotations
 # 0.61.1: preserve complete current Android runtime values across supervised phone services.
 # 0.62.0: connect bounded Work capture diagnostics and exact decoded-video candidates.
 # 0.62.1: retain the unchanged original PNG in bounded capture diagnostic packets.
-APP_VERSION = "0.62.1"
+# 0.63.0: handle owned Work-menu unmounts and seal new jobs to a public family model.
+APP_VERSION = "0.63.0"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.

@@ -1,6 +1,6 @@
 # Rokid DocScan（入試問題を撮影して解答するサーバ）
 
-Status: Current project entrypoint. Updated 2026-10-29.
+Status: Current project entrypoint. Updated 2026-10-31.
 
 撮影後は実画像を3秒表示し、通常は写真に文字を重ねません。確認できるのは**構図のみ**で、無操作で保存しても画質は未検証です。
 保存写真の [原寸点検・補正候補・登録条件評価](docs/capture-quality.md) はPC用部品で、
@@ -128,7 +128,8 @@ risk があります。**利用者の判断で選択した経路です（詳細�
 最新の対象はChatGPTアプリ／WebのWorkです。実利用は常時オンのスマホとテザリング接続グラスだけで、PC・有線・毎回の接続操作を要求しません。
 Work向けの画像jobは、向き補正済みサーバPNGのbytesとSHA・順序を保持し、原画素の検査と答案を同じ入力へ照合します。フォルダ名・画像一覧・データ配信記録を、AIが全画像を読めた証明にしません。
 ブラウザ経路はPNGを再圧縮せずZIPへ格納し、容量と添付数で区切って受領を待ち、最後に全問を解かせます。送信台帳を使って同じ会話へ復帰し、結果不確定の送信を自動で繰り返しません。各原画像のhash・寸法・順序と未校正の判読レビューを照合し、判読不能・不確実な画像に基づく答案は受け付けません。モデルの判読レビューは全文字の正確さの証明ではありません。外部MCPの校正済み品質条件は別に維持します。
-Workのモデル選択は、希望する系統・版数・種類を照合し、GPT接頭辞の省略や空白などの表記差を扱います。Work・Fast・effortは関連するメニューの役割と意味から確認し、送信準備前と送信直前に実選択を照合します。自分で開いたメニューだけを閉じ、その結果も再確認します。閉鎖時にメニュー要素を削除するUIは現在停止する制限があり、実機の閉鎖方式との適合は未確認です。新しいモデル体系や設定を判別できないUIは、原本と送信記録を保持して再評価します。あらゆる将来変更への追従や実機での復旧は未検証です。
+Workのモデル選択は、希望する系統・版数・種類を照合し、GPT接頭辞の省略や空白などの表記差を扱います。Work・Fast・effortは関連するメニューの役割と意味から確認し、送信準備前と送信直前に実選択を照合します。自分で開いたメニューだけを閉じ、その結果も再確認します。閉鎖時にメニュー要素を削除するUIには、閉鎖直前の選択と同じWork画面での閉鎖経過を検査するPC修正を加えました。削除済み要素を現在の選択の証拠としては扱いません。新しいモデル体系や設定を判別できないUIは、原本と送信記録を保持して再評価します。あらゆる将来変更への追従や実機での復旧は未検証です。
+新しいブラウザjobは、公開候補から同じ系統・基準版以上の最高版を数値で比較し、実際の表示名を保存します。`ROKID_WORK_MODEL_POLICY=exact` では指定版に固定します。再開中の冊子と同じチャットへの追加音声は保存済み設定を引き継ぎ、モデル一覧を取り直しません。送信無効時の手動HTTP queueは指定設定を保存する互換経路で、公開画面で確認した設定とは区別します。
 Workの送信後に通信が切れた場合も、同じ処理の原画像・原音・端末世代を確認して、監視から既存の送信結果を回収します。終了した旧Workも一意に照合できる返答だけを読み取り、旧答案の保存・点灯・再送をせず送信記録を整理します。生成中や処理中は次の利用の再試行回数を消費せず待ちます。未知の記録は保持し、過去のChat送信をWorkへ送り直しません。実機での復旧受け入れは未検証です。
 Driveへ置く場合も全件列挙と各原画像取得が必要で、添付20枚制限から外れることと全頁を正しく読めることは別です。[公式MCP Events](https://developers.openai.com/plugins/build/mcp-events)・[Secure MCP Tunnel](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels)は接続候補であり、このアカウント／スマホでの接続・購読・自動復旧は未検証です。
 
@@ -137,7 +138,7 @@ Driveへ置く場合も全件列挙と各原画像取得が必要で、添付20�
 CXR-L の実装境界は
 [CXR-L / Global Hi Rokid integration](docs/cxr-l-integration.md)です。
 
-現在のバージョン: **Server APP 0.62.1 / API 1.39.0 / Android client 0.3.17 / Glasses View 1.38.0 / Solver API 1.9.0**。
+現在のバージョン: **Server APP 0.63.0 / API 1.39.0 / Android client 0.3.17 / Glasses View 1.38.0 / Solver API 1.9.0**。
 版数の正本は `app/version.py` です。他の資料は版数を書かず、この行だけが
 `tests/test_documentation_contract.py` で実装と照合されます。
 Solver API は、記入用解答の全文保持・資料不足の分離を行う `answer_only` モードを含みます。
@@ -573,7 +574,8 @@ uvicorn app.main:app --port 8000
 | `ROKID_TRANSCRIBE_MODEL` | `gpt-4o-transcribe` | openai の書き起こしモデル（gemini は `ROKID_LLM_MODEL`） |
 | `ROKID_SOLVER_TIERS` | （単一） | 二段フォールバック順（例 `openai,local`） |
 | `ROKID_CHATGPT_CDP` | `http://127.0.0.1:9222` | `chatgpt-web` / `chatgpt-work` が接続する Chromium のDevToolsポート。Termux起動ではloopbackへ固定 |
-| `ROKID_WORK_MODEL` / `ROKID_WORK_EFFORT` / `ROKID_WORK_SPEED` | `gpt-6.1-sol` / `xhigh` / `fast` | Workで送信前に確認するモデル・推論量・速度。設定値と公開UIの選択を照合 |
+| `ROKID_WORK_MODEL` / `ROKID_WORK_EFFORT` / `ROKID_WORK_SPEED` | `gpt-6.1-sol` / `xhigh` / `fast` | 新規Work jobの基準モデル・推論量・速度。保存した実設定と送信前の公開UIを照合 |
+| `ROKID_WORK_MODEL_POLICY` | `follow-family` | 新規ブラウザjobで同系統・基準版以上の最高版へ追従。`exact` で指定版固定。既存job・追加音声の保存設定は引継ぐ |
 | `ROKID_KEYMAP` | （なし） | gesture→KeyCode の上書き（JSON、`/v1/settings.input`。既定 KeyCode は旧機由来・未実測） |
 | `ROKID_API_KEY` | （なし） | 設定時に Bearer 認証（発見系は開放） |
 

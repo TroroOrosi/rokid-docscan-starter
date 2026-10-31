@@ -1,16 +1,17 @@
 # Real-device operation
 
-Status: Current venue preparation and exercised phone-relay fallback runbook. Updated 2026-10-30.
+Status: Current venue preparation and exercised phone-relay fallback runbook. Updated 2026-10-31.
 
-## 会場経路の準備（未導入・未受け入れ）
+## 会場経路の準備（スマホサービス復旧済み・会場未受け入れ）
 
 Runs on: スマホのTermux、glassdoc、スマホのテザリングとモバイル通信。PCは開発・監査に使い、会場の実行には不要です。端末操作は対象とコマンドを固定し、本人の承認範囲内で進めます。
 
-専用Termux Chromiumの永続プロファイルとTermux:X11の可視環境を継続使用します。この端末ではヘッドレス時にHTTP403を観測し、可視WorkのSol 6.1・Extra High・Fastで21原PNG入りZIPの送信と返答を確認しました。これは技術fixtureの部品測定で、実紙・グラス表示・再起動後の自動開始の受け入れではありません。既存の手動起動を所有確認して正常に閉じた後、同じプロファイルをサービスへ引き継ぎます。
+専用Termux Chromiumの永続プロファイルとTermux:X11の可視環境を継続使用します。この端末ではヘッドレス時にHTTP403を観測し、可視WorkのSol 6.1・Extra High・Fastで21原PNG入りZIPの送信と返答を確認しました。10/31の限定復旧では、同じプロファイルの4サービス起動と認証付きhealthを確認しています。これは技術fixtureとスマホ部品の測定で、実紙・グラス表示・再起動後の自動開始の受け入れではありません。現在の実行範囲と配布物は[継続記録](../.agents/progress/current.md)と実行reportを参照します。
 
 準備対象はTermuxの `x11-repo`、`chromium`、`termux-x11-nightly`、`termux-services`、`android-tools` と、Termux公式の対応する署名のTermux:X11・Termux:Bootアプリです。導入・設定は別承認です。公式手順は [Chromiumビルド](https://github.com/termux/termux-packages/blob/master/x11-packages/chromium/build.sh)、[Termux:X11](https://github.com/termux/termux-x11)、[Termux:Boot](https://github.com/termux/termux-boot#how-to-use)、[サービス管理](https://github.com/termux/termux-services)を参照します。
 
 環境設定ファイルは権限0600とし、実鍵を表示せず `ROKID_API_KEY`、`ROKID_GLASSES_SERIAL` を保存します。Work経路は `ROKID_SOLVER=chatgpt-work`、`ROKID_WORK_MODEL=gpt-6.1-sol`、`ROKID_WORK_EFFORT=xhigh`、`ROKID_WORK_SPEED=fast` を使用します。旧Chat互換経路は `chatgpt-web` です。起動スクリプトはCDPを `http://127.0.0.1:9222`、X11表示先を専用の `:1` に固定します。プロファイルを変える場合だけ `ROKID_BROWSER_PROFILE` を指定します。
+新規ブラウザjobの `ROKID_WORK_MODEL_POLICY` は既定で `follow-family` です。公開候補から同じ系統・基準版以上の最高版を保存し、`exact` を明示すると指定版へ固定します。既存jobと合同英語の音声追加は、読解時の保存設定を引き継ぎます。モデル一覧の取得だけでは実選択の合格にせず、送信前にもmodel・effort・Fastを照合します。
 準備時の `ROKID_CHATGPT_SEND_ENABLED=0` は未送信DBの自動送信も止めます。ログイン・サービス導入の承認をGPT送信の承認と扱いません。完全な資料と送信対象を特定した別承認の後だけ1へ変えます。
 
 初回セットアップ済みのスマホのソース更新は、確認済みの端末・ブラウザ所有・配布物をGit管理外のmanifestへ固定します。Windows PCで `py -3.12 -X utf8 scripts/phone_update.py --manifest <manifest.json> --manifest-sha256 <確認済みSHA256>` のプレビューを確認します。プレビューは端末に接続せず、引数なしでは必要なmanifest情報だけを表示します。`--inspect-readonly` で更新条件を読み取り、正確な `--execute-approved-source-update` コマンドの承認後だけ更新します。更新処理は配布対象のソースファイルに限り、保存済み写真・答案・Chromiumプロファイル・秘密設定・Git情報を保ちます。

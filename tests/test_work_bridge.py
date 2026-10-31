@@ -485,7 +485,8 @@ def test_native_tile_receipts_require_the_bound_packet_and_every_delivered_image
     assert store.result(job["job_id"]) is None
 
 
-def test_mixed_audio_keeps_the_reading_conversation_and_original_images(tmp_path):
+@pytest.mark.parametrize("model", ["gpt-6.1-sol", "GPT-6.10 Sol"])
+def test_mixed_audio_keeps_the_reading_conversation_and_original_images(tmp_path, model):
     from app.work_bridge import WorkConflict, WorkStore
 
     store = WorkStore(tmp_path, validated_profiles=("fixture",))
@@ -495,14 +496,20 @@ def test_mixed_audio_keeps_the_reading_conversation_and_original_images(tmp_path
                                         "answer_no": [2], "requires_audio": True,
                                         "status": "pending_audio", "answer": "", "diagrams": []})
     first = store.enqueue(session_id=1, conversation_key="session:1", stage="reading",
-                          sources=sources(), system="answer", prompt="reading")
+                          sources=sources(), system="answer", prompt="reading",
+                          requested_settings={"model": model, "effort": "xhigh", "speed": "fast"})
     acquired = [receipt(store, first, "p1")]
     complete(store, first, acquired, reading_result)
     audio = {"source_id": "audio", "mime_type": "audio/wav", "data": b"original recording"}
+    with pytest.raises(WorkConflict, match="settings"):
+        store.enqueue(session_id=1, conversation_key="session:1", stage="listening",
+                      sources=[*sources(), audio], system="answer", prompt="listening", question_ids=["q2"],
+                      requested_settings={"model": "GPT-6.99 Sol", "effort": "xhigh", "speed": "fast"})
     second = store.enqueue(session_id=1, conversation_key="session:1", stage="listening",
                            sources=[*sources(), audio], system="answer", prompt="listening",
                            question_ids=["q2"])
     assert second["previous_job_id"] == first["job_id"]
+    assert second["requested_settings"] == first["requested_settings"]
     assert second["conversation_id"] == "work-chat-1"
     assert second["new_source_ids"] == ["audio"]
     listening_result = answer(label="問2", text="B")

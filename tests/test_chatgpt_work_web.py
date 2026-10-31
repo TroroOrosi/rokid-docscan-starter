@@ -315,7 +315,7 @@ def test_final_verification_preserves_a_changed_setting_instead_of_reselecting(p
     assert _guard_state() == "idle"
 
 
-@pytest.mark.parametrize("change", ["model", "effort", "speed", "work", "remove-menu", "replace-menu", "replace-control"])
+@pytest.mark.parametrize("change", ["model", "effort", "speed", "work", "unproved-removal", "replace-menu", "replace-control"])
 def test_own_popup_closure_must_preserve_live_settings_before_the_submission_boundary(page, change):
     _upload_composer(page)
     changes = {
@@ -326,7 +326,7 @@ def test_own_popup_closure_must_preserve_live_settings_before_the_submission_bou
         "speed": "document.querySelector('[role=menuitemcheckbox]').setAttribute('aria-checked','false');"
                  "document.querySelector('[role=menuitemcheckbox]').setAttribute('aria-label','Enable fast mode');",
         "work": "document.getElementById('work').setAttribute('aria-pressed','false');",
-        "remove-menu": "menu.remove();",
+        "unproved-removal": "menu.remove(); this.removeAttribute('aria-expanded');",
         "replace-menu": "menu.replaceWith(menu.cloneNode(true));",
         "replace-control": "document.getElementById('sol').outerHTML=document.getElementById('sol').outerHTML;",
     }
@@ -360,6 +360,245 @@ def test_asynchronous_owned_closure_only_reads_until_the_same_menu_closes(page):
     assert work.verify_work_model(page) == "GPT-6.1 Sol / Extra High / Fast"
     assert page.evaluate("window.popupClicks") == 2
     assert page.evaluate("document.getElementById('models').hidden") is True
+
+
+def _unmounting_popup(page, *, delayed=False, change=""):
+    """Measured public controls; each open mounts fresh nodes, each close removes them."""
+    _upload_composer(page)
+    page.evaluate("""(() => {
+      const menu=document.getElementById('models');
+      for(const name of ['GPT-6 Astra','GPT-6 Sol','GPT-6 Luna','GPT-5.6 Sol','GPT-5.6 Terra','GPT-5.6 Luna']) {
+        const option=document.createElement('div'); option.setAttribute('role','menuitemradio');
+        option.setAttribute('aria-checked','false'); option.textContent=name; menu.append(option);
+      }
+      menu.insertAdjacentHTML('beforeend','<div role="menuitem"></div><div role="menuitem" aria-label="Power">Power</div>');
+      const template=menu.cloneNode(true); menu.remove();
+      window.popupClicks=0; window.settingClicks=0; window.retainedControls=[];
+      document.querySelector('button[aria-haspopup]').onclick=function(){
+        window.popupClicks++;
+        if(this.getAttribute('aria-expanded')==='false') {
+          const mounted=template.cloneNode(true); mounted.hidden=false; document.body.append(mounted);
+          this.setAttribute('aria-expanded','true');
+          mounted.addEventListener('click',()=>{window.settingClicks++});
+        } else {
+          const owned=document.getElementById('models');
+          const finish=()=>{
+            """ + change + """
+            window.retainedControls=[...owned.querySelectorAll('[role]')];
+            owned.remove(); this.setAttribute('aria-expanded','false');
+            // React teardown may clear text/disable items after they cease being public controls.
+            owned.querySelector('[role=menuitem]').textContent='';
+            owned.querySelector('[aria-label=Power]').setAttribute('aria-disabled','true');
+            owned.querySelector('#default').textContent='';
+          };
+          """ + ("setTimeout(finish,20);" if delayed else "finish();") + """
+        }
+      };
+      return true;
+    })()""")
+
+
+@pytest.mark.parametrize("delayed", [False, True])
+def test_normal_owned_unmount_keeps_last_live_confirmation_separate_from_closed_state(page, monkeypatch, delayed):
+    _unmounting_popup(page, delayed=delayed)
+    original, closed = work._controls, []
+
+    def inspect(*args, **kwargs):
+        result = original(*args, **kwargs)
+        if len(args) > 1 and args[1] == "close":
+            closed.append(result)
+        return result
+
+    monkeypatch.setattr(work, "_controls", inspect)
+    assert work.verify_work_model(page) == "GPT-6.1 Sol / Extra High / Fast"
+    assert closed[-1]["close_evidence"] == "unmounted_after_live_confirmation"
+    assert closed[-1]["closed_joint_selection_proven"] is False
+    assert closed[-1]["before_close"]["checked"] == ["6.1:sol"]
+    assert closed[-1]["checked"] == []  # Detached values are never current selection evidence.
+    assert page.evaluate("document.querySelector('[role=menu]')===null") is True
+    assert page.evaluate("window.retainedControls.length===14 && window.retainedControls.every(e=>!e.isConnected)") is True
+    assert page.evaluate("[window.popupClicks,window.settingClicks,window.sent]") == [2, 0, 0]
+
+
+def test_preparation_and_final_submit_both_allow_normal_unmount_without_extra_send(page):
+    _unmounting_popup(page)
+    reply = json.loads(_booklet(work.WorkWebClient(), _VenueTab(page), lambda: [_payload()]))
+    assert reply["questions"][0]["answer"] == "4"
+    assert page.evaluate("[window.popupClicks,window.settingClicks,window.sent]") == [4, 0, 1]
+    assert page.evaluate("window.uploaded") == ["originals.zip"] and _guard_state() == "idle"
+    assert page.evaluate("document.querySelector('[role=menu]')===null") is True
+
+
+@pytest.mark.parametrize("change", [
+    "owned.querySelector('#sol').setAttribute('aria-checked','false'); owned.querySelector('#terra').setAttribute('aria-checked','true');",
+    "owned.querySelector('#effort').textContent='Medium'; owned.querySelector('[role=slider]').setAttribute('aria-valuenow','1');",
+    "owned.querySelector('[role=menuitemcheckbox]').setAttribute('aria-checked','false');",
+    "document.getElementById('work').setAttribute('aria-pressed','false');",
+    "this.replaceWith(this.cloneNode(true));",
+    "document.getElementById('work').replaceWith(document.getElementById('work').cloneNode(true));",
+    "owned.querySelector('#sol').outerHTML=owned.querySelector('#sol').outerHTML;",
+    "const replacement=owned.cloneNode(true); replacement.hidden=true; owned.after(replacement);",
+    "document.body.insertAdjacentHTML('beforeend','<div role=menu>Foreign choices</div>');",
+    "owned.querySelector('#sol').setAttribute('aria-checked','false'); owned.querySelector('#sol').setAttribute('aria-checked','true');",
+])
+def test_owned_unmount_cannot_hide_a_selection_change_or_replaced_owner(page, change):
+    _unmounting_popup(page, change=change)
+    page.evaluate("document.getElementById('send').disabled=false; true")
+    reached = []
+
+    def before_submit():
+        reached.append(True)
+        raise AssertionError("changed closing controls reached the send journal")
+
+    with pytest.raises(chatgpt_web.ChatGptWebModelMismatch):
+        work.WorkWebClient()._send_and_read(page,
+            'Local fixture\nTransfer receipt:\n{"batch_id":"unmount-boundary"}', composer=None,
+            expect=("questions",), before_submit=before_submit,
+            on_chat_url=lambda value: None, on_model=lambda value: None)
+    assert reached == [] and page.evaluate("window.sent") == 0
+
+
+def _public_model_inventory(page):
+    _controls(page)
+    page.evaluate("""(() => { document.getElementById('work').setAttribute('aria-pressed','true');
+      window.settingClicks=0;
+      const menu=document.getElementById('models'); menu.addEventListener('click',()=>{window.settingClicks++});
+      for(const name of ['GPT-6.2 Sol','GPT-6.10 Sol','GPT-6.20 Terra']) {
+        const radio=document.createElement('div'); radio.setAttribute('role','menuitemradio');
+        radio.setAttribute('aria-checked','false'); radio.textContent=name; menu.append(radio);
+      }; return true; })()""")
+
+
+@pytest.mark.parametrize("follow", [False, True])
+def test_public_inventory_resolves_actual_label_without_claiming_or_changing_selection(page, follow):
+    _public_model_inventory(page)
+    settings = work.resolve_work_model_settings(page,
+        requested_settings={"model": "gpt-6.1-sol", "effort": "xhigh", "speed": "fast"}, follow_family=follow)
+    assert settings == {"model": "GPT-6.10 Sol" if follow else "GPT 6.1 Sol", "effort": "xhigh", "speed": "fast"}
+    assert page.evaluate("document.getElementById('default').getAttribute('aria-checked')") == "true"
+    assert page.evaluate("document.querySelector('[role=slider]').getAttribute('aria-valuenow')") == "0"
+    assert page.evaluate("window.settingClicks") == 0
+    assert page.evaluate("document.getElementById('models').hidden") is True
+
+
+def test_public_inventory_accepts_own_normal_unmount_without_detached_selection_proof(page):
+    _unmounting_popup(page)
+    result = work.resolve_work_model_settings(page,
+        requested_settings={"model": "GPT-6.1 Sol", "effort": "xhigh", "speed": "fast"}, follow_family=True)
+    assert result["model"] == "GPT 6.1 Sol"
+    assert page.evaluate("[window.popupClicks,window.settingClicks,window.sent]") == [2, 0, 0]
+    assert page.evaluate("document.querySelector('[role=menu]')===null") is True
+
+
+@pytest.mark.parametrize("change", ["unknown", "duplicate", "no-family", "unowned"])
+def test_unreadable_or_ambiguous_inventory_cannot_resolve_or_change_settings(page, change):
+    _public_model_inventory(page)
+    changes = {
+        "unknown": "document.querySelector('[role=menuitemradio]').textContent='Unidentified model';",
+        "duplicate": "const extra=document.querySelectorAll('[role=menuitemradio]')[4]; extra.after(extra.cloneNode(true));",
+        "no-family": "document.querySelectorAll('[role=menuitemradio]').forEach(e=>{if(/sol/i.test(e.textContent))e.remove()});",
+        "unowned": "document.getElementById('models').hidden=false;",
+    }
+    page.evaluate("(() => {" + changes[change] + " return true; })()")
+    with pytest.raises(chatgpt_web.ChatGptWebModelMismatch):
+        work.resolve_work_model_settings(page,
+            requested_settings={"model": "GPT-6.1 Sol", "effort": "xhigh", "speed": "fast"}, follow_family=True)
+    assert page.evaluate("window.settingClicks") == 0
+
+
+def test_inventory_changed_after_resolution_cannot_be_sealed(page, monkeypatch):
+    _public_model_inventory(page)
+    original = work._controls
+
+    def change_before_close(*args, **kwargs):
+        if len(args) > 1 and args[1] == "close":
+            page.evaluate("document.getElementById('sol').textContent='GPT-6.99 Sol'; true")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(work, "_controls", change_before_close)
+    with pytest.raises(chatgpt_web.ChatGptWebModelMismatch):
+        work.resolve_work_model_settings(page,
+            requested_settings={"model": "GPT-6.1 Sol", "effort": "xhigh", "speed": "fast"}, follow_family=True)
+
+
+def test_new_job_inventory_uses_shared_writer_without_journal_send_or_navigation(page, monkeypatch, tmp_path):
+    from app.browser_guard import BrowserBusy, BrowserGuard
+    from app.solvers import cdp
+
+    _upload_composer(page)
+    tab = _VenueTab(page)
+    closed, connected = [], []
+
+    class Browser:
+        contexts = [_Context(tab)]
+
+        def close(self):
+            closed.append(True)
+
+    def connect(endpoint):
+        with pytest.raises(BrowserBusy), BrowserGuard():
+            pytest.fail("inventory must already own the shared writer")
+        connected.append(endpoint)
+        return Browser()
+
+    monkeypatch.setattr(cdp, "connect_over_cdp", connect)
+    monkeypatch.setenv("ROKID_CHATGPT_SEND_ENABLED", "1")
+    resolved = work.WorkWebClient().resolve_new_job_settings(
+        requested_settings={"model": "GPT-6.1 Sol", "effort": "xhigh", "speed": "fast"}, follow_family=True)
+    assert resolved == {"model": "GPT 6.1 Sol", "effort": "xhigh", "speed": "fast"}
+    assert len(connected) == len(closed) == 1 and tab.navigations == []
+    assert page.evaluate("window.sent") == 0 and page.evaluate("window.uploaded") == []
+    assert not (tmp_path / "browser-state" / "submission.json").exists()
+
+
+@pytest.mark.parametrize("barrier", ["busy", "uncertain"])
+def test_new_job_inventory_cannot_touch_browser_or_pending_journal_across_writer_barriers(monkeypatch, tmp_path, barrier):
+    from contextlib import nullcontext
+    from app.browser_guard import BrowserGuard
+    from app.solvers import cdp
+
+    monkeypatch.setenv("ROKID_CHATGPT_SEND_ENABLED", "1")
+    monkeypatch.setattr(cdp, "connect_over_cdp", lambda endpoint: pytest.fail("barrier must precede browser access"))
+    journal = tmp_path / "browser-state" / "submission.json"
+    if barrier == "uncertain":
+        with BrowserGuard() as guard:
+            guard.mark_sending("a" * 64)
+    before = (journal.read_bytes(), journal.stat().st_mtime_ns) if journal.exists() else None
+    with BrowserGuard() if barrier == "busy" else nullcontext():
+        with pytest.raises(chatgpt_web.ChatGptWebBusy if barrier == "busy" else chatgpt_web.ChatGptWebBlocked):
+            work.WorkWebClient().resolve_new_job_settings(
+                requested_settings={"model": "GPT-6.1 Sol", "effort": "xhigh", "speed": "fast"}, follow_family=True)
+    after = (journal.read_bytes(), journal.stat().st_mtime_ns) if journal.exists() else None
+    assert before == after
+
+
+@pytest.mark.parametrize("urls", [[], ["https://chatgpt.com/", "https://chatgpt.com/c/old"],
+                                   ["https://chatgpt.com.evil/"], [None], [{"url": "https://chatgpt.com/"}],
+                                   ["https://[bad"]])
+def test_new_job_inventory_does_not_create_navigate_or_adopt_an_unbound_tab(monkeypatch, urls):
+    from app.solvers import cdp
+
+    class Tab:
+        def __init__(self, url):
+            self.url = url
+
+        def __getattr__(self, key):
+            pytest.fail("an unbound tab must not be read, navigated or clicked")
+
+    class Browser:
+        closed = False
+        contexts = [type("Context", (), {"pages": [Tab(url) for url in urls]})()]
+
+        def close(self):
+            self.closed = True
+
+    browser = Browser()
+    monkeypatch.setenv("ROKID_CHATGPT_SEND_ENABLED", "1")
+    monkeypatch.setattr(cdp, "connect_over_cdp", lambda endpoint: browser)
+    with pytest.raises(chatgpt_web.ChatGptWebBrowserUnavailable):
+        work.WorkWebClient().resolve_new_job_settings(
+            requested_settings={"model": "GPT-6.1 Sol", "effort": "xhigh", "speed": "fast"}, follow_family=True)
+    assert browser.closed
 
 
 @pytest.mark.parametrize("remove", [False, True])

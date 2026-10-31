@@ -1,6 +1,6 @@
 # rokid-docscan-starter development guide
 
-Status: Current engineering contract. Updated 2026-10-30.
+Status: Current engineering contract. Updated 2026-10-31.
 
 **Start at `.agents/progress/current.md`.** It lists the operator's decisions,
 the verified state and the next steps. Do not re-ask what it settles. Keep the
@@ -115,8 +115,8 @@ is now the intended topology and is still unexercised.
 
 | Route | Status |
 |---|---|
-| `ROKID_SOLVER=chatgpt-web` | **Current primary.** Drives the operator's own signed-in ChatGPT web session over CDP. |
-| `ROKID_SOLVER=chatgpt-work` | The phone-local browser consumer sends unchanged PNG ZIPs, verifies source receipts and returns staged answers. Work technical fixtures passed on the signed-in phone. Source, a separate SEND0 environment and four services are prepared; successful service handover, production invocation and venue acceptance remain unverified. |
+| `ROKID_SOLVER=chatgpt-web` | The existing Chat route drives the operator's own signed-in ChatGPT web session over CDP. |
+| `ROKID_SOLVER=chatgpt-work` | The requested phone-local Work consumer sends unchanged PNG ZIPs, verifies source receipts and returns staged answers. Work technical fixtures passed on the signed-in phone. The four services were restored with SEND0 and authenticated health checks. A public menu observation confirmed Sol / Extra High / Fast and normal menu unmount; production invocation, restart and venue acceptance remain unverified. |
 | On-phone local model (F-51F, llama.cpp) | **Not the route.** The operator chose chatgpt-web on 2026-09-14. Its measurements are kept as evidence in `docs/hardware-measurements.md` §E; no further work is scheduled on it. |
 | `openai` / `gemini` / `claude` API keys | Supported and config-only. The per-question routes can fall back through `ROKID_SOLVER_TIERS`; the background booklet route uses `ROKID_SOLVER` alone and has no fallback tier. |
 | Local OpenAI-compatible HTTP (`app/llm_http.py`) | Reaches an on-phone `llama-server` without the openai SDK. |
@@ -491,11 +491,13 @@ Then, on a device:
 Server:
 
 ```bash
-py -3.12 -m pytest -q
+py -3.12 -m pytest -q tests
 py -3.12 -m ruff check .
 ```
 
 `python` on this machine is 3.14 and has no pytest. Use `py -3.12`.
+The explicit `tests` directory excludes ignored device reports and frozen audit
+fixtures; run those fixtures separately with their recorded command.
 
 Android relay:
 

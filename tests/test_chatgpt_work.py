@@ -41,6 +41,11 @@ class BrowserReply:
         self.after = None
         self.fail_once = False
 
+    def resolve_new_job_settings(self, *, requested_settings, follow_family):
+        from app.work_model_policy import resolve_work_model
+        return {**requested_settings, "model": resolve_work_model(
+            ["gpt-6.1-sol"], requested_settings["model"], follow_family=follow_family)}
+
     def complete_json(self, **options):
         if self.before:
             self.before()
@@ -106,6 +111,7 @@ def test_local_work_browser_returns_original_bound_answers_and_restart_reads_the
     class NoBrowser:
         def complete_json(self, **options):
             pytest.fail("a sealed job must not send again")
+    monkeypatch.setenv("ROKID_WORK_MODEL", "GPT-6.99 Sol")
     resumed = ChatGptWorkSolver(client=NoBrowser()).answer_all(question=question)
     assert resumed[0][1].answer == "4"
     assert len(fake.calls) == 1
@@ -147,7 +153,10 @@ def test_canonical_pages_remain_byte_exact_in_bounded_deterministic_zips_after_i
     with pytest.raises(ChatGptWebUncertain):
         ChatGptWorkSolver(client=fake).answer_all(question=question)
     assert len(configured_work_store().list_jobs()["jobs"]) == 1
+    monkeypatch.setenv("ROKID_WORK_MODEL", "GPT-6.99 Sol")
+    fake.resolve_new_job_settings = lambda **options: pytest.fail("an uncertain job must retain its model")
     assert ChatGptWorkSolver(client=fake).answer_all(question=question)[0][1].answer == "4"
+    assert fake.calls[0]["requested_settings"] == fake.calls[1]["requested_settings"]
     first, second = [call["files"] for call in fake.calls]
     assert first == second
     entries = {}
@@ -206,6 +215,8 @@ def test_mixed_work_stages_keep_the_same_browser_chat_and_send_only_original_aud
     assert reading[0][1].answer == "4" and reading[1][1] is None
     monkeypatch.setattr(main, "get_solver", lambda *args: ChatGptWorkSolver(client=fake))
     main._solve_deck_in_background(session, doc)
+    monkeypatch.setenv("ROKID_WORK_MODEL", "GPT-6.99 Sol")
+    fake.resolve_new_job_settings = lambda **options: pytest.fail("listening must inherit the reading model")
     audio = tmp_path / "original.wav"
     with wave.open(str(audio), "wb") as output:
         output.setparams((1, 2, 16000, 0, "NONE", "not compressed"))
@@ -219,6 +230,7 @@ def test_mixed_work_stages_keep_the_same_browser_chat_and_send_only_original_aud
     wait_for(lambda: len(fake.calls) == 2)
     wait_for(lambda: session not in main._background_solves)
     assert fake.calls[0]["chat_key"] == fake.calls[1]["chat_key"]
+    assert fake.calls[0]["requested_settings"] == fake.calls[1]["requested_settings"] == first["requested_settings"]
     assert [file["mimeType"] for file in fake.calls[1]["files"]] == ["audio/wav"]
     with main.db.connect() as conn:
         recorded_path = conn.execute("SELECT audio_path FROM exam_sessions WHERE id=?", (session,)).fetchone()[0]
@@ -285,3 +297,215 @@ def test_original_audio_replacement_cannot_send_or_seal_listening_answers(client
     pending = next(job for job in configured_work_store().list_jobs()["jobs"] if job["stage"] == "listening")
     assert configured_work_store().result(pending["job_id"]) is None
     assert configured_work_store().result(reading_job["job_id"])["questions"][0]["answer"] == "4"
+
+
+@pytest.mark.parametrize("policy", [None, "exact"])
+def test_new_browser_job_seals_actual_inventory_model_and_reuses_it_after_restart(tmp_path, monkeypatch, policy):
+    from app.solvers import chatgpt_work
+    from app.solvers.base import Question
+    from app.work_bridge import WorkPending, WorkStore
+
+    store = WorkStore(tmp_path)
+    original = tmp_path / "page.png"
+    original.write_bytes(picture())
+    question = Question(chat_key="session:1", document_pages=[{"page_number": 1, "image_path": str(original)}])
+    monkeypatch.setattr(chatgpt_work, "configured_work_store", lambda: store)
+    monkeypatch.setattr(chatgpt_work, "work_binding", lambda session_id: ("fixture-glasses", 7))
+    monkeypatch.setenv("ROKID_CHATGPT_SEND_ENABLED", "1")
+    monkeypatch.delenv("ROKID_WORK_MODEL", raising=False)
+    if policy:
+        monkeypatch.setenv("ROKID_WORK_MODEL_POLICY", policy)
+    else:
+        monkeypatch.delenv("ROKID_WORK_MODEL_POLICY", raising=False)
+
+    def pending(*args):
+        raise WorkPending("fixture pauses after durable enqueue, before Send")
+    monkeypatch.setattr(chatgpt_work.ChatGptWorkSolver, "_consume_browser", pending)
+
+    class Inventory:
+        calls = []
+
+        def resolve_new_job_settings(self, *, requested_settings, follow_family):
+            self.calls.append((requested_settings, follow_family))
+            return {**requested_settings, "model": "GPT-6.10 Sol" if follow_family else "GPT 6.1 Sol"}
+
+    inventory = Inventory()
+    with pytest.raises(WorkPending):
+        chatgpt_work.ChatGptWorkSolver(client=inventory).answer_all(question=question)
+    first = store.session_jobs(1)[0]
+    assert first["requested_settings"] == {"model": "GPT-6.10 Sol" if policy is None else "GPT 6.1 Sol",
+                                          "effort": "xhigh", "speed": "fast"}
+    assert inventory.calls == [({"model": "gpt-6.1-sol", "effort": "xhigh", "speed": "fast"}, policy is None)]
+    raw, _ = store.read_source(first["job_id"], "p1")
+    assert raw == original.read_bytes()
+    monkeypatch.setenv("ROKID_WORK_MODEL", "GPT-6.99 Sol")
+    monkeypatch.setenv("ROKID_WORK_MODEL_POLICY", "invalid-after-seal")
+    with pytest.raises(WorkPending):
+        chatgpt_work.ChatGptWorkSolver(client=inventory).answer_all(question=question)
+    assert store.session_jobs(1)[0]["job_id"] == first["job_id"] and len(inventory.calls) == 1
+
+
+@pytest.mark.parametrize("failure", ["unavailable", "authentication", "missing-resolver", "bad-policy"])
+def test_new_browser_inventory_failure_preserves_original_and_allows_later_resume(tmp_path, monkeypatch, failure):
+    from app.solvers import chatgpt_work
+    from app.solvers.base import Question
+    from app.solvers.chatgpt_web import ChatGptWebAuthenticationRequired, ChatGptWebBrowserUnavailable, ChatGptWebModelMismatch
+    from app.work_bridge import WorkPending, WorkStore
+
+    store = WorkStore(tmp_path)
+    original = tmp_path / "page.png"
+    original.write_bytes(picture())
+    before = original.read_bytes(), original.stat().st_mtime_ns
+    question = Question(chat_key="session:1", document_pages=[{"page_number": 1, "image_path": str(original)}])
+    monkeypatch.setattr(chatgpt_work, "configured_work_store", lambda: store)
+    monkeypatch.setattr(chatgpt_work, "work_binding", lambda session_id: ("fixture-glasses", 7))
+    monkeypatch.setenv("ROKID_CHATGPT_SEND_ENABLED", "1")
+    monkeypatch.delenv("ROKID_WORK_MODEL_POLICY", raising=False)
+    error = {"unavailable": ChatGptWebBrowserUnavailable, "authentication": ChatGptWebAuthenticationRequired,
+             "missing-resolver": ChatGptWebModelMismatch, "bad-policy": ChatGptWebModelMismatch}[failure]
+
+    class Inventory:
+        unavailable = True
+
+        def resolve_new_job_settings(self, *, requested_settings, follow_family):
+            if self.unavailable:
+                raise error("fixture browser is unavailable or unauthenticated")
+            return {**requested_settings, "model": "GPT-6.10 Sol"}
+
+    def pending(*args):
+        raise WorkPending("fixture pauses before Send")
+    monkeypatch.setattr(chatgpt_work.ChatGptWorkSolver, "_consume_browser", pending)
+    inventory = Inventory()
+    if failure == "bad-policy":
+        monkeypatch.setenv("ROKID_WORK_MODEL_POLICY", "unreviewed-policy")
+    with pytest.raises(error):
+        chatgpt_work.ChatGptWorkSolver(client=object() if failure == "missing-resolver" else inventory).answer_all(question=question)
+    assert store.session_jobs(1) == []
+    assert (original.read_bytes(), original.stat().st_mtime_ns) == before
+    inventory.unavailable = False
+    monkeypatch.delenv("ROKID_WORK_MODEL_POLICY", raising=False)
+    with pytest.raises(WorkPending):
+        chatgpt_work.ChatGptWorkSolver(client=inventory).answer_all(question=question)
+    assert store.session_jobs(1)[0]["requested_settings"]["model"] == "GPT-6.10 Sol"
+
+
+@pytest.mark.parametrize("send_enabled", ["0", "1"])
+def test_orphan_listening_preserves_originals_and_rejects_before_model_inventory(tmp_path, monkeypatch, send_enabled):
+    from app.solvers import chatgpt_work
+    from app.solvers.base import Question
+    from app.work_bridge import WorkConflict, WorkStore
+
+    store = WorkStore(tmp_path)
+    original = tmp_path / "page.png"
+    original.write_bytes(picture())
+    audio = tmp_path / "original.wav"
+    with wave.open(str(audio), "wb") as output:
+        output.setparams((1, 2, 16000, 0, "NONE", "not compressed"))
+        output.writeframes(b"\x01\x00" * 64)
+    before = [(path.read_bytes(), path.stat().st_mtime_ns) for path in (original, audio)]
+    monkeypatch.setattr(chatgpt_work, "configured_work_store", lambda: store)
+    monkeypatch.setattr(chatgpt_work, "work_binding", lambda session_id: ("fixture-glasses", 7))
+    monkeypatch.setenv("ROKID_CHATGPT_SEND_ENABLED", send_enabled)
+    monkeypatch.setenv("ROKID_WORK_MODEL_POLICY", "follow-family")
+    calls = []
+
+    class NoInventory:
+        def resolve_new_job_settings(self, **options):
+            calls.append(options)
+            raise AssertionError("listening cannot inspect or resolve a new model")
+
+    question = Question(chat_key="session:1", booklet_stage="listening", audio_path=str(audio),
+        document_pages=[{"page_number": 1, "image_path": str(original)}],
+        booklet_questions=[{"question_id": "q1"}])
+    with pytest.raises(WorkConflict):
+        chatgpt_work.ChatGptWorkSolver(client=NoInventory()).answer_all(question=question)
+    assert calls == [] and store.session_jobs(1) == []
+    assert [(path.read_bytes(), path.stat().st_mtime_ns) for path in (original, audio)] == before
+
+
+def test_new_manual_work_queue_keeps_explicit_settings_without_reading_inventory(tmp_path, monkeypatch):
+    from app.solvers import chatgpt_work
+    from app.solvers.base import Question
+    from app.work_bridge import WorkPending, WorkStore
+
+    store = WorkStore(tmp_path)
+    original = tmp_path / "page.png"
+    original.write_bytes(picture())
+    monkeypatch.setattr(chatgpt_work, "configured_work_store", lambda: store)
+    monkeypatch.setattr(chatgpt_work, "work_binding", lambda session_id: ("fixture-glasses", 7))
+    monkeypatch.setenv("ROKID_CHATGPT_SEND_ENABLED", "0")
+    monkeypatch.setenv("ROKID_WORK_MODEL", "GPT-6.2 Sol")
+    question = Question(chat_key="session:1", document_pages=[{"page_number": 1, "image_path": str(original)}])
+    with pytest.raises(WorkPending):
+        chatgpt_work.ChatGptWorkSolver(client=object()).answer_all(question=question)
+    job = store.session_jobs(1)[0]
+    assert job["requested_settings"]["model"] == "GPT-6.2 Sol" and job["model_selection_verified"] is False
+    assert store.read_source(job["job_id"], "p1")[0] == original.read_bytes()
+
+
+@pytest.mark.parametrize("late_final_ready", [False, True])
+def test_new_job_retires_only_expired_owner_read_only_before_inventory_and_can_resume(client, monkeypatch, late_final_ready):
+    from app import main
+    from app.solvers import chatgpt_work
+    from app.solvers.chatgpt_work_web import WorkWebClient
+    from app.solvers.chatgpt_web import ChatGptWebBlocked
+    from app.work_bridge import WorkPending, configured_work_store
+
+    _, old_session, old = api_session(client, generation=7)
+    wait_for(lambda: old_session not in main._background_solves)
+    doc = client.post("/v1/documents", json={"title": "new model resolution"}).json()["document_id"]
+    assert client.post(f"/v1/documents/{doc}/pages", data={"page_index": 0},
+        files={"image": ("page.png", picture(), "image/png")}).status_code == 201
+    assert client.post(f"/v1/documents/{doc}/finalize").status_code == 200
+    session = client.post("/v1/exam-sessions", json={"document_id": doc, "mode": "study"}).json()["session_id"]
+    assert client.post("/v1/glasses/state", json={"device_id": "fixture-glasses", "session_id": session,
+        "generation": 8, "sequence": 1, "phase": "analyzing"}).json()["accepted"]
+    question = question_for(doc, session)
+    original = Path(question.document_pages[0]["image_path"])
+    before = original.read_bytes(), original.stat().st_mtime_ns
+    activity = []
+
+    class OldOwner(WorkWebClient):
+        retired = False
+        ready = late_final_ready
+
+        def pending_work_owner(self):
+            return None if self.retired else {"chat_key": chatgpt_work._browser_chat_key(old), "stage": old["stage"]}
+
+        def retire_expired_batch(self, *, chat_key, booklet_stage, expired_guard):
+            assert chat_key == chatgpt_work._browser_chat_key(old) and booklet_stage == old["stage"]
+            with expired_guard():
+                activity.append("read-old-final")
+            if not self.ready:
+                return False
+            with expired_guard():
+                self.retired = True  # Only a matching late body retires its own journal in production.
+            return True
+
+        def resolve_new_job_settings(self, *, requested_settings, follow_family):
+            if not self.retired:
+                raise ChatGptWebBlocked("old uncertain send must be recovered before inventory")
+            activity.append("resolve-new")
+            return {**requested_settings, "model": "GPT-6.10 Sol"}
+
+    def pending(*args):
+        raise WorkPending("fixture pauses the NEW job before Send")
+    monkeypatch.setattr(chatgpt_work.ChatGptWorkSolver, "_consume_browser", pending)
+    monkeypatch.setenv("ROKID_CHATGPT_SEND_ENABLED", "1")
+    old_owner = OldOwner()
+    solver = chatgpt_work.ChatGptWorkSolver(client=old_owner)
+    monkeypatch.setattr(main, "get_solver", lambda *args: solver)
+    assert client.post(f"/v1/exam-sessions/{session}/finalize-reading?solve=background").status_code == 200
+    wait_for(lambda: session not in main._background_solves)
+    store = configured_work_store()
+    if not late_final_ready:
+        assert store.session_jobs(session) == [] and activity == ["read-old-final"]
+        old_owner.ready = True
+        with main.db.connect() as conn:
+            row = conn.execute("SELECT * FROM exam_sessions WHERE id=?", (session,)).fetchone()
+            assert row["status"] == "reviewing" and main._resume_answers(conn, row)
+        wait_for(lambda: session not in main._background_solves)
+    assert store.session_jobs(session)[0]["requested_settings"]["model"] == "GPT-6.10 Sol"
+    assert activity[-2:] == ["read-old-final", "resolve-new"]
+    assert store.result(old["job_id"]) is None and store.get(old["job_id"])["requested_settings"] == old["requested_settings"]
+    assert (original.read_bytes(), original.stat().st_mtime_ns) == before
