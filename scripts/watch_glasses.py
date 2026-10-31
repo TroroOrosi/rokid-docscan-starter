@@ -205,7 +205,7 @@ async def _unicast_services(address: str) -> list[str]:
                 break
             try:
                 name = await asyncio.wait_for(pending.get(), remaining)
-            except TimeoutError:
+            except asyncio.TimeoutError:
                 break
             info = await client.async_get_service_info(service, name, timeout=max(1, min(500, int(remaining * 1000))))
             if info is not None and info.port == 5555 and name in live:
