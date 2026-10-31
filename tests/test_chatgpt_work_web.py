@@ -84,12 +84,19 @@ def _controls(page, *, selected="Default", power=0, fast=False):
           onclick="document.querySelectorAll('[role=menuitemradio]').forEach(e=>e.setAttribute('aria-checked',String(e===this)))">GPT-6.1 Terra</div>
         <div role="menuitem" aria-label="Select model">GPT-6.1 Sol <span id="effort">{['Light', 'Medium', 'High', 'Extra High'][power]}</span></div>
         <span role="slider" tabindex="0" aria-valuenow="{power}" aria-valuemin="0" aria-valuemax="5"
-          onkeydown="let n=Number(this.getAttribute('aria-valuenow'))+(event.key==='ArrowRight'?1:-1);
+          onkeydown="if(!['ArrowRight','ArrowLeft'].includes(event.key))return;
+          let n=Number(this.getAttribute('aria-valuenow'))+(event.key==='ArrowRight'?1:-1);
           this.setAttribute('aria-valuenow',n); document.getElementById('effort').textContent=['Light','Medium','High','Extra High'][n] || 'Other';"></span>
         <div role="menuitemcheckbox" aria-label="{'Enable standard mode' if fast else 'Enable fast mode'}"
           aria-checked="{str(fast).lower()}" onclick="let checked=this.getAttribute('aria-checked')!=='true';
           this.setAttribute('aria-checked',String(checked)); this.setAttribute('aria-label',checked?'Enable standard mode':'Enable fast mode')">More usage</div>
       </div>''') + "; true")
+    page.evaluate("""document.onkeydown=event=>{
+      if(event.key==='Escape') {
+        const menu=document.getElementById('models'); if(menu) menu.hidden=true;
+        document.querySelector('button[aria-haspopup]')?.setAttribute('aria-expanded','false');
+      }
+    };true""")
 
 
 def test_preparation_selects_the_actual_radio_power_and_fast_controls(page):
@@ -221,6 +228,7 @@ def test_effort_uses_meaning_after_slider_numbers_and_labels_change(page):
       slider.setAttribute('aria-valuemin','10'); slider.setAttribute('aria-valuemax','14');
       slider.setAttribute('aria-valuenow','11'); slider.setAttribute('aria-valuetext','中');
       slider.onkeydown=function(event){
+        if(!['ArrowRight','ArrowLeft'].includes(event.key))return;
         const n=Number(this.getAttribute('aria-valuenow'))+(event.key==='ArrowRight'?1:-1);
         this.setAttribute('aria-valuenow',String(n));
         this.setAttribute('aria-valuetext',({10:'軽量',11:'中',12:'高',13:'極高',14:'最大'})[n]);
@@ -260,6 +268,7 @@ def test_a_power_preset_changing_model_stops_before_another_adjustment_or_upload
     page.evaluate("""(() => {const slider=document.querySelector('[role=slider]');
       slider.setAttribute('aria-valuenow','0'); document.getElementById('effort').textContent='Light';
       slider.onkeydown=function(event){
+        if(!['ArrowRight','ArrowLeft'].includes(event.key))return;
         const n=Number(this.getAttribute('aria-valuenow'))+1; this.setAttribute('aria-valuenow',String(n));
         document.getElementById('effort').textContent=['Light','Medium','High','Extra High'][n];
         document.getElementById('sol').setAttribute('aria-checked','false');
@@ -294,7 +303,8 @@ def test_unproved_controls_or_popup_closure_never_submit(page, fault):
     elif fault == "missing-effort":
         page.evaluate("document.querySelector('[role=slider]').remove(); true")
     else:
-        page.evaluate("document.querySelector('button[aria-controls]').onclick=function(){document.getElementById('models').hidden=false}; true")
+        page.evaluate("document.querySelector('button[aria-controls]').onclick=function(){document.getElementById('models').hidden=false};"
+                      "document.onkeydown=()=>{};true")
     with pytest.raises(chatgpt_web.ChatGptWebModelMismatch):
         _booklet(work.WorkWebClient(), _VenueTab(page), lambda: [_payload()])
     assert page.evaluate("window.sent") == 0 and page.evaluate("window.uploaded") == []
@@ -330,11 +340,13 @@ def test_own_popup_closure_must_preserve_live_settings_before_the_submission_bou
         "replace-menu": "menu.replaceWith(menu.cloneNode(true));",
         "replace-control": "document.getElementById('sol').outerHTML=document.getElementById('sol').outerHTML;",
     }
-    page.evaluate("""window.popupClicks=0; document.getElementById('send').disabled=false;
-      document.querySelector('button[aria-haspopup]').onclick=function(){
-        window.popupClicks++; const menu=document.getElementById('models'); menu.hidden=!menu.hidden;
-        if(menu.hidden){""" + changes[change] + """}
-      }; true""")
+    page.evaluate("""(() => {window.popupClicks=0; document.getElementById('send').disabled=false;
+      const trigger=document.querySelector('button[aria-haspopup]');
+      trigger.onclick=function(){window.popupClicks++;document.getElementById('models').hidden=false};
+      document.onkeydown=event=>{if(event.key==='Escape') (function(){
+        const menu=document.getElementById('models'); menu.hidden=true;
+        """ + changes[change] + """
+      }).call(trigger)}; return true;})()""")
     reached = []
 
     def before_submit():
@@ -347,7 +359,7 @@ def test_own_popup_closure_must_preserve_live_settings_before_the_submission_bou
             expect=("questions",), before_submit=before_submit,
             on_chat_url=lambda value: None, on_model=lambda value: None)
     assert reached == [] and page.evaluate("window.sent") == 0
-    assert page.evaluate("window.popupClicks") == 2
+    assert page.evaluate("window.popupClicks") == 1
 
 
 def test_asynchronous_owned_closure_only_reads_until_the_same_menu_closes(page):
@@ -356,9 +368,9 @@ def test_asynchronous_owned_closure_only_reads_until_the_same_menu_closes(page):
       window.popupClicks=0; document.querySelector('button[aria-haspopup]').onclick=function(){
         window.popupClicks++; const menu=document.getElementById('models');
         if(menu.hidden) menu.hidden=false; else setTimeout(()=>{menu.hidden=true},20);
-      }; true""")
+      }; document.onkeydown=event=>{if(event.key==='Escape')setTimeout(()=>{document.getElementById('models').hidden=true},20)};true""")
     assert work.verify_work_model(page) == "GPT-6.1 Sol / Extra High / Fast"
-    assert page.evaluate("window.popupClicks") == 2
+    assert page.evaluate("window.popupClicks") == 1
     assert page.evaluate("document.getElementById('models').hidden") is True
 
 
@@ -374,28 +386,162 @@ def _unmounting_popup(page, *, delayed=False, change=""):
       menu.insertAdjacentHTML('beforeend','<div role="menuitem"></div><div role="menuitem" aria-label="Power">Power</div>');
       const template=menu.cloneNode(true); menu.remove();
       window.popupClicks=0; window.settingClicks=0; window.retainedControls=[];
-      document.querySelector('button[aria-haspopup]').onclick=function(){
+      const trigger=document.querySelector('button[aria-haspopup]');
+      const close=function(){
+        const owned=document.getElementById('models');
+        const finish=()=>{
+          """ + change + """
+          window.retainedControls=[...owned.querySelectorAll('[role]')];
+          owned.remove(); this.setAttribute('aria-expanded','false');
+          // React teardown may clear text/disable items after controls cease being public.
+          owned.querySelector('[role=menuitem]').textContent='';
+          owned.querySelector('[aria-label=Power]').setAttribute('aria-disabled','true');
+          owned.querySelector('#default').textContent='';
+        };
+        """ + ("setTimeout(finish,20);" if delayed else "finish();") + """
+      };
+      trigger.onclick=function(){
         window.popupClicks++;
         if(this.getAttribute('aria-expanded')==='false') {
           const mounted=template.cloneNode(true); mounted.hidden=false; document.body.append(mounted);
           this.setAttribute('aria-expanded','true');
           mounted.addEventListener('click',()=>{window.settingClicks++});
-        } else {
-          const owned=document.getElementById('models');
-          const finish=()=>{
-            """ + change + """
-            window.retainedControls=[...owned.querySelectorAll('[role]')];
-            owned.remove(); this.setAttribute('aria-expanded','false');
-            // React teardown may clear text/disable items after they cease being public controls.
-            owned.querySelector('[role=menuitem]').textContent='';
-            owned.querySelector('[aria-label=Power]').setAttribute('aria-disabled','true');
-            owned.querySelector('#default').textContent='';
-          };
-          """ + ("setTimeout(finish,20);" if delayed else "finish();") + """
+        } else close.call(this);
+      };
+      document.onkeydown=event=>{if(event.key==='Escape')close.call(trigger)};
+      return true;
+    })()""")
+
+
+def _escape_only_popup(page):
+    """Real key events close the measured kind of popup; clicking its trigger does not."""
+    _unmounting_popup(page)
+    page.evaluate("""(() => {
+      const trigger=document.querySelector('button[aria-haspopup]');
+      const previous=trigger.onclick;
+      window.ignoredTriggerClose=0; window.escapeClosures=0;
+      trigger.onclick=function(){
+        if(this.getAttribute('aria-expanded')==='false') previous.call(this);
+        else window.ignoredTriggerClose++;
+      };
+      document.onkeydown=event=>{
+        if(event.key==='Escape' && trigger.getAttribute('aria-expanded')==='true') {
+          window.escapeClosures++;
+          document.getElementById('models')?.remove();
+          trigger.setAttribute('aria-expanded','false');
         }
       };
       return true;
     })()""")
+
+
+def test_actual_escape_closes_owned_work_popup_when_trigger_click_does_not(page):
+    _escape_only_popup(page)
+    assert work.verify_work_model(page, select=False) == "GPT-6.1 Sol / Extra High / Fast"
+    assert page.evaluate("[window.popupClicks,window.ignoredTriggerClose,window.escapeClosures,window.settingClicks,window.sent]") == [1, 0, 1, 0, 0]
+    assert page.evaluate("document.querySelector('[role=menu]')===null") is True
+
+
+@pytest.mark.parametrize("fault", ["foreign", "joint", "replacement"])
+def test_live_owner_and_joint_changes_before_real_escape_do_not_dispatch(page, fault):
+    _escape_only_popup(page)
+    changes = {
+        "foreign": "document.body.insertAdjacentHTML('beforeend','<div role=menu>Other</div>');true",
+        "joint": "document.querySelector('[role=slider]').setAttribute('aria-valuenow','2');true",
+        "replacement": "document.querySelector('button[aria-haspopup]').replaceWith(document.querySelector('button[aria-haspopup]').cloneNode(true));true",
+    }
+
+    class BeforeEscape:
+        def send(self, method, params=None):
+            if method == "Runtime.callFunctionOn" and params.get("functionDeclaration") == "function(){return this.prepare();}":
+                page.evaluate(changes[fault])
+            return page.send(method, params)
+
+        def __getattr__(self, name):
+            return getattr(page, name)
+
+    with pytest.raises(chatgpt_web.ChatGptWebModelMismatch):
+        work.verify_work_model(BeforeEscape())
+    assert page.evaluate("[window.escapeClosures,window.settingClicks,window.sent]") == [0, 0, 0]
+
+
+@pytest.mark.parametrize("primary_failed", [False, True])
+def test_unknown_key_failure_releases_close_observer_and_preserves_primary_error(page, monkeypatch, primary_failed):
+    from app.solvers.cdp import CdpError
+
+    _escape_only_popup(page)
+    primary = chatgpt_web.ChatGptWebModelMismatch("intentional primary verification failure")
+    secondary = CdpError("intentional unknown input failure")
+    calls = []
+    if primary_failed:
+        def fail(_state):
+            raise primary
+        monkeypatch.setattr(work, "_current_effort", fail)
+
+    class KeyFailure:
+        class keyboard:
+            @staticmethod
+            def press(key):
+                calls.append(key)
+                raise secondary
+
+        def send(self, method, params=None):
+            reply = page.send(method, params)
+            if method == "Runtime.releaseObject":
+                calls.append("release")
+            elif method == "Runtime.callFunctionOn" and params.get("functionDeclaration") == "function(){return this.cancel();}":
+                assert reply["result"]["value"] is True
+                calls.append("cancel")
+            return reply
+
+        def __getattr__(self, name):
+            return getattr(page, name)
+
+    with pytest.raises(type(primary if primary_failed else secondary)) as raised:
+        work.verify_work_model(KeyFailure())
+    assert raised.value is (primary if primary_failed else secondary)
+    assert calls == ["Escape", "cancel", "release"]
+    assert page.evaluate("[window.escapeClosures,window.settingClicks,window.sent]") == [0, 0, 0]
+
+
+@pytest.mark.parametrize("expiry", ["timer", "mutation"])
+def test_remote_close_owner_expires_without_client_cancel_or_read(page, expiry):
+    _escape_only_popup(page)
+    work._controls(page, "open")
+    page.evaluate("""(() => {
+      const OriginalObserver=window.MutationObserver, originalTimeout=window.setTimeout, originalNow=Date.now;
+      window.closeLeaseCallbacks=[]; window.activeCloseObservers=0;
+      window.MutationObserver=class extends OriginalObserver {
+        constructor(callback){super(callback);this.active=true;window.activeCloseObservers++}
+        disconnect(){if(this.active){this.active=false;window.activeCloseObservers--}super.disconnect()}
+      };
+      window.setTimeout=(callback,delay,...args)=>{
+        if(delay===5000)window.closeLeaseCallbacks.push(callback);
+        return originalTimeout(callback,delay,...args);
+      };
+      window.advanceCloseClock=()=>{Date.now=()=>originalNow()+6000};
+      window.restoreCloseClock=()=>{window.MutationObserver=OriginalObserver;window.setTimeout=originalTimeout;Date.now=originalNow};
+      return true;
+    })()""")
+    handle = page.send("Runtime.evaluate", {"expression": work._CONTROLS_JS + '("close","GPT-6.1 Sol",3,false)',
+        "returnByValue": False})["result"]["objectId"]
+    try:
+        assert page.evaluate("window.activeCloseObservers") == 1
+        page.evaluate("window.advanceCloseClock();true")
+        if expiry == "timer":
+            assert page.evaluate("window.closeLeaseCallbacks.length") == 1
+            page.evaluate("window.closeLeaseCallbacks[0]();true")
+        else:
+            page.evaluate("document.getElementById('sol').setAttribute('aria-checked','false');true")
+        assert page.evaluate("window.activeCloseObservers") == 0
+        page.keyboard.press("Escape")
+        result = page.send("Runtime.callFunctionOn", {"objectId": handle,
+            "functionDeclaration": "function(){return this.read();}", "awaitPromise": True, "returnByValue": True})
+        assert result["result"]["value"]["closed"] is False
+    finally:
+        page.send("Runtime.callFunctionOn", {"objectId": handle, "functionDeclaration": "function(){return this.cancel();}"})
+        page.send("Runtime.releaseObject", {"objectId": handle})
+        page.evaluate("window.restoreCloseClock();true")
 
 
 @pytest.mark.parametrize("delayed", [False, True])
@@ -417,14 +563,14 @@ def test_normal_owned_unmount_keeps_last_live_confirmation_separate_from_closed_
     assert closed[-1]["checked"] == []  # Detached values are never current selection evidence.
     assert page.evaluate("document.querySelector('[role=menu]')===null") is True
     assert page.evaluate("window.retainedControls.length===14 && window.retainedControls.every(e=>!e.isConnected)") is True
-    assert page.evaluate("[window.popupClicks,window.settingClicks,window.sent]") == [2, 0, 0]
+    assert page.evaluate("[window.popupClicks,window.settingClicks,window.sent]") == [1, 0, 0]
 
 
 def test_preparation_and_final_submit_both_allow_normal_unmount_without_extra_send(page):
     _unmounting_popup(page)
     reply = json.loads(_booklet(work.WorkWebClient(), _VenueTab(page), lambda: [_payload()]))
     assert reply["questions"][0]["answer"] == "4"
-    assert page.evaluate("[window.popupClicks,window.settingClicks,window.sent]") == [4, 0, 1]
+    assert page.evaluate("[window.popupClicks,window.settingClicks,window.sent]") == [2, 0, 1]
     assert page.evaluate("window.uploaded") == ["originals.zip"] and _guard_state() == "idle"
     assert page.evaluate("document.querySelector('[role=menu]')===null") is True
 
@@ -486,7 +632,7 @@ def test_public_inventory_accepts_own_normal_unmount_without_detached_selection_
     result = work.resolve_work_model_settings(page,
         requested_settings={"model": "GPT-6.1 Sol", "effort": "xhigh", "speed": "fast"}, follow_family=True)
     assert result["model"] == "GPT 6.1 Sol"
-    assert page.evaluate("[window.popupClicks,window.settingClicks,window.sent]") == [2, 0, 0]
+    assert page.evaluate("[window.popupClicks,window.settingClicks,window.sent]") == [1, 0, 0]
     assert page.evaluate("document.querySelector('[role=menu]')===null") is True
 
 

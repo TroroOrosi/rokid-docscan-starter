@@ -176,7 +176,13 @@ _CONTROLS_JS = r"""(function inspect(action, requested, requestedLevel, allowUnl
     const walker = document.createTreeWalker(menu, NodeFilter.SHOW_ALL);
     do { originalNodes.add(walker.currentNode); } while (walker.nextNode());
     let detached = false;
+    const deadline = Date.now() + 5000;
+    let observer, cleanupTimer, stopped = false;
+    const disconnect = () => {
+      if (!stopped) { observer.disconnect(); clearTimeout(cleanupTimer); stopped = true; }
+    };
     const observeChanges = records => {
+      if (Date.now() >= deadline) { disconnect(); return; }
       for (const record of records) {
         if (record.type === 'childList' && [...record.removedNodes].some(e => e === menu || e.contains(menu))) {
           detached = true;
@@ -185,26 +191,42 @@ _CONTROLS_JS = r"""(function inspect(action, requested, requestedLevel, allowUnl
         }
       }
     };
-    const observer = new MutationObserver(observeChanges);
+    observer = new MutationObserver(observeChanges);
     observer.observe(menu, {subtree:true, childList:true, characterData:true, attributes:true,
       attributeFilter:['role', 'aria-label', 'aria-checked', 'aria-selected', 'aria-pressed',
         'aria-valuenow', 'aria-valuemin', 'aria-valuemax', 'aria-valuetext']});
     // Observe ancestor removal in the same ordered stream; don't watch unrelated subtrees.
     for (let parent = menu.parentNode; parent; parent = parent.parentNode) observer.observe(parent, {childList:true});
-    return new Promise((resolve, reject) => {
-      const deadline = Date.now() + 5000;
-      const read = () => {
-        try {
-          observeChanges(observer.takeRecords());
-          const state = inspect('closed', requested, requestedLevel, allowUnlinked, owner);
-          if (state.closed || !state.close_context_valid || owner.changed || Date.now() >= deadline) {
-            observer.disconnect(); resolve({...state, acted:true});
-          } else setTimeout(read, 50);
-        } catch (error) { observer.disconnect(); reject(error); }
-      };
-      try { owner.trigger.click(); read(); }
-      catch (error) { observer.disconnect(); reject(error); }
-    });
+    cleanupTimer = setTimeout(disconnect, 5000);
+    const current = () => {
+      observeChanges(observer.takeRecords());
+      const state = inspect('closed', requested, requestedLevel, allowUnlinked, owner);
+      return stopped ? {...state, closed:false, close_context_valid:false} : state;
+    };
+    // The remote object keeps this exact owner and observer alive across the
+    // real CDP Escape. No document/window state or synthetic key event is used.
+    return {
+      prepare() {
+        const state = current();
+        return {...state, ready:!stopped && !owner.changed && state.owner_valid &&
+          state.close_context_valid && !state.closed && state.foreign_popup_count === 0 && visible(menu)};
+      },
+      read() {
+        return new Promise((resolve, reject) => {
+          const read = () => {
+            try {
+              const state = current();
+              if (stopped || state.closed || !state.close_context_valid || owner.changed ||
+                  state.foreign_popup_count || Date.now() >= deadline) {
+                disconnect(); resolve({...state, acted:true});
+              } else setTimeout(read, 50);
+            } catch (error) { disconnect(); reject(error); }
+          };
+          read();
+        });
+      },
+      cancel() { disconnect(); return true; }
+    };
   } else if (action === 'model' && matching.length === 1 && enabled(matching[0])) {
     matching[0].click(); acted = true;
   } else if (action === 'effort' && selected && matchingEffort.length === 1 && enabled(matchingEffort[0])) {
@@ -240,7 +262,7 @@ _CONTROLS_JS = r"""(function inspect(action, requested, requestedLevel, allowUnl
       (work[0].getAttribute('aria-pressed') || work[0].getAttribute('aria-selected')) === 'true',
     trigger_count:triggers.length, linked, unlinked_count:unlinked.length,
     menu_count:menus.length, model_matches:matching.length, owner_valid:ownerValid,
-    close_context_valid:sameContext && (ownerValid || unmounted),
+     close_context_valid:sameContext && (ownerValid || unmounted), foreign_popup_count:foreignPopups,
     closed:!!closedOwner && !closedOwner.changed && foreignPopups === 0 &&
       (ownerValid && !visible(menu) || unmounted),
     close_evidence:unmounted ? 'unmounted_after_live_confirmation' : 'retained_controls_rechecked',
@@ -256,8 +278,54 @@ _CONTROLS_JS = r"""(function inspect(action, requested, requestedLevel, allowUnl
 })""".replace("__MODEL_PATTERN__", json.dumps(_MODEL_PATTERN)).replace("__EFFORT_LEVELS__", json.dumps(_EFFORT_LEVELS))
 
 
-def _controls(page, action="state", *, model=MODEL, level=3, allow_unlinked=False):
-    return page.evaluate(f"{_CONTROLS_JS}({json.dumps(action)}, {json.dumps(model)}, {level}, {json.dumps(allow_unlinked)})")
+def _controls(page, action="state", *, model=MODEL, level=3, allow_unlinked=False, close_check=None):
+    expression = f"{_CONTROLS_JS}({json.dumps(action)}, {json.dumps(model)}, {level}, {json.dumps(allow_unlinked)})"
+    if action == "close":
+        return _close_controls(page, expression, close_check=close_check)
+    return page.evaluate(expression)
+
+
+def _close_controls(page, expression, *, close_check):
+    """Keep the owner/observer remote through one real Escape and bounded readback."""
+    object_id = None
+
+    def call(function, *, promise=False):
+        reply = page.send("Runtime.callFunctionOn", {"objectId": object_id, "functionDeclaration": function,
+            "returnByValue": True, "awaitPromise": promise})
+        value = reply.get("result", {}).get("value")
+        if reply.get("exceptionDetails") or not isinstance(value, dict):
+            raise chat.ChatGptWebModelMismatch("Work close proof is unreadable; nothing sent")
+        return value
+
+    try:
+        handle = page.send("Runtime.evaluate", {"expression": expression, "returnByValue": False, "awaitPromise": False})
+        object_id = handle.get("result", {}).get("objectId")
+        if handle.get("exceptionDetails") or not isinstance(object_id, str) or not object_id:
+            raise chat.ChatGptWebModelMismatch("Work close owner is unavailable; nothing sent")
+        prepared = call("function(){return this.prepare();}")
+        if prepared.get("ready") is not True:
+            raise chat.ChatGptWebModelMismatch("Work popup ownership changed before closing; nothing sent")
+        if close_check is not None:
+            close_check(prepared["before_close"])
+        page.keyboard.press("Escape")
+        return call("function(){return this.read();}", promise=True)
+    finally:
+        failed = sys.exc_info()[0] is not None
+        cleanup_error = None
+        if isinstance(object_id, str) and object_id:
+            try:
+                reply = page.send("Runtime.callFunctionOn", {"objectId": object_id,
+                    "functionDeclaration": "function(){return this.cancel();}", "returnByValue": True})
+                if reply.get("exceptionDetails") or reply.get("result", {}).get("value") is not True:
+                    raise chat.ChatGptWebModelMismatch("Work close observer cleanup is unconfirmed; nothing sent")
+            except Exception as error:
+                cleanup_error = error
+            try:
+                page.send("Runtime.releaseObject", {"objectId": object_id})
+            except Exception as error:
+                cleanup_error = cleanup_error or error
+            if cleanup_error is not None and not failed:
+                raise cleanup_error
 
 
 def _effort_levels(text):
@@ -295,9 +363,11 @@ def verify_work_model(page, *, select=False, requested_settings=None, sleep=time
     settings = requested_settings if isinstance(requested_settings, _Settings) else _requested_settings(requested_settings)
     model_key = _model_identity(settings.model)
     allow_unlinked = False
+    opened = verified = False
 
     def controls(action="state"):
-        return _controls(page, action, model=settings.model, level=settings.level, allow_unlinked=allow_unlinked)
+        return _controls(page, action, model=settings.model, level=settings.level, allow_unlinked=allow_unlinked,
+                         close_check=require_joint if action == "close" and verified else None)
 
     def read_until(predicate):
         deadline = now() + min(5.0, chat.READY_TIMEOUT_S)
@@ -314,6 +384,11 @@ def verify_work_model(page, *, select=False, requested_settings=None, sleep=time
                 or not state["work_active"]):
             raise chat.ChatGptWebModelMismatch("Work controls no longer select the requested model")
 
+    def require_joint(state):
+        require_selected(state)
+        if _current_effort(state) != settings.level or not state[settings.speed]:
+            raise chat.ChatGptWebModelMismatch("Work settings changed before closing; nothing sent")
+
     state = controls()
     if state["menu_count"] or state["unlinked_count"]:
         raise chat.ChatGptWebModelMismatch("an existing Work popup is not owned by this verification")
@@ -323,7 +398,6 @@ def verify_work_model(page, *, select=False, requested_settings=None, sleep=time
         if not select or not controls("work")["acted"]:
             raise chat.ChatGptWebModelMismatch("Work is not selected")
         state = read_until(lambda s: s["work_active"])
-    opened = verified = False
     try:
         if state["menu_count"] or state["unlinked_count"]:
             raise chat.ChatGptWebModelMismatch("Work mode navigation left an unowned popup open")
@@ -383,18 +457,23 @@ def verify_work_model(page, *, select=False, requested_settings=None, sleep=time
         verified = True
         return settings.model + " / " + settings.effort + " / " + settings.speed.title()
     finally:
-        if opened and (controls()["menu_count"] == 1 or verified):
-            state = controls("close")
-            if not state["acted"] or not state["closed"]:
-                raise chat.ChatGptWebModelMismatch("Work model popup could not close; nothing sent")
-            if verified:
-                # An unmounted popup has no current public radios. Validate the fresh
-                # pre-close snapshot plus the close transition, never detached values.
-                confirmed = (state["before_close"] if state["close_evidence"] == "unmounted_after_live_confirmation"
-                             else state)
-                require_selected(confirmed)
-                if _current_effort(confirmed) != settings.level or not confirmed[settings.speed]:
-                    raise chat.ChatGptWebModelMismatch("Work settings changed while closing the model popup; nothing sent")
+        primary_error = sys.exc_info()[1]
+        try:
+            if opened and (controls()["menu_count"] == 1 or verified):
+                state = controls("close")
+                if not state["acted"] or not state["closed"]:
+                    raise chat.ChatGptWebModelMismatch("Work model popup could not close; nothing sent")
+                if verified:
+                    # An unmounted popup has no current public radios. Validate the fresh
+                    # pre-close snapshot plus the close transition, never detached values.
+                    confirmed = (state["before_close"] if state["close_evidence"] == "unmounted_after_live_confirmation"
+                                 else state)
+                    require_selected(confirmed)
+                    if _current_effort(confirmed) != settings.level or not confirmed[settings.speed]:
+                        raise chat.ChatGptWebModelMismatch("Work settings changed while closing the model popup; nothing sent")
+        except Exception:
+            if primary_error is None:
+                raise
 
 
 def resolve_work_model_settings(page, *, requested_settings, follow_family=False, sleep=time.sleep, now=time.monotonic):
