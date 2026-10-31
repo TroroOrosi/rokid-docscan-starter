@@ -486,7 +486,8 @@ def test_one_message_names_and_answers_the_whole_deck(client, monkeypatch):
     bundle = _background_finalize_and_wait(
         client, session_id, lambda items: all(i["status"] == "ready" for i in items))
     assert [(i["group_label"], i["question_label"], i["answer"]) for i in bundle["items"]] == [
-        ("第1問", "問1", "④"), ("第1問", "問2", "②"), ("第2問", "問1", "③")]
+        ("第1問", "問1", "④"), ("第1問", "問2", "②"), ("第2問", "問1", "③"),
+        ("第2問", "P1 項目4（印字なし）", "x")]
     assert len(asked) == 1 and per_question == []
     assert asked[0].chat_key == f"session:{session_id}" and asked[0].document_pages
 
@@ -898,9 +899,8 @@ def _numbered(*rows):
     return [(item, answer_sheet_result(item, subject=None, extras={})) for item in items]
 
 
-def test_a_skipped_answer_number_is_shown_instead_of_dropped(client, monkeypatch):
-    """9/30: a 小問 missing from the one reply left no row at all, so a booklet
-    the model had mostly dropped still finalized as a complete deck."""
+def test_nonconsecutive_printed_answer_numbers_do_not_invent_questions(client, monkeypatch):
+    """The returned printed numbers do not prove that intermediate slots exist."""
     from app import main
 
     _, session_id = _session_with(client, ["問1 2+2を求めよ。"])
@@ -915,9 +915,7 @@ def test_a_skipped_answer_number_is_shown_instead_of_dropped(client, monkeypatch
     assert [(i["question_label"], i["status"], i["answer"] or i["issue"], i.get("answer_no"))
             for i in bundle["items"]] == [
         ("問1", "ready", "④", [101]),
-        ("問4", "ready", "②", [104]),
-        ("解答番号102", "failed", "この解答番号の答えが返答にありません", None),
-        ("解答番号103", "failed", "この解答番号の答えが返答にありません", None)]
+        ("問4", "ready", "②", [104])]
 
 
 def test_a_booklet_that_prints_no_answer_numbers_keeps_its_deck(client, monkeypatch):
@@ -935,3 +933,99 @@ def test_a_booklet_that_prints_no_answer_numbers_keeps_its_deck(client, monkeypa
 
     assert [(i["question_label"], i["status"]) for i in bundle["items"]] == [
         ("問1", "ready"), ("問2", "ready")]
+
+
+
+def test_unprinted_questions_keep_page_order_and_saved_answers_after_restart(client, monkeypatch):
+    from app import main
+
+    _, session_id = _session_with(client, ["説明と図", "解答する文章と図"])
+    monkeypatch.setenv("ROKID_SOLVER", "test-provider")
+    calls = []
+
+    def answer_all(question):
+        calls.append(question)
+        return _replies(("", "", [2], "理由を記す"), ("", "", [1, 2], "図を記す"),
+                        ("", "", [2], "不等式を示す"))
+
+    monkeypatch.setattr(main, "_answer_all", answer_all)
+    monkeypatch.setattr(main, "solve_with_fallback", lambda **_: pytest.fail("per-question send"))
+    bundle = _background_finalize_and_wait(
+        client, session_id, lambda items: len(items) == 3 and all(i["status"] == "ready" for i in items))
+    assert [(i["question_label"], i["answer"], i.get("answer_no")) for i in bundle["items"]] == [
+        ("P2 項目1（印字なし）", "理由を記す", None),
+        ("P1 項目2（印字なし）", "図を記す", None),
+        ("P2 項目3（印字なし）", "不等式を示す", None)]
+    with main.db.connect() as conn:
+        assert [json.loads(row["structure_json"])["page_indexes"]
+                for row in main._deck_question_rows(conn, session_id)] == [[1], [0, 1], [1]]
+    deadline = time.monotonic() + 5
+    while session_id in main._background_solves and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert session_id not in main._background_solves
+    assert len(calls) == 1
+
+    importlib.reload(main)
+    monkeypatch.setattr(main, "_answer_all", lambda _: pytest.fail("saved answers must not be sent again"))
+    main._resume_all_answers()
+    restored = client.get(f"/v1/exam-sessions/{session_id}/answer-bundle").json()
+    assert restored["items"] == bundle["items"]
+    assert restored["input_digest"] == bundle["input_digest"]
+
+
+def test_model_inventory_overflow_is_rejected_without_a_partial_deck(client, monkeypatch):
+    from app import main
+
+    _, session_id = _session_with(client, ["番号のない多数の設問"])
+    monkeypatch.setenv("ROKID_SOLVER", "test-provider")
+    monkeypatch.setattr(main, "_answer_all", lambda _: _replies(
+        *(("", f"欄{n}", [1], "x") for n in range(301))))
+    bundle = _background_finalize_and_wait(
+        client, session_id, lambda items: items and all(i["status"] != "pending" for i in items))
+    assert len(bundle["items"]) == 1
+    assert bundle["items"][0]["status"] == "failed"
+    with main.db.connect() as conn:
+        assert conn.execute("SELECT count(*) FROM solutions").fetchone()[0] == 0
+    with pytest.raises(ValueError, match="300"):
+        main._model_problems([{"label": str(n), "pages": [1]} for n in range(301)], 1)
+
+
+
+@pytest.mark.parametrize("unprinted_count", [1, 2])
+def test_unprinted_items_under_a_shared_heading_keep_every_answer(client, monkeypatch, unprinted_count):
+    from app import main
+
+    _, session_id = _session_with(client, ["番号のない設問と印字小問がある用紙"])
+    monkeypatch.setenv("ROKID_SOLVER", "test-provider")
+    rows = [("第1問", "", [], f"記述{n}") for n in range(1, unprinted_count + 1)]
+    rows.append(("第1問", "問B", [7], "図の答え"))
+    monkeypatch.setattr(main, "_answer_all", lambda _: _numbered(*rows))
+    monkeypatch.setattr(main, "solve_with_fallback", lambda **_: pytest.fail("per-question send"))
+    bundle = _background_finalize_and_wait(
+        client, session_id, lambda items: items and all(i["status"] == "ready" for i in items))
+    expected = [(f"P1 項目{n}（印字なし）", f"記述{n}", []) for n in range(1, unprinted_count + 1)]
+    expected.append(("問B", "図の答え", [7]))
+    assert [(item["question_label"], item["answer"], item.get("answer_no", []))
+            for item in bundle["items"]] == expected
+    assert all(item["group_label"] == "第1問" for item in bundle["items"])
+    deadline = time.monotonic() + 5
+    while session_id in main._background_solves and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert session_id not in main._background_solves
+    importlib.reload(main)
+    monkeypatch.setattr(main, "_answer_all", lambda _: pytest.fail("saved answers must not be sent again"))
+    main._resume_all_answers()
+    assert client.get(f"/v1/exam-sessions/{session_id}/answer-bundle").json()["items"] == bundle["items"]
+
+
+@pytest.mark.parametrize(("group", "label", "expected"), [
+    ("I", "IV", ("I", "IV")),
+    ("問1", "問10", ("問1", "問10")),
+    ("第1問", "第1問 問1", ("第1問", "問1")),
+    ("第1問", "第1問\u3000問1", ("第1問", "問1")),
+    ("第1問", "第1問", ("第1問", "")),
+])
+def test_printed_question_label_prefix_is_not_a_duplicate_group(client, group, label, expected):
+    from app import main
+
+    assert main._item_labels({"group": group, "label": label}) == expected

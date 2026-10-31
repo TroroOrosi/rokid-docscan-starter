@@ -593,6 +593,171 @@ public class DocScanGlassActivityAnswerReadingTest {
         assertEquals(movedOffset, resumed.offset());
     }
 
+    /** Arbitrary paper labels need no subject/year/answer-number input to reach the real reader. */
+    @Test
+    @org.robolectric.annotation.GraphicsMode(org.robolectric.annotation.GraphicsMode.Mode.NATIVE)
+    public void arbitraryWrittenBundleIsDrawnCompletelyAndResumesWithDisplayHold() throws Exception {
+        String written = "【導出開始】図の長さを x₁ と β とし、x₁² + β² = 1 とおく。\n"
+                + java.util.stream.IntStream.rangeClosed(1, 18)
+                        .mapToObj(step -> "変形" + step + ": S = ∑(x₁² + β²)。平方完成より √S ≥ 0。"
+                                + "等号の条件を確認し、途中式と理由を答案に記す。")
+                        .collect(java.util.stream.Collectors.joining("\n"))
+                + "\nしたがって β = √(1 − x₁²)、0 ≤ x₁ ≤ 1。【導出終】";
+        String figureLabel = "横の辺は x₁、縦の辺は β。途中式と対応する補助図";
+        dev.rokid.docscanrelay.study.AnswerDiagram figure =
+                new dev.rokid.docscanrelay.study.AnswerDiagram(new org.json.JSONObject()
+                        .put("alt", "二辺と斜辺の関係を示す直角三角形").put("aspect_ratio", 1)
+                        .put("elements", new org.json.JSONArray()
+                                .put(new org.json.JSONObject("{\"type\":\"polyline\",\"points\":[[0.1,0.15],[0.1,0.8],[0.9,0.8],[0.1,0.15]]}"))
+                                .put(new org.json.JSONObject().put("type", "text")
+                                        .put("x", .5).put("y", .9).put("text", figureLabel))));
+        AnswerBundle expected = new AnswerBundle(Long.toString(SESSION_ID), "a".repeat(64), 1, List.of(
+                AnswerItem.ready("margin", "余白", "upper", "上の空欄", "酸素 O₂"),
+                AnswerItem.ready("margin", "余白", "diamond", "◆", "範囲は −2 ≤ t ≤ 3"),
+                new AnswerItem("free", "資料", "derivation", "α・考察", written,
+                        AnswerItem.Status.READY, "", List.of(figure))));
+        org.json.JSONObject response = new org.json.JSONObject(expected.toJson());
+        org.json.JSONArray responseItems = response.getJSONArray("items");
+        for (int i = 0; i < responseItems.length(); i++) responseItems.getJSONObject(i).remove("answer_no");
+        server.setDispatcher(new Dispatcher() {
+            @Override public MockResponse dispatch(RecordedRequest request) {
+                if (("/v1/exam-sessions/" + SESSION_ID + "/answer-bundle").equals(request.getPath())) {
+                    answerBundleRequests.incrementAndGet();
+                    return json(response.toString());
+                }
+                return new MockResponse().setResponseCode(404);
+            }
+        });
+        readyUpdate(activity, List.of("ready"), "arbitrary-paper");
+        awaitTrue("HTTP bundle opens the Activity reader", () -> getField(activity, "reader") != null);
+        AnswerReader reader = (AnswerReader) getField(activity, "reader");
+        AnswerView view = (AnswerView) getField(activity, "answers");
+        view.layout(0, 0, 480, 640); // real Paint metrics, without substituting the reader's viewport
+        AnswerStore.Saved saved = awaitSavedState(filesDir, reader.current().questionId, reader.offset());
+        assertEquals("Atomic persistence retains every body, label and diagram", expected.toJson(), saved.bundle.toJson());
+        for (AnswerItem item : saved.bundle.items) assertTrue(item.answerNumbers.isEmpty());
+        assertEquals(1, answerBundleRequests.get());
+        int slides = reader.pageCount();
+        assertTrue("the long derivation must cross multiple fixed slides", slides > 3);
+
+        // Forward to the real Canvas as well as recording its body draw calls: a contentDescription alone
+        // would stay green even if onDraw stopped drawing the text or the vector figure.
+        class DrawnSlide {
+            final android.graphics.Bitmap bitmap = android.graphics.Bitmap.createBitmap(
+                    480, 640, android.graphics.Bitmap.Config.ARGB_8888);
+            final StringBuilder body = new StringBuilder();
+            int paths;
+            DrawnSlide(AnswerView target) {
+                target.draw(new android.graphics.Canvas(bitmap) {
+                    @Override public void drawText(String text, float x, float y, android.graphics.Paint paint) {
+                        super.drawText(text, x, y, paint);
+                        if (paint.getColor() != android.graphics.Color.rgb(0x40, 0xFF, 0x5E)) return;
+                        assertTrue("written rows fit horizontally", x >= 0 && x + paint.measureText(text) <= 480.5f);
+                        assertTrue("written rows fit vertically", y + paint.ascent() >= 0 && y + paint.descent() <= 640);
+                        if (paint.getTextSize() == 32f) body.append(text);
+                    }
+                    @Override public void drawPath(android.graphics.Path path, android.graphics.Paint paint) {
+                        super.drawPath(path, paint);
+                        paths++;
+                    }
+                });
+                int green = 0;
+                for (int y = 80; y < 630; y++) for (int x = 0; x < 480; x++) {
+                    int pixel = bitmap.getPixel(x, y);
+                    if (android.graphics.Color.green(pixel) > 100
+                            && android.graphics.Color.green(pixel) > 2 * android.graphics.Color.red(pixel)) green++;
+                }
+                assertTrue("the actual slide has visible body/figure pixels", green > 100);
+            }
+        }
+        StringBuilder canvasText = new StringBuilder();
+        int figuresDrawn = 0;
+        for (int page = 1; page <= slides; page++) {
+            assertEquals(page, reader.pageNumber());
+            assertEquals("reading retains a fixed readable font", 32f, view.bodyTextSize(), .01f);
+            DrawnSlide drawn = new DrawnSlide(view);
+            canvasText.append(drawn.body);
+            if (reader.diagram() != null) {
+                assertEquals(figure, reader.diagram());
+                assertEquals("the triangle reaches Canvas.drawPath", 1, drawn.paths);
+                int vectorPixels = 0;
+                for (int y = 110; y < 400; y++) for (int x = 40; x < 440; x++) {
+                    int pixel = drawn.bitmap.getPixel(x, y);
+                    if (android.graphics.Color.green(pixel) > 100
+                            && android.graphics.Color.green(pixel) > 2 * android.graphics.Color.red(pixel)) vectorPixels++;
+                }
+                assertTrue("triangle pixels exist above the separate label row", vectorPixels > 300);
+                figuresDrawn++;
+            }
+            drawn.bitmap.recycle();
+            if (page < slides) invokeOnAction(GlassesInputAction.SWIPE_FORWARD);
+        }
+        String displayed = canvasText.toString().replaceAll("\\s+", "");
+        String completeWriting = written.replaceAll("\\s+", "");
+        int beginning = displayed.indexOf("【導出開始】");
+        int ending = displayed.indexOf("【導出終】") + "【導出終】".length();
+        assertTrue("both ends of the written solution are drawn", beginning >= 0 && ending > beginning);
+        assertEquals("all Unicode mathematics and intervening prose are drawn in order",
+                completeWriting, displayed.substring(beginning, ending));
+        assertTrue(displayed.contains("余白上の空欄酸素O₂"));
+        assertTrue(displayed.contains("余白◆範囲は−2≤t≤3"));
+        assertTrue(displayed.contains(figureLabel.replaceAll("\\s+", "")));
+        assertEquals(1, figuresDrawn);
+
+        while (reader.pageNumber() > 2) invokeOnAction(GlassesInputAction.SWIPE_BACK);
+        String question = reader.current().questionId;
+        int offset = reader.offset();
+        assertEquals("derivation", question);
+        assertTrue("resume is within the long solution, not its first character", offset > 0);
+        DrawnSlide beforeRestart = new DrawnSlide(view);
+        invokeOnAction(GlassesInputAction.SHORT_TAP);
+        assertEquals("a tap does not hide continuous writing in an index", AnswerReader.Screen.ANSWER, reader.screen());
+        invokeOnAction(GlassesInputAction.SWIPE_FORWARD);
+        assertEquals(3, reader.pageNumber());
+        invokeOnAction(GlassesInputAction.SWIPE_BACK);
+        assertEquals(2, reader.pageNumber());
+        awaitSavedState(filesDir, question, offset);
+        ConnectionSettings connection = (ConnectionSettings) getField(activity, "connectionSettings");
+        disposeActivity();
+
+        activity = Robolectric.buildActivity(DocScanGlassActivity.class).get();
+        activityDisposed = false;
+        setField(activity, "hud", new HudView(activity));
+        setField(activity, "answerStore", new AnswerStore(filesDir));
+        setField(activity, "connectionSettings", connection);
+        controller = new DocScanController(activity, new Surface(), null, activity,
+                new ClientIdentity("test-glasses", "answer-test/1", "fake-camera"));
+        controller.configure(server.url("/").toString(), "test-key", 180);
+        setField(activity, "controller", controller);
+        activity.onUpdate(RelayState.REVIEW, List.of("ready"), "arbitrary-paper-resume");
+        Shadows.shadowOf(Looper.getMainLooper()).idle();
+        awaitTrue("new Activity restores the Atomic reader file", () -> getField(activity, "reader") != null);
+        AnswerReader resumed = (AnswerReader) getField(activity, "reader");
+        AnswerView resumedView = (AnswerView) getField(activity, "answers");
+        resumedView.layout(0, 0, 480, 640);
+        assertEquals(question, resumed.current().questionId);
+        assertEquals(offset, resumed.offset());
+        assertEquals(expected.toJson(), resumed.bundle().toJson());
+        DrawnSlide restored = new DrawnSlide(resumedView);
+        assertTrue("reflow restores the same visible slide", beforeRestart.bitmap.sameAs(restored.bitmap));
+        int keepScreenOn = android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON;
+        assertTrue((activity.getWindow().getAttributes().flags & keepScreenOn) != 0);
+        Shadows.shadowOf(Looper.getMainLooper()).idleFor(30, TimeUnit.SECONDS);
+        assertEquals(question, resumed.current().questionId);
+        assertEquals(offset, resumed.offset());
+        assertTrue("written answers remain held beyond the five-second idle timeout",
+                (activity.getWindow().getAttributes().flags & keepScreenOn) != 0);
+        assertEquals("reading", getField(activity, "powerPhase"));
+        DrawnSlide later = new DrawnSlide(resumedView);
+        assertTrue("time alone neither scrolls nor clears the written solution", restored.bitmap.sameAs(later.bitmap));
+        assertEquals("offline restart/hold must not fetch a second bundle", 1, answerBundleRequests.get());
+        System.out.println("ARBITRARY_PAPER_ROUNDTRIP slides=" + slides + " diagrams=" + figuresDrawn
+                + " http_bundles=" + answerBundleRequests.get() + " hold_seconds=30");
+        beforeRestart.bitmap.recycle();
+        restored.bitmap.recycle();
+        later.bitmap.recycle();
+    }
+
     @Test
     public void eachMovingGesturePersistsTheReaderPosition() throws Exception {
         readyUpdate(activity, List.of("a"), "review-1");

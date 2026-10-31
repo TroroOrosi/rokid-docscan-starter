@@ -546,3 +546,130 @@ def test_finalize_claims_the_mode_before_reading_its_session_snapshot(client, mo
         worker.join(3)
         _wait(session_id)
     assert client.post(f"/v1/exam-sessions/{session_id}/mode", json={"exam_type": "mixed"}).status_code == 409
+
+
+
+def test_unprinted_mixed_slots_and_nonconsecutive_numbers_survive_restart(client, monkeypatch):
+    import json
+
+    from app import main
+    from app.solvers.base import SolveResult
+
+    doc_id, session_id = _session(client)
+    monkeypatch.setenv("ROKID_SOLVER", "chatgpt-web")
+    monkeypatch.setenv("ROKID_CHATGPT_SEND_ENABLED", "1")
+    stages = []
+
+    def answer_all(question):
+        stages.append(question.booklet_stage)
+        assert question.booklet_stage == "reading"
+        return [
+            ({"group": "", "label": "", "pages": [1], "answer_no": [], "requires_audio": False},
+             SolveResult(answer="文章で答える")),
+            ({"group": "第1問", "label": "問B", "pages": [1], "answer_no": [101], "requires_audio": False},
+             SolveResult(answer="根拠を示す")),
+            ({"group": "", "label": "", "pages": [1], "answer_no": [], "requires_audio": True}, None),
+            ({"group": "第2問", "label": "問Z", "pages": [1], "answer_no": [104], "requires_audio": True}, None),
+        ]
+
+    monkeypatch.setattr(main, "_answer_all", answer_all)
+    client.post(f"/v1/exam-sessions/{session_id}/finalize-reading?solve=background")
+    _wait(session_id)
+    first = client.get(f"/v1/exam-sessions/{session_id}/answer-bundle").json()
+    assert first["analysis_stage"] == "awaiting_audio"
+    assert [(item["question_label"], item["status"], item.get("answer_no", [])) for item in first["items"]] == [
+        ("P1 項目1（印字なし）", "ready", []), ("問B", "ready", [101]),
+        ("P1 項目3（印字なし）", "pending", []), ("問Z", "pending", [104])]
+    with main.db.connect() as conn:
+        metadata = [json.loads(row["structure_json"]) for row in main._deck_question_rows(conn, session_id)]
+        unprinted = [item["booklet_item"] for item in metadata if "booklet_item" in item and not item["booklet_item"]["group"]]
+        assert unprinted == [{"group": "", "label": "", "pages": [1], "answer_no": []}] * 2
+    _record_complete(client, doc_id)
+    with monkeypatch.context() as paused:
+        paused.setattr(main, "_resume_answers", lambda *args: False)
+        assert client.post(f"/v1/exam-sessions/{session_id}/document-audio").status_code == 200
+
+    importlib.reload(main)
+
+    def answer_audio(question):
+        stages.append(question.booklet_stage)
+        assert question.booklet_stage == "listening"
+        slots = question.booklet_questions
+        assert slots[0] == {"question_id": first["items"][2]["question_id"],
+                            "group": "", "label": "", "answer_no": [], "pages": [1]}
+        assert slots[1]["question_id"] == first["items"][3]["question_id"]
+        return [(slot, SolveResult(answer=f"聞いた答え{index + 1}")) for index, slot in enumerate(slots)]
+
+    monkeypatch.setattr(main, "_answer_all", answer_audio)
+    main._resume_all_answers()
+    _wait(session_id)
+    final = client.get(f"/v1/exam-sessions/{session_id}/answer-bundle").json()
+    assert final["analysis_stage"] == "complete"
+    shape = lambda bundle: [(item["question_id"], item["question_label"], item.get("answer_no", [])) for item in bundle["items"]]  # noqa: E731
+    assert shape(final) == shape(first)
+    assert [item["answer"] for item in final["items"]] == ["文章で答える", "根拠を示す", "聞いた答え1", "聞いた答え2"]
+    assert stages == ["reading", "listening"]
+    main._resume_all_answers()
+    _wait(session_id)
+    assert stages == ["reading", "listening"]
+
+
+
+@pytest.mark.parametrize("unprinted_count", [1, 2])
+def test_shared_heading_unprinted_audio_slot_survives_restart(client, monkeypatch, unprinted_count):
+    import json
+
+    from app import main
+    from app.solvers.base import SolveResult
+
+    doc_id, session_id = _session(client)
+    monkeypatch.setenv("ROKID_SOLVER", "chatgpt-web")
+    monkeypatch.setenv("ROKID_CHATGPT_SEND_ENABLED", "1")
+    stages = []
+
+    def answer_all(question):
+        stages.append(question.booklet_stage)
+        assert question.booklet_stage == "reading"
+        rows = [({"group": "第1問", "label": "", "answer_no": [], "pages": [1],
+                  "requires_audio": n == unprinted_count},
+                 None if n == unprinted_count else SolveResult(answer=f"記述{n}"))
+                for n in range(1, unprinted_count + 1)]
+        rows.append(({"group": "第1問", "label": "問B", "answer_no": [7], "pages": [1],
+                      "requires_audio": False}, SolveResult(answer="図の答え")))
+        return rows
+
+    monkeypatch.setattr(main, "_answer_all", answer_all)
+    client.post(f"/v1/exam-sessions/{session_id}/finalize-reading?solve=background")
+    _wait(session_id)
+    first = client.get(f"/v1/exam-sessions/{session_id}/answer-bundle").json()
+    assert first["analysis_stage"] == "awaiting_audio"
+    labels = [f"P1 項目{n}（印字なし）" for n in range(1, unprinted_count + 1)] + ["問B"]
+    assert [item["question_label"] for item in first["items"]] == labels
+    assert all(item["group_label"] == "第1問" for item in first["items"])
+    with main.db.connect() as conn:
+        metadata = [json.loads(row["structure_json"]) for row in main._deck_question_rows(conn, session_id)]
+        assert [item["booklet_item"] for item in metadata if item.get("booklet_item", {}).get("label") == ""] == [
+            {"group": "第1問", "label": "", "answer_no": [], "pages": [1]}] * unprinted_count
+    _record_complete(client, doc_id)
+    with monkeypatch.context() as paused:
+        paused.setattr(main, "_resume_answers", lambda *args: False)
+        assert client.post(f"/v1/exam-sessions/{session_id}/document-audio").status_code == 200
+    importlib.reload(main)
+
+    def answer_audio(question):
+        stages.append(question.booklet_stage)
+        assert question.booklet_stage == "listening"
+        assert question.booklet_questions == [{"question_id": first["items"][unprinted_count - 1]["question_id"],
+                                               "group": "第1問", "label": "", "answer_no": [], "pages": [1]}]
+        return [(question.booklet_questions[0], SolveResult(answer="原音からの答え"))]
+
+    monkeypatch.setattr(main, "_answer_all", answer_audio)
+    main._resume_all_answers()
+    _wait(session_id)
+    final = client.get(f"/v1/exam-sessions/{session_id}/answer-bundle").json()
+    assert final["analysis_stage"] == "complete"
+    assert [item["question_label"] for item in final["items"]] == labels
+    assert [item["question_id"] for item in final["items"]] == [item["question_id"] for item in first["items"]]
+    assert [item["answer"] for item in final["items"]] == [f"記述{n}" for n in range(1, unprinted_count)] + [
+        "原音からの答え", "図の答え"]
+    assert stages == ["reading", "listening"]

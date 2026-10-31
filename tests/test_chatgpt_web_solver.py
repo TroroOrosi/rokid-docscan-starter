@@ -2190,7 +2190,8 @@ def test_a_limit_crash_cannot_acknowledge_a_different_or_unfinished_turn(monkeyp
 
 
 @pytest.mark.parametrize("questions", [None, "bad", [], [7], [{"label": "問1", "answer": "4"}, 7],
-                                       [{}], [{"label": "", "group": "", "answer": "4"}]])
+                                       [{}], [{"unrecognized": "not question data"}],
+                                       [{"group": "", "label": "", "unrecognized": "not question data"}]])
 def test_a_structurally_invalid_question_list_never_acknowledges_the_final_send(monkeypatch, tmp_path, questions):
     _fast(monkeypatch)
     page = _BatchPage()
@@ -2209,6 +2210,35 @@ def test_a_structurally_invalid_question_list_never_acknowledges_the_final_send(
     with pytest.raises(chatgpt_web.ChatGptWebUncertain):
         _booklet(chatgpt_web.ChatGptWebClient(), page, _batch_files(1))
     assert _guard_state(tmp_path) == "uncertain" and len(_sends(page)) == 1
+
+
+def test_unprinted_valid_answer_acknowledges_final_and_recovers_without_resend(monkeypatch, tmp_path):
+    _fast(monkeypatch)
+    page = _BatchPage()
+    real_sent = page.sent
+    item = {"group": "", "label": "", "answer": "4"}
+
+    def unprinted():
+        real_sent()
+        reply = json.loads(page.replies[0])
+        reply["questions"] = [dict(item)]
+        page.replies = [json.dumps(reply)]
+
+    page.sent = unprinted
+    reply = json.loads(_booklet(chatgpt_web.ChatGptWebClient(), page, _batch_files(1)))
+    transfer = _chats(tmp_path)["session:batch"]["transfer"]
+    assert reply["questions"] == [item]
+    assert transfer["final"] == reply["batch_id"] and len(transfer["completed"]) == 1
+    assert transfer["pending"] is None and _guard_state(tmp_path) == "idle"
+
+    def no_files():
+        pytest.fail("the saved final answer must recover without preparing another upload")
+
+    restored = chatgpt_web.ChatGptWebClient()._ask_with_retries(
+        _OneTabContext(page), "Answer every question", [], files=no_files,
+        chat_key="session:batch", expect=("questions",), booklet=True)
+    assert json.loads(restored) == reply and len(_sends(page)) == 1
+    assert _guard_state(tmp_path) == "idle"
 
 
 def test_reading_back_a_recorded_final_still_requires_a_valid_question_list(monkeypatch):
@@ -2671,3 +2701,52 @@ def test_a_limit_phrase_seen_in_a_blink_is_not_a_limit():
                      streaming=[True, False, True, False])
     reply, _ = ask_page(page, "全問", poll_s=0, expect=("questions",), sleep=lambda _s: None)
     assert reply == '{"questions":[{"answer":"上限に達した"}]}'
+
+
+
+@pytest.mark.parametrize(("stage", "pending_audio"), [
+    ("single", False), ("reading", False), ("reading", True), ("listening", False),
+])
+def test_unprinted_question_is_valid_without_inventing_printed_labels(stage, pending_audio):
+    item = {"group": "", "label": "", "answer_no": [], "pages": [2],
+            "status": "pending_audio" if pending_audio else "ready",
+            "answer": "" if pending_audio else "根拠を文章で記す"}
+    if stage == "reading":
+        item["requires_audio"] = pending_audio
+    if stage == "listening":
+        item["question_id"] = "q7"
+    replies = chatgpt_web._booklet_replies(
+        {"questions": [item]}, subject=None, extras={}, stage=stage,
+        question_ids=["q7"] if stage == "listening" else None)
+    assert replies[0][0] == item
+    assert replies[0][0]["group"] == replies[0][0]["label"] == ""
+    assert replies[0][0]["answer_no"] == []
+    if pending_audio:
+        assert replies[0][1] is None
+    else:
+        assert replies[0][1].answer == item["answer"]
+
+
+def test_booklet_solver_keeps_unprinted_questions_from_the_same_reply(tmp_path):
+    page_path = tmp_path / "page.png"
+    page_path.write_bytes(_real_png(80))
+    items = [{"group": "", "label": "", "pages": [1], "answer_no": [],
+              "status": "ready", "answer": answer} for answer in ("文章", "図の説明")]
+    question = Question(document_pages=[{"page_number": 1, "image_path": str(page_path)}],
+                        document_id="1", chat_key="session:1", answer_only=True)
+    replies = ChatGptWebSolver(client=_FakeClient(json.dumps({"questions": items}))).answer_all(question=question)
+    assert [item for item, _ in replies] == items
+    assert [result.answer for _, result in replies] == ["文章", "図の説明"]
+
+
+def test_booklet_reply_limit_rejects_overflow_without_accepting_a_partial_inventory():
+    item = {"group": "第1問", "label": "問1", "pages": [1], "answer_no": [],
+            "status": "ready", "answer": "4"}
+    data = {"batch_id": "final-id", "questions": [dict(item) for _ in range(300)]}
+    batch = {"id": "final-id", "final": True, "expect": ["questions"]}
+    assert len(chatgpt_web._booklet_replies(data, subject=None, extras={})) == 300
+    assert chatgpt_web.ChatGptWebClient._valid_batch(json.dumps(data), batch)
+    data["questions"].append(dict(item))
+    with pytest.raises(ValueError, match="300"):
+        chatgpt_web._booklet_replies(data, subject=None, extras={})
+    assert not chatgpt_web.ChatGptWebClient._valid_batch(json.dumps(data), batch)

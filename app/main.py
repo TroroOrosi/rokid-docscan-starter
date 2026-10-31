@@ -3314,19 +3314,36 @@ def _item_labels(item: dict) -> tuple[str, str]:
     """(group, label) of a model item, without the group repeated in the label."""
     group = str(item.get("group") or "").strip()[:60]
     label = str(item.get("label") or "").strip()[:60]
-    if group and label.startswith(group):
-        label = label[len(group):].strip()  # "第1問 問1" under 第1問
+    if group and (label == group or (label.startswith(group) and label[len(group):len(group) + 1].isspace())):
+        label = label[len(group):].strip()  # Remove only a separately repeated group, not 問1 in 問10.
     return group, label
 
 
+def _model_item_labels(items: list | None, page_count: int) -> list[tuple[str, str]]:
+    """Display positions for unprinted items; preserve a sole whole-group answer."""
+    labels = [_item_labels(item) for item in items or []]
+    group_sizes: dict[str, int] = {}
+    for group, _ in labels:
+        group_sizes[group] = group_sizes.get(group, 0) + 1
+    located = []
+    for ordinal, (item, (group, label)) in enumerate(zip(items or [], labels), 1):
+        # A heading can stand for one whole-group answer only when it is the
+        # group's sole returned question. Otherwise every item needs its own row.
+        if not label and (not group or group_sizes[group] > 1):
+            raw_pages = item.get("pages") if isinstance(item.get("pages"), list) else []
+            first_page = min((p for p in raw_pages if isinstance(p, int) and 1 <= p <= page_count), default=1)
+            label = f"P{first_page} 項目{ordinal}（印字なし）"
+        located.append((group, label))
+    return located
+
+
 def _model_problems(items: list | None, page_count: int) -> list[ProblemUnit]:
-    """Validated model list -> deck problems, with 大問 heading rows where printed."""
+    """Validated model list -> deck problems; unprinted items keep their list positions."""
+    if items and len(items) > 300:
+        raise ValueError("a booklet reply must contain at most 300 questions")
     problems: list[ProblemUnit] = []
     heading: ProblemUnit | None = None
-    for item in (items or [])[:300]:
-        group, label = _item_labels(item)
-        if not (label or group):
-            continue
+    for item, (group, label) in zip(items or [], _model_item_labels(items, page_count)):
         raw_pages = item.get("pages") if isinstance(item.get("pages"), list) else []
         pages = sorted({p - 1 for p in raw_pages
                         if isinstance(p, int) and 1 <= p <= page_count}) or list(range(page_count))
@@ -3343,28 +3360,6 @@ def _model_problems(items: list | None, page_count: int) -> list[ProblemUnit]:
             problems.append(ProblemUnit(label, f"{group} {label}".strip(),
                                         start_page_index=pages[0], page_indexes=pages))
     return unique_question_numbers(problems)
-
-
-def _missing_answer_numbers(items: list | None) -> list[int]:
-    """解答番号 the booklet prints between the answered ones and the reply skipped.
-
-    The model both sorts and answers the booklet, so a 小問 it forgets leaves
-    no deck row at all and the session looks complete. The printed numbers run
-    consecutively, so the gaps in what came back name exactly what is missing.
-    Returns [] for a booklet that prints no numbers, or a span too wide to be
-    a real answer sheet.
-    """
-    seen = sorted({number for item in (items or []) if isinstance(item, dict)
-                   for number in answer_numbers(item.get("answer_no"))})
-    if len(seen) < 2 or seen[-1] - seen[0] > 300:
-        return []
-    return sorted(set(range(seen[0], seen[-1] + 1)) - set(seen))
-
-
-def _missing_answer_problem(number: int, page_count: int) -> ProblemUnit:
-    """The deck row that shows a skipped 解答番号 instead of hiding it."""
-    return ProblemUnit(f"解答番号{number}", f"解答番号{number}",
-                       start_page_index=0, page_indexes=list(range(page_count)))
 
 
 def _fallback_problems(conn, doc_id: int, page_count: int) -> list:
@@ -3461,6 +3456,8 @@ def _answer_deck(conn, session, session_id: int, doc_id: int) -> bool:
             time.sleep(PRESEND_RETRY_S)
         try:
             replies, failed = _answer_all(question), None
+            if replies is not None and len(replies) > 300:
+                raise ValueError("a booklet reply must contain at most 300 questions")
             break
         except Exception as error:  # noqa: BLE001 - recorded on the deck, never resent
             if isinstance(error, (ChatGptWebSendNotAuthorized, WorkPending, WorkConflict)):
@@ -3473,8 +3470,6 @@ def _answer_deck(conn, session, session_id: int, doc_id: int) -> bool:
     try:
         with _work_reply_commit_guard(session_id, replies, failed_attempt=work_attempt if failed else None):
             problems = _model_problems([item for item, _ in replies], len(source_pages))
-            missing = _missing_answer_numbers([item for item, _ in replies])
-            problems += [_missing_answer_problem(number, len(source_pages)) for number in missing]
             carried = 0
             if problems and items and not any(_latest_solution_row(conn, row["id"]) for row in items):
                 # Only the whole-booklet row of a failed message: the model's list replaces it.
@@ -3500,14 +3495,12 @@ def _answer_deck(conn, session, session_id: int, doc_id: int) -> bool:
                 _record_solve_failure(conn, items[0], failed, commit=False)
                 conn.commit()
                 return True
-            # A row the model named carries "第1問 問1" as its body (_model_problems),
-            # untouched by the 問1(2) suffix that keeps question_no unique. One label
-            # given twice (two answer slots of one 問) keeps reply order.
+            # The body retains its printed labels or generated position, untouched
+            # by the suffix that keeps question_no unique. Repeated printed labels
+            # (two answer slots of one 問) keep reply order.
             results: dict[str, list[SolveResult | Exception]] = {}
-            for item, result in replies:
-                results.setdefault(" ".join(filter(None, _item_labels(item))), []).append(result)
-            for number in missing:
-                results[f"解答番号{number}"] = [AnswerMissing(str(number))]
+            for (_, result), labels in zip(replies, _model_item_labels([item for item, _ in replies], len(source_pages))):
+                results.setdefault(" ".join(filter(None, labels)), []).append(result)
             for row in items:
                 if _latest_solution_row(conn, row["id"]) is not None:
                     continue
@@ -3583,12 +3576,10 @@ def _answer_mixed_deck(conn, session, session_id: int, doc_id: int) -> bool:
             if any(_latest_solution_row(conn, row["id"]) for row in old_rows):
                 raise ValueError("mixed reading inventory cannot replace saved answers")
             conn.executemany("DELETE FROM questions WHERE id=?", [(row["id"],) for row in old_rows])
-            missing = _missing_answer_numbers([item for item, _ in replies])
-            _insert_deck(conn, session_id, doc_id, _model_problems([item for item, _ in replies], len(source_pages))
-                         + [_missing_answer_problem(number, len(source_pages)) for number in missing])
+            _insert_deck(conn, session_id, doc_id, _model_problems([item for item, _ in replies], len(source_pages)))
             results = {}
-            for item, result in replies:
-                results.setdefault(" ".join(filter(None, _item_labels(item))), []).append((item, result))
+            for (item, result), labels in zip(replies, _model_item_labels([item for item, _ in replies], len(source_pages))):
+                results.setdefault(" ".join(filter(None, labels)), []).append((item, result))
             items = [row for group in _answer_groups(conn, session_id) for row in group["items"]]
             for index, row in enumerate(items):
                 metadata = json.loads(row["structure_json"])

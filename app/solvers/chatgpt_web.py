@@ -1649,12 +1649,16 @@ def locator_prompt(question) -> str:
 # "questions" key alone says the reply is whole.
 _ALL_TASK = (
     "Answer EVERY question in the attached booklet in this one reply. List, in booklet "
-    "order, every question whose answer is written on the answer sheet, with its printed "
-    "major label (such as 第1問, or empty), its printed question label (such as 問1), the "
-    "printed answer-sheet numbers it fills (解答番号, such as [101,102]; [] when the booklet "
-    "prints none) and the capture page numbers it uses. A 解答番号 the booklet prints must "
-    "appear exactly once in the list, even when its question is unreadable. "
-    "Choices, passages and figures are not questions. "
+    "order, every actual question, including unnumbered written, choice and diagram questions. "
+    "Determine the requested answer format from the original images. Copy its printed "
+    "major label (such as 第1問) and question label (such as 問1); use empty strings for "
+    "either that is not printed, including both empty when neither is printed. Give the "
+    "printed answer-sheet numbers it fills (解答番号, such as [101,102]; [] when none are "
+    "printed) and the capture page numbers it uses. Never invent printed labels or numbers "
+    "or assume that answer numbers are consecutive. A 解答番号 the booklet prints must "
+    "appear exactly once in the list, even when its question is unreadable. Keep unlabelled "
+    "questions in page/list order; the application will give them position locators. "
+    "Choices, passages and figures alone are not additional questions. "
     "Apply the rules above to each question's status, answer, missing_material and "
     "diagrams. Reply with ONE JSON object and nothing else: "
     '{"questions":[{"group":"第1問","label":"問1","answer_no":[101],"pages":[1],'
@@ -1663,8 +1667,13 @@ _ALL_TASK = (
 
 _READING_TASK = (
     "This is stage 1 of a mixed reading/listening paper. All original page images are supplied now; "
-    "original audio will arrive later in THIS chat. Enumerate EVERY answer-sheet question in booklet "
-    "order with group, label, answer_no and pages as below. Set requires_audio to a JSON boolean for "
+    "original audio will arrive later in THIS chat. Enumerate EVERY actual question in booklet "
+    "order, including unnumbered questions, with group, label, answer_no and capture pages as below. "
+    "Determine the requested answer format from the original images. Copy printed group/label "
+    "only; use empty strings for unprinted labels, including both empty. Use answer_no=[] "
+    "when no answer number is printed; never invent printed numbers or assume consecutiveness. "
+    "Keep unlabelled questions in page/list order for application position locators. "
+    "Set requires_audio to a JSON boolean for "
     "EVERY question. Solve only questions that do not require audio, using ready or needs_input. "
     "For audio-dependent questions, use requires_audio=true, status=pending_audio, answer=\"\", "
     "diagrams=[]; do not guess from choices or invent audio. Return ONE JSON object: "
@@ -1678,7 +1687,8 @@ _LISTENING_TASK = (
     "This is stage 2 of the SAME mixed paper. Keep every earlier reading answer unchanged. "
     "The only new attachment is the original captured audio; the complete page images remain in "
     "this chat. Answer ONLY the pending audio-dependent question slots listed below, exactly once "
-    "each, preserving question_id, group, label, answer_no and pages. Reply with ONE JSON object "
+    "each, preserving question_id, group, label, answer_no and pages, including intentionally empty "
+    "printed labels or answer_no. Reply with ONE JSON object "
     "whose questions array uses ready or needs_input, answer, missing_material and diagrams. "
     "Recording may have started late: never invent unheard speech or missing audio. If the recorded "
     "audio cannot establish an answer, return needs_input and explain the missing material. "
@@ -1706,11 +1716,12 @@ def _booklet_chat_key(question, audio) -> str | None:
 def _booklet_replies(data, *, subject, extras, stage="single", question_ids=None) -> list[tuple[dict, SolveResult | Exception | None]]:
     """Validate the envelope once; retain each question's own answer failure."""
     items = data.get("questions") if isinstance(data, dict) else None
-    if not isinstance(items, list) or not items or any(not isinstance(item, dict) for item in items):
-        raise ValueError("the reply carried no valid non-empty question list")
-    if any(not str(item.get("label") or "").strip() and not str(item.get("group") or "").strip()
-           for item in items):
-        raise ValueError("a question has neither a printed label nor a major heading")
+    if not isinstance(items, list) or not 1 <= len(items) <= 300 or any(not isinstance(item, dict) for item in items):
+        raise ValueError("the reply must carry 1 to 300 valid questions")
+    question_fields = ("group", "label", "question_id", "pages", "answer_no", "answer", "diagrams", "missing_material")
+    if any(not any((value.strip() if isinstance(value, str) else value not in (None, [], {}))
+                   for value in (item.get(key) for key in question_fields)) for item in items):
+        raise ValueError("every item must carry question or answer data")
     if stage == "reading" and any(type(item.get("requires_audio")) is not bool for item in items):
         raise ValueError("every mixed question must classify its audio requirement")
     if stage == "listening":

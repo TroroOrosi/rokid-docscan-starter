@@ -1,6 +1,6 @@
 # rokid-docscan-starter development guide
 
-Status: Current engineering contract. Updated 2026-10-31.
+Status: Current engineering contract. Updated 2026-11-01.
 
 **Start at `.agents/progress/current.md`.** It lists the operator's decisions,
 the verified state and the next steps. Do not re-ask what it settles. Keep the
@@ -28,8 +28,16 @@ and the current section of `docs/requirements-audit.md`; earlier proposals and
 historical implementation states are not current decisions. Continue independent
 PC work while a manual action remains pending.
 
-Photograph an exam booklet (共通テスト and similar), and let the operator read,
-per 小問, **what to write on the answer sheet** on Rokid Glasses.
+Photograph arbitrary problem papers, and let the operator read **what to write
+on the answer sheet**, including complete written solutions, on Rokid Glasses.
+Subject, year, institution, printed question labels and a known paper size are
+not prerequisites. GPT reads the original images and determines the questions,
+required answer form, figures and missing material; the app does not impose a
+separate subject or question-format classifier before submission. Preserve the
+model's complete answer and its association with the source question, including
+unlabelled questions and intentionally nonconsecutive printed answer numbers.
+The operator's 2026-11-01 request includes remaining physical-paper checks;
+an earlier decision to defer them is historical, not a current exclusion.
 
 The scan-and-match half (`/v1/match`, pHash, page dedup) is the foundation this
 was built on, not the goal. Do not describe it as the product.

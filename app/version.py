@@ -250,7 +250,9 @@ from __future__ import annotations
 # 0.66.0: evaluate pre-upload selection between two retained native originals;
 #         prioritize a verified running app's explicit sleep over diagnostics.
 # 0.66.1: bounded monotonic timing metadata for phone-side display delivery diagnosis.
-APP_VERSION = "0.66.2"
+# 0.66.2: include watcher work in its polling interval instead of adding fixed delay.
+# 0.66.3: retain unlabelled questions and nonconsecutive printed answer numbers.
+APP_VERSION = "0.66.3"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.
@@ -370,7 +372,8 @@ APP_VERSION = "0.66.2"
 # 1.37.0: explicitly identified ZSL originals require matching positive sensor timestamps.
 # 1.38.0: /capture-videos accepts sealed original-video comparison clips and their journals.
 # 1.39.0: optional capture inspection origins and authenticated diagnostic result lookups.
-API_VERSION = "1.39.0"
+# 1.39.1: source-position labels for unlabelled questions; do not invent numeric gaps.
+API_VERSION = "1.39.1"
 
 # Matching algorithm identity. Bump when thresholds or hashing change so a
 # re-index/eval is triggered. Mirrors thresholds in app/matching.py.
