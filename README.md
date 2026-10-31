@@ -141,7 +141,7 @@ Driveへ置く場合も全件列挙と各原画像取得が必要で、添付20�
 CXR-L の実装境界は
 [CXR-L / Global Hi Rokid integration](docs/cxr-l-integration.md)です。
 
-現在のバージョン: **Server APP 0.66.0 / API 1.39.0 / Android client 0.3.17 / Glasses View 1.40.0 / Solver API 1.9.0**。
+現在のバージョン: **Server APP 0.66.1 / API 1.39.0 / Android client 0.3.17 / Glasses View 1.40.0 / Solver API 1.9.0**。
 版数の正本は `app/version.py` です。他の資料は版数を書かず、この行だけが
 `tests/test_documentation_contract.py` で実装と照合されます。
 Solver API は、記入用解答の全文保持・資料不足の分離を行う `answer_only` モードを含みます。

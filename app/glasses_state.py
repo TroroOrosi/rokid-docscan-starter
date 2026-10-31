@@ -10,6 +10,7 @@ from pathlib import Path
 import re
 import tempfile
 import threading
+import time
 from typing import Literal
 
 from pydantic import BaseModel, Field, conint, root_validator
@@ -92,36 +93,57 @@ def _read(path: Path) -> dict | None:
 
 
 def record_state(state: GlassesState, source_ip: str) -> bool:
-    with _LOCK:
-        path = _path(state.device_id)
-        previous = read_state(state.device_id)
-        record = dict(state)
-        if previous:
-            if (state.generation, state.sequence) <= (previous["generation"], previous["sequence"]):
-                return False
-            if state.generation == previous["generation"]:
-                if previous["phase"] == "closed" or (previous["phase"] == "writing_done"
-                                                     and state.phase != "closed"):
+    entered_ns = time.monotonic_ns()
+    locked_ns = durable_ns = None
+    outcome = "error"
+    try:
+        with _LOCK:
+            locked_ns = time.monotonic_ns()
+            path = _path(state.device_id)
+            previous = read_state(state.device_id)
+            record = dict(state)
+            if previous:
+                if (state.generation, state.sequence) <= (previous["generation"], previous["sequence"]):
+                    outcome = "ignored"
                     return False
-                if state.session_id == previous["session_id"] and previous.get("ack_answer_revision") is not None:
-                    # Preserve only an acknowledgement the client already sent;
-                    # never derive receipt from generated server answers.
-                    record["ack_answer_revision"] = max(previous["ack_answer_revision"],
-                                                        state.ack_answer_revision or 0)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        fd, temporary = tempfile.mkstemp(prefix="state-", suffix=".tmp", dir=path.parent)
+                if state.generation == previous["generation"]:
+                    if previous["phase"] == "closed" or (previous["phase"] == "writing_done"
+                                                         and state.phase != "closed"):
+                        outcome = "ignored"
+                        return False
+                    if state.session_id == previous["session_id"] and previous.get("ack_answer_revision") is not None:
+                        # Preserve only an acknowledgement the client already sent;
+                        # never derive receipt from generated server answers.
+                        record["ack_answer_revision"] = max(previous["ack_answer_revision"],
+                                                            state.ack_answer_revision or 0)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            fd, temporary = tempfile.mkstemp(prefix="state-", suffix=".tmp", dir=path.parent)
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as target:
+                    json.dump({**record, "source_ip": source_ip}, target)
+                    target.flush()
+                    os.fsync(target.fileno())
+                os.replace(temporary, path)
+                if os.name != "nt":
+                    directory_fd = os.open(path.parent, os.O_RDONLY)
+                    try:
+                        os.fsync(directory_fd)
+                    finally:
+                        os.close(directory_fd)
+                durable_ns = time.monotonic_ns()
+            finally:
+                Path(temporary).unlink(missing_ok=True)
+            outcome = "saved"
+            return True
+    finally:
+        # Completion metadata only. Never retain the state lock while stdout
+        # waits, and never replace the persistence result/error with a log error.
         try:
-            with os.fdopen(fd, "w", encoding="utf-8") as target:
-                json.dump({**record, "source_ip": source_ip}, target)
-                target.flush()
-                os.fsync(target.fileno())
-            os.replace(temporary, path)
-            if os.name != "nt":
-                directory_fd = os.open(path.parent, os.O_RDONLY)
-                try:
-                    os.fsync(directory_fd)
-                finally:
-                    os.close(directory_fd)
-        finally:
-            Path(temporary).unlink(missing_ok=True)
-        return True
+            print(json.dumps({"event": "glasses_state_store", "outcome": outcome,
+                              "generation": state.generation, "sequence": state.sequence,
+                              "phase": state.phase, "display_request": state.display_request,
+                              "entered_ns": entered_ns, "locked_ns": locked_ns,
+                              "durable_ns": durable_ns, "finished_ns": time.monotonic_ns()},
+                             separators=(",", ":")), flush=True)
+        except Exception:
+            pass

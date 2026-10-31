@@ -766,3 +766,145 @@ def test_library_explicit_ipv4_unicast_resolves_only_legacy_port_and_excludes_se
     else:
         assert asyncio.run(watch_glasses._unicast_services("10.129.169.180")) == ["10.129.169.42:5555"]
         assert events == ["wrong._adb._tcp.local.", "right._adb._tcp.local.", "cancelled", "closed"]
+
+
+@pytest.mark.parametrize("args,step", [
+    (("shell", "getprop", "vendor.rkd.glasses.is_spread"), "fold_read"),
+    (("shell", "cmd", "media_session", "volume", "--stream", "3", "--get"), "volume_read"),
+    (("shell", "cmd", "media_session", "volume", "--stream", "3", "--set", "0"), "volume_mute"),
+    (("shell", "input", "-d", "0", "keyevent", "KEYCODE_SOFT_SLEEP"), "sleep_input"),
+])
+def test_slow_adb_timing_names_only_the_fixed_step_and_preserves_the_result(monkeypatch, capsys, args, step):
+    now = [1_000_000_000]
+    monkeypatch.setattr(time, "monotonic_ns", lambda: now[0])
+
+    def run(*_, **__):
+        now[0] += 350_000_000
+        return SimpleNamespace(stdout="PRIVATE_RESULT_CANARY\n", stderr="")
+
+    monkeypatch.setattr(watch_glasses.subprocess, "run", run)
+    assert watch_glasses.adb("PRIVATE_SERIAL_CANARY", *args) == "PRIVATE_RESULT_CANARY"
+    output = capsys.readouterr().out
+    event = json.loads(output)
+    assert event == {"event": "watch_rpc", "step": step, "outcome": "returned",
+                     "started_ns": 1_000_000_000, "finished_ns": 1_350_000_000}
+    assert "PRIVATE" not in output
+
+
+def test_fast_poll_reads_are_quiet_but_input_still_has_a_monotonic_interval(monkeypatch, capsys):
+    now = [1_000_000_000]
+    monkeypatch.setattr(time, "monotonic_ns", lambda: now[0])
+
+    def run(*_, **__):
+        now[0] += 10_000_000
+        return SimpleNamespace(stdout="1", stderr="")
+
+    monkeypatch.setattr(watch_glasses.subprocess, "run", run)
+    assert watch_glasses.adb("PRIVATE_SERIAL_CANARY", "shell", "getprop", "vendor.rkd.glasses.is_spread") == "1"
+    assert capsys.readouterr().out == ""
+    assert watch_glasses.adb("PRIVATE_SERIAL_CANARY", "shell", "input", "-d", "0",
+                             "keyevent", "KEYCODE_SOFT_SLEEP") == "1"
+    assert json.loads(capsys.readouterr().out) == {
+        "event": "watch_rpc", "step": "sleep_input", "outcome": "returned",
+        "started_ns": 1_010_000_000, "finished_ns": 1_020_000_000}
+
+
+@pytest.mark.parametrize("timeout", [False, True])
+def test_failed_rpc_timing_preserves_the_original_exception_and_redacts_details(monkeypatch, capsys, timeout):
+    now = [10]
+    monkeypatch.setattr(time, "monotonic_ns", lambda: now[0])
+    error = (subprocess.TimeoutExpired("PRIVATE_ARGS_CANARY", 10, output="PRIVATE_BODY_CANARY")
+             if timeout else subprocess.CalledProcessError(1, "PRIVATE_ARGS_CANARY", stderr="PRIVATE_BODY_CANARY"))
+
+    def run(*_, **__):
+        now[0] += 400_000_000
+        raise error
+
+    monkeypatch.setattr(watch_glasses.subprocess, "run", run)
+    with pytest.raises(type(error)) as raised:
+        watch_glasses.adb("PRIVATE_SERIAL_CANARY", "shell", "dumpsys", "audio")
+    assert raised.value is error
+    output = capsys.readouterr().out
+    assert json.loads(output) == {"event": "watch_rpc", "step": "audio_read",
+                                 "outcome": "timeout" if timeout else "error",
+                                 "started_ns": 10, "finished_ns": 400_000_010}
+    assert "PRIVATE" not in output
+
+
+@pytest.mark.parametrize("call_fails", [False, True])
+def test_timing_logger_failure_cannot_change_device_call_result_or_exception(monkeypatch, call_fails):
+    now = iter((10, 400_000_010))
+    monkeypatch.setattr(time, "monotonic_ns", lambda: next(now))
+    error = subprocess.TimeoutExpired("PRIVATE_ARGS_CANARY", 10)
+
+    def run(*_, **__):
+        if call_fails:
+            raise error
+        return SimpleNamespace(stdout="unchanged", stderr="")
+
+    def output(*_, **__):
+        raise RuntimeError("PRIVATE_LOGGER_CANARY")
+
+    monkeypatch.setattr(watch_glasses.subprocess, "run", run)
+    monkeypatch.setattr(watch_glasses, "print", output, raising=False)
+    if call_fails:
+        with pytest.raises(subprocess.TimeoutExpired) as raised:
+            watch_glasses.adb("PRIVATE_SERIAL_CANARY", "shell", "getprop", "ro.serialno")
+        assert raised.value is error
+    else:
+        assert watch_glasses.adb("PRIVATE_SERIAL_CANARY", "shell", "getprop", "ro.serialno") == "unchanged"
+
+
+@pytest.mark.parametrize("fails", [False, True])
+def test_slow_http_timing_covers_the_whole_fetch_and_keeps_auth_and_body_private(monkeypatch, capsys, fails):
+    now = [100]
+    monkeypatch.setattr(time, "monotonic_ns", lambda: now[0])
+    monkeypatch.setenv("ROKID_API_KEY", "PRIVATE_KEY_CANARY")
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            pass
+
+        def read(self, limit):
+            assert limit == 8193
+            now[0] += 400_000_000
+            return json.dumps({**STATE, "device_id": "PRIVATE_DEVICE_CANARY"}).encode()
+
+    def open_url(request, timeout):
+        assert timeout == 3
+        if fails:
+            now[0] += 400_000_000
+            raise watch_glasses.urllib.error.URLError("PRIVATE_ERROR_CANARY")
+        return Response()
+
+    monkeypatch.setattr(watch_glasses.urllib.request, "urlopen", open_url)
+    if fails:
+        with pytest.raises(watch_glasses.StateUnavailable, match="^server_stopped$"):
+            watch_glasses.fetch_state("http://127.0.0.1:8000", "PRIVATE_DEVICE_CANARY")
+    else:
+        assert watch_glasses.fetch_state("http://127.0.0.1:8000", "PRIVATE_DEVICE_CANARY")["phase"] == "capturing"
+    output = capsys.readouterr().out
+    assert json.loads(output) == {"event": "watch_rpc", "step": "state_get",
+                                 "outcome": "error" if fails else "returned",
+                                 "started_ns": 100, "finished_ns": 400_000_100}
+    assert "PRIVATE" not in output and "127.0.0.1" not in output
+
+
+def test_only_first_read_of_each_new_order_is_logged_including_sleep_cancel_readback(monkeypatch, capsys):
+    awake = {**STATE, "device_id": "PRIVATE_DEVICE_CANARY", "phase": "chooser", "display_request": "wake"}
+    sleep = {**awake, "sequence": 2, "display_request": "sleep"}
+    reading = {**awake, "sequence": 3, "phase": "reading"}
+    commands = _watch(monkeypatch, [awake, awake, sleep, reading, reading])
+    assert not any("KEYCODE_SOFT_SLEEP" in command for command in commands)
+    output = capsys.readouterr().out
+    events = [json.loads(line) for line in output.splitlines() if line.startswith("{")]
+    assert [(event["event"], event["generation"], event["sequence"], event["phase"], event["display_request"])
+            for event in events] == [("watch_state_read", 3, 1, "chooser", "wake"),
+                                     ("watch_state_read", 3, 2, "chooser", "sleep"),
+                                     ("watch_state_read", 3, 3, "reading", "wake")]
+    assert all(set(event) == {"event", "generation", "sequence", "phase", "display_request", "read_ns"}
+               and type(event["read_ns"]) is int for event in events)
+    assert "PRIVATE" not in output

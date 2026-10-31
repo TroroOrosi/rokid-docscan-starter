@@ -6,6 +6,7 @@ operator approval. Unit tests use fake device calls; physical acceptance is pend
 
 import argparse
 import asyncio
+from contextlib import contextmanager
 import ipaddress
 import json
 import os
@@ -30,6 +31,51 @@ MDNS_TIMEOUT_SECONDS = 4.0
 DISCOVERY_TIMEOUT_SECONDS = 12.0
 DISCOVERY_RETRY_SECONDS = 15.0
 MDNS_CHILD_FLAG = "--mdns-unicast-child"
+SLOW_RPC_NS = 250_000_000
+
+
+def _timing_event(event: str, **fields) -> None:
+    """Callers supply only fixed codes, counters and monotonic timestamps."""
+    try:
+        print(json.dumps({"event": event, **fields}, separators=(",", ":")), flush=True)
+    except Exception:
+        pass  # Diagnostic output must not change a device/HTTP result or error.
+
+
+@contextmanager
+def _rpc_timing(step: str, *, control: bool = False):
+    started_ns = time.monotonic_ns()
+    outcome = "returned"
+    try:
+        yield
+    except subprocess.TimeoutExpired:
+        outcome = "timeout"
+        raise
+    except Exception:
+        outcome = "error"
+        raise
+    finally:
+        finished_ns = time.monotonic_ns()
+        if control or finished_ns - started_ns >= SLOW_RPC_NS:
+            _timing_event("watch_rpc", step=step, outcome=outcome,
+                          started_ns=started_ns, finished_ns=finished_ns)
+
+
+def _adb_step(args: tuple[str, ...]) -> str:
+    if args[:2] == ("shell", "getprop"):
+        return {"ro.serialno": "serial_read", "vendor.rkd.glasses.is_spread": "fold_read"}.get(
+            args[2] if len(args) > 2 else "", "property_read")
+    if args[:4] == ("shell", "cmd", "media_session", "volume"):
+        return "volume_mute" if "--set" in args else "volume_read"
+    if args[:3] == ("shell", "dumpsys", "audio"):
+        return "audio_read"
+    if args[:3] == ("shell", "settings", "put"):
+        return "mute_setting"
+    if args[:2] == ("shell", "am"):
+        return "wake_input" if "wake_session_id" in args else "activity_input"
+    if args[:2] == ("shell", "input"):
+        return "sleep_input" if "KEYCODE_SOFT_SLEEP" in args else "wake_input"
+    return "adb_other"
 
 
 class StateUnavailable(RuntimeError):
@@ -40,6 +86,7 @@ class _DiscoveryProcessUnavailable(StateUnavailable):
     """A missing, failed or timed-out discovery process; not output overflow."""
 
 
+@_rpc_timing("state_get")
 def fetch_state(server: str, device_id: str | None) -> dict:
     url = urllib.parse.urlsplit(server)
     if url.scheme != "http" or url.hostname not in ("127.0.0.1", "::1") or url.username or url.password:
@@ -96,21 +143,25 @@ def target(serial: str, expected_serial: str, state: dict) -> str:
         return serial
     address = ipaddress.IPv4Address(state["source_ip"])
     candidate = f"{address}:5555"
-    subprocess.run(["adb", "connect", candidate], capture_output=True, timeout=5, check=True)
+    with _rpc_timing("connect"):
+        subprocess.run(["adb", "connect", candidate], capture_output=True, timeout=5, check=True)
     if adb(candidate, "shell", "getprop", "ro.serialno") != expected_serial:
         raise ValueError("Glasses identity mismatch")
     return candidate
 
 
 def adb(serial: str, *args: str, timeout: float = 10) -> str:
-    result = subprocess.run(["adb", "-s", serial, *args], check=True, capture_output=True,
-                            text=True, timeout=timeout)
-    output = result.stdout + result.stderr
-    if "Error:" in output or "Exception" in output:
-        raise subprocess.CalledProcessError(1, "device command")
-    return result.stdout.strip()
+    step = _adb_step(args)
+    with _rpc_timing(step, control=step in ("sleep_input", "wake_input", "activity_input")):
+        result = subprocess.run(["adb", "-s", serial, *args], check=True, capture_output=True,
+                                text=True, timeout=timeout)
+        output = result.stdout + result.stderr
+        if "Error:" in output or "Exception" in output:
+            raise subprocess.CalledProcessError(1, "device command")
+        return result.stdout.strip()
 
 
+@_rpc_timing("discovery_read")
 def _mdns_output(command: list[str], timeout: float) -> bytes:
     """Bound output and kill only this short-lived child, including stuck cleanup."""
     with subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
@@ -270,8 +321,9 @@ def mdns_target(expected_serial: str) -> str:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 break
-            subprocess.run(["adb", "connect", candidate], check=True, capture_output=True,
-                           timeout=min(3, remaining))
+            with _rpc_timing("connect"):
+                subprocess.run(["adb", "connect", candidate], check=True, capture_output=True,
+                               timeout=min(3, remaining))
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 break
@@ -283,6 +335,7 @@ def mdns_target(expected_serial: str) -> str:
     raise StateUnavailable("glasses_discovery_unavailable")
 
 
+@_rpc_timing("process_read")
 def app_running(serial: str) -> bool:
     """Only a clean pidof miss counts as stopped; transport errors are unknown."""
     result = subprocess.run(["adb", "-s", serial, "shell", "pidof", "dev.rokid.docscanglass.doc"],
@@ -356,6 +409,16 @@ def watch(requested: str, expected_serial: str, interval: float, server: str = S
     last_volume_check = 0.0
     last_running = False
     selected = device_id or os.environ.get("ROKID_GLASSES_DEVICE_ID")
+    observed_order = (-1, -1)
+
+    def observe_order(state: dict) -> None:
+        nonlocal observed_order
+        order = (state["generation"], state["sequence"])
+        if order > observed_order:
+            observed_order = order
+            _timing_event("watch_state_read", generation=state["generation"], sequence=state["sequence"],
+                          phase=state["phase"], display_request=state.get("display_request"),
+                          read_ns=time.monotonic_ns())
 
     def sleep_current(state: dict) -> None:
         nonlocal newest, sleep_key
@@ -366,6 +429,7 @@ def watch(requested: str, expected_serial: str, interval: float, server: str = S
         # Recheck the authenticated intent immediately before input. Android's
         # SOFT_SLEEP then respects a window hold acquired after this GET.
         current = fetch_state(server, selected) if request else state
+        observe_order(current)
         newest = max(newest, (current["generation"], current["sequence"]))
         fields = ("device_id", "generation", "sequence", "session_id", "phase", "display_request", "ack_answer_revision")
         if (all(current.get(field) == state.get(field) for field in fields)
@@ -398,6 +462,7 @@ def watch(requested: str, expected_serial: str, interval: float, server: str = S
                 else:
                     raise StateUnavailable("waiting_for_glasses")
                 state = fetch_state(server, selected)
+            observe_order(state)
             if requested == "auto" and serial != f"{ipaddress.IPv4Address(state['source_ip'])}:5555":
                 verified = False
             if not verified:

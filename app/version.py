@@ -249,7 +249,8 @@ from __future__ import annotations
 # 0.65.2: respect protected glasses windows when a delayed phone sleep arrives.
 # 0.66.0: evaluate pre-upload selection between two retained native originals;
 #         prioritize a verified running app's explicit sleep over diagnostics.
-APP_VERSION = "0.66.0"
+# 0.66.1: bounded monotonic timing metadata for phone-side display delivery diagnosis.
+APP_VERSION = "0.66.1"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.

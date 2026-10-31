@@ -1,6 +1,7 @@
 """Authenticated power notifications survive restart and reject late updates."""
 
 import importlib
+import json
 import time
 
 import pytest
@@ -372,3 +373,104 @@ def test_setup_also_preserves_a_pending_synchronous_compatibility_deck(tmp_path,
     with main.db.connect() as conn:
         row = main._deck_question_rows(conn, session_id)[0]
         assert main._solve_failure(row) == {} and main._failure_count(row) == 0
+
+
+def test_store_timing_distinguishes_lock_wait_and_durable_save_without_private_fields(tmp_path, monkeypatch):
+    from app import glasses_state
+
+    monkeypatch.setattr(glasses_state.config, "DATA_DIR", tmp_path)
+    now = [100_000_000]
+    monkeypatch.setattr(time, "monotonic_ns", lambda: now[0])
+
+    class Lock:
+        depth = 0
+
+        def __enter__(self):
+            if not self.depth:
+                now[0] += 30_000_000
+            self.depth += 1
+
+        def __exit__(self, *_):
+            self.depth -= 1
+            if not self.depth:
+                now[0] += 20_000_000
+
+    lock = Lock()
+    monkeypatch.setattr(glasses_state, "_LOCK", lock)
+    real_fsync = glasses_state.os.fsync
+
+    def fsync(fd):
+        now[0] += 40_000_000
+        real_fsync(fd)
+
+    monkeypatch.setattr(glasses_state.os, "fsync", fsync)
+    events = []
+
+    def output(line, **_):
+        assert lock.depth == 0  # A slow stdout sink must not retain the state lock.
+        events.append(json.loads(line))
+
+    monkeypatch.setattr(glasses_state, "print", output, raising=False)
+    state = glasses_state.GlassesState(**{**STATE, "device_id": "PRIVATE_DEVICE_CANARY",
+                                         "phase": "chooser", "display_request": "sleep"})
+    assert glasses_state.record_state(state, "PRIVATE_SOURCE_CANARY") is True
+    event, = events
+    assert set(event) == {"event", "outcome", "generation", "sequence", "phase", "display_request",
+                          "entered_ns", "locked_ns", "durable_ns", "finished_ns"}
+    assert (event["event"], event["outcome"]) == ("glasses_state_store", "saved")
+    assert event["entered_ns"] == 100_000_000
+    assert event["locked_ns"] == 130_000_000
+    assert event["locked_ns"] < event["durable_ns"] < event["finished_ns"]
+    assert "PRIVATE" not in json.dumps(event)
+    assert glasses_state.read_state(state.device_id)["display_request"] == "sleep"
+
+
+@pytest.mark.parametrize("write_fails", [False, True])
+def test_store_logger_failure_never_changes_a_saved_state_or_original_write_error(
+        tmp_path, monkeypatch, write_fails):
+    from app import glasses_state
+
+    monkeypatch.setattr(glasses_state.config, "DATA_DIR", tmp_path)
+    error = OSError("PRIVATE_WRITE_CANARY")
+    if write_fails:
+        def replace(*_):
+            raise error
+        monkeypatch.setattr(glasses_state.os, "replace", replace)
+
+    def output(*_, **__):
+        raise RuntimeError("PRIVATE_LOGGER_CANARY")
+
+    monkeypatch.setattr(glasses_state, "print", output, raising=False)
+    state = glasses_state.GlassesState(**STATE)
+    if write_fails:
+        with pytest.raises(OSError) as raised:
+            glasses_state.record_state(state, "PRIVATE_SOURCE_CANARY")
+        assert raised.value is error
+        assert glasses_state.read_state(state.device_id) is None
+    else:
+        assert glasses_state.record_state(state, "PRIVATE_SOURCE_CANARY") is True
+        assert glasses_state.read_state(state.device_id)["sequence"] == state.sequence
+
+
+def test_failed_and_ignored_store_timings_do_not_claim_a_durable_save(tmp_path, monkeypatch, capsys):
+    from app import glasses_state
+
+    monkeypatch.setattr(glasses_state.config, "DATA_DIR", tmp_path)
+    state = glasses_state.GlassesState(**STATE)
+    assert glasses_state.record_state(state, "PRIVATE_SOURCE_CANARY") is True
+    assert glasses_state.record_state(state, "PRIVATE_SOURCE_CANARY") is False
+    error = OSError("PRIVATE_WRITE_CANARY")
+
+    def fsync(_):
+        raise error
+
+    monkeypatch.setattr(glasses_state.os, "fsync", fsync)
+    with pytest.raises(OSError) as raised:
+        glasses_state.record_state(glasses_state.GlassesState(**{**STATE, "sequence": 2}), "PRIVATE_SOURCE_CANARY")
+    assert raised.value is error
+    output = capsys.readouterr().out
+    events = [json.loads(line) for line in output.splitlines()]
+    assert [event["outcome"] for event in events] == ["saved", "ignored", "error"]
+    assert events[0]["durable_ns"] is not None
+    assert events[1]["durable_ns"] is events[2]["durable_ns"] is None
+    assert "PRIVATE" not in output
