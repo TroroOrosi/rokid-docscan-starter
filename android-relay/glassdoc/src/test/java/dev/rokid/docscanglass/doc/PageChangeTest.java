@@ -127,4 +127,139 @@ public class PageChangeTest {
         change.observe(reusable, 2500);
         assertFalse("the same page may only yield one still", change.ready(2500));
     }
+
+    @Test public void aSlowTurnAccumulatesAcrossSmallAdjacentFrameChanges() {
+        PageChange change = new PageChange();
+        byte[] page = photographedPage();
+        change.observe(page, 0);
+        change.observe(page, 400);
+        change.consumed();
+        long capturedScene = change.sequence();
+        byte[] turning = page.clone();
+        for (int x = 0; x < 12; x++) {
+            for (int y = 0; y < 24; y++) turning[y * 32 + x] = (byte) 160;
+            change.observe(turning, 1000 + x * 50);
+        }
+        change.observe(turning, 2000);
+        assertTrue("one-column steps must not erase the cumulative turn", change.sequence() > capturedScene);
+        assertTrue("the changed scene is ready after settling", change.ready(2000));
+        change.consumed();
+        change.observe(turning, 2500);
+        assertFalse("a retained scene yields only one still", change.ready(2500));
+    }
+
+    @Test public void samePageOnePixelJitterDoesNotAccumulateIntoATurn() {
+        PageChange change = new PageChange();
+        byte[] page = photographedPage();
+        change.observe(page, 0);
+        change.observe(page, 400);
+        change.consumed();
+        long capturedScene = change.sequence();
+        for (int observation = 0; observation < 20; observation++) {
+            int offset = observation % 2 == 0 ? 1 : -1;
+            byte[] shifted = new byte[page.length];
+            for (int y = 0; y < 24; y++) for (int x = 0; x < 32; x++) {
+                shifted[y * 32 + x] = page[y * 32 + Math.max(0, Math.min(31, x + offset))];
+            }
+            change.observe(shifted, 1000 + observation * 50);
+        }
+        change.observe(page, 2500);
+        assertEquals("bounded head jitter is not positive page evidence", capturedScene, change.sequence());
+        assertFalse(change.ready(2500));
+    }
+
+    @Test public void gradualUniformExposureDriftDoesNotAccumulateIntoATurn() {
+        PageChange change = new PageChange();
+        byte[] page = photographedPage();
+        change.observe(page, 0);
+        change.observe(page, 400);
+        change.consumed();
+        long capturedScene = change.sequence();
+        for (int gain = 1; gain <= 30; gain++) {
+            byte[] brighter = page.clone();
+            for (int i = 0; i < brighter.length; i++) brighter[i] = (byte) ((brighter[i] & 255) + gain);
+            change.observe(brighter, 1000 + gain * 50);
+        }
+        change.observe(page, 3000);
+        assertEquals("uniform gain does not create a scene", capturedScene, change.sequence());
+        assertFalse(change.ready(3000));
+    }
+
+    @Test public void consumingUsesTheLatestPreviewRatherThanOldSubthresholdDrift() {
+        PageChange change = new PageChange();
+        byte[] page = photographedPage();
+        change.observe(page, 0);
+        for (int y = 0; y < 24; y++) for (int x = 0; x < 2; x++) page[y * 32 + x] = (byte) 160;
+        change.observe(page, 400);
+        change.consumed();
+        long capturedScene = change.sequence();
+        for (int y = 0; y < 24; y++) for (int x = 2; x < 4; x++) page[y * 32 + x] = (byte) 160;
+        change.observe(page, 1000);
+        change.observe(page, 1500);
+        assertEquals("pre-shutter drift must not be counted again", capturedScene, change.sequence());
+        assertFalse(change.ready(1500));
+    }
+
+    private byte[] shifted(byte[] page, int dx, int dy) {
+        byte[] result = new byte[page.length];
+        for (int y = 0; y < 24; y++) for (int x = 0; x < 32; x++) {
+            result[y * 32 + x] = page[Math.max(0, Math.min(23, y + dy)) * 32
+                    + Math.max(0, Math.min(31, x + dx))];
+        }
+        return result;
+    }
+
+    @Test public void samePageJitterDoesNotDependOnWhichPhaseWasPhotographed() {
+        byte[] page = photographedPage();
+        for (int capturedX = -1; capturedX <= 1; capturedX++) for (int capturedY = -1; capturedY <= 1; capturedY++) {
+            PageChange change = new PageChange();
+            byte[] captured = shifted(page, capturedX, capturedY);
+            change.observe(captured, 0);
+            change.observe(captured, 400);
+            change.consumed();
+            long capturedScene = change.sequence();
+            for (int observation = 0; observation < 18; observation++) {
+                int dx = observation % 3 - 1;
+                int dy = observation / 3 % 3 - 1;
+                change.observe(shifted(page, dx, dy), 1000 + observation * 50);
+            }
+            change.observe(captured, 2500);
+            assertEquals("same-page jitter from capture phase " + capturedX + "," + capturedY,
+                    capturedScene, change.sequence());
+            assertFalse(change.ready(2500));
+        }
+    }
+
+    @Test public void unconsumedMotionStillWaitsAfterATranslation() {
+        PageChange motion = new PageChange();
+        byte[] page = photographedPage();
+        motion.observe(shifted(page, -1, 0), 0);
+        motion.observe(shifted(page, -1, 0), 400);
+        assertTrue(motion.ready(400));
+        motion.observe(shifted(page, 1, 0), 1000);
+        assertFalse("preview motion is not exempted by page-jitter compensation", motion.ready(1000));
+        assertFalse(motion.ready(1399));
+        assertTrue(motion.ready(1400));
+    }
+
+    @Test public void aSlowOuterTurnStillRetainsASimilarFollowingPage() {
+        PageChange change = new PageChange();
+        byte[] page = photographedPage();
+        change.observe(page, 0);
+        change.observe(page, 400);
+        change.consumed();
+        long capturedScene = change.sequence();
+        byte[] turning = page.clone();
+        for (int x = 31; x >= 20; x--) {
+            for (int y = 0; y < 24; y++) turning[y * 32 + x] = (byte) 160;
+            change.observe(turning, 1000 + (31 - x) * 50);
+        }
+        assertTrue("right-edge turn evidence must survive registration", change.sequence() > capturedScene);
+        change.observe(page, 1700);
+        assertFalse(change.ready(2099));
+        assertTrue("a similar A-B-A return still follows an observed turn", change.ready(2100));
+        change.consumed();
+        change.observe(page, 2600);
+        assertFalse(change.ready(2600));
+    }
 }

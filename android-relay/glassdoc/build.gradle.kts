@@ -78,8 +78,8 @@ android {
         // 43 adds explicit original-video/MAX-JPEG evaluation and a recorder stop barrier.
         // 44 adds opt-in comparison transfer with persistent origin and receipt binding.
         // 46 adds explicit provisional paper/AE comparison and respects Y-plane buffer origins.
-        versionCode = 46
-        versionName = "0.37.0"
+        versionCode = 47
+        versionName = "0.38.0"
     }
 
     // Same reasoning as `:glassapp`: a vendor installer that reads JAR
