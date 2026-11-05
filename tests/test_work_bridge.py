@@ -224,6 +224,46 @@ def test_one_missing_original_cannot_be_called_a_completed_booklet(tmp_path):
     assert store.get(job["job_id"])["status"] == "pending"
 
 
+@pytest.mark.parametrize(("groups", "labels"), [
+    (("第1問", "第2問"), ("問1", "問1")),
+    (("第1問", "第1問"), ("問1", "問2")),
+    (("第1問", "第1問"), ("問1", "問1")),
+    (("", ""), ("", "")),
+])
+def test_repeated_printed_numbers_are_local_to_questions_not_booklet_identity(client, groups, labels):
+    from app import main
+
+    _, session, job = api_session(client)
+    delivered = [api_tile_receipt(client, job)]
+    result = {"questions": [dict(answer(text=text)["questions"][0], group=group, label=label)
+                           for group, label, text in zip(groups, labels, ("x=2", "y=3"), strict=True)]}
+    response = api_complete(client, job, delivered, result)
+    assert response.status_code == 200, response.text
+    bundle = wait_for(lambda: data if (data := client.get(
+        f"/v1/exam-sessions/{session}/answer-bundle").json()).get("items")
+        and all(item["status"] == "ready" for item in data["items"]) else None)
+    assert [(item["answer"], item["answer_no"]) for item in bundle["items"]] == [
+        ("x=2", [1]), ("y=3", [1])]
+    assert len({item["question_id"] for item in bundle["items"]}) == 2
+    before = bundle["items"]
+    main._resume_all_answers()
+    wait_for(lambda: session not in main._background_solves)
+    assert client.get(f"/v1/exam-sessions/{session}/answer-bundle").json()["items"] == before
+    with main.db.connect() as conn:
+        assert conn.execute("SELECT count(*) FROM solutions").fetchone()[0] == 2
+
+
+def test_a_question_cannot_repeat_its_own_answer_slot(tmp_path):
+    from app.work_bridge import WorkStore
+
+    store = WorkStore(tmp_path)
+    job = queue(store)
+    result = answer()
+    result["questions"][0]["answer_no"] = [1, 1]
+    with pytest.raises(ValueError, match="more than once"):
+        store._validate_result(job, result)
+
+
 @pytest.mark.parametrize("change", ["hash", "generation", "receipt", "source_hash", "duplicate", "answer"])
 @pytest.mark.parametrize("stop", [False, True])
 def test_wrong_identity_or_invalid_answer_is_not_committed(tmp_path, change, stop):
@@ -674,14 +714,15 @@ def test_phone_api_auto_queues_images_and_returns_work_answers_in_the_existing_b
         assert conn.execute("SELECT solver_name FROM solutions").fetchone()[0] == "chatgpt-work"
 
 
-def test_phone_api_mixed_work_roundtrip_keeps_original_audio_and_committed_reading_answers(client, monkeypatch):
+@pytest.mark.parametrize("audio_number", [1, 2])
+def test_phone_api_mixed_work_roundtrip_keeps_original_audio_and_committed_reading_answers(client, monkeypatch, audio_number):
     from app import listening, main
 
     monkeypatch.setattr(listening, "transcribe_chunk", lambda *args, **kwargs: pytest.fail("unneeded ASR"))
     doc, session, first = api_session(client, exam_type="mixed")
     reading = answer(text="4")
     reading["questions"][0]["requires_audio"] = False
-    reading["questions"].append({"group": "Listening", "label": "問2", "pages": [1], "answer_no": [2],
+    reading["questions"].append({"group": "Listening", "label": "問2", "pages": [1], "answer_no": [audio_number],
                                  "requires_audio": True, "status": "pending_audio", "answer": "", "diagrams": []})
     delivered = [api_tile_receipt(client, first)]
     assert api_complete(client, first, delivered, reading).status_code == 200
@@ -708,7 +749,7 @@ def test_phone_api_mixed_work_roundtrip_keeps_original_audio_and_committed_readi
     audio_receipt = {"source_id": "audio", "sha256": hashlib.sha256(raw.content).hexdigest(),
                      "delivery": "original_bytes", "receipt": raw.headers["x-work-source-receipt"]}
     result = answer(label="問2", text="3")
-    result["questions"][0].update(question_id=before["items"][1]["question_id"], answer_no=[2])
+    result["questions"][0].update(question_id=before["items"][1]["question_id"], answer_no=[audio_number])
     assert api_complete(client, second, [audio_receipt], result).status_code == 200
     after = wait_for(lambda: data if (data := client.get(
         f"/v1/exam-sessions/{session}/answer-bundle").json()).get("available_stage") == "complete" else None)

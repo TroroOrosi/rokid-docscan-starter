@@ -56,15 +56,29 @@ _ANSWER_ONLY_SYSTEM = (
     "written solution, including the derivation needed for full credit. Never shorten "
     "an answer to fit a display. Write mathematics as plain text with Unicode symbols "
     "(x², √3, π, ≤, a/b); never LaTeX, because the answer is shown as text on glasses. "
+    "For programming or pseudocode answers, preserve identifiers, operators and indentation. "
     "If required material is missing or unreadable, return status needs_input, an "
     "empty answer and identify the missing material separately; do not guess. "
     "For questions requiring a drawing, include diagrams (array, at most 4). Each has "
     "alt (description <=500 characters), aspect_ratio (width/height, 0.25..4), elements "
     "(1..128). Supported elements ONLY: {type:'line',x1,y1,x2,y2}, "
     "{type:'polyline',points:[[x,y],...]}, {type:'circle',cx,cy,r}, "
+    "{type:'arc',cx,cy,r,start_degrees,sweep_degrees}, {type:'polygon',points:[[x,y],...]}, "
     "{type:'text',x,y,text}. All coordinates are 0..1, origin top left. Circle r is "
-    "relative to the shorter side. Keep all geometry and labels inside margins. "
-    "Text labels <=80 characters, polyline <=256 points. Preserve mathematical "
+    "relative to the shorter side; arc r has the same meaning and its entire circle must fit. "
+    "Arc angles are degrees: start_degrees 0..360 (0 points right), sweep_degrees -360..360 "
+    "and nonzero, positive clockwise. Optional JSON boolean dashed applies to strokes of "
+    "line/polyline/circle/arc/polygon; default false. Circle filled=true marks a closed "
+    "endpoint (filled circles cannot be dashed), filled=false marks an open endpoint with a "
+    "clear interior; omit filled for ordinary geometric circles. Draw endpoint markers after "
+    "curves/regions so their interiors stay clear. Polygon hatched=true marks a shaded "
+    "region, default false gives its closed outline. Do not replace open/closed endpoints "
+    "or strict/non-strict boundaries with the same symbol. Use separate polylines across "
+    "discontinuities; never connect across an asymptote. Approximate curves with enough "
+    "polyline points to preserve extrema, intersections and shape. Arrowheads may use "
+    "short lines. Keep all geometry and labels inside margins, separate labels to avoid "
+    "overlap, and split dense drawings across the available diagrams with matching labels. "
+    "Text labels <=80 characters, polyline/polygon <=256 points (polygon >=3, boundary order, nonzero area). Preserve mathematical "
     "scale and geometry; add axes, units and labels where required. No SVG, images, "
     "URLs or Markdown image references. Use an empty diagrams array for text answers. "
     "A drawing-only answer may have empty answer text. If the required drawing "
@@ -176,17 +190,23 @@ def _read_audio(question: Question) -> tuple[str, bytes] | None:
 def answer_numbers(value) -> list[int]:
     """The 解答番号 printed beside one question's blanks; [] when none is printed.
 
-    Accepts a single number or a list. These numbers, not the model's own
-    ordering, are what says whether the one reply answered the whole booklet.
+    Accepts a single number or a list. These are local printed slot labels,
+    not unique question identities or evidence that the whole booklet was read.
     """
+    if value is None or value == "":
+        return []
     values = value if isinstance(value, list) else [value]
+    if len(values) > 1000:
+        raise ValueError("too many answer numbers")
     numbers: list[int] = []
-    for item in values[:20]:
+    for item in values:
         try:
             number = int(str(item).strip())
-        except (TypeError, ValueError):
-            continue
-        if 1 <= number <= 999 and number not in numbers:
+        except (TypeError, ValueError) as exc:
+            raise ValueError("invalid answer number") from exc
+        if not 1 <= number <= 9999:
+            raise ValueError("answer number outside display contract")
+        if number not in numbers:
             numbers.append(number)
     return numbers
 
@@ -205,7 +225,7 @@ def answer_sheet_result(data: dict, *, subject: str | None, extras: dict) -> Sol
     if status == "ready" and (not isinstance(answer, str) or not (answer.strip() or diagrams)):
         raise ValueError("written answer must be a non-empty string")
     return SolveResult(
-        answer=answer.strip() if status == "ready" else "",
+        answer=answer.strip("\r\n") if status == "ready" else "",
         subject=subject,
         diagrams=diagrams if status == "ready" else [],
         extras={**extras, "answer_status": status,

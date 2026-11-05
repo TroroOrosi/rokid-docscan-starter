@@ -53,6 +53,27 @@ PAGE = "\n".join([
 ])
 
 
+@pytest.mark.parametrize("numbers", [list(range(1, 22)), [1000, 2026, 9999], [10000]])
+def test_bundle_preserves_program_text_and_never_silently_drops_number_lists(client, numbers):
+    from app import db
+
+    _, session_id = _session_with(client, [PAGE])
+    client.post(f"/v1/exam-sessions/{session_id}/finalize-reading")
+    bundle = client.get(f"/v1/exam-sessions/{session_id}/answer-bundle").json()
+    qid = int(bundle["items"][0]["question_id"][1:])
+    answer = '    total_cost += i\n    print("$x_1$")'
+    with db.connect() as conn:
+        conn.execute("INSERT INTO solutions(question_id, answer, answer_metadata_json) VALUES (?, ?, ?)",
+                     (qid, answer, json.dumps({"answer_no": numbers})))
+    item = client.get(f"/v1/exam-sessions/{session_id}/answer-bundle").json()["items"][0]
+    assert item["answer"] == answer
+    if numbers == [10000]:
+        assert item["status"] == "needs_review" and "解答番号" in item["issue"]
+    else:
+        assert item["status"] == "ready"
+        assert item["answer_no"] == numbers
+
+
 def test_vector_answer_round_trip_and_invalid_stored_diagram(client):
     import json
     from app import db
@@ -71,6 +92,13 @@ def test_vector_answer_round_trip_and_invalid_stored_diagram(client):
     assert bundle["items"][0]["status"] == "ready"
     assert bundle["items"][0]["answer"] == ""
     assert bundle["items"][0]["diagrams"] == [diagram]
+    diagram["elements"][0]["filled"] = True
+    with db.connect() as conn:
+        conn.execute("UPDATE solutions SET diagrams_json = ? WHERE question_id = ?",
+                     (json.dumps([diagram]), question_id))
+    styled = client.get(f"/v1/exam-sessions/{session_id}/answer-bundle").json()
+    assert styled["schema_version"] == 3
+    assert styled["items"][0]["diagrams"] == [diagram]
     with db.connect() as conn:
         conn.execute("UPDATE solutions SET diagrams_json = '[{}]' WHERE question_id = ?", (question_id,))
     item = client.get(f"/v1/exam-sessions/{session_id}/answer-bundle").json()["items"][0]

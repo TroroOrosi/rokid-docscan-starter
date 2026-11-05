@@ -33,6 +33,7 @@ from . import config, db
 from .audio_formats import safe_audio_suffix
 from .analyzers import get_analyzer
 from .answer_text import to_display_answer
+from .answer_diagrams import diagram_schema_version
 from .config import IMAGE_DIR, ensure_dirs
 from .capture_provenance import parse_capture_metadata, parse_capture_provenance
 from .capture_video_upload import receive_capture_video
@@ -2991,7 +2992,7 @@ def _answer_bundle_item(conn, group: dict, row) -> dict:
     from .answer_diagrams import validate_diagrams
 
     sol = _latest_solution_row(conn, row["id"])
-    raw = (sol["answer"] or "").strip() if sol is not None else ""
+    raw = (sol["answer"] or "").strip("\r\n") if sol is not None else ""
     display = to_display_answer(raw)
     answer = display.text
     diagram_error = False
@@ -3008,7 +3009,11 @@ def _answer_bundle_item(conn, group: dict, row) -> dict:
         original_numbers = json.loads(row["structure_json"] or "{}").get("answer_no", [])
     except (ValueError, TypeError, AttributeError):
         original_numbers = []
-    numbers = answer_numbers(original_numbers or metadata.get("answer_no") or [])
+    numbers_error = False
+    try:
+        numbers = answer_numbers(original_numbers or metadata.get("answer_no") or [])
+    except ValueError:
+        numbers, numbers_error = [], True
     if sol is None:
         failure = _solve_failure(row)
         inherited = _solve_failure(group.get("heading"))
@@ -3030,6 +3035,8 @@ def _answer_bundle_item(conn, group: dict, row) -> dict:
         status, issue = "needs_input", str(metadata.get("missing_material") or "資料が不足しています")[:1000]
     elif diagram_error:
         status, issue = "needs_review" if answer else "failed", "図の形式を表示できません"
+    elif numbers_error:
+        status, issue = "needs_review" if answer or diagrams else "failed", "解答番号を表示できません"
     elif not answer and not diagrams:
         status, issue = "failed", "解答本文がありません"
     elif display.complete:
@@ -4276,7 +4283,7 @@ def exam_ingest_solutions(session_id: int, payload: IngestSolutions) -> dict:
                 (
                     question_id,
                     "onboard",
-                    item.answer.strip(),
+                    item.answer.strip("\r\n"),
                     json.dumps(item.solution_steps, ensure_ascii=False),
                     item.rationale,
                     item.cautions,
@@ -4381,7 +4388,7 @@ def exam_answer_bundle(session_id: int) -> dict:
             for row in group["items"]
         ]
         return {
-            "schema_version": 2 if any(i.get("diagrams") for i in items) else 1,
+            "schema_version": max((diagram_schema_version(i.get("diagrams", [])) for i in items), default=1),
             "session_id": str(session_id),
             "input_digest": _answer_input_digest(conn, session),
             "revision": _answer_revision(conn, session_id),

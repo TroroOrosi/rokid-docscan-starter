@@ -151,6 +151,8 @@ def test_capture_context_reaches_the_sealed_work_job_and_browser_prompt(client, 
     assert prompt.count("capture order, not printed page numbers") == 1
     assert "overlapping sections" in prompt and "each question once" in prompt
     assert "Do not merge distinct questions" in prompt and "uncaptured" in prompt
+    assert "not a booklet-wide question identifier" in prompt
+    assert "even under the same labels" in prompt
     entries = {}
     for payload in fake.calls[0]["files"]:
         with zipfile.ZipFile(io.BytesIO(payload["buffer"])) as archive:

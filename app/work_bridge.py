@@ -771,7 +771,6 @@ class WorkStore:
         if not isinstance(items, list) or not 1 <= len(items) <= 300:
             raise ValueError("a complete non-empty question list is required")
         page_count = sum("page_number" in source for source in job["sources"])
-        numbers = []
         for item in items:
             if not isinstance(item, dict):
                 raise ValueError("invalid Work answer item")
@@ -782,9 +781,10 @@ class WorkStore:
             answer_no = item.get("answer_no", [])
             if not isinstance(answer_no, list) or any(type(n) is not int or n < 1 for n in answer_no):
                 raise ValueError("invalid printed answer numbers")
-            numbers.extend(answer_no)
-        if len(numbers) != len(set(numbers)):
-            raise ValueError("a printed answer number appears more than once")
+            # Printed slot numbers may restart within a section or each question.
+            # Reply order, source pages and the assigned question IDs carry identity.
+            if len(answer_no) != len(set(answer_no)):
+                raise ValueError("a printed answer number appears more than once in one question")
         replies = _booklet_replies(result, subject=None, extras={}, stage=job["stage"],
                                    question_ids=job["question_ids"])
         if any(isinstance(answer, Exception) for _, answer in replies):

@@ -1,6 +1,6 @@
 # rokid-docscan-starter development guide
 
-Status: Current engineering contract. Updated 2026-11-01.
+Status: Current engineering contract. Updated 2026-11-05.
 
 **Start at `.agents/progress/current.md`.** It lists the operator's decisions,
 the verified state and the next steps. Do not re-ask what it settles. Keep the
@@ -38,6 +38,9 @@ model's complete answer and its association with the source question, including
 unlabelled questions and intentionally nonconsecutive printed answer numbers.
 The operator's 2026-11-01 request includes remaining physical-paper checks;
 an earlier decision to defer them is historical, not a current exclusion.
+On 2026-11-05 the operator confirmed both devices connected and requested overall
+functional/structural evaluation and improvements before physical capture. Treat
+the connection as current fact, not an instruction to start capturing a paper.
 
 The scan-and-match half (`/v1/match`, pHash, page dedup) is the foundation this
 was built on, not the goal. Do not describe it as the product.
@@ -262,6 +265,10 @@ and uncertain-send safeguards remain independent of model-name fallback.
   sends original images/audio, not OCR or local transcripts, and does not require
   local VAD/ASR. ASR remains for compatible non-browser provider paths.
   Diagram answers use validated vectors and the existing AnswerReader/Canvas.
+  Extended figures use schema 3 for arcs, hatched polygons and optional dashed
+  strokes/filled circles; legacy figures retain schema 2 and text schema 1.
+  Preserve literal program identifiers/indentation and whole mathematical script
+  groups. The server must not silently truncate printed answer numbers.
   These new behaviors have not passed physical acceptance on the current APK.
 - Answer reading is continuous: pack short items on one screen, keep full
   derivations and diagrams, and retain printed answer numbers and position.

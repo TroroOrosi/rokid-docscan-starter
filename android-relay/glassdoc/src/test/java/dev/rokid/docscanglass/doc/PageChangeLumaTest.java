@@ -159,7 +159,7 @@ public class PageChangeLumaTest {
     private static void frame640(PageChange page, byte[] pixels, long now) {
         page.observeFrame(coarse640(pixels), ByteBuffer.wrap(pixels), 640, 480, 640, 1, (now + 1) * 1_000_000, now);
     }
-    @Test public void both640GlyphDirectionsAndABARequireAll6561CoherentOffsets() {
+    @Test public void both640GlyphDirectionsAndABARequireAll6561CoherentOffsets() throws Exception {
         byte[] a = scaledGlyph(false), b = scaledGlyph(true); assertArrayEquals(coarse640(a), coarse640(b));
         for (byte[][] pair : new byte[][][]{new byte[][]{a, b}, new byte[][]{b, a}}) {
             LumaPageEvidence e = new LumaPageEvidence(() -> 0);
@@ -167,7 +167,8 @@ public class PageChangeLumaTest {
             e.sample(ByteBuffer.wrap(pair[1]), 640, 480, 640, 1, 1000);
             assertTrue(e.changed(true, 1000)); assertEquals(6561, e.evaluatedOffsets());
         }
-        PageChange page = new PageChange(); frame640(page, a, 0); frame640(page, a, 400); page.consumed();
+        // Both functional paths use the injected clock; real deadlines have separate unknown-state tests.
+        PageChange page = controlledPage(() -> 0); frame640(page, a, 0); frame640(page, a, 400); page.consumed();
         long initial = page.sequence();
         for (int i = 0; i < 8; i++) frame640(page, b, 1000 + i * 200);
         assertTrue(page.sequence() > initial); page.consumed(); long middle = page.sequence();

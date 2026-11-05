@@ -209,6 +209,7 @@ final class GlassCamera {
     private long lastPreviewSensorTimestamp;
     private boolean autoFocusStarted;
     private long autoFocusSensorTimestamp;
+    private long autoFocusCycle;
     private PageChange previewMotion = new PageChange();
     // AGENT_APPROVED=1: opt-in comparison only; never changes the saved JPEG bounds.
     private final boolean paperGeometryEvaluation;
@@ -439,6 +440,7 @@ final class GlassCamera {
             meteringExposureNanos = 0;
             previewSensorTimestamp = 0;
             lastPreviewSensorTimestamp = 0;
+            sceneStartTimestamp = 0;
             autoFocusStarted = false;
             autoFocusSensorTimestamp = 0;
             lastJpegSensorTimestamp = 0;
@@ -549,6 +551,8 @@ final class GlassCamera {
     }
 
     private void previewFrame(ImageReader source, long token) {
+        // A queued notification from a closed reader must not fail a newer healthy stream.
+        if (source != previewReader || token != previewGeneration || closed || unknown) return;
         try (Image image = source.acquireLatestImage()) {
             if (image == null || token != previewGeneration || closed) return;
             long now = SystemClock.elapsedRealtime();
@@ -572,6 +576,7 @@ final class GlassCamera {
                 thumbnail[y * 32 + x] = pixels.get(origin + y * image.getHeight() / 24 * row + x * image.getWidth() / 32 * step);
             }
             long previousScene = pageChange.sequence();
+            if (sceneStartTimestamp == 0) sceneStartTimestamp = timestamp;
             pageChange.observeFrame(thumbnail, pixels, image.getWidth(), image.getHeight(), row, step, timestamp, now);
             framing.fine(pageChange.fineStatus(), image.getWidth(), image.getHeight());
             if (video != null && (!videoSceneObserved || previousScene != pageChange.sequence())) {
@@ -579,6 +584,11 @@ final class GlassCamera {
             }
             if (previousScene != pageChange.sequence()) {
                 sceneStartTimestamp = timestamp;
+                if (generation == 0 || settled) {
+                    // Before shutter issue, the next page needs its own AUTO/MACRO focus cycle.
+                    autoFocusStarted = false;
+                    autoFocusSensorTimestamp = 0;
+                }
                 selectionScene = null;
                 if (capturePending && captureSceneEnd == Long.MAX_VALUE) captureSceneEnd = timestamp;
                 if (activeFuturePage != null && futureSceneEndTimestamp == Long.MAX_VALUE) {
@@ -716,6 +726,8 @@ final class GlassCamera {
     private boolean meteredFrame(long now) {
         // Compare only timestamps from this camera; UNKNOWN timebases are not wall clocks.
         return metering != null && metering.ready(now) && meteringSensorTimestamp > 0
+                // A quick turn can finish its quiet interval while the previous page's result is still fresh.
+                && meteringSensorTimestamp >= sceneStartTimestamp
                 && (!metering.needsTrigger() || (autoFocusStarted && autoFocusSensorTimestamp > 0
                 && meteringSensorTimestamp >= autoFocusSensorTimestamp))
                 && previewSensorTimestamp > 0 && Math.abs(meteringSensorTimestamp - previewSensorTimestamp)
@@ -724,10 +736,12 @@ final class GlassCamera {
 
     private CameraCaptureSession.CaptureCallback previewResults(long token, boolean focusTrigger) {
         long focusGeneration = generation;
+        long focusCycle = autoFocusCycle;
         return new CameraCaptureSession.CaptureCallback() {
             private boolean current() {
                 return token == previewGeneration && !closed && !unknown
-                        && (!focusTrigger || (focusGeneration == generation && autoFocusStarted));
+                        && (!focusTrigger || (focusGeneration == generation
+                        && focusCycle == autoFocusCycle && autoFocusStarted));
             }
             @Override public void onCaptureCompleted(CameraCaptureSession source,
                     CaptureRequest request, TotalCaptureResult result) {
@@ -889,6 +903,7 @@ final class GlassCamera {
             if (mode == Mode.VIDEO_EVALUATION) addVideoTarget(trigger);
             applyMetering(trigger);
             trigger.set(CaptureRequest.CONTROL_AF_TRIGGER, CaptureRequest.CONTROL_AF_TRIGGER_START);
+            autoFocusCycle++;
             autoFocusStarted = true;
             previewSession.capture(trigger.build(), previewResults(previewGeneration, true), handler);
         } catch (CameraAccessException | RuntimeException error) { previewFailed("camera autofocus failed"); }

@@ -7,7 +7,19 @@ import pytest
 
 from app.llm import LLMClient
 from app.solvers import Question, register_solver, solve_with_fallback
-from app.solvers.llm_adapter import _ANSWER_ONLY_SYSTEM, LLMSolver
+from app.solvers.llm_adapter import _ANSWER_ONLY_SYSTEM, LLMSolver, answer_numbers
+
+
+def test_printed_numbers_survive_beyond_twenty_blanks_and_three_digits():
+    numbers = list(range(1, 22)) + [1000, 2026, 9999]
+    assert answer_numbers(numbers) == numbers
+    assert answer_numbers(["1000", "2026", "1000"]) == [1000, 2026]
+
+
+@pytest.mark.parametrize("numbers", [[10000], list(range(1, 1002)), [0, 1], [-1], ["A"], [True]])
+def test_unrepresentable_number_lists_fail_instead_of_dropping_printed_labels(numbers):
+    with pytest.raises(ValueError, match="answer number"):
+        answer_numbers(numbers)
 
 
 def test_answer_only_system_keeps_the_derivation_for_a_written_solution():
@@ -37,6 +49,13 @@ def test_written_proof_survives_adapter_and_registry_without_display_length_limi
         tiers=["answer-sheet-test"],
     )
     assert result.answer == proof
+
+
+def test_indented_code_fragment_survives_solver_entry():
+    answer = "    total_cost += i"
+    result = solver_for({"answer": answer, "status": "ready"}).solve(
+        question=Question(body_text="空欄に入るコードを記入", answer_only=True))
+    assert result.answer == answer
 
 
 def test_selection_keeps_only_the_written_label_and_excludes_supplementary_sections():

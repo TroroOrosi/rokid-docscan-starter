@@ -97,9 +97,10 @@ public final class AnswerBundle {
                     .put("answer", item.answer).put("status", item.status.name().toLowerCase(Locale.ROOT))
                     .put("issue", item.issue).put("diagrams", AnswerDiagram.encode(item.diagrams))
                     .put("answer_no", new JSONArray(item.answerNumbers)));
-            boolean hasDiagrams = false;
-            for (AnswerItem item : items) hasDiagrams |= !item.diagrams.isEmpty();
-            String json = new JSONObject().put("schema_version", hasDiagrams ? 2 : SCHEMA_VERSION)
+            int schema = SCHEMA_VERSION;
+            for (AnswerItem item : items) for (AnswerDiagram diagram : item.diagrams)
+                schema = Math.max(schema, diagram.schemaVersion);
+            String json = new JSONObject().put("schema_version", schema)
                     .put("session_id", sessionId).put("input_digest", inputDigest)
                     .put("revision", revision).put("analysis_stage", analysisStage)
                     .put("available_stage", availableStage).put("items", array).toString();
@@ -119,7 +120,7 @@ public final class AnswerBundle {
         }
         JSONObject root = new JSONObject(json);
         long schema = number(root, "schema_version");
-        if (schema != SCHEMA_VERSION && schema != 2) {
+        if (schema != SCHEMA_VERSION && schema != 2 && schema != 3) {
             throw new IllegalArgumentException("unsupported answer schema");
         }
         JSONArray array = root.getJSONArray("items");

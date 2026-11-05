@@ -3,8 +3,10 @@ package dev.rokid.docscanglass.doc;
 import android.content.Context;
 import android.graphics.Canvas;
 import android.graphics.Color;
+import android.graphics.DashPathEffect;
 import android.graphics.Paint;
 import android.graphics.Path;
+import android.graphics.RectF;
 import android.graphics.Typeface;
 import android.view.View;
 import dev.rokid.docscanrelay.study.AnswerLayout;
@@ -160,6 +162,9 @@ final class AnswerView extends View {
             for (int i = 0; i < elements.length(); i++) {
                 JSONObject e = elements.getJSONObject(i);
                 vector.setStyle(Paint.Style.STROKE);
+                vector.setPathEffect(e.optBoolean("dashed", false)
+                        ? new DashPathEffect(new float[]{vector.getStrokeWidth() * 4,
+                                vector.getStrokeWidth() * 3}, 0) : null);
                 switch (e.getString("type")) {
                     case "line":
                         canvas.drawLine(left + (float)e.getDouble("x1") * width,
@@ -167,9 +172,29 @@ final class AnswerView extends View {
                                 left + (float)e.getDouble("x2") * width,
                                 top + (float)e.getDouble("y2") * height, vector); break;
                     case "circle":
+                        if (e.has("filled") && !e.getBoolean("filled")) {
+                            // An open endpoint must clear the curve beneath it. Ordinary
+                            // geometric circles (without filled) keep their interiors.
+                            Paint background = new Paint(vector);
+                            background.setPathEffect(null);
+                            background.setStyle(Paint.Style.FILL);
+                            background.setColor(Color.BLACK);
+                            canvas.drawCircle(left + (float)e.getDouble("cx") * width,
+                                    top + (float)e.getDouble("cy") * height,
+                                    (float)e.getDouble("r") * Math.min(width, height), background);
+                        }
+                        if (e.optBoolean("filled", false)) vector.setStyle(Paint.Style.FILL);
                         canvas.drawCircle(left + (float)e.getDouble("cx") * width,
                                 top + (float)e.getDouble("cy") * height,
                                 (float)e.getDouble("r") * Math.min(width, height), vector); break;
+                    case "arc":
+                        float cx = left + (float)e.getDouble("cx") * width;
+                        float cy = top + (float)e.getDouble("cy") * height;
+                        float radius = (float)e.getDouble("r") * Math.min(width, height);
+                        canvas.drawArc(new RectF(cx - radius, cy - radius, cx + radius, cy + radius),
+                                (float)e.getDouble("start_degrees"), (float)e.getDouble("sweep_degrees"),
+                                false, vector); break;
+                    case "polygon":
                     case "polyline":
                         Path path = new Path();
                         JSONArray points = e.getJSONArray("points");
@@ -178,6 +203,19 @@ final class AnswerView extends View {
                             float x = left + (float)p.getDouble(0) * width;
                             float y = top + (float)p.getDouble(1) * height;
                             if (j == 0) path.moveTo(x, y); else path.lineTo(x, y);
+                        }
+                        if (e.getString("type").equals("polygon")) {
+                            path.close();
+                            if (e.optBoolean("hatched", false)) {
+                                int save = canvas.save();
+                                canvas.clipPath(path);
+                                Paint hatch = new Paint(vector);
+                                hatch.setPathEffect(null);
+                                float spacing = Math.max(10, getHeight() * .02f);
+                                for (float x = left - height; x < left + width; x += spacing)
+                                    canvas.drawLine(x, top + height, x + height, top, hatch);
+                                canvas.restoreToCount(save);
+                            }
                         }
                         canvas.drawPath(path, vector); break;
                     case "text":

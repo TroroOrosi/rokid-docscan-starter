@@ -14,6 +14,40 @@ from app.solvers import chatgpt_web, chatgpt_work_web as work
 from app.solvers.cdp import connect_over_cdp
 
 
+def _stop_owned_browser(browser, process):
+    """Close only this fixture's private-profile Popen; production close is detach."""
+    if browser is not None:
+        try:
+            if process.poll() is None:
+                browser._connection.timeout_s = 2
+                browser._connection.send("Browser.close")
+        except Exception:
+            # Chrome may close the socket before acknowledging its own shutdown.
+            pass
+        finally:
+            browser.close()
+    elif process.poll() is None:
+        process.terminate()
+    try:
+        process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        process.terminate()
+        process.wait(timeout=10)  # Never hide a failed cleanup or kill other browsers.
+
+
+def _wait_owned_browser_port(port_file, deadline):
+    # On Windows Chrome can create the file before releasing its writer handle.
+    while time.monotonic() < deadline:
+        try:
+            port = int(port_file.read_text(encoding="utf-8").splitlines()[0])
+            if 1 <= port <= 65535:
+                return port
+        except (OSError, ValueError, IndexError):
+            pass
+        time.sleep(0.05)
+    raise AssertionError("local Chromium did not expose a readable debugging port")
+
+
 @pytest.fixture(scope="module")
 def browser_page(tmp_path_factory):
     executable = next((p for p in [shutil.which("google-chrome"), shutil.which("chromium"),
@@ -34,10 +68,7 @@ def browser_page(tmp_path_factory):
     try:
         port_file = directory / "profile" / "DevToolsActivePort"
         deadline = time.monotonic() + 20
-        while not port_file.exists() and time.monotonic() < deadline:
-            time.sleep(0.05)
-        assert port_file.exists(), "local Chromium did not expose its debugging port"
-        port = int(port_file.read_text(encoding="utf-8").splitlines()[0])
+        port = _wait_owned_browser_port(port_file, deadline)
         browser = connect_over_cdp(f"http://127.0.0.1:{port}")
         page = browser.contexts[0].pages[0]
         while time.monotonic() < deadline:
@@ -47,10 +78,59 @@ def browser_page(tmp_path_factory):
         assert page.url == fixture.as_uri() and page.evaluate("document.readyState") == "complete"
         yield page
     finally:
-        if browser is not None:
-            browser.close()
-        process.terminate()
-        process.wait(timeout=10)
+        _stop_owned_browser(browser, process)
+
+
+@pytest.mark.parametrize("socket_eof", [False, True])
+def test_owned_browser_shutdown_prefers_graceful_close(socket_eof):
+    from unittest.mock import Mock
+
+    browser, process = Mock(), Mock()
+    process.poll.return_value = None
+    if socket_eof:
+        browser._connection.send.side_effect = RuntimeError("closed")
+    _stop_owned_browser(browser, process)
+    browser._connection.send.assert_called_once_with("Browser.close")
+    browser.close.assert_called_once()
+    process.wait.assert_called_once_with(timeout=10)
+    process.terminate.assert_not_called()
+
+
+def test_owned_browser_cleanup_reports_a_process_that_will_not_stop():
+    from unittest.mock import Mock
+
+    browser, process = Mock(), Mock()
+    process.poll.return_value = None
+    process.wait.side_effect = subprocess.TimeoutExpired("owned-fixture", 10)
+    with pytest.raises(subprocess.TimeoutExpired):
+        _stop_owned_browser(browser, process)
+    process.terminate.assert_called_once()
+    assert process.wait.call_count == 2
+
+
+def test_owned_browser_cleanup_skips_closed_process_and_handles_failed_initialization():
+    from unittest.mock import Mock
+
+    browser, process = Mock(), Mock()
+    process.poll.return_value = 0
+    _stop_owned_browser(browser, process)
+    browser._connection.send.assert_not_called()
+    process.terminate.assert_not_called()
+    running = Mock()
+    running.poll.return_value = None
+    _stop_owned_browser(None, running)
+    running.terminate.assert_called_once()
+
+
+def test_owned_browser_port_waits_for_complete_readable_file(monkeypatch):
+    from unittest.mock import Mock
+
+    monkeypatch.setattr(time, "sleep", lambda _: None)
+    path = Mock()
+    path.read_text.side_effect = [PermissionError(), "", "partial", "0", "65536", "12345\n/ws"]
+    assert _wait_owned_browser_port(path, time.monotonic() + 5) == 12345
+    with pytest.raises(AssertionError, match="readable debugging port"):
+        _wait_owned_browser_port(path, 0)
 
 
 @pytest.fixture

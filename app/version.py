@@ -253,7 +253,8 @@ from __future__ import annotations
 # 0.66.2: include watcher work in its polling interval instead of adding fixed delay.
 # 0.66.3: retain unlabelled questions and nonconsecutive printed answer numbers.
 # 0.66.4: share capture context with Work and supplement coarse page-change evidence.
-APP_VERSION = "0.66.4"
+# 0.67.0: extended graph/construction slides, lossless plain answers and scene-bound metering.
+APP_VERSION = "0.67.0"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.
@@ -374,7 +375,8 @@ APP_VERSION = "0.66.4"
 # 1.38.0: /capture-videos accepts sealed original-video comparison clips and their journals.
 # 1.39.0: optional capture inspection origins and authenticated diagnostic result lookups.
 # 1.39.1: source-position labels for unlabelled questions; do not invent numeric gaps.
-API_VERSION = "1.39.1"
+# 1.40.0: schema 3 for extended vector diagrams; preserve printed answer-number bounds.
+API_VERSION = "1.40.0"
 
 # Matching algorithm identity. Bump when thresholds or hashing change so a
 # re-index/eval is triggered. Mirrors thresholds in app/matching.py.
@@ -437,7 +439,8 @@ ANALYZER_API_VERSION = "1.0.0"
 #        the final message requests all answers after every source was received.
 # 1.9.0: mixed reading and listening stages share the original paper/chat
 #        identity and retain completed reading answers when audio arrives.
-SOLVER_API_VERSION = "1.9.0"
+# 1.10.0: optional vector styles, arcs and hatched polygons in answer diagrams.
+SOLVER_API_VERSION = "1.10.0"
 
 # Media-extractor plugin interface (formula/figure/graph/table).
 EXTRACTOR_API_VERSION = "1.0.0"
@@ -526,7 +529,8 @@ EXPLAINER_API_VERSION = "1.1.0"
 # 1.39.0: fence stale power generations and show bounded, identity-bound capture feedback.
 # 1.40.0: opt-in native A/B selection retains both originals and reviews the chosen image.
 # 1.41.0: bounded fine-detail page-change evidence with coherent preview registration.
-GLASSES_VIEW_CONTRACT_VERSION = "1.41.0"
+# 1.42.0: extended diagram rendering and metering fenced to the current page scene.
+GLASSES_VIEW_CONTRACT_VERSION = "1.42.0"
 
 # Answer-area overlay payload (box + short answer; 2D image-anchored).
 # 1.1.0: added tracking metadata (tracking/fixed_ar/anchor_hint).

@@ -9,6 +9,32 @@ import org.robolectric.RobolectricTestRunner;
 
 @RunWith(RobolectricTestRunner.class)
 public class AnswerDiagramTest {
+    @Test public void extendedGeometryAndUnicodeSurviveOfflineRoundTrip() throws Exception {
+        JSONObject value = new JSONObject("{\"alt\":\"graph\",\"aspect_ratio\":1.3,\"elements\":["
+                + "{\"type\":\"circle\",\"cx\":0.2,\"cy\":0.5,\"r\":0.26},"
+                + "{\"type\":\"arc\",\"cx\":0.5,\"cy\":0.5,\"r\":0.3,\"start_degrees\":30,\"sweep_degrees\":-120,\"dashed\":true},"
+                + "{\"type\":\"polygon\",\"points\":[[0.1,0.8],[0.5,0.2],[0.9,0.8]],\"hatched\":true},"
+                + "{\"type\":\"circle\",\"cx\":0.8,\"cy\":0.5,\"r\":0.02,\"filled\":true}]}");
+        value.getJSONArray("elements").put(new JSONObject().put("type", "text").put("x", .5).put("y", .1)
+                .put("text", "𝑥".repeat(80)));
+        AnswerDiagram diagram = new AnswerDiagram(value);
+        assertEquals(3, diagram.schemaVersion);
+        AnswerItem item = new AnswerItem("g1", "用紙", "q1", "項目1", "x²", AnswerItem.Status.READY, "", List.of(diagram));
+        String saved = new AnswerBundle("1", "a".repeat(64), 1, List.of(item)).toJson();
+        assertEquals(3, new JSONObject(saved).getInt("schema_version"));
+        AnswerBundle restored = AnswerBundle.fromJson(saved);
+        assertEquals(value.toString(), restored.items.get(0).diagrams.get(0).toJson().toString());
+        AnswerReader reader = new AnswerReader(restored, 20, 2, String::length, true);
+        while (reader.diagram() == null) reader.forward();
+        AnswerReader resumed = new AnswerReader(restored, 20, 2, String::length, true);
+        resumed.restore("q1", reader.offset());
+        assertEquals(diagram, resumed.diagram());
+        assertThrows(Exception.class, () -> new AnswerDiagram(new JSONObject(value.toString())
+                .put("elements", new org.json.JSONArray("[{\"type\":\"arc\",\"cx\":0.5,\"cy\":0.5,\"r\":0.2,\"start_degrees\":0,\"sweep_degrees\":0}]"))));
+        assertThrows(Exception.class, () -> new AnswerDiagram(new JSONObject(value.toString())
+                .put("elements", new org.json.JSONArray("[{\"type\":\"circle\",\"cx\":0.5,\"cy\":0.5,\"r\":0.2,\"filled\":1}]"))));
+    }
+
     @Test public void diagramSurvivesOfflineBundlePagingAndResume() throws Exception {
         AnswerDiagram diagram = new AnswerDiagram(new JSONObject("{\"alt\":\"circle\",\"aspect_ratio\":1,"
                 + "\"elements\":[{\"type\":\"circle\",\"cx\":0.5,\"cy\":0.5,\"r\":0.3}]}"));

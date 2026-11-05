@@ -238,6 +238,7 @@ public class GlassCameraDeliveryTest {
     }
 
     @Test public void previewObservationsDuringReviewLatchTheTurnWithoutStartingAnotherStill() {
+        ReflectionHelpers.setField(camera, "previewReader", reader);
         DocScanTestImage image = (DocScanTestImage) readerShadow.image;
         image.format = ImageFormat.YUV_420_888;
         image.width = 32;

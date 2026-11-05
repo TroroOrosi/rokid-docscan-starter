@@ -809,8 +809,37 @@ public class GlassCameraWarmSessionTest {
         camera.captureOnce(); idle(350);
         assertEquals(0, firstDevice().session.captures);
         idle(50);
+        assertEquals("motion settled, but the previous page's metering is insufficient", 0, firstDevice().session.captures);
+        result(CONTROL_AF_STATE_PASSIVE_FOCUSED, CONTROL_AE_STATE_CONVERGED); idle(50);
         assertEquals(1, firstDevice().session.captures);
         assertEquals(2, displayed); assertTrue(failures.isEmpty());
+    }
+
+    @Test public void aNewSceneCannotBorrowThePreviousPagesStillFreshMetering() {
+        camera.preview(); idle(100);
+        result(CONTROL_AF_STATE_PASSIVE_FOCUSED, CONTROL_AE_STATE_CONVERGED); frame(180);
+        idle(400); result(CONTROL_AF_STATE_PASSIVE_FOCUSED, CONTROL_AE_STATE_CONVERGED); frame(180);
+        idle(30); frame(180, true); idle(30); frame(180);
+        camera.captureOnce(); idle(400);
+        // The old result is only 460 ms old, but describes the page before the turn.
+        assertEquals("freshness alone cannot authorize a different scene", 0, firstDevice().session.captures);
+        result(CONTROL_AF_STATE_PASSIVE_FOCUSED, CONTROL_AE_STATE_SEARCHING); frame(180); idle(50);
+        assertEquals("the new scene must actually converge", 0, firstDevice().session.captures);
+        result(CONTROL_AF_STATE_PASSIVE_FOCUSED, CONTROL_AE_STATE_CONVERGED); frame(180); idle(50);
+        assertEquals(1, firstDevice().session.captures);
+        assertTrue(failures.isEmpty());
+    }
+
+    @Test public void automaticNextPageWaitsForItsOwnMeteringOnFixedFocusHardware() {
+        CharacteristicsShadow.fixedFocus = true;
+        camera.preview(); idle(100);
+        result(CONTROL_AF_STATE_INACTIVE, CONTROL_AE_STATE_CONVERGED); frame(180);
+        PageChange pages = ReflectionHelpers.getField(camera, "pageChange"); pages.consumed();
+        AtomicInteger ready = new AtomicInteger(); camera.awaitNextPage(ready::incrementAndGet); idle(0);
+        idle(30); frame(180, true); idle(30); frame(180); idle(400); frame(180);
+        assertEquals("a fixed lens still requires this page's exposure", 0, ready.get());
+        idle(1); result(CONTROL_AF_STATE_INACTIVE, CONTROL_AE_STATE_CONVERGED); frame(180);
+        assertEquals(1, ready.get()); assertTrue(failures.isEmpty());
     }
 
     @Test public void invalidDuplicateAndReversedFramesCannotBecomeNewPageObservations() {
@@ -844,12 +873,95 @@ public class GlassCameraWarmSessionTest {
         assertEquals(0, ready.get()); assertTrue(failures.isEmpty());
     }
 
+    @Test public void aQueuedClosedReaderFailureCannotStopTheCurrentPreview() {
+        camera.preview(); idle(100); frame(180);
+        ReaderShadow old = currentReader(ImageFormat.YUV_420_888);
+        camera.pausePreview(); idle(0); camera.preview(); idle(100);
+        result(CONTROL_AF_STATE_PASSIVE_FOCUSED, CONTROL_AE_STATE_CONVERGED); frame(180);
+        DocScanTestCamera reopened = currentDevice();
+        assertTrue(old.closed);
+        old.acquireFailure = new IllegalStateException("closed native reader");
+        old.listener.onImageAvailable(old.reader);
+        assertTrue("a stale reader must be rejected before native acquisition", failures.isEmpty());
+        assertFalse(reopened.closed);
+        camera.captureOnce(); idle(400);
+        result(CONTROL_AF_STATE_PASSIVE_FOCUSED, CONTROL_AE_STATE_CONVERGED); frame(180); idle(50);
+        assertEquals(1, reopened.session.captures); assertTrue(failures.isEmpty());
+    }
+
+    @Test public void aReopenedSamePageNeedsMeteringFromItsFirstObservedFrameOrLater() {
+        camera.preview(); idle(100); frame(180);
+        PageChange pages = ReflectionHelpers.getField(camera, "pageChange"); pages.consumed();
+        long scene = pages.sequence();
+        camera.pausePreview(); idle(0); camera.preview(); idle(100);
+        result(CONTROL_AF_STATE_PASSIVE_FOCUSED, CONTROL_AE_STATE_CONVERGED);
+        idle(50); frame(180); // the first observation of this stream follows its early metering result
+        assertEquals("a stream restart alone is not another page", scene, pages.sequence());
+        camera.captureOnce(); idle(400);
+        assertEquals("the previous stream's scene floor cannot admit pre-observation metering", 0, currentDevice().session.captures);
+        result(CONTROL_AF_STATE_PASSIVE_FOCUSED, CONTROL_AE_STATE_CONVERGED); frame(180); idle(50);
+        assertEquals(1, currentDevice().session.captures); assertTrue(failures.isEmpty());
+    }
+
+    @Test public void currentPreviewAcquisitionFailureStillBlocksAnotherCapture() {
+        camera.preview(); idle(100);
+        ReaderShadow current = currentReader(ImageFormat.YUV_420_888);
+        current.acquireFailure = new IllegalStateException("current native reader failure");
+        current.listener.onImageAvailable(current.reader);
+        assertEquals(List.of("preview unavailable"), failures);
+        camera.captureOnce(); idle(100);
+        assertEquals(1, ManagerShadow.devices.size());
+        assertTrue(current.closed); assertTrue(currentDevice().closed);
+        assertEquals(0, currentDevice().session.captures);
+    }
+
     @Test public void autoOnlyHardwareStartsFocusBeforeTheFirstAutomaticPageCallback() {
         firstAutomaticPage(CONTROL_AF_MODE_AUTO);
     }
 
     @Test public void macroOnlyHardwareStartsFocusBeforeTheFirstAutomaticPageCallback() {
         firstAutomaticPage(CONTROL_AF_MODE_MACRO);
+    }
+
+    @Test public void aTurnDuringAutoFocusPreparationCannotKeepThePreviousPagesLock() {
+        turnDuringFocusPreparation(CONTROL_AF_MODE_AUTO);
+    }
+
+    @Test public void aTurnDuringMacroFocusPreparationCannotKeepThePreviousPagesLock() {
+        turnDuringFocusPreparation(CONTROL_AF_MODE_MACRO);
+    }
+
+    private void turnDuringFocusPreparation(int mode) {
+        CharacteristicsShadow.afMode = mode;
+        camera.captureOnce(); idle(100); frame(180); idle(400); frame(180);
+        var session = currentDevice().session;
+        assertEquals(1, session.captures);
+        var oldCallback = session.captureCallback;
+        var oldRequest = session.captured;
+        oldCallback.onCaptureCompleted(session, oldRequest,
+                metadata(CONTROL_AF_STATE_ACTIVE_SCAN, CONTROL_AE_STATE_CONVERGED, SystemClock.elapsedRealtimeNanos()));
+        idle(30); frame(180, true); idle(30); frame(180); idle(400);
+        result(CONTROL_AF_STATE_FOCUSED_LOCKED, CONTROL_AE_STATE_CONVERGED); frame(180);
+        assertEquals("the new page needs its own AF START, not the old page's locked lens", 2, session.captures);
+        assertEquals(CameraDevice.TEMPLATE_PREVIEW, ((RequestShadow)Shadow.extract(session.captured)).template);
+        var newCallback = session.captureCallback;
+        var newRequest = session.captured;
+        idle(1);
+        oldCallback.onCaptureCompleted(session, oldRequest,
+                metadata(CONTROL_AF_STATE_FOCUSED_LOCKED, CONTROL_AE_STATE_CONVERGED, SystemClock.elapsedRealtimeNanos()));
+        oldCallback.onCaptureFailed(session, oldRequest, null);
+        idle(50);
+        assertEquals("the prior scene's completion cannot acknowledge the new AF cycle", 2, session.captures);
+        assertTrue(failures.isEmpty());
+        newCallback.onCaptureCompleted(session, newRequest,
+                metadata(CONTROL_AF_STATE_ACTIVE_SCAN, CONTROL_AE_STATE_CONVERGED, SystemClock.elapsedRealtimeNanos()));
+        idle(1); result(CONTROL_AF_STATE_FOCUSED_LOCKED, CONTROL_AE_STATE_CONVERGED); frame(180); idle(50);
+        assertEquals(3, session.captures);
+        assertEquals(CameraDevice.TEMPLATE_STILL_CAPTURE, ((RequestShadow)Shadow.extract(session.captured)).template);
+        idle(30); frame(180, true); idle(30); frame(180); idle(400);
+        result(CONTROL_AF_STATE_FOCUSED_LOCKED, CONTROL_AE_STATE_CONVERGED); frame(180); idle(50);
+        assertEquals("a turn cannot start another focus or JPEG request while the original is in flight", 3, session.captures);
+        assertTrue(failures.isEmpty());
     }
 
     private void firstAutomaticPage(int mode) {
@@ -1197,7 +1309,10 @@ public class GlassCameraWarmSessionTest {
         }
         @Implementation protected Surface getSurface() { return surface; }
         @Implementation protected void setOnImageAvailableListener(ImageReader.OnImageAvailableListener l, Handler h) { listener = l; }
-        @Implementation protected Image acquireLatestImage() { return image; }
+        @Implementation protected Image acquireLatestImage() {
+            if (acquireFailure != null) throw acquireFailure;
+            return image;
+        }
         @Implementation protected Image acquireNextImage() {
             if (acquireFailure != null) throw acquireFailure;
             return image;
