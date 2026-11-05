@@ -1345,6 +1345,8 @@ PC Chrome 152 での画像付きは 9.0 s（2026-09-14）。
 `SLOW_S=40` / `SLOW_STREAK=2` のブレーキがこの端末で妥当かどうか。
 ブレーキは 2026-09-14 にアカウントが止まった実測から入れたもので、
 **閾値の変更は利用者の判断が要る**。
+（2026-09-29 追記：background解析を1教科1通にしたため、ブレーキは削除し、
+`TIMEOUT_S` の既定は 9000 秒（セッション全体）にした。上の数値はその前の設定。）
 
 `adb forward tcp:9222` を張ったまま `py -3.12 -m pytest -q` を回したところ、
 `tests/test_chatgpt_web_live.py` の門（`cdp_available() is None` で skip）が

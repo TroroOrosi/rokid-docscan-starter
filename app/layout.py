@@ -34,12 +34,10 @@ _Q_PATTERNS = [
 # parentheses like 「大戦（1914）」 are years/inline notes, not boundaries.
 # Arabic digits realistically run 1-3 digits; the class also matches kanji
 # numerals (一-十) and a single Latin capital (A-Z / full-width Ａ-Ｚ), so
-# (三) and (A) count as markers too, not just (1). Because it counts any
-# line-leading parenthesized letter, a line-leading choice list like
-# "(A) りんご" now becomes its own question unit rather than body text —
-# _CHOICE_RE requires no leading parenthesis, so parenthesized choice lists
-# on their own lines over-split. The same was already true for (1)-style
-# choices, so this extends known behaviour rather than introducing it.
+# (三) and (A) count as markers too, not just (1). Under a 問N, a letter
+# line is that question's choice instead (see parse_layout); elsewhere a
+# parenthesized choice list still over-splits, and (1)-style choices do
+# everywhere, because text alone cannot tell them from sub-questions.
 _PAREN_Q_RE = re.compile(
     r"^\s*[（(]\s*(?:([0-9０-９]{1,3})|([一二三四五六七八九十]{1,3})|([A-ZＡ-Ｚ]))\s*[)）]"
 )
@@ -152,6 +150,15 @@ def parse_layout(
     for line in lines:
         qno = _detect_question_no(line)
         choice_m = _CHOICE_RE.match(line)
+        # RP-12a: under a 小問 (問N), a (A)-style letter line is one of its
+        # choices; the whole line is kept so the label survives. Under a 大問
+        # or at top level it still splits (東大 1(A)/1(B) are problems).
+        paren = _PAREN_Q_RE.match(line)
+        if (paren and paren.group(3) and current is not None
+                and (current.question_no or "").startswith("問")):
+            current.choices.append(line)
+            current.figure_refs.extend(_FIGURE_RE.findall(line))
+            continue
         if qno is not None and not choice_m:
             _flush()
             current = QuestionUnit(question_no=qno, body_text=line)
@@ -382,8 +389,15 @@ def segment_problems(
         first.body_text = "\n".join(preamble_parts + [first.body_text]).strip()
         first.page_indexes = sorted(set(preamble_pages) | set(first.page_indexes))
 
-    # Disambiguate duplicate numbers: the deck / ingest address problems by
-    # this string, so it must be unique within the document.
+    return unique_question_numbers(problems)
+
+
+def unique_question_numbers(problems: list[ProblemUnit]) -> list[ProblemUnit]:
+    """Suffix repeated numbers (問1 under two 大問 -> 問1(2)).
+
+    The deck / ingest address problems by this string, so it must be unique
+    within the document.
+    """
     seen: dict[str, int] = {}
     for p in problems:
         if p.question_no is None:
@@ -392,5 +406,4 @@ def segment_problems(
         seen[p.question_no] = n
         if n > 1:
             p.question_no = f"{p.question_no}({n})"
-
     return problems

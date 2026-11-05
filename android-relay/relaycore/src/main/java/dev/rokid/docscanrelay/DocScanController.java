@@ -2,6 +2,7 @@ package dev.rokid.docscanrelay;
 
 import android.content.Context;
 import android.content.SharedPreferences;
+import android.os.PowerManager;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -67,29 +68,6 @@ public final class DocScanController implements AutoCloseable {
     // enough to be tapped away.
     private static final long AUTO_COMMIT_COMPLETE_MILLIS = 4000;
     private static final long AUTO_COMMIT_UNVERIFIED_MILLIS = 12000;
-    // Hands-free reading. On the capture-review view a tap closes the
-    // CustomView without delivering any AI event, so that state has no usable
-    // glasses input at all and no amount of gesture work will give it one.
-    // Instead of asking, the relay shoots the same page several times, keeps
-    // the frame the recogniser did best on, and registers it.
-    private static final int AUTO_BURST_SHOTS = 3;
-    // Continuous scanning is what the operator asked for, so the intervals
-    // are only long enough to let the camera settle between frames and to
-    // let a page be turned. They are not a throttle.
-    private static final long AUTO_SHOT_INTERVAL_MILLIS = 400;
-    private static final long AUTO_PAGE_TURN_MILLIS = 2500;
-    /** Give up on a page that keeps reading as the one already registered. */
-    private static final int AUTO_DUPLICATE_BURST_LIMIT = 20;
-    /** An unreadable burst is retried at once; nothing was captured to keep. */
-    private static final long AUTO_RETRY_IMMEDIATE_MILLIS = 200;
-    /**
-     * Unreadable bursts keep retrying at full speed for this long before the
-     * interval opens up slightly. This is a thermal and battery guard, not a
-     * privacy one: the LED stays lit for exactly as long as the camera runs,
-     * which is the whole point of it.
-     */
-    private static final int AUTO_UNREADABLE_RETRY_LIMIT = 40;
-    private static final long AUTO_UNREADABLE_BACKOFF_MILLIS = 1200;
     private static final String KEY_PHOTO_WIDTH = "photo_width";
     private static final String KEY_PHOTO_HEIGHT = "photo_height";
     private static final String KEY_PHOTO_QUALITY = "photo_quality";
@@ -109,10 +87,23 @@ public final class DocScanController implements AutoCloseable {
     private volatile LocalCaptureSession localSession;
     private String localRestoreError;
     private final ExecutorService localNetwork = Executors.newSingleThreadExecutor();
+    private final ExecutorService nativeQuality = Executors.newSingleThreadExecutor();
+    private final java.util.concurrent.atomic.AtomicBoolean nativeQualityBusy = new java.util.concurrent.atomic.AtomicBoolean();
     private boolean localNetworkBusy;
     private boolean localUploadBlocked;
     private volatile boolean closed;
     private final RetryCursor retryCursor = new RetryCursor();
+    private volatile java.util.function.Supplier<CaptureInspectionOrigin.Context> inspectionContext = () -> null;
+    // Metadata only: one selected local session, at most its 1000 pages and two future candidates.
+    private final java.util.concurrent.ConcurrentHashMap<String, InspectionCapture> inspectionCaptures =
+            new java.util.concurrent.ConcurrentHashMap<>();
+    private InspectionRequest inspectionRequest;
+    // latest native feedback is metadata-only, separate from the upload/answer worker.
+    private final CaptureInspectionFeedback inspectionFeedback = new CaptureInspectionFeedback();
+    private final java.util.concurrent.atomic.AtomicLong inspectionEpoch = new java.util.concurrent.atomic.AtomicLong();
+    private record InspectionRequest(CaptureInspectionOrigin.Context context, LocalCaptureSession saved,
+                                     DocScanApi target, long document, int page, long feedbackEpoch) { }
+    private record InspectionCapture(InspectionRequest request, CaptureProvenance source) { }
 
     private volatile RelayState state = RelayState.DISCONNECTED;
     private volatile PhotoCaptureSettings photoSettings = PhotoCaptureSettings.DEFAULT;
@@ -126,6 +117,16 @@ public final class DocScanController implements AutoCloseable {
     private boolean linkReady;
     private volatile long documentId;
     private volatile boolean listeningMode;
+    private volatile boolean mixedMode;
+    /**
+     * Every photo is an explicit tap. The automatic burst decides what to keep
+     * and what to skip from the recogniser's reading of the page, and on the 22
+     * real captures measured 2026-09-29 that reading was not dependable: 7 read
+     * no characters at all and 3 frames with no paper in them were judged
+     * complete. A page that is not a clean exam sheet is exactly that case.
+     */
+    private volatile boolean manualOnly;
+    private final Context context;
     private boolean listeningComplete;
     private boolean listeningFailed;
     private int nextPageIndex;
@@ -157,16 +158,14 @@ public final class DocScanController implements AutoCloseable {
     private boolean autoCaptureEnabled;
     private boolean manualCaptureRequested;
     private boolean ocrInFlight;
-    private boolean finishCaptureRequested;
+    private volatile boolean finishCaptureRequested;
     private long autoRunGeneration;
+    private long futureCaptureEpoch;
+    private boolean futureWatching;
+    private volatile boolean futureStopping;
+    private boolean reacquiringCaptureGap;
+    private volatile boolean localCameraUnknown;
     private static final long LOCAL_REVIEW_MILLIS = 3000;
-    private int autoShotsRemaining;
-    private int autoShotsTaken;
-    private CaptureReviewStore.Pending autoBest;
-    private double autoBestScore;
-    private String lastRegisteredPageText = "";
-    private int duplicateBurstsSeen;
-    private int unreadableBurstsSeen;
     private volatile long sessionId;
     private int reviewIndex;
     private int reviewViewPage;
@@ -186,6 +185,7 @@ public final class DocScanController implements AutoCloseable {
         this.ocr = ocr;
         this.listener = listener;
         this.client = client;
+        this.context = context.getApplicationContext();
         preferences = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
         localRoot = new File(context.getFilesDir(), "local-scans");
         String localId = preferences.getString(KEY_LOCAL_SESSION, "");
@@ -211,7 +211,10 @@ public final class DocScanController implements AutoCloseable {
             nextPageIndex = localSession.pageCount();
             sessionId = localSession.sessionId();
             listeningMode = localSession.listening();
+            mixedMode = localSession.mixed();
+            listeningComplete = localSession.audioComplete();
             try {
+                localSession.reconcileCandidates();
                 if (new File(localSession.directory(), "pending.bin").exists()) {
                     restored = captureReviewPersistence.readPending();
                     if (localSession.contains(restored)) {
@@ -283,6 +286,88 @@ public final class DocScanController implements AutoCloseable {
     /** The configured client, so a caller never builds an unconfigured one. */
     public DocScanApi api() {
         return api;
+    }
+
+    /** Optional current-run diagnostic context; legacy/restored images do not gain an invented origin. */
+    public void setCaptureInspectionContextProvider(
+            java.util.function.Supplier<CaptureInspectionOrigin.Context> provider) {
+        inspectionContext = provider == null ? () -> null : provider;
+    }
+
+    private CaptureInspectionOrigin.Context inspectionContext() {
+        try { return closed ? null : inspectionContext.get(); }
+        catch (RuntimeException unavailable) { return null; }
+    }
+
+    private InspectionRequest inspectionRequest(LocalCaptureSession saved, int page) {
+        long feedbackEpoch = invalidateInspectionFeedback();
+        CaptureInspectionOrigin.Context run = inspectionContext();
+        DocScanApi target = api;
+        if (run == null || saved == null || saved != localSession || target == null) return null;
+        synchronized (saved) {
+            return saved.phase() != LocalCaptureSession.Phase.CAPTURE || !saved.server().equals(target.serverUrl())
+                    ? null : new InspectionRequest(run, saved, target, saved.documentId(), page, feedbackEpoch);
+        }
+    }
+
+    private void rememberInspection(InspectionRequest request, CaptureProvenance source) {
+        if (request == null || source == null || closed || localCameraUnknown
+                || request.saved != localSession || request.target != api || (request.page >= 0 && request.page != source.pageIndex)
+                || !request.saved.id().equals(source.localSessionId) || !request.context.equals(inspectionContext())) return;
+        // Retakes replace only the optional run association, never an original or its upload cursor.
+        inspectionCaptures.entrySet().removeIf(entry -> entry.getValue().request.saved == request.saved
+                && entry.getValue().source.pageIndex == source.pageIndex);
+        inspectionCaptures.put(source.captureId, new InspectionCapture(request, source));
+    }
+
+    private CaptureInspectionOrigin inspectionOrigin(LocalCaptureSession saved, DocScanApi target,
+                                                     CaptureProvenance source) {
+        if (source == null) return null;
+        InspectionCapture capture = inspectionCaptures.get(source.captureId);
+        if (capture == null || closed || localCameraUnknown || !capture.source.equals(source)) return null;
+        InspectionRequest request = capture.request;
+        long document = saved.documentId();
+        if (request.saved != saved || saved != localSession || request.target != target || target != api
+                || !request.context.equals(inspectionContext()) || document <= 0 || document > Integer.MAX_VALUE
+                || (request.document != 0 && request.document != document)) return null;
+        return new CaptureInspectionOrigin(request.context, source, document);
+    }
+
+    private long invalidateInspectionFeedback() {
+        long epoch = inspectionEpoch.incrementAndGet();
+        inspectionFeedback.clear();
+        if (link.supportsLocalCaptureReview()) link.showCaptureInspectionFeedback(null, () -> false);
+        return epoch;
+    }
+
+    private boolean inspectionFeedbackCurrent(InspectionCapture capture, LocalCaptureSession.Page page) {
+        if (capture == null || closed || localCameraUnknown || finishCaptureRequested) return false;
+        InspectionRequest request = capture.request;
+        if (request.feedbackEpoch != inspectionEpoch.get() || request.saved != localSession || request.target != api
+                || !request.context.equals(inspectionContext())) return false;
+        if (state != RelayState.READING && state != RelayState.AIMING && state != RelayState.STABILIZING
+                && state != RelayState.CAPTURING && state != RelayState.CAPTURE_REVIEW) return false;
+        synchronized (request.saved) {
+            try {
+                return request.saved.phase() == LocalCaptureSession.Phase.CAPTURE && !request.saved.captureGap()
+                        && page.fileName.equals(request.saved.page(page.index).fileName);
+            } catch (IOException unavailable) { return false; }
+        }
+    }
+
+    private void startInspectionFeedback(InspectionCapture capture, LocalCaptureSession.Page page, JSONObject receipt) {
+        if (!inspectionFeedbackCurrent(capture, page)) return;
+        try {
+            InspectionRequest request = capture.request;
+            CaptureInspectionFeedback.Binding binding = CaptureInspectionFeedback.Binding.fromReceipt(
+                    request.context, capture.source, request.saved.documentId(), receipt);
+            if (binding == null) return;
+            java.util.function.BooleanSupplier current = () -> inspectionFeedbackCurrent(capture, page);
+            inspectionFeedback.start(binding, request.target::captureInspection, current,
+                    notice -> link.showCaptureInspectionFeedback(notice, current));
+        } catch (org.json.JSONException | RuntimeException unavailable) {
+            // Optional diagnosis is independent of the already persisted image ACK.
+        }
     }
 
     /**
@@ -408,6 +493,7 @@ public final class DocScanController implements AutoCloseable {
     public boolean hasLocalSession() { return localSession != null || localRestoreError != null; }
     public boolean hasSavedWorkflow() { return !savedCaptures().isEmpty(); }
     public boolean isListeningMode() { return listeningMode; }
+    public boolean isMixedMode() { return mixedMode; }
 
     /** Media shares the local UUID and its validated origin, never just an HTTP document number. */
     public File localCaptureDirectory() throws IOException {
@@ -416,12 +502,33 @@ public final class DocScanController implements AutoCloseable {
         return saved.directory();
     }
 
+    /** Read-only durable binding; comparison media never creates or changes server IDs. */
+    public static final class LocalCaptureBinding {
+        public final String localId, server;
+        public final long documentId, sessionId;
+        public final DocScanApi api;
+        private LocalCaptureBinding(LocalCaptureSession saved, DocScanApi api) {
+            localId=saved.id(); server=saved.server(); documentId=saved.documentId(); sessionId=saved.sessionId(); this.api=api;
+        }
+    }
+    public LocalCaptureBinding localCaptureBinding() {
+        LocalCaptureSession saved=localSession; DocScanApi target=api;
+        if (closed || saved == null || target == null) return null;
+        synchronized (saved) {
+            if (saved.phase() == LocalCaptureSession.Phase.CLOSED || !saved.server().equals(target.serverUrl())) return null;
+            LocalCaptureBinding binding=new LocalCaptureBinding(saved,target);
+            return closed || saved != localSession || target != api ? null : binding;
+        }
+    }
+
     public static final class SavedCapture {
         public final String id;
         public final String label;
         public final boolean listening;
-        private SavedCapture(String id, String label, boolean listening) {
-            this.id = id; this.label = label; this.listening = listening;
+        public final boolean mixed;
+        private SavedCapture(String id, String label, boolean listening) { this(id, label, listening, false); }
+        private SavedCapture(String id, String label, boolean listening, boolean mixed) {
+            this.id = id; this.label = label; this.listening = listening; this.mixed = mixed;
         }
     }
 
@@ -438,8 +545,8 @@ public final class DocScanController implements AutoCloseable {
                     if (!saved.unfinished()) continue;
                     String date = new SimpleDateFormat("M/d HH:mm", Locale.JAPAN)
                             .format(new Date(new File(directory, "state.properties").lastModified()));
-                    result.add(new SavedCapture(saved.id(), date + (saved.listening() ? " 音声 " : " 通常 ")
-                            + saved.pageCount() + "枚", saved.listening()));
+                    result.add(new SavedCapture(saved.id(), date + (saved.mixed() ? " 合同英語 " : saved.listening() ? " 音声 " : " 通常 ")
+                            + saved.pageCount() + "枚", saved.listening(), saved.mixed()));
                 } catch (IOException error) {
                     result.add(new SavedCapture(directory.getName(), "保存記録の復旧が必要", false));
                 }
@@ -470,18 +577,24 @@ public final class DocScanController implements AutoCloseable {
     }
 
     public void startLocalSession(boolean listening, java.util.function.Consumer<Boolean> selection) {
+        startLocalSession(listening ? "listening" : "written", selection);
+    }
+
+    public void startLocalSession(String examType, java.util.function.Consumer<Boolean> selection) {
         serial.execute(() -> {
             if (!link.supportsLocalCaptureReview() || !requireApi() || captureLease.isUnresolved()
                     || state.isCaptureInProgress() || state == RelayState.AIMING || state == RelayState.FINALIZING
-                    || localNetworkBusy || closed) { selection.accept(false); return; }
+                    || localNetworkBusy || futureWatching || futureStopping || closed) { selection.accept(false); return; }
             boolean accepted = false;
             try {
-                LocalCaptureSession next = LocalCaptureSession.create(localRoot, configuredServer, listening);
+                LocalCaptureSession next = LocalCaptureSession.create(localRoot, configuredServer, examType);
                 if (!preferences.edit().putString(KEY_LOCAL_SESSION, next.id()).remove(KEY_DOCUMENT)
                         .remove(KEY_NEXT_PAGE).remove(KEY_SESSION).remove(KEY_COMMITTED_PAGE)
                         .remove(KEY_COMMITTED_JPEG_SHA256).commit()) throw new IOException("読取記録を選択できません");
                 // The previous session and its pending file stay in their original directory.
                 localSession = next;
+                inspectionCaptures.clear();
+                invalidateInspectionFeedback();
                 localRestoreError = null;
                 localUploadBlocked = false;
                 captureReviewPersistence = new CaptureReviewPersistence(new File(next.directory(), "pending.bin"));
@@ -493,10 +606,9 @@ public final class DocScanController implements AutoCloseable {
                 captureTargetPageIndex = -1;
                 retryCursor.clear();
                 autoCaptureEnabled = false;
-                autoShotsRemaining = 0;
-                autoBest = null;
-                lastRegisteredPageText = "";
-                listeningMode = listening;
+
+                listeningMode = next.listening();
+                mixedMode = next.mixed();
                 listeningComplete = listeningFailed = finishCaptureRequested = false;
                 listener.onCaptureReviewCleared();
                 accepted = true;
@@ -517,7 +629,7 @@ public final class DocScanController implements AutoCloseable {
 
     public void resumeLocalSession(String id, java.util.function.Consumer<Boolean> selection) {
         serial.execute(() -> {
-            if (closed || localNetworkBusy || captureLease.isUnresolved() || state.isCaptureInProgress()
+            if (closed || localNetworkBusy || futureWatching || futureStopping || captureLease.isUnresolved() || state.isCaptureInProgress()
                     || state == RelayState.AIMING || state == RelayState.FINALIZING || !requireApi()) {
                 selection.accept(false); return;
             }
@@ -530,6 +642,7 @@ public final class DocScanController implements AutoCloseable {
                     resumeNow(); return;
                 }
                 LocalCaptureSession saved = LocalCaptureSession.load(localRoot, id);
+                saved.reconcileCandidates();
                 if (!saved.server().equals(configuredServer)) {
                     fail("中断資料と接続先が異なります", null); selection.accept(false); return;
                 }
@@ -542,6 +655,8 @@ public final class DocScanController implements AutoCloseable {
                 }
                 saved.resume();
                 localSession = saved;
+                inspectionCaptures.clear();
+                invalidateInspectionFeedback();
                 localRestoreError = null;
                 localUploadBlocked = false;
                 captureReviewPersistence = persistence;
@@ -557,17 +672,24 @@ public final class DocScanController implements AutoCloseable {
                 retryCursor.clear();
                 listeningComplete = listeningFailed = finishCaptureRequested = false;
                 listeningMode = saved.listening();
+                mixedMode = saved.mixed();
+                listeningComplete = saved.audioComplete();
                 accepted = true;
                 selection.accept(true);
                 if (saved.phase() == LocalCaptureSession.Phase.REVIEW) {
+                    if (mixedMode) startLocalCapture(true);
                     publish(RelayState.REVIEW, List.of("答案を再開", "", ""), "Resumed saved answer session");
+                    queueLocalUpload();
                     return;
                 }
                 if (saved.phase() == LocalCaptureSession.Phase.ANALYSIS) {
+                    if (mixedMode) listener.onListeningReady(saved.directory(), saved.documentId(), true);
                     finishCaptureRequested = true;
                     publish(RelayState.FINALIZING, List.of("解析を再開", "資料は保存済み", ""), "Resumed saved analysis");
                 } else if (captureReview.hasPending()) {
                     publishCaptureReview(captureReview.peek(), "Resumed local pending photo", true);
+                    if (listeningMode) startLocalCapture(true);
+                } else if (promoteFutureCandidate()) {
                     if (listeningMode) startLocalCapture(true);
                 } else {
                     publish(RelayState.READING, List.of("読取を再開", nextPageIndex + "枚保存済み", ""), "Resumed local capture");
@@ -578,17 +700,35 @@ public final class DocScanController implements AutoCloseable {
         });
     }
 
-    public void setListeningMode(boolean enabled) { listeningMode = enabled && link.supportsLocalCaptureReview(); }
+    public void setListeningMode(boolean enabled) { listeningMode = enabled && link.supportsLocalCaptureReview(); mixedMode = false; }
+
+    public void setManualCapture(boolean enabled) { manualOnly = enabled; }
+
+    public boolean isManualCapture() { return manualOnly; }
 
     public void completeListening() {
-        serial.execute(() -> { if (!listeningFailed) { listeningComplete = true; finishReadingNow(); } });
+        serial.execute(() -> {
+            if (listeningFailed) return;
+            listeningComplete = true;
+            if (mixedMode && localSession != null) {
+                try { localSession.completeAudio(); queueLocalUpload(); }
+                catch (IOException error) { fail("原音完成を保存できません", error); }
+            } else finishReadingNow();
+        });
     }
 
     public void onListeningError() {
         try { serial.execute(() -> {
             listeningFailed = true;
+            if (mixedMode) {
+                publish(state, List.of("録音を確認してください", "紙の読取は継続", "原音は削除しません"),
+                        "Mixed recording stopped; paper capture continues; original audio retained");
+                return;
+            }
             autoCaptureEnabled = false;
             autoRunGeneration++;
+            link.pausePreview();
+            listener.onAutoCaptureChanged(false);
             reviewGeneration++;
             autoCommitArmed = false;
             publish(RelayState.ERROR, List.of("録音が中断されました", "原音は保存済み", "終了して録音を確認"),
@@ -601,11 +741,12 @@ public final class DocScanController implements AutoCloseable {
         if (listeningMode) {
             listener.onListeningReady(localCaptureDirectory(), documentId, resume);
             queueLocalUpload();
-        } else startAutoCaptureNow();
+        }
+        if (!listeningMode || (mixedMode && localSession.phase() == LocalCaptureSession.Phase.CAPTURE)) startAutoCaptureNow();
     }
 
     private void manualCaptureNow() {
-        if ((finishCaptureRequested && state != RelayState.CAPTURE_REVIEW) || captureLease.isTimedOut()
+        if (localCameraUnknown || futureStopping || (finishCaptureRequested && state != RelayState.CAPTURE_REVIEW) || captureLease.isTimedOut()
                 || state == RelayState.FINALIZING || state == RelayState.UPLOADING) return;
         if (state == RelayState.CAPTURE_REVIEW) finishCaptureRequested = false;
         manualCaptureRequested = true;
@@ -613,14 +754,27 @@ public final class DocScanController implements AutoCloseable {
         autoCommitArmed = false;
         reviewGeneration++;
         reviewWindow = null;
-        // A tap during a burst selects the in-flight still; it never starts a second photo.
+        // A tap never starts a second photo while the current lease is unresolved.
         if (state == RelayState.CAPTURING || ocrInFlight) return;
-        if (reviewBufferedBurst()) return;
-        autoShotsRemaining = 0;
-        autoBest = null;
+
         if (state == RelayState.CAPTURE_REVIEW) {
             retakePendingCaptureNow(null);
         } else if (state != RelayState.AIMING && state != RelayState.STABILIZING) {
+            if (futureWatching) {
+                // An issued future original owns the camera until the idle
+                // acknowledgement. Review it first instead of shooting the same
+                // page index again for this tap.
+                stopFutureObservation(() -> {
+                    if (localCameraUnknown || finishCaptureRequested || state != RelayState.READING) return;
+                    if (promoteFutureCandidate()) return;
+                    reacquiringCaptureGap = localSession != null && localSession.captureGap()
+                            && localSession.candidateCount() == 0;
+                    captureNextPageNow();
+                });
+                return;
+            }
+            reacquiringCaptureGap = localSession != null && localSession.captureGap()
+                    && localSession.candidateCount() == 0;
             captureNextPageNow();
         } else if (state == RelayState.AIMING && captureGuideAcknowledged) {
             triggerArmedCaptureNow();
@@ -628,32 +782,28 @@ public final class DocScanController implements AutoCloseable {
     }
 
     private void finishLocalCaptureNow() {
+        invalidateInspectionFeedback();
         finishCaptureRequested = true;
         autoRunGeneration++;
+        stopFutureObservation(this::finishLocalCaptureWhenCameraIdle);
+    }
+
+    private void finishLocalCaptureWhenCameraIdle() {
+        link.pausePreview();
         if (captureLease.isUnresolved() || ocrInFlight
                 || state == RelayState.UPLOADING || state == RelayState.FINALIZING) return;
-        if (reviewBufferedBurst()) return;
         if (state == RelayState.CAPTURE_REVIEW) {
             if (!autoCommitArmed) publishCaptureReview(captureReview.peek(), "Retry retained photo after operator action", true);
             return; // keep the last full review window
         }
         clearArmedCapture();
-        autoShotsRemaining = 0;
+
         if (captureReview.peek() != null) {
             publishCaptureReview(captureReview.peek(), "Review last photo before finishing", true);
             return;
         }
         state = RelayState.READING;
         finishReadingNow();
-    }
-
-    private boolean reviewBufferedBurst() {
-        if (state != RelayState.OCR || ocrInFlight || autoBest == null) return false;
-        CaptureReviewStore.Pending shot = autoBest;
-        autoBest = null;
-        autoShotsRemaining = 0;
-        stageCaptureReview(shot, null);
-        return true;
     }
 
     /** A hidden/covered still must receive a fresh uninterrupted review window. */
@@ -735,7 +885,7 @@ public final class DocScanController implements AutoCloseable {
     }
 
     public boolean isCaptureReconnectRequired() {
-        return captureLease.isTimedOut();
+        return localCameraUnknown || captureLease.isTimedOut();
     }
 
     public boolean hasPendingCaptureReview() {
@@ -891,7 +1041,7 @@ public final class DocScanController implements AutoCloseable {
             throw new IllegalStateException(
                     "写真の確認または撮影処理中です。登録か撮り直しを選んでください");
         }
-        DocScanApi candidate = new DocScanApi(serverUrl, apiKey, client);
+        DocScanApi candidate = new DocScanApi(serverUrl, apiKey, client, context);
         String previousServer = preferences.getString(KEY_SERVER, "");
         String normalizedServer = serverUrl.trim().replaceAll("/+$", "");
         if (localStartup && localSession == null && !normalizedServer.equals(previousServer)
@@ -914,6 +1064,7 @@ public final class DocScanController implements AutoCloseable {
         configuredServer = normalizedServer;
         configuredKey = apiKey == null ? "" : apiKey.trim();
         imageRotation = JapaneseOcr.normalizeRotation(rotationDegrees);
+        invalidateInspectionFeedback();
         api = candidate;
         if (!beforeSelection && !captureReview.hasPending()
                 && !previousServer.isEmpty()
@@ -1161,6 +1312,8 @@ public final class DocScanController implements AutoCloseable {
     }
 
     private void armCaptureAt(int pageIndex, boolean replacingPending) {
+        if (localCameraUnknown || futureWatching || futureStopping) return;
+        invalidateInspectionFeedback();
         if (committedRecoveryBlocked && !retryCommittedRecoverySynchronously()) {
             publishCommittedPendingLocked(
                     captureReview.peek(),
@@ -1220,11 +1373,7 @@ public final class DocScanController implements AutoCloseable {
             // Pressing the shutter while looking at a photo can only mean
             // "take another one". Answering "撮影準備なし" was a dead end that
             // made the operator hunt for the right button.
-            if (autoCaptureEnabled) {
-                beginAutoBurst();
-            } else {
-                retakePendingCaptureNow(null);
-            }
+            retakePendingCaptureNow(null);
             return;
         }
         if (state != RelayState.AIMING || armedPageIndex < 0) {
@@ -1308,7 +1457,7 @@ public final class DocScanController implements AutoCloseable {
                 : List.of(
                         "P" + (pageIndex + 1)
                                 + (replacingPending ? " 撮り直し準備" : " 撮影準備"),
-                        "40〜60cm・中心を＋へ",
+                        "無理のない姿勢で合わせる",
                         "シャッターはスマホ");
         long viewGeneration =
                 link.showCaptureAiming(pageIndex + 1, replacingPending, stabilizing);
@@ -1416,10 +1565,11 @@ public final class DocScanController implements AutoCloseable {
             PhotoCaptureSettings settings = photoSettings;
             publish(
                     RelayState.CAPTURING,
-                    List.of("撮影中", "40〜60cm離す", "用紙全体を入れて静止"),
+                    List.of("撮影中", "", ""),
                     "Requesting glasses photo for page index " + pageIndex
                             + " (" + settings.describe() + ")");
             photoRequestedAtMillis = System.currentTimeMillis();
+            inspectionRequest = inspectionRequest(localSession, pageIndex);
             CaptureSurface.PhotoStartResult startResult =
                     link.takePhoto(settings.width, settings.height, settings.quality);
             if (startResult == CaptureSurface.PhotoStartResult.REJECTED) {
@@ -1436,6 +1586,7 @@ public final class DocScanController implements AutoCloseable {
                     CAPTURE_TIMEOUT_SECONDS,
                     TimeUnit.SECONDS);
         } catch (Exception error) {
+            inspectionRequest = null;
             if (attempt != CaptureLease.NO_TOKEN) {
                 if (photoRequestMayBeActive) {
                     captureLease.markStartUnknown(attempt);
@@ -1459,17 +1610,27 @@ public final class DocScanController implements AutoCloseable {
     }
 
     public void onPhoto(byte[] jpeg) {
+        onPhoto(jpeg, null);
+    }
+
+    public void onPhoto(byte[] jpeg, CaptureProvenance provenance) {
+        onPhoto(jpeg, provenance, true);
+    }
+
+    public void onPhoto(byte[] jpeg, CaptureProvenance provenance, boolean associationResolved) {
         try {
-            serial.execute(() -> handlePhoto(jpeg));
+            serial.execute(() -> handlePhoto(jpeg, provenance, associationResolved));
         } catch (RejectedExecutionException ignored) {
             // The activity closed while the Binder callback was arriving.
         }
     }
 
-    private void handlePhoto(byte[] jpeg) {
+    private void handlePhoto(byte[] jpeg, CaptureProvenance provenance, boolean associationResolved) {
         if (link.supportsLocalCaptureReview() && captureLease.isTimedOut()) return;
         CaptureLease.Completion completion = captureLease.complete();
-        if (listeningFailed) return;
+        InspectionRequest issuedInspection = inspectionRequest;
+        inspectionRequest = null;
+        if (listeningFailed && !mixedMode) return;
         if (completion == null) {
             return;
         }
@@ -1504,6 +1665,25 @@ public final class DocScanController implements AutoCloseable {
         }
         final int uploadIndex = completion.pageIndex;
         final int uploadRotation = imageRotation;
+        if (link.supportsLocalCaptureReview()) {
+            try {
+                CaptureProvenance source = provenance == null || localSession == null ? provenance
+                        : provenance.bind(localSession.id(), uploadIndex, uploadRotation);
+                stageCaptureReview(new CaptureReviewStore.Pending(uploadIndex, jpeg, "", uploadRotation,
+                        associationResolved ? "" : CaptureReviewStore.Pending.SCENE_TIMESTAMP_UNRESOLVED,
+                        PageFraming.UNKNOWN, photoRequestedAtMillis, source), null);
+                if (associationResolved) rememberInspection(issuedInspection, source);
+                if (!associationResolved && localSession != null) {
+                    try { localSession.markCaptureGap(); }
+                    catch (IOException error) { fail("撮影の対応を安全保存できません", error); }
+                }
+            } catch (IllegalArgumentException invalid) {
+                CaptureReviewStore.Pending previous = captureReview.peek();
+                if (previous != null) publishCaptureReview(previous, "Native capture association rejected; previous review retained");
+                else fail("撮影元を確認できません", invalid);
+            }
+            return;
+        }
         publish(
                 RelayState.OCR,
                 List.of("文字認識中", "P" + (uploadIndex + 1), ""),
@@ -1541,12 +1721,14 @@ public final class DocScanController implements AutoCloseable {
     public void onPhotoError(String message, Throwable cause) {
         try {
             serial.execute(() -> {
-                if (link.supportsLocalCaptureReview() && captureLease.isUnresolved()) {
+                if (link.supportsLocalCaptureReview()) {
+                    inspectionRequest = null;
+                    localCameraUnknown = true;
                     captureLease.markUnknown();
                     autoCaptureEnabled = false;
                     autoRunGeneration++;
-                    autoShotsRemaining = 0;
-                    autoBest = null;
+                    link.pausePreview();
+                    listener.onAutoCaptureChanged(false);
                     fail("カメラ状態が不明です。アプリを終了して再起動してください", null);
                     return;
                 }
@@ -1582,6 +1764,7 @@ public final class DocScanController implements AutoCloseable {
                 if (!captureLease.markTimedOut(attempt)) {
                     return;
                 }
+                inspectionRequest = null;
                 // The request that produced no callback is the measurement the
                 // capture sweep is after, so it has to survive the failure.
                 fail(
@@ -1609,11 +1792,7 @@ public final class DocScanController implements AutoCloseable {
 
     private void stageCaptureReview(CaptureReviewStore.Pending candidate, OcrQuality quality) {
         ocrInFlight = false;
-        if (listeningFailed || closed) return;
-        if (autoShotsRemaining > 0) {
-            acceptAutoShot(candidate, quality);
-            return;
-        }
+        if ((listeningFailed && !mixedMode) || closed) return;
         int pageIndex = candidate.pageIndex;
         CaptureReviewStore.Pending previous = captureReview.peek();
         CaptureReviewStore.Pending pending;
@@ -1698,6 +1877,7 @@ public final class DocScanController implements AutoCloseable {
                 || android.os.SystemClock.elapsedRealtime() < reviewDeadlineMillis
                 || reviewGestureBlocksCommit(reviewGeneration)
                 || !link.isCaptureReviewVisible(reviewViewGeneration))) return;
+        if (pending.needsSceneRecapture()) return;
         if (api == null) {
             publishCaptureReview(
                     pending,
@@ -1716,6 +1896,10 @@ public final class DocScanController implements AutoCloseable {
         CaptureReviewStore.Pending pending = confirmation.pending();
         try {
             localSession.commit(pending);
+            if (reacquiringCaptureGap) {
+                localSession.resolveCaptureGap();
+                reacquiringCaptureGap = false;
+            }
         } catch (IOException error) {
             publishCaptureReview(pending, "Local photo save failed; previous revision retained");
             return;
@@ -1728,14 +1912,136 @@ public final class DocScanController implements AutoCloseable {
         reviewGeneration++;
         try { captureReviewPersistence.clearAfterCommit(); }
         catch (IOException ignored) { /* Recovery compares the retained pending file with the committed revision. */ }
-        lastRegisteredPageText = pending.ocrText;
+
         manualCaptureRequested = false;
         listener.onCaptureReviewCleared();
         publish(RelayState.READING, List.of(nextPageIndex + "枚保存済み", "次のページへ", "ダブルタップで撮影終了"),
                 "Photo committed locally; network upload queued");
         queueLocalUpload();
+        if (promoteFutureCandidate()) { observeFutureCandidates(); return; }
+        if (futureStopping) return;
+        if (localSession.captureGap()) { publishCaptureGap(); return; }
         if (finishCaptureRequested) finishReadingNow();
-        else if (autoCaptureEnabled) scheduleAuto(this::beginAutoBurst, AUTO_PAGE_TURN_MILLIS);
+        else if (autoCaptureEnabled) waitForNextPage();
+    }
+
+    private boolean promoteFutureCandidate() {
+        if (closed || localSession == null || captureReview.hasPending() || localSession.candidateCount() == 0
+                || captureLease.isUnresolved() || state == RelayState.ERROR) return false;
+        try {
+            CaptureReviewStore.Pending pending = localSession.promoteCandidate();
+            if (pending == null) return false;
+            captureReview.stage(pending);
+            captureTargetPageIndex = pending.pageIndex;
+            imageRotation = pending.rotationDegrees;
+            listener.onCaptureReview(pending);
+            publishCaptureReview(pending, "Preserved native candidate awaiting its own visible review", !pending.hasOcrFailure());
+            return true;
+        } catch (IOException error) {
+            fail("撮影候補を復元できません。原本は保持しています", null);
+            return true;
+        }
+    }
+
+    private void observeFutureCandidates() {
+        LocalCaptureSession saved = localSession;
+        if (!link.supportsFuturePages() || saved == null || closed || !autoCaptureEnabled || finishCaptureRequested
+                || futureStopping || captureLease.isUnresolved() || saved.captureGap()
+                || saved.phase() != LocalCaptureSession.Phase.CAPTURE
+                || (state != RelayState.CAPTURE_REVIEW && state != RelayState.READING)) return;
+        if (!futureWatching && !link.isCaptureReviewVisible(reviewViewGeneration)) return;
+        try { saved.beginCandidateObservation(); }
+        catch (IOException error) { onPhotoError("future observation could not be saved", null); return; }
+        futureWatching = true;
+        long epoch = futureCaptureEpoch;
+        int rotation = imageRotation;
+        link.observeFuturePages(2 - saved.candidateCount(), new CaptureSurface.FuturePageListener() {
+            private InspectionRequest issuedInspection;
+            @Override public boolean onCaptureStarting() {
+                try {
+                    // The existing candidate store assigns its page after capture; do not reread a full pending image here.
+                    InspectionRequest before = inspectionRequest(saved, -1);
+                    saved.beginCandidate();
+                    issuedInspection = before;
+                    return true;
+                }
+                catch (IOException error) { return false; }
+            }
+            @Override public void onCandidate(byte[] jpeg, CaptureProvenance source, boolean sceneMatched) {
+                InspectionRequest issued = issuedInspection;
+                issuedInspection = null;
+                boolean stored = false;
+                try {
+                    // Persist before queueing UI work: close/shutdown must not lose an issued original.
+                    synchronized (saved) {
+                        int index = saved.nextCandidatePageIndex();
+                        CaptureProvenance associated = source == null ? null : source.bind(saved.id(), index, rotation);
+                        saved.retainCandidate(new CaptureReviewStore.Pending(index, jpeg, "", rotation,
+                                sceneMatched ? "" : CaptureReviewStore.Pending.SCENE_TIMESTAMP_UNRESOLVED, PageFraming.UNKNOWN,
+                                System.currentTimeMillis(), associated));
+                        if (sceneMatched && epoch == futureCaptureEpoch) rememberInspection(issued, associated);
+                        stored = true;
+                    }
+                } catch (IOException | IllegalArgumentException error) {
+                    try { saved.markCaptureGap(); } catch (IOException ignored) { }
+                }
+                boolean persisted = stored;
+                try { serial.execute(() -> {
+                    if (closed || localSession != saved) return;
+                    if (!persisted) {
+                        stopFutureObservation(() -> fail("撮影候補を安全保存できません", null));
+                        return;
+                    }
+                    if (epoch != futureCaptureEpoch || futureStopping || captureLease.isUnresolved()
+                            || state == RelayState.ERROR) return;
+                    if (!captureReview.hasPending()) promoteFutureCandidate();
+                    if (!sceneMatched) stopFutureObservation(() -> { });
+                    else observeFutureCandidates();
+                }); } catch (RejectedExecutionException ignored) { /* Original remains in its own session. */ }
+            }
+            @Override public void onPageMissed() {
+                try { saved.markCaptureGap(); }
+                catch (IOException error) { onPhotoError("candidate gap could not be saved", null); return; }
+                try { serial.execute(() -> {
+                    if (closed || localSession != saved || epoch != futureCaptureEpoch) return;
+                    autoCaptureEnabled = false;
+                    listener.onAutoCaptureChanged(false);
+                    stopFutureObservation(() -> {
+                        if (!captureReview.hasPending() && !promoteFutureCandidate()) publishCaptureGap();
+                    });
+                }); } catch (RejectedExecutionException ignored) { }
+            }
+        });
+    }
+
+    private void stopFutureObservation(Runnable idle) {
+        if (!link.supportsFuturePages()) { idle.run(); return; }
+        LocalCaptureSession saved = localSession;
+        long epoch = ++futureCaptureEpoch;
+        futureWatching = false;
+        futureStopping = true;
+        link.stopFuturePages(() -> {
+            try { serial.execute(() -> {
+                if (closed || localSession != saved || epoch != futureCaptureEpoch) return;
+                if (saved != null) {
+                    try {
+                        if (localCameraUnknown || captureLease.isUnresolved()) saved.markCaptureGap();
+                        else saved.finishCandidateObservation();
+                    } catch (IOException error) {
+                        onPhotoError("future observation stop could not be saved", null);
+                        return;
+                    }
+                }
+                futureStopping = false;
+                idle.run();
+            }); } catch (RejectedExecutionException ignored) { }
+        });
+    }
+
+    private void publishCaptureGap() {
+        finishCaptureRequested = false;
+        publish(RelayState.READING, List.of("撮り逃しの確認", "未撮影の頁へ戻してタップ", ""),
+                "Observed scene was not captured; preserved originals are not proof of complete coverage");
     }
 
     private void queueLocalUpload() {
@@ -1745,12 +2051,18 @@ public final class DocScanController implements AutoCloseable {
         if (destination == null || !saved.server().equals(configuredServer)) return;
         localNetworkBusy = true;
         localNetwork.execute(() -> {
+            // The photo is already durable. Keep only the transfer alive, never analysis waiting.
+            PowerManager power = (PowerManager)context.getSystemService(Context.POWER_SERVICE);
+            PowerManager.WakeLock transferLock = power == null ? null
+                    : power.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "docscan:photo-transfer");
             boolean failed = false;
             boolean analysisStarted = false;
             boolean httpInProgress = false;
+            boolean audioAttachInProgress = false;
             boolean retryable = false;
             JSONObject finished = null;
             try {
+                if (transferLock != null) transferLock.acquire(120_000);
                 LocalCaptureSession.Page page = saved.nextUnsent();
                 if ((page != null || saved.listening()) && saved.documentId() == 0) {
                     // An ambiguous create can leave an empty server document; images only use the durably bound ID.
@@ -1768,32 +2080,52 @@ public final class DocScanController implements AutoCloseable {
                 while (!closed && page != null) {
                     CaptureReviewStore.Pending photo = saved.read(page);
                     httpInProgress = true;
-                    destination.uploadPage(saved.documentId(), photo.pageIndex, photo.jpeg, photo.ocrText,
-                            photo.rotationDegrees, photo.capturedAtMillis);
+                    InspectionCapture diagnostic = photo.provenance == null ? null : inspectionCaptures.get(photo.provenance.captureId);
+                    CaptureInspectionOrigin origin = inspectionOrigin(saved, destination, photo.provenance);
+                    JSONObject receipt = destination.uploadPage(saved.documentId(), photo.pageIndex, photo.jpeg, photo.ocrText,
+                            photo.rotationDegrees, photo.capturedAtMillis, photo.provenance, origin);
                     httpInProgress = false;
                     saved.acknowledge(page);
+                    if (origin != null) startInspectionFeedback(diagnostic, page, receipt);
+                    if (photo.provenance != null) inspectionCaptures.remove(photo.provenance.captureId);
                     page = saved.nextUnsent();
                 }
                 if (!closed && saved.phase() == LocalCaptureSession.Phase.ANALYSIS && saved.documentId() > 0) {
                     analysisStarted = true;
                     destination.finalizeDocument(saved.documentId());
-                    if (saved.sessionId() == 0) saved.bindSession(destination.createExamSession(saved.documentId(), saved.listening()).getLong("session_id"));
-                    if (saved.listening()) destination.attachDocumentAudio(saved.sessionId());
+                    if (saved.sessionId() == 0) saved.bindSession(destination.createExamSession(saved.documentId(), saved.examType()).getLong("session_id"));
+                    serial.execute(() -> {
+                        if (closed || localSession != saved) return;
+                        sessionId = saved.sessionId();
+                        persistWorkflow();
+                        publish(RelayState.FINALIZING, List.of("解析中", "資料は保存済み", "カメラ停止"), "Local analysis session bound");
+                    });
+                    if (saved.listening() && !saved.mixed()) destination.attachDocumentAudio(saved.sessionId());
                     finished = destination.finalizeReadingLocal(saved.sessionId());
                     if (!closed) saved.setPhase("reading".equals(finished.optString("status"))
                             ? LocalCaptureSession.Phase.CAPTURE : LocalCaptureSession.Phase.REVIEW);
                 }
+                if (!closed && saved.audioAttachPending()) {
+                    // This binds the saved original idempotently; it never repeats stage-one submission.
+                    audioAttachInProgress = true;
+                    destination.attachDocumentAudio(saved.sessionId());
+                    audioAttachInProgress = false;
+                    saved.acknowledgeAudio();
+                }
             } catch (Exception error) {
                 failed = true;
-                retryable = error instanceof IOException && httpInProgress && !analysisStarted;
+                retryable = error instanceof IOException
+                        && (audioAttachInProgress || (httpInProgress && !analysisStarted));
                 if (error instanceof DocScanApi.ApiException) {
                     int status = ((DocScanApi.ApiException) error).getStatusCode();
                     retryable &= status == 408 || status == 429 || status >= 500;
                 }
+            } finally {
+                if (transferLock != null && transferLock.isHeld()) transferLock.release();
             }
             final boolean retry = retryable;
             final boolean stopped = failed && !retryable;
-            final boolean analysisFailed = failed && analysisStarted;
+            final boolean analysisFailed = failed && analysisStarted && !audioAttachInProgress;
             final JSONObject result = finished;
             try { serial.execute(() -> {
                 localNetworkBusy = false;
@@ -1805,18 +2137,20 @@ public final class DocScanController implements AutoCloseable {
                     localUploadBlocked = true;
                     fail(analysisFailed ? "解析を停止しました。資料は保存済みです"
                             : "保存・送信処理を停止しました。原本は保持しています", null);
-                } else if (result != null) handleFinalizedSession(result, "Local session analysis finished");
-                else if (retry) {
-                    listener.onUpdate(state, currentHudLines, "Network work paused; local images retained for retry");
-                    if (state == RelayState.FINALIZING) publish(state,
-                            List.of("接続を待っています", "資料は保存済み", "ダブルタップ2回で終了"), "Waiting to retry saved session");
-                    watchdog.schedule(() -> {
-                        try { serial.execute(this::queueLocalUpload); } catch (RejectedExecutionException ignored) { }
-                    }, 5, TimeUnit.SECONDS);
                 } else {
-                    try {
-                        if (saved.nextUnsent() != null || saved.phase() == LocalCaptureSession.Phase.ANALYSIS) queueLocalUpload();
-                    } catch (IOException error) { fail("保存ページを読み出せません", null); }
+                    if (result != null) handleFinalizedSession(result, "Local session analysis finished");
+                    if (retry) {
+                        listener.onUpdate(state, currentHudLines, "Network work paused; local images retained for retry");
+                        if (state == RelayState.FINALIZING) publish(state,
+                                List.of("接続を待っています", "資料は保存済み", "ダブルタップ2回で終了"), "Waiting to retry saved session");
+                        watchdog.schedule(() -> {
+                            try { serial.execute(this::queueLocalUpload); } catch (RejectedExecutionException ignored) { }
+                        }, 5, TimeUnit.SECONDS);
+                    } else if (result == null) {
+                        try {
+                            if (saved.nextUnsent() != null || saved.phase() == LocalCaptureSession.Phase.ANALYSIS || saved.audioAttachPending()) queueLocalUpload();
+                        } catch (IOException error) { fail("保存ページを読み出せません", null); }
+                    }
                 }
             }); } catch (RejectedExecutionException ignored) { }
         });
@@ -1867,7 +2201,11 @@ public final class DocScanController implements AutoCloseable {
         if (replacementRotation != null) {
             imageRotation = replacementRotation;
         }
-        armCaptureAt(pending.pageIndex, true);
+        reacquiringCaptureGap = localSession != null && localSession.captureGap() && pending.hasOcrFailure();
+        stopFutureObservation(() -> {
+            if (!captureLease.isUnresolved() && state == RelayState.CAPTURE_REVIEW
+                    && captureReview.peek() == pending) armCaptureAt(pending.pageIndex, true);
+        });
     }
 
     private void uploadCapturedPage(CaptureReviewStore.Confirmation confirmation) {
@@ -1884,7 +2222,8 @@ public final class DocScanController implements AutoCloseable {
                     pending.jpeg,
                     pending.ocrText,
                     pending.rotationDegrees,
-                    pending.capturedAtMillis);
+                    pending.capturedAtMillis,
+                    pending.provenance);
         } catch (Exception error) {
             publishCaptureReview(
                     pending,
@@ -1970,12 +2309,12 @@ public final class DocScanController implements AutoCloseable {
                         "Uploaded confirmed page " + pending.pageIndex
                                 + (replaced ? " (replaced)" : "")
                                 + persistenceWarning);
-                lastRegisteredPageText = pending.ocrText;
+
                 manualCaptureRequested = false;
                 if (link.supportsLocalCaptureReview() && finishCaptureRequested) {
                     finishReadingNow();
                 } else if (autoCaptureEnabled) {
-                    scheduleAuto(this::beginAutoBurst, AUTO_PAGE_TURN_MILLIS);
+                    waitForNextPage();
                 }
                 return;
             }
@@ -2074,7 +2413,7 @@ public final class DocScanController implements AutoCloseable {
         autoCommitScheduled = false;
         reviewDeadlineMillis = 0;
         reviewWindow = null;
-        autoCommitArmed = link.supportsLocalCaptureReview() && armAutoCommit;
+        autoCommitArmed = link.supportsLocalCaptureReview() && armAutoCommit && !pending.needsSceneRecapture();
         reviewViewGeneration = CaptureSurface.NO_VIEW_GENERATION;
         // The operator cannot see the camera's field of view, so the framing
         // verdict leads: a page that ran outside the frame must read as a
@@ -2103,6 +2442,7 @@ public final class DocScanController implements AutoCloseable {
                 pending.rotationDegrees,
                 lines);
         reviewViewGeneration = viewGeneration;
+        if (pending.needsSceneRecapture()) link.showCaptureReviewNotice("頁の対応を確認できません・タップで撮り直し");
         listener.onUpdate(RelayState.CAPTURE_REVIEW, lines, diagnostic);
     }
 
@@ -2125,26 +2465,32 @@ public final class DocScanController implements AutoCloseable {
             publish(state, currentHudLines, "Automatic capture is disabled; use explicit phone controls");
             return;
         }
-        if (autoCaptureEnabled || captureLease.isUnresolved()
+        // Here, not at each caller: the listening recorder starts capture too.
+        if (manualOnly) {
+            publishAutoWaiting("手動撮影", "1タップ＝1枚",
+                    "Manual capture: the automatic loop is disabled for this session");
+            return;
+        }
+        if (localCameraUnknown || autoCaptureEnabled || captureLease.isUnresolved()
                 || (state != RelayState.READY && state != RelayState.READING)) return;
         finishCaptureRequested = false;
         manualCaptureRequested = false;
         autoCaptureEnabled = true;
         autoRunGeneration++;
         listener.onAutoCaptureChanged(true);
-        beginAutoBurst();
+        link.resetPageDetection();
+        waitForNextPage();
     }
 
     private void stopAutoCaptureNow(String reason) {
-        if (!autoCaptureEnabled && autoShotsRemaining == 0) {
+        invalidateInspectionFeedback();
+        if (!autoCaptureEnabled) {
             return;
         }
         autoCaptureEnabled = false;
         autoRunGeneration++;
-        autoShotsRemaining = 0;
-        autoShotsTaken = 0;
-        autoBest = null;
-        autoBestScore = 0;
+
+        link.pausePreview();
         listener.onAutoCaptureChanged(false);
         publish(
                 documentId > 0 ? RelayState.READING : RelayState.READY,
@@ -2152,164 +2498,19 @@ public final class DocScanController implements AutoCloseable {
                 reason);
     }
 
-    private void beginAutoBurst() {
-        if (!autoCaptureEnabled || finishCaptureRequested || captureLease.isUnresolved()) {
-            return;
-        }
-        autoShotsRemaining = AUTO_BURST_SHOTS;
-        autoShotsTaken = 0;
-        autoBest = null;
-        autoBestScore = 0;
-        // The first shot, like a manual shot, waits for a visible guide acknowledgement.
-        armCaptureAt(nextPageIndex, false);
-    }
-
-    private void takeAutoShotNow() {
-        if (!autoCaptureEnabled || autoShotsRemaining <= 0) {
-            return;
-        }
-        if (!linkReady || !requireApi()) {
-            stopAutoCaptureNow("Automatic reading stopped because the glasses link is not ready");
-            return;
-        }
-        if (captureLease.isUnresolved()) {
-            stopAutoCaptureNow(
-                    "Automatic reading stopped because a CXR-L photo lease is unresolved");
-            return;
-        }
-        int pageIndex = nextPageIndex;
-        int shot = autoShotsTaken + 1;
-        // requestPhotoAt only fires from STABILIZING, and it publishes its own
-        // "撮影中" view. Pushing another one here would double the view swaps
-        // per shot, and each swap costs the glasses several hundred ms.
-        state = RelayState.STABILIZING;
-        listener.onUpdate(
-                state,
-                currentHudLines,
-                "Automatic burst shot " + shot + "/" + AUTO_BURST_SHOTS
-                        + " for page index " + pageIndex);
-        requestPhotoAt(pageIndex, false);
-    }
-
-    private void scheduleAuto(Runnable action, long delayMillis) {
-        long generation = autoRunGeneration;
-        try {
-            watchdog.schedule(
-                    () -> {
-                        try {
-                            serial.execute(() -> {
-                                if (autoCaptureEnabled && !finishCaptureRequested
-                                        && generation == autoRunGeneration) action.run();
-                            });
-                        } catch (RejectedExecutionException ignored) {
-                            // The activity closed while the cycle was waiting.
-                        }
-                    },
-                    delayMillis,
-                    TimeUnit.MILLISECONDS);
-        } catch (RejectedExecutionException ignored) {
-            // The activity is already closing.
-        }
-    }
-
-    /**
-     * Keeps the best frame of the burst and presents it for review.
-     * The photo is only persisted when it wins, so a burst
-     * costs one durable write rather than {@link #AUTO_BURST_SHOTS}.
-     */
-    private void acceptAutoShot(CaptureReviewStore.Pending shot, OcrQuality quality) {
-        if (manualCaptureRequested || finishCaptureRequested) {
-            autoShotsRemaining = 0;
-            autoBest = null;
-            stageCaptureReview(shot, quality);
-            return;
-        }
-        autoShotsTaken++;
-        autoShotsRemaining--;
-        double score = ShotScore.of(
-                shot.framing,
-                shot.ocrCharacters(),
-                quality == null ? 0f : quality.meanConfidence(),
-                quality != null && quality.hasConfidence());
-        listener.onUpdate(
-                RelayState.OCR,
-                currentHudLines,
-                "Automatic burst shot " + autoShotsTaken + "/" + AUTO_BURST_SHOTS
-                        + " " + ShotScore.describe(score)
-                        + " framing=" + shot.framing
-                        + " OCR characters: " + shot.ocrCharacters()
-                        + (quality == null ? "" : " (" + quality.describe() + ")"));
-        if (autoBest == null || ShotScore.isBetter(score, autoBestScore)) {
-            autoBest = shot;
-            autoBestScore = score;
-        }
-        if (!autoCaptureEnabled) {
-            autoShotsRemaining = 0;
-            return;
-        }
-        if (autoShotsRemaining > 0) {
-            scheduleAuto(this::takeAutoShotNow, AUTO_SHOT_INTERVAL_MILLIS);
-            return;
-        }
-        finishAutoBurst();
-    }
-
-    private void finishAutoBurst() {
-        CaptureReviewStore.Pending best = autoBest;
-        autoBest = null;
-        autoBestScore = 0;
-        if (best == null || best.ocrCharacters() == 0 || best.hasOcrFailure()
-                || best.isFramingFailing()) {
-            // Nothing was read, so there is nothing to register and nothing to
-            // wait for: go straight back and shoot again. Only after several
-            // consecutive failures does the interval open up, because a camera
-            // firing continuously keeps the privacy LED lit and heats the
-            // glasses.
-            unreadableBurstsSeen++;
-            boolean backOff = unreadableBurstsSeen > AUTO_UNREADABLE_RETRY_LIMIT;
-            publishAutoWaiting(
-                    "読み取れません",
-                    backOff ? "位置を調整してください" : "すぐに撮り直します",
-                    "Automatic burst produced no readable frame ("
-                            + unreadableBurstsSeen + " in a row); retrying "
-                            + (backOff ? "after backing off" : "immediately"));
-            scheduleAuto(
-                    this::beginAutoBurst,
-                    backOff
-                            ? AUTO_UNREADABLE_BACKOFF_MILLIS
-                            : AUTO_RETRY_IMMEDIATE_MILLIS);
-            return;
-        }
-        unreadableBurstsSeen = 0;
-        if (PageTextSimilarity.isSamePage(lastRegisteredPageText, best.ocrText)) {
-            duplicateBurstsSeen++;
-            if (duplicateBurstsSeen >= AUTO_DUPLICATE_BURST_LIMIT) {
-                stopAutoCaptureNow(
-                        "Automatic reading stopped after " + duplicateBurstsSeen
-                                + " bursts that read as the page already registered");
-                return;
-            }
-            publishAutoWaiting(
-                    "同じページです",
-                    "次のページへ",
-                    "Automatic burst skipped as a duplicate of the registered page");
-            scheduleAuto(this::beginAutoBurst, AUTO_PAGE_TURN_MILLIS);
-            return;
-        }
-        duplicateBurstsSeen = 0;
-        try {
-            CaptureReviewTransaction.replace(
-                    captureReview,
-                    best,
-                    captureReviewPersistence::save);
-        } catch (IOException error) {
-            stopAutoCaptureNow(
-                    "Automatic reading stopped because the chosen photo could not be saved: "
-                            + error.getMessage());
-            return;
-        }
-        listener.onCaptureReview(best);
-        publishCaptureReview(best, "Review selected automatic frame", true);
+    private void waitForNextPage() {
+        if (!autoCaptureEnabled || finishCaptureRequested || captureLease.isUnresolved()) return;
+        // Keep observing throughout capture; only an explicit stop or a fault
+        // ends the wait. An unchanged page does not require a resume gesture.
+        long run = autoRunGeneration;
+        if (futureWatching) observeFutureCandidates();
+        else link.awaitNextPage(() -> {
+            try { serial.execute(() -> {
+                if (run != autoRunGeneration || !autoCaptureEnabled || finishCaptureRequested
+                        || (state != RelayState.READY && state != RelayState.READING)) return;
+                armCaptureAt(nextPageIndex, false);
+            }); } catch (RejectedExecutionException ignored) { }
+        });
     }
 
     private void publishAutoWaiting(String first, String second, String diagnostic) {
@@ -2382,6 +2583,94 @@ public final class DocScanController implements AutoCloseable {
                         + " purpose=" + purpose
                         + " delay=" + delayMillis + "ms"
                         + " framing=" + pending.framing);
+        observeFutureCandidates();
+        requestNativeSelection(pending);
+    }
+
+    /** A is already visible and durable; neither its timer nor next-page observation waits for optional B. */
+    private void requestNativeSelection(CaptureReviewStore.Pending a) {
+        LocalCaptureSession saved = localSession;
+        CaptureInspectionOrigin.Context run = inspectionContext();
+        CaptureSurface.NativeScene scene = a.provenance == null ? null : link.nativeSelectionScene(a.provenance);
+        long review = reviewGeneration;
+        if (saved == null || run == null || scene == null || !qualityCurrent(saved, a, review, run, scene)) return;
+        if (!nativeQualityBusy.compareAndSet(false, true)) return;
+        try { nativeQuality.execute(() -> prepareNativeSelection(saved, a, review, run, scene)); }
+        catch (RejectedExecutionException stopped) { nativeQualityBusy.set(false); }
+    }
+
+    /** One optional analysis at a time, independent of camera, visible-review timer and answer/network work. */
+    private void prepareNativeSelection(LocalCaptureSession saved, CaptureReviewStore.Pending a, long review,
+                                        CaptureInspectionOrigin.Context run, CaptureSurface.NativeScene scene) {
+        boolean requested = false;
+        try {
+            if (!qualityCurrent(saved, a, review, run, scene)) return;
+            final NativeImageQuality.Sample first;
+            if (!saved.beginQualitySelection(a, scene, run.generation)) return;
+            first = link.sampleNativeImage(a.jpeg, a.provenance);
+            if (first == null || !qualityCurrent(saved, a, review, run, scene)) return;
+            java.util.concurrent.atomic.AtomicBoolean started = new java.util.concurrent.atomic.AtomicBoolean();
+            java.util.concurrent.atomic.AtomicBoolean delivered = new java.util.concurrent.atomic.AtomicBoolean();
+            link.requestNativeAlternative(scene, new CaptureSurface.NativeAlternative() {
+                @Override public boolean onStarting() {
+                    return started.compareAndSet(false, true) && qualityCurrent(saved, a, review, run, scene);
+                }
+                @Override public void onSkipped() { nativeQualityBusy.set(false); }
+                @Override public void onOriginal(byte[] jpeg, CaptureProvenance source, boolean sameScene) {
+                    if (!delivered.compareAndSet(false, true)) return;
+                    CaptureProvenance bound = null;
+                    try { if (source != null) bound = source.bind(saved.id(), a.pageIndex, a.rotationDegrees); }
+                    catch (IllegalArgumentException invalid) { sameScene = false; }
+                    boolean matched = sameScene && started.get() && bound != null
+                            && bound.resultTimestampNanos != null && bound.matches(jpeg, a.pageIndex, a.rotationDegrees);
+                    CaptureReviewStore.Pending b = new CaptureReviewStore.Pending(a.pageIndex, jpeg, "", a.rotationDegrees,
+                            matched ? "" : CaptureReviewStore.Pending.SCENE_TIMESTAMP_UNRESOLVED,
+                            PageFraming.UNKNOWN, System.currentTimeMillis(), bound);
+                    try { saved.retainQualityAlternative(a, b); }
+                    catch (IOException | RuntimeException failure) {
+                        try { saved.markCaptureGap(); } catch (IOException ignored) { }
+                        onPhotoError("optional native original persistence unresolved", null);
+                        nativeQualityBusy.set(false);
+                        return;
+                    }
+                    try { nativeQuality.execute(() -> rankNativeAlternative(saved, a, b, review, run, scene, first, matched)); }
+                    catch (RejectedExecutionException ignored) { nativeQualityBusy.set(false); }
+                }
+            });
+            requested = true;
+        } catch (IOException | RuntimeException unavailable) { /* No replacement; reservation remains consumed. */ }
+        finally { if (!requested) nativeQualityBusy.set(false); }
+    }
+
+    private void rankNativeAlternative(LocalCaptureSession saved, CaptureReviewStore.Pending a, CaptureReviewStore.Pending b,
+                                       long review, CaptureInspectionOrigin.Context run, CaptureSurface.NativeScene scene,
+                                       NativeImageQuality.Sample first, boolean matched) {
+        try {
+            // Late originals remain in q-* even when their page, run or camera scene has retired.
+            if (!matched || !qualityCurrent(saved, a, review, run, scene)) return;
+            NativeImageQuality.Decision measured = NativeImageQuality.choose(first, link.sampleNativeImage(b.jpeg, b.provenance));
+            serial.execute(() -> {
+                try {
+                    if (!qualityCurrent(saved, a, review, run, scene)) return;
+                    CaptureReviewStore.Pending selected = saved.qualityDecision(a, measured);
+                    if (measured != NativeImageQuality.Decision.SELECT_B || !qualityCurrent(saved, a, review, run, scene)) return;
+                    InspectionCapture capture = inspectionCaptures.get(a.provenance.captureId);
+                    stageCaptureReview(selected, null); // A new visible ACK and full ordinary 3-second review are required.
+                    if (captureReview.peek() == selected && capture != null) rememberInspection(capture.request, selected.provenance);
+                } catch (IOException | RuntimeException unavailable) { /* A is never silently displaced. */ }
+            });
+        } catch (RuntimeException unavailable) { /* Both originals remain UNKNOWN. */ }
+        finally { nativeQualityBusy.set(false); }
+    }
+
+    private boolean qualityCurrent(LocalCaptureSession saved, CaptureReviewStore.Pending a, long review,
+                                   CaptureInspectionOrigin.Context run, CaptureSurface.NativeScene scene) {
+        return !closed && !localCameraUnknown && !finishCaptureRequested && !futureStopping
+                && localSession == saved && saved.phase() == LocalCaptureSession.Phase.CAPTURE && !saved.captureGap()
+                && review == reviewGeneration && state == RelayState.CAPTURE_REVIEW && captureReview.peek() == a
+                && reviewDeadlineMillis > 0 && android.os.SystemClock.elapsedRealtime() < reviewDeadlineMillis
+                && !captureLease.isUnresolved() && run.equals(inspectionContext())
+                && link.isNativeSelectionSceneCurrent(scene);
     }
 
     private void enqueueAutoCommit(long generationAtSchedule) {
@@ -2441,6 +2730,11 @@ public final class DocScanController implements AutoCloseable {
     }
 
     private void finishReadingNow() {
+        invalidateInspectionFeedback();
+        if (link.supportsFuturePages() && (futureWatching || futureStopping)) {
+            finishLocalCaptureNow();
+            return;
+        }
         if (link.supportsLocalCaptureReview()) {
             autoCaptureEnabled = false;
             autoRunGeneration++;
@@ -2475,6 +2769,11 @@ public final class DocScanController implements AutoCloseable {
                     "Finish rejected until the pending photo is registered or retaken");
             return;
         }
+        if (localSession != null && localSession.candidateCount() > 0) {
+            promoteFutureCandidate();
+            return;
+        }
+        if (localSession != null && localSession.captureGap()) { publishCaptureGap(); return; }
         if ((documentId == 0 && localSession == null) || nextPageIndex == 0) {
             publish(
                     RelayState.READING,
@@ -2482,7 +2781,7 @@ public final class DocScanController implements AutoCloseable {
                     "Finish rejected: empty document");
             return;
         }
-        if (listeningMode && !listeningComplete) {
+        if (listeningMode && !mixedMode && !listeningComplete) {
             if (localSession != null) {
                 try { localSession.setPhase(LocalCaptureSession.Phase.LISTENING); }
                 catch (IOException error) { fail("録音状態を保存できません", null); return; }
@@ -2671,6 +2970,9 @@ public final class DocScanController implements AutoCloseable {
 
     private void publish(RelayState next, List<String> lines, String diagnostic) {
         if (closed) return;
+        if (next != RelayState.READY && next != RelayState.READING && next != RelayState.AIMING
+                && next != RelayState.STABILIZING && next != RelayState.CAPTURING && next != RelayState.CAPTURE_REVIEW)
+            invalidateInspectionFeedback();
         state = next;
         List<String> safeLines = lines == null || lines.isEmpty()
                 ? List.of(next.name(), "", "")
@@ -2690,10 +2992,7 @@ public final class DocScanController implements AutoCloseable {
         // is not watching the phone and would never see it.
         if (autoCaptureEnabled) {
             autoCaptureEnabled = false;
-            autoShotsRemaining = 0;
-            autoShotsTaken = 0;
-            autoBest = null;
-            autoBestScore = 0;
+            link.pausePreview();
             listener.onAutoCaptureChanged(false);
         }
         publish(
@@ -2881,12 +3180,16 @@ public final class DocScanController implements AutoCloseable {
     @Override
     public void close() {
         closed = true;
+        inspectionFeedback.close();
+        invalidateInspectionFeedback();
+        link.pausePreview();
         if (link.supportsLocalCaptureReview() && api != null) api.cancelRequests();
         clearArmedCapture();
         captureLease.resetAfterBindingReset();
         watchdog.shutdownNow();
         serial.shutdownNow();
         localNetwork.shutdownNow();
+        nativeQuality.shutdownNow();
     }
 
     static final class FallbackCommitMarker {

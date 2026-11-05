@@ -18,7 +18,9 @@ from .. import config
 from ..llm import ADAPTER_PROVIDERS
 from ..provider_registry import ProviderRegistry
 from .base import Solver
-from .chatgpt_web import ChatGptWebSolver, ChatGptWebUncertain
+from .chatgpt_web import ChatGptWebChatLost, ChatGptWebSolver, ChatGptWebUncertain
+from .chatgpt_work import ChatGptWorkSolver
+from ..work_bridge import WorkBrowserResultRejected, WorkConflict, WorkPending
 from .llm_adapter import LLMSolver, choice_label, choice_out_of_range
 from .local_placeholder import LocalPlaceholderSolver
 
@@ -89,7 +91,7 @@ def _retry_out_of_range(solver, question, result, max_answer_len: int):
     retry = replace(question, retry_hint=_choice_retry_hint(question))
     try:
         retried = solver.solve(question=retry, max_answer_len=max_answer_len)
-    except ChatGptWebUncertain:
+    except (ChatGptWebUncertain, WorkPending, WorkConflict):
         raise  # Do not hide an ambiguously submitted corrective question.
     except Exception:  # noqa: BLE001 - a failed retry must not lose the answer
         retried = None
@@ -137,14 +139,29 @@ def solve_with_fallback(
         if question.required_image_paths and not getattr(solver, "accepts_images", False):
             skipped.append(f"{name}:images_unsupported")
             continue
+        # The current API adapters send an image, not original audio. After
+        # bypassing local ASR for the browser route, they have no substitute.
+        if (names[0] in ("chatgpt-web", "chatgpt-work") and name != names[0]
+                and question.audio_path and not question.audio_transcript):
+            skipped.append(f"{name}:original_audio_unsupported")
+            continue
         try:
             result = solver.solve(question=question, max_answer_len=max_answer_len)
-        except ChatGptWebUncertain:
+        except (ChatGptWebUncertain, WorkPending, WorkConflict, WorkBrowserResultRejected):
             raise  # Another provider would still duplicate a possibly submitted question.
+        except ChatGptWebChatLost:
+            # The subject's chat is gone and no new one was opened. Another tier
+            # would hide that behind a generic failure; the batch stops and says why.
+            raise
         except Exception:  # noqa: BLE001 - one tier failing must not 500
             skipped.append(f"{name}:error")
             continue
-        if choice_out_of_range(result.answer, question.choices):
+        # Original-image answers use printed labels. Incomplete OCR choices
+        # cannot justify another GPT send or replacing a valid printed answer.
+        original_labels = name in ("chatgpt-web", "chatgpt-work") and (
+            question.document_pages or question.document_image_paths
+            or question.image_paths or question.image_path)
+        if not original_labels and choice_out_of_range(result.answer, question.choices):
             result = _retry_out_of_range(solver, question, result, max_answer_len)
         last_result = result
         if question.answer_only:
@@ -194,3 +211,4 @@ for _name, _provider in ADAPTER_PROVIDERS:
 # own signed-in ChatGPT web session over a Chrome debugging port. Only runs
 # when routed to AND that browser is reachable.
 register_solver(ChatGptWebSolver(), replace=True)
+register_solver(ChatGptWorkSolver(), replace=True)

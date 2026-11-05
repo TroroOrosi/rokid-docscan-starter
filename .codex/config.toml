@@ -1,0 +1,5 @@
+# Agent Skills is this repository's process spine (AGENTS.md).
+# Avoid Ponytail's automatic full-mode persona in every session and subagent.
+# Keep the installation and the user's settings for other repositories intact.
+[plugins."ponytail@ponytail"]
+enabled = false

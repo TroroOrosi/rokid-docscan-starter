@@ -7,7 +7,31 @@ import pytest
 
 from app.llm import LLMClient
 from app.solvers import Question, register_solver, solve_with_fallback
-from app.solvers.llm_adapter import LLMSolver
+from app.solvers.llm_adapter import _ANSWER_ONLY_SYSTEM, LLMSolver, answer_numbers
+
+
+def test_printed_numbers_survive_beyond_twenty_blanks_and_three_digits():
+    numbers = list(range(1, 22)) + [1000, 2026, 9999]
+    assert answer_numbers(numbers) == numbers
+    assert answer_numbers(["1000", "2026", "1000"]) == [1000, 2026]
+
+
+@pytest.mark.parametrize("numbers", [[10000], list(range(1, 1002)), [0, 1], [-1], ["A"], [True]])
+def test_unrepresentable_number_lists_fail_instead_of_dropping_printed_labels(numbers):
+    with pytest.raises(ValueError, match="answer number"):
+        answer_numbers(numbers)
+
+
+def test_answer_only_system_keeps_the_derivation_for_a_written_solution():
+    """The operator's decision: the answer is the full content written on the
+    answer sheet; a 記述式 mathematics answer includes the derivation needed
+    for credit. This must not be conditioned on the question "explicitly"
+    asking for a proof -- a 記述式 answer format implies it. Asserted on the
+    prompt constant itself, not on model output.
+    """
+    assert "記述式" in _ANSWER_ONLY_SYSTEM
+    assert "derivation" in _ANSWER_ONLY_SYSTEM
+    assert "full credit" in _ANSWER_ONLY_SYSTEM
 
 
 def solver_for(payload):
@@ -25,6 +49,13 @@ def test_written_proof_survives_adapter_and_registry_without_display_length_limi
         tiers=["answer-sheet-test"],
     )
     assert result.answer == proof
+
+
+def test_indented_code_fragment_survives_solver_entry():
+    answer = "    total_cost += i"
+    result = solver_for({"answer": answer, "status": "ready"}).solve(
+        question=Question(body_text="空欄に入るコードを記入", answer_only=True))
+    assert result.answer == answer
 
 
 def test_selection_keeps_only_the_written_label_and_excludes_supplementary_sections():
@@ -82,5 +113,18 @@ def test_uncertain_browser_submission_never_falls_through_to_another_provider(mo
     monkeypatch.setattr(failing, "solve", fail)
     register_solver(failing, replace=True)
     with pytest.raises(ChatGptWebUncertain):
+        solve_with_fallback(Question(body_text="question", answer_only=True),
+                            tiers=["answer-sheet-test", "local"])
+
+
+def test_a_lost_subject_chat_is_reported_not_hidden_behind_another_tier(monkeypatch):
+    # The operator has to learn the subject's chat is gone, not "解析に失敗しました".
+    from app.solvers.chatgpt_web import ChatGptWebChatLost
+    failing = solver_for({"answer": "not used", "status": "ready"})
+    def lost(**_):
+        raise ChatGptWebChatLost("could not return to the subject's chat")
+    monkeypatch.setattr(failing, "solve", lost)
+    register_solver(failing, replace=True)
+    with pytest.raises(ChatGptWebChatLost):
         solve_with_fallback(Question(body_text="question", answer_only=True),
                             tiers=["answer-sheet-test", "local"])

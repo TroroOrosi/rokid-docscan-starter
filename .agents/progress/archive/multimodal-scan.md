@@ -260,7 +260,7 @@ commit `db4255d` をorigin/feature/multimodal-scanへpush。新APKと、その�
 導入前からAsleepだったため、起動後にwakeして通常／リスニング二択を確認した。
 診断キーは `input -d 0` で指定すると届き、往復の選択後は通常モードを選択したまま待機。
 `dumpsys media.camera` → `Active Camera Clients: []`。撮影・録音は始めていない。
-正確な成果物ハッシュ・コマンドと限界は [hardware-measurements §H](../../docs/hardware-measurements.md#h-起動二択と診断キー入力2026-09-16)。
+正確な成果物ハッシュ・コマンドと限界は [hardware-measurements §H](../../../docs/hardware-measurements.md#h-起動二択と診断キー入力2026-09-16)。
 
 F-51FにAPI鍵を新規設定して `192.168.0.30:8000` で待受、同じ鍵をグラスへ暗号化保存する
 具体案は利用者が2026-09-16に承認し、適用済み。`REAL_MODE=1`／`client-ocr`／`chatgpt-web`、
@@ -395,8 +395,8 @@ Runs on: 今回の照合・文書更新はWindowsだけ。実機への書込み�
 さらに「抜けを徹底確認」「全て実装せず、新旧を組み合わせて使用感と精度を高める」と指定した。
 そのため追加実装を止め、旧FS-01～72・R1～13・S01～30・X01～06と現コードを照合した。
 
-正本は [現行plan](../../tasks/plan.md)、[RPタスク](../../tasks/todo.md)、
-[ソース根拠・採否対応表](../../docs/requirements-audit.md)。旧planとtodoは全文を履歴区画へ保持した。
+正本は [現行plan](../../../tasks/plan.md)、[RPタスク](../../../tasks/todo.md)、
+[ソース根拠・採否対応表](../../../docs/requirements-audit.md)。旧planとtodoは全文を履歴区画へ保持した。
 この後に続く以前の「残る範囲と再開順」は当時の記録であり、今はRP一覧に優先しない。
 
 - 基準HEAD `97ef5b8e02d06436406543ad2d6de3672b43088b`、branch `feature/multimodal-scan`、開始時clean。
@@ -444,9 +444,9 @@ OCR＋画像とPDFの比較、図付き答案、並行録音と端末内ASR/VAD�
 ASRは**端末内**を選択。解答はChatGPT Webのままです。原音と正規化PNGを保全し、
 時刻だけで設問対応を断定しません。手動貼付け、PCを必要とする会場運用、
 クラウドASRへの自動切替は選択していません。「再開」を受けて同じ実装を継続しました。
-仕様は [現行計画](../../tasks/plan.md) の2026-09-15改訂、実装項目は
-[MS-1～7](../../tasks/todo.md)、操作・設定・制限は
-[現行runbook](../../docs/multimodal-scan.md) を参照してください。
+仕様は [現行計画](../../../tasks/plan.md) の2026-09-15改訂、実装項目は
+[MS-1～7](../../../tasks/todo.md)、操作・設定・制限は
+[現行runbook](../../../docs/multimodal-scan.md) を参照してください。
 
 ## 作業木とレビュー
 
@@ -555,7 +555,7 @@ APK再ビルド時は上のハッシュを流用せず再検査します。
 Runs on: 指定F-51FのTermux。利用者の適用承認後に実行済み。
 
 ビルド、モデル取得、環境保存、DB保全・加算移行、サーバ起動、ASRと2チャンクAPI試験を実施。
-実測のコマンド・出力・tupleは [hardware-measurements.md §G](../../docs/hardware-measurements.md#g-local-asr)。
+実測のコマンド・出力・tupleは [hardware-measurements.md §G](../../../docs/hardware-measurements.md#g-local-asr)。
 11秒音声を5.109秒、17秒を5.814秒で処理。34秒音声の再送と原音一致を確認しました。
 グラス実録音と撮影の同居、長時間運用は未測定です。
 

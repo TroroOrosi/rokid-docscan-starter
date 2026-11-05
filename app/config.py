@@ -32,16 +32,31 @@ ENABLE_EMBEDDING = os.environ.get("ROKID_ENABLE_EMBEDDING", "0") == "1"
 REAL_MODE = os.environ.get("ROKID_REAL_MODE", "0") == "1"
 
 
+def real_mode_rejection(kind: str, provider, info: dict) -> str | None:
+    """The message ``require_real_provider`` would raise for this already-computed
+    ``info``, or None if it would be accepted.
+
+    Split out so a caller that already has ``info`` (the ``/v1/settings``
+    pre-flight in ``app.main.provider_status``) can learn the verdict without
+    calling ``provider.info()`` a second time -- ``info()`` is not free
+    (``ready()`` can probe a live endpoint, as the chatgpt-web CDP check
+    does). Does not check ``REAL_MODE`` itself; callers gate that.
+    """
+    if getattr(provider, "placeholder", info.get("offline")) or not info.get("ready"):
+        return (
+            "ROKID_REAL_MODE=1 rejects placeholder or unready "
+            f"{kind} provider '{info.get('name', 'unknown')}'"
+        )
+    return None
+
+
 def require_real_provider(kind: str, provider):
     """Reject placeholder or unready providers in a physical-device session."""
     if not REAL_MODE:
         return provider
-    info = provider.info()
-    if getattr(provider, "placeholder", info.get("offline")) or not info.get("ready"):
-        raise RuntimeError(
-            "ROKID_REAL_MODE=1 rejects placeholder or unready "
-            f"{kind} provider '{info.get('name', 'unknown')}'"
-        )
+    message = real_mode_rejection(kind, provider, provider.info())
+    if message:
+        raise RuntimeError(message)
     return provider
 
 # Explainer adapter selection (explain-sessions).
@@ -89,12 +104,15 @@ ROKID_EXPLAINER = os.environ.get("ROKID_EXPLAINER", "local")
 #                                     phase, so nothing on screen is the answer
 #                                     while it exists
 #   ROKID_CHATGPT_UPLOAD_S            default 20 (a confirmed upload took 0.11s)
-#   ROKID_CHATGPT_ATTEMPTS            default 3 tries per question, fresh chat
+#   ROKID_CHATGPT_ATTEMPTS            default 3 preparation tries before a send;
+#                                     never a second send
 #   ROKID_CHATGPT_RETRY_S             default 5, multiplied by the attempt
-#   ROKID_CHATGPT_TIMEOUT_S           default 180
+#   ROKID_CHATGPT_TIMEOUT_S           default 9000 (the session; never an analysis budget)
+#   ROKID_CHATGPT_REPLY_START_S       default 120 (no reply turn at all = failed send)
+#   ROKID_CHATGPT_SETTLE_POLLS        default 10 (stop button gone this long = finished)
 #   ROKID_CHATGPT_READY_S             default 30 (composer mount wait)
-#   ROKID_CHATGPT_POLL_S              default 0.25
-#   ROKID_CHATGPT_STABLE_POLLS        default 4  (0.25 x 4 = 1s of silence)
+#   ROKID_CHATGPT_POLL_S              default 1.0 (a reply ends on its content,
+#                                     never on N quiet polls)
 # Use a DEDICATED --user-data-dir and sign in there once. Passing the flag to an
 # already-running Chrome only opens a tab in it and never opens the port, and a
 # signed-out chatgpt.com serves a placeholder shell with no composer at all.

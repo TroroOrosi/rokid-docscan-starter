@@ -3,8 +3,10 @@ package dev.rokid.docscanglass.doc;
 import android.content.Context;
 import android.graphics.Canvas;
 import android.graphics.Color;
+import android.graphics.DashPathEffect;
 import android.graphics.Paint;
 import android.graphics.Path;
+import android.graphics.RectF;
 import android.graphics.Typeface;
 import android.view.View;
 import dev.rokid.docscanrelay.study.AnswerLayout;
@@ -19,7 +21,7 @@ import org.json.JSONObject;
 
 /**
  * The reading surface for a written answer: black background, green monospace,
- * three rows.
+ * filling the available height at a fixed readable type size.
  *
  * <p>The top row is the index -- which question this is and where in it the
  * reader stands -- and the rows under it are the answer itself. They never
@@ -34,8 +36,6 @@ import org.json.JSONObject;
 final class AnswerView extends View {
     private static final int GREEN = Color.rgb(0x40, 0xFF, 0x5E);
     private static final int INDEX_GREY = Color.rgb(0x8A, 0xC0, 0x96);
-    /** One index row and two answer rows: the three-line display contract. */
-    private static final int BODY_LINES = 2;
     private static final float SIDE_PADDING = 0.03f;
 
     private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -85,7 +85,7 @@ final class AnswerView extends View {
         if (reader.screen() == AnswerReader.Screen.ANSWER) {
             AnswerLayout.Page page = reader.page();
             body = reader.diagram() == null ? new ArrayList<>(page.lines) : Collections.emptyList();
-            index = reader.current().heading() + "  " + reader.pageNumber() + "/" + reader.pageCount();
+            index = reader.current().readingLabel() + "  " + reader.pageNumber() + "/" + reader.pageCount();
         } else {
             // On the index screens there is no answer to keep apart, so the
             // prompt belongs to the spoken text: it says what is being chosen.
@@ -116,7 +116,16 @@ final class AnswerView extends View {
         if (reader == null || getWidth() <= 0) {
             return;
         }
-        reader.viewport(textWidth(), BODY_LINES, paint::measureText);
+        int bodyLines = Math.max(1, (int)((getHeight() - bodyTop() - getWidth() * SIDE_PADDING) / lineHeight()));
+        reader.viewport(textWidth(), bodyLines, paint::measureText);
+    }
+
+    private float lineHeight() {
+        return Math.max(paint.getFontSpacing(), paint.getTextSize() * 1.25f);
+    }
+
+    private float bodyTop() {
+        return getWidth() * SIDE_PADDING * 1.5f + indexPaint.getFontSpacing();
     }
 
     private float textWidth() {
@@ -128,16 +137,15 @@ final class AnswerView extends View {
         super.onDraw(canvas);
         canvas.drawColor(Color.BLACK);
         float left = getWidth() * SIDE_PADDING;
-        float row = paint.getTextSize() * 1.5f;
-        float y = row;
-        canvas.drawText(index, left, y, indexPaint);
+        canvas.drawText(index, left, left - indexPaint.ascent(), indexPaint);
         if (reader != null && reader.diagram() != null) {
-            drawDiagram(canvas, reader.diagram(), left, row * 1.7f);
+            drawDiagram(canvas, reader.diagram(), left, bodyTop());
             return;
         }
+        float y = bodyTop() - paint.ascent();
         for (String line : body) {
-            y += row;
             canvas.drawText(line == null ? "" : line, left, y, paint);
+            y += lineHeight();
         }
     }
 
@@ -154,6 +162,9 @@ final class AnswerView extends View {
             for (int i = 0; i < elements.length(); i++) {
                 JSONObject e = elements.getJSONObject(i);
                 vector.setStyle(Paint.Style.STROKE);
+                vector.setPathEffect(e.optBoolean("dashed", false)
+                        ? new DashPathEffect(new float[]{vector.getStrokeWidth() * 4,
+                                vector.getStrokeWidth() * 3}, 0) : null);
                 switch (e.getString("type")) {
                     case "line":
                         canvas.drawLine(left + (float)e.getDouble("x1") * width,
@@ -161,9 +172,29 @@ final class AnswerView extends View {
                                 left + (float)e.getDouble("x2") * width,
                                 top + (float)e.getDouble("y2") * height, vector); break;
                     case "circle":
+                        if (e.has("filled") && !e.getBoolean("filled")) {
+                            // An open endpoint must clear the curve beneath it. Ordinary
+                            // geometric circles (without filled) keep their interiors.
+                            Paint background = new Paint(vector);
+                            background.setPathEffect(null);
+                            background.setStyle(Paint.Style.FILL);
+                            background.setColor(Color.BLACK);
+                            canvas.drawCircle(left + (float)e.getDouble("cx") * width,
+                                    top + (float)e.getDouble("cy") * height,
+                                    (float)e.getDouble("r") * Math.min(width, height), background);
+                        }
+                        if (e.optBoolean("filled", false)) vector.setStyle(Paint.Style.FILL);
                         canvas.drawCircle(left + (float)e.getDouble("cx") * width,
                                 top + (float)e.getDouble("cy") * height,
                                 (float)e.getDouble("r") * Math.min(width, height), vector); break;
+                    case "arc":
+                        float cx = left + (float)e.getDouble("cx") * width;
+                        float cy = top + (float)e.getDouble("cy") * height;
+                        float radius = (float)e.getDouble("r") * Math.min(width, height);
+                        canvas.drawArc(new RectF(cx - radius, cy - radius, cx + radius, cy + radius),
+                                (float)e.getDouble("start_degrees"), (float)e.getDouble("sweep_degrees"),
+                                false, vector); break;
+                    case "polygon":
                     case "polyline":
                         Path path = new Path();
                         JSONArray points = e.getJSONArray("points");
@@ -172,6 +203,19 @@ final class AnswerView extends View {
                             float x = left + (float)p.getDouble(0) * width;
                             float y = top + (float)p.getDouble(1) * height;
                             if (j == 0) path.moveTo(x, y); else path.lineTo(x, y);
+                        }
+                        if (e.getString("type").equals("polygon")) {
+                            path.close();
+                            if (e.optBoolean("hatched", false)) {
+                                int save = canvas.save();
+                                canvas.clipPath(path);
+                                Paint hatch = new Paint(vector);
+                                hatch.setPathEffect(null);
+                                float spacing = Math.max(10, getHeight() * .02f);
+                                for (float x = left - height; x < left + width; x += spacing)
+                                    canvas.drawLine(x, top + height, x + height, top, hatch);
+                                canvas.restoreToCount(save);
+                            }
                         }
                         canvas.drawPath(path, vector); break;
                     case "text":

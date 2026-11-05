@@ -39,11 +39,64 @@ public interface CaptureSurface {
 
     long showCaptureReview(byte[] jpeg, int rotationDegrees, List<String> lines);
 
+    default void showCaptureReviewNotice(String notice) { }
+
+    /** Diagnostic-only, outside photos and answers. Recheck current again on the UI thread/draw. */
+    default void showCaptureInspectionFeedback(CaptureInspectionFeedback.Notice notice,
+                                               java.util.function.BooleanSupplier current) { }
+
     /** Only an app-owned surface with verified gestures may register automatically. */
     default boolean supportsLocalCaptureReview() { return false; }
 
     /** True only while this exact still remains visible, not merely requested. */
     default boolean isCaptureReviewVisible(long generation) { return false; }
+
+    /** Camera preview gate. The callback fires once after a page change becomes still. */
+    default void awaitNextPage(Runnable ready) { ready.run(); }
+
+    interface FuturePageListener {
+        default boolean onCaptureStarting() { return true; }
+        void onCandidate(byte[] jpeg, CaptureProvenance source, boolean sceneMatched);
+        void onPageMissed();
+    }
+
+    default boolean supportsFuturePages() { return false; }
+
+    /** Capacity excludes the displayed photo; an issued still reserves one slot. */
+    default void observeFuturePages(int capacity, FuturePageListener listener) { }
+
+    /** Stop observing, then report idle only after any issued original has been delivered. */
+    default void stopFuturePages(Runnable idle) { idle.run(); }
+
+    /** Stops the viewfinder and its sensors outside capture or during an idle pause. */
+    default void pausePreview() { }
+
+    default void resetPageDetection() { }
+
+    /** Internal camera identity, deliberately separate from the unchanged upload provenance schema. */
+    record NativeScene(String camera, long stream, long sequence, String captureId, String sha256) {
+        public NativeScene {
+            if (camera == null || !camera.matches("[0-9a-f-]{36}") || stream <= 0 || sequence <= 0
+                    || captureId == null || !captureId.matches("[0-9a-f-]{36}")
+                    || sha256 == null || !sha256.matches("[0-9a-f]{64}"))
+                throw new IllegalArgumentException("native scene identity");
+        }
+        public boolean matches(CaptureProvenance source) {
+            return source != null && "native_still".equals(source.sourceKind)
+                    && captureId.equals(source.captureId) && sha256.equals(source.jpegSha256);
+        }
+    }
+
+    /** Disabled by default. An optional issued JPEG must be retained even after scene/end invalidation. */
+    interface NativeAlternative {
+        boolean onStarting();
+        void onOriginal(byte[] jpeg, CaptureProvenance source, boolean sameScene);
+        void onSkipped();
+    }
+    default NativeScene nativeSelectionScene(CaptureProvenance source) { return null; }
+    default boolean isNativeSelectionSceneCurrent(NativeScene scene) { return false; }
+    default NativeImageQuality.Sample sampleNativeImage(byte[] jpeg, CaptureProvenance source) { return null; }
+    default void requestNativeAlternative(NativeScene scene, NativeAlternative result) { result.onSkipped(); }
 
     /**
      * Retires an ambiguous view callback stream after an acknowledgement

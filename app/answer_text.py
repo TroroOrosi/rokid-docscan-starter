@@ -1,9 +1,8 @@
 """Turn a solver's answer into the text the operator writes on the answer sheet.
 
-A model writes for a screen with a font. The glasses have neither: the HUD is
-monochrome green, at most three lines, and renders exactly the characters it is
-given (`app/glasses_view.py`). LaTeX, markdown tables and image references
-therefore reach the operator as literal backslashes and pipes.
+The standalone glasses reader renders text and validated vector diagrams.
+Preserve plain text (including code indentation) and convert explicit mathematical
+notation without mistaking identifiers, currency or programming operators for it.
 
 Two jobs, in this order:
 
@@ -39,21 +38,29 @@ _COMMANDS = {
     "phi": "\u03c6", "omega": "\u03c9", "Omega": "\u03a9", "Delta": "\u0394",
     "Sigma": "\u03a3", "circ": "\u00b0", "degree": "\u00b0",
     # Layout-only commands carry no answer content.
-    "left": "", "right": "", "displaystyle": "", "text": "", "mathrm": "",
+    "left": "", "right": "", "displaystyle": "",
     "quad": " ", "qquad": " ",
 }
 
 _CASES = re.compile(r"\\begin\{cases\}(.*?)\\end\{cases\}", re.DOTALL)
+_TEXT_GROUP = re.compile(r"\\(?:text|mathrm)\s*\{([^{}]*)\}")
 _FRAC = re.compile(r"\\[dt]?frac\s*\{([^{}]*)\}\s*\{([^{}]*)\}")
 _SQRT = re.compile(r"\\sqrt\s*\{([^{}]*)\}")
 _POWER = re.compile(r"\^\s*\{([^{}]*)\}|\^(\w)")
 _INDEX = re.compile(r"_\s*\{([^{}]*)\}|_(\w)")
 _COMMAND = re.compile(r"\\([A-Za-z]+)\s*")
-_MATH_DELIMITERS = ("\\(", "\\)", "\\[", "\\]", "$$", "$")
+_SEGMENTS = re.compile(
+    r"(?P<fenced>^(?P<fence>`{3,}|~{3,})[^\n]*\n(?P<code>.*?)^(?P=fence)[ \t]*(?=\n|$))"
+    r"|(?P<unclosed>^(?:`{3,}|~{3,})[^\n]*\n.*\Z)"
+    r"|(?P<inline>`[^`\n]+`)"
+    r'''|(?P<quoted>"(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*')'''
+    r"|(?P<math>\\\(.*?\\\)|\\\[.*?\\\]|\$\$.*?\$\$|(?<!\\)\$(?!\s)[^$\n]+(?<!\s)\$(?![0-9]))",
+    re.MULTILINE | re.DOTALL,
+)
 _TABLE_ROW = re.compile(r"^\s*\|.*\|\s*$", re.MULTILINE)
 _TABLE_RULE = re.compile(r"^\s*\|[\s:|-]+\|\s*$", re.MULTILINE)
 _IMAGE = re.compile(r"!\[[^\]]*\]\([^)]*\)")
-_CODE_FENCE = re.compile(r"```")
+_CODE_FENCE = re.compile(r"^\s*(?:`{3,}|~{3,})", re.MULTILINE)
 _LEFTOVER = re.compile(r"\\[A-Za-z]+|\\\\")
 
 _TABLE_LABEL = "\u8868"  # 表
@@ -89,54 +96,75 @@ def _atom(part: str) -> str:
 def _cases(match: re.Match) -> str:
     """One 場合分け per line: `\\begin{cases} a & x>0 \\\\ b & x<0 \\end{cases}`."""
     rows = [row.strip() for row in re.split(r"\\\\|\n", match.group(1))]
-    return "\n".join(row.replace("&", " ").strip() for row in rows if row.strip())
+    return "\n".join(re.sub(r"[ \t]+", " ", row.replace("&", " ")).strip()
+                     for row in rows if row.strip())
 
 
 def _script(match: re.Match, table: dict[int, str], fallback: str) -> str:
     """Render one ^{...} or _{...} run, or keep it readable if it has no glyphs."""
     body = match.group(1) if match.group(1) is not None else match.group(2)
-    converted = body.translate(table)
-    if converted == body and any(c.isalnum() for c in body):
+    if not all(ord(c) in table for c in body):
         return fallback.format(body)
-    return converted
+    return body.translate(table)
 
 
-def to_display_answer(answer: str) -> DisplayAnswer:
-    """Convert `answer` for the glasses display and name what did not convert."""
-    text = (answer or "").strip()
-    if not text:
-        return DisplayAnswer("")
-
-    unsupported: list[str] = []
+def _convert_text(text: str, unsupported: list[str], *, explicit_math: bool = False) -> str:
+    # A malformed/unclosed code block must remain literal, including its contents.
+    if _CODE_FENCE.search(text):
+        unsupported.append(_FENCE_LABEL)
+        return text
     if _IMAGE.search(text):
         unsupported.append(_IMAGE_LABEL)
         text = _IMAGE.sub("", text)
     if _TABLE_ROW.search(text) and _TABLE_RULE.search(text):
         unsupported.append(_TABLE_LABEL)
-    if _CODE_FENCE.search(text):
-        unsupported.append(_FENCE_LABEL)
-        text = _CODE_FENCE.sub("", text)
-
     text = _CASES.sub(_cases, text)
-    for _ in range(4):  # a nested \frac{\frac{a}{b}}{c} needs one pass per level
-        converted = _FRAC.sub(lambda m: f"{_atom(m.group(1))}/{_atom(m.group(2))}", text)
+    for _ in range(4):  # nested LaTeX groups need one pass per level
+        converted = _TEXT_GROUP.sub(r"\1", text)
+        converted = _FRAC.sub(lambda m: f"{_atom(m.group(1))}/{_atom(m.group(2))}", converted)
         if converted == text:
             break
         text = converted
     text = _SQRT.sub(lambda m: f"\u221a({m.group(1)})", text)
-    text = _POWER.sub(lambda m: _script(m, _SUPERSCRIPT, "^({0})"), text)
-    text = _INDEX.sub(lambda m: _script(m, _SUBSCRIPT, "_({0})"), text)
+    # Bare x^{...} is also valid programming syntax (XOR with a set). Only
+    # explicitly delimited math authorizes changing these ambiguous operators.
+    if explicit_math:
+        text = _POWER.sub(lambda m: _script(m, _SUPERSCRIPT, "^({0})"), text)
+        text = _INDEX.sub(lambda m: _script(m, _SUBSCRIPT, "_({0})"), text)
     text = _COMMAND.sub(lambda m: _COMMANDS.get(m.group(1), "\\" + m.group(1)), text)
 
-    # Name what is left BEFORE the braces go, or `\begin{cases}` is reported as
-    # the run-together `\begincasesx` instead of `\begin`.
+    # Keep unknown commands and meaningful braces in sets and code intact.
     leftover = sorted(set(_LEFTOVER.findall(text)))
     if leftover:
         unsupported.append(_NOTATION_LABEL + " ".join(leftover[:5]))
 
-    for delimiter in _MATH_DELIMITERS:
-        text = text.replace(delimiter, "")
-    text = text.replace("{", "").replace("}", "")
+    return text
 
-    text = re.sub(r"[ \t]+", " ", text).strip()
-    return DisplayAnswer(text, tuple(unsupported))
+
+def to_display_answer(answer: str) -> DisplayAnswer:
+    """Keep prose/code literal; convert explicit math and name unrenderable content."""
+    text = (answer or "").strip("\r\n")
+    if not text.strip():
+        return DisplayAnswer("")
+    unsupported: list[str] = []
+    parts: list[str] = []
+    end = 0
+    for match in _SEGMENTS.finditer(text):
+        parts.append(_convert_text(text[end:match.start()], unsupported))
+        if match.group("fenced") is not None:
+            # Strip only the presentation wrapper, not indentation or literal notation.
+            parts.append(match.group("code").removesuffix("\n"))
+        elif match.group("unclosed") is not None:
+            unsupported.append(_FENCE_LABEL)
+            parts.append(match.group("unclosed"))
+        elif match.group("inline") is not None:
+            parts.append(match.group("inline")[1:-1])
+        elif match.group("quoted") is not None:
+            parts.append(match.group("quoted"))
+        else:
+            math = match.group("math")
+            edge = 2 if math.startswith(("\\(", "\\[", "$$")) else 1
+            parts.append(_convert_text(math[edge:-edge], unsupported, explicit_math=True))
+        end = match.end()
+    parts.append(_convert_text(text[end:], unsupported))
+    return DisplayAnswer("".join(parts), tuple(dict.fromkeys(unsupported)))

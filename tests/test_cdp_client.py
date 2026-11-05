@@ -68,16 +68,90 @@ def test_fill_refuses_when_no_element_matched():
 
 
 def test_set_input_files_carries_the_bytes_name_and_type():
-    page = FakePage(values=[True])
+    page = FakePage(values=[True, True, True])
     page.locator("input#upload-files").set_input_files(
-        [{"name": "pages.pdf", "mimeType": "application/pdf", "buffer": b"%PDF-1.4 body"}]
+        [{"name": "page001.jpg", "mimeType": "image/jpeg", "buffer": b"jpeg body"}]
     )
-    script = page.evaluated[0]
-    payload = json.loads(script[script.index("[{") : script.index("}]") + 2])
-    assert payload[0]["name"] == "pages.pdf"
-    assert payload[0]["type"] == "application/pdf"
-    assert base64.b64decode(payload[0]["data"]) == b"%PDF-1.4 body"
-    assert "new DataTransfer()" in script and "e.files = dt.files" in script
+    script = page.evaluated[1]
+    payload = json.loads(script[script.index("{\"name\"") : script.index("}; const bin") + 1])
+    assert payload["name"] == "page001.jpg"
+    assert payload["type"] == "image/jpeg"
+    assert base64.b64decode(payload["data"]) == b"jpeg body"
+    assert "new DataTransfer()" in page.evaluated[-1] and "e.files = dt.files" in page.evaluated[-1]
+
+
+def test_no_single_evaluate_carries_more_than_one_file():
+    """The DevTools websocket takes 100 MB per message; 20 pages in one exceeded it."""
+    page = FakePage(values=[True] * 5)
+    buffers = [bytes([i]) * 1000 for i in range(3)]
+    page.locator("input").set_input_files(
+        [{"name": f"p{i}.jpg", "mimeType": "image/jpeg", "buffer": b} for i, b in enumerate(buffers)]
+    )
+    encoded = [base64.b64encode(b).decode() for b in buffers]
+    carried = [sum(e in script for e in encoded) for script in page.evaluated]
+    assert carried == [0, 1, 1, 1, 0]
+
+
+def test_large_file_bytes_are_split_below_the_websocket_message_limit():
+    data = bytes(range(256)) * 5000
+    page = FakePage(values=[True] * 20)
+    page.locator('input[type="file"]').set_input_files(
+        [{"name": "originals.zip", "mimeType": "application/zip", "buffer": data}]
+    )
+    assert max(len(script.encode()) for script in page.evaluated) < 800_000
+    chunks = []
+    for script in page.evaluated:
+        if "const chunk = " in script:
+            encoded = json.loads(script.split("const chunk = ", 1)[1].split(";", 1)[0])
+            chunks.append(base64.b64decode(encoded))
+    assert b"".join(chunks) == data
+    assert "new File" in page.evaluated[-2] and "new DataTransfer" in page.evaluated[-1]
+
+
+def test_shared_filesystem_attachment_sends_paths_without_encoding_bytes():
+    class SharedPage(FakePage):
+        def send(self, method, params=None):
+            self.sent.append((method, params or {}))
+            if method == "DOM.getDocument":
+                return {"root": {"nodeId": 1}}
+            if method == "DOM.querySelectorAll":
+                return {"nodeIds": [9]}
+            return {}
+
+    page = SharedPage()
+    page.locator('input[type="file"]').set_input_paths(["/private/originals.zip"])
+    assert page.sent[-1] == ("DOM.setFileInputFiles", {"nodeId": 9, "files": ["/private/originals.zip"]})
+    assert page.evaluated == []
+
+
+def test_shared_filesystem_attachment_refuses_ambiguous_input():
+    class AmbiguousPage(FakePage):
+        def send(self, method, params=None):
+            self.sent.append((method, params or {}))
+            return {"root": {"nodeId": 1}} if method == "DOM.getDocument" else {"nodeIds": [4, 9]}
+
+    page = AmbiguousPage()
+    with pytest.raises(cdp.CdpError, match="ambiguous"):
+        page.locator("input").set_input_paths(["/private/originals.zip"])
+    assert all(method != "DOM.setFileInputFiles" for method, _ in page.sent)
+
+
+def test_failed_large_file_staging_releases_browser_arrays_and_never_changes_input():
+    class BrokenPage(FakePage):
+        def evaluate(self, expression):
+            self.evaluated.append(expression)
+            if "new File(" in expression:
+                raise cdp.CdpError("browser refused the File allocation")
+            return True
+
+    page = BrokenPage()
+    with pytest.raises(cdp.CdpError, match="allocation"):
+        page.locator("input").set_input_files(
+            [{"name": "originals.zip", "mimeType": "application/zip", "buffer": b"x" * 600_000}]
+        )
+    assert "delete window.__rokidFiles" in page.evaluated[-1]
+    assert "delete window.__rokidChunks" in page.evaluated[-1]
+    assert not any("e.files = dt.files" in script for script in page.evaluated)
 
 
 def test_press_enter_sends_a_real_key_event_pair():

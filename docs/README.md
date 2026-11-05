@@ -1,6 +1,11 @@
 # Documentation index and authority
 
-Status: Current documentation map. Updated 2026-09-22.
+Status: Current documentation map. Updated 2026-09-23.
+
+実機確認前の入口は [目的・機能の全体整理](requirements-audit.md)。
+目的／採否と全機能の不足 → [実装配置図](implementation-surfaces.md) → [設計](../tasks/plan.md)・
+[現在のWタスクと旧CQ/RPの対応](../tasks/todo.md) → [継続記録](../.agents/progress/current.md) の順で読む。9/23以前の採否・順序は履歴で、10/29の録画／Work／最小表示の比較を置き換えない。
+実機操作・導入・GPT送信の停止は継続する。文書の保存やPC検査は停止解除ではない。
 
 Separate the intended requirement from evidence of what works:
 
@@ -11,7 +16,7 @@ Separate the intended requirement from evidence of what works:
 - Versioned official APIs and inspected artifacts establish the supported surface.
 - Device claims require dated measurements with the exact version/hash tuple.
 - Historical plans and research retain context. Their superseded resume instructions
-  are not current work; use the RP list in `tasks/todo.md`.
+  are not current work; use the current dated section in `tasks/todo.md`.
 
 A build proves compilation only. A repository note proves that an observation
 was recorded, not that it applies to another device or firmware.
@@ -39,12 +44,14 @@ silently applying that exception. `.agents/progress/` remains in scope.
 - `docs/capture-preflight.md` — PR37の撮影再開前チェック。保存写真の無送信検査、原本保全、制限ヒープ試験。
 
 - `docs/implementation-surfaces.md` — **read this before adding anything.**
-  Every Gradle module, Activity and operator-facing server module, each with a
+  Repository map covering the server, Android, scripts, tests, CI, configuration and records.
+  Every Gradle module, Activity and operator-facing server module carries a
   status: route, frozen, probe or shared. `tests/test_surface_inventory.py`
   fails when a surface is missing from it, so a second implementation of an
   existing role has to be declared rather than merely appear.
-- `docs/multimodal-scan.md` — standalone capture, diagrams, source attachments and local listening ASR; physical acceptance pending.
+- `docs/multimodal-scan.md` — standalone capture, diagrams, original image/audio input; ASR only on the compatibility route; physical acceptance pending.
 - `README.md` — project entrypoint: what this is for, setup, and the HTTP API.
+- `AGENTS.md` — agent entrypoint for every harness: read order and the rules past sessions broke.
 - `CLAUDE.md` — engineering invariants. The contract that governs changes:
   real-device rules, answer routes, capture/input/server invariants, build and
   device gates, and the documentation rules above.
@@ -59,7 +66,8 @@ silently applying that exception. `.agents/progress/` remains in scope.
 - `docs/windows-android-real-device-setup.md` — Windows/Android setup.
 - `docs/explain-sessions.md` — server explain-session API.
 - `docs/exam-solver-architecture.md` — answer-mode architecture, including
-  `chatgpt-web` and OCR/image/PDF attachment paths.
+  original image/audio input, chatgpt-web, and unfinished segmentation/delivery connections.
+  The superseded architecture is retained in an explicitly historical section.
 - `docs/future-proof-architecture.md` — extension boundaries; current where it
   agrees with the implementation.
 
@@ -93,27 +101,25 @@ what the platform permits.
 ## Implementation plans and adoption decisions
 
 - `tasks/plan.md` — current rationalized plan first; superseded plans preserved in a historical section.
-- `tasks/todo.md` — active RP tasks with acceptance criteria; older checkboxes are history.
-- `docs/requirements-audit.md` — source findings, adoption/defer/retire decisions,
-  and the complete old FS/R/S/X requirement mapping. Planning only, not physical acceptance.
+- `tasks/todo.md` — current W work and acceptance conditions; earlier RP/CQ checkboxes are history.
+- `docs/requirements-audit.md` — 現在の要望・会話中の変更・比較候補と到達点。旧採否・順序は折り畳んだ履歴。
+  旧FS/R/S/Xの対応と2026-09-15の調査履歴も保持。実装／物理受け入れの完了ではない。
 - `docs/fast-scan-decisions.md` — automatic/manual scan and listening decisions.
   The current implementation is described in `docs/multimodal-scan.md`.
   D/E/X comparisons retain their original evidence; physical/model acceptance is pending.
 
 ## Internal progress records
 
-- `.agents/progress/pr37-capture-quality.md` — **PR37の再開入口。** 撮影品質要件の31件対応表、今回の検証と本流未接続の残作業。
+- `.agents/progress/current.md` — **再開入口。** 目的（原本画像を正確にGPTへ）、遅延の原因、有効な停止、PR38の完了分と次の作業。
 
-- `.agents/progress/pr37-objective-review.md` — **2026-09-17時点のレビュー。** 整合性・録音・終了保存の回帰修正、客観的な未解決事項。実機停止は維持。
+退避済み（2026-09-23、利用者承認）。PR37〜38の測定と訂正の一次記録。必要な節だけ参照する:
 
-- `.agents/progress/pr37-camera-research.md` — **objective-reviewの次に読む。** 撮影仕様調査、配送・診断修正、検証の範囲。追加撮影は停止のまま。
-
-- `.agents/progress/pr37-offline-remediation.md` — **新しいcamera-research記録の後に読む。** 追加修正と停止条件。続いて既存2記録の全文を読む。
-
-- `.agents/progress/pr37-predevice-handoff.md` — PR37の実機前修正、検証範囲、Windows Codexへの引き継ぎと未実装の対応表。
-
-- `.agents/progress/multimodal-scan.md` — **read this in full after the PR37 handoff.** 保存・停止時の実機状態と経緯。
-  以前の実装・実機導入・ASRの測定と、追加実装を始める前の境界を保持する。
+- `.agents/progress/archive/pr37-capture-quality.md` — 31件の対応表、実機試験、保存画像・OCR比較、訂正の全履歴。
+- `.agents/progress/archive/pr37-objective-review.md` — 2026-09-17時点のレビューと回帰修正。
+- `.agents/progress/archive/pr37-camera-research.md` — 撮影仕様調査と配送・診断修正。
+- `.agents/progress/archive/pr37-offline-remediation.md` — 追加修正と停止条件。
+- `.agents/progress/archive/pr37-predevice-handoff.md` — PR37の実機前修正とCodexへの引き継ぎ。
+- `.agents/progress/archive/multimodal-scan.md` — multimodal-scanの実機状態と経緯。
 
 Continuation records for agents. Never an operator contract.
 

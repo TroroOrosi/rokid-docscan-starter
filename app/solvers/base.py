@@ -73,6 +73,9 @@ class Question:
     question_id: str = ""
     # Pages whose content has no text representation; a fallback must read them.
     required_image_paths: list[str] = field(default_factory=list)
+    # Mixed papers retain one image-backed chat and add original audio later.
+    booklet_stage: str = "single"
+    booklet_questions: list[dict] = field(default_factory=list)
 
 
 @dataclass

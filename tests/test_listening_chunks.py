@@ -14,6 +14,72 @@ def wav(samples, value=b"\x01\x00"):
     return output.getvalue()
 
 
+@pytest.mark.parametrize("stage", ["completion", "verification"])
+def test_original_audio_hashes_without_python311_file_digest(saved_audio, monkeypatch, stage):
+    raw = wav(16000)
+    listening.store_chunk(1, 0, 0, 1000, raw, transcribe=False)
+    if stage == "verification":
+        manifest = listening.complete_recording(1, 1, 16000)
+    monkeypatch.delattr(listening.hashlib, "file_digest", raising=False)
+    if stage == "completion":
+        manifest = listening.complete_recording(1, 1, 16000)
+    assert manifest["audio_sha256"] == listening.hashlib.sha256(raw).hexdigest()
+    path, transcript = listening.recording_transcript(1, require_transcript=False, verify_original=True)
+    assert path == manifest["audio_path"] and transcript == ""
+    original = listening.folder(1) / "original.wav"
+    original.write_bytes(wav(16000, b"\x02\x00"))  # Same path and size, different PCM.
+    with pytest.raises(ValueError, match="integrity"):
+        listening.recording_transcript(1, require_transcript=False, verify_original=True)
+    assert (listening.folder(1) / "0000.wav").read_bytes() == raw
+
+
+def test_chatgpt_audio_receives_original_without_asr_or_transcript(tmp_path, monkeypatch):
+    import importlib
+    from fastapi.testclient import TestClient
+    from app import config, db, main
+
+    monkeypatch.setenv("ROKID_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("ROKID_SOLVER", "chatgpt-web")
+    monkeypatch.delenv("ROKID_SOLVER_TIERS", raising=False)
+    for key in ("ROKID_WHISPER_CLI", "ROKID_WHISPER_MODEL", "ROKID_WHISPER_VAD_MODEL"):
+        monkeypatch.delenv(key, raising=False)
+    importlib.reload(config)
+    importlib.reload(db)
+    importlib.reload(main)
+    main.ensure_dirs()
+    db.init_db()
+    client = TestClient(main.app)
+    monkeypatch.setattr(listening, "transcribe_chunk", lambda *a, **kw: pytest.fail("unneeded ASR"))
+    monkeypatch.setattr("app.transcribe.transcribe_audio", lambda *a, **kw: pytest.fail("unneeded ASR"))
+    assert client.get("/v1/listening-ready").status_code == 200
+    doc = client.post("/v1/documents", json={"title": "originals"}).json()["document_id"]
+    raw = wav(16000)
+    url = f"/v1/documents/{doc}/audio-chunks"
+    data = {"sequence": 0, "start_sample": 0, "captured_at_ms": 123000}
+    first = client.post(url, data=data, files={"audio": ("0000.wav", raw)})
+    assert first.status_code == 200 and first.json()["asr_seconds"] == 0
+    assert client.post(url, data=data, files={"audio": ("0000.wav", raw)}).json() == first.json()
+    assert client.post(f"/v1/documents/{doc}/audio-complete", json={
+        "expected_chunks": 1, "total_samples": 16000}).status_code == 200
+    assert client.post(f"/v1/documents/{doc}/pages", data={
+        "page_index": 0, "ocr_text": "問1 Listen"}).status_code == 201
+    assert client.post(f"/v1/documents/{doc}/finalize").status_code == 200
+    session = client.post("/v1/exam-sessions", json={
+        "document_id": doc, "exam_type": "listening"}).json()["session_id"]
+    assert client.post(f"/v1/exam-sessions/{session}/document-audio").status_code == 200
+    with db.connect() as conn:
+        row = conn.execute("SELECT * FROM exam_sessions WHERE id = ?", (session,)).fetchone()
+        assert row["transcript"] == ""
+        with wave.open(row["audio_path"], "rb") as original:
+            assert original.readframes(16000) == b"\x01\x00" * 16000
+    # The older full-recording upload must not start a second transcription either.
+    other = client.post("/v1/exam-sessions", json={
+        "document_id": doc, "exam_type": "listening"}).json()["session_id"]
+    response = client.post(f"/v1/exam-sessions/{other}/audio",
+                           data={"transcript": "ignored ASR"}, files={"audio": ("original.wav", raw)})
+    assert response.status_code == 200 and response.json()["transcript"] == ""
+
+
 def test_chunk_retry_missing_tail_and_original_audio_survive(tmp_path, monkeypatch):
     monkeypatch.setattr(listening.config, "AUDIO_DIR", tmp_path)
 
