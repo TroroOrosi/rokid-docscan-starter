@@ -8,6 +8,7 @@ import shutil
 import socket
 import stat
 import subprocess
+import sys
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -430,23 +431,38 @@ def test_only_the_exact_legacy_logger_is_adopted(tmp_path, changed):
 
 
 def _display_guard(script, directory, endpoint, connect_error=errno.ECONNREFUSED,
-                   cdp_error=errno.ECONNREFUSED):
+                   cdp_error=errno.ECONNREFUSED, lock=None):
     """Execute the launcher's actual Python guard with only OS boundaries faked."""
     source = (ROOT / "scripts" / script).read_text().split("python - <<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
     root = Path("/fixture-x11")
     metadata = {root / ".X11-unix": directory, root / ".X11-unix/X1": endpoint}
+    lock_path = root / "profile/SingletonLock"
+    lock_reads = []
 
     def lstat(path):
-        value = metadata[path]
+        if path == lock_path:
+            lock_reads.append(path)
+            value = None if lock is None else lock.get("metadata", (10026, stat.S_IFLNK | 0o777))
+            if lock is not None and len(lock_reads) > 1:
+                value = lock.get("metadata_after", value)
+        else:
+            value = metadata[path]
         if isinstance(value, OSError):
             raise value
         if value is None:
             raise FileNotFoundError(errno.ENOENT, "fixture absent")
-        return SimpleNamespace(st_uid=value[0], st_mode=value[1])
+        inode = 1 if path != lock_path or lock is None or len(lock_reads) < 2 else lock.get("inode_after", 1)
+        return SimpleNamespace(st_uid=value[0], st_mode=value[1], st_dev=1, st_ino=inode,
+                               st_size=16, st_mtime_ns=1, st_ctime_ns=1)
 
     outcome = None
-    with patch.dict(os.environ, {"TMPDIR": str(root)}), \
+    target = "fixture-host-679" if lock is None else lock.get("target", "fixture-host-679")
+    owner_error = None if lock is None else lock.get("owner_error", ProcessLookupError(errno.ESRCH, "fixture absent"))
+    with patch.dict(os.environ, {"TMPDIR": str(root), "ROKID_BROWSER_PROFILE": str(root / "profile")}), \
             patch.object(os, "getuid", return_value=10026, create=True), \
+            patch.object(os, "readlink", side_effect=[target, target if lock is None else lock.get("target_after", target)]), \
+            patch.object(os, "kill", side_effect=owner_error), \
+            patch.object(socket, "gethostname", return_value="fixture-host"), \
             patch.object(socket, "AF_UNIX", 1, create=True), \
             patch.object(Path, "lstat", lstat), patch.object(socket, "socket") as native_socket:
         connection = native_socket.return_value.__enter__.return_value
@@ -458,6 +474,89 @@ def _display_guard(script, directory, endpoint, connect_error=errno.ECONNREFUSED
         except SystemExit as error:
             outcome = str(error)
     return outcome
+
+
+@pytest.mark.parametrize("lock,allowed", [
+    (None, True),
+    ({}, True),
+    ({"owner_error": None}, False),
+    ({"owner_error": PermissionError(errno.EPERM, "fixture denied")}, False),
+    ({"owner_error": OSError(errno.EIO, "fixture unknown")}, False),
+    ({"target": "other-host-679"}, False),
+    ({"target": "fixture-host-0"}, False),
+    ({"target": "fixture-host--1"}, False),
+    ({"target": "fixture-host-2147483648"}, False),
+    ({"target": "fixture-host-000679"}, False),
+    ({"target": "fixture-host-６７９"}, False),
+    ({"target": "fixture-host-invalid"}, False),
+    ({"metadata": (0, stat.S_IFLNK | 0o777)}, False),
+    ({"metadata": (10026, stat.S_IFREG | 0o600)}, False),
+    ({"metadata": PermissionError(errno.EACCES, "fixture denied")}, False),
+    ({"metadata_after": None}, False),
+    ({"metadata_after": (10026, stat.S_IFREG | 0o600)}, False),
+    ({"inode_after": 2}, False),
+    ({"target_after": "fixture-host-680"}, False),
+])
+def test_actual_browser_guard_allows_only_absent_or_stable_same_host_dead_owner(lock, allowed):
+    outcome = _display_guard("phone_browser.sh", (10026, stat.S_IFDIR | 0o1777),
+                             (10026, stat.S_IFSOCK | 0o777), 0, lock=lock)
+    assert (outcome is None) == allowed
+
+
+@requires_bash
+@pytest.mark.parametrize("owner,allowed", [("dead", True), ("live", False), ("foreign", False)])
+def test_browser_launcher_preserves_real_symlink_and_credentials_until_native_start(tmp_path, owner, allowed):
+    env, log = _environment(tmp_path)
+    profile = Path(env["ROKID_BROWSER_PROFILE"])
+    profile.mkdir(mode=0o700)
+    login = profile / "Cookies"
+    login.write_bytes(b"private existing profile")
+    child = subprocess.Popen([sys.executable, "-c", "pass"])
+    child.wait(timeout=15)
+    owner_pid = os.getpid() if owner == "live" else child.pid
+    hostname = "foreign-fixture-host" if owner == "foreign" else socket.gethostname()
+    target = f"{hostname}-{owner_pid}"
+    lock = profile / "SingletonLock"
+    try:
+        lock.symlink_to(target)
+    except OSError as error:
+        if os.name == "nt" and error.winerror == 1314:
+            pytest.skip("Windows account lacks symbolic-link creation privilege")
+        raise
+    before = (lock.lstat().st_ino, os.readlink(lock), login.read_bytes())
+    # Run the real Python preflight. POSIX uses the real signal-0 probe, while
+    # Windows mocks it because Windows os.kill(pid, 0) can terminate the target.
+    # Display/CDP endpoints and the Chromium command are fixture boundaries.
+    wrapper = tmp_path / "guard.py"
+    wrapper.write_text("import os, pathlib, socket, stat, sys\n"
+                       "from types import SimpleNamespace\n"
+                       "from unittest.mock import patch\n"
+                       "if os.name == 'nt':\n"
+                       "    os.getuid = lambda: 0\n"
+                       "    def probe(pid, signal):\n"
+                       "        assert signal == 0\n"
+                       f"        if pid != {os.getpid()}:\n"
+                       "            raise ProcessLookupError(3, 'fixture absent')\n"
+                       "    os.kill = probe\n"
+                       "original = pathlib.Path.lstat\n"
+                       "def lstat(path):\n"
+                       "    if path.name == 'X1':\n"
+                       "        return SimpleNamespace(st_uid=os.getuid(), st_mode=stat.S_IFSOCK | 0o777)\n"
+                       "    if path.name == '.X11-unix':\n"
+                       "        return SimpleNamespace(st_uid=os.getuid(), st_mode=stat.S_IFDIR | 0o1777)\n"
+                       "    return original(path)\n"
+                       "with patch.object(pathlib.Path, 'lstat', lstat), patch.object(socket, 'socket') as native:\n"
+                       "    native.return_value.__enter__.return_value.connect_ex.return_value = 111\n"
+                       "    exec(compile(sys.stdin.read(), 'actual browser guard', 'exec'), {})\n")
+    python = tmp_path / "bin/python"
+    python.write_text("#!/usr/bin/env bash\nexec " + shlex.quote(Path(sys.executable).as_posix())
+                      + " " + shlex.quote(wrapper.as_posix()) + "\n")
+    result = _run("phone_browser.sh", env)
+    assert (result.returncode == 0) == allowed, result.stderr
+    assert log.exists() == allowed
+    if allowed:
+        assert log.read_text().splitlines()[0] == "chromium-browser"
+    assert (lock.lstat().st_ino, os.readlink(lock), login.read_bytes()) == before
 
 
 @pytest.mark.parametrize("script", ["phone_x11.sh", "phone_browser.sh"])

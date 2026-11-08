@@ -23,16 +23,17 @@ if [[ "$(stat -c '%a' "$profile")" != 700 || "$(stat -c '%u' "$profile")" != "$(
     echo "phone_browser: private profile must be owned by this user with mode 0700" >&2
     exit 1
 fi
-if [[ -e "$profile/SingletonLock" || -L "$profile/SingletonLock" ]]; then
+if [[ -e "$profile/SingletonLock" && ! -L "$profile/SingletonLock" ]]; then
     echo "phone_browser: existing profile lock retained; hand over the owned browser before starting services" >&2
     exit 1
 fi
 # Runit may start services concurrently at boot. A usable local X socket must
-# precede Chromium, and an existing CDP owner is never replaced or killed.
-python - <<'PY'
+# precede Chromium. Refuse an observed live or unknown profile/CDP owner.
+ROKID_BROWSER_PROFILE="$profile" python - <<'PY'
 import errno
 import os
 from pathlib import Path
+import re
 import socket
 import stat
 import sys
@@ -60,6 +61,38 @@ except OSError:
     available = False
 if not available:
     sys.exit("phone_browser: X11 is not ready or local CDP is occupied/unavailable")
+
+lock = Path(os.environ["ROKID_BROWSER_PROFILE"]) / "SingletonLock"
+try:
+    existing_lock = lock.lstat()
+except FileNotFoundError:
+    existing_lock = None
+except OSError:
+    sys.exit("phone_browser: profile lock identity is unavailable")
+if existing_lock is not None:
+    try:
+        if existing_lock.st_uid != os.getuid() or not stat.S_ISLNK(existing_lock.st_mode):
+            sys.exit("phone_browser: unexpected profile lock identity")
+        target = os.readlink(lock)
+        hostname, _, owner = target.rpartition("-")
+        if (hostname != socket.gethostname() or not re.fullmatch(r"[1-9][0-9]{0,9}", owner)
+                or int(owner) > 2147483647):
+            sys.exit("phone_browser: profile lock owner is unavailable")
+        try:
+            os.kill(int(owner), 0)
+        except ProcessLookupError as error:
+            if error.errno != errno.ESRCH:
+                raise
+        else:
+            sys.exit("phone_browser: existing profile owner is still running")
+        current_lock = lock.lstat()
+        identity_fields = ("st_dev", "st_ino", "st_uid", "st_mode", "st_size", "st_mtime_ns", "st_ctime_ns")
+        if (any(getattr(existing_lock, field) != getattr(current_lock, field) for field in identity_fields)
+                or target != os.readlink(lock)):
+            sys.exit("phone_browser: profile lock changed during preflight")
+    except OSError:
+        sys.exit("phone_browser: profile lock owner is unavailable")
+    # Chromium's ProcessSingleton owns stale-lock removal and acquisition.
 PY
 exec chromium-browser --user-data-dir="$profile" \
     --remote-debugging-address=127.0.0.1 --remote-debugging-port=9222 \
