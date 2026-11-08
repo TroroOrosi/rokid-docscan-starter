@@ -313,6 +313,11 @@ public class DocScanGlassActivityIntentTest {
         java.lang.reflect.Method action = DocScanGlassActivity.class.getDeclaredMethod("onAction", GlassesInputAction.class, long.class);
         action.setAccessible(true);
         action.invoke(activity, GlassesInputAction.SHORT_TAP, 1000L);
+        ((java.util.concurrent.ExecutorService) org.robolectric.util.ReflectionHelpers.getField(activity, "answerPersistExecutor"))
+                .submit(() -> {}).get(5, TimeUnit.SECONDS);
+        Shadows.shadowOf(android.os.Looper.getMainLooper()).idle();
+        layoutAnswersAndWaitForReceipt();
+        assertFalse("previous answers must reopen before completion gestures", answers.load().closed);
         action.invoke(activity, GlassesInputAction.BACK, 2000L);
         action.invoke(activity, GlassesInputAction.BACK, 2500L);
         java.util.Properties state = new java.util.Properties();
