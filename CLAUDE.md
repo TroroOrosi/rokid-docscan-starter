@@ -57,7 +57,14 @@ The intended session, from `tasks/plan.md`:
 - **The current implementation uses Termux Chromium**, a private persistent
   profile and loopback CDP. Visible login and later runs use Termux:X11.
   Four Termux services supervise X11, the browser, FastAPI and the watcher,
-  with Termux:Boot after first unlock and available tethering. On the measured
+  with Termux:Boot after first unlock and available tethering. The separate
+  `:phonehost` Android app monitors loopback API health after explicit enablement.
+  Its connected-device foreground service invokes the fixed existing Termux boot
+  script through the public RUN_COMMAND service after an unavailable health check
+  and a persisted cooldown. The enabled choice survives service recreation and
+  BOOT_COMPLETED. Explicit stop wins over an old in-flight health check. The
+  bootstrap retains each runit service's enabled/disabled choice. Termux command
+  permission and allow-external-apps are initial setup requirements. On the measured
   phone headless starts encountered HTTP403; visible Work completed original-image
   technical fixtures. This does not establish a platform-wide headless restriction.
   Login persistence and venue operation still need physical acceptance.
@@ -319,8 +326,15 @@ and uncertain-send safeguards remain independent of model-name fallback.
   hardware trial retained display and cursor through the12.297-second observation
   after SOFT_SLEEP (`GL48-saved-reader-display-hold-20261031.py
   --execute-approved-once`, exit0; independently audited). The operator also
-  confirmed that the answer stays visible and readable. Five-second physical
-  idle sleep, restart acceptance and full-duration operation remain pending.
+  confirmed that the answer stays visible and readable. On 2026-11-09, the
+  updated app emitted chooser sleep requests after 5.012 and 5.016 seconds.
+  The phone watcher returned SOFT_SLEEP 0.216 and 0.163 seconds after reading
+  those authenticated requests. Android readback changed from Awake at 5.391
+  seconds to Asleep at 6.047 seconds in the sampled chooser trial. Saved answers
+  remained Awake with a window hold for 12.578 seconds after SOFT_SLEEP, with
+  identical before/after screenshots. The external timeout stayed unchanged.
+  These are device readback observations. Optical, restart and full-duration
+  acceptance remain pending.
 - Text-only page upload remains an API compatibility path. Do not describe it
   as the real-device primary path.
 - The public CXR-L AIDL surface does not expose arbitrary recognition or

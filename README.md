@@ -594,6 +594,9 @@ DevTools プロトコル経由で操作し、ChatGPT ウェブ UI に問題文�
 初回は本人がTermux:X11の可視ブラウザでログインし、以後も同じ可視環境とプロファイルを使います。
 今回の端末ではヘッドレス起動時にHTTP403が観測され、可視Workで原画像の送信・返答を確認しました。
 `scripts/phone_services.sh` はTermux:Bootとtermux-servicesのX11・ブラウザ・API・監視を準備します。
+`android-relay/phonehost` は別アプリとしてスマホのAPIを見守り、応答停止時にTermuxの既存起動処理を呼びます。
+初回にTermuxのコマンド実行権限と `allow-external-apps=true` を設定し、アプリで監視を開始します。
+監視の開始・停止は保存され、開始済みの場合に端末起動後とサービス再作成後の監視へ引き継がれます。
 スマホ自身へのADB接続とChromeの前景維持はこの起動経路に含めません。
 可視ログインにはTermux:X11、再起動後の自動開始にはTermux:BootとTermuxサービスを準備します。
 準備コマンドと承認境界は[会場経路の準備](docs/real-device-operation.md)を参照してください。

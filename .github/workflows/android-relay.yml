@@ -32,7 +32,7 @@ jobs:
       - name: Install Android SDK 36
         run: sdkmanager "platforms;android-36" "build-tools;36.0.0"
       - uses: gradle/actions/setup-gradle@v4
-      - name: Test and build both supported surfaces
+      - name: Test and build Android apps
         run: sh android-relay/gradlew --no-daemon test testDebugUnitTest assembleDebug
       - name: Preserve unit-test reports even on failure
         if: always()
@@ -53,7 +53,7 @@ jobs:
           git rev-parse HEAD > data/ci-apk/commit.txt
           java -version 2> data/ci-apk/java.txt
           sdkmanager --list_installed > data/ci-apk/sdk.txt
-          for apk in android-relay/glassdoc/build/outputs/apk/debug/glassdoc-debug.apk android-relay/app/build/outputs/apk/debug/app-debug.apk; do
+          for apk in android-relay/glassdoc/build/outputs/apk/debug/glassdoc-debug.apk android-relay/app/build/outputs/apk/debug/app-debug.apk android-relay/phonehost/build/outputs/apk/debug/phonehost-debug.apk; do
             name=$(basename "$apk" .apk)
             "$tools/aapt2" dump badging "$apk" > "data/ci-apk/$name-identity.txt"
             "$tools/apksigner" verify --verbose --print-certs "$apk" > "data/ci-apk/$name-signature.txt"
@@ -65,6 +65,7 @@ jobs:
           path: |
             android-relay/glassdoc/build/outputs/apk/debug/glassdoc-debug.apk
             android-relay/app/build/outputs/apk/debug/app-debug.apk
+            android-relay/phonehost/build/outputs/apk/debug/phonehost-debug.apk
             data/ci-apk/
           if-no-files-found: error
           retention-days: 14

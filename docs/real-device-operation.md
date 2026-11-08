@@ -1,6 +1,6 @@
 # Real-device operation
 
-Status: Current venue preparation and exercised phone-relay fallback runbook. Updated 2026-10-31.
+Status: Current venue preparation and exercised phone-relay fallback runbook. Updated 2026-11-09.
 
 ## 会場経路の準備（スマホサービス復旧済み・会場未受け入れ）
 
@@ -28,7 +28,12 @@ bash scripts/phone_services.sh enable
 bash scripts/phone_services.sh status
 ```
 
-Termux:Bootは導入後に本人が一度開きます。現在の接続端末には導入・初回起動済みです。スマホ再起動後の最初のロック解除とテザリング利用可能を前提に、X11→ブラウザ→FastAPI→グラス監視の4サービスを有効化します。この順序は起動要求の順序で、全サービスの準備完了を保証しません。スマホ自身へのADB接続やAndroid Chrome前景維持は使いません。停止時は `bash scripts/phone_services.sh disable` で逆順に止め、保存資料を残します。残存するChromiumのSingletonLockは起動を止めるため、全クラッシュからの自動復旧は未実装です。
+Termux:Bootは導入後に本人が一度開きます。現在の接続端末には導入・初回起動済みです。スマホ再起動後の最初のロック解除とテザリング利用可能を前提に、X11→ブラウザ→FastAPI→グラス監視の4サービスを有効化します。この順序は起動要求の順序で、全サービスの準備完了を保証しません。スマホ自身へのADB接続やAndroid Chrome前景維持は使いません。停止時は `bash scripts/phone_services.sh disable` で逆順に止め、保存資料を残します。ブラウザ起動時は、同じhost・UIDの終了済みPIDを指す安定したSingletonLock symlinkをChromiumの通常回復へ渡します。その他の所有状態は個別確認の対象です。
+
+
+スマホの `:phonehost`（`dev.rokid.docscanhost`）は独立したUIDで監視を続けます。初回にTermuxの `~/.termux/termux.properties` へ `allow-external-apps=true` を設定し、このアプリへ `com.termux.permission.RUN_COMMAND` と通知権限を許可して監視を開始します。監視は15秒ごとにloopback APIを読み、起動猶予60秒と保存済みの再試行間隔60秒を経て、固定の `~/.termux/boot/20-rokid-services` を背景コマンドとして起動します。復旧は後続のhealth応答で確認します。監視の停止はアプリから行えます。停止した選択は端末起動後にも引き継がれます。
+
+Termux全体が停止した場合の復旧は、この別UIDからの起動要求が担当します。通常のサービス終了・端末再起動・メーカー独自の強制停止は条件が異なるため、各実測の範囲を記録します。設定とAPIの根拠はTermuxの公開起動APIとAndroidのforeground service仕様です。[Termux RUN_COMMAND](https://github.com/termux/termux-app/wiki/RUN_COMMAND-Intent)、[Android connectedDevice service](https://developer.android.com/develop/background-work/services/fgs/service-types#connected-device)
 
 グラスは `http://gateway:8000` を使い、認証付き状態通知の接続元IPから監視対象を見つけます。制御の前にグラスの `ro.serialno` を指定serialと照合します。撮影はローカル保存後に転送し、確定済みの転送から再開します。Workにはサーバの原画像PNGをZIPにまとめ、20添付・メッセージ容量内で同じチャットへ順番に送ります。中間受領確認の完了後に次を送り、最後に全答案を求めます。PDFへの変換や頁数だけの上限は設けません。合同英語は保存済みの読解返答の後に、完成した原音だけを同じチャットへ追加します。送信不確定は照合可能な返答を読み取って回収し、確認できない送信を自動で繰り返しません。
 
