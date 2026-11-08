@@ -424,12 +424,17 @@ final class LocalCaptureSession {
     }
 
     private static String digest(File file) throws IOException {
-        if (file.length() > 16 * 1024 * 1024) throw new IOException("保存画像が大きすぎます");
+        if (file.length() > CaptureReviewPersistence.MAX_RECORD_BYTES) throw new IOException("保存画像が大きすぎます");
         try (InputStream input = new FileInputStream(file)) {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
             byte[] buffer = new byte[8192];
             int count;
-            while ((count = input.read(buffer)) != -1) digest.update(buffer, 0, count);
+            long bytes = 0;
+            while ((count = input.read(buffer)) != -1) {
+                bytes += count;
+                if (bytes > CaptureReviewPersistence.MAX_RECORD_BYTES) throw new IOException("保存画像が大きすぎます");
+                digest.update(buffer, 0, count);
+            }
             StringBuilder hex = new StringBuilder(64);
             for (byte value : digest.digest()) hex.append(String.format(java.util.Locale.ROOT, "%02x", value & 255));
             return hex.toString();

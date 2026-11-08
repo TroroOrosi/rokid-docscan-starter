@@ -55,9 +55,12 @@ final class GlassesCaptureSurface implements CaptureSurface {
     // Owned by the queued draw until it transfers to preview on the UI thread.
     private Bitmap waitingPreview;
     private Runnable waitingDraw;
+    private Bitmap waitingLivePreview;
+    private Runnable waitingLiveDraw;
+    private boolean livePreviewActive;
     private volatile long visibleReview = NO_VIEW_GENERATION;
     private volatile boolean closed;
-    private int rotationDegrees = 270;
+    private volatile int rotationDegrees = 270;
 
     @Override
     public boolean supportsLocalCaptureReview() { return true; }
@@ -69,12 +72,12 @@ final class GlassesCaptureSurface implements CaptureSurface {
 
     @Override public void awaitNextPage(Runnable ready) {
         if (camera != null) camera.awaitNextPage(ready);
-        main.post(() -> hud.capturePreview(true));
+        capturePreview(true);
     }
 
     @Override public void pausePreview() {
         if (camera != null) camera.pausePreview();
-        main.post(() -> hud.capturePreview(false));
+        capturePreview(false);
     }
 
     @Override public void resetPageDetection() { if (camera != null) camera.resetPages(); }
@@ -152,14 +155,44 @@ final class GlassesCaptureSurface implements CaptureSurface {
         showLivePreview(bitmap, null); // same full image, optional comparison corners.
     }
 
-    void showLivePreview(Bitmap bitmap, PaperGeometry.Box proposal) {
+    synchronized void showLivePreview(Bitmap bitmap, PaperGeometry.Box proposal) {
+        if (closed || !livePreviewActive) {
+            recycle(bitmap);
+            return;
+        }
         int rotation = rotationDegrees;
         Bitmap rotated = orient(bitmap, rotation);
         PaperGeometry.Box transformed = proposal == null ? null : proposal.rotate(rotation);
+        clearWaitingLivePreview();
+        waitingLivePreview = rotated;
+        waitingLiveDraw = () -> {
+            synchronized (GlassesCaptureSurface.this) {
+                if (closed || waitingLivePreview != rotated) return;
+                waitingLivePreview = null;
+                waitingLiveDraw = null;
+                hud.showLivePreview(rotated, transformed);
+            }
+        };
+        if (!main.post(waitingLiveDraw)) clearWaitingLivePreview();
+    }
+
+    private synchronized void capturePreview(boolean active) {
+        if (closed) return;
+        livePreviewActive = active;
+        if (!active) clearWaitingLivePreview();
         main.post(() -> {
-            if (closed) recycle(rotated);
-            else hud.showLivePreview(rotated, transformed);
+            synchronized (GlassesCaptureSurface.this) {
+                if (!closed) hud.capturePreview(active);
+            }
         });
+    }
+
+    /** Camera frames supersede each other; a stalled UI must retain at most one waiting image. */
+    private void clearWaitingLivePreview() {
+        if (waitingLiveDraw != null) main.removeCallbacks(waitingLiveDraw);
+        waitingLiveDraw = null;
+        recycle(waitingLivePreview);
+        waitingLivePreview = null;
     }
 
     GlassesCaptureSurface(
@@ -205,7 +238,7 @@ final class GlassesCaptureSurface implements CaptureSurface {
     @Override
     public long showCaptureAiming(int pageNumber, boolean retake, boolean stabilizing) {
         if (camera != null) camera.preview();
-        main.post(() -> hud.capturePreview(true));
+        capturePreview(true);
         List<String> lines = List.of(Integer.toString(pageNumber));
         return show(
                 stabilizing ? "capture-stabilizing" : "capture-aiming",
@@ -250,6 +283,8 @@ final class GlassesCaptureSurface implements CaptureSurface {
     /** Releases the review thumbnail. The activity calls this on destruction. */
     synchronized void close() {
         closed = true;
+        livePreviewActive = false;
+        clearWaitingLivePreview();
         inspectionNotices.incrementAndGet();
         if (waitingDraw != null) main.removeCallbacks(waitingDraw);
         waitingDraw = null;

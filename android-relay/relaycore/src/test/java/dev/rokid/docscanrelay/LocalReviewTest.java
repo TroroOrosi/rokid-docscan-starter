@@ -321,17 +321,29 @@ public class LocalReviewTest {
     }
 
     @Test public void mismatchedZslJpegIsPreservedUnresolvedAndCannotUploadAfterRestart() throws Exception {
+        unresolvedNativeOriginal(false);
+    }
+
+    @Test public void unresolvedNativeExposureRetainsItsOriginalAndMetadataWithoutUploadingAfterRestart() throws Exception {
+        unresolvedNativeOriginal(true);
+    }
+
+    private void unresolvedNativeOriginal(boolean metadataPresent) throws Exception {
         Context context = RuntimeEnvironment.getApplication();
         Surface surface = new Surface(); surface.holdForPage = true;
         DocScanController controller = localWithOriginal(context, surface);
         byte[] jpeg = {7, 8, 9}; String sessionId;
+        CaptureProvenance source = metadataPresent ? nativeSource(jpeg, 100) : null;
         try {
             sessionId = ((LocalCaptureSession)get(controller, "localSession")).id();
             ((CaptureLease)get(controller, "captureLease")).begin(0);
             set(controller, "state", RelayState.CAPTURING);
-            controller.onPhoto(jpeg, null, false); barrier(controller);
+            controller.onPhoto(jpeg, source, false); barrier(controller);
             CaptureReviewStore.Pending held = ((CaptureReviewStore)get(controller, "captureReview")).peek();
-            assertArrayEquals(jpeg, held.jpeg); assertNull(held.provenance); assertTrue(held.needsSceneRecapture());
+            assertArrayEquals(jpeg, held.jpeg); assertTrue(held.needsSceneRecapture());
+            assertEquals(CaptureReviewStore.Pending.CAPTURE_METADATA_UNRESOLVED, held.ocrFailure);
+            assertEquals(metadataPresent, held.provenance != null);
+            if (source != null) assertEquals(source.captureId, held.provenance.captureId);
             commitVisible(controller, surface);
             controller.onGlassesAction(GlassesInputAction.BACK); barrier(controller);
             controller.confirmPendingCapture(); barrier(controller);
@@ -346,7 +358,10 @@ public class LocalReviewTest {
             set(restored, "localNetworkBusy", true);
             restored.showPendingCaptureReview(); barrier(restored);
             CaptureReviewStore.Pending held = ((CaptureReviewStore)get(restored, "captureReview")).peek();
-            assertArrayEquals(jpeg, held.jpeg); assertTrue(held.needsSceneRecapture()); assertNull(held.provenance);
+            assertArrayEquals(jpeg, held.jpeg); assertTrue(held.needsSceneRecapture());
+            assertEquals(CaptureReviewStore.Pending.CAPTURE_METADATA_UNRESOLVED, held.ocrFailure);
+            assertEquals(metadataPresent, held.provenance != null);
+            if (source != null) assertEquals(source.captureId, held.provenance.captureId);
             commitVisible(restored, restoredSurface); restored.confirmPendingCapture(); barrier(restored);
             LocalCaptureSession saved = (LocalCaptureSession)get(restored, "localSession");
             assertEquals(sessionId, saved.id()); assertEquals(0, saved.pageCount()); assertNull(saved.nextUnsent());

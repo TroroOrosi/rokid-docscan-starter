@@ -1670,7 +1670,7 @@ public final class DocScanController implements AutoCloseable {
                 CaptureProvenance source = provenance == null || localSession == null ? provenance
                         : provenance.bind(localSession.id(), uploadIndex, uploadRotation);
                 stageCaptureReview(new CaptureReviewStore.Pending(uploadIndex, jpeg, "", uploadRotation,
-                        associationResolved ? "" : CaptureReviewStore.Pending.SCENE_TIMESTAMP_UNRESOLVED,
+                        associationResolved ? "" : CaptureReviewStore.Pending.CAPTURE_METADATA_UNRESOLVED,
                         PageFraming.UNKNOWN, photoRequestedAtMillis, source), null);
                 if (associationResolved) rememberInspection(issuedInspection, source);
                 if (!associationResolved && localSession != null) {
@@ -2442,7 +2442,7 @@ public final class DocScanController implements AutoCloseable {
                 pending.rotationDegrees,
                 lines);
         reviewViewGeneration = viewGeneration;
-        if (pending.needsSceneRecapture()) link.showCaptureReviewNotice("頁の対応を確認できません・タップで撮り直し");
+        if (pending.needsSceneRecapture()) link.showCaptureReviewNotice("撮影状態を確認できません・タップで撮り直し");
         listener.onUpdate(RelayState.CAPTURE_REVIEW, lines, diagnostic);
     }
 

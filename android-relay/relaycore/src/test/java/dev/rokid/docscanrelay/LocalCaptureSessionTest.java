@@ -11,6 +11,30 @@ import org.junit.rules.TemporaryFolder;
 public class LocalCaptureSessionTest {
     @Rule public TemporaryFolder folder = new TemporaryFolder();
 
+    @Test public void fullJpegAndTextBudgetsFitTheRecordButOversizedRecordsRemainRejected() throws Exception {
+        LocalCaptureSession session = LocalCaptureSession.create(folder.getRoot(), "http://phone:8000", false);
+        byte[] jpeg = new byte[20 * 1024 * 1024];
+        jpeg[0] = 12;
+        jpeg[jpeg.length - 1] = 34;
+        CaptureReviewStore.Pending pending = new CaptureReviewStore.Pending(0, jpeg,
+                "t".repeat(4 * 1024 * 1024), 270, "e".repeat(64 * 1024));
+        session.commit(pending);
+        LocalCaptureSession restored = LocalCaptureSession.load(folder.getRoot(), session.id());
+        LocalCaptureSession.Page page = restored.nextUnsent();
+        assertTrue(restored.contains(pending));
+        CaptureReviewStore.Pending read = restored.read(page);
+        assertArrayEquals(jpeg, read.jpeg);
+        assertEquals(pending.ocrText, read.ocrText);
+        assertEquals(pending.ocrFailure, read.ocrFailure);
+        File file = new File(restored.directory(), page.fileName);
+        assertTrue(file.length() <= CaptureReviewPersistence.MAX_RECORD_BYTES);
+        try (java.io.RandomAccessFile oversized = new java.io.RandomAccessFile(file, "rw")) {
+            oversized.setLength((long) CaptureReviewPersistence.MAX_RECORD_BYTES + 1);
+        }
+        assertThrows(IOException.class, () -> restored.read(page));
+        assertEquals((long) CaptureReviewPersistence.MAX_RECORD_BYTES + 1, file.length());
+    }
+
     @Test public void localCommitRestartReplacementAndAcknowledgementKeepEachRevision() throws Exception {
         LocalCaptureSession session = LocalCaptureSession.create(folder.getRoot(), "http://phone:8000", false);
         assertEquals(0, session.documentId());

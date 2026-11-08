@@ -32,6 +32,69 @@ import org.robolectric.util.ReflectionHelpers;
 @Config(sdk = 32, manifest = Config.NONE)
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 public class GlassesCaptureSurfaceTest {
+    @Test public void slowUiKeepsOnlyTheNewestWaitingLiveFrame() {
+        HudView hud = new HudView(RuntimeEnvironment.getApplication());
+        GlassesCaptureSurface surface = new GlassesCaptureSurface(RuntimeEnvironment.getApplication(), null, hud,
+                new Handler(Looper.getMainLooper()), (generation, purpose) -> { });
+        surface.showCaptureAiming(1, false, false);
+        ReflectionHelpers.setField(surface, "rotationDegrees", 0);
+        ShadowLooper.runUiThreadTasksIncludingDelayedTasks();
+        Bitmap older = Bitmap.createBitmap(320, 240, Bitmap.Config.RGB_565);
+        Bitmap newest = Bitmap.createBitmap(320, 240, Bitmap.Config.RGB_565);
+        surface.showLivePreview(older);
+        surface.showLivePreview(newest);
+        assertTrue("a superseded waiting frame must release its native pixels before the UI catches up",
+                older.isRecycled());
+        assertFalse(newest.isRecycled());
+        ShadowLooper.runUiThreadTasksIncludingDelayedTasks();
+        org.junit.Assert.assertSame(newest, ReflectionHelpers.getField(hud, "livePreview"));
+        surface.close();
+        assertTrue(newest.isRecycled());
+    }
+
+    @Test public void pausedCaptureReleasesQueuedAndLateFramesBeforeTheNextStream() {
+        HudView hud = new HudView(RuntimeEnvironment.getApplication());
+        GlassesCaptureSurface surface = new GlassesCaptureSurface(RuntimeEnvironment.getApplication(), null, hud,
+                new Handler(Looper.getMainLooper()), (generation, purpose) -> { });
+        surface.showCaptureAiming(1, false, false);
+        ReflectionHelpers.setField(surface, "rotationDegrees", 0);
+        ShadowLooper.runUiThreadTasksIncludingDelayedTasks();
+        Bitmap previous = Bitmap.createBitmap(320, 240, Bitmap.Config.RGB_565);
+        surface.showLivePreview(previous);
+        ShadowLooper.runUiThreadTasksIncludingDelayedTasks();
+        Bitmap queued = Bitmap.createBitmap(320, 240, Bitmap.Config.RGB_565);
+        surface.showLivePreview(queued);
+        surface.pausePreview();
+        assertTrue("pause must release waiting native pixels immediately", queued.isRecycled());
+        Bitmap late = Bitmap.createBitmap(320, 240, Bitmap.Config.RGB_565);
+        surface.showLivePreview(late);
+        assertTrue("a late callback must not seed the next capture's image", late.isRecycled());
+        surface.awaitNextPage(() -> { });
+        ShadowLooper.runUiThreadTasksIncludingDelayedTasks();
+        assertTrue("restarting must also clear the previously displayed stream", previous.isRecycled());
+        org.junit.Assert.assertNull(ReflectionHelpers.getField(hud, "livePreview"));
+        Bitmap current = Bitmap.createBitmap(320, 240, Bitmap.Config.RGB_565);
+        surface.showLivePreview(current);
+        ShadowLooper.runUiThreadTasksIncludingDelayedTasks();
+        org.junit.Assert.assertSame(current, ReflectionHelpers.getField(hud, "livePreview"));
+        surface.close();
+    }
+
+    @Test public void closingCaptureReleasesWaitingLivePixelsWithoutRunningTheUiQueue() {
+        HudView hud = new HudView(RuntimeEnvironment.getApplication());
+        GlassesCaptureSurface surface = new GlassesCaptureSurface(RuntimeEnvironment.getApplication(), null, hud,
+                new Handler(Looper.getMainLooper()), (generation, purpose) -> { });
+        surface.showCaptureAiming(1, false, false);
+        ReflectionHelpers.setField(surface, "rotationDegrees", 0);
+        ShadowLooper.runUiThreadTasksIncludingDelayedTasks();
+        Bitmap queued = Bitmap.createBitmap(320, 240, Bitmap.Config.RGB_565);
+        surface.showLivePreview(queued);
+        surface.close();
+        assertTrue(queued.isRecycled());
+        ShadowLooper.runUiThreadTasksIncludingDelayedTasks();
+        org.junit.Assert.assertNull(ReflectionHelpers.getField(hud, "livePreview"));
+    }
+
     @Test @Config(shadows = RegionDecoder.class)
     public void nativeQualitySamplesExactSmallNativeRegionsWithoutChangingTheOriginal() {
         Bitmap bitmap = Bitmap.createBitmap(576, 384, Bitmap.Config.ARGB_8888);
@@ -144,6 +207,7 @@ public class GlassesCaptureSurfaceTest {
         GlassesCaptureSurface surface = new GlassesCaptureSurface(
                 RuntimeEnvironment.getApplication(), null, hud,
                 new Handler(Looper.getMainLooper()), (generation, purpose) -> { });
+        surface.showCaptureAiming(1, false, false);
         for (int rotation : new int[]{0, 90, 180, 270}) {
             ReflectionHelpers.setField(surface, "rotationDegrees", rotation);
             surface.showLivePreview(source.copy(Bitmap.Config.ARGB_8888, false));

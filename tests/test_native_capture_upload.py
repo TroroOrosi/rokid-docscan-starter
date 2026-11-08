@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 
 import pytest
-from PIL import Image
+from PIL import Image, ImageChops
 
 from tests.test_work_bridge import client as _client_fixture
 
@@ -62,6 +62,40 @@ def test_native_receipt_preserves_metadata_and_exact_canonical_hash_after_db_rei
     assert json.loads(row[0]) == {"capture_provenance": meta,
                                   "canonical_image_sha256": receipt["canonical_image_sha256"]}
     assert list(canonical.parent.iterdir()) == [canonical]  # No raw-JPEG retention.
+
+
+@pytest.mark.parametrize(("byte_count", "size"), [
+    (18_457_096, (4032, 3024)),  # Maximum advertised by the connected camera.
+    (20 * 1024 * 1024, (24, 32)),  # Inclusive transport/storage boundary.
+])
+def test_native_jpeg_capacity_preserves_decoded_pixels_and_receipt(client, byte_count, size):
+    output = io.BytesIO()
+    Image.new("RGB", size, (40, 180, 230)).save(output, "JPEG")
+    # Deterministic JPEG padding exercises the byte boundary without a huge test fixture.
+    raw = output.getvalue().ljust(byte_count, b"\0")
+    meta = provenance(raw, width=size[0], height=size[1])
+    response = upload(client, create_document(client), raw, meta)
+    assert response.status_code == 201, response.text
+    receipt = response.json()
+    canonical = Path(receipt["image_path"])
+    assert receipt["capture_provenance"] == meta
+    assert receipt["canonical_image_sha256"] == hashlib.sha256(canonical.read_bytes()).hexdigest()
+    with Image.open(io.BytesIO(raw)) as source, Image.open(canonical) as stored:
+        assert stored.format == "PNG" and stored.size == (size[1], size[0])
+        expected = source.transpose(Image.Transpose.ROTATE_90)
+        assert ImageChops.difference(expected, stored).getbbox() is None
+    assert list(canonical.parent.iterdir()) == [canonical]
+
+
+def test_native_jpeg_above_capacity_is_rejected_before_image_decode(client, monkeypatch):
+    from app import main
+
+    monkeypatch.setattr(main, "_load_image", lambda _: pytest.fail("oversized image decoded"))
+    response = upload(client, create_document(client), b"x" * (20 * 1024 * 1024 + 1), None)
+    assert response.status_code == 413
+    assert list(main.IMAGE_DIR.iterdir()) == []
+    with main.db.connect() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM pages").fetchone()[0] == 0
 
 
 @pytest.mark.parametrize(("field", "value"), [

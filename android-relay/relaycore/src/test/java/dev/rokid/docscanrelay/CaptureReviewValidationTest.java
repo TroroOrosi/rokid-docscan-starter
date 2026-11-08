@@ -20,7 +20,7 @@ public class CaptureReviewValidationTest {
                 new CaptureReviewStore.Pending(0, new byte[]{9}, "", 45, ""),
                 new CaptureReviewStore.Pending(0, new byte[0], "", 270, ""),
                 new CaptureReviewStore.Pending(0, new byte[]{9}, "", 270, "", null, -1),
-                new CaptureReviewStore.Pending(0, new byte[8 * 1024 * 1024 + 1], "", 270, "")
+                new CaptureReviewStore.Pending(0, new byte[20 * 1024 * 1024 + 1], "", 270, "")
         };
         for (CaptureReviewStore.Pending candidate : invalid) {
             try {

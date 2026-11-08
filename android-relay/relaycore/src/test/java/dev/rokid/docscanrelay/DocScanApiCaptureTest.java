@@ -23,6 +23,33 @@ public class DocScanApiCaptureTest {
     private static final String JPEG_SHA = "039058c6f2c0cb492c533b0a4d14ef77cc0f78abccced5287d84a1a2011cfb81";
     private static final String SESSION = "11111111-2222-3333-4444-555555555555";
 
+    @Test public void cameraMaximumSurvivesLocalRestartAndUploadsTheExactOriginal() throws Exception {
+        byte[] original = new byte[18_457_096];
+        original[0] = 12;
+        original[original.length - 1] = 34;
+        java.io.File root = java.nio.file.Files.createTempDirectory("large-native-upload").toFile();
+        LocalCaptureSession local = LocalCaptureSession.create(root, "http://phone:8000", false);
+        CaptureProvenance source = CaptureProvenance.nativeStill(original, 4032, 3024,
+                100L, 100L, 3L, 25_000_000L, 100, 0, 2).bind(local.id(), 0, 270);
+        local.commit(new CaptureReviewStore.Pending(0, original, "", 270, "",
+                PageFraming.UNKNOWN, 1234, source));
+        LocalCaptureSession restored = LocalCaptureSession.load(root, local.id());
+        LocalCaptureSession.Page page = restored.nextUnsent();
+        CaptureReviewStore.Pending pending = restored.read(page);
+        assertArrayEquals(original, pending.jpeg);
+        assertEquals(source, pending.provenance);
+        try (MockWebServer server = new MockWebServer()) {
+            JSONObject response = new JSONObject().put("document_id", 17).put("page_index", 0)
+                    .put("canonical_image_sha256", "c".repeat(64))
+                    .put("capture_provenance", source.toUploadJson(original, 0, 270));
+            server.enqueue(new MockResponse().setBody(response.toString()));
+            api(server).uploadPage(17, 0, pending.jpeg, "", 270, 1234, pending.provenance);
+            assertArrayEquals(original, part(server.takeRequest(), "image"));
+            restored.acknowledge(page);
+            assertNull(restored.nextUnsent());
+        }
+    }
+
     @Test public void optionalInspectionOriginKeepsTheOriginalReceiptContract() throws Exception {
         CaptureProvenance source = knownSource();
         CaptureInspectionOrigin origin = new CaptureInspectionOrigin(

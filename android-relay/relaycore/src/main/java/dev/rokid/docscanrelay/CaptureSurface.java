@@ -17,6 +17,9 @@ import java.util.List;
  * view generations to fence.</p>
  */
 public interface CaptureSurface {
+    /** Original JPEG budget, including the camera's advertised 18,457,096-byte maximum. */
+    int MAX_JPEG_BYTES = 20 * 1024 * 1024;
+
     /** Returned by every view call that could not reach the glasses. */
     long NO_VIEW_GENERATION = -1;
 

@@ -20,6 +20,7 @@ import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
 import android.util.Size;
+import android.util.Range;
 import android.view.Surface;
 import java.nio.ByteBuffer;
 import java.time.Duration;
@@ -66,6 +67,7 @@ public class GlassCameraWarmSessionTest {
         ManagerShadow.refuseSession = false; CharacteristicsShadow.fixedFocus = false;
         CharacteristicsShadow.aeRegions = 0; // AGENT_APPROVED=1: explicit comparison test setup.
         CharacteristicsShadow.strictPublicApi = false;
+        CharacteristicsShadow.manualSensor = false;
         MapShadow.previewSize = new Size(320, 240);
         CharacteristicsShadow.afMode = CONTROL_AF_MODE_CONTINUOUS_PICTURE;
         createCamera();
@@ -710,6 +712,160 @@ public class GlassCameraWarmSessionTest {
         jpeg.image = image; jpeg.listener.onImageAvailable(jpeg.reader); idle(0);
     }
 
+    private void prepareManualStill() {
+        CharacteristicsShadow.fixedFocus = true;
+        CharacteristicsShadow.manualSensor = true;
+        camera.captureOnce(); idle(100);
+        for (int i = 0; i < 8; i++) {
+            TotalCaptureResult result = manualResult(SystemClock.elapsedRealtimeNanos(), 10_000_000L, 800, CONTROL_AE_MODE_ON);
+            var session = currentDevice().session;
+            session.previewCallback.onCaptureCompleted(session, session.repeating, result);
+            frame(180); idle(100);
+        }
+        assertEquals(1, firstDevice().session.captures);
+    }
+
+    private TotalCaptureResult manualResult(long timestamp, long exposure, int iso) {
+        return manualResult(timestamp, exposure, iso, CONTROL_AE_MODE_OFF);
+    }
+
+    private TotalCaptureResult manualResult(long timestamp, long exposure, int iso, int aeMode) {
+        TotalCaptureResult result = ShadowTotalCaptureResult.newTotalCaptureResult();
+        ShadowCaptureResult values = Shadow.extract(result);
+        values.set(CaptureResult.CONTROL_AF_STATE, CONTROL_AF_STATE_INACTIVE);
+        values.set(CaptureResult.CONTROL_AE_STATE, CONTROL_AE_STATE_CONVERGED);
+        values.set(CaptureResult.SENSOR_TIMESTAMP, timestamp);
+        values.set(CaptureResult.SENSOR_EXPOSURE_TIME, exposure);
+        values.set(CaptureResult.SENSOR_SENSITIVITY, iso);
+        values.set(CaptureResult.SENSOR_FRAME_DURATION, 33_333_333L);
+        values.set(CaptureResult.CONTROL_POST_RAW_SENSITIVITY_BOOST, 150);
+        values.set(CaptureResult.CONTROL_AE_MODE, aeMode);
+        values.set(CaptureResult.CONTROL_AWB_LOCK, true);
+        return result;
+    }
+
+    private List<String> manualJpeg(long timestamp) {
+        var reader = currentReader(ImageFormat.JPEG);
+        List<String> events = new ArrayList<>();
+        DocScanTestImage image = new DocScanTestImage(events);
+        image.timestamp = timestamp; image.buffer = ByteBuffer.wrap(new byte[]{1, 2, 3});
+        reader.image = image; reader.listener.onImageAvailable(reader.reader); idle(0);
+        return events;
+    }
+
+    private void manualCompleted(TotalCaptureResult result) {
+        var session = firstDevice().session;
+        session.captureCallback.onCaptureCompleted(session, session.captured, result); idle(0);
+    }
+
+    @Test public void manualStillCopiesTheFreshExposureAndGainWithoutChangingTheRepeatingRequest() {
+        prepareManualStill();
+        var session = firstDevice().session;
+        assertEquals(Integer.valueOf(CONTROL_AE_MODE_OFF), session.captured.get(CaptureRequest.CONTROL_AE_MODE));
+        assertEquals(Long.valueOf(10_000_000), session.captured.get(CaptureRequest.SENSOR_EXPOSURE_TIME));
+        assertEquals(Integer.valueOf(800), session.captured.get(CaptureRequest.SENSOR_SENSITIVITY));
+        assertEquals(Long.valueOf(33_333_333), session.captured.get(CaptureRequest.SENSOR_FRAME_DURATION));
+        assertEquals(Integer.valueOf(150), session.captured.get(CaptureRequest.CONTROL_POST_RAW_SENSITIVITY_BOOST));
+        assertEquals(Boolean.TRUE, session.captured.get(CaptureRequest.CONTROL_AWB_LOCK));
+        assertEquals(Integer.valueOf(CONTROL_AE_MODE_ON), session.repeating.get(CaptureRequest.CONTROL_AE_MODE));
+        assertNull(session.repeating.get(CaptureRequest.SENSOR_EXPOSURE_TIME));
+    }
+
+    @Test public void manualJpegWaitsForItsResultWithTheNativeImageAlreadyClosed() {
+        prepareManualStill();
+        long timestamp = SystemClock.elapsedRealtimeNanos();
+        List<String> events = manualJpeg(timestamp);
+        assertEquals(List.of("image.close"), events); assertEquals(0, delivered);
+        manualCompleted(manualResult(timestamp, 9_999_000L, 799));
+        assertEquals(1, delivered); assertTrue(originals.get(0).associationResolved);
+        assertEquals(Long.valueOf(9_999_000L), originals.get(0).provenance.exposureNanos);
+        idle(15_000); assertEquals(1, delivered); assertTrue(failures.isEmpty());
+    }
+
+    @Test public void manualResultCanArriveBeforeItsJpeg() {
+        prepareManualStill();
+        long timestamp = SystemClock.elapsedRealtimeNanos();
+        manualCompleted(manualResult(timestamp, 10_000_000L, 800));
+        assertEquals(0, delivered); manualJpeg(timestamp);
+        assertEquals(1, delivered); assertTrue(originals.get(0).associationResolved);
+    }
+
+    @Test public void manualJpegWithoutMetadataIsRetainedUnresolvedAtTheOriginalDeadline() {
+        prepareManualStill();
+        long timestamp = SystemClock.elapsedRealtimeNanos();
+        manualJpeg(timestamp); assertEquals(0, delivered);
+        idle(15_000);
+        assertEquals(1, delivered); assertFalse(originals.get(0).associationResolved);
+        assertArrayEquals(new byte[]{1, 2, 3}, originals.get(0).jpeg);
+        manualCompleted(manualResult(timestamp, 10_000_000L, 800));
+        assertEquals(1, delivered); assertFalse(originals.get(0).associationResolved);
+    }
+
+    @Test public void aLongerActualExposureIsRetainedWithoutOrdinaryAcceptance() {
+        prepareManualStill();
+        long timestamp = SystemClock.elapsedRealtimeNanos();
+        manualCompleted(manualResult(timestamp, 66_666_666L, 800)); manualJpeg(timestamp);
+        assertEquals(1, delivered); assertFalse(originals.get(0).associationResolved);
+        assertEquals(Long.valueOf(66_666_666L), originals.get(0).provenance.exposureNanos);
+    }
+
+    @Test public void mismatchedManualMetadataCannotAuthorizeOrDescribeTheJpeg() {
+        prepareManualStill();
+        long timestamp = SystemClock.elapsedRealtimeNanos();
+        manualJpeg(timestamp); manualCompleted(manualResult(timestamp + 1, 10_000_000L, 800));
+        assertEquals(1, delivered); assertFalse(originals.get(0).associationResolved);
+        assertNull(originals.get(0).provenance.resultTimestampNanos);
+    }
+
+    @Test public void laterPreviewExposureCannotRelaxTheIssuedManualStillsBudget() {
+        prepareManualStill();
+        long timestamp = SystemClock.elapsedRealtimeNanos();
+        var session = firstDevice().session;
+        session.previewCallback.onCaptureCompleted(session, session.repeating,
+                manualResult(timestamp, 20_000_000L, 800, CONTROL_AE_MODE_ON));
+        idle(1);
+        long capturedAt = SystemClock.elapsedRealtimeNanos();
+        manualCompleted(manualResult(capturedAt, 15_000_000L, 800)); manualJpeg(capturedAt);
+        assertEquals(1, delivered); assertFalse(originals.get(0).associationResolved);
+    }
+
+    @Test public void autoExposureInAResultCannotAcknowledgeAManualRequest() {
+        prepareManualStill();
+        long timestamp = SystemClock.elapsedRealtimeNanos();
+        manualCompleted(manualResult(timestamp, 10_000_000L, 800, CONTROL_AE_MODE_ON)); manualJpeg(timestamp);
+        assertEquals(1, delivered); assertFalse(originals.get(0).associationResolved);
+    }
+
+    @Test public void endingTheCameraPreservesAJpegAlreadyAwaitingItsMetadata() {
+        prepareManualStill();
+        long timestamp = SystemClock.elapsedRealtimeNanos();
+        manualJpeg(timestamp); camera.close(); idle(0);
+        assertEquals(1, delivered); assertFalse(originals.get(0).associationResolved);
+        assertArrayEquals(new byte[]{1, 2, 3}, originals.get(0).jpeg);
+        manualCompleted(manualResult(timestamp, 10_000_000L, 800)); assertEquals(1, delivered);
+    }
+
+    @Test public void delayedRealtimePreviewAndResultsCannotAuthorizeAManualStill() {
+        CharacteristicsShadow.fixedFocus = true; CharacteristicsShadow.manualSensor = true;
+        camera.captureOnce(); idle(100);
+        for (int i = 0; i < 8; i++) {
+            long oldTimestamp = SystemClock.elapsedRealtimeNanos();
+            idle(CameraReadiness.FRESH_MILLIS + 1);
+            var session = firstDevice().session;
+            session.previewCallback.onCaptureCompleted(session, session.repeating,
+                    manualResult(oldTimestamp, 10_000_000L, 800, CONTROL_AE_MODE_ON));
+            frame(currentReader(ImageFormat.YUV_420_888), 180, false, oldTimestamp);
+            idle(50); assertEquals(0, session.captures);
+        }
+        for (int i = 0; i < 8; i++) {
+            var session = firstDevice().session;
+            session.previewCallback.onCaptureCompleted(session, session.repeating,
+                    manualResult(SystemClock.elapsedRealtimeNanos(), 10_000_000L, 800, CONTROL_AE_MODE_ON));
+            frame(180); idle(100);
+        }
+        assertEquals(1, firstDevice().session.captures);
+    }
+
     @Test public void missingOrInvalidExposureCannotAuthorizeAStillAfterMeteringConverges() {
         camera.captureOnce(); idle(100); frame(180); idle(500);
         for (Long value : new Long[]{null, 0L, -1L}) {
@@ -775,6 +931,7 @@ public class GlassCameraWarmSessionTest {
     private void motionFrames(ShadowSensorManager sensors, float speed, int readings) {
         for (int i = 0; i < readings; i++) {
             SensorEvent event = ShadowSensorManager.createSensorEvent(3);
+            event.timestamp = SystemClock.elapsedRealtimeNanos();
             event.values[0] = speed;
             sensors.sendSensorEventToListeners(event);
             idle(50); result(CONTROL_AF_STATE_PASSIVE_FOCUSED, CONTROL_AE_STATE_CONVERGED); frame(180);
@@ -1275,6 +1432,7 @@ public class GlassCameraWarmSessionTest {
         static int afMode;
         static int aeRegions;
         static boolean strictPublicApi;
+        static boolean manualSensor;
         @Implementation protected <T> T get(CameraCharacteristics.Key<T> key) {
             if (strictPublicApi && ((android.os.Build.VERSION.SDK_INT < 30
                     && key.getName().equals("android.control.zoomRatioRange"))
@@ -1284,7 +1442,16 @@ public class GlassCameraWarmSessionTest {
             Object value = key.equals(CameraCharacteristics.LENS_FACING) ? LENS_FACING_BACK
                     : key.equals(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP) ? Shadow.newInstanceOf(StreamConfigurationMap.class)
                     : key.equals(CameraCharacteristics.CONTROL_AF_AVAILABLE_MODES) ? new int[]{CONTROL_AF_MODE_OFF, afMode}
-                    : key.equals(CameraCharacteristics.CONTROL_AE_AVAILABLE_MODES) ? new int[]{CONTROL_AE_MODE_ON}
+                    : key.equals(CameraCharacteristics.CONTROL_AE_AVAILABLE_MODES) ? new int[]{CONTROL_AE_MODE_OFF, CONTROL_AE_MODE_ON}
+                    : key.equals(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES) ? manualSensor
+                        ? new int[]{REQUEST_AVAILABLE_CAPABILITIES_MANUAL_SENSOR, REQUEST_AVAILABLE_CAPABILITIES_READ_SENSOR_SETTINGS} : new int[0]
+                    : key.equals(CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE) ? new Range<>(100_000L, 300_000_000L)
+                    : key.equals(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE) ? new Range<>(100, 3200)
+                    : key.equals(CameraCharacteristics.SENSOR_INFO_MAX_FRAME_DURATION) ? 400_000_000L
+                    : key.equals(CameraCharacteristics.CONTROL_POST_RAW_SENSITIVITY_BOOST_RANGE) ? new Range<>(100, 3200)
+                    : key.equals(CameraCharacteristics.CONTROL_AWB_LOCK_AVAILABLE) ? Boolean.TRUE
+                    : key.equals(CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE) ? manualSensor
+                        ? SENSOR_INFO_TIMESTAMP_SOURCE_REALTIME : SENSOR_INFO_TIMESTAMP_SOURCE_UNKNOWN
                     : key.equals(CameraCharacteristics.CONTROL_MAX_REGIONS_AE) ? aeRegions
                     : key.equals(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE) ? new Rect(0, 0, 4032, 3024)
                     : key.equals(CameraCharacteristics.SENSOR_INFO_PRE_CORRECTION_ACTIVE_ARRAY_SIZE) ? new Rect(0, 0, 4032, 3024)

@@ -495,17 +495,20 @@ class CreateDocument(BaseModel):
 
 # --- helpers ----------------------------------------------------------------
 
-_MAX_UPLOAD_BYTES = 15 * 1024 * 1024  # generous for page photos / recordings
+_MAX_UPLOAD_BYTES = 15 * 1024 * 1024  # Audio chunks retain their existing budget.
+# Matches CaptureSurface.MAX_JPEG_BYTES and covers the camera's 18,457,096-byte maximum.
+_MAX_IMAGE_UPLOAD_BYTES = 20 * 1024 * 1024
 # The relay camera is 12 MP. Keep enough headroom for imported scans while
 # bounding decoded memory independently of the compressed upload byte limit.
 _MAX_IMAGE_PIXELS = 25_000_000
 
 
-async def _read_upload_limited(upload: UploadFile) -> bytes:
+async def _read_upload_limited(upload: UploadFile, maximum: int | None = None) -> bytes:
     """Read an UploadFile with a hard size cap (memory-exhaustion guard)."""
-    raw = await upload.read(_MAX_UPLOAD_BYTES + 1)
-    if len(raw) > _MAX_UPLOAD_BYTES:
-        raise HTTPException(status_code=413, detail="upload too large (max 15MB)")
+    maximum = _MAX_UPLOAD_BYTES if maximum is None else maximum
+    raw = await upload.read(maximum + 1)
+    if len(raw) > maximum:
+        raise HTTPException(status_code=413, detail=f"upload too large (max {maximum} bytes)")
     return raw
 
 
@@ -919,7 +922,7 @@ async def add_page(
         ).fetchone()
 
         if has_image:
-            raw = await _read_upload_limited(image)
+            raw = await _read_upload_limited(image, _MAX_IMAGE_UPLOAD_BYTES)
             img = _load_image(raw)
             if native_source is not None:
                 if (img.format != "JPEG" or native_source["jpeg_sha256"] != hashlib.sha256(raw).hexdigest()
@@ -1467,7 +1470,7 @@ async def match_page(
         _doc_or_404(conn, document_id)
         raw_q_md5: str | None = None
         if has_image:
-            raw = await _read_upload_limited(image)
+            raw = await _read_upload_limited(image, _MAX_IMAGE_UPLOAD_BYTES)
             img = _load_image(raw)
             q_phash: str | None = phash_hex(img)
             # Historical compat rule: body text MD5, falling back to the
@@ -1956,7 +1959,7 @@ async def add_question(
         # IMAGE_DIR (no questions row would ever own it).
         fpath: Path | None = None
         if has_image:
-            raw = await _read_upload_limited(image)
+            raw = await _read_upload_limited(image, _MAX_IMAGE_UPLOAD_BYTES)
             img = _load_image(raw)
             fname = f"q_{session_id}_{uuid.uuid4().hex[:8]}.png"
             fpath = IMAGE_DIR / fname

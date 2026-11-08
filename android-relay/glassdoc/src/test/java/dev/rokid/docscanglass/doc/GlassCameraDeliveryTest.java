@@ -147,8 +147,19 @@ public class GlassCameraDeliveryTest {
         assertEquals(3024, deliveredHeight);
         assertTrue(failures.isEmpty());
     }
-    @Test public void bufferAboveExistingReviewLimitIsRejectedBeforeCopy() {
-        ((DocScanTestImage) readerShadow.image).buffer = ByteBuffer.allocate(8 * 1024 * 1024 + 1);
+    @Test public void cameraAdvertisedMaximumJpegIsDeliveredByteForByte() {
+        byte[] original = new byte[18_457_096];
+        original[0] = 12;
+        original[original.length - 1] = 34;
+        ((DocScanTestImage) readerShadow.image).buffer = ByteBuffer.wrap(original);
+        deliver();
+        assertEquals(1, delivered);
+        assertArrayEquals(original, deliveredBytes);
+        assertTrue(failures.isEmpty());
+        assertEquals(List.of("image.close", "reader.close", "delivered"), events);
+    }
+    @Test public void bufferAboveReviewLimitIsRejectedBeforeCopy() {
+        ((DocScanTestImage) readerShadow.image).buffer = ByteBuffer.allocate(20 * 1024 * 1024 + 1);
         deliver();
         assertEquals(0, delivered);
         assertEquals(1, failures.size());

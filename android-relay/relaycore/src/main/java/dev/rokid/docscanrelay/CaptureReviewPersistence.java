@@ -27,7 +27,10 @@ final class CaptureReviewPersistence {
     private static final int MAX_TEXT_BYTES = 4 * 1024 * 1024;
     private static final int MAX_FAILURE_BYTES = 64 * 1024;
     private static final int MAX_FRAMING_BYTES = 256;
-    private static final int MAX_JPEG_BYTES = 8 * 1024 * 1024;
+    private static final int MAX_JPEG_BYTES = CaptureSurface.MAX_JPEG_BYTES;
+    // Length prefixes, timestamps and validated v1-v5 provenance fit inside 1 KiB.
+    static final int MAX_RECORD_BYTES = MAX_JPEG_BYTES + MAX_TEXT_BYTES
+            + MAX_FAILURE_BYTES + MAX_FRAMING_BYTES + 1024;
 
     private final File file;
     private final File temporaryFile;

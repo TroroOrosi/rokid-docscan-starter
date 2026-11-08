@@ -64,7 +64,7 @@ final class GlassCamera {
     // Preparation plus JPEG deadline remains below the controller's 30s capture lease.
     private static final long PREPARE_TIMEOUT_MILLIS = 10_000;
     // Same bound as CaptureReviewPersistence; reject before allocating a second buffer.
-    static final int MAX_JPEG_BYTES = 8 * 1024 * 1024;
+    static final int MAX_JPEG_BYTES = CaptureSurface.MAX_JPEG_BYTES;
 
     interface Callback {
         void onCaptured(byte[] jpeg, int width, int height, long elapsedMillis);
@@ -107,7 +107,8 @@ final class GlassCamera {
     private static final class StillResult {
         final long generation;
         final Long timestamp, frame, exposure;
-        final Integer iso, af, ae;
+        final Integer iso, af, ae, aeMode, boost;
+        final Boolean awbLocked;
         StillResult(long generation, TotalCaptureResult result) {
             this.generation = generation;
             timestamp = result.get(CaptureResult.SENSOR_TIMESTAMP);
@@ -116,6 +117,82 @@ final class GlassCamera {
             iso = result.get(CaptureResult.SENSOR_SENSITIVITY);
             af = result.get(CaptureResult.CONTROL_AF_STATE);
             ae = result.get(CaptureResult.CONTROL_AE_STATE);
+            aeMode = result.get(CaptureResult.CONTROL_AE_MODE);
+            boost = result.get(CaptureResult.CONTROL_POST_RAW_SENSITIVITY_BOOST);
+            awbLocked = result.get(CaptureResult.CONTROL_AWB_LOCK);
+        }
+    }
+
+    /** Freeze the measured exposure for one fixed-focus still, including its processed-image gain. */
+    private static final class StillExposure {
+        final long exposure, frameDuration, sourceTimestamp;
+        final int iso;
+        final Integer boost;
+        final Range<Long> exposureRange;
+        final Range<Integer> isoRange, boostRange;
+
+        StillExposure(long exposure, long frameDuration, long sourceTimestamp, int iso, Integer boost,
+                Range<Long> exposureRange, Range<Integer> isoRange, Range<Integer> boostRange) {
+            this.exposure = exposure; this.frameDuration = frameDuration; this.iso = iso; this.boost = boost;
+            this.sourceTimestamp = sourceTimestamp;
+            this.exposureRange = exposureRange; this.isoRange = isoRange; this.boostRange = boostRange;
+        }
+
+        static boolean supported(CameraCharacteristics camera) {
+            int[] capabilities = camera.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES);
+            return contains(capabilities, CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_MANUAL_SENSOR)
+                    && contains(capabilities, CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_READ_SENSOR_SETTINGS)
+                    && contains(camera.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_MODES), CaptureRequest.CONTROL_AE_MODE_OFF)
+                    && Boolean.TRUE.equals(camera.get(CameraCharacteristics.CONTROL_AWB_LOCK_AVAILABLE))
+                    && camera.get(CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE) != null
+                    && camera.get(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE) != null
+                    && camera.get(CameraCharacteristics.SENSOR_INFO_MAX_FRAME_DURATION) != null;
+        }
+
+        static StillExposure observe(CameraCharacteristics camera, TotalCaptureResult result) {
+            Long exposure = result.get(CaptureResult.SENSOR_EXPOSURE_TIME);
+            Long duration = result.get(CaptureResult.SENSOR_FRAME_DURATION);
+            Integer iso = result.get(CaptureResult.SENSOR_SENSITIVITY);
+            Range<Long> exposureRange = camera.get(CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE);
+            Range<Integer> isoRange = camera.get(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE);
+            Range<Integer> boostRange = camera.get(CameraCharacteristics.CONTROL_POST_RAW_SENSITIVITY_BOOST_RANGE);
+            Integer boost = result.get(CaptureResult.CONTROL_POST_RAW_SENSITIVITY_BOOST);
+            if (!Integer.valueOf(CaptureRequest.CONTROL_AE_MODE_ON).equals(result.get(CaptureResult.CONTROL_AE_MODE))
+                    || exposure == null || exposure <= 0 || !exposureRange.contains(exposure)
+                    || duration == null || duration < exposure || duration > camera.get(CameraCharacteristics.SENSOR_INFO_MAX_FRAME_DURATION)
+                    || iso == null || iso <= 0 || !isoRange.contains(iso)
+                    || (boostRange != null && (boost == null || boost <= 0 || !boostRange.contains(boost)))) return null;
+            return new StillExposure(exposure, duration, result.get(CaptureResult.SENSOR_TIMESTAMP), iso, boostRange == null ? null : boost,
+                    exposureRange, isoRange, boostRange);
+        }
+
+        void apply(CaptureRequest.Builder request) {
+            request.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF);
+            request.set(CaptureRequest.CONTROL_AWB_LOCK, true);
+            request.set(CaptureRequest.SENSOR_EXPOSURE_TIME, exposure);
+            request.set(CaptureRequest.SENSOR_FRAME_DURATION, frameDuration);
+            request.set(CaptureRequest.SENSOR_SENSITIVITY, iso);
+            if (boost != null) request.set(CaptureRequest.CONTROL_POST_RAW_SENSITIVITY_BOOST, boost);
+        }
+
+        boolean matches(StillResult actual, long timestamp) {
+            // Camera2 permits only downward rounding of exposure, ISO and post-RAW gain.
+            return actual != null && actual.timestamp != null && actual.timestamp == timestamp && timestamp >= sourceTimestamp
+                    && Integer.valueOf(CaptureRequest.CONTROL_AE_MODE_OFF).equals(actual.aeMode)
+                    && Boolean.TRUE.equals(actual.awbLocked)
+                    && actual.exposure != null && exposureRange.contains(actual.exposure) && actual.exposure <= exposure
+                    && actual.iso != null && isoRange.contains(actual.iso) && actual.iso <= iso
+                    && (boost == null || (actual.boost != null && boostRange.contains(actual.boost) && actual.boost <= boost));
+        }
+    }
+
+    /** The native Image is closed before these bytes wait for the matching result. */
+    private static final class PendingJpeg {
+        final byte[] bytes;
+        final int width, height;
+        final long timestamp;
+        PendingJpeg(byte[] bytes, int width, int height, long timestamp) {
+            this.bytes = bytes; this.width = width; this.height = height; this.timestamp = timestamp;
         }
     }
 
@@ -166,6 +243,10 @@ final class GlassCamera {
     private long lastJpegSensorTimestamp;
     private long startedAtMillis;
     private StillResult stillResult;
+    private boolean stillResultFinished;
+    private PendingJpeg pendingJpeg;
+    private CameraCharacteristics manualExposureCamera;
+    private StillExposure meteringStillExposure, stillExposure;
     private final CameraDiagnostics.Framing framing = new CameraDiagnostics.Framing();
     private boolean settled;
     private boolean closed;
@@ -202,6 +283,7 @@ final class GlassCamera {
     private boolean captureSceneUncertain;
     private final List<Runnable> futureStops = new ArrayList<>();
     private CameraReadiness metering;
+    private boolean realtimeTimestamps;
     private long meteringSensorTimestamp;
     private long lastMeteringSensorTimestamp;
     private long meteringExposureNanos;
@@ -218,7 +300,10 @@ final class GlassCamera {
     private final Runnable prepareTimeout = () -> previewFailed("camera not still or AF/AE not ready");
     private final Runnable inputReleaseTimeout = () -> previewFailed("ZSL input release timeout");
 
-    private final Runnable timeout = () -> fail("CAMERA TIMEOUT");
+    private final Runnable timeout = () -> {
+        if (pendingJpeg != null) deliverJpeg();
+        else fail("CAMERA TIMEOUT");
+    };
 
     GlassCamera(Context context, Handler handler, Callback callback) {
         this(context, handler, callback, Mode.NATIVE_STILL);
@@ -428,6 +513,11 @@ final class GlassCamera {
             metering = new CameraReadiness(characteristics.get(CameraCharacteristics.CONTROL_AF_AVAILABLE_MODES),
                     characteristics.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE),
                     characteristics.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_MODES));
+            manualExposureCamera = mode == Mode.NATIVE_STILL && metering.afMode == CaptureRequest.CONTROL_AF_MODE_OFF
+                    && StillExposure.supported(characteristics) ? characteristics : null;
+            realtimeTimestamps = Integer.valueOf(CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE_REALTIME)
+                    .equals(characteristics.get(CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE));
+            meteringStillExposure = null;
             paperTracker = paperGeometryEvaluation ? new PaperGeometry.Tracker() : null;
             paperExposure = paperGeometryEvaluation && metering.afMode == CaptureRequest.CONTROL_AF_MODE_OFF
                     ? PaperExposure.create(characteristics, size, token) : null;
@@ -557,7 +647,7 @@ final class GlassCamera {
             if (image == null || token != previewGeneration || closed) return;
             long now = SystemClock.elapsedRealtime();
             long timestamp = image.getTimestamp();
-            if (timestamp <= 0 || timestamp <= lastPreviewSensorTimestamp) {
+            if (timestamp <= 0 || timestamp <= lastPreviewSensorTimestamp || !currentCameraTimestamp(timestamp)) {
                 // Do not refresh readiness or invent a turn from an old/invalid buffer.
                 previewSensorTimestamp = 0;
                 selectionScene = null;
@@ -566,7 +656,7 @@ final class GlassCamera {
             }
             lastPreviewSensorTimestamp = timestamp;
             previewSensorTimestamp = timestamp;
-            previewAt = now;
+            previewAt = realtimeTimestamps ? timestamp / 1_000_000L : now;
             Image.Plane luma = image.getPlanes()[0];
             ByteBuffer pixels = luma.getBuffer();
             int row = luma.getRowStride(), step = luma.getPixelStride();
@@ -702,6 +792,7 @@ final class GlassCamera {
                 && (activeFuturePage == null || (futureSceneSequence == pageChange.sequence()
                 && pageChange.ready(now)))
                 && meteringExposureNanos > 0 && meteredFrame(now) && previewMotion.ready(now) && pageChange.fineMotionReady(now)
+                && (manualExposureCamera == null || meteringStillExposure != null)
                 && now >= previewAt && now - previewAt <= CameraReadiness.FRESH_MILLIS
                 && (mode != Mode.ZSL_EVALUATION_YUV || (inputTransfer != null && inputTransfer.ready() && zslCandidate() != null))
                 && (mode != Mode.VIDEO_EVALUATION || (video != null && video.recording()));
@@ -734,6 +825,12 @@ final class GlassCamera {
                 <= CameraReadiness.FRESH_MILLIS * 1_000_000L;
     }
 
+    private boolean currentCameraTimestamp(long timestamp) {
+        if (!realtimeTimestamps) return true;
+        long now = SystemClock.elapsedRealtimeNanos();
+        return timestamp <= now && now - timestamp <= CameraReadiness.FRESH_MILLIS * 1_000_000L;
+    }
+
     private CameraCaptureSession.CaptureCallback previewResults(long token, boolean focusTrigger) {
         long focusGeneration = generation;
         long focusCycle = autoFocusCycle;
@@ -753,7 +850,7 @@ final class GlassCamera {
                     if (video != null && timestamp != null) video.frame(timestamp, result.getFrameNumber(),
                             result.get(CaptureResult.SCALER_CROP_REGION), result.get(CaptureResult.CONTROL_VIDEO_STABILIZATION_MODE),
                             result.get(CaptureResult.LENS_OPTICAL_STABILIZATION_MODE));
-                    if (timestamp == null || timestamp <= 0) {
+                    if (timestamp == null || timestamp <= 0 || !currentCameraTimestamp(timestamp)) {
                         meteringExposureNanos = 0;
                         meteringSensorTimestamp = 0; return;
                     }
@@ -771,8 +868,10 @@ final class GlassCamera {
                     meteringSensorTimestamp = timestamp;
                     Long exposure = result.get(CaptureResult.SENSOR_EXPOSURE_TIME);
                     meteringExposureNanos = exposure != null && exposure > 0 ? exposure : 0;
+                    meteringStillExposure = manualExposureCamera == null ? null : StillExposure.observe(manualExposureCamera, result);
                     metering.observe(result.get(CaptureResult.CONTROL_AF_STATE),
-                            result.get(CaptureResult.CONTROL_AE_STATE), SystemClock.elapsedRealtime());
+                            result.get(CaptureResult.CONTROL_AE_STATE), realtimeTimestamps
+                                    ? timestamp / 1_000_000L : SystemClock.elapsedRealtime());
                 } catch (RuntimeException error) { previewFailed("camera metering unavailable"); }
             }
             @Override public void onCaptureFailed(CameraCaptureSession source,
@@ -934,6 +1033,9 @@ final class GlassCamera {
         long current = ++generation;
         framing.arm(current, previewGeneration);
         stillResult = null;
+        stillResultFinished = false;
+        pendingJpeg = null;
+        stillExposure = meteringStillExposure;
         settled = false;
         captureStream = previewGeneration;
         captureScene = pageChange.sequence();
@@ -968,6 +1070,10 @@ final class GlassCamera {
     void close(Runnable completed) {
         handler.post(() -> {
             if (completed != null) closeCallbacks.add(completed);
+            if (pendingJpeg != null) {
+                stillResult = null;
+                deliverJpeg();
+            }
             if (mode == Mode.VIDEO_EVALUATION && video != null && generation > 0 && !settled) {
                 video.gap("generation_end_native_original_unresolved");
                 unknown = true;
@@ -977,6 +1083,7 @@ final class GlassCamera {
             activeAlternative = null;
             alternativeScene = null;
             settled = true;
+            pendingJpeg = null;
             generation++;
             previewRequested = false;
             pageReady = null;
@@ -1022,6 +1129,7 @@ final class GlassCamera {
             // Native AF/AE convergence now precedes this request in the same
             // session; the older timeout does not establish its cause.
             applyMetering(request);
+            if (stillExposure != null) stillExposure.apply(request);
             // capture() takes priority over repeating preview without stopping its next frames.
             previewSession.capture(request.build(), captureCallback(current), handler);
         } catch (CameraAccessException | RuntimeException | OutOfMemoryError error) {
@@ -1053,7 +1161,11 @@ final class GlassCamera {
                 // Metadata can fail while an image is still delivered. Do not discard it
                 // or restart the deadline merely because the result metadata failed.
                 if (!failure.wasImageCaptured()) fail("capture failed " + failure.getReason());
-                else Log.w(TAG, "capture_result gen=" + current + " unavailable; waiting for JPEG");
+                else {
+                    stillResultFinished = true;
+                    if (pendingJpeg != null) deliverJpeg();
+                    else Log.w(TAG, "capture_result gen=" + current + " unavailable; waiting for JPEG");
+                }
             }
             @Override public void onCaptureBufferLost(CameraCaptureSession source,
                     CaptureRequest request, Surface target, long frameNumber) {
@@ -1064,15 +1176,17 @@ final class GlassCamera {
             }
             @Override public void onCaptureCompleted(CameraCaptureSession source,
                     CaptureRequest request, TotalCaptureResult result) {
-                // Results and ImageReader notifications have independent ordering. A
-                // late result is diagnostic only, never a success or a retry trigger.
+                // Results and ImageReader notifications have independent ordering.
+                // The manual still keeps one copied JPEG until this result or the original deadline.
                 if (current == generation && !closed && !unknown) {
                     CameraDiagnostics.result(current, result);
                     framing.result(current, captureStream, result);
                 }
-                if (active(current) && !unknown && result != null) {
-                    try { stillResult = new StillResult(current, result); }
+                if (active(current) && !unknown && !stillResultFinished && source == previewSession) {
+                    try { stillResult = result == null ? null : new StillResult(current, result); }
                     catch (RuntimeException unavailable) { stillResult = null; }
+                    stillResultFinished = true;
+                    if (pendingJpeg != null) deliverJpeg();
                 }
             }
         };
@@ -1085,7 +1199,7 @@ final class GlassCamera {
         final long sensorTimestamp;
         try (Image image = source.acquireNextImage()) {
             // A retained reader must drain late notifications even between requests.
-            if (source != reader || generation <= 0 || !active(generation)) return;
+            if (source != reader || generation <= 0 || !active(generation) || pendingJpeg != null) return;
             if (image == null || image.getFormat() != ImageFormat.JPEG) {
                 throw new RejectedJpeg("missing JPEG image");
             }
@@ -1102,7 +1216,7 @@ final class GlassCamera {
             ByteBuffer buffer = planes[0].getBuffer();
             int bytes = buffer.remaining();
             if (bytes <= 0 || bytes > MAX_JPEG_BYTES) {
-                throw new RejectedJpeg("JPEG byte limit (1..8MiB)");
+                throw new RejectedJpeg("JPEG byte limit (1..20MiB)");
             }
             jpeg = new byte[bytes];
             buffer.get(jpeg);
@@ -1116,6 +1230,17 @@ final class GlassCamera {
         }
         if (settled || closed) return;
         framing.jpeg(generation, captureStream, sensorTimestamp);
+        pendingJpeg = new PendingJpeg(jpeg, width, height, sensorTimestamp);
+        if (stillExposure == null || stillResultFinished) deliverJpeg();
+    }
+
+    private void deliverJpeg() {
+        if (pendingJpeg == null || settled || closed) return;
+        PendingJpeg original = pendingJpeg;
+        pendingJpeg = null;
+        byte[] jpeg = original.bytes;
+        int width = original.width, height = original.height;
+        long sensorTimestamp = original.timestamp;
         ZslFrameBuffer.Selection outputSource = selectedInput;
         if (!previewRequested && !release()) {
             fail("camera close failed");
@@ -1134,8 +1259,10 @@ final class GlassCamera {
         // Reuse the configured readers/session until pause, close or failure.
         // Consumer exceptions must not re-label a delivered image as a camera failure.
         StillResult result = stillResult != null && stillResult.generation == generation ? stillResult : null;
-        boolean associationResolved = mode != Mode.ZSL_EVALUATION_YUV || (outputSource != null
-                && sensorTimestamp == outputSource.timestamp);
+        boolean associationResolved = mode == Mode.ZSL_EVALUATION_YUV
+                ? outputSource != null && sensorTimestamp == outputSource.timestamp
+                : stillExposure == null || (stillExposure.matches(result, sensorTimestamp)
+                        && (!realtimeTimestamps || sensorTimestamp <= SystemClock.elapsedRealtimeNanos()));
         CaptureProvenance provenance;
         if (mode != Mode.ZSL_EVALUATION_YUV) {
             provenance = CaptureProvenance.nativeStill(jpeg, width, height, sensorTimestamp,
@@ -1161,7 +1288,7 @@ final class GlassCamera {
         activeAlternative = null;
         CaptureSurface.NativeScene origin = alternativeScene;
         alternativeScene = null;
-        boolean nativeSceneMatched = nativeSelection && mode == Mode.NATIVE_STILL && !captureSceneUncertain
+        boolean nativeSceneMatched = associationResolved && nativeSelection && mode == Mode.NATIVE_STILL && !captureSceneUncertain
                 && captureStream == previewGeneration && captureScene == pageChange.sequence()
                 && captureScene > 0 && captureSceneStart > 0 && sensorTimestamp >= captureSceneStart
                 && sensorTimestamp < captureSceneEnd && provenance != null && provenance.resultTimestampNanos != null;
@@ -1186,7 +1313,8 @@ final class GlassCamera {
             }
             future.onCandidate(jpeg, provenance, sceneMatched);
         }
-        if (!associationResolved) previewFailed("ZSL original timestamp mismatch");
+        if (!associationResolved) previewFailed(mode == Mode.ZSL_EVALUATION_YUV
+                ? "ZSL original timestamp mismatch" : "native original exposure metadata unresolved");
         futureIdle();
     }
 
@@ -1196,6 +1324,11 @@ final class GlassCamera {
 
     private void fail(String reason) {
         if (settled) {
+            return;
+        }
+        if (pendingJpeg != null) {
+            stillResult = null;
+            deliverJpeg();
             return;
         }
         settled = true;
@@ -1240,6 +1373,8 @@ final class GlassCamera {
         selectedInput = null;
         ++previewGeneration;
         meteringExposureNanos = 0;
+        meteringStillExposure = null;
+        manualExposureCamera = null;
         if (oldDevice != null || previewOpening) previewClosing = true;
         if (mode == Mode.VIDEO_EVALUATION) {
             if (videoClose != null) return true;

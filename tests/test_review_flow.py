@@ -940,7 +940,7 @@ def test_new_page_index_rejected_after_finalize(client):
 def test_upload_size_limit(client, monkeypatch):
     import app.main as main
 
-    monkeypatch.setattr(main, "_MAX_UPLOAD_BYTES", 16)
+    monkeypatch.setattr(main, "_MAX_IMAGE_UPLOAD_BYTES", 16)
     r = client.post("/v1/documents", json={"title": "模試"})
     doc_id = r.json()["document_id"]
     files = {"image": ("p.png", image_bytes(make_image(seed=3)), "image/png")}
@@ -948,6 +948,22 @@ def test_upload_size_limit(client, monkeypatch):
         f"/v1/documents/{doc_id}/pages", data={"page_index": 0}, files=files
     )
     assert resp.status_code == 413
+
+
+def test_audio_upload_keeps_its_separate_byte_budget(client, monkeypatch):
+    import app.main as main
+
+    assert main._MAX_UPLOAD_BYTES == 15 * 1024 * 1024
+    assert main._MAX_IMAGE_UPLOAD_BYTES == 20 * 1024 * 1024
+    monkeypatch.setattr(main, "_MAX_UPLOAD_BYTES", 16)
+    doc_id = client.post("/v1/documents", json={"title": "録音"}).json()["document_id"]
+    response = client.post(
+        f"/v1/documents/{doc_id}/audio-chunks",
+        data={"sequence": 0, "start_sample": 0, "captured_at_ms": 1234},
+        files={"audio": ("chunk.wav", b"x" * 17, "audio/wav")},
+    )
+    assert response.status_code == 413
+    assert response.json()["detail"] == "upload too large (max 16 bytes)"
 
 
 # --- phase 3: review deck -----------------------------------------------------

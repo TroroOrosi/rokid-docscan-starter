@@ -8,6 +8,7 @@ import android.hardware.SensorEvent;
 import android.hardware.SensorManager;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
 import java.time.Duration;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -36,6 +37,7 @@ public class StillnessTest {
     private void motion(float speed, int readings) {
         for (int i = 0; i < readings; i++) {
             SensorEvent event = ShadowSensorManager.createSensorEvent(3);
+            event.timestamp = SystemClock.elapsedRealtimeNanos();
             event.values[0] = speed; sensors.sendSensorEventToListeners(event);
             shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(50));
         }
@@ -125,5 +127,96 @@ public class StillnessTest {
         shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(CameraReadiness.FRESH_MILLIS + 1));
         assertFalse(stillness.readyNow());
         stillness.cancel(); assertFalse(stillness.readyNow()); assertFalse(sensors.hasListener(stillness));
+    }
+
+    private void sampleAt(long timestamp, float speed) {
+        SensorEvent event = ShadowSensorManager.createSensorEvent(3);
+        event.timestamp = timestamp;
+        event.values[0] = speed;
+        sensors.sendSensorEventToListeners(event);
+    }
+
+    @Test public void delayedDeliveryCannotRefreshAnExpiredMotionSample() {
+        AtomicBoolean focused = new AtomicBoolean();
+        stillness.await(new Handler(Looper.getMainLooper()), focused::get, exposureNanos::get, shots::incrementAndGet);
+        motion(0f, 10);
+        long recordedAt = SystemClock.elapsedRealtimeNanos();
+        shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(CameraReadiness.FRESH_MILLIS + 1));
+        focused.set(true);
+        sampleAt(recordedAt, 0f);
+        shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(50));
+        assertEquals("the callback time is not the measurement time", 0, shots.get());
+        motion(0f, 8);
+        assertEquals(1, shots.get());
+    }
+
+    @Test public void previousPreparationAndInvalidTimestampsCannotAuthorizeAStill() {
+        long previous = SystemClock.elapsedRealtimeNanos();
+        shadowOf(Looper.getMainLooper()).idleFor(Duration.ofSeconds(1));
+        stillness.await(new Handler(Looper.getMainLooper()), () -> true, exposureNanos::get, shots::incrementAndGet);
+        for (int i = 0; i < 10; i++) {
+            sampleAt(previous + i, 0f);
+            sampleAt(0, 0f);
+            sampleAt(-1, 0f);
+            sampleAt(SystemClock.elapsedRealtimeNanos() + 1_000_000_000L, 0f);
+            shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(50));
+        }
+        assertEquals(0, shots.get());
+        motion(0f, 8);
+        assertEquals(1, shots.get());
+    }
+
+    @Test public void duplicateAndReversedSamplesCannotReplaceNewerMovement() {
+        stillness.await(new Handler(Looper.getMainLooper()), () -> true, exposureNanos::get, shots::incrementAndGet);
+        long movingTimestamp = SystemClock.elapsedRealtimeNanos();
+        sampleAt(movingTimestamp, 0.5f);
+        for (int i = 0; i < 10; i++) {
+            sampleAt(movingTimestamp, 0f);
+            sampleAt(movingTimestamp - 1, 0f);
+            shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(50));
+        }
+        assertEquals(0, shots.get());
+        motion(0f, 8);
+        assertEquals(1, shots.get());
+    }
+
+    @Test public void retainedMotionUsesTheMeasurementTimestampForFreshness() {
+        stillness.retainMeasurements(true);
+        stillness.await(new Handler(Looper.getMainLooper()), () -> true, exposureNanos::get, shots::incrementAndGet);
+        motion(0f, 10);
+        assertEquals(1, shots.get());
+        long recordedAt = SystemClock.elapsedRealtimeNanos();
+        shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(CameraReadiness.FRESH_MILLIS + 1));
+        sampleAt(recordedAt, 0f);
+        assertFalse(stillness.readyNow());
+        motion(0f, 1);
+        assertFalse("retained sampling must recover its quiet interval", stillness.readyNow());
+        motion(0f, 8);
+        assertTrue(stillness.readyNow());
+    }
+
+    @Test public void missingMeasurementsRestartTheQuietWindowAfterRecovery() {
+        AtomicBoolean focused = new AtomicBoolean();
+        stillness.await(new Handler(Looper.getMainLooper()), focused::get, exposureNanos::get, shots::incrementAndGet);
+        motion(0f, 10);
+        shadowOf(Looper.getMainLooper()).idleFor(Duration.ofSeconds(1));
+        focused.set(true);
+        motion(0f, 1);
+        assertEquals("unobserved time cannot establish a quiet interval", 0, shots.get());
+        motion(0f, 7);
+        assertEquals(1, shots.get());
+    }
+
+    @Test public void aRepeatedInvalidSampleCannotBecomeValidMotionEvidence() {
+        stillness.await(new Handler(Looper.getMainLooper()), () -> true, exposureNanos::get, shots::incrementAndGet);
+        long timestamp = SystemClock.elapsedRealtimeNanos();
+        sampleAt(timestamp, Float.NaN);
+        for (int i = 0; i < 8; i++) {
+            sampleAt(timestamp, 0f);
+            shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(50));
+        }
+        assertEquals(0, shots.get());
+        motion(0f, 8);
+        assertEquals(1, shots.get());
     }
 }

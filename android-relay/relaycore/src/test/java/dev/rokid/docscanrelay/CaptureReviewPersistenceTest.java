@@ -5,6 +5,7 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertThrows;
+import static org.junit.Assert.assertTrue;
 
 import java.io.DataOutputStream;
 import java.io.File;
@@ -15,6 +16,43 @@ import java.nio.file.Files;
 import org.junit.Test;
 
 public class CaptureReviewPersistenceTest {
+    @Test
+    public void fullNativeJpegBudgetSurvivesPersistenceWithExactProvenance() throws Exception {
+        File file = new File(Files.createTempDirectory("docscan-large-native").toFile(), "capture.bin");
+        byte[] jpeg = new byte[20 * 1024 * 1024];
+        jpeg[0] = 12;
+        jpeg[jpeg.length - 1] = 34;
+        CaptureProvenance source = CaptureProvenance.nativeStill(jpeg, 4032, 3024,
+                100L, 100L, 3L, 25_000_000L, 100, 0, 2)
+                .bind("11111111-1111-4111-8111-111111111111", 0, 270);
+        CaptureReviewStore.Pending original = new CaptureReviewStore.Pending(
+                0, jpeg, "", 270, "", PageFraming.UNKNOWN, 1234, source);
+        CaptureReviewPersistence disk = new CaptureReviewPersistence(file);
+        disk.save(original);
+        assertTrue(disk.matches(original));
+        CaptureReviewStore.Pending restored = new CaptureReviewPersistence(file).readPending();
+        assertArrayEquals(jpeg, restored.jpeg);
+        assertEquals(source, restored.provenance);
+    }
+
+    @Test
+    public void oversizedStoredLengthIsRejectedBeforeReadingOrAllocatingThePayload() throws Exception {
+        File file = new File(Files.createTempDirectory("docscan-large-length").toFile(), "capture.bin");
+        try (DataOutputStream data = new DataOutputStream(new FileOutputStream(file))) {
+            data.writeInt(0x44534350);
+            data.writeInt(1);
+            data.writeInt(0);
+            data.writeInt(270);
+            data.writeInt(0);
+            data.writeInt(0);
+            data.writeInt(20 * 1024 * 1024 + 1);
+        }
+        IOException error = assertThrows(IOException.class,
+                () -> new CaptureReviewPersistence(file).readPending());
+        assertTrue(error.getMessage().contains("field is too large"));
+        assertTrue(file.isFile());
+    }
+
     @Test
     public void theProducerKindIsPartOfTheSameOriginalsIdentity() throws Exception {
         File directory = Files.createTempDirectory("docscan-producer-identity").toFile();

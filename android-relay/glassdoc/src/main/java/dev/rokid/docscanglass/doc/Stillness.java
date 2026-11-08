@@ -37,6 +37,8 @@ final class Stillness implements SensorEventListener {
     private boolean retainMeasurements;
     private boolean measuring;
     private long measurementStartedAt;
+    private long measurementStartedAtNanos;
+    private long lastSensorTimestampNanos;
     private long generation;
     private LongSupplier exposureNanos = () -> 0;
 
@@ -55,10 +57,14 @@ final class Stillness implements SensorEventListener {
     boolean readyNow() {
         long now = SystemClock.elapsedRealtime();
         float limit = motionLimit();
-        return measuring && limit > 0 && observedAt >= measurementStartedAt
-                && now >= observedAt && now - observedAt <= CameraReadiness.FRESH_MILLIS
+        return measuring && limit > 0 && fresh(now)
                 && ready(now, measurementStartedAt, movingAt)
                 && motionSquared <= limit * limit && quietMotionSquared <= limit * limit;
+    }
+
+    private boolean fresh(long now) {
+        return observedAt >= measurementStartedAt && now >= observedAt
+                && now - observedAt <= CameraReadiness.FRESH_MILLIS;
     }
 
     /** Keep measuring motion until the camera is also ready; elapsed wait never authorizes a shot. */
@@ -67,7 +73,9 @@ final class Stillness implements SensorEventListener {
         exposureNanos = exposure;
         long startedAt = SystemClock.elapsedRealtime();
         measurementStartedAt = startedAt;
-        quietSinceNanos = SystemClock.elapsedRealtimeNanos();
+        measurementStartedAtNanos = SystemClock.elapsedRealtimeNanos();
+        lastSensorTimestampNanos = 0;
+        quietSinceNanos = measurementStartedAtNanos;
         movingAt = startedAt; // a full STILL_MILLIS of readings is required
         observedAt = -1;
         motionSquared = Float.POSITIVE_INFINITY;
@@ -80,14 +88,13 @@ final class Stillness implements SensorEventListener {
                 if (token != generation) return;
                 long now = SystemClock.elapsedRealtime();
                 float limit = motionLimit();
-                if (limit <= 0 || (measured && (motionSquared > limit * limit
+                if (limit <= 0 || (measured && (!fresh(now) || motionSquared > limit * limit
                         || quietMotionSquared > limit * limit))) {
                     movingAt = now;
                     quietSinceNanos = SystemClock.elapsedRealtimeNanos();
                     quietMotionSquared = 0;
                 }
-                if (limit > 0 && cameraReady.getAsBoolean() && (!measured || (observedAt >= startedAt
-                        && now >= observedAt && now - observedAt <= CameraReadiness.FRESH_MILLIS
+                if (limit > 0 && cameraReady.getAsBoolean() && (!measured || (fresh(now)
                         && ready(now, startedAt, movingAt)))) {
                     if (!retainMeasurements) {
                         if (sensors != null) sensors.unregisterListener(Stillness.this);
@@ -120,14 +127,25 @@ final class Stillness implements SensorEventListener {
 
     @Override
     public void onSensorChanged(SensorEvent event) {
-        observedAt = SystemClock.elapsedRealtime();
-        if (event.values.length < 3 || !Float.isFinite(event.values[0])
-                || !Float.isFinite(event.values[1]) || !Float.isFinite(event.values[2])) {
-            movingAt = observedAt;
-            quietSinceNanos = SystemClock.elapsedRealtimeNanos();
-            observedAt = -1;
+        if (!measuring) return;
+        long nowNanos = SystemClock.elapsedRealtimeNanos();
+        // SensorEvent timestamps use elapsedRealtimeNanos. Queueing is not fresh motion evidence.
+        if (event.timestamp <= 0 || event.timestamp > nowNanos) {
+            invalidateMotion(nowNanos);
             return;
         }
+        if (event.timestamp < measurementStartedAtNanos || event.timestamp <= lastSensorTimestampNanos) return;
+        long previousTimestamp = lastSensorTimestampNanos;
+        lastSensorTimestampNanos = event.timestamp;
+        if (event.values.length < 3 || !Float.isFinite(event.values[0])
+                || !Float.isFinite(event.values[1]) || !Float.isFinite(event.values[2])) {
+            invalidateMotion(nowNanos);
+            return;
+        }
+        // The retained optional-shot path has no polling loop after its first callback.
+        if (previousTimestamp > 0 && event.timestamp - previousTimestamp
+                > CameraReadiness.FRESH_MILLIS * 1_000_000L) invalidateMotion(nowNanos);
+        observedAt = event.timestamp / 1_000_000L;
         float x = event.values[0];
         float y = event.values[1];
         float z = event.values[2];
@@ -141,6 +159,13 @@ final class Stillness implements SensorEventListener {
             // Recheck this window against later exposure without resetting for harmless AE jitter.
             quietMotionSquared = Math.max(quietMotionSquared, motionSquared);
         }
+    }
+
+    private void invalidateMotion(long nowNanos) {
+        movingAt = SystemClock.elapsedRealtime();
+        quietSinceNanos = nowNanos;
+        quietMotionSquared = 0;
+        observedAt = -1;
     }
 
     @Override
