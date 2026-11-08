@@ -115,4 +115,64 @@ public class AnswerReaderTest {
         assertTrue(lines.get(0).startsWith("【要確認】"));
         assertTrue(String.join("", lines).contains("12"));
     }
+
+    @Test public void continuousMillionsOfLinesRestoreAndReflowWithoutRetainingEveryPage() {
+        String answer = "x" + "\n".repeat(8_000_000);
+        AnswerBundle bundle = new AnswerBundle("session", "a".repeat(64), 1, List.of(
+                AnswerItem.ready("g", "g", "q", "q", answer)));
+        AnswerReader reader = new AnswerReader(bundle, 40, 3, String::length, true);
+        assertEquals(2_666_667, reader.pageCount());
+        reader.restore("q", answer.length() - 1);
+        assertEquals(reader.pageCount(), reader.pageNumber());
+        reader.backward();
+        reader.forward();
+        assertEquals(reader.pageCount(), reader.pageNumber());
+        int offset = reader.offset();
+        reader.viewport(40, 4, String::length);
+        assertEquals(2_000_000, reader.pageCount());
+        assertEquals(reader.pageCount(), reader.pageNumber());
+        assertEquals(offset, reader.offset());
+    }
+
+    @Test public void ordinaryMillionsOfLinesRestoreNearTheLastPage() {
+        String answer = "x" + "\n".repeat(8_000_000);
+        AnswerReader reader = new AnswerReader(new AnswerBundle("session", "a".repeat(64), 1,
+                List.of(AnswerItem.ready("g", "g", "q", "q", answer))), 40, 3, String::length);
+        reader.restore("q", answer.length() - 1);
+        assertEquals(2_666_667, reader.pageCount());
+        assertEquals(reader.pageCount(), reader.pageNumber());
+        assertEquals(answer.length(), reader.page().end);
+    }
+
+    @Test public void metadataOnlyReaderRestoresAndValidatesBeforeTheActualViewport() {
+        for (boolean continuous : new boolean[]{false, true}) {
+            AnswerReader reader = new AnswerReader(initial(), continuous);
+            reader.restore("g1-q1", 8);
+            assertFalse(reader.hasViewport());
+            assertEquals(8, reader.offset());
+            assertThrows(IllegalStateException.class, reader::page);
+            assertThrows(IllegalStateException.class, reader::pageCount);
+            assertNull(reader.diagram());
+            assertTrue(reader.accept(initial().withAnswer(
+                    AnswerItem.ready("g1", "大問1", "g1-q2", "(2)", "ウ"))));
+            assertEquals("g1-q1", reader.current().questionId);
+            assertEquals(8, reader.offset());
+            assertFalse(reader.hasViewport());
+            reader.viewport(4, 2, String::length);
+            assertTrue(reader.hasViewport());
+            assertEquals(8, reader.offset());
+        }
+    }
+
+    @Test public void invalidViewportPreservesDeferredAndDisplayedReaderState() {
+        AnswerReader reader = new AnswerReader(initial(), true);
+        assertThrows(IllegalArgumentException.class, () -> reader.viewport(0, 2, String::length));
+        assertFalse(reader.hasViewport());
+        reader.viewport(20, 2, String::length);
+        AnswerLayout.Page page = reader.page();
+        assertThrows(IllegalArgumentException.class, () -> reader.viewport(20, 0, String::length));
+        assertThrows(IllegalArgumentException.class, () -> reader.viewport(Float.NaN, 2, String::length));
+        assertThrows(IllegalArgumentException.class, () -> reader.viewport(20, 2, null));
+        assertSame(page, reader.page());
+    }
 }

@@ -543,8 +543,22 @@ public final class DocScanApi {
 
     /** One complete snapshot, so a reader works with no route to the server. */
     public AnswerBundle answerBundle(long sessionId) throws IOException, JSONException {
-        return AnswerBundle.fromJson(
-                get("/v1/exam-sessions/" + sessionId + "/answer-bundle").toString());
+        Request.Builder request = new Request.Builder()
+                .url(baseUrl + "/v1/exam-sessions/" + sessionId + "/answer-bundle")
+                .header("Accept", "application/json").get();
+        if (!apiKey.isEmpty()) request.header("Authorization", "Bearer " + apiKey);
+        try (Response response = http.newCall(request.build()).execute()) {
+            if (!response.isSuccessful()) {
+                String detail = response.peekBody(4096).string();
+                try { detail = new JSONObject(detail).optString("detail", detail); }
+                catch (JSONException ignored) { /* Retain the bounded HTTP diagnostic. */ }
+                throw new ApiException(response.code(), detail);
+            }
+            if (response.body() == null) throw new IOException("empty answer bundle");
+            if (response.body().contentLength() > AnswerBundle.MAX_JSON_BYTES)
+                throw new IOException("answer bundle too large");
+            return AnswerBundle.fromStream(response.body().byteStream());
+        }
     }
 
     public void glassesState(String deviceId, Long sessionId, long generation, long sequence, String phase)

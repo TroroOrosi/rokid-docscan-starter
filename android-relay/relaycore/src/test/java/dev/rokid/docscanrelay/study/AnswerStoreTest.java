@@ -17,6 +17,19 @@ import org.robolectric.annotation.Config;
 public class AnswerStoreTest {
     @Rule public TemporaryFolder temp = new TemporaryFolder();
 
+    @Test public void longAnswerAndCursorSurviveOfflineRestart() throws Exception {
+        File directory = temp.newFolder();
+        String answer = "式".repeat(800_000);
+        AnswerBundle bundle = new AnswerBundle("s", "a".repeat(64), 1,
+                List.of(AnswerItem.ready("g", "全問", "q", "1", answer)));
+        AnswerStore store = new AnswerStore(directory);
+        store.start(bundle);
+        store.save(bundle, "q", 300_001, false);
+        AnswerStore.Saved saved = new AnswerStore(directory).load();
+        assertEquals(answer, saved.bundle.items.get(0).answer);
+        assertEquals(300_001, saved.offset);
+    }
+
     private AnswerBundle bundle(String session) {
         return new AnswerBundle(session, "a".repeat(64), 1, List.of(
                 AnswerItem.ready("g1", "大問1", "q1", "(1)", "書く内容だけ。".repeat(100))));
@@ -37,6 +50,28 @@ public class AnswerStoreTest {
         AnswerStore.Saved resumed = store.resume();
         assertFalse(resumed.closed);
         assertEquals(80, resumed.offset);
+    }
+
+    @Test public void cancelledResumeBeforeReadAfterReadOrBeforeCommitKeepsTheClosedOriginal() throws Exception {
+        for (int cancelledCheck : new int[]{1, 2, 3}) {
+            File directory = temp.newFolder();
+            AnswerStore store = new AnswerStore(directory);
+            AnswerBundle bundle = bundle("s");
+            store.start(bundle);
+            store.save(bundle, "q1", 80, true);
+            java.nio.file.Path original = new File(directory, "answer-reader.json").toPath();
+            byte[] before = java.nio.file.Files.readAllBytes(original);
+            java.util.concurrent.atomic.AtomicInteger checks = new java.util.concurrent.atomic.AtomicInteger();
+
+            assertThrows(IOException.class, () -> store.resume(() -> checks.incrementAndGet() < cancelledCheck));
+
+            assertEquals(cancelledCheck, checks.get());
+            assertArrayEquals(before, java.nio.file.Files.readAllBytes(original));
+            AnswerStore.Saved saved = store.load();
+            assertTrue(saved.closed);
+            assertEquals(80, saved.offset);
+            assertEquals(bundle.items.get(0).answer, saved.bundle.items.get(0).answer);
+        }
     }
 
     @Test public void lateSaveCannotUndoCloseOrReplaceANewerSession() throws Exception {

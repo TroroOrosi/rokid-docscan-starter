@@ -17,6 +17,30 @@ import dev.rokid.docscanrelay.study.AnswerReader;
 public class AnswerViewTest {
     @Test
     @org.robolectric.annotation.GraphicsMode(org.robolectric.annotation.GraphicsMode.Mode.NATIVE)
+    public void firstLayoutUsesRealFontAndKeepsTheRestoredPosition() {
+        AnswerBundle bundle = new AnswerBundle("s", "a".repeat(64), 1, List.of(
+                AnswerItem.ready("g", "問題", "q", "問", "𝑥 = 2 を記入する。".repeat(400))));
+        AnswerReader reader = new AnswerReader(bundle, true);
+        reader.restore("q", 2000);
+        AnswerView view = new AnswerView(RuntimeEnvironment.getApplication());
+        view.bind(reader);
+        assertFalse(reader.hasViewport());
+        assertNull(view.getContentDescription());
+
+        view.layout(0, 0, 480, 640);
+        assertTrue(reader.hasViewport());
+        assertEquals(2000, reader.offset());
+        assertTrue(reader.pageCount() > 1);
+        assertTrue(view.getContentDescription().length() > 0);
+        assertEquals(32f, view.bodyTextSize(), .01f);
+
+        view.layout(0, 0, 280, 640);
+        assertEquals(2000, reader.offset());
+        assertEquals(32f, view.bodyTextSize(), .01f);
+    }
+
+    @Test
+    @org.robolectric.annotation.GraphicsMode(org.robolectric.annotation.GraphicsMode.Mode.NATIVE)
     public void quadraticGraphKeepsAxesScaleInterceptsAndItsShadedRegion() throws Exception {
         org.json.JSONArray curve = new org.json.JSONArray();
         org.json.JSONArray region = new org.json.JSONArray().put(new org.json.JSONArray(new double[]{.5, .75}));

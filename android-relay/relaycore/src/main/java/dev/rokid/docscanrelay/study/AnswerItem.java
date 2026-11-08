@@ -42,9 +42,9 @@ public final class AnswerItem {
         this.groupLabel = label(groupLabel);
         this.questionLabel = label(questionLabel);
         boolean carriesAnswer = status == Status.READY || status == Status.NEEDS_REVIEW;
-        if (status == null || answer == null || issue == null || answer.length() > 200_000
+        if (status == null || answer == null || issue == null || answer.length() > AnswerBundle.MAX_TEXT_CHARS
                 || diagrams == null || diagrams.size() > 4 || diagrams.stream().anyMatch(d -> d == null)
-                || issue.length() > 1000 || (carriesAnswer && answer.trim().isEmpty() && diagrams.isEmpty())
+                || issue.codePointCount(0, issue.length()) > 1000 || (carriesAnswer && answer.trim().isEmpty() && diagrams.isEmpty())
                 || (!carriesAnswer && !answer.isEmpty())
                 || (!carriesAnswer && !diagrams.isEmpty())
                 || (status == Status.NEEDS_REVIEW && issue.trim().isEmpty())) {
@@ -82,7 +82,7 @@ public final class AnswerItem {
     }
 
     private static String label(String value) {
-        if (value == null || value.trim().isEmpty() || value.length() > 120) {
+        if (value == null || value.trim().isEmpty() || value.codePointCount(0, value.length()) > 120) {
             throw new IllegalArgumentException("invalid question label");
         }
         return value;

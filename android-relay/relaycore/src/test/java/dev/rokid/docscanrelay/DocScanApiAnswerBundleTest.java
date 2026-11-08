@@ -35,6 +35,24 @@ public class DocScanApiAnswerBundleTest {
                 new ClientIdentity("test", "test/1", "test"));
     }
 
+    @Test public void streamsLongChunkedAnswersWithoutTheFormerTwoMiBLimit() throws Exception {
+        String answer = "式".repeat(800_000);
+        String body = BODY.replace("x = 2", answer);
+        try (MockWebServer server = new MockWebServer()) {
+            server.enqueue(new MockResponse().setChunkedBody(body, 4096));
+            AnswerBundle bundle = api(server).answerBundle(7);
+            assertEquals(answer, bundle.items.get(0).answer);
+        }
+    }
+
+    @Test public void rejectsAdvertisedOversizeBeforeReadingTheBody() throws Exception {
+        try (MockWebServer server = new MockWebServer()) {
+            server.enqueue(new MockResponse().setBody("{")
+                    .setHeader("Content-Length", AnswerBundle.MAX_JSON_BYTES + 1));
+            assertThrows(IOException.class, () -> api(server).answerBundle(7));
+        }
+    }
+
     @Test
     public void parsesTheBundleAndAsksTheRightPath() throws Exception {
         try (MockWebServer server = new MockWebServer()) {

@@ -79,7 +79,7 @@ final class AnswerView extends View {
 
     /** Re-reads the reader after the host moved it. */
     void refresh() {
-        if (reader == null) {
+        if (reader == null || !reader.hasViewport()) {
             return;
         }
         if (reader.screen() == AnswerReader.Screen.ANSWER) {
@@ -113,7 +113,7 @@ final class AnswerView extends View {
     }
 
     private void applyViewport() {
-        if (reader == null || getWidth() <= 0) {
+        if (reader == null || getWidth() <= 0 || getHeight() <= 0) {
             return;
         }
         int bodyLines = Math.max(1, (int)((getHeight() - bodyTop() - getWidth() * SIDE_PADDING) / lineHeight()));
@@ -138,7 +138,7 @@ final class AnswerView extends View {
         canvas.drawColor(Color.BLACK);
         float left = getWidth() * SIDE_PADDING;
         canvas.drawText(index, left, left - indexPaint.ascent(), indexPaint);
-        if (reader != null && reader.diagram() != null) {
+        if (reader != null && reader.hasViewport() && reader.diagram() != null) {
             drawDiagram(canvas, reader.diagram(), left, bodyTop());
             return;
         }

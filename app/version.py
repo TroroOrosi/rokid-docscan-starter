@@ -254,7 +254,8 @@ from __future__ import annotations
 # 0.66.3: retain unlabelled questions and nonconsecutive printed answer numbers.
 # 0.66.4: share capture context with Work and supplement coarse page-change evidence.
 # 0.67.0: extended graph/construction slides, lossless plain answers and scene-bound metering.
-APP_VERSION = "0.67.0"
+# 0.68.0: preserve measured capture timing/exposure and large original/answer payloads.
+APP_VERSION = "0.68.0"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.
@@ -376,7 +377,8 @@ APP_VERSION = "0.67.0"
 # 1.39.0: optional capture inspection origins and authenticated diagnostic result lookups.
 # 1.39.1: source-position labels for unlabelled questions; do not invent numeric gaps.
 # 1.40.0: schema 3 for extended vector diagrams; preserve printed answer-number bounds.
-API_VERSION = "1.40.0"
+# 1.41.0: align original JPEG and complete answer budgets with the standalone client.
+API_VERSION = "1.41.0"
 
 # Matching algorithm identity. Bump when thresholds or hashing change so a
 # re-index/eval is triggered. Mirrors thresholds in app/matching.py.
@@ -530,7 +532,8 @@ EXPLAINER_API_VERSION = "1.1.0"
 # 1.40.0: opt-in native A/B selection retains both originals and reviews the chosen image.
 # 1.41.0: bounded fine-detail page-change evidence with coherent preview registration.
 # 1.42.0: extended diagram rendering and metering fenced to the current page scene.
-GLASSES_VIEW_CONTRACT_VERSION = "1.42.0"
+# 1.43.0: sensor-time stillness, checked native exposure and bounded long-answer reading.
+GLASSES_VIEW_CONTRACT_VERSION = "1.43.0"
 
 # Answer-area overlay payload (box + short answer; 2D image-anchored).
 # 1.1.0: added tracking metadata (tracking/fixed_ar/anchor_hint).

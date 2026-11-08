@@ -917,26 +917,168 @@ public class DocScanGlassActivityAnswerReadingTest {
                 getField(activity, "answers"));
     }
 
-    /**
-     * C1: {@code openAnswers}'s placeholder viewport (width=1f, replaced by
-     * {@code AnswerView.onSizeChanged} as soon as it is laid out) must not
-     * crash on any answer text. The old placeholder measured a cluster's
-     * UTF-16 {@code length()}: any surrogate pair or combining mark -- a
-     * math italic variable, an emoji, an NFD-decomposed accent -- measures
-     * &gt;= 2, always &gt; width=1f, and {@code AnswerLayout.paginate}
-     * throws {@code IllegalArgumentException("viewport narrower than
-     * glyph")} for a cluster it cannot start a line with. Uses U+1D465
-     * (MATHEMATICAL ITALIC SMALL X, "𝑥") as the surrogate pair.
-     */
     @Test
-    public void openAnswersToleratesASurrogatePairInThePlaceholderViewport() throws Exception {
+    public void openAnswersKeepsSurrogatePairsUntilTheRealViewportIsAvailable() throws Exception {
         AnswerBundle bundle = new AnswerBundle(Long.toString(SESSION_ID), "a".repeat(64), 1, List.of(
                 AnswerItem.ready("g1", "第1問", "q10", "問1", "x = 𝑥")));
 
         invokeOpenAnswers(bundle, "q10", 0);
 
-        assertNotNull("the placeholder viewport must not crash the Activity",
-                getField(activity, "reader"));
+        AnswerReader reader = (AnswerReader) getField(activity, "reader");
+        assertNotNull(reader);
+        assertFalse(reader.hasViewport());
+    }
+
+    @Test
+    public void unwrappedAnswerWaitsForLayoutBeforePaginationAndReceipt() throws Exception {
+        AnswerBundle bundle = new AnswerBundle(Long.toString(SESSION_ID), "a".repeat(64), 1, List.of(
+                AnswerItem.ready("g", "g", "q", "q", "x".repeat(200_000))));
+        ((AnswerStore) getField(activity, "answerStore")).start(bundle);
+        invokeOpenAnswers(bundle, "q", 100_000);
+
+        AnswerReader reader = (AnswerReader) getField(activity, "reader");
+        assertFalse(reader.hasViewport());
+        assertEquals(100_000, reader.offset());
+        assertEquals(-1L, getField(activity, "acknowledgedRevision"));
+        invokeOnAction(GlassesInputAction.SWIPE_FORWARD);
+        assertEquals(100_000, reader.offset());
+    }
+
+    @Test
+    public void laidOutSavedAnswerAcknowledgesTheDisplayedRevision() throws Exception {
+        AnswerBundle bundle = new AnswerBundle(Long.toString(SESSION_ID), "a".repeat(64), 1, List.of(
+                AnswerItem.ready("g", "g", "q", "q", "x = 𝑥")));
+        ((AnswerStore) getField(activity, "answerStore")).start(bundle);
+        invokeOpenAnswers(bundle, "q", 0);
+        assertEquals(-1L, getField(activity, "acknowledgedRevision"));
+
+        ((AnswerView) getField(activity, "answers")).layout(0, 0, 480, 640);
+        answerPersistenceBarrier();
+        assertTrue(((AnswerReader) getField(activity, "reader")).hasViewport());
+        assertEquals(1L, getField(activity, "acknowledgedRevision"));
+    }
+
+    @Test
+    public void firstLayoutDoesNotWaitForTheSavedAnswerReadAndStaleReadCannotAcknowledge() throws Exception {
+        AnswerBundle bundle = new AnswerBundle(Long.toString(SESSION_ID), "a".repeat(64), 1, List.of(
+                AnswerItem.ready("g", "g", "q", "q", "x = 2")));
+        ((AnswerStore) getField(activity, "answerStore")).start(bundle);
+        java.util.concurrent.CountDownLatch release = new java.util.concurrent.CountDownLatch(1);
+        ((ExecutorService) getField(activity, "answerPersistExecutor")).submit(() -> {
+            release.await(5, TimeUnit.SECONDS);
+            return null;
+        });
+        try {
+            invokeOpenAnswers(bundle, "q", 0);
+            ((AnswerView) getField(activity, "answers")).layout(0, 0, 480, 640);
+            assertEquals(-1L, getField(activity, "acknowledgedRevision"));
+            PowerState.Snapshot next = PowerState.forContext(activity).begin(0);
+            setField(activity, "powerGeneration", next.generation);
+        } finally {
+            release.countDown();
+        }
+        answerPersistenceBarrier();
+        assertEquals(-1L, getField(activity, "acknowledgedRevision"));
+    }
+
+    @Test
+    public void writingCompletionRetainsReceiptBeforeTheQueuedAckCallbackRuns() throws Exception {
+        AnswerBundle bundle = new AnswerBundle(Long.toString(SESSION_ID), "a".repeat(64), 1, List.of(
+                AnswerItem.ready("g", "g", "q", "q", "x = 2")));
+        ((AnswerStore) getField(activity, "answerStore")).start(bundle);
+        invokeOpenAnswers(bundle, "q", 0);
+        ((AnswerView) getField(activity, "answers")).layout(0, 0, 480, 640);
+        ((ExecutorService) getField(activity, "answerPersistExecutor")).submit(() -> {}).get(5, TimeUnit.SECONDS);
+
+        invokeOnAction(GlassesInputAction.BACK);
+        assertTrue((boolean) getField(activity, "writingDone"));
+        assertEquals(1L, getField(activity, "acknowledgedRevision"));
+        assertNull(getField(activity, "reader"));
+        Shadows.shadowOf(Looper.getMainLooper()).idle();
+        assertNull(getField(activity, "reader"));
+    }
+
+    @Test
+    public void previousAnswerResumeRunsOffMainThreadAndReopensTheSavedCursor() throws Exception {
+        AnswerBundle bundle = new AnswerBundle(Long.toString(SESSION_ID), "a".repeat(64), 1, List.of(
+                AnswerItem.ready("g", "g", "q", "q", "x = 2")));
+        AnswerStore store = (AnswerStore) getField(activity, "answerStore");
+        store.start(bundle);
+        store.save(bundle, "q", 3, true);
+        setField(activity, "choosingSession", true);
+        java.util.concurrent.CountDownLatch release = new java.util.concurrent.CountDownLatch(1);
+        ((ExecutorService) getField(activity, "answerPersistExecutor")).submit(() -> {
+            release.await(5, TimeUnit.SECONDS);
+            return null;
+        });
+        try {
+            Method resume = DocScanGlassActivity.class.getDeclaredMethod("resumePreviousAnswers");
+            resume.setAccessible(true);
+            resume.invoke(activity);
+            assertTrue((boolean) getField(activity, "startupStarting"));
+            assertNull(getField(activity, "reader"));
+            assertTrue(store.load().closed);
+        } finally {
+            release.countDown();
+        }
+        answerPersistenceBarrier();
+        AnswerReader reader = (AnswerReader) getField(activity, "reader");
+        assertNotNull(reader);
+        assertEquals(3, reader.offset());
+        assertFalse(reader.hasViewport());
+        assertFalse(store.load().closed);
+    }
+
+    @Test
+    public void queuedPreviousAnswerResumeCannotReopenAfterItsGenerationChanges() throws Exception {
+        AnswerBundle bundle = new AnswerBundle(Long.toString(SESSION_ID), "a".repeat(64), 1, List.of(
+                AnswerItem.ready("g", "g", "q", "q", "x = 2")));
+        AnswerStore store = (AnswerStore) getField(activity, "answerStore");
+        store.start(bundle);
+        store.save(bundle, "q", 3, true);
+        setField(activity, "choosingSession", true);
+        java.util.concurrent.CountDownLatch release = new java.util.concurrent.CountDownLatch(1);
+        ((ExecutorService) getField(activity, "answerPersistExecutor")).submit(() -> {
+            release.await(5, TimeUnit.SECONDS);
+            return null;
+        });
+        try {
+            Method resume = DocScanGlassActivity.class.getDeclaredMethod("resumePreviousAnswers");
+            resume.setAccessible(true);
+            resume.invoke(activity);
+            PowerState.Snapshot next = PowerState.forContext(activity).begin(0);
+            setField(activity, "powerGeneration", next.generation);
+        } finally {
+            release.countDown();
+        }
+        answerPersistenceBarrier();
+        assertNull(getField(activity, "reader"));
+        assertTrue(store.load().closed);
+        assertEquals(3, store.load().offset);
+    }
+
+    @Test
+    public void savedReadingSwipeReturnsBeforeDiskReadAndStaleGenerationCannotOpenIt() throws Exception {
+        AnswerBundle bundle = new AnswerBundle(Long.toString(SESSION_ID), "a".repeat(64), 1, List.of(
+                AnswerItem.ready("g", "g", "q", "q", "x = 2")));
+        ((AnswerStore) getField(activity, "answerStore")).start(bundle);
+        setField(activity, "mixedMode", true);
+        setField(activity, "awaitingAnswers", true);
+        java.util.concurrent.CountDownLatch release = new java.util.concurrent.CountDownLatch(1);
+        ((ExecutorService) getField(activity, "answerPersistExecutor")).submit(() -> {
+            release.await(5, TimeUnit.SECONDS);
+            return null;
+        });
+        try {
+            invokeOnAction(GlassesInputAction.SWIPE_FORWARD);
+            assertNull(getField(activity, "reader"));
+            PowerState.Snapshot next = PowerState.forContext(activity).begin(0);
+            setField(activity, "powerGeneration", next.generation);
+        } finally {
+            release.countDown();
+        }
+        answerPersistenceBarrier();
+        assertNull(getField(activity, "reader"));
     }
 
     @Test
@@ -1125,6 +1267,11 @@ public class DocScanGlassActivityAnswerReadingTest {
 
     private void controllerBarrier() throws Exception {
         ((ExecutorService) getField(controller, "serial")).submit(() -> { }).get(5, TimeUnit.SECONDS);
+    }
+
+    private void answerPersistenceBarrier() throws Exception {
+        ((ExecutorService) getField(activity, "answerPersistExecutor")).submit(() -> {}).get(5, TimeUnit.SECONDS);
+        Shadows.shadowOf(Looper.getMainLooper()).idle();
     }
 
     private void invokeStageCaptureReview(byte[] jpeg) throws Exception {

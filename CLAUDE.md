@@ -1,6 +1,6 @@
 # rokid-docscan-starter development guide
 
-Status: Current engineering contract. Updated 2026-11-05.
+Status: Current engineering contract. Updated 2026-11-08.
 
 **Start at `.agents/progress/current.md`.** It lists the operator's decisions,
 the verified state and the next steps. Do not re-ask what it settles. Keep the
@@ -196,6 +196,14 @@ and uncertain-send safeguards remain independent of model-name fallback.
   supported focus/exposure and stillness checks. Fixed-focus hardware does not
   gain autofocus from an AF trigger. Expired preparation fails instead
   of forcing a moving shot. Physical character accuracy remains unverified.
+  Gyroscope freshness uses the sensor's measurement timestamp, including delayed
+  deliveries and gaps in the retained preview stream. On supported fixed-focus
+  cameras, one native still copies the current preview's manual exposure, sensitivity,
+  frame duration and post-RAW gain. Its JPEG joins the matching capture result
+  within the existing deadline. Missing or inconsistent metadata retains the
+  original for explicit recapture. Live preview retains at most one queued bitmap.
+  The original JPEG budget is 20 MiB across capture, local persistence and image
+  upload. The measured camera advertises 18,457,096 bytes as its JPEG maximum.
   An explicit `zsl_evaluation=true` launch evaluates full-resolution YUV
   reprocessing on cameras advertising the required reprocessing, burst and
   realtime timestamp capabilities. It pairs input frames with their own session's
@@ -281,6 +289,15 @@ and uncertain-send safeguards remain independent of model-name fallback.
   The phone repeats an answer notification until `ack_answer_revision` confirms
   a bundle saved and displayed by that client; generated revisions are not
   receipt acknowledgements. The client suppresses concurrent and duplicate loads.
+  Complete answer JSON is bounded to 64 MiB and answer/issue text to 24 Mi UTF-16
+  units. These budgets cover the two 8 MiB Work stages and expanded mathematical
+  glyphs. Network input and atomic offline saves use bounded streams. Schema
+  versions 1, 2 and 3 remain readable, including existing saved cursor state.
+  Long-answer layout keeps bounded page-position indexes and constructs visible
+  pages when requested. Initial layout waits for the measured view dimensions.
+  Saved-answer reads and explicit resume run on the serialized persistence worker.
+  A resume canceled before its commit decision rolls back its atomic save.
+  Explicit completion waits for durable storage before leaving the reader.
   Keep microphone input while muting output. Do not hold the glasses CPU for
   indefinite analysis or poll answers there; bounded upload work may retain CPU
   only until its timeout or completion. Physical silence and timing are pending.

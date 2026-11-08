@@ -20,9 +20,8 @@ public final class AnswerReader {
     private int menuIndex;
     private String menuGroup;
     private final boolean continuous;
-    private final List<Integer> pageQuestions = new ArrayList<>();
-    private final List<Integer> pageOffsets = new ArrayList<>();
-    private final List<AnswerDiagram> pageDiagrams = new ArrayList<>();
+    private final List<ContinuousSection> sections = new ArrayList<>();
+    private int continuousPageCount;
 
     public AnswerReader(AnswerBundle bundle, float width, int lines, AnswerLayout.Measurer measurer) {
         this(bundle, width, lines, measurer, false);
@@ -30,31 +29,55 @@ public final class AnswerReader {
 
     public AnswerReader(AnswerBundle bundle, float width, int lines, AnswerLayout.Measurer measurer,
                         boolean continuous) {
-        this.bundle = bundle;
-        this.continuous = continuous;
+        this(bundle, continuous);
         viewport(width, lines, measurer);
     }
 
+    /** Metadata and cursor are usable before a view supplies its actual font and size. */
+    public AnswerReader(AnswerBundle bundle, boolean continuous) {
+        this.bundle = bundle;
+        this.continuous = continuous;
+    }
+
     public AnswerBundle bundle() { return bundle; }
+    public boolean hasViewport() { return measurer != null; }
     public AnswerItem current() { return bundle.items.get(questionIndex); }
     public Screen screen() { return screen; }
     public int offset() { return anchorOffset; }
     public int pageNumber() { return pageIndex + 1; }
-    public int pageCount() { return continuous ? pages.size() : textPageCount + current().diagrams.size(); }
-    public AnswerLayout.Page page() { return pages.get(Math.min(pageIndex, pages.size()-1)); }
+    public int pageCount() {
+        if (!hasViewport()) throw new IllegalStateException("answer viewport unavailable");
+        return continuous ? continuousPageCount : textPageCount + current().diagrams.size();
+    }
+    public AnswerLayout.Page page() {
+        if (!hasViewport()) throw new IllegalStateException("answer viewport unavailable");
+        if (!continuous) return pages.get(Math.min(pageIndex, pages.size() - 1));
+        ContinuousSection section = sectionAt(pageIndex);
+        int localPage = pageIndex - section.firstPage;
+        return localPage < section.pages.size() ? section.pages.get(localPage)
+                : AnswerLayout.paginate("", width, lines, measurer).get(0);
+    }
     public AnswerDiagram diagram() {
-        if (continuous) return screen == Screen.ANSWER ? pageDiagrams.get(pageIndex) : null;
+        if (!hasViewport()) return null;
+        if (continuous) {
+            ContinuousSection section = sectionAt(pageIndex);
+            int index = pageIndex - section.firstPage - section.pages.size();
+            return screen == Screen.ANSWER && index >= 0 ? section.diagrams.get(index) : null;
+        }
         return screen == Screen.ANSWER && pageIndex >= textPageCount
                 ? current().diagrams.get(pageIndex - textPageCount) : null;
     }
 
     private int pageStart() {
-        if (continuous) return pageOffsets.get(pageIndex);
+        if (continuous) return sectionAt(pageIndex).offset(pageIndex);
         return pageIndex < textPageCount ? pages.get(pageIndex).start
                 : contentLength + 1 + pageIndex - textPageCount;
     }
 
     public void viewport(float width, int lines, AnswerLayout.Measurer measurer) {
+        if (measurer == null || !Float.isFinite(width) || width <= 0 || lines < 1) {
+            throw new IllegalArgumentException("invalid answer viewport");
+        }
         this.width = width;
         this.lines = lines;
         this.measurer = measurer;
@@ -62,9 +85,11 @@ public final class AnswerReader {
     }
 
     private void reflow() {
+        if (!hasViewport()) return;
         if (continuous) { reflowContinuous(); return; }
         AnswerItem item = current();
         String content = content(item);
+        pages = null;
         pages = AnswerLayout.paginate(content, width, lines, measurer);
         contentLength = content.length();
         textPageCount = content.isEmpty() && !item.diagrams.isEmpty() ? 0 : pages.size();
@@ -72,7 +97,14 @@ public final class AnswerReader {
         if (anchorOffset > contentLength && !item.diagrams.isEmpty()) {
             pageIndex = textPageCount + Math.min(item.diagrams.size()-1, anchorOffset-contentLength-1);
         } else {
-            while (pageIndex + 1 < textPageCount && pages.get(pageIndex).end <= anchorOffset) pageIndex++;
+            int low = 0;
+            int high = textPageCount - 1;
+            while (low < high) {
+                int middle = low + (high - low) / 2;
+                if (pages.get(middle).end <= anchorOffset) low = middle + 1;
+                else high = middle;
+            }
+            pageIndex = low;
         }
     }
 
@@ -95,23 +127,26 @@ public final class AnswerReader {
     private void reflowContinuous() {
         int targetQuestion = questionIndex;
         int targetOffset = anchorOffset;
-        pages = new ArrayList<>();
-        pageQuestions.clear(); pageOffsets.clear(); pageDiagrams.clear();
+        sections.clear();
+        continuousPageCount = 0;
         int first = 0;
         while (first < bundle.items.size()) {
             int last = first;
             while (last + 1 < bundle.items.size() && bundle.items.get(last).diagrams.isEmpty()) last++;
             StringBuilder text = new StringBuilder();
-            List<Integer> starts = new ArrayList<>();
-            List<Integer> bodyStarts = new ArrayList<>();
+            int[] starts = new int[last - first + 1];
+            int[] bodyStarts = new int[starts.length];
+            int lastContentLength = 0;
             int lineStart = 0;
             boolean previousCompact = false;
             for (int i = first; i <= last; i++) {
                 AnswerItem item = bundle.items.get(i);
                 String body = content(item);
-                String entry = item.readingLabel() + " " + body;
+                String label = item.readingLabel();
                 boolean compact = item.status == AnswerItem.Status.READY && item.diagrams.isEmpty()
-                        && !body.contains("\n") && !body.contains("\r") && measurer.width(entry) <= width;
+                        && !body.contains("\n") && !body.contains("\r");
+                String entry = compact ? label + " " + body : "";
+                compact = compact && measurer.width(entry) <= width;
                 if (i > first) {
                     if (previousCompact && compact
                             && measurer.width(text.substring(lineStart) + "　" + entry) <= width) {
@@ -121,41 +156,103 @@ public final class AnswerReader {
                         lineStart = text.length();
                     }
                 }
-                starts.add(text.length());
-                text.append(item.readingLabel()).append(' ');
-                bodyStarts.add(text.length());
+                starts[i - first] = text.length();
+                text.append(label).append(' ');
+                bodyStarts[i - first] = text.length();
                 text.append(body);
+                lastContentLength = body.length();
                 previousCompact = compact;
             }
-            for (AnswerLayout.Page page : AnswerLayout.paginate(text.toString(), width, lines, measurer)) {
-                int owner = 0;
-                while (owner + 1 < starts.size() && starts.get(owner + 1) <= page.start) owner++;
-                pages.add(page);
-                pageQuestions.add(first + owner);
-                pageOffsets.add(Math.max(0, page.start - bodyStarts.get(owner)));
-                pageDiagrams.add(null);
-            }
             AnswerItem item = bundle.items.get(last);
-            for (int d = 0; d < item.diagrams.size(); d++) {
-                pages.add(AnswerLayout.paginate("", width, lines, measurer).get(0));
-                pageQuestions.add(last);
-                pageOffsets.add(content(item).length() + 1 + d);
-                pageDiagrams.add(item.diagrams.get(d));
-            }
+            String sectionText = text.toString();
+            // The line index may be large, so release the mutable text buffer first.
+            text = null;
+            ContinuousSection section = new ContinuousSection(first, continuousPageCount,
+                    AnswerLayout.paginate(sectionText, width, lines, measurer),
+                    starts, bodyStarts, lastContentLength, item.diagrams);
+            sections.add(section);
+            continuousPageCount += section.pages.size() + item.diagrams.size();
             first = last + 1;
         }
         pageIndex = 0;
-        for (int p = 0; p < pages.size(); p++) {
-            if (pageQuestions.get(p) < targetQuestion || (pageQuestions.get(p) == targetQuestion
-                    && pageOffsets.get(p) <= targetOffset)) pageIndex = p;
+        int low = 0;
+        int high = continuousPageCount - 1;
+        while (low <= high) {
+            int middle = low + (high - low) / 2;
+            ContinuousSection section = sectionAt(middle);
+            int owner = section.question(middle);
+            if (owner < targetQuestion || (owner == targetQuestion
+                    && section.offset(middle) <= targetOffset)) {
+                pageIndex = middle;
+                low = middle + 1;
+            } else high = middle - 1;
         }
         questionIndex = targetQuestion;
         anchorOffset = targetOffset;
     }
 
     private void selectContinuousPage() {
-        questionIndex = pageQuestions.get(pageIndex);
-        anchorOffset = pageOffsets.get(pageIndex);
+        ContinuousSection section = sectionAt(pageIndex);
+        questionIndex = section.question(pageIndex);
+        anchorOffset = section.offset(pageIndex);
+    }
+
+    private ContinuousSection sectionAt(int page) {
+        int low = 0;
+        int high = sections.size() - 1;
+        while (low < high) {
+            int middle = low + (high - low + 1) / 2;
+            if (sections.get(middle).firstPage <= page) low = middle;
+            else high = middle - 1;
+        }
+        return sections.get(low);
+    }
+
+    /** Store question boundaries once; page text and ownership are resolved on demand. */
+    private static final class ContinuousSection {
+        final int firstQuestion;
+        final int firstPage;
+        final List<AnswerLayout.Page> pages;
+        final int[] starts;
+        final int[] bodyStarts;
+        final int lastContentLength;
+        final List<AnswerDiagram> diagrams;
+
+        ContinuousSection(int firstQuestion, int firstPage, List<AnswerLayout.Page> pages,
+                          int[] starts, int[] bodyStarts, int lastContentLength,
+                          List<AnswerDiagram> diagrams) {
+            this.firstQuestion = firstQuestion;
+            this.firstPage = firstPage;
+            this.pages = pages;
+            this.starts = starts;
+            this.bodyStarts = bodyStarts;
+            this.lastContentLength = lastContentLength;
+            this.diagrams = diagrams;
+        }
+
+        private int owner(int start) {
+            int low = 0;
+            int high = starts.length - 1;
+            while (low < high) {
+                int middle = low + (high - low + 1) / 2;
+                if (starts[middle] <= start) low = middle;
+                else high = middle - 1;
+            }
+            return low;
+        }
+
+        int question(int globalPage) {
+            int localPage = globalPage - firstPage;
+            int index = localPage < pages.size() ? owner(pages.get(localPage).start) : starts.length - 1;
+            return firstQuestion + index;
+        }
+
+        int offset(int globalPage) {
+            int localPage = globalPage - firstPage;
+            if (localPage >= pages.size()) return lastContentLength + 1 + localPage - pages.size();
+            int start = pages.get(localPage).start;
+            return Math.max(0, start - bodyStarts[owner(start)]);
+        }
     }
 
     public boolean accept(AnswerBundle next) {
@@ -202,7 +299,7 @@ public final class AnswerReader {
                 questionIndex = i;
                 anchorOffset = Math.max(0, offset);
                 reflow();
-                if (continuous) return;
+                if (continuous || !hasViewport()) return;
                 anchorOffset = Math.min(anchorOffset, contentLength + current().diagrams.size());
                 return;
             }

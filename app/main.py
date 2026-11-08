@@ -4358,6 +4358,27 @@ def exam_list_solutions(session_id: int) -> dict:
         conn.close()
 
 
+_MAX_ANSWER_BUNDLE_JSON_BYTES = 64 * 1024 * 1024
+_MAX_ANSWER_BUNDLE_TEXT_CHARS = 24 * 1024 * 1024
+
+
+def _check_answer_bundle_capacity(bundle: dict) -> None:
+    # Match AnswerBundle's UTF-16 text and canonical UTF-8 wire budgets. Work
+    # retains two 8 MiB stage results; mathematical scripts may expand to 3-byte glyphs.
+    items = bundle["items"]
+    characters = sum(len((item["answer"] + item["issue"]).encode("utf-16-le")) // 2 for item in items)
+    if len(items) > 2000 or characters > _MAX_ANSWER_BUNDLE_TEXT_CHARS:
+        raise HTTPException(status_code=413, detail="the complete answer exceeds the reader text capacity")
+    encoder = json.JSONEncoder(ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+    size = 0
+    persisted = {**bundle, "items": [{"diagrams": [], "answer_no": [], **item} for item in items]}
+    for chunk in encoder.iterencode(persisted):
+        # Android JsonWriter escapes JavaScript line separators on offline save.
+        size += len(chunk.replace("\u2028", "\\u2028").replace("\u2029", "\\u2029").encode("utf-8"))
+        if size > _MAX_ANSWER_BUNDLE_JSON_BYTES:
+            raise HTTPException(status_code=413, detail="the complete answer exceeds the reader byte capacity")
+
+
 @app.get("/v1/exam-sessions/{session_id}/answer-bundle")
 def exam_answer_bundle(session_id: int) -> dict:
     """One complete snapshot the glasses read offline.
@@ -4390,7 +4411,7 @@ def exam_answer_bundle(session_id: int) -> dict:
             for group in groups
             for row in group["items"]
         ]
-        return {
+        bundle = {
             "schema_version": max((diagram_schema_version(i.get("diagrams", [])) for i in items), default=1),
             "session_id": str(session_id),
             "input_digest": _answer_input_digest(conn, session),
@@ -4399,6 +4420,8 @@ def exam_answer_bundle(session_id: int) -> dict:
             "available_stage": _available_stage(session, items),
             "items": items,
         }
+        _check_answer_bundle_capacity(bundle)
+        return bundle
     finally:
         conn.close()
 

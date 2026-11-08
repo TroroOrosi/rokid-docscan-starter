@@ -686,6 +686,7 @@ public class DocScanGlassActivityIntentTest {
         java.lang.reflect.Method open = DocScanGlassActivity.class.getDeclaredMethod("openAnswers", AnswerBundle.class, String.class, int.class);
         open.setAccessible(true);
         open.invoke(activity, bundle, "q1", 0);
+        layoutAnswersAndWaitForReceipt();
         java.lang.reflect.Method action = DocScanGlassActivity.class.getDeclaredMethod("onAction", GlassesInputAction.class, long.class);
         action.setAccessible(true);
         try {
@@ -765,6 +766,7 @@ public class DocScanGlassActivityIntentTest {
         } finally { release.countDown(); }
         for (int attempt = 0; attempt < 100 && store.load() == null; attempt++) Thread.sleep(10);
         Shadows.shadowOf(android.os.Looper.getMainLooper()).idle();
+        layoutAnswersAndWaitForReceipt();
         assertEquals("only a saved and visible bundle may acknowledge receipt", 1,
                 activity.getPreferences(Context.MODE_PRIVATE).getLong("power_ack_revision", -1));
         long sequence = PowerState.forContext(activity).load().sequence;
@@ -785,6 +787,7 @@ public class DocScanGlassActivityIntentTest {
         begin.setAccessible(true); begin.invoke(activity);
         java.lang.reflect.Method open = DocScanGlassActivity.class.getDeclaredMethod("openAnswers", AnswerBundle.class, String.class, int.class);
         open.setAccessible(true); open.invoke(activity, bundle, "q1", 0);
+        layoutAnswersAndWaitForReceipt();
         long generation = PowerState.forContext(activity).load().generation;
         long sequence = PowerState.forContext(activity).load().sequence;
         server.setDispatcher(new Dispatcher() {
@@ -814,6 +817,15 @@ public class DocScanGlassActivityIntentTest {
         assertEquals(2, server.getRequestCount());
         assertFalse(Shadows.shadowOf(activity).getTurnScreenOn());
         assertEquals(sequence, PowerState.forContext(activity).load().sequence);
+    }
+
+    private void layoutAnswersAndWaitForReceipt() throws Exception {
+        AnswerView view = org.robolectric.util.ReflectionHelpers.getField(activity, "answers");
+        assertNotNull(view);
+        view.layout(0, 0, 480, 640);
+        ((java.util.concurrent.ExecutorService) org.robolectric.util.ReflectionHelpers.getField(activity, "answerPersistExecutor"))
+                .submit(() -> {}).get(5, TimeUnit.SECONDS);
+        Shadows.shadowOf(android.os.Looper.getMainLooper()).idle();
     }
 
     @Test @Config(sdk = 28, manifest = Config.NONE)

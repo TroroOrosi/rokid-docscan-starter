@@ -140,12 +140,8 @@ public final class DocScanGlassActivity extends Activity
     private AnswerView answers;
     private AnswerStore answerStore;
     private ConnectionSettings connectionSettings;
-    // Off the main thread only for AnswerStore.save's per-gesture write --
-    // load-then-rewrite-the-whole-bundle plus an fsync, too expensive for a
-    // wearable's UI thread on every page turn. Single-threaded so writes
-    // still commit in the order the gestures that queued them happened in;
-    // daemon so it never has to be shut down from onDestroy, which this
-    // change does not touch.
+    // Reads and per-gesture writes share one queue so large saved answers
+    // stay off the UI thread and position writes commit in gesture order.
     private final ExecutorService answerPersistExecutor = Executors.newSingleThreadExecutor(
             runnable -> {
                 Thread thread = new Thread(runnable, "answer-persist");
@@ -171,6 +167,8 @@ public final class DocScanGlassActivity extends Activity
     private long answersFetchSession = -1, answersFetchGeneration = -1, answersFetchRevision = -1;
     private long pendingAnswerRevision = -1;
     private long acknowledgedSession, acknowledgedRevision = -1;
+    private AnswerBundle acknowledgementPending;
+    private long savedReadingLoadGeneration = -1;
     // Wakes the display once per run of failed fetches, not once per retry.
     private volatile boolean answerFetchFailing;
     // True once this Activity instance has checked AnswerStore for a saved
@@ -269,7 +267,6 @@ public final class DocScanGlassActivity extends Activity
 
         applyIntent(getIntent(), true);
         startupSelection = mixedMode ? 1 : listeningMode ? 2 : 0;
-        startupAnswers = loadSavedAnswers();
         long answersSession = getIntent() == null ? 0 : getIntent().getLongExtra(EXTRA_ANSWERS, 0);
         if (restoringWake) {
             choosingSession = false;
@@ -282,6 +279,7 @@ public final class DocScanGlassActivity extends Activity
             fetchAnswers(answersSession);
         } else {
             showStartupChoices();
+            loadStartupAnswers();
         }
         if (!hasCamera()) {
             requestPermissions(
@@ -598,6 +596,7 @@ public final class DocScanGlassActivity extends Activity
                 }
                 return;
             }
+            if (!reader.hasViewport()) return;
             if (!AnswerGestures.apply(reader, action)) {
                 closeAnswers();
                 return;
@@ -616,10 +615,7 @@ public final class DocScanGlassActivity extends Activity
         if (mixedMode) {
             boolean swipe = action == GlassesInputAction.SWIPE_FORWARD || action == GlassesInputAction.SWIPE_BACK;
             if (awaitingAnswers && swipe) {
-                AnswerStore.Saved saved = loadSavedAnswers();
-                if (saved != null && !saved.closed && saved.bundle.sessionId.equals(Long.toString(activeSession()))) {
-                    openAnswers(saved.bundle, saved.questionId, saved.offset);
-                }
+                openSavedReadingAnswers();
                 return;
             }
             if (swipe || (awaitingAnswers && action == GlassesInputAction.SHORT_TAP)) { toggleAudio(); return; }
@@ -691,14 +687,7 @@ public final class DocScanGlassActivity extends Activity
             return;
         }
         if ("前回の答案".equals(selected)) {
-            try {
-                AnswerStore.Saved saved = answerStore.resume();
-                if (saved == null) return;
-                beginPowerGeneration();
-                choosingSession = false;
-                viewingPreviousAnswers = true;
-                openAnswers(saved.bundle, saved.questionId, saved.offset);
-            } catch (IOException error) { hud.showLines(List.of("前回答案を開けません", "原本は保持しています", "")); }
+            resumePreviousAnswers();
             return;
         }
         if (!hasCamera()) {
@@ -731,6 +720,7 @@ public final class DocScanGlassActivity extends Activity
             }
             beginPowerGeneration();
             choosingSession = false;
+            startupAnswers = null;
             startupCaptures = null;
             notifyPhase("capturing", controller.sessionId());
             answersFetchedForSession = -1;
@@ -1081,7 +1071,7 @@ public final class DocScanGlassActivity extends Activity
                 String question = bundle.items.get(0).questionId;
                 int offset = 0;
                 if (saved != null && saved.bundle.sessionId.equals(bundle.sessionId)) {
-                    AnswerReader validation = new AnswerReader(saved.bundle, 1f, 2, text -> 0f, true);
+                    AnswerReader validation = new AnswerReader(saved.bundle, true);
                     validation.restore(saved.questionId, saved.offset);
                     if (!validation.accept(bundle)) throw new IOException("answer identity changed");
                     question = validation.current().questionId;
@@ -1149,6 +1139,65 @@ public final class DocScanGlassActivity extends Activity
         }
     }
 
+    private void loadStartupAnswers() {
+        long generation = powerGeneration;
+        answerPersistExecutor.execute(() -> {
+            AnswerStore.Saved saved = loadSavedAnswers();
+            main.post(() -> {
+                if (!isCurrentPowerGeneration(generation) || sessionClosed || isFinishing() || isDestroyed()
+                        || !choosingSession || startupStarting) return;
+                startupAnswers = saved;
+                showStartupChoices();
+            });
+        });
+    }
+
+    private void openSavedReadingAnswers() {
+        long generation = powerGeneration;
+        long session = activeSession();
+        if (savedReadingLoadGeneration == generation) return;
+        savedReadingLoadGeneration = generation;
+        answerPersistExecutor.execute(() -> {
+            AnswerStore.Saved saved = loadSavedAnswers();
+            main.post(() -> {
+                if (savedReadingLoadGeneration != generation) return;
+                savedReadingLoadGeneration = -1;
+                if (!isCurrentPowerGeneration(generation) || sessionClosed || writingDone
+                        || isFinishing() || isDestroyed() || !awaitingAnswers || reader != null
+                        || activeSession() != session) return;
+                if (saved != null && !saved.closed && saved.bundle.sessionId.equals(Long.toString(session))) {
+                    openAnswers(saved.bundle, saved.questionId, saved.offset);
+                }
+            });
+        });
+    }
+
+    private void resumePreviousAnswers() {
+        long generation = powerGeneration;
+        startupStarting = true;
+        answerPersistExecutor.execute(() -> {
+            AnswerStore.Saved saved = null;
+            try { saved = answerStore.resume(() -> isCurrentPowerGeneration(generation)
+                    && !sessionClosed && !isFinishing() && !isDestroyed()); }
+            catch (IOException error) { Log.w(TAG, "previous answers unavailable", error); }
+            AnswerStore.Saved resumed = saved;
+            main.post(() -> {
+                if (!isCurrentPowerGeneration(generation) || sessionClosed || isFinishing() || isDestroyed()
+                        || !choosingSession) return;
+                startupStarting = false;
+                if (resumed == null) {
+                    hud.showLines(List.of("前回答案を開けません", "原本は保持しています", ""));
+                    return;
+                }
+                beginPowerGeneration();
+                choosingSession = false;
+                startupAnswers = null;
+                viewingPreviousAnswers = true;
+                openAnswers(resumed.bundle, resumed.questionId, resumed.offset);
+            });
+        });
+    }
+
     private void openAnswers(AnswerBundle bundle, String questionId, int offset) {
         if (sessionClosed || writingDone || isFinishing() || isDestroyed() || !isCurrentPowerGeneration(powerGeneration)) {
             // The fetch (or a resume) completed after the two-stage exit
@@ -1174,21 +1223,17 @@ public final class DocScanGlassActivity extends Activity
             return;
         }
         answers = new AnswerView(this);
-        // A placeholder viewport: AnswerView.onSizeChanged calls
-        // reader.viewport with its own Paint as soon as it is laid out, and
-        // the view owns the layout, so nothing here should guess at width --
-        // it only has to be safe, not accurate. A measurer that always
-        // reports zero width never exceeds the placeholder's width=1f, so
-        // AnswerLayout.paginate never has to split a line mid-cluster; a
-        // measurer keyed to UTF-16 length() (the previous placeholder)
-        // measures >= 2 for any surrogate pair or combining mark, which is
-        // always > 1f and throws IllegalArgumentException from inside this
-        // main.post callback -- uncaught, and permanent, since the bundle
-        // is already saved to disk by the time this runs and the next
-        // launch takes the same saved-state branch into the same crash.
-        reader = new AnswerReader(bundle, 1f, 2, text -> 0f, true);
+        // AnswerView supplies the actual font and viewport after its first layout.
+        reader = new AnswerReader(bundle, true);
         reader.restore(questionId, offset);
         answers.bind(reader);
+        AnswerReader openedReader = reader;
+        answers.addOnLayoutChangeListener((view, left, top, right, bottom,
+                                          oldLeft, oldTop, oldRight, oldBottom) -> {
+            if (view != answers || reader != openedReader || writingDone || sessionClosed
+                    || isFinishing() || isDestroyed() || !isCurrentPowerGeneration(powerGeneration)) return;
+            acknowledgeDisplayedAnswers();
+        });
         setContentView(answers);
         acknowledgeDisplayedAnswers();
         if (hasWrittenAnswers()) {
@@ -1209,6 +1254,7 @@ public final class DocScanGlassActivity extends Activity
             if (answers != null) answers.announceSaveFailure();
             return false;
         }
+        if (reader != null && reader.hasViewport()) recordAcknowledgedRevision(reader.bundle());
         reader = null;
         answers = null;
         setContentView(hud);
@@ -1256,15 +1302,40 @@ public final class DocScanGlassActivity extends Activity
     }
 
     private void acknowledgeDisplayedAnswers() {
-        if (reader == null || answerStore == null) return;
+        if (reader == null || !reader.hasViewport() || answerStore == null) return;
+        AnswerReader displayedReader = reader;
         AnswerBundle shown = reader.bundle();
-        AnswerStore.Saved saved = loadSavedAnswers();
-        if (saved == null || saved.closed || saved.bundle.revision < shown.revision
-                || !saved.bundle.sessionId.equals(shown.sessionId) || !saved.bundle.inputDigest.equals(shown.inputDigest)) return;
+        long session;
+        try {
+            session = Long.parseLong(shown.sessionId);
+        } catch (NumberFormatException ignored) { return; }
+        if (session <= 0 || acknowledgementPending == shown
+                || (acknowledgedSession == session && acknowledgedRevision >= shown.revision)) return;
+        long generation = powerGeneration;
+        acknowledgementPending = shown;
+        answerPersistExecutor.execute(() -> {
+            AnswerStore.Saved saved = loadSavedAnswers();
+            main.post(() -> {
+                if (acknowledgementPending != shown) return;
+                acknowledgementPending = null;
+                if (!isCurrentPowerGeneration(generation) || sessionClosed || writingDone
+                        || isFinishing() || isDestroyed() || reader != displayedReader || reader.bundle() != shown
+                        || !reader.hasViewport()) return;
+                if (saved == null || saved.closed || saved.bundle.revision < shown.revision
+                        || !saved.bundle.sessionId.equals(shown.sessionId)
+                        || !saved.bundle.inputDigest.equals(shown.inputDigest)) return;
+                recordAcknowledgedRevision(shown);
+                notifyPhase(powerPhase, powerSession, displayRequest);
+            });
+        });
+    }
+
+    private void recordAcknowledgedRevision(AnswerBundle shown) {
         try {
             long session = Long.parseLong(shown.sessionId);
             if (session <= 0) return;
-            acknowledgedRevision = acknowledgedSession == session ? Math.max(acknowledgedRevision, shown.revision) : shown.revision;
+            acknowledgedRevision = acknowledgedSession == session
+                    ? Math.max(acknowledgedRevision, shown.revision) : shown.revision;
             acknowledgedSession = session;
         } catch (NumberFormatException ignored) { }
     }

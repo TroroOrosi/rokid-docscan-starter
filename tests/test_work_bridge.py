@@ -662,6 +662,42 @@ def test_phone_api_returns_non_answering_stop_in_existing_answer_bundle(client):
     assert bundle["items"][0]["issue"] == "P1の文字が判読できません"
 
 
+@pytest.mark.parametrize("count,length,symbol", [(4, 180_000, "x"), (4, 180_000, "式"), (1, 300_001, "x")])
+def test_long_work_answers_survive_the_complete_bundle_boundary(client, count, length, symbol):
+    _, session, job = api_session(client)
+    received = [api_tile_receipt(client, job)]
+    text = symbol * length
+    result = {"questions": [{"group": "全問", "label": str(i + 1), "pages": [1],
+                            "answer_no": [i + 1], "status": "ready", "answer": text,
+                            "missing_material": "", "diagrams": []} for i in range(count)]}
+    assert api_complete(client, job, received, result).status_code == 200
+    bundle = wait_for(lambda: response if (response := client.get(
+        f"/v1/exam-sessions/{session}/answer-bundle")).status_code == 200
+        and response.json().get("available_stage") == "complete" else None).json()
+    assert len(bundle["items"]) == count
+    assert all(item["answer"] == text and item["status"] == "ready" for item in bundle["items"])
+
+
+def test_bundle_capacity_matches_decoded_utf16_and_offline_json_budget(monkeypatch):
+    from app import main
+    from fastapi import HTTPException
+
+    bundle = {"items": [{"answer": "😀\u2028", "issue": ""}]}
+    monkeypatch.setattr(main, "_MAX_ANSWER_BUNDLE_TEXT_CHARS", 3)
+    persisted = {"items": [{"diagrams": [], "answer_no": [], **bundle["items"][0]}]}
+    size = len(json.dumps(persisted, ensure_ascii=False, separators=(",", ":"))
+               .replace("\u2028", "\\u2028").encode())
+    monkeypatch.setattr(main, "_MAX_ANSWER_BUNDLE_JSON_BYTES", size)
+    main._check_answer_bundle_capacity(bundle)
+    monkeypatch.setattr(main, "_MAX_ANSWER_BUNDLE_JSON_BYTES", size - 1)
+    with pytest.raises(HTTPException, match="reader byte capacity"):
+        main._check_answer_bundle_capacity(bundle)
+    monkeypatch.setattr(main, "_MAX_ANSWER_BUNDLE_JSON_BYTES", size)
+    monkeypatch.setattr(main, "_MAX_ANSWER_BUNDLE_TEXT_CHARS", 2)
+    with pytest.raises(HTTPException, match="reader text capacity"):
+        main._check_answer_bundle_capacity(bundle)
+
+
 def test_phone_api_auto_queues_images_and_returns_work_answers_in_the_existing_bundle(client):
     doc = client.post("/v1/documents", json={"title": "local Work test"}).json()["document_id"]
     for index in range(21):
