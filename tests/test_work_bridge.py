@@ -690,12 +690,16 @@ def test_bundle_capacity_matches_decoded_utf16_and_offline_json_budget(monkeypat
     monkeypatch.setattr(main, "_MAX_ANSWER_BUNDLE_JSON_BYTES", size)
     main._check_answer_bundle_capacity(bundle)
     monkeypatch.setattr(main, "_MAX_ANSWER_BUNDLE_JSON_BYTES", size - 1)
-    with pytest.raises(HTTPException, match="reader byte capacity"):
+    with pytest.raises(HTTPException) as byte_error:
         main._check_answer_bundle_capacity(bundle)
+    assert byte_error.value.status_code == 413
+    assert byte_error.value.detail == "the complete answer exceeds the reader byte capacity"
     monkeypatch.setattr(main, "_MAX_ANSWER_BUNDLE_JSON_BYTES", size)
     monkeypatch.setattr(main, "_MAX_ANSWER_BUNDLE_TEXT_CHARS", 2)
-    with pytest.raises(HTTPException, match="reader text capacity"):
+    with pytest.raises(HTTPException) as text_error:
         main._check_answer_bundle_capacity(bundle)
+    assert text_error.value.status_code == 413
+    assert text_error.value.detail == "the complete answer exceeds the reader text capacity"
 
 
 def test_phone_api_auto_queues_images_and_returns_work_answers_in_the_existing_bundle(client):

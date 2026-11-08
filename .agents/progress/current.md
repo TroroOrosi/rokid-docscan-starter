@@ -90,7 +90,7 @@ Runs on: 会場phone AP＋glassesのみ。本人の起動画面表示確認と�
   → 旧サーバ停止 → `nohup bash scripts/phone_serve.sh 127.0.0.1 > data/server-<commit>.log 2>&1 &`。PCからは `ssh -f -N -L 8000:127.0.0.1:8000 ...`（ssh `-i ~/.ssh/f51f_key -p 8022 u0_a26@192.168.0.6`）。
   ベンチの鍵は `ROKID_API_KEY` をスマホの env から読んで渡す（画面に出さない）。
 
-次の実行: phone接続復帰後、PC監査済の非起動読取候補でSEND/services/profile/journalを確認し復旧手順を確定。直近ADB一覧はGL49のみ。Termux停止・SmartBackground有効を観測済、UID停止後復旧・実写精度・会場全経路は未受入。新APK52未導入、旧device CLI再送/import禁止。
+次の実行: 再接続した同一F-51Fの非起動読取で4services定義・submission idle・sessions11件・open/analyzing0件・owner不在のprofile lockを確認。SEND変数とWorkDB実配置を照合し復旧候補を確定。Termux停止・SmartBackground有効、UID停止後復旧・実写精度・会場全経路は未受入。新APK52未導入、旧device CLI再送/import禁止。
 
 1. 済：独立監査2回（`4552ea1`、`4552ea1..e12e155`）の指摘を `61ad481`〜`1134404` で反映。
 2. 済：4a（3節）。起動はスマホで `bash scripts/phone_serve.sh 127.0.0.1`、PCから `ssh -L 8000:127.0.0.1:8000` で投入した。
