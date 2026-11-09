@@ -463,7 +463,7 @@ def _unmounting_popup(page, *, delayed=False, change=""):
         const option=document.createElement('div'); option.setAttribute('role','menuitemradio');
         option.setAttribute('aria-checked','false'); option.textContent=name; menu.append(option);
       }
-      menu.insertAdjacentHTML('beforeend','<div role="menuitem"></div><div role="menuitem" aria-label="Power">Power</div>');
+      menu.insertAdjacentHTML('beforeend','<div role="menuitem"></div><div role="menuitem" aria-label="Power">Power<span class="particle-clip"></span></div>');
       const template=menu.cloneNode(true); menu.remove();
       window.popupClicks=0; window.settingClicks=0; window.retainedControls=[];
       const trigger=document.querySelector('button[aria-haspopup]');
@@ -653,6 +653,91 @@ def test_preparation_and_final_submit_both_allow_normal_unmount_without_extra_se
     assert page.evaluate("[window.popupClicks,window.settingClicks,window.sent]") == [2, 0, 1]
     assert page.evaluate("window.uploaded") == ["originals.zip"] and _guard_state() == "idle"
     assert page.evaluate("document.querySelector('[role=menu]')===null") is True
+
+
+_PARTICLE_ADDITION = """
+  const particles=document.createElement('span');
+  particles.setAttribute('aria-hidden','true'); particles.setAttribute('data-animation-active','false');
+  particles.className='GeneratedParticles-arbitrary';
+  for(let i=0;i<3;i++) {
+    const path=document.createElement('span'), particle=document.createElement('span');
+    path.className='GeneratedPath-arbitrary'; path.style.animationDelay='-0.5s';
+    particle.className='GeneratedParticle-arbitrary'; particle.style.transform='scale(0.7)';
+    path.append(particle); particles.append(path);
+  }
+  owned.querySelector('.particle-clip').append(particles);
+"""
+
+
+def _particle_popup(page, *, before_prepare=False, change=""):
+    _unmounting_popup(page, change=("" if before_prepare else _PARTICLE_ADDITION) + change)
+
+    class DuringClose:
+        def send(self, method, params=None):
+            if (before_prepare and method == "Runtime.callFunctionOn"
+                    and params.get("functionDeclaration") == "function(){return this.prepare();}"):
+                page.evaluate("(() => {const owned=document.getElementById('models');"
+                              + _PARTICLE_ADDITION + "return true;})()")
+            return page.send(method, params)
+
+        def __getattr__(self, name):
+            return getattr(page, name)
+
+    return DuringClose()
+
+
+@pytest.mark.parametrize("before_prepare", [False, True])
+def test_particle_animation_added_during_close_keeps_full_booklet_send(page, before_prepare):
+    proxy = _particle_popup(page, before_prepare=before_prepare)
+    reply = json.loads(_booklet(work.WorkWebClient(), _VenueTab(proxy), lambda: [_payload()]))
+    assert reply["questions"][0]["answer"] == "4"
+    assert page.evaluate("[window.popupClicks,window.settingClicks,window.sent]") == [2, 0, 1]
+    assert page.evaluate("window.uploaded") == ["originals.zip"] and _guard_state() == "idle"
+    assert page.evaluate("document.querySelector('[role=menu]')===null") is True
+
+
+@pytest.mark.parametrize("before_prepare", [False, True])
+@pytest.mark.parametrize("change", [
+    "animated.setAttribute('role','radio'); animated.removeAttribute('role');",
+    "animated.firstChild.setAttribute('aria-label','High'); animated.firstChild.removeAttribute('aria-label');",
+    "animated.setAttribute('aria-hidden','false'); animated.setAttribute('aria-hidden','true');",
+    "animated.firstChild.setAttribute('tabindex','0'); animated.firstChild.removeAttribute('tabindex');",
+    "animated.firstChild.append(document.createTextNode('Medium')); animated.firstChild.lastChild.remove();",
+    "animated.firstChild.append(document.createElement('span')); animated.firstChild.lastChild.remove();",
+    "animated.firstChild.replaceWith(animated.firstChild.cloneNode(true));",
+    "animated.remove();",
+])
+def test_added_animation_cannot_hide_later_semantic_or_structure_changes(page, before_prepare, change):
+    proxy = _particle_popup(page, before_prepare=before_prepare,
+                            change="const animated=owned.querySelector('[data-animation-active]');" + change)
+    reached = []
+
+    def before_submit():
+        reached.append(True)
+        raise AssertionError("changed animation subtree reached the send journal")
+
+    with pytest.raises(chatgpt_web.ChatGptWebModelMismatch):
+        work.WorkWebClient()._send_and_read(proxy,
+            'Local fixture\nTransfer receipt:\n{"batch_id":"animation-boundary"}', composer=None,
+            expect=("questions",), before_submit=before_submit,
+            on_chat_url=lambda value: None, on_model=lambda value: None)
+    assert reached == [] and page.evaluate("window.sent") == 0
+    assert _guard_state() == "idle"
+
+
+@pytest.mark.parametrize("change", [
+    "particles.removeAttribute('aria-hidden');",
+    "particles.firstChild.setAttribute('aria-hidden','false');",
+    "particles.firstChild.setAttribute('role','radio');",
+    "particles.firstChild.setAttribute('title','High');",
+    "particles.firstChild.textContent='Medium';",
+    "particles.firstChild.append(document.createElement('button'));",
+])
+def test_only_hidden_textless_span_additions_qualify_as_decoration(page, change):
+    _unmounting_popup(page, change=_PARTICLE_ADDITION + change)
+    with pytest.raises(chatgpt_web.ChatGptWebModelMismatch):
+        work.verify_work_model(page)
+    assert page.evaluate("window.sent") == 0 and _guard_state() == "idle"
 
 
 @pytest.mark.parametrize("change", [

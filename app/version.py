@@ -255,7 +255,8 @@ from __future__ import annotations
 # 0.66.4: share capture context with Work and supplement coarse page-change evidence.
 # 0.67.0: extended graph/construction slides, lossless plain answers and scene-bound metering.
 # 0.68.0: preserve measured capture timing/exposure and large original/answer payloads.
-APP_VERSION = "0.68.0"
+# 0.68.1: accept hidden Work close animations while retaining selection-change guards.
+APP_VERSION = "0.68.1"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.

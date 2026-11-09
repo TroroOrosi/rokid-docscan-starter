@@ -175,6 +175,17 @@ _CONTROLS_JS = r"""(function inspect(action, requested, requestedLevel, allowUnl
     const originalNodes = new Set();
     const walker = document.createTreeWalker(menu, NodeFilter.SHOW_ALL);
     do { originalNodes.add(walker.currentNode); } while (walker.nextNode());
+    const selectionAttributes = new Set(['role', 'aria-label', 'aria-checked', 'aria-selected', 'aria-pressed',
+      'aria-valuenow', 'aria-valuemin', 'aria-valuemax', 'aria-valuetext']);
+    const decorativeAttributes = new Set(['class', 'style', 'data-animation-active']);
+    const addedDecorationNodes = new Set();
+    const decorationNodes = root => {
+      if (root.nodeType !== Node.ELEMENT_NODE || root.getAttribute('aria-hidden') !== 'true') return null;
+      const nodes = [root, ...root.querySelectorAll('*')];
+      return nodes.every(node => node.tagName === 'SPAN' && node.childNodes.length === node.children.length &&
+        [...node.attributes].every(attribute => decorativeAttributes.has(attribute.name) ||
+          attribute.name === 'aria-hidden' && attribute.value === 'true')) ? nodes : null;
+    };
     let detached = false;
     const deadline = Date.now() + 5000;
     let observer, cleanupTimer, stopped = false;
@@ -186,15 +197,26 @@ _CONTROLS_JS = r"""(function inspect(action, requested, requestedLevel, allowUnl
       for (const record of records) {
         if (record.type === 'childList' && [...record.removedNodes].some(e => e === menu || e.contains(menu))) {
           detached = true;
-        } else if (!detached && originalNodes.has(record.target)) {
+        } else if (!detached && (originalNodes.has(record.target) || addedDecorationNodes.has(record.target))) {
+          if (record.type === 'attributes' && (addedDecorationNodes.has(record.target)
+              ? decorativeAttributes.has(record.attributeName) : !selectionAttributes.has(record.attributeName))) continue;
+          // Work mounts a hidden, textless particle animation while its popup closes.
+          // Keep every added node observed so later semantic changes cannot hide in it.
+          if (record.type === 'childList' && originalNodes.has(record.target) &&
+              !record.removedNodes.length && record.addedNodes.length) {
+            const decorations = [...record.addedNodes].map(decorationNodes);
+            if (decorations.every(Boolean)) {
+              decorations.flat().forEach(node => addedDecorationNodes.add(node));
+              continue;
+            }
+          }
           owner.changed = true;
         }
       }
     };
     observer = new MutationObserver(observeChanges);
-    observer.observe(menu, {subtree:true, childList:true, characterData:true, attributes:true,
-      attributeFilter:['role', 'aria-label', 'aria-checked', 'aria-selected', 'aria-pressed',
-        'aria-valuenow', 'aria-valuemin', 'aria-valuemax', 'aria-valuetext']});
+    // Attribute records also cover new decoration before its first observer callback.
+    observer.observe(menu, {subtree:true, childList:true, characterData:true, attributes:true});
     // Observe ancestor removal in the same ordered stream; don't watch unrelated subtrees.
     for (let parent = menu.parentNode; parent; parent = parent.parentNode) observer.observe(parent, {childList:true});
     cleanupTimer = setTimeout(disconnect, 5000);
