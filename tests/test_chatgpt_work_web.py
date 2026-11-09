@@ -58,24 +58,42 @@ def browser_page(tmp_path_factory):
     directory = tmp_path_factory.mktemp("work-web-dom")
     fixture = directory / "fixture.html"
     fixture.write_text('<meta charset="utf-8"><body></body>', encoding="utf-8")
-    process = subprocess.Popen([
-        executable, "--headless", "--remote-debugging-port=0", "--disable-background-networking",
-        "--disable-component-update", "--disable-sync", "--no-first-run", "--no-default-browser-check",
-        "--host-resolver-rules=MAP * ~NOTFOUND", "--user-data-dir=" + str(directory / "profile"),
-        fixture.as_uri(),
-    ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    stderr_path = directory / "browser-stderr.log"
+    with stderr_path.open("wb") as stderr:
+        process = subprocess.Popen([
+            executable, "--headless", "--remote-debugging-port=0", "--disable-background-networking",
+            "--disable-component-update", "--disable-sync", "--no-first-run", "--no-default-browser-check",
+            "--host-resolver-rules=MAP * ~NOTFOUND", "--user-data-dir=" + str(directory / "profile"),
+            fixture.as_uri(),
+        ], stdout=subprocess.DEVNULL, stderr=stderr)
     browser = None
     try:
-        port_file = directory / "profile" / "DevToolsActivePort"
-        deadline = time.monotonic() + 20
-        port = _wait_owned_browser_port(port_file, deadline)
-        browser = connect_over_cdp(f"http://127.0.0.1:{port}")
-        page = browser.contexts[0].pages[0]
-        while time.monotonic() < deadline:
-            if page.url == fixture.as_uri() and page.evaluate("document.readyState") == "complete":
-                break
-            time.sleep(0.05)
-        assert page.url == fixture.as_uri() and page.evaluate("document.readyState") == "complete"
+        try:
+            port_file = directory / "profile" / "DevToolsActivePort"
+            deadline = time.monotonic() + 20
+            port = _wait_owned_browser_port(port_file, deadline)
+            browser = connect_over_cdp(f"http://127.0.0.1:{port}")
+            page = browser.contexts[0].pages[0]
+            while time.monotonic() < deadline:
+                if page.url == fixture.as_uri() and page.evaluate("document.readyState") == "complete":
+                    break
+                time.sleep(0.05)
+            assert page.url == fixture.as_uri() and page.evaluate("document.readyState") == "complete"
+        except Exception as error:
+            exit_code = process.poll()
+            try:
+                with stderr_path.open("rb") as stderr:
+                    stderr.seek(0, 2)
+                    stderr.seek(max(0, stderr.tell() - 8192))
+                    stderr_tail = stderr.read(8192).decode("utf-8", errors="replace")
+            except OSError as log_error:
+                stderr_tail = f"<unavailable: {type(log_error).__name__}>"
+            raise AssertionError(
+                "local Chromium fixture startup failed\n"
+                f"exit_code={exit_code!r}\n"
+                f"stderr_log={stderr_path}\n"
+                f"stderr_tail={stderr_tail}"
+            ) from error
         yield page
     finally:
         _stop_owned_browser(browser, process)
@@ -131,6 +149,116 @@ def test_owned_browser_port_waits_for_complete_readable_file(monkeypatch):
     assert _wait_owned_browser_port(path, time.monotonic() + 5) == 12345
     with pytest.raises(AssertionError, match="readable debugging port"):
         _wait_owned_browser_port(path, 0)
+
+
+@pytest.mark.parametrize("exit_code", [None, 17])
+def test_owned_browser_startup_failure_reports_stderr_and_preserves_cause(
+    monkeypatch, tmp_path, exit_code,
+):
+    from unittest.mock import Mock
+
+    executable = tmp_path / "chromium"
+    executable.touch()
+    monkeypatch.setattr(shutil, "which", lambda _: str(executable))
+    factory = Mock()
+    factory.mktemp.return_value = tmp_path
+    process = Mock()
+    process.poll.return_value = exit_code
+    stderr_tail = b"x" * 8180 + b"\xffstartup-end"
+    stderr_bytes = b"discarded-prefix" + stderr_tail
+
+    def start_browser(*args, stderr, **kwargs):
+        if stderr != subprocess.DEVNULL:
+            stderr.write(stderr_bytes)
+            stderr.flush()
+        return process
+
+    launch = Mock(side_effect=start_browser)
+    monkeypatch.setattr(subprocess, "Popen", launch)
+    original = AssertionError("debugging port unavailable")
+    wait_port = Mock(side_effect=original)
+    monkeypatch.setattr(f"{__name__}._wait_owned_browser_port", wait_port)
+    stop = Mock()
+    monkeypatch.setattr(f"{__name__}._stop_owned_browser", stop)
+
+    with pytest.raises(AssertionError, match="fixture startup failed") as caught:
+        next(browser_page.__wrapped__(factory))
+
+    log_path = tmp_path / "browser-stderr.log"
+    assert caught.value.__cause__ is original
+    assert f"exit_code={exit_code!r}" in str(caught.value)
+    assert f"stderr_log={log_path}" in str(caught.value)
+    assert str(caught.value).endswith(stderr_tail.decode("utf-8", errors="replace"))
+    assert "discarded-prefix" not in str(caught.value)
+    assert log_path.read_bytes() == stderr_bytes
+    launch.assert_called_once()
+    assert launch.call_args.kwargs["stderr"].closed
+    wait_port.assert_called_once()
+    stop.assert_called_once_with(None, process)
+
+
+def test_owned_browser_startup_failure_survives_unreadable_stderr(monkeypatch, tmp_path):
+    from unittest.mock import Mock
+
+    executable = tmp_path / "chromium"
+    executable.touch()
+    monkeypatch.setattr(shutil, "which", lambda _: str(executable))
+    factory = Mock()
+    factory.mktemp.return_value = tmp_path
+    process = Mock()
+    process.poll.return_value = None
+    monkeypatch.setattr(subprocess, "Popen", Mock(return_value=process))
+    monkeypatch.setattr(f"{__name__}._wait_owned_browser_port", Mock(return_value=12345))
+    original = RuntimeError("CDP connection failed")
+    monkeypatch.setattr(f"{__name__}.connect_over_cdp", Mock(side_effect=original))
+    real_open = Path.open
+
+    def open_log(path, mode="r", *args, **kwargs):
+        if path.name == "browser-stderr.log" and mode == "rb":
+            raise PermissionError("log is unavailable")
+        return real_open(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", open_log)
+    stop = Mock()
+    monkeypatch.setattr(f"{__name__}._stop_owned_browser", stop)
+
+    with pytest.raises(AssertionError, match="fixture startup failed") as caught:
+        next(browser_page.__wrapped__(factory))
+
+    assert caught.value.__cause__ is original
+    assert "exit_code=None" in str(caught.value)
+    assert "stderr_tail=<unavailable: PermissionError>" in str(caught.value)
+    stop.assert_called_once_with(None, process)
+
+
+def test_owned_browser_fixture_preserves_test_body_error(monkeypatch, tmp_path):
+    from unittest.mock import Mock
+
+    executable = tmp_path / "chromium"
+    executable.touch()
+    monkeypatch.setattr(shutil, "which", lambda _: str(executable))
+    factory = Mock()
+    factory.mktemp.return_value = tmp_path
+    process = Mock()
+    monkeypatch.setattr(subprocess, "Popen", Mock(return_value=process))
+    monkeypatch.setattr(f"{__name__}._wait_owned_browser_port", Mock(return_value=12345))
+    page = Mock()
+    page.url = (tmp_path / "fixture.html").as_uri()
+    page.evaluate.return_value = "complete"
+    browser = Mock()
+    browser.contexts = [Mock(pages=[page])]
+    monkeypatch.setattr(f"{__name__}.connect_over_cdp", Mock(return_value=browser))
+    stop = Mock()
+    monkeypatch.setattr(f"{__name__}._stop_owned_browser", stop)
+
+    fixture = browser_page.__wrapped__(factory)
+    assert next(fixture) is page
+    original = RuntimeError("test body failed")
+    with pytest.raises(RuntimeError) as caught:
+        fixture.throw(original)
+    assert caught.value is original
+    assert caught.value.__cause__ is None
+    stop.assert_called_once_with(browser, process)
 
 
 @pytest.fixture

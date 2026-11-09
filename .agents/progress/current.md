@@ -1,7 +1,7 @@
 # 再開入口：次のセッションはここだけ読めば始められる
 
-最終更新: 2026-11-09 再開中。Sol/Extra Highの既存返答を正式回収し14/14一致。Sol/Highは送信前の添付名照合で停止、PC修正・別監査済み。JPEGはf5d3e01でpush・CI success、phone未導入。詳細phone-work-connected-root-20261030.jsonのlatest_resume_20261109.current_snapshot_1127UTC。
-Runs on: 会場phone AP＋glasses。phonehost監視ON/常に許可確認、API/Work稼働、GL52 chooser。原JPEG保持はPC実装・別監査済み、40枚相当の再確認35.578→1.626秒(PC)、phone未導入/OFF。実紙・原音・全再起動・長時間受入と東大モデル適性は未測定。
+最終更新: 2026-11-09 再開中。物理基礎全14頁のSol/Extra Highは14/14一致。Sol/Highの送信前添付照合修正2f37457はpush・CI success。CI起動失敗の診断追加は233 passed・独立必須指摘0。詳細phone-work-connected-root-20261030.jsonのlatest_resume_20261109.current_snapshot_1127UTC。
+Runs on: 会場phone AP＋glasses。スマホ開発接続は再接続依頼中、HTTP APIはstatus=ok。JPEG保持f5d3e01はPC実装・別監査済み/phone未導入・OFF。Sol/High・Terra・東大比較、実紙・原音・全再起動・長時間受入は未了。
 
 ## 0. 読み方（前提と資料に引きずられないため）
 
