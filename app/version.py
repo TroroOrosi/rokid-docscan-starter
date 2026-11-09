@@ -258,7 +258,8 @@ from __future__ import annotations
 # 0.68.1: accept hidden Work close animations while retaining selection-change guards.
 # 0.69.0: preserve native JPEG originals and bind opt-in Work delivery to upright pixels.
 # 0.69.1: recognize numbered Work attachment display names without relaxing upload identity.
-APP_VERSION = "0.69.1"
+# 0.69.2: repair Work receipt types and recover sealed replies with singleton metadata.
+APP_VERSION = "0.69.2"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.

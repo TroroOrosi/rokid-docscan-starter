@@ -732,3 +732,66 @@ def test_one_question_that_fills_two_answer_numbers_is_graded_per_number():
     assert run_exam_deck.grade(
         [{"question_label": "問2", "answer_no": [110, 111], "answer": "⑤", "status": "ready"}],
         {110: "5", 111: "6"}) == [(111, "6", "⑤")]
+
+
+@pytest.mark.parametrize("answer", [
+    "110：⑤、111：⑥",
+    "110: ⑤, 111: ⑥",
+    "110：⑤\n111：⑥",
+    "111：⑥、110：⑤",
+])
+def test_explicit_number_labels_map_combined_answers_to_their_numbers(answer):
+    items = [{"answer_no": [110, 111], "answer": answer, "status": "ready"}]
+
+    assert run_exam_deck.grade(items, {110: "5", 111: "6"}) == []
+
+
+@pytest.mark.parametrize("answer", [
+    "110：⑤、112：⑥",
+    "110：⑤、110：⑥",
+    "110：⑤",
+])
+def test_incomplete_or_conflicting_answer_labels_do_not_pass_grading(answer):
+    items = [{"answer_no": [110, 111], "answer": answer, "status": "ready"}]
+
+    assert run_exam_deck.grade(items, {110: "5", 111: "6"})
+
+
+def test_one_answer_keeps_its_ratio_when_it_starts_with_the_answer_number():
+    item = {"answer_no": [1], "answer": "1:2", "status": "ready"}
+
+    assert run_exam_deck.grade([item], {1: "1:2"}) == []
+
+
+@pytest.mark.parametrize("numbers", [[110, 111], [1, 3]])
+def test_combined_unlabeled_ratios_keep_their_positional_correspondence(numbers):
+    item = {"answer_no": numbers, "answer": "1:2,3:4", "status": "ready"}
+
+    assert run_exam_deck.grade([item], dict(zip(numbers, ["1:2", "3:4"]))) == []
+
+
+def test_the_bench_matches_explicitly_numbered_combined_answers(
+        server_app, tmp_path, monkeypatch):
+    from app.solvers.llm_adapter import answer_sheet_result
+
+    pytest.importorskip("pypdfium2")
+    server_main, client = server_app
+    monkeypatch.setenv("ROKID_SOLVER", "test-provider")
+    monkeypatch.setattr(run_exam_deck, "remote_client", lambda server, key: client)
+    monkeypatch.setattr(run_exam_deck, "POLL_S", 0)
+    item = {"group": "第2問", "label": "問2", "answer_no": [110, 111], "pages": [1],
+            "status": "ready", "answer": "110：⑤、111：⑥"}
+    monkeypatch.setattr(server_main, "_answer_all", lambda question: [
+        (item, answer_sheet_result(item, subject=None, extras={}))])
+    pdf = tmp_path / "butsuri.pdf"
+    _pdf(pdf, 4)
+    key_path = tmp_path / "key.json"
+    key_path.write_text(json.dumps({"110": "5", "111": "6"}), encoding="utf-8")
+    out = tmp_path / "reports" / "butsuri-server.json"
+
+    code = run_exam_deck.main(
+        ["--pdf", str(pdf), "--server", "http://phone.example:8000",
+         "--answer-key", str(key_path), "--out", str(out)])
+
+    assert code == 0
+    assert json.loads(out.read_text(encoding="utf-8"))["wrong"] == []

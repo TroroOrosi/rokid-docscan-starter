@@ -1719,6 +1719,63 @@ def _guard_state():
         return guard.status()["state"]
 
 
+def test_work_final_receipt_preserves_source_evidence_field_types(tmp_path, monkeypatch):
+    from app.browser_guard import BrowserGuard
+
+    client = work.WorkWebClient()
+    sent = []
+
+    def capture(context, text, images, **kwargs):
+        sent.append(text)
+        return '{"questions":[]}'
+
+    monkeypatch.setattr(client, '_ask_locked', capture)
+    with BrowserGuard(tmp_path) as guard:
+        client._booklet_locked(None, 'manifest_sha256=' + 'a' * 64, guard=guard,
+            files=[_payload()], chat_key='typed-work-evidence',
+            expect=('questions', 'manifest_sha256', 'extraction', 'readability'))
+    receipt = json.loads(sent[0].rsplit('\nTransfer receipt:\n', 1)[1])
+    assert type(receipt['manifest_sha256']) is str
+    assert receipt['extraction'] == {'status': 'ok', 'files': []}
+    assert receipt['questions'] == receipt['readability'] == []
+
+
+def test_work_json_restores_singleton_source_fields_without_changing_answers(monkeypatch):
+    envelope = {'batch_id': 'batch', 'manifest_sha256': ['a' * 64],
+                'extraction': [{'status': 'ok', 'files': [{'source_id': 'p1'}]}],
+                'questions': [{'answer': '4'}], 'readability': [{'source_id': 'p1'}]}
+    raw = json.dumps(envelope)
+    client = work.WorkWebClient()
+    monkeypatch.setattr(client, 'complete', lambda **kwargs: raw)
+    result = client.complete_json(expect=('questions', 'manifest_sha256', 'extraction', 'readability'))
+    assert result['manifest_sha256'] == envelope['manifest_sha256'][0]
+    assert result['extraction'] == envelope['extraction'][0]
+    assert {key: result[key] for key in ('batch_id', 'questions', 'readability')} == {
+        key: envelope[key] for key in ('batch_id', 'questions', 'readability')}
+    assert json.dumps(envelope) == raw
+
+
+@pytest.mark.parametrize('field, value', [
+    ('manifest_sha256', []), ('manifest_sha256', ['a' * 64, 'a' * 64]),
+    ('manifest_sha256', [['a' * 64]]), ('manifest_sha256', [None]),
+    ('extraction', []), ('extraction', [{'status': 'ok'}, {'status': 'ok'}]),
+    ('extraction', [[{'status': 'ok'}]]), ('extraction', ['{"status":"ok"}']),
+])
+def test_work_json_preserves_ambiguous_or_wrongly_typed_evidence(field, value):
+    envelope = {'manifest_sha256': 'a' * 64, 'extraction': {'status': 'ok', 'files': []},
+                'questions': [], 'readability': []}
+    envelope[field] = value
+    assert work.WorkWebClient.extract_json(json.dumps(envelope)) == envelope
+
+
+def test_work_json_does_not_normalize_diagnostic_or_incomplete_envelopes():
+    for envelope in (
+        {'inspection_id': 'b' * 64, 'manifest_sha256': ['a' * 64], 'inspection': {}},
+        {'manifest_sha256': ['a' * 64], 'extraction': [{'status': 'ok'}], 'questions': []},
+    ):
+        assert work.WorkWebClient.extract_json(json.dumps(envelope)) == envelope
+
+
 def test_work_send_uses_durable_batch_then_restart_reads_it_without_upload_or_send(page, tmp_path):
     _upload_composer(page)
     tab = _VenueTab(page)
@@ -1733,6 +1790,48 @@ def test_work_send_uses_durable_batch_then_restart_reads_it_without_upload_or_se
     assert restarted.conversation_id == "12345678-1234-1234-1234-123456789abc"
     assert page.evaluate("window.sent") == 1
     assert json.loads((tmp_path / "browser-state" / "chats.json").read_text())["chats"]["work:local-fixture"]["transfer"]["pending"] is None
+
+
+def test_work_completed_singleton_reply_recovers_through_normal_entry_without_resend(page, monkeypatch):
+    from app.solvers import cdp
+
+    _upload_composer(page)
+    page.evaluate("""const finish = window.finish;
+      window.finish = function() {
+        finish();
+        const final = document.querySelectorAll('[data-local-conversation-final-assistant=true] [data-markdown-text-style=assistant-message]');
+        const node = final[final.length - 1];
+        const result = JSON.parse(node.textContent);
+        result.manifest_sha256 = ['a'.repeat(64)];
+        result.extraction = [{status:'ok', files:[]}];
+        result.readability = [];
+        node.textContent = JSON.stringify(result);
+      }; true""")
+    tab = _VenueTab(page)
+
+    class LocalBrowser:
+        contexts = [_Context(tab)]
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(cdp, 'connect_over_cdp', lambda endpoint: LocalBrowser())
+    monkeypatch.setenv('ROKID_CHATGPT_SEND_ENABLED', '1')
+    options = dict(system='Answer', prompt='manifest_sha256=' + 'a' * 64,
+                   chat_key='work:legacy-singleton', booklet=True,
+                   expect=('questions', 'manifest_sha256', 'extraction', 'readability'))
+    first = work.WorkWebClient().complete_json(files=lambda: [_payload()], **options)
+    final_text = page.locator('[data-local-conversation-final-assistant=true] [data-markdown-text-style=assistant-message]').inner_text()
+    assert first['manifest_sha256'] == 'a' * 64 and type(first['extraction']) is dict
+    assert type(json.loads(final_text)['manifest_sha256']) is list
+
+    def forbidden_files():
+        raise AssertionError('completed reply reopened its originals')
+
+    restarted = work.WorkWebClient()
+    assert restarted.complete_json(files=forbidden_files, **options) == first
+    assert page.evaluate('window.sent') == 1 and _guard_state() == 'idle'
+    assert page.locator('[data-local-conversation-final-assistant=true] [data-markdown-text-style=assistant-message]').inner_text() == final_text
 
 
 def test_late_work_final_clears_only_own_uncertain_send_on_restart(page):

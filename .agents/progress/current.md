@@ -1,7 +1,7 @@
 # 再開入口：次のセッションはここだけ読めば始められる
 
-最終更新: 2026-11-09 再開中。物理基礎全14頁のSol/Extra Highは14/14一致、High送信前の添付修正2f37457はCI success。追加CI診断はPython280 passed/Android386件、独立必須指摘0。元CI停滞原因は未特定。詳細phone-work-connected-root-20261030.jsonのlatest_resume_20261109.current_snapshot_1127UTC。
-Runs on: 会場phone AP＋glasses。スマホ開発接続は再接続依頼中、HTTP APIはstatus=ok。JPEG保持f5d3e01はPC実装・別監査済み/phone未導入・OFF。Sol/High・Terra・東大比較、実紙・原音・全再起動・長時間受入は未了。
+最終更新: 2026-11-10 物理基礎3条件14/14。東大数学はSol Extra High/Highが13/13、Terra Highが12/13。全返答を原画像20頁と厳密再検証。Highを採用候補としJPEG試験準備中。詳細phone-work-connected-root-20261030.jsonのsnapshot_20261110_0010JST。
+Runs on: 会場phone AP＋glasses。SmartBackground主設定OFF後23時/0時境界でTermux停止なし。PC全体2352 passed/4 skipped、実紙・原音・全再起動・長時間受入は継続中。
 
 ## 0. 読み方（前提と資料に引きずられないため）
 
@@ -90,7 +90,7 @@ Runs on: 会場phone AP＋glasses。スマホ開発接続は再接続依頼中�
   → 旧サーバ停止 → `nohup bash scripts/phone_serve.sh 127.0.0.1 > data/server-<commit>.log 2>&1 &`。PCからは `ssh -f -N -L 8000:127.0.0.1:8000 ...`（ssh `-i ~/.ssh/f51f_key -p 8022 u0_a26@192.168.0.6`）。
   ベンチの鍵は `ROKID_API_KEY` をスマホの env から読んで渡す（画面に出さない）。
 
-次の実行: helper/packet更新→同一14頁/東大20頁の残条件比較。phone開発接続復帰待ち（API health=ok）、SmartBackground毎時停止の原因候補を調査。JPEGの導入・原画素検証と会場全経路の受入は未了。
+次の実行: JPEG原画素のphone/Work検査→受領JSON修正のphone更新→Sol High設定の実機確認。原返答/比較条件を保持し、実紙・原音・再起動を含む会場受入まで進める。
 
 1. 済：独立監査2回（`4552ea1`、`4552ea1..e12e155`）の指摘を `61ad481`〜`1134404` で反映。
 2. 済：4a（3節）。起動はスマホで `bash scripts/phone_serve.sh 127.0.0.1`、PCから `ssh -L 8000:127.0.0.1:8000` で投入した。

@@ -1239,7 +1239,7 @@ class ChatGptWebClient:
             if stage != "single":
                 batch.update(stage=stage, question_ids=question_ids or [])
             if final:
-                receipt = {"batch_id": batch_id, **{key: [] for key in expected}}
+                receipt = self._final_receipt(batch_id, expected)
                 instruction = ("Now answer every question from the complete booklet in one reply. " if stage == "single"
                                else "Complete only the requested analysis stage in one reply; retain the earlier evidence and answers. ")
                 message = (text + "\nAll previous received batches and these files belong to ONE paper in this chat. "
@@ -1258,6 +1258,10 @@ class ChatGptWebClient:
             if final:
                 return reply
         raise ChatGptWebUncertain("a booklet has receipts but no final answer; nothing sent again")
+
+    @staticmethod
+    def _final_receipt(batch_id, expected):
+        return {"batch_id": batch_id, **{key: [] for key in expected}}
 
     @staticmethod
     def _valid_batch(reply, batch) -> bool:

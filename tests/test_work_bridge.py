@@ -120,6 +120,49 @@ def test_browser_original_review_can_return_answers_without_claiming_calibration
             result=answer(pages=[1, 2]))
 
 
+@pytest.mark.parametrize('fault', [None, 'manifest', 'hash', 'dimension', 'order', 'two_wrappers', 'nested_wrapper'])
+def test_provider_singleton_compatibility_retains_strict_original_validation(tmp_path, fault):
+    from app.solvers.chatgpt_work_web import WorkWebClient
+    from app.work_bridge import WorkBrowserResultRejected, WorkConflict, WorkStore
+
+    store = WorkStore(tmp_path)
+    job = queue(store, 2)
+    acquired = [receipt(store, job, source['source_id'], quality=False) for source in job['sources']]
+    extraction, reviews = browser_observations(job)
+    envelope = {'manifest_sha256': [job['manifest_sha256']], 'extraction': [extraction],
+                'questions': answer(pages=[1, 2])['questions'], 'readability': reviews}
+    if fault == 'manifest':
+        envelope['manifest_sha256'] = ['0' * 64]
+    elif fault == 'hash':
+        extraction['files'][0]['sha256'] = '0' * 64
+    elif fault == 'dimension':
+        extraction['files'][0]['width'] += 1
+    elif fault == 'order':
+        extraction['files'].reverse()
+    elif fault == 'two_wrappers':
+        envelope['extraction'].append(extraction)
+    elif fault == 'nested_wrapper':
+        envelope['extraction'] = [[extraction]]
+
+    def submit(value):
+        return store.submit_browser_result(job['job_id'], manifest_sha256=value['manifest_sha256'],
+            generation=job['generation'], conversation_id='browser-chat', source_receipts=acquired,
+            result={'questions': value['questions']}, extraction=value['extraction'], readability=value['readability'])
+
+    with pytest.raises(WorkConflict):
+        submit(envelope)
+    raw = json.dumps(envelope)
+    decoded = WorkWebClient.extract_json(raw)
+    if fault is None:
+        assert submit(decoded)['status'] == 'completed'
+        assert store.result(job['job_id']) == answer(pages=[1, 2])
+    else:
+        with pytest.raises((WorkConflict, WorkBrowserResultRejected)):
+            submit(decoded)
+        assert store.result(job['job_id']) is None
+    assert json.dumps(envelope) == raw
+
+
 @pytest.mark.parametrize("change", ["hash", "dimension", "float_dimension", "missing", "extra", "order",
     "review_missing", "review_order", "viewer_false", "status", "calibration_claim", "reason"])
 def test_browser_evidence_is_bound_to_every_original_and_cannot_claim_calibrated_quality(tmp_path, change):
@@ -648,6 +691,16 @@ def test_external_post_cannot_select_uncalibrated_browser_admission(client):
     assert reply.status_code in (409, 422), reply.text
     from app.work_bridge import configured_work_store
     assert configured_work_store().result(job["job_id"]) is None
+
+
+def test_external_post_rejects_singleton_manifest_even_after_provider_compatibility(client):
+    _, _, job = api_session(client)
+    reply = client.post(f"/v1/work/jobs/{job['job_id']}/result", json={
+        'manifest_sha256': [job['manifest_sha256']], 'generation': job['generation'],
+        'conversation_id': 'external-chat', 'source_receipts': [], 'result': answer()})
+    assert reply.status_code == 422
+    from app.work_bridge import configured_work_store
+    assert configured_work_store().result(job['job_id']) is None
 
 
 def test_phone_api_returns_non_answering_stop_in_existing_answer_bundle(client):

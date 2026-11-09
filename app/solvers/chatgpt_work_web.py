@@ -829,7 +829,28 @@ class WorkWebClient(chat.ChatGptWebClient):
             self._requested.reset(token)
 
     def complete_json(self, *, requested_settings=None, **kwargs):
-        return chat.extract_json(self.complete(requested_settings=requested_settings, **kwargs))
+        return self.extract_json(self.complete(requested_settings=requested_settings, **kwargs))
+
+    @staticmethod
+    def extract_json(reply):
+        envelope = chat.extract_json(reply)
+        if isinstance(envelope, dict) and all(key in envelope for key in (
+                "questions", "manifest_sha256", "extraction", "readability")):
+            # Older final receipt examples incorrectly showed these as arrays.
+            # Restore only a single typed wrapper, then retain strict source validation.
+            for key, expected_type in (("manifest_sha256", str), ("extraction", dict)):
+                value = envelope[key]
+                if type(value) is list and len(value) == 1 and type(value[0]) is expected_type:
+                    envelope[key] = value[0]
+        return envelope
+
+    @staticmethod
+    def _final_receipt(batch_id, expected):
+        receipt = chat.ChatGptWebClient._final_receipt(batch_id, expected)
+        for key, value in (("manifest_sha256", ""), ("extraction", {"status": "ok", "files": []})):
+            if key in receipt:
+                receipt[key] = value
+        return receipt
 
     def complete_inspection(self, *, inspection_id, manifest_sha256, prompt, files, before_submit=None, requested_settings=None):
         """A distinct diagnostic purpose on the SAME writer and send journal.

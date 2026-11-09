@@ -464,12 +464,21 @@ _ANSWER_PARTS = re.compile(r"[、,，・/／\s]+")
 def answers_by_number(item: dict) -> dict[int, str]:
     """The item's answer against each 解答番号 it fills.
 
-    When the answer names one part per number, they pair in order; otherwise
-    the whole answer stands against every number, which is what a single-number
-    item wants and what makes a mismatched count visible instead of silent.
+    A complete set of number-labeled circled choices determines correspondence.
+    Otherwise one part per number pairs in order, and a mismatched count leaves
+    the whole answer against every number for the comparison to expose.
     """
     numbers = [n for n in item.get("answer_no", []) if isinstance(n, int)]
-    parts = [part for part in _ANSWER_PARTS.split(str(item["answer"]).strip()) if part]
+    answer = str(item["answer"]).strip()
+    if len(numbers) > 1:
+        labeled_parts = re.split(r"[、,，・/／\s]+(?=\d+\s*[:：])", answer)
+        labeled = [re.fullmatch(r"(\d+)\s*[:：]\s*([①-⑳])", part)
+                   for part in labeled_parts]
+        if len(labeled) == len(numbers) and all(labeled):
+            by_label = {int(match[1]): match[2].strip() for match in labeled}
+            if set(by_label) == set(numbers):
+                return by_label
+    parts = [part for part in _ANSWER_PARTS.split(answer) if part]
     if len(numbers) > 1 and len(parts) == len(numbers):
         return dict(zip(numbers, parts))
     return {number: item["answer"] for number in numbers}
