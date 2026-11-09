@@ -35,7 +35,7 @@ from .analyzers import get_analyzer
 from .answer_text import to_display_answer
 from .answer_diagrams import diagram_schema_version
 from .config import IMAGE_DIR, ensure_dirs
-from .capture_provenance import parse_capture_metadata, parse_capture_provenance
+from .capture_provenance import JPEG_PIXEL_FIELDS, jpeg_pixel_evidence, parse_capture_metadata, parse_capture_provenance
 from .capture_video_upload import receive_capture_video
 from .capture_inspection import read_inspection, register_native, register_video, registration_summary, stop_worker, wake_worker
 from .explainer import ExplainRequest, ExplainResult
@@ -183,7 +183,7 @@ def _work_current_job(job_id: str) -> tuple[WorkStore, dict]:
         if device_id != job["device_id"] or generation != job["generation"]:
             raise WorkConflict("the glasses generation changed")
         images = [source for source in job["sources"] if "page_number" in source]
-        current = _document_source_pages(conn, session["document_id"], job["session_id"])
+        current = _document_source_pages(conn, session["document_id"], job["session_id"], work_originals=True)
         if ([(item["page_number"], item["sha256"], item.get("capture_provenance"),
               item.get("canonical_image_sha256")) for item in images]
                 != [(item["page_number"], item["image_sha256"], item.get("capture_provenance"),
@@ -249,12 +249,14 @@ def _expired_work_job_guard(job_id: str):
                 if not expired:
                     if not session["document_id"]:
                         raise WorkConflict("the Work input identity is unavailable")
-                    pages = _document_source_pages(conn, session["document_id"], job["session_id"])
+                    pages = _document_source_pages(conn, session["document_id"], job["session_id"], work_originals=False)
                     if not pages or any(not re.fullmatch(r"[a-f0-9]{64}", page["image_sha256"]) for page in pages):
                         raise WorkConflict("the Work input identity is unavailable")
                     images = [source for source in job["sources"] if "page_number" in source]
-                    expired = ([(page["page_number"], page["image_sha256"]) for page in pages]
-                               != [(source["page_number"], source["sha256"]) for source in images])
+                    expired = ([(page["page_number"], page["image_sha256"], page.get("capture_provenance"))
+                                for page in pages]
+                               != [(source["page_number"], source.get("canonical_image_sha256", source["sha256"]),
+                                    source.get("capture_provenance")) for source in images])
                     recordings = [source for source in job["sources"] if "page_number" not in source]
                     if recordings:
                         current_audio = file_sha256(session["audio_path"])
@@ -853,6 +855,9 @@ def _native_capture_retry(conn, document_id: int, page_index: int, source: dict,
         try:
             if existing is None or file_sha256(existing["image_path"]) != metadata["canonical_image_sha256"]:
                 raise ValueError("canonical image differs")
+            original = Path(existing["image_path"]).with_suffix(".jpg")
+            if original.exists() and file_sha256(original) != source["jpeg_sha256"]:
+                raise ValueError("native original differs")
         except (OSError, ValueError):
             raise HTTPException(status_code=409, detail="saved native canonical image is unavailable or changed") from None
         receipt = metadata
@@ -910,11 +915,22 @@ async def add_page(
     if native_source is not None and not has_image:
         raise HTTPException(status_code=400, detail="native capture_provenance requires its JPEG")
     pending_image_path: Path | None = None
+    pending_original_path: Path | None = None
     image_persisted = False
     native_metadata = None
     native_replay = False
     conn = db.connect()
     try:
+        _doc_or_404(conn, document_id)
+        observed_existing = conn.execute(
+            "SELECT id FROM pages WHERE document_id=? AND page_index=?", (document_id, page_index)
+        ).fetchone()
+        if has_image:
+            raw = await _read_upload_limited(image, _MAX_IMAGE_UPLOAD_BYTES)
+            img = _load_image(raw)
+        # Bind the native ID and replacement cleanup to the same current row.
+        # Upload reads finish before the write lock, with no awaits until commit.
+        conn.execute("BEGIN IMMEDIATE")
         doc = _doc_or_404(conn, document_id)
         existing = conn.execute(
             "SELECT * FROM pages WHERE document_id = ? AND page_index = ?",
@@ -922,8 +938,6 @@ async def add_page(
         ).fetchone()
 
         if has_image:
-            raw = await _read_upload_limited(image, _MAX_IMAGE_UPLOAD_BYTES)
-            img = _load_image(raw)
             if native_source is not None:
                 if (img.format != "JPEG" or native_source["jpeg_sha256"] != hashlib.sha256(raw).hexdigest()
                         or (native_source["width"], native_source["height"]) != img.size
@@ -932,6 +946,9 @@ async def add_page(
                     raise HTTPException(status_code=400, detail="capture_provenance does not match the uploaded JPEG")
                 native_metadata = _native_capture_retry(conn, document_id, page_index, native_source, existing)
                 native_replay = native_metadata is not None
+        if observed_existing is None and existing is not None and not native_replay:
+            raise HTTPException(status_code=409, detail=f"page_index {page_index} already exists")
+        if has_image:
             if native_replay:
                 ph, omd5, image_path = existing["phash"], existing["ocr_md5"], existing["image_path"]
                 vision_text = existing["vision_text"]
@@ -941,12 +958,26 @@ async def add_page(
                 omd5 = _fallback_md5(ocr_md5(ocr_text), raw)
                 fname = f"{document_id}_{page_index}_{uuid.uuid4().hex[:8]}.png"
                 fpath: Path | None = IMAGE_DIR / fname
-                pending_image_path = fpath
-                img.convert("RGB").save(fpath, format="PNG")
+                with fpath.open("xb") as saved:
+                    pending_image_path = fpath
+                    img.convert("RGB").save(saved, format="PNG")
+                    saved.flush()
+                    os.fsync(saved.fileno())
                 image_path = str(fpath)
                 if native_source is not None:
+                    with fpath.with_suffix(".jpg").open("xb") as saved:
+                        pending_original_path = fpath.with_suffix(".jpg")
+                        saved.write(raw)
+                        saved.flush()
+                        os.fsync(saved.fileno())
                     native_metadata = {"capture_provenance": native_source,
                                        "canonical_image_sha256": file_sha256(fpath)}
+                if os.name != "nt":
+                    directory_fd = os.open(IMAGE_DIR, os.O_RDONLY)
+                    try:
+                        os.fsync(directory_fd)
+                    finally:
+                        os.close(directory_fd)
         else:
             # Text-only compatibility input has no image/pHash. OCR-MD5 hashes
             # the full body + figure description for exact matching.
@@ -958,6 +989,7 @@ async def add_page(
         metadata_json = json.dumps(native_metadata, ensure_ascii=False, sort_keys=True) if native_metadata else None
         if native_replay:
             page_id, replaced = existing["id"], False
+            conn.commit()
         elif existing is not None:
             # 再読取: replace this page's recognition. Frozen once a bound
             # exam session finished reading — its deck was segmented from
@@ -1011,6 +1043,8 @@ async def add_page(
             if existing["image_path"] and existing["image_path"] != image_path:
                 # The replaced photo must not linger on disk.
                 _unlink_best_effort(existing["image_path"])
+                if existing["capture_metadata_json"] is not None:
+                    _unlink_best_effort(Path(existing["image_path"]).with_suffix(".jpg"))
             page_id, replaced = existing["id"], True
         else:
             if doc["status"] != "open":
@@ -1112,6 +1146,7 @@ async def add_page(
         # do not retain a photo that no database row owns.
         if pending_image_path is not None and not image_persisted:
             _unlink_best_effort(pending_image_path)
+            _unlink_best_effort(pending_original_path)
 
 
 # Physical exams do not exceed this; the cap bounds the missing-index range
@@ -2853,7 +2888,13 @@ def _document_image_paths(conn, doc_id: int) -> list[str]:
     return [r["image_path"] for r in rows if r["image_path"]]
 
 
-def _document_source_pages(conn, doc_id: int, session_id: int) -> list[dict]:
+def _document_source_pages(conn, doc_id: int, session_id: int, *, work_originals: bool | None = None) -> list[dict]:
+    if work_originals is None:
+        work_originals = os.environ.get("ROKID_SOLVER", "").strip() == "chatgpt-work"
+    work_store = configured_work_store()
+    jobs = work_store.session_jobs(session_id) if work_originals and work_store.path.is_file() else []
+    sealed = {source["page_number"]: source for source in jobs[0]["sources"]
+              if "page_number" in source} if jobs else {}
     refs: dict[int, list[str]] = {}
     for question in _deck_question_rows(conn, session_id):
         for index in _row_page_indexes(question):
@@ -2865,12 +2906,44 @@ def _document_source_pages(conn, doc_id: int, session_id: int) -> list[dict]:
         if metadata is not None and (metadata["canonical_image_sha256"] != sha
                 or metadata["capture_provenance"]["page_index"] != row["page_index"]):
             raise ValueError("saved native capture does not match its canonical page")
-        pages.append({"page_number": row["page_index"] + 1, "image_path": row["image_path"],
+        number, image_path, evidence = row["page_index"] + 1, row["image_path"], {}
+        prior = sealed.get(number)
+        use_jpeg = (prior["mime_type"] == "image/jpeg" if prior else
+                    (not jobs and work_originals
+                     and os.environ.get("ROKID_WORK_ORIGINAL_JPEG", "0") == "1"))
+        if use_jpeg and metadata is not None:
+            original_path = Path(image_path).with_suffix(".jpg")
+            if prior or original_path.is_file():
+                raw = (work_store.read_source(jobs[0]["job_id"], prior["source_id"])[0]
+                       if prior else original_path.read_bytes())
+                native = metadata["capture_provenance"]
+                original_sha = hashlib.sha256(raw).hexdigest()
+                if original_sha != native["jpeg_sha256"]:
+                    raise ValueError("saved original JPEG does not match its native capture")
+                if prior:
+                    if (prior.get("capture_provenance") != native
+                            or prior.get("canonical_image_sha256") != sha
+                            or prior["sha256"] != original_sha):
+                        raise ValueError("sealed original JPEG does not match its canonical page")
+                    # These pixels were checked before sealing. Both byte hashes
+                    # still match, so the immutable evidence remains applicable.
+                    evidence = {field: prior[field] for field in JPEG_PIXEL_FIELDS}
+                else:
+                    evidence = jpeg_pixel_evidence(raw, native["rotation_degrees"])
+                    if (evidence["width"], evidence["height"]) != (native["width"], native["height"]):
+                        raise ValueError("saved original JPEG dimensions differ")
+                    with Image.open(image_path) as canonical, canonical.convert("RGB") as rgb:
+                        if ((rgb.width, rgb.height) != (evidence["upright_width"], evidence["upright_height"])
+                                or hashlib.sha256(rgb.tobytes()).hexdigest() != evidence["upright_rgb_sha256"]):
+                            raise ValueError("original JPEG pixels do not match the canonical page")
+                image_path, sha = str(original_path), original_sha
+        pages.append({"page_number": number, "image_path": image_path,
          "image_sha256": sha,
          "ocr_text": row["ocr_text"] or "", "vision_text": row["vision_text"] or "",
          "question_ids": refs.get(row["page_index"], []),
          "captured_at": row["captured_at_ms"] or "unknown; server received at " + row["created_at"],
-         **(metadata or {})})
+         **(metadata or {}), **evidence,
+         **({"_work_source_job_id": jobs[0]["job_id"]} if prior else {})})
     return pages
 
 
@@ -3394,9 +3467,13 @@ def _work_reply_commit_guard(session_id: int, replies, *, failed_attempt=None):
                 if (_session_phase(session) != "reviewing" or not session["document_id"]
                         or (session["mode"] == "real" and not config.ALLOW_REAL_EXAM_SOLVE)):
                     raise WorkConflict("the Work session is not open for failures")
+                try:
+                    source_pages = _document_source_pages(conn, session["document_id"], session_id)
+                except (OSError, ValueError) as error:
+                    raise WorkConflict("the failed Work input is no longer current") from error
                 current = Question(document_id=str(session["document_id"]),
                     booklet_stage=session["analysis_stage"], audio_path=session["audio_path"],
-                    document_pages=_document_source_pages(conn, session["document_id"], session_id))
+                    document_pages=source_pages)
                 if _work_attempt_identity(session_id, current) != failed_attempt:
                     raise WorkConflict("the failed Work input is no longer current")
             finally:

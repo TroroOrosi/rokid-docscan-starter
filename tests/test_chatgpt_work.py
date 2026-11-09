@@ -2,6 +2,7 @@
 
 import hashlib
 import io
+import json
 import re
 import wave
 import zipfile
@@ -58,7 +59,9 @@ class BrowserReply:
                 with zipfile.ZipFile(io.BytesIO(payload["buffer"])) as archive:
                     for name in archive.namelist():
                         number = len(reviews) + 1
-                        assert name == f"page_{number:03d}.png"
+                        manifest = json.loads(options["prompt"].rsplit("\n", 1)[1])
+                        source = next(item for item in manifest if item["source_id"] == f"p{number}")
+                        assert name == source["file_name"]
                         assert archive.getinfo(name).date_time == (1980, 1, 1, 0, 0, 0)
                         raw = archive.read(name)
                         with Image.open(io.BytesIO(raw)) as image:
@@ -67,6 +70,12 @@ class BrowserReply:
                         assert sha not in options["prompt"]
                         extracted.append({"source_id": f"p{number}", "file_name": name,
                                           "sha256": sha, "width": width, "height": height})
+                        if name.endswith(".jpg"):
+                            rotation = source["rotation_degrees"]
+                            with Image.open(io.BytesIO(raw)) as opened:
+                                upright = opened.convert("RGB").rotate(-rotation, expand=True)
+                            extracted[-1].update(rotation_degrees=rotation, upright_width=upright.width,
+                                upright_height=upright.height, upright_rgb_sha256=hashlib.sha256(upright.tobytes()).hexdigest())
                         reviews.append({"source_id": f"p{number}", "status": "readable",
                                         "image_viewer_used": True, "reasons": []})
             else:
@@ -239,12 +248,20 @@ def test_browser_delivery_cannot_send_or_commit_for_changed_glasses_or_originals
     assert configured_work_store().result(job["job_id"]) is None
 
 
-def test_mixed_work_stages_keep_the_same_browser_chat_and_send_only_original_audio_later(client, monkeypatch, tmp_path):
+@pytest.mark.parametrize("native_jpeg", [False, True])
+def test_mixed_work_stages_keep_the_same_browser_chat_and_send_only_original_audio_later(
+        client, monkeypatch, tmp_path, native_jpeg):
     from app import main
     from app.solvers.chatgpt_work import ChatGptWorkSolver
     from app.work_bridge import configured_work_store
 
-    doc, session, first = api_session(client, exam_type="mixed", generation=7)
+    if native_jpeg:
+        from tests.test_native_capture_work import native_job
+
+        monkeypatch.setenv("ROKID_WORK_ORIGINAL_JPEG", "1")
+        doc, session, original_receipt, first = native_job(client, exam_type="mixed")
+    else:
+        doc, session, first = api_session(client, exam_type="mixed", generation=7)
     wait_for(lambda: session not in main._background_solves)
     fake = BrowserReply()
     monkeypatch.setenv("ROKID_CHATGPT_SEND_ENABLED", "1")
@@ -252,6 +269,16 @@ def test_mixed_work_stages_keep_the_same_browser_chat_and_send_only_original_aud
     assert reading[0][1].answer == "4" and reading[1][1] is None
     monkeypatch.setattr(main, "get_solver", lambda *args: ChatGptWorkSolver(client=fake))
     main._solve_deck_in_background(session, doc)
+    if native_jpeg:
+        from app import work_bridge
+
+        Path(original_receipt["image_path"]).with_suffix(".jpg").unlink()
+        monkeypatch.setenv("ROKID_WORK_ORIGINAL_JPEG", "0")
+        def unexpected_decode(*args):
+            pytest.fail("listening must reuse the sealed reading pixel evidence")
+
+        monkeypatch.setattr(main, "jpeg_pixel_evidence", unexpected_decode)
+        monkeypatch.setattr(work_bridge, "jpeg_pixel_evidence", unexpected_decode)
     monkeypatch.setenv("ROKID_WORK_MODEL", "GPT-6.99 Sol")
     fake.resolve_new_job_settings = lambda **options: pytest.fail("listening must inherit the reading model")
     audio = tmp_path / "original.wav"

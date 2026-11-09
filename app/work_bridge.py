@@ -20,7 +20,7 @@ from contextlib import contextmanager
 from PIL import Image
 from pathlib import Path
 
-from .capture_provenance import validate_capture_metadata
+from .capture_provenance import JPEG_PIXEL_FIELDS, jpeg_pixel_evidence, validate_capture_metadata
 
 
 class WorkPending(RuntimeError):
@@ -62,11 +62,14 @@ def _identifier(value, field: str) -> str:
 
 
 def browser_source_name(source: dict) -> str:
-    """Stable flat names for the browser's unchanged canonical originals."""
+    """Stable flat names for the browser's sealed original bytes."""
     if "page_number" in source:
-        if source["mime_type"] != "image/png":
-            raise WorkConflict("browser image delivery requires canonical PNG originals")
-        return f"page_{source['page_number']:03d}.png"
+        if source["mime_type"] == "image/jpeg" and "rotation_degrees" not in source:
+            raise WorkConflict("browser JPEG delivery requires explicit native rotation")
+        suffix = {"image/png": "png", "image/jpeg": "jpg"}.get(source["mime_type"])
+        if suffix is None:
+            raise WorkConflict("browser image delivery requires PNG or JPEG originals")
+        return f"page_{source['page_number']:03d}.{suffix}"
     suffix = {"audio/wav": "wav", "audio/mpeg": "mp3", "audio/mp4": "m4a",
               "audio/ogg": "ogg", "audio/flac": "flac"}[source["mime_type"]]
     return f"original_audio.{suffix}"
@@ -347,6 +350,10 @@ class WorkStore:
             _identifier(device_id, "device identity")
         if not isinstance(sources, list) or not sources:
             raise ValueError("the original images are required")
+        previous_jobs = self.session_jobs(session_id) if self.path.is_file() else []
+        previous_sources = {source["source_id"]: source for job in previous_jobs
+                            if job["stage"] == stage or (stage == "listening" and job["stage"] == "reading")
+                            for source in job["sources"]}
         manifest, seen = [], set()
         for source in sources:
             source_id = _identifier(source.get("source_id"), "source identity")
@@ -366,16 +373,29 @@ class WorkStore:
                     ("capture_provenance", "canonical_image_sha256") if key in source})
                 native = metadata["capture_provenance"]
                 size = (native["width"], native["height"])
-                if native["rotation_degrees"] in (90, 270):
+                if mime == "image/png" and native["rotation_degrees"] in (90, 270):
                     size = size[::-1]
-                if (mime != "image/png" or metadata["canonical_image_sha256"] != item["sha256"]
+                expected_sha = native["jpeg_sha256"] if mime == "image/jpeg" else metadata["canonical_image_sha256"]
+                if (mime not in ("image/png", "image/jpeg") or expected_sha != item["sha256"]
                         or native["page_index"] + 1 != item.get("page_number")):
-                    raise ValueError("native capture metadata does not match its canonical original")
+                    raise ValueError("native capture metadata does not match its original")
                 with Image.open(io.BytesIO(data)) as canonical:
-                    if canonical.format != "PNG" or canonical.size != size:
-                        raise ValueError("native capture dimensions do not match the canonical PNG")
+                    if canonical.format != {"image/png": "PNG", "image/jpeg": "JPEG"}[mime] or canonical.size != size:
+                        raise ValueError("native capture dimensions do not match the original")
                     canonical.verify()
                 item.update(metadata)
+            if mime == "image/jpeg" and "capture_provenance" in item:
+                previous_source = previous_sources.get(source_id)
+                if previous_source is not None:
+                    if any(previous_source.get(field) != item.get(field) for field in
+                           ("mime_type", "sha256", "page_number", "capture_provenance", "canonical_image_sha256")):
+                        raise WorkConflict("the sealed original JPEG identity changed")
+                    evidence = {field: previous_source[field] for field in JPEG_PIXEL_FIELDS}
+                else:
+                    evidence = jpeg_pixel_evidence(data, item["capture_provenance"]["rotation_degrees"])
+                if any(source.get(key) != value for key, value in evidence.items()):
+                    raise ValueError("original JPEG pixel evidence does not match")
+                item.update(evidence)
             manifest.append(item)
         numbers = [item["page_number"] for item in manifest if "page_number" in item]
         if numbers != list(range(1, len(numbers) + 1)):
@@ -507,7 +527,7 @@ class WorkStore:
         return prepare_captured_image(row["data"], session_id=str(job["session_id"]),
                                        capture_id=f"{job['job_id'][:24]}:{source_id}",
                                        generation=job["generation"], page_turn=item["page_number"] - 1,
-                                       revision=1, rotation=0)
+                                       revision=1, rotation=item.get("rotation_degrees", 0))
 
     def quality_request(self, job_id: str, source_id: str) -> dict:
         with self._connect() as conn:
@@ -702,18 +722,21 @@ class WorkStore:
                 if _sha(raw) != source["sha256"]:
                     raise WorkConflict("the stored original hash changed")
                 try:
-                    with Image.open(io.BytesIO(raw)) as image:
-                        if image.format != "PNG":
-                            raise ValueError("not canonical PNG")
-                        item.update(width=image.width, height=image.height)
-                        image.verify()
+                    if source["mime_type"] == "image/jpeg":
+                        item.update({field: source[field] for field in JPEG_PIXEL_FIELDS})
+                    else:
+                        with Image.open(io.BytesIO(raw)) as image:
+                            if image.format != "PNG":
+                                raise ValueError("original image format differs")
+                            item.update(width=image.width, height=image.height)
+                            image.verify()
                 except (OSError, ValueError) as error:
-                    raise WorkConflict("the canonical original image is unavailable") from error
+                    raise WorkConflict("the original image is unavailable") from error
             expected.append(item)
         if (not isinstance(extraction, dict) or set(extraction) != {"status", "files"}
                 or extraction["status"] != "ok" or extraction["files"] != expected
                 or any(type(item.get(axis)) is not int for item in extraction["files"]
-                       for axis in ("width", "height") if axis in item)):
+                       for axis in ("width", "height", "rotation_degrees", "upright_width", "upright_height") if axis in item)):
             raise WorkBrowserResultRejected("browser extraction must match every original hash, dimension and order")
         if job["stage"] == "listening":
             if readability != []:
@@ -741,6 +764,8 @@ class WorkStore:
                     raise WorkBrowserResultRejected("invalid or incomplete browser readability review")
                 images.append({"source_id": original["source_id"], "source_sha256": original["sha256"],
                                "width": original["width"], "height": original["height"],
+                               **{key: original[key] for key in ("rotation_degrees", "upright_width",
+                                  "upright_height", "upright_rgb_sha256") if key in original},
                                **{key: review[key] for key in ("status", "image_viewer_used", "reasons")}})
         return {"kind": "uncalibrated_browser_readability", "calibrated": False,
                 "visual_reading_verified": False, "images": images}

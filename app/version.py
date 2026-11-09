@@ -256,7 +256,8 @@ from __future__ import annotations
 # 0.67.0: extended graph/construction slides, lossless plain answers and scene-bound metering.
 # 0.68.0: preserve measured capture timing/exposure and large original/answer payloads.
 # 0.68.1: accept hidden Work close animations while retaining selection-change guards.
-APP_VERSION = "0.68.1"
+# 0.69.0: preserve native JPEG originals and bind opt-in Work delivery to upright pixels.
+APP_VERSION = "0.69.0"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.
@@ -379,7 +380,8 @@ APP_VERSION = "0.68.1"
 # 1.39.1: source-position labels for unlabelled questions; do not invent numeric gaps.
 # 1.40.0: schema 3 for extended vector diagrams; preserve printed answer-number bounds.
 # 1.41.0: align original JPEG and complete answer budgets with the standalone client.
-API_VERSION = "1.41.0"
+# 1.42.0: optional native JPEG Work sources include explicit rotation and upright RGB evidence.
+API_VERSION = "1.42.0"
 
 # Matching algorithm identity. Bump when thresholds or hashing change so a
 # re-index/eval is triggered. Mirrors thresholds in app/matching.py.

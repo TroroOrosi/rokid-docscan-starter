@@ -151,34 +151,26 @@ def test_finalize_reading_atomically_freezes_page_replacement(client, monkeypatc
     document_id = _doc_with_text_pages(client, ["問1 置換前の本文"])
     session_id = _new_doc_exam(client, document_id)["session_id"]
 
-    review_check_finished = threading.Event()
+    replacement_waiting_for_write = threading.Event()
     release_replacement = threading.Event()
     real_connect = main.db.connect
-
-    class BufferedCursor:
-        def __init__(self, row):
-            self._row = row
-
-        def fetchone(self):
-            return self._row
 
     class PausingConnection:
         def __init__(self, inner):
             self._inner = inner
+            self._page_replacement = False
 
         def execute(self, sql, parameters=()):
-            cursor = self._inner.execute(sql, parameters)
-            if "SELECT COUNT(*) FROM exam_sessions" in sql:
-                # Buffer and close the read cursor before pausing so the
-                # finalizer can acquire and commit under SQLite's write lock.
-                row = cursor.fetchone()
-                cursor.close()
-                review_check_finished.set()
+            if "SELECT id FROM pages WHERE document_id=? AND page_index=?" in sql:
+                self._page_replacement = True
+            if sql == "BEGIN IMMEDIATE" and self._page_replacement:
+                # Let finalization win before the replacement reserves the
+                # writer lock. No writer may pause while owning that lock.
+                replacement_waiting_for_write.set()
                 assert release_replacement.wait(5), (
                     "test did not release the page replacement"
                 )
-                return BufferedCursor(row)
-            return cursor
+            return self._inner.execute(sql, parameters)
 
         def __getattr__(self, name):
             return getattr(self._inner, name)
@@ -200,7 +192,7 @@ def test_finalize_reading_atomically_freezes_page_replacement(client, monkeypatc
     worker = threading.Thread(target=replace_page)
     worker.start()
     try:
-        assert review_check_finished.wait(3), "replacement did not reach review check"
+        assert replacement_waiting_for_write.wait(3), "replacement did not reach the writer lock"
         finalized = client.post(
             f"/v1/exam-sessions/{session_id}/finalize-reading"
         )

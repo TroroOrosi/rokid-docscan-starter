@@ -4,6 +4,8 @@ import hashlib
 import io
 import json
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
+import threading
 
 import pytest
 from PIL import Image, ImageChops
@@ -61,7 +63,8 @@ def test_native_receipt_preserves_metadata_and_exact_canonical_hash_after_db_rei
         row = conn.execute("SELECT capture_metadata_json FROM pages WHERE document_id=?", (document,)).fetchone()
     assert json.loads(row[0]) == {"capture_provenance": meta,
                                   "canonical_image_sha256": receipt["canonical_image_sha256"]}
-    assert list(canonical.parent.iterdir()) == [canonical]  # No raw-JPEG retention.
+    assert canonical.with_suffix(".jpg").read_bytes() == raw
+    assert set(canonical.parent.iterdir()) == {canonical, canonical.with_suffix(".jpg")}
 
 
 @pytest.mark.parametrize(("byte_count", "size"), [
@@ -84,7 +87,8 @@ def test_native_jpeg_capacity_preserves_decoded_pixels_and_receipt(client, byte_
         assert stored.format == "PNG" and stored.size == (size[1], size[0])
         expected = source.transpose(Image.Transpose.ROTATE_90)
         assert ImageChops.difference(expected, stored).getbbox() is None
-    assert list(canonical.parent.iterdir()) == [canonical]
+    assert canonical.with_suffix(".jpg").read_bytes() == raw
+    assert set(canonical.parent.iterdir()) == {canonical, canonical.with_suffix(".jpg")}
 
 
 def test_native_jpeg_above_capacity_is_rejected_before_image_decode(client, monkeypatch):
@@ -195,6 +199,7 @@ def test_new_native_capture_replaces_atomically_and_legacy_replacement_clears_me
     assert response.status_code == 201 and response.json()["replaced"] is True
     assert response.json()["capture_provenance"] == replacement
     assert not Path(first["image_path"]).exists()
+    assert not Path(first["image_path"]).with_suffix(".jpg").exists()
     old = response.json()
     with main.db.connect() as conn:
         conn.execute("INSERT INTO exam_sessions(document_id,status) VALUES(?, 'reviewing')", (document,))
@@ -208,6 +213,7 @@ def test_new_native_capture_replaces_atomically_and_legacy_replacement_clears_me
     legacy = upload(client, document, raw, None)
     assert legacy.status_code == 201
     assert legacy.json()["capture_provenance"] is None and legacy.json()["canonical_image_sha256"] is None
+    assert not Path(old["image_path"]).with_suffix(".jpg").exists()
     with main.db.connect() as conn:
         assert conn.execute("SELECT capture_metadata_json FROM pages WHERE document_id=?", (document,)).fetchone()[0] is None
 
@@ -234,7 +240,7 @@ def test_native_id_cannot_be_rebound_to_another_current_page_or_document(client,
     page = 1 if elsewhere == "page" else 0
     result = upload(client, target, raw, provenance(raw, page_index=page), page_index=page)
     assert result.status_code == 409
-    assert list(main.IMAGE_DIR.iterdir()) == [Path(first["image_path"])]
+    assert set(main.IMAGE_DIR.iterdir()) == {Path(first["image_path"]), Path(first["image_path"]).with_suffix(".jpg")}
     with main.db.connect() as conn:
         assert conn.execute("SELECT COUNT(*) FROM pages").fetchone()[0] == 1
 
@@ -307,7 +313,7 @@ def test_native_replacement_db_failure_keeps_old_png_and_metadata(client, monkey
     assert leaves(failure.value) == [write_error]
     with original_connect() as conn:
         assert dict(conn.execute("SELECT * FROM pages WHERE document_id=?", (document,)).fetchone()) == before
-    assert list(main.IMAGE_DIR.iterdir()) == [Path(first["image_path"])]
+    assert set(main.IMAGE_DIR.iterdir()) == {Path(first["image_path"]), Path(first["image_path"]).with_suffix(".jpg")}
 
 
 @pytest.mark.parametrize("field", ["image_timestamp_ns", "result_timestamp_ns", "frame_number", "exposure_ns",
@@ -356,7 +362,8 @@ def test_zsl_receipt_keeps_kind_canonical_png_and_exact_retry_after_db_restart(c
     retry = upload(client, document, raw, meta)
     assert retry.status_code == 201 and retry.json()["capture_provenance"] == meta
     assert image.stat().st_mtime_ns == image_mtime
-    assert list(image.parent.iterdir()) == [image]
+    assert image.with_suffix(".jpg").read_bytes() == raw
+    assert set(image.parent.iterdir()) == {image, image.with_suffix(".jpg")}
     with main.db.connect() as conn:
         assert dict(conn.execute("SELECT * FROM pages WHERE document_id=?", (document,)).fetchone()) == before
     changed_kind = upload(client, document, raw, {**meta, "source_kind": "native_still"})
@@ -386,3 +393,93 @@ def test_zsl_keeps_unobserved_optional_result_fields_explicitly_null(client):
     result = upload(client, create_document(client), raw, meta)
     assert result.status_code == 201, result.text
     assert result.json()["capture_provenance"] == meta
+
+
+@pytest.mark.parametrize("missing", [False, True])
+def test_native_retry_keeps_legacy_missing_jpeg_and_rejects_changed_sidecar(client, missing):
+    raw, document = native_image(), create_document(client)
+    first = upload(client, document, raw, provenance(raw)).json()
+    original = Path(first["image_path"]).with_suffix(".jpg")
+    if missing:
+        original.unlink()
+    else:
+        original.write_bytes(b"changed original")
+    retried = upload(client, document, raw, provenance(raw))
+    assert retried.status_code == (201 if missing else 409)
+    assert original.exists() is not missing
+    if not missing:
+        assert original.read_bytes() == b"changed original"
+
+
+@pytest.mark.parametrize("failed_sync", [1, 2])
+def test_failed_png_or_jpeg_sync_keeps_old_pair_and_no_new_page(client, monkeypatch, failed_sync):
+    from app import main
+    try:
+        from builtins import BaseExceptionGroup
+    except ImportError:
+        from exceptiongroup import BaseExceptionGroup
+
+    raw, document = native_image(), create_document(client)
+    first = upload(client, document, raw, provenance(raw)).json()
+    with main.db.connect() as conn:
+        before = dict(conn.execute("SELECT * FROM pages WHERE document_id=?", (document,)).fetchone())
+    sync = main.os.fsync
+    calls = []
+    failure = OSError("fixture durable write failed")
+
+    def failing_sync(fd):
+        calls.append(fd)
+        if len(calls) == failed_sync:
+            raise failure
+        return sync(fd)
+
+    monkeypatch.setattr(main.os, "fsync", failing_sync)
+    with pytest.raises((OSError, BaseExceptionGroup)) as caught:
+        upload(client, document, raw, provenance(raw, capture_id="33333333-3333-4333-8333-333333333333"))
+    error = caught.value
+    while isinstance(error, BaseExceptionGroup):
+        assert len(error.exceptions) == 1
+        error = error.exceptions[0]
+    assert error is failure
+    with main.db.connect() as conn:
+        assert dict(conn.execute("SELECT * FROM pages WHERE document_id=?", (document,)).fetchone()) == before
+    image = Path(first["image_path"])
+    assert set(main.IMAGE_DIR.iterdir()) == {image, image.with_suffix(".jpg")}
+    assert image.with_suffix(".jpg").read_bytes() == raw
+
+
+@pytest.mark.parametrize("same_capture", [False, True])
+@pytest.mark.parametrize("replacing", [False, True])
+def test_concurrent_native_uploads_keep_one_bound_pair_and_exact_retry_receipt(
+        client, monkeypatch, same_capture, replacing):
+    from app import main
+
+    raw, document = native_image(), create_document(client)
+    initial = upload(client, document, raw, provenance(raw)).json() if replacing else None
+    barrier = threading.Barrier(2)
+    load = main._load_image
+
+    def simultaneous_decode(data):
+        image = load(data)
+        barrier.wait(timeout=5)
+        return image
+
+    monkeypatch.setattr(main, "_load_image", simultaneous_decode)
+    first_meta = provenance(raw, capture_id="33333333-3333-4333-8333-333333333333")
+    second_meta = first_meta if same_capture else provenance(raw, capture_id="44444444-4444-4444-8444-444444444444")
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(upload, client, document, raw, first_meta)
+        second = executor.submit(upload, client, document, raw, second_meta)
+        responses = [first.result(timeout=10), second.result(timeout=10)]
+    assert sorted(response.status_code for response in responses) == (
+        [201, 409] if not replacing and not same_capture else [201, 201])
+    if same_capture:
+        assert responses[0].json()["image_path"] == responses[1].json()["image_path"]
+    with main.db.connect() as conn:
+        rows = conn.execute("SELECT * FROM pages WHERE document_id=?", (document,)).fetchall()
+    assert len(rows) == 1
+    image = Path(rows[0]["image_path"])
+    assert image.with_suffix(".jpg").read_bytes() == raw
+    assert set(main.IMAGE_DIR.iterdir()) == {image, image.with_suffix(".jpg")}
+    if initial:
+        assert not Path(initial["image_path"]).exists()

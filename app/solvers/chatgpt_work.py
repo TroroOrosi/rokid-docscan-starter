@@ -93,11 +93,24 @@ def _browser_chat_key(job):
 
 def _browser_prompt(job):
     manifest = [{"source_id": source["source_id"], "file_name": browser_source_name(source),
-                 **({"page_number": source["page_number"]} if "page_number" in source else {})}
+                 **({"page_number": source["page_number"]} if "page_number" in source else {}),
+                 **({"mime_type": source["mime_type"], "rotation_degrees": source["rotation_degrees"]}
+                    if source["mime_type"] == "image/jpeg" else {})}
                 for source in job["sources"] if source["source_id"] in job["new_source_ids"]]
-    return (job["prompt"] + "\nThe ZIP archives contain exactly one unchanged original PNG per capture page. "
+    has_jpeg = any(source["mime_type"] == "image/jpeg" for source in job["sources"])
+    kind = "PNG or JPEG" if has_jpeg else "PNG"
+    jpeg_instruction = (
+        "For each JPEG, decode its encoded pixels to RGB, apply only the manifest's explicit clockwise "
+        "rotation_degrees with an exact 90-degree transpose, and view that full-resolution upright image. "
+        "Do not apply EXIF orientation, resize, crop or recompress before measuring. With Pillow, use "
+        "Image.open(...).convert('RGB'), then transpose ROTATE_270 for 90, ROTATE_180 for 180, "
+        "ROTATE_90 for 270, or no transpose for 0. Compute SHA256 of upright.tobytes(), the row-major "
+        "RGB pixel bytes. For JPEG extraction entries additionally return rotation_degrees, upright_width, "
+        "upright_height and upright_rgb_sha256. Width/height still describe encoded original dimensions. "
+        if has_jpeg else "")
+    return (job["prompt"] + f"\nThe ZIP archives contain exactly one unchanged original {kind} per capture page. "
         "Extract every archive and compute each file's actual SHA256 and image width/height from its bytes; "
-        "do not echo or invent measurements. Open EVERY original PNG individually with an image/vision "
+        "do not echo or invent measurements. " + jpeg_instruction + f"Open EVERY original {kind} individually with an image/vision "
         "tool. OCR, thumbnails, listing files or scanning image bytes in code do not replace viewing. "
         "After viewing the entire original, inspect necessary fine-text/figure areas before judging "
         "readability. This is an UNCALIBRATED source-bound readability review, not a calibrated capture "
@@ -200,7 +213,10 @@ class ChatGptWorkSolver(Solver):
         originals = []
         for page in question.document_pages:
             try:
-                data = Path(page["image_path"]).read_bytes()
+                data = (store.read_source(page["_work_source_job_id"], f"p{page['page_number']}")[0]
+                        if "_work_source_job_id" in page else Path(page["image_path"]).read_bytes())
+                if page.get("image_sha256") and hashlib.sha256(data).hexdigest() != page["image_sha256"]:
+                    raise ValueError("the Work original changed before sealing")
                 with Image.open(io.BytesIO(data)) as image:
                     mime = {"PNG": "image/png", "JPEG": "image/jpeg"}[image.format]
                     image.verify()
@@ -208,7 +224,8 @@ class ChatGptWorkSolver(Solver):
                 raise ValueError("an original Work page image is unavailable") from error
             original = {"source_id": f"p{page['page_number']}", "page_number": page["page_number"],
                         "mime_type": mime, "data": data}
-            for key in ("capture_provenance", "canonical_image_sha256"):
+            for key in ("capture_provenance", "canonical_image_sha256", "width", "height",
+                        "rotation_degrees", "upright_width", "upright_height", "upright_rgb_sha256"):
                 if key in page:
                     original[key] = page[key]
             originals.append(original)

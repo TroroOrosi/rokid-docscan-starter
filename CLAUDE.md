@@ -1,6 +1,6 @@
 # rokid-docscan-starter development guide
 
-Status: Current engineering contract. Updated 2026-11-08.
+Status: Current engineering contract. Updated 2026-11-09.
 
 **Start at `.agents/progress/current.md`.** It lists the operator's decisions,
 the verified state and the next steps. Do not re-ask what it settles. Keep the
@@ -134,7 +134,7 @@ is now the intended topology and is still unexercised.
 | Route | Status |
 |---|---|
 | `ROKID_SOLVER=chatgpt-web` | The existing Chat route drives the operator's own signed-in ChatGPT web session over CDP. |
-| `ROKID_SOLVER=chatgpt-work` | The requested phone-local Work consumer sends unchanged PNG ZIPs, verifies source receipts and returns staged answers. Work technical fixtures passed on the signed-in phone. The production model verifier confirmed Sol / Extra High / Fast and its owned-menu closure. Common SEND1 and restarted API/watcher readiness were checked while retaining the browser/X11; this activation sent no diagnostic material. Full restart and venue acceptance remain unverified. |
+| `ROKID_SOLVER=chatgpt-work` | The requested phone-local Work consumer sends unchanged image ZIPs, verifies source receipts and returns staged answers. PNG is the default; opt-in native JPEG sources bind explicit rotation and upright RGB evidence to the canonical PNG. Work PNG technical fixtures passed on the signed-in phone. The production model verifier confirmed Sol / Extra High / Fast and its owned-menu closure. Common SEND1 and restarted API/watcher readiness were checked while retaining the browser/X11; this activation sent no diagnostic material. JPEG delivery, full restart and venue acceptance remain unverified. |
 | On-phone local model (F-51F, llama.cpp) | **Not the route.** The operator chose chatgpt-web on 2026-09-14. Its measurements are kept as evidence in `docs/hardware-measurements.md` §E; no further work is scheduled on it. |
 | `openai` / `gemini` / `claude` API keys | Supported and config-only. The per-question routes can fall back through `ROKID_SOLVER_TIERS`; the background booklet route uses `ROKID_SOLVER` alone and has no fallback tier. |
 | Local OpenAI-compatible HTTP (`app/llm_http.py`) | Reaches an on-phone `llama-server` without the openai SDK. |
@@ -464,8 +464,14 @@ Only four gestures reach an ordinary app; the rest are system-reserved in
 ## Server invariants
 
 - Store the orientation-corrected, normalized PNG as the authoritative server
-  image. The relay upload may be a JPEG, but the raw upload bytes are not
-  persisted. Never claim raw JPEG is persisted when it is not.
+  image. A native JPEG with verified capture provenance is also persisted
+  unchanged beside that PNG before the page is committed. Compatibility uploads
+  without native provenance keep only the PNG. New Work jobs may opt into these
+  retained originals through `ROKID_WORK_ORIGINAL_JPEG=1` (default off), binding
+  their encoded dimensions, explicit clockwise rotation and upright RGB hash to
+  the canonical PNG. Existing jobs retain their sealed format; later checks use
+  both byte hashes and immutable pixel evidence. Other solvers use the canonical
+  PNG. Physical JPEG delivery accuracy and latency remain unverified.
 - Optional native capture provenance must match the received JPEG's actual
   hash, dimensions, page and rotation before persistence. Keep its correspondence
   with the canonical PNG hash on that page and in the sealed Work manifest.

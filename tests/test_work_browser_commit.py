@@ -91,7 +91,7 @@ def test_completed_recording_replacement_invalidates_its_work_job(monkeypatch, t
         "document_id": 1, "mode": "practice", "audio_path": str(audio)})
     monkeypatch.setattr(main, "_session_phase", lambda _: "reviewing")
     monkeypatch.setattr(main, "work_binding", lambda _: ("glasses", 7))
-    monkeypatch.setattr(main, "_document_source_pages", lambda *a: [
+    monkeypatch.setattr(main, "_document_source_pages", lambda *a, **kw: [
         {"page_number": 1, "image_sha256": "page-sha"}])
     assert main._work_current_job("job")[1] is job
     audio.write_bytes(b"same-size replaced audio")

@@ -4,6 +4,13 @@ from __future__ import annotations
 
 import json
 import re
+import hashlib
+import io
+
+from PIL import Image
+
+JPEG_PIXEL_FIELDS = ("width", "height", "rotation_degrees", "upright_width",
+                     "upright_height", "upright_rgb_sha256")
 
 _UUID = r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}"
 _SHA256 = r"[0-9a-f]{64}"
@@ -78,3 +85,20 @@ def validate_capture_metadata(value: object) -> dict:
 
 def parse_capture_metadata(text: str | None) -> dict | None:
     return None if text is None else validate_capture_metadata(json.loads(text, object_pairs_hook=_unique_object))
+
+
+def jpeg_pixel_evidence(data: bytes, rotation: int) -> dict:
+    """Hash row-major RGB pixels after explicit clockwise rotation, without EXIF."""
+    if type(rotation) is not int or rotation not in (0, 90, 180, 270):
+        raise ValueError("invalid original JPEG rotation")
+    with Image.open(io.BytesIO(data)) as image:
+        if image.format != "JPEG":
+            raise ValueError("the native original must be JPEG")
+        width, height = image.size
+        with image.convert("RGB") as rgb:
+            transpose = {0: None, 90: Image.Transpose.ROTATE_270,
+                         180: Image.Transpose.ROTATE_180, 270: Image.Transpose.ROTATE_90}[rotation]
+            with rgb.copy() if transpose is None else rgb.transpose(transpose) as upright:
+                return {"width": width, "height": height, "rotation_degrees": rotation,
+                        "upright_width": upright.width, "upright_height": upright.height,
+                        "upright_rgb_sha256": hashlib.sha256(upright.tobytes()).hexdigest()}

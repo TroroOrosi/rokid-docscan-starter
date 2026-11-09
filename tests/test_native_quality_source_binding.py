@@ -50,7 +50,9 @@ def test_selected_B_original_is_bound_through_upload_to_work_source_bytes(client
         assert saved.format == "PNG" and saved.size == (32, 24)
         assert saved.tobytes() == expected_b.tobytes()
         assert saved.tobytes() != expected_a.tobytes()
-    assert list(main.IMAGE_DIR.iterdir()) == [canonical_path]
+    original_path = canonical_path.with_suffix(".jpg")
+    assert set(main.IMAGE_DIR.iterdir()) == {canonical_path, original_path}
+    assert original_path.read_bytes() == original_b
     with main.db.connect() as conn:
         pages = conn.execute("SELECT capture_metadata_json FROM pages WHERE document_id=?", (document,)).fetchall()
     assert [json.loads(row[0]) for row in pages] == [{"capture_provenance": metadata_b,

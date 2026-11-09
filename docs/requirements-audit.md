@@ -1,6 +1,6 @@
 # 要件と実装の照合・採否判断
 
-Status: Current requirements audit / adoption decisions。2026-11-05、接続後も実機撮影より先に全機能・構造・作図表示・自動スキャンを評価改善する指示を反映。現在の機能・比較候補・実機合格を混同せず、過去の判断と測定は履歴として保持する。
+Status: Current requirements audit / adoption decisions。2026-11-09、モデル・effortの適性を正確性と全冊子の所要時間から評価する追加指示を反映。実機撮影前の機能・構造・作図表示・自動スキャンの評価改善を続け、過去の判断と測定は履歴として保持する。
 Runs on: 整理・調査・実装・自動試験は開発PC。利用は常時オンのスマホとテザリング接続グラスだけで、PC・有線・装着後の接続操作を要求しない。
 
 ## 現在の要望と方式選定
@@ -63,7 +63,11 @@ Runs on: 整理・調査・実装・自動試験は開発PC。利用は常時オ
 
 phoneの `POST /v1/capture-videos` は認証付きの比較原動画受領用で、原MP4と送られた記録をそのまま保全する。端末・session・generation・実際の接続元と文書の対応を確認し、保存した実物と受領票を照合する。品質は未評価で、自動解析・頁登録・Work送信を開始しない。64KiB単位の保存と128MiBの比較clip上限は受領原本の制限であり、FastAPIのmultipart解析前にHTTP全体を制限するものではない。Androidの `video_transfer_evaluation=true` は `video_evaluation=true` と併用する明示比較だけに限定し、次の通常起動Intentへ持ち越さない。別workerが原本を転送し、録画前のorigin・現在世代・固定した送信記録・受領票を前後で照合する。実機転送、自動候補選定、AIによる撮影調整は後続の確認・接続作業である。
 
-モデルはSol 6.1／xhigh／Fastを解答役候補として維持し、Lunaの限定検査、Terraの曖昧な視覚領域の再確認を別に比較する。Lunaのlowは速度候補で、公式Workの開始推奨highも比較対象とする。Fastとeffortは別設定で、Sol 6.1固有の速度倍率や全問正答を未実測で断定しない。APIの画像数・bytes・寸法規則をWork/Driveの能力へ転用しない。根拠は[Workモデル](https://learn.chatgpt.com/docs/models)、[speed](https://learn.chatgpt.com/docs/agent-configuration/speed)、[画像入力](https://developers.openai.com/api/docs/guides/images-vision)、[Camera2再処理](https://developer.android.com/reference/android/hardware/camera2/CameraDevice)。原音の利用は別経路の確認が必要で、reading先行と同一会話への確定音声追加を保持する。
+11/9の利用者指示は、東大入試レベルの問題でも全問正解できる精度を目標とし、難易度に対して過剰な時間が掛からないモデル・effortを調べて選ぶこと。Sol 6.1／Extra High／Fastは保存設定の動作だけを確認しており、適性比較は未実施だった。Terraも全冊子の解答役として比較する。実アカウントの公開一覧にはGPT-6.1 Terraがあり、現選択はGPT-6.1 SolとFastだった（11/9のphonehost-work-close-trace採取）。
+
+比較計画は、同じ完全な冊子画像・指示・解答基準でSol／Extra High／Fast、Sol／High／Fast、Terra／High／Fastを測り、品質条件を満たしたモデルのMediumも調べる。これは現時点の評価計画で、採用値は未確定。全問正解した冊子の割合、記述・図の充足、設問の取りこぼし、修正を含む全体時間を記録する。公式Work資料も同じ入力とeffortによる比較と、品質条件を満たす軽い設定の選択を勧めている。APIのxhigh指針では追加の時間に見合う改善を評価で確認するよう求めている。APIの既定effortや速度倍率をWorkの実測へ転用しない。[モデル選定](https://learn.chatgpt.com/docs/model-selection)、[推論量](https://developers.openai.com/api/docs/guides/reasoning#reasoning-effort)、[Workの速度設定](https://learn.chatgpt.com/docs/agent-configuration/speed)
+
+画像の寸法・bytes・原寸取得、転送と中間応答の時間もモデル比較と併せて測る。原音の利用は別途確認し、reading先行と同一会話への確定音声追加を保持する。[画像入力](https://developers.openai.com/api/docs/guides/images-vision)、[Camera2再処理](https://developer.android.com/reference/android/hardware/camera2/CameraDevice)
 
 今回、送信JPEGで1画素幅の赤青線がほぼ同色へ混ざる再現例を修正した。寸法・原本・品質fallbackは維持し、色の解像度を落とさない設定とする。保存実写8枚のPC比較で中央値は約1.96MBから2.24MB、encodeは約84msから132ms。これは文字判読・GPT正答・スマホ速度の測定ではない。PNGは追加の画素損失を避ける候補だが、この比較では中央値約10.08MBとなり、既存保存PNGを送る方式も含めて総時間と処理上限で判断する。
 
