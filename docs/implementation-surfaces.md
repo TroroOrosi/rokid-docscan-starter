@@ -1,6 +1,6 @@
 # Implementation surfaces
 
-Status: Current repository map and runnable-surface inventory. Updated 2026-09-30; the standalone venue implementation remains physically unverified.
+Status: Current repository map and runnable-surface inventory. Updated 2026-11-09. Full venue operation remains physically unverified.
 
 **Read this before adding anything.** It exists because the same role kept
 getting a second implementation: a session would grasp the feature it was asked
@@ -67,6 +67,7 @@ A surface listed here is not automatically wanted. Each row carries a status:
 | Module | Status | Role |
 |---|---|---|
 | `:glassdoc` | route | The glasses-side scanner. Owns capture, OCR and the server connection; the phone hosts its server over the phone AP. |
+| `:phonehost` | route | Phone-local health monitor under a UID separate from Termux. Explicit enablement permits loopback health checks and recovery through the fixed public Termux `RUN_COMMAND` bootstrap. Full phone restart and long-duration venue acceptance remain unmeasured. |
 | `:relaycore` | shared | The capture pipeline both apps run: `DocScanController`, OCR, upload, review. The automatic-scan loop lives here; enabled only for the local glasses surface. |
 | `:pagequality` | shared | `PageFraming` (OCR text-box margins, not the physical sheet outline) and `ShotScore` (rank an automatic burst). Built for hands-free capture. |
 | `:glassinput` | shared | The gesture contract. Plain `java-library`, so its tests run with no Android runtime. |
@@ -79,6 +80,7 @@ A surface listed here is not automatically wanted. Each row carries a status:
 | Activity | Module | Status |
 |---|---|---|
 | `DocScanGlassActivity` | `:glassdoc` | route |
+| `dev.rokid.docscanhost.MainActivity` | `:phonehost` | route |
 | `MainActivity` | `:app` | frozen |
 | `TapProbeActivity` | `:glassapp` | probe |
 | `CapabilityProbeActivity` | `:glassprobe` | probe |
