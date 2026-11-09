@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import time
 
 import pytest
@@ -35,17 +36,74 @@ def _stop_owned_browser(browser, process):
         process.wait(timeout=10)  # Never hide a failed cleanup or kill other browsers.
 
 
-def _wait_owned_browser_port(port_file, deadline):
+def _wait_owned_browser_port(port_file, deadline, diagnostics=None):
     # On Windows Chrome can create the file before releasing its writer handle.
     while time.monotonic() < deadline:
         try:
             port = int(port_file.read_text(encoding="utf-8").splitlines()[0])
             if 1 <= port <= 65535:
+                if diagnostics is not None:
+                    diagnostics["last_port_read"] = {"monotonic": time.monotonic(), "status": "ready"}
                 return port
-        except (OSError, ValueError, IndexError):
-            pass
+            status = "port_out_of_range"
+        except (OSError, ValueError, IndexError) as error:
+            status = type(error).__name__
+        if diagnostics is not None:
+            diagnostics["last_port_read"] = {"monotonic": time.monotonic(), "status": status}
         time.sleep(0.05)
     raise AssertionError("local Chromium did not expose a readable debugging port")
+
+
+def _read_browser_process_stat(path):
+    with path.open(encoding="utf-8") as stat_file:
+        content = stat_file.read(4096)
+    fields = content.rpartition(")")[2].split()
+    return {"pid": int(content.split(" ", 1)[0]), "parent_pid": int(fields[1]),
+            "state": fields[0], "user_cpu_ticks": int(fields[11]),
+            "system_cpu_ticks": int(fields[12]), "start_ticks": int(fields[19])}
+
+
+def _owned_browser_process_snapshot(root_pid, exit_code, *, proc_root=Path("/proc")):
+    if sys.platform != "linux":
+        return {"status": "unavailable", "reason": "non_linux"}
+    if exit_code is not None:
+        return {"status": "unavailable", "reason": "process_exited"}
+    directory = proc_root / str(root_pid)
+    try:
+        before = _read_browser_process_stat(directory / "stat")
+        if before["pid"] != root_pid:
+            return {"status": "unavailable", "reason": "identity_changed"}
+        if before["state"] in {"Z", "X", "x"}:
+            return {"status": "unavailable", "reason": "process_exited"}
+        wait_state = {}
+        try:
+            with (directory / "wchan").open(encoding="utf-8") as wait_channel:
+                wait_state["wchan"] = wait_channel.read(128).strip()
+        except OSError as error:
+            wait_state.update(wchan=None, wchan_error=type(error).__name__)
+        after = _read_browser_process_stat(directory / "stat")
+        if any(before[key] != after[key] for key in ("pid", "parent_pid", "start_ticks")):
+            return {"status": "unavailable", "reason": "identity_changed"}
+        if after["state"] in {"Z", "X", "x"}:
+            return {"status": "unavailable", "reason": "process_exited"}
+    except (OSError, ValueError, IndexError) as error:
+        return {"status": "unavailable", "reason": type(error).__name__}
+    return {"status": "collected", "process": {**after, **wait_state}}
+
+
+def _save_browser_startup_diagnostics(path, stderr_path, diagnostics):
+    try:
+        with stderr_path.open("rb") as stderr:
+            stderr.seek(0, 2)
+            stderr.seek(max(0, stderr.tell() - 8192))
+            diagnostics["stderr_tail"] = stderr.read(8192).decode("utf-8", errors="replace")
+    except OSError as error:
+        diagnostics["stderr_tail"] = f"<unavailable: {type(error).__name__}>"
+    try:
+        path.write_text(json.dumps(diagnostics, ensure_ascii=False, indent=2), encoding="utf-8")
+    except OSError as error:
+        return f"{path} <unavailable: {type(error).__name__}>"
+    return str(path)
 
 
 @pytest.fixture(scope="module")
@@ -59,6 +117,11 @@ def browser_page(tmp_path_factory):
     fixture = directory / "fixture.html"
     fixture.write_text('<meta charset="utf-8"><body></body>', encoding="utf-8")
     stderr_path = directory / "browser-stderr.log"
+    diagnostics_path = directory / "browser-startup.json"
+    diagnostics = {"schema": 1, "started_monotonic": time.monotonic(),
+                   "port_monotonic": None, "ready_monotonic": None,
+                   "last_port_read": {"status": "not_attempted", "monotonic": None},
+                   "linux_process_snapshot": {"status": "not_requested"}}
     with stderr_path.open("wb") as stderr:
         process = subprocess.Popen([
             executable, "--headless", "--remote-debugging-port=0", "--disable-background-networking",
@@ -66,12 +129,14 @@ def browser_page(tmp_path_factory):
             "--host-resolver-rules=MAP * ~NOTFOUND", "--user-data-dir=" + str(directory / "profile"),
             fixture.as_uri(),
         ], stdout=subprocess.DEVNULL, stderr=stderr)
+    diagnostics.update(pid=process.pid, launched_monotonic=time.monotonic())
     browser = None
     try:
         try:
             port_file = directory / "profile" / "DevToolsActivePort"
             deadline = time.monotonic() + 20
-            port = _wait_owned_browser_port(port_file, deadline)
+            port = _wait_owned_browser_port(port_file, deadline, diagnostics)
+            diagnostics["port_monotonic"] = time.monotonic()
             browser = connect_over_cdp(f"http://127.0.0.1:{port}")
             page = browser.contexts[0].pages[0]
             while time.monotonic() < deadline:
@@ -79,21 +144,26 @@ def browser_page(tmp_path_factory):
                     break
                 time.sleep(0.05)
             assert page.url == fixture.as_uri() and page.evaluate("document.readyState") == "complete"
+            diagnostics["ready_monotonic"] = time.monotonic()
         except Exception as error:
             exit_code = process.poll()
+            diagnostics.update(failed_monotonic=time.monotonic(), exit_code=exit_code,
+                               failure_type=type(error).__name__)
             try:
-                with stderr_path.open("rb") as stderr:
-                    stderr.seek(0, 2)
-                    stderr.seek(max(0, stderr.tell() - 8192))
-                    stderr_tail = stderr.read(8192).decode("utf-8", errors="replace")
-            except OSError as log_error:
-                stderr_tail = f"<unavailable: {type(log_error).__name__}>"
+                diagnostics["linux_process_snapshot"] = _owned_browser_process_snapshot(process.pid, exit_code)
+            except Exception as snapshot_error:
+                diagnostics["linux_process_snapshot"] = {
+                    "status": "unavailable", "reason": type(snapshot_error).__name__,
+                }
+            saved_diagnostics = _save_browser_startup_diagnostics(diagnostics_path, stderr_path, diagnostics)
             raise AssertionError(
                 "local Chromium fixture startup failed\n"
                 f"exit_code={exit_code!r}\n"
                 f"stderr_log={stderr_path}\n"
-                f"stderr_tail={stderr_tail}"
+                f"startup_diagnostics={saved_diagnostics}\n"
+                f"stderr_tail={diagnostics['stderr_tail']}"
             ) from error
+        _save_browser_startup_diagnostics(diagnostics_path, stderr_path, diagnostics)
         yield page
     finally:
         _stop_owned_browser(browser, process)
@@ -151,6 +221,117 @@ def test_owned_browser_port_waits_for_complete_readable_file(monkeypatch):
         _wait_owned_browser_port(path, 0)
 
 
+@pytest.mark.parametrize("read_result, expected", [
+    ("", "IndexError"), ("partial", "ValueError"), ("0", "port_out_of_range"),
+    (PermissionError(), "PermissionError"), (FileNotFoundError(), "FileNotFoundError"),
+])
+def test_owned_browser_port_records_last_read_state(monkeypatch, read_result, expected):
+    from unittest.mock import Mock
+
+    monkeypatch.setattr(time, "sleep", lambda _: None)
+    monkeypatch.setattr(time, "monotonic", Mock(side_effect=[0, 0.01, 2]))
+    path = Mock()
+    path.read_text.side_effect = [read_result]
+    diagnostics = {}
+    with pytest.raises(AssertionError, match="readable debugging port"):
+        _wait_owned_browser_port(path, 1, diagnostics)
+    assert diagnostics["last_port_read"] == {"monotonic": 0.01, "status": expected}
+
+
+def test_owned_browser_port_records_ready_without_file_contents():
+    from unittest.mock import Mock
+
+    path = Mock()
+    path.read_text.return_value = "12345\n/private-websocket-id"
+    diagnostics = {}
+    assert _wait_owned_browser_port(path, time.monotonic() + 1, diagnostics) == 12345
+    assert diagnostics["last_port_read"]["status"] == "ready"
+    assert "12345" not in json.dumps(diagnostics)
+    assert "private-websocket-id" not in json.dumps(diagnostics)
+
+
+@pytest.mark.parametrize("wait_channel_available", [True, False])
+def test_owned_browser_linux_snapshot_reads_only_root_stat_and_wait_channel(
+    monkeypatch, tmp_path, wait_channel_available,
+):
+    monkeypatch.setattr(sys, "platform", "linux")
+    directory = tmp_path / "1000"
+    directory.mkdir()
+    fields = ["0"] * 20
+    fields[0], fields[1], fields[11], fields[12], fields[19] = "S", "1", "13", "17", "101"
+    (directory / "stat").write_text("1000 (private command (name)) " + " ".join(fields))
+    if wait_channel_available:
+        (directory / "wchan").write_text("x" * 200)
+    opened = []
+    real_open = Path.open
+
+    def open_proc(path, *args, **kwargs):
+        opened.append(path)
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", open_proc)
+    result = _owned_browser_process_snapshot(1000, None, proc_root=tmp_path)
+    assert opened == [directory / "stat", directory / "wchan", directory / "stat"]
+    assert result["status"] == "collected"
+    row = result["process"]
+    assert row["pid"] == 1000 and row["parent_pid"] == 1 and row["state"] == "S"
+    assert row["user_cpu_ticks"] == 13 and row["system_cpu_ticks"] == 17 and row["start_ticks"] == 101
+    if wait_channel_available:
+        assert row["wchan"] == "x" * 128
+    else:
+        assert row["wchan"] is None and row["wchan_error"] == "FileNotFoundError"
+    assert "private command" not in json.dumps(result)
+
+
+@pytest.mark.parametrize("changed_field, changed_value, reason", [
+    ("pid", "1001", "identity_changed"), ("parent", "9999", "identity_changed"),
+    ("start", "999", "identity_changed"), ("state", "Z", "process_exited"),
+])
+def test_owned_browser_linux_snapshot_discards_identity_change_or_exit(
+    monkeypatch, tmp_path, changed_field, changed_value, reason,
+):
+    monkeypatch.setattr(sys, "platform", "linux")
+    directory = tmp_path / "1000"
+    directory.mkdir()
+    fields = ["0"] * 20
+    fields[0], fields[1], fields[19] = "S", "1", "101"
+    (directory / "stat").write_text("1000 (chrome) " + " ".join(fields))
+    (directory / "wchan").write_text("discard-this-wait-state")
+    real_open = Path.open
+
+    def open_changed_proc(path, *args, **kwargs):
+        if path == directory / "wchan":
+            pid = changed_value if changed_field == "pid" else "1000"
+            for name, index in (("parent", 1), ("start", 19), ("state", 0)):
+                if changed_field == name:
+                    fields[index] = changed_value
+            with real_open(directory / "stat", "w") as stat_file:
+                stat_file.write(f"{pid} (chrome) " + " ".join(fields))
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", open_changed_proc)
+    assert _owned_browser_process_snapshot(1000, None, proc_root=tmp_path) == {
+        "status": "unavailable", "reason": reason,
+    }
+
+
+@pytest.mark.parametrize("platform, exit_code, reason", [
+    ("win32", None, "non_linux"), ("linux", 7, "process_exited"),
+])
+def test_owned_browser_snapshot_reports_unsupported_or_exited_process(
+    monkeypatch, platform, exit_code, reason,
+):
+    import sys
+    from unittest.mock import Mock
+
+    monkeypatch.setattr(sys, "platform", platform)
+    proc_root = Mock()
+    assert _owned_browser_process_snapshot(1000, exit_code, proc_root=proc_root) == {
+        "status": "unavailable", "reason": reason,
+    }
+    assert proc_root.mock_calls == []
+
+
 @pytest.mark.parametrize("exit_code", [None, 17])
 def test_owned_browser_startup_failure_reports_stderr_and_preserves_cause(
     monkeypatch, tmp_path, exit_code,
@@ -163,6 +344,7 @@ def test_owned_browser_startup_failure_reports_stderr_and_preserves_cause(
     factory = Mock()
     factory.mktemp.return_value = tmp_path
     process = Mock()
+    process.pid = 12345
     process.poll.return_value = exit_code
     stderr_tail = b"x" * 8180 + b"\xffstartup-end"
     stderr_bytes = b"discarded-prefix" + stderr_tail
@@ -180,6 +362,8 @@ def test_owned_browser_startup_failure_reports_stderr_and_preserves_cause(
     monkeypatch.setattr(f"{__name__}._wait_owned_browser_port", wait_port)
     stop = Mock()
     monkeypatch.setattr(f"{__name__}._stop_owned_browser", stop)
+    snapshot = Mock(return_value={"status": "unavailable", "reason": "fixture_process"})
+    monkeypatch.setattr(f"{__name__}._owned_browser_process_snapshot", snapshot)
 
     with pytest.raises(AssertionError, match="fixture startup failed") as caught:
         next(browser_page.__wrapped__(factory))
@@ -191,9 +375,16 @@ def test_owned_browser_startup_failure_reports_stderr_and_preserves_cause(
     assert str(caught.value).endswith(stderr_tail.decode("utf-8", errors="replace"))
     assert "discarded-prefix" not in str(caught.value)
     assert log_path.read_bytes() == stderr_bytes
+    diagnostics = json.loads((tmp_path / "browser-startup.json").read_text(encoding="utf-8"))
+    assert diagnostics["pid"] == 12345
+    assert diagnostics["started_monotonic"] <= diagnostics["launched_monotonic"]
+    assert diagnostics["port_monotonic"] is None and diagnostics["ready_monotonic"] is None
+    assert diagnostics["last_port_read"]["status"] == "not_attempted"
+    assert diagnostics["stderr_tail"] == stderr_tail.decode("utf-8", errors="replace")
     launch.assert_called_once()
     assert launch.call_args.kwargs["stderr"].closed
     wait_port.assert_called_once()
+    snapshot.assert_called_once_with(12345, exit_code)
     stop.assert_called_once_with(None, process)
 
 
@@ -206,6 +397,7 @@ def test_owned_browser_startup_failure_survives_unreadable_stderr(monkeypatch, t
     factory = Mock()
     factory.mktemp.return_value = tmp_path
     process = Mock()
+    process.pid = 12345
     process.poll.return_value = None
     monkeypatch.setattr(subprocess, "Popen", Mock(return_value=process))
     monkeypatch.setattr(f"{__name__}._wait_owned_browser_port", Mock(return_value=12345))
@@ -221,6 +413,8 @@ def test_owned_browser_startup_failure_survives_unreadable_stderr(monkeypatch, t
     monkeypatch.setattr(Path, "open", open_log)
     stop = Mock()
     monkeypatch.setattr(f"{__name__}._stop_owned_browser", stop)
+    monkeypatch.setattr(f"{__name__}._owned_browser_process_snapshot",
+                        Mock(return_value={"status": "unavailable", "reason": "fixture_process"}))
 
     with pytest.raises(AssertionError, match="fixture startup failed") as caught:
         next(browser_page.__wrapped__(factory))
@@ -229,6 +423,49 @@ def test_owned_browser_startup_failure_survives_unreadable_stderr(monkeypatch, t
     assert "exit_code=None" in str(caught.value)
     assert "stderr_tail=<unavailable: PermissionError>" in str(caught.value)
     stop.assert_called_once_with(None, process)
+
+
+@pytest.mark.parametrize("diagnostic_failure", ["snapshot", "save"])
+def test_owned_browser_diagnostic_failure_preserves_startup_cause_and_cleanup(
+    monkeypatch, tmp_path, diagnostic_failure,
+):
+    from unittest.mock import Mock
+
+    executable = tmp_path / "chromium"
+    executable.touch()
+    monkeypatch.setattr(shutil, "which", lambda _: str(executable))
+    factory = Mock()
+    factory.mktemp.return_value = tmp_path
+    process = Mock(pid=12345)
+    process.poll.return_value = None
+    monkeypatch.setattr(subprocess, "Popen", Mock(return_value=process))
+    original = RuntimeError("port did not become available")
+    monkeypatch.setattr(f"{__name__}._wait_owned_browser_port", Mock(side_effect=original))
+    snapshot = Mock(return_value={"status": "unavailable", "reason": "fixture_process"})
+    monkeypatch.setattr(f"{__name__}._owned_browser_process_snapshot", snapshot)
+    if diagnostic_failure == "snapshot":
+        snapshot.side_effect = RuntimeError("proc snapshot failed")
+    else:
+        real_write = Path.write_text
+
+        def write_diagnostics(path, *args, **kwargs):
+            if path.name == "browser-startup.json":
+                raise PermissionError("diagnostics unavailable")
+            return real_write(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "write_text", write_diagnostics)
+    stop = Mock()
+    monkeypatch.setattr(f"{__name__}._stop_owned_browser", stop)
+
+    with pytest.raises(AssertionError, match="fixture startup failed") as caught:
+        next(browser_page.__wrapped__(factory))
+    assert caught.value.__cause__ is original
+    stop.assert_called_once_with(None, process)
+    if diagnostic_failure == "snapshot":
+        diagnostics = json.loads((tmp_path / "browser-startup.json").read_text(encoding="utf-8"))
+        assert diagnostics["linux_process_snapshot"] == {"status": "unavailable", "reason": "RuntimeError"}
+    else:
+        assert "<unavailable: PermissionError>" in str(caught.value)
 
 
 def test_owned_browser_fixture_preserves_test_body_error(monkeypatch, tmp_path):
@@ -240,6 +477,7 @@ def test_owned_browser_fixture_preserves_test_body_error(monkeypatch, tmp_path):
     factory = Mock()
     factory.mktemp.return_value = tmp_path
     process = Mock()
+    process.pid = 12345
     monkeypatch.setattr(subprocess, "Popen", Mock(return_value=process))
     monkeypatch.setattr(f"{__name__}._wait_owned_browser_port", Mock(return_value=12345))
     page = Mock()
@@ -253,6 +491,10 @@ def test_owned_browser_fixture_preserves_test_body_error(monkeypatch, tmp_path):
 
     fixture = browser_page.__wrapped__(factory)
     assert next(fixture) is page
+    diagnostics = json.loads((tmp_path / "browser-startup.json").read_text(encoding="utf-8"))
+    assert (diagnostics["started_monotonic"] <= diagnostics["launched_monotonic"]
+            <= diagnostics["port_monotonic"] <= diagnostics["ready_monotonic"])
+    assert diagnostics["linux_process_snapshot"] == {"status": "not_requested"}
     original = RuntimeError("test body failed")
     with pytest.raises(RuntimeError) as caught:
         fixture.throw(original)

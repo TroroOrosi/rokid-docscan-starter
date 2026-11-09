@@ -1,6 +1,6 @@
 # 再開入口：次のセッションはここだけ読めば始められる
 
-最終更新: 2026-11-09 再開中。物理基礎全14頁のSol/Extra Highは14/14一致。Sol/Highの送信前添付照合修正2f37457はpush・CI success。CI起動失敗の診断追加は233 passed・独立必須指摘0。詳細phone-work-connected-root-20261030.jsonのlatest_resume_20261109.current_snapshot_1127UTC。
+最終更新: 2026-11-09 再開中。物理基礎全14頁のSol/Extra Highは14/14一致、High送信前の添付修正2f37457はCI success。追加CI診断はPython280 passed/Android386件、独立必須指摘0。元CI停滞原因は未特定。詳細phone-work-connected-root-20261030.jsonのlatest_resume_20261109.current_snapshot_1127UTC。
 Runs on: 会場phone AP＋glasses。スマホ開発接続は再接続依頼中、HTTP APIはstatus=ok。JPEG保持f5d3e01はPC実装・別監査済み/phone未導入・OFF。Sol/High・Terra・東大比較、実紙・原音・全再起動・長時間受入は未了。
 
 ## 0. 読み方（前提と資料に引きずられないため）

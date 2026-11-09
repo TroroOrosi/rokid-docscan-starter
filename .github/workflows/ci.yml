@@ -47,6 +47,14 @@ jobs:
           pip install -r requirements.txt
       - name: Run tests
         run: pytest -q
+      - name: Preserve local browser startup diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-startup-python-${{ matrix.python-version }}
+          path: /tmp/pytest-of-runner/pytest-*/work-web-dom*/browser-startup.json
+          if-no-files-found: ignore
+          retention-days: 14
 
   phone-stack-compatibility:
     runs-on: ubuntu-latest
@@ -62,6 +70,14 @@ jobs:
         run: |
           python -m pip install -r requirements-phone.txt -c constraints-phone.txt pytest httpx pyyaml
           python -m pytest -q
+      - name: Preserve local browser startup diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-startup-phone-stack
+          path: /tmp/pytest-of-runner/pytest-*/work-web-dom*/browser-startup.json
+          if-no-files-found: ignore
+          retention-days: 14
 
   windows-predevice:
     runs-on: windows-latest
