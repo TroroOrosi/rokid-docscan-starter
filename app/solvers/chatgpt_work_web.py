@@ -642,11 +642,17 @@ _UPLOAD_STATE_JS = r"""(names => {
   const scope = composers[0].closest('form') || composers[0].closest('main');
   if (!scope) return {ready:false, ambiguous:true, counts:[], error:false};
   const cards = [...scope.querySelectorAll('span.truncate')].filter(e => !e.querySelector('span.truncate'));
-  const counts = names.map(name => cards.filter(e => e.textContent.trim() === name).length);
+  const matches = cards.map(card => {
+    const label = card.textContent.trim();
+    const numbered = /^(.+)\([1-9][0-9]*\)(\.[^.]+)$/.exec(label);
+    return names.map(name => label === name || numbered !== null && numbered[1] + numbered[2] === name);
+  });
+  const counts = names.map((name, index) => matches.filter(row => row[index]).length);
+  const ambiguous = matches.some(row => row.filter(Boolean).length > 1);
   const error = [...scope.querySelectorAll('[role=alert], [data-state=error]')].some(visible);
   const busy = [...scope.querySelectorAll('[role=progressbar], [aria-busy=true], [data-state=uploading]')].some(visible);
   const sends = [...scope.querySelectorAll('button[data-testid="send-button"], button[type="submit"][aria-label="Send prompt"], button[type="submit"][aria-label="Send"]')].filter(visible);
-  return {counts, error, ambiguous:false, ready:!busy && !error && counts.every(n => n === 1) &&
+  return {counts, error, ambiguous, ready:!ambiguous && !busy && !error && counts.every(n => n === 1) &&
     sends.length === 1 && !sends[0].disabled && sends[0].getAttribute('aria-disabled') !== 'true'};
 })""" % json.dumps(COMPOSER_SEL)
 

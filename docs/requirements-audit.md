@@ -67,6 +67,8 @@ phoneの `POST /v1/capture-videos` は認証付きの比較原動画受領用で
 
 比較計画は、同じ完全な冊子画像・指示・解答基準でSol／Extra High／Fast、Sol／High／Fast、Terra／High／Fastを測り、品質条件を満たしたモデルのMediumも調べる。これは現時点の評価計画で、採用値は未確定。全問正解した冊子の割合、記述・図の充足、設問の取りこぼし、修正を含む全体時間を記録する。公式Work資料も同じ入力とeffortによる比較と、品質条件を満たす軽い設定の選択を勧めている。APIのxhigh指針では追加の時間に見合う改善を評価で確認するよう求めている。APIの既定effortや速度倍率をWorkの実測へ転用しない。[モデル選定](https://learn.chatgpt.com/docs/model-selection)、[推論量](https://developers.openai.com/api/docs/guides/reasoning#reasoning-effort)、[Workの速度設定](https://learn.chatgpt.com/docs/agent-configuration/speed)
 
+11/9のスマホWorkによる共通テスト物理基礎14頁の最初の条件は、Sol／Extra High／Fastで全14答が公式解答と一致した。`model-fit-20261109-runner.py --grade ...sol-xhigh-fast-result-v4.json --packet ...packet-v4/packet.json` はexit 0、`matched=14, total=14, wrong=[]`。入力はPDFから描画した全冊子で、グラスの実写真ではない。途中の準備・返答回収修正を含むため比較用の所要時間は未取得で、東大水準の適性も示さない。次のSol／Highは添付準備で停止した。実画面のZIP表示名末尾に`(3)`が付き、元名だけを照合する判定がPCのDOM再現でも失敗した。表示名の対応だけを拡張し、送信元bytes、アップロード前後の個数確認、曖昧な対応の拒否を保つ。実機での修正版と残りのモデル比較は未確認。
+
 画像の寸法・bytes・原寸取得、転送と中間応答の時間もモデル比較と併せて測る。原音の利用は別途確認し、reading先行と同一会話への確定音声追加を保持する。[画像入力](https://developers.openai.com/api/docs/guides/images-vision)、[Camera2再処理](https://developer.android.com/reference/android/hardware/camera2/CameraDevice)
 
 今回、送信JPEGで1画素幅の赤青線がほぼ同色へ混ざる再現例を修正した。寸法・原本・品質fallbackは維持し、色の解像度を落とさない設定とする。保存実写8枚のPC比較で中央値は約1.96MBから2.24MB、encodeは約84msから132ms。これは文字判読・GPT正答・スマホ速度の測定ではない。PNGは追加の画素損失を避ける候補だが、この比較では中央値約10.08MBとなり、既存保存PNGを送る方式も含めて総時間と処理上限で判断する。

@@ -1190,6 +1190,81 @@ def test_attachment_confirmation_requires_the_card_and_enabled_send_not_input_fi
     assert page.evaluate("window.sent") == 0
 
 
+@pytest.mark.parametrize("name,displayed", [
+    ("pages_e238596b2c250aeb06e0fbc4d4d667091d43233fb0f1af38601cb2e376ba135c_001.zip",
+     "pages_e238596b2c250aeb06e0fbc4d4d667091d43233fb0f1af38601cb2e376ba135c_001(3).zip"),
+    ("originals.zip", "originals(1).zip"),
+    ("pages_[draft]+(copy).zip", "pages_[draft]+(copy)(12).zip"),
+])
+def test_numbered_upload_display_name_keeps_original_payload(page, name, displayed):
+    _upload_composer(page)
+    page.evaluate("""(displayed => {
+      const input = document.getElementById('files');
+      const originalChange = input.onchange;
+      input.onchange = function() {
+        window.uploadedBytes = this.files[0].arrayBuffer().then(buffer => [...new Uint8Array(buffer)]);
+        originalChange.call(this);
+        const card = document.querySelector('#cards span.truncate');
+        card.textContent = displayed;
+        const remove = document.createElement('button');
+        remove.setAttribute('aria-label', 'Remove ' + displayed);
+        document.getElementById('cards').append(remove);
+      };
+      return true;
+    })""" + f"({json.dumps(displayed)})")
+    payload = _payload(name=name)
+    assert work.attach_work_files(page, [payload], endpoint="http://127.0.0.1:9222", timeout_s=0) is True
+    assert page.evaluate("window.uploaded") == [name]
+    assert bytes(page.evaluate("window.uploadedBytes")) == payload["buffer"]
+    assert payload == _payload(name=name)
+    assert page.evaluate("window.sent") == 0
+
+
+def test_preexisting_numbered_upload_card_stops_before_writing_files(page):
+    _upload_composer(page)
+    page.evaluate("document.getElementById('cards').innerHTML='<span class=truncate>originals(3).zip</span>'; true")
+    with pytest.raises(chatgpt_web.ChatGptWebAttachmentFailed, match="already has"):
+        work.attach_work_files(page, [_payload()], endpoint="http://127.0.0.1:9222", timeout_s=0)
+    assert page.evaluate("window.uploaded") == []
+
+
+@pytest.mark.parametrize("labels,names,counts,ambiguous", [
+    (["originals(1).zip", "originals(3).zip"], ["originals.zip"], [2], False),
+    (["originals(1).zip"], ["originals.zip", "originals(1).zip"], [1, 1], True),
+])
+def test_numbered_upload_cards_require_one_to_one_matching(page, labels, names, counts, ambiguous):
+    _upload_composer(page)
+    page.evaluate("""(labels => {
+      for (const label of labels) {
+        const card = document.createElement('span');
+        card.className = 'truncate'; card.textContent = label;
+        document.getElementById('cards').append(card);
+      }
+      document.getElementById('send').disabled = false;
+      return true;
+    })""" + f"({json.dumps(labels)})")
+    state = page.evaluate(f"{work._UPLOAD_STATE_JS}({json.dumps(names)})")
+    assert state["counts"] == counts and state["ambiguous"] is ambiguous
+    assert state["ready"] is False
+
+
+@pytest.mark.parametrize("displayed", [
+    "originals(0).zip", "originals(01).zip", "originals(-1).zip", "originals(+1).zip",
+    "originals (1).zip", "originals(1).ZIP", "originals(1).zip.exe", "originals(1)(2).zip",
+])
+def test_numbered_upload_alias_requires_exact_stem_integer_and_extension(page, displayed):
+    _upload_composer(page)
+    page.evaluate("""(label => {
+      const card = document.createElement('span');
+      card.className = 'truncate'; card.textContent = label;
+      document.getElementById('cards').append(card);
+      document.getElementById('send').disabled = false;
+      return true;
+    })""" + f"({json.dumps(displayed)})")
+    state = page.evaluate(f'{work._UPLOAD_STATE_JS}(["originals.zip"])')
+    assert state["counts"] == [0] and state["ready"] is False
+
+
 def test_failed_upload_or_oversized_original_never_submits(page, monkeypatch):
     _upload_composer(page)
     page.evaluate("window.uploadError = true")

@@ -1,6 +1,6 @@
 # 再開入口：次のセッションはここだけ読めば始められる
 
-最終更新: 2026-11-09 再開中。Work close/長文receipt認識を2d01e50まで修正・push。phoneで既存返答14答の読取と公式解答一致を確認、正式回収待ち。詳細phone-work-connected-root-20261030.jsonのlatest_resume_20261109。
+最終更新: 2026-11-09 再開中。Sol/Extra Highの既存返答を正式回収し14/14一致。Sol/Highは送信前の添付名照合で停止、PC修正・別監査済み。JPEGはf5d3e01でpush・CI success、phone未導入。詳細phone-work-connected-root-20261030.jsonのlatest_resume_20261109.current_snapshot_1127UTC。
 Runs on: 会場phone AP＋glasses。phonehost監視ON/常に許可確認、API/Work稼働、GL52 chooser。原JPEG保持はPC実装・別監査済み、40枚相当の再確認35.578→1.626秒(PC)、phone未導入/OFF。実紙・原音・全再起動・長時間受入と東大モデル適性は未測定。
 
 ## 0. 読み方（前提と資料に引きずられないため）
@@ -90,7 +90,7 @@ Runs on: 会場phone AP＋glasses。phonehost監視ON/常に許可確認、API/W
   → 旧サーバ停止 → `nohup bash scripts/phone_serve.sh 127.0.0.1 > data/server-<commit>.log 2>&1 &`。PCからは `ssh -f -N -L 8000:127.0.0.1:8000 ...`（ssh `-i ~/.ssh/f51f_key -p 8022 u0_a26@192.168.0.6`）。
   ベンチの鍵は `ROKID_API_KEY` をスマホの env から読んで渡す（画面に出さない）。
 
-次の実行: helper2d01e50固定packetで既存Sol返答をreadback回収→同一14頁/東大20頁の残条件を比較。JPEGは全回帰の唯一stub失敗修正後31件通過、CI確認後・モデル比較終了後にphone導入と原画素検証。詳細は報告latest_resume_20261109。
+次の実行: helper/packet更新→同一14頁/東大20頁の残条件比較。phone開発接続復帰待ち（API health=ok）、SmartBackground毎時停止の原因候補を調査。JPEGの導入・原画素検証と会場全経路の受入は未了。
 
 1. 済：独立監査2回（`4552ea1`、`4552ea1..e12e155`）の指摘を `61ad481`〜`1134404` で反映。
 2. 済：4a（3節）。起動はスマホで `bash scripts/phone_serve.sh 127.0.0.1`、PCから `ssh -L 8000:127.0.0.1:8000` で投入した。
