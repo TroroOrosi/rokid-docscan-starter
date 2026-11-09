@@ -20,6 +20,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -28,6 +29,7 @@ import org.robolectric.RuntimeEnvironment;
 import org.robolectric.annotation.Config;
 import org.robolectric.shadow.api.Shadow;
 import org.robolectric.shadows.ShadowCaptureResult;
+import org.robolectric.shadows.ShadowLog;
 import org.robolectric.shadows.ShadowTotalCaptureResult;
 import org.robolectric.util.ReflectionHelpers;
 
@@ -92,6 +94,10 @@ public class GlassCameraVideoTest {
             idle(0); worker.drain(); Thread.sleep(2);
         }
         idle(0);
+        Object ending = ReflectionHelpers.getField(camera, "videoClose");
+        if (!port.closed || (ending != null && !(Boolean)ReflectionHelpers.getField(ending, "recorderFinished"))) {
+            fail(closeFailureEvidence("recorder close did not finish"));
+        }
     }
     private void awaitCameraResourcesClosed() throws Exception {
         Object ending = ReflectionHelpers.getField(camera, "videoClose");
@@ -100,7 +106,40 @@ public class GlassCameraVideoTest {
             idle(0); Thread.sleep(2);
         }
         idle(0);
-        assertTrue("camera close did not finish", (Boolean)ReflectionHelpers.getField(ending, "resourcesClosed"));
+        if (!(Boolean)ReflectionHelpers.getField(ending, "resourcesClosed")) {
+            fail(closeFailureEvidence("camera resources did not finish closing"));
+        }
+    }
+    private String closeFailureEvidence(String reason) {
+        StringBuilder evidence = new StringBuilder(reason);
+        Object ending = ReflectionHelpers.getField(camera, "videoClose");
+        evidence.append("\nvideoClosePresent=").append(ending != null);
+        if (ending != null) {
+            for (String field : List.of("resourcesClosed", "cameraClosed", "finishQueued", "recorderFinished")) {
+                Object value = ReflectionHelpers.getField(ending, field);
+                evidence.append(' ').append(field).append('=').append(value);
+            }
+        }
+        evidence.append("\nportStopped=").append(port.stopped).append(" portClosed=").append(port.closed);
+        evidence.append(" recorderTasks=").append(worker.tasks.size()).append(" failures=").append(failures);
+        for (DocScanTestCamera opened : GlassCameraWarmSessionTest.ManagerShadow.devices) {
+            evidence.append("\ndeviceClosed=").append(opened.closed)
+                    .append(" sessionClosed=").append(opened.session.closed);
+        }
+        for (var opened : GlassCameraWarmSessionTest.ReaderShadow.readers) {
+            evidence.append("\nreaderFormat=").append(opened.format).append(" readerClosed=").append(opened.closed);
+        }
+        evidence.append("\nuptimeMillis=").append(SystemClock.uptimeMillis())
+                .append(" mainNextTask=").append(shadowOf(Looper.getMainLooper()).getNextScheduledTaskTime());
+        evidence.append("\ncloseThreads:");
+        for (var entry : Thread.getAllStackTraces().entrySet()) {
+            Thread thread = entry.getKey();
+            if (!thread.getName().equals("glass-video-camera-close")) continue;
+            evidence.append('\n').append(thread.getName()).append(' ').append(thread.getState());
+            for (StackTraceElement frame : entry.getValue()) evidence.append("\n  ").append(frame);
+        }
+        evidence.append("\nDocScanGlassDoc logs=").append(ShadowLog.getLogsForTag("DocScanGlassDoc"));
+        return evidence.toString();
     }
     @Test public void explicitVideoKeepsMaxNativeJpegAndWarmObservationWithOneRecorder() {
         issue();
@@ -121,6 +160,32 @@ public class GlassCameraVideoTest {
         jpeg(); assertEquals(1, originals.size()); assertEquals(0, stopped[0]);
         closeWorkers(); assertEquals(1, stopped[0]); assertTrue(port.stopped); assertTrue(port.closed);
         assertTrue(device().closed); assertTrue(failures.isEmpty());
+    }
+    @Test public void incompleteCameraCloseMakesWaitHelperFailWithBoundaryEvidence() throws Exception {
+        issue(); jpeg();
+        CountDownLatch closeEntered = new CountDownLatch(1);
+        CountDownLatch releaseClose = new CountDownLatch(1);
+        device().onClose = () -> {
+            android.util.Log.w("DocScanGlassDoc", "test camera close gate");
+            closeEntered.countDown();
+            try { releaseClose.await(); }
+            catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); }
+        };
+        try {
+            camera.stopFuturePages(() -> {}); idle(0);
+            assertTrue(closeEntered.await(5, java.util.concurrent.TimeUnit.SECONDS));
+            AssertionError failure = assertThrows(AssertionError.class, this::closeWorkers);
+            assertTrue(failure.getMessage().contains("resourcesClosed=false"));
+            assertTrue(failure.getMessage().contains("cameraClosed=false"));
+            assertTrue(failure.getMessage().contains("recorderFinished=false"));
+            assertTrue(failure.getMessage().contains("portClosed=false"));
+            assertTrue(failure.getMessage().contains("glass-video-camera-close"));
+            assertTrue(failure.getMessage().contains("CountDownLatch.await"));
+            assertTrue(failure.getMessage().contains("test camera close gate"));
+        } finally {
+            releaseClose.countDown();
+            closeWorkers();
+        }
     }
     @Test public void failedStopNeverAcknowledgesIdleOrStartsANewCapture() throws Exception {
         issue(); jpeg(); port.stopFails = true; final int[] stopped = {0};
