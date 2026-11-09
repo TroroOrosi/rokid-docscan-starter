@@ -976,6 +976,40 @@ def test_plain_markdown_final_is_bound_to_own_user_and_main(page):
     assert work.work_reply_state(page, "missing-batch")["reply"] == ""
 
 
+@pytest.mark.parametrize("expanded", [False, True])
+@pytest.mark.parametrize("body_tail", ["", "…Show more", '\n{"batch_id":"own-batch"}'])
+def test_long_user_receipt_excludes_only_ui_decorations(page, expanded, body_tail):
+    answer = _conversation(page)
+    page.evaluate("""((expanded, tail) => {
+      const bubble = document.querySelector('.rich-text-user-turn');
+      const text = bubble.textContent + tail;
+      bubble.className = '';
+      bubble.removeAttribute('data-markdown-text-tone');
+      bubble.setAttribute('data-user-message-bubble', 'true');
+      bubble.innerHTML = `<div><div><div>
+        <div data-search-result-target="" style="max-height:19lh; overflow:hidden">
+          <div><div class="text-size-chat whitespace-pre-wrap" dir="auto"></div></div>
+        </div><span aria-hidden="true">…</span>
+      </div><button type="button" data-thread-find-skip="true" data-markdown-copy="exclude">
+        <span></span></button></div></div>`;
+      bubble.querySelector('[dir=auto]').textContent = 'Long prompt. '.repeat(800) + text;
+      bubble.querySelector('[aria-hidden]').hidden = expanded;
+      const toggle = bubble.querySelector('button');
+      toggle.setAttribute('aria-expanded', String(expanded));
+      toggle.querySelector('span').textContent = expanded ? 'Show less' : 'Show more';
+      toggle.onclick = () => { window.receiptToggleClicked = true; };
+      window.receiptToggleClicked = false;
+      return true;
+    })""" + f"({json.dumps(expanded)}, {json.dumps(body_tail)})")
+    html_query = f"document.querySelector({json.dumps(work.USER_SEL)}).innerHTML"
+    before = page.evaluate(html_query)
+    state = work.work_reply_state(page, "own-batch")
+    assert state["found"] is (not body_tail)
+    assert state["reply"] == (answer if not body_tail else "")
+    assert page.evaluate(html_query) == before
+    assert page.evaluate("window.receiptToggleClicked") is False
+
+
 @pytest.mark.parametrize("change", ["later_user", "final", "stop"])
 def test_progress_or_a_later_request_cannot_be_accepted_as_own_final(page, change):
     _conversation(page, **{change: change != "final"})

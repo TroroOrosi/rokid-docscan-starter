@@ -557,7 +557,9 @@ _REPLY_STATE_JS = r"""(batchId => {
   const userSelector = %s;
   const users = [...document.querySelectorAll(userSelector)].filter(e => e.getClientRects().length);
   const matches = users.filter(e => {
-    const text = e.textContent || ''; const pos = text.lastIndexOf('Transfer receipt:');
+    const content = e.cloneNode(true);
+    content.querySelectorAll('[aria-hidden="true"], [data-markdown-copy="exclude"]').forEach(node => node.remove());
+    const text = content.textContent || ''; const pos = text.lastIndexOf('Transfer receipt:');
     if (pos < 0) return false;
     try { return JSON.parse(text.slice(pos + 'Transfer receipt:'.length).trim()).batch_id === batchId; }
     catch { return false; }
