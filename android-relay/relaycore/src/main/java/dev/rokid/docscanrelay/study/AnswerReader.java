@@ -259,12 +259,19 @@ public final class AnswerReader {
         if (!bundle.sessionId.equals(next.sessionId) || !bundle.inputDigest.equals(next.inputDigest)
                 || next.revision <= bundle.revision) return false;
         boolean sameShape = next.items.size() == bundle.items.size();
+        boolean changed = false;
         for (int i = 0; sameShape && i < bundle.items.size(); i++) {
             AnswerItem old = bundle.items.get(i);
             AnswerItem item = next.items.get(i);
             sameShape = old.questionId.equals(item.questionId) && old.groupId.equals(item.groupId)
                     && old.groupLabel.equals(item.groupLabel) && old.questionLabel.equals(item.questionLabel)
                     && old.answerNumbers.equals(item.answerNumbers);
+            // Continuous pages contain every item; ordinary pages only contain the current one.
+            if (continuous || i == questionIndex) {
+                changed = changed || !old.answer.equals(item.answer)
+                        || old.status != item.status || !old.issue.equals(item.issue)
+                        || !old.diagrams.equals(item.diagrams);
+            }
         }
         if (!sameShape) {
             // The same questions never change order or identity. A deck with none
@@ -284,12 +291,8 @@ public final class AnswerReader {
             reflow();
             return true;
         }
-        boolean changed = !current().answer.equals(next.items.get(questionIndex).answer)
-                || current().status != next.items.get(questionIndex).status
-                || !current().issue.equals(next.items.get(questionIndex).issue)
-                || !current().diagrams.equals(next.items.get(questionIndex).diagrams);
         bundle = next;
-        if (changed || continuous) reflow();
+        if (changed) reflow();
         return true;
     }
 
