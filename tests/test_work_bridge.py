@@ -237,21 +237,22 @@ def test_browser_uncertain_pages_return_only_genuine_non_answering_stops(tmp_pat
         assert store.result(job["job_id"]) is None
 
 
-def test_new_work_and_quality_requests_use_standard_speed(tmp_path):
+def test_new_work_uses_fast_while_quality_requests_keep_standard_speed(tmp_path):
     from app.work_bridge import WorkStore
 
     store = WorkStore(tmp_path)
     job = queue(store)
-    assert job["requested_settings"]["speed"] == "standard"
+    assert job["requested_settings"]["speed"] == "fast"
     assert store.quality_request(job["job_id"], "p1")["requested_settings"]["speed"] == "standard"
 
 
 @pytest.mark.parametrize("completed", [False, True])
-def test_existing_fast_job_resumes_with_its_sealed_settings(tmp_path, completed):
+@pytest.mark.parametrize("speed", ["fast", "standard"])
+def test_existing_job_resumes_with_its_sealed_speed(tmp_path, completed, speed):
     from app.work_bridge import WorkConflict, WorkStore
 
     store = WorkStore(tmp_path, validated_profiles=("fixture",))
-    settings = {"model": "gpt-6.1-sol", "effort": "xhigh", "speed": "fast"}
+    settings = {"model": "gpt-6.1-sol", "effort": "xhigh", "speed": speed}
     job = queue(store, requested_settings=settings)
     if completed:
         complete(store, job, [receipt(store, job, "p1")])
@@ -261,7 +262,7 @@ def test_existing_fast_job_resumes_with_its_sealed_settings(tmp_path, completed)
     assert resumed["requested_settings"] == settings
     assert resumed["status"] == ("completed" if completed else "pending")
     with pytest.raises(WorkConflict, match="identity changed"):
-        queue(restarted, requested_settings={**settings, "speed": "standard"})
+        queue(restarted, requested_settings={**settings, "speed": "standard" if speed == "fast" else "fast"})
     assert restarted.get(job["job_id"]) == resumed
     assert restarted.result(job["job_id"]) == (answer() if completed else None)
 
@@ -598,7 +599,8 @@ def test_native_tile_receipts_require_the_bound_packet_and_every_delivered_image
 
 
 @pytest.mark.parametrize("model", ["gpt-6.1-sol", "GPT-6.10 Sol"])
-def test_mixed_audio_keeps_the_reading_conversation_and_original_images(tmp_path, model):
+@pytest.mark.parametrize("speed", ["fast", "standard"])
+def test_mixed_audio_keeps_the_reading_conversation_and_original_images(tmp_path, model, speed):
     from app.work_bridge import WorkConflict, WorkStore
 
     store = WorkStore(tmp_path, validated_profiles=("fixture",))
@@ -609,7 +611,7 @@ def test_mixed_audio_keeps_the_reading_conversation_and_original_images(tmp_path
                                         "status": "pending_audio", "answer": "", "diagrams": []})
     first = store.enqueue(session_id=1, conversation_key="session:1", stage="reading",
                           sources=sources(), system="answer", prompt="reading",
-                          requested_settings={"model": model, "effort": "xhigh", "speed": "fast"})
+                          requested_settings={"model": model, "effort": "xhigh", "speed": speed})
     acquired = [receipt(store, first, "p1")]
     complete(store, first, acquired, reading_result)
     audio = {"source_id": "audio", "mime_type": "audio/wav", "data": b"original recording"}
@@ -842,7 +844,7 @@ def test_phone_api_auto_queues_images_and_returns_work_answers_in_the_existing_b
     assert done.status_code == 200
     job = wait_for(lambda: (client.get("/v1/work/jobs").json().get("jobs") or [None])[0])
     assert len(job["sources"]) == 21
-    assert job["requested_settings"] == {"model": "gpt-6.1-sol", "effort": "xhigh", "speed": "standard"}
+    assert job["requested_settings"] == {"model": "gpt-6.1-sol", "effort": "xhigh", "speed": "fast"}
     assert job["model_selection_verified"] is False
     acquired = []
     for item in job["sources"]:

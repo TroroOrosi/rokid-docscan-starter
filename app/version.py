@@ -261,7 +261,8 @@ from __future__ import annotations
 # 0.69.2: repair Work receipt types and recover sealed replies with singleton metadata.
 # 0.69.3: use Standard Work speed and prevent silent answer-body or fraction-scope loss.
 # 0.69.4: retain unsupported table and matrix expressions before display conversion.
-APP_VERSION = "0.69.4"
+# 0.69.5: default production Work answers to Fast while trials explicitly use Standard.
+APP_VERSION = "0.69.5"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.
@@ -387,7 +388,8 @@ APP_VERSION = "0.69.4"
 # 1.42.0: optional native JPEG Work sources include explicit rotation and upright RGB evidence.
 # 1.42.1: reject nonempty answer fields that the displayed answer cannot retain.
 # 1.42.2: keep unsupported table/matrix source intact and mark it for review.
-API_VERSION = "1.42.2"
+# 1.42.3: new Work answers default to Fast without replacing sealed job settings.
+API_VERSION = "1.42.3"
 
 # Matching algorithm identity. Bump when thresholds or hashing change so a
 # re-index/eval is triggered. Mirrors thresholds in app/matching.py.

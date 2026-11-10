@@ -514,6 +514,7 @@ def private_state(monkeypatch, tmp_path):
     from app import config
 
     monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    monkeypatch.setenv("ROKID_WORK_SPEED", "standard")  # Verification fixtures explicitly use Standard.
     monkeypatch.setattr(chatgpt_web, "POLL_S", 0.001)
     monkeypatch.setattr(chatgpt_web, "RETRY_BACKOFF_S", 0)
     monkeypatch.setattr(chatgpt_web, "TIMEOUT_S", 0.2)
@@ -1487,6 +1488,7 @@ def _diagnostic_composer(page):
 
 
 def test_inspection_uses_explicit_purpose_and_restart_reads_same_chat_without_resending(page, monkeypatch):
+    monkeypatch.setenv("ROKID_WORK_SPEED", "fast")
     _diagnostic_composer(page)
     first = _inspection_call(page, monkeypatch)
     assert first["inspection_id"] == "a" * 64 and first["manifest_sha256"] == "b" * 64
@@ -2098,7 +2100,8 @@ def test_an_unrelated_draft_inserted_while_inspecting_settings_is_never_sent(pag
     assert page.evaluate("window.sent") == 0 and _guard_state() == "idle"
 
 
-def test_sealed_settings_override_later_environment_changes_before_send(page, monkeypatch):
+@pytest.mark.parametrize("speed", ["fast", "standard"])
+def test_sealed_settings_override_later_environment_changes_before_send(page, monkeypatch, speed):
     from app.solvers import cdp
 
     _upload_composer(page)
@@ -2109,19 +2112,20 @@ def test_sealed_settings_override_later_environment_changes_before_send(page, mo
             pass
     monkeypatch.setattr(cdp, "connect_over_cdp", lambda endpoint: LocalBrowser())
     monkeypatch.setenv("ROKID_WORK_MODEL", "gpt-6.1-terra")
-    monkeypatch.setenv("ROKID_WORK_SPEED", "fast")
+    monkeypatch.setenv("ROKID_WORK_SPEED", "standard" if speed == "fast" else "fast")
     client = work.WorkWebClient()
     result = client.complete_json(system="Answer", prompt="All questions", files=lambda: [_payload()],
         chat_key="work:sealed-settings", expect=("questions",), booklet=True,
-        requested_settings={"model": "gpt-6.1-sol", "effort": "xhigh", "speed": "standard"})
+        requested_settings={"model": "gpt-6.1-sol", "effort": "xhigh", "speed": speed})
     assert result["questions"] and page.evaluate("window.sent") == 1
     assert page.evaluate("document.getElementById('sol').getAttribute('aria-checked')") == "true"
+    assert page.evaluate("document.querySelector('[role=menuitemcheckbox]').getAttribute('aria-checked')") == str(speed == "fast").lower()
     assert client.conversation_id == "12345678-1234-1234-1234-123456789abc"
 
 
-def test_default_work_and_inspection_settings_use_standard(monkeypatch):
+def test_default_work_uses_fast_while_inspection_keeps_standard(monkeypatch):
     monkeypatch.delenv("ROKID_WORK_SPEED", raising=False)
-    assert work._requested_settings().speed == "standard"
+    assert work._requested_settings().speed == "fast"
     calls = []
     client = work.WorkWebClient()
     monkeypatch.setattr(client, "complete_json", lambda **kwargs: calls.append(kwargs))
@@ -2130,41 +2134,67 @@ def test_default_work_and_inspection_settings_use_standard(monkeypatch):
     assert calls[0]["requested_settings"]["speed"] == "standard"
 
 
-@pytest.mark.parametrize("purpose,source", [("answer", "explicit"), ("answer", "environment"),
-                                           ("inspection", "explicit")])
-def test_fast_requests_stop_before_attachment_and_send(page, monkeypatch, purpose, source):
+@pytest.mark.parametrize("source", ["default", "explicit", "environment"])
+def test_fast_answers_verify_actual_controls_attach_and_send_once(page, monkeypatch, source):
     from app.solvers import cdp
 
-    _diagnostic_composer(page) if purpose == "inspection" else _upload_composer(page)
+    _upload_composer(page)
+    monkeypatch.setenv("ROKID_CHATGPT_SEND_ENABLED", "1")
+    if source == "default":
+        monkeypatch.delenv("ROKID_WORK_SPEED", raising=False)
+    else:
+        monkeypatch.setenv("ROKID_WORK_SPEED", "fast")
+    monkeypatch.setattr(cdp, "connect_over_cdp", lambda endpoint: type("LocalBrowser", (), {
+        "contexts": [_Context(_VenueTab(page))], "close": lambda self: None})())
+    settings = {"model": "gpt-6.1-sol", "effort": "xhigh", "speed": "fast"}
+    client = work.WorkWebClient()
+    result = client.complete_json(system="Answer", prompt="All questions", files=lambda: [_payload()],
+        chat_key="work:production-fast", expect=("questions",), booklet=True,
+        requested_settings=settings if source == "explicit" else None)
+    assert result["questions"] and page.evaluate("window.sent") == 1
+    assert page.evaluate("window.uploaded") == ["originals.zip"]
+    assert page.evaluate("document.querySelector('[role=menuitemcheckbox]').getAttribute('aria-checked')") == "true"
+    assert page.evaluate("document.getElementById('models').hidden") is True
+    assert _guard_state() == "idle"
+
+
+def test_explicit_fast_inspection_still_stops_before_attachment_and_send(page, monkeypatch):
+    from app.solvers import cdp
+
+    _diagnostic_composer(page)
     monkeypatch.setenv("ROKID_CHATGPT_SEND_ENABLED", "1")
     monkeypatch.setenv("ROKID_WORK_SPEED", "fast")
     monkeypatch.setattr(cdp, "connect_over_cdp", lambda endpoint: type("LocalBrowser", (), {
         "contexts": [_Context(_VenueTab(page))], "close": lambda self: None})())
-    settings = {"model": "gpt-6-luna" if purpose == "inspection" else "gpt-6.1-sol",
-                "effort": "high" if purpose == "inspection" else "xhigh", "speed": "fast"}
-    client = work.WorkWebClient()
     with pytest.raises(chatgpt_web.ChatGptWebModelMismatch, match="require Standard"):
-        if purpose == "inspection":
-            client.complete_inspection(inspection_id="a" * 64, manifest_sha256="b" * 64,
-                prompt="Inspect regions", files=lambda: [_payload()], requested_settings=settings)
-        else:
-            client.complete_json(system="Answer", prompt="All questions", files=lambda: [_payload()],
-                chat_key="work:old-fast", expect=("questions",), booklet=True,
-                requested_settings=settings if source == "explicit" else None)
+        work.WorkWebClient().complete_inspection(inspection_id="a" * 64, manifest_sha256="b" * 64,
+            prompt="Inspect regions", files=lambda: [_payload()],
+            requested_settings={"model": "gpt-6-luna", "effort": "high", "speed": "fast"})
     assert page.evaluate("window.sent") == 0 and page.evaluate("window.uploaded") == []
     assert _guard_state() == "idle"
 
 
-def test_fast_is_also_rejected_at_the_direct_submission_boundary(page, monkeypatch):
+@pytest.mark.parametrize("actual_fast", [False, True])
+def test_fast_submission_boundary_requires_the_requested_public_speed(page, monkeypatch, actual_fast):
     _upload_composer(page)
     monkeypatch.setenv("ROKID_WORK_SPEED", "fast")
-    reached = []
-    with pytest.raises(chatgpt_web.ChatGptWebModelMismatch, match="require Standard"):
-        work.WorkWebClient()._send_and_read(page,
-            'Local fixture\nTransfer receipt:\n{"batch_id":"old-fast"}', composer=None,
+    page.evaluate("document.getElementById('send').disabled=false")
+    if actual_fast:
+        page.evaluate("document.querySelector('[role=menuitemcheckbox]').click()")
+    reached, models = [], []
+    def submit():
+        return work.WorkWebClient()._send_and_read(page,
+            'Local fixture\nTransfer receipt:\n{"batch_id":"production-fast"}', composer=None,
             expect=("questions",), before_submit=lambda: reached.append(True),
-            on_chat_url=lambda value: None, on_model=lambda value: None)
-    assert reached == [] and page.evaluate("window.sent") == 0
+            on_chat_url=lambda value: None, on_model=models.append)
+    if actual_fast:
+        assert '"questions"' in submit()
+        assert reached == [True] and models == ["GPT-6.1 Sol / Extra High / Fast"]
+        assert page.evaluate("window.sent") == 1
+    else:
+        with pytest.raises(chatgpt_web.ChatGptWebModelMismatch):
+            submit()
+        assert reached == [] and page.evaluate("window.sent") == 0
 
 
 @pytest.mark.parametrize("pending", [False, True])
@@ -2177,9 +2207,6 @@ def test_old_fast_answers_recover_without_another_attachment_or_send(page, monke
         "contexts": [_Context(_VenueTab(page))], "close": lambda self: None})())
     settings = {"model": "gpt-6.1-sol", "effort": "xhigh", "speed": "fast"}
     legacy = work.WorkWebClient()
-    # Build the historical journal using local HTML and the prior verifier.
-    monkeypatch.setattr(legacy, "_verify_model", lambda page, select=False:
-                        work.verify_work_model(page, select=select, requested_settings=settings))
     arguments = {"system": "Answer", "prompt": "All questions", "chat_key": "work:saved-fast",
                  "expect": ("questions",), "booklet": True, "requested_settings": settings}
     page.evaluate("window.suppressFinal = " + json.dumps(pending))

@@ -72,7 +72,7 @@ def _requested_settings(settings=None):
     values = settings if settings is not None else {
         "model": os.environ.get("ROKID_WORK_MODEL") or MODEL,
         "effort": os.environ.get("ROKID_WORK_EFFORT") or "xhigh",
-        "speed": os.environ.get("ROKID_WORK_SPEED") or "standard",
+        "speed": os.environ.get("ROKID_WORK_SPEED") or "fast",
     }
     if (not isinstance(values, dict) or set(values) != {"model", "effort", "speed"}
             or any(not isinstance(value, str) or not value.strip() for value in values.values())):
@@ -1020,10 +1020,8 @@ class WorkWebClient(chat.ChatGptWebClient):
 
     def _verify_model(self, page, *, select=False):
         settings = self._requested.get() or _requested_settings()
-        if settings.speed != "standard":
-            # Saved Fast replies recover before model verification. A fresh
-            # submission must not incur Fast usage, including old sealed jobs.
-            raise chat.ChatGptWebModelMismatch("new Work submissions require Standard speed; nothing sent")
+        if self._inspection.get() is not None and settings.speed != "standard":
+            raise chat.ChatGptWebModelMismatch("Work inspections require Standard speed; nothing sent")
         return verify_work_model(page, select=select, requested_settings=settings)
 
     def _attach_images(self, page, images, *, files=None, audio=None, **kwargs):

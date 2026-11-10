@@ -187,7 +187,7 @@ class ChatGptWorkSolver(Solver):
             return saved  # Restart, uncertain sends and listening never re-resolve.
         requested = {"model": os.environ.get("ROKID_WORK_MODEL") or "gpt-6.1-sol",
                      "effort": os.environ.get("ROKID_WORK_EFFORT") or "xhigh",
-                     "speed": os.environ.get("ROKID_WORK_SPEED") or "standard"}
+                     "speed": os.environ.get("ROKID_WORK_SPEED") or "fast"}
         if not chatgpt_send_enabled():
             return requested  # Explicit authenticated HTTP queue; no actual-selection claim.
         if self._client is None:

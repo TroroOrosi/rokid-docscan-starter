@@ -456,7 +456,8 @@ def test_original_audio_replacement_cannot_send_or_seal_listening_answers(client
 
 
 @pytest.mark.parametrize("policy", [None, "exact"])
-def test_new_browser_job_seals_actual_inventory_model_and_reuses_it_after_restart(tmp_path, monkeypatch, policy):
+@pytest.mark.parametrize("speed", [None, "standard"])
+def test_new_browser_job_seals_actual_inventory_model_and_reuses_it_after_restart(tmp_path, monkeypatch, policy, speed):
     from app.solvers import chatgpt_work
     from app.solvers.base import Question
     from app.work_bridge import WorkPending, WorkStore
@@ -469,6 +470,10 @@ def test_new_browser_job_seals_actual_inventory_model_and_reuses_it_after_restar
     monkeypatch.setattr(chatgpt_work, "work_binding", lambda session_id: ("fixture-glasses", 7))
     monkeypatch.setenv("ROKID_CHATGPT_SEND_ENABLED", "1")
     monkeypatch.delenv("ROKID_WORK_MODEL", raising=False)
+    if speed is None:
+        monkeypatch.delenv("ROKID_WORK_SPEED", raising=False)
+    else:
+        monkeypatch.setenv("ROKID_WORK_SPEED", speed)
     if policy:
         monkeypatch.setenv("ROKID_WORK_MODEL_POLICY", policy)
     else:
@@ -490,12 +495,13 @@ def test_new_browser_job_seals_actual_inventory_model_and_reuses_it_after_restar
         chatgpt_work.ChatGptWorkSolver(client=inventory).answer_all(question=question)
     first = store.session_jobs(1)[0]
     assert first["requested_settings"] == {"model": "GPT-6.10 Sol" if policy is None else "GPT 6.1 Sol",
-                                          "effort": "xhigh", "speed": "standard"}
-    assert inventory.calls == [({"model": "gpt-6.1-sol", "effort": "xhigh", "speed": "standard"}, policy is None)]
+                                          "effort": "xhigh", "speed": speed or "fast"}
+    assert inventory.calls == [({"model": "gpt-6.1-sol", "effort": "xhigh", "speed": speed or "fast"}, policy is None)]
     raw, _ = store.read_source(first["job_id"], "p1")
     assert raw == original.read_bytes()
     monkeypatch.setenv("ROKID_WORK_MODEL", "GPT-6.99 Sol")
     monkeypatch.setenv("ROKID_WORK_MODEL_POLICY", "invalid-after-seal")
+    monkeypatch.setenv("ROKID_WORK_SPEED", "fast" if speed == "standard" else "standard")
     with pytest.raises(WorkPending):
         chatgpt_work.ChatGptWorkSolver(client=inventory).answer_all(question=question)
     assert store.session_jobs(1)[0]["job_id"] == first["job_id"] and len(inventory.calls) == 1

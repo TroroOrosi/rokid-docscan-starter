@@ -180,6 +180,13 @@ selection, obstructed click or unclosed popup still stops submission.
 Close and confirm only a popup the verification itself opened. Login, attachment
 and uncertain-send safeguards remain independent of model-name fallback.
 
+Ordinary new Work answer jobs default to Fast for production. Trials and
+verification explicitly set `ROKID_WORK_SPEED=standard`; the phone's current
+Standard override is a trial setting. Existing sealed jobs, restarted sends and
+their later listening stage retain their saved settings. Capture-inspection and
+quality requests retain dedicated Standard settings. Actual model, effort and
+speed verification and uncertain-send safeguards apply to both answer speeds.
+
 ## Real-device contract
 
 - Photographing the physical page is the primary input path. On the decided

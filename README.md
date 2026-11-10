@@ -144,7 +144,7 @@ Driveへ置く場合も全件列挙と各原画像取得が必要で、添付20�
 CXR-L の実装境界は
 [CXR-L / Global Hi Rokid integration](docs/cxr-l-integration.md)です。
 
-現在のバージョン: **Server APP 0.69.4 / API 1.42.2 / Android client 0.3.17 / Glasses View 1.43.2 / Solver API 1.10.0**。
+現在のバージョン: **Server APP 0.69.5 / API 1.42.3 / Android client 0.3.17 / Glasses View 1.43.2 / Solver API 1.10.0**。
 版数の正本は `app/version.py` です。他の資料は版数を書かず、この行だけが
 `tests/test_documentation_contract.py` で実装と照合されます。
 Solver API は、記入用解答の全文保持・資料不足の分離を行う `answer_only` モードを含みます。
@@ -581,7 +581,7 @@ uvicorn app.main:app --port 8000
 | `ROKID_TRANSCRIBE_MODEL` | `gpt-4o-transcribe` | openai の書き起こしモデル（gemini は `ROKID_LLM_MODEL`） |
 | `ROKID_SOLVER_TIERS` | （単一） | 二段フォールバック順（例 `openai,local`） |
 | `ROKID_CHATGPT_CDP` | `http://127.0.0.1:9222` | `chatgpt-web` / `chatgpt-work` が接続する Chromium のDevToolsポート。Termux起動ではloopbackへ固定 |
-| `ROKID_WORK_MODEL` / `ROKID_WORK_EFFORT` / `ROKID_WORK_SPEED` | `gpt-6.1-sol` / `xhigh` / `fast` | 新規Work jobの基準モデル・推論量・速度。保存した実設定と送信前の公開UIを照合 |
+| `ROKID_WORK_MODEL` / `ROKID_WORK_EFFORT` / `ROKID_WORK_SPEED` | `gpt-6.1-sol` / `xhigh` / `fast` | 通常の新規答案は本番Fast。試験・検証では `ROKID_WORK_SPEED=standard` を明示。保存済みjob・追加音声の設定は引き継ぎ、送信前の公開UIと照合。専用の品質検査はStandard |
 | `ROKID_WORK_MODEL_POLICY` | `follow-family` | 新規ブラウザjobで同系統・基準版以上の最高版へ追従。`exact` で指定版固定。既存job・追加音声の保存設定は引継ぐ |
 | `ROKID_WORK_ORIGINAL_JPEG` | `0` | `1`で新規Work jobに検証済みの撮影JPEGを使用。向きと画素の対応を検証し、既存jobの形式は保持。端末での速度・精度比較後に採用を判断 |
 | `ROKID_KEYMAP` | （なし） | gesture→KeyCode の上書き（JSON、`/v1/settings.input`。既定 KeyCode は旧機由来・未実測） |

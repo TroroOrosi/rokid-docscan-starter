@@ -415,7 +415,7 @@ class WorkStore:
             prior = conn.execute("SELECT * FROM jobs WHERE session_id=? AND stage='reading'", (session_id,)).fetchone() if stage == "listening" else None
             sealed = previous or prior
             requested_settings = requested_settings or (json.loads(sealed["spec_json"])["requested_settings"] if sealed
-                                                       else {"model": "gpt-6.1-sol", "effort": "xhigh", "speed": "standard"})
+                                                       else {"model": "gpt-6.1-sol", "effort": "xhigh", "speed": "fast"})
             if (set(requested_settings) != {"model", "effort", "speed"}
                     or any(not isinstance(v, str) or not v.strip() for v in requested_settings.values())):
                 raise ValueError("invalid requested model settings")
