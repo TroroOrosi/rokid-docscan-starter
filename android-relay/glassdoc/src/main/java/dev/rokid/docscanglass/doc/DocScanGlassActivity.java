@@ -148,6 +148,10 @@ public final class DocScanGlassActivity extends Activity
                 thread.setDaemon(true);
                 return thread;
             });
+    private final Object answerPositionLock = new Object();
+    // Only an unstarted cursor write can absorb later moves of this exact bundle.
+    // Every read, resume and waited/terminal save cuts this pending tail.
+    private PendingAnswerPosition pendingAnswerPosition;
     // Screen ownership only. Always read/written on the main thread (onAction,
     // openAnswers/closeAnswers, and the main.post callback fetchAnswers posts
     // from its background thread) -- onUpdate's guard no longer reads it.
@@ -481,7 +485,10 @@ public final class DocScanGlassActivity extends Activity
         if (ocr != null) ocr.close();
         if (!videoEnding && cameraThread != null) cameraThread.quitSafely();
         stateExecutor.shutdown();
-        answerPersistExecutor.shutdown();
+        synchronized (answerPositionLock) {
+            pendingAnswerPosition = null;
+            answerPersistExecutor.shutdown();
+        }
         super.onDestroy();
     }
 
@@ -1141,7 +1148,7 @@ public final class DocScanGlassActivity extends Activity
 
     private void loadStartupAnswers() {
         long generation = powerGeneration;
-        answerPersistExecutor.execute(() -> {
+        queueAnswerPersistence(() -> {
             AnswerStore.Saved saved = loadSavedAnswers();
             main.post(() -> {
                 if (!isCurrentPowerGeneration(generation) || sessionClosed || isFinishing() || isDestroyed()
@@ -1157,7 +1164,7 @@ public final class DocScanGlassActivity extends Activity
         long session = activeSession();
         if (savedReadingLoadGeneration == generation) return;
         savedReadingLoadGeneration = generation;
-        answerPersistExecutor.execute(() -> {
+        queueAnswerPersistence(() -> {
             AnswerStore.Saved saved = loadSavedAnswers();
             main.post(() -> {
                 if (savedReadingLoadGeneration != generation) return;
@@ -1175,7 +1182,7 @@ public final class DocScanGlassActivity extends Activity
     private void resumePreviousAnswers() {
         long generation = powerGeneration;
         startupStarting = true;
-        answerPersistExecutor.execute(() -> {
+        queueAnswerPersistence(() -> {
             AnswerStore.Saved saved = null;
             try { saved = answerStore.resume(() -> isCurrentPowerGeneration(generation)
                     && !sessionClosed && !isFinishing() && !isDestroyed()); }
@@ -1313,7 +1320,7 @@ public final class DocScanGlassActivity extends Activity
                 || (acknowledgedSession == session && acknowledgedRevision >= shown.revision)) return;
         long generation = powerGeneration;
         acknowledgementPending = shown;
-        answerPersistExecutor.execute(() -> {
+        queueAnswerPersistence(() -> {
             AnswerStore.Saved saved = loadSavedAnswers();
             main.post(() -> {
                 if (acknowledgementPending != shown) return;
@@ -1579,10 +1586,12 @@ public final class DocScanGlassActivity extends Activity
      * Persistence must never throw into the UI, exactly as the fetch does
      * not. The write itself runs off the main thread on
      * {@code answerPersistExecutor} -- single-threaded, so writes still
-     * commit in the order the gestures that queued them happened in. CLOSED
+     * commit in gesture order. Consecutive unstarted cursor writes for the
+     * same immutable bundle retain only the latest cursor. Reads, resumes,
+     * waited writes and CLOSED remain separate FIFO barriers. CLOSED
      * is queued on that same executor, not a separate path, so it can never
      * be overtaken by a position write queued earlier by a faster gesture;
-     * and this method blocks on it (only for CLOSED) so the latch is
+     * and this method blocks on waited writes so the CLOSED latch is
      * durable before {@code closeAnswers} swaps the screen back to the HUD.
      */
     private boolean persistAnswerPosition(boolean closed) {
@@ -1596,8 +1605,24 @@ public final class DocScanGlassActivity extends Activity
         AnswerBundle bundle = reader.bundle();
         String questionId = reader.current().questionId;
         int offset = reader.offset();
-        Future<Boolean> queued = answerPersistExecutor.submit(
-                () -> writeAnswerPosition(bundle, questionId, offset, closed));
+        Future<Boolean> queued;
+        synchronized (answerPositionLock) {
+            if (!closed && !wait && pendingAnswerPosition != null
+                    && pendingAnswerPosition.bundle == bundle) {
+                pendingAnswerPosition.questionId = questionId;
+                pendingAnswerPosition.offset = offset;
+                return true;
+            }
+            pendingAnswerPosition = null;
+            PendingAnswerPosition position = new PendingAnswerPosition(bundle, questionId, offset, closed);
+            if (!closed && !wait) pendingAnswerPosition = position;
+            try { queued = answerPersistExecutor.submit(position); }
+            catch (java.util.concurrent.RejectedExecutionException error) {
+                pendingAnswerPosition = null;
+                Log.w(TAG, "answer position queue closed", error);
+                return false;
+            }
+        }
         if (wait) {
             try {
                 return queued.get();
@@ -1611,6 +1636,38 @@ public final class DocScanGlassActivity extends Activity
             }
         }
         return true; // ordinary position accepted by the queue, not yet durable
+    }
+
+    private void queueAnswerPersistence(Runnable task) {
+        synchronized (answerPositionLock) {
+            pendingAnswerPosition = null;
+            answerPersistExecutor.execute(task);
+        }
+    }
+
+    private final class PendingAnswerPosition implements java.util.concurrent.Callable<Boolean> {
+        private final AnswerBundle bundle;
+        private final boolean closed;
+        private String questionId;
+        private int offset;
+
+        private PendingAnswerPosition(AnswerBundle bundle, String questionId, int offset, boolean closed) {
+            this.bundle = bundle;
+            this.questionId = questionId;
+            this.offset = offset;
+            this.closed = closed;
+        }
+
+        @Override public Boolean call() {
+            String savedQuestion;
+            int savedOffset;
+            synchronized (answerPositionLock) {
+                if (pendingAnswerPosition == this) pendingAnswerPosition = null;
+                savedQuestion = questionId;
+                savedOffset = offset;
+            }
+            return writeAnswerPosition(bundle, savedQuestion, savedOffset, closed);
+        }
     }
 
     private boolean writeAnswerPosition(
