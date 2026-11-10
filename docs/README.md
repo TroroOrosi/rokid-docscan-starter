@@ -120,6 +120,7 @@ what the platform permits.
 - `.agents/progress/archive/pr37-offline-remediation.md` — 追加修正と停止条件。
 - `.agents/progress/archive/pr37-predevice-handoff.md` — PR37の実機前修正とCodexへの引き継ぎ。
 - `.agents/progress/archive/multimodal-scan.md` — multimodal-scanの実機状態と経緯。
+- `.agents/progress/archive/venue-approval-log-20261001-20261005.md` — 10/1〜10/5の可視ログイン・モデル確認・headless診断・更新の承認と実行結果。消費済みの履歴で、現在の承認ではない。
 
 Continuation records for agents. Never an operator contract.
 

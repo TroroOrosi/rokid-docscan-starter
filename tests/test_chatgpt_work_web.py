@@ -2224,3 +2224,24 @@ def test_old_fast_answers_recover_without_another_attachment_or_send(page, monke
     assert page.evaluate("window.sent") == 1 and page.evaluate("window.uploaded") == ["originals.zip"]
     assert page.evaluate("document.querySelector('[role=menuitemcheckbox]').getAttribute('aria-checked')") == "true"
     assert _guard_state() == "idle"
+
+
+@pytest.mark.parametrize("final, error", [
+    ("解答の途中で出力が止まりました", "ChatGptWebReplyIncomplete"),
+    ("You've reached your usage limit", "ChatGptWebRateLimit"),
+])
+def test_a_work_task_that_ended_without_its_answer_is_a_known_outcome_not_an_unknown_send(page, final, error):
+    """Another route may take the booklet only because this send can no longer be answered."""
+    _upload_composer(page)
+    page.evaluate("window.suppressFinal = true")
+    tab = _VenueTab(page)
+    with pytest.raises(chatgpt_web.ChatGptWebUncertain):
+        _booklet(work.WorkWebClient(), tab, lambda: [_payload()])
+    assert _guard_state() == "uncertain"
+    page.evaluate("window.finish()")
+    page.evaluate("document.querySelector('[data-local-conversation-final-assistant] div').textContent = "
+                  + json.dumps(final))
+    with pytest.raises(getattr(chatgpt_web, error)):
+        _booklet(work.WorkWebClient(), tab, lambda: [])
+    # Read only: the ended task was not sent again, and the shared send guard is free.
+    assert page.evaluate("window.sent") == 1 and _guard_state() == "idle"

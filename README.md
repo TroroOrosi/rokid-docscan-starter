@@ -118,7 +118,7 @@ submodule、AARコピーは不要です。
 | 経路 | 位置づけ |
 |---|---|
 | `ROKID_SOLVER=chatgpt-web` | スマホに残る従来のChat経路。ログイン済みウェブセッションをCDP経由で操作します |
-| `ROKID_SOLVER=chatgpt-work` | スマホ内のWorkブラウザへ原画像のZIPを分割送信し、同じ会話の回答を受領する経路。PNGが既定で、撮影情報と画素を照合した原JPEGの送信も比較できます。実装・PC検証と、スマホへの導入・会場受入を分けて確認します |
+| `ROKID_SOLVER=chatgpt-work` | スマホ内のWorkブラウザへ原画像のZIPを分割送信し、同じ会話の回答を受領する経路。PNGが既定で、撮影情報と画素を照合した原JPEGの送信も比較できます。実装・PC検証と、スマホへの導入・会場受入を分けて確認します。Workが利用制限の返答を返した場合、または送信前にWorkの操作部が使えない場合は、同じ冊子を `chatgpt-web`（先頭のモデル位置、Extra Highを確認してから送信）へ自動で渡します。送信結果が不明な場合は切り替えません |
 | スマホ内ローカルモデル（F-51F、llama.cpp） | **不採用**（2026-09-14、利用者の決定）。実測は `docs/hardware-measurements.md` E 節に証拠として残しますが、新規作業はありません |
 | `openai` / `gemini` / `claude` | API キーがあれば設定だけで動きます。`ROKID_SOLVER_TIERS` のフォールバック段として残します |
 
@@ -144,7 +144,7 @@ Driveへ置く場合も全件列挙と各原画像取得が必要で、添付20�
 CXR-L の実装境界は
 [CXR-L / Global Hi Rokid integration](docs/cxr-l-integration.md)です。
 
-現在のバージョン: **Server APP 0.69.5 / API 1.42.3 / Android client 0.3.17 / Glasses View 1.43.2 / Solver API 1.10.0**。
+現在のバージョン: **Server APP 0.70.0 / API 1.43.0 / Android client 0.3.17 / Glasses View 1.43.2 / Solver API 1.10.0**。
 版数の正本は `app/version.py` です。他の資料は版数を書かず、この行だけが
 `tests/test_documentation_contract.py` で実装と照合されます。
 Solver API は、記入用解答の全文保持・資料不足の分離を行う `answer_only` モードを含みます。
@@ -580,6 +580,7 @@ uvicorn app.main:app --port 8000
 | `ROKID_TRANSCRIBER` | （なし） | リスニング録音の書き起こし `openai\|gemini`（未設定=与えた transcript を使用） |
 | `ROKID_TRANSCRIBE_MODEL` | `gpt-4o-transcribe` | openai の書き起こしモデル（gemini は `ROKID_LLM_MODEL`） |
 | `ROKID_SOLVER_TIERS` | （単一） | 二段フォールバック順（例 `openai,local`） |
+| `ROKID_SOLVER_FALLBACKS` | `chatgpt-work` のとき `chatgpt-web` | 冊子1通の経路が利用制限または送信前の失敗で使えないときに引き継ぐ経路の順（カンマ区切り）。空文字で無効。録音の段は画像を持つ会話から動かしません |
 | `ROKID_CHATGPT_CDP` | `http://127.0.0.1:9222` | `chatgpt-web` / `chatgpt-work` が接続する Chromium のDevToolsポート。Termux起動ではloopbackへ固定 |
 | `ROKID_WORK_MODEL` / `ROKID_WORK_EFFORT` / `ROKID_WORK_SPEED` | `gpt-6.1-sol` / `xhigh` / `fast` | 通常の新規答案は本番Fast。試験・検証では `ROKID_WORK_SPEED=standard` を明示。保存済みjob・追加音声の設定は引き継ぎ、送信前の公開UIと照合。専用の品質検査はStandard |
 | `ROKID_WORK_MODEL_POLICY` | `follow-family` | 新規ブラウザjobで同系統・基準版以上の最高版へ追従。`exact` で指定版固定。既存job・追加音声の保存設定は引継ぐ |

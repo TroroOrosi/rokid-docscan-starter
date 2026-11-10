@@ -42,6 +42,11 @@ def list_solvers() -> list[dict]:
     return _registry.list()
 
 
+def has_booklet_route(name: str) -> bool:
+    """A registered solver that answers the whole booklet in one message."""
+    return name in _registry and callable(getattr(_registry.get(name), "answer_all", None))
+
+
 def _select_name(prefer: str | None) -> str:
     return _registry.select_name(prefer)
 

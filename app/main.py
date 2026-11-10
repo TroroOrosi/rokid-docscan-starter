@@ -8,6 +8,7 @@ registries; see docs/exam-solver-architecture.md and docs/cxr-l-integration.md.
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import hmac
 import io
@@ -88,9 +89,10 @@ from .solvers.chatgpt_web import (
     ChatGptWebAttachmentFailed, ChatGptWebAuthenticationRequired,
     ChatGptWebBlocked, ChatGptWebBrowserUnavailable, ChatGptWebBusy,
     ChatGptWebChatLost, ChatGptWebError, ChatGptWebModelMismatch, ChatGptWebRateLimit,
+    ChatGptWebReplyIncomplete,
     ChatGptWebSendNotAuthorized, ChatGptWebUncertain, chatgpt_send_enabled,
 )
-from .solvers.registry import solve_with_fallback
+from .solvers.registry import has_booklet_route, solve_with_fallback
 from .solvers.chatgpt_work import WorkBrowserUncertain, work_binding
 from .work_bridge import (
     WorkBrowserResultRejected, WorkConflict, WorkPending, WorkReadabilityRejected, WorkStore, configured_work_store,
@@ -2992,6 +2994,7 @@ _FAILURE_CODES = (
     (ChatGptWebUncertain, "browser_outcome_unknown"),
     (ChatGptWebChatLost, "chat_lost"),
     (ChatGptWebRateLimit, "rate_limited"),
+    (ChatGptWebReplyIncomplete, "reply_incomplete"),
     (ChatGptWebBusy, "browser_busy"),
     (ChatGptWebBlocked, "browser_blocked"),
 )
@@ -3040,11 +3043,68 @@ def _work_recovery_job_id(row) -> str | None:
 
 
 def _retrying(row) -> bool:
-    return bool(_work_recovery_job_id(row)) or (_solve_failure(row).get("code") in _RETRYING_ISSUES
-            and _failure_count(row) < RESUME_LIMIT)
+    failure = _solve_failure(row)
+    return bool(_work_recovery_job_id(row)) or bool(failure.get("next_route")) or (
+        failure.get("code") in _RETRYING_ISSUES and _failure_count(row) < RESUME_LIMIT)
 
 
-def _record_solve_failure(conn, row, error: Exception, *, commit: bool = True) -> None:
+def _booklet_routes() -> list[str]:
+    """ROKID_SOLVER, then the routes that take the same booklet when it cannot answer.
+
+    No PC is at the venue and the phone is not touched, so a usage limit on Work
+    must not end the subject: Chat (first model position, Extra High verified
+    before sending) takes it by default. ROKID_SOLVER_FALLBACKS overrides the
+    order; an empty value disables switching.
+    """
+    primary = (os.environ.get("ROKID_SOLVER") or "").strip()
+    default = "chatgpt-web" if primary == "chatgpt-work" else ""
+    names = [primary, *(name.strip() for name in os.environ.get("ROKID_SOLVER_FALLBACKS", default).split(","))]
+    return list(dict.fromkeys(name for name in names if name and (name == primary or has_booklet_route(name))))
+
+
+def _closed_routes(rows) -> set[str]:
+    closed: set[str] = set()
+    for row in rows:
+        try:
+            closed |= set(json.loads(row["structure_json"] or "{}").get("closed_routes", []))
+        except (ValueError, TypeError, AttributeError):
+            pass
+    return closed
+
+
+def _route_closed_count(conn, session_id: int) -> int:
+    return len(_closed_routes(_deck_question_rows(conn, session_id)))
+
+
+def _booklet_route(conn, session_id: int) -> tuple[str, bool]:
+    """(route for this attempt, whether a later route may take over).
+
+    Read from the deck, so a restart returns to the same route instead of
+    sending to the limited one again. A stage already answered pins its route:
+    the recording goes to the chat that holds the images.
+    """
+    routes = _booklet_routes()
+    rows = _deck_question_rows(conn, session_id)
+    for row in rows:
+        solution = _latest_solution_row(conn, row["id"])
+        if solution is not None and solution["solver_name"] in routes:
+            return solution["solver_name"], False
+    closed = _closed_routes(rows)
+    route = next((name for name in routes if name not in closed), routes[0] if routes else "")
+    return route, any(name != route and name not in closed for name in routes)
+
+
+def _switches_route(error: Exception) -> bool:
+    """Only a known outcome moves the booklet: a received refusal, or a failure
+    before any send. The browser, the account and the send guard are common to
+    every browser route, so their failures are retried where they are."""
+    return isinstance(error, (ChatGptWebRateLimit, ChatGptWebReplyIncomplete)) or (_nothing_sent(error) and not isinstance(
+        error, (ChatGptWebBusy, ChatGptWebBlocked, ChatGptWebAuthenticationRequired,
+                ChatGptWebBrowserUnavailable)))
+
+
+def _record_solve_failure(conn, row, error: Exception, *, commit: bool = True,
+                          route: str | None = None) -> None:
     if isinstance(error, ChatGptWebSendNotAuthorized):
         return  # Setup is a pause: preserve pending rows and retry counts.
     # Keep a fixed code and optional local job identity, never provider messages.
@@ -3058,6 +3118,13 @@ def _record_solve_failure(conn, row, error: Exception, *, commit: bool = True) -
         "not_sent" if _nothing_sent(error) else "solver_failed")}
     if isinstance(error, WorkBrowserUncertain):
         metadata["solve_failure"]["work_job_id"] = error.work_job_id
+    if route and _switches_route(error):
+        # ``route`` is passed only while a later route may take over.
+        closed = sorted({*metadata.get("closed_routes", []), route})
+        metadata["closed_routes"] = closed
+        following = next((name for name in _booklet_routes() if name not in closed), None)
+        if following:
+            metadata["solve_failure"]["next_route"] = following
     conn.execute("UPDATE questions SET structure_json = ? WHERE id = ?",
                  (json.dumps(metadata, ensure_ascii=False), row["id"]))
     if commit:
@@ -3100,6 +3167,9 @@ def _answer_bundle_item(conn, group: dict, row) -> dict:
             status = "pending"
         issue = ("送信結果の確認待ち。自動再送は停止しています" if code == "browser_outcome_unknown"
                  else "教科のチャットへ戻れません。新しいチャットは作っていません" if code == "chat_lost"
+                 else "利用制限のため別の経路へ切り替えます" if code == "rate_limited" and retrying
+                 else "返答が途中で終わったため別の経路へ切り替えます" if code == "reply_incomplete" and retrying
+                 else "返答が途中で終わりました。資料は保持しています" if code == "reply_incomplete"
                  else "ChatGPTの利用制限です。解除後に再開してください" if code == "rate_limited"
                  else _RETRYING_ISSUES[code] if retrying
                  else _GAVE_UP_ISSUES[code] if code in _GAVE_UP_ISSUES
@@ -3393,6 +3463,39 @@ def _answer_all(question) -> list | None:
     return answer_all(question=question) if answer_all else None
 
 
+def _fallback_answer(conn, session_id: int, doc_id: int, question, route: str) -> list:
+    """The same booklet on a later route.
+
+    It reads the canonical upright PNG: Work's sealed sensor JPEG carries its
+    rotation in the manifest, which only the Work prompt explains.
+    """
+    try:
+        solver = get_solver(route)
+    except RuntimeError as error:
+        raise ChatGptWebBrowserUnavailable("provider is unavailable before send") from error
+    pages = _document_source_pages(conn, doc_id, session_id, work_originals=False)
+    return solver.answer_all(question=dataclasses.replace(question, document_pages=pages))
+
+
+def _route_answer(conn, session_id: int, doc_id: int, question, route: str) -> list | None:
+    if route in ("", (os.environ.get("ROKID_SOLVER") or "").strip()):
+        return _answer_all(question)
+    return _fallback_answer(conn, session_id, doc_id, question, route)
+
+
+def _commit_fence(work_attempt, failed, route: str):
+    """A reply from a later route has no sealed Work job. Its commit is fenced, as a
+    failure is, on the session and inputs still being the ones the attempt began with."""
+    primary = (os.environ.get("ROKID_SOLVER") or "").strip()
+    return work_attempt if failed or route not in ("", primary) else None
+
+
+def _give_up_presend(error: Exception, attempt: int, can_switch: bool) -> bool:
+    """Stop retrying this route: something was sent, or a later route is waiting
+    and one retry has already shown the failure is not a passing render."""
+    return not _nothing_sent(error) or (can_switch and attempt >= 1 and _switches_route(error))
+
+
 def _item_labels(item: dict) -> tuple[str, str]:
     """(group, label) of a model item, without the group repeated in the label."""
     group = str(item.get("group") or "").strip()[:60]
@@ -3537,12 +3640,13 @@ def _answer_deck(conn, session, session_id: int, doc_id: int) -> bool:
         work_attempt = _work_attempt_identity(session_id, question)
     except WorkConflict:
         return True
+    route, can_switch = _booklet_route(conn, session_id)
     failed: Exception | None = None
     for attempt in range(PRESEND_TRIES):
         if attempt:
             time.sleep(PRESEND_RETRY_S)
         try:
-            replies, failed = _answer_all(question), None
+            replies, failed = _route_answer(conn, session_id, doc_id, question, route), None
             if replies is not None and len(replies) > 300:
                 raise ValueError("a booklet reply must contain at most 300 questions")
             break
@@ -3550,12 +3654,12 @@ def _answer_deck(conn, session, session_id: int, doc_id: int) -> bool:
             if isinstance(error, (ChatGptWebSendNotAuthorized, WorkPending, WorkConflict)):
                 return True
             replies, failed = [], error
-            if not _nothing_sent(error):
+            if _give_up_presend(error, attempt, can_switch):
                 break
     if replies is None:
         return False
     try:
-        with _work_reply_commit_guard(session_id, replies, failed_attempt=work_attempt if failed else None):
+        with _work_reply_commit_guard(session_id, replies, failed_attempt=_commit_fence(work_attempt, failed, route)):
             problems = _model_problems([item for item, _ in replies], len(source_pages))
             carried = 0
             if problems and items and not any(_latest_solution_row(conn, row["id"]) for row in items):
@@ -3579,7 +3683,8 @@ def _answer_deck(conn, session, session_id: int, doc_id: int) -> bool:
             # The rows and every answer land in ONE commit: the glasses never read a
             # deck whose rows exist and whose answers are not saved yet.
             if failed is not None:
-                _record_solve_failure(conn, items[0], failed, commit=False)
+                _record_solve_failure(conn, items[0], failed, commit=False,
+                                      route=route if can_switch else None)
                 conn.commit()
                 return True
             # The body retains its printed labels or generated position, untouched
@@ -3593,7 +3698,7 @@ def _answer_deck(conn, session, session_id: int, doc_id: int) -> bool:
                     continue
                 result = (results.get(row["body_text"]) or [None]).pop(0)
                 if isinstance(result, SolveResult):
-                    _save_solution(conn, row, result, os.environ.get("ROKID_SOLVER", "chatgpt-web").strip(), commit=False)
+                    _save_solution(conn, row, result, route or "chatgpt-web", commit=False)
                 else:
                     _record_solve_failure(conn, row, result or ValueError("no answer for this question"),
                                           commit=False)
@@ -3628,12 +3733,13 @@ def _answer_mixed_deck(conn, session, session_id: int, doc_id: int) -> bool:
         work_attempt = _work_attempt_identity(session_id, question)
     except WorkConflict:
         return True
+    route, can_switch = _booklet_route(conn, session_id)
     failed, replies = None, []
     for attempt in range(PRESEND_TRIES):
         if attempt:
             time.sleep(PRESEND_RETRY_S)
         try:
-            replies = _answer_all(question)
+            replies = _route_answer(conn, session_id, doc_id, question, route)
             if (not replies or len(replies) > 300
                     or any(type(item.get("requires_audio")) is not bool
                            or (item["requires_audio"] and result is not None)
@@ -3646,18 +3752,20 @@ def _answer_mixed_deck(conn, session, session_id: int, doc_id: int) -> bool:
             if isinstance(error, (ChatGptWebSendNotAuthorized, WorkPending, WorkConflict)):
                 return True
             replies, failed = [], error
-            if not _nothing_sent(error):
+            if _give_up_presend(error, attempt, can_switch):
                 break
     try:
-        with _work_reply_commit_guard(session_id, replies, failed_attempt=work_attempt if failed else None):
+        with _work_reply_commit_guard(session_id, replies, failed_attempt=_commit_fence(work_attempt, failed, route)):
             old_rows = _deck_question_rows(conn, session_id)
             carried = sum(_failure_count(row) for row in old_rows)
+            closed = sorted(_closed_routes(old_rows))
             if failed is not None:
                 if not old_rows:
                     _insert_deck(conn, session_id, doc_id, [ProblemUnit(
                         None, "", start_page_index=0, page_indexes=list(range(len(source_pages))))])
                     old_rows = _deck_question_rows(conn, session_id)
-                _record_solve_failure(conn, old_rows[0], failed, commit=False)
+                _record_solve_failure(conn, old_rows[0], failed, commit=False,
+                                      route=route if can_switch else None)
                 conn.commit()
                 return True
             if any(_latest_solution_row(conn, row["id"]) for row in old_rows):
@@ -3672,6 +3780,9 @@ def _answer_mixed_deck(conn, session, session_id: int, doc_id: int) -> bool:
                 metadata = json.loads(row["structure_json"])
                 if carried and index == 0:
                     metadata["solve_failures"] = carried
+                if closed and index == 0:
+                    # An all-audio paper saves no reading answer to pin the route.
+                    metadata["closed_routes"] = closed
                 matched = results.get(row["body_text"])
                 item, result = matched.pop(0) if matched else ({}, AnswerMissing(row["question_no"]))
                 metadata.update(requires_audio=item.get("requires_audio") is True,
@@ -3682,7 +3793,7 @@ def _answer_mixed_deck(conn, session, session_id: int, doc_id: int) -> bool:
                 conn.execute("UPDATE questions SET structure_json=? WHERE id=?", (json.dumps(metadata), row["id"]))
                 if isinstance(result, SolveResult):
                     result.extras["answer_no"] = metadata["answer_no"]
-                    _save_solution(conn, row, result, os.environ.get("ROKID_SOLVER", "chatgpt-web").strip(), commit=False)
+                    _save_solution(conn, row, result, route or "chatgpt-web", commit=False)
                 elif result is not None:
                     refreshed = conn.execute("SELECT * FROM questions WHERE id=?", (row["id"],)).fetchone()
                     _record_solve_failure(conn, refreshed, result, commit=False)
@@ -3741,6 +3852,8 @@ def _answer_mixed_audio(conn, session, session_id, doc_id):
         work_attempt = _work_attempt_identity(session_id, question)
     except WorkConflict:
         return True
+    # The recording goes to the chat that holds the images: this stage never switches.
+    route, _ = _booklet_route(conn, session_id)
     failed, replies = None, []
     for attempt in range(PRESEND_TRIES):
         if attempt:
@@ -3749,7 +3862,7 @@ def _answer_mixed_audio(conn, session, session_id, doc_id):
             path, _ = recording_transcript(doc_id, require_transcript=False, verify_original=True)
             if path != session["audio_path"]:
                 raise ValueError("completed original audio identity changed")
-            replies = _answer_all(question)
+            replies = _route_answer(conn, session_id, doc_id, question, route)
             ids = [item.get("question_id") for item, _ in (replies or [])]
             if (any(not isinstance(qid, str) for qid in ids) or len(ids) != len(set(ids))
                     or set(ids) != {slot["question_id"] for slot in slots}
@@ -3764,7 +3877,7 @@ def _answer_mixed_audio(conn, session, session_id, doc_id):
             if not _nothing_sent(error):
                 break
     try:
-        with _work_reply_commit_guard(session_id, replies, failed_attempt=work_attempt if failed else None):
+        with _work_reply_commit_guard(session_id, replies, failed_attempt=_commit_fence(work_attempt, failed, route)):
             if failed is not None:
                 for row in rows:
                     _record_solve_failure(conn, row, failed, commit=False)
@@ -3775,7 +3888,7 @@ def _answer_mixed_audio(conn, session, session_id, doc_id):
                 result = results[f"q{row['id']}"]
                 if isinstance(result, SolveResult):
                     result.extras["answer_no"] = json.loads(row["structure_json"])["answer_no"]
-                    _save_solution(conn, row, result, os.environ.get("ROKID_SOLVER", "chatgpt-web").strip(), commit=False)
+                    _save_solution(conn, row, result, route or "chatgpt-web", commit=False)
                 else:
                     _record_solve_failure(conn, row, result, commit=False)
             conn.execute("UPDATE exam_sessions SET analysis_stage='complete' WHERE id=?", (session_id,))
@@ -4018,8 +4131,11 @@ def _solve_deck_in_background(session_id: int, doc_id: int) -> None:
                 return
         while True:
             session = _exam_session_or_404(conn, session_id)
+            closed = _route_closed_count(conn, session_id)
             if not _answer_deck(conn, session, session_id, doc_id):
                 break
+            if _route_closed_count(conn, session_id) > closed:
+                continue  # A route just closed: the next one takes the same booklet now.
             latest = _exam_session_or_404(conn, session_id)
             if (latest["exam_type"] != "mixed" or latest["analysis_stage"] != "awaiting_audio"
                     or not _mixed_work_pending(conn, latest)):

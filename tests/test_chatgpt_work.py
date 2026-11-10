@@ -671,3 +671,81 @@ def test_new_job_retires_only_expired_owner_read_only_before_inventory_and_can_r
     assert activity[-2:] == ["read-old-final", "resolve-new"]
     assert store.result(old["job_id"]) is None and store.get(old["job_id"])["requested_settings"] == old["requested_settings"]
     assert (original.read_bytes(), original.stat().st_mtime_ns) == before
+
+
+@pytest.mark.parametrize("exam_type", ["written", "mixed"])
+def test_a_work_usage_limit_hands_the_same_originals_to_chat_under_the_real_guards(client, monkeypatch, exam_type):
+    """Work refused after its send: Chat answers, and the commit keeps Work's input fence."""
+    from app import main
+    from app.solvers.base import SolveResult
+    from app.solvers.chatgpt_web import ChatGptWebRateLimit
+    from app.solvers.chatgpt_work import ChatGptWorkSolver
+    from app.work_bridge import configured_work_store
+
+    doc, session, job = api_session(client, exam_type=exam_type, generation=7)
+    wait_for(lambda: session not in main._background_solves)
+
+    class Limited(BrowserReply):
+        def complete_json(self, **options):
+            self.calls.append(options["booklet_stage"])
+            raise ChatGptWebRateLimit("the recorded Work task received a usage limit")
+
+    class Chat:
+        name, questions = "chatgpt-web", []
+
+        def answer_all(self, *, question):
+            self.questions.append(question)
+            item = {"group": "第1問", "label": "問1", "pages": [1], "answer_no": [1]}
+            if question.booklet_stage == "reading":
+                item["requires_audio"] = False
+            return [(item, SolveResult(answer="4"))]
+
+    work, chat = Limited(), Chat()
+    monkeypatch.setattr(main, "get_solver", lambda name=None: chat if name == "chatgpt-web"
+                        else ChatGptWorkSolver(client=work))
+    monkeypatch.setenv("ROKID_CHATGPT_SEND_ENABLED", "1")
+    main._solve_deck_in_background(session, doc)
+    bundle = client.get(f"/v1/exam-sessions/{session}/answer-bundle").json()
+    assert [(item["status"], item["answer"]) for item in bundle["items"]] == [("ready", "4")]
+    assert len(work.calls) == 1 and len(chat.questions) == 1
+    # Chat receives the canonical upright page, not a Work-sealed source reference.
+    page = chat.questions[0].document_pages[0]
+    assert page["image_path"].endswith(".png") and "_work_source_job_id" not in page
+    with main.db.connect() as conn:
+        assert [row[0] for row in conn.execute("SELECT solver_name FROM solutions")] == ["chatgpt-web"]
+    # The refused Work job stays unanswered: nothing sealed a result it never produced.
+    assert configured_work_store().result(job["job_id"]) is None
+    # A later poll or restart asks neither route again.
+    with main.db.connect() as conn:
+        row = conn.execute("SELECT * FROM exam_sessions WHERE id=?", (session,)).fetchone()
+        assert not main._resume_answers(conn, row)
+    assert len(work.calls) == 1 and len(chat.questions) == 1
+
+
+def test_a_wearer_change_during_the_chat_fallback_cannot_commit_its_reply(client, monkeypatch):
+    from app import main
+    from app.solvers.base import SolveResult
+    from app.solvers.chatgpt_web import ChatGptWebRateLimit
+    from app.solvers.chatgpt_work import ChatGptWorkSolver
+
+    doc, session, _ = api_session(client, generation=7)
+    wait_for(lambda: session not in main._background_solves)
+
+    class Limited(BrowserReply):
+        def complete_json(self, **options):
+            raise ChatGptWebRateLimit("usage limit")
+
+    class Chat:
+        name = "chatgpt-web"
+
+        def answer_all(self, *, question):
+            assert client.post("/v1/glasses/state", json={"device_id": "fixture-glasses", "session_id": session,
+                               "generation": 8, "sequence": 1, "phase": "analyzing"}).json()["accepted"]
+            return [({"group": "第1問", "label": "問1", "pages": [1]}, SolveResult(answer="4"))]
+
+    monkeypatch.setattr(main, "get_solver", lambda name=None: Chat() if name == "chatgpt-web"
+                        else ChatGptWorkSolver(client=Limited()))
+    monkeypatch.setenv("ROKID_CHATGPT_SEND_ENABLED", "1")
+    main._solve_deck_in_background(session, doc)
+    with main.db.connect() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM solutions").fetchone()[0] == 0

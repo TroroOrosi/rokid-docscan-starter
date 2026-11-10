@@ -198,6 +198,8 @@ class _StubPage:
     def evaluate(self, expression):
         if "signed_out" in expression:
             return {"signed_out": getattr(self, "signed_out", False)}
+        if "chatgptwork" in expression:  # leave_work_mode: this fake is plain Chat.
+            return {"count": 0, "active": False, "acted": False}
         if "menuitemradio" in expression:
             return {"menu_count": 1, "model_menu_associated": True, "model_groups": 1,
                     "radios": [{"label_lines": [self.selected_model] if self.selected_model else [],
@@ -534,7 +536,7 @@ def test_model_reader_runs_on_changed_local_dom_without_the_previous_labels(monk
 
     class DomStatePage(_CurrentUiPage):
         def evaluate(self, expression):
-            return snapshot
+            return super().evaluate(expression) if "chatgptwork" in expression else snapshot
 
     for snapshot, expected in zip(snapshots, ["Aurora Pro", "Latest", None, None, None, None, None,
                                              "Aurora Reasoning"], strict=True):

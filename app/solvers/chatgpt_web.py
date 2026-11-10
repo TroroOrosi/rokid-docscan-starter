@@ -243,6 +243,15 @@ class ChatGptWebRateLimit(ChatGptWebError):
     """
 
 
+class ChatGptWebReplyIncomplete(ChatGptWebError):
+    """The task ended, and its final message is not this batch's answer.
+
+    A limit can cut a reply short without its notice entering the message, so
+    no marker matches. The final message exists and nothing is generating: the
+    outcome is known, like a refusal, and unlike a send whose reply was never seen.
+    """
+
+
 def cdp_available(
     endpoint: str = CDP_ENDPOINT, *, timeout: float = 1.0, attempts: int = 3
 ) -> str | None:
@@ -695,8 +704,46 @@ def _selected_model_in_effort_menu(page, *, select: bool = False) -> dict:
                 raise ChatGptWebModelMismatch("model selection popup did not close; nothing sent")
 
 
+_WORK_MODE_JS = r"""(click => {
+  const visible = e => e.getClientRects().length > 0;
+  const phrase = e => (e.getAttribute('aria-label') || e.innerText || '').normalize('NFKC')
+    .trim().toLowerCase().replace(/[\s_–—-]+/g, '');
+  const on = e => (e.getAttribute('aria-pressed') || e.getAttribute('aria-selected')) === 'true';
+  const work = [...document.querySelectorAll('button[aria-pressed], [role=tab][aria-selected]')]
+    .filter(visible).filter(e => ['work', 'chatgptwork', 'ワーク', '作業'].includes(phrase(e)));
+  let acted = false;
+  // Only a pressed toggle is released. A tab has no "off"; it fails closed below.
+  if (click && work.length === 1 && on(work[0]) && work[0].hasAttribute('aria-pressed') &&
+      !work[0].disabled && work[0].getAttribute('aria-disabled') !== 'true') {
+    work[0].click(); acted = true;
+  }
+  return {count: work.length, active: work.length === 1 && on(work[0]), acted};
+})"""
+
+
+def leave_work_mode(page, *, select: bool = False) -> None:
+    """Chat never sends inside Work: its usage limit is why Chat was asked.
+
+    The Work entry is the control the Work adapter reads (same labels). During
+    preparation an active toggle is released once; immediately before sending
+    nothing is clicked, and an active or ambiguous entry stops the send.
+    """
+    state = page.evaluate(f"{_WORK_MODE_JS}(false)")
+    if isinstance(state, dict) and state.get("count") == 1 and state.get("active") is True and select:
+        page.evaluate(f"{_WORK_MODE_JS}(true)")
+        deadline = time.monotonic() + READY_TIMEOUT_S
+        while True:
+            state = page.evaluate(f"{_WORK_MODE_JS}(false)")
+            if not isinstance(state, dict) or state.get("active") is not True or time.monotonic() >= deadline:
+                break
+            time.sleep(0.1)
+    if not isinstance(state, dict) or state.get("count") not in (0, 1) or state.get("active") is not False:
+        raise ChatGptWebModelMismatch("Chat could not leave Work mode; nothing sent")
+
+
 def verify_selected_model(page, *, select: bool = False) -> str:
     """Keep the operator's model-menu position across renames and saved choices."""
+    leave_work_mode(page, select=select)
     previous_url = _url_of(page)
     state = _selected_model_in_effort_menu(page, select=select)
     if select and _is_chat_url(previous_url) and _url_of(page) != previous_url:
@@ -1479,7 +1526,7 @@ class ChatGptWebClient:
                 else:
                     guard.acknowledge(request_id)
                     self._pending = None
-            except ChatGptWebRateLimit:
+            except (ChatGptWebRateLimit, ChatGptWebReplyIncomplete):
                 # Load the chat again before the next attach: the page after a
                 # refusal is not a composer this route vouches for.
                 self._reload = True

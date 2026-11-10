@@ -617,6 +617,9 @@ def _wait_for_reply(page, batch_id, *, expect, on_chat_url=None, timeout_s=None,
             if reply and gone >= chat.SETTLE_POLLS:
                 if chat._limited(reply):
                     raise chat.ChatGptWebRateLimit("the recorded Work task received a usage limit")
+                if not chat._complete_json(reply, expect):
+                    # Ended without an answer. A complete JSON for another batch stays unknown.
+                    raise chat.ChatGptWebReplyIncomplete("the recorded Work task ended without its answer")
                 raise chat.ChatGptWebError("Work final did not contain this batch's complete JSON")
         if not state["started"] and now() - started > chat.REPLY_START_S:
             raise chat.ChatGptWebError("the recorded Work task did not start; no automatic resend")
@@ -1072,7 +1075,7 @@ class WorkWebClient(chat.ChatGptWebClient):
             return None
         try:
             reply = _wait_for_reply(page, batch["id"], expect=expect, sleep=sleep, now=now)
-        except chat.ChatGptWebRateLimit:
+        except (chat.ChatGptWebRateLimit, chat.ChatGptWebReplyIncomplete):
             if self._pending and self._transfer.get("pending") == batch:
                 self._clear_refused_batch(guard, self._pending, chat._url_of(page))
             raise
