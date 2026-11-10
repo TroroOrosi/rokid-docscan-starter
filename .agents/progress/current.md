@@ -4,6 +4,8 @@
 Runs on: 会場phone AP＋glasses。phone ZY22（192.168.0.5:38329）へサーバ反映済（API再起動のみ、browser26460/watch11998/X11 26297維持、backup `~/rokid-backups/pre-031d85d-20261110T125533Z` ほか同日分）。実効設定：chatgpt-work／effort xhigh（試験残りのhighを訂正）／speed standard（試験用。本番準備時にfastへ）。グラス1904…へvc54/0.43.2導入済（署名906307…、権限・保存69files/257,911KB保持、消灯のまま）。実ブラウザで入力・送信なしに確認：Chatボタンでのみ Work解除、Chat入力欄19.9秒、GPT-6＋Power「Extra High（4/5）」を読み戻し、Workへ復元、guard idle。未確認：実際の制限文言、切替後のChat解答、修正後の撮影の実機挙動、光学/全頁/品質gate/長時間/会場全経路。GL53の転送済みstageはvc54で置換済みのため使わない。
 送信量の追記（11/10、送信側セッション、PCのみ・端末未反映・GPT送信0）: PC上の実写全数を本番と同じ回転270度で測定し、Chat冊子に添付前の枚数検査を追加（APP 0.71.0 / API 1.44.0）。40枚でWork PNG 575MB・7通、原JPEG 238MB・3通、Chat 172〜216MB・40〜80ファイル。Workの既定はPNGのまま（原JPEGの回転270度と画素照合が実写で通るかは端末のWork 1回で決まる）。9/15の結合案は画素密度の計算で不採用。見開き分割は高さ4032を残すため、計画③の紙面切出しが要る。数値・未確認は `docs/requirements-audit.md` の枚数制限の行、原表は `data/device-setup/reports/delivery-size-20261110/`。
 Runs on: PC（`py -3.12 -B -X utf8 -m pytest -q tests`、`ruff check .`）。スマホのサーバにこの検査は未反映。
+撮影側の追記（11/11、Android側セッション、PCのみ・未導入・GPT送信0）: glassdoc 0.43.4（vc56、グラスはvc54のまま）。`96d0fbb` 3秒確認を紙面へ切り出して表示（実写30枚で16枚が1.12〜1.33倍、紙の欠け最大1%、他は全枠）。`83871c4` 静止画はちらつきが報告される場合に露光を1周期へ切り詰め感度で補う（アナログ上限まで）、静止判定は静止画の露光に従う。明示起動 `settings_bracket=true` で通常の1枚の後に同じ場面を設定1つずつ変えて6枚撮り、`files/settings-bracket/<run>/` へ保存（頁にしない・送らない、1起動4組まで）。実装しなかったもの：感度で紙の白を200へ置く（実写の量子化は雑音分散の2.5〜3.1%で利点なし）、紙面測光の既定化（領域の返却が実機未確認で不一致なら全撮影が止まる）。校正：消失点から焦点距離は約1900画素（1765〜1974）、EXIFの11mmは不支持。実写19枚の見開きは幅2000〜2480画素・文字の送り20〜27画素。
+Runs on: PC（`./android-relay/gradlew --no-daemon test testDebugUnitTest assembleDebug` → BUILD SUCCESSFUL・875件/失敗0）。実機では露光の切り詰め・ブラケット・確認表示のいずれも未確認。測定表と手順は共有ノートにあり、リポジトリには無い。
 
 ## 0. 読み方（前提と資料に引きずられないため）
 
