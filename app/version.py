@@ -265,7 +265,8 @@ from __future__ import annotations
 # 0.70.0: a Work usage limit or unusable Work control hands the same booklet to Chat.
 # 0.70.1: Chat leaves Work by its Chat button and selects the Extra High power position, as read on the phone.
 # 0.71.0: the Chat booklet checks its file count against the 3-hour upload window before attaching.
-APP_VERSION = "0.71.0"
+# 0.72.0: Chat images are cropped to the paper when its box is certain; otherwise the frame is sent as before.
+APP_VERSION = "0.72.0"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.
