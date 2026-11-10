@@ -189,11 +189,59 @@ public class GlassesCaptureSurfaceTest {
         assertEquals(List.of("タップで撮り直し"), ReflectionHelpers.getField(hud, "lines"));
         surface.close();
     }
+    private static byte[] deskJpeg(int left, int top, int right, int bottom) {
+        Bitmap source = Bitmap.createBitmap(640, 480, Bitmap.Config.ARGB_8888);
+        Canvas canvas = new Canvas(source);
+        canvas.drawColor(Color.rgb(30, 30, 30));
+        Paint paper = new Paint(); paper.setColor(Color.rgb(220, 220, 220));
+        canvas.drawRect(left, top, right, bottom, paper);
+        ByteArrayOutputStream encoded = new ByteArrayOutputStream();
+        source.compress(Bitmap.CompressFormat.JPEG, 95, encoded); source.recycle();
+        return encoded.toByteArray();
+    }
+
+    private static Bitmap reviewed(byte[] jpeg, HudView hud, GlassesCaptureSurface surface) {
+        surface.showCaptureReview(jpeg, 0, List.of());
+        ShadowLooper.runUiThreadTasksIncludingDelayedTasks();
+        return ReflectionHelpers.getField(hud, "preview");
+    }
+
+    /** Operator, 2026-09-30: the paper was too small in the review to tell whether the photo matched. */
+    @Test public void theReviewShowsThePaperEnlargedWithoutTextAndLeavesTheOriginalAlone() {
+        byte[] jpeg = deskJpeg(160, 120, 480, 360), original = jpeg.clone();
+        HudView hud = new HudView(RuntimeEnvironment.getApplication());
+        GlassesCaptureSurface surface = new GlassesCaptureSurface(RuntimeEnvironment.getApplication(), null, hud,
+                new Handler(Looper.getMainLooper()), (generation, purpose) -> { });
+        Bitmap review = reviewed(jpeg, hud, surface);
+        assertTrue("the paper, not the desk around it, fills the review: " + review.getWidth() + "x" + review.getHeight(),
+                review.getWidth() < 640 * 3 / 4 && review.getHeight() < 480 * 3 / 4);
+        assertTrue("every edge of the paper stays visible", review.getWidth() >= 320 && review.getHeight() >= 240);
+        assertTrue(Color.green(review.getPixel(review.getWidth() / 2, review.getHeight() / 2)) > 180);
+        assertTrue("a margin of desk remains on each side", Color.green(review.getPixel(1, review.getHeight() / 2)) < 80
+                && Color.green(review.getPixel(review.getWidth() - 2, review.getHeight() / 2)) < 80);
+        assertEquals("no text may cover the photograph", List.of(), ReflectionHelpers.getField(hud, "lines"));
+        assertArrayEquals("the display crop must not touch the saved original", original, jpeg);
+        surface.close();
+    }
+
+    @Test public void aFrameWithoutAClearPaperOrWithNothingToGainIsReviewedWhole() {
+        HudView hud = new HudView(RuntimeEnvironment.getApplication());
+        GlassesCaptureSurface surface = new GlassesCaptureSurface(RuntimeEnvironment.getApplication(), null, hud,
+                new Handler(Looper.getMainLooper()), (generation, purpose) -> { });
+        for (int[] paper : new int[][] {{0, 0, 0, 0}, {8, 8, 632, 472}, {20, 120, 620, 360}}) {
+            Bitmap review = reviewed(deskJpeg(paper[0], paper[1], paper[2], paper[3]), hud, surface);
+            assertEquals("paper " + java.util.Arrays.toString(paper), 640, review.getWidth());
+            assertEquals("paper " + java.util.Arrays.toString(paper), 480, review.getHeight());
+        }
+        surface.close();
+    }
+
     @Test public void liveAndReviewKeepTheSameFourCornersAfterEverySupportedRotation() {
         Bitmap source = Bitmap.createBitmap(320, 240, Bitmap.Config.ARGB_8888);
         Canvas canvas = new Canvas(source);
         Paint quadrant = new Paint();
-        int[] values = {40, 80, 120, 160};
+        // Four near-equal grays: no paper stands out, so the review is the whole frame like the live image.
+        int[] values = {100, 106, 112, 118};
         for (int y = 0; y < 2; y++) for (int x = 0; x < 2; x++) {
             int gray = values[y * 2 + x];
             quadrant.setColor(Color.rgb(gray, gray, gray));

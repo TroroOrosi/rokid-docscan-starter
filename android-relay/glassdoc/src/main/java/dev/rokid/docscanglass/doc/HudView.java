@@ -160,7 +160,7 @@ final class HudView extends View {
     }
 
     /**
-     * Review: the complete still stays in the capture corner, without instructions.
+     * Review: the still, cropped to its paper when one stands out, stays in the capture corner without instructions.
      *
      * <p>The captured image stays visible for review while the live stream
      * observes any page turn for the next capture.</p>
@@ -297,7 +297,7 @@ final class HudView extends View {
         canvas.restore();
     }
 
-    /** Show the entire photograph in one corner; status never covers it. */
+    /** Show the whole given image in one corner; status never covers it. */
     private void drawPreview(Canvas canvas, Bitmap still) {
         RectF target = imageBounds(still);
         canvas.save();

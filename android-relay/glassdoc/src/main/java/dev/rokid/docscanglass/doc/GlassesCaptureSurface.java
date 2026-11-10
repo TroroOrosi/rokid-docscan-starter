@@ -249,7 +249,8 @@ final class GlassesCaptureSurface implements CaptureSurface {
     public long showCaptureReview(byte[] jpeg, int rotationDegrees, List<String> lines) {
         if (closed) return NO_VIEW_GENERATION;
         this.rotationDegrees = rotationDegrees;
-        Bitmap still = decodePreview(jpeg, rotationDegrees);
+        // Display only: the paper enlarged, or the whole frame when no box stands out. The JPEG is not touched.
+        Bitmap still = PaperCrop.apply(decodePreview(jpeg, rotationDegrees));
         if (still == null) return NO_VIEW_GENERATION;
         return show("capture-review", () -> {
             Bitmap previous = preview;
