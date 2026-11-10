@@ -370,21 +370,12 @@ def test_a_missing_chat_composer_outside_work_mode_is_still_an_error(monkeypatch
     assert page.clicks == 0
 
 
-def test_the_work_entry_reader_runs_in_a_real_dom():
+def test_the_work_entry_reader_runs_in_a_real_dom(dom_states):
     """The script itself, in local Chromium, on the control shape read from the phone."""
-    import html
     import json
-    import shutil
-    import subprocess
-    import tempfile
-    from pathlib import Path
 
     from app.solvers import chatgpt_web as chat
 
-    browser = next((p for p in [shutil.which("google-chrome"), shutil.which("chromium"),
-                    "C:/Program Files/Google/Chrome/Application/chrome.exe"] if p and Path(p).is_file()), None)
-    if browser is None:
-        pytest.skip("local Chromium is not installed; no browser is downloaded")
     # The real control (phone, 2026-11-10): two buttons, exactly one pressed.
     pick = ("[...this.parentNode.children].forEach(e => e.setAttribute(e.hasAttribute('aria-pressed') ? "
             "'aria-pressed' : 'aria-selected', String(e === this)))")
@@ -410,16 +401,7 @@ def test_the_work_entry_reader_runs_in_a_real_dom():
               f"return [before, click.acted, {chat._WORK_MODE_JS}(false)]; }}); "
               "document.body.innerHTML = '<pre id=states></pre>';"
               "document.getElementById('states').textContent = JSON.stringify(states);")
-    with tempfile.TemporaryDirectory(prefix="rokid-work-mode-dom-") as directory:
-        fixture = Path(directory) / "fixture.html"
-        fixture.write_text('<meta charset="utf-8"><body><script>' + script + "</script>", encoding="utf-8")
-        result = subprocess.run([
-            browser, "--headless", "--dump-dom", "--disable-background-networking", "--disable-component-update",
-            "--disable-sync", "--no-first-run", "--no-default-browser-check", "--host-resolver-rules=MAP * ~NOTFOUND",
-            "--user-data-dir=" + str(Path(directory) / "profile"), fixture.as_uri(),
-        ], capture_output=True, text=True, encoding="utf-8", timeout=30, check=False)
-    assert result.returncode == 0, f"{browser} exited {result.returncode}: {result.stderr}"
-    states = json.loads(html.unescape(result.stdout.split('<pre id="states">', 1)[1].split("</pre>", 1)[0]))
+    states = dom_states(script)
     summary = [((before["count"], before["active"]), acted, after["active"]) for before, acted, after in states]
     assert summary == [
         ((0, False), False, False),  # Plain Chat: nothing to leave.

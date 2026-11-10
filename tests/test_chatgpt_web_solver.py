@@ -473,17 +473,8 @@ def test_checked_selection_survives_trigger_count_and_expanded_attribute_changes
     assert page.opened is False
 
 
-def test_model_reader_runs_on_changed_local_dom_without_the_previous_labels(monkeypatch):
-    import html
-    import shutil
-    import subprocess
-    import tempfile
-    from pathlib import Path
+def test_model_reader_runs_on_changed_local_dom_without_the_previous_labels(monkeypatch, dom_states):
 
-    browser = next((p for p in [shutil.which("google-chrome"), shutil.which("chromium"),
-                    "C:/Program Files/Google/Chrome/Application/chrome.exe"] if p and Path(p).is_file()), None)
-    if browser is None:
-        pytest.skip("local Chromium is not installed; no browser is downloaded")
     fixtures = [
         '<button aria-haspopup="listbox" aria-label="Choose model" aria-controls="models">Aurora Pro</button>'
         '<button aria-haspopup="menu" aria-label="Thinking effort">Maximum</button>'
@@ -514,16 +505,7 @@ def test_model_reader_runs_on_changed_local_dom_without_the_previous_labels(monk
     script = "const states = " + json.dumps(fixtures) + ".map(source => { document.body.innerHTML = source; return "
     script += chatgpt_web._MODEL_MENU_STATE_JS + "; }); document.body.innerHTML = '<pre id=states></pre>';"
     script += "document.getElementById('states').textContent = JSON.stringify(states);"
-    with tempfile.TemporaryDirectory(prefix="rokid-model-dom-") as directory:
-        fixture = Path(directory) / "fixture.html"
-        fixture.write_text('<meta charset="utf-8"><body><script>' + script + "</script>", encoding="utf-8")
-        result = subprocess.run([
-            browser, "--headless", "--dump-dom", "--disable-background-networking", "--disable-component-update",
-            "--disable-sync", "--no-first-run", "--no-default-browser-check", "--host-resolver-rules=MAP * ~NOTFOUND",
-            "--user-data-dir=" + str(Path(directory) / "profile"), fixture.as_uri(),
-        ], capture_output=True, text=True, encoding="utf-8", timeout=30, check=False)
-    assert result.returncode == 0, f"{browser} exited {result.returncode}: {result.stderr}"
-    snapshots = json.loads(html.unescape(result.stdout.split('<pre id="states">', 1)[1].split("</pre>", 1)[0]))
+    snapshots = dom_states(script)
     states = snapshots
     assert [(state["radios"][0]["label_lines"][0], state["efforts"]) for state in states[:3]] == [
         ("Aurora Pro", ["Maximum"]), ("Latest", ["Extra High"]), ("Japanese", ["Extra High"])]
