@@ -472,7 +472,7 @@ class InspectionService:
             prepare = _prepare_legacy_diagnostic_image if legacy else prepare_diagnostic_image
             request = prepare(source, packet, source_sha256=source_sha256, owner=owner, rotation=rotation)
             request["requested_settings"] = (previous["request"]["requested_settings"] if previous else
-                                               {"model": "gpt-6-luna", "effort": "high", "speed": "fast"})
+                                               {"model": "gpt-6-luna", "effort": "high", "speed": "standard"})
             request["manifest_sha256"] = _sha({key: value for key, value in request.items() if key != "manifest_sha256"})
             self.store.prepare_capture_inspection_part(task["inspection_id"], part_id, request)
 

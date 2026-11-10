@@ -2,6 +2,7 @@ package dev.rokid.docscanrelay.study;
 
 import static org.junit.Assert.*;
 
+import java.util.ArrayList;
 import java.util.List;
 import org.junit.Test;
 
@@ -119,5 +120,45 @@ public class AnswerLayoutTest {
         assertEquals(18, pages.get(2).start);
         assertEquals(27, pages.get(2).end);
         assertEquals(List.of("Y"), pages.get(3).lines);
+    }
+
+    @Test public void displayRowsReconstructLogicalLinesAcrossPagesWithoutSourceOffsets() {
+        List<String> expected = List.of("if ready:",
+                "    total = long_function_name(argument_one, argument_two)", "",
+                "    if total > 0:", "        print(total)", "done = True");
+        String source = expected.get(0) + "\r\n" + expected.get(1) + "\r\n\r\n"
+                + expected.get(3) + "\n" + expected.get(4) + "\r" + expected.get(5) + "\n";
+        for (int width : new int[]{8, 19, 28}) for (int rows : new int[]{1, 2, 3}) {
+            List<AnswerLayout.Page> pages = AnswerLayout.paginate(source, width, rows, MONO);
+            // Metadata is derived correctly even when random access visits a later page first.
+            pages.get(pages.size() - 1);
+            List<StringBuilder> restored = new ArrayList<>();
+            StringBuilder exactFragments = new StringBuilder();
+            boolean continuedAtPageStart = false;
+            for (AnswerLayout.Page page : pages) {
+                assertEquals(page.lines.size(), page.continuedFromPreviousLine.size());
+                exactFragments.append(page.sourceText);
+                if (page.continuedFromPreviousLine.get(0)) continuedAtPageStart = true;
+                for (int row = 0; row < page.lines.size(); row++) {
+                    if (!page.continuedFromPreviousLine.get(row)) restored.add(new StringBuilder());
+                    assertFalse("a continuation must have an earlier logical row", restored.isEmpty());
+                    restored.get(restored.size()-1).append(page.lines.get(row));
+                }
+            }
+            assertTrue("a wrapped logical line must continue onto another page", continuedAtPageStart);
+            List<String> logicalLines = new ArrayList<>();
+            for (StringBuilder line : restored) logicalLines.add(line.toString());
+            assertEquals(expected, logicalLines);
+            assertEquals("CRLF, CR, LF and all indentation remain exact", source, exactFragments.toString());
+            assertThrows(UnsupportedOperationException.class,
+                    () -> pages.get(0).continuedFromPreviousLine.set(0, true));
+        }
+    }
+
+    @Test public void emptyTextHasNoContinuationAndKeepsAnEmptySourceFragment() {
+        AnswerLayout.Page page = AnswerLayout.paginate("", 8, 1, MONO).get(0);
+        assertEquals(List.of(""), page.lines);
+        assertEquals(List.of(false), page.continuedFromPreviousLine);
+        assertEquals("", page.sourceText);
     }
 }

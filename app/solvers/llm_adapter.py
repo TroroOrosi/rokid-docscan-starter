@@ -211,6 +211,22 @@ def answer_numbers(value) -> list[int]:
     return numbers
 
 
+_ANSWER_SHEET_FIELDS = frozenset({
+    "status", "answer", "diagrams", "missing_material", "answer_no",
+    "group", "label", "question_id", "pages", "requires_audio",
+})
+
+
+def validate_answer_fields(data: dict, fields: set[str] | frozenset[str] = _ANSWER_SHEET_FIELDS) -> None:
+    """Reject nonempty content that a downstream answer contract cannot retain."""
+    for field in data.keys() - fields:
+        value = data[field]
+        if isinstance(value, str):
+            value = value.strip()
+        if value not in (None, "", [], {}):
+            raise ValueError("unsupported answer-sheet field with content")
+
+
 def answer_sheet_result(data: dict, *, subject: str | None, extras: dict) -> SolveResult:
     """One answer-only reply as a SolveResult; ValueError when it breaks the rules.
 
@@ -220,6 +236,9 @@ def answer_sheet_result(data: dict, *, subject: str | None, extras: dict) -> Sol
     status = data.get("status", "ready")
     if status not in ("ready", "needs_input"):
         raise ValueError("invalid answer-sheet status")
+    # The displayed answer has one ordered body. Separate nonempty fields
+    # cannot be discarded or merged without knowing their order and meaning.
+    validate_answer_fields(data)
     answer = data.get("answer")
     diagrams = validate_diagrams(data.get("diagrams", []))
     if status == "ready" and (not isinstance(answer, str) or not (answer.strip() or diagrams)):

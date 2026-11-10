@@ -26,7 +26,7 @@ import org.json.JSONObject;
  * <p>The top row is the index -- which question this is and where in it the
  * reader stands -- and the rows under it are the answer itself. They never
  * share a row, because a heading read as part of the answer is a wrong answer.
- * The content description carries only the answer rows.</p>
+ * The content description carries the original answer fragment, with no visual-wrap newlines.</p>
  *
  * <p>A narrower viewport re-flows through {@link AnswerReader#viewport}; it
  * never shrinks the type and never drops text. Every character of the answer
@@ -40,9 +40,12 @@ final class AnswerView extends View {
 
     private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint indexPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint continuationPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Path continuationPath = new Path();
 
     private AnswerReader reader;
     private List<String> body = Collections.emptyList();
+    private List<Boolean> continuedFromPreviousLine = Collections.emptyList();
     private String index = "";
 
     AnswerView(Context context) {
@@ -51,6 +54,8 @@ final class AnswerView extends View {
         paint.setTypeface(Typeface.MONOSPACE);
         indexPaint.setColor(INDEX_GREY);
         indexPaint.setTypeface(Typeface.MONOSPACE);
+        continuationPaint.setColor(INDEX_GREY);
+        continuationPaint.setStyle(Paint.Style.STROKE);
         applyTextSize();
     }
 
@@ -82,18 +87,23 @@ final class AnswerView extends View {
         if (reader == null || !reader.hasViewport()) {
             return;
         }
+        String spoken;
         if (reader.screen() == AnswerReader.Screen.ANSWER) {
             AnswerLayout.Page page = reader.page();
             body = reader.diagram() == null ? new ArrayList<>(page.lines) : Collections.emptyList();
+            continuedFromPreviousLine = reader.diagram() == null ? page.continuedFromPreviousLine : Collections.emptyList();
+            spoken = reader.diagram() == null ? page.sourceText : reader.diagram().alt;
             index = reader.current().readingLabel() + "  " + reader.pageNumber() + "/" + reader.pageCount();
         } else {
             // On the index screens there is no answer to keep apart, so the
             // prompt belongs to the spoken text: it says what is being chosen.
             String prompt = reader.screen() == AnswerReader.Screen.GROUPS ? "大問を選択" : "小問を選択";
             body = List.of(prompt, reader.selectionLabel());
+            continuedFromPreviousLine = Collections.emptyList();
+            spoken = String.join("\n", body);
             index = reader.selectionNumber() + "/" + reader.selectionCount();
         }
-        setContentDescription(reader.diagram() == null ? String.join("\n", body) : reader.diagram().alt);
+        setContentDescription(spoken);
         invalidate();
     }
 
@@ -110,6 +120,7 @@ final class AnswerView extends View {
         float height = getHeight() > 0 ? getHeight() : 640;
         paint.setTextSize(height * 0.05f);
         indexPaint.setTextSize(height * 0.035f);
+        continuationPaint.setStrokeWidth(Math.max(1f, paint.getTextSize() * 0.04f));
     }
 
     private void applyViewport() {
@@ -143,10 +154,29 @@ final class AnswerView extends View {
             return;
         }
         float y = bodyTop() - paint.ascent();
-        for (String line : body) {
+        for (int row = 0; row < body.size(); row++) {
+            String line = body.get(row);
+            if (row < continuedFromPreviousLine.size() && continuedFromPreviousLine.get(row)) {
+                drawContinuation(canvas, left, y);
+            }
             canvas.drawText(line == null ? "" : line, left, y, paint);
             y += lineHeight();
         }
+    }
+
+    /** A small bent arrow in the existing gutter; never a character in the answer. */
+    private void drawContinuation(Canvas canvas, float left, float baseline) {
+        float right = left * .75f;
+        float size = Math.min(left * .5f, paint.getTextSize() * .2f);
+        float middle = baseline + (paint.ascent() + paint.descent()) * .5f;
+        continuationPath.reset();
+        continuationPath.moveTo(right - size, middle - size * .5f);
+        continuationPath.lineTo(right - size, middle);
+        continuationPath.lineTo(right, middle);
+        continuationPath.moveTo(right - size * .4f, middle - size * .4f);
+        continuationPath.lineTo(right, middle);
+        continuationPath.lineTo(right - size * .4f, middle + size * .4f);
+        canvas.drawPath(continuationPath, continuationPaint);
     }
 
     private void drawDiagram(Canvas canvas, AnswerDiagram diagram, float left, float top) {

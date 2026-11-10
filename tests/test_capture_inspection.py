@@ -176,6 +176,8 @@ def test_native_diagnostic_zip_exposes_the_unchanged_original_in_one_call(native
     class OriginalClient(DiagnosticClient):
         def complete_inspection(self, **kwargs):
             request = json.loads(kwargs["prompt"].split("\nInspection request:\n")[1])
+            assert kwargs["requested_settings"] == request["requested_settings"] == {
+                "model": "gpt-6-luna", "effort": "high", "speed": "standard"}
             assert "source_original" in kwargs["prompt"]
             assert "zoom" in kwargs["prompt"]
             original = request["images"][0]
@@ -229,6 +231,8 @@ def test_legacy_prepared_manifest_is_reproduced_without_inserting_an_original(na
         def complete_inspection(self, **kwargs):
             request = json.loads(kwargs["prompt"].split("\nInspection request:\n")[1])
             assert request == old
+            assert kwargs["requested_settings"] == old["requested_settings"]
+            assert kwargs["requested_settings"]["speed"] == "fast"
             assert "ONLY the supplied overview and bounded native-pixel regions" in kwargs["prompt"]
             return super().complete_inspection(**kwargs)
 
@@ -309,7 +313,7 @@ def test_pending_stale_inspection_retires_late_reply_without_another_local_send(
 @pytest.mark.parametrize("legacy", [True, False])
 def test_uncertain_diagnostic_replays_exact_prepared_manifest_without_another_send(native_task, page, monkeypatch, legacy):
     from app import capture_inspection as inspection
-    from app.solvers import cdp, chatgpt_web
+    from app.solvers import cdp, chatgpt_web, chatgpt_work_web as work
     from tests.test_chatgpt_work_web import _Context, _VenueTab, _diagnostic_composer, _guard_state
     _, config, receipt, _, task = native_task
     store = WorkStore(config.DATA_DIR)
@@ -322,7 +326,13 @@ def test_uncertain_diagnostic_replays_exact_prepared_manifest_without_another_se
         monkeypatch.setattr(chatgpt_web, name, value)
     monkeypatch.setattr(cdp, "connect_over_cdp", lambda endpoint: type("LocalBrowser", (), {
         "contexts": [_Context(_VenueTab(page))], "close": lambda self: None})())
-    assert inspection.InspectionService(store, answer_pending=lambda: False).process_one() is False
+    historical = work.WorkWebClient()
+    if legacy:
+        # Seed a pre-policy Fast send on local HTML; recovery uses the current client below.
+        historical._verify_model = lambda page, select=False: work.verify_work_model(
+            page, select=select, requested_settings=historical._requested.get())
+    assert inspection.InspectionService(store, client_factory=lambda: historical,
+                                       answer_pending=lambda: False).process_one() is False
     prepared = store.get_capture_inspection_part(part_id)["request"]
     assert ("packet_policy" not in prepared) is legacy
     assert store.get_capture_inspection(task["inspection_id"])["status"] == "uncertain"

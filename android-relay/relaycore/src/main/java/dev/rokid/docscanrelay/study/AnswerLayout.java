@@ -18,11 +18,17 @@ public final class AnswerLayout {
         public final int start;
         public final int end;
         public final List<String> lines;
+        /** True when the display row starts inside the same source line, including across pages. */
+        public final List<Boolean> continuedFromPreviousLine;
+        /** Exact original fragment, including original line endings and indentation. */
+        public final String sourceText;
 
-        private Page(int start, int end, List<String> lines) {
+        private Page(int start, int end, List<String> lines, List<Boolean> continued, String sourceText) {
             this.start = start;
             this.end = end;
             this.lines = Collections.unmodifiableList(new ArrayList<>(lines));
+            this.continuedFromPreviousLine = Collections.unmodifiableList(new ArrayList<>(continued));
+            this.sourceText = sourceText;
         }
     }
 
@@ -118,7 +124,8 @@ public final class AnswerLayout {
         @Override public synchronized Page get(int index) {
             if (index < 0 || index >= size()) throw new IndexOutOfBoundsException();
             if (index == cachedIndex) return cachedPage;
-            if (lineCount == 0) return new Page(0, 0, Collections.singletonList(""));
+            if (lineCount == 0) return new Page(0, 0, Collections.singletonList(""),
+                    Collections.singletonList(false), "");
             int group = index / pagesPerIndex;
             int start = indexEnd(group - 1);
             int skippedLines = index % pagesPerIndex * linesPerPage;
@@ -129,7 +136,9 @@ public final class AnswerLayout {
             int lastLine = firstLine + Math.min(linesPerPage, lineCount - firstLine);
             int pageStart = start;
             List<String> lines = new ArrayList<>();
+            List<Boolean> continued = new ArrayList<>();
             for (int line = firstLine; line < lastLine; line++) {
+                continued.add(start > 0 && text.charAt(start - 1) != '\n' && text.charAt(start - 1) != '\r');
                 int consumedEnd = lineEnd(text, start, width, measurer, clusters);
                 int end = consumedEnd;
                 if (end > start && text.charAt(end - 1) == '\n') end--;
@@ -138,7 +147,7 @@ public final class AnswerLayout {
                 start = consumedEnd;
             }
             cachedIndex = index;
-            cachedPage = new Page(pageStart, start, lines);
+            cachedPage = new Page(pageStart, start, lines, continued, text.substring(pageStart, start));
             return cachedPage;
         }
     }

@@ -79,8 +79,9 @@ android {
         // 44 adds opt-in comparison transfer with persistent origin and receipt binding.
         // 46 adds explicit provisional paper/AE comparison and respects Y-plane buffer origins.
         // 48 fences stale power callbacks and consumes bounded current-capture feedback.
-        versionCode = 52
-        versionName = "0.43.0"
+        // 53 distinguishes display wraps from source newlines without changing answer text.
+        versionCode = 53
+        versionName = "0.43.1"
     }
 
     // Same reasoning as `:glassapp`: a vendor installer that reads JAR

@@ -3,6 +3,7 @@ package dev.rokid.docscanglass.doc;
 import static org.junit.Assert.*;
 
 import java.util.List;
+import java.util.ArrayList;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.robolectric.RobolectricTestRunner;
@@ -213,6 +214,98 @@ public class AnswerViewTest {
         bitmap.recycle();
     }
 
+    @Test
+    @org.robolectric.annotation.GraphicsMode(org.robolectric.annotation.GraphicsMode.Mode.NATIVE)
+    public void accessibilityKeepsTheSourceFragmentWithoutSoftWrapNewlines() {
+        String source = "if ready:\n    total = long_function_name(argument_one, argument_two)\n    print(total)";
+        AnswerView view = new AnswerView(RuntimeEnvironment.getApplication());
+        view.layout(0, 0, 280, 640);
+        AnswerReader reader = reader(source);
+        view.bind(reader);
+
+        assertTrue("the native font must actually wrap this source", reader.page().lines.size() > 3);
+        assertEquals(source.substring(reader.page().start, reader.page().end),
+                view.getContentDescription().toString());
+    }
+
+    @Test
+    @org.robolectric.annotation.GraphicsMode(org.robolectric.annotation.GraphicsMode.Mode.NATIVE)
+    public void nativeFontMarksOnlySoftContinuationsAndRestoresCodeAcrossPages() throws Exception {
+        String calculation = "    total = long_function_name(" + "argument_one, ".repeat(22) + "argument_two)";
+        List<String> expected = List.of("if ready:", calculation, "", "    print(total)");
+        String source = String.join("\r\n", expected) + "\r\n";
+        AnswerView view = new AnswerView(RuntimeEnvironment.getApplication());
+        view.layout(0, 0, 280, 640);
+        AnswerReader reader = reader(source);
+        view.bind(reader);
+        assertTrue(reader.pageCount() > 1);
+        android.graphics.Paint font = org.robolectric.util.ReflectionHelpers.getField(view, "paint");
+        assertEquals(32f, view.bodyTextSize(), .01f);
+        float textWidth = org.robolectric.util.ReflectionHelpers.callInstanceMethod(view, "textWidth");
+        assertEquals("the existing text width is preserved", 280 * .94f, textWidth, .01f);
+        float top = org.robolectric.util.ReflectionHelpers.callInstanceMethod(view, "bodyTop");
+        float lineHeight = org.robolectric.util.ReflectionHelpers.callInstanceMethod(view, "lineHeight");
+        int gutterRight = (int)(280 * .03f) - 1;
+        List<StringBuilder> restored = new ArrayList<>();
+        org.json.JSONArray renderedRows = new org.json.JSONArray();
+        StringBuilder accessible = new StringBuilder();
+        boolean sawContinuedPageStart = false, sawHardLine = false;
+        int pageCount = reader.pageCount();
+        java.io.File output = new java.io.File("build/outputs/answer-soft-wrap");
+        output.mkdirs();
+        for (int pageIndex = 0; pageIndex < pageCount; pageIndex++) {
+            view.refresh();
+            dev.rokid.docscanrelay.study.AnswerLayout.Page page = reader.page();
+            assertEquals(page.sourceText, view.getContentDescription().toString());
+            accessible.append(view.getContentDescription());
+            android.graphics.Bitmap bitmap = android.graphics.Bitmap.createBitmap(
+                    280, 640, android.graphics.Bitmap.Config.ARGB_8888);
+            view.draw(new android.graphics.Canvas(bitmap));
+            for (int row = 0; row < page.lines.size(); row++) {
+                String line = page.lines.get(row);
+                boolean continued = page.continuedFromPreviousLine.get(row);
+                assertTrue("native-font row must retain the complete available width",
+                        font.measureText(line) <= textWidth + .01f);
+                int gutterPixels = 0;
+                for (int y = (int)(top + row*lineHeight); y < top + (row+1)*lineHeight; y++)
+                    for (int x = 1; x < gutterRight; x++)
+                        if (bitmap.getPixel(x, y) != android.graphics.Color.BLACK) gutterPixels++;
+                if (continued) {
+                    assertTrue("continued row has a separate visible gutter path", gutterPixels > 0);
+                    if (row == 0 && pageIndex > 0) sawContinuedPageStart = true;
+                } else {
+                    assertEquals("original newline/blank row has no continuation marker", 0, gutterPixels);
+                    restored.add(new StringBuilder());
+                    sawHardLine = true;
+                }
+                renderedRows.put(new org.json.JSONObject().put("page", pageIndex).put("row", row)
+                        .put("text", line).put("continued", continued).put("gutter_pixels", gutterPixels));
+                assertFalse(restored.isEmpty());
+                restored.get(restored.size()-1).append(line);
+            }
+            if (pageIndex < 2) try (java.io.FileOutputStream stream = new java.io.FileOutputStream(
+                    new java.io.File(output, "page-" + pageIndex + ".png"))) {
+                bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, stream);
+            }
+            bitmap.recycle();
+            if (pageIndex+1 < pageCount) reader.forward();
+        }
+        List<String> logicalLines = new ArrayList<>();
+        for (StringBuilder line : restored) logicalLines.add(line.toString());
+        assertEquals(expected, logicalLines);
+        assertEquals(source, accessible.toString());
+        assertTrue(sawContinuedPageStart && sawHardLine);
+        assertEquals(32f, view.bodyTextSize(), .01f);
+        // An external Python parser compares these artifacts; the reconstruction above uses only rows/metadata.
+        java.nio.file.Files.write(new java.io.File(output, "source.py").toPath(),
+                source.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        java.nio.file.Files.write(new java.io.File(output, "restored.py").toPath(),
+                String.join("\n", logicalLines).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        java.nio.file.Files.write(new java.io.File(output, "rendered-rows.json").toPath(),
+                new org.json.JSONObject().put("text_size", view.bodyTextSize()).put("text_width", textWidth)
+                        .put("rows", renderedRows).toString().getBytes(java.nio.charset.StandardCharsets.UTF_8));
+    }
+
     private AnswerReader reader(String text) {
         return new AnswerReader(new AnswerBundle("s", "a".repeat(64), 1, List.of(
                 AnswerItem.ready("g1", "大問1", "q1", "(1)", text))), 400, 2, String::length);
@@ -230,7 +323,7 @@ public class AnswerViewTest {
         assertTrue(count > 1);
         for (int i = 0; i < count; i++) {
             view.refresh();
-            int rows = view.getContentDescription().toString().split("\n", -1).length + 1;
+            int rows = reader.page().lines.size() + 1;
             assertTrue("every line stays within the display", rows * fontSize * 1.25f <= view.getHeight());
             restored.append(text, reader.page().start, reader.page().end);
             reader.forward();

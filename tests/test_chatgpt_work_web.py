@@ -549,13 +549,13 @@ def _controls(page, *, selected="Default", power=0, fast=False):
     };true""")
 
 
-def test_preparation_selects_the_actual_radio_power_and_fast_controls(page):
-    _controls(page)
-    assert work.verify_work_model(page, select=True) == "GPT-6.1 Sol / Extra High / Fast"
+def test_preparation_selects_the_actual_radio_power_and_standard_controls(page):
+    _controls(page, fast=True)
+    assert work.verify_work_model(page, select=True) == "GPT-6.1 Sol / Extra High / Standard"
     assert page.evaluate("document.getElementById('sol').getAttribute('aria-checked')") == "true"
     assert page.evaluate("document.getElementById('default').getAttribute('aria-checked')") == "false"
     assert page.evaluate("document.querySelector('[role=slider]').getAttribute('aria-valuenow')") == "3"
-    assert page.evaluate("document.querySelector('[role=menuitemcheckbox]').getAttribute('aria-checked')") == "true"
+    assert page.evaluate("document.querySelector('[role=menuitemcheckbox]').getAttribute('aria-checked')") == "false"
     assert page.evaluate("document.getElementById('models').hidden") is True
 
 
@@ -593,17 +593,17 @@ def test_work_environment_settings_and_changed_trigger_label_use_real_controls(p
 
 @pytest.mark.parametrize("linked", [True, False])
 def test_the_same_model_accepts_an_omitted_display_prefix(page, linked):
-    _controls(page, selected="GPT-6.1 Sol", power=3, fast=True)
+    _controls(page, selected="GPT-6.1 Sol", power=3)
     page.evaluate("""document.getElementById('work').setAttribute('aria-pressed','true');
       document.getElementById('sol').textContent='Sol 6.1'; true""")
     if not linked:
         page.evaluate("document.querySelector('button[aria-controls]').removeAttribute('aria-controls'); true")
-    assert work.verify_work_model(page) == "GPT-6.1 Sol / Extra High / Fast"
+    assert work.verify_work_model(page) == "GPT-6.1 Sol / Extra High / Standard"
     assert page.evaluate("document.getElementById('sol').getAttribute('aria-checked')") == "true"
 
 
 def test_a_different_decimal_version_is_not_the_requested_model(page):
-    _controls(page, selected="GPT-6.1 Sol", power=3, fast=True)
+    _controls(page, selected="GPT-6.1 Sol", power=3)
     page.evaluate("""document.getElementById('work').setAttribute('aria-pressed','true');
       document.getElementById('sol').textContent='GPT-61 Sol'; true""")
     with pytest.raises(chatgpt_web.ChatGptWebModelMismatch):
@@ -624,9 +624,9 @@ def test_associated_controls_use_roles_and_their_visible_meaning(page):
       const speed=document.querySelector('[role=menuitemcheckbox]');
       speed.setAttribute('role','switch'); speed.setAttribute('aria-label','高速モード');
       speed.onclick=function(){this.setAttribute('aria-checked',String(this.getAttribute('aria-checked')!=='true'))}; return true})()""")
-    assert work.verify_work_model(page, select=True) == "GPT-6.1 Sol / Extra High / Fast"
+    assert work.verify_work_model(page, select=True) == "GPT-6.1 Sol / Extra High / Standard"
     assert page.evaluate("document.getElementById('work').getAttribute('aria-selected')") == "true"
-    assert page.evaluate("document.querySelector('[role=switch]').getAttribute('aria-checked')") == "true"
+    assert page.evaluate("document.querySelector('[role=switch]').getAttribute('aria-checked')") == "false"
     assert page.evaluate("document.getElementById('models').hidden") is True
 
 
@@ -645,7 +645,7 @@ def test_an_existing_associated_popup_is_left_untouched(page, select):
 
 
 def test_a_popup_opened_by_mode_navigation_is_not_claimed_or_closed(page):
-    _controls(page, selected="GPT-6.1 Sol", power=3, fast=True)
+    _controls(page, selected="GPT-6.1 Sol", power=3)
     page.evaluate("""document.getElementById('work').onclick=function(){
       this.setAttribute('aria-pressed','true'); document.getElementById('models').hidden=false;
     }; true""")
@@ -684,7 +684,7 @@ def test_effort_uses_meaning_after_slider_numbers_and_labels_change(page):
         this.setAttribute('aria-valuetext',({10:'軽量',11:'中',12:'高',13:'極高',14:'最大'})[n]);
         document.getElementById('effort').textContent=({10:'Light',11:'Medium',12:'High',13:'Extra High',14:'Maximum'})[n];
       }; return true})()""")
-    assert work.verify_work_model(page, select=True) == "GPT-6.1 Sol / Extra High / Fast"
+    assert work.verify_work_model(page, select=True) == "GPT-6.1 Sol / Extra High / Standard"
     assert page.evaluate("document.querySelector('[role=slider]').getAttribute('aria-valuenow')") == "13"
     assert page.evaluate("document.querySelector('[role=slider]').getAttribute('aria-valuetext')") == "極高"
 
@@ -740,7 +740,7 @@ def test_named_effort_choices_keep_model_and_effort_groups_distinct(page):
         document.querySelectorAll('#depth [role=radio]').forEach(e=>e.setAttribute('aria-checked',String(e===this)));
         document.getElementById('effort').textContent=this.textContent;
       }; return true})()""")
-    assert work.verify_work_model(page, select=True) == "GPT-6.1 Sol / Extra High / Fast"
+    assert work.verify_work_model(page, select=True) == "GPT-6.1 Sol / Extra High / Standard"
     assert page.evaluate("document.querySelector('#depth [aria-checked=true]').textContent") == "極高"
     assert page.evaluate("document.getElementById('sol').getAttribute('aria-checked')") == "true"
 
@@ -783,8 +783,8 @@ def test_own_popup_closure_must_preserve_live_settings_before_the_submission_bou
                  "document.getElementById('terra').setAttribute('aria-checked','true');",
         "effort": "document.querySelector('[role=slider]').setAttribute('aria-valuenow','1');"
                   "document.getElementById('effort').textContent='Medium';",
-        "speed": "document.querySelector('[role=menuitemcheckbox]').setAttribute('aria-checked','false');"
-                 "document.querySelector('[role=menuitemcheckbox]').setAttribute('aria-label','Enable fast mode');",
+        "speed": "document.querySelector('[role=menuitemcheckbox]').setAttribute('aria-checked','true');"
+                 "document.querySelector('[role=menuitemcheckbox]').setAttribute('aria-label','Enable standard mode');",
         "work": "document.getElementById('work').setAttribute('aria-pressed','false');",
         "unproved-removal": "menu.remove(); this.removeAttribute('aria-expanded');",
         "replace-menu": "menu.replaceWith(menu.cloneNode(true));",
@@ -813,13 +813,13 @@ def test_own_popup_closure_must_preserve_live_settings_before_the_submission_bou
 
 
 def test_asynchronous_owned_closure_only_reads_until_the_same_menu_closes(page):
-    _controls(page, selected="GPT-6.1 Sol", power=3, fast=True)
+    _controls(page, selected="GPT-6.1 Sol", power=3)
     page.evaluate("""document.getElementById('work').setAttribute('aria-pressed','true');
       window.popupClicks=0; document.querySelector('button[aria-haspopup]').onclick=function(){
         window.popupClicks++; const menu=document.getElementById('models');
         if(menu.hidden) menu.hidden=false; else setTimeout(()=>{menu.hidden=true},20);
       }; document.onkeydown=event=>{if(event.key==='Escape')setTimeout(()=>{document.getElementById('models').hidden=true},20)};true""")
-    assert work.verify_work_model(page) == "GPT-6.1 Sol / Extra High / Fast"
+    assert work.verify_work_model(page) == "GPT-6.1 Sol / Extra High / Standard"
     assert page.evaluate("window.popupClicks") == 1
     assert page.evaluate("document.getElementById('models').hidden") is True
 
@@ -887,7 +887,7 @@ def _escape_only_popup(page):
 
 def test_actual_escape_closes_owned_work_popup_when_trigger_click_does_not(page):
     _escape_only_popup(page)
-    assert work.verify_work_model(page, select=False) == "GPT-6.1 Sol / Extra High / Fast"
+    assert work.verify_work_model(page, select=False) == "GPT-6.1 Sol / Extra High / Standard"
     assert page.evaluate("[window.popupClicks,window.ignoredTriggerClose,window.escapeClosures,window.settingClicks,window.sent]") == [1, 0, 1, 0, 0]
     assert page.evaluate("document.querySelector('[role=menu]')===null") is True
 
@@ -1006,7 +1006,7 @@ def test_normal_owned_unmount_keeps_last_live_confirmation_separate_from_closed_
         return result
 
     monkeypatch.setattr(work, "_controls", inspect)
-    assert work.verify_work_model(page) == "GPT-6.1 Sol / Extra High / Fast"
+    assert work.verify_work_model(page) == "GPT-6.1 Sol / Extra High / Standard"
     assert closed[-1]["close_evidence"] == "unmounted_after_live_confirmation"
     assert closed[-1]["closed_joint_selection_proven"] is False
     assert closed[-1]["before_close"]["checked"] == ["6.1:sol"]
@@ -1113,7 +1113,7 @@ def test_only_hidden_textless_span_additions_qualify_as_decoration(page, change)
 @pytest.mark.parametrize("change", [
     "owned.querySelector('#sol').setAttribute('aria-checked','false'); owned.querySelector('#terra').setAttribute('aria-checked','true');",
     "owned.querySelector('#effort').textContent='Medium'; owned.querySelector('[role=slider]').setAttribute('aria-valuenow','1');",
-    "owned.querySelector('[role=menuitemcheckbox]').setAttribute('aria-checked','false');",
+    "owned.querySelector('[role=menuitemcheckbox]').setAttribute('aria-checked','true');",
     "document.getElementById('work').setAttribute('aria-pressed','false');",
     "this.replaceWith(this.cloneNode(true));",
     "document.getElementById('work').replaceWith(document.getElementById('work').cloneNode(true));",
@@ -1404,7 +1404,7 @@ def test_conversation_identity_is_observed_url_only():
 
 
 def _upload_composer(page):
-    _controls(page, selected="GPT-6.1 Sol", power=3, fast=True)
+    _controls(page, selected="GPT-6.1 Sol", power=3)
     page.evaluate("""document.getElementById('work').setAttribute('aria-pressed','true');
       document.body.insertAdjacentHTML('beforeend', `<main><div role="region" aria-label="Conversation" id="conversation"></div>
       <form onsubmit="return false"><div id="work-composer" contenteditable="true" role="textbox" aria-label="Work with ChatGPT"></div>
@@ -2109,10 +2109,91 @@ def test_sealed_settings_override_later_environment_changes_before_send(page, mo
             pass
     monkeypatch.setattr(cdp, "connect_over_cdp", lambda endpoint: LocalBrowser())
     monkeypatch.setenv("ROKID_WORK_MODEL", "gpt-6.1-terra")
+    monkeypatch.setenv("ROKID_WORK_SPEED", "fast")
     client = work.WorkWebClient()
     result = client.complete_json(system="Answer", prompt="All questions", files=lambda: [_payload()],
         chat_key="work:sealed-settings", expect=("questions",), booklet=True,
-        requested_settings={"model": "gpt-6.1-sol", "effort": "xhigh", "speed": "fast"})
+        requested_settings={"model": "gpt-6.1-sol", "effort": "xhigh", "speed": "standard"})
     assert result["questions"] and page.evaluate("window.sent") == 1
     assert page.evaluate("document.getElementById('sol').getAttribute('aria-checked')") == "true"
     assert client.conversation_id == "12345678-1234-1234-1234-123456789abc"
+
+
+def test_default_work_and_inspection_settings_use_standard(monkeypatch):
+    monkeypatch.delenv("ROKID_WORK_SPEED", raising=False)
+    assert work._requested_settings().speed == "standard"
+    calls = []
+    client = work.WorkWebClient()
+    monkeypatch.setattr(client, "complete_json", lambda **kwargs: calls.append(kwargs))
+    client.complete_inspection(inspection_id="a" * 64, manifest_sha256="b" * 64,
+                               prompt="Inspect original regions", files=lambda: [_payload()])
+    assert calls[0]["requested_settings"]["speed"] == "standard"
+
+
+@pytest.mark.parametrize("purpose,source", [("answer", "explicit"), ("answer", "environment"),
+                                           ("inspection", "explicit")])
+def test_fast_requests_stop_before_attachment_and_send(page, monkeypatch, purpose, source):
+    from app.solvers import cdp
+
+    _diagnostic_composer(page) if purpose == "inspection" else _upload_composer(page)
+    monkeypatch.setenv("ROKID_CHATGPT_SEND_ENABLED", "1")
+    monkeypatch.setenv("ROKID_WORK_SPEED", "fast")
+    monkeypatch.setattr(cdp, "connect_over_cdp", lambda endpoint: type("LocalBrowser", (), {
+        "contexts": [_Context(_VenueTab(page))], "close": lambda self: None})())
+    settings = {"model": "gpt-6-luna" if purpose == "inspection" else "gpt-6.1-sol",
+                "effort": "high" if purpose == "inspection" else "xhigh", "speed": "fast"}
+    client = work.WorkWebClient()
+    with pytest.raises(chatgpt_web.ChatGptWebModelMismatch, match="require Standard"):
+        if purpose == "inspection":
+            client.complete_inspection(inspection_id="a" * 64, manifest_sha256="b" * 64,
+                prompt="Inspect regions", files=lambda: [_payload()], requested_settings=settings)
+        else:
+            client.complete_json(system="Answer", prompt="All questions", files=lambda: [_payload()],
+                chat_key="work:old-fast", expect=("questions",), booklet=True,
+                requested_settings=settings if source == "explicit" else None)
+    assert page.evaluate("window.sent") == 0 and page.evaluate("window.uploaded") == []
+    assert _guard_state() == "idle"
+
+
+def test_fast_is_also_rejected_at_the_direct_submission_boundary(page, monkeypatch):
+    _upload_composer(page)
+    monkeypatch.setenv("ROKID_WORK_SPEED", "fast")
+    reached = []
+    with pytest.raises(chatgpt_web.ChatGptWebModelMismatch, match="require Standard"):
+        work.WorkWebClient()._send_and_read(page,
+            'Local fixture\nTransfer receipt:\n{"batch_id":"old-fast"}', composer=None,
+            expect=("questions",), before_submit=lambda: reached.append(True),
+            on_chat_url=lambda value: None, on_model=lambda value: None)
+    assert reached == [] and page.evaluate("window.sent") == 0
+
+
+@pytest.mark.parametrize("pending", [False, True])
+def test_old_fast_answers_recover_without_another_attachment_or_send(page, monkeypatch, pending):
+    from app.solvers import cdp
+
+    _upload_composer(page)
+    monkeypatch.setenv("ROKID_CHATGPT_SEND_ENABLED", "1")
+    monkeypatch.setattr(cdp, "connect_over_cdp", lambda endpoint: type("LocalBrowser", (), {
+        "contexts": [_Context(_VenueTab(page))], "close": lambda self: None})())
+    settings = {"model": "gpt-6.1-sol", "effort": "xhigh", "speed": "fast"}
+    legacy = work.WorkWebClient()
+    # Build the historical journal using local HTML and the prior verifier.
+    monkeypatch.setattr(legacy, "_verify_model", lambda page, select=False:
+                        work.verify_work_model(page, select=select, requested_settings=settings))
+    arguments = {"system": "Answer", "prompt": "All questions", "chat_key": "work:saved-fast",
+                 "expect": ("questions",), "booklet": True, "requested_settings": settings}
+    page.evaluate("window.suppressFinal = " + json.dumps(pending))
+    if pending:
+        with pytest.raises(chatgpt_web.ChatGptWebUncertain):
+            legacy.complete_json(**arguments, files=lambda: [_payload()])
+        page.evaluate("window.finish()")
+    else:
+        legacy.complete_json(**arguments, files=lambda: [_payload()])
+    result = work.WorkWebClient().complete_json(**arguments,
+        files=lambda: pytest.fail("saved Fast answer requested another attachment"),
+        before_submit=lambda: pytest.fail("saved Fast answer attempted another send"))
+    assert result["questions"]
+    assert settings["speed"] == "fast"
+    assert page.evaluate("window.sent") == 1 and page.evaluate("window.uploaded") == ["originals.zip"]
+    assert page.evaluate("document.querySelector('[role=menuitemcheckbox]').getAttribute('aria-checked')") == "true"
+    assert _guard_state() == "idle"

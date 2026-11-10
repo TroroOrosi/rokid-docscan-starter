@@ -241,14 +241,14 @@ def test_a_latex_fraction_reaches_the_operator_as_writable_text(client):
     _, session_id = _session_with(client, [PAGE])
     item = _ingest(client, session_id, chr(92) + "frac{1}{2}")
     assert item["status"] == "ready"
-    assert item["answer"] == "1/2"
+    assert item["answer"] == "(1/2)"
 
 
 @pytest.mark.parametrize("answer, expected", [
     ("{−1, 1}", "{−1, 1}"),
     ("function f() { return 1; }", "function f() { return 1; }"),
     (r"\text{速さ} = 2 \mathrm{m/s}", "速さ = 2 m/s"),
-    (r"\frac{\mathrm{kg}}{2}", "(kg)/2"),
+    (r"\frac{\mathrm{kg}}{2}", "((kg)/2)"),
 ])
 def test_answer_bundle_preserves_braces_and_removes_only_latex_groups(client, answer, expected):
     _, session_id = _session_with(client, [PAGE])

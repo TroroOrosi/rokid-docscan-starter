@@ -134,6 +134,98 @@ def question_for(doc, session, *, stage="single", **extra):
     return Question(chat_key=f"session:{session}", document_pages=pages, booklet_stage=stage, **extra)
 
 
+@pytest.mark.parametrize("field", ["derivation", "solution_steps", "answer_blocks"])
+def test_work_browser_rejects_extra_body_fields_before_discarding_transport_envelope(client, monkeypatch, field):
+    from app import main
+    from app.solvers.chatgpt_work import ChatGptWorkSolver
+    from app.work_bridge import configured_work_store
+
+    doc, session, job = api_session(client)
+    wait_for(lambda: session not in main._background_solves)
+
+    class SeparateBodyReply(BrowserReply):
+        def complete_json(self, **options):
+            envelope = super().complete_json(**options)
+            envelope[field] = ["2x=4"]
+            self.returned = envelope
+            return envelope
+
+    fake = SeparateBodyReply()
+    monkeypatch.setenv("ROKID_CHATGPT_SEND_ENABLED", "1")
+    with pytest.raises(ValueError, match="unsupported answer-sheet field"):
+        ChatGptWorkSolver(client=fake).answer_all(question=question_for(doc, session))
+    assert configured_work_store().result(job["job_id"]) is None
+    assert fake.returned[field] == ["2x=4"]
+    assert len(fake.calls) == 1
+
+
+@pytest.mark.parametrize("empty", [None, "", " \n ", [], {}])
+@pytest.mark.parametrize("level", ["result", "question"])
+def test_work_browser_empty_legacy_fields_preserve_non_answering_stop(client, monkeypatch, empty, level):
+    from app import main
+    from app.solvers.chatgpt_work import ChatGptWorkSolver
+    from app.work_bridge import configured_work_store
+
+    doc, session, job = api_session(client)
+    wait_for(lambda: session not in main._background_solves)
+
+    class UnreadableReply(BrowserReply):
+        def complete_json(self, **options):
+            envelope = super().complete_json(**options)
+            envelope["questions"][0].update(status="needs_input", answer="", missing_material="blur")
+            envelope["readability"][0].update(status="unreadable", reasons=["blur"])
+            target = envelope if level == "result" else envelope["questions"][0]
+            target["derivation"] = empty
+            return envelope
+
+    monkeypatch.setenv("ROKID_CHATGPT_SEND_ENABLED", "1")
+    fake = UnreadableReply()
+    replies = ChatGptWorkSolver(client=fake).answer_all(question=question_for(doc, session))
+    assert replies[0][1].answer == ""
+    assert replies[0][1].extras["answer_status"] == "needs_input"
+    assert replies[0][1].extras["missing_material"] == "blur"
+    sealed = configured_work_store().result(job["job_id"])
+    target = sealed if level == "result" else sealed["questions"][0]
+    assert target["derivation"] == empty
+    assert len(fake.calls) == 1
+
+
+@pytest.mark.parametrize("level", ["question", "result"])
+def test_legacy_sealed_separate_body_is_auditable_and_never_resent(client, monkeypatch, level):
+    from app import main
+    from app.solvers.chatgpt_work import ChatGptWorkSolver
+    from app.work_bridge import configured_work_store
+    from tests.test_work_bridge import answer, api_tile_receipt
+
+    doc, session, job = api_session(client)
+    wait_for(lambda: session not in main._background_solves)
+    store = configured_work_store()
+    received = [api_tile_receipt(client, job)]
+    legacy = answer(text="よって x=2。")
+    target = legacy["questions"][0] if level == "question" else legacy
+    target["derivation"] = "2x+3=7 より 2x=4。"
+    # Model the older validator's acceptance while using the real immutable store.
+    with monkeypatch.context() as previous_version:
+        previous_version.setattr(store, "_validate_result", lambda job, result: None)
+        store.submit_result(job["job_id"], manifest_sha256=job["manifest_sha256"], generation=job["generation"],
+                            conversation_id="legacy-work", source_receipts=received, result=legacy)
+
+    class NoBrowser:
+        def complete_json(self, **options):
+            pytest.fail("a sealed legacy reply must never be sent again")
+
+    solver = ChatGptWorkSolver(client=NoBrowser())
+    question = question_for(doc, session)
+    monkeypatch.setenv("ROKID_CHATGPT_SEND_ENABLED", "1")
+    if level == "result":
+        with pytest.raises(ValueError, match="unsupported answer-sheet field"):
+            solver.answer_all(question=question)
+    else:
+        replies = solver.answer_all(question=question)
+        assert isinstance(replies[0][1], ValueError)
+    assert configured_work_store().result(job["job_id"]) == legacy
+
+
 @pytest.mark.parametrize("stage", ["single", "reading"])
 def test_capture_context_reaches_the_sealed_work_job_and_browser_prompt(client, monkeypatch, stage):
     from app import main
@@ -398,8 +490,8 @@ def test_new_browser_job_seals_actual_inventory_model_and_reuses_it_after_restar
         chatgpt_work.ChatGptWorkSolver(client=inventory).answer_all(question=question)
     first = store.session_jobs(1)[0]
     assert first["requested_settings"] == {"model": "GPT-6.10 Sol" if policy is None else "GPT 6.1 Sol",
-                                          "effort": "xhigh", "speed": "fast"}
-    assert inventory.calls == [({"model": "gpt-6.1-sol", "effort": "xhigh", "speed": "fast"}, policy is None)]
+                                          "effort": "xhigh", "speed": "standard"}
+    assert inventory.calls == [({"model": "gpt-6.1-sol", "effort": "xhigh", "speed": "standard"}, policy is None)]
     raw, _ = store.read_source(first["job_id"], "p1")
     assert raw == original.read_bytes()
     monkeypatch.setenv("ROKID_WORK_MODEL", "GPT-6.99 Sol")

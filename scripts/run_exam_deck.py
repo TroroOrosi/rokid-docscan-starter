@@ -490,14 +490,25 @@ def grade(items: list[dict], key: dict[int, str]) -> list[tuple[int, str, str]]:
     The bundle carries the numbers printed in the booklet, so this compares the
     answer sheet the operator would write, not the model's own question order.
     A number the reply never answered is reported as missing, not skipped.
+    This key has no section identity: a repeated number is ambiguous even when
+    the answers agree, and must never pass by overwriting an earlier item.
     """
     given: dict[int, str] = {}
+    occurrences: dict[int, int] = {}
     for item in items:
+        for number in item.get("answer_no", []):
+            if isinstance(number, int):
+                occurrences[number] = occurrences.get(number, 0) + 1
         if item["status"] in ("ready", "needs_review"):
             given.update(answers_by_number(item))
-    return [(number, official, given.get(number, ""))
-            for number, official in sorted(key.items())
-            if normalize_answer(given.get(number, "")) != normalize_answer(official)]
+    wrong = []
+    for number, official in sorted(key.items()):
+        count = occurrences.get(number, 0)
+        if count > 1:
+            wrong.append((number, official, f"(ambiguous answer number: {count} occurrences)"))
+        elif normalize_answer(given.get(number, "")) != normalize_answer(official):
+            wrong.append((number, official, given.get(number, "")))
+    return wrong
 
 
 def build_parser() -> argparse.ArgumentParser:

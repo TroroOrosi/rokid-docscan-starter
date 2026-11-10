@@ -770,6 +770,63 @@ def test_combined_unlabeled_ratios_keep_their_positional_correspondence(numbers)
     assert run_exam_deck.grade([item], dict(zip(numbers, ["1:2", "3:4"]))) == []
 
 
+@pytest.mark.parametrize("answers", [("WRONG", "4"), ("4", "WRONG"), ("4", "4"), ("④", "4")])
+def test_reused_answer_numbers_cannot_be_graded_with_an_unscoped_key(answers):
+    items = [{"question_id": index, "question_label": f"第{index}問 問1",
+              "answer_no": [1], "answer": answer, "status": "ready"}
+             for index, answer in enumerate(answers, 1)]
+
+    assert run_exam_deck.grade(items, {1: "4"}) == [
+        (1, "4", "(ambiguous answer number: 2 occurrences)")]
+
+
+@pytest.mark.parametrize("status", ["needs_review", "pending"])
+def test_a_reused_number_remains_ambiguous_when_one_item_is_not_ready(status):
+    items = [{"question_id": 1, "answer_no": [1], "answer": "", "status": status},
+             {"question_id": 2, "answer_no": [1], "answer": "4", "status": "ready"}]
+
+    assert run_exam_deck.grade(items, {1: "4"}) == [
+        (1, "4", "(ambiguous answer number: 2 occurrences)")]
+
+
+def test_unique_nonconsecutive_numbers_and_review_answers_keep_their_grading():
+    items = [{"answer_no": [1, 3], "answer": "④,⑥", "status": "needs_review"},
+             {"answer_no": [10], "answer": "⑧", "status": "ready"}]
+
+    assert run_exam_deck.grade(items, {1: "4", 3: "6", 10: "8"}) == []
+    assert run_exam_deck.grade(items, {1: "4", 3: "6", 10: "8", 20: "2"}) == [
+        (20, "2", "")]
+
+
+@pytest.mark.parametrize("answers", [("WRONG", "4"), ("4", "WRONG"), ("4", "4")])
+def test_the_bench_fails_when_answer_numbers_restart_in_another_section(
+        server_app, tmp_path, monkeypatch, answers):
+    from app.solvers.llm_adapter import answer_sheet_result
+
+    server_main, client = server_app
+    monkeypatch.setenv("ROKID_SOLVER", "test-provider")
+    monkeypatch.setattr(run_exam_deck, "remote_client", lambda server, key: client)
+    monkeypatch.setattr(run_exam_deck, "POLL_S", 0)
+    items = [{"group": f"第{index}問", "label": "問1", "answer_no": [1], "pages": [1],
+              "status": "ready", "answer": answer}
+             for index, answer in enumerate(answers, 1)]
+    monkeypatch.setattr(server_main, "_answer_all", lambda question: [
+        (item, answer_sheet_result(item, subject=None, extras={})) for item in items])
+    key_path = tmp_path / "key.json"
+    key_path.write_text(json.dumps({"1": "4"}), encoding="utf-8")
+    out = tmp_path / "report.json"
+
+    code = run_exam_deck.main(
+        ["--images", str(_one_photo(tmp_path)), "--server", "http://phone.example:8000",
+         "--answer-key", str(key_path), "--out", str(out)])
+
+    assert code == 2
+    report = json.loads(out.read_text(encoding="utf-8"))
+    assert len({item["question_id"] for item in report["bundle"]["items"]}) == 2
+    assert report["wrong"] == [{"answer_no": 1, "official": "4",
+                                "given": "(ambiguous answer number: 2 occurrences)"}]
+
+
 def test_the_bench_matches_explicitly_numbered_combined_answers(
         server_app, tmp_path, monkeypatch):
     from app.solvers.llm_adapter import answer_sheet_result

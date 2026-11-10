@@ -411,9 +411,11 @@ class WorkStore:
             raise ValueError("invalid Work instruction or question identities")
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            previous = conn.execute("SELECT * FROM jobs WHERE session_id=? AND stage=?", (session_id, stage)).fetchone()
             prior = conn.execute("SELECT * FROM jobs WHERE session_id=? AND stage='reading'", (session_id,)).fetchone() if stage == "listening" else None
-            requested_settings = requested_settings or (json.loads(prior["spec_json"])["requested_settings"] if prior
-                                                       else {"model": "gpt-6.1-sol", "effort": "xhigh", "speed": "fast"})
+            sealed = previous or prior
+            requested_settings = requested_settings or (json.loads(sealed["spec_json"])["requested_settings"] if sealed
+                                                       else {"model": "gpt-6.1-sol", "effort": "xhigh", "speed": "standard"})
             if (set(requested_settings) != {"model", "effort", "speed"}
                     or any(not isinstance(v, str) or not v.strip() for v in requested_settings.values())):
                 raise ValueError("invalid requested model settings")
@@ -423,7 +425,6 @@ class WorkStore:
                         "requested_settings": requested_settings}
             encoded = _json(identity)
             job_id, manifest_sha256 = _sha(encoded.encode()), _sha(_json(manifest).encode())
-            previous = conn.execute("SELECT * FROM jobs WHERE session_id=? AND stage=?", (session_id, stage)).fetchone()
             if previous:
                 if previous["identity_json"] != encoded:
                     raise WorkConflict("the existing job identity changed; nothing was requeued")
@@ -548,7 +549,7 @@ class WorkStore:
             return {**request, "identity_origin": "server_sealed_source_and_order",
                     "inspection_manifest_sha256": _sha(_json(request).encode()),
                     "validated_profile_ids": list(self.validated_profiles),
-                    "requested_settings": {"model": "gpt-6-luna", "effort": "low", "speed": "fast"},
+                    "requested_settings": {"model": "gpt-6-luna", "effort": "low", "speed": "standard"},
                     "model_selection_verified": False}
 
     def read_quality_image(self, job_id: str, source_id: str, image_id: str) -> tuple[bytes, dict]:
@@ -674,7 +675,12 @@ class WorkStore:
                 else:
                     raise WorkConflict("unknown original image delivery kind")
                 claims.append({**item, "delivery": delivery})
-            self._validate_result(job, result)
+            try:
+                self._validate_result(job, result)
+            except ValueError as error:
+                if browser_evidence is not None:
+                    raise WorkBrowserResultRejected(str(error)) from error
+                raise
             browser_review = (self._browser_review(conn, job, *browser_evidence)
                               if browser_evidence is not None else None)
             if browser_review is not None:
@@ -774,14 +780,9 @@ class WorkStore:
     def _non_answering_stop(result: dict) -> bool:
         # Called only after validation. A stop can describe unreadable material,
         # but cannot carry answers through extra blocks, derivations or diagrams.
-        if set(result) != {"questions"}:
-            return False
-        fields = {"group", "label", "pages", "answer_no", "status", "answer",
-                  "missing_material", "diagrams", "requires_audio", "question_id"}
         items = result["questions"]
         return (any(item.get("status") == "needs_input" for item in items)
-                and all(set(item) <= fields
-                        and item.get("status") in ("needs_input", "pending_audio")
+                and all(item.get("status") in ("needs_input", "pending_audio")
                         and item.get("answer") == "" and item.get("diagrams", []) == []
                         and (item.get("status") != "needs_input"
                              or (isinstance(item.get("missing_material"), str)
@@ -791,10 +792,12 @@ class WorkStore:
     @staticmethod
     def _validate_result(job: dict, result: dict) -> None:
         from .solvers.chatgpt_web import _booklet_replies  # noqa: PLC0415
+        from .solvers.llm_adapter import validate_answer_fields  # noqa: PLC0415
 
         items = result.get("questions") if isinstance(result, dict) else None
         if not isinstance(items, list) or not 1 <= len(items) <= 300:
             raise ValueError("a complete non-empty question list is required")
+        validate_answer_fields(result, {"questions"})
         page_count = sum("page_number" in source for source in job["sources"])
         for item in items:
             if not isinstance(item, dict):

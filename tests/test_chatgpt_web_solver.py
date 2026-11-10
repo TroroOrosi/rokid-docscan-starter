@@ -2278,6 +2278,20 @@ def test_individual_answer_errors_remain_visible_beside_ready_and_needs_input(tm
     assert all(isinstance(result, ValueError) for _, result in replies[2:])
 
 
+@pytest.mark.parametrize("field", ["extraction", "readability", "manifest_sha256"])
+def test_chat_answer_rejects_body_disguised_as_work_transport_metadata(tmp_path, field):
+    page_path = tmp_path / "page.png"
+    page_path.write_bytes(_real_png(80))
+    data = {"batch_id": "final-id", "questions": [{"status": "ready", "answer": "x=2"}],
+            field: {"derivation": "2x+3=7 より 2x=4。"}}
+    batch = {"id": "final-id", "final": True, "expect": ["questions"]}
+    assert not chatgpt_web.ChatGptWebClient._valid_batch(json.dumps(data), batch)
+    question = Question(document_pages=[{"page_number": 1, "image_path": str(page_path)}],
+                        document_id="1", chat_key="session:1", answer_only=True)
+    with pytest.raises(ValueError, match="unsupported answer-sheet field"):
+        ChatGptWebSolver(client=_FakeClient(json.dumps(data))).answer_all(question=question)
+
+
 def test_a_whole_major_question_answer_can_use_its_heading_without_a_minor_label(tmp_path):
     page_path = tmp_path / "page.png"
     page_path.write_bytes(_real_png(80))

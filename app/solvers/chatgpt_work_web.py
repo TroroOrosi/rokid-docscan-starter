@@ -72,7 +72,7 @@ def _requested_settings(settings=None):
     values = settings if settings is not None else {
         "model": os.environ.get("ROKID_WORK_MODEL") or MODEL,
         "effort": os.environ.get("ROKID_WORK_EFFORT") or "xhigh",
-        "speed": os.environ.get("ROKID_WORK_SPEED") or "fast",
+        "speed": os.environ.get("ROKID_WORK_SPEED") or "standard",
     }
     if (not isinstance(values, dict) or set(values) != {"model", "effort", "speed"}
             or any(not isinstance(value, str) or not value.strip() for value in values.values())):
@@ -866,7 +866,7 @@ class WorkWebClient(chat.ChatGptWebClient):
             return self.complete_json(system="Inspect supplied image regions only. Never solve, guess missing text, or certify a page.",
                 prompt=prompt, files=files, chat_key="inspection:" + inspection_id, booklet=True,
                 expect=("inspection_id", "manifest_sha256", "inspection"), before_submit=before_submit,
-                requested_settings=requested_settings or {"model": "gpt-6-luna", "effort": "high", "speed": "fast"})
+                requested_settings=requested_settings or {"model": "gpt-6-luna", "effort": "high", "speed": "standard"})
         finally:
             self._inspection.reset(token)
 
@@ -1019,7 +1019,12 @@ class WorkWebClient(chat.ChatGptWebClient):
         return chat.start_new_chat(page, wait_composer=self._wait_for_composer)
 
     def _verify_model(self, page, *, select=False):
-        return verify_work_model(page, select=select, requested_settings=self._requested.get())
+        settings = self._requested.get() or _requested_settings()
+        if settings.speed != "standard":
+            # Saved Fast replies recover before model verification. A fresh
+            # submission must not incur Fast usage, including old sealed jobs.
+            raise chat.ChatGptWebModelMismatch("new Work submissions require Standard speed; nothing sent")
+        return verify_work_model(page, select=select, requested_settings=settings)
 
     def _attach_images(self, page, images, *, files=None, audio=None, **kwargs):
         if images or audio:

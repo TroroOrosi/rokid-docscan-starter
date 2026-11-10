@@ -50,6 +50,7 @@ from .llm_adapter import (
     _read_audio,
     _read_images,
     answer_sheet_result,
+    validate_answer_fields,
 )
 
 # DevTools endpoint of the operator's already-running browser.
@@ -1272,7 +1273,7 @@ class ChatGptWebClient:
         if batch["final"] and "questions" in batch["expect"]:
             try:
                 _booklet_replies(data, subject=None, extras={}, stage=batch.get("stage", "single"),
-                                 question_ids=batch.get("question_ids"))
+                                 question_ids=batch.get("question_ids"), transport_fields=batch["expect"])
             except ValueError:
                 return False
         return (isinstance(data, dict) and data.get("batch_id") == batch["id"]
@@ -1357,7 +1358,8 @@ class ChatGptWebClient:
             try:
                 _booklet_replies(extract_json(reply), subject=None, extras={},
                                  stage=batch.get("stage", "single") if batch else "single",
-                                 question_ids=batch.get("question_ids") if batch else None)
+                                 question_ids=batch.get("question_ids") if batch else None,
+                                 transport_fields=expect)
             except ValueError:
                 return None
         if batch is not None:
@@ -1733,11 +1735,17 @@ def _booklet_chat_key(question, audio) -> str | None:
     return f"{key}:{identity}"
 
 
-def _booklet_replies(data, *, subject, extras, stage="single", question_ids=None) -> list[tuple[dict, SolveResult | Exception | None]]:
+def _booklet_replies(data, *, subject, extras, stage="single", question_ids=None,
+                     transport_fields=()) -> list[tuple[dict, SolveResult | Exception | None]]:
     """Validate the envelope once; retain each question's own answer failure."""
     items = data.get("questions") if isinstance(data, dict) else None
     if not isinstance(items, list) or not 1 <= len(items) <= 300 or any(not isinstance(item, dict) for item in items):
         raise ValueError("the reply must carry 1 to 300 valid questions")
+    # Transport fields come from the caller's sealed request, never the reply.
+    # Ordinary Chat answers do not carry Work extraction/readability envelopes.
+    validate_answer_fields(data, {"questions", "batch_id", *transport_fields})
+    if "batch_id" in data and not isinstance(data["batch_id"], str):
+        raise ValueError("invalid answer receipt identifier")
     question_fields = ("group", "label", "question_id", "pages", "answer_no", "answer", "diagrams", "missing_material")
     if any(not any((value.strip() if isinstance(value, str) else value not in (None, [], {}))
                    for value in (item.get(key) for key in question_fields)) for item in items):
@@ -1753,6 +1761,7 @@ def _booklet_replies(data, *, subject, extras, stage="single", question_ids=None
         invalid_label = (item.get("label") is not None and not isinstance(item["label"], str)
                          or item.get("group") is not None and not isinstance(item["group"], str))
         if stage == "reading" and item["requires_audio"]:
+            validate_answer_fields(item)
             if invalid_label:
                 raise ValueError("invalid printed question label")
             if item.get("status") != "pending_audio" or item.get("answer") != "" or item.get("diagrams"):

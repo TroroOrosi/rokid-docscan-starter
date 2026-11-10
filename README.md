@@ -1,10 +1,12 @@
 # Rokid DocScan（入試問題を撮影して解答するサーバ）
 
-Status: Current project entrypoint. Updated 2026-10-31.
+Status: Current project entrypoint. Updated 2026-11-10.
 
 撮影後は実画像を3秒表示し、通常は写真に文字を重ねません。確認できるのは**構図のみ**で、無操作で保存しても画質は未検証です。
 保存写真の [原寸点検・補正候補・登録条件評価](docs/capture-quality.md) はPC用部品で、
 撮影・正式登録本流の自動画質合格には未接続です。実紙の撮影精度と会場経路の受け入れは未完了です。
+
+答案の分数は演算範囲を保つ括弧付きで表示し、原文の改行・字下げを保存します。画面幅で折り返した行は左余白の小さい印で示します。保存できない別欄に途中式などが返された場合は、本文を黙って省かずエラーにします。表・行列の表示、長文時の応答時間、実際の見え方には残る確認事項があります。
 現行glassdocは撮影中の映像で頁変化を観測し、静止と端末が対応する焦点・露出の状態を確認して、同じカメラのJPEGを1枚ずつ撮ります。確認中も次の原寸写真を最大2枚保持し、順番に3秒表示してから保存します。欠頁の疑いや未完了の撮影は再起動後も残します。固定焦点の端末でAFによる改善を保証するものではありません。録画・ZSL・AIとの組合せは比較中で、実機の暗さ・一文字の精度は未確認です。
 
 ## このリポジトリの目的
@@ -142,7 +144,7 @@ Driveへ置く場合も全件列挙と各原画像取得が必要で、添付20�
 CXR-L の実装境界は
 [CXR-L / Global Hi Rokid integration](docs/cxr-l-integration.md)です。
 
-現在のバージョン: **Server APP 0.69.2 / API 1.42.0 / Android client 0.3.17 / Glasses View 1.43.0 / Solver API 1.10.0**。
+現在のバージョン: **Server APP 0.69.3 / API 1.42.1 / Android client 0.3.17 / Glasses View 1.43.1 / Solver API 1.10.0**。
 版数の正本は `app/version.py` です。他の資料は版数を書かず、この行だけが
 `tests/test_documentation_contract.py` で実装と照合されます。
 Solver API は、記入用解答の全文保持・資料不足の分離を行う `answer_only` モードを含みます。

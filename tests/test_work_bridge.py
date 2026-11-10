@@ -237,6 +237,35 @@ def test_browser_uncertain_pages_return_only_genuine_non_answering_stops(tmp_pat
         assert store.result(job["job_id"]) is None
 
 
+def test_new_work_and_quality_requests_use_standard_speed(tmp_path):
+    from app.work_bridge import WorkStore
+
+    store = WorkStore(tmp_path)
+    job = queue(store)
+    assert job["requested_settings"]["speed"] == "standard"
+    assert store.quality_request(job["job_id"], "p1")["requested_settings"]["speed"] == "standard"
+
+
+@pytest.mark.parametrize("completed", [False, True])
+def test_existing_fast_job_resumes_with_its_sealed_settings(tmp_path, completed):
+    from app.work_bridge import WorkConflict, WorkStore
+
+    store = WorkStore(tmp_path, validated_profiles=("fixture",))
+    settings = {"model": "gpt-6.1-sol", "effort": "xhigh", "speed": "fast"}
+    job = queue(store, requested_settings=settings)
+    if completed:
+        complete(store, job, [receipt(store, job, "p1")])
+    restarted = WorkStore(tmp_path, validated_profiles=("fixture",))
+    resumed = queue(restarted)
+    assert resumed["job_id"] == job["job_id"]
+    assert resumed["requested_settings"] == settings
+    assert resumed["status"] == ("completed" if completed else "pending")
+    with pytest.raises(WorkConflict, match="identity changed"):
+        queue(restarted, requested_settings={**settings, "speed": "standard"})
+    assert restarted.get(job["job_id"]) == resumed
+    assert restarted.result(job["job_id"]) == (answer() if completed else None)
+
+
 def test_120_originals_are_ordered_immutable_and_restart_reuses_the_job(tmp_path):
     from app.work_bridge import WorkStore
 
@@ -436,20 +465,20 @@ def test_non_answering_needs_input_survives_quality_failure_and_restart(tmp_path
     assert complete(restarted, job, [fetched], result) == saved
 
 
-@pytest.mark.parametrize("field,value,level", [
-    ("answer", "推測値 x=2", "question"),
+@pytest.mark.parametrize("field,value,level,error", [
+    ("answer", "推測値 x=2", "question", "quality evidence"),
     ("diagrams", [{"alt": "推測図", "aspect_ratio": 1,
-                   "elements": [{"type": "text", "x": 0.5, "y": 0.5, "text": "x=2"}]}], "question"),
-    ("answer_blocks", [{"text": "x=2"}], "question"),
-    ("derivation", "x+1=3 より x=2", "question"),
-    ("solution_steps", ["x=2"], "question"),
-    ("missing_material", "", "question"),
-    ("missing_material", {"answer": "x=2"}, "question"),
-    ("blocks", [{"text": "x=2"}], "result"),
-    ("derivation", "x=2", "result"),
+                   "elements": [{"type": "text", "x": 0.5, "y": 0.5, "text": "x=2"}]}], "question", "quality evidence"),
+    ("answer_blocks", [{"text": "x=2"}], "question", "invalid answer"),
+    ("derivation", "x+1=3 より x=2", "question", "invalid answer"),
+    ("solution_steps", ["x=2"], "question", "invalid answer"),
+    ("missing_material", "", "question", "quality evidence"),
+    ("missing_material", {"answer": "x=2"}, "question", "quality evidence"),
+    ("blocks", [{"text": "x=2"}], "result", "unsupported answer-sheet field"),
+    ("derivation", "x=2", "result", "unsupported answer-sheet field"),
 ])
-def test_needs_input_cannot_hide_answers_from_the_quality_guard(tmp_path, field, value, level):
-    from app.work_bridge import WorkConflict, WorkStore
+def test_needs_input_cannot_hide_answers_from_the_quality_guard(tmp_path, field, value, level, error):
+    from app.work_bridge import WorkStore
 
     store = WorkStore(tmp_path)
     job = queue(store)
@@ -457,7 +486,7 @@ def test_needs_input_cannot_hide_answers_from_the_quality_guard(tmp_path, field,
     result = needs_input()
     target = result["questions"][0] if level == "question" else result
     target[field] = value
-    with pytest.raises(WorkConflict, match="quality evidence"):
+    with pytest.raises(ValueError, match=error):
         complete(store, job, [fetched], result)
     assert store.result(job["job_id"]) is None
 
@@ -715,6 +744,48 @@ def test_phone_api_returns_non_answering_stop_in_existing_answer_bundle(client):
     assert bundle["items"][0]["issue"] == "P1の文字が判読できません"
 
 
+@pytest.mark.parametrize("field,value", [
+    ("derivation", "2x+3=7 より 2x=4。"),
+    ("solution_steps", ["両辺から3を引く。", "両辺を2で割る。"]),
+    ("answer_blocks", [{"text": "x=2"}]),
+])
+@pytest.mark.parametrize("level", ["question", "result"])
+def test_work_api_rejects_ready_answers_with_separate_unspecified_body_fields(client, field, value, level):
+    from app.work_bridge import configured_work_store
+
+    _, _, job = api_session(client)
+    acquired = [api_tile_receipt(client, job)]
+    result = answer(text="よって x=2。")
+    target = result["questions"][0] if level == "question" else result
+    target[field] = value
+    original = json.dumps(result)
+    response = api_complete(client, job, acquired, result)
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"] in ("the Work reply contains an invalid answer",
+                                         "unsupported answer-sheet field with content")
+    assert configured_work_store().result(job["job_id"]) is None
+    assert json.dumps(result) == original
+
+
+def test_work_api_preserves_complete_written_solution_and_diagram_with_empty_legacy_fields(client):
+    from app.work_bridge import configured_work_store
+
+    _, session, job = api_session(client)
+    acquired = [api_tile_receipt(client, job)]
+    text = "2x+3=7 より 2x=4。\n両辺を2で割ると、x=2。"
+    diagram = {"alt": "x=2の点", "aspect_ratio": 1, "elements": [
+        {"type": "circle", "cx": 0.5, "cy": 0.5, "r": 0.03, "filled": True}]}
+    result = answer(text=text)
+    result["questions"][0].update(derivation="", solution_steps=[], diagrams=[diagram])
+    response = api_complete(client, job, acquired, result)
+    assert response.status_code == 200, response.text
+    assert configured_work_store().result(job["job_id"]) == result
+    bundle = wait_for(lambda: data if (data := client.get(
+        f"/v1/exam-sessions/{session}/answer-bundle").json()).get("available_stage") == "complete" else None)
+    assert [(item["answer"], item["diagrams"], item["status"]) for item in bundle["items"]] == [
+        (text, [diagram], "ready")]
+
+
 @pytest.mark.parametrize("count,length,symbol", [(4, 180_000, "x"), (4, 180_000, "式"), (1, 300_001, "x")])
 def test_long_work_answers_survive_the_complete_bundle_boundary(client, count, length, symbol):
     _, session, job = api_session(client)
@@ -771,7 +842,7 @@ def test_phone_api_auto_queues_images_and_returns_work_answers_in_the_existing_b
     assert done.status_code == 200
     job = wait_for(lambda: (client.get("/v1/work/jobs").json().get("jobs") or [None])[0])
     assert len(job["sources"]) == 21
-    assert job["requested_settings"] == {"model": "gpt-6.1-sol", "effort": "xhigh", "speed": "fast"}
+    assert job["requested_settings"] == {"model": "gpt-6.1-sol", "effort": "xhigh", "speed": "standard"}
     assert job["model_selection_verified"] is False
     acquired = []
     for item in job["sources"]:

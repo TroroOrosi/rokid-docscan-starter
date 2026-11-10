@@ -259,7 +259,8 @@ from __future__ import annotations
 # 0.69.0: preserve native JPEG originals and bind opt-in Work delivery to upright pixels.
 # 0.69.1: recognize numbered Work attachment display names without relaxing upload identity.
 # 0.69.2: repair Work receipt types and recover sealed replies with singleton metadata.
-APP_VERSION = "0.69.2"
+# 0.69.3: use Standard Work speed and prevent silent answer-body or fraction-scope loss.
+APP_VERSION = "0.69.3"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.
@@ -383,7 +384,8 @@ APP_VERSION = "0.69.2"
 # 1.40.0: schema 3 for extended vector diagrams; preserve printed answer-number bounds.
 # 1.41.0: align original JPEG and complete answer budgets with the standalone client.
 # 1.42.0: optional native JPEG Work sources include explicit rotation and upright RGB evidence.
-API_VERSION = "1.42.0"
+# 1.42.1: reject nonempty answer fields that the displayed answer cannot retain.
+API_VERSION = "1.42.1"
 
 # Matching algorithm identity. Bump when thresholds or hashing change so a
 # re-index/eval is triggered. Mirrors thresholds in app/matching.py.
@@ -538,7 +540,8 @@ EXPLAINER_API_VERSION = "1.1.0"
 # 1.41.0: bounded fine-detail page-change evidence with coherent preview registration.
 # 1.42.0: extended diagram rendering and metering fenced to the current page scene.
 # 1.43.0: sensor-time stillness, checked native exposure and bounded long-answer reading.
-GLASSES_VIEW_CONTRACT_VERSION = "1.43.0"
+# 1.43.1: keep displayed fractions atomic and hold ambiguous unsupported notation.
+GLASSES_VIEW_CONTRACT_VERSION = "1.43.1"
 
 # Answer-area overlay payload (box + short answer; 2D image-anchored).
 # 1.1.0: added tracking metadata (tracking/fixed_ar/anchor_hint).

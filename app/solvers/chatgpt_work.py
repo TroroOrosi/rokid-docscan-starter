@@ -187,7 +187,7 @@ class ChatGptWorkSolver(Solver):
             return saved  # Restart, uncertain sends and listening never re-resolve.
         requested = {"model": os.environ.get("ROKID_WORK_MODEL") or "gpt-6.1-sol",
                      "effort": os.environ.get("ROKID_WORK_EFFORT") or "xhigh",
-                     "speed": os.environ.get("ROKID_WORK_SPEED") or "fast"}
+                     "speed": os.environ.get("ROKID_WORK_SPEED") or "standard"}
         if not chatgpt_send_enabled():
             return requested  # Explicit authenticated HTTP queue; no actual-selection claim.
         if self._client is None:
@@ -313,9 +313,11 @@ class ChatGptWorkSolver(Solver):
         # Validate the body only after the atomic current/completed check: a
         # concurrent valid seal must not be replaced by this late reply's error.
         envelope = envelope if isinstance(envelope, dict) else {}
+        result = {field: value for field, value in envelope.items()
+                  if field not in {"batch_id", "manifest_sha256", "extraction", "readability"}}
         _commit_work_browser_result(job["job_id"], manifest_sha256=envelope.get("manifest_sha256"),
             generation=job["generation"], conversation_id=self._client.conversation_id,
-            source_receipts=receipts, result={"questions": envelope.get("questions")},
+            source_receipts=receipts, result=result,
             extraction=envelope.get("extraction"), readability=envelope.get("readability"))
 
     def _retire_expired_browser_send(self, store, current_job=None):

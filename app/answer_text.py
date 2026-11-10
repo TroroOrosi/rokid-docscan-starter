@@ -93,6 +93,16 @@ def _atom(part: str) -> str:
     return body if len(body) == 1 or body.isdigit() else f"({body})"
 
 
+def _fraction(match: re.Match) -> str:
+    prefix = match.string[:match.start()].rstrip()
+    # A preceding numeral may denote a mixed number. Keep that ambiguous
+    # notation for explicit review instead of silently choosing multiplication.
+    if prefix and prefix[-1].isdecimal():
+        return match.group(0)
+    # A fraction is one atom for division, juxtaposition and following scripts.
+    return f"({_atom(match.group(1))}/{_atom(match.group(2))})"
+
+
 def _cases(match: re.Match) -> str:
     """One 場合分け per line: `\\begin{cases} a & x>0 \\\\ b & x<0 \\end{cases}`."""
     rows = [row.strip() for row in re.split(r"\\\\|\n", match.group(1))]
@@ -121,7 +131,7 @@ def _convert_text(text: str, unsupported: list[str], *, explicit_math: bool = Fa
     text = _CASES.sub(_cases, text)
     for _ in range(4):  # nested LaTeX groups need one pass per level
         converted = _TEXT_GROUP.sub(r"\1", text)
-        converted = _FRAC.sub(lambda m: f"{_atom(m.group(1))}/{_atom(m.group(2))}", converted)
+        converted = _FRAC.sub(_fraction, converted)
         if converted == text:
             break
         text = converted
