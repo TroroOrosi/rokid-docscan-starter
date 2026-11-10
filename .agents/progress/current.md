@@ -1,7 +1,7 @@
 # 再開入口：次のセッションはここだけ読めば始められる
 
-最終更新: 2026-11-10 PC修正: `py -3.12 -X utf8 -m pytest -q tests` → 2466 passed/4 skipped、`gradlew.bat --no-daemon test testDebugUnitTest assembleDebug` → BUILD SUCCESSFUL/237 tasks。意味・本文欠落/番号採点/Fast/折返しmetadataを修正、各独立監査R0/O0。詳細rootreportのfunctional_acceptance_reassessment_20261110。
-Runs on: 会場phone AP＋glasses。現在はスマホ不在。PCの撮影320反例・80頁連続再生でtrigger見逃しを確認。品質gate/全設問充足/表行列/長文応答/光学・会場全経路は未了。実機解除/GPT追加送信へ進まない。
+最終更新: 2026-11-10 PC: 445cf81保存済。字下げ後の不要な空白折返しを修正、実font同一原文51→41行/4→3画面・旧保存85位置680復元を保持。`gradlew.bat --no-daemon test testDebugUnitTest assembleDebug` → BUILD SUCCESSFUL/237 tasks、独立監査R0/O0。
+Runs on: 会場phone AP＋glasses。現在スマホ不在、実機/GPT追加送信0。PC撮影候補はUNKNOWN保持で全頁候補でも3秒確認/保存待ちで欠落し未採用。品質gate/全設問充足/表行列/長文応答/光学・会場全経路は未了。
 
 ## 0. 読み方（前提と資料に引きずられないため）
 
@@ -90,7 +90,7 @@ Runs on: 会場phone AP＋glasses。現在はスマホ不在。PCの撮影320反
   → 旧サーバ停止 → `nohup bash scripts/phone_serve.sh 127.0.0.1 > data/server-<commit>.log 2>&1 &`。PCからは `ssh -f -N -L 8000:127.0.0.1:8000 ...`（ssh `-i ~/.ssh/f51f_key -p 8022 u0_a26@192.168.0.6`）。
   ベンチの鍵は `ROKID_API_KEY` をスマホの env から読んで渡す（画面に出さない）。
 
-次の実行: 検証済みPC修正をcommit/pushで保存→全領域の12.5%差分要求と探索時間切れが候補を失う撮影入口を、位置合わせ/局所差分/未判定を分離する候補と全時間帯の原動画保持候補で比較。保存原本とqueue/確認時間を含め、閾値だけや動画flagだけを採用しない。空白継続行の操作増加を最小層で修正し、長文保存/終了待ちも残す。追加モデルベンチ/GPT試験送信/実機変更0。
+次の実行: PCで同一答案の未実行cursor保存だけをまとめ、read/resume/ackと終了保存の順序・耐障害性を保持して実Activity回帰/同条件測定/別監査。撮影候補1を独立検算し、全撮影期間の原動画保持＋native併用を容量・画質・選別/確認待ちまで比較する。閾値/flagだけを採用しない。実機/GPT追加送信0。
 
 1. 済：独立監査2回（`4552ea1`、`4552ea1..e12e155`）の指摘を `61ad481`〜`1134404` で反映。
 2. 済：4a（3節）。起動はスマホで `bash scripts/phone_serve.sh 127.0.0.1`、PCから `ssh -L 8000:127.0.0.1:8000` で投入した。

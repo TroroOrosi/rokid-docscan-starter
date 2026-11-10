@@ -161,4 +161,75 @@ public class AnswerLayoutTest {
         assertEquals(List.of(false), page.continuedFromPreviousLine);
         assertEquals("", page.sourceText);
     }
+
+    @Test public void leadingWhitespaceKeepsFollowingContentWhenItFitsTheRow() {
+        List<AnswerLayout.Page> pages = AnswerLayout.paginate("    abcdefghi", 8, 1, MONO);
+        assertEquals(List.of("    abcd"), pages.get(0).lines);
+        assertEquals(List.of("efghi"), pages.get(1).lines);
+    }
+
+    @Test public void leadingTabsWideSpacesJapaneseAndEmojiKeepTheirFollowingContent() {
+        assertEquals(List.of(" \tabcd"), AnswerLayout.paginate(" \tabcdefgh", 6, 1, MONO).get(0).lines);
+        assertEquals(List.of("　　あい"), AnswerLayout.paginate("　　あいうえお", 4, 1, MONO).get(0).lines);
+        assertEquals(List.of("  あいうえ"), AnswerLayout.paginate("  あいうえおかき", 6, 1, MONO).get(0).lines);
+        assertEquals(List.of("  😀😀"), AnswerLayout.paginate("  😀😀😀😀😀", 4, 1, MONO).get(0).lines);
+    }
+
+    @Test public void sourceWhitespaceOnlyLinesAndOverwideIndentationRemainVisible() {
+        List<AnswerLayout.Page> blank = AnswerLayout.paginate("    \r\n \t \n", 3, 1, MONO);
+        assertEquals(List.of("   "), blank.get(0).lines);
+        assertEquals(List.of(" "), blank.get(1).lines);
+        assertEquals(List.of(" \t "), blank.get(2).lines);
+        assertEquals(List.of(false), blank.get(0).continuedFromPreviousLine);
+        assertEquals(List.of(true), blank.get(1).continuedFromPreviousLine);
+        assertEquals(List.of(false), blank.get(2).continuedFromPreviousLine);
+        List<AnswerLayout.Page> indented = AnswerLayout.paginate("          abcdef", 4, 1, MONO);
+        assertEquals(List.of("    "), indented.get(0).lines);
+        assertEquals(List.of("    "), indented.get(1).lines);
+        assertEquals(List.of("  ab"), indented.get(2).lines);
+        assertEquals(List.of("cdef"), indented.get(3).lines);
+    }
+
+    @Test public void spacesAndPunctuationAfterContentKeepTheirExistingPreferredBreaks() {
+        assertEquals(List.of("abc "), AnswerLayout.paginate("abc defghijkl", 8, 1, MONO).get(0).lines);
+        assertEquals(List.of("字、"), AnswerLayout.paginate("字、abcdefghi", 5, 1, MONO).get(0).lines);
+        assertEquals(List.of("、"), AnswerLayout.paginate("、abcdefghi", 5, 1, MONO).get(0).lines);
+        assertEquals(List.of("ab;"), AnswerLayout.paginate("ab;cdefghijkl", 5, 1, MONO).get(0).lines);
+    }
+
+    @Test public void leadingWhitespaceAcrossPagesPreservesOffsetsAndLogicalLines() {
+        List<String> expected = List.of("    abcdefghi  ", "", "      ", " \t abcdef",
+                "  あいうえおかきくけこ、", "  😀😀e\u0301𝑥 = 1  ", "          abcdef", "done; next");
+        String source = expected.get(0) + "\r\n\n" + expected.get(2) + "\r" + expected.get(3) + "\r\n"
+                + expected.get(4) + "\n" + expected.get(5) + "\r\n" + expected.get(6) + "\r" + expected.get(7) + "\n";
+        for (int width : new int[]{4, 8, 19}) for (int rows : new int[]{1, 2, 9}) {
+            List<AnswerLayout.Page> pages = AnswerLayout.paginate(source, width, rows, MONO);
+            pages.get(pages.size()-1);
+            List<StringBuilder> logical = new ArrayList<>();
+            StringBuilder exact = new StringBuilder();
+            int offset = 0;
+            for (AnswerLayout.Page page : pages) {
+                assertEquals(offset, page.start);
+                assertEquals(source.substring(page.start, page.end), page.sourceText);
+                exact.append(page.sourceText);
+                offset = page.end;
+                for (int row = 0; row < page.lines.size(); row++) {
+                    String line = page.lines.get(row);
+                    assertTrue(MONO.width(line) <= width);
+                    if (!page.continuedFromPreviousLine.get(row)) logical.add(new StringBuilder());
+                    assertFalse(logical.isEmpty());
+                    logical.get(logical.size()-1).append(line);
+                    if (!line.isEmpty()) {
+                        assertFalse(Character.isLowSurrogate(line.charAt(0)));
+                        assertNotEquals('\u0301', line.charAt(0));
+                    }
+                }
+            }
+            List<String> restored = new ArrayList<>();
+            for (StringBuilder line : logical) restored.add(line.toString());
+            assertEquals(expected, restored);
+            assertEquals(source, exact.toString());
+            assertEquals(source.length(), offset);
+        }
+    }
 }

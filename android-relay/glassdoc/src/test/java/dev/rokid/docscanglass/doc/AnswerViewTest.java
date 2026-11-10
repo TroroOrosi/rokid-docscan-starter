@@ -251,6 +251,7 @@ public class AnswerViewTest {
         StringBuilder accessible = new StringBuilder();
         boolean sawContinuedPageStart = false, sawHardLine = false;
         int pageCount = reader.pageCount();
+        int whitespaceOnlyRows = 0;
         java.io.File output = new java.io.File("build/outputs/answer-soft-wrap");
         output.mkdirs();
         for (int pageIndex = 0; pageIndex < pageCount; pageIndex++) {
@@ -263,6 +264,7 @@ public class AnswerViewTest {
             view.draw(new android.graphics.Canvas(bitmap));
             for (int row = 0; row < page.lines.size(); row++) {
                 String line = page.lines.get(row);
+                if (!line.isEmpty() && line.isBlank()) whitespaceOnlyRows++;
                 boolean continued = page.continuedFromPreviousLine.get(row);
                 assertTrue("native-font row must retain the complete available width",
                         font.measureText(line) <= textWidth + .01f);
@@ -304,6 +306,8 @@ public class AnswerViewTest {
         java.nio.file.Files.write(new java.io.File(output, "rendered-rows.json").toPath(),
                 new org.json.JSONObject().put("text_size", view.bodyTextSize()).put("text_width", textWidth)
                         .put("rows", renderedRows).toString().getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        assertEquals("this source has no whitespace-only logical lines or viewport-wide indentation",
+                0, whitespaceOnlyRows);
     }
 
     private AnswerReader reader(String text) {

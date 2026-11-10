@@ -51,6 +51,7 @@ public final class AnswerLayout {
                                Measurer measurer, BreakIterator clusters) {
         int end = start;
         int preferredBreak = start;
+        boolean hasNonWhitespace = false;
         while (end < text.length() && text.charAt(end) != '\n' && text.charAt(end) != '\r') {
             int next = clusterEnd(text, clusters, end);
             float measured = measurer.width(text.substring(start, next));
@@ -64,7 +65,10 @@ public final class AnswerLayout {
             }
             end = next;
             int last = text.codePointBefore(end);
-            if (Character.isWhitespace(last) || "、。;,:".indexOf(last) >= 0) preferredBreak = end;
+            if (!Character.isWhitespace(last)) hasNonWhitespace = true;
+            if (hasNonWhitespace && (Character.isWhitespace(last) || "、。;,:".indexOf(last) >= 0)) {
+                preferredBreak = end;
+            }
         }
         if (end < text.length() && text.charAt(end) == '\r') end++;
         if (end < text.length() && text.charAt(end) == '\n') end++;
