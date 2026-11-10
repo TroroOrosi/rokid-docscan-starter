@@ -1,6 +1,6 @@
 # rokid-docscan-starter development guide
 
-Status: Current engineering contract. Updated 2026-11-09.
+Status: Current engineering contract. Updated 2026-11-10.
 
 **Start at `.agents/progress/current.md`.** It lists the operator's decisions,
 the verified state and the next steps. Do not re-ask what it settles. Keep the
@@ -283,7 +283,10 @@ and uncertain-send safeguards remain independent of model-name fallback.
   Extended figures use schema 3 for arcs, hatched polygons and optional dashed
   strokes/filled circles; legacy figures retain schema 2 and text schema 1.
   Preserve literal program identifiers/indentation and whole mathematical script
-  groups. The server must not silently truncate printed answer numbers.
+  groups. Unsupported Markdown table blocks and matrix-bearing expressions retain
+  their source notation and remain needs_review before scalar conversion. This
+  source-preservation boundary is not cell-aligned or typeset matrix support.
+  The server must not silently truncate printed answer numbers.
   These new behaviors have not passed physical acceptance on the current APK.
 - Answer reading is continuous: pack short items on one screen, keep full
   derivations and diagrams, and retain printed answer numbers and position.

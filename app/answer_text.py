@@ -49,12 +49,28 @@ _SQRT = re.compile(r"\\sqrt\s*\{([^{}]*)\}")
 _POWER = re.compile(r"\^\s*\{([^{}]*)\}|\^(\w)")
 _INDEX = re.compile(r"_\s*\{([^{}]*)\}|_(\w)")
 _COMMAND = re.compile(r"\\([A-Za-z]+)\s*")
+_MATRIX = re.compile(r"\\(?:begin|end)\s*\{(?:[pbBvV]?matrix|smallmatrix|array)\*?\}")
+# A table separator is meaningful only after a header with a structural pipe.
+# Escaped pipes and pipes inside inline code do not supply that boundary.
+_TABLE_BLOCK = (
+    # Consume ordinary text in runs, separate from escapes and inline code.
+    r"^[^\\`|\r\n]*(?:(?:\\[^\r\n]|`[^`\r\n]*`)[^\\`|\r\n]*)*"
+    r"\|[^\r\n]*(?:\r\n|\n|\r)"
+    r"(?=[^\r\n]*\|)[ \t]*(?:\|[ \t]*)?:?-+:?"
+    r"(?:[ \t]*\|[ \t]*:?-+:?)*[ \t]*(?:\|[ \t]*)?(?=\r?$|\r)"
+    # Preserve a contiguous table, including ragged rows and one-column cells.
+    # A new code fence is its own protected block, even without a blank line.
+    r"(?:(?:\r\n|\n|\r)(?![ \t]*(?:`{3,}|~{3,}))(?=[^\r\n]*\S)[^\r\n]+)*"
+)
 _SEGMENTS = re.compile(
     r"(?P<fenced>^(?P<fence>`{3,}|~{3,})[^\n]*\n(?P<code>.*?)^(?P=fence)[ \t]*(?=\n|$))"
     r"|(?P<unclosed>^(?:`{3,}|~{3,})[^\n]*\n.*\Z)"
+    rf"|(?P<table>{_TABLE_BLOCK})"
     r"|(?P<inline>`[^`\n]+`)"
-    r'''|(?P<quoted>"(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*')'''
-    r"|(?P<math>\\\(.*?\\\)|\\\[.*?\\\]|\$\$.*?\$\$|(?<!\\)\$(?!\s)[^$\n]+(?<!\s)\$(?![0-9]))",
+    # Apostrophes after identifiers are mathematical primes. Keep Python-style
+    # prefixed string literals protected along with ordinary quoted strings.
+    r'''|(?P<quoted>"(?:\\.|[^"\\\n])*"|(?<![\w'])(?:[rRuUbBfF]{0,2}'(?:\\.|[^'\\\n])*')+)'''
+    r"|(?P<math>\\\(.*?\\\)|\\\[.*?\\\]|\$\$.*?\$\$|(?<!\\)\$(?!\s)(?:\\[^\n]|[^$\\\n])+(?<!\s)\$(?![0-9]))",
     re.MULTILINE | re.DOTALL,
 )
 _TABLE_ROW = re.compile(r"^\s*\|.*\|\s*$", re.MULTILINE)
@@ -123,6 +139,12 @@ def _convert_text(text: str, unsupported: list[str], *, explicit_math: bool = Fa
     if _CODE_FENCE.search(text):
         unsupported.append(_FENCE_LABEL)
         return text
+    # Keep unsupported matrix-bearing source intact, including incomplete/nested
+    # environments. Converting individual cells would discard original notation
+    # before the reader can retain its row, column and expression boundaries.
+    if _MATRIX.search(text):
+        unsupported.append(_NOTATION_LABEL + " ".join(sorted(set(_LEFTOVER.findall(text)))[:5]))
+        return text
     if _IMAGE.search(text):
         unsupported.append(_IMAGE_LABEL)
         text = _IMAGE.sub("", text)
@@ -167,6 +189,9 @@ def to_display_answer(answer: str) -> DisplayAnswer:
         elif match.group("unclosed") is not None:
             unsupported.append(_FENCE_LABEL)
             parts.append(match.group("unclosed"))
+        elif match.group("table") is not None:
+            unsupported.append(_TABLE_LABEL)
+            parts.append(match.group("table"))
         elif match.group("inline") is not None:
             parts.append(match.group("inline")[1:-1])
         elif match.group("quoted") is not None:
@@ -174,7 +199,10 @@ def to_display_answer(answer: str) -> DisplayAnswer:
         else:
             math = match.group("math")
             edge = 2 if math.startswith(("\\(", "\\[", "$$")) else 1
-            parts.append(_convert_text(math[edge:-edge], unsupported, explicit_math=True))
+            # Matrix delimiters belong to the preserved expression. Other math
+            # keeps the existing scalar conversion and presentation wrappers.
+            body = math if _MATRIX.search(math) else math[edge:-edge]
+            parts.append(_convert_text(body, unsupported, explicit_math=True))
         end = match.end()
     parts.append(_convert_text(text[end:], unsupported))
     return DisplayAnswer("".join(parts), tuple(dict.fromkeys(unsupported)))

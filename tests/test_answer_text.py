@@ -164,6 +164,93 @@ def test_a_table_is_named_rather_than_silently_shown_as_pipes():
     assert result.unsupported == ("表",)
 
 
+@pytest.mark.parametrize("source", [
+    "時間(s) | 距離(m)\n--- | ---\n1 | 2",
+    "| 時間(s) | 距離(m)\n|---|---\n| 1 | 2",
+    "時間(s) | 距離(m) |\n---|---|\n1 | 2 |",
+    "x' | y'\n--- | ---\n1 | 2",
+    "| 条件 | 結果 |\n|---|---|\n| `a | b` | $x^2$ |",
+    "| 条件 | 結果 |\n|---|---|\n| a\\|b | $x^2$ |",
+    "| a | b |\n|---|---|\n| 1 | 2 | 3 |",
+    "| 説明 | 式 |\n|---|---|\n| " + "長い説明を保持する。" * 40 + " | $x^2$ |",
+])
+def test_unsupported_table_keeps_its_complete_original_structure(source):
+    result = to_display_answer(source)
+    assert result.text == source
+    assert not result.complete
+    assert result.unsupported == ("表",)
+
+
+@pytest.mark.parametrize("source", [
+    r"$A=\begin{pmatrix}1 & \frac{1}{2}\\x^2 & -3\end{pmatrix}B=C$",
+    r"\(A=\begin{bmatrix}\frac{a+1}{2} & x^{12}\\-3 & 4\end{bmatrix}+I\)",
+    r"\[M=\begin{array}{cc}\frac{1}{2} & x^2\\3 & 4\end{array}\]",
+    r"$$\det A=\begin{vmatrix}1 & 2\\3 & 4\end{vmatrix}=-2$$",
+    r"A=\begin{matrix}\frac{1}{2} & x^2\\3 & 4\end{matrix}, AB=C",
+    r"\begin{pmatrix}\begin{pmatrix}1\end{pmatrix}&\frac{1}{2}\end{pmatrix}",
+    r"$A=\begin{pmatrix}\text{\$}&\frac{1}{2}\end{pmatrix}$",
+    r"$\begin{Bmatrix}1\end{Bmatrix}-\begin{Vmatrix}\frac{1}{2}\end{Vmatrix}$",
+    r"\[\begin{smallmatrix}1 & \frac{2}{3}\end{smallmatrix}\]",
+    r"$\begin{pmatrix}x^2 & \frac{1}{2}$",
+    r"\frac{1}{2} & x^2\end{matrix}",
+    "A=\\begin{pmatrix}\n  \\frac{1}{2} & x^2\\\\\n  3 & 4\n\\end{pmatrix}B=C",
+])
+def test_matrix_bearing_expression_keeps_its_original_notation(source):
+    result = to_display_answer(source)
+    assert result.text == source
+    assert not result.complete
+    assert any("\\begin" in item or "\\end" in item for item in result.unsupported)
+
+
+@pytest.mark.parametrize("prime_count", [1, 2, 3, 4, 6])
+def test_bare_matrix_between_primed_variables_requires_review(prime_count):
+    primes = "'" * prime_count
+    source = "A" + primes + r"=\begin{pmatrix}\frac{1}{2}&x^2\end{pmatrix}B" + primes
+    result = to_display_answer(source)
+    assert result.text == source
+    assert not result.complete
+
+
+def test_scalar_math_outside_unsupported_structures_still_converts():
+    table = "項目 | 値\n--- | ---\n`a|b` | $x^2$"
+    matrix = r"$A=\begin{pmatrix}\frac{1}{2}&x^2\end{pmatrix}B$"
+    source = "$x^2$\n\n" + table + "\n\n" + matrix + "\n\n$y_1$"
+    result = to_display_answer(source)
+    assert result.text == "x²\n\n" + table + "\n\n" + matrix + "\n\ny₁"
+    assert not result.complete
+
+
+@pytest.mark.parametrize("source,expected", [
+    ("`項目 | 値`\n`--- | ---`\n`質量 | 2`", "項目 | 値\n--- | ---\n質量 | 2"),
+    ("```text\n項目 | 値\n--- | ---\n質量 | 2\n```", "項目 | 値\n--- | ---\n質量 | 2"),
+    (r"`$A=\begin{matrix}\frac{1}{2}&x^2\end{matrix}$`",
+     r"$A=\begin{matrix}\frac{1}{2}&x^2\end{matrix}$"),
+    ("```tex\n" + r"A=\begin{matrix}\frac{1}{2}&x^2\end{matrix}" + "\n```",
+     r"A=\begin{matrix}\frac{1}{2}&x^2\end{matrix}"),
+    ("```python\nx = a | b\ny = c & d\n```", "x = a | b\ny = c & d"),
+])
+def test_structured_notation_inside_code_keeps_its_literal_behavior(source, expected):
+    result = to_display_answer(source)
+    assert result.text == expected
+    assert result.complete
+
+
+def test_adjacent_single_quoted_program_strings_remain_literal():
+    for source in ("'a''$x_1$'", r"r'a'r'\begin{matrix}\frac{1}{2}\end{matrix}'",
+                   "print('a'b'$x^2$')"):
+        result = to_display_answer(source)
+        assert result.text == source
+        assert result.complete
+
+
+@pytest.mark.parametrize("leading,trailing", [(8000, 0), (0, 8000), (4000, 4000)])
+def test_invalid_table_rule_with_long_whitespace_keeps_plain_text_behavior(leading, trailing):
+    prefix = "A | B\n" + " " * leading + "--- | ---" + " " * trailing
+    result = to_display_answer(prefix + "x\nvalue | $x^2$")
+    assert result.text == prefix + "x\nvalue | x²"
+    assert result.complete
+
+
 def test_an_image_reference_is_named_and_removed():
     result = to_display_answer("答: ![図](fig.png)")
     assert not result.complete
@@ -191,6 +278,7 @@ def test_plain_program_and_aligned_text_keep_all_significant_characters():
         "0010 ^ 0011 = 0001",
         "価格は$5と$10です。比率は$5/$10。",
         'print("$x_1$", "total_cost", "\\\\n")',
+        "print(r'$x_1$', b'$x^2$', f'$value_{index}$')",
         'result = {1, 2} ^ {2, 3}',
         '    result = source ^ {1, 2}',
         'x^{2}',

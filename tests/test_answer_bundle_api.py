@@ -269,6 +269,103 @@ def test_an_answer_with_a_table_is_not_reported_ready(client):
     assert item["answer"]
 
 
+@pytest.mark.parametrize("source, issue_fragment", [
+    pytest.param(
+        "項目 | 値\n--- | ---\n質量 | 2",
+        "表", id="table-without-outer-pipes"),
+    pytest.param(
+        "| 項目 | 値\n| --- | ---\n| 質量 | 2",
+        "表", id="table-leading-pipe-only"),
+    pytest.param(
+        "項目 | 値 |\n--- | --- |\n質量 | 2 |",
+        "表", id="table-trailing-pipe-only"),
+    pytest.param(
+        "| 式 | 値\n| --- | ---\n| `a|b` | 1",
+        "表", id="table-with-code-pipe"),
+    pytest.param(
+        "| 日本語の見出し | 詳しい記述 |\n| --- | --- |\n"
+        "| 条件 | このセルには測定した値だけでなく条件と理由を含めます。"
+        "途中で文章を短くせず、同じ行に属する説明を最後まで残します。"
+        "計算結果は $x^2=4$ であり、表の列と行の対応も確認する必要があります。 |",
+        "表", id="table-long-japanese-cell-with-math"),
+    pytest.param(
+        r"計算すると $A=\begin{pmatrix}1 & \frac{1}{2}\\x^2 & -3\end{pmatrix}B=C$ となる。",
+        r"\begin", id="matrix-dollar-delimiter-and-surrounding-expression"),
+    pytest.param(
+        "次の等式を得る。\n"
+        r"\[A=\begin{bmatrix}\frac{a+1}{2} & x^{12}\\-3 & 4\end{bmatrix}+I\]"
+        "\nこれを代入する。",
+        r"\begin", id="matrix-display-delimiter-fraction-and-power"),
+    pytest.param(
+        r"A=\begin{matrix}\frac{1}{2} & x^2\\3 & 4\end{matrix}, AB=C",
+        r"\begin", id="matrix-without-math-delimiter"),
+    pytest.param(
+        r"A''=\begin{pmatrix}\frac{1}{2}&x^2\end{pmatrix}B''",
+        r"\begin", id="matrix-between-double-primed-variables"),
+    pytest.param(
+        r"\[M=\begin{array}{cc}\frac{1}{2} & x^{2}\\3 & 4\end{array}\]",
+        r"\begin", id="array-keeps-column-specification"),
+])
+def test_structured_source_is_preserved_in_review_bundle_and_storage(client, source, issue_fragment):
+    from app import db
+
+    _, session_id = _session_with(client, [PAGE])
+    item = _ingest(client, session_id, source)
+    bundle = client.get(f"/v1/exam-sessions/{session_id}/answer-bundle").json()
+    question_id = int(item["question_id"][1:])
+    with db.connect() as conn:
+        saved = conn.execute(
+            "SELECT answer FROM solutions WHERE question_id = ? ORDER BY id DESC LIMIT 1",
+            (question_id,),
+        ).fetchone()
+    assert saved["answer"] == source
+    assert bundle["schema_version"] == 1
+    assert item["answer"] == source
+    assert item["status"] == "needs_review"
+    assert issue_fragment in item["issue"]
+
+
+@pytest.mark.parametrize("source, expected", [
+    pytest.param(
+        "```tex\n" + r"A=\begin{pmatrix}\frac{1}{2} & x^2\\3 & 4\end{pmatrix}" + "\n```",
+        r"A=\begin{pmatrix}\frac{1}{2} & x^2\\3 & 4\end{pmatrix}",
+        id="fenced-matrix-is-literal"),
+    pytest.param(
+        r"`$A=\begin{pmatrix}\frac{1}{2} & x^2\\3 & 4\end{pmatrix}$`",
+        r"$A=\begin{pmatrix}\frac{1}{2} & x^2\\3 & 4\end{pmatrix}$",
+        id="inline-matrix-is-literal"),
+    pytest.param(
+        "```text\n項目 | 値\n--- | ---\n質量 | 2\n```",
+        "項目 | 値\n--- | ---\n質量 | 2",
+        id="fenced-table-is-literal"),
+    pytest.param(
+        "`| 項目 | 値 |`",
+        "| 項目 | 値 |",
+        id="inline-table-row-is-literal"),
+    pytest.param(
+        "`項目 | 値`\n`--- | ---`\n`質量 | 2`",
+        "項目 | 値\n--- | ---\n質量 | 2",
+        id="individually-inline-coded-table-rows-are-literal"),
+])
+def test_structured_source_in_code_remains_ready_with_literal_contents(client, source, expected):
+    from app import db
+
+    _, session_id = _session_with(client, [PAGE])
+    item = _ingest(client, session_id, source)
+    bundle = client.get(f"/v1/exam-sessions/{session_id}/answer-bundle").json()
+    question_id = int(item["question_id"][1:])
+    with db.connect() as conn:
+        saved = conn.execute(
+            "SELECT answer FROM solutions WHERE question_id = ? ORDER BY id DESC LIMIT 1",
+            (question_id,),
+        ).fetchone()
+    assert saved["answer"] == source
+    assert bundle["schema_version"] == 1
+    assert item["answer"] == expected
+    assert item["status"] == "ready"
+    assert item["issue"] == ""
+
+
 def test_unknown_notation_is_named_and_kept_out_of_ready(client):
     _, session_id = _session_with(client, [PAGE])
     item = _ingest(client, session_id, chr(92) + "begin{array}{c}1" + chr(92) + "end{array}")
