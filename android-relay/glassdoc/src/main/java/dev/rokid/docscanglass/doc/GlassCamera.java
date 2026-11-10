@@ -165,8 +165,40 @@ final class GlassCamera {
                     || duration == null || duration < exposure || duration > camera.get(CameraCharacteristics.SENSOR_INFO_MAX_FRAME_DURATION)
                     || iso == null || iso <= 0 || !isoRange.contains(iso)
                     || (boostRange != null && (boost == null || boost <= 0 || !boostRange.contains(boost)))) return null;
+            // Decided 2026-11-10: one flicker period and never longer. Sensitivity carries the light the
+            // preview gathered with a longer exposure; up to the analog ceiling, darker rather than slower.
+            // An unreported flicker leaves the measured exposure alone. Not verified on the glasses.
+            Integer flicker = result.get(CaptureResult.STATISTICS_SCENE_FLICKER);
+            long period = flicker == null ? 0 : flicker == CaptureResult.STATISTICS_SCENE_FLICKER_60HZ
+                    ? 8_333_333L : Stillness.REFERENCE_EXPOSURE_NANOS;
+            if (period > 0 && exposure > period + period / 100 && exposureRange.contains(period)) {
+                Integer analog = camera.get(CameraCharacteristics.SENSOR_MAX_ANALOG_SENSITIVITY);
+                int ceiling = Math.max(iso, analog == null ? isoRange.getUpper() : Math.min(analog, isoRange.getUpper()));
+                iso = (int)Math.min(ceiling, Math.round((double)iso * exposure / period));
+                exposure = period;
+            }
             return new StillExposure(exposure, duration, result.get(CaptureResult.SENSOR_TIMESTAMP), iso, boostRange == null ? null : boost,
                     exposureRange, isoRange, boostRange);
+        }
+
+        /** The explicit bracket's variation of this still; null when the device range cannot hold it. */
+        StillExposure vary(SettingsBracket.Variant variant) {
+            long varied = exposure * variant.periods;
+            if (!exposureRange.contains(varied)) return null;
+            long gain = Math.round((double)iso * (1 << variant.evSteps) / variant.periods);
+            return new StillExposure(varied, Math.max(frameDuration, varied), sourceTimestamp,
+                    (int)Math.max(isoRange.getLower(), Math.min(isoRange.getUpper(), gain)), boost,
+                    exposureRange, isoRange, boostRange);
+        }
+
+        java.util.Map<String, Object> requested(SettingsBracket.Variant variant) {
+            java.util.Map<String, Object> map = new java.util.LinkedHashMap<>();
+            map.put("exposure_ns", exposure); map.put("iso", iso); map.put("frame_ns", frameDuration);
+            if (boost != null) map.put("post_raw_boost", boost);
+            if (variant != null && variant.noiseReduction != null) map.put("noise_reduction", variant.noiseReduction);
+            if (variant != null && variant.edge != null) map.put("edge", variant.edge);
+            if (variant != null && variant.jpegQuality != null) map.put("jpeg_quality", variant.jpegQuality);
+            return map;
         }
 
         void apply(CaptureRequest.Builder request) {
@@ -282,6 +314,29 @@ final class GlassCamera {
     private boolean selectionAttempted;
     private CaptureSurface.NativeAlternative activeAlternative;
     private CaptureSurface.NativeScene alternativeScene;
+    // Explicit, nonpersistent settings comparison. Its stills never reach the session callback.
+    private volatile SettingsBracket bracket;
+    private StillExposure bracketExposure;
+    private SettingsBracket.Variant bracketVariant;
+    private long bracketDeadline;
+    private TotalCaptureResult stillTotal;
+    private final Runnable bracketStep = this::bracketStep;
+    private final CaptureSurface.NativeAlternative bracketShot = new CaptureSurface.NativeAlternative() {
+        @Override public boolean onStarting() { return true; }
+        @Override public void onSkipped() { handler.postDelayed(bracketStep, 100); }
+        @Override public void onOriginal(byte[] jpeg, CaptureProvenance source, boolean sameScene) {
+            SettingsBracket set = bracket;
+            if (set == null || !set.running()) return;
+            java.util.Map<String, Object> details = new java.util.LinkedHashMap<>();
+            details.put("sha256", source == null ? null : source.jpegSha256);
+            details.put("requested", stillExposure == null ? null : stillExposure.requested(bracketVariant));
+            details.put("actual", reported(stillTotal));
+            details.put("metadata_matched", stillExposure != null && stillResult != null
+                    && stillExposure.matches(stillResult, source == null || source.imageTimestampNanos == null ? -1 : source.imageTimestampNanos));
+            details.put("same_scene", captureScene == pageChange.sequence() && captureSceneEnd == Long.MAX_VALUE);
+            if (set.saved(jpeg, details)) handler.postDelayed(bracketStep, 100);
+        }
+    };
     private long captureStream, captureScene, captureSceneStart, captureSceneEnd;
     private boolean captureSceneUncertain;
     private final List<Runnable> futureStops = new ArrayList<>();
@@ -359,11 +414,76 @@ final class GlassCamera {
     boolean paperGeometryEvaluation() { return paperGeometryEvaluation; } // AGENT_APPROVED=1
 
     void nativeSelection(boolean enabled) {
-        if (enabled && mode != Mode.NATIVE_STILL)
+        if (enabled && (mode != Mode.NATIVE_STILL || bracket != null))
             throw new IllegalArgumentException("native selection requires native stills");
         nativeSelection = enabled;
-        stillness.retainMeasurements(enabled);
+        stillness.retainMeasurements(enabled || bracket != null);
         if (!enabled) selectionScene = null;
+    }
+
+    /** Explicit comparison launch only. The extra stills are private files, never pages. */
+    void settingsBracket(boolean enabled) {
+        if (enabled && (mode != Mode.NATIVE_STILL || paperGeometryEvaluation || nativeSelection))
+            throw new IllegalArgumentException("settings bracket requires ordinary native stills");
+        bracket = enabled ? new SettingsBracket(context.getFilesDir(), cameraRun) : null;
+        stillness.retainMeasurements(enabled || nativeSelection);
+    }
+
+    boolean settingsBracket() { return bracket != null; }
+
+    private static java.util.Map<String, Object> reported(CaptureResult result) {
+        java.util.Map<String, Object> map = new java.util.LinkedHashMap<>();
+        if (result == null) return map;
+        map.put("sensor_timestamp_ns", result.get(CaptureResult.SENSOR_TIMESTAMP));
+        map.put("exposure_ns", result.get(CaptureResult.SENSOR_EXPOSURE_TIME));
+        map.put("iso", result.get(CaptureResult.SENSOR_SENSITIVITY));
+        map.put("frame_ns", result.get(CaptureResult.SENSOR_FRAME_DURATION));
+        map.put("post_raw_boost", result.get(CaptureResult.CONTROL_POST_RAW_SENSITIVITY_BOOST));
+        map.put("ae_mode", result.get(CaptureResult.CONTROL_AE_MODE));
+        map.put("ae_state", result.get(CaptureResult.CONTROL_AE_STATE));
+        map.put("noise_reduction", result.get(CaptureResult.NOISE_REDUCTION_MODE));
+        map.put("edge", result.get(CaptureResult.EDGE_MODE));
+        Byte quality = result.get(CaptureResult.JPEG_QUALITY);
+        map.put("jpeg_quality", quality == null ? null : (int)quality);
+        map.put("scene_flicker", result.get(CaptureResult.STATISTICS_SCENE_FLICKER));
+        return map;
+    }
+
+    /** After an ordinary still of a manual-exposure camera: the same scene again, one setting changed each time. */
+    private void bracketBegin(CaptureProvenance source, boolean associationResolved) {
+        SettingsBracket set = bracket;
+        if (set == null || closed || unknown || manualExposureCamera == null || stillExposure == null || source == null) return;
+        java.util.Map<String, Object> base = new java.util.LinkedHashMap<>();
+        base.put("sha256", source.jpegSha256);
+        base.put("requested", stillExposure.requested(null));
+        base.put("actual", reported(stillTotal));
+        base.put("metadata_matched", associationResolved);
+        if (!set.begin(captureScene, SettingsBracket.variants(
+                manualExposureCamera.get(CameraCharacteristics.NOISE_REDUCTION_AVAILABLE_NOISE_REDUCTION_MODES),
+                manualExposureCamera.get(CameraCharacteristics.EDGE_AVAILABLE_EDGE_MODES)), base)) return;
+        bracketDeadline = SystemClock.elapsedRealtime() + SettingsBracket.SET_DEADLINE_MILLIS;
+        handler.removeCallbacks(bracketStep);
+        handler.postDelayed(bracketStep, 100);
+    }
+
+    /** One request in flight; a turned page, a busy camera or the deadline ends the set, never a forced shot. */
+    private void bracketStep() {
+        SettingsBracket set = bracket;
+        if (set == null || !set.running()) return;
+        long now = SystemClock.elapsedRealtime();
+        String end = closed || unknown ? "camera_closed_or_unknown"
+                : pageChange.sequence() != set.scene() || pageChange.ready(now) ? "scene_changed"
+                : now > bracketDeadline ? "not_ready_before_deadline" : null;
+        if (end != null) { set.end(end); return; }
+        if (capturePending || activeFuturePage != null || activeAlternative != null || (generation > 0 && !settled)
+                || !cameraReady() || !stillness.readyNow()) { handler.postDelayed(bracketStep, 100); return; }
+        SettingsBracket.Variant variant = set.peek();
+        if (variant == null) { set.end("complete"); return; }
+        StillExposure varied = meteringStillExposure == null ? null : meteringStillExposure.vary(variant);
+        if (varied == null) { set.skip("outside_device_range"); handler.post(bracketStep); return; }
+        bracketExposure = varied; bracketVariant = variant;
+        activeAlternative = bracketShot; alternativeScene = null; capturePending = true;
+        captureOnHandler();
     }
 
     CaptureSurface.NativeScene nativeSelectionScene(CaptureProvenance source) {
@@ -829,12 +949,14 @@ final class GlassCamera {
         futureIdle();
     }
 
-    /** The preview's actual exposure, never a request setting or an old session's result. */
+    /** The exposure this still will actually use, from the current session's fresh result only. */
     private long motionExposureNanos() {
         long now = SystemClock.elapsedRealtime();
         long exposure = !closed && !unknown && previewDevice != null && previewSession != null
                 && meteredFrame(now) && now >= previewAt
                 && now - previewAt <= CameraReadiness.FRESH_MILLIS ? meteringExposureNanos : 0;
+        // The manual still, not the preview, is what head motion can blur.
+        if (exposure > 0 && meteringStillExposure != null) exposure = Math.min(exposure, meteringStillExposure.exposure);
         if (exposure <= 0 || mode != Mode.ZSL_EVALUATION_YUV) return exposure;
         ZslFrameBuffer.Selection candidate = zslCandidate();
         return candidate == null ? exposure : Math.max(exposure, candidate.result.get(CaptureResult.SENSOR_EXPOSURE_TIME));
@@ -1059,9 +1181,10 @@ final class GlassCamera {
         long current = ++generation;
         framing.arm(current, previewGeneration);
         stillResult = null;
+        stillTotal = null;
         stillResultFinished = false;
         pendingJpeg = null;
-        stillExposure = meteringStillExposure;
+        stillExposure = activeAlternative == bracketShot ? bracketExposure : meteringStillExposure;
         settled = false;
         captureStream = previewGeneration;
         captureScene = pageChange.sequence();
@@ -1105,6 +1228,7 @@ final class GlassCamera {
                 unknown = true;
             }
             closed = true;
+            if (bracket != null) bracket.end("camera_closed_or_unknown");
             selectionScene = null;
             activeAlternative = null;
             alternativeScene = null;
@@ -1156,6 +1280,7 @@ final class GlassCamera {
             // session; the older timeout does not establish its cause.
             applyMetering(request);
             if (stillExposure != null) stillExposure.apply(request);
+            if (activeAlternative == bracketShot && bracketVariant != null) bracketVariant.apply(request);
             // capture() takes priority over repeating preview without stopping its next frames.
             previewSession.capture(request.build(), captureCallback(current), handler);
         } catch (CameraAccessException | RuntimeException | OutOfMemoryError error) {
@@ -1211,6 +1336,7 @@ final class GlassCamera {
                 if (active(current) && !unknown && !stillResultFinished && source == previewSession) {
                     try { stillResult = result == null ? null : new StillResult(current, result); }
                     catch (RuntimeException unavailable) { stillResult = null; }
+                    if (bracket != null) stillTotal = result;
                     stillResultFinished = true;
                     if (pendingJpeg != null) deliverJpeg();
                 }
@@ -1327,6 +1453,7 @@ final class GlassCamera {
                 selectionAttempted = false;
             }
             callback.onCaptured(new Captured(jpeg, width, height, elapsed, provenance, associationResolved));
+            bracketBegin(provenance, associationResolved);
         }
         else {
             boolean sceneMatched = associationResolved && sensorTimestamp >= futureSceneStartTimestamp
@@ -1339,7 +1466,8 @@ final class GlassCamera {
             }
             future.onCandidate(jpeg, provenance, sceneMatched);
         }
-        if (!associationResolved) previewFailed(mode == Mode.ZSL_EVALUATION_YUV
+        // A comparison still is saved with its mismatch journaled; it describes no page and blocks none.
+        if (!associationResolved && alternative != bracketShot) previewFailed(mode == Mode.ZSL_EVALUATION_YUV
                 ? "ZSL original timestamp mismatch" : "native original exposure metadata unresolved");
         futureIdle();
     }

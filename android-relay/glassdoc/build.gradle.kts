@@ -80,8 +80,8 @@ android {
         // 46 adds explicit provisional paper/AE comparison and respects Y-plane buffer origins.
         // 48 fences stale power callbacks and consumes bounded current-capture feedback.
         // 53 distinguishes display wraps from source newlines without changing answer text.
-        versionCode = 55
-        versionName = "0.43.3"
+        versionCode = 56
+        versionName = "0.43.4"
     }
 
     // Same reasoning as `:glassapp`: a vendor installer that reads JAR

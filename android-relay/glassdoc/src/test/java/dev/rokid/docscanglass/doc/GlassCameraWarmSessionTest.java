@@ -68,6 +68,8 @@ public class GlassCameraWarmSessionTest {
         CharacteristicsShadow.aeRegions = 0; // AGENT_APPROVED=1: explicit comparison test setup.
         CharacteristicsShadow.strictPublicApi = false;
         CharacteristicsShadow.manualSensor = false;
+        CharacteristicsShadow.maxAnalog = null;
+        failures.clear(); originals.clear(); delivered = 0;
         MapShadow.previewSize = new Size(320, 240);
         CharacteristicsShadow.afMode = CONTROL_AF_MODE_CONTINUOUS_PICTURE;
         createCamera();
@@ -771,6 +773,236 @@ public class GlassCameraWarmSessionTest {
         assertNull(session.repeating.get(CaptureRequest.SENSOR_EXPOSURE_TIME));
     }
 
+    private TotalCaptureResult flickerResult(long exposure, int iso, Integer flicker) {
+        TotalCaptureResult result = manualResult(SystemClock.elapsedRealtimeNanos(), exposure, iso, CONTROL_AE_MODE_ON);
+        if (flicker != null) ((ShadowCaptureResult)Shadow.extract(result)).set(CaptureResult.STATISTICS_SCENE_FLICKER, flicker);
+        return result;
+    }
+
+    private void prepareFlickerStill(long previewExposure, int iso, Integer flicker) {
+        CharacteristicsShadow.fixedFocus = true;
+        CharacteristicsShadow.manualSensor = true;
+        camera.captureOnce(); idle(100);
+        for (int i = 0; i < 8; i++) {
+            var session = currentDevice().session;
+            session.previewCallback.onCaptureCompleted(session, session.repeating, flickerResult(previewExposure, iso, flicker));
+            frame(180); idle(100);
+        }
+        assertEquals(1, firstDevice().session.captures);
+    }
+
+    /** Decided 2026-11-10: one flicker period, never 1/40 s; sensitivity carries the light instead. */
+    @Test public void aSlowerConvergedPreviewIsShotInOneFlickerPeriodWithSensitivityCarryingTheLight() {
+        prepareFlickerStill(25_000_000L, 100, STATISTICS_SCENE_FLICKER_60HZ);
+        var session = firstDevice().session;
+        assertEquals(Integer.valueOf(CONTROL_AE_MODE_OFF), session.captured.get(CaptureRequest.CONTROL_AE_MODE));
+        assertEquals(Long.valueOf(8_333_333), session.captured.get(CaptureRequest.SENSOR_EXPOSURE_TIME));
+        assertEquals("the same exposure product as the preview chose", Integer.valueOf(300),
+                session.captured.get(CaptureRequest.SENSOR_SENSITIVITY));
+        assertEquals(Long.valueOf(33_333_333), session.captured.get(CaptureRequest.SENSOR_FRAME_DURATION));
+        assertEquals(Integer.valueOf(150), session.captured.get(CaptureRequest.CONTROL_POST_RAW_SENSITIVITY_BOOST));
+        assertNull("the preview keeps its own automatic exposure", session.repeating.get(CaptureRequest.SENSOR_EXPOSURE_TIME));
+        long timestamp = SystemClock.elapsedRealtimeNanos();
+        manualCompleted(manualResult(timestamp, 8_333_333L, 300)); manualJpeg(timestamp);
+        assertEquals(1, delivered); assertTrue(originals.get(0).associationResolved);
+        assertEquals(Long.valueOf(8_333_333L), originals.get(0).provenance.exposureNanos);
+    }
+
+    @Test public void fiftyHertzAndSteadyLightUseTenMillisecondsAndAShortExposureIsCopiedAsMeasured() {
+        prepareFlickerStill(20_000_000L, 100, STATISTICS_SCENE_FLICKER_50HZ);
+        assertEquals(Long.valueOf(10_000_000), firstDevice().session.captured.get(CaptureRequest.SENSOR_EXPOSURE_TIME));
+        assertEquals(Integer.valueOf(200), firstDevice().session.captured.get(CaptureRequest.SENSOR_SENSITIVITY));
+        setup(); prepareFlickerStill(25_000_000L, 100, STATISTICS_SCENE_FLICKER_NONE);
+        assertEquals(Long.valueOf(10_000_000), firstDevice().session.captured.get(CaptureRequest.SENSOR_EXPOSURE_TIME));
+        assertEquals(Integer.valueOf(250), firstDevice().session.captured.get(CaptureRequest.SENSOR_SENSITIVITY));
+        setup(); prepareFlickerStill(8_333_333L, 120, STATISTICS_SCENE_FLICKER_60HZ);
+        assertEquals(Long.valueOf(8_333_333), firstDevice().session.captured.get(CaptureRequest.SENSOR_EXPOSURE_TIME));
+        assertEquals(Integer.valueOf(120), firstDevice().session.captured.get(CaptureRequest.SENSOR_SENSITIVITY));
+    }
+
+    @Test public void anUnreportedFlickerLeavesTheMeasuredExposureAlone() {
+        prepareFlickerStill(25_000_000L, 100, null);
+        assertEquals(Long.valueOf(25_000_000), firstDevice().session.captured.get(CaptureRequest.SENSOR_EXPOSURE_TIME));
+        assertEquals(Integer.valueOf(100), firstDevice().session.captured.get(CaptureRequest.SENSOR_SENSITIVITY));
+    }
+
+    @Test public void sensitivityStopsAtTheAnalogCeilingRatherThanLengtheningTheExposure() {
+        CharacteristicsShadow.maxAnalog = 800;
+        prepareFlickerStill(25_000_000L, 400, STATISTICS_SCENE_FLICKER_60HZ);
+        assertEquals(Long.valueOf(8_333_333), firstDevice().session.captured.get(CaptureRequest.SENSOR_EXPOSURE_TIME));
+        assertEquals("darker, never slower", Integer.valueOf(800), firstDevice().session.captured.get(CaptureRequest.SENSOR_SENSITIVITY));
+        setup(); CharacteristicsShadow.maxAnalog = 800;
+        prepareFlickerStill(25_000_000L, 1600, STATISTICS_SCENE_FLICKER_60HZ);
+        assertEquals("a preview already above the ceiling is not turned down", Integer.valueOf(1600),
+                firstDevice().session.captured.get(CaptureRequest.SENSOR_SENSITIVITY));
+    }
+
+    @Test public void theHeadMotionAllowanceFollowsTheShortenedStillNotThePreview() {
+        SensorManager manager = (SensorManager)RuntimeEnvironment.getApplication()
+                .getSystemService(android.content.Context.SENSOR_SERVICE);
+        ShadowSensorManager sensors = shadowOf(manager);
+        sensors.addSensor(ShadowSensor.newInstance(Sensor.TYPE_GYROSCOPE));
+        CharacteristicsShadow.fixedFocus = true; CharacteristicsShadow.manualSensor = true;
+        createCamera(); camera.captureOnce(); idle(0);
+        for (int i = 0; i < 14; i++) {
+            SensorEvent event = ShadowSensorManager.createSensorEvent(3);
+            event.timestamp = SystemClock.elapsedRealtimeNanos(); event.values[0] = 0.1f;
+            sensors.sendSensorEventToListeners(event);
+            idle(50);
+            var session = currentDevice().session;
+            session.previewCallback.onCaptureCompleted(session, session.repeating,
+                    flickerResult(25_000_000L, 100, STATISTICS_SCENE_FLICKER_60HZ));
+            frame(180);
+        }
+        assertEquals("0.1 rad/s is within the 10 ms allowance of an 8.3 ms still", 1, firstDevice().session.captures);
+        assertTrue(failures.isEmpty());
+    }
+
+    private void quiet(ShadowSensorManager sensors) {
+        SensorEvent event = ShadowSensorManager.createSensorEvent(3);
+        event.timestamp = SystemClock.elapsedRealtimeNanos(); event.values[0] = 0f;
+        sensors.sendSensorEventToListeners(event);
+        idle(50);
+        var session = currentDevice().session;
+        session.previewCallback.onCaptureCompleted(session, session.repeating,
+                flickerResult(8_333_333L, 200, STATISTICS_SCENE_FLICKER_60HZ));
+        frame(180);
+    }
+
+    /** The fake HAL answers the request in flight: its result, then its JPEG. */
+    private void bracketStill(int marker, long exposure, int iso) {
+        idle(1);
+        long timestamp = SystemClock.elapsedRealtimeNanos();
+        manualCompleted(manualResult(timestamp, exposure, iso));
+        var reader = currentReader(ImageFormat.JPEG);
+        DocScanTestImage image = new DocScanTestImage(new ArrayList<>());
+        image.timestamp = timestamp; image.buffer = ByteBuffer.wrap(new byte[]{(byte)marker, 2, 3});
+        reader.image = image; reader.listener.onImageAvailable(reader.reader); idle(0);
+    }
+
+    private ShadowSensorManager bracketCamera(boolean explicit) {
+        SensorManager manager = (SensorManager)RuntimeEnvironment.getApplication()
+                .getSystemService(android.content.Context.SENSOR_SERVICE);
+        ShadowSensorManager sensors = shadowOf(manager);
+        sensors.addSensor(ShadowSensor.newInstance(Sensor.TYPE_GYROSCOPE));
+        CharacteristicsShadow.fixedFocus = true; CharacteristicsShadow.manualSensor = true;
+        createCamera(); camera.settingsBracket(explicit); camera.captureOnce(); idle(0);
+        for (int i = 0; i < 14 && firstDevice().session.captures == 0; i++) quiet(sensors);
+        assertEquals(1, firstDevice().session.captures);
+        bracketStill(1, 8_333_333L, 200);
+        assertEquals(1, delivered);
+        return sensors;
+    }
+
+    private static java.io.File bracketDirectory() {
+        java.io.File[] runs = new java.io.File(RuntimeEnvironment.getApplication().getFilesDir(), "settings-bracket").listFiles();
+        return runs == null || runs.length != 1 ? null : runs[0];
+    }
+
+    private static List<org.json.JSONObject> bracketJournal() throws Exception {
+        List<org.json.JSONObject> lines = new ArrayList<>();
+        for (String line : java.nio.file.Files.readAllLines(new java.io.File(bracketDirectory(), "journal.jsonl").toPath()))
+            lines.add(new org.json.JSONObject(line));
+        return lines;
+    }
+
+    @Test public void theSettingsBracketIsAnExplicitNativeOnlyNonpersistentGate() {
+        assertFalse(DocScanGlassActivity.settingsBracket(new android.content.Intent()));
+        assertTrue(DocScanGlassActivity.settingsBracket(new android.content.Intent().putExtra("settings_bracket", true)));
+        assertEquals(GlassCamera.Mode.NATIVE_STILL, DocScanGlassActivity.evaluationMode(new android.content.Intent()
+                .putExtra("settings_bracket", true)));
+        for (String other : new String[]{"zsl_evaluation", "video_evaluation", "paper_geometry_evaluation",
+                "native_selection", "wrong_type"}) {
+            android.content.Intent intent = new android.content.Intent().putExtra("settings_bracket", true);
+            if (other.equals("wrong_type")) intent.putExtra("settings_bracket", "true"); else intent.putExtra(other, true);
+            assertThrows(other, IllegalArgumentException.class, () -> DocScanGlassActivity.evaluationMode(intent));
+        }
+        assertFalse(camera.settingsBracket());
+        camera.nativeSelection(true);
+        assertThrows(IllegalArgumentException.class, () -> camera.settingsBracket(true));
+    }
+
+    /** Plan step 5: the wearer looks at one sheet once; the app changes one setting per still by itself. */
+    @Test public void theSettingsBracketRetakesTheSameSceneWithOneSettingChangedAndNeverAsAPage() throws Exception {
+        ShadowSensorManager sensors = bracketCamera(true);
+        var session = firstDevice().session;
+        Object[][] expected = {
+                {"ev+1", 8_333_333L, 400, null, null, null}, {"ev+2", 8_333_333L, 800, null, null, null},
+                {"two-periods", 16_666_666L, 100, null, null, null},
+                {"nr-off-edge-off", 8_333_333L, 200, NOISE_REDUCTION_MODE_OFF, EDGE_MODE_OFF, null},
+                {"nr-hq-edge-hq", 8_333_333L, 200, NOISE_REDUCTION_MODE_HIGH_QUALITY, EDGE_MODE_HIGH_QUALITY, null},
+                {"jpeg-90", 8_333_333L, 200, null, null, (byte)90}};
+        for (int i = 0; i < expected.length; i++) {
+            for (int n = 0; n < 20 && session.captures == i + 1; n++) quiet(sensors);
+            String name = (String)expected[i][0];
+            assertEquals(name + " must be requested", i + 2, session.captures);
+            assertEquals(name, Integer.valueOf(CONTROL_AE_MODE_OFF), session.captured.get(CaptureRequest.CONTROL_AE_MODE));
+            assertEquals(name, expected[i][1], session.captured.get(CaptureRequest.SENSOR_EXPOSURE_TIME));
+            assertEquals(name, expected[i][2], session.captured.get(CaptureRequest.SENSOR_SENSITIVITY));
+            assertEquals(name, expected[i][3], session.captured.get(CaptureRequest.NOISE_REDUCTION_MODE));
+            assertEquals(name, expected[i][4], session.captured.get(CaptureRequest.EDGE_MODE));
+            assertEquals(name, expected[i][5], session.captured.get(CaptureRequest.JPEG_QUALITY));
+            quiet(sensors); quiet(sensors);
+            assertEquals("one still in flight", i + 2, session.captures);
+            bracketStill(10 + i, (Long)expected[i][1], (Integer)expected[i][2]);
+            assertEquals("a bracket still is never handed to the session", 1, delivered);
+            assertArrayEquals("saved before the next request", new byte[]{(byte)(10 + i), 2, 3}, java.nio.file.Files.readAllBytes(
+                    new java.io.File(bracketDirectory(), String.format("set1-%02d-%s.jpg", i + 1, name)).toPath()));
+        }
+        for (int n = 0; n < 20; n++) quiet(sensors);
+        assertEquals("the set ends after its last variant", 7, session.captures);
+        List<org.json.JSONObject> journal = bracketJournal();
+        assertEquals(8, journal.size());
+        assertEquals("base", journal.get(0).getString("kind"));
+        assertEquals(originals.get(0).provenance.jpegSha256, journal.get(0).getString("sha256"));
+        assertEquals(8_333_333L, journal.get(0).getJSONObject("requested").getLong("exposure_ns"));
+        for (int i = 0; i < expected.length; i++) {
+            org.json.JSONObject line = journal.get(i + 1);
+            assertEquals("variant", line.getString("kind")); assertEquals(expected[i][0], line.getString("name"));
+            assertFalse(line.getBoolean("auto_upload_allowed")); assertTrue(line.getBoolean("metadata_matched"));
+            assertEquals(((Long)expected[i][1]).longValue(), line.getJSONObject("requested").getLong("exposure_ns"));
+            assertEquals(((Integer)expected[i][2]).intValue(), line.getJSONObject("actual").getInt("iso"));
+        }
+        assertEquals("end", journal.get(7).getString("kind")); assertEquals("complete", journal.get(7).getString("reason"));
+        assertTrue(failures.isEmpty());
+    }
+
+    @Test public void aPageTurnEndsTheBracketAndTheStillInFlightIsKept() throws Exception {
+        ShadowSensorManager sensors = bracketCamera(true);
+        var session = firstDevice().session;
+        for (int n = 0; n < 20 && session.captures == 1; n++) quiet(sensors);
+        assertEquals(2, session.captures);
+        idle(30); frame(180, true); idle(30); frame(180); idle(400);
+        bracketStill(10, 8_333_333L, 400);
+        for (int n = 0; n < 20; n++) quiet(sensors);
+        assertEquals("no still of another page may enter this set", 2, session.captures);
+        List<org.json.JSONObject> journal = bracketJournal();
+        assertEquals("variant", journal.get(1).getString("kind"));
+        assertFalse(journal.get(1).getBoolean("same_scene"));
+        assertEquals("scene_changed", journal.get(journal.size() - 1).getString("reason"));
+        assertEquals(1, delivered); assertTrue(failures.isEmpty());
+    }
+
+    @Test public void aBracketStillTheCameraDidNotTakeAsAskedIsRecordedAsSuchAndTheSetGoesOn() throws Exception {
+        ShadowSensorManager sensors = bracketCamera(true);
+        var session = firstDevice().session;
+        for (int n = 0; n < 20 && session.captures == 1; n++) quiet(sensors);
+        bracketStill(10, 16_666_666L, 400); // twice the requested exposure
+        for (int n = 0; n < 20 && session.captures == 2; n++) quiet(sensors);
+        assertEquals("the completed comparison still is not an unknown capture", 3, session.captures);
+        assertFalse(bracketJournal().get(1).getBoolean("metadata_matched"));
+        assertEquals(16_666_666L, bracketJournal().get(1).getJSONObject("actual").getLong("exposure_ns"));
+        assertTrue(failures.isEmpty());
+    }
+
+    @Test public void withoutTheExplicitLaunchNoExtraStillFollowsAPage() {
+        ShadowSensorManager sensors = bracketCamera(false);
+        for (int n = 0; n < 20; n++) quiet(sensors);
+        assertEquals(1, firstDevice().session.captures);
+        assertNull(bracketDirectory());
+        assertTrue(failures.isEmpty());
+    }
+
     @Test public void manualJpegWaitsForItsResultWithTheNativeImageAlreadyClosed() {
         prepareManualStill();
         long timestamp = SystemClock.elapsedRealtimeNanos();
@@ -1436,6 +1668,7 @@ public class GlassCameraWarmSessionTest {
         static int aeRegions;
         static boolean strictPublicApi;
         static boolean manualSensor;
+        static Integer maxAnalog;
         @Implementation protected <T> T get(CameraCharacteristics.Key<T> key) {
             if (strictPublicApi && ((android.os.Build.VERSION.SDK_INT < 30
                     && key.getName().equals("android.control.zoomRatioRange"))
@@ -1451,6 +1684,9 @@ public class GlassCameraWarmSessionTest {
                     : key.equals(CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE) ? new Range<>(100_000L, 300_000_000L)
                     : key.equals(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE) ? new Range<>(100, 3200)
                     : key.equals(CameraCharacteristics.SENSOR_INFO_MAX_FRAME_DURATION) ? 400_000_000L
+                    : key.equals(CameraCharacteristics.SENSOR_MAX_ANALOG_SENSITIVITY) ? maxAnalog
+                    : key.equals(CameraCharacteristics.NOISE_REDUCTION_AVAILABLE_NOISE_REDUCTION_MODES) ? new int[]{0, 1, 2}
+                    : key.equals(CameraCharacteristics.EDGE_AVAILABLE_EDGE_MODES) ? new int[]{1, 2, 0}
                     : key.equals(CameraCharacteristics.CONTROL_POST_RAW_SENSITIVITY_BOOST_RANGE) ? new Range<>(100, 3200)
                     : key.equals(CameraCharacteristics.CONTROL_AWB_LOCK_AVAILABLE) ? Boolean.TRUE
                     : key.equals(CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE) ? manualSensor
