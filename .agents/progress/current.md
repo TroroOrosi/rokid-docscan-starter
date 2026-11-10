@@ -1,7 +1,7 @@
 # 再開入口：次のセッションはここだけ読めば始められる
 
-最終更新: 2026-11-10 PC：表/行列afcaa0e・同本文revision再利用5f67266はpush済。通常答案の本番Fast修正は全Python2525 passed/4 skipped、ruff全体pass、独立R0/O0。Android最終859 tests/失敗0、216source SHAとAPK53の一致を確認。
-Runs on: 会場phone AP＋glasses。承認済Standard変更actualはhost exit0、API down-up各1、watch/browser/X11保持、GPT/glasses0。readonlyでphone ZY22/glass1904のAP接続とglass版52を確認、新APK53は未導入。試験Standard・本番Fastを維持し、光学/全頁/品質gate/全設問/表行列組版/長時間/会場全経路は未了。
+最終更新: 2026-11-10 利用者の「一旦進捗状況をローカル、リポジトリ共に保存して」により進捗を保存。コードba0b6f1（本番Fast／試験Standard）はpush済。PC既存記録：`py -3.12 -B -X utf8 -m pytest -q tests` → exit0・2525 passed/4 skipped、`py -3.12 -B -X utf8 -m ruff check .` → All checks passed!、独立R0/O0。`gradlew.bat --no-daemon --offline test testDebugUnitTest assembleDebug` → BUILD SUCCESSFUL・859 tests/失敗0、216source SHAとAPK53一致。実機受入の完了ではない。
+Runs on: 会場phone AP＋glasses。ba0b6f1のphone9source更新actualはhostexit0・独立R0/O0、API down/up各1・watch/browser/X11/envStandard保持・GPT/glasses0。APK53全データ転送/hash/filefsync後、保存確定待ちで導入0。光学/全頁/品質gate/全設問/表行列組版/長時間/会場全経路は未了。
 
 ## 0. 読み方（前提と資料に引きずられないため）
 
@@ -90,7 +90,7 @@ Runs on: 会場phone AP＋glasses。承認済Standard変更actualはhost exit0�
   → 旧サーバ停止 → `nohup bash scripts/phone_serve.sh 127.0.0.1 > data/server-<commit>.log 2>&1 &`。PCからは `ssh -f -N -L 8000:127.0.0.1:8000 ...`（ssh `-i ~/.ssh/f51f_key -p 8022 u0_a26@192.168.0.6`）。
   ベンチの鍵は `ROKID_API_KEY` をスマホの env から読んで渡す（画面に出さない）。
 
-次の実行: Fastのcommit/push後にphone source-only更新器の最終payloadをpinし、R1（rollback後の誤った完了marker）修正版を独立再監査して今回の通常実行承認内で更新。phone envは試験Standardを保持し本番準備時Fastへ戻す。APK53はquiet/保存データ保全付き導入器を準備中。撮影候補1は再実行せず、原動画/nativeの分割原本確定・転送・全期間選別まで比較する。
+次の実行: 再開時に接続復帰後、phone ZY22をreadonly確認し、独立R0/O0のGL53-stage-finalizer（f438d346／結合0f9ce1cc）を新しいactual-v2記録で1回実行→quiet/既存file全件保持付きGL53導入。直前devices0・旧TCP拒否10061・mDNS0でfinalizerはdispatch0、導入0。転送済GL53-99cb06210fd2671b-b64-stage4.tmp（全55,626,807B/SHA99cb0621）を再送しない。最新pin/原因/再開条件はローカル `data/device-setup/reports/venue-pc-20260930/work-production-fast-PC-20261110/root-continuation-20261110.json`。source更新再実行・追加モデル比較はしない。今回の保存作業はPCのみ。
 
 1. 済：独立監査2回（`4552ea1`、`4552ea1..e12e155`）の指摘を `61ad481`〜`1134404` で反映。
 2. 済：4a（3節）。起動はスマホで `bash scripts/phone_serve.sh 127.0.0.1`、PCから `ssh -L 8000:127.0.0.1:8000` で投入した。
