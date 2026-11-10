@@ -2,6 +2,8 @@
 
 最終更新: 2026-11-10 Claude。本人依頼（Work使用量枯渇時にChat GPT-6 Extra Highへ切替、合理性の点検、実機反映・PR管理の全権限）を実施。サーバ：Workの利用制限返答・途中で切れた最終返答・送信前の操作不能でChatへ自動切替（経路はdeck行に保存、結果不明・判読/照合不合格・録音段は切替えない）。グラス：準備10秒期限切れ（撮影要求前）でセッション全体が止まる欠陥を修正。PC：`py -3.12 -B -X utf8 -m pytest -q tests` → 2557 passed/4 skipped、`py -3.12 -B -X utf8 -m ruff check .` → All checks passed!、`gradlew --no-daemon test testDebugUnitTest assembleDebug` → BUILD SUCCESSFUL・861件/失敗0（PageChangeLumaTestはPython全体と並行実行した1回だけ失敗、単独と再実行は通過）。独立レビューの指摘4件を反映。
 Runs on: 会場phone AP＋glasses。phone ZY22（192.168.0.5:38329）へサーバ反映済（API再起動のみ、browser26460/watch11998/X11 26297維持、backup `~/rokid-backups/pre-031d85d-20261110T125533Z` ほか同日分）。実効設定：chatgpt-work／effort xhigh（試験残りのhighを訂正）／speed standard（試験用。本番準備時にfastへ）。グラス1904…へvc54/0.43.2導入済（署名906307…、権限・保存69files/257,911KB保持、消灯のまま）。実ブラウザで入力・送信なしに確認：Chatボタンでのみ Work解除、Chat入力欄19.9秒、GPT-6＋Power「Extra High（4/5）」を読み戻し、Workへ復元、guard idle。未確認：実際の制限文言、切替後のChat解答、修正後の撮影の実機挙動、光学/全頁/品質gate/長時間/会場全経路。GL53の転送済みstageはvc54で置換済みのため使わない。
+送信量の追記（11/10、送信側セッション、PCのみ・端末未反映・GPT送信0）: PC上の実写全数を本番と同じ回転270度で測定し、Chat冊子に添付前の枚数検査を追加（APP 0.71.0 / API 1.44.0）。40枚でWork PNG 575MB・7通、原JPEG 238MB・3通、Chat 172〜216MB・40〜80ファイル。Workの既定はPNGのまま（原JPEGの回転270度と画素照合が実写で通るかは端末のWork 1回で決まる）。9/15の結合案は画素密度の計算で不採用。見開き分割は高さ4032を残すため、計画③の紙面切出しが要る。数値・未確認は `docs/requirements-audit.md` の枚数制限の行、原表は `data/device-setup/reports/delivery-size-20261110/`。
+Runs on: PC（`py -3.12 -B -X utf8 -m pytest -q tests`、`ruff check .`）。スマホのサーバにこの検査は未反映。
 
 ## 0. 読み方（前提と資料に引きずられないため）
 

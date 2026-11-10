@@ -789,7 +789,7 @@ class _FakeClient:
         self.last_image_attached = attached
 
     def complete_json(self, *, system, prompt, image=None, images=None, audio=None,
-                      chat_key=None, files=None, expect=None, booklet=False):
+                      chat_key=None, files=None, expect=None, booklet=False, upload_names=None):
         self.seen = {
             "expect": expect,
             "system": system,
@@ -1814,6 +1814,130 @@ def test_booklet_uses_ordered_receipts_then_one_whole_answer(monkeypatch, tmp_pa
     assert transfer["pages"] == [f["name"] for f in files]
     assert len(transfer["completed"]) == 4 and transfer["final"] == reply["batch_id"]
     assert transfer["pending"] is None and _guard_state(tmp_path) == "idle"
+
+
+def _counted_booklet(client, page, files, key="session:batch"):
+    """As the Chat solver sends it: the names are known before anything is attached."""
+    return client._ask_with_retries(_OneTabContext(page), "Answer EVERY question", [],
+                                    chat_key=key, files=lambda: iter(files), expect=("questions",),
+                                    booklet=True, upload_names=lambda: [f["name"] for f in files])
+
+
+def _uploaded(tmp_path):
+    path = tmp_path / "browser-state" / "uploads.json"
+    return sum(count for _, count in json.loads(path.read_text(encoding="utf-8"))["uploads"]) if path.exists() else 0
+
+
+def test_a_booklet_over_the_upload_window_stops_before_anything_is_attached(monkeypatch, tmp_path):
+    """80 files per 3 hours on paid plans (help.openai.com, read 2026-11-10)."""
+    _fast(monkeypatch)
+    page = _BatchPage()
+    with pytest.raises(chatgpt_web.ChatGptWebUploadBudget) as refused:
+        _counted_booklet(chatgpt_web.ChatGptWebClient(), page, _batch_files(80, audio=True))
+    assert (refused.value.files, refused.value.room) == (81, 80)
+    assert not page.uploads and not _sends(page) and not _clicks(page, chatgpt_web.NEW_CHAT_SEL)
+    assert _uploaded(tmp_path) == 0 and _guard_state(tmp_path) == "idle"
+    assert json.loads(_counted_booklet(chatgpt_web.ChatGptWebClient(), page, _batch_files(80)))["questions"]
+    assert _uploaded(tmp_path) == 80
+
+
+def test_the_upload_window_can_be_changed_or_disabled(monkeypatch):
+    _fast(monkeypatch)
+    monkeypatch.setenv("ROKID_CHATGPT_UPLOAD_WINDOW_FILES", "20")
+    page = _BatchPage()
+    with pytest.raises(chatgpt_web.ChatGptWebUploadBudget):
+        _counted_booklet(chatgpt_web.ChatGptWebClient(), page, _batch_files(21))
+    assert not page.uploads
+    monkeypatch.setenv("ROKID_CHATGPT_UPLOAD_WINDOW_FILES", "0")
+    assert json.loads(_counted_booklet(chatgpt_web.ChatGptWebClient(), page, _batch_files(81)))["questions"]
+
+
+def test_files_attached_in_the_last_three_hours_count_against_the_next_booklet(monkeypatch, tmp_path):
+    _fast(monkeypatch)
+    first = _batch_files()
+    assert json.loads(_counted_booklet(chatgpt_web.ChatGptWebClient(), _BatchPage(), first, key="session:1"))["questions"]
+    assert _uploaded(tmp_path) == 47
+    page, second = _BatchPage(), _batch_files(34)
+    with pytest.raises(chatgpt_web.ChatGptWebUploadBudget) as refused:
+        _counted_booklet(chatgpt_web.ChatGptWebClient(), page, second, key="session:2")
+    assert (refused.value.files, refused.value.room) == (34, 33) and not page.uploads
+    # Entries older than the window no longer count.
+    ledger = tmp_path / "browser-state" / "uploads.json"
+    aged = [[stamp - chatgpt_web.UPLOAD_WINDOW_S - 1, count]
+            for stamp, count in json.loads(ledger.read_text(encoding="utf-8"))["uploads"]]
+    ledger.write_text(json.dumps({"uploads": aged}), encoding="utf-8")
+    assert json.loads(_counted_booklet(chatgpt_web.ChatGptWebClient(), page, second, key="session:2"))["questions"]
+    assert _uploaded(tmp_path) == 34
+
+
+def test_a_resumed_booklet_needs_room_only_for_the_files_not_yet_acknowledged(monkeypatch, tmp_path):
+    _fast(monkeypatch)
+    monkeypatch.setenv("ROKID_CHATGPT_UPLOAD_WINDOW_FILES", "1000")
+    files = _batch_files()
+    page = _BatchPage(thumbnail_appears=[True] + [False] * 10)
+    with pytest.raises(chatgpt_web.ChatGptWebAttachmentFailed):
+        _counted_booklet(chatgpt_web.ChatGptWebClient(), page, files)
+    # 20 acknowledged; every unconfirmed attempt of the next 20 is counted too,
+    # because a failed upload may count against the plan.
+    used = _uploaded(tmp_path)
+    assert used >= 40 and used % 20 == 0
+    page.thumbnail_script = None
+    page.thumbnail_appears = True
+    page.uploads.clear()
+    monkeypatch.setenv("ROKID_CHATGPT_UPLOAD_WINDOW_FILES", str(used + 26))
+    with pytest.raises(chatgpt_web.ChatGptWebUploadBudget) as refused:
+        _counted_booklet(chatgpt_web.ChatGptWebClient(), page, files)
+    assert (refused.value.files, refused.value.room) == (27, 26) and not page.uploads
+    monkeypatch.setenv("ROKID_CHATGPT_UPLOAD_WINDOW_FILES", str(used + 27))
+    assert json.loads(_counted_booklet(chatgpt_web.ChatGptWebClient(), page, files))["questions"]
+    assert [f["name"] for payload in page.uploads for f in payload] == [f["name"] for f in files[20:]]
+
+
+def test_an_answered_booklet_is_read_back_whatever_the_window_holds(monkeypatch, tmp_path):
+    _fast(monkeypatch)
+    page, files = _BatchPage(), _batch_files(3)
+    first = _counted_booklet(chatgpt_web.ChatGptWebClient(), page, files)
+    monkeypatch.setenv("ROKID_CHATGPT_UPLOAD_WINDOW_FILES", "1")
+    assert _counted_booklet(chatgpt_web.ChatGptWebClient(), page, files) == first
+    assert _uploaded(tmp_path) == 3 and len(_sends(page)) == 1
+
+
+def test_an_unreadable_upload_ledger_counts_as_empty(monkeypatch, tmp_path):
+    """No PC is at the venue to repair it; the plan itself still refuses a real excess."""
+    _fast(monkeypatch)
+    (tmp_path / "browser-state").mkdir(exist_ok=True)
+    (tmp_path / "browser-state" / "uploads.json").write_text("{not json", encoding="utf-8")
+    assert json.loads(_counted_booklet(chatgpt_web.ChatGptWebClient(), _BatchPage(), _batch_files(3)))["questions"]
+    assert _uploaded(tmp_path) == 3
+
+
+def test_the_chat_solver_names_every_attachment_before_sending(tmp_path):
+    from PIL import Image
+
+    from app.solvers.base import Question
+
+    seen = {}
+
+    class Client:
+        model = "chatgpt-web"
+        last_image_attached = True
+
+        def complete_json(self, **options):
+            seen.update(options)
+            return {"questions": [{"label": "問1", "answer": "4", "status": "ready", "pages": [1]}]}
+
+    pages = []
+    for number in (1, 2):
+        path = tmp_path / f"p{number}.png"
+        Image.new("RGB", (40, 60), "white").save(path)
+        pages.append({"page_number": number, "image_path": str(path)})
+    audio = tmp_path / "original.wav"
+    audio.write_bytes(b"RIFF original audio")
+    question = Question(chat_key="session:3", document_pages=pages, question_id="booklet",
+                        audio_path=str(audio), answer_only=True)
+    chatgpt_web.ChatGptWebSolver(client=Client()).answer_all(question=question)
+    assert seen["upload_names"]() == [f["name"] for f in seen["files"]()]
+    assert seen["upload_names"]() == ["page001.jpg", "page002.jpg", "original.wav"]
 
 
 def test_booklet_limits_batch_bytes_and_waits_for_ack_before_reading_the_next_batch(monkeypatch):

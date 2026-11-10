@@ -94,15 +94,40 @@ def _page_images(pages: list[dict]):
         yield f"{number} L", left
 
 
-def source_images(pages: list[dict]):
-    """One full-resolution colour JPEG per page; no booklet-size limit."""
+def _ordered(pages: list[dict]) -> list[dict]:
     numbers = [p["page_number"] for p in pages]
     if any(type(n) is not int or n < 1 for n in numbers) or len(set(numbers)) != len(numbers):
         raise ValueError("page numbers must be unique positive integers")
-    selected = sorted(pages, key=lambda page: page["page_number"])
-    if not selected:
+    if not pages:
         raise ValueError("no source pages")
-    for label, photo in _page_images(selected):
+    return sorted(pages, key=lambda page: page["page_number"])
+
+
+def _name(label: str) -> str:
+    return "page" + label.replace(" ", "") + ".jpg"
+
+
+def source_image_names(pages: list[dict]) -> list[str]:
+    """The names source_images will yield, without encoding a JPEG.
+
+    A spread is two files, so the count is known only after each photo is
+    decoded; the caller compares it with the plan's upload window before
+    anything is attached.
+
+    ponytail: every page is decoded a second time (0.24 s per photo on the PC,
+    2026-11-10; the phone is unmeasured). Skip the pass when two files per page
+    already fit the window, if the phone shows the delay matters.
+    """
+    names = []
+    for label, photo in _page_images(_ordered(pages)):
+        photo.close()
+        names.append(_name(label))
+    return names
+
+
+def source_images(pages: list[dict]):
+    """One full-resolution colour JPEG per page; no booklet-size limit."""
+    for label, photo in _page_images(_ordered(pages)):
         with photo:
             for quality in JPEG_QUALITIES:
                 output = io.BytesIO()
@@ -114,7 +139,7 @@ def source_images(pages: list[dict]):
                     break
             if len(data) > MAX_IMAGE_BYTES:
                 raise ValueError(f"Page {label} image attachment exceeds 20MB")
-        yield _payload("page" + label.replace(" ", "") + ".jpg", "image/jpeg", data)
+        yield _payload(_name(label), "image/jpeg", data)
 
 
 def source_bundle(pages: list[dict]) -> list[dict]:

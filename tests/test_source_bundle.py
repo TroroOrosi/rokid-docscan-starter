@@ -154,3 +154,15 @@ def test_split_pages_keep_their_order_and_page_width(tmp_path, photos):
     assert [f["name"][4:-4] for f in files] == [
         f"{n:03d}{side}" for n in range(1, photos + 1) for side in (("R", "L") if n % 3 else ("",))]
     assert all(Image.open(io.BytesIO(f["buffer"])).width <= 800 for f in files)
+
+
+def test_attachment_names_are_known_without_encoding_a_jpeg(tmp_path, monkeypatch):
+    """The Chat route counts its files against the upload window before attaching any."""
+    from app.source_bundle import source_image_names
+
+    spread, single = spread_at(tmp_path), spread_at(tmp_path, (800, 1200), None)
+    pages = [{"page_number": 2, "image_path": str(single)}, {"page_number": 1, "image_path": str(spread)}]
+    expected = [f["name"] for f in source_bundle(pages)]
+    assert expected == ["page001R.jpg", "page001L.jpg", "page002.jpg"]
+    monkeypatch.setattr(Image.Image, "save", lambda *a, **k: pytest.fail("counting must not encode"))
+    assert source_image_names(pages) == expected

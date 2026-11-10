@@ -264,7 +264,8 @@ from __future__ import annotations
 # 0.69.5: default production Work answers to Fast while trials explicitly use Standard.
 # 0.70.0: a Work usage limit or unusable Work control hands the same booklet to Chat.
 # 0.70.1: Chat leaves Work by its Chat button and selects the Extra High power position, as read on the phone.
-APP_VERSION = "0.70.1"
+# 0.71.0: the Chat booklet checks its file count against the 3-hour upload window before attaching.
+APP_VERSION = "0.71.0"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.
@@ -392,7 +393,8 @@ APP_VERSION = "0.70.1"
 # 1.42.2: keep unsupported table/matrix source intact and mark it for review.
 # 1.42.3: new Work answers default to Fast without replacing sealed job settings.
 # 1.43.0: answer-bundle reports a route change as pending; ROKID_SOLVER_FALLBACKS orders booklet routes.
-API_VERSION = "1.43.0"
+# 1.44.0: answer-bundle issue for a booklet over the upload window; ROKID_CHATGPT_UPLOAD_WINDOW_FILES.
+API_VERSION = "1.44.0"
 
 # Matching algorithm identity. Bump when thresholds or hashing change so a
 # re-index/eval is triggered. Mirrors thresholds in app/matching.py.

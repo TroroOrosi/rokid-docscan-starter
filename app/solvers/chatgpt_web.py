@@ -160,6 +160,12 @@ CHATS_KEPT = 8
 # Technical memory/transport budget per acknowledged message, not a booklet
 # size limit or a claim about the service's account-specific upload allowance.
 TRANSFER_BATCH_BYTES = 96 * 1024 * 1024
+# The plan's rolling upload window. help.openai.com (File Uploads FAQ, read
+# 2026-11-10): up to 80 files per 3 hours on paid plans, possibly fewer at peak
+# hours, and a failed upload may count. Every file this server attaches is
+# recorded here; uploads made elsewhere on the account are not visible to it.
+UPLOADS_FILE = "uploads.json"
+UPLOAD_WINDOW_S = 3 * 3600
 ATTEMPTS = int(os.environ.get("ROKID_CHATGPT_ATTEMPTS", "3"))
 RETRY_BACKOFF_S = float(os.environ.get("ROKID_CHATGPT_RETRY_S", "5"))
 # A throttled account is refused in the message body, not by an exception, so a
@@ -211,6 +217,49 @@ class ChatGptWebBrowserUnavailable(ChatGptWebError):
 
 class ChatGptWebAttachmentFailed(ChatGptWebError):
     """A source attachment is unconfirmed. Nothing was sent."""
+
+
+class ChatGptWebUploadBudget(ChatGptWebError):
+    """The booklet needs more files than the upload window has left. Nothing was sent.
+
+    Its own class because waiting a few minutes does not help and no retry is
+    worth its quota: a booklet that stops halfway has spent the window too.
+    """
+
+    def __init__(self, files: int, room: int):
+        super().__init__(f"{files} files exceed the {room} left in the upload window; nothing sent")
+        self.files, self.room = files, room
+
+
+def upload_window_files() -> int:
+    """Files accepted per UPLOAD_WINDOW_S; 0 disables the pre-send check."""
+    return int(os.environ.get("ROKID_CHATGPT_UPLOAD_WINDOW_FILES") or 80)
+
+
+def _recent_uploads(directory: Path) -> list[list]:
+    """[epoch seconds, files] inside the window. An unreadable record counts as none:
+    no PC is at the venue to repair it, and the plan still refuses a real excess."""
+    try:
+        entries = json.loads((directory / UPLOADS_FILE).read_text(encoding="utf-8"))["uploads"]
+        oldest = time.time() - UPLOAD_WINDOW_S
+        return [[float(stamp), int(count)] for stamp, count in entries if float(stamp) > oldest]
+    except (OSError, ValueError, TypeError, KeyError):
+        return []
+
+
+def _record_uploads(directory: Path, count: int) -> None:
+    """Count files when their upload starts, so an unconfirmed one is counted too."""
+    record = {"uploads": [*_recent_uploads(directory), [time.time(), count]]}
+    try:
+        fd, temporary = tempfile.mkstemp(prefix="uploads-", suffix=".tmp", dir=directory)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as target:
+                json.dump(record, target)
+            os.replace(temporary, directory / UPLOADS_FILE)
+        finally:
+            Path(temporary).unlink(missing_ok=True)
+    except OSError:
+        pass  # A lost count must not stop a send the plan would accept.
 
 
 class ChatGptWebModelMismatch(ChatGptWebError):
@@ -1139,6 +1188,7 @@ class ChatGptWebClient:
         stage_audio_digest: str | None = None,
         stage_question_ids: list[str] | None = None,
         before_submit: Callable[[], None] | None = None,
+        upload_names: Callable[[], list[str]] | None = None,
     ) -> str:
         if not chatgpt_send_enabled():
             raise ChatGptWebSendNotAuthorized("ChatGPT send is not authorized")
@@ -1174,6 +1224,7 @@ class ChatGptWebClient:
                 stage_audio_digest=stage_audio_digest,
                 stage_question_ids=stage_question_ids,
                 before_submit=before_submit,
+                upload_names=upload_names,
             )
         finally:
             browser.close()
@@ -1181,7 +1232,7 @@ class ChatGptWebClient:
     def _ask_with_retries(self, context, text: str, pages: list[bytes], *,
                           audio=None, chat_key=None, files=None, expect=None, booklet=False,
                           booklet_stage="single", stage_audio_digest=None, stage_question_ids=None,
-                          before_submit=None) -> str:
+                          before_submit=None, upload_names=None) -> str:
         """Serialize all tab interaction; a restart cannot erase an uncertain send."""
         from .cdp import CdpError  # noqa: PLC0415
 
@@ -1192,7 +1243,7 @@ class ChatGptWebClient:
                     return self._booklet_locked(context, text, guard=guard, files=files,
                                                 chat_key=chat_key, expect=expect, stage=booklet_stage,
                                                 audio_digest=stage_audio_digest, question_ids=stage_question_ids,
-                                                before_submit=before_submit)
+                                                before_submit=before_submit, upload_names=upload_names)
                 try:
                     guard.require_clear()
                 except BrowserGuardError as error:
@@ -1309,7 +1360,8 @@ class ChatGptWebClient:
         self._unsaved = False
 
     def _booklet_locked(self, context, text: str, *, guard, files, chat_key, expect,
-                        stage="single", audio_digest=None, question_ids=None, before_submit=None) -> str:
+                        stage="single", audio_digest=None, question_ids=None, before_submit=None,
+                        upload_names=None) -> str:
         """Bound each message by bytes/count; only a matching receipt advances."""
         if not chat_key:
             raise ChatGptWebError("a booklet needs a persistent session chat key; nothing sent")
@@ -1353,6 +1405,15 @@ class ChatGptWebClient:
                 raise ChatGptWebUncertain("the final reply could not be read; nothing is sent again")
             self.last_image_attached = True
             return reply
+        limit = upload_window_files()
+        if upload_names is not None and limit > 0:
+            # After every read-only recovery above and before anything is attached:
+            # a booklet refused halfway has spent the window and still has no answer.
+            done = set(self._transfer["pages"])
+            needed = sum(name not in done for name in upload_names())
+            room = max(0, limit - sum(count for _, count in _recent_uploads(guard.directory)))
+            if needed > room:
+                raise ChatGptWebUploadBudget(needed, room)
         source = iter(files() if callable(files) else files or [])
         first = next(source, None)
         if first is None:
@@ -1609,6 +1670,9 @@ class ChatGptWebClient:
                 pending_audio = (
                     audio if audio and _digest(audio[1]) not in self._attached_in_chat else None
                 )
+                starting = len(pending) + bool(pending_audio) + len(pending_files)
+                if starting:
+                    _record_uploads(guard.directory, starting)
                 attached = (
                     self._attach_images(
                         page, pending, audio=pending_audio, poll_s=POLL_S,
@@ -1746,6 +1810,7 @@ class ChatGptWebClient:
         stage_audio_digest: str | None = None,
         stage_question_ids: list[str] | None = None,
         before_submit: Callable[[], None] | None = None,
+        upload_names: Callable[[], list[str]] | None = None,
     ) -> dict:
         return extract_json(
             self.complete(
@@ -1762,6 +1827,7 @@ class ChatGptWebClient:
                 stage_audio_digest=stage_audio_digest,
                 stage_question_ids=stage_question_ids,
                 before_submit=before_submit,
+                upload_names=upload_names,
             )
         )
 
@@ -1949,7 +2015,7 @@ class ChatGptWebSolver(LLMSolver):
                   expect: tuple[str, ...] = ("answer",), booklet_key: str | None = None) -> dict:
         """Send original evidence; document sessions retain the whole booklet."""
         if question.document_pages:
-            from ..source_bundle import source_bundle, source_images  # noqa: PLC0415
+            from ..source_bundle import source_bundle, source_image_names, source_images  # noqa: PLC0415
 
             stage = question.booklet_stage
             audio = None if stage == "reading" else _read_audio(question)
@@ -1961,6 +2027,10 @@ class ChatGptWebSolver(LLMSolver):
                                source_images(question.document_pages) if task in (_ALL_TASK, _READING_TASK)
                                else iter(source_bundle(question.document_pages)))
                 return itertools.chain(attachments, [audio_payload(*audio)] if audio else [])
+
+            def upload_names():
+                images = [] if stage == "listening" else source_image_names(question.document_pages)
+                return images + ([audio[0]] if audio else [])
 
             instructions = (
                 "Read the attached original booklet images and recording directly. "
@@ -1983,7 +2053,7 @@ class ChatGptWebSolver(LLMSolver):
             return client.complete_json(system=system, prompt=prompt, files=files,
                                          chat_key=booklet_key or _booklet_chat_key(question, audio),
                                         expect=expect, booklet=task == _ALL_TASK or stage != "single",
-                                        **stage_options)
+                                        upload_names=upload_names, **stage_options)
         pages = _read_images(question)
         audio = _read_audio(question)
         if pages or audio:

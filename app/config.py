@@ -106,6 +106,11 @@ ROKID_EXPLAINER = os.environ.get("ROKID_EXPLAINER", "local")
 #   ROKID_CHATGPT_UPLOAD_S            default 20 (a confirmed upload took 0.11s)
 #   ROKID_CHATGPT_ATTEMPTS            default 3 preparation tries before a send;
 #                                     never a second send
+#   ROKID_CHATGPT_UPLOAD_WINDOW_FILES default 80 files per rolling 3 hours (the
+#                                     paid-plan figure, help.openai.com, read
+#                                     2026-11-10). A Chat booklet needing more
+#                                     than what is left is refused before any
+#                                     attachment. 0 disables the check
 #   ROKID_CHATGPT_RETRY_S             default 5, multiplied by the attempt
 #   ROKID_CHATGPT_TIMEOUT_S           default 9000 (the session; never an analysis budget)
 #   ROKID_CHATGPT_REPLY_START_S       default 120 (no reply turn at all = failed send)

@@ -111,6 +111,30 @@ def test_every_route_limited_ends_plainly_without_another_send(client, monkeypat
     assert calls == {"primary": 1, "backup": 1}
 
 
+def test_a_booklet_over_the_upload_window_fails_once_and_shows_its_numbers(client, monkeypatch):
+    """Waiting 150 seconds does not reopen a three-hour window: one refusal, no send."""
+    from app.solvers.chatgpt_web import ChatGptWebRateLimit, ChatGptWebUploadBudget
+
+    _, session_id = _session_with(client, ["問1 2+2を求めよ。"])
+    calls = _routes(monkeypatch, lambda n: _raise(ChatGptWebRateLimit("usage limit")),
+                    lambda n: _raise(ChatGptWebUploadBudget(81, 33)))
+    issue = "添付81枚が3時間の利用枠の残り33枚を超えます。送信していません"
+    bundle = _background_finalize_and_wait(client, session_id, lambda items: items[0]["issue"] == issue)
+    assert bundle["items"][0]["status"] == "failed"
+    client.get(f"/v1/exam-sessions/{session_id}/answer-bundle")  # A later poll starts nothing.
+    assert calls == {"primary": 1, "backup": 1}
+
+
+def test_an_upload_window_refusal_on_the_primary_does_not_move_the_same_files_elsewhere(client, monkeypatch):
+    from app.solvers.chatgpt_web import ChatGptWebUploadBudget
+
+    _, session_id = _session_with(client, ["問1 2+2を求めよ。"])
+    calls = _routes(monkeypatch, lambda n: _raise(ChatGptWebUploadBudget(44, 0)),
+                    lambda n: pytest.fail("the next browser route shares the account's window"))
+    _background_finalize_and_wait(client, session_id, lambda items: items[0]["status"] == "failed")
+    assert calls == {"primary": 1, "backup": 0}
+
+
 def test_an_unknown_send_outcome_never_moves_to_another_route(client, monkeypatch):
     """Another route would duplicate a booklet that may already be answered."""
     from app.solvers.chatgpt_web import ChatGptWebUncertain

@@ -89,6 +89,7 @@ from .solvers.chatgpt_web import (
     ChatGptWebAttachmentFailed, ChatGptWebAuthenticationRequired,
     ChatGptWebBlocked, ChatGptWebBrowserUnavailable, ChatGptWebBusy,
     ChatGptWebChatLost, ChatGptWebError, ChatGptWebModelMismatch, ChatGptWebRateLimit,
+    ChatGptWebUploadBudget,
     ChatGptWebReplyIncomplete,
     ChatGptWebSendNotAuthorized, ChatGptWebUncertain, chatgpt_send_enabled,
 )
@@ -2990,6 +2991,7 @@ _FAILURE_CODES = (
     (ChatGptWebAuthenticationRequired, "authentication_failed"),
     (ChatGptWebBrowserUnavailable, "browser_unavailable"),
     (ChatGptWebAttachmentFailed, "attachment_failed"),
+    (ChatGptWebUploadBudget, "upload_budget"),
     (ChatGptWebModelMismatch, "model_mismatch"),
     (ChatGptWebUncertain, "browser_outcome_unknown"),
     (ChatGptWebChatLost, "chat_lost"),
@@ -3123,6 +3125,9 @@ def _record_solve_failure(conn, row, error: Exception, *, commit: bool = True,
         "not_sent" if _nothing_sent(error) else "solver_failed")}
     if isinstance(error, WorkBrowserUncertain):
         metadata["solve_failure"]["work_job_id"] = error.work_job_id
+    if isinstance(error, ChatGptWebUploadBudget):
+        # Local counts, not provider text: the wearer sees how far over the booklet is.
+        metadata["solve_failure"].update(files=error.files, room=error.room)
     if route and _switches_route(error):
         # ``route`` is passed only while a later route may take over.
         closed = sorted(_closed_routes([current]) | {route})
@@ -3176,6 +3181,8 @@ def _answer_bundle_item(conn, group: dict, row) -> dict:
                  else "返答が途中で終わったため別の経路へ切り替えます" if code == "reply_incomplete" and retrying
                  else "返答が途中で終わりました。資料は保持しています" if code == "reply_incomplete"
                  else "ChatGPTの利用制限です。解除後に再開してください" if code == "rate_limited"
+                 else (f"添付{(failure or inherited).get('files')}枚が3時間の利用枠の残り"
+                       f"{(failure or inherited).get('room')}枚を超えます。送信していません") if code == "upload_budget"
                  else _RETRYING_ISSUES[code] if retrying
                  else _GAVE_UP_ISSUES[code] if code in _GAVE_UP_ISSUES
                  else "この解答番号の答えが返答にありません" if code == "answer_missing"
