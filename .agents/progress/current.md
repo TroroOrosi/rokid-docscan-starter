@@ -1,7 +1,7 @@
 # 再開入口：次のセッションはここだけ読めば始められる
 
-最終更新: 2026-11-10 利用者の「一旦進捗状況をローカル、リポジトリ共に保存して」により進捗を保存。コードba0b6f1（本番Fast／試験Standard）はpush済。PC既存記録：`py -3.12 -B -X utf8 -m pytest -q tests` → exit0・2525 passed/4 skipped、`py -3.12 -B -X utf8 -m ruff check .` → All checks passed!、独立R0/O0。`gradlew.bat --no-daemon --offline test testDebugUnitTest assembleDebug` → BUILD SUCCESSFUL・859 tests/失敗0、216source SHAとAPK53一致。実機受入の完了ではない。
-Runs on: 会場phone AP＋glasses。ba0b6f1のphone9source更新actualはhostexit0・独立R0/O0、API down/up各1・watch/browser/X11/envStandard保持・GPT/glasses0。APK53全データ転送/hash/filefsync後、保存確定待ちで導入0。光学/全頁/品質gate/全設問/表行列組版/長時間/会場全経路は未了。
+最終更新: 2026-11-10 Claude。本人依頼（Work使用量枯渇時にChat GPT-6 Extra Highへ切替、合理性の点検、実機反映・PR管理の全権限）を実施。サーバ：Workの利用制限返答・途中で切れた最終返答・送信前の操作不能でChatへ自動切替（経路はdeck行に保存、結果不明・判読/照合不合格・録音段は切替えない）。グラス：準備10秒期限切れ（撮影要求前）でセッション全体が止まる欠陥を修正。PC：`py -3.12 -B -X utf8 -m pytest -q tests` → 2557 passed/4 skipped、`py -3.12 -B -X utf8 -m ruff check .` → All checks passed!、`gradlew --no-daemon test testDebugUnitTest assembleDebug` → BUILD SUCCESSFUL・861件/失敗0（PageChangeLumaTestはPython全体と並行実行した1回だけ失敗、単独と再実行は通過）。独立レビューの指摘4件を反映。
+Runs on: 会場phone AP＋glasses。phone ZY22（192.168.0.5:38329）へサーバ反映済（API再起動のみ、browser26460/watch11998/X11 26297維持、backup `~/rokid-backups/pre-031d85d-20261110T125533Z` ほか同日分）。実効設定：chatgpt-work／effort xhigh（試験残りのhighを訂正）／speed standard（試験用。本番準備時にfastへ）。グラス1904…へvc54/0.43.2導入済（署名906307…、権限・保存69files/257,911KB保持、消灯のまま）。実ブラウザで入力・送信なしに確認：Chatボタンでのみ Work解除、Chat入力欄19.9秒、GPT-6＋Power「Extra High（4/5）」を読み戻し、Workへ復元、guard idle。未確認：実際の制限文言、切替後のChat解答、修正後の撮影の実機挙動、光学/全頁/品質gate/長時間/会場全経路。GL53の転送済みstageはvc54で置換済みのため使わない。
 
 ## 0. 読み方（前提と資料に引きずられないため）
 
@@ -90,7 +90,7 @@ Runs on: 会場phone AP＋glasses。ba0b6f1のphone9source更新actualはhostexi
   → 旧サーバ停止 → `nohup bash scripts/phone_serve.sh 127.0.0.1 > data/server-<commit>.log 2>&1 &`。PCからは `ssh -f -N -L 8000:127.0.0.1:8000 ...`（ssh `-i ~/.ssh/f51f_key -p 8022 u0_a26@192.168.0.6`）。
   ベンチの鍵は `ROKID_API_KEY` をスマホの env から読んで渡す（画面に出さない）。
 
-次の実行: 再開時に接続復帰後、phone ZY22をreadonly確認し、独立R0/O0のGL53-stage-finalizer（f438d346／結合0f9ce1cc）を新しいactual-v2記録で1回実行→quiet/既存file全件保持付きGL53導入。直前devices0・旧TCP拒否10061・mDNS0でfinalizerはdispatch0、導入0。転送済GL53-99cb06210fd2671b-b64-stage4.tmp（全55,626,807B/SHA99cb0621）を再送しない。最新pin/原因/再開条件はローカル `data/device-setup/reports/venue-pc-20260930/work-production-fast-PC-20261110/root-continuation-20261110.json`。source更新再実行・追加モデル比較はしない。今回の保存作業はPCのみ。
+次の実行: (1) Runs on: glasses＋phone AP。B5実紙を着席で数頁撮り、準備期限切れで「静止すると撮影します」が出て撮影が続くこと、写真がピント・明るさ・紙の欠けの点で読めることを確認する（撮影画像の可否検査は未実装：下記）。(2) Runs on: 会場経路。正解のある冊子を1通で送り全答案の受信まで通す。現既定（Work・Sol・xhigh）の時間実測は東大数学20頁PDF描画の1回（556.6秒・13/13）のみで、20〜40頁・写真入力・転送込みは未測定。(3) PC実装の候補（未着手）：撮影画像のぼけ・暗さ・紙欠けを確定前に検査する関門、確認画像の表示失敗で無表示停止する経路、グラス内の古い撮影データ整理（現在258MB、削除機構なし）。ChatのメニューにはExtra Highの位置でも「Locked, opens access options」「Usage limit reached」が表示される（Pro段のものと見られるが未確認）。追加モデル比較はしない。
 
 1. 済：独立監査2回（`4552ea1`、`4552ea1..e12e155`）の指摘を `61ad481`〜`1134404` で反映。
 2. 済：4a（3節）。起動はスマホで `bash scripts/phone_serve.sh 127.0.0.1`、PCから `ssh -L 8000:127.0.0.1:8000` で投入した。

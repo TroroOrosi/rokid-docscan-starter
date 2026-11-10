@@ -263,7 +263,8 @@ from __future__ import annotations
 # 0.69.4: retain unsupported table and matrix expressions before display conversion.
 # 0.69.5: default production Work answers to Fast while trials explicitly use Standard.
 # 0.70.0: a Work usage limit or unusable Work control hands the same booklet to Chat.
-APP_VERSION = "0.70.0"
+# 0.70.1: Chat leaves Work by its Chat button and selects the Extra High power position, as read on the phone.
+APP_VERSION = "0.70.1"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.

@@ -617,10 +617,14 @@ def _wait_for_reply(page, batch_id, *, expect, on_chat_url=None, timeout_s=None,
             if reply and gone >= chat.SETTLE_POLLS:
                 if chat._limited(reply):
                     raise chat.ChatGptWebRateLimit("the recorded Work task received a usage limit")
-                if not chat._complete_json(reply, expect):
-                    # Ended without an answer. A complete JSON for another batch stays unknown.
+                if chat._complete_json(reply, expect):
+                    # A complete JSON for another batch stays unknown.
+                    raise chat.ChatGptWebError("Work final did not contain this batch's complete JSON")
+                # Another route will take the booklet, so a pause must not pass for an
+                # end: three settle periods with the final message and no generation.
+                # Generation resuming resets the count; a late complete answer returns above.
+                if gone >= 3 * chat.SETTLE_POLLS:
                     raise chat.ChatGptWebReplyIncomplete("the recorded Work task ended without its answer")
-                raise chat.ChatGptWebError("Work final did not contain this batch's complete JSON")
         if not state["started"] and now() - started > chat.REPLY_START_S:
             raise chat.ChatGptWebError("the recorded Work task did not start; no automatic resend")
         sleep(chat.POLL_S if poll_s is None else poll_s)

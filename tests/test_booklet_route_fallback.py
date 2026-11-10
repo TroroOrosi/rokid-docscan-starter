@@ -181,18 +181,46 @@ def test_work_falls_back_to_chat_by_default_and_other_primaries_have_no_fallback
     assert main._booklet_routes() == ["chatgpt-work", "chatgpt-web"]
     monkeypatch.setenv("ROKID_SOLVER_FALLBACKS", "")
     assert main._booklet_routes() == ["chatgpt-work"]
+    # Work's sealed jobs and commit guard exist only for the primary.
+    monkeypatch.setenv("ROKID_SOLVER", "chatgpt-web")
+    monkeypatch.setenv("ROKID_SOLVER_FALLBACKS", "chatgpt-work")
+    assert main._booklet_routes() == ["chatgpt-web"]
+
+
+def test_a_saved_stage_pins_its_route_even_after_the_fallback_is_disabled(client, monkeypatch):
+    """The recording must go to the chat that holds the images, whatever the configuration says now."""
+    from app import main
+    from app.solvers.base import SolveResult
+
+    _, session_id = _session_with(client, ["問1 2+2を求めよ。"])
+    client.post(f"/v1/exam-sessions/{session_id}/finalize-reading")
+    monkeypatch.setenv("ROKID_SOLVER", "chatgpt-work")
+    monkeypatch.setenv("ROKID_SOLVER_FALLBACKS", "")
+    conn = main.db.connect()
+    try:
+        row = main._deck_question_rows(conn, session_id)[0]
+        assert main._booklet_route(conn, session_id) == ("chatgpt-work", False)
+        main._save_solution(conn, row, SolveResult(answer="4"), "chatgpt-web")
+        assert main._booklet_route(conn, session_id) == ("chatgpt-web", False)
+        # A damaged record cannot stop a failure from being written.
+        conn.execute("UPDATE questions SET structure_json = ? WHERE id = ?",
+                     ('{"deck": true, "closed_routes": 7}', row["id"]))
+        assert main._closed_routes(main._deck_question_rows(conn, session_id)) == set()
+    finally:
+        conn.close()
 
 
 class _Page:
     """Only what leave_work_mode reads: the Work entry's state, and one toggle."""
 
-    def __init__(self, count, active, *, toggles=True):
+    def __init__(self, count, active, *, toggles=True, lost_clicks=0):
         self.count, self.active, self.toggles, self.clicks = count, active, toggles, 0
+        self.lost_clicks = lost_clicks
 
     def evaluate(self, script):
         if "(true)" in script[-8:] and self.count == 1 and self.active:
             self.clicks += 1
-            self.active = not self.toggles
+            self.active = not self.toggles or self.clicks <= self.lost_clicks
             return {"count": self.count, "active": self.active, "acted": True}
         return {"count": self.count, "active": self.active, "acted": False}
 
@@ -207,6 +235,12 @@ def test_chat_leaves_work_mode_before_preparing_and_never_sends_inside_it(monkey
     active = _Page(1, True)
     chat.leave_work_mode(active, select=True)
     assert active.clicks == 1 and not active.active
+    # Phone, 2026-11-10: a click right after the new-chat navigation was dropped.
+    monkeypatch.setattr(chat, "READY_TIMEOUT_S", 5.0)
+    busy = _Page(1, True, lost_clicks=1)
+    chat.leave_work_mode(busy, select=True)
+    assert busy.clicks == 2 and not busy.active
+    monkeypatch.setattr(chat, "READY_TIMEOUT_S", 0.2)
     # Immediately before sending nothing is clicked: Work still active stops the send.
     with pytest.raises(chat.ChatGptWebModelMismatch):
         chat.leave_work_mode(_Page(1, True), select=False)
@@ -216,8 +250,104 @@ def test_chat_leaves_work_mode_before_preparing_and_never_sends_inside_it(monkey
         chat.leave_work_mode(_Page(2, False), select=True)
 
 
+class _PowerPage:
+    """Chat's Power slider as read on the phone: five labelled positions, one step per key event."""
+
+    LABELS = ["Light", "Medium", "High", "Extra High", "Pro"]
+
+    def __init__(self, value, *, labels=None, count=1, enabled=True, stuck=False):
+        self.labels = self.LABELS if labels is None else labels
+        self.value, self.count, self.enabled, self.stuck, self.steps = value, count, enabled, stuck, 0
+
+    def evaluate(self, script):
+        if self.count != 1:
+            return {"count": self.count}
+        step = 1 if script.endswith("(1)") else -1 if script.endswith("(-1)") else 0
+        if step and self.enabled and 0 <= self.value + step < len(self.labels):
+            self.steps += 1
+            self.value += 0 if self.stuck else step
+        return {"count": 1, "value": self.value, "min": 0, "max": len(self.labels) - 1,
+                "enabled": self.enabled, "label": self.labels[self.value]}
+
+
+def test_chat_moves_its_power_slider_to_extra_high_not_to_the_locked_top_position():
+    """Phone, 2026-11-10: saved at Medium; the maximum is Pro, locked with a usage-limit notice."""
+    from app.solvers import chatgpt_web as chat
+
+    medium = _PowerPage(1)
+    chat._select_extra_high_power(medium)
+    assert (medium.labels[medium.value], medium.steps) == ("Extra High", 2)
+    pro = _PowerPage(4)
+    chat._select_extra_high_power(pro)
+    assert (pro.labels[pro.value], pro.steps) == ("Extra High", 1)
+    already = _PowerPage(3)
+    chat._select_extra_high_power(already)
+    assert already.steps == 0
+    # No Extra High position, or a control that cannot be read or moved: left for the check to refuse.
+    for page in (_PowerPage(1, labels=["Light", "Medium", "High", "Pro"]), _PowerPage(1, count=0),
+                 _PowerPage(1, count=2), _PowerPage(1, enabled=False), _PowerPage(1, stuck=True),
+                 _PowerPage(1, labels=["", "", "", "", ""])):
+        chat._select_extra_high_power(page)
+        assert chat._power_rank(page.labels[page.value] if page.count == 1 else "") != 3
+
+
+@pytest.mark.parametrize("label, accepted", [("Extra High", True), ("extra-high", True), ("極高", True),
+                                             ("Pro", False), ("High", False), ("Medium", False), ("Max", False)])
+def test_a_readable_power_position_other_than_extra_high_never_sends(monkeypatch, label, accepted):
+    """Pro matched no effort word, so the old check read it as no effort and let the send through."""
+    from app.solvers import chatgpt_web as chat
+
+    monkeypatch.setattr(chat, "leave_work_mode", lambda page, select=False: None)
+    monkeypatch.setattr(chat, "_selected_model_in_effort_menu",
+                        lambda page, select=False: {"models": ["GPT-6"], "power": label, "efforts": [label]})
+
+    class Page:
+        url = "https://chatgpt.com/"
+
+    if accepted:
+        assert chat.verify_selected_model(Page()) == "GPT-6"
+    else:
+        with pytest.raises(chat.ChatGptWebModelMismatch):
+            chat.verify_selected_model(Page())
+
+
+@pytest.mark.parametrize("rendered_late", [False, True])
+def test_a_new_chat_leaves_work_mode_before_waiting_for_the_chat_composer(monkeypatch, rendered_late):
+    """Phone, 2026-11-10: in Work mode Chat's composer is absent, so the wait alone can only time out."""
+    from app.solvers import chatgpt_web as chat
+
+    monkeypatch.setattr(chat, "READY_TIMEOUT_S", 0.2)
+    page = _Page(0 if rendered_late else 1, not rendered_late)
+    waits = []
+
+    def wait_for_composer(target, *, ready_timeout_s=None):
+        waits.append(target.active)
+        if target.active or (rendered_late and len(waits) == 1):
+            target.count, target.active = 1, True  # The toggle appears while Chat's composer never does.
+            raise chat.ChatGptWebError("composer did not appear; nothing sent")
+        return "chat composer"
+
+    monkeypatch.setattr(chat, "wait_for_composer", wait_for_composer)
+    assert chat.wait_for_chat_composer(page) == "chat composer"
+    assert page.clicks == 1 and not page.active
+    assert waits == ([False, False] if rendered_late else [False])
+
+
+def test_a_missing_chat_composer_outside_work_mode_is_still_an_error(monkeypatch):
+    from app.solvers import chatgpt_web as chat
+
+    def absent(target, *, ready_timeout_s=None):
+        raise chat.ChatGptWebError("composer did not appear; nothing sent")
+
+    monkeypatch.setattr(chat, "wait_for_composer", absent)
+    page = _Page(0, False)
+    with pytest.raises(chat.ChatGptWebError):
+        chat.wait_for_chat_composer(page)
+    assert page.clicks == 0
+
+
 def test_the_work_entry_reader_runs_in_a_real_dom():
-    """The script itself, in local Chromium: a pressed toggle is released, a tab is not clicked."""
+    """The script itself, in local Chromium, on the control shape read from the phone."""
     import html
     import json
     import shutil
@@ -231,16 +361,25 @@ def test_the_work_entry_reader_runs_in_a_real_dom():
                     "C:/Program Files/Google/Chrome/Application/chrome.exe"] if p and Path(p).is_file()), None)
     if browser is None:
         pytest.skip("local Chromium is not installed; no browser is downloaded")
-    toggle = "this.setAttribute('aria-pressed', String(this.getAttribute('aria-pressed') !== 'true'))"
+    # The real control (phone, 2026-11-10): two buttons, exactly one pressed.
+    pick = ("[...this.parentNode.children].forEach(e => e.setAttribute(e.hasAttribute('aria-pressed') ? "
+            "'aria-pressed' : 'aria-selected', String(e === this)))")
     fixtures = [
         '<button aria-pressed="false">Search</button><div id="prompt-textarea"></div>',
-        f'<button aria-pressed="true" onclick="{toggle}">Work</button>',
-        f'<button aria-pressed="false" onclick="{toggle}">Work</button>',
-        '<div role="tablist"><div role="tab" aria-selected="false">Chat</div>'
-        '<div role="tab" aria-selected="true">ChatGPT Work</div></div>',
-        f'<button aria-pressed="true" onclick="{toggle}">Work</button><button aria-pressed="true">ワーク</button>',
-        f'<button aria-pressed="true" disabled onclick="{toggle}">Work</button>',
-        f'<button aria-pressed="true" style="display:none" onclick="{toggle}">Work</button>',
+        f'<div><button aria-pressed="false" onclick="{pick}">Chat</button>'
+        f'<button aria-pressed="true" onclick="{pick}">Work</button></div>',
+        f'<div><button aria-pressed="true" onclick="{pick}">Chat</button>'
+        f'<button aria-pressed="false" onclick="{pick}">Work</button></div>',
+        f'<div role="tablist"><div role="tab" aria-selected="false" onclick="{pick}">Chat</div>'
+        f'<div role="tab" aria-selected="true" onclick="{pick}">ChatGPT Work</div></div>',
+        '<button aria-pressed="true">Work</button>',
+        f'<div><button aria-pressed="false" onclick="{pick}">Chat</button>'
+        f'<button aria-pressed="true" onclick="{pick}">Work</button><button aria-pressed="true">ワーク</button></div>',
+        f'<div><button aria-pressed="false" disabled onclick="{pick}">Chat</button>'
+        f'<button aria-pressed="true" onclick="{pick}">Work</button></div>',
+        f'<div><button aria-pressed="false" onclick="{pick}">Chat</button>'
+        f'<button aria-pressed="true" onclick="{pick}">Work</button>'
+        '<button aria-pressed="false">Filter chats and work</button></div>',
     ]
     script = ("const states = " + json.dumps(fixtures) + ".map(source => { document.body.innerHTML = source; "
               f"const before = {chat._WORK_MODE_JS}(false); const click = {chat._WORK_MODE_JS}(true); "
@@ -260,10 +399,11 @@ def test_the_work_entry_reader_runs_in_a_real_dom():
     summary = [((before["count"], before["active"]), acted, after["active"]) for before, acted, after in states]
     assert summary == [
         ((0, False), False, False),  # Plain Chat: nothing to leave.
-        ((1, True), True, False),    # Pressed toggle: released by one click.
-        ((1, False), False, False),  # Already Chat: never clicked into Work.
-        ((1, True), False, True),    # A tab has no "off": left active, so the caller stops.
-        ((2, False), False, False),  # Ambiguous entries: count 2 stops the caller.
-        ((1, True), False, True),    # Disabled: not clicked, stays active, caller stops.
-        ((0, False), False, False),  # Hidden entry is not the visible mode control.
+        ((1, True), True, False),    # The real control: its Chat sibling leaves Work.
+        ((1, False), False, False),  # Already Chat: nothing is clicked.
+        ((1, True), True, False),    # The same pair as tabs.
+        ((1, True), False, True),    # A lone Work toggle has no known way out: the caller stops.
+        ((2, False), False, False),  # Ambiguous Work entries: count 2 stops the caller.
+        ((1, True), False, True),    # Chat disabled: not clicked, the caller stops.
+        ((1, True), True, False),    # An unrelated filter button is not a mode entry.
     ]

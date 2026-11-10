@@ -644,6 +644,79 @@ _MODEL_MENU_STATE_JS = r"""(() => {
 })()""" % (json.dumps(MODEL_SEL), json.dumps(EFFORT_SEL))
 
 
+_POWER_JS = r"""(step => {
+  const visible = e => e.getClientRects().length > 0;
+  const menus = [...document.querySelectorAll('[role="menu"], [role="listbox"], [role="radiogroup"]')].filter(visible);
+  const sliders = [...new Set(menus.flatMap(m => [...m.querySelectorAll('[role="slider"]')]))].filter(visible);
+  if (sliders.length !== 1) return {count: sliders.length};
+  const slider = sliders[0];
+  const number = name => { const v = slider.getAttribute(name); return /^-?\d+$/.test(v || '') ? Number(v) : null; };
+  // The position is announced as "Pro, 5 of 5." in the menu; aria-valuetext was empty (phone, 2026-11-10).
+  const menu = slider.closest('[role="menu"], [role="listbox"], [role="radiogroup"]');
+  const spoken = (menu.innerText || '').split('\n').map(t => /^(.+?),\s*\d+\s+of\s+\d+\.?$/i.exec(t.trim())).filter(Boolean);
+  const state = {count: 1, value: number('aria-valuenow'), min: number('aria-valuemin'), max: number('aria-valuemax'),
+    enabled: !slider.disabled && slider.getAttribute('aria-disabled') !== 'true',
+    label: (slider.getAttribute('aria-valuetext') || (spoken.length === 1 ? spoken[0][1] : '') || '').trim()};
+  if ((step === 1 || step === -1) && state.enabled && state.value !== null && state.min !== null && state.max !== null &&
+      state.value + step >= state.min && state.value + step <= state.max) {
+    const key = step === 1 ? 'ArrowRight' : 'ArrowLeft';
+    slider.focus();
+    slider.dispatchEvent(new KeyboardEvent('keydown', {key, code: key, bubbles: true}));
+  }
+  return state;
+})"""
+_EXTRA_HIGH = re.compile(r"極高|超高|\bxhigh\b|\bextra[\s-]?high\b", re.IGNORECASE)
+_LOWER_POWER = {"light": 0, "low": 0, "軽量": 0, "低": 0, "medium": 1, "standard": 1, "中": 1, "標準": 1,
+                "high": 2, "高": 2}
+
+
+def _power_rank(label) -> int | None:
+    """Position relative to Extra High (3); None when the label cannot be read."""
+    text = re.sub(r"[\s_–—-]+", " ", label).strip().lower() if isinstance(label, str) else ""
+    if not text:
+        return None
+    if _EXTRA_HIGH.search(text):
+        return 3
+    # A readable tier this code does not know sits above Extra High, as "Pro" did.
+    return _LOWER_POWER.get(text, 4)
+
+
+def _select_extra_high_power(page) -> None:
+    """Move Chat's Power slider to the position labelled Extra High while our menu is open.
+
+    Phone, 2026-11-10: five positions, saved at Medium, and the top one is
+    "Pro" ("Locked", "Usage limit reached"), so the maximum is the wrong
+    target. One step per key event, each confirmed by the slider's own value.
+    Anything unreadable is left alone; the check after this refuses a
+    readable position that is not Extra High.
+    """
+    state = page.evaluate(f"{_POWER_JS}(0)")
+    for _ in range(16):  # The same bound as Work's slider.
+        if (not isinstance(state, dict) or state.get("count") != 1 or state.get("enabled") is not True
+                or not all(type(state.get(k)) is int for k in ("value", "min", "max"))
+                or state["max"] - state["min"] > 16):
+            return
+        rank = _power_rank(state.get("label"))
+        if rank is None or rank == 3:
+            return
+        before = state["value"]
+        page.evaluate(f"{_POWER_JS}({1 if rank < 3 else -1})")
+        deadline = time.monotonic() + 2.0
+        while True:
+            state = page.evaluate(f"{_POWER_JS}(0)")
+            if not isinstance(state, dict) or state.get("value") != before:
+                break
+            if time.monotonic() >= deadline:
+                return
+            time.sleep(0.05)
+
+
+def _power_label(page) -> str:
+    state = page.evaluate(f"{_POWER_JS}(0)")
+    label = state.get("label") if isinstance(state, dict) and state.get("count") == 1 else ""
+    return label if isinstance(label, str) else ""
+
+
 def _selected_model_in_effort_menu(page, *, select: bool = False) -> dict:
     """Select the first visible model position; close only a popup we opened."""
     state = page.evaluate(_MODEL_MENU_STATE_JS)
@@ -679,7 +752,16 @@ def _selected_model_in_effort_menu(page, *, select: bool = False) -> dict:
             # The operator chose the first model position, independent of its label.
             first = rows[0]
             if first.get("aria_checked") == "true":
-                return {"models": first["label_lines"][:1], "efforts": state.get("efforts", [])}
+                if select:
+                    _select_extra_high_power(page)
+                    state = page.evaluate(_MODEL_MENU_STATE_JS)
+                    if not isinstance(state, dict):
+                        raise ChatGptWebModelMismatch("actual ChatGPT model selection is unreadable; nothing sent")
+                power = _power_label(page)
+                # The slider's own label is the effort when it has one: the menu's
+                # other text did not name "Pro" at all, which read as no effort.
+                return {"models": first["label_lines"][:1], "power": power,
+                        "efforts": [power] if power else state.get("efforts", [])}
             if not select or selection_attempt or first.get("enabled") is not True or first.get("can_click") is not True:
                 raise ChatGptWebModelMismatch("requested model position could not be selected; nothing sent")
             for event_type in ("mousePressed", "mouseReleased"):
@@ -709,15 +791,17 @@ _WORK_MODE_JS = r"""(click => {
   const phrase = e => (e.getAttribute('aria-label') || e.innerText || '').normalize('NFKC')
     .trim().toLowerCase().replace(/[\s_–—-]+/g, '');
   const on = e => (e.getAttribute('aria-pressed') || e.getAttribute('aria-selected')) === 'true';
-  const work = [...document.querySelectorAll('button[aria-pressed], [role=tab][aria-selected]')]
-    .filter(visible).filter(e => ['work', 'chatgptwork', 'ワーク', '作業'].includes(phrase(e)));
+  const enabled = e => !e.disabled && e.getAttribute('aria-disabled') !== 'true';
+  const modes = [...document.querySelectorAll('button[aria-pressed], [role=tab][aria-selected]')].filter(visible);
+  const work = modes.filter(e => ['work', 'chatgptwork', 'ワーク', '作業'].includes(phrase(e)));
+  const chat = modes.filter(e => ['chat', 'chatgptchat', 'チャット'].includes(phrase(e)));
   let acted = false;
-  // Only a pressed toggle is released. A tab has no "off"; it fails closed below.
-  if (click && work.length === 1 && on(work[0]) && work[0].hasAttribute('aria-pressed') &&
-      !work[0].disabled && work[0].getAttribute('aria-disabled') !== 'true') {
-    work[0].click(); acted = true;
+  // Phone, 2026-11-10: the new-chat page has two buttons, Chat and Work. Pressing
+  // the pressed Work again changes nothing; only its Chat sibling leaves Work.
+  if (click && work.length === 1 && on(work[0]) && chat.length === 1 && !on(chat[0]) && enabled(chat[0])) {
+    chat[0].click(); acted = true;
   }
-  return {count: work.length, active: work.length === 1 && on(work[0]), acted};
+  return {count: work.length, active: work.length === 1 && on(work[0]), chat_count: chat.length, acted};
 })"""
 
 
@@ -725,20 +809,46 @@ def leave_work_mode(page, *, select: bool = False) -> None:
     """Chat never sends inside Work: its usage limit is why Chat was asked.
 
     The Work entry is the control the Work adapter reads (same labels). During
-    preparation an active toggle is released once; immediately before sending
+    preparation its Chat sibling is pressed once; immediately before sending
     nothing is clicked, and an active or ambiguous entry stops the send.
     """
     state = page.evaluate(f"{_WORK_MODE_JS}(false)")
-    if isinstance(state, dict) and state.get("count") == 1 and state.get("active") is True and select:
+    deadline = time.monotonic() + READY_TIMEOUT_S
+    while (select and isinstance(state, dict) and state.get("count") == 1 and state.get("active") is True
+           and time.monotonic() < deadline):
+        # Right after the new-chat navigation the page drops a click (phone,
+        # 2026-11-10). The script presses Chat only while Work is active, so
+        # pressing again cannot switch back.
         page.evaluate(f"{_WORK_MODE_JS}(true)")
-        deadline = time.monotonic() + READY_TIMEOUT_S
+        settle = min(deadline, time.monotonic() + 2.0)
         while True:
             state = page.evaluate(f"{_WORK_MODE_JS}(false)")
-            if not isinstance(state, dict) or state.get("active") is not True or time.monotonic() >= deadline:
+            if not isinstance(state, dict) or state.get("active") is not True or time.monotonic() >= settle:
                 break
             time.sleep(0.1)
     if not isinstance(state, dict) or state.get("count") not in (0, 1) or state.get("active") is not False:
         raise ChatGptWebModelMismatch("Chat could not leave Work mode; nothing sent")
+
+
+def wait_for_chat_composer(page, *, ready_timeout_s: float | None = None):
+    """Chat's composer on a new chat, after leaving Work mode.
+
+    Work mode shows only Work's composer (phone, 2026-11-10, read-only: Chat
+    composers 0, Work composers 1), so waiting for Chat's composer inside it
+    can only time out. The toggle is released first; if it rendered after the
+    first look, it is released once the wait has failed and the wait repeats.
+    """
+    leave_work_mode(page, select=True)
+    try:
+        return wait_for_composer(page, ready_timeout_s=ready_timeout_s)
+    except ChatGptWebAuthenticationRequired:
+        raise
+    except ChatGptWebError:
+        state = page.evaluate(f"{_WORK_MODE_JS}(false)")
+        if not isinstance(state, dict) or state.get("active") is not True:
+            raise
+        leave_work_mode(page, select=True)
+        return wait_for_composer(page, ready_timeout_s=ready_timeout_s)
 
 
 def verify_selected_model(page, *, select: bool = False) -> str:
@@ -758,6 +868,8 @@ def verify_selected_model(page, *, select: bool = False) -> str:
     if len(efforts) > 1:
         raise ChatGptWebModelMismatch("actual thinking effort selection is ambiguous; nothing sent")
     effort = next(iter(efforts), "")
+    if state.get("power") and _power_rank(state["power"]) != 3:
+        raise ChatGptWebModelMismatch("selected power is not Extra High; nothing sent")
     highest = re.search(r"極高|超高|最高|\bxhigh\b|\bextra[ -]?high\b|\bextreme\b|\bmax(?:imum|imal)?\b", effort)
     if not highest and (re.search(r"\b(?:high|medium|low|standard|light)\b|^(?:高|中|低|標準)$", effort)
                         or re.search(r"\bgpt\s*5\.6\s+sol\b", model)):
@@ -991,7 +1103,7 @@ class ChatGptWebClient:
         self._transfer: dict | None = None
 
     def _start_new_chat(self, page):
-        return start_new_chat(page)
+        return start_new_chat(page, wait_composer=wait_for_chat_composer)
 
     def _return_to_chat(self, page, url, *, reload):
         return return_to_chat(page, url, reload=reload)

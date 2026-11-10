@@ -118,7 +118,7 @@ submodule、AARコピーは不要です。
 | 経路 | 位置づけ |
 |---|---|
 | `ROKID_SOLVER=chatgpt-web` | スマホに残る従来のChat経路。ログイン済みウェブセッションをCDP経由で操作します |
-| `ROKID_SOLVER=chatgpt-work` | スマホ内のWorkブラウザへ原画像のZIPを分割送信し、同じ会話の回答を受領する経路。PNGが既定で、撮影情報と画素を照合した原JPEGの送信も比較できます。実装・PC検証と、スマホへの導入・会場受入を分けて確認します。Workが利用制限の返答を返した場合、または送信前にWorkの操作部が使えない場合は、同じ冊子を `chatgpt-web`（先頭のモデル位置、Extra Highを確認してから送信）へ自動で渡します。送信結果が不明な場合は切り替えません |
+| `ROKID_SOLVER=chatgpt-work` | スマホ内のWorkブラウザへ原画像のZIPを分割送信し、同じ会話の回答を受領する経路。PNGが既定で、撮影情報と画素を照合した原JPEGの送信も比較できます。実装・PC検証と、スマホへの導入・会場受入を分けて確認します。Workが利用制限の返答を返した場合、または送信前にWorkの操作部が使えない場合は、同じ冊子を `chatgpt-web` へ自動で渡します。ChatはWorkモードを「Chat」ボタンで抜け、先頭のモデル位置を選び、Powerスライダーを「Extra High」と表示される段へ合わせ、送信直前にその表示を読み直します（最上段はProで、Extra Highではありません）。送信結果が不明な場合は切り替えません |
 | スマホ内ローカルモデル（F-51F、llama.cpp） | **不採用**（2026-09-14、利用者の決定）。実測は `docs/hardware-measurements.md` E 節に証拠として残しますが、新規作業はありません |
 | `openai` / `gemini` / `claude` | API キーがあれば設定だけで動きます。`ROKID_SOLVER_TIERS` のフォールバック段として残します |
 
@@ -144,7 +144,7 @@ Driveへ置く場合も全件列挙と各原画像取得が必要で、添付20�
 CXR-L の実装境界は
 [CXR-L / Global Hi Rokid integration](docs/cxr-l-integration.md)です。
 
-現在のバージョン: **Server APP 0.70.0 / API 1.43.0 / Android client 0.3.17 / Glasses View 1.43.2 / Solver API 1.10.0**。
+現在のバージョン: **Server APP 0.70.1 / API 1.43.0 / Android client 0.3.17 / Glasses View 1.43.2 / Solver API 1.10.0**。
 版数の正本は `app/version.py` です。他の資料は版数を書かず、この行だけが
 `tests/test_documentation_contract.py` で実装と照合されます。
 Solver API は、記入用解答の全文保持・資料不足の分離を行う `answer_only` モードを含みます。

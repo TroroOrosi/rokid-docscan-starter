@@ -3059,7 +3059,9 @@ def _booklet_routes() -> list[str]:
     primary = (os.environ.get("ROKID_SOLVER") or "").strip()
     default = "chatgpt-web" if primary == "chatgpt-work" else ""
     names = [primary, *(name.strip() for name in os.environ.get("ROKID_SOLVER_FALLBACKS", default).split(","))]
-    return list(dict.fromkeys(name for name in names if name and (name == primary or has_booklet_route(name))))
+    # Work is a primary only: its sealed jobs, originals and commit guard key on ROKID_SOLVER.
+    return list(dict.fromkeys(name for name in names if name and (
+        name == primary or (name != "chatgpt-work" and has_booklet_route(name)))))
 
 
 def _closed_routes(rows) -> set[str]:
@@ -3087,7 +3089,10 @@ def _booklet_route(conn, session_id: int) -> tuple[str, bool]:
     rows = _deck_question_rows(conn, session_id)
     for row in rows:
         solution = _latest_solution_row(conn, row["id"])
-        if solution is not None and solution["solver_name"] in routes:
+        # Pinned by what answered, not by today's configuration: a fallback
+        # disabled after the reading stage still holds the images.
+        if solution is not None and (solution["solver_name"] in routes
+                                     or has_booklet_route(solution["solver_name"] or "")):
             return solution["solver_name"], False
     closed = _closed_routes(rows)
     route = next((name for name in routes if name not in closed), routes[0] if routes else "")
@@ -3120,7 +3125,7 @@ def _record_solve_failure(conn, row, error: Exception, *, commit: bool = True,
         metadata["solve_failure"]["work_job_id"] = error.work_job_id
     if route and _switches_route(error):
         # ``route`` is passed only while a later route may take over.
-        closed = sorted({*metadata.get("closed_routes", []), route})
+        closed = sorted(_closed_routes([current]) | {route})
         metadata["closed_routes"] = closed
         following = next((name for name in _booklet_routes() if name not in closed), None)
         if following:
