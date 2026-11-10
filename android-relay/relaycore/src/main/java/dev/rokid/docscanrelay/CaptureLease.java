@@ -46,6 +46,15 @@ final class CaptureLease {
         return true;
     }
 
+    /** Local preparation ended before any camera request. A timed-out request stays unknown. */
+    synchronized boolean abortNotStarted() {
+        if (!isUnresolved() || timedOut) {
+            return false;
+        }
+        clear();
+        return true;
+    }
+
     synchronized boolean markTimedOut(long expectedToken) {
         if (token != expectedToken || !isUnresolved() || timedOut) {
             return false;

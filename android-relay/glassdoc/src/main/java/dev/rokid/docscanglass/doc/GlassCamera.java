@@ -75,6 +75,9 @@ final class GlassCamera {
 
         void onCaptureFailed(String reason);
 
+        /** Preparation ended before any camera request; the camera and preview remain usable. */
+        default void onCaptureNotReady() { onCaptureFailed("camera not still or AF/AE not ready"); }
+
         default void onPreview(Bitmap frame) { frame.recycle(); }
         default void onPreview(Bitmap frame, PaperGeometry.Box proposal) { onPreview(frame); }
         default CaptureVideoTransfer.Origin comparisonVideoOrigin(CaptureVideoRecording.Options options) { return null; }
@@ -297,7 +300,7 @@ final class GlassCamera {
     private final boolean paperGeometryEvaluation;
     private PaperGeometry.Tracker paperTracker;
     private PaperExposure paperExposure;
-    private final Runnable prepareTimeout = () -> previewFailed("camera not still or AF/AE not ready");
+    private final Runnable prepareTimeout = this::prepareExpired;
     private final Runnable inputReleaseTimeout = () -> previewFailed("ZSL input release timeout");
 
     private final Runnable timeout = () -> {
@@ -762,6 +765,29 @@ final class GlassCamera {
         if (!previewClosing) return;
         previewClosing = false;
         startPreview();
+    }
+
+    /**
+     * Ten seconds without stillness and settled exposure. No request has been
+     * issued to the camera, so this is a cancelled preparation, not an unknown
+     * capture: ending the whole session here cost the wearer every later page.
+     */
+    private void prepareExpired() {
+        if (closed || unknown || !capturePending) return;
+        if ((generation > 0 && !settled) || activeAlternative != null
+                || mode != Mode.NATIVE_STILL) {
+            previewFailed("camera not still or AF/AE not ready");
+            return;
+        }
+        stillness.cancel();
+        capturePending = false;
+        if (activeFuturePage != null) {
+            // The observed scene is unchanged: the next preview frame prepares it again.
+            activeFuturePage = null;
+            futureCapacity++;
+            return;
+        }
+        callback.onCaptureNotReady();
     }
 
     private void previewFailed() { previewFailed("preview unavailable"); }

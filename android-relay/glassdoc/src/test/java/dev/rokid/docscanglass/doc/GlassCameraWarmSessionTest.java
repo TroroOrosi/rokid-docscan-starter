@@ -1372,14 +1372,17 @@ public class GlassCameraWarmSessionTest {
         assertEquals(0, firstDevice().session.captures);
     }
 
-    @Test public void missingReadinessTimesOutWithoutShootingAndLateResultsCannotRetry() {
+    @Test public void missingReadinessExpiresWithoutShootingAndTheCameraStaysUsable() {
         camera.captureOnce(); idle(100); frame(180); idle(9900);
         assertEquals(List.of("camera not still or AF/AE not ready"), failures);
         assertEquals(0, firstDevice().session.captures);
-        result(CONTROL_AF_STATE_PASSIVE_FOCUSED, CONTROL_AE_STATE_CONVERGED);
-        camera.captureOnce(); idle(1000);
-        assertEquals(1, ManagerShadow.devices.size()); assertEquals(0, delivered);
-        assertTrue(firstDevice().closed); assertTrue((Boolean)ReflectionHelpers.getField(camera, "unknown"));
+        // A late result alone cannot fire the expired preparation.
+        result(CONTROL_AF_STATE_PASSIVE_FOCUSED, CONTROL_AE_STATE_CONVERGED); idle(1000);
+        assertEquals(0, firstDevice().session.captures); assertEquals(0, delivered);
+        // No request reached the camera, so it is not unknown: the session continues.
+        assertFalse(firstDevice().closed); assertFalse((Boolean)ReflectionHelpers.getField(camera, "unknown"));
+        camera.captureOnce(); idle(100); readyFrame(); idle(400); readyFrame(); idle(50);
+        assertEquals(1, firstDevice().session.captures); assertEquals(1, ManagerShadow.devices.size());
     }
 
     @Test public void aRefusedTwoOutputSessionStopsWithoutAColdJpegFallback() {

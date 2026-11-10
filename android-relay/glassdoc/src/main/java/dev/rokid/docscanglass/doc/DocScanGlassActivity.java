@@ -771,6 +771,11 @@ public final class DocScanGlassActivity extends Activity
             public void onCaptureFailed(String reason) {
                 controller.onPhotoError("撮影に失敗しました: " + reason, null);
             }
+
+            @Override
+            public void onCaptureNotReady() {
+                controller.onPhotoNotStarted();
+            }
         };
     }
 

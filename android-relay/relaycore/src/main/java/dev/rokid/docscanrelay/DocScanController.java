@@ -1758,6 +1758,37 @@ public final class DocScanController implements AutoCloseable {
         }
     }
 
+    /**
+     * The local camera stopped preparing before it asked for a photo: the wearer
+     * kept moving, or exposure did not settle. Nothing is in flight, so the
+     * session continues and the same page is observed again. A failure after
+     * the camera request still arrives through onPhotoError and stays unknown.
+     */
+    public void onPhotoNotStarted() {
+        try {
+            serial.execute(() -> {
+                if (!link.supportsLocalCaptureReview() || localCameraUnknown
+                        || !captureLease.abortNotStarted()) {
+                    return;
+                }
+                inspectionRequest = null;
+                CaptureReviewStore.Pending pending = captureReview.peek();
+                if (pending != null) {
+                    publishCaptureReview(
+                            pending,
+                            "Retake did not start; previous review photo retained: camera not still");
+                    return;
+                }
+                publishAutoWaiting(
+                        "静止すると撮影します", "",
+                        "Local preparation expired before any camera request");
+                waitForNextPage();
+            });
+        } catch (RejectedExecutionException ignored) {
+            // The activity closed while the camera callback was arriving.
+        }
+    }
+
     private void enqueueCaptureTimeout(long attempt) {
         try {
             serial.execute(() -> {

@@ -1371,6 +1371,51 @@ public class LocalReviewTest {
         }
     }
 
+    @Test public void preparationThatNeverBecameStillReturnsToWaitingInsteadOfEndingTheSession() throws Exception {
+        Surface surface = new Surface();
+        surface.holdForPage = true;
+        try (MockWebServer server = new MockWebServer()) {
+            DocScanController controller = new DocScanController(RuntimeEnvironment.getApplication(), surface, null,
+                    (state, lines, diagnostic) -> {}, new ClientIdentity("test", "test", "test"));
+            try {
+                controller.configureForLocalStart(server.url("/").toString(), "", 270);
+                controller.startLocalSession(false);
+                barrier(controller);
+                set(controller, "autoCaptureEnabled", true);
+                set(controller, "state", RelayState.STABILIZING);
+                call(controller, "requestPhotoAt", new Class<?>[]{int.class, boolean.class}, 0, false);
+                assertEquals(1, surface.photos);
+                surface.pageReady = null;
+                // The camera asked for no photo: the wearer moved for the whole preparation.
+                controller.onPhotoNotStarted();
+                barrier(controller);
+                CaptureLease lease = (CaptureLease)get(controller, "captureLease");
+                assertFalse(lease.isUnresolved());
+                assertEquals(Boolean.FALSE, get(controller, "localCameraUnknown"));
+                assertTrue(controller.getState() == RelayState.READING || controller.getState() == RelayState.READY);
+                assertTrue(controller.isAutoCaptureEnabled());
+                assertNotNull(surface.pageReady);  // Observing the same page again, no restart.
+                set(controller, "state", RelayState.STABILIZING);
+                call(controller, "requestPhotoAt", new Class<?>[]{int.class, boolean.class}, 0, false);
+                assertEquals(2, surface.photos);
+            } finally { controller.close(); }
+        }
+    }
+
+    @Test public void aPhotoThatWasRequestedStaysUnknownWhenPreparationIsReportedLate() throws Exception {
+        Surface surface = new Surface();
+        DocScanController controller = new DocScanController(RuntimeEnvironment.getApplication(), surface, null,
+                (state, lines, diagnostic) -> {}, new ClientIdentity("test", "test", "test"));
+        try {
+            CaptureLease lease = (CaptureLease)get(controller, "captureLease");
+            long attempt = lease.begin(0);
+            assertTrue(lease.markTimedOut(attempt));
+            controller.onPhotoNotStarted();
+            barrier(controller);
+            assertTrue(lease.isTimedOut());
+        } finally { controller.close(); }
+    }
+
     @Test public void localCameraFailureRemainsUnknownAndBlocksAnotherPhoto() throws Exception {
         Surface surface = new Surface();
         DocScanController controller = new DocScanController(RuntimeEnvironment.getApplication(), surface, null,

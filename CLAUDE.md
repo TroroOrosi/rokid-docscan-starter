@@ -209,8 +209,13 @@ speed verification and uncertain-send safeguards apply to both answer speeds.
   `manual=true` does not carry over to a normal launch.
   The same preview camera/session supplies the full-size JPEG after fresh
   supported focus/exposure and stillness checks. Fixed-focus hardware does not
-  gain autofocus from an AF trigger. Expired preparation fails instead
-  of forcing a moving shot. Physical character accuracy remains unverified.
+  gain autofocus from an AF trigger. Expired preparation never forces a
+  moving shot. Before any camera request it is a cancelled preparation: the
+  wearer is told to hold still, the session continues and the same page is
+  observed again (2026-11-10; until then it ended the session and required an
+  app restart). A failure after the camera request stays UNKNOWN. Evaluation
+  modes keep the earlier fatal stop. PC tests only; physical character
+  accuracy remains unverified.
   Gyroscope freshness uses the sensor's measurement timestamp, including delayed
   deliveries and gaps in the retained preview stream. On supported fixed-focus
   cameras, one native still copies the current preview's manual exposure, sensitivity,
