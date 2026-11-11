@@ -161,11 +161,31 @@ public class DocScanGlassActivityIntentTest {
         assertEquals("an Intent without an integer margin keeps the saved one", 125, content.getPaddingBottom());
 
         activity.onNewIntent(new Intent().putExtra("bottom_margin", 9999));
-        assertEquals(DocScanGlassActivity.MAX_BOTTOM_MARGIN, content.getPaddingBottom());
+        assertEquals(DocScanGlassActivity.MAX_MARGIN, content.getPaddingBottom());
         activity.onNewIntent(new Intent().putExtra("bottom_margin", -5));
         assertEquals(0, content.getPaddingBottom());
         assertEquals(0, activity.getPreferences(Context.MODE_PRIVATE).getInt("bottom_margin", -1));
         assertEquals(0, server.getRequestCount());
+    }
+
+    /** Answers start at the top of the panel: the wearer who finds that too high lowers them with a top margin. */
+    @Test
+    public void topMarginIntentLowersEveryScreenIndependentlyOfTheBottomMargin() throws Exception {
+        android.view.View content = activity.findViewById(android.R.id.content);
+
+        activity.onNewIntent(new Intent().putExtra("bottom_margin", 125).putExtra("top_margin", 80));
+        assertEquals(80, content.getPaddingTop());
+        assertEquals(125, content.getPaddingBottom());
+        assertEquals(80, activity.getPreferences(Context.MODE_PRIVATE).getInt("top_margin", -1));
+
+        activity.onNewIntent(new Intent().putExtra("bottom_margin", 100));
+        assertEquals("one margin alone keeps the other", 80, content.getPaddingTop());
+        assertEquals(100, content.getPaddingBottom());
+
+        activity.onNewIntent(new Intent().putExtra("top_margin", 9999).putExtra("bottom_margin", 9999));
+        assertEquals(DocScanGlassActivity.MAX_MARGIN, content.getPaddingTop());
+        assertEquals(DocScanGlassActivity.MAX_MARGIN, content.getPaddingBottom());
+        assertTrue("both at their limit still leave a screen", 640 - 2 * DocScanGlassActivity.MAX_MARGIN >= 160);
     }
 
     @Test public void ordinaryNewIntentRevokesComparisonTransferWithoutCarryingAnySavedFlag() throws Exception {

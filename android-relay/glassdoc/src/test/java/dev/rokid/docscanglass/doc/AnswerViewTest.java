@@ -40,6 +40,27 @@ public class AnswerViewTest {
         assertEquals(32f, view.bodyTextSize(), .01f);
     }
 
+    /** Margins place the answers for the wearer; they must not cost the size of the type. */
+    @Test
+    @org.robolectric.annotation.GraphicsMode(org.robolectric.annotation.GraphicsMode.Mode.NATIVE)
+    public void marginsMoveTheAnswersWithoutShrinkingTheirType() {
+        AnswerReader reader = new AnswerReader(new AnswerBundle("s", "a".repeat(64), 1, List.of(
+                AnswerItem.ready("g", "問題", "q", "問", "𝑥 = 2 を記入する。".repeat(400)))), true);
+        AnswerView view = new AnswerView(RuntimeEnvironment.getApplication());
+        view.bind(reader);
+        android.widget.FrameLayout panel = new android.widget.FrameLayout(RuntimeEnvironment.getApplication());
+        panel.setPadding(0, 80, 0, 125);
+        panel.addView(view);
+        panel.measure(android.view.View.MeasureSpec.makeMeasureSpec(480, android.view.View.MeasureSpec.EXACTLY),
+                android.view.View.MeasureSpec.makeMeasureSpec(640, android.view.View.MeasureSpec.EXACTLY));
+        panel.layout(0, 0, 480, 640);
+
+        assertEquals(80, view.getTop());
+        assertEquals(435, view.getHeight());
+        assertTrue(reader.hasViewport());
+        assertEquals(32f, view.bodyTextSize(), .01f);
+    }
+
     @Test
     @org.robolectric.annotation.GraphicsMode(org.robolectric.annotation.GraphicsMode.Mode.NATIVE)
     public void quadraticGraphKeepsAxesScaleInterceptsAndItsShadedRegion() throws Exception {

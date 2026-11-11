@@ -246,7 +246,7 @@ final class HudView extends View {
 
         // Leave the centre clear and the existing lower-right camera image unobstructed.
         float bottom = Math.max(1f, getHeight() - CAPTURE_MARGIN);
-        float height = Math.max(1f, getHeight() * .30f - CAPTURE_MARGIN);
+        float height = Math.max(1f, Math.min(getHeight(), panelHeight() * .30f) - CAPTURE_MARGIN);
         int width = Math.max(1, (int) (getWidth() * .60f - CAPTURE_MARGIN));
         statusPaint.setTextSize(18f);
         StaticLayout layout = statusLayout(text, width);
@@ -306,11 +306,16 @@ final class HudView extends View {
         canvas.restore();
     }
 
+    /** Margins around this view place it for the wearer; sizes keep following the whole panel. */
+    private int panelHeight() {
+        return Math.max(getHeight(), getRootView().getHeight());
+    }
+
     private RectF captureArea() {
         float right = Math.max(1, getWidth() - CAPTURE_MARGIN);
         float bottom = Math.max(1, getHeight() - CAPTURE_MARGIN);
         return new RectF(Math.max(0, right - getWidth() * CAPTURE_FRACTION),
-                Math.max(0, bottom - getHeight() * CAPTURE_FRACTION), right, bottom);
+                Math.max(0, bottom - panelHeight() * CAPTURE_FRACTION), right, bottom);
     }
 
     private RectF imageBounds(Bitmap image) {

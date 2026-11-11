@@ -116,11 +116,16 @@ final class AnswerView extends View {
     }
 
     private void applyTextSize() {
-        // Height decides the type size; a narrow page re-flows instead.
-        float height = getHeight() > 0 ? getHeight() : 640;
+        // The panel's height decides the type size; a narrow page or a margin re-flows instead.
+        float height = panelHeight() > 0 ? panelHeight() : 640;
         paint.setTextSize(height * 0.05f);
         indexPaint.setTextSize(height * 0.035f);
         continuationPaint.setStrokeWidth(Math.max(1f, paint.getTextSize() * 0.04f));
+    }
+
+    /** Margins around this view place it for the wearer; sizes keep following the whole panel. */
+    private int panelHeight() {
+        return Math.max(getHeight(), getRootView().getHeight());
     }
 
     private void applyViewport() {
@@ -185,8 +190,8 @@ final class AnswerView extends View {
         else height = width / diagram.aspectRatio;
         left = (getWidth() - width) / 2;
         Paint vector = new Paint(paint);
-        vector.setStrokeWidth(Math.max(2, getHeight() * .004f));
-        vector.setTextSize(Math.max(18, getHeight() * .035f));
+        vector.setStrokeWidth(Math.max(2, panelHeight() * .004f));
+        vector.setTextSize(Math.max(18, panelHeight() * .035f));
         try {
             JSONArray elements = diagram.toJson().getJSONArray("elements");
             for (int i = 0; i < elements.length(); i++) {
@@ -241,7 +246,7 @@ final class AnswerView extends View {
                                 canvas.clipPath(path);
                                 Paint hatch = new Paint(vector);
                                 hatch.setPathEffect(null);
-                                float spacing = Math.max(10, getHeight() * .02f);
+                                float spacing = Math.max(10, panelHeight() * .02f);
                                 for (float x = left - height; x < left + width; x += spacing)
                                     canvas.drawLine(x, top + height, x + height, top, hatch);
                                 canvas.restoreToCount(save);

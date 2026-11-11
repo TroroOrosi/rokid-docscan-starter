@@ -298,6 +298,8 @@ final class GlassCamera {
     private PageChange pageChange = new PageChange();
     private long previewAt;
     private long previewDisplayAt;
+    private long statusAt, statusFrameAt, statusWorkMillis, statusGapMillis;
+    private int statusFrames;
     private boolean capturePending;
     private CaptureSurface.FuturePageListener futurePages;
     private CaptureSurface.FuturePageListener activeFuturePage;
@@ -860,7 +862,28 @@ final class GlassCamera {
                     }
                 }
             }
+            previewStatus(now);
         } catch (RuntimeException | OutOfMemoryError error) { previewFailed(); }
+    }
+
+    /**
+     * One line a second while the preview runs: what the next still waits for, and whether this thread keeps up
+     * with the stream (2026-11-11: four device sessions ended without a still and without a recorded reason).
+     */
+    private void previewStatus(long now) {
+        statusFrames++;
+        statusWorkMillis = Math.max(statusWorkMillis, SystemClock.elapsedRealtime() - now);
+        if (statusFrameAt > 0) statusGapMillis = Math.max(statusGapMillis, now - statusFrameAt);
+        statusFrameAt = now;
+        if (now - statusAt < 1000) return;
+        Log.i(TAG, "preview_status frames=" + statusFrames + " max_work_ms=" + statusWorkMillis
+                + " max_gap_ms=" + statusGapMillis + " pending=" + capturePending + " page_ready=" + (pageReady != null)
+                + " future=" + (futurePages != null) + " scene=" + pageChange.sequence()
+                + " page_still=" + pageChange.ready(now) + " metered=" + meteredFrame(now)
+                + " exposure_ns=" + meteringExposureNanos + " motion=" + previewMotion.ready(now)
+                + " fine=" + pageChange.fineMotionReady(now) + " gyro=" + stillness.readyNow()
+                + " camera_ready=" + cameraReady());
+        statusAt = now; statusFrames = 0; statusWorkMillis = 0; statusGapMillis = 0;
     }
 
     private void futurePageMissed() {

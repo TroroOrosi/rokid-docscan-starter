@@ -43,6 +43,33 @@ public class HudViewTest {
         assertReadableStatus(choices);
     }
 
+    /** Margins move the chooser and the review image; neither may become smaller than on the whole panel. */
+    @Test public void marginsKeepTheChoicesReadableAndTheReviewImageItsSize() throws Exception {
+        HudView view = new HudView(RuntimeEnvironment.getApplication());
+        android.widget.FrameLayout panel = new android.widget.FrameLayout(RuntimeEnvironment.getApplication());
+        panel.setPadding(0, 80, 0, 125);
+        panel.addView(view);
+        panel.measure(android.view.View.MeasureSpec.makeMeasureSpec(480, android.view.View.MeasureSpec.EXACTLY),
+                android.view.View.MeasureSpec.makeMeasureSpec(640, android.view.View.MeasureSpec.EXACTLY));
+        panel.layout(0, 0, 480, 640);
+        assertEquals(435, view.getHeight());
+        List<String> choices = List.of("　 通常の読取", "▶ 合同英語（読解＋音声）", "　 リスニング",
+                "　 中断した読取", "　 前回の答案", "スワイプで選択・タップで開始");
+        view.showLines(choices);
+        Bitmap screen = Bitmap.createBitmap(480, 435, Bitmap.Config.ARGB_8888);
+        TextCanvas canvas = new TextCanvas(screen);
+        view.draw(canvas);
+        assertEquals(String.join("", choices), canvas.text.toString());
+        assertTrue("the choices must stay as readable as on the whole panel", canvas.smallestTextSize >= 18f);
+        screen.recycle();
+
+        java.lang.reflect.Method area = HudView.class.getDeclaredMethod("captureArea");
+        area.setAccessible(true);
+        android.graphics.RectF corner = (android.graphics.RectF) area.invoke(view);
+        assertEquals("30% of the 640 px panel", 192f, corner.height(), .01f);
+        assertEquals(435f - 8f, corner.bottom, .01f);
+    }
+
     @Test public void compactFailureWrapsTheCompleteReasonAndRecoveryAction() {
         assertReadableStatus(List.of("開始・再開できません",
                 "接続先と保存記録を確認してください。撮影した問題用紙と原音は保存されています。",
