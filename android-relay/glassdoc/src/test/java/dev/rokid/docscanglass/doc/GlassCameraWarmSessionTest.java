@@ -58,6 +58,7 @@ public class GlassCameraWarmSessionTest {
     private final List<GlassCamera.Captured> originals = new ArrayList<>();
     private int delivered;
     private int displayed;
+    private long previewCostMillis;
     private PaperGeometry.Box displayedPaper;
     private int displayedCenter;
     private Long exposureNanos = 10_000_000L;
@@ -87,7 +88,10 @@ public class GlassCameraWarmSessionTest {
                         assertEquals(4032, w); assertEquals(3024, h); delivered++;
                     }
                     @Override public void onCaptureFailed(String reason) { failures.add(reason); }
-                    @Override public void onPreview(Bitmap frame) { displayed++; frame.recycle(); }
+                    @Override public void onPreview(Bitmap frame) {
+                        displayed++; frame.recycle();
+                        if (previewCostMillis > 0) org.robolectric.shadows.ShadowSystemClock.advanceBy(Duration.ofMillis(previewCostMillis));
+                    }
                     @Override public void onPreview(Bitmap frame, PaperGeometry.Box paper) {
                         displayedPaper = paper; displayedCenter = android.graphics.Color.green(
                                 frame.getPixel(frame.getWidth() / 2, frame.getHeight() / 2));
@@ -1229,6 +1233,25 @@ public class GlassCameraWarmSessionTest {
         assertEquals("a fixed lens still requires this page's exposure", 0, ready.get());
         idle(1); result(CONTROL_AF_STATE_INACTIVE, CONTROL_AE_STATE_CONVERGED); frame(180);
         assertEquals(1, ready.get()); assertTrue(failures.isEmpty());
+    }
+
+    /**
+     * Glasses, 2026-11-11: frames handled back to back kept metering results and gyro readings waiting on the
+     * same thread until they were stale, and no still was taken in 143 s.
+     */
+    @Test public void aSlowFrameLeavesTheThreadFreeForAsLongAsItTookAndDoesNotMoveThePlane() {
+        camera.preview(); idle(100);
+        previewCostMillis = 170;
+        frame(180);
+        ReaderShadow preview = currentReader(ImageFormat.YUV_420_888);
+        assertEquals(1, displayed);
+        assertEquals("the copy must leave the camera's plane where it was", 0, ((DocScanTestImage) preview.image).buffer.position());
+
+        idle(100); frame(180);
+        assertEquals("100 ms after a 170 ms frame the thread still belongs to the queued results", 1, displayed);
+        idle(70); frame(180);
+        assertEquals(2, displayed);
+        assertTrue(failures.isEmpty());
     }
 
     @Test public void invalidDuplicateAndReversedFramesCannotBecomeNewPageObservations() {

@@ -299,6 +299,8 @@ final class GlassCamera {
     private long previewAt;
     private long previewDisplayAt;
     private long statusAt, statusFrameAt, statusWorkMillis, statusGapMillis;
+    private long previewFrameDoneAt, previewFrameWorkMillis;
+    private byte[] previewLuma;
     private int statusFrames;
     private boolean capturePending;
     private CaptureSurface.FuturePageListener futurePages;
@@ -768,6 +770,11 @@ final class GlassCamera {
     private void previewFrame(ImageReader source, long token) {
         // A queued notification from a closed reader must not fail a newer healthy stream.
         if (source != previewReader || token != previewGeneration || closed || unknown) return;
+        // Leave this thread free for as long as the last frame took before handling another one. Handled
+        // back to back, slow frames kept the metering results and gyro readings queued behind them until
+        // they were no longer fresh: on 2026-11-11 the glasses took no still in 143 s (`metered=false`).
+        long arrived = SystemClock.elapsedRealtime();
+        if (arrived >= previewFrameDoneAt && arrived - previewFrameDoneAt < previewFrameWorkMillis) return;
         try (Image image = source.acquireLatestImage()) {
             if (image == null || token != previewGeneration || closed) return;
             long now = SystemClock.elapsedRealtime();
@@ -783,7 +790,14 @@ final class GlassCamera {
             previewSensorTimestamp = timestamp;
             previewAt = realtimeTimestamps ? timestamp / 1_000_000L : now;
             Image.Plane luma = image.getPlanes()[0];
-            ByteBuffer pixels = luma.getBuffer();
+            // Copy the plane once. Reading the camera's own buffer a pixel at a time cost about 170 ms a frame
+            // on the glasses even when compiled (0.5 ms for the same work on a PC); every reader below
+            // keeps the plane's offsets, now counted from the start of the copy.
+            ByteBuffer plane = luma.getBuffer().duplicate(); // the copy must not move the plane's own position
+            int planeBytes = plane.remaining();
+            if (previewLuma == null || previewLuma.length < planeBytes) previewLuma = new byte[planeBytes];
+            plane.get(previewLuma, 0, planeBytes);
+            ByteBuffer pixels = ByteBuffer.wrap(previewLuma, 0, planeBytes);
             int row = luma.getRowStride(), step = luma.getPixelStride();
             int origin = pixels.position(); // AGENT_APPROVED=1: same Y-plane origin for observation, guide and preview.
             byte[] thumbnail = new byte[32 * 24];
@@ -864,6 +878,10 @@ final class GlassCamera {
             }
             previewStatus(now);
         } catch (RuntimeException | OutOfMemoryError error) { previewFailed(); }
+        finally {
+            previewFrameDoneAt = SystemClock.elapsedRealtime();
+            previewFrameWorkMillis = previewFrameDoneAt - arrived;
+        }
     }
 
     /**

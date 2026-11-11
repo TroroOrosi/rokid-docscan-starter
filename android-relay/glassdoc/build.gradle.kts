@@ -81,8 +81,9 @@ android {
         // 48 fences stale power callbacks and consumes bounded current-capture feedback.
         // 53 distinguishes display wraps from source newlines without changing answer text.
         // 59 is not debuggable: on the glasses a debuggable build ran interpreted only (2026-11-11).
-        versionCode = 59
-        versionName = "0.43.7"
+        // 60 copies the preview plane once per frame and paces frames so results are not starved.
+        versionCode = 60
+        versionName = "0.43.8"
     }
 
     // Same reasoning as `:glassapp`: a vendor installer that reads JAR
