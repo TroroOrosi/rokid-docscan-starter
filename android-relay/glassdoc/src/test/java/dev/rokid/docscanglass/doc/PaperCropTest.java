@@ -21,6 +21,15 @@ public class PaperCropTest {
         assertArrayEquals(new int[] {11, 14, 37, 50}, PaperCrop.box(luma, 48, 64));
     }
 
+    @Test public void theLiveBoxFollowsOnlyAMoveOfMoreThanTwoCells() {
+        int[] shown = {8, 20, 40, 44};
+        org.junit.Assert.assertSame(shown, PaperCrop.steady(shown, new int[] {10, 20, 40, 42}));
+        int[] moved = {11, 20, 40, 44};
+        org.junit.Assert.assertSame(moved, PaperCrop.steady(shown, moved));
+        org.junit.Assert.assertSame(moved, PaperCrop.steady(null, moved));
+        assertNull(PaperCrop.steady(shown, null));
+    }
+
     @Test public void anEvenFrameIsLeftWhole() {
         assertNull(PaperCrop.box(frame(48, 64, 0, 0, 0, 0), 48, 64));
     }
