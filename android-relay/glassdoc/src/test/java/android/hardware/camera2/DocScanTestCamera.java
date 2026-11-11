@@ -5,6 +5,7 @@ import android.hardware.camera2.params.OutputConfiguration;
 import android.hardware.camera2.params.SessionConfiguration;
 import android.os.Handler;
 import android.view.Surface;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.function.IntFunction;
 
@@ -15,6 +16,8 @@ public final class DocScanTestCamera extends CameraDevice {
     public StateCallback state;
     public Handler handler;
     public List<Surface> outputs;
+    /** The outputs of every session configured on this device, in order. */
+    public final List<List<Surface>> configured = new ArrayList<>();
     public int configurations;
     public boolean closed;
     public boolean suppressCloseCallback;
@@ -43,6 +46,7 @@ public final class DocScanTestCamera extends CameraDevice {
     @Override public void createCaptureSession(List<Surface> surfaces, CameraCaptureSession.StateCallback callback, Handler h) {
         configurations++;
         outputs = surfaces;
+        configured.add(new ArrayList<>(surfaces));
         h.post(() -> { if (refuseSession) callback.onConfigureFailed(session); else callback.onConfigured(session); });
     }
     @Override public void createCaptureSessionByOutputConfigurations(List<OutputConfiguration> o, CameraCaptureSession.StateCallback c, Handler h) { throw new UnsupportedOperationException(); }

@@ -23,7 +23,9 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.util.ArrayList;
 import java.util.Collections;
+import java.util.List;
 
 /**
  * P2: does an ordinary Android app on the glasses open the camera?
@@ -56,13 +58,38 @@ final class CameraProbe {
     private CameraDevice device;
     private CameraCaptureSession session;
     private ImageReader reader;
+    private ImageReader previewReader;
+    private int previewFrames;
+    private android.graphics.SurfaceTexture texture;
+    private android.view.Surface textureSurface;
+    /**
+     * How the still is taken, from {@code --es camera_variant}: comma-separated {@code preview=WxH}
+     * (a repeating YUV preview in the same session, as glassdoc runs it), {@code warm=<ms>} before the
+     * still, {@code af_off}, {@code ae_on} (written into both requests), {@code stop} (stop the
+     * repeating request before the still), {@code busy=<ms>} (hold each preview image that long).
+     * Empty is the single JPEG output measured on 2026-09-04.
+     */
+    static String variant = "";
+
+    private static String option(String name) {
+        for (String part : variant.split(",")) {
+            if (part.equals(name)) return "";
+            if (part.startsWith(name + "=")) return part.substring(name.length() + 1);
+        }
+        return null;
+    }
+
+    private void applyOptions(CaptureRequest.Builder request) {
+        if (option("af_off") != null) request.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF);
+        if (option("ae_on") != null) request.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON);
+    }
     private File captured;
     private long startedAtMillis;
     private boolean settled;
 
     private final Runnable timeout = () -> settle(
             ProbeReport.Status.FAILED,
-            "no image within " + CAPTURE_TIMEOUT_MILLIS + "ms");
+            "no image within " + CAPTURE_TIMEOUT_MILLIS + "ms variant=[" + variant + "] preview_frames=" + previewFrames);
 
     CameraProbe(Context context, Handler handler, Callback callback) {
         this.context = context;
@@ -126,12 +153,26 @@ final class CameraProbe {
                 settle(ProbeReport.Status.FAILED, "no JPEG output size");
                 return;
             }
-            reader = ImageReader.newInstance(
-                    size.getWidth(), size.getHeight(), ImageFormat.JPEG, 1);
+            reader = ImageReader.newInstance(size.getWidth(), size.getHeight(),
+                    option("yuvstill") != null ? ImageFormat.YUV_420_888 : ImageFormat.JPEG, 1);
             reader.setOnImageAvailableListener(this::onImageAvailable, handler);
+            String preview = option("preview");
+            previewFrames = 0;
+            if (preview != null) {
+                String[] wh = preview.split("x");
+                long busy = option("busy") == null ? 0 : Long.parseLong(option("busy"));
+                previewReader = ImageReader.newInstance(Integer.parseInt(wh[0]), Integer.parseInt(wh[1]),
+                        ImageFormat.YUV_420_888, 2);
+                previewReader.setOnImageAvailableListener(source -> {
+                    try (Image image = source.acquireLatestImage()) {
+                        if (image != null) previewFrames++;
+                        if (busy > 0) SystemClock.sleep(busy);
+                    } catch (RuntimeException ignored) { }
+                }, handler);
+            }
             handler.postDelayed(timeout, CAPTURE_TIMEOUT_MILLIS);
             Log.i(TAG, "camera probe opening id=" + id
-                    + " size=" + size.getWidth() + "x" + size.getHeight());
+                    + " size=" + size.getWidth() + "x" + size.getHeight() + " variant=[" + variant + "]");
             manager.openCamera(id, deviceCallback(), handler);
         } catch (CameraAccessException | RuntimeException error) {
             // SecurityException is a RuntimeException, so a refused CAMERA
@@ -175,13 +216,54 @@ final class CameraProbe {
 
     private void configureSession() {
         try {
+            List<android.view.Surface> outputs = new ArrayList<>(Collections.singletonList(reader.getSurface()));
+            if (previewReader != null) outputs.add(previewReader.getSurface());
+            if (option("priv") != null) {
+                String[] wh = option("priv").split("x");
+                texture = new android.graphics.SurfaceTexture(false);
+                texture.setDefaultBufferSize(Integer.parseInt(wh[0]), Integer.parseInt(wh[1]));
+                textureSurface = new android.view.Surface(texture);
+                outputs.add(textureSurface);
+            }
             device.createCaptureSession(
-                    Collections.singletonList(reader.getSurface()),
+                    outputs,
                     new CameraCaptureSession.StateCallback() {
                         @Override
                         public void onConfigured(CameraCaptureSession configured) {
                             session = configured;
-                            requestStill();
+                            if (previewReader == null) { requestStill(); return; }
+                            try {
+                                CaptureRequest.Builder preview = device.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW);
+                                preview.addTarget(previewReader.getSurface());
+                                if (textureSurface != null) preview.addTarget(textureSurface);
+                                applyOptions(preview);
+                                configured.setRepeatingRequest(preview.build(), null, handler);
+                                long warm = option("warm") == null ? 1500 : Long.parseLong(option("warm"));
+                                handler.postDelayed(() -> {
+                                    if (session != configured || settled) return;
+                                    if (option("reconfig") == null) { requestStill(); return; }
+                                    long asked = SystemClock.elapsedRealtime();
+                                    try {
+                                        device.createCaptureSession(Collections.singletonList(reader.getSurface()),
+                                                new CameraCaptureSession.StateCallback() {
+                                                    @Override public void onConfigured(CameraCaptureSession still) {
+                                                        session = still;
+                                                        Log.i(TAG, "camera probe reconfigured in " + (SystemClock.elapsedRealtime() - asked) + "ms");
+                                                        ImageReader preview = previewReader; previewReader = null;
+                                                        requestStill();
+                                                        previewReader = preview;
+                                                    }
+                                                    @Override public void onConfigureFailed(CameraCaptureSession failed) {
+                                                        settle(ProbeReport.Status.FAILED, "reconfigure failed");
+                                                    }
+                                                }, handler);
+                                    } catch (CameraAccessException | RuntimeException error) {
+                                        settle(ProbeReport.Status.FAILED, "reconfigure " + error.getClass().getSimpleName());
+                                    }
+                                }, warm);
+                            } catch (CameraAccessException | RuntimeException error) {
+                                settle(ProbeReport.Status.FAILED, "preview failed: " + error.getClass().getSimpleName());
+                            }
                         }
 
                         @Override
@@ -203,6 +285,13 @@ final class CameraProbe {
                     device.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE);
             request.addTarget(reader.getSurface());
             request.set(CaptureRequest.JPEG_ORIENTATION, 0);
+            applyOptions(request);
+            if (option("zsl_off") != null) request.set(CaptureRequest.CONTROL_ENABLE_ZSL, false);
+            if (previewReader != null && option("both") != null) request.addTarget(previewReader.getSurface());
+            if (textureSurface != null && option("both") != null) request.addTarget(textureSurface);
+            if (previewReader != null && option("stop") != null) session.stopRepeating();
+            Log.i(TAG, "camera probe still requested after " + (SystemClock.elapsedRealtime() - startedAtMillis)
+                    + "ms preview_frames=" + previewFrames);
             session.capture(request.build(), null, handler);
         } catch (CameraAccessException | RuntimeException error) {
             settle(ProbeReport.Status.FAILED,
@@ -227,7 +316,8 @@ final class CameraProbe {
             long elapsed = SystemClock.elapsedRealtime() - startedAtMillis;
             settle(ProbeReport.Status.OK,
                     image.getWidth() + "x" + image.getHeight()
-                            + " " + bytes.length + "B in " + elapsed + "ms");
+                            + " " + bytes.length + "B in " + elapsed + "ms variant=[" + variant
+                            + "] preview_frames=" + previewFrames);
         } catch (IOException | RuntimeException error) {
             settle(ProbeReport.Status.FAILED,
                     "image failed: " + error.getClass().getSimpleName());
@@ -258,6 +348,12 @@ final class CameraProbe {
             reader.close();
             reader = null;
         }
+        if (previewReader != null) {
+            previewReader.close();
+            previewReader = null;
+        }
+        if (textureSurface != null) { textureSurface.release(); textureSurface = null; }
+        if (texture != null) { texture.release(); texture = null; }
     }
 
     private static String preferredCameraId(CameraManager manager)

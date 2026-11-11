@@ -28,6 +28,7 @@ Status: Frozen measurement record. 集約 2026-09-14。
 | E | スマホ内推論 | F-51F、Android 16 / API 36、`MT6897`、llama.cpp | 2026-09-12〜09-14 |
 | F | スマホ側 CDP 終端の到達性 | F-51F、Android 16 / API 36、`com.android.chrome`、chromium/src main | 2026-09-14 |
 | F-6 | スマホの Chrome を CDP で実操作 | F-51F、Android 16 / API 36、Chrome/153.0.8010.36 | 2026-09-15 |
+| M | 静止画が返らない構成・プレビュー処理時間・自動撮影 | `RG_glasses` build `1.29.013-20261110-150201`、`:glassprobe`（variant付き）、`:glassdoc` 0.43.10（vc62） | 2026-11-12 |
 
 # A. 端末とプラットフォーム
 
@@ -1633,6 +1634,58 @@ Runs on: 実グラス、家庭Wi-FiとF-51F。修正の回帰試験とbuildはWi
 単頁／見開きのOCR・解答精度は未検証。画像とOCR内容はGit対象外のローカル保全のみ。
 
 # 出典
+
+## M. ファームウェア1.29.013での撮影構成と自動撮影（2026-11-12）
+
+Status: Frozen measurement. 機体 `RG_glasses`（serial末尾1086）、fingerprint
+`Rokid/glasses/glasses:12/SKQ1.240613.001/1.29.013-20261110-150201`（ビルド 2026-11-10 17:47 CST）。
+接続は PC → スマホ上の中継 → テザリング → グラス adb。操作はすべて PC からの adb（`am start`、
+`input keyevent`）で、装着者の操作なし。場面は暗所（撮れた画像の平均輝度 8.4/255）で、
+**紙面の写り・文字の判読は測っていない**。
+
+### M-1. JPEG出力を他の出力と同じセッションに置くと静止画が返らない
+
+`:glassprobe` に `--es camera_variant` を加え、同じ機体で順に実行した（各1回、`reconfig` は4回）。
+
+| variant | 結果 |
+|---|---|
+| なし（JPEGのみのセッションで1枚） | OK 829〜1174 ms（4回） |
+| `preview=320x240`（YUVプレビューを繰り返し、同じセッションでJPEG） | 15秒で画像なし |
+| `preview=320x240,af_off,ae_on` | 15秒で画像なし |
+| `preview=640x480`／`preview=1440x1080` | 15秒で画像なし |
+| `preview=320x240,stop`（静止画の前に繰り返しを停止） | 15秒で画像なし |
+| `preview=320x240,zsl_off`（`CONTROL_ENABLE_ZSL=false`） | 15秒で画像なし |
+| `preview=320x240,both`（静止画要求にプレビュー出力も含める） | 15秒で画像なし |
+| `preview=320x240,priv=640x480`（PRIVATEのプレビュー出力を追加） | 15秒で画像なし |
+| `preview=320x240,reconfig`（撮る時だけJPEGのみのセッションへ組み替え） | OK 4回中4回。組み替え 0.74〜0.81秒＋撮影 約0.8秒 |
+| `preview=320x240,yuvstill`（静止画を4032x3024のYUVで受ける） | OK。要求から0.74秒、プレビュー継続 |
+
+画像が返らない場合、カメラサービスは `In-flight list too large`（71→251件）と
+`metadata arrived: false` を出し続け、約10秒後に `vendor.qti.camera.provider` が
+`ExtensionModule::ProcessSystemEventMessage` で SIGABRT、アプリへは `camera error 4`
+または `CAMERA TIMEOUT`。パイプライン名は `RealTimeFeatureZSLPreviewRawRokid`。
+2026-09-27 の glassdoc（`6149beb`、build `1.25.012`）は YUV＋JPEG の1セッションで撮れていた記録があるが、
+旧ファームウェアでの再実行はしていない。
+
+### M-2. プレビュー1枚の処理時間
+
+glassdoc vc61（非debuggable・`status=speed`）で処理ごとの最大時間を記録した。
+1枚 173〜213 ms（毎秒3枚）のうち、表示用の縮小ループが 141〜285 ms。ループ内で
+1画素ごとに `Image.getWidth()`／`getHeight()` を呼んでおり（320x240 で約15万回）、
+1枚につき1回へ直すと 5〜11 ms、1枚全体で最大 47 ms（毎秒8〜14枚）になった。
+`addd40a` が原因とした「Y面を1画素ずつ読む」は、修正後も 173〜213 ms のままで原因ではなかった。
+
+### M-3. glassdoc 0.43.10（vc62）の自動撮影
+
+プレビューのみのセッションで待ち、静止画ごとにJPEGのみのセッションへ組み替え、取得後に
+プレビューへ戻す。`scripts/glasses_capture_smoke.py --serial 127.0.0.1:5556` を3回：3回とも PASS
+（4032x3024、7.25〜7.33 MB、1491〜1656 ms、プレビュー処理 最大 39〜43 ms）。
+1セッション内の連続4枚（待機中タップ）も頁0〜3がすべて保存まで完了（各 1481〜1514 ms）。
+手動露出（1/120秒・ISO 800、`ae_state=0`）の静止画も同じ方式で完了した。
+スマホのサーバには文書20の頁0として JPEG 7,230,339 バイトが届き、SHA-256 は出所情報と一致した。
+
+未確認：明るい場所での紙面の写り、頁めくりによる自動検出、3秒確認の見え方、
+ZSL／録画の評価起動（JPEGを同じセッションに置くため、このファームウェアでは通らない見込み）。
 
 ## 出典 — グラス一次情報索引（2026-09-03）
 

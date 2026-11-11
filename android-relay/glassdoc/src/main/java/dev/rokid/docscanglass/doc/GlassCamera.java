@@ -33,6 +33,7 @@ import androidx.annotation.RequiresPermission;
 
 import java.nio.ByteBuffer;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.Executor;
@@ -60,6 +61,12 @@ final class GlassCamera {
     enum Mode { NATIVE_STILL, ZSL_EVALUATION_YUV, VIDEO_EVALUATION }
 
     private static final String TAG = "DocScanGlassDoc";
+    /** Longest time in each part of the preview frame handler since the last status line. */
+    private final long[] stepNanos = new long[7];
+    /** Starts the repeating preview on a session of this camera run; reused after each still's own session. */
+    private CameraCaptureSession.StateCallback previewSessionCallback;
+    /** True while {@link #previewSession} is the JPEG-only session of one still. */
+    private boolean stillSession;
     private static final long CAPTURE_TIMEOUT_MILLIS = 15_000;
     // Preparation plus JPEG deadline remains below the controller's 30s capture lease.
     private static final long PREPARE_TIMEOUT_MILLIS = 10_000;
@@ -723,6 +730,8 @@ final class GlassCamera {
                                         ? "video evaluation exact YUV/MAX-JPEG/recorder session refused" : "camera YUV/JPEG session refused");
                             }
                         };
+                        previewSessionCallback = sessionCallback;
+                        stillSession = false;
                         if (mode == Mode.ZSL_EVALUATION_YUV) {
                             opened.createReprocessableCaptureSession(new InputConfiguration(jpegSize.getWidth(), jpegSize.getHeight(),
                                     ImageFormat.YUV_420_888), Arrays.asList(previewReader.getSurface(),
@@ -745,7 +754,9 @@ final class GlassCamera {
                             video.sessionSupport("advertised_supported_not_throughput_verified");
                             opened.createCaptureSession(outputs, sessionCallback, handler);
                         } else {
-                            opened.createCaptureSession(Arrays.asList(previewReader.getSurface(), reader.getSurface()),
+                            // The preview alone. On firmware 1.29.013 a session holding the JPEG output beside any
+                            // other output never returns the still (see requestStill), so the JPEG has its own.
+                            opened.createCaptureSession(Collections.singletonList(previewReader.getSurface()),
                                     sessionCallback, handler);
                         }
                     } catch (CameraAccessException | RuntimeException error) { previewFailed(); }
@@ -779,7 +790,9 @@ final class GlassCamera {
             try (Image skipped = source.acquireLatestImage()) { return; }
             catch (RuntimeException ignored) { return; }
         }
+        long s0 = System.nanoTime(), s1 = s0, s2 = s0, s3 = s0, s4 = s0, s5 = s0, s6 = s0;
         try (Image image = source.acquireLatestImage()) {
+            s1 = s2 = s3 = s4 = s5 = s6 = System.nanoTime();
             if (image == null || token != previewGeneration || closed) return;
             long now = SystemClock.elapsedRealtime();
             long timestamp = image.getTimestamp();
@@ -793,6 +806,9 @@ final class GlassCamera {
             lastPreviewSensorTimestamp = timestamp;
             previewSensorTimestamp = timestamp;
             previewAt = realtimeTimestamps ? timestamp / 1_000_000L : now;
+            // Once per frame: on the device each call is a native call, and the loops below made about
+            // 150,000 of them a frame (145-285 ms measured on the glasses on 2026-11-12, 0.5 ms on a PC).
+            int imageWidth = image.getWidth(), imageHeight = image.getHeight();
             Image.Plane luma = image.getPlanes()[0];
             // Copy the plane once. Reading the camera's own buffer a pixel at a time cost about 170 ms a frame
             // on the glasses even when compiled (0.5 ms for the same work on a PC); every reader below
@@ -804,14 +820,17 @@ final class GlassCamera {
             ByteBuffer pixels = ByteBuffer.wrap(previewLuma, 0, planeBytes);
             int row = luma.getRowStride(), step = luma.getPixelStride();
             int origin = pixels.position(); // AGENT_APPROVED=1: same Y-plane origin for observation, guide and preview.
+            s2 = s3 = s4 = s5 = s6 = System.nanoTime();
             byte[] thumbnail = new byte[32 * 24];
             for (int y = 0; y < 24; y++) for (int x = 0; x < 32; x++) {
-                thumbnail[y * 32 + x] = pixels.get(origin + y * image.getHeight() / 24 * row + x * image.getWidth() / 32 * step);
+                thumbnail[y * 32 + x] = pixels.get(origin + y * imageHeight / 24 * row + x * imageWidth / 32 * step);
             }
             long previousScene = pageChange.sequence();
             if (sceneStartTimestamp == 0) sceneStartTimestamp = timestamp;
-            pageChange.observeFrame(thumbnail, pixels, image.getWidth(), image.getHeight(), row, step, timestamp, now);
-            framing.fine(pageChange.fineStatus(), image.getWidth(), image.getHeight());
+            s3 = s4 = s5 = s6 = System.nanoTime();
+            pageChange.observeFrame(thumbnail, pixels, imageWidth, imageHeight, row, step, timestamp, now);
+            s4 = s5 = s6 = System.nanoTime();
+            framing.fine(pageChange.fineStatus(), imageWidth, imageHeight);
             if (video != null && (!videoSceneObserved || previousScene != pageChange.sequence())) {
                 videoSceneObserved = true; video.scene(pageChange.sequence(), timestamp, now);
             }
@@ -833,7 +852,7 @@ final class GlassCamera {
             }
             previewMotion.observe(thumbnail, now);
             PaperGeometry.Box paper = paperTracker == null ? null : paperTracker.observe(
-                    PaperGeometry.candidate(pixels, image.getWidth(), image.getHeight(), row, step), pageChange.sequence());
+                    PaperGeometry.candidate(pixels, imageWidth, imageHeight, row, step), pageChange.sequence());
             if (paperExposure != null && paperExposure.propose(paper, pageChange.sequence())) {
                 // A new scene/region must receive its own actual, fresh AE result before shutter.
                 meteringSensorTimestamp = 0; meteringExposureNanos = 0;
@@ -848,17 +867,19 @@ final class GlassCamera {
             // AUTO/MACRO must start before pageReady can require a focused result.
             if (capturePending || ((pageReady != null || futurePages != null) && pageChange.ready(now))) startAutoFocus();
             // Observe every received frame; only the HUD bitmap is limited to 10 Hz.
+            s5 = s6 = System.nanoTime();
             if (now - previewDisplayAt >= 100) {
                 previewDisplayAt = now;
-                int width = Math.min(320, image.getWidth()), height = Math.max(1, width * image.getHeight() / image.getWidth());
+                int width = Math.min(320, imageWidth), height = Math.max(1, width * imageHeight / imageWidth);
                 int[] display = new int[width * height];
                 for (int y = 0; y < height; y++) for (int x = 0; x < width; x++) {
-                    int gray = pixels.get(origin + y * image.getHeight() / height * row + x * image.getWidth() / width * step) & 255;
+                    int gray = pixels.get(origin + y * imageHeight / height * row + x * imageWidth / width * step) & 255;
                     display[y * width + x] = 0xFF000000 | (gray << 8);
                 }
                 Bitmap frame = Bitmap.createBitmap(display, width, height, Bitmap.Config.RGB_565);
                 if (paperGeometryEvaluation) callback.onPreview(frame, paper); else callback.onPreview(frame);
             }
+            s6 = System.nanoTime();
             if (!capturePending && pageReady != null && pageChange.ready(now) && meteredFrame(now)) {
                 Runnable ready = pageReady;
                 pageReady = null;
@@ -883,6 +904,9 @@ final class GlassCamera {
             previewStatus(now);
         } catch (RuntimeException | OutOfMemoryError error) { previewFailed(); }
         finally {
+            long s7 = System.nanoTime();
+            long[] steps = {s1 - s0, s2 - s1, s3 - s2, s4 - s3, s5 - s4, s6 - s5, s7 - s6};
+            for (int i = 0; i < steps.length; i++) stepNanos[i] = Math.max(stepNanos[i], steps[i]);
             previewFrameDoneAt = SystemClock.elapsedRealtime();
             previewFrameWorkMillis = previewFrameDoneAt - arrived;
         }
@@ -904,7 +928,11 @@ final class GlassCamera {
                 + " page_still=" + pageChange.ready(now) + " metered=" + meteredFrame(now)
                 + " exposure_ns=" + meteringExposureNanos + " motion=" + previewMotion.ready(now)
                 + " fine=" + pageChange.fineMotionReady(now) + " gyro=" + stillness.readyNow()
-                + " camera_ready=" + cameraReady());
+                + " camera_ready=" + cameraReady()
+                + " steps_ms acquire/copy/thumb/observe/misc/display/rest=" + stepNanos[0] / 1_000_000 + "/"
+                + stepNanos[1] / 1_000_000 + "/" + stepNanos[2] / 1_000_000 + "/" + stepNanos[3] / 1_000_000 + "/"
+                + stepNanos[4] / 1_000_000 + "/" + stepNanos[5] / 1_000_000 + "/" + stepNanos[6] / 1_000_000);
+        Arrays.fill(stepNanos, 0);
         statusAt = now; statusFrames = 0; statusWorkMillis = 0; statusGapMillis = 0;
     }
 
@@ -1071,6 +1099,8 @@ final class GlassCamera {
             @Override public void onCaptureFailed(CameraCaptureSession source,
                     CaptureRequest request, CaptureFailure failure) {
                 if (!current()) return;
+                // Frames flushed by this class's own session change are not a camera failure.
+                if (failure != null && failure.getReason() == CaptureFailure.REASON_FLUSHED) return;
                 if (failure != null) Log.w(TAG, "preview frame failed frame=" + failure.getFrameNumber()
                         + " reason=" + failure.getReason() + " image=" + failure.wasImageCaptured());
                 // A dropped preview frame only lacks its metering result; the stream and the next result go on.
@@ -1334,8 +1364,36 @@ final class GlassCamera {
             applyMetering(request);
             if (stillExposure != null) stillExposure.apply(request);
             if (activeAlternative == bracketShot && bracketVariant != null) bracketVariant.apply(request);
-            // capture() takes priority over repeating preview without stopping its next frames.
-            previewSession.capture(request.build(), captureCallback(current), handler);
+            CaptureRequest still = request.build();
+            Log.i(TAG, "still_requested gen=" + current + " manual_exposure=" + (stillExposure != null));
+            if (mode != Mode.NATIVE_STILL) {
+                // capture() takes priority over repeating preview without stopping its next frames.
+                previewSession.capture(still, captureCallback(current), handler);
+                return;
+            }
+            // Measured on the glasses on 2026-11-12 (firmware 1.29.013-20261110, glassprobe variants): with the
+            // JPEG output in the same session as a YUV preview the still never arrives, at any preview size,
+            // with the repeating request stopped, with ZSL off or with a PRIVATE preview added, and the camera
+            // provider aborts about 10 s later. A session holding only the JPEG output returned 4 of 4 stills,
+            // about 0.8 s to reconfigure and 0.8 s to capture. The 2026-09-27 firmware took both in one session.
+            long token = previewGeneration;
+            previewDevice.createCaptureSession(Collections.singletonList(reader.getSurface()),
+                    new CameraCaptureSession.StateCallback() {
+                        @Override public void onConfigured(CameraCaptureSession configured) {
+                            if (!active(current) || token != previewGeneration || unknown) { configured.close(); return; }
+                            previewSession = configured;
+                            stillSession = true;
+                            Log.i(TAG, "still_session gen=" + current + " after_ms=" + (SystemClock.elapsedRealtime() - startedAtMillis));
+                            try { configured.capture(still, captureCallback(current), handler); }
+                            catch (CameraAccessException | RuntimeException error) {
+                                fail("capture " + error.getClass().getSimpleName());
+                            }
+                        }
+                        @Override public void onConfigureFailed(CameraCaptureSession failed) {
+                            failed.close();
+                            if (active(current)) fail("still session refused");
+                        }
+                    }, handler);
         } catch (CameraAccessException | RuntimeException | OutOfMemoryError error) {
             fail("capture " + error.getClass().getSimpleName());
         }
@@ -1523,6 +1581,19 @@ final class GlassCamera {
         if (!associationResolved && alternative != bracketShot) previewFailed(mode == Mode.ZSL_EVALUATION_YUV
                 ? "ZSL original timestamp mismatch" : "native original exposure metadata unresolved");
         futureIdle();
+        resumePreviewSession();
+    }
+
+    /** After a still's own session, put the repeating preview back on the same open camera. */
+    private void resumePreviewSession() {
+        if (!stillSession) return;
+        stillSession = false;
+        if (closed || unknown || !previewRequested || previewDevice == null || previewReader == null
+                || previewSessionCallback == null) return;
+        try {
+            previewDevice.createCaptureSession(Collections.singletonList(previewReader.getSurface()),
+                    previewSessionCallback, handler);
+        } catch (CameraAccessException | RuntimeException error) { previewFailed("preview unavailable after still"); }
     }
 
     private static final class RejectedJpeg extends RuntimeException {

@@ -1455,16 +1455,40 @@ public class GlassCameraWarmSessionTest {
         idle(100); result(CONTROL_AF_STATE_FOCUSED_LOCKED, CONTROL_AE_STATE_CONVERGED); frame(180); idle(50);
         assertEquals(1, ready.get()); assertEquals(precedingCaptures + 2, session.captures);
         assertEquals(CameraDevice.TEMPLATE_STILL_CAPTURE, ((RequestShadow)Shadow.extract(session.captured)).template);
-        assertEquals(1, currentDevice().configurations);
+        assertEquals("the still has a session of its own", List.of(currentReader(ImageFormat.JPEG).surface), currentDevice().outputs);
     }
 
-    @Test public void warmedPreviewFocusAndLargestJpegUseOneDeviceAndOneSession() {
+    /**
+     * On the glasses the frame handler asked the image for its width and height once per pixel: about 150,000
+     * native calls and 145-285 ms a frame (2026-11-12), 0.5 ms here, so three frames a second were handled.
+     */
+    @Test public void aPreviewFrameAsksTheImageForItsSizeOnce() {
+        camera.preview(); idle(100);
+        frame(180);
+        DocScanTestImage image = (DocScanTestImage) currentReader(ImageFormat.YUV_420_888).image;
+        assertTrue("size and plane queries in one frame: " + image.nativeCalls, image.nativeCalls <= 3);
+        assertTrue(failures.isEmpty());
+    }
+
+    /**
+     * Glasses firmware 1.29.013 (2026-11-12): a session holding the JPEG output beside the preview never
+     * returns the still. The preview and each still therefore have sessions of their own on one open camera.
+     */
+    @Test public void warmedPreviewAndLargestJpegUseOneDeviceAndTheStillItsOwnSession() {
         camera.preview(); idle(100); readyFrame();
         DocScanTestCamera device = firstDevice();
+        List<Surface> preview = List.of(originalReader(ImageFormat.YUV_420_888).surface);
+        List<Surface> still = List.of(originalReader(ImageFormat.JPEG).surface);
+        assertEquals(List.of(preview), device.configured);
         camera.captureOnce(); camera.captureOnce(); idle(400); readyFrame(); idle(50);
-        assertEquals(1, ManagerShadow.devices.size()); assertEquals(1, device.configurations);
-        assertEquals(2, device.outputs.size()); assertEquals(1, device.session.captures);
+        assertEquals(1, ManagerShadow.devices.size()); assertEquals(List.of(preview, still), device.configured);
+        assertEquals(1, device.session.captures);
         assertFalse(device.closed); assertFalse(device.session.repeatingStopped);
+        // Preview frames flushed by the change of session are not a camera failure.
+        android.hardware.camera2.CaptureFailure flushed = Shadow.newInstanceOf(android.hardware.camera2.CaptureFailure.class);
+        org.robolectric.util.ReflectionHelpers.setField(flushed, "mReason", android.hardware.camera2.CaptureFailure.REASON_FLUSHED);
+        device.session.previewCallback.onCaptureFailed(device.session, device.session.repeating, flushed);
+        assertTrue(failures.isEmpty());
         RequestShadow request = Shadow.extract(device.session.captured);
         assertEquals(CameraDevice.TEMPLATE_STILL_CAPTURE, request.template);
         assertEquals(0, request.values.get(CaptureRequest.JPEG_ORIENTATION.getName()));
@@ -1475,6 +1499,7 @@ public class GlassCameraWarmSessionTest {
         jpeg.listener.onImageAvailable(jpeg.reader); idle(0);
         assertEquals(1, delivered); assertFalse(device.closed); assertFalse(jpeg.closed);
         assertFalse(originalReader(ImageFormat.YUV_420_888).closed);
+        assertEquals("the preview returns after the still", List.of(preview, still, preview), device.configured);
         camera.pausePreview(); idle(0);
         assertTrue(device.closed); assertTrue(device.session.closed); assertTrue(jpeg.closed);
         assertTrue(originalReader(ImageFormat.YUV_420_888).closed);
@@ -1496,7 +1521,7 @@ public class GlassCameraWarmSessionTest {
         assertEquals(0, ready.get());
         readyFrame(); assertEquals(1, ready.get());
         assertEquals(1, delivered); assertEquals(1, device.session.captures);
-        assertEquals(1, ManagerShadow.devices.size()); assertEquals(1, device.configurations);
+        assertEquals(1, ManagerShadow.devices.size()); assertEquals(3, device.configurations);
         assertFalse(jpeg.closed); assertFalse(originalReader(ImageFormat.YUV_420_888).closed);
         assertTrue(failures.isEmpty());
     }

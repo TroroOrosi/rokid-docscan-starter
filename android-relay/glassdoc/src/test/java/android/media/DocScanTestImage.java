@@ -14,12 +14,14 @@ public final class DocScanTestImage extends Image {
     public int rowStride;
     public int pixelStride;
     public long timestamp = 10L;
+    /** On a device each size or plane query is a native call. */
+    public int nativeCalls;
     public boolean memoryFailure;
     public boolean timestampMemoryFailure;
     public DocScanTestImage(List<String> events) { this.events = events; }
     @Override public int getFormat() { return format; }
-    @Override public int getWidth() { return width; }
-    @Override public int getHeight() { return height; }
+    @Override public int getWidth() { nativeCalls++; return width; }
+    @Override public int getHeight() { nativeCalls++; return height; }
     @Override public long getTimestamp() {
         if (timestampMemoryFailure) throw new OutOfMemoryError("synthetic timestamp failure");
         return timestamp;
@@ -28,6 +30,7 @@ public final class DocScanTestImage extends Image {
     @Override public void close() { events.add("image.close"); }
     @Override public Plane[] getPlanes() {
         if (memoryFailure) throw new OutOfMemoryError("synthetic allocation failure");
+        nativeCalls++;
         return new Plane[]{new Plane() {
             @Override public int getRowStride() { return rowStride; }
             @Override public int getPixelStride() { return pixelStride; }

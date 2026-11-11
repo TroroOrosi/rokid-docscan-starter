@@ -207,8 +207,15 @@ speed verification and uncertain-send safeguards apply to both answer speeds.
   observation continues across idle waits without a resume tap. Explicit end,
   lifecycle stop and failure boundaries still stop the camera. A previous
   `manual=true` does not carry over to a normal launch.
-  The same preview camera/session supplies the full-size JPEG after fresh
-  supported focus/exposure and stillness checks. Fixed-focus hardware does not
+  The same open camera supplies the full-size JPEG after fresh supported
+  focus/exposure and stillness checks, on a JPEG-only session of its own; the
+  preview session is put back afterwards. On firmware `1.29.013-20261110` a
+  session holding the JPEG output beside any other output never returned the
+  still and the camera provider aborted (`docs/hardware-measurements.md` §M,
+  2026-11-12). With this, glassdoc 0.43.10 took and saved stills on the glasses
+  in 1.5-1.7 s, three runs and four in one session, in a dark scene; what a
+  page looks like in them is not measured. The ZSL and recording evaluation
+  launches still put the JPEG beside other outputs. Fixed-focus hardware does not
   gain autofocus from an AF trigger. Expired preparation never forces a
   moving shot. Before any camera request it is a cancelled preparation: the
   wearer is told to hold still, the session continues and the same page is
@@ -627,6 +634,13 @@ For changes to the real-device path:
 
 An Android build proves compilation only. Do not label hardware behavior as
 verified until the physical checklist has been completed.
+
+After any change to the glasses' camera path, and before the wearer is asked to
+try it, run `py -3.12 scripts/glasses_capture_smoke.py --serial <glasses>`. It
+starts the installed app over adb, sends the start tap and passes only when a
+full-size photo is taken and saved with the preview handler under 100 ms. The
+unit tests use a fake camera; from 2026-11-01 to 2026-11-11 the camera path was
+changed on those tests alone and took no photo on the device.
 
 ## Versioning
 

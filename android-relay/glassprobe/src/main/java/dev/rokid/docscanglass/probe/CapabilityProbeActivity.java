@@ -97,6 +97,8 @@ public final class CapabilityProbeActivity extends Activity {
                 this, new Handler(cameraThread.getLooper()), this::onCameraResult);
 
         serverBaseUrl = getIntent() == null ? null : getIntent().getStringExtra(EXTRA_SERVER);
+        String variant = getIntent() == null ? null : getIntent().getStringExtra("camera_variant");
+        CameraProbe.variant = variant == null ? "" : variant;
 
         recordDisplay();
         record(P2, ProbeReport.Status.PENDING, CameraProbe.describeCameras(this));
