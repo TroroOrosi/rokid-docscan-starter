@@ -65,6 +65,10 @@ public final class DocScanGlassActivity extends Activity
     private static final String EXTRA_KEY = "key";
     private static final String EXTRA_GUIDE = "guide";
     private static final String EXTRA_SPREAD = "spread";
+    /** Saved pixels kept dark below every screen, from {@code --ei bottom_margin}; fits the panel to the wearer. */
+    private static final String EXTRA_BOTTOM_MARGIN = "bottom_margin";
+    /** Half the measured 640 px panel: the margin can lift the screens, never remove them. */
+    static final int MAX_BOTTOM_MARGIN = 320;
     /** Diagnostic override for this launch only; normal launches always capture automatically. */
     private static final String EXTRA_MANUAL = "manual";
     private static final String EXTRA_ZSL_EVALUATION = "zsl_evaluation";
@@ -228,6 +232,7 @@ public final class DocScanGlassActivity extends Activity
 
         hud = new HudView(this);
         setContentView(hud);
+        raiseScreens(getPreferences(MODE_PRIVATE).getInt(EXTRA_BOTTOM_MARGIN, 0));
         answerStore = new AnswerStore(getFilesDir());
         connectionSettings = new ConnectionSettings(new File(getNoBackupFilesDir(), "connection.bin"));
         choosingSession = true;
@@ -339,6 +344,13 @@ public final class DocScanGlassActivity extends Activity
         applyIntent(intent, false);
     }
 
+    /** The chooser, capture and answers all live in the content frame, so one padding moves them together. */
+    private void raiseScreens(int pixels) {
+        android.view.View content = findViewById(android.R.id.content);
+        content.setBackgroundColor(android.graphics.Color.BLACK); // black draws nothing on the glasses
+        content.setPadding(0, 0, 0, pixels);
+    }
+
     private void applyIntent(Intent intent, boolean starting) {
         if (intent != null && intent.hasExtra(EXTRA_SPREAD)) {
             boolean spread = intent.getBooleanExtra(EXTRA_SPREAD, false);
@@ -366,6 +378,12 @@ public final class DocScanGlassActivity extends Activity
                 hud.calibrateGuide(fraction);
                 getPreferences(MODE_PRIVATE).edit().putFloat(EXTRA_GUIDE, fraction).apply();
             }
+        }
+        if (intent != null && intent.getExtras() != null
+                && intent.getExtras().get(EXTRA_BOTTOM_MARGIN) instanceof Integer) {
+            int margin = Math.max(0, Math.min(MAX_BOTTOM_MARGIN, intent.getIntExtra(EXTRA_BOTTOM_MARGIN, 0)));
+            raiseScreens(margin);
+            getPreferences(MODE_PRIVATE).edit().putInt(EXTRA_BOTTOM_MARGIN, margin).apply();
         }
         // A guide-only Intent must not reset an active capture or review.
         if (starting || (intent != null

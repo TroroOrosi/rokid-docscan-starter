@@ -916,6 +916,7 @@ final class GlassCamera {
         if (closed || unknown) return;
         if (video != null) video.gap(reason);
         if (generation > 0 && active(generation)) { fail(reason); return; }
+        Log.w(TAG, "preview failed: " + reason);
         previewRequested = false;
         previewOpening = false;
         unknown = true;
@@ -1024,7 +1025,10 @@ final class GlassCamera {
             }
             @Override public void onCaptureFailed(CameraCaptureSession source,
                     CaptureRequest request, CaptureFailure failure) {
-                if (current()) previewFailed("camera metering failed");
+                if (!current()) return;
+                if (failure != null) Log.w(TAG, "preview frame failed frame=" + failure.getFrameNumber()
+                        + " reason=" + failure.getReason() + " image=" + failure.wasImageCaptured());
+                previewFailed("camera metering failed");
             }
         };
     }

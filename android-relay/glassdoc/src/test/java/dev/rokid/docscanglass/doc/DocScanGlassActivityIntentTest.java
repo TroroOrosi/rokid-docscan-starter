@@ -140,6 +140,34 @@ public class DocScanGlassActivityIntentTest {
         assertEquals(0, server.getRequestCount());
     }
 
+    /** The wearer cannot see the lowest part of the panel: every screen is laid out above a saved margin. */
+    @Test
+    public void bottomMarginIntentRaisesEveryScreenAndPersistsWhileCaptureRemainsArmed() throws Exception {
+        controller.captureNextPage();
+        updates.awaitState(RelayState.AIMING);
+        android.view.View content = activity.findViewById(android.R.id.content);
+
+        activity.onNewIntent(new Intent().putExtra("bottom_margin", 125));
+        awaitControllerBarrier();
+
+        assertEquals(125, content.getPaddingBottom());
+        assertEquals(125, activity.getPreferences(Context.MODE_PRIVATE).getInt("bottom_margin", -1));
+        assertEquals("the strip below the screens must stay dark", android.graphics.Color.BLACK,
+                ((android.graphics.drawable.ColorDrawable) content.getBackground()).getColor());
+        assertEquals(RelayState.AIMING, controller.getState());
+
+        activity.onNewIntent(new Intent());
+        activity.onNewIntent(new Intent().putExtra("bottom_margin", "40"));
+        assertEquals("an Intent without an integer margin keeps the saved one", 125, content.getPaddingBottom());
+
+        activity.onNewIntent(new Intent().putExtra("bottom_margin", 9999));
+        assertEquals(DocScanGlassActivity.MAX_BOTTOM_MARGIN, content.getPaddingBottom());
+        activity.onNewIntent(new Intent().putExtra("bottom_margin", -5));
+        assertEquals(0, content.getPaddingBottom());
+        assertEquals(0, activity.getPreferences(Context.MODE_PRIVATE).getInt("bottom_margin", -1));
+        assertEquals(0, server.getRequestCount());
+    }
+
     @Test public void ordinaryNewIntentRevokesComparisonTransferWithoutCarryingAnySavedFlag() throws Exception {
         CaptureVideoTransfer transfer=new CaptureVideoTransfer(activity.getFilesDir(),() -> null,null);
         setField(activity,"videoTransfer",transfer); setField(activity,"comparisonTransferEnabled",true);
