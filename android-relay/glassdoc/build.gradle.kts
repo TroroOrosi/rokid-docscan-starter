@@ -82,8 +82,9 @@ android {
         // 53 distinguishes display wraps from source newlines without changing answer text.
         // 59 is not debuggable: on the glasses a debuggable build ran interpreted only (2026-11-11).
         // 60 copies the preview plane once per frame and paces frames so results are not starved.
-        versionCode = 60
-        versionName = "0.43.8"
+        // 61 keeps the session when the HAL drops a preview frame before any still is requested.
+        versionCode = 61
+        versionName = "0.43.9"
     }
 
     // Same reasoning as `:glassapp`: a vendor installer that reads JAR

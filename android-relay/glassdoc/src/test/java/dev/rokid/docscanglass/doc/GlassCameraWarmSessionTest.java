@@ -1538,6 +1538,20 @@ public class GlassCameraWarmSessionTest {
         assertTrue(failures.isEmpty());
     }
 
+    /** Glasses, 2026-11-11/12: the HAL drops a frame or two about a second after every stream start. */
+    @Test public void aDroppedPreviewFrameBeforeAnyStillIsNotTheEndOfTheSession() {
+        camera.preview(); idle(100); frame(180);
+        var device = firstDevice();
+        device.session.previewCallback.onCaptureFailed(device.session, device.session.repeating, null);
+        assertTrue(failures.isEmpty());
+        assertFalse((Boolean)ReflectionHelpers.getField(camera, "unknown"));
+        assertFalse(device.closed);
+
+        camera.captureOnce(); idle(100); readyFrame(); idle(400); readyFrame(); idle(50);
+        assertEquals("the same stream still leads to a still", 1, device.session.captures);
+        assertTrue(failures.isEmpty());
+    }
+
     @Test public void aRetainedPreviewFailureSettlesAnInFlightStillOnlyOnce() {
         camera.captureOnce(); idle(100); readyFrame(); idle(400); readyFrame(); idle(50);
         var device = firstDevice();

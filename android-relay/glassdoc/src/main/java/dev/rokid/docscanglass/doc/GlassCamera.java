@@ -774,7 +774,11 @@ final class GlassCamera {
         // back to back, slow frames kept the metering results and gyro readings queued behind them until
         // they were no longer fresh: on 2026-11-11 the glasses took no still in 143 s (`metered=false`).
         long arrived = SystemClock.elapsedRealtime();
-        if (arrived >= previewFrameDoneAt && arrived - previewFrameDoneAt < previewFrameWorkMillis) return;
+        if (arrived >= previewFrameDoneAt && arrived - previewFrameDoneAt < previewFrameWorkMillis) {
+            // Return the waiting buffers: a full reader is what makes the HAL drop frames.
+            try (Image skipped = source.acquireLatestImage()) { return; }
+            catch (RuntimeException ignored) { return; }
+        }
         try (Image image = source.acquireLatestImage()) {
             if (image == null || token != previewGeneration || closed) return;
             long now = SystemClock.elapsedRealtime();
@@ -1069,7 +1073,11 @@ final class GlassCamera {
                 if (!current()) return;
                 if (failure != null) Log.w(TAG, "preview frame failed frame=" + failure.getFrameNumber()
                         + " reason=" + failure.getReason() + " image=" + failure.wasImageCaptured());
-                previewFailed("camera metering failed");
+                // A dropped preview frame only lacks its metering result; the stream and the next result go on.
+                // The glasses drop one or two about a second after every stream start (2026-11-11/12), and
+                // ending the session for that left the wearer with no photo at all. A still in flight keeps
+                // its earlier, stricter handling.
+                if (generation > 0 && active(generation)) previewFailed("camera metering failed");
             }
         };
     }
