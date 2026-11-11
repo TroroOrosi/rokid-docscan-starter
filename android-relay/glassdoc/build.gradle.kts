@@ -80,8 +80,9 @@ android {
         // 46 adds explicit provisional paper/AE comparison and respects Y-plane buffer origins.
         // 48 fences stale power callbacks and consumes bounded current-capture feedback.
         // 53 distinguishes display wraps from source newlines without changing answer text.
-        versionCode = 58
-        versionName = "0.43.6"
+        // 59 is not debuggable: on the glasses a debuggable build ran interpreted only (2026-11-11).
+        versionCode = 59
+        versionName = "0.43.7"
     }
 
     // Same reasoning as `:glassapp`: a vendor installer that reads JAR
@@ -94,6 +95,13 @@ android {
     }
 
     buildTypes {
+        debug {
+            // Measured on firmware 1.29.013: a debuggable APK stayed at dexopt `verify` after
+            // `cmd package compile -m speed`, its JIT thread used 0.01 s in a 55 s capture, and each
+            // preview frame took about 600 ms on the camera thread, so no still was ever taken.
+            // `-PglassdocDebuggable` restores `run-as` for reading the app's files during development.
+            isDebuggable = providers.gradleProperty("glassdocDebuggable").isPresent
+        }
         release {
             isMinifyEnabled = false
         }
