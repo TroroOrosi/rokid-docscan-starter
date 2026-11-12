@@ -601,7 +601,13 @@ public final class DocScanGlassActivity extends Activity
             return;
         }
         if (reader != null) {
-            if (action == GlassesInputAction.SHORT_TAP) { if (mixedMode) toggleAudio(); return; }
+            // One tap clears the answers from view and the next gesture of any kind brings them back
+            // (operator, 2026-11-12). Mixed English keeps its tap for the recording.
+            if (answersHidden) { showAnswers(true); return; }
+            if (action == GlassesInputAction.SHORT_TAP) {
+                if (mixedMode) toggleAudio(); else showAnswers(false);
+                return;
+            }
             if (action == GlassesInputAction.BACK) {
                 if (reader.screen() != AnswerReader.Screen.ANSWER) {
                     reader.back();
@@ -680,7 +686,22 @@ public final class DocScanGlassActivity extends Activity
             }
             return;
         }
+        if (!mixedMode && !listeningMode) {
+            // Operator, 2026-11-12: one tap pauses the display and the camera, the next resumes. The forward
+            // swipe takes over what the tap did: a photo while waiting, a retake during the 3-second review.
+            if (controller.isCapturePaused() && action != GlassesInputAction.SHORT_TAP
+                    && action != GlassesInputAction.BACK) return;
+            if (action == GlassesInputAction.SHORT_TAP) { controller.toggleCapturePause(); return; }
+            if (action == GlassesInputAction.SWIPE_FORWARD) action = GlassesInputAction.SHORT_TAP;
+        }
         controller.onGlassesAction(action, elapsedMillis);
+    }
+
+    private boolean answersHidden;
+
+    private void showAnswers(boolean visible) {
+        answersHidden = !visible;
+        answers.setVisibility(visible ? android.view.View.VISIBLE : android.view.View.INVISIBLE);
     }
 
     private List<String> startupOptions() {
@@ -1293,6 +1314,7 @@ public final class DocScanGlassActivity extends Activity
         }
         if (reader != null && reader.hasViewport()) recordAcknowledgedRevision(reader.bundle());
         reader = null;
+        answersHidden = false;
         answers = null;
         setContentView(hud);
         return true;

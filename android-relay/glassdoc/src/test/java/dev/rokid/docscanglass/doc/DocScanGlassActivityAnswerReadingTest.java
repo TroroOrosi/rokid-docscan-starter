@@ -710,8 +710,13 @@ public class DocScanGlassActivityAnswerReadingTest {
         assertEquals("derivation", question);
         assertTrue("resume is within the long solution, not its first character", offset > 0);
         DrawnSlide beforeRestart = new DrawnSlide(view);
+        // Operator, 2026-11-12: one tap clears the answers from view; the next gesture only brings them back.
         invokeOnAction(GlassesInputAction.SHORT_TAP);
         assertEquals("a tap does not hide continuous writing in an index", AnswerReader.Screen.ANSWER, reader.screen());
+        assertEquals(android.view.View.INVISIBLE, view.getVisibility());
+        invokeOnAction(GlassesInputAction.SWIPE_FORWARD);
+        assertEquals(android.view.View.VISIBLE, view.getVisibility());
+        assertEquals("the gesture that restores the display does not turn the page", 2, reader.pageNumber());
         invokeOnAction(GlassesInputAction.SWIPE_FORWARD);
         assertEquals(3, reader.pageNumber());
         invokeOnAction(GlassesInputAction.SWIPE_BACK);

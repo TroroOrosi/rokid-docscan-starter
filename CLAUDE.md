@@ -197,9 +197,13 @@ speed verification and uncertain-send safeguards apply to both answer speeds.
   through `relaycore`'s `DocScanController`.
 - **The decided capture method is automatic scanning** (operator, 2026-09-15).
   `docs/fast-scan-decisions.md` defines it: the glasses detect the page and
-  shoot on their own, the captured image is shown for 3 seconds, a single tap
-  in that window retakes, no input commits it and moves to the next page, and a
-  double tap ends the capture phase. Zero phone operations after setup.
+  shoot on their own, the captured image is shown for 3 seconds, no input
+  commits it and moves to the next page, and a double tap ends the capture
+  phase. Zero phone operations after setup. On 2026-11-12 the operator asked
+  for one tap to clear the display and stop the camera and one tap to bring
+  them back; in ordinary reading the retake and the manual shot, which the tap
+  did until then, moved to the forward swipe. Mixed English and listening keep
+  the earlier assignment. `docs/multimodal-scan.md` holds the operation table.
 - **The existing loop is enabled only on `:glassdoc`.** Page change is latched
   until stillness permits one shot; OCR character count and burst scoring are
   not capture conditions. Actual review lasts three seconds, then local save
@@ -214,7 +218,10 @@ speed verification and uncertain-send safeguards apply to both answer speeds.
   still and the camera provider aborted (`docs/hardware-measurements.md` §M,
   2026-11-12). With this, glassdoc 0.43.10 took and saved stills on the glasses
   in 1.5-1.7 s, three runs and four in one session, in a dark scene; what a
-  page looks like in them is not measured. The ZSL and recording evaluation
+  page looks like in them is not measured. In a lit scene that version took an
+  unmoving page again and again, because the returning preview starts its
+  exposure over; 0.43.12 does not count frames as page evidence until a fresh
+  converged result arrives (§M-4). Each still leaves about 3 s without preview. The ZSL and recording evaluation
   launches still put the JPEG beside other outputs. Fixed-focus hardware does not
   gain autofocus from an AF trigger. Expired preparation never forces a
   moving shot. Before any camera request it is a cancelled preparation: the
@@ -283,10 +290,13 @@ speed verification and uncertain-send safeguards apply to both answer speeds.
   requires its own visible acknowledgement and review before upload. Observation
   is reserved durably before native start. Unknown captures, failed persistence
   and suspected gaps survive restart; only an acknowledged ordinary stop can
-  clear a resolved observation. A single tap retakes, no input commits, BACK ends
+  clear a resolved observation. A forward swipe retakes, no input commits, BACK ends
   capture after the last review. Hidden or stale views cannot commit. A waiting
-  tap first waits for the native stop barrier and promotes any saved candidate
-  before requesting a manual shot. One photo remains in flight at most. This
+  forward swipe first waits for the native stop barrier and promotes any saved
+  candidate before requesting a manual shot. A tap pauses: the photo in hand is
+  saved first, then the camera closes and nothing is drawn until the next tap;
+  the same page is not taken again on return (on the glasses, 2026-11-12,
+  `docs/hardware-measurements.md` §M-4). One photo remains in flight at most. This
   does not establish whole-booklet coverage or physical readability. See
   `docs/multimodal-scan.md`.
 - The standalone app keeps the previous listening-only flow and adds mixed

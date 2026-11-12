@@ -552,7 +552,9 @@ EXPLAINER_API_VERSION = "1.1.0"
 # 1.43.0: sensor-time stillness, checked native exposure and bounded long-answer reading.
 # 1.43.1: keep displayed fractions atomic and hold ambiguous unsupported notation.
 # 1.43.2: preserve unsupported table blocks and whole matrix-bearing expressions.
-GLASSES_VIEW_CONTRACT_VERSION = "1.43.2"
+# 1.44.0: in ordinary reading one tap pauses and resumes the display and camera; the forward swipe
+#         takes the manual shot and the retake; a tap hides the answers while reading them.
+GLASSES_VIEW_CONTRACT_VERSION = "1.44.0"
 
 # Answer-area overlay payload (box + short answer; 2D image-anchored).
 # 1.1.0: added tracking metadata (tracking/fixed_ar/anchor_hint).

@@ -391,6 +391,8 @@ public class GlassCameraWarmSessionTest {
             @Override public void onCandidate(byte[] jpeg, CaptureProvenance source, boolean sameScene) { }
             @Override public void onPageMissed() { fail("available next-page capacity must be retained"); }
         }); idle(0);
+        // The preview that returned after the still has settled: its frames count as page evidence again.
+        result(CONTROL_AF_STATE_PASSIVE_FOCUSED, CONTROL_AE_STATE_CONVERGED);
         frame(180, true); idle(30); frame(180);
         SensorManager manager = (SensorManager)RuntimeEnvironment.getApplication().getSystemService(android.content.Context.SENSOR_SERVICE);
         motionFrames(shadowOf(manager), 0f, 10);
@@ -1462,6 +1464,28 @@ public class GlassCameraWarmSessionTest {
      * On the glasses the frame handler asked the image for its width and height once per pixel: about 150,000
      * native calls and 145-285 ms a frame (2026-11-12), 0.5 ms here, so three frames a second were handled.
      */
+    /**
+     * After a still the preview starts its exposure over. Its unsettled frames were read as page turns and the
+     * same unmoving page was taken five times in 15 s on the glasses (2026-11-12).
+     */
+    @Test public void framesOfTheReturningPreviewAreNotPageEvidenceUntilItsExposureHasSettled() {
+        camera.captureOnce(); idle(100); readyFrame(); idle(400); readyFrame(); idle(50);
+        ReaderShadow jpeg = originalReader(ImageFormat.JPEG);
+        jpeg.image = new DocScanTestImage(new ArrayList<>());
+        jpeg.listener.onImageAvailable(jpeg.reader); idle(0);
+        assertEquals(1, delivered);
+        PageChange pages = ReflectionHelpers.getField(camera, "pageChange");
+        long scene = pages.sequence();
+        idle(CameraReadiness.FRESH_MILLIS + 1); // no fresh result yet: the exposure is still moving
+        frame(40); idle(30); frame(90); idle(30);
+        assertEquals("unsettled frames are not a page turn", scene, pages.sequence());
+        readyFrame();
+        assertEquals("the same page, settled, is not a turn either", scene, pages.sequence());
+        idle(100); result(CONTROL_AF_STATE_PASSIVE_FOCUSED, CONTROL_AE_STATE_CONVERGED); frame(180, true);
+        assertEquals("a real turn after that is seen", scene + 1, pages.sequence());
+        assertTrue(failures.isEmpty());
+    }
+
     @Test public void aPreviewFrameAsksTheImageForItsSizeOnce() {
         camera.preview(); idle(100);
         frame(180);

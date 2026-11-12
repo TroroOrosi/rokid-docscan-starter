@@ -162,6 +162,8 @@ public final class DocScanController implements AutoCloseable {
     private long autoRunGeneration;
     private long futureCaptureEpoch;
     private boolean futureWatching;
+    /** The wearer's pause: no camera, no page observation and an empty display until the next tap. */
+    private volatile boolean capturePaused;
     private volatile boolean futureStopping;
     private boolean reacquiringCaptureGap;
     private volatile boolean localCameraUnknown;
@@ -781,8 +783,50 @@ public final class DocScanController implements AutoCloseable {
         }
     }
 
+    /**
+     * One tap during local capture (operator, 2026-11-12): the display clears and the camera stops; the next
+     * tap brings both back. A photo being taken or reviewed is finished and saved first, so nothing is lost
+     * or left unreviewed. The same page is not taken again on return; a different one is.
+     */
+    public void toggleCapturePause() {
+        try {
+            serial.execute(() -> {
+                if (!link.supportsLocalCaptureReview() || localCameraUnknown || finishCaptureRequested
+                        || state == RelayState.FINALIZING || state == RelayState.UPLOADING
+                        || state == RelayState.REVIEW || state == RelayState.ERROR) return;
+                if (capturePaused) {
+                    capturePaused = false;
+                    if (state == RelayState.READY || state == RelayState.READING) {
+                        publishAutoWaiting("撮影を再開しました", "", "Capture resumed by the wearer");
+                        waitForNextPage();
+                    }
+                    return;
+                }
+                capturePaused = true;
+                if (state == RelayState.READY || state == RelayState.READING) pauseCaptureNow();
+            });
+        } catch (RejectedExecutionException ignored) {
+            // The activity is already closing.
+        }
+    }
+
+    public boolean isCapturePaused() { return capturePaused; }
+
+    private void pauseCaptureNow() {
+        autoRunGeneration++; // a page-ready callback already on its way must not arm a photo
+        stopFutureObservation(() -> {
+            if (!capturePaused || finishCaptureRequested || localCameraUnknown) return;
+            // A page saved while this stop was in flight is reviewed first; its commit returns here.
+            if (captureReview.hasPending() || promoteFutureCandidate()) return;
+            link.pausePreview();
+            publish(documentId > 0 ? RelayState.READING : RelayState.READY, List.of("", "", ""),
+                    "Capture paused by the wearer");
+        });
+    }
+
     private void finishLocalCaptureNow() {
         invalidateInspectionFeedback();
+        capturePaused = false;
         finishCaptureRequested = true;
         autoRunGeneration++;
         stopFutureObservation(this::finishLocalCaptureWhenCameraIdle);
@@ -2462,7 +2506,7 @@ public final class DocScanController implements AutoCloseable {
                         "登録はスマホのボタン");
         if (link.supportsLocalCaptureReview()) {
             lines = armAutoCommit
-                    ? List.of(page + " 撮影確認", "3秒以内のタップで撮り直し",
+                    ? List.of(page + " 撮影確認", "3秒以内の前スワイプで撮り直し",
                             pending.isFramingFailing() ? "範囲を確認してください" : "無操作で確定")
                     : List.of(page + " 写真を保全しています", "ダブルタップで再送", "タップで撮り直し");
         }
@@ -2530,6 +2574,7 @@ public final class DocScanController implements AutoCloseable {
     }
 
     private void waitForNextPage() {
+        if (capturePaused && !finishCaptureRequested && !captureLease.isUnresolved()) { pauseCaptureNow(); return; }
         if (!autoCaptureEnabled || finishCaptureRequested || captureLease.isUnresolved()) return;
         // Keep observing throughout capture; only an explicit stop or a fault
         // ends the wait. An unchanged page does not require a resume gesture.
@@ -2548,7 +2593,7 @@ public final class DocScanController implements AutoCloseable {
         publish(
                 documentId > 0 ? RelayState.READING : RelayState.READY,
                 List.of(first, second, link.supportsLocalCaptureReview()
-                        ? "タップ撮影・ダブルタップ終了" : "停止はスマホ"),
+                        ? "タップ休止・ダブルタップ終了" : "停止はスマホ"),
                 diagnostic);
     }
 

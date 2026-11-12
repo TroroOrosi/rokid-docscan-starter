@@ -83,8 +83,8 @@ android {
         // 59 is not debuggable: on the glasses a debuggable build ran interpreted only (2026-11-11).
         // 60 copies the preview plane once per frame and paces frames so results are not starved.
         // 61 keeps the session when the HAL drops a preview frame before any still is requested.
-        versionCode = 62
-        versionName = "0.43.10"
+        versionCode = 64
+        versionName = "0.43.12"
     }
 
     // Same reasoning as `:glassapp`: a vendor installer that reads JAR

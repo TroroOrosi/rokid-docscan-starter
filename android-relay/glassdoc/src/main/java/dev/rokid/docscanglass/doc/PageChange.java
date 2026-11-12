@@ -90,6 +90,7 @@ final class PageChange {
             capturedReference = true;
         }
     }
+    boolean hasCapturedPage() { return capturedReference; }
     boolean fineMotionReady(long now) { return fine.motionReady(now); }
     String fineStatus() { return fine.status(); }
     void restartStream() {

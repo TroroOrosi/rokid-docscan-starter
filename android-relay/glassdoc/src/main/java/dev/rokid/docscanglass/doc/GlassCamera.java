@@ -67,6 +67,13 @@ final class GlassCamera {
     private CameraCaptureSession.StateCallback previewSessionCallback;
     /** True while {@link #previewSession} is the JPEG-only session of one still. */
     private boolean stillSession;
+    /**
+     * Set when the preview returns after a still: its exposure starts over, and until it has settled the
+     * frames differ from the page just taken. Observed as page turns they took the same page again and
+     * again, five photos in 15 s of an unmoving scene on the glasses (2026-11-12, scene 3, 4, 6, 7, 9...).
+     */
+    private long resumeSettlingSince;
+    static final long RESUME_SETTLE_LIMIT_MILLIS = 2000;
     private static final long CAPTURE_TIMEOUT_MILLIS = 15_000;
     // Preparation plus JPEG deadline remains below the controller's 30s capture lease.
     private static final long PREPARE_TIMEOUT_MILLIS = 10_000;
@@ -732,6 +739,9 @@ final class GlassCamera {
                         };
                         previewSessionCallback = sessionCallback;
                         stillSession = false;
+                        // A camera opened again after the wearer's pause starts its exposure over too. The first
+                        // page of a session has no earlier photo to be mistaken for and is observed at once.
+                        resumeSettlingSince = pageChange.hasCapturedPage() ? Math.max(1, SystemClock.elapsedRealtime()) : 0;
                         if (mode == Mode.ZSL_EVALUATION_YUV) {
                             opened.createReprocessableCaptureSession(new InputConfiguration(jpegSize.getWidth(), jpegSize.getHeight(),
                                     ImageFormat.YUV_420_888), Arrays.asList(previewReader.getSurface(),
@@ -804,6 +814,14 @@ final class GlassCamera {
                 return;
             }
             lastPreviewSensorTimestamp = timestamp;
+            if (resumeSettlingSince != 0) {
+                // A fresh converged result of the restarted stream, or the limit: then frames count again.
+                boolean steady = metering != null && metering.ready(now) && meteringExposureNanos > 0;
+                if (!steady && now - resumeSettlingSince < RESUME_SETTLE_LIMIT_MILLIS) return;
+                Log.i(TAG, "preview_resumed settled=" + steady + " after_ms=" + (now - resumeSettlingSince)
+                        + " exposure_ns=" + meteringExposureNanos);
+                resumeSettlingSince = 0;
+            }
             previewSensorTimestamp = timestamp;
             previewAt = realtimeTimestamps ? timestamp / 1_000_000L : now;
             // Once per frame: on the device each call is a native call, and the loops below made about
@@ -1591,6 +1609,7 @@ final class GlassCamera {
         if (closed || unknown || !previewRequested || previewDevice == null || previewReader == null
                 || previewSessionCallback == null) return;
         try {
+            resumeSettlingSince = Math.max(1, SystemClock.elapsedRealtime());
             previewDevice.createCaptureSession(Collections.singletonList(previewReader.getSurface()),
                     previewSessionCallback, handler);
         } catch (CameraAccessException | RuntimeException error) { previewFailed("preview unavailable after still"); }

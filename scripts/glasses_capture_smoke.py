@@ -8,6 +8,10 @@ waits for the app's own log to say a full-size photo was taken and saved.
 
     py -3.12 scripts/glasses_capture_smoke.py --serial 127.0.0.1:5556
 
+After the first photo is saved it keeps watching (--watch seconds): on
+2026-11-12 an unmoving page was photographed five times in 15 s, which one
+photo and an immediate stop had hidden, and the stop cut off the upload.
+
 It never sends the double tap that ends a capture, so nothing is sent to GPT.
 The photo is uploaded to the phone server as one page of a new document when the
 server is reachable. The glasses may lie on a desk; a dark frame still passes,
@@ -34,12 +38,13 @@ def main() -> int:
     parser.add_argument("--serial", required=True, help="adb transport of the glasses")
     parser.add_argument("--expect-serialno", default=GLASSES_SERIAL)
     parser.add_argument("--seconds", type=int, default=40)
+    parser.add_argument("--watch", type=int, default=15, help="seconds to keep watching after the first photo")
     options = parser.parse_args()
     adb = shutil.which("adb") or os.path.expandvars(r"%LOCALAPPDATA%\Android\Sdk\platform-tools\adb.exe")
 
     def shell(command: str) -> str:
         return subprocess.run([adb, "-s", options.serial, "shell", command], capture_output=True, text=True,
-                              encoding="utf-8", errors="replace", timeout=options.seconds + 30).stdout
+                              encoding="utf-8", errors="replace", timeout=options.seconds + options.watch + 30).stdout
 
     if shell("getprop ro.serialno").strip() != options.expect_serialno:
         print("FAIL: this transport is not the expected glasses")
@@ -58,9 +63,13 @@ def main() -> int:
         if "Photo committed locally" in log or "capture failed" in log or "ERROR:" in log:
             break
         time.sleep(2)
+    if "Photo committed locally" in log:
+        time.sleep(options.watch)
+        log = shell(f'logcat -d -v time -t "{started}" -s DocScanGlassDoc:*')
     status = [line for line in log.splitlines() if "preview_status" in line]
     work = [int(value) for value in re.findall(r"max_work_ms=(\d+)", "\n".join(status[1:]))]
     captured = re.search(r"captured (\d+)x(\d+) (\d+)B in (\d+)ms", log)
+    photos = len(re.findall(r"captured \d+x\d+ \d+B in", log))
     shell(f"am force-stop {PACKAGE}")
     for line in log.splitlines():
         if re.search(r"captured \d+x|capture failed|ERROR:|preview failed|Photo committed|still_", line):
@@ -76,7 +85,11 @@ def main() -> int:
     if work and max(work) > 100:
         print("FAIL: the preview frame handler is too slow to keep metering current")
         return 1
-    print(f"PASS: {captured.group(1)}x{captured.group(2)}, {captured.group(3)} bytes, {captured.group(4)} ms")
+    if photos > 2:
+        print(f"FAIL: {photos} photos in {options.watch} s; an unmoving page is being taken again and again")
+        return 1
+    print(f"PASS: {captured.group(1)}x{captured.group(2)}, {captured.group(3)} bytes, {captured.group(4)} ms; "
+          f"{photos} photo(s) in the {options.watch} s after the first was saved")
     return 0
 
 

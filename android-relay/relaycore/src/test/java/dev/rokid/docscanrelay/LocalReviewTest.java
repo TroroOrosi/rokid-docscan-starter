@@ -1371,6 +1371,73 @@ public class LocalReviewTest {
         }
     }
 
+    /** Operator, 2026-11-12: one tap clears the display and stops the camera, the next brings both back. */
+    @Test public void oneTapPausesTheCameraAndDisplayAndTheNextTapResumesObservation() throws Exception {
+        Surface surface = new Surface();
+        surface.holdForPage = true;
+        List<List<String>> hud = new java.util.ArrayList<>();
+        try (MockWebServer server = new MockWebServer()) {
+            DocScanController controller = new DocScanController(RuntimeEnvironment.getApplication(), surface, null,
+                    (state, lines, diagnostic) -> hud.add(lines), new ClientIdentity("test", "test", "test"));
+            try {
+                controller.configureForLocalStart(server.url("/").toString(), "", 270);
+                controller.startLocalSession(false);
+                barrier(controller);
+                set(controller, "autoCaptureEnabled", true);
+                call(controller, "waitForNextPage", new Class<?>[]{});
+                Runnable onItsWay = surface.pageReady;
+                assertNotNull(onItsWay);
+                int pauses = surface.pauses;
+
+                controller.toggleCapturePause();
+                barrier(controller);
+                assertTrue(controller.isCapturePaused());
+                assertEquals("the camera stops", pauses + 1, surface.pauses);
+                assertEquals("nothing is left on the display", List.of("", "", ""), hud.get(hud.size() - 1));
+                onItsWay.run(); // a page seen just before the tap must not take a photo during the pause
+                barrier(controller);
+                assertEquals(0, surface.photos);
+                assertTrue(controller.getState() == RelayState.READING || controller.getState() == RelayState.READY);
+
+                surface.pageReady = null;
+                controller.toggleCapturePause();
+                barrier(controller);
+                assertFalse(controller.isCapturePaused());
+                assertNotNull("the next tap observes pages again", surface.pageReady);
+                assertTrue(controller.isAutoCaptureEnabled());
+            } finally { controller.close(); }
+        }
+    }
+
+    @Test public void aTapWhileAPhotoIsInHandPausesOnlyAfterThatPhotoIsDone() throws Exception {
+        Surface surface = new Surface();
+        surface.holdForPage = true;
+        try (MockWebServer server = new MockWebServer()) {
+            DocScanController controller = new DocScanController(RuntimeEnvironment.getApplication(), surface, null,
+                    (state, lines, diagnostic) -> {}, new ClientIdentity("test", "test", "test"));
+            try {
+                controller.configureForLocalStart(server.url("/").toString(), "", 270);
+                controller.startLocalSession(false);
+                barrier(controller);
+                set(controller, "autoCaptureEnabled", true);
+                RelayState waiting = controller.getState();
+                set(controller, "state", RelayState.STABILIZING);
+                int pauses = surface.pauses;
+                controller.toggleCapturePause();
+                barrier(controller);
+                assertTrue(controller.isCapturePaused());
+                assertEquals("the photo in hand keeps its camera", pauses, surface.pauses);
+                // The photo is saved and the controller returns to waiting for the next page.
+                set(controller, "state", waiting);
+                surface.pageReady = null; // the real camera drops its page callback when it stops
+                call(controller, "waitForNextPage", new Class<?>[]{});
+                barrier(controller);
+                assertEquals(pauses + 1, surface.pauses);
+                assertNull("no page is awaited during the pause", surface.pageReady);
+            } finally { controller.close(); }
+        }
+    }
+
     @Test public void preparationThatNeverBecameStillReturnsToWaitingInsteadOfEndingTheSession() throws Exception {
         Surface surface = new Surface();
         surface.holdForPage = true;
