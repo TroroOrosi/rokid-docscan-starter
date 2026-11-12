@@ -556,7 +556,9 @@ EXPLAINER_API_VERSION = "1.1.0"
 #         takes the manual shot and the retake; a tap hides the answers while reading them.
 # 1.45.0: one rule on every screen: tap turns the display off or on, swipe selects, double tap decides.
 #         The chooser starts on the double tap; the live corner shows the paper, not the whole frame.
-GLASSES_VIEW_CONTRACT_VERSION = "1.45.0"
+# 1.46.0: the still copies the preview's auto exposure; the exposure is shortened by the camera's own
+# frame-rate range, never by hand (a hand-raised gain was colour noise beside the glasses' own camera).
+GLASSES_VIEW_CONTRACT_VERSION = "1.46.0"
 
 # Answer-area overlay payload (box + short answer; 2D image-anchored).
 # 1.1.0: added tracking metadata (tracking/fixed_ar/anchor_hint).

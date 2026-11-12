@@ -44,6 +44,7 @@ TAP = "KEYCODE_NOTIFICATION KEYCODE_ENTER"
 SWIPE_FORWARD = "KEYCODE_NOTIFICATION KEYCODE_DPAD_RIGHT KEYCODE_DPAD_DOWN"
 DOUBLE_TAP = "KEYCODE_NOTIFICATION KEYCODE_NOTIFICATION KEYCODE_BACK"
 PHONE_IMAGES = "/data/data/com.termux/files/home/rokid-server/data/images"
+STANDARD_PHOTOS = "/sdcard/DCIM/Camera"  # where the glasses' own camera (the physical photo key) saves
 
 
 class Check:
@@ -110,6 +111,71 @@ class Check:
         if self.report:
             image.save(self.report / f"screen-{name}.png")
         return image
+
+    @staticmethod
+    def flat(gray, patches=None):
+        """(level, noise, patches) over the flattest mid-bright 64 px squares; given patches are read in place."""
+        from PIL import ImageStat  # noqa: PLC0415
+        if patches is None:
+            found = []
+            for top in range(0, gray.height - 64, 96):
+                for left in range(0, gray.width - 64, 96):
+                    stat = ImageStat.Stat(gray.crop((left, top, left + 64, top + 64)))
+                    if 70 <= stat.mean[0] <= 190:
+                        found.append((stat.stddev[0], left, top))
+            patches = [(left, top) for _, left, top in sorted(found)[:40]]
+        if len(patches) < 10:
+            return 0.0, 0.0, patches
+        stats = [ImageStat.Stat(gray.crop((left, top, left + 64, top + 64))) for left, top in patches]
+        noises = sorted(stat.stddev[0] for stat in stats)
+        return sum(stat.mean[0] for stat in stats) / len(stats), noises[len(noises) // 2], patches
+
+    def reference(self) -> None:
+        """One photo of the same scene with the glasses' own camera, taken before the app holds the camera.
+
+        The physical photo key over adb; the vendor capture plays its sound and leaves its file in the glasses'
+        gallery. On 2026-11-13 a still this check had passed as bright enough was colour noise beside that photo
+        (level over noise 1.9 against 39.7), so every app photo is now read at the same places as the reference.
+        A worn head does not hold one scene, so --paper takes no reference.
+        """
+        self.standard = None
+        if self.options.paper:
+            return
+        from PIL import Image  # noqa: PLC0415
+        before = set(self.shell(f"ls {STANDARD_PHOTOS}").split())
+        self.keys("KEYCODE_WAKEUP")
+        time.sleep(2)
+        self.keys("KEYCODE_SPRITE_FUNCTION")
+        name, deadline = None, time.monotonic() + 20
+        while name is None and time.monotonic() < deadline:
+            time.sleep(2)
+            new = sorted(n for n in self.shell(f"ls {STANDARD_PHOTOS}").split() if n.endswith(".jpg") and n not in before)
+            name = new[-1] if new else None
+        gray = None
+        for _ in range(3):  # the file is listed before the vendor has finished writing it
+            time.sleep(2)
+            data = self.run(self.options.glasses, "exec-out", f"cat {STANDARD_PHOTOS}/{name}", timeout=120) if name else b""
+            try:
+                image = Image.open(io.BytesIO(data))
+                gray = image.convert("L")
+                break
+            except OSError:
+                continue
+        if gray is None:
+            self.row("the glasses' own camera photographed the scene", "WARN", "no photo from the photo key; app photos are not compared")
+            return
+        level, noise, patches = self.flat(gray)
+        details = image.getexif().get_ifd(0x8769)
+        exposure = details.get(0x829A)
+        if not noise:
+            self.row("the glasses' own camera photographed the scene", "WARN", "no flat mid-bright area to compare at")
+            return
+        self.standard = (gray.size, patches, level / noise)
+        if self.report:
+            (self.report / "standard-camera.jpg").write_bytes(data)
+        self.row("the glasses' own camera photographed the scene", "PASS",
+                 f"{float(exposure) * 1000:.0f} ms, sensitivity {details.get(0x8827)}, level {level:.0f} over noise {noise:.2f}"
+                 if exposure else f"level {level:.0f} over noise {noise:.2f}")
 
     def photos(self) -> list[tuple[str, int, int]]:
         """(sensor log line time, bytes, generation) of every photo since the start."""
@@ -300,15 +366,33 @@ class Check:
                      + (f"; looks like photo {same[0]} again" if same else ""))
             if self.report:
                 (self.report / f"photo-{index + 1:02d}.jpg").write_bytes(data)
+            standard = getattr(self, "standard", None)
+            if standard:
+                upright = image.convert("L")
+                if upright.width > upright.height:
+                    upright = upright.rotate(-270, expand=True)  # sensor orientation, as the upload is turned
+                if upright.size != standard[0]:
+                    self.row(f"photo {index + 1} is as clean as the glasses' own camera's", "WARN",
+                             f"{upright.size} against {standard[0]}: not compared")
+                    continue
+                level, noise, _ = self.flat(upright, standard[1])
+                ratio = level / noise / standard[2] if noise else 0.0
+                # One dim desk scene, 2026-11-13: a 30 ms auto-exposure still read 0.65-0.85 of the reference and
+                # was legible, a 10 ms one 0.23 and was not, the manual one-period rule 0.05. Provisional bounds.
+                self.row(f"photo {index + 1} is as clean as the glasses' own camera's",
+                         "PASS" if ratio >= 0.6 else "WARN" if ratio >= 0.3 else "FAIL",
+                         f"level over noise {level / noise if noise else 0:.1f} against {standard[2]:.1f} at the same places")
 
     def main(self) -> int:
         try:
-            if self.environment() and self.chooser() and self.capture():
-                if self.options.paper:
-                    self.paper()
-                else:
-                    self.pause()
-                self.server()
+            if self.environment():
+                self.reference()
+                if self.chooser() and self.capture():
+                    if self.options.paper:
+                        self.paper()
+                    else:
+                        self.pause()
+                    self.server()
         finally:
             self.shell(f"am force-stop {PACKAGE}")  # never the double tap: ending a capture sends it to GPT
         failed = [name for name, state, _ in self.rows if state == "FAIL"]

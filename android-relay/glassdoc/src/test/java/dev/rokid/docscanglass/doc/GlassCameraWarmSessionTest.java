@@ -69,7 +69,7 @@ public class GlassCameraWarmSessionTest {
         CharacteristicsShadow.aeRegions = 0; // AGENT_APPROVED=1: explicit comparison test setup.
         CharacteristicsShadow.strictPublicApi = false;
         CharacteristicsShadow.manualSensor = false;
-        CharacteristicsShadow.maxAnalog = null;
+        CharacteristicsShadow.maxAnalog = null; CharacteristicsShadow.fpsRanges = false;
         failures.clear(); originals.clear(); delivered = 0;
         MapShadow.previewSize = new Size(320, 240);
         MapShadow.fullSizeYuv = false; ManagerShadow.refuseOutputs = 0; previewBoost = 150;
@@ -800,100 +800,69 @@ public class GlassCameraWarmSessionTest {
         assertEquals(1, firstDevice().session.captures);
     }
 
-    /** Decided 2026-11-10: one flicker period, never 1/40 s; sensitivity carries the light instead. */
-    @Test public void aSlowerConvergedPreviewIsShotInOneFlickerPeriodWithSensitivityCarryingTheLight() {
+    /**
+     * Glasses, 2026-11-13: a still asked for manually at a shorter exposure and more gain than the preview's auto
+     * exposure was running had three times the noise of an auto-exposed one at the same values, and one flicker
+     * period with the gain raised by hand was colour noise beside the glasses' own camera. The still copies what
+     * the preview measured, whatever the flicker (the 2026-11-10 one-period rule is withdrawn).
+     */
+    @Test public void theStillCopiesWhatThePreviewsAutoExposureMeasuredWhateverTheFlicker() {
         prepareFlickerStill(25_000_000L, 100, STATISTICS_SCENE_FLICKER_60HZ);
         var session = firstDevice().session;
         assertEquals(Integer.valueOf(CONTROL_AE_MODE_OFF), session.captured.get(CaptureRequest.CONTROL_AE_MODE));
-        assertEquals(Long.valueOf(8_333_333), session.captured.get(CaptureRequest.SENSOR_EXPOSURE_TIME));
-        assertEquals("the same exposure product as the preview chose", Integer.valueOf(300),
-                session.captured.get(CaptureRequest.SENSOR_SENSITIVITY));
-        assertEquals(Long.valueOf(33_333_333), session.captured.get(CaptureRequest.SENSOR_FRAME_DURATION));
+        assertEquals(Long.valueOf(25_000_000), session.captured.get(CaptureRequest.SENSOR_EXPOSURE_TIME));
+        assertEquals(Integer.valueOf(100), session.captured.get(CaptureRequest.SENSOR_SENSITIVITY));
         assertEquals(Integer.valueOf(150), session.captured.get(CaptureRequest.CONTROL_POST_RAW_SENSITIVITY_BOOST));
-        assertNull("the preview keeps its own automatic exposure", session.repeating.get(CaptureRequest.SENSOR_EXPOSURE_TIME));
+        assertNull("a low gain leaves the template's edge enhancement", session.captured.get(CaptureRequest.EDGE_MODE));
         long timestamp = SystemClock.elapsedRealtimeNanos();
-        manualCompleted(manualResult(timestamp, 8_333_333L, 300)); manualJpeg(timestamp);
+        manualCompleted(manualResult(timestamp, 25_000_000L, 100)); manualJpeg(timestamp);
         assertEquals(1, delivered); assertTrue(originals.get(0).associationResolved);
-        assertEquals(Long.valueOf(8_333_333L), originals.get(0).provenance.exposureNanos);
-    }
-
-    @Test public void fiftyHertzAndSteadyLightUseTenMillisecondsAndAShortExposureIsCopiedAsMeasured() {
-        prepareFlickerStill(20_000_000L, 100, STATISTICS_SCENE_FLICKER_50HZ);
-        assertEquals(Long.valueOf(10_000_000), firstDevice().session.captured.get(CaptureRequest.SENSOR_EXPOSURE_TIME));
-        assertEquals(Integer.valueOf(200), firstDevice().session.captured.get(CaptureRequest.SENSOR_SENSITIVITY));
-        setup(); prepareFlickerStill(25_000_000L, 100, STATISTICS_SCENE_FLICKER_NONE);
-        assertEquals(Long.valueOf(10_000_000), firstDevice().session.captured.get(CaptureRequest.SENSOR_EXPOSURE_TIME));
-        assertEquals(Integer.valueOf(250), firstDevice().session.captured.get(CaptureRequest.SENSOR_SENSITIVITY));
-        setup(); prepareFlickerStill(8_333_333L, 120, STATISTICS_SCENE_FLICKER_60HZ);
-        assertEquals(Long.valueOf(8_333_333), firstDevice().session.captured.get(CaptureRequest.SENSOR_EXPOSURE_TIME));
-        assertEquals(Integer.valueOf(120), firstDevice().session.captured.get(CaptureRequest.SENSOR_SENSITIVITY));
-    }
-
-    @Test public void anUnreportedFlickerLeavesTheMeasuredExposureAlone() {
-        prepareFlickerStill(25_000_000L, 100, null);
-        assertEquals(Long.valueOf(25_000_000), firstDevice().session.captured.get(CaptureRequest.SENSOR_EXPOSURE_TIME));
-        assertEquals(Integer.valueOf(100), firstDevice().session.captured.get(CaptureRequest.SENSOR_SENSITIVITY));
-    }
-
-    /**
-     * Glasses, 2026-11-12: darker left a dim page at 17 of 255, and a 50-70 ms exposure was never still enough
-     * on a worn head. The still stays at one flicker period and the camera's own gain keeps it as bright.
-     */
-    @Test public void whereSensitivityCannotCarryTheLightTheCamerasGainDoesBeforeTheExposureGrows() {
-        CharacteristicsShadow.maxAnalog = 800;
-        prepareFlickerStill(25_000_000L, 400, STATISTICS_SCENE_FLICKER_60HZ);
-        assertEquals("one period", Long.valueOf(8_333_333), firstDevice().session.captured.get(CaptureRequest.SENSOR_EXPOSURE_TIME));
-        assertEquals("sensitivity to its ceiling", Integer.valueOf(800), firstDevice().session.captured.get(CaptureRequest.SENSOR_SENSITIVITY));
-        assertEquals("the rest as gain: 150 x 1200 / 800", Integer.valueOf(225),
-                firstDevice().session.captured.get(CaptureRequest.CONTROL_POST_RAW_SENSITIVITY_BOOST));
-        setup(); CharacteristicsShadow.maxAnalog = 800;
+        setup(); CharacteristicsShadow.maxAnalog = 800; previewBoost = 766;
         prepareFlickerStill(30_000_000L, 800, STATISTICS_SCENE_FLICKER_50HZ);
-        assertEquals("a dim scene already at the ceiling is still shot in one period", Long.valueOf(10_000_000),
+        assertEquals("a dim scene is not shortened by hand", Long.valueOf(30_000_000),
                 firstDevice().session.captured.get(CaptureRequest.SENSOR_EXPOSURE_TIME));
         assertEquals(Integer.valueOf(800), firstDevice().session.captured.get(CaptureRequest.SENSOR_SENSITIVITY));
-        assertEquals(Integer.valueOf(450), firstDevice().session.captured.get(CaptureRequest.CONTROL_POST_RAW_SENSITIVITY_BOOST));
-        setup(); CharacteristicsShadow.maxAnalog = 800;
-        prepareFlickerStill(25_000_000L, 1600, STATISTICS_SCENE_FLICKER_60HZ);
-        assertEquals("a preview above the ceiling is not turned down", Integer.valueOf(1600),
-                firstDevice().session.captured.get(CaptureRequest.SENSOR_SENSITIVITY));
-        assertEquals(Long.valueOf(8_333_333), firstDevice().session.captured.get(CaptureRequest.SENSOR_EXPOSURE_TIME));
-        assertEquals(Integer.valueOf(450), firstDevice().session.captured.get(CaptureRequest.CONTROL_POST_RAW_SENSITIVITY_BOOST));
+        assertEquals(Integer.valueOf(766), firstDevice().session.captured.get(CaptureRequest.CONTROL_POST_RAW_SENSITIVITY_BOOST));
+        assertEquals("at this gain edge enhancement makes specks of the noise", Integer.valueOf(CaptureRequest.EDGE_MODE_OFF),
+                firstDevice().session.captured.get(CaptureRequest.EDGE_MODE));
     }
 
-    /** With the gain at its limit too, the still may be one stop darker; beyond that it takes a second period. */
-    @Test public void onlyWhenTheGainIsSpentDoesTheStillTakeASecondPeriod() {
-        CharacteristicsShadow.maxAnalog = 800;
-        previewBoost = 1600; // of 3200: two times left
-        prepareFlickerStill(30_000_000L, 800, STATISTICS_SCENE_FLICKER_50HZ);
-        assertEquals("three times the light is wanted, two as gain, the rest within one stop", Long.valueOf(10_000_000),
-                firstDevice().session.captured.get(CaptureRequest.SENSOR_EXPOSURE_TIME));
-        assertEquals(Integer.valueOf(3200), firstDevice().session.captured.get(CaptureRequest.CONTROL_POST_RAW_SENSITIVITY_BOOST));
-        setup(); CharacteristicsShadow.maxAnalog = 800;
-        previewBoost = 3200; // none left
-        prepareFlickerStill(30_000_000L, 800, STATISTICS_SCENE_FLICKER_50HZ);
-        assertEquals("three times darker is more than a stop: two periods", Long.valueOf(20_000_000),
-                firstDevice().session.captured.get(CaptureRequest.SENSOR_EXPOSURE_TIME));
-        assertEquals(Integer.valueOf(3200), firstDevice().session.captured.get(CaptureRequest.CONTROL_POST_RAW_SENSITIVITY_BOOST));
+    /** The measured scenes: a lit room (25 ms at 235) and the dim desk (60 ms at 3064, 30 ms at 6128, 10 ms spent near 10000). */
+    @Test public void theExposurePaceFollowsTheLightAndLeavingNeedsMoreThanEntering() {
+        int plain = GlassCamera.ExposurePace.DEFAULT, mid = GlassCamera.ExposurePace.MID, fast = GlassCamera.ExposurePace.FAST;
+        long sixty = 8_333_333L, fifty = 10_000_000L;
+        assertEquals(fast, GlassCamera.ExposurePace.next(plain, true, true, 25_000_000L, 235, sixty));
+        assertEquals(fast, GlassCamera.ExposurePace.next(fast, true, true, 8_333_333L, 705, sixty));
+        assertEquals(mid, GlassCamera.ExposurePace.next(plain, true, true, 60_000_000L, 3064, fifty));
+        assertEquals(mid, GlassCamera.ExposurePace.next(mid, true, true, 30_000_000L, 6128, fifty));
+        assertEquals("the gain is spent at one period", mid, GlassCamera.ExposurePace.next(fast, true, true, 10_000_000L, 10_000, fifty));
+        assertEquals("darker still: the template's own range", plain, GlassCamera.ExposurePace.next(mid, true, true, 30_000_000L, 9_000, fifty));
+        assertEquals(plain, GlassCamera.ExposurePace.next(plain, true, true, 60_000_000L, 5_000, fifty));
+        assertEquals("a camera without the ranges keeps the template's", plain,
+                GlassCamera.ExposurePace.next(plain, false, false, 25_000_000L, 235, sixty));
+        assertTrue(GlassCamera.ExposurePace.measuredUnder(fast, new Range<>(60, 60)));
+        assertFalse("a result from the range asked before", GlassCamera.ExposurePace.measuredUnder(fast, new Range<>(14, 30)));
+        assertTrue(GlassCamera.ExposurePace.measuredUnder(plain, new Range<>(30, 30)));
     }
 
-    @Test public void theHeadMotionAllowanceFollowsTheShortenedStillNotThePreview() {
-        SensorManager manager = (SensorManager)RuntimeEnvironment.getApplication()
-                .getSystemService(android.content.Context.SENSOR_SERVICE);
-        ShadowSensorManager sensors = shadowOf(manager);
-        sensors.addSensor(ShadowSensor.newInstance(Sensor.TYPE_GYROSCOPE));
-        CharacteristicsShadow.fixedFocus = true; CharacteristicsShadow.manualSensor = true;
-        createCamera(); camera.captureOnce(); idle(0);
-        for (int i = 0; i < 14; i++) {
-            SensorEvent event = ShadowSensorManager.createSensorEvent(3);
-            event.timestamp = SystemClock.elapsedRealtimeNanos(); event.values[0] = 0.1f;
-            sensors.sendSensorEventToListeners(event);
-            idle(50);
-            var session = currentDevice().session;
-            session.previewCallback.onCaptureCompleted(session, session.repeating,
-                    flickerResult(25_000_000L, 100, STATISTICS_SCENE_FLICKER_60HZ));
-            frame(180);
+    @Test public void aLitPreviewAsksItsAutoExposureForTheFastRangeAndTheStillCopiesAResultMeasuredUnderIt() {
+        CharacteristicsShadow.fixedFocus = true; CharacteristicsShadow.manualSensor = true; CharacteristicsShadow.fpsRanges = true;
+        createCamera(); camera.captureOnce(); idle(100);
+        var session = currentDevice().session;
+        assertNull("the template's own range to begin with", session.repeating.get(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE));
+        session.previewCallback.onCaptureCompleted(session, session.repeating, flickerResult(25_000_000L, 235, STATISTICS_SCENE_FLICKER_60HZ));
+        assertEquals(new Range<>(60, 60), currentDevice().session.repeating.get(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE));
+        assertEquals("no still from the exposure measured before", 0, firstDevice().session.captures);
+        for (int i = 0; i < 8; i++) {
+            var now = currentDevice().session;
+            TotalCaptureResult result = flickerResult(8_333_333L, 705, STATISTICS_SCENE_FLICKER_60HZ);
+            ((ShadowCaptureResult)Shadow.extract(result)).set(CaptureResult.CONTROL_AE_TARGET_FPS_RANGE, new Range<>(60, 60));
+            now.previewCallback.onCaptureCompleted(now, now.repeating, result);
+            frame(180); idle(100);
         }
-        assertEquals("0.1 rad/s is within the 10 ms allowance of an 8.3 ms still", 1, firstDevice().session.captures);
+        assertEquals(1, firstDevice().session.captures);
+        assertEquals(Long.valueOf(8_333_333), firstDevice().session.captured.get(CaptureRequest.SENSOR_EXPOSURE_TIME));
+        assertEquals(Integer.valueOf(705), firstDevice().session.captured.get(CaptureRequest.SENSOR_SENSITIVITY));
         assertTrue(failures.isEmpty());
     }
 
@@ -1881,6 +1850,7 @@ public class GlassCameraWarmSessionTest {
         static boolean strictPublicApi;
         static boolean manualSensor;
         static Integer maxAnalog;
+        static boolean fpsRanges;
         @Implementation protected <T> T get(CameraCharacteristics.Key<T> key) {
             if (strictPublicApi && ((android.os.Build.VERSION.SDK_INT < 30
                     && key.getName().equals("android.control.zoomRatioRange"))
@@ -1897,6 +1867,8 @@ public class GlassCameraWarmSessionTest {
                     : key.equals(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE) ? new Range<>(100, 3200)
                     : key.equals(CameraCharacteristics.SENSOR_INFO_MAX_FRAME_DURATION) ? 400_000_000L
                     : key.equals(CameraCharacteristics.SENSOR_MAX_ANALOG_SENSITIVITY) ? maxAnalog
+                    : key.equals(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES) ? fpsRanges
+                        ? new Range[]{new Range<>(14, 30), new Range<>(30, 30), new Range<>(60, 60)} : null
                     : key.equals(CameraCharacteristics.NOISE_REDUCTION_AVAILABLE_NOISE_REDUCTION_MODES) ? new int[]{0, 1, 2}
                     : key.equals(CameraCharacteristics.EDGE_AVAILABLE_EDGE_MODES) ? new int[]{1, 2, 0}
                     : key.equals(CameraCharacteristics.CONTROL_POST_RAW_SENSITIVITY_BOOST_RANGE) ? new Range<>(100, 3200)

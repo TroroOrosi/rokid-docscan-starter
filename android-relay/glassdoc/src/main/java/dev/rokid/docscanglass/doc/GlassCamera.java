@@ -169,8 +169,12 @@ final class GlassCamera {
 
     /** Freeze the measured exposure for one fixed-focus still, including its processed-image gain. */
     private static final class StillExposure {
-        /** How much darker than the preview a still may be before its exposure grows by a flicker period: one stop. */
-        static final double DARKER_STOPS = 2;
+        /**
+         * Total gain (sensitivity x post-RAW gain / 100) above which the still asks for no edge enhancement. On the
+         * glasses at a gain of about 6100 the camera's edge enhancement turned noise into specks: level over noise
+         * 25.8 with it and 33.8 without, against 39.7 from the glasses' own camera (2026-11-13). Unmeasured below.
+         */
+        static final int CLEAN_EDGE_GAIN = 1600;
         final long exposure, frameDuration, sourceTimestamp;
         final int iso;
         final Integer boost;
@@ -208,34 +212,13 @@ final class GlassCamera {
                     || duration == null || duration < exposure || duration > camera.get(CameraCharacteristics.SENSOR_INFO_MAX_FRAME_DURATION)
                     || iso == null || iso <= 0 || !isoRange.contains(iso)
                     || (boostRange != null && (boost == null || boost <= 0 || !boostRange.contains(boost)))) return null;
-            // One flicker period wherever the camera can still show the page as bright: sensitivity first, up to
-            // its analog ceiling, then the camera's own digital gain, up to its limit; a second period only when
-            // that would leave the still more than one stop darker than the preview.
-            // Two earlier rules failed on the glasses on 2026-11-12. One period and simply darker left a dim page
-            // at 17 of 255. As many periods as the light needed gave 50-70 ms, and the stillness that exposure
-            // demands, about 1 degree a second, was never met on a worn head: three preparations expired in 37 s
-            // without one photo. At 10 ms with six times the gain the same scene read 39 against 41 at 70 ms
-            // (flat-area noise 3.9 against 1.5), and the shot needs only 7 degrees a second.
-            // An unreported flicker, or no whole number of periods within the exposure, leaves it as measured.
-            Integer flicker = result.get(CaptureResult.STATISTICS_SCENE_FLICKER);
-            long period = flicker == null ? 0 : flicker == CaptureResult.STATISTICS_SCENE_FLICKER_60HZ
-                    ? 8_333_333L : Stillness.REFERENCE_EXPOSURE_NANOS;
-            if (period > 0 && exposure > period + period / 100 && exposureRange.contains(period)) {
-                Integer analog = camera.get(CameraCharacteristics.SENSOR_MAX_ANALOG_SENSITIVITY);
-                int ceiling = Math.max(iso, analog == null ? isoRange.getUpper() : Math.min(analog, isoRange.getUpper()));
-                double digital = boostRange != null && boost != null ? (double)boostRange.getUpper() / boost : 1;
-                double light = (double)iso * exposure;
-                long periods = Math.max(1, (long)Math.ceil(light / ((double)ceiling * period * digital * DARKER_STOPS)));
-                long shortened = periods * period;
-                if (shortened <= exposure) {
-                    double wanted = light / shortened; // the sensitivity that would keep the preview's brightness
-                    iso = (int)Math.min(ceiling, Math.round(wanted));
-                    if (boostRange != null && boost != null) {
-                        boost = (int)Math.max(boostRange.getLower(), Math.min(boostRange.getUpper(), Math.round(boost * wanted / iso)));
-                    }
-                    exposure = shortened;
-                }
-            }
+            // The still copies exactly what the preview's auto exposure measured. Shortening it by hand failed three
+            // ways on the glasses: darker left a dim page at 17 of 255 (2026-11-12); as many flicker periods as the
+            // light needed was never still enough on a worn head; one period with the gain raised by hand was colour
+            // noise beside the glasses' own camera, level over noise 2 against 43 (2026-11-13). The ISP tunes its
+            // noise reduction to the auto exposure's state: at the same exposure, sensitivity and gain a manual still
+            // had three times the noise of an auto-exposed one unless its values were the preview's own.
+            // The exposure is shortened by the preview's own frame-rate range instead: ExposurePace.
             return new StillExposure(exposure, duration, result.get(CaptureResult.SENSOR_TIMESTAMP), iso, boostRange == null ? null : boost,
                     exposureRange, isoRange, boostRange);
         }
@@ -260,6 +243,8 @@ final class GlassCamera {
             return map;
         }
 
+        double gain() { return iso * (boost == null ? 1d : boost / 100d); }
+
         void apply(CaptureRequest.Builder request) {
             request.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF);
             request.set(CaptureRequest.CONTROL_AWB_LOCK, true);
@@ -277,6 +262,34 @@ final class GlassCamera {
                     && actual.exposure != null && exposureRange.contains(actual.exposure) && actual.exposure <= exposure
                     && actual.iso != null && isoRange.contains(actual.iso) && actual.iso <= iso
                     && (boost == null || (actual.boost != null && boostRange.contains(actual.boost) && actual.boost <= boost));
+        }
+    }
+
+    /**
+     * The camera's own shutter control: the auto-exposure frame-rate range bounds its exposure time and its auto
+     * exposure keeps the brightness with gain. Glasses, 2026-11-13, one dim desk scene against the glasses' own
+     * camera (60 ms at a total gain of 3064, level over noise 39.7): the range 30 gave 30 ms at 6128 and 0.65-0.85
+     * of that; 60 gave 10 ms with the gain spent near 10000, a third darker, 0.23. The same camera in a lit room chose
+     * 25 ms at 235 (2026-09-22), which one flicker period needs about 700 for. The bounds below are from those two
+     * scenes; they are the knob to turn when a lit page has been measured.
+     */
+    static final class ExposurePace {
+        static final int DEFAULT = 0, MID = 30, FAST = 60;
+        static final int FAST_ENTER_GAIN = 1600, FAST_LEAVE_GAIN = 3200, MID_ENTER_GAIN = 6400, MID_LEAVE_GAIN = 8000;
+        static final long MID_EXPOSURE_NANOS = 30_000_000L;
+
+        /** The range to ask next, from a converged result measured under {@code pace}; leaving needs more than entering. */
+        static int next(int pace, boolean mid, boolean fast, long exposureNanos, double gain, long periodNanos) {
+            double light = gain * exposureNanos; // what this scene needs at the brightness the camera chose
+            if (pace == FAST) return gain > FAST_LEAVE_GAIN ? (mid ? MID : DEFAULT) : FAST;
+            if (fast && periodNanos > 0 && light / periodNanos <= FAST_ENTER_GAIN) return FAST;
+            if (pace == MID) return gain > MID_LEAVE_GAIN ? DEFAULT : MID;
+            return mid && light / MID_EXPOSURE_NANOS <= MID_ENTER_GAIN ? MID : DEFAULT;
+        }
+
+        /** Whether a result was measured under the range now asked; a camera that reports no range is taken at its word. */
+        static boolean measuredUnder(int pace, Range<Integer> reported) {
+            return pace == DEFAULT || reported == null || (reported.getLower() == pace && reported.getUpper() == pace);
         }
     }
 
@@ -341,6 +354,8 @@ final class GlassCamera {
     private PendingJpeg pendingJpeg;
     private CameraCharacteristics manualExposureCamera;
     private StillExposure meteringStillExposure, stillExposure;
+    private int pace;
+    private boolean paceMid, paceFast;
     private final CameraDiagnostics.Framing framing = new CameraDiagnostics.Framing();
     private boolean settled;
     private boolean closed;
@@ -704,6 +719,13 @@ final class GlassCamera {
             realtimeTimestamps = Integer.valueOf(CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE_REALTIME)
                     .equals(characteristics.get(CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE));
             meteringStillExposure = null;
+            pace = ExposurePace.DEFAULT; paceMid = false; paceFast = false;
+            Range<Integer>[] paces = manualExposureCamera == null ? null
+                    : characteristics.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES);
+            if (paces != null) for (Range<Integer> range : paces) {
+                if (range.getLower() == ExposurePace.MID && range.getUpper() == ExposurePace.MID) paceMid = true;
+                if (range.getLower() == ExposurePace.FAST && range.getUpper() == ExposurePace.FAST) paceFast = true;
+            }
             paperTracker = paperGeometryEvaluation ? new PaperGeometry.Tracker() : null;
             paperExposure = paperGeometryEvaluation && metering.afMode == CaptureRequest.CONTROL_AF_MODE_OFF
                     ? PaperExposure.create(characteristics, size, token) : null;
@@ -1174,6 +1196,10 @@ final class GlassCamera {
                         }
                         return;
                     }
+                    if (!ExposurePace.measuredUnder(pace, result.get(CaptureResult.CONTROL_AE_TARGET_FPS_RANGE))) {
+                        // Measured under the range asked before: it cannot stand for the exposure to come.
+                        meteringExposureNanos = 0; meteringSensorTimestamp = 0; return;
+                    }
                     // Fence old LOCKED metadata until this START has reached the native pipeline.
                     if (focusTrigger) autoFocusSensorTimestamp = timestamp;
                     if (timestamp <= lastMeteringSensorTimestamp) return;
@@ -1182,6 +1208,17 @@ final class GlassCamera {
                     Long exposure = result.get(CaptureResult.SENSOR_EXPOSURE_TIME);
                     meteringExposureNanos = exposure != null && exposure > 0 ? exposure : 0;
                     meteringStillExposure = manualExposureCamera == null ? null : StillExposure.observe(manualExposureCamera, result);
+                    Integer exposureState = result.get(CaptureResult.CONTROL_AE_STATE);
+                    if (meteringStillExposure != null && (paceMid || paceFast) && !focusTrigger && !(generation > 0 && !settled)
+                            && exposureState != null && (exposureState == CaptureResult.CONTROL_AE_STATE_CONVERGED
+                                    || exposureState == CaptureResult.CONTROL_AE_STATE_FLASH_REQUIRED
+                                    || exposureState == CaptureResult.CONTROL_AE_STATE_LOCKED)) {
+                        Integer flicker = result.get(CaptureResult.STATISTICS_SCENE_FLICKER);
+                        int next = ExposurePace.next(pace, paceMid, paceFast, meteringStillExposure.exposure, meteringStillExposure.gain(),
+                                flicker != null && flicker == CaptureResult.STATISTICS_SCENE_FLICKER_60HZ
+                                        ? 8_333_333L : Stillness.REFERENCE_EXPOSURE_NANOS);
+                        if (next != pace) { pace = next; repace(token); return; }
+                    }
                     metering.observe(result.get(CaptureResult.CONTROL_AF_STATE),
                             result.get(CaptureResult.CONTROL_AE_STATE), realtimeTimestamps
                                     ? timestamp / 1_000_000L : SystemClock.elapsedRealtime());
@@ -1241,7 +1278,19 @@ final class GlassCamera {
     private void applyMetering(CaptureRequest.Builder request) {
         request.set(CaptureRequest.CONTROL_AF_MODE, metering.afMode);
         request.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON);
+        if (pace != ExposurePace.DEFAULT) request.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, new Range<>(pace, pace));
         if (paperExposure != null) paperExposure.apply(request);
+    }
+
+    /** Asks the running preview for the new range; the next still waits for a result measured under it. */
+    private void repace(long token) {
+        meteringSensorTimestamp = 0; meteringExposureNanos = 0; meteringStillExposure = null;
+        try {
+            CaptureRequest.Builder request = previewDevice.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW);
+            request.addTarget(previewReader.getSurface()); applyMetering(request);
+            previewSession.setRepeatingRequest(request.build(), previewResults(token, false), handler);
+            Log.i(TAG, "exposure_pace fps=" + pace);
+        } catch (CameraAccessException | RuntimeException failure) { previewFailed("exposure pace unavailable"); }
     }
 
     /** Camera2 request/result correspondence for one explicitly enabled, fixed-focus comparison. */
@@ -1448,12 +1497,16 @@ final class GlassCamera {
             // one image, where TEMPLATE_STILL_CAPTURE untouched had returned
             // seven stills in 785-1380 ms. The phone relay never sets exposure
             // either -- it calls takePhoto(w, h, quality) and nothing more.
-            // Dark captures remain unresolved. The 2026-09-22 operator reported
-            // a bright room; do not attribute the result to lighting alone.
+            // The dark captures of September were this app's exposure, not the
+            // room: the glasses' own camera took the same desk the same night at
+            // 25 ms and a sensitivity of 218-259, the app at 10 ms and 50
+            // (docs/hardware-measurements.md M-9).
             // Native AF/AE convergence now precedes this request in the same
             // session; the older timeout does not establish its cause.
             applyMetering(request);
             if (stillExposure != null) stillExposure.apply(request);
+            if (stillExposure != null && stillExposure.gain() > StillExposure.CLEAN_EDGE_GAIN)
+                request.set(CaptureRequest.EDGE_MODE, CaptureRequest.EDGE_MODE_OFF);
             if (activeAlternative == bracketShot && bracketVariant != null) bracketVariant.apply(request);
             CaptureRequest still = request.build();
             stillJpegQuality = activeAlternative == bracketShot && bracketVariant != null && bracketVariant.jpegQuality != null

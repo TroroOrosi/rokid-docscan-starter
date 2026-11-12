@@ -241,21 +241,25 @@ speed verification and uncertain-send safeguards apply to both answer speeds.
   accuracy remains unverified.
   Gyroscope freshness uses the sensor's measurement timestamp, including delayed
   deliveries and gaps in the retained preview stream. On supported fixed-focus
-  cameras, one native still stays at one flicker period and keeps the preview's
-  brightness with sensitivity up to its analog ceiling and then the camera's
-  post-RAW gain up to its limit; it takes a second period only when it would
-  otherwise be more than a stop darker. Simply darker left a dim page at 17 of
-  255, and the preview's own 50-70 ms exposure was never still enough on a worn
-  head: three preparations expired without a photo (§M-6, §M-7). Whether a page
-  shot with that gain can be read is not measured. On 2026-11-13 the same scene was
-  taken with the glasses' own camera and with the app's session (§M-9): the
-  camera's auto exposure chose the same values in both and the photos were as
-  bright; an AE frame-rate range of 30 halved the exposure and kept the
-  brightness. The dark photos of September (8.3-10 ms, sensitivity 50-60) were
-  the app's own exposure rule, about a twelfth of the light the glasses' camera
-  used that night, not the room. The glasses' camera detects motion and scene
-  and fuses a five-frame exposure bracket; the app takes one frame. The manual
-  one-period rule has not been compared with these on a page. Preview frames brightened by
+  cameras the still copies the exposure, sensitivity and gain the preview's auto
+  exposure measured, and the exposure is shortened only by asking that auto
+  exposure for a faster frame-rate range: 60 where one flicker period needs a
+  total gain of at most 1600, else 30 where 30 ms needs at most 6400, else the
+  template's; leaving a range needs more than entering it. Above a total gain
+  of 1600 the still asks for no edge enhancement. Shortening by hand failed
+  three ways on the glasses: darker left a dim page at 17 of 255; the preview's
+  own 50-70 ms was never still enough on a worn head (§M-6, §M-7); one period
+  with the gain raised by hand was colour noise, level over noise 2 against 43
+  from the glasses' own camera, because the ISP tunes noise reduction to the
+  auto exposure's state (§M-9, §M-10). In one dim desk scene glassdoc 0.43.16
+  read 38-40 against that camera's 45 at half its exposure. The dark photos of
+  September (8.3-10 ms, sensitivity 50-60) were the app's exposure, about a
+  twelfth of the light the glasses' camera used that night, not the room. The
+  glasses' camera waits for stillness, takes an auto-exposed exposure bracket
+  of five frames and fuses it with a vendor library no third-party app can
+  call; glassdoc takes one frame, and averaging four 30 ms frames of a still
+  scene passed that camera's noise. A lit page, a worn head, burst alignment
+  and the bounds of the ranges are not measured. Preview frames brightened by
   a still in flight are not page evidence. Its JPEG joins the matching capture result
   within the existing deadline. Missing or inconsistent metadata retains the
   original for explicit recapture. Live preview retains at most one queued bitmap.
@@ -687,7 +691,10 @@ exposure, gain or still processing is handed to the wearer, take the same scene
 both ways seconds apart and compare brightness and noise; `:glassprobe`
 `--es camera_variant` takes `fps=`, `scene=` and `ev=` for the camera's own
 controls. Do not attribute a dark photo to the room without that comparison,
-and do not judge from old photos when a new pair can be taken.
+and do not judge from old photos when a new pair can be taken. The device
+check takes the reference itself and reads every app photo at the same flat
+places: under 0.3 of the reference's level over noise fails, under 0.6 warns.
+Brightness alone passed a photo that was colour noise.
 
 ## Versioning
 

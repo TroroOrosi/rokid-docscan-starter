@@ -410,11 +410,20 @@ final class CameraProbe {
                 out.write(bytes);
             }
             captured = target;
+            // count=<n> with keep: each still stays as probe-capture-<remaining>.jpg, so a burst can be merged off
+            // the device; gap=<ms> is the wait between its stills (1500 when absent).
+            if (option("count") != null && option("keep") != null) {
+                try (FileOutputStream out = new FileOutputStream(
+                        new File(context.getCacheDir(), "probe-capture-" + stillsLeft + ".jpg"))) {
+                    out.write(bytes);
+                }
+            }
             long elapsed = SystemClock.elapsedRealtime() - startedAtMillis;
             Log.i(TAG, "camera probe still " + image.getWidth() + "x" + image.getHeight() + " " + bytes.length
                     + "B arrived_ms=" + (arrived - stillAskedAt) + encoded + " preview_frames=" + previewFrames);
             if (--stillsLeft > 0 && previewReader != null) {
-                handler.postDelayed(() -> { if (!settled) requestStill(); }, 1500);
+                handler.postDelayed(() -> { if (!settled) requestStill(); },
+                        option("gap") == null ? 1500 : Long.parseLong(option("gap")));
                 return;
             }
             settle(ProbeReport.Status.OK,
