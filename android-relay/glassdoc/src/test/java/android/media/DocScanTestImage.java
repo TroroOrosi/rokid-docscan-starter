@@ -13,6 +13,8 @@ public final class DocScanTestImage extends Image {
     public int height = 3024;
     public int rowStride;
     public int pixelStride;
+    /** Semi-planar chroma of a YUV still: with these set the image has three planes. */
+    public ByteBuffer chromaU, chromaV;
     public long timestamp = 10L;
     /** On a device each size or plane query is a native call. */
     public int nativeCalls;
@@ -31,10 +33,20 @@ public final class DocScanTestImage extends Image {
     @Override public Plane[] getPlanes() {
         if (memoryFailure) throw new OutOfMemoryError("synthetic allocation failure");
         nativeCalls++;
-        return new Plane[]{new Plane() {
+        Plane luma = new Plane() {
             @Override public int getRowStride() { return rowStride; }
             @Override public int getPixelStride() { return pixelStride; }
             @Override public ByteBuffer getBuffer() { return buffer; }
-        }};
+        };
+        if (chromaV == null) return new Plane[]{luma};
+        return new Plane[]{luma, chroma(chromaU), chroma(chromaV)};
+    }
+
+    private Plane chroma(ByteBuffer data) {
+        return new Plane() {
+            @Override public int getRowStride() { return rowStride; }
+            @Override public int getPixelStride() { return 2; }
+            @Override public ByteBuffer getBuffer() { return data; }
+        };
     }
 }

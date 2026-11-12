@@ -211,17 +211,24 @@ speed verification and uncertain-send safeguards apply to both answer speeds.
   observation continues across idle waits without a resume tap. Explicit end,
   lifecycle stop and failure boundaries still stop the camera. A previous
   `manual=true` does not carry over to a normal launch.
-  The same open camera supplies the full-size JPEG after fresh supported
-  focus/exposure and stillness checks, on a JPEG-only session of its own; the
-  preview session is put back afterwards. On firmware `1.29.013-20261110` a
-  session holding the JPEG output beside any other output never returned the
-  still and the camera provider aborted (`docs/hardware-measurements.md` §M,
-  2026-11-12). With this, glassdoc 0.43.10 took and saved stills on the glasses
+  The same preview session supplies the full-size still after fresh supported
+  focus/exposure and stillness checks: full-size YUV beside the running
+  preview, copied, closed and then encoded to JPEG (quality 98) off the camera
+  thread, about 1.0 s from request to bytes with the preview never stopping
+  (glassdoc 0.43.13 on the glasses, 2026-11-12, `docs/hardware-measurements.md`
+  §M-5). That JPEG carries no EXIF; its provenance stays `native_still`. On
+  firmware `1.29.013-20261110` a session holding the camera's JPEG output
+  beside any other output never returned the still and the camera provider
+  aborted (§M-1), so the camera's own JPEG is used only where the YUV pair is
+  refused, on a JPEG-only session of its own with the preview put back
+  afterwards. With this, glassdoc 0.43.10 took and saved stills on the glasses
   in 1.5-1.7 s, three runs and four in one session, in a dark scene; what a
   page looks like in them is not measured. In a lit scene that version took an
   unmoving page again and again, because the returning preview starts its
   exposure over; 0.43.12 does not count frames as page evidence until a fresh
-  converged result arrives (§M-4). Each still leaves about 3 s without preview. The ZSL and recording evaluation
+  converged result arrives (§M-4). The JPEG-session path leaves about 3 s
+  without preview after each still; the YUV path leaves none. Which noise
+  reduction and edge setting reads best on a lit page is not measured. The ZSL and recording evaluation
   launches still put the JPEG beside other outputs. Fixed-focus hardware does not
   gain autofocus from an AF trigger. Expired preparation never forces a
   moving shot. Before any camera request it is a cancelled preparation: the

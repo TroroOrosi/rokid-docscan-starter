@@ -68,6 +68,31 @@ final class GlassCamera {
     /** True while {@link #previewSession} is the JPEG-only session of one still. */
     private boolean stillSession;
     /**
+     * The still arrives as full-size YUV beside the running preview and is encoded here. Measured on the
+     * glasses on 2026-11-12 (firmware 1.29.013, glassprobe {@code yuvstill}): 13 of 13 stills, 0.65-0.74 s
+     * after the request, the preview at about 12 frames a second throughout, manual exposure honoured,
+     * 0.04-0.06 s to copy and 0.19-0.45 s to encode. With noise reduction and edge enhancement off its
+     * pixel-scale noise equals the camera's own JPEG (7.04 against 7.26), so it is the sensor's full size.
+     * The JPEG output cannot share a session on that firmware; its own session costs about 3 s without
+     * preview after every still, which stays as the path for a camera that offers no full-size YUV.
+     */
+    private boolean yuvStill;
+    private boolean yuvStillRefused;
+    private boolean encodingStill;
+    private int stillJpegQuality;
+    private byte[] stillNv21;
+    private Executor stillWorker;
+    /** About the quality of the camera's own JPEG (quantization tables 1-5 on its saved photographs). */
+    static final int STILL_JPEG_QUALITY = 98;
+
+    /** NV21 to JPEG; null when it cannot be encoded. Replaced in tests, which have no codec. */
+    interface StillEncoder { byte[] encode(byte[] nv21, int width, int height, int quality); }
+    StillEncoder stillEncoder = (nv21, width, height, quality) -> {
+        java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream(8 << 20);
+        return new android.graphics.YuvImage(nv21, ImageFormat.NV21, width, height, null)
+                .compressToJpeg(new Rect(0, 0, width, height), quality, out) ? out.toByteArray() : null;
+    };
+    /**
      * Set when the preview returns after a still: its exposure starts over, and until it has settled the
      * frames differ from the page just taken. Observed as page turns they took the same page again and
      * again, five photos in 15 s of an unmoving scene on the glasses (2026-11-12, scene 3, 4, 6, 7, 9...).
@@ -676,7 +701,10 @@ final class GlassCamera {
             autoFocusSensorTimestamp = 0;
             lastJpegSensorTimestamp = 0;
             CameraDiagnostics.capabilities(generation + 1, characteristics, jpegSize);
-            reader = ImageReader.newInstance(jpegSize.getWidth(), jpegSize.getHeight(), ImageFormat.JPEG, 1);
+            yuvStill = mode == Mode.NATIVE_STILL && !yuvStillRefused && Arrays.asList(sizes).contains(jpegSize);
+            encodingStill = false;
+            reader = ImageReader.newInstance(jpegSize.getWidth(), jpegSize.getHeight(),
+                    yuvStill ? ImageFormat.YUV_420_888 : ImageFormat.JPEG, 1);
             reader.setOnImageAvailableListener(source -> {
                 if (source == reader) onImageAvailable(source);
             }, handler);
@@ -733,7 +761,17 @@ final class GlassCamera {
                                 } catch (CameraAccessException | RuntimeException error) { previewFailed(); }
                             }
                             @Override public void onConfigureFailed(CameraCaptureSession failed) {
-                                failed.close(); if (token == previewGeneration) previewFailed(mode == Mode.VIDEO_EVALUATION
+                                failed.close();
+                                if (token != previewGeneration) return;
+                                if (yuvStill && !(generation > 0 && !settled)) {
+                                    // Preview with full-size YUV is not a guaranteed pair on a LIMITED camera:
+                                    // open again with the JPEG on a session of its own.
+                                    Log.w(TAG, "preview with full-size YUV refused; the still keeps its own JPEG session");
+                                    yuvStillRefused = true;
+                                    release();
+                                    return;
+                                }
+                                previewFailed(mode == Mode.VIDEO_EVALUATION
                                         ? "video evaluation exact YUV/MAX-JPEG/recorder session refused" : "camera YUV/JPEG session refused");
                             }
                         };
@@ -764,10 +802,11 @@ final class GlassCamera {
                             video.sessionSupport("advertised_supported_not_throughput_verified");
                             opened.createCaptureSession(outputs, sessionCallback, handler);
                         } else {
-                            // The preview alone. On firmware 1.29.013 a session holding the JPEG output beside any
-                            // other output never returns the still (see requestStill), so the JPEG has its own.
-                            opened.createCaptureSession(Collections.singletonList(previewReader.getSurface()),
-                                    sessionCallback, handler);
+                            // With the full-size YUV still, one session for both. Otherwise the preview alone:
+                            // on firmware 1.29.013 a session holding the JPEG output beside any other output
+                            // never returns the still (see requestStill), so the JPEG has its own.
+                            opened.createCaptureSession(yuvStill ? Arrays.asList(previewReader.getSurface(), reader.getSurface())
+                                    : Collections.singletonList(previewReader.getSurface()), sessionCallback, handler);
                         }
                     } catch (CameraAccessException | RuntimeException error) { previewFailed(); }
                 }
@@ -1383,8 +1422,11 @@ final class GlassCamera {
             if (stillExposure != null) stillExposure.apply(request);
             if (activeAlternative == bracketShot && bracketVariant != null) bracketVariant.apply(request);
             CaptureRequest still = request.build();
-            Log.i(TAG, "still_requested gen=" + current + " manual_exposure=" + (stillExposure != null));
-            if (mode != Mode.NATIVE_STILL) {
+            stillJpegQuality = activeAlternative == bracketShot && bracketVariant != null && bracketVariant.jpegQuality != null
+                    ? bracketVariant.jpegQuality : STILL_JPEG_QUALITY;
+            Log.i(TAG, "still_requested gen=" + current + " manual_exposure=" + (stillExposure != null)
+                    + " producer=" + (yuvStill ? "yuv_still" : "camera_jpeg"));
+            if (mode != Mode.NATIVE_STILL || yuvStill) {
                 // capture() takes priority over repeating preview without stopping its next frames.
                 previewSession.capture(still, captureCallback(current), handler);
                 return;
@@ -1478,9 +1520,24 @@ final class GlassCamera {
         final int width;
         final int height;
         final long sensorTimestamp;
+        boolean yuv = false;
         try (Image image = source.acquireNextImage()) {
             // A retained reader must drain late notifications even between requests.
-            if (source != reader || generation <= 0 || !active(generation) || pendingJpeg != null) return;
+            if (source != reader || generation <= 0 || !active(generation) || pendingJpeg != null || encodingStill) return;
+            if (yuvStill && image != null && image.getFormat() == ImageFormat.YUV_420_888) {
+                width = image.getWidth();
+                height = image.getHeight();
+                sensorTimestamp = image.getTimestamp();
+                if (sensorTimestamp <= 0) throw new RejectedJpeg("invalid still timestamp");
+                if (sensorTimestamp <= lastJpegSensorTimestamp) return;
+                if (width <= 0 || height <= 0 || (width & 1) != 0 || (height & 1) != 0) throw new RejectedJpeg("invalid still dimensions");
+                Image.Plane[] planes = image.getPlanes();
+                if (planes.length != 3) throw new RejectedJpeg("invalid still planes");
+                if (stillNv21 == null || stillNv21.length != width * height * 3 / 2) stillNv21 = new byte[width * height * 3 / 2];
+                copyNv21(planes, width, height, stillNv21);
+                jpeg = null;
+                yuv = true;
+            } else {
             if (image == null || image.getFormat() != ImageFormat.JPEG) {
                 throw new RejectedJpeg("missing JPEG image");
             }
@@ -1501,6 +1558,7 @@ final class GlassCamera {
             }
             jpeg = new byte[bytes];
             buffer.get(jpeg);
+            }
         } catch (RejectedJpeg error) {
             fail(error.getMessage());
             return;
@@ -1511,8 +1569,60 @@ final class GlassCamera {
         }
         if (settled || closed) return;
         framing.jpeg(generation, captureStream, sensorTimestamp);
-        pendingJpeg = new PendingJpeg(jpeg, width, height, sensorTimestamp);
-        if (stillExposure == null || stillResultFinished) deliverJpeg();
+        if (!yuv) {
+            pendingJpeg = new PendingJpeg(jpeg, width, height, sensorTimestamp);
+            if (stillExposure == null || stillResultFinished) deliverJpeg();
+            return;
+        }
+        // The native Image is closed; encoding leaves this thread to the preview that is still running.
+        long current = generation, arrived = SystemClock.elapsedRealtime();
+        int quality = stillJpegQuality;
+        byte[] nv21 = stillNv21;
+        encodingStill = true;
+        Executor worker = inputWorker != null ? inputWorker : stillWorker != null ? stillWorker
+                : (stillWorker = Executors.newSingleThreadExecutor(task -> {
+                    Thread thread = new Thread(task, "glass-still-jpeg"); thread.setDaemon(true); return thread;
+                }));
+        try {
+            worker.execute(() -> {
+                byte[] encoded;
+                try { encoded = stillEncoder.encode(nv21, width, height, quality); }
+                catch (RuntimeException | OutOfMemoryError error) { encoded = null; }
+                byte[] done = encoded;
+                handler.post(() -> {
+                    encodingStill = false;
+                    if (!active(current) || pendingJpeg != null) return; // settled while encoding: timeout, failure or close
+                    if (done == null || done.length == 0 || done.length > MAX_JPEG_BYTES) { fail("still could not be encoded"); return; }
+                    Log.i(TAG, "still_encoded gen=" + current + " bytes=" + done.length + " quality=" + quality
+                            + " encode_ms=" + (SystemClock.elapsedRealtime() - arrived));
+                    pendingJpeg = new PendingJpeg(done, width, height, sensorTimestamp);
+                    if (stillExposure == null || stillResultFinished) deliverJpeg();
+                });
+            });
+        } catch (java.util.concurrent.RejectedExecutionException error) { encodingStill = false; fail("still encoder unavailable"); }
+    }
+
+    /** YUV_420_888 planes into NV21: the luma rows, then V and U interleaved. */
+    private static void copyNv21(Image.Plane[] planes, int width, int height, byte[] nv21) {
+        ByteBuffer luma = planes[0].getBuffer().duplicate();
+        int lumaRow = planes[0].getRowStride();
+        for (int y = 0; y < height; y++) { luma.position(y * lumaRow); luma.get(nv21, y * width, width); }
+        ByteBuffer u = planes[1].getBuffer().duplicate(), v = planes[2].getBuffer().duplicate();
+        int row = planes[2].getRowStride(), step = planes[2].getPixelStride();
+        if (step == 2 && planes[1].getPixelStride() == 2 && planes[1].getRowStride() == row) {
+            // Semi-planar: the V plane's buffer already reads V,U,V,U...; only its last U byte lies in the U plane.
+            for (int y = 0; y < height / 2; y++) {
+                v.position(y * row);
+                v.get(nv21, width * height + y * width, Math.min(width, v.remaining()));
+            }
+            nv21[nv21.length - 1] = u.get(u.limit() - 1);
+            return;
+        }
+        int uRow = planes[1].getRowStride(), uStep = planes[1].getPixelStride();
+        for (int y = 0; y < height / 2; y++) for (int x = 0; x < width / 2; x++) {
+            nv21[width * height + y * width + 2 * x] = v.get(y * row + x * step);
+            nv21[width * height + y * width + 2 * x + 1] = u.get(y * uRow + x * uStep);
+        }
     }
 
     private void deliverJpeg() {

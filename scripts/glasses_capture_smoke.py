@@ -65,7 +65,16 @@ def main() -> int:
         time.sleep(2)
     if "Photo committed locally" in log:
         time.sleep(options.watch)
-        log = shell(f'logcat -d -v time -t "{started}" -s DocScanGlassDoc:*')
+        later = ""
+        for _ in range(3):  # a read through the phone relay came back empty once (2026-11-12)
+            later = shell(f'logcat -d -v time -t "{started}" -s DocScanGlassDoc:*')
+            if "Photo committed locally" in later:
+                break
+            time.sleep(2)
+        if "Photo committed locally" not in later:
+            print("FAIL: the log could not be read back after the photo; the adb connection is unreliable")
+            return 1
+        log = later
     status = [line for line in log.splitlines() if "preview_status" in line]
     work = [int(value) for value in re.findall(r"max_work_ms=(\d+)", "\n".join(status[1:]))]
     captured = re.search(r"captured (\d+)x(\d+) (\d+)B in (\d+)ms", log)

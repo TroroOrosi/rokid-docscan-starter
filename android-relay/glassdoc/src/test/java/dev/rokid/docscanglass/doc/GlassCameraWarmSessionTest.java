@@ -72,6 +72,7 @@ public class GlassCameraWarmSessionTest {
         CharacteristicsShadow.maxAnalog = null;
         failures.clear(); originals.clear(); delivered = 0;
         MapShadow.previewSize = new Size(320, 240);
+        MapShadow.fullSizeYuv = false; ManagerShadow.refuseOutputs = 0;
         CharacteristicsShadow.afMode = CONTROL_AF_MODE_CONTINUOUS_PICTURE;
         createCamera();
     }
@@ -1486,6 +1487,77 @@ public class GlassCameraWarmSessionTest {
         assertTrue(failures.isEmpty());
     }
 
+    private ReaderShadow readerOfWidth(int width) {
+        return ReaderShadow.readers.stream().filter(r -> r.width == width && !r.closed).findFirst().orElseThrow();
+    }
+
+    /**
+     * Glasses, 2026-11-12: full-size YUV arrives beside the running preview in 0.65-0.74 s, where the JPEG
+     * output needs a session of its own and leaves about 3 s without preview after every still.
+     */
+    @Test public void aFullSizeYuvStillSharesThePreviewSessionAndIsEncodedAfterItsImageIsClosed() {
+        MapShadow.fullSizeYuv = true;
+        ReflectionHelpers.setField(camera, "stillWorker", (java.util.concurrent.Executor) Runnable::run);
+        List<String> events = new ArrayList<>();
+        int[] asked = new int[4];
+        camera.stillEncoder = (nv21, width, height, quality) -> {
+            assertTrue("the camera's image is returned before the slow work", events.contains("image.close"));
+            asked[0] = width; asked[1] = height; asked[2] = quality; asked[3] = nv21.length;
+            assertEquals(11, nv21[0]); assertEquals(12, nv21[4032 * 3024 - 1]);
+            assertEquals("V first", 22, nv21[4032 * 3024]); assertEquals("then U", 33, nv21[4032 * 3024 + 1]);
+            assertEquals("the last U byte comes from the U plane", 44, nv21[nv21.length - 1]);
+            return new byte[]{7, 7, 7};
+        };
+        camera.preview(); idle(100);
+        ReaderShadow preview = readerOfWidth(320), still = readerOfWidth(4032);
+        assertEquals(ImageFormat.YUV_420_888, still.format);
+        DocScanTestCamera device = firstDevice();
+        assertEquals("one session for the preview and the still", List.of(List.of(preview.surface, still.surface)), device.configured);
+        result(CONTROL_AF_STATE_PASSIVE_FOCUSED, CONTROL_AE_STATE_CONVERGED);
+        frame(preview, 180, false, SystemClock.elapsedRealtimeNanos());
+        camera.captureOnce(); idle(400);
+        result(CONTROL_AF_STATE_PASSIVE_FOCUSED, CONTROL_AE_STATE_CONVERGED);
+        frame(preview, 180, false, SystemClock.elapsedRealtimeNanos()); idle(50);
+        assertEquals(1, device.session.captures);
+        RequestShadow request = Shadow.extract(device.session.captured);
+        assertEquals(CameraDevice.TEMPLATE_STILL_CAPTURE, request.template);
+        assertEquals(List.of(still.surface), request.targets);
+        assertEquals("no second session", 1, device.configurations);
+
+        DocScanTestImage image = new DocScanTestImage(events);
+        image.format = ImageFormat.YUV_420_888; image.rowStride = 4032; image.pixelStride = 1;
+        byte[] luma = new byte[4032 * 3024]; luma[0] = 11; luma[luma.length - 1] = 12;
+        byte[] vu = new byte[4032 * 1512 - 1]; vu[0] = 22; vu[1] = 33;
+        byte[] uv = new byte[4032 * 1512 - 1]; uv[uv.length - 1] = 44;
+        image.buffer = ByteBuffer.wrap(luma); image.chromaV = ByteBuffer.wrap(vu); image.chromaU = ByteBuffer.wrap(uv);
+        image.timestamp = SystemClock.elapsedRealtimeNanos();
+        still.image = image;
+        int shown = displayed;
+        still.listener.onImageAvailable(still.reader); idle(0);
+        assertArrayEquals(new int[]{4032, 3024, GlassCamera.STILL_JPEG_QUALITY, 4032 * 3024 * 3 / 2}, asked);
+        assertEquals(1, delivered);
+        assertArrayEquals(new byte[]{7, 7, 7}, originals.get(0).jpeg);
+        assertEquals("native_still", originals.get(0).provenance.sourceKind);
+        assertEquals("the preview was never replaced", 1, device.configurations);
+        assertFalse(device.closed);
+        idle(100); result(CONTROL_AF_STATE_PASSIVE_FOCUSED, CONTROL_AE_STATE_CONVERGED);
+        frame(preview, 180, false, SystemClock.elapsedRealtimeNanos());
+        assertTrue("frames keep being observed right after the still", displayed > shown);
+        assertTrue(failures.isEmpty());
+    }
+
+    @Test public void aCameraThatRefusesThePreviewWithFullSizeYuvFallsBackToTheJpegOnItsOwnSession() {
+        MapShadow.fullSizeYuv = true;
+        ManagerShadow.refuseOutputs = 2;
+        camera.preview(); idle(200);
+        assertEquals("the camera is opened again for the fallback", 2, ManagerShadow.devices.size());
+        assertTrue(firstDevice().closed);
+        ReaderShadow jpeg = currentReader(ImageFormat.JPEG);
+        assertEquals(List.of(List.of(readerOfWidth(320).surface)), currentDevice().configured);
+        assertEquals(4032, jpeg.width);
+        assertTrue(failures.isEmpty());
+    }
+
     @Test public void aPreviewFrameAsksTheImageForItsSizeOnce() {
         camera.preview(); idle(100);
         frame(180);
@@ -1737,6 +1809,7 @@ public class GlassCameraWarmSessionTest {
     @Implements(CameraManager.class) public static class ManagerShadow {
         static final List<DocScanTestCamera> devices = new ArrayList<>();
         static boolean refuseSession;
+        static int refuseOutputs;
         @Implementation protected String[] getCameraIdList() { return new String[]{"0"}; }
         @Implementation protected CameraCharacteristics getCameraCharacteristics(String id) { return Shadow.newInstanceOf(CameraCharacteristics.class); }
         @Implementation protected void openCamera(String id, CameraDevice.StateCallback callback, Handler h) {
@@ -1745,6 +1818,7 @@ public class GlassCameraWarmSessionTest {
                 ((BuilderShadow)Shadow.extract(b)).template = template; return b;
             });
             device.handler = h; device.state = callback; device.refuseSession = refuseSession;
+            device.refuseOutputs = refuseOutputs;
             devices.add(device); h.post(() -> callback.onOpened(device));
         }
     }
@@ -1786,7 +1860,9 @@ public class GlassCameraWarmSessionTest {
     }
     @Implements(StreamConfigurationMap.class) public static class MapShadow {
         static Size previewSize = new Size(320, 240);
+        static boolean fullSizeYuv;
         @Implementation protected Size[] getOutputSizes(int format) {
+            if (format != ImageFormat.JPEG && fullSizeYuv) return new Size[]{new Size(4032, 3024), previewSize};
             return new Size[]{format == ImageFormat.JPEG ? new Size(4032, 3024) : previewSize};
         }
     }

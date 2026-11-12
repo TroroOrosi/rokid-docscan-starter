@@ -22,6 +22,8 @@ public final class DocScanTestCamera extends CameraDevice {
     public boolean closed;
     public boolean suppressCloseCallback;
     public boolean refuseSession;
+    /** Refuse a session with at least this many outputs; 0 refuses none by count. */
+    public int refuseOutputs;
     public boolean supportsExactSession = true;
     public boolean sessionQueryUnsupported;
     public SessionConfiguration queriedConfiguration;
@@ -47,7 +49,8 @@ public final class DocScanTestCamera extends CameraDevice {
         configurations++;
         outputs = surfaces;
         configured.add(new ArrayList<>(surfaces));
-        h.post(() -> { if (refuseSession) callback.onConfigureFailed(session); else callback.onConfigured(session); });
+        boolean refused = refuseSession || (refuseOutputs > 0 && surfaces.size() >= refuseOutputs);
+        h.post(() -> { if (refused) callback.onConfigureFailed(session); else callback.onConfigured(session); });
     }
     @Override public void createCaptureSessionByOutputConfigurations(List<OutputConfiguration> o, CameraCaptureSession.StateCallback c, Handler h) { throw new UnsupportedOperationException(); }
     @Override public void createConstrainedHighSpeedCaptureSession(List<Surface> o, CameraCaptureSession.StateCallback c, Handler h) { throw new UnsupportedOperationException(); }

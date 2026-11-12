@@ -60,13 +60,24 @@ final class CameraProbe {
     private ImageReader reader;
     private ImageReader previewReader;
     private int previewFrames;
+    private int stillsLeft;
+    private long stillAskedAt;
+    private android.hardware.camera2.TotalCaptureResult lastPreview;
+    private final CameraCaptureSession.CaptureCallback previewResults = new CameraCaptureSession.CaptureCallback() {
+        @Override public void onCaptureCompleted(CameraCaptureSession source, CaptureRequest request,
+                android.hardware.camera2.TotalCaptureResult result) { lastPreview = result; }
+    };
     private android.graphics.SurfaceTexture texture;
     private android.view.Surface textureSurface;
     /**
      * How the still is taken, from {@code --es camera_variant}: comma-separated {@code preview=WxH}
      * (a repeating YUV preview in the same session, as glassdoc runs it), {@code warm=<ms>} before the
      * still, {@code af_off}, {@code ae_on} (written into both requests), {@code stop} (stop the
-     * repeating request before the still), {@code busy=<ms>} (hold each preview image that long).
+     * repeating request before the still), {@code busy=<ms>} (hold each preview image that long),
+     * {@code yuvstill} (the still as full-size YUV beside the preview), {@code jpeg=<quality>} (encode that
+     * YUV here and time it), {@code manual} (the preview's last exposure, sensitivity and frame duration
+     * with AE off, as glassdoc asks), {@code count=<n>} (that many stills in the one session),
+     * {@code keep} (leave the last file in the cache for {@code run-as} to read).
      * Empty is the single JPEG output measured on 2026-09-04.
      */
     static String variant = "";
@@ -158,6 +169,8 @@ final class CameraProbe {
             reader.setOnImageAvailableListener(this::onImageAvailable, handler);
             String preview = option("preview");
             previewFrames = 0;
+            stillsLeft = option("count") == null ? 1 : Integer.parseInt(option("count"));
+            lastPreview = null;
             if (preview != null) {
                 String[] wh = preview.split("x");
                 long busy = option("busy") == null ? 0 : Long.parseLong(option("busy"));
@@ -186,7 +199,7 @@ final class CameraProbe {
     void close() {
         handler.removeCallbacks(timeout);
         closeQuietly();
-        if (captured != null && captured.exists() && !captured.delete()) {
+        if (option("keep") == null && captured != null && captured.exists() && !captured.delete()) {
             Log.w(TAG, "probe capture file could not be deleted");
         }
         captured = null;
@@ -237,7 +250,7 @@ final class CameraProbe {
                                 preview.addTarget(previewReader.getSurface());
                                 if (textureSurface != null) preview.addTarget(textureSurface);
                                 applyOptions(preview);
-                                configured.setRepeatingRequest(preview.build(), null, handler);
+                                configured.setRepeatingRequest(preview.build(), previewResults, handler);
                                 long warm = option("warm") == null ? 1500 : Long.parseLong(option("warm"));
                                 handler.postDelayed(() -> {
                                     if (session != configured || settled) return;
@@ -290,9 +303,40 @@ final class CameraProbe {
             if (previewReader != null && option("both") != null) request.addTarget(previewReader.getSurface());
             if (textureSurface != null && option("both") != null) request.addTarget(textureSurface);
             if (previewReader != null && option("stop") != null) session.stopRepeating();
-            Log.i(TAG, "camera probe still requested after " + (SystemClock.elapsedRealtime() - startedAtMillis)
-                    + "ms preview_frames=" + previewFrames);
-            session.capture(request.build(), null, handler);
+            String asked = "auto";
+            if (option("manual") != null && lastPreview != null) {
+                Long exposure = lastPreview.get(android.hardware.camera2.CaptureResult.SENSOR_EXPOSURE_TIME);
+                Integer iso = lastPreview.get(android.hardware.camera2.CaptureResult.SENSOR_SENSITIVITY);
+                Long frame = lastPreview.get(android.hardware.camera2.CaptureResult.SENSOR_FRAME_DURATION);
+                request.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF);
+                request.set(CaptureRequest.CONTROL_AWB_LOCK, true);
+                request.set(CaptureRequest.SENSOR_EXPOSURE_TIME, exposure);
+                request.set(CaptureRequest.SENSOR_FRAME_DURATION, frame);
+                request.set(CaptureRequest.SENSOR_SENSITIVITY, iso);
+                asked = "manual exposure_ns=" + exposure + " iso=" + iso;
+            }
+            if (option("nr") != null) request.set(CaptureRequest.NOISE_REDUCTION_MODE, Integer.parseInt(option("nr")));
+            if (option("edge") != null) request.set(CaptureRequest.EDGE_MODE, Integer.parseInt(option("edge")));
+            if (option("manual") != null && lastPreview != null) {
+                Integer boost = lastPreview.get(android.hardware.camera2.CaptureResult.CONTROL_POST_RAW_SENSITIVITY_BOOST);
+                if (boost != null) request.set(CaptureRequest.CONTROL_POST_RAW_SENSITIVITY_BOOST, boost);
+                asked += " boost=" + boost;
+            }
+            stillAskedAt = SystemClock.elapsedRealtime();
+            Log.i(TAG, "camera probe still requested after " + (stillAskedAt - startedAtMillis)
+                    + "ms preview_frames=" + previewFrames + " " + asked);
+            session.capture(request.build(), new CameraCaptureSession.CaptureCallback() {
+                @Override public void onCaptureCompleted(CameraCaptureSession source, CaptureRequest done,
+                        android.hardware.camera2.TotalCaptureResult result) {
+                    Log.i(TAG, "camera probe still result exposure_ns="
+                            + result.get(android.hardware.camera2.CaptureResult.SENSOR_EXPOSURE_TIME) + " iso="
+                            + result.get(android.hardware.camera2.CaptureResult.SENSOR_SENSITIVITY) + " ae_mode="
+                            + result.get(android.hardware.camera2.CaptureResult.CONTROL_AE_MODE) + " nr="
+                            + result.get(android.hardware.camera2.CaptureResult.NOISE_REDUCTION_MODE) + " edge="
+                            + result.get(android.hardware.camera2.CaptureResult.EDGE_MODE) + " boost="
+                            + result.get(android.hardware.camera2.CaptureResult.CONTROL_POST_RAW_SENSITIVITY_BOOST));
+                }
+            }, handler);
         } catch (CameraAccessException | RuntimeException error) {
             settle(ProbeReport.Status.FAILED,
                     "capture failed: " + error.getClass().getSimpleName());
@@ -305,15 +349,56 @@ final class CameraProbe {
                 settle(ProbeReport.Status.FAILED, "null image");
                 return;
             }
-            ByteBuffer buffer = image.getPlanes()[0].getBuffer();
-            byte[] bytes = new byte[buffer.remaining()];
-            buffer.get(bytes);
+            long arrived = SystemClock.elapsedRealtime();
+            String encoded = "";
+            byte[] bytes;
+            if (image.getFormat() == ImageFormat.YUV_420_888 && option("jpeg") != null) {
+                int width = image.getWidth(), height = image.getHeight();
+                Image.Plane[] planes = image.getPlanes();
+                long copyFrom = SystemClock.elapsedRealtime();
+                byte[] nv21 = new byte[width * height * 3 / 2];
+                ByteBuffer luma = planes[0].getBuffer();
+                int lumaRow = planes[0].getRowStride();
+                for (int y = 0; y < height; y++) { luma.position(y * lumaRow); luma.get(nv21, y * width, width); }
+                ByteBuffer v = planes[2].getBuffer(), u = planes[1].getBuffer();
+                int chromaRow = planes[2].getRowStride(), chromaStep = planes[2].getPixelStride();
+                if (chromaStep == 2) {
+                    // Semi-planar: the V plane's buffer is already V,U,V,U...; its last U byte is in the U plane.
+                    for (int y = 0; y < height / 2; y++) {
+                        v.position(y * chromaRow);
+                        v.get(nv21, width * height + y * width, Math.min(width, v.remaining()));
+                    }
+                    nv21[nv21.length - 1] = u.get(u.limit() - 1);
+                } else {
+                    for (int y = 0; y < height / 2; y++) for (int x = 0; x < width / 2; x++) {
+                        nv21[width * height + y * width + 2 * x] = v.get(y * chromaRow + x * chromaStep);
+                        nv21[width * height + y * width + 2 * x + 1] = u.get(y * planes[1].getRowStride() + x * planes[1].getPixelStride());
+                    }
+                }
+                long encodeFrom = SystemClock.elapsedRealtime();
+                java.io.ByteArrayOutputStream jpeg = new java.io.ByteArrayOutputStream(8 << 20);
+                new android.graphics.YuvImage(nv21, ImageFormat.NV21, width, height, null).compressToJpeg(
+                        new android.graphics.Rect(0, 0, width, height), Integer.parseInt(option("jpeg")), jpeg);
+                bytes = jpeg.toByteArray();
+                encoded = " copy_ms=" + (encodeFrom - copyFrom) + " encode_ms=" + (SystemClock.elapsedRealtime() - encodeFrom)
+                        + " luma_row=" + lumaRow + " chroma_row=" + chromaRow + " chroma_step=" + chromaStep;
+            } else {
+                ByteBuffer buffer = image.getPlanes()[0].getBuffer();
+                bytes = new byte[buffer.remaining()];
+                buffer.get(bytes);
+            }
             File target = new File(context.getCacheDir(), CAPTURE_NAME);
             try (FileOutputStream out = new FileOutputStream(target)) {
                 out.write(bytes);
             }
             captured = target;
             long elapsed = SystemClock.elapsedRealtime() - startedAtMillis;
+            Log.i(TAG, "camera probe still " + image.getWidth() + "x" + image.getHeight() + " " + bytes.length
+                    + "B arrived_ms=" + (arrived - stillAskedAt) + encoded + " preview_frames=" + previewFrames);
+            if (--stillsLeft > 0 && previewReader != null) {
+                handler.postDelayed(() -> { if (!settled) requestStill(); }, 1500);
+                return;
+            }
             settle(ProbeReport.Status.OK,
                     image.getWidth() + "x" + image.getHeight()
                             + " " + bytes.length + "B in " + elapsed + "ms variant=[" + variant
