@@ -104,6 +104,9 @@ what the platform permits.
 - `tasks/todo.md` — current W work and acceptance conditions; earlier RP/CQ checkboxes are history.
 - `docs/requirements-audit.md` — 現在の要望・会話中の変更・比較候補と到達点。旧採否・順序は折り畳んだ履歴。
   旧FS/R/S/Xの対応と2026-09-15の調査履歴も保持。実装／物理受け入れの完了ではない。
+- `docs/superpowers/specs/2026-11-12-wearer-led-capture-design.md` — 撮影方式の設計提案
+  （2026-11-12、**未承認・未実装**）。露光を頭の動きに合わせ、視界ごとに原寸の複数候補から1枚を残す。
+  実写19枚の集計、外部の製品・研究の出典、方式比較、装着者に頼む前の検証を含む。装着での確認はない。
 - `docs/fast-scan-decisions.md` — automatic/manual scan and listening decisions.
   The current implementation is described in `docs/multimodal-scan.md`.
   D/E/X comparisons retain their original evidence; physical/model acceptance is pending.
