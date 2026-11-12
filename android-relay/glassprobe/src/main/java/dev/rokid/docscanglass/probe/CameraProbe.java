@@ -310,6 +310,7 @@ final class CameraProbe {
                 Long frame = lastPreview.get(android.hardware.camera2.CaptureResult.SENSOR_FRAME_DURATION);
                 request.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF);
                 request.set(CaptureRequest.CONTROL_AWB_LOCK, true);
+                if (option("expose") != null) exposure = Long.parseLong(option("expose")); // ns, in place of the preview's
                 request.set(CaptureRequest.SENSOR_EXPOSURE_TIME, exposure);
                 request.set(CaptureRequest.SENSOR_FRAME_DURATION, frame);
                 request.set(CaptureRequest.SENSOR_SENSITIVITY, iso);

@@ -833,13 +833,24 @@ public class GlassCameraWarmSessionTest {
         assertEquals(Integer.valueOf(100), firstDevice().session.captured.get(CaptureRequest.SENSOR_SENSITIVITY));
     }
 
-    @Test public void sensitivityStopsAtTheAnalogCeilingRatherThanLengtheningTheExposure() {
+    /**
+     * Glasses, 2026-11-12: one period where the preview needed five at the ceiling left a page at 17 of 255.
+     * The still keeps the preview's light with as few whole periods as the ceiling allows.
+     */
+    @Test public void whereTheCeilingCannotCarryTheLightTheStillTakesMorePeriodsInsteadOfGoingDark() {
         CharacteristicsShadow.maxAnalog = 800;
         prepareFlickerStill(25_000_000L, 400, STATISTICS_SCENE_FLICKER_60HZ);
-        assertEquals(Long.valueOf(8_333_333), firstDevice().session.captured.get(CaptureRequest.SENSOR_EXPOSURE_TIME));
-        assertEquals("darker, never slower", Integer.valueOf(800), firstDevice().session.captured.get(CaptureRequest.SENSOR_SENSITIVITY));
+        assertEquals("two periods", Long.valueOf(16_666_666), firstDevice().session.captured.get(CaptureRequest.SENSOR_EXPOSURE_TIME));
+        assertEquals("the same light", Integer.valueOf(600), firstDevice().session.captured.get(CaptureRequest.SENSOR_SENSITIVITY));
+        setup(); CharacteristicsShadow.maxAnalog = 800;
+        prepareFlickerStill(30_000_000L, 800, STATISTICS_SCENE_FLICKER_50HZ); // within the fake's 33 ms frame
+        assertEquals("a dim scene at the ceiling keeps the preview's exposure", Long.valueOf(30_000_000),
+                firstDevice().session.captured.get(CaptureRequest.SENSOR_EXPOSURE_TIME));
+        assertEquals(Integer.valueOf(800), firstDevice().session.captured.get(CaptureRequest.SENSOR_SENSITIVITY));
         setup(); CharacteristicsShadow.maxAnalog = 800;
         prepareFlickerStill(25_000_000L, 1600, STATISTICS_SCENE_FLICKER_60HZ);
+        assertEquals("no whole number of periods fits: the measured exposure stays", Long.valueOf(25_000_000),
+                firstDevice().session.captured.get(CaptureRequest.SENSOR_EXPOSURE_TIME));
         assertEquals("a preview already above the ceiling is not turned down", Integer.valueOf(1600),
                 firstDevice().session.captured.get(CaptureRequest.SENSOR_SENSITIVITY));
     }
@@ -1555,6 +1566,26 @@ public class GlassCameraWarmSessionTest {
         ReaderShadow jpeg = currentReader(ImageFormat.JPEG);
         assertEquals(List.of(List.of(readerOfWidth(320).surface)), currentDevice().configured);
         assertEquals(4032, jpeg.width);
+        assertTrue(failures.isEmpty());
+    }
+
+    /**
+     * Glasses, 2026-11-12: 0.55-0.9 s after a still's request two preview frames rose from a mean of 70 to 155
+     * and fell back, reported as converged. Counted as page turns they took one unmoving page three times.
+     */
+    @Test public void framesBrightenedByTheStillInFlightAreNotPageEvidenceButAnOrdinaryTurnStillIs() {
+        camera.captureOnce(); idle(100); readyFrame(); idle(400); readyFrame(); idle(50);
+        assertEquals(1, firstDevice().session.captures);
+        PageChange pages = ReflectionHelpers.getField(camera, "pageChange");
+        long scene = pages.sequence();
+        int shown = displayed;
+        idle(100); result(CONTROL_AF_STATE_PASSIVE_FOCUSED, CONTROL_AE_STATE_CONVERGED); frame(250);
+        assertEquals("the leaked exposure is not a page turn", scene, pages.sequence());
+        assertEquals("and is not shown", shown, displayed);
+        idle(100); result(CONTROL_AF_STATE_PASSIVE_FOCUSED, CONTROL_AE_STATE_CONVERGED); frame(180);
+        assertEquals(scene, pages.sequence());
+        idle(100); frame(180, true);
+        assertEquals("a page turned while the still is in flight is still seen", scene + 1, pages.sequence());
         assertTrue(failures.isEmpty());
     }
 

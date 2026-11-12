@@ -569,6 +569,7 @@ public final class DocScanGlassActivity extends Activity
     private void onAction(GlassesInputAction action, long elapsedMillis) {
         if (sessionClosed) return;
         muteOutput();
+        boolean wasAsleep = idleAsleep;
         if (!writingDone) {
             if (displayProtected()) keepDisplayActive();
             else {
@@ -582,21 +583,18 @@ public final class DocScanGlassActivity extends Activity
         }
         if (choosingSession) {
             if (startupStarting) return;
+            // One rule on every screen (operator, 2026-11-12): a tap turns the display off or on, a swipe
+            // moves, a double tap decides. The gesture that turns the display back on does nothing else.
+            if (wasAsleep || startupNotice) { startupNotice = false; showStartupChoices(); return; }
             if (action == GlassesInputAction.SWIPE_FORWARD || action == GlassesInputAction.SWIPE_BACK) {
                 int step = action == GlassesInputAction.SWIPE_FORWARD ? 1 : -1;
-                int count = startupCaptures == null ? startupOptions().size() : startupCaptures.size();
+                int count = startupCaptures == null ? startupOptions().size() : startupCaptures.size() + 1;
                 startupSelection = Math.floorMod(startupSelection + step, count);
                 showStartupChoices();
             } else if (action == GlassesInputAction.SHORT_TAP) {
-                startSelectedSession();
+                sleepDisplayNow();
             } else if (action == GlassesInputAction.BACK) {
-                if (startupCaptures != null) {
-                    startupCaptures = null;
-                    startupSelection = 3;
-                    backExit.reset();
-                    showStartupChoices();
-                } else if (backExit.onBack(elapsedMillis) == BackExitPolicy.Decision.EXIT) exitSession();
-                else hud.showLines(List.of("もう一度で終了", "タップで選択中の読取を開始", ""));
+                startSelectedSession();
             }
             return;
         }
@@ -708,15 +706,21 @@ public final class DocScanGlassActivity extends Activity
         List<String> options = new ArrayList<>(List.of("通常の読取", "合同英語（読解＋音声）", "リスニング"));
         if (controller.hasSavedWorkflow()) options.add("中断した読取");
         if (startupAnswers != null) options.add("前回の答案");
+        options.add(EXIT_OPTION);
         return options;
     }
 
     private void showStartupChoices() {
         enterIdleDisplay("chooser", 0);
         if (startupCaptures != null) {
+            startupSelection = Math.floorMod(startupSelection, startupCaptures.size() + 1);
+            if (startupSelection == startupCaptures.size()) {
+                hud.showLines(List.of("中断した読取", "▶ 一覧へ戻る", "スワイプ選択・ダブルタップ決定"));
+                return;
+            }
             DocScanController.SavedCapture selected = startupCaptures.get(startupSelection);
             hud.showLines(List.of("中断した読取 " + (startupSelection + 1) + "/" + startupCaptures.size(),
-                    selected.label, "スワイプで選択・タップで再開", "ダブルタップで戻る"));
+                    selected.label, "スワイプ選択・ダブルタップ再開"));
             return;
         }
         List<String> options = startupOptions();
@@ -725,13 +729,33 @@ public final class DocScanGlassActivity extends Activity
         for (int index = 0; index < options.size(); index++) {
             lines.add((index == startupSelection ? "▶ " : "　 ") + options.get(index));
         }
-        lines.add("スワイプで選択・タップで開始");
+        lines.add("スワイプ選択・ダブルタップ開始");
         hud.showLines(lines);
     }
 
+    private static final String EXIT_OPTION = "アプリを終了";
+    private boolean startupNotice;
+
+    /** The idle sleep, now: what the display does by itself after five seconds on these screens. */
+    private void sleepDisplayNow() {
+        hud.showLines(List.of()); // at once: the system's own sleep arrives through the phone, up to seconds later
+        scheduleDisplayIdle();
+        Runnable sleep = displayIdle;
+        if (sleep == null) return;
+        main.removeCallbacks(sleep);
+        sleep.run();
+    }
+
     private void startSelectedSession() {
+        if (startupCaptures != null && startupSelection >= startupCaptures.size()) {
+            startupCaptures = null;
+            startupSelection = 3;
+            showStartupChoices();
+            return;
+        }
         String selected = startupCaptures == null ? startupOptions().get(startupSelection) : "中断記録";
         backExit.reset();
+        if (EXIT_OPTION.equals(selected)) { exitSession(); return; }
         if ("中断した読取".equals(selected)) {
             startupCaptures = controller.savedCaptures();
             if (startupCaptures.isEmpty()) startupCaptures = null;
@@ -768,7 +792,8 @@ public final class DocScanGlassActivity extends Activity
             if (sessionClosed) return;
             startupStarting = false;
             if (!accepted) {
-                hud.showLines(List.of("開始・再開できません", "接続先と保存記録を確認", "ダブルタップで戻る"));
+                startupNotice = true; // the next gesture of any kind shows the choices again
+                hud.showLines(List.of("開始・再開できません", "接続先と保存記録を確認", "操作すると一覧へ戻ります"));
                 return;
             }
             beginPowerGeneration();

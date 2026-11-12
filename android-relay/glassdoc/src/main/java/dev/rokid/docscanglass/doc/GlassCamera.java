@@ -93,11 +93,13 @@ final class GlassCamera {
                 .compressToJpeg(new Rect(0, 0, width, height), quality, out) ? out.toByteArray() : null;
     };
     /**
-     * Set when the preview returns after a still: its exposure starts over, and until it has settled the
-     * frames differ from the page just taken. Observed as page turns they took the same page again and
-     * again, five photos in 15 s of an unmoving scene on the glasses (2026-11-12, scene 3, 4, 6, 7, 9...).
+     * Set when a preview stream starts over after a still or a pause: its exposure starts over too, and
+     * until it has settled the frames differ from the page just taken. Counted as page turns they took the
+     * same unmoving page again and again on the glasses (2026-11-12).
      */
     private long resumeSettlingSince;
+    /** Mean level of the last preview frame seen with no still in flight; negative before the first. */
+    private int quietLevel = -1;
     static final long RESUME_SETTLE_LIMIT_MILLIS = 2000;
     private static final long CAPTURE_TIMEOUT_MILLIS = 15_000;
     // Preparation plus JPEG deadline remains below the controller's 30s capture lease.
@@ -204,17 +206,24 @@ final class GlassCamera {
                     || duration == null || duration < exposure || duration > camera.get(CameraCharacteristics.SENSOR_INFO_MAX_FRAME_DURATION)
                     || iso == null || iso <= 0 || !isoRange.contains(iso)
                     || (boostRange != null && (boost == null || boost <= 0 || !boostRange.contains(boost)))) return null;
-            // Decided 2026-11-10: one flicker period and never longer. Sensitivity carries the light the
-            // preview gathered with a longer exposure; up to the analog ceiling, darker rather than slower.
-            // An unreported flicker leaves the measured exposure alone. Not verified on the glasses.
+            // As few whole flicker periods as the sensitivity ceiling allows, so the still keeps the light the
+            // preview measured: one period where sensitivity can carry it, more where it cannot. The first
+            // rule, one period and darker rather than slower (2026-11-10), was wrong in dim light: on the
+            // glasses a scene the preview exposed for 50 ms at the ceiling came out at 17 of 255 in 10 ms
+            // and at 62 in 50 ms (2026-11-12). The stillness the shot waits for follows this exposure.
+            // An unreported flicker, or no whole number of periods within it, leaves the measured exposure.
             Integer flicker = result.get(CaptureResult.STATISTICS_SCENE_FLICKER);
             long period = flicker == null ? 0 : flicker == CaptureResult.STATISTICS_SCENE_FLICKER_60HZ
                     ? 8_333_333L : Stillness.REFERENCE_EXPOSURE_NANOS;
             if (period > 0 && exposure > period + period / 100 && exposureRange.contains(period)) {
                 Integer analog = camera.get(CameraCharacteristics.SENSOR_MAX_ANALOG_SENSITIVITY);
                 int ceiling = Math.max(iso, analog == null ? isoRange.getUpper() : Math.min(analog, isoRange.getUpper()));
-                iso = (int)Math.min(ceiling, Math.round((double)iso * exposure / period));
-                exposure = period;
+                long light = (long)iso * exposure, most = (long)ceiling * period;
+                long shortened = Math.max(1, (light + most - 1) / most) * period;
+                if (shortened <= exposure) {
+                    iso = (int)Math.min(ceiling, Math.round((double)light / shortened));
+                    exposure = shortened;
+                }
             }
             return new StillExposure(exposure, duration, result.get(CaptureResult.SENSOR_TIMESTAMP), iso, boostRange == null ? null : boost,
                     exposureRange, isoRange, boostRange);
@@ -689,6 +698,7 @@ final class GlassCamera {
                     ? PaperExposure.create(characteristics, size, token) : null;
             previewMotion = new PageChange();
             pageChange.restartStream();
+            quietLevel = -1;
             previewAt = 0;
             previewDisplayAt = 0;
             meteringSensorTimestamp = 0;
@@ -882,6 +892,16 @@ final class GlassCamera {
             for (int y = 0; y < 24; y++) for (int x = 0; x < 32; x++) {
                 thumbnail[y * 32 + x] = pixels.get(origin + y * imageHeight / 24 * row + x * imageWidth / 32 * step);
             }
+            // While a still is in flight its exposure leaks into the preview: on the glasses the frames 0.55-0.9 s
+            // after the request rose from a mean of 70 to 155 and fell back, each reported as converged, and
+            // each was counted as a page turn, so one unmoving page was taken three times (2026-11-12). Such a
+            // frame is dropped; any other frame during the still stays page evidence, a turned page included.
+            int level = 0;
+            for (byte value : thumbnail) level += value & 255;
+            level /= thumbnail.length;
+            if (generation > 0 && !settled) {
+                if (quietLevel >= 0 && level * 10 > quietLevel * 13 + 80) return;
+            } else quietLevel = level;
             long previousScene = pageChange.sequence();
             if (sceneStartTimestamp == 0) sceneStartTimestamp = timestamp;
             s3 = s4 = s5 = s6 = System.nanoTime();
@@ -892,6 +912,9 @@ final class GlassCamera {
                 videoSceneObserved = true; video.scene(pageChange.sequence(), timestamp, now);
             }
             if (previousScene != pageChange.sequence()) {
+                // Why a page turn was counted: without this a retaken page cannot be told from a moved scene.
+                Log.i(TAG, "page_change scene=" + pageChange.sequence() + " " + pageChange.lastChange()
+                        + " exposure_ns=" + meteringExposureNanos + " fine=" + pageChange.fineStatus());
                 sceneStartTimestamp = timestamp;
                 if (generation == 0 || settled) {
                     // Before shutter issue, the next page needs its own AUTO/MACRO focus cycle.

@@ -202,8 +202,10 @@ speed verification and uncertain-send safeguards apply to both answer speeds.
   phase. Zero phone operations after setup. On 2026-11-12 the operator asked
   for one tap to clear the display and stop the camera and one tap to bring
   them back; in ordinary reading the retake and the manual shot, which the tap
-  did until then, moved to the forward swipe. Mixed English and listening keep
-  the earlier assignment. `docs/multimodal-scan.md` holds the operation table.
+  did until then, moved to the forward swipe. The same rule holds on the
+  chooser: a tap turns the display off, a swipe selects, a double tap starts.
+  Mixed English and listening keep the earlier assignment while capturing.
+  `docs/multimodal-scan.md` holds the operation table.
 - **The existing loop is enabled only on `:glassdoc`.** Page change is latched
   until stillness permits one shot; OCR character count and burst scoring are
   not capture conditions. Actual review lasts three seconds, then local save
@@ -239,8 +241,11 @@ speed verification and uncertain-send safeguards apply to both answer speeds.
   accuracy remains unverified.
   Gyroscope freshness uses the sensor's measurement timestamp, including delayed
   deliveries and gaps in the retained preview stream. On supported fixed-focus
-  cameras, one native still copies the current preview's manual exposure, sensitivity,
-  frame duration and post-RAW gain. Its JPEG joins the matching capture result
+  cameras, one native still keeps the light the preview measured: as few whole
+  flicker periods as the sensitivity ceiling allows, with the preview's frame
+  duration and post-RAW gain (one period and darker was tried and left a dim
+  page at 17 of 255, §M-6). Preview frames brightened by a still in flight are
+  not page evidence. Its JPEG joins the matching capture result
   within the existing deadline. Missing or inconsistent metadata retains the
   original for explicit recapture. Live preview retains at most one queued bitmap.
   The original JPEG budget is 20 MiB across capture, local persistence and image
@@ -652,12 +657,17 @@ For changes to the real-device path:
 An Android build proves compilation only. Do not label hardware behavior as
 verified until the physical checklist has been completed.
 
-After any change to the glasses' camera path, and before the wearer is asked to
-try it, run `py -3.12 scripts/glasses_capture_smoke.py --serial <glasses>`. It
-starts the installed app over adb, sends the start tap and passes only when a
-full-size photo is taken and saved with the preview handler under 100 ms. The
-unit tests use a fake camera; from 2026-11-01 to 2026-11-11 the camera path was
-changed on those tests alone and took no photo on the device.
+After any change to the glasses app, and before the wearer is asked to try it,
+run `py -3.12 scripts/glasses_device_check.py --glasses <serial> --phone <serial>`.
+It drives the installed app over adb as the touchpad does and checks, line by
+line, the environment, the chooser, the automatic photo and its exposure, that
+an unmoving scene is not taken again, pause and resume, the manual shot and
+what reached the phone server. `--paper <seconds>` records a real booklet
+being read by the wearer. The unit tests use a fake camera and display: from
+2026-11-01 to 2026-11-12 they hid a frame handler 300 times slower on the
+device, a still the firmware never returned, one page taken again and again,
+and a photo too dark to read. Glasses lying on a desk look across the room, not
+at a page; a page's legibility and page turns need the wearer.
 
 ## Versioning
 

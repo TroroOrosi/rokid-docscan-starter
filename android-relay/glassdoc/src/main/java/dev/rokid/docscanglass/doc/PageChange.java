@@ -17,6 +17,8 @@ final class PageChange {
     private long sequence;
     private LumaPageEvidence fine = new LumaPageEvidence();
     private long lastFrameTimestamp, lastFrameAt;
+    private String lastCause = "none";
+    private int lastOffset, lastShare;
 
     void observe(byte[] pixels, long now) { observe(pixels, now, false); }
 
@@ -31,6 +33,7 @@ final class PageChange {
     }
     private void observe(byte[] pixels, long now, boolean fullFrame) {
         boolean changed = reference == null || reference.length != pixels.length;
+        String cause = changed ? "first" : "coarse";
         if (!changed) {
             changed = differs(pixels, 0, 0);
             if (changed && capturedReference && pixels.length == WIDTH * HEIGHT) {
@@ -46,8 +49,9 @@ final class PageChange {
         // A captured-page rescue needs one native phase to explain every point and both mean scales.
         boolean samePhase = fullFrame && changed && capturedReference && fine.sameNativePhase(pixels);
         if (samePhase) changed = false;
-        if (fullFrame && !changed && !samePhase) changed = fine.changed(capturedReference, now);
+        if (fullFrame && !changed && !samePhase) { changed = fine.changed(capturedReference, now); cause = "fine"; }
         if (changed) {
+            lastCause = cause;
             if (fullFrame) fine.acceptScene();
             pending = true;
             changedAt = now;
@@ -71,6 +75,7 @@ final class PageChange {
         for (int i = 0; i < pixels.length; i++) {
             if (Math.abs((pixels[i] & 255) - (reference[index(i, dx, dy)] & 255) - exposureOffset) >= CHANGE_DELTA) changed++;
         }
+        if (dx == 0 && dy == 0) { lastOffset = exposureOffset; lastShare = changed * 100 / pixels.length; }
         return changed * 5 >= pixels.length;
     }
 
@@ -91,6 +96,8 @@ final class PageChange {
         }
     }
     boolean hasCapturedPage() { return capturedReference; }
+    /** The last counted change: which comparison decided it, the mean level shift and the share of cells over the limit. */
+    String lastChange() { return "cause=" + lastCause + " level_shift=" + lastOffset + " cells_over_percent=" + lastShare; }
     boolean fineMotionReady(long now) { return fine.motionReady(now); }
     String fineStatus() { return fine.status(); }
     void restartStream() {

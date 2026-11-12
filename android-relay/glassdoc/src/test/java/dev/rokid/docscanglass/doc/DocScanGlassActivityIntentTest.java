@@ -301,7 +301,12 @@ public class DocScanGlassActivityIntentTest {
         action.invoke(activity, GlassesInputAction.SWIPE_FORWARD, 1000L);
         assertEquals(0, server.getRequestCount());
         action.invoke(activity, GlassesInputAction.SWIPE_BACK, 1200L);
-        action.invoke(activity, GlassesInputAction.SHORT_TAP, 1400L);
+        // Operator, 2026-11-12: a tap turns the display off on every screen; the double tap starts.
+        action.invoke(activity, GlassesInputAction.SHORT_TAP, 1300L);
+        awaitSerial();
+        assertFalse("a tap on the choices starts nothing", controller.hasLocalSession());
+        action.invoke(activity, GlassesInputAction.SWIPE_FORWARD, 1350L); // brings the display back, moves nothing
+        action.invoke(activity, GlassesInputAction.BACK, 1400L);
         awaitSerial();
         assertEquals(RelayState.AIMING, controller.getState());
         assertTrue(controller.hasLocalSession());
@@ -360,7 +365,7 @@ public class DocScanGlassActivityIntentTest {
         setField(activity, "startupSelection", 4);
         java.lang.reflect.Method action = DocScanGlassActivity.class.getDeclaredMethod("onAction", GlassesInputAction.class, long.class);
         action.setAccessible(true);
-        action.invoke(activity, GlassesInputAction.SHORT_TAP, 1000L);
+        action.invoke(activity, GlassesInputAction.BACK, 1000L);
         ((java.util.concurrent.ExecutorService) org.robolectric.util.ReflectionHelpers.getField(activity, "answerPersistExecutor"))
                 .submit(() -> {}).get(5, TimeUnit.SECONDS);
         Shadows.shadowOf(android.os.Looper.getMainLooper()).idle();
@@ -402,14 +407,17 @@ public class DocScanGlassActivityIntentTest {
         Shadows.shadowOf(activity.getApplication()).grantPermissions(android.Manifest.permission.CAMERA);
         java.lang.reflect.Method action = DocScanGlassActivity.class.getDeclaredMethod("onAction", GlassesInputAction.class, long.class);
         action.setAccessible(true);
-        action.invoke(activity, GlassesInputAction.SHORT_TAP, 1000L);
+        action.invoke(activity, GlassesInputAction.BACK, 1000L);
         awaitSerial();
         Shadows.shadowOf(android.os.Looper.getMainLooper()).idle();
         Field choosing = DocScanGlassActivity.class.getDeclaredField("choosingSession");
         choosing.setAccessible(true);
         assertTrue(choosing.getBoolean(activity));
-        action.invoke(activity, GlassesInputAction.BACK, 2000L); // back to root
+        action.invoke(activity, GlassesInputAction.SWIPE_FORWARD, 2000L); // the notice gives way to the list
+        setField(activity, "startupSelection", 1); // "back to the list" follows the one saved capture
         action.invoke(activity, GlassesInputAction.BACK, 2500L);
+        setField(activity, "startupSelection", 0);
+        action.invoke(activity, GlassesInputAction.SWIPE_BACK, 2800L); // the last choice ends the app
         action.invoke(activity, GlassesInputAction.BACK, 3000L);
         java.util.Properties saved = new java.util.Properties();
         try (java.io.InputStream stream = new java.io.FileInputStream(new File(activity.getFilesDir(),

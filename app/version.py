@@ -554,7 +554,9 @@ EXPLAINER_API_VERSION = "1.1.0"
 # 1.43.2: preserve unsupported table blocks and whole matrix-bearing expressions.
 # 1.44.0: in ordinary reading one tap pauses and resumes the display and camera; the forward swipe
 #         takes the manual shot and the retake; a tap hides the answers while reading them.
-GLASSES_VIEW_CONTRACT_VERSION = "1.44.0"
+# 1.45.0: one rule on every screen: tap turns the display off or on, swipe selects, double tap decides.
+#         The chooser starts on the double tap; the live corner shows the paper, not the whole frame.
+GLASSES_VIEW_CONTRACT_VERSION = "1.45.0"
 
 # Answer-area overlay payload (box + short answer; 2D image-anchored).
 # 1.1.0: added tracking metadata (tracking/fixed_ar/anchor_hint).

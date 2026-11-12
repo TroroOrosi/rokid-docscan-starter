@@ -47,6 +47,15 @@ final class HudView extends View {
     private Bitmap preview;
     private Bitmap livePreview;
     private PaperGeometry.Box paperProposal; // provisional comparison, never a crop.
+    /**
+     * The paper of the live image in PaperCrop grid cells; null shows the whole camera frame. The camera sees
+     * about 77 by 94 degrees, several times the page the wearer looks at: "the view is wider than the frame on
+     * the display" (2026-09), "still too wide" (2026-11-12). The corner keeps its size and shows the paper.
+     */
+    private int[] liveBox;
+    private int liveMisses;
+    /** Frames without a paper box before the live image returns to the whole camera frame (about half a second). */
+    private static final int LIVE_MISSES = 5;
     private boolean capturing;
     private boolean aiming;
     private double guideFraction = FramingGuide.UNCALIBRATED_FRACTION;
@@ -69,7 +78,7 @@ final class HudView extends View {
 
     void capturePreview(boolean active) {
         capturing = active;
-        if (!active) paperProposal = null;
+        if (!active) { paperProposal = null; liveBox = null; liveMisses = 0; }
         if (!active && livePreview != null) { livePreview.recycle(); livePreview = null; }
         invalidate();
     }
@@ -82,6 +91,11 @@ final class HudView extends View {
         Bitmap previous = livePreview;
         livePreview = bitmap;
         paperProposal = proposal;
+        // Display only. The comparison corners describe the whole frame, so that launch keeps it whole.
+        int[] found = proposal != null ? null : PaperCrop.boxOf(bitmap);
+        if (found == null && liveBox != null && proposal == null && ++liveMisses < LIVE_MISSES) found = liveBox;
+        else liveMisses = 0;
+        liveBox = PaperCrop.steady(liveBox, found);
         if (previous != null && previous != bitmap && !previous.isRecycled()) previous.recycle();
         invalidate();
     }
@@ -279,6 +293,18 @@ final class HudView extends View {
         guidePaint.setStrokeWidth(2f);
         Bitmap frame = livePreview;
         if (frame == null || frame.isRecycled()) return;
+        int[] crop = PaperCrop.pixels(frame, liveBox);
+        if (crop != null) {
+            // The line is the limit of what the camera sees: paper that reaches it is cut off in the photo.
+            RectF shown = fit(crop[2] - crop[0], crop[3] - crop[1]);
+            float scale = shown.width() / (crop[2] - crop[0]);
+            canvas.save(); canvas.clipRect(shown.left - 1f, shown.top - 1f, shown.right + 1f, shown.bottom + 1f);
+            canvas.drawRect(shown.left - crop[0] * scale + 1f, shown.top - crop[1] * scale + 1f,
+                    shown.left + (frame.getWidth() - crop[0]) * scale - 1f,
+                    shown.top + (frame.getHeight() - crop[1]) * scale - 1f, guidePaint);
+            canvas.restore();
+            return;
+        }
         RectF bounds = imageBounds(frame);
         PaperGeometry.Box proposal = paperProposal;
         if (proposal == null) { canvas.drawRect(bounds, guidePaint); return; }
@@ -297,12 +323,14 @@ final class HudView extends View {
         canvas.restore();
     }
 
-    /** Show the whole given image in one corner; status never covers it. */
+    /** Show the given image, the live one cut to its paper, in one corner; status never covers it. */
     private void drawPreview(Canvas canvas, Bitmap still) {
-        RectF target = imageBounds(still);
+        int[] crop = still == livePreview ? PaperCrop.pixels(still, liveBox) : null;
+        RectF target = crop == null ? imageBounds(still) : fit(crop[2] - crop[0], crop[3] - crop[1]);
         canvas.save();
         canvas.clipRect(captureArea());
-        canvas.drawBitmap(still, null, target, still == livePreview ? livePaint : previewPaint);
+        canvas.drawBitmap(still, crop == null ? null : new android.graphics.Rect(crop[0], crop[1], crop[2], crop[3]),
+                target, still == livePreview ? livePaint : previewPaint);
         canvas.restore();
     }
 
@@ -319,9 +347,14 @@ final class HudView extends View {
     }
 
     private RectF imageBounds(Bitmap image) {
+        return fit(image.getWidth(), image.getHeight());
+    }
+
+    /** The largest rectangle of this shape centred in the capture corner. */
+    private RectF fit(float imageWidth, float imageHeight) {
         RectF area = captureArea();
-        float scale = Math.min(area.width() / image.getWidth(), area.height() / image.getHeight());
-        float width = image.getWidth() * scale, height = image.getHeight() * scale;
+        float scale = Math.min(area.width() / imageWidth, area.height() / imageHeight);
+        float width = imageWidth * scale, height = imageHeight * scale;
         return new RectF(area.centerX() - width / 2f, area.centerY() - height / 2f,
                 area.centerX() + width / 2f, area.centerY() + height / 2f);
     }
