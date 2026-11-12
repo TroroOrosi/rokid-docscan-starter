@@ -72,7 +72,7 @@ public class GlassCameraWarmSessionTest {
         CharacteristicsShadow.maxAnalog = null;
         failures.clear(); originals.clear(); delivered = 0;
         MapShadow.previewSize = new Size(320, 240);
-        MapShadow.fullSizeYuv = false; ManagerShadow.refuseOutputs = 0;
+        MapShadow.fullSizeYuv = false; ManagerShadow.refuseOutputs = 0; previewBoost = 150;
         CharacteristicsShadow.afMode = CONTROL_AF_MODE_CONTINUOUS_PICTURE;
         createCamera();
     }
@@ -738,6 +738,8 @@ public class GlassCameraWarmSessionTest {
         return manualResult(timestamp, exposure, iso, CONTROL_AE_MODE_OFF);
     }
 
+    private int previewBoost = 150;
+
     private TotalCaptureResult manualResult(long timestamp, long exposure, int iso, int aeMode) {
         TotalCaptureResult result = ShadowTotalCaptureResult.newTotalCaptureResult();
         ShadowCaptureResult values = Shadow.extract(result);
@@ -747,7 +749,7 @@ public class GlassCameraWarmSessionTest {
         values.set(CaptureResult.SENSOR_EXPOSURE_TIME, exposure);
         values.set(CaptureResult.SENSOR_SENSITIVITY, iso);
         values.set(CaptureResult.SENSOR_FRAME_DURATION, 33_333_333L);
-        values.set(CaptureResult.CONTROL_POST_RAW_SENSITIVITY_BOOST, 150);
+        values.set(CaptureResult.CONTROL_POST_RAW_SENSITIVITY_BOOST, previewBoost);
         values.set(CaptureResult.CONTROL_AE_MODE, aeMode);
         values.set(CaptureResult.CONTROL_AWB_LOCK, true);
         return result;
@@ -834,25 +836,44 @@ public class GlassCameraWarmSessionTest {
     }
 
     /**
-     * Glasses, 2026-11-12: one period where the preview needed five at the ceiling left a page at 17 of 255.
-     * The still keeps the preview's light with as few whole periods as the ceiling allows.
+     * Glasses, 2026-11-12: darker left a dim page at 17 of 255, and a 50-70 ms exposure was never still enough
+     * on a worn head. The still stays at one flicker period and the camera's own gain keeps it as bright.
      */
-    @Test public void whereTheCeilingCannotCarryTheLightTheStillTakesMorePeriodsInsteadOfGoingDark() {
+    @Test public void whereSensitivityCannotCarryTheLightTheCamerasGainDoesBeforeTheExposureGrows() {
         CharacteristicsShadow.maxAnalog = 800;
         prepareFlickerStill(25_000_000L, 400, STATISTICS_SCENE_FLICKER_60HZ);
-        assertEquals("two periods", Long.valueOf(16_666_666), firstDevice().session.captured.get(CaptureRequest.SENSOR_EXPOSURE_TIME));
-        assertEquals("the same light", Integer.valueOf(600), firstDevice().session.captured.get(CaptureRequest.SENSOR_SENSITIVITY));
+        assertEquals("one period", Long.valueOf(8_333_333), firstDevice().session.captured.get(CaptureRequest.SENSOR_EXPOSURE_TIME));
+        assertEquals("sensitivity to its ceiling", Integer.valueOf(800), firstDevice().session.captured.get(CaptureRequest.SENSOR_SENSITIVITY));
+        assertEquals("the rest as gain: 150 x 1200 / 800", Integer.valueOf(225),
+                firstDevice().session.captured.get(CaptureRequest.CONTROL_POST_RAW_SENSITIVITY_BOOST));
         setup(); CharacteristicsShadow.maxAnalog = 800;
-        prepareFlickerStill(30_000_000L, 800, STATISTICS_SCENE_FLICKER_50HZ); // within the fake's 33 ms frame
-        assertEquals("a dim scene at the ceiling keeps the preview's exposure", Long.valueOf(30_000_000),
+        prepareFlickerStill(30_000_000L, 800, STATISTICS_SCENE_FLICKER_50HZ);
+        assertEquals("a dim scene already at the ceiling is still shot in one period", Long.valueOf(10_000_000),
                 firstDevice().session.captured.get(CaptureRequest.SENSOR_EXPOSURE_TIME));
         assertEquals(Integer.valueOf(800), firstDevice().session.captured.get(CaptureRequest.SENSOR_SENSITIVITY));
+        assertEquals(Integer.valueOf(450), firstDevice().session.captured.get(CaptureRequest.CONTROL_POST_RAW_SENSITIVITY_BOOST));
         setup(); CharacteristicsShadow.maxAnalog = 800;
         prepareFlickerStill(25_000_000L, 1600, STATISTICS_SCENE_FLICKER_60HZ);
-        assertEquals("no whole number of periods fits: the measured exposure stays", Long.valueOf(25_000_000),
-                firstDevice().session.captured.get(CaptureRequest.SENSOR_EXPOSURE_TIME));
-        assertEquals("a preview already above the ceiling is not turned down", Integer.valueOf(1600),
+        assertEquals("a preview above the ceiling is not turned down", Integer.valueOf(1600),
                 firstDevice().session.captured.get(CaptureRequest.SENSOR_SENSITIVITY));
+        assertEquals(Long.valueOf(8_333_333), firstDevice().session.captured.get(CaptureRequest.SENSOR_EXPOSURE_TIME));
+        assertEquals(Integer.valueOf(450), firstDevice().session.captured.get(CaptureRequest.CONTROL_POST_RAW_SENSITIVITY_BOOST));
+    }
+
+    /** With the gain at its limit too, the still may be one stop darker; beyond that it takes a second period. */
+    @Test public void onlyWhenTheGainIsSpentDoesTheStillTakeASecondPeriod() {
+        CharacteristicsShadow.maxAnalog = 800;
+        previewBoost = 1600; // of 3200: two times left
+        prepareFlickerStill(30_000_000L, 800, STATISTICS_SCENE_FLICKER_50HZ);
+        assertEquals("three times the light is wanted, two as gain, the rest within one stop", Long.valueOf(10_000_000),
+                firstDevice().session.captured.get(CaptureRequest.SENSOR_EXPOSURE_TIME));
+        assertEquals(Integer.valueOf(3200), firstDevice().session.captured.get(CaptureRequest.CONTROL_POST_RAW_SENSITIVITY_BOOST));
+        setup(); CharacteristicsShadow.maxAnalog = 800;
+        previewBoost = 3200; // none left
+        prepareFlickerStill(30_000_000L, 800, STATISTICS_SCENE_FLICKER_50HZ);
+        assertEquals("three times darker is more than a stop: two periods", Long.valueOf(20_000_000),
+                firstDevice().session.captured.get(CaptureRequest.SENSOR_EXPOSURE_TIME));
+        assertEquals(Integer.valueOf(3200), firstDevice().session.captured.get(CaptureRequest.CONTROL_POST_RAW_SENSITIVITY_BOOST));
     }
 
     @Test public void theHeadMotionAllowanceFollowsTheShortenedStillNotThePreview() {

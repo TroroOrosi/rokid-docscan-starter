@@ -320,6 +320,7 @@ final class CameraProbe {
             if (option("edge") != null) request.set(CaptureRequest.EDGE_MODE, Integer.parseInt(option("edge")));
             if (option("manual") != null && lastPreview != null) {
                 Integer boost = lastPreview.get(android.hardware.camera2.CaptureResult.CONTROL_POST_RAW_SENSITIVITY_BOOST);
+                if (boost != null && option("gain") != null) boost = Math.round(boost * Float.parseFloat(option("gain"))); // more digital gain
                 if (boost != null) request.set(CaptureRequest.CONTROL_POST_RAW_SENSITIVITY_BOOST, boost);
                 asked += " boost=" + boost;
             }

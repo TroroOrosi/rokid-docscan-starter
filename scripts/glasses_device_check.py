@@ -265,10 +265,16 @@ class Check:
             return
         from PIL import Image, ImageStat  # noqa: PLC0415
         photos = self.photos()
-        listing = self.run(self.options.phone, "shell",
-                           f"run-as com.termux sh -c 'ls -lt {PHONE_IMAGES}/*.jpg | head -{max(1, len(photos))}'").decode()
-        arrived = {int(m.group(1)): m.group(2) for m in re.finditer(r"\s(\d{5,})\s+\d{4}-\d\d-\d\d \d\d:\d\d (\S+\.jpg)", listing)}
-        missing = [size for _, size, _ in photos if size not in arrived]
+        arrived: dict[int, str] = {}
+        missing = [size for _, size, _ in photos]
+        for _ in range(10):  # an upload of several megabytes over the hotspot takes a few seconds
+            listing = self.run(self.options.phone, "shell",
+                               f"run-as com.termux sh -c 'ls -lt {PHONE_IMAGES}/*.jpg | head -{max(1, len(photos))}'").decode()
+            arrived = {int(m.group(1)): m.group(2) for m in re.finditer(r"\s(\d{5,})\s+\d{4}-\d\d-\d\d \d\d:\d\d (\S+\.jpg)", listing)}
+            missing = [size for _, size, _ in photos if size not in arrived]
+            if not missing:
+                break
+            time.sleep(3)
         self.expect("every photo reached the phone server", not missing, f"{len(photos) - len(missing)} of {len(photos)} arrived")
         hashes: list[tuple[str, int]] = []
         for index, (stamp, size, generation) in enumerate(photos):
@@ -287,7 +293,8 @@ class Check:
             code = sum(1 << i for i in range(64) if pixels[i // 8 * 9 + i % 8] > pixels[i // 8 * 9 + i % 8 + 1])
             same = [n for n, (_, other) in enumerate(hashes, 1) if bin(code ^ other).count("1") <= 6]
             hashes.append((stamp, code))
-            state = "PASS" if bright >= 60 else "FAIL"
+            # On the glasses a page at 40 could not be read and one at 116 could (2026-11-12); between, the scene is dim.
+            state = "PASS" if bright >= 90 else "WARN" if bright >= 50 else "FAIL"
             self.row(f"photo {index + 1} ({stamp[:8]}) is bright enough to read", state,
                      f"brightest quarter {bright:.0f} of 255, mean {ImageStat.Stat(gray).mean[0]:.0f}"
                      + (f"; looks like photo {same[0]} again" if same else ""))

@@ -169,6 +169,8 @@ final class GlassCamera {
 
     /** Freeze the measured exposure for one fixed-focus still, including its processed-image gain. */
     private static final class StillExposure {
+        /** How much darker than the preview a still may be before its exposure grows by a flicker period: one stop. */
+        static final double DARKER_STOPS = 2;
         final long exposure, frameDuration, sourceTimestamp;
         final int iso;
         final Integer boost;
@@ -206,22 +208,31 @@ final class GlassCamera {
                     || duration == null || duration < exposure || duration > camera.get(CameraCharacteristics.SENSOR_INFO_MAX_FRAME_DURATION)
                     || iso == null || iso <= 0 || !isoRange.contains(iso)
                     || (boostRange != null && (boost == null || boost <= 0 || !boostRange.contains(boost)))) return null;
-            // As few whole flicker periods as the sensitivity ceiling allows, so the still keeps the light the
-            // preview measured: one period where sensitivity can carry it, more where it cannot. The first
-            // rule, one period and darker rather than slower (2026-11-10), was wrong in dim light: on the
-            // glasses a scene the preview exposed for 50 ms at the ceiling came out at 17 of 255 in 10 ms
-            // and at 62 in 50 ms (2026-11-12). The stillness the shot waits for follows this exposure.
-            // An unreported flicker, or no whole number of periods within it, leaves the measured exposure.
+            // One flicker period wherever the camera can still show the page as bright: sensitivity first, up to
+            // its analog ceiling, then the camera's own digital gain, up to its limit; a second period only when
+            // that would leave the still more than one stop darker than the preview.
+            // Two earlier rules failed on the glasses on 2026-11-12. One period and simply darker left a dim page
+            // at 17 of 255. As many periods as the light needed gave 50-70 ms, and the stillness that exposure
+            // demands, about 1 degree a second, was never met on a worn head: three preparations expired in 37 s
+            // without one photo. At 10 ms with six times the gain the same scene read 39 against 41 at 70 ms
+            // (flat-area noise 3.9 against 1.5), and the shot needs only 7 degrees a second.
+            // An unreported flicker, or no whole number of periods within the exposure, leaves it as measured.
             Integer flicker = result.get(CaptureResult.STATISTICS_SCENE_FLICKER);
             long period = flicker == null ? 0 : flicker == CaptureResult.STATISTICS_SCENE_FLICKER_60HZ
                     ? 8_333_333L : Stillness.REFERENCE_EXPOSURE_NANOS;
             if (period > 0 && exposure > period + period / 100 && exposureRange.contains(period)) {
                 Integer analog = camera.get(CameraCharacteristics.SENSOR_MAX_ANALOG_SENSITIVITY);
                 int ceiling = Math.max(iso, analog == null ? isoRange.getUpper() : Math.min(analog, isoRange.getUpper()));
-                long light = (long)iso * exposure, most = (long)ceiling * period;
-                long shortened = Math.max(1, (light + most - 1) / most) * period;
+                double digital = boostRange != null && boost != null ? (double)boostRange.getUpper() / boost : 1;
+                double light = (double)iso * exposure;
+                long periods = Math.max(1, (long)Math.ceil(light / ((double)ceiling * period * digital * DARKER_STOPS)));
+                long shortened = periods * period;
                 if (shortened <= exposure) {
-                    iso = (int)Math.min(ceiling, Math.round((double)light / shortened));
+                    double wanted = light / shortened; // the sensitivity that would keep the preview's brightness
+                    iso = (int)Math.min(ceiling, Math.round(wanted));
+                    if (boostRange != null && boost != null) {
+                        boost = (int)Math.max(boostRange.getLower(), Math.min(boostRange.getUpper(), Math.round(boost * wanted / iso)));
+                    }
                     exposure = shortened;
                 }
             }
@@ -1007,7 +1018,7 @@ final class GlassCamera {
                 + " future=" + (futurePages != null) + " scene=" + pageChange.sequence()
                 + " page_still=" + pageChange.ready(now) + " metered=" + meteredFrame(now)
                 + " exposure_ns=" + meteringExposureNanos + " motion=" + previewMotion.ready(now)
-                + " fine=" + pageChange.fineMotionReady(now) + " gyro=" + stillness.readyNow()
+                + " fine=" + pageChange.fineMotionReady(now) + " gyro=" + stillness.readyNow() + " " + stillness.describe()
                 + " camera_ready=" + cameraReady()
                 + " steps_ms acquire/copy/thumb/observe/misc/display/rest=" + stepNanos[0] / 1_000_000 + "/"
                 + stepNanos[1] / 1_000_000 + "/" + stepNanos[2] / 1_000_000 + "/" + stepNanos[3] / 1_000_000 + "/"

@@ -54,6 +54,12 @@ final class Stillness implements SensorEventListener {
     /** Opt-in native A/B uses only readings already available; it never starts a second wait. */
     void retainMeasurements(boolean retain) { retainMeasurements = retain; }
 
+    /** The head's turning speed against what the coming exposure allows, for the status line; rad/s. */
+    String describe() {
+        return "head_rad_s=" + (measuring && Float.isFinite(motionSquared) ? String.format(java.util.Locale.ROOT, "%.3f", Math.sqrt(motionSquared)) : "none")
+                + " limit_rad_s=" + String.format(java.util.Locale.ROOT, "%.3f", motionLimit());
+    }
+
     boolean readyNow() {
         long now = SystemClock.elapsedRealtime();
         float limit = motionLimit();

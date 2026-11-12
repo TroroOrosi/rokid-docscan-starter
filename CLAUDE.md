@@ -241,11 +241,14 @@ speed verification and uncertain-send safeguards apply to both answer speeds.
   accuracy remains unverified.
   Gyroscope freshness uses the sensor's measurement timestamp, including delayed
   deliveries and gaps in the retained preview stream. On supported fixed-focus
-  cameras, one native still keeps the light the preview measured: as few whole
-  flicker periods as the sensitivity ceiling allows, with the preview's frame
-  duration and post-RAW gain (one period and darker was tried and left a dim
-  page at 17 of 255, §M-6). Preview frames brightened by a still in flight are
-  not page evidence. Its JPEG joins the matching capture result
+  cameras, one native still stays at one flicker period and keeps the preview's
+  brightness with sensitivity up to its analog ceiling and then the camera's
+  post-RAW gain up to its limit; it takes a second period only when it would
+  otherwise be more than a stop darker. Simply darker left a dim page at 17 of
+  255, and the preview's own 50-70 ms exposure was never still enough on a worn
+  head: three preparations expired without a photo (§M-6, §M-7). Whether a page
+  shot with that gain can be read is not measured. Preview frames brightened by
+  a still in flight are not page evidence. Its JPEG joins the matching capture result
   within the existing deadline. Missing or inconsistent metadata retains the
   original for explicit recapture. Live preview retains at most one queued bitmap.
   The original JPEG budget is 20 MiB across capture, local persistence and image
