@@ -247,7 +247,15 @@ speed verification and uncertain-send safeguards apply to both answer speeds.
   otherwise be more than a stop darker. Simply darker left a dim page at 17 of
   255, and the preview's own 50-70 ms exposure was never still enough on a worn
   head: three preparations expired without a photo (§M-6, §M-7). Whether a page
-  shot with that gain can be read is not measured. Preview frames brightened by
+  shot with that gain can be read is not measured. On 2026-11-13 the same scene was
+  taken with the glasses' own camera and with the app's session (§M-9): the
+  camera's auto exposure chose the same values in both and the photos were as
+  bright; an AE frame-rate range of 30 halved the exposure and kept the
+  brightness. The dark photos of September (8.3-10 ms, sensitivity 50-60) were
+  the app's own exposure rule, about a twelfth of the light the glasses' camera
+  used that night, not the room. The glasses' camera detects motion and scene
+  and fuses a five-frame exposure bracket; the app takes one frame. The manual
+  one-period rule has not been compared with these on a page. Preview frames brightened by
   a still in flight are not page evidence. Its JPEG joins the matching capture result
   within the existing deadline. Missing or inconsistent metadata retains the
   original for explicit recapture. Live preview retains at most one queued bitmap.
@@ -671,6 +679,15 @@ being read by the wearer. The unit tests use a fake camera and display: from
 device, a still the firmware never returned, one page taken again and again,
 and a photo too dark to read. Glasses lying on a desk look across the room, not
 at a page; a page's legibility and page turns need the wearer.
+
+The glasses' own camera is the reference for exposure and processing. Over adb
+`input keyevent KEYCODE_SPRITE_FUNCTION` takes one photo with it into
+`/sdcard/DCIM/Camera` without stopping the foreground app. Before a change to
+exposure, gain or still processing is handed to the wearer, take the same scene
+both ways seconds apart and compare brightness and noise; `:glassprobe`
+`--es camera_variant` takes `fps=`, `scene=` and `ev=` for the camera's own
+controls. Do not attribute a dark photo to the room without that comparison,
+and do not judge from old photos when a new pair can be taken.
 
 ## Versioning
 

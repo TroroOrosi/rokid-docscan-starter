@@ -93,6 +93,22 @@ final class CameraProbe {
     private void applyOptions(CaptureRequest.Builder request) {
         if (option("af_off") != null) request.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF);
         if (option("ae_on") != null) request.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON);
+        // The camera's own ways to shorten the exposure while its auto exposure keeps the brightness:
+        // fps=<n> or fps=<low>-<high> (AE target frame-rate range), scene=<n> (a scene mode, 13 is sports),
+        // ev=<steps> (AE compensation in the camera's steps). Written into both requests.
+        String fps = option("fps");
+        if (fps != null && !fps.isEmpty()) {
+            String[] ends = fps.split("-");
+            request.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, new android.util.Range<>(
+                    Integer.parseInt(ends[0]), Integer.parseInt(ends[ends.length - 1])));
+        }
+        String scene = option("scene");
+        if (scene != null && !scene.isEmpty()) {
+            request.set(CaptureRequest.CONTROL_MODE, CaptureRequest.CONTROL_MODE_USE_SCENE_MODE);
+            request.set(CaptureRequest.CONTROL_SCENE_MODE, Integer.parseInt(scene));
+        }
+        String ev = option("ev");
+        if (ev != null && !ev.isEmpty()) request.set(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, Integer.parseInt(ev));
     }
     private File captured;
     private long startedAtMillis;
