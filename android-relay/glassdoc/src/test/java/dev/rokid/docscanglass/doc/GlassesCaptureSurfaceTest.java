@@ -147,7 +147,6 @@ public class GlassesCaptureSurfaceTest {
     // AGENT_APPROVED=1: explicit paper proposal stays within the existing small HUD preview.
     @Test public void paperCornersRotateWithTheWholeLiveImageAndDisappearOnUncertainty() {
         HudView hud = new HudView(RuntimeEnvironment.getApplication()); hud.layout(0, 0, 1000, 800);
-        hud.previewFraction(.30f); // the earlier corner
         GlassesCaptureSurface surface = new GlassesCaptureSurface(RuntimeEnvironment.getApplication(), null, hud,
                 new Handler(Looper.getMainLooper()), (generation, purpose) -> { });
         surface.showCaptureAiming(1, true, true);

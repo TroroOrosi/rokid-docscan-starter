@@ -24,9 +24,27 @@ final class PaperCrop {
     /** The paper region of {@code still}, or {@code still} itself when none stands out. */
     static Bitmap apply(Bitmap still) {
         if (still == null) return null;
-        int[] area = pixels(still, boxOf(still));
-        if (area == null) return still;
-        int x = area[0], y = area[1], w = area[2] - area[0], h = area[3] - area[1];
+        Bitmap small;
+        try {
+            small = Bitmap.createScaledBitmap(still, GRID_W, GRID_H, true);
+        } catch (OutOfMemoryError error) {
+            return still;
+        }
+        int[] pixels = new int[GRID_W * GRID_H];
+        small.getPixels(pixels, 0, GRID_W, 0, 0, GRID_W, GRID_H);
+        if (small != still) small.recycle();
+        int[] luma = new int[pixels.length];
+        for (int i = 0; i < pixels.length; i++) {
+            int p = pixels[i];
+            luma[i] = (((p >> 16) & 0xFF) * 299 + ((p >> 8) & 0xFF) * 587 + (p & 0xFF) * 114) / 1000;
+        }
+        int[] box = reviewBox(luma, GRID_W, GRID_H);
+        // The corner fits the image by its tighter side: under a tenth larger is not worth hiding the surroundings.
+        if (box == null || Math.min(GRID_W * 10 / (box[2] - box[0]), GRID_H * 10 / (box[3] - box[1])) < 11) return still;
+        int x = box[0] * still.getWidth() / GRID_W;
+        int y = box[1] * still.getHeight() / GRID_H;
+        int w = Math.max(1, box[2] * still.getWidth() / GRID_W - x);
+        int h = Math.max(1, box[3] * still.getHeight() / GRID_H - y);
         try {
             Bitmap cropped = Bitmap.createBitmap(still, x, y, w, h);
             if (cropped != still) still.recycle();
@@ -34,43 +52,6 @@ final class PaperCrop {
         } catch (OutOfMemoryError error) {
             return still;
         }
-    }
-
-    /** The paper of {@code image} in grid cells, or null when none stands out or showing it enlarges little. */
-    static int[] boxOf(Bitmap image) {
-        if (image == null || image.isRecycled()) return null;
-        Bitmap small;
-        try {
-            small = Bitmap.createScaledBitmap(image, GRID_W, GRID_H, true);
-        } catch (OutOfMemoryError error) {
-            return null;
-        }
-        int[] pixels = new int[GRID_W * GRID_H];
-        small.getPixels(pixels, 0, GRID_W, 0, 0, GRID_W, GRID_H);
-        if (small != image) small.recycle();
-        int[] luma = new int[pixels.length];
-        for (int i = 0; i < pixels.length; i++) {
-            int p = pixels[i];
-            luma[i] = (((p >> 16) & 0xFF) * 299 + ((p >> 8) & 0xFF) * 587 + (p & 0xFF) * 114) / 1000;
-        }
-        int[] box = reviewBox(luma, GRID_W, GRID_H);
-        // The image is fitted by its tighter side: under a tenth larger is not worth hiding the surroundings.
-        return box == null || Math.min(GRID_W * 10 / (box[2] - box[0]), GRID_H * 10 / (box[3] - box[1])) < 11 ? null : box;
-    }
-
-    /** {left, top, right, bottom} of a grid box in the pixels of {@code image}; null for no box. */
-    static int[] pixels(Bitmap image, int[] box) {
-        if (box == null) return null;
-        int x = box[0] * image.getWidth() / GRID_W, y = box[1] * image.getHeight() / GRID_H;
-        return new int[] {x, y, Math.max(x + 1, box[2] * image.getWidth() / GRID_W),
-                Math.max(y + 1, box[3] * image.getHeight() / GRID_H)};
-    }
-
-    /** The box to keep showing: the live image follows the paper only once it has moved more than two cells. */
-    static int[] steady(int[] shown, int[] found) {
-        if (shown == null || found == null) return found;
-        for (int i = 0; i < 4; i++) if (Math.abs(shown[i] - found[i]) > 2) return found;
-        return shown;
     }
 
     /**

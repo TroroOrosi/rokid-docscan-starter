@@ -65,92 +65,9 @@ public class HudViewTest {
 
         java.lang.reflect.Method area = HudView.class.getDeclaredMethod("captureArea");
         area.setAccessible(true);
-        android.graphics.RectF whole = (android.graphics.RectF) area.invoke(view);
-        assertEquals("the image has the view between the margins, under the status strip",
-                new android.graphics.RectF(8f, 44f, 472f, 427f), whole);
-        view.previewFraction(.30f);
         android.graphics.RectF corner = (android.graphics.RectF) area.invoke(view);
         assertEquals("30% of the 640 px panel", 192f, corner.height(), .01f);
         assertEquals(435f - 8f, corner.bottom, .01f);
-    }
-
-    /**
-     * The wearer could not aim with the whole 93-degree frame in a 144x192 px corner and brought the page
-     * closer (2026-11-11). The live image now shows the paper, enlarged, with the camera's limit as a line.
-     */
-    @Test public void theLiveImageShowsThePaperEnlargedAndTheCameraLimitWhereThePaperReachesIt() {
-        HudView view = new HudView(RuntimeEnvironment.getApplication());
-        view.layout(0, 0, 480, 640);
-        view.capturePreview(true);
-        view.showAiming(List.of());
-        view.showLivePreview(liveFrame(40, 200));
-        Bitmap screen = Bitmap.createBitmap(480, 640, Bitmap.Config.ARGB_8888);
-        view.draw(new Canvas(screen));
-        // A 160x120 sheet of the 240x320 frame, with its margin, is shown across the 464 px area.
-        for (int x : new int[]{60, 240, 420}) {
-            assertEquals("the sheet spans the display", 200, Color.green(screen.getPixel(x, 338)));
-        }
-        assertEquals("the status strip stays free", Color.BLACK, screen.getPixel(240, 20));
-        for (int y = 0; y < 640; y++) {
-            assertTrue("no camera limit is drawn where the sheet is inside the frame",
-                    Color.red(screen.getPixel(9, y)) == 0 && Color.red(screen.getPixel(470, y)) == 0);
-        }
-
-        // The sheet now leaves the camera frame on its left: the limit shows on that side only.
-        view.showLivePreview(liveFrame(0, 160));
-        view.draw(new Canvas(screen));
-        assertEquals("the camera limit is a line at the cut side", 0x40, Color.red(screen.getPixel(9, 338)));
-        assertEquals(0, Color.red(screen.getPixel(470, 338)));
-        view.capturePreview(false);
-        screen.recycle();
-    }
-
-    @Test public void theLiveImageDoesNotJumpForASmallMoveOrOneFrameWithoutPaper() throws Exception {
-        HudView view = new HudView(RuntimeEnvironment.getApplication());
-        view.layout(0, 0, 480, 640);
-        view.capturePreview(true);
-        view.showLivePreview(liveFrame(40, 200));
-        java.lang.reflect.Field field = HudView.class.getDeclaredField("liveBox");
-        field.setAccessible(true);
-        int[] first = (int[]) field.get(view);
-        view.showLivePreview(liveFrame(45, 205)); // one grid cell
-        assertTrue("a small move keeps the shown box", first == field.get(view));
-        Bitmap dark = Bitmap.createBitmap(240, 320, Bitmap.Config.ARGB_8888);
-        dark.eraseColor(Color.rgb(0, 20, 0));
-        view.showLivePreview(dark);
-        assertTrue("one frame without paper keeps the shown box", first == field.get(view));
-        view.showLivePreview(liveFrame(120, 240)); // sixteen cells
-        assertTrue("a real move is followed", first != field.get(view));
-        view.capturePreview(false);
-        assertEquals(null, field.get(view));
-    }
-
-    @Test public void theReviewImageHasTheWholeArea() {
-        Bitmap photo = Bitmap.createBitmap(480, 360, Bitmap.Config.ARGB_8888);
-        photo.eraseColor(Color.rgb(90, 90, 90));
-        HudView view = new HudView(RuntimeEnvironment.getApplication());
-        view.layout(0, 0, 480, 640);
-        view.showReview(photo, List.of());
-        Bitmap screen = Bitmap.createBitmap(480, 640, Bitmap.Config.ARGB_8888);
-        view.draw(new Canvas(screen));
-        // 464x348 centred in [8,44,472,632].
-        for (int x : new int[]{12, 240, 468}) {
-            assertTrue("the photograph spans the display", Color.green(screen.getPixel(x, 338)) > 80);
-        }
-        assertEquals(Color.BLACK, screen.getPixel(240, 20));
-        photo.recycle();
-        screen.recycle();
-    }
-
-    /** A dark desk with a sheet of {@code green} 200 from {@code left} to {@code right}, rows 100 to 220. */
-    private static Bitmap liveFrame(int left, int right) {
-        Bitmap frame = Bitmap.createBitmap(240, 320, Bitmap.Config.ARGB_8888);
-        frame.eraseColor(Color.rgb(0, 20, 0));
-        Canvas canvas = new Canvas(frame);
-        android.graphics.Paint paper = new android.graphics.Paint();
-        paper.setColor(Color.rgb(0, 200, 0));
-        canvas.drawRect(left, 100, right, 220, paper);
-        return frame;
     }
 
     @Test public void compactFailureWrapsTheCompleteReasonAndRecoveryAction() {
@@ -291,7 +208,6 @@ public class HudViewTest {
         photo.eraseColor(Color.rgb(90, 90, 90));
         HudView view = new HudView(RuntimeEnvironment.getApplication());
         view.layout(0, 0, 480, 640);
-        view.previewFraction(.30f); // the earlier corner
         view.showReview(photo, List.of());
         Bitmap screen = Bitmap.createBitmap(480, 640, Bitmap.Config.ARGB_8888);
         view.draw(new Canvas(screen));
@@ -323,7 +239,6 @@ public class HudViewTest {
         source.drawRect(740, 540, 800, 600, paper);
         HudView view = new HudView(RuntimeEnvironment.getApplication());
         view.layout(0, 0, 480, 640);
-        view.previewFraction(.30f); // the earlier corner
         view.showReview(photo, List.of());
         Bitmap screen = Bitmap.createBitmap(480, 640, Bitmap.Config.ARGB_8888);
         view.draw(new Canvas(screen));
@@ -346,7 +261,6 @@ public class HudViewTest {
         }
         HudView view = new HudView(RuntimeEnvironment.getApplication());
         view.layout(0, 0, 480, 640);
-        view.previewFraction(.30f); // the earlier corner
         view.showReview(photo, List.of());
         Bitmap screen = Bitmap.createBitmap(480, 640, Bitmap.Config.ARGB_8888);
         view.draw(new Canvas(screen));
@@ -365,7 +279,6 @@ public class HudViewTest {
     @Test public void aimingFramesTheActualCameraImageAndRemovesItOutsideCapture() {
         HudView view = new HudView(RuntimeEnvironment.getApplication());
         view.layout(0, 0, 480, 640);
-        view.previewFraction(.30f); // the earlier corner
         Bitmap screen = Bitmap.createBitmap(480, 640, Bitmap.Config.ARGB_8888);
         Bitmap camera = Bitmap.createBitmap(320, 240, Bitmap.Config.ARGB_8888);
         camera.eraseColor(Color.rgb(0, 80, 0));
@@ -388,7 +301,6 @@ public class HudViewTest {
     @Test public void endingCaptureKeepsThePhotoStationaryAndTheNoticeOutsideIt() {
         HudView view = new HudView(RuntimeEnvironment.getApplication());
         view.layout(0, 0, 480, 640);
-        view.previewFraction(.30f); // the earlier corner
         Bitmap photo = Bitmap.createBitmap(240, 480, Bitmap.Config.ARGB_8888);
         photo.eraseColor(Color.rgb(90, 90, 90));
         view.showReview(photo, List.of());

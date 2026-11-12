@@ -68,8 +68,6 @@ public final class DocScanGlassActivity extends Activity
     /** Saved pixels kept dark below and above every screen, from {@code --ei}; they fit the panel to the wearer. */
     private static final String EXTRA_BOTTOM_MARGIN = "bottom_margin";
     private static final String EXTRA_TOP_MARGIN = "top_margin";
-    /** Share of the panel, 20-100, given to the live and review image; saved. */
-    private static final String EXTRA_PREVIEW_PERCENT = "preview_percent";
     /** Both at this limit still leave 160 px of the measured 640 px panel. */
     static final int MAX_MARGIN = 240;
     /** Diagnostic override for this launch only; normal launches always capture automatically. */
@@ -243,7 +241,6 @@ public final class DocScanGlassActivity extends Activity
         hud.calibrateGuide(getPreferences(MODE_PRIVATE).getFloat(
                 EXTRA_GUIDE, (float) FramingGuide.UNCALIBRATED_FRACTION));
         hud.showSpreadGuide(getPreferences(MODE_PRIVATE).getBoolean(EXTRA_SPREAD, true));
-        hud.previewFraction(getPreferences(MODE_PRIVATE).getInt(EXTRA_PREVIEW_PERCENT, 100) / 100f);
 
         final GlassCamera.Mode cameraMode;
         final CaptureVideoRecording.Options recordingOptions;
@@ -383,11 +380,6 @@ public final class DocScanGlassActivity extends Activity
                 hud.calibrateGuide(fraction);
                 getPreferences(MODE_PRIVATE).edit().putFloat(EXTRA_GUIDE, fraction).apply();
             }
-        }
-        if (intent != null && intent.getExtras() != null && intent.getExtras().get(EXTRA_PREVIEW_PERCENT) instanceof Integer) {
-            int percent = Math.max(20, Math.min(100, intent.getIntExtra(EXTRA_PREVIEW_PERCENT, 100)));
-            getPreferences(MODE_PRIVATE).edit().putInt(EXTRA_PREVIEW_PERCENT, percent).apply();
-            hud.previewFraction(percent / 100f);
         }
         for (String margin : new String[]{EXTRA_TOP_MARGIN, EXTRA_BOTTOM_MARGIN}) {
             if (intent == null || intent.getExtras() == null || !(intent.getExtras().get(margin) instanceof Integer)) continue;
