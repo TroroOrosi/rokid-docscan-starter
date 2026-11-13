@@ -217,9 +217,17 @@ class Check:
         self.row("the document's pages are complete and in order", [p[0] for p in pages] == list(range(len(pages))) and len(pages) >= self.committed,
                  f"indexes {[p[0] for p in pages]}")
         self.row("the answers are not there before the stand-in has answered", self.api(f"/v1/exam-sessions/{self.session}/answer-bundle")[0] == 409)
+        if self.o.interrupt == "wait":
+            # What folding the temple arms does while the answers are being made: the system force-stops the app.
+            # Putting the glasses back on brings the chooser up through the watcher's launch, reproduced here.
+            self.sh(f"am force-stop {PACKAGE}")
+            time.sleep(3)
+            self.sh(f"am start -W -n {ACTIVITY} --ez chooser true --ez wear_bootstrap true >/dev/null 2>&1")
+            time.sleep(2)
+            self.row("interrupted during the wait: app force-stopped and the chooser reopened", None, f"{self.lit('chooser-after-kill')} lit pixels")
         time.sleep(8)
         asleep = "mWakefulness=Asleep" in self.sh("dumpsys power")
-        self.row("the display goes off while waiting for the answers", asleep and self.lit("waiting") == 0, f"asleep={asleep}")
+        self.row("the display goes off while waiting", asleep and self.lit("waiting") == 0, f"asleep={asleep}")
         deadline = time.monotonic() + 150
         ready_at = None
         while time.monotonic() < deadline and ready_at is None:
@@ -243,7 +251,12 @@ class Check:
         self.row("the glasses wake and show the answers by themselves", shown is not None,
                  f"{shown - self.ready_at:.1f} s after the bundle was ready" if shown else "not within 45 s; app: "
                  + " | ".join(line[:70] for line in self.log(self.ready_stamp) if "preview_status" not in line)[-240:])
-        if shown is None:
+        if shown is None or self.o.interrupt:
+            if self.o.interrupt:
+                self.sh("input keyevent KEYCODE_WAKEUP")
+                time.sleep(2)
+                self.row("what the wearer finds after the interruption", None, f"{self.lit('after-interruption')} lit pixels; state "
+                         + json.dumps({k: v for k, v in (self.api('/v1/glasses/state')[1] or {}).items() if k in ('devices',)})[:200])
             return
         first = self.adb("exec-out", "screencap", "-p")
         self.gesture(SWIPE_FORWARD)
@@ -286,6 +299,7 @@ def main() -> int:
     parser.add_argument("--key", required=True, help="the stand-in server's API key (a test value, not the phone's)")
     parser.add_argument("--server", default="http://127.0.0.1:8765")
     parser.add_argument("--photos", type=int, default=3)
+    parser.add_argument("--interrupt", choices=["wait"], help="force-stop the app (what a fold does) at this point and reopen the chooser")
     parser.add_argument("--report")
     return Check(parser.parse_args()).run()
 

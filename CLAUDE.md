@@ -719,6 +719,16 @@ uploads. A start double tap is sent once and confirmed from a time-stamped log
 filter, never repeated: a retry loop repeated it into a running capture, which
 only an unresolved-scene guard kept from ending and going to the model.
 
+Check the whole use, in the order it is used, not one item. `scripts/e2e_route_check.py`
+drives start, photos, end, upload, analysis wait, answers, wake, reading and finish
+on the real glasses through the touchpad's input device, with a second package of
+the same app (`-PglassdocRouteCheck`, beside the real one, whose saved server, key
+and answers it never touches), a server on the PC with `ROKID_SOLVER=recorded`
+(a recorded reply; sending off; no browser) and the watcher on the PC. First run
+on 2026-11-13: 26 of 27 lines (§M-14). The phone, its hotspot and the browser are
+not in that loop: it is not the venue topology. The "use in order" table at the
+top of `docs/defect-register.md` says what has and has not been checked.
+
 ## Versioning
 
 Update `APP_VERSION` for every release. Update `API_VERSION` when HTTP schemas
