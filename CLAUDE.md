@@ -729,6 +729,15 @@ on 2026-11-13: 26 of 27 lines (§M-14). The phone, its hotspot and the browser a
 not in that loop: it is not the venue topology. The "use in order" table at the
 top of `docs/defect-register.md` says what has and has not been checked.
 
+A check that leaves the model out has not checked the product. "Do not measure
+on my account, do not waste usage" was said about repeated model-comparison
+runs; it is not a ban on running the real route. The stand-in solver is for
+repetition and fault injection only. On 2026-11-13 the real route ran once from
+end to end for the first time (§M-15): real app, phone hotspot, phone server,
+ChatGPT, answers, the phone's watcher waking the glasses, 6 min 17 s for one
+page. The scene was the desk, not a problem page, and the model said so. Run the
+real route sparingly: once per change that matters, at Standard speed.
+
 ## Versioning
 
 Update `APP_VERSION` for every release. Update `API_VERSION` when HTTP schemas
