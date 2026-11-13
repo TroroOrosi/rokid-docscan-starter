@@ -22,7 +22,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-COMPONENT = "dev.rokid.docscanglass.doc/.DocScanGlassActivity"
+PACKAGE = "dev.rokid.docscanglass.doc"
+COMPONENT = f"{PACKAGE}/dev.rokid.docscanglass.doc.DocScanGlassActivity"
 SERVER = "http://127.0.0.1:8000"
 ANSWER_RETRY_SECONDS = 5.0
 MDNS_MAX_BYTES = 8192
@@ -338,7 +339,7 @@ def mdns_target(expected_serial: str) -> str:
 @_rpc_timing("process_read")
 def app_running(serial: str) -> bool:
     """Only a clean pidof miss counts as stopped; transport errors are unknown."""
-    result = subprocess.run(["adb", "-s", serial, "shell", "pidof", "dev.rokid.docscanglass.doc"],
+    result = subprocess.run(["adb", "-s", serial, "shell", "pidof", PACKAGE],
                             capture_output=True, text=True, timeout=10)
     if result.returncode == 0 and re.fullmatch(r"[0-9]+(?:\s+[0-9]+)*", result.stdout.strip()) and not result.stderr.strip():
         return True
@@ -595,7 +596,10 @@ if __name__ == "__main__":
     parser.add_argument("--server", default=SERVER, help="Phone loopback API URL")
     parser.add_argument("--device-id", help="Optional Android identity; auto-discovered after serial verification")
     parser.add_argument("--interval", type=float, default=0.5)
+    parser.add_argument("--package", default=PACKAGE,
+                        help="Glasses app package; the route check installs a second one beside the real app")
     args = parser.parse_args()
+    globals().update(PACKAGE=args.package, COMPONENT=f"{args.package}/dev.rokid.docscanglass.doc.DocScanGlassActivity")
     if not 0.1 <= args.interval <= 5:
         parser.error("interval must be between 0.1 and 5 seconds")
     try:

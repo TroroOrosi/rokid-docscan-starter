@@ -20,6 +20,7 @@ from ..provider_registry import ProviderRegistry
 from .base import Solver
 from .chatgpt_web import ChatGptWebChatLost, ChatGptWebSolver, ChatGptWebUncertain
 from .chatgpt_work import ChatGptWorkSolver
+from .recorded import RecordedSolver
 from ..work_bridge import WorkBrowserResultRejected, WorkConflict, WorkPending
 from .llm_adapter import LLMSolver, choice_label, choice_out_of_range
 from .local_placeholder import LocalPlaceholderSolver
@@ -217,3 +218,6 @@ for _name, _provider in ADAPTER_PROVIDERS:
 # when routed to AND that browser is reachable.
 register_solver(ChatGptWebSolver(), replace=True)
 register_solver(ChatGptWorkSolver(), replace=True)
+# A stand-in that answers from a recorded file, for end-to-end route checks that must send nothing to the model.
+# Unready unless sending is off and a reply file is named; see app/solvers/recorded.py.
+register_solver(RecordedSolver(), replace=True)

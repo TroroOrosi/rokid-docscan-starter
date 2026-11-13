@@ -103,6 +103,10 @@ android {
             // preview frame took about 600 ms on the camera thread, so no still was ever taken.
             // `-PglassdocDebuggable` restores `run-as` for reading the app's files during development.
             isDebuggable = providers.gradleProperty("glassdocDebuggable").isPresent
+            // `-PglassdocRouteCheck` builds the same app under a second package name, so the whole route can be
+            // exercised on the glasses beside the real app without touching its saved server, key or answers
+            // (the real, non-debuggable install cannot be backed up). Used by scripts/e2e_route_check.py.
+            if (providers.gradleProperty("glassdocRouteCheck").isPresent) applicationIdSuffix = ".routecheck"
         }
         release {
             isMinifyEnabled = false
