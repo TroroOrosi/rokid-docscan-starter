@@ -467,9 +467,20 @@ public final class DocScanGlassActivity extends Activity
     @Override protected void onResume() {
         super.onResume();
         muteOutput();
-        if (sessionClosed || writingDone || idleAsleep || isFinishing() || isDestroyed()
-                || !isCurrentPowerGeneration(powerGeneration)) displaySleep.sleep(this);
-        else getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        boolean live = !(sessionClosed || writingDone || isFinishing() || isDestroyed()
+                || !isCurrentPowerGeneration(powerGeneration));
+        if (!live) displaySleep.sleep(this);
+        else if (idleAsleep) {
+            // The system display is on again. A touch on a sleeping display is consumed by the wake and never reaches
+            // this app: the Activity is only restarted and resumed (glasses, 2026-11-13, events written to the
+            // touchpad's own input device). Until then the flag stayed set after such a wake and the next tap was
+            // spent as "turn the display back on", so the display-off worked once only. This resume is the notice.
+            keepDisplayActive();
+            if (!displayProtected()) {
+                notifyPhase(choosingSession ? "chooser" : awaitingAnswers ? "analyzing" : "waiting", activeSession(), "wake");
+                scheduleDisplayIdle();
+            }
+        } else getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         if (deviceId != null && !isFinishing() && !isDestroyed()) {
             try { startForegroundService(new Intent(this, WearService.class)); }
             catch (RuntimeException error) { Log.w(TAG, "wear monitoring unavailable: " + error.getClass().getSimpleName()); }
@@ -581,6 +592,10 @@ public final class DocScanGlassActivity extends Activity
         if (action != GlassesInputAction.BACK) {
             backExit.reset();
         }
+        // The gesture that turns the display back on does nothing else, on every screen (operator, 2026-11-12).
+        // Until 2026-11-13 only the chooser held to it: a waking tap also toggled the mixed recording and a waking
+        // double tap armed the exit. The chooser redraws its choices below; a finished writing session stays asleep.
+        if (wasAsleep && !choosingSession && !writingDone) return;
         if (choosingSession) {
             if (startupStarting) return;
             // One rule on every screen (operator, 2026-11-12): a tap turns the display off or on, a swipe
@@ -684,6 +699,12 @@ public final class DocScanGlassActivity extends Activity
             }
             return;
         }
+        if (awaitingAnswers && !mixedMode && !listeningMode) {
+            // Waiting for the answers there is nothing to capture: a tap turns the display off as on every screen,
+            // and no gesture reaches the capture controller (a forward swipe used to arrive there as a tap).
+            if (action == GlassesInputAction.SHORT_TAP) sleepDisplayNow();
+            return;
+        }
         if (!mixedMode && !listeningMode) {
             // Operator, 2026-11-12: one tap pauses the display and the camera, the next resumes. The forward
             // swipe takes over what the tap did: a photo while waiting, a retake during the 3-second review.
@@ -738,8 +759,7 @@ public final class DocScanGlassActivity extends Activity
 
     /** The idle sleep, now: what the display does by itself after five seconds on these screens. */
     private void sleepDisplayNow() {
-        hud.showLines(List.of()); // at once: the system's own sleep arrives through the phone, up to seconds later
-        scheduleDisplayIdle();
+        scheduleDisplayIdle(); // its run blanks the view at once; the system's own sleep arrives through the phone
         Runnable sleep = displayIdle;
         if (sleep == null) return;
         main.removeCallbacks(sleep);
@@ -1441,6 +1461,7 @@ public final class DocScanGlassActivity extends Activity
         cancelDisplayIdle();
         if (idleAsleep) displaySleep.wake(this);
         idleAsleep = false;
+        if (hud != null) hud.setBlank(false);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
     }
 
@@ -1462,6 +1483,9 @@ public final class DocScanGlassActivity extends Activity
                     || !isCurrentPowerGeneration(generation) || isFinishing() || isDestroyed() || displayProtected()) return;
             displayIdle = null;
             idleAsleep = true;
+            // Off as the wearer sees it, whether or not the system's sleep follows: until 2026-11-13 the idle left
+            // the screen drawn, so a display the phone had not put to sleep looked on while a tap only "woke" it.
+            if (hud != null) hud.setBlank(true);
             displaySleep.sleep(this);
             notifyPhase(List.of("chooser", "analyzing", "waiting").contains(powerPhase) ? powerPhase : "waiting", activeSession(), "sleep");
         };

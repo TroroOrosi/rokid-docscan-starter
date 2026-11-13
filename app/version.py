@@ -558,7 +558,9 @@ EXPLAINER_API_VERSION = "1.1.0"
 #         The chooser starts on the double tap; the live corner shows the paper, not the whole frame.
 # 1.46.0: the still copies the preview's auto exposure; the exposure is shortened by the camera's own
 # frame-rate range, never by hand (a hand-raised gain was colour noise beside the glasses' own camera).
-GLASSES_VIEW_CONTRACT_VERSION = "1.46.0"
+# 1.47.0: the display state follows the real display: a system wake without a gesture is noticed on resume, the
+# idle blanks the view, the waking gesture does nothing else on every screen, a tap turns a waiting screen off.
+GLASSES_VIEW_CONTRACT_VERSION = "1.47.0"
 
 # Answer-area overlay payload (box + short answer; 2D image-anchored).
 # 1.1.0: added tracking metadata (tracking/fixed_ar/anchor_hint).

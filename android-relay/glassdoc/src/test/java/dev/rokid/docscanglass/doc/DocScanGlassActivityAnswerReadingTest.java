@@ -131,6 +131,11 @@ public class DocScanGlassActivityAnswerReadingTest {
         assertEquals(0, activity.getWindow().getAttributes().flags
                 & android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
 
+        // The display went off by itself: the gesture that brings it back does nothing else (2026-11-13; until then
+        // a double tap on the dark screen armed the exit unseen).
+        invokeOnAction(GlassesInputAction.BACK, 500);
+        assertEquals("資料読み込み中", ((List<?>) getField(getField(activity, "hud"), "lines")).get(0));
+        assertFalse(((HudView) getField(activity, "hud")).isBlank());
         invokeOnAction(GlassesInputAction.BACK, 1000);
         assertEquals("もう一度ダブルタップで終了",
                 ((List<?>) getField(getField(activity, "hud"), "lines")).get(0));

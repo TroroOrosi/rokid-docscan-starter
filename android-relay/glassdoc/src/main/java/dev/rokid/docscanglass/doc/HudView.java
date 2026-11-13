@@ -146,6 +146,20 @@ final class HudView extends View {
         invalidate();
     }
 
+    private boolean blank;
+
+    /**
+     * Off as the wearer sees it: nothing is drawn and nothing counts as shown until it is turned back on; what was on
+     * screen is kept for the return. The system's own display sleep comes through the phone and may be late or absent.
+     */
+    void setBlank(boolean value) {
+        if (blank == value) return;
+        blank = value;
+        invalidate();
+    }
+
+    boolean isBlank() { return blank; }
+
     /** Text only: the states where there is nothing to look at. */
     void showLines(List<String> newLines) {
         set(newLines, null, false);
@@ -202,6 +216,7 @@ final class HudView extends View {
     protected void onDraw(Canvas canvas) {
         super.onDraw(canvas);
         canvas.drawColor(Color.BLACK);
+        if (blank) return;
         if (!frameReported && isShown() && hasWindowFocus() && visibleFrame != null) {
             frameReported = true;
             Runnable rendered = visibleFrame;

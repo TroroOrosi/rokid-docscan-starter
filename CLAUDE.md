@@ -696,6 +696,17 @@ check takes the reference itself and reads every app photo at the same flat
 places: under 0.3 of the reference's level over noise fails, under 0.6 warns.
 Brightness alone passed a photo that was colour noise.
 
+Injected keys do not take the path a real touch takes. A touch on a sleeping
+display is consumed by the wake and never reaches the app; the Activity is only
+restarted and resumed (§M-12). Write gestures to the touchpad's own input device
+(`sendevent /dev/input/event1`, a tap is KEY_DASHBOARD 204 then KEY_ENTER 28;
+`scripts/glasses_display_cycles.py <serial> chooser|capture --raw`) and repeat
+every cycle at least three times: one cycle with injected keys passed a
+display-off that failed from the second use. Never pipe a dump into an
+early-closing filter on the device (`dumpsys media.camera | grep -m1` killed the
+camera provider while the camera was streaming); read it whole on the PC.
+`docs/defect-register.md` lists the known defects by cause layer and their state.
+
 ## Versioning
 
 Update `APP_VERSION` for every release. Update `API_VERSION` when HTTP schemas

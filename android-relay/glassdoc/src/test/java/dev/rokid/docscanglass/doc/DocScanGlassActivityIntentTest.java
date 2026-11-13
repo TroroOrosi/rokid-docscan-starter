@@ -556,7 +556,11 @@ public class DocScanGlassActivityIntentTest {
         setField(activity, "awaitingAnswers", true);
         setField(activity, "idleAsleep", true);
         activity.onResume();
-        assertEquals(0, activity.getWindow().getAttributes().flags & keepOn);
+        assertTrue("a display the system turned back on is shown again, not left dark behind a stale flag",
+                (activity.getWindow().getAttributes().flags & keepOn) != 0);
+        Shadows.shadowOf(android.os.Looper.getMainLooper()).idleFor(java.time.Duration.ofMillis(5_000));
+        assertEquals("and a waiting session lets it go again after five seconds without input", 0,
+                activity.getWindow().getAttributes().flags & keepOn);
         setField(activity, "awaitingAnswers", false);
         setField(activity, "idleAsleep", false);
         setField(activity, "writingDone", true);
@@ -570,6 +574,61 @@ public class DocScanGlassActivityIntentTest {
         assertEquals(0, activity.getWindow().getAttributes().flags & keepOn);
         assertEquals(0, android.provider.Settings.System.getInt(activity.getContentResolver(),
                 android.provider.Settings.System.SCREEN_OFF_TIMEOUT, -1));
+    }
+
+    /**
+     * Glasses, 2026-11-13, events written to the touchpad's own input device: a touch on a sleeping display is
+     * consumed by the wake and never reaches the app; the Activity is only restarted and resumed. The app kept
+     * believing the display was off, so the next tap was spent as "turn it back on": the display-off worked once.
+     */
+    @Test public void aSystemWakeWithoutAGestureIsNoticedAndTheNextTapTurnsTheDisplayOffEveryTime() throws Exception {
+        setField(activity, "choosingSession", true);
+        activity.onResume();
+        java.lang.reflect.Method choices = DocScanGlassActivity.class.getDeclaredMethod("showStartupChoices");
+        choices.setAccessible(true);
+        choices.invoke(activity);
+        java.lang.reflect.Method action = DocScanGlassActivity.class.getDeclaredMethod("onAction", GlassesInputAction.class, long.class);
+        action.setAccessible(true);
+        Field asleep = DocScanGlassActivity.class.getDeclaredField("idleAsleep");
+        asleep.setAccessible(true);
+        Field hudField = DocScanGlassActivity.class.getDeclaredField("hud");
+        hudField.setAccessible(true);
+        HudView hud = (HudView)hudField.get(activity);
+        int keepOn = android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON;
+        for (int cycle = 1; cycle <= 3; cycle++) {
+            action.invoke(activity, GlassesInputAction.SHORT_TAP, cycle * 10_000L);
+            assertTrue("tap " + cycle + " turns the display off", asleep.getBoolean(activity));
+            assertTrue("and nothing is drawn", hud.isBlank());
+            assertEquals(0, activity.getWindow().getAttributes().flags & keepOn);
+            activity.onResume(); // the system woke the display; no gesture arrives
+            assertFalse("wake " + cycle + " is noticed without a gesture", asleep.getBoolean(activity));
+            assertFalse("and the screen is back", hud.isBlank());
+            assertTrue((activity.getWindow().getAttributes().flags & keepOn) != 0);
+        }
+        Shadows.shadowOf(android.os.Looper.getMainLooper()).idleFor(java.time.Duration.ofMillis(5_000));
+        assertTrue("five seconds without input", asleep.getBoolean(activity));
+        assertTrue("off as the wearer sees it, whether or not the system's sleep follows", hud.isBlank());
+        activity.onResume();
+        action.invoke(activity, GlassesInputAction.SHORT_TAP, 50_000L);
+        assertTrue("the tap after an unseen wake turns it off", asleep.getBoolean(activity));
+    }
+
+    /** Waiting for the answers: a tap turns the display off as on every screen, and the gesture that brings it back does nothing else. */
+    @Test public void whileWaitingForAnswersATapTurnsTheDisplayOffAndTheWakingGestureDoesNothingElse() throws Exception {
+        setField(activity, "awaitingAnswers", true);
+        activity.onResume();
+        java.lang.reflect.Method action = DocScanGlassActivity.class.getDeclaredMethod("onAction", GlassesInputAction.class, long.class);
+        action.setAccessible(true);
+        Field asleep = DocScanGlassActivity.class.getDeclaredField("idleAsleep");
+        asleep.setAccessible(true);
+        RelayState before = controller.getState();
+        action.invoke(activity, GlassesInputAction.SHORT_TAP, 1_000L);
+        assertTrue("a tap turns the display off while waiting", asleep.getBoolean(activity));
+        action.invoke(activity, GlassesInputAction.SWIPE_FORWARD, 2_000L);
+        assertFalse("any gesture brings it back", asleep.getBoolean(activity));
+        action.invoke(activity, GlassesInputAction.SWIPE_FORWARD, 3_000L);
+        assertEquals("a swipe while waiting never reaches the capture controller", before, controller.getState());
+        assertFalse(controller.hasLocalSession());
     }
 
     @Test public void chooserIdleSleepsAtFiveSecondsWithoutChangingTheSystemTimeout() throws Exception {
