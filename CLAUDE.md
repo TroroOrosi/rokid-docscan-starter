@@ -707,6 +707,18 @@ early-closing filter on the device (`dumpsys media.camera | grep -m1` killed the
 camera provider while the camera was streaming); read it whole on the PC.
 `docs/defect-register.md` lists the known defects by cause layer and their state.
 
+Look at the whole system, not one component. `scripts/system_observation.py`
+drives a capture through the touchpad's input device and records load, memory,
+temperature and server response on both devices and every log buffer by source;
+take it before and after a change to capture or display. Measured on a desk on
+2026-11-13 (§M-13): ten minutes of capture took the SoC from 39 to 74 C and the
+camera zone to 73.5 C, still rising, with the preview handled at 9-11 frames a
+second after the first 30 s; the phone's watcher sends three adb commands a loop
+to the glasses at 0.3-2.8 s each; the server's `/health` took up to 1.1 s during
+uploads. A start double tap is sent once and confirmed from a time-stamped log
+filter, never repeated: a retry loop repeated it into a running capture, which
+only an unresolved-scene guard kept from ending and going to the model.
+
 ## Versioning
 
 Update `APP_VERSION` for every release. Update `API_VERSION` when HTTP schemas
