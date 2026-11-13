@@ -229,7 +229,7 @@ class Check:
         self.expect("the chooser is cleared at once", self.screen("chooser-off").getbbox() is None)
         asleep_at = None
         for second in range(1, 11):  # the system sleep comes through the phone watcher
-            if "Asleep" in self.shell("dumpsys power | grep -m1 mWakefulness"):
+            if "mWakefulness=Asleep" in self.shell("dumpsys power"):  # read whole: see the camera dump below
                 asleep_at = second
                 break
             time.sleep(1)
@@ -289,8 +289,12 @@ class Check:
         if not self.expect("tap pauses the capture", bool(self.wait(r"Capture paused by the wearer", 8, mark))):
             return
         time.sleep(1)
-        camera = self.shell("dumpsys media.camera | grep -A1 'Active Camera Clients'")
-        self.expect("the camera is closed during the pause", "[]" in camera)
+        # The dump is read whole here and never piped on the device: on 2026-11-13 `dumpsys media.camera | grep -m1`
+        # closed the pipe early while the camera was streaming, the camera provider died of SIGPIPE and the app
+        # ended in its camera-state-unknown error. Only asked once the app says the capture is paused.
+        dump = self.shell("dumpsys media.camera")
+        clients = dump.split("Active Camera Clients:", 1)[1].split("\n", 2)[1] if "Active Camera Clients:" in dump else ""
+        self.expect("the camera is closed during the pause", "[]" in clients)
         self.expect("nothing is drawn during the pause", self.screen("paused").getbbox() is None)
         self.keys(SWIPE_FORWARD)
         time.sleep(3)
