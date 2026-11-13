@@ -605,12 +605,30 @@ public class DocScanGlassActivityIntentTest {
             assertFalse("and the screen is back", hud.isBlank());
             assertTrue((activity.getWindow().getAttributes().flags & keepOn) != 0);
         }
-        Shadows.shadowOf(android.os.Looper.getMainLooper()).idleFor(java.time.Duration.ofMillis(5_000));
-        assertTrue("five seconds without input", asleep.getBoolean(activity));
+        Shadows.shadowOf(android.os.Looper.getMainLooper()).idleFor(java.time.Duration.ofMillis(30_000));
+        assertTrue("thirty seconds without input on the chooser", asleep.getBoolean(activity));
         assertTrue("off as the wearer sees it, whether or not the system's sleep follows", hud.isBlank());
         activity.onResume();
         action.invoke(activity, GlassesInputAction.SHORT_TAP, 50_000L);
         assertTrue("the tap after an unseen wake turns it off", asleep.getBoolean(activity));
+    }
+
+    /**
+     * Route check on the glasses, 2026-11-13: after the writing was ended the display is off, and the touch that wakes
+     * a sleeping display never reaches the app, so "two double taps within three seconds" took three. The wake itself
+     * counts as the first.
+     */
+    @Test public void afterTheWritingIsDoneTheWakingTouchCountsAsTheFirstOfTheTwoThatLeave() throws Exception {
+        setField(activity, "writingDone", true);
+        Field closed = DocScanGlassActivity.class.getDeclaredField("sessionClosed");
+        closed.setAccessible(true);
+        java.lang.reflect.Method action = DocScanGlassActivity.class.getDeclaredMethod("onAction", GlassesInputAction.class, long.class);
+        action.setAccessible(true);
+        activity.onResume(); // the display was woken by a touch the app never sees
+        activity.onWindowFocusChanged(true); // on the glasses the focus returns after the resume and used to disarm it
+        assertFalse(closed.getBoolean(activity));
+        action.invoke(activity, GlassesInputAction.BACK, android.os.SystemClock.elapsedRealtime() + 800);
+        assertTrue("one delivered double tap after the wake leaves", closed.getBoolean(activity));
     }
 
     /** Waiting for the answers: a tap turns the display off as on every screen, and the gesture that brings it back does nothing else. */
@@ -631,7 +649,12 @@ public class DocScanGlassActivityIntentTest {
         assertFalse(controller.hasLocalSession());
     }
 
-    @Test public void chooserIdleSleepsAtFiveSecondsWithoutChangingTheSystemTimeout() throws Exception {
+    /**
+     * Real use, 2026-11-13: the chooser appeared when the glasses were put on and was gone five seconds later, before
+     * its six lines could be read and one chosen; the next double tap then only brought the display back. The first
+     * screen stays for thirty seconds. Waiting screens keep their five.
+     */
+    @Test public void theChooserStaysLongEnoughToBeReadAndChosenFrom() throws Exception {
         android.provider.Settings.System.putInt(activity.getContentResolver(),
                 android.provider.Settings.System.SCREEN_OFF_TIMEOUT, 0);
         setField(activity, "choosingSession", true);
@@ -640,7 +663,9 @@ public class DocScanGlassActivityIntentTest {
         choices.setAccessible(true);
         choices.invoke(activity);
         int keepOn = android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON;
-        Shadows.shadowOf(android.os.Looper.getMainLooper()).idleFor(java.time.Duration.ofMillis(4_999));
+        Shadows.shadowOf(android.os.Looper.getMainLooper()).idleFor(java.time.Duration.ofMillis(5_000));
+        assertTrue("five seconds is not enough to read six lines and choose", (activity.getWindow().getAttributes().flags & keepOn) != 0);
+        Shadows.shadowOf(android.os.Looper.getMainLooper()).idleFor(java.time.Duration.ofMillis(24_999));
         assertTrue((activity.getWindow().getAttributes().flags & keepOn) != 0);
         activity.onUpdate(RelayState.READY, List.of("network update"), "background status");
         Shadows.shadowOf(android.os.Looper.getMainLooper()).idleFor(java.time.Duration.ofMillis(1));
@@ -752,11 +777,11 @@ public class DocScanGlassActivityIntentTest {
         choices.setAccessible(true);
         choices.invoke(activity);
         int keepOn = android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON;
-        Shadows.shadowOf(android.os.Looper.getMainLooper()).idleFor(java.time.Duration.ofSeconds(4));
+        Shadows.shadowOf(android.os.Looper.getMainLooper()).idleFor(java.time.Duration.ofSeconds(29));
         java.lang.reflect.Method action = DocScanGlassActivity.class.getDeclaredMethod("onAction", GlassesInputAction.class, long.class);
         action.setAccessible(true);
         action.invoke(activity, GlassesInputAction.SWIPE_FORWARD, android.os.SystemClock.elapsedRealtime());
-        Shadows.shadowOf(android.os.Looper.getMainLooper()).idleFor(java.time.Duration.ofSeconds(4));
+        Shadows.shadowOf(android.os.Looper.getMainLooper()).idleFor(java.time.Duration.ofSeconds(29));
         assertTrue((activity.getWindow().getAttributes().flags & keepOn) != 0);
         Shadows.shadowOf(android.os.Looper.getMainLooper()).idleFor(java.time.Duration.ofSeconds(1));
         assertEquals(0, activity.getWindow().getAttributes().flags & keepOn);

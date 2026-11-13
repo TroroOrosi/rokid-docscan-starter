@@ -371,9 +371,10 @@ speed verification and uncertain-send safeguards apply to both answer speeds.
 - Ordinary still review shows the image without text covering it. Keep the
   three-second visible review and the existing retake/end gestures. Preserve
   the operator's system screen-off timeout, including disabled auto-off:
-  capture/review/reading hold the app window on. Chooser, recording-only,
-  uploading, analysis and other waiting sleep after five seconds without user
-  input; network refreshes do not extend that timer. Authenticated phone-watcher
+  capture/review/reading hold the app window on. The chooser stays thirty
+  seconds (it is read and chosen from; at five it was gone before a wearer could
+  choose, 2026-11-13). Recording-only, uploading, analysis and other waiting
+  sleep after five seconds without user input; network refreshes do not extend that timer. Authenticated phone-watcher
   requests handle sleep/wake. Sleep uses Android's soft-sleep key so the window's
   current screen wake lock is checked when a delayed request reaches the device.
   Old persistent generations cannot release or reacquire the current window's

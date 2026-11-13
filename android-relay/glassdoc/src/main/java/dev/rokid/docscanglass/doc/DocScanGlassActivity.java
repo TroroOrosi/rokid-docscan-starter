@@ -128,6 +128,15 @@ public final class DocScanGlassActivity extends Activity
     private volatile boolean sessionClosed;
     private final Handler main = new Handler(Looper.getMainLooper());
     private static final long DISPLAY_IDLE_MILLIS = 5_000;
+    /**
+     * The chooser is read and chosen from, so it stays longer than a waiting screen. In real use on 2026-11-13 it
+     * appeared when the glasses were put on and was gone five seconds later, before its six lines could be read; the
+     * next double tap then only brought the display back. A tap still turns it off at once.
+     */
+    private static final long CHOOSER_IDLE_MILLIS = 30_000;
+    /** Set by a new Intent until the resume that follows it: that resume was not the wearer's touch. */
+    private boolean intentBeforeResume;
+    private boolean rearmExitOnFocus;
     private Runnable displayIdle;
     private long displayIdleToken;
     private boolean idleAsleep;
@@ -305,6 +314,7 @@ public final class DocScanGlassActivity extends Activity
     @Override
     protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
+        intentBeforeResume = true;
         if (intent != null && intent.getBooleanExtra("wear_origin", false)) {
             if (!acceptsWearEntry(intent)) return;
             if (!displaySleep.wake(this)) Log.w(TAG, "wear display wake request refused");
@@ -469,8 +479,20 @@ public final class DocScanGlassActivity extends Activity
         muteOutput();
         boolean live = !(sessionClosed || writingDone || isFinishing() || isDestroyed()
                 || !isCurrentPowerGeneration(powerGeneration));
-        if (!live) displaySleep.sleep(this);
-        else if (idleAsleep) {
+        boolean resumedByIntent = intentBeforeResume;
+        intentBeforeResume = false;
+        if (!live) {
+            displaySleep.sleep(this);
+            // After the writing is done the display is off, and the touch that wakes a sleeping display never reaches
+            // the app: "two double taps within three seconds" took three on the glasses (route check, 2026-11-13).
+            // This resume is that waking touch, so it counts as the first of the two.
+            // A resume that a notification brought (a late answer wake from the phone) is not a touch and arms nothing.
+            if (writingDone && !resumedByIntent && !sessionClosed && !isFinishing() && !isDestroyed()) {
+                backExit.reset();
+                backExit.onBack(SystemClock.elapsedRealtime());
+                rearmExitOnFocus = true; // the focus comes back after this resume and clears a half-made exit
+            }
+        } else if (idleAsleep) {
             // The system display is on again. A touch on a sleeping display is consumed by the wake and never reaches
             // this app: the Activity is only restarted and resumed (glasses, 2026-11-13, events written to the
             // touchpad's own input device). Until then the flag stayed set after such a wake and the next tap was
@@ -536,6 +558,8 @@ public final class DocScanGlassActivity extends Activity
         normalizer.reset();
         backExit.reset();
         backOwnedByReader = false;
+        if (hasFocus && rearmExitOnFocus && writingDone && !sessionClosed) backExit.onBack(SystemClock.elapsedRealtime());
+        if (hasFocus) rearmExitOnFocus = false;
     }
 
     // --- input ------------------------------------------------------------
@@ -1489,7 +1513,7 @@ public final class DocScanGlassActivity extends Activity
             displaySleep.sleep(this);
             notifyPhase(List.of("chooser", "analyzing", "waiting").contains(powerPhase) ? powerPhase : "waiting", activeSession(), "sleep");
         };
-        main.postDelayed(displayIdle, DISPLAY_IDLE_MILLIS);
+        main.postDelayed(displayIdle, choosingSession ? CHOOSER_IDLE_MILLIS : DISPLAY_IDLE_MILLIS);
     }
 
     private long activeSession() {
