@@ -199,7 +199,10 @@ final class CameraProbe {
                     } catch (RuntimeException ignored) { }
                 }, handler);
             }
-            handler.postDelayed(timeout, CAPTURE_TIMEOUT_MILLIS);
+            // warm=<ms> keeps the preview running that long before the still, so a long warm is a soak of the session
+            // shape (for temperature and load); the time limit follows it.
+            handler.postDelayed(timeout, CAPTURE_TIMEOUT_MILLIS
+                    + (option("warm") == null ? 0 : Long.parseLong(option("warm"))));
             Log.i(TAG, "camera probe opening id=" + id
                     + " size=" + size.getWidth() + "x" + size.getHeight() + " variant=[" + variant + "]");
             manager.openCamera(id, deviceCallback(), handler);
