@@ -744,6 +744,20 @@ means (the stand-in solver, the standard camera, the PC); it is one run at
 Standard speed, with the route and effort named. Then ask, once, and wait.
 The stand-in solver (`ROKID_SOLVER=recorded`) carries every other route check.
 
+Which route costs what was already in the record and was not consulted before
+that run. Work shares one allowance with Codex ("ChatGPT Work usage inside
+ChatGPT uses the same pricing, credits, and usage limits as Codex"; Plus: an
+estimated 15-160 messages per five hours for GPT-6.1 Sol, weekly limits may
+apply; Fast uses 2.5 times the included usage; learn.chatgpt.com/codex/pricing,
+read again 2026-11-13). Ordinary chat is outside that allowance; in Chat the
+Pro position has its own allowance and the others are GPT-6 Sol
+(`docs/requirements-audit.md`, 2026-11-12). The operator's point: a trial with
+the real model goes through Chat (`ROKID_SOLVER=chatgpt-web`), which does not
+draw on the Work allowance; its own limit is the upload window (80 files per
+three hours). The Chat booklet route has only run in PC tests and has never
+sent from the phone, so its first real run is also the first check of the
+fallback route. The phone's solver setting is changed on the phone.
+
 ## Versioning
 
 Update `APP_VERSION` for every release. Update `API_VERSION` when HTTP schemas
