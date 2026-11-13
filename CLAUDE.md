@@ -729,14 +729,20 @@ on 2026-11-13: 26 of 27 lines (§M-14). The phone, its hotspot and the browser a
 not in that loop: it is not the venue topology. The "use in order" table at the
 top of `docs/defect-register.md` says what has and has not been checked.
 
-A check that leaves the model out has not checked the product. "Do not measure
-on my account, do not waste usage" was said about repeated model-comparison
-runs; it is not a ban on running the real route. The stand-in solver is for
-repetition and fault injection only. On 2026-11-13 the real route ran once from
-end to end for the first time (§M-15): real app, phone hotspot, phone server,
-ChatGPT, answers, the phone's watcher waking the glasses, 6 min 17 s for one
-page. The scene was the desk, not a problem page, and the model said so. Run the
-real route sparingly: once per change that matters, at Standard speed.
+A real run with the model spends the operator's usage and is decided by the
+operator, not by the agent. On 2026-11-13 the agent first carried "GPT sends: 0"
+as a blanket premise (an instruction about repeated model comparisons, widened
+without thought), and then, told that this made no sense, swung the other way
+and ran the real route at once: a Work task on a photo of the desk, not a
+problem page, while capture was known to be broken (§M-15). The operator called
+that waste: such a run is not to be repeated and was not to be done then; Fast
+is production's setting and is waste in a trial, and Work is costly too.
+Before proposing a real run, all of these hold: capture has passed the desk
+checks against the glasses' own camera; a real problem page is in view; the
+question the run answers is written down and cannot be answered by a cheaper
+means (the stand-in solver, the standard camera, the PC); it is one run at
+Standard speed, with the route and effort named. Then ask, once, and wait.
+The stand-in solver (`ROKID_SOLVER=recorded`) carries every other route check.
 
 ## Versioning
 
