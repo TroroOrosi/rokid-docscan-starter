@@ -151,6 +151,7 @@ is the intended topology. It has run once, with the glasses driven from a PC
 | `openai` / `gemini` / `claude` API keys | Supported and config-only. The per-question routes can fall back through `ROKID_SOLVER_TIERS`. They have no one-message booklet answer, so they are not booklet fallback routes. |
 | Booklet route fallback (`ROKID_SOLVER_FALLBACKS`) | Requested by the operator on 2026-11-10. When Work returns a usage limit, or cannot send (model or attachment control unusable after one retry), the same booklet goes to `chatgpt-web`. The choice is stored on the deck row, so a restart does not return to the limited route. An unknown send outcome, a shared browser/login/guard failure, a readability or receipt rejection and the listening stage never switch. Observed on the phone's live tab on 2026-11-10 without typing or sending: the new-chat page has two buttons, Chat and Work, and only pressing Chat leaves Work (a click right after the navigation was dropped, so it is repeated until Work is inactive); in Work mode Chat's composer is absent; Chat's effort is a five-position Power slider whose top position is Pro (shown with "Locked" and "Usage limit reached"), so the route moves it to the position labelled Extra High and refuses any other readable position. That preparation ended at GPT-6 / Extra High and Work was restored. Not observed: a real limit notice, a Work task cut short, and a Chat answer after a Work refusal. |
 | Local OpenAI-compatible HTTP (`app/llm_http.py`) | Reaches an on-phone `llama-server` without the openai SDK. |
+| Official Codex CLI on the phone (`codex exec`, signed in with ChatGPT) | **Candidate, not wired into the server.** The operator asked on 2026-11-14 whether the present route is rational for the venue; it had never been compared with anything (`docs/whole-review-2026-11-14.md` section 9). Measured that night in the phone's Termux (§M-21): the static aarch64 binary runs once names are resolved by a loopback CONNECT proxy and `SSL_CERT_FILE` names Termux's bundle; 47 page images in one request were answered in 6 min 26 s with 8.7 MB sent, a 14-page booklet in 79 s with 14 of 14 correct, and a worn photo from the glasses' own camera (pages cut on the PC) gave the first correct answers from a glasses photo. No browser or X11 is involved. Unmeasured: cellular, how long the sign-in lasts unattended, a reboot, how the plan allowance is drawn, photos taken by the app. It takes no audio. |
 
 Settled decisions. Do not re-argue them:
 
@@ -167,7 +168,8 @@ Settled decisions. Do not re-argue them:
 text answer in `docs/hardware-measurements.md` §F-6-6 through §F-6-10. These are
 component measurements. The glasses → phone AP → answer-bundle route ran once
 on 2026-11-13 through Work with one photo of a desk (§M-15). A wearer's paper
-capture, a booklet of several pages, a correct answer from a glasses photo, the
+capture, a booklet of several pages, a correct answer from a photo the app itself
+took, the
 capture/power behavior over a whole session and the model's use of original
 listening audio remain unvalidated on hardware. Do not describe chatgpt-web as
 venue-ready.
