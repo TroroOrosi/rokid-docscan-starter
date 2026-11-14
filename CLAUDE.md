@@ -153,6 +153,23 @@ is the intended topology. It has run once, with the glasses driven from a PC
 | Local OpenAI-compatible HTTP (`app/llm_http.py`) | Reaches an on-phone `llama-server` without the openai SDK. |
 | `ROKID_SOLVER=codex-cli` (the official Codex CLI, `codex exec`, signed in with ChatGPT) | **The phone's route since 2026-11-14**, with Chat behind it. The operator asked whether the present route was rational for the venue; it had never been compared with anything (`docs/whole-review-2026-11-14.md` sections 9 and 10). One request carries every page image; no API key, browser or X11. On Android the server resolves names for the static binary through a loopback CONNECT proxy of its own and names Termux's certificate bundle. A reply is kept per booklet, so a repeat does not pay twice. A usage limit or a failed run hands the booklet to Chat; a booklet with audio is refused before anything runs. From 2026-11-15 one small request at low effort first asks where each photo's pages are and which way their lines run; each page is then cut out, enlarged to twice its size and sent in strips or bands along its lines (the paragraph below), and a booklet too large for the model's 500,000-token context is enlarged less. `POST /v1/route-check`, and a daily thread, try every booklet route (this one with a real request of about 5 s; Chat is only looked at) and `/v1/settings` carries the last result; the CLI reports no remaining allowance. Measured on the phone (§M-21 to §M-23): 47 rendered pages through the phone's own server, enlarged, answered 7 min 11 s after registration with 31 of 35 correct; 14 pages in 81 s with 14 of 14; two worn whole-frame photos with 4 of 4, and 3 of 4 with the fourth declared unreadable. Unmeasured: cellular, how long the sign-in lasts unattended, a reboot, how the plan allowance is drawn, photos taken by the app, worn photos of horizontal text. |
 
+**The venue is far darker than every photo the reading was measured on.** The
+wearer's own latest photos (2026-11-14 18:46, the glasses' camera) needed 60 ms
+at ISO 4032-5688 and nothing in them can be read at native pixels; the reference
+photos of 2026-09-22, used for §M-11, §M-22 and §M-23, were 25 ms at ISO 209, 46
+to 65 times the light. At that darkness one frame cannot work however it is
+exposed or processed: measured on the glasses' sensor with noise reduction off
+(§M-24), level over noise is 2.2 for a 10 ms frame and 4.5 for 30 ms, it grows
+with the square root of the frames added (11.8 for thirty of 10 ms), and the
+model needs about 32 (2.5-3% of characters wrong; 5-36% at 16; nothing at 8).
+That is 35 to 190 frames of 30 ms, one to six seconds of light a page. The camera
+offers RAW, bursts and manual exposure, analog gain up to ISO 800, and a fixed
+1.9 mm f/2.25 lens, so a narrower view adds no detail. Capturing the whole wide
+frame as one still, the structure of every build so far, has to be replaced by
+gathering frames of the looked-at paper; that design is not written or approved
+yet (`docs/whole-review-2026-11-14.md` section 11). The paragraph below holds
+for bright photos only.
+
 What a page needs to be read, measured on the phone with worn photos of one page
 from the glasses' own camera (§M-22, §M-23). One input read twice differs by up
 to 6.5 points of 199 characters: only repeated reads count, and two conclusions
