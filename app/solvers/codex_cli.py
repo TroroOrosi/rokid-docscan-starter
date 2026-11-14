@@ -141,18 +141,46 @@ def _answered(result) -> bool:
     return isinstance(result, SolveResult) and result.extras.get("answer_status") == "ready"
 
 
-def _identities(replies: list) -> list:
-    """Each question's identity within one read: its printed answer numbers, else its printed labels; a repeat of
-    either (numbers restart in another section) is the next of its kind."""
+_UNANSWERED = object()
+
+
+def _slots(replies: list) -> list[list[tuple]]:
+    """For each question of one read, the answer slots it fills: each of its printed answer numbers, or, when none
+    is printed, its labels as one slot. A repeat (numbers restart in another section) is the next of its kind.
+
+    The reads are compared slot by slot, not question by question: on the phone (2026-11-15, 47 pages) one read gave
+    answer numbers 1 to 5 as one question and the other as five."""
     seen: dict = {}
-    identities = []
+    slots = []
     for item, _ in replies:
         numbers = item.get("answer_no")
-        base = ("numbers", *map(str, numbers)) if isinstance(numbers, list) and numbers else (
-            "labels", _plain(item.get("group")), _plain(item.get("label")))
-        seen[base] = seen.get(base, 0) + 1
-        identities.append((base, seen[base]))
-    return identities
+        bases = [("number", str(number)) for number in numbers] if isinstance(numbers, list) and numbers else [
+            ("labels", _plain(item.get("group")), _plain(item.get("label")))]
+        keys = []
+        for base in bases:
+            seen[base] = seen.get(base, 0) + 1
+            keys.append((*base, seen[base]))
+        slots.append(keys)
+    return slots
+
+
+def _slot_marks(replies: list, slots: list) -> dict:
+    """{slot: what this read says there}: a mark, None for writing (not compared), or ``_UNANSWERED``.
+
+    A question of several answer numbers gives each number its own mark when its answer has as many parts as numbers
+    ("④、②、①", "④ ② ①"); otherwise the whole answer stands for each of them."""
+    marks: dict = {}
+    for (_, result), keys in zip(replies, slots):
+        if not _answered(result):
+            marks.update(dict.fromkeys(keys, _UNANSWERED))
+            continue
+        whole = _mark(result.answer)
+        # The model separates the marks of one question by spaces as often as by commas ("④ ④ ① ② ②", phone).
+        parts = [part for part in re.split(r"[\s、,・;]+", unicodedata.normalize("NFKC", result.answer)) if part]
+        apart = whole is not None and len(keys) > 1 and len(parts) == len(keys)
+        for index, key in enumerate(keys):
+            marks[key] = parts[index] if apart else whole
+    return marks
 
 
 def _compared(first: list, second: list) -> list:
@@ -161,31 +189,36 @@ def _compared(first: list, second: list) -> list:
     A ready answer the reads do not agree on gets ``review_note`` in its extras and stays ready with the first
     read's answer: the server turns the note into an answer to review.
     """
-    first_ids, second_ids = _identities(first), _identities(second)
-    theirs = dict(zip(second_ids, second))
+    first_slots, second_slots = _slots(first), _slots(second)
+    mine, theirs = _slot_marks(first, first_slots), _slot_marks(second, second_slots)
+    same_question = {tuple(keys): pair for keys, pair in zip(second_slots, second)}
     merged = []
-    for identity, (item, result) in zip(first_ids, first):
-        match = theirs.get(identity)
+    for keys, (item, result) in zip(first_slots, first):
+        match = same_question.get(tuple(keys))
         note = ""
         if _answered(result):
-            if match is None:
-                note = _ONE_LISTED
-            elif not _answered(match[1]):
+            different = [(key, theirs[key]) for key in keys
+                         if key in theirs and theirs[key] is not _UNANSWERED and theirs[key] != mine[key]]
+            if different and match is not None and _answered(match[1]):
+                note = _DIFFERENT.format(other=match[1].answer.strip()[:24])
+            elif different:  # the other read grouped these numbers differently: name the numbers it differs on
+                note = _DIFFERENT.format(other="、".join(
+                    f"{key[1]}は{'記述' if mark is None else mark}" for key, mark in different)[:40])
+            elif any(theirs.get(key) is _UNANSWERED for key in keys):
                 note = _ONE_ANSWERED
-            else:
-                mine, other = _mark(result.answer), _mark(match[1].answer)
-                if mine != other:  # two writings are both None and are not compared
-                    note = _DIFFERENT.format(other=match[1].answer.strip()[:24])
+            elif any(key not in theirs for key in keys):
+                note = _ONE_LISTED
         elif match is not None and _answered(match[1]):
             (item, result), note = match, _ONE_ANSWERED
         if note:
             result.extras["review_note"] = note
         merged.append((item, result))
-    place = {identity: index for index, identity in enumerate(first_ids)}
+    place = {key: index for index, keys in enumerate(first_slots) for key in keys}
     extra, last = [], -1
-    for order, (identity, pair) in enumerate(zip(second_ids, second)):
-        if identity in place:
-            last = place[identity]
+    for order, (keys, pair) in enumerate(zip(second_slots, second)):
+        known = [place[key] for key in keys if key in place]
+        if known:
+            last = max(known)
             continue
         if _answered(pair[1]):
             pair[1].extras["review_note"] = _ONE_LISTED

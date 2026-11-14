@@ -668,3 +668,38 @@ def test_a_reply_kept_before_there_were_two_reads_is_still_used(codex, tmp_path,
 
     assert _shown(codex_cli.CodexCliSolver().answer_all(question=question)) == [([1], "④", "ready", "")]
     assert not _runs(codex())
+
+
+def _grouped(*questions):
+    """One read whose questions each fill the given answer numbers: (numbers, answer)."""
+    return {"questions": [{"group": "第1問", "label": f"問{index}", "answer_no": list(numbers), "pages": [1],
+                           "status": "ready", "answer": answer, "missing_material": "", "diagrams": []}
+                          for index, (numbers, answer) in enumerate(questions, 1)]}
+
+
+@pytest.mark.parametrize("first, second", [
+    (_grouped(((1, 2, 3), "④、②、①")), _grouped(((1,), "④"), ((2,), "②"), ((3,), "①"))),
+    (_grouped(((1,), "④"), ((2,), "②"), ((3,), "①")), _grouped(((1, 2, 3), "④、②、①"))),
+    (_grouped(((1, 2), "④、②"), ((3,), "①")), _grouped(((1,), "4"), ((2, 3), "2,1"))),
+    # As the model wrote them on the phone: the marks of one question separated by spaces.
+    (_grouped(((1, 2, 3, 4, 5), "④ ④ ① ② ②"), ((6,), "③")), _grouped(((1,), "④"), ((2,), "④"), ((3,), "①"), ((4,), "②"), ((5,), "②"), ((6,), "③"))),
+])
+def test_reads_that_group_the_same_answer_numbers_differently_agree_number_by_number(codex, tmp_path, monkeypatch, first, second):
+    """Phone, 2026-11-15, 47 pages: one read gave answer numbers 1 to 5 as one question and the other as five. Matched
+    question by question, ten right answers of 35 were marked as listed by one read only."""
+    _twice(monkeypatch, first, second)
+    shown = _shown(codex_cli.CodexCliSolver().answer_all(question=_booklet(tmp_path)))
+    assert [numbers for numbers, _, _, _ in shown] == [question["answer_no"] for question in first["questions"]]
+    assert [note for _, _, _, note in shown] == [""] * len(shown)
+
+
+def test_a_number_the_reads_disagree_on_inside_a_question_of_several_numbers_is_named(codex, tmp_path, monkeypatch):
+    _twice(monkeypatch, _grouped(((1, 2, 3), "④、②、①")), _grouped(((1,), "④"), ((2,), "③"), ((3,), "①")))
+    [(numbers, answer, _, note)] = _shown(codex_cli.CodexCliSolver().answer_all(question=_booklet(tmp_path)))
+    assert (numbers, answer) == ([1, 2, 3], "④、②、①") and "2" in note and "3" in note and "1は" not in note
+
+
+def test_a_separate_question_is_marked_when_the_other_reads_joined_question_differs_on_its_number(codex, tmp_path, monkeypatch):
+    _twice(monkeypatch, _grouped(((1,), "④"), ((2,), "②"), ((3,), "①")), _grouped(((1, 2, 3), "④、③、①")))
+    shown = _shown(codex_cli.CodexCliSolver().answer_all(question=_booklet(tmp_path)))
+    assert [bool(note) for _, _, _, note in shown] == [False, True, False] and "3" in shown[1][3]
