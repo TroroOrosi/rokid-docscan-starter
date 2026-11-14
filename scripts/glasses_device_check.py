@@ -40,9 +40,10 @@ PACKAGE = "dev.rokid.docscanglass.doc"
 GLASSES_SERIAL = "1904092623381086"
 # The firmware every measurement in docs/hardware-measurements.md section M was taken on.
 MEASURED_FIRMWARE = "1.29.013-20261110-150201"
-TAP = "KEYCODE_NOTIFICATION KEYCODE_ENTER"
-SWIPE_FORWARD = "KEYCODE_NOTIFICATION KEYCODE_DPAD_RIGHT KEYCODE_DPAD_DOWN"
-DOUBLE_TAP = "KEYCODE_NOTIFICATION KEYCODE_NOTIFICATION KEYCODE_BACK"
+# Gestures are the key codes the touchpad itself sends, written to its own input device: a touch on a sleeping
+# display is consumed by the wake and never reaches the app, which injected keys (`input keyevent`) do not reproduce.
+TOUCHPAD = "/dev/input/event1"
+TAP, SWIPE_FORWARD, SWIPE_BACK, DOUBLE_TAP = (204, 28), (204, 106, 108), (204, 105, 103), (204, 204, 158)
 PHONE_IMAGES = "/data/data/com.termux/files/home/rokid-server/data/images"
 STANDARD_PHOTOS = "/sdcard/DCIM/Camera"  # where the glasses' own camera (the physical photo key) saves
 
@@ -102,8 +103,22 @@ class Check:
             time.sleep(3)
         return False
 
-    def keys(self, sequence: str) -> None:
-        self.shell(f"input keyevent {sequence}")
+    def keys(self, sequence: str | tuple[int, ...]) -> None:
+        if isinstance(sequence, str):  # system keys only: wake, and the glasses' own camera
+            self.shell(f"input keyevent {sequence}")
+            return
+        self.shell("; ".join(f"sendevent {TOUCHPAD} 1 {code} 1; sendevent {TOUCHPAD} 0 0 0; sendevent {TOUCHPAD} 1 {code} 0; "
+                             f"sendevent {TOUCHPAD} 0 0 0; sleep 0.08" for code in sequence))
+
+    def chosen(self, name: str) -> int | None:
+        """Which line of the chooser the marker is on, read from the screen: the marker is all that is lit left of the text."""
+        image = self.screen(name)
+        text = image.getbbox()
+        if not text:
+            return None
+        line = (text[3] - text[1]) / 7  # six choices, then the hint line, which starts at the left edge too
+        marker = image.crop((0, 0, 30, round(text[1] + 6 * line))).getbbox()
+        return None if not marker else round(((marker[1] + marker[3]) / 2 - text[1]) / line - 0.5)
 
     def screen(self, name: str):
         from PIL import Image  # noqa: PLC0415
@@ -237,14 +252,22 @@ class Check:
                  f"about {asleep_at} s after the tap" if asleep_at else "not within 10 s; the phone watcher did not act")
         self.expect("the tap started no session", "Started local capture session" not in self.log())
         mark = len(self.log())
-        # Keys injected over adb do not reach a sleeping device; the touchpad's do. Wake it as the touch would,
-        # then check what the app does with the gesture that arrives. The touch itself only the wearer can check.
-        self.keys("KEYCODE_WAKEUP")
-        time.sleep(2)  # the activity must be resumed before a key reaches it
+        # The touch that wakes a sleeping display is consumed by the wake: the app is only resumed. Until 2026-11-14
+        # this step injected a wake key and then a swipe, which since 0.43.17 is a second gesture: it moved the
+        # choice to mixed English, and the "tap pauses" line below failed on a correct app.
         self.keys(SWIPE_FORWARD)
-        self.expect("the gesture after a display-off only turns it back on", bool(self.wait(r"phase=chooser request=wake", 3, mark)))
+        self.expect("the gesture after a display-off only turns it back on", bool(self.wait(r"phase=chooser request=wake", 4, mark)))
         self.expect("that gesture started no session", "Started local capture session" not in self.log())
-        time.sleep(1)
+        time.sleep(2)  # the activity must be resumed before the next gesture reaches it
+        self.expect("the display is on again", "mWakefulness=Awake" in self.shell("dumpsys power"))
+        # The chooser opens on the kind of reading used last. On 2026-11-14 a run left mixed English chosen, where a
+        # tap takes a photo, and "tap pauses" failed on a correct app. Read the marker as the wearer does and go back.
+        chosen = self.chosen("chooser-before-start")
+        for _ in range(chosen or 0):
+            self.keys(SWIPE_BACK)
+            time.sleep(0.6)
+        self.expect("the ordinary reading is the one selected", self.chosen("chooser-selected") == 0,
+                    f"the marker was on line {chosen}" if chosen else "")
         self.keys(DOUBLE_TAP)  # safe here only: on the chooser the double tap starts, it never ends a capture
         return self.expect("double tap starts the selected reading", bool(self.wait(r"Started local capture session", 8)))
 
@@ -267,6 +290,14 @@ class Check:
             self.row("still exposure against the preview's", "INFO",
                      f"preview {int(preview[-1]) / 1e6:.1f} ms, still {int(still.group(1)) / 1e6:.1f} ms at ISO {still.group(2)} "
                      f"(ratio {ratio:.2f}; sensitivity may carry the rest)")
+        motion = re.search(r"still_motion gen=1 samples=(\d+) covered=(\w+) window_ms=(\d+) mean_rad_s=([\d.]+) peak_rad_s=([\d.]+) blur_px=([\d.]+)", log)
+        self.expect("the head's turning during the photo's own exposure is recorded", bool(motion) and int(motion.group(1)) >= 2,
+                    f"{motion.group(1)} readings over {motion.group(3)} ms, peak {motion.group(5)} rad/s, about {motion.group(6)} px of smear"
+                    if motion else "no still_motion line")
+        light = re.findall(r"preview_status .*?exposure_ns=(\d+) .*?pace=(\d+) gain=(\d+)", log)
+        if light:
+            self.row("light as the preview measures it", "INFO", f"{int(light[-1][0]) / 1e6:.0f} ms at a total gain of {light[-1][2]}, "
+                     f"frame-rate range {light[-1][1] or 'default'} (60 ms never held on a worn head; 30 ms is the longest asked)")
         time.sleep(self.options.watch)
         log = self.log()
         photos = self.photos()
@@ -325,6 +356,22 @@ class Check:
         causes = re.findall(r"(\d\d:\d\d:\d\d)\.\d+ I/DocScanGlassDoc.*page_change scene=(\d+) (cause=\w+ level_shift=-?\d+ cells_over_percent=\d+)", log)
         self.row("real paper: photos taken", "INFO", f"{len(photos)} in {self.options.paper} s at " + ", ".join(p[0][:8] for p in photos))
         self.row("real paper: page changes counted", "INFO", "; ".join(f"{t} #{n} {c}" for t, n, c in causes[-12:]) or "none")
+        motions = re.findall(r"still_motion gen=(\d+) samples=\d+ covered=\w+ window_ms=\d+ mean_rad_s=[\d.]+ peak_rad_s=([\d.]+) blur_px=([\d.]+)", log)
+        self.row("real paper: head turning during each photo's exposure", "INFO",
+                 "; ".join(f"#{g} peak {peak} rad/s, {blur} px" for g, peak, blur in motions[-12:]) or "no photo")
+        light = re.findall(r"preview_status .*?exposure_ns=(\d+) .*?peak_rad_s=([\d.]+) pace=(\d+) gain=(\d+)", log)
+        if light:
+            exposures = sorted({round(int(e) / 1e6) for e, *_ in light if int(e)})
+            gains = sorted(int(g) for *_, g in light)
+            peaks = sorted(float(peak) for _, peak, *_ in light)
+            self.row("real paper: light and head, second by second", "INFO",
+                     f"exposure ms {exposures}, total gain median {gains[len(gains) // 2]} (range {gains[0]}-{gains[-1]}), "
+                     f"frame-rate ranges {sorted({pace for _, _, pace, _ in light})}; each second's fastest turning: "
+                     f"median {peaks[len(peaks) // 2]:.3f}, quietest {peaks[0]:.3f}, largest {peaks[-1]:.3f} rad/s over {len(peaks)} s")
+        if self.report:
+            trace = self.run(self.options.glasses, "exec-out", "cat", f"/sdcard/Android/data/{PACKAGE}/files/head-motion.bin", timeout=120)
+            (self.report / "head-motion.bin").write_bytes(trace)
+            self.row("real paper: head-motion trace kept", "INFO", f"{len(trace)} bytes; read it with scripts/head_motion_report.py")
         self.expect("real paper: nothing failed", not re.search(r"capture failed|preview failed|ERROR:", log))
 
     def server(self) -> None:

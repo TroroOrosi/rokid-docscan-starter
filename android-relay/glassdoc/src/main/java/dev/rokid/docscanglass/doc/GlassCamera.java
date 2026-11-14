@@ -275,16 +275,20 @@ final class GlassCamera {
      */
     static final class ExposurePace {
         static final int DEFAULT = 0, MID = 30, FAST = 60;
-        static final int FAST_ENTER_GAIN = 1600, FAST_LEAVE_GAIN = 3200, MID_ENTER_GAIN = 6400, MID_LEAVE_GAIN = 8000;
-        static final long MID_EXPOSURE_NANOS = 30_000_000L;
+        static final int FAST_ENTER_GAIN = 1600, FAST_LEAVE_GAIN = 3200;
 
-        /** The range to ask next, from a converged result measured under {@code pace}; leaving needs more than entering. */
+        /**
+         * The range to ask next, from a converged result measured under {@code pace}; leaving the fast range needs more
+         * than entering it. However dark, the 30 fps range stays where the camera has one: at the template's 50-60 ms
+         * the stillness limit is 0.02 rad/s, which a worn head never held (2026-11-12), and smear cannot be undone
+         * while noise can be averaged out. Until 2026-11-14 a scene needing a gain over 6400 at 30 ms fell back to
+         * 60 ms; the desk of that day needed 6640.
+         */
         static int next(int pace, boolean mid, boolean fast, long exposureNanos, double gain, long periodNanos) {
             double light = gain * exposureNanos; // what this scene needs at the brightness the camera chose
-            if (pace == FAST) return gain > FAST_LEAVE_GAIN ? (mid ? MID : DEFAULT) : FAST;
-            if (fast && periodNanos > 0 && light / periodNanos <= FAST_ENTER_GAIN) return FAST;
-            if (pace == MID) return gain > MID_LEAVE_GAIN ? DEFAULT : MID;
-            return mid && light / MID_EXPOSURE_NANOS <= MID_ENTER_GAIN ? MID : DEFAULT;
+            if (pace == FAST && gain <= FAST_LEAVE_GAIN) return FAST;
+            if (pace != FAST && fast && periodNanos > 0 && light / periodNanos <= FAST_ENTER_GAIN) return FAST;
+            return mid ? MID : DEFAULT;
         }
 
         /** Whether a result was measured under the range now asked; a camera that reports no range is taken at its word. */
@@ -307,6 +311,7 @@ final class GlassCamera {
     private final Handler handler;
     private final Callback callback;
     private final Stillness stillness;
+    private final HeadMotion headMotion;
     private final Mode mode;
     private final Executor inputWorker;
     private final ZslInputTransfer.Factory inputFactory;
@@ -477,6 +482,7 @@ final class GlassCamera {
         this.videoFactory = videoFactory;
         this.paperGeometryEvaluation = paperGeometryEvaluation;
         stillness = new Stillness(context);
+        headMotion = new HeadMotion(context);
     }
 
     void videoGeneration(long next) {
@@ -769,6 +775,7 @@ final class GlassCamera {
                         opened.close(); return;
                     }
                     previewDevice = opened;
+                    headMotion.start();
                     try {
                         CameraCaptureSession.StateCallback sessionCallback = new CameraCaptureSession.StateCallback() {
                             @Override public void onConfigured(CameraCaptureSession configured) {
@@ -1041,6 +1048,8 @@ final class GlassCamera {
                 + " page_still=" + pageChange.ready(now) + " metered=" + meteredFrame(now)
                 + " exposure_ns=" + meteringExposureNanos + " motion=" + previewMotion.ready(now)
                 + " fine=" + pageChange.fineMotionReady(now) + " gyro=" + stillness.readyNow() + " " + stillness.describe()
+                + " " + headMotion.describe(SystemClock.elapsedRealtimeNanos())
+                + " pace=" + pace + " gain=" + (meteringStillExposure == null ? "none" : Math.round(meteringStillExposure.gain()))
                 + " camera_ready=" + cameraReady()
                 + " steps_ms acquire/copy/thumb/observe/misc/display/rest=" + stepNanos[0] / 1_000_000 + "/"
                 + stepNanos[1] / 1_000_000 + "/" + stepNanos[2] / 1_000_000 + "/" + stepNanos[3] / 1_000_000 + "/"
@@ -1590,6 +1599,13 @@ final class GlassCamera {
                 if (current == generation && !closed && !unknown) {
                     CameraDiagnostics.result(current, result);
                     framing.result(current, captureStream, result);
+                    if (result != null && realtimeTimestamps) {
+                        Long at = result.get(CaptureResult.SENSOR_TIMESTAMP);
+                        Long exposure = result.get(CaptureResult.SENSOR_EXPOSURE_TIME);
+                        Long skew = result.get(CaptureResult.SENSOR_ROLLING_SHUTTER_SKEW);
+                        // The last readings of the window arrive a few milliseconds after the result.
+                        handler.postDelayed(() -> headMotion.still(current, at, exposure, skew), 60);
+                    }
                 }
                 if (active(current) && !unknown && !stillResultFinished && source == previewSession) {
                     try { stillResult = result == null ? null : new StillResult(current, result); }
@@ -1846,6 +1862,7 @@ final class GlassCamera {
     }
 
     private boolean release() {
+        headMotion.stop();
         selectionScene = null;
         // Detach ownership first, then attempt every close even if one fails.
         CameraCaptureSession oldSession = previewSession;

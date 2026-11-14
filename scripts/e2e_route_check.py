@@ -13,6 +13,13 @@ its hotspot, its load and its browser are not in the loop.
     py -3.12 scripts/e2e_route_check.py --glasses <usb serial> --data <server data dir> --key <test api key>
         [--server http://127.0.0.1:8765] [--photos 3] [--report <dir>]
 
+With --paper SECONDS the run is a recording of worn use and nothing else: the reading is started, the wearer reads a
+real booklet for that long without touching the touchpad, and the run reports the light the camera measured, the
+head's turning, every photo and the turning during its exposure, and keeps the 200 Hz head-motion trace
+(scripts/head_motion_report.py replays capture rules against it). The capture is not ended, so not even the stand-in
+is asked. The real app is force-stopped first: its wear detection would bring it to the front, and there the double
+tap that ends a capture sends the pages to the model. Its wear detection starts again when it is next opened.
+
 Start the server first (see the docstring of app/solvers/recorded.py for its environment) and `adb reverse` its port.
 The double tap that ends the capture is sent only after the server answering the app is confirmed to be the
 stand-in. The start double tap is sent once and confirmed from a time-stamped log filter, never repeated.
@@ -34,6 +41,7 @@ from pathlib import Path
 
 ADB = os.environ.get("ADB", r"C:\Users\pupu_\AppData\Local\Android\Sdk\platform-tools\adb.exe")
 PACKAGE = "dev.rokid.docscanglass.doc.routecheck"
+REAL_PACKAGE = "dev.rokid.docscanglass.doc"
 ACTIVITY = f"{PACKAGE}/dev.rokid.docscanglass.doc.DocScanGlassActivity"
 GLASSES_SERIAL = "1904092623381086"
 TOUCHPAD = "/dev/input/event1"
@@ -127,7 +135,11 @@ class Check:
             if not self.prepare():
                 return 1
             watcher = self.start_watcher()
-            if self.capture() and self.finish_and_wait():
+            if self.o.paper:
+                self.sh(f"rm -f /sdcard/Android/data/{PACKAGE}/files/head-motion.bin")  # this run's turning only
+                if self.start():
+                    self.paper()
+            elif self.capture() and self.finish_and_wait():
                 self.read_and_exit()
         finally:
             self.sh(f"am force-stop {PACKAGE}")
@@ -142,6 +154,8 @@ class Check:
         return 1 if failed else 0
 
     def prepare(self) -> bool:
+        if self.o.paper:
+            self.sh(f"am force-stop {REAL_PACKAGE}")  # see the module docstring
         ok = self.row("these are the glasses", self.sh("getprop ro.serialno").strip() == GLASSES_SERIAL)
         status, settings = self.api("/v1/settings")
         solver = settings.get("providers", {}).get("solver", {}) if status == 200 else {}
@@ -164,14 +178,52 @@ class Check:
                                  "--expected-serial", GLASSES_SERIAL, "--server", self.o.server, "--package", PACKAGE],
                                 env=environment, stdout=log, stderr=subprocess.STDOUT)
 
-    def capture(self) -> bool:
+    def start(self) -> bool:
         self.sh(f"am force-stop {PACKAGE}; input keyevent KEYCODE_WAKEUP; sleep 1")
         self.since = self.stamp()
         self.sh(f"am start -W -n {ACTIVITY} --es server {self.o.server} --es key {self.o.key} --ez chooser true >/dev/null 2>&1")
         time.sleep(1.5)
         self.row("the chooser is drawn", self.lit("chooser") > 0)
         self.gesture(DOUBLE_TAP)  # once; a second one would land in a running capture
-        if not self.row("one double tap starts the reading", bool(self.wait_log(self.since, "Started local capture session", 8))):
+        return self.row("one double tap starts the reading", bool(self.wait_log(self.since, "Started local capture session", 8)))
+
+    def paper(self) -> None:
+        print(f"----- worn use: {self.o.paper} s. Read the booklet and turn its pages; do not touch the touchpad. -----", flush=True)
+        time.sleep(self.o.paper)
+        pid = self.sh(f"pidof {PACKAGE}").strip()  # with the clock times, which log() drops
+        text = "\n".join(line for line in self.sh(f'logcat -d -v time -t "{self.since}" -s DocScanGlassDoc:*', timeout=120).splitlines()
+                         if pid and re.search(r"\(\s*" + re.escape(pid) + r"\)", line[:70]))
+        if self.report:
+            (self.report / "paper-log.txt").write_text(text, encoding="utf-8")
+        photos = re.findall(r"(\d\d:\d\d:\d\d)\.\d+ .*captured \d+x\d+ (\d+)B in (\d+)ms gen=(\d+)", text)
+        self.row("worn: photos taken", None, f"{len(photos)} in {self.o.paper} s" + "".join(f"; {at} #{gen}" for at, _, _, gen in photos[:20]))
+        self.row("worn: waits for stillness that ran out (10 s each)", None, str(len(re.findall("preparation expired", text))))
+        motions = re.findall(r"still_motion gen=(\d+) samples=\d+ covered=\w+ window_ms=(\d+) mean_rad_s=[\d.]+ peak_rad_s=([\d.]+) blur_px=([\d.]+)", text)
+        self.row("worn: turning during each photo's own exposure", None,
+                 "; ".join(f"#{gen} {peak} rad/s over {window} ms, {blur} px" for gen, window, peak, blur in motions[:20]) or "no photo")
+        status = re.findall(r"preview_status .*?metered=true exposure_ns=(\d+) .*?limit_rad_s=([\d.]+) head_1s=\d+ mean_rad_s=[\d.]+ peak_rad_s=([\d.]+) pace=(\d+) gain=(\d+)", text)
+        if status:
+            gains = sorted(int(gain) for *_, gain in status)
+            peaks = sorted(float(peak) for _, _, peak, _, _ in status)
+            under = sum(1 for _, limit, peak, _, _ in status if float(limit) > 0 and float(peak) <= float(limit))
+            self.row("worn: light on what the wearer looks at", None,
+                     f"exposure ms {sorted({round(int(e) / 1e6) for e, *_ in status if int(e)})}, total gain median {gains[len(gains) // 2]} "
+                     f"({gains[0]}-{gains[-1]}), frame-rate ranges {sorted({pace for *_, pace, _ in status})}")
+            self.row("worn: each second's fastest turning", None,
+                     f"median {peaks[len(peaks) // 2]:.3f}, quietest {peaks[0]:.3f}, largest {peaks[-1]:.3f} rad/s; "
+                     f"{under} of {len(status)} seconds wholly under the limit then in force ({sorted({limit for _, limit, *_ in status})})")
+        self.row("worn: page changes counted", None, str(len(re.findall("page_change scene=", text))))
+        new_document = self.db("select count(*) from documents")[0][0] > self.before["documents"]
+        pages = self.db("select count(*) from pages where document_id = (select max(id) from documents)")[0][0] if new_document else 0
+        self.row("worn: photos that reached the server", None, str(pages))
+        trace = self.adb("exec-out", "cat", f"/sdcard/Android/data/{PACKAGE}/files/head-motion.bin", timeout=120)
+        if self.report:
+            (self.report / "head-motion.bin").write_bytes(trace)
+        self.row("worn: head-motion trace", None, f"{len(trace)} bytes ({len(trace) / 20 / 200:.0f} s at 200 Hz)")
+        self.row("nothing failed in the app", not re.search(r"capture failed|preview failed|ERROR:", text))
+
+    def capture(self) -> bool:
+        if not self.start():
             return False
         first = self.wait_log(self.since, r"captured \d+x\d+ \d+B in \d+ms gen=1", 40)
         if not self.row("the first photo is taken without any input", bool(first), first or "no photo within 40 s"):
@@ -300,6 +352,7 @@ def main() -> int:
     parser.add_argument("--server", default="http://127.0.0.1:8765")
     parser.add_argument("--photos", type=int, default=3)
     parser.add_argument("--interrupt", choices=["wait"], help="force-stop the app (what a fold does) at this point and reopen the chooser")
+    parser.add_argument("--paper", type=int, default=0, help="seconds of worn reading to record; the capture is not ended")
     parser.add_argument("--report")
     return Check(parser.parse_args()).run()
 

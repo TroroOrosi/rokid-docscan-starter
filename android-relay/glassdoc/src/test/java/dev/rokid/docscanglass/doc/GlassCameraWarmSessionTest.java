@@ -836,8 +836,12 @@ public class GlassCameraWarmSessionTest {
         assertEquals(mid, GlassCamera.ExposurePace.next(plain, true, true, 60_000_000L, 3064, fifty));
         assertEquals(mid, GlassCamera.ExposurePace.next(mid, true, true, 30_000_000L, 6128, fifty));
         assertEquals("the gain is spent at one period", mid, GlassCamera.ExposurePace.next(fast, true, true, 10_000_000L, 10_000, fifty));
-        assertEquals("darker still: the template's own range", plain, GlassCamera.ExposurePace.next(mid, true, true, 30_000_000L, 9_000, fifty));
-        assertEquals(plain, GlassCamera.ExposurePace.next(plain, true, true, 60_000_000L, 5_000, fifty));
+        // A worn head never held the template's 50-60 ms (limit 0.02 rad/s, 2026-11-12). Smear cannot be undone and
+        // noise can be averaged out, so a darker scene keeps 30 ms and pays in gain or brightness.
+        assertEquals("darker still: 30 ms stays", mid, GlassCamera.ExposurePace.next(mid, true, true, 30_000_000L, 9_000, fifty));
+        assertEquals("the desk of 2026-11-14: 60 ms at 3320", mid, GlassCamera.ExposurePace.next(plain, true, true, 60_000_000L, 3_320, fifty));
+        assertEquals(mid, GlassCamera.ExposurePace.next(plain, true, true, 60_000_000L, 12_000, fifty));
+        assertEquals("a camera with only the fast range", plain, GlassCamera.ExposurePace.next(fast, false, true, 10_000_000L, 10_000, fifty));
         assertEquals("a camera without the ranges keeps the template's", plain,
                 GlassCamera.ExposurePace.next(plain, false, false, 25_000_000L, 235, sixty));
         assertTrue(GlassCamera.ExposurePace.measuredUnder(fast, new Range<>(60, 60)));

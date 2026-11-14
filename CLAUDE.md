@@ -1,9 +1,11 @@
 # rokid-docscan-starter development guide
 
-Status: Current engineering contract. Updated 2026-11-10.
+Status: Current engineering contract. Updated 2026-11-14.
 
 **Start at `.agents/progress/current.md`.** It lists the operator's decisions,
-the verified state and the next steps. Do not re-ask what it settles. Keep the
+the verified state and the next steps. Do not re-ask what it settles. Then read
+the top of `docs/defect-register.md`: the purpose, how far each step of the use
+has been checked, and the known defects by cause layer. Keep the
 prohibitions below. Treat this file's measurements and "the platform cannot"
 statements as past observations: check them against the artifact before relying
 on them. Judge every change by one test: does ChatGPT answer correctly from the
@@ -98,13 +100,17 @@ The operator confirmed on 2026-09-14 that the phone can be an access point,
 which retires the "the glasses have no network at the venue" premise that this
 file carried until then.
 
-**None of that topology has been run.** What is measured is each piece
-separately: the glasses app captures and reaches a server over Wi-Fi
-(2026-09-04), and the phone-only CDP/FastAPI/answer component in §F-6 (2026-09-15).
-The AP has never carried a complete glasses session.
+**That topology has run end to end once** (2026-11-13,
+`docs/hardware-measurements.md` §M-15): the real app, the phone's hotspot and
+server, Work, the answer, the watcher's wake and the reader, with one photo of
+a desk and the glasses lying on it. It has not carried what it is for: a
+booklet photographed by a wearer, more than one page, or the Chat route. The
+pieces measured separately before that are the glasses app reaching a server
+over Wi-Fi (2026-09-04) and the phone-only CDP/FastAPI/answer component in
+§F-6 (2026-09-15).
 
-The **phone-relay topology** below is what this repository has actually
-exercised end to end, and it stays as the fallback. Do not extend it.
+The **phone-relay topology** below was exercised end to end earlier and
+stays as the fallback. Do not extend it.
 
 ```text
 Rokid Glasses -> Global Hi Rokid -> Android relay -> FastAPI server -> HUD
@@ -153,9 +159,12 @@ Settled decisions. Do not re-argue them:
 
 **Open gap.** The current record includes phone-only CDP, FastAPI discovery and a
 text answer in `docs/hardware-measurements.md` §F-6-6 through §F-6-10. These are
-component measurements, not a glasses → phone AP → answer-bundle session.
-That full route, the new capture/power behavior and the model's use of original listening audio remain
-unvalidated on hardware. Do not describe chatgpt-web as venue-ready.
+component measurements. The glasses → phone AP → answer-bundle route ran once
+on 2026-11-13 through Work with one photo of a desk (§M-15). A wearer's paper
+capture, a booklet of several pages, the Chat route sent from the phone, the
+capture/power behavior over a whole session and the model's use of original
+listening audio remain unvalidated on hardware. Do not describe chatgpt-web as
+venue-ready.
 
 The earlier Android Chrome build used an abstract unix CDP socket and an
 on-device forward. Those source/device observations remain in
@@ -187,6 +196,9 @@ Standard override is a trial setting. Existing sealed jobs, restarted sends and
 their later listening stage retain their saved settings. Capture-inspection and
 quality requests retain dedicated Standard settings. Actual model, effort and
 speed verification and uncertain-send safeguards apply to both answer speeds.
+A trial with the real model goes through Chat, not Work ("Development and
+verification" below), so the Standard setting matters only when Work itself is
+what is being tried.
 
 ## Real-device contract
 
@@ -244,8 +256,13 @@ speed verification and uncertain-send safeguards apply to both answer speeds.
   cameras the still copies the exposure, sensitivity and gain the preview's auto
   exposure measured, and the exposure is shortened only by asking that auto
   exposure for a faster frame-rate range: 60 where one flicker period needs a
-  total gain of at most 1600, else 30 where 30 ms needs at most 6400, else the
-  template's; leaving a range needs more than entering it. Above a total gain
+  total gain of at most 1600 (leaving it needs more than entering), else 30
+  wherever the camera has that range, however dark. Until 0.43.20 a scene
+  needing a gain over 6400 at 30 ms fell back to the template's 50-60 ms, where
+  the stillness limit is 0.02 rad/s and a worn head never passed; smear cannot
+  be undone and noise can be averaged out. On the desk of 2026-11-14 (60 ms at
+  3320 by the glasses' own camera) the app took 30 ms at a gain of about 6600
+  and read 35.5-37.4 against that camera's 42.6-44.1 (§M-17). Above a total gain
   of 1600 the still asks for no edge enhancement. Shortening by hand failed
   three ways on the glasses: darker left a dim page at 17 of 255; the preview's
   own 50-70 ms was never still enough on a worn head (§M-6, §M-7); one period
@@ -387,7 +404,8 @@ speed verification and uncertain-send safeguards apply to both answer speeds.
   hardware trial retained display and cursor through the12.297-second observation
   after SOFT_SLEEP (`GL48-saved-reader-display-hold-20261031.py
   --execute-approved-once`, exit0; independently audited). The operator also
-  confirmed that the answer stays visible and readable. On 2026-11-09, the
+  confirmed that the answer stays visible and readable. On 2026-11-09, when
+  the chooser's timeout was still five seconds (thirty from 0.43.18), the
   updated app emitted chooser sleep requests after 5.012 and 5.016 seconds.
   The phone watcher returned SOFT_SLEEP 0.216 and 0.163 seconds after reading
   those authenticated requests. Android readback changed from Awake at 5.391
@@ -673,13 +691,68 @@ For changes to the real-device path:
 An Android build proves compilation only. Do not label hardware behavior as
 verified until the physical checklist has been completed.
 
+### Order of verification on hardware
+
+This list is the rule. The paragraphs after it are the reasons and the
+records; each was learned from a failure the operator found.
+
+1. Place the work in the flow first. `docs/defect-register.md` opens with the
+   purpose and where each step of the use stands. A remark from the operator
+   is one observation of that flow, not a new goal: the goal and the step in
+   hand do not change because of it.
+2. Characterise before building: the glasses' own camera for exposure and
+   processing, the recorded head motion (`scripts/head_motion_report.py`) for
+   stillness, the project's records for what is already known.
+3. After every change to the glasses app, on the desk: compile the installed
+   package; `glasses_device_check.py`; gestures through the touchpad's input device,
+   every cycle three times; `system_observation.py` before and after a change
+   to capture or display; `e2e_route_check.py` with the stand-in solver for
+   the whole use in order.
+4. Say what the desk cannot show. Glasses on a desk look across the room and
+   do not move; on 2026-11-14 that view was about thirty times darker than the
+   page a wearer photographed on 9/22. Look at what the camera sees (a photo
+   with the glasses' own camera) before reading a desk number as a condition
+   of use. The light on a page a wearer looks at and the motion of a
+   reading head exist only when worn.
+5. When the wearer is needed, say so plainly: what they do, for how long,
+   what the one pass decides, and what was checked first so that it cannot
+   fail for a reason findable on the desk. Not before that, and not silently
+   never.
+6. A run with the real model is the operator's decision: once, through Chat,
+   under the conditions below.
+7. A rule or measurement added to this file or to another record is added by
+   reading the whole document again and correcting, in the same change, what
+   it has made stale.
+
+What is known about worn capture (2026-11-14): one attempt, 37 seconds on
+glassdoc 0.43.14 with the preview at 50-60 ms, where the stillness limit was
+0.02 rad/s, took no photo (§M-7); in September, at 10 ms and 0.12 rad/s, worn
+photos were taken. The exposure rules since (0.43.15, 0.43.16) have never been
+worn, and neither a worn head's turning speed nor the light on a worn page had
+been recorded. From 0.43.21 the app records the gyroscope at 200 Hz for as
+long as its camera is open (a trace named head-motion.bin in the app's
+external files directory, which adb can read; the build is not debuggable;
+read by `scripts/head_motion_report.py`) and logs, for each photo, the turning during
+its own exposure (`still_motion`); neither changes a decision. The stillness
+gate itself is unchanged: it allows a photo after 300 ms in which every
+reading is under 0.12 rad/s x 10 ms / exposure, then stops listening, and the
+exposure comes 0.3-0.7 s later.
+
 After any change to the glasses app, and before the wearer is asked to try it,
 run `py -3.12 scripts/glasses_device_check.py --glasses <serial> --phone <serial>`.
-It drives the installed app over adb as the touchpad does and checks, line by
+After each install run `cmd package compile -m speed -f <package>` on the
+glasses; the check fails an uncompiled app, which is slower and hotter. It
+writes gestures to the touchpad's own input device (from 2026-11-14; its
+injected keys had drifted from the app and started mixed English, where a tap
+takes a photo) and reads the chooser's marker from the screen, because the
+chooser opens on the kind of reading used last. It checks, line by
 line, the environment, the chooser, the automatic photo and its exposure, that
 an unmoving scene is not taken again, pause and resume, the manual shot and
-what reached the phone server. `--paper <seconds>` records a real booklet
-being read by the wearer. The unit tests use a fake camera and display: from
+what reached the phone server. A worn recording is taken with
+`scripts/e2e_route_check.py --paper <seconds>`: the test-only package and the
+stand-in server, the real app force-stopped, the capture never ended, so
+nothing can reach the model whatever the wearer touches; it reports the light,
+the head's turning and every photo, and keeps the head-motion trace. The unit tests use a fake camera and display: from
 2026-11-01 to 2026-11-12 they hid a frame handler 300 times slower on the
 device, a still the firmware never returned, one page taken again and again,
 and a photo too dark to read. Glasses lying on a desk look across the room, not
