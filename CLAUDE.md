@@ -169,10 +169,17 @@ as two of the seven worn photos were. No simple image measure told those two
 from the rest; the model returns such a page as unreadable by itself. The Codex
 route therefore sends each page at twice its size in parts along its lines
 (implemented 2026-11-15). On a second photo (17 px) that cut read worse than one
-larger image, three reads against two; that is open. Not implemented: more than
-one photo a page, choosing by the gyroscope, and a second independent read whose
-disagreements are flagged (estimated from 18 reads to cut unnoticed wrong
-answers from 6.9% to 1.6%, with a tenth of the questions flagged).
+larger image, three reads against two; that is open. The route also reads each
+booklet twice at the same time and compares the two answer lists answer number
+by answer number (`ROKID_CODEX_READS`, 2): a short answer the reads disagree on,
+or that only one gave, keeps an answer and is shown for review with the other
+one; writing is not compared. Through the phone's server: 24 answers from worn
+whole-frame photos with no unnoticed wrong answer (one wrong and four right
+ones marked); 35 answers of 47 rendered pages, run twice, each with one
+unnoticed (three or four read once) and two wrong ones marked, and three and
+no right ones marked; the wait is the slower read's (365.8 s and 586.1 s for
+the 47 pages), at twice the allowance. Both reads wrong alike stays unnoticed. Not implemented: more than
+one photo a page and choosing by the gyroscope.
 
 Settled decisions. Do not re-argue them:
 
