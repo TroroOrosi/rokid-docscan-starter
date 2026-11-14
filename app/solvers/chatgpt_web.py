@@ -90,7 +90,8 @@ ATTACHMENT_SEL = os.environ.get(
 )
 # Present only while a reply streams. Its absence is the fastest honest signal
 # that the answer is finished; the caller's expected JSON covers it going missing.
-STOP_SEL = os.environ.get("ROKID_CHATGPT_STOP_SEL", '[data-testid="stop-button"]')
+# Phone, 2026-11-14: the composer's buttons carry no data-testid; Work's reader found the stop control by its label.
+STOP_SEL = os.environ.get("ROKID_CHATGPT_STOP_SEL", '[data-testid="stop-button"], form button[aria-label^="Stop"]')
 # Starting the next question is a CLICK, not a page load. Reloading chatgpt.com
 # once per question (and again per retry) hammers the site for no benefit and
 # was measured destabilising the browser partway through a run of subjects.
@@ -103,7 +104,10 @@ NEW_CHAT_SEL = os.environ.get(
 # attempts each pressed Enter, each left another blank line in the composer, and
 # not one of them sent anything. The button carries the same testid on both
 # layouts; Enter stays as the fallback for a page where it has moved.
-SEND_SEL = os.environ.get("ROKID_CHATGPT_SEND_SEL", '[data-testid="send-button"]')
+# Phone, 2026-11-14: the send control is the composer form's only submit button, labelled "Send", with no
+# data-testid. Without a match, submit() fell back to Enter wherever the focus was.
+SEND_SEL = os.environ.get(
+    "ROKID_CHATGPT_SEND_SEL", f'[data-testid="send-button"], form:has({_IDLESS_COMPOSER_SEL}) button[type="submit"]')
 MODEL_SEL = os.environ.get("ROKID_CHATGPT_MODEL_SEL", '[data-testid="model-switcher-dropdown-button"]')
 EFFORT_SEL = os.environ.get(
     "ROKID_CHATGPT_EFFORT_SEL",
@@ -403,6 +407,32 @@ def upload_plan(
     return plan
 
 
+# Whatever language the page is shown in, an attached file's tile carries the file's own name: a button labelled
+# with it beside "Remove <name>", and the image's alt (phone, 2026-11-14). The thumbnail selector above is a label
+# in one language; on that phone it was a Japanese one, matched nothing, and each page was written three times.
+_ATTACHED_NAMES_JS = r"""(names => { /* attached_names */
+  const composers = [...document.querySelectorAll(%s)].filter(e => e.getClientRects().length);
+  const form = composers.length === 1 ? composers[0].closest('form') : null;
+  if (!form) return null;
+  const labels = [...form.querySelectorAll('[aria-label], img[alt]')]
+      .flatMap(e => [e.getAttribute('aria-label') || '', e.getAttribute('alt') || '']);
+  const shown = e => e.getClientRects().length > 0;
+  const busy = [...form.querySelectorAll('[role=progressbar], [aria-busy=true], [data-state=uploading]')].some(shown);
+  const blocked = [...form.querySelectorAll('button[type="submit"]')].filter(shown)
+      .some(e => e.disabled || e.getAttribute('aria-disabled') === 'true');
+  return {present: names.map(name => labels.some(label => label.includes(name))), ready: !busy && !blocked};
+})""" % json.dumps(COMPOSER_SEL)
+
+
+def _attached_names(page, names: list[str]) -> tuple[list[bool], bool]:
+    """(which names the composer shows, whether it is ready to send); ([], False) when the page cannot say."""
+    state = page.evaluate(f"{_ATTACHED_NAMES_JS}({json.dumps(names)})")
+    present = state.get("present") if isinstance(state, dict) else None
+    if not isinstance(present, list) or len(present) != len(names) or any(type(shown) is not bool for shown in present):
+        return [], False
+    return present, state.get("ready") is True
+
+
 def _upload_input(page, selector: str):
     """Prefer the existing input; the idless UI needs one input in one composer form."""
     target = page.locator(selector)
@@ -455,6 +485,20 @@ def attach_images(
     expected = sum(len(payloads) for _, payloads in plan)
     thumbnails = page.locator(ATTACHMENT_SEL)
     baseline = thumbnails.count()
+    names = [payload["name"] for _, payloads in plan for payload in payloads]
+    if any(_attached_names(page, names)[0]):
+        # Writing again would attach a renamed copy beside whatever an earlier attempt left there.
+        raise ChatGptWebAttachmentFailed("the composer already holds a file with these names; nothing attached")
+
+    def landed() -> bool:
+        if thumbnails.count() >= baseline + expected:
+            return True
+        present, ready = _attached_names(page, names)
+        return bool(present) and all(present) and ready
+
+    def some_landed() -> bool:
+        return thumbnails.count() > baseline or any(_attached_names(page, names)[0])
+
     # The write is retried, because the node it lands on can be thrown away.
     # On the mobile layout `start_new_chat` falls back to a real page load --
     # that layout has no new-chat control -- and React replaces the file input
@@ -471,7 +515,7 @@ def attach_images(
     # against a clock that stops advancing.
     deadline = now() + timeout_s
     for attempt in range(UPLOAD_ATTEMPTS):
-        if attempt and thumbnails.count() > baseline:
+        if attempt and some_landed():
             break
         for file_input, payloads in plan:
             _upload_input(page, file_input).set_input_files(payloads)
@@ -479,14 +523,14 @@ def attach_images(
         # reported unconfirmed just because the budget was small.
         window = min(now() + timeout_s / UPLOAD_ATTEMPTS, deadline)
         while True:
-            if thumbnails.count() >= baseline + expected:
+            if landed():
                 return True
             if now() >= window:
                 break
             sleep(poll_s)
         if now() >= deadline:
             break
-    return thumbnails.count() >= baseline + expected
+    return landed()
 
 
 def reuse_page(context):

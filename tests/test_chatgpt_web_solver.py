@@ -14,6 +14,8 @@ import json
 
 import io
 import itertools
+import shutil
+import subprocess
 
 import pytest
 
@@ -1238,6 +1240,74 @@ def test_idless_composer_takes_the_image_input_for_several_files_when_a_single_p
     assert chatgpt_web.attach_images(page, [PNG, JPEG]) is True
     assert [f["mimeType"] for f in page.uploads[0]] == ["image/png", "image/jpeg"]
     assert page.upload_selectors[0].endswith('input[type="file"][accept="image/*"][multiple]')
+
+
+_SYNTAX_CHECK = ("const s = JSON.parse(require('fs').readFileSync(0, 'utf8'));"
+                 "for (const [k, v] of Object.entries(s)) { try { new Function('return ' + v); }"
+                 " catch (e) { console.log(k + ': ' + e.message); } }")
+
+
+def _broken_scripts(scripts: dict) -> str:
+    result = subprocess.run([shutil.which("node"), "-e", _SYNTAX_CHECK], input=json.dumps(scripts),
+                            capture_output=True, text=True, encoding="utf-8", timeout=60)
+    assert result.returncode == 0, result.stderr
+    return result.stdout.strip()
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
+def test_every_page_script_is_valid_javascript():
+    """The fakes never run the page scripts: on 2026-11-14 a patch left a string literal broken across two lines
+    and every test still passed."""
+    from app.solvers import chatgpt_work_web
+
+    scripts = {f"{module.__name__}.{name}": value for module in (chatgpt_web, chatgpt_work_web)
+               for name, value in vars(module).items() if name.endswith("_JS") and isinstance(value, str)}
+    assert len(scripts) >= 8
+    assert _broken_scripts(scripts) == ""
+    assert "broken" in _broken_scripts({"broken": "(e => 'a\n' + e)"})  # the check does catch that fault
+
+
+class _NamedTilePage(_IdlessUploadPage):
+    """Phone, 2026-11-14, Chat mode shown in English: each attached file is a button labelled with its own name
+    beside "Remove <name>". The thumbnail selector configured on that phone was a Japanese label and matched
+    nothing, so the route wrote the same two pages three times and then called the attach unconfirmed."""
+
+    def __init__(self, *, send_disabled=False, leftover=(), **kwargs):
+        super().__init__(accepts=("image/*", "image/*,video/*", "image/*", None), thumbnail_appears=False, **kwargs)
+        self.send_disabled, self.leftover = send_disabled, set(leftover)
+
+    def evaluate(self, expression):
+        if "attached_names" in expression:
+            names = json.loads(expression[expression.rindex("})(") + 3:-1])
+            landed = self.leftover | {f["name"] for upload in self.uploads for f in upload}
+            return {"present": [name in landed for name in names], "ready": not self.send_disabled}
+        return super().evaluate(expression)
+
+
+def _two_pages():
+    return [{"name": "page001.jpg", "mimeType": "image/jpeg", "buffer": JPEG},
+            {"name": "page002.jpg", "mimeType": "image/jpeg", "buffer": JPEG}]
+
+
+def test_attached_files_are_confirmed_by_their_own_names_and_written_once():
+    page = _NamedTilePage()
+    assert chatgpt_web.attach_images(page, [], files=_two_pages(), sleep=lambda _s: None) is True
+    assert len(page.uploads) == 1
+
+
+def test_named_files_are_not_confirmed_while_the_send_control_is_still_disabled():
+    page = _NamedTilePage(send_disabled=True)
+    ticks = iter([0.0, 1.0, 2.0, 3.0])
+    assert chatgpt_web.attach_images(page, [], files=_two_pages(), timeout_s=2, sleep=lambda _s: None,
+                                     now=lambda: next(ticks, 99.0)) is False
+    assert len(page.uploads) == 1  # present but not ready is still "landed": never written twice
+
+
+def test_a_composer_that_already_holds_a_file_of_the_same_name_is_refused_before_writing():
+    page = _NamedTilePage(leftover={"page002.jpg"})
+    with pytest.raises(chatgpt_web.ChatGptWebAttachmentFailed, match="already holds"):
+        chatgpt_web.attach_images(page, [], files=_two_pages(), sleep=lambda _s: None)
+    assert page.uploads == []
 
 
 def test_existing_upload_selectors_remain_preferred():
