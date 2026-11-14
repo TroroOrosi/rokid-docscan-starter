@@ -1,6 +1,6 @@
 # rokid-docscan-starter development guide
 
-Status: Current engineering contract. Updated 2026-11-14.
+Status: Current engineering contract. Updated 2026-11-15.
 
 **Start at `.agents/progress/current.md`.** It lists the operator's decisions,
 the verified state and the next steps. Do not re-ask what it settles. Then read
@@ -151,17 +151,28 @@ is the intended topology. It has run once, with the glasses driven from a PC
 | `openai` / `gemini` / `claude` API keys | Supported and config-only. The per-question routes can fall back through `ROKID_SOLVER_TIERS`. They have no one-message booklet answer, so they are not booklet fallback routes. |
 | Booklet route fallback (`ROKID_SOLVER_FALLBACKS`) | Requested by the operator on 2026-11-10. When Work returns a usage limit, or cannot send (model or attachment control unusable after one retry), the same booklet goes to `chatgpt-web`. The choice is stored on the deck row, so a restart does not return to the limited route. An unknown send outcome, a shared browser/login/guard failure, a readability or receipt rejection and the listening stage never switch. Observed on the phone's live tab on 2026-11-10 without typing or sending: the new-chat page has two buttons, Chat and Work, and only pressing Chat leaves Work (a click right after the navigation was dropped, so it is repeated until Work is inactive); in Work mode Chat's composer is absent; Chat's effort is a five-position Power slider whose top position is Pro (shown with "Locked" and "Usage limit reached"), so the route moves it to the position labelled Extra High and refuses any other readable position. That preparation ended at GPT-6 / Extra High and Work was restored. Not observed: a real limit notice, a Work task cut short, and a Chat answer after a Work refusal. |
 | Local OpenAI-compatible HTTP (`app/llm_http.py`) | Reaches an on-phone `llama-server` without the openai SDK. |
-| `ROKID_SOLVER=codex-cli` (the official Codex CLI, `codex exec`, signed in with ChatGPT) | **The phone's route since 2026-11-14**, with Chat behind it. The operator asked whether the present route was rational for the venue; it had never been compared with anything (`docs/whole-review-2026-11-14.md` sections 9 and 10). One request carries every page image; no API key, browser or X11. On Android the server resolves names for the static binary through a loopback CONNECT proxy of its own and names Termux's certificate bundle. A reply is kept per booklet, so a repeat does not pay twice. A usage limit or a failed run hands the booklet to Chat; a booklet with audio is refused before anything runs. Measured on the phone (§M-21, §M-22): 47 page images in one request in 6 min 26 s with 8.7 MB sent; 14 pages through the phone's own server in 61 s with 14 of 14 correct. Unmeasured: cellular, how long the sign-in lasts unattended, a reboot, how the plan allowance is drawn, photos taken by the app. |
+| `ROKID_SOLVER=codex-cli` (the official Codex CLI, `codex exec`, signed in with ChatGPT) | **The phone's route since 2026-11-14**, with Chat behind it. The operator asked whether the present route was rational for the venue; it had never been compared with anything (`docs/whole-review-2026-11-14.md` sections 9 and 10). One request carries every page image; no API key, browser or X11. On Android the server resolves names for the static binary through a loopback CONNECT proxy of its own and names Termux's certificate bundle. A reply is kept per booklet, so a repeat does not pay twice. A usage limit or a failed run hands the booklet to Chat; a booklet with audio is refused before anything runs. From 2026-11-15 one small request at low effort first asks where each photo's pages are and which way their lines run; each page is then cut out, enlarged to twice its size and sent in strips or bands along its lines (the paragraph below), and a booklet too large for the model's 500,000-token context is enlarged less. `POST /v1/route-check`, and a daily thread, try every booklet route (this one with a real request of about 5 s; Chat is only looked at) and `/v1/settings` carries the last result; the CLI reports no remaining allowance. Measured on the phone (§M-21 to §M-23): 47 rendered pages through the phone's own server, enlarged, answered 7 min 11 s after registration with 31 of 35 correct; 14 pages in 81 s with 14 of 14; two worn whole-frame photos with 4 of 4, and 3 of 4 with the fourth declared unreadable. Unmeasured: cellular, how long the sign-in lasts unattended, a reboot, how the plan allowance is drawn, photos taken by the app, worn photos of horizontal text. |
 
-What a page needs to be read, measured with seven worn photos of one page from the
-glasses' own camera (§M-22, one run each): characters of 15.8 px were read with
-18% of them wrong, 20.3 px with 1.5%, and wrong characters come back as other
-plausible words, not as gaps. The same 15.8 px photo enlarged twofold was read
-with none wrong; cropping alone changed nothing and sharpening made it worse.
-Two of the seven were smeared and unreadable whatever was done to them. So a
-page is sent enlarged to about 30 px a character, one photo a page is not
-enough, and a smeared photo has to be recognised and replaced before it is
-sent. None of this is implemented yet.
+What a page needs to be read, measured on the phone with worn photos of one page
+from the glasses' own camera (§M-22, §M-23). One input read twice differs by up
+to 6.5 points of 199 characters: only repeated reads count, and two conclusions
+drawn from single reads on 2026-11-15 were wrong. Characters of 15.8 px were
+read with 18% wrong as photographed (one read) and, at twice the size, with
+4.10% as one image and 1.59% as two strips cut along the lines (six reads each,
+the rule fixed before the runs); cut across the lines it was no better than one
+image, and larger or sharpened no better. Wrong characters come back as other
+plausible words, not as gaps. Pixel count is not the limit: a sharp photo
+reduced to 8 px a character was still read with 2% wrong. Blur and smear are:
+a smear of 10% of a character's height cost nothing, 20% doubled the errors and
+the time, 30% broke the answers and 44% left nothing readable (one read each),
+as two of the seven worn photos were. No simple image measure told those two
+from the rest; the model returns such a page as unreadable by itself. The Codex
+route therefore sends each page at twice its size in parts along its lines
+(implemented 2026-11-15). On a second photo (17 px) that cut read worse than one
+larger image, three reads against two; that is open. Not implemented: more than
+one photo a page, choosing by the gyroscope, and a second independent read whose
+disagreements are flagged (estimated from 18 reads to cut unnoticed wrong
+answers from 6.9% to 1.6%, with a tenth of the questions flagged).
 
 Settled decisions. Do not re-argue them:
 

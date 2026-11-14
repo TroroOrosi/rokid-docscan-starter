@@ -17,4 +17,6 @@ fi
 termux-wake-lock
 echo "phone_serve: listening on $address:8000; glasses use their Wi-Fi gateway"
 # A forwarded header must never turn a phone/attacker address into the control target.
-exec python -m uvicorn app.main:app --host "$address" --port 8000 --workers 1 --no-access-log --no-proxy-headers
+# uvicorn closes an idle kept-alive connection after 5 s by default; a client that asks again about then loses the
+# answer (measured on this phone, 2026-11-15: 5 of 24 at a 5 s interval, none at 3 s or 7 s).
+exec python -m uvicorn app.main:app --host "$address" --port 8000 --workers 1 --no-access-log --no-proxy-headers     --timeout-keep-alive 75

@@ -74,7 +74,10 @@ def test_serve_uses_loopback_cdp_without_phone_connection_or_browser_foreground(
     assert result.returncode == 0, result.stderr
     commands = log.read_text().splitlines()
     assert commands == ["termux-wake-lock", "python", "-m", "uvicorn", "app.main:app",
-                        "--host", "0.0.0.0", "--port", "8000", "--workers", "1", "--no-access-log", "--no-proxy-headers"]
+                        "--host", "0.0.0.0", "--port", "8000", "--workers", "1", "--no-access-log", "--no-proxy-headers",
+                        # Phone, 2026-11-15: with uvicorn's own 5 s a client asking every 5 s lost 5 of 24 answers
+                        # ("Server disconnected without sending a response"); every 3 s or 7 s, none.
+                        "--timeout-keep-alive", "75"]
     assert "cdp=http://127.0.0.1:9222 timeout=unset poll=unset send=0" in result.stdout
 
 
