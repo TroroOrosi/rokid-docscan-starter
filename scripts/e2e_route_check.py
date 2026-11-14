@@ -13,7 +13,9 @@ its hotspot, its load and its browser are not in the loop.
     py -3.12 scripts/e2e_route_check.py --glasses <usb serial> --data <server data dir> --key <test api key>
         [--server http://127.0.0.1:8765] [--photos 3] [--report <dir>]
 
-With --paper SECONDS the run is a recording of worn use and nothing else: the reading is started, the wearer reads a
+With --paper SECONDS the run is a recording of worn use and nothing else: the glasses' own camera takes one reference
+photo of what the wearer is looking at (its exposure and sensitivity say how much light is on the page), then the
+reading is started, the wearer reads a
 real booklet for that long without touching the touchpad, and the run reports the light the camera measured, the
 head's turning, every photo and the turning during its exposure, and keeps the 200 Hz head-motion trace
 (scripts/head_motion_report.py replays capture rules against it). The capture is not ended, so not even the stand-in
@@ -146,6 +148,7 @@ class Check:
             watcher = self.start_watcher()
             if self.o.paper:
                 self.sh(f"rm -f /sdcard/Android/data/{PACKAGE}/files/head-motion.bin")  # this run's turning only
+                self.standard_photo()
                 if self.start():
                     self.paper()
             elif self.capture() and self.finish_and_wait():
@@ -195,6 +198,27 @@ class Check:
         self.row("the chooser is drawn", self.lit("chooser") > 0)
         self.gesture(DOUBLE_TAP)  # once; a second one would land in a running capture
         return self.row("one double tap starts the reading", bool(self.wait_log(self.since, "Started local capture session", 8)))
+
+    def standard_photo(self) -> None:
+        """The glasses' own camera on what the wearer is looking at, before the app holds the camera: the reference for light."""
+        print("----- look at the page: the glasses' own camera takes one photo first (about 10 s) -----", flush=True)
+        before = self.sh("ls /sdcard/DCIM/Camera").split()
+        self.sh("input keyevent KEYCODE_WAKEUP; sleep 1; input keyevent KEYCODE_SPRITE_FUNCTION; sleep 9")
+        new = sorted(set(self.sh("ls /sdcard/DCIM/Camera").split()) - set(before))
+        if not new:
+            self.row("worn: the glasses' own camera took the reference photo", False, "no new file")
+            return
+        raw = self.adb("exec-out", "cat", f"/sdcard/DCIM/Camera/{new[-1]}", timeout=120)
+        detail = f"{new[-1]}, {len(raw)} bytes"
+        try:
+            from PIL import Image  # noqa: PLC0415
+            exif = Image.open(io.BytesIO(raw))._getexif() or {}
+            detail += f", exposure {float(exif.get(33434, 0)) * 1000:.1f} ms at ISO {exif.get(34855)}"
+        except Exception as error:  # noqa: BLE001 - the photo is kept whatever its tags say
+            detail += f" (tags unread: {type(error).__name__})"
+        if self.report:
+            (self.report / "standard-camera.jpg").write_bytes(raw)
+        self.row("worn: the glasses' own camera took the reference photo", len(raw) > 100_000, detail)
 
     def paper(self) -> None:
         print(f"----- worn use: {self.o.paper} s. Read the booklet and turn its pages; do not touch the touchpad. -----", flush=True)
