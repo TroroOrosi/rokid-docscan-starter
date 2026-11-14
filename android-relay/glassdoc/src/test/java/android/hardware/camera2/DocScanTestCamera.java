@@ -24,6 +24,9 @@ public final class DocScanTestCamera extends CameraDevice {
     public boolean refuseSession;
     /** Refuse a session with at least this many outputs; 0 refuses none by count. */
     public int refuseOutputs;
+    /** Keep each session's configured callback here until the test runs it: the time a rebuild takes on the device. */
+    public boolean holdSessions;
+    public final List<Runnable> heldSessions = new ArrayList<>();
     public boolean supportsExactSession = true;
     public boolean sessionQueryUnsupported;
     public SessionConfiguration queriedConfiguration;
@@ -50,7 +53,8 @@ public final class DocScanTestCamera extends CameraDevice {
         outputs = surfaces;
         configured.add(new ArrayList<>(surfaces));
         boolean refused = refuseSession || (refuseOutputs > 0 && surfaces.size() >= refuseOutputs);
-        h.post(() -> { if (refused) callback.onConfigureFailed(session); else callback.onConfigured(session); });
+        Runnable answer = () -> { if (refused) callback.onConfigureFailed(session); else callback.onConfigured(session); };
+        if (holdSessions) heldSessions.add(answer); else h.post(answer);
     }
     @Override public void createCaptureSessionByOutputConfigurations(List<OutputConfiguration> o, CameraCaptureSession.StateCallback c, Handler h) { throw new UnsupportedOperationException(); }
     @Override public void createConstrainedHighSpeedCaptureSession(List<Surface> o, CameraCaptureSession.StateCallback c, Handler h) { throw new UnsupportedOperationException(); }

@@ -88,6 +88,15 @@ class Check:
                 return None
             time.sleep(1)
 
+    def wait_saved(self, count: int, seconds: float) -> bool:
+        deadline = time.monotonic() + seconds
+        while True:
+            if sum("Photo committed locally" in line for line in self.log(self.since)) >= count:
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.5)
+
     def lit(self, name: str) -> int:
         from PIL import Image  # noqa: PLC0415
         image = Image.open(io.BytesIO(self.adb("exec-out", "screencap", "-p"))).convert("L")
@@ -203,12 +212,14 @@ class Check:
                  "; ".join(f"#{gen} {peak} rad/s over {window} ms, {blur} px" for gen, window, peak, blur in motions[:20]) or "no photo")
         status = re.findall(r"preview_status .*?metered=true exposure_ns=(\d+) .*?limit_rad_s=([\d.]+) head_1s=\d+ mean_rad_s=[\d.]+ peak_rad_s=([\d.]+) pace=(\d+) gain=(\d+)", text)
         if status:
-            gains = sorted(int(gain) for *_, gain in status)
+            # Exposure times gain is what the scene needs, whichever range the preview is in: watching (15 frames a
+            # second, a long exposure) or preparing a photo. Said as the gain a 30 ms and a 10 ms exposure would need.
+            needs = sorted(int(e) / 1e6 * int(gain) / 30 for e, *_, gain in status if int(e))
             peaks = sorted(float(peak) for _, _, peak, _, _ in status)
             under = sum(1 for _, limit, peak, _, _ in status if float(limit) > 0 and float(peak) <= float(limit))
             self.row("worn: light on what the wearer looks at", None,
-                     f"exposure ms {sorted({round(int(e) / 1e6) for e, *_ in status if int(e)})}, total gain median {gains[len(gains) // 2]} "
-                     f"({gains[0]}-{gains[-1]}), frame-rate ranges {sorted({pace for *_, pace, _ in status})}")
+                     f"a 30 ms exposure needs a total gain of {needs[len(needs) // 2]:.0f} (median; {needs[0]:.0f}-{needs[-1]:.0f}), "
+                     f"a 10 ms one {3 * needs[len(needs) // 2]:.0f}; the still's frame-rate range {sorted({pace for *_, pace, _ in status})}")
             self.row("worn: each second's fastest turning", None,
                      f"median {peaks[len(peaks) // 2]:.3f}, quietest {peaks[0]:.3f}, largest {peaks[-1]:.3f} rad/s; "
                      f"{under} of {len(status)} seconds wholly under the limit then in force ({sorted({limit for _, limit, *_ in status})})")
@@ -229,12 +240,13 @@ class Check:
         if not self.row("the first photo is taken without any input", bool(first), first or "no photo within 40 s"):
             return False
         committed = 1
-        self.row("photo 1 is saved after its 3-second review", bool(self.wait_log(self.since, "Photo committed locally", 12)))
+        self.row("photo 1 is saved after its 3-second review", self.wait_saved(1, 12))
         for number in range(2, self.o.photos + 1):
-            mark = self.stamp()
             self.gesture(SWIPE_FORWARD)
-            taken = self.wait_log(mark, r"captured \d+x\d+ \d+B in \d+ms gen=\d+", 25)
-            saved = self.wait_log(mark, "Photo committed locally", 14) if taken else None
+            taken = self.wait_log(self.since, rf"captured \d+x\d+ \d+B in \d+ms gen={number} *$", 25)
+            # Counted, not looked for after a clock mark: the mark is cut to the second, and on 2026-11-14 the save of
+            # the photo before was taken for this one's, so the next swipe fell in its review and retook it.
+            saved = self.wait_saved(number, 14) if taken else False
             committed += 1 if saved else 0
             self.row(f"a forward swipe takes photo {number} and it is saved", bool(saved), (taken or "no photo")[:70])
         stills = len([line for line in self.log(self.since) if "still_requested" in line])

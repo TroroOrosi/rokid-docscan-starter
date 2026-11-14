@@ -78,6 +78,10 @@ final class GlassCamera {
      */
     private boolean yuvStill;
     private boolean yuvStillRefused;
+    /** The session holds, or is being rebuilt to hold, the full-size output beside the preview. */
+    private boolean pairHeld;
+    /** A session was asked for and is not configured yet; what the old one still delivers cannot stand for it. */
+    private boolean rebuilding;
     private boolean encodingStill;
     private int stillJpegQuality;
     private byte[] stillNv21;
@@ -275,6 +279,8 @@ final class GlassCamera {
      */
     static final class ExposurePace {
         static final int DEFAULT = 0, MID = 30, FAST = 60;
+        /** While the preview only watches for a page: no short exposure is needed, and half the frames are half the heat. */
+        static final int WATCH = 15;
         static final int FAST_ENTER_GAIN = 1600, FAST_LEAVE_GAIN = 3200;
 
         /**
@@ -360,7 +366,7 @@ final class GlassCamera {
     private CameraCharacteristics manualExposureCamera;
     private StillExposure meteringStillExposure, stillExposure;
     private int pace;
-    private boolean paceMid, paceFast;
+    private boolean paceMid, paceFast, paceWatch;
     private final CameraDiagnostics.Framing framing = new CameraDiagnostics.Framing();
     private boolean settled;
     private boolean closed;
@@ -606,6 +612,7 @@ final class GlassCamera {
             handler.postDelayed(prepareTimeout, PREPARE_TIMEOUT_MILLIS);
             startPreview();
             if (closed || unknown) return;
+            shapeSession();
             stillness.await(handler, this::cameraReady, this::motionExposureNanos, this::captureOnHandler);
         });
     }
@@ -638,6 +645,7 @@ final class GlassCamera {
                 capturePending = false;
                 stillness.cancel();
                 handler.removeCallbacks(prepareTimeout);
+                shapeSession();
             }
             if (mode == Mode.VIDEO_EVALUATION) {
                 previewRequested = false; pageReady = null;
@@ -725,12 +733,13 @@ final class GlassCamera {
             realtimeTimestamps = Integer.valueOf(CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE_REALTIME)
                     .equals(characteristics.get(CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE));
             meteringStillExposure = null;
-            pace = ExposurePace.DEFAULT; paceMid = false; paceFast = false;
+            pace = ExposurePace.DEFAULT; paceMid = false; paceFast = false; paceWatch = false;
             Range<Integer>[] paces = manualExposureCamera == null ? null
                     : characteristics.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES);
             if (paces != null) for (Range<Integer> range : paces) {
                 if (range.getLower() == ExposurePace.MID && range.getUpper() == ExposurePace.MID) paceMid = true;
                 if (range.getLower() == ExposurePace.FAST && range.getUpper() == ExposurePace.FAST) paceFast = true;
+                if (range.getLower() == ExposurePace.WATCH && range.getUpper() == ExposurePace.WATCH) paceWatch = true;
             }
             paperTracker = paperGeometryEvaluation ? new PaperGeometry.Tracker() : null;
             paperExposure = paperGeometryEvaluation && metering.afMode == CaptureRequest.CONTROL_AF_MODE_OFF
@@ -781,6 +790,7 @@ final class GlassCamera {
                             @Override public void onConfigured(CameraCaptureSession configured) {
                                 if (token != previewGeneration || !previewRequested || closed) { configured.close(); return; }
                                 previewSession = configured;
+                                rebuilding = false;
                                 try {
                                     if (!metering.supported()) {
                                         previewFailed("camera AF/AE capabilities unsupported"); return;
@@ -813,7 +823,7 @@ final class GlassCamera {
                             @Override public void onConfigureFailed(CameraCaptureSession failed) {
                                 failed.close();
                                 if (token != previewGeneration) return;
-                                if (yuvStill && !(generation > 0 && !settled)) {
+                                if (yuvStill && pairHeld && !(generation > 0 && !settled)) {
                                     // Preview with full-size YUV is not a guaranteed pair on a LIMITED camera:
                                     // open again with the JPEG on a session of its own.
                                     Log.w(TAG, "preview with full-size YUV refused; the still keeps its own JPEG session");
@@ -855,7 +865,9 @@ final class GlassCamera {
                             // With the full-size YUV still, one session for both. Otherwise the preview alone:
                             // on firmware 1.29.013 a session holding the JPEG output beside any other output
                             // never returns the still (see requestStill), so the JPEG has its own.
-                            opened.createCaptureSession(yuvStill ? Arrays.asList(previewReader.getSurface(), reader.getSurface())
+                            pairHeld = yuvStill && (!lightWatch() || capturePending || (generation > 0 && !settled));
+                            rebuilding = false;
+                            opened.createCaptureSession(pairHeld ? Arrays.asList(previewReader.getSurface(), reader.getSurface())
                                     : Collections.singletonList(previewReader.getSurface()), sessionCallback, handler);
                         }
                     } catch (CameraAccessException | RuntimeException error) { previewFailed(); }
@@ -892,7 +904,7 @@ final class GlassCamera {
         long s0 = System.nanoTime(), s1 = s0, s2 = s0, s3 = s0, s4 = s0, s5 = s0, s6 = s0;
         try (Image image = source.acquireLatestImage()) {
             s1 = s2 = s3 = s4 = s5 = s6 = System.nanoTime();
-            if (image == null || token != previewGeneration || closed) return;
+            if (image == null || token != previewGeneration || closed || rebuilding) return;
             long now = SystemClock.elapsedRealtime();
             long timestamp = image.getTimestamp();
             if (timestamp <= 0 || timestamp <= lastPreviewSensorTimestamp || !currentCameraTimestamp(timestamp)) {
@@ -1017,6 +1029,7 @@ final class GlassCamera {
                         futureSceneEndTimestamp = Long.MAX_VALUE;
                         capturePending = true;
                         handler.postDelayed(prepareTimeout, PREPARE_TIMEOUT_MILLIS);
+                        shapeSession();
                         stillness.await(handler, this::cameraReady, this::motionExposureNanos, this::captureOnHandler);
                     }
                 }
@@ -1050,6 +1063,7 @@ final class GlassCamera {
                 + " fine=" + pageChange.fineMotionReady(now) + " gyro=" + stillness.readyNow() + " " + stillness.describe()
                 + " " + headMotion.describe(SystemClock.elapsedRealtimeNanos())
                 + " pace=" + pace + " gain=" + (meteringStillExposure == null ? "none" : Math.round(meteringStillExposure.gain()))
+                + " full_size=" + pairHeld + " asked=" + askedPace()
                 + " camera_ready=" + cameraReady()
                 + " steps_ms acquire/copy/thumb/observe/misc/display/rest=" + stepNanos[0] / 1_000_000 + "/"
                 + stepNanos[1] / 1_000_000 + "/" + stepNanos[2] / 1_000_000 + "/" + stepNanos[3] / 1_000_000 + "/"
@@ -1096,6 +1110,7 @@ final class GlassCamera {
         }
         stillness.cancel();
         capturePending = false;
+        shapeSession();
         if (activeFuturePage != null) {
             // The observed scene is unchanged: the next preview frame prepares it again.
             activeFuturePage = null;
@@ -1103,6 +1118,37 @@ final class GlassCamera {
             return;
         }
         callback.onCaptureNotReady();
+    }
+
+    /**
+     * Ordinary reading keeps the full-size output out of the session except while a photo is prepared and taken.
+     * Held all along it doubled the heat: on the glasses, 2026-11-14, three minutes of capture took the board from
+     * 38.5 to 62.2 C and the frame handler from 21 to 9 frames a second, while the small preview alone levelled off
+     * near 45 C (docs/hardware-measurements.md M-18). Comparison launches take stills without a preparation and keep it.
+     */
+    private boolean lightWatch() {
+        return yuvStill && bracket == null && !nativeSelection && !paperGeometryEvaluation;
+    }
+
+    /**
+     * Brings the session to the shape the moment needs, on the same open camera: 0.45 s on the glasses, during
+     * which nothing of the old session counts. A still 0.3 s after the rebuilt preview restarted read the same as
+     * one from a session held all along; the JPEG on a session of its own read a third of it.
+     */
+    private void shapeSession() {
+        if (!lightWatch() || closed || unknown || !previewRequested || previewDevice == null || previewReader == null
+                || reader == null || previewSessionCallback == null) return;
+        boolean pair = capturePending || (generation > 0 && !settled);
+        if (pair == pairHeld) return;
+        pairHeld = pair;
+        rebuilding = true;
+        meteringSensorTimestamp = 0; meteringExposureNanos = 0; meteringStillExposure = null;
+        resumeSettlingSince = Math.max(1, SystemClock.elapsedRealtime());
+        try {
+            previewDevice.createCaptureSession(pair ? Arrays.asList(previewReader.getSurface(), reader.getSurface())
+                    : Collections.singletonList(previewReader.getSurface()), previewSessionCallback, handler);
+            Log.i(TAG, "session_shape full_size=" + pair);
+        } catch (CameraAccessException | RuntimeException error) { previewFailed("session rebuild unavailable"); }
     }
 
     private void previewFailed() { previewFailed("preview unavailable"); }
@@ -1131,6 +1177,7 @@ final class GlassCamera {
     private boolean cameraReady() {
         long now = SystemClock.elapsedRealtime();
         return !closed && !unknown && previewDevice != null && previewSession != null
+                && !rebuilding && (!lightWatch() || pairHeld)
                 && (activeFuturePage == null || (futureSceneSequence == pageChange.sequence()
                 && pageChange.ready(now)))
                 && meteringExposureNanos > 0 && meteredFrame(now) && previewMotion.ready(now) && pageChange.fineMotionReady(now)
@@ -1186,7 +1233,7 @@ final class GlassCamera {
             }
             @Override public void onCaptureCompleted(CameraCaptureSession source,
                     CaptureRequest request, TotalCaptureResult result) {
-                if (!current() || source != previewSession || result == null) return;
+                if (!current() || source != previewSession || result == null || rebuilding) return;
                 try {
                     if (!focusTrigger) framing.preview(token, result);
                     if (!focusTrigger && zslFrames != null) zslFrames.result(result);
@@ -1205,7 +1252,7 @@ final class GlassCamera {
                         }
                         return;
                     }
-                    if (!ExposurePace.measuredUnder(pace, result.get(CaptureResult.CONTROL_AE_TARGET_FPS_RANGE))) {
+                    if (!ExposurePace.measuredUnder(askedPace(), result.get(CaptureResult.CONTROL_AE_TARGET_FPS_RANGE))) {
                         // Measured under the range asked before: it cannot stand for the exposure to come.
                         meteringExposureNanos = 0; meteringSensorTimestamp = 0; return;
                     }
@@ -1226,7 +1273,8 @@ final class GlassCamera {
                         int next = ExposurePace.next(pace, paceMid, paceFast, meteringStillExposure.exposure, meteringStillExposure.gain(),
                                 flicker != null && flicker == CaptureResult.STATISTICS_SCENE_FLICKER_60HZ
                                         ? 8_333_333L : Stillness.REFERENCE_EXPOSURE_NANOS);
-                        if (next != pace) { pace = next; repace(token); return; }
+                        // While only watching, the still's range is kept for the session that will take it.
+                        if (next != pace) { pace = next; if (askedPace() == next) { repace(token); return; } }
                     }
                     metering.observe(result.get(CaptureResult.CONTROL_AF_STATE),
                             result.get(CaptureResult.CONTROL_AE_STATE), realtimeTimestamps
@@ -1287,8 +1335,18 @@ final class GlassCamera {
     private void applyMetering(CaptureRequest.Builder request) {
         request.set(CaptureRequest.CONTROL_AF_MODE, metering.afMode);
         request.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON);
-        if (pace != ExposurePace.DEFAULT) request.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, new Range<>(pace, pace));
+        int asked = askedPace();
+        if (asked != ExposurePace.DEFAULT) request.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, new Range<>(asked, asked));
         if (paperExposure != null) paperExposure.apply(request);
+    }
+
+    /**
+     * The range the preview is asked for now: slow while it only watches for a page, the still's while a photo is
+     * prepared and taken. On the glasses the small preview alone at 30 frames a second took the board from 37 to
+     * 49 C in three minutes (2026-11-14); the change of range rides on the rebuild of the session.
+     */
+    private int askedPace() {
+        return paceWatch && lightWatch() && !pairHeld ? ExposurePace.WATCH : pace;
     }
 
     /** Asks the running preview for the new range; the next still waits for a result measured under it. */
@@ -1813,6 +1871,7 @@ final class GlassCamera {
                 ? "ZSL original timestamp mismatch" : "native original exposure metadata unresolved");
         futureIdle();
         resumePreviewSession();
+        shapeSession();
     }
 
     /** After a still's own session, put the repeating preview back on the same open camera. */
@@ -1863,6 +1922,8 @@ final class GlassCamera {
 
     private boolean release() {
         headMotion.stop();
+        pairHeld = false;
+        rebuilding = false;
         selectionScene = null;
         // Detach ownership first, then attempt every close even if one fails.
         CameraCaptureSession oldSession = previewSession;

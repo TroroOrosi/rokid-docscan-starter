@@ -296,8 +296,9 @@ class Check:
                     if motion else "no still_motion line")
         light = re.findall(r"preview_status .*?exposure_ns=(\d+) .*?pace=(\d+) gain=(\d+)", log)
         if light:
-            self.row("light as the preview measures it", "INFO", f"{int(light[-1][0]) / 1e6:.0f} ms at a total gain of {light[-1][2]}, "
-                     f"frame-rate range {light[-1][1] or 'default'} (60 ms never held on a worn head; 30 ms is the longest asked)")
+            need = int(light[-1][0]) / 1e6 * int(light[-1][2]) / 30  # the same whichever range the preview is in
+            self.row("light as the preview measures it", "INFO", f"a 30 ms exposure needs a total gain of {need:.0f}; the still's "
+                     f"frame-rate range is {light[-1][1] or 'default'} (60 ms never held on a worn head; 30 ms is the longest asked)")
         time.sleep(self.options.watch)
         log = self.log()
         photos = self.photos()
@@ -361,12 +362,11 @@ class Check:
                  "; ".join(f"#{g} peak {peak} rad/s, {blur} px" for g, peak, blur in motions[-12:]) or "no photo")
         light = re.findall(r"preview_status .*?exposure_ns=(\d+) .*?peak_rad_s=([\d.]+) pace=(\d+) gain=(\d+)", log)
         if light:
-            exposures = sorted({round(int(e) / 1e6) for e, *_ in light if int(e)})
-            gains = sorted(int(g) for *_, g in light)
+            needs = sorted(int(e) / 1e6 * int(g) / 30 for e, *_, g in light if int(e))
             peaks = sorted(float(peak) for _, peak, *_ in light)
             self.row("real paper: light and head, second by second", "INFO",
-                     f"exposure ms {exposures}, total gain median {gains[len(gains) // 2]} (range {gains[0]}-{gains[-1]}), "
-                     f"frame-rate ranges {sorted({pace for _, _, pace, _ in light})}; each second's fastest turning: "
+                     f"a 30 ms exposure needs a total gain of {needs[len(needs) // 2]:.0f} (median; {needs[0]:.0f}-{needs[-1]:.0f}), "
+                     f"the still's frame-rate ranges {sorted({pace for _, _, pace, _ in light})}; each second's fastest turning: "
                      f"median {peaks[len(peaks) // 2]:.3f}, quietest {peaks[0]:.3f}, largest {peaks[-1]:.3f} rad/s over {len(peaks)} s")
         if self.report:
             trace = self.run(self.options.glasses, "exec-out", "cat", f"/sdcard/Android/data/{PACKAGE}/files/head-motion.bin", timeout=120)

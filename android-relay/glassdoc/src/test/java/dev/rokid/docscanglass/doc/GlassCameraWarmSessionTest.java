@@ -870,6 +870,32 @@ public class GlassCameraWarmSessionTest {
         assertTrue(failures.isEmpty());
     }
 
+    /**
+     * Glasses, 2026-11-14: the small preview alone at 30 frames a second still took the board from 37 to 49 C in
+     * three minutes; at 15 it levelled off near 45 C in the measurement app. Watching for a page needs no short
+     * exposure: the preview asks for 15 while it only watches and for the still's range while a photo is prepared.
+     */
+    @Test public void watchingAsksForFifteenFramesASecondAndAPhotoToTakeForTheStillsRange() {
+        MapShadow.fullSizeYuv = true;
+        CharacteristicsShadow.fixedFocus = true; CharacteristicsShadow.manualSensor = true; CharacteristicsShadow.fpsRanges = true;
+        createCamera(); camera.preview(); idle(100);
+        var session = currentDevice().session;
+        assertEquals(new Range<>(15, 15), session.repeating.get(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE));
+        // A scene too dark for the fast range: 30 ms at a total gain of 1200 is 3600 at one flicker period. (The desk
+        // of that day needed 6640 at 30 ms; the fake camera's sensitivity stops at 800 and its frame lasts 33 ms.)
+        TotalCaptureResult watched = flickerResult(30_000_000L, 800, null);
+        ((ShadowCaptureResult)Shadow.extract(watched)).set(CaptureResult.CONTROL_AE_TARGET_FPS_RANGE, new Range<>(15, 15));
+        session.previewCallback.onCaptureCompleted(session, session.repeating, watched);
+        frame(180); idle(100);
+        assertEquals("still only watching", new Range<>(15, 15),
+                currentDevice().session.repeating.get(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE));
+        assertEquals("and the session is not asked again for it", 1, currentDevice().configurations);
+        camera.captureOnce(); idle(400);
+        assertEquals("a photo to take: 30 ms at the longest", new Range<>(30, 30),
+                currentDevice().session.repeating.get(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE));
+        assertTrue(failures.isEmpty());
+    }
+
     private void quiet(ShadowSensorManager sensors) {
         SensorEvent event = ShadowSensorManager.createSensorEvent(3);
         event.timestamp = SystemClock.elapsedRealtimeNanos(); event.values[0] = 0f;
@@ -1500,7 +1526,14 @@ public class GlassCameraWarmSessionTest {
      * Glasses, 2026-11-12: full-size YUV arrives beside the running preview in 0.65-0.74 s, where the JPEG
      * output needs a session of its own and leaves about 3 s without preview after every still.
      */
-    @Test public void aFullSizeYuvStillSharesThePreviewSessionAndIsEncodedAfterItsImageIsClosed() {
+    /**
+     * Glasses, 2026-11-14: with the full-size output held in the session all along, three minutes of capture took the
+     * board from 38.5 to 62.2 C and the preview handler from 21 to 9 frames a second; the small preview alone
+     * levelled off near 45 C. The full-size output is in the session only while a photo is prepared and taken. The
+     * rebuild took 0.45 s, and a still 0.3 s after the rebuilt preview restarted read the same as one from a session
+     * held all along (32.2-33.4 against 32.6 where the glasses' own camera read 39.7).
+     */
+    @Test public void theFullSizeOutputJoinsTheSessionForAPhotoAndLeavesItAfterwards() {
         MapShadow.fullSizeYuv = true;
         ReflectionHelpers.setField(camera, "stillWorker", (java.util.concurrent.Executor) Runnable::run);
         List<String> events = new ArrayList<>();
@@ -1517,17 +1550,21 @@ public class GlassCameraWarmSessionTest {
         ReaderShadow preview = readerOfWidth(320), still = readerOfWidth(4032);
         assertEquals(ImageFormat.YUV_420_888, still.format);
         DocScanTestCamera device = firstDevice();
-        assertEquals("one session for the preview and the still", List.of(List.of(preview.surface, still.surface)), device.configured);
+        assertEquals("watching: the small preview alone", List.of(List.of(preview.surface)), device.configured);
         result(CONTROL_AF_STATE_PASSIVE_FOCUSED, CONTROL_AE_STATE_CONVERGED);
         frame(preview, 180, false, SystemClock.elapsedRealtimeNanos());
         camera.captureOnce(); idle(400);
+        assertEquals("a photo to take: the full-size output beside the preview",
+                List.of(List.of(preview.surface), List.of(preview.surface, still.surface)), device.configured);
+        result(CONTROL_AF_STATE_PASSIVE_FOCUSED, CONTROL_AE_STATE_CONVERGED);
+        frame(preview, 180, false, SystemClock.elapsedRealtimeNanos()); idle(400);
         result(CONTROL_AF_STATE_PASSIVE_FOCUSED, CONTROL_AE_STATE_CONVERGED);
         frame(preview, 180, false, SystemClock.elapsedRealtimeNanos()); idle(50);
         assertEquals(1, device.session.captures);
         RequestShadow request = Shadow.extract(device.session.captured);
         assertEquals(CameraDevice.TEMPLATE_STILL_CAPTURE, request.template);
         assertEquals(List.of(still.surface), request.targets);
-        assertEquals("no second session", 1, device.configurations);
+        assertEquals("the still is taken in that session", 2, device.configurations);
 
         DocScanTestImage image = new DocScanTestImage(events);
         image.format = ImageFormat.YUV_420_888; image.rowStride = 4032; image.pixelStride = 1;
@@ -1543,18 +1580,63 @@ public class GlassCameraWarmSessionTest {
         assertEquals(1, delivered);
         assertArrayEquals(new byte[]{7, 7, 7}, originals.get(0).jpeg);
         assertEquals("native_still", originals.get(0).provenance.sourceKind);
-        assertEquals("the preview was never replaced", 1, device.configurations);
-        assertFalse(device.closed);
+        idle(50);
+        assertEquals("the photo is taken: the small preview alone again", List.of(preview.surface), device.configured.get(2));
+        assertEquals(3, device.configurations);
+        assertFalse("on the same open camera", device.closed);
+        assertEquals(1, ManagerShadow.devices.size());
         idle(100); result(CONTROL_AF_STATE_PASSIVE_FOCUSED, CONTROL_AE_STATE_CONVERGED);
         frame(preview, 180, false, SystemClock.elapsedRealtimeNanos());
-        assertTrue("frames keep being observed right after the still", displayed > shown);
+        assertTrue("frames are observed again once the returning preview has settled", displayed > shown);
         assertTrue(failures.isEmpty());
+    }
+
+    /** While the session is being rebuilt the old one still delivers frames and results; its outputs cannot take the still. */
+    @Test public void noStillIsAskedOfASessionThatDoesNotHoldTheFullSizeOutputYet() {
+        MapShadow.fullSizeYuv = true;
+        camera.preview(); idle(100);
+        ReaderShadow preview = readerOfWidth(320);
+        DocScanTestCamera device = firstDevice();
+        result(CONTROL_AF_STATE_PASSIVE_FOCUSED, CONTROL_AE_STATE_CONVERGED);
+        frame(preview, 180, false, SystemClock.elapsedRealtimeNanos());
+        device.holdSessions = true;
+        camera.captureOnce(); idle(400);
+        assertEquals(1, device.heldSessions.size());
+        for (int i = 0; i < 3; i++) {
+            result(CONTROL_AF_STATE_PASSIVE_FOCUSED, CONTROL_AE_STATE_CONVERGED);
+            frame(preview, 180, false, SystemClock.elapsedRealtimeNanos()); idle(400);
+        }
+        assertEquals("the full-size output is in no session yet", 0, device.session.captures);
+        assertTrue(failures.isEmpty());
+        device.heldSessions.remove(0).run();
+        for (int i = 0; i < 2; i++) {
+            result(CONTROL_AF_STATE_PASSIVE_FOCUSED, CONTROL_AE_STATE_CONVERGED);
+            frame(preview, 180, false, SystemClock.elapsedRealtimeNanos()); idle(400);
+        }
+        assertEquals(1, device.session.captures);
+        assertTrue(failures.isEmpty());
+    }
+
+    /** Ten seconds without stillness cancel the preparation; the camera goes back to the light session to wait. */
+    @Test public void aPreparationThatRunsOutGivesTheFullSizeOutputBack() {
+        MapShadow.fullSizeYuv = true;
+        camera.preview(); idle(100);
+        ReaderShadow preview = readerOfWidth(320), still = readerOfWidth(4032);
+        DocScanTestCamera device = firstDevice();
+        camera.captureOnce(); idle(400);
+        assertEquals(List.of(preview.surface, still.surface), device.configured.get(1));
+        idle(10_000);
+        assertEquals(0, device.session.captures);
+        assertEquals("waiting again: the small preview alone", List.of(preview.surface), device.configured.get(device.configured.size() - 1));
+        assertFalse(device.closed);
     }
 
     @Test public void aCameraThatRefusesThePreviewWithFullSizeYuvFallsBackToTheJpegOnItsOwnSession() {
         MapShadow.fullSizeYuv = true;
         ManagerShadow.refuseOutputs = 2;
         camera.preview(); idle(200);
+        assertEquals("the small preview alone is not refused", 1, ManagerShadow.devices.size());
+        camera.captureOnce(); idle(400); // the first photo asks for the pair, which this camera refuses
         assertEquals("the camera is opened again for the fallback", 2, ManagerShadow.devices.size());
         assertTrue(firstDevice().closed);
         ReaderShadow jpeg = currentReader(ImageFormat.JPEG);
@@ -1872,7 +1954,7 @@ public class GlassCameraWarmSessionTest {
                     : key.equals(CameraCharacteristics.SENSOR_INFO_MAX_FRAME_DURATION) ? 400_000_000L
                     : key.equals(CameraCharacteristics.SENSOR_MAX_ANALOG_SENSITIVITY) ? maxAnalog
                     : key.equals(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES) ? fpsRanges
-                        ? new Range[]{new Range<>(14, 30), new Range<>(30, 30), new Range<>(60, 60)} : null
+                        ? new Range[]{new Range<>(15, 15), new Range<>(14, 30), new Range<>(30, 30), new Range<>(60, 60)} : null
                     : key.equals(CameraCharacteristics.NOISE_REDUCTION_AVAILABLE_NOISE_REDUCTION_MODES) ? new int[]{0, 1, 2}
                     : key.equals(CameraCharacteristics.EDGE_AVAILABLE_EDGE_MODES) ? new int[]{1, 2, 0}
                     : key.equals(CameraCharacteristics.CONTROL_POST_RAW_SENSITIVITY_BOOST_RANGE) ? new Range<>(100, 3200)

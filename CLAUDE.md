@@ -225,12 +225,24 @@ what is being tried.
   observation continues across idle waits without a resume tap. Explicit end,
   lifecycle stop and failure boundaries still stop the camera. A previous
   `manual=true` does not carry over to a normal launch.
-  The same preview session supplies the full-size still after fresh supported
-  focus/exposure and stillness checks: full-size YUV beside the running
-  preview, copied, closed and then encoded to JPEG (quality 98) off the camera
-  thread, about 1.0 s from request to bytes with the preview never stopping
-  (glassdoc 0.43.13 on the glasses, 2026-11-12, `docs/hardware-measurements.md`
-  §M-5). That JPEG carries no EXIF; its provenance stays `native_still`. On
+  The still is full-size YUV taken beside the running preview after fresh
+  supported focus/exposure and stillness checks, copied, closed and then
+  encoded to JPEG (quality 98) off the camera thread (glassdoc 0.43.13,
+  2026-11-12, `docs/hardware-measurements.md` §M-5). From 0.43.23 the
+  full-size output is in the session only while a photo is prepared and taken,
+  and the preview that merely watches for a page runs at 15 frames a second:
+  held all along at 30, the full-size output took the board from 38.5 to 62.2 C
+  in three minutes on a desk and the frame handler from 21 to 9 frames a
+  second; now the same three minutes take it from 37.7 to 43.8 C with 10-11
+  frames handled steadily (§M-18). Ten minutes on the desk with a photo every 20 s (31 stills, 62 rebuilds) levelled off near 48 C on the board, with no spurious page change, no error and no restart of the camera services. The session is rebuilt on the same
+  open camera, about 0.45 s each way, and nothing of the session being replaced
+  counts meanwhile; from a detected page to its photo is about 2 s. A still
+  0.3 s after the rebuilt preview restarted read the same as one from a
+  session held all along, while the camera's own JPEG on a session of its own
+  read a third of it (10.5 against 33.3 where the glasses' own camera read
+  39.7), so that path is not a way to save heat. Comparison launches keep the
+  full-size output throughout. That JPEG carries no EXIF; its provenance stays
+  `native_still`. On
   firmware `1.29.013-20261110` a session holding the camera's JPEG output
   beside any other output never returned the still and the camera provider
   aborted (§M-1), so the camera's own JPEG is used only where the YUV pair is
@@ -241,7 +253,8 @@ what is being tried.
   unmoving page again and again, because the returning preview starts its
   exposure over; 0.43.12 does not count frames as page evidence until a fresh
   converged result arrives (§M-4). The JPEG-session path leaves about 3 s
-  without preview after each still; the YUV path leaves none. Which noise
+  without preview after each still; the YUV path about half a second at each
+  rebuild. Which noise
   reduction and edge setting reads best on a lit page is not measured. The ZSL and recording evaluation
   launches still put the JPEG beside other outputs. Fixed-focus hardware does not
   gain autofocus from an AF trigger. Expired preparation never forces a
@@ -785,9 +798,10 @@ Look at the whole system, not one component. `scripts/system_observation.py`
 drives a capture through the touchpad's input device and records load, memory,
 temperature and server response on both devices and every log buffer by source;
 take it before and after a change to capture or display. Measured on a desk on
-2026-11-13 (§M-13): ten minutes of capture took the SoC from 39 to 74 C and the
-camera zone to 73.5 C, still rising, with the preview handled at 9-11 frames a
-second after the first 30 s; the phone's watcher sends three adb commands a loop
+2026-11-13 (§M-13, glassdoc 0.43.17, before the heat was dealt with in 0.43.23):
+ten minutes of capture took the SoC from 39 to 74 C and the camera zone to
+73.5 C, still rising, with the preview handled at 9-11 frames a second after
+the first 30 s; the phone's watcher sends three adb commands a loop
 to the glasses at 0.3-2.8 s each; the server's `/health` took up to 1.1 s during
 uploads. A start double tap is sent once and confirmed from a time-stamped log
 filter, never repeated: a retry loop repeated it into a running capture, which

@@ -78,6 +78,8 @@ final class CameraProbe {
      * YUV here and time it), {@code manual} (the preview's last exposure, sensitivity and frame duration
      * with AE off, as glassdoc asks), {@code count=<n>} (that many stills in the one session),
      * {@code keep} (leave the last file in the cache for {@code run-as} to read).
+     * {@code previewonly} (the preview alone for the warm time, then the session is rebuilt with the full-size
+     * output beside it and, {@code settle=<ms>} later, the still is taken).
      * Empty is the single JPEG output measured on 2026-09-04.
      */
     static String variant = "";
@@ -248,7 +250,12 @@ final class CameraProbe {
 
     private void configureSession() {
         try {
-            List<android.view.Surface> outputs = new ArrayList<>(Collections.singletonList(reader.getSurface()));
+            // previewonly: the session holds the small preview alone for the warm time (the sensor need not run at
+            // full size), then is rebuilt with the full-size reader beside the preview and takes the still. It
+            // measures what watching for a page costs without the still's stream, and what the switch costs in time.
+            boolean previewOnly = option("previewonly") != null && previewReader != null;
+            List<android.view.Surface> outputs = new ArrayList<>();
+            if (!previewOnly) outputs.add(reader.getSurface());
             if (previewReader != null) outputs.add(previewReader.getSurface());
             if (option("priv") != null) {
                 String[] wh = option("priv").split("x");
@@ -273,14 +280,29 @@ final class CameraProbe {
                                 long warm = option("warm") == null ? 1500 : Long.parseLong(option("warm"));
                                 handler.postDelayed(() -> {
                                     if (session != configured || settled) return;
-                                    if (option("reconfig") == null) { requestStill(); return; }
+                                    if (option("reconfig") == null && !previewOnly) { requestStill(); return; }
                                     long asked = SystemClock.elapsedRealtime();
                                     try {
-                                        device.createCaptureSession(Collections.singletonList(reader.getSurface()),
+                                        device.createCaptureSession(previewOnly
+                                                        ? java.util.Arrays.asList(reader.getSurface(), previewReader.getSurface())
+                                                        : Collections.singletonList(reader.getSurface()),
                                                 new CameraCaptureSession.StateCallback() {
                                                     @Override public void onConfigured(CameraCaptureSession still) {
                                                         session = still;
                                                         Log.i(TAG, "camera probe reconfigured in " + (SystemClock.elapsedRealtime() - asked) + "ms");
+                                                        if (previewOnly) {
+                                                            try {
+                                                                CaptureRequest.Builder again = device.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW);
+                                                                again.addTarget(previewReader.getSurface());
+                                                                applyOptions(again);
+                                                                still.setRepeatingRequest(again.build(), previewResults, handler);
+                                                                long settle = option("settle") == null ? 800 : Long.parseLong(option("settle"));
+                                                                handler.postDelayed(() -> { if (session == still && !settled) requestStill(); }, settle);
+                                                            } catch (CameraAccessException | RuntimeException error) {
+                                                                settle(ProbeReport.Status.FAILED, "preview after reconfigure " + error.getClass().getSimpleName());
+                                                            }
+                                                            return;
+                                                        }
                                                         ImageReader preview = previewReader; previewReader = null;
                                                         requestStill();
                                                         previewReader = preview;
