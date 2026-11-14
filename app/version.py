@@ -274,7 +274,9 @@ from __future__ import annotations
 # 0.75.0: the Codex route asks which way each page's lines run and sends the page at twice its size in strips or
 #         bands along them (six reads each on the phone: 1.59% of the characters wrong against 4.10% as one image); a
 #         booklet too large for the model's context is enlarged less; a photo's files are written before the write lock.
-APP_VERSION = "0.75.0"
+# 0.76.0: the Codex route reads a booklet twice at the same time and marks a short answer the two reads disagree
+#         on, with the other answer, as one to review (ROKID_CODEX_READS, default 2).
+APP_VERSION = "0.76.0"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.
@@ -404,7 +406,8 @@ APP_VERSION = "0.75.0"
 # 1.43.0: answer-bundle reports a route change as pending; ROKID_SOLVER_FALLBACKS orders booklet routes.
 # 1.44.0: answer-bundle issue for a booklet over the upload window; ROKID_CHATGPT_UPLOAD_WINDOW_FILES.
 # 1.45.0: POST /v1/route-check; /v1/settings gains `route_check` (the last result, or null).
-API_VERSION = "1.45.0"
+# 1.46.0: an answer-bundle item is needs_review, with its reason in `issue`, when two reads disagreed on it.
+API_VERSION = "1.46.0"
 
 # Matching algorithm identity. Bump when thresholds or hashing change so a
 # re-index/eval is triggered. Mirrors thresholds in app/matching.py.

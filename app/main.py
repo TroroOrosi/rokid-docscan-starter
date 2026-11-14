@@ -3329,6 +3329,10 @@ def _answer_bundle_item(conn, group: dict, row) -> dict:
         status, issue = "failed", "解答本文がありません"
     elif display.complete:
         status, issue = "ready", ""
+        note = metadata.get("review_note")
+        if isinstance(note, str) and note.strip():
+            # Two independent reads did not agree on this answer (codex-cli): shown, and marked to be checked.
+            status, issue = "needs_review", note.strip()[:200]
     else:
         # FS-65: an answer whose elements the display cannot carry is never
         # reported ready. The converted text still reaches the operator.
@@ -4077,7 +4081,7 @@ def _save_solution(conn, row, result, solver_name: str, *, commit: bool = True) 
             result.extras.get("served_by", solver_name),
             json.dumps(result.diagrams, ensure_ascii=False),
             json.dumps({k: result.extras.get(k)
-                        for k in ("answer_status", "missing_material", "answer_no")},
+                        for k in ("answer_status", "missing_material", "answer_no", "review_note")},
                        ensure_ascii=False),
             row["id"],
         ),

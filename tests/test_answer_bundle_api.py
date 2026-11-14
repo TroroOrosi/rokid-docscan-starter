@@ -373,6 +373,21 @@ def test_unknown_notation_is_named_and_kept_out_of_ready(client):
     assert chr(92) + "begin" in item["issue"]
 
 
+def test_an_answer_two_reads_disagreed_on_is_shown_for_review_with_its_reason_and_still_carries_the_answer(client):
+    """The glasses render such an item as the review mark, the reason and the answer (AnswerReader)."""
+    from app import db
+
+    _, session_id = _session_with(client, [PAGE])
+    client.post(f"/v1/exam-sessions/{session_id}/finalize-reading")
+    bundle = client.get(f"/v1/exam-sessions/{session_id}/answer-bundle").json()
+    qid = int(bundle["items"][0]["question_id"][1:])
+    with db.connect() as conn:
+        conn.execute("INSERT INTO solutions(question_id, answer, answer_metadata_json) VALUES (?, ?, ?)",
+                     (qid, "④", json.dumps({"answer_status": "ready", "review_note": "2回の読みで不一致。他方：②"}, ensure_ascii=False)))
+    item = client.get(f"/v1/exam-sessions/{session_id}/answer-bundle").json()["items"][0]
+    assert (item["status"], item["answer"], item["issue"]) == ("needs_review", "④", "2回の読みで不一致。他方：②")
+
+
 def test_input_digest_changes_for_image_bytes_even_with_identical_phash_and_ocr(client, tmp_path):
     from app import db, main
     doc_id, session_id = _session_with(client, [PAGE])

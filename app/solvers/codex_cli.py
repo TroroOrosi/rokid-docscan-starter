@@ -19,12 +19,21 @@ photographed; at twice the size, six reads each, with 4.10% as one image and 1.5
 input read twice differs by up to 6.5 points. A photo with no page found, or a failed first request, is sent as the
 Chat route sends it. A booklet too large for the model's context is enlarged less, not refused.
 
+The booklet is read twice, by two requests at the same time over the same images, and the two answer lists are
+compared (``ROKID_CODEX_READS``, 2; 1 reads once). Measured on the phone on 2026-11-15 (M-23): of 72 answers to kanji
+questions read once from a worn photo 5 were wrong, each as confidently as a right one; over every pair of the 18
+reads both were wrong in the same way in 1.6% and disagreed in 10.6%. A short answer (a mark, a number, a word) the
+reads disagree on keeps the first read's answer and carries a note with the other one; the server shows it as an
+answer to review, which the glasses already render. Writing is not compared: two writings of one solution differ.
+An answer or a question only one read gave is shown and noted. When one read fails the other answers alone.
+
 The CLI takes images only. A booklet with audio (listening, mixed English) is refused before anything runs, with the
 error the server answers by handing the booklet to the next route.
 
 Settings: ``ROKID_CODEX_BIN`` (default: the Termux npm install, else ``codex`` on PATH), ``ROKID_CODEX_MODEL``
 (``gpt-6.1-sol``), ``ROKID_CODEX_EFFORT`` (``xhigh``), ``ROKID_CODEX_TIMEOUT_S`` (3600), ``ROKID_CODEX_LOCATE`` (``1``;
-``0`` sends photos as the Chat route does), ``ROKID_CODEX_PAGE_LONG`` (the enlarged page's long side, 2540 px). Sending is gated by
+``0`` sends photos as the Chat route does), ``ROKID_CODEX_PAGE_LONG`` (the enlarged page's long side, 2540 px),
+``ROKID_CODEX_READS`` (2). Sending is gated by
 ``ROKID_CHATGPT_SEND_ENABLED`` like every other route that spends the operator's usage.
 
 ``check()`` is the proof before use: one request at low effort with a generated picture of three to seven black squares,
@@ -34,6 +43,7 @@ event stream (``--json``, 0.169.0) carries token counts only, so how much allowa
 """
 from __future__ import annotations
 
+import concurrent.futures
 import contextlib
 import hashlib
 import json
@@ -47,6 +57,7 @@ import socketserver
 import subprocess
 import tempfile
 import threading
+import unicodedata
 from pathlib import Path
 
 from .. import config
@@ -109,6 +120,79 @@ def _target_long(sizes: list[tuple[int, int]], views: int, wanted: int) -> int:
         middle = (low + high) // 2
         low, high = (middle, high) if patches(middle) <= room else (low, middle)
     return low
+
+
+_DIFFERENT = "2回の読みで不一致。他方：{other}"
+_ONE_ANSWERED = "2回のうち1回は解答なし"
+_ONE_LISTED = "2回のうち1回だけが挙げた設問"
+
+
+def _plain(value) -> str:
+    return "".join(unicodedata.normalize("NFKC", value).split()) if isinstance(value, str) else ""
+
+
+def _mark(answer: str) -> str | None:
+    """A short answer in the form two reads are compared in; None for writing, which is not compared."""
+    text = re.sub(r"[、,・;]+", "", _plain(answer))
+    return text if len(text) <= 24 else None
+
+
+def _answered(result) -> bool:
+    return isinstance(result, SolveResult) and result.extras.get("answer_status") == "ready"
+
+
+def _identities(replies: list) -> list:
+    """Each question's identity within one read: its printed answer numbers, else its printed labels; a repeat of
+    either (numbers restart in another section) is the next of its kind."""
+    seen: dict = {}
+    identities = []
+    for item, _ in replies:
+        numbers = item.get("answer_no")
+        base = ("numbers", *map(str, numbers)) if isinstance(numbers, list) and numbers else (
+            "labels", _plain(item.get("group")), _plain(item.get("label")))
+        seen[base] = seen.get(base, 0) + 1
+        identities.append((base, seen[base]))
+    return identities
+
+
+def _compared(first: list, second: list) -> list:
+    """The first read's answers, each checked against the second read's; what only the second read has is added.
+
+    A ready answer the reads do not agree on gets ``review_note`` in its extras and stays ready with the first
+    read's answer: the server turns the note into an answer to review.
+    """
+    first_ids, second_ids = _identities(first), _identities(second)
+    theirs = dict(zip(second_ids, second))
+    merged = []
+    for identity, (item, result) in zip(first_ids, first):
+        match = theirs.get(identity)
+        note = ""
+        if _answered(result):
+            if match is None:
+                note = _ONE_LISTED
+            elif not _answered(match[1]):
+                note = _ONE_ANSWERED
+            else:
+                mine, other = _mark(result.answer), _mark(match[1].answer)
+                if mine != other:  # two writings are both None and are not compared
+                    note = _DIFFERENT.format(other=match[1].answer.strip()[:24])
+        elif match is not None and _answered(match[1]):
+            (item, result), note = match, _ONE_ANSWERED
+        if note:
+            result.extras["review_note"] = note
+        merged.append((item, result))
+    place = {identity: index for index, identity in enumerate(first_ids)}
+    extra, last = [], -1
+    for order, (identity, pair) in enumerate(zip(second_ids, second)):
+        if identity in place:
+            last = place[identity]
+            continue
+        if _answered(pair[1]):
+            pair[1].extras["review_note"] = _ONE_LISTED
+        extra.append((last, order, pair))
+    for after, _, pair in sorted(extra, key=lambda entry: entry[:2], reverse=True):
+        merged.insert(after + 1, pair)  # where the second read had it: after the question before it there
+    return merged
 
 
 def _regions(reply: str, photos: int) -> dict[int, list[tuple[float, float, float, float, bool | None]]]:
@@ -263,25 +347,45 @@ class CodexCliSolver(Solver):
         if kept is not None and kept.is_file():
             try:
                 # Already answered and paid for: a repeated finalize or a restart reads it, as the Chat route reads its chat.
-                return _booklet_replies(json.loads(kept.read_text(encoding="utf-8")), subject=question.subject, extras=extras)
-            except ValueError:
+                # Both reads are kept since 2026-11-15; before that, the one reply itself.
+                stored = json.loads(kept.read_text(encoding="utf-8"))
+                reads = stored["reads"] if isinstance(stored, dict) and "reads" in stored else [stored]
+                return self._answers(reads, question, extras)
+            except (ValueError, TypeError, IndexError):
                 pass
         if not self._signed_in():
             raise ChatGptWebAuthenticationRequired("the Codex CLI is missing or not signed in; nothing sent")
-        data = extract_json(self._run(question, model))
-        replies = _booklet_replies(data, subject=question.subject, extras=extras)
+        reads, unusable = [], None
+        for text in self._run(question, model):
+            try:
+                data = extract_json(text)
+                _booklet_replies(data, subject=question.subject, extras=extras)
+            except ValueError as error:
+                unusable = error
+                continue
+            reads.append(data)
+        if not reads:
+            raise unusable or ValueError("the Codex CLI returned no reply")
+        replies = self._answers(reads, question, extras)
         if kept is not None:
             kept.parent.mkdir(parents=True, exist_ok=True)
             temporary = kept.with_suffix(".tmp")
-            temporary.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+            temporary.write_text(json.dumps({"reads": reads}, ensure_ascii=False), encoding="utf-8")
             os.replace(temporary, kept)
         return replies
 
     @staticmethod
+    def _answers(reads: list, question: Question, extras: dict) -> list:
+        first = _booklet_replies(reads[0], subject=question.subject, extras=extras)
+        if len(reads) < 2:
+            return first
+        return _compared(first, _booklet_replies(reads[1], subject=question.subject, extras=extras))
+
+    @staticmethod
     def _exec(directory: Path, environment: dict, *, model: str, effort: str, images: list[str], prompt: str,
-              timeout: float, schema: dict | None = None) -> str:
+              timeout: float, schema: dict | None = None, reply_name: str = "reply.json") -> str:
         """Run the CLI once in ``directory`` on the image files named there; its reply text."""
-        reply = directory / "reply.json"
+        reply = directory / reply_name
         reply.unlink(missing_ok=True)
         command = [*_command(), "exec", "-m", model, "-c", f"model_reasoning_effort={effort}", "-s", "read-only",
                    "--skip-git-repo-check", "--ephemeral", *(part for name in images for part in ("-i", name))]
@@ -394,7 +498,7 @@ class CodexCliSolver(Solver):
             raise ChatGptWebError("the check's reply was not the count the picture shows")
 
     @classmethod
-    def _run(cls, question: Question, model: str) -> str:
+    def _run(cls, question: Question, model: str) -> list[str]:
         effort = os.environ.get("ROKID_CODEX_EFFORT") or "xhigh"
         timeout = float(os.environ.get("ROKID_CODEX_TIMEOUT_S") or 3600)
         with cls._workplace() as (directory, environment):
@@ -407,8 +511,26 @@ class CodexCliSolver(Solver):
                 for payload in source_images(question.document_pages):
                     (directory / payload["name"]).write_bytes(payload["buffer"])
                     names.append(payload["name"])
-            return cls._exec(directory, environment, model=model, effort=effort, images=names,
-                             prompt=_ANSWER_ONLY_SYSTEM + "\n\n" + _ALL_TASK + note, timeout=timeout)
+            request = {"model": model, "effort": effort, "images": names, "timeout": timeout,
+                       "prompt": _ANSWER_ONLY_SYSTEM + "\n\n" + _ALL_TASK + note}
+            if (os.environ.get("ROKID_CODEX_READS") or "2").strip() == "1":
+                return [cls._exec(directory, environment, **request)]
+            # Two independent reads of the same images at the same time: the second costs no more waiting.
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+                pending = [pool.submit(cls._exec, directory, environment, reply_name=f"reply-{number}.json", **request)
+                           for number in (1, 2)]
+            replies, failures = [], []
+            for read in pending:
+                try:
+                    replies.append(read.result())
+                except ChatGptWebError as error:
+                    failures.append(error)
+            if not replies:
+                raise next((error for error in failures if isinstance(error, ChatGptWebRateLimit)), failures[0])
+            for error in failures:
+                # The other read answers alone; which kind of failure it was is logged, never its text.
+                print(json.dumps({"event": "codex_read_failed", "type": type(error).__name__}), flush=True)
+            return replies
 
     def solve(self, *, question: Question, max_answer_len: int = 64) -> SolveResult:
         raise ValueError("codex-cli answers a whole booklet only")
