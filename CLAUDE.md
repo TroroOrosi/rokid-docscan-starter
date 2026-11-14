@@ -107,7 +107,9 @@ file carried until then.
 server, Work, the answer, the watcher's wake and the reader, with one photo of
 a desk, the glasses lying on it and driven from a PC over USB. It has not
 carried what it is for: a
-booklet photographed by a wearer, more than one page, or the Chat route. The
+booklet photographed by a wearer, or more than one page. The Chat route sent
+its first booklet from the phone on 2026-11-14 with page images cut on the PC
+(§M-19), not through the glasses. The
 pieces measured separately before that are the glasses app reaching a server
 over Wi-Fi (2026-09-04) and the phone-only CDP/FastAPI/answer component in
 §F-6 (2026-09-15).
@@ -143,7 +145,7 @@ is the intended topology. It has run once, with the glasses driven from a PC
 
 | Route | Status |
 |---|---|
-| `ROKID_SOLVER=chatgpt-web` | The existing Chat route drives the operator's own signed-in ChatGPT web session over CDP. A booklet is one JPEG per page and two per spread split at the fold. Each photo is first cropped to its paper and a margin when the paper box is certain (at least 15% of the frame, at most one frame side touched, unchanged when the brightness floor is lowered, at most 5% of the paper-like area outside the crop, and at most 65% of the frame kept); otherwise the whole frame is sent as before, and the stored original is never changed. On the 27 distinct real photos on this PC (2026-11-10, each crop looked at) 14 of the 16 whole spreads taken by glassdoc were cropped without losing paper, the 7 taken by the glasses' own camera app stayed whole, and the 4 frames whose box was wrong were sent whole. Before anything is attached, the file count is compared with what is left of a rolling 3-hour window (`ROKID_CHATGPT_UPLOAD_WINDOW_FILES`, default 80, the paid-plan figure read on help.openai.com on 2026-11-10). The window counts every file this server attached, including Work ZIPs and attempts that were never confirmed; uploads made elsewhere on the account are invisible to it. A booklet that does not fit is refused before any send, is not retried or moved to another route, and shows its count and the remaining room on the glasses. PC tests only. |
+| `ROKID_SOLVER=chatgpt-web` | The existing Chat route drives the operator's own signed-in ChatGPT web session over CDP. A booklet is one JPEG per page and two per spread split at the fold. Each photo is first cropped to its paper and a margin when the paper box is certain (at least 15% of the frame, at most one frame side touched, unchanged when the brightness floor is lowered, at most 5% of the paper-like area outside the crop, and at most 65% of the frame kept); otherwise the whole frame is sent as before, and the stored original is never changed. On the 27 distinct real photos on this PC (2026-11-10, each crop looked at) 14 of the 16 whole spreads taken by glassdoc were cropped without losing paper, the 7 taken by the glasses' own camera app stayed whole, and the 4 frames whose box was wrong were sent whole. Before anything is attached, the file count is compared with what is left of a rolling 3-hour window (`ROKID_CHATGPT_UPLOAD_WINDOW_FILES`, default 80, the paid-plan figure read on help.openai.com on 2026-11-10). The window counts every file this server attached, including Work ZIPs and attempts that were never confirmed; uploads made elsewhere on the account are invisible to it. A booklet that does not fit is refused before any send, is not retried or moved to another route, and shows its count and the remaining room on the glasses. Sent its first booklet from the phone on 2026-11-14 (§M-19): two page images cut on the PC from one worn photo, one message, GPT-6 at Extra High, answered in 2 min 51 s. Until that day it could not attach, confirm an attachment, find the send control or see a reply on the live page (six fixes, each from reading that page); the reply was taken by the read-only recovery, so the live wait for a reply and the stop control are still unexercised. A whole frame whose paper box is uncertain is still sent whole and shrunk by ChatGPT: the worn reference photo was neither cropped nor split. Attaching took 10-13 s for two 250 KB pages; the budget is now 20 s plus 15 s per file (`ROKID_CHATGPT_UPLOAD_PER_FILE_S`), from that one measurement on home Wi-Fi. |
 | `ROKID_SOLVER=chatgpt-work` | The requested phone-local Work consumer sends unchanged image ZIPs, verifies source receipts and returns staged answers. PNG is the default; opt-in native JPEG sources bind explicit rotation and upright RGB evidence to the canonical PNG. Work PNG technical fixtures passed on the signed-in phone. The production model verifier confirmed Sol / Extra High / Fast and its owned-menu closure. Common SEND1 and restarted API/watcher readiness were checked while retaining the browser/X11; this activation sent no diagnostic material. JPEG delivery, full restart and venue acceptance remain unverified. Measured on this PC on 2026-11-10 with the 19 distinct glassdoc photos, processed as an upload is (rotation 270): the upright PNG is 2.41 times its JPEG (median 14.17 MB against 5.93 MB), so 40 photos are 575 MB in 20 ZIPs and 7 messages as PNG, and 238 MB in 8 ZIPs and 3 messages as JPEG. The default stays PNG: every JPEG needs the model to apply rotation 270 and return the upright-pixel hash, a rejected receipt does not switch routes, and no Work run has shown those receipts pass on real photos. That single run decides the default. |
 | On-phone local model (F-51F, llama.cpp) | **Not the route.** The operator chose chatgpt-web on 2026-09-14. Its measurements are kept as evidence in `docs/hardware-measurements.md` §E; no further work is scheduled on it. |
 | `openai` / `gemini` / `claude` API keys | Supported and config-only. The per-question routes can fall back through `ROKID_SOLVER_TIERS`. They have no one-message booklet answer, so they are not booklet fallback routes. |
@@ -165,7 +167,7 @@ Settled decisions. Do not re-argue them:
 text answer in `docs/hardware-measurements.md` §F-6-6 through §F-6-10. These are
 component measurements. The glasses → phone AP → answer-bundle route ran once
 on 2026-11-13 through Work with one photo of a desk (§M-15). A wearer's paper
-capture, a booklet of several pages, the Chat route sent from the phone, the
+capture, a booklet of several pages, a correct answer from a glasses photo, the
 capture/power behavior over a whole session and the model's use of original
 listening audio remain unvalidated on hardware. Do not describe chatgpt-web as
 venue-ready.
@@ -854,9 +856,12 @@ Pro position has its own allowance and the others are GPT-6 Sol
 (`docs/requirements-audit.md`, 2026-11-12). The operator's point: a trial with
 the real model goes through Chat (`ROKID_SOLVER=chatgpt-web`), which does not
 draw on the Work allowance; its own limit is the upload window (80 files per
-three hours). The Chat booklet route has only run in PC tests and has never
-sent from the phone, so its first real run is also the first check of the
-fallback route. The phone's solver setting is changed on the phone.
+three hours). The Chat booklet route sent its first booklet from the phone on
+2026-11-14 (§M-19) after six fixes found on the live page; the switch from Work
+into it has still never run. A page whose questions need a passage on another
+page comes back `needs_input`, as the prompt requires: a trial that is to judge
+answers needs pages that can be answered from what is sent. The phone's solver
+setting is changed on the phone; since that run it is `chatgpt-web`.
 
 ## Versioning
 
