@@ -62,10 +62,18 @@ COMPOSER_SEL = os.environ.get(
     "ROKID_CHATGPT_COMPOSER_SEL",
     f"#prompt-textarea, {_IDLESS_COMPOSER_SEL}",
 )
+# Phone, 2026-11-14: a Chat conversation carried no data-message-author-role at all, so the first booklet sent
+# through Chat was answered in 2 min 51 s and never read ("no reply started"). The second selector of each pair is
+# what that page had, the same marks Work's reader uses; with them the same reply read back complete.
 ASSISTANT_SEL = os.environ.get(
-    "ROKID_CHATGPT_ASSISTANT_SEL", '[data-message-author-role="assistant"]'
+    "ROKID_CHATGPT_ASSISTANT_SEL",
+    '[data-message-author-role="assistant"], div[data-markdown-text-style="assistant-message"]',
 )
-USER_SEL = os.environ.get("ROKID_CHATGPT_USER_SEL", '[data-message-author-role="user"]')
+USER_SEL = os.environ.get(
+    "ROKID_CHATGPT_USER_SEL",
+    '[data-message-author-role="user"], div[data-user-message-bubble="true"], '
+    'div.rich-text-user-turn[data-markdown-text-tone="user-message"]:not([data-user-message-bubble="true"] *)',
+)
 # The composer's hidden file input, and the thumbnail that confirms the upload
 # finished. Sending before the upload lands would ask about a figure the model
 # never received, so the thumbnail is waited for rather than assumed.
@@ -91,7 +99,8 @@ ATTACHMENT_SEL = os.environ.get(
 # Present only while a reply streams. Its absence is the fastest honest signal
 # that the answer is finished; the caller's expected JSON covers it going missing.
 # Phone, 2026-11-14: the composer's buttons carry no data-testid; Work's reader found the stop control by its label.
-STOP_SEL = os.environ.get("ROKID_CHATGPT_STOP_SEL", '[data-testid="stop-button"], form button[aria-label^="Stop"]')
+STOP_SEL = os.environ.get(
+    "ROKID_CHATGPT_STOP_SEL", '[data-testid="stop-button"], button[aria-label="Stop"], form button[aria-label^="Stop"]')
 # Starting the next question is a CLICK, not a page load. Reloading chatgpt.com
 # once per question (and again per retry) hammers the site for no benefit and
 # was measured destabilising the browser partway through a run of subjects.

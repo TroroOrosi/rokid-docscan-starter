@@ -1273,6 +1273,16 @@ def test_every_page_script_is_valid_javascript():
     assert "broken" in _broken_scripts({"broken": "(e => 'a\n' + e)"})  # the check does catch that fault
 
 
+def test_the_turn_selectors_keep_the_marks_measured_on_the_live_chat_page():
+    """Phone, 2026-11-14: no data-message-author-role anywhere in a Chat conversation; these marks were there."""
+    from app.solvers import chatgpt_work_web
+
+    assert chatgpt_work_web.ASSISTANT_SEL in chatgpt_web.ASSISTANT_SEL
+    assert chatgpt_work_web.USER_SEL in chatgpt_web.USER_SEL
+    assert 'button[aria-label="Stop"]' in chatgpt_web.STOP_SEL
+    assert 'button[type="submit"]' in chatgpt_web.SEND_SEL
+
+
 class _NamedTilePage(_IdlessUploadPage):
     """Phone, 2026-11-14, Chat mode shown in English: each attached file is a button labelled with its own name
     beside "Remove <name>". The thumbnail selector configured on that phone was a Japanese label and matched
