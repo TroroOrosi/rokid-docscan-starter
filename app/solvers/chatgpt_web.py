@@ -1607,15 +1607,23 @@ class ChatGptWebClient:
             return None
         replies = page.locator(ASSISTANT_SEL)
         started = idle_since = now()
+        shown, looks = None, 0
         while True:
             if page.locator(STOP_SEL).count():
-                idle_since = now()
+                idle_since, shown, looks = now(), None, 0
             else:
                 users, answered = page.locator(USER_SEL).count(), replies.count()
                 newer = (batch is None or users > batch.get("users", users)
                          and answered > batch.get("replies", answered))
                 if users and users <= answered and newer:
-                    break
+                    # A reloaded chat counts its turns before their text is there: on the phone (2026-11-14) the
+                    # reply read empty for about 2 s. Take it once it has text and reads the same twice, within
+                    # the polls a finished reply is given to settle.
+                    text = replies.last.inner_text().strip()
+                    looks += 1
+                    if text and text == shown or looks > SETTLE_POLLS:
+                        break
+                    shown = text
                 if now() - idle_since > REPLY_START_S:
                     return None
             if now() - started > TIMEOUT_S:

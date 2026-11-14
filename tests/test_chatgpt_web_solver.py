@@ -2439,6 +2439,8 @@ def test_a_limit_crash_cannot_acknowledge_a_different_or_unfinished_turn(monkeyp
         page.turns += 1
     elif changed == "streaming":
         page.streaming, page.stop_poll = [False, True], 0
+        # Generation that resumes is waited for, read-only, to the reply's own limit; here that limit is now.
+        monkeypatch.setattr(chatgpt_web, "TIMEOUT_S", 0)
     else:
         with BrowserGuard() as guard:
             guard._write({"schema": 1, "state": "uncertain", "request_id": "f" * 64})
@@ -2840,6 +2842,29 @@ def test_an_uncertain_send_whose_reply_finished_is_read_back_not_resent(monkeypa
     assert json.loads(text)["questions"][0]["answer"] == "4"
     assert _guard_state(tmp_path) == "idle"
     assert not _sends(page) and page.url == "https://chatgpt.com/c/abc"
+
+
+def test_a_reloaded_chat_whose_reply_text_arrives_after_its_turn_is_still_read_back(monkeypatch, tmp_path):
+    """Phone, 2026-11-14: after the reload both turns counted while the reply was still empty for about 2 s.
+    The read-back took the empty text, called the outcome unknown and left a finished answer unread."""
+    key = _uncertain_chat(tmp_path)
+    page = _StubPage(['{"questions":[{"label":"問1","answer":"4"}]}'], streaming=[])
+    locate, empty_reads = page.locator, [2]
+
+    def late_text(selector):
+        found = locate(selector)
+        if selector == chatgpt_web.ASSISTANT_SEL:
+            read = found.inner_text
+            found.inner_text = lambda: "" if empty_reads[0] > 0 and not empty_reads.__setitem__(0, empty_reads[0] - 1) else read()
+        return found
+
+    page.locator = late_text
+
+    text = _recover(monkeypatch, page, key)
+
+    assert text is not None and json.loads(text)["questions"][0]["answer"] == "4"
+    assert _guard_state(tmp_path) == "idle"
+    assert not _sends(page)
 
 
 def test_a_reply_still_generating_is_waited_for_read_only(monkeypatch, tmp_path):
