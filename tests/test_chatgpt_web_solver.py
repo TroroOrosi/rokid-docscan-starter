@@ -1242,6 +1242,12 @@ def test_idless_composer_takes_the_image_input_for_several_files_when_a_single_p
     assert page.upload_selectors[0].endswith('input[type="file"][accept="image/*"][multiple]')
 
 
+@pytest.fixture(autouse=True)
+def _no_per_file_wait(monkeypatch):
+    """The per-file share of the attach budget is real seconds; only its own test restores it."""
+    monkeypatch.setattr(chatgpt_web, "UPLOAD_PER_FILE_S", 0.0)
+
+
 _SYNTAX_CHECK = ("const s = JSON.parse(require('fs').readFileSync(0, 'utf8'));"
                  "for (const [k, v] of Object.entries(s)) { try { new Function('return ' + v); }"
                  " catch (e) { console.log(k + ': ' + e.message); } }")
@@ -1272,15 +1278,15 @@ class _NamedTilePage(_IdlessUploadPage):
     beside "Remove <name>". The thumbnail selector configured on that phone was a Japanese label and matched
     nothing, so the route wrote the same two pages three times and then called the attach unconfirmed."""
 
-    def __init__(self, *, send_disabled=False, leftover=(), **kwargs):
+    def __init__(self, *, uploading=False, leftover=(), **kwargs):
         super().__init__(accepts=("image/*", "image/*,video/*", "image/*", None), thumbnail_appears=False, **kwargs)
-        self.send_disabled, self.leftover = send_disabled, set(leftover)
+        self.uploading, self.leftover = uploading, list(leftover)
 
     def evaluate(self, expression):
         if "attached_names" in expression:
             names = json.loads(expression[expression.rindex("})(") + 3:-1])
-            landed = self.leftover | {f["name"] for upload in self.uploads for f in upload}
-            return {"present": [name in landed for name in names], "ready": not self.send_disabled}
+            landed = [*self.leftover, *(f["name"] for upload in self.uploads for f in upload)]
+            return {"counts": [landed.count(name) for name in names], "ready": not self.uploading}
         return super().evaluate(expression)
 
 
@@ -1295,12 +1301,62 @@ def test_attached_files_are_confirmed_by_their_own_names_and_written_once():
     assert len(page.uploads) == 1
 
 
-def test_named_files_are_not_confirmed_while_the_send_control_is_still_disabled():
-    page = _NamedTilePage(send_disabled=True)
-    ticks = iter([0.0, 1.0, 2.0, 3.0])
-    assert chatgpt_web.attach_images(page, [], files=_two_pages(), timeout_s=2, sleep=lambda _s: None,
-                                     now=lambda: next(ticks, 99.0)) is False
-    assert len(page.uploads) == 1  # present but not ready is still "landed": never written twice
+def test_a_file_that_is_still_uploading_is_waited_for_to_the_deadline_and_never_written_again():
+    page = _NamedTilePage(uploading=True)
+    clock = itertools.count()
+    assert chatgpt_web.attach_images(page, [], files=_two_pages(), timeout_s=30, sleep=lambda _s: None,
+                                     now=lambda: float(next(clock))) is False
+    assert len(page.uploads) == 1
+
+
+def test_the_attach_budget_grows_with_the_number_of_files(monkeypatch):
+    monkeypatch.setattr(chatgpt_web, "UPLOAD_PER_FILE_S", 15.0)
+    page = _NamedTilePage(uploading=True)
+    clock = itertools.count()
+    chatgpt_web.attach_images(page, [], files=_two_pages(), sleep=lambda _s: None, now=lambda: float(next(clock)))
+    assert next(clock) > chatgpt_web.UPLOAD_TIMEOUT_S + 2 * chatgpt_web.UPLOAD_PER_FILE_S
+
+
+def test_a_file_attached_twice_is_refused():
+    page = _NamedTilePage(leftover=())
+    page.uploads.append(_two_pages())  # a copy the page already shows beside the one about to be written
+    page.leftover = []
+    with pytest.raises(chatgpt_web.ChatGptWebAttachmentFailed):
+        chatgpt_web.attach_images(page, [], files=_two_pages(), sleep=lambda _s: None)
+
+
+_FAKE_COMPOSER = """
+const el = (attrs, visible = true) => ({getAttribute: n => (n in attrs ? attrs[n] : null), disabled: !!attrs.disabled,
+                                         getClientRects: () => (visible ? [1] : [])});
+const form = {querySelectorAll: sel => {
+  if (sel.startsWith('button[aria-label]')) return TILES.map(t => el({'aria-label': t}));
+  if (sel.startsWith('img[alt]')) return ALTS.map(t => el({alt: t}));
+  if (sel.includes('progressbar')) return BUSY.map(t => el({'aria-label': t}));
+  if (sel.includes('submit')) return [el({'aria-label': 'Send'})];
+  return [];
+}};
+globalThis.document = {querySelectorAll: () => [{getClientRects: () => [1], closest: () => form}]};
+"""
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
+@pytest.mark.parametrize("tiles,alts,busy,expected", [
+    # Phone, 2026-11-14: 0.6 s after the write, 9.7 s after it, and once both uploads had finished.
+    (["page001.jpg", "Remove page001.jpg", "page002.jpg", "Remove page002.jpg", "Add files and more", "Send"],
+     ["page001.jpg", "page002.jpg"], ["Uploading page001.jpg", "Uploading page002.jpg"], {"counts": [1, 1], "ready": False}),
+    (["page001.jpg", "Remove page001.jpg", "page002(6).jpg", "Remove page002(6).jpg"],
+     ["page001.jpg", "page002(6).jpg"], ["Uploading page001.jpg"], {"counts": [1, 1], "ready": False}),
+    (["page001(6).jpg", "Remove page001(6).jpg", "page002(6).jpg", "Remove page002(6).jpg"],
+     ["page001(6).jpg", "page002(6).jpg"], [], {"counts": [1, 1], "ready": True}),
+    (["page001.jpg", "page001(1).jpg", "page002.jpg"], [], [], {"counts": [2, 1], "ready": True}),
+    (["Add files and more", "Select ChatGPT model"], [], [], {"counts": [0, 0], "ready": True}),
+])
+def test_the_attached_names_script_reads_the_composer_measured_on_the_phone(tiles, alts, busy, expected):
+    source = (f"const TILES = {json.dumps(tiles)}, ALTS = {json.dumps(alts)}, BUSY = {json.dumps(busy)};" + _FAKE_COMPOSER
+              + f"console.log(JSON.stringify(({chatgpt_web._ATTACHED_NAMES_JS})(['page001.jpg', 'page002.jpg'])));")
+    result = subprocess.run([shutil.which("node"), "-e", source], capture_output=True, text=True, encoding="utf-8", timeout=60)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == expected
 
 
 def test_a_composer_that_already_holds_a_file_of_the_same_name_is_refused_before_writing():

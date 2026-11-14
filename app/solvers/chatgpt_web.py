@@ -136,6 +136,9 @@ SETTLE_POLLS = int(os.environ.get("ROKID_CHATGPT_SETTLE_POLLS", "10"))
 # retries; with ATTEMPTS on top it made one unattachable question cost 3
 # minutes, which on a deck is worse than a fast retry in a fresh chat.
 UPLOAD_TIMEOUT_S = float(os.environ.get("ROKID_CHATGPT_UPLOAD_S", "20"))
+# Added per file. Phone on home Wi-Fi, 2026-11-14: two 250 KB page JPEGs showed "Uploading" for 10-13 s, so 20 s
+# for a whole message could not hold a 20-file batch. A calibration from one measurement: cellular is unmeasured.
+UPLOAD_PER_FILE_S = float(os.environ.get("ROKID_CHATGPT_UPLOAD_PER_FILE_S", "15"))
 # How many times the bytes are written before the attach is called unconfirmed.
 # Not a flake allowance: the mobile composer replaces its file input under us,
 # so the first write can land on a node that is already discarded. Costs no
@@ -414,23 +417,28 @@ _ATTACHED_NAMES_JS = r"""(names => { /* attached_names */
   const composers = [...document.querySelectorAll(%s)].filter(e => e.getClientRects().length);
   const form = composers.length === 1 ? composers[0].closest('form') : null;
   if (!form) return null;
-  const labels = [...form.querySelectorAll('[aria-label], img[alt]')]
-      .flatMap(e => [e.getAttribute('aria-label') || '', e.getAttribute('alt') || '']);
   const shown = e => e.getClientRects().length > 0;
+  // A finished upload is renamed "name(6).ext" when the account already holds that name (same phone, same day).
+  const base = label => { const m = /^(.+)\([1-9][0-9]*\)(\.[^.]+)$/.exec(label); return m ? m[1] + m[2] : label; };
+  const tiles = [...form.querySelectorAll('button[aria-label], [role="button"][aria-label]')].filter(shown)
+      .map(e => base(e.getAttribute('aria-label').trim()));
+  const pictures = [...form.querySelectorAll('img[alt]')].filter(shown).map(e => base(e.getAttribute('alt').trim()));
+  const count = (list, name) => list.filter(label => label === name).length;
+  // "Uploading <name>" is a progressbar for as long as the upload runs: two 250 KB pages took 10-13 s.
   const busy = [...form.querySelectorAll('[role=progressbar], [aria-busy=true], [data-state=uploading]')].some(shown);
   const blocked = [...form.querySelectorAll('button[type="submit"]')].filter(shown)
       .some(e => e.disabled || e.getAttribute('aria-disabled') === 'true');
-  return {present: names.map(name => labels.some(label => label.includes(name))), ready: !busy && !blocked};
+  return {counts: names.map(name => Math.max(count(tiles, name), count(pictures, name))), ready: !busy && !blocked};
 })""" % json.dumps(COMPOSER_SEL)
 
 
-def _attached_names(page, names: list[str]) -> tuple[list[bool], bool]:
-    """(which names the composer shows, whether it is ready to send); ([], False) when the page cannot say."""
+def _attached_names(page, names: list[str]) -> tuple[list[int], bool]:
+    """(how many tiles show each name, whether every upload has finished); ([], False) when the page cannot say."""
     state = page.evaluate(f"{_ATTACHED_NAMES_JS}({json.dumps(names)})")
-    present = state.get("present") if isinstance(state, dict) else None
-    if not isinstance(present, list) or len(present) != len(names) or any(type(shown) is not bool for shown in present):
+    counts = state.get("counts") if isinstance(state, dict) else None
+    if not isinstance(counts, list) or len(counts) != len(names) or any(type(count) is not int for count in counts):
         return [], False
-    return present, state.get("ready") is True
+    return counts, state.get("ready") is True
 
 
 def _upload_input(page, selector: str):
@@ -480,9 +488,9 @@ def attach_images(
     plan = upload_plan(images, audio, files)
     if not plan:
         return False
-    timeout_s = UPLOAD_TIMEOUT_S if timeout_s is None else timeout_s
-    poll_s = POLL_S if poll_s is None else poll_s
     expected = sum(len(payloads) for _, payloads in plan)
+    timeout_s = UPLOAD_TIMEOUT_S + UPLOAD_PER_FILE_S * expected if timeout_s is None else timeout_s
+    poll_s = POLL_S if poll_s is None else poll_s
     thumbnails = page.locator(ATTACHMENT_SEL)
     baseline = thumbnails.count()
     names = [payload["name"] for _, payloads in plan for payload in payloads]
@@ -493,8 +501,10 @@ def attach_images(
     def landed() -> bool:
         if thumbnails.count() >= baseline + expected:
             return True
-        present, ready = _attached_names(page, names)
-        return bool(present) and all(present) and ready
+        counts, ready = _attached_names(page, names)
+        if any(count > 1 for count in counts):
+            raise ChatGptWebAttachmentFailed("a file is attached more than once; nothing sent")
+        return bool(counts) and all(count == 1 for count in counts) and ready
 
     def some_landed() -> bool:
         return thumbnails.count() > baseline or any(_attached_names(page, names)[0])
@@ -514,9 +524,7 @@ def attach_images(
     # may outlive it: a per-attempt window computed on its own would never close
     # against a clock that stops advancing.
     deadline = now() + timeout_s
-    for attempt in range(UPLOAD_ATTEMPTS):
-        if attempt and some_landed():
-            break
+    for _attempt in range(UPLOAD_ATTEMPTS):
         for file_input, payloads in plan:
             _upload_input(page, file_input).set_input_files(payloads)
         # Check before waiting, so an upload that has already landed is never
@@ -525,10 +533,12 @@ def attach_images(
         while True:
             if landed():
                 return True
-            if now() >= window:
+            # A file that shows is uploading: it gets the rest of the budget, not a second copy
+            # (phone, 2026-11-14: the share of one attempt ran out mid-upload and the pages were written again).
+            if now() >= deadline or (now() >= window and not some_landed()):
                 break
             sleep(poll_s)
-        if now() >= deadline:
+        if now() >= deadline or some_landed():
             break
     return landed()
 
