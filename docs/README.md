@@ -107,6 +107,7 @@ what the platform permits.
 - `docs/defect-register.md` — 欠陥一覧と直す順序（2026-11-13 作成、現行の作業台帳）。製品全体を4系統で調べた結果と
   実機で再現した結果を、原因の層ごとにまとめる。ここの状態が「確認済み」になるまで未解決。
 - `docs/superpowers/specs/2026-11-12-wearer-led-capture-design.md` — 撮影方式の設計提案
+- `docs/superpowers/specs/2026-11-14-line-of-sight-capture-design.md` — 撮影の設計提案（目線に合う範囲・表示位置・装着して撮れる撮り方）。未承認・未実装。11/12 の提案を置き換える
   （2026-11-12、**未承認・未実装**）。露光を頭の動きに合わせ、視界ごとに原寸の複数候補から1枚を残す。
   実写19枚の集計、外部の製品・研究の出典、方式比較、装着者に頼む前の検証を含む。装着での確認はない。
 - `docs/fast-scan-decisions.md` — automatic/manual scan and listening decisions.

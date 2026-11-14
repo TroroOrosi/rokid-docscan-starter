@@ -103,6 +103,8 @@ def listen(options: argparse.Namespace, out: Path, glasses: str, port: str) -> i
                 adb(glasses, "reverse", f"tcp:{port}", f"tcp:{port}")
                 reader = subprocess.Popen([ADB, "-s", glasses, "logcat", "-v", "time", "-T", "1", "-s", "DocScanGlassDoc:*"],
                                           stdout=log, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL, env=ENV)
+            # Every round: a cable pulled out takes the rule it made with it, and the photos then wait on the glasses.
+            adb(glasses, "reverse", f"tcp:{port}", f"tcp:{port}")
             line = adb(glasses, "shell", SAMPLE).strip()
             samples.write((line or f"{time.strftime('%H:%M:%S')} unreachable") + "\n")
             samples.flush()
