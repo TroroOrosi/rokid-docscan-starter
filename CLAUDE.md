@@ -761,8 +761,16 @@ takes a photo) and reads the chooser's marker from the screen, because the
 chooser opens on the kind of reading used last. It checks, line by
 line, the environment, the chooser, the automatic photo and its exposure, that
 an unmoving scene is not taken again, pause and resume, the manual shot and
-what reached the phone server. A worn recording is taken with
-`scripts/e2e_route_check.py --paper <seconds>`: the test-only package and the
+what reached the phone server. The PC reaches the glasses without a cable
+through the phone: `scripts/glasses_over_phone.py start --phone <transport>`
+runs a relay on the phone and prints an adb transport of the glasses (this PC,
+the phone on the home network, the glasses on the phone's hotspot), which
+every script takes as `--glasses`; `adb reverse` works over it. Use it by
+default: a cable is not part of the use, and on 2026-11-14 a worn recording
+was asked for over USB and could not be done. A worn recording is taken with
+`scripts/e2e_route_check.py --paper <seconds>` over that transport; it waits
+for the wear sensor before it counts (a first attempt recorded two minutes of
+a desk): the test-only package and the
 stand-in server, the real app force-stopped, the capture never ended, so
 nothing can reach the model whatever the wearer touches; it reports the light,
 the head's turning and every photo, and keeps the head-motion trace. The unit tests use a fake camera and display: from

@@ -10,8 +10,12 @@ data directory; the glasses reach it over `adb reverse`. Gestures are written to
 This checks the glasses-side route and the server and watcher logic. It does NOT check the venue topology: the phone,
 its hotspot, its load and its browser are not in the loop.
 
-    py -3.12 scripts/e2e_route_check.py --glasses <usb serial> --data <server data dir> --key <test api key>
+    py -3.12 scripts/e2e_route_check.py --glasses <adb transport> --data <server data dir> --key <test api key>
         [--server http://127.0.0.1:8765] [--photos 3] [--report <dir>]
+
+--glasses is any adb transport of the glasses. Without a cable it is the one scripts/glasses_over_phone.py prints
+(this PC -> the phone on the home network -> the glasses on the phone's hotspot); `adb reverse` works over it too.
+A worn recording has to use that one: nobody reads a booklet on a cable.
 
 With --paper SECONDS the run is a recording of worn use and nothing else: the glasses' own camera takes one reference
 photo of what the wearer is looking at (its exposure and sensitivity say how much light is on the page), then the
@@ -143,6 +147,9 @@ class Check:
     def run(self) -> int:
         watcher = None
         try:
+            # Before the real app is stopped: its wear detection is what keeps the wear sensor reporting.
+            if self.o.paper and not self.wait_worn():
+                return 1
             if not self.prepare():
                 return 1
             watcher = self.start_watcher()
@@ -198,6 +205,33 @@ class Check:
         self.row("the chooser is drawn", self.lit("chooser") > 0)
         self.gesture(DOUBLE_TAP)  # once; a second one would land in a running capture
         return self.row("one double tap starts the reading", bool(self.wait_log(self.since, "Started local capture session", 8)))
+
+    def wear_reading(self) -> tuple[str, float] | None:
+        """The wear (proximity) sensor's last report: its sensor time and its value, 5 when nothing is near."""
+        dump = self.sh("dumpsys sensorservice", timeout=30)
+        block = re.search(r"Proximity Sensor Wakeup: last \d+ events\n((?:\s+\d+ \(ts=.*\n)+)", dump)
+        last = re.findall(r"\(ts=([\d.]+),[^)]*\) ([\d.]+),", block.group(1))[-1:] if block else []
+        return (last[0][0], float(last[0][1])) if last else None
+
+    def wait_worn(self) -> bool:
+        """On 2026-11-14 a recording started as soon as the cable was seen and held two minutes of a desk."""
+        if not self.o.worn_wait:
+            return True
+        print(f"----- put the glasses on: the recording starts once they are worn (waiting up to {self.o.worn_wait} s) -----", flush=True)
+        deadline, near, before, silent = time.monotonic() + self.o.worn_wait, 0, None, 0
+        while time.monotonic() < deadline:
+            reading = self.wear_reading()
+            fresh = reading is not None and before is not None and reading[0] != before
+            near = near + 1 if fresh and reading[1] < 2.5 else 0
+            silent = 0 if fresh or before is None else silent + 1
+            if silent == 3:  # nobody is listening to the sensor: the real app, whose wear detection does, was stopped
+                self.sh(f"input keyevent KEYCODE_WAKEUP; am start -n {REAL_PACKAGE}/.DocScanGlassActivity >/dev/null 2>&1")
+            before = reading[0] if reading else None
+            if near >= 3:
+                return self.row("worn: the wear sensor reports the glasses on a head", True)
+            time.sleep(1)
+        return self.row("worn: the wear sensor reports the glasses on a head", False,
+                        "it stayed 'far' or silent; nothing was recorded")
 
     def standard_photo(self) -> None:
         """The glasses' own camera on what the wearer is looking at, before the app holds the camera: the reference for light."""
@@ -389,6 +423,7 @@ def main() -> int:
     parser.add_argument("--photos", type=int, default=3)
     parser.add_argument("--interrupt", choices=["wait"], help="force-stop the app (what a fold does) at this point and reopen the chooser")
     parser.add_argument("--paper", type=int, default=0, help="seconds of worn reading to record; the capture is not ended")
+    parser.add_argument("--worn-wait", type=int, default=240, help="with --paper: seconds to wait for the wear sensor; 0 records at once (a desk dry run)")
     parser.add_argument("--report")
     return Check(parser.parse_args()).run()
 
