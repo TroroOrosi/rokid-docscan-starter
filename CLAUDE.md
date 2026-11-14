@@ -151,7 +151,17 @@ is the intended topology. It has run once, with the glasses driven from a PC
 | `openai` / `gemini` / `claude` API keys | Supported and config-only. The per-question routes can fall back through `ROKID_SOLVER_TIERS`. They have no one-message booklet answer, so they are not booklet fallback routes. |
 | Booklet route fallback (`ROKID_SOLVER_FALLBACKS`) | Requested by the operator on 2026-11-10. When Work returns a usage limit, or cannot send (model or attachment control unusable after one retry), the same booklet goes to `chatgpt-web`. The choice is stored on the deck row, so a restart does not return to the limited route. An unknown send outcome, a shared browser/login/guard failure, a readability or receipt rejection and the listening stage never switch. Observed on the phone's live tab on 2026-11-10 without typing or sending: the new-chat page has two buttons, Chat and Work, and only pressing Chat leaves Work (a click right after the navigation was dropped, so it is repeated until Work is inactive); in Work mode Chat's composer is absent; Chat's effort is a five-position Power slider whose top position is Pro (shown with "Locked" and "Usage limit reached"), so the route moves it to the position labelled Extra High and refuses any other readable position. That preparation ended at GPT-6 / Extra High and Work was restored. Not observed: a real limit notice, a Work task cut short, and a Chat answer after a Work refusal. |
 | Local OpenAI-compatible HTTP (`app/llm_http.py`) | Reaches an on-phone `llama-server` without the openai SDK. |
-| Official Codex CLI on the phone (`codex exec`, signed in with ChatGPT) | **Candidate, not wired into the server.** The operator asked on 2026-11-14 whether the present route is rational for the venue; it had never been compared with anything (`docs/whole-review-2026-11-14.md` section 9). Measured that night in the phone's Termux (§M-21): the static aarch64 binary runs once names are resolved by a loopback CONNECT proxy and `SSL_CERT_FILE` names Termux's bundle; 47 page images in one request were answered in 6 min 26 s with 8.7 MB sent, a 14-page booklet in 79 s with 14 of 14 correct, and a worn photo from the glasses' own camera (pages cut on the PC) gave the first correct answers from a glasses photo. No browser or X11 is involved. Unmeasured: cellular, how long the sign-in lasts unattended, a reboot, how the plan allowance is drawn, photos taken by the app. It takes no audio. |
+| `ROKID_SOLVER=codex-cli` (the official Codex CLI, `codex exec`, signed in with ChatGPT) | **The phone's route since 2026-11-14**, with Chat behind it. The operator asked whether the present route was rational for the venue; it had never been compared with anything (`docs/whole-review-2026-11-14.md` sections 9 and 10). One request carries every page image; no API key, browser or X11. On Android the server resolves names for the static binary through a loopback CONNECT proxy of its own and names Termux's certificate bundle. A reply is kept per booklet, so a repeat does not pay twice. A usage limit or a failed run hands the booklet to Chat; a booklet with audio is refused before anything runs. Measured on the phone (§M-21, §M-22): 47 page images in one request in 6 min 26 s with 8.7 MB sent; 14 pages through the phone's own server in 61 s with 14 of 14 correct. Unmeasured: cellular, how long the sign-in lasts unattended, a reboot, how the plan allowance is drawn, photos taken by the app. |
+
+What a page needs to be read, measured with seven worn photos of one page from the
+glasses' own camera (§M-22, one run each): characters of 15.8 px were read with
+18% of them wrong, 20.3 px with 1.5%, and wrong characters come back as other
+plausible words, not as gaps. The same 15.8 px photo enlarged twofold was read
+with none wrong; cropping alone changed nothing and sharpening made it worse.
+Two of the seven were smeared and unreadable whatever was done to them. So a
+page is sent enlarged to about 30 px a character, one photo a page is not
+enough, and a smeared photo has to be recognised and replaced before it is
+sent. None of this is implemented yet.
 
 Settled decisions. Do not re-argue them:
 
@@ -863,7 +873,7 @@ three hours). The Chat booklet route sent its first booklet from the phone on
 into it has still never run. A page whose questions need a passage on another
 page comes back `needs_input`, as the prompt requires: a trial that is to judge
 answers needs pages that can be answered from what is sent. The phone's solver
-setting is changed on the phone; since that run it is `chatgpt-web`.
+setting is changed on the phone; since 2026-11-14 it is `codex-cli`.
 
 ## Versioning
 
