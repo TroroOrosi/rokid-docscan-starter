@@ -276,6 +276,37 @@ def test_presend_failures_have_distinct_codes_and_unknown_sends_are_never_resume
         assert main._nothing_sent(error) is resumable
 
 
+def test_a_recorded_failure_logs_where_it_was_raised_and_never_its_message(tmp_path, monkeypatch, capsys):
+    """Phone, 2026-11-14: a booklet stopped as "model_mismatch" and nothing anywhere said which of nine checks had
+    refused it; the cause was found only by reading the live page. The log line names the place, not the message."""
+    client = _client(tmp_path, monkeypatch)
+    from app import main
+    from app.layout import ProblemUnit
+    from app.solvers import chatgpt_web
+    doc_id = client.post("/v1/documents", json={"title": "test"}, headers=HEADERS).json()["document_id"]
+    client.post(f"/v1/documents/{doc_id}/pages", data={"page_index": 0, "ocr_text": "問1 2+2"}, headers=HEADERS)
+    client.post(f"/v1/documents/{doc_id}/finalize", headers=HEADERS)
+    session_id = client.post("/v1/exam-sessions", json={"mode": "study", "document_id": doc_id}, headers=HEADERS).json()["session_id"]
+
+    def the_check_that_refused():
+        raise chatgpt_web.ChatGptWebModelMismatch("a provider message containing private data")
+
+    with main.db.connect() as conn:
+        main._insert_deck(conn, session_id, doc_id, [ProblemUnit("問1", "問1", start_page_index=0)])
+        row = main._deck_question_rows(conn, session_id)[0]
+        capsys.readouterr()
+        try:
+            the_check_that_refused()
+        except chatgpt_web.ChatGptWebError as error:
+            main._record_solve_failure(conn, row, error)
+    printed = capsys.readouterr().out
+    [event] = [json.loads(line) for line in printed.splitlines() if '"solve_failure"' in line]
+    assert event["code"] == "model_mismatch" and event["type"] == "ChatGptWebModelMismatch"
+    assert event["at"].startswith("test_glasses_state.py:") and event["at"].endswith(":the_check_that_refused")
+    assert event["session_id"] == session_id
+    assert "private data" not in printed
+
+
 def test_phone_setup_defers_unsent_material_without_failure_and_resumes_after_permission(
         tmp_path, monkeypatch):
     client = _client(tmp_path, monkeypatch)

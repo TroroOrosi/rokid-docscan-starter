@@ -198,6 +198,67 @@ def _page_images(pages: list[dict]):
         yield f"{number} L", left
 
 
+# What the model side takes without reducing. The Codex client resizes an image over 2048 px or over 2,500 patches of
+# 32 px (read from its source on 2026-11-14, not measured); tiles stay a little under that.
+MAX_TILE_SIDE = 2048
+MAX_TILE_PATCHES = 2400
+
+
+def _tile_fits(width: int, height: int) -> bool:
+    return max(width, height) <= MAX_TILE_SIDE and math.ceil(width / 32) * math.ceil(height / 32) <= MAX_TILE_PATCHES
+
+
+def _cuts(ink: Image.Image, parts: int) -> list[int]:
+    """Where to cut a 1-pixel-wide ink profile into ``parts``: each cut moves, within a quarter of a part, to the
+    least inked place nearest its even position, so that it falls between blocks or lines of text, not through one."""
+    length = ink.height
+    profile = ink.filter(ImageFilter.BoxBlur(max(1, length // 160))).tobytes()
+    reach = max(1, length // parts // 4)
+    cuts = []
+    for part in range(1, parts):
+        even = round(part * length / parts)
+        cuts.append(min(range(max(1, even - reach), min(length - 1, even + reach) + 1),
+                        key=lambda place: (profile[place], abs(place - even))))
+    return cuts
+
+
+def page_tiles(page: Image.Image, *, target_long: int = 2500, max_scale: float = 2.5,
+               overlap: float = 0.06) -> list[tuple[Image.Image, tuple[int, int, int, int]]]:
+    """[(tile, its box on the page)]: the page enlarged, in as few overlapping tiles as the model side takes whole.
+
+    Phone, 2026-11-14 (M-22): characters of 15.8 px were read with 18% wrong as photographed and with none wrong at
+    twice the size; sharpening made it worse, so the enlargement is a plain Lanczos resize. The page is enlarged until
+    its long side reaches ``target_long`` (never past ``max_scale``, never reduced). Tiles run left to right, then top
+    to bottom, and neighbours share ``overlap`` of a part's length.
+    """
+    scale = min(max_scale, max(1.0, target_long / max(page.size)))
+    ink = ImageOps.invert(ImageOps.autocontrast(page.convert("L")))
+    across = ink.resize((page.width, 1), Image.BOX).transpose(Image.Transpose.ROTATE_90)
+    down = ink.resize((1, page.height), Image.BOX)
+    columns = rows = 1
+    while True:
+        xs, ys = [0, *_cuts(across, columns), page.width], [0, *_cuts(down, rows), page.height]
+        pad_x = math.ceil(page.width / columns * overlap / 2) if columns > 1 else 0
+        pad_y = math.ceil(page.height / rows * overlap / 2) if rows > 1 else 0
+        boxes = [(max(0, xs[column] - pad_x), max(0, ys[row] - pad_y),
+                  min(page.width, xs[column + 1] + pad_x), min(page.height, ys[row + 1] + pad_y))
+                 for row in range(rows) for column in range(columns)]
+        # Judged on the tiles as cut: a cut moved to a blank band leaves one part longer than an even share.
+        sizes = [(round((box[2] - box[0]) * scale), round((box[3] - box[1]) * scale)) for box in boxes]
+        over = next((size for size in sizes if not _tile_fits(*size)), None)
+        if over is None:
+            break
+        if over[1] >= over[0]:
+            rows += 1
+        else:
+            columns += 1
+    tiles = []
+    for box, size in zip(boxes, sizes):
+        tile = page.crop(box)
+        tiles.append((tile.resize(size, Image.LANCZOS) if scale > 1 else tile, box))
+    return tiles
+
+
 def _ordered(pages: list[dict]) -> list[dict]:
     numbers = [p["page_number"] for p in pages]
     if any(type(n) is not int or n < 1 for n in numbers) or len(set(numbers)) != len(numbers):

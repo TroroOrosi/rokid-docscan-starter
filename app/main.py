@@ -13,6 +13,7 @@ import hashlib
 import hmac
 import io
 import json
+import traceback
 import os
 import re
 import sqlite3
@@ -3126,6 +3127,16 @@ def _record_solve_failure(conn, row, error: Exception, *, commit: bool = True,
     metadata["solve_failure"] = {"code": next(
         (code for kind, code in _FAILURE_CODES if isinstance(error, kind)),
         "not_sent" if _nothing_sent(error) else "solver_failed")}
+    # The code alone cannot say which check refused (phone, 2026-11-14: one of nine behind "model_mismatch").
+    # Where it was raised is logged; the message never is, since it can carry provider or page text.
+    raised = traceback.extract_tb(error.__traceback__)[-1] if error.__traceback__ else None
+    try:
+        session_of_row = row["session_id"]
+    except (KeyError, IndexError):  # a caller's row that was read without it must still have its failure recorded
+        session_of_row = None
+    print(json.dumps({"event": "solve_failure", "session_id": session_of_row, "code": metadata["solve_failure"]["code"],
+                      "type": type(error).__name__, "route": route,
+                      "at": f"{Path(raised.filename).name}:{raised.lineno}:{raised.name}" if raised else None}), flush=True)
     if isinstance(error, WorkBrowserUncertain):
         metadata["solve_failure"]["work_job_id"] = error.work_job_id
     if isinstance(error, ChatGptWebUploadBudget):

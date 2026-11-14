@@ -35,9 +35,21 @@ if args[:2] == ["login", "status"]:
     print(os.environ.get("FAKE_CODEX_LOGIN", "Logged in using ChatGPT"))
     sys.exit(0)
 assert args[0] == "exec", args
+from PIL import Image
+sizes = {}
 for index, value in enumerate(args):
     if value == "-i":
         assert open(args[index + 1], "rb").read(2) == b"\xff\xd8", "every attached page must be a JPEG"
+        sizes[args[index + 1]] = Image.open(args[index + 1]).size
+calls[-1]["sizes"] = sizes
+record.write_text(json.dumps(calls), encoding="utf-8")
+locating = any(name.startswith("photo") for name in sizes)
+if locating and os.environ.get("FAKE_CODEX_LOCATE_FAIL"):
+    sys.stderr.write(os.environ["FAKE_CODEX_LOCATE_FAIL"])
+    sys.exit(1)
+if locating:
+    Path(args[args.index("-o") + 1]).write_text(os.environ.get("FAKE_CODEX_REGIONS", '{"images": []}'), encoding="utf-8")
+    sys.exit(0)
 if os.environ.get("FAKE_CODEX_FAIL"):
     sys.stderr.write(os.environ["FAKE_CODEX_FAIL"])
     sys.exit(1)
@@ -63,8 +75,8 @@ def codex(tmp_path, monkeypatch):
     monkeypatch.setenv("FAKE_CODEX_RECORD", str(record))
     monkeypatch.setenv("FAKE_CODEX_REPLY", json.dumps(REPLY, ensure_ascii=False))
     monkeypatch.setenv("ROKID_CHATGPT_SEND_ENABLED", "1")
-    monkeypatch.delenv("FAKE_CODEX_FAIL", raising=False)
-    monkeypatch.delenv("FAKE_CODEX_LOGIN", raising=False)
+    for name in ("FAKE_CODEX_FAIL", "FAKE_CODEX_LOGIN", "FAKE_CODEX_REGIONS", "FAKE_CODEX_LOCATE_FAIL"):
+        monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(codex_cli, "_needs_proxy", lambda: False)
     return lambda: json.loads(record.read_text(encoding="utf-8")) if record.exists() else []
 
@@ -79,7 +91,16 @@ def _booklet(tmp_path, pages=2, **fields) -> Question:
 
 
 def _runs(calls):
-    return [call for call in calls if call["args"][:1] == ["exec"]]
+    """The requests that ask for answers (not the one that asks where the pages are)."""
+    return [call for call in calls if call["args"][:1] == ["exec"] and not _locating(call)]
+
+
+def _locating(call):
+    return call["args"][:1] == ["exec"] and any(name.startswith("photo") for name in call.get("sizes", {}))
+
+
+def _locates(calls):
+    return [call for call in calls if _locating(call)]
 
 
 def test_a_booklet_is_one_exec_request_with_every_page_and_its_reply_becomes_the_answers(codex, tmp_path):
@@ -304,3 +325,80 @@ def test_with_sending_off_the_route_reports_it_and_runs_nothing(tmp_path):
     assert result["solver"]["ready"] is False and result["solver"]["code"] == "send_not_authorized"
     assert result["exec_runs"] == 0
     assert all(status == "pending" for status, _ in result["items"]), result
+
+
+REGIONS = {"images": [{"index": 1, "pages": [{"left": 520, "top": 250, "right": 900, "bottom": 750},
+                                             {"left": 100, "top": 250, "right": 480, "bottom": 750}]}]}
+
+
+def _photo(tmp_path, size=(1500, 2000)) -> Question:
+    path = tmp_path / "photo.png"
+    Image.new("RGB", size, (190, 190, 185)).save(path)
+    return Question(question_no=None, chat_key="session:9", document_pages=[{"page_number": 1, "image_path": str(path)}],
+                    document_id="5")
+
+
+def test_the_pages_are_located_first_from_a_small_view_of_each_photo(codex, tmp_path, monkeypatch):
+    """Phone, 2026-11-15, all 27 real photos: the model returned every page's box, dark or bright desk, in 37 s at low
+    effort; brightness and text-density rules each failed on some background."""
+    monkeypatch.setenv("FAKE_CODEX_REGIONS", json.dumps(REGIONS))
+    codex_cli.CodexCliSolver().answer_all(question=_photo(tmp_path))
+
+    [locate] = _locates(codex())
+    args = locate["args"]
+    assert list(locate["sizes"]) == ["photo001.jpg"] and max(locate["sizes"]["photo001.jpg"]) == 1024
+    assert "model_reasoning_effort=low" in args and "--output-schema" in args
+    assert "thousandths" in args[-1]
+
+
+def test_each_located_page_is_sent_enlarged_right_page_first_and_inside_the_model_side_budget(codex, tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_CODEX_REGIONS", json.dumps(REGIONS))
+    codex_cli.CodexCliSolver().answer_all(question=_photo(tmp_path))
+
+    [run] = _runs(codex())
+    names = [name for name in run["sizes"] if name.startswith("page")]
+    assert names and all(name.startswith(("page001-1", "page001-2")) for name in names)
+    assert names.index(next(n for n in names if n.startswith("page001-2"))) > names.index(next(n for n in names if n.startswith("page001-1")))
+    # The first region is 570 px wide and 1000 px tall on the 1500x2000 photo, before its margin: enlarged about 2.3 times.
+    first = [run["sizes"][name] for name in names if name.startswith("page001-1")]
+    assert sum(height for _, height in first) >= 2400
+    assert all(max(size) <= 2048 for size in run["sizes"].values())
+    assert "page001-1a.jpg" in run["args"][-1] or "tile" in run["args"][-1]
+    assert "overview001.jpg" in run["sizes"], "the whole photo goes along small, so nothing outside the boxes is lost unseen"
+
+
+def test_a_photo_in_which_no_page_was_found_is_sent_as_before(codex, tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_CODEX_REGIONS", json.dumps({"images": [{"index": 1, "pages": []}]}))
+    codex_cli.CodexCliSolver().answer_all(question=_photo(tmp_path))
+
+    [run] = _runs(codex())
+    assert "page001.jpg" in run["sizes"]
+
+
+def test_when_locating_fails_the_booklet_is_still_sent_as_before(codex, tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_CODEX_LOCATE_FAIL", "error sending request for url (https://chatgpt.com/backend-api/codex/responses)")
+    replies = codex_cli.CodexCliSolver().answer_all(question=_photo(tmp_path))
+
+    [run] = _runs(codex())
+    assert list(run["sizes"]) == ["page001.jpg"] and replies
+
+
+def test_a_usage_limit_while_locating_is_a_rate_limit_and_nothing_more_runs(codex, tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_CODEX_LOCATE_FAIL", "ERROR: You've hit your usage limit.")
+    with pytest.raises(ChatGptWebRateLimit):
+        codex_cli.CodexCliSolver().answer_all(question=_photo(tmp_path))
+    assert not _runs(codex())
+
+
+@pytest.mark.parametrize("regions", [
+    {"images": [{"index": 1, "pages": [{"left": 900, "top": 100, "right": 200, "bottom": 800}]}]},   # right of left
+    {"images": [{"index": 1, "pages": [{"left": 100, "top": 100, "right": 110, "bottom": 105}]}]},   # a speck
+    {"images": [{"index": 7, "pages": [{"left": 100, "top": 100, "right": 900, "bottom": 900}]}]},   # no such photo
+    {"oops": True},
+])
+def test_boxes_that_make_no_sense_are_not_used(codex, tmp_path, monkeypatch, regions):
+    monkeypatch.setenv("FAKE_CODEX_REGIONS", json.dumps(regions))
+    codex_cli.CodexCliSolver().answer_all(question=_photo(tmp_path))
+
+    [run] = _runs(codex())
+    assert "page001.jpg" in run["sizes"]
