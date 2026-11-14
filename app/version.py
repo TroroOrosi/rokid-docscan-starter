@@ -266,7 +266,9 @@ from __future__ import annotations
 # 0.70.1: Chat leaves Work by its Chat button and selects the Extra High power position, as read on the phone.
 # 0.71.0: the Chat booklet checks its file count against the 3-hour upload window before attaching.
 # 0.72.0: Chat images are cropped to the paper when its box is certain; otherwise the frame is sent as before.
-APP_VERSION = "0.72.0"
+# 0.73.0: ROKID_SOLVER=codex-cli answers a whole booklet with one `codex exec` request (the official CLI and the
+#         operator's ChatGPT sign-in, no web page), with Chat behind it; the Chat route was repaired on the live page.
+APP_VERSION = "0.73.0"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.

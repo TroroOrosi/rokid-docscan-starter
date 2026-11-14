@@ -120,6 +120,7 @@ submodule、AARコピーは不要です。
 |---|---|
 | `ROKID_SOLVER=chatgpt-web` | スマホに残る従来のChat経路。ログイン済みウェブセッションをCDP経由で操作します。冊子は写真ごとに紙面を余白付きで切り出します（紙面の枠が確かでない写真は全枠のまま。保存した原本は変更しません）。1頁1ファイル（見開きは綴じ目で2ファイル）で、添付を始める前に総数を直近3時間の添付実績と合わせて利用枠（既定80）と比べ、超える場合は何も送らずグラスへ「添付N枚が3時間の利用枠の残りM枚を超えます。送信していません」を出します。このサーバ以外で行った添付は数えられません |
 | `ROKID_SOLVER=chatgpt-work` | スマホ内のWorkブラウザへ原画像のZIPを分割送信し、同じ会話の回答を受領する経路。PNGが既定で、撮影情報と画素を照合した原JPEGの送信も比較できます。実装・PC検証と、スマホへの導入・会場受入を分けて確認します。Workが利用制限の返答を返した場合、または送信前にWorkの操作部が使えない場合は、同じ冊子を `chatgpt-web` へ自動で渡します。ChatはWorkモードを「Chat」ボタンで抜け、先頭のモデル位置を選び、Powerスライダーを「Extra High」と表示される段へ合わせ、送信直前にその表示を読み直します（最上段はProで、Extra Highではありません）。送信結果が不明な場合は切り替えません |
+| `ROKID_SOLVER=codex-cli` | OpenAI 公式の Codex CLI（`codex exec`）で、冊子の全頁を1回の依頼で解かせる経路。利用者の ChatGPT のログインを使い、API キーもウェブ画面の操作も使いません。スマホの Termux に `@openai/codex` を入れ、`codex login --device-auth` で一度ログインします。Android では名前解決と証明書の手当てが要り、サーバーが自動で行います。画像だけを扱い、録音を含む冊子は次の経路へ渡します。利用制限のときは `chatgpt-web` が引き継ぎます。2026-11-14 にスマホ上で 47 頁を1回・6分26秒で解析（`docs/hardware-measurements.md` M-21）。携帯回線、ログインの保持、グラスのアプリが撮った写真は未確認です |
 | スマホ内ローカルモデル（F-51F、llama.cpp） | **不採用**（2026-09-14、利用者の決定）。実測は `docs/hardware-measurements.md` E 節に証拠として残しますが、新規作業はありません |
 | `openai` / `gemini` / `claude` | API キーがあれば設定だけで動きます。`ROKID_SOLVER_TIERS` のフォールバック段として残します |
 
@@ -145,7 +146,7 @@ Driveへ置く場合も全件列挙と各原画像取得が必要で、添付20�
 CXR-L の実装境界は
 [CXR-L / Global Hi Rokid integration](docs/cxr-l-integration.md)です。
 
-現在のバージョン: **Server APP 0.72.0 / API 1.44.0 / Android client 0.3.17 / Glasses View 1.48.0 / Solver API 1.10.0**。
+現在のバージョン: **Server APP 0.73.0 / API 1.44.0 / Android client 0.3.17 / Glasses View 1.48.0 / Solver API 1.10.0**。
 版数の正本は `app/version.py` です。他の資料は版数を書かず、この行だけが
 `tests/test_documentation_contract.py` で実装と照合されます。
 Solver API は、記入用解答の全文保持・資料不足の分離を行う `answer_only` モードを含みます。
@@ -581,7 +582,7 @@ uvicorn app.main:app --port 8000
 | `ROKID_TRANSCRIBER` | （なし） | リスニング録音の書き起こし `openai\|gemini`（未設定=与えた transcript を使用） |
 | `ROKID_TRANSCRIBE_MODEL` | `gpt-4o-transcribe` | openai の書き起こしモデル（gemini は `ROKID_LLM_MODEL`） |
 | `ROKID_SOLVER_TIERS` | （単一） | 二段フォールバック順（例 `openai,local`） |
-| `ROKID_SOLVER_FALLBACKS` | `chatgpt-work` のとき `chatgpt-web` | 冊子1通の経路が利用制限または送信前の失敗で使えないときに引き継ぐ経路の順（カンマ区切り）。空文字で無効。録音の段は画像を持つ会話から動かしません |
+| `ROKID_SOLVER_FALLBACKS` | `chatgpt-work`・`codex-cli` のとき `chatgpt-web` | 冊子1通の経路が利用制限または送信前の失敗で使えないときに引き継ぐ経路の順（カンマ区切り）。空文字で無効。録音の段は画像を持つ会話から動かしません |
 | `ROKID_CHATGPT_UPLOAD_WINDOW_FILES` | `80` | Chat経路の冊子が3時間に添付できるファイル数（help.openai.com の有料プランの値、2026-11-10確認。混雑時は減り、失敗した添付も数えられる場合があります）。残りを超える冊子は添付前に止めます。`0`で検査を無効化 |
 | `ROKID_CHATGPT_CDP` | `http://127.0.0.1:9222` | `chatgpt-web` / `chatgpt-work` が接続する Chromium のDevToolsポート。Termux起動ではloopbackへ固定 |
 | `ROKID_WORK_MODEL` / `ROKID_WORK_EFFORT` / `ROKID_WORK_SPEED` | `gpt-6.1-sol` / `xhigh` / `fast` | 通常の新規答案は本番Fast。試験・検証では `ROKID_WORK_SPEED=standard` を明示。保存済みjob・追加音声の設定は引き継ぎ、送信前の公開UIと照合。専用の品質検査はStandard |

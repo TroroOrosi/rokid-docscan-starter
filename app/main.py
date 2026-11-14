@@ -101,6 +101,9 @@ from .work_bridge import (
 from .subjects import detect_subject
 from .version import APP_VERSION, HUD_CONTRACT_VERSION, version_info
 
+# Routes that wait for ROKID_CHATGPT_SEND_ENABLED before they spend the operator's subscription. Work has its own gate.
+_SEND_GATED_ROUTES = ("chatgpt-web", "codex-cli")
+
 
 def _extract_media(ocr_text: str | None, image_path: str | None) -> list[dict]:
     """Run the active media extractor over any figure/table/graph/formula cues."""
@@ -127,7 +130,7 @@ async def lifespan(app: FastAPI):
         from .solvers import get_solver  # noqa: PLC0415
 
         get_analyzer()
-        if (os.environ.get("ROKID_SOLVER") or "").strip() not in ("chatgpt-web", "chatgpt-work"):
+        if (os.environ.get("ROKID_SOLVER") or "").strip() not in ("chatgpt-web", "chatgpt-work", "codex-cli"):
             get_solver()
         # The separately supervised Termux Chromium may still be starting.
         # Its loopback CDP and authentication are checked before sending.
@@ -776,7 +779,7 @@ def provider_status() -> dict:
 
     def _status(kind: str, registry) -> dict:
         provider = registry.get()
-        if provider.name == "chatgpt-web" and not chatgpt_send_enabled():
+        if provider.name in _SEND_GATED_ROUTES and not chatgpt_send_enabled():
             return {"name": provider.name, "ready": False, "code": "send_not_authorized",
                     "message": "GPT submission has not been authorized for this runtime"}
         try:
@@ -3059,7 +3062,7 @@ def _booklet_routes() -> list[str]:
     order; an empty value disables switching.
     """
     primary = (os.environ.get("ROKID_SOLVER") or "").strip()
-    default = "chatgpt-web" if primary == "chatgpt-work" else ""
+    default = "chatgpt-web" if primary in ("chatgpt-work", "codex-cli") else ""
     names = [primary, *(name.strip() for name in os.environ.get("ROKID_SOLVER_FALLBACKS", default).split(","))]
     # Work is a primary only: its sealed jobs, originals and commit guard key on ROKID_SOLVER.
     return list(dict.fromkeys(name for name in names if name and (
@@ -3629,7 +3632,7 @@ def _answer_deck(conn, session, session_id: int, doc_id: int) -> bool:
     sent, on success or failure: on 9/29 a list-only reply followed by one
     message per 小問 sent the next message before anything was answered.
     """
-    if os.environ.get("ROKID_SOLVER", "").strip() == "chatgpt-web" and not chatgpt_send_enabled():
+    if os.environ.get("ROKID_SOLVER", "").strip() in _SEND_GATED_ROUTES and not chatgpt_send_enabled():
         return True  # Keep the reviewing session and originals for later permission.
     if session["exam_type"] == "mixed":
         return _answer_mixed_deck(conn, session, session_id, doc_id)
@@ -3965,7 +3968,7 @@ def _solve_deck(conn, session, session_id: int, doc_id: int, *, bundle_items: bo
     (the glassdoc route) solves only what answer-bundle shows and names the 大問
     in the locator; the frozen /review route keeps solving every deck row.
     """
-    if os.environ.get("ROKID_SOLVER", "").strip() == "chatgpt-web" and not chatgpt_send_enabled():
+    if os.environ.get("ROKID_SOLVER", "").strip() in _SEND_GATED_ROUTES and not chatgpt_send_enabled():
         return 0
     server_solved = 0
     # Context is scoped to each problem's own 大問 (plan.md contract 1),
@@ -4084,7 +4087,7 @@ def _resume_answers(conn, session) -> bool:
     solver_env = (os.environ.get("ROKID_SOLVER") or "").strip()
     if (not session["document_id"] or _session_phase(session) == "reading"
             or solver_env in ("", "local")
-            or (solver_env == "chatgpt-web" and not chatgpt_send_enabled())
+            or (solver_env in _SEND_GATED_ROUTES and not chatgpt_send_enabled())
             or (session["mode"] == "real" and not config.ALLOW_REAL_EXAM_SOLVE)):
         return False
     recent = conn.execute(
