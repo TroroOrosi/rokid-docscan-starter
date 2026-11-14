@@ -42,6 +42,8 @@ for index, value in enumerate(args):
         assert open(args[index + 1], "rb").read(2) == b"\xff\xd8", "every attached page must be a JPEG"
         sizes[args[index + 1]] = Image.open(args[index + 1]).size
 calls[-1]["sizes"] = sizes
+if "--output-schema" in args:
+    calls[-1]["schema"] = json.loads(Path(args[args.index("--output-schema") + 1]).read_text(encoding="utf-8"))
 record.write_text(json.dumps(calls), encoding="utf-8")
 locating = any(name.startswith("photo") for name in sizes)
 if locating and os.environ.get("FAKE_CODEX_LOCATE_FAIL"):
@@ -334,8 +336,13 @@ def test_with_sending_off_the_route_reports_it_and_runs_nothing(tmp_path):
     assert all(status == "pending" for status, _ in result["items"]), result
 
 
-REGIONS = {"images": [{"index": 1, "pages": [{"left": 520, "top": 250, "right": 900, "bottom": 750},
-                                             {"left": 100, "top": 250, "right": 480, "bottom": 750}]}]}
+REGIONS = {"images": [{"index": 1, "pages": [
+    {"left": 520, "top": 250, "right": 900, "bottom": 750, "vertical_text": True},
+    {"left": 100, "top": 250, "right": 480, "bottom": 750, "vertical_text": True}]}]}
+
+
+def _patches(size):
+    return -(-size[0] // 32) * -(-size[1] // 32)
 
 
 def _photo(tmp_path, size=(1500, 2000)) -> Question:
@@ -356,22 +363,60 @@ def test_the_pages_are_located_first_from_a_small_view_of_each_photo(codex, tmp_
     assert list(locate["sizes"]) == ["photo001.jpg"] and max(locate["sizes"]["photo001.jpg"]) == 1024
     assert "model_reasoning_effort=low" in args and "--output-schema" in args
     assert "thousandths" in args[-1]
+    # Which way the lines run decides how a page is cut; a worn photo does not show it to a simple measure.
+    region = locate["schema"]["properties"]["images"]["items"]["properties"]["pages"]["items"]
+    assert "vertical_text" in region["required"] and region["properties"]["vertical_text"] == {"type": "boolean"}
+    assert "vertical" in args[-1]
 
 
-def test_each_located_page_is_sent_enlarged_right_page_first_and_inside_the_model_side_budget(codex, tmp_path, monkeypatch):
+def test_each_located_page_is_sent_enlarged_in_strips_along_its_vertical_lines_right_page_first(codex, tmp_path, monkeypatch):
+    """Phone, 2026-11-15 (M-23, E8): two strips along the lines were read with 1.59% wrong, the page as one image 4.10%."""
     monkeypatch.setenv("FAKE_CODEX_REGIONS", json.dumps(REGIONS))
     codex_cli.CodexCliSolver().answer_all(question=_photo(tmp_path))
 
     [run] = _runs(codex())
     names = [name for name in run["sizes"] if name.startswith("page")]
-    assert names and all(name.startswith(("page001-1", "page001-2")) for name in names)
-    assert names.index(next(n for n in names if n.startswith("page001-2"))) > names.index(next(n for n in names if n.startswith("page001-1")))
-    # The first region is 570 px wide and 1000 px tall on the 1500x2000 photo, before its margin: enlarged about 2.3 times.
+    assert [name[:9] for name in names] == sorted(name[:9] for name in names) and {name[:9] for name in names} == {
+        "page001-1", "page001-2"}, names
+    # The first region is 570x1000 px on the 1500x2000 photo, 604x1060 with its margin: enlarged 2.4 times to 2540 px.
     first = [run["sizes"][name] for name in names if name.startswith("page001-1")]
-    assert sum(height for _, height in first) >= 2400
-    assert all(max(size) <= 2048 for size in run["sizes"].values())
-    assert "page001-1a.jpg" in run["args"][-1] or "tile" in run["args"][-1]
+    assert len(first) == 2 and all(height == 2540 for _, height in first), "strips down the page, each its full height"
+    assert all(_patches(run["sizes"][name]) <= 2900 for name in names)
     assert "overview001.jpg" in run["sizes"], "the whole photo goes along small, so nothing outside the boxes is lost unseen"
+    assert "right edge" in run["args"][-1] and "overlap" in run["args"][-1]
+
+
+def test_a_page_of_horizontal_text_is_sent_in_bands_across_it(codex, tmp_path, monkeypatch):
+    regions = {"images": [{"index": 1, "pages": [{"left": 520, "top": 250, "right": 900, "bottom": 750, "vertical_text": False}]}]}
+    monkeypatch.setenv("FAKE_CODEX_REGIONS", json.dumps(regions))
+    codex_cli.CodexCliSolver().answer_all(question=_photo(tmp_path))
+
+    [run] = _runs(codex())
+    parts = [run["sizes"][name] for name in run["sizes"] if name.startswith("page001-1")]
+    assert len(parts) == 2 and len({width for width, _ in parts}) == 1 and all(height < 2540 for _, height in parts)
+
+
+def test_a_region_whose_direction_is_missing_is_still_cut_out_and_enlarged(codex, tmp_path, monkeypatch):
+    regions = {"images": [{"index": 1, "pages": [{"left": 520, "top": 250, "right": 900, "bottom": 750}]}]}
+    monkeypatch.setenv("FAKE_CODEX_REGIONS", json.dumps(regions))
+    codex_cli.CodexCliSolver().answer_all(question=_photo(tmp_path))
+
+    [run] = _runs(codex())
+    assert any(name.startswith("page001-1") for name in run["sizes"])
+
+
+def test_a_booklet_too_large_for_the_models_context_is_enlarged_less_and_still_sent_whole(codex, tmp_path, monkeypatch):
+    """The model takes 500,000 tokens (the CLI's own model list, phone, 2026-11-15) and an image costs 1.21 a 32-px
+    patch. At twice the size 40 pages are about 270,000 tokens; a longer booklet must not be refused for its size."""
+    monkeypatch.setenv("FAKE_CODEX_REGIONS", json.dumps(REGIONS))
+    monkeypatch.setattr(codex_cli, "_CONTEXT_TOKENS", codex_cli._FIXED_TOKENS + 6000)
+    codex_cli.CodexCliSolver().answer_all(question=_photo(tmp_path))
+
+    [run] = _runs(codex())
+    pages = [size for name, size in run["sizes"].items() if name.startswith("page001-")]
+    views = [size for name, size in run["sizes"].items() if name.startswith("overview")]
+    assert pages and (sum(map(_patches, pages)) + sum(map(_patches, views))) * 1.21 <= 6000
+    assert max(height for _, height in pages) < 2540
 
 
 def test_a_photo_in_which_no_page_was_found_is_sent_as_before(codex, tmp_path, monkeypatch):

@@ -11,18 +11,20 @@ Two things that phone needs, both handled here:
   given ``HTTPS_PROXY`` pointing at a loopback CONNECT proxy in this process, which resolves through the system.
 - It finds no certificate store; ``SSL_CERT_FILE`` is pointed at Termux's bundle when that exists.
 
-Each photo goes twice. First a small view of every photo, at low effort, asks where the exam pages are; then each
-located page is cut out, enlarged and sent in tiles the model side takes whole, beside the small view. Measured on the
-phone (M-22, M-23): the boxes were right on all 27 real photos, dark or bright desk, where brightness and text-density
-rules each failed on some background; and characters of 15.8 px, read with 18% wrong as photographed, were read with
-none wrong at twice the size. A photo with no page found, or a failed first request, is sent as the Chat route sends it.
+Each photo goes twice. First a small view of every photo, at low effort, asks where the exam pages are and which way
+their lines of text run; then each located page is cut out, enlarged and sent in parts cut along its lines, beside the
+small view. Measured on the phone (M-22, M-23): the boxes were right on all 27 real photos, dark or bright desk, where
+brightness and text-density rules each failed on some background. Characters of 15.8 px were read with 18% wrong as
+photographed; at twice the size, six reads each, with 4.10% as one image and 1.59% as two strips along the lines. One
+input read twice differs by up to 6.5 points. A photo with no page found, or a failed first request, is sent as the
+Chat route sends it. A booklet too large for the model's context is enlarged less, not refused.
 
 The CLI takes images only. A booklet with audio (listening, mixed English) is refused before anything runs, with the
 error the server answers by handing the booklet to the next route.
 
 Settings: ``ROKID_CODEX_BIN`` (default: the Termux npm install, else ``codex`` on PATH), ``ROKID_CODEX_MODEL``
 (``gpt-6.1-sol``), ``ROKID_CODEX_EFFORT`` (``xhigh``), ``ROKID_CODEX_TIMEOUT_S`` (3600), ``ROKID_CODEX_LOCATE`` (``1``;
-``0`` sends photos as the Chat route does), ``ROKID_CODEX_PAGE_LONG`` (the enlarged page's long side, 2500 px). Sending is gated by
+``0`` sends photos as the Chat route does), ``ROKID_CODEX_PAGE_LONG`` (the enlarged page's long side, 2540 px). Sending is gated by
 ``ROKID_CHATGPT_SEND_ENABLED`` like every other route that spends the operator's usage.
 
 ``check()`` is the proof before use: one request at low effort with a generated picture of three to seven black squares,
@@ -51,7 +53,7 @@ from .. import config
 from ..llm import extract_json
 from PIL import Image
 
-from ..source_bundle import _readable, page_tiles, source_images
+from ..source_bundle import MAX_SCALE, _readable, page_tiles, source_images
 from .base import Question, Solver, SolveResult
 from .chatgpt_web import (_ALL_TASK, _booklet_chat_key, _booklet_replies, ChatGptWebAuthenticationRequired,
                           ChatGptWebError, ChatGptWebRateLimit, ChatGptWebReplyIncomplete, ChatGptWebSendNotAuthorized,
@@ -65,41 +67,68 @@ _IMAGES_NOTE = "\n\nThe attached images are the booklet pages in capture order (
 _TILES_NOTE = (
     "\n\nHow the attached images are named. overviewNNN.jpg is the whole photo of capture page NNN at low resolution: use it "
     "for layout and for anything outside the pages, never to read text. pageNNN-PT.jpg is from that same photo: printed page P "
-    "in reading order within the photo (1 is read first), tile T (a, b, c ...: overlapping parts of that one page, left to "
-    "right and then top to bottom, enlarged). Read each page's tiles together as one page; text in an overlap appears twice "
-    "and is one text. pageNNN.jpg without P and T is a whole photo in which no separate page was found." + _NO_TOOLS)
+    "in reading order within the photo (1 is read first), part T (a, b, c ...) of that one page, enlarged. A page is cut "
+    "along its lines of text and its parts come in reading order: for vertical text, strips from the right edge leftwards; "
+    "otherwise bands from the top down. Neighbouring parts overlap: text in an overlap appears twice and is one text. Read "
+    "the parts of a page together as one page. pageNNN.jpg without P and T is a whole photo in which no separate page was "
+    "found." + _NO_TOOLS)
 _LOCATE_PROMPT = (
     "Each attached image is a photo, taken through smart glasses, of exam paper lying on a desk; other things are in view. "
     "For each image, in the order attached (photo001.jpg is index 1), return the regions that hold exam pages: one region per "
     "printed page. An open booklet shows two pages: return two regions, the page that is read first first. Give each region as "
     "left, top, right and bottom in thousandths of the image's width and height (0 to 1000), covering the whole sheet of that "
-    "page with its margins as far as it is in the photo; where the page runs past the photo's edge, use the edge. Return an "
+    "page with its margins as far as it is in the photo; where the page runs past the photo's edge, use the edge. For each "
+    "region also give vertical_text: true when its main text is written vertically (lines running from top to bottom and "
+    "read from the right, as in Japanese vertical writing), false when it is written in horizontal lines. Return an "
     "empty list for an image that shows no exam page. Do not run commands or use tools; look at the images and reply once.")
 _INTEGER = {"type": "integer"}
-_REGION = {"type": "object", "additionalProperties": False, "required": ["left", "top", "right", "bottom"],
-           "properties": {"left": _INTEGER, "top": _INTEGER, "right": _INTEGER, "bottom": _INTEGER}}
+_REGION = {"type": "object", "additionalProperties": False, "required": ["left", "top", "right", "bottom", "vertical_text"],
+           "properties": {"left": _INTEGER, "top": _INTEGER, "right": _INTEGER, "bottom": _INTEGER,
+                          "vertical_text": {"type": "boolean"}}}
 _LOCATE_SCHEMA = {"type": "object", "additionalProperties": False, "required": ["images"], "properties": {"images": {
     "type": "array", "items": {"type": "object", "additionalProperties": False, "required": ["index", "pages"],
                                "properties": {"index": _INTEGER, "pages": {"type": "array", "items": _REGION}}}}}}
 _REGION_MARGIN = 0.03  # of the region's own size on each side: the boxes sat on the sheet's edge, sometimes just inside
+# What one request can carry, measured on the phone on 2026-11-15 (M-23).
+_CONTEXT_TOKENS = 475_000  # 95% of the 500,000 the CLI's own model list gives gpt-6.1-sol
+_FIXED_TOKENS = 115_000    # the CLI's own 15,000 (14,650 with no image) and 100,000 kept for reasoning and the reply
+_TOKENS_PER_PATCH = 1.21   # an image's cost per 32-px patch, in proportion from 512x512 to 3000x3000
 
 
-def _regions(reply: str, photos: int) -> dict[int, list[tuple[float, float, float, float]]]:
-    """{photo number: its page boxes as fractions, in the order given}. Anything that makes no sense is left out."""
+def _target_long(sizes: list[tuple[int, int]], views: int, wanted: int) -> int:
+    """``wanted``, or the largest long side at which every page, enlarged and cut, still fits the model's context."""
+    room = (_CONTEXT_TOKENS - _FIXED_TOKENS) / _TOKENS_PER_PATCH - views * 800  # a 1024-px view is 768 patches
+
+    def patches(target: int) -> float:  # with a tenth more for the parts' overlap and their rounding up
+        return sum(width * height * min(MAX_SCALE, max(1.0, target / max(width, height))) ** 2 for width, height in sizes) / 1024 * 1.1
+
+    if patches(wanted) <= room:
+        return wanted
+    low, high = 1, wanted  # the cost never falls as the target grows
+    while high - low > 16:
+        middle = (low + high) // 2
+        low, high = (middle, high) if patches(middle) <= room else (low, middle)
+    return low
+
+
+def _regions(reply: str, photos: int) -> dict[int, list[tuple[float, float, float, float, bool | None]]]:
+    """{photo number: its pages in the order given, each (left, top, right, bottom as fractions, vertical text or
+    None when not said)}. Anything that makes no sense is left out."""
     try:
         images = extract_json(reply)["images"]
     except (ValueError, KeyError, TypeError):
         return {}
-    found: dict[int, list[tuple[float, float, float, float]]] = {}
+    found: dict[int, list[tuple[float, float, float, float, bool | None]]] = {}
     for image in images if isinstance(images, list) else []:
         try:
             index, pages = image["index"], image["pages"]
-            boxes = [(page["left"] / 1000, page["top"] / 1000, page["right"] / 1000, page["bottom"] / 1000) for page in pages]
-        except (KeyError, TypeError):
+            boxes = [(page["left"] / 1000, page["top"] / 1000, page["right"] / 1000, page["bottom"] / 1000,
+                      page.get("vertical_text") if isinstance(page.get("vertical_text"), bool) else None) for page in pages]
+        except (KeyError, TypeError, AttributeError):
             continue
         if type(index) is not int or not 1 <= index <= photos or index in found:
             continue
-        boxes = [box for box in boxes if all(isinstance(v, float) and 0 <= v <= 1 for v in box)
+        boxes = [box for box in boxes if all(isinstance(v, float) and 0 <= v <= 1 for v in box[:4])
                  and box[2] - box[0] >= 0.05 and box[3] - box[1] >= 0.05]
         if boxes and len(boxes) <= 8:
             found[index] = boxes
@@ -302,7 +331,15 @@ class CodexCliSolver(Solver):
         found = _regions(reply, len(photos))
         if not found:
             return None
-        target = int(os.environ.get("ROKID_CODEX_PAGE_LONG") or 2500)
+        crops: dict[tuple[int, int], tuple[Image.Image, bool | None]] = {}
+        for number, photo in enumerate(photos, 1):
+            for printed, (left, top, right, bottom, vertical) in enumerate(found.get(number, ()), 1):
+                pad_x, pad_y = (right - left) * _REGION_MARGIN, (bottom - top) * _REGION_MARGIN
+                box = (max(0, round((left - pad_x) * photo.width)), max(0, round((top - pad_y) * photo.height)),
+                       min(photo.width, round((right + pad_x) * photo.width)), min(photo.height, round((bottom + pad_y) * photo.height)))
+                crops[number, printed] = (photo.crop(box), vertical)
+        target = _target_long([crop.size for crop, _ in crops.values()], len(found),
+                              int(os.environ.get("ROKID_CODEX_PAGE_LONG") or 2540))
         names = []
         for number, (page, photo) in enumerate(zip(ordered, photos), 1):
             label = f"{page['page_number']:03d}"
@@ -315,11 +352,9 @@ class CodexCliSolver(Solver):
             overview = f"overview{label}.jpg"
             (directory / f"photo{number:03d}.jpg").replace(directory / overview)
             names.append(overview)
-            for printed, (left, top, right, bottom) in enumerate(found[number], 1):
-                pad_x, pad_y = (right - left) * _REGION_MARGIN, (bottom - top) * _REGION_MARGIN
-                box = (max(0, round((left - pad_x) * photo.width)), max(0, round((top - pad_y) * photo.height)),
-                       min(photo.width, round((right + pad_x) * photo.width)), min(photo.height, round((bottom + pad_y) * photo.height)))
-                for tile_number, (tile, _) in enumerate(page_tiles(photo.crop(box), target_long=target)):
+            for printed in range(1, len(found[number]) + 1):
+                crop, vertical = crops[number, printed]
+                for tile_number, (tile, _) in enumerate(page_tiles(crop, vertical_text=vertical, target_long=target)):
                     name = f"page{label}-{printed}{chr(97 + tile_number)}.jpg"
                     tile.save(directory / name, format="JPEG", quality=92, subsampling=0)
                     names.append(name)

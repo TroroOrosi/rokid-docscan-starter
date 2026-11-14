@@ -198,21 +198,25 @@ def _page_images(pages: list[dict]):
         yield f"{number} L", left
 
 
-# What the model side takes without reducing. The Codex client resizes an image over 2048 px or over 2,500 patches of
-# 32 px (read from its source on 2026-11-14, not measured); tiles stay a little under that.
-MAX_TILE_SIDE = 2048
-MAX_TILE_PATCHES = 2400
+# The largest image a page is cut into. Measured on the phone on 2026-11-15 (M-23, E8) with one worn photo of
+# vertical text at twice its size, six reads each: the page as one image of 4,560 patches of 32 px was read with 4.10%
+# of the characters wrong; as two strips along its lines (1,920 and 2,880 patches) with 1.59%; as four with 2.60%.
+# Between 2,900 and 4,560 is not measured. The token cost does not show this: it grows in proportion up to 3000x3000.
+MAX_IMAGE_PATCHES = 2900  # the larger measured strip was 2,880
 
 
-def _tile_fits(width: int, height: int) -> bool:
-    return max(width, height) <= MAX_TILE_SIDE and math.ceil(width / 32) * math.ceil(height / 32) <= MAX_TILE_PATCHES
+MAX_SCALE = 2.5  # twice the size took 18% wrong to about 2%; two and a half and three times did no better
 
 
-def _cuts(ink: Image.Image, parts: int) -> list[int]:
-    """Where to cut a 1-pixel-wide ink profile into ``parts``: each cut moves, within a quarter of a part, to the
-    least inked place nearest its even position, so that it falls between blocks or lines of text, not through one."""
-    length = ink.height
-    profile = ink.filter(ImageFilter.BoxBlur(max(1, length // 160))).tobytes()
+def _fits(width: float, height: float) -> bool:
+    return math.ceil(width / 32) * math.ceil(height / 32) <= MAX_IMAGE_PATCHES
+
+
+def _cuts(profile: bytes, parts: int) -> list[int]:
+    """Where to cut a line of ink levels into ``parts``: each cut moves, within a quarter of a part, to the least
+    inked place nearest its even position. On a worn photo the shading of the paper is stronger than the text, so
+    this finds a wide blank band and little else; the overlap of neighbours covers the rest."""
+    length = len(profile)
     reach = max(1, length // parts // 4)
     cuts = []
     for part in range(1, parts):
@@ -222,39 +226,43 @@ def _cuts(ink: Image.Image, parts: int) -> list[int]:
     return cuts
 
 
-def page_tiles(page: Image.Image, *, target_long: int = 2500, max_scale: float = 2.5,
-               overlap: float = 0.06) -> list[tuple[Image.Image, tuple[int, int, int, int]]]:
-    """[(tile, its box on the page)]: the page enlarged, in as few overlapping tiles as the model side takes whole.
+def page_tiles(page: Image.Image, *, vertical_text: bool | None = None, target_long: int = 2540,
+               max_scale: float = MAX_SCALE, overlap: float = 0.08) -> list[tuple[Image.Image, tuple[int, int, int, int]]]:
+    """[(image, its box on the page)]: the page enlarged and cut along its lines of text, in reading order.
 
-    Phone, 2026-11-14 (M-22): characters of 15.8 px were read with 18% wrong as photographed and with none wrong at
-    twice the size; sharpening made it worse, so the enlargement is a plain Lanczos resize. The page is enlarged until
-    its long side reaches ``target_long`` (never past ``max_scale``, never reduced). Tiles run left to right, then top
-    to bottom, and neighbours share ``overlap`` of a part's length.
+    Phone, 2026-11-14 and 15 (M-22, M-23): characters of 15.8 px were read with 18% wrong as photographed and with
+    about 4% at twice the size as one image; cut across the lines no better; cut along them into two strips, 1.59%.
+    Sharpening made it worse, so the enlargement is a plain Lanczos resize, and more than twice the size did not help.
+
+    ``vertical_text`` says which way the lines run (it is asked of the model that locates the page: the image itself
+    does not show it on a worn photo). Vertical text is cut into strips down the page, the right edge first, as it is
+    read; horizontal text into bands across it, from the top. Unknown, the longer side is cut. The page is enlarged
+    until its long side reaches ``target_long`` (never past ``max_scale``, never reduced), and cut into the fewest
+    parts that each fit ``MAX_IMAGE_PATCHES``. Neighbours share ``overlap`` of a part, as the measured strips did.
     """
     scale = min(max_scale, max(1.0, target_long / max(page.size)))
+    strips = vertical_text if vertical_text is not None else page.width > page.height
+    length, other = (page.width, page.height) if strips else (page.height, page.width)
     ink = ImageOps.invert(ImageOps.autocontrast(page.convert("L")))
-    across = ink.resize((page.width, 1), Image.BOX).transpose(Image.Transpose.ROTATE_90)
-    down = ink.resize((1, page.height), Image.BOX)
-    columns = rows = 1
+    line = ink.resize((length, 1), Image.BOX) if strips else ink.resize((1, length), Image.BOX).transpose(Image.Transpose.ROTATE_90)
+    profile = line.filter(ImageFilter.BoxBlur(max(1, length // 160))).tobytes()
+    parts = 1
     while True:
-        xs, ys = [0, *_cuts(across, columns), page.width], [0, *_cuts(down, rows), page.height]
-        pad_x = math.ceil(page.width / columns * overlap / 2) if columns > 1 else 0
-        pad_y = math.ceil(page.height / rows * overlap / 2) if rows > 1 else 0
-        boxes = [(max(0, xs[column] - pad_x), max(0, ys[row] - pad_y),
-                  min(page.width, xs[column + 1] + pad_x), min(page.height, ys[row + 1] + pad_y))
-                 for row in range(rows) for column in range(columns)]
-        # Judged on the tiles as cut: a cut moved to a blank band leaves one part longer than an even share.
-        sizes = [(round((box[2] - box[0]) * scale), round((box[3] - box[1]) * scale)) for box in boxes]
-        over = next((size for size in sizes if not _tile_fits(*size)), None)
-        if over is None:
+        edges = [0, *_cuts(profile, parts), length]
+        pad = math.ceil(length / parts * overlap / 2) if parts > 1 else 0
+        spans = [(max(0, edges[index] - pad), min(length, edges[index + 1] + pad)) for index in range(parts)]
+        # Judged on the parts as cut: a cut moved to a blank band leaves one part longer than an even share.
+        if all(_fits((end - start) * scale, other * scale) if strips else _fits(other * scale, (end - start) * scale)
+               for start, end in spans) or parts >= length // 8:
             break
-        if over[1] >= over[0]:
-            rows += 1
-        else:
-            columns += 1
+        parts += 1
+    if strips and vertical_text:
+        spans.reverse()  # vertical Japanese text is read from the right
     tiles = []
-    for box, size in zip(boxes, sizes):
+    for start, end in spans:
+        box = (start, 0, end, page.height) if strips else (0, start, page.width, end)
         tile = page.crop(box)
+        size = (round(tile.width * scale), round(tile.height * scale))
         tiles.append((tile.resize(size, Image.LANCZOS) if scale > 1 else tile, box))
     return tiles
 

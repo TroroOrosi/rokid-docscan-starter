@@ -588,6 +588,27 @@ def _prepare_page_image(raw: bytes, rotation: int, *, encode: bool = True
     return source_format, source_size, phash_hex(upright), encoded.getvalue()
 
 
+def _write_page_files(png_path: Path, png: bytes, original: bytes | None) -> None:
+    """Create the stored PNG, and the unchanged JPEG beside it for a native capture, synced to disk.
+
+    The PNG of a real photo is 29.7 MB (phone, 2026-11-15); the upload handler runs this in a worker thread before
+    it takes the database's write lock. The names are new each time, so a rejected upload only has to remove them.
+    """
+    for path, content in ((png_path, png), (png_path.with_suffix(".jpg"), original)):
+        if content is None:
+            continue
+        with path.open("xb") as saved:
+            saved.write(content)
+            saved.flush()
+            os.fsync(saved.fileno())
+    if os.name != "nt":
+        directory_fd = os.open(png_path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+
+
 def _match_text(ocr_text: str | None, vision_text: str | None) -> str:
     """Combine body text and figure reading into one /match similarity string.
 
@@ -965,8 +986,20 @@ async def add_page(
                 "LIMIT 1", (str(native_source["capture_id"]),)).fetchone() is not None
             source_format, source_size, upright_phash, png = await run_in_threadpool(
                 functools.partial(_prepare_page_image, raw, image_rotation, encode=not stored_before))
+            if native_source is not None and (
+                    source_format != "JPEG" or native_source["jpeg_sha256"] != hashlib.sha256(raw).hexdigest()
+                    or (native_source["width"], native_source["height"]) != source_size
+                    or native_source["page_index"] != page_index
+                    or native_source["rotation_degrees"] != image_rotation):
+                raise HTTPException(status_code=400, detail="capture_provenance does not match the uploaded JPEG")
+            if png is not None:
+                fpath: Path | None = IMAGE_DIR / f"{document_id}_{page_index}_{uuid.uuid4().hex[:8]}.png"
+                # Named before they exist: whatever stops this request, the cleanup below removes them.
+                pending_image_path = fpath
+                pending_original_path = fpath.with_suffix(".jpg") if native_source is not None else None
+                await run_in_threadpool(_write_page_files, fpath, png, raw if native_source is not None else None)
         # Bind the native ID and replacement cleanup to the same current row.
-        # Upload reads and image work finish before the write lock, with no awaits until commit.
+        # Upload reads, image work and file writes finish before the write lock, with no awaits until commit.
         conn.execute("BEGIN IMMEDIATE")
         doc = _doc_or_404(conn, document_id)
         existing = conn.execute(
@@ -974,15 +1007,9 @@ async def add_page(
             (document_id, page_index),
         ).fetchone()
 
-        if has_image:
-            if native_source is not None:
-                if (source_format != "JPEG" or native_source["jpeg_sha256"] != hashlib.sha256(raw).hexdigest()
-                        or (native_source["width"], native_source["height"]) != source_size
-                        or native_source["page_index"] != page_index
-                        or native_source["rotation_degrees"] != image_rotation):
-                    raise HTTPException(status_code=400, detail="capture_provenance does not match the uploaded JPEG")
-                native_metadata = _native_capture_retry(conn, document_id, page_index, native_source, existing)
-                native_replay = native_metadata is not None
+        if has_image and native_source is not None:
+            native_metadata = _native_capture_retry(conn, document_id, page_index, native_source, existing)
+            native_replay = native_metadata is not None
         if observed_existing is None and existing is not None and not native_replay:
             raise HTTPException(status_code=409, detail=f"page_index {page_index} already exists")
         if has_image:
@@ -991,32 +1018,20 @@ async def add_page(
                 vision_text = existing["vision_text"]
             else:
                 if png is None:
-                    # The stored capture went away between the look and the lock: encode here, as before 2026-11-15.
+                    # The stored capture went away between the look and the lock: encode and write here, as before
+                    # 2026-11-15.
                     _, _, upright_phash, png = _prepare_page_image(raw, image_rotation)
+                    fpath = IMAGE_DIR / f"{document_id}_{page_index}_{uuid.uuid4().hex[:8]}.png"
+                    pending_image_path = fpath
+                    pending_original_path = fpath.with_suffix(".jpg") if native_source is not None else None
+                    _write_page_files(fpath, png, raw if native_source is not None else None)
                 ph = upright_phash
                 omd5 = _fallback_md5(ocr_md5(ocr_text), raw)
-                fname = f"{document_id}_{page_index}_{uuid.uuid4().hex[:8]}.png"
-                fpath: Path | None = IMAGE_DIR / fname
-                with fpath.open("xb") as saved:
-                    pending_image_path = fpath
-                    saved.write(png)
-                    saved.flush()
-                    os.fsync(saved.fileno())
                 image_path = str(fpath)
                 if native_source is not None:
-                    with fpath.with_suffix(".jpg").open("xb") as saved:
-                        pending_original_path = fpath.with_suffix(".jpg")
-                        saved.write(raw)
-                        saved.flush()
-                        os.fsync(saved.fileno())
+                    # The file holds exactly these bytes; reading 29.7 MB back to hash it held the loop.
                     native_metadata = {"capture_provenance": native_source,
-                                       "canonical_image_sha256": file_sha256(fpath)}
-                if os.name != "nt":
-                    directory_fd = os.open(IMAGE_DIR, os.O_RDONLY)
-                    try:
-                        os.fsync(directory_fd)
-                    finally:
-                        os.close(directory_fd)
+                                       "canonical_image_sha256": hashlib.sha256(png).hexdigest()}
         else:
             # Text-only compatibility input has no image/pHash. OCR-MD5 hashes
             # the full body + figure description for exact matching.

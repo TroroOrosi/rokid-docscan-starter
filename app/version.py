@@ -271,7 +271,10 @@ from __future__ import annotations
 # 0.74.0: a check before use tries every booklet route (the Codex CLI with one small real request) and keeps the
 #         result, daily too; a photo is made into its PNG off the event loop and outside the write lock; the watcher's
 #         poll no longer hashes every page file.
-APP_VERSION = "0.74.0"
+# 0.75.0: the Codex route asks which way each page's lines run and sends the page at twice its size in strips or
+#         bands along them (six reads each on the phone: 1.59% of the characters wrong against 4.10% as one image); a
+#         booklet too large for the model's context is enlarged less; a photo's files are written before the write lock.
+APP_VERSION = "0.75.0"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.

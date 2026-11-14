@@ -46,6 +46,28 @@ def test_the_png_is_encoded_off_the_event_loop_and_outside_the_write_transaction
         return save(self, target, format=format, **options)
 
     monkeypatch.setattr(Image.Image, "save", watched)
+    synced, fsync = [], main.os.fsync
+
+    def watched_fsync(descriptor):
+        # The phone writes a 29.7 MB PNG for a real photo: the write and its fsync must not hold the loop or the lock.
+        try:
+            asyncio.get_running_loop()
+            on_loop = True
+        except RuntimeError:
+            on_loop = False
+        other = sqlite3.connect(config.DB_PATH, timeout=0)
+        try:
+            other.execute("BEGIN IMMEDIATE")
+            other.rollback()
+            write_free = True
+        except sqlite3.OperationalError:
+            write_free = False
+        finally:
+            other.close()
+        synced.append((on_loop, write_free))
+        return fsync(descriptor)
+
+    monkeypatch.setattr(main.os, "fsync", watched_fsync)
     photo = io.BytesIO()
     save(Image.new("RGB", (640, 480), (200, 190, 180)), photo, format="JPEG")
 
@@ -54,6 +76,7 @@ def test_the_png_is_encoded_off_the_event_loop_and_outside_the_write_transaction
 
     assert response.status_code == 201, response.text
     assert seen == [(False, True)], "encoded once, in a worker thread, while another writer could still take the database"
+    assert synced and set(synced) == {(False, True)}, "written and synced off the loop, outside the write transaction"
     with db.connect() as conn:
         stored = conn.execute("SELECT image_path FROM pages WHERE document_id = ?", (document,)).fetchone()["image_path"]
     with Image.open(stored) as upright:
