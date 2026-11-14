@@ -128,6 +128,14 @@ class Solver(abc.ABC):
         """
         return True
 
+    #: True when ``check()`` makes a real request to the provider; False when it only looks at ``ready()``.
+    check_sends: bool = False
+
+    def check(self) -> None:
+        """Prove this route can answer now, or raise what answering would raise. Run before use, not per booklet."""
+        if not self.ready():
+            raise RuntimeError(f"{self.name} is not ready")
+
     def info(self) -> dict:
         return {
             "name": self.name,

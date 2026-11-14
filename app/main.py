@@ -9,6 +9,7 @@ registries; see docs/exam-solver-architecture.md and docs/cxr-l-integration.md.
 from __future__ import annotations
 
 import dataclasses
+import functools
 import hashlib
 import hmac
 import io
@@ -137,9 +138,12 @@ async def lifespan(app: FastAPI):
         # Its loopback CDP and authentication are checked before sending.
     _resume_all_answers()
     wake_worker()
+    stopping = threading.Event()
+    threading.Thread(target=_route_check_daily, args=(stopping,), name="route-check", daemon=True).start()
     try:
         yield
     finally:
+        stopping.set()
         stop_worker()
 
 
@@ -470,7 +474,8 @@ def glasses_status(device_id: str | None = None) -> dict:
     if state["phase"] in ("analyzing", "waiting", "reading") and state["session_id"] is not None:
         try:
             # Also resumes a pre-send failure on the phone, without glasses polling.
-            bundle = exam_answer_bundle(state["session_id"])
+            # Asked twice a second by the watcher: the answers' state only, without hashing every page file.
+            bundle = _answer_snapshot(state["session_id"], identify=False)
             items = bundle["items"]
             available = bundle.get("available_stage", "complete" if items and all(
                 item["status"] != "pending" for item in items) else "none")
@@ -562,6 +567,25 @@ def _rotate_image_for_ocr(img: Image.Image, rotation: int) -> Image.Image:
         270: Image.Transpose.ROTATE_90,
     }[rotation]
     return img if transpose is None else img.transpose(transpose)
+
+
+def _prepare_page_image(raw: bytes, rotation: int, *, encode: bool = True
+                        ) -> tuple[str | None, tuple[int, int], str | None, bytes | None]:
+    """Decode one uploaded photo, turn it upright, hash it and encode the PNG that is stored.
+
+    Returns the upload's own format and size, the upright image's pHash and the PNG's bytes. On the phone the
+    encoding of a real 4032x3024 photo takes 2.2 s (2026-11-15), so the upload handler runs this in a worker thread
+    before it takes the database's write lock. ``encode=False`` only decodes: a retry of a capture already stored
+    creates no image.
+    """
+    img = _load_image(raw)
+    source_format, source_size = img.format, img.size
+    if not encode:
+        return source_format, source_size, None, None
+    upright = _rotate_image_for_ocr(img, rotation)
+    encoded = io.BytesIO()
+    upright.convert("RGB").save(encoded, format="PNG")
+    return source_format, source_size, phash_hex(upright), encoded.getvalue()
 
 
 def _match_text(ocr_text: str | None, vision_text: str | None) -> str:
@@ -819,6 +843,7 @@ def get_settings() -> dict:
         },
         "input": build_input_contract(),
         "providers": provider_status(),
+        "route_check": last_route_check(),
         "versions": version_info(),
     }
 
@@ -934,9 +959,14 @@ async def add_page(
         ).fetchone()
         if has_image:
             raw = await _read_upload_limited(image, _MAX_IMAGE_UPLOAD_BYTES)
-            img = _load_image(raw)
+            # A native capture whose ID is already stored is a retry: it is checked under the lock and creates nothing.
+            stored_before = native_source is not None and conn.execute(
+                "SELECT 1 FROM pages WHERE capture_metadata_json IS NOT NULL AND instr(capture_metadata_json, ?) > 0 "
+                "LIMIT 1", (str(native_source["capture_id"]),)).fetchone() is not None
+            source_format, source_size, upright_phash, png = await run_in_threadpool(
+                functools.partial(_prepare_page_image, raw, image_rotation, encode=not stored_before))
         # Bind the native ID and replacement cleanup to the same current row.
-        # Upload reads finish before the write lock, with no awaits until commit.
+        # Upload reads and image work finish before the write lock, with no awaits until commit.
         conn.execute("BEGIN IMMEDIATE")
         doc = _doc_or_404(conn, document_id)
         existing = conn.execute(
@@ -946,8 +976,8 @@ async def add_page(
 
         if has_image:
             if native_source is not None:
-                if (img.format != "JPEG" or native_source["jpeg_sha256"] != hashlib.sha256(raw).hexdigest()
-                        or (native_source["width"], native_source["height"]) != img.size
+                if (source_format != "JPEG" or native_source["jpeg_sha256"] != hashlib.sha256(raw).hexdigest()
+                        or (native_source["width"], native_source["height"]) != source_size
                         or native_source["page_index"] != page_index
                         or native_source["rotation_degrees"] != image_rotation):
                     raise HTTPException(status_code=400, detail="capture_provenance does not match the uploaded JPEG")
@@ -960,14 +990,16 @@ async def add_page(
                 ph, omd5, image_path = existing["phash"], existing["ocr_md5"], existing["image_path"]
                 vision_text = existing["vision_text"]
             else:
-                img = _rotate_image_for_ocr(img, image_rotation)
-                ph = phash_hex(img)
+                if png is None:
+                    # The stored capture went away between the look and the lock: encode here, as before 2026-11-15.
+                    _, _, upright_phash, png = _prepare_page_image(raw, image_rotation)
+                ph = upright_phash
                 omd5 = _fallback_md5(ocr_md5(ocr_text), raw)
                 fname = f"{document_id}_{page_index}_{uuid.uuid4().hex[:8]}.png"
                 fpath: Path | None = IMAGE_DIR / fname
                 with fpath.open("xb") as saved:
                     pending_image_path = fpath
-                    img.convert("RGB").save(saved, format="PNG")
+                    saved.write(png)
                     saved.flush()
                     os.fsync(saved.fileno())
                 image_path = str(fpath)
@@ -3070,6 +3102,75 @@ def _booklet_routes() -> list[str]:
         name == primary or (name != "chatgpt-work" and has_booklet_route(name)))))
 
 
+_route_check_lock = threading.Lock()
+
+
+def last_route_check() -> dict | None:
+    """The kept result of the last check before use; None when none was made or it cannot be read."""
+    try:
+        return json.loads((Path(config.DATA_DIR) / "route-check.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def run_route_check() -> dict:
+    """Try every booklet route as it stands, in the order a booklet would use them, and keep the result.
+
+    Until 2026-11-15 nothing said a route had stopped (sign-in expired, usage limit, a changed provider) before a
+    booklet had been photographed and sent. What trying means is the route's own ``check()``: the Codex CLI makes one
+    small real request, the others only look at readiness (``real`` says which). ``ok`` is true when any route passed,
+    since a booklet moves to the next route. Only fixed codes are kept, never the provider's words; where a failure
+    was raised goes to the log.
+    """
+    from .solvers.registry import _registry as solver_registry
+
+    with _route_check_lock:
+        routes = []
+        for name in _booklet_routes():
+            started, code, solver = time.monotonic(), "ok", None
+            try:
+                if name not in solver_registry:
+                    raise LookupError("no such route")
+                solver = solver_registry.get(name)
+                solver.check()
+            except Exception as error:  # noqa: BLE001 - a check reports; it never raises
+                code = next((code for kind, code in _FAILURE_CODES if isinstance(error, kind)), "provider_unavailable")
+                raised = traceback.extract_tb(error.__traceback__)[-1] if error.__traceback__ else None
+                print(json.dumps({"event": "route_check_failure", "route": name, "code": code, "type": type(error).__name__,
+                                  "at": f"{Path(raised.filename).name}:{raised.lineno}:{raised.name}" if raised else None}),
+                      flush=True)
+            routes.append({"name": name, "ok": code == "ok", "code": code,
+                           "real": bool(getattr(solver, "check_sends", False)),
+                           "seconds": round(time.monotonic() - started, 1)})
+        result = {"checked_at": int(time.time()), "ok": any(route["ok"] for route in routes), "routes": routes}
+        path = Path(config.DATA_DIR) / "route-check.json"
+        temporary = path.with_suffix(".tmp")
+        temporary.write_text(json.dumps(result), encoding="utf-8")
+        os.replace(temporary, path)
+        return result
+
+
+def route_check_due(*, now: float, interval: float) -> bool:
+    last = last_route_check()
+    return interval > 0 and (last is None or now - last.get("checked_at", 0) >= interval)
+
+
+def _route_check_daily(stopping: threading.Event) -> None:
+    """Once a day, so a route that stopped is known before the day of use (ROKID_ROUTE_CHECK_INTERVAL_S; 0 is off).
+
+    How long the CLI's sign-in lasts unattended is not known; this is also what measures it.
+    """
+    interval = float(os.environ.get("ROKID_ROUTE_CHECK_INTERVAL_S") or 86400)
+    while interval > 0 and not stopping.wait(300):
+        if _booklet_routes() and route_check_due(now=time.time(), interval=interval):
+            run_route_check()
+
+
+@app.post("/v1/route-check")
+def route_check() -> dict:
+    return run_route_check()
+
+
 def _closed_routes(rows) -> set[str]:
     closed: set[str] = set()
     for row in rows:
@@ -4606,6 +4707,15 @@ def exam_answer_bundle(session_id: int) -> dict:
     android-relay/relaycore/.../study/AnswerBundle.java. It has no way to say
     "locked" or "still reading", so those are 409s rather than a partial body.
     """
+    return _answer_snapshot(session_id, identify=True)
+
+
+def _answer_snapshot(session_id: int, *, identify: bool) -> dict:
+    """The answer bundle. ``identify=False`` leaves ``input_digest`` empty and reads no page file.
+
+    The digest hashes every page's content on purpose (no stat-only cache; see ``file_sha256``). The watcher's poll
+    never used it and paid for it twice a second: 40 PNG pages are 575 MB a poll (review C-10).
+    """
     conn = db.connect()
     try:
         # Multiple SELECTs form one wire snapshot. A concurrent answer commit
@@ -4633,7 +4743,7 @@ def exam_answer_bundle(session_id: int) -> dict:
         bundle = {
             "schema_version": max((diagram_schema_version(i.get("diagrams", [])) for i in items), default=1),
             "session_id": str(session_id),
-            "input_digest": _answer_input_digest(conn, session),
+            "input_digest": _answer_input_digest(conn, session) if identify else "",
             "revision": _answer_revision(conn, session_id),
             "analysis_stage": session["analysis_stage"],
             "available_stage": _available_stage(session, items),

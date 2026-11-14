@@ -53,6 +53,12 @@ if locating:
 if os.environ.get("FAKE_CODEX_FAIL"):
     sys.stderr.write(os.environ["FAKE_CODEX_FAIL"])
     sys.exit(1)
+if "canary.jpg" in sizes:
+    picture = Image.open("canary.jpg").convert("L")
+    dark = [picture.getpixel((x, picture.height // 2)) < 128 for x in range(picture.width)]
+    count = sum(1 for x in range(len(dark)) if dark[x] and not (x and dark[x - 1]))
+    Path(args[args.index("-o") + 1]).write_text(os.environ.get("FAKE_CODEX_CANARY_REPLY", str(count)), encoding="utf-8")
+    sys.exit(0)
 Path(args[args.index("-o") + 1]).write_text(os.environ["FAKE_CODEX_REPLY"], encoding="utf-8")
 print("tokens used\n12,345")
 '''
@@ -75,7 +81,8 @@ def codex(tmp_path, monkeypatch):
     monkeypatch.setenv("FAKE_CODEX_RECORD", str(record))
     monkeypatch.setenv("FAKE_CODEX_REPLY", json.dumps(REPLY, ensure_ascii=False))
     monkeypatch.setenv("ROKID_CHATGPT_SEND_ENABLED", "1")
-    for name in ("FAKE_CODEX_FAIL", "FAKE_CODEX_LOGIN", "FAKE_CODEX_REGIONS", "FAKE_CODEX_LOCATE_FAIL"):
+    for name in ("FAKE_CODEX_FAIL", "FAKE_CODEX_LOGIN", "FAKE_CODEX_REGIONS", "FAKE_CODEX_LOCATE_FAIL",
+                 "FAKE_CODEX_CANARY_REPLY"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(codex_cli, "_needs_proxy", lambda: False)
     return lambda: json.loads(record.read_text(encoding="utf-8")) if record.exists() else []
@@ -402,3 +409,54 @@ def test_boxes_that_make_no_sense_are_not_used(codex, tmp_path, monkeypatch, reg
 
     [run] = _runs(codex())
     assert "page001.jpg" in run["sizes"]
+
+
+def _checks(calls):
+    return [call for call in calls if call["args"][:1] == ["exec"] and "canary.jpg" in call.get("sizes", {})]
+
+
+def test_the_check_before_use_is_one_small_real_request_whose_reply_depends_on_the_picture(codex):
+    """Phone, 2026-11-15 (M-23): five black squares counted in 5 s at low effort, 14,834 input tokens, 12,160 of them cached."""
+    codex_cli.CodexCliSolver().check()
+
+    assert codex_cli.CodexCliSolver.check_sends is True, "the proof is a real request, not a look at readiness"
+
+    [check] = _checks(codex())
+    args = check["args"]
+    assert "model_reasoning_effort=low" in args and args[args.index("-s") + 1] == "read-only" and "--ephemeral" in args
+    assert max(check["sizes"]["canary.jpg"]) <= 512 and check["stdin"] == ""
+    assert not _runs([call for call in codex() if call not in _checks(codex())]), "no booklet request is made"
+
+
+def test_the_check_fails_when_the_reply_is_not_what_the_picture_shows(codex, monkeypatch):
+    monkeypatch.setenv("FAKE_CODEX_CANARY_REPLY", "9")  # the picture shows three to seven
+    with pytest.raises(ChatGptWebError):
+        codex_cli.CodexCliSolver().check()
+
+
+def test_the_check_reports_a_usage_limit_as_a_usage_limit(codex, monkeypatch):
+    monkeypatch.setenv("FAKE_CODEX_FAIL", "ERROR: You've hit your usage limit. Try again in 3 hours.")
+    with pytest.raises(ChatGptWebRateLimit):
+        codex_cli.CodexCliSolver().check()
+
+
+def test_the_check_sends_nothing_when_the_cli_is_not_signed_in(codex, monkeypatch):
+    monkeypatch.setenv("FAKE_CODEX_LOGIN", "Not logged in")
+    with pytest.raises(ChatGptWebAuthenticationRequired):
+        codex_cli.CodexCliSolver().check()
+    assert not _checks(codex())
+
+
+def test_the_check_sends_nothing_while_sending_is_disabled(codex, monkeypatch):
+    monkeypatch.setenv("ROKID_CHATGPT_SEND_ENABLED", "0")
+    with pytest.raises(ChatGptWebSendNotAuthorized):
+        codex_cli.CodexCliSolver().check()
+    assert not codex()
+
+
+def test_the_check_goes_through_the_loopback_proxy_where_names_do_not_resolve(codex, monkeypatch):
+    monkeypatch.setattr(codex_cli, "_needs_proxy", lambda: True)
+    codex_cli.CodexCliSolver().check()
+
+    [check] = _checks(codex())
+    assert check["proxy"].startswith("http://127.0.0.1:")

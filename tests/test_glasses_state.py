@@ -78,11 +78,12 @@ def test_only_a_finished_bundle_for_the_active_session_can_wake(tmp_path, monkey
     ])
     sessions = []
 
-    def bundle(session_id):
+    def bundle(session_id, *, identify):
+        assert identify is False, "the poll needs the answers' state, not the identity of the input"
         sessions.append(session_id)
         return next(bundles)
 
-    monkeypatch.setattr(main, "exam_answer_bundle", bundle)
+    monkeypatch.setattr(main, "_answer_snapshot", bundle)
     client.post("/v1/glasses/state", json={**STATE, "session_id": 7, "phase": "analyzing"}, headers=HEADERS)
     url = "/v1/glasses/state?device_id=glasses-serial"
     assert client.get(url, headers=HEADERS).json()["answer_ready"] is False
@@ -124,7 +125,7 @@ def test_writing_done_during_bundle_read_revokes_a_pending_wake(tmp_path, monkey
         record_state(GlassesState(**{**analyzing, "phase": "writing_done", "sequence": 2}), "10.0.0.12")
         return {"items": [{"status": "ready"}]}
 
-    monkeypatch.setattr(main, "exam_answer_bundle", bundle)
+    monkeypatch.setattr(main, "_answer_snapshot", lambda session_id, *, identify: bundle(session_id))
     response = client.get("/v1/glasses/state?device_id=glasses-serial", headers=HEADERS).json()
     assert response["phase"] == "writing_done" and response["answer_ready"] is False
 
@@ -154,7 +155,7 @@ def test_active_capture_and_answer_reading_reject_a_sleep_request(tmp_path, monk
 def test_mixed_reading_snapshot_is_available_while_listening_is_pending(tmp_path, monkeypatch):
     client = _client(tmp_path, monkeypatch)
     from app import main
-    monkeypatch.setattr(main, "exam_answer_bundle", lambda _: {
+    monkeypatch.setattr(main, "_answer_snapshot", lambda _, *, identify: {
         "available_stage": "reading", "revision": 4,
         "items": [{"status": "ready"}, {"status": "pending"}],
     })
@@ -178,7 +179,7 @@ def test_received_revision_requires_a_session_and_is_never_inferred_from_server_
     from app import main
     assert client.post("/v1/glasses/state", headers=HEADERS,
                        json={**STATE, "ack_answer_revision": 1}).status_code == 422
-    monkeypatch.setattr(main, "exam_answer_bundle", lambda _: {
+    monkeypatch.setattr(main, "_answer_snapshot", lambda _, *, identify: {
         "available_stage": "complete", "revision": 2, "items": [{"status": "ready"}],
     })
     waiting = {**STATE, "session_id": 7, "phase": "waiting"}
@@ -188,7 +189,7 @@ def test_received_revision_requires_a_session_and_is_never_inferred_from_server_
     client.post("/v1/glasses/state", headers=HEADERS,
                 json={**waiting, "sequence": 2, "ack_answer_revision": 1})
     restarted = _client(tmp_path, monkeypatch)
-    monkeypatch.setattr(main, "exam_answer_bundle", lambda _: {
+    monkeypatch.setattr(main, "_answer_snapshot", lambda _, *, identify: {
         "available_stage": "complete", "revision": 2, "items": [{"status": "ready"}],
     })
     restored = restarted.get(url, headers=HEADERS).json()
@@ -242,7 +243,7 @@ def test_new_generation_during_partial_bundle_read_revokes_the_old_wake(tmp_path
         record_state(GlassesState(**{**STATE, "generation": 4, "phase": "chooser"}), "10.0.0.12")
         return {"items": [{"status": "ready"}, {"status": "pending"}], "revision": 4, "available_stage": "reading"}
 
-    monkeypatch.setattr(main, "exam_answer_bundle", bundle)
+    monkeypatch.setattr(main, "_answer_snapshot", lambda session_id, *, identify: bundle(session_id))
     saved = client.get("/v1/glasses/state?device_id=glasses-serial", headers=HEADERS).json()
     assert saved["generation"] == 4 and saved["phase"] == "chooser"
     assert saved["answer_ready"] is False and saved["answer_revision"] == 0 and saved["available_stage"] == "none"
@@ -505,3 +506,28 @@ def test_failed_and_ignored_store_timings_do_not_claim_a_durable_save(tmp_path, 
     assert events[0]["durable_ns"] is not None
     assert events[1]["durable_ns"] is events[2]["durable_ns"] is None
     assert "PRIVATE" not in output
+
+
+def test_the_watchers_poll_does_not_read_the_page_files_again(tmp_path, monkeypatch):
+    """Review C-10: the watcher asks twice a second through 130 minutes of reading, and each poll hashed every page
+    file again (40 PNG pages are 575 MB). The poll uses the answers' state only; the bundle the glasses fetch keeps
+    the content identity, read from the files each time as before."""
+    client = _client(tmp_path, monkeypatch)
+    from app import main
+    document = client.post("/v1/documents", json={"title": "t"}, headers=HEADERS).json()["document_id"]
+    client.post(f"/v1/documents/{document}/pages", headers=HEADERS,
+                data={"page_index": 0, "ocr_text": "第1問 次の問いに答えよ。\n問1 2x + 3 = 7 を解け。"})
+    client.post(f"/v1/documents/{document}/finalize", headers=HEADERS)
+    session = client.post("/v1/exam-sessions", headers=HEADERS, json={
+        "mode": "study", "document_id": document, "exam_type": "written", "answer_format": "mark"}).json()["session_id"]
+    client.post(f"/v1/exam-sessions/{session}/finalize-reading", headers=HEADERS)
+    hashed, real = [], main.file_sha256
+    monkeypatch.setattr(main, "file_sha256", lambda path: hashed.append(path) or real(path))
+    client.post("/v1/glasses/state", json={**STATE, "session_id": session, "phase": "analyzing"}, headers=HEADERS)
+
+    polled = client.get("/v1/glasses/state?device_id=glasses-serial", headers=HEADERS).json()
+
+    assert hashed == []
+    bundle = client.get(f"/v1/exam-sessions/{session}/answer-bundle", headers=HEADERS).json()
+    assert len(bundle["input_digest"]) == 64 and hashed, "the bundle itself still identifies its input by content"
+    assert polled["answer_revision"] == bundle["revision"]

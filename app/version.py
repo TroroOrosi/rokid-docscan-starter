@@ -268,7 +268,10 @@ from __future__ import annotations
 # 0.72.0: Chat images are cropped to the paper when its box is certain; otherwise the frame is sent as before.
 # 0.73.0: ROKID_SOLVER=codex-cli answers a whole booklet with one `codex exec` request (the official CLI and the
 #         operator's ChatGPT sign-in, no web page), with Chat behind it; the Chat route was repaired on the live page.
-APP_VERSION = "0.73.0"
+# 0.74.0: a check before use tries every booklet route (the Codex CLI with one small real request) and keeps the
+#         result, daily too; a photo is made into its PNG off the event loop and outside the write lock; the watcher's
+#         poll no longer hashes every page file.
+APP_VERSION = "0.74.0"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.
@@ -397,7 +400,8 @@ APP_VERSION = "0.73.0"
 # 1.42.3: new Work answers default to Fast without replacing sealed job settings.
 # 1.43.0: answer-bundle reports a route change as pending; ROKID_SOLVER_FALLBACKS orders booklet routes.
 # 1.44.0: answer-bundle issue for a booklet over the upload window; ROKID_CHATGPT_UPLOAD_WINDOW_FILES.
-API_VERSION = "1.44.0"
+# 1.45.0: POST /v1/route-check; /v1/settings gains `route_check` (the last result, or null).
+API_VERSION = "1.45.0"
 
 # Matching algorithm identity. Bump when thresholds or hashing change so a
 # re-index/eval is triggered. Mirrors thresholds in app/matching.py.
@@ -461,7 +465,8 @@ ANALYZER_API_VERSION = "1.0.0"
 # 1.9.0: mixed reading and listening stages share the original paper/chat
 #        identity and retain completed reading answers when audio arrives.
 # 1.10.0: optional vector styles, arcs and hatched polygons in answer diagrams.
-SOLVER_API_VERSION = "1.10.0"
+# 1.11.0: Solver.check() proves a route can answer now; check_sends says whether that is a real request.
+SOLVER_API_VERSION = "1.11.0"
 
 # Media-extractor plugin interface (formula/figure/graph/table).
 EXTRACTOR_API_VERSION = "1.0.0"

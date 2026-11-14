@@ -24,6 +24,11 @@ Settings: ``ROKID_CODEX_BIN`` (default: the Termux npm install, else ``codex`` o
 (``gpt-6.1-sol``), ``ROKID_CODEX_EFFORT`` (``xhigh``), ``ROKID_CODEX_TIMEOUT_S`` (3600), ``ROKID_CODEX_LOCATE`` (``1``;
 ``0`` sends photos as the Chat route does), ``ROKID_CODEX_PAGE_LONG`` (the enlarged page's long side, 2500 px). Sending is gated by
 ``ROKID_CHATGPT_SEND_ENABLED`` like every other route that spends the operator's usage.
+
+``check()`` is the proof before use: one request at low effort with a generated picture of three to seven black squares,
+which the model counts. Measured on the phone on 2026-11-15 (M-23): 5 s, 14,834 input tokens of which 12,160 were cached.
+It shows the CLI is signed in, the network and the image path work and no limit is in force at that moment. The CLI's
+event stream (``--json``, 0.169.0) carries token counts only, so how much allowance is left cannot be read.
 """
 from __future__ import annotations
 
@@ -31,6 +36,7 @@ import contextlib
 import hashlib
 import json
 import os
+import random
 import re
 import select
 import shutil
@@ -319,18 +325,44 @@ class CodexCliSolver(Solver):
                     names.append(name)
         return names
 
-    @classmethod
-    def _run(cls, question: Question, model: str) -> str:
-        effort = os.environ.get("ROKID_CODEX_EFFORT") or "xhigh"
-        timeout = float(os.environ.get("ROKID_CODEX_TIMEOUT_S") or 3600)
+    @staticmethod
+    @contextlib.contextmanager
+    def _workplace():
+        """A directory of its own and the environment the CLI needs on this host, for as long as one request takes."""
         environment = dict(os.environ)
         bundle = Path(os.environ.get("PREFIX", "")) / "etc/tls/cert.pem"
         if os.environ.get("PREFIX") and bundle.is_file():
             environment.setdefault("SSL_CERT_FILE", str(bundle))
         with tempfile.TemporaryDirectory(prefix="rokid-codex-") as folder, contextlib.ExitStack() as stack:
-            directory = Path(folder)
             if _needs_proxy():
                 environment["HTTPS_PROXY"] = f"http://127.0.0.1:{stack.enter_context(name_resolving_proxy())}"
+            yield Path(folder), environment
+
+    check_sends = True
+
+    def check(self) -> None:
+        if not chatgpt_send_enabled():
+            raise ChatGptWebSendNotAuthorized("sending is not authorized")
+        if not self._signed_in():
+            raise ChatGptWebAuthenticationRequired("the Codex CLI is missing or not signed in; nothing sent")
+        squares = random.randint(3, 7)  # a different picture each time: the reply has to come from the picture
+        picture = Image.new("RGB", (512, 256), "white")
+        for index in range(squares):
+            picture.paste((0, 0, 0), (24 + index * 68, 100, 72 + index * 68, 148))
+        with self._workplace() as (directory, environment):
+            picture.save(directory / "canary.jpg", quality=85)
+            reply = self._exec(directory, environment, model=os.environ.get("ROKID_CODEX_MODEL") or "gpt-6.1-sol",
+                               effort="low", images=["canary.jpg"], timeout=120,
+                               prompt="How many black squares are in the attached image? Do not run commands or use "
+                                      "tools. Reply with the number only.")
+        if re.sub(r"\D", "", reply) != str(squares):
+            raise ChatGptWebError("the check's reply was not the count the picture shows")
+
+    @classmethod
+    def _run(cls, question: Question, model: str) -> str:
+        effort = os.environ.get("ROKID_CODEX_EFFORT") or "xhigh"
+        timeout = float(os.environ.get("ROKID_CODEX_TIMEOUT_S") or 3600)
+        with cls._workplace() as (directory, environment):
             names = None
             if (os.environ.get("ROKID_CODEX_LOCATE") or "1") != "0":
                 names = cls._located(directory, environment, question.document_pages, model=model, timeout=timeout)
