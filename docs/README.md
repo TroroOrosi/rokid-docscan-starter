@@ -106,9 +106,12 @@ what the platform permits.
   旧FS/R/S/Xの対応と2026-09-15の調査履歴も保持。実装／物理受け入れの完了ではない。
 - `docs/defect-register.md` — 欠陥一覧と直す順序（2026-11-13 作成、現行の作業台帳）。製品全体を4系統で調べた結果と
   実機で再現した結果を、原因の層ごとにまとめる。ここの状態が「確認済み」になるまで未解決。
+- `docs/whole-review-2026-11-14.md` — 全体の見直し（現行の調査記録、実機は動かしていない）。一度も確かめていないこと、
+  使用の順の問題（A〜F）、本人の要望の全件と現状、記録の食い違い、次の順番の提案。
 - `docs/superpowers/specs/2026-11-12-wearer-led-capture-design.md` — 撮影方式の設計提案
-- `docs/superpowers/specs/2026-11-14-line-of-sight-capture-design.md` — 撮影の設計提案（目線に合う範囲・表示位置・装着して撮れる撮り方）。未承認・未実装。11/12 の提案を置き換える
   （2026-11-12、**未承認・未実装**）。露光を頭の動きに合わせ、視界ごとに原寸の複数候補から1枚を残す。
+- `docs/superpowers/specs/2026-11-14-line-of-sight-capture-design.md` — 撮影の設計提案（目線に合う範囲・表示位置・装着して撮れる撮り方）。
+  **承認依頼は取り下げ（2026-11-14 夜）**。未実装。全体の見直しの後に作り直す。
   実写19枚の集計、外部の製品・研究の出典、方式比較、装着者に頼む前の検証を含む。装着での確認はない。
 - `docs/fast-scan-decisions.md` — automatic/manual scan and listening decisions.
   The current implementation is described in `docs/multimodal-scan.md`.

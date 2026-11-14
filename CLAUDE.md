@@ -5,8 +5,10 @@ Status: Current engineering contract. Updated 2026-11-14.
 **Start at `.agents/progress/current.md`.** It lists the operator's decisions,
 the verified state and the next steps. Do not re-ask what it settles. Then read
 the top of `docs/defect-register.md`: the purpose, how far each step of the use
-has been checked, and the known defects by cause layer. Keep the
-prohibitions below. Treat this file's measurements and "the platform cannot"
+has been checked, and the known defects by cause layer; and
+`docs/whole-review-2026-11-14.md`: what has never been observed, the open
+problems by stage of use, and every request of the operator with its state.
+Keep the prohibitions below. Treat this file's measurements and "the platform cannot"
 statements as past observations: check them against the artifact before relying
 on them. Judge every change by one test: does ChatGPT answer correctly from the
 image, and can the answer be read on the glasses?
@@ -103,7 +105,8 @@ file carried until then.
 **That topology has run end to end once** (2026-11-13,
 `docs/hardware-measurements.md` §M-15): the real app, the phone's hotspot and
 server, Work, the answer, the watcher's wake and the reader, with one photo of
-a desk and the glasses lying on it. It has not carried what it is for: a
+a desk, the glasses lying on it and driven from a PC over USB. It has not
+carried what it is for: a
 booklet photographed by a wearer, more than one page, or the Chat route. The
 pieces measured separately before that are the glasses app reaching a server
 over Wi-Fi (2026-09-04) and the phone-only CDP/FastAPI/answer component in
@@ -133,7 +136,8 @@ Frozen means the code stays and its tests keep running. It does not get new
 features, and a measurement taken on it does not validate the decided route.
 `docs/superpowers/specs/2026-09-11-glasses-offline-answer-bundle-design.md` is
 the design of the decided route, not a shelved one — its phone-hotspot topology
-is now the intended topology and is still unexercised.
+is the intended topology. It has run once, with the glasses driven from a PC
+(2026-11-13, §M-15), and never with the phone and the glasses alone.
 
 ## Answer routes
 
