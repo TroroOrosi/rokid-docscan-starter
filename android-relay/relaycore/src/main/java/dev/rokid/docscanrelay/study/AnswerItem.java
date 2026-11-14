@@ -22,6 +22,7 @@ public final class AnswerItem {
     public final Status status;
     public final String issue;
     public final List<AnswerDiagram> diagrams;
+    public final List<Integer> answerNumbers;
 
     public AnswerItem(String groupId, String groupLabel, String questionId, String questionLabel,
                       String answer, Status status, String issue) {
@@ -30,14 +31,20 @@ public final class AnswerItem {
 
     public AnswerItem(String groupId, String groupLabel, String questionId, String questionLabel,
                       String answer, Status status, String issue, List<AnswerDiagram> diagrams) {
+        this(groupId, groupLabel, questionId, questionLabel, answer, status, issue, diagrams, Collections.emptyList());
+    }
+
+    public AnswerItem(String groupId, String groupLabel, String questionId, String questionLabel,
+                      String answer, Status status, String issue, List<AnswerDiagram> diagrams,
+                      List<Integer> answerNumbers) {
         this.groupId = identifier(groupId);
         this.questionId = identifier(questionId);
         this.groupLabel = label(groupLabel);
         this.questionLabel = label(questionLabel);
         boolean carriesAnswer = status == Status.READY || status == Status.NEEDS_REVIEW;
-        if (status == null || answer == null || issue == null || answer.length() > 200_000
+        if (status == null || answer == null || issue == null || answer.length() > AnswerBundle.MAX_TEXT_CHARS
                 || diagrams == null || diagrams.size() > 4 || diagrams.stream().anyMatch(d -> d == null)
-                || issue.length() > 1000 || (carriesAnswer && answer.trim().isEmpty() && diagrams.isEmpty())
+                || issue.codePointCount(0, issue.length()) > 1000 || (carriesAnswer && answer.trim().isEmpty() && diagrams.isEmpty())
                 || (!carriesAnswer && !answer.isEmpty())
                 || (!carriesAnswer && !diagrams.isEmpty())
                 || (status == Status.NEEDS_REVIEW && issue.trim().isEmpty())) {
@@ -47,6 +54,9 @@ public final class AnswerItem {
         this.status = status;
         this.issue = status == Status.READY ? "" : issue;
         this.diagrams = Collections.unmodifiableList(new ArrayList<>(diagrams));
+        if (answerNumbers == null || answerNumbers.size() > 1000 || answerNumbers.stream()
+                .anyMatch(n -> n == null || n <= 0 || n > 9999)) throw new IllegalArgumentException("invalid answer number");
+        this.answerNumbers = Collections.unmodifiableList(new ArrayList<>(answerNumbers));
     }
 
     public static AnswerItem ready(String groupId, String groupLabel, String questionId,
@@ -54,7 +64,14 @@ public final class AnswerItem {
         return new AnswerItem(groupId, groupLabel, questionId, questionLabel, answer, Status.READY, "");
     }
 
-    public String heading() { return groupLabel + " " + questionLabel; }
+    public String readingLabel() {
+        if (answerNumbers.isEmpty()) return groupLabel + " " + questionLabel;
+        List<String> labels = new ArrayList<>();
+        for (Integer number : answerNumbers) labels.add(number.toString());
+        return String.join(",", labels);
+    }
+
+    public String heading() { return groupLabel + " " + (answerNumbers.isEmpty() ? questionLabel : readingLabel()); }
 
     static String identifier(String value) {
         if (value == null || !value.matches("[A-Za-z0-9_.-]{1,120}")
@@ -65,7 +82,7 @@ public final class AnswerItem {
     }
 
     private static String label(String value) {
-        if (value == null || value.trim().isEmpty() || value.length() > 120) {
+        if (value == null || value.trim().isEmpty() || value.codePointCount(0, value.length()) > 120) {
             throw new IllegalArgumentException("invalid question label");
         }
         return value;

@@ -1,15 +1,18 @@
 package dev.rokid.docscanrelay.study;
 
 import android.util.AtomicFile;
-import java.io.ByteArrayOutputStream;
+import android.util.JsonReader;
+import android.util.JsonToken;
+import android.util.JsonWriter;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileNotFoundException;
 import java.io.FileOutputStream;
 import java.io.IOException;
-import java.nio.charset.StandardCharsets;
+import java.util.HashSet;
+import java.util.Set;
+import java.util.function.BooleanSupplier;
 import org.json.JSONException;
-import org.json.JSONObject;
 
 /** Durable last-reader state. Closing is saved before the UI returns to mode selection. */
 public final class AnswerStore {
@@ -25,7 +28,8 @@ public final class AnswerStore {
         private Saved(AnswerBundle bundle, String questionId, int offset, boolean closed) {
             boolean found = false;
             for (AnswerItem item : bundle.items) if (item.questionId.equals(questionId)) found = true;
-            if (!found || offset < 0 || offset > 250_000) throw new IllegalArgumentException("invalid reader cursor");
+            if (!found || offset < 0 || offset > AnswerBundle.MAX_JSON_BYTES)
+                throw new IllegalArgumentException("invalid reader cursor");
             this.bundle = bundle;
             this.questionId = questionId;
             this.offset = offset;
@@ -56,55 +60,83 @@ public final class AnswerStore {
 
     /** Only a user-requested resume is allowed to clear CLOSED. */
     public synchronized Saved resume() throws IOException {
+        return resume(() -> true);
+    }
+
+    public synchronized Saved resume(BooleanSupplier isCurrent) throws IOException {
+        requireCurrentResume(isCurrent);
         Saved old = load();
+        requireCurrentResume(isCurrent);
         if (old == null) return null;
         Saved resumed = new Saved(old.bundle, old.questionId, old.offset, false);
-        write(resumed);
+        write(resumed, isCurrent);
         return resumed;
     }
 
+    private static void requireCurrentResume(BooleanSupplier isCurrent) throws IOException {
+        if (!isCurrent.getAsBoolean()) throw new IOException("reader resume no longer active");
+    }
+
     public synchronized Saved load() throws IOException {
-        try (FileInputStream input = file.openRead();
-             ByteArrayOutputStream bytes = new ByteArrayOutputStream()) {
-            byte[] chunk = new byte[8192];
-            int count;
-            while ((count = input.read(chunk)) != -1) {
-                if (bytes.size() + count > AnswerBundle.MAX_JSON_BYTES + 4096) {
-                    throw new IOException("saved reader state is too large");
+        try (FileInputStream input = file.openRead()) {
+            JsonReader reader = AnswerJson.reader(input, AnswerBundle.MAX_JSON_BYTES + 4096);
+            AnswerBundle bundle = null;
+            String question = null;
+            int offset = -1;
+            Boolean closed = null;
+            Set<String> fields = new HashSet<>();
+            reader.beginObject();
+            while (reader.hasNext()) {
+                String name = reader.nextName();
+                if (fields.size() >= 32 || !fields.add(name)) throw new IOException("invalid reader fields");
+                switch (name) {
+                    case "bundle": bundle = AnswerBundle.readJson(reader); break;
+                    case "question_id": question = AnswerJson.string(reader); break;
+                    case "offset": offset = Math.toIntExact(AnswerJson.integer(reader)); break;
+                    case "closed":
+                        if (reader.peek() != JsonToken.BOOLEAN) throw new IOException("invalid completion state");
+                        closed = reader.nextBoolean();
+                        break;
+                    default: reader.skipValue();
                 }
-                bytes.write(chunk, 0, count);
             }
-            JSONObject json = new JSONObject(new String(bytes.toByteArray(), StandardCharsets.UTF_8));
-            if (!(json.get("closed") instanceof Boolean)) throw new JSONException("invalid completion state");
-            return new Saved(AnswerBundle.fromJson(json.getJSONObject("bundle").toString()),
-                    AnswerBundle.string(json, "question_id"),
-                    Math.toIntExact(AnswerBundle.number(json, "offset")), json.getBoolean("closed"));
+            reader.endObject();
+            AnswerJson.endDocument(reader);
+            if (bundle == null || closed == null) throw new IOException("incomplete reader state");
+            return new Saved(bundle, question, offset, closed);
         } catch (FileNotFoundException absent) {
             return null;
-        } catch (JSONException | IllegalArgumentException | ArithmeticException invalid) {
+        } catch (JSONException | IllegalArgumentException | ArithmeticException | IllegalStateException invalid) {
             throw new IOException("saved reader state is invalid", invalid);
         }
     }
 
     private void write(Saved saved) throws IOException {
+        write(saved, () -> true);
+    }
+
+    private void write(Saved saved, BooleanSupplier isCurrent) throws IOException {
         if (!directory.isDirectory() && !directory.mkdirs()) throw new IOException("reader storage unavailable");
-        byte[] bytes;
-        try {
-            bytes = new JSONObject().put("bundle", new JSONObject(saved.bundle.toJson()))
-                    .put("question_id", saved.questionId).put("offset", saved.offset)
-                    .put("closed", saved.closed).toString().getBytes(StandardCharsets.UTF_8);
-        } catch (JSONException | IllegalArgumentException invalid) {
-            throw new IOException("reader state cannot be saved", invalid);
-        }
+        try { saved.bundle.checkSerializedSize(); }
+        catch (JSONException invalid) { throw new IOException("reader state cannot be saved", invalid); }
         FileOutputStream output = null;
         try {
             output = file.startWrite();
-            output.write(bytes);
+            JsonWriter writer = AnswerJson.writer(output, AnswerBundle.MAX_JSON_BYTES + 4096);
+            writer.beginObject().name("bundle");
+            saved.bundle.writeJson(writer);
+            writer.name("question_id").value(saved.questionId).name("offset").value(saved.offset)
+                    .name("closed").value(saved.closed).endObject();
+            writer.flush();
             output.getFD().sync();
+            requireCurrentResume(isCurrent);
             file.finishWrite(output);
         } catch (IOException failure) {
             file.failWrite(output);
             throw failure;
+        } catch (JSONException | IllegalArgumentException invalid) {
+            file.failWrite(output);
+            throw new IOException("reader state cannot be saved", invalid);
         }
     }
 }

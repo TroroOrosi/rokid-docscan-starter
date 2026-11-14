@@ -1,11 +1,50 @@
 # rokid-docscan-starter development guide
 
-Status: Current engineering contract. Updated 2026-09-22.
+Status: Current engineering contract. Updated 2026-11-14.
+
+**Start at `.agents/progress/current.md`.** It lists the operator's decisions,
+the verified state and the next steps. Do not re-ask what it settles. Then read
+the top of `docs/defect-register.md`: the purpose, how far each step of the use
+has been checked, and the known defects by cause layer; and
+`docs/whole-review-2026-11-14.md`: what has never been observed, the open
+problems by stage of use, and every request of the operator with its state.
+Keep the prohibitions below. Treat this file's measurements and "the platform cannot"
+statements as past observations: check them against the artifact before relying
+on them. Judge every change by one test: does ChatGPT answer correctly from the
+image, and can the answer be read on the glasses?
 
 ## What this repository is
 
-Photograph an exam booklet (共通テスト and similar), and let the operator read,
-per 小問, **what to write on the answer sheet** on Rokid Glasses.
+The operator's 2026-10-29 requirements in `tasks/plan.md` take precedence over
+older model, review-display and power preferences below. Venue operation uses
+only the always-on phone and glasses on its hotspot: no PC, wired connection or
+repeated connection procedure. PC commands in development records are not the
+venue topology. Prioritize accurate, fast automatic capture/quality inspection,
+ChatGPT app/web Work with every original image and answer return, and minimal
+HUD, before subject/year benchmarks. Compare recording/frame selection, native
+stills and their combinations, rather than assuming the existing still loop is
+the selected design. There is no operator-specified fixed order among capture,
+Work and HUD improvements. Work Cloud is under investigation; Drive, the phone's
+existing browser and official external triggers must be compared before adopting
+a transport. PC-local Work is not a venue alternative. Do not present a component
+test as proof that this complete route works. Read the conversation's corrections
+and the current section of `docs/requirements-audit.md`; earlier proposals and
+historical implementation states are not current decisions. Continue independent
+PC work while a manual action remains pending.
+
+Photograph arbitrary problem papers, and let the operator read **what to write
+on the answer sheet**, including complete written solutions, on Rokid Glasses.
+Subject, year, institution, printed question labels and a known paper size are
+not prerequisites. GPT reads the original images and determines the questions,
+required answer form, figures and missing material; the app does not impose a
+separate subject or question-format classifier before submission. Preserve the
+model's complete answer and its association with the source question, including
+unlabelled questions and intentionally nonconsecutive printed answer numbers.
+The operator's 2026-11-01 request includes remaining physical-paper checks;
+an earlier decision to defer them is historical, not a current exclusion.
+On 2026-11-05 the operator confirmed both devices connected and requested overall
+functional/structural evaluation and improvements before physical capture. Treat
+the connection as current fact, not an instruction to start capturing a paper.
 
 The scan-and-match half (`/v1/match`, pHash, page dedup) is the foundation this
 was built on, not the goal. Do not describe it as the product.
@@ -19,12 +58,26 @@ The intended session, from `tasks/plan.md`:
   2026-09-14, also serves a Wi-Fi AP that carries the glasses; the operator
   confirmed this is available. The server process therefore runs on the phone.
   Nothing auto-terminates at 150 minutes.
-- **Chrome has to stay in the foreground on the phone**, and the server runs
-  behind it. Measured 2026-09-15 (`docs/hardware-measurements.md` §F-6-1):
+- **The current implementation uses Termux Chromium**, a private persistent
+  profile and loopback CDP. Visible login and later runs use Termux:X11.
+  Four Termux services supervise X11, the browser, FastAPI and the watcher,
+  with Termux:Boot after first unlock and available tethering. The separate
+  `:phonehost` Android app monitors loopback API health after explicit enablement.
+  Its connected-device foreground service invokes the fixed existing Termux boot
+  script through the public RUN_COMMAND service after an unavailable health check
+  and a persisted cooldown. The enabled choice survives service recreation and
+  BOOT_COMPLETED. Explicit stop wins over an old in-flight health check. The
+  bootstrap retains each runit service's enabled/disabled choice. Termux command
+  permission and allow-external-apps are initial setup requirements. On the measured
+  phone headless starts encountered HTTP403; visible Work completed original-image
+  technical fixtures. This does not establish a platform-wide headless restriction.
+  Login persistence and venue operation still need physical acceptance.
+  The previous Android Chrome route was measured 2026-09-15
+  (`docs/hardware-measurements.md` §F-6-1):
   foregrounding Termux removed `@chrome_devtools_remote` outright, and
   foregrounding Chrome rebuilt it under a new inode in about 2s, with the
   screen awake throughout. The operator's 2026-09-15 decision to keep the
-  screen on and the phone face down therefore fixes the foreground app too.
+  screen on and the phone face down applied to that earlier route.
   The endpoint also refuses the first probes and then answers (§F-6-2), so one
   refusal is not an absent browser; both `cdp_available()` and
   `app/solvers/cdp.py` retry.
@@ -41,7 +94,7 @@ session; the glasses' own tap/swipe drive it.
 
 ```text
 Rokid Glasses (:glassdoc APK) -> phone Wi-Fi AP -> FastAPI on the phone
-                                                -> Chrome CDP on the phone -> ChatGPT web
+                                                -> Termux Chromium CDP -> ChatGPT web
 Rokid Glasses (:glassdoc AnswerView) <- answer-bundle
 ```
 
@@ -49,13 +102,20 @@ The operator confirmed on 2026-09-14 that the phone can be an access point,
 which retires the "the glasses have no network at the venue" premise that this
 file carried until then.
 
-**None of that topology has been run.** What is measured is each piece
-separately: the glasses app captures and reaches a server over Wi-Fi
-(2026-09-04), and the phone-only CDP/FastAPI/answer component in §F-6 (2026-09-15).
-The AP has never carried a complete glasses session.
+**That topology has run end to end once** (2026-11-13,
+`docs/hardware-measurements.md` §M-15): the real app, the phone's hotspot and
+server, Work, the answer, the watcher's wake and the reader, with one photo of
+a desk, the glasses lying on it and driven from a PC over USB. It has not
+carried what it is for: a
+booklet photographed by a wearer, or more than one page. The Chat route sent
+its first booklet from the phone on 2026-11-14 with page images cut on the PC
+(§M-19), not through the glasses. The
+pieces measured separately before that are the glasses app reaching a server
+over Wi-Fi (2026-09-04) and the phone-only CDP/FastAPI/answer component in
+§F-6 (2026-09-15).
 
-The **phone-relay topology** below is what this repository has actually
-exercised end to end, and it stays as the fallback. Do not extend it.
+The **phone-relay topology** below was exercised end to end earlier and
+stays as the fallback. Do not extend it.
 
 ```text
 Rokid Glasses -> Global Hi Rokid -> Android relay -> FastAPI server -> HUD
@@ -70,24 +130,38 @@ Which of each duplicated surface is the route, decided 2026-09-14:
 
 | Role | Route | Kept but frozen |
 |---|---|---|
-| Capture + OCR | `android-relay/glassdoc` | `android-relay/app` (phone relay) |
+| Capture + page-change observation | `android-relay/glassdoc` | `android-relay/app` (phone relay + OCR) |
 | Answer display | `AnswerView` + `AnswerLayout` (measures the real font) | `app/glasses_view.py` wrapping (estimates 18 columns), `app/hud.py` (`/v1/match` only) |
-| Answer delivery | `GET /v1/exam-sessions/{id}/answer-bundle` | `/v1/exam-sessions/{id}/paste-prompt` (already rejected), `/v1/exam-sessions/{id}/pages.pdf` (kept: chatgpt-web attaches it) |
+| Answer delivery | `GET /v1/exam-sessions/{id}/answer-bundle` | `/v1/exam-sessions/{id}/paste-prompt` (already rejected; `pages.pdf` beside it was removed on 2026-09-29, since outside Enterprise ChatGPT discards a PDF's images) |
 
 Frozen means the code stays and its tests keep running. It does not get new
 features, and a measurement taken on it does not validate the decided route.
 `docs/superpowers/specs/2026-09-11-glasses-offline-answer-bundle-design.md` is
 the design of the decided route, not a shelved one — its phone-hotspot topology
-is now the intended topology and is still unexercised.
+is the intended topology. It has run once, with the glasses driven from a PC
+(2026-11-13, §M-15), and never with the phone and the glasses alone.
 
 ## Answer routes
 
 | Route | Status |
 |---|---|
-| `ROKID_SOLVER=chatgpt-web` | **Current primary.** Drives the operator's own signed-in ChatGPT web session over CDP. |
+| `ROKID_SOLVER=chatgpt-web` | The existing Chat route drives the operator's own signed-in ChatGPT web session over CDP. A booklet is one JPEG per page and two per spread split at the fold. Each photo is first cropped to its paper and a margin when the paper box is certain (at least 15% of the frame, at most one frame side touched, unchanged when the brightness floor is lowered, at most 5% of the paper-like area outside the crop, and at most 65% of the frame kept); otherwise the whole frame is sent as before, and the stored original is never changed. On the 27 distinct real photos on this PC (2026-11-10, each crop looked at) 14 of the 16 whole spreads taken by glassdoc were cropped without losing paper, the 7 taken by the glasses' own camera app stayed whole, and the 4 frames whose box was wrong were sent whole. Before anything is attached, the file count is compared with what is left of a rolling 3-hour window (`ROKID_CHATGPT_UPLOAD_WINDOW_FILES`, default 80, the paid-plan figure read on help.openai.com on 2026-11-10). The window counts every file this server attached, including Work ZIPs and attempts that were never confirmed; uploads made elsewhere on the account are invisible to it. A booklet that does not fit is refused before any send, is not retried or moved to another route, and shows its count and the remaining room on the glasses. Sent its first booklet from the phone on 2026-11-14 (§M-19): two page images cut on the PC from one worn photo, one message, GPT-6 at Extra High, answered in 2 min 51 s. Until that day it could not attach, confirm an attachment, find the send control or see a reply on the live page (six fixes, each from reading that page); the reply was taken by the read-only recovery, so the live wait for a reply and the stop control are still unexercised. A whole frame whose paper box is uncertain is still sent whole and shrunk by ChatGPT: the worn reference photo was neither cropped nor split. Attaching took 10-13 s for two 250 KB pages; the budget is now 20 s plus 15 s per file (`ROKID_CHATGPT_UPLOAD_PER_FILE_S`), from that one measurement on home Wi-Fi. |
+| `ROKID_SOLVER=chatgpt-work` | The requested phone-local Work consumer sends unchanged image ZIPs, verifies source receipts and returns staged answers. PNG is the default; opt-in native JPEG sources bind explicit rotation and upright RGB evidence to the canonical PNG. Work PNG technical fixtures passed on the signed-in phone. The production model verifier confirmed Sol / Extra High / Fast and its owned-menu closure. Common SEND1 and restarted API/watcher readiness were checked while retaining the browser/X11; this activation sent no diagnostic material. JPEG delivery, full restart and venue acceptance remain unverified. Measured on this PC on 2026-11-10 with the 19 distinct glassdoc photos, processed as an upload is (rotation 270): the upright PNG is 2.41 times its JPEG (median 14.17 MB against 5.93 MB), so 40 photos are 575 MB in 20 ZIPs and 7 messages as PNG, and 238 MB in 8 ZIPs and 3 messages as JPEG. The default stays PNG: every JPEG needs the model to apply rotation 270 and return the upright-pixel hash, a rejected receipt does not switch routes, and no Work run has shown those receipts pass on real photos. That single run decides the default. |
 | On-phone local model (F-51F, llama.cpp) | **Not the route.** The operator chose chatgpt-web on 2026-09-14. Its measurements are kept as evidence in `docs/hardware-measurements.md` §E; no further work is scheduled on it. |
-| `openai` / `gemini` / `claude` API keys | Supported and config-only. Kept as a fallback tier via `ROKID_SOLVER_TIERS`. |
+| `openai` / `gemini` / `claude` API keys | Supported and config-only. The per-question routes can fall back through `ROKID_SOLVER_TIERS`. They have no one-message booklet answer, so they are not booklet fallback routes. |
+| Booklet route fallback (`ROKID_SOLVER_FALLBACKS`) | Requested by the operator on 2026-11-10. When Work returns a usage limit, or cannot send (model or attachment control unusable after one retry), the same booklet goes to `chatgpt-web`. The choice is stored on the deck row, so a restart does not return to the limited route. An unknown send outcome, a shared browser/login/guard failure, a readability or receipt rejection and the listening stage never switch. Observed on the phone's live tab on 2026-11-10 without typing or sending: the new-chat page has two buttons, Chat and Work, and only pressing Chat leaves Work (a click right after the navigation was dropped, so it is repeated until Work is inactive); in Work mode Chat's composer is absent; Chat's effort is a five-position Power slider whose top position is Pro (shown with "Locked" and "Usage limit reached"), so the route moves it to the position labelled Extra High and refuses any other readable position. That preparation ended at GPT-6 / Extra High and Work was restored. Not observed: a real limit notice, a Work task cut short, and a Chat answer after a Work refusal. |
 | Local OpenAI-compatible HTTP (`app/llm_http.py`) | Reaches an on-phone `llama-server` without the openai SDK. |
+| `ROKID_SOLVER=codex-cli` (the official Codex CLI, `codex exec`, signed in with ChatGPT) | **The phone's route since 2026-11-14**, with Chat behind it. The operator asked whether the present route was rational for the venue; it had never been compared with anything (`docs/whole-review-2026-11-14.md` sections 9 and 10). One request carries every page image; no API key, browser or X11. On Android the server resolves names for the static binary through a loopback CONNECT proxy of its own and names Termux's certificate bundle. A reply is kept per booklet, so a repeat does not pay twice. A usage limit or a failed run hands the booklet to Chat; a booklet with audio is refused before anything runs. Measured on the phone (§M-21, §M-22): 47 page images in one request in 6 min 26 s with 8.7 MB sent; 14 pages through the phone's own server in 61 s with 14 of 14 correct. Unmeasured: cellular, how long the sign-in lasts unattended, a reboot, how the plan allowance is drawn, photos taken by the app. |
+
+What a page needs to be read, measured with seven worn photos of one page from the
+glasses' own camera (§M-22, one run each): characters of 15.8 px were read with
+18% of them wrong, 20.3 px with 1.5%, and wrong characters come back as other
+plausible words, not as gaps. The same 15.8 px photo enlarged twofold was read
+with none wrong; cropping alone changed nothing and sharpening made it worse.
+Two of the seven were smeared and unreadable whatever was done to them. So a
+page is sent enlarged to about 30 px a character, one photo a page is not
+enough, and a smeared photo has to be recognised and replaced before it is
+sent. None of this is implemented yet.
 
 Settled decisions. Do not re-argue them:
 
@@ -102,53 +176,283 @@ Settled decisions. Do not re-argue them:
 
 **Open gap.** The current record includes phone-only CDP, FastAPI discovery and a
 text answer in `docs/hardware-measurements.md` §F-6-6 through §F-6-10. These are
-component measurements, not a glasses → phone AP → answer-bundle session.
-That full route, the new capture/power behavior and local listening ASR remain
-unvalidated on hardware. Do not describe chatgpt-web as venue-ready.
+component measurements. The glasses → phone AP → answer-bundle route ran once
+on 2026-11-13 through Work with one photo of a desk (§M-15). A wearer's paper
+capture, a booklet of several pages, a correct answer from a photo the app itself
+took, the
+capture/power behavior over a whole session and the model's use of original
+listening audio remain unvalidated on hardware. Do not describe chatgpt-web as
+venue-ready.
 
-Chrome for Android does not hand out a CDP endpoint the way a PC does, and the
-difference is not a configuration detail. It listens only on a unix
-abstract-namespace socket, never on TCP, and it authorizes the connecting
-process by peer UID: `root`, `shell`, or its own. A phone-side app is neither,
-and SELinux gives each app its own MCS categories on top of that. The route
-therefore needs an on-device `adb forward` (adbd runs as `shell`) to turn that
-socket into `127.0.0.1:9222`. Measured, with the source and device evidence, in
-`docs/hardware-measurements.md` §F.
+The earlier Android Chrome build used an abstract unix CDP socket and an
+on-device forward. Those source/device observations remain in
+`docs/hardware-measurements.md` §F. The current Termux Chromium launcher opens
+loopback CDP directly and does not use a phone-to-itself connection. Verify
+visible login persistence and actual public model/effort/speed selection before
+switching the physical route.
 
 A throttled account is refused in the message *body*, not by an exception. The
-solver's rate-limit markers and slow-generation brake exist because a retry loop
-read a refusal as a bad answer and turned one block into many on 2026-09-14.
+solver's rate-limit markers exist because a retry loop read a refusal as a bad
+answer and turned one block into many on 2026-09-14. The slow-generation brake
+beside them was removed on 2026-09-29. A booklet now sends single-page JPEGs
+in the same chat in batches of at most 20 files including audio. Completed
+intermediate receipts precede the next batch; the final batch requests every
+answer. Durable progress and the existing uncertain-send guard prevent a
+restart from repeating a confirmed or uncertain send. Long generation is normal.
+Before attaching files, select the first visible model option: the position
+previously named Latest, now GPT-6. The operator wants this same position after
+future display-name changes. Immediately before sending, confirm its public
+checked/selected state without another model click. Model names and configured
+selectors are hints. A readable lower-effort choice, ambiguous
+selection, obstructed click or unclosed popup still stops submission.
+Close and confirm only a popup the verification itself opened. Login, attachment
+and uncertain-send safeguards remain independent of model-name fallback.
+
+Ordinary new Work answer jobs default to Fast for production. Trials and
+verification explicitly set `ROKID_WORK_SPEED=standard`; the phone's current
+Standard override is a trial setting. Existing sealed jobs, restarted sends and
+their later listening stage retain their saved settings. Capture-inspection and
+quality requests retain dedicated Standard settings. Actual model, effort and
+speed verification and uncertain-send safeguards apply to both answer speeds.
+A trial with the real model goes through Chat, not Work ("Development and
+verification" below), so the Standard setting matters only when Work itself is
+what is being tried.
 
 ## Real-device contract
 
 - Photographing the physical page is the primary input path. On the decided
-  route `:glassdoc` opens `camera2` on the glasses and OCRs there; on the
+  route `:glassdoc` opens `camera2` on the glasses and observes image change; on the
   fallback relay route the phone calls CXR-L `takePhoto`, receives the JPEG,
   performs bundled Japanese ML Kit OCR, and uploads both JPEG and OCR. Both go
   through `relaycore`'s `DocScanController`.
 - **The decided capture method is automatic scanning** (operator, 2026-09-15).
   `docs/fast-scan-decisions.md` defines it: the glasses detect the page and
-  shoot on their own, the captured image is shown for 3 seconds, a single tap
-  in that window retakes, no input commits it and moves to the next page, and a
-  double tap ends the capture phase. Zero phone operations after setup.
-- **The existing loop is enabled only on `:glassdoc`.** It still uses three shots,
-  the existing intervals, ShotScore/PageFraming and duplicate/unreadable limits.
+  shoot on their own, the captured image is shown for 3 seconds, no input
+  commits it and moves to the next page, and a double tap ends the capture
+  phase. Zero phone operations after setup. On 2026-11-12 the operator asked
+  for one tap to clear the display and stop the camera and one tap to bring
+  them back; in ordinary reading the retake and the manual shot, which the tap
+  did until then, moved to the forward swipe. The same rule holds on the
+  chooser: a tap turns the display off, a swipe selects, a double tap starts.
+  Mixed English and listening keep the earlier assignment while capturing.
+  `docs/multimodal-scan.md` holds the operation table.
+- **The existing loop is enabled only on `:glassdoc`.** Page change is latched
+  until stillness permits one shot; OCR character count and burst scoring are
+  not capture conditions. Actual review lasts three seconds, then local save
+  waits for another page change. While local capture remains active, page
+  observation continues across idle waits without a resume tap. Explicit end,
+  lifecycle stop and failure boundaries still stop the camera. A previous
+  `manual=true` does not carry over to a normal launch.
+  The still is full-size YUV taken beside the running preview after fresh
+  supported focus/exposure and stillness checks, copied, closed and then
+  encoded to JPEG (quality 98) off the camera thread (glassdoc 0.43.13,
+  2026-11-12, `docs/hardware-measurements.md` §M-5). From 0.43.23 the
+  full-size output is in the session only while a photo is prepared and taken,
+  and the preview that merely watches for a page runs at 15 frames a second:
+  held all along at 30, the full-size output took the board from 38.5 to 62.2 C
+  in three minutes on a desk and the frame handler from 21 to 9 frames a
+  second; now the same three minutes take it from 37.7 to 43.8 C with 10-11
+  frames handled steadily (§M-18). Ten minutes on the desk with a photo every 20 s (31 stills, 62 rebuilds) levelled off near 48 C on the board, with no spurious page change, no error and no restart of the camera services. The session is rebuilt on the same
+  open camera, about 0.45 s each way, and nothing of the session being replaced
+  counts meanwhile; from a detected page to its photo is about 2 s. A still
+  0.3 s after the rebuilt preview restarted read the same as one from a
+  session held all along, while the camera's own JPEG on a session of its own
+  read a third of it (10.5 against 33.3 where the glasses' own camera read
+  39.7), so that path is not a way to save heat. Comparison launches keep the
+  full-size output throughout. That JPEG carries no EXIF; its provenance stays
+  `native_still`. On
+  firmware `1.29.013-20261110` a session holding the camera's JPEG output
+  beside any other output never returned the still and the camera provider
+  aborted (§M-1), so the camera's own JPEG is used only where the YUV pair is
+  refused, on a JPEG-only session of its own with the preview put back
+  afterwards. With this, glassdoc 0.43.10 took and saved stills on the glasses
+  in 1.5-1.7 s, three runs and four in one session, in a dark scene; what a
+  page looks like in them is not measured. In a lit scene that version took an
+  unmoving page again and again, because the returning preview starts its
+  exposure over; 0.43.12 does not count frames as page evidence until a fresh
+  converged result arrives (§M-4). The JPEG-session path leaves about 3 s
+  without preview after each still; the YUV path about half a second at each
+  rebuild. Which noise
+  reduction and edge setting reads best on a lit page is not measured. The ZSL and recording evaluation
+  launches still put the JPEG beside other outputs. Fixed-focus hardware does not
+  gain autofocus from an AF trigger. Expired preparation never forces a
+  moving shot. Before any camera request it is a cancelled preparation: the
+  wearer is told to hold still, the session continues and the same page is
+  observed again (2026-11-10; until then it ended the session and required an
+  app restart). A failure after the camera request stays UNKNOWN. Evaluation
+  modes keep the earlier fatal stop. PC tests only; physical character
+  accuracy remains unverified.
+  Gyroscope freshness uses the sensor's measurement timestamp, including delayed
+  deliveries and gaps in the retained preview stream. On supported fixed-focus
+  cameras the still copies the exposure, sensitivity and gain the preview's auto
+  exposure measured, and the exposure is shortened only by asking that auto
+  exposure for a faster frame-rate range: 60 where one flicker period needs a
+  total gain of at most 1600 (leaving it needs more than entering), else 30
+  wherever the camera has that range, however dark. Until 0.43.20 a scene
+  needing a gain over 6400 at 30 ms fell back to the template's 50-60 ms, where
+  the stillness limit is 0.02 rad/s and a worn head never passed; smear cannot
+  be undone and noise can be averaged out. On the desk of 2026-11-14 (60 ms at
+  3320 by the glasses' own camera) the app took 30 ms at a gain of about 6600
+  and read 35.5-37.4 against that camera's 42.6-44.1 (§M-17). Above a total gain
+  of 1600 the still asks for no edge enhancement. Shortening by hand failed
+  three ways on the glasses: darker left a dim page at 17 of 255; the preview's
+  own 50-70 ms was never still enough on a worn head (§M-6, §M-7); one period
+  with the gain raised by hand was colour noise, level over noise 2 against 43
+  from the glasses' own camera, because the ISP tunes noise reduction to the
+  auto exposure's state (§M-9, §M-10). In one dim desk scene glassdoc 0.43.16
+  read 38-40 against that camera's 45 at half its exposure. The dark photos of
+  September (8.3-10 ms, sensitivity 50-60) were the app's exposure, about a
+  twelfth of the light the glasses' camera used that night, not the room. The
+  glasses' camera waits for stillness, takes an auto-exposed exposure bracket
+  of five frames and fuses it with a vendor library no third-party app can
+  call; glassdoc takes one frame, and averaging four 30 ms frames of a still
+  scene passed that camera's noise. A lit page, a worn head, burst alignment
+  and the bounds of the ranges are not measured. Preview frames brightened by
+  a still in flight are not page evidence. Its JPEG joins the matching capture result
+  within the existing deadline. Missing or inconsistent metadata retains the
+  original for explicit recapture. Live preview retains at most one queued bitmap.
+  The original JPEG budget is 20 MiB across capture, local persistence and image
+  upload. The measured camera advertises 18,457,096 bytes as its JPEG maximum.
+  An explicit `zsl_evaluation=true` launch evaluates full-resolution YUV
+  reprocessing on cameras advertising the required reprocessing, burst and
+  realtime timestamp capabilities. It pairs input frames with their own session's
+  capture results and the current scene/quiet interval. Default native stills
+  remain the ordinary route. Unsupported evaluation is reported instead of
+  silently mixing native samples into the measurement. Queue and close work
+  must not block the camera handler or falsely acknowledge a completed stop.
+  An explicit `video_evaluation=true` comparison keeps maximum native JPEGs
+  beside a silent original MP4. It queries MediaRecorder sizes, AVC/HEVC
+  encoder capabilities and the exact three-output session without a silent
+  profile fallback. Recorder preparation/finalization run off the camera handler;
+  stop acknowledgement waits for finalization and retains uncertain originals.
+  Its private journal separates selected profiles, actual container metadata,
+  camera scene timestamps and unknown video PTS correspondence. The bounded
+  local clip is not an automatic whole-booklet recording. An additional explicit
+  `video_transfer_evaluation=true` launch enables comparison transfer, without
+  persisting that choice or changing the journal's `auto_upload_allowed=false`.
+  A separate origin binds the local session, device and generation before
+  recorder preparation, then binds the matching server IDs once. A dedicated
+  worker streams the sealed original and retains the exact envelope and receipt.
+  Stale generations, changed local artifacts and uncertain responses cannot
+  acknowledge a transfer. Camera stop and ordinary page uploads do not wait for it.
+  Optional phone-side capture inspection keeps the unchanged original PNG in
+  each new diagnostic packet, with one overview and at most four native-pixel
+  regions when the bounded packet budget permits. An original exceeding that
+  comparison budget is retained as unknown; prepared or uncertain old manifests
+  are preserved. It uses the existing Work writer and uncertain-send journal.
+  Exact decoded-video candidates share that diagnostic
+  queue. A current-run origin is fixed before capture; restored legacy originals
+  remain usable without invented generations. Results never authorize automatic
+  retakes, quality acceptance or wake. PRIVATE reprocessing and live AI inspection
+  remain comparison candidates without physical quality or performance acceptance.
   The frozen CUSTOMVIEW route keeps explicit phone controls. The original
   `adf12ee` disable decision belonged to the route without operator taps.
-- On the local surface the captured still is drawn after camera closure; a
-  visible acknowledgement starts a fresh 3000ms review. A single tap retakes,
-  no input commits, BACK ends capture after the last review. Hidden or stale
-  views cannot commit. A waiting tap requests a manual shot without starting
-  a second request in flight. See `docs/multimodal-scan.md`.
-- The standalone app records listening PCM while capturing. VAD/ASR runs on the
-  phone, retains originals and waits for all chunks before final analysis.
+- An explicit, nonpersistent `native_selection=true` comparison launch may take
+  one additional maximum-size native JPEG only when the same scene is already
+  ready, without waiting for preparation or taking priority over a next page.
+  Retain both originals and their provenance before comparing bounded native-pixel
+  regions. Unknown or tied comparisons retain the first image. A selected second
+  image must receive its own fresh three-second visible review before ordinary
+  upload; stale scenes, expired review, generation changes and terminal states
+  cannot replace it. Restart must not repeat the extra request. This comparison
+  is default-off and exclusive with ZSL, recording and paper-geometry evaluation.
+  Physical character accuracy and additional latency are not accepted yet.
+- On the local surface the captured still is drawn after its native image is
+  closed. The preview session continues observing page changes until pause,
+  capture end or failure; physical frame continuity remains unverified. A
+  visible acknowledgement starts a fresh 3000ms review. During review, at most
+  two future-page originals are retained locally and promoted in order; each
+  requires its own visible acknowledgement and review before upload. Observation
+  is reserved durably before native start. Unknown captures, failed persistence
+  and suspected gaps survive restart; only an acknowledged ordinary stop can
+  clear a resolved observation. A forward swipe retakes, no input commits, BACK ends
+  capture after the last review. Hidden or stale views cannot commit. A waiting
+  forward swipe first waits for the native stop barrier and promotes any saved
+  candidate before requesting a manual shot. A tap pauses: the photo in hand is
+  saved first, then the camera closes and nothing is drawn until the next tap;
+  the same page is not taken again on return (on the glasses, 2026-11-12,
+  `docs/hardware-measurements.md` §M-4). One photo remains in flight at most. This
+  does not establish whole-booklet coverage or physical readability. See
+  `docs/multimodal-scan.md`.
+- The standalone app keeps the previous listening-only flow and adds mixed
+  English: capture paper first, solve reading from images, then send completed
+  original audio to the same chat after the reading reply is durably saved.
+  Audio-dependent questions remain pending before audio; missing recording is
+  never inferred. Capture/review swipes and reader/analysis/waiting single taps
+  toggle mixed recording without shifting answer position. A waiting swipe
+  returns to saved reading answers. The phone preserves and verifies all chunks
+  before audio analysis. The chatgpt-web route
+  sends original images/audio, not OCR or local transcripts, and does not require
+  local VAD/ASR. ASR remains for compatible non-browser provider paths.
   Diagram answers use validated vectors and the existing AnswerReader/Canvas.
+  Extended figures use schema 3 for arcs, hatched polygons and optional dashed
+  strokes/filled circles; legacy figures retain schema 2 and text schema 1.
+  Preserve literal program identifiers/indentation and whole mathematical script
+  groups. Unsupported Markdown table blocks and matrix-bearing expressions retain
+  their source notation and remain needs_review before scalar conversion. This
+  source-preservation boundary is not cell-aligned or typeset matrix support.
+  The server must not silently truncate printed answer numbers.
   These new behaviors have not passed physical acceptance on the current APK.
+- Answer reading is continuous: pack short items on one screen, keep full
+  derivations and diagrams, and retain printed answer numbers and position.
+  The first final-reader double tap persists writing completion and sleeps
+  inside the app; only two further double taps within three seconds exit to home.
+  Mixed intermediate reading completion returns to audio waiting and keeps
+  recording; a later answer revision updates the same question identities.
+  Authenticated device/session/generation/sequence state lets the phone watcher
+  request sleep/wake. A completed or closed generation ignores late answers.
+  The phone repeats an answer notification until `ack_answer_revision` confirms
+  a bundle saved and displayed by that client; generated revisions are not
+  receipt acknowledgements. The client suppresses concurrent and duplicate loads.
+  Complete answer JSON is bounded to 64 MiB and answer/issue text to 24 Mi UTF-16
+  units. These budgets cover the two 8 MiB Work stages and expanded mathematical
+  glyphs. Network input and atomic offline saves use bounded streams. Schema
+  versions 1, 2 and 3 remain readable, including existing saved cursor state.
+  Long-answer layout keeps bounded page-position indexes and constructs visible
+  pages when requested. Initial layout waits for the measured view dimensions.
+  Saved-answer reads and explicit resume run on the serialized persistence worker.
+  A resume canceled before its commit decision rolls back its atomic save.
+  Explicit completion waits for durable storage before leaving the reader.
+  Keep microphone input while muting output. Do not hold the glasses CPU for
+  indefinite analysis or poll answers there; bounded upload work may retain CPU
+  only until its timeout or completion. Physical silence and timing are pending.
+- Ordinary still review shows the image without text covering it. Keep the
+  three-second visible review and the existing retake/end gestures. Preserve
+  the operator's system screen-off timeout, including disabled auto-off:
+  capture/review/reading hold the app window on. The chooser stays thirty
+  seconds (it is read and chosen from; at five it was gone before a wearer could
+  choose, 2026-11-13). Recording-only, uploading, analysis and other waiting
+  sleep after five seconds without user input; network refreshes do not extend that timer. Authenticated phone-watcher
+  requests handle sleep/wake. Sleep uses Android's soft-sleep key so the window's
+  current screen wake lock is checked when a delayed request reaches the device.
+  Old persistent generations cannot release or reacquire the current window's
+  display hold. Ordinary chooser updates are not app-entry requests.
+  Confirmed wear requests use a fresh persistent generation and an explicit
+  chooser entry, explicit wake and no old answer-wake extras. Never restore
+  a saved timeout over a later operator choice. For a serial-verified, previously
+  running app, a fresh explicit sleep request precedes fold/process diagnostics;
+  cold-start and prior in-flight work can still delay delivery. A saved-answer
+  hardware trial retained display and cursor through the12.297-second observation
+  after SOFT_SLEEP (`GL48-saved-reader-display-hold-20261031.py
+  --execute-approved-once`, exit0; independently audited). The operator also
+  confirmed that the answer stays visible and readable. On 2026-11-09, when
+  the chooser's timeout was still five seconds (thirty from 0.43.18), the
+  updated app emitted chooser sleep requests after 5.012 and 5.016 seconds.
+  The phone watcher returned SOFT_SLEEP 0.216 and 0.163 seconds after reading
+  those authenticated requests. Android readback changed from Awake at 5.391
+  seconds to Asleep at 6.047 seconds in the sampled chooser trial. Saved answers
+  remained Awake with a window hold for 12.578 seconds after SOFT_SLEEP, with
+  identical before/after screenshots. The external timeout stayed unchanged.
+  These are device readback observations. Optical, restart and full-duration
+  acceptance remain pending.
 - Text-only page upload remains an API compatibility path. Do not describe it
   as the real-device primary path.
 - The public CXR-L AIDL surface does not expose arbitrary recognition or
   answer text from the AI running on the glasses. The current production path
-  therefore uses the phone OCR and a configured server analyzer/solver.
+  uses a configured server solver; glassdoc observes page images,
+  while the frozen relay performs OCR on the phone. On the background
+  chatgpt-web route the model lists and answers the questions from the original
+  images after ordered attachment receipts and OCR does not segment or gate capture.
 - Use the official `com.rokid.cxr:client-l:1.1.1` dependency. Do not commit,
   copy, or redistribute Rokid AAR files.
 - Global Hi Rokid uses package `com.rokid.sprite.global.aiapp`. Keep the
@@ -227,8 +531,8 @@ with no device commands, `tests/test_rokid_led.py` enforces that, and the
 procedures are deliberately not kept anywhere in this repository.
 
 OCR文字枠の内側判定は `TEXT_BOUNDS_ONLY`（旧保存token `COMPLETE` も同義）であり、
-紙面・未認識文字・図表の合格ではない。glassdocの確認表示は「構図確認のみ」
-「無操作で保存・画質未検証」とし、3秒の無操作を品質承認と説明しない。
+紙面・未認識文字・図表の合格ではない。glassdocの通常確認は実画像だけを3秒表示し、
+無操作で保存する。これは構図の確認で、3秒の無操作を品質承認と説明しない。
 PC用の原寸点検・登録条件・比較部品は `docs/capture-quality.md`。画像由来の証拠生成と
 撮影／正式登録本流の品質ゲートは未接続。既存の実機試験・導入・送信停止を維持する。
 
@@ -270,15 +574,50 @@ Only four gestures reach an ordinary app; the rest are system-reserved in
 ## Server invariants
 
 - Store the orientation-corrected, normalized PNG as the authoritative server
-  image. The relay upload may be a JPEG, but the raw upload bytes are not
-  persisted. Never claim raw JPEG is persisted when it is not.
+  image. A native JPEG with verified capture provenance is also persisted
+  unchanged beside that PNG before the page is committed. Compatibility uploads
+  without native provenance keep only the PNG. New Work jobs may opt into these
+  retained originals through `ROKID_WORK_ORIGINAL_JPEG=1` (default off), binding
+  their encoded dimensions, explicit clockwise rotation and upright RGB hash to
+  the canonical PNG. Existing jobs retain their sealed format; later checks use
+  both byte hashes and immutable pixel evidence. Other solvers use the canonical
+  PNG. Physical JPEG delivery accuracy and latency remain unverified.
+- Optional native capture provenance must match the received JPEG's actual
+  hash, dimensions, page and rotation before persistence. Keep its correspondence
+  with the canonical PNG hash on that page and in the sealed Work manifest.
+  Native clients require the complete provenance echo before acknowledging an
+  upload. Legacy images stay usable without invented sensor metadata. These
+  bindings are not physical image-quality or multi-client upload-order proofs.
+  Explicit ZSL provenance uses `source_kind=zsl_reprocess` and requires matching
+  positive image/result timestamps. The same sixteen-key receipt and canonical
+  PNG binding apply. Pending-image format v5 preserves the source kind while
+  loading v4 as native and keeping v1-v3 compatibility; missing metadata is not
+  invented for legacy images. A ZSL association failure retains the JPEG as an
+  unresolved local original and must remain ineligible for upload after restart.
 - A configured cloud analyzer may transcribe/correct OCR and describe diagrams
   from the image. Finalization must fail clearly if a photo has no usable text
   and no image-capable analyzer is configured.
+- The explicit comparison-video receipt endpoint keeps the original MP4 and
+  exact metadata envelope separately from page PNGs. It requires an authenticated,
+  current device/session/generation and matching document, verifies stored bytes,
+  and publishes a durable receipt only after no-clobber storage succeeds.
+  Stored means quality is unevaluated; it does not register pages or invoke Work.
+  The explicit Android transfer client and physical video quality still need
+  end-to-end acceptance on the glasses and phone.
 - Persist analyzer-derived text before segmenting problems.
 - Pass the originating page image to image-capable solvers.
 - Keep document finalization idempotent and page replacement keyed by
   `(document_id, page_index)`.
+- `/v1/glasses/state` always requires a configured API key. Store monotonic
+  generation/sequence and terminal states atomically. Use the authenticated
+  request's source address for watcher discovery, then check `ro.serialno`
+  before device control. If that address is unreachable or state is absent,
+  bounded legacy mDNS discovery may identify a candidate for serial-verified
+  stopped-app bootstrap only; it must not fabricate authenticated state or a
+  session generation. If the native ADB service is unavailable or empty, a bounded
+  python-zeroconf child uses the current hotspot IPv4 directly. The measured
+  F-51F interface is `ap0`; other phones and actual advertisement reception remain
+  unverified. Forwarded headers must not select the target.
 - `ROKID_REAL_MODE=1` must reject placeholder analyzer/solver combinations and
   fail explicitly rather than fall back silently.
 - Never send unsupported media to a provider: OGG/FLAC are not handed to OpenAI
@@ -300,9 +639,10 @@ Build and inspect before touching a device:
 
 Then, on a device:
 
-- Enumerate devices read-only first and name the serial in every command. Stop
-  on multiple devices, signature mismatch, version downgrade, unknown callback
-  state.
+- Enumerate devices read-only first and name the selected transport in every
+  command, checking its actual serial. Refuse ambiguous target identity,
+  signature mismatch, version downgrade or unknown callback state. Multiple
+  listed transports alone do not make an explicitly verified target ambiguous.
 - Record the exact phone / glasses / Hi Rokid / service / relay tuple.
 - Report the LED result only from external physical observation.
 - Ask before uninstalling apps or changing phone security settings.
@@ -340,11 +680,13 @@ Then, on a device:
 Server:
 
 ```bash
-py -3.12 -m pytest -q
+py -3.12 -m pytest -q tests
 py -3.12 -m ruff check .
 ```
 
 `python` on this machine is 3.14 and has no pytest. Use `py -3.12`.
+The explicit `tests` directory excludes ignored device reports and frozen audit
+fixtures; run those fixtures separately with their recorded command.
 
 Android relay:
 
@@ -379,6 +721,159 @@ For changes to the real-device path:
 
 An Android build proves compilation only. Do not label hardware behavior as
 verified until the physical checklist has been completed.
+
+### Order of verification on hardware
+
+This list is the rule. The paragraphs after it are the reasons and the
+records; each was learned from a failure the operator found.
+
+1. Place the work in the flow first. `docs/defect-register.md` opens with the
+   purpose and where each step of the use stands. A remark from the operator
+   is one observation of that flow, not a new goal: the goal and the step in
+   hand do not change because of it.
+2. Characterise before building: the glasses' own camera for exposure and
+   processing, the recorded head motion (`scripts/head_motion_report.py`) for
+   stillness, the project's records for what is already known.
+3. After every change to the glasses app, on the desk: compile the installed
+   package; `glasses_device_check.py`; gestures through the touchpad's input device,
+   every cycle three times; `system_observation.py` before and after a change
+   to capture or display; `e2e_route_check.py` with the stand-in solver for
+   the whole use in order.
+4. Say what the desk cannot show. Glasses on a desk look across the room and
+   do not move; on 2026-11-14 that view was about thirty times darker than the
+   page a wearer photographed on 9/22. Look at what the camera sees (a photo
+   with the glasses' own camera) before reading a desk number as a condition
+   of use. The light on a page a wearer looks at and the motion of a
+   reading head exist only when worn.
+5. When the wearer is needed, say so plainly: what they do, for how long,
+   what the one pass decides, and what was checked first so that it cannot
+   fail for a reason findable on the desk. Not before that, and not silently
+   never.
+6. A run with the real model is the operator's decision: once, through Chat,
+   under the conditions below.
+7. A rule or measurement added to this file or to another record is added by
+   reading the whole document again and correcting, in the same change, what
+   it has made stale.
+
+What is known about worn capture (2026-11-14): one attempt, 37 seconds on
+glassdoc 0.43.14 with the preview at 50-60 ms, where the stillness limit was
+0.02 rad/s, took no photo (§M-7); in September, at 10 ms and 0.12 rad/s, worn
+photos were taken. The exposure rules since (0.43.15, 0.43.16) have never been
+worn, and neither a worn head's turning speed nor the light on a worn page had
+been recorded. From 0.43.21 the app records the gyroscope at 200 Hz for as
+long as its camera is open (a trace named head-motion.bin in the app's
+external files directory, which adb can read; the build is not debuggable;
+read by `scripts/head_motion_report.py`) and logs, for each photo, the turning during
+its own exposure (`still_motion`); neither changes a decision. The stillness
+gate itself is unchanged: it allows a photo after 300 ms in which every
+reading is under 0.12 rad/s x 10 ms / exposure, then stops listening, and the
+exposure comes 0.3-0.7 s later.
+
+After any change to the glasses app, and before the wearer is asked to try it,
+run `py -3.12 scripts/glasses_device_check.py --glasses <serial> --phone <serial>`.
+After each install run `cmd package compile -m speed -f <package>` on the
+glasses; the check fails an uncompiled app, which is slower and hotter. It
+writes gestures to the touchpad's own input device (from 2026-11-14; its
+injected keys had drifted from the app and started mixed English, where a tap
+takes a photo) and reads the chooser's marker from the screen, because the
+chooser opens on the kind of reading used last. It checks, line by
+line, the environment, the chooser, the automatic photo and its exposure, that
+an unmoving scene is not taken again, pause and resume, the manual shot and
+what reached the phone server. The PC reaches the glasses without a cable
+through the phone: `scripts/glasses_over_phone.py start --phone <transport>`
+runs a relay on the phone and prints an adb transport of the glasses (this PC,
+the phone on the home network, the glasses on the phone's hotspot), which
+every script takes as `--glasses`; `adb reverse` works over it. Use it by
+default: a cable is not part of the use, and on 2026-11-14 a worn recording
+was asked for over USB and could not be done. A worn recording is taken with
+`scripts/e2e_route_check.py --paper <seconds>` over that transport; it waits
+for the wear sensor before it counts (a first attempt recorded two minutes of
+a desk): the test-only package and the
+stand-in server, the real app force-stopped, the capture never ended, so
+nothing can reach the model whatever the wearer touches; it reports the light,
+the head's turning and every photo, and keeps the head-motion trace. The unit tests use a fake camera and display: from
+2026-11-01 to 2026-11-12 they hid a frame handler 300 times slower on the
+device, a still the firmware never returned, one page taken again and again,
+and a photo too dark to read. Glasses lying on a desk look across the room, not
+at a page; a page's legibility and page turns need the wearer.
+
+The glasses' own camera is the reference for exposure and processing. Over adb
+`input keyevent KEYCODE_SPRITE_FUNCTION` takes one photo with it into
+`/sdcard/DCIM/Camera` without stopping the foreground app. Before a change to
+exposure, gain or still processing is handed to the wearer, take the same scene
+both ways seconds apart and compare brightness and noise; `:glassprobe`
+`--es camera_variant` takes `fps=`, `scene=` and `ev=` for the camera's own
+controls. Do not attribute a dark photo to the room without that comparison,
+and do not judge from old photos when a new pair can be taken. The device
+check takes the reference itself and reads every app photo at the same flat
+places: under 0.3 of the reference's level over noise fails, under 0.6 warns.
+Brightness alone passed a photo that was colour noise.
+
+Injected keys do not take the path a real touch takes. A touch on a sleeping
+display is consumed by the wake and never reaches the app; the Activity is only
+restarted and resumed (§M-12). Write gestures to the touchpad's own input device
+(`sendevent /dev/input/event1`, a tap is KEY_DASHBOARD 204 then KEY_ENTER 28;
+`scripts/glasses_display_cycles.py <serial> chooser|capture --raw`) and repeat
+every cycle at least three times: one cycle with injected keys passed a
+display-off that failed from the second use. Never pipe a dump into an
+early-closing filter on the device (`dumpsys media.camera | grep -m1` killed the
+camera provider while the camera was streaming); read it whole on the PC.
+`docs/defect-register.md` lists the known defects by cause layer and their state.
+
+Look at the whole system, not one component. `scripts/system_observation.py`
+drives a capture through the touchpad's input device and records load, memory,
+temperature and server response on both devices and every log buffer by source;
+take it before and after a change to capture or display. Measured on a desk on
+2026-11-13 (§M-13, glassdoc 0.43.17, before the heat was dealt with in 0.43.23):
+ten minutes of capture took the SoC from 39 to 74 C and the camera zone to
+73.5 C, still rising, with the preview handled at 9-11 frames a second after
+the first 30 s; the phone's watcher sends three adb commands a loop
+to the glasses at 0.3-2.8 s each; the server's `/health` took up to 1.1 s during
+uploads. A start double tap is sent once and confirmed from a time-stamped log
+filter, never repeated: a retry loop repeated it into a running capture, which
+only an unresolved-scene guard kept from ending and going to the model.
+
+Check the whole use, in the order it is used, not one item. `scripts/e2e_route_check.py`
+drives start, photos, end, upload, analysis wait, answers, wake, reading and finish
+on the real glasses through the touchpad's input device, with a second package of
+the same app (`-PglassdocRouteCheck`, beside the real one, whose saved server, key
+and answers it never touches), a server on the PC with `ROKID_SOLVER=recorded`
+(a recorded reply; sending off; no browser) and the watcher on the PC. First run
+on 2026-11-13: 26 of 27 lines (§M-14). The phone, its hotspot and the browser are
+not in that loop: it is not the venue topology. The "use in order" table at the
+top of `docs/defect-register.md` says what has and has not been checked.
+
+A real run with the model spends the operator's usage and is decided by the
+operator, not by the agent. On 2026-11-13 the agent first carried "GPT sends: 0"
+as a blanket premise (an instruction about repeated model comparisons, widened
+without thought), and then, told that this made no sense, swung the other way
+and ran the real route at once: a Work task on a photo of the desk, not a
+problem page, while capture was known to be broken (§M-15). The operator called
+that waste: such a run is not to be repeated and was not to be done then; Fast
+is production's setting and is waste in a trial, and Work is costly too.
+Before proposing a real run, all of these hold: capture has passed the desk
+checks against the glasses' own camera; a real problem page is in view; the
+question the run answers is written down and cannot be answered by a cheaper
+means (the stand-in solver, the standard camera, the PC); it is one run at
+Standard speed, with the route and effort named. Then ask, once, and wait.
+The stand-in solver (`ROKID_SOLVER=recorded`) carries every other route check.
+
+Which route costs what was already in the record and was not consulted before
+that run. Work shares one allowance with Codex ("ChatGPT Work usage inside
+ChatGPT uses the same pricing, credits, and usage limits as Codex"; Plus: an
+estimated 15-160 messages per five hours for GPT-6.1 Sol, weekly limits may
+apply; Fast uses 2.5 times the included usage; learn.chatgpt.com/codex/pricing,
+read again 2026-11-13). Ordinary chat is outside that allowance; in Chat the
+Pro position has its own allowance and the others are GPT-6 Sol
+(`docs/requirements-audit.md`, 2026-11-12). The operator's point: a trial with
+the real model goes through Chat (`ROKID_SOLVER=chatgpt-web`), which does not
+draw on the Work allowance; its own limit is the upload window (80 files per
+three hours). The Chat booklet route sent its first booklet from the phone on
+2026-11-14 (§M-19) after six fixes found on the live page; the switch from Work
+into it has still never run. A page whose questions need a passage on another
+page comes back `needs_input`, as the prompt requires: a trial that is to judge
+answers needs pages that can be answered from what is sent. The phone's solver
+setting is changed on the phone; since 2026-11-14 it is `codex-cli`.
 
 ## Versioning
 

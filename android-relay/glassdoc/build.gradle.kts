@@ -69,8 +69,22 @@ android {
         // Review end feedback never changes the visible-frame clock or capture policy.
         // 15 handles Camera2 delivery failures and records numeric diagnostics.
         // Capture settings and physical acceptance gates remain unchanged.
-        versionCode = 17
-        versionName = "0.14.2"
+        // Meter before the single JPEG; convergence is not a readability certificate.
+        // 21 sends a best shot OCR could not read to the 3 s review instead of shooting again.
+        // 39 retains up to two future-page originals during visible review.
+        // 40 verifies native capture provenance before acknowledging an upload.
+        // 41 keeps active page observation across idle waits without a resume tap.
+        // 42 adds explicit full-resolution ZSL evaluation, without changing the native default.
+        // 43 adds explicit original-video/MAX-JPEG evaluation and a recorder stop barrier.
+        // 44 adds opt-in comparison transfer with persistent origin and receipt binding.
+        // 46 adds explicit provisional paper/AE comparison and respects Y-plane buffer origins.
+        // 48 fences stale power callbacks and consumes bounded current-capture feedback.
+        // 53 distinguishes display wraps from source newlines without changing answer text.
+        // 59 is not debuggable: on the glasses a debuggable build ran interpreted only (2026-11-11).
+        // 60 copies the preview plane once per frame and paces frames so results are not starved.
+        // 61 keeps the session when the HAL drops a preview frame before any still is requested.
+        versionCode = 75
+        versionName = "0.43.23"
     }
 
     // Same reasoning as `:glassapp`: a vendor installer that reads JAR
@@ -83,6 +97,17 @@ android {
     }
 
     buildTypes {
+        debug {
+            // Measured on firmware 1.29.013: a debuggable APK stayed at dexopt `verify` after
+            // `cmd package compile -m speed`, its JIT thread used 0.01 s in a 55 s capture, and each
+            // preview frame took about 600 ms on the camera thread, so no still was ever taken.
+            // `-PglassdocDebuggable` restores `run-as` for reading the app's files during development.
+            isDebuggable = providers.gradleProperty("glassdocDebuggable").isPresent
+            // `-PglassdocRouteCheck` builds the same app under a second package name, so the whole route can be
+            // exercised on the glasses beside the real app without touching its saved server, key or answers
+            // (the real, non-debuggable install cannot be backed up). Used by scripts/e2e_route_check.py.
+            if (providers.gradleProperty("glassdocRouteCheck").isPresent) applicationIdSuffix = ".routecheck"
+        }
         release {
             isMinifyEnabled = false
         }

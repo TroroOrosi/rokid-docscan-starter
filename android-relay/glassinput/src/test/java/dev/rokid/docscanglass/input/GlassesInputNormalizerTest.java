@@ -219,6 +219,32 @@ public class GlassesInputNormalizerTest {
                 normalizer.accept(key(1250, "KEYCODE_ENTER")));
     }
 
+    @Test
+    public void ignoresKeyUpClockJitterWithoutLosingTheMeasuredTap() {
+        GlassesInputNormalizer normalizer = new GlassesInputNormalizer();
+        normalizer.accept(key(7_395_373, "KEYCODE_NOTIFICATION"));
+        // Actual glasses trace: the elapsed/uptime conversion differed by 1 ms.
+        assertTrue(normalizer.accept(InputSignal.key(
+                7_395_372, "UP", "KEYCODE_NOTIFICATION", true)).isEmpty());
+        assertEquals(Optional.of(GlassesInputAction.SHORT_TAP),
+                normalizer.accept(key(7_395_376, "KEYCODE_ENTER")));
+        assertTrue(normalizer.accept(key(7_395_377, "KEYCODE_ENTER")).isEmpty());
+    }
+
+    @Test
+    public void ignoredKeyUpDoesNotAdvanceTheRecognitionClock() {
+        GlassesInputNormalizer normalizer = new GlassesInputNormalizer();
+        normalizer.accept(key(100, "KEYCODE_NOTIFICATION"));
+        assertTrue(normalizer.accept(InputSignal.key(
+                102, "UP", "KEYCODE_NOTIFICATION", true)).isEmpty());
+        assertEquals(Optional.of(GlassesInputAction.SHORT_TAP),
+                normalizer.accept(key(101, "KEYCODE_ENTER")));
+        // A reordered DOWN remains invalid; only non-recognition UP is ignored.
+        normalizer.accept(key(200, "KEYCODE_NOTIFICATION"));
+        assertTrue(normalizer.accept(key(199, "KEYCODE_NOTIFICATION")).isEmpty());
+        assertTrue(normalizer.accept(key(201, "KEYCODE_ENTER")).isEmpty());
+    }
+
     private static InputSignal key(long elapsedMillis, String name) {
         return InputSignal.key(elapsedMillis, "DOWN", name, true);
     }

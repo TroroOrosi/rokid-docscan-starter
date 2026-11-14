@@ -1,12 +1,39 @@
-"""PC-only comparison of reference-labelled single/spread trials; never selects a mode."""
+"""PC-only reference comparisons; never selects a capture mode or approves quality."""
 from __future__ import annotations
 
 import argparse
 import json
 import re
+import unicodedata
 from pathlib import Path
 
 MAX_BYTES = 8 * 1024 * 1024
+
+
+def compare_text(reference: str, recognized: str) -> dict:
+    """Count NFC code-point edits for one labelled region, without a quality verdict.
+
+    Preserve spaces, punctuation, case and math symbols. The caller owns the
+    transcription and reading order; never sort or deduplicate OCR to fit it.
+    """
+    if (not isinstance(reference, str) or not isinstance(recognized, str)
+            or not reference.strip() or max(len(reference), len(recognized)) > 2048):
+        raise ValueError("text comparison requires a reference and at most 2048 characters per input")
+    reference, recognized = (unicodedata.normalize("NFC", text) for text in (reference, recognized))
+    if max(len(reference), len(recognized)) > 2048:
+        raise ValueError("normalized text exceeds 2048 characters")
+    # ponytail: quadratic work bounded to short regions; use a vetted edit-distance
+    # library if whole-document comparisons become necessary.
+    row = list(range(len(recognized) + 1))
+    for i, expected in enumerate(reference, 1):
+        current = [i]
+        for j, actual in enumerate(recognized, 1):
+            current.append(min(current[-1] + 1, row[j] + 1,
+                               row[j - 1] + (expected != actual)))
+        row = current
+    return {"errors": row[-1], "reference_characters": len(reference),
+            "recognized_characters": len(recognized),
+            "error_rate": row[-1] / len(reference), "normalization": "NFC"}
 
 
 def evaluate_trials(records: object) -> dict:

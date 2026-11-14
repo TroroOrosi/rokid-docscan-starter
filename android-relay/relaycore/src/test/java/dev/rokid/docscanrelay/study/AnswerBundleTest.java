@@ -3,6 +3,11 @@ package dev.rokid.docscanrelay.study;
 import static org.junit.Assert.*;
 
 import java.util.List;
+import java.io.ByteArrayInputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.SequenceInputStream;
+import java.nio.charset.StandardCharsets;
 import org.json.JSONObject;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -13,6 +18,73 @@ import org.robolectric.annotation.Config;
 @Config(manifest = Config.NONE, sdk = 28)
 public class AnswerBundleTest {
     private final String digest = "a".repeat(64);
+
+    @Test public void streamBoundsApplyBeforeAnOversizedTokenOrBodyIsAllocated() throws Exception {
+        InputStream hugeString = new SequenceInputStream(new ByteArrayInputStream(
+                "{\"unknown\":\"".getBytes(StandardCharsets.UTF_8)),
+                repeated('x', AnswerBundle.MAX_TEXT_CHARS + 1));
+        assertThrows(IOException.class, () -> AnswerBundle.fromStream(hugeString));
+        assertThrows(IOException.class, () -> AnswerBundle.fromStream(
+                repeated(' ', AnswerBundle.MAX_JSON_BYTES + 1)));
+        InputStream malformedScalar = new ByteArrayInputStream(
+                ("{\"unknown\":" + ("x".repeat(100) + "\u2003").repeat(10)).getBytes(StandardCharsets.UTF_8));
+        IOException invalid = assertThrows(IOException.class, () -> AnswerBundle.fromStream(malformedScalar));
+        assertTrue(invalid.getMessage().contains("scalar too large"));
+    }
+
+    @Test public void strictStreamingParserRejectsCoercionDuplicatesAndTrailingValues() throws Exception {
+        String valid = new AnswerBundle("s", digest, 1,
+                List.of(AnswerItem.ready("g", "全問", "q", "1", "A"))).toJson();
+        for (String invalid : List.of(valid + " {}", valid.replace("\"revision\":1", "\"revision\":1.0"),
+                valid.replace("\"revision\":1", "\"revision\":1,\"revision\":2"),
+                "{\"unknown\":" + "[".repeat(32) + "0" + "]".repeat(32) + "," + valid.substring(1))) {
+            assertThrows(Exception.class, () -> AnswerBundle.fromJson(invalid));
+        }
+    }
+
+    private static InputStream repeated(int value, int length) {
+        return new InputStream() {
+            private int remaining = length;
+            @Override public int read() { return remaining-- > 0 ? value : -1; }
+            @Override public int read(byte[] buffer, int offset, int count) {
+                if (remaining <= 0) return -1;
+                int actual = Math.min(remaining, count);
+                java.util.Arrays.fill(buffer, offset, offset + actual, (byte) value);
+                remaining -= actual;
+                return actual;
+            }
+        };
+    }
+
+    @Test public void acceptedLongWorkAnswersRetainAllTextAcrossBundleRoundTrip() throws Exception {
+        for (String unit : List.of("x", "式")) {
+            String answer = unit.repeat(180_000);
+            AnswerBundle bundle = new AnswerBundle("s", digest, 1, List.of(
+                    AnswerItem.ready("g", "全問", "q1", "1", answer),
+                    AnswerItem.ready("g", "全問", "q2", "2", answer),
+                    AnswerItem.ready("g", "全問", "q3", "3", answer),
+                    AnswerItem.ready("g", "全問", "q4", "4", answer)));
+            AnswerBundle restored = AnswerBundle.fromJson(bundle.toJson());
+            for (AnswerItem item : restored.items) assertEquals(answer, item.answer);
+        }
+        String single = "x".repeat(300_001);
+        AnswerBundle bundle = new AnswerBundle("s", digest, 1,
+                List.of(AnswerItem.ready("g", "全問", "q", "1", single)));
+        assertEquals(single, AnswerBundle.fromJson(bundle.toJson()).items.get(0).answer);
+    }
+
+    @Test public void mixedReadingStageSurvivesOfflinePersistenceUntilAudioAnswersArrive() throws Exception {
+        JSONObject json = new JSONObject(new AnswerBundle("7", digest, 1, List.of(
+                AnswerItem.ready("g1", "読解", "q1", "問1", "A"),
+                new AnswerItem("g2", "音声", "q2", "問2", "", AnswerItem.Status.PENDING, "原音待ち"))).toJson())
+                .put("analysis_stage", "awaiting_audio").put("available_stage", "reading");
+        AnswerBundle restored = AnswerBundle.fromJson(json.toString());
+        JSONObject saved = new JSONObject(restored.toJson());
+        assertEquals("awaiting_audio", saved.getString("analysis_stage"));
+        assertEquals("reading", saved.getString("available_stage"));
+        assertFalse(restored.finished());
+        assertEquals("q2", restored.items.get(1).questionId);
+    }
 
     @Test public void completeWrittenAnswersRoundTripWithRepeatedSmallQuestionLabels() throws Exception {
         String proof = "対応する角は等しい。\n".repeat(100);

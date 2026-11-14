@@ -73,6 +73,9 @@ class Question:
     question_id: str = ""
     # Pages whose content has no text representation; a fallback must read them.
     required_image_paths: list[str] = field(default_factory=list)
+    # Mixed papers retain one image-backed chat and add original audio later.
+    booklet_stage: str = "single"
+    booklet_questions: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -124,6 +127,14 @@ class Solver(abc.ABC):
         pre-flight has to be able to ask the second one.
         """
         return True
+
+    #: True when ``check()`` makes a real request to the provider; False when it only looks at ``ready()``.
+    check_sends: bool = False
+
+    def check(self) -> None:
+        """Prove this route can answer now, or raise what answering would raise. Run before use, not per booklet."""
+        if not self.ready():
+            raise RuntimeError(f"{self.name} is not ready")
 
     def info(self) -> dict:
         return {
