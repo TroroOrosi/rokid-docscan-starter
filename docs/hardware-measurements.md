@@ -88,6 +88,8 @@ key 204   NOTIFICATION
 
 ## A-3. AIUI 経路（採用しなかった理由の根拠）
 
+**2026-11-14 追記**：下は 8〜9月の観測。公式文書の今の記載は「通信は全て Bluetooth 経由」「音声起動のみ」と違い、画像を渡せるモデル呼び出しと撮影の API がある（§M-20）。この節を根拠に AIUI を不可としない。
+
 - 成果物は `.aix`（ZIP、圧縮方式 `store`、難読化・署名なし）。JavaScript + `.ink` SFC
 - 配信は Rokid クラウド経由（AIUI Studio → 同一アカウント → 実機）。ケーブル不要
 - **通信は全て Hi Rokid の Bluetooth ネットワークプロキシ経由。グラス単体でネットに
@@ -2245,6 +2247,33 @@ Work から Chat への切替。全画角の写真をサーバー側で紙へ切
 **その他の観測**：PC からスマホのサーバーへの問い合わせは、待ちの間に 53 回 `RemoteProtocolError` で応答が無かった（9/30 にも記録あり、原因未調査）。
 失敗の理由はコードだけが保存され（`model_mismatch` など）、どの確認で外れたかはどこにも残らない。今回の原因は全て実画面を読んで特定した。
 添付数の記録は、実際には上がらなかった3回ぶんも数えた。この確認のための添付は 14 ファイル（未送信、作成欄から削除済み）。
+
+### M-20. 解答の経路の調査：グラス搭載の AI と、公式に使える経路（2026-11-14 夜、資料と読み取りのみ）
+
+Runs on: PC（資料の調査）と、両機の読み取り。何も導入・送信していない。結論と比較表は `docs/whole-review-2026-11-14.md` の9章。
+
+**両機の読み取り**：グラスは `MemTotal` 1,816,600 kB（空き 877,128 kB）、arm64。AI に関わるパッケージは `com.rokid.os.sprite.assistserver` と `com.rokid.cxrservice` で、モデル本体は無い。
+スマホは MT6897、`MemTotal` 11,728,552 kB、Android 16。Termux に Node v26.4.0、Python 3.14.6、git、curl。`codex`・`claude`・`gemini` は未導入。
+PC は `codex-cli 0.167.0`、`Logged in using ChatGPT`。`codex exec --help` に `-i, --image <FILE>...`、`--output-schema <FILE>`、`-m`、`-o`、`--skip-git-repo-check`。
+
+**グラス搭載の AI**（調査役が公式資料と `client-l-1.1.1.aar` の `javap` から。†は私も公式文書で確認）：
+- 標準アシスタントはクラウドで動く。海外版は Gemini・ChatGPT・DeepSeek・Qwen を選べる（Rokid の 2026-03-02 の発表）。起動は呼びかけか AI キー。
+- CXR-L 1.1.1 の AI に関わる面は `IAiEventCallback`（`onAiKeyDown/Up/Exit`、`onInterruptAiWake`）と `interruptAiWake` だけ。画像をアシスタントへ渡す口も、認識や答えの文字を受け取る口も無い。
+- † Rokid 公式の AIUI（`github.com/jsar-project/AIUI`）：`LanguageModel.prompt()`／`promptStreaming()` は、`role: 'user'` の `content` にテキストと1枚以上の画像（`image_url`、Data URL か HTTPS）を取る。
+  `ImageCapture.takePhoto()` の Blob をそのまま渡せる。「選んだモデルが画像入力に対応していること」「大きな Data URL は遅くなり上限を超え得る」とある。モデルを指定しない時は実行環境の既定。
+- `ImageCapture` には 3024×4032 と、読書用とされる `telephoto` 2016×1512 がある。通信は Wi-Fi が切れている時だけ Hi Rokid 経由。起動は声のほか `aix launch-page`（adb）、通知から開く頁。
+- 分からなかったこと：既定のモデル、枚数・大きさ・出力・時間の上限、firmware `1.29.013` で画像入力が動くか、Global での公開、声と PC なしの起動。
+
+**§A-3 との違い**：§A-3 は「通信は全て Hi Rokid の Bluetooth 経由」「音声起動のみ」とし、画像入力と撮影の API に触れていない。公式文書の今の記載はどちらとも違う。§A-3 は 8〜9月の観測として残す。
+
+**公式に使える経路**（調査役が公式資料から。†は私も確認）：
+- † Codex CLI：`codex exec`、`-i path[,path...]`（繰り返し可）、`--output-schema`、`-m gpt-6.1-sol`、`codex login --device-auth`。
+  非対話の文書は、保存済みの認証を再利用する、自動化の既定は API キー、ChatGPT の認証での自動化は「(advanced)」「Use this path only if you specifically need to run as your Codex account」とする。
+- † Sign in with ChatGPT：オープンソースとローカルのアプリが、本人の ChatGPT プランで Responses API を呼べる。`store: false` と `stream: true` が要る。画像と無人の実行は該当の頁に記載なし。
+- 公式 API：1回 1,500 枚・512 MB、原寸を保つ設定あり。40 頁（1000×1700）で入力 約 83K トークン、6.1 Sol で1回 約 0.6〜1.2 ドル（調査役の概算）。
+- ChatGPT の製品機能（予定の実行、Workspace Agents の起動）は、答えを外から読み取れない。
+- Claude Code：`claude -p` は画像を読め、JSON スキーマに対応。消費者向けの規約は API キー以外でのスクリプト利用を認めない。Android は対応表に無い。
+- Gemini API：多数の画像可。最上位は無料枠に無い。
 
 ## 出典 — グラス一次情報索引（2026-09-03）
 
