@@ -1193,9 +1193,10 @@ class _IdlessUploadPage(_StubPage):
     """Three public input attributes measured on the sole 2026-10-01 composer form."""
 
     def __init__(self, *, forms=1, old_inputs=False, accepts=("image/*,video/*", "image/*", None),
-                 thumbnail_appears=True):
+                 thumbnail_appears=True, several=1):
         super().__init__(["answer"], thumbnail_appears=thumbnail_appears)
         self.forms, self.old_inputs, self.accepts = forms, old_inputs, accepts
+        self.several = several  # image/* inputs that take more than one file
 
     def locator(self, selector):
         page = self
@@ -1207,6 +1208,8 @@ class _IdlessUploadPage(_StubPage):
                 if selector.startswith('form:has(div[role="textbox"][contenteditable="true"][aria-label="Ask ChatGPT"])'):
                     if selector.endswith('input[type="file"][accept="image/*"]'):
                         return page.forms * page.accepts.count("image/*")
+                    if selector.endswith('input[type="file"][accept="image/*"][multiple]'):
+                        return page.forms * page.several
                     if selector.endswith('input[type="file"]:not([accept])'):
                         return page.forms * page.accepts.count(None)
                     return page.forms
@@ -1226,6 +1229,17 @@ def test_idless_composer_uses_distinct_image_and_general_inputs_without_generate
     assert all("_r_" not in selector and "has-text" not in selector for selector in page.upload_selectors)
 
 
+def test_idless_composer_takes_the_image_input_for_several_files_when_a_single_photo_input_shares_its_accept():
+    """Phone, 2026-11-14, Chat mode: image/* (one file), image/*,video/*, image/* (several), and one without accept.
+
+    Until then the two image/* inputs were refused as ambiguous, so the Chat route attached nothing.
+    """
+    page = _IdlessUploadPage(accepts=("image/*", "image/*,video/*", "image/*", None))
+    assert chatgpt_web.attach_images(page, [PNG, JPEG]) is True
+    assert [f["mimeType"] for f in page.uploads[0]] == ["image/png", "image/jpeg"]
+    assert page.upload_selectors[0].endswith('input[type="file"][accept="image/*"][multiple]')
+
+
 def test_existing_upload_selectors_remain_preferred():
     page = _IdlessUploadPage(forms=2, old_inputs=True)
     assert chatgpt_web.attach_images(page, [PNG], audio=("rec.mp3", b"ID3rec")) is True
@@ -1237,7 +1251,8 @@ def test_existing_upload_selectors_remain_preferred():
     (1, ("image/*,video/*", None)), (1, ("image/*", "image/*", None)),
 ])
 def test_idless_upload_refuses_missing_or_ambiguous_composer_photo_input(forms, accepts):
-    page = _IdlessUploadPage(forms=forms, accepts=accepts)
+    # Every image/* input here takes several files, so two of them stay ambiguous.
+    page = _IdlessUploadPage(forms=forms, accepts=accepts, several=accepts.count("image/*"))
     with pytest.raises(chatgpt_web.ChatGptWebAttachmentFailed):
         chatgpt_web.attach_images(page, [PNG])
     assert not page.uploads and not _sends(page)

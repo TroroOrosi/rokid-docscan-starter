@@ -413,6 +413,9 @@ def _upload_input(page, selector: str):
         raise ChatGptWebAttachmentFailed("source attachment composer form is missing or ambiguous")
     suffix = '[accept="image/*"]' if selector == FILE_INPUT_SEL else ':not([accept])'
     target = page.locator(f'{form} input[type="file"]{suffix}')
+    if selector == FILE_INPUT_SEL and target.count() > 1:
+        # Phone, 2026-11-14, Chat mode: a one-photo input shares accept="image/*" with the one that takes several.
+        target = page.locator(f'{form} input[type="file"]{suffix}[multiple]')
     if target.count() != 1:
         raise ChatGptWebAttachmentFailed("source attachment input is missing or ambiguous")
     return target
