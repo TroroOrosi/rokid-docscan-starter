@@ -461,9 +461,37 @@ public class ClipCameraTest {
         assertEquals("the camera opens and watches first", 1, device.configurations);
         assertEquals(0, encoder.opens); assertEquals(0, device.session.stops);
         light(10_000_000L, 100, null, CONTROL_AE_STATE_SEARCHING);
+        assertEquals("an exposure that is still searching is not the light to match", 0, encoder.opens);
+        light(10_000_000L, 100, null, CONTROL_AE_STATE_CONVERGED);
         assertEquals(1, encoder.opens); assertEquals(1, device.session.stops);
         idleSession(0);
         assertEquals("a bright scene needs no gain: never under 1.0", 100, asked(CaptureRequest.CONTROL_POST_RAW_SENSITIVITY_BOOST));
+    }
+
+    @Test public void a_preview_that_does_not_settle_is_recorded_with_its_last_reading() {
+        // The preview starts its exposure over whenever it restarts (after every clip, a pause, a reopening). A clip
+        // asked for just then took its exposure and gain from a reading still on its way. It waits a moment for the
+        // exposure to settle, and no longer than that: a page recorded a little off is better than none.
+        camera.captureOnce(); idle(100);
+        light(40_000_000L, 800, 300, CONTROL_AE_STATE_SEARCHING);
+        idle(4000);
+        assertEquals(0, encoder.opens);
+        idle(1100);
+        assertEquals(1, encoder.opens); assertEquals(0, notReady);
+        idleSession(0);
+        assertEquals("40 ms at 3.0 is 4.0 at 30 ms", 400, asked(CaptureRequest.CONTROL_POST_RAW_SENSITIVITY_BOOST));
+    }
+
+    @Test public void a_request_just_after_the_preview_restarted_waits_for_its_exposure_at_most_a_second_and_a_half() {
+        watching(); recording();
+        clipFrames(66, 0); idle(0);
+        watchingAgain();
+        assertEquals(1, pages.size());
+        light(20_000_000L, 800, 200, CONTROL_AE_STATE_SEARCHING); // the restarted preview, still on its way
+        camera.captureOnce(); idle(0);
+        assertEquals("not with a reading that is still moving", 1, encoder.opens);
+        idle(1500);
+        assertEquals("but not for long", 2, encoder.opens);
     }
 
     @Test public void a_request_the_light_was_never_measured_for_is_given_up_before_anything_is_recorded() {
@@ -672,7 +700,10 @@ public class ClipCameraTest {
         assertEquals("a turned page is offered", 2, ready.get());
     }
 
-    @Test public void a_pause_while_recording_closes_the_clip_and_the_camera_in_order() {
+    @Test public void a_pause_while_recording_ends_the_clip_at_once_and_what_it_has_is_the_page() {
+        // A tap (pause) or a double tap (end) while a page is being recorded. The clip used to be thrown away: the
+        // page the wearer was looking at was then not in the booklet, and an end was left hanging until asked again.
+        // The camera stops just as fast; what has been recorded is kept, as a still in flight is.
         watching(); recording();
         clipFrames(10, 0);
         DocScanTestCamera device = device();
@@ -683,17 +714,28 @@ public class ClipCameraTest {
         clipFrames(2, 0);
         assertEquals("frames still in flight are taken and returned, not recorded", 10, encoder.offers);
         assertEquals(12, clipImages.size());
-        idleSession(1);
+        idleSession(1); idle(0);
         assertTrue(device.closed);
         assertEquals("no session is built for a camera that is being closed", 2, device.configurations);
-        assertTrue(pages.isEmpty()); assertTrue(failures.isEmpty());
-        assertEquals("the controller is told that no photo is coming", 1, notReady);
-        assertArrayEquals("nothing is left in the inbox", new String[0], inboxDirectory.list());
+        assertEquals("the four frames that counted are a page", 1, pages.size());
+        assertEquals(0, notReady); assertTrue(failures.isEmpty());
+        assertTrue(inbox.has(pages.get(0).provenance.captureId));
         assertEquals(0, sensors.getListeners().size());
 
         camera.preview(); idle(100);
         assertEquals("the camera opens again when it is asked to watch", 2, ManagerShadow.devices.size());
         assertEquals(1, device().configurations);
+    }
+
+    @Test public void a_pause_before_any_frame_has_counted_drops_the_clip() {
+        watching(); recording();
+        clipFrames(3, 0);
+        camera.pausePreview(); idle(0);
+        idleSession(1); idle(0);
+        assertTrue(pages.isEmpty()); assertTrue(failures.isEmpty());
+        assertEquals("the controller is told that nothing was taken", 1, notReady);
+        assertArrayEquals("nothing is left in the inbox", new String[0], inboxDirectory.list());
+        assertTrue(device().closed);
     }
 
     @Test public void a_pause_after_the_recording_ended_still_hands_the_page_over() {

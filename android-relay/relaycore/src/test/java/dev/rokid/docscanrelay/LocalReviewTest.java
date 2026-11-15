@@ -336,6 +336,94 @@ public class LocalReviewTest {
         } finally { clipStatus = 201; }
     }
 
+    @Test public void aPageSavedWhileClipsWereBeingSentIsSentBeforeTheBookletIsFinalized() throws Exception {
+        // A clip takes seconds to send (36 MB), a backlog of clips minutes. A page saved meanwhile was left out when
+        // the wearer ended the capture: the booklet was finalized as soon as the clips were through, and the last
+        // pages were missing from the answers without a word.
+        Surface surface = new Surface(); surface.holdForPage = true;
+        var run = new java.util.concurrent.atomic.AtomicReference<>(new CaptureInspectionOrigin.Context("glasses", 1));
+        try (MockWebServer server = inspectionServer()) {
+            DocScanController controller = inspectionController(server, surface, run);
+            try {
+                ClipInbox inbox = new ClipInbox(java.nio.file.Files.createTempDirectory("clip-inbox").toFile());
+                controller.setClipInbox(inbox);
+                byte[] jpeg = {1, 2, 3};
+                CaptureProvenance source = clipSource(inbox, jpeg, 100);
+                issueInspectionPhoto(controller, 0, false);
+                controller.onPhoto(jpeg, source); barrier(controller); commitVisible(controller, surface);
+                LocalCaptureSession saved = (LocalCaptureSession) get(controller, "localSession");
+                byte[] next = {4, 5, 6};
+                CaptureProvenance nextSource = nativeSource(next, 200).bind(saved.id(), 1, 270);
+                whileClipIsSent = () -> {
+                    try {
+                        saved.commit(new CaptureReviewStore.Pending(1, next, "", 270, "", PageFraming.UNKNOWN, 2000L, nextSource));
+                        saved.setPhase(LocalCaptureSession.Phase.ANALYSIS);
+                    } catch (java.io.IOException error) { throw new IllegalStateException(error); }
+                };
+                set(controller, "localNetworkBusy", false); call(controller, "queueLocalUpload", new Class<?>[]{});
+                waitForUpload(controller); waitForUpload(controller);
+                List<String> paths = new java.util.ArrayList<>();
+                RecordedRequest request;
+                while ((request = server.takeRequest(200, TimeUnit.MILLISECONDS)) != null) paths.add(request.getPath());
+                int finalized = paths.indexOf("/v1/documents/17/finalize");
+                assertTrue(paths.toString(), finalized > 0);
+                assertEquals("both pages went before the booklet was finalized: " + paths, 2,
+                        java.util.Collections.frequency(paths.subList(0, finalized), "/v1/documents/17/pages"));
+            } finally { controller.close(); whileClipIsSent = null; }
+        }
+    }
+
+    @Test public void aClipTheServerCannotTakeIsDroppedAndTheUploadGoesOn() throws Exception {
+        // The page is held and the server names it as left ungathered: one bad clip must not stop the booklet.
+        Surface surface = new Surface(); surface.holdForPage = true;
+        var run = new java.util.concurrent.atomic.AtomicReference<>(new CaptureInspectionOrigin.Context("glasses", 1));
+        clipStatus = 400;
+        try (MockWebServer server = inspectionServer()) {
+            DocScanController controller = inspectionController(server, surface, run);
+            try {
+                ClipInbox inbox = new ClipInbox(java.nio.file.Files.createTempDirectory("clip-inbox").toFile());
+                controller.setClipInbox(inbox);
+                byte[] jpeg = {1, 2, 3};
+                CaptureProvenance source = clipSource(inbox, jpeg, 100);
+                issueInspectionPhoto(controller, 0, false);
+                controller.onPhoto(jpeg, source); barrier(controller); commitVisible(controller, surface);
+                set(controller, "localNetworkBusy", false); call(controller, "queueLocalUpload", new Class<?>[]{}); waitForUpload(controller);
+                LocalCaptureSession saved = (LocalCaptureSession) get(controller, "localSession");
+                assertNull("the refused clip is not offered again", saved.nextUnsentClip());
+                assertFalse((boolean) get(controller, "localUploadBlocked"));
+                assertNotEquals(RelayState.ERROR, controller.getState());
+            } finally { controller.close(); }
+        } finally { clipStatus = 201; }
+    }
+
+    @Test public void endingWhileAPageWasAskedForAndNothingWasTakenEndsTheCapture() throws Exception {
+        // The clip camera answers a pause that comes before anything was recorded with "nothing was taken". The end
+        // the wearer had asked for was then left hanging: camera closed, "hold still" shown, and every touch ignored
+        // except a second double tap.
+        Surface surface = new Surface(); surface.holdForPage = true;
+        var run = new java.util.concurrent.atomic.AtomicReference<>(new CaptureInspectionOrigin.Context("glasses", 1));
+        try (MockWebServer server = inspectionServer()) {
+            DocScanController controller = inspectionController(server, surface, run);
+            try {
+                byte[] jpeg = {1, 2, 3};
+                issueInspectionPhoto(controller, 0, false);
+                controller.onPhoto(jpeg, nativeSource(jpeg, 100)); barrier(controller); commitVisible(controller, surface);
+                issueInspectionPhoto(controller, 1, false);
+                controller.onGlassesAction(GlassesInputAction.BACK); barrier(controller);
+                assertTrue("the page that was asked for is still awaited", ((CaptureLease) get(controller, "captureLease")).isUnresolved());
+                controller.onPhotoNotStarted(); barrier(controller);
+                LocalCaptureSession saved = (LocalCaptureSession) get(controller, "localSession");
+                assertEquals("the capture is over and its pages go on", LocalCaptureSession.Phase.ANALYSIS, saved.phase());
+            } finally { controller.close(); }
+        }
+    }
+
+    @Test public void aRecordedPageHasLongerToArriveThanAStill() {
+        assertEquals(30, DocScanController.captureTimeoutSeconds(false));
+        assertEquals("up to ten seconds of recording, and then its file is written out", 60, DocScanController.captureTimeoutSeconds(true));
+    }
+
+    private static volatile Runnable whileClipIsSent;
     private static volatile int clipStatus = 201;
 
     private static CaptureProvenance clipSource(ClipInbox inbox, byte[] jpeg, long timestamp) throws Exception {
@@ -351,6 +439,11 @@ public class LocalReviewTest {
             @Override public MockResponse dispatch(RecordedRequest request) {
                 try {
                     if ("/v1/documents".equals(request.getPath())) return new MockResponse().setBody("{\"document_id\":17}");
+                    if (request.getPath().matches("/v1/documents/17/pages/[0-9]+/clip")) {
+                        Runnable meanwhile = whileClipIsSent;
+                        whileClipIsSent = null;
+                        if (meanwhile != null) meanwhile.run();
+                    }
                     if (request.getPath().matches("/v1/documents/17/pages/[0-9]+/clip")) return new MockResponse().setResponseCode(clipStatus).setBody("{\"status\":\"stored\",\"detail\":\"stale\"}");
                     if ("/v1/documents/17/pages".equals(request.getPath())) {
                         JSONObject metadata = new JSONObject(new String(uploadPart(request, "capture_provenance"), StandardCharsets.UTF_8));

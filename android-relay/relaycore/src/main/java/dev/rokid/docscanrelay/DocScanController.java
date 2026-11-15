@@ -59,6 +59,14 @@ public final class DocScanController implements AutoCloseable {
     private static final String KEY_COMMITTED_JPEG_SHA256 = "committed_jpeg_sha256";
     private static final int NO_COMMITTED_PAGE = -1;
     private static final long CAPTURE_TIMEOUT_SECONDS = 30;
+    /**
+     * A recorded page is up to ten seconds of recording and then its file written out (36 MB at about 9 MB a
+     * second, more for a clip that ran long), behind the wait for the light: it can take over half a minute to
+     * arrive where a still takes two seconds.
+     */
+    private static final long CLIP_TIMEOUT_SECONDS = 60;
+
+    static long captureTimeoutSeconds(boolean clips) { return clips ? CLIP_TIMEOUT_SECONDS : CAPTURE_TIMEOUT_SECONDS; }
     private static final long SHUTTER_STABILIZATION_MILLIS = 1500;
     private static final long CUSTOM_VIEW_ACK_TIMEOUT_MILLIS = 3000;
     // This firmware delivers one tap and nothing else, and the tap is already
@@ -1633,7 +1641,7 @@ public final class DocScanController implements AutoCloseable {
             final long scheduledAttempt = attempt;
             watchdog.schedule(
                     () -> enqueueCaptureTimeout(scheduledAttempt),
-                    CAPTURE_TIMEOUT_SECONDS,
+                    captureTimeoutSeconds(clipInbox != null),
                     TimeUnit.SECONDS);
         } catch (Exception error) {
             inspectionRequest = null;
@@ -1822,6 +1830,12 @@ public final class DocScanController implements AutoCloseable {
                     return;
                 }
                 inspectionRequest = null;
+                if (finishCaptureRequested) {
+                    // The wearer ended the capture while this page was being asked for, and nothing was taken:
+                    // the end goes on. Left here, the camera stayed closed under "hold still" until a second end.
+                    finishLocalCaptureWhenCameraIdle();
+                    return;
+                }
                 CaptureReviewStore.Pending pending = captureReview.peek();
                 if (pending != null) {
                     publishCaptureReview(
@@ -2185,13 +2199,21 @@ public final class DocScanController implements AutoCloseable {
                     try {
                         destination.uploadPageClip(saved.documentId(), clip.index, clip.captureId, clip.sha256, clip.file, clip.record);
                     } catch (DocScanApi.ApiException refused) {
-                        if (refused.getStatusCode() != 409) throw refused; // 409: the page is another capture's now
+                        // 409: the page is another capture's now. 400, 404, 413, 422: the server cannot take this
+                        // clip at all. Either way the page itself is held and the server names it as left
+                        // ungathered, so the clip is let go and the booklet goes on. Anything else is a failed
+                        // transfer and is handled as one.
+                        int status = refused.getStatusCode();
+                        if (status != 409 && status != 400 && status != 404 && status != 413 && status != 422) throw refused;
                     }
                     httpInProgress = false;
                     saved.acknowledgeClip(clip);
                     clip = saved.nextUnsentClip();
                 }
-                if (!closed && saved.phase() == LocalCaptureSession.Phase.ANALYSIS && saved.documentId() > 0) {
+                // A page saved while the clips above were on their way is still unsent here, and so is its clip: the
+                // booklet is finalized only when nothing is left, on a later pass.
+                if (!closed && saved.phase() == LocalCaptureSession.Phase.ANALYSIS && saved.documentId() > 0
+                        && saved.nextUnsent() == null && saved.nextUnsentClip() == null) {
                     analysisStarted = true;
                     destination.finalizeDocument(saved.documentId());
                     if (saved.sessionId() == 0) saved.bindSession(destination.createExamSession(saved.documentId(), saved.examType()).getLong("session_id"));

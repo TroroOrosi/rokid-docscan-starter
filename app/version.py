@@ -583,8 +583,9 @@ EXPLAINER_API_VERSION = "1.1.0"
 # the first of the two double taps that leave.
 # 1.49.0: with capture=clip saved, an ordinary written page is a short clip: while it is recorded a line along the
 # small window's lower edge shows how far it has come, and while waiting a mark at each corner says the paper fills
-# too little of the window (provisional); a tap or a double tap during the recording drops that clip. The lower
-# margin is 125 px until one is saved. Stills are unchanged and stay the default.
+# too little of the window (provisional); a double tap during the recording ends that clip at once and what it has
+# is the page, a tap lets it finish and then pauses. The lower margin is 125 px until one is saved. Stills are
+# unchanged and stay the default.
 GLASSES_VIEW_CONTRACT_VERSION = "1.49.0"
 
 # Answer-area overlay payload (box + short answer; 2D image-anchored).

@@ -120,6 +120,8 @@ final class ClipCamera implements PageCamera {
     static final int LONG_FPS = 15, LONG_SETTLE_FRAMES = 15;
     static final float MAX_SMEAR_PIXELS = 2f;
     static final long MIN_MILLIS = 1_000, MAX_MILLIS = 10_000, IDLE_TIMEOUT_MILLIS = 1_500, LIGHT_TIMEOUT_MILLIS = 5_000;
+    /** How long a clip waits for an exposure that has been measured but has not settled yet. */
+    static final long SETTLE_WAIT_MILLIS = 1_500;
     static final int JPEG_QUALITY = 90;
     /**
      * A camera that reports an error is closed and opened again, and the page is looked for again, until it has
@@ -260,22 +262,36 @@ final class ClipCamera implements PageCamera {
             if (closed || clip != null) return;
             wanted = true;
             clip = new Clip();
-            handler.postDelayed(timer, LIGHT_TIMEOUT_MILLIS);
+            // The clip's exposure and gain are fixed from the preview's automatic exposure, which starts over
+            // whenever the preview restarts: only a settled reading is matched. One that does not settle is
+            // waited for briefly and then used as it is; with no reading at all nothing is recorded.
+            handler.postDelayed(timer, previewExposure > 0 ? SETTLE_WAIT_MILLIS : LIGHT_TIMEOUT_MILLIS);
             step();
-            if (running == WATCH && afterReady == null && previewExposure > 0) begin();
+            if (running == WATCH && afterReady == null && previewExposure > 0 && steady) begin();
         });
     }
 
     /**
-     * A clip that is being recorded is closed and deleted, and the session is told that no photo is coming; a clip
-     * already recorded is still handed over. The camera is closed once its session is idle.
+     * A tap (pause) or a double tap (end). A clip being recorded is ended at once and what it has becomes the
+     * page, as a still in flight is kept: thrown away, the page the wearer was looking at was missing from the
+     * booklet and an end was left hanging. Only a clip in which no frame has counted yet is deleted, and the
+     * session told that nothing was taken. The camera is closed once its session is idle.
      */
     @Override public void pausePreview() {
         handler.post(() -> {
             wanted = false;
             pageReady = null;
             showFar(false);
-            if (clip != null && clip.phase != ENDING) {
+            Clip held = clip;
+            boolean counted;
+            synchronized (lock) {
+                counted = held != null && held.phase == RECORDING && held.counted > 0;
+            }
+            if (counted) {
+                end(held); // goes on to step()
+                return;
+            }
+            if (held != null && held.phase != ENDING) {
                 abandon();
                 if (!closed) callback.onCaptureNotReady();
             }
@@ -520,7 +536,7 @@ final class ClipCamera implements PageCamera {
                 if (state != null && (state == CaptureResult.CONTROL_AE_STATE_CONVERGED
                         || state == CaptureResult.CONTROL_AE_STATE_LOCKED
                         || state == CaptureResult.CONTROL_AE_STATE_FLASH_REQUIRED)) steady = true;
-                if (clip != null && clip.phase == WAITING && running == WATCH && afterReady == null) begin();
+                if (clip != null && clip.phase == WAITING && running == WATCH && afterReady == null && steady) begin();
             }
         }, handler);
     }
@@ -604,6 +620,10 @@ final class ClipCamera implements PageCamera {
         if (late.phase == RECORDING) {
             end(late);
         } else if (late.phase == WAITING) {
+            if (previewExposure > 0 && running == WATCH && afterReady == null) {
+                begin(); // measured but never settled: recorded with the last reading rather than not at all
+                return;
+            }
             // The preview never measured the light: nothing was asked of the camera, and it goes on watching.
             clip = null;
             callback.onCaptureNotReady();
