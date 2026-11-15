@@ -218,6 +218,10 @@ public class DocScanGlassActivityIntentTest {
         assertEquals(0.3f, saved.getFloat("far_share", -1), 0.0001f);
         activity.onNewIntent(new Intent().putExtra("far_share", 7f));
         assertEquals("a share is at most the whole window", 1f, saved.getFloat("far_share", -1), 0.0001f);
+        activity.onNewIntent(new Intent().putExtra("long_above", 300));
+        assertEquals("the gain, in hundredths, above which a clip takes the long exposure", 300, saved.getInt("long_above", -1));
+        activity.onNewIntent(new Intent().putExtra("long_above", 5));
+        assertEquals("never under 1.0", 100, saved.getInt("long_above", -1));
     }
 
     /** The kind of session is chosen on the chooser, after the cameras were built: the camera is chosen when it starts. */

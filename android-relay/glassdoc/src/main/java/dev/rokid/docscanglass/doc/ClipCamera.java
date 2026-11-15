@@ -88,6 +88,11 @@ final class ClipCamera implements PageCamera {
          * and 5.7% at 50 Mbit/s (M-29). At 15 frames a second half of it is asked, the same bits a frame.
          */
         int bitrate = 95_000_000;
+        /**
+         * The gain, in hundredths, that 30 ms may need before the long exposure is taken instead. 705 is where a
+         * page was read at 30 ms (it got 5.0 of it: Zh5, M-29); nothing darker was read at 30 ms.
+         */
+        int longAboveBoost = 705;
         /** The clockwise turn that makes a page upright, written beside the clip for the phone. */
         int rotationDegrees = 270;
         /**
@@ -110,11 +115,6 @@ final class ClipCamera implements PageCamera {
     static final int SETTLE_FRAMES = 6;
     /** At the long exposure: 15 frames a second, and the brightness moves for about twelve frames (M-30). */
     static final int LONG_FPS = 15, LONG_SETTLE_FRAMES = 15;
-    /**
-     * The gain, in hundredths, that 30 ms needed where a page was read (it got 5.0 of it: Zh5, M-29). A scene that
-     * needs more is darker than anything read at 30 ms and is recorded at the long exposure.
-     */
-    static final int LONG_ABOVE_BOOST = 705;
     static final float MAX_SMEAR_PIXELS = 2f;
     static final long MIN_MILLIS = 1_000, MAX_MILLIS = 10_000, IDLE_TIMEOUT_MILLIS = 1_500, LIGHT_TIMEOUT_MILLIS = 5_000;
     static final int JPEG_QUALITY = 90;
@@ -517,7 +517,7 @@ final class ClipCamera implements PageCamera {
         starting.previewBoost = previewBoost;
         // As bright as the preview's automatic exposure just was, at this clip's fixed exposure and sensitivity.
         double light = (double) previewExposure * previewIso * previewBoost / ISO;
-        boolean dark = options.longExposureNanos > 0 && Math.round(light / options.exposureNanos) > LONG_ABOVE_BOOST;
+        boolean dark = options.longExposureNanos > 0 && Math.round(light / options.exposureNanos) > options.longAboveBoost;
         starting.exposure = dark ? options.longExposureNanos : options.exposureNanos;
         starting.fps = dark ? LONG_FPS : FPS;
         starting.settle = dark ? LONG_SETTLE_FRAMES : SETTLE_FRAMES;

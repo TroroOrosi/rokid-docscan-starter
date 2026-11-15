@@ -374,6 +374,16 @@ public class ClipCameraTest {
         assertEquals(30_000_000L, asked(CaptureRequest.SENSOR_EXPOSURE_TIME));
     }
 
+    @Test public void the_gain_above_which_the_long_exposure_is_taken_can_be_set() {
+        // One measurement set it (a page read at 7.05); it has to be movable once worn pages are read.
+        ClipCamera.Options options = new ClipCamera.Options();
+        options.longAboveBoost = 300;
+        create(options);
+        watching(); recording(); // 7.05 at 30 ms
+        assertEquals(60_000_000L, asked(CaptureRequest.SENSOR_EXPOSURE_TIME));
+        assertEquals("3.5 at 60 ms", 353, asked(CaptureRequest.CONTROL_POST_RAW_SENSITIVITY_BOOST));
+    }
+
     @Test public void without_a_long_exposure_a_dark_scene_is_recorded_at_thirty() {
         ClipCamera.Options options = new ClipCamera.Options();
         options.longExposureNanos = 0;

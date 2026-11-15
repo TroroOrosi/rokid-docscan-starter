@@ -81,6 +81,11 @@ public final class DocScanGlassActivity extends Activity
     private static final String EXTRA_CAPTURE = "capture";
     /** Saved from {@code --ef far_share}: the provisional limit of ClipCamera's "paper too far" mark; 0 shows none. */
     private static final String EXTRA_FAR_SHARE = "far_share";
+    /**
+     * Saved from {@code --ei long_above}: the gain, in hundredths, that a 30 ms clip may need before ClipCamera takes
+     * 60 ms instead (705 until one is saved). Set from one desk measurement; movable once worn pages are read.
+     */
+    private static final String EXTRA_LONG_ABOVE = "long_above";
     /** Diagnostic override for this launch only; normal launches always capture automatically. */
     private static final String EXTRA_MANUAL = "manual";
     private static final String EXTRA_ZSL_EVALUATION = "zsl_evaluation";
@@ -408,6 +413,7 @@ public final class DocScanGlassActivity extends Activity
             ClipCamera.Options options = new ClipCamera.Options();
             options.rotationDegrees = MEASURED_ROTATION_DEGREES;
             options.farShare = getPreferences(MODE_PRIVATE).getFloat(EXTRA_FAR_SHARE, options.farShare);
+            options.longAboveBoost = getPreferences(MODE_PRIVATE).getInt(EXTRA_LONG_ABOVE, options.longAboveBoost);
             clipCamera = new ClipCamera(this, new Handler(cameraThread.getLooper()), cameraCallback(), clipInbox,
                     new ClipEncoder.Hardware(), options);
             clipCamera.marks(surface);
@@ -432,6 +438,10 @@ public final class DocScanGlassActivity extends Activity
             if (Float.isFinite(share)) {
                 getPreferences(MODE_PRIVATE).edit().putFloat(EXTRA_FAR_SHARE, Math.max(0f, Math.min(1f, share))).apply();
             }
+        }
+        if (intent != null && intent.getExtras() != null && intent.getExtras().get(EXTRA_LONG_ABOVE) instanceof Integer) {
+            getPreferences(MODE_PRIVATE).edit().putInt(EXTRA_LONG_ABOVE,
+                    Math.max(ClipCamera.MIN_BOOST, intent.getIntExtra(EXTRA_LONG_ABOVE, 705))).apply();
         }
         if (intent != null && intent.hasExtra(EXTRA_SPREAD)) {
             boolean spread = intent.getBooleanExtra(EXTRA_SPREAD, false);
