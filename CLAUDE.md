@@ -210,9 +210,14 @@ the smallest worn size: 60.7% through the glasses' encoder and 6.7% without it,
 so that form is dropped (the 2.3% of §M-25 came from a bright photo with noise
 added). At that size the paper's own pixels read 3.2% without an encoder and
 3.9% through it at 1.24 bit (24 reads; 2.3 points over the direct frames, at the
-limit of 2.0 and not a pass), 6.0% at 0.51 bit: the farther the paper, the
-worse, so the wearer needs a guide to distance and the recording 0.66 bit a
-pixel a frame or more. The phone's wireless debugging goes off whenever its
+limit of 2.0 and not a pass), 6.0% at 0.51 bit; and reducing also averaged the
+noise, so those 60 frames stand for about 150 real ones (7 s of recording). The
+farther the paper, the worse and the slower: the wearer needs a guide to
+distance and the recording 0.66 bit a pixel a frame or more. **The operator
+approved the change of form on 2026-11-15 (night): record only the line-of-sight
+frame, in the sensor's own pixels, cut by the app out of the full-size stream,
+with a guide to distance; the whole field at half size and the camera's video
+output are dropped.** Not built yet. The phone's wireless debugging goes off whenever its
 Wi-Fi blinks (22:12 and 22:50 that night) and cannot be turned back on from the
 PC; reads started over it go on inside the phone. Not decided: a worn head's
 real movement, the median worn size, the change of brightness over a stream's
