@@ -273,7 +273,11 @@ about one page in three, the camera's thread stood 2.6 s once): the camera
 survives it, the wearer waits. Neither failure showed in three runs of three
 pages; both needed tens of clips on the route that sends. A camera that reports
 an error or cannot make a session is closed and opened again and the page looked
-for again; three in a row with no page between end the capture. Heat on the desk
+for again; three in a row with no page between end the capture. A clip's exposure
+is matched to the preview's only once that has settled (at most 1.5 s of waiting).
+An independent read of the code after all the desk checks had passed found a page
+silently left out of a booklet ended while its clips were still being sent, and
+three smaller faults; all four are fixed, the first reproduced in a test. Heat on the desk
 at fifteen seconds a page: board 49.5 C with stills, 51 C with clips not sent,
 55-56.5 C with clips sent (36 MB a page); how that feels worn is unknown. The
 Codex route never reduced a page, so more than about twenty gathered pages
@@ -513,9 +517,13 @@ what is being tried.
 - With `--es capture clip` saved, ordinary written reading takes each page as a
   short clip instead (`ClipCamera`, from glassdoc 0.44.0; the paragraph on the
   venue's light above and §M-30). Stills are the default until the clip route
-  has been worn. On that route a tap or a double tap during a recording drops
-  that clip and the wearer is asked to hold still again, and pages turned to
-  during a recording or its review are not kept.
+  has been worn. On that route a double tap during a recording ends that clip at
+  once and what it has is the page (on the glasses: 36 frames, the capture ended
+  with that one double tap); a tap lets the clip finish, saves the page, then
+  pauses, as with a still. Pages turned to during a recording or its review are
+  not kept. The booklet is finalized only when no page and no clip is unsent: a
+  page saved while clips were on their way was once left out (found by review,
+  not by the desk checks).
 - An explicit, nonpersistent `native_selection=true` comparison launch may take
   one additional maximum-size native JPEG only when the same scene is already
   ready, without waiting for preparation or taking priority over a next page.
