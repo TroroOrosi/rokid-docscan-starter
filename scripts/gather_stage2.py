@@ -409,7 +409,7 @@ def verdicts(means: dict[str, float]) -> list[str]:
             "F5 sixty frames a second   " + against("L60", "L30", 2.0, "keep 60 a second as a candidate", "drop 60 a second"),
             *("F6 the paper's own pixels, " + against(name, "N", 2.0, "pass", "fail") for name in ("C03", "C05", "C13") if name in means),
             *("F7 the same, from the camera " + against(name, "N", 2.0, "pass", "fail") for name in ("O60",) if name in means),
-            *("F8 the field's centre at zoom 2 " + against(name, "Nz", 2.0, "pass", "fail") for name in ("Z60", "Z60b", "Zh7", "Zh5", "Z5") if name in means),
+            *("F8 the field's centre at zoom 2 " + against(name, "Nz", 2.0, "pass", "fail") for name in ("Z60", "Z60b", "Zh7", "Zh5", "Z5", "Zd5") if name in means),
             # the third ruling: the worn distance stood for by reducing the direct frames, a moving head by shifting them
             *("G-A half size, worn, moving " + against(name, "N", 2.0, "pass", "fail") for name in ("Mwe", "Mwe10") if name in means),
             *("G-B own pixels, worn, still " + against(name, "N", 2.0, "pass", "fail") for name in ("Cw03", "Cw05", "Cw13") if name in means),
