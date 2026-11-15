@@ -102,6 +102,8 @@ what the platform permits.
 
 - `tasks/plan.md` — current rationalized plan first; superseded plans preserved in a historical section.
 - `tasks/todo.md` — current W work and acceptance conditions; earlier RP/CQ checkboxes are history.
+- `docs/superpowers/plans/2026-11-16-gathered-capture-stage3.md` — 撮影の作り直しの段階3の実施計画（2026-11-16）。録画で撮る経路をアプリとサーバーに入れる
+  （録画用のカメラ、頁に付く録画の送信、スマホでの重ね合わせと頁の置き換え、机上の検査）。実装の途中。掛けての確認は段階4。
 - `docs/superpowers/plans/2026-11-15-gathered-capture-stage2.md` — 撮影の作り直しの段階2の実施計画（2026-11-15）。暗い所に置いた冊子の頁を録って重ね、
   読ませて判定する。条件と判定の基準を実行の前に固定してある。準備（Task 1〜3）は本人の手なし、Task 4 以降は冊子を置いていただいてから。
 - `docs/superpowers/plans/2026-11-15-gathered-capture-stage1.md` — 撮影の作り直しの段階1の実施計画（2026-11-15、承認済みの設計に対する計画）。

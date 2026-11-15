@@ -569,6 +569,7 @@ final class FeedProbe {
             codec = null;
             muxer = null;
             ending = true;
+            awaitingPreview = true;  // from here the page is over only when the camera watches again: the clip may end first
             return true;
         }
         long from = SystemClock.elapsedRealtime();
