@@ -10,6 +10,9 @@ uvicorn[standard]>=0.27
 python-multipart>=0.0.9
 python-dotenv>=1.0
 pillow>=10.0
+# app/gather.py (frames of a page added into one image). On the phone numpy comes from Termux's `python-numpy`
+# package, not from pip, so requirements-phone.txt does not list it; the tests skip where it is absent.
+numpy>=1.26
 pytest>=8.0
 httpx>=0.27
 
