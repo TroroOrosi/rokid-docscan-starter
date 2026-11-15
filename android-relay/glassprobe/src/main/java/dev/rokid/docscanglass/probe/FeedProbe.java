@@ -99,6 +99,9 @@ final class FeedProbe {
     private long backAskedAt;
     private long cycleStartedAt;
     private String pageLine;
+    private boolean ending;  // the last clip's encoder is still being ended, off this thread
+    private long watchingAt;
+    private long backMillis;
 
     FeedProbe(Context context, Handler handler, PageCycleProbe.Done done) {
         this.context = context;
@@ -221,13 +224,21 @@ final class FeedProbe {
             return;
         }
         awaitingPreview = false;
-        if (pageLine != null) Log.i(TAG, pageLine + " back_ms=" + (SystemClock.elapsedRealtime() - backAskedAt));
+        watchingAt = SystemClock.elapsedRealtime();
+        backMillis = watchingAt - backAskedAt;
+        pageDone();
+    }
+
+    /** A page is over when the camera watches again and its clip is closed; the first is what the wearer waits for. */
+    private void pageDone() {
+        if (closed || awaitingPreview || ending) return;
+        if (pageLine != null) Log.i(TAG, pageLine + " back_ms=" + backMillis);
         pageLine = null;
         if (page >= pages) {
             finish(true, "feed cycle " + pages + " pages in " + (SystemClock.elapsedRealtime() - cycleStartedAt) + "ms out=" + outWidth + "x" + outHeight);
             return;
         }
-        handler.postDelayed(this::feedPage, watchMillis);
+        handler.postDelayed(this::feedPage, Math.max(0, watchMillis - (SystemClock.elapsedRealtime() - watchingAt)));
     }
 
     private void feedPage() {
@@ -398,6 +409,73 @@ final class FeedProbe {
             if (device != null) { device.close(); device = null; }  // the camera first: nothing of it is needed to end the clip
             session = null;
         }
+        if (pages > 0) {
+            // Back to watching at once; the clip is ended on a thread of its own. Ending it here held the camera's thread
+            // for up to 5.6 s in 7 of 28 pages, and the camera then failed to drain (M-29).
+            final MediaCodec endingCodec = codec;
+            final MediaMuxer endingMuxer = muxer;
+            final File endingClip = clip;
+            final int trackNow = track;
+            final int writtenNow = written;
+            final int pageNow = page;
+            final String head = "camera probe page=" + page + " rebuild_ms=" + rebuildMillis + " first_image_ms=" + firstImageMillis + " for_ms=" + fedFor
+                    + " images=" + images + " fed=" + fed + " dropped=" + dropped + " copy_us=" + (fed == 0 ? 0 : copyNanos / 1000 / fed);
+            final String tail = " levels=" + levels;
+            codec = null;
+            muxer = null;
+            ending = true;
+            new Thread(() -> {
+                long from = SystemClock.elapsedRealtime();
+                int wrote = writtenNow, trackId = trackNow;
+                boolean ended = false;
+                String failed = null;
+                try {
+                    MediaCodec.BufferInfo own = new MediaCodec.BufferInfo();
+                    int in = endingCodec.dequeueInputBuffer(500_000);
+                    if (in >= 0) endingCodec.queueInputBuffer(in, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM);
+                    for (int tries = 0; tries < 60 && !ended; tries++) {
+                        int out = endingCodec.dequeueOutputBuffer(own, 100_000);
+                        if (out == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
+                            trackId = endingMuxer.addTrack(endingCodec.getOutputFormat());
+                            endingMuxer.start();
+                        } else if (out >= 0) {
+                            if ((own.flags & MediaCodec.BUFFER_FLAG_CODEC_CONFIG) == 0 && own.size > 0 && trackId >= 0) {
+                                endingMuxer.writeSampleData(trackId, endingCodec.getOutputBuffer(out), own);
+                                wrote++;
+                            }
+                            endingCodec.releaseOutputBuffer(out, false);
+                            ended = (own.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0;
+                        }
+                    }
+                    endingCodec.stop();
+                    if (trackId >= 0) endingMuxer.stop();
+                } catch (RuntimeException error) {
+                    failed = "end " + error;
+                } finally {
+                    endingCodec.release();
+                    try {
+                        endingMuxer.release();
+                    } catch (RuntimeException ignored) {
+                        // a muxer that never started
+                    }
+                }
+                long bytes = endingClip.length();
+                if (pageNow > keepClips) endingClip.delete();
+                final String line = head + " written=" + wrote + " ended=" + ended + " bytes=" + bytes + " end_ms=" + (SystemClock.elapsedRealtime() - from) + tail;
+                final String error = failed;
+                handler.post(() -> {
+                    ending = false;
+                    if (error != null) {
+                        finish(false, error);
+                        return;
+                    }
+                    pageLine = line;
+                    pageDone();
+                });
+            }, "probe-encoder-end").start();
+            watch();
+            return;
+        }
         long from = SystemClock.elapsedRealtime();
         boolean ended = false;
         try {
@@ -408,19 +486,6 @@ final class FeedProbe {
             if (track >= 0) muxer.stop();
         } catch (RuntimeException error) {
             finish(false, "end " + error);
-            return;
-        }
-        if (pages > 0) {
-            long bytes = clip.length();
-            codec.release();
-            codec = null;
-            muxer.release();
-            muxer = null;
-            if (page > keepClips) clip.delete();
-            pageLine = "camera probe page=" + page + " rebuild_ms=" + rebuildMillis + " first_image_ms=" + firstImageMillis + " for_ms=" + fedFor + " images=" + images
-                    + " fed=" + fed + " dropped=" + dropped + " written=" + written + " ended=" + ended + " bytes=" + bytes + " copy_us="
-                    + (fed == 0 ? 0 : copyNanos / 1000 / fed) + " end_ms=" + (SystemClock.elapsedRealtime() - from) + " levels=" + levels;
-            watch();
             return;
         }
         finish(true, "feed " + width + "x" + height + " fps=" + fps + " for_ms=" + fedFor + " images=" + images + " fed=" + fed + " dropped=" + dropped
