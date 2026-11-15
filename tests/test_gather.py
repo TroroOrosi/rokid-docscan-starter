@@ -84,6 +84,34 @@ def alike(a, b):
     return float(np.corrcoef(a[inner].ravel(), b[inner].ravel())[0, 1])
 
 
+def page_of_print(seed=5, h=172, w=512):
+    """A part of a page as the sensor sees vertical print lying on its side: lines every 16 px with blank paper between,
+    a character every 8 px along a line, lines of unequal length, a blank here and there. Regular, as print is; a
+    correlation surface repeats that as side peaks. Each character is a few strokes in its 6 px cell."""
+    rng = np.random.default_rng(seed)
+    image = np.full((h, w), PAPER, np.float32)
+    for y in range(6, h - 10, 16):
+        for x in range(4, int((w - 8) * rng.uniform(0.6, 1.0)), 8):
+            if rng.random() < 0.15:
+                continue
+            for _ in range(int(rng.integers(2, 5))):
+                a, b = int(rng.integers(0, 5)), int(rng.integers(0, 5))
+                if rng.random() < 0.5:
+                    image[y + a:y + a + 2, x:x + 6] = 0.08
+                else:
+                    image[y:y + 6, x + b:x + b + 2] = 0.08
+    fy = np.fft.fftfreq(h)[:, None]
+    fx = np.fft.rfftfreq(w)[None, :]
+    soft = np.exp(-2 * (np.pi * 1.0) ** 2 * (fy ** 2 + fx ** 2))
+    return np.fft.irfft2(np.fft.rfft2(image) * soft, s=image.shape).astype(np.float32)
+
+
+def taken(image, shifts, snr1, seed=3):
+    """Frames at the scene's own size: moved, one frame's level over noise `snr1`, nothing below black."""
+    rng = np.random.default_rng(seed)
+    return [np.maximum(moved(image, dy, dx) + rng.normal(0, PAPER / snr1, image.shape), 0).astype(np.float32) for dy, dx in shifts]
+
+
 def test_shift_of_finds_a_known_shift_under_the_venue_noise():
     s = scene()
     reference = sum(frames(s, [(0, 0)] * 8, 2.2)) / 8
@@ -260,4 +288,19 @@ def test_only_the_first_frames_asked_for_are_used(tmp_path):
     assert g.gather_clip(path, record, limit=20).used == 10 - g.SETTLE  # frames 6 to 9 pass; 10 to 25 are smeared
     long = g.gather_clip(path)
     assert long.level_over_noise > short.level_over_noise
+
+
+def test_a_page_of_regular_print_is_placed():
+    # Found on the first real page (2026-11-15): frames placed within half a pixel were dropped, 118 of 208, because the
+    # peak was judged against a surface full of the print's own side peaks, and stayed under the floor however good the light.
+    sway = [(0.3 * np.sin(k / 5), 0.4 * np.cos(k / 7)) for k in range(60)]
+    result = g.gather(taken(page_of_print(), sway, 4.5))
+    assert (result.used, result.total, result.placed) == (60, 60, True)
+
+
+def test_noise_is_not_placed_on_a_page_of_print():
+    rng = np.random.default_rng(8)
+    page = taken(page_of_print(), [(0, 0)] * 30, 4.5)
+    noise = [np.maximum(rng.normal(PAPER, PAPER / 4.5, page[0].shape), 0).astype(np.float32) for _ in range(120)]
+    assert g.gather(page + noise).used <= 31
 

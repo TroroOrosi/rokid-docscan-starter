@@ -33,11 +33,16 @@ from pathlib import Path
 import numpy as np
 
 REACHES = (4.0, 16.0)  # frame pixels searched around the last placement: first near, then once wider
-WIDE_EXTRA = 2.0  # the wider search has sixteen times the places for noise to peak: its peak must be this much stronger
-STRENGTH_SHARE = 0.5  # a frame is placed when its correlation peak is this share of the first frames' typical peak
-# ... and never below this. Measured (M-26): real clips at the venue's light 11.3 to 16.4; noise alone, another scene or a
-# scene far too dark up to 5.6. Without it frames of pure noise were all "placed".
-STRENGTH_FLOOR = 7.0
+WIDE_EXTRA = 3.0  # the wider search has sixteen times the places for noise to peak: its peak must be this much stronger
+# A frame is placed when its correlation peak stands this far above the rest of the surface (see _peak). Measured on the
+# first real page (M-27, 2026-11-15, parts of 512x172 to 960x324 px of clips of a page of print): frames of the page 9.4
+# to 187 at the present light and 5.6 to 23 at half of it (the low end against a sum of one frame, rising as frames are
+# added); noise alone up to 7.6 within 4 px and 9.3 within 16 px; the facing page of the same booklet up to 5.6, 7.0 at
+# half the light. Until that day the peak was judged against the whole surface and a share of the first frames' value,
+# with a floor of 7.0 from a desk scene (M-26): on print that measure stays at 4 to 8 whatever the light.
+# ponytail: a page whose characters fill their cells exactly like this page's would pass (generated: 11 to 31); the real
+# facing page did not. If a real one does, also ask what share of the sum's pattern the frame holds (1 against its own page).
+STRENGTH_FLOOR = 8.0
 SETTLE = 6  # frames at the start of a clip that are not used: the glasses' first three are darker than asked (M-26)
 SURPLUS = 3  # a clip holds up to this many frames more than the glasses logged results for, at its end (M-26)
 HOLE_SHARE = 0.05  # a grid cell that received under this share of the typical weight is filled from the plain average
@@ -89,8 +94,19 @@ def _reference_side(reference: np.ndarray) -> np.ndarray:
     return np.conj(_spectrum(reference)) * band
 
 
-def _peak(cross: np.ndarray, shape: tuple[int, int], around: tuple[float, float], reach: float) -> tuple[float, float, float]:
+def _own(reference: np.ndarray, side: np.ndarray) -> np.ndarray:
+    """The sum correlated with itself: the pattern its own print leaves on every correlation surface, peak at (0, 0)."""
+    return np.fft.irfft2(_spectrum(reference) * side, s=reference.shape)
+
+
+def _peak(cross: np.ndarray, shape: tuple[int, int], around: tuple[float, float], reach: float,
+          own: np.ndarray | None = None) -> tuple[float, float, float]:
     """The correlation's peak within `reach` of `around`, from the cross spectrum; sub-pixel by a parabola through it.
+
+    The strength is the peak over the spread of the surface, after the sum's own pattern (`own`, scaled to the peak and
+    put at the peak) is taken out of the surface. Print is regular: lines and characters repeat, and the surface of a
+    well-placed frame is full of side peaks that are the page, not noise. Judged against them a frame of a real page
+    scored 6 to 8 and noise alone up to 7 (M-27); with them taken out the page scores 12 to 200 and noise the same 7.
 
     The whole surface is transformed back. Computing only the points near `around` by a matrix product is fewer
     operations, but it ran several times slower beside the decoder, which takes the threads the product wants.
@@ -108,16 +124,21 @@ def _peak(cross: np.ndarray, shape: tuple[int, int], around: tuple[float, float]
 
     dy = py + finer(surface[(py - 1) % h, px], surface[py, px], surface[(py + 1) % h, px])
     dx = px + finer(surface[py, (px - 1) % w], surface[py, px], surface[py, (px + 1) % w])
+    top = float(surface[py, px])
+    if own is not None and own[0, 0] > 0:
+        surface = surface - (top / float(own[0, 0])) * np.roll(own, (py, px), (0, 1))
     spread = float(surface.std())
-    return float((dy + h / 2) % h - h / 2), float((dx + w / 2) % w - w / 2), float(surface[py, px] / spread) if spread > 0 else 0.0
+    return float((dy + h / 2) % h - h / 2), float((dx + w / 2) % w - w / 2), top / spread if spread > 0 else 0.0
 
 
 def shift_of(frame: np.ndarray, reference: np.ndarray, around: tuple[float, float] = (0.0, 0.0), reach: float = 4.0) -> tuple[float, float, float]:
     """(dy, dx, strength) with frame(y, x) = reference(y - dy, x - dx), looked for within `reach` pixels of `around`.
 
-    strength is the correlation peak over the spread of the whole correlation surface: high when the two show one scene.
+    strength is the correlation peak over the spread of the rest of the correlation surface (see _peak): high when the
+    two show one scene.
     """
-    return _peak(_spectrum(frame) * _reference_side(reference), frame.shape, around, reach)
+    side = _reference_side(reference)
+    return _peak(_spectrum(frame) * side, frame.shape, around, reach, _own(reference, side))
 
 
 def _joined(image: np.ndarray, k: int) -> np.ndarray:
@@ -234,15 +255,17 @@ def gather(frames: Iterable[np.ndarray], *, smear: Sequence[float] | None = None
     total = usable = used = 0
     planes = reference = coarse = covered = shape = None
     join = 1
-    strengths: list[float] = []
     position = (0.0, 0.0)
-    held: dict[object, tuple[int, np.ndarray]] = {}
+    held: dict[object, tuple[int, np.ndarray, np.ndarray | None]] = {}
 
     def side(key: object, source) -> np.ndarray:
-        """The sum's half of the correlation for the whole (key None) or a piece (key = its box), taken anew when stale."""
+        """The sum's half of the correlation for the whole (key None) or a piece (key = its box), taken anew when stale.
+        For the whole, the sum's own pattern is kept beside it: it is what the frame's strength is judged without."""
         kept = held.get(key)
         if kept is None or used < FRESH_UNTIL or used - kept[0] >= REFRESH:
-            kept = (used, _reference_side(source()))
+            summed = source()
+            half = _reference_side(summed)
+            kept = (used, half, _own(summed, half) if key is None else None)
             held[key] = kept
         return kept[1]
 
@@ -264,14 +287,13 @@ def gather(frames: Iterable[np.ndarray], *, smear: Sequence[float] | None = None
             dy = dx = 0.0
         else:
             cross = _spectrum(small) * side(None, lambda: coarse)
-            floor = max(STRENGTH_FLOOR, STRENGTH_SHARE * float(np.median(strengths[:7])) if len(strengths) >= 3 else 0.0)
             for reach in REACHES:
-                dy, dx, strength = _peak(cross, small.shape, (position[0] / join, position[1] / join), max(2.0, reach / join))
-                if strength >= floor + (WIDE_EXTRA if reach > REACHES[0] else 0.0):
+                dy, dx, strength = _peak(cross, small.shape, (position[0] / join, position[1] / join), max(2.0, reach / join),
+                                         held[None][2])
+                if strength >= STRENGTH_FLOOR + (WIDE_EXTRA if reach > REACHES[0] else 0.0):
                     break
             else:
                 continue  # not this scene: the view left the page, or something came between
-            strengths.append(strength)
             dy, dx = dy * join, dx * join
             if parts > 1 and used >= PARTS_FROM:
                 field = _field(frame, lambda box: side((box[0].start, box[1].start), lambda: reference[box]), dy, dx, parts,
