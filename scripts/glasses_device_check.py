@@ -22,12 +22,18 @@ With --paper SECONDS it then waits that long while the wearer, doing nothing but
 turning pages, reads a real booklet, and reports every photo taken: when, why the
 page was counted as turned, how bright it is, and which photos are the same page
 twice. --report DIR keeps the photos and the screens.
+
+--capture clip checks the clip route (saved by the app on that start; --capture still, the default, saves stills
+again): every page is a short recording, checked for its frames, dropped frames, gain, the wait for its first frame
+and the gyroscope's clock; with --phone, that each clip reached the phone server and was gathered there into its
+page's image. --no-reference leaves the glasses' own camera alone (its photo goes to the glasses' gallery).
 """
 
 from __future__ import annotations
 
 import argparse
 import io
+import json
 import os
 import re
 import shutil
@@ -46,6 +52,10 @@ TOUCHPAD = "/dev/input/event1"
 TAP, SWIPE_FORWARD, SWIPE_BACK, DOUBLE_TAP = (204, 28), (204, 106, 108), (204, 105, 103), (204, 204, 158)
 PHONE_IMAGES = "/data/data/com.termux/files/home/rokid-server/data/images"
 STANDARD_PHOTOS = "/sdcard/DCIM/Camera"  # where the glasses' own camera (the physical photo key) saves
+PHONE_SERVER = "/data/data/com.termux/files/home/rokid-server"
+# One line a clip from ClipCamera (see scripts/e2e_route_check.py).
+CLIP_LINE = (r"(\d\d:\d\d:\d\d\.\d+) I/DocScanGlassDoc.*clip frames=(\d+) counted=(\d+) dropped=(\d+) bytes=(\d+) "
+             r"first_ms=(-?\d+) back_ms=(-?\d+) boost=(\d+) exposure_ms=(\d+) gyro=(\d+)")
 
 
 class Check:
@@ -154,7 +164,7 @@ class Check:
         A worn head does not hold one scene, so --paper takes no reference.
         """
         self.standard = None
-        if self.options.paper:
+        if self.options.paper or self.options.no_reference or self.options.capture == "clip":
             return
         from PIL import Image  # noqa: PLC0415
         before = set(self.shell(f"ls {STANDARD_PHOTOS}").split())
@@ -191,6 +201,26 @@ class Check:
         self.row("the glasses' own camera photographed the scene", "PASS",
                  f"{float(exposure) * 1000:.0f} ms, sensitivity {details.get(0x8827)}, level {level:.0f} over noise {noise:.2f}"
                  if exposure else f"level {level:.0f} over noise {noise:.2f}")
+
+    def clips(self) -> list[tuple]:
+        """(log time, frames, counted, dropped, bytes, first ms, back ms, gain, exposure ms, gyroscope frames) of every clip."""
+        return [(m.group(1), *map(int, m.groups()[1:])) for m in re.finditer(CLIP_LINE, self.log())]
+
+    def taken(self) -> int:
+        return len(self.clips()) if self.options.capture == "clip" else len(self.photos())
+
+    def wait_taken(self, count: int, seconds: float) -> bool:
+        deadline = time.monotonic() + seconds
+        while self.taken() < count and time.monotonic() < deadline:
+            time.sleep(1)
+        return self.taken() >= count
+
+    def phone_sh(self, script: str, timeout: int = 120) -> str:
+        head = ("export PREFIX=/data/data/com.termux/files/usr HOME=/data/data/com.termux/files/home\n"
+                "export PATH=$PREFIX/bin:$PATH LD_LIBRARY_PATH=$PREFIX/lib TMPDIR=$PREFIX/tmp\n")
+        done = subprocess.run([self.adb, "-s", self.options.phone, "shell", "run-as com.termux sh -s"],
+                              input=(head + script).encode(), capture_output=True, timeout=timeout)
+        return done.stdout.decode("utf-8", "replace").replace("\r", "")
 
     def photos(self) -> list[tuple[str, int, int]]:
         """(sensor log line time, bytes, generation) of every photo since the start."""
@@ -231,7 +261,7 @@ class Check:
     def chooser(self) -> bool:
         self.started = self.shell('date "+%m-%d %H:%M:%S.000"').strip()
         self.shell(f"am force-stop {PACKAGE}; input keyevent KEYCODE_WAKEUP; sleep 1; "
-                   f"am start -n {PACKAGE}/.DocScanGlassActivity >/dev/null 2>&1")
+                   f"am start -n {PACKAGE}/.DocScanGlassActivity --es capture {self.options.capture} >/dev/null 2>&1")
         if not self.expect("chooser opens", bool(self.wait(r"phase=chooser request=wake", 8))):
             return False
         time.sleep(1)
@@ -269,9 +299,51 @@ class Check:
         self.expect("the ordinary reading is the one selected", self.chosen("chooser-selected") == 0,
                     f"the marker was on line {chosen}" if chosen else "")
         self.keys(DOUBLE_TAP)  # safe here only: on the chooser the double tap starts, it never ends a capture
-        return self.expect("double tap starts the selected reading", bool(self.wait(r"Started local capture session", 8)))
+        started = self.expect("double tap starts the selected reading", bool(self.wait(r"Started local capture session", 8)))
+        camera = self.wait(r"capture=(clip|still)", 3)
+        return self.expect(f"pages are taken as asked: {self.options.capture}",
+                           bool(camera) and camera.group(1) == self.options.capture) and started
+
+    def capture_clip(self) -> bool:
+        if not self.expect("first page is recorded automatically", self.wait_taken(1, 40), "" if self.taken() else "no clip in 40 s"):
+            for line in self.log().splitlines()[-6:]:
+                print("      " + line[:200])
+            return False
+        _, frames, counted, dropped, size, first, back, boost, exposure, gyro = self.clips()[0]
+        settle = 15 if exposure > 30 else 6  # the long exposure settles more slowly
+        self.expect("the clip holds the frames a page needs", frames >= 60 + settle and counted >= 60,
+                    f"{frames} frames, {counted} counted, {size / 1e6:.1f} MB, {exposure} ms")
+        self.expect("no frame was dropped", dropped == 0, f"{dropped}")
+        self.expect("the gain is 5.0 at most", boost <= 500, f"{boost / 100:.2f}")
+        self.expect("the first frame comes within 2 s of the request", 0 <= first <= 2000, f"{first} ms; watching again after {back} ms")
+        self.expect("the gyroscope's readings fall inside the frames' exposures", gyro >= frames * 0.9, f"{gyro} of {frames} frames")
+        page = self.wait(r"captured (\d+)x(\d+) in (\d+) ms", 10)
+        self.expect("the page is one frame of its clip", bool(page) and page.group(1, 2) == ("2016", "1512"),
+                    f"{page.group(1)}x{page.group(2)}, {page.group(3)} ms from the request" if page else "no page")
+        self.screen("review")
+        self.expect("it is saved after the 3-second review", bool(self.wait(r"Photo committed locally", 15)))
+        time.sleep(self.options.watch)
+        log = self.log()
+        status = re.findall(r"watch_status frames=(\d+) max_work_ms=(\d+) exposure_ns=(\d+) iso=(\d+) boost=(\d+) far=(\w+)", log)
+        if status:
+            _, _, nanos, iso, gain, _ = status[-1]
+            self.row("light as the watch preview measures it", "INFO",
+                     f"a 30 ms exposure needs a total gain of {int(nanos) / 1e6 * int(iso) * int(gain) / 100 / 30:.0f}; "
+                     "the clip has 4000 at most and takes 60 ms above 5640")
+        causes = re.findall(r"page_change scene=(\d+) (cause=\w+ level_shift=-?\d+ cells_over_percent=\d+)", log)
+        self.expect(f"an unmoving scene adds no clip in {self.options.watch} s", self.taken() <= 2,
+                    f"{self.taken()} clip(s); page changes counted: " + ("; ".join(f"{n} {c}" for n, c in causes[-4:]) or "none"))
+        work = [int(ms) for _, ms, *_ in status][1:]
+        self.expect("the preview handler keeps up", bool(work) and max(work) <= 100,
+                    f"{max(work) if work else '?'} ms at most over {len(work)} s")
+        box = self.screen("waiting").getbbox()
+        self.expect("the live image stays in its lower-right corner", box is None or (box[0] >= 480 * 0.6 and box[1] >= 640 * 0.4),
+                    f"lit area {box}")
+        return True
 
     def capture(self) -> bool:
+        if self.options.capture == "clip":
+            return self.capture_clip()
         first = self.wait(r"captured (\d+)x(\d+) (\d+)B in (\d+)ms", 30)
         if not self.expect("first photo is taken automatically", bool(first),
                            f"{first.group(1)}x{first.group(2)}, {first.group(3)} bytes, {first.group(4)} ms from the request"
@@ -315,7 +387,7 @@ class Check:
         return True
 
     def pause(self) -> None:
-        before = len(self.photos())
+        before = self.taken()
         mark = len(self.log())
         self.keys(TAP)
         if not self.expect("tap pauses the capture", bool(self.wait(r"Capture paused by the wearer", 8, mark))):
@@ -330,15 +402,14 @@ class Check:
         self.expect("nothing is drawn during the pause", self.screen("paused").getbbox() is None)
         self.keys(SWIPE_FORWARD)
         time.sleep(3)
-        self.expect("a swipe during the pause takes no photo", len(self.photos()) == before)
+        self.expect("a swipe during the pause takes no photo", self.taken() == before)
         mark = len(self.log())
         self.keys(TAP)
         self.expect("tap resumes", bool(self.wait(r"Capture resumed by the wearer", 5, mark)))
         time.sleep(6)
-        self.expect("the same page is not taken again on return", len(self.photos()) == before, f"{len(self.photos())} photo(s)")
+        self.expect("the same page is not taken again on return", self.taken() == before, f"{self.taken()} photo(s)")
         self.keys(SWIPE_FORWARD)
-        taken = self.wait(rf"captured \d+x\d+ \d+B in \d+ms gen={before + 1}", 12)
-        self.expect("forward swipe takes a photo", bool(taken))
+        self.expect("forward swipe takes a photo", self.wait_taken(before + 1, 20))
         self.wait(r"Photo committed locally", 8, len(self.log()) - 200)
         time.sleep(4)
 
@@ -374,11 +445,56 @@ class Check:
             self.row("real paper: head-motion trace kept", "INFO", f"{len(trace)} bytes; read it with scripts/head_motion_report.py")
         self.expect("real paper: nothing failed", not re.search(r"capture failed|preview failed|ERROR:", log))
 
+    def server_clips(self) -> None:
+        """The newest document on the phone server: a clip for each page, gathered there into the page's image."""
+        from PIL import Image  # noqa: PLC0415
+        pages = sum(1 for clip in self.clips() if clip[2] > 0)
+        query = ("import sqlite3, json; c = sqlite3.connect('file:data/docscan.db?mode=ro', uri=True); "
+                 "d = c.execute('select max(id) from documents').fetchone()[0]; "
+                 "print(json.dumps({'document': d, 'clips': c.execute('select page_index, status, reason, used, total, level, bytes from "
+                 "page_clips where document_id = ? order by page_index', (d,)).fetchall(), 'pages': c.execute('select page_index, "
+                 "image_path, capture_metadata_json like ? from pages where document_id = ? order by page_index', "
+                 "('%gathered%', d)).fetchall()}))")
+        started, state = time.monotonic(), {}
+        while True:
+            answer = self.phone_sh(f"cd {PHONE_SERVER} && python3 -c \"{query}\"")
+            try:
+                state = json.loads(answer.strip().splitlines()[-1])
+            except (ValueError, IndexError):
+                state = {}
+            clips = state.get("clips", [])
+            if (len(clips) >= pages and all(row[1] in ("done", "failed") for row in clips)) or time.monotonic() - started > 300:
+                break
+            time.sleep(4)
+        clips, stored = state.get("clips", []), state.get("pages", [])
+        self.expect("every page reached the phone server", len(stored) >= pages, f"{len(stored)} of {pages} in document {state.get('document')}")
+        self.expect("every clip reached the phone server and was gathered there", len(clips) >= pages and all(row[1] == "done" for row in clips),
+                    "; ".join(f"page {index + 1} {status}" + (f" ({reason})" if reason else f", {used} of {total} frames, level over noise {level}")
+                              + f", {size / 1e6:.1f} MB" for index, status, reason, used, total, level, size in clips)
+                    + f"; {time.monotonic() - started:.0f} s after the last page")
+        self.expect("each page's image is the one gathered from its clip", sum(1 for row in stored if row[2]) >= pages,
+                    f"{sum(1 for row in stored if row[2])} of {pages}")
+        if not self.report:
+            return
+        for index, path, _ in stored[:3]:  # looked at by eye afterwards; each is about 10 MB
+            data = self.run(self.options.phone, "exec-out", f"run-as com.termux cat {path}", timeout=180)
+            try:
+                image = Image.open(io.BytesIO(data))
+                levels = sorted(image.convert("L").resize((252, 189)).tobytes())
+                bright = sum(levels[len(levels) * 3 // 4:]) / (len(levels) / 4)
+                (self.report / f"page-{index + 1:02d}.png").write_bytes(data)
+                self.row(f"page {index + 1} as the server holds it", "INFO", f"{image.size[0]}x{image.size[1]}, brightest quarter {bright:.0f} of 255")
+            except OSError:
+                self.expect(f"page {index + 1} can be read back", False, f"{len(data)} bytes")
+
     def server(self) -> None:
         if not self.options.phone:
             return
         if not self.phone_again():
             self.row("phone server checks", "WARN", "the phone is not reachable over adb now; whether the photos arrived was not checked")
+            return
+        if self.options.capture == "clip":
+            self.server_clips()
             return
         from PIL import Image, ImageStat  # noqa: PLC0415
         photos = self.photos()
@@ -463,5 +579,7 @@ if __name__ == "__main__":
     parser.add_argument("--expect-serialno", default=GLASSES_SERIAL)
     parser.add_argument("--watch", type=int, default=15, help="seconds to watch an unmoving scene after the first photo")
     parser.add_argument("--paper", type=int, default=0, help="seconds to record a real booklet being read, in place of the pause steps")
+    parser.add_argument("--capture", choices=["still", "clip"], default="still", help="how a page is taken; the app saves it on this start")
+    parser.add_argument("--no-reference", action="store_true", help="take no photo with the glasses' own camera (it goes to their gallery)")
     parser.add_argument("--report", help="directory for the pulled photos and the screens")
     sys.exit(Check(parser.parse_args()).main())
