@@ -1,6 +1,6 @@
 # rokid-docscan-starter development guide
 
-Status: Current engineering contract. Updated 2026-11-15.
+Status: Current engineering contract. Updated 2026-11-15 (evening: stage 2 of the gathered capture, §M-27).
 
 **Start at `.agents/progress/current.md`.** It lists the operator's decisions,
 the verified state and the next steps. Do not re-ask what it settles. Then read
@@ -176,21 +176,37 @@ the desk a 40-page cycle of watching and recording levelled the board near 46 C,
 clips reached the phone at about 10 MB/s over the hotspot, and the phone gathered
 a 5-second clip in 34-35 s, three at once in 39 s. A clip is the whole field and
 its frame k is capture result k. Starting a recording takes 1.1-2.4 s (the
-session rebuild) and stopping it took 3-5.6 s in 7 of 40. Nothing of this is in
-`:glassdoc` or the server's route yet; the next step needs a booklet placed in
-front of the glasses in the dark. What it rests on, measured on the desk and the PC on 2026-11-15 (§M-25):
+session rebuild); stopping it took 3-5.6 s in 7 of 40 until the camera was sent
+back to watching first and the recorder stopped off its thread (0.7-1.2 s, 20 of
+20, §M-27). **Stage 2, the first real page (2026-11-15, §M-27), failed the
+design's first choice as built.** What the camera hands the hardware encoder is
+already smoothed whatever is asked (noise reduction off, the camera's own
+video-denoise keys, either codec, 57 or 140 Mbit/s: eight settings). A clip's
+frame keeps 7-13% of the print's stroke-sized detail and a quarter of the noise
+that reducing alone leaves; 288 gathered frames cannot be read where the mean of
+20 direct frames can. Encoders themselves keep the print (x264/x265 on the PC,
+1.00 at the same 0.4 bit a pixel a frame). The 132 model reads planned were not
+run. Next to measure: frames of an output without that smoothing (YUV) handed to
+the encoder by the app; failing that, adding on the glasses. The same page
+showed that `app/gather.py` dropped well-placed frames of regular print (the
+peak was judged against the print's own repeats; fixed, floors re-measured),
+that a spread at reading distance is about 16% of the whole field, and that
+taking full-size stills in a row ran the glasses out of memory and got the real
+app killed and restarted. The booklet stood nearer than a page is read from
+(characters 24 px apart against 15.8 in the worn reference photo). Nothing of
+this is in `:glassdoc` or the server's route yet. What it rests on, measured on the desk and the PC on 2026-11-15 (§M-25):
 the 2016x1512 stream is the whole field at half size and the only whole-field
 size at 60 frames a second; streaming it heats the glasses by 17.7 C in 150 s
 with no work done and 24.9 C with one Java pass over each frame, which alone
 takes 22.5 ms; the hardware encoder is refused beside the YUV preview and
 accepted alone or beside a small display-format stream, and recording 2400x1800
 at 30 a second heats by 15.7 C; video compression keeps what adding needs
-(software encoders on the PC, 0.985 at 40 Mbit/s; my estimate that it would not
-was wrong); textbook phase correlation cannot place frames this noisy and a
+(software encoders on the PC, 0.985 at 40 Mbit/s; that is true of encoders and
+not of the glasses' video output, see above); textbook phase correlation cannot place frames this noisy and a
 band-passed correlation against the running sum can; half-size frames read as
 well as full-size ones only when added on a finer grid (simulated, six reads
 each: 2.3% against 3.3%, and 21.2% without the finer grid). Unmeasured: placing
-on a worn head, whether the glasses' encoder keeps the detail of text, recording
+on a worn head, the glasses' encoder fed with unsmoothed frames, recording
 and sending at once, clips of ten seconds. The paragraph below holds
 for bright photos only.
 
