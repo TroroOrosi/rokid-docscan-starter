@@ -48,6 +48,7 @@ public final class DocScanApi {
             Objects.requireNonNull(MediaType.parse("application/json; charset=utf-8"));
     private static final MediaType JPEG =
             Objects.requireNonNull(MediaType.parse("image/jpeg"));
+    private static final MediaType MP4 = MediaType.parse("video/mp4");
     private static final MediaType EMPTY =
             Objects.requireNonNull(MediaType.parse("application/octet-stream"));
 
@@ -360,6 +361,22 @@ public final class DocScanApi {
         if (!(ip instanceof String) || ((String)ip).isBlank() || ((String)ip).length() > 256
                 || ((String)ip).indexOf('\0') >= 0) throw new JSONException("原動画の接続元を確認できません");
         return (String)ip;
+    }
+
+    /**
+     * The clip a page's frame was cut from, after the page itself. The server gathers it into the page's image.
+     * 201 stores it, 200 says it already holds this clip; 409 says the page is now another capture's (a retake).
+     */
+    public JSONObject uploadPageClip(long documentId, int pageIndex, String captureId, String sha256, File clip, File record)
+            throws IOException, JSONException {
+        MultipartBody body = new MultipartBody.Builder().setType(MultipartBody.FORM)
+                .addFormDataPart("capture_id", captureId).addFormDataPart("sha256", sha256)
+                .addFormDataPart("record", new String(java.nio.file.Files.readAllBytes(record.toPath()), StandardCharsets.UTF_8))
+                .addFormDataPart("clip", "page-" + (pageIndex + 1) + ".mp4", RequestBody.create(clip, MP4)).build();
+        // A clip is tens of megabytes over the hotspot: its own, longer limits, never a retry of the body in secret.
+        return execute(new Request.Builder().url(baseUrl + "/v1/documents/" + documentId + "/pages/" + pageIndex + "/clip").post(body),
+                http.newBuilder().writeTimeout(120, TimeUnit.SECONDS).callTimeout(10, TimeUnit.MINUTES)
+                        .retryOnConnectionFailure(false).build());
     }
 
     /** Explicit comparison only; the producer's false auto-upload flag grants no permission. */

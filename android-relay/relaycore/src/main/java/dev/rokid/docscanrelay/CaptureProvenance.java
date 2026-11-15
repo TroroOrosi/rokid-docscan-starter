@@ -64,6 +64,14 @@ public final class CaptureProvenance {
                 frameNumber, exposureNanos, sensitivityIso, afState, aeState);
     }
 
+    /** One frame of a recorded clip, shown and uploaded as the page until the clip has been gathered. */
+    public static CaptureProvenance clipFrame(byte[] jpeg, int width, int height,
+            Long imageTimestamp, Long resultTimestamp, Long frameNumber, Long exposureNanos,
+            Integer sensitivityIso, Integer afState, Integer aeState) {
+        return captured("clip_frame", jpeg, width, height, imageTimestamp, resultTimestamp,
+                frameNumber, exposureNanos, sensitivityIso, afState, aeState);
+    }
+
     private static CaptureProvenance captured(String sourceKind, byte[] jpeg, int width, int height,
             Long imageTimestamp, Long resultTimestamp, Long frameNumber, Long exposureNanos,
             Integer sensitivityIso, Integer afState, Integer aeState) {
@@ -182,7 +190,7 @@ public final class CaptureProvenance {
 
     static CaptureProvenance readFromV5(DataInputStream data) throws IOException {
         String sourceKind = data.readUTF();
-        if (!sourceKind.equals("native_still") && !sourceKind.equals("zsl_reprocess")) {
+        if (!sourceKind.equals("native_still") && !sourceKind.equals("zsl_reprocess") && !sourceKind.equals("clip_frame")) {
             throw new IOException("unsupported capture producer");
         }
         return readFields(data, sourceKind);

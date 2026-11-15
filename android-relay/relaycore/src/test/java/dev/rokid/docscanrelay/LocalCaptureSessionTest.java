@@ -200,6 +200,72 @@ public class LocalCaptureSessionTest {
         return new CaptureReviewStore.Pending(index, jpeg, "", 270, "", PageFraming.UNKNOWN, value, source);
     }
 
+    @Test public void aClipFollowsItsPageAndIsSentOnlyAfterThePage() throws Exception {
+        LocalCaptureSession session = LocalCaptureSession.create(folder.getRoot(), "http://phone:8000", false);
+        ClipInbox inbox = new ClipInbox(folder.newFolder("inbox"));
+        String capture = clip(inbox, 7);
+        session.commit(photo(0, 1));
+        session.attachClip(0, capture, inbox);
+        assertFalse("the clip has left the inbox", inbox.has(capture));
+        assertNull("a clip is not sent before its page", session.nextUnsentClip());
+        session.acknowledge(session.nextUnsent());
+        LocalCaptureSession restarted = LocalCaptureSession.load(folder.getRoot(), session.id());
+        LocalCaptureSession.Clip clip = restarted.nextUnsentClip();
+        assertNotNull(clip);
+        assertEquals(0, clip.index);
+        assertEquals(capture, clip.captureId);
+        assertEquals("v-0-" + clip.sha256 + ".mp4", clip.file.getName());
+        assertArrayEquals(new byte[]{0, 0, 0, 24, 'f', 't', 'y', 'p', 7}, Files.readAllBytes(clip.file.toPath()));
+        assertTrue(clip.record.isFile());
+        restarted.acknowledgeClip(clip);
+        assertNull(restarted.nextUnsentClip());
+        assertFalse("a clip the server holds is not kept", clip.file.exists());
+        assertFalse(clip.record.exists());
+        assertNull(LocalCaptureSession.load(folder.getRoot(), session.id()).nextUnsentClip());
+    }
+
+    @Test public void aRetakeReplacesTheClipAndAStillRetakeRemovesIt() throws Exception {
+        LocalCaptureSession session = LocalCaptureSession.create(folder.getRoot(), "http://phone:8000", false);
+        ClipInbox inbox = new ClipInbox(folder.newFolder("inbox"));
+        session.commit(photo(0, 1));
+        session.attachClip(0, clip(inbox, 1), inbox);
+        session.acknowledge(session.nextUnsent());
+        LocalCaptureSession.Clip first = session.nextUnsentClip();
+        assertNotNull(first);
+
+        session.commit(photo(0, 2));
+        String second = clip(inbox, 2);
+        session.attachClip(0, second, inbox);
+        assertFalse("the first clip belongs to a photo that was replaced", first.file.exists());
+        assertNull("the new clip waits for the new page", session.nextUnsentClip());
+        session.acknowledgeClip(first); // A late acknowledgement cannot cover the replacement.
+        session.acknowledge(session.nextUnsent());
+        LocalCaptureSession.Clip replacement = session.nextUnsentClip();
+        assertNotNull(replacement);
+        assertEquals(second, replacement.captureId);
+
+        session.commit(photo(0, 3));
+        session.attachClip(0, java.util.UUID.randomUUID().toString(), inbox); // a still: no clip of this capture
+        session.acknowledge(session.nextUnsent());
+        assertNull(session.nextUnsentClip());
+        assertFalse(replacement.file.exists());
+    }
+
+    @Test public void aClipWithoutItsPageIsRefused() throws Exception {
+        LocalCaptureSession session = LocalCaptureSession.create(folder.getRoot(), "http://phone:8000", false);
+        ClipInbox inbox = new ClipInbox(folder.newFolder("inbox"));
+        String capture = clip(inbox, 1);
+        assertThrows(IOException.class, () -> session.attachClip(0, capture, inbox));
+        assertTrue("a refused clip stays where it was", inbox.has(capture));
+    }
+
+    private static String clip(ClipInbox inbox, int value) throws Exception {
+        String id = java.util.UUID.randomUUID().toString();
+        Files.write(inbox.reserve(id).toPath(), new byte[]{0, 0, 0, 24, 'f', 't', 'y', 'p', (byte) value});
+        inbox.offer(id, ("{\"schema\":1,\"n\":" + value + "}").getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        return id;
+    }
+
     private static CaptureReviewStore.Pending photo(int index, int value) {
         return new CaptureReviewStore.Pending(index, new byte[]{(byte)value, 2, 3}, "実資料", 180, "",
                 PageFraming.UNKNOWN, 1000 + value);

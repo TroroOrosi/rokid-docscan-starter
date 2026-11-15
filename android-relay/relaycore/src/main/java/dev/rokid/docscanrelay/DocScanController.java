@@ -94,6 +94,7 @@ public final class DocScanController implements AutoCloseable {
     private volatile boolean closed;
     private final RetryCursor retryCursor = new RetryCursor();
     private volatile java.util.function.Supplier<CaptureInspectionOrigin.Context> inspectionContext = () -> null;
+    private volatile ClipInbox clipInbox;
     // Metadata only: one selected local session, at most its 1000 pages and two future candidates.
     private final java.util.concurrent.ConcurrentHashMap<String, InspectionCapture> inspectionCaptures =
             new java.util.concurrent.ConcurrentHashMap<>();
@@ -291,6 +292,11 @@ public final class DocScanController implements AutoCloseable {
     }
 
     /** Optional current-run diagnostic context; legacy/restored images do not gain an invented origin. */
+    /** Where the camera leaves the clip of each frame it hands over as a photo; null for a camera that takes stills. */
+    public void setClipInbox(ClipInbox inbox) {
+        clipInbox = inbox;
+    }
+
     public void setCaptureInspectionContextProvider(
             java.util.function.Supplier<CaptureInspectionOrigin.Context> provider) {
         inspectionContext = provider == null ? () -> null : provider;
@@ -1868,6 +1874,9 @@ public final class DocScanController implements AutoCloseable {
     private void stageCaptureReview(CaptureReviewStore.Pending candidate, OcrQuality quality) {
         ocrInFlight = false;
         if ((listeningFailed && !mixedMode) || closed) return;
+        // Only the photo now under review can still be accepted: the clip of any photo before it is waste.
+        if (clipInbox != null) clipInbox.discardExcept(candidate.provenance == null
+                ? java.util.Set.of() : java.util.Set.of(candidate.provenance.captureId));
         int pageIndex = candidate.pageIndex;
         CaptureReviewStore.Pending previous = captureReview.peek();
         CaptureReviewStore.Pending pending;
@@ -1971,6 +1980,7 @@ public final class DocScanController implements AutoCloseable {
         CaptureReviewStore.Pending pending = confirmation.pending();
         try {
             localSession.commit(pending);
+            localSession.attachClip(pending.pageIndex, pending.provenance == null ? null : pending.provenance.captureId, clipInbox);
             if (reacquiringCaptureGap) {
                 localSession.resolveCaptureGap();
                 reacquiringCaptureGap = false;
@@ -2130,6 +2140,7 @@ public final class DocScanController implements AutoCloseable {
             PowerManager power = (PowerManager)context.getSystemService(Context.POWER_SERVICE);
             PowerManager.WakeLock transferLock = power == null ? null
                     : power.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "docscan:photo-transfer");
+            if (transferLock != null) transferLock.setReferenceCounted(false); // each clip renews the same two minutes
             boolean failed = false;
             boolean analysisStarted = false;
             boolean httpInProgress = false;
@@ -2164,6 +2175,21 @@ public final class DocScanController implements AutoCloseable {
                     if (origin != null) startInspectionFeedback(diagnostic, page, receipt);
                     if (photo.provenance != null) inspectionCaptures.remove(photo.provenance.captureId);
                     page = saved.nextUnsent();
+                }
+                // Each page's clip follows it, and all of them before the booklet is finalized: the server
+                // gathers a clip into its page and holds the finalization for the clips it has.
+                LocalCaptureSession.Clip clip = saved.nextUnsentClip();
+                while (!closed && clip != null) {
+                    if (transferLock != null) transferLock.acquire(120_000);
+                    httpInProgress = true;
+                    try {
+                        destination.uploadPageClip(saved.documentId(), clip.index, clip.captureId, clip.sha256, clip.file, clip.record);
+                    } catch (DocScanApi.ApiException refused) {
+                        if (refused.getStatusCode() != 409) throw refused; // 409: the page is another capture's now
+                    }
+                    httpInProgress = false;
+                    saved.acknowledgeClip(clip);
+                    clip = saved.nextUnsentClip();
                 }
                 if (!closed && saved.phase() == LocalCaptureSession.Phase.ANALYSIS && saved.documentId() > 0) {
                     analysisStarted = true;
@@ -2223,7 +2249,8 @@ public final class DocScanController implements AutoCloseable {
                         }, 5, TimeUnit.SECONDS);
                     } else if (result == null) {
                         try {
-                            if (saved.nextUnsent() != null || saved.phase() == LocalCaptureSession.Phase.ANALYSIS || saved.audioAttachPending()) queueLocalUpload();
+                            if (saved.nextUnsent() != null || saved.nextUnsentClip() != null
+                                    || saved.phase() == LocalCaptureSession.Phase.ANALYSIS || saved.audioAttachPending()) queueLocalUpload();
                         } catch (IOException error) { fail("保存ページを読み出せません", null); }
                     }
                 }

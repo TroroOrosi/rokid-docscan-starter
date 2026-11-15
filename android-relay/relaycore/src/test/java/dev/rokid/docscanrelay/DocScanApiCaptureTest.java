@@ -274,6 +274,30 @@ public class DocScanApiCaptureTest {
                 .put("capture_provenance", nativeCapture).put("canonical_image_sha256", "c".repeat(64));
     }
 
+    @Test public void aClipIsSentWithItsCaptureAndItsHash() throws Exception {
+        java.io.File directory = java.nio.file.Files.createTempDirectory("clip-upload").toFile();
+        java.io.File clip = new java.io.File(directory, "v.mp4"), record = new java.io.File(directory, "v.json");
+        byte[] body = {0, 0, 0, 24, 'f', 't', 'y', 'p', 5, 6};
+        java.nio.file.Files.write(clip.toPath(), body);
+        java.nio.file.Files.write(record.toPath(), "{\"schema\":1}".getBytes(StandardCharsets.UTF_8));
+        try (MockWebServer server = new MockWebServer()) {
+            server.enqueue(new MockResponse().setResponseCode(201).setBody("{\"status\":\"stored\"}"));
+            server.enqueue(new MockResponse().setResponseCode(200).setBody("{\"status\":\"done\"}"));
+            server.enqueue(new MockResponse().setResponseCode(409).setBody("{\"detail\":\"another capture\"}"));
+            api(server).uploadPageClip(17, 2, SESSION, "a".repeat(64), clip, record);
+            RecordedRequest request = server.takeRequest();
+            assertEquals("/v1/documents/17/pages/2/clip", request.getPath());
+            assertArrayEquals(body, part(request, "clip"));
+            assertEquals(SESSION, new String(part(request, "capture_id"), StandardCharsets.UTF_8));
+            assertEquals("a".repeat(64), new String(part(request, "sha256"), StandardCharsets.UTF_8));
+            assertEquals("{\"schema\":1}", new String(part(request, "record"), StandardCharsets.UTF_8));
+            api(server).uploadPageClip(17, 2, SESSION, "a".repeat(64), clip, record); // the same clip again is a success
+            DocScanApi.ApiException stale = assertThrows(DocScanApi.ApiException.class,
+                    () -> api(server).uploadPageClip(17, 2, SESSION, "a".repeat(64), clip, record));
+            assertEquals(409, stale.getStatusCode());
+        }
+    }
+
     private static DocScanApi api(MockWebServer server) {
         return new DocScanApi(server.url("/").toString(), "", new ClientIdentity("test", "test", "test"));
     }

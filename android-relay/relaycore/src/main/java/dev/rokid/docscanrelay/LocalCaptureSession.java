@@ -10,6 +10,8 @@ import java.util.UUID;
 /** A glasses session exists before HTTP: immutable image revisions plus one atomic state file. */
 final class LocalCaptureSession {
     enum Phase { CAPTURE, LISTENING, ANALYSIS, REVIEW, CLOSED }
+    /** One clip is a few seconds of one page: about 35 MB, 140 MB at the ten-second limit. */
+    static final long MAX_CLIP_BYTES = 192L * 1024 * 1024;
     private final File directory;
     private boolean freshProcess = true;
     private Properties state;
@@ -63,7 +65,10 @@ final class LocalCaptureSession {
             if (!java.util.List.of("written", "listening", "mixed").contains(result.examType())
                     || result.listening() != !"written".equals(result.examType())) throw new IOException("試験形式が不正です");
             Phase.valueOf(state.getProperty("resume_phase"));
-            for (int index = 0; index < result.pageCount(); index++) result.page(index);
+            for (int index = 0; index < result.pageCount(); index++) {
+                result.page(index);
+                result.clipName(index);
+            }
             if (result.candidateCount() < 0 || result.candidateCount() > 2) throw new IOException("保存候補数が不正です");
             for (int index = 0; index < result.candidateCount(); index++) result.candidateName(index);
             if (Boolean.parseBoolean(state.getProperty("candidate.issued", "false"))
@@ -374,6 +379,72 @@ final class LocalCaptureSession {
         return pending;
     }
 
+    /** The clip a page's frame was cut from: an extra original beside the page, sent after it. */
+    static final class Clip {
+        final int index;
+        final String captureId, sha256;
+        final File file, record;
+        Clip(int index, String captureId, String sha256, File file, File record) {
+            this.index = index; this.captureId = captureId; this.sha256 = sha256; this.file = file; this.record = record;
+        }
+    }
+
+    /**
+     * Called for every accepted page. The clip of this capture moves from the inbox into this session; a page
+     * accepted without one (a still, a retake by still) drops the clip of the photo it replaced.
+     */
+    synchronized void attachClip(int pageIndex, String captureId, ClipInbox inbox) throws IOException {
+        if (inbox == null) return;
+        page(pageIndex);
+        String previous = clipName(pageIndex);
+        Properties next = copy();
+        String name = null;
+        if (captureId != null && inbox.has(captureId)) {
+            File clip = inbox.clip(captureId);
+            name = "v-" + pageIndex + "-" + digest(clip, MAX_CLIP_BYTES) + ".mp4";
+            CaptureReviewPersistence.moveReplacing(inbox.record(captureId), new File(directory, name + ".json"));
+            CaptureReviewPersistence.moveReplacing(clip, new File(directory, name));
+            next.setProperty("clip." + pageIndex, name);
+            next.setProperty("clipid." + pageIndex, captureId);
+        } else {
+            if (previous == null) return;
+            next.remove("clip." + pageIndex);
+            next.remove("clipid." + pageIndex);
+        }
+        next.remove("clipack." + pageIndex);
+        save(next);
+        if (previous != null && !previous.equals(name)) {
+            new File(directory, previous).delete();
+            new File(directory, previous + ".json").delete();
+        }
+    }
+
+    /** A clip is sent only after the server holds the page it belongs to. */
+    synchronized Clip nextUnsentClip() throws IOException {
+        for (int index = 0; index < pageCount(); index++) {
+            String name = clipName(index);
+            if (name == null || name.equals(state.getProperty("clipack." + index))
+                    || !page(index).fileName.equals(state.getProperty("ack." + index))) continue;
+            return new Clip(index, state.getProperty("clipid." + index, ""), name.substring(name.lastIndexOf('-') + 1, name.length() - 4),
+                    new File(directory, name), new File(directory, name + ".json"));
+        }
+        return null;
+    }
+
+    /** The server holds it (or refused it as stale): it is not kept here any longer. */
+    synchronized void acknowledgeClip(Clip clip) throws IOException {
+        if (!clip.file.getName().equals(clipName(clip.index))) return;
+        update("clipack." + clip.index, clip.file.getName());
+        clip.file.delete();
+        clip.record.delete();
+    }
+
+    private String clipName(int index) throws IOException {
+        String name = state.getProperty("clip." + index);
+        if (name != null && !name.matches("v-" + index + "-[0-9a-f]{64}\\.mp4")) throw new IOException("保存録画の参照が不正です");
+        return name;
+    }
+
     synchronized void acknowledge(Page page) throws IOException {
         if (page.fileName.equals(page(page.index).fileName)) update("ack." + page.index, page.fileName);
     }
@@ -424,7 +495,11 @@ final class LocalCaptureSession {
     }
 
     private static String digest(File file) throws IOException {
-        if (file.length() > CaptureReviewPersistence.MAX_RECORD_BYTES) throw new IOException("保存画像が大きすぎます");
+        return digest(file, CaptureReviewPersistence.MAX_RECORD_BYTES);
+    }
+
+    private static String digest(File file, long limit) throws IOException {
+        if (file.length() > limit) throw new IOException("保存画像が大きすぎます");
         try (InputStream input = new FileInputStream(file)) {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
             byte[] buffer = new byte[8192];
@@ -432,7 +507,7 @@ final class LocalCaptureSession {
             long bytes = 0;
             while ((count = input.read(buffer)) != -1) {
                 bytes += count;
-                if (bytes > CaptureReviewPersistence.MAX_RECORD_BYTES) throw new IOException("保存画像が大きすぎます");
+                if (bytes > limit) throw new IOException("保存画像が大きすぎます");
                 digest.update(buffer, 0, count);
             }
             StringBuilder hex = new StringBuilder(64);

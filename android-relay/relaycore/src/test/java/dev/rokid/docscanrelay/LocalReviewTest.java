@@ -276,12 +276,82 @@ public class LocalReviewTest {
         }
     }
 
+    @Test public void aClipGoesToTheServerAfterItsPageAndARetakeTakesItsOwnClip() throws Exception {
+        Surface surface = new Surface(); surface.holdForPage = true;
+        var run = new java.util.concurrent.atomic.AtomicReference<>(new CaptureInspectionOrigin.Context("glasses", 1));
+        try (MockWebServer server = inspectionServer()) {
+            DocScanController controller = inspectionController(server, surface, run);
+            try {
+                ClipInbox inbox = new ClipInbox(java.nio.file.Files.createTempDirectory("clip-inbox").toFile());
+                controller.setClipInbox(inbox);
+                byte[] first = {1, 2, 3}, second = {4, 5, 6};
+                CaptureProvenance firstSource = clipSource(inbox, first, 100);
+                issueInspectionPhoto(controller, 0, false);
+                controller.onPhoto(first, firstSource); barrier(controller);
+                assertTrue("the clip of the photo under review is kept", inbox.has(firstSource.captureId));
+                issueInspectionPhoto(controller, 0, true); // a retake of the same page
+                CaptureProvenance secondSource = clipSource(inbox, second, 200); // the camera offers a clip just before its photo
+                controller.onPhoto(second, secondSource); barrier(controller);
+                assertFalse("the clip of the replaced photo is gone", inbox.has(firstSource.captureId));
+                commitVisible(controller, surface);
+                LocalCaptureSession saved = (LocalCaptureSession) get(controller, "localSession");
+                assertFalse("the accepted clip moved into the session", inbox.has(secondSource.captureId));
+                assertNull(saved.nextUnsentClip());
+
+                set(controller, "localNetworkBusy", false); call(controller, "queueLocalUpload", new Class<?>[]{}); waitForUpload(controller);
+                List<String> paths = new java.util.ArrayList<>();
+                RecordedRequest request, clip = null;
+                while ((request = server.takeRequest(50, TimeUnit.MILLISECONDS)) != null) {
+                    paths.add(request.getPath());
+                    if (request.getPath().endsWith("/clip")) clip = request;
+                }
+                assertEquals(List.of("/v1/documents", "/v1/documents/17/pages", "/v1/documents/17/pages/0/clip"), paths);
+                assertEquals(secondSource.captureId, new String(uploadPart(clip, "capture_id"), StandardCharsets.UTF_8));
+                assertArrayEquals(new byte[]{0, 0, 0, 24, 'f', 't', 'y', 'p', 4}, uploadPart(clip, "clip"));
+                assertNull(saved.nextUnsent());
+                assertNull(saved.nextUnsentClip());
+            } finally { controller.close(); }
+        }
+    }
+
+    @Test public void aClipTheServerRefusesAsStaleIsDroppedAndTheUploadGoesOn() throws Exception {
+        Surface surface = new Surface(); surface.holdForPage = true;
+        var run = new java.util.concurrent.atomic.AtomicReference<>(new CaptureInspectionOrigin.Context("glasses", 1));
+        clipStatus = 409;
+        try (MockWebServer server = inspectionServer()) {
+            DocScanController controller = inspectionController(server, surface, run);
+            try {
+                ClipInbox inbox = new ClipInbox(java.nio.file.Files.createTempDirectory("clip-inbox").toFile());
+                controller.setClipInbox(inbox);
+                byte[] jpeg = {1, 2, 3};
+                CaptureProvenance source = clipSource(inbox, jpeg, 100);
+                issueInspectionPhoto(controller, 0, false);
+                controller.onPhoto(jpeg, source); barrier(controller); commitVisible(controller, surface);
+                set(controller, "localNetworkBusy", false); call(controller, "queueLocalUpload", new Class<?>[]{}); waitForUpload(controller);
+                LocalCaptureSession saved = (LocalCaptureSession) get(controller, "localSession");
+                assertNull("the refused clip is not offered again", saved.nextUnsentClip());
+                assertFalse("a stale clip does not stop the session", (boolean) get(controller, "localUploadBlocked"));
+                assertNotEquals(RelayState.ERROR, controller.getState());
+            } finally { controller.close(); }
+        } finally { clipStatus = 201; }
+    }
+
+    private static volatile int clipStatus = 201;
+
+    private static CaptureProvenance clipSource(ClipInbox inbox, byte[] jpeg, long timestamp) throws Exception {
+        CaptureProvenance source = CaptureProvenance.clipFrame(jpeg, 2016, 1512, timestamp, timestamp, timestamp, 30_000_000L, 800, 0, 2);
+        java.nio.file.Files.write(inbox.reserve(source.captureId).toPath(), new byte[]{0, 0, 0, 24, 'f', 't', 'y', 'p', jpeg[0]});
+        inbox.offer(source.captureId, "{\"schema\":1}".getBytes(StandardCharsets.UTF_8));
+        return source;
+    }
+
     private static MockWebServer inspectionServer() throws Exception {
         MockWebServer server = new MockWebServer();
         server.setDispatcher(new Dispatcher() {
             @Override public MockResponse dispatch(RecordedRequest request) {
                 try {
                     if ("/v1/documents".equals(request.getPath())) return new MockResponse().setBody("{\"document_id\":17}");
+                    if (request.getPath().matches("/v1/documents/17/pages/[0-9]+/clip")) return new MockResponse().setResponseCode(clipStatus).setBody("{\"status\":\"stored\",\"detail\":\"stale\"}");
                     if ("/v1/documents/17/pages".equals(request.getPath())) {
                         JSONObject metadata = new JSONObject(new String(uploadPart(request, "capture_provenance"), StandardCharsets.UTF_8));
                         return new MockResponse().setBody(new JSONObject().put("document_id", 17)
