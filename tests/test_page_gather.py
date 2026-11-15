@@ -172,6 +172,16 @@ def test_interrupted_work_is_taken_up_again(client, tmp_path, monkeypatch):
         assert settled()[1] == ("failed", "numpy unavailable"), "a clip that arrives wakes a worker"
 
 
+def test_the_frames_left_out_at_the_start_are_the_ones_the_clip_names():
+    """The glasses leave 6 frames out at 30 ms and 15 at the long exposure, whose brightness moves for longer (M-30)."""
+    from app import page_gather
+
+    assert page_gather.settle_of({"settle": 15}) == 15
+    assert page_gather.settle_of({"settle": 6}) == 6
+    for record in ({}, {"settle": "15"}, {"settle": -1}, {"settle": 61}, {"settle": True}, {"settle": 7.5}):
+        assert page_gather.settle_of(record) == 6, record
+
+
 def test_the_page_image_is_upright():
     from app import page_gather
     from app.gather import Gathered

@@ -33,6 +33,13 @@ def _gather_module():
     return gather
 
 
+def settle_of(record: dict) -> int:
+    """How many frames at the clip's start are left out, as the glasses wrote it: 6 at 30 ms, 15 at the long exposure,
+    whose brightness moves for longer (M-30). Anything else is read as the 6 every clip had at first."""
+    settle = record.get("settle")
+    return settle if type(settle) is int and 0 <= settle <= 60 else 6
+
+
 def page_image(gathered, rotation_degrees: int) -> bytes:
     """The gathered light as the page's PNG: the brightest half percent white, 8 bits through the display curve, turned
     upright (clockwise, as a page upload's image_rotation), RGB like every stored page."""
@@ -106,8 +113,9 @@ class GatherService:
         if shutil.which(os.environ.get("ROKID_FFMPEG") or "ffmpeg") is None:
             return "ffmpeg unavailable"
         try:
-            gathered = gather.gather_clip(page_clips.clip_path(document_id, page_index, sha256), json.loads(clip["record_json"]),
-                                          settle=6, seconds=CLIP_SECONDS)
+            record = json.loads(clip["record_json"])
+            gathered = gather.gather_clip(page_clips.clip_path(document_id, page_index, sha256), record,
+                                          settle=settle_of(record), seconds=CLIP_SECONDS)
         except gather.GatherTimeout:
             return "timeout"
         if not gathered.placed:
