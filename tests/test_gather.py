@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import time
 
 import pytest
 
@@ -147,8 +148,9 @@ def test_a_tilted_head_is_followed_part_by_part():
     assert alike(fitted.image, s) > alike(whole.image, s) + 0.01
 
 
-def clip(tmp_path, fs, name="c.mp4"):
-    """The frames as a video a camera would have written: 8 bits through the display curve, H.264."""
+def clip(tmp_path, fs, name="c.mp4", gap_after=None):
+    """The frames as a video a camera would have written: 8 bits through the display curve, H.264. gap_after: the
+    frame after which five frame times pass with no frame, as when the camera drops frames."""
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
         pytest.skip("ffmpeg is not installed")
@@ -156,24 +158,25 @@ def clip(tmp_path, fs, name="c.mp4"):
     raw = b"".join((np.clip(np.where(f <= 0.0031308, f * 12.92, 1.055 * np.maximum(f, 1e-9) ** (1 / 2.4) - 0.055), 0, 1) * 255 + 0.5)
                    .astype(np.uint8).tobytes() for f in fs)
     target = tmp_path / name
+    timing = [] if gap_after is None else ["-vf", f"setpts='if(gt(N,{gap_after}),PTS+5/30/TB,PTS)'", "-fps_mode", "passthrough"]
     subprocess.run([ffmpeg, "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "gray", "-s", f"{w}x{h}", "-r", "30", "-i", "-",
-                    "-c:v", "libx264", "-crf", "12", "-pix_fmt", "yuv420p", str(target)], input=raw, check=True)
+                    *timing, "-c:v", "libx264", "-crf", "12", "-pix_fmt", "yuv420p", str(target)], input=raw, check=True)
     return target
 
 
 def test_a_clip_round_trips_into_a_page(tmp_path):
     s = scene()
     result = g.gather_clip(clip(tmp_path, frames(s, [(0, 0)] * 40, 4.0)))
-    assert result.placed and result.total == 40 and result.selection == "none"
+    assert result.placed and result.total == 40 - g.SETTLE and result.selection == "none"
     assert alike(result.image, s) > 0.85
 
 
 def test_a_record_of_another_length_is_not_used(tmp_path):
     path = clip(tmp_path, frames(scene(), [(0, 0)] * 20, 4.0))
     ignored = g.gather_clip(path, {"frames": [{"smear_px": 9.0}] * 7})
-    assert ignored.selection == "none" and ignored.used >= 18
+    assert ignored.selection == "none" and ignored.used >= 12
     applied = g.gather_clip(path, {"frames": [{"smear_px": 0.5}] * 10 + [{"smear_px": 9.0}] * 10})
-    assert (applied.selection, applied.used, applied.total) == ("motion", 10, 20)
+    assert (applied.selection, applied.used, applied.total) == ("motion", 10 - g.SETTLE, 20 - g.SETTLE)
 
 
 def test_a_missing_ffmpeg_and_a_broken_clip_say_why(tmp_path):
@@ -191,7 +194,60 @@ def test_the_command_writes_the_page_and_reports_it(tmp_path, capsys):
     out = tmp_path / "page.png"
     assert g.main([str(path), "--out", str(out)]) == 0
     report = __import__("json").loads(capsys.readouterr().out)
-    assert report["placed"] is True and report["used"] == 12 and report["total"] == 12 and report["seconds"] >= 0
+    assert report["placed"] is True and report["used"] == 12 - g.SETTLE and report["total"] == 12 - g.SETTLE and report["seconds"] >= 0
     from PIL import Image
     with Image.open(out) as page:
         assert page.size == (512, 384) and page.mode in ("I;16", "I")
+
+
+# Found by the review of the first version: each failed before its fix.
+
+
+def test_frames_too_dark_to_place_are_not_called_placed():
+    rng = np.random.default_rng(5)
+    noise = g.gather([np.maximum(rng.normal(0.1, 0.05, (192, 256)), 0).astype(np.float32) for _ in range(40)])
+    assert not noise.placed and noise.used <= 2
+    dark = g.gather(frames(scene(), [(0, 0)] * 60, 0.1))
+    assert not dark.placed
+
+
+def test_a_settling_start_does_not_fill_the_edge_from_the_far_edge():
+    s = scene()
+    settling = [(18.0 - 3.6 * k, 0.0) for k in range(5)] + [(0.0, 0.0)] * 35  # the view moves 18 px while the first frames are taken
+    result = g.gather(frames(s, settling, 8.0))
+    truth = moved(s, 18.0, 0.0)  # the page is put where the first frame is
+    edge = (slice(0, 8), slice(24, -24))  # rows only the first frames saw
+    assert result.placed
+    assert float(np.corrcoef(result.image[edge].ravel(), truth[edge].ravel())[0, 1]) > 0.75
+
+
+def test_a_gap_in_the_clip_is_not_filled_with_copies(tmp_path):
+    path = clip(tmp_path, frames(scene(), [(0, 0)] * 30, 4.0), gap_after=15)
+    assert len(list(g.read_clip(path))) == 30
+
+
+def test_a_slow_reader_is_not_mistaken_for_a_stuck_decoder(tmp_path, monkeypatch):
+    path = clip(tmp_path, frames(scene(), [(0, 0)] * 20, 4.0))
+    monkeypatch.setattr(g, "DECODE_SECONDS", 1.0)
+    count = 0
+    for _ in g.read_clip(path):
+        time.sleep(0.15)
+        count += 1
+    assert count == 20
+
+
+def test_the_first_frames_of_a_clip_do_not_set_the_page(tmp_path):
+    s = scene()
+    fs = frames(s, [(0, 0)] * 30, 4.0)
+    dim_start = [frame * 0.2 for frame in fs[:3]] + fs[3:]  # the glasses' first three frames are darker than asked
+    result = g.gather_clip(clip(tmp_path, dim_start))
+    assert result.total == 30 - g.SETTLE and result.used == 30 - g.SETTLE
+    assert 0.8 < float(np.percentile(result.image, 90)) / PAPER < 1.2
+
+
+def test_a_record_a_few_frames_short_of_the_clip_is_applied(tmp_path):
+    path = clip(tmp_path, frames(scene(), [(0, 0)] * 20, 4.0))
+    record = {"frames": [{"smear_px": 0.5}] * 12 + [{"smear_px": 9.0}] * 6}  # 18 entries for 20 frames: the glasses log 2 to 3 fewer
+    result = g.gather_clip(path, record)
+    assert (result.selection, result.used, result.total) == ("motion", 12 - g.SETTLE, 20 - g.SETTLE)
+

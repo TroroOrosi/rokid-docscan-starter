@@ -174,7 +174,7 @@ the frames. Its stage 1 is done (§M-26, plan in `docs/superpowers/plans/`):
 page.png`; numpy, which the phone has from Termux's package, and ffmpeg), and on
 the desk a 40-page cycle of watching and recording levelled the board near 46 C,
 clips reached the phone at about 10 MB/s over the hotspot, and the phone gathered
-a 5-second clip in 33-35 s, three at once in 38 s. A clip is the whole field and
+a 5-second clip in 34-35 s, three at once in 39 s. A clip is the whole field and
 its frame k is capture result k. Starting a recording takes 1.1-2.4 s (the
 session rebuild) and stopping it took 3-5.6 s in 7 of 40. Nothing of this is in
 `:glassdoc` or the server's route yet; the next step needs a booklet placed in
