@@ -38,6 +38,11 @@ import java.util.Collections;
  *
  * <p>{@code out=WxH,cut=XxY} encodes only that part of each frame, its corner at (X, Y) of the stream: the paper in the
  * sensor's own pixels out of a full-size stream, wherever it lies (the camera itself crops at its centre only).
+ *
+ * <p>{@code pages=N,watch=<ms>} does it page after page on one open camera, as the app would: the small preview alone
+ * for {@code watch} ms, then the feed for {@code feed} seconds into {@code probe-clip-<page>.mp4}, and back. Each page
+ * logs how long the wearer waits (session rebuilt, first frame, clip ended, watching again) and the brightness of its
+ * first frames. {@code keepclips=K} keeps the first K clips; the others are deleted as soon as they are measured.
  */
 final class FeedProbe {
 
@@ -58,7 +63,11 @@ final class FeedProbe {
     private final long exposureNanos;
     private final long feedMillis;
     private final boolean hevc;
+    private final int pages;
+    private final long watchMillis;
+    private final int keepClips;
     private final MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
+    private final StringBuilder levels = new StringBuilder();
 
     private CameraDevice device;
     private CameraCaptureSession session;
@@ -80,6 +89,16 @@ final class FeedProbe {
     private long firstStamp = -1;
     private long startedAt;
     private String layout = "";
+    private ImageReader preview;
+    private Rect cropRegion;
+    private int page;
+    private boolean awaitingPreview;
+    private long askedAt;
+    private long rebuildMillis;
+    private long firstImageMillis;
+    private long backAskedAt;
+    private long cycleStartedAt;
+    private String pageLine;
 
     FeedProbe(Context context, Handler handler, PageCycleProbe.Done done) {
         this.context = context;
@@ -100,6 +119,9 @@ final class FeedProbe {
         exposureNanos = number("expose", 30_000_000);
         feedMillis = number("feed", 5) * 1000;
         hevc = !"avc".equals(CameraProbe.option("codec"));
+        pages = (int) number("pages", 0);
+        watchMillis = number("watch", 8500);
+        keepClips = (int) number("keepclips", 0);
     }
 
     private static long number(String name, long fallback) {
@@ -118,27 +140,21 @@ final class FeedProbe {
                 int w = (int) (array.width() / Double.parseDouble(zoom)), h = (int) (array.height() / Double.parseDouble(zoom));
                 crop = new Rect(array.centerX() - w / 2, array.centerY() - h / 2, array.centerX() + w / 2, array.centerY() + h / 2);
             }
-            final Rect cropRegion = crop;
+            cropRegion = crop;
             if (cutX < 0 || cutY < 0 || cutX + outWidth > width || cutY + outHeight > height) throw new IllegalArgumentException("the part lies outside the frame");
-            clip = new File(context.getCacheDir(), "probe-clip-1.mp4");
-            MediaFormat format = MediaFormat.createVideoFormat(hevc ? MediaFormat.MIMETYPE_VIDEO_HEVC : MediaFormat.MIMETYPE_VIDEO_AVC, outWidth, outHeight);
-            format.setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible);
-            format.setInteger(MediaFormat.KEY_BIT_RATE, bitrate);
-            format.setInteger(MediaFormat.KEY_FRAME_RATE, fps);
-            format.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1);
-            codec = MediaCodec.createEncoderByType(format.getString(MediaFormat.KEY_MIME));
-            codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE);
-            codec.start();
-            muxer = new MediaMuxer(clip.getAbsolutePath(), MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4);
+            if (pages == 0) openEncoder(1);
+            cycleStartedAt = SystemClock.elapsedRealtime();
+            preview = ImageReader.newInstance(320, 240, ImageFormat.YUV_420_888, 2);
+            preview.setOnImageAvailableListener(this::onPreview, handler);
             reader = ImageReader.newInstance(width, height, ImageFormat.YUV_420_888, width * height > 6_000_000 ? 3 : 4);  // a full-size frame is 18 MB
             reader.setOnImageAvailableListener(this::onImage, handler);
             Log.i(TAG, "camera probe feed " + width + "x" + height + " out=" + outWidth + "x" + outHeight + " cut=" + cutX + "x" + cutY + " fps=" + fps
                     + " expose_ns=" + exposureNanos + " boost=" + boost
-                    + " bitrate=" + bitrate + " codec=" + codec.getName() + " crop=" + cropRegion);
+                    + " bitrate=" + bitrate + " hevc=" + hevc + " crop=" + cropRegion + " pages=" + pages + " watch_ms=" + watchMillis);
             manager.openCamera(id, new CameraDevice.StateCallback() {
                 @Override public void onOpened(CameraDevice opened) {
                     device = opened;
-                    configure(cropRegion);
+                    if (pages > 0) watch(); else configure(cropRegion);
                 }
 
                 @Override public void onDisconnected(CameraDevice disconnected) {
@@ -154,6 +170,82 @@ final class FeedProbe {
         } catch (CameraAccessException | IOException | SecurityException | IllegalArgumentException | IllegalStateException error) {
             finish(false, "start " + error);
         }
+    }
+
+    private void openEncoder(int number) throws IOException {
+        clip = new File(context.getCacheDir(), "probe-clip-" + number + ".mp4");
+        MediaFormat format = MediaFormat.createVideoFormat(hevc ? MediaFormat.MIMETYPE_VIDEO_HEVC : MediaFormat.MIMETYPE_VIDEO_AVC, outWidth, outHeight);
+        format.setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible);
+        format.setInteger(MediaFormat.KEY_BIT_RATE, bitrate);
+        format.setInteger(MediaFormat.KEY_FRAME_RATE, fps);
+        format.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1);
+        codec = MediaCodec.createEncoderByType(format.getString(MediaFormat.KEY_MIME));
+        codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE);
+        codec.start();
+        muxer = new MediaMuxer(clip.getAbsolutePath(), MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4);
+        track = -1;
+    }
+
+    /** The small preview alone, as the app waits for a page. */
+    private void watch() {
+        try {
+            backAskedAt = SystemClock.elapsedRealtime();
+            awaitingPreview = true;
+            device.createCaptureSession(Collections.singletonList(preview.getSurface()), new CameraCaptureSession.StateCallback() {
+                @Override public void onConfigured(CameraCaptureSession configured) {
+                    if (closed) return;
+                    session = configured;
+                    try {
+                        CaptureRequest.Builder request = device.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW);
+                        request.addTarget(preview.getSurface());
+                        request.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, new Range<>(15, 15));
+                        configured.setRepeatingRequest(request.build(), null, handler);
+                    } catch (CameraAccessException | RuntimeException error) {
+                        finish(false, "watch request " + error);
+                    }
+                }
+
+                @Override public void onConfigureFailed(CameraCaptureSession failed) {
+                    finish(false, "watch session refused");
+                }
+            }, handler);
+        } catch (CameraAccessException | RuntimeException error) {
+            finish(false, "watch session " + error);
+        }
+    }
+
+    private void onPreview(ImageReader source) {
+        try (Image image = source.acquireLatestImage()) {
+            if (image == null || !awaitingPreview || closed) return;
+        } catch (RuntimeException ignored) {
+            return;
+        }
+        awaitingPreview = false;
+        if (pageLine != null) Log.i(TAG, pageLine + " back_ms=" + (SystemClock.elapsedRealtime() - backAskedAt));
+        pageLine = null;
+        if (page >= pages) {
+            finish(true, "feed cycle " + pages + " pages in " + (SystemClock.elapsedRealtime() - cycleStartedAt) + "ms out=" + outWidth + "x" + outHeight);
+            return;
+        }
+        handler.postDelayed(this::feedPage, watchMillis);
+    }
+
+    private void feedPage() {
+        if (closed) return;
+        page++;
+        images = fed = dropped = results = written = 0;
+        copyNanos = 0;
+        firstStamp = -1;
+        firstImageMillis = -1;
+        levels.setLength(0);
+        try {
+            openEncoder(page);
+        } catch (IOException | RuntimeException error) {
+            finish(false, "encoder " + error);
+            return;
+        }
+        askedAt = SystemClock.elapsedRealtime();
+        configure(cropRegion);
     }
 
     private void configure(Rect cropRegion) {
@@ -175,6 +267,7 @@ final class FeedProbe {
                         request.set(CaptureRequest.NOISE_REDUCTION_MODE, CaptureRequest.NOISE_REDUCTION_MODE_OFF);
                         request.set(CaptureRequest.EDGE_MODE, CaptureRequest.EDGE_MODE_OFF);
                         if (cropRegion != null) request.set(CaptureRequest.SCALER_CROP_REGION, cropRegion);
+                        rebuildMillis = SystemClock.elapsedRealtime() - askedAt;
                         startedAt = SystemClock.elapsedRealtime();
                         feeding = true;
                         configured.setRepeatingRequest(request.build(), new CameraCaptureSession.CaptureCallback() {
@@ -209,6 +302,7 @@ final class FeedProbe {
         try {
             if (!feeding || closed) return;
             images++;
+            if (firstImageMillis < 0) firstImageMillis = SystemClock.elapsedRealtime() - askedAt;
             int in = codec.dequeueInputBuffer(0);
             if (in < 0) {
                 dropped++;  // the encoder has no buffer free: this frame is lost, the next is not delayed
@@ -235,6 +329,17 @@ final class FeedProbe {
                     dst.put(plane, y * srcRows + cutX, outWidth);
                 }
             }
+            if (pages > 0 && fed < 90) {  // the brightness of the page's first frames, from a sparse sample of what was copied
+                long sum = 0;
+                int count2 = 0;
+                for (int y = 0; y < outHeight; y += 16) {
+                    for (int x = 0; x < outWidth; x += 16) {
+                        sum += plane[y * srcRows + cutX + x] & 0xff;
+                        count2++;
+                    }
+                }
+                levels.append(fed == 0 ? "" : ",").append(sum / count2);
+            }
             ByteBuffer u = to[1].getBuffer(), v = to[2].getBuffer();
             if (grey == null || grey.length < Math.max(u.remaining(), v.remaining())) {
                 grey = new byte[Math.max(u.remaining(), v.remaining())];
@@ -255,7 +360,7 @@ final class FeedProbe {
             finish(false, "feed " + error);
         } finally {
             image.close();
-            if (!closed) drain(0);
+            if (!closed && feeding && codec != null) drain(0);  // between pages there is no encoder
         }
     }
 
@@ -283,8 +388,16 @@ final class FeedProbe {
         if (closed || !feeding) return;
         feeding = false;
         long fedFor = SystemClock.elapsedRealtime() - startedAt;
-        if (device != null) { device.close(); device = null; }  // the camera first: nothing of it is needed to end the clip
-        session = null;
+        if (pages > 0) {
+            try {
+                session.stopRepeating();
+            } catch (CameraAccessException | RuntimeException ignored) {
+                // the next session replaces it either way
+            }
+        } else {
+            if (device != null) { device.close(); device = null; }  // the camera first: nothing of it is needed to end the clip
+            session = null;
+        }
         long from = SystemClock.elapsedRealtime();
         boolean ended = false;
         try {
@@ -295,6 +408,19 @@ final class FeedProbe {
             if (track >= 0) muxer.stop();
         } catch (RuntimeException error) {
             finish(false, "end " + error);
+            return;
+        }
+        if (pages > 0) {
+            long bytes = clip.length();
+            codec.release();
+            codec = null;
+            muxer.release();
+            muxer = null;
+            if (page > keepClips) clip.delete();
+            pageLine = "camera probe page=" + page + " rebuild_ms=" + rebuildMillis + " first_image_ms=" + firstImageMillis + " for_ms=" + fedFor + " images=" + images
+                    + " fed=" + fed + " dropped=" + dropped + " written=" + written + " ended=" + ended + " bytes=" + bytes + " copy_us="
+                    + (fed == 0 ? 0 : copyNanos / 1000 / fed) + " end_ms=" + (SystemClock.elapsedRealtime() - from) + " levels=" + levels;
+            watch();
             return;
         }
         finish(true, "feed " + width + "x" + height + " fps=" + fps + " for_ms=" + fedFor + " images=" + images + " fed=" + fed + " dropped=" + dropped
@@ -324,5 +450,6 @@ final class FeedProbe {
             muxer = null;
         }
         if (reader != null) { reader.close(); reader = null; }
+        if (preview != null) { preview.close(); preview = null; }
     }
 }

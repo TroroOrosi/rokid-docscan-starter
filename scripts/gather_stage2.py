@@ -409,6 +409,7 @@ def verdicts(means: dict[str, float]) -> list[str]:
             "F5 sixty frames a second   " + against("L60", "L30", 2.0, "keep 60 a second as a candidate", "drop 60 a second"),
             *("F6 the paper's own pixels, " + against(name, "N", 2.0, "pass", "fail") for name in ("C03", "C05", "C13") if name in means),
             *("F7 the same, from the camera " + against(name, "N", 2.0, "pass", "fail") for name in ("O60",) if name in means),
+            *("F8 the field's centre at zoom 2 " + against(name, "Nz", 2.0, "pass", "fail") for name in ("Z60",) if name in means),
             # the third ruling: the worn distance stood for by reducing the direct frames, a moving head by shifting them
             *("G-A half size, worn, moving " + against(name, "N", 2.0, "pass", "fail") for name in ("Mwe", "Mwe10") if name in means),
             *("G-B own pixels, worn, still " + against(name, "N", 2.0, "pass", "fail") for name in ("Cw03", "Cw05", "Cw13") if name in means),
@@ -519,21 +520,23 @@ def cmd_reads(asked: argparse.Namespace) -> int:
                     replies[name].append(text_of(json.loads(target.read_text(encoding="utf-8"))))
                 except ValueError:
                     continue
+    # the text the errors are counted against: what the reads of `--ref` agree on (N: the whole part; another: its own part)
+    reference_file = PRIVATE / ("reference_text.txt" if asked.ref == "N" else f"reference_text_{asked.ref}.txt")
     if asked.step == "reference":  # what the reads of the best picture agree on, kept outside the repository
-        best = replies.get("N", [])
+        best = replies.get(asked.ref, [])
         if len(best) < 6:
-            raise SystemExit(f"{len(best)} reads of N: too few to agree on a text")
+            raise SystemExit(f"{len(best)} reads of {asked.ref}: too few to agree on a text")
         text = agreed(best)
-        (PRIVATE / "reference_text.txt").write_text(text, encoding="utf-8")
+        reference_file.write_text(text, encoding="utf-8")
         apart = [100 * distance(text, one) / len(text) for one in best]
-        print(f"reference of {len(text)} characters from {len(best)} reads of N; each read differs from it by "
+        print(f"reference of {len(text)} characters from {len(best)} reads of {asked.ref}; each read differs from it by "
               f"{' '.join(f'{value:.1f}' for value in apart)} %")
         return 0
     if asked.step in ("run", "score"):
-        if not (PRIVATE / "reference_text.txt").exists():
-            print("no reference text yet: `reads reference` makes it from the reads of N")
+        if not reference_file.exists():
+            print(f"no reference text yet: `reads reference` makes it from the reads of {asked.ref}")
             return 0
-        reference = (PRIVATE / "reference_text.txt").read_text(encoding="utf-8")
+        reference = reference_file.read_text(encoding="utf-8")
         means, lines = {}, []
         for name in names:
             shares = [100 * min(within(reference, one), len(reference)) / len(reference) for one in replies[name]]
@@ -574,6 +577,7 @@ def demo() -> None:
     assert "pass" in fed[0] and "keeps it" in fed[1] and "not measured" in fed[2] and "finer grid" in fed[3] and "enough" in fed[4], fed
     assert "lower" in fed[5] and "drop" in fed[6], fed
     worn = verdicts({"N": 1.6, "L30": 8.4, "Nh": 3.0, "Mw": 2.5, "Mwe": 9.0, "Cw05": 3.0, "Nw": 2.8})
+    assert "F8" in verdicts({"L30": 8.0, "Nz": 2.0, "Z60": 3.1})[-1] and "pass" in verdicts({"L30": 8.0, "Nz": 2.0, "Z60": 3.1})[-1]
     assert "G-A" in worn[-6] and "fail" in worn[-6] and "G-B" in worn[-5] and "pass" in worn[-5] and "+6.5" in worn[-4] and "+5.4" in worn[-1], worn
     lines = np.full((400, 600), 0.5, np.float32)
     lines[:, np.arange(600) % 40 < 20] = 0.1  # print every 40 px across, nothing regular down
@@ -601,6 +605,7 @@ def main() -> int:
     reads.add_argument("--reads", type=int, default=12)
     reads.add_argument("--lanes", type=int, default=3)
     reads.add_argument("--port", type=int, default=18082, help="first proxy port on the phone; a second run at the same time takes another")
+    reads.add_argument("--ref", default="N", help="the condition whose reads give the reference text (default N; Nz for the centre part)")
     reads.add_argument("--only")
     asked = parser.parse_args()
     global GLASSES, WORK
