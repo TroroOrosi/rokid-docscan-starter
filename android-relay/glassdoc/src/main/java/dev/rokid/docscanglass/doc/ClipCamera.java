@@ -193,6 +193,8 @@ final class ClipCamera implements PageCamera {
     private Rect crop;
     private boolean wanted, closed, opening, closing, configuring;
     private int running, cameraFailures;
+    /** Counts the cameras asked for: a callback of an earlier one is not the present camera's. */
+    private int opens;
     /** Counts the sessions asked for: a callback of an earlier one is not the present session's. */
     private int configured;
     private Runnable afterReady, pageReady;
@@ -398,10 +400,15 @@ final class ClipCamera implements PageCamera {
             }
             pageChange.restartStream();
             previewExposure = 0;
+            int attempt = ++opens;
             manager.openCamera(id, new CameraDevice.StateCallback() {
                 private boolean told;
 
                 @Override public void onOpened(CameraDevice opened) {
+                    if (attempt != opens) { // asked for before a later one: nothing waits for it
+                        opened.close();
+                        return;
+                    }
                     opening = false;
                     device = opened;
                     step();
@@ -418,7 +425,9 @@ final class ClipCamera implements PageCamera {
                 }
 
                 private void lost(CameraDevice gone, String reason) {
-                    if (told || (gone != device && !opening)) return; // once; not for a camera already let go
+                    // Once, and not for a camera already let go: neither before the next one is asked for nor,
+                    // now that a failed camera is opened again by itself, while the next one is being opened.
+                    if (told || attempt != opens || (gone != device && !opening)) return;
                     told = true;
                     fail(reason, gone);
                 }

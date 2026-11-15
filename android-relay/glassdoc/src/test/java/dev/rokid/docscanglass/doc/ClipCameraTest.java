@@ -316,6 +316,25 @@ public class ClipCameraTest {
         assertEquals("the page that was in view is offered again without being turned", 1, ready.get());
     }
 
+    @Test public void a_late_error_of_the_camera_that_was_let_go_does_not_stop_the_one_being_opened() {
+        // The camera is opened again by itself after a failure, so an error the old one reports late now arrives
+        // while the new one is being opened. Taken for the new one's, it left the camera closing for ever.
+        watching();
+        DocScanTestCamera old = device();
+        old.refuseSession = true;
+        old.suppressCloseCallback = true;
+        camera.captureOnce(); idle(0);
+        idleSession(0); idle(0);
+        assertTrue(old.closed);
+        old.state.onClosed(old); // the next camera is asked for
+        old.state.onError(old, CameraDevice.StateCallback.ERROR_CAMERA_DEVICE); // and only then the old one's error comes
+        idle(100);
+        assertEquals(2, ManagerShadow.devices.size());
+        assertNotSame(old, device());
+        assertEquals("the new camera watches", 1, device().configurations);
+        assertTrue(failures.isEmpty());
+    }
+
     @Test public void a_clip_session_is_built_only_after_the_watch_session_is_idle() {
         watching();
         DocScanTestCamera device = device();
