@@ -97,6 +97,17 @@ final class PageCycleProbe {
     private long backAskedAt;
     private long rebuildMillis;
     private long stopMillis;
+    private long stopAskedAt;
+    private long drainMillis;
+    private boolean draining;
+    private android.graphics.Rect cropRegion;
+    private MediaRecorder ending;  // the clip's encoder between the camera's return to watching and its own stop
+    private long watchingAt;
+    private long backMillis;
+    private static final int TAIL_RESULTS = 4;  // results of display-only requests that mean none is left in flight to the encoder
+    private int tailResults;
+    private CaptureRequest tail;
+    private final Runnable whenDrained = this::drained;
     private long clipBytes;
     private int grabs;
     private long grabNanos;
@@ -143,6 +154,14 @@ final class PageCycleProbe {
             Log.i(TAG, "camera probe cycle pages=" + pages + " watch_ms=" + watchMillis + " record_ms=" + recordMillis
                     + " clip=" + clipSize + " fps=" + fps + " bitrate=" + bitrate + " hevc=" + hevc + " expose_ns="
                     + exposureNanos + " display=" + (display != null && display.isAvailable() ? "TextureView" : "detached"));
+            String zoom = CameraProbe.option("zoom");  // zoom=1.68: the middle of the field, so that the clip's pixels are the sensor's
+            if (zoom != null) {
+                android.graphics.Rect array = manager.getCameraCharacteristics(manager.getCameraIdList()[0])
+                        .get(android.hardware.camera2.CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE);
+                int w = (int) (array.width() / Double.parseDouble(zoom)), h = (int) (array.height() / Double.parseDouble(zoom));
+                cropRegion = new android.graphics.Rect(array.centerX() - w / 2, array.centerY() - h / 2, array.centerX() + w / 2, array.centerY() + h / 2);
+                Log.i(TAG, "camera probe cycle crop=" + cropRegion);
+            }
             manager.openCamera(manager.getCameraIdList()[0], new CameraDevice.StateCallback() {
                 @Override public void onOpened(CameraDevice opened) {
                     device = opened;
@@ -173,6 +192,7 @@ final class PageCycleProbe {
                 @Override public void onConfigured(CameraCaptureSession configured) {
                     if (closed) return;
                     session = configured;
+                    endRecorder();
                     try {
                         CaptureRequest.Builder request = device.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW);
                         request.addTarget(preview.getSurface());
@@ -204,18 +224,25 @@ final class PageCycleProbe {
             return;
         }
         awaitingPreviewFrame = false;
-        long back = SystemClock.elapsedRealtime() - backAskedAt;
+        watchingAt = SystemClock.elapsedRealtime();
+        backMillis = watchingAt - backAskedAt;
+        pageDone();
+    }
+
+    /** A page is over when the camera watches again and its clip is closed; the first is what the wearer waits for. */
+    private void pageDone() {
+        if (closed || awaitingPreviewFrame || ending != null) return;
         if (page > 0) {
-            Log.i(TAG, "camera probe page=" + page + " rebuild_ms=" + rebuildMillis + " stop_ms=" + stopMillis + " back_ms=" + back
-                    + " results=" + stamps.size() + " bytes=" + clipBytes + " boost=" + boost + " prepare_ms=" + preparedMillis
-                    + " configured_ms=" + configuredMillis);
+            Log.i(TAG, "camera probe page=" + page + " rebuild_ms=" + rebuildMillis + " stop_ms=" + stopMillis + " drain_ms=" + drainMillis
+                    + " back_ms=" + backMillis + " results=" + stamps.size() + " bytes=" + clipBytes + " boost=" + boost + " prepare_ms="
+                    + preparedMillis + " configured_ms=" + configuredMillis);
         }
         if (page >= pages) {
             finish(true, "cycle " + pages + " pages in " + (SystemClock.elapsedRealtime() - startedAt) + "ms variant=["
                     + CameraProbe.variant + "]");
             return;
         }
-        handler.postDelayed(this::record, watchMillis);
+        handler.postDelayed(this::record, Math.max(0, watchMillis - (SystemClock.elapsedRealtime() - watchingAt)));
     }
 
     /** One page: the encoder beside the display stream, manual exposure. */
@@ -245,7 +272,14 @@ final class PageCycleProbe {
                     session = configured;
                     configuredMillis = SystemClock.elapsedRealtime() - rebuildAskedAt;
                     try {
-                        CaptureRequest.Builder request = device.createCaptureRequest(CameraDevice.TEMPLATE_RECORD);
+                        // intent=preview: the encoder fed by requests that do not say "video", to see what the camera does to video
+                        CaptureRequest.Builder request = device.createCaptureRequest("preview".equals(CameraProbe.option("intent"))
+                                ? CameraDevice.TEMPLATE_PREVIEW : CameraDevice.TEMPLATE_RECORD);
+                        if (cropRegion != null) request.set(CaptureRequest.SCALER_CROP_REGION, cropRegion);
+                        // tnr=0 / cnr=0: the camera's own keys for the noise reduction it applies to video (named in its
+                        // description, dumpsys media.camera of 2026-11-15); NOISE_REDUCTION_MODE_OFF does not reach it
+                        vendor(request, "tnr", "org.codeaurora.qcamera3.temporal_denoise.enable");
+                        vendor(request, "cnr", "org.quic.camera.CustomNoiseReduction.CustomNoiseReduction");
                         request.addTarget(recorder.getSurface());
                         request.addTarget(textureSurface);
                         request.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF);
@@ -260,6 +294,9 @@ final class PageCycleProbe {
                         CaptureRequest full = request.build();
                         request.set(CaptureRequest.CONTROL_POST_RAW_SENSITIVITY_BOOST, Math.max(100, boost / 2));
                         CaptureRequest dim = request.build();
+                        request.set(CaptureRequest.CONTROL_POST_RAW_SENSITIVITY_BOOST, boost);
+                        request.removeTarget(recorder.getSurface());
+                        tail = request.build();
                         recorder.start();
                         configured.setRepeatingRequest(mark ? dim : full, new CameraCaptureSession.CaptureCallback() {
                             @Override public void onCaptureCompleted(CameraCaptureSession source, CaptureRequest asked,
@@ -271,6 +308,8 @@ final class PageCycleProbe {
                                 gains.add(gain == null ? -1 : gain);
                                 if (!firstResultSeen) {
                                     firstResultSeen = true;
+                                    Log.i(TAG, "camera probe cycle first result nr=" + result.get(CaptureResult.NOISE_REDUCTION_MODE) + " edge="
+                                            + result.get(CaptureResult.EDGE_MODE) + " crop=" + result.get(CaptureResult.SCALER_CROP_REGION));
                                     rebuildMillis = SystemClock.elapsedRealtime() - rebuildAskedAt;
                                     handler.postDelayed(PageCycleProbe.this::stopRecording, recordMillis);
                                     if (mark) {
@@ -297,6 +336,17 @@ final class PageCycleProbe {
         }
     }
 
+    private static void vendor(CaptureRequest.Builder request, String option, String name) {
+        String value = CameraProbe.option(option);
+        if (value == null) return;
+        try {
+            request.set(new CaptureRequest.Key<>(name, Byte.class), Byte.parseByte(value));
+            Log.i(TAG, "camera probe cycle set " + name + "=" + value);
+        } catch (RuntimeException error) {
+            Log.i(TAG, "camera probe cycle refused " + name + ": " + error);
+        }
+    }
+
     /** The digital gain that gives the watch's brightness at this exposure and ISO 800, in the camera's 100 to 3199. */
     private int gain() {
         if (lastWatch == null) return 3199;
@@ -308,19 +358,75 @@ final class PageCycleProbe {
         return (int) Math.max(100, Math.min(3199, Math.round(light / ((double) exposureNanos * 800))));
     }
 
+    /**
+     * End a clip without leaving the camera idle and without frames in flight to the encoder: go on asking for frames, to the
+     * display stream alone, and stop the encoder when a few of those have come back.
+     *
+     * Two ways that failed on the glasses (logcat of 2026-11-15). Stopping the requests and the encoder at once abandons the
+     * encoder's surface under about three requests in flight ("BufferQueue has been abandoned", "Stuck on Sequence Id"), and
+     * the stop sometimes took 3 to 5.8 s (M-26). Stopping the requests and waiting for the session to report idle is worse:
+     * a streaming pipeline with no requests trips the camera's own watchdog after 33 frames ("Hit SOF threshold ...
+     * triggering watchdog recovery"), the idle report did not come within 1.5 s in 7 of 9 stops and the stop took 2.2-3.2 s.
+     *
+     * With the frames drained the encoder's own stop still took 3.9 to 6.4 s in about one of four, after the file was
+     * complete ("MOOV atom was written" 0.3 s after the stop was asked). So the camera goes back to watching first, and the
+     * encoder is stopped off the camera's thread once the watching session is in place and nothing writes to its surface.
+     */
     private void stopRecording() {
         if (closed) return;
-        long asked = SystemClock.elapsedRealtime();
+        stopAskedAt = SystemClock.elapsedRealtime();
         try {
-            session.stopRepeating();
-            recorder.stop();
+            draining = true;
+            tailResults = 0;
+            session.setRepeatingRequest(tail, new CameraCaptureSession.CaptureCallback() {
+                @Override public void onCaptureCompleted(CameraCaptureSession source, CaptureRequest asked, TotalCaptureResult result) {
+                    if (source == session && ++tailResults == TAIL_RESULTS) drained();
+                }
+            }, handler);
         } catch (CameraAccessException | RuntimeException error) {
             fail("stop " + error.getClass().getSimpleName());
             return;
         }
-        stopMillis = SystemClock.elapsedRealtime() - asked;
-        recorder.release();
+        handler.postDelayed(whenDrained, 1500);  // if the display stream's results do not come
+    }
+
+    private void drained() {
+        if (closed || !draining) return;
+        draining = false;
+        handler.removeCallbacks(whenDrained);
+        drainMillis = SystemClock.elapsedRealtime() - stopAskedAt;
+        ending = recorder;
         recorder = null;
+        backAskedAt = SystemClock.elapsedRealtime();
+        watch();
+    }
+
+    private void endRecorder() {
+        final MediaRecorder stopping = ending;
+        if (stopping == null) return;
+        final long asked = SystemClock.elapsedRealtime();
+        new Thread(() -> {
+            boolean stopped = true;
+            try {
+                stopping.stop();
+            } catch (RuntimeException error) {
+                stopped = false;
+            }
+            stopping.release();
+            final boolean ok = stopped;
+            final long took = SystemClock.elapsedRealtime() - asked;
+            handler.post(() -> recorderEnded(ok, took));
+        }, "probe-recorder-stop").start();
+    }
+
+    private void recorderEnded(boolean ok, long took) {
+        if (closed) return;
+        ending = null;
+        if (!ok) {
+            fail("stop RuntimeException");
+            return;
+        }
+        stopMillis = took;
         clipBytes = clip.length();
         if (page <= keepClips) {
             StringBuilder json = new StringBuilder("{\"page\":").append(page).append(",\"exposure_ns\":").append(exposureNanos)
@@ -338,8 +444,7 @@ final class PageCycleProbe {
         } else if (!clip.delete()) {
             Log.w(TAG, "probe clip could not be deleted");
         }
-        backAskedAt = SystemClock.elapsedRealtime();
-        watch();
+        pageDone();
     }
 
     /** The display stream read back as the app would draw it: five times a second, on the view's thread. */
