@@ -62,8 +62,11 @@ import dev.rokid.docscanrelay.ClipInbox;
  * <li>A session is left only after its repeating request was stopped and that session reported itself idle (or
  * 1.5 s passed). Changed at once, frames in flight got no buffer and the camera failed to drain after 16 and after
  * 28 pages. {@link #step} is the only place a session or the camera is changed.</li>
- * <li>The clip stream's frames are taken and returned on a thread of their own, recorded or not. Left untaken while
- * the camera's thread waited for a session, the camera hung until the glasses were restarted.</li>
+ * <li>Every frame, the clip stream's and the watch preview's, is taken and returned on the frames' thread, which
+ * neither opens files nor changes sessions. Left untaken while the camera's thread waited for a session, the camera
+ * hung until the glasses were restarted (M-29); with the watch preview on the camera's thread, which opens the
+ * clip's file and the codec, the camera could not get a buffer for over a second on 2026-11-16, never drained, and
+ * the session could not be changed (M-30). The camera's thread works on a copy of the watch frame.</li>
  * <li>A session is created with the request it will repeat as its session parameters. The frame-rate range is one
  * of this camera's session keys: a session created without it was configured a second time by its first request,
  * after a wait for the device to idle, and on 2026-11-16 that wait ran out after five seconds (camera error 4) on
@@ -200,6 +203,10 @@ final class ClipCamera implements PageCamera {
     private int previewIso, previewBoost;
     private boolean steady, far;
     private byte[] watchLuma;
+    // The watch frame the camera's thread works on, copied by the frames' thread: under the lock until taken.
+    private boolean watchPending;
+    private int watchWidth, watchHeight, watchRow, watchStep, watchBytes;
+    private long watchStamp;
 
     // Under the lock.
     private ImageReader clipReader;
@@ -379,12 +386,13 @@ final class ClipCamera implements PageCamera {
             Size size = GlassCamera.previewSize(map == null ? null : map.getOutputSizes(ImageFormat.YUV_420_888),
                     GlassCamera.largestJpegSize(characteristics));
             if (size == null) throw new IllegalStateException("no watch preview size");
-            watchReader = ImageReader.newInstance(size.getWidth(), size.getHeight(), ImageFormat.YUV_420_888, 2);
-            watchReader.setOnImageAvailableListener(this::watchFrame, handler);
             framesThread = new HandlerThread("clip-frames");
             framesThread.start();
             frames = new Handler(framesThread.getLooper());
             synchronized (lock) {
+                watchPending = false;
+                watchReader = ImageReader.newInstance(size.getWidth(), size.getHeight(), ImageFormat.YUV_420_888, 2);
+                watchReader.setOnImageAvailableListener(this::watchImage, frames);
                 clipReader = ImageReader.newInstance(WIDTH, HEIGHT, ImageFormat.YUV_420_888, 4);
                 clipReader.setOnImageAvailableListener(this::clipFrame, frames);
             }
@@ -423,8 +431,8 @@ final class ClipCamera implements PageCamera {
     }
 
     private void releaseReaders() {
-        if (watchReader != null) { watchReader.close(); watchReader = null; }
         synchronized (lock) { // not while the frames' thread holds one of its images
+            if (watchReader != null) { watchReader.close(); watchReader = null; }
             if (clipReader != null) { clipReader.close(); clipReader = null; }
         }
         if (framesThread != null) { framesThread.quitSafely(); framesThread = null; frames = null; }
@@ -463,14 +471,14 @@ final class ClipCamera implements PageCamera {
                 @Override public void onConfigureFailed(CameraCaptureSession refused) {
                     if (token != configured) return;
                     configuring = false;
-                    fail("camera session refused", null);
+                    fail("camera session refused", device);
                 }
             });
             asked.setSessionParameters(request);
             device.createCaptureSession(asked);
         } catch (CameraAccessException | RuntimeException error) {
             configuring = false;
-            fail("camera session " + error, null);
+            fail("camera session " + error, error instanceof CameraAccessException ? device : null);
         }
     }
 
@@ -817,8 +825,15 @@ final class ClipCamera implements PageCamera {
         Clip pending = clip;
         boolean recorded = gone != null && pending != null && pending.phase == ENDING;
         boolean again = gone != null && !closed && (recorded || ++cameraFailures < MAX_CAMERA_FAILURES);
-        if (recorded) pending.back = true; // there is no watching to wait for; join() hands the page over
-        else abandon();
+        if (recorded) {
+            pending.back = true; // there is no watching to wait for; join() hands the page over
+        } else {
+            abandon();
+            if (pending != null && again) { // the page in view was not taken: it is seen as new once the camera is back
+                pageChange = new PageChange();
+                settlingSince = 0;
+            }
+        }
         if (!again) {
             wanted = false;
             pageReady = null;
@@ -841,12 +856,49 @@ final class ClipCamera implements PageCamera {
         step();
     }
 
+    /**
+     * The frames' thread: the watch preview's frame is copied and returned at once. The camera's thread may be
+     * opening a clip's file or waiting for a session; the camera must get its buffer back all the same (M-30).
+     */
+    private void watchImage(ImageReader source) {
+        synchronized (lock) {
+            if (source != watchReader) return; // a notice from a reader already closed
+            Image image;
+            try {
+                image = source.acquireLatestImage();
+            } catch (RuntimeException unavailable) {
+                return;
+            }
+            if (image == null) return;
+            try {
+                if (watchPending) return; // the camera's thread still has the frame before: this one is only returned
+                Image.Plane luma = image.getPlanes()[0];
+                // Copied once: reading the camera's own buffer a pixel at a time cost about 170 ms a frame on the glasses.
+                ByteBuffer plane = luma.getBuffer().duplicate();
+                int bytes = plane.remaining();
+                if (watchLuma == null || watchLuma.length < bytes) watchLuma = new byte[bytes];
+                plane.get(watchLuma, 0, bytes);
+                watchBytes = bytes;
+                watchWidth = image.getWidth();
+                watchHeight = image.getHeight();
+                watchRow = luma.getRowStride();
+                watchStep = luma.getPixelStride();
+                watchStamp = image.getTimestamp();
+                watchPending = true;
+            } catch (RuntimeException | OutOfMemoryError error) {
+                return; // this frame is lost; the next one is taken
+            } finally {
+                image.close();
+            }
+        }
+        handler.post(this::watchFrame);
+    }
+
     /** The camera's thread: the watch preview. What it shows is page evidence exactly as in {@link GlassCamera}. */
-    private void watchFrame(ImageReader source) {
-        if (source != watchReader) return; // a notice from a reader already closed
-        try (Image image = source.acquireLatestImage()) {
-            if (image == null || running != WATCH || afterReady != null) return; // taken and returned all the same
-            long now = SystemClock.elapsedRealtime(), timestamp = image.getTimestamp(), began = System.nanoTime();
+    private void watchFrame() {
+        try {
+            if (running != WATCH || afterReady != null || watchReader == null) return;
+            long now = SystemClock.elapsedRealtime(), timestamp = watchStamp, began = System.nanoTime();
             Clip ending = clip;
             if (ending != null && ending.phase == ENDING && !ending.back) {
                 ending.back = true;
@@ -858,15 +910,9 @@ final class ClipCamera implements PageCamera {
                 if (!steady && now - settlingSince < GlassCamera.RESUME_SETTLE_LIMIT_MILLIS) return;
                 settlingSince = 0;
             }
-            int width = image.getWidth(), height = image.getHeight();
-            Image.Plane luma = image.getPlanes()[0];
-            // Copied once: reading the camera's own buffer a pixel at a time cost about 170 ms a frame on the glasses.
-            ByteBuffer plane = luma.getBuffer().duplicate();
-            int bytes = plane.remaining();
-            if (watchLuma == null || watchLuma.length < bytes) watchLuma = new byte[bytes];
-            plane.get(watchLuma, 0, bytes);
-            ByteBuffer pixels = ByteBuffer.wrap(watchLuma, 0, bytes);
-            int row = luma.getRowStride(), step = luma.getPixelStride();
+            int width = watchWidth, height = watchHeight;
+            ByteBuffer pixels = ByteBuffer.wrap(watchLuma, 0, watchBytes);
+            int row = watchRow, step = watchStep;
             byte[] thumbnail = new byte[32 * 24];
             int level = 0;
             for (int y = 0; y < 24; y++) for (int x = 0; x < 32; x++) {
@@ -915,6 +961,10 @@ final class ClipCamera implements PageCamera {
             }
         } catch (RuntimeException | OutOfMemoryError error) {
             fail("watch frame " + error, null);
+        } finally {
+            synchronized (lock) {
+                watchPending = false;
+            }
         }
     }
 

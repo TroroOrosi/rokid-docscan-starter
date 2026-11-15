@@ -188,6 +188,7 @@ public class ClipCameraTest {
         image.timestamp = SystemClock.elapsedRealtimeNanos(); image.buffer = ByteBuffer.wrap(pixels);
         ReaderShadow watch = reader(320);
         watch.image = image; watch.listener.onImageAvailable(watch.reader);
+        idle(0); // the camera's thread works on the copy
     }
 
     private void watchFrame(boolean turned) {
@@ -275,6 +276,44 @@ public class ClipCameraTest {
         idle(70); watchFrame(false);
         assertEquals("the live image goes to the small window", 1, previews);
         assertEquals(List.of("image.close"), watchImages);
+    }
+
+    @Test public void a_watch_frame_is_returned_at_once_whatever_the_cameras_thread_is_doing() {
+        // On the glasses, 2026-11-16, clip 26 of a run: the camera's thread was held up for over a second as a clip
+        // began (it opens the clip's file and the codec), the watch preview's buffers were not returned meanwhile, the
+        // camera could not get one ("Can't dequeue next output buffer") and never drained ("Error waiting to drain").
+        camera.preview(); idle(100);
+        ReaderShadow watch = reader(320);
+        assertNotSame("taken on a thread that neither opens files nor changes sessions", Looper.getMainLooper(), watch.handler.getLooper());
+        for (int i = 0; i < 2; i++) {
+            DocScanTestImage image = new DocScanTestImage(watchImages);
+            image.format = ImageFormat.YUV_420_888; image.width = 32; image.height = 24;
+            image.rowStride = 32; image.pixelStride = 1;
+            image.timestamp = SystemClock.elapsedRealtimeNanos(); image.buffer = ByteBuffer.wrap(new byte[32 * 24]);
+            watch.image = image; watch.listener.onImageAvailable(watch.reader);
+        }
+        assertEquals("both returned before the camera's thread has looked at either", List.of("image.close", "image.close"), watchImages);
+        assertEquals(0, previews);
+        idle(0);
+        assertEquals("it works on one copy; the frame that came meanwhile was only returned", 1, previews);
+    }
+
+    @Test public void a_session_the_camera_cannot_make_closes_the_camera_and_the_same_page_is_looked_for_again() {
+        // The same night: the session for that clip could not be made, and the capture ended ("restart the app").
+        // Nothing had been recorded and the camera is closed here, so nothing is in doubt.
+        watching();
+        device().refuseSession = true;
+        camera.captureOnce(); idle(0);
+        idleSession(0); idle(100);
+        assertTrue(failures.isEmpty());
+        assertEquals("the wearer is asked to hold still again", 1, notReady);
+        assertArrayEquals("the clip that was opened is deleted", new String[0], inboxDirectory.list());
+        assertEquals("the camera is opened again", 2, ManagerShadow.devices.size());
+        AtomicInteger ready = new AtomicInteger();
+        camera.awaitNextPage(ready::incrementAndGet); idle(100);
+        light(50_000_000L, 800, 423, CONTROL_AE_STATE_CONVERGED);
+        watchFrame(false); idle(400); watchFrame(false);
+        assertEquals("the page that was in view is offered again without being turned", 1, ready.get());
     }
 
     @Test public void a_clip_session_is_built_only_after_the_watch_session_is_idle() {
