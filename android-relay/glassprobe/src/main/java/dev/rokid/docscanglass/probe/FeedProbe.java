@@ -402,6 +402,18 @@ final class FeedProbe {
                         request.set(CaptureRequest.CONTROL_POST_RAW_SENSITIVITY_BOOST, boost);
                         request.set(CaptureRequest.NOISE_REDUCTION_MODE, CaptureRequest.NOISE_REDUCTION_MODE_OFF);
                         request.set(CaptureRequest.EDGE_MODE, CaptureRequest.EDGE_MODE_OFF);
+                        String tone = CameraProbe.option("tone");  // tone=srgb or tone=linear: the brightness curve given, not the camera's own
+                        if (tone != null) {
+                            float[] curve = new float[128];
+                            for (int i = 0; i < 64; i++) {
+                                float x = i / 63f;
+                                curve[2 * i] = x;
+                                curve[2 * i + 1] = "linear".equals(tone) ? x
+                                        : x <= 0.0031308f ? 12.92f * x : (float) (1.055 * Math.pow(x, 1 / 2.4) - 0.055);
+                            }
+                            request.set(CaptureRequest.TONEMAP_MODE, CaptureRequest.TONEMAP_MODE_CONTRAST_CURVE);
+                            request.set(CaptureRequest.TONEMAP_CURVE, new android.hardware.camera2.params.TonemapCurve(curve, curve, curve));
+                        }
                         if (cropRegion != null) request.set(CaptureRequest.SCALER_CROP_REGION, cropRegion);
                         rebuildMillis = SystemClock.elapsedRealtime() - askedAt;
                         startedAt = SystemClock.elapsedRealtime();
