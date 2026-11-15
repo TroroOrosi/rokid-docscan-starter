@@ -64,6 +64,9 @@ final class HudView extends View {
     private Runnable hiddenFrame;
     private boolean frameReported;
     private boolean recording;
+    private float clipProgress;
+    private boolean far;
+    private static final float MARK = 10f;
     // metadata-only latest-capture notice; no review/answer or power callback.
     private String inspectionNotice = "";
     private java.util.function.BooleanSupplier inspectionCurrent = () -> false;
@@ -76,9 +79,25 @@ final class HudView extends View {
 
     void showRecording(boolean active) { recording = active; invalidate(); }
 
+    /**
+     * The clip being recorded: the share of the frames it needs that have counted, as a line along the lower edge of
+     * the small window. The wearer holds still without knowing for how long; a line says it without words. 0 hides it.
+     */
+    void showClipProgress(float share) {
+        clipProgress = Math.max(0f, Math.min(1f, share));
+        invalidate();
+    }
+
+    /** The paper fills too little of the small window to be read: a mark at each of its corners while waiting. */
+    void showFar(boolean value) {
+        if (far == value) return;
+        far = value;
+        invalidate();
+    }
+
     void capturePreview(boolean active) {
         capturing = active;
-        if (!active) { paperProposal = null; liveBox = null; liveMisses = 0; }
+        if (!active) { paperProposal = null; liveBox = null; liveMisses = 0; clipProgress = 0f; far = false; }
         if (!active && livePreview != null) { livePreview.recycle(); livePreview = null; }
         invalidate();
     }
@@ -239,6 +258,16 @@ final class HudView extends View {
         if (recording && still == null) {
             RectF area = captureArea();
             canvas.drawCircle(area.right - 3f, area.top - 12f, 3f, paint);
+        }
+        if (capturing && clipProgress > 0f) {
+            RectF area = captureArea();
+            canvas.drawRect(area.left, area.bottom - 3f, area.left + area.width() * clipProgress, area.bottom, paint);
+        }
+        if (capturing && far && still == null) {
+            RectF area = captureArea();
+            for (float x : new float[]{area.left, area.right - MARK}) for (float y : new float[]{area.top, area.bottom - MARK}) {
+                canvas.drawRect(x, y, x + MARK, y + MARK, paint);
+            }
         }
         if (still == null && capturing && !inspectionNotice.isEmpty()) {
             boolean current;

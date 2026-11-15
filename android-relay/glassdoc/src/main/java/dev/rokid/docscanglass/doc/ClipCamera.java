@@ -1,0 +1,893 @@
+package dev.rokid.docscanglass.doc;
+
+import android.Manifest;
+import android.content.Context;
+import android.graphics.Bitmap;
+import android.graphics.ImageFormat;
+import android.graphics.Rect;
+import android.hardware.Sensor;
+import android.hardware.SensorEvent;
+import android.hardware.SensorEventListener;
+import android.hardware.SensorManager;
+import android.hardware.camera2.CameraAccessException;
+import android.hardware.camera2.CameraCaptureSession;
+import android.hardware.camera2.CameraCharacteristics;
+import android.hardware.camera2.CameraDevice;
+import android.hardware.camera2.CameraManager;
+import android.hardware.camera2.CaptureRequest;
+import android.hardware.camera2.CaptureResult;
+import android.hardware.camera2.TotalCaptureResult;
+import android.hardware.camera2.params.StreamConfigurationMap;
+import android.media.Image;
+import android.media.ImageReader;
+import android.os.Handler;
+import android.os.HandlerThread;
+import android.os.SystemClock;
+import android.util.Log;
+import android.util.Range;
+import android.util.Size;
+
+import androidx.annotation.RequiresPermission;
+
+import java.io.File;
+import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.List;
+import java.util.UUID;
+
+import org.json.JSONArray;
+import org.json.JSONException;
+import org.json.JSONObject;
+
+import dev.rokid.docscanrelay.CaptureProvenance;
+import dev.rokid.docscanrelay.CaptureSurface;
+import dev.rokid.docscanrelay.ClipInbox;
+
+/**
+ * One page as a few seconds of frames. At the venue's light a single frame cannot be read however it is exposed
+ * (M-24); the phone adds the frames of a clip into one page (M-26). The camera watches through a small preview of
+ * the middle of its field (zoom 2); for a page it records that middle at 2016x1512 with a fixed exposure into a clip
+ * of its own, and goes back to watching. One frame of the clip travels as the page's JPEG through the path every
+ * photo takes; the clip waits in the {@link ClipInbox} under that frame's capture id.
+ *
+ * <p>Two rules of this camera are kept above everything else here, both measured on the glasses (M-29):
+ * <ul>
+ * <li>A session is left only after its repeating request was stopped and that session reported itself idle (or
+ * 1.5 s passed). Changed at once, frames in flight got no buffer and the camera failed to drain after 16 and after
+ * 28 pages. {@link #step} is the only place a session or the camera is changed.</li>
+ * <li>The clip stream's frames are taken and returned on a thread of their own, recorded or not. Left untaken while
+ * the camera's thread waited for a session, the camera hung until the glasses were restarted.</li>
+ * </ul>
+ */
+final class ClipCamera implements PageCamera {
+
+    static final class Options {
+        /** Frames that have to count before a clip ends. */
+        int targetFrames = 60;
+        long exposureNanos = 30_000_000;
+        /**
+         * For a scene that the exposure above cannot show bright enough at the gain limit; 0 never uses it. Half the
+         * desk's light at 30 ms and a gain of 5.0 read 6.6% wrong although four times the frames were added: the dark
+         * paper is lost on its way through the camera's curve and the encoder, not in the noise. Twice the exposure
+         * brings it back to the brightness that was read (M-29, M-30).
+         */
+        long longExposureNanos = 60_000_000;
+        /**
+         * Asked of the encoder at 30 frames a second, about 1.35 bit a pixel a frame: a page read 3.1% wrong at this
+         * and 5.7% at 50 Mbit/s (M-29). At 15 frames a second half of it is asked, the same bits a frame.
+         */
+        int bitrate = 95_000_000;
+        /** The clockwise turn that makes a page upright, written beside the clip for the phone. */
+        int rotationDegrees = 270;
+        /**
+         * Provisional: the paper counts as far away while under this share of the watch frame is brighter than the
+         * frame's mean. 0 shows no mark. Unmeasured on a worn head.
+         */
+        float farShare = 0.5f;
+    }
+
+    /** What the small window shows beside the image; called from the camera's and the frames' threads. */
+    interface Marks {
+        void showClipProgress(float share);
+        void showFar(boolean far);
+    }
+
+    static final int WIDTH = 2016, HEIGHT = 1512, FPS = 30, WATCH_FPS = 15, ISO = 800;
+    /** The post-RAW gain is asked in hundredths: 1.0 to 5.0. */
+    static final int MIN_BOOST = 100, MAX_BOOST = 500;
+    /** The first frames of a clip are still settling to the manual exposure: in the clip, never counted or used. */
+    static final int SETTLE_FRAMES = 6;
+    /** At the long exposure: 15 frames a second, and the brightness moves for about twelve frames (M-30). */
+    static final int LONG_FPS = 15, LONG_SETTLE_FRAMES = 15;
+    /**
+     * The gain, in hundredths, that 30 ms needed where a page was read (it got 5.0 of it: Zh5, M-29). A scene that
+     * needs more is darker than anything read at 30 ms and is recorded at the long exposure.
+     */
+    static final int LONG_ABOVE_BOOST = 705;
+    static final float MAX_SMEAR_PIXELS = 2f;
+    static final long MIN_MILLIS = 1_000, MAX_MILLIS = 10_000, IDLE_TIMEOUT_MILLIS = 1_500, LIGHT_TIMEOUT_MILLIS = 5_000;
+    static final int JPEG_QUALITY = 90;
+    private static final int MAX_FRAMES = (int) (MAX_MILLIS / 1000) * FPS + FPS;
+    private static final String TAG = "DocScanGlassDoc";
+    /** What the session's repeating request is for. */
+    private static final int OFF = 0, WATCH = 1, CLIP = 2;
+    /** A clip: waiting for the watch preview to measure the light, its session being built, recording, being closed. */
+    private static final int WAITING = 0, STARTING = 1, RECORDING = 2, ENDING = 3;
+
+    /** One page's clip, from the request to the page handed over. */
+    private static final class Clip {
+        final long askedAt = SystemClock.elapsedRealtime();
+        int phase = WAITING;
+        File file;
+        boolean opened;
+        int boost, previewIso, previewBoost, fps = FPS, settle = SETTLE_FRAMES, gyroFrames;
+        long previewExposure, exposure;
+        // While recording: the frames' thread, under the lock.
+        final long[] stamps = new long[MAX_FRAMES];
+        final float[] smears = new float[MAX_FRAMES];
+        int frames, counted, dropped;
+        long firstAt, shownAt, firstMillis = -1, pageStamp;
+        TotalCaptureResult pageResult;
+        // After it: the camera's thread.
+        long endedAt, backMillis = -1, bytes;
+        boolean encoded, back;
+        GlassCamera.Captured page;
+        String failure;
+    }
+
+    private final Context context;
+    private final Handler handler;
+    private final GlassCamera.Callback callback;
+    private final ClipInbox inbox;
+    private final ClipEncoder encoder;
+    private final Options options;
+    private final SensorManager sensors;
+    private final Sensor gyroscope;
+    private final HeadMotion.Ring turning = new HeadMotion.Ring(512);
+    private final SensorEventListener turningListener = new SensorEventListener() {
+        @Override public void onSensorChanged(SensorEvent event) {
+            if (event.values.length < 3) return;
+            float x = event.values[0], y = event.values[1], z = event.values[2];
+            turning.add(event.timestamp, (float) Math.sqrt(x * x + y * y + z * z));
+        }
+
+        @Override public void onAccuracyChanged(Sensor sensor, int accuracy) { }
+    };
+    private final Object lock = new Object(); // the clip being recorded, between the frames' thread and the camera's
+    private final List<Runnable> closeCallbacks = new ArrayList<>();
+    private final Runnable readyTimeout = this::readyNow;
+    private final Runnable timer = this::timeUp;
+    /** NV21 to JPEG; null when it cannot be encoded. Replaced in tests, which have no codec. */
+    GlassCamera.StillEncoder pageEncoder = (nv21, width, height, quality) -> {
+        java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream(2 << 20);
+        return new android.graphics.YuvImage(nv21, ImageFormat.NV21, width, height, null)
+                .compressToJpeg(new Rect(0, 0, width, height), quality, out) ? out.toByteArray() : null;
+    };
+    private volatile Marks marks;
+
+    // The camera's thread.
+    private CameraDevice device;
+    private CameraCaptureSession session;
+    private ImageReader watchReader;
+    private HandlerThread framesThread;
+    private Handler frames;
+    private Rect crop;
+    private boolean wanted, closed, opening, closing, configuring;
+    private int running;
+    /** Counts the sessions asked for: a callback of an earlier one is not the present session's. */
+    private int configured;
+    private Runnable afterReady, pageReady;
+    private PageChange pageChange = new PageChange();
+    private Clip clip;
+    private long previewExposure, settlingSince, displayAt, statusAt, watchWorkNanos, pageScene;
+    private int watchFrames;
+    private int previewIso, previewBoost;
+    private boolean steady, far;
+    private byte[] watchLuma;
+
+    // Under the lock.
+    private ImageReader clipReader;
+    private Clip recording;
+    private final ArrayDeque<TotalCaptureResult> recent = new ArrayDeque<>();
+    private byte[] nv21, line;
+
+    ClipCamera(Context context, Handler cameraHandler, GlassCamera.Callback callback, ClipInbox inbox,
+            ClipEncoder encoder, Options options) {
+        this.context = context;
+        this.handler = cameraHandler;
+        this.callback = callback;
+        this.inbox = inbox;
+        this.encoder = encoder;
+        this.options = options;
+        sensors = (SensorManager) context.getSystemService(Context.SENSOR_SERVICE);
+        gyroscope = sensors == null ? null : sensors.getDefaultSensor(Sensor.TYPE_GYROSCOPE);
+    }
+
+    void marks(Marks shown) { marks = shown; }
+
+    @Override public void awaitNextPage(Runnable ready) {
+        handler.post(() -> {
+            if (closed) return;
+            pageReady = ready;
+            wanted = true;
+            step();
+        });
+    }
+
+    @Override public void preview() {
+        handler.post(() -> {
+            if (closed) return;
+            wanted = true;
+            step();
+        });
+    }
+
+    @Override public void resetPages() {
+        handler.post(() -> {
+            pageChange = new PageChange();
+            settlingSince = 0;
+        });
+    }
+
+    /** One clip of the page in view; its middle frame arrives at the callback as the page. */
+    @Override public void captureOnce() {
+        handler.post(() -> {
+            if (closed || clip != null) return;
+            wanted = true;
+            clip = new Clip();
+            handler.postDelayed(timer, LIGHT_TIMEOUT_MILLIS);
+            step();
+            if (running == WATCH && afterReady == null && previewExposure > 0) begin();
+        });
+    }
+
+    /**
+     * A clip that is being recorded is closed and deleted, and the session is told that no photo is coming; a clip
+     * already recorded is still handed over. The camera is closed once its session is idle.
+     */
+    @Override public void pausePreview() {
+        handler.post(() -> {
+            wanted = false;
+            pageReady = null;
+            showFar(false);
+            if (clip != null && clip.phase != ENDING) {
+                abandon();
+                if (!closed) callback.onCaptureNotReady();
+            }
+            step();
+        });
+    }
+
+    @Override public void close() { close(null); }
+
+    @Override public void close(Runnable completed) {
+        handler.post(() -> {
+            if (completed != null) closeCallbacks.add(completed);
+            closed = true;
+            wanted = false;
+            pageReady = null;
+            abandon();
+            step();
+        });
+    }
+
+    // A clip is one page: pages turned to meanwhile are not kept, and there is no second still to choose from.
+    @Override public boolean supportsFuturePages() { return false; }
+    @Override public void observeFuturePages(int capacity, CaptureSurface.FuturePageListener listener) { }
+    @Override public void stopFuturePages(Runnable idle) { idle.run(); }
+    @Override public CaptureSurface.NativeScene nativeSelectionScene(CaptureProvenance source) { return null; }
+    @Override public boolean isNativeSelectionSceneCurrent(CaptureSurface.NativeScene scene) { return false; }
+    @Override public void requestNativeAlternative(CaptureSurface.NativeScene scene, CaptureSurface.NativeAlternative result) {
+        result.onSkipped();
+    }
+
+    private int target() {
+        if (closed || !wanted) return OFF;
+        return clip != null && (clip.phase == STARTING || clip.phase == RECORDING) ? CLIP : WATCH;
+    }
+
+    /**
+     * Brings the camera one step nearer to what is wanted now; every step ends by calling this again. Whatever asked
+     * for the change (a page, the end of a clip, a pause, a failure), a running session is left only through
+     * {@link #whenIdle} (M-29).
+     */
+    private void step() {
+        if (opening || closing || configuring || afterReady != null) return;
+        int target = target();
+        if (device == null) {
+            if (target != OFF) { open(); return; }
+            if (clip != null && clip.phase == ENDING && !clip.back) {
+                clip.back = true; // paused after the recording had ended: there is no watching to wait for
+                join();
+            }
+            if (!closed) return;
+            List<Runnable> completed = new ArrayList<>(closeCallbacks);
+            closeCallbacks.clear();
+            for (Runnable each : completed) each.run();
+            return;
+        }
+        if (running == target && target != OFF) return;
+        if (running != OFF) {
+            whenIdle(() -> {
+                running = OFF;
+                step();
+            });
+        } else if (target == OFF) {
+            closing = true;
+            CameraDevice leaving = device;
+            device = null;
+            session = null;
+            leaving.close(); // onClosed goes on
+        } else {
+            configure(target);
+        }
+    }
+
+    /**
+     * Stop the repeating request and go on only when the session has nothing in flight, or after 1.5 s. The frames
+     * still in flight are taken meanwhile: the camera's thread returns to its queue, and the clip's frames have a
+     * thread of their own (M-29).
+     */
+    private void whenIdle(Runnable next) {
+        afterReady = next;
+        try {
+            session.stopRepeating();
+        } catch (CameraAccessException | RuntimeException ignored) {
+            // the timeout below goes on
+        }
+        handler.postDelayed(readyTimeout, IDLE_TIMEOUT_MILLIS);
+    }
+
+    private void readyNow() {
+        Runnable next = afterReady;
+        if (next == null) return;
+        afterReady = null;
+        handler.removeCallbacks(readyTimeout);
+        next.run();
+    }
+
+    @RequiresPermission(Manifest.permission.CAMERA)
+    private void open() {
+        opening = true;
+        try {
+            CameraManager manager = (CameraManager) context.getSystemService(Context.CAMERA_SERVICE);
+            String id = GlassCamera.rearCameraId(manager);
+            CameraCharacteristics characteristics = manager.getCameraCharacteristics(id);
+            // Zoom 2: the middle half of the field each way. On the glasses' 4032x3024 sensor that is 2016x1512 of
+            // its own pixels, so the clip stream of that size is not scaled by the camera.
+            Rect array = characteristics.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE);
+            int width = array.width() / 2, height = array.height() / 2;
+            crop = new Rect(array.centerX() - width / 2, array.centerY() - height / 2,
+                    array.centerX() + width / 2, array.centerY() + height / 2);
+            StreamConfigurationMap map = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
+            Size size = GlassCamera.previewSize(map == null ? null : map.getOutputSizes(ImageFormat.YUV_420_888),
+                    GlassCamera.largestJpegSize(characteristics));
+            if (size == null) throw new IllegalStateException("no watch preview size");
+            watchReader = ImageReader.newInstance(size.getWidth(), size.getHeight(), ImageFormat.YUV_420_888, 2);
+            watchReader.setOnImageAvailableListener(this::watchFrame, handler);
+            framesThread = new HandlerThread("clip-frames");
+            framesThread.start();
+            frames = new Handler(framesThread.getLooper());
+            synchronized (lock) {
+                clipReader = ImageReader.newInstance(WIDTH, HEIGHT, ImageFormat.YUV_420_888, 4);
+                clipReader.setOnImageAvailableListener(this::clipFrame, frames);
+            }
+            pageChange.restartStream();
+            previewExposure = 0;
+            manager.openCamera(id, new CameraDevice.StateCallback() {
+                private boolean told;
+
+                @Override public void onOpened(CameraDevice opened) {
+                    opening = false;
+                    device = opened;
+                    step();
+                }
+
+                @Override public void onDisconnected(CameraDevice gone) { lost(gone, "camera disconnected"); }
+
+                @Override public void onError(CameraDevice gone, int error) { lost(gone, "camera error " + error); }
+
+                @Override public void onClosed(CameraDevice left) {
+                    closing = false;
+                    releaseReaders();
+                    step();
+                }
+
+                private void lost(CameraDevice gone, String reason) {
+                    if (told || (gone != device && !opening)) return; // once; not for a camera already let go
+                    told = true;
+                    fail(reason, gone);
+                }
+            }, handler);
+        } catch (CameraAccessException | RuntimeException error) {
+            opening = false;
+            releaseReaders();
+            fail("camera " + error, null);
+        }
+    }
+
+    private void releaseReaders() {
+        if (watchReader != null) { watchReader.close(); watchReader = null; }
+        synchronized (lock) { // not while the frames' thread holds one of its images
+            if (clipReader != null) { clipReader.close(); clipReader = null; }
+        }
+        if (framesThread != null) { framesThread.quitSafely(); framesThread = null; frames = null; }
+    }
+
+    private void configure(int mode) {
+        int token = ++configured;
+        configuring = true;
+        ImageReader output = mode == CLIP ? clipReader : watchReader;
+        try {
+            device.createCaptureSession(Collections.singletonList(output.getSurface()), new CameraCaptureSession.StateCallback() {
+                @Override public void onConfigured(CameraCaptureSession made) {
+                    if (token != configured || device == null) return;
+                    configuring = false;
+                    session = made;
+                    running = mode; // also when what is wanted changed meanwhile: it is then left like any other session
+                    if (target() == mode) {
+                        try {
+                            if (mode == CLIP) record(made); else watch(made, token);
+                        } catch (CameraAccessException | RuntimeException error) {
+                            fail("camera request " + error, null);
+                            return;
+                        }
+                    }
+                    step();
+                }
+
+                @Override public void onReady(CameraCaptureSession ready) {
+                    if (token == configured && afterReady != null) readyNow();
+                }
+
+                @Override public void onConfigureFailed(CameraCaptureSession refused) {
+                    if (token != configured) return;
+                    configuring = false;
+                    fail("camera session refused", null);
+                }
+            }, handler);
+        } catch (CameraAccessException | RuntimeException error) {
+            configuring = false;
+            fail("camera session " + error, null);
+        }
+    }
+
+    /** The small preview alone, automatic exposure, 15 frames a second: half the frames are half the heat (M-18). */
+    private void watch(CameraCaptureSession made, int token) throws CameraAccessException {
+        CaptureRequest.Builder request = device.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW);
+        request.addTarget(watchReader.getSurface());
+        request.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, new Range<>(WATCH_FPS, WATCH_FPS));
+        request.set(CaptureRequest.SCALER_CROP_REGION, crop);
+        // A preview that starts over starts its exposure over too. Until it has settled its frames differ from the
+        // page just taken, and counted as page turns they took one unmoving page again and again (GlassCamera,
+        // 2026-11-12). The first page of a session has no earlier one to be mistaken for.
+        steady = false;
+        settlingSince = pageChange.hasCapturedPage() ? Math.max(1, SystemClock.elapsedRealtime()) : 0;
+        made.setRepeatingRequest(request.build(), new CameraCaptureSession.CaptureCallback() {
+            @Override public void onCaptureCompleted(CameraCaptureSession source, CaptureRequest asked, TotalCaptureResult result) {
+                if (token != configured || result == null) return;
+                Long exposure = result.get(CaptureResult.SENSOR_EXPOSURE_TIME);
+                Integer iso = result.get(CaptureResult.SENSOR_SENSITIVITY);
+                if (exposure == null || exposure <= 0 || iso == null || iso <= 0) return;
+                Integer boost = result.get(CaptureResult.CONTROL_POST_RAW_SENSITIVITY_BOOST);
+                previewExposure = exposure;
+                previewIso = iso;
+                previewBoost = boost == null || boost <= 0 ? 100 : boost;
+                Integer state = result.get(CaptureResult.CONTROL_AE_STATE);
+                if (state != null && (state == CaptureResult.CONTROL_AE_STATE_CONVERGED
+                        || state == CaptureResult.CONTROL_AE_STATE_LOCKED
+                        || state == CaptureResult.CONTROL_AE_STATE_FLASH_REQUIRED)) steady = true;
+                if (clip != null && clip.phase == WAITING && running == WATCH && afterReady == null) begin();
+            }
+        }, handler);
+    }
+
+    /** The light is known: open the clip, then leave the watch session for the clip's. */
+    private void begin() {
+        Clip starting = clip;
+        handler.removeCallbacks(timer);
+        starting.previewExposure = previewExposure;
+        starting.previewIso = previewIso;
+        starting.previewBoost = previewBoost;
+        // As bright as the preview's automatic exposure just was, at this clip's fixed exposure and sensitivity.
+        double light = (double) previewExposure * previewIso * previewBoost / ISO;
+        boolean dark = options.longExposureNanos > 0 && Math.round(light / options.exposureNanos) > LONG_ABOVE_BOOST;
+        starting.exposure = dark ? options.longExposureNanos : options.exposureNanos;
+        starting.fps = dark ? LONG_FPS : FPS;
+        starting.settle = dark ? LONG_SETTLE_FRAMES : SETTLE_FRAMES;
+        starting.boost = (int) Math.max(MIN_BOOST, Math.min(MAX_BOOST, Math.round(light / starting.exposure)));
+        try {
+            // Its capture id is that of the frame that becomes the page, known only at the end: a name of its own until then.
+            starting.file = inbox.reserve(UUID.randomUUID().toString());
+            encoder.open(starting.file, WIDTH, HEIGHT, (int) ((long) options.bitrate * starting.fps / FPS), starting.fps);
+            starting.opened = true;
+        } catch (IOException | RuntimeException error) {
+            fail("encoder " + error, null);
+            return;
+        }
+        starting.phase = STARTING;
+        pageChange.consumed();
+        showFar(false);
+        step();
+    }
+
+    /** The clip stream alone: the middle of the sensor in its own pixels, 30 or 15 frames a second, nothing automatic. */
+    private void record(CameraCaptureSession made) throws CameraAccessException {
+        Clip started = clip;
+        CaptureRequest.Builder request = device.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW);
+        request.addTarget(clipReader.getSurface());
+        request.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF);
+        request.set(CaptureRequest.CONTROL_AWB_LOCK, true);
+        request.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, new Range<>(started.fps, started.fps));
+        request.set(CaptureRequest.SENSOR_FRAME_DURATION, 1_000_000_000L / started.fps);
+        request.set(CaptureRequest.SENSOR_EXPOSURE_TIME, started.exposure);
+        request.set(CaptureRequest.SENSOR_SENSITIVITY, ISO);
+        request.set(CaptureRequest.CONTROL_POST_RAW_SENSITIVITY_BOOST, started.boost);
+        // What the phone adds together has to be the sensor's own noise and edges, not the camera's guess at them.
+        request.set(CaptureRequest.NOISE_REDUCTION_MODE, CaptureRequest.NOISE_REDUCTION_MODE_OFF);
+        request.set(CaptureRequest.EDGE_MODE, CaptureRequest.EDGE_MODE_OFF);
+        // No TONEMAP_MODE and no curve: asked for either, this camera fails with error 4 (M-29).
+        request.set(CaptureRequest.SCALER_CROP_REGION, crop);
+        synchronized (lock) {
+            recent.clear();
+            recording = started;
+        }
+        started.phase = RECORDING;
+        if (gyroscope != null) sensors.registerListener(turningListener, gyroscope, HeadMotion.PERIOD_MICROS, frames);
+        handler.postDelayed(timer, MAX_MILLIS);
+        made.setRepeatingRequest(request.build(), new CameraCaptureSession.CaptureCallback() {
+            @Override public void onCaptureCompleted(CameraCaptureSession source, CaptureRequest asked, TotalCaptureResult result) {
+                if (result == null) return;
+                synchronized (lock) {
+                    if (recording != started) return;
+                    // The page's frame and its result arrive in either order: a few results wait for their frame.
+                    if (recent.size() == 8) recent.removeFirst();
+                    recent.addLast(result);
+                    if (started.pageResult == null && started.pageStamp != 0
+                            && Long.valueOf(started.pageStamp).equals(result.get(CaptureResult.SENSOR_TIMESTAMP))) {
+                        started.pageResult = result;
+                    }
+                }
+            }
+        }, handler);
+    }
+
+    private void timeUp() {
+        Clip late = clip;
+        if (late == null) return;
+        if (late.phase == RECORDING) {
+            end(late);
+        } else if (late.phase == WAITING) {
+            // The preview never measured the light: nothing was asked of the camera, and it goes on watching.
+            clip = null;
+            callback.onCaptureNotReady();
+        }
+    }
+
+    /** The frames' thread: the clip stream, 30 times a second, whether a clip is recorded or not (M-29). */
+    private void clipFrame(ImageReader source) {
+        synchronized (lock) {
+            if (source != clipReader) return;
+            Image image;
+            try {
+                image = source.acquireNextImage();
+            } catch (RuntimeException unavailable) {
+                return;
+            }
+            if (image == null) return;
+            Clip into = recording;
+            try {
+                if (into == null) return;
+                long now = SystemClock.elapsedRealtime(), stamp = image.getTimestamp();
+                Image.Plane plane = image.getPlanes()[0];
+                int row = plane.getRowStride();
+                if (image.getWidth() != WIDTH || image.getHeight() != HEIGHT || plane.getPixelStride() != 1 || row < WIDTH) {
+                    throw new IllegalStateException("clip frame layout");
+                }
+                ByteBuffer luma = plane.getBuffer();
+                if (into.firstAt == 0) {
+                    into.firstAt = now;
+                    into.firstMillis = now - into.askedAt;
+                }
+                if (!encoder.offer(luma.duplicate(), row, stamp)) {
+                    into.dropped++; // the encoder has no room: this frame is lost, the next is not delayed
+                    return;
+                }
+                int index = into.frames++;
+                // How far the fastest turn of the head during this exposure carried the picture, in sensor pixels.
+                HeadMotion.Span span = turning.between(stamp, stamp + into.exposure);
+                float smear = span == null ? 0f : span.blurPixels(into.exposure);
+                if (span != null) into.gyroFrames++;
+                into.stamps[index] = stamp;
+                into.smears[index] = smear;
+                if (index >= into.settle && smear <= MAX_SMEAR_PIXELS) {
+                    into.counted++;
+                    // ponytail: one copy only, so the page is the first counted frame until the middle of a full clip
+                    // is reached. A clip cut short at 10 s keeps its first; keep a second copy if that page reads worse.
+                    if (into.counted == 1 || into.counted == Math.max(1, options.targetFrames / 2)) keep(into, luma, row, stamp);
+                }
+                if (now - into.shownAt >= 200) {
+                    into.shownAt = now;
+                    show(luma, row);
+                    showProgress(Math.min(1f, (float) into.counted / Math.max(1, options.targetFrames)));
+                }
+                if ((into.counted >= options.targetFrames && now - into.firstAt >= MIN_MILLIS) || into.frames == MAX_FRAMES) {
+                    recording = null; // no later frame joins this clip
+                    handler.post(() -> end(into));
+                }
+            } catch (RuntimeException | OutOfMemoryError error) {
+                recording = null;
+                handler.post(() -> { if (clip == into) fail("clip frame " + error, null); });
+            } finally {
+                image.close();
+            }
+        }
+    }
+
+    /** The frame that may become the page: its rows without the camera's padding, colour grey. */
+    private void keep(Clip into, ByteBuffer luma, int row, long stamp) {
+        if (nv21 == null) {
+            nv21 = new byte[WIDTH * HEIGHT * 3 / 2];
+            Arrays.fill(nv21, WIDTH * HEIGHT, nv21.length, (byte) 128);
+        }
+        ByteBuffer rows = luma.duplicate();
+        int origin = rows.position();
+        for (int y = 0; y < HEIGHT; y++) {
+            rows.position(origin + y * row);
+            rows.get(nv21, y * WIDTH, WIDTH);
+        }
+        into.pageStamp = stamp;
+        into.pageResult = null;
+        for (TotalCaptureResult result : recent) {
+            if (Long.valueOf(stamp).equals(result.get(CaptureResult.SENSOR_TIMESTAMP))) into.pageResult = result;
+        }
+    }
+
+    /** The frame being recorded, in the small window: a row at a time, as each read of the camera's buffer is a native call. */
+    private void show(ByteBuffer luma, int row) {
+        int width = 320, height = width * HEIGHT / WIDTH;
+        if (line == null) line = new byte[WIDTH];
+        int[] display = new int[width * height];
+        ByteBuffer rows = luma.duplicate();
+        int origin = rows.position();
+        for (int y = 0; y < height; y++) {
+            rows.position(origin + y * HEIGHT / height * row);
+            rows.get(line, 0, WIDTH);
+            for (int x = 0; x < width; x++) display[y * width + x] = 0xFF000000 | ((line[x * WIDTH / width] & 255) << 8);
+        }
+        callback.onPreview(Bitmap.createBitmap(display, width, height, Bitmap.Config.RGB_565), null);
+    }
+
+    /** Enough frames, or ten seconds: the camera goes back to watching while the clip's own thread closes the file. */
+    private void end(Clip ended) {
+        if (clip != ended || ended.phase != RECORDING) return;
+        stopRecording(ended);
+        ended.phase = ENDING;
+        ended.endedAt = SystemClock.elapsedRealtime();
+        encoder.end((written, bytes, failure) -> {
+            GlassCamera.Captured page = null;
+            String problem = failure != null ? failure : ended.frames == 0 ? "clip without frames" : null;
+            if (problem == null && ended.counted > 0) {
+                try {
+                    page = pageOf(ended);
+                } catch (IOException | JSONException | RuntimeException | OutOfMemoryError error) {
+                    problem = "clip page " + error;
+                }
+            }
+            GlassCamera.Captured made = page;
+            String reason = problem;
+            handler.post(() -> encoded(ended, made, reason, bytes));
+        });
+        step();
+    }
+
+    private void stopRecording(Clip stopped) {
+        handler.removeCallbacks(timer);
+        synchronized (lock) {
+            if (recording == stopped) recording = null;
+        }
+        if (gyroscope != null) sensors.unregisterListener(turningListener);
+        showProgress(0);
+    }
+
+    /**
+     * The clip's own thread, once its file is closed: the page's JPEG from the kept frame, and the clip moved under
+     * that page's capture id with its record. Neither the camera's thread nor the frames' waits for these files.
+     */
+    private GlassCamera.Captured pageOf(Clip ended) throws IOException, JSONException {
+        byte[] jpeg = pageEncoder.encode(nv21, WIDTH, HEIGHT, JPEG_QUALITY);
+        if (jpeg == null || jpeg.length == 0 || jpeg.length > GlassCamera.MAX_JPEG_BYTES) throw new IOException("page not encoded");
+        TotalCaptureResult result = ended.pageResult;
+        CaptureProvenance provenance = CaptureProvenance.clipFrame(jpeg, WIDTH, HEIGHT, ended.pageStamp,
+                result == null ? null : result.get(CaptureResult.SENSOR_TIMESTAMP),
+                result == null ? null : result.getFrameNumber(),
+                result == null ? null : result.get(CaptureResult.SENSOR_EXPOSURE_TIME),
+                result == null ? null : result.get(CaptureResult.SENSOR_SENSITIVITY),
+                result == null ? null : result.get(CaptureResult.CONTROL_AF_STATE),
+                result == null ? null : result.get(CaptureResult.CONTROL_AE_STATE));
+        File named = inbox.reserve(provenance.captureId);
+        if (!ended.file.renameTo(named)) throw new IOException("clip not moved");
+        ended.file = named;
+        JSONArray each = new JSONArray();
+        for (int i = 0; i < ended.frames; i++) {
+            each.put(new JSONObject().put("t_ns", ended.stamps[i]).put("smear_px", Math.round(ended.smears[i] * 100f) / 100.0));
+        }
+        JSONObject record = new JSONObject().put("schema", 1).put("capture_id", provenance.captureId)
+                .put("width", WIDTH).put("height", HEIGHT).put("rotation_degrees", options.rotationDegrees)
+                .put("exposure_ns", ended.exposure).put("sensitivity_iso", ISO).put("boost", ended.boost)
+                .put("frame_rate", ended.fps).put("gyro_frames", ended.gyroFrames)
+                .put("preview", new JSONObject().put("exposure_ns", ended.previewExposure)
+                        .put("sensitivity_iso", ended.previewIso).put("boost", ended.previewBoost))
+                .put("frames", each).put("dropped", ended.dropped).put("settle", ended.settle);
+        inbox.offer(provenance.captureId, record.toString().getBytes(StandardCharsets.UTF_8));
+        return new GlassCamera.Captured(jpeg, WIDTH, HEIGHT, SystemClock.elapsedRealtime() - ended.askedAt, provenance);
+    }
+
+    private void encoded(Clip ended, GlassCamera.Captured page, String failure, long bytes) {
+        ended.page = page;
+        ended.failure = failure;
+        ended.bytes = bytes;
+        ended.encoded = true;
+        if (clip != ended) { // given up meanwhile: a record left behind goes with the session's next photo
+            ended.file.delete();
+        } else if (failure != null) {
+            clip = null;
+            ended.file.delete();
+            fail(failure, null);
+        } else {
+            join();
+        }
+    }
+
+    /** A page is handed over when its clip is closed and the camera watches again; the second is what the wearer waits for. */
+    private void join() {
+        Clip done = clip;
+        if (done == null || !done.encoded || !done.back) return;
+        clip = null;
+        Log.i(TAG, "clip frames=" + done.frames + " counted=" + done.counted + " dropped=" + done.dropped
+                + " bytes=" + done.bytes + " first_ms=" + done.firstMillis + " back_ms=" + done.backMillis
+                + " boost=" + done.boost + " exposure_ms=" + done.exposure / 1_000_000 + " gyro=" + done.gyroFrames);
+        if (done.page != null) {
+            callback.onCaptured(done.page);
+            return;
+        }
+        // Not one frame was still enough to count: nothing is in flight, and the same page is looked for again.
+        done.file.delete();
+        pageChange = new PageChange();
+        settlingSince = 0;
+        callback.onCaptureNotReady();
+    }
+
+    /** A clip that will not become a page: closed, and deleted once its file is closed. */
+    private void abandon() {
+        Clip given = clip;
+        if (given == null) return;
+        clip = null;
+        stopRecording(given);
+        if (given.phase == ENDING) { // its encoder was told to end already: encoded() finds the clip gone
+            if (given.encoded) given.file.delete();
+            return;
+        }
+        if (given.opened) encoder.end((written, bytes, failure) -> given.file.delete());
+        else if (given.file != null) given.file.delete();
+    }
+
+    /**
+     * The capture fails and the camera is closed; it opens again when it is next asked to watch. A camera that
+     * reported itself gone is closed at once, as nothing of it can be waited for; otherwise in order.
+     */
+    private void fail(String reason, CameraDevice gone) {
+        Log.w(TAG, "clip camera failed: " + reason);
+        abandon();
+        wanted = false;
+        pageReady = null;
+        showFar(false);
+        if (gone != null) {
+            opening = configuring = false;
+            afterReady = null;
+            handler.removeCallbacks(readyTimeout);
+            configured++;
+            device = null;
+            session = null;
+            running = OFF;
+            closing = true;
+            gone.close();
+        }
+        if (!closed) callback.onCaptureFailed(reason);
+        step();
+    }
+
+    /** The camera's thread: the watch preview. What it shows is page evidence exactly as in {@link GlassCamera}. */
+    private void watchFrame(ImageReader source) {
+        if (source != watchReader) return; // a notice from a reader already closed
+        try (Image image = source.acquireLatestImage()) {
+            if (image == null || running != WATCH || afterReady != null) return; // taken and returned all the same
+            long now = SystemClock.elapsedRealtime(), timestamp = image.getTimestamp(), began = System.nanoTime();
+            Clip ending = clip;
+            if (ending != null && ending.phase == ENDING && !ending.back) {
+                ending.back = true;
+                ending.backMillis = now - ending.endedAt;
+                join();
+                if (running != WATCH || afterReady != null) return;
+            }
+            if (settlingSince != 0) {
+                if (!steady && now - settlingSince < GlassCamera.RESUME_SETTLE_LIMIT_MILLIS) return;
+                settlingSince = 0;
+            }
+            int width = image.getWidth(), height = image.getHeight();
+            Image.Plane luma = image.getPlanes()[0];
+            // Copied once: reading the camera's own buffer a pixel at a time cost about 170 ms a frame on the glasses.
+            ByteBuffer plane = luma.getBuffer().duplicate();
+            int bytes = plane.remaining();
+            if (watchLuma == null || watchLuma.length < bytes) watchLuma = new byte[bytes];
+            plane.get(watchLuma, 0, bytes);
+            ByteBuffer pixels = ByteBuffer.wrap(watchLuma, 0, bytes);
+            int row = luma.getRowStride(), step = luma.getPixelStride();
+            byte[] thumbnail = new byte[32 * 24];
+            int level = 0;
+            for (int y = 0; y < 24; y++) for (int x = 0; x < 32; x++) {
+                byte value = pixels.get(y * height / 24 * row + x * width / 32 * step);
+                thumbnail[y * 32 + x] = value;
+                level += value & 255;
+            }
+            pageChange.observeFrame(thumbnail, pixels, width, height, row, step, timestamp, now);
+            if (pageScene != pageChange.sequence()) {
+                pageScene = pageChange.sequence();
+                Log.i(TAG, "page_change scene=" + pageScene + " " + pageChange.lastChange());
+            }
+            if (options.farShare > 0) {
+                // ponytail: paper is taken to be what is brighter than the frame's mean. A dark desk beside a lit
+                // page reads the same as a page far away; replace with the paper's outline once worn frames exist.
+                int mean = level / thumbnail.length, brighter = 0;
+                for (byte value : thumbnail) if ((value & 255) > mean) brighter++;
+                showFar(brighter < options.farShare * thumbnail.length);
+            }
+            if (now - displayAt >= 100) {
+                displayAt = now;
+                int shownWidth = Math.min(320, width), shownHeight = Math.max(1, shownWidth * height / width);
+                int[] display = new int[shownWidth * shownHeight];
+                for (int y = 0; y < shownHeight; y++) for (int x = 0; x < shownWidth; x++) {
+                    int gray = pixels.get(y * height / shownHeight * row + x * width / shownWidth * step) & 255;
+                    display[y * shownWidth + x] = 0xFF000000 | (gray << 8);
+                }
+                callback.onPreview(Bitmap.createBitmap(display, shownWidth, shownHeight, Bitmap.Config.RGB_565), null);
+            }
+            if (clip == null && pageReady != null && pageChange.ready(now)) {
+                Runnable ready = pageReady;
+                pageReady = null;
+                ready.run();
+            }
+            // What the desk check and a worn recording read: the frames handled, the slowest of them, and the light
+            // as the automatic exposure measures it.
+            watchFrames++;
+            watchWorkNanos = Math.max(watchWorkNanos, System.nanoTime() - began);
+            if (now - statusAt >= 1000) {
+                Log.i(TAG, "watch_status frames=" + watchFrames + " max_work_ms=" + watchWorkNanos / 1_000_000
+                        + " exposure_ns=" + previewExposure + " iso=" + previewIso + " boost=" + previewBoost
+                        + " far=" + far);
+                statusAt = now;
+                watchFrames = 0;
+                watchWorkNanos = 0;
+            }
+        } catch (RuntimeException | OutOfMemoryError error) {
+            fail("watch frame " + error, null);
+        }
+    }
+
+    private void showFar(boolean now) {
+        if (far == now) return;
+        far = now;
+        Marks shown = marks;
+        if (shown != null) shown.showFar(now);
+    }
+
+    private void showProgress(float share) {
+        Marks shown = marks;
+        if (shown != null) shown.showClipProgress(share);
+    }
+}

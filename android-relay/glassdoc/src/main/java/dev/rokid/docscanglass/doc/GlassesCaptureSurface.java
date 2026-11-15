@@ -26,7 +26,7 @@ import dev.rokid.docscanrelay.NativeImageQuality;
  * controller, the recognizer, the upload and the review store are the relay's,
  * unchanged.</p>
  */
-final class GlassesCaptureSurface implements CaptureSurface {
+final class GlassesCaptureSurface implements CaptureSurface, ClipCamera.Marks {
     /**
      * Bound the full-frame preview to twice the 640px HUD edge.
      * A 4032px capture decodes to 1008px in RGB_565 (about 1.5 MB).
@@ -44,7 +44,7 @@ final class GlassesCaptureSurface implements CaptureSurface {
     }
 
     private final Context context;
-    private final GlassCamera camera;
+    private volatile PageCamera camera;
     private final HudView hud;
     private final Handler main;
     private final Listener listener;
@@ -141,7 +141,7 @@ final class GlassesCaptureSurface implements CaptureSurface {
         } catch (java.security.NoSuchAlgorithmException impossible) { throw new IllegalStateException(impossible); }
     }
 
-    @Override public boolean supportsFuturePages() { return camera != null; }
+    @Override public boolean supportsFuturePages() { return camera != null && camera.supportsFuturePages(); }
 
     @Override public void observeFuturePages(int capacity, FuturePageListener listener) {
         if (camera != null && !closed) camera.observeFuturePages(capacity, listener);
@@ -197,7 +197,7 @@ final class GlassesCaptureSurface implements CaptureSurface {
 
     GlassesCaptureSurface(
             Context context,
-            GlassCamera camera,
+            PageCamera camera,
             HudView hud,
             Handler main,
             Listener listener) {
@@ -206,6 +206,22 @@ final class GlassesCaptureSurface implements CaptureSurface {
         this.hud = hud;
         this.main = main;
         this.listener = listener;
+    }
+
+    /**
+     * The session's kind is chosen after this surface is built, and with it the camera: clips for ordinary written
+     * reading, stills for everything else. The camera that is replaced has been asked for nothing yet.
+     */
+    void camera(PageCamera chosen) { camera = chosen; }
+
+    /** How far the clip being recorded has come, 0 to 1; 0 clears the line. From the clip's frames thread. */
+    @Override public void showClipProgress(float share) {
+        main.post(() -> { if (!closed) hud.showClipProgress(share); });
+    }
+
+    /** The paper fills too little of the small window. From the camera's thread. */
+    @Override public void showFar(boolean far) {
+        main.post(() -> { if (!closed) hud.showFar(far); });
     }
 
     /**

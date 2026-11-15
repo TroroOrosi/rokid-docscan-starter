@@ -361,6 +361,78 @@ public class HudViewTest {
         return frame;
     }
 
+    /** Lit pixels of one screen row inside the capture corner [328,440,472,632] of a 480x640 panel. */
+    private static int litInRow(Bitmap screen, int y) {
+        int lit = 0;
+        for (int x = 328; x < 472; x++) if (Color.green(screen.getPixel(x, y)) > 200) lit++;
+        return lit;
+    }
+
+    /** While a clip is recorded the wearer holds still without knowing for how long: a line, no words. */
+    @Test public void the_progress_line_grows_with_the_counted_frames() {
+        HudView view = new HudView(RuntimeEnvironment.getApplication());
+        view.layout(0, 0, 480, 640);
+        view.capturePreview(true);
+        Bitmap screen = Bitmap.createBitmap(480, 640, Bitmap.Config.ARGB_8888);
+        int[] lengths = new int[4];
+        float[] shares = {0f, .25f, .5f, 1f};
+        for (int i = 0; i < shares.length; i++) {
+            view.showClipProgress(shares[i]);
+            TextCanvas canvas = new TextCanvas(screen);
+            view.draw(canvas);
+            assertEquals("no words", "", canvas.text.toString());
+            lengths[i] = litInRow(screen, 630);
+            assertCornerOnly(screen);
+        }
+        assertEquals("nothing counted, no line", 0, lengths[0]);
+        assertEquals(36, lengths[1], 2);
+        assertEquals(72, lengths[2], 2);
+        assertEquals("the whole lower edge of the small window", 144, lengths[3], 2);
+        view.capturePreview(false);
+        view.draw(new Canvas(screen));
+        assertEquals("the line goes with the capture display", 0, litInRow(screen, 630));
+        screen.recycle();
+    }
+
+    /** Paper too far away fills little of the window; the four corners say so while the wearer can still move. */
+    @Test public void the_far_mark_shows_only_while_waiting() {
+        HudView view = new HudView(RuntimeEnvironment.getApplication());
+        view.layout(0, 0, 480, 640);
+        view.capturePreview(true);
+        Bitmap live = Bitmap.createBitmap(320, 240, Bitmap.Config.ARGB_8888); // shown 144x108: the corners stay free
+        live.eraseColor(Color.rgb(0, 20, 0));
+        view.showLivePreview(live);
+        Bitmap screen = Bitmap.createBitmap(480, 640, Bitmap.Config.ARGB_8888);
+        int[][] corners = {{331, 443}, {468, 443}, {331, 628}, {468, 628}};
+        view.draw(new Canvas(screen));
+        for (int[] corner : corners) assertEquals(Color.BLACK, screen.getPixel(corner[0], corner[1]));
+
+        view.showFar(true);
+        TextCanvas canvas = new TextCanvas(screen);
+        view.draw(canvas);
+        assertEquals("no words", "", canvas.text.toString());
+        for (int[] corner : corners) assertTrue("a mark at each corner", Color.green(screen.getPixel(corner[0], corner[1])) > 200);
+        assertEquals("the image between them stays clear", 20, Color.green(screen.getPixel(400, 536)));
+        assertCornerOnly(screen);
+
+        Bitmap photo = Bitmap.createBitmap(320, 240, Bitmap.Config.ARGB_8888);
+        photo.eraseColor(Color.rgb(90, 90, 90));
+        view.showReview(photo, List.of());
+        view.draw(new Canvas(screen));
+        for (int[] corner : corners) assertEquals("not over the photo under review", Color.BLACK, screen.getPixel(corner[0], corner[1]));
+
+        view.showAiming(List.of());
+        view.showFar(false);
+        view.draw(new Canvas(screen));
+        for (int[] corner : corners) assertEquals(Color.BLACK, screen.getPixel(corner[0], corner[1]));
+        view.showFar(true);
+        view.capturePreview(false);
+        view.capturePreview(true);
+        view.draw(new Canvas(screen));
+        for (int[] corner : corners) assertEquals("a stopped capture forgets the mark", Color.BLACK, screen.getPixel(corner[0], corner[1]));
+        photo.recycle(); screen.recycle();
+    }
+
     @Test public void endingCaptureKeepsThePhotoStationaryAndTheNoticeOutsideIt() {
         HudView view = new HudView(RuntimeEnvironment.getApplication());
         view.layout(0, 0, 480, 640);

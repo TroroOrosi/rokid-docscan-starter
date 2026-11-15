@@ -56,7 +56,7 @@ import dev.rokid.docscanrelay.CaptureSurface;
  * before the client even disconnects. This class never reads, writes, disables,
  * obscures, spoofs, or bypasses it.
  */
-final class GlassCamera {
+final class GlassCamera implements PageCamera {
 
     enum Mode { NATIVE_STILL, ZSL_EVALUATION_YUV, VIDEO_EVALUATION }
 
@@ -576,17 +576,17 @@ final class GlassCamera {
         captureOnHandler();
     }
 
-    CaptureSurface.NativeScene nativeSelectionScene(CaptureProvenance source) {
+    public CaptureSurface.NativeScene nativeSelectionScene(CaptureProvenance source) {
         CaptureSurface.NativeScene scene = selectionScene;
         return scene != null && scene.matches(source) && isNativeSelectionSceneCurrent(scene) ? scene : null;
     }
 
-    boolean isNativeSelectionSceneCurrent(CaptureSurface.NativeScene scene) {
+    public boolean isNativeSelectionSceneCurrent(CaptureSurface.NativeScene scene) {
         return nativeSelection && scene != null && scene.equals(selectionScene);
     }
 
     /** Never await/prepare an optional shot: the next-page observer and current readings take priority. */
-    void requestNativeAlternative(CaptureSurface.NativeScene scene, CaptureSurface.NativeAlternative result) {
+    public void requestNativeAlternative(CaptureSurface.NativeScene scene, CaptureSurface.NativeAlternative result) {
         handler.post(() -> {
             if (!isNativeSelectionSceneCurrent(scene) || selectionAttempted) { result.onSkipped(); return; }
             selectionAttempted = true;
@@ -604,7 +604,7 @@ final class GlassCamera {
 
     /** Opens the rear camera and captures exactly one JPEG at its largest size. */
     @RequiresPermission(Manifest.permission.CAMERA)
-    void captureOnce() {
+    public void captureOnce() {
         handler.post(() -> {
             if (closed || unknown || capturePending) return;
             capturePending = true;
@@ -617,13 +617,13 @@ final class GlassCamera {
         });
     }
 
-    void resetPages() { handler.post(() -> {
+    public void resetPages() { handler.post(() -> {
         selectionScene = null;
         pageChange = new PageChange();
         if (paperGeometryEvaluation) paperTracker = new PaperGeometry.Tracker();
     }); }
 
-    void observeFuturePages(int capacity, CaptureSurface.FuturePageListener listener) {
+    public void observeFuturePages(int capacity, CaptureSurface.FuturePageListener listener) {
         if (capacity < 0 || capacity > 2 || listener == null) throw new IllegalArgumentException("future capacity 0..2 required");
         handler.post(() -> {
             if (closed || unknown) return;
@@ -634,7 +634,7 @@ final class GlassCamera {
         });
     }
 
-    void stopFuturePages(Runnable idle) {
+    public void stopFuturePages(Runnable idle) {
         handler.post(() -> {
             futurePages = null;
             futureCapacity = 0;
@@ -669,7 +669,7 @@ final class GlassCamera {
         return mode != Mode.ZSL_EVALUATION_YUV || (zslCloseComplete && (inputTransfer == null || inputTransfer.idle()));
     }
 
-    void awaitNextPage(Runnable ready) {
+    public void awaitNextPage(Runnable ready) {
         handler.post(() -> {
             if (closed || unknown) return;
             pageReady = ready;
@@ -678,11 +678,11 @@ final class GlassCamera {
         });
     }
 
-    void preview() {
+    public void preview() {
         handler.post(() -> { previewRequested = true; startPreview(); });
     }
 
-    void pausePreview() {
+    public void pausePreview() {
         handler.post(() -> {
             selectionScene = null;
             previewRequested = false;
@@ -1504,9 +1504,9 @@ final class GlassCamera {
         }
     }
 
-    void close() { close(null); }
+    public void close() { close(null); }
 
-    void close(Runnable completed) {
+    public void close(Runnable completed) {
         handler.post(() -> {
             if (completed != null) closeCallbacks.add(completed);
             if (pendingJpeg != null) {
@@ -2073,7 +2073,7 @@ final class GlassCamera {
         }
     }
 
-    private static String rearCameraId(CameraManager manager) throws CameraAccessException {
+    static String rearCameraId(CameraManager manager) throws CameraAccessException {
         String[] ids = manager.getCameraIdList();
         for (String id : ids) {
             Integer lens = manager.getCameraCharacteristics(id)
@@ -2085,7 +2085,7 @@ final class GlassCamera {
         return ids.length == 0 ? null : ids[0];
     }
 
-    private static Size largestJpegSize(CameraCharacteristics characteristics) {
+    static Size largestJpegSize(CameraCharacteristics characteristics) {
         StreamConfigurationMap map = characteristics.get(
                 CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
         if (map == null) {
@@ -2106,7 +2106,7 @@ final class GlassCamera {
     }
 
     /** Different stream aspects are centre-cropped by Camera2; a guide must show the full JPEG. */
-    private static Size previewSize(Size[] sizes, Size jpeg) {
+    static Size previewSize(Size[] sizes, Size jpeg) {
         if (sizes == null || jpeg == null) return null;
         Size smallest = null;
         for (Size candidate : sizes) {

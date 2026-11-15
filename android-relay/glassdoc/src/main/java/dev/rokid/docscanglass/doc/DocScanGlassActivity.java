@@ -34,6 +34,7 @@ import dev.rokid.docscanglass.input.GlassesInputAction;
 import dev.rokid.docscanglass.input.GlassesInputNormalizer;
 import dev.rokid.docscanglass.input.InputSignal;
 import dev.rokid.docscanrelay.ClientIdentity;
+import dev.rokid.docscanrelay.ClipInbox;
 import dev.rokid.docscanrelay.DocScanApi;
 import dev.rokid.docscanrelay.DocScanController;
 import dev.rokid.docscanrelay.CaptureInspectionOrigin;
@@ -70,6 +71,16 @@ public final class DocScanGlassActivity extends Activity
     private static final String EXTRA_TOP_MARGIN = "top_margin";
     /** Both at this limit still leave 160 px of the measured 640 px panel. */
     static final int MAX_MARGIN = 240;
+    /** The wearer does not see the lowest part of the panel; used until a margin has been saved. */
+    static final int DEFAULT_BOTTOM_MARGIN = 125;
+    /**
+     * How a page is taken, from {@code --es capture clip|still}, saved: {@code clip} records a few seconds of the
+     * page for the phone to add together, in ordinary written reading only. Stills until the desk checks of the
+     * clip route have passed.
+     */
+    private static final String EXTRA_CAPTURE = "capture";
+    /** Saved from {@code --ef far_share}: the provisional limit of ClipCamera's "paper too far" mark; 0 shows none. */
+    private static final String EXTRA_FAR_SHARE = "far_share";
     /** Diagnostic override for this launch only; normal launches always capture automatically. */
     private static final String EXTRA_MANUAL = "manual";
     private static final String EXTRA_ZSL_EVALUATION = "zsl_evaluation";
@@ -145,7 +156,13 @@ public final class DocScanGlassActivity extends Activity
     private RelayState displayedState;
 
     private HandlerThread cameraThread;
-    private GlassCamera camera;
+    /** The camera in use: the still camera until an ordinary written session starts with {@code capture=clip} saved. */
+    private PageCamera camera;
+    private GlassCamera stillCamera;
+    private ClipCamera clipCamera;
+    private ClipInbox clipInbox;
+    /** No evaluation launch: only then may clips replace stills. */
+    private boolean ordinaryCamera;
     private volatile boolean evaluationRestarting;
     private volatile boolean comparisonTransferEnabled;
     private volatile CaptureVideoTransfer videoTransfer;
@@ -270,10 +287,12 @@ public final class DocScanGlassActivity extends Activity
         }
         cameraThread = new HandlerThread("glass-camera");
         cameraThread.start();
-        camera = new GlassCamera(this, new Handler(cameraThread.getLooper()), cameraCallback(),
+        stillCamera = new GlassCamera(this, new Handler(cameraThread.getLooper()), cameraCallback(),
                 cameraMode, null, null, recordingOptions, null, paperGeometry);
-        camera.nativeSelection(nativeSelection);
-        camera.settingsBracket(settingsBracket);
+        stillCamera.nativeSelection(nativeSelection);
+        stillCamera.settingsBracket(settingsBracket);
+        camera = stillCamera;
+        ordinaryCamera = cameraMode == GlassCamera.Mode.NATIVE_STILL && !paperGeometry && !nativeSelection && !settingsBracket;
         surface = new GlassesCaptureSurface(this, camera, hud, main, this);
         ocr = new JapaneseOcr();
         controller = new DocScanController(
@@ -326,7 +345,7 @@ public final class DocScanGlassActivity extends Activity
         if (intent != null && (intent.hasExtra(EXTRA_VIDEO_EVALUATION) || intent.hasExtra(EXTRA_ZSL_EVALUATION)
                 || intent.hasExtra(EXTRA_VIDEO_TRANSFER_EVALUATION) || intent.hasExtra(EXTRA_PAPER_GEOMETRY_EVALUATION)
                 || intent.hasExtra(EXTRA_NATIVE_SELECTION) || intent.hasExtra(EXTRA_SETTINGS_BRACKET)
-                || (camera != null && (camera.paperGeometryEvaluation() || camera.settingsBracket())))) {
+                || (still() != null && (still().paperGeometryEvaluation() || still().settingsBracket())))) {
             if (evaluationRestarting) return;
             try { evaluationMode(intent); videoOptions(intent, deviceId == null ? "evaluation" : deviceId, powerGeneration); }
             catch (IllegalArgumentException invalid) {
@@ -360,10 +379,60 @@ public final class DocScanGlassActivity extends Activity
         android.view.View content = findViewById(android.R.id.content);
         content.setBackgroundColor(android.graphics.Color.BLACK); // black draws nothing on the glasses
         content.setPadding(0, getPreferences(MODE_PRIVATE).getInt(EXTRA_TOP_MARGIN, 0),
-                0, getPreferences(MODE_PRIVATE).getInt(EXTRA_BOTTOM_MARGIN, 0));
+                0, getPreferences(MODE_PRIVATE).getInt(EXTRA_BOTTOM_MARGIN, DEFAULT_BOTTOM_MARGIN));
+    }
+
+    static String captureOption(android.content.SharedPreferences saved) {
+        return "clip".equals(saved.getString(EXTRA_CAPTURE, "still")) ? "clip" : "still";
+    }
+
+    /** Clips only where nothing else depends on the still camera: mixed English, listening and every evaluation keep it. */
+    static boolean clipRoute(String capture, boolean ordinaryCamera, boolean mixed, boolean listening) {
+        return "clip".equals(capture) && ordinaryCamera && !mixed && !listening;
+    }
+
+    /** The still camera when it is the one in use: only it has the evaluation launches. */
+    private GlassCamera still() {
+        return camera instanceof GlassCamera ? (GlassCamera) camera : null;
+    }
+
+    /**
+     * The session's kind is chosen on the chooser, after the cameras and the surface were built in onCreate, so the
+     * camera is chosen here, just before the session starts. Neither camera has been opened by then.
+     */
+    private void chooseCamera() {
+        if (stillCamera == null || cameraThread == null) return;
+        boolean clips = clipRoute(captureOption(getPreferences(MODE_PRIVATE)), ordinaryCamera, mixedMode, listeningMode);
+        if (clips && clipCamera == null) {
+            clipInbox = new ClipInbox(new File(getFilesDir(), "clip-inbox"));
+            ClipCamera.Options options = new ClipCamera.Options();
+            options.rotationDegrees = MEASURED_ROTATION_DEGREES;
+            options.farShare = getPreferences(MODE_PRIVATE).getFloat(EXTRA_FAR_SHARE, options.farShare);
+            clipCamera = new ClipCamera(this, new Handler(cameraThread.getLooper()), cameraCallback(), clipInbox,
+                    new ClipEncoder.Hardware(), options);
+            clipCamera.marks(surface);
+        }
+        PageCamera chosen = clips ? clipCamera : stillCamera;
+        if (chosen != camera) {
+            camera.pausePreview();
+            camera = chosen;
+            surface.camera(chosen);
+        }
+        controller.setClipInbox(clips ? clipInbox : null);
+        Log.i(TAG, "capture=" + (clips ? "clip" : "still"));
     }
 
     private void applyIntent(Intent intent, boolean starting) {
+        if (intent != null && intent.hasExtra(EXTRA_CAPTURE)) {
+            getPreferences(MODE_PRIVATE).edit().putString(EXTRA_CAPTURE,
+                    "clip".equals(intent.getStringExtra(EXTRA_CAPTURE)) ? "clip" : "still").apply();
+        }
+        if (intent != null && intent.getExtras() != null && intent.getExtras().get(EXTRA_FAR_SHARE) instanceof Float) {
+            float share = intent.getFloatExtra(EXTRA_FAR_SHARE, 0f);
+            if (Float.isFinite(share)) {
+                getPreferences(MODE_PRIVATE).edit().putFloat(EXTRA_FAR_SHARE, Math.max(0f, Math.min(1f, share))).apply();
+            }
+        }
         if (intent != null && intent.hasExtra(EXTRA_SPREAD)) {
             boolean spread = intent.getBooleanExtra(EXTRA_SPREAD, false);
             hud.showSpreadGuide(spread);
@@ -537,11 +606,13 @@ public final class DocScanGlassActivity extends Activity
         backExit.reset();
         if (controller != null) controller.close();
         if (surface != null) surface.close();
-        boolean videoEnding = camera != null && camera.videoEvaluation();
-        if (videoEnding) camera.close(() -> { if (cameraThread != null) cameraThread.quitSafely(); });
+        // The video evaluation and the clip camera both close in steps on the camera's thread (the clip camera only
+        // after its session is idle), so that thread is let go by their own last step.
+        boolean closesInSteps = (still() != null && still().videoEvaluation()) || camera instanceof ClipCamera;
+        if (closesInSteps) camera.close(() -> { if (cameraThread != null) cameraThread.quitSafely(); });
         else if (camera != null) camera.close();
         if (ocr != null) ocr.close();
-        if (!videoEnding && cameraThread != null) cameraThread.quitSafely();
+        if (!closesInSteps && cameraThread != null) cameraThread.quitSafely();
         stateExecutor.shutdown();
         synchronized (answerPositionLock) {
             pendingAnswerPosition = null;
@@ -821,12 +892,14 @@ public final class DocScanGlassActivity extends Activity
             DocScanController.SavedCapture saved = startupCaptures.get(startupSelection);
             listeningMode = saved.listening;
             mixedMode = saved.mixed;
+            chooseCamera();
             controller.resumeLocalSession(saved.id, this::onStartupSelected);
         } else {
             mixedMode = startupSelection == 1;
             listeningMode = mixedMode || startupSelection == 2;
             String examType = mixedMode ? "mixed" : listeningMode ? "listening" : "written";
             getPreferences(MODE_PRIVATE).edit().putBoolean("listening", listeningMode).putString("exam_type", examType).apply();
+            chooseCamera();
             controller.startLocalSession(examType, this::onStartupSelected);
         }
     }
@@ -1612,7 +1685,7 @@ public final class DocScanGlassActivity extends Activity
         try { powerGeneration = new PowerState(getPreferences(MODE_PRIVATE)).begin(powerGeneration).generation; }
         catch (IOException error) { sessionClosed = true; displaySleep.sleep(this); finish(); return; }
         powerSequence = 0;
-        if (camera != null) camera.videoGeneration(powerGeneration);
+        if (still() != null) still().videoGeneration(powerGeneration);
         powerSession = 0;
         acknowledgedSession = 0;
         acknowledgedRevision = -1;

@@ -188,6 +188,80 @@ public class DocScanGlassActivityIntentTest {
         assertTrue("both at their limit still leave a screen", 640 - 2 * DocScanGlassActivity.MAX_MARGIN >= 160);
     }
 
+    /** The wearer does not see the lowest part of the panel: before any margin is saved, every screen stands above it. */
+    @Test public void the_bottom_margin_defaults_to_125() {
+        android.view.View content = activity.findViewById(android.R.id.content);
+        activity.onNewIntent(new Intent().putExtra("top_margin", 10));
+        assertEquals(125, content.getPaddingBottom());
+        activity.onNewIntent(new Intent().putExtra("bottom_margin", 0));
+        assertEquals("a saved value is kept, zero too", 0, content.getPaddingBottom());
+        activity.onNewIntent(new Intent().putExtra("top_margin", 20));
+        assertEquals(0, content.getPaddingBottom());
+    }
+
+    @Test public void the_capture_option_is_saved_and_clips_are_for_ordinary_written_reading_only() {
+        SharedPreferences saved = activity.getPreferences(Context.MODE_PRIVATE);
+        assertEquals("stills until the desk checks have passed", "still", DocScanGlassActivity.captureOption(saved));
+        activity.onNewIntent(new Intent().putExtra("capture", "clip"));
+        assertEquals("clip", DocScanGlassActivity.captureOption(saved));
+        activity.onNewIntent(new Intent().putExtra("guide", 0.6f));
+        assertEquals("an Intent without the option keeps it", "clip", DocScanGlassActivity.captureOption(saved));
+        assertTrue(DocScanGlassActivity.clipRoute("clip", true, false, false));
+        assertFalse("mixed English keeps the still camera", DocScanGlassActivity.clipRoute("clip", true, true, true));
+        assertFalse("listening keeps the still camera", DocScanGlassActivity.clipRoute("clip", true, false, true));
+        assertFalse("so does every evaluation launch", DocScanGlassActivity.clipRoute("clip", false, false, false));
+        assertFalse(DocScanGlassActivity.clipRoute("still", true, false, false));
+        activity.onNewIntent(new Intent().putExtra("capture", "anything else"));
+        assertEquals("still", DocScanGlassActivity.captureOption(saved));
+
+        activity.onNewIntent(new Intent().putExtra("far_share", 0.3f));
+        assertEquals(0.3f, saved.getFloat("far_share", -1), 0.0001f);
+        activity.onNewIntent(new Intent().putExtra("far_share", 7f));
+        assertEquals("a share is at most the whole window", 1f, saved.getFloat("far_share", -1), 0.0001f);
+    }
+
+    /** The kind of session is chosen on the chooser, after the cameras were built: the camera is chosen when it starts. */
+    @Test public void an_ordinary_written_session_records_clips_and_any_other_keeps_the_still_camera() throws Exception {
+        android.os.HandlerThread thread = new android.os.HandlerThread("test-camera");
+        thread.start();
+        try {
+            GlassCamera still = new GlassCamera(activity, new android.os.Handler(thread.getLooper()), new GlassCamera.Callback() {
+                @Override public void onCaptured(byte[] jpeg, int width, int height, long elapsedMillis) { }
+                @Override public void onCaptureFailed(String reason) { }
+            });
+            GlassesCaptureSurface glasses = new GlassesCaptureSurface(activity, still, hud,
+                    new android.os.Handler(android.os.Looper.getMainLooper()), activity);
+            setField(activity, "cameraThread", thread); setField(activity, "stillCamera", still);
+            setField(activity, "camera", still); setField(activity, "surface", glasses);
+            setField(activity, "ordinaryCamera", true);
+            java.lang.reflect.Method choose = DocScanGlassActivity.class.getDeclaredMethod("chooseCamera");
+            choose.setAccessible(true);
+
+            choose.invoke(activity);
+            assertSame("stills unless clips were asked for", still, org.robolectric.util.ReflectionHelpers.getField(activity, "camera"));
+            assertNull(org.robolectric.util.ReflectionHelpers.getField(controller, "clipInbox"));
+
+            activity.onNewIntent(new Intent().putExtra("capture", "clip"));
+            choose.invoke(activity);
+            assertTrue(org.robolectric.util.ReflectionHelpers.getField(activity, "camera") instanceof ClipCamera);
+            assertFalse("the surface answers for the camera in use", glasses.supportsFuturePages());
+            assertNotNull("the controller looks for each page's clip", org.robolectric.util.ReflectionHelpers.getField(controller, "clipInbox"));
+
+            setField(activity, "mixedMode", true); setField(activity, "listeningMode", true);
+            choose.invoke(activity);
+            assertSame("mixed English keeps the still camera", still, org.robolectric.util.ReflectionHelpers.getField(activity, "camera"));
+            assertTrue(glasses.supportsFuturePages());
+            assertNull(org.robolectric.util.ReflectionHelpers.getField(controller, "clipInbox"));
+
+            setField(activity, "mixedMode", false); setField(activity, "listeningMode", false);
+            setField(activity, "ordinaryCamera", false);
+            choose.invoke(activity);
+            assertSame("an evaluation launch keeps it too", still, org.robolectric.util.ReflectionHelpers.getField(activity, "camera"));
+        } finally {
+            thread.quitSafely();
+        }
+    }
+
     @Test public void ordinaryNewIntentRevokesComparisonTransferWithoutCarryingAnySavedFlag() throws Exception {
         CaptureVideoTransfer transfer=new CaptureVideoTransfer(activity.getFilesDir(),() -> null,null);
         setField(activity,"videoTransfer",transfer); setField(activity,"comparisonTransferEnabled",true);

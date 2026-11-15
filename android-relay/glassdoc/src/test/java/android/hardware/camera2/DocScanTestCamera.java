@@ -18,6 +18,8 @@ public final class DocScanTestCamera extends CameraDevice {
     public List<Surface> outputs;
     /** The outputs of every session configured on this device, in order. */
     public final List<List<Surface>> configured = new ArrayList<>();
+    /** The state callback of every session asked for, in order: a test reports a session idle through its own. */
+    public final List<CameraCaptureSession.StateCallback> callbacks = new ArrayList<>();
     public int configurations;
     public boolean closed;
     public boolean suppressCloseCallback;
@@ -52,6 +54,7 @@ public final class DocScanTestCamera extends CameraDevice {
         configurations++;
         outputs = surfaces;
         configured.add(new ArrayList<>(surfaces));
+        callbacks.add(callback);
         boolean refused = refuseSession || (refuseOutputs > 0 && surfaces.size() >= refuseOutputs);
         Runnable answer = () -> { if (refused) callback.onConfigureFailed(session); else callback.onConfigured(session); };
         if (holdSessions) heldSessions.add(answer); else h.post(answer);
@@ -74,13 +77,14 @@ public final class DocScanTestCamera extends CameraDevice {
         public int captures;
         public boolean closed;
         public boolean repeatingStopped;
+        public int stops;
         @Override public int setRepeatingRequest(CaptureRequest request, CaptureCallback callback, Handler h) {
             repeating = request; previewCallback = callback; return 1;
         }
         @Override public int capture(CaptureRequest request, CaptureCallback callback, Handler h) {
             captured = request; captureCallback = callback; captures++; return captures + 1;
         }
-        @Override public void stopRepeating() { repeatingStopped = true; }
+        @Override public void stopRepeating() { repeatingStopped = true; stops++; }
         @Override public void close() { closed = true; }
         @Override public CameraDevice getDevice() { return DocScanTestCamera.this; }
         @Override public Surface getInputSurface() { return inputConfiguration == null ? null : outputs.get(0); }

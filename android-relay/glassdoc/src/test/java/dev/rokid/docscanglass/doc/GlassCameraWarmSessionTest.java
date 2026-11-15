@@ -1980,13 +1980,14 @@ public class GlassCameraWarmSessionTest {
         static final List<ReaderShadow> readers = new ArrayList<>();
         ImageReader reader; int format, width, height; Image image; boolean closed; RuntimeException acquireFailure;
         Surface surface = Shadow.newInstanceOf(Surface.class); ImageReader.OnImageAvailableListener listener;
+        int maxImages; Handler handler; // the thread its frames were asked on
         @Implementation protected static ImageReader newInstance(int width, int height, int format, int maxImages) {
             ImageReader reader = Shadow.newInstanceOf(ImageReader.class);
             ReaderShadow shadow = Shadow.extract(reader); shadow.reader = reader; shadow.format = format;
-            shadow.width = width; shadow.height = height; readers.add(shadow); return reader;
+            shadow.width = width; shadow.height = height; shadow.maxImages = maxImages; readers.add(shadow); return reader;
         }
         @Implementation protected Surface getSurface() { return surface; }
-        @Implementation protected void setOnImageAvailableListener(ImageReader.OnImageAvailableListener l, Handler h) { listener = l; }
+        @Implementation protected void setOnImageAvailableListener(ImageReader.OnImageAvailableListener l, Handler h) { listener = l; handler = h; }
         @Implementation protected Image acquireLatestImage() {
             if (acquireFailure != null) throw acquireFailure;
             return image;

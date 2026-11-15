@@ -581,7 +581,11 @@ EXPLAINER_API_VERSION = "1.1.0"
 # idle blanks the view, the waking gesture does nothing else on every screen, a tap turns a waiting screen off.
 # 1.48.0: the chooser stays 30 s (waiting screens keep 5 s); after the writing is done the waking touch counts as
 # the first of the two double taps that leave.
-GLASSES_VIEW_CONTRACT_VERSION = "1.48.0"
+# 1.49.0: with capture=clip saved, an ordinary written page is a short clip: while it is recorded a line along the
+# small window's lower edge shows how far it has come, and while waiting a mark at each corner says the paper fills
+# too little of the window (provisional); a tap or a double tap during the recording drops that clip. The lower
+# margin is 125 px until one is saved. Stills are unchanged and stay the default.
+GLASSES_VIEW_CONTRACT_VERSION = "1.49.0"
 
 # Answer-area overlay payload (box + short answer; 2D image-anchored).
 # 1.1.0: added tracking metadata (tracking/fixed_ar/anchor_hint).
