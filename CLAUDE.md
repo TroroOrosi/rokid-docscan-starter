@@ -208,12 +208,14 @@ has to find and cut the paper. Half size with a moving head, the form the
 design counted on, was stood for by shifting and reducing the direct frames to
 the smallest worn size: 60.7% through the glasses' encoder and 6.7% without it,
 so that form is dropped (the 2.3% of §M-25 came from a bright photo with noise
-added). At that size the paper's own pixels read 3.2% without an encoder;
-through the encoder is not decided (those reads were under way when the phone's
-wireless debugging went off, as it does whenever its Wi-Fi blinks: 22:12 and
-again before 22:50; the reads go on inside the phone, and the PC cannot turn it
-back on). The recording needs 0.66 bit a pixel a frame or more. Not decided
-either: a worn head's real movement, the change of brightness over a stream's
+added). At that size the paper's own pixels read 3.2% without an encoder and
+3.9% through it at 1.24 bit (24 reads; 2.3 points over the direct frames, at the
+limit of 2.0 and not a pass), 6.0% at 0.51 bit: the farther the paper, the
+worse, so the wearer needs a guide to distance and the recording 0.66 bit a
+pixel a frame or more. The phone's wireless debugging goes off whenever its
+Wi-Fi blinks (22:12 and 22:50 that night) and cannot be turned back on from the
+PC; reads started over it go on inside the phone. Not decided: a worn head's
+real movement, the median worn size, the change of brightness over a stream's
 first 2.3 s, figures, horizontal text, single large sheets. Nothing of this is in `:glassdoc` or the server's route
 yet; the change of form waits for the operator's approval. What it rests on, measured on the desk and the PC on 2026-11-15 (§M-25):
 the 2016x1512 stream is the whole field at half size and the only whole-field
