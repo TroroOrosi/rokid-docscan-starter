@@ -41,7 +41,7 @@ Status: 計画（2026-11-16）。段階2（§M-27〜§M-29）で決まった形�
 ### Task 1: サーバー：頁に付く録画の受け口と保存
 
 **Files:**
-- Create: `app/page_clips.py`、`tests/test_page_clips.py`
+- Create: app/page_clips.py、tests/test_page_clips.py
 - Modify: `app/db.py`（表 `page_clips` を足す）、`app/main.py`（口を足す）、`app/capture_provenance.py`（由来の種類 `clip_frame`）、`app/version.py`、`tests/test_versioning.py`、`README.md`（版の行）
 
 **Interfaces:**
@@ -50,11 +50,11 @@ Status: 計画（2026-11-16）。段階2（§M-27〜§M-29）で決まった形�
   - `POST /v1/documents/{document_id}/pages/{page_index}/clip`（multipart：`clip`＝`video/mp4`、`record`＝JSON、`capture_id`、`sha256`）。返り値 `{"status": "stored"|"done"|"failed"|"gathering", "sha256": ..., "bytes": ...}`、新規 201・同じ `sha256` の再送 200。
     - 頁（`document_id`, `page_index`）が無い → 404。文書が `open` でない → 409。その頁の由来の `capture_id` と違う → 409。`sha256`・大きさが本体と違う → 400。192 MiB 超 → 413。`ftyp` で始まらない → 400。
     - 本体は一時ファイルへ流して書き、検証の後に `DATA_DIR/page-clips/{document_id}/{page_index}/{sha256}.mp4` へ上書きなしで移す。同じ頁に違う `sha256` が来たら（取り直し）、行を置き換えて `stored` に戻し、古いファイルを消す。
-  - `app/page_clips.py`：`store_clip(document_id, page_index, capture_id, sha256, record_text, stream) -> dict`、`pending(document_id) -> int`（`stored` と `gathering` の数）、`rows(document_id) -> list[dict]`、`claim() -> dict | None`（最も古い `stored` を `gathering` にして返す）、`finish(document_id, page_index, sha256, *, used, total, level)`、`fail(document_id, page_index, sha256, reason)`、`requeue_interrupted()`（起動時に `gathering` を `stored` へ）。
+  - app/page_clips.py：`store_clip(document_id, page_index, capture_id, sha256, record_text, stream) -> dict`、`pending(document_id) -> int`（`stored` と `gathering` の数）、`rows(document_id) -> list[dict]`、`claim() -> dict | None`（最も古い `stored` を `gathering` にして返す）、`finish(document_id, page_index, sha256, *, used, total, level)`、`fail(document_id, page_index, sha256, reason)`、`requeue_interrupted()`（起動時に `gathering` を `stored` へ）。
   - `GET /v1/documents/{document_id}/clips` → `{"clips": [{"page_index", "status", "reason", "used", "total", "level", "bytes"}]}`（検査用）。
   - `capture_provenance` は `source_kind` に `clip_frame` を受け入れる（16 個の鍵は同じ）。
 
-- [ ] **Step 1: 試験を書く**（`tests/test_page_clips.py`。既存の `tests/test_native_capture_upload.py` の作り方に合わせ、`TestClient` と一時の `ROKID_DATA_DIR` を使う）
+- [ ] **Step 1: 試験を書く**（tests/test_page_clips.py。既存の `tests/test_native_capture_upload.py` の作り方に合わせ、`TestClient` と一時の `ROKID_DATA_DIR` を使う）
   - `test_a_clip_is_stored_beside_its_page`：頁を由来つき（`clip_frame`）で登録 → 録画を送る → 201、`status == "stored"`、ファイルの sha256 が一致、`GET .../clips` に 1 行。
   - `test_the_same_clip_again_is_a_replay`：同じものを 2 度 → 2 度目は 200、ファイルは 1 つ。
   - `test_a_retake_replaces_the_clip`：頁を別の由来で置き換え、別の録画を送る → 行の `sha256` が新しく、古いファイルは無い、`status == "stored"`。
@@ -70,17 +70,17 @@ Status: 計画（2026-11-16）。段階2（§M-27〜§M-29）で決まった形�
 ### Task 2: サーバー：重ね合わせの係と、頁の画像の置き換え
 
 **Files:**
-- Create: `app/page_gather.py`、`tests/test_page_gather.py`
+- Create: app/page_gather.py、tests/test_page_gather.py
 - Modify: `app/main.py`（`lifespan` で係を始めて止める。置き換えの関数）、`app/gather.py`（必要なら頁の画像にする小さな関数）
 
 **Interfaces:**
 - Consumes: Task 1 の `claim`／`finish`／`fail`／`requeue_interrupted`、`app.gather.gather_clip(path, record, settle=6)`。
 - Produces:
-  - `app/page_gather.py`：`class GatherService`（`start()`、`stop()`、`wake()`。係のスレッド `ROKID_GATHER_WORKERS` 本、既定 3）。`app/capture_inspection.py` の `InspectionService` と同じ作り（起こす合図と止める合図）。numpy と `app.gather` は係の中で初めて読み込む（サーバーは numpy 無しでも起動する）。
+  - app/page_gather.py：`class GatherService`（`start()`、`stop()`、`wake()`。係のスレッド `ROKID_GATHER_WORKERS` 本、既定 3）。`app/capture_inspection.py` の `InspectionService` と同じ作り（起こす合図と止める合図）。numpy と `app.gather` は係の中で初めて読み込む（サーバーは numpy 無しでも起動する）。
   - `page_image(gathered, rotation_degrees) -> bytes`：重ねた画像（float32 の光）を、明るい側 0.5% を白にして 8 ビットにし、指定の向きへ回して RGB の PNG にする（今の `scripts/gather_stage2.py` の `shown` と同じ変換）。
   - `replace_page_image(document_id, page_index, png_bytes, note: dict) -> bool`（`app/main.py`）：その頁の正本の PNG を置き換える。`add_page` が使っている `_prepare_page_image`／`_write_page_files` と同じ道具で書き、`pages` の行を `BEGIN IMMEDIATE` の中で更新し、古い PNG を消す。仮の頁の JPEG と由来の記録は残す。`capture_metadata_json` に `gathered`（`used`、`total`、`level_over_noise`、`clip_sha256`）を足す。文書が `open` でない時は置き換えず `False`。
   - 失敗の理由：`"numpy unavailable"`、`"ffmpeg unavailable"`、`"not placed"`（`placed` が偽）、`"too dark"`（`level_over_noise < 8`）、`"gather error: ..."`、`"timeout"`（1 本 180 秒）。
-- [ ] **Step 1: 試験を書く**（`tests/test_page_gather.py`。録画は `tests/test_gather.py` と同じく生成した場面を ffmpeg で作る。numpy か ffmpeg が無い環境では skip）
+- [ ] **Step 1: 試験を書く**（tests/test_page_gather.py。録画は `tests/test_gather.py` と同じく生成した場面を ffmpeg で作る。numpy か ffmpeg が無い環境では skip）
   - `test_a_stored_clip_becomes_the_page`：頁（灰色 1 フレームの JPEG）＋録画を登録 → 係を 1 回まわす → 行が `done`、頁の PNG が変わっている（ハッシュが仮の頁と違う）、`used > 0`、`capture_metadata_json` に `gathered`。
   - `test_a_clip_that_cannot_be_placed_leaves_the_page`：模様の無い録画 → `failed`、理由 `not placed`、頁の PNG は元のまま。
   - `test_without_numpy_the_page_stays`：`app.page_gather` の読み込み口を差し替えて ImportError → `failed`、理由 `numpy unavailable`。
@@ -94,7 +94,7 @@ Status: 計画（2026-11-16）。段階2（§M-27〜§M-29）で決まった形�
 ### Task 3: サーバー：冊子の確定は重ね合わせを待つ。済まなかった頁を答案の束に出す
 
 **Files:**
-- Modify: `app/main.py`（`_finalize_document_once` の先頭、`_answer_snapshot`）、`tests/test_page_gather.py`
+- Modify: `app/main.py`（`_finalize_document_once` の先頭、`_answer_snapshot`）、tests/test_page_gather.py
 
 **Interfaces:**
 - Consumes: Task 1 の `pending(document_id)`・`rows(document_id)`。
@@ -113,8 +113,8 @@ Status: 計画（2026-11-16）。段階2（§M-27〜§M-29）で決まった形�
 ### Task 4: アプリ（`:relaycore`）：録画を頁に添えて保存し、送る
 
 **Files:**
-- Create: `android-relay/relaycore/src/main/java/dev/rokid/docscanrelay/ClipInbox.java`、`.../src/test/java/dev/rokid/docscanrelay/ClipInboxTest.java`
-- Modify: `.../LocalCaptureSession.java`、`.../DocScanApi.java`、`.../DocScanController.java`（`commitLocalPhoto`、`queueLocalUpload`）、`.../CaptureProvenance.java`（`clip_frame`）、対応する試験（`LocalReviewTest.java`、`DocScanApiTest` に相当するもの）
+- Create: android-relay/relaycore/src/main/java/dev/rokid/docscanrelay/ClipInbox.java、.../src/test/java/dev/rokid/docscanrelay/ClipInboxTest.java
+- Modify: .../LocalCaptureSession.java、.../DocScanApi.java、.../DocScanController.java（`commitLocalPhoto`、`queueLocalUpload`）、.../CaptureProvenance.java（`clip_frame`）、対応する試験（`LocalReviewTest.java`、`DocScanApiTest` に相当するもの）
 
 **Interfaces:**
 - Produces:
@@ -135,11 +135,11 @@ Status: 計画（2026-11-16）。段階2（§M-27〜§M-29）で決まった形�
 ### Task 5: アプリ（`:glassdoc`）：録画用のカメラ `ClipCamera`
 
 **Files:**
-- Create: `android-relay/glassdoc/src/main/java/dev/rokid/docscanglass/doc/PageCamera.java`、`.../ClipCamera.java`、`.../ClipEncoder.java`、`.../src/test/java/dev/rokid/docscanglass/doc/ClipCameraTest.java`
-- Modify: `.../GlassCamera.java`（`implements PageCamera` の 1 行だけ）、`.../GlassesCaptureSurface.java`（型を `PageCamera` に）、`.../DocScanGlassActivity.java`（起動時の指定 `capture`、カメラの作り分け、録画の受け渡し）
+- Create: android-relay/glassdoc/src/main/java/dev/rokid/docscanglass/doc/PageCamera.java、.../ClipCamera.java、.../ClipEncoder.java、.../src/test/java/dev/rokid/docscanglass/doc/ClipCameraTest.java
+- Modify: .../GlassCamera.java（`implements PageCamera` の 1 行だけ）、.../GlassesCaptureSurface.java（型を `PageCamera` に）、.../DocScanGlassActivity.java（起動時の指定 `capture`、カメラの作り分け、録画の受け渡し）
 
 **Interfaces:**
-- Consumes: Task 4 の `ClipInbox`。既存の `PageChange`、`LumaPageEvidence`、`GlassCamera.Callback`、`GlassCamera.Captured`、`CaptureProvenance`。計測アプリの `FeedProbe`（`android-relay/glassprobe/.../FeedProbe.java`）が、この作りの動く見本。
+- Consumes: Task 4 の `ClipInbox`。既存の `PageChange`、`LumaPageEvidence`、`GlassCamera.Callback`、`GlassCamera.Captured`、`CaptureProvenance`。計測アプリの `FeedProbe`（android-relay/glassprobe/.../FeedProbe.java）が、この作りの動く見本。
 - Produces:
   - `interface PageCamera`：`GlassesCaptureSurface` と `DocScanGlassActivity` が `GlassCamera` に対して呼んでいるメソッドだけ（`awaitNextPage(Runnable)`、`captureOnce()`、`preview()`、`pausePreview()`、`resetPages()`、`observeFuturePages(...)`、`stopFuturePages(Runnable)`、`nativeSelectionScene(...)`、`isNativeSelectionSceneCurrent(...)`、`requestNativeAlternative(...)`、`close()`、`close(Runnable)`）。`ClipCamera` は、先の頁の観測と追加の原寸撮影を「対応しない」で返す。
   - `interface ClipEncoder { void open(File clip, int width, int height, int bitrate) throws IOException; boolean offer(java.nio.ByteBuffer luma, int rowStride, long timestampNanos); void end(Ended ended); interface Ended { void done(int written, long bytes, String failure); } }` と、その実物 `ClipEncoder.Hardware`（`MediaCodec`＋`MediaMuxer`、録画ごとの書き込みスレッド。`FeedProbe.Writer` と同じ作り）。試験は偽物を使う。
@@ -170,7 +170,7 @@ Status: 計画（2026-11-16）。段階2（§M-27〜§M-29）で決まった形�
 ### Task 6: アプリ：小窓の表示（進みの線、遠い印、下余白の既定値）
 
 **Files:**
-- Modify: `android-relay/glassdoc/.../HudView.java`、`.../GlassesCaptureSurface.java`、`.../DocScanGlassActivity.java`、`.../ClipCamera.java`、`app/version.py`（`GLASSES_VIEW_CONTRACT_VERSION`）、試験 `HudViewTest`
+- Modify: android-relay/glassdoc/.../HudView.java、.../GlassesCaptureSurface.java、.../DocScanGlassActivity.java、.../ClipCamera.java、`app/version.py`（`GLASSES_VIEW_CONTRACT_VERSION`）、試験 `HudViewTest`
 
 **Interfaces:**
 - Produces: `HudView.showClipProgress(float share)`（0〜1。小窓の下の縁に線。0 で消す）、`HudView.showFar(boolean far)`（小窓の四隅の印）。`ClipCamera` は、録っている間に数えた枚数÷目標を 5 Hz で、待つ間に「プレビューの明るい面の割合が 0.5 未満」を `far` として出す（基準は仮。`--ef far_share` で保存して変えられる。0 で印を出さない）。下余白 `bottom_margin` の既定値を 125 にする（保存された値がある時はそれ）。
