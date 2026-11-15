@@ -166,8 +166,24 @@ That is 35 to 190 frames of 30 ms, one to six seconds of light a page. The camer
 offers RAW, bursts and manual exposure, analog gain up to ISO 800, and a fixed
 1.9 mm f/2.25 lens, so a narrower view adds no detail. Capturing the whole wide
 frame as one still, the structure of every build so far, has to be replaced by
-gathering frames of the looked-at paper; that design is not written or approved
-yet (`docs/whole-review-2026-11-14.md` section 11). The paragraph below holds
+gathering frames of the looked-at paper. The design is written and awaits the
+operator's approval; nothing of it is built
+(`docs/superpowers/specs/2026-11-15-gathered-capture-design.md`): the glasses
+record a few seconds of video a page, the phone selects, places and adds the
+frames. What it rests on, measured on the desk and the PC on 2026-11-15 (§M-25):
+the 2016x1512 stream is the whole field at half size and the only whole-field
+size at 60 frames a second; streaming it heats the glasses by 17.7 C in 150 s
+with no work done and 24.9 C with one Java pass over each frame, which alone
+takes 22.5 ms; the hardware encoder is refused beside the YUV preview and
+accepted alone or beside a small display-format stream, and recording 2400x1800
+at 30 a second heats by 15.7 C; video compression keeps what adding needs
+(software encoders on the PC, 0.985 at 40 Mbit/s; my estimate that it would not
+was wrong); textbook phase correlation cannot place frames this noisy and a
+band-passed correlation against the running sum can; half-size frames read as
+well as full-size ones only when added on a finer grid (simulated, six reads
+each: 2.3% against 3.3%, and 21.2% without the finer grid). Unmeasured: placing
+on a worn head, whether the glasses' encoder keeps the detail of text, heat of
+recording page by page, transfer and processing time. The paragraph below holds
 for bright photos only.
 
 What a page needs to be read, measured on the phone with worn photos of one page
@@ -837,7 +853,8 @@ The glasses' own camera is the reference for exposure and processing. Over adb
 `/sdcard/DCIM/Camera` without stopping the foreground app. Before a change to
 exposure, gain or still processing is handed to the wearer, take the same scene
 both ways seconds apart and compare brightness and noise; `:glassprobe`
-`--es camera_variant` takes `fps=`, `scene=` and `ev=` for the camera's own
+`--es camera_variant` takes `fps=`, `scene=` and `ev=` (and, for streams and
+clips, `still=WxH`, `stream=<s>`, `record=<s>`, `iso=`, `boost=`) for the camera's own
 controls. Do not attribute a dark photo to the room without that comparison,
 and do not judge from old photos when a new pair can be taken. The device
 check takes the reference itself and reads every app photo at the same flat
