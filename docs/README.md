@@ -102,6 +102,8 @@ what the platform permits.
 
 - `tasks/plan.md` — current rationalized plan first; superseded plans preserved in a historical section.
 - `tasks/todo.md` — current W work and acceptance conditions; earlier RP/CQ checkboxes are history.
+- `docs/superpowers/plans/2026-11-15-gathered-capture-stage1.md` — 撮影の作り直しの段階1の実施計画（2026-11-15、承認済みの設計に対する計画）。
+  重ね合わせのモジュール、計測アプリの拡張、机上の測定と合格条件 G1〜G3 の判定。PC・スマホ・机上のグラスだけで、掛けない。
 - `docs/requirements-audit.md` — 現在の要望・会話中の変更・比較候補と到達点。旧採否・順序は折り畳んだ履歴。
   旧FS/R/S/Xの対応と2026-09-15の調査履歴も保持。実装／物理受け入れの完了ではない。
 - `docs/defect-register.md` — 欠陥一覧と直す順序（2026-11-13 作成、現行の作業台帳）。製品全体を4系統で調べた結果と
