@@ -227,7 +227,8 @@ def _cuts(profile: bytes, parts: int) -> list[int]:
 
 
 def page_tiles(page: Image.Image, *, vertical_text: bool | None = None, target_long: int = 2540,
-               max_scale: float = MAX_SCALE, overlap: float = 0.08) -> list[tuple[Image.Image, tuple[int, int, int, int]]]:
+               max_scale: float = MAX_SCALE, min_scale: float = 1.0,
+               overlap: float = 0.08) -> list[tuple[Image.Image, tuple[int, int, int, int]]]:
     """[(image, its box on the page)]: the page enlarged and cut along its lines of text, in reading order.
 
     Phone, 2026-11-14 and 15 (M-22, M-23): characters of 15.8 px were read with 18% wrong as photographed and with
@@ -239,8 +240,11 @@ def page_tiles(page: Image.Image, *, vertical_text: bool | None = None, target_l
     read; horizontal text into bands across it, from the top. Unknown, the longer side is cut. The page is enlarged
     until its long side reaches ``target_long`` (never past ``max_scale``, never reduced), and cut into the fewest
     parts that each fit ``MAX_IMAGE_PATCHES``. Neighbours share ``overlap`` of a part, as the measured strips did.
+    ``min_scale`` under 1 lets a page larger than ``target_long`` be reduced to it: only for a booklet that does not
+    fit the model's context at its own size (pages gathered from clips are 3024x4032). How much a reduced page loses
+    is not measured.
     """
-    scale = min(max_scale, max(1.0, target_long / max(page.size)))
+    scale = min(max_scale, max(min_scale, target_long / max(page.size)))
     strips = vertical_text if vertical_text is not None else page.width > page.height
     length, other = (page.width, page.height) if strips else (page.height, page.width)
     ink = ImageOps.invert(ImageOps.autocontrast(page.convert("L")))
@@ -263,7 +267,7 @@ def page_tiles(page: Image.Image, *, vertical_text: bool | None = None, target_l
         box = (start, 0, end, page.height) if strips else (0, start, page.width, end)
         tile = page.crop(box)
         size = (round(tile.width * scale), round(tile.height * scale))
-        tiles.append((tile.resize(size, Image.LANCZOS) if scale > 1 else tile, box))
+        tiles.append((tile.resize(size, Image.LANCZOS) if scale != 1 else tile, box))
     return tiles
 
 

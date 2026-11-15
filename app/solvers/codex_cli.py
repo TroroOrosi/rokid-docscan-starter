@@ -106,20 +106,31 @@ _FIXED_TOKENS = 115_000    # the CLI's own 15,000 (14,650 with no image) and 100
 _TOKENS_PER_PATCH = 1.21   # an image's cost per 32-px patch, in proportion from 512x512 to 3000x3000
 
 
-def _target_long(sizes: list[tuple[int, int]], views: int, wanted: int) -> int:
-    """``wanted``, or the largest long side at which every page, enlarged and cut, still fits the model's context."""
+def _target_long(sizes: list[tuple[int, int]], views: int, wanted: int) -> tuple[int, float]:
+    """(long side, least scale) for ``page_tiles``: ``wanted`` with no page reduced, or the largest long side at which
+    every page, enlarged and cut, still fits the model's context.
+
+    Pages are reduced (least scale 0) only when the booklet does not fit even at its own size. A page gathered from its
+    clip is 3024x4032, about 15,000 tokens when the paper fills it: twenty fit at their own size and forty do not. The
+    reads behind the clip route were of pages at their own size (M-28, M-29); a reduced one is not measured.
+    """
     room = (_CONTEXT_TOKENS - _FIXED_TOKENS) / _TOKENS_PER_PATCH - views * 800  # a 1024-px view is 768 patches
 
-    def patches(target: int) -> float:  # with a tenth more for the parts' overlap and their rounding up
-        return sum(width * height * min(MAX_SCALE, max(1.0, target / max(width, height))) ** 2 for width, height in sizes) / 1024 * 1.1
+    def patches(target: int, least: float) -> float:  # with a tenth more for the parts' overlap and their rounding up
+        return sum(width * height * min(MAX_SCALE, max(least, target / max(width, height))) ** 2
+                   for width, height in sizes) / 1024 * 1.1
 
-    if patches(wanted) <= room:
-        return wanted
-    low, high = 1, wanted  # the cost never falls as the target grows
-    while high - low > 16:
-        middle = (low + high) // 2
-        low, high = (middle, high) if patches(middle) <= room else (low, middle)
-    return low
+    low = 1
+    for least, most in ((1.0, wanted), (0.0, max([wanted, *(max(size) for size in sizes)]))):
+        if patches(most, least) <= room:
+            return most, least
+        low, high = 1, most  # the cost never falls as the target grows
+        while high - low > 16:
+            middle = (low + high) // 2
+            low, high = (middle, high) if patches(middle, least) <= room else (low, middle)
+        if patches(low, least) <= room:
+            return low, least
+    return low, 0.0
 
 
 _DIFFERENT = "2回の読みで不一致。他方：{other}"
@@ -475,8 +486,8 @@ class CodexCliSolver(Solver):
                 box = (max(0, round((left - pad_x) * photo.width)), max(0, round((top - pad_y) * photo.height)),
                        min(photo.width, round((right + pad_x) * photo.width)), min(photo.height, round((bottom + pad_y) * photo.height)))
                 crops[number, printed] = (photo.crop(box), vertical)
-        target = _target_long([crop.size for crop, _ in crops.values()], len(found),
-                              int(os.environ.get("ROKID_CODEX_PAGE_LONG") or 2540))
+        target, least = _target_long([crop.size for crop, _ in crops.values()], len(found),
+                                     int(os.environ.get("ROKID_CODEX_PAGE_LONG") or 2540))
         names = []
         for number, (page, photo) in enumerate(zip(ordered, photos), 1):
             label = f"{page['page_number']:03d}"
@@ -491,7 +502,8 @@ class CodexCliSolver(Solver):
             names.append(overview)
             for printed in range(1, len(found[number]) + 1):
                 crop, vertical = crops[number, printed]
-                for tile_number, (tile, _) in enumerate(page_tiles(crop, vertical_text=vertical, target_long=target)):
+                for tile_number, (tile, _) in enumerate(page_tiles(crop, vertical_text=vertical, target_long=target,
+                                                                   min_scale=least)):
                     name = f"page{label}-{printed}{chr(97 + tile_number)}.jpg"
                     tile.save(directory / name, format="JPEG", quality=92, subsampling=0)
                     names.append(name)

@@ -466,6 +466,23 @@ def test_a_booklet_too_large_for_the_models_context_is_enlarged_less_and_still_s
     assert max(height for _, height in pages) < 2540
 
 
+def test_a_booklet_of_gathered_pages_too_large_at_their_own_size_is_reduced_and_still_sent_whole(codex, tmp_path, monkeypatch):
+    """A page gathered from its clip is 3024x4032, twice the sensor's pixels: about 15,000 tokens when the paper fills
+    it, so forty are over the model's context at their own size. Until 2026-11-16 a page was never reduced, and a
+    booklet that did not fit at its own size went out too large."""
+    monkeypatch.setenv("FAKE_CODEX_REGIONS", json.dumps(REGIONS))
+    monkeypatch.setattr(codex_cli, "_CONTEXT_TOKENS", codex_cli._FIXED_TOKENS + 4000)
+    codex_cli.CodexCliSolver().answer_all(question=_photo(tmp_path, size=(3024, 4032)))
+
+    [run] = _runs(codex())
+    pages = [size for name, size in run["sizes"].items() if name.startswith("page001-")]
+    views = [size for name, size in run["sizes"].items() if name.startswith("overview")]
+    assert {name[:9] for name in run["sizes"] if name.startswith("page")} == {"page001-1", "page001-2"}
+    assert (sum(map(_patches, pages)) + sum(map(_patches, views))) * 1.21 <= 4000
+    # Each region is 1218x2137 px on the photo with its margin; both pages come out the same size, as large as fits.
+    assert 1200 < max(height for _, height in pages) < 2137
+
+
 def test_a_photo_in_which_no_page_was_found_is_sent_as_before(codex, tmp_path, monkeypatch):
     monkeypatch.setenv("FAKE_CODEX_REGIONS", json.dumps({"images": [{"index": 1, "pages": []}]}))
     codex_cli.CodexCliSolver().answer_all(question=_photo(tmp_path))

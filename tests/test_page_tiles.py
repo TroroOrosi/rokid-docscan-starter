@@ -56,6 +56,13 @@ def test_a_page_is_never_enlarged_past_the_limit_and_never_reduced():
     assert all(tile.size == (box[2] - box[0], box[3] - box[1]) for tile, box in large)
 
 
+def test_a_page_is_reduced_only_when_the_caller_allows_it():
+    """A booklet too large for the model's context at its own size (pages gathered from clips are 3024x4032)."""
+    tiles = page_tiles(_rows(1900, 2600, [(60, 2500)]), vertical_text=False, target_long=1300, min_scale=0.0)
+    assert all(tile.size == (round((box[2] - box[0]) / 2), round((box[3] - box[1]) / 2)) for tile, box in tiles)
+    assert sum(tile.height for tile, _ in tiles) >= 1300
+
+
 @pytest.mark.parametrize("vertical", [True, False, None])
 @pytest.mark.parametrize("size", [(910, 1270), (1380, 2020), (2200, 1700), (3024, 4032), (600, 2600)])
 def test_every_image_stays_inside_the_size_that_was_read_best(size, vertical):
