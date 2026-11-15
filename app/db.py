@@ -161,6 +161,25 @@ CREATE TABLE IF NOT EXISTS explain_claims (
     PRIMARY KEY (session_id, page_index, page_signature)
 );
 
+-- The clip a recorded page was cut from, and how far its gathering into the page's image has come (app/page_clips.py).
+-- status: stored | gathering | done | failed (with its reason). One clip a page: a retake replaces the row.
+CREATE TABLE IF NOT EXISTS page_clips (
+    document_id INTEGER,
+    page_index  INTEGER,
+    capture_id  TEXT,
+    sha256      TEXT,
+    bytes       INTEGER,
+    record_json TEXT,
+    status      TEXT,
+    reason      TEXT,
+    used        INTEGER,
+    total       INTEGER,
+    level       REAL,
+    created_at  REAL,
+    updated_at  REAL,
+    PRIMARY KEY (document_id, page_index)
+);
+
 -- Hot-path lookups: latest solution per question (deck/review/view), a
 -- session's questions, and a document's pages. Runs on every init_db, so
 -- existing DBs pick these up too.

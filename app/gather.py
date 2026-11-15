@@ -64,6 +64,10 @@ class GatherError(RuntimeError):
     """A clip could not be read. The message says why."""
 
 
+class GatherTimeout(GatherError):
+    """A clip was not gathered within the time it was given."""
+
+
 @dataclass(frozen=True)
 class Gathered:
     image: np.ndarray  # float32 light on the finer grid: (grid * h, grid * w)
@@ -406,8 +410,16 @@ def read_clip(path: Path, *, crop: tuple[int, int, int, int] | None = None, ffmp
         process.wait()
 
 
+def _within(frames: Iterable[np.ndarray], deadline: float) -> Iterator[np.ndarray]:
+    for frame in frames:
+        if time.monotonic() > deadline:
+            raise GatherTimeout("timeout")
+        yield frame
+
+
 def gather_clip(path: Path, record: dict | None = None, *, crop: tuple[int, int, int, int] | None = None, ffmpeg: str | None = None,
-                black: float = 0.0, settle: int = SETTLE, limit: int | None = None, **options) -> Gathered:
+                black: float = 0.0, settle: int = SETTLE, limit: int | None = None, seconds: float | None = None,
+                **options) -> Gathered:
     """One recorded page into its image.
 
     record is what the glasses wrote beside the clip: record["frames"][k]["smear_px"] belongs to the clip's frame k and
@@ -415,6 +427,8 @@ def gather_clip(path: Path, record: dict | None = None, *, crop: tuple[int, int,
     logged result); they are not used. A record of any other length is not trusted and every frame is offered.
     The first `settle` frames are left out: they are darker than the rest and would set where the page is put.
     limit: use only that many frames after them (how good is the page with less light?).
+    seconds: give up with GatherTimeout once this long has passed, looked at before each frame (the server's worker
+    must come back to the next page's clip).
     """
     path = Path(path)
     smear = None
@@ -426,7 +440,8 @@ def gather_clip(path: Path, record: dict | None = None, *, crop: tuple[int, int,
     end = None if limit is None else settle + limit
     if smear is not None and limit is not None:
         smear = smear[:limit]
-    return gather(itertools.islice(read_clip(path, crop=crop, ffmpeg=ffmpeg, black=black), settle, end), smear=smear, **options)
+    frames = itertools.islice(read_clip(path, crop=crop, ffmpeg=ffmpeg, black=black), settle, end)
+    return gather(frames if seconds is None else _within(frames, time.monotonic() + seconds), smear=smear, **options)
 
 
 def main(arguments: Sequence[str] | None = None) -> int:

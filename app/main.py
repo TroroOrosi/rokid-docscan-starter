@@ -32,7 +32,7 @@ from PIL import Image, UnidentifiedImageError
 from pydantic import BaseModel, ConfigDict, StrictInt, StrictStr, validator
 from starlette.concurrency import run_in_threadpool
 
-from . import config, db
+from . import config, db, page_clips
 from .audio_formats import safe_audio_suffix
 from .analyzers import get_analyzer
 from .answer_text import to_display_answer
@@ -84,6 +84,7 @@ from .matching import (
 )
 from .matching import verdict as match_verdict
 from .overlay import build_overlay
+from .page_gather import GatherService
 from .retrieval import retrieve_context
 from .solvers import Question, SolveResult, get_solver
 from .solvers.llm_adapter import answer_numbers, paste_prompt
@@ -138,6 +139,8 @@ async def lifespan(app: FastAPI):
         # Its loopback CDP and authentication are checked before sending.
     _resume_all_answers()
     wake_worker()
+    page_clips.requeue_interrupted()  # a clip that was being gathered when the server stopped
+    gather_service.start()
     stopping = threading.Event()
     threading.Thread(target=_route_check_daily, args=(stopping,), name="route-check", daemon=True).start()
     try:
@@ -145,6 +148,7 @@ async def lifespan(app: FastAPI):
     finally:
         stopping.set()
         stop_worker()
+        gather_service.stop()
 
 
 app = FastAPI(title="Rokid DocScan", version=APP_VERSION, lifespan=lifespan)
@@ -1203,6 +1207,79 @@ async def add_page(
             _unlink_best_effort(pending_original_path)
 
 
+def replace_page_image(document_id: int, page_index: int, png_bytes: bytes, note: dict) -> bool:
+    """Put the image gathered from a page's clip in place of that page's stored PNG.
+
+    Only for the page the clip was cut from (the capture the page holds is the clip's) and only while the booklet still
+    takes pages; otherwise nothing changes and the answer is False. The capture's record stays, with ``note`` (used,
+    total, level_over_noise, clip_sha256) added as ``gathered`` and the canonical hash now the new PNG's. The JPEG frame
+    the page arrived as stays where it is: it is not the original of the gathered image, so it is not kept beside it,
+    where the opt-in Work JPEG delivery would take it for that.
+    """
+    with _load_image(png_bytes) as picture:
+        ph = phash_hex(picture)
+    fpath = IMAGE_DIR / f"{document_id}_{page_index}_{uuid.uuid4().hex[:8]}.png"
+    _write_page_files(fpath, png_bytes, None)  # before the write lock, as a page upload writes its files
+    superseded: str | Path = fpath  # what is removed at the end: the new file, until a row has taken it
+    conn = db.connect()
+    try:
+        # Under the finalizer's own lock: a page whose image changed while its booklet was being finalized stops the
+        # finalization with a 409, and the glasses stop on that. Finalization waits for the clips before it takes the lock.
+        with _document_finalize_mutex(document_id):
+            conn.execute("BEGIN IMMEDIATE")
+            capture, page = page_clips.open_capture(conn, document_id, page_index)
+            clip = conn.execute("SELECT capture_id FROM page_clips WHERE document_id = ? AND page_index = ? AND sha256 = ?",
+                                (document_id, page_index, note["clip_sha256"])).fetchone()
+            if page is None or clip is None or capture.get("capture_id") != clip["capture_id"]:
+                return False
+            metadata = {"capture_provenance": capture, "canonical_image_sha256": hashlib.sha256(png_bytes).hexdigest(),
+                        "gathered": note}
+            updated = conn.execute(
+                "UPDATE pages SET image_path = ?, phash = ?, capture_metadata_json = ?, summary = NULL WHERE id = ? "
+                "AND NOT EXISTS (SELECT 1 FROM exam_sessions WHERE document_id = ? AND status = 'reviewing')",
+                (str(fpath), ph, json.dumps(metadata, ensure_ascii=False, sort_keys=True), page["id"], document_id))
+            if updated.rowcount != 1:
+                return False
+            conn.commit()
+            superseded = page["image_path"]
+        return True
+    finally:
+        conn.close()
+        # ponytail: the frame's JPEG keeps its first name; a page taken again after its clip was gathered leaves that
+        # JPEG behind in the image directory. Remove it with the page if that ever adds up.
+        _unlink_best_effort(superseded)
+
+
+gather_service = GatherService(replace_page_image)
+
+
+@app.post("/v1/documents/{document_id}/pages/{page_index}/clip")
+def add_page_clip(document_id: int, page_index: int, clip: UploadFile = File(...), record: str = Form(...),
+                  capture_id: str = Form(...), sha256: str = Form(...)) -> JSONResponse:
+    """Keep the clip a recorded page was cut from, with the record the glasses wrote beside it.
+
+    The page itself came first, as one frame of this clip (``clip_frame``). 201 for a new clip, 200 for the one the
+    page already has; what is refused is listed at ``page_clips.store_clip``. A new clip wakes the gathering.
+    """
+    kept = page_clips.store_clip(document_id, page_index, capture_id, sha256, record, clip.file)
+    created = kept.pop("created")
+    if created:
+        gather_service.wake()
+    return JSONResponse(kept, status_code=201 if created else 200)
+
+
+@app.get("/v1/documents/{document_id}/clips")
+def document_clips(document_id: int) -> dict:
+    """For inspection: how far each page's clip has come."""
+    conn = db.connect()
+    try:
+        _doc_or_404(conn, document_id)
+    finally:
+        conn.close()
+    shown = ("page_index", "status", "reason", "used", "total", "level", "bytes")
+    return {"clips": [{key: row[key] for key in shown} for row in page_clips.rows(document_id)]}
+
+
 # Physical exams do not exceed this; the cap bounds the missing-index range
 # expansion below (and the response payload) against absurd inputs.
 MAX_EXPECTED_TOTAL_PAGES = 10_000
@@ -1362,8 +1439,30 @@ def get_document_scan_status(
     }
 
 
+def _await_gathering(document_id: int) -> None:
+    """Wait for this booklet's clips that are stored or being gathered, at most ROKID_GATHER_WAIT_S seconds (150).
+
+    Past the limit the booklet goes on with the pages that are done; the others stay the one frame they arrived as and
+    the answers name them (``_ungathered_pages``). A clip that never arrived has no row and cannot be waited for. The
+    glasses' finalize call reads for four minutes (DocScanApi), so the limit has to stay well under that.
+    """
+    left = page_clips.pending(document_id)
+    if not left:
+        return
+    limit = float(os.environ.get("ROKID_GATHER_WAIT_S") or 150)
+    started = time.monotonic()
+    while left and time.monotonic() - started < limit:
+        time.sleep(0.5)
+        left = page_clips.pending(document_id)
+    print(json.dumps({"event": "gather_wait", "document_id": document_id, "seconds": round(time.monotonic() - started, 1),
+                      "left": left}), flush=True)
+
+
 @app.post("/v1/documents/{document_id}/finalize")
 def finalize_document(document_id: int) -> dict:
+    # Before the pages are read, and before the lock: the gathering puts a page's image in place under that lock
+    # (replace_page_image), so that once the pages are being read here none of them changes any more.
+    _await_gathering(document_id)
     with _document_finalize_mutex(document_id):
         return _finalize_document_once(document_id)
 
@@ -4729,6 +4828,34 @@ def exam_answer_bundle(session_id: int) -> dict:
     return _answer_snapshot(session_id, identify=True)
 
 
+def _ungathered_pages(conn, document_id: int | None) -> list[int]:
+    """Printed-order numbers (from 1) of the recorded pages that were read as the one frame they arrived as.
+
+    A page of source kind ``clip_frame`` with no clip of that capture in status ``done``: its clip failed, was still
+    waiting when finalization went on, or never reached the server. A still (``native_still``) is never one of these.
+    """
+    done = {(row["page_index"], row["capture_id"]) for row in conn.execute(
+        "SELECT page_index, capture_id FROM page_clips WHERE document_id = ? AND status = 'done'", (document_id,))}
+    numbers = []
+    for row in conn.execute("SELECT page_index, capture_metadata_json FROM pages WHERE document_id = ? "
+                            "AND capture_metadata_json IS NOT NULL ORDER BY page_index", (document_id,)):
+        capture = page_clips.provenance_of(row["capture_metadata_json"])
+        if capture.get("source_kind") == "clip_frame" and (row["page_index"], capture.get("capture_id")) not in done:
+            numbers.append(row["page_index"] + 1)
+    return numbers
+
+
+def _ungathered_item(number: int) -> dict:
+    """One item at the end of the bundle for a recorded page that stayed one frame: shown as to be checked.
+
+    The glasses' AnswerItem refuses the whole bundle on a needs_review item with a blank answer and no figure
+    (relaycore, study/AnswerItem.java), so the answer says in words that there is none.
+    """
+    return {"group_id": "pages", "group_label": "撮影の確認", "question_id": f"page{number}", "question_label": f"{number}頁",
+            "answer": "（解答なし）", "status": "needs_review",
+            "issue": f"{number}頁目は重ねられませんでした（1枚の画像で解析）。必要なら録り直してください"}
+
+
 def _answer_snapshot(session_id: int, *, identify: bool) -> dict:
     """The answer bundle. ``identify=False`` leaves ``input_digest`` empty and reads no page file.
 
@@ -4759,6 +4886,7 @@ def _answer_snapshot(session_id: int, *, identify: bool) -> dict:
             for group in groups
             for row in group["items"]
         ]
+        items += [_ungathered_item(number) for number in _ungathered_pages(conn, session["document_id"])]
         bundle = {
             "schema_version": max((diagram_schema_version(i.get("diagrams", [])) for i in items), default=1),
             "session_id": str(session_id),

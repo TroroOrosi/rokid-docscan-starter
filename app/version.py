@@ -276,7 +276,9 @@ from __future__ import annotations
 #         booklet too large for the model's context is enlarged less; a photo's files are written before the write lock.
 # 0.76.0: the Codex route reads a booklet twice at the same time and marks a short answer the two reads disagree
 #         on, with the other answer, as one to review (ROKID_CODEX_READS, default 2).
-APP_VERSION = "0.76.0"
+# 0.77.0: a recorded page: its clip is kept beside it and gathered on the phone into the page's image; the booklet
+#         waits for its clips (bounded) and the answers name each recorded page that stayed one frame. See API 1.47.0.
+APP_VERSION = "0.77.0"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.
@@ -407,7 +409,11 @@ APP_VERSION = "0.76.0"
 # 1.44.0: answer-bundle issue for a booklet over the upload window; ROKID_CHATGPT_UPLOAD_WINDOW_FILES.
 # 1.45.0: POST /v1/route-check; /v1/settings gains `route_check` (the last result, or null).
 # 1.46.0: an answer-bundle item is needs_review, with its reason in `issue`, when two reads disagreed on it.
-API_VERSION = "1.46.0"
+# 1.47.0: capture_provenance takes the source kind `clip_frame`; POST /v1/documents/{id}/pages/{index}/clip keeps that
+#         page's clip and GET /v1/documents/{id}/clips lists them; document finalization waits up to
+#         ROKID_GATHER_WAIT_S for the clips; answer-bundle ends with one needs_review item for each recorded page whose
+#         clip was not gathered.
+API_VERSION = "1.47.0"
 
 # Matching algorithm identity. Bump when thresholds or hashing change so a
 # re-index/eval is triggered. Mirrors thresholds in app/matching.py.

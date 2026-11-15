@@ -34,7 +34,8 @@ def validate_capture_provenance(value: object) -> dict:
         raise ValueError("capture_provenance requires exactly the schema 1 fields")
     if (type(value["schema"]) is not int or value["schema"] != 1
             or type(value["source_kind"]) is not str
-            or value["source_kind"] not in ("native_still", "zsl_reprocess")):
+            # clip_frame: one frame of the page's recorded clip, with that frame's own capture result (app/page_clips.py)
+            or value["source_kind"] not in ("native_still", "zsl_reprocess", "clip_frame")):
         raise ValueError("unsupported capture_provenance schema or source kind")
     for key, pattern in (("capture_id", _UUID), ("local_session_id", _UUID), ("jpeg_sha256", _SHA256)):
         if type(value[key]) is not str or re.fullmatch(pattern, value[key]) is None:
@@ -74,7 +75,9 @@ def parse_capture_provenance(text: str) -> dict:
 
 
 def validate_capture_metadata(value: object) -> dict:
-    if type(value) is not dict or set(value) != {"capture_provenance", "canonical_image_sha256"}:
+    # "gathered" is the server's own note on a recorded page whose clip became its image (main.replace_page_image).
+    # It is allowed and not returned: the capture's identity is still these two keys for everything that binds to it.
+    if type(value) is not dict or set(value) - {"gathered"} != {"capture_provenance", "canonical_image_sha256"}:
         raise ValueError("invalid saved capture metadata")
     sha = value["canonical_image_sha256"]
     if type(sha) is not str or re.fullmatch(_SHA256, sha) is None:
