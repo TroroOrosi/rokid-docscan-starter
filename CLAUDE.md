@@ -1,6 +1,6 @@
 # rokid-docscan-starter development guide
 
-Status: Current engineering contract. Updated 2026-11-16 (the form of the capture is settled, §M-29; stage 3 is being built).
+Status: Current engineering contract. Updated 2026-11-16 (stage 3 of the gathered capture is built and has passed the desk checks, §M-30; the worn test is next).
 
 **Start at `.agents/progress/current.md`.** It lists the operator's decisions,
 the verified state and the next steps. Do not re-ask what it settles. Then read
@@ -217,7 +217,7 @@ distance and the recording 0.66 bit a pixel a frame or more. **The operator
 approved the change of form on 2026-11-15 (night): record only the line-of-sight
 frame, in the sensor's own pixels, cut by the app out of the full-size stream,
 with a guide to distance; the whole field at half size and the camera's video
-output are dropped.** Not built yet. Measured after the approval, page after
+output are dropped.** Built in stage 3 (below). Measured after the approval, page after
 page as the app would (§M-29): the full-size stream leaves 165-305 MB of memory
 free while it records (1.8 GB device), and forty pages of it failed at the
 ninth, the system killing the real app in the background on the way; **the
@@ -243,12 +243,45 @@ digital gain of about 5.5 this stream lifts its blacks (and the gain stops near
 the camera fail; (5) the glasses write about 9 MB a second: 95 Mbit/s for five
 seconds a page could not be kept up for forty pages, three seconds could; at 50
 Mbit/s the page read 5.7%; (6) the full-size stream with a single-page part ran
-forty pages but took the board to 52.4 C. Stage 3 (plan in
-`docs/superpowers/plans/`) builds this beside the still camera, which stays:
-`ClipCamera` in `:glassdoc`, one frame of the clip as the page through the flow
-every photo takes, the clip sent after it and gathered on the phone into the
-page's image. Not measured: the venue's light with the gain held at 5.0 (the
-paper comes out darker still), a worn head, figures, horizontal text. What it rests on, measured on the desk and the PC on 2026-11-15 (§M-25):
+forty pages but took the board to 52.4 C. **Stage 3 is built and has passed the desk checks
+(§M-30, 2026-11-16, from glassdoc 0.44.0); stills stay the default and the clip
+route has never been worn.** `--es capture clip` (saved) makes a page of ordinary
+written reading a clip: `ClipCamera` records it, one frame of it travels as the
+page (`clip_frame`) through the flow every photo takes, the clip follows it
+(`POST /v1/documents/{id}/pages/{index}/clip`) and worker threads on the phone
+gather it into the page's image; a page whose clip could not be gathered stays
+that one frame and is named in the answers. More frames do not help a dark scene:
+half the desk's light at 30 ms and a gain of 5.0 read 6.6% wrong with four times
+the frames. Where 30 ms would need a gain over 7.05 (`--ei long_above`, saved) the
+clip therefore takes 60 ms at 15 frames a second, the first 15 frames left out,
+half the bit rate; that read 3.0% with the paper as bright as in the clip that
+passed, and the venue's own light is still unread. On the desk: the whole route
+with the stand-in solver (38 of 38 lines, also with 60 ms forced); the real app
+with the phone's own server (43-44 lines without failure, pause and resume
+included); forty pages at fifteen seconds a page on that route, every clip whole,
+sent, and gathered on the phone (22.6 s a clip, keeping pace). Three more things
+the camera taught, each from a failure: (7) the frame-rate range is one of its
+session keys: a session created without session parameters is configured a second
+time by its first request, behind a wait for idle that ran out once in eleven
+clips (camera error 4), so a session is created from a `SessionConfiguration`
+carrying the request it will repeat; (8) the watch preview's frames too are taken
+on the frames' thread: on the camera's thread, which opens the clip's file and the
+codec, they were not returned for over a second once in about eighty clips and the
+camera never drained; (9) writing a clip's 36 MB out stalls the whole system on
+memory and storage for seconds (a page's review image came up to 5.6 s late in
+about one page in three, the camera's thread stood 2.6 s once): the camera
+survives it, the wearer waits. Neither failure showed in three runs of three
+pages; both needed tens of clips on the route that sends. A camera that reports
+an error or cannot make a session is closed and opened again and the page looked
+for again; three in a row with no page between end the capture. Heat on the desk
+at fifteen seconds a page: board 49.5 C with stills, 51 C with clips not sent,
+55-56.5 C with clips sent (36 MB a page); how that feels worn is unknown. The
+Codex route never reduced a page, so more than about twenty gathered pages
+(3024x4032 each) would have gone out over the model's context; it now brings all
+pages to the largest common long side that fits, only when the booklet does not
+fit unreduced (unit tests only; a reduced page's reading is unmeasured). Not done:
+a worn head (stage 4), figures, horizontal text, the real model through the
+product route. What it rests on, measured on the desk and the PC on 2026-11-15 (§M-25):
 the 2016x1512 stream is the whole field at half size and the only whole-field
 size at 60 frames a second; streaming it heats the glasses by 17.7 C in 150 s
 with no work done and 24.9 C with one Java pass over each frame, which alone
@@ -477,6 +510,12 @@ what is being tried.
   remain comparison candidates without physical quality or performance acceptance.
   The frozen CUSTOMVIEW route keeps explicit phone controls. The original
   `adf12ee` disable decision belonged to the route without operator taps.
+- With `--es capture clip` saved, ordinary written reading takes each page as a
+  short clip instead (`ClipCamera`, from glassdoc 0.44.0; the paragraph on the
+  venue's light above and §M-30). Stills are the default until the clip route
+  has been worn. On that route a tap or a double tap during a recording drops
+  that clip and the wearer is asked to hold still again, and pages turned to
+  during a recording or its review are not kept.
 - An explicit, nonpersistent `native_selection=true` comparison launch may take
   one additional maximum-size native JPEG only when the same scene is already
   ready, without waiting for preparation or taking priority over a next page.
@@ -734,6 +773,12 @@ Only four gestures reach an ordinary app; the rest are system-reserved in
   Stored means quality is unevaluated; it does not register pages or invoke Work.
   The explicit Android transfer client and physical video quality still need
   end-to-end acceptance on the glasses and phone.
+- A recorded page (`clip_frame`) keeps its clip beside it. The gathered image
+  takes the place of the page's PNG only while the booklet still takes pages and
+  only for the capture the page holds; finalization waits for the clips at most
+  `ROKID_GATHER_WAIT_S` (150 s); a page left ungathered is named in the answers,
+  never dropped. Clips are kept on the phone (about 36 MB a page; nothing removes
+  them yet).
 - Persist analyzer-derived text before segmenting problems.
 - Pass the originating page image to image-capable solvers.
 - Keep document finalization idempotent and page replacement keyed by
@@ -868,7 +913,10 @@ records; each was learned from a failure the operator found.
    package; `glasses_device_check.py`; gestures through the touchpad's input device,
    every cycle three times; `system_observation.py` before and after a change
    to capture or display; `e2e_route_check.py` with the stand-in solver for
-   the whole use in order.
+   the whole use in order. Both take `--capture clip`. A change to a camera,
+   or to what runs beside it, is run for forty pages on the route that sends,
+   not three: on 2026-11-16 two camera failures came once in eleven and once
+   in about eighty clips (§M-30).
 4. Say what the desk cannot show. Glasses on a desk look across the room and
    do not move; on 2026-11-14 that view was about thirty times darker than the
    page a wearer photographed on 9/22. Look at what the camera sees (a photo
@@ -929,7 +977,8 @@ at a page; a page's legibility and page turns need the wearer.
 
 The glasses' own camera is the reference for exposure and processing. Over adb
 `input keyevent KEYCODE_SPRITE_FUNCTION` takes one photo with it into
-`/sdcard/DCIM/Camera` without stopping the foreground app. Before a change to
+`/sdcard/DCIM/Camera` without stopping the foreground app; the photo stays in
+the glasses' gallery (`--no-reference` on both check scripts takes none). Before a change to
 exposure, gain or still processing is handed to the wearer, take the same scene
 both ways seconds apart and compare brightness and noise; `:glassprobe`
 `--es camera_variant` takes `fps=`, `scene=` and `ev=` (and, for streams and

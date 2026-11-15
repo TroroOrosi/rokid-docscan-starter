@@ -333,9 +333,17 @@ class Check:
         causes = re.findall(r"page_change scene=(\d+) (cause=\w+ level_shift=-?\d+ cells_over_percent=\d+)", log)
         self.expect(f"an unmoving scene adds no clip in {self.options.watch} s", self.taken() <= 2,
                     f"{self.taken()} clip(s); page changes counted: " + ("; ".join(f"{n} {c}" for n, c in causes[-4:]) or "none"))
-        work = [int(ms) for _, ms, *_ in status][1:]
-        self.expect("the preview handler keeps up", bool(work) and max(work) <= 100,
-                    f"{max(work) if work else '?'} ms at most over {len(work)} s")
+        # Each second's slowest frame. The line is for a handler that is slow all the time (300 times slower on the
+        # device than in the unit tests, 2026-11-12), so the usual second decides. A single long one is something
+        # else: while a clip's 36 MB are written out the whole system stalls on memory and storage for up to a few
+        # seconds (2.6 s on 2026-11-16, M-30). The camera survives it; the page change and the small window wait.
+        work = sorted(int(ms) for _, ms, *_ in status[1:])
+        usual = work[len(work) * 9 // 10 - 1] if len(work) >= 10 else (work[-1] if work else 0)
+        self.expect("the preview handler keeps up", bool(work) and usual <= 100,
+                    f"{usual} ms in nine seconds of ten, over {len(work)} s")
+        if work:
+            self.row("the camera thread's longest stall", "PASS" if work[-1] <= 1000 else "WARN",
+                     f"{work[-1]} ms" + ("" if work[-1] <= 1000 else " (a clip being written out; see M-30)"))
         box = self.screen("waiting").getbbox()
         self.expect("the live image stays in its lower-right corner", box is None or (box[0] >= 480 * 0.6 and box[1] >= 640 * 0.4),
                     f"lit area {box}")

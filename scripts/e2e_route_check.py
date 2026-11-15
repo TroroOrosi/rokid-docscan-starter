@@ -24,7 +24,9 @@ gain, saved by the test app on every start, 705 by default) moves the light belo
 (this PC -> the phone on the home network -> the glasses on the phone's hotspot); `adb reverse` works over it too.
 A worn recording has to use that one: nobody reads a booklet on a cable.
 
-With --paper SECONDS the run is a recording of worn use and nothing else: the glasses' own camera takes one reference
+With --paper SECONDS the run is a recording of worn use and nothing else: unless --no-reference is given (the photo
+goes to the glasses' gallery; with --capture clip the light is read from the watch preview anyway), the glasses' own
+camera takes one reference
 photo of what the wearer is looking at (its exposure and sensitivity say how much light is on the page), then the
 reading is started, the wearer reads a
 real booklet for that long without touching the touchpad, and the run reports the light the camera measured, the
@@ -213,7 +215,8 @@ class Check:
             watcher = self.start_watcher()
             if self.o.paper:
                 self.sh(f"rm -f /sdcard/Android/data/{PACKAGE}/files/head-motion.bin")  # this run's turning only
-                self.standard_photo()
+                if not self.o.no_reference:
+                    self.standard_photo()
                 if self.start():
                     self.paper()
             elif self.capture() and self.finish_and_wait():
@@ -258,9 +261,15 @@ class Check:
     def start(self) -> bool:
         self.sh(f"am force-stop {PACKAGE}; input keyevent KEYCODE_WAKEUP; sleep 1")
         self.since = self.stamp()
-        self.sh(f"am start -W -n {ACTIVITY} --es server {self.o.server} --es key {self.o.key} --es capture {self.o.capture} "
-                f"--ei long_above {self.o.long_above} --ez chooser true >/dev/null 2>&1")
+        options = (f"--es server {self.o.server} --es key {self.o.key} --es capture {self.o.capture} "
+                   f"--ei long_above {self.o.long_above}")
+        self.sh(f"am start -W -n {ACTIVITY} {options} --ez chooser true >/dev/null 2>&1")
         time.sleep(1.5)
+        # Once more without the chooser flag. This check's own watcher opens a stopped app's chooser, and a chooser
+        # launch onto a running app is rebuilt without its options: on 2026-11-16, with nothing saved from earlier
+        # runs, a session started with no server and with stills. Without the flag the options are only applied.
+        self.sh(f"am start -W -n {ACTIVITY} {options} >/dev/null 2>&1")
+        time.sleep(0.5)
         self.row("the chooser is drawn", self.lit("chooser") > 0)
         self.gesture(DOUBLE_TAP)  # once; a second one would land in a running capture
         started = self.row("one double tap starts the reading", bool(self.wait_log(self.since, "Started local capture session", 8)))
@@ -552,6 +561,8 @@ def main() -> int:
     parser.add_argument("--interrupt", choices=["wait"], help="force-stop the app (what a fold does) at this point and reopen the chooser")
     parser.add_argument("--paper", type=int, default=0, help="seconds of worn reading to record; the capture is not ended")
     parser.add_argument("--worn-wait", type=int, default=240, help="with --paper: seconds to wait for the wear sensor; 0 records at once (a desk dry run)")
+    parser.add_argument("--no-reference", action="store_true",
+                        help="with --paper: take no photo with the glasses' own camera (it goes to their gallery)")
     parser.add_argument("--report")
     return Check(parser.parse_args()).run()
 
