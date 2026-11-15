@@ -297,6 +297,18 @@ public class ClipCameraTest {
         assertNotSame("its frames never come on the camera's thread", Looper.getMainLooper(), clip.handler.getLooper());
     }
 
+    @Test public void each_session_is_created_with_its_own_request_as_session_parameters() {
+        // The frame-rate range is a session key of this camera. A session created without it was configured a second
+        // time by its first request, after a wait for the device to idle that ran out once in eleven clips (M-30).
+        watching();
+        DocScanTestCamera device = device();
+        assertEquals(1, device.sessionParameters.size());
+        assertSame(device.session.repeating, device.sessionParameters.get(0));
+        recording();
+        assertEquals(2, device.sessionParameters.size());
+        assertSame("the clip's own request, with its frame rate", device.session.repeating, device.sessionParameters.get(1));
+    }
+
     @Test public void a_session_that_never_reports_idle_is_left_after_a_second_and_a_half() {
         watching();
         camera.captureOnce(); idle(1499);
@@ -670,18 +682,58 @@ public class ClipCameraTest {
         assertArrayEquals(new String[0], inboxDirectory.list());
     }
 
-    @Test public void a_camera_error_while_recording_closes_the_clip_and_fails_the_capture() {
+    @Test public void a_camera_error_while_recording_drops_the_clip_and_the_same_page_is_looked_for_again() {
         watching(); recording();
         clipFrames(10, 0);
         DocScanTestCamera device = device();
         device.state.onError(device, CameraDevice.StateCallback.ERROR_CAMERA_DEVICE); idle(0);
-        assertEquals(List.of("camera error 4"), failures);
+        assertTrue("nothing was taken and nothing is in doubt: the camera is closed and the clip deleted", failures.isEmpty());
+        assertEquals(1, notReady);
         assertEquals(1, encoder.ends); assertTrue(device.closed);
         assertArrayEquals(new String[0], inboxDirectory.list());
         device.state.onError(device, CameraDevice.StateCallback.ERROR_CAMERA_DEVICE); idle(0);
-        assertEquals("once", 1, failures.size());
+        assertEquals("once", 1, notReady);
+        idle(100);
+        assertEquals("the camera opens again", 2, ManagerShadow.devices.size());
+        assertEquals("and watches", List.of(reader(320).surface), device().configured.get(0));
+    }
+
+    @Test public void a_camera_error_after_the_clip_was_recorded_still_hands_the_page_over() {
+        // On the glasses, 2026-11-16: the clip was whole and its file closed when the camera failed on its way back
+        // to watching. The page was thrown away and the session ended.
+        watching(); recording();
+        clipFrames(66, 0); idle(0);
+        assertEquals(1, encoder.ends);
+        DocScanTestCamera device = device();
+        device.state.onError(device, CameraDevice.StateCallback.ERROR_CAMERA_DEVICE); idle(100);
+        assertEquals(1, pages.size()); assertTrue(failures.isEmpty()); assertEquals(0, notReady);
+        assertTrue(inbox.has(pages.get(0).provenance.captureId));
+        assertEquals("the camera opens again for the next page", 2, ManagerShadow.devices.size());
+    }
+
+    @Test public void the_page_of_a_clip_still_being_closed_when_the_camera_fails_comes_once_its_file_is_closed() {
+        watching(); recording();
+        encoder.holdEnd = true;
+        clipFrames(66, 0); idle(0);
+        DocScanTestCamera device = device();
+        device.state.onError(device, CameraDevice.StateCallback.ERROR_CAMERA_DEVICE); idle(100);
+        assertTrue(pages.isEmpty());
+        encoder.finish(); idle(0);
+        assertEquals(1, pages.size()); assertTrue(failures.isEmpty());
+    }
+
+    @Test public void three_camera_errors_with_no_page_between_them_fail_the_capture() {
         camera.preview(); idle(100);
-        assertEquals(2, ManagerShadow.devices.size());
+        for (int i = 0; i < 2; i++) {
+            DocScanTestCamera device = device();
+            device.state.onError(device, CameraDevice.StateCallback.ERROR_CAMERA_DEVICE); idle(100);
+            assertTrue(failures.isEmpty());
+        }
+        assertEquals(3, ManagerShadow.devices.size());
+        DocScanTestCamera device = device();
+        device.state.onError(device, CameraDevice.StateCallback.ERROR_CAMERA_DEVICE); idle(100);
+        assertEquals(List.of("camera error 4"), failures);
+        assertEquals("it is not opened a fourth time by itself", 3, ManagerShadow.devices.size());
     }
 
     @Test public void frames_are_taken_and_returned_when_no_clip_is_recorded() {

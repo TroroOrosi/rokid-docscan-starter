@@ -189,14 +189,19 @@ interface ClipEncoder {
                 } catch (RuntimeException error) {
                     failure = "clip " + error;
                 } finally {
-                    codec.release();
                     try {
                         muxer.release();
                     } catch (RuntimeException ignored) {
                         // a muxer that never started
                     }
                 }
-                awaitEnd().done(wrote, clip.length(), failure);
+                // The file is whole and closed here. Releasing the codec then took about 5.3 s in some clips (15 of 40
+                // with the measurement app, M-29; again in the app, M-30): the page is not held for it.
+                try {
+                    awaitEnd().done(wrote, clip.length(), failure);
+                } finally {
+                    codec.release();
+                }
             }
         }
     }

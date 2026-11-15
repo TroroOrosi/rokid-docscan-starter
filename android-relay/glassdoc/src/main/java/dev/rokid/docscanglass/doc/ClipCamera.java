@@ -17,6 +17,8 @@ import android.hardware.camera2.CameraManager;
 import android.hardware.camera2.CaptureRequest;
 import android.hardware.camera2.CaptureResult;
 import android.hardware.camera2.TotalCaptureResult;
+import android.hardware.camera2.params.OutputConfiguration;
+import android.hardware.camera2.params.SessionConfiguration;
 import android.hardware.camera2.params.StreamConfigurationMap;
 import android.media.Image;
 import android.media.ImageReader;
@@ -62,6 +64,10 @@ import dev.rokid.docscanrelay.ClipInbox;
  * 28 pages. {@link #step} is the only place a session or the camera is changed.</li>
  * <li>The clip stream's frames are taken and returned on a thread of their own, recorded or not. Left untaken while
  * the camera's thread waited for a session, the camera hung until the glasses were restarted.</li>
+ * <li>A session is created with the request it will repeat as its session parameters. The frame-rate range is one
+ * of this camera's session keys: a session created without it was configured a second time by its first request,
+ * after a wait for the device to idle, and on 2026-11-16 that wait ran out after five seconds (camera error 4) on
+ * the eleventh clip (M-30).</li>
  * </ul>
  */
 final class ClipCamera implements PageCamera {
@@ -112,6 +118,11 @@ final class ClipCamera implements PageCamera {
     static final float MAX_SMEAR_PIXELS = 2f;
     static final long MIN_MILLIS = 1_000, MAX_MILLIS = 10_000, IDLE_TIMEOUT_MILLIS = 1_500, LIGHT_TIMEOUT_MILLIS = 5_000;
     static final int JPEG_QUALITY = 90;
+    /**
+     * A camera that reports an error is closed and opened again, and the page is looked for again, until it has
+     * failed this many times with no page between: then the capture fails, as every other failure does at once.
+     */
+    static final int MAX_CAMERA_FAILURES = 3;
     private static final int MAX_FRAMES = (int) (MAX_MILLIS / 1000) * FPS + FPS;
     private static final String TAG = "DocScanGlassDoc";
     /** What the session's repeating request is for. */
@@ -178,7 +189,7 @@ final class ClipCamera implements PageCamera {
     private Handler frames;
     private Rect crop;
     private boolean wanted, closed, opening, closing, configuring;
-    private int running;
+    private int running, cameraFailures;
     /** Counts the sessions asked for: a callback of an earlier one is not the present session's. */
     private int configured;
     private Runnable afterReady, pageReady;
@@ -423,16 +434,20 @@ final class ClipCamera implements PageCamera {
         int token = ++configured;
         configuring = true;
         ImageReader output = mode == CLIP ? clipReader : watchReader;
+        Clip started = mode == CLIP ? clip : null;
         try {
-            device.createCaptureSession(Collections.singletonList(output.getSurface()), new CameraCaptureSession.StateCallback() {
+            CaptureRequest request = mode == CLIP ? recordRequest(started) : watchRequest();
+            SessionConfiguration asked = new SessionConfiguration(SessionConfiguration.SESSION_REGULAR,
+                    Collections.singletonList(new OutputConfiguration(output.getSurface())), handler::post,
+                    new CameraCaptureSession.StateCallback() {
                 @Override public void onConfigured(CameraCaptureSession made) {
                     if (token != configured || device == null) return;
                     configuring = false;
                     session = made;
                     running = mode; // also when what is wanted changed meanwhile: it is then left like any other session
-                    if (target() == mode) {
+                    if (target() == mode && (mode != CLIP || clip == started)) {
                         try {
-                            if (mode == CLIP) record(made); else watch(made, token);
+                            if (mode == CLIP) record(made, request, started); else watch(made, request, token);
                         } catch (CameraAccessException | RuntimeException error) {
                             fail("camera request " + error, null);
                             return;
@@ -450,7 +465,9 @@ final class ClipCamera implements PageCamera {
                     configuring = false;
                     fail("camera session refused", null);
                 }
-            }, handler);
+            });
+            asked.setSessionParameters(request);
+            device.createCaptureSession(asked);
         } catch (CameraAccessException | RuntimeException error) {
             configuring = false;
             fail("camera session " + error, null);
@@ -458,17 +475,21 @@ final class ClipCamera implements PageCamera {
     }
 
     /** The small preview alone, automatic exposure, 15 frames a second: half the frames are half the heat (M-18). */
-    private void watch(CameraCaptureSession made, int token) throws CameraAccessException {
+    private CaptureRequest watchRequest() throws CameraAccessException {
         CaptureRequest.Builder request = device.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW);
         request.addTarget(watchReader.getSurface());
         request.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, new Range<>(WATCH_FPS, WATCH_FPS));
         request.set(CaptureRequest.SCALER_CROP_REGION, crop);
+        return request.build();
+    }
+
+    private void watch(CameraCaptureSession made, CaptureRequest request, int token) throws CameraAccessException {
         // A preview that starts over starts its exposure over too. Until it has settled its frames differ from the
         // page just taken, and counted as page turns they took one unmoving page again and again (GlassCamera,
         // 2026-11-12). The first page of a session has no earlier one to be mistaken for.
         steady = false;
         settlingSince = pageChange.hasCapturedPage() ? Math.max(1, SystemClock.elapsedRealtime()) : 0;
-        made.setRepeatingRequest(request.build(), new CameraCaptureSession.CaptureCallback() {
+        made.setRepeatingRequest(request, new CameraCaptureSession.CaptureCallback() {
             @Override public void onCaptureCompleted(CameraCaptureSession source, CaptureRequest asked, TotalCaptureResult result) {
                 if (token != configured || result == null) return;
                 Long exposure = result.get(CaptureResult.SENSOR_EXPOSURE_TIME);
@@ -517,8 +538,7 @@ final class ClipCamera implements PageCamera {
     }
 
     /** The clip stream alone: the middle of the sensor in its own pixels, 30 or 15 frames a second, nothing automatic. */
-    private void record(CameraCaptureSession made) throws CameraAccessException {
-        Clip started = clip;
+    private CaptureRequest recordRequest(Clip started) throws CameraAccessException {
         CaptureRequest.Builder request = device.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW);
         request.addTarget(clipReader.getSurface());
         request.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF);
@@ -533,6 +553,10 @@ final class ClipCamera implements PageCamera {
         request.set(CaptureRequest.EDGE_MODE, CaptureRequest.EDGE_MODE_OFF);
         // No TONEMAP_MODE and no curve: asked for either, this camera fails with error 4 (M-29).
         request.set(CaptureRequest.SCALER_CROP_REGION, crop);
+        return request.build();
+    }
+
+    private void record(CameraCaptureSession made, CaptureRequest request, Clip started) throws CameraAccessException {
         synchronized (lock) {
             recent.clear();
             recording = started;
@@ -540,7 +564,7 @@ final class ClipCamera implements PageCamera {
         started.phase = RECORDING;
         if (gyroscope != null) sensors.registerListener(turningListener, gyroscope, HeadMotion.PERIOD_MICROS, frames);
         handler.postDelayed(timer, MAX_MILLIS);
-        made.setRepeatingRequest(request.build(), new CameraCaptureSession.CaptureCallback() {
+        made.setRepeatingRequest(request, new CameraCaptureSession.CaptureCallback() {
             @Override public void onCaptureCompleted(CameraCaptureSession source, CaptureRequest asked, TotalCaptureResult result) {
                 if (result == null) return;
                 synchronized (lock) {
@@ -753,6 +777,7 @@ final class ClipCamera implements PageCamera {
                 + " bytes=" + done.bytes + " first_ms=" + done.firstMillis + " back_ms=" + done.backMillis
                 + " boost=" + done.boost + " exposure_ms=" + done.exposure / 1_000_000 + " gyro=" + done.gyroFrames);
         if (done.page != null) {
+            cameraFailures = 0;
             callback.onCaptured(done.page);
             return;
         }
@@ -780,12 +805,24 @@ final class ClipCamera implements PageCamera {
     /**
      * The capture fails and the camera is closed; it opens again when it is next asked to watch. A camera that
      * reported itself gone is closed at once, as nothing of it can be waited for; otherwise in order.
+     *
+     * <p>A camera that reported itself gone leaves nothing in doubt: it is closed, and a clip is either whole, with
+     * its file closed, or deleted. So a clip already recorded still becomes its page, a clip cut short is dropped and
+     * the same page is looked for again, and the camera is opened again, up to {@link #MAX_CAMERA_FAILURES} times
+     * with no page between. On 2026-11-16 the camera failed on its way back to watching after a whole clip: the
+     * page was thrown away and the session ended, which at the venue means starting the app again.
      */
     private void fail(String reason, CameraDevice gone) {
         Log.w(TAG, "clip camera failed: " + reason);
-        abandon();
-        wanted = false;
-        pageReady = null;
+        Clip pending = clip;
+        boolean recorded = gone != null && pending != null && pending.phase == ENDING;
+        boolean again = gone != null && !closed && (recorded || ++cameraFailures < MAX_CAMERA_FAILURES);
+        if (recorded) pending.back = true; // there is no watching to wait for; join() hands the page over
+        else abandon();
+        if (!again) {
+            wanted = false;
+            pageReady = null;
+        }
         showFar(false);
         if (gone != null) {
             opening = configuring = false;
@@ -798,7 +835,9 @@ final class ClipCamera implements PageCamera {
             closing = true;
             gone.close();
         }
-        if (!closed) callback.onCaptureFailed(reason);
+        if (recorded) join();
+        else if (!again) { if (!closed) callback.onCaptureFailed(reason); }
+        else if (pending != null) callback.onCaptureNotReady(); // nothing was taken: the page is asked for again
         step();
     }
 

@@ -59,6 +59,14 @@ public final class DocScanTestCamera extends CameraDevice {
         Runnable answer = () -> { if (refused) callback.onConfigureFailed(session); else callback.onConfigured(session); };
         if (holdSessions) heldSessions.add(answer); else h.post(answer);
     }
+    /** The session parameters of every session created from a SessionConfiguration, in order. */
+    public final List<CaptureRequest> sessionParameters = new ArrayList<>();
+    @Override public void createCaptureSession(SessionConfiguration configuration) {
+        List<Surface> surfaces = new ArrayList<>();
+        for (OutputConfiguration output : configuration.getOutputConfigurations()) surfaces.add(output.getSurface());
+        sessionParameters.add(configuration.getSessionParameters());
+        createCaptureSession(surfaces, configuration.getStateCallback(), handler);
+    }
     @Override public void createCaptureSessionByOutputConfigurations(List<OutputConfiguration> o, CameraCaptureSession.StateCallback c, Handler h) { throw new UnsupportedOperationException(); }
     @Override public void createConstrainedHighSpeedCaptureSession(List<Surface> o, CameraCaptureSession.StateCallback c, Handler h) { throw new UnsupportedOperationException(); }
     @Override public CaptureRequest.Builder createReprocessCaptureRequest(TotalCaptureResult r) {

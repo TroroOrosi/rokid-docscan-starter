@@ -11,7 +11,12 @@ This checks the glasses-side route and the server and watcher logic. It does NOT
 its hotspot, its load and its browser are not in the loop.
 
     py -3.12 scripts/e2e_route_check.py --glasses <adb transport> --data <server data dir> --key <test api key>
-        [--server http://127.0.0.1:8765] [--photos 3] [--report <dir>]
+        [--server http://127.0.0.1:8765] [--photos 3] [--capture clip] [--report <dir>]
+
+--capture says how a page is taken and is saved by the test app on every start: `still` (the default) or `clip`,
+where a page is a short recording that the server gathers into the page's image (the server needs numpy and ffmpeg).
+With `clip` every page's recording is checked (frames, none dropped, gain, the wait for its first frame, the
+gyroscope's clock), then that each clip reached the server and became its page's image.
 
 --glasses is any adb transport of the glasses. Without a cable it is the one scripts/glasses_over_phone.py prints
 (this PC -> the phone on the home network -> the glasses on the phone's hotspot); `adb reverse` works over it too.
@@ -53,6 +58,11 @@ GLASSES_SERIAL = "1904092623381086"
 TOUCHPAD = "/dev/input/event1"
 TAP, SWIPE_FORWARD, SWIPE_BACK, DOUBLE_TAP = (204, 28), (204, 106, 108), (204, 105, 103), (204, 204, 158)
 ENV = dict(os.environ, MSYS_NO_PATHCONV="1")
+# One line a clip from ClipCamera: frames in the clip, frames counted, frames the encoder refused, the clip's bytes, the
+# wait from the request to the first frame and from the end to watching again, the gain in hundredths, the exposure,
+# and the frames whose exposure the gyroscope's readings covered.
+CLIP_LINE = (r"clip frames=(\d+) counted=(\d+) dropped=(\d+) bytes=(\d+) first_ms=(-?\d+) back_ms=(-?\d+) boost=(\d+) "
+             r"exposure_ms=(\d+) gyro=(\d+)")
 
 
 class Check:
@@ -71,9 +81,13 @@ class Check:
     def sh(self, command: str, timeout: int = 60) -> str:
         return self.adb("shell", command, timeout=timeout).decode("utf-8", "replace")
 
+    @staticmethod
+    def keys(codes: tuple[int, ...]) -> str:
+        return "; ".join(f"sendevent {TOUCHPAD} 1 {c} 1; sendevent {TOUCHPAD} 0 0 0; sendevent {TOUCHPAD} 1 {c} 0; "
+                         f"sendevent {TOUCHPAD} 0 0 0; sleep 0.08" for c in codes)
+
     def gesture(self, codes: tuple[int, ...]) -> None:
-        self.sh("; ".join(f"sendevent {TOUCHPAD} 1 {c} 1; sendevent {TOUCHPAD} 0 0 0; sendevent {TOUCHPAD} 1 {c} 0; "
-                          f"sendevent {TOUCHPAD} 0 0 0; sleep 0.08" for c in codes))
+        self.sh(self.keys(codes))
 
     def stamp(self) -> str:
         return self.sh("date '+%m-%d %H:%M:%S.000'").strip()
@@ -102,6 +116,48 @@ class Check:
             if time.monotonic() >= deadline:
                 return False
             time.sleep(0.5)
+
+    def clip_lines(self) -> list[tuple[int, ...]]:
+        return [tuple(map(int, found.groups())) for line in self.log(self.since) if (found := re.search(CLIP_LINE, line))]
+
+    def wait_clips(self, count: int, seconds: float) -> list[tuple[int, ...]]:
+        deadline = time.monotonic() + seconds
+        while True:
+            clips = self.clip_lines()
+            if len(clips) >= count or time.monotonic() >= deadline:
+                return clips
+            time.sleep(1)
+
+    def clip_row(self, number: int, clip: tuple[int, ...]) -> None:
+        frames, counted, dropped, size, first, back, boost, exposure, gyro = clip
+        settle = 15 if exposure > 30 else 6  # the long exposure settles more slowly
+        self.row(f"page {number}'s clip is whole: enough frames, none dropped, a gain of at most 5.0, begun within 2 s",
+                 frames >= 60 + settle and counted >= 60 and dropped == 0 and boost <= 500 and 0 <= first <= 2000,
+                 f"{frames} frames, {counted} counted, {dropped} dropped, {size / 1e6:.1f} MB, first frame after {first} ms, "
+                 f"watching again after {back} ms, gain {boost / 100:.2f}, {exposure} ms")
+        # No reading inside the exposures would mean the camera's and the gyroscope's clocks differ: every frame
+        # would then count as still, silently.
+        self.row(f"page {number}: the gyroscope's readings fall inside the frames' exposures", gyro >= frames * 0.9,
+                 f"{gyro} of {frames} frames")
+
+    def gathered(self, committed: int) -> None:
+        """Each page's clip on the server, and the page's image replaced by what was gathered from it."""
+        document = self.db("select max(id) from documents")[0][0]
+        started, clips = time.monotonic(), []
+        while True:
+            clips = self.api(f"/v1/documents/{document}/clips")[1].get("clips", [])
+            if (len(clips) >= committed and all(c["status"] in ("done", "failed") for c in clips)) or time.monotonic() - started > 300:
+                break
+            time.sleep(2)
+
+        def told(c: dict) -> str:
+            how = f" ({c['reason']})" if c.get("reason") else f", {c['used']} of {c['total']} frames, level over noise {c['level']}" if c["status"] == "done" else ""
+            return f"page {c['page_index'] + 1} {c['status']}{how}, {c['bytes'] / 1e6:.1f} MB"
+
+        self.row("every page's clip reached the server and was gathered", len(clips) >= committed and all(c["status"] == "done" for c in clips),
+                 ("; ".join(map(told, clips)) or "no clip on the server") + f"; {time.monotonic() - started:.0f} s after the pages")
+        replaced = self.db(f"select count(*) from pages where document_id = {document} and capture_metadata_json like '%\"gathered\"%'")[0][0]
+        self.row("each page's image is the one gathered from its clip", replaced >= committed, f"{replaced} of {committed}")
 
     def lit(self, name: str) -> int:
         from PIL import Image  # noqa: PLC0415
@@ -200,11 +256,14 @@ class Check:
     def start(self) -> bool:
         self.sh(f"am force-stop {PACKAGE}; input keyevent KEYCODE_WAKEUP; sleep 1")
         self.since = self.stamp()
-        self.sh(f"am start -W -n {ACTIVITY} --es server {self.o.server} --es key {self.o.key} --ez chooser true >/dev/null 2>&1")
+        self.sh(f"am start -W -n {ACTIVITY} --es server {self.o.server} --es key {self.o.key} --es capture {self.o.capture} "
+                "--ez chooser true >/dev/null 2>&1")
         time.sleep(1.5)
         self.row("the chooser is drawn", self.lit("chooser") > 0)
         self.gesture(DOUBLE_TAP)  # once; a second one would land in a running capture
-        return self.row("one double tap starts the reading", bool(self.wait_log(self.since, "Started local capture session", 8)))
+        started = self.row("one double tap starts the reading", bool(self.wait_log(self.since, "Started local capture session", 8)))
+        camera = self.wait_log(self.since, r"capture=(clip|still)", 3) or ""
+        return self.row(f"pages are taken as asked: {self.o.capture}", camera.endswith("capture=" + self.o.capture), camera) and started
 
     def wear_reading(self) -> tuple[str, float] | None:
         """The wear (proximity) sensor's last report: its sensor time and its value, 5 when nothing is near."""
@@ -262,6 +321,9 @@ class Check:
                          if pid and re.search(r"\(\s*" + re.escape(pid) + r"\)", line[:70]))
         if self.report:
             (self.report / "paper-log.txt").write_text(text, encoding="utf-8")
+        if self.o.capture == "clip":
+            self.paper_clips(text)
+            return
         photos = re.findall(r"(\d\d:\d\d:\d\d)\.\d+ .*captured \d+x\d+ (\d+)B in (\d+)ms gen=(\d+)", text)
         self.row("worn: photos taken", None, f"{len(photos)} in {self.o.paper} s" + "".join(f"; {at} #{gen}" for at, _, _, gen in photos[:20]))
         self.row("worn: waits for stillness that ran out (10 s each)", None, str(len(re.findall("preparation expired", text))))
@@ -291,30 +353,86 @@ class Check:
         self.row("worn: head-motion trace", None, f"{len(trace)} bytes ({len(trace) / 20 / 200:.0f} s at 200 Hz)")
         self.row("nothing failed in the app", not re.search(r"capture failed|preview failed|ERROR:", text))
 
+    def paper_clips(self, text: str) -> None:
+        clips = [(at, *map(int, rest)) for at, *rest in re.findall(r"(\d\d:\d\d:\d\d)\.\d+ .*" + CLIP_LINE, text)]
+        pages = [clip for clip in clips if clip[2] > 0]
+        self.row("worn: clips recorded", None, f"{len(clips)} in {self.o.paper} s, {len(pages)} with a page" + "".join(
+            f"; {at} {frames} frames, {counted} counted, {exposure} ms at gain {boost / 100:.2f}, first frame after {first} ms, {dropped} dropped"
+            for at, frames, counted, dropped, _, first, _, boost, exposure, _ in clips[:24]))
+        self.row("worn: clips in which no frame was still enough to count", None, str(len(clips) - len(pages)))
+        status = re.findall(r"watch_status frames=(\d+) max_work_ms=(\d+) exposure_ns=(\d+) iso=(\d+) boost=(\d+) far=(\w+)", text)
+        if status:
+            needs = sorted(int(e) / 1e6 * int(iso) * int(boost) / 100 / 30 for _, _, e, iso, boost, _ in status if int(e))
+            far = sum(1 for *_, mark in status if mark == "true")
+            self.row("worn: light on what the wearer looks at", None,
+                     f"a 30 ms exposure needs a total gain of {needs[len(needs) // 2]:.0f} (median; {needs[0]:.0f}-{needs[-1]:.0f}); "
+                     f"the clip has 4000 at most, and takes 60 ms above 5640" if needs else "not measured")
+            self.row("worn: seconds of watching with the 'paper too far' mark shown", None, f"{far} of {len(status)}")
+            work = max(int(ms) for _, ms, *_ in status)
+            self.row("worn: the watch preview's handler kept up", work <= 100, f"{work} ms at most over {len(status)} s")
+        self.row("worn: page changes counted", None, str(len(re.findall("page_change scene=", text))))
+        new_document = self.db("select count(*) from documents")[0][0] > self.before["documents"]
+        if new_document and pages:
+            document = self.db("select max(id) from documents")[0][0]
+            deadline = time.monotonic() + 240  # the last clips are still on their way and being gathered
+            while True:
+                rows = self.db(f"select page_index, status, reason, used, total, level, record_json from page_clips where document_id = {document} order by page_index")
+                if (len(rows) >= len(pages) and all(row[1] in ("done", "failed") for row in rows)) or time.monotonic() >= deadline:
+                    break
+                time.sleep(3)
+            for index, state, reason, used, total, level, record in rows:
+                smears = sorted(frame.get("smear_px", 0) for frame in json.loads(record).get("frames", []))
+                moving = f"; smear a frame: median {smears[len(smears) // 2]:.1f} px, over 2 px in {sum(1 for v in smears if v > 2)} of {len(smears)}" if smears else ""
+                self.row(f"worn: page {index + 1}'s clip on the server", None,
+                         (f"gathered from {used} of {total} frames, level over noise {level}" if state == "done" else f"{state}: {reason}") + moving)
+            self.row("worn: clips that became their page's image", None, f"{sum(1 for row in rows if row[1] == 'done')} of {len(pages)} pages")
+        else:
+            self.row("worn: pages that reached the server", None, "none")
+        self.row("nothing failed in the app", not re.search(r"capture failed|clip camera failed|ERROR:", text))
+
     def capture(self) -> bool:
         if not self.start():
             return False
-        first = self.wait_log(self.since, r"captured \d+x\d+ \d+B in \d+ms gen=1", 40)
-        if not self.row("the first photo is taken without any input", bool(first), first or "no photo within 40 s"):
-            return False
+        clip = self.o.capture == "clip"
+        if clip:
+            clips = self.wait_clips(1, 40)
+            if not self.row("the first page is recorded without any input", bool(clips), "" if clips else "no clip within 40 s; app: "
+                            + " | ".join(line[:70] for line in self.log(self.since) if "watch_status" not in line)[-300:]):
+                return False
+            self.clip_row(1, clips[0])
+            page = self.wait_log(self.since, r"captured \d+x\d+ in \d+ ms", 10) or ""
+            self.row("the page is one frame of its clip", "captured 2016x1512 " in page, page)
+        else:
+            first = self.wait_log(self.since, r"captured \d+x\d+ \d+B in \d+ms gen=1", 40)
+            if not self.row("the first photo is taken without any input", bool(first), first or "no photo within 40 s"):
+                return False
         committed = 1
-        self.row("photo 1 is saved after its 3-second review", self.wait_saved(1, 12))
+        self.row("photo 1 is saved after its 3-second review", self.wait_saved(1, 15))
         for number in range(2, self.o.photos + 1):
             self.gesture(SWIPE_FORWARD)
-            taken = self.wait_log(self.since, rf"captured \d+x\d+ \d+B in \d+ms gen={number} *$", 25)
+            if clip:
+                clips = self.wait_clips(number, 30)
+                taken = f"clip {number}" if len(clips) >= number else None
+                if taken:
+                    self.clip_row(number, clips[number - 1])
+            else:
+                taken = self.wait_log(self.since, rf"captured \d+x\d+ \d+B in \d+ms gen={number} *$", 25)
             # Counted, not looked for after a clock mark: the mark is cut to the second, and on 2026-11-14 the save of
             # the photo before was taken for this one's, so the next swipe fell in its review and retook it.
             saved = self.wait_saved(number, 14) if taken else False
             committed += 1 if saved else 0
             self.row(f"a forward swipe takes photo {number} and it is saved", bool(saved), (taken or "no photo")[:70])
-        stills = len([line for line in self.log(self.since) if "still_requested" in line])
-        self.row("stills requested so far", None, f"{stills} for {committed} saved photo(s)")
+        stills = len(self.clip_lines()) if clip else len([line for line in self.log(self.since) if "still_requested" in line])
+        self.row("clips recorded so far" if clip else "stills requested so far", None, f"{stills} for {committed} saved photo(s)")
         pages = self.wait_db("select count(*) from pages where document_id = (select max(id) from documents)",
                              lambda rows: rows and rows[0][0] >= committed, 60)
         new_document = self.db("select count(*) from documents")[0][0] > self.before["documents"]
         self.committed = committed
-        return self.row("every saved photo reached the server, in one new document", new_document and pages[0][0] >= committed,
-                        f"{pages[0][0]} page(s) on the server for {committed} saved")
+        reached = self.row("every saved photo reached the server, in one new document", new_document and pages[0][0] >= committed,
+                           f"{pages[0][0]} page(s) on the server for {committed} saved")
+        if reached and clip:
+            self.gathered(committed)
+        return reached
 
     def finish_and_wait(self) -> bool:
         status, settings = self.api("/v1/settings")
@@ -360,6 +478,10 @@ class Check:
         if not self.row("the stand-in's answers become a bundle on the server", ready_at is not None):
             return False
         self.ready_at, self.ready_stamp = ready_at, mark
+        if self.o.capture == "clip":
+            items = self.api(f"/v1/exam-sessions/{self.session}/answer-bundle")[1].get("items", [])
+            named = [str(item.get("question_label")) for item in items if item.get("group_id") == "pages"]
+            self.row("the answers name no page as left ungathered", not named, ", ".join(named))
         return True
 
     def read_and_exit(self) -> None:
@@ -403,9 +525,9 @@ class Check:
         time.sleep(6)
         self.row("a double tap in the reader ends the writing and the display goes off",
                  self.lit("writing-done") == 0, " | ".join(line[:70] for line in self.log(mark) if "preview_status" not in line)[-200:])
-        self.gesture(DOUBLE_TAP)
-        time.sleep(0.6)
-        self.gesture(DOUBLE_TAP)
+        # One command: sent as two over the phone relay they reached the glasses 4.5 s apart on 2026-11-16, past the
+        # three seconds the app allows, and a correct app stayed in front.
+        self.sh(self.keys(DOUBLE_TAP) + "; sleep 0.6; " + self.keys(DOUBLE_TAP))
         time.sleep(4)
         self.row("two more double taps within three seconds leave the app", not self.foreground().startswith(PACKAGE + "/"), self.foreground())
         self.row("no further session was created by reading and leaving", self.db("select count(*) from exam_sessions")[0][0] == state)
@@ -421,6 +543,8 @@ def main() -> int:
     parser.add_argument("--key", required=True, help="the stand-in server's API key (a test value, not the phone's)")
     parser.add_argument("--server", default="http://127.0.0.1:8765")
     parser.add_argument("--photos", type=int, default=3)
+    parser.add_argument("--capture", choices=["still", "clip"], default="still",
+                        help="how a page is taken; saved by the test app on every start")
     parser.add_argument("--interrupt", choices=["wait"], help="force-stop the app (what a fold does) at this point and reopen the chooser")
     parser.add_argument("--paper", type=int, default=0, help="seconds of worn reading to record; the capture is not ended")
     parser.add_argument("--worn-wait", type=int, default=240, help="with --paper: seconds to wait for the wear sensor; 0 records at once (a desk dry run)")
