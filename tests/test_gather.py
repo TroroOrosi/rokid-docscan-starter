@@ -61,6 +61,20 @@ def frames(image, shifts, snr1, seed=2):
             .astype(np.float32) for dy, dx in shifts]
 
 
+def rolled(image, degrees):
+    """The scene turned about its centre, as a tilted head sees it."""
+    h, w = image.shape
+    angle = np.deg2rad(degrees)
+    yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+    cy, cx = (h - 1) / 2, (w - 1) / 2
+    sy = cy + (yy - cy) * np.cos(angle) - (xx - cx) * np.sin(angle)
+    sx = cx + (yy - cy) * np.sin(angle) + (xx - cx) * np.cos(angle)
+    y0, x0 = np.clip(np.floor(sy).astype(int), 0, h - 2), np.clip(np.floor(sx).astype(int), 0, w - 2)
+    fy, fx = np.clip(sy - y0, 0, 1), np.clip(sx - x0, 0, 1)
+    return ((1 - fy) * (1 - fx) * image[y0, x0] + (1 - fy) * fx * image[y0, x0 + 1]
+            + fy * (1 - fx) * image[y0 + 1, x0] + fy * fx * image[y0 + 1, x0 + 1]).astype(np.float32)
+
+
 def alike(a, b):
     inner = (slice(24, -24), slice(24, -24))
     return float(np.corrcoef(a[inner].ravel(), b[inner].ravel())[0, 1])
@@ -117,3 +131,14 @@ def test_bright_frames_stay_in_range():
     result = g.gather([np.full((96, 128), 0.98, np.float32) for _ in range(12)])
     assert np.isfinite(result.image).all()
     assert 0.9 < float(result.image.mean()) < 1.05
+
+
+def test_a_tilted_head_is_followed_part_by_part():
+    s = scene(h=576, w=768)
+    angles = np.random.default_rng(4).normal(0, 0.25, 60)
+    angles[0] = 0.0  # the first frame is where the page is put
+    fs = [frames(rolled(s, angle), [(0, 0)], 2.2, seed=10 + k)[0] for k, angle in enumerate(angles)]
+    whole = g.gather(fs, parts=1)
+    fitted = g.gather(fs, parts=3)
+    assert fitted.placed and fitted.used >= 55
+    assert alike(fitted.image, s) > alike(whole.image, s) + 0.01

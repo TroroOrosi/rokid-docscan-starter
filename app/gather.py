@@ -24,6 +24,10 @@ import numpy as np
 REACHES = (4.0, 16.0)  # frame pixels searched around the last placement: first near, then once wider
 STRENGTH_SHARE = 0.5  # a frame is placed when its correlation peak is this share of the first frames' typical peak
 HOLE_SHARE = 0.05  # a grid cell that received under this share of the typical weight is filled from the plain average
+PART_REACH = 2.0  # frame pixels a part of a frame is searched around the whole frame's placement
+PART_OUTLIER = 1.5  # a part placed further than this from the parts' median is left out of the fit
+PARTS_FROM = 4  # frames in the sum before parts are placed against it
+BLOCK = 64  # frame pixels a side: each block is added at the fitted shift of its centre
 
 
 @dataclass(frozen=True)
@@ -77,11 +81,12 @@ def shift_of(frame: np.ndarray, reference: np.ndarray, around: tuple[float, floa
     return _peak(_surface(frame, reference), around, reach)
 
 
-def _splat(total: np.ndarray, weight: np.ndarray, frame: np.ndarray, dy: float, dx: float, grid: int) -> None:
-    """Add a frame known to be the scene moved by (dy, dx) frame pixels onto the finer grid, shared between the two
-    nearest cells each way by distance."""
+def _splat(total: np.ndarray, weight: np.ndarray, frame: np.ndarray, dy: float, dx: float, grid: int, top: int = 0, left: int = 0) -> None:
+    """Add a frame (or the block of it that starts at row `top`, column `left`) known to be the scene moved by (dy, dx)
+    frame pixels onto the finer grid, shared between the two nearest cells each way by distance."""
     h, w = frame.shape
-    ty, tx = grid / 2 - 0.5 - grid * dy, grid / 2 - 0.5 - grid * dx  # the cell under the centre of frame pixel (0, 0)
+    # the cell under the centre of the block's first pixel
+    ty, tx = grid / 2 - 0.5 - grid * dy + grid * top, grid / 2 - 0.5 - grid * dx + grid * left
     y0, x0 = math.floor(ty), math.floor(tx)
     for oy, share_y in ((y0, 1 - (ty - y0)), (y0 + 1, ty - y0)):
         j0, j1 = max(0, math.ceil(-oy / grid)), min(h, (total.shape[0] - 1 - oy) // grid + 1)
@@ -95,11 +100,42 @@ def _splat(total: np.ndarray, weight: np.ndarray, frame: np.ndarray, dy: float, 
             weight[rows, columns] += share
 
 
-def gather(frames: Iterable[np.ndarray], *, smear: Sequence[float] | None = None, smear_limit: float = 2.0, grid: int = 2) -> Gathered:
+def _field(frame: np.ndarray, reference: np.ndarray, dy: float, dx: float, parts: int) -> np.ndarray | None:
+    """How the shift changes across the frame (a tilted head, a bent page): parts of the frame placed one by one, and
+    a plane fitted through their shifts. Rows: constant, per row, per column; columns: dy, dx. None when too few parts
+    agree, and the whole frame's shift stands."""
+    h, w = frame.shape
+    centres, shifts = [], []
+    for py in range(parts):
+        for px in range(parts):
+            box = (slice(py * h // parts, (py + 1) * h // parts), slice(px * w // parts, (px + 1) * w // parts))
+            sy, sx, _ = _peak(_surface(frame[box], reference[box]), (dy, dx), PART_REACH)
+            centres.append(((box[0].start + box[0].stop) / 2, (box[1].start + box[1].stop) / 2))
+            shifts.append((sy, sx))
+    found = np.array(shifts)
+    agree = np.hypot(*(found - np.median(found, axis=0)).T) <= PART_OUTLIER
+    if int(agree.sum()) < 4:
+        return None
+    design = np.column_stack([np.ones(int(agree.sum())), np.array(centres)[agree]])
+    return np.linalg.lstsq(design, found[agree], rcond=None)[0]
+
+
+def _splat_field(total: np.ndarray, weight: np.ndarray, frame: np.ndarray, field: np.ndarray, grid: int) -> None:
+    h, w = frame.shape
+    for top in range(0, h, BLOCK):
+        for left in range(0, w, BLOCK):
+            block = frame[top:top + BLOCK, left:left + BLOCK]
+            dy, dx = field[0] + (top + block.shape[0] / 2) * field[1] + (left + block.shape[1] / 2) * field[2]
+            _splat(total, weight, block, float(dy), float(dx), grid, top, left)
+
+
+def gather(frames: Iterable[np.ndarray], *, smear: Sequence[float] | None = None, smear_limit: float = 2.0, grid: int = 2,
+           parts: int = 3) -> Gathered:
     """Gather frames of one scene into one image on a grid `grid` times finer than the frames.
 
     frames: 2-D arrays of light, all one shape, in the order taken. smear: for each frame, how many pixels the picture
-    moved during its exposure (from the gyroscope); frames over smear_limit are not used.
+    moved during its exposure (from the gyroscope); frames over smear_limit are not used. parts: each frame is also
+    placed in parts x parts pieces, to follow tilt and bend; 1 moves every frame as a whole.
     """
     selection = "none" if smear is None else "motion"
     total = usable = used = 0
@@ -131,7 +167,11 @@ def gather(frames: Iterable[np.ndarray], *, smear: Sequence[float] | None = None
                 continue  # not this scene: the view left the page, or something came between
             strengths.append(strength)
         position = (dy, dx)
-        _splat(sums[used % 2], weights[used % 2], frame, dy, dx, grid)
+        field = _field(frame, reference, dy, dx, parts) if parts > 1 and used >= PARTS_FROM else None
+        if field is None:
+            _splat(sums[used % 2], weights[used % 2], frame, dy, dx, grid)
+        else:
+            _splat_field(sums[used % 2], weights[used % 2], frame, field, grid)
         back = np.roll(frame, (-round(dy), -round(dx)), (0, 1))
         reference = back.copy() if reference is None else reference + back
         used += 1
