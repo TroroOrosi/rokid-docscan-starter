@@ -91,6 +91,9 @@ final class CameraProbe {
      * Empty is the single JPEG output measured on 2026-09-04.
      */
     static String variant = "";
+    /** Where the display stream of a {@code pages=} cycle is drawn, when the variant asks for {@code texture}. */
+    static android.view.TextureView display;
+    private PageCycleProbe cycle;
 
     private long streamUntil;
     private int streamFrames, streamSecond, streamSecondFrames, streamWorked, streamResults;
@@ -100,7 +103,7 @@ final class CameraProbe {
     private android.media.MediaRecorder recorder;
     private File recordFile;
 
-    private static String option(String name) {
+    static String option(String name) {
         for (String part : variant.split(",")) {
             if (part.equals(name)) return "";
             if (part.startsWith(name + "=")) return part.substring(name.length() + 1);
@@ -191,6 +194,13 @@ final class CameraProbe {
     void captureOnce() {
         settled = false;
         startedAtMillis = SystemClock.elapsedRealtime();
+        if (option("pages") != null) { // the watch-and-record cycle has its own camera handling and no time limit of this class
+            if (cycle != null) cycle.close();
+            cycle = new PageCycleProbe(context, handler, display, (ok, detail) ->
+                    callback.onCameraResult(ok ? ProbeReport.Status.OK : ProbeReport.Status.FAILED, detail));
+            cycle.start();
+            return;
+        }
         CameraManager manager =
                 (CameraManager) context.getSystemService(Context.CAMERA_SERVICE);
         if (manager == null) {
@@ -272,6 +282,7 @@ final class CameraProbe {
 
     /** Releases every camera resource and deletes the captured file. */
     void close() {
+        if (cycle != null) { cycle.close(); cycle = null; }
         handler.removeCallbacks(timeout);
         closeQuietly();
         if (option("keep") == null && captured != null && captured.exists() && !captured.delete()) {

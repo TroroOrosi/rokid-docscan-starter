@@ -88,8 +88,22 @@ public final class CapabilityProbeActivity extends Activity {
         // camera probe plus one network probe.
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
 
+        String asked = getIntent() == null ? null : getIntent().getStringExtra("camera_variant");
+        CameraProbe.variant = asked == null ? "" : asked;
         view = new ReportView(this);
-        setContentView(view);
+        if (CameraProbe.option("texture") != null) {
+            // The display stream of a pages= cycle is drawn here, small and in the corner, so that reading it back can be timed.
+            android.widget.FrameLayout frame = new android.widget.FrameLayout(this);
+            frame.addView(view);
+            android.view.TextureView display = new android.view.TextureView(this);
+            frame.addView(display, new android.widget.FrameLayout.LayoutParams(320, 240,
+                    android.view.Gravity.BOTTOM | android.view.Gravity.END));
+            CameraProbe.display = display;
+            setContentView(frame);
+        } else {
+            CameraProbe.display = null;
+            setContentView(view);
+        }
 
         cameraThread = new HandlerThread("camera-probe");
         cameraThread.start();
@@ -97,8 +111,6 @@ public final class CapabilityProbeActivity extends Activity {
                 this, new Handler(cameraThread.getLooper()), this::onCameraResult);
 
         serverBaseUrl = getIntent() == null ? null : getIntent().getStringExtra(EXTRA_SERVER);
-        String variant = getIntent() == null ? null : getIntent().getStringExtra("camera_variant");
-        CameraProbe.variant = variant == null ? "" : variant;
 
         recordDisplay();
         record(P2, ProbeReport.Status.PENDING, CameraProbe.describeCameras(this));
