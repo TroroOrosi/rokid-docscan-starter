@@ -37,7 +37,13 @@ HOLE_SHARE = 0.05  # a grid cell that received under this share of the typical w
 PART_REACH = 2.0  # frame pixels a part of a frame is searched around the whole frame's placement
 PART_OUTLIER = 1.5  # a part placed further than this from the parts' median is left out of the fit
 PARTS_FROM = 4  # frames in the sum before parts are placed against it
-BLOCK = 64  # frame pixels a side: each block is added at the fitted shift of its centre
+COARSE_SIDE = 384  # a frame is first placed on a copy joined down until its short side is about this many pixels
+WINDOW = 256  # frame pixels a side of the piece of each part that is placed
+STEP = 0.25  # frame pixels the fitted shift may change across one block that is added at one shift
+BLOCKS = (64, 512)  # the smallest and the largest block, frame pixels a side
+FLAT = 0.5  # frame pixels: a fitted shift that changes less than this from edge to edge is one shift for the whole frame
+FRESH_UNTIL = 16  # while the sum holds fewer frames than this, its transform is taken anew for every frame
+REFRESH = 4  # after that, the sum's transform is reused for this many frames: three more frames change it little
 DECODE_SECONDS = 120  # a clip of one page is at most ten seconds; a decoder still running after this is stuck
 
 
@@ -65,14 +71,25 @@ def _tools(shape: tuple[int, int]) -> tuple[np.ndarray, np.ndarray]:
     return window, band
 
 
-def _surface(frame: np.ndarray, reference: np.ndarray) -> np.ndarray:
-    window, band = _tools(frame.shape)
-    cross = np.fft.rfft2((frame - frame.mean()) * window) * np.conj(np.fft.rfft2((reference - reference.mean()) * window)) * band
-    return np.fft.irfft2(cross, s=frame.shape)
+def _spectrum(image: np.ndarray) -> np.ndarray:
+    window, _ = _tools(image.shape)
+    return np.fft.rfft2((image - image.mean()) * window)
 
 
-def _peak(surface: np.ndarray, around: tuple[float, float], reach: float) -> tuple[float, float, float]:
-    h, w = surface.shape
+def _reference_side(reference: np.ndarray) -> np.ndarray:
+    """The half of the correlation that belongs to the sum: reusable while the sum changes little."""
+    _, band = _tools(reference.shape)
+    return np.conj(_spectrum(reference)) * band
+
+
+def _peak(cross: np.ndarray, shape: tuple[int, int], around: tuple[float, float], reach: float) -> tuple[float, float, float]:
+    """The correlation's peak within `reach` of `around`, from the cross spectrum; sub-pixel by a parabola through it.
+
+    The whole surface is transformed back. Computing only the points near `around` by a matrix product is fewer
+    operations, but it ran several times slower beside the decoder, which takes the threads the product wants.
+    """
+    h, w = shape
+    surface = np.fft.irfft2(cross, s=shape)
     yy = (np.arange(h) - around[0] + h / 2) % h - h / 2
     xx = (np.arange(w) - around[1] + w / 2) % w - w / 2
     limited = np.where(yy[:, None] ** 2 + xx[None, :] ** 2 <= reach ** 2, surface, -np.inf)
@@ -93,55 +110,90 @@ def shift_of(frame: np.ndarray, reference: np.ndarray, around: tuple[float, floa
 
     strength is the correlation peak over the spread of the whole correlation surface: high when the two show one scene.
     """
-    return _peak(_surface(frame, reference), around, reach)
+    return _peak(_spectrum(frame) * _reference_side(reference), frame.shape, around, reach)
 
 
-def _splat(total: np.ndarray, weight: np.ndarray, frame: np.ndarray, dy: float, dx: float, grid: int, top: int = 0, left: int = 0) -> None:
-    """Add a frame (or the block of it that starts at row `top`, column `left`) known to be the scene moved by (dy, dx)
-    frame pixels onto the finer grid, shared between the two nearest cells each way by distance."""
-    h, w = frame.shape
-    # the cell under the centre of the block's first pixel
-    ty, tx = grid / 2 - 0.5 - grid * dy + grid * top, grid / 2 - 0.5 - grid * dx + grid * left
-    y0, x0 = math.floor(ty), math.floor(tx)
-    for oy, share_y in ((y0, 1 - (ty - y0)), (y0 + 1, ty - y0)):
-        j0, j1 = max(0, math.ceil(-oy / grid)), min(h, (total.shape[0] - 1 - oy) // grid + 1)
-        for ox, share_x in ((x0, 1 - (tx - x0)), (x0 + 1, tx - x0)):
-            i0, i1 = max(0, math.ceil(-ox / grid)), min(w, (total.shape[1] - 1 - ox) // grid + 1)
-            share = share_y * share_x
-            if share < 0.02 or j1 <= j0 or i1 <= i0:
-                continue
-            rows, columns = slice(oy + grid * j0, oy + grid * (j1 - 1) + 1, grid), slice(ox + grid * i0, ox + grid * (i1 - 1) + 1, grid)
-            total[rows, columns] += share * frame[j0:j1, i0:i1]
-            weight[rows, columns] += share
+def _joined(image: np.ndarray, k: int) -> np.ndarray:
+    h, w = image.shape[0] // k * k, image.shape[1] // k * k
+    return image[:h, :w].reshape(h // k, k, w // k, k).mean(axis=(1, 3))
 
 
-def _field(frame: np.ndarray, reference: np.ndarray, dy: float, dx: float, parts: int) -> np.ndarray | None:
-    """How the shift changes across the frame (a tilted head, a bent page): parts of the frame placed one by one, and
-    a plane fitted through their shifts. Rows: constant, per row, per column; columns: dy, dx. None when too few parts
-    agree, and the whole frame's shift stands."""
+class _Planes:
+    """Light added at sub-pixel positions. The finer grid is kept as one plane a position inside a frame pixel: plane
+    [py, px] holds the grid cells (grid * y + py, grid * x + px), so that adding a frame is a few adds of whole blocks
+    of memory. Two halves are kept apart: their difference is the noise."""
+
+    def __init__(self, shape: tuple[int, int], grid: int) -> None:
+        self.grid = grid
+        self.sums = np.zeros((2, grid, grid, *shape), np.float32)
+        self.weights = np.zeros((2, grid, grid, *shape), np.float32)
+        self._scratch = np.empty(shape, np.float32)
+
+    def add(self, half: int, block: np.ndarray, dy: float, dx: float, top: int = 0, left: int = 0) -> None:
+        """Add a frame (or the block of it that starts at row `top`, column `left`) known to be the scene moved by
+        (dy, dx) frame pixels, shared between the two nearest grid cells each way by distance."""
+        grid = self.grid
+        h, w = self.sums.shape[-2:]
+        bh, bw = block.shape
+        ty, tx = grid / 2 - 0.5 - grid * dy, grid / 2 - 0.5 - grid * dx  # the cell under the centre of a pixel, less grid * its index
+        y0, x0 = math.floor(ty), math.floor(tx)
+        for cell_y, share_y in ((y0, 1 - (ty - y0)), (y0 + 1, ty - y0)):
+            move_y, plane_y = divmod(cell_y, grid)
+            j0, j1 = max(0, -(top + move_y)), min(bh, h - top - move_y)
+            for cell_x, share_x in ((x0, 1 - (tx - x0)), (x0 + 1, tx - x0)):
+                move_x, plane_x = divmod(cell_x, grid)
+                i0, i1 = max(0, -(left + move_x)), min(bw, w - left - move_x)
+                share = share_y * share_x
+                if share < 0.02 or j1 <= j0 or i1 <= i0:
+                    continue
+                rows, columns = slice(top + move_y + j0, top + move_y + j1), slice(left + move_x + i0, left + move_x + i1)
+                shared = np.multiply(block[j0:j1, i0:i1], share, out=self._scratch[:j1 - j0, :i1 - i0])
+                self.sums[half, plane_y, plane_x, rows, columns] += shared
+                self.weights[half, plane_y, plane_x, rows, columns] += share
+
+    def _woven(self, planes: np.ndarray) -> np.ndarray:
+        grid = self.grid
+        h, w = planes.shape[-2:]
+        return planes.transpose(2, 0, 3, 1).reshape(grid * h, grid * w)
+
+    def result(self, plain: np.ndarray) -> tuple[np.ndarray, float]:
+        """(the image on the finer grid, its level over noise). `plain` is the frames' plain average, for cells nothing reached."""
+        weight = self._woven(self.weights[0] + self.weights[1])
+        typical = float(np.median(weight))
+        image = self._woven(self.sums[0] + self.sums[1]) / np.maximum(weight, 1e-6)
+        holes = weight < HOLE_SHARE * typical
+        if holes.any():
+            image[holes] = np.repeat(np.repeat(plain, self.grid, 0), self.grid, 1)[holes]
+        both = (self.weights[0] > HOLE_SHARE * typical / 2) & (self.weights[1] > HOLE_SHARE * typical / 2)
+        ratio = 0.0
+        if both.any():
+            difference = (self.sums[0] / np.maximum(self.weights[0], 1e-6) - self.sums[1] / np.maximum(self.weights[1], 1e-6))[both]
+            noise = float(difference.std()) / 2
+            ratio = float(np.percentile(image, 90)) / noise if noise > 0 else 0.0
+        return image.astype(np.float32), ratio
+
+
+def _field(frame: np.ndarray, side, dy: float, dx: float, parts: int, reach: float) -> np.ndarray | None:
+    """How the shift changes across the frame (a tilted head, a bent page): a piece of each part of the frame is placed
+    by itself, and a plane is fitted through the pieces' shifts. Rows: constant, per row, per column; columns: dy, dx.
+    None when too few pieces agree, and the whole frame's shift stands. side(box) gives the sum's half of the correlation
+    for that piece."""
     h, w = frame.shape
     centres, shifts = [], []
     for py in range(parts):
         for px in range(parts):
-            box = (slice(py * h // parts, (py + 1) * h // parts), slice(px * w // parts, (px + 1) * w // parts))
-            sy, sx, _ = _peak(_surface(frame[box], reference[box]), (dy, dx), PART_REACH)
-            centres.append(((box[0].start + box[0].stop) / 2, (box[1].start + box[1].stop) / 2))
+            cy, cx = (2 * py + 1) * h // (2 * parts), (2 * px + 1) * w // (2 * parts)
+            half_y, half_x = min(WINDOW, h // parts) // 2, min(WINDOW, w // parts) // 2
+            box = (slice(cy - half_y, cy + half_y), slice(cx - half_x, cx + half_x))
+            sy, sx, _ = _peak(_spectrum(frame[box]) * side(box), (2 * half_y, 2 * half_x), (dy, dx), reach)
+            centres.append((cy, cx))
             shifts.append((sy, sx))
     found = np.array(shifts)
     agree = np.hypot(*(found - np.median(found, axis=0)).T) <= PART_OUTLIER
     if int(agree.sum()) < 4:
         return None
-    design = np.column_stack([np.ones(int(agree.sum())), np.array(centres)[agree]])
+    design = np.column_stack([np.ones(int(agree.sum())), np.array(centres, dtype=np.float64)[agree]])
     return np.linalg.lstsq(design, found[agree], rcond=None)[0]
-
-
-def _splat_field(total: np.ndarray, weight: np.ndarray, frame: np.ndarray, field: np.ndarray, grid: int) -> None:
-    h, w = frame.shape
-    for top in range(0, h, BLOCK):
-        for left in range(0, w, BLOCK):
-            block = frame[top:top + BLOCK, left:left + BLOCK]
-            dy, dx = field[0] + (top + block.shape[0] / 2) * field[1] + (left + block.shape[1] / 2) * field[2]
-            _splat(total, weight, block, float(dy), float(dx), grid, top, left)
 
 
 def gather(frames: Iterable[np.ndarray], *, smear: Sequence[float] | None = None, smear_limit: float = 2.0, grid: int = 2,
@@ -151,63 +203,85 @@ def gather(frames: Iterable[np.ndarray], *, smear: Sequence[float] | None = None
     frames: 2-D arrays of light, all one shape, in the order taken. smear: for each frame, how many pixels the picture
     moved during its exposure (from the gyroscope); frames over smear_limit are not used. parts: each frame is also
     placed in parts x parts pieces, to follow tilt and bend; 1 moves every frame as a whole.
+
+    A frame is placed in two steps: on a copy joined down to a short side of about COARSE_SIDE pixels, which also says
+    whether it shows this scene at all, then piece by piece at full size around that.
     """
     selection = "none" if smear is None else "motion"
     total = usable = used = 0
-    sums = weights = reference = shape = None
+    planes = reference = coarse = shape = None
+    join = 1
     strengths: list[float] = []
     position = (0.0, 0.0)
+    held: dict[object, tuple[int, np.ndarray]] = {}
+
+    def side(key: object, source) -> np.ndarray:
+        """The sum's half of the correlation for the whole (key None) or a piece (key = its box), taken anew when stale."""
+        kept = held.get(key)
+        if kept is None or used < FRESH_UNTIL or used - kept[0] >= REFRESH:
+            kept = (used, _reference_side(source()))
+            held[key] = kept
+        return kept[1]
+
     for index, frame in enumerate(frames):
         frame = np.asarray(frame, dtype=np.float32)
-        if sums is None:
+        if shape is None:
             shape = frame.shape
-            fine = (grid * shape[0], grid * shape[1])
-            sums, weights = np.zeros((2, *fine), np.float32), np.zeros((2, *fine), np.float32)
+            join = max(1, min(shape) // COARSE_SIDE)
+            planes = _Planes(shape, grid)
         elif frame.shape != shape:
             raise ValueError(f"frame {index} is {frame.shape}, the first was {shape}")
         total += 1
         if smear is not None and (index >= len(smear) or smear[index] > smear_limit):
             continue
         usable += 1
+        small = _joined(frame, join) if join > 1 else frame
+        field = None
         if reference is None:
             dy = dx = 0.0
         else:
-            surface = _surface(frame, reference)
+            cross = _spectrum(small) * side(None, lambda: coarse)
             floor = STRENGTH_SHARE * float(np.median(strengths[:7])) if len(strengths) >= 3 else 0.0
             for reach in REACHES:
-                dy, dx, strength = _peak(surface, position, reach)
+                dy, dx, strength = _peak(cross, small.shape, (position[0] / join, position[1] / join), max(2.0, reach / join))
                 if strength >= floor:
                     break
             else:
                 continue  # not this scene: the view left the page, or something came between
             strengths.append(strength)
+            dy, dx = dy * join, dx * join
+            if parts > 1 and used >= PARTS_FROM:
+                field = _field(frame, lambda box: side((box[0].start, box[1].start), lambda: reference[box]), dy, dx, parts,
+                               PART_REACH + (join - 1) / 2)
+                if field is not None:
+                    dy, dx = (float(v) for v in field[0] + shape[0] / 2 * field[1] + shape[1] / 2 * field[2])
+                    if float((np.abs(field[1]) * shape[0] + np.abs(field[2]) * shape[1]).max()) < FLAT:
+                        field = None  # no tilt worth following: the whole frame goes in at the fitted centre shift
         position = (dy, dx)
-        field = _field(frame, reference, dy, dx, parts) if parts > 1 and used >= PARTS_FROM else None
         if field is None:
-            _splat(sums[used % 2], weights[used % 2], frame, dy, dx, grid)
+            planes.add(used % 2, frame, dy, dx)
         else:
-            _splat_field(sums[used % 2], weights[used % 2], frame, field, grid)
+            steepest = float(np.abs(field[1:]).max())
+            block = int(min(BLOCKS[1], max(BLOCKS[0], STEP / steepest))) if steepest > 0 else BLOCKS[1]
+            for top in range(0, shape[0], block):
+                for left in range(0, shape[1], block):
+                    piece = frame[top:top + block, left:left + block]
+                    by, bx = field[0] + (top + piece.shape[0] / 2) * field[1] + (left + piece.shape[1] / 2) * field[2]
+                    planes.add(used % 2, piece, float(by), float(bx), top, left)
         back = np.roll(frame, (-round(dy), -round(dx)), (0, 1))
         reference = back.copy() if reference is None else reference + back
+        if join > 1:
+            small_back = np.roll(small, (-round(dy / join), -round(dx / join)), (0, 1))
+            coarse = small_back.copy() if coarse is None else coarse + small_back
+        else:
+            coarse = reference
         used += 1
-    if sums is None:
+    if shape is None:
         return Gathered(np.zeros((0, 0), np.float32), 0, total, 0.0, False, selection)
     if used == 0:
-        return Gathered(np.zeros(sums.shape[1:], np.float32), 0, total, 0.0, False, selection)
-    weight = weights[0] + weights[1]
-    typical = float(np.median(weight))
-    image = (sums[0] + sums[1]) / np.maximum(weight, 1e-6)
-    holes = weight < HOLE_SHARE * typical
-    if holes.any():
-        image[holes] = np.repeat(np.repeat(reference / used, grid, 0), grid, 1)[holes]
-    ratio = 0.0
-    if used >= 4:
-        both = (weights[0] > HOLE_SHARE * typical / 2) & (weights[1] > HOLE_SHARE * typical / 2)
-        if both.any():
-            difference = (sums[0] / np.maximum(weights[0], 1e-6) - sums[1] / np.maximum(weights[1], 1e-6))[both]
-            noise = float(difference.std()) / 2
-            ratio = float(np.percentile(image[both], 90)) / noise if noise > 0 else 0.0
-    return Gathered(image.astype(np.float32), used, total, ratio, used * 2 > usable, selection)
+        return Gathered(np.zeros((grid * shape[0], grid * shape[1]), np.float32), 0, total, 0.0, False, selection)
+    image, ratio = planes.result(reference / used)
+    return Gathered(image, used, total, ratio if used >= 4 else 0.0, used * 2 > usable, selection)
 
 
 def _ffmpeg(binary: str | None) -> str:
