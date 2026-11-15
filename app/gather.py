@@ -384,13 +384,14 @@ def read_clip(path: Path, *, crop: tuple[int, int, int, int] | None = None, ffmp
 
 
 def gather_clip(path: Path, record: dict | None = None, *, crop: tuple[int, int, int, int] | None = None, ffmpeg: str | None = None,
-                black: float = 0.0, settle: int = SETTLE, **options) -> Gathered:
+                black: float = 0.0, settle: int = SETTLE, limit: int | None = None, **options) -> Gathered:
     """One recorded page into its image.
 
     record is what the glasses wrote beside the clip: record["frames"][k]["smear_px"] belongs to the clip's frame k and
     chooses the frames. The clip may hold up to SURPLUS frames more than the record (frames encoded after the last
     logged result); they are not used. A record of any other length is not trusted and every frame is offered.
     The first `settle` frames are left out: they are darker than the rest and would set where the page is put.
+    limit: use only that many frames after them (how good is the page with less light?).
     """
     path = Path(path)
     smear = None
@@ -399,7 +400,10 @@ def gather_clip(path: Path, record: dict | None = None, *, crop: tuple[int, int,
         _, _, frames = _described(_ffmpeg(ffmpeg), path)
         if frames is not None and 0 <= frames - len(listed) <= SURPLUS and all(isinstance(entry, dict) and "smear_px" in entry for entry in listed):
             smear = [float(entry["smear_px"]) for entry in listed][settle:]
-    return gather(itertools.islice(read_clip(path, crop=crop, ffmpeg=ffmpeg, black=black), settle, None), smear=smear, **options)
+    end = None if limit is None else settle + limit
+    if smear is not None and limit is not None:
+        smear = smear[:limit]
+    return gather(itertools.islice(read_clip(path, crop=crop, ffmpeg=ffmpeg, black=black), settle, end), smear=smear, **options)
 
 
 def main(arguments: Sequence[str] | None = None) -> int:
@@ -410,12 +414,13 @@ def main(arguments: Sequence[str] | None = None) -> int:
     parser.add_argument("--record", type=Path, help="the JSON the glasses wrote beside the clip")
     parser.add_argument("--crop", help="left,top,width,height in the clip's pixels")
     parser.add_argument("--black", type=float, default=0.0, help="light to subtract from every pixel")
+    parser.add_argument("--frames", type=int, help="use only this many frames, after the first ones that are always left out")
     asked = parser.parse_args(arguments)
     started = time.monotonic()
     try:
         record = json.loads(asked.record.read_text(encoding="utf-8")) if asked.record else None
         crop = tuple(int(value) for value in asked.crop.split(",")) if asked.crop else None
-        result = gather_clip(asked.clip, record, crop=crop, black=asked.black)
+        result = gather_clip(asked.clip, record, crop=crop, black=asked.black, limit=asked.frames)
     except (GatherError, OSError, ValueError) as error:
         print(json.dumps({"error": str(error)}))
         return 1

@@ -251,3 +251,13 @@ def test_a_record_a_few_frames_short_of_the_clip_is_applied(tmp_path):
     result = g.gather_clip(path, record)
     assert (result.selection, result.used, result.total) == ("motion", 12 - g.SETTLE, 20 - g.SETTLE)
 
+
+def test_only_the_first_frames_asked_for_are_used(tmp_path):
+    path = clip(tmp_path, frames(scene(), [(0, 0)] * 40, 4.0))
+    short = g.gather_clip(path, limit=10)
+    assert (short.used, short.total) == (10, 10)
+    record = {"frames": [{"smear_px": 0.5}] * 10 + [{"smear_px": 9.0}] * 30}
+    assert g.gather_clip(path, record, limit=20).used == 10 - g.SETTLE  # frames 6 to 9 pass; 10 to 25 are smeared
+    long = g.gather_clip(path)
+    assert long.level_over_noise > short.level_over_noise
+
