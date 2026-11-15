@@ -102,6 +102,12 @@ final class FeedProbe {
     private boolean ending;  // the last clip's encoder is still being ended, off this thread
     private final Object lock = new Object();  // the encoder and the counters, between the frames' thread and the camera's
     private android.os.HandlerThread framesThread;
+    private Writer writer;
+    private Runnable afterReady;  // what to do once the session has nothing in flight
+    private final Runnable readyTimeout = this::readyNow;
+    private long idleAskedAt;
+    private long idleMillis;
+    private long watchIdleMillis;
     private long watchingAt;
     private long backMillis;
 
@@ -195,6 +201,110 @@ final class FeedProbe {
         track = -1;
     }
 
+    /**
+     * Stop the repeating request and go on only when the session has nothing in flight (or after 1.5 s). A session changed
+     * at once left frames in flight that could get no buffer while the camera was being configured; the camera then
+     * failed to drain, after 16 and after 28 pages (M-29).
+     */
+    private void whenIdle(Runnable next) {
+        afterReady = next;
+        idleAskedAt = SystemClock.elapsedRealtime();
+        try {
+            session.stopRepeating();
+        } catch (CameraAccessException | RuntimeException ignored) {
+            // the timeout below goes on
+        }
+        handler.postDelayed(readyTimeout, 1500);
+    }
+
+    private void readyNow() {
+        Runnable next = afterReady;
+        if (next == null || closed) return;
+        afterReady = null;
+        handler.removeCallbacks(readyTimeout);
+        idleMillis = SystemClock.elapsedRealtime() - idleAskedAt;
+        next.run();
+    }
+
+    /**
+     * One page's clip: takes what the encoder gives and writes it, on a thread of its own, so that neither the camera's
+     * thread nor the frames' thread ever waits for the file (ending a clip took 1 to 5.6 s in 7 of 28 pages, M-29).
+     */
+    private final class Writer implements Runnable {
+        private final MediaCodec codec;
+        private final MediaMuxer muxer;
+        private final File clip;
+        private final int number;
+        volatile boolean endAsked;
+        volatile String head = "";
+        volatile String tail = "";
+
+        Writer(MediaCodec codec, MediaMuxer muxer, File clip, int number) {
+            this.codec = codec;
+            this.muxer = muxer;
+            this.clip = clip;
+            this.number = number;
+        }
+
+        @Override public void run() {
+            MediaCodec.BufferInfo own = new MediaCodec.BufferInfo();
+            int trackId = -1, wrote = 0;
+            boolean ended = false, endQueued = false;
+            String failed = null;
+            long from = 0;
+            try {
+                while (!ended) {
+                    if (endAsked && !endQueued) {
+                        if (from == 0) from = SystemClock.elapsedRealtime();
+                        int in = codec.dequeueInputBuffer(20_000);
+                        if (in >= 0) {
+                            codec.queueInputBuffer(in, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM);
+                            endQueued = true;
+                        }
+                    }
+                    int out = codec.dequeueOutputBuffer(own, 20_000);
+                    if (out == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
+                        trackId = muxer.addTrack(codec.getOutputFormat());
+                        muxer.start();
+                    } else if (out >= 0) {
+                        if ((own.flags & MediaCodec.BUFFER_FLAG_CODEC_CONFIG) == 0 && own.size > 0 && trackId >= 0) {
+                            muxer.writeSampleData(trackId, codec.getOutputBuffer(out), own);
+                            wrote++;
+                        }
+                        codec.releaseOutputBuffer(out, false);
+                        ended = (own.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0;
+                    }
+                    if (from != 0 && SystemClock.elapsedRealtime() - from > 8000) break;  // never for ever
+                }
+                codec.stop();
+                if (trackId >= 0) muxer.stop();
+            } catch (RuntimeException error) {
+                failed = "clip " + error;
+            } finally {
+                codec.release();
+                try {
+                    muxer.release();
+                } catch (RuntimeException ignored) {
+                    // a muxer that never started
+                }
+            }
+            long bytes = clip.length();
+            if (number > keepClips) clip.delete();
+            final String line = head + " written=" + wrote + " ended=" + ended + " bytes=" + bytes + " end_ms="
+                    + (from == 0 ? 0 : SystemClock.elapsedRealtime() - from) + tail;
+            final String error = failed;
+            handler.post(() -> {
+                ending = false;
+                if (error != null && !closed) {
+                    finish(false, error);
+                    return;
+                }
+                pageLine = line;
+                pageDone();
+            });
+        }
+    }
+
     /** The small preview alone, as the app waits for a page. */
     private void watch() {
         try {
@@ -212,6 +322,10 @@ final class FeedProbe {
                     } catch (CameraAccessException | RuntimeException error) {
                         finish(false, "watch request " + error);
                     }
+                }
+
+                @Override public void onReady(CameraCaptureSession ready) {
+                    if (ready == session && afterReady != null) readyNow();
                 }
 
                 @Override public void onConfigureFailed(CameraCaptureSession failed) {
@@ -238,7 +352,7 @@ final class FeedProbe {
     /** A page is over when the camera watches again and its clip is closed; the first is what the wearer waits for. */
     private void pageDone() {
         if (closed || awaitingPreview || ending) return;
-        if (pageLine != null) Log.i(TAG, pageLine + " back_ms=" + backMillis);
+        if (pageLine != null) Log.i(TAG, pageLine + " idle_ms=" + idleMillis + " back_ms=" + backMillis);
         pageLine = null;
         if (page >= pages) {
             finish(true, "feed cycle " + pages + " pages in " + (SystemClock.elapsedRealtime() - cycleStartedAt) + "ms out=" + outWidth + "x" + outHeight);
@@ -261,8 +375,13 @@ final class FeedProbe {
             finish(false, "encoder " + error);
             return;
         }
+        writer = new Writer(codec, muxer, clip, page);
+        new Thread(writer, "probe-clip-writer").start();
         askedAt = SystemClock.elapsedRealtime();
-        configure(cropRegion);
+        whenIdle(() -> {
+            watchIdleMillis = idleMillis;
+            configure(cropRegion);
+        });
     }
 
     private void configure(Rect cropRegion) {
@@ -296,6 +415,10 @@ final class FeedProbe {
                     } catch (CameraAccessException | RuntimeException error) {
                         finish(false, "request " + error);
                     }
+                }
+
+                @Override public void onReady(CameraCaptureSession ready) {
+                    if (ready == session && afterReady != null) readyNow();
                 }
 
                 @Override public void onConfigureFailed(CameraCaptureSession failed) {
@@ -384,7 +507,7 @@ final class FeedProbe {
             handler.post(() -> finish(false, detail));
         } finally {
             image.close();
-            if (!closed && feeding && codec != null) drain(0);  // between pages there is no encoder
+            if (pages == 0 && !closed && feeding && codec != null) drain(0);  // page after page, the clip's writer takes the output
         }
     }
 
@@ -413,7 +536,7 @@ final class FeedProbe {
         synchronized (lock) {
             watchNext = stopLocked();
         }
-        if (watchNext) watch();  // outside the lock: the change of session waits for the camera, and the frames must go on
+        if (watchNext) whenIdle(this::watch);  // outside the lock: the frames must go on being taken while the camera drains
     }
 
     /** @return whether the camera is to go back to watching (page after page) */
@@ -421,80 +544,19 @@ final class FeedProbe {
         if (closed || !feeding) return false;
         feeding = false;
         long fedFor = SystemClock.elapsedRealtime() - startedAt;
-        if (pages > 0) {
-            try {
-                session.stopRepeating();
-            } catch (CameraAccessException | RuntimeException ignored) {
-                // the next session replaces it either way
-            }
-        } else {
+        if (pages == 0) {
             if (device != null) { device.close(); device = null; }  // the camera first: nothing of it is needed to end the clip
             session = null;
         }
         if (pages > 0) {
-            // Back to watching at once; the clip is ended on a thread of its own. Ending it here held the camera's thread
-            // for up to 5.6 s in 7 of 28 pages, and the camera then failed to drain (M-29).
-            final MediaCodec endingCodec = codec;
-            final MediaMuxer endingMuxer = muxer;
-            final File endingClip = clip;
-            final int trackNow = track;
-            final int writtenNow = written;
-            final int pageNow = page;
-            final String head = "camera probe page=" + page + " rebuild_ms=" + rebuildMillis + " first_image_ms=" + firstImageMillis + " for_ms=" + fedFor
-                    + " images=" + images + " fed=" + fed + " dropped=" + dropped + " copy_us=" + (fed == 0 ? 0 : copyNanos / 1000 / fed);
-            final String tail = " levels=" + levels;
+            // The clip's writer ends the clip; the camera goes back to watching meanwhile.
+            writer.head = "camera probe page=" + page + " rebuild_ms=" + rebuildMillis + " first_image_ms=" + firstImageMillis + " watch_idle_ms=" + watchIdleMillis
+                    + " for_ms=" + fedFor + " images=" + images + " fed=" + fed + " dropped=" + dropped + " copy_us=" + (fed == 0 ? 0 : copyNanos / 1000 / fed);
+            writer.tail = " levels=" + levels;
+            writer.endAsked = true;
             codec = null;
             muxer = null;
             ending = true;
-            new Thread(() -> {
-                long from = SystemClock.elapsedRealtime();
-                int wrote = writtenNow, trackId = trackNow;
-                boolean ended = false;
-                String failed = null;
-                try {
-                    MediaCodec.BufferInfo own = new MediaCodec.BufferInfo();
-                    int in = endingCodec.dequeueInputBuffer(500_000);
-                    if (in >= 0) endingCodec.queueInputBuffer(in, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM);
-                    for (int tries = 0; tries < 60 && !ended; tries++) {
-                        int out = endingCodec.dequeueOutputBuffer(own, 100_000);
-                        if (out == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
-                            trackId = endingMuxer.addTrack(endingCodec.getOutputFormat());
-                            endingMuxer.start();
-                        } else if (out >= 0) {
-                            if ((own.flags & MediaCodec.BUFFER_FLAG_CODEC_CONFIG) == 0 && own.size > 0 && trackId >= 0) {
-                                endingMuxer.writeSampleData(trackId, endingCodec.getOutputBuffer(out), own);
-                                wrote++;
-                            }
-                            endingCodec.releaseOutputBuffer(out, false);
-                            ended = (own.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0;
-                        }
-                    }
-                    endingCodec.stop();
-                    if (trackId >= 0) endingMuxer.stop();
-                } catch (RuntimeException error) {
-                    failed = "end " + error;
-                } finally {
-                    endingCodec.release();
-                    try {
-                        endingMuxer.release();
-                    } catch (RuntimeException ignored) {
-                        // a muxer that never started
-                    }
-                }
-                long bytes = endingClip.length();
-                if (pageNow > keepClips) endingClip.delete();
-                final String line = head + " written=" + wrote + " ended=" + ended + " bytes=" + bytes + " end_ms=" + (SystemClock.elapsedRealtime() - from) + tail;
-                final String error = failed;
-                handler.post(() -> {
-                    ending = false;
-                    if (error != null) {
-                        finish(false, error);
-                        return;
-                    }
-                    pageLine = line;
-                    pageDone();
-                });
-            }, "probe-encoder-end").start();
             return true;
         }
         long from = SystemClock.elapsedRealtime();
@@ -528,6 +590,11 @@ final class FeedProbe {
         handler.removeCallbacksAndMessages(null);
         if (device != null) { device.close(); device = null; }
         synchronized (lock) {
+            if (pages > 0) {  // the clip's writer owns the encoder and lets go of it itself
+                if (writer != null) writer.endAsked = true;
+                codec = null;
+                muxer = null;
+            }
             if (codec != null) { codec.release(); codec = null; }
             if (muxer != null) {
                 try {
