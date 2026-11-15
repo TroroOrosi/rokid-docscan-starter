@@ -398,6 +398,16 @@ def verdicts(means: dict[str, float]) -> list[str]:
         call = "undecided (within 0.5 of the limit: read that condition 12 more times)" if abs(gap - limit) <= 0.5 else yes if gap <= limit else no
         return f"{a} - {b} = {gap:+.1f} points (limit {limit:.1f}): {call}"
 
+    if "L30" in means:  # the second pass (M-28): clips the app fed to the encoder from the camera's unsmoothed output
+        return [
+            "F1 G4, the size as placed  " + against("L30", "N", 2.0, "pass", "fail"),
+            "F2 encoder, the worn size  " + against("Fh", "Ns", 2.0, "the encoder keeps it", "lost in the encoder"),
+            "F2 the same at 2 bits      " + against("Fh2", "Ns", 2.0, "the encoder keeps it", "lost in the encoder"),
+            "F2b sampling, a still page " + against("Ns", "N", 2.0, "half size is fine enough even without movement", "needs the finer grid a moving head gives, or the paper's own pixels"),
+            "F3 one second of light     " + against("L30-30", "N", 2.0, "30 frames are enough here", "more than 30 frames"),
+            "F4 bit rate                " + against("L30low", "L30", 1.0, "take the lower bit rate", "keep the higher bit rate"),
+            "F5 sixty frames a second   " + against("L60", "L30", 2.0, "keep 60 a second as a candidate", "drop 60 a second"),
+        ]
     lines = [
         "1 G4 at the worn size   " + against("F-208", "N", 2.0, "pass", "fail"),
         "2 encoder, small print  " + against("F-208", "Ns", 2.0, "the encoder and the gathering keep it", "lost in recording or gathering"),
@@ -467,7 +477,8 @@ def cmd_reads(asked: argparse.Namespace) -> int:
             print(f"{name}: {[tile.size for tile, _ in tiles]}")
         return 0
     if asked.step == "run":
-        assert phone(asked.phone, "getprop ro.serialno").strip() == "ZY22LWGDCV", "not the phone"
+        serial = subprocess.run([ADB, "-s", asked.phone, "shell", "getprop ro.serialno"], capture_output=True, timeout=60, env=ENV).stdout.decode().strip()
+        assert serial == "ZY22LWGDCV", f"{asked.phone} is not the phone"  # asked outside run-as: an app's user cannot read it
         ready = [name for name in names if (reads / name / "prompt.txt").exists()]
         packed = subprocess.run(["tar", "-C", str(reads), "-cf", "-", "--exclude=out-*", "--exclude=err-*", *ready], capture_output=True, check=True).stdout
         subprocess.run([ADB, "-s", asked.phone, "exec-in", f"run-as com.termux sh -c 'mkdir -p {PHONE_HOME}/codex-trial/s2/{WORK.name} && cd {PHONE_HOME}/codex-trial/s2/{WORK.name} && tar -xf -'"],
@@ -511,6 +522,9 @@ def cmd_reads(asked: argparse.Namespace) -> int:
               f"{' '.join(f'{value:.1f}' for value in apart)} %")
         return 0
     if asked.step in ("run", "score"):
+        if not (PRIVATE / "reference_text.txt").exists():
+            print("no reference text yet: `reads reference` makes it from the reads of N")
+            return 0
         reference = (PRIVATE / "reference_text.txt").read_text(encoding="utf-8")
         means, lines = {}, []
         for name in names:
@@ -548,6 +562,9 @@ def demo() -> None:
     assert "pass" in called[0] and "keep it" in called[1] and "fine enough" in called[2] and "kept" in called[3], called
     assert "F-208" in called[4].split(";")[0] and "F-52" in called[4].split(";")[1] and "lower" in called[5] and "drop" in called[6], called
     assert "undecided" in verdicts({"N": 2.0, "F-208": 4.3})[0]
+    fed = verdicts({"N": 1.0, "Ns": 6.0, "L30": 1.5, "L30-30": 2.0, "L30low": 1.6, "L60": 5.0, "Fh": 6.5})
+    assert "pass" in fed[0] and "keeps it" in fed[1] and "not measured" in fed[2] and "finer grid" in fed[3] and "enough" in fed[4], fed
+    assert "lower" in fed[5] and "drop" in fed[6], fed
     lines = np.full((400, 600), 0.5, np.float32)
     lines[:, np.arange(600) % 40 < 20] = 0.1  # print every 40 px across, nothing regular down
     assert abs(pitch(lines)[0] - 40) < 1.5 and pitch(lines)[1] == 0.0, pitch(lines)
