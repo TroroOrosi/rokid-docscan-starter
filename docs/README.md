@@ -103,7 +103,7 @@ what the platform permits.
 - `tasks/plan.md` — current rationalized plan first; superseded plans preserved in a historical section.
 - `tasks/todo.md` — current W work and acceptance conditions; earlier RP/CQ checkboxes are history.
 - `docs/superpowers/plans/2026-11-15-gathered-capture-stage1.md` — 撮影の作り直しの段階1の実施計画（2026-11-15、承認済みの設計に対する計画）。
-  重ね合わせのモジュール、計測アプリの拡張、机上の測定と合格条件 G1〜G3 の判定。PC・スマホ・机上のグラスだけで、掛けない。
+  重ね合わせのモジュール、計測アプリの拡張、机上の測定と合格条件 G1〜G3 の判定。PC・スマホ・机上のグラスだけで、掛けない。実施済み（結果は §M-26）。
 - `docs/requirements-audit.md` — 現在の要望・会話中の変更・比較候補と到達点。旧採否・順序は折り畳んだ履歴。
   旧FS/R/S/Xの対応と2026-09-15の調査履歴も保持。実装／物理受け入れの完了ではない。
 - `docs/defect-register.md` — 欠陥一覧と直す順序（2026-11-13 作成、現行の作業台帳）。製品全体を4系統で調べた結果と
@@ -114,9 +114,9 @@ what the platform permits.
   （2026-11-12、**未承認・未実装**）。露光を頭の動きに合わせ、視界ごとに原寸の複数候補から1枚を残す。
 - `docs/superpowers/specs/2026-11-14-line-of-sight-capture-design.md` — 撮影の設計提案（目線に合う範囲・表示位置・装着して撮れる撮り方）。
   **承認依頼は取り下げ（2026-11-14 夜）**。未実装。全体の見直しの後に作り直す。
-- `docs/superpowers/specs/2026-11-15-gathered-capture-design.md` — 撮影の設計提案（2026-11-15、**未承認・未実装**）。
+- `docs/superpowers/specs/2026-11-15-gathered-capture-design.md` — 撮影の設計（2026-11-15、本人が承認。段階1を実施済み、グラスのアプリは未実装）。
   暗い会場で読める頁を残すために、見ている紙を頁ごとに数秒録り、スマホでフレームを選んで位置を合わせて足す。
-  目線の枠と表示位置を含む。机上と PC の測定（§M-25）に基づき、装着での確認はない。上の 11/14 の設計を置き換える。
+  目線の枠と表示位置を含む。机上と PC の測定（§M-25、§M-26）に基づき、装着での確認はない。上の 11/14 の設計を置き換える。
   実写19枚の集計、外部の製品・研究の出典、方式比較、装着者に頼む前の検証を含む。装着での確認はない。
 - `docs/fast-scan-decisions.md` — automatic/manual scan and listening decisions.
   The current implementation is described in `docs/multimodal-scan.md`.
