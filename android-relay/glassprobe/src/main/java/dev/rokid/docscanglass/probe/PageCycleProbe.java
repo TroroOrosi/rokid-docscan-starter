@@ -41,8 +41,11 @@ import java.util.List;
  * {@code expose=<ns>} (16666666), {@code codec=avc|hevc}, {@code bitrate=} (20000000). ISO is 800 and the digital gain
  * is what gives the watch's brightness at that exposure, within the camera's 1x to 32x.
  *
- * <p>Each page logs the time from asking for the rebuild to the first recorded frame's result, the time the stop took,
- * and the time back to the first preview frame. With {@code keep}, the first {@code keepclips=<m>} (3) clips stay in
+ * <p>Each page logs the time from asking for the rebuild to the first recorded frame's result (and, inside it, to the
+ * prepared encoder and to the configured session), the time the stop took, and the time back to the first preview frame.
+ * With {@code mark}, a page starts at half its digital gain and goes to the full gain when the first result arrives: the
+ * step in brightness is then at a known capture result, which ties the clip's frames to the results without relying on
+ * their times. With {@code keep}, the first {@code keepclips=<m>} (3) clips stay in
  * the cache as {@code probe-clip-<k>.mp4} beside {@code probe-clip-<k>.json}, which lists every capture result's
  * sensor timestamp. With {@code texture}, the display stream goes to a {@link TextureView} and a bitmap is read back
  * five times a second, to learn whether the app can draw from it while recording.
@@ -80,6 +83,10 @@ final class PageCycleProbe {
     private Surface textureSurface;
     private TotalCaptureResult lastWatch;
     private final List<Long> stamps = new ArrayList<>();
+    private final List<Integer> gains = new ArrayList<>();
+    private final boolean mark;
+    private long preparedMillis;
+    private long configuredMillis;
     private int page;
     private int boost;
     private boolean closed;
@@ -111,6 +118,7 @@ final class PageCycleProbe {
         hevc = !"avc".equals(CameraProbe.option("codec"));
         exposureNanos = number("expose", 16_666_666);
         keepClips = CameraProbe.option("keep") == null ? 0 : (int) number("keepclips", 3);
+        mark = CameraProbe.option("mark") != null;
     }
 
     private static long number(String name, long fallback) {
@@ -199,7 +207,8 @@ final class PageCycleProbe {
         long back = SystemClock.elapsedRealtime() - backAskedAt;
         if (page > 0) {
             Log.i(TAG, "camera probe page=" + page + " rebuild_ms=" + rebuildMillis + " stop_ms=" + stopMillis + " back_ms=" + back
-                    + " results=" + stamps.size() + " bytes=" + clipBytes + " boost=" + boost);
+                    + " results=" + stamps.size() + " bytes=" + clipBytes + " boost=" + boost + " prepare_ms=" + preparedMillis
+                    + " configured_ms=" + configuredMillis);
         }
         if (page >= pages) {
             finish(true, "cycle " + pages + " pages in " + (SystemClock.elapsedRealtime() - startedAt) + "ms variant=["
@@ -225,13 +234,16 @@ final class PageCycleProbe {
             recorder.setVideoEncodingBitRate(bitrate);
             recorder.setOutputFile(clip.getAbsolutePath());
             recorder.prepare();
+            preparedMillis = SystemClock.elapsedRealtime() - rebuildAskedAt;
             firstResultSeen = false;
             stamps.clear();
+            gains.clear();
             boost = gain();
             device.createCaptureSession(Arrays.asList(recorder.getSurface(), textureSurface), new CameraCaptureSession.StateCallback() {
                 @Override public void onConfigured(CameraCaptureSession configured) {
                     if (closed) return;
                     session = configured;
+                    configuredMillis = SystemClock.elapsedRealtime() - rebuildAskedAt;
                     try {
                         CaptureRequest.Builder request = device.createCaptureRequest(CameraDevice.TEMPLATE_RECORD);
                         request.addTarget(recorder.getSurface());
@@ -245,17 +257,29 @@ final class PageCycleProbe {
                         request.set(CaptureRequest.CONTROL_POST_RAW_SENSITIVITY_BOOST, boost);
                         request.set(CaptureRequest.NOISE_REDUCTION_MODE, CaptureRequest.NOISE_REDUCTION_MODE_OFF);
                         request.set(CaptureRequest.EDGE_MODE, CaptureRequest.EDGE_MODE_OFF);
+                        CaptureRequest full = request.build();
+                        request.set(CaptureRequest.CONTROL_POST_RAW_SENSITIVITY_BOOST, Math.max(100, boost / 2));
+                        CaptureRequest dim = request.build();
                         recorder.start();
-                        configured.setRepeatingRequest(request.build(), new CameraCaptureSession.CaptureCallback() {
+                        configured.setRepeatingRequest(mark ? dim : full, new CameraCaptureSession.CaptureCallback() {
                             @Override public void onCaptureCompleted(CameraCaptureSession source, CaptureRequest asked,
                                     TotalCaptureResult result) {
                                 if (source != session || closed) return;
                                 Long stamp = result.get(CaptureResult.SENSOR_TIMESTAMP);
+                                Integer gain = result.get(CaptureResult.CONTROL_POST_RAW_SENSITIVITY_BOOST);
                                 stamps.add(stamp == null ? -1L : stamp);
+                                gains.add(gain == null ? -1 : gain);
                                 if (!firstResultSeen) {
                                     firstResultSeen = true;
                                     rebuildMillis = SystemClock.elapsedRealtime() - rebuildAskedAt;
                                     handler.postDelayed(PageCycleProbe.this::stopRecording, recordMillis);
+                                    if (mark) {
+                                        try {
+                                            source.setRepeatingRequest(full, this, handler);
+                                        } catch (CameraAccessException | RuntimeException error) {
+                                            fail("full gain " + error.getClass().getSimpleName());
+                                        }
+                                    }
                                 }
                             }
                         }, handler);
@@ -301,7 +325,9 @@ final class PageCycleProbe {
         if (page <= keepClips) {
             StringBuilder json = new StringBuilder("{\"page\":").append(page).append(",\"exposure_ns\":").append(exposureNanos)
                     .append(",\"iso\":800,\"boost\":").append(boost).append(",\"frame_ns\":").append(1_000_000_000L / fps)
-                    .append(",\"rebuild_ms\":").append(rebuildMillis).append(",\"stop_ms\":").append(stopMillis).append(",\"results\":[");
+                    .append(",\"rebuild_ms\":").append(rebuildMillis).append(",\"stop_ms\":").append(stopMillis).append(",\"gains\":[");
+            for (int i = 0; i < gains.size(); i++) json.append(i == 0 ? "" : ",").append(gains.get(i));
+            json.append("],\"results\":[");
             for (int i = 0; i < stamps.size(); i++) json.append(i == 0 ? "" : ",").append(stamps.get(i));
             try (FileOutputStream out = new FileOutputStream(new File(context.getCacheDir(), "probe-clip-" + page + ".json"))) {
                 out.write(json.append("]}").toString().getBytes(StandardCharsets.UTF_8));
