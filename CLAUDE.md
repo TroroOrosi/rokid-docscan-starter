@@ -204,11 +204,17 @@ lines lie, both failed to tell what the model would read. The booklet's
 characters (24 px apart) are 1.25 times the median of nine worn photos and 1.58
 times the smallest; in those photos a spread spans 50-70% of the frame's width
 and lies below its centre, and the camera crops at its centre only, so the app
-has to find and cut the paper. Not decided: the worn distance and a moving head
-(conditions made from the direct frames were being read when the phone's
-wireless adb dropped at 22:05; their results are still on the phone), the
-change of brightness over a stream's first 2.3 s, figures, horizontal text,
-single large sheets. Nothing of this is in `:glassdoc` or the server's route
+has to find and cut the paper. Half size with a moving head, the form the
+design counted on, was stood for by shifting and reducing the direct frames to
+the smallest worn size: 60.7% through the glasses' encoder and 6.7% without it,
+so that form is dropped (the 2.3% of §M-25 came from a bright photo with noise
+added). At that size the paper's own pixels read 3.2% without an encoder;
+through the encoder is not decided (those reads were under way when the phone's
+wireless debugging went off, as it does whenever its Wi-Fi blinks: 22:12 and
+again before 22:50; the reads go on inside the phone, and the PC cannot turn it
+back on). The recording needs 0.66 bit a pixel a frame or more. Not decided
+either: a worn head's real movement, the change of brightness over a stream's
+first 2.3 s, figures, horizontal text, single large sheets. Nothing of this is in `:glassdoc` or the server's route
 yet; the change of form waits for the operator's approval. What it rests on, measured on the desk and the PC on 2026-11-15 (§M-25):
 the 2016x1512 stream is the whole field at half size and the only whole-field
 size at 60 frames a second; streaming it heats the glasses by 17.7 C in 150 s
@@ -220,9 +226,10 @@ at 30 a second heats by 15.7 C; video compression keeps what adding needs
 not of the glasses' video output, see above); textbook phase correlation cannot place frames this noisy and a
 band-passed correlation against the running sum can; half-size frames read as
 well as full-size ones only when added on a finer grid (simulated, six reads
-each: 2.3% against 3.3%, and 21.2% without the finer grid). Unmeasured: placing
-on a worn head, the finer grid on real frames of a moving head, recording
-and sending at once, clips of ten seconds. The paragraph below holds
+each: 2.3% against 3.3%, and 21.2% without the finer grid; with real dark
+frames shifted to stand for a moving head it was 6.7% against 3.2%, §M-28).
+Unmeasured: placing on a worn head, recording and sending at once, clips of
+ten seconds. The paragraph below holds
 for bright photos only.
 
 What a page needs to be read, measured on the phone with worn photos of one page

@@ -7,8 +7,9 @@ glasses therefore record a few seconds of short exposures a page and this module
 
 - Frames are placed by a band-passed correlation against the sum of the frames already placed. Textbook phase
   correlation, which weights every frequency alike, misplaced 21 to 29 of 29 real frames this noisy.
-- Frames are added on a grid finer than their own pixels, at sub-pixel positions. Half-size frames gathered that way
-  read like full-size ones (2.3% of characters wrong against 3.3%); added on their own grid they do not (21.2%).
+- Frames are added on a grid finer than their own pixels, at sub-pixel positions. On a bright photo with noise added,
+  half-size frames gathered that way read like full-size ones (2.3% of characters wrong against 3.3%; 21.2% on their
+  own grid). On real dark frames the finer grid helped less (6.7% against 3.2% for the paper's own pixels, M-28).
 
 The result is an average of measured light. Nothing is generated, sharpened or filled in from a model.
 """
