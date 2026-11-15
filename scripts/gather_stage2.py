@@ -407,6 +407,13 @@ def verdicts(means: dict[str, float]) -> list[str]:
             "F3 one second of light     " + against("L30-30", "N", 2.0, "30 frames are enough here", "more than 30 frames"),
             "F4 bit rate                " + against("L30low", "L30", 1.0, "take the lower bit rate", "keep the higher bit rate"),
             "F5 sixty frames a second   " + against("L60", "L30", 2.0, "keep 60 a second as a candidate", "drop 60 a second"),
+            *("F6 the paper's own pixels, " + against(name, "N", 2.0, "pass", "fail") for name in ("C03", "C05", "C13") if name in means),
+            # the third ruling: the worn distance stood for by reducing the direct frames, a moving head by shifting them
+            *("G-A half size, worn, moving " + against(name, "N", 2.0, "pass", "fail") for name in ("Mwe", "Mwe10") if name in means),
+            *("G-B own pixels, worn, still " + against(name, "N", 2.0, "pass", "fail") for name in ("Cw03", "Cw05", "Cw13") if name in means),
+            *(f"    {what}: {a} - {b} = {means[a] - means[b]:+.1f} points" for what, a, b in (
+                ("the encoder's part, half size moving", "Mwe", "Mw"), ("the encoder's part, own pixels", "Cw05", "Nw"),
+                ("half size, as placed, still", "Nh", "N"), ("the encoder's part of L30", "L30", "Nh")) if a in means and b in means),
         ]
     lines = [
         "1 G4 at the worn size   " + against("F-208", "N", 2.0, "pass", "fail"),
@@ -487,7 +494,7 @@ def cmd_reads(asked: argparse.Namespace) -> int:
         lanes = [jobs[k::asked.lanes] for k in range(asked.lanes)]
         running = []
         for index, lane in enumerate(lanes):
-            script = LANE.replace("PORT", str(18082 + index)).replace("JOBS", " ".join(lane)).replace("RUN", WORK.name)
+            script = LANE.replace("PORT", str(asked.port + index)).replace("JOBS", " ".join(lane)).replace("RUN", WORK.name)
             running.append(subprocess.Popen([ADB, "-s", asked.phone, "shell", "run-as com.termux sh -s"], stdin=subprocess.PIPE,
                                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=ENV))
             running[-1].stdin.write((f"export PREFIX=/data/data/com.termux/files/usr HOME={PHONE_HOME}\n"
@@ -565,6 +572,8 @@ def demo() -> None:
     fed = verdicts({"N": 1.0, "Ns": 6.0, "L30": 1.5, "L30-30": 2.0, "L30low": 1.6, "L60": 5.0, "Fh": 6.5})
     assert "pass" in fed[0] and "keeps it" in fed[1] and "not measured" in fed[2] and "finer grid" in fed[3] and "enough" in fed[4], fed
     assert "lower" in fed[5] and "drop" in fed[6], fed
+    worn = verdicts({"N": 1.6, "L30": 8.4, "Nh": 3.0, "Mw": 2.5, "Mwe": 9.0, "Cw05": 3.0, "Nw": 2.8})
+    assert "G-A" in worn[-6] and "fail" in worn[-6] and "G-B" in worn[-5] and "pass" in worn[-5] and "+6.5" in worn[-4] and "+5.4" in worn[-1], worn
     lines = np.full((400, 600), 0.5, np.float32)
     lines[:, np.arange(600) % 40 < 20] = 0.1  # print every 40 px across, nothing regular down
     assert abs(pitch(lines)[0] - 40) < 1.5 and pitch(lines)[1] == 0.0, pitch(lines)
@@ -590,6 +599,7 @@ def main() -> int:
     reads.add_argument("--phone", help="adb transport of the phone")
     reads.add_argument("--reads", type=int, default=12)
     reads.add_argument("--lanes", type=int, default=3)
+    reads.add_argument("--port", type=int, default=18082, help="first proxy port on the phone; a second run at the same time takes another")
     reads.add_argument("--only")
     asked = parser.parse_args()
     global GLASSES, WORK
