@@ -94,6 +94,7 @@ final class CameraProbe {
     /** Where the display stream of a {@code pages=} cycle is drawn, when the variant asks for {@code texture}. */
     static android.view.TextureView display;
     private PageCycleProbe cycle;
+    private FeedProbe feed;
 
     private long streamUntil;
     private int streamFrames, streamSecond, streamSecondFrames, streamWorked, streamResults;
@@ -194,6 +195,30 @@ final class CameraProbe {
     void captureOnce() {
         settled = false;
         startedAtMillis = SystemClock.elapsedRealtime();
+        if (option("encode") != null) { // frames from a file through the encoder: no camera at all
+            new Thread(() -> {
+                String detail;
+                boolean ok = true;
+                try {
+                    detail = EncodeProbe.run(context);
+                } catch (java.io.IOException | RuntimeException error) {
+                    detail = "encode " + error;
+                    ok = false;
+                    Log.i(TAG, "camera probe FAILED " + detail);
+                }
+                final String said = detail;
+                final ProbeReport.Status status = ok ? ProbeReport.Status.OK : ProbeReport.Status.FAILED;
+                handler.post(() -> callback.onCameraResult(status, said));
+            }, "probe-encode").start();
+            return;
+        }
+        if (option("feed") != null) { // the camera's YUV output copied into the encoder by the app
+            if (feed != null) feed.close();
+            feed = new FeedProbe(context, handler, (ok, detail) ->
+                    callback.onCameraResult(ok ? ProbeReport.Status.OK : ProbeReport.Status.FAILED, detail));
+            feed.start();
+            return;
+        }
         if (option("pages") != null) { // the watch-and-record cycle has its own camera handling and no time limit of this class
             if (cycle != null) cycle.close();
             cycle = new PageCycleProbe(context, handler, display, (ok, detail) ->
@@ -283,6 +308,7 @@ final class CameraProbe {
     /** Releases every camera resource and deletes the captured file. */
     void close() {
         if (cycle != null) { cycle.close(); cycle = null; }
+        if (feed != null) { feed.close(); feed = null; }
         handler.removeCallbacks(timeout);
         closeQuietly();
         if (option("keep") == null && captured != null && captured.exists() && !captured.delete()) {
