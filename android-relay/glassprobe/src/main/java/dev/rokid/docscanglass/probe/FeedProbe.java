@@ -100,6 +100,8 @@ final class FeedProbe {
     private long cycleStartedAt;
     private String pageLine;
     private boolean ending;  // the last clip's encoder is still being ended, off this thread
+    private final Object lock = new Object();  // the encoder and the counters, between the frames' thread and the camera's
+    private android.os.HandlerThread framesThread;
     private long watchingAt;
     private long backMillis;
 
@@ -150,7 +152,11 @@ final class FeedProbe {
             preview = ImageReader.newInstance(320, 240, ImageFormat.YUV_420_888, 2);
             preview.setOnImageAvailableListener(this::onPreview, handler);
             reader = ImageReader.newInstance(width, height, ImageFormat.YUV_420_888, width * height > 6_000_000 ? 3 : 4);  // a full-size frame is 18 MB
-            reader.setOnImageAvailableListener(this::onImage, handler);
+            // The frames come on a thread of their own. On the camera's thread they were not taken while that thread
+            // waited for a session to change; the camera could then not drain, and hung until the glasses were restarted (M-29).
+            framesThread = new android.os.HandlerThread("probe-frames");
+            framesThread.start();
+            reader.setOnImageAvailableListener(this::onImage, new Handler(framesThread.getLooper()));
             Log.i(TAG, "camera probe feed " + width + "x" + height + " out=" + outWidth + "x" + outHeight + " cut=" + cutX + "x" + cutY + " fps=" + fps
                     + " expose_ns=" + exposureNanos + " boost=" + boost
                     + " bitrate=" + bitrate + " hevc=" + hevc + " crop=" + cropRegion + " pages=" + pages + " watch_ms=" + watchMillis);
@@ -303,6 +309,12 @@ final class FeedProbe {
 
     /** One frame from the camera into the encoder: its brightness plane copied, its colour left grey. */
     private void onImage(ImageReader source) {
+        synchronized (lock) {
+            onImageLocked(source);
+        }
+    }
+
+    private void onImageLocked(ImageReader source) {
         Image image;
         try {
             image = source.acquireNextImage();
@@ -368,7 +380,8 @@ final class FeedProbe {
             codec.queueInputBuffer(in, 0, capacity, (image.getTimestamp() - firstStamp) / 1000, 0);
             fed++;
         } catch (RuntimeException error) {
-            finish(false, "feed " + error);
+            final String detail = "feed " + error;
+            handler.post(() -> finish(false, detail));
         } finally {
             image.close();
             if (!closed && feeding && codec != null) drain(0);  // between pages there is no encoder
@@ -396,7 +409,16 @@ final class FeedProbe {
     }
 
     private void stop() {
-        if (closed || !feeding) return;
+        boolean watchNext;
+        synchronized (lock) {
+            watchNext = stopLocked();
+        }
+        if (watchNext) watch();  // outside the lock: the change of session waits for the camera, and the frames must go on
+    }
+
+    /** @return whether the camera is to go back to watching (page after page) */
+    private boolean stopLocked() {
+        if (closed || !feeding) return false;
         feeding = false;
         long fedFor = SystemClock.elapsedRealtime() - startedAt;
         if (pages > 0) {
@@ -473,8 +495,7 @@ final class FeedProbe {
                     pageDone();
                 });
             }, "probe-encoder-end").start();
-            watch();
-            return;
+            return true;
         }
         long from = SystemClock.elapsedRealtime();
         boolean ended = false;
@@ -486,12 +507,13 @@ final class FeedProbe {
             if (track >= 0) muxer.stop();
         } catch (RuntimeException error) {
             finish(false, "end " + error);
-            return;
+            return false;
         }
         finish(true, "feed " + width + "x" + height + " fps=" + fps + " for_ms=" + fedFor + " images=" + images + " fed=" + fed + " dropped=" + dropped
                 + " results=" + results + " written=" + written + " ended=" + ended + " bytes=" + clip.length() + " copy_us="
                 + (fed == 0 ? 0 : copyNanos / 1000 / fed) + " end_ms=" + (SystemClock.elapsedRealtime() - from) + " " + layout
                 + " out=" + outWidth + "x" + outHeight + " cut=" + cutX + "x" + cutY);
+        return false;
     }
 
     private void finish(boolean ok, String detail) {
@@ -505,16 +527,19 @@ final class FeedProbe {
         closed = true;
         handler.removeCallbacksAndMessages(null);
         if (device != null) { device.close(); device = null; }
-        if (codec != null) { codec.release(); codec = null; }
-        if (muxer != null) {
-            try {
-                muxer.release();
-            } catch (RuntimeException ignored) {
-                // a muxer that never started
+        synchronized (lock) {
+            if (codec != null) { codec.release(); codec = null; }
+            if (muxer != null) {
+                try {
+                    muxer.release();
+                } catch (RuntimeException ignored) {
+                    // a muxer that never started
+                }
+                muxer = null;
             }
-            muxer = null;
+            if (reader != null) { reader.close(); reader = null; }
         }
-        if (reader != null) { reader.close(); reader = null; }
+        if (framesThread != null) { framesThread.quitSafely(); framesThread = null; }
         if (preview != null) { preview.close(); preview = null; }
     }
 }

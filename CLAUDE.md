@@ -1,6 +1,6 @@
 # rokid-docscan-starter development guide
 
-Status: Current engineering contract. Updated 2026-11-15 (night: stage 2 continued, §M-28).
+Status: Current engineering contract. Updated 2026-11-15 (midnight: after the change of form, §M-29).
 
 **Start at `.agents/progress/current.md`.** It lists the operator's decisions,
 the verified state and the next steps. Do not re-ask what it settles. Then read
@@ -217,7 +217,22 @@ distance and the recording 0.66 bit a pixel a frame or more. **The operator
 approved the change of form on 2026-11-15 (night): record only the line-of-sight
 frame, in the sensor's own pixels, cut by the app out of the full-size stream,
 with a guide to distance; the whole field at half size and the camera's video
-output are dropped.** Not built yet. The phone's wireless debugging goes off whenever its
+output are dropped.** Not built yet. Measured after the approval, page after
+page as the app would (§M-29): the full-size stream leaves 165-305 MB of memory
+free while it records (1.8 GB device), and forty pages of it failed at the
+ninth, the system killing the real app in the background on the way; **the
+half-size stream at zoom 2, which is the centre of the field in the sensor's
+own pixels (2016x1512), leaves 530 MB free and levelled the board near 45 C**,
+so the frame becomes the centre of the field at single-page size and a spread no
+longer fits one clip. After a spell of watching, a clip's brightness is steady
+from its first frames (the first six at zoom 2). **A camera whose frames are not
+taken while a session change waits for it hangs inside the camera service, and
+nobody can open it again until the glasses restart**: the measurement app did
+that on its 29th page (frames and session changes on one thread, held by ending
+a clip). In the app, frames are taken on a thread of their own, always, and a
+clip is never ended on the camera's thread. Not yet done: forty pages to the
+end with the corrected measurement app, and the read of a page recorded at
+zoom 2 (the plan's fourth ruling). The phone's wireless debugging goes off whenever its
 Wi-Fi blinks (22:12 and 22:50 that night) and cannot be turned back on from the
 PC; reads started over it go on inside the phone. Not decided: a worn head's
 real movement, the median worn size, the change of brightness over a stream's
