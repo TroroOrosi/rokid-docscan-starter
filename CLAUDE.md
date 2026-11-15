@@ -1,6 +1,6 @@
 # rokid-docscan-starter development guide
 
-Status: Current engineering contract. Updated 2026-11-15 (midnight: after the change of form, §M-29).
+Status: Current engineering contract. Updated 2026-11-16 (the form of the capture is settled, §M-29; stage 3 is being built).
 
 **Start at `.agents/progress/current.md`.** It lists the operator's decisions,
 the verified state and the next steps. Do not re-ask what it settles. Then read
@@ -225,19 +225,30 @@ half-size stream at zoom 2, which is the centre of the field in the sensor's
 own pixels (2016x1512), leaves 530 MB free and levelled the board near 45 C**,
 so the frame becomes the centre of the field at single-page size and a spread no
 longer fits one clip. After a spell of watching, a clip's brightness is steady
-from its first frames (the first six at zoom 2). **A camera whose frames are not
-taken while a session change waits for it hangs inside the camera service, and
-nobody can open it again until the glasses restart**: the measurement app did
-that on its 29th page (frames and session changes on one thread, held by ending
-a clip). In the app, frames are taken on a thread of their own, always, and a
-clip is never ended on the camera's thread. Not yet done: forty pages to the
-end with the corrected measurement app, and the read of a page recorded at
-zoom 2 (the plan's fourth ruling). The phone's wireless debugging goes off whenever its
-Wi-Fi blinks (22:12 and 22:50 that night) and cannot be turned back on from the
-PC; reads started over it go on inside the phone. Not decided: a worn head's
-real movement, the median worn size, the change of brightness over a stream's
-first 2.3 s, figures, horizontal text, single large sheets. Nothing of this is in `:glassdoc` or the server's route
-yet; the change of form waits for the operator's approval. What it rests on, measured on the desk and the PC on 2026-11-15 (§M-25):
+from its first frames (the first six at zoom 2). **The form is settled (§M-29, 2026-11-16): the half-size stream at zoom 2, manual
+30 ms, digital gain at most 5.0, 95 Mbit/s (about 1.35 bit a pixel a frame), one
+short clip a page (60 frames after the first six, about 40 MB).** In that shape
+forty pages ran on the desk with no frame dropped, 1.14 s to the first frame,
+0.61 s back to watching, the board level at 46-47 C and the real app left alone;
+a page gathered from such a clip read 3.1% wrong against 2.0% for the direct
+frames (twelve reads each). What the camera taught on the way, each from a
+failure: (1) a session must be changed only after `stopRepeating()` and that
+session's `onReady`; changed at once, frames in flight get no buffer and the
+camera fails to drain (after 16 and after 28 pages); waiting also halves the time
+to the first frame; (2) frames are taken on a thread other than the one that
+changes sessions; on one thread a failed change left the camera service hung
+until the glasses were restarted, on two it could be reopened; (3) above a
+digital gain of about 5.5 this stream lifts its blacks (and the gain stops near
+7): pages read 4.1-6.8% there; (4) giving a tone curve (`TONEMAP_MODE`) makes
+the camera fail; (5) the glasses write about 9 MB a second: 95 Mbit/s for five
+seconds a page could not be kept up for forty pages, three seconds could; at 50
+Mbit/s the page read 5.7%; (6) the full-size stream with a single-page part ran
+forty pages but took the board to 52.4 C. Stage 3 (plan in
+`docs/superpowers/plans/`) builds this beside the still camera, which stays:
+`ClipCamera` in `:glassdoc`, one frame of the clip as the page through the flow
+every photo takes, the clip sent after it and gathered on the phone into the
+page's image. Not measured: the venue's light with the gain held at 5.0 (the
+paper comes out darker still), a worn head, figures, horizontal text. What it rests on, measured on the desk and the PC on 2026-11-15 (§M-25):
 the 2016x1512 stream is the whole field at half size and the only whole-field
 size at 60 frames a second; streaming it heats the glasses by 17.7 C in 150 s
 with no work done and 24.9 C with one Java pass over each frame, which alone
