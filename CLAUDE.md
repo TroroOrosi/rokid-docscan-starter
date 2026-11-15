@@ -1,6 +1,6 @@
 # rokid-docscan-starter development guide
 
-Status: Current engineering contract. Updated 2026-11-15 (evening: stage 2 of the gathered capture, §M-27).
+Status: Current engineering contract. Updated 2026-11-15 (night: stage 2 continued, §M-28).
 
 **Start at `.agents/progress/current.md`.** It lists the operator's decisions,
 the verified state and the next steps. Do not re-ask what it settles. Then read
@@ -182,19 +182,34 @@ back to watching first and the recorder stopped off its thread (0.7-1.2 s, 20 of
 design's first choice as built.** What the camera hands the hardware encoder is
 already smoothed whatever is asked (noise reduction off, the camera's own
 video-denoise keys, either codec, 57 or 140 Mbit/s: eight settings). A clip's
-frame keeps 7-13% of the print's stroke-sized detail and a quarter of the noise
-that reducing alone leaves; 288 gathered frames cannot be read where the mean of
-20 direct frames can. Encoders themselves keep the print (x264/x265 on the PC,
-1.00 at the same 0.4 bit a pixel a frame). The 132 model reads planned were not
-run. Next to measure: frames of an output without that smoothing (YUV) handed to
-the encoder by the app; failing that, adding on the glasses. The same page
-showed that `app/gather.py` dropped well-placed frames of regular print (the
-peak was judged against the print's own repeats; fixed, floors re-measured),
-that a spread at reading distance is about 16% of the whole field, and that
-taking full-size stills in a row ran the glasses out of memory and got the real
-app killed and restarted. The booklet stood nearer than a page is read from
-(characters 24 px apart against 15.8 in the worn reference photo). Nothing of
-this is in `:glassdoc` or the server's route yet. What it rests on, measured on the desk and the PC on 2026-11-15 (§M-25):
+frame keeps almost none of the print's stroke-sized detail (0.02-0.03 of its
+amplitude, §M-28) and a quarter of the noise that reducing alone leaves; 288
+gathered frames cannot be read where the mean of 20 direct frames can. Encoders
+themselves keep the print (x264/x265 on the PC). The same page showed that
+`app/gather.py` dropped well-placed frames of regular print (the peak was judged
+against the print's own repeats; fixed, floors re-measured) and that taking
+full-size stills in a row ran the glasses out of memory and got the real app
+killed and restarted. **Stage 2 continued the same evening (§M-28): the app
+copies the camera's YUV frames into the hardware encoder itself** (measurement
+app only; no frame dropped, a clip ends in 0.1-0.4 s, heat as the video path).
+Read by the model twelve times a condition, the rule fixed before the runs, on
+the page as placed and not moving: the mean of 60 direct full-size frames 1.6%
+of characters wrong; the whole field recorded at half size 8.4% (fails), 32%
+with one second of light, 40% at half the bit rate, 81% at 60 frames a second;
+**the paper's own pixels, cut by the app out of the full-size stream and
+recorded, 2.9% (passes).** That stream gives 21-24 frames a second, not 30, and
+heats no more for a 1920x1080 part (4 C more for 2688x2016). Pictures that
+looked readable to the eye, and a first measure that followed only where the
+lines lie, both failed to tell what the model would read. The booklet's
+characters (24 px apart) are 1.25 times the median of nine worn photos and 1.58
+times the smallest; in those photos a spread spans 50-70% of the frame's width
+and lies below its centre, and the camera crops at its centre only, so the app
+has to find and cut the paper. Not decided: the worn distance and a moving head
+(conditions made from the direct frames were being read when the phone's
+wireless adb dropped at 22:05; their results are still on the phone), the
+change of brightness over a stream's first 2.3 s, figures, horizontal text,
+single large sheets. Nothing of this is in `:glassdoc` or the server's route
+yet; the change of form waits for the operator's approval. What it rests on, measured on the desk and the PC on 2026-11-15 (§M-25):
 the 2016x1512 stream is the whole field at half size and the only whole-field
 size at 60 frames a second; streaming it heats the glasses by 17.7 C in 150 s
 with no work done and 24.9 C with one Java pass over each frame, which alone
@@ -206,7 +221,7 @@ not of the glasses' video output, see above); textbook phase correlation cannot 
 band-passed correlation against the running sum can; half-size frames read as
 well as full-size ones only when added on a finer grid (simulated, six reads
 each: 2.3% against 3.3%, and 21.2% without the finer grid). Unmeasured: placing
-on a worn head, the glasses' encoder fed with unsmoothed frames, recording
+on a worn head, the finer grid on real frames of a moving head, recording
 and sending at once, clips of ten seconds. The paragraph below holds
 for bright photos only.
 

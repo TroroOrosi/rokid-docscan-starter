@@ -35,6 +35,9 @@ import java.util.Collections;
  * stream ({@code still=WxH}, {@code fps=}, manual exposure {@code expose=} at ISO 800 with {@code boost=}), every frame's
  * brightness plane copied into an encoder input buffer, the colour planes left grey (a page is read from its brightness,
  * and grey costs the encoder nothing). {@code feed=<seconds>} records that long into {@code probe-clip-1.mp4}.
+ *
+ * <p>{@code out=WxH,cut=XxY} encodes only that part of each frame, its corner at (X, Y) of the stream: the paper in the
+ * sensor's own pixels out of a full-size stream, wherever it lies (the camera itself crops at its centre only).
  */
 final class FeedProbe {
 
@@ -45,6 +48,10 @@ final class FeedProbe {
     private final PageCycleProbe.Done done;
     private final int width;
     private final int height;
+    private final int outWidth;
+    private final int outHeight;
+    private final int cutX;
+    private final int cutY;
     private final int fps;
     private final int bitrate;
     private final int boost;
@@ -81,6 +88,12 @@ final class FeedProbe {
         String[] wh = (CameraProbe.option("still") == null ? "2016x1512" : CameraProbe.option("still")).split("x");
         width = Integer.parseInt(wh[0]);
         height = Integer.parseInt(wh[1]);
+        String[] out = (CameraProbe.option("out") == null ? width + "x" + height : CameraProbe.option("out")).split("x");
+        outWidth = Integer.parseInt(out[0]);
+        outHeight = Integer.parseInt(out[1]);
+        String[] cut = (CameraProbe.option("cut") == null ? "0x0" : CameraProbe.option("cut")).split("x");
+        cutX = Integer.parseInt(cut[0]);
+        cutY = Integer.parseInt(cut[1]);
         fps = (int) number("fps", 30);
         bitrate = (int) number("bitrate", 27_000_000);
         boost = (int) number("boost", 700);
@@ -106,8 +119,9 @@ final class FeedProbe {
                 crop = new Rect(array.centerX() - w / 2, array.centerY() - h / 2, array.centerX() + w / 2, array.centerY() + h / 2);
             }
             final Rect cropRegion = crop;
+            if (cutX < 0 || cutY < 0 || cutX + outWidth > width || cutY + outHeight > height) throw new IllegalArgumentException("the part lies outside the frame");
             clip = new File(context.getCacheDir(), "probe-clip-1.mp4");
-            MediaFormat format = MediaFormat.createVideoFormat(hevc ? MediaFormat.MIMETYPE_VIDEO_HEVC : MediaFormat.MIMETYPE_VIDEO_AVC, width, height);
+            MediaFormat format = MediaFormat.createVideoFormat(hevc ? MediaFormat.MIMETYPE_VIDEO_HEVC : MediaFormat.MIMETYPE_VIDEO_AVC, outWidth, outHeight);
             format.setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible);
             format.setInteger(MediaFormat.KEY_BIT_RATE, bitrate);
             format.setInteger(MediaFormat.KEY_FRAME_RATE, fps);
@@ -116,9 +130,10 @@ final class FeedProbe {
             codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE);
             codec.start();
             muxer = new MediaMuxer(clip.getAbsolutePath(), MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4);
-            reader = ImageReader.newInstance(width, height, ImageFormat.YUV_420_888, 4);
+            reader = ImageReader.newInstance(width, height, ImageFormat.YUV_420_888, width * height > 6_000_000 ? 3 : 4);  // a full-size frame is 18 MB
             reader.setOnImageAvailableListener(this::onImage, handler);
-            Log.i(TAG, "camera probe feed " + width + "x" + height + " fps=" + fps + " expose_ns=" + exposureNanos + " boost=" + boost
+            Log.i(TAG, "camera probe feed " + width + "x" + height + " out=" + outWidth + "x" + outHeight + " cut=" + cutX + "x" + cutY + " fps=" + fps
+                    + " expose_ns=" + exposureNanos + " boost=" + boost
                     + " bitrate=" + bitrate + " codec=" + codec.getName() + " crop=" + cropRegion);
             manager.openCamera(id, new CameraDevice.StateCallback() {
                 @Override public void onOpened(CameraDevice opened) {
@@ -206,17 +221,18 @@ final class FeedProbe {
             Image.Plane[] to = target.getPlanes();
             ByteBuffer src = from0.getBuffer(), dst = to[0].getBuffer();
             int srcRows = from0.getRowStride(), dstRows = to[0].getRowStride();
-            // One read of the camera's whole plane, then its rows into the encoder's. Measured on the glasses (2016x1512,
-            // the camera pads rows to 2048): row by row through a small array 8.6 ms a frame, buffer to buffer 16.9 ms.
-            int count = Math.min(src.remaining(), srcRows * height);
+            // One read of the rows wanted from the camera's plane, then each into the encoder's. Measured on the glasses
+            // (2016x1512, the camera pads rows to 2048): row by row through a small array 8.6 ms a frame, buffer to buffer 16.9 ms.
+            src.position(cutY * srcRows);
+            int count = Math.min(src.remaining(), srcRows * outHeight);
             if (plane == null || plane.length < count) plane = new byte[count];
             src.get(plane, 0, count);
-            if (srcRows == dstRows) {
+            if (srcRows == dstRows && cutX == 0) {
                 dst.put(plane, 0, Math.min(count, dst.remaining()));
             } else {
-                for (int y = 0; y < height; y++) {
+                for (int y = 0; y < outHeight; y++) {
                     dst.position(y * dstRows);
-                    dst.put(plane, y * srcRows, width);
+                    dst.put(plane, y * srcRows + cutX, outWidth);
                 }
             }
             ByteBuffer u = to[1].getBuffer(), v = to[2].getBuffer();
@@ -283,7 +299,8 @@ final class FeedProbe {
         }
         finish(true, "feed " + width + "x" + height + " fps=" + fps + " for_ms=" + fedFor + " images=" + images + " fed=" + fed + " dropped=" + dropped
                 + " results=" + results + " written=" + written + " ended=" + ended + " bytes=" + clip.length() + " copy_us="
-                + (fed == 0 ? 0 : copyNanos / 1000 / fed) + " end_ms=" + (SystemClock.elapsedRealtime() - from) + " " + layout);
+                + (fed == 0 ? 0 : copyNanos / 1000 / fed) + " end_ms=" + (SystemClock.elapsedRealtime() - from) + " " + layout
+                + " out=" + outWidth + "x" + outHeight + " cut=" + cutX + "x" + cutY);
     }
 
     private void finish(boolean ok, String detail) {
