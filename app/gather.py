@@ -14,10 +14,20 @@ The result is an average of measured light. Nothing is generated, sharpened or f
 """
 from __future__ import annotations
 
+import argparse
+import json
 import math
-from collections.abc import Iterable, Sequence
+import os
+import re
+import shutil
+import subprocess
+import sys
+import threading
+import time
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from functools import lru_cache
+from pathlib import Path
 
 import numpy as np
 
@@ -28,6 +38,11 @@ PART_REACH = 2.0  # frame pixels a part of a frame is searched around the whole 
 PART_OUTLIER = 1.5  # a part placed further than this from the parts' median is left out of the fit
 PARTS_FROM = 4  # frames in the sum before parts are placed against it
 BLOCK = 64  # frame pixels a side: each block is added at the fitted shift of its centre
+DECODE_SECONDS = 120  # a clip of one page is at most ten seconds; a decoder still running after this is stuck
+
+
+class GatherError(RuntimeError):
+    """A clip could not be read. The message says why."""
 
 
 @dataclass(frozen=True)
@@ -193,3 +208,112 @@ def gather(frames: Iterable[np.ndarray], *, smear: Sequence[float] | None = None
             noise = float(difference.std()) / 2
             ratio = float(np.percentile(image[both], 90)) / noise if noise > 0 else 0.0
     return Gathered(image.astype(np.float32), used, total, ratio, used * 2 > usable, selection)
+
+
+def _ffmpeg(binary: str | None) -> str:
+    named = binary or os.environ.get("ROKID_FFMPEG") or "ffmpeg"
+    found = shutil.which(named)
+    if not found:
+        raise GatherError(f"ffmpeg is not available ({named})")
+    return found
+
+
+def _described(binary: str, path: Path) -> tuple[int, int, int | None]:
+    """(width, height, frames) of a clip's video; frames is None when the container does not say."""
+    try:
+        said = subprocess.run([binary, "-hide_banner", "-i", str(path), "-map", "0:v:0", "-c", "copy", "-f", "null", "-"],
+                              capture_output=True, timeout=DECODE_SECONDS, stdin=subprocess.DEVNULL).stderr.decode("utf-8", "replace")
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise GatherError(f"ffmpeg could not read {path.name}: {type(error).__name__}") from error
+    size = re.search(r"Video:.*?\b(\d{2,5})x(\d{2,5})\b", said)
+    if not size:
+        lines = [line.strip() for line in said.splitlines() if line.strip()]
+        raise GatherError(f"ffmpeg found no video in {path.name}: {lines[-1] if lines else 'no output'}")
+    counted = re.findall(r"frame=\s*(\d+)", said)
+    return int(size.group(1)), int(size.group(2)), int(counted[-1]) if counted else None
+
+
+_LIGHT = np.array([(v / 255 / 12.92) if v / 255 <= 0.04045 else ((v / 255 + 0.055) / 1.055) ** 2.4 for v in range(256)], np.float32)
+
+
+def read_clip(path: Path, *, crop: tuple[int, int, int, int] | None = None, ffmpeg: str | None = None, black: float = 0.0) -> Iterator[np.ndarray]:
+    """The frames of a clip as light: luma with the display curve undone and `black` subtracted, never below zero.
+
+    crop is (left, top, width, height) in the clip's pixels. ffmpeg names the binary; by default ROKID_FFMPEG, else
+    `ffmpeg` on the path. Raises GatherError when the binary is missing, the clip cannot be decoded or holds no frame.
+    """
+    path = Path(path)
+    binary = _ffmpeg(ffmpeg)
+    width, height, _ = _described(binary, path)
+    if crop is not None:
+        left, top, width, height = crop
+    command = [binary, "-v", "error", "-i", str(path), "-map", "0:v:0"]
+    if crop is not None:
+        command += ["-vf", f"crop={width}:{height}:{left}:{top}"]
+    process = subprocess.Popen([*command, "-f", "rawvideo", "-pix_fmt", "gray", "-"], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                               stdin=subprocess.DEVNULL)
+    watchdog = threading.Timer(DECODE_SECONDS, process.kill)
+    watchdog.start()
+    count = 0
+    try:
+        while True:
+            raw = process.stdout.read(width * height)
+            if len(raw) < width * height:
+                break
+            count += 1
+            light = _LIGHT[np.frombuffer(raw, np.uint8)].reshape(height, width)
+            yield np.maximum(light - black, 0) if black else light
+        said = process.stderr.read().decode("utf-8", "replace").strip().splitlines()
+        if process.wait() != 0 or count == 0:
+            raise GatherError(f"ffmpeg gave {count} frames of {path.name}: {said[-1] if said else 'no message'}")
+    finally:
+        watchdog.cancel()
+        process.kill()
+        process.stdout.close()
+        process.stderr.close()
+        process.wait()
+
+
+def gather_clip(path: Path, record: dict | None = None, *, crop: tuple[int, int, int, int] | None = None, ffmpeg: str | None = None,
+                black: float = 0.0, **options) -> Gathered:
+    """One recorded page into its image. record is what the glasses wrote beside the clip: record["frames"][k]["smear_px"]
+    chooses the frames when there is one entry a frame; otherwise every frame is offered."""
+    path = Path(path)
+    smear = None
+    listed = record.get("frames") if isinstance(record, dict) else None
+    if isinstance(listed, list) and listed:
+        _, _, frames = _described(_ffmpeg(ffmpeg), path)
+        if frames == len(listed) and all(isinstance(entry, dict) and "smear_px" in entry for entry in listed):
+            smear = [float(entry["smear_px"]) for entry in listed]
+    return gather(read_clip(path, crop=crop, ffmpeg=ffmpeg, black=black), smear=smear, **options)
+
+
+def main(arguments: Sequence[str] | None = None) -> int:
+    """`python -m app.gather clip.mp4 --out page.png`: the page as a 16-bit grey PNG, and one line of JSON about it."""
+    parser = argparse.ArgumentParser(description="Gather one recorded page into an image.")
+    parser.add_argument("clip", type=Path)
+    parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument("--record", type=Path, help="the JSON the glasses wrote beside the clip")
+    parser.add_argument("--crop", help="left,top,width,height in the clip's pixels")
+    parser.add_argument("--black", type=float, default=0.0, help="light to subtract from every pixel")
+    asked = parser.parse_args(arguments)
+    started = time.monotonic()
+    try:
+        record = json.loads(asked.record.read_text(encoding="utf-8")) if asked.record else None
+        crop = tuple(int(value) for value in asked.crop.split(",")) if asked.crop else None
+        result = gather_clip(asked.clip, record, crop=crop, black=asked.black)
+    except (GatherError, OSError, ValueError) as error:
+        print(json.dumps({"error": str(error)}))
+        return 1
+    if result.used:
+        from PIL import Image
+
+        white = float(np.percentile(result.image, 99.5)) or 1.0
+        Image.fromarray(np.round(np.clip(result.image / white, 0, 1) * 65535).astype(np.uint16)).save(asked.out)
+    print(json.dumps({"used": result.used, "total": result.total, "level_over_noise": round(result.level_over_noise, 2),
+                      "placed": result.placed, "selection": result.selection, "seconds": round(time.monotonic() - started, 2)}))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

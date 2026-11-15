@@ -10,6 +10,9 @@ The scenes here are generated: print-like strokes on paper. No photograph is use
 """
 from __future__ import annotations
 
+import shutil
+import subprocess
+
 import pytest
 
 np = pytest.importorskip("numpy")
@@ -142,3 +145,53 @@ def test_a_tilted_head_is_followed_part_by_part():
     fitted = g.gather(fs, parts=3)
     assert fitted.placed and fitted.used >= 55
     assert alike(fitted.image, s) > alike(whole.image, s) + 0.01
+
+
+def clip(tmp_path, fs, name="c.mp4"):
+    """The frames as a video a camera would have written: 8 bits through the display curve, H.264."""
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        pytest.skip("ffmpeg is not installed")
+    h, w = fs[0].shape
+    raw = b"".join((np.clip(np.where(f <= 0.0031308, f * 12.92, 1.055 * np.maximum(f, 1e-9) ** (1 / 2.4) - 0.055), 0, 1) * 255 + 0.5)
+                   .astype(np.uint8).tobytes() for f in fs)
+    target = tmp_path / name
+    subprocess.run([ffmpeg, "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "gray", "-s", f"{w}x{h}", "-r", "30", "-i", "-",
+                    "-c:v", "libx264", "-crf", "12", "-pix_fmt", "yuv420p", str(target)], input=raw, check=True)
+    return target
+
+
+def test_a_clip_round_trips_into_a_page(tmp_path):
+    s = scene()
+    result = g.gather_clip(clip(tmp_path, frames(s, [(0, 0)] * 40, 4.0)))
+    assert result.placed and result.total == 40 and result.selection == "none"
+    assert alike(result.image, s) > 0.85
+
+
+def test_a_record_of_another_length_is_not_used(tmp_path):
+    path = clip(tmp_path, frames(scene(), [(0, 0)] * 20, 4.0))
+    ignored = g.gather_clip(path, {"frames": [{"smear_px": 9.0}] * 7})
+    assert ignored.selection == "none" and ignored.used >= 18
+    applied = g.gather_clip(path, {"frames": [{"smear_px": 0.5}] * 10 + [{"smear_px": 9.0}] * 10})
+    assert (applied.selection, applied.used, applied.total) == ("motion", 10, 20)
+
+
+def test_a_missing_ffmpeg_and_a_broken_clip_say_why(tmp_path):
+    with pytest.raises(g.GatherError, match="ffmpeg"):
+        list(g.read_clip(tmp_path / "c.mp4", ffmpeg=str(tmp_path / "no-such-binary")))
+    if not shutil.which("ffmpeg"):
+        pytest.skip("ffmpeg is not installed")
+    (tmp_path / "bad.mp4").write_bytes(b"not a video")
+    with pytest.raises(g.GatherError):
+        list(g.read_clip(tmp_path / "bad.mp4"))
+
+
+def test_the_command_writes_the_page_and_reports_it(tmp_path, capsys):
+    path = clip(tmp_path, frames(scene(), [(0, 0)] * 12, 4.0))
+    out = tmp_path / "page.png"
+    assert g.main([str(path), "--out", str(out)]) == 0
+    report = __import__("json").loads(capsys.readouterr().out)
+    assert report["placed"] is True and report["used"] == 12 and report["total"] == 12 and report["seconds"] >= 0
+    from PIL import Image
+    with Image.open(out) as page:
+        assert page.size == (512, 384) and page.mode in ("I;16", "I")
