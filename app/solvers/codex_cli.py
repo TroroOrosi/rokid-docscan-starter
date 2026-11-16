@@ -176,7 +176,10 @@ def _target_long(regions: list[tuple[tuple[int, int], float]], spent: float) -> 
 
     if patches(math.inf) <= room:
         return math.inf
-    low, high = 1.0, max(max(size) * wanted for size, wanted in regions)  # the cost never falls as the limit grows
+    # The cost never falls as the limit grows. Never under 256 px: with no room at all (whole photos are counted and
+    # not reduced, and 25 of 4032x3024 use up the request) a region is still an image, and the CLI's refusal of a
+    # request that is too large hands the booklet to the next route, as before.
+    low, high = 256.0, max(256.0, *(max(size) * wanted for size, wanted in regions))
     while high - low > 16:
         middle = (low + high) / 2
         low, high = (middle, high) if patches(middle) <= room else (low, middle)

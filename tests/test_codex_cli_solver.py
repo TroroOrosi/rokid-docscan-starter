@@ -614,6 +614,8 @@ def test_the_regions_sent_largest_give_way_first_and_none_when_the_booklet_fits(
     assert 4032 < limit < 6000, "the still is sent smaller than twice; the gathered page keeps its own size"
     monkeypatch.setattr(codex_cli, "_CONTEXT_TOKENS", codex_cli._FIXED_TOKENS + 12000)
     assert codex_cli._target_long([still, gathered], 0) < 3000, "then both, to one long side"
+    # Whole photos alone can use up the request (25 of 4032x3024): the regions are still images, not nothing.
+    assert codex_cli._target_long([still, gathered], 10 ** 9) == 256
 
 
 def test_a_page_gathered_from_its_clip_is_still_sent_at_its_own_size(codex, tmp_path, monkeypatch):
