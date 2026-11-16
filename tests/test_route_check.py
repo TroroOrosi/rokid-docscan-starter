@@ -32,19 +32,21 @@ def _server(tmp_path, monkeypatch, *, primary="codex-cli", fallbacks=None):
 def _routes(monkeypatch, outcomes):
     """Each named route's check returns or raises what ``outcomes`` gives it; the calls made are returned."""
     from app.solvers.chatgpt_web import ChatGptWebSolver
+    from app.solvers.chatgpt_work import ChatGptWorkSolver
     from app.solvers.codex_cli import CodexCliSolver
     called = []
 
     def stand_in(name):
         def check(self):
             called.append(name)
-            outcome = outcomes[name]
+            outcome = outcomes.get(name, False)  # a route a test says nothing about is up, and only looked at
             if isinstance(outcome, Exception):
                 raise outcome
             return outcome
         return check
 
     monkeypatch.setattr(CodexCliSolver, "check", stand_in("codex-cli"))
+    monkeypatch.setattr(ChatGptWorkSolver, "check", stand_in("chatgpt-work"))
     monkeypatch.setattr(ChatGptWebSolver, "check", stand_in("chatgpt-web"))
     return called
 
@@ -55,16 +57,18 @@ def test_a_check_tries_every_booklet_route_in_order_and_says_which_proof_was_a_r
 
     result = TestClient(main.app).post("/v1/route-check", headers=HEADERS).json()
 
-    assert called == ["codex-cli", "chatgpt-web"]
+    # The operator's order (2026-11-16): the CLI, then Work, then Chat.
+    assert called == ["codex-cli", "chatgpt-work", "chatgpt-web"]
     assert result["ok"] is True and result["checked_at"] > 0
     assert [(route["name"], route["ok"], route["code"], route["real"]) for route in result["routes"]] == [
-        ("codex-cli", True, "ok", True), ("chatgpt-web", True, "ok", False)]
+        ("codex-cli", True, "ok", True), ("chatgpt-work", True, "ok", False), ("chatgpt-web", True, "ok", False)]
     assert all(route["seconds"] >= 0 for route in result["routes"])
 
 
 def test_a_stopped_route_is_reported_by_its_code_and_never_by_the_providers_words(tmp_path, monkeypatch):
     main = _server(tmp_path, monkeypatch)
     _routes(monkeypatch, {"codex-cli": ChatGptWebRateLimit("You've hit your usage limit, secret-detail"),
+                          "chatgpt-work": ChatGptWebAuthenticationRequired("login page for someone"),
                           "chatgpt-web": ChatGptWebAuthenticationRequired("login page for someone")})
 
     response = TestClient(main.app).post("/v1/route-check", headers=HEADERS)
@@ -72,7 +76,8 @@ def test_a_stopped_route_is_reported_by_its_code_and_never_by_the_providers_word
     result = response.json()
     assert result["ok"] is False
     assert [(route["name"], route["ok"], route["code"]) for route in result["routes"]] == [
-        ("codex-cli", False, "rate_limited"), ("chatgpt-web", False, "authentication_failed")]
+        ("codex-cli", False, "rate_limited"), ("chatgpt-work", False, "authentication_failed"),
+        ("chatgpt-web", False, "authentication_failed")]
     assert "secret-detail" not in response.text and "someone" not in response.text
 
 
@@ -82,7 +87,9 @@ def test_the_first_route_down_and_the_next_one_up_is_usable_and_says_so(tmp_path
 
     result = TestClient(main.app).post("/v1/route-check", headers=HEADERS).json()
 
-    assert result["ok"] is True and result["routes"][0]["ok"] is False and result["routes"][1]["ok"] is True
+    assert result["ok"] is True
+    assert [(route["name"], route["ok"]) for route in result["routes"]] == [
+        ("codex-cli", False), ("chatgpt-work", True), ("chatgpt-web", True)]
 
 
 def test_the_last_result_is_kept_across_a_restart_and_shown_in_the_settings_the_glasses_read(tmp_path, monkeypatch):

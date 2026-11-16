@@ -289,7 +289,10 @@ from __future__ import annotations
 #         be used for another cause, then Chat when the usage has run out (a limit on the CLI or on Work closes
 #         both, since they draw on one allowance). Work runs behind another primary with its sealed job, input
 #         fence and commit guard, and is passed over for a session without a registered wearer.
-APP_VERSION = "0.80.0"
+# 0.80.1: Chat's reply wait takes only a stop control that is on screen for a reply being written. The first
+#         booklet Chat took over at a real usage limit (phone, 2026-11-16) was answered on the page and never
+#         collected: a second composer of zero size kept a Stop button, and the wait runs 150 minutes.
+APP_VERSION = "0.80.1"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.

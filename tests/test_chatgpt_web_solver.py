@@ -124,6 +124,12 @@ class _Locator:
     def first(self):
         return self
 
+    def nth(self, index):
+        return self
+
+    def is_visible(self):
+        return self._selector not in getattr(self._page, "hidden", ())
+
     def inner_text(self):
         # Each poll advances the stream by one scripted frame; the final frame
         # repeats so the reply reads as finished.
@@ -710,6 +716,19 @@ def test_a_stop_button_gone_for_good_returns_a_reply_that_is_not_the_json():
 
     assert reply == "I cannot read the pages."
     assert page.poll == 1 + chatgpt_web.SETTLE_POLLS
+
+
+def test_a_stop_button_in_the_page_but_not_on_screen_does_not_hold_a_finished_reply():
+    # Phone, 2026-11-16, the first booklet Chat took over at a real usage limit: the page kept a second composer of
+    # zero size whose Stop button never left. The reply was complete and was taken for one still being written;
+    # the wait would have run its 150 minutes.
+    page = _StubPage(['{"questions": []}'], streaming=[True])
+    page.hidden = {chatgpt_web.STOP_SEL}
+    clock = iter(range(10_000))
+    reply, _ = ask_page(page, "全問", poll_s=0, timeout_s=60, expect=("questions",), sleep=lambda _s: None,
+                        now=lambda: next(clock))
+
+    assert reply == '{"questions": []}'
 
 
 def test_a_blink_of_the_stop_button_does_not_return_half_the_json():

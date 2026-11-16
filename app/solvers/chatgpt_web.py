@@ -1065,6 +1065,17 @@ def ask_page(
     return reply, attached
 
 
+def _generating(page) -> bool:
+    """Whether a stop control is on screen, which is what says a reply is being written.
+
+    A match in the page is not enough. On the phone on 2026-11-16 the page kept a second composer of zero size
+    whose Stop button never left: a complete reply was taken for one still being written, and the wait would have
+    run to its end (150 minutes) with the answer on the page. The Work client has always asked for a drawn box.
+    """
+    stop = page.locator(STOP_SEL)
+    return any(stop.nth(index).is_visible() for index in range(stop.count()))
+
+
 def submit(page) -> str:
     """Send the composed message. Returns which control did it.
 
@@ -1124,7 +1135,6 @@ def send_and_read(
         before_submit()
     submit(page)
 
-    stop_button = page.locator(STOP_SEL)
     started = now()
     seen = False
     turn = False
@@ -1142,7 +1152,7 @@ def send_and_read(
         # included. While it is there, nothing on screen is the answer: the
         # turn shows the placeholder, then goes briefly EMPTY before the real
         # text streams in.
-        streaming = bool(stop_button.count())
+        streaming = _generating(page)
         streaming_started = streaming_started or streaming
         gone = 0 if streaming else gone + 1
         # An unchanged old answer is not proof that this submission completed.
@@ -1609,7 +1619,7 @@ class ChatGptWebClient:
         started = idle_since = now()
         shown, looks = None, 0
         while True:
-            if page.locator(STOP_SEL).count():
+            if _generating(page):
                 idle_since, shown, looks = now(), None, 0
             else:
                 users, answered = page.locator(USER_SEL).count(), replies.count()
@@ -1640,7 +1650,7 @@ class ChatGptWebClient:
             # A single missing stop button can be a blink during generation.
             for _ in range(max(0, SETTLE_POLLS - 1)):
                 sleep(POLL_S)
-                if (page.locator(STOP_SEL).count() or page.locator(USER_SEL).count() != users
+                if (_generating(page) or page.locator(USER_SEL).count() != users
                         or replies.count() != answered or replies.last.inner_text().strip() != reply):
                     return None
             self._clear_refused_batch(guard, self._pending, _url_of(page))
