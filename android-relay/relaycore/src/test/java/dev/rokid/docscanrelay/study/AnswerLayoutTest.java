@@ -59,6 +59,33 @@ public class AnswerLayoutTest {
         assertEquals("である(条件によって", AnswerLayout.paginate("である(条件によっては成り立たない)", 10, 1, MONO).get(0).lines.get(0));
     }
 
+    private static List<String> linesOf(String text, float width) {
+        List<String> lines = new ArrayList<>();
+        for (AnswerLayout.Page page : AnswerLayout.paginate(text, width, 1, MONO)) lines.addAll(page.lines);
+        return lines;
+    }
+
+    @Test public void aFormulaThatRunsOutInsideItsBracketsStartsTheNextLine() {
+        // Glasses, 2026-11-16, with the first bracket rule in place: "R=(6-2a,-2b" still ended a line and ",3)"
+        // began the next, because a letter and not Japanese text stood before the bracket. The formula begins
+        // where Japanese text ends: the line breaks there.
+        assertEquals(List.of("ゆえに重心の条件から求める点は", "R=(6-2a,-2b,3)である。"),
+                linesOf("ゆえに重心の条件から求める点はR=(6-2a,-2b,3)である。", 26));
+        assertEquals(List.of("ここで関数", "f(a,b)の値"), linesOf("ここで関数f(a,b)の値", 10));
+        // Two formulas after a comma break at the comma, as before.
+        assertEquals(List.of("A=(1,2), ", "B=(3,4)"), linesOf("A=(1,2), B=(3,4)", 12));
+        // A formula that takes more than half the line does not leave the line before it half empty.
+        assertEquals("よってR=(6-2a,", linesOf("よってR=(6-2a,-2b,3)", 11).get(0));
+    }
+
+    @Test public void aLineDoesNotBeginWithAClosingMark() {
+        // Glasses, 2026-11-16: a line held "、" and nothing else. The character before it comes down with it.
+        assertEquals(List.of("原点からの距離が5未満であ", "り、Mは内部"), linesOf("原点からの距離が5未満であり、Mは内部", 14));
+        assertEquals(List.of("これは文であ", "る。次の文"), linesOf("これは文である。次の文", 7));
+        // One character alone cannot give its place up.
+        assertEquals(List.of("あ", "、", "い"), linesOf("あ、い", 1));
+    }
+
     @Test public void combiningMarksAndSurrogatePairsStayTogether() {
         String answer = "ABe\u0301𝑥CD";
         List<AnswerLayout.Page> pages = AnswerLayout.paginate(answer, 3, 1, MONO);
