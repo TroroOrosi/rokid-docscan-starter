@@ -118,6 +118,24 @@ def _booklet(tmp_path, pages=2, **fields) -> Question:
     return Question(question_no=None, chat_key="session:7", document_pages=rows, document_id="3", **fields)
 
 
+def test_the_cli_answers_in_fast_mode_unless_a_trial_asks_for_standard(codex, tmp_path, monkeypatch):
+    """The operator, 2026-11-16 (M-33): the Codex CLI and Work answer in Fast mode; a trial runs at Standard (11/10).
+    The CLI's key is service_tier: `priority` is its Fast tier, `default` asks for standard routing even where a
+    model's own default is Fast (codex-rs config_toml.rs and protocol config_types.rs, read 2026-11-16)."""
+    monkeypatch.delenv("ROKID_CODEX_SPEED", raising=False)
+    codex_cli.CodexCliSolver().answer_all(question=_booklet(tmp_path))
+    assert all("service_tier=priority" in call["args"] for call in codex() if call["args"][:1] == ["exec"])
+    assert len(_runs(codex())) == 1
+
+    monkeypatch.setenv("ROKID_CODEX_SPEED", "standard")
+    codex_cli.CodexCliSolver().check()
+    assert "service_tier=default" in codex()[-1]["args"] and "service_tier=priority" not in codex()[-1]["args"]
+
+    monkeypatch.setenv("ROKID_CODEX_SPEED", "anything else")
+    codex_cli.CodexCliSolver().check()
+    assert "service_tier=priority" in codex()[-1]["args"]  # only the one word turns Fast off
+
+
 def _runs(calls):
     """The requests that ask for answers (not the one that asks where the pages are)."""
     return [call for call in calls if call["args"][:1] == ["exec"] and not _locating(call)]

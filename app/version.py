@@ -283,7 +283,9 @@ from __future__ import annotations
 #         from glasses that lie still gathers to the same page as before, bit for bit.
 # 0.78.1: a Codex CLI that is signed out hands the booklet to the next route (Chat) after one retry, as a usage
 #         limit does. Its sign-in is its own; it was retried where it stood, as a signed-out browser is.
-APP_VERSION = "0.78.1"
+# 0.79.0: the Codex CLI answers in its Fast tier (service_tier=priority) unless ROKID_CODEX_SPEED=standard, as Work
+#         does unless ROKID_WORK_SPEED=standard (the operator, 2026-11-16: Fast for the CLI and for Work).
+APP_VERSION = "0.79.0"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.

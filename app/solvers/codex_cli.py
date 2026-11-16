@@ -431,7 +431,11 @@ class CodexCliSolver(Solver):
         """Run the CLI once in ``directory`` on the image files named there; its reply text."""
         reply = directory / reply_name
         reply.unlink(missing_ok=True)
-        command = [*_command(), "exec", "-m", model, "-c", f"model_reasoning_effort={effort}", "-s", "read-only",
+        # Fast unless a trial says standard (the operator, 2026-11-16 and 11/10). `priority` is the CLI's Fast tier;
+        # `default` asks for standard routing even where a model's own default is Fast.
+        tier = "default" if (os.environ.get("ROKID_CODEX_SPEED") or "").strip().lower() == "standard" else "priority"
+        command = [*_command(), "exec", "-m", model, "-c", f"model_reasoning_effort={effort}",
+                   "-c", f"service_tier={tier}", "-s", "read-only",
                    "--skip-git-repo-check", "--ephemeral", *(part for name in images for part in ("-i", name))]
         if schema is not None:
             (directory / "schema.json").write_text(json.dumps(schema), encoding="utf-8")
