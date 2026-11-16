@@ -151,9 +151,10 @@ public final class DocScanGlassActivity extends Activity
     /**
      * The chooser is read and chosen from, so it stays longer than a waiting screen. In real use on 2026-11-13 it
      * appeared when the glasses were put on and was gone five seconds later, before its six lines could be read; the
-     * next double tap then only brought the display back. A tap still turns it off at once.
+     * next double tap then only brought the display back, and it was set to thirty seconds. Worn on 2026-11-17
+     * the operator set it to ten. A tap still turns it off at once.
      */
-    private static final long CHOOSER_IDLE_MILLIS = 30_000;
+    private static final long CHOOSER_IDLE_MILLIS = 10_000;
     /** Set by a new Intent until the resume that follows it: that resume was not the wearer's touch. */
     private boolean intentBeforeResume;
     private boolean rearmExitOnFocus;
@@ -901,7 +902,7 @@ public final class DocScanGlassActivity extends Activity
      * state notices to the phone nor the start of a capture waits behind them).
      *
      * <p>The reply changes that one line and nothing else. It is not input: it does not bring a cleared display back
-     * or restart the chooser's thirty seconds, and nothing holds the processor for it. Once the chooser has been
+     * or restart the chooser's ten seconds, and nothing holds the processor for it. Once the chooser has been
      * left it is dropped. Without a saved server nothing is asked and the chooser has no such line.</p>
      */
     private void askRoutes() {
@@ -1573,9 +1574,20 @@ public final class DocScanGlassActivity extends Activity
                 || state == RelayState.CAPTURING || state == RelayState.CAPTURE_REVIEW;
     }
 
+    /**
+     * Something final to read: an answer, a figure, or the reason an item has neither. Worn on 2026-11-17 a booklet
+     * came back as nine reasons ("cannot be read") and no answer; counted as nothing to read, the reader went dark
+     * five seconds after each touch. An item still being made is not something to read, and neither are the reasons
+     * of a mixed reading that still waits for its recording: the recording goes on behind a sleeping screen.
+     */
     private boolean hasWrittenAnswers() {
         if (reader == null) return false;
-        for (AnswerItem item : reader.bundle().items) if (!item.answer.isBlank() || !item.diagrams.isEmpty()) return true;
+        boolean last = !reader.bundle().intermediate();
+        for (AnswerItem item : reader.bundle().items) {
+            if (!item.answer.isBlank() || !item.diagrams.isEmpty()) return true;
+            if (last && (item.status == AnswerItem.Status.NEEDS_INPUT || item.status == AnswerItem.Status.FAILED)
+                    && !item.issue.isBlank()) return true;
+        }
         return false;
     }
 

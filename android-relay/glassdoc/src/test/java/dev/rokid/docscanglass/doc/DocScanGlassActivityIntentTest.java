@@ -731,8 +731,8 @@ public class DocScanGlassActivityIntentTest {
             assertFalse("and the screen is back", hud.isBlank());
             assertTrue((activity.getWindow().getAttributes().flags & keepOn) != 0);
         }
-        Shadows.shadowOf(android.os.Looper.getMainLooper()).idleFor(java.time.Duration.ofMillis(30_000));
-        assertTrue("thirty seconds without input on the chooser", asleep.getBoolean(activity));
+        Shadows.shadowOf(android.os.Looper.getMainLooper()).idleFor(java.time.Duration.ofMillis(10_000));
+        assertTrue("ten seconds without input on the chooser", asleep.getBoolean(activity));
         assertTrue("off as the wearer sees it, whether or not the system's sleep follows", hud.isBlank());
         activity.onResume();
         action.invoke(activity, GlassesInputAction.SHORT_TAP, 50_000L);
@@ -837,7 +837,8 @@ public class DocScanGlassActivityIntentTest {
     /**
      * Real use, 2026-11-13: the chooser appeared when the glasses were put on and was gone five seconds later, before
      * its six lines could be read and one chosen; the next double tap then only brought the display back. The first
-     * screen stays for thirty seconds. Waiting screens keep their five.
+     * screen stayed for thirty seconds from then. Worn on 2026-11-17 the operator set it to ten. Waiting screens
+     * keep their five.
      */
     @Test public void theChooserStaysLongEnoughToBeReadAndChosenFrom() throws Exception {
         android.provider.Settings.System.putInt(activity.getContentResolver(),
@@ -850,7 +851,7 @@ public class DocScanGlassActivityIntentTest {
         int keepOn = android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON;
         Shadows.shadowOf(android.os.Looper.getMainLooper()).idleFor(java.time.Duration.ofMillis(5_000));
         assertTrue("five seconds is not enough to read six lines and choose", (activity.getWindow().getAttributes().flags & keepOn) != 0);
-        Shadows.shadowOf(android.os.Looper.getMainLooper()).idleFor(java.time.Duration.ofMillis(24_999));
+        Shadows.shadowOf(android.os.Looper.getMainLooper()).idleFor(java.time.Duration.ofMillis(4_999));
         assertTrue((activity.getWindow().getAttributes().flags & keepOn) != 0);
         activity.onUpdate(RelayState.READY, List.of("network update"), "background status");
         Shadows.shadowOf(android.os.Looper.getMainLooper()).idleFor(java.time.Duration.ofMillis(1));
@@ -955,6 +956,38 @@ public class DocScanGlassActivityIntentTest {
         assertEquals(0, server.getRequestCount());
     }
 
+    private void openReaderWith(AnswerItem item) throws Exception {
+        android.provider.Settings.System.putInt(activity.getContentResolver(),
+                android.provider.Settings.System.SCREEN_OFF_TIMEOUT, 0);
+        AnswerStore store = new AnswerStore(activity.getFilesDir());
+        AnswerBundle bundle = new AnswerBundle("7", "a".repeat(64), 1, List.of(item));
+        store.start(bundle);
+        setField(activity, "answerStore", store);
+        java.lang.reflect.Method open = DocScanGlassActivity.class.getDeclaredMethod("openAnswers", AnswerBundle.class, String.class, int.class);
+        open.setAccessible(true);
+        open.invoke(activity, bundle, "q1", 0);
+    }
+
+    /**
+     * Worn, 2026-11-17: every answer of a booklet came back as "cannot be read" (nine items, no answer text) and
+     * the reader went dark five seconds after each touch. Reasons alone did not count as something to read.
+     */
+    @Test public void answersThatAreOnlyReasonsHoldTheDisplayLikeAnyAnswer() throws Exception {
+        int keepOn = android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON;
+        openReaderWith(new AnswerItem("g1", "全体", "q1", "問一", "", AnswerItem.Status.NEEDS_INPUT, "不鮮明で判読できません"));
+        Shadows.shadowOf(android.os.Looper.getMainLooper()).idleFor(java.time.Duration.ofSeconds(30));
+        assertTrue("the reason an item has no answer is read like an answer", (activity.getWindow().getAttributes().flags & keepOn) != 0);
+        assertEquals("reading", PowerState.forContext(activity).load().phase);
+    }
+
+    @Test public void answersStillBeingMadeDoNotHoldTheDisplay() throws Exception {
+        int keepOn = android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON;
+        openReaderWith(new AnswerItem("g1", "全体", "q1", "問一", "", AnswerItem.Status.PENDING, "未解答"));
+        Shadows.shadowOf(android.os.Looper.getMainLooper()).idleFor(java.time.Duration.ofSeconds(6));
+        assertEquals("nothing final to read yet: a waiting screen", 0, activity.getWindow().getAttributes().flags & keepOn);
+        assertEquals("waiting", PowerState.forContext(activity).load().phase);
+    }
+
     @Test public void aChooserSwipeRestartsTheIdleClockAndAStoppedCameraCanSleep() throws Exception {
         setField(activity, "choosingSession", true);
         activity.onResume();
@@ -962,11 +995,11 @@ public class DocScanGlassActivityIntentTest {
         choices.setAccessible(true);
         choices.invoke(activity);
         int keepOn = android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON;
-        Shadows.shadowOf(android.os.Looper.getMainLooper()).idleFor(java.time.Duration.ofSeconds(29));
+        Shadows.shadowOf(android.os.Looper.getMainLooper()).idleFor(java.time.Duration.ofSeconds(9));
         java.lang.reflect.Method action = DocScanGlassActivity.class.getDeclaredMethod("onAction", GlassesInputAction.class, long.class);
         action.setAccessible(true);
         action.invoke(activity, GlassesInputAction.SWIPE_FORWARD, android.os.SystemClock.elapsedRealtime());
-        Shadows.shadowOf(android.os.Looper.getMainLooper()).idleFor(java.time.Duration.ofSeconds(29));
+        Shadows.shadowOf(android.os.Looper.getMainLooper()).idleFor(java.time.Duration.ofSeconds(9));
         assertTrue((activity.getWindow().getAttributes().flags & keepOn) != 0);
         Shadows.shadowOf(android.os.Looper.getMainLooper()).idleFor(java.time.Duration.ofSeconds(1));
         assertEquals(0, activity.getWindow().getAttributes().flags & keepOn);
@@ -1140,8 +1173,8 @@ public class DocScanGlassActivityIntentTest {
         serveRoutes(routesChecked(60, ROUTES_PASSED), "{}", null);
         showChooser();
         awaitRoutesReply();
-        Shadows.shadowOf(android.os.Looper.getMainLooper()).idleFor(java.time.Duration.ofSeconds(30));
-        assertTrue("thirty seconds without input", hud.isBlank());
+        Shadows.shadowOf(android.os.Looper.getMainLooper()).idleFor(java.time.Duration.ofSeconds(10));
+        assertTrue("ten seconds without input", hud.isBlank());
         serveRoutes(routesChecked(60, CODEX_FAILED), "{}", null);
 
         activity.onResume();
@@ -1204,12 +1237,12 @@ public class DocScanGlassActivityIntentTest {
         assertEquals("and the phone is asked for nothing new", sequence, PowerState.forContext(activity).load().sequence);
     }
 
-    @Test public void aReplyDoesNotRestartTheChoosersThirtySeconds() throws Exception {
+    @Test public void aReplyDoesNotRestartTheChoosersTenSeconds() throws Exception {
         java.util.concurrent.CountDownLatch held = new java.util.concurrent.CountDownLatch(1);
         serveRoutes(routesChecked(60, ROUTES_PASSED), "{}", held);
         int keepOn = android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON;
         showChooser();
-        Shadows.shadowOf(android.os.Looper.getMainLooper()).idleFor(java.time.Duration.ofMillis(29_999));
+        Shadows.shadowOf(android.os.Looper.getMainLooper()).idleFor(java.time.Duration.ofMillis(9_999));
         assertTrue((activity.getWindow().getAttributes().flags & keepOn) != 0);
 
         held.countDown();
@@ -1217,7 +1250,7 @@ public class DocScanGlassActivityIntentTest {
         assertEquals("the reply came in the last millisecond and is shown", "経路 ○ 使用3%", routesLine());
 
         Shadows.shadowOf(android.os.Looper.getMainLooper()).idleFor(java.time.Duration.ofMillis(1));
-        assertEquals("a reply is not input: the thirty seconds end when they would have", 0,
+        assertEquals("a reply is not input: the ten seconds end when they would have", 0,
                 activity.getWindow().getAttributes().flags & keepOn);
         assertTrue(hud.isBlank());
     }

@@ -709,9 +709,9 @@ what is being tried.
 - Ordinary still review shows the image without text covering it. Keep the
   three-second visible review and the existing retake/end gestures. Preserve
   the operator's system screen-off timeout, including disabled auto-off:
-  capture/review/reading hold the app window on. The chooser stays thirty
-  seconds (it is read and chosen from; at five it was gone before a wearer could
-  choose, 2026-11-13). Recording-only, uploading, analysis and other waiting
+  capture/review/reading hold the app window on. The chooser stays ten
+  seconds (the operator, worn, 2026-11-17, from glassdoc 0.44.6; it was thirty from 2026-11-13, when at five it was
+  gone before a wearer could choose). Recording-only, uploading, analysis and other waiting
   sleep after five seconds without user input; network refreshes do not extend that timer. Authenticated phone-watcher
   requests handle sleep/wake. Sleep uses Android's soft-sleep key so the window's
   current screen wake lock is checked when a delayed request reaches the device.
@@ -726,7 +726,7 @@ what is being tried.
   after SOFT_SLEEP (`GL48-saved-reader-display-hold-20261031.py
   --execute-approved-once`, exit0; independently audited). The operator also
   confirmed that the answer stays visible and readable. On 2026-11-09, when
-  the chooser's timeout was still five seconds (thirty from 0.43.18), the
+  the chooser's timeout was still five seconds (thirty from 0.43.18, ten from 0.44.6), the
   updated app emitted chooser sleep requests after 5.012 and 5.016 seconds.
   The phone watcher returned SOFT_SLEEP 0.216 and 0.163 seconds after reading
   those authenticated requests. Android readback changed from Awake at 5.391
