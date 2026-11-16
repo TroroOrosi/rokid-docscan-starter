@@ -733,6 +733,65 @@ public class DocScanGlassActivityIntentTest {
     }
 
     /**
+     * Worn, 2026-11-16 (register 1-16): a tap while a page was being taken only booked the pause. The display stayed
+     * on for up to 13 s, the wearer tapped again, and those taps were read as the double tap that ends the capture.
+     */
+    @Test public void aTapDuringCaptureClearsTheDisplayInItsOwnTurnAndADoubleTapBehindItOnlyBringsItBack() throws Exception {
+        startLocalCapture();
+        assertEquals("a page is about to be taken", RelayState.AIMING, controller.getState());
+        java.lang.reflect.Method action = DocScanGlassActivity.class.getDeclaredMethod("onAction", GlassesInputAction.class, long.class);
+        action.setAccessible(true);
+
+        action.invoke(activity, GlassesInputAction.SHORT_TAP, 1_000L);
+        assertTrue("nothing is drawn from the turn of the tap on", hud.isBlank());
+        awaitSerial();
+        activity.onUpdate(controller.getState(), List.of("", "", ""), "the controller reports during the pause");
+        Shadows.shadowOf(android.os.Looper.getMainLooper()).idle();
+        assertTrue("what the controller reports meanwhile does not bring the display back", hud.isBlank());
+        action.invoke(activity, GlassesInputAction.SWIPE_FORWARD, 1_500L);
+        assertTrue("nor does a swipe", hud.isBlank());
+
+        action.invoke(activity, GlassesInputAction.BACK, 2_000L);
+        assertFalse("a double tap behind the cleared display brings it back", hud.isBlank());
+        awaitSerial();
+        assertFalse("and is not the end of the capture",
+                (Boolean) org.robolectric.util.ReflectionHelpers.getField(controller, "finishCaptureRequested"));
+        assertFalse(controller.isCapturePaused());
+
+        action.invoke(activity, GlassesInputAction.BACK, 4_000L);
+        awaitSerial();
+        assertTrue("with the capture in view a double tap ends it as before",
+                (Boolean) org.robolectric.util.ReflectionHelpers.getField(controller, "finishCaptureRequested"));
+    }
+
+    @Test public void aFailureBehindAClearedDisplayIsShown() throws Exception {
+        startLocalCapture();
+        java.lang.reflect.Method action = DocScanGlassActivity.class.getDeclaredMethod("onAction", GlassesInputAction.class, long.class);
+        action.setAccessible(true);
+        action.invoke(activity, GlassesInputAction.SHORT_TAP, 1_000L);
+        awaitSerial();
+        action.invoke(activity, GlassesInputAction.SWIPE_FORWARD, 1_200L); // ignored; the waiting screen's idle clock is running
+        assertTrue(hud.isBlank());
+
+        controller.onPhotoError("camera lost", null);
+        awaitSerial();
+        activity.onUpdate(RelayState.ERROR, List.of("エラー", "", ""), "the controller ended the pause itself");
+        Shadows.shadowOf(android.os.Looper.getMainLooper()).idle();
+        assertFalse("the display follows the controller out of the pause", hud.isBlank());
+    }
+
+    /** An ordinary written session of the real controller on a surface that reviews on the glasses; a page is in view. */
+    private void startLocalCapture() throws Exception {
+        controller.close();
+        controller = new DocScanController(activity, new Surface(true), null, updates,
+                new ClientIdentity("test-glasses", "intent-test/1", "fake-camera"));
+        setField(activity, "controller", controller);
+        controller.configureForLocalStart(server.url("/").toString(), "", 180);
+        controller.startLocalSession(false);
+        awaitSerial();
+    }
+
+    /**
      * Real use, 2026-11-13: the chooser appeared when the glasses were put on and was gone five seconds later, before
      * its six lines could be read and one chosen; the next double tap then only brought the display back. The first
      * screen stays for thirty seconds. Waiting screens keep their five.

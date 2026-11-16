@@ -768,6 +768,21 @@ public class ClipCameraTest {
         assertTrue(device().closed);
     }
 
+    @Test public void a_page_whose_clip_a_pause_dropped_is_looked_for_again_on_return() {
+        // A tap pauses at once from 2026-11-16, so a clip can be dropped before a frame of it has counted. The page
+        // was marked as taken when its clip began: left so, it would be passed over on return until a page was turned.
+        watching(); recording();
+        clipFrames(3, 0);
+        camera.pausePreview(); idle(0);
+        idleSession(1); idle(0);
+        assertEquals(1, notReady);
+        AtomicInteger ready = new AtomicInteger();
+        camera.awaitNextPage(ready::incrementAndGet); idle(100);
+        light(50_000_000L, 800, 423, CONTROL_AE_STATE_CONVERGED);
+        watchFrame(false); idle(400); watchFrame(false);
+        assertEquals("the page that was in view is offered again without being turned", 1, ready.get());
+    }
+
     @Test public void a_pause_after_the_recording_ended_still_hands_the_page_over() {
         watching(); recording();
         clipFrames(66, 0); idle(0);

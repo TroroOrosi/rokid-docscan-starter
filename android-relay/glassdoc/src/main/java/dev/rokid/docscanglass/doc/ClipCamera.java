@@ -313,6 +313,10 @@ final class ClipCamera implements PageCamera {
             }
             if (held != null && held.phase != ENDING) {
                 abandon();
+                // The page in view was not taken, though it was marked as taken when its clip began: it is seen as
+                // new on return. A tap pauses at once from 2026-11-16, so this is no longer only the end of a capture.
+                pageChange = new PageChange();
+                settlingSince = 0;
                 if (!closed) callback.onCaptureNotReady();
             }
             step();

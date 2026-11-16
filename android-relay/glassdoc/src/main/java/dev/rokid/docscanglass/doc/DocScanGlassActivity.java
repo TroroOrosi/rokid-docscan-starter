@@ -799,7 +799,7 @@ public final class DocScanGlassActivity extends Activity
             return;
         }
         // Feedback only; the serial controller still owns finish/retake and the deadline.
-        if (action == GlassesInputAction.BACK && surface != null
+        if (action == GlassesInputAction.BACK && surface != null && !controller.isCapturePaused()
                 && controller.getState() == RelayState.CAPTURE_REVIEW) {
             surface.showCaptureEndRequested();
         }
@@ -827,9 +827,16 @@ public final class DocScanGlassActivity extends Activity
         if (!mixedMode && !listeningMode) {
             // Operator, 2026-11-12: one tap pauses the display and the camera, the next resumes. The forward
             // swipe takes over what the tap did: a photo while waiting, a retake during the 3-second review.
-            if (controller.isCapturePaused() && action != GlassesInputAction.SHORT_TAP
-                    && action != GlassesInputAction.BACK) return;
-            if (action == GlassesInputAction.SHORT_TAP) { controller.toggleCapturePause(); return; }
+            // The display follows in the turn of the tap. Worn on 2026-11-16 it stayed on until the page in hand
+            // was saved, up to 13 s; the wearer tapped again and that was read as the double tap that ends the
+            // capture. So behind a cleared display a double tap only brings it back, as a tap does.
+            boolean paused = controller.isCapturePaused();
+            if (action == GlassesInputAction.SHORT_TAP || (paused && action == GlassesInputAction.BACK)) {
+                controller.toggleCapturePause();
+                showOrBlank();
+                return;
+            }
+            if (paused) return;
             if (action == GlassesInputAction.SWIPE_FORWARD) action = GlassesInputAction.SHORT_TAP;
         }
         controller.onGlassesAction(action, elapsedMillis);
@@ -1034,7 +1041,9 @@ public final class DocScanGlassActivity extends Activity
         Log.i(TAG, state + ": " + diagnostic);
         if (sessionClosed || writingDone || choosingSession) return;
         main.post(() -> {
-            if (sessionClosed || writingDone || choosingSession || displayedState == state) return;
+            if (sessionClosed || writingDone || choosingSession) return;
+            showOrBlank(); // the controller ends the wearer's pause itself when the capture fails
+            if (displayedState == state) return;
             displayedState = state;
             if (displayProtected()) keepDisplayActive();
             else enterIdleDisplay(awaitingAnswers ? "analyzing" : "waiting", activeSession());
@@ -1582,8 +1591,13 @@ public final class DocScanGlassActivity extends Activity
         cancelDisplayIdle();
         if (idleAsleep) displaySleep.wake(this);
         idleAsleep = false;
-        if (hud != null) hud.setBlank(false);
+        showOrBlank();
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+    }
+
+    /** Nothing is drawn while the display idles, nor while the wearer has paused the capture with a tap. */
+    private void showOrBlank() {
+        if (hud != null) hud.setBlank(idleAsleep || (controller != null && controller.isCapturePaused()));
     }
 
     private void enterIdleDisplay(String phase, long session) {
