@@ -450,8 +450,10 @@ for job in JOBS; do
   [ -s out-$rep.json ] && continue
   images=""; for f in tile-*.jpg; do images="$images -i $f"; done
   started=$(date +%s)
-  "$bin" exec --json -m gpt-6.1-sol -c model_reasoning_effort=xhigh -s read-only --skip-git-repo-check --ephemeral $images --output-schema schema.json -o out-$rep.json "$(cat prompt.txt)" > out-$rep.jsonl 2> err-$rep.log < /dev/null
-  echo "$name rep=$rep exit=$? seconds=$(( $(date +%s) - started ))" >> $work/s2_run.log
+  "$bin" exec --json -m gpt-6.1-sol -c model_reasoning_effort=EFFORT -c service_tier=TIER -s read-only --skip-git-repo-check --ephemeral $images --output-schema schema.json -o out-$rep.json "$(cat prompt.txt)" > out-$rep.jsonl 2> err-$rep.log < /dev/null
+  code=$?
+  echo "$name rep=$rep exit=$code seconds=$(( $(date +%s) - started ))" >> $work/s2_run.log
+  echo "$(( $(date +%s) - started ))" > seconds-$rep.txt
 done
 echo "end-lane PORT" >> $work/s2_run.log
 pkill -f "connect_proxy.py PORT"
@@ -496,7 +498,8 @@ def cmd_reads(asked: argparse.Namespace) -> int:
         lanes = [jobs[k::asked.lanes] for k in range(asked.lanes)]
         running = []
         for index, lane in enumerate(lanes):
-            script = LANE.replace("PORT", str(asked.port + index)).replace("JOBS", " ".join(lane)).replace("RUN", WORK.name)
+            script = (LANE.replace("PORT", str(asked.port + index)).replace("JOBS", " ".join(lane)).replace("RUN", WORK.name)
+                      .replace("EFFORT", asked.effort).replace("TIER", "priority" if asked.speed == "fast" else "default"))
             running.append(subprocess.Popen([ADB, "-s", asked.phone, "shell", "run-as com.termux sh -s"], stdin=subprocess.PIPE,
                                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=ENV))
             running[-1].stdin.write((f"export PREFIX=/data/data/com.termux/files/usr HOME={PHONE_HOME}\n"
@@ -506,6 +509,7 @@ def cmd_reads(asked: argparse.Namespace) -> int:
         for lane in running:
             lane.wait()
     replies: dict[str, list[str]] = {}
+    seconds: dict[str, list[int]] = {}
     for name in names:
         replies[name] = []
         for rep in range(1, 61):
@@ -515,11 +519,19 @@ def cmd_reads(asked: argparse.Namespace) -> int:
                                      capture_output=True, timeout=60, env=ENV).stdout
                 if raw.strip().startswith(b"{"):
                     target.write_bytes(raw)
+            took = reads / name / f"seconds-{rep}.txt"
+            if asked.phone and target.exists() and not took.exists():
+                raw = subprocess.run([ADB, "-s", asked.phone, "exec-out", f"run-as com.termux cat {PHONE_HOME}/codex-trial/s2/{WORK.name}/{name}/seconds-{rep}.txt"],
+                                     capture_output=True, timeout=60, env=ENV).stdout.strip()
+                if raw.isdigit():
+                    took.write_bytes(raw)
             if target.exists():
                 try:
                     replies[name].append(text_of(json.loads(target.read_text(encoding="utf-8"))))
                 except ValueError:
                     continue
+                if took.exists():
+                    seconds.setdefault(name, []).append(int(took.read_text()))
     # the text the errors are counted against: what the reads of `--ref` agree on (N: the whole part; another: its own part)
     reference_file = PRIVATE / ("reference_text.txt" if asked.ref == "N" else f"reference_text_{asked.ref}.txt")
     if asked.step == "reference":  # what the reads of the best picture agree on, kept outside the repository
@@ -542,8 +554,10 @@ def cmd_reads(asked: argparse.Namespace) -> int:
             shares = [100 * min(within(reference, one), len(reference)) / len(reference) for one in replies[name]]
             if shares:
                 means[name] = statistics.mean(shares)
+                took = seconds.get(name)
                 lines.append(f"{name:8s} reads {len(shares):2d}  wrong % mean {means[name]:5.1f}  sd {statistics.pstdev(shares):4.1f}  "
-                             f"each {' '.join(f'{value:.1f}' for value in shares)}")
+                             f"each {' '.join(f'{value:.1f}' for value in shares)}"
+                             + (f"  seconds a read: median {statistics.median(took):.0f} ({min(took)}-{max(took)})" if took else ""))
         report = "\n".join([f"reference: {len(reference)} characters", *lines, "", *verdicts(means)])
         (WORK / "reads.txt").write_text(report + "\n", encoding="utf-8")
         print(report)
@@ -606,6 +620,10 @@ def main() -> int:
     reads.add_argument("--lanes", type=int, default=3)
     reads.add_argument("--port", type=int, default=18082, help="first proxy port on the phone; a second run at the same time takes another")
     reads.add_argument("--ref", default="N", help="the condition whose reads give the reference text (default N; Nz for the centre part)")
+    reads.add_argument("--effort", default="xhigh", choices=("low", "medium", "high", "xhigh"),
+                       help="the reasoning effort of the reads (a condition read at another effort gets a name of its own)")
+    reads.add_argument("--speed", default="standard", choices=("standard", "fast"),
+                       help="fast asks for the CLI's Fast tier (service_tier=priority); until 2026-11-16 no tier was named, which is standard for this model")
     reads.add_argument("--only")
     asked = parser.parse_args()
     global GLASSES, WORK
