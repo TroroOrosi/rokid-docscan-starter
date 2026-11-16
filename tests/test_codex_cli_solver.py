@@ -14,7 +14,7 @@ import threading
 from pathlib import Path
 
 import pytest
-from PIL import Image
+from PIL import Image, ImageChops, ImageDraw
 
 from app import config
 from app.solvers import codex_cli
@@ -438,7 +438,7 @@ def test_two_reads_that_differ_reach_the_glasses_bundle_as_an_answer_to_review_w
     assert "②" in result["issues"][0]
 
 
-REGIONS = {"images": [{"index": 1, "pages": [
+REGIONS = {"images": [{"index": 1, "regions": [
     {"left": 520, "top": 250, "right": 900, "bottom": 750, "vertical_text": True},
     {"left": 100, "top": 250, "right": 480, "bottom": 750, "vertical_text": True}]}]}
 
@@ -469,7 +469,7 @@ def test_the_pages_are_located_first_from_a_small_view_of_each_photo(codex, tmp_
     assert "model_reasoning_effort=low" in args and "--output-schema" in args
     assert "thousandths" in args[-1]
     # Which way the lines run decides how a page is cut; a worn photo does not show it to a simple measure.
-    region = locate["schema"]["properties"]["images"]["items"]["properties"]["pages"]["items"]
+    region = locate["schema"]["properties"]["images"]["items"]["properties"]["regions"]["items"]
     assert "vertical_text" in region["required"] and region["properties"]["vertical_text"] == {"type": "boolean"}
     assert "vertical" in args[-1]
 
@@ -492,7 +492,7 @@ def test_each_located_page_is_sent_enlarged_in_strips_along_its_vertical_lines_r
 
 
 def test_a_page_of_horizontal_text_is_sent_in_bands_across_it(codex, tmp_path, monkeypatch):
-    regions = {"images": [{"index": 1, "pages": [{"left": 520, "top": 250, "right": 900, "bottom": 750, "vertical_text": False}]}]}
+    regions = {"images": [{"index": 1, "regions": [{"left": 520, "top": 250, "right": 900, "bottom": 750, "vertical_text": False}]}]}
     monkeypatch.setenv("FAKE_CODEX_REGIONS", json.dumps(regions))
     codex_cli.CodexCliSolver().answer_all(question=_photo(tmp_path))
 
@@ -502,7 +502,7 @@ def test_a_page_of_horizontal_text_is_sent_in_bands_across_it(codex, tmp_path, m
 
 
 def test_a_region_whose_direction_is_missing_is_still_cut_out_and_enlarged(codex, tmp_path, monkeypatch):
-    regions = {"images": [{"index": 1, "pages": [{"left": 520, "top": 250, "right": 900, "bottom": 750}]}]}
+    regions = {"images": [{"index": 1, "regions": [{"left": 520, "top": 250, "right": 900, "bottom": 750}]}]}
     monkeypatch.setenv("FAKE_CODEX_REGIONS", json.dumps(regions))
     codex_cli.CodexCliSolver().answer_all(question=_photo(tmp_path))
 
@@ -541,7 +541,7 @@ def test_a_booklet_of_gathered_pages_too_large_at_their_own_size_is_reduced_and_
     assert 1200 < max(height for _, height in pages) < 2137
 
 
-WHOLE_SHEET = {"images": [{"index": 1, "pages": [
+WHOLE_SHEET = {"images": [{"index": 1, "regions": [
     {"left": 100, "top": 20, "right": 900, "bottom": 980, "vertical_text": True}]}]}
 
 
@@ -627,7 +627,7 @@ def test_a_page_gathered_from_its_clip_is_still_sent_at_its_own_size(codex, tmp_
 
 
 def test_a_photo_in_which_no_page_was_found_is_sent_as_before(codex, tmp_path, monkeypatch):
-    monkeypatch.setenv("FAKE_CODEX_REGIONS", json.dumps({"images": [{"index": 1, "pages": []}]}))
+    monkeypatch.setenv("FAKE_CODEX_REGIONS", json.dumps({"images": [{"index": 1, "regions": []}]}))
     codex_cli.CodexCliSolver().answer_all(question=_photo(tmp_path))
 
     [run] = _runs(codex())
@@ -650,9 +650,9 @@ def test_a_usage_limit_while_locating_is_a_rate_limit_and_nothing_more_runs(code
 
 
 @pytest.mark.parametrize("regions", [
-    {"images": [{"index": 1, "pages": [{"left": 900, "top": 100, "right": 200, "bottom": 800}]}]},   # right of left
-    {"images": [{"index": 1, "pages": [{"left": 100, "top": 100, "right": 110, "bottom": 105}]}]},   # a speck
-    {"images": [{"index": 7, "pages": [{"left": 100, "top": 100, "right": 900, "bottom": 900}]}]},   # no such photo
+    {"images": [{"index": 1, "regions": [{"left": 900, "top": 100, "right": 200, "bottom": 800}]}]},   # right of left
+    {"images": [{"index": 1, "regions": [{"left": 100, "top": 100, "right": 110, "bottom": 105}]}]},   # a speck
+    {"images": [{"index": 7, "regions": [{"left": 100, "top": 100, "right": 900, "bottom": 900}]}]},   # no such photo
     {"oops": True},
 ])
 def test_boxes_that_make_no_sense_are_not_used(codex, tmp_path, monkeypatch, regions):
@@ -661,6 +661,115 @@ def test_boxes_that_make_no_sense_are_not_used(codex, tmp_path, monkeypatch, reg
 
     [run] = _runs(codex())
     assert "page001.jpg" in run["sizes"]
+
+
+def _box(left, top, right, bottom, vertical=False):
+    return {"left": left, "top": top, "right": right, "bottom": bottom, "vertical_text": vertical}
+
+
+PROBLEM_PAGE, ANSWER_SHEET, STRIP = _box(100, 100, 600, 900), _box(620, 100, 980, 400), _box(620, 450, 980, 465)
+SPECK = _box(700, 600, 710, 605)
+
+
+def _desk(tmp_path) -> Question:
+    """A synthetic photo: a problem page on a desk, an answer sheet beside it (blue ink) and, under that, a narrow
+    strip of a resource card (red ink), one line of print high. The boxes above are where they lie, in thousandths."""
+    photo = Image.new("RGB", (2000, 1500), (96, 78, 60))
+    draw = ImageDraw.Draw(photo)
+    for (left, top, right, bottom), ink in (((200, 150, 1200, 1350), (20, 20, 20)), ((1240, 150, 1960, 600), (0, 0, 170)),
+                                            ((1240, 675, 1960, 697), (170, 0, 0))):
+        draw.rectangle([left, top, right, bottom], fill=(245, 245, 240))
+        for y in range(top + 6, bottom - 8, 14):
+            draw.rectangle([left + 12, y, right - 12, y + 6], fill=ink)
+    path = tmp_path / "desk.png"
+    photo.save(path)
+    return Question(question_no=None, chat_key="session:9", document_pages=[{"page_number": 1, "image_path": str(path)}],
+                    document_id="5")
+
+
+def _locate(tmp_path, monkeypatch, question, *boxes):
+    """The files the route writes for ``question`` when the locating request returns ``boxes`` for its photo."""
+    monkeypatch.setenv("FAKE_CODEX_REGIONS", json.dumps({"images": [{"index": 1, "regions": list(boxes)}]}))
+    directory = tmp_path / "request"
+    directory.mkdir()
+    names = codex_cli.CodexCliSolver._located(directory, dict(os.environ), question.document_pages, model="gpt-6.1-sol",
+                                              timeout=60)
+    return directory, names
+
+
+def _tint(image: Image.Image, strong: int, weak: int) -> int:
+    """How far one colour band stands over another at the image's most coloured pixel."""
+    bands = image.convert("RGB").split()
+    return ImageChops.subtract(bands[strong], bands[weak]).getextrema()[1]
+
+
+def test_every_sheet_part_is_a_region_down_to_a_strip_one_line_high_and_a_speck_is_not():
+    """Until 2026-11-16 a region had to be 5% of the photo each way: an answer strip of a line or two (151 px of a
+    3024 px photo is five lines of 16 px print and more) was dropped, and nothing said so."""
+    reply = {"images": [{"index": 1, "regions": [PROBLEM_PAGE, ANSWER_SHEET, STRIP, SPECK, _box(800, 800, 830, 830)]}]}
+    found, partial = codex_cli._regions(json.dumps(reply), 1)
+    assert [box[:4] for box in found[1]] == [(0.1, 0.1, 0.6, 0.9), (0.62, 0.1, 0.98, 0.4), (0.62, 0.45, 0.98, 0.465)]
+    assert partial == {1}, "a returned box was left out: the photo also goes whole"
+
+    found, partial = codex_cli._regions(json.dumps({"images": [{"index": 1, "regions": [PROBLEM_PAGE, STRIP]}]}), 1)
+    assert len(found[1]) == 2 and partial == set()
+
+
+def test_more_regions_than_the_limit_keep_the_first_and_the_photo_also_goes_whole():
+    """Until 2026-11-16 a ninth region made the whole photo go out unenlarged, with no part of it cut out."""
+    rows = [_box(50 + 100 * column, 100 + 400 * row, 140 + 100 * column, 450 + 400 * row)
+            for row in range(2) for column in range(5)]
+    found, partial = codex_cli._regions(json.dumps({"images": [{"index": 1, "regions": rows}]}), 1)
+    assert [box[:2] for box in found[1]] == [(row["left"] / 1000, row["top"] / 1000) for row in rows[:8]]
+    assert partial == {1}
+
+
+def test_an_answer_sheet_and_a_narrow_strip_beside_the_page_are_cut_out_and_enlarged_too(codex, tmp_path, monkeypatch):
+    directory, names = _locate(tmp_path, monkeypatch, _desk(tmp_path), PROBLEM_PAGE, ANSWER_SHEET, STRIP)
+
+    assert names[0] == "overview001.jpg" and [name[:9] for name in names[1:]] == sorted(name[:9] for name in names[1:])
+    assert {name[:9] for name in names[1:]} == {"page001-1", "page001-2", "page001-3"}, names
+    with Image.open(directory / "page001-2a.jpg") as sheet, Image.open(directory / "page001-3a.jpg") as strip:
+        # The strip is 720x22 px on the photo. With its margin, at two and a half times: every bar of it is there.
+        assert strip.width >= 2.5 * 720 and 2.5 * 22 <= strip.height <= 2.5 * 60, strip.size
+        assert _tint(strip, 0, 2) > 80 and _tint(sheet, 2, 0) > 80, "the strip's red ink and the sheet's blue"
+    assert "page001.jpg" not in names, "every returned box was kept: the regions and the small view are all"
+
+
+@pytest.mark.parametrize("extra", ["a speck", "a ninth region"])
+def test_when_something_returned_is_left_out_the_photo_also_goes_whole_at_its_own_size(codex, tmp_path, monkeypatch, extra):
+    boxes = [PROBLEM_PAGE, SPECK] if extra == "a speck" else [
+        _box(50 + 100 * column, 100, 140 + 100 * column, 900) for column in range(9)]
+    directory, names = _locate(tmp_path, monkeypatch, _desk(tmp_path), *boxes)
+
+    kept = 1 if extra == "a speck" else 8
+    assert {name[:9] for name in names if "-" in name} == {f"page001-{number}" for number in range(1, kept + 1)}
+    assert names[0] == "overview001.jpg" and names[-1] == "page001.jpg"
+    with Image.open(directory / "page001.jpg") as whole:
+        assert whole.size == (2000, 1500)
+        assert _tint(whole, 0, 2) > 80, "the strip no region shows is in it"
+
+
+def test_whole_photos_are_counted_in_what_the_request_may_carry(codex, tmp_path, monkeypatch):
+    """A whole photo costs up to the 10,000 patches the CLI lets one image be."""
+    monkeypatch.setattr(codex_cli, "_CONTEXT_TOKENS", codex_cli._FIXED_TOKENS + 12000)
+    directory, names = _locate(tmp_path, monkeypatch, _desk(tmp_path), PROBLEM_PAGE, SPECK)
+
+    sizes = [Image.open(directory / name).size for name in names]
+    assert "page001.jpg" in names and sum(map(_patches, sizes)) * 1.21 <= 12000
+
+
+def test_the_requests_name_sheets_and_regions_not_booklet_pages(codex, tmp_path, monkeypatch):
+    """An answer sheet, a resource card or a strip beside the page is exam matter too, and not a printed page."""
+    monkeypatch.setenv("FAKE_CODEX_REGIONS", json.dumps({"images": [{"index": 1, "regions": [PROBLEM_PAGE, STRIP]}]}))
+    codex_cli.CodexCliSolver().answer_all(question=_desk(tmp_path))
+
+    asked = _locates(codex())[0]["args"][-1]
+    assert all(word in asked for word in ("every sheet, or part of a sheet", "answer sheets", "resource", "cards", "strips"))
+    assert "one region per printed page" not in asked
+    note = _runs(codex())[0]["args"][-1]
+    assert "region S" in note and "an answer sheet" in note and "printed page P" not in note
+    assert "may not cover everything" in note and "capture page numbers NNN" in note
 
 
 def _checks(calls):

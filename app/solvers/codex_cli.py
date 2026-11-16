@@ -19,6 +19,12 @@ photographed; at twice the size, six reads each, with 4.10% as one image and 1.5
 input read twice differs by up to 6.5 points. A photo with no page found, or a failed first request, is sent as the
 Chat route sends it. A booklet too large for the model's context is enlarged less, not refused.
 
+From 2026-11-16 the first request asks for every sheet or part of a sheet that carries exam matter, not for the pages
+of a booklet: an answer sheet, a resource card or a narrow strip beside the page is a region too, down to one line of
+print high. Only what is in a region is sent at reading size, so when something returned is left out (a box that makes
+no sense, a speck, a ninth region) the whole photo goes at its own size beside its regions. No real photo has been
+located with this wording yet: the 27 above were located with the earlier one.
+
 The booklet is read twice, by two requests at the same time over the same images, and the two answer lists are
 compared (``ROKID_CODEX_READS``, 2; 1 reads once). Measured on the phone on 2026-11-15 (M-23): of 72 answers to kanji
 questions read once from a worn photo 5 were wrong, each as confidently as a right one; over every pair of the 18
@@ -80,31 +86,50 @@ _NO_TOOLS = " Do not run commands or use tools; read the images directly and rep
 _IMAGES_NOTE = "\n\nThe attached images are the booklet pages in capture order (page001.jpg is capture page 1)." + _NO_TOOLS
 _TILES_NOTE = (
     "\n\nHow the attached images are named. overviewNNN.jpg is the whole photo of capture page NNN at low resolution: use it "
-    "for layout and for anything outside the pages, never to read text. pageNNN-PT.jpg is from that same photo: printed page P "
-    "in reading order within the photo (1 is read first), part T (a, b, c ...) of that one page, enlarged. A page is cut "
-    "along its lines of text and its parts come in reading order: for vertical text, strips from the right edge leftwards; "
+    "for layout and to see where each region lies, never to read text. pageNNN-ST.jpg is from that same photo: region S, a "
+    "sheet or a part of a sheet that carries exam matter (a problem page, an answer sheet, a resource sheet, a card, a "
+    "strip), numbered in reading order within the photo (1 is read first); part T (a, b, c ...) of that one region, "
+    "enlarged. A region is cut along its lines of text and its parts come in reading order: for vertical text, strips from "
+    "the right edge leftwards; "
     "otherwise bands from the top down. A part too long for one image is cut again across its lines and its pieces take "
     "the next letters: a band's from left to right, a strip's from top to bottom; a line that crosses that cut goes on "
     "in the next piece. Neighbouring parts overlap: text in an overlap appears twice and is one text. Read "
-    "the parts of a page together as one page. pageNNN.jpg without P and T is a whole photo in which no separate page was "
-    "found." + _NO_TOOLS)
+    "the parts of a region together as one sheet. pageNNN.jpg without S and T (or pageNNNR.jpg and pageNNNL.jpg, its right "
+    "and left half) is a whole photo at its own size: no region was found in it, or its regions may not cover everything "
+    "in it; read from it whatever no region shows. S and T only name files: in the answers, pages are capture page numbers "
+    "NNN." + _NO_TOOLS)
+# Until 2026-11-16 this asked for "exam pages", "one region per printed page", of "an open booklet": an answer sheet, a
+# resource card or a strip beside the page was not asked for, and what is not boxed goes out only as the small view.
 _LOCATE_PROMPT = (
-    "Each attached image is a photo, taken through smart glasses, of exam paper lying on a desk; other things are in view. "
-    "For each image, in the order attached (photo001.jpg is index 1), return the regions that hold exam pages: one region per "
-    "printed page. An open booklet shows two pages: return two regions, the page that is read first first. Give each region as "
-    "left, top, right and bottom in thousandths of the image's width and height (0 to 1000), covering the whole sheet of that "
-    "page with its margins as far as it is in the photo; where the page runs past the photo's edge, use the edge. For each "
+    "Each attached image is a photo, taken through smart glasses, of exam papers on a desk; other things are in view. "
+    "For each image, in the order attached (photo001.jpg is index 1), return a region for every sheet, or part of a sheet, "
+    "that carries exam matter: problem pages, answer sheets, resource or data sheets, cards and narrow strips alike, "
+    "however small in the photo. Give each printed page or separate sheet its own region where they can be told apart (an "
+    "open booklet or a folded sheet shows two pages: two regions); one large sheet with no such division is one region. "
+    "List an image's regions in the order they are read. Give each region as "
+    "left, top, right and bottom in thousandths of the image's width and height (0 to 1000), covering that sheet or page "
+    "with its margins as far as it is in the photo; where it runs past the photo's edge, use the edge. For each "
     "region also give vertical_text: true when its main text is written vertically (lines running from top to bottom and "
     "read from the right, as in Japanese vertical writing), false when it is written in horizontal lines. Return an "
-    "empty list for an image that shows no exam page. Do not run commands or use tools; look at the images and reply once.")
+    "empty list for an image that shows no exam matter. Do not run commands or use tools; look at the images and reply once.")
 _INTEGER = {"type": "integer"}
 _REGION = {"type": "object", "additionalProperties": False, "required": ["left", "top", "right", "bottom", "vertical_text"],
            "properties": {"left": _INTEGER, "top": _INTEGER, "right": _INTEGER, "bottom": _INTEGER,
                           "vertical_text": {"type": "boolean"}}}
 _LOCATE_SCHEMA = {"type": "object", "additionalProperties": False, "required": ["images"], "properties": {"images": {
-    "type": "array", "items": {"type": "object", "additionalProperties": False, "required": ["index", "pages"],
-                               "properties": {"index": _INTEGER, "pages": {"type": "array", "items": _REGION}}}}}}
+    "type": "array", "items": {"type": "object", "additionalProperties": False, "required": ["index", "regions"],
+                               "properties": {"index": _INTEGER, "regions": {"type": "array", "items": _REGION}}}}}}
 _REGION_MARGIN = 0.03  # of the region's own size on each side: the boxes sat on the sheet's edge, sometimes just inside
+# ... and at least this share of the photo's side (15 to 20 px of 4032x3024). 3% of a strip one line high is under a
+# pixel, and a box comes in thousandths read off a view where one pixel is four of the photo's.
+_REGION_MARGIN_LEAST = 0.005
+# A region's sides as shares of the photo's. The shorter at least 1%: 30 px of a 4032x3024 photo, one line of the
+# smallest print the worn photos show (characters of 14 to 16 px) with a little room, and ten steps of the thousandths
+# the boxes come in. The longer at least 5%, as both had to be until 2026-11-16: 150 to 200 px, about ten such
+# characters. A strip one line high is a region; a box a few characters each way is a speck. No strip has been located
+# on a real photo yet: both numbers are from the size of print, not from the model's boxes.
+_REGION_SHORT, _REGION_LONG = 0.01, 0.05
+_REGIONS_MOST = 8  # of one photo; past it the first are cut out and the photo also goes whole
 # What one request can carry, measured on the phone on 2026-11-15 (M-23).
 _CONTEXT_TOKENS = 475_000  # 95% of the 500,000 the CLI's own model list gives gpt-6.1-sol
 _FIXED_TOKENS = 115_000    # the CLI's own 15,000 (14,650 with no image) and 100,000 kept for reasoning and the reply
@@ -269,28 +294,38 @@ def _compared(first: list, second: list) -> list:
     return merged
 
 
-def _regions(reply: str, photos: int) -> dict[int, list[tuple[float, float, float, float, bool | None]]]:
-    """{photo number: its pages in the order given, each (left, top, right, bottom as fractions, vertical text or
-    None when not said)}. Anything that makes no sense is left out."""
+def _regions(reply: str, photos: int) -> tuple[dict[int, list[tuple[float, float, float, float, bool | None]]], set[int]]:
+    """({photo number: its regions in the order given, each (left, top, right, bottom as fractions, vertical text or
+    None when not said)}, {the photos of which something returned was left out}).
+
+    A box that makes no sense, a speck and whatever comes after the eighth region are left out. Their photo is in
+    the second value, and goes whole beside its regions: until 2026-11-16 a box left out was only in the small view,
+    and a ninth region made the whole photo go out unenlarged.
+    """
     try:
         images = extract_json(reply)["images"]
     except (ValueError, KeyError, TypeError):
-        return {}
+        return {}, set()
     found: dict[int, list[tuple[float, float, float, float, bool | None]]] = {}
+    partial: set[int] = set()
     for image in images if isinstance(images, list) else []:
         try:
-            index, pages = image["index"], image["pages"]
-            boxes = [(page["left"] / 1000, page["top"] / 1000, page["right"] / 1000, page["bottom"] / 1000,
-                      page.get("vertical_text") if isinstance(page.get("vertical_text"), bool) else None) for page in pages]
+            index, regions = image["index"], image["regions"]
+            boxes = [(region["left"] / 1000, region["top"] / 1000, region["right"] / 1000, region["bottom"] / 1000,
+                      region.get("vertical_text") if isinstance(region.get("vertical_text"), bool) else None)
+                     for region in regions]
         except (KeyError, TypeError, AttributeError):
             continue
-        if type(index) is not int or not 1 <= index <= photos or index in found:
+        if type(index) is not int or not 1 <= index <= photos:
             continue
-        boxes = [box for box in boxes if all(isinstance(v, float) and 0 <= v <= 1 for v in box[:4])
-                 and box[2] - box[0] >= 0.05 and box[3] - box[1] >= 0.05]
-        if boxes and len(boxes) <= 8:
-            found[index] = boxes
-    return found
+        kept = [box for box in boxes if all(isinstance(v, float) and 0 <= v <= 1 for v in box[:4])
+                and min(box[2] - box[0], box[3] - box[1]) >= _REGION_SHORT - 1e-9
+                and max(box[2] - box[0], box[3] - box[1]) >= _REGION_LONG - 1e-9]
+        if index in found or len(kept) < len(boxes) or len(kept) > _REGIONS_MOST:
+            partial.add(index)
+        if kept and index not in found:
+            found[index] = kept[:_REGIONS_MOST]
+    return found, partial & set(found)
 _LIMIT = re.compile(r"usage limit|rate limit|quota", re.IGNORECASE)
 
 
@@ -501,9 +536,11 @@ class CodexCliSolver(Solver):
 
     @classmethod
     def _located(cls, directory: Path, environment: dict, pages: list[dict], *, model: str, timeout: float) -> list[str] | None:
-        """Write the enlarged page tiles and small views into ``directory``; their names in sending order.
+        """Write each photo's small view and its regions, enlarged and cut, into ``directory``; their names in sending
+        order. A photo with no region goes as the Chat route sends it; one of which something returned was left out
+        goes whole beside its regions.
 
-        None when the pages could not be located at all (the caller sends the photos as before). A usage limit is raised.
+        None when nothing could be located at all (the caller sends the photos as before). A usage limit is raised.
         """
         ordered = sorted(pages, key=lambda page: page["page_number"])
         photos = []
@@ -523,24 +560,28 @@ class CodexCliSolver(Solver):
             raise
         except ChatGptWebError:
             return None
-        found = _regions(reply, len(photos))
+        found, partial = _regions(reply, len(photos))
         if not found:
             return None
         crops: dict[tuple[int, int], tuple[Image.Image, bool | None, float]] = {}
         for number, (page, photo) in enumerate(zip(ordered, photos), 1):
             for printed, (left, top, right, bottom, vertical) in enumerate(found.get(number, ()), 1):
-                pad_x, pad_y = (right - left) * _REGION_MARGIN, (bottom - top) * _REGION_MARGIN
+                pad_x = max((right - left) * _REGION_MARGIN, _REGION_MARGIN_LEAST)
+                pad_y = max((bottom - top) * _REGION_MARGIN, _REGION_MARGIN_LEAST)
                 box = (max(0, round((left - pad_x) * photo.width)), max(0, round((top - pad_y) * photo.height)),
                        min(photo.width, round((right + pad_x) * photo.width)), min(photo.height, round((bottom + pad_y) * photo.height)))
                 crop = photo.crop(box)
                 crops[number, printed] = (crop, vertical, _wanted_scale(crop.size, clip=clip_page(page)))
-        # A 1024-px view is 768 patches.
-        limit = _target_long([(crop.size, wanted) for crop, _, wanted in crops.values()], len(found) * 800)
+        # A 1024-px view is 768 patches. A photo that goes whole is counted at its own size: until 2026-11-16 it was
+        # not counted at all, and forty photos with no page found are more than the model's context.
+        whole = [photo for number, photo in enumerate(photos, 1) if number not in found or number in partial]
+        limit = _target_long([(crop.size, wanted) for crop, _, wanted in crops.values()], len(found) * 800 + sum(
+            math.ceil(photo.width / 32) * math.ceil(photo.height / 32) for photo in whole))
         names = []
         for number, (page, photo) in enumerate(zip(ordered, photos), 1):
             label = f"{page['page_number']:03d}"
             if number not in found:
-                # No separate page here: this photo as the Chat route prepares it (paper crop, fold split), at its own size.
+                # No region here: this photo as the Chat route prepares it (paper crop, fold split), at its own size.
                 for payload in source_images([page]):
                     (directory / payload["name"]).write_bytes(payload["buffer"])
                     names.append(payload["name"])
@@ -556,6 +597,11 @@ class CodexCliSolver(Solver):
                     name = f"page{label}-{printed}{_letters(tile_number)}.jpg"
                     tile.save(directory / name, format="JPEG", quality=92, subsampling=0)
                     names.append(name)
+            if number in partial:
+                # Something returned for this photo was left out. The whole frame goes too, uncropped (the paper crop
+                # could cut off just what was left out), so that what no region shows is more than the small view.
+                photo.save(directory / f"page{label}.jpg", format="JPEG", quality=92, subsampling=0)
+                names.append(f"page{label}.jpg")
         return names
 
     @staticmethod
