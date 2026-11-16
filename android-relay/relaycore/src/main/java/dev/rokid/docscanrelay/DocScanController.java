@@ -799,25 +799,27 @@ public final class DocScanController implements AutoCloseable {
 
     /**
      * One tap during local capture (operator, 2026-11-12): the display clears and the camera stops; the next
-     * tap brings both back. A photo being taken or reviewed is finished and saved first, so nothing is lost
-     * or left unreviewed. The same page is not taken again on return; a different one is.
+     * tap brings both back. The same page is not taken again on return; a different one is.
+     *
+     * <p>The tap counts in the turn it is made in. Until 2026-11-16 it only booked the pause for after the page
+     * in hand, which on the clip route is up to 13 s away: worn, the display stayed on, the wearer tapped again,
+     * and those taps were read as the double tap that ends the capture (register 1-16). So the flag is set here,
+     * on the caller's thread: the display follows at once, and the caller, which sees the flag before its next
+     * gesture, passes no double tap on as an end while it is set. Nothing is saved while it is set either; a
+     * page the tap interrupts is kept and gets its own review on return.</p>
      */
     public void toggleCapturePause() {
+        if (!pauseApplies()) return;
+        capturePaused = !capturePaused;
         try {
             serial.execute(() -> {
-                if (!link.supportsLocalCaptureReview() || localCameraUnknown || finishCaptureRequested
-                        || state == RelayState.FINALIZING || state == RelayState.UPLOADING
-                        || state == RelayState.REVIEW || state == RelayState.ERROR) return;
-                if (capturePaused) {
+                if (!pauseApplies()) {
+                    // The capture ended or failed while the tap was on its way: no pause is left behind it, and
+                    // the display, which may have cleared for the tap, hears of it.
                     capturePaused = false;
-                    if (state == RelayState.READY || state == RelayState.READING) {
-                        publishAutoWaiting("撮影を再開しました", "", "Capture resumed by the wearer");
-                        waitForNextPage();
-                    }
-                    return;
-                }
-                capturePaused = true;
-                if (state == RelayState.READY || state == RelayState.READING) pauseCaptureNow();
+                    listener.onUpdate(state, currentHudLines, "Tap dropped: the capture is no longer running");
+                } else if (capturePaused) pauseCaptureNow();
+                else resumeCaptureNow();
             });
         } catch (RejectedExecutionException ignored) {
             // The activity is already closing.
@@ -826,16 +828,55 @@ public final class DocScanController implements AutoCloseable {
 
     public boolean isCapturePaused() { return capturePaused; }
 
+    /** Local capture that has neither ended nor failed. Also read on the caller's thread: every field is volatile. */
+    private boolean pauseApplies() {
+        return !closed && link.supportsLocalCaptureReview() && !localCameraUnknown && !finishCaptureRequested
+                && state != RelayState.FINALIZING && state != RelayState.UPLOADING
+                && state != RelayState.REVIEW && state != RelayState.ERROR;
+    }
+
     private void pauseCaptureNow() {
         autoRunGeneration++; // a page-ready callback already on its way must not arm a photo
+        if (state == RelayState.AIMING || state == RelayState.STABILIZING) {
+            // Nothing has been asked of the camera yet: the page stays untaken and is looked for again on return.
+            clearArmedCapture();
+            state = captureReview.hasPending() ? RelayState.CAPTURE_REVIEW
+                    : documentId > 0 ? RelayState.READING : RelayState.READY;
+        }
         stopFutureObservation(() -> {
-            if (!capturePaused || finishCaptureRequested || localCameraUnknown) return;
-            // A page saved while this stop was in flight is reviewed first; its commit returns here.
-            if (captureReview.hasPending() || promoteFutureCandidate()) return;
+            if (!pauseApplies()) return;
+            // The wearer came back before the camera had stopped. A page seen meanwhile was not taken and its
+            // one notice is spent, so the return is gone through again now that a page can be asked for.
+            if (!capturePaused) { resumeCaptureNow(); return; }
+            if (captureLease.isUnresolved()) {
+                // A clip being recorded ends here and what it has is the page. A still cannot be cut short: it
+                // lands first, and handlePhoto closes its camera. Either page waits, unseen, for the return.
+                if (clipInbox != null) link.pausePreview();
+                listener.onUpdate(state, currentHudLines, "Capture paused by the wearer; the page in hand is kept");
+                return;
+            }
             link.pausePreview();
+            // The photo under review, or one saved while the camera was stopping, is held for the return too.
+            if (captureReview.hasPending() || promoteFutureCandidate()) {
+                listener.onUpdate(state, currentHudLines, "Capture paused by the wearer; a page waits for its review");
+                return;
+            }
             publish(documentId > 0 ? RelayState.READING : RelayState.READY, List.of("", "", ""),
                     "Capture paused by the wearer");
         });
+    }
+
+    private void resumeCaptureNow() {
+        CaptureReviewStore.Pending held = captureReview.peek();
+        if (state == RelayState.CAPTURE_REVIEW && held != null) {
+            // Shown afresh: whatever it had of its three seconds ran out behind a cleared display.
+            publishCaptureReview(held, "Capture resumed by the wearer; the held page gets its own review", autoCommitArmed);
+        } else if (state == RelayState.READY || state == RelayState.READING) {
+            publishAutoWaiting("撮影を再開しました", "", "Capture resumed by the wearer");
+            waitForNextPage();
+        } else {
+            listener.onUpdate(state, currentHudLines, "Capture resumed by the wearer");
+        }
     }
 
     private void finishLocalCaptureNow() {
@@ -1692,6 +1733,8 @@ public final class DocScanController implements AutoCloseable {
         if (completion == null) {
             return;
         }
+        // The wearer paused while this page was being taken: it has landed, and the camera stops now.
+        if (capturePaused) link.pausePreview();
         if (completion.lateAfterTimeout) {
             CaptureReviewStore.Pending pending = captureReview.peek();
             if (pending != null) {
@@ -1971,7 +2014,8 @@ public final class DocScanController implements AutoCloseable {
                     "Stale pending-photo confirmation ignored in state " + state);
             return;
         }
-        if (link.supportsLocalCaptureReview() && (reviewDeadlineMillis == 0
+        // Behind a display the wearer cleared nothing is saved: the page is shown afresh on return.
+        if (link.supportsLocalCaptureReview() && (capturePaused || reviewDeadlineMillis == 0
                 || android.os.SystemClock.elapsedRealtime() < reviewDeadlineMillis
                 || reviewGestureBlocksCommit(reviewGeneration)
                 || !link.isCaptureReviewVisible(reviewViewGeneration))) return;
@@ -2679,9 +2723,11 @@ public final class DocScanController implements AutoCloseable {
      * view is on screen. Without that acknowledgement nothing is uploaded.
      */
     private void scheduleAutoCommitOnAck(long generation, String purpose) {
+        // capturePaused: a view reported just as the wearer cleared the display starts neither the three seconds
+        // nor the watch for the next page, which would open the camera again.
         if (!link.supportsLocalCaptureReview() || !"capture-review".equals(purpose)
                 || !link.isCaptureReviewVisible(generation) || !autoCommitArmed
-                || autoCommitScheduled
+                || autoCommitScheduled || capturePaused
                 || generation != reviewViewGeneration) {
             return;
         }
@@ -2801,7 +2847,8 @@ public final class DocScanController implements AutoCloseable {
     private void enqueueAutoCommit(long generationAtSchedule) {
         try {
             serial.execute(() -> {
-                if (!link.isCaptureReviewVisible(reviewViewGeneration) || !shouldAutoCommit(
+                // Paused: the page stays armed as it was, for the review it gets on return.
+                if (capturePaused || !link.isCaptureReviewVisible(reviewViewGeneration) || !shouldAutoCommit(
                         state,
                         generationAtSchedule,
                         reviewGeneration,
@@ -3113,6 +3160,7 @@ public final class DocScanController implements AutoCloseable {
 
     private void fail(String userMessage, Throwable error, RelayState next) {
         String detail = error == null ? userMessage : userMessage + ": " + error.getMessage();
+        capturePaused = false; // a failure is shown, also on a display the wearer had cleared
         // A hands-free cycle must not keep shooting into a fault; the operator
         // is not watching the phone and would never see it.
         if (autoCaptureEnabled) {

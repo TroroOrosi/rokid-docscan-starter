@@ -1572,33 +1572,246 @@ public class LocalReviewTest {
         }
     }
 
-    @Test public void aTapWhileAPhotoIsInHandPausesOnlyAfterThatPhotoIsDone() throws Exception {
-        Surface surface = new Surface();
-        surface.holdForPage = true;
-        try (MockWebServer server = new MockWebServer()) {
-            DocScanController controller = new DocScanController(RuntimeEnvironment.getApplication(), surface, null,
-                    (state, lines, diagnostic) -> {}, new ClientIdentity("test", "test", "test"));
+    /**
+     * Worn, 2026-11-16 (register 1-16): a tap while a page was being recorded only booked the pause. The display
+     * stayed on for up to 13 s, the wearer tapped again, and those taps were read as the double tap that ends the
+     * capture. The tap now counts at once; the page it interrupts is kept and reviewed when the wearer returns.
+     */
+    @Test public void aTapWhileAClipIsRecordedEndsItAtOnceAndItsPageWaitsUnsavedForTheReturn() throws Exception {
+        pausedWithAPageInHand(true);
+    }
+
+    /** A still cannot be cut short: it lands first, as before, and its camera closes then. */
+    @Test public void aTapWhileAStillIsInHandLetsItLandAndThatPhotoWaitsUnsavedForTheReturn() throws Exception {
+        pausedWithAPageInHand(false);
+    }
+
+    private static void pausedWithAPageInHand(boolean clips) throws Exception {
+        Surface surface = new Surface(); surface.holdForPage = true;
+        var run = new java.util.concurrent.atomic.AtomicReference<>(new CaptureInspectionOrigin.Context("glasses", 1));
+        try (MockWebServer server = inspectionServer()) {
+            DocScanController controller = inspectionController(server, surface, run);
             try {
-                controller.configureForLocalStart(server.url("/").toString(), "", 270);
-                controller.startLocalSession(false);
-                barrier(controller);
-                set(controller, "autoCaptureEnabled", true);
-                RelayState waiting = controller.getState();
-                set(controller, "state", RelayState.STABILIZING);
+                ClipInbox inbox = new ClipInbox(java.nio.file.Files.createTempDirectory("clip-inbox").toFile());
+                if (clips) controller.setClipInbox(inbox);
+                byte[] jpeg = {1, 2, 3};
+                CaptureProvenance source = clips ? clipSource(inbox, jpeg, 100) : nativeSource(jpeg, 100);
+                issueInspectionPhoto(controller, 0, false);
                 int pauses = surface.pauses;
-                controller.toggleCapturePause();
-                barrier(controller);
+
+                controller.toggleCapturePause(); barrier(controller);
                 assertTrue(controller.isCapturePaused());
-                assertEquals("the photo in hand keeps its camera", pauses, surface.pauses);
-                // The photo is saved and the controller returns to waiting for the next page.
-                set(controller, "state", waiting);
+                if (clips) assertEquals("the camera is told to stop at once: the clip ends with the frames it has", pauses + 1, surface.pauses);
+                else assertEquals("the still in hand keeps its camera", pauses, surface.pauses);
+                controller.onPhoto(jpeg, source); barrier(controller);
+                assertTrue("the camera is stopped once the page has landed", surface.pauses > pauses);
+
+                LocalCaptureSession saved = (LocalCaptureSession) get(controller, "localSession");
+                commitVisible(controller, surface); // three seconds behind a cleared display are not a review
+                assertEquals("a page nobody was shown is not saved", 0, saved.pageCount());
+                assertArrayEquals("it is held", jpeg, ((CaptureReviewStore) get(controller, "captureReview")).peek().jpeg);
+                if (clips) assertTrue("and so is its clip", inbox.has(source.captureId));
+
                 surface.pageReady = null; // the real camera drops its page callback when it stops
-                call(controller, "waitForNextPage", new Class<?>[]{});
-                barrier(controller);
-                assertEquals(pauses + 1, surface.pauses);
-                assertNull("no page is awaited during the pause", surface.pageReady);
+                long hidden = (long) get(controller, "reviewGeneration");
+                controller.toggleCapturePause(); barrier(controller);
+                assertFalse(controller.isCapturePaused());
+                assertNotEquals("the return shows the page afresh", hidden, (long) get(controller, "reviewGeneration"));
+                assertEquals(0, saved.pageCount());
+                commitVisible(controller, surface);
+                assertEquals("three visible seconds later it is saved", 1, saved.pageCount());
+                if (clips) assertFalse("its clip went with it", inbox.has(source.captureId));
+                assertEquals("the same page is not asked for again", 1, surface.photos);
+                assertNotNull("and the next page is looked for", surface.pageReady);
             } finally { controller.close(); }
         }
+    }
+
+    @Test public void aTapDuringTheReviewClearsItAndThePageIsReviewedAfreshOnReturn() throws Exception {
+        Surface surface = new Surface(); surface.holdForPage = true;
+        var run = new java.util.concurrent.atomic.AtomicReference<>(new CaptureInspectionOrigin.Context("glasses", 1));
+        try (MockWebServer server = inspectionServer()) {
+            DocScanController controller = inspectionController(server, surface, run);
+            try {
+                byte[] jpeg = {1, 2, 3};
+                issueInspectionPhoto(controller, 0, false);
+                controller.onPhoto(jpeg, nativeSource(jpeg, 100)); barrier(controller);
+                surface.visible = true; controller.onCustomViewAvailable(1, "capture-review"); barrier(controller);
+                long seen = (long) get(controller, "reviewGeneration");
+                assertTrue("the three seconds are running", (long) get(controller, "reviewDeadlineMillis") > 0);
+                org.robolectric.shadows.ShadowSystemClock.advanceBy(java.time.Duration.ofSeconds(1));
+                int pauses = surface.pauses;
+
+                controller.toggleCapturePause(); barrier(controller);
+                org.robolectric.shadows.ShadowSystemClock.advanceBy(java.time.Duration.ofMillis(2100));
+                call(controller, "enqueueAutoCommit", new Class<?>[]{long.class}, seen); barrier(controller);
+                LocalCaptureSession saved = (LocalCaptureSession) get(controller, "localSession");
+                assertEquals("a review cut short by the tap saves nothing", 0, saved.pageCount());
+                assertEquals("the camera stops at once", pauses + 1, surface.pauses);
+
+                controller.toggleCapturePause(); barrier(controller);
+                assertEquals("nothing counts until the page is seen again", 0L, (long) get(controller, "reviewDeadlineMillis"));
+                call(controller, "enqueueAutoCommit", new Class<?>[]{long.class}, seen); barrier(controller);
+                assertEquals("the countdown from before the tap is dead", 0, saved.pageCount());
+                commitVisible(controller, surface);
+                assertEquals(1, saved.pageCount());
+                assertEquals(1, surface.photos);
+            } finally { controller.close(); }
+        }
+    }
+
+    /** The tap of 2026-11-16 came while the page was being prepared: the camera had not been asked for anything yet. */
+    @Test public void aTapBeforeTheCameraWasAskedTakesNoPhotoAndThePageIsLookedForAgainOnReturn() throws Exception {
+        Surface surface = new Surface(); surface.holdForPage = true;
+        DocScanController controller = waitingLocalController(surface);
+        ClockedWatchdog clock = installClockedWatchdog(controller);
+        try {
+            controller.startLocalSession(false); barrier(controller);
+            surface.pageReady.run(); barrier(controller);
+            controller.onCustomViewAvailable(3, "capture-aiming"); barrier(controller);
+            controller.onCustomViewAvailable(3, "capture-stabilizing"); barrier(controller);
+            assertEquals(RelayState.STABILIZING, controller.getState());
+            surface.pageReady = null;
+            int pauses = surface.pauses;
+
+            controller.toggleCapturePause(); barrier(controller);
+            assertEquals("the camera stops at once", pauses + 1, surface.pauses);
+            clock.advanceBy(controller, 1500);
+            assertEquals("no page is taken behind a cleared display", 0, surface.photos);
+            assertFalse(((CaptureLease) get(controller, "captureLease")).isUnresolved());
+
+            controller.toggleCapturePause(); barrier(controller);
+            assertNotNull("the page that was not taken is looked for again", surface.pageReady);
+        } finally { controller.close(); }
+    }
+
+    @Test public void aTapCountsFromTheTurnItIsMadeIn() throws Exception {
+        // The display clears in the turn of the tap, and a double tap that follows before the controller's thread has
+        // got to the tap must find the capture paused: writing a page out has held that thread for seconds (M-30).
+        Surface surface = new Surface(); surface.holdForPage = true;
+        DocScanController controller = waitingLocalController(surface);
+        CountDownLatch busy = new CountDownLatch(1);
+        try {
+            controller.startLocalSession(false); barrier(controller);
+            ((ExecutorService) get(controller, "serial")).execute(() -> {
+                try { busy.await(5, TimeUnit.SECONDS); } catch (InterruptedException stopped) { Thread.currentThread().interrupt(); }
+            });
+            int pauses = surface.pauses;
+            controller.toggleCapturePause();
+            assertTrue("known to the caller before the controller's thread has run", controller.isCapturePaused());
+            assertEquals(pauses, surface.pauses);
+            busy.countDown(); barrier(controller);
+            assertEquals("and applied when it does", pauses + 1, surface.pauses);
+        } finally { busy.countDown(); controller.close(); }
+    }
+
+    @Test public void anEndAskedForBeforeTheTapStillEndsTheCaptureAndLeavesNoPauseBehind() throws Exception {
+        // A double tap made with the capture in view is an end, also when a tap follows before the controller's
+        // thread has got to either. Behind a cleared display the Activity never passes a double tap on as an end.
+        Surface surface = new Surface(); surface.holdForPage = true;
+        List<String> told = new java.util.concurrent.CopyOnWriteArrayList<>();
+        DocScanController controller = new DocScanController(RuntimeEnvironment.getApplication(), surface, null,
+                (state, lines, diagnostic) -> told.add(diagnostic), new ClientIdentity("test", "test", "test"));
+        CountDownLatch busy = new CountDownLatch(1);
+        try {
+            controller.configureForLocalStart("http://phone:8000", "", 270);
+            controller.startLocalSession(false); barrier(controller);
+            ((ExecutorService) get(controller, "serial")).execute(() -> {
+                try { busy.await(5, TimeUnit.SECONDS); } catch (InterruptedException stopped) { Thread.currentThread().interrupt(); }
+            });
+            controller.onGlassesAction(GlassesInputAction.BACK);
+            controller.toggleCapturePause();
+            assertTrue(controller.isCapturePaused());
+            busy.countDown(); barrier(controller);
+            assertTrue("the end that was asked for first goes on", (boolean) get(controller, "finishCaptureRequested"));
+            assertFalse(controller.isCapturePaused());
+            assertTrue("and the display, cleared for the tap, is told", told.contains("Tap dropped: the capture is no longer running"));
+        } finally { busy.countDown(); controller.close(); }
+    }
+
+    @Test public void aTapOvertakenByAFailureLeavesNoPauseBehind() throws Exception {
+        // The tap is taken on the caller's thread, so the capture can fail before the controller's thread gets to it.
+        Surface surface = new Surface(); surface.holdForPage = true;
+        List<String> told = new java.util.concurrent.CopyOnWriteArrayList<>();
+        DocScanController controller = new DocScanController(RuntimeEnvironment.getApplication(), surface, null,
+                (state, lines, diagnostic) -> told.add(diagnostic), new ClientIdentity("test", "test", "test"));
+        CountDownLatch busy = new CountDownLatch(1);
+        try {
+            controller.configureForLocalStart("http://phone:8000", "", 270);
+            controller.startLocalSession(false); barrier(controller);
+            ((ExecutorService) get(controller, "serial")).execute(() -> {
+                try { busy.await(5, TimeUnit.SECONDS); } catch (InterruptedException stopped) { Thread.currentThread().interrupt(); }
+            });
+            controller.toggleCapturePause();
+            assertTrue(controller.isCapturePaused());
+            set(controller, "state", RelayState.ERROR); // the failure landed in between
+            int pauses = surface.pauses;
+            told.clear();
+            busy.countDown(); barrier(controller);
+            assertFalse("a failure is not left behind a cleared display", controller.isCapturePaused());
+            assertEquals("and the display is told so", 1, told.size());
+            assertEquals(pauses, surface.pauses);
+        } finally { busy.countDown(); controller.close(); }
+    }
+
+    @Test public void aFailureEndsThePauseSoThatItCanBeShown() throws Exception {
+        Surface surface = new Surface(); surface.holdForPage = true;
+        DocScanController controller = waitingLocalController(surface);
+        try {
+            controller.startLocalSession(false); barrier(controller);
+            controller.toggleCapturePause(); barrier(controller);
+            controller.onPhotoError("camera lost", null); barrier(controller);
+            assertEquals(RelayState.ERROR, controller.getState());
+            assertFalse(controller.isCapturePaused());
+        } finally { controller.close(); }
+    }
+
+    @Test public void returningBeforeTheCameraHasStoppedStillLooksForTheNextPage() throws Exception {
+        // The camera reports itself stopped only once a still it had been asked for has landed. A page seen before
+        // that is not taken, and its one notice is spent: without another look the capture stood still for good.
+        Surface surface = new Surface(); surface.futureEnabled = true; surface.holdForPage = true;
+        DocScanController controller = localWithOriginal(RuntimeEnvironment.getApplication(), surface);
+        try {
+            surface.deferFutureStop = true;
+            commitVisible(controller, surface);
+            assertTrue((boolean) get(controller, "futureWatching"));
+            controller.toggleCapturePause(); barrier(controller);
+            controller.toggleCapturePause(); barrier(controller);
+            surface.pageReady.run(); barrier(controller);
+            assertNotEquals("no page is taken while the camera is stopping", RelayState.AIMING, controller.getState());
+            surface.pageReady = null;
+            surface.futureStopped.run(); barrier(controller);
+            assertNotNull("once it has stopped the page is looked for again", surface.pageReady);
+            surface.pageReady.run(); barrier(controller);
+            assertEquals(RelayState.AIMING, controller.getState());
+        } finally { controller.close(); }
+    }
+
+    @Test public void aPageSavedWhileTheCameraWasStoppingWaitsForTheReturnToo() throws Exception {
+        Surface surface = new Surface(); surface.futureEnabled = true; surface.holdForPage = true;
+        DocScanController controller = localWithOriginal(RuntimeEnvironment.getApplication(), surface);
+        try {
+            surface.visible = true; controller.onCustomViewAvailable(1, "capture-review"); barrier(controller);
+            CaptureSurface.FuturePageListener future = surface.future;
+            assertTrue(future.onCaptureStarting()); // the next page's still was already asked for
+            surface.deferFutureStop = true;
+            commitVisible(controller, surface);
+            LocalCaptureSession saved = (LocalCaptureSession) get(controller, "localSession");
+            assertEquals(1, saved.pageCount());
+
+            controller.toggleCapturePause(); barrier(controller);
+            byte[] second = {4, 5, 6};
+            future.onCandidate(second, nativeSource(second, 200), true); barrier(controller);
+            surface.futureStopped.run(); barrier(controller);
+            commitVisible(controller, surface);
+            assertEquals("it is not saved behind a cleared display", 1, saved.pageCount());
+
+            controller.toggleCapturePause(); barrier(controller);
+            assertArrayEquals(second, ((CaptureReviewStore) get(controller, "captureReview")).peek().jpeg);
+            commitVisible(controller, surface);
+            assertEquals(2, saved.pageCount());
+            assertEquals(0, surface.photos);
+        } finally { controller.close(); }
     }
 
     @Test public void preparationThatNeverBecameStillReturnsToWaitingInsteadOfEndingTheSession() throws Exception {
