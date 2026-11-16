@@ -109,7 +109,9 @@ public class ClipCameraTest {
     private final List<GlassCamera.Captured> pages = new ArrayList<>();
     private final List<String> failures = new ArrayList<>();
     private final List<String> watchImages = new ArrayList<>(), clipImages = new ArrayList<>();
-    private final List<Float> progress = new ArrayList<>();
+    /** What the display's bar is told: "counted/wanted", with " end" for the report that ends a recording; and when. */
+    private final List<String> progress = new ArrayList<>();
+    private final List<Long> progressAt = new ArrayList<>();
     private final List<Boolean> far = new ArrayList<>();
     private final List<Long> stamps = new ArrayList<>();
     private final byte[] luma = new byte[ROW * (H - 1) + W];
@@ -150,7 +152,10 @@ public class ClipCameraTest {
                 }, inbox, encoder, options);
         camera.pageEncoder = (nv21, width, height, quality) -> new byte[]{(byte) 0xff, (byte) 0xd8, nv21[0]};
         camera.marks(new ClipCamera.Marks() {
-            @Override public void showClipProgress(float share) { progress.add(share); }
+            @Override public void showClipProgress(int counted, int wanted, boolean recording) {
+                progress.add(counted + "/" + wanted + (recording ? "" : " end"));
+                progressAt.add(SystemClock.elapsedRealtime());
+            }
             @Override public void showFar(boolean value) { far.add(value); }
         });
     }
@@ -898,19 +903,95 @@ public class ClipCameraTest {
         assertEquals(0, sensors.getListeners().size());
     }
 
-    @Test public void the_progress_line_grows_with_the_counted_frames() {
-        watching(); recording();
+    /** The counts reported while recording, without the report that ends it. */
+    private List<Integer> counts() {
+        List<Integer> counts = new ArrayList<>();
+        for (String each : progress) if (!each.endsWith(" end")) counts.add(Integer.parseInt(each.substring(0, each.indexOf('/'))));
+        return counts;
+    }
+
+    // Worn on 2026-11-16 (M-33): on three pages the head turned at 0.12-0.145 rad/s, 5 to 8 frames of 290 were still
+    // and no page came; nothing on the display said that a clip was being recorded or that it was waiting for a
+    // still head. The display's bar is fed by these reports.
+    @Test public void a_clip_of_still_frames_reports_its_count_from_nothing_to_all_it_wants() {
+        watching();
+        assertTrue("nothing is reported while the camera only watches", progress.isEmpty());
+        recording();
+        assertEquals("the recording has begun and nothing has counted yet", List.of("0/60"), progress);
         clipFrames(66, 0);
-        assertTrue("about five times a second over 2.2 s: " + progress, progress.size() >= 9 && progress.size() <= 12);
-        for (int i = 1; i < progress.size(); i++) assertTrue(progress.get(i) >= progress.get(i - 1));
-        assertEquals("nothing is counted while the brightness settles", 0f, progress.get(0), 0f);
-        assertTrue(progress.get(progress.size() - 1) > 0.8f && progress.get(progress.size() - 1) <= 1f);
+        List<Integer> counts = counts();
+        assertEquals("the end is not among them yet", progress.size(), counts.size());
+        assertTrue("as the count grows, at most about ten times a second over 2.2 s: " + progress,
+                counts.size() >= 12 && counts.size() <= 23);
+        for (int i = 1; i < counts.size(); i++) {
+            assertTrue("only a count that has grown is reported: " + progress, counts.get(i) > counts.get(i - 1));
+            if (i > 1) assertTrue("a tenth of a second apart: " + progressAt, progressAt.get(i) - progressAt.get(i - 1) >= 100);
+        }
+        assertEquals("the first frame that counts is shown at once", Integer.valueOf(1), counts.get(1));
         idle(0);
-        assertEquals("the line goes when the clip ends", 0f, progress.get(progress.size() - 1), 0f);
+        assertEquals("once more when the recording ends, with the final count", "60/60 end", progress.get(progress.size() - 1));
+        assertEquals(counts.size() + 1, progress.size());
+        int reports = progress.size();
+        watchingAgain();
+        assertEquals(1, pages.size());
+        camera.awaitNextPage(() -> { }); idle(100); watchFrame(false); idle(400); watchFrame(false);
+        assertEquals("and nothing while the camera watches again", reports, progress.size());
         assertTrue("the small window shows the frames being recorded", previews >= 9);
     }
 
+    @Test public void a_clip_whose_frames_are_all_smeared_stays_at_nothing_until_its_ten_seconds_are_up() {
+        watching(); recording();
+        clipFrames(100, 0.1f); // 0.1 rad/s over 30 ms is 5.7 px
+        assertEquals("the count does not grow, so nothing is reported: the bar stands still", List.of("0/60"), progress);
+        idle(10_000);
+        assertEquals(List.of("0/60", "0/60 end"), progress);
+        watchingAgain();
+        assertEquals("not a page: the wearer is asked to hold still", 1, notReady);
+        assertEquals(2, progress.size());
+    }
+
+    @Test public void the_count_reported_grows_only_on_still_frames_and_never_past_what_the_clip_wants() {
+        ClipCamera.Options options = new ClipCamera.Options();
+        options.targetFrames = 10;
+        create(options);
+        watching(); recording();
+        clipFrames(6, 0);
+        assertEquals("frames that are still settling do not count", List.of("0/10"), progress);
+        clipFrames(5, 0);
+        assertEquals("the first at once, the next a tenth of a second later", List.of("0/10", "1/10", "5/10"), progress);
+        clipFrames(10, 0.1f);
+        assertEquals("the head moves: nothing", List.of("0/10", "1/10", "5/10"), progress);
+        clipFrames(11, 0); // the clip has its ten after five of these and goes on to the end of its first second
+        assertEquals("never more than it wants, and what it wants is reported once",
+                List.of("0/10", "1/10", "5/10", "6/10", "10/10"), progress);
+        idle(0);
+        assertEquals(1, encoder.ends);
+        assertEquals(List.of("0/10", "1/10", "5/10", "6/10", "10/10", "10/10 end"), progress);
+    }
+
+    @Test public void a_clip_given_up_ends_its_report_once_and_one_that_never_began_reports_nothing() {
+        watching();
+        camera.captureOnce(); idle(0); // its session is not built yet
+        camera.pausePreview(); idle(0);
+        assertTrue("it was never recording: " + progress, progress.isEmpty());
+        idleSession(0); idle(0);
+
+        camera.awaitNextPage(() -> { }); idle(100);
+        light(50_000_000L, 800, 423, CONTROL_AE_STATE_CONVERGED);
+        camera.captureOnce(); idle(0);
+        idleSession(0);
+        clipFrames(10, 0);
+        camera.pausePreview(); idle(0); // a tap: what the clip has is the page
+        assertEquals(List.of("0/60", "1/60", "4/60 end"), progress);
+        idleSession(1); idle(0);
+        assertEquals("the page is handed over without another report", 3, progress.size());
+        assertEquals(1, pages.size());
+    }
+
     @Test public void the_far_mark_shows_only_while_waiting() {
+        ClipCamera.Options options = new ClipCamera.Options();
+        options.farShare = 0.5f;
+        create(options);
         camera.preview(); idle(100);
         light(50_000_000L, 800, 423, CONTROL_AE_STATE_CONVERGED);
         watchShare(0.2f);
@@ -926,11 +1007,11 @@ public class ClipCameraTest {
         assertEquals(4, far.size());
     }
 
-    @Test public void a_far_share_of_zero_shows_no_mark() {
-        ClipCamera.Options options = new ClipCamera.Options();
-        options.farShare = 0;
-        create(options);
+    @Test public void the_far_mark_is_off_until_a_share_is_set() {
+        // Its rule does not measure distance: worn on 2026-11-16 the mark stood for 38 of 67 s of watching while the
+        // characters were as large as the page that passed needed (M-31, register 2-24).
         camera.preview(); idle(100);
+        light(50_000_000L, 800, 423, CONTROL_AE_STATE_CONVERGED);
         watchShare(0.1f);
         assertTrue(far.isEmpty());
     }

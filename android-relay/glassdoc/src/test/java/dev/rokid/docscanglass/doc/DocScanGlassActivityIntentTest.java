@@ -271,6 +271,49 @@ public class DocScanGlassActivityIntentTest {
         }
     }
 
+    /**
+     * The "paper too far" mark's rule does not measure distance: worn on 2026-11-16 it stood for 38 of 67 s while the
+     * distance was fine (register 2-24). Off until a share is saved for a trial; the clip bar needs no option.
+     */
+    @Test public void the_far_mark_is_off_until_a_share_is_saved_and_the_clip_cameras_marks_go_to_the_display() throws Exception {
+        android.os.HandlerThread thread = new android.os.HandlerThread("test-camera");
+        thread.start();
+        try {
+            GlassCamera still = new GlassCamera(activity, new android.os.Handler(thread.getLooper()), new GlassCamera.Callback() {
+                @Override public void onCaptured(byte[] jpeg, int width, int height, long elapsedMillis) { }
+                @Override public void onCaptureFailed(String reason) { }
+            });
+            GlassesCaptureSurface glasses = new GlassesCaptureSurface(activity, still, hud,
+                    new android.os.Handler(android.os.Looper.getMainLooper()), activity);
+            setField(activity, "cameraThread", thread); setField(activity, "stillCamera", still);
+            setField(activity, "camera", still); setField(activity, "surface", glasses);
+            setField(activity, "ordinaryCamera", true);
+            java.lang.reflect.Method choose = DocScanGlassActivity.class.getDeclaredMethod("chooseCamera");
+            choose.setAccessible(true);
+
+            choose.invoke(activity);
+            assertNull("the still route has no clip camera: nothing reports to the bar",
+                    org.robolectric.util.ReflectionHelpers.getField(activity, "clipCamera"));
+
+            activity.onNewIntent(new Intent().putExtra("capture", "clip"));
+            choose.invoke(activity);
+            ClipCamera clip = org.robolectric.util.ReflectionHelpers.getField(activity, "camera");
+            ClipCamera.Options options = org.robolectric.util.ReflectionHelpers.getField(clip, "options");
+            assertEquals("no far mark unless asked for", 0f, options.farShare, 0f);
+            assertSame("what the clip camera reports is shown by the surface", glasses,
+                    org.robolectric.util.ReflectionHelpers.getField(clip, "marks"));
+
+            activity.onNewIntent(new Intent().putExtra("far_share", 0.3f));
+            setField(activity, "clipCamera", null); // built once a run: the next run's
+            choose.invoke(activity);
+            clip = org.robolectric.util.ReflectionHelpers.getField(activity, "camera");
+            options = org.robolectric.util.ReflectionHelpers.getField(clip, "options");
+            assertEquals("--ef far_share turns it on for a trial", 0.3f, options.farShare, 0.0001f);
+        } finally {
+            thread.quitSafely();
+        }
+    }
+
     @Test public void ordinaryNewIntentRevokesComparisonTransferWithoutCarryingAnySavedFlag() throws Exception {
         CaptureVideoTransfer transfer=new CaptureVideoTransfer(activity.getFilesDir(),() -> null,null);
         setField(activity,"videoTransfer",transfer); setField(activity,"comparisonTransferEnabled",true);

@@ -52,6 +52,35 @@ public class GlassesCaptureSurfaceTest {
         assertTrue(newest.isRecycled());
     }
 
+    /** The clip camera reports from its frames' thread, which must never wait: the surface only posts to the display. */
+    @Test public void aClipsProgressReachesTheDisplayOnTheUiThreadAndNotAfterTheSurfaceIsClosed() {
+        HudView hud = new HudView(RuntimeEnvironment.getApplication());
+        hud.layout(0, 0, 480, 640);
+        GlassesCaptureSurface surface = new GlassesCaptureSurface(RuntimeEnvironment.getApplication(), null, hud,
+                new Handler(Looper.getMainLooper()), (generation, purpose) -> { });
+        surface.showCaptureAiming(1, false, false);
+        ShadowLooper.runUiThreadTasksIncludingDelayedTasks();
+        Bitmap screen = Bitmap.createBitmap(480, 640, Bitmap.Config.ARGB_8888);
+        java.util.function.IntSupplier bar = () -> { // lit pixels of one row of the bar above the corner [328,440,472,632]
+            hud.draw(new Canvas(screen));
+            int lit = 0;
+            for (int x = 328; x < 472; x++) if (Color.green(screen.getPixel(x, 437)) > 200) lit++;
+            return lit;
+        };
+        surface.showClipProgress(30, 60, true);
+        assertEquals("nothing is drawn in the caller's turn", 0, bar.getAsInt());
+        ShadowLooper.runUiThreadTasksIncludingDelayedTasks();
+        assertEquals("half of what the clip wants", 72, bar.getAsInt());
+        surface.showClipProgress(60, 60, false);
+        ShadowLooper.runUiThreadTasksIncludingDelayedTasks();
+        assertEquals("the recording ended", 0, bar.getAsInt());
+        surface.showClipProgress(30, 60, true);
+        surface.close();
+        ShadowLooper.runUiThreadTasksIncludingDelayedTasks();
+        assertEquals("a report still on its way when the surface closes is dropped", 0, bar.getAsInt());
+        screen.recycle();
+    }
+
     @Test public void pausedCaptureReleasesQueuedAndLateFramesBeforeTheNextStream() {
         HudView hud = new HudView(RuntimeEnvironment.getApplication());
         GlassesCaptureSurface surface = new GlassesCaptureSurface(RuntimeEnvironment.getApplication(), null, hud,

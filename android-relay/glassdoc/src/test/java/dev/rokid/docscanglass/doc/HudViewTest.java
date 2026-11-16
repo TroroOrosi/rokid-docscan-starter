@@ -1,5 +1,6 @@
 package dev.rokid.docscanglass.doc;
 
+import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 
@@ -368,30 +369,103 @@ public class HudViewTest {
         return lit;
     }
 
-    /** While a clip is recorded the wearer holds still without knowing for how long: a line, no words. */
-    @Test public void the_progress_line_grows_with_the_counted_frames() {
+    /** A capture display with the live image filling its corner [328,440,472,632], as the camera's frame does once turned upright. */
+    private static HudView capturing() {
         HudView view = new HudView(RuntimeEnvironment.getApplication());
         view.layout(0, 0, 480, 640);
         view.capturePreview(true);
+        Bitmap live = Bitmap.createBitmap(240, 320, Bitmap.Config.ARGB_8888);
+        live.eraseColor(Color.rgb(0, 20, 0));
+        view.showLivePreview(live);
+        view.showAiming(List.of());
+        return view;
+    }
+
+    /**
+     * Lit pixels of the clip bar's four rows, 435 to 438. The corner's top edge is at 440 and the frame line drawn on
+     * it takes rows 439 and 440: the bar stands on that line.
+     */
+    private static int[] barRows(HudView view, Bitmap screen) {
+        TextCanvas canvas = new TextCanvas(screen);
+        view.draw(canvas);
+        assertEquals("no words", "", canvas.text.toString());
+        assertCornerOnly(screen);
+        assertEquals("nothing above the bar", 0, litInRow(screen, 434));
+        return new int[]{litInRow(screen, 435), litInRow(screen, 436), litInRow(screen, 437), litInRow(screen, 438)};
+    }
+
+    /**
+     * Worn on 2026-11-16 (M-33) nothing told the wearer that a clip was being recorded, or that it only counts frames
+     * taken with the head still. A bar on the top edge of the small window, as wide as it: empty when the recording
+     * starts, filled from the left as frames count. It stands still while the head moves; that is the whole cue.
+     */
+    @Test public void the_clip_bar_lies_on_the_top_edge_of_the_small_window_and_fills_from_the_left() {
+        HudView view = capturing();
         Bitmap screen = Bitmap.createBitmap(480, 640, Bitmap.Config.ARGB_8888);
-        int[] lengths = new int[4];
-        float[] shares = {0f, .25f, .5f, 1f};
-        for (int i = 0; i < shares.length; i++) {
-            view.showClipProgress(shares[i]);
-            TextCanvas canvas = new TextCanvas(screen);
-            view.draw(canvas);
-            assertEquals("no words", "", canvas.text.toString());
-            lengths[i] = litInRow(screen, 630);
-            assertCornerOnly(screen);
-        }
-        assertEquals("nothing counted, no line", 0, lengths[0]);
-        assertEquals(36, lengths[1], 2);
-        assertEquals(72, lengths[2], 2);
-        assertEquals("the whole lower edge of the small window", 144, lengths[3], 2);
+
+        view.showClipProgress(0, 60, true);
+        assertArrayEquals("empty: one line as wide as the window, so that a clip which counts nothing still shows",
+                new int[]{144, 0, 0, 0}, barRows(view, screen));
+        assertEquals("the frame line it stands on is as it was", 144, litInRow(screen, 439));
+        assertEquals("the image is not covered", 20, Color.green(screen.getPixel(400, 445)));
+
+        view.showClipProgress(30, 60, true);
+        assertArrayEquals("half of what the clip wants: half the width, four pixels high",
+                new int[]{144, 72, 72, 72}, barRows(view, screen));
+        assertTrue("filled from the left", Color.green(screen.getPixel(328, 437)) > 200 && Color.green(screen.getPixel(399, 437)) > 200);
+        assertEquals(Color.BLACK, screen.getPixel(400, 437));
+        assertEquals(20, Color.green(screen.getPixel(400, 445)));
+
+        view.showClipProgress(60, 60, true);
+        assertArrayEquals("full when the clip has what it wants", new int[]{144, 144, 144, 144}, barRows(view, screen));
+        assertEquals("exactly as wide as the window", Color.BLACK, screen.getPixel(327, 437));
+        assertEquals(Color.BLACK, screen.getPixel(472, 437));
+        view.showClipProgress(75, 60, true);
+        assertArrayEquals("never wider than the window", new int[]{144, 144, 144, 144}, barRows(view, screen));
         view.capturePreview(false);
-        view.draw(new Canvas(screen));
-        assertEquals("the line goes with the capture display", 0, litInRow(screen, 630));
         screen.recycle();
+    }
+
+    @Test public void the_clip_bar_is_absent_while_watching_and_on_the_still_route() {
+        HudView view = capturing();
+        Bitmap screen = Bitmap.createBitmap(480, 640, Bitmap.Config.ARGB_8888);
+        view.showRecording(true); // the sound of a listening session is not a clip
+        assertArrayEquals("no clip has reported: the still camera never does, and a clip camera that watches does not",
+                new int[]{0, 0, 0, 0}, barRows(view, screen));
+        view.showRecording(false);
+
+        view.showClipProgress(0, 60, true);
+        view.showClipProgress(45, 60, true);
+        assertArrayEquals(new int[]{144, 108, 108, 108}, barRows(view, screen));
+        view.showClipProgress(60, 60, false);
+        assertArrayEquals("the recording has ended and the camera watches again", new int[]{0, 0, 0, 0}, barRows(view, screen));
+
+        view.showClipProgress(10, 60, true);
+        view.capturePreview(false);
+        view.capturePreview(true);
+        assertArrayEquals("a stopped capture forgets the bar", new int[]{0, 0, 0, 0}, barRows(view, screen));
+        view.capturePreview(false);
+        screen.recycle();
+    }
+
+    @Test public void the_clip_bar_is_absent_during_the_review_and_while_the_display_is_cleared() {
+        HudView view = capturing();
+        Bitmap screen = Bitmap.createBitmap(480, 640, Bitmap.Config.ARGB_8888);
+        view.showClipProgress(30, 60, true);
+        assertArrayEquals(new int[]{144, 72, 72, 72}, barRows(view, screen));
+
+        view.setBlank(true); // the wearer's tap
+        view.draw(new Canvas(screen));
+        for (int y = 0; y < 640; y++) for (int x = 0; x < 480; x++) assertEquals(Color.BLACK, screen.getPixel(x, y));
+        view.setBlank(false);
+        assertArrayEquals("kept for the return", new int[]{144, 72, 72, 72}, barRows(view, screen));
+
+        Bitmap photo = Bitmap.createBitmap(240, 320, Bitmap.Config.ARGB_8888);
+        photo.eraseColor(Color.rgb(90, 90, 90));
+        view.showReview(photo, List.of());
+        assertArrayEquals("not over the three-second review", new int[]{0, 0, 0, 0}, barRows(view, screen));
+        view.capturePreview(false);
+        photo.recycle(); screen.recycle();
     }
 
     /** Paper too far away fills little of the window; the four corners say so while the wearer can still move. */

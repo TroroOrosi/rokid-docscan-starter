@@ -99,15 +99,24 @@ final class ClipCamera implements PageCamera {
         /** The clockwise turn that makes a page upright, written beside the clip for the phone. */
         int rotationDegrees = 270;
         /**
-         * Provisional: the paper counts as far away while under this share of the watch frame is brighter than the
-         * frame's mean. 0 shows no mark. Unmeasured on a worn head.
+         * Off: 0 shows no "paper too far" mark. Set, the paper counts as far away while under this share of the
+         * watch frame is brighter than the frame's mean. That rule does not measure distance: worn on 2026-11-16 the
+         * mark stood for 38 of 67 s of watching while the characters were as large as they had to be (M-31, register
+         * 2-24). Kept so that another limit can be tried.
          */
-        float farShare = 0.5f;
+        float farShare = 0f;
     }
 
     /** What the small window shows beside the image; called from the camera's and the frames' threads. */
     interface Marks {
-        void showClipProgress(float share);
+        /**
+         * A clip is being recorded and {@code counted} of the {@code wanted} frames have counted: once with 0 when
+         * the recording starts, then whenever the count has grown, at most ten times a second. Once more, with
+         * {@code recording} false and the final count, when the recording ends. Only frames taken with the head
+         * still count, so a count that does not grow is the wearer's cue to hold still: worn on 2026-11-16 (M-33)
+         * 5 to 8 frames of 290 were still on three pages and nothing on the display said so.
+         */
+        void showClipProgress(int counted, int wanted, boolean recording);
         void showFar(boolean far);
     }
 
@@ -129,6 +138,8 @@ final class ClipCamera implements PageCamera {
     /** How long a clip waits for an exposure that has been measured but has not settled yet. */
     static final long SETTLE_WAIT_MILLIS = 1_500;
     static final int JPEG_QUALITY = 90;
+    /** A clip's growing count is reported at most this often. */
+    static final long PROGRESS_MILLIS = 100;
     /**
      * A camera that reports an error is closed and opened again, and the page is looked for again, until it has
      * failed this many times with no page between: then the capture fails, as every other failure does at once.
@@ -158,8 +169,8 @@ final class ClipCamera implements PageCamera {
         final long[] turnedAt = new long[MAX_READINGS];
         final float[] turned = new float[3 * MAX_READINGS];
         int readings;
-        int frames, counted, dropped;
-        long firstAt, shownAt, firstMillis = -1, pageStamp;
+        int frames, counted, dropped, reported;
+        long firstAt, shownAt, reportedAt, firstMillis = -1, pageStamp;
         TotalCaptureResult pageResult;
         // After it: the camera's thread.
         long endedAt, backMillis = -1, bytes;
@@ -617,6 +628,7 @@ final class ClipCamera implements PageCamera {
         synchronized (lock) {
             recent.clear();
             recording = started;
+            showProgress(started, true); // under the lock: before any report of a frame that counts
         }
         started.phase = RECORDING;
         if (gyroscope != null) sensors.registerListener(turningListener, gyroscope, HeadMotion.PERIOD_MICROS, frames);
@@ -703,7 +715,12 @@ final class ClipCamera implements PageCamera {
                 if (now - into.shownAt >= 200) {
                     into.shownAt = now;
                     show(luma, row);
-                    showProgress(Math.min(1f, (float) into.counted / Math.max(1, options.targetFrames)));
+                }
+                // A few comparisons a frame, and a post when the count has grown: this thread waits for nothing (M-30).
+                if (into.counted > into.reported && into.reported < options.targetFrames
+                        && now - into.reportedAt >= PROGRESS_MILLIS) {
+                    into.reportedAt = now;
+                    showProgress(into, true);
                 }
                 if ((into.counted >= options.targetFrames && now - into.firstAt >= MIN_MILLIS) || into.frames == MAX_FRAMES) {
                     recording = null; // no later frame joins this clip
@@ -781,7 +798,8 @@ final class ClipCamera implements PageCamera {
             if (recording == stopped) recording = null;
         }
         if (gyroscope != null) sensors.unregisterListener(turningListener);
-        showProgress(0);
+        // Once for a recording: abandon() also comes here for a clip not yet begun and for one already ended.
+        if (stopped.phase == RECORDING) showProgress(stopped, false);
     }
 
     /**
@@ -1039,8 +1057,10 @@ final class ClipCamera implements PageCamera {
         if (shown != null) shown.showFar(now);
     }
 
-    private void showProgress(float share) {
+    /** The frames' thread while the clip is recorded, under the lock as the count is; the camera's at its start and its end. */
+    private void showProgress(Clip of, boolean recording) {
+        of.reported = Math.min(of.counted, options.targetFrames); // a short clip goes on to the end of its first second
         Marks shown = marks;
-        if (shown != null) shown.showClipProgress(share);
+        if (shown != null) shown.showClipProgress(of.reported, options.targetFrames, recording);
     }
 }

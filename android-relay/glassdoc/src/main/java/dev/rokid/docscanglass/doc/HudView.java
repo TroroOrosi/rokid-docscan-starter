@@ -64,9 +64,12 @@ final class HudView extends View {
     private Runnable hiddenFrame;
     private boolean frameReported;
     private boolean recording;
+    private boolean clipRecording;
     private float clipProgress;
     private boolean far;
     private static final float MARK = 10f;
+    /** The clip bar's height; the frame line of the small window takes the row under it. */
+    private static final float BAR = 4f;
     // metadata-only latest-capture notice; no review/answer or power callback.
     private String inspectionNotice = "";
     private java.util.function.BooleanSupplier inspectionCurrent = () -> false;
@@ -80,15 +83,23 @@ final class HudView extends View {
     void showRecording(boolean active) { recording = active; invalidate(); }
 
     /**
-     * The clip being recorded: the share of the frames it needs that have counted, as a line along the lower edge of
-     * the small window. The wearer holds still without knowing for how long; a line says it without words. 0 hides it.
+     * The clip being recorded: a bar standing on the top edge of the small window, as wide as the window, a line
+     * when the recording starts and filled from the left by the share of the frames it wants that have counted.
+     * Only frames taken with the head still count, so the bar stands still while the head moves: that is the cue,
+     * without a word. Worn on 2026-11-16 (M-33) 5 to 8 frames of 290 were still on three pages and nothing said
+     * so: the line there was until then lay over the lower edge of the image and was not drawn while nothing had
+     * counted. Above the image the bar is on black whatever the page looks like. Gone when the recording ends.
      */
-    void showClipProgress(float share) {
-        clipProgress = Math.max(0f, Math.min(1f, share));
+    void showClipProgress(int counted, int wanted, boolean recording) {
+        clipRecording = recording;
+        clipProgress = Math.max(0f, Math.min(1f, (float) counted / Math.max(1, wanted)));
         invalidate();
     }
 
-    /** The paper fills too little of the small window to be read: a mark at each of its corners while waiting. */
+    /**
+     * A mark at each corner of the small window while waiting: the paper fills too little of it. Off unless a share
+     * was saved with {@code --ef far_share}; its rule does not measure distance (register 2-24).
+     */
     void showFar(boolean value) {
         if (far == value) return;
         far = value;
@@ -97,7 +108,7 @@ final class HudView extends View {
 
     void capturePreview(boolean active) {
         capturing = active;
-        if (!active) { paperProposal = null; liveBox = null; liveMisses = 0; clipProgress = 0f; far = false; }
+        if (!active) { paperProposal = null; liveBox = null; liveMisses = 0; clipRecording = false; far = false; }
         if (!active && livePreview != null) { livePreview.recycle(); livePreview = null; }
         invalidate();
     }
@@ -259,9 +270,12 @@ final class HudView extends View {
             RectF area = captureArea();
             canvas.drawCircle(area.right - 3f, area.top - 12f, 3f, paint);
         }
-        if (capturing && clipProgress > 0f) {
+        if (capturing && clipRecording && still == null) {
+            // On the corner's edge, not the picture's: the picture follows the paper, and the bar has to stand still.
             RectF area = captureArea();
-            canvas.drawRect(area.left, area.bottom - 3f, area.left + area.width() * clipProgress, area.bottom, paint);
+            float bottom = area.top - 1f, top = bottom - BAR;
+            canvas.drawRect(area.left, top, area.right, top + 1f, paint); // empty: a clip that counts nothing still shows
+            canvas.drawRect(area.left, top, area.left + area.width() * clipProgress, bottom, paint);
         }
         if (capturing && far && still == null) {
             RectF area = captureArea();

@@ -79,7 +79,11 @@ public final class DocScanGlassActivity extends Activity
      * clip route have passed.
      */
     private static final String EXTRA_CAPTURE = "capture";
-    /** Saved from {@code --ef far_share}: the provisional limit of ClipCamera's "paper too far" mark; 0 shows none. */
+    /**
+     * Saved from {@code --ef far_share}: turns on ClipCamera's "paper too far" mark with this provisional limit.
+     * Off until one is saved, and after {@code --ef far_share 0}: the rule does not measure distance, and worn on
+     * 2026-11-16 the mark stood for 38 of 67 s while the distance was fine (register 2-24).
+     */
     private static final String EXTRA_FAR_SHARE = "far_share";
     /**
      * Saved from {@code --ei long_above}: the gain, in hundredths, that a 30 ms clip may need before ClipCamera takes

@@ -214,12 +214,15 @@ final class GlassesCaptureSurface implements CaptureSurface, ClipCamera.Marks {
      */
     void camera(PageCamera chosen) { camera = chosen; }
 
-    /** How far the clip being recorded has come, 0 to 1; 0 clears the line. From the clip's frames thread. */
-    @Override public void showClipProgress(float share) {
-        main.post(() -> { if (!closed) hud.showClipProgress(share); });
+    /**
+     * How far the clip being recorded has come, and that its recording ended. From the clip's frames thread and the
+     * camera's: only a post, and not under this surface's lock, so neither waits for the display.
+     */
+    @Override public void showClipProgress(int counted, int wanted, boolean recording) {
+        main.post(() -> { if (!closed) hud.showClipProgress(counted, wanted, recording); });
     }
 
-    /** The paper fills too little of the small window. From the camera's thread. */
+    /** The paper fills too little of the small window; never called unless the mark was turned on. From the camera's thread. */
     @Override public void showFar(boolean far) {
         main.post(() -> { if (!closed) hud.showFar(far); });
     }
