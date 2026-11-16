@@ -309,6 +309,20 @@ public class DocScanGlassActivityIntentTest {
             clip = org.robolectric.util.ReflectionHelpers.getField(activity, "camera");
             options = org.robolectric.util.ReflectionHelpers.getField(clip, "options");
             assertEquals("--ef far_share turns it on for a trial", 0.3f, options.farShare, 0.0001f);
+            assertEquals("the near mark is on, at 42 px between lines, until another limit is saved", 42f, options.nearLines, 0f);
+
+            activity.onNewIntent(new Intent().putExtra("near_lines", 38.5f));
+            setField(activity, "clipCamera", null);
+            choose.invoke(activity);
+            clip = org.robolectric.util.ReflectionHelpers.getField(activity, "camera");
+            options = org.robolectric.util.ReflectionHelpers.getField(clip, "options");
+            assertEquals("--ef near_lines saves another limit", 38.5f, options.nearLines, 0.0001f);
+            activity.onNewIntent(new Intent().putExtra("near_lines", 0f));
+            setField(activity, "clipCamera", null);
+            choose.invoke(activity);
+            clip = org.robolectric.util.ReflectionHelpers.getField(activity, "camera");
+            options = org.robolectric.util.ReflectionHelpers.getField(clip, "options");
+            assertEquals("and 0 turns the mark off", 0f, options.nearLines, 0f);
         } finally {
             thread.quitSafely();
         }

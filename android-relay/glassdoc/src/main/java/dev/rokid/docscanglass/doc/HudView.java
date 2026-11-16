@@ -69,9 +69,11 @@ final class HudView extends View {
     /** The recording that ended last counted too few frames: its bar stays over the review of its page. */
     private boolean clipWeak;
     private boolean far;
+    private boolean near;
     private static final float MARK = 10f;
     /** The clip bar's height; the frame line of the small window takes the row under it. */
     private static final float BAR = 4f;
+    private static final float EDGE = 4f, GAP = 2f;
     // metadata-only latest-capture notice; no review/answer or power callback.
     private String inspectionNotice = "";
     private java.util.function.BooleanSupplier inspectionCurrent = () -> false;
@@ -118,9 +120,23 @@ final class HudView extends View {
         invalidate();
     }
 
+    /**
+     * A thick frame around the small window: the page is nearer than the camera can focus, and moving back takes the
+     * frame away. Outside the window, above the clip's bar: the live picture is cut to the paper and already carries
+     * a thin line at the limit of what the camera sees, so neither the picture's size nor its outline can say how
+     * near the page is. Shown beside the live picture and beside the review of a page that was recorded while it
+     * stood (the forward swipe retakes it). Forgotten when the capture stops. Worn on 2026-11-17 every page of a
+     * pass was unreadable because the paper was 27 to 32 cm away and nothing on the display said so (M-41 to M-43).
+     */
+    void showNear(boolean value) {
+        if (near == value) return;
+        near = value;
+        invalidate();
+    }
+
     void capturePreview(boolean active) {
         capturing = active;
-        if (!active) { paperProposal = null; liveBox = null; liveMisses = 0; clipRecording = false; clipWeak = false; far = false; }
+        if (!active) { paperProposal = null; liveBox = null; liveMisses = 0; clipRecording = false; clipWeak = false; far = false; near = false; }
         if (!active && livePreview != null) { livePreview.recycle(); livePreview = null; }
         invalidate();
     }
@@ -314,6 +330,15 @@ final class HudView extends View {
             float bottom = area.top - 1f, top = bottom - BAR;
             canvas.drawRect(area.left, top, area.right, top + 1f, paint); // empty: a clip that counts nothing still shows
             canvas.drawRect(area.left, top, area.left + area.width() * clipProgress, bottom, paint);
+        }
+        if (capturing && near) {
+            RectF area = captureArea();
+            float left = area.left - GAP - EDGE, right = area.right + GAP + EDGE;
+            float top = area.top - BAR - 1f - GAP - EDGE, bottom = area.bottom + GAP + EDGE; // above the clip's bar
+            canvas.drawRect(left, top, right, top + EDGE, paint);
+            canvas.drawRect(left, bottom - EDGE, right, bottom, paint);
+            canvas.drawRect(left, top, left + EDGE, bottom, paint);
+            canvas.drawRect(right - EDGE, top, right, bottom, paint);
         }
         if (capturing && far && still == null) {
             RectF area = captureArea();

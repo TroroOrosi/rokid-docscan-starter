@@ -637,6 +637,48 @@ public class HudViewTest {
         photo.recycle(); screen.recycle();
     }
 
+    /**
+     * A page nearer than the camera can focus: a thick frame around the window says so, without a word, while the
+     * wearer can still move back, and it stays beside the review of a page that was recorded that way.
+     */
+    @Test public void the_near_mark_frames_the_window() {
+        HudView view = new HudView(RuntimeEnvironment.getApplication());
+        view.layout(0, 0, 480, 640);
+        view.capturePreview(true);
+        Bitmap live = Bitmap.createBitmap(320, 240, Bitmap.Config.ARGB_8888);
+        live.eraseColor(Color.rgb(0, 20, 0));
+        view.showLivePreview(live);
+        Bitmap screen = Bitmap.createBitmap(480, 640, Bitmap.Config.ARGB_8888);
+        int[][] edges = {{400, 430}, {400, 636}, {324, 536}, {476, 536}}; // outside the window (328..472 by 440..632)
+        view.draw(new Canvas(screen));
+        for (int[] edge : edges) assertTrue("no frame until told", Color.green(screen.getPixel(edge[0], edge[1])) < 100);
+
+        view.showNear(true);
+        TextCanvas canvas = new TextCanvas(screen);
+        view.draw(canvas);
+        assertEquals("no words", "", canvas.text.toString());
+        for (int[] edge : edges) assertTrue("the frame", Color.green(screen.getPixel(edge[0], edge[1])) > 200);
+        assertEquals("the image inside it stays clear", 20, Color.green(screen.getPixel(400, 536)));
+        assertEquals("the clip's bar keeps its place under the frame's upper side", Color.BLACK, screen.getPixel(400, 437));
+
+        Bitmap photo = Bitmap.createBitmap(320, 240, Bitmap.Config.ARGB_8888);
+        photo.eraseColor(Color.rgb(90, 90, 90));
+        view.showReview(photo, List.of());
+        view.draw(new Canvas(screen));
+        for (int[] edge : edges) assertTrue("over the review of a page recorded too near", Color.green(screen.getPixel(edge[0], edge[1])) > 200);
+
+        view.showAiming(List.of());
+        view.showNear(false);
+        view.draw(new Canvas(screen));
+        for (int[] edge : edges) assertTrue(Color.green(screen.getPixel(edge[0], edge[1])) < 100);
+        view.showNear(true);
+        view.capturePreview(false);
+        view.capturePreview(true);
+        view.draw(new Canvas(screen));
+        for (int[] edge : edges) assertTrue("a stopped capture forgets the mark", Color.green(screen.getPixel(edge[0], edge[1])) < 100);
+        photo.recycle(); screen.recycle();
+    }
+
     @Test public void endingCaptureKeepsThePhotoStationaryAndTheNoticeOutsideIt() {
         HudView view = new HudView(RuntimeEnvironment.getApplication());
         view.layout(0, 0, 480, 640);

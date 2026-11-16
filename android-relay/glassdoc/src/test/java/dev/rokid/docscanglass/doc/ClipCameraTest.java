@@ -113,6 +113,7 @@ public class ClipCameraTest {
     private final List<String> progress = new ArrayList<>();
     private final List<Long> progressAt = new ArrayList<>();
     private final List<Boolean> far = new ArrayList<>();
+    private final List<Boolean> near = new ArrayList<>();
     private final List<Long> stamps = new ArrayList<>();
     private final byte[] luma = new byte[ROW * (H - 1) + W];
     private int notReady, previews;
@@ -157,6 +158,7 @@ public class ClipCameraTest {
                 progressAt.add(SystemClock.elapsedRealtime());
             }
             @Override public void showFar(boolean value) { far.add(value); }
+            @Override public void showNear(boolean value) { near.add(value); }
         });
     }
 
@@ -200,6 +202,21 @@ public class ClipCameraTest {
         byte[] pixels = new byte[32 * 24]; Arrays.fill(pixels, (byte) 180);
         if (turned) Arrays.fill(pixels, 0, pixels.length / 3, (byte) 70);
         watchFrame(pixels);
+    }
+
+    /** A 320x240 watch frame of print whose lines lie {@code period} px apart: 6.3 px of the recorded frame to one of it. */
+    private void watchPrint(double period) {
+        byte[] pixels = new byte[320 * 240];
+        for (int y = 0; y < 240; y++) for (int x = 0; x < 320; x++) {
+            pixels[y * 320 + x] = (byte) Math.round(190 - 90 * Math.max(0, Math.cos(2 * Math.PI * x / period)));
+        }
+        DocScanTestImage image = new DocScanTestImage(watchImages);
+        image.format = ImageFormat.YUV_420_888; image.width = 320; image.height = 240;
+        image.rowStride = 320; image.pixelStride = 1;
+        image.timestamp = SystemClock.elapsedRealtimeNanos(); image.buffer = ByteBuffer.wrap(pixels);
+        ReaderShadow watch = reader(320);
+        watch.image = image; watch.listener.onImageAvailable(watch.reader);
+        idle(0);
     }
 
     /** A frame whose first {@code share} of pixels is paper and the rest desk. */
@@ -1005,6 +1022,60 @@ public class ClipCameraTest {
         idleSession(0);
         clipFrames(8, 0);
         assertEquals(4, far.size());
+    }
+
+    /**
+     * Worn, 2026-11-17 (M-43): pages whose lines of print lay 44 px of the frame and more apart were out of the fixed
+     * lens's focus and could not be read at all; 39 to 42 px could. The limit is 42 until another is saved.
+     */
+    @Test public void the_near_mark_shows_while_the_lines_of_print_lie_too_far_apart() {
+        camera.preview(); idle(100);
+        light(50_000_000L, 800, 423, CONTROL_AE_STATE_CONVERGED);
+        idle(600); watchPrint(7.6); // 47.9 px of the frame
+        assertEquals("too near", List.of(true), near);
+        idle(600); watchPrint(7.5);
+        assertEquals("told once", 1, near.size());
+        idle(600); watchPrint(6.65); // 41.9 px: inside the limit, but not a whole pixel inside it
+        assertEquals("the mark does not flicker at the limit", 1, near.size());
+        idle(600); watchPrint(6.2); // 39 px
+        assertEquals(List.of(true, false), near);
+        idle(600); watchPrint(6.65);
+        assertEquals("nor does it come back there", 2, near.size());
+        idle(600); watchPrint(7.6);
+        assertEquals(List.of(true, false, true), near);
+        idle(600); watchFrame(false); // a picture in which no print is found
+        assertEquals("nothing is said about a view without print", List.of(true, false, true, false), near);
+    }
+
+    @Test public void the_near_mark_stays_over_the_clip_and_its_review_and_goes_when_the_capture_pauses() {
+        watching();
+        idle(600); watchPrint(7.6);
+        assertEquals(List.of(true), near);
+        camera.captureOnce(); idle(0);
+        idleSession(0);
+        clipFrames(8, 0);
+        assertEquals("a page recorded too near keeps its mark: the wearer sees it over the review", List.of(true), near);
+        camera.pausePreview(); idle(0);
+        assertEquals(List.of(true, false), near);
+    }
+
+    @Test public void the_near_mark_is_measured_twice_a_second_at_most_and_not_at_all_when_its_limit_is_zero() {
+        camera.preview(); idle(100);
+        light(50_000_000L, 800, 423, CONTROL_AE_STATE_CONVERGED);
+        idle(600); watchPrint(6.2);
+        idle(70); watchPrint(7.6); idle(70); watchPrint(7.6);
+        assertTrue("the transform is not run on every frame", near.isEmpty());
+        idle(500); watchPrint(7.6);
+        assertEquals(List.of(true), near);
+
+        ClipCamera.Options options = new ClipCamera.Options();
+        options.nearLines = 0f;
+        near.clear();
+        create(options);
+        camera.preview(); idle(100);
+        light(50_000_000L, 800, 423, CONTROL_AE_STATE_CONVERGED);
+        idle(600); watchPrint(7.6);
+        assertTrue("--ef near_lines 0 turns the mark off", near.isEmpty());
     }
 
     @Test public void the_far_mark_is_off_until_a_share_is_set() {

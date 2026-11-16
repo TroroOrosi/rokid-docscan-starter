@@ -1,6 +1,6 @@
 # rokid-docscan-starter development guide
 
-Status: Current engineering contract. Updated 2026-11-17 05:00 (§M-41, §M-42: the whole use ran once on the venue topology, worn, and every answer came back unreadable; the cause is the distance: the pages, and the desk bench every gathered page was measured on, stood 27-32 cm from a fixed-focus camera that is sharp from 40 cm; which distance reads best is not measured, and no worn page has been read correctly).
+Status: Current engineering contract. Updated 2026-11-17 07:00 (§M-41 to §M-43: the whole use ran once on the venue topology, worn, and every answer came back unreadable because the pages stood nearer than the fixed-focus camera can see sharply; glassdoc 0.44.7 shows a mark while the page is too near, by the print's line distance; that mark has not been seen on the device, pages taken at the better distance read 24-81% of a known text against the desk's 92%, and no worn page has produced a correct answer).
 
 **Start at `.agents/progress/current.md`.** It lists the operator's decisions,
 the verified state and the next steps. Do not re-ask what it settles. Then read
@@ -357,8 +357,9 @@ page bit for bit (twelve desk clips). The ten worn clips then gave 60, 41, 60,
 61, 61, 49, 6, 5, 28 and 1 frames, and page 4 can be read by eye to its edges.
 A page laid this way shows about 0.67 of the old level over noise for the same
 light (22 where 32): do not compare it with the 32 above. Read by the model three times each, with no known text for that page: the
-old gathering of page 4 came back as other text with not one character marked
-unreadable (two reads 18.9% apart, and 70% from the new page's reads); the new
+old gathering of page 4 came back with 58-69% of its characters marked unreadable
+(two reads 18.9% apart, and 70% from the new page's reads; until 2026-11-17 this
+said "not one character marked": the count missed the full-width mark); the new
 page's reads lie 10.4% apart, which the same measure on desk reads with a known
 text (3.0% apart at 2.0% wrong, 3.9 at 3.1, 6.3 at 6.6) puts at roughly 7-10%
 wrong: readable, not at the bar. Of its 61 frames 45 carry 1-2 px of smear (a
@@ -400,16 +401,28 @@ read (lines 48 px apart, characters of 24-26 px) both stood 27-32 cm away; the w
 read (characters of 15.8 px) were taken from 43-50 cm, the spread in the middle of the field, seen from almost straight
 above. Worn, one page filled the recorded frame and was seen at a slant (characters 79-85% as tall as wide): its middle
 reads like the desk page, its near, far and left parts are blurred. The same part of the same print, twelve reads each:
-the desk page 4.8% of characters wrong, the worn page 63.7%, with not one character marked unreadable (other plausible
-text; two reads of it lie 17.8% apart, so they err alike and their comparison does not show it; register 3-27).
+the desk page 4.8% of characters wrong, the worn page 63.7%, most of it marked unreadable by the model itself (43-67% of a read's characters; 0.6-5.2% on
+the desk page).
 Flattening the page's light and taking the blur back did not help (53-71%) and made the desk page worse (8.3%): not
 adopted. Ruled out by measurement: the laying (six free numbers a frame at full size gave the same page), warmth (board
 31 to 52 C: no more blur), the camera's processing in the dark, frames blended in the camera (neighbours' fine noise is
 not shared), smear under 2 px. The measure of §M-41's analysis counts the sensor's fixed pattern as detail in a clip
 that does not move, so its desk figures are 10-30% too high and "the desk 0.27 against worn 0.15" overstates the gap.
-Not known: which distance reads best (beyond 40 cm the focus holds and a character is about 16 px; the September
-photos were bright stills), and why the far part of a worn page is blurred too. The next worn step is that one
-question: the same page at three sizes in the window, read against the known text.
+The distance was then tried worn (2026-11-17, §M-43; the test package and the stand-in server): fifteen clips of
+that page, lines of print 39 to 50 px apart. The camera cannot be focused: one camera, `afAvailableModes [0]`. Of a
+known text, twelve reads each found 0.1% and 1.7% at 44 and 50 px (90-96% of the characters marked unreadable), and
+80.9%, 24.6% and 63.8% at 39, 41 and 42 px (the desk page: 92.2%). The page's own detail in fourteen clips: 0.18-0.28
+at 41.6 px and under, 0.11-0.16 at 44.3 px and over. So 42-44 px is where reading stops; under it the clips still
+differ, and neither their line distance, nor how their frames were laid, nor the gyroscope's smear says why (register
+2-32). Flattening the page's light was tried on those sharper pages too and is not adopted (+6, +3, 0 points; the
+desk page -3). The small window had never shown distance: its picture is cut to the paper, so a page looks the same
+size from anywhere, and "fill half the window" could not be done. **glassdoc 0.44.7 shows a thick frame around the
+small window while the lines of print lie more than 42 px of the frame apart** (`PrintPitch` on the watch picture's
+middle 128x128 px; within 0.7 px of the full frame's figure on 25 worn clips; `--ef near_lines`, 0 turns it off; it
+stays over the review of a page recorded while it stood). It measures the print, not the distance (register 2-31).
+On the desk: unit tests, the whole-use check 35 of 38 (the three are a scene too dark to gather). The mark itself has
+not been seen on the glasses: no print was in view. Not tried: the distance of September's photos (43-50 cm, from
+above), which no worn clip has reached.
 What it rests on, measured on the desk and the PC on 2026-11-15 (§M-25):
 the 2016x1512 stream is the whole field at half size and the only whole-field
 size at 60 frames a second; streaming it heats the glasses by 17.7 C in 150 s
@@ -639,6 +652,9 @@ what is being tried.
   remain comparison candidates without physical quality or performance acceptance.
   The frozen CUSTOMVIEW route keeps explicit phone controls. The original
   `adf12ee` disable decision belonged to the route without operator taps.
+- On the clip route a thick frame around the small window says the page is too near
+  for the fixed lens (the print's lines over 42 px of the frame apart; glassdoc 0.44.7,
+  §M-43): move back until it goes. Not seen on the device yet.
 - With `--es capture clip` saved, ordinary written reading takes each page as a
   short clip instead (`ClipCamera`, from glassdoc 0.44.0; the paragraph on the
   venue's light above and §M-30). Stills are the default until a worn page has
