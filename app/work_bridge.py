@@ -36,7 +36,11 @@ class WorkBrowserResultRejected(ValueError):
 
 
 class WorkReadabilityRejected(WorkBrowserResultRejected):
-    """A known browser reply attempted answers from unreadable/uncertain pages."""
+    """A known browser reply attempted answers from unreadable/uncertain pages.
+
+    The store has not raised it since 2026-11-16: such answers are taken out one by one (``WorkStore._supported``)
+    and the rest of the reply is kept. The class stays for the server's failure code of that name.
+    """
 
 
 def _json(value) -> str:
@@ -687,10 +691,8 @@ class WorkStore:
                 if not self._non_answering_stop(result):
                     if len(browser_review["images"]) != sum("page_number" in p for p in job["sources"]):
                         raise WorkBrowserResultRejected("every browser original requires its original readability review")
-                    if any(p["status"] != "readable" for p in browser_review["images"]):
-                        if any(item.get("status") == "ready" for item in result["questions"]):
-                            raise WorkReadabilityRejected("browser readability review does not support answering")
-                        raise WorkBrowserResultRejected("every browser original must be readable before accepting answers")
+                    result = self._supported(job, result, browser_review["images"])
+                    encoded = _json(result)
             elif not self._non_answering_stop(result):
                 for source in job["sources"]:
                     if "page_number" not in source:
@@ -775,6 +777,38 @@ class WorkStore:
                                **{key: review[key] for key in ("status", "image_viewer_used", "reasons")}})
         return {"kind": "uncalibrated_browser_readability", "calibrated": False,
                 "visual_reading_verified": False, "images": images}
+
+    @staticmethod
+    def _supported(job: dict, result: dict, images: list[dict]) -> dict:
+        """The reply without any answer that rests on a capture its own review did not find readable.
+
+        From 2026-10-30 to 2026-11-16 one such capture refused the whole reply: a stray shot of the desk or a blank
+        back cost every answer of the booklet, and this route does not hand a refused reply to another. What was
+        recorded as the reason (README and docs/capture-quality.md of 2026-10-30) is that an answer based on an
+        unreadable or uncertain image is not accepted; that is kept, question by question. An item that is not
+        already unanswered and whose pages include such a capture becomes needs_input with nothing of its answer.
+        A capture that no unanswered item names gets an item of its own, so that it is said; not in listening, whose
+        items are exactly the pending slots.
+        """
+        number = {source["source_id"]: source["page_number"] for source in job["sources"] if "page_number" in source}
+        unread = {number[image["source_id"]]: image["reasons"] for image in images if image["status"] != "readable"}
+        if not unread:
+            return result
+        questions = []
+        for item in result["questions"]:
+            lost = sorted(unread.keys() & set(item["pages"]))
+            if lost and item.get("status", "ready") not in ("needs_input", "pending_audio"):
+                item = {**item, "status": "needs_input", "answer": "", "diagrams": [], "missing_material":
+                        f"撮影{'・'.join(map(str, lost))}枚目の判読を確認できないため、この解答は採用していません"}
+            questions.append(item)
+        if job["stage"] != "listening":
+            named = {page for item in questions if item.get("status") == "needs_input" for page in item["pages"]}
+            questions += [{"group": "", "label": "", "answer_no": [], "pages": [page], "status": "needs_input",
+                           "answer": "", "diagrams": [],
+                           "missing_material": f"撮影{page}枚目の判読を確認できませんでした：{'／'.join(reasons)}"[:300],
+                           **({"requires_audio": False} if job["stage"] == "reading" else {})}
+                          for page, reasons in sorted(unread.items()) if page not in named]
+        return {**result, "questions": questions}
 
     @staticmethod
     def _non_answering_stop(result: dict) -> bool:

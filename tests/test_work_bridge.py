@@ -204,20 +204,16 @@ def test_browser_evidence_is_bound_to_every_original_and_cannot_claim_calibrated
 
 
 @pytest.mark.parametrize("status", ["unreadable", "uncertain"])
-@pytest.mark.parametrize("kind", ["ready", "stop", "mixed", "hidden_answer"])
-def test_browser_uncertain_pages_return_only_genuine_non_answering_stops(tmp_path, status, kind):
-    from app.work_bridge import WorkBrowserResultRejected, WorkConflict, WorkReadabilityRejected, WorkStore
+@pytest.mark.parametrize("kind", ["stop", "hidden_answer"])
+def test_browser_uncertain_pages_return_genuine_non_answering_stops(tmp_path, status, kind):
+    from app.work_bridge import WorkBrowserResultRejected, WorkStore
 
     store = WorkStore(tmp_path)
     job = queue(store, 2)
     acquired = [receipt(store, job, source["source_id"], quality=False) for source in job["sources"]]
     extraction, review = browser_observations(job, statuses=["readable", status])
-    result = answer() if kind == "ready" else needs_input()
-    if kind == "mixed":
-        ready = answer(label="問2")["questions"][0]
-        ready["answer_no"] = [2]
-        result["questions"].append(ready)
-    elif kind == "hidden_answer":
+    result = needs_input()
+    if kind == "hidden_answer":
         result["questions"][0]["derivation"] = "hidden answer: x=2"
     def submit():
         return store.submit_browser_result(job["job_id"], manifest_sha256=job["manifest_sha256"],
@@ -228,13 +224,83 @@ def test_browser_uncertain_pages_return_only_genuine_non_answering_stops(tmp_pat
         assert store.result(job["job_id"]) == needs_input()
         assert submit()["browser_review"]["images"][1]["status"] == status
     else:
-        expected = WorkReadabilityRejected if kind in ("ready", "mixed") else WorkBrowserResultRejected
-        with pytest.raises(expected) as error:
+        with pytest.raises(WorkBrowserResultRejected):
             submit()
-        if kind in ("ready", "mixed"):
-            assert str(error.value) == "browser readability review does not support answering"
-            assert not isinstance(error.value, WorkConflict)
         assert store.result(job["job_id"]) is None
+
+
+def _two_answers(second_pages):
+    """One reply: 問1 from capture 1, 問2 from ``second_pages``."""
+    result = answer()
+    second = answer(label="問2", text="y=5", pages=second_pages)["questions"][0]
+    second["answer_no"] = [2]
+    result["questions"].append(second)
+    return result
+
+
+@pytest.mark.parametrize("status", ["unreadable", "uncertain"])
+def test_a_capture_the_review_cannot_read_takes_only_the_answers_that_rest_on_it(tmp_path, status):
+    """Until 2026-11-16 one such capture voided every answer of the booklet, and Work never switches route on it.
+    The rule it stood for is kept (README, 2026-10-30: answers based on an unreadable or uncertain image are not
+    accepted); an answer that rests on other captures is no longer taken with it."""
+    from app.work_bridge import WorkStore
+
+    store = WorkStore(tmp_path)
+    job = queue(store, 3)
+    acquired = [receipt(store, job, source["source_id"], quality=False) for source in job["sources"]]
+    extraction, review = browser_observations(job, statuses=["readable", status, "readable"])
+    result = _two_answers([2, 3])
+    def submit():
+        return store.submit_browser_result(job["job_id"], manifest_sha256=job["manifest_sha256"],
+            generation=job["generation"], conversation_id="browser-chat", source_receipts=acquired,
+            result=result, extraction=extraction, readability=review)
+    assert submit()["status"] == "completed"
+    first, second = store.result(job["job_id"])["questions"]
+    assert first == answer()["questions"][0], "the answer from capture 1 is kept as it came"
+    assert (second["status"], second["answer"], second["diagrams"]) == ("needs_input", "", [])
+    assert second["label"] == "問2" and second["answer_no"] == [2] and second["pages"] == [2, 3]
+    assert "撮影2枚目" in second["missing_material"]
+    assert result == _two_answers([2, 3]), "the reply handed in is not changed"
+    assert submit()["status"] == "completed", "the same reply again is the same sealed answer"
+
+
+def test_a_capture_no_answer_rests_on_is_named_and_takes_no_answer(tmp_path):
+    """A stray shot of the desk or a blank back among the captures."""
+    from app.work_bridge import WorkStore
+
+    store = WorkStore(tmp_path)
+    job = queue(store, 3)
+    acquired = [receipt(store, job, source["source_id"], quality=False) for source in job["sources"]]
+    extraction, review = browser_observations(job, statuses=["readable", "unreadable", "readable"])
+    store.submit_browser_result(job["job_id"], manifest_sha256=job["manifest_sha256"],
+        generation=job["generation"], conversation_id="browser-chat", source_receipts=acquired,
+        result=_two_answers([3]), extraction=extraction, readability=review)
+    sealed = store.result(job["job_id"])["questions"]
+    assert sealed[:2] == _two_answers([3])["questions"]
+    [named] = sealed[2:]
+    assert (named["status"], named["answer"], named["pages"], named["answer_no"]) == ("needs_input", "", [2], [])
+    assert "撮影2枚目" in named["missing_material"] and "small text is blurred" in named["missing_material"]
+
+
+@pytest.mark.parametrize("stage", ["reading", "listening"])
+def test_what_an_unreadable_capture_takes_keeps_the_shape_of_each_stage(stage):
+    """Reading: every item says whether it needs audio. Listening: the items are exactly the pending slots."""
+    from app.work_bridge import WorkStore
+
+    job = {"stage": stage, "sources": [{"source_id": "p1", "page_number": 1}, {"source_id": "p2", "page_number": 2},
+                                       {"source_id": "p3", "page_number": 3}, {"source_id": "audio"}]}
+    images = [{"source_id": "p1", "status": "readable", "reasons": []},
+              {"source_id": "p2", "status": "uncertain", "reasons": ["glare"]},
+              {"source_id": "p3", "status": "unreadable", "reasons": ["a desk"]}]
+    items = [{"question_id": "q1", "label": "問1", "pages": [1], "status": "ready", "answer": "3", "requires_audio": False},
+             {"question_id": "q2", "label": "問2", "pages": [1, 2], "status": "ready", "answer": "1", "requires_audio": False}]
+    kept, taken, *named = WorkStore._supported(job, {"questions": items}, images)["questions"]
+    assert kept == items[0]
+    assert (taken["question_id"], taken["status"], taken["answer"]) == ("q2", "needs_input", "")
+    if stage == "listening":
+        assert named == []
+    else:
+        assert [(item["pages"], item["status"], item["requires_audio"]) for item in named] == [([3], "needs_input", False)]
 
 
 def test_new_work_uses_fast_while_quality_requests_keep_standard_speed(tmp_path):

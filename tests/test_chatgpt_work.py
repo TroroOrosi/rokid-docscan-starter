@@ -299,6 +299,41 @@ def test_a_page_recorded_as_a_clip_is_said_to_be_greyscale_in_the_work_job(clien
     assert ("telling colours apart" in prompt and "which colours" in prompt) is clip
 
 
+def test_a_stray_capture_costs_no_answer_and_is_named_beside_them(client, monkeypatch):
+    """Work stands behind the Codex CLI now. Until 2026-11-16 one capture its review did not find readable (a shot of
+    the desk, a blank back) refused every answer of the booklet, and Work hands a refused reply to no other route."""
+    from app import main
+    from app.solvers.chatgpt_work import ChatGptWorkSolver
+    from app.work_bridge import configured_work_store
+
+    doc = client.post("/v1/documents", json={"title": "two pages and a desk"}).json()["document_id"]
+    for number in range(3):
+        assert client.post(f"/v1/documents/{doc}/pages", data={"page_index": number},
+            files={"image": ("page.png", picture(number), "image/png")}).status_code == 201
+    assert client.post(f"/v1/documents/{doc}/finalize").status_code == 200
+    session = client.post("/v1/exam-sessions", json={"document_id": doc, "mode": "study"}).json()["session_id"]
+    assert client.post(f"/v1/exam-sessions/{session}/finalize-reading?solve=background").status_code == 200
+    wait_for(lambda: configured_work_store().list_jobs()["jobs"])
+    wait_for(lambda: session not in main._background_solves)
+
+    class StrayReply(BrowserReply):
+        def complete_json(self, **options):
+            envelope = super().complete_json(**options)
+            envelope["readability"][2].update(status="unreadable", reasons=["机だけが写っている"])
+            return envelope
+
+    fake = StrayReply()
+    monkeypatch.setenv("ROKID_CHATGPT_SEND_ENABLED", "1")
+    replies = ChatGptWorkSolver(client=fake).answer_all(question=question_for(doc, session))
+    assert [(result.answer, result.extras["answer_status"]) for _, result in replies] == [
+        ("4", "ready"), ("", "needs_input")]
+    assert replies[1][0]["pages"] == [3] and "撮影3枚目" in replies[1][1].extras["missing_material"]
+    assert replies[0][1].extras["browser_review"]["images"][2]["status"] == "unreadable"
+    prompt = fake.calls[0]["prompt"]
+    assert "cannot support a ready answer" in prompt and "answer the questions that rest on readable images" in prompt
+    assert "return only unanswered needs_input slots" not in prompt, "that read as: one such image, no answers at all"
+
+
 @pytest.mark.parametrize(("count", "soft_limit"), [(21, None), (47, 1), (21, 1250)])
 def test_canonical_pages_remain_byte_exact_in_bounded_deterministic_zips_after_interruption(
         client, monkeypatch, count, soft_limit):
