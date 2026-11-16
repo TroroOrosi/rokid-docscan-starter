@@ -207,8 +207,30 @@ def _plain(value) -> str:
 
 def _mark(answer: str) -> str | None:
     """A short answer in the form two reads are compared in; None for writing, which is not compared."""
-    text = re.sub(r"[、,・;]+", "", _plain(answer))
+    text = re.sub(r"[、,・;]+", "", _plain(answer)).replace("\u2212", "-")
     return text if len(text) <= 24 else None
+
+
+# What stands around the box letters in a label: "(1) アイ", "(1)(ii) カ", "問2 ウ", "〔2〕 エ〜カ".
+_AROUND_BOXES = re.compile(r"[\(\[〔【][0-9A-Za-z]+[\)\]〕】]|\d+|[問第\s・,、〜~\-–:：.．]")
+
+
+def _boxes(item) -> list[str]:
+    """The lettered answer boxes a question names in its label (ア, イ, ウ of a mark sheet whose boxes carry no
+    number), one each; none when the label is anything but such letters and what numbers the question.
+
+    Phone, 2026-11-17, forty pages of such a sheet: one read wrote "アイ" and the other "(1) アイ"; compared by the
+    whole label not one of 199 items lined up."""
+    label = item.get("label")
+    rest = _AROUND_BOXES.sub("", unicodedata.normalize("NFKC", label)) if isinstance(label, str) else ""
+    return list(rest) if re.fullmatch(r"[ァ-ヶ]+", rest) else []
+
+
+def _major(item) -> str:
+    """The question group a box belongs to, by its number: "第1問" and "第１問 〔2〕" are one."""
+    group = _plain(item.get("group"))
+    number = re.search(r"\d+", group)
+    return number.group(0) if number else group
 
 
 def _answered(result) -> bool:
@@ -228,8 +250,10 @@ def _slots(replies: list) -> list[list[tuple]]:
     slots = []
     for item, _ in replies:
         numbers = item.get("answer_no")
-        bases = [("number", str(number)) for number in numbers] if isinstance(numbers, list) and numbers else [
-            ("labels", _plain(item.get("group")), _plain(item.get("label")))]
+        boxes = [] if isinstance(numbers, list) and numbers else _boxes(item)
+        bases = ([("number", str(number)) for number in numbers] if isinstance(numbers, list) and numbers
+                 else [("box", _major(item), box) for box in boxes] if boxes
+                 else [("labels", _plain(item.get("group")), _plain(item.get("label")))])
         keys = []
         for base in bases:
             seen[base] = seen.get(base, 0) + 1
@@ -252,8 +276,10 @@ def _slot_marks(replies: list, slots: list) -> dict:
         # The model separates the marks of one question by spaces as often as by commas ("④ ④ ① ② ②", phone).
         parts = [part for part in re.split(r"[\s、,・;]+", unicodedata.normalize("NFKC", result.answer)) if part]
         apart = whole is not None and len(keys) > 1 and len(parts) == len(keys)
+        # A lettered box holds one character: "-45" fills three of them.
+        each = whole is not None and not apart and len(keys) > 1 and keys[0][0] == "box" and len(whole) == len(keys)
         for index, key in enumerate(keys):
-            marks[key] = parts[index] if apart else whole
+            marks[key] = parts[index] if apart else whole[index] if each else whole
     return marks
 
 
@@ -277,7 +303,8 @@ def _compared(first: list, second: list) -> list:
                 note = _DIFFERENT.format(other=match[1].answer.strip()[:24])
             elif different:  # the other read grouped these numbers differently: name the numbers it differs on
                 note = _DIFFERENT.format(other="、".join(
-                    f"{key[1]}は{'記述' if mark is None else mark}" for key, mark in different)[:40])
+                    f"{key[2] if key[0] == 'box' else key[1]}は{'記述' if mark is None else mark}"
+                    for key, mark in different)[:40])
             elif any(theirs.get(key) is _UNANSWERED for key in keys):
                 note = _ONE_ANSWERED
             elif any(key not in theirs for key in keys):

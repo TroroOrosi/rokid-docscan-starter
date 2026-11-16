@@ -1081,3 +1081,48 @@ def test_a_separate_question_is_marked_when_the_other_reads_joined_question_diff
     _twice(monkeypatch, _grouped(((1,), "④"), ((2,), "②"), ((3,), "①")), _grouped(((1, 2, 3), "④、③、①")))
     shown = _shown(codex_cli.CodexCliSolver().answer_all(question=_booklet(tmp_path)))
     assert [bool(note) for _, _, _, note in shown] == [False, True, False] and "3" in shown[1][3]
+
+
+def _boxed(group, *questions):
+    """One read of a mark sheet whose answer boxes are lettered and carry no number: (label, answer)."""
+    return {"questions": [{"group": group, "label": label, "answer_no": [], "pages": [1], "status": "ready",
+                           "answer": answer, "missing_material": "", "diagrams": []} for label, answer in questions]}
+
+
+def _labelled(replies):
+    return [(item["label"], result.answer, result.extras.get("review_note", "")) for item, result in replies]
+
+
+def test_reads_that_label_the_same_lettered_boxes_differently_agree_box_by_box(codex, tmp_path, monkeypatch):
+    """Phone, 2026-11-17, forty pages of a mark sheet whose boxes are lettered: one read labelled a question "アイ"
+    and the other "(1) アイ". Matched by the whole label nothing lined up: the 199 items of both reads were all
+    shown, every one marked as listed by one read only."""
+    first = _boxed("第1問", ("アイ", "12"), ("ウ", "3"), ("エオカ", "-45"))
+    # The other read also named the part of the question, as it did on the phone: "(1)(ii) カ", "(1)(iii) サシス".
+    second = _boxed("第１問", ("(1)(i) アイ", "12"), ("(1)(ii) ウ", "3"), ("(2) エ", "−"), ("〔2〕(a) オカ", "45"))
+    _twice(monkeypatch, first, second)
+    shown = _labelled(codex_cli.CodexCliSolver().answer_all(question=_booklet(tmp_path)))
+    assert shown == [("アイ", "12", ""), ("ウ", "3", ""), ("エオカ", "-45", "")]
+
+
+def test_a_lettered_box_the_reads_disagree_on_is_named_by_its_letter(codex, tmp_path, monkeypatch):
+    _twice(monkeypatch, _boxed("第2問", ("アイ", "12"), ("ウ", "3")),
+           _boxed("第2問", ("(1) ア", "1"), ("(1) イ", "7"), ("(1) ウ", "3")))
+    shown = _labelled(codex_cli.CodexCliSolver().answer_all(question=_booklet(tmp_path)))
+    assert shown[1] == ("ウ", "3", "")
+    assert "イ" in shown[0][2] and "7" in shown[0][2] and "アは" not in shown[0][2]
+
+
+def test_the_same_letters_under_another_question_group_are_other_boxes(codex, tmp_path, monkeypatch):
+    first = {"questions": _boxed("第1問", ("ア", "1"))["questions"] + _boxed("第2問", ("ア", "5"))["questions"]}
+    second = {"questions": _boxed("第1問", ("(1) ア", "1"))["questions"] + _boxed("第2問", ("(1) ア", "6"))["questions"]}
+    _twice(monkeypatch, first, second)
+    shown = _labelled(codex_cli.CodexCliSolver().answer_all(question=_booklet(tmp_path)))
+    assert [bool(note) for _, _, note in shown] == [False, True]
+
+
+def test_a_label_of_words_is_no_row_of_boxes_and_is_compared_whole_as_before(codex, tmp_path, monkeypatch):
+    _twice(monkeypatch, _boxed("第1問", ("グラフの概形", "右上がり"), ("エネルギー", "保存される")),
+           _boxed("第1問", ("グラフの概形", "右上がり"), ("エネルギー", "保存される")))
+    shown = _labelled(codex_cli.CodexCliSolver().answer_all(question=_booklet(tmp_path)))
+    assert shown == [("グラフの概形", "右上がり", ""), ("エネルギー", "保存される", "")]
