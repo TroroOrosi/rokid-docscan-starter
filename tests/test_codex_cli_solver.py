@@ -155,7 +155,7 @@ def test_a_booklet_is_one_exec_request_with_every_page_and_its_reply_becomes_the
     [run] = _runs(codex())
     args = run["args"]
     assert [args[i + 1] for i, a in enumerate(args) if a == "-i"] == ["page001.jpg", "page002.jpg", "page003.jpg"]
-    assert args[args.index("-m") + 1] == "gpt-6.1-sol" and "model_reasoning_effort=xhigh" in args
+    assert args[args.index("-m") + 1] == "gpt-6.1-sol" and "model_reasoning_effort=high" in args
     assert args[args.index("-s") + 1] == "read-only" and "--skip-git-repo-check" in args and "--ephemeral" in args
     assert "Answer EVERY question in the attached booklet" in args[-1] and "page001.jpg is capture page 1" in args[-1]
     # Phone, 2026-11-14: a CLI started from a piped script read the rest of the script as its input.

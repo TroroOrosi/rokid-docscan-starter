@@ -169,17 +169,22 @@ cleared by hand once, on the evidence of the page); the Help Center says that fr
 with ChatGPT and only Instant chat stays outside it, which would end Chat as the insurance for a spent allowance
 (3-18, the operator's decision); a whole use has never been timed (3-16).
 
-Model and effort are GPT-6.1 Sol at Extra High. Outside sources (`docs/model-effort-research-2026-11-16.md`, each
-claim with its source): reading barely moves with effort (MMMU-Pro 84.9% at high, 85.1% at xhigh; one reading harness
-equal at low and high), hard reasoning gains a few points at xhigh (HLE-Diamond 51.9% to 55.8%) for 1.3 to 1.6 times
-the time and 1.5 times the reasoning tokens, and no other single model is supported under the one-model rule. The CLI
-silently reduces any image over 6000 px a side or 10,000 patches of 32 px (read in its source); the strips this route
-sends (about 517-690 x 2540) are under that. In-house: Work, 2026-11-09, twenty pages, once each, Extra High 556.6 s
-and High 339.6 s, both 13 of 13 (too few to decide; judged on 11/12 to favour High for the time target and nothing was
-changed); on the CLI Extra High took 14 pages in 81-86 s and 47 in 7 min 11 s. By reading accuracy on this
-system's own page (the dark gathered desk page, 342 characters, twelve reads each, standard tier, §M-36): Extra High 3.1% wrong in
-about 311 s a read, High 3.3% in 150 s, Medium 4.8% in 78 s. High reads as well as Extra High in half the time; Medium
-reads worse. The setting stays Extra High until hard problems have been compared at High and Extra High, item by item.
+Model and effort are GPT-6.1 Sol at High for the Codex CLI and Work (from Server 0.83.0, the operator's decision of
+2026-11-16; they were at Extra High), and GPT-6 at Extra High for Chat. Outside sources
+(`docs/model-effort-research-2026-11-16.md`, each claim with its source): reading barely moves with effort (MMMU-Pro
+84.9% at high, 85.1% at xhigh; one reading harness equal at low and high), hard reasoning gains a few points at xhigh
+(HLE-Diamond 51.9% to 55.8%) for 1.3 to 1.6 times the time and 1.5 times the reasoning tokens, and no other single
+model is supported under the one-model rule. The CLI silently reduces any image over 6000 px a side or 10,000 patches
+of 32 px (read in its source); the strips this route sends (about 517-690 x 2540) are under that. In-house, on this
+system's own pages (§M-36, §M-37, §M-39): characters wrong, twelve reads each at the standard tier, on a dark gathered
+page Extra High 3.1%, High 3.3%, Medium 4.8% (about 311 s, 150 s and 78 s a read), on a bright page Extra High 2.0%,
+High 2.5%; what two reads both get wrong alike, which their comparison cannot flag, is the same at both (0.60% and
+0.55% dark, 0.19% and 0.21% bright); High gave one read in twelve with about 6% wrong on each page, which the other
+read contradicts. Hard written mathematics through the product route (Fast, two reads): 21 items of two 東大 papers came
+back with the same results at High and at Extra High, in 154 s against 232 s and 378 s against 483 s; sameness is not
+correctness (one item was checked by hand). Not compared at High: worn pages, horizontal text, English, figures; and
+written answers are not compared between the two reads at any effort, since two writings of one solution differ.
+Earlier: Work, 2026-11-09, twenty pages, once each, Extra High 556.6 s and High 339.6 s, both 13 of 13.
 
 | Route | Status |
 |---|---|

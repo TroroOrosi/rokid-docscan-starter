@@ -71,7 +71,7 @@ def _model_identity(value):
 def _requested_settings(settings=None):
     values = settings if settings is not None else {
         "model": os.environ.get("ROKID_WORK_MODEL") or MODEL,
-        "effort": os.environ.get("ROKID_WORK_EFFORT") or "xhigh",
+        "effort": os.environ.get("ROKID_WORK_EFFORT") or "high",
         "speed": os.environ.get("ROKID_WORK_SPEED") or "fast",
     }
     if (not isinstance(values, dict) or set(values) != {"model", "effort", "speed"}

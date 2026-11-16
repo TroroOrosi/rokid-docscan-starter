@@ -566,8 +566,9 @@ def test_new_browser_job_seals_actual_inventory_model_and_reuses_it_after_restar
         chatgpt_work.ChatGptWorkSolver(client=inventory).answer_all(question=question)
     first = store.session_jobs(1)[0]
     assert first["requested_settings"] == {"model": "GPT-6.10 Sol" if policy is None else "GPT 6.1 Sol",
-                                          "effort": "xhigh", "speed": speed or "fast"}
-    assert inventory.calls == [({"model": "gpt-6.1-sol", "effort": "xhigh", "speed": speed or "fast"}, policy is None)]
+                                          "effort": "high", "speed": speed or "fast"}
+    # High since 2026-11-16: on this system's pages it read and solved as Extra High did, in less time (M-36, M-37).
+    assert inventory.calls == [({"model": "gpt-6.1-sol", "effort": "high", "speed": speed or "fast"}, policy is None)]
     raw, _ = store.read_source(first["job_id"], "p1")
     assert raw == original.read_bytes()
     monkeypatch.setenv("ROKID_WORK_MODEL", "GPT-6.99 Sol")

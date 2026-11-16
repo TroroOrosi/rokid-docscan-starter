@@ -10,7 +10,7 @@ Runs on: スマホのTermux、glassdoc、スマホのテザリングとモバイ
 
 準備対象はTermuxの `x11-repo`、`chromium`、`termux-x11-nightly`、`termux-services`、`android-tools` と、Termux公式の対応する署名のTermux:X11・Termux:Bootアプリです。導入・設定は別承認です。公式手順は [Chromiumビルド](https://github.com/termux/termux-packages/blob/master/x11-packages/chromium/build.sh)、[Termux:X11](https://github.com/termux/termux-x11)、[Termux:Boot](https://github.com/termux/termux-boot#how-to-use)、[サービス管理](https://github.com/termux/termux-services)を参照します。
 
-環境設定ファイルは権限0600とし、実鍵を表示せず `ROKID_API_KEY`、`ROKID_GLASSES_SERIAL` を保存します。Work経路は `ROKID_SOLVER=chatgpt-work`、`ROKID_WORK_MODEL=gpt-6.1-sol`、`ROKID_WORK_EFFORT=xhigh`、`ROKID_WORK_SPEED=fast` を使用します。旧Chat互換経路は `chatgpt-web` です。起動スクリプトはCDPを `http://127.0.0.1:9222`、X11表示先を専用の `:1` に固定します。プロファイルを変える場合だけ `ROKID_BROWSER_PROFILE` を指定します。
+環境設定ファイルは権限0600とし、実鍵を表示せず `ROKID_API_KEY`、`ROKID_GLASSES_SERIAL` を保存します。Work経路は `ROKID_SOLVER=chatgpt-work`、`ROKID_WORK_MODEL=gpt-6.1-sol`、`ROKID_WORK_EFFORT=high`（0.83.0 からの既定。Codex CLI と共通）、`ROKID_WORK_SPEED=fast` を使用します。旧Chat互換経路は `chatgpt-web` です。起動スクリプトはCDPを `http://127.0.0.1:9222`、X11表示先を専用の `:1` に固定します。プロファイルを変える場合だけ `ROKID_BROWSER_PROFILE` を指定します。
 新規ブラウザjobの `ROKID_WORK_MODEL_POLICY` は既定で `follow-family` です。公開候補から同じ系統・基準版以上の最高版を保存し、`exact` を明示すると指定版へ固定します。既存jobと合同英語の音声追加は、読解時の保存設定を引き継ぎます。モデル一覧の取得だけでは実選択の合格にせず、送信前にもmodel・effort・Fastを照合します。
 準備時の `ROKID_CHATGPT_SEND_ENABLED=0` は未送信DBの自動送信も止めます。ログイン・サービス導入の承認をGPT送信の承認と扱いません。完全な資料と送信対象を特定した別承認の後だけ1へ変えます。
 

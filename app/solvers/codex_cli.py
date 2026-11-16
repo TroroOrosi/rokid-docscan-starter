@@ -37,7 +37,7 @@ The CLI takes images only. A booklet with audio (listening, mixed English) is re
 error the server answers by handing the booklet to the next route.
 
 Settings: ``ROKID_CODEX_BIN`` (default: the Termux npm install, else ``codex`` on PATH), ``ROKID_CODEX_MODEL``
-(``gpt-6.1-sol``), ``ROKID_CODEX_EFFORT`` (``xhigh``), ``ROKID_CODEX_TIMEOUT_S`` (by the booklet's size, see ``_time_allowed``), ``ROKID_CODEX_LOCATE`` (``1``;
+(``gpt-6.1-sol``), ``ROKID_CODEX_EFFORT`` (``high``), ``ROKID_CODEX_TIMEOUT_S`` (by the booklet's size, see ``_time_allowed``), ``ROKID_CODEX_LOCATE`` (``1``;
 ``0`` sends photos as the Chat route does), ``ROKID_CODEX_PAGE_SCALE`` (2: a region cut from a still photo is sent at
 this many times its own pixels at least), ``ROKID_CODEX_PAGE_LONG`` (2540 px: the long side a smaller region is
 enlarged up to, at most two and a half times; a page recorded as a clip follows this alone, see ``_wanted_scale``),
@@ -643,7 +643,10 @@ class CodexCliSolver(Solver):
 
     @classmethod
     def _run(cls, question: Question, model: str) -> list[str]:
-        effort = os.environ.get("ROKID_CODEX_EFFORT") or "xhigh"
+        # High: on this system's own pages it read as Extra High did (3.3% of characters wrong against 3.1% on a dark
+        # page, 2.5% against 2.0% on a bright one, twelve reads each) and gave the same results on 21 items of hard
+        # written mathematics, in 0.66 to 0.78 of the time (2026-11-16, M-36 and M-37; the operator's decision).
+        effort = os.environ.get("ROKID_CODEX_EFFORT") or "high"
         timeout, locating = _time_allowed(len(question.document_pages))
         with cls._workplace() as (directory, environment):
             names = None

@@ -146,7 +146,7 @@ Driveへ置く場合も全件列挙と各原画像取得が必要で、添付20�
 CXR-L の実装境界は
 [CXR-L / Global Hi Rokid integration](docs/cxr-l-integration.md)です。
 
-現在のバージョン: **Server APP 0.82.1 / API 1.49.0 / Android client 0.3.17 / Glasses View 1.51.0 / Solver API 1.11.0**。
+現在のバージョン: **Server APP 0.83.0 / API 1.49.0 / Android client 0.3.17 / Glasses View 1.51.0 / Solver API 1.11.0**。
 版数の正本は `app/version.py` です。他の資料は版数を書かず、この行だけが
 `tests/test_documentation_contract.py` で実装と照合されます。
 Solver API は、記入用解答の全文保持・資料不足の分離を行う `answer_only` モードを含みます。
@@ -582,7 +582,7 @@ uvicorn app.main:app --port 8000
 | `ROKID_TRANSCRIBER` | （なし） | リスニング録音の書き起こし `openai\|gemini`（未設定=与えた transcript を使用） |
 | `ROKID_TRANSCRIBE_MODEL` | `gpt-4o-transcribe` | openai の書き起こしモデル（gemini は `ROKID_LLM_MODEL`） |
 | `ROKID_SOLVER_TIERS` | （単一） | 二段フォールバック順（例 `openai,local`） |
-| `ROKID_CODEX_MODEL` / `ROKID_CODEX_EFFORT` / `ROKID_CODEX_TIMEOUT_S` | `gpt-6.1-sol` / `xhigh` / `3600` | `codex-cli` の経路のモデル、推論の強さ、1回の要求の上限秒 |
+| `ROKID_CODEX_MODEL` / `ROKID_CODEX_EFFORT` / `ROKID_CODEX_TIMEOUT_S` | `gpt-6.1-sol` / `high` / 頁数に応じた秒数 | `codex-cli` の経路のモデル、推論の強さ（0.83.0 から High。Work と共通）、1回の要求の上限秒（既定は 240 秒＋1 頁 30 秒、最低 600 秒） |
 | `ROKID_CODEX_PAGE_LONG` | `2540` | `codex-cli` が切り出した頁を拡大する長辺の画素（2.5 倍まで。等倍より小さくはしません）。冊子がモデルの文脈（500,000 トークン）に収まらない時は自動で小さくします |
 | `ROKID_CODEX_PAGE_SCALE` | `2` | 静止画から切り出した範囲を、少なくともこの倍率で送ります（大きな紙が 1 枚に写った時も文字を 2 倍にするため。`1` で以前の寸法）。1 ファイルは CLI が黙って縮める上限（1 辺 6000 px）以内に切り分けます。録画から重ねた頁は対象外 |
 | `ROKID_CODEX_LOCATE` | `1` | `0` で頁の位置の問い合わせをやめ、Chat の経路と同じ画像を送ります |
@@ -591,7 +591,7 @@ uvicorn app.main:app --port 8000
 | `ROKID_SOLVER_FALLBACKS` | `chatgpt-work`・`codex-cli` のとき `chatgpt-web` | 冊子1通の経路が利用制限または送信前の失敗で使えないときに引き継ぐ経路の順（カンマ区切り）。空文字で無効。録音の段は画像を持つ会話から動かしません |
 | `ROKID_CHATGPT_UPLOAD_WINDOW_FILES` | `80` | Chat経路の冊子が3時間に添付できるファイル数（help.openai.com の有料プランの値、2026-11-10確認。混雑時は減り、失敗した添付も数えられる場合があります）。残りを超える冊子は添付前に止めます。`0`で検査を無効化 |
 | `ROKID_CHATGPT_CDP` | `http://127.0.0.1:9222` | `chatgpt-web` / `chatgpt-work` が接続する Chromium のDevToolsポート。Termux起動ではloopbackへ固定 |
-| `ROKID_WORK_MODEL` / `ROKID_WORK_EFFORT` / `ROKID_WORK_SPEED` | `gpt-6.1-sol` / `xhigh` / `fast` | 通常の新規答案は本番Fast。試験・検証では `ROKID_WORK_SPEED=standard` を明示。保存済みjob・追加音声の設定は引き継ぎ、送信前の公開UIと照合。専用の品質検査はStandard |
+| `ROKID_WORK_MODEL` / `ROKID_WORK_EFFORT` / `ROKID_WORK_SPEED` | `gpt-6.1-sol` / `high` / `fast` | 通常の新規答案は本番Fast。試験・検証では `ROKID_WORK_SPEED=standard` を明示。保存済みjob・追加音声の設定は引き継ぎ、送信前の公開UIと照合。専用の品質検査はStandard |
 | `ROKID_WORK_MODEL_POLICY` | `follow-family` | 新規ブラウザjobで同系統・基準版以上の最高版へ追従。`exact` で指定版固定。既存job・追加音声の保存設定は引継ぐ |
 | `ROKID_WORK_ORIGINAL_JPEG` | `0` | `1`で新規Work jobに検証済みの撮影JPEGを使用。向きと画素の対応を検証し、既存jobの形式は保持。PC上の実写（glassdoc撮影の重複を除く19枚、2026-11-10）では正立PNGが原JPEGの2.41倍で、40枚はPNG 575MB・7通、JPEG 238MB・3通。JPEGは全頁が回転270度で、モデル側の回転と画素照合が要るため、実写でその照合が通ることを端末のWorkで1回確かめるまで既定は変えません |
 | `ROKID_KEYMAP` | （なし） | gesture→KeyCode の上書き（JSON、`/v1/settings.input`。既定 KeyCode は旧機由来・未実測） |

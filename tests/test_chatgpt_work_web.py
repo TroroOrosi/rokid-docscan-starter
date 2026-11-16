@@ -515,6 +515,7 @@ def private_state(monkeypatch, tmp_path):
 
     monkeypatch.setattr(config, "DATA_DIR", tmp_path)
     monkeypatch.setenv("ROKID_WORK_SPEED", "standard")  # Verification fixtures explicitly use Standard.
+    monkeypatch.setenv("ROKID_WORK_EFFORT", "xhigh")  # ... and Extra High: the default is High since 2026-11-16.
     monkeypatch.setattr(chatgpt_web, "POLL_S", 0.001)
     monkeypatch.setattr(chatgpt_web, "RETRY_BACKOFF_S", 0)
     monkeypatch.setattr(chatgpt_web, "TIMEOUT_S", 0.2)
@@ -590,6 +591,15 @@ def test_work_environment_settings_and_changed_trigger_label_use_real_controls(p
     assert page.evaluate("document.getElementById('terra').getAttribute('aria-checked')") == "true"
     assert page.evaluate("document.querySelector('[role=slider]').getAttribute('aria-valuenow')") == "2"
     assert page.evaluate("document.querySelector('[role=menuitemcheckbox]').getAttribute('aria-checked')") == "false"
+
+
+def test_with_nothing_said_about_effort_the_power_is_set_to_high(page, monkeypatch):
+    """The Codex CLI and Work share one effort, High (M-36, M-37): the slider goes to High, not to its top."""
+    monkeypatch.delenv("ROKID_WORK_EFFORT")
+    assert work._requested_settings().effort == "High"
+    _controls(page, fast=True)
+    assert work.verify_work_model(page, select=True) == "GPT-6.1 Sol / High / Standard"
+    assert page.evaluate("document.getElementById('effort').textContent") == "High"
 
 
 @pytest.mark.parametrize("linked", [True, False])

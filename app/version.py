@@ -314,7 +314,11 @@ from __future__ import annotations
 #         (register 3-17). See API 1.49.0.
 # 0.82.1: an item that names what the captures leave out is shown behind the answers. The model lists it where
 #         the gap lies; inside a 大問 that split the group in two on the glasses (phone, 2026-11-16).
-APP_VERSION = "0.82.1"
+# 0.83.0: the Codex CLI and Work answer at High unless ROKID_CODEX_EFFORT / ROKID_WORK_EFFORT say otherwise (they
+#         were at Extra High). On this system's own pages High read as Extra High did and gave the same results on
+#         hard written mathematics, in less time (M-36, M-37, M-39). Chat stays GPT-6 at Extra High. A Work job
+#         already sealed keeps its setting.
+APP_VERSION = "0.83.0"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.
