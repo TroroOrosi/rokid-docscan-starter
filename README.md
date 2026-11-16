@@ -146,7 +146,7 @@ Driveへ置く場合も全件列挙と各原画像取得が必要で、添付20�
 CXR-L の実装境界は
 [CXR-L / Global Hi Rokid integration](docs/cxr-l-integration.md)です。
 
-現在のバージョン: **Server APP 0.83.0 / API 1.49.0 / Android client 0.3.17 / Glasses View 1.51.0 / Solver API 1.11.0**。
+現在のバージョン: **Server APP 0.84.0 / API 1.50.0 / Android client 0.3.17 / Glasses View 1.51.0 / Solver API 1.11.0**。
 版数の正本は `app/version.py` です。他の資料は版数を書かず、この行だけが
 `tests/test_documentation_contract.py` で実装と照合されます。
 Solver API は、記入用解答の全文保持・資料不足の分離を行う `answer_only` モードを含みます。
@@ -588,6 +588,8 @@ uvicorn app.main:app --port 8000
 | `ROKID_CODEX_LOCATE` | `1` | `0` で頁の位置の問い合わせをやめ、Chat の経路と同じ画像を送ります |
 | `ROKID_CODEX_READS` | `2` | `codex-cli` が冊子を読む回数。`2` は同じ画像を同時に2回読ませ、短い答え（選択肢・記号・数値）が食い違った設問を「要確認」にして他方の答えを添えます（記述は比べません）。利用枠の消費は2倍です。`1` で1回だけ |
 | `ROKID_ROUTE_CHECK_INTERVAL_S` | `86400` | 経路の確認を自動で繰り返す間隔（秒）。`0` で無効。手動は `POST /v1/route-check` |
+| `ROKID_ROUTE_CHECK_DEEP` | 未設定 | `1` にすると、毎日の経路の確認で Chat の経路に小さな実メッセージを 1 通送り、添付・送信・返答の受け取りまで確かめる（既定は画面を見るだけ）。手動は `POST /v1/route-check?deep=1`。ChatGPT の画面の自動操作で、送信 1 通と画像 1 枚を使う。ブラウザの経路が失敗した時は、画面の構造（操作部品の数と名前。文面は含まない）がブラウザの状態の保存先の failures フォルダに残り、`GET /v1/route-check/failures` と `/v1/settings` の `route_failure` で読める |
+| `ROKID_CHATGPT_CHECK_REPLY_S` | `600` | 上の確認が返答を待つ秒数（未計測の仮の値） |
 | `ROKID_SOLVER_FALLBACKS` | `chatgpt-work`・`codex-cli` のとき `chatgpt-web` | 冊子1通の経路が利用制限または送信前の失敗で使えないときに引き継ぐ経路の順（カンマ区切り）。空文字で無効。録音の段は画像を持つ会話から動かしません |
 | `ROKID_CHATGPT_UPLOAD_WINDOW_FILES` | `80` | Chat経路の冊子が3時間に添付できるファイル数（help.openai.com の有料プランの値、2026-11-10確認。混雑時は減り、失敗した添付も数えられる場合があります）。残りを超える冊子は添付前に止めます。`0`で検査を無効化 |
 | `ROKID_CHATGPT_CDP` | `http://127.0.0.1:9222` | `chatgpt-web` / `chatgpt-work` が接続する Chromium のDevToolsポート。Termux起動ではloopbackへ固定 |

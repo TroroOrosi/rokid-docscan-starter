@@ -318,7 +318,13 @@ from __future__ import annotations
 #         were at Extra High). On this system's own pages High read as Extra High did and gave the same results on
 #         hard written mathematics, in less time (M-36, M-37, M-39). Chat stays GPT-6 at Extra High. A Work job
 #         already sealed keeps its setting.
-APP_VERSION = "0.83.0"
+# 0.84.0: what the glasses cannot draw is written out. Their answer typeface has the script digits and the
+#         superscript n, and no script sign or other script letter (read from the fonts' own tables, register
+#         3-22): a signed power is ^(...), and a run of script characters a model wrote itself that holds an
+#         undrawn one is ^(...) or _(...). A failed browser route leaves the structure of its page (counts of
+#         controls, no text); the check before use can send one small real message through Chat as a
+#         booklet's goes; a Codex model the service no longer offers is named model_mismatch. See API 1.50.0.
+APP_VERSION = "0.84.0"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.
@@ -458,7 +464,11 @@ APP_VERSION = "0.83.0"
 # the item keeps its answer text in both cases.
 # 1.49.0: an answer bundle can hold items with empty group and label and status needs_input that name what the
 # captures leave out (a page-number gap, text cut at an image's edge, a capture Work's review could not read).
-API_VERSION = "1.49.0"
+# 1.50.0: POST /v1/route-check takes ?deep=1: the Chat route sends one small real message and collects its
+#         reply (without it the browser routes are only looked at). GET /v1/route-check/failures returns the
+#         newest snapshots a failed browser route left, and /v1/settings carries the last as `route_failure`.
+#         A route's check can report `check_failed` (the reply's count was wrong) and `model_mismatch`.
+API_VERSION = "1.50.0"
 
 # Matching algorithm identity. Bump when thresholds or hashing change so a
 # re-index/eval is triggered. Mirrors thresholds in app/matching.py.
