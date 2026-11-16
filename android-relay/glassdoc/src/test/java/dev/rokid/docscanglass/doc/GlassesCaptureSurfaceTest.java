@@ -81,6 +81,28 @@ public class GlassesCaptureSurfaceTest {
         screen.recycle();
     }
 
+    /**
+     * The camera posts a recording's last report when the recording ends; the page's review is posted only after the
+     * clip is closed and the page encoded. In that order a clip that ended short has its bar over its page's review.
+     */
+    @Test public void aShortClipsLastReportIsOnTheDisplayWhenItsPageIsReviewed() {
+        HudView hud = new HudView(RuntimeEnvironment.getApplication());
+        hud.layout(0, 0, 480, 640);
+        GlassesCaptureSurface surface = new GlassesCaptureSurface(RuntimeEnvironment.getApplication(), null, hud,
+                new Handler(Looper.getMainLooper()), (generation, purpose) -> { });
+        surface.showCaptureAiming(1, false, false);
+        surface.showClipProgress(28, 60, true);
+        surface.showClipProgress(28, 60, false);
+        surface.showCaptureReview(deskJpeg(160, 120, 480, 360), 0, List.of());
+        ShadowLooper.runUiThreadTasksIncludingDelayedTasks();
+        Bitmap screen = Bitmap.createBitmap(480, 640, Bitmap.Config.ARGB_8888);
+        hud.draw(new Canvas(screen));
+        int lit = 0;
+        for (int x = 328; x < 472; x++) if (Color.green(screen.getPixel(x, 437)) > 200) lit++;
+        assertEquals("28 of 60 across the 144 px window", 67, lit);
+        surface.close(); screen.recycle();
+    }
+
     @Test public void pausedCaptureReleasesQueuedAndLateFramesBeforeTheNextStream() {
         HudView hud = new HudView(RuntimeEnvironment.getApplication());
         GlassesCaptureSurface surface = new GlassesCaptureSurface(RuntimeEnvironment.getApplication(), null, hud,

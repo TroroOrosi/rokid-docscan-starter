@@ -66,6 +66,8 @@ final class HudView extends View {
     private boolean recording;
     private boolean clipRecording;
     private float clipProgress;
+    /** The recording that ended last counted too few frames: its bar stays over the review of its page. */
+    private boolean clipWeak;
     private boolean far;
     private static final float MARK = 10f;
     /** The clip bar's height; the frame line of the small window takes the row under it. */
@@ -89,10 +91,20 @@ final class HudView extends View {
      * without a word. Worn on 2026-11-16 (M-33) 5 to 8 frames of 290 were still on three pages and nothing said
      * so: the line there was until then lay over the lower edge of the image and was not drawn while nothing had
      * counted. Above the image the bar is on black whatever the page looks like. Gone when the recording ends.
+     *
+     * <p>Unless the recording ended with fewer than two thirds of the frames it wants (40 of 60): then the bar comes
+     * back, as far as it got, for as long as that page's review is shown. The page is saved as always; the forward
+     * swipe that retakes it is the wearer's. Of 17 worn clips (2026-11-16, analysis-1116-cues) the nine that counted
+     * 45 or more all gave a usable page (41 to 61 frames added on the phone) and the eight that counted 28 or fewer
+     * did not; any limit from 29 to 45 parts them alike. The count foretells how many frames the phone adds, not that
+     * the page reads. The bar is forgotten when the review ends, when the display is cleared, when the capture stops
+     * and when a recording starts; a clip whose end is reported behind a cleared display or a stopped capture (the
+     * tap or the ending double tap cut it short) leaves none.</p>
      */
     void showClipProgress(int counted, int wanted, boolean recording) {
         clipRecording = recording;
         clipProgress = Math.max(0f, Math.min(1f, (float) counted / Math.max(1, wanted)));
+        clipWeak = !recording && capturing && !blank && counted * 3 < wanted * 2;
         invalidate();
     }
 
@@ -108,7 +120,7 @@ final class HudView extends View {
 
     void capturePreview(boolean active) {
         capturing = active;
-        if (!active) { paperProposal = null; liveBox = null; liveMisses = 0; clipRecording = false; far = false; }
+        if (!active) { paperProposal = null; liveBox = null; liveMisses = 0; clipRecording = false; clipWeak = false; far = false; }
         if (!active && livePreview != null) { livePreview.recycle(); livePreview = null; }
         invalidate();
     }
@@ -185,6 +197,7 @@ final class HudView extends View {
     void setBlank(boolean value) {
         if (blank == value) return;
         blank = value;
+        if (value) clipWeak = false; // a page held behind the cleared display gets a review of its own on return
         invalidate();
     }
 
@@ -237,6 +250,8 @@ final class HudView extends View {
 
     private void set(List<String> newLines, Bitmap still, boolean showGuide) {
         lines = newLines == null ? Collections.emptyList() : new ArrayList<>(newLines);
+        // The review ended. Not on every view without a picture: one may come between a clip's end and its review.
+        if (still == null && preview != null) clipWeak = false;
         preview = still;
         aiming = showGuide;
         invalidate();
@@ -270,7 +285,9 @@ final class HudView extends View {
             RectF area = captureArea();
             canvas.drawCircle(area.right - 3f, area.top - 12f, 3f, paint);
         }
-        if (capturing && clipRecording && still == null) {
+        // While it is recorded; and, for a clip that ended short, over its page's review. The picture under review is
+        // cut to the corner, which begins below the bar: nothing of it is covered.
+        if (capturing && (still == null ? clipRecording : clipWeak)) {
             // On the corner's edge, not the picture's: the picture follows the paper, and the bar has to stand still.
             RectF area = captureArea();
             float bottom = area.top - 1f, top = bottom - BAR;

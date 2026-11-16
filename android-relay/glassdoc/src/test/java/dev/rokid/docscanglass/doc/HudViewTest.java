@@ -433,6 +433,11 @@ public class HudViewTest {
         assertArrayEquals("no clip has reported: the still camera never does, and a clip camera that watches does not",
                 new int[]{0, 0, 0, 0}, barRows(view, screen));
         view.showRecording(false);
+        Bitmap still = page();
+        view.showReview(still, List.of());
+        assertArrayEquals("nor over the review of a still", new int[]{0, 0, 0, 0}, barRows(view, screen));
+        view.showAiming(List.of());
+        still.recycle();
 
         view.showClipProgress(0, 60, true);
         view.showClipProgress(45, 60, true);
@@ -465,6 +470,127 @@ public class HudViewTest {
         view.showReview(photo, List.of());
         assertArrayEquals("not over the three-second review", new int[]{0, 0, 0, 0}, barRows(view, screen));
         view.capturePreview(false);
+        photo.recycle(); screen.recycle();
+    }
+
+    /** A capture display on which a recording has just ended with {@code counted} of the 60 frames it wants. */
+    private static HudView afterClip(int counted) {
+        HudView view = capturing();
+        view.showClipProgress(0, 60, true);
+        view.showClipProgress(counted, 60, true);
+        view.showClipProgress(counted, 60, false);
+        return view;
+    }
+
+    /** A page under review that fills the corner [328,440,472,632]: its first row is 440, under the bar's rows. */
+    private static Bitmap page() {
+        Bitmap photo = Bitmap.createBitmap(240, 320, Bitmap.Config.ARGB_8888);
+        photo.eraseColor(Color.rgb(90, 90, 90));
+        return photo;
+    }
+
+    /**
+     * Of 17 worn clips (2026-11-16) the nine that counted 45 still frames or more all gave a usable page and the eight
+     * that counted 28 or fewer did not, and nothing told the wearer which was which. A recording that ends under two
+     * thirds of what it wants leaves its bar where it stopped, over that page's review: no word, and the page is
+     * saved as always; the forward swipe that retakes it is the wearer's.
+     */
+    @Test public void a_clip_that_ended_short_keeps_its_bar_over_that_pages_review() {
+        Bitmap screen = Bitmap.createBitmap(480, 640, Bitmap.Config.ARGB_8888), photo = page();
+        for (int counted : new int[]{28, 39}) {
+            HudView view = afterClip(counted);
+            assertArrayEquals("gone with the recording, as before", new int[]{0, 0, 0, 0}, barRows(view, screen));
+            view.showAiming(List.of()); // the page takes a moment to arrive: what the display is told meanwhile changes nothing
+            view.showReview(photo, List.of());
+            int filled = 144 * counted / 60;
+            assertArrayEquals("where it stopped, " + counted + " of 60, with its line across the window",
+                    new int[]{144, filled, filled, filled}, barRows(view, screen));
+            assertEquals("nothing between the bar and the picture", 0, litInRow(screen, 439));
+            assertTrue("the picture under review starts below the bar and is not covered",
+                    Color.green(screen.getPixel(400, 440)) > 80 && Color.green(screen.getPixel(400, 440)) < 100);
+            view.capturePreview(false);
+        }
+        photo.recycle(); screen.recycle();
+    }
+
+    @Test public void a_clip_that_reached_two_thirds_of_its_frames_shows_no_bar_in_its_review() {
+        Bitmap screen = Bitmap.createBitmap(480, 640, Bitmap.Config.ARGB_8888), photo = page();
+        for (int counted : new int[]{40, 45, 60}) {
+            HudView view = afterClip(counted);
+            view.showReview(photo, List.of());
+            assertArrayEquals(counted + " of 60", new int[]{0, 0, 0, 0}, barRows(view, screen));
+            view.capturePreview(false);
+        }
+        photo.recycle(); screen.recycle();
+    }
+
+    @Test public void the_short_clips_bar_goes_when_the_review_ends() {
+        Bitmap screen = Bitmap.createBitmap(480, 640, Bitmap.Config.ARGB_8888), photo = page();
+        HudView view = afterClip(28);
+        view.showReview(photo, List.of());
+        view.showReview(photo, List.of()); // the same page shown again keeps it
+        assertArrayEquals(new int[]{144, 67, 67, 67}, barRows(view, screen));
+        view.showAiming(List.of()); // saved, or the wearer's retake: a page is looked for
+        assertArrayEquals(new int[]{0, 0, 0, 0}, barRows(view, screen));
+        view.showReview(photo, List.of());
+        assertArrayEquals("forgotten, not hidden: a review with no clip of its own has no bar",
+                new int[]{0, 0, 0, 0}, barRows(view, screen));
+        view.capturePreview(false);
+        photo.recycle(); screen.recycle();
+    }
+
+    @Test public void the_short_clips_bar_goes_when_the_display_is_cleared() {
+        Bitmap screen = Bitmap.createBitmap(480, 640, Bitmap.Config.ARGB_8888), photo = page();
+        HudView view = afterClip(28);
+        view.showReview(photo, List.of());
+        assertArrayEquals(new int[]{144, 67, 67, 67}, barRows(view, screen));
+        view.setBlank(true); // the wearer's tap: the page is held and gets its own review on return
+        view.setBlank(false);
+        assertArrayEquals(new int[]{0, 0, 0, 0}, barRows(view, screen));
+        view.capturePreview(false);
+
+        HudView cut = capturing(); // the tap came during the recording: the clip ends behind the cleared display
+        cut.showClipProgress(10, 60, true);
+        cut.setBlank(true);
+        cut.showClipProgress(10, 60, false);
+        cut.setBlank(false);
+        cut.showReview(photo, List.of());
+        assertArrayEquals(new int[]{0, 0, 0, 0}, barRows(cut, screen));
+        cut.capturePreview(false);
+        photo.recycle(); screen.recycle();
+    }
+
+    @Test public void the_short_clips_bar_goes_when_a_new_recording_starts() {
+        Bitmap screen = Bitmap.createBitmap(480, 640, Bitmap.Config.ARGB_8888), photo = page();
+        HudView view = afterClip(28);
+        view.showReview(photo, List.of());
+        assertArrayEquals(new int[]{144, 67, 67, 67}, barRows(view, screen));
+        view.showClipProgress(0, 60, true);
+        assertArrayEquals("neither the bar of the clip before nor that of the one being recorded",
+                new int[]{0, 0, 0, 0}, barRows(view, screen));
+        view.capturePreview(false);
+        photo.recycle(); screen.recycle();
+    }
+
+    @Test public void the_short_clips_bar_goes_when_the_capture_is_not_active() {
+        Bitmap screen = Bitmap.createBitmap(480, 640, Bitmap.Config.ARGB_8888), photo = page();
+        HudView view = afterClip(28);
+        view.showReview(photo, List.of());
+        assertArrayEquals(new int[]{144, 67, 67, 67}, barRows(view, screen));
+        view.capturePreview(false);
+        assertArrayEquals(new int[]{0, 0, 0, 0}, barRows(view, screen));
+        view.capturePreview(true);
+        assertArrayEquals("a stopped capture forgets it", new int[]{0, 0, 0, 0}, barRows(view, screen));
+        view.capturePreview(false);
+
+        HudView cut = capturing(); // a tap or the ending double tap stops the camera first: the clip's end is reported after
+        cut.showClipProgress(10, 60, true);
+        cut.capturePreview(false);
+        cut.showClipProgress(10, 60, false);
+        cut.showReview(photo, List.of());
+        cut.capturePreview(true);
+        assertArrayEquals(new int[]{0, 0, 0, 0}, barRows(cut, screen));
+        cut.capturePreview(false);
         photo.recycle(); screen.recycle();
     }
 
