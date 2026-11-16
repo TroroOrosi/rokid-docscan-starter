@@ -261,7 +261,8 @@ class Check:
     def chooser(self) -> bool:
         self.started = self.shell('date "+%m-%d %H:%M:%S.000"').strip()
         self.shell(f"am force-stop {PACKAGE}; input keyevent KEYCODE_WAKEUP; sleep 1; "
-                   f"am start -n {PACKAGE}/.DocScanGlassActivity --es capture {self.options.capture} >/dev/null 2>&1")
+                   f"am start -n {PACKAGE}/.DocScanGlassActivity --es capture {self.options.capture} "
+                   f"--ei long_above {self.options.long_above} >/dev/null 2>&1")
         if not self.expect("chooser opens", bool(self.wait(r"phase=chooser request=wake", 8))):
             return False
         time.sleep(1)
@@ -329,7 +330,7 @@ class Check:
             _, _, nanos, iso, gain, _ = status[-1]
             self.row("light as the watch preview measures it", "INFO",
                      f"a 30 ms exposure needs a total gain of {int(nanos) / 1e6 * int(iso) * int(gain) / 100 / 30:.0f}; "
-                     "the clip has 4000 at most and takes 60 ms above 5640")
+                     "the clip has 4000 at most" + (f", and takes 60 ms above {8 * self.options.long_above}" if self.options.long_above else ""))
         causes = re.findall(r"page_change scene=(\d+) (cause=\w+ level_shift=-?\d+ cells_over_percent=\d+)", log)
         self.expect(f"an unmoving scene adds no clip in {self.options.watch} s", self.taken() <= 2,
                     f"{self.taken()} clip(s); page changes counted: " + ("; ".join(f"{n} {c}" for n, c in causes[-4:]) or "none"))
@@ -588,6 +589,9 @@ if __name__ == "__main__":
     parser.add_argument("--watch", type=int, default=15, help="seconds to watch an unmoving scene after the first photo")
     parser.add_argument("--paper", type=int, default=0, help="seconds to record a real booklet being read, in place of the pause steps")
     parser.add_argument("--capture", choices=["still", "clip"], default="still", help="how a page is taken; the app saves it on this start")
+    parser.add_argument("--long-above", type=int, default=0,
+                        help="with --capture clip: the gain in hundredths that 30 ms may need before 60 ms is taken; the app "
+                             "saves it on this start. 0, the default: never (worn, hardly a frame is still at 60 ms, M-31)")
     parser.add_argument("--no-reference", action="store_true", help="take no photo with the glasses' own camera (it goes to their gallery)")
     parser.add_argument("--report", help="directory for the pulled photos and the screens")
     sys.exit(Check(parser.parse_args()).main())

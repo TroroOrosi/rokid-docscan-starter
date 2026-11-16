@@ -259,6 +259,18 @@ class Check:
                                  "--expected-serial", GLASSES_SERIAL, "--server", self.o.server, "--package", PACKAGE],
                                 env=environment, stdout=log, stderr=subprocess.STDOUT)
 
+    def changed(self, before: bytes, seconds: float = 8.0) -> bytes | None:
+        """The screen once it differs from `before`, or None after `seconds`. A gesture written over the phone's relay
+        reaches the glasses after up to a few seconds: judged 1.5 s after it was written, a swipe that had turned the
+        page was twice reported as having done nothing (2026-11-16)."""
+        end = time.monotonic() + seconds
+        while time.monotonic() < end:
+            time.sleep(0.7)
+            now = self.adb("exec-out", "screencap", "-p")
+            if now != before:
+                return now
+        return None
+
     def start(self) -> bool:
         self.sh(f"am force-stop {PACKAGE}; input keyevent KEYCODE_WAKEUP; sleep 1")
         self.since = self.stamp()
@@ -378,7 +390,8 @@ class Check:
             far = sum(1 for *_, mark in status if mark == "true")
             self.row("worn: light on what the wearer looks at", None,
                      f"a 30 ms exposure needs a total gain of {needs[len(needs) // 2]:.0f} (median; {needs[0]:.0f}-{needs[-1]:.0f}); "
-                     f"the clip has 4000 at most, and takes 60 ms above 5640" if needs else "not measured")
+                     f"the clip has 4000 at most" + (f", and takes 60 ms above {8 * self.o.long_above}" if self.o.long_above else "")
+                     if needs else "not measured")
             self.row("worn: seconds of watching with the 'paper too far' mark shown", None, f"{far} of {len(status)}")
             work = max(int(ms) for _, ms, *_ in status)
             self.row("worn: the watch preview's handler kept up", work <= 100, f"{work} ms at most over {len(status)} s")
@@ -516,13 +529,11 @@ class Check:
             return
         first = self.adb("exec-out", "screencap", "-p")
         self.gesture(SWIPE_FORWARD)
-        time.sleep(1.5)
-        second = self.adb("exec-out", "screencap", "-p")
+        second = self.changed(first)
         self.lit("answers-next")
-        self.row("a forward swipe moves on through the answers", first != second)
+        self.row("a forward swipe moves on through the answers", second is not None)
         self.gesture(SWIPE_BACK)
-        time.sleep(1.5)
-        self.row("a back swipe returns", self.adb("exec-out", "screencap", "-p") != second)
+        self.row("a back swipe returns", second is not None and self.changed(second) is not None)
         self.gesture(TAP)
         time.sleep(1.5)
         self.row("a tap hides the answers", self.lit("answers-hidden") == 0)

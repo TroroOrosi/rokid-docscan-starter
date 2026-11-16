@@ -1,6 +1,6 @@
 # rokid-docscan-starter development guide
 
-Status: Current engineering contract. Updated 2026-11-16 (stage 3 of the gathered capture is built and has passed the desk checks, §M-30; the worn test is next).
+Status: Current engineering contract. Updated 2026-11-16 (the gathered capture was worn for the first time, §M-31: a worn head's frames are now laid on the page by a map of their own; no worn page has been read against a known text yet).
 
 **Start at `.agents/progress/current.md`.** It lists the operator's decisions,
 the verified state and the next steps. Do not re-ask what it settles. Then read
@@ -151,7 +151,7 @@ is the intended topology. It has run once, with the glasses driven from a PC
 | `openai` / `gemini` / `claude` API keys | Supported and config-only. The per-question routes can fall back through `ROKID_SOLVER_TIERS`. They have no one-message booklet answer, so they are not booklet fallback routes. |
 | Booklet route fallback (`ROKID_SOLVER_FALLBACKS`) | Requested by the operator on 2026-11-10. When Work returns a usage limit, or cannot send (model or attachment control unusable after one retry), the same booklet goes to `chatgpt-web`. The choice is stored on the deck row, so a restart does not return to the limited route. An unknown send outcome, a shared browser/login/guard failure, a readability or receipt rejection and the listening stage never switch. Observed on the phone's live tab on 2026-11-10 without typing or sending: the new-chat page has two buttons, Chat and Work, and only pressing Chat leaves Work (a click right after the navigation was dropped, so it is repeated until Work is inactive); in Work mode Chat's composer is absent; Chat's effort is a five-position Power slider whose top position is Pro (shown with "Locked" and "Usage limit reached"), so the route moves it to the position labelled Extra High and refuses any other readable position. That preparation ended at GPT-6 / Extra High and Work was restored. Not observed: a real limit notice, a Work task cut short, and a Chat answer after a Work refusal. |
 | Local OpenAI-compatible HTTP (`app/llm_http.py`) | Reaches an on-phone `llama-server` without the openai SDK. |
-| `ROKID_SOLVER=codex-cli` (the official Codex CLI, `codex exec`, signed in with ChatGPT) | **The phone's route since 2026-11-14**, with Chat behind it. The operator asked whether the present route was rational for the venue; it had never been compared with anything (`docs/whole-review-2026-11-14.md` sections 9 and 10). One request carries every page image; no API key, browser or X11. On Android the server resolves names for the static binary through a loopback CONNECT proxy of its own and names Termux's certificate bundle. A reply is kept per booklet, so a repeat does not pay twice. A usage limit or a failed run hands the booklet to Chat; a booklet with audio is refused before anything runs. From 2026-11-15 one small request at low effort first asks where each photo's pages are and which way their lines run; each page is then cut out, enlarged to twice its size and sent in strips or bands along its lines (the paragraph below), and a booklet too large for the model's 500,000-token context is enlarged less. `POST /v1/route-check`, and a daily thread, try every booklet route (this one with a real request of about 5 s; Chat is only looked at) and `/v1/settings` carries the last result; the CLI reports no remaining allowance. Measured on the phone (§M-21 to §M-23): 47 rendered pages through the phone's own server, enlarged, answered 7 min 11 s after registration with 31 of 35 correct; 14 pages in 81 s with 14 of 14; two worn whole-frame photos with 4 of 4, and 3 of 4 with the fourth declared unreadable. Unmeasured: cellular, how long the sign-in lasts unattended, a reboot, how the plan allowance is drawn, photos taken by the app, worn photos of horizontal text. |
+| `ROKID_SOLVER=codex-cli` (the official Codex CLI, `codex exec`, signed in with ChatGPT) | **The phone's route since 2026-11-14**, with Chat behind it. The operator asked whether the present route was rational for the venue; it had never been compared with anything (`docs/whole-review-2026-11-14.md` sections 9 and 10). One request carries every page image; no API key, browser or X11. On Android the server resolves names for the static binary through a loopback CONNECT proxy of its own and names Termux's certificate bundle. A reply is kept per booklet, so a repeat does not pay twice. A usage limit, a failed run or (from 0.78.1) a CLI that is signed out hands the booklet to Chat, and nothing stands behind Chat: Work runs as a primary only and draws on the allowance the CLI draws on. The handover has never been seen on a real limit (unit tests only): on 2026-11-16, while the operator's display showed Codex at 0%, the check's small real request still succeeded (§M-32); a booklet with audio is refused before anything runs. From 2026-11-15 one small request at low effort first asks where each photo's pages are and which way their lines run; each page is then cut out, enlarged to twice its size and sent in strips or bands along its lines (the paragraph below), and a booklet too large for the model's 500,000-token context is enlarged less. `POST /v1/route-check`, and a daily thread, try every booklet route (this one with a real request of about 5 s; Chat is only looked at) and `/v1/settings` carries the last result; the CLI reports no remaining allowance. Measured on the phone (§M-21 to §M-23): 47 rendered pages through the phone's own server, enlarged, answered 7 min 11 s after registration with 31 of 35 correct; 14 pages in 81 s with 14 of 14; two worn whole-frame photos with 4 of 4, and 3 of 4 with the fourth declared unreadable. Unmeasured: cellular, how long the sign-in lasts unattended, a reboot, how the plan allowance is drawn, photos taken by the app, worn photos of horizontal text. |
 
 **The venue is far darker than every photo the reading was measured on.** The
 wearer's own latest photos (2026-11-14 18:46, the glasses' camera) needed 60 ms
@@ -244,8 +244,8 @@ the camera fail; (5) the glasses write about 9 MB a second: 95 Mbit/s for five
 seconds a page could not be kept up for forty pages, three seconds could; at 50
 Mbit/s the page read 5.7%; (6) the full-size stream with a single-page part ran
 forty pages but took the board to 52.4 C. **Stage 3 is built and has passed the desk checks
-(§M-30, 2026-11-16, from glassdoc 0.44.0); stills stay the default and the clip
-route has never been worn.** `--es capture clip` (saved) makes a page of ordinary
+(§M-30, 2026-11-16, from glassdoc 0.44.0); stills stay the default. The clip
+route was worn once (stage 4, below).** `--es capture clip` (saved) makes a page of ordinary
 written reading a clip: `ClipCamera` records it, one frame of it travels as the
 page (`clip_frame`) through the flow every photo takes, the clip follows it
 (`POST /v1/documents/{id}/pages/{index}/clip`) and worker threads on the phone
@@ -255,7 +255,9 @@ half the desk's light at 30 ms and a gain of 5.0 read 6.6% wrong with four times
 the frames. Where 30 ms would need a gain over 7.05 (`--ei long_above`, saved) the
 clip therefore takes 60 ms at 15 frames a second, the first 15 frames left out,
 half the bit rate; that read 3.0% with the paper as bright as in the clip that
-passed, and the venue's own light is still unread. On the desk: the whole route
+passed, and the venue's own light is still unread. From 0.44.1 the long exposure
+is taken only once a gain is saved (`--ei long_above N`; 0 turns it off): worn,
+hardly a frame is still at 60 ms (below). On the desk: the whole route
 with the stand-in solver (38 of 38 lines, also with 60 ms forced); the real app
 with the phone's own server (43-44 lines without failure, pause and resume
 included); forty pages at fifteen seconds a page on that route, every clip whole,
@@ -284,8 +286,54 @@ Codex route never reduced a page, so more than about twenty gathered pages
 (3024x4032 each) would have gone out over the model's context; it now brings all
 pages to the largest common long side that fits, only when the booklet does not
 fit unreduced (unit tests only; a reduced page's reading is unmeasured). Not done:
-a worn head (stage 4), figures, horizontal text, the real model through the
-product route. What it rests on, measured on the desk and the PC on 2026-11-15 (§M-25):
+figures, horizontal text, the real model through the product route, a worn page
+read against a known text. **Stage 4, the first worn pass (2026-11-16, §M-31:
+three minutes, the test package and the stand-in server, ten clips, all gathered
+again on the PC afterwards).** As built it failed: of seven pages four were
+gathered, from half their still frames, and three clips at 60 ms had no still
+frame at all. Distance was not the cause (characters 19-22.5 px apart, 24 on the
+desk that passed) and the glasses did not feel hot. A worn head does what the
+desk never showed. It moves the picture 46-301 px between runs of 13-38 still
+frames (four frames in ten are under 2 px of smear at 30 ms; 6 and 1 of some 133
+at 60 ms), where a frame was looked for within 16 px of the last one added:
+every frame is now placed against the frame before it and the moves are added
+up. And it tilts and sees the page from another side: against a move of 44 px
+the edges lay another 15-19 px off, so a page added at one shift was sharp in
+its middle and double at its edges, however many frames it had taken. One shift
+left 11.4 px (rms over 25 pieces), a plane 1.7, a homography 0.6; following such
+a map from frame to frame through the smeared frames failed (5-19 px off), and
+finding it against the page, coarse to fine, held (0.0-0.5 px inside the paper).
+A frame further than 8 px from the clip's first is therefore laid on the page by
+a homography of its own, pixel by pixel into the nearest cell (`app/gather.py`,
+Server APP 0.78.0), and a frame that no single shift places (a head that came
+back from further away) is tried by a map from where the picture was followed
+to. A clip of glasses lying still takes the old path and gathers to the same
+page bit for bit (twelve desk clips). The ten worn clips then gave 60, 41, 60,
+61, 61, 49, 6, 5, 28 and 1 frames, and page 4 can be read by eye to its edges.
+A page laid this way shows about 0.67 of the old level over noise for the same
+light (22 where 32): do not compare it with the 32 above. Read by the model three times each, with no known text for that page: the
+old gathering of page 4 came back as other text with not one character marked
+unreadable (two reads 18.9% apart, and 70% from the new page's reads); the new
+page's reads lie 10.4% apart, which the same measure on desk reads with a known
+text (3.0% apart at 2.0% wrong, 3.9 at 3.1, 6.3 at 6.6) puts at roughly 7-10%
+wrong: readable, not at the bar. Of its 61 frames 45 carry 1-2 px of smear (a
+desk clip has none); which smear limit reads best can be settled on a recorded
+page with a known text.
+Found on the way: a frame during whose exposure no gyroscope reading had
+arrived was written as 0 px of smear and counted as the stillest (8 of 296
+frames; 999 and not counted from glassdoc 0.44.1). On the phone a worn clip is
+gathered in 50-63 s alone and 24 s each three at once, against a page every
+18 s when worn: beyond about 25 pages the last ones would not be gathered within
+the 150 s the booklet waits (open; six at once was no faster and left 1.7 GB of
+memory). The wear sensor read "far" while worn and the capture did not start
+by itself; the wearer could not tell the distance from the far mark. The phone's server
+now runs 0.78.1 (the gathering from 0.78.0) and the glasses 0.44.1 (both packages), and the desk checks
+passed again (whole route 38 of 38; the real app with the phone's server 44 of
+44 on clips and 38 of 38 on stills): none of it worn.
+Unmeasured: a worn page read against a known text (the one page with a known
+text was recorded with the head moving throughout), the venue's darkness worn
+(30 ms is too dark there and 60 ms is not still).
+What it rests on, measured on the desk and the PC on 2026-11-15 (§M-25):
 the 2016x1512 stream is the whole field at half size and the only whole-field
 size at 60 frames a second; streaming it heats the glasses by 17.7 C in 150 s
 with no work done and 24.9 C with one Java pass over each frame, which alone
@@ -298,8 +346,8 @@ band-passed correlation against the running sum can; half-size frames read as
 well as full-size ones only when added on a finer grid (simulated, six reads
 each: 2.3% against 3.3%, and 21.2% without the finer grid; with real dark
 frames shifted to stand for a moving head it was 6.7% against 3.2%, §M-28).
-Unmeasured: placing on a worn head, recording and sending at once, clips of
-ten seconds. The paragraph below holds
+Placing on a worn head was unmeasured then: worn, one shift a frame did not
+hold and a frame is laid by a map (stage 4, above). The paragraph below holds
 for bright photos only.
 
 What a page needs to be read, measured on the phone with worn photos of one page
@@ -516,8 +564,8 @@ what is being tried.
   `adf12ee` disable decision belonged to the route without operator taps.
 - With `--es capture clip` saved, ordinary written reading takes each page as a
   short clip instead (`ClipCamera`, from glassdoc 0.44.0; the paragraph on the
-  venue's light above and §M-30). Stills are the default until the clip route
-  has been worn. On that route a double tap during a recording ends that clip at
+  venue's light above and §M-30). Stills are the default until a worn page has
+  been read (worn once, §M-31). On that route a double tap during a recording ends that clip at
   once and what it has is the page (on the glasses: 36 frames, the capture ended
   with that one double tap); a tap lets the clip finish, saves the page, then
   pauses, as with a still. Pages turned to during a recording or its review are
@@ -785,8 +833,10 @@ Only four gestures reach an ordinary app; the rest are system-reserved in
   takes the place of the page's PNG only while the booklet still takes pages and
   only for the capture the page holds; finalization waits for the clips at most
   `ROKID_GATHER_WAIT_S` (150 s); a page left ungathered is named in the answers,
-  never dropped. Clips are kept on the phone (about 36 MB a page; nothing removes
-  them yet).
+  never dropped. Clips are kept on the phone (about 36 MB a page, 70-146 MB worn;
+  nothing removes them yet). A frame that lies away from the clip's first is laid
+  on the page by a map of its own; a clip of glasses lying still must keep
+  gathering to the same page (§M-31).
 - Persist analyzer-derived text before segmenting problems.
 - Pass the originating page image to image-capable solvers.
 - Keep document finalization idempotent and page replacement keyed by
@@ -930,7 +980,12 @@ records; each was learned from a failure the operator found.
    page a wearer photographed on 9/22. Look at what the camera sees (a photo
    with the glasses' own camera) before reading a desk number as a condition
    of use. The light on a page a wearer looks at and the motion of a
-   reading head exist only when worn.
+   reading head exist only when worn. A stand-in for them tests the stand-in:
+   until 2026-11-16 a moving head was stood for by shifting the picture, the
+   gathering passed every desk check, and worn it placed four pages of seven,
+   because a head also tilts and sees the page from another side (§M-31). And
+   a count is not the picture: with the frames followed, 60 of 60 were added
+   and the page was double at its edges. Look at the page at its own pixels.
 5. When the wearer is needed, say so plainly: what they do, for how long,
    what the one pass decides, and what was checked first so that it cannot
    fail for a reason findable on the desk. Not before that, and not silently
@@ -953,7 +1008,14 @@ read by `scripts/head_motion_report.py`) and logs, for each photo, the turning d
 its own exposure (`still_motion`); neither changes a decision. The stillness
 gate itself is unchanged: it allows a photo after 300 ms in which every
 reading is under 0.12 rad/s x 10 ms / exposure, then stops listening, and the
-exposure comes 0.3-0.7 s later.
+exposure comes 0.3-0.7 s later. The clip route was worn on 2026-11-16 (§M-31,
+the paragraph on the venue's light above). Its camera does not write the
+head-motion trace, and the ten worn clips' records hold each frame's time and
+smear only; from glassdoc 0.44.1 a clip's record also keeps the gyroscope's
+readings taken while it was recorded (`gyro`: time and the turn about three
+axes, about 202 a second). The ten worn clips and their records are kept on
+this PC, untracked (`data/gather-stage2/worn1/clips`), and can be gathered
+again; `app.gather` logs each frame's fate at debug level.
 
 After any change to the glasses app, and before the wearer is asked to try it,
 run `py -3.12 scripts/glasses_device_check.py --glasses <serial> --phone <serial>`.
