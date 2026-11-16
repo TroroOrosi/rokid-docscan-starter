@@ -1992,6 +1992,26 @@ _COVERAGE = (
     "text or a figure is cut off at an image's edge and no other capture continues it. "
 )
 
+
+def clip_page(page: dict) -> bool:
+    """Whether this page was recorded as a clip: one frame of the clip, or the image gathered from it."""
+    return (page.get("capture_provenance") or {}).get("source_kind") == "clip_frame"
+
+
+def grey_note(pages: list[dict]) -> str:
+    """Says which captures hold no colour; empty when every page is a still.
+
+    A recorded page is luma only, as one frame (ClipCamera keeps the Y plane) and as gathered (app/gather.py adds grey
+    frames). Until 2026-11-16 no request said so, and a colour-coded graph, map or legend was answered from grey.
+    """
+    grey = [str(page["page_number"]) for page in pages if clip_page(page)]
+    return "" if not grey else (
+        f"Greyscale capture pages (the camera recorded no colour there): {', '.join(grey)}. "
+        "A question that depends on telling colours apart, such as a colour-coded graph, map or "
+        "legend, is needs_input with missing_material saying which colours it needs; never guess "
+        "a colour from grey. ")
+
+
 _ALL_TASK = _CAPTURE_CONTEXT + _COVERAGE + (
     "Answer EVERY question in the attached booklet in this one reply. List, in booklet "
     "order, every actual question, including unnumbered written, choice and diagram questions. "
@@ -2141,7 +2161,7 @@ class ChatGptWebSolver(LLMSolver):
                 "audio are missing or unreadable, return needs_input; do not guess. "
             )
             context = "" if task in (_ALL_TASK, _READING_TASK) else _CAPTURE_CONTEXT
-            prompt = instructions + context + (task or (
+            prompt = instructions + context + grey_note(question.document_pages) + (task or (
                 f"Solve {question.question_no or 'the question'}; "
                 f"question_id={question.question_id}; Pages {question.page_numbers}. "
                 + (question.retry_hint or "")))

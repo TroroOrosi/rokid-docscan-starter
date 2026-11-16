@@ -2835,6 +2835,18 @@ def test_the_booklet_request_asks_what_the_captures_leave_out(tmp_path, stage):
         assert "ONE extra item" in prompt and "needs_input" in prompt and "no other capture continues it" in prompt
 
 
+@pytest.mark.parametrize("stage", ["single", "reading", "question"])
+def test_a_page_recorded_as_a_clip_is_said_to_be_greyscale(tmp_path, stage):
+    """The recorded route keeps luma only (ClipCamera, app/gather.py): a colour-coded graph, map or legend was
+    answered from grey with nothing said."""
+    prompt = _prompt_sent(tmp_path, stage, capture_provenance={"source_kind": "clip_frame"})
+    assert "Greyscale capture pages" in prompt and "): 2. " in prompt, "the clip page is named, the still is not"
+    assert "telling colours apart" in prompt and "is needs_input" in prompt and "which colours" in prompt
+
+    still = _prompt_sent(tmp_path, stage, capture_provenance={"source_kind": "native_still"})
+    assert "reyscale" not in still and "reyscale" not in _prompt_sent(tmp_path, stage)
+
+
 def test_one_message_lists_and_answers_the_booklet_in_the_answer_chat(tmp_path):
     """The model names the 小問 from the originals AND answers them in one reply."""
     page_path = tmp_path / "page.png"

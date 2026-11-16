@@ -174,6 +174,21 @@ def test_the_request_asks_what_the_captures_leave_out(codex, tmp_path):
     assert "ONE extra item" in prompt and "no other capture continues it" in prompt
 
 
+def test_a_page_recorded_as_a_clip_is_said_to_be_greyscale(codex, tmp_path):
+    """The recorded route keeps luma only (ClipCamera, app/gather.py): a colour-coded graph, map or legend was
+    answered from grey with nothing said."""
+    codex_cli.CodexCliSolver().answer_all(question=_booklet(tmp_path))
+    assert "reyscale" not in _runs(codex())[-1]["args"][-1]
+
+    recorded = _booklet(tmp_path, pages=3)
+    for page in recorded.document_pages[1:]:
+        page["capture_provenance"] = {"source_kind": "clip_frame"}
+    codex_cli.CodexCliSolver().answer_all(question=recorded)
+    prompt = _runs(codex())[-1]["args"][-1]
+    assert "Greyscale capture pages" in prompt and "): 2, 3. " in prompt
+    assert "telling colours apart" in prompt and "is needs_input" in prompt and "which colours" in prompt
+
+
 def test_the_reply_is_kept_so_the_same_booklet_is_not_paid_for_twice(codex, tmp_path):
     question = _booklet(tmp_path)
     first = codex_cli.CodexCliSolver().answer_all(question=question)

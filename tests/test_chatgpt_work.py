@@ -291,6 +291,14 @@ def test_the_work_job_asks_what_the_captures_leave_out(client, monkeypatch, stag
     assert "ONE extra item" in prompt and "no other capture continues it" in prompt
 
 
+@pytest.mark.parametrize("clip", [True, False])
+def test_a_page_recorded_as_a_clip_is_said_to_be_greyscale_in_the_work_job(client, monkeypatch, clip):
+    """The recorded route keeps luma only: a colour-coded graph, map or legend was answered from grey, unsaid."""
+    prompt = _work_prompt(client, monkeypatch, clip=clip)
+    assert ("Greyscale capture pages" in prompt and "): 1. " in prompt) is clip
+    assert ("telling colours apart" in prompt and "which colours" in prompt) is clip
+
+
 @pytest.mark.parametrize(("count", "soft_limit"), [(21, None), (47, 1), (21, 1250)])
 def test_canonical_pages_remain_byte_exact_in_bounded_deterministic_zips_after_interruption(
         client, monkeypatch, count, soft_limit):

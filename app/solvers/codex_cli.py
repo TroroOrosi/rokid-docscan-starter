@@ -68,7 +68,7 @@ from ..source_bundle import MAX_SCALE, _readable, page_tiles, source_images
 from .base import Question, Solver, SolveResult
 from .chatgpt_web import (_ALL_TASK, _booklet_chat_key, _booklet_replies, ChatGptWebAuthenticationRequired,
                           ChatGptWebError, ChatGptWebRateLimit, ChatGptWebReplyIncomplete, ChatGptWebSendNotAuthorized,
-                          chatgpt_send_enabled)
+                          chatgpt_send_enabled, grey_note)
 from .llm_adapter import _ANSWER_ONLY_SYSTEM
 
 _TERMUX_BINARY = ("lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-arm64/vendor/"
@@ -574,7 +574,7 @@ class CodexCliSolver(Solver):
                     (directory / payload["name"]).write_bytes(payload["buffer"])
                     names.append(payload["name"])
             request = {"model": model, "effort": effort, "images": names, "timeout": timeout,
-                       "prompt": _ANSWER_ONLY_SYSTEM + "\n\n" + _ALL_TASK + note}
+                       "prompt": _ANSWER_ONLY_SYSTEM + "\n\n" + grey_note(question.document_pages) + _ALL_TASK + note}
             if (os.environ.get("ROKID_CODEX_READS") or "2").strip() == "1":
                 return [cls._exec(directory, environment, **request)]
             # Two independent reads of the same images at the same time: the second costs no more waiting.
