@@ -278,6 +278,26 @@ final class LumaPageEvidence {
         }
         return false;
     }
+    /**
+     * The reference as the camera shows it at another exposure: every native pixel times {@code gain} 1024ths,
+     * clipped at white, summed again. The comparisons still subtract the whole-frame level themselves.
+     */
+    void reexpose(int gain) {
+        Frame frame = reference;
+        if (frame == null) return;
+        int stride = frame.stride, rows = frame.height + 2 * frame.padY;
+        int[] above = new int[stride], row = new int[stride]; // the sums as they were, a row at a time
+        for (int y = 0; y < rows; y++) {
+            int top = y * stride, bottom = top + stride, sum = 0;
+            System.arraycopy(frame.integral, bottom, row, 0, stride);
+            for (int x = 0; x < stride - 1; x++) {
+                int pixel = row[x + 1] - row[x] - above[x + 1] + above[x];
+                sum += Math.min(255, (pixel * gain + 512) >> 10);
+                frame.integral[bottom + x + 1] = frame.integral[top + x + 1] + sum;
+            }
+            int[] swap = above; above = row; row = swap;
+        }
+    }
     void acceptScene() {
         if (valid) reference = latest;
         else reference = null;
@@ -294,6 +314,8 @@ final class LumaPageEvidence {
         capacityFallback = true; status = code;
     }
     String status() { return status; }
+    /** The last comparison was put off or ran out of its time: neither same nor different. */
+    boolean undecided() { return status.equals("throttled") || status.equals("time_budget") || status.equals("interrupted"); }
     int evaluatedOffsets() { return evaluatedOffsets; }
     int retainedIntegralInts() { return first == null ? 0 : first.integral.length + second.integral.length; }
     int retainedArrayBytes() {

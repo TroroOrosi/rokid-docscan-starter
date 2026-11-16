@@ -174,7 +174,8 @@ public class GlassCameraWarmSessionTest {
                 if (glyph[y].charAt(x) == '1') pixels[(cy * 10 + y + 1) * 320 + cx * 10 + x + 1] = 30;
         return pixels;
     }
-    private void fineFrame(byte[] luma) {
+    private void fineFrame(byte[] luma) { fineFrame(currentReader(ImageFormat.YUV_420_888), luma); }
+    private void fineFrame(ReaderShadow reader, byte[] luma) {
         DocScanTestImage image = new DocScanTestImage(new ArrayList<>());
         image.format = ImageFormat.YUV_420_888;
         image.width = luma.length == 640 * 480 ? 640 : 320; image.height = luma.length / image.width;
@@ -184,7 +185,6 @@ public class GlassCameraWarmSessionTest {
             storage[7 + y * image.rowStride + x * 2] = luma[y * image.width + x];
         image.buffer = ByteBuffer.wrap(storage); image.buffer.position(7);
         image.timestamp = SystemClock.elapsedRealtimeNanos();
-        ReaderShadow reader = currentReader(ImageFormat.YUV_420_888);
         reader.image = image; reader.listener.onImageAvailable(reader.reader);
     }
     private void fineReadyFrame(byte[] luma) {
@@ -894,6 +894,97 @@ public class GlassCameraWarmSessionTest {
         assertEquals("a photo to take: 30 ms at the longest", new Range<>(30, 30),
                 currentDevice().session.repeating.get(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE));
         assertTrue(failures.isEmpty());
+    }
+
+    /** One preview frame of the dark desk and the result that belongs to it: the gain at its cap, as that night. */
+    private void darkDeskFrame(int fps, long exposure, boolean turned) {
+        idle(100);
+        TotalCaptureResult result = ShadowTotalCaptureResult.newTotalCaptureResult();
+        ShadowCaptureResult values = Shadow.extract(result);
+        values.set(CaptureResult.CONTROL_AF_STATE, CONTROL_AF_STATE_INACTIVE);
+        values.set(CaptureResult.CONTROL_AE_STATE, CONTROL_AE_STATE_CONVERGED);
+        values.set(CaptureResult.CONTROL_AE_MODE, CONTROL_AE_MODE_ON);
+        values.set(CaptureResult.SENSOR_TIMESTAMP, SystemClock.elapsedRealtimeNanos());
+        values.set(CaptureResult.SENSOR_EXPOSURE_TIME, exposure);
+        values.set(CaptureResult.SENSOR_SENSITIVITY, 800);
+        values.set(CaptureResult.CONTROL_POST_RAW_SENSITIVITY_BOOST, previewBoost);
+        values.set(CaptureResult.SENSOR_FRAME_DURATION, 1_000_000_000L / fps);
+        values.set(CaptureResult.CONTROL_AE_TARGET_FPS_RANGE, new Range<>(fps, fps));
+        var session = currentDevice().session;
+        session.previewCallback.onCaptureCompleted(session, session.repeating, result);
+        fineFrame(readerOfWidth(320), PageChangeLumaTest.darkDesk(exposure / 60_000_000d, turned));
+    }
+
+    /** A dark desk watched at 60 ms and photographed once at 30 ms; the returning watch preview waits for future pages. */
+    private AtomicInteger[] darkDeskPhotographed() {
+        MapShadow.fullSizeYuv = true;
+        CharacteristicsShadow.fixedFocus = true; CharacteristicsShadow.manualSensor = true; CharacteristicsShadow.fpsRanges = true;
+        CharacteristicsShadow.maxAnalog = 800; previewBoost = 884;
+        createCamera();
+        ReflectionHelpers.setField(camera, "stillWorker", (java.util.concurrent.Executor) Runnable::run);
+        camera.stillEncoder = (nv21, width, height, quality) -> new byte[]{7, 7, 7};
+        camera.preview(); idle(100); fineClock(() -> 0L);
+        for (int i = 0; i < 6; i++) darkDeskFrame(15, 60_000_000L, false);
+        camera.captureOnce(); idle(400);
+        assertEquals(new Range<>(30, 30), currentDevice().session.repeating.get(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE));
+        for (int i = 0; i < 12 && firstDevice().session.captures == 0; i++) darkDeskFrame(30, 30_000_000L, false);
+        assertEquals(1, firstDevice().session.captures);
+        assertEquals(Long.valueOf(30_000_000), firstDevice().session.captured.get(CaptureRequest.SENSOR_EXPOSURE_TIME));
+        idle(1);
+        long timestamp = SystemClock.elapsedRealtimeNanos();
+        manualCompleted(manualResult(timestamp, 30_000_000L, 800));
+        DocScanTestImage image = new DocScanTestImage(new ArrayList<>());
+        image.format = ImageFormat.YUV_420_888; image.rowStride = 4032; image.pixelStride = 1;
+        image.buffer = ByteBuffer.wrap(new byte[4032 * 3024]);
+        image.chromaV = ByteBuffer.wrap(new byte[4032 * 1512 - 1]); image.chromaU = ByteBuffer.wrap(new byte[4032 * 1512 - 1]);
+        image.timestamp = timestamp;
+        ReaderShadow still = readerOfWidth(4032);
+        still.image = image; still.listener.onImageAvailable(still.reader); idle(50);
+        assertEquals(1, delivered);
+        assertEquals("watching again", new Range<>(15, 15),
+                currentDevice().session.repeating.get(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE));
+        AtomicInteger candidates = new AtomicInteger(), missed = new AtomicInteger();
+        camera.observeFuturePages(2, new CaptureSurface.FuturePageListener() {
+            public void onCandidate(byte[] jpeg, CaptureProvenance source, boolean matched) { candidates.incrementAndGet(); }
+            public void onPageMissed() { missed.incrementAndGet(); }
+        }); idle(450); // what the change of session takes on the glasses: the first frame after it is compared at once
+        return new AtomicInteger[]{candidates, missed};
+    }
+
+    /**
+     * Glasses lying still on a dark desk, 2026-11-16 21:38 (register 2-29): the watch preview at its 15 frames a
+     * second settled at 60 ms with the gain at its cap, the session that prepares a photo at 30 ms, about 12 of 255
+     * darker. Each change of session was counted as a page turn: the unmoving scene was prepared again, the return
+     * from that was a third scene, seen and never taken, and the double tap that ends the capture was refused.
+     */
+    @Test public void theWatchAndThePreparationExposuresOfAnUnmovingDarkSceneAreNotPageTurns() {
+        AtomicInteger[] future = darkDeskPhotographed();
+        PageChange pages = ReflectionHelpers.getField(camera, "pageChange");
+        long scene = pages.sequence();
+        assertEquals("the first photo's preparation at 30 ms was no page turn either", 1, scene);
+        int sessions = firstDevice().configurations;
+        for (int i = 0; i < 10; i++) darkDeskFrame(15, 60_000_000L, false);
+        assertEquals("the same desk at the watch preview's exposure is the page just taken", scene, pages.sequence());
+        assertEquals("no second photo is prepared", sessions, firstDevice().configurations);
+        assertEquals(1, firstDevice().session.captures);
+        assertEquals(0, future[0].get()); assertEquals(0, future[1].get());
+        assertTrue(failures.isEmpty());
+    }
+
+    /** The wearer turns the page while the photo's session gives way to the watch preview: that page is still taken. */
+    @Test public void aPageTurnedBehindTheChangeOfSessionIsStillSeenAtTheWatchPreviewsExposure() {
+        AtomicInteger[] future = darkDeskPhotographed();
+        PageChange pages = ReflectionHelpers.getField(camera, "pageChange");
+        long scene = pages.sequence();
+        Range<Integer> prepared = new Range<>(30, 30);
+        for (int i = 0; i < 12 && !prepared.equals(currentDevice().session.repeating.get(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE)); i++)
+            darkDeskFrame(15, 60_000_000L, true);
+        assertEquals("the sheet's block at its other end, at twice the exposure", scene + 1, pages.sequence());
+        assertEquals("its photo is prepared", prepared, currentDevice().session.repeating.get(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE));
+        for (int i = 0; i < 12 && firstDevice().session.captures == 1; i++) darkDeskFrame(30, 30_000_000L, true);
+        assertEquals("and taken once, as the scene that was seen", scene + 1, pages.sequence());
+        assertEquals(2, firstDevice().session.captures);
+        assertEquals(0, future[1].get()); assertTrue(failures.isEmpty());
     }
 
     private void quiet(ShadowSensorManager sensors) {

@@ -957,7 +957,16 @@ final class GlassCamera implements PageCamera {
             long previousScene = pageChange.sequence();
             if (sceneStartTimestamp == 0) sceneStartTimestamp = timestamp;
             s3 = s4 = s5 = s6 = System.nanoTime();
-            pageChange.observeFrame(thumbnail, pixels, imageWidth, imageHeight, row, step, timestamp, now);
+            // The watch preview and the session that prepares a photo expose differently in the dark (60 ms and 30 ms
+            // with the gain at its cap, 2026-11-16): the page comparison is told the exposure the frame was taken at.
+            StillExposure exposed = meteringStillExposure;
+            long light = exposed != null && Math.abs(exposed.sourceTimestamp - timestamp) <= CameraReadiness.FRESH_MILLIS * 1_000_000L
+                    ? Math.round(exposed.exposure * exposed.gain()) : 0;
+            long exposureSteps = pageChange.exposureSteps();
+            pageChange.observeFrame(thumbnail, pixels, imageWidth, imageHeight, row, step, timestamp, now, light);
+            // What was left once the reference had been brought to the new exposure: the fit is unmeasured on the glasses.
+            if (exposureSteps != pageChange.exposureSteps()) Log.i(TAG, "exposure_step scene=" + pageChange.sequence() + " "
+                    + pageChange.lastExposureStep() + " fine=" + pageChange.fineStatus());
             s4 = s5 = s6 = System.nanoTime();
             framing.fine(pageChange.fineStatus(), imageWidth, imageHeight);
             if (video != null && (!videoSceneObserved || previousScene != pageChange.sequence())) {

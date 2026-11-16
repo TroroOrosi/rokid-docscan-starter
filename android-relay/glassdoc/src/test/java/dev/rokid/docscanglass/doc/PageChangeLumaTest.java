@@ -328,6 +328,123 @@ public class PageChangeLumaTest {
         calls.set(0); fine = phaseEvidence(a, b, () -> calls.getAndIncrement() == 0 ? 0 : -1);
         assertFalse(fine.sameNativePhase(coarse(b))); assertEquals("time_budget", fine.status());
     }
+    /**
+     * What the glasses looked at on 2026-11-16 21:38 (register 2-29), lying on a dark desk: nearly black, a lit sheet
+     * over about a fifth of the view and a lamp that is white at either exposure. {@code light} is the exposure
+     * against the watch preview's 60 ms; {@code turned} puts the sheet's grey block at its other end, as another page has.
+     */
+    static byte[] darkDesk(double light, boolean turned) {
+        byte[] p = new byte[320 * 240];
+        for (int y = 0; y < 240; y++) for (int x = 0; x < 320; x++) {
+            double level = 6 + (x * 7 + y * 3) % 3;
+            if (x >= 40 && x < 160 && y >= 60 && y < 200) level = (turned ? y >= 116 : y < 144) ? 64 : 104;
+            if (x >= 250 && x < 280 && y >= 20 && y < 40) level = 700;
+            p[y * 320 + x] = (byte)Math.min(255, Math.round(level * light));
+        }
+        return p;
+    }
+    /**
+     * The same view with a brighter sheet through an sRGB-like tone curve: half the light is then about a quarter
+     * less level, not half. Which curve the glasses' preview has is not measured.
+     */
+    static byte[] tonedDesk(double light) {
+        byte[] p = darkDesk(1, false);
+        for (int i = 0; i < p.length; i++) {
+            int level = p[i] & 255;
+            double linear = (level == 104 ? 180 : level == 64 ? 140 : level) / 255.0;
+            linear = level == 255 ? 4 : linear <= 0.04045 ? linear / 12.92 : Math.pow((linear + 0.055) / 1.055, 2.4);
+            linear = Math.min(1, linear * light);
+            p[i] = (byte)Math.round(255 * (linear <= 0.0031308 ? 12.92 * linear : 1.055 * Math.pow(linear, 1 / 2.4) - 0.055));
+        }
+        return p;
+    }
+    /** Exposure time (ns) x total gain as the glasses reported them that night: 60 ms and 30 ms, the gain at its cap. */
+    static final long WATCH_LIGHT = 60_000_000L * 7088, PREPARE_LIGHT = 30_000_000L * 7072;
+    static void frame(PageChange page, byte[] p, long now, long light) {
+        page.observeFrame(coarse(p), ByteBuffer.wrap(p), 320, 240, 320, 1, (now + 1) * 1_000_000L, now, light);
+    }
+    private static PageChange photographed(byte[] p, long light) throws Exception {
+        PageChange page = controlledPage(() -> 0); frame(page, p, 0, light); frame(page, p, 400, light);
+        assertTrue(page.ready(400)); page.consumed(); return page;
+    }
+    /**
+     * Glasses lying still, 2026-11-16 21:38: the photo is prepared and taken at 30 ms, the watch preview settles at
+     * 60 ms with the same gain, the next preparation is at 30 ms again. Each step moved the level by about 12 of 255
+     * and a fifth of the cells further than that, and each was counted as a page turn.
+     */
+    @Test public void theCamerasOwnChangeOfExposureOverAnUnmovingDarkSceneIsNotAPageTurn() throws Exception {
+        byte[] watch = darkDesk(1, false), prepare = darkDesk(0.5, false);
+        PageChange unreported = photographed(prepare, 0); long scene = unreported.sequence();
+        frame(unreported, watch, 2000, 0);
+        assertEquals("the scene is the log's: with no word of the exposure it is counted", scene + 1, unreported.sequence());
+        assertEquals("cause=coarse level_shift=11 cells_over_percent=21", unreported.lastChange());
+
+        PageChange page = photographed(prepare, PREPARE_LIGHT); scene = page.sequence();
+        frame(page, watch, 2000, WATCH_LIGHT);
+        assertEquals("back to watching at 60 ms", scene, page.sequence());
+        frame(page, watch, 2400, WATCH_LIGHT); assertFalse(page.ready(2400));
+        frame(page, prepare, 4000, PREPARE_LIGHT);
+        assertEquals("a photo prepared at 30 ms", scene, page.sequence());
+        frame(page, prepare, 4400, PREPARE_LIGHT);
+        frame(page, watch, 6000, WATCH_LIGHT); frame(page, watch, 6400, WATCH_LIGHT);
+        assertEquals("and watching again", scene, page.sequence()); assertFalse(page.ready(6400));
+
+        // The level need not follow the exposure in proportion: a tone curve between them is counted the same way...
+        unreported = photographed(tonedDesk(0.5), 0); scene = unreported.sequence();
+        frame(unreported, tonedDesk(1), 2000, 0);
+        assertEquals(scene + 1, unreported.sequence());
+        assertEquals("cause=coarse level_shift=11 cells_over_percent=21", unreported.lastChange());
+        // ...and is no page turn either once the exposure is known.
+        page = photographed(tonedDesk(0.5), PREPARE_LIGHT); scene = page.sequence();
+        frame(page, tonedDesk(1), 2000, WATCH_LIGHT); frame(page, tonedDesk(1), 2400, WATCH_LIGHT);
+        frame(page, tonedDesk(0.5), 4000, PREPARE_LIGHT); frame(page, tonedDesk(0.5), 4400, PREPARE_LIGHT);
+        assertEquals(scene, page.sequence()); assertFalse(page.ready(4400));
+
+        // Print between the coarse points, which only the native-pixel comparison sees, at half and at full light.
+        byte[] print = glyph(false), dim = halved(print);
+        page = photographed(dim, PREPARE_LIGHT); scene = page.sequence();
+        frame(page, print, 2000, WATCH_LIGHT); frame(page, print, 2400, WATCH_LIGHT);
+        frame(page, dim, 4000, PREPARE_LIGHT); frame(page, dim, 4400, PREPARE_LIGHT);
+        assertEquals("the same print at twice and at half the light", scene, page.sequence());
+        frame(page, halved(glyph(true)), 4800, PREPARE_LIGHT);
+        assertEquals("and other print is told from the reference retaken at that exposure", scene + 1, page.sequence());
+    }
+    private static byte[] halved(byte[] p) {
+        byte[] out = new byte[p.length];
+        for (int i = 0; i < p.length; i++) out[i] = (byte)((p[i] & 255) / 2);
+        return out;
+    }
+    /** The wearer turns the page while the photo's session gives way to the watch preview: both change at once. */
+    @Test public void aPageTurnedWhileTheExposureChangesIsStillATurn() throws Exception {
+        PageChange page = photographed(darkDesk(0.5, false), PREPARE_LIGHT); long scene = page.sequence();
+        frame(page, darkDesk(1, true), 2000, WATCH_LIGHT);
+        assertEquals("the sheet's block at its other end, and twice the light", scene + 1, page.sequence());
+        assertFalse(page.ready(2399)); frame(page, darkDesk(1, true), 2400, WATCH_LIGHT); assertTrue(page.ready(2400));
+        page.consumed(); scene = page.sequence();
+        frame(page, darkDesk(0.5, false), 4000, PREPARE_LIGHT);
+        assertEquals("and turned back with half the light", scene + 1, page.sequence());
+
+        // Print that differs only between the coarse points: the native-pixel comparison has to see it at the new exposure.
+        byte[] print = glyph(false), other = glyph(true);
+        assertArrayEquals(coarse(print), coarse(other));
+        page = photographed(halved(print), PREPARE_LIGHT); scene = page.sequence();
+        frame(page, other, 2000, WATCH_LIGHT);
+        assertEquals("other print and twice the light at once", scene + 1, page.sequence());
+        page = photographed(print, WATCH_LIGHT); scene = page.sequence();
+        frame(page, halved(other), 2000, PREPARE_LIGHT);
+        assertEquals("other print and half the light at once", scene + 1, page.sequence());
+    }
+    /** A lit page whose auto exposure wanders by a tenth keeps its reference: a slow turn still adds up across the steps. */
+    @Test public void smallStepsOfALitPagesExposureDoNotRetakeTheReference() throws Exception {
+        long light = 10_000_000L * 150;
+        byte[] turning = new byte[320 * 240]; Arrays.fill(turning, (byte)220);
+        PageChange page = photographed(turning, light); long scene = page.sequence();
+        for (int column = 0; column < 12; column++) {
+            for (int y = 0; y < 240; y++) Arrays.fill(turning, y * 320 + column * 20, y * 320 + column * 20 + 20, (byte)160);
+            frame(page, turning, 1000 + column * 250, column % 2 == 0 ? light * 11 / 10 : light);
+        }
+        assertTrue("one-column steps under a wandering exposure still add up to a turn", page.sequence() > scene);
+    }
     @Test public void clampedCapturedEdgesMayConservativelyRefuseAnInRangeNativePhase() {
         byte[] a = denseNative(); int matches = 0, refused = 0;
         for (int ay = -1; ay <= 1; ay++) for (int ax = -1; ax <= 1; ax++)
