@@ -591,8 +591,12 @@ def start_new_chat(page, *, ready_timeout_s: float | None = None, wait_composer=
 
 
 def _is_chat_url(url: str) -> bool:
-    """A conversation on chatgpt.com, not its home page and not another site."""
-    return url.startswith(CHAT_URL.rstrip("/") + "/") and "/c/" in url
+    """A conversation on chatgpt.com, not its home page and not another site.
+
+    Not the address the page makes up right after a send either (``/c/local-chatgpt%3A<id>``, phone, 2026-11-16):
+    the account has no such chat, loading it leads to the home page, and a booklet recorded under it was lost.
+    """
+    return url.startswith(CHAT_URL.rstrip("/") + "/") and "/c/" in url and "/c/local-" not in url.lower()
 
 
 def _url_of(page) -> str:

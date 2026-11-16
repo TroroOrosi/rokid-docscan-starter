@@ -731,6 +731,29 @@ def test_a_stop_button_in_the_page_but_not_on_screen_does_not_hold_a_finished_re
     assert reply == '{"questions": []}'
 
 
+def test_the_address_shown_right_after_sending_is_not_recorded_until_it_is_the_chats_own():
+    # Phone, 2026-11-16: right after a send the page showed /c/local-chatgpt%3A<id>, an address of the page's own
+    # making. It was recorded as the chat's, and after a restart loading it led to the home page: the answered
+    # booklet was lost with its reply on the account.
+    provisional = "https://chatgpt.com/c/local-chatgpt%3A0a1b2c3d-0a1b-0a1b-0a1b-0a1b2c3d4e5f"
+    real = "https://chatgpt.com/c/6a1b2c3d-0a1b-0a1b-0a1b-0a1b2c3d4e5f"
+    assert not chatgpt_web._is_chat_url(provisional) and chatgpt_web._is_chat_url(real)
+
+    page = _StubPage(['{"questions": []}'], streaming=[True, True, True, True, False])
+    page.addresses = False
+    polls, recorded = [], []
+
+    def poll(_seconds):
+        polls.append(1)
+        page.url = provisional if len(polls) < 3 else real
+
+    reply = chatgpt_web.send_and_read(page, "全問", poll_s=0, expect=("questions",), sleep=poll,
+                                      on_chat_url=recorded.append)
+
+    assert reply == '{"questions": []}'
+    assert recorded == [real]
+
+
 def test_a_blink_of_the_stop_button_does_not_return_half_the_json():
     # Between thinking and writing the button can vanish for a frame. The half
     # reply already holds a complete inner object; it must not be returned.

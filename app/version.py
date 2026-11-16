@@ -292,7 +292,10 @@ from __future__ import annotations
 # 0.80.1: Chat's reply wait takes only a stop control that is on screen for a reply being written. The first
 #         booklet Chat took over at a real usage limit (phone, 2026-11-16) was answered on the page and never
 #         collected: a second composer of zero size kept a Stop button, and the wait runs 150 minutes.
-APP_VERSION = "0.80.1"
+# 0.80.2: the address the page shows right after a send (/c/local-chatgpt%3A<id>) is not recorded as the chat's.
+#         After the restart that brought 0.80.1 the answered booklet of 2026-11-16 could not be read back:
+#         loading that address leads to the home page.
+APP_VERSION = "0.80.2"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.
