@@ -19,8 +19,8 @@ from PIL import Image, ImageChops, ImageDraw
 from app import config
 from app.solvers import codex_cli
 from app.solvers.base import Question
-from app.solvers.chatgpt_web import (ChatGptWebAuthenticationRequired, ChatGptWebError, ChatGptWebModelMismatch,
-                                     ChatGptWebRateLimit, ChatGptWebSendNotAuthorized)
+from app.solvers.chatgpt_web import (ChatGptWebAuthenticationRequired, ChatGptWebCheckFailed, ChatGptWebError,
+                                     ChatGptWebModelMismatch, ChatGptWebRateLimit, ChatGptWebSendNotAuthorized)
 
 FAKE_CODEX = r'''
 import atexit, json, os, sys, time
@@ -844,7 +844,7 @@ def test_the_check_before_use_is_one_small_real_request_whose_reply_depends_on_t
 
 def test_the_check_fails_when_the_reply_is_not_what_the_picture_shows(codex, monkeypatch):
     monkeypatch.setenv("FAKE_CODEX_CANARY_REPLY", "9")  # the picture shows three to seven
-    with pytest.raises(ChatGptWebError):
+    with pytest.raises(ChatGptWebCheckFailed):  # the check before use then says check_failed, as Chat's deep check does
         codex_cli.CodexCliSolver().check()
 
 

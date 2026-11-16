@@ -18,6 +18,7 @@ import itertools
 import re
 import shutil
 import subprocess
+import time
 
 import pytest
 
@@ -3526,14 +3527,10 @@ _CHAT_ID = "6917a1b2-0c5e-4d0a-9f3b-2f6f0c1d2e3f"
 _MESSAGE = "第2問 傍線部の理由を説明せよ"
 
 
-class _StructuredPage(_StubPage):
+class _Structure:
     """A page that answers the structure script: every selector it is asked about matches twice, once drawn."""
 
     structure = "as asked"
-
-    def sent(self):
-        super().sent()
-        self.url = f"https://chatgpt.com/c/{_CHAT_ID}?model=gpt-6"
 
     def evaluate(self, expression):
         if "page_structure" not in expression:
@@ -3548,6 +3545,14 @@ class _StructuredPage(_StubPage):
                 "form_buttons": [{"aria_label": "Send prompt", "data_testid": None},
                                  {"aria_label": "Remove page01.png", "data_testid": "attachment-6917a1b20c5e"}],
                 "forms": 2, "dialogs": 0, "alerts": 1}
+
+
+class _StructuredPage(_Structure, _StubPage):
+    """... on a conversation whose address carries an identifier and a query."""
+
+    def sent(self):
+        super().sent()
+        self.url = f"https://chatgpt.com/c/{_CHAT_ID}?model=gpt-6"
 
 
 def _lost_reply(monkeypatch, page, text=_MESSAGE, client=None):
@@ -3683,6 +3688,197 @@ def test_a_read_back_that_raises_leaves_a_snapshot_too(monkeypatch, tmp_path):
     snapshot = json.loads(path.read_text(encoding="utf-8"))
     assert snapshot["code"] == "chat_lost" and re.fullmatch(r"chatgpt_web\.py:\d+:return_to_chat", snapshot["at"])
     assert snapshot["page"]["address"] == "https://chatgpt.com/" and _CHAT_ID not in path.read_text(encoding="utf-8")
+
+
+# --- the deep check before use: one small real message through the path a booklet's message takes -----------------
+# Looking at the Chat route (is the browser there, is it signed in) passed every change of the live page that
+# stopped it on 2026-11-14 and 11/16: the attach control, the send control, how an attachment shows, the marks of
+# the turns, the Stop button that never left, the address of the page's own making. Only a message that is really
+# attached, sent, waited for and read finds those before a booklet does.
+
+def _black_squares(jpeg: bytes) -> int:
+    """How many dark runs the picture's middle row crosses: what a reader of the check's picture would count."""
+    from PIL import Image
+
+    picture = Image.open(io.BytesIO(jpeg)).convert("L")
+    dark = [picture.getpixel((x, picture.height // 2)) < 128 for x in range(picture.width)]
+    return sum(1 for x in range(len(dark)) if dark[x] and not (x and dark[x - 1]))
+
+
+def test_the_checks_picture_shows_the_count_it_states_and_is_not_the_same_every_time():
+    drawn = [chatgpt_web.check_picture() for _ in range(40)]
+    assert all(3 <= squares <= 7 and _black_squares(jpeg) == squares for squares, jpeg in drawn)
+    assert len({squares for squares, _ in drawn}) > 1, "the count has to come from the picture"
+
+
+class _CountingPage(_Structure, _AccountPage):
+    """An account's tab whose model does what the check asks: it counts the black squares of the attached picture.
+    A booklet's message is answered as _BatchPage answers it."""
+
+    count = None  # what it answers instead of what the picture shows
+
+    def sent(self):
+        super().sent()
+        receipt = self.receipts[-1]
+        if "count" in receipt:
+            [picture] = self.uploads[-1]
+            self.replies = [json.dumps({"batch_id": receipt["batch_id"], "count": (
+                [_black_squares(picture["buffer"])] if self.count is None else self.count)})]
+
+
+def _deep_check(monkeypatch, page):
+    from app.solvers import cdp
+
+    _fast(monkeypatch)
+    monkeypatch.setenv("ROKID_CHATGPT_SEND_ENABLED", "1")
+    monkeypatch.setattr(cdp, "connect_over_cdp", lambda endpoint: _Browser(page))
+    return ChatGptWebSolver().check_deep()
+
+
+def _check_records(tmp_path):
+    return {key: entry for key, entry in _chats(tmp_path).items() if key.startswith("route-check:")}
+
+
+def test_the_deep_check_is_one_small_picture_in_a_new_chat_sent_and_read_as_a_booklets_message_is(monkeypatch, tmp_path):
+    from PIL import Image
+
+    page = _CountingPage()
+    _deep_check(monkeypatch, page)
+
+    # A new chat, one picture through the input a booklet's page images take, one message, in that order.
+    assert len(_clicks(page, chatgpt_web.NEW_CHAT_SEL)) == 1 and len(_sends(page)) == 1
+    kinds = _kinds(page)
+    assert kinds.index("upload") < kinds.index("fill") < kinds.index("send") and kinds.count("upload") == 1
+    assert page.upload_selectors == [chatgpt_web.FILE_INPUT_SEL]
+    [[picture]] = page.uploads
+    assert picture["mimeType"] == "image/jpeg" and picture["name"].endswith(".jpg")
+    assert max(Image.open(io.BytesIO(picture["buffer"])).size) <= 512 and len(picture["buffer"]) < 20_000
+    # The message carries the receipt a booklet's final message carries, and the reply was accepted against it.
+    [receipt] = page.receipts
+    assert set(receipt) == {"batch_id", "count"} and "black squares" in page.user_text
+    [(key, record)] = _check_records(tmp_path).items()
+    assert re.fullmatch(r"route-check:[0-9a-f]{64}", key)
+    assert record["url"] == page.address and chatgpt_web._is_chat_url(record["url"])
+    assert record["transfer"]["final"] == receipt["batch_id"] and record["transfer"]["pending"] is None
+    assert record["pending"] is None and _guard_state(tmp_path) == "idle"
+    # Its file counts in the plan's upload window, like any file this server attaches.
+    assert _uploaded(tmp_path) == 1
+    assert not _snapshots(tmp_path)
+
+
+def test_every_deep_check_opens_a_chat_of_its_own_and_never_returns_to_an_earlier_one(monkeypatch, tmp_path):
+    page = _CountingPage()
+    for _ in range(3):
+        _deep_check(monkeypatch, page)
+
+    assert len(_clicks(page, chatgpt_web.NEW_CHAT_SEL)) == len(_sends(page)) == 3 and not _gotos(page)
+    assert len(_check_records(tmp_path)) == 3 and len({entry["url"] for entry in _check_records(tmp_path).values()}) == 3
+    assert len({upload[0]["name"] for upload in page.uploads}) == 3 and _uploaded(tmp_path) == 3
+
+
+@pytest.mark.parametrize("count", [[9], 9, "nine", {"squares": "many"}, []])
+def test_the_deep_check_passes_only_when_the_reply_holds_the_count_the_picture_shows(monkeypatch, tmp_path, count):
+    page = _CountingPage()
+    page.count = count
+    with pytest.raises(chatgpt_web.ChatGptWebCheckFailed):
+        _deep_check(monkeypatch, page)
+    # The message was sent and answered: nothing is unresolved, and what the page looked like is kept.
+    assert len(_sends(page)) == 1 and _guard_state(tmp_path) == "idle"
+    [path] = _snapshots(tmp_path)
+    snapshot = json.loads(path.read_text(encoding="utf-8"))
+    assert snapshot["code"] == "check_failed" and re.fullmatch(r"chatgpt_web\.py:\d+:check_deep", snapshot["at"])
+
+
+@pytest.mark.parametrize("answer", [5, [5], "5", " 5 squares"])
+def test_the_count_is_taken_in_whatever_form_the_reply_gives_it(monkeypatch, answer):
+    """The receipt shows "count" as an empty list, as it shows a booklet's "questions"; a model fills it either way."""
+    monkeypatch.setattr(chatgpt_web, "check_picture", lambda: (5, JPEG))
+    page = _CountingPage()
+    page.sent = lambda: (_AccountPage.sent(page), setattr(page, "replies", [json.dumps(
+        {"batch_id": page.receipts[-1]["batch_id"], "count": answer})]))
+    _deep_check(monkeypatch, page)
+
+
+def test_the_deep_check_stops_before_attaching_when_the_model_position_cannot_be_verified(monkeypatch, tmp_path):
+    page = _CountingPage()
+    page.selected_model, page.selected_effort = "GPT-5.6 Sol", "高"  # a lower effort than the operator's
+    with pytest.raises(chatgpt_web.ChatGptWebModelMismatch):
+        _deep_check(monkeypatch, page)
+    assert not page.uploads and not _sends(page) and _guard_state(tmp_path) == "idle" and _uploaded(tmp_path) == 0
+    assert json.loads(_snapshots(tmp_path)[-1].read_text(encoding="utf-8"))["code"] == "model_mismatch"
+
+
+def test_the_deep_check_sends_nothing_while_sending_is_off(monkeypatch, tmp_path):
+    from app.solvers import cdp
+
+    monkeypatch.setenv("ROKID_CHATGPT_SEND_ENABLED", "0")
+    monkeypatch.setattr(cdp, "connect_over_cdp", lambda endpoint: pytest.fail("the browser must not be reached"))
+    with pytest.raises(chatgpt_web.ChatGptWebSendNotAuthorized):
+        ChatGptWebSolver().check_deep()
+    assert not (tmp_path / "browser-state").exists()
+
+
+def test_the_deep_check_is_refused_before_attaching_when_the_upload_window_has_no_room(monkeypatch, tmp_path):
+    (tmp_path / "browser-state").mkdir()
+    (tmp_path / "browser-state" / "uploads.json").write_text(json.dumps({"uploads": [[time.time(), 80]]}), encoding="utf-8")
+    page = _CountingPage()
+    with pytest.raises(chatgpt_web.ChatGptWebUploadBudget):
+        _deep_check(monkeypatch, page)
+    assert page.events == [] and not _snapshots(tmp_path)
+
+
+def test_the_deep_check_sends_nothing_while_another_worker_has_the_browser(monkeypatch, tmp_path):
+    from app.browser_guard import BrowserGuard
+
+    page = _CountingPage()
+    with BrowserGuard(tmp_path):
+        with pytest.raises(chatgpt_web.ChatGptWebBusy):
+            _deep_check(monkeypatch, page)
+    assert page.events == [] and not _snapshots(tmp_path)
+
+
+@pytest.mark.parametrize("owner", ["nobody", "a booklet whose reply could be read back"])
+def test_the_deep_check_sends_and_loads_nothing_while_a_send_is_unresolved(monkeypatch, tmp_path, owner):
+    """A booklet in that place reads the other booklet's reply back first (_resolve_other_send). The check is not a
+    booklet: an unresolved send is reported as what it found, and the tab stays where that send left it."""
+    page = _CountingPage()
+    if owner == "nobody":
+        _foreign_mark(tmp_path, [])
+    else:
+        _fast(monkeypatch)
+        _send_and_lose(monkeypatch, page, _batch_files(1), _KEY_A)
+    before = list(page.events)
+
+    with pytest.raises(chatgpt_web.ChatGptWebBlocked):
+        _deep_check(monkeypatch, page)
+
+    assert page.events == before and _guard_state(tmp_path) == "uncertain" and not _check_records(tmp_path)
+
+
+def test_a_deep_check_whose_reply_was_never_taken_leaves_the_mark_a_booklet_leaves_and_is_read_back_like_one(
+        monkeypatch, tmp_path):
+    page = _CountingPage()
+    real_submit = chatgpt_web.submit
+
+    def lost(p):
+        real_submit(p)
+        raise TimeoutError("the reply was lost")
+
+    monkeypatch.setattr(chatgpt_web, "submit", lost)
+    with pytest.raises(chatgpt_web.ChatGptWebUncertain):
+        _deep_check(monkeypatch, page)
+    monkeypatch.setattr(chatgpt_web, "submit", real_submit)
+    [(key, record)] = _check_records(tmp_path).items()
+    assert _guard_state(tmp_path) == "uncertain" and record["transfer"]["pending"] and record["pending"]
+    assert len(_sends(page)) == 1 and len(_snapshots(tmp_path)) == 1
+
+    # The next booklet does for it what it does for another session's booklet: reads its reply in its chat, once,
+    # and is then sent itself. The check's message is not sent again.
+    reply = json.loads(_booklet(chatgpt_web.ChatGptWebClient(), page, _batch_files(2), key=_KEY_B))
+
+    assert reply["questions"] and len(_sends(page)) == 2 and _guard_state(tmp_path) == "idle"
+    settled = _chats(tmp_path)[key]
+    assert settled["pending"] is None and settled["transfer"]["pending"] is None and settled["transfer"]["final"]
 
 
 @pytest.mark.parametrize("address, kept", [

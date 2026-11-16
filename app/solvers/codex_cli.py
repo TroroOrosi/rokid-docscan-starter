@@ -57,7 +57,6 @@ import hashlib
 import json
 import math
 import os
-import random
 import re
 import select
 import shutil
@@ -76,8 +75,9 @@ from PIL import Image
 from ..source_bundle import MAX_SCALE, _readable, page_tiles, source_images
 from .base import Question, Solver, SolveResult
 from .chatgpt_web import (_ALL_TASK, _booklet_chat_key, _booklet_replies, ChatGptWebAuthenticationRequired,
-                          ChatGptWebError, ChatGptWebModelMismatch, ChatGptWebRateLimit, ChatGptWebReplyIncomplete,
-                          ChatGptWebSendNotAuthorized, chatgpt_send_enabled, clip_page, grey_note)
+                          ChatGptWebCheckFailed, ChatGptWebError, ChatGptWebModelMismatch, ChatGptWebRateLimit,
+                          ChatGptWebReplyIncomplete, ChatGptWebSendNotAuthorized, chatgpt_send_enabled, check_picture,
+                          clip_page, grey_note)
 from .llm_adapter import _ANSWER_ONLY_SYSTEM
 
 _TERMUX_BINARY = ("lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-arm64/vendor/"
@@ -642,18 +642,15 @@ class CodexCliSolver(Solver):
             raise ChatGptWebSendNotAuthorized("sending is not authorized")
         if not self._signed_in():
             raise ChatGptWebAuthenticationRequired("the Codex CLI is missing or not signed in; nothing sent")
-        squares = random.randint(3, 7)  # a different picture each time: the reply has to come from the picture
-        picture = Image.new("RGB", (512, 256), "white")
-        for index in range(squares):
-            picture.paste((0, 0, 0), (24 + index * 68, 100, 72 + index * 68, 148))
+        squares, picture = check_picture()  # a different picture each time: the reply has to come from the picture
         with self._workplace() as (directory, environment):
-            picture.save(directory / "canary.jpg", quality=85)
+            (directory / "canary.jpg").write_bytes(picture)
             reply = self._exec(directory, environment, model=os.environ.get("ROKID_CODEX_MODEL") or "gpt-6.1-sol",
                                effort="low", images=["canary.jpg"], timeout=120,
                                prompt="How many black squares are in the attached image? Do not run commands or use "
                                       "tools. Reply with the number only.")
         if re.sub(r"\D", "", reply) != str(squares):
-            raise ChatGptWebError("the check's reply was not the count the picture shows")
+            raise ChatGptWebCheckFailed("the check's reply was not the count the picture shows")
 
     @classmethod
     def _run(cls, question: Question, model: str) -> list[str]:

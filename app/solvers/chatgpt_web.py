@@ -29,9 +29,11 @@ ASR are not source attachments or message bodies on this route.
 from __future__ import annotations
 
 import hashlib
+import io
 import itertools
 import json
 import os
+import random
 import re
 import secrets
 import tempfile
@@ -331,6 +333,30 @@ class ChatGptWebReplyIncomplete(ChatGptWebError):
     """
 
 
+class ChatGptWebCheckFailed(ChatGptWebError):
+    """The check before use was answered, and the answer is not the count its picture shows.
+
+    The route carried a message there and a reply back; what the model was given or what it said is wrong.
+    """
+
+
+def check_picture() -> tuple[int, bytes]:
+    """(how many black squares, the picture as a JPEG) for a check before use: the route is asked to count them.
+
+    Three to seven, drawn anew each time, so the reply has to come from the picture. Measured through the Codex
+    CLI on the phone on 2026-11-15 (M-23): counted right in 5 s at low effort.
+    """
+    from PIL import Image  # noqa: PLC0415
+
+    squares = random.randint(3, 7)
+    picture = Image.new("RGB", (512, 256), "white")
+    for index in range(squares):
+        picture.paste((0, 0, 0), (24 + index * 68, 100, 72 + index * 68, 148))
+    buffer = io.BytesIO()
+    picture.save(buffer, format="JPEG", quality=85)
+    return squares, buffer.getvalue()
+
+
 # The fixed code of each failure of the browser routes, most specific first. The server's own table (main.py) ends
 # with this one, so a failure carries one code in the answer bundle, in the check before use and in its snapshot.
 FAILURE_CODES = (
@@ -346,6 +372,7 @@ FAILURE_CODES = (
     (ChatGptWebReplyIncomplete, "reply_incomplete"),
     (ChatGptWebBusy, "browser_busy"),
     (ChatGptWebBlocked, "browser_blocked"),
+    (ChatGptWebCheckFailed, "check_failed"),
 )
 
 
@@ -749,8 +776,12 @@ def _find_sent_chat(page, batch_id: str, *, sleep=time.sleep) -> str | None:
     return None
 
 
+# The record of a deep check's one message (ChatGptWebSolver.check_deep): this, a colon and 64 hex digits.
+CHECK_CHAT_KEY = "route-check"
 # A booklet of this route, as _booklet_chat_key names it. Work's keys carry ":browser:" or start "inspection:".
-_CHAT_BOOKLET_KEY = re.compile(r"session:[1-9][0-9]*:[0-9a-f]{64}")
+# The deep check's message too: this client sent it with a batch of its own, as it sends a booklet's, so when its
+# reply was never taken it is read back by the same rule, and its mark does not wait for a person to clear it.
+_CHAT_BOOKLET_KEY = re.compile(rf"(?:session:[1-9][0-9]*|{CHECK_CHAT_KEY}):[0-9a-f]{{64}}")
 
 
 def _pending_chat_owner(directory: Path, request_id: str) -> str | None:
@@ -1567,6 +1598,7 @@ class ChatGptWebClient:
         stage_question_ids: list[str] | None = None,
         before_submit: Callable[[], None] | None = None,
         upload_names: Callable[[], list[str]] | None = None,
+        only_if_clear: bool = False,
     ) -> str:
         if not chatgpt_send_enabled():
             raise ChatGptWebSendNotAuthorized("ChatGPT send is not authorized")
@@ -1604,6 +1636,7 @@ class ChatGptWebClient:
                     stage_question_ids=stage_question_ids,
                     before_submit=before_submit,
                     upload_names=upload_names,
+                    only_if_clear=only_if_clear,
                 )
             except Exception as error:
                 self.note_failure(error, context)
@@ -1614,13 +1647,20 @@ class ChatGptWebClient:
     def _ask_with_retries(self, context, text: str, pages: list[bytes], *,
                           audio=None, chat_key=None, files=None, expect=None, booklet=False,
                           booklet_stage="single", stage_audio_digest=None, stage_question_ids=None,
-                          before_submit=None, upload_names=None) -> str:
+                          before_submit=None, upload_names=None, only_if_clear=False) -> str:
         """Serialize all tab interaction; a restart cannot erase an uncertain send."""
         from .cdp import CdpError  # noqa: PLC0415
 
         try:
             with BrowserGuard() as guard:
                 self.last_image_attached = None
+                if only_if_clear:
+                    # The check before use is not a booklet: where a booklet reads another's unanswered send back
+                    # (_resolve_other_send), it reports the mark and leaves the tab where that send left it.
+                    try:
+                        guard.require_clear()
+                    except BrowserGuardError as error:
+                        raise ChatGptWebBlocked("an earlier send is unresolved; nothing loaded, nothing sent") from error
                 if booklet:
                     return self._booklet_locked(context, text, guard=guard, files=files,
                                                 chat_key=chat_key, expect=expect, stage=booklet_stage,
@@ -2616,6 +2656,42 @@ class ChatGptWebSolver(LLMSolver):
         if not isinstance(self._client, ChatGptWebClient):
             return True
         return cdp_available(self._client.endpoint) is not None
+
+    def check_deep(self) -> None:
+        """Prove before use that this route can carry a booklet now: one small real message, or raise what a
+        booklet's message would raise.
+
+        ``check()`` looks at whether the browser answers. Every change of the live page that stopped this route on
+        2026-11-14 and 11/16 passed that look. This sends a picture of three to seven black squares (check_picture,
+        the Codex check's own) in a new chat and asks for their count, by the client's booklet path and nothing
+        beside it: the send guard, a new chat, the model position and effort selected and verified, the upload
+        window, the attachment and its confirmation, the send control, the wait for a reply that is whole JSON,
+        the conversation's address, the receipt. It passes only when the reply holds the count the picture shows.
+
+        It is one message on the operator's account, at the first model position and Extra High, and one file of
+        the plan's upload window; it runs when asked for (POST /v1/route-check?deep=1) and daily only with
+        ROKID_ROUTE_CHECK_DEEP=1. A send whose reply is never taken leaves the mark a booklet's leaves, which
+        stops every browser send until that reply is read back: the next booklet of this route does that
+        (_CHAT_BOOKLET_KEY), Work waits. While the browser is busy or a send is unresolved, nothing is sent.
+        """
+        squares, picture = check_picture()
+        token = secrets.token_hex(32)
+        name = f"check-{token[:8]}.jpg"  # of its own: a name the account already holds is shown renamed
+        # ponytail: each check keeps one of the CHATS_KEPT records; drop a settled check's record if booklets'
+        # records are ever pushed out by them (eight newer keys are needed for that).
+        reply = self._client.complete(
+            system="This message checks that the connection works. It is not an exam paper.",
+            prompt='Count the black squares in the attached image. Give that number as "count" in the JSON object '
+                   "asked for below, and reply with that one JSON object and nothing else.",
+            files=[{"name": name, "mimeType": "image/jpeg", "buffer": picture}], upload_names=lambda: [name],
+            chat_key=f"{CHECK_CHAT_KEY}:{token}", expect=("count",), booklet=True, only_if_clear=True)
+        try:
+            # The receipt shows the key as an empty list, as it shows a booklet's "questions": 5, [5] and "5" are 5.
+            if re.sub(r"\D", "", json.dumps(extract_json(reply).get("count"))) != str(squares):
+                raise ChatGptWebCheckFailed("the check's reply was not the count the picture shows")
+        except ChatGptWebCheckFailed as error:
+            self._client.note_failure(error)
+            raise
 
 
 def _smoke(question_text: str = "2x+3=7 を解け", *image_paths: str) -> int:

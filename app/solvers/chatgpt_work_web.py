@@ -824,9 +824,13 @@ class WorkWebClient(chat.ChatGptWebClient):
                                 pages.append(page)
                     if len(pages) != 1:
                         raise chat.ChatGptWebBrowserUnavailable("a unique existing ChatGPT tab is required for inventory")
-                    self._wait_for_composer(pages[0])
-                    return resolve_work_model_settings(pages[0], requested_settings=requested_settings,
-                                                       follow_family=follow_family)
+                    try:
+                        self._wait_for_composer(pages[0])
+                        return resolve_work_model_settings(pages[0], requested_settings=requested_settings,
+                                                           follow_family=follow_family)
+                    except Exception as error:
+                        self.note_failure(error, browser.contexts[0])
+                        raise
                 finally:
                     browser.close()
         except chat.BrowserBusy as error:

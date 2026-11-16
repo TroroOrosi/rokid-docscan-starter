@@ -2351,3 +2351,32 @@ def test_a_work_failure_leaves_a_snapshot_counted_by_works_own_selectors(page, m
     assert counts["send"] == {"matches": 2, "drawn": 1}, "this fixture keeps a second Send that is not drawn"
     assert snapshot["page"]["form_buttons"] == [{"aria_label": "Send", "data_testid": None}]
     assert page.evaluate("window.sent") == 0 and tab.navigations == [chatgpt_web.CHAT_URL]
+
+
+def test_a_model_inventory_that_cannot_be_read_leaves_a_snapshot_too(page, monkeypatch, tmp_path):
+    """For a new job the inventory is Work's first step on the page: a changed page stops Work here, before any
+    message exists."""
+    from app.solvers import cdp
+
+    _upload_composer(page)
+    page.evaluate("document.getElementById('work').remove(); true")
+    tab = _VenueTab(page)
+
+    class LocalBrowser:
+        contexts = [_Context(tab)]
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(cdp, "connect_over_cdp", lambda endpoint: LocalBrowser())
+    monkeypatch.setenv("ROKID_CHATGPT_SEND_ENABLED", "1")
+    with pytest.raises(chatgpt_web.ChatGptWebModelMismatch):
+        work.WorkWebClient().resolve_new_job_settings(
+            requested_settings={"model": "GPT-6.1 Sol", "effort": "xhigh", "speed": "fast"}, follow_family=True)
+
+    [path] = sorted((tmp_path / "browser-state" / "failures").glob("*.json"))
+    snapshot = json.loads(path.read_text(encoding="utf-8"))
+    assert (snapshot["route"], snapshot["code"]) == ("chatgpt-work", "model_mismatch")
+    assert snapshot["at"].endswith(":resolve_work_model_settings")
+    assert snapshot["page"]["selectors"]["work_mode"] == {"matches": 0, "drawn": 0}
+    assert tab.navigations == [] and page.evaluate("window.sent") == 0
