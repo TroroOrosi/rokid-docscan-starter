@@ -13,7 +13,7 @@ import math
 import pytest
 from PIL import Image, ImageDraw
 
-from app.source_bundle import MAX_IMAGE_PATCHES, page_tiles
+from app.source_bundle import MAX_IMAGE_PATCHES, MAX_IMAGE_SIDE, page_tiles
 
 
 def _rows(width, height, blocks):
@@ -113,6 +113,43 @@ def test_when_the_direction_is_not_known_the_longer_side_is_cut():
 def test_a_page_that_fits_is_one_image():
     [(tile, box)] = page_tiles(_rows(600, 800, [(40, 760)]), vertical_text=False, target_long=1200)
     assert box == (0, 0, 600, 800) and tile.size == (900, 1200)
+
+
+def _covered(size, boxes):
+    covered = Image.new("1", size, 0)
+    for left, top, right, bottom in boxes:
+        covered.paste(1, (left, top, right, bottom))
+    return covered.histogram()[0] == 0
+
+
+def test_a_region_3000_px_long_at_twice_its_size_stays_inside_what_the_cli_takes():
+    """The Codex CLI reduces an image over 6000 px a side, or over 10,000 patches, by itself and says nothing. A large
+    sheet that fills the photo is 3000 px and more; at twice its size its strips are as long as the CLI takes."""
+    tiles = page_tiles(_columns(2100, 3000, [(60, 2040)]), vertical_text=True, min_scale=2.0)
+    assert all(tile.size == ((box[2] - box[0]) * 2, 6000) for tile, box in tiles), [tile.size for tile, _ in tiles]
+    assert all(_patches(tile) <= MAX_IMAGE_PATCHES and max(tile.size) <= MAX_IMAGE_SIDE == 6000 for tile, _ in tiles)
+    assert _covered((2100, 3000), [box for _, box in tiles])
+
+
+def test_a_part_longer_than_the_cli_takes_is_cut_again_across_its_lines_and_its_pieces_follow_one_another():
+    """A sheet of horizontal text that fills a 4032x3024 photo: a band across it is 8064 px at twice its size."""
+    tiles = page_tiles(_rows(4032, 3024, [(60, 2960)]), vertical_text=False, min_scale=2.0)
+    boxes = [box for _, box in tiles]
+    assert all(tile.size == ((box[2] - box[0]) * 2, (box[3] - box[1]) * 2) for tile, box in tiles), "still twice the size"
+    assert all(_patches(tile) <= MAX_IMAGE_PATCHES and max(tile.size) <= MAX_IMAGE_SIDE for tile, _ in tiles)
+    assert _covered((4032, 3024), boxes)
+    left, right = boxes[0], boxes[1]
+    assert (left[1], left[3]) == (right[1], right[3]) and left[1] == 0, "the two pieces of the top band come first"
+    assert left[0] == 0 and right[2] == 4032 and right[0] < left[2], "left then right, sharing what neighbours share"
+    assert boxes[2][0] == 0 and boxes[2][1] > 0, "then the next band down, from its left again"
+
+
+def test_a_part_a_little_longer_than_the_cli_takes_is_enlarged_a_little_less_instead_of_cut():
+    """A sheet of vertical text as high as the photo: 6048 px at twice its size, 48 over. Cutting every line of it in
+    two for that would be the cut that read worse (across the lines)."""
+    tiles = page_tiles(_columns(4032, 3024, [(60, 3970)]), vertical_text=True, min_scale=2.0)
+    assert all((box[1], box[3]) == (0, 3024) and tile.height == 6000 for tile, box in tiles)
+    assert all(_patches(tile) <= MAX_IMAGE_PATCHES for tile, _ in tiles)
 
 
 def test_a_cut_moved_to_a_blank_band_never_leaves_an_image_too_large():

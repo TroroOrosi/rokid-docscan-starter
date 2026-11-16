@@ -447,11 +447,14 @@ def _patches(size):
     return -(-size[0] // 32) * -(-size[1] // 32)
 
 
-def _photo(tmp_path, size=(1500, 2000)) -> Question:
+def _photo(tmp_path, size=(1500, 2000), clip=False) -> Question:
+    """One photo as the booklet; ``clip`` makes it a page recorded as a clip (source kind clip_frame)."""
     path = tmp_path / "photo.png"
     Image.new("RGB", size, (190, 190, 185)).save(path)
-    return Question(question_no=None, chat_key="session:9", document_pages=[{"page_number": 1, "image_path": str(path)}],
-                    document_id="5")
+    page = {"page_number": 1, "image_path": str(path)}
+    if clip:
+        page["capture_provenance"] = {"source_kind": "clip_frame"}
+    return Question(question_no=None, chat_key="session:9", document_pages=[page], document_id="5")
 
 
 def test_the_pages_are_located_first_from_a_small_view_of_each_photo(codex, tmp_path, monkeypatch):
@@ -527,7 +530,7 @@ def test_a_booklet_of_gathered_pages_too_large_at_their_own_size_is_reduced_and_
     booklet that did not fit at its own size went out too large."""
     monkeypatch.setenv("FAKE_CODEX_REGIONS", json.dumps(REGIONS))
     monkeypatch.setattr(codex_cli, "_CONTEXT_TOKENS", codex_cli._FIXED_TOKENS + 4000)
-    codex_cli.CodexCliSolver().answer_all(question=_photo(tmp_path, size=(3024, 4032)))
+    codex_cli.CodexCliSolver().answer_all(question=_photo(tmp_path, size=(3024, 4032), clip=True))
 
     [run] = _runs(codex())
     pages = [size for name, size in run["sizes"].items() if name.startswith("page001-")]
@@ -536,6 +539,91 @@ def test_a_booklet_of_gathered_pages_too_large_at_their_own_size_is_reduced_and_
     assert (sum(map(_patches, pages)) + sum(map(_patches, views))) * 1.21 <= 4000
     # Each region is 1218x2137 px on the photo with its margin; both pages come out the same size, as large as fits.
     assert 1200 < max(height for _, height in pages) < 2137
+
+
+WHOLE_SHEET = {"images": [{"index": 1, "pages": [
+    {"left": 100, "top": 20, "right": 900, "bottom": 980, "vertical_text": True}]}]}
+
+
+def test_a_region_cut_from_a_still_is_wanted_at_twice_its_own_pixels_and_a_small_one_as_before(monkeypatch):
+    """Phone, M-22 and M-23: characters of about 16 px were read with 18% wrong as photographed and 1.6 to 4% at twice
+    the size in strips; larger did no better. Until 2026-11-16 the aim was a long side of 2540 px, twice a B5 page as a
+    spread photo shows it, so a large sheet that fills the photo (3000 px, characters of 14 to 20 px) went out at its
+    own size."""
+    monkeypatch.delenv("ROKID_CODEX_PAGE_SCALE", raising=False)
+    monkeypatch.delenv("ROKID_CODEX_PAGE_LONG", raising=False)
+    assert codex_cli._wanted_scale((2100, 3000), clip=False) == 2.0
+    assert codex_cli._wanted_scale((900, 1270), clip=False) * 1270 == 2540, "a B5 page of a spread: what it was"
+    assert codex_cli._wanted_scale((604, 1060), clip=False) * 1060 == pytest.approx(2540), "a smaller one: still 2540"
+    assert codex_cli._wanted_scale((400, 560), clip=False) == 2.5, "never past two and a half times"
+    # A page gathered from its clip is already on a grid twice as fine as the camera's frame: as before.
+    assert codex_cli._wanted_scale((3024, 4032), clip=True) == 1.0
+    assert codex_cli._wanted_scale((1218, 2137), clip=True) == pytest.approx(2540 / 2137)
+    monkeypatch.setenv("ROKID_CODEX_PAGE_SCALE", "1.5")
+    assert codex_cli._wanted_scale((2100, 3000), clip=False) == 1.5
+    assert codex_cli._wanted_scale((3024, 4032), clip=True) == 1.0
+    monkeypatch.setenv("ROKID_CODEX_PAGE_LONG", "3200")
+    assert codex_cli._wanted_scale((900, 1270), clip=False) == 2.5
+    assert codex_cli._wanted_scale((2100, 3000), clip=False) == 1.5
+
+
+def test_a_large_sheet_that_fills_a_still_photo_is_sent_at_twice_its_size_in_strips_the_cli_takes_whole(
+        codex, tmp_path, monkeypatch):
+    """The CLI reduces an image over 6000 px a side or 10,000 patches of 32 px by itself, unsaid."""
+    monkeypatch.setenv("FAKE_CODEX_REGIONS", json.dumps(WHOLE_SHEET))
+    codex_cli.CodexCliSolver().answer_all(question=_photo(tmp_path, size=(2400, 3000)))
+
+    [run] = _runs(codex())
+    parts = [size for name, size in run["sizes"].items() if name.startswith("page001-1")]
+    # The region is 1920x2880 px on the photo, 2036x3000 with its margin, cut at the photo's edge.
+    assert len(parts) > 2 and all(height == 6000 for _, height in parts), parts
+    assert sum(width for width, _ in parts) >= 2 * 2036
+    assert all(_patches(size) <= 2900 for size in parts)
+    names = [name for name in run["sizes"] if name.startswith("page001-1")]
+    assert names[:2] == ["page001-1a.jpg", "page001-1b.jpg"] and all(name[9:-4].isalpha() for name in names)
+    # A band 8064 px long is two files (tests/test_page_tiles.py): the request says how they follow one another.
+    assert "cut again across its lines" in run["args"][-1] and "goes on in the next piece" in run["args"][-1]
+
+
+def test_more_than_26_parts_of_one_region_still_have_names():
+    assert [codex_cli._letters(index) for index in (0, 1, 25, 26, 27, 51, 52, 701, 702)] == [
+        "a", "b", "z", "aa", "ab", "az", "ba", "zz", "aaa"]
+
+
+def test_a_stills_region_at_twice_its_size_gives_way_when_the_booklet_would_not_fit(codex, tmp_path, monkeypatch):
+    """At twice its size the sheet of the test above is about 32,000 tokens."""
+    monkeypatch.setenv("FAKE_CODEX_REGIONS", json.dumps(WHOLE_SHEET))
+    monkeypatch.setattr(codex_cli, "_CONTEXT_TOKENS", codex_cli._FIXED_TOKENS + 20000)
+    codex_cli.CodexCliSolver().answer_all(question=_photo(tmp_path, size=(2400, 3000)))
+
+    [run] = _runs(codex())
+    parts = [size for name, size in run["sizes"].items() if name.startswith("page001-1")]
+    views = [size for name, size in run["sizes"].items() if name.startswith("overview")]
+    assert (sum(map(_patches, parts)) + sum(map(_patches, views))) * 1.21 <= 20000
+    assert 3000 < max(height for _, height in parts) < 6000, "less than twice, and still more than its own size"
+
+
+def test_the_regions_sent_largest_give_way_first_and_none_when_the_booklet_fits(monkeypatch):
+    import math
+
+    still, gathered = ((2000, 3000), 2.0), ((3024, 4032), 1.0)
+    assert codex_cli._target_long([still, gathered] * 3, 6 * 800) == math.inf
+    # Room for the gathered page at its own size and the still at about 5000 px, not at its 6000.
+    monkeypatch.setattr(codex_cli, "_CONTEXT_TOKENS", codex_cli._FIXED_TOKENS + 37500)
+    limit = codex_cli._target_long([still, gathered], 0)
+    assert 4032 < limit < 6000, "the still is sent smaller than twice; the gathered page keeps its own size"
+    monkeypatch.setattr(codex_cli, "_CONTEXT_TOKENS", codex_cli._FIXED_TOKENS + 12000)
+    assert codex_cli._target_long([still, gathered], 0) < 3000, "then both, to one long side"
+
+
+def test_a_page_gathered_from_its_clip_is_still_sent_at_its_own_size(codex, tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_CODEX_REGIONS", json.dumps(WHOLE_SHEET))
+    codex_cli.CodexCliSolver().answer_all(question=_photo(tmp_path, size=(3024, 4032), clip=True))
+
+    [run] = _runs(codex())
+    parts = [size for name, size in run["sizes"].items() if name.startswith("page001-1")]
+    assert parts and all(height == 4032 for _, height in parts), parts
+    assert 2565 <= sum(width for width, _ in parts) < 2 * 2565, "2565 px wide on the page, and its parts overlap"
 
 
 def test_a_photo_in_which_no_page_was_found_is_sent_as_before(codex, tmp_path, monkeypatch):

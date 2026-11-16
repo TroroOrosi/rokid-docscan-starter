@@ -207,6 +207,11 @@ MAX_IMAGE_PATCHES = 2900  # the larger measured strip was 2,880
 
 MAX_SCALE = 2.5  # twice the size took 18% wrong to about 2%; two and a half and three times did no better
 
+# The Codex CLI reduces an image over this many px a side, or over 10,000 patches of 32 px, by itself and says nothing
+# (its source, as read for the task of 2026-11-16; not re-read here). MAX_IMAGE_PATCHES keeps every part far under the
+# second limit; the first is met when a region of 3000 px and more is sent at twice its size.
+MAX_IMAGE_SIDE = 6000
+
 
 def _fits(width: float, height: float) -> bool:
     return math.ceil(width / 32) * math.ceil(height / 32) <= MAX_IMAGE_PATCHES
@@ -242,11 +247,23 @@ def page_tiles(page: Image.Image, *, vertical_text: bool | None = None, target_l
     parts that each fit ``MAX_IMAGE_PATCHES``. Neighbours share ``overlap`` of a part, as the measured strips did.
     ``min_scale`` under 1 lets a page larger than ``target_long`` be reduced to it: only for a booklet that does not
     fit the model's context at its own size (pages gathered from clips are 3024x4032). How much a reduced page loses
-    is not measured.
+    is not measured. ``min_scale`` over 1 is a least enlargement (a region cut from a still photo, twice).
+
+    A part is as long as the page along its lines. Enlarged past ``MAX_IMAGE_SIDE`` it is cut once more, across its
+    lines, into pieces that follow one another (left to right for a band, top to bottom for a strip) and share
+    ``overlap`` too: a sheet of horizontal text 4032 px wide at twice its size. Up to a twentieth over, the page is
+    enlarged that much less instead: cutting every line in two is the cut that read no better than one image. How
+    such long narrow parts (up to 6000x480) and the pieces of a line are read is not measured.
     """
     scale = min(max_scale, max(min_scale, target_long / max(page.size)))
     strips = vertical_text if vertical_text is not None else page.width > page.height
     length, other = (page.width, page.height) if strips else (page.height, page.width)
+    pieces = max(1, math.ceil(other * scale / MAX_IMAGE_SIDE - 0.05))
+    reach = math.ceil(other / pieces * overlap / 2) if pieces > 1 else 0
+    across = [(max(0, round(other * index / pieces) - reach), min(other, round(other * (index + 1) / pieces) + reach))
+              for index in range(pieces)]
+    widest = max(end - start for start, end in across)
+    scale = min(scale, MAX_IMAGE_SIDE / widest)
     ink = ImageOps.invert(ImageOps.autocontrast(page.convert("L")))
     line = ink.resize((length, 1), Image.BOX) if strips else ink.resize((1, length), Image.BOX).transpose(Image.Transpose.ROTATE_90)
     profile = line.filter(ImageFilter.BoxBlur(max(1, length // 160))).tobytes()
@@ -256,7 +273,7 @@ def page_tiles(page: Image.Image, *, vertical_text: bool | None = None, target_l
         pad = math.ceil(length / parts * overlap / 2) if parts > 1 else 0
         spans = [(max(0, edges[index] - pad), min(length, edges[index + 1] + pad)) for index in range(parts)]
         # Judged on the parts as cut: a cut moved to a blank band leaves one part longer than an even share.
-        if all(_fits((end - start) * scale, other * scale) if strips else _fits(other * scale, (end - start) * scale)
+        if all(_fits((end - start) * scale, widest * scale) if strips else _fits(widest * scale, (end - start) * scale)
                for start, end in spans) or parts >= length // 8:
             break
         parts += 1
@@ -264,10 +281,11 @@ def page_tiles(page: Image.Image, *, vertical_text: bool | None = None, target_l
         spans.reverse()  # vertical Japanese text is read from the right
     tiles = []
     for start, end in spans:
-        box = (start, 0, end, page.height) if strips else (0, start, page.width, end)
-        tile = page.crop(box)
-        size = (round(tile.width * scale), round(tile.height * scale))
-        tiles.append((tile.resize(size, Image.LANCZOS) if scale != 1 else tile, box))
+        for low, high in across:
+            box = (start, low, end, high) if strips else (low, start, high, end)
+            tile = page.crop(box)
+            size = (round(tile.width * scale), round(tile.height * scale))
+            tiles.append((tile.resize(size, Image.LANCZOS) if scale != 1 else tile, box))
     return tiles
 
 

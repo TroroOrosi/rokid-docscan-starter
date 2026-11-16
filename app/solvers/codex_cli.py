@@ -32,7 +32,9 @@ error the server answers by handing the booklet to the next route.
 
 Settings: ``ROKID_CODEX_BIN`` (default: the Termux npm install, else ``codex`` on PATH), ``ROKID_CODEX_MODEL``
 (``gpt-6.1-sol``), ``ROKID_CODEX_EFFORT`` (``xhigh``), ``ROKID_CODEX_TIMEOUT_S`` (by the booklet's size, see ``_time_allowed``), ``ROKID_CODEX_LOCATE`` (``1``;
-``0`` sends photos as the Chat route does), ``ROKID_CODEX_PAGE_LONG`` (the enlarged page's long side, 2540 px),
+``0`` sends photos as the Chat route does), ``ROKID_CODEX_PAGE_SCALE`` (2: a region cut from a still photo is sent at
+this many times its own pixels at least), ``ROKID_CODEX_PAGE_LONG`` (2540 px: the long side a smaller region is
+enlarged up to, at most two and a half times; a page recorded as a clip follows this alone, see ``_wanted_scale``),
 ``ROKID_CODEX_READS`` (2). Sending is gated by
 ``ROKID_CHATGPT_SEND_ENABLED`` like every other route that spends the operator's usage.
 
@@ -47,6 +49,7 @@ import concurrent.futures
 import contextlib
 import hashlib
 import json
+import math
 import os
 import random
 import re
@@ -68,7 +71,7 @@ from ..source_bundle import MAX_SCALE, _readable, page_tiles, source_images
 from .base import Question, Solver, SolveResult
 from .chatgpt_web import (_ALL_TASK, _booklet_chat_key, _booklet_replies, ChatGptWebAuthenticationRequired,
                           ChatGptWebError, ChatGptWebRateLimit, ChatGptWebReplyIncomplete, ChatGptWebSendNotAuthorized,
-                          chatgpt_send_enabled, grey_note)
+                          chatgpt_send_enabled, clip_page, grey_note)
 from .llm_adapter import _ANSWER_ONLY_SYSTEM
 
 _TERMUX_BINARY = ("lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-arm64/vendor/"
@@ -80,7 +83,9 @@ _TILES_NOTE = (
     "for layout and for anything outside the pages, never to read text. pageNNN-PT.jpg is from that same photo: printed page P "
     "in reading order within the photo (1 is read first), part T (a, b, c ...) of that one page, enlarged. A page is cut "
     "along its lines of text and its parts come in reading order: for vertical text, strips from the right edge leftwards; "
-    "otherwise bands from the top down. Neighbouring parts overlap: text in an overlap appears twice and is one text. Read "
+    "otherwise bands from the top down. A part too long for one image is cut again across its lines and its pieces take "
+    "the next letters: a band's from left to right, a strip's from top to bottom; a line that crosses that cut goes on "
+    "in the next piece. Neighbouring parts overlap: text in an overlap appears twice and is one text. Read "
     "the parts of a page together as one page. pageNNN.jpg without P and T is a whole photo in which no separate page was "
     "found." + _NO_TOOLS)
 _LOCATE_PROMPT = (
@@ -106,31 +111,56 @@ _FIXED_TOKENS = 115_000    # the CLI's own 15,000 (14,650 with no image) and 100
 _TOKENS_PER_PATCH = 1.21   # an image's cost per 32-px patch, in proportion from 512x512 to 3000x3000
 
 
-def _target_long(sizes: list[tuple[int, int]], views: int, wanted: int) -> tuple[int, float]:
-    """(long side, least scale) for ``page_tiles``: ``wanted`` with no page reduced, or the largest long side at which
-    every page, enlarged and cut, still fits the model's context.
+def _wanted_scale(size: tuple[int, int], *, clip: bool) -> float:
+    """How many times its own pixels a cut-out region is sent at, when the booklet fits the model's context.
 
-    Pages are reduced (least scale 0) only when the booklet does not fit even at its own size. A page gathered from its
-    clip is 3024x4032, about 15,000 tokens when the paper fills it: twenty fit at their own size and forty do not. The
-    reads behind the clip route were of pages at their own size (M-28, M-29); a reduced one is not measured.
+    A region cut from a still photo: ``ROKID_CODEX_PAGE_SCALE`` times (2). Characters of about 16 px were read with
+    18% wrong as photographed and with 1.6 to 4% at twice the size in strips, and larger did no better (M-22, M-23).
+    Until 2026-11-16 the aim was a long side alone, ``ROKID_CODEX_PAGE_LONG`` (2540 px, twice a B5 page as a spread
+    photo shows it), so a large sheet that fills the photo, 3000 px with characters of 14 to 20 px, went out at its own
+    size. That long side is still what a smaller region is brought up to, never past ``MAX_SCALE``: every region of
+    1270 px and less is sent as it was.
+
+    A page recorded as a clip keeps the long side alone: the image gathered from a clip is already on a grid twice as
+    fine as the camera's frame, and what was read of it was read at its own size (M-28, M-29).
     """
-    room = (_CONTEXT_TOKENS - _FIXED_TOKENS) / _TOKENS_PER_PATCH - views * 800  # a 1024-px view is 768 patches
+    least = 1.0 if clip else float(os.environ.get("ROKID_CODEX_PAGE_SCALE") or 2)
+    return min(MAX_SCALE, max(least, float(os.environ.get("ROKID_CODEX_PAGE_LONG") or 2540) / max(size)))
 
-    def patches(target: int, least: float) -> float:  # with a tenth more for the parts' overlap and their rounding up
-        return sum(width * height * min(MAX_SCALE, max(least, target / max(width, height))) ** 2
-                   for width, height in sizes) / 1024 * 1.1
 
-    low = 1
-    for least, most in ((1.0, wanted), (0.0, max([wanted, *(max(size) for size in sizes)]))):
-        if patches(most, least) <= room:
-            return most, least
-        low, high = 1, most  # the cost never falls as the target grows
-        while high - low > 16:
-            middle = (low + high) // 2
-            low, high = (middle, high) if patches(middle, least) <= room else (low, middle)
-        if patches(low, least) <= room:
-            return low, least
-    return low, 0.0
+def _target_long(regions: list[tuple[tuple[int, int], float]], spent: float) -> float:
+    """The long side no region may be sent past for the booklet to fit the model's context: infinite when every
+    region fits at the scale wanted for it, else the largest common one that fits.
+
+    ``regions`` are (size, wanted scale); ``spent`` is what the other images of the request cost, in patches. The
+    regions sent largest give way first, and a region is reduced below its own size only when the booklet does not
+    fit otherwise. A page gathered from its clip is 3024x4032, about 15,000 tokens when the paper fills it: twenty fit
+    at their own size and forty do not. A still's region at twice its size costs four times its own pixels: a sheet
+    that fills a 4032x3024 photo is about 58,000 tokens, and six such photos fill the context. A reduced page's
+    reading is not measured.
+    """
+    room = (_CONTEXT_TOKENS - _FIXED_TOKENS) / _TOKENS_PER_PATCH - spent
+
+    def patches(limit: float) -> float:
+        # A fifth more than the region's own area: neighbouring parts share 8%, and each part counts in whole patches,
+        # up to 7% more for the narrowest (a strip 6000 px long is at most 15 patches wide). A tenth, until
+        # 2026-11-16, was 0.4% short for six such strips.
+        return sum(width * height * min(wanted, limit / max(width, height)) ** 2
+                   for (width, height), wanted in regions) / 1024 * 1.2
+
+    if patches(math.inf) <= room:
+        return math.inf
+    low, high = 1.0, max(max(size) * wanted for size, wanted in regions)  # the cost never falls as the limit grows
+    while high - low > 16:
+        middle = (low + high) / 2
+        low, high = (middle, high) if patches(middle) <= room else (low, middle)
+    return low
+
+
+def _letters(index: int) -> str:
+    """a, b ... z, aa, ab ...: a region sent at twice its size can be more than 26 parts."""
+    index, last = divmod(index, 26)
+    return (_letters(index - 1) if index else "") + chr(97 + last)
 
 
 _DIFFERENT = "2回の読みで不一致。他方：{other}"
@@ -496,15 +526,16 @@ class CodexCliSolver(Solver):
         found = _regions(reply, len(photos))
         if not found:
             return None
-        crops: dict[tuple[int, int], tuple[Image.Image, bool | None]] = {}
-        for number, photo in enumerate(photos, 1):
+        crops: dict[tuple[int, int], tuple[Image.Image, bool | None, float]] = {}
+        for number, (page, photo) in enumerate(zip(ordered, photos), 1):
             for printed, (left, top, right, bottom, vertical) in enumerate(found.get(number, ()), 1):
                 pad_x, pad_y = (right - left) * _REGION_MARGIN, (bottom - top) * _REGION_MARGIN
                 box = (max(0, round((left - pad_x) * photo.width)), max(0, round((top - pad_y) * photo.height)),
                        min(photo.width, round((right + pad_x) * photo.width)), min(photo.height, round((bottom + pad_y) * photo.height)))
-                crops[number, printed] = (photo.crop(box), vertical)
-        target, least = _target_long([crop.size for crop, _ in crops.values()], len(found),
-                                     int(os.environ.get("ROKID_CODEX_PAGE_LONG") or 2540))
+                crop = photo.crop(box)
+                crops[number, printed] = (crop, vertical, _wanted_scale(crop.size, clip=clip_page(page)))
+        # A 1024-px view is 768 patches.
+        limit = _target_long([(crop.size, wanted) for crop, _, wanted in crops.values()], len(found) * 800)
         names = []
         for number, (page, photo) in enumerate(zip(ordered, photos), 1):
             label = f"{page['page_number']:03d}"
@@ -518,10 +549,11 @@ class CodexCliSolver(Solver):
             (directory / f"photo{number:03d}.jpg").replace(directory / overview)
             names.append(overview)
             for printed in range(1, len(found[number]) + 1):
-                crop, vertical = crops[number, printed]
-                for tile_number, (tile, _) in enumerate(page_tiles(crop, vertical_text=vertical, target_long=target,
-                                                                   min_scale=least)):
-                    name = f"page{label}-{printed}{chr(97 + tile_number)}.jpg"
+                crop, vertical, wanted = crops[number, printed]
+                scale = min(wanted, limit / max(crop.size))
+                for tile_number, (tile, _) in enumerate(page_tiles(crop, vertical_text=vertical, min_scale=scale,
+                                                                   max_scale=scale)):
+                    name = f"page{label}-{printed}{_letters(tile_number)}.jpg"
                     tile.save(directory / name, format="JPEG", quality=92, subsampling=0)
                     names.append(name)
         return names
