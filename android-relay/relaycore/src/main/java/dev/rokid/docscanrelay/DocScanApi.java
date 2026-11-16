@@ -145,6 +145,24 @@ public final class DocScanApi {
         return get("/v1/settings");
     }
 
+    /**
+     * What the server found when it last tried its answer routes, as its settings carry it; null when it keeps none.
+     * For a screen that only reports: five seconds at most and no retry, on the client the capture feedback uses,
+     * so it never waits behind an upload or an answer.
+     */
+    public JSONObject keptRouteCheck() throws IOException, JSONException {
+        return execute(new Request.Builder().url(baseUrl + "/v1/settings").get(), inspectionHttp).optJSONObject("route_check");
+    }
+
+    /**
+     * Has the server try its answer routes now and returns what it found. Its Codex CLI makes one small real request
+     * for this, so it is not for polling. 25 seconds at most and no retry.
+     */
+    public JSONObject routeCheck() throws IOException, JSONException {
+        return execute(new Request.Builder().url(baseUrl + "/v1/route-check").post(RequestBody.create(new byte[0], EMPTY)),
+                inspectionHttp.newBuilder().readTimeout(25, TimeUnit.SECONDS).callTimeout(25, TimeUnit.SECONDS).build());
+    }
+
     public void requireLocalAsr() throws IOException, JSONException {
         if (!get("/v1/listening-ready").getBoolean("ready")) throw new IOException("録音の受信準備ができていません");
     }

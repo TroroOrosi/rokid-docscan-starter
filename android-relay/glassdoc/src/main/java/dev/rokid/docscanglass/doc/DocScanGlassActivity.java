@@ -599,6 +599,7 @@ public final class DocScanGlassActivity extends Activity
                 notifyPhase(choosingSession ? "chooser" : awaitingAnswers ? "analyzing" : "waiting", activeSession(), "wake");
                 scheduleDisplayIdle();
             }
+            if (choosingSession) askRoutes(); // the chooser is in view again without a gesture: a showing like any other
         } else getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         if (deviceId != null && !isFinishing() && !isDestroyed()) {
             try { startForegroundService(new Intent(this, WearService.class)); }
@@ -881,11 +882,50 @@ public final class DocScanGlassActivity extends Activity
             lines.add((index == startupSelection ? "▶ " : "　 ") + options.get(index));
         }
         lines.add("スワイプ選択・ダブルタップ開始");
-        hud.showLines(lines);
+        hud.showChoices(lines, routeLine);
+        askRoutes();
     }
 
     private static final String EXIT_OPTION = "アプリを終了";
     private boolean startupNotice;
+    /** The chooser's line on the answer routes (RouteCheck); empty until a saved server has been asked. */
+    private String routeLine = "";
+    /** This showing of the chooser has had its one question; a showing ends when the display goes off. */
+    private boolean routeAsked;
+    private boolean routeInFlight;
+
+    /**
+     * Whether answers can come, asked of the saved server once for each showing of the chooser and never while a
+     * reply is still on its way: one reading of what it keeps and, when that is missing or over thirty minutes old,
+     * one check made now (RouteCheck.ask: two bounded requests at most, on a thread of their own, so neither the
+     * state notices to the phone nor the start of a capture waits behind them).
+     *
+     * <p>The reply changes that one line and nothing else. It is not input: it does not bring a cleared display back
+     * or restart the chooser's thirty seconds, and nothing holds the processor for it. Once the chooser has been
+     * left it is dropped. Without a saved server nothing is asked and the chooser has no such line.</p>
+     */
+    private void askRoutes() {
+        if (routeAsked || routeInFlight) return;
+        routeAsked = routeInFlight = true;
+        controller.afterConfiguration(api -> main.post(() -> {
+            if (api == null || !choosingSession) { routeInFlight = false; return; }
+            showRoute(RouteCheck.ASKING);
+            Thread asking = new Thread(() -> {
+                String line = RouteCheck.ask(api, System.currentTimeMillis() / 1000);
+                main.post(() -> {
+                    routeInFlight = false;
+                    if (choosingSession) showRoute(line);
+                });
+            }, "route-check");
+            asking.setDaemon(true);
+            asking.start();
+        }));
+    }
+
+    private void showRoute(String line) {
+        routeLine = line; // kept for the next drawing of the list
+        hud.showRoute(line); // drawn only while the list is what is shown and the display is not cleared
+    }
 
     /** The idle sleep, now: what the display does by itself after five seconds on these screens. */
     private void sleepDisplayNow() {
@@ -1622,6 +1662,7 @@ public final class DocScanGlassActivity extends Activity
                     || !isCurrentPowerGeneration(generation) || isFinishing() || isDestroyed() || displayProtected()) return;
             displayIdle = null;
             idleAsleep = true;
+            routeAsked = false; // this showing of the chooser is over: the next one asks about the routes again
             // Off as the wearer sees it, whether or not the system's sleep follows: until 2026-11-13 the idle left
             // the screen drawn, so a display the phone had not put to sleep looked on while a tap only "woke" it.
             if (hud != null) hud.setBlank(true);

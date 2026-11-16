@@ -2,6 +2,8 @@ package dev.rokid.docscanglass.doc;
 
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
 import android.graphics.Bitmap;
@@ -138,7 +140,9 @@ public class HudViewTest {
         float smallestTextSize = Float.MAX_VALUE;
         float largestTextSize;
 
-        TextCanvas(Bitmap bitmap) { super(bitmap); }
+        final Bitmap bitmap;
+
+        TextCanvas(Bitmap bitmap) { super(bitmap); this.bitmap = bitmap; }
 
         private void record(CharSequence drawn, float x, float y, Paint paint) {
             text.append(drawn);
@@ -696,5 +700,136 @@ public class HudViewTest {
         TextCanvas stopped = new TextCanvas(screen); view.draw(stopped);
         assertTrue("stopping capture must hide the notice",!stopped.text.toString().contains("P1 要確認"));
         original.recycle();screen.recycle();
+    }
+
+    // --- the chooser's line on the answer routes ---------------------------------------------------------------
+
+    /** The chooser at its longest: six choices and the hint. */
+    private static final List<String> CHOOSER = List.of("▶ 通常の読取", "　 合同英語（読解＋音声）", "　 リスニング",
+            "　 中断した読取", "　 前回の答案", "　 アプリを終了", "スワイプ選択・ダブルタップ開始");
+    /** Left of this column is the list's own area (8 + 60% of 480 - 8); the routes' line starts 8 px right of it. */
+    private static final int LIST_RIGHT = 288;
+
+    /** The 480x640 panel with the 125 rows the wearer does not see kept dark below: the view is 480x515. */
+    private static HudView onThePanel() {
+        HudView view = new HudView(RuntimeEnvironment.getApplication());
+        android.widget.FrameLayout panel = new android.widget.FrameLayout(RuntimeEnvironment.getApplication());
+        panel.setPadding(0, 0, 0, DocScanGlassActivity.DEFAULT_BOTTOM_MARGIN);
+        panel.addView(view);
+        panel.measure(android.view.View.MeasureSpec.makeMeasureSpec(480, android.view.View.MeasureSpec.EXACTLY),
+                android.view.View.MeasureSpec.makeMeasureSpec(640, android.view.View.MeasureSpec.EXACTLY));
+        panel.layout(0, 0, 480, 640);
+        assertEquals(515, view.getHeight());
+        return view;
+    }
+
+    private static TextCanvas drawn(HudView view) {
+        TextCanvas canvas = new TextCanvas(Bitmap.createBitmap(view.getWidth(), view.getHeight(), Bitmap.Config.ARGB_8888));
+        view.draw(canvas);
+        return canvas;
+    }
+
+    /** {left, top, right, bottom} of what is lit in the columns from..until, the last lit column and row included; null when dark. */
+    private static int[] lit(Bitmap screen, int from, int until) {
+        int[] box = null;
+        for (int y = 0; y < screen.getHeight(); y++) for (int x = from; x < until; x++) {
+            if (screen.getPixel(x, y) == Color.BLACK) continue;
+            if (box == null) box = new int[]{x, y, x, y};
+            box[0] = Math.min(box[0], x); box[2] = Math.max(box[2], x); box[3] = y;
+        }
+        return box;
+    }
+
+    /** The rows of the list's last line: up from the lowest lit row to the dark rows between two lines. */
+    private static int[] lastRow(Bitmap screen) {
+        int bottom = lit(screen, 0, LIST_RIGHT)[3], top = bottom;
+        while (top > 0 && rowOfTheListLit(screen, top - 1)) top--;
+        return new int[]{top, bottom};
+    }
+
+    private static boolean rowOfTheListLit(Bitmap screen, int y) {
+        for (int x = 0; x < LIST_RIGHT; x++) if (screen.getPixel(x, y) != Color.BLACK) return true;
+        return false;
+    }
+
+    private static void assertTheListIsUntouched(Bitmap alone, Bitmap withLine) {
+        for (int y = 0; y < alone.getHeight(); y++) for (int x = 0; x < LIST_RIGHT + 8; x++) {
+            assertEquals("the list must not move or change at " + x + "," + y, alone.getPixel(x, y), withLine.getPixel(x, y));
+        }
+    }
+
+    @Test public void the_routes_line_lies_right_of_the_lists_last_row_and_moves_nothing_of_the_list() {
+        HudView view = onThePanel();
+        view.showLines(CHOOSER);
+        Bitmap alone = drawn(view).bitmap;
+        assertTrue("the list keeps to its own area", lit(alone, 0, 480)[2] < LIST_RIGHT);
+
+        view.showChoices(CHOOSER, "経路 ○ 使用3%");
+        TextCanvas canvas = drawn(view);
+
+        assertEquals(String.join("", CHOOSER) + "経路 ○ 使用3%", canvas.text.toString());
+        assertEquals("the line is written as large as the choices", 18f, canvas.smallestTextSize, 0f);
+        assertEquals(18f, canvas.largestTextSize, 0f);
+        assertTheListIsUntouched(alone, canvas.bitmap);
+        int[] line = lit(canvas.bitmap, LIST_RIGHT + 8, 480), hint = lastRow(alone);
+        assertNotNull("the line is drawn right of the list", line);
+        assertTrue("inside the panel's right margin: " + Arrays.toString(line), line[2] < 480 - 8);
+        assertTrue("on the rows of the list's last line " + Arrays.toString(hint) + ": " + Arrays.toString(line),
+                line[1] >= hint[0] - 2 && line[3] <= hint[1] + 2);
+    }
+
+    @Test public void a_long_routes_line_takes_the_row_above_too_and_still_moves_nothing() {
+        HudView view = onThePanel();
+        view.showLines(CHOOSER);
+        Bitmap alone = drawn(view).bitmap;
+
+        view.showChoices(CHOOSER, "経路 ? サーバーに届きません");
+        TextCanvas canvas = drawn(view);
+
+        assertEquals("every word of it is drawn", String.join("", CHOOSER) + "経路 ? サーバーに届きません", canvas.text.toString());
+        assertEquals("and none of it smaller than the choices", 18f, canvas.smallestTextSize, 0f);
+        assertTheListIsUntouched(alone, canvas.bitmap);
+        int[] line = lit(canvas.bitmap, LIST_RIGHT + 8, 480), list = lit(alone, 0, LIST_RIGHT), hint = lastRow(alone);
+        assertTrue("inside the panel's right margin: " + Arrays.toString(line), line[2] < 480 - 8);
+        assertTrue("within the list's own rows " + Arrays.toString(list) + ": " + Arrays.toString(line),
+                line[1] >= list[1] && line[3] <= hint[1] + 2);
+        assertTrue("it grows upward from the last row: " + Arrays.toString(line), line[1] < hint[0] - 2);
+    }
+
+    @Test public void the_routes_line_changes_in_place_while_the_choosers_list_is_what_is_shown() {
+        HudView view = onThePanel();
+        view.showChoices(CHOOSER, "経路 …");
+        assertEquals(String.join("", CHOOSER) + "経路 …", drawn(view).text.toString());
+
+        view.showRoute("経路 ○");
+
+        assertEquals(String.join("", CHOOSER) + "経路 ○", drawn(view).text.toString());
+    }
+
+    @Test public void a_routes_line_that_comes_after_the_chooser_was_left_is_not_drawn() {
+        HudView view = onThePanel();
+        view.showChoices(CHOOSER, "経路 …");
+        view.showLines(List.of("読取を開始", "用紙全体を入れてください", ""));
+
+        view.showRoute("経路 ○ 使用3%");
+
+        TextCanvas canvas = drawn(view);
+        assertEquals("読取を開始用紙全体を入れてください", canvas.text.toString());
+        assertNull(lit(canvas.bitmap, LIST_RIGHT, 480));
+    }
+
+    @Test public void nothing_of_the_routes_line_is_drawn_while_the_display_is_cleared() {
+        HudView view = onThePanel();
+        view.showChoices(CHOOSER, "経路 …");
+        view.setBlank(true);
+        assertNull(lit(drawn(view).bitmap, 0, 480));
+
+        view.showRoute("経路 ○ 使用3%");
+
+        TextCanvas cleared = drawn(view);
+        assertEquals("a reply behind the cleared display draws nothing", "", cleared.text.toString());
+        assertNull(lit(cleared.bitmap, 0, 480));
+        view.setBlank(false);
+        assertEquals("and is there when the display returns", String.join("", CHOOSER) + "経路 ○ 使用3%", drawn(view).text.toString());
     }
 }

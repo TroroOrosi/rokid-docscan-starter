@@ -299,6 +299,19 @@ public final class DocScanController implements AutoCloseable {
         return api;
     }
 
+    /**
+     * Hands the task the client that every configuration queued so far has left: null when no server was accepted.
+     * A configuration is applied on this controller's own thread, so {@link #api()} read right after one was asked
+     * for is still the old client. The task runs on that thread too and must give long work to another.
+     */
+    public void afterConfiguration(java.util.function.Consumer<DocScanApi> task) {
+        try {
+            serial.execute(() -> task.accept(api));
+        } catch (RejectedExecutionException ignored) {
+            // The activity is already closing.
+        }
+    }
+
     /** Optional current-run diagnostic context; legacy/restored images do not gain an invented origin. */
     /** Where the camera leaves the clip of each frame it hands over as a photo; null for a camera that takes stills. */
     public void setClipInbox(ClipInbox inbox) {

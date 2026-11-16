@@ -208,6 +208,26 @@ final class HudView extends View {
         set(newLines, null, false);
     }
 
+    /** The chooser's word on the answer routes; null while what is shown is not the chooser's list. */
+    private String route;
+
+    /**
+     * The chooser's list and, beside its last row, one line on whether answers can come (RouteCheck). The line takes
+     * the place the camera's corner has during a capture, so no row of the list moves or shrinks for it; a line too
+     * long for that width takes the row above as well.
+     */
+    void showChoices(List<String> choices, String word) {
+        set(choices, null, false);
+        route = word == null ? "" : word;
+    }
+
+    /** The word changed. It belongs to the chooser's list: once anything else has been shown it is dropped. */
+    void showRoute(String word) {
+        if (route == null) return;
+        route = word == null ? "" : word;
+        invalidate();
+    }
+
     /** Aiming keeps the live image and its frame visible throughout capture. */
     void showAiming(List<String> newLines) {
         set(newLines, null, true);
@@ -250,6 +270,7 @@ final class HudView extends View {
 
     private void set(List<String> newLines, Bitmap still, boolean showGuide) {
         lines = newLines == null ? Collections.emptyList() : new ArrayList<>(newLines);
+        route = null;
         // The review ended. Not on every view without a picture: one may come between a clip's end and its review.
         if (still == null && preview != null) clipWeak = false;
         preview = still;
@@ -347,6 +368,18 @@ final class HudView extends View {
         canvas.clipRect(CAPTURE_MARGIN, bottom - height, CAPTURE_MARGIN + width, bottom);
         canvas.translate(CAPTURE_MARGIN, bottom - layout.getHeight());
         layout.draw(canvas);
+        canvas.restore();
+        if (route == null || route.isEmpty()) return;
+        // Right of the list, standing on the same bottom row, as large as the list's own text. On these screens the
+        // camera's corner is empty, and there is no row under the list: it ends 8 px above the rows kept dark.
+        float left = CAPTURE_MARGIN + width + CAPTURE_MARGIN;
+        float right = getWidth() - CAPTURE_MARGIN;
+        if (right - left < 1f) return;
+        StaticLayout word = statusLayout(route, (int) (right - left));
+        canvas.save();
+        canvas.clipRect(left, bottom - height, right, bottom);
+        canvas.translate(left, bottom - word.getHeight());
+        word.draw(canvas);
         canvas.restore();
     }
 

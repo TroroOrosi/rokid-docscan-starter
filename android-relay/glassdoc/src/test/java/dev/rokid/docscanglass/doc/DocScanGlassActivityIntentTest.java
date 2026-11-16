@@ -983,6 +983,261 @@ public class DocScanGlassActivityIntentTest {
                 activity.getWindow().getAttributes().flags & keepOn);
     }
 
+    // --- the chooser's line on the answer routes ---------------------------------------------------------------
+
+    private static final String ROUTES_PASSED = "{\"name\":\"codex-cli\",\"ok\":true,\"code\":\"ok\",\"real\":true,\"seconds\":5.1,"
+            + "\"usage\":{\"used_percent\":3.0,\"window_minutes\":10080,\"resets_at\":1795429113}},"
+            + "{\"name\":\"chatgpt-work\",\"ok\":true,\"code\":\"ok\",\"real\":false,\"seconds\":0.2},"
+            + "{\"name\":\"chatgpt-web\",\"ok\":true,\"code\":\"ok\",\"real\":false,\"seconds\":0.3}";
+    private static final String CODEX_FAILED = "{\"name\":\"codex-cli\",\"ok\":false,\"code\":\"rate_limited\",\"real\":true,\"seconds\":4.0},"
+            + "{\"name\":\"chatgpt-work\",\"ok\":true,\"code\":\"ok\",\"real\":false,\"seconds\":0.2},"
+            + "{\"name\":\"chatgpt-web\",\"ok\":true,\"code\":\"ok\",\"real\":false,\"seconds\":0.3}";
+
+    /** A check of the routes as the server keeps it, made this many seconds ago by the clock the app reads. */
+    private static String routesChecked(long secondsAgo, String routes) {
+        return "{\"checked_at\":" + (System.currentTimeMillis() / 1000 - secondsAgo) + ",\"ok\":true,\"routes\":[" + routes + "]}";
+    }
+
+    /** What the server keeps in its settings and what a check made now finds; {@code held} keeps every reply back. */
+    private void serveRoutes(String kept, String checkedNow, java.util.concurrent.CountDownLatch held) {
+        server.setDispatcher(new Dispatcher() {
+            @Override public MockResponse dispatch(RecordedRequest request) throws InterruptedException {
+                if (held != null) held.await(10, TimeUnit.SECONDS);
+                if ("GET".equals(request.getMethod()) && "/v1/settings".equals(request.getPath())) {
+                    return new MockResponse().setBody("{\"hud\":{\"max_lines\":3},\"route_check\":" + kept + "}");
+                }
+                if ("POST".equals(request.getMethod()) && "/v1/route-check".equals(request.getPath())) {
+                    return new MockResponse().setBody(checkedNow);
+                }
+                return new MockResponse().setResponseCode(404).setBody("unexpected test request");
+            }
+        });
+    }
+
+    /** The chooser as onCreate shows it, run until the controller has handed over the client it was configured with. */
+    private void showChooser() throws Exception {
+        setField(activity, "choosingSession", true);
+        activity.onResume();
+        java.lang.reflect.Method choices = DocScanGlassActivity.class.getDeclaredMethod("showStartupChoices");
+        choices.setAccessible(true);
+        choices.invoke(activity);
+        settleChooser();
+    }
+
+    private void settleChooser() throws Exception {
+        awaitSerial();
+        Shadows.shadowOf(android.os.Looper.getMainLooper()).idle();
+    }
+
+    private void gesture(GlassesInputAction action, long at) throws Exception {
+        java.lang.reflect.Method onAction = DocScanGlassActivity.class.getDeclaredMethod("onAction", GlassesInputAction.class, long.class);
+        onAction.setAccessible(true);
+        onAction.invoke(activity, action, at);
+    }
+
+    /** The routes' line as the HUD holds it: null when what is shown is not the chooser's list. */
+    private String routesLine() {
+        return org.robolectric.util.ReflectionHelpers.getField(hud, "route");
+    }
+
+    /** Lets the reply that is on its way arrive and be handled on the main thread, without moving the clock. */
+    private void awaitRoutesReply() throws Exception {
+        for (int attempt = 0; attempt < 1000
+                && (boolean) org.robolectric.util.ReflectionHelpers.getField(activity, "routeInFlight"); attempt++) {
+            Thread.sleep(10);
+            Shadows.shadowOf(android.os.Looper.getMainLooper()).idle();
+        }
+        assertFalse("the reply was handled", (boolean) org.robolectric.util.ReflectionHelpers.getField(activity, "routeInFlight"));
+    }
+
+    @Test public void theChooserShowsTheRoutesFromOneReadingOfAFreshResult() throws Exception {
+        java.util.concurrent.CountDownLatch held = new java.util.concurrent.CountDownLatch(1);
+        serveRoutes(routesChecked(60, ROUTES_PASSED), "{}", held);
+
+        showChooser();
+
+        assertEquals("while the reply is on its way", "経路 …", routesLine());
+        held.countDown();
+        awaitRoutesReply();
+        assertEquals("経路 ○ 使用3%", routesLine());
+        RecordedRequest read = takeRequest(server);
+        assertEquals("GET", read.getMethod());
+        assertEquals("/v1/settings", read.getPath());
+        assertEquals("Bearer original-test-key", read.getHeader("Authorization"));
+        gesture(GlassesInputAction.SWIPE_FORWARD, 1_000L); // the marker moves and the list is drawn again: the same showing
+        settleChooser();
+        assertEquals("the line stays with the list", "経路 ○ 使用3%", routesLine());
+        assertEquals("a fresh result is read once and nothing is checked", 1, server.getRequestCount());
+    }
+
+    @Test public void aResultOverThirtyMinutesOldMakesExactlyOneCheckNow() throws Exception {
+        serveRoutes(routesChecked(31 * 60, ROUTES_PASSED), routesChecked(0, CODEX_FAILED), null);
+
+        showChooser();
+        awaitRoutesReply();
+
+        assertEquals("what the check made now found", "経路 △ (Codex×)", routesLine());
+        assertEquals("/v1/settings", takeRequest(server).getPath());
+        RecordedRequest check = takeRequest(server);
+        assertEquals("POST", check.getMethod());
+        assertEquals("/v1/route-check", check.getPath());
+        assertEquals("Bearer original-test-key", check.getHeader("Authorization"));
+        gesture(GlassesInputAction.SWIPE_FORWARD, 1_000L);
+        gesture(GlassesInputAction.SWIPE_BACK, 2_000L);
+        settleChooser();
+        assertEquals("one reading and one check for this showing, however the list is redrawn", 2, server.getRequestCount());
+    }
+
+    @Test public void aServerThatKeepsNoResultMakesExactlyOneCheckNow() throws Exception {
+        serveRoutes("null", routesChecked(0, ROUTES_PASSED), null);
+
+        showChooser();
+        awaitRoutesReply();
+
+        assertEquals("経路 ○ 使用3%", routesLine());
+        assertEquals("GET", takeRequest(server).getMethod());
+        assertEquals("POST", takeRequest(server).getMethod());
+        assertEquals(2, server.getRequestCount());
+    }
+
+    @Test public void aServerThatCannotBeReachedIsSaidInTheFixedWords() throws Exception {
+        server.shutdown();
+
+        showChooser();
+        awaitRoutesReply();
+
+        assertEquals("経路 ? サーバーに届きません", routesLine());
+    }
+
+    @Test public void eachShowingOfTheChooserAsksOnceAndNeverWhileAReplyIsOnItsWay() throws Exception {
+        java.util.concurrent.CountDownLatch held = new java.util.concurrent.CountDownLatch(1);
+        serveRoutes(routesChecked(60, ROUTES_PASSED), "{}", held);
+        showChooser();
+        takeRequest(server);                               // the reading has reached the server and is held back there
+        gesture(GlassesInputAction.SHORT_TAP, 1_000L);     // the display is cleared: this showing is over
+        gesture(GlassesInputAction.SWIPE_FORWARD, 2_000L); // and brought back while the first reply is still on its way
+        settleChooser();
+        assertFalse(hud.isBlank());
+        assertEquals("the returning list says a reply is still awaited", "経路 …", routesLine());
+
+        held.countDown();
+        awaitRoutesReply();
+        assertEquals("経路 ○ 使用3%", routesLine());
+        gesture(GlassesInputAction.SWIPE_FORWARD, 3_000L);
+        settleChooser();
+        assertEquals("no second question while one was on its way, nor for a redrawn list", 1, server.getRequestCount());
+
+        gesture(GlassesInputAction.SHORT_TAP, 4_000L);
+        gesture(GlassesInputAction.SWIPE_FORWARD, 5_000L); // the next showing
+        settleChooser();
+        awaitRoutesReply();
+        assertEquals("the chooser shown again reads the result again, once", 2, server.getRequestCount());
+        assertEquals("経路 ○ 使用3%", routesLine());
+    }
+
+    /** A touch on the sleeping display never reaches the app: it is only resumed, and that is a showing too. */
+    @Test public void aChooserTheSystemWokeWithoutAGestureAsksAgain() throws Exception {
+        serveRoutes(routesChecked(60, ROUTES_PASSED), "{}", null);
+        showChooser();
+        awaitRoutesReply();
+        Shadows.shadowOf(android.os.Looper.getMainLooper()).idleFor(java.time.Duration.ofSeconds(30));
+        assertTrue("thirty seconds without input", hud.isBlank());
+        serveRoutes(routesChecked(60, CODEX_FAILED), "{}", null);
+
+        activity.onResume();
+        settleChooser();
+        awaitRoutesReply();
+
+        assertFalse(hud.isBlank());
+        assertEquals("what the server keeps now, not what was shown before the sleep", "経路 △ (Codex×)", routesLine());
+        assertEquals(2, server.getRequestCount());
+    }
+
+    @Test public void aReplyAfterTheChooserWasLeftForACaptureChangesNothing() throws Exception {
+        controller.close();
+        controller = new DocScanController(activity, new Surface(true), null, updates,
+                new ClientIdentity("test-glasses", "intent-test/1", "fake-camera"));
+        setField(activity, "controller", controller);
+        controller.configureForLocalStart(server.url("/").toString(), "", 180);
+        Shadows.shadowOf(activity.getApplication()).grantPermissions(android.Manifest.permission.CAMERA);
+        java.util.concurrent.CountDownLatch held = new java.util.concurrent.CountDownLatch(1);
+        serveRoutes(routesChecked(60, ROUTES_PASSED), "{}", held);
+        showChooser();
+        assertEquals("経路 …", routesLine());
+
+        gesture(GlassesInputAction.BACK, 1_000L); // the double tap starts the ordinary reading
+        settleChooser();
+        assertFalse((boolean) org.robolectric.util.ReflectionHelpers.getField(activity, "choosingSession"));
+        assertEquals("a page is about to be taken", RelayState.AIMING, controller.getState());
+        int flags = activity.getWindow().getAttributes().flags;
+        PowerState.Snapshot power = PowerState.forContext(activity).load();
+        held.countDown();
+        awaitRoutesReply();
+
+        // This test's capture surface draws nothing, so the HUD still holds the chooser's list and would take a line.
+        assertEquals("the late reply is dropped", "経路 …", routesLine());
+        assertEquals(RelayState.AIMING, controller.getState());
+        assertEquals(flags, activity.getWindow().getAttributes().flags);
+        assertEquals(power.sequence, PowerState.forContext(activity).load().sequence);
+        assertEquals("capturing", PowerState.forContext(activity).load().phase);
+        assertEquals("and nothing more was asked of the server", 1, server.getRequestCount());
+    }
+
+    @Test public void aReplyBehindAClearedDisplayLeavesItCleared() throws Exception {
+        java.util.concurrent.CountDownLatch held = new java.util.concurrent.CountDownLatch(1);
+        serveRoutes(routesChecked(60, ROUTES_PASSED), "{}", held);
+        showChooser();
+        takeRequest(server); // the reading is on its way when the wearer clears the display
+        gesture(GlassesInputAction.SHORT_TAP, 1_000L);
+        assertTrue("the tap clears the display", hud.isBlank());
+        int keepOn = android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON;
+        assertEquals(0, activity.getWindow().getAttributes().flags & keepOn);
+        long sequence = PowerState.forContext(activity).load().sequence;
+
+        held.countDown();
+        awaitRoutesReply();
+
+        assertTrue("nothing is drawn when the reply arrives", hud.isBlank());
+        assertTrue((boolean) org.robolectric.util.ReflectionHelpers.getField(activity, "idleAsleep"));
+        assertEquals("the display is not held on again", 0, activity.getWindow().getAttributes().flags & keepOn);
+        assertEquals("sleep", PowerState.forContext(activity).load().display);
+        assertEquals("and the phone is asked for nothing new", sequence, PowerState.forContext(activity).load().sequence);
+    }
+
+    @Test public void aReplyDoesNotRestartTheChoosersThirtySeconds() throws Exception {
+        java.util.concurrent.CountDownLatch held = new java.util.concurrent.CountDownLatch(1);
+        serveRoutes(routesChecked(60, ROUTES_PASSED), "{}", held);
+        int keepOn = android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON;
+        showChooser();
+        Shadows.shadowOf(android.os.Looper.getMainLooper()).idleFor(java.time.Duration.ofMillis(29_999));
+        assertTrue((activity.getWindow().getAttributes().flags & keepOn) != 0);
+
+        held.countDown();
+        awaitRoutesReply();
+        assertEquals("the reply came in the last millisecond and is shown", "経路 ○ 使用3%", routesLine());
+
+        Shadows.shadowOf(android.os.Looper.getMainLooper()).idleFor(java.time.Duration.ofMillis(1));
+        assertEquals("a reply is not input: the thirty seconds end when they would have", 0,
+                activity.getWindow().getAttributes().flags & keepOn);
+        assertTrue(hud.isBlank());
+    }
+
+    @Test public void withoutASavedServerNothingIsAskedAndNoLineIsShown() throws Exception {
+        controller.close();
+        controller = new DocScanController(activity, new Surface(true), null, updates,
+                new ClientIdentity("test-glasses", "intent-test/1", "fake-camera"));
+        setField(activity, "controller", controller);
+        assertNull("no connection was configured", controller.api());
+
+        showChooser();
+        Thread.sleep(200);
+        Shadows.shadowOf(android.os.Looper.getMainLooper()).idle();
+
+        assertEquals("the chooser is the list alone", "", routesLine());
+        assertEquals(0, server.getRequestCount());
+        assertFalse((boolean) org.robolectric.util.ReflectionHelpers.getField(activity, "routeInFlight"));
+    }
+
     @Test public void staleWakeCannotCreateAChooserAfterTheProcessWasStopped() throws Exception {
         activity.getPreferences(Context.MODE_PRIVATE).edit().putLong("power_generation", 3)
                 .putLong("power_session", 7).putString("power_phase", "writing_done").commit();
