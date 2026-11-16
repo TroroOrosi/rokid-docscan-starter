@@ -297,7 +297,13 @@ from __future__ import annotations
 #         loading that address leads to the home page.
 # 0.80.3: a Codex CLI run that hangs gives the booklet to the next route in minutes, by the booklet's size
 #         (it was held 3600 s, longer than a 50-minute test).
-APP_VERSION = "0.80.3"
+# 0.81.0: what an answer holds. The answer sheet is not among the images, so the form is judged from the question:
+#         a mark, choice, boxed number or word alone where that is what is filled in, otherwise the result and then
+#         the working needed for full credit. A drawing is redrawn with the printed figure's reference points and
+#         said in words; one that cannot be represented keeps its written part instead of becoming needs_input.
+#         A ready item whose figure cannot be drawn, or that carries a field outside the format, keeps its text
+#         and is shown for review (it was stored as failed and empty). See API 1.48.0.
+APP_VERSION = "0.81.0"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.
@@ -432,7 +438,10 @@ APP_VERSION = "0.80.3"
 #         page's clip and GET /v1/documents/{id}/clips lists them; document finalization waits up to
 #         ROKID_GATHER_WAIT_S for the clips; answer-bundle ends with one needs_review item for each recorded page whose
 #         clip was not gathered.
-API_VERSION = "1.47.0"
+# 1.48.0: an answer-bundle item is needs_review with the issue 図の形式を表示できません when a figure of a ready answer
+# could not be drawn, and 形式外の内容は表示していません when the reply carried content outside the answer format;
+# the item keeps its answer text in both cases.
+API_VERSION = "1.48.0"
 
 # Matching algorithm identity. Bump when thresholds or hashing change so a
 # re-index/eval is triggered. Mirrors thresholds in app/matching.py.

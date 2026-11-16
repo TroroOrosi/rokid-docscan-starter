@@ -378,7 +378,7 @@ again one of the restless ones. The route asks the wearer to hold still for
 some seconds a page and does not tell them so (register 2-25). A tap did not
 clear the display: it only books a pause for after the page in hand, which is
 up to 13 s on this route, and the taps that followed were taken as the double
-tap that ends the capture (register 1-16, unfixed). I had asked the wearer not
+tap that ends the capture (register 1-16; fixed in glassdoc 0.44.2 and checked on the desk, §M-35; not worn). I had asked the wearer not
 to touch the touchpad: the worn check had left out how the thing is used.
 What it rests on, measured on the desk and the PC on 2026-11-15 (§M-25):
 the 2016x1512 stream is the whole field at half size and the only whole-field
@@ -614,8 +614,8 @@ what is being tried.
   venue's light above and §M-30). Stills are the default until a worn page has
   been read (worn once, §M-31). On that route a double tap during a recording ends that clip at
   once and what it has is the page (on the glasses: 36 frames, the capture ended
-  with that one double tap); a tap lets the clip finish, saves the page, then
-  pauses, as with a still. Pages turned to during a recording or its review are
+  with that one double tap); a tap ends the clip at once, what it has is the page, and that page waits unsaved for the return (0.44.2; until then
+  the tap let the clip finish and saved the page before pausing). Pages turned to during a recording or its review are
   not kept. The booklet is finalized only when no page and no clip is unsent: a
   page saved while clips were on their way was once left out (found by review,
   not by the desk checks).
@@ -640,10 +640,14 @@ what is being tried.
   clear a resolved observation. A forward swipe retakes, no input commits, BACK ends
   capture after the last review. Hidden or stale views cannot commit. A waiting
   forward swipe first waits for the native stop barrier and promotes any saved
-  candidate before requesting a manual shot. A tap pauses: the photo in hand is
-  saved first, then the camera closes and nothing is drawn until the next tap;
-  the same page is not taken again on return (on the glasses, 2026-11-12,
-  `docs/hardware-measurements.md` §M-4). One photo remains in flight at most. This
+  candidate before requesting a manual shot. A tap pauses at once (glassdoc 0.44.2): the display clears in the turn of the tap and the camera stops. A still
+  already asked for lands first and a clip being recorded ends there; either page is held unsaved, and on the next tap
+  it gets its own fresh three-second review and is then saved. Behind a cleared display a double tap only brings the
+  display back; it ends the capture only while the capture is showing. The same page is not taken again on return, and
+  a page whose clip had no frame yet is looked for again. Until 0.44.1 the tap only booked the pause for after the
+  page in hand, up to 13 s away on the clip route: worn on 2026-11-16 the display stayed on and the follow-up taps
+  ended the capture (register 1-16). Checked on the glasses lying on a desk (§M-35): the still route's 38 lines, five
+  pauses on the clip route at different moments, the whole use in order. Not worn yet. One photo remains in flight at most. This
   does not establish whole-booklet coverage or physical readability. See
   `docs/multimodal-scan.md`.
 - The standalone app keeps the previous listening-only flow and adds mixed
