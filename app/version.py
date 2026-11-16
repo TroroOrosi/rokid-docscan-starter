@@ -324,6 +324,8 @@ from __future__ import annotations
 #         undrawn one is ^(...) or _(...). A failed browser route leaves the structure of its page (counts of
 #         controls, no text); the check before use can send one small real message through Chat as a
 #         booklet's goes; a Codex model the service no longer offers is named model_mismatch. See API 1.50.0.
+#         The Chat route waits for its model control as it waits for the composer: on a slowly loading page
+#         the control came later and a booklet handed over from the CLI stopped there (phone, 2026-11-16).
 APP_VERSION = "0.84.0"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
