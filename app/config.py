@@ -111,6 +111,10 @@ ROKID_EXPLAINER = os.environ.get("ROKID_EXPLAINER", "local")
 #                                     2026-11-10). A Chat booklet needing more
 #                                     than what is left is refused before any
 #                                     attachment. 0 disables the check
+#   ROKID_CHATGPT_UPLOAD_ROUNDS       default 2: how often one set of files is
+#                                     uploaded inside that window with no message
+#                                     sent; the next upload of it does not start
+#                                     and the booklet ends. 0 disables the check
 #   ROKID_CHATGPT_RETRY_S             default 5, multiplied by the attempt
 #   ROKID_CHATGPT_TIMEOUT_S           default 9000 (the session; never an analysis budget)
 #   ROKID_CHATGPT_REPLY_START_S       default 120 (no reply turn at all = failed send)

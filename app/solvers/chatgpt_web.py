@@ -199,6 +199,9 @@ TRANSFER_BATCH_BYTES = 96 * 1024 * 1024
 # recorded here; uploads made elsewhere on the account are not visible to it.
 UPLOADS_FILE = "uploads.json"
 UPLOAD_WINDOW_S = 3 * 3600
+# How often one set of files is uploaded inside the window with no message sent; 0 disables the check. A try that
+# fails before its send has already uploaded, and the server tries five times (ChatGptWebUploadRepeated).
+UPLOAD_ROUNDS = int(os.environ.get("ROKID_CHATGPT_UPLOAD_ROUNDS", "2"))
 ATTEMPTS = int(os.environ.get("ROKID_CHATGPT_ATTEMPTS", "3"))
 RETRY_BACKOFF_S = float(os.environ.get("ROKID_CHATGPT_RETRY_S", "5"))
 # A throttled account is refused in the message body, not by an exception, so a
@@ -264,25 +267,53 @@ class ChatGptWebUploadBudget(ChatGptWebError):
         self.files, self.room = files, room
 
 
+class ChatGptWebUploadRepeated(ChatGptWebUploadBudget):
+    """These files went up UPLOAD_ROUNDS times inside the window and no message left with them. Nothing was sent.
+
+    Phone, 2026-11-16 23:32: the check right before the send refused five times, 150 s apart, and every try had
+    opened a chat and uploaded the booklet's 14 files first. 70 of the window's 80 were spent on a booklet that
+    was never sent, and the booklets after it had no room. Final like its parent: the next try would upload again.
+    """
+
+    def __init__(self, files: int, room: int):
+        ChatGptWebError.__init__(
+            self, f"{files} files were uploaded {UPLOAD_ROUNDS} times without a send; not uploaded again, nothing sent")
+        self.files, self.room = files, room
+
+
 def upload_window_files() -> int:
     """Files accepted per UPLOAD_WINDOW_S; 0 disables the pre-send check."""
     return int(os.environ.get("ROKID_CHATGPT_UPLOAD_WINDOW_FILES") or 80)
 
 
 def _recent_uploads(directory: Path) -> list[list]:
-    """[epoch seconds, files] inside the window. An unreadable record counts as none:
-    no PC is at the venue to repair it, and the plan still refuses a real excess."""
+    """[epoch seconds, files] or [epoch seconds, files, tag] inside the window. An entry written before uploads
+    were tagged, or for an upload without a chat key, has no tag (_upload_tag). An unreadable record counts as
+    none: no PC is at the venue to repair it, and the plan still refuses a real excess."""
     try:
         entries = json.loads((directory / UPLOADS_FILE).read_text(encoding="utf-8"))["uploads"]
         oldest = time.time() - UPLOAD_WINDOW_S
-        return [[float(stamp), int(count)] for stamp, count in entries if float(stamp) > oldest]
-    except (OSError, ValueError, TypeError, KeyError):
+        return [[float(entry[0]), int(entry[1]), *(str(tag) for tag in entry[2:3])]
+                for entry in entries if float(entry[0]) > oldest]
+    except (OSError, ValueError, TypeError, KeyError, IndexError):
         return []
 
 
-def _record_uploads(directory: Path, count: int) -> None:
+def _upload_tag(chat_key: str | None, batch: dict | None, digests: list[str]) -> str | None:
+    """Which files, for which message of which chat: what an upload is counted by against UPLOAD_ROUNDS.
+
+    A booklet's batches share a chat key and each has its own files; the batch's id keeps two batches apart even
+    when their files' bytes are the same. Without a chat key every call is a chat of its own and a sent message
+    does not keep its files from the next call, so there is nothing to count by.
+    """
+    if not chat_key:
+        return None
+    return _digest(json.dumps([chat_key, batch["id"] if batch else None, sorted(digests)]).encode())[:16]
+
+
+def _record_uploads(directory: Path, count: int, tag: str | None = None) -> None:
     """Count files when their upload starts, so an unconfirmed one is counted too."""
-    record = {"uploads": [*_recent_uploads(directory), [time.time(), count]]}
+    record = {"uploads": [*_recent_uploads(directory), [time.time(), count, *([tag] if tag else [])]]}
     try:
         fd, temporary = tempfile.mkstemp(prefix="uploads-", suffix=".tmp", dir=directory)
         try:
@@ -365,6 +396,7 @@ FAILURE_CODES = (
     (ChatGptWebAuthenticationRequired, "authentication_failed"),
     (ChatGptWebBrowserUnavailable, "browser_unavailable"),
     (ChatGptWebAttachmentFailed, "attachment_failed"),
+    (ChatGptWebUploadRepeated, "upload_repeated"),
     (ChatGptWebUploadBudget, "upload_budget"),
     (ChatGptWebModelMismatch, "model_mismatch"),
     (ChatGptWebUncertain, "browser_outcome_unknown"),
@@ -1859,7 +1891,7 @@ class ChatGptWebClient:
             # a booklet refused halfway has spent the window and still has no answer.
             done = set(self._transfer["pages"])
             needed = sum(name not in done for name in upload_names())
-            room = max(0, limit - sum(count for _, count in _recent_uploads(guard.directory)))
+            room = max(0, limit - sum(entry[1] for entry in _recent_uploads(guard.directory)))
             if needed > room:
                 raise ChatGptWebUploadBudget(needed, room)
         source = iter(files() if callable(files) else files or [])
@@ -2184,9 +2216,19 @@ class ChatGptWebClient:
                 pending_audio = (
                     audio if audio and _digest(audio[1]) not in self._attached_in_chat else None
                 )
-                starting = len(pending) + bool(pending_audio) + len(pending_files)
-                if starting:
-                    _record_uploads(guard.directory, starting)
+                digests = [_digest(p) for p in pending]
+                digests += [_digest(f["buffer"]) for f in pending_files]
+                if pending_audio:
+                    digests.append(_digest(pending_audio[1]))
+                if digests:
+                    # Every try that fails before its send has uploaded first, and the server tries five times
+                    # (phone, 2026-11-16: 70 of the window's 80 files went on one booklet that was never sent).
+                    tag = _upload_tag(chat_key, batch, digests)
+                    recent = _recent_uploads(guard.directory)
+                    if tag and 0 < UPLOAD_ROUNDS <= sum(entry[2:] == [tag] for entry in recent):
+                        raise ChatGptWebUploadRepeated(
+                            len(digests), max(0, upload_window_files() - sum(entry[1] for entry in recent)))
+                    _record_uploads(guard.directory, len(digests), tag)
                 attached = (
                     self._attach_images(
                         page, pending, audio=pending_audio, poll_s=POLL_S,
@@ -2242,7 +2284,8 @@ class ChatGptWebClient:
                         "send outcome unknown; retained for inspection, no automatic resend"
                     ) from exc
                 last_error = exc
-                if isinstance(exc, (ChatGptWebAuthenticationRequired, ChatGptWebModelMismatch, ChatGptWebBlocked)):
+                if isinstance(exc, (ChatGptWebAuthenticationRequired, ChatGptWebModelMismatch, ChatGptWebBlocked,
+                                    ChatGptWebUploadRepeated)):
                     raise
                 if isinstance(exc, CdpError):
                     raise ChatGptWebBrowserUnavailable("local Chromium CDP disconnected; nothing sent") from exc
@@ -2255,10 +2298,6 @@ class ChatGptWebClient:
                     ) from exc
             else:
                 # Answered, so the chat exists and holds what this message carried.
-                digests = [_digest(p) for p in pending]
-                digests += [_digest(f["buffer"]) for f in pending_files]
-                if pending_audio:
-                    digests.append(_digest(pending_audio[1]))
                 booklet = ([_digest(f["buffer"]) for f in current_files]
                            if callable(files) and current_files else None)
                 self._keep_chat(guard, chat_key, _url_of(page), digests, booklet=booklet)

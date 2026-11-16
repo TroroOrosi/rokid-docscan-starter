@@ -592,6 +592,7 @@ uvicorn app.main:app --port 8000
 | `ROKID_CHATGPT_CHECK_REPLY_S` | `600` | 上の確認が返答を待つ秒数（未計測の仮の値） |
 | `ROKID_SOLVER_FALLBACKS` | `chatgpt-work`・`codex-cli` のとき `chatgpt-web` | 冊子1通の経路が利用制限または送信前の失敗で使えないときに引き継ぐ経路の順（カンマ区切り）。空文字で無効。録音の段は画像を持つ会話から動かしません |
 | `ROKID_CHATGPT_UPLOAD_WINDOW_FILES` | `80` | Chat経路の冊子が3時間に添付できるファイル数（help.openai.com の有料プランの値、2026-11-10確認。混雑時は減り、失敗した添付も数えられる場合があります）。残りを超える冊子は添付前に止めます。`0`で検査を無効化 |
+| `ROKID_CHATGPT_UPLOAD_ROUNDS` | `2` | 同じ会話の同じファイルの組を、送信できないまま3時間の枠の中でアップロードする回数の上限（`chatgpt-web` / `chatgpt-work`）。送信前の失敗は添付の後に起きるため、再試行のたびに枠が減ります（2026-11-16、14枚の冊子1件が5回の再試行で80枚中70枚を使い、何も送れなかった）。上限に達した組はアップロードせずに止め、再試行も経路の切替もせず、グラスへ「同じ添付を2回アップロードしましたが送信できませんでした。これ以上はアップロードしません」を出します。1回の試行の中の添付のやり直し（`ROKID_CHATGPT_ATTEMPTS`、既定3）も数えます。`0`で検査を無効化 |
 | `ROKID_CHATGPT_CDP` | `http://127.0.0.1:9222` | `chatgpt-web` / `chatgpt-work` が接続する Chromium のDevToolsポート。Termux起動ではloopbackへ固定 |
 | `ROKID_WORK_MODEL` / `ROKID_WORK_EFFORT` / `ROKID_WORK_SPEED` | `gpt-6.1-sol` / `high` / `fast` | 通常の新規答案は本番Fast。試験・検証では `ROKID_WORK_SPEED=standard` を明示。保存済みjob・追加音声の設定は引き継ぎ、送信前の公開UIと照合。専用の品質検査はStandard |
 | `ROKID_WORK_MODEL_POLICY` | `follow-family` | 新規ブラウザjobで同系統・基準版以上の最高版へ追従。`exact` で指定版固定。既存job・追加音声の保存設定は引継ぐ |

@@ -94,7 +94,8 @@ from .solvers.chatgpt_web import (
     ChatGptWebChatLost, ChatGptWebError, ChatGptWebModelMismatch, ChatGptWebRateLimit,
     ChatGptWebUploadBudget,
     ChatGptWebReplyIncomplete,
-    ChatGptWebSendNotAuthorized, ChatGptWebUncertain, FAILURE_CODES, chatgpt_send_enabled, recent_failures,
+    ChatGptWebSendNotAuthorized, ChatGptWebUncertain, FAILURE_CODES, UPLOAD_ROUNDS, chatgpt_send_enabled,
+    recent_failures,
 )
 from .solvers.registry import has_booklet_route, solve_with_fallback
 from .solvers.chatgpt_work import WorkBrowserUncertain, work_binding
@@ -3162,6 +3163,10 @@ _GAVE_UP_ISSUES = {
     "browser_busy": "ブラウザが使用中のままです。送信していません",
     "browser_blocked": "前の送信の結果確認待ちです。確認後に読取完了をやり直してください",
 }
+# Final at once, like the upload window's refusal whose class it shares (ChatGptWebUploadRepeated): the next try
+# would upload the same files again. Its own sentence, because the window's counts say nothing true about it.
+_UPLOAD_REPEATED_ISSUE = (f"同じ添付を{UPLOAD_ROUNDS}回アップロードしましたが送信できませんでした。"
+                          "これ以上はアップロードしません")
 # Batches a session may fail without sending before it stops resuming. Each
 # batch is PRESEND_TRIES tries, so three are at least half an hour.
 RESUME_LIMIT = 3
@@ -3460,6 +3465,7 @@ def _answer_bundle_item(conn, group: dict, row) -> dict:
                  else "ChatGPTの利用制限です。解除後に再開してください" if code == "rate_limited"
                  else (f"添付{(failure or inherited).get('files')}枚が3時間の利用枠の残り"
                        f"{(failure or inherited).get('room')}枚を超えます。送信していません") if code == "upload_budget"
+                 else _UPLOAD_REPEATED_ISSUE if code == "upload_repeated"
                  else _RETRYING_ISSUES[code] if retrying
                  else _GAVE_UP_ISSUES[code] if code in _GAVE_UP_ISSUES
                  else "この解答番号の答えが返答にありません" if code == "answer_missing"

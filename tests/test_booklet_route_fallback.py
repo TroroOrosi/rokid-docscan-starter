@@ -125,14 +125,33 @@ def test_a_booklet_over_the_upload_window_fails_once_and_shows_its_numbers(clien
     assert calls == {"primary": 1, "backup": 1}
 
 
-def test_an_upload_window_refusal_on_the_primary_does_not_move_the_same_files_elsewhere(client, monkeypatch):
-    from app.solvers.chatgpt_web import ChatGptWebUploadBudget
+@pytest.mark.parametrize("kind, numbers", [("ChatGptWebUploadBudget", (44, 0)), ("ChatGptWebUploadRepeated", (14, 52))])
+def test_an_upload_window_refusal_on_the_primary_does_not_move_the_same_files_elsewhere(client, monkeypatch, kind,
+                                                                                         numbers):
+    from app.solvers import chatgpt_web
 
     _, session_id = _session_with(client, ["問1 2+2を求めよ。"])
-    calls = _routes(monkeypatch, lambda n: _raise(ChatGptWebUploadBudget(44, 0)),
+    calls = _routes(monkeypatch, lambda n: _raise(getattr(chatgpt_web, kind)(*numbers)),
                     lambda n: pytest.fail("the next browser route shares the account's window"))
     _background_finalize_and_wait(client, session_id, lambda items: items[0]["status"] == "failed")
     assert calls == {"primary": 1, "backup": 0}
+
+
+def test_a_booklet_that_cannot_be_sent_stops_at_its_third_upload_and_says_so(client, monkeypatch):
+    """Phone, 2026-11-16 23:32 to 2026-11-17 00:06: on the last route the check before the send refused five
+    times, 150 s apart, and each try had uploaded the booklet's 14 files first: 70 of the window's 80, nothing sent.
+    The route now refuses the third upload, and the server stops there instead of trying a fourth and a fifth time."""
+    from app.solvers.chatgpt_web import ChatGptWebModelMismatch, ChatGptWebRateLimit, ChatGptWebUploadRepeated
+
+    _, session_id = _session_with(client, ["問1 2+2を求めよ。"])
+    calls = _routes(monkeypatch, lambda n: _raise(ChatGptWebRateLimit("usage limit")),
+                    lambda n: _raise(ChatGptWebModelMismatch("model selection menu is not usable; nothing sent")
+                                     if n < 3 else ChatGptWebUploadRepeated(14, 52)))
+    issue = "同じ添付を2回アップロードしましたが送信できませんでした。これ以上はアップロードしません"
+    bundle = _background_finalize_and_wait(client, session_id, lambda items: items[0]["status"] == "failed")
+    assert bundle["items"][0]["issue"] == issue
+    client.get(f"/v1/exam-sessions/{session_id}/answer-bundle")  # A later poll starts nothing.
+    assert calls == {"primary": 1, "backup": 3}
 
 
 def test_an_unknown_send_outcome_never_moves_to_another_route(client, monkeypatch):

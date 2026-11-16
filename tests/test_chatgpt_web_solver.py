@@ -1676,6 +1676,13 @@ def _fast(monkeypatch):
         monkeypatch.setattr(chatgpt_web, name, value)
 
 
+def _one_attempt_a_try(monkeypatch):
+    """A try whose attachment is not confirmed has uploaded once, so the files may go up once more afterwards.
+    With the three attempts a try has by default, the third is refused and so is every later try inside the
+    window (UPLOAD_ROUNDS; test_an_attachment_never_confirmed_is_not_written_a_third_time_within_one_try)."""
+    monkeypatch.setattr(chatgpt_web, "ATTEMPTS", 1)
+
+
 def _subject_chat(monkeypatch, page, key="subject:数学"):
     """Ask once under ``key`` so a chat exists; return the client and its URL."""
     _fast(monkeypatch)
@@ -2031,9 +2038,24 @@ def _counted_booklet(client, page, files, key="session:batch"):
                                     booklet=True, upload_names=lambda: [f["name"] for f in files])
 
 
-def _uploaded(tmp_path):
+def _upload_entries(tmp_path):
+    """The record as written: [seconds, files], or [seconds, files, tag] for an upload under a chat key."""
     path = tmp_path / "browser-state" / "uploads.json"
-    return sum(count for _, count in json.loads(path.read_text(encoding="utf-8"))["uploads"]) if path.exists() else 0
+    return json.loads(path.read_text(encoding="utf-8"))["uploads"] if path.exists() else []
+
+
+def _uploaded(tmp_path):
+    return sum(entry[1] for entry in _upload_entries(tmp_path))
+
+
+def _upload_tags(tmp_path):
+    return [entry[2] if len(entry) > 2 else None for entry in _upload_entries(tmp_path)]
+
+
+def _age_uploads(tmp_path):
+    """Every recorded upload becomes older than the window."""
+    aged = [[entry[0] - chatgpt_web.UPLOAD_WINDOW_S - 1, *entry[1:]] for entry in _upload_entries(tmp_path)]
+    (tmp_path / "browser-state" / "uploads.json").write_text(json.dumps({"uploads": aged}), encoding="utf-8")
 
 
 def test_a_booklet_over_the_upload_window_stops_before_anything_is_attached(monkeypatch, tmp_path):
@@ -2070,16 +2092,14 @@ def test_files_attached_in_the_last_three_hours_count_against_the_next_booklet(m
         _counted_booklet(chatgpt_web.ChatGptWebClient(), page, second, key="session:2")
     assert (refused.value.files, refused.value.room) == (34, 33) and not page.uploads
     # Entries older than the window no longer count.
-    ledger = tmp_path / "browser-state" / "uploads.json"
-    aged = [[stamp - chatgpt_web.UPLOAD_WINDOW_S - 1, count]
-            for stamp, count in json.loads(ledger.read_text(encoding="utf-8"))["uploads"]]
-    ledger.write_text(json.dumps({"uploads": aged}), encoding="utf-8")
+    _age_uploads(tmp_path)
     assert json.loads(_counted_booklet(chatgpt_web.ChatGptWebClient(), page, second, key="session:2"))["questions"]
     assert _uploaded(tmp_path) == 34
 
 
 def test_a_resumed_booklet_needs_room_only_for_the_files_not_yet_acknowledged(monkeypatch, tmp_path):
     _fast(monkeypatch)
+    _one_attempt_a_try(monkeypatch)
     monkeypatch.setenv("ROKID_CHATGPT_UPLOAD_WINDOW_FILES", "1000")
     files = _batch_files()
     page = _BatchPage(thumbnail_appears=[True] + [False] * 10)
@@ -2117,6 +2137,115 @@ def test_an_unreadable_upload_ledger_counts_as_empty(monkeypatch, tmp_path):
     (tmp_path / "browser-state" / "uploads.json").write_text("{not json", encoding="utf-8")
     assert json.loads(_counted_booklet(chatgpt_web.ChatGptWebClient(), _BatchPage(), _batch_files(3)))["questions"]
     assert _uploaded(tmp_path) == 3
+
+
+class _SendRefused(chatgpt_web.ChatGptWebClient):
+    """Phone, 2026-11-16 23:32: the model position was verified, the files went into the composer, and the check
+    right before the send refused. Which check refuses does not matter here: the files are up and nothing is sent."""
+
+    def _send_and_read(self, page, text, **kwargs):
+        raise chatgpt_web.ChatGptWebModelMismatch("model selection menu is not usable; nothing sent")
+
+
+def test_files_that_were_never_sent_are_uploaded_twice_and_not_a_third_time(monkeypatch, tmp_path):
+    """Phone, 2026-11-16 23:32 to 2026-11-17 00:06: five tries of one 14-page booklet each opened a chat and uploaded
+    all 14 files before the send was refused. 70 of the window's 80 files were spent and nothing had been sent."""
+    _fast(monkeypatch)
+    page, files = _BatchPage(), _batch_files(14)
+    for _ in range(2):
+        with pytest.raises(chatgpt_web.ChatGptWebModelMismatch):
+            _counted_booklet(_SendRefused(), page, files)
+    assert [len(payload) for payload in page.uploads] == [14, 14] and _uploaded(tmp_path) == 28
+    for _ in range(3):  # the server's third, fourth and fifth try, each of them a new process for all it knows
+        with pytest.raises(chatgpt_web.ChatGptWebUploadRepeated) as refused:
+            _counted_booklet(_SendRefused(), page, files)
+    assert len(page.uploads) == len(page.upload_selectors) == 2, "the file input is not written a third time"
+    assert _uploaded(tmp_path) == 28 and not _sends(page) and _guard_state(tmp_path) == "idle"
+    # Final where the window's refusal is final (main.py keys on the class), under a code and a sentence of its own.
+    assert isinstance(refused.value, chatgpt_web.ChatGptWebUploadBudget)
+    assert (refused.value.files, refused.value.room) == (14, 52)
+    assert chatgpt_web.failure_code(refused.value) == "upload_repeated"
+    # The window's own expiry is the only thing that ends it.
+    _age_uploads(tmp_path)
+    with pytest.raises(chatgpt_web.ChatGptWebModelMismatch):
+        _counted_booklet(_SendRefused(), page, files)
+    assert len(page.uploads) == 3
+
+
+def test_an_attachment_never_confirmed_is_not_written_a_third_time_within_one_try(monkeypatch, tmp_path):
+    """One try attaches up to ATTEMPTS (3) times; the third is the same files going up a third time."""
+    _fast(monkeypatch)
+    page = _BatchPage(thumbnail_appears=False)
+    with pytest.raises(chatgpt_web.ChatGptWebUploadRepeated):
+        _counted_booklet(chatgpt_web.ChatGptWebClient(), page, _batch_files(14))
+    assert [len(payload) for payload in page.uploads] == [14, 14]
+    assert _uploaded(tmp_path) == 28 and not _sends(page)
+
+
+def test_the_number_of_unsent_uploads_can_be_changed_or_the_check_disabled(monkeypatch, tmp_path):
+    _fast(monkeypatch)
+    page, files = _BatchPage(), _batch_files(3)
+    monkeypatch.setattr(chatgpt_web, "UPLOAD_ROUNDS", 1)
+    with pytest.raises(chatgpt_web.ChatGptWebModelMismatch):
+        _counted_booklet(_SendRefused(), page, files)
+    with pytest.raises(chatgpt_web.ChatGptWebUploadRepeated):
+        _counted_booklet(_SendRefused(), page, files)
+    monkeypatch.setattr(chatgpt_web, "UPLOAD_ROUNDS", 0)
+    for _ in range(3):
+        with pytest.raises(chatgpt_web.ChatGptWebModelMismatch):
+            _counted_booklet(_SendRefused(), page, files)
+    assert _uploaded(tmp_path) == 12
+
+
+@pytest.mark.parametrize("same_bytes", [False, True])
+def test_each_batch_of_a_long_booklet_keeps_its_own_count_of_uploads(monkeypatch, tmp_path, same_bytes):
+    """A booklet of more than 20 files goes up in several messages under one chat key. One upload each is allowed
+    here: a tag the batches shared would refuse the second batch. Not even pages with the same bytes share one."""
+    _fast(monkeypatch)
+    monkeypatch.setattr(chatgpt_web, "UPLOAD_ROUNDS", 1)
+    files = _batch_files(47)
+    if same_bytes:
+        files = [{**entry, "buffer": JPEG} for entry in files]
+    page = _BatchPage()
+    assert json.loads(_counted_booklet(chatgpt_web.ChatGptWebClient(), page, files))["questions"]
+    assert [len(payload) for payload in page.uploads] == [20, 20, 7]
+    tags = _upload_tags(tmp_path)
+    assert len(set(tags)) == 3 and all(re.fullmatch(r"[0-9a-f]{16}", tag or "") for tag in tags)
+    assert [entry[1] for entry in _upload_entries(tmp_path)] == [20, 20, 7]
+
+
+def test_a_record_written_before_uploads_were_tagged_is_still_read_and_summed(monkeypatch, tmp_path):
+    """The phone's record holds [seconds, files] entries today; the ones written from now on carry a tag."""
+    _fast(monkeypatch)
+    ledger = tmp_path / "browser-state" / "uploads.json"
+    ledger.parent.mkdir(exist_ok=True)
+    now = time.time()
+    for entries in ([[now, 30], [now, 40]], [[now, 30], [now, 40, "0123456789abcdef"]]):
+        ledger.write_text(json.dumps({"uploads": entries}), encoding="utf-8")
+        page = _BatchPage()
+        with pytest.raises(chatgpt_web.ChatGptWebUploadBudget) as refused:
+            _counted_booklet(chatgpt_web.ChatGptWebClient(), page, _batch_files(11))
+        assert type(refused.value) is chatgpt_web.ChatGptWebUploadBudget
+        assert (refused.value.files, refused.value.room) == (11, 10) and not page.uploads
+    # A new entry is written behind the old ones, which keep their shape.
+    assert json.loads(_counted_booklet(chatgpt_web.ChatGptWebClient(), page, _batch_files(10)))["questions"]
+    assert _uploaded(tmp_path) == 80
+    assert _upload_tags(tmp_path)[:2] == [None, "0123456789abcdef"] and _upload_tags(tmp_path)[2] not in (
+        None, "0123456789abcdef")
+
+
+def test_other_files_under_the_same_chat_key_are_not_refused_after_a_sent_message(monkeypatch, tmp_path):
+    """Mixed English: the recording follows the answered pages under the session's one chat key. One upload each is
+    allowed here, so an upload counted by its chat key alone would refuse the recording."""
+    _fast(monkeypatch)
+    monkeypatch.setattr(chatgpt_web, "UPLOAD_ROUNDS", 1)
+    page = _MixedBatchPage()
+    assert json.loads(_mixed_booklet(chatgpt_web.ChatGptWebClient(), page, _batch_files(3), "reading"))["questions"]
+    audio = [chatgpt_web.audio_payload("original.wav", b"RIFF captured original")]
+    assert json.loads(_mixed_booklet(chatgpt_web.ChatGptWebClient(), page, audio, "listening"))["questions"]
+    assert [len(payload) for payload in page.uploads] == [3, 1]
+    pages_tag, audio_tag = _upload_tags(tmp_path)
+    assert pages_tag and audio_tag and pages_tag != audio_tag
 
 
 def test_the_chat_solver_names_every_attachment_before_sending(tmp_path):
@@ -2195,6 +2324,7 @@ def test_changed_source_binding_stops_before_durable_send_and_is_not_retried(mon
 
 def test_restarting_after_attachment_failure_skips_acknowledged_pages(monkeypatch, tmp_path):
     _fast(monkeypatch)
+    _one_attempt_a_try(monkeypatch)
     files = _batch_files()
     page = _BatchPage(thumbnail_appears=[True] + [False] * 10)
     with pytest.raises(chatgpt_web.ChatGptWebAttachmentFailed):
@@ -2643,6 +2773,7 @@ def test_a_cdp_disconnect_returning_to_an_acknowledged_chat_is_retryable(monkeyp
     from app.solvers.cdp import CdpError
 
     _fast(monkeypatch)
+    _one_attempt_a_try(monkeypatch)
     page = _BatchPage(thumbnail_appears=[True] + [False] * 10)
     files = _batch_files()
     with pytest.raises(chatgpt_web.ChatGptWebAttachmentFailed):
