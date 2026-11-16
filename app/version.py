@@ -326,7 +326,11 @@ from __future__ import annotations
 #         booklet's goes; a Codex model the service no longer offers is named model_mismatch. See API 1.50.0.
 #         The Chat route waits for its model control as it waits for the composer: on a slowly loading page
 #         the control came later and a booklet handed over from the CLI stopped there (phone, 2026-11-16).
-APP_VERSION = "0.84.0"
+# 0.84.1: two reads of a mark sheet whose answer boxes are lettered are compared box by box (forty pages on the
+#         phone had every item of both reads shown and marked). A set of files that was uploaded twice without
+#         a message being sent is not uploaded a third time: one booklet that could not be sent had used 70 of
+#         the 80 files of the upload window in five retries (phone, 2026-11-16).
+APP_VERSION = "0.84.1"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.
