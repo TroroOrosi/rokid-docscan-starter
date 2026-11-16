@@ -234,7 +234,7 @@ public class ClipCameraTest {
         for (int i = 0; i < count; i++) {
             idle(33);
             long stamp = SystemClock.elapsedRealtimeNanos();
-            if (turning > 0) {
+            if (turning >= 0) { // a gyroscope reports a head that does not turn too; under 0: no reading reaches the app
                 SensorEvent event = ShadowSensorManager.createSensorEvent(3);
                 event.timestamp = stamp + 1_000_000; event.values[0] = turning;
                 sensors.sendSensorEventToListeners(event);
@@ -537,12 +537,41 @@ public class ClipCameraTest {
         watchingAgain();
         JSONArray frames = record(pages.get(0).provenance.captureId).getJSONArray("frames");
         assertEquals(76, frames.length());
-        assertEquals("frames whose exposure the gyroscope covered: the two clocks are one", 70,
+        assertEquals("frames whose exposure the gyroscope covered: the two clocks are one", 76,
                 record(pages.get(0).provenance.captureId).getInt("gyro_frames"));
         for (int i = 0; i < 76; i++) {
             double smear = frames.getJSONObject(i).getDouble("smear_px");
             if (i >= 6 && i < 16) assertEquals(5.7, smear, 0.01); else assertTrue(smear <= 2);
             assertEquals((long) stamps.get(i), frames.getJSONObject(i).getLong("t_ns"));
+        }
+        // What the head did is kept whole, not only its fastest reading a frame: worn for the first time (M-31) the
+        // clips came back with a smear a frame and nothing to work out the head's turn from.
+        JSONObject gyro = record(pages.get(0).provenance.captureId).getJSONObject("gyro");
+        assertEquals(76, gyro.getJSONArray("t_ns").length());
+        assertEquals(76, gyro.getJSONArray("x").length());
+        assertEquals(76, gyro.getJSONArray("y").length());
+        assertEquals(76, gyro.getJSONArray("z").length());
+        assertEquals(stamps.get(7) + 1_000_000, gyro.getJSONArray("t_ns").getLong(7));
+        assertEquals(0.1, gyro.getJSONArray("x").getDouble(7), 0.00001);
+        assertEquals(0.0, gyro.getJSONArray("y").getDouble(7), 0.0);
+    }
+
+    @Test public void a_frame_the_gyroscope_said_nothing_about_is_not_taken_for_still() throws Exception {
+        // Worn for the first time (M-31): eight of a clip's 296 frames had no reading of the gyroscope during their
+        // exposure. They were written as 0 px of smear, counted, and offered to the phone as its stillest frames.
+        watching(); recording();
+        clipFrames(6, 0);
+        clipFrames(8, -1);
+        clipFrames(59, 0); idle(0);
+        assertEquals("the eight did not count", 0, encoder.ends);
+        clipFrames(1, 0); idle(0);
+        assertEquals(1, encoder.ends); assertEquals(74, encoder.offers);
+        watchingAgain();
+        JSONObject record = record(pages.get(0).provenance.captureId);
+        assertEquals(66, record.getInt("gyro_frames"));
+        for (int i = 0; i < 74; i++) {
+            double smear = record.getJSONArray("frames").getJSONObject(i).getDouble("smear_px");
+            if (i >= 6 && i < 14) assertEquals("over any limit the phone applies", 999.0, smear, 0.0); else assertEquals(0.0, smear, 0.0);
         }
     }
 
@@ -636,13 +665,14 @@ public class ClipCameraTest {
         assertEquals(0, record.getInt("dropped"));
         assertEquals(6, record.getInt("settle"));
         assertEquals(30, record.getInt("frame_rate"));
-        assertEquals("no gyroscope reading came in this test", 0, record.getInt("gyro_frames"));
+        assertEquals("every frame had a reading of the gyroscope", 66, record.getInt("gyro_frames"));
+        assertEquals("and for each the readings ended before its exposure did: how often that is, is counted", 66, record.getInt("gyro_partial"));
 
         // The desk check reads this line: frames in the clip, counted, refused by the encoder, the clip's size, the
         // wait for the first frame and for the watch preview's return, the gain applied.
         List<org.robolectric.shadows.ShadowLog.LogItem> lines = org.robolectric.shadows.ShadowLog.getLogsForTag("DocScanGlassDoc");
         String line = lines.get(lines.size() - 1).msg;
-        assertTrue(line, line.matches("clip frames=66 counted=60 dropped=0 bytes=8 first_ms=\\d+ back_ms=\\d+ boost=500 exposure_ms=30 gyro=0"));
+        assertTrue(line, line.matches("clip frames=66 counted=60 dropped=0 bytes=8 first_ms=\\d+ back_ms=\\d+ boost=500 exposure_ms=30 gyro=66"));
     }
 
     @Test public void a_second_request_during_a_clip_starts_nothing() {

@@ -17,8 +17,9 @@ its hotspot, its load and its browser are not in the loop.
 where a page is a short recording that the server gathers into the page's image (the server needs numpy and ffmpeg).
 With `clip` every page's recording is checked (frames, none dropped, gain, the wait for its first frame, the
 gyroscope's clock), then that each clip reached the server and became its page's image. --long-above N (hundredths of
-gain, saved by the test app on every start, 705 by default) moves the light below which a clip takes 60 ms instead of
-30: a desk is too bright for the long exposure, and 300 makes the app take it there.
+gain, saved by the test app on every start) lets a clip take 60 ms instead of 30 where 30 ms would need more gain
+than N: 705 is the light a page was read at, and 300 makes the app take 60 ms on a desk, which is too bright for it
+otherwise. 0, the default, never takes it: on a worn head hardly a frame was still at 60 ms (M-31).
 
 --glasses is any adb transport of the glasses. Without a cable it is the one scripts/glasses_over_phone.py prints
 (this PC -> the phone on the home network -> the glasses on the phone's hotspot); `adb reverse` works over it too.
@@ -556,8 +557,8 @@ def main() -> int:
     parser.add_argument("--photos", type=int, default=3)
     parser.add_argument("--capture", choices=["still", "clip"], default="still",
                         help="how a page is taken; saved by the test app on every start")
-    parser.add_argument("--long-above", type=int, default=705,
-                        help="with --capture clip: the gain in hundredths that 30 ms may need before 60 ms is taken")
+    parser.add_argument("--long-above", type=int, default=0,
+                        help="with --capture clip: the gain in hundredths that 30 ms may need before 60 ms is taken; 0: never")
     parser.add_argument("--interrupt", choices=["wait"], help="force-stop the app (what a fold does) at this point and reopen the chooser")
     parser.add_argument("--paper", type=int, default=0, help="seconds of worn reading to record; the capture is not ended")
     parser.add_argument("--worn-wait", type=int, default=240, help="with --paper: seconds to wait for the wear sensor; 0 records at once (a desk dry run)")

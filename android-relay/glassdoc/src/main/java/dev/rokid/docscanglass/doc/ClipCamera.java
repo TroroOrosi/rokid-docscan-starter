@@ -119,6 +119,12 @@ final class ClipCamera implements PageCamera {
     /** At the long exposure: 15 frames a second, and the brightness moves for about twelve frames (M-30). */
     static final int LONG_FPS = 15, LONG_SETTLE_FRAMES = 15;
     static final float MAX_SMEAR_PIXELS = 2f;
+    /**
+     * Written for a frame during whose exposure no reading of the gyroscope reached the app: not known to be still,
+     * so never counted, and over any limit the phone applies. Until 2026-11-16 such a frame was written as 0 px,
+     * the stillest of all: eight of a worn clip's 296 frames (M-31).
+     */
+    static final float UNKNOWN_SMEAR = 999f;
     static final long MIN_MILLIS = 1_000, MAX_MILLIS = 10_000, IDLE_TIMEOUT_MILLIS = 1_500, LIGHT_TIMEOUT_MILLIS = 5_000;
     /** How long a clip waits for an exposure that has been measured but has not settled yet. */
     static final long SETTLE_WAIT_MILLIS = 1_500;
@@ -129,6 +135,7 @@ final class ClipCamera implements PageCamera {
      */
     static final int MAX_CAMERA_FAILURES = 3;
     private static final int MAX_FRAMES = (int) (MAX_MILLIS / 1000) * FPS + FPS;
+    private static final int MAX_READINGS = 4096;
     private static final String TAG = "DocScanGlassDoc";
     /** What the session's repeating request is for. */
     private static final int OFF = 0, WATCH = 1, CLIP = 2;
@@ -141,11 +148,16 @@ final class ClipCamera implements PageCamera {
         int phase = WAITING;
         File file;
         boolean opened;
-        int boost, previewIso, previewBoost, fps = FPS, settle = SETTLE_FRAMES, gyroFrames;
+        int boost, previewIso, previewBoost, fps = FPS, settle = SETTLE_FRAMES, gyroFrames, gyroPartial;
         long previewExposure, exposure;
         // While recording: the frames' thread, under the lock.
         final long[] stamps = new long[MAX_FRAMES];
         final float[] smears = new float[MAX_FRAMES];
+        // The gyroscope's readings while it is recorded, written beside the clip: its time and the turn about its
+        // three axes (rad/s). About 2200 in the longest clip.
+        final long[] turnedAt = new long[MAX_READINGS];
+        final float[] turned = new float[3 * MAX_READINGS];
+        int readings;
         int frames, counted, dropped;
         long firstAt, shownAt, firstMillis = -1, pageStamp;
         TotalCaptureResult pageResult;
@@ -170,6 +182,14 @@ final class ClipCamera implements PageCamera {
             if (event.values.length < 3) return;
             float x = event.values[0], y = event.values[1], z = event.values[2];
             turning.add(event.timestamp, (float) Math.sqrt(x * x + y * y + z * z));
+            synchronized (lock) { // the frames' thread, under the lock, as the frames themselves
+                Clip into = recording;
+                if (into != null && into.readings < MAX_READINGS) {
+                    int at = into.readings++;
+                    into.turnedAt[at] = event.timestamp;
+                    into.turned[3 * at] = x; into.turned[3 * at + 1] = y; into.turned[3 * at + 2] = z;
+                }
+            }
         }
 
         @Override public void onAccuracyChanged(Sensor sensor, int accuracy) { }
@@ -662,8 +682,12 @@ final class ClipCamera implements PageCamera {
                 int index = into.frames++;
                 // How far the fastest turn of the head during this exposure carried the picture, in sensor pixels.
                 HeadMotion.Span span = turning.between(stamp, stamp + into.exposure);
-                float smear = span == null ? 0f : span.blurPixels(into.exposure);
-                if (span != null) into.gyroFrames++;
+                // Glasses without a gyroscope cannot tell: every frame counts there, as before.
+                float smear = span != null ? span.blurPixels(into.exposure) : gyroscope == null ? 0f : UNKNOWN_SMEAR;
+                if (span != null) {
+                    into.gyroFrames++;
+                    if (!span.covered) into.gyroPartial++; // readings to come may still be faster: counted to learn how often
+                }
                 into.stamps[index] = stamp;
                 into.smears[index] = smear;
                 if (index >= into.settle && smear <= MAX_SMEAR_PIXELS) {
@@ -778,13 +802,20 @@ final class ClipCamera implements PageCamera {
         for (int i = 0; i < ended.frames; i++) {
             each.put(new JSONObject().put("t_ns", ended.stamps[i]).put("smear_px", Math.round(ended.smears[i] * 100f) / 100.0));
         }
+        JSONArray turnedAt = new JSONArray();
+        JSONArray[] turned = {new JSONArray(), new JSONArray(), new JSONArray()};
+        for (int i = 0; i < ended.readings; i++) {
+            turnedAt.put(ended.turnedAt[i]);
+            for (int axis = 0; axis < 3; axis++) turned[axis].put(Math.round(ended.turned[3 * i + axis] * 10000f) / 10000.0);
+        }
         JSONObject record = new JSONObject().put("schema", 1).put("capture_id", provenance.captureId)
                 .put("width", WIDTH).put("height", HEIGHT).put("rotation_degrees", options.rotationDegrees)
                 .put("exposure_ns", ended.exposure).put("sensitivity_iso", ISO).put("boost", ended.boost)
-                .put("frame_rate", ended.fps).put("gyro_frames", ended.gyroFrames)
+                .put("frame_rate", ended.fps).put("gyro_frames", ended.gyroFrames).put("gyro_partial", ended.gyroPartial)
                 .put("preview", new JSONObject().put("exposure_ns", ended.previewExposure)
                         .put("sensitivity_iso", ended.previewIso).put("boost", ended.previewBoost))
-                .put("frames", each).put("dropped", ended.dropped).put("settle", ended.settle);
+                .put("frames", each).put("dropped", ended.dropped).put("settle", ended.settle)
+                .put("gyro", new JSONObject().put("t_ns", turnedAt).put("x", turned[0]).put("y", turned[1]).put("z", turned[2]));
         inbox.offer(provenance.captureId, record.toString().getBytes(StandardCharsets.UTF_8));
         return new GlassCamera.Captured(jpeg, WIDTH, HEIGHT, SystemClock.elapsedRealtime() - ended.askedAt, provenance);
     }

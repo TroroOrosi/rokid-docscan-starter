@@ -278,7 +278,10 @@ from __future__ import annotations
 #         on, with the other answer, as one to review (ROKID_CODEX_READS, default 2).
 # 0.77.0: a recorded page: its clip is kept beside it and gathered on the phone into the page's image; the booklet
 #         waits for its clips (bounded) and the answers name each recorded page that stayed one frame. See API 1.47.0.
-APP_VERSION = "0.77.0"
+# 0.78.0: a clip from a worn head is gathered: the picture is followed from frame to frame, and a frame that lies
+#         away from the first is laid on the page by a map of its own (a homography) instead of one shift. A clip
+#         from glasses that lie still gathers to the same page as before, bit for bit.
+APP_VERSION = "0.78.0"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.
@@ -586,7 +589,11 @@ EXPLAINER_API_VERSION = "1.1.0"
 # too little of the window (provisional); a double tap during the recording ends that clip at once and what it has
 # is the page, a tap lets it finish and then pauses. The lower margin is 125 px until one is saved. Stills are
 # unchanged and stay the default.
-GLASSES_VIEW_CONTRACT_VERSION = "1.49.0"
+# 1.50.0: a clip's frame during whose exposure no gyroscope reading arrived is not counted as still (it was
+# written as 0 px of smear; now 999, with the number of frames whose readings ended early as gyro_partial); a
+# clip's record keeps the gyroscope's readings taken while it was recorded (gyro: t_ns, x, y, z); a clip takes the
+# long exposure only once a gain was saved with long_above (0 turns it off again).
+GLASSES_VIEW_CONTRACT_VERSION = "1.50.0"
 
 # Answer-area overlay payload (box + short answer; 2D image-anchored).
 # 1.1.0: added tracking metadata (tracking/fixed_ar/anchor_hint).

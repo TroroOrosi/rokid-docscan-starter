@@ -83,7 +83,7 @@ public final class DocScanGlassActivity extends Activity
     private static final String EXTRA_FAR_SHARE = "far_share";
     /**
      * Saved from {@code --ei long_above}: the gain, in hundredths, that a 30 ms clip may need before ClipCamera takes
-     * 60 ms instead (705 until one is saved). Set from one desk measurement; movable once worn pages are read.
+     * 60 ms instead. Until one is saved, and after {@code --ei long_above 0}, no clip takes 60 ms: see longExposure.
      */
     private static final String EXTRA_LONG_ABOVE = "long_above";
     /** Diagnostic override for this launch only; normal launches always capture automatically. */
@@ -413,6 +413,7 @@ public final class DocScanGlassActivity extends Activity
             ClipCamera.Options options = new ClipCamera.Options();
             options.rotationDegrees = MEASURED_ROTATION_DEGREES;
             options.farShare = getPreferences(MODE_PRIVATE).getFloat(EXTRA_FAR_SHARE, options.farShare);
+            options.longExposureNanos = longExposure(getPreferences(MODE_PRIVATE), options.longExposureNanos);
             options.longAboveBoost = getPreferences(MODE_PRIVATE).getInt(EXTRA_LONG_ABOVE, options.longAboveBoost);
             clipCamera = new ClipCamera(this, new Handler(cameraThread.getLooper()), cameraCallback(), clipInbox,
                     new ClipEncoder.Hardware(), options);
@@ -428,6 +429,15 @@ public final class DocScanGlassActivity extends Activity
         Log.i(TAG, "capture=" + (clips ? "clip" : "still"));
     }
 
+    /**
+     * The long exposure a clip may take in a dark scene: none until a gain was saved with {@code --ei long_above}.
+     * On a worn head 6 and 1 of some 133 frames were still enough at 60 ms, where four in ten were at 30 ms (M-31):
+     * the long exposure read a dark page well only from glasses lying still (M-30).
+     */
+    static long longExposure(android.content.SharedPreferences saved, long whenSaved) {
+        return saved.contains(EXTRA_LONG_ABOVE) ? whenSaved : 0;
+    }
+
     private void applyIntent(Intent intent, boolean starting) {
         if (intent != null && intent.hasExtra(EXTRA_CAPTURE)) {
             getPreferences(MODE_PRIVATE).edit().putString(EXTRA_CAPTURE,
@@ -440,8 +450,12 @@ public final class DocScanGlassActivity extends Activity
             }
         }
         if (intent != null && intent.getExtras() != null && intent.getExtras().get(EXTRA_LONG_ABOVE) instanceof Integer) {
-            getPreferences(MODE_PRIVATE).edit().putInt(EXTRA_LONG_ABOVE,
-                    Math.max(ClipCamera.MIN_BOOST, intent.getIntExtra(EXTRA_LONG_ABOVE, 705))).apply();
+            int above = intent.getIntExtra(EXTRA_LONG_ABOVE, 0);
+            if (above <= 0) {
+                getPreferences(MODE_PRIVATE).edit().remove(EXTRA_LONG_ABOVE).apply();
+            } else {
+                getPreferences(MODE_PRIVATE).edit().putInt(EXTRA_LONG_ABOVE, Math.max(ClipCamera.MIN_BOOST, above)).apply();
+            }
         }
         if (intent != null && intent.hasExtra(EXTRA_SPREAD)) {
             boolean spread = intent.getBooleanExtra(EXTRA_SPREAD, false);
