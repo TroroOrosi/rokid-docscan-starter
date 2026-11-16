@@ -1,6 +1,6 @@
 # rokid-docscan-starter development guide
 
-Status: Current engineering contract. Updated 2026-11-17 01:00 (§M-40: the answers' display, the clip bar and the chooser's route line are on the glasses and a scenario suite ran through the phone's product route, all on a desk; dark pages took the model several times longer than its time allows, which is unmeasured on real gathered pages; nothing of this has been worn, and no worn page has been read against a known text).
+Status: Current engineering contract. Updated 2026-11-17 05:00 (§M-41, §M-42: the whole use ran once on the venue topology, worn, and every answer came back unreadable; the cause is the distance: the pages, and the desk bench every gathered page was measured on, stood 27-32 cm from a fixed-focus camera that is sharp from 40 cm; which distance reads best is not measured, and no worn page has been read correctly).
 
 **Start at `.agents/progress/current.md`.** It lists the operator's decisions,
 the verified state and the next steps. Do not re-ask what it settles. Then read
@@ -258,7 +258,7 @@ added). At that size the paper's own pixels read 3.2% without an encoder and
 limit of 2.0 and not a pass), 6.0% at 0.51 bit; and reducing also averaged the
 noise, so those 60 frames stand for about 150 real ones (7 s of recording). The
 farther the paper, the worse and the slower: the wearer needs a guide to
-distance and the recording 0.66 bit a pixel a frame or more. **The operator
+distance and the recording 0.66 bit a pixel a frame or more. (Wrong for a real page further away: the frames that were reduced had been taken at 27-32 cm and carried that distance's defocus with them; §M-42 and the paragraph on the camera's focus below.) **The operator
 approved the change of form on 2026-11-15 (night): record only the line-of-sight
 frame, in the sensor's own pixels, cut by the app out of the full-size stream,
 with a guide to distance; the whole field at half size and the camera's video
@@ -389,6 +389,27 @@ clear the display: it only books a pause for after the page in hand, which is
 up to 13 s on this route, and the taps that followed were taken as the double
 tap that ends the capture (register 1-16; fixed in glassdoc 0.44.2 and checked on the desk, §M-35; not worn). I had asked the wearer not
 to touch the touchpad: the worn check had left out how the thing is used. **From glassdoc 0.44.3 to 0.44.5 (§M-40; on a desk, not worn):** while a clip is recorded a bar on the top edge of the small window fills as still frames count and stands still while the head moves (seen filling in screen captures); a clip that ends with fewer than 40 of its 60 frames keeps that bar over its page's review (the rule was right on all 17 worn clips offline; a desk cannot show it); the "paper too far" mark is off unless `--ef far_share` is saved, and no distance mark is built: a frame's character pitch can be measured (16 strips, 100% of 698 frames within 10%), but a 20 px limit would be on for 58% of the wearer's time and a 16 px limit never, and no record says where reading fails. On the still route, in the dark, a step of the preview's own exposure (60 ms watching, 30 ms preparing a photo) was counted as a page turn and an unmoving scene was photographed again and again; the reference is now brought to the frame's exposure first (register 2-29; 38 of 38 on the dark desk).
+
+**The camera does not focus where the pages were held (2026-11-17, §M-41, §M-42).** The third worn pass (the real app,
+the phone's server, the real model) ran the whole use for the first time: ten pages, eight of them with all 60 still
+frames, answers on the glasses five minutes after the capture ended; and every answer said it could not be read. The
+camera's own description (`dumpsys media.camera`, read whole on the PC): fixed focus, 1.9 mm, f/2.25, hyperfocal
+distance 0.80 m, pixels of 1.0 um (1900 px a radian). It is sharp from 0.40 m; nearer, the blur disc is 1.7 px across
+at 0.43 m, 3.4 at 0.30 m and 3.9 at 0.27 m. That night's pages and the desk bench on which every gathered page had been
+read (lines 48 px apart, characters of 24-26 px) both stood 27-32 cm away; the wearer's photos of September that were
+read (characters of 15.8 px) were taken from 43-50 cm, the spread in the middle of the field, seen from almost straight
+above. Worn, one page filled the recorded frame and was seen at a slant (characters 79-85% as tall as wide): its middle
+reads like the desk page, its near, far and left parts are blurred. The same part of the same print, twelve reads each:
+the desk page 4.8% of characters wrong, the worn page 63.7%, with not one character marked unreadable (other plausible
+text; two reads of it lie 17.8% apart, so they err alike and their comparison does not show it; register 3-27).
+Flattening the page's light and taking the blur back did not help (53-71%) and made the desk page worse (8.3%): not
+adopted. Ruled out by measurement: the laying (six free numbers a frame at full size gave the same page), warmth (board
+31 to 52 C: no more blur), the camera's processing in the dark, frames blended in the camera (neighbours' fine noise is
+not shared), smear under 2 px. The measure of §M-41's analysis counts the sensor's fixed pattern as detail in a clip
+that does not move, so its desk figures are 10-30% too high and "the desk 0.27 against worn 0.15" overstates the gap.
+Not known: which distance reads best (beyond 40 cm the focus holds and a character is about 16 px; the September
+photos were bright stills), and why the far part of a worn page is blurred too. The next worn step is that one
+question: the same page at three sizes in the window, read against the known text.
 What it rests on, measured on the desk and the PC on 2026-11-15 (§M-25):
 the 2016x1512 stream is the whole field at half size and the only whole-field
 size at 60 frames a second; streaming it heats the glasses by 17.7 C in 150 s
@@ -1031,7 +1052,10 @@ records; each was learned from a failure the operator found.
    hand do not change because of it.
 2. Characterise before building: the glasses' own camera for exposure and
    processing, the recorded head motion (`scripts/head_motion_report.py`) for
-   stillness, the project's records for what is already known.
+   stillness, the project's records for what is already known. The camera's own
+   description comes first (`dumpsys media.camera`, saved whole on the PC: focal
+   length, aperture, hyperfocal distance, pixel size): the desk bench stood inside
+   the lens's blur for two days because it was not read (§M-42).
 3. After every change to the glasses app, on the desk: compile the installed
    package; `glasses_device_check.py`; gestures through the touchpad's input device,
    every cycle three times; `system_observation.py` before and after a change
@@ -1042,7 +1066,9 @@ records; each was learned from a failure the operator found.
    in about eighty clips (§M-30). A change to how a booklet is answered is run through
    `scripts/scenario_suite.py` (synthetic photos, the phone's product route, the real model) for paper other than a
    plain spread; its photos are flat and still, so it stands for no worn page.
-4. Say what the desk cannot show. Glasses on a desk look across the room and
+4. Put the desk bench where the use is: the distance and the angle a wearer has
+   (September's photos: 43-50 cm, from above), not where the print looks large.
+   Say what the desk cannot show. Glasses on a desk look across the room and
    do not move; on 2026-11-14 that view was about thirty times darker than the
    page a wearer photographed on 9/22. Look at what the camera sees (a photo
    with the glasses' own camera) before reading a desk number as a condition
