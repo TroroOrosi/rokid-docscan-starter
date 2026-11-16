@@ -337,6 +337,35 @@ def test_current_ui_reads_the_menu_when_its_trigger_rerenders():
     assert [value for kind, value in page.events if kind == "press"] == ["Escape"]
 
 
+def test_a_model_control_that_renders_after_the_composer_is_waited_for():
+    """Phone, 2026-11-16 23:59, read from the live page while a booklet was being retried: on a page that took
+    15 s to load the composer was there 0.8 s before the model control (composer 1 and no trigger, then the
+    trigger). The route read the control once, at once, and gave the booklet up as "menu is not usable"."""
+    class LateTriggerPage(_CurrentUiPage):
+        looks = 0
+
+        def evaluate(self, expression):
+            state = super().evaluate(expression)
+            if "menuitemradio" in expression and not self.opened:
+                self.looks += 1
+                if self.looks <= 3:  # not rendered yet
+                    state.update(trigger_count=0, expanded=None, enabled=False, can_click=False, x=0, y=0)
+            return state
+
+    page = LateTriggerPage()
+    assert chatgpt_web.verify_selected_model(page) == "Latest"
+    assert page.looks > 3 and page.opened is False
+    assert [value["type"] for kind, value in page.events if kind == "mouse"] == ["mousePressed", "mouseReleased"]
+
+
+def test_a_model_control_that_never_becomes_usable_still_stops_the_send(monkeypatch):
+    monkeypatch.setattr(chatgpt_web, "READY_TIMEOUT_S", 0.3)
+    page = _CurrentUiPage(enabled=False)
+    with pytest.raises(chatgpt_web.ChatGptWebModelMismatch, match="not usable"):
+        chatgpt_web.verify_selected_model(page)
+    assert not any(kind == "mouse" for kind, _ in page.events)
+
+
 @pytest.mark.parametrize("model,effort", [("GPT-7 Reasoning", "Extra High"), ("Aurora Pro", "Maximum")])
 def test_renamed_saved_selection_survives_a_stale_model_setting(monkeypatch, model, effort):
     monkeypatch.setenv("ROKID_CHATGPT_MODEL", "GPT-6 Pro")
@@ -556,7 +585,8 @@ def test_current_ui_unreadable_unchecked_or_low_effort_never_submits(radios, eff
 
 
 @pytest.mark.parametrize("enabled,hit", [(False, True), (True, False)])
-def test_current_ui_never_opens_a_disabled_or_obscured_effort_trigger(enabled, hit):
+def test_current_ui_never_opens_a_disabled_or_obscured_effort_trigger(monkeypatch, enabled, hit):
+    monkeypatch.setattr(chatgpt_web, "READY_TIMEOUT_S", 0.2)  # the control is waited for; here it never comes
     page = _CurrentUiPage(enabled=enabled, hit=hit)
     with pytest.raises(chatgpt_web.ChatGptWebModelMismatch):
         _ask(page, expect=("answer",))

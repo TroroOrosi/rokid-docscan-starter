@@ -980,6 +980,15 @@ def _power_label(page) -> str:
 def _selected_model_in_effort_menu(page, *, select: bool = False) -> dict:
     """Select the first visible model position; close only a popup we opened."""
     state = page.evaluate(_MODEL_MENU_STATE_JS)
+    # The model control is waited for as the composer is. On a page that took 15 s to load it came 0.8 s after the
+    # composer (phone, 2026-11-16 23:59, read while a booklet was retried); read once, at once, it was "not usable"
+    # and a booklet handed over from the CLI stopped there after every retry.
+    deadline = time.monotonic() + READY_TIMEOUT_S
+    while (isinstance(state, dict) and state.get("menu_count") == 0
+           and (state.get("enabled") is not True or state.get("can_click") is not True)
+           and time.monotonic() < deadline):
+        time.sleep(0.1)
+        state = page.evaluate(_MODEL_MENU_STATE_JS)
     opened = False
     try:
         for selection_attempt in range(2):
