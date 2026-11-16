@@ -295,7 +295,9 @@ from __future__ import annotations
 # 0.80.2: the address the page shows right after a send (/c/local-chatgpt%3A<id>) is not recorded as the chat's.
 #         After the restart that brought 0.80.1 the answered booklet of 2026-11-16 could not be read back:
 #         loading that address leads to the home page.
-APP_VERSION = "0.80.2"
+# 0.80.3: a Codex CLI run that hangs gives the booklet to the next route in minutes, by the booklet's size
+#         (it was held 3600 s, longer than a 50-minute test).
+APP_VERSION = "0.80.3"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.
