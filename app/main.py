@@ -3257,13 +3257,18 @@ def run_route_check(*, deep: bool = False) -> dict:
     with _route_check_lock:
         routes = []
         for name in _booklet_routes():
-            started, code, solver, deeper = time.monotonic(), "ok", None, None
+            started, code, solver, deeper, used = time.monotonic(), "ok", None, None, {}
             try:
                 if name not in solver_registry:
                     raise LookupError("no such route")
                 solver = solver_registry.get(name)
                 deeper = getattr(solver, "check_deep", None) if deep else None
-                (deeper or solver.check)()
+                told = (deeper or solver.check)()
+                # How much of its allowance a route has used, where its check can tell: numbers only.
+                usage = told.get("usage") if isinstance(told, dict) else None
+                used = {key: usage[key] for key in ("used_percent", "window_minutes", "resets_at")
+                        if isinstance(usage, dict) and isinstance(usage.get(key), (int, float))
+                        and not isinstance(usage.get(key), bool)}
             except Exception as error:  # noqa: BLE001 - a check reports; it never raises
                 code = next((code for kind, code in _FAILURE_CODES if isinstance(error, kind)), "provider_unavailable")
                 raised = traceback.extract_tb(error.__traceback__)[-1] if error.__traceback__ else None
@@ -3272,7 +3277,7 @@ def run_route_check(*, deep: bool = False) -> dict:
                       flush=True)
             routes.append({"name": name, "ok": code == "ok", "code": code,
                            "real": bool(deeper or getattr(solver, "check_sends", False)),
-                           "seconds": round(time.monotonic() - started, 1)})
+                           "seconds": round(time.monotonic() - started, 1), **({"usage": used} if used else {})})
         result = {"checked_at": int(time.time()), "ok": any(route["ok"] for route in routes), "routes": routes}
         path = Path(config.DATA_DIR) / "route-check.json"
         temporary = path.with_suffix(".tmp")

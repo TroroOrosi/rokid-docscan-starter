@@ -468,6 +468,8 @@ APP_VERSION = "0.84.0"
 #         reply (without it the browser routes are only looked at). GET /v1/route-check/failures returns the
 #         newest snapshots a failed browser route left, and /v1/settings carries the last as `route_failure`.
 #         A route's check can report `check_failed` (the reply's count was wrong) and `model_mismatch`.
+#         The Codex CLI's row of a route check carries `usage` when its request's record tells it:
+#         `used_percent`, `window_minutes` and `resets_at` of the allowance, numbers only.
 API_VERSION = "1.50.0"
 
 # Matching algorithm identity. Bump when thresholds or hashing change so a

@@ -11,6 +11,7 @@ import socket
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -69,6 +70,11 @@ if failure:
     sys.stderr.write(failure)
     sys.exit(1)
 if "canary.jpg" in sizes:
+    if "--ephemeral" not in args and os.environ.get("FAKE_CODEX_ROLLOUT"):
+        folder = Path(os.environ["CODEX_HOME"]) / "sessions" / "2026" / "11" / "16"
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / ("rollout-check-%d.jsonl" % os.getpid())).write_text(
+            '{"type": "session_meta"}' + "\n" + os.environ["FAKE_CODEX_ROLLOUT"] + "\n", encoding="utf-8")
     picture = Image.open("canary.jpg").convert("L")
     dark = [picture.getpixel((x, picture.height // 2)) < 128 for x in range(picture.width)]
     count = sum(1 for x in range(len(dark)) if dark[x] and not (x and dark[x - 1]))
@@ -100,8 +106,10 @@ def codex(tmp_path, monkeypatch):
     monkeypatch.setenv("ROKID_CHATGPT_SEND_ENABLED", "1")
     for name in ("FAKE_CODEX_FAIL", "FAKE_CODEX_LOGIN", "FAKE_CODEX_REGIONS", "FAKE_CODEX_LOCATE_FAIL",
                  "FAKE_CODEX_CANARY_REPLY", "FAKE_CODEX_REPLY_2", "FAKE_CODEX_FAIL_1", "FAKE_CODEX_FAIL_2",
-                 "FAKE_CODEX_SLEEP"):
+                 "FAKE_CODEX_SLEEP", "FAKE_CODEX_ROLLOUT"):
         monkeypatch.delenv(name, raising=False)
+    # The CLI's own folder is this test's: the check reads the session record its request leaves there.
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))
     # One read unless a test asks for the default of two: most tests here are about one request.
     monkeypatch.setenv("ROKID_CODEX_READS", "1")
     monkeypatch.setattr(codex_cli, "_needs_proxy", lambda: False)
@@ -844,9 +852,50 @@ def test_the_check_before_use_is_one_small_real_request_whose_reply_depends_on_t
 
     [check] = _checks(codex())
     args = check["args"]
-    assert "model_reasoning_effort=low" in args and args[args.index("-s") + 1] == "read-only" and "--ephemeral" in args
+    # Not --ephemeral: the session record this one request leaves is what carries the allowance used.
+    assert "model_reasoning_effort=low" in args and args[args.index("-s") + 1] == "read-only" and "--ephemeral" not in args
     assert max(check["sizes"]["canary.jpg"]) <= 512 and check["stdin"] == ""
     assert not _runs([call for call in codex() if call not in _checks(codex())]), "no booklet request is made"
+
+
+ROLLOUT = {"timestamp": "2026-11-16T14:00:25Z", "type": "event_msg", "payload": {"type": "token_count", "rate_limits": {
+    "limit_id": "codex", "plan_type": "pro", "secondary": None, "credits": {"balance": 0, "has_credits": False},
+    "primary": {"used_percent": 3.0, "window_minutes": 10080, "resets_at": 1795429113}}}}
+
+
+def test_the_check_says_how_much_of_the_allowance_is_used(codex, tmp_path, monkeypatch):
+    """Phone, 2026-11-16 23:00: the session record of one small request held the service's own view of the limits
+    (3.0% of the week used). Nobody is at the venue to look that up, and a limit only shows once it is met."""
+    monkeypatch.setenv("FAKE_CODEX_ROLLOUT", json.dumps(ROLLOUT))
+
+    assert codex_cli.CodexCliSolver().check() == {
+        "usage": {"used_percent": 3.0, "window_minutes": 10080, "resets_at": 1795429113}}
+
+
+def test_a_check_whose_request_left_no_readable_record_still_passes(codex, tmp_path, monkeypatch):
+    assert codex_cli.CodexCliSolver().check() is None  # no record at all
+
+    monkeypatch.setenv("FAKE_CODEX_ROLLOUT", "not json")
+    assert codex_cli.CodexCliSolver().check() is None
+
+    monkeypatch.setenv("FAKE_CODEX_ROLLOUT", json.dumps({"payload": {"rate_limits": {"primary": {"used_percent": "much"}}}}))
+    assert codex_cli.CodexCliSolver().check() is None
+
+
+def test_a_record_from_before_the_check_is_not_taken_for_its_own(codex, tmp_path, monkeypatch):
+    old = tmp_path / "codex-home" / "sessions" / "2026" / "11" / "15" / "rollout-old.jsonl"
+    old.parent.mkdir(parents=True)
+    old.write_text(json.dumps(ROLLOUT).replace("3.0", "88.0") + "\n", encoding="utf-8")
+    os.utime(old, (time.time() - 3600, time.time() - 3600))
+
+    assert codex_cli.CodexCliSolver().check() is None
+    assert old.is_file(), "the check removes nothing"
+
+
+def test_a_booklet_request_still_leaves_no_session_record(codex, tmp_path):
+    codex_cli.CodexCliSolver().answer_all(question=_booklet(tmp_path))
+
+    assert all("--ephemeral" in call["args"] for call in _runs(codex()))
 
 
 def test_the_check_fails_when_the_reply_is_not_what_the_picture_shows(codex, monkeypatch):

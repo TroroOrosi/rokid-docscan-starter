@@ -66,6 +66,19 @@ def test_a_check_tries_every_booklet_route_in_order_and_says_which_proof_was_a_r
     assert all(route["seconds"] >= 0 for route in result["routes"])
 
 
+def test_the_check_carries_how_much_of_the_allowance_the_cli_has_used_in_numbers_only(tmp_path, monkeypatch):
+    main = _server(tmp_path, monkeypatch)
+    _routes(monkeypatch, {"codex-cli": {"usage": {"used_percent": 3.0, "window_minutes": 10080, "resets_at": 1795429113,
+                                                  "plan_type": "words of the provider", "unlimited": True}}})
+
+    cli, work, chat = TestClient(main.app).post("/v1/route-check", headers=HEADERS).json()["routes"]
+
+    assert cli["ok"] is True and cli["usage"] == {"used_percent": 3.0, "window_minutes": 10080, "resets_at": 1795429113}
+    assert "usage" not in work and "usage" not in chat
+    kept = TestClient(main.app).get("/v1/settings", headers=HEADERS).json()["route_check"]
+    assert kept["routes"][0]["usage"]["used_percent"] == 3.0
+
+
 def test_a_stopped_route_is_reported_by_its_code_and_never_by_the_providers_words(tmp_path, monkeypatch):
     main = _server(tmp_path, monkeypatch)
     _routes(monkeypatch, {"codex-cli": ChatGptWebRateLimit("You've hit your usage limit, secret-detail"),

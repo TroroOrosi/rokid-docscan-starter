@@ -47,7 +47,10 @@ enlarged up to, at most two and a half times; a page recorded as a clip follows 
 ``check()`` is the proof before use: one request at low effort with a generated picture of three to seven black squares,
 which the model counts. Measured on the phone on 2026-11-15 (M-23): 5 s, 14,834 input tokens of which 12,160 were cached.
 It shows the CLI is signed in, the network and the image path work and no limit is in force at that moment. The CLI's
-event stream (``--json``, 0.169.0) carries token counts only, so how much allowance is left cannot be read.
+event stream (``--json``, 0.169.0) carries token counts only. The session record a request leaves does carry the
+service's view of the limits (``rate_limits``: the share of the window used, the window's length, when it starts
+anew; phone, 2026-11-16, 3.0% of a week), so the check keeps its record, where a booklet's request leaves none, and
+returns those three numbers. Nothing is removed: on a PC the same folder holds the user's own Codex sessions.
 """
 from __future__ import annotations
 
@@ -64,6 +67,7 @@ import socket
 import socketserver
 import subprocess
 import tempfile
+import time
 import threading
 import unicodedata
 from pathlib import Path
@@ -520,7 +524,8 @@ class CodexCliSolver(Solver):
 
     @staticmethod
     def _exec(directory: Path, environment: dict, *, model: str, effort: str, images: list[str], prompt: str,
-              timeout: float, schema: dict | None = None, reply_name: str = "reply.json") -> str:
+              timeout: float, schema: dict | None = None, reply_name: str = "reply.json",
+              ephemeral: bool = True) -> str:
         """Run the CLI once in ``directory`` on the image files named there; its reply text."""
         reply = directory / reply_name
         reply.unlink(missing_ok=True)
@@ -529,7 +534,8 @@ class CodexCliSolver(Solver):
         tier = "default" if (os.environ.get("ROKID_CODEX_SPEED") or "").strip().lower() == "standard" else "priority"
         command = [*_command(), "exec", "-m", model, "-c", f"model_reasoning_effort={effort}",
                    "-c", f"service_tier={tier}", "-s", "read-only",
-                   "--skip-git-repo-check", "--ephemeral", *(part for name in images for part in ("-i", name))]
+                   "--skip-git-repo-check", *(["--ephemeral"] if ephemeral else []),
+                   *(part for name in images for part in ("-i", name))]
         if schema is not None:
             (directory / "schema.json").write_text(json.dumps(schema), encoding="utf-8")
             command += ["--output-schema", "schema.json"]
@@ -639,7 +645,29 @@ class CodexCliSolver(Solver):
 
     check_sends = True
 
-    def check(self) -> None:
+    @staticmethod
+    def _usage(environment: dict, since: float) -> dict | None:
+        """The allowance used, from the session record a request made after ``since`` left; None when it says nothing."""
+        home = Path(environment.get("CODEX_HOME") or Path.home() / ".codex")
+        try:
+            records = [path for path in (home / "sessions").rglob("rollout-*.jsonl") if path.stat().st_mtime >= since]
+            newest = max(records, key=lambda path: path.stat().st_mtime, default=None)
+            lines = newest.read_text(encoding="utf-8", errors="replace").splitlines() if newest else []
+        except OSError:
+            return None
+        found = None
+        for line in lines:
+            try:
+                limits = json.loads(line)["payload"]["rate_limits"]["primary"]
+            except (ValueError, KeyError, TypeError):
+                continue
+            if isinstance(limits, dict):
+                found = limits
+        numbers = {key: found[key] for key in ("used_percent", "window_minutes", "resets_at")
+                   if found and isinstance(found.get(key), (int, float)) and not isinstance(found.get(key), bool)}
+        return numbers if "used_percent" in numbers else None
+
+    def check(self) -> dict | None:
         if not chatgpt_send_enabled():
             raise ChatGptWebSendNotAuthorized("sending is not authorized")
         if not self._signed_in():
@@ -647,12 +675,15 @@ class CodexCliSolver(Solver):
         squares, picture = check_picture()  # a different picture each time: the reply has to come from the picture
         with self._workplace() as (directory, environment):
             (directory / "canary.jpg").write_bytes(picture)
+            asked = time.time() - 2  # a file's time is coarser than the clock on some hosts
             reply = self._exec(directory, environment, model=os.environ.get("ROKID_CODEX_MODEL") or "gpt-6.1-sol",
-                               effort="low", images=["canary.jpg"], timeout=120,
+                               effort="low", images=["canary.jpg"], timeout=120, ephemeral=False,
                                prompt="How many black squares are in the attached image? Do not run commands or use "
                                       "tools. Reply with the number only.")
+            usage = self._usage(environment, asked)
         if re.sub(r"\D", "", reply) != str(squares):
             raise ChatGptWebCheckFailed("the check's reply was not the count the picture shows")
+        return {"usage": usage} if usage else None
 
     @classmethod
     def _run(cls, question: Question, model: str) -> list[str]:
