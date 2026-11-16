@@ -3113,6 +3113,295 @@ def test_another_sessions_pending_send_blocks_without_being_read_back(monkeypatc
     assert page.events == []
 
 
+# --- a send whose reply was never collected must not stop the venue (register 3-17) ---------------------------
+# Phone, 2026-11-16: a booklet was answered on the page, the server restarted before it took the reply, the chat
+# had been recorded under an address of the page's own making, and the next session's booklet waited ten minutes
+# and ended browser_blocked. No person is at the venue to clear the mark. What may clear it has not changed: this
+# batch's own valid reply, or this batch's own recognised refusal, read in the chat that holds this batch's message.
+
+_KEY_A, _KEY_B = "session:29:" + "a" * 64, "session:30:" + "b" * 64  # as _booklet_chat_key makes them
+
+
+class _AccountPage(_BatchPage):
+    """One tab on an account with several conversations, listed by the page's navigation newest first.
+
+    Loading a listed address shows that conversation's turns; any other address leads to the home page. With
+    ``provisional`` a send from the home page leaves the tab on an address of the page's own making, as the phone
+    did on 2026-11-16, while the account lists the conversation under its real one.
+    """
+
+    HOME = "https://chatgpt.com/"
+
+    def __init__(self, *, provisional=False, **kw):
+        super().__init__(**kw)
+        self.provisional = provisional
+        self.listed = {}  # real address -> (last user text, reply frames, turns), newest first
+        self.address = None  # the real address of the conversation on screen
+
+    def sent(self):
+        opened = "/c/" not in self.url
+        super().sent()
+        if opened:
+            self.address = self.url
+            if self.provisional:
+                self.url = f"https://chatgpt.com/c/local-chatgpt%3A{self.chats}"
+            self.listed = {self.address: None, **self.listed}
+
+    def goto(self, url, **kw):
+        if self.turns and self.address:
+            self.listed[self.address] = (self.user_text, self.replies, self.turns)
+        super().goto(url, **kw)
+        if url not in self.listed:
+            self.url = self.HOME
+        self.address = url if url in self.listed else None
+        self.user_text, self.replies, self.turns = self.listed.get(url) or ("", [], 0)
+        self.poll = 0
+
+    def evaluate(self, expression):
+        if "newest_chats" in expression:
+            return list(self.listed)
+        return super().evaluate(expression)
+
+
+def _send_and_lose(monkeypatch, page, files, key, *, server=False):
+    """Send a booklet whose message reaches the page and whose reply this server never takes.
+
+    ``server``: the process ends at the click, so nothing after it is recorded and the chat has no address on
+    record. Otherwise the call fails after the click and records the address the tab shows.
+    """
+    from app import config
+
+    real_submit = chatgpt_web.submit
+
+    def lost(p):
+        real_submit(p)
+        raise (SystemExit("the server restarted") if server else TimeoutError("the reply was lost"))
+
+    monkeypatch.setattr(chatgpt_web, "submit", lost)
+    with pytest.raises(SystemExit if server else chatgpt_web.ChatGptWebUncertain):
+        _booklet(chatgpt_web.ChatGptWebClient(), page, files, key=key)
+    monkeypatch.setattr(chatgpt_web, "submit", real_submit)
+    assert len(_sends(page)) == 1 and _guard_state(config.DATA_DIR) == "uncertain"
+
+
+def _typed_or_attached(page):
+    return [kind for kind, _ in page.events if kind in ("fill", "upload")]
+
+
+@pytest.mark.parametrize("recorded", ["the home page", "the page's own address", "nothing"])
+def test_a_send_with_no_address_on_record_is_found_among_the_newest_chats_after_a_restart(
+        monkeypatch, tmp_path, recorded):
+    _fast(monkeypatch)
+    page, files = _AccountPage(provisional=True), _batch_files(1)
+    _send_and_lose(monkeypatch, page, files, _KEY_A, server=True)
+    made_up, chat = page.url, page.address
+    assert not chatgpt_web._is_chat_url(made_up) and chatgpt_web._is_chat_url(chat)
+    state = tmp_path / "browser-state" / "chats.json"
+    record = json.loads(state.read_text(encoding="utf-8"))
+    assert record["chats"][_KEY_A]["url"] == page.HOME, "the address the tab showed before the send"
+    record["chats"][_KEY_A]["url"] = {"the home page": page.HOME, "the page's own address": made_up, "nothing": ""}[recorded]
+    state.write_text(json.dumps(record), encoding="utf-8")
+    page.goto(made_up)  # as the read-back of 2026-11-16 did: it leads to the home page
+    assert page.url == page.HOME and page.turns == 0
+    before = _typed_or_attached(page)
+
+    reply = json.loads(_booklet(chatgpt_web.ChatGptWebClient(), page, files, key=_KEY_A))
+
+    assert reply["questions"][0]["answer"] == "4" and reply["batch_id"] == page.receipts[-1]["batch_id"]
+    assert len(_sends(page)) == 1 and len(_clicks(page, chatgpt_web.NEW_CHAT_SEL)) == 1
+    assert _typed_or_attached(page) == before, "the read-back only loads and reads"
+    assert _guard_state(tmp_path) == "idle"
+    kept = _chats(tmp_path)[_KEY_A]
+    assert kept["url"] == chat and kept["pending"] is None
+    assert kept["transfer"]["pending"] is None and kept["transfer"]["final"] == reply["batch_id"]
+
+
+def test_a_send_that_is_not_among_the_three_newest_chats_stays_uncertain_and_nothing_is_sent(monkeypatch, tmp_path):
+    _fast(monkeypatch)
+    page, files = _AccountPage(provisional=True), _batch_files(1)
+    _send_and_lose(monkeypatch, page, files, _KEY_A, server=True)
+    page.goto(page.HOME)
+    others = {f"https://chatgpt.com/c/other-{n}": (f"someone else's question {n}", [f"someone else's answer {n}"], 1)
+              for n in (1, 2, 3)}
+    page.listed = {**others, **page.listed}
+    loaded, before = len(_gotos(page)), _typed_or_attached(page)
+
+    with pytest.raises(chatgpt_web.ChatGptWebUncertain):
+        _booklet(chatgpt_web.ChatGptWebClient(), page, files, key=_KEY_A)
+
+    assert _gotos(page)[loaded:] == list(others), "the three newest are looked at, the fourth is not"
+    assert len(_sends(page)) == 1 and len(_clicks(page, chatgpt_web.NEW_CHAT_SEL)) == 1
+    assert _typed_or_attached(page) == before and _guard_state(tmp_path) == "uncertain"
+    kept = (tmp_path / "browser-state" / "chats.json").read_text(encoding="utf-8")
+    assert "other-" not in kept and "someone else" not in kept, "nothing of another conversation is kept"
+    assert _chats(tmp_path)[_KEY_A]["url"] == page.HOME and _chats(tmp_path)[_KEY_A]["transfer"]["pending"]
+
+
+@pytest.mark.parametrize("ours_listed", [True, False])
+def test_a_conversation_whose_last_message_is_not_this_batch_is_not_taken_for_its_chat(
+        monkeypatch, tmp_path, ours_listed):
+    _fast(monkeypatch)
+    page, files = _AccountPage(provisional=True), _batch_files(1)
+    _send_and_lose(monkeypatch, page, files, _KEY_A, server=True)
+    page.goto(page.HOME)
+    (ours, (text, replies, turns)), = page.listed.items()
+    batch_id = page.receipts[-1]["batch_id"]
+    assert batch_id in text and batch_id in replies[0]
+    # The same paper asked again by hand: the same words and an answer that even carries this batch's id, but
+    # its last message is not the one this server sent.
+    look_alike = "https://chatgpt.com/c/look-alike"
+    page.listed = {look_alike: (text.replace(batch_id, "0" * 64), replies, turns), **(page.listed if ours_listed else {})}
+
+    if ours_listed:
+        assert json.loads(_booklet(chatgpt_web.ChatGptWebClient(), page, files, key=_KEY_A))["batch_id"] == batch_id
+        assert _chats(tmp_path)[_KEY_A]["url"] == ours and _guard_state(tmp_path) == "idle"
+    else:
+        with pytest.raises(chatgpt_web.ChatGptWebUncertain):
+            _booklet(chatgpt_web.ChatGptWebClient(), page, files, key=_KEY_A)
+        assert _chats(tmp_path)[_KEY_A]["url"] == page.HOME and _guard_state(tmp_path) == "uncertain"
+    assert look_alike in _gotos(page), "it was looked at and passed over"
+    assert len(_sends(page)) == 1 and len(_clicks(page, chatgpt_web.NEW_CHAT_SEL)) == 1
+
+
+def test_another_sessions_answered_send_is_read_back_and_this_booklet_is_then_sent_once(monkeypatch, tmp_path):
+    _fast(monkeypatch)
+    page, first, second = _AccountPage(), _batch_files(1), _batch_files(2)
+    _send_and_lose(monkeypatch, page, first, _KEY_A)
+    theirs = page.address
+    assert _chats(tmp_path)[_KEY_A]["url"] == theirs
+
+    reply = json.loads(_booklet(chatgpt_web.ChatGptWebClient(), page, second, key=_KEY_B))
+
+    assert reply["questions"] and len(_sends(page)) == 2, "theirs once and this one once"
+    assert len(_clicks(page, chatgpt_web.NEW_CHAT_SEL)) == 2 and _guard_state(tmp_path) == "idle"
+    kept = _chats(tmp_path)
+    assert kept[_KEY_A]["url"] == theirs and kept[_KEY_A]["pending"] is None
+    assert kept[_KEY_A]["transfer"]["pending"] is None and kept[_KEY_A]["transfer"]["final"]
+    assert kept[_KEY_B]["transfer"]["final"] == reply["batch_id"] and kept[_KEY_B]["url"] == page.address
+    # The first session asks again: its answer is read in its own chat and nothing is sent.
+    again = json.loads(_booklet(chatgpt_web.ChatGptWebClient(), page, first, key=_KEY_A))
+    assert again["batch_id"] == kept[_KEY_A]["transfer"]["final"] and len(_sends(page)) == 2
+
+
+def test_the_send_stranded_on_2026_11_16_no_longer_blocks_the_next_sessions_booklet(monkeypatch, tmp_path):
+    """Both holes at once, as it happened: no address on record, and the next booklet belongs to another session."""
+    _fast(monkeypatch)
+    page, first, second = _AccountPage(provisional=True), _batch_files(1), _batch_files(2)
+    _send_and_lose(monkeypatch, page, first, _KEY_A, server=True)
+    theirs = page.address
+    page.goto(page.url)
+
+    reply = json.loads(_booklet(chatgpt_web.ChatGptWebClient(), page, second, key=_KEY_B))
+
+    assert reply["questions"] and len(_sends(page)) == 2 and _guard_state(tmp_path) == "idle"
+    kept = _chats(tmp_path)[_KEY_A]
+    assert kept["url"] == theirs and kept["pending"] is None and kept["transfer"]["final"]
+
+
+def test_another_sessions_send_still_being_answered_keeps_this_booklet_blocked(monkeypatch, tmp_path):
+    _fast(monkeypatch)
+    monkeypatch.setattr(chatgpt_web, "OTHER_SEND_WAIT_S", 0)
+    page, first, second = _AccountPage(), _batch_files(1), _batch_files(2)
+    _send_and_lose(monkeypatch, page, first, _KEY_A)
+    theirs, loaded, before = page.address, len(_gotos(page)), _typed_or_attached(page)
+    page.streaming = [True]  # the stop control stays on screen: their reply is still being written
+
+    with pytest.raises(chatgpt_web.ChatGptWebBlocked):
+        _booklet(chatgpt_web.ChatGptWebClient(), page, second, key=_KEY_B)
+
+    assert _gotos(page)[loaded:] == [theirs], "their chat was looked at, once"
+    assert len(_sends(page)) == 1 and len(_clicks(page, chatgpt_web.NEW_CHAT_SEL)) == 1
+    assert _typed_or_attached(page) == before and _guard_state(tmp_path) == "uncertain"
+    assert _chats(tmp_path)[_KEY_A]["transfer"]["pending"] and _KEY_B not in _chats(tmp_path)
+    # Once it has finished, the next try reads it and sends this booklet.
+    page.streaming = [False]
+    monkeypatch.setattr(chatgpt_web, "OTHER_SEND_WAIT_S", 30)
+    assert json.loads(_booklet(chatgpt_web.ChatGptWebClient(), page, second, key=_KEY_B))["questions"]
+    assert len(_sends(page)) == 2 and _guard_state(tmp_path) == "idle"
+
+
+def test_another_sessions_refused_send_is_cleared_without_refusing_this_booklet(monkeypatch, tmp_path):
+    """The limit notice answers their message, not this one: this booklet is sent and judged by its own reply."""
+    _fast(monkeypatch)
+    page, first, second = _AccountPage(), _batch_files(1), _batch_files(2)
+    real_sent = page.sent
+
+    def limited():
+        real_sent()
+        page.replies = ["使用制限に達しました。しばらくお待ちください。"]
+
+    page.sent = limited
+    _send_and_lose(monkeypatch, page, first, _KEY_A)
+    page.sent = real_sent  # by the time the next booklet arrives the limit has passed
+
+    reply = json.loads(_booklet(chatgpt_web.ChatGptWebClient(), page, second, key=_KEY_B))
+
+    assert reply["questions"] and len(_sends(page)) == 2 and _guard_state(tmp_path) == "idle"
+    theirs = _chats(tmp_path)[_KEY_A]
+    assert theirs["pending"] is None and theirs["transfer"]["pending"] is None
+    assert theirs["transfer"]["completed"] == [] and theirs["transfer"]["final"] is None, "refused, not answered"
+
+
+def test_a_question_blocked_by_another_sessions_booklet_is_asked_once_after_the_read_back(monkeypatch, tmp_path):
+    _fast(monkeypatch)
+    page = _AccountPage()
+    _send_and_lose(monkeypatch, page, _batch_files(1), _KEY_A)
+
+    def plain():  # a question on its own carries no transfer receipt
+        _StubPage.sent(page)
+        page.replies, page.poll = ["答"], 0
+
+    page.sent = plain
+
+    assert chatgpt_web.ChatGptWebClient()._ask_with_retries(
+        _OneTabContext(page), "問1", [], chat_key="session:30") == "答"
+
+    assert len(_sends(page)) == 2 and _guard_state(tmp_path) == "idle"
+    assert _chats(tmp_path)[_KEY_A]["transfer"]["final"]
+
+
+def _foreign_mark(tmp_path, owners):
+    """An uncertain send whose pending batch is recorded under each of ``owners``."""
+    from app.browser_guard import BrowserGuard
+
+    batch = {"id": "c" * 64, "number": 1, "names": ["page001.jpg"], "digests": ["d" * 64], "final": True,
+             "expect": ["questions"], "users": 0, "replies": 0}
+    entry = {"url": "https://chatgpt.com/c/their-chat", "attached": [], "source_attached": False, "pending": "e" * 64,
+             "transfer": {"completed": [], "pages": [], "final": None, "pending": batch}}
+    with BrowserGuard(tmp_path) as guard:
+        guard.mark_sending("e" * 64)
+        (guard.directory / chatgpt_web.CHATS_FILE).write_text(json.dumps({"chats": {key: entry for key in owners}}))
+
+
+@pytest.mark.parametrize("owners", [
+    ["session:29:browser:" + "a" * 64],  # a Work task: Work's reader and Work's own retirement
+    ["inspection:" + "a" * 64],  # a capture inspection, Work's too
+    ["subject:数学"],  # not a booklet of this route
+    [_KEY_A, "session:28:" + "f" * 64],  # two records claim it
+    [],  # no record at all
+])
+def test_a_mark_that_no_single_chat_booklet_owns_stays_and_nothing_is_loaded(monkeypatch, tmp_path, owners):
+    _fast(monkeypatch)
+    _foreign_mark(tmp_path, owners)
+    page = _AccountPage()
+    page.listed = {"https://chatgpt.com/c/their-chat": ("c" * 64, ['{"batch_id":"%s","questions":[]}' % ("c" * 64)], 1)}
+    with pytest.raises(chatgpt_web.ChatGptWebBlocked):
+        _booklet(chatgpt_web.ChatGptWebClient(), page, _batch_files(1), key=_KEY_B)
+    assert page.events == [] and _guard_state(tmp_path) == "uncertain"
+
+
+def test_the_work_client_does_not_read_a_chat_booklets_send_back(monkeypatch, tmp_path):
+    """Work reads its tasks with a reader of its own and retires its own stale sends; that is unchanged."""
+    from app.solvers import chatgpt_work_web
+
+    _fast(monkeypatch)
+    _foreign_mark(tmp_path, [_KEY_A])
+    page = _AccountPage()
+    with pytest.raises(chatgpt_web.ChatGptWebBlocked):
+        _booklet(chatgpt_work_web.WorkWebClient(), page, _batch_files(1), key="session:30:browser:" + "b" * 64)
+    assert page.events == [] and _guard_state(tmp_path) == "uncertain"
+
+
 def test_a_reply_that_stops_with_no_text_fails_instead_of_waiting_the_session(monkeypatch):
     page = _StubPage([""], streaming=[True, False])
     with pytest.raises(ChatGptWebError, match="without any text"):

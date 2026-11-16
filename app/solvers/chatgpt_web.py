@@ -117,6 +117,13 @@ NEW_CHAT_SEL = os.environ.get(
 # data-testid. Without a match, submit() fell back to Enter wherever the focus was.
 SEND_SEL = os.environ.get(
     "ROKID_CHATGPT_SEND_SEL", f'[data-testid="send-button"], form:has({_IDLESS_COMPOSER_SEL}) button[type="submit"]')
+# The conversations the page's navigation lists, newest first. Phone, 2026-11-16: 10 links, all drawn, and on a
+# conversation page the first one's href was the tab's own path. Only their hrefs are read, to find the chat of a
+# send that was recorded under no address of its own (_find_sent_chat); nothing in the list is clicked.
+CHAT_LINKS_SEL = os.environ.get("ROKID_CHATGPT_CHAT_LINKS_SEL", 'nav a[href*="/c/"]')
+# How many of them are loaded to look for that send. Each is a page load on the phone, and a send that is not
+# among the newest stays uncertain, as it did before there was a search.
+NEWEST_CHATS = 3
 MODEL_SEL = os.environ.get("ROKID_CHATGPT_MODEL_SEL", '[data-testid="model-switcher-dropdown-button"]')
 EFFORT_SEL = os.environ.get(
     "ROKID_CHATGPT_EFFORT_SEL",
@@ -137,6 +144,10 @@ TIMEOUT_S = float(os.environ.get("ROKID_CHATGPT_TIMEOUT_S", "9000"))
 # Measured on F-51F (§F-6-10): the stop button at t+0.0s, the assistant node
 # only at t+130.4s, so the turn alone is not the start.
 REPLY_START_S = float(os.environ.get("ROKID_CHATGPT_REPLY_START_S", "300"))
+# How long ANOTHER booklet's unanswered send is read before this booklet is called blocked (_resolve_other_send).
+# A finished reply showed its text about 2 s after the load (phone, 2026-11-14); one still being written is left
+# to the server's next try (150 s later) instead of holding the browser for the rest of its generation.
+OTHER_SEND_WAIT_S = float(os.environ.get("ROKID_CHATGPT_OTHER_SEND_WAIT_S", "30"))
 # The stop button can blink out between thinking and writing. Seen and then
 # gone for this many polls in a row (about 10s at POLL_S) is a finished reply
 # even when it is not the expected JSON; that fails visibly and is never resent.
@@ -649,6 +660,70 @@ def return_to_chat(page, url: str, *, reload: bool, ready_timeout_s: float | Non
     if not landed:
         raise ChatGptWebChatLost(_NO_RETURN + ": loading it ended on a different page")
     return composer
+
+
+_NEWEST_CHATS_JS = r"""(() => { /* newest_chats */
+  const links = [...document.querySelectorAll(%s)];
+  const drawn = links.filter(a => a.getClientRects().length > 0);
+  return (drawn.length ? drawn : links).map(a => a.href);
+})()""" % json.dumps(CHAT_LINKS_SEL)
+
+
+def _find_sent_chat(page, batch_id: str, *, sleep=time.sleep) -> str | None:
+    """The address of the conversation that ends with this batch's own message, or None.
+
+    For a send whose chat is on record under no address of its own: the home page it was sent from, or the address
+    the page made up for it (phone, 2026-11-16: the server restarted before the real one showed, and the answered
+    booklet could not be read back). The tab is looked at as it is, then the NEWEST_CHATS newest conversations the
+    page lists. This only loads pages and reads them: no typing, no attaching, no send and no new chat. A
+    conversation is taken only if its LAST user message carries the batch id, so a reply is never read in a chat
+    this server did not send the batch into. What is read is compared here and kept nowhere.
+    """
+    def ours() -> bool:
+        users, shown = page.locator(USER_SEL), None
+        for _ in range(3 * SETTLE_POLLS):  # about 30 s at POLL_S: a loaded chat shows its turns late
+            text = users.last.inner_text() if users.count() else ""
+            if batch_id in text:
+                return True
+            if text and text == shown:
+                return False  # Read the same twice: this is its last message, and it is another one.
+            shown = text
+            sleep(POLL_S)
+        return False
+
+    here = _url_of(page)
+    if _is_chat_url(here) and ours():
+        return here
+    if here.rstrip("/") != CHAT_URL.rstrip("/"):
+        page.goto(CHAT_URL, wait_until="domcontentloaded")
+    listed: list[str] = []
+    for _ in range(3 * SETTLE_POLLS):  # The list is filled in after the page has loaded.
+        found = page.evaluate(_NEWEST_CHATS_JS)
+        found = list(dict.fromkeys(url for url in found if isinstance(url, str) and _is_chat_url(url))
+                     ) if isinstance(found, list) else []
+        if found and found == listed:
+            break
+        listed = found
+        sleep(POLL_S)
+    for url in listed[:NEWEST_CHATS]:
+        try:
+            return_to_chat(page, url, reload=True)
+        except ChatGptWebChatLost:
+            continue
+        if ours():
+            return url
+    return None
+
+
+# A booklet of this route, as _booklet_chat_key names it. Work's keys carry ":browser:" or start "inspection:".
+_CHAT_BOOKLET_KEY = re.compile(r"session:[1-9][0-9]*:[0-9a-f]{64}")
+
+
+def _pending_chat_owner(directory: Path, request_id: str) -> str | None:
+    """The one Chat booklet whose record holds this unanswered send; None for any other or unknown owner."""
+    owners = [key for key, entry in _read_chats(directory).items()
+              if isinstance(entry, dict) and entry.get("pending") == request_id]
+    return owners[0] if len(owners) == 1 and _CHAT_BOOKLET_KEY.fullmatch(owners[0]) else None
 
 
 def wait_for_composer(page, *, ready_timeout_s: float | None = None, composer_selector=None):
@@ -1327,7 +1402,8 @@ class ChatGptWebClient:
                 try:
                     guard.require_clear()
                 except BrowserGuardError as error:
-                    raise ChatGptWebBlocked(str(error)) from error
+                    if not self._resolve_other_send(context, guard, chat_key):
+                        raise ChatGptWebBlocked(str(error)) from error
                 return self._ask_locked(context, text, pages, guard=guard, audio=audio,
                                         chat_key=chat_key, files=files, expect=expect, before_submit=before_submit)
         except BrowserBusy as error:
@@ -1449,7 +1525,8 @@ class ChatGptWebClient:
             raise ValueError("invalid booklet stage")
         self._load_chat(guard, chat_key)
         status = guard.status()
-        if status["state"] == "uncertain" and self._pending != status.get("request_id"):
+        if (status["state"] == "uncertain" and self._pending != status.get("request_id")
+                and not self._resolve_other_send(context, guard, chat_key)):
             raise ChatGptWebBlocked("another send is unconfirmed; nothing sent")
         if self._chat_url and self._transfer is None:
             if stage != "single":
@@ -1610,15 +1687,25 @@ class ChatGptWebClient:
         self._keep_chat(guard, self._chat_key, url)
         self._save_chat(guard)
 
-    def _recover_locked(self, context, guard, *, expect, batch=None, sleep=time.sleep, now=time.monotonic):
+    def _recover_locked(self, context, guard, *, expect, batch=None, sleep=time.sleep, now=time.monotonic,
+                        timeout_s=None):
         """Read the recorded send only; matching batch id and a new turn are required."""
-        if not self._chat_url:
+        if batch is None and not self._chat_url:
             return None
         page = reuse_page(context)
-        if _is_chat_url(self._chat_url):
+        if _is_chat_url(self._chat_url or ""):
             return_to_chat(page, self._chat_url, reload=True)
-        elif batch is None or not _is_chat_url(_url_of(page)):
+        elif batch is None or self._chat_key is None:
             return None
+        else:
+            # No address of its own on record (register 3-17). The chat that holds this batch's message is looked
+            # for, and recorded before its reply is judged: from here on this is the read-back of a recorded chat.
+            found = _find_sent_chat(page, batch["id"], sleep=sleep)
+            if found is None:
+                return None
+            self._chat_url = found
+            self._save_chat(guard)
+        limit = TIMEOUT_S if timeout_s is None else timeout_s
         replies = page.locator(ASSISTANT_SEL)
         started = idle_since = now()
         shown, looks = None, 0
@@ -1640,7 +1727,7 @@ class ChatGptWebClient:
                     shown = text
                 if now() - idle_since > REPLY_START_S:
                     return None
-            if now() - started > TIMEOUT_S:
+            if now() - started > limit:
                 return None
             sleep(POLL_S)
         reply = replies.last.inner_text().strip()
@@ -1679,6 +1766,54 @@ class ChatGptWebClient:
             if status["state"] == "uncertain" and self._pending == status.get("request_id"):
                 guard.acknowledge(self._pending)
         return reply
+
+    #: What _load_chat sets: this call's own chat, put back after another booklet's record was loaded in its place.
+    _CHAT_STATE = ("_chat_key", "_chat_url", "_attached_in_chat", "_source_attached", "_unsaved", "_pending",
+                   "_transfer")
+
+    def _resolve_other_send(self, context, guard, chat_key) -> bool:
+        """Read back, once, the send another booklet left unanswered; True when the mark is gone.
+
+        The mark stops every send of every session, and at the venue no person clears it (register 3-17; phone,
+        2026-11-16: the next session's booklet waited ten minutes and ended browser_blocked). So before this call
+        is refused, the booklet that owns the mark is read back as its own session would read it: its record is
+        loaded, its chat is opened and its batch's reply is read there. What clears the mark has not changed:
+        _accept_batch for that batch's valid reply, _clear_refused_batch for that batch's recognised usage-limit
+        notice. A reply still being written, a chat not found and a reply that is incomplete leave the mark, and
+        this call is refused as before. Nothing is typed, attached or sent here, and that batch is not sent again.
+
+        Their limit notice is not raised into this call. It answers their message at the time they sent it; raised
+        here it would move or stop a booklet that was never refused (main.py acts on ChatGptWebRateLimit). This
+        booklet is sent, and if the account is still limited its own reply says so.
+
+        Only a booklet of this route is read back: one record holding the mark's request, under a key
+        _booklet_chat_key makes. Work reads its tasks with a reader of its own and retires them itself, and a send
+        without a batch has no identity to look for. This client's own chat state is put back afterwards; a chat of
+        its own that has no address is not left, because the tab could not come back to it.
+        """
+        try:
+            status = guard.status()
+        except BrowserGuardError:
+            return False
+        owner = (_pending_chat_owner(guard.directory, status["request_id"])
+                 if status["state"] == "uncertain" else None)
+        if owner is None or owner == chat_key or self._chat_url and not _is_chat_url(self._chat_url):
+            return False
+        own = {name: getattr(self, name) for name in self._CHAT_STATE}
+        try:
+            self._load_chat(guard, owner)
+            batch = (self._transfer or {}).get("pending")
+            if isinstance(batch, dict) and self._pending == status["request_id"]:
+                self._recover_locked(context, guard, expect=tuple(batch["expect"]), batch=batch,
+                                     timeout_s=OTHER_SEND_WAIT_S)
+        except ChatGptWebAuthenticationRequired:
+            raise
+        except (ChatGptWebError, OSError, KeyError, TypeError, ValueError):
+            pass  # The guard's state below is the outcome. Of these, only their limit notice leaves it clear.
+        finally:
+            for name, value in own.items():
+                setattr(self, name, value)
+        return guard.status()["state"] == "idle"
 
     def _ask_locked(self, context, text: str, pages: list[bytes], *, guard,
                     audio=None, chat_key=None, files=None, expect=None, batch=None, before_submit=None) -> str:

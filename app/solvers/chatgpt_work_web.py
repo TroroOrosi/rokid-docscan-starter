@@ -1069,6 +1069,10 @@ class WorkWebClient(chat.ChatGptWebClient):
             raise chat.ChatGptWebChatLost("Work conversation address is invalid; nothing sent")
         return chat.return_to_chat(page, url, reload=reload, wait_composer=self._wait_for_composer)
 
+    def _resolve_other_send(self, context, guard, chat_key):
+        """Unchanged for Work: it reads tasks with its own reader and retires its stale sends itself."""
+        return False
+
     def _recover_locked(self, context, guard, *, expect, batch=None, sleep=time.sleep, now=time.monotonic):
         if not batch or not self._chat_url:
             return None
