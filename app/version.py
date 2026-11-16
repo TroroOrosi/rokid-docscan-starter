@@ -281,7 +281,9 @@ from __future__ import annotations
 # 0.78.0: a clip from a worn head is gathered: the picture is followed from frame to frame, and a frame that lies
 #         away from the first is laid on the page by a map of its own (a homography) instead of one shift. A clip
 #         from glasses that lie still gathers to the same page as before, bit for bit.
-APP_VERSION = "0.78.0"
+# 0.78.1: a Codex CLI that is signed out hands the booklet to the next route (Chat) after one retry, as a usage
+#         limit does. Its sign-in is its own; it was retried where it stood, as a signed-out browser is.
+APP_VERSION = "0.78.1"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.

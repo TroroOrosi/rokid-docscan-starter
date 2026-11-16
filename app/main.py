@@ -3320,10 +3320,17 @@ def _booklet_route(conn, session_id: int) -> tuple[str, bool]:
     return route, any(name != route and name not in closed for name in routes)
 
 
-def _switches_route(error: Exception) -> bool:
+_OWN_SIGN_IN = ("codex-cli",)  # routes that use no browser: their sign-in is not the one the browser's routes share
+
+
+def _switches_route(error: Exception, route: str | None = None) -> bool:
     """Only a known outcome moves the booklet: a received refusal, or a failure
     before any send. The browser, the account and the send guard are common to
-    every browser route, so their failures are retried where they are."""
+    every browser route, so their failures are retried where they are. A route
+    with a sign-in of its own that is signed out moves on: retrying does not
+    sign it in, and the next route does not need it."""
+    if route in _OWN_SIGN_IN and isinstance(error, ChatGptWebAuthenticationRequired):
+        return True
     return isinstance(error, (ChatGptWebRateLimit, ChatGptWebReplyIncomplete)) or (_nothing_sent(error) and not isinstance(
         error, (ChatGptWebBusy, ChatGptWebBlocked, ChatGptWebAuthenticationRequired,
                 ChatGptWebBrowserUnavailable)))
@@ -3357,7 +3364,7 @@ def _record_solve_failure(conn, row, error: Exception, *, commit: bool = True,
     if isinstance(error, ChatGptWebUploadBudget):
         # Local counts, not provider text: the wearer sees how far over the booklet is.
         metadata["solve_failure"].update(files=error.files, room=error.room)
-    if route and _switches_route(error):
+    if route and _switches_route(error, route):
         # ``route`` is passed only while a later route may take over.
         closed = sorted(_closed_routes([current]) | {route})
         metadata["closed_routes"] = closed
@@ -3735,10 +3742,10 @@ def _commit_fence(work_attempt, failed, route: str):
     return work_attempt if failed or route not in ("", primary) else None
 
 
-def _give_up_presend(error: Exception, attempt: int, can_switch: bool) -> bool:
+def _give_up_presend(error: Exception, attempt: int, can_switch: bool, route: str | None = None) -> bool:
     """Stop retrying this route: something was sent, or a later route is waiting
     and one retry has already shown the failure is not a passing render."""
-    return not _nothing_sent(error) or (can_switch and attempt >= 1 and _switches_route(error))
+    return not _nothing_sent(error) or (can_switch and attempt >= 1 and _switches_route(error, route))
 
 
 def _item_labels(item: dict) -> tuple[str, str]:
@@ -3899,7 +3906,7 @@ def _answer_deck(conn, session, session_id: int, doc_id: int) -> bool:
             if isinstance(error, (ChatGptWebSendNotAuthorized, WorkPending, WorkConflict)):
                 return True
             replies, failed = [], error
-            if _give_up_presend(error, attempt, can_switch):
+            if _give_up_presend(error, attempt, can_switch, route):
                 break
     if replies is None:
         return False
@@ -3997,7 +4004,7 @@ def _answer_mixed_deck(conn, session, session_id: int, doc_id: int) -> bool:
             if isinstance(error, (ChatGptWebSendNotAuthorized, WorkPending, WorkConflict)):
                 return True
             replies, failed = [], error
-            if _give_up_presend(error, attempt, can_switch):
+            if _give_up_presend(error, attempt, can_switch, route):
                 break
     try:
         with _work_reply_commit_guard(session_id, replies, failed_attempt=_commit_fence(work_attempt, failed, route)):

@@ -13,13 +13,13 @@ from tests.test_answer_bundle_api import (
 client = _client_fixture
 
 
-def _routes(monkeypatch, primary, fallback):
+def _routes(monkeypatch, primary, fallback, primary_name="test-provider"):
     """Primary through the existing entry point; the fallback through its own."""
     from app import main
 
     monkeypatch.setattr(main, "PRESEND_RETRY_S", 0)
-    monkeypatch.setenv("ROKID_SOLVER", "test-provider")
-    monkeypatch.setattr(main, "_booklet_routes", lambda: ["test-provider", "backup"])
+    monkeypatch.setenv("ROKID_SOLVER", primary_name)
+    monkeypatch.setattr(main, "_booklet_routes", lambda: [primary_name, "backup"])
     calls = {"primary": 0, "backup": 0}
 
     def answer_all(question):
@@ -174,6 +174,21 @@ def test_a_failure_the_next_route_shares_keeps_retrying_the_primary(client, monk
         client, session_id, lambda items: items and all(i["status"] == "ready" for i in items))
     assert bundle["items"][0]["answer"] == "4" and calls["primary"] == 4
     assert main.PRESEND_TRIES >= 4
+
+
+def test_a_codex_cli_that_is_signed_out_moves_the_booklet_to_the_next_route(client, monkeypatch):
+    """The CLI's sign-in is its own; the browser's routes do not share it. Until 2026-11-16 a CLI that had been
+    signed out was retried where it stood, as a signed-out browser is, and its booklet never reached Chat: the
+    route that is there for when the first cannot answer was not taken for the one failure no retry mends."""
+    from app.solvers.chatgpt_web import ChatGptWebAuthenticationRequired
+
+    _, session_id = _session_with(client, ["問1 2+2を求めよ。"])
+    calls = _routes(monkeypatch, lambda n: _raise(ChatGptWebAuthenticationRequired("not signed in; nothing sent")),
+                    lambda n: _replies(("第1問", "問1", [1], "4")), primary_name="codex-cli")
+    bundle = _background_finalize_and_wait(
+        client, session_id, lambda items: items and all(i["status"] == "ready" for i in items))
+    assert bundle["items"][0]["answer"] == "4"
+    assert calls == {"primary": 2, "backup": 1}  # one retry, as after any failure before a send
 
 
 def test_the_glasses_are_told_the_route_is_changing_not_that_the_subject_ended(client, monkeypatch):
