@@ -918,6 +918,34 @@ def test_an_item_whose_figure_or_separate_field_cannot_be_shown_keeps_its_text_f
         ("ready", "4", "", [])]
 
 
+def test_the_recorded_derivation_and_graph_reply_reaches_the_bundle_whole(client, monkeypatch):
+    """The stand-in reply for looking at a derivation and a graph on the glasses
+    without the model: a result line with its working, a graph with its
+    instructions in words, and a plain choice. Its content is synthetic."""
+    from pathlib import Path
+
+    fixture = Path(__file__).parent / "fixtures" / "recorded-reply-derivation-and-graph.json"
+    recorded = json.loads(fixture.read_text(encoding="utf-8"))["questions"]
+    monkeypatch.setenv("ROKID_SOLVER", "recorded")
+    monkeypatch.setenv("ROKID_RECORDED_REPLY", str(fixture))
+    monkeypatch.setenv("ROKID_CHATGPT_SEND_ENABLED", "0")
+    monkeypatch.delenv("ROKID_SOLVER_FALLBACKS", raising=False)
+    _, session_id = _session_with(client, ["問1 2+2を求めよ。"])
+
+    bundle = _background_finalize_and_wait(
+        client, session_id, lambda items: items and all(i["status"] != "pending" for i in items))
+
+    assert [(i["group_label"], i["question_label"], i["status"], i["issue"], len(i.get("diagrams", [])))
+            for i in bundle["items"]] == [
+        ("第1問", "問1", "ready", "", 0), ("第1問", "問2", "ready", "", 1), ("第2問", "問1", "ready", "", 0)]
+    assert [i["answer"] for i in bundle["items"]] == [question["answer"] for question in recorded]
+    assert len(bundle["items"][0]["answer"].splitlines()) == 9, "the result line and eight lines of working"
+    assert bundle["items"][1]["diagrams"] == recorded[1]["diagrams"]
+    assert {e["type"] for e in bundle["items"][1]["diagrams"][0]["elements"]} == {"polygon", "line", "polyline", "circle", "text"}
+    assert bundle["items"][2]["answer_no"] == [1]
+    assert bundle["schema_version"] == 3
+
+
 def test_answers_lost_before_their_commit_are_read_back_not_sent_again(client, monkeypatch):
     """A kill or a locked database after the reply: the resume reads the chat."""
     import threading
