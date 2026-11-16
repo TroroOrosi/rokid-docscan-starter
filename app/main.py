@@ -3187,7 +3187,7 @@ def _failure_count(row) -> int:
 def _work_recovery_job_id(row) -> str | None:
     failure = _solve_failure(row)
     job_id = failure.get("work_job_id")
-    if (os.environ.get("ROKID_SOLVER", "").strip() == "chatgpt-work"
+    if ("chatgpt-work" in _booklet_routes()
             and failure.get("code") == "browser_outcome_unknown"
             and isinstance(job_id, str) and re.fullmatch(r"[a-f0-9]{64}", job_id)):
         return job_id
@@ -3203,17 +3203,38 @@ def _retrying(row) -> bool:
 def _booklet_routes() -> list[str]:
     """ROKID_SOLVER, then the routes that take the same booklet when it cannot answer.
 
-    No PC is at the venue and the phone is not touched, so a usage limit on Work
-    must not end the subject: Chat (first model position, Extra High verified
-    before sending) takes it by default. ROKID_SOLVER_FALLBACKS overrides the
-    order; an empty value disables switching.
+    No PC is at the venue and the phone is not touched, so a route that stops
+    must not end the subject. The operator's order (2026-11-16): the Codex CLI,
+    then Work when the CLI cannot be used for some other cause, then Chat
+    (first model position, Extra High verified before sending) when the usage
+    has run out. ROKID_SOLVER_FALLBACKS overrides the order; an empty value
+    disables switching.
     """
     primary = (os.environ.get("ROKID_SOLVER") or "").strip()
-    default = "chatgpt-web" if primary in ("chatgpt-work", "codex-cli") else ""
+    default = {"codex-cli": "chatgpt-work,chatgpt-web", "chatgpt-work": "chatgpt-web"}.get(primary, "")
     names = [primary, *(name.strip() for name in os.environ.get("ROKID_SOLVER_FALLBACKS", default).split(","))]
-    # Work is a primary only: its sealed jobs, originals and commit guard key on ROKID_SOLVER.
-    return list(dict.fromkeys(name for name in names if name and (
-        name == primary or (name != "chatgpt-work" and has_booklet_route(name)))))
+    return list(dict.fromkeys(name for name in names if name and (name == primary or has_booklet_route(name))))
+
+
+# One usage allowance: a limit one of these met is a limit the other would meet with the same booklet.
+_SHARED_ALLOWANCE = frozenset({"codex-cli", "chatgpt-work"})
+
+
+def _is_work(route: str | None = None) -> bool:
+    """Whether Work's sealed job and input fence apply: Work is the primary, or it is this attempt's route."""
+    return "chatgpt-work" in ((os.environ.get("ROKID_SOLVER") or "").strip(), route)
+
+
+def _session_routes(session_id: int | None) -> list[str]:
+    """The booklet routes this session can use. Work behind another primary needs the wearer's registered
+    generation; a session without one goes past it (as its primary, Work waits for the binding instead)."""
+    routes = _booklet_routes()
+    if session_id is not None and "chatgpt-work" in routes[1:]:
+        try:
+            work_binding(session_id)
+        except WorkConflict:
+            routes.remove("chatgpt-work")
+    return routes
 
 
 _route_check_lock = threading.Lock()
@@ -3306,7 +3327,7 @@ def _booklet_route(conn, session_id: int) -> tuple[str, bool]:
     sending to the limited one again. A stage already answered pins its route:
     the recording goes to the chat that holds the images.
     """
-    routes = _booklet_routes()
+    routes = _session_routes(session_id)
     rows = _deck_question_rows(conn, session_id)
     for row in rows:
         solution = _latest_solution_row(conn, row["id"])
@@ -3366,9 +3387,13 @@ def _record_solve_failure(conn, row, error: Exception, *, commit: bool = True,
         metadata["solve_failure"].update(files=error.files, room=error.room)
     if route and _switches_route(error, route):
         # ``route`` is passed only while a later route may take over.
-        closed = sorted(_closed_routes([current]) | {route})
+        routes = _session_routes(session_of_row)
+        closed = _closed_routes([current]) | {route}
+        if isinstance(error, ChatGptWebRateLimit) and route in _SHARED_ALLOWANCE:
+            closed |= _SHARED_ALLOWANCE.intersection(routes)
+        closed = sorted(closed)
         metadata["closed_routes"] = closed
-        following = next((name for name in _booklet_routes() if name not in closed), None)
+        following = next((name for name in routes if name not in closed), None)
         if following:
             metadata["solve_failure"]["next_route"] = following
     conn.execute("UPDATE questions SET structure_json = ? WHERE id = ?",
@@ -3719,7 +3744,8 @@ def _fallback_answer(conn, session_id: int, doc_id: int, question, route: str) -
     """The same booklet on a later route.
 
     It reads the canonical upright PNG: Work's sealed sensor JPEG carries its
-    rotation in the manifest, which only the Work prompt explains.
+    rotation in the manifest, which only the Work prompt explains. Work behind
+    another primary is given that PNG too, whatever ROKID_WORK_ORIGINAL_JPEG says.
     """
     try:
         solver = get_solver(route)
@@ -3739,7 +3765,7 @@ def _commit_fence(work_attempt, failed, route: str):
     """A reply from a later route has no sealed Work job. Its commit is fenced, as a
     failure is, on the session and inputs still being the ones the attempt began with."""
     primary = (os.environ.get("ROKID_SOLVER") or "").strip()
-    return work_attempt if failed or route not in ("", primary) else None
+    return work_attempt if failed or (route or primary) != "chatgpt-work" else None
 
 
 def _give_up_presend(error: Exception, attempt: int, can_switch: bool, route: str | None = None) -> bool:
@@ -3807,9 +3833,9 @@ def _fallback_problems(conn, doc_id: int, page_count: int) -> list:
 
 
 @contextmanager
-def _work_reply_commit_guard(session_id: int, replies, *, failed_attempt=None):
+def _work_reply_commit_guard(session_id: int, replies, *, failed_attempt=None, route: str | None = None):
     """Bind only the local deck commit, after all provider work has returned."""
-    if os.environ.get("ROKID_SOLVER", "").strip() != "chatgpt-work":
+    if not _is_work(route):
         yield
         return
     if failed_attempt is not None:
@@ -3829,7 +3855,7 @@ def _work_reply_commit_guard(session_id: int, replies, *, failed_attempt=None):
                 current = Question(document_id=str(session["document_id"]),
                     booklet_stage=session["analysis_stage"], audio_path=session["audio_path"],
                     document_pages=source_pages)
-                if _work_attempt_identity(session_id, current) != failed_attempt:
+                if _work_attempt_identity(session_id, current, route) != failed_attempt:
                     raise WorkConflict("the failed Work input is no longer current")
             finally:
                 conn.close()
@@ -3848,9 +3874,9 @@ def _work_reply_commit_guard(session_id: int, replies, *, failed_attempt=None):
         yield
 
 
-def _work_attempt_identity(session_id: int, question):
+def _work_attempt_identity(session_id: int, question, route: str | None = None):
     """Snapshot input hashes and native identity before provider work begins."""
-    if os.environ.get("ROKID_SOLVER", "").strip() != "chatgpt-work":
+    if not _is_work(route):
         return None
     with state_guard():
         audio = None if question.booklet_stage == "reading" else question.audio_path
@@ -3888,11 +3914,11 @@ def _answer_deck(conn, session, session_id: int, doc_id: int) -> bool:
         page_numbers=[p["page_number"] for p in source_pages],
         answer_only=True,
     )
+    route, can_switch = _booklet_route(conn, session_id)
     try:
-        work_attempt = _work_attempt_identity(session_id, question)
+        work_attempt = _work_attempt_identity(session_id, question, route)
     except WorkConflict:
         return True
-    route, can_switch = _booklet_route(conn, session_id)
     failed: Exception | None = None
     for attempt in range(PRESEND_TRIES):
         if attempt:
@@ -3911,7 +3937,7 @@ def _answer_deck(conn, session, session_id: int, doc_id: int) -> bool:
     if replies is None:
         return False
     try:
-        with _work_reply_commit_guard(session_id, replies, failed_attempt=_commit_fence(work_attempt, failed, route)):
+        with _work_reply_commit_guard(session_id, replies, failed_attempt=_commit_fence(work_attempt, failed, route), route=route):
             problems = _model_problems([item for item, _ in replies], len(source_pages))
             carried = 0
             if problems and items and not any(_latest_solution_row(conn, row["id"]) for row in items):
@@ -3981,11 +4007,11 @@ def _answer_mixed_deck(conn, session, session_id: int, doc_id: int) -> bool:
     question = Question(chat_key=f"session:{session_id}", booklet_stage="reading",
                         document_pages=source_pages, document_id=str(doc_id),
                         question_id="booklet", answer_only=True)
+    route, can_switch = _booklet_route(conn, session_id)
     try:
-        work_attempt = _work_attempt_identity(session_id, question)
+        work_attempt = _work_attempt_identity(session_id, question, route)
     except WorkConflict:
         return True
-    route, can_switch = _booklet_route(conn, session_id)
     failed, replies = None, []
     for attempt in range(PRESEND_TRIES):
         if attempt:
@@ -4007,7 +4033,7 @@ def _answer_mixed_deck(conn, session, session_id: int, doc_id: int) -> bool:
             if _give_up_presend(error, attempt, can_switch, route):
                 break
     try:
-        with _work_reply_commit_guard(session_id, replies, failed_attempt=_commit_fence(work_attempt, failed, route)):
+        with _work_reply_commit_guard(session_id, replies, failed_attempt=_commit_fence(work_attempt, failed, route), route=route):
             old_rows = _deck_question_rows(conn, session_id)
             carried = sum(_failure_count(row) for row in old_rows)
             closed = sorted(_closed_routes(old_rows))
@@ -4100,12 +4126,12 @@ def _answer_mixed_audio(conn, session, session_id, doc_id):
                         booklet_questions=slots, audio_path=session["audio_path"],
                         document_pages=_document_source_pages(conn, doc_id, session_id),
                         document_id=str(doc_id), question_id="booklet", answer_only=True)
-    try:
-        work_attempt = _work_attempt_identity(session_id, question)
-    except WorkConflict:
-        return True
     # The recording goes to the chat that holds the images: this stage never switches.
     route, _ = _booklet_route(conn, session_id)
+    try:
+        work_attempt = _work_attempt_identity(session_id, question, route)
+    except WorkConflict:
+        return True
     failed, replies = None, []
     for attempt in range(PRESEND_TRIES):
         if attempt:
@@ -4129,7 +4155,7 @@ def _answer_mixed_audio(conn, session, session_id, doc_id):
             if not _nothing_sent(error):
                 break
     try:
-        with _work_reply_commit_guard(session_id, replies, failed_attempt=_commit_fence(work_attempt, failed, route)):
+        with _work_reply_commit_guard(session_id, replies, failed_attempt=_commit_fence(work_attempt, failed, route), route=route):
             if failed is not None:
                 for row in rows:
                     _record_solve_failure(conn, row, failed, commit=False)

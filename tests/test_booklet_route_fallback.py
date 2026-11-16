@@ -220,10 +220,10 @@ def test_work_falls_back_to_chat_by_default_and_other_primaries_have_no_fallback
     assert main._booklet_routes() == ["chatgpt-work", "chatgpt-web"]
     monkeypatch.setenv("ROKID_SOLVER_FALLBACKS", "")
     assert main._booklet_routes() == ["chatgpt-work"]
-    # Work's sealed jobs and commit guard exist only for the primary.
+    # Work's sealed job and guards follow the attempt's route, so Work can stand behind another primary.
     monkeypatch.setenv("ROKID_SOLVER", "chatgpt-web")
     monkeypatch.setenv("ROKID_SOLVER_FALLBACKS", "chatgpt-work")
-    assert main._booklet_routes() == ["chatgpt-web"]
+    assert main._booklet_routes() == ["chatgpt-web", "chatgpt-work"]
 
 
 def test_a_saved_stage_pins_its_route_even_after_the_fallback_is_disabled(client, monkeypatch):

@@ -285,7 +285,11 @@ from __future__ import annotations
 #         limit does. Its sign-in is its own; it was retried where it stood, as a signed-out browser is.
 # 0.79.0: the Codex CLI answers in its Fast tier (service_tier=priority) unless ROKID_CODEX_SPEED=standard, as Work
 #         does unless ROKID_WORK_SPEED=standard (the operator, 2026-11-16: Fast for the CLI and for Work).
-APP_VERSION = "0.79.0"
+# 0.80.0: the booklet's routes in the operator's order (2026-11-16): the Codex CLI, then Work when the CLI cannot
+#         be used for another cause, then Chat when the usage has run out (a limit on the CLI or on Work closes
+#         both, since they draw on one allowance). Work runs behind another primary with its sealed job, input
+#         fence and commit guard, and is passed over for a session without a registered wearer.
+APP_VERSION = "0.80.0"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.

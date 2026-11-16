@@ -334,7 +334,7 @@ print("RESULT " + json.dumps(out, ensure_ascii=False))
 
 
 def test_the_server_half_of_the_route_runs_from_pages_to_the_answer_bundle(tmp_path):
-    """With ROKID_SOLVER=codex-cli in real mode, and Chat behind it for a limit, as the phone will run it."""
+    """With ROKID_SOLVER=codex-cli in real mode, with Work and then Chat behind it, as the phone will run it."""
     fake = tmp_path / "fake_codex.py"
     fake.write_text(FAKE_CODEX, encoding="utf-8")
     data = tmp_path / "data"
@@ -350,7 +350,7 @@ def test_the_server_half_of_the_route_runs_from_pages_to_the_answer_bundle(tmp_p
     lines = [line for line in done.stdout.splitlines() if line.startswith("RESULT ")]
     assert lines, done.stderr[-2500:]
     result = json.loads(lines[-1][7:])
-    assert result["routes"] == ["codex-cli", "chatgpt-web"]
+    assert result["routes"] == ["codex-cli", "chatgpt-work", "chatgpt-web"]
     assert result["solver"]["name"] == "codex-cli" and result["solver"]["ready"] is True
     assert result["bundle"] == 200
     assert result["items"] == [["ready", "④"], ["needs_input", ""]]
