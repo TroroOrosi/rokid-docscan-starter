@@ -150,8 +150,10 @@ for some other cause, Chat is for when the usage has run out (a limit goes to Ch
 same limit). The CLI and Work are to answer in Fast mode; Chat has no such choice. Time: an ordinary high-school
 test has to fit in its 50 minutes altogether, the wearer's writing included; a common test or a university
 entrance paper has to be done with 30 minutes of its time to spare. Today's code goes from the CLI to Chat on a
-limit and on a failure alike, Work runs as a primary only, the CLI is given no speed (0.169.0 has a Fast tier,
-`priority`; the key that sets it is unread), and the phone's Work is at Standard for trials. Model and effort are
+limit and on a failure alike, Work runs as a primary only, and the phone's Work is at Standard for trials. The CLI
+answers in its Fast tier from 0.79.0 (`-c service_tier=priority`; `ROKID_CODEX_SPEED=standard` for a trial; on the
+phone the route check's real request passed with it, and whether it was served at that tier does not show in the
+reply). Model and effort are
 GPT-6.1 Sol at Extra High; the one comparison on record (Work, 2026-11-09, twenty pages, once each: Extra High
 556.6 s, High 339.6 s, both 13 of 13) was judged on 11/12 to favour High for the time target and nothing was
 changed; on the CLI no effort or speed has been compared (Extra High: 14 pages in 81 s, 47 in 7 min 11 s). A
