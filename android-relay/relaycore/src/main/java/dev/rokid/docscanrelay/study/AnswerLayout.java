@@ -52,6 +52,13 @@ public final class AnswerLayout {
         int end = start;
         int preferredBreak = start;
         boolean hasNonWhitespace = false;
+        // A bracketed group such as a coordinate pair stays together when it can: on the glasses on 2026-11-16
+        // "(5," ended a line and "0)" began the next. Inside brackets a comma or colon is no place to break, and a
+        // line that runs out there breaks before the opening bracket instead, when Japanese text stands right
+        // before it (f(a,b) is not torn from f, nor a root sign from what it covers) and the group so far takes
+        // at most half the line (a long remark in brackets still fills its line).
+        int depth = 0;
+        int groupBreak = start;
         while (end < text.length() && text.charAt(end) != '\n' && text.charAt(end) != '\r') {
             int next = clusterEnd(text, clusters, end);
             float measured = measurer.width(text.substring(start, next));
@@ -60,13 +67,24 @@ public final class AnswerLayout {
             }
             if (measured > width) {
                 if (end == start) throw new IllegalArgumentException("viewport narrower than glyph");
-                if (preferredBreak > start) end = preferredBreak;
+                boolean group = depth > 0 && (end - groupBreak) * 2 <= end - start;
+                int held = group ? Math.max(preferredBreak, groupBreak) : preferredBreak;
+                if (held > start) end = held;
                 break;
             }
+            int last = text.codePointBefore(next);
+            if ("(（[［{｛".indexOf(last) >= 0) {
+                if (depth++ == 0) {
+                    int before = end > start ? text.codePointBefore(end) : ' ';
+                    groupBreak = before >= 0x2E80 ? end : start;
+                }
+            } else if (")）]］}｝".indexOf(last) >= 0) {
+                depth = Math.max(0, depth - 1);
+            }
             end = next;
-            int last = text.codePointBefore(end);
             if (!Character.isWhitespace(last)) hasNonWhitespace = true;
-            if (hasNonWhitespace && (Character.isWhitespace(last) || "、。;,:".indexOf(last) >= 0)) {
+            if (hasNonWhitespace && (Character.isWhitespace(last) || "、。;".indexOf(last) >= 0
+                    || (depth == 0 && ",:".indexOf(last) >= 0))) {
                 preferredBreak = end;
             }
         }

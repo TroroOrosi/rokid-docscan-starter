@@ -35,6 +35,43 @@ public class AnswerDiagramTest {
                 .put("elements", new org.json.JSONArray("[{\"type\":\"circle\",\"cx\":0.5,\"cy\":0.5,\"r\":0.2,\"filled\":1}]"))));
     }
 
+    private static AnswerDiagram labelled() throws Exception {
+        return new AnswerDiagram(new JSONObject("{\"alt\":\"circle\",\"aspect_ratio\":1,\"elements\":["
+                + "{\"type\":\"circle\",\"cx\":0.5,\"cy\":0.5,\"r\":0.3},"
+                + "{\"type\":\"text\",\"x\":0.1,\"y\":0.5,\"text\":\"x\"},"
+                + "{\"type\":\"text\",\"x\":0.1,\"y\":0.2,\"text\":\"a label too long to fit\"}]}"));
+    }
+
+    @Test public void onlyTheLabelsTheFigureShowsAsNumbersAreListedBeforeIt() throws Exception {
+        // Glasses, 2026-11-16: a real answer's eight short labels, each drawn in its figure, were also listed
+        // before it and took a screen and a third.
+        AnswerDiagram diagram = labelled();
+        assertEquals("\n図1: circle\n[2] x\n[3] a label too long to fit", diagram.readingText(1));
+        assertEquals("\n図1: circle\n[3] a label too long to fit", diagram.readingText(1, (d, label) -> label.length() > 5));
+        assertEquals("\n図1: circle", diagram.readingText(1, (d, label) -> false));
+    }
+
+    @Test public void theReaderListsALabelOnlyWhenItsViewDrawsANumberForIt() throws Exception {
+        AnswerItem item = new AnswerItem("g1", "用紙", "q1", "項目1", "x", AnswerItem.Status.READY, "", List.of(labelled()));
+        AnswerBundle bundle = new AnswerBundle("1", "a".repeat(64), 1, List.of(item));
+        AnswerReader unfitted = new AnswerReader(bundle, 40, 2, String::length, true);
+        AnswerReader fitted = new AnswerReader(bundle, true);
+        fitted.viewport(40, 2, String::length, (d, label) -> label.length() > 5);
+        assertTrue(textBeforeTheFigure(unfitted).contains("[2] x"));
+        String shown = textBeforeTheFigure(fitted);
+        assertFalse(shown, shown.contains("[2]"));
+        assertTrue(shown, shown.contains("図1: circle") && shown.contains("[3] a label too long to fit"));
+    }
+
+    private static String textBeforeTheFigure(AnswerReader reader) {
+        StringBuilder text = new StringBuilder();
+        for (int screens = 0; screens < 20 && reader.diagram() == null; screens++) {
+            for (String line : reader.page().lines) text.append(line).append('\n');
+            reader.forward();
+        }
+        return text.toString();
+    }
+
     @Test public void diagramSurvivesOfflineBundlePagingAndResume() throws Exception {
         AnswerDiagram diagram = new AnswerDiagram(new JSONObject("{\"alt\":\"circle\",\"aspect_ratio\":1,"
                 + "\"elements\":[{\"type\":\"circle\",\"cx\":0.5,\"cy\":0.5,\"r\":0.3}]}"));

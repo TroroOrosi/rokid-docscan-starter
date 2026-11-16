@@ -85,6 +85,8 @@ public class AnswerViewTest {
         double[][] anchors = {{.58,.16},{.94,.8},{.51,.08},{.43,.8},{.26,.81},{.69,.81},{.39,.95},{.08,.81},{.87,.81}};
         for (int n = 0; n < labels.length; n++) elements.put(new org.json.JSONObject().put("type", "text")
                 .put("x", anchors[n][0]).put("y", anchors[n][1]).put("text", labels[n]));
+        String wide = "the hatched region lies under the axis";
+        elements.put(new org.json.JSONObject().put("type", "text").put("x", .1).put("y", .5).put("text", wide));
         org.json.JSONObject figure = new org.json.JSONObject().put("alt", "y=x²−1, −2≤x≤2. The hatched region is 0≤x≤1, x²−1≤y≤0.")
                 .put("aspect_ratio", 1).put("elements", elements);
         AnswerItem item = new AnswerItem("g1", "Paper", "q1", "Graph", "y = x² − 1 (−2 ≤ x ≤ 2)", AnswerItem.Status.READY, "",
@@ -93,7 +95,16 @@ public class AnswerViewTest {
         AnswerView view = new AnswerView(RuntimeEnvironment.getApplication());
         view.layout(0, 0, 480, 640);
         view.bind(reader);
-        while (reader.diagram() == null) reader.forward();
+        // Before the figure: its description and the one label too wide to be drawn in it, by its number. The nine
+        // short labels are drawn in the figure and not listed (glasses, 2026-11-16: such a list took a screen).
+        StringBuilder before = new StringBuilder();
+        while (reader.diagram() == null) {
+            for (String line : reader.page().lines) before.append(line);
+            reader.forward();
+        }
+        String listed = before.toString().replaceAll("\\s", "");
+        assertTrue(listed, listed.contains(("[" + elements.length() + "]" + wide).replaceAll("\\s", "")));
+        assertFalse(listed, listed.contains("]x") || listed.contains("]O") || listed.contains("[9]"));
         view.refresh();
         android.graphics.Bitmap bitmap = android.graphics.Bitmap.createBitmap(480, 640, android.graphics.Bitmap.Config.ARGB_8888);
         view.draw(new android.graphics.Canvas(bitmap));

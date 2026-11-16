@@ -33,6 +33,32 @@ public class AnswerLayoutTest {
         assertEquals(0, pages.get(0).start);
     }
 
+    @Test public void aBracketedGroupIsNotBrokenAtItsComma() {
+        // Glasses, 2026-11-16: "(5," ended a line and "0)" began the next, three times in one real answer.
+        String answer = "軌跡は円から点(5,0)を除いたものである。";
+        List<String> lines = new ArrayList<>();
+        for (AnswerLayout.Page page : AnswerLayout.paginate(answer, 10, 1, MONO)) lines.addAll(page.lines);
+        assertEquals(List.of("軌跡は円から点", "(5,0)を除いたも", "のである。"), lines);
+        for (int width = 8; width <= 12; width++) {
+            for (AnswerLayout.Page page : AnswerLayout.paginate(answer, width, 1, MONO)) {
+                for (String line : page.lines) assertFalse(line + " at width " + width, line.endsWith("(5,"));
+            }
+        }
+        // A group that has closed no longer holds the line back, and outside brackets a comma is still a break.
+        lines.clear();
+        for (AnswerLayout.Page page : AnswerLayout.paginate(answer, 14, 1, MONO)) lines.addAll(page.lines);
+        assertEquals(List.of("軌跡は円から点(5,0)を除", "いたものである。"), lines);
+        lines.clear();
+        for (AnswerLayout.Page page : AnswerLayout.paginate("a=1,b=2,c=3", 6, 1, MONO)) lines.addAll(page.lines);
+        assertEquals(List.of("a=1,", "b=2,", "c=3"), lines);
+        // A function's argument list is not torn from its name: there the line breaks where it runs out, as before.
+        lines.clear();
+        for (AnswerLayout.Page page : AnswerLayout.paginate("y=f(a,b)", 6, 1, MONO)) lines.addAll(page.lines);
+        assertEquals(List.of("y=f(a,", "b)"), lines);
+        // A long remark in brackets is no such group: its line is filled as before, not cut short at the bracket.
+        assertEquals("である(条件によって", AnswerLayout.paginate("である(条件によっては成り立たない)", 10, 1, MONO).get(0).lines.get(0));
+    }
+
     @Test public void combiningMarksAndSurrogatePairsStayTogether() {
         String answer = "ABe\u0301𝑥CD";
         List<AnswerLayout.Page> pages = AnswerLayout.paginate(answer, 3, 1, MONO);

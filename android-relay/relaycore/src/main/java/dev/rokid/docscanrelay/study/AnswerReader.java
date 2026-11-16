@@ -13,6 +13,7 @@ public final class AnswerReader {
     private float width;
     private int lines;
     private AnswerLayout.Measurer measurer;
+    private AnswerDiagram.Numbering numbering;
     private List<AnswerLayout.Page> pages;
     private int textPageCount;
     private int contentLength;
@@ -74,6 +75,12 @@ public final class AnswerReader {
                 : contentLength + 1 + pageIndex - textPageCount;
     }
 
+    /** The view also says which labels its figures show as numbers; only those are listed before a figure. */
+    public void viewport(float width, int lines, AnswerLayout.Measurer measurer, AnswerDiagram.Numbering numbering) {
+        this.numbering = numbering;
+        viewport(width, lines, measurer);
+    }
+
     public void viewport(float width, int lines, AnswerLayout.Measurer measurer) {
         if (measurer == null || !Float.isFinite(width) || width <= 0 || lines < 1) {
             throw new IllegalArgumentException("invalid answer viewport");
@@ -108,7 +115,7 @@ public final class AnswerReader {
         }
     }
 
-    private static String content(AnswerItem item) {
+    private String content(AnswerItem item) {
         String content;
         switch (item.status) {
             case READY: content = item.answer; break;
@@ -119,7 +126,7 @@ public final class AnswerReader {
             case FAILED: content = "解析できません\n" + item.issue; break;
             default: content = "解析中"; break;
         }
-        for (int i = 0; i < item.diagrams.size(); i++) content += item.diagrams.get(i).readingText(i + 1);
+        for (int i = 0; i < item.diagrams.size(); i++) content += item.diagrams.get(i).readingText(i + 1, numbering);
         return content;
     }
 

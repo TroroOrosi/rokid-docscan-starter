@@ -106,14 +106,25 @@ public final class AnswerDiagram {
         catch (JSONException impossible) { throw new IllegalStateException(impossible); }
     }
 
-    /** Full descriptions/labels remain reachable even when a label cannot fit in the figure. */
-    public String readingText(int figureNumber) {
+    /** Whether the display draws a label as its number instead of its text. The view decides: it measures the font. */
+    public interface Numbering { boolean numbered(AnswerDiagram diagram, String label); }
+
+    /** Without a view to ask, every label is listed. */
+    public String readingText(int figureNumber) { return readingText(figureNumber, null); }
+
+    /**
+     * The figure's description, then the full text of each label the figure shows only as a number. A label drawn
+     * in the figure is not repeated: on the glasses on 2026-11-16 a real answer's eight short labels, all drawn in
+     * their figure, were listed before it as well and took a screen and a third.
+     */
+    public String readingText(int figureNumber, Numbering numbering) {
         StringBuilder text = new StringBuilder("\n図" + figureNumber + ": " + alt);
         try {
             JSONArray elements = toJson().getJSONArray("elements");
             for (int i = 0; i < elements.length(); i++) {
                 JSONObject e = elements.getJSONObject(i);
-                if (e.getString("type").equals("text")) {
+                if (e.getString("type").equals("text")
+                        && (numbering == null || numbering.numbered(this, e.getString("text")))) {
                     text.append("\n[").append(i + 1).append("] ").append(e.getString("text"));
                 }
             }

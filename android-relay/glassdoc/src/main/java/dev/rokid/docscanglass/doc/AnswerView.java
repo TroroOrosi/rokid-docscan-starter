@@ -133,7 +133,7 @@ final class AnswerView extends View {
             return;
         }
         int bodyLines = Math.max(1, (int)((getHeight() - bodyTop() - getWidth() * SIDE_PADDING) / lineHeight()));
-        reader.viewport(textWidth(), bodyLines, paint::measureText);
+        reader.viewport(textWidth(), bodyLines, paint::measureText, this::drawnAsNumber);
     }
 
     private float lineHeight() {
@@ -184,14 +184,28 @@ final class AnswerView extends View {
         canvas.drawPath(continuationPath, continuationPaint);
     }
 
-    private void drawDiagram(Canvas canvas, AnswerDiagram diagram, float left, float top) {
-        float width = textWidth(), height = getHeight() - top - left;
-        if (width / height > diagram.aspectRatio) width = height * diagram.aspectRatio;
-        else height = width / diagram.aspectRatio;
-        left = (getWidth() - width) / 2;
+    /** The figure's width on this display: as wide as the text, or as its height and aspect ratio allow. */
+    private float figureWidth(AnswerDiagram diagram) {
+        float width = textWidth(), height = getHeight() - bodyTop() - getWidth() * SIDE_PADDING;
+        return width / height > diagram.aspectRatio ? height * diagram.aspectRatio : width;
+    }
+
+    private Paint vectorPaint() {
         Paint vector = new Paint(paint);
         vector.setStrokeWidth(Math.max(2, panelHeight() * .004f));
         vector.setTextSize(Math.max(18, panelHeight() * .035f));
+        return vector;
+    }
+
+    /** One rule for a label too wide for its figure: drawn as its number, and listed in full before the figure. */
+    private boolean drawnAsNumber(AnswerDiagram diagram, String label) {
+        return label.contains("\n") || vectorPaint().measureText(label) > figureWidth(diagram) * .45f;
+    }
+
+    private void drawDiagram(Canvas canvas, AnswerDiagram diagram, float left, float top) {
+        float width = figureWidth(diagram), height = width / diagram.aspectRatio;
+        left = (getWidth() - width) / 2;
+        Paint vector = vectorPaint();
         try {
             JSONArray elements = diagram.toJson().getJSONArray("elements");
             for (int i = 0; i < elements.length(); i++) {
@@ -257,7 +271,7 @@ final class AnswerView extends View {
                         vector.setStyle(Paint.Style.FILL);
                         String label = e.getString("text");
                         // A numbered marker refers to the full, paginated label before the figure.
-                        if (label.contains("\n") || vector.measureText(label) > width * .45f) label = "[" + (i+1) + "]";
+                        if (drawnAsNumber(diagram, label)) label = "[" + (i+1) + "]";
                         float x = Math.max(left, Math.min(left + (float)e.getDouble("x") * width,
                                 left + width - vector.measureText(label)));
                         float y = Math.max(top - vector.ascent(), Math.min(top + (float)e.getDouble("y") * height,
