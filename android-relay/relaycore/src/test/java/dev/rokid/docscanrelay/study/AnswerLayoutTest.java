@@ -82,6 +82,9 @@ public class AnswerLayoutTest {
         // Glasses, 2026-11-16: a line held "、" and nothing else. The character before it comes down with it.
         assertEquals(List.of("原点からの距離が5未満であ", "り、Mは内部"), linesOf("原点からの距離が5未満であり、Mは内部", 14));
         assertEquals(List.of("これは文であ", "る。次の文"), linesOf("これは文である。次の文", 7));
+        // Glasses, 2026-11-16, with one character brought down: "))。" still began a line. Closing marks that follow
+        // one another come down together, behind the character before them.
+        assertEquals(List.of("=m(16m-7)/((6m-1)(3m-", "1))。"), linesOf("=m(16m-7)/((6m-1)(3m-1))。", 23));
         // One character alone cannot give its place up.
         assertEquals(List.of("あ", "、", "い"), linesOf("あ、い", 1));
     }

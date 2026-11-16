@@ -65,7 +65,6 @@ public final class AnswerLayout {
         // (a long remark in brackets still fills its line).
         int depth = 0;
         int runBreak = start;
-        int previous = start;
         while (end < text.length() && text.charAt(end) != '\n' && text.charAt(end) != '\r') {
             int next = clusterEnd(text, clusters, end);
             float measured = measurer.width(text.substring(start, next));
@@ -81,10 +80,12 @@ public final class AnswerLayout {
                 }
                 if (held > start) {
                     end = held;
-                } else if (previous > start && NOT_FIRST.indexOf(text.codePointAt(end)) >= 0) {
-                    // No line begins with a closing mark (a line held "、" and nothing else): the character
-                    // before it comes down with it.
-                    end = previous;
+                } else {
+                    // No line begins with a closing mark (a line held "、" and nothing else, another began
+                    // "))。"): closing marks that follow one another come down with the character before them.
+                    int back = end;
+                    while (back > start && NOT_FIRST.indexOf(text.codePointAt(back)) >= 0) back = clusters.preceding(back);
+                    if (back > start) end = back;
                 }
                 break;
             }
@@ -99,7 +100,6 @@ public final class AnswerLayout {
             } else if (CLOSING.indexOf(last) >= 0) {
                 depth = Math.max(0, depth - 1);
             }
-            previous = end;
             end = next;
             if (!Character.isWhitespace(last)) hasNonWhitespace = true;
             if (hasNonWhitespace && (Character.isWhitespace(last) || "、。;".indexOf(last) >= 0
