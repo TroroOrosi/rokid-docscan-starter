@@ -76,8 +76,8 @@ from PIL import Image
 from ..source_bundle import MAX_SCALE, _readable, page_tiles, source_images
 from .base import Question, Solver, SolveResult
 from .chatgpt_web import (_ALL_TASK, _booklet_chat_key, _booklet_replies, ChatGptWebAuthenticationRequired,
-                          ChatGptWebError, ChatGptWebRateLimit, ChatGptWebReplyIncomplete, ChatGptWebSendNotAuthorized,
-                          chatgpt_send_enabled, clip_page, grey_note)
+                          ChatGptWebError, ChatGptWebModelMismatch, ChatGptWebRateLimit, ChatGptWebReplyIncomplete,
+                          ChatGptWebSendNotAuthorized, chatgpt_send_enabled, clip_page, grey_note)
 from .llm_adapter import _ANSWER_ONLY_SYSTEM
 
 _TERMUX_BINARY = ("lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-arm64/vendor/"
@@ -331,6 +331,15 @@ def _regions(reply: str, photos: int) -> tuple[dict[int, list[tuple[float, float
             found[index] = kept[:_REGIONS_MOST]
     return found, partial & set(found)
 _LIMIT = re.compile(r"usage limit|rate limit|quota", re.IGNORECASE)
+# A run that ended because the service no longer offers the model. The CLI warns "Model metadata for `<model>` not
+# found. Defaulting to fallback metadata; ..." (its own words, read from the binary of codex 0.153.2 on 2026-11-16)
+# and the service's error code is model_not_found; the service's sentence is not ours to fix, so its likely forms
+# are taken too. Looked for only in a run that failed: a CLI older than a model that still answers warns and works.
+_NO_MODEL = re.compile(
+    r"model metadata for .{0,200}?not found|model[_ ]not[_ ]found|unknown model|invalid model"
+    r"|not an? (?:valid|supported|available) model"
+    r"|model\b.{0,200}?(?:is not supported|does not exist|is not available|no longer (?:available|supported))",
+    re.IGNORECASE)
 
 
 def _time_allowed(pages: int) -> tuple[float, float]:
@@ -534,6 +543,10 @@ class CodexCliSolver(Solver):
         if done.returncode != 0 or not reply.is_file():
             if _LIMIT.search(output):
                 raise ChatGptWebRateLimit("the Codex CLI reported a usage limit")
+            if _NO_MODEL.search(output):
+                # Named, so the check before use says why and the booklet goes to the next route. No other model
+                # is tried: which one answers a booklet is the operator's choice (ROKID_CODEX_MODEL).
+                raise ChatGptWebModelMismatch("the Codex CLI's model is not offered; nothing answered")
             # The CLI's own last line is the only record of why; it names no page content.
             raise ChatGptWebError(f"the Codex CLI ended without a reply: {_last_line(done.stderr) or _last_line(done.stdout)}")
         return reply.read_text(encoding="utf-8")
@@ -544,7 +557,8 @@ class CodexCliSolver(Solver):
         order. A photo with no region goes as the Chat route sends it; one of which something returned was left out
         goes whole beside its regions.
 
-        None when nothing could be located at all (the caller sends the photos as before). A usage limit is raised.
+        None when nothing could be located at all (the caller sends the photos as before). A usage limit is raised,
+        and so is a model that is not offered: the request for the answers would end the same way.
         """
         ordered = sorted(pages, key=lambda page: page["page_number"])
         photos = []
@@ -560,7 +574,7 @@ class CodexCliSolver(Solver):
         try:
             reply = cls._exec(directory, environment, model=model, effort="low", images=views, prompt=_LOCATE_PROMPT,
                               timeout=min(timeout, 900), schema=_LOCATE_SCHEMA)
-        except ChatGptWebRateLimit:
+        except (ChatGptWebRateLimit, ChatGptWebModelMismatch):
             raise
         except ChatGptWebError:
             return None

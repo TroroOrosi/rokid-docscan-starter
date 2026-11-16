@@ -19,8 +19,8 @@ from PIL import Image, ImageChops, ImageDraw
 from app import config
 from app.solvers import codex_cli
 from app.solvers.base import Question
-from app.solvers.chatgpt_web import (ChatGptWebAuthenticationRequired, ChatGptWebError, ChatGptWebRateLimit,
-                                     ChatGptWebSendNotAuthorized)
+from app.solvers.chatgpt_web import (ChatGptWebAuthenticationRequired, ChatGptWebError, ChatGptWebModelMismatch,
+                                     ChatGptWebRateLimit, ChatGptWebSendNotAuthorized)
 
 FAKE_CODEX = r'''
 import atexit, json, os, sys, time
@@ -226,6 +226,55 @@ def test_a_run_that_fails_for_another_reason_is_a_send_that_did_not_happen(codex
         codex_cli.CodexCliSolver().answer_all(question=_booklet(tmp_path))
     assert type(raised.value) is ChatGptWebError, "the bare class is what the server retries and moves to another route"
     assert "error sending request" in str(raised.value), "the CLI's own last line is the only record of the cause"
+
+
+# A model the service no longer offers. The first line is the CLI's own warning, read from the binary of a CLI
+# installed on this PC (codex 0.153.2, 2026-11-16); `model_not_found` is an error code in that binary's list. The
+# other two are the service's words as they have read elsewhere, which the pattern has to tolerate: no run has been
+# made against a model that was really withdrawn.
+_MODEL_GONE = [
+    "warning: Model metadata for `gpt-6.1-sol` not found. Defaulting to fallback metadata; this can degrade "
+    "performance and cause issues.\nERROR: unexpected status 400 Bad Request",
+    'ERROR: {"type":"error","error":{"code":"model_not_found","message":"..."}}',
+    "ERROR: unexpected status 400 Bad Request: {\"detail\":\"The 'gpt-6.1-sol' model is not supported when using "
+    "Codex with a ChatGPT account.\"}",
+    "stream error: The model `gpt-6.1-sol` does not exist or you do not have access to it.",
+]
+
+
+@pytest.mark.parametrize("message", _MODEL_GONE)
+def test_the_check_names_a_model_that_is_no_longer_offered(codex, monkeypatch, message):
+    """The route check then says model_mismatch, not the code every other failure of the CLI gets."""
+    monkeypatch.setenv("FAKE_CODEX_FAIL", message)
+    with pytest.raises(ChatGptWebModelMismatch):
+        codex_cli.CodexCliSolver().check()
+
+
+@pytest.mark.parametrize("message", _MODEL_GONE)
+def test_a_booklet_whose_model_is_no_longer_offered_stops_at_the_first_request_and_asks_no_other_model(
+        codex, tmp_path, monkeypatch, message):
+    """ChatGptWebModelMismatch is a send that did not happen: the server hands the booklet to the next route."""
+    monkeypatch.setenv("FAKE_CODEX_LOCATE_FAIL", message)
+    monkeypatch.setenv("FAKE_CODEX_FAIL", message)
+    with pytest.raises(ChatGptWebModelMismatch) as raised:
+        codex_cli.CodexCliSolver().answer_all(question=_booklet(tmp_path))
+    assert "gpt-6.1-sol" not in str(raised.value) and "Bad Request" not in str(raised.value)
+    [request] = [call for call in codex() if call["args"][:1] == ["exec"]]
+    assert request["args"][request["args"].index("-m") + 1] == "gpt-6.1-sol", "no other model is guessed"
+
+
+def test_a_failure_that_only_names_the_model_is_not_taken_for_a_model_that_is_gone(codex, tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_CODEX_FAIL", "model: gpt-6.1-sol\nERROR: stream disconnected before completion")
+    with pytest.raises(ChatGptWebError) as raised:
+        codex_cli.CodexCliSolver().answer_all(question=_booklet(tmp_path))
+    assert type(raised.value) is ChatGptWebError
+
+
+def test_a_usage_limit_is_still_a_usage_limit_when_the_model_is_also_unknown_to_the_cli(codex, monkeypatch):
+    """A limit sends the booklet straight to Chat; the CLI's warning about its own model list must not hide it."""
+    monkeypatch.setenv("FAKE_CODEX_FAIL", _MODEL_GONE[0] + "\nERROR: You've hit your usage limit.")
+    with pytest.raises(ChatGptWebRateLimit):
+        codex_cli.CodexCliSolver().check()
 
 
 def test_not_signed_in_is_unready_and_an_authentication_failure(codex, tmp_path, monkeypatch):
