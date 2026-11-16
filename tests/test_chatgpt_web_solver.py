@@ -10,10 +10,12 @@ page still matches the selectors -- only a live run shows that.
 
 from __future__ import annotations
 
+import contextlib
 import json
 
 import io
 import itertools
+import re
 import shutil
 import subprocess
 
@@ -3512,3 +3514,206 @@ def test_booklet_reply_limit_rejects_overflow_without_accepting_a_partial_invent
     with pytest.raises(ValueError, match="300"):
         chatgpt_web._booklet_replies(data, subject=None, extras={})
     assert not chatgpt_web.ChatGptWebClient._valid_batch(json.dumps(data), batch)
+
+
+# --- what the page's structure was when a browser route failed ------------------------------------------------
+# 2026-11-14 and 11/16: nine changes of the live page each stopped the Chat route, each was seen only when a real
+# booklet failed, and each needed a person to read the page by hand. A failure now leaves the structure it met:
+# how many elements each selector matches and how many of them are drawn, and the page's own names of the buttons
+# in its forms. Never a message, a title, an identifier or an account.
+
+_CHAT_ID = "6917a1b2-0c5e-4d0a-9f3b-2f6f0c1d2e3f"
+_MESSAGE = "第2問 傍線部の理由を説明せよ"
+
+
+class _StructuredPage(_StubPage):
+    """A page that answers the structure script: every selector it is asked about matches twice, once drawn."""
+
+    structure = "as asked"
+
+    def sent(self):
+        super().sent()
+        self.url = f"https://chatgpt.com/c/{_CHAT_ID}?model=gpt-6"
+
+    def evaluate(self, expression):
+        if "page_structure" not in expression:
+            return super().evaluate(expression)
+        self.events.append(("structure", None))
+        if self.structure == "the script fails":
+            raise RuntimeError("Execution context was destroyed: " + _MESSAGE)
+        if self.structure == "another shape":
+            return {"models": ["GPT-6"]}
+        asked = json.loads(expression[len(chatgpt_web._STRUCTURE_JS) + 1:-1])
+        return {"selectors": {name: {"matches": 2, "drawn": 1} for name in asked},
+                "form_buttons": [{"aria_label": "Send prompt", "data_testid": None},
+                                 {"aria_label": "Remove page01.png", "data_testid": "attachment-6917a1b20c5e"}],
+                "forms": 2, "dialogs": 0, "alerts": 1}
+
+
+def _lost_reply(monkeypatch, page, text=_MESSAGE, client=None):
+    """A message that is sent and never answered, through the client's own entry: the reply wait gives up."""
+    from app.solvers import cdp
+
+    _fast(monkeypatch)
+    monkeypatch.setattr(chatgpt_web, "REPLY_START_S", -1)
+    monkeypatch.setattr(cdp, "connect_over_cdp", lambda endpoint: _Browser(page))
+    with pytest.raises(chatgpt_web.ChatGptWebUncertain) as raised:
+        (client or chatgpt_web.ChatGptWebClient()).complete(system="Answer only", prompt=text)
+    return raised.value
+
+
+def _snapshots(tmp_path):
+    return sorted((tmp_path / "browser-state" / "failures").glob("*.json"))
+
+
+def test_a_failed_reply_wait_leaves_the_pages_structure_and_nothing_of_its_content(monkeypatch, tmp_path):
+    page = _StructuredPage([], streaming=[])
+    error = _lost_reply(monkeypatch, page)
+
+    [path] = _snapshots(tmp_path)
+    assert re.fullmatch(r"20\d{6}T\d{9}Z-browser_outcome_unknown\.json", path.name)
+    kept = path.read_text(encoding="utf-8")
+    snapshot = json.loads(kept)
+    assert snapshot["route"] == "chatgpt-web" and snapshot["code"] == "browser_outcome_unknown"
+    assert re.fullmatch(r"20\d\d-\d\d-\d\dT\d\d:\d\d:\d\dZ", snapshot["time"])
+    # Where the error the server sees was raised, and where the failure behind it was: the wait for a reply.
+    assert re.fullmatch(r"chatgpt_web\.py:\d+:_ask_locked", snapshot["at"])
+    assert re.fullmatch(r"chatgpt_web\.py:\d+:send_and_read", snapshot["cause_at"])
+    assert (snapshot["type"], snapshot["cause_type"]) == ("ChatGptWebUncertain", "ChatGptWebError")
+    structure = snapshot["page"]
+    assert structure["address"] == "https://chatgpt.com/c/<id>?model=<v>"
+    assert set(structure["selectors"]) == {
+        "composer", "send", "stop", "attachment", "file_input", "upload_control", "user_turn", "assistant_turn",
+        "model_control", "effort_control", "chat_links", "new_chat"}
+    assert all(count == {"matches": 2, "drawn": 1} for count in structure["selectors"].values())
+    assert structure["form_buttons"] == [{"aria_label": "Send prompt", "data_testid": None},
+                                         {"aria_label": "Remove <file>", "data_testid": "attachment-<id>"}]
+    assert (structure["forms"], structure["dialogs"], structure["alerts"]) == (2, 0, 1)
+    for private in (_MESSAGE, _CHAT_ID, "6917a1b2", "page01", "gpt-6", str(error)):
+        assert private not in kept
+
+
+def test_the_selectors_counted_are_the_ones_the_chat_route_works_with(monkeypatch, tmp_path):
+    asked = {}
+
+    class Page(_StructuredPage):
+        def evaluate(self, expression):
+            if "page_structure" in expression:
+                asked.update(json.loads(expression[len(chatgpt_web._STRUCTURE_JS) + 1:-1]))
+            return super().evaluate(expression)
+
+    monkeypatch.setattr(chatgpt_web, "STOP_SEL", "button.retuned-stop")  # a selector retuned after a page change
+    _lost_reply(monkeypatch, Page([], streaming=[]))
+
+    assert asked == {
+        "composer": chatgpt_web.COMPOSER_SEL, "send": chatgpt_web.SEND_SEL, "stop": "button.retuned-stop",
+        "attachment": chatgpt_web.ATTACHMENT_SEL, "file_input": chatgpt_web.FILE_INPUT_SEL,
+        "upload_control": chatgpt_web.FILE_UPLOAD_SEL, "user_turn": chatgpt_web.USER_SEL,
+        "assistant_turn": chatgpt_web.ASSISTANT_SEL, "model_control": chatgpt_web.MODEL_SEL,
+        "effort_control": chatgpt_web.EFFORT_SEL, "chat_links": chatgpt_web.CHAT_LINKS_SEL,
+        "new_chat": chatgpt_web.NEW_CHAT_SEL}
+
+
+def test_taking_the_snapshot_only_reads_the_page(monkeypatch, tmp_path):
+    page = _StructuredPage([], streaming=[])
+    _lost_reply(monkeypatch, page)
+
+    sent = max(index for index, kind in enumerate(_kinds(page)) if kind == "send")
+    assert [kind for kind, _ in page.events[sent + 1:]] == ["structure"], "no click, key, text or load after the failure"
+
+
+@pytest.mark.parametrize("unreadable", ["the script fails", "another shape", "the folder cannot be written"])
+def test_a_snapshot_that_cannot_be_taken_is_skipped_and_the_failure_is_the_one_raised(monkeypatch, tmp_path, unreadable):
+    page = _StructuredPage([], streaming=[])
+    page.structure = unreadable
+    if unreadable == "the folder cannot be written":
+        (tmp_path / "browser-state").mkdir()
+        (tmp_path / "browser-state" / "failures").write_text("a file where the folder would be", encoding="utf-8")
+
+    error = _lost_reply(monkeypatch, page)
+
+    assert "send outcome unknown" in str(error) and isinstance(error.__cause__, ChatGptWebError)
+    assert not _snapshots(tmp_path) and _guard_state(tmp_path) == "uncertain"
+
+
+def test_a_failure_that_says_nothing_of_the_page_leaves_no_snapshot(monkeypatch, tmp_path):
+    from app.browser_guard import BrowserGuard
+    from app.solvers import cdp
+
+    _fast(monkeypatch)
+    limit = "使用制限に達しました。しばらくしてからもう一度お試しください。"
+    for page, expected, held in ((_StructuredPage([limit, limit]), chatgpt_web.ChatGptWebRateLimit, False),
+                                 (_StructuredPage(["x"]), chatgpt_web.ChatGptWebBusy, True)):
+        monkeypatch.setattr(cdp, "connect_over_cdp", lambda endpoint, page=page: _Browser(page))
+        with BrowserGuard(tmp_path) if held else contextlib.nullcontext():
+            with pytest.raises(expected):
+                chatgpt_web.ChatGptWebClient().complete(system="Answer only", prompt="問1")
+        assert ("structure", None) not in page.events
+    # An earlier send that is still unresolved: nothing of this call reached the page.
+    _foreign_mark(tmp_path, [])
+    page = _StructuredPage(["x"])
+    monkeypatch.setattr(cdp, "connect_over_cdp", lambda endpoint: _Browser(page))
+    with pytest.raises(chatgpt_web.ChatGptWebBlocked):
+        chatgpt_web.ChatGptWebClient().complete(system="Answer only", prompt="問1")
+    assert page.events == [] and not _snapshots(tmp_path)
+
+
+def test_only_the_newest_twenty_snapshots_are_kept(monkeypatch, tmp_path):
+    folder = tmp_path / "browser-state" / "failures"
+    folder.mkdir(parents=True)
+    for second in range(1, 23):
+        (folder / f"20250101T0800{second:02d}000Z-attachment_failed.json").write_text("{}", encoding="utf-8")
+
+    _lost_reply(monkeypatch, _StructuredPage([], streaming=[]))
+
+    names = [path.name for path in _snapshots(tmp_path)]
+    assert len(names) == 20 and names[-1].endswith("-browser_outcome_unknown.json")
+    assert names[0].startswith("20250101T080004"), "the three oldest are gone"
+
+
+def test_a_read_back_that_raises_leaves_a_snapshot_too(monkeypatch, tmp_path):
+    """After a restart the recorded chat is loaded and read; a chat that cannot be reached is a failure of the page."""
+    key = _uncertain_chat(tmp_path, url=f"https://chatgpt.com/c/{_CHAT_ID}")
+    page = _StructuredPage(["x"], streaming=[])
+    page.goto = lambda url, **kw: None  # the load leads nowhere: the tab stays on the home page
+
+    assert _recover(monkeypatch, page, key) is None
+
+    [path] = _snapshots(tmp_path)
+    snapshot = json.loads(path.read_text(encoding="utf-8"))
+    assert snapshot["code"] == "chat_lost" and re.fullmatch(r"chatgpt_web\.py:\d+:return_to_chat", snapshot["at"])
+    assert snapshot["page"]["address"] == "https://chatgpt.com/" and _CHAT_ID not in path.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("address, kept", [
+    (f"https://chatgpt.com/c/{_CHAT_ID}", "https://chatgpt.com/c/<id>"),
+    # The address the page makes up right after a send (2026-11-16) stays recognisable: it is what broke.
+    ("https://chatgpt.com/c/local-chatgpt%3A1763280000123", "https://chatgpt.com/c/local-<id>"),
+    ("https://chatgpt.com/", "https://chatgpt.com/"),
+    ("https://chatgpt.com/g/g-p-6917a1b20c5e-kokugo-notes/project", "https://chatgpt.com/g/<id>/project"),
+    ("https://chatgpt.com/?model=gpt-6&temporary-chat=true#frag", "https://chatgpt.com/?model=<v>&temporary-chat=<v>#<v>"),
+    ("https://someone:secret@auth.openai.com:8443/log-in/identifier?login_hint=someone%40example.com",
+     "https://auth.openai.com:8443/<id>/identifier?login_hint=<v>"),
+    ("about:blank", "about:"),
+    ("", ""),
+])
+def test_identifiers_in_the_tabs_address_are_masked(address, kept):
+    assert chatgpt_web._masked_address(address) == kept
+
+
+@pytest.mark.parametrize("label, kept", [
+    ("Send prompt", "Send prompt"),
+    ("Stop", "Stop"),
+    ("thinking-effort-dropdown-button", "thinking-effort-dropdown-button"),
+    ("GPT-6.1 Sol", "GPT-6.1 Sol"),
+    ("page01.png", "<file>"),
+    ("Remove pages_" + "a1" * 32 + "_001.zip", "Remove <file>"),
+    ("conversation-turn-12345678", "conversation-turn-<id>"),
+    ("history-item-" + _CHAT_ID, "history-item-<id>"),
+    ("Open profile menu for someone@example.com", "Open profile menu for <id>"),
+    ("x" * 200, "x" * 80 + "…"),
+    (None, None),
+    (17, None),
+])
+def test_names_of_files_and_identifiers_in_a_controls_name_are_masked(label, kept):
+    assert chatgpt_web._masked(label) == kept

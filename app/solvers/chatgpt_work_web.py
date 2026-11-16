@@ -33,6 +33,12 @@ USER_SEL = ('div[data-user-message-bubble="true"], '
             'div.rich-text-user-turn[data-markdown-text-tone="user-message"]'
             ':not([data-user-message-bubble="true"] *)')
 ASSISTANT_SEL = 'div[data-markdown-text-style="assistant-message"]'
+# Named, where they were written out inside the page scripts, so that a failure's snapshot counts the same
+# elements the scripts look for (WorkWebClient._selectors).
+SEND_SEL = ('button[data-testid="send-button"], button[type="submit"][aria-label="Send prompt"], '
+            'button[type="submit"][aria-label="Send"]')
+STOP_SEL = 'button[aria-label="Stop"], [data-testid="stop-button"]'
+MODE_SEL = "button[aria-pressed], [role=tab][aria-selected]"  # the Chat and Work entries
 MODEL = "GPT-6.1 Sol"
 _MODEL_PATTERN = (r"(?:gpt[\s_–—-]*)?(?:([0-9]+(?:\.[0-9]+)*)[\s_–—-]*([a-z]+)"
                   r"|([a-z]+)[\s_–—-]*([0-9]+(?:\.[0-9]+)*))")
@@ -121,7 +127,7 @@ _CONTROLS_JS = r"""(function inspect(action, requested, requestedLevel, allowUnl
       return !root ? [] : root.matches(menuSelector) ? [root] : [...root.querySelectorAll(menuSelector)];
     }).filter(hasModels));
   };
-  const work = all('button[aria-pressed], [role=tab][aria-selected]').filter(e =>
+  const work = all(__MODE_SEL__).filter(e =>
     ['work', 'chatgptwork', 'ワーク', '作業'].includes(phrase(label(e))));
   const triggers = all('[aria-haspopup]').filter(e =>
     norm(e.getAttribute('aria-label')) === 'selectchatgptmodel' || associated(e).length > 0);
@@ -297,7 +303,8 @@ _CONTROLS_JS = r"""(function inspect(action, requested, requestedLevel, allowUnl
     effort_text:summary + ' ' + (sliders.length === 1 ? sliders[0].getAttribute('aria-valuetext') || '' : ''),
     fast:speed.length === 1 && speedState(speed[0]) === 'fast',
     standard:speed.length === 1 && speedState(speed[0]) === 'standard'};
-})""".replace("__MODEL_PATTERN__", json.dumps(_MODEL_PATTERN)).replace("__EFFORT_LEVELS__", json.dumps(_EFFORT_LEVELS))
+})""".replace("__MODEL_PATTERN__", json.dumps(_MODEL_PATTERN)).replace("__EFFORT_LEVELS__", json.dumps(_EFFORT_LEVELS)
+            ).replace("__MODE_SEL__", json.dumps(MODE_SEL))
 
 
 def _controls(page, action="state", *, model=MODEL, level=3, allow_unlinked=False, close_check=None):
@@ -578,10 +585,10 @@ _REPLY_STATE_JS = r"""(batchId => {
     const owner = e.closest('[data-local-conversation-final-assistant="true"]');
     return owner && !owner.contains(user) && !owner.querySelector(userSelector);
   });
-  const streaming = [...main.querySelectorAll('button[aria-label="Stop"], [data-testid="stop-button"]')].some(e => e.getClientRects().length);
+  const streaming = [...main.querySelectorAll(%s)].some(e => e.getClientRects().length);
   return {found:true, ambiguous:final.length > 1, streaming, started:streaming || assistants.length > 0,
     reply:final.length === 1 ? (final[0].textContent || '').trim() : ''};
-})""" % json.dumps(USER_SEL)
+})""" % (json.dumps(USER_SEL), json.dumps(STOP_SEL))
 
 
 def work_reply_state(page, batch_id):
@@ -658,10 +665,10 @@ _UPLOAD_STATE_JS = r"""(names => {
   const ambiguous = matches.some(row => row.filter(Boolean).length > 1);
   const error = [...scope.querySelectorAll('[role=alert], [data-state=error]')].some(visible);
   const busy = [...scope.querySelectorAll('[role=progressbar], [aria-busy=true], [data-state=uploading]')].some(visible);
-  const sends = [...scope.querySelectorAll('button[data-testid="send-button"], button[type="submit"][aria-label="Send prompt"], button[type="submit"][aria-label="Send"]')].filter(visible);
+  const sends = [...scope.querySelectorAll(%s)].filter(visible);
   return {counts, error, ambiguous, ready:!ambiguous && !busy && !error && counts.every(n => n === 1) &&
     sends.length === 1 && !sends[0].disabled && sends[0].getAttribute('aria-disabled') !== 'true'};
-})""" % json.dumps(COMPOSER_SEL)
+})""" % (json.dumps(COMPOSER_SEL), json.dumps(SEND_SEL))
 
 
 def _shared_filesystem(endpoint):
@@ -715,11 +722,11 @@ _SEND_JS = r"""((click, expected) => {
   if (composers.length !== 1 || norm(composers[0].innerText) !== norm(expected)) return false;
   const form = composers[0].closest('form');
   if (!form) return false;
-  const buttons = [...form.querySelectorAll('button[data-testid="send-button"], button[type="submit"][aria-label="Send prompt"], button[type="submit"][aria-label="Send"]')].filter(e => e.getClientRects().length);
+  const buttons = [...form.querySelectorAll(%s)].filter(e => e.getClientRects().length);
   if (buttons.length !== 1 || buttons[0].disabled || buttons[0].getAttribute('aria-disabled') === 'true') return false;
   if (click) buttons[0].click();
   return true;
-})""" % json.dumps(COMPOSER_SEL)
+})""" % (json.dumps(COMPOSER_SEL), json.dumps(SEND_SEL))
 
 
 def _pending_work_send(guard, *, purpose="answer"):
@@ -778,6 +785,12 @@ class WorkWebClient(chat.ChatGptWebClient):
     """Work controls/final reader; BrowserGuard and batch journal stay shared."""
 
     transfer_batch_bytes = chat.TRANSFER_BATCH_BYTES
+    route = "chatgpt-work"
+
+    def _selectors(self):
+        return {"composer": COMPOSER_SEL, "send": SEND_SEL, "stop": STOP_SEL, "file_input": FILE_INPUT_SEL,
+                "user_turn": USER_SEL, "assistant_turn": ASSISTANT_SEL, "work_mode": MODE_SEL,
+                "new_chat": chat.NEW_CHAT_SEL}
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)

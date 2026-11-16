@@ -36,10 +36,13 @@ import re
 import secrets
 import tempfile
 import time
+import traceback
 import urllib.error
 import urllib.request
 from collections.abc import Callable, Iterable
+from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from ..llm import extract_json
 from ..browser_guard import BrowserBusy, BrowserGuard, BrowserGuardError
@@ -328,6 +331,30 @@ class ChatGptWebReplyIncomplete(ChatGptWebError):
     """
 
 
+# The fixed code of each failure of the browser routes, most specific first. The server's own table (main.py) ends
+# with this one, so a failure carries one code in the answer bundle, in the check before use and in its snapshot.
+FAILURE_CODES = (
+    (ChatGptWebSendNotAuthorized, "send_not_authorized"),
+    (ChatGptWebAuthenticationRequired, "authentication_failed"),
+    (ChatGptWebBrowserUnavailable, "browser_unavailable"),
+    (ChatGptWebAttachmentFailed, "attachment_failed"),
+    (ChatGptWebUploadBudget, "upload_budget"),
+    (ChatGptWebModelMismatch, "model_mismatch"),
+    (ChatGptWebUncertain, "browser_outcome_unknown"),
+    (ChatGptWebChatLost, "chat_lost"),
+    (ChatGptWebRateLimit, "rate_limited"),
+    (ChatGptWebReplyIncomplete, "reply_incomplete"),
+    (ChatGptWebBusy, "browser_busy"),
+    (ChatGptWebBlocked, "browser_blocked"),
+)
+
+
+def failure_code(error: BaseException) -> str:
+    """The code the server records for this failure of a booklet: the bare class is raised only before a send."""
+    return next((code for kind, code in FAILURE_CODES if isinstance(error, kind)),
+                "not_sent" if type(error) is ChatGptWebError else "solver_failed")
+
+
 def cdp_available(
     endpoint: str = CDP_ENDPOINT, *, timeout: float = 1.0, attempts: int = 3
 ) -> str | None:
@@ -563,20 +590,27 @@ def attach_images(
     return landed()
 
 
-def reuse_page(context):
-    """The tab this route works in: an existing chatgpt.com tab, else one new one.
-
-    Opening a tab per question left dozens behind over a deck and reloaded the
-    site every time. One tab is claimed and kept.
-    """
+def _chat_tab(context):
+    """An open chatgpt.com tab, or None. Nothing is opened or loaded."""
     for page in context.pages:
         try:
             if page.url.startswith(CHAT_URL.rstrip("/")):
                 return page
         except Exception:  # noqa: BLE001 - a closing page has no url
             continue
-    page = context.new_page()
-    page.goto(CHAT_URL, wait_until="domcontentloaded")
+    return None
+
+
+def reuse_page(context):
+    """The tab this route works in: an existing chatgpt.com tab, else one new one.
+
+    Opening a tab per question left dozens behind over a deck and reloaded the
+    site every time. One tab is claimed and kept.
+    """
+    page = _chat_tab(context)
+    if page is None:
+        page = context.new_page()
+        page.goto(CHAT_URL, wait_until="domcontentloaded")
     return page
 
 
@@ -1266,6 +1300,160 @@ def send_and_read(
     raise ChatGptWebError(f"ChatGPT web reply did not finish within {timeout_s:g}s ({state})")
 
 
+# --- what the page's structure was when a route failed ------------------------------------------------------------
+# On 2026-11-14 and 11/16 nine changes of the live page stopped the Chat route (the attach control, the send
+# control, how an attachment shows, the turns' marks, a second composer of zero size whose Stop button never left,
+# an address of the page's own making ...). Each was found when a real booklet failed, and each needed a person to
+# read the live page by hand, because a failure left a code and a line number and nothing of the page. Now it also
+# leaves the page's structure as the failure met it: what each selector of the route matches and how much of that
+# is drawn, and the page's own names of the drawn buttons in its forms. This is evidence for a repair by a person;
+# nothing here changes a selector or guesses another control.
+#
+# No text of the page is read, only two attributes of buttons inside forms, and whatever in them looks like a file
+# name, an address or an identifier is masked before it is kept (an attached file's tile is a button named after
+# the file, and Work's archives are named after their manifest's hash). Nothing is clicked, typed or loaded.
+FAILURES_DIR = "failures"
+FAILURES_KEPT = 20
+# Failures that say nothing of the page: nothing on it was tried for this call, the browser could not be reached,
+# or what the page showed was understood (a usage limit).
+_NO_SNAPSHOT = (ChatGptWebSendNotAuthorized, ChatGptWebBusy, ChatGptWebBlocked, ChatGptWebBrowserUnavailable,
+                ChatGptWebUploadBudget, ChatGptWebRateLimit)
+_STRUCTURE_JS = r"""(selectors => { /* page_structure */
+  const drawn = e => e.getClientRects().length > 0;
+  const all = selector => [...document.querySelectorAll(selector)];
+  const counted = selector => {
+    try { const found = all(selector); return {matches: found.length, drawn: found.filter(drawn).length}; }
+    catch (error) { return {matches: null, drawn: null}; }  // a selector this browser cannot parse
+  };
+  const named = (e, attribute) => { const v = e.getAttribute(attribute); return v === null ? null : v.slice(0, 200); };
+  return {
+    selectors: Object.fromEntries(Object.entries(selectors).map(([key, selector]) => [key, counted(selector)])),
+    form_buttons: all('form button, form [role="button"]').filter(drawn).slice(0, 40)
+      .map(e => ({aria_label: named(e, 'aria-label'), data_testid: named(e, 'data-testid')})),
+    forms: all('form').filter(drawn).length,
+    dialogs: all('[role="dialog"], [role="alertdialog"], dialog').filter(drawn).length,
+    alerts: all('[role="alert"]').filter(drawn).length,
+  };
+})"""
+_MASKS = (
+    (re.compile(r"\S+@\S+"), "<id>"),  # an account's address
+    (re.compile(r"\S+\.[A-Za-z][A-Za-z0-9]{1,4}\b"), "<file>"),  # name.ext: "GPT-6.1" is not one, "page01.png" is
+    (re.compile(r"[0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}"), "<id>"),
+    (re.compile(r"\b(?=[A-Fa-f]*\d)[0-9A-Fa-f]{8,}\b"), "<id>"),  # a run of hex that holds a digit
+    (re.compile(r"\b(?=[A-Za-z_]*\d)(?=\d*[A-Za-z_])\w{12,}\b"), "<id>"),  # a long token of letters and digits
+    (re.compile(r"\d{4,}"), "<id>"),
+)
+
+
+def _masked(name) -> str | None:
+    """A control's name as the page gives it (aria-label, data-testid), without what could name a file, a person or
+    a conversation's identifier, and no longer than 80 characters. None for no name."""
+    if not isinstance(name, str):
+        return None
+    text = " ".join(name.split())
+    for pattern, mask in _MASKS:
+        text = pattern.sub(mask, text)
+    return text if len(text) <= 80 else text[:80] + "…"
+
+
+def _masked_address(url: str) -> str:
+    """Where the tab is, with every identifier masked: the host, the site's own short path words (c, g, share ...)
+    and the names of the query's keys stay. ``local-`` stays in front of an address of the page's own making
+    (_is_chat_url): on 2026-11-16 that address was the failure."""
+    try:
+        parts = urlsplit(url)
+        host, port = parts.hostname or "", f":{parts.port}" if parts.port else ""
+    except ValueError:
+        return "<unreadable>"
+    if not host:
+        return f"{parts.scheme}:" if parts.scheme else ""
+
+    def segment(part: str) -> str:
+        if re.fullmatch(r"[a-z]{0,12}", part):
+            return part
+        return "local-<id>" if part.lower().startswith("local-") else "<id>"
+
+    keys = [pair.split("=", 1)[0] for pair in parts.query.split("&") if pair]
+    query = "&".join((key if re.fullmatch(r"[A-Za-z_-]{1,24}", key) else "<v>") + "=<v>" for key in keys)
+    return (f"{parts.scheme}://{host}{port}" + "/".join(segment(part) for part in parts.path.split("/"))
+            + (f"?{query}" if query else "") + ("#<v>" if parts.fragment else ""))
+
+
+def page_structure(page, selectors: dict[str, str]) -> dict:
+    """The page's structure as it is now, for ``selectors`` ({name: CSS selector}). Reads only.
+
+    Only whole numbers and masked names are passed on, whatever the page answers; an answer of another shape raises.
+    """
+    address = _masked_address(_url_of(page))
+    state = page.evaluate(f"{_STRUCTURE_JS}({json.dumps(selectors)})")
+    counts = state.get("selectors") if isinstance(state, dict) else None
+    if not isinstance(counts, dict) or set(counts) != set(selectors) or any(
+            not isinstance(count, dict) for count in counts.values()):
+        raise ValueError("the page's structure could not be read")
+
+    def whole(value) -> int | None:
+        return value if type(value) is int else None
+
+    buttons = state.get("form_buttons")
+    return {
+        "address": address,
+        "selectors": {name: {"matches": whole(counts[name].get("matches")), "drawn": whole(counts[name].get("drawn"))}
+                      for name in selectors},
+        "form_buttons": [{"aria_label": _masked(button.get("aria_label")), "data_testid": _masked(button.get("data_testid"))}
+                         for button in (buttons if isinstance(buttons, list) else [])[:40] if isinstance(button, dict)],
+        "forms": whole(state.get("forms")), "dialogs": whole(state.get("dialogs")), "alerts": whole(state.get("alerts")),
+    }
+
+
+def _raised_at(error: BaseException) -> str | None:
+    """file:line:function of where ``error`` was raised. Never its message: that can carry the page's words."""
+    frame = traceback.extract_tb(error.__traceback__)[-1] if error.__traceback__ else None
+    return f"{Path(frame.filename).name}:{frame.lineno}:{frame.name}" if frame else None
+
+
+def record_failure(directory: Path, *, route: str, error: BaseException, page, selectors: dict[str, str]) -> Path:
+    """Write ``directory``/failures/<UTC time>-<code>.json for this failure and keep the newest FAILURES_KEPT.
+
+    Raises when the page cannot be read or the file cannot be written: the caller drops that, since the failure
+    itself is what has to reach the server.
+    """
+    structure = page_structure(page, selectors)
+    cause = error
+    while cause.__cause__ is not None:
+        cause = cause.__cause__
+    now = datetime.now(timezone.utc)
+    record = {"time": now.strftime("%Y-%m-%dT%H:%M:%SZ"), "route": route, "code": failure_code(error),
+              "type": type(error).__name__, "at": _raised_at(error)}
+    if cause is not error:
+        # The error the server sees is often raised where an earlier one was caught: "outcome unknown" names the
+        # send, and the wait that gave up is what a repair needs.
+        record.update(cause_type=type(cause).__name__, cause_at=_raised_at(cause))
+    record["page"] = structure
+    folder = directory / FAILURES_DIR
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / f"{now.strftime('%Y%m%dT%H%M%S')}{now.microsecond // 1000:03d}Z-{record['code']}.json"
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(json.dumps(record, ensure_ascii=False, indent=1), encoding="utf-8")
+    os.replace(temporary, path)
+    for old in sorted(folder.glob("*.json"))[:-FAILURES_KEPT]:
+        old.unlink(missing_ok=True)
+    return path
+
+
+def recent_failures(directory: Path | None = None) -> list[dict]:
+    """The kept snapshots, newest first; one that cannot be read is left out."""
+    folder = (BrowserGuard().directory if directory is None else directory) / FAILURES_DIR
+    kept = []
+    for path in sorted(folder.glob("*.json"), reverse=True):
+        try:
+            snapshot = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(snapshot, dict):
+            kept.append(snapshot)
+    return kept
+
+
 class ChatGptWebClient:
     """An ``LLMClient``-shaped stand-in backed by the ChatGPT web UI.
 
@@ -1327,6 +1515,41 @@ class ChatGptWebClient:
     def _turn_counts(self, page):
         return page.locator(USER_SEL).count(), page.locator(ASSISTANT_SEL).count()
 
+    #: The route's name in a failure's snapshot.
+    route = "chatgpt-web"
+
+    def _selectors(self) -> dict[str, str]:
+        """The selectors this route works with, as they are set now: what a failure's snapshot counts."""
+        return {"composer": COMPOSER_SEL, "send": SEND_SEL, "stop": STOP_SEL, "attachment": ATTACHMENT_SEL,
+                "file_input": FILE_INPUT_SEL, "upload_control": FILE_UPLOAD_SEL, "user_turn": USER_SEL,
+                "assistant_turn": ASSISTANT_SEL, "model_control": MODEL_SEL, "effort_control": EFFORT_SEL,
+                "chat_links": CHAT_LINKS_SEL, "new_chat": NEW_CHAT_SEL}
+
+    def note_failure(self, error: BaseException, context=None) -> None:
+        """Leave the page's structure as this failure met it (record_failure). Never raises.
+
+        ``context`` is the connection the failed call still holds; without one the browser is reached for this
+        read alone. The open chatgpt.com tab is read where it stands; with no such tab there is nothing to keep.
+        """
+        if isinstance(error, _NO_SNAPSHOT):
+            return
+        browser = None
+        try:
+            if context is None:
+                from .cdp import connect_over_cdp  # noqa: PLC0415
+
+                browser = connect_over_cdp(self.endpoint)
+                context = browser.contexts[0]
+            page = _chat_tab(context)
+            if page is not None:
+                record_failure(BrowserGuard().directory, route=self.route, error=error, page=page,
+                               selectors=self._selectors())
+        except Exception:  # noqa: BLE001 - the failure being noted is the one that matters, and it is already raised
+            pass
+        finally:
+            if browser is not None:
+                browser.close()
+
     def complete(
         self,
         *,
@@ -1366,21 +1589,25 @@ class ChatGptWebClient:
             ) from exc
         try:
             context = browser.contexts[0] if browser.contexts else browser.new_context()
-            return self._ask_with_retries(
-                context,
-                f"{system}\n\n{prompt}",
-                pages,
-                audio=audio,
-                chat_key=chat_key,
-                files=files,
-                expect=expect,
-                booklet=booklet,
-                booklet_stage=booklet_stage,
-                stage_audio_digest=stage_audio_digest,
-                stage_question_ids=stage_question_ids,
-                before_submit=before_submit,
-                upload_names=upload_names,
-            )
+            try:
+                return self._ask_with_retries(
+                    context,
+                    f"{system}\n\n{prompt}",
+                    pages,
+                    audio=audio,
+                    chat_key=chat_key,
+                    files=files,
+                    expect=expect,
+                    booklet=booklet,
+                    booklet_stage=booklet_stage,
+                    stage_audio_digest=stage_audio_digest,
+                    stage_question_ids=stage_question_ids,
+                    before_submit=before_submit,
+                    upload_names=upload_names,
+                )
+            except Exception as error:
+                self.note_failure(error, context)
+                raise
         finally:
             browser.close()
 
@@ -2010,8 +2237,12 @@ class ChatGptWebClient:
                         status = guard.status()
                         if status["state"] == "uncertain" and self._pending != status.get("request_id"):
                             return None
-                    return self._recover_locked(context, guard, expect=expect, batch=batch,
-                                                sleep=sleep, now=now)
+                    try:
+                        return self._recover_locked(context, guard, expect=expect, batch=batch,
+                                                    sleep=sleep, now=now)
+                    except Exception as error:
+                        self.note_failure(error, context)
+                        raise
                 finally:
                     browser.close()
         except (BrowserGuardError, CdpError, ChatGptWebError, OSError, ValueError):

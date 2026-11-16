@@ -6,6 +6,7 @@ booklet had been photographed and sent (docs/whole-review-2026-11-14.md, 10.3 it
 import importlib
 import json
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app.solvers.chatgpt_web import ChatGptWebAuthenticationRequired, ChatGptWebRateLimit
@@ -131,3 +132,125 @@ def test_a_route_without_a_check_of_its_own_is_looked_at_and_not_sent_to(tmp_pat
     result = TestClient(main.app).post("/v1/route-check", headers=HEADERS).json()
 
     assert [(route["name"], route["real"]) for route in result["routes"]] == [("recorded", False)]
+
+
+# --- the deep check: the Chat route sends one small real message ------------------------------------------------
+# Looking at Chat and Work says the browser answers and is signed in, and nothing of attaching, sending, the wait
+# for a reply or the conversation's address: the nine changes of the live page that stopped the Chat route on
+# 2026-11-14 and 11/16 all passed that look. What the deep check itself does is in tests/test_chatgpt_web_solver.py.
+
+def _deep(monkeypatch, outcome=None):
+    """The Chat route's deep check stands in: it returns, or raises ``outcome``; the calls made are returned."""
+    from app.solvers.chatgpt_web import ChatGptWebSolver
+    made = []
+
+    def check_deep(self):
+        made.append(self.name)
+        if outcome is not None:
+            raise outcome
+
+    monkeypatch.setattr(ChatGptWebSolver, "check_deep", check_deep, raising=False)
+    return made
+
+
+def test_a_deep_check_makes_the_chat_route_send_and_work_is_still_only_looked_at(tmp_path, monkeypatch):
+    main = _server(tmp_path, monkeypatch)
+    looked = _routes(monkeypatch, {"codex-cli": True})
+    sent = _deep(monkeypatch)
+
+    result = TestClient(main.app).post("/v1/route-check?deep=1", headers=HEADERS).json()
+
+    assert looked == ["codex-cli", "chatgpt-work"] and sent == ["chatgpt-web"]
+    # A Work task draws on the allowance the CLI draws on: it gets no real request, and the result says so.
+    assert [(route["name"], route["ok"], route["code"], route["real"]) for route in result["routes"]] == [
+        ("codex-cli", True, "ok", True), ("chatgpt-work", True, "ok", False), ("chatgpt-web", True, "ok", True)]
+    assert result["ok"] is True and main.last_route_check() == result
+
+
+def test_without_deep_nothing_is_sent_through_the_browser(tmp_path, monkeypatch):
+    main = _server(tmp_path, monkeypatch)
+    looked = _routes(monkeypatch, {"codex-cli": True})
+    sent = _deep(monkeypatch)
+
+    for query in ("", "?deep=0"):
+        result = TestClient(main.app).post("/v1/route-check" + query, headers=HEADERS).json()
+        assert [route["real"] for route in result["routes"]] == [True, False, False]
+    assert sent == [] and looked == ["codex-cli", "chatgpt-work", "chatgpt-web"] * 2
+
+
+def test_a_failed_deep_check_is_reported_by_its_code_as_a_real_request(tmp_path, monkeypatch):
+    from app.solvers.chatgpt_web import ChatGptWebAttachmentFailed
+
+    main = _server(tmp_path, monkeypatch)
+    _routes(monkeypatch, {"codex-cli": ChatGptWebRateLimit("limit")})
+    _deep(monkeypatch, ChatGptWebAttachmentFailed("the attach control of someone's page"))
+
+    response = TestClient(main.app).post("/v1/route-check?deep=1", headers=HEADERS)
+
+    chat = response.json()["routes"][2]
+    assert (chat["name"], chat["ok"], chat["code"], chat["real"]) == ("chatgpt-web", False, "attachment_failed", True)
+    assert "someone" not in response.text
+
+
+class _OneRound:
+    """The daily thread's wait: the first returns at once as a wait that ran out does, the second stops the thread."""
+
+    def __init__(self):
+        self.waits = 0
+
+    def wait(self, seconds):
+        self.waits += 1
+        return self.waits > 1
+
+
+@pytest.mark.parametrize("setting, deep", [(None, False), ("0", False), ("1", True)])
+def test_the_daily_check_sends_through_the_browser_only_when_the_operator_turned_that_on(
+        tmp_path, monkeypatch, setting, deep):
+    """An unattended message a day on the operator's account is the operator's decision (ROKID_ROUTE_CHECK_DEEP)."""
+    main = _server(tmp_path, monkeypatch)
+    if setting is None:
+        monkeypatch.delenv("ROKID_ROUTE_CHECK_DEEP", raising=False)
+    else:
+        monkeypatch.setenv("ROKID_ROUTE_CHECK_DEEP", setting)
+    made = []
+    monkeypatch.setattr(main, "run_route_check", lambda **options: made.append(options))
+
+    main._route_check_daily(_OneRound())
+
+    assert made == [{"deep": deep}]
+
+
+# --- what the page's structure was when a browser route failed ---------------------------------------------------
+
+def _kept_failure(tmp_path, name, **snapshot):
+    folder = tmp_path / "browser-state" / "failures"
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / name).write_text(json.dumps(snapshot), encoding="utf-8")
+
+
+def test_the_kept_failures_are_returned_newest_first_and_need_the_key(tmp_path, monkeypatch):
+    main = _server(tmp_path, monkeypatch)
+    client = TestClient(main.app)
+    assert client.get("/v1/route-check/failures", headers=HEADERS).json() == {"failures": []}
+    older = {"time": "2026-11-16T09:15:00Z", "route": "chatgpt-web", "code": "attachment_failed",
+             "at": "chatgpt_web.py:1919:_ask_locked", "page": {"forms": 1, "selectors": {"send": {"matches": 0, "drawn": 0}}}}
+    newer = {"time": "2026-11-16T18:45:01Z", "route": "chatgpt-work", "code": "model_mismatch",
+             "at": "chatgpt_work_web.py:418:verify_work_model", "page": {"forms": 1}}
+    _kept_failure(tmp_path, "20261116T091500000Z-attachment_failed.json", **older)
+    _kept_failure(tmp_path, "20261116T184501000Z-model_mismatch.json", **newer)
+    (tmp_path / "browser-state" / "failures" / "20261116T200000000Z-chat_lost.json").write_text("{cut off", encoding="utf-8")
+
+    assert client.get("/v1/route-check/failures", headers=HEADERS).json() == {"failures": [newer, older]}
+    assert client.get("/v1/route-check/failures").status_code == 401
+
+
+def test_the_settings_carry_the_time_and_code_of_the_newest_failure(tmp_path, monkeypatch):
+    main = _server(tmp_path, monkeypatch)
+    assert TestClient(main.app).get("/v1/settings").json()["route_failure"] is None
+    _kept_failure(tmp_path, "20261116T091500000Z-attachment_failed.json", time="2026-11-16T09:15:00Z",
+                  route="chatgpt-web", code="attachment_failed", at="chatgpt_web.py:1919:_ask_locked", page={"forms": 1})
+    _kept_failure(tmp_path, "20261116T184501000Z-model_mismatch.json", time="2026-11-16T18:45:01Z",
+                  route="chatgpt-work", code="model_mismatch", at="chatgpt_work_web.py:418:verify_work_model", page={})
+
+    assert TestClient(main.app).get("/v1/settings").json()["route_failure"] == {
+        "time": "2026-11-16T18:45:01Z", "code": "model_mismatch"}

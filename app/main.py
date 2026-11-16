@@ -94,7 +94,7 @@ from .solvers.chatgpt_web import (
     ChatGptWebChatLost, ChatGptWebError, ChatGptWebModelMismatch, ChatGptWebRateLimit,
     ChatGptWebUploadBudget,
     ChatGptWebReplyIncomplete,
-    ChatGptWebSendNotAuthorized, ChatGptWebUncertain, chatgpt_send_enabled,
+    ChatGptWebSendNotAuthorized, ChatGptWebUncertain, FAILURE_CODES, chatgpt_send_enabled, recent_failures,
 )
 from .solvers.registry import has_booklet_route, solve_with_fallback
 from .solvers.chatgpt_work import WorkBrowserUncertain, work_binding
@@ -869,6 +869,7 @@ def get_settings() -> dict:
         "input": build_input_contract(),
         "providers": provider_status(),
         "route_check": last_route_check(),
+        "route_failure": last_route_failure(),
         "versions": version_info(),
     }
 
@@ -3137,18 +3138,7 @@ _FAILURE_CODES = (
     (AnswerMissing, "answer_missing"),
     (WorkReadabilityRejected, "image_review_rejected"),
     (WorkBrowserResultRejected, "work_result_rejected"),
-    (ChatGptWebSendNotAuthorized, "send_not_authorized"),
-    (ChatGptWebAuthenticationRequired, "authentication_failed"),
-    (ChatGptWebBrowserUnavailable, "browser_unavailable"),
-    (ChatGptWebAttachmentFailed, "attachment_failed"),
-    (ChatGptWebUploadBudget, "upload_budget"),
-    (ChatGptWebModelMismatch, "model_mismatch"),
-    (ChatGptWebUncertain, "browser_outcome_unknown"),
-    (ChatGptWebChatLost, "chat_lost"),
-    (ChatGptWebRateLimit, "rate_limited"),
-    (ChatGptWebReplyIncomplete, "reply_incomplete"),
-    (ChatGptWebBusy, "browser_busy"),
-    (ChatGptWebBlocked, "browser_blocked"),
+    *FAILURE_CODES,  # the browser routes' own, which a failure's snapshot is named by too (chatgpt_web)
 )
 # Nothing was sent for these, so the server tries again on its own (see
 # _resume_answers) and the glasses keep waiting instead of showing a dead end,
@@ -3248,7 +3238,7 @@ def last_route_check() -> dict | None:
         return None
 
 
-def run_route_check() -> dict:
+def run_route_check(*, deep: bool = False) -> dict:
     """Try every booklet route as it stands, in the order a booklet would use them, and keep the result.
 
     Until 2026-11-15 nothing said a route had stopped (sign-in expired, usage limit, a changed provider) before a
@@ -3256,18 +3246,24 @@ def run_route_check() -> dict:
     small real request, the others only look at readiness (``real`` says which). ``ok`` is true when any route passed,
     since a booklet moves to the next route. Only fixed codes are kept, never the provider's words; where a failure
     was raised goes to the log.
+
+    ``deep`` also makes a route that has a ``check_deep()`` send: the Chat route sends one small real message
+    through the page, as a booklet's message goes (chatgpt_web). Looking at it had passed every change of the live
+    page that stopped it on 2026-11-14 and 11/16. Work has none: a Work task draws on the allowance the CLI draws
+    on, so its ``real`` stays false.
     """
     from .solvers.registry import _registry as solver_registry
 
     with _route_check_lock:
         routes = []
         for name in _booklet_routes():
-            started, code, solver = time.monotonic(), "ok", None
+            started, code, solver, deeper = time.monotonic(), "ok", None, None
             try:
                 if name not in solver_registry:
                     raise LookupError("no such route")
                 solver = solver_registry.get(name)
-                solver.check()
+                deeper = getattr(solver, "check_deep", None) if deep else None
+                (deeper or solver.check)()
             except Exception as error:  # noqa: BLE001 - a check reports; it never raises
                 code = next((code for kind, code in _FAILURE_CODES if isinstance(error, kind)), "provider_unavailable")
                 raised = traceback.extract_tb(error.__traceback__)[-1] if error.__traceback__ else None
@@ -3275,7 +3271,7 @@ def run_route_check() -> dict:
                                   "at": f"{Path(raised.filename).name}:{raised.lineno}:{raised.name}" if raised else None}),
                       flush=True)
             routes.append({"name": name, "ok": code == "ok", "code": code,
-                           "real": bool(getattr(solver, "check_sends", False)),
+                           "real": bool(deeper or getattr(solver, "check_sends", False)),
                            "seconds": round(time.monotonic() - started, 1)})
         result = {"checked_at": int(time.time()), "ok": any(route["ok"] for route in routes), "routes": routes}
         path = Path(config.DATA_DIR) / "route-check.json"
@@ -3294,16 +3290,31 @@ def _route_check_daily(stopping: threading.Event) -> None:
     """Once a day, so a route that stopped is known before the day of use (ROKID_ROUTE_CHECK_INTERVAL_S; 0 is off).
 
     How long the CLI's sign-in lasts unattended is not known; this is also what measures it.
+
+    The browser routes are only looked at unless ROKID_ROUTE_CHECK_DEEP=1: a message a day sent from the operator's
+    account with no one there is the operator's decision.
     """
     interval = float(os.environ.get("ROKID_ROUTE_CHECK_INTERVAL_S") or 86400)
     while interval > 0 and not stopping.wait(300):
         if _booklet_routes() and route_check_due(now=time.time(), interval=interval):
-            run_route_check()
+            run_route_check(deep=os.environ.get("ROKID_ROUTE_CHECK_DEEP") == "1")
 
 
 @app.post("/v1/route-check")
-def route_check() -> dict:
-    return run_route_check()
+def route_check(deep: bool = False) -> dict:
+    return run_route_check(deep=deep)
+
+
+def last_route_failure() -> dict | None:
+    """When a browser route last failed on the page and with which code; None when no failure is kept."""
+    newest = next(iter(recent_failures()), None)
+    return None if newest is None else {"time": newest.get("time"), "code": newest.get("code")}
+
+
+@app.get("/v1/route-check/failures")
+def route_check_failures() -> dict:
+    """What the page's structure was at the browser routes' last failures, newest first (chatgpt_web.record_failure)."""
+    return {"failures": recent_failures()}
 
 
 def _closed_routes(rows) -> set[str]:

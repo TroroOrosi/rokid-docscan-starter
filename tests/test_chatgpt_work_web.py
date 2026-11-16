@@ -2255,3 +2255,99 @@ def test_a_work_task_that_ended_without_its_answer_is_a_known_outcome_not_an_unk
         _booklet(work.WorkWebClient(), tab, lambda: [])
     # Read only: the ended task was not sent again, and the shared send guard is free.
     assert page.evaluate("window.sent") == 1 and _guard_state() == "idle"
+
+
+# --- the page's structure, as a failure's snapshot reads it, on a real DOM ---------------------------------------
+
+_PRIVATE = ("国語", "傍線部", "秘密", "下書き", "田中", "6917a1b2", "page01", "someone")
+
+
+def _chat_page_of_2026_11_16(page):
+    """The Chat page that held a finished reply for "still being written": two composers, the one on screen idle,
+    the other not drawn and still holding a Stop button. Around them, what a snapshot must not take: a
+    conversation's title and address, a message, a reply, a draft, an attached file's name, an account's name."""
+    page.evaluate("document.body.innerHTML = " + json.dumps('''
+      <nav><a href="/c/6917a1b2-0c5e-4d0a-9f3b-2f6f0c1d2e3f">国語 第2問の相談</a>
+        <button aria-label="Open profile menu for someone@example.com" onclick="window.touched=true">田中</button></nav>
+      <main>
+        <div data-user-message-bubble="true">傍線部の理由を説明せよ</div>
+        <div data-markdown-text-style="assistant-message">{"questions":[{"answer":"秘密の答え"}]}</div>
+        <form onsubmit="return false">
+          <div id="prompt-textarea" contenteditable="true" role="textbox" aria-label="Ask ChatGPT">下書きの文</div>
+          <input type="file" multiple accept="image/*" onclick="window.touched=true">
+          <button type="button" aria-label="page01.jpg" onclick="window.touched=true">tile</button>
+          <button type="button" aria-label="Remove page01.jpg" onclick="window.touched=true">x</button>
+          <button type="button" data-testid="composer-speech-button" aria-label="Start Voice"
+            onclick="window.touched=true">v</button>
+          <button type="submit" aria-label="Send" onclick="window.touched=true">s</button></form>
+        <form onsubmit="return false" style="display:none">
+          <div contenteditable="true" role="textbox" aria-label="Ask ChatGPT"></div>
+          <button type="button" aria-label="Stop" onclick="window.touched=true">stop</button></form>
+        <div role="dialog" aria-label="田中さんの設定">account</div>
+        <div role="alert" style="display:none">not drawn</div>
+      </main>''') + "; window.touched = false; true")
+
+
+def test_the_structure_script_counts_what_is_drawn_and_takes_none_of_the_pages_content(page):
+    _chat_page_of_2026_11_16(page)
+    before = page.evaluate("document.body.innerHTML")
+
+    structure = chatgpt_web.page_structure(page, chatgpt_web.ChatGptWebClient()._selectors())
+
+    counts = structure["selectors"]
+    # What a count of matches alone could not show on 2026-11-16: the Stop button is in the page and not on screen.
+    assert counts["stop"] == {"matches": 1, "drawn": 0}
+    assert counts["composer"] == {"matches": 2, "drawn": 1}
+    assert counts["send"] == counts["user_turn"] == counts["assistant_turn"] == counts["chat_links"] == {
+        "matches": 1, "drawn": 1}
+    assert counts["file_input"] == counts["upload_control"] == counts["new_chat"] == {"matches": 0, "drawn": 0}
+    # The page's own names of the buttons drawn inside its forms, in the page's order; a file's name is masked.
+    assert structure["form_buttons"] == [
+        {"aria_label": "<file>", "data_testid": None}, {"aria_label": "Remove <file>", "data_testid": None},
+        {"aria_label": "Start Voice", "data_testid": "composer-speech-button"},
+        {"aria_label": "Send", "data_testid": None}]
+    assert (structure["forms"], structure["dialogs"], structure["alerts"]) == (1, 1, 0)
+    assert structure["address"] == "file:", "a local path can hold a person's name"
+    kept = json.dumps(structure, ensure_ascii=False)
+    assert not [word for word in _PRIVATE if word in kept]
+    # Reading it changed nothing and pressed nothing.
+    assert page.evaluate("document.body.innerHTML") == before and page.evaluate("window.touched") is False
+
+
+def test_a_selector_the_browser_cannot_parse_is_reported_as_unreadable_and_the_rest_is_still_counted(page):
+    _chat_page_of_2026_11_16(page)
+    counts = chatgpt_web.page_structure(page, {"stop": 'button[aria-label="Stop"]', "retuned": "button[["})["selectors"]
+    assert counts == {"stop": {"matches": 1, "drawn": 0}, "retuned": {"matches": None, "drawn": None}}
+
+
+def test_a_work_failure_leaves_a_snapshot_counted_by_works_own_selectors(page, monkeypatch, tmp_path):
+    from app.solvers import cdp
+
+    _upload_composer(page)
+    page.evaluate("document.getElementById('work').remove(); true")  # the page no longer shows a Work entry
+    tab = _VenueTab(page)
+
+    class LocalBrowser:
+        contexts = [_Context(tab)]
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(cdp, "connect_over_cdp", lambda endpoint: LocalBrowser())
+    monkeypatch.setenv("ROKID_CHATGPT_SEND_ENABLED", "1")
+    with pytest.raises(chatgpt_web.ChatGptWebModelMismatch, match="Work entry is missing"):
+        work.WorkWebClient().complete(system="Answer", prompt="manifest_sha256=" + "a" * 64, booklet=True,
+                                      files=lambda: [_payload()], chat_key="work:local-fixture", expect=("questions",))
+
+    [path] = sorted((tmp_path / "browser-state" / "failures").glob("*.json"))
+    snapshot = json.loads(path.read_text(encoding="utf-8"))
+    assert (snapshot["route"], snapshot["code"]) == ("chatgpt-work", "model_mismatch")
+    assert snapshot["at"].startswith("chatgpt_work_web.py:") and snapshot["at"].endswith(":verify_work_model")
+    counts = snapshot["page"]["selectors"]
+    assert set(counts) == {"composer", "send", "stop", "file_input", "user_turn", "assistant_turn", "work_mode",
+                           "new_chat"}
+    assert counts["work_mode"] == {"matches": 0, "drawn": 0}, "what stopped it: no Work entry on the page"
+    assert counts["composer"] == counts["file_input"] == {"matches": 1, "drawn": 1}
+    assert counts["send"] == {"matches": 2, "drawn": 1}, "this fixture keeps a second Send that is not drawn"
+    assert snapshot["page"]["form_buttons"] == [{"aria_label": "Send", "data_testid": None}]
+    assert page.evaluate("window.sent") == 0 and tab.navigations == [chatgpt_web.CHAT_URL]
