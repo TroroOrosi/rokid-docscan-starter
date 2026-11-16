@@ -31,7 +31,7 @@ The CLI takes images only. A booklet with audio (listening, mixed English) is re
 error the server answers by handing the booklet to the next route.
 
 Settings: ``ROKID_CODEX_BIN`` (default: the Termux npm install, else ``codex`` on PATH), ``ROKID_CODEX_MODEL``
-(``gpt-6.1-sol``), ``ROKID_CODEX_EFFORT`` (``xhigh``), ``ROKID_CODEX_TIMEOUT_S`` (3600), ``ROKID_CODEX_LOCATE`` (``1``;
+(``gpt-6.1-sol``), ``ROKID_CODEX_EFFORT`` (``xhigh``), ``ROKID_CODEX_TIMEOUT_S`` (by the booklet's size, see ``_time_allowed``), ``ROKID_CODEX_LOCATE`` (``1``;
 ``0`` sends photos as the Chat route does), ``ROKID_CODEX_PAGE_LONG`` (the enlarged page's long side, 2540 px),
 ``ROKID_CODEX_READS`` (2). Sending is gated by
 ``ROKID_CHATGPT_SEND_ENABLED`` like every other route that spends the operator's usage.
@@ -262,6 +262,19 @@ def _regions(reply: str, photos: int) -> dict[int, list[tuple[float, float, floa
             found[index] = boxes
     return found
 _LIMIT = re.compile(r"usage limit|rate limit|quota", re.IGNORECASE)
+
+
+def _time_allowed(pages: int) -> tuple[float, float]:
+    """(seconds for the answers, seconds for finding the pages) before this route gives the booklet to the next.
+
+    Until 2026-11-16 a run that hung was held 3600 s, longer than a 50-minute test, with Work and Chat waiting.
+    The slowest on record: 12.5 s a page for the answers (47 pages, two reads, M-23) and 27.8 s a page through Work
+    on hard written mathematics (twenty pages, once); finding the pages took 20 s for 14 and 40 s for 31. Allowed:
+    four minutes and half a minute a page, ten minutes at least. ROKID_CODEX_TIMEOUT_S names another limit.
+    """
+    named = os.environ.get("ROKID_CODEX_TIMEOUT_S")
+    answers = float(named) if named else max(600.0, 240.0 + 30.0 * pages)
+    return answers, min(answers, max(120.0, 60.0 + 6.0 * pages))
 
 
 def _command() -> list[str]:
@@ -549,11 +562,11 @@ class CodexCliSolver(Solver):
     @classmethod
     def _run(cls, question: Question, model: str) -> list[str]:
         effort = os.environ.get("ROKID_CODEX_EFFORT") or "xhigh"
-        timeout = float(os.environ.get("ROKID_CODEX_TIMEOUT_S") or 3600)
+        timeout, locating = _time_allowed(len(question.document_pages))
         with cls._workplace() as (directory, environment):
             names = None
             if (os.environ.get("ROKID_CODEX_LOCATE") or "1") != "0":
-                names = cls._located(directory, environment, question.document_pages, model=model, timeout=timeout)
+                names = cls._located(directory, environment, question.document_pages, model=model, timeout=locating)
             note = _TILES_NOTE
             if names is None:
                 names, note = [], _IMAGES_NOTE

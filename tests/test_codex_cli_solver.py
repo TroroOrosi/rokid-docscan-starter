@@ -356,6 +356,19 @@ def test_the_server_half_of_the_route_runs_from_pages_to_the_answer_bundle(tmp_p
     assert result["items"] == [["ready", "④"], ["needs_input", ""]]
 
 
+def test_a_run_that_hangs_gives_the_booklet_up_in_minutes_by_its_size(monkeypatch):
+    """Until 2026-11-16 a hung run held the booklet 3600 s, longer than a 50-minute test, with two routes waiting."""
+    from app.solvers import codex_cli
+
+    monkeypatch.delenv("ROKID_CODEX_TIMEOUT_S", raising=False)
+    # (seconds for the answers, seconds for finding the pages)
+    assert codex_cli._time_allowed(8) == (600.0, 120.0)
+    assert codex_cli._time_allowed(20) == (840.0, 180.0)
+    assert codex_cli._time_allowed(47) == (1650.0, 342.0)
+    monkeypatch.setenv("ROKID_CODEX_TIMEOUT_S", "90")
+    assert codex_cli._time_allowed(47) == (90.0, 90.0)
+
+
 def test_with_sending_off_the_route_reports_it_and_runs_nothing(tmp_path):
     """The gate every route that spends the operator's subscription waits for (ROKID_CHATGPT_SEND_ENABLED)."""
     fake = tmp_path / "fake_codex.py"
