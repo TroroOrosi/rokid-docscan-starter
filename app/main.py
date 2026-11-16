@@ -3756,10 +3756,25 @@ def _fallback_answer(conn, session_id: int, doc_id: int, question, route: str) -
     return solver.answer_all(question=dataclasses.replace(question, document_pages=pages))
 
 
+def _coverage_last(replies: list | None) -> list | None:
+    """What the captures leave out (chatgpt_web._COVERAGE) goes behind the answers.
+
+    The model lists such an item where the gap lies. On the phone on 2026-11-16 that was inside a 大問: the glasses
+    showed 第3問, the notice, then the rest of it under a second heading 第3問(2).
+    """
+    def left_out(item) -> bool:
+        return (isinstance(item, dict) and item.get("status") == "needs_input" and not item.get("answer_no")
+                and not str(item.get("group") or "").strip() and not str(item.get("label") or "").strip())
+
+    if not replies:
+        return replies
+    return [reply for reply in replies if not left_out(reply[0])] + [reply for reply in replies if left_out(reply[0])]
+
+
 def _route_answer(conn, session_id: int, doc_id: int, question, route: str) -> list | None:
     if route in ("", (os.environ.get("ROKID_SOLVER") or "").strip()):
-        return _answer_all(question)
-    return _fallback_answer(conn, session_id, doc_id, question, route)
+        return _coverage_last(_answer_all(question))
+    return _coverage_last(_fallback_answer(conn, session_id, doc_id, question, route))
 
 
 def _commit_fence(work_attempt, failed, route: str):

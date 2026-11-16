@@ -1199,6 +1199,32 @@ def test_what_the_captures_leave_out_reaches_the_glasses_as_an_item_of_its_own(c
         ("ready", "④", ""), ("needs_input", "", "印刷された2〜3頁が撮影にありません")]
 
 
+def test_what_the_captures_leave_out_is_shown_behind_the_answers_and_splits_no_group(client, monkeypatch):
+    """Phone, 2026-11-16: the model put "printed page 13 is not among the captures" where the gap lay, inside 第3問,
+    and the glasses showed 第3問, the notice, then the rest under a second heading 第3問(2)."""
+    from app import main
+    from app.solvers.chatgpt_web import _booklet_replies
+
+    _, session_id = _session_with(client, ["一頁目", "二頁目"])
+    monkeypatch.setenv("ROKID_SOLVER", "test-provider")
+
+    def answered(label, number, answer):
+        return {"group": "第3問", "label": label, "answer_no": [number], "pages": [1], "status": "ready",
+                "answer": answer, "missing_material": "", "diagrams": []}
+
+    reply = {"questions": [
+        answered("問1", 1, "④"),
+        {"group": "", "label": "", "answer_no": [], "pages": [1, 2], "status": "needs_input", "answer": "",
+         "missing_material": "印刷ページ13が未収録です。", "diagrams": []},
+        answered("問2", 2, "②"), answered("問3", 3, "③")]}
+    monkeypatch.setattr(main, "_answer_all", lambda _: _booklet_replies(reply, subject=None, extras={}))
+    bundle = _background_finalize_and_wait(
+        client, session_id, lambda items: len(items) == 4 and all(i["status"] != "pending" for i in items))
+    assert [(item["group_label"], item["question_label"], item["status"]) for item in bundle["items"][:3]] == [
+        ("第3問", "問1", "ready"), ("第3問", "問2", "ready"), ("第3問", "問3", "ready")]
+    assert (bundle["items"][3]["status"], bundle["items"][3]["issue"]) == ("needs_input", "印刷ページ13が未収録です。")
+
+
 def test_model_inventory_overflow_is_rejected_without_a_partial_deck(client, monkeypatch):
     from app import main
 

@@ -312,7 +312,9 @@ from __future__ import annotations
 #         whose reply was never collected is read back by itself: found among the newest conversations by its
 #         batch id when no address was recorded, and resolved before another session's booklet is refused
 #         (register 3-17). See API 1.49.0.
-APP_VERSION = "0.82.0"
+# 0.82.1: an item that names what the captures leave out is shown behind the answers. The model lists it where
+#         the gap lies; inside a 大問 that split the group in two on the glasses (phone, 2026-11-16).
+APP_VERSION = "0.82.1"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.
