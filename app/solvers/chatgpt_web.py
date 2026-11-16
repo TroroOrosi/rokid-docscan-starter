@@ -42,6 +42,7 @@ import traceback
 import urllib.error
 import urllib.request
 from collections.abc import Callable, Iterable
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -1485,6 +1486,15 @@ def recent_failures(directory: Path | None = None) -> list[dict]:
     return kept
 
 
+# The reply to the check before use is a number. A booklet's reply is waited for as long as the session lasts
+# (TIMEOUT_S), and for that long the browser is this call's alone: the check must not hold it so, least of all on
+# the page it exists to find, where a reply never ends (the Stop button that never left, 2026-11-16). No check has
+# run on the live page yet: Chat answered booklets of 2 and 14 files in under 3 minutes (M-19, M-34), so ten.
+CHECK_REPLY_S = float(os.environ.get("ROKID_CHATGPT_CHECK_REPLY_S", "600"))
+# Set around the check's one call, for its thread alone: a booklet answered meanwhile on another thread waits as before.
+_reply_wait_s: ContextVar[float | None] = ContextVar("chatgpt_reply_wait_s", default=None)
+
+
 class ChatGptWebClient:
     """An ``LLMClient``-shaped stand-in backed by the ChatGPT web UI.
 
@@ -1540,8 +1550,13 @@ class ChatGptWebClient:
     def _attach_images(self, page, images, **kwargs):
         return attach_images(page, images, **kwargs)
 
+    @staticmethod
+    def _reply_wait() -> float | None:
+        """How long this thread's message waits for its reply; None for a booklet's: as long as the session."""
+        return _reply_wait_s.get()
+
     def _send_and_read(self, page, text, **kwargs):
-        return send_and_read(page, text, **kwargs)
+        return send_and_read(page, text, timeout_s=self._reply_wait(), **kwargs)
 
     def _turn_counts(self, page):
         return page.locator(USER_SEL).count(), page.locator(ASSISTANT_SEL).count()
@@ -2679,12 +2694,16 @@ class ChatGptWebSolver(LLMSolver):
         name = f"check-{token[:8]}.jpg"  # of its own: a name the account already holds is shown renamed
         # ponytail: each check keeps one of the CHATS_KEPT records; drop a settled check's record if booklets'
         # records are ever pushed out by them (eight newer keys are needed for that).
-        reply = self._client.complete(
-            system="This message checks that the connection works. It is not an exam paper.",
-            prompt='Count the black squares in the attached image. Give that number as "count" in the JSON object '
-                   "asked for below, and reply with that one JSON object and nothing else.",
-            files=[{"name": name, "mimeType": "image/jpeg", "buffer": picture}], upload_names=lambda: [name],
-            chat_key=f"{CHECK_CHAT_KEY}:{token}", expect=("count",), booklet=True, only_if_clear=True)
+        waiting = _reply_wait_s.set(CHECK_REPLY_S)
+        try:
+            reply = self._client.complete(
+                system="This message checks that the connection works. It is not an exam paper.",
+                prompt='Count the black squares in the attached image. Give that number as "count" in the JSON '
+                       "object asked for below, and reply with that one JSON object and nothing else.",
+                files=[{"name": name, "mimeType": "image/jpeg", "buffer": picture}], upload_names=lambda: [name],
+                chat_key=f"{CHECK_CHAT_KEY}:{token}", expect=("count",), booklet=True, only_if_clear=True)
+        finally:
+            _reply_wait_s.reset(waiting)
         try:
             # The receipt shows the key as an empty list, as it shows a booklet's "questions": 5, [5] and "5" are 5.
             if re.sub(r"\D", "", json.dumps(extract_json(reply).get("count"))) != str(squares):

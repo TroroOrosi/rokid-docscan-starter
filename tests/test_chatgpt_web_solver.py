@@ -3808,6 +3808,24 @@ def test_the_deep_check_stops_before_attaching_when_the_model_position_cannot_be
     assert json.loads(_snapshots(tmp_path)[-1].read_text(encoding="utf-8"))["code"] == "model_mismatch"
 
 
+def test_the_deep_check_gives_up_on_a_reply_that_never_ends_long_before_a_booklets_wait_would(monkeypatch, tmp_path):
+    """A booklet's reply is waited for as long as the session lasts (TIMEOUT_S, 150 minutes). The check holds the
+    browser every booklet needs: on a page whose Stop control never leaves, as on 2026-11-16, it must not hold it
+    that long."""
+    page = _CountingPage(streaming=[True])
+    monkeypatch.setattr(chatgpt_web, "TIMEOUT_S", 6.0)
+    monkeypatch.setattr(chatgpt_web, "CHECK_REPLY_S", 0.2, raising=False)
+    started = time.monotonic()
+
+    with pytest.raises(chatgpt_web.ChatGptWebUncertain):
+        _deep_check(monkeypatch, page)
+
+    assert time.monotonic() - started < 3.0, "the check waited the booklet's budget"
+    assert len(_sends(page)) == 1 and _guard_state(tmp_path) == "uncertain"
+    # The bound is the check's alone: a message sent afterwards waits as before.
+    assert chatgpt_web.ChatGptWebClient()._reply_wait() is None
+
+
 def test_the_deep_check_sends_nothing_while_sending_is_off(monkeypatch, tmp_path):
     from app.solvers import cdp
 

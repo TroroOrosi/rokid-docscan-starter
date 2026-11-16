@@ -334,11 +334,13 @@ _LIMIT = re.compile(r"usage limit|rate limit|quota", re.IGNORECASE)
 # A run that ended because the service no longer offers the model. The CLI warns "Model metadata for `<model>` not
 # found. Defaulting to fallback metadata; ..." (its own words, read from the binary of codex 0.153.2 on 2026-11-16)
 # and the service's error code is model_not_found; the service's sentence is not ours to fix, so its likely forms
-# are taken too. Looked for only in a run that failed: a CLI older than a model that still answers warns and works.
+# are taken too, on a line that says "error" first: a run that failed for another cause may have written an exam's
+# own words about a model. Looked for only in a run that failed: a CLI older than a model that still answers warns
+# and works.
 _NO_MODEL = re.compile(
-    r"model metadata for .{0,200}?not found|model[_ ]not[_ ]found|unknown model|invalid model"
-    r"|not an? (?:valid|supported|available) model"
-    r"|model\b.{0,200}?(?:is not supported|does not exist|is not available|no longer (?:available|supported))",
+    r"model metadata for .{0,200}?not found|model[_ ]not[_ ]found"
+    r"|error\b.{0,300}?(?:unknown model|invalid model|not an? (?:valid|supported|available) model"
+    r"|model\b.{0,200}?(?:is not supported|does not exist|is not available|no longer (?:available|supported)))",
     re.IGNORECASE)
 
 

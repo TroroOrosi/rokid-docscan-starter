@@ -5,6 +5,8 @@ draws on the allowance the CLI draws on, so a limit skips it. Work runs here beh
 sealed job and guards; only the browser client and the other two routes are stand-ins.
 """
 
+import json
+
 from tests.test_chatgpt_work import BrowserReply
 from tests.test_work_bridge import client as _client_fixture, picture, wait_for
 
@@ -124,6 +126,19 @@ def test_a_cli_that_fails_for_another_cause_is_answered_by_work_under_its_sealed
         row = conn.execute("SELECT * FROM exam_sessions WHERE id=?", (session,)).fetchone()
         assert not main._resume_answers(conn, row)
     assert (cli.calls, len(work.calls), chat.questions) == (2, 1, [])
+
+
+def test_a_cli_whose_model_is_no_longer_offered_is_answered_by_work(client, monkeypatch, capsys):
+    """It is no usage limit, so Work is the next route (after the one retry every such failure gets); the cause is
+    logged by name."""
+    from app.solvers.chatgpt_web import ChatGptWebModelMismatch
+
+    cli, work, chat = Cli(ChatGptWebModelMismatch("the Codex CLI's model is not offered")), BrowserReply(), Chat()
+    _, session = booklet(client, monkeypatch, cli, work, chat)
+    assert answers(client, session) == [("ready", "4")]
+    assert (cli.calls, len(work.calls), chat.questions) == (2, 1, []) and answered_by() == ["chatgpt-work"]
+    failures = [json.loads(line) for line in capsys.readouterr().out.splitlines() if '"solve_failure"' in line]
+    assert failures and {failure["code"] for failure in failures} == {"model_mismatch"}
 
 
 def test_work_that_meets_the_limit_after_the_cli_failed_hands_the_booklet_to_chat(client, monkeypatch):

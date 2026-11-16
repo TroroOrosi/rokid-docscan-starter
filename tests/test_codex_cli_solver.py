@@ -263,8 +263,15 @@ def test_a_booklet_whose_model_is_no_longer_offered_stops_at_the_first_request_a
     assert request["args"][request["args"].index("-m") + 1] == "gpt-6.1-sol", "no other model is guessed"
 
 
-def test_a_failure_that_only_names_the_model_is_not_taken_for_a_model_that_is_gone(codex, tmp_path, monkeypatch):
-    monkeypatch.setenv("FAKE_CODEX_FAIL", "model: gpt-6.1-sol\nERROR: stream disconnected before completion")
+@pytest.mark.parametrize("output", [
+    "model: gpt-6.1-sol\nERROR: stream disconnected before completion",
+    # What a run had written of an exam's own matter before it failed for another cause.
+    "The Bohr model does not exist in this form, and the older model is not supported by the data.\n"
+    "ERROR: stream disconnected before completion",
+])
+def test_a_failed_run_that_only_speaks_of_a_model_is_not_taken_for_a_model_that_is_gone(
+        codex, tmp_path, monkeypatch, output):
+    monkeypatch.setenv("FAKE_CODEX_FAIL", output)
     with pytest.raises(ChatGptWebError) as raised:
         codex_cli.CodexCliSolver().answer_all(question=_booklet(tmp_path))
     assert type(raised.value) is ChatGptWebError
