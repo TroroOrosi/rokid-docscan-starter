@@ -28,7 +28,7 @@ def test_a_compound_fraction_keeps_its_grouping():
 @pytest.mark.parametrize("source,expected", [
     (r"$\frac{2}{3}^{2}$", "(2/3)²"),
     (r"$\frac{a+b}{c}^{2}$", "((a+b)/c)²"),
-    (r"$\frac{x}{y}^{-1}$", "(x/y)⁻¹"),
+    (r"$\frac{x}{y}^{-1}$", "(x/y)^(-1)"),  # the glasses have no superscript minus (2026-11-16)
     (r"$\dfrac{x}{y}_1$", "(x/y)₁"),
     (r"$\tfrac{x}{y}_{i+1}$", "(x/y)_(i+1)"),
     (r"$\frac{x}{y}^2_1$", "(x/y)²₁"),
@@ -63,7 +63,7 @@ def test_fraction_scripts_apply_to_the_whole_fraction(source, expected):
     (r"$f(\frac{1}{2})$", "f((1/2))"),
     (r"$\sqrt{\frac{1}{2}}$", "√((1/2))"),
     (r"$\frac{-a}{+b}$", "((-a)/(+b))"),
-    (r"$\frac{x}{y}^{+2}$", "(x/y)⁺²"),
+    (r"$\frac{x}{y}^{+2}$", "(x/y)^(+2)"),  # nor a superscript plus
 ])
 def test_fraction_remains_one_atom_in_surrounding_arithmetic(source, expected):
     result = to_display_answer(source)
@@ -136,8 +136,29 @@ def test_powers_and_indices_become_single_glyphs():
 
 def test_an_unrenderable_exponent_stays_readable_instead_of_vanishing():
     got = to_display_answer("$e^{n+1}$").text
-    assert got == "e^(n+1)" or got == "eⁿ⁺¹"
+    assert got == "e^(n+1)"
     assert "{" not in got
+
+
+def test_a_sign_in_a_power_or_an_index_is_written_out_since_the_glasses_have_no_glyph_for_it():
+    # The glasses' answer typeface (monospace and its fallbacks, firmware 1.29.013, read from the fonts' own
+    # tables on 2026-11-16) has the script digits and ⁿ, and no script sign or letter.
+    assert to_display_answer("$1.6" + BS + "times 10^{-19}$").text == "1.6×10^(-19)"
+    assert to_display_answer("$x^{-1}+a_{n+1}$").text == "x^(-1)+a_(n+1)"
+    assert to_display_answer("$x^{10}+a_{12}+2^n$").text == "x¹⁰+a₁₂+2ⁿ"
+
+
+def test_script_characters_the_model_wrote_itself_are_written_out_when_the_glasses_cannot_draw_them():
+    # Glasses, 2026-11-16: a real answer's p₂ₘ showed a box for its second index.
+    assert to_display_answer("確率 p₂ₘ を求める").text == "確率 p_(2m) を求める"
+    assert to_display_answer("10⁻³ m, xⁿ⁺¹, aₙ, vₓ²").text == "10^(−3) m, x^(n+1), a_(n), v_(x)²"
+    assert to_display_answer("x² + a₁₀ + 2ⁿ").text == "x² + a₁₀ + 2ⁿ"  # all of these are drawn
+    # Code keeps its characters whatever the display draws.
+    assert to_display_answer("`aₙ`").text == "aₙ"
+
+
+def test_other_characters_the_glasses_lack_become_ones_they_have():
+    assert to_display_answer("位相 ϕ、誤差 ϵ、確率 ⅓ と ⅔").text == "位相 φ、誤差 ε、確率 1/3 と 2/3"
 
 
 def test_roots_operators_and_greek_letters_convert():
@@ -311,7 +332,7 @@ def test_unclosed_code_fence_is_not_silently_rewritten_or_accepted():
 
 def test_mixed_supported_and_unsupported_script_characters_keep_the_whole_group():
     for source, expected in (("x^{2k}", "x^(2k)"), ("x_{i+1}", "x_(i+1)"),
-                             ("x^{a2}", "x^(a2)"), ("x^{n+1}", "xⁿ⁺¹")):
+                             ("x^{a2}", "x^(a2)"), ("x^{n+1}", "x^(n+1)"), ("x^{2n}", "x²ⁿ")):
         result = to_display_answer('$' + source + '$')
         assert result.text == expected
         assert result.complete

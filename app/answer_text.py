@@ -19,11 +19,24 @@ so the persisted answer stays auditable.
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass
 
-# Superscript and subscript characters the display renders as one glyph each.
-_SUPERSCRIPT = str.maketrans("0123456789+-=()n", "\u2070\u00b9\u00b2\u00b3\u2074\u2075\u2076\u2077\u2078\u2079\u207a\u207b\u207c\u207d\u207e\u207f")
-_SUBSCRIPT = str.maketrans("0123456789+-=()", "\u2080\u2081\u2082\u2083\u2084\u2085\u2086\u2087\u2088\u2089\u208a\u208b\u208c\u208d\u208e")
+# Superscript and subscript characters the display renders as one glyph each: the script digits and the
+# superscript n. The glasses' answer typeface (monospace and its fallback families) has no script sign and no
+# other script letter. Read from the fonts' own tables with scripts/glasses_font_coverage.py on firmware
+# 1.29.013 (2026-11-16), after a real answer's second index showed as a box; until then the signs were in
+# these tables and a negative power of ten reached the glasses with a character they cannot draw.
+_SUPERSCRIPT = str.maketrans("0123456789n", "\u2070\u00b9\u00b2\u00b3\u2074\u2075\u2076\u2077\u2078\u2079\u207f")
+_SUBSCRIPT = str.maketrans("0123456789", "\u2080\u2081\u2082\u2083\u2084\u2085\u2086\u2087\u2088\u2089")
+_DRAWN_SCRIPTS = frozenset(_SUPERSCRIPT.values()) | frozenset(_SUBSCRIPT.values())
+# Script characters a model writes itself reach the display as they are. A run of them holding one the glasses
+# lack is written out with its plain characters, as an unrenderable ^{...} or _{...} is.
+_SCRIPT_RUN = re.compile(
+    "([\u00b2\u00b3\u00b9\u2070\u2071\u2074-\u207f\u02b0-\u02b8\u02e0-\u02e4\u1d2c-\u1d61\u1d9b-\u1dbf\u2c7d]+)"
+    "|[\u2080-\u209c\u1d62-\u1d6a\u2c7c]+")
+# Other characters that typeface lacks, and what stands for each.
+_UNDRAWN = str.maketrans({"\u03d5": "\u03c6", "\u03f5": "\u03b5", "\u2153": "1/3", "\u2154": "2/3", "\u2155": "1/5"})
 
 # A LaTeX command mapped to the character an operator would write by hand.
 # Only commands that have a faithful single-character rendering belong here; an
@@ -134,6 +147,14 @@ def _script(match: re.Match, table: dict[int, str], fallback: str) -> str:
     return body.translate(table)
 
 
+def _written_out(match: re.Match) -> str:
+    """Keep a run of script characters the glasses draw; write any other run out in plain characters."""
+    run = match.group(0)
+    if all(ord(c) in _DRAWN_SCRIPTS for c in run):
+        return run
+    return ("^(" if match.group(1) else "_(") + unicodedata.normalize("NFKD", run) + ")"
+
+
 def _convert_text(text: str, unsupported: list[str], *, explicit_math: bool = False) -> str:
     # A malformed/unclosed code block must remain literal, including its contents.
     if _CODE_FENCE.search(text):
@@ -164,6 +185,7 @@ def _convert_text(text: str, unsupported: list[str], *, explicit_math: bool = Fa
         text = _POWER.sub(lambda m: _script(m, _SUPERSCRIPT, "^({0})"), text)
         text = _INDEX.sub(lambda m: _script(m, _SUBSCRIPT, "_({0})"), text)
     text = _COMMAND.sub(lambda m: _COMMANDS.get(m.group(1), "\\" + m.group(1)), text)
+    text = _SCRIPT_RUN.sub(_written_out, text).translate(_UNDRAWN)
 
     # Keep unknown commands and meaningful braces in sets and code intact.
     leftover = sorted(set(_LEFTOVER.findall(text)))
