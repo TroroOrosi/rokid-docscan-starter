@@ -770,6 +770,8 @@ def test_the_requests_name_sheets_and_regions_not_booklet_pages(codex, tmp_path,
     note = _runs(codex())[0]["args"][-1]
     assert "region S" in note and "an answer sheet" in note and "printed page P" not in note
     assert "may not cover everything" in note and "capture page numbers NNN" in note
+    # The same request asks where text is cut off at an image's edge (what the captures leave out): every part is cut.
+    assert "cut off at an image's edge" in note and "not where the capture ends" in note
 
 
 def _checks(calls):

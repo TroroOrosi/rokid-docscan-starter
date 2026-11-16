@@ -97,7 +97,8 @@ _TILES_NOTE = (
     "the parts of a region together as one sheet. pageNNN.jpg without S and T (or pageNNNR.jpg and pageNNNL.jpg, its right "
     "and left half) is a whole photo at its own size: no region was found in it, or its regions may not cover everything "
     "in it; read from it whatever no region shows. S and T only name files: in the answers, pages are capture page numbers "
-    "NNN." + _NO_TOOLS)
+    "NNN. The edge of a part or of a region is a cut made here, not where the capture ends: what a capture leaves out is "
+    "judged at the photo's own edge, which overviewNNN.jpg shows." + _NO_TOOLS)
 # Until 2026-11-16 this asked for "exam pages", "one region per printed page", of "an open booklet": an answer sheet, a
 # resource card or a strip beside the page was not asked for, and what is not boxed goes out only as the small view.
 _LOCATE_PROMPT = (
