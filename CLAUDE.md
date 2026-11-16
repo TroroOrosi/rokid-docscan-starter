@@ -1,6 +1,6 @@
 # rokid-docscan-starter development guide
 
-Status: Current engineering contract. Updated 2026-11-16 (the gathered capture was worn for the first time, §M-31: a worn head's frames are now laid on the page by a map of their own; no worn page has been read against a known text yet).
+Status: Current engineering contract. Updated 2026-11-16 evening (worn twice, §M-31 and §M-33: a worn head's frames are laid on the page by a map of their own, but the wearer is not still for most pages and no worn page has been read against a known text; the operator's requirements of that evening on routes, speed and time are below and not yet built).
 
 **Start at `.agents/progress/current.md`.** It lists the operator's decisions,
 the verified state and the next steps. Do not re-ask what it settles. Then read
@@ -142,6 +142,20 @@ is the intended topology. It has run once, with the glasses driven from a PC
 (2026-11-13, §M-15), and never with the phone and the glasses alone.
 
 ## Answer routes
+
+**The operator's requirements of 2026-11-16 (§M-33 (5)); not built yet (register 3-15, 3-16).** Usage is spent by
+Codex and by Work, on what is sent and what comes back; when it runs out both stop and Chat still answers. So the
+order is the Codex CLI, then Work, then Chat, and each step has its reason: Work is for when the CLI cannot be used
+for some other cause, Chat is for when the usage has run out (a limit goes to Chat directly; Work would meet the
+same limit). The CLI and Work are to answer in Fast mode; Chat has no such choice. Time: an ordinary high-school
+test has to fit in its 50 minutes altogether, the wearer's writing included; a common test or a university
+entrance paper has to be done with 30 minutes of its time to spare. Today's code goes from the CLI to Chat on a
+limit and on a failure alike, Work runs as a primary only, the CLI is given no speed (0.169.0 has a Fast tier,
+`priority`; the key that sets it is unread), and the phone's Work is at Standard for trials. Model and effort are
+GPT-6.1 Sol at Extra High; the one comparison on record (Work, 2026-11-09, twenty pages, once each: Extra High
+556.6 s, High 339.6 s, both 13 of 13) was judged on 11/12 to favour High for the time target and nothing was
+changed; on the CLI no effort or speed has been compared (Extra High: 14 pages in 81 s, 47 in 7 min 11 s). A
+whole use has never been timed.
 
 | Route | Status |
 |---|---|
@@ -332,7 +346,18 @@ passed again (whole route 38 of 38; the real app with the phone's server 44 of
 44 on clips and 38 of 38 on stills): none of it worn.
 Unmeasured: a worn page read against a known text (the one page with a known
 text was recorded with the head moving throughout), the venue's darkness worn
-(30 ms is too dark there and 60 ms is not still).
+(30 ms is too dark there and 60 ms is not still). **Worn a second time the same
+evening (§M-33, ten pages from the first problem page, glassdoc 0.44.1):** the
+record now holds the gyroscope's readings, and they show why pages fail. On the
+first three pages the head turned at 0.12-0.145 rad/s (7-8 px in 30 ms) and 5
+to 8 frames of 290 were still; on the pages that were gathered it turned at
+0.04-0.05 rad/s and four frames in ten were. The page with the known text was
+again one of the restless ones. The route asks the wearer to hold still for
+some seconds a page and does not tell them so (register 2-25). A tap did not
+clear the display: it only books a pause for after the page in hand, which is
+up to 13 s on this route, and the taps that followed were taken as the double
+tap that ends the capture (register 1-16, unfixed). I had asked the wearer not
+to touch the touchpad: the worn check had left out how the thing is used.
 What it rests on, measured on the desk and the PC on 2026-11-15 (§M-25):
 the 2016x1512 stream is the whole field at half size and the only whole-field
 size at 60 frames a second; streaming it heats the glasses by 17.7 C in 150 s
@@ -989,7 +1014,12 @@ records; each was learned from a failure the operator found.
 5. When the wearer is needed, say so plainly: what they do, for how long,
    what the one pass decides, and what was checked first so that it cannot
    fail for a reason findable on the desk. Not before that, and not silently
-   never.
+   never. A worn pass is the use in order, operated by the wearer (choose,
+   capture, tap to clear the display and back, end, read, finish): on
+   2026-11-16 two passes asked for "pages only, do not touch the touchpad",
+   and the tap that does not clear the display was found by the wearer
+   outside the check (§M-33). What to photograph is asked in the wearer's
+   terms ("from the first problem page"), not by a printed page number.
 6. A run with the real model is the operator's decision: once, through Chat,
    under the conditions below.
 7. A rule or measurement added to this file or to another record is added by
