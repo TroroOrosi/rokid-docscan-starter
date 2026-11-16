@@ -7,7 +7,8 @@ import pytest
 
 from app.llm import LLMClient
 from app.solvers import Question, register_solver, solve_with_fallback
-from app.solvers.llm_adapter import _ANSWER_ONLY_SYSTEM, LLMSolver, answer_numbers
+from app.solvers.llm_adapter import (_ANSWER_ONLY_SYSTEM, DIAGRAM_NOT_SHOWN, OUTSIDE_FORMAT_NOT_SHOWN, LLMSolver,
+                                     answer_numbers)
 
 
 def test_printed_numbers_survive_beyond_twenty_blanks_and_three_digits():
@@ -34,6 +35,46 @@ def test_answer_only_system_keeps_the_derivation_for_a_written_solution():
     assert "full credit" in _ANSWER_ONLY_SYSTEM
 
 
+def test_answer_only_system_judges_the_form_from_the_question_and_gives_result_then_working():
+    """The answer sheet is never photographed and no format hint is sent, so the
+    working cannot hang on what "the answer sheet itself expects": a bare value
+    is right only where the question shows a mark, choice, boxed number or word.
+    """
+    assert "answer sheet is not among the images" in _ANSWER_ONLY_SYSTEM
+    assert "answer sheet itself expects" not in _ANSWER_ONLY_SYSTEM
+    assert "a mark, a choice, a number in a box or a word" in _ANSWER_ONLY_SYSTEM
+    assert "final result first and then the derivation" in _ANSWER_ONLY_SYSTEM
+    assert "Never shorten an answer to fit a display" in _ANSWER_ONLY_SYSTEM
+
+
+def test_answer_only_system_places_a_drawing_beside_the_printed_figure_and_in_words():
+    """The glasses draw a standalone figure, never over the printed one."""
+    assert "redraw the axes, points and labels" in _ANSWER_ONLY_SYSTEM
+    assert "which points to join, intercepts, what to shade" in _ANSWER_ONLY_SYSTEM
+
+
+def test_answer_only_system_states_where_a_label_sits_and_how_long_it_may_be():
+    """AnswerView draws a label from the left end of its baseline in the 22.4 px
+    monospace label font (max(18, 640 * .035); half-width 0.6 em, full-width
+    1 em) and replaces one wider than 45% of the figure by "[n]". The figure is
+    at most 480 * (1 - 2 * .03) px wide.
+    """
+    import re
+
+    assert "left end of its baseline" in _ANSWER_ONLY_SYSTEM
+    full, half = map(int, re.search(r"(\d+) full-width or (\d+) half-width", _ANSWER_ONLY_SYSTEM).groups())
+    room, font = 480 * (1 - 2 * .03) * .45, 640 * .035
+    assert full * font <= room and half * font * .6 <= room
+    assert full >= 6 and half >= 10, "a limit this short would forbid ordinary axis labels"
+
+
+def test_answer_only_system_keeps_the_written_part_when_a_drawing_cannot_be_represented():
+    assert "return needs_input with the limitation" not in _ANSWER_ONLY_SYSTEM
+    assert "describe the drawing in words" in _ANSWER_ONLY_SYSTEM
+    assert "needs_input is only for missing or unreadable material" in _ANSWER_ONLY_SYSTEM
+    assert "empty answer and identify the missing material separately" in _ANSWER_ONLY_SYSTEM
+
+
 def solver_for(payload):
     sdk = SimpleNamespace(messages=SimpleNamespace(create=lambda **kwargs:
         SimpleNamespace(content=[SimpleNamespace(type="text", text=json.dumps(payload))])))
@@ -58,7 +99,7 @@ def test_indented_code_fragment_survives_solver_entry():
     assert result.answer == answer
 
 
-@pytest.mark.parametrize("field,value", [
+_OUTSIDE_THE_CONTRACT = [
     ("derivation", "2x+3=7 より 2x=4。"),
     ("solution_steps", ["両辺から3を引く。", "両辺を2で割る。"]),
     ("answer_blocks", [{"text": "x=2"}]),
@@ -67,14 +108,92 @@ def test_indented_code_fragment_survives_solver_entry():
     ("raw_reasoning", "2x=4"),
     ("unrecognized_answer", 0),
     ("unrecognized_answer", False),
-])
-@pytest.mark.parametrize("status", ["ready", "needs_input"])
-def test_answer_rejects_nonempty_content_outside_the_answer_contract(field, value, status):
-    payload = {"answer": "よって x=2。", "status": status, field: value}
+]
+
+
+@pytest.mark.parametrize("field,value", _OUTSIDE_THE_CONTRACT)
+def test_answer_rejects_nonempty_content_outside_the_answer_contract(field, value):
+    """A reply that answers nothing has no text to keep, and Work's quality guard
+    relies on a stop not carrying an answer in another field."""
+    payload = {"answer": "よって x=2。", "status": "needs_input", field: value}
     original = json.dumps(payload)
     with pytest.raises(ValueError, match="unsupported answer-sheet field"):
         solver_for(payload).solve(question=Question(body_text="方程式を解け", answer_only=True))
     assert json.dumps(payload) == original
+
+
+@pytest.mark.parametrize("field,value", _OUTSIDE_THE_CONTRACT)
+def test_ready_answer_with_content_outside_the_contract_keeps_its_text_for_review(field, value):
+    """The other field is not shown and not merged (its order and meaning are
+    unknown); the wearer gets the answer text and is told something is missing."""
+    payload = {"answer": "よって x=2。", "status": "ready", field: value}
+    original = json.dumps(payload)
+    result = solver_for(payload).solve(question=Question(body_text="方程式を解け", answer_only=True))
+    assert result.answer == "よって x=2。"
+    assert result.extras["answer_status"] == "ready"
+    assert result.extras["review_note"] == OUTSIDE_FORMAT_NOT_SHOWN
+    assert json.dumps(payload) == original
+
+
+_CIRCLE = {"alt": "円", "aspect_ratio": 1, "elements": [{"type": "circle", "cx": .5, "cy": .5, "r": .3}]}
+_INVALID_DIAGRAMS = [
+    {"alt": "曲線", "aspect_ratio": 1, "elements": [{"type": "bezier", "points": [[0, 0], [1, 1]]}]},
+    {"alt": "線", "aspect_ratio": 1, "elements": [{"type": "line", "x1": 0, "y1": 0, "x2": 1.2, "y2": 1}]},
+    {"alt": "線", "aspect_ratio": 1, "elements": [{"type": ["line"]}]},
+    "y=x のグラフ",
+]
+
+
+@pytest.mark.parametrize("bad", _INVALID_DIAGRAMS)
+def test_invalid_diagram_is_dropped_alone_and_the_written_answer_is_kept_for_review(bad):
+    result = solver_for({"answer": "y=x", "status": "ready", "diagrams": [bad, _CIRCLE]}).solve(
+        question=Question(body_text="グラフをかけ", answer_only=True))
+    assert result.answer == "y=x" and result.diagrams == [_CIRCLE]
+    assert result.extras["answer_status"] == "ready"
+    assert result.extras["review_note"] == DIAGRAM_NOT_SHOWN
+
+
+@pytest.mark.parametrize("diagrams,kept", [({"alt": "円"}, []), ([_CIRCLE] * 5, [_CIRCLE] * 4)])
+def test_diagrams_that_are_not_a_list_of_at_most_four_keep_the_text_and_what_can_be_drawn(diagrams, kept):
+    result = solver_for({"answer": "y=x", "status": "ready", "diagrams": diagrams}).solve(
+        question=Question(body_text="グラフをかけ", answer_only=True))
+    assert (result.answer, result.diagrams, result.extras["review_note"]) == ("y=x", kept, DIAGRAM_NOT_SHOWN)
+
+
+@pytest.mark.parametrize("diagrams", [None, [], [_CIRCLE]])
+def test_an_answer_with_no_or_valid_diagrams_is_not_marked_for_review(diagrams):
+    result = solver_for({"answer": "y=x", "status": "ready", "diagrams": diagrams}).solve(
+        question=Question(body_text="グラフをかけ", answer_only=True))
+    assert result.answer == "y=x" and result.diagrams == (diagrams or [])
+    assert not result.extras.get("review_note")
+
+
+def test_a_drawing_only_answer_with_nothing_drawable_left_still_fails():
+    with pytest.raises(ValueError, match="written answer"):
+        solver_for({"answer": "", "status": "ready", "diagrams": [_INVALID_DIAGRAMS[0]]}).solve(
+            question=Question(body_text="グラフをかけ", answer_only=True))
+
+
+def test_both_notes_reach_the_wearer_when_a_diagram_and_a_separate_field_are_left_out():
+    result = solver_for({"answer": "y=x", "status": "ready", "diagrams": [_INVALID_DIAGRAMS[0]],
+                         "derivation": "傾き1"}).solve(question=Question(body_text="グラフをかけ", answer_only=True))
+    assert result.extras["review_note"] == DIAGRAM_NOT_SHOWN + "。" + OUTSIDE_FORMAT_NOT_SHOWN
+
+
+def test_booklet_item_with_an_invalid_diagram_keeps_its_text_and_fails_only_when_nothing_is_left():
+    from app.solvers.chatgpt_web import _booklet_replies
+
+    bad = _INVALID_DIAGRAMS[0]
+    replies = _booklet_replies({"questions": [
+        {"label": "問1", "status": "ready", "answer": "x=2", "diagrams": [bad]},
+        {"label": "問2", "status": "ready", "answer": "", "diagrams": [bad]},
+        {"label": "問3", "status": "needs_input", "answer": "", "missing_material": "図2", "diagrams": [bad]},
+    ]}, subject=None, extras={})
+    assert (replies[0][1].answer, replies[0][1].diagrams) == ("x=2", [])
+    assert replies[0][1].extras["review_note"] == DIAGRAM_NOT_SHOWN
+    assert isinstance(replies[1][1], ValueError)
+    assert replies[2][1].extras["answer_status"] == "needs_input"
+    assert replies[2][1].extras["missing_material"] == "図2" and not replies[2][1].extras.get("review_note")
 
 
 @pytest.mark.parametrize("empty", [None, "", " \n ", [], {}])

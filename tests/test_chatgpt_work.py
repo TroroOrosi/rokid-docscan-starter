@@ -222,7 +222,8 @@ def test_legacy_sealed_separate_body_is_auditable_and_never_resent(client, monke
             solver.answer_all(question=question)
     else:
         replies = solver.answer_all(question=question)
-        assert isinstance(replies[0][1], ValueError)
+        assert replies[0][1].answer == "よって x=2。"
+        assert replies[0][1].extras["review_note"] == "形式外の内容は表示していません"
     assert configured_work_store().result(job["job_id"]) == legacy
 
 

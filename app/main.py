@@ -3458,17 +3458,18 @@ def _answer_bundle_item(conn, group: dict, row) -> dict:
         status, issue = "needs_review" if answer or diagrams else "failed", "解答番号を表示できません"
     elif not answer and not diagrams:
         status, issue = "failed", "解答本文がありません"
-    elif display.complete:
-        status, issue = "ready", ""
-        note = metadata.get("review_note")
-        if isinstance(note, str) and note.strip():
-            # Two independent reads did not agree on this answer (codex-cli): shown, and marked to be checked.
-            status, issue = "needs_review", note.strip()[:200]
     else:
-        # FS-65: an answer whose elements the display cannot carry is never
-        # reported ready. The converted text still reaches the operator.
-        status = "needs_review"
-        issue = "表示できない要素: " + "、".join(display.unsupported)
+        # Shown, and marked to be checked: two independent reads did not agree on this answer (codex-cli), or a
+        # figure or a field outside the format was left out of it (answer_sheet_result).
+        note = metadata.get("review_note")
+        note = note.strip()[:200] if isinstance(note, str) else ""
+        if display.complete:
+            status, issue = ("needs_review", note) if note else ("ready", "")
+        else:
+            # FS-65: an answer whose elements the display cannot carry is never
+            # reported ready. The converted text still reaches the operator.
+            status = "needs_review"
+            issue = "。".join(filter(None, ["表示できない要素: " + "、".join(display.unsupported), note]))
     # "問1(2)" keeps question_no unique; the glasses show the printed "問1".
     label = "全問" if group["whole"] else (_base_problem_no(row["question_no"]) or "全問")
     return {

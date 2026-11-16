@@ -388,6 +388,23 @@ def test_an_answer_two_reads_disagreed_on_is_shown_for_review_with_its_reason_an
     assert (item["status"], item["answer"], item["issue"]) == ("needs_review", "④", "2回の読みで不一致。他方：②")
 
 
+def test_a_review_note_survives_beside_an_element_the_display_cannot_carry(client):
+    """A figure left out at intake must still be named when the text also holds a table."""
+    from app import db
+
+    _, session_id = _session_with(client, [PAGE])
+    client.post(f"/v1/exam-sessions/{session_id}/finalize-reading")
+    bundle = client.get(f"/v1/exam-sessions/{session_id}/answer-bundle").json()
+    qid = int(bundle["items"][0]["question_id"][1:])
+    with db.connect() as conn:
+        conn.execute("INSERT INTO solutions(question_id, answer, answer_metadata_json) VALUES (?, ?, ?)",
+                     (qid, "| a | b |\n|---|---|\n| 1 | 2 |",
+                      json.dumps({"answer_status": "ready", "review_note": "図の形式を表示できません"}, ensure_ascii=False)))
+    item = client.get(f"/v1/exam-sessions/{session_id}/answer-bundle").json()["items"][0]
+    assert item["status"] == "needs_review" and item["answer"]
+    assert "表" in item["issue"] and item["issue"].endswith("。図の形式を表示できません")
+
+
 def test_input_digest_changes_for_image_bytes_even_with_identical_phash_and_ocr(client, tmp_path):
     from app import db, main
     doc_id, session_id = _session_with(client, [PAGE])
@@ -877,6 +894,28 @@ def test_a_repeated_finalize_reads_the_booklet_chat_and_never_sends_again(client
 
     assert chat.sends == 1
     assert [i["status"] for i in bundle["items"]] == ["ready", "failed"]
+
+
+def test_an_item_whose_figure_or_separate_field_cannot_be_shown_keeps_its_text_for_review(client, monkeypatch):
+    """Until 2026-11-16 one invalid diagram element or one field outside the format
+    failed the whole question and the text the model did give was thrown away."""
+    bad = {"alt": "曲線", "aspect_ratio": 1, "elements": [{"type": "bezier", "points": [[0, 0], [1, 1]]}]}
+    _booklet_solver(monkeypatch, json.dumps({"questions": [
+        {"group": "第1問", "label": "問1", "status": "ready", "answer": "y=2x+1", "diagrams": [bad]},
+        {"group": "第1問", "label": "問2", "status": "ready", "answer": "x=2", "derivation": "2x=4"},
+        {"group": "第1問", "label": "問3", "status": "ready", "answer": "", "diagrams": [bad]},
+        {"group": "第1問", "label": "問4", "status": "ready", "answer": "4"}]}))
+    _, session_id = _session_with(client, ["問1 2+2を求めよ。"])
+    monkeypatch.setenv("ROKID_SOLVER", "test-provider")
+
+    bundle = _background_finalize_and_wait(
+        client, session_id, lambda items: items and all(i["status"] != "pending" for i in items))
+
+    assert [(i["status"], i["answer"], i["issue"], i.get("diagrams", [])) for i in bundle["items"]] == [
+        ("needs_review", "y=2x+1", "図の形式を表示できません", []),
+        ("needs_review", "x=2", "形式外の内容は表示していません", []),
+        ("failed", "", "解析に失敗しました。資料は保持しています", []),
+        ("ready", "4", "", [])]
 
 
 def test_answers_lost_before_their_commit_are_read_back_not_sent_again(client, monkeypatch):

@@ -751,22 +751,43 @@ def test_phone_api_returns_non_answering_stop_in_existing_answer_bundle(client):
     ("solution_steps", ["両辺から3を引く。", "両辺を2で割る。"]),
     ("answer_blocks", [{"text": "x=2"}]),
 ])
-@pytest.mark.parametrize("level", ["question", "result"])
-def test_work_api_rejects_ready_answers_with_separate_unspecified_body_fields(client, field, value, level):
+def test_work_api_rejects_separate_unspecified_body_fields_outside_the_questions(client, field, value):
     from app.work_bridge import configured_work_store
 
     _, _, job = api_session(client)
     acquired = [api_tile_receipt(client, job)]
     result = answer(text="よって x=2。")
-    target = result["questions"][0] if level == "question" else result
-    target[field] = value
+    result[field] = value
     original = json.dumps(result)
     response = api_complete(client, job, acquired, result)
     assert response.status_code == 409, response.text
-    assert response.json()["detail"] in ("the Work reply contains an invalid answer",
-                                         "unsupported answer-sheet field with content")
+    assert response.json()["detail"] == "unsupported answer-sheet field with content"
     assert configured_work_store().result(job["job_id"]) is None
     assert json.dumps(result) == original
+
+
+@pytest.mark.parametrize("field,value", [
+    ("derivation", "2x+3=7 より 2x=4。"),
+    ("solution_steps", ["両辺から3を引く。", "両辺を2で割る。"]),
+    ("diagrams", [{"alt": "曲線", "aspect_ratio": 1, "elements": [{"type": "bezier"}]}]),
+])
+def test_work_api_keeps_a_ready_answers_text_for_review_when_part_of_it_cannot_be_shown(client, field, value):
+    """One such item no longer rejects the whole Work reply: the booklet's answers
+    arrive, the sealed reply stays as the model gave it, and this item is never ready."""
+    from app.work_bridge import configured_work_store
+
+    _, session, job = api_session(client)
+    acquired = [api_tile_receipt(client, job)]
+    result = answer(text="よって x=2。")
+    result["questions"][0][field] = value
+    response = api_complete(client, job, acquired, result)
+    assert response.status_code == 200, response.text
+    assert configured_work_store().result(job["job_id"]) == result
+    bundle = wait_for(lambda: data if (data := client.get(
+        f"/v1/exam-sessions/{session}/answer-bundle").json()).get("available_stage") == "complete" else None)
+    note = "図の形式を表示できません" if field == "diagrams" else "形式外の内容は表示していません"
+    assert [(item["answer"], item.get("diagrams", []), item["status"], item["issue"]) for item in bundle["items"]] == [
+        ("よって x=2。", [], "needs_review", note)]
 
 
 def test_work_api_preserves_complete_written_solution_and_diagram_with_empty_legacy_fields(client):
