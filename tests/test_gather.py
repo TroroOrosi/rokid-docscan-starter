@@ -84,6 +84,13 @@ def alike(a, b):
     return float(np.corrcoef(a[inner].ravel(), b[inner].ravel())[0, 1])
 
 
+def settled(image, truth):
+    """`alike` once the truth is moved to where the image lies: a page gathered a fraction of a pixel off as a whole
+    (it lies where its frames lay on average, not where the first one lay) is as good a page."""
+    dy, dx, _ = g.shift_of(image, truth, reach=4.0)
+    return alike(image, moved(truth, dy, dx))
+
+
 def page_of_print(seed=5, h=172, w=512):
     """A part of a page as the sensor sees vertical print lying on its side: lines every 16 px with blank paper between,
     a character every 8 px along a line, lines of unequal length, a blank here and there. Regular, as print is; a
@@ -174,6 +181,118 @@ def test_a_tilted_head_is_followed_part_by_part():
     fitted = g.gather(fs, parts=3)
     assert fitted.placed and fitted.used >= 55
     assert alike(fitted.image, s) > alike(whole.image, s) + 0.01
+
+
+def seen(image, dy, dx, h=384, w=512):
+    """The part of a larger scene that a camera turned by (dy, dx) scene pixels sees: scene(y - dy, x - dx)."""
+    top, left = (image.shape[0] - h) // 2, (image.shape[1] - w) // 2
+    whole_y, whole_x = int(np.floor(dy)), int(np.floor(dx))
+    fine = moved(image, dy - whole_y, dx - whole_x)
+    return fine[top - whole_y:top - whole_y + h, left - whole_x:left - whole_x + w]
+
+
+def test_a_worn_head_is_followed_through_the_frames_that_are_not_added():
+    """Worn for the first time, 2026-11-16 (M-31). A clip took 5 to 10 s, and between two runs of still frames the head
+    turned and the picture moved 46 to 301 px. A frame was looked for within 16 px of the last one added, so every run
+    after the first was lost: three clips of seven were not placed, the others used half their still frames. Each
+    frame was a strong match for the frame just before it, added or not."""
+    s = scene(seed=3, h=640, w=832)
+    rng = np.random.default_rng(8)
+    path, smear, at = [], [], np.zeros(2)
+    for run in range(4):
+        for _ in range(15):  # still: a fraction of a pixel a frame
+            at = at + rng.normal(0, 0.3, 2)
+            path.append(at.copy())
+            smear.append(0.8)
+        if run < 3:
+            way = rng.normal(0, 1, 2)
+            way /= np.hypot(*way)
+            for _ in range(10):  # turning: 5 scene px a frame, 50 before the head is still again
+                at = at + 5 * way
+                path.append(at.copy())
+                smear.append(5.0)
+    noise = np.random.default_rng(9)
+    sigma = PAPER / (2 * 2.2)
+    fs = [np.maximum(joined(seen(s, dy, dx)) + noise.normal(0, sigma, (192, 256)), 0).astype(np.float32) for dy, dx in path]
+    result = g.gather(fs, smear=smear)
+    assert result.placed and result.used >= 56, (result.used, result.total)  # sixty still frames in four runs
+    # The later runs add to the page: with them it is nearer the scene than the first run alone gives (0.963 against
+    # 0.945). Added at one shift a frame it was 0.979: a frame laid by a map goes pixel by pixel into the nearest cell,
+    # not shared between four, and the cells are noisier for it; joined 2x2 the two ways read 0.988 and 0.991.
+    first = g.gather(fs[:15], smear=smear[:15])
+    assert settled(result.image, seen(s, 0, 0)) > settled(first.image, seen(s, 0, 0)) + 0.01
+
+
+def looked_at(image, dy, dx, degrees, lean, size=1.0, h=768, w=1024):
+    """What a camera sees of a larger scene after the head turned: the picture moved by (dy, dx) scene pixels, turned
+    by `degrees` about its centre, seen `lean` more from the side (the far edge smaller: a homography), and `size`
+    times as large as at first (0.9: from further away)."""
+    angle = np.deg2rad(degrees)
+    yy, xx = np.mgrid[0:h, 0:w].astype(np.float64)
+    y, x = yy - (h - 1) / 2, xx - (w - 1) / 2
+    far = (1 + lean * x / (w / 2)) * size
+    ty, tx = (y * np.cos(angle) - x * np.sin(angle)) / far, (y * np.sin(angle) + x * np.cos(angle)) / far
+    sy, sx = (image.shape[0] - 1) / 2 + ty - dy, (image.shape[1] - 1) / 2 + tx - dx
+    y0, x0 = np.clip(np.floor(sy).astype(int), 0, image.shape[0] - 2), np.clip(np.floor(sx).astype(int), 0, image.shape[1] - 2)
+    fy, fx = np.clip(sy - y0, 0, 1), np.clip(sx - x0, 0, 1)
+    return ((1 - fy) * (1 - fx) * image[y0, x0] + (1 - fy) * fx * image[y0, x0 + 1]
+            + fy * (1 - fx) * image[y0 + 1, x0] + fy * fx * image[y0 + 1, x0 + 1]).astype(np.float32)
+
+
+def test_a_head_that_turned_is_laid_on_the_page_across_the_whole_field():
+    """Worn for the first time, 2026-11-16 (M-31). Between two still runs the picture had not only moved: against a
+    move of 44 px its edges lay another 15 to 19 px off, because the head had also tilted about a degree and saw the
+    page from another side. Added at one shift, the page was sharp in the middle and double towards its edges."""
+    s = scene(seed=3, h=1024, w=1280)
+    rng = np.random.default_rng(8)
+    stops = [(0.0, 0.0, 0.0, 0.0), (-26.0, 14.0, 1.2, 0.012), (18.0, -34.0, -0.9, -0.010), (30.0, 22.0, 1.5, 0.008)]
+    poses, smear = [], []
+    for run, stop in enumerate(stops):
+        for _ in range(12):  # still: a fraction of a pixel a frame
+            poses.append((stop[0] + rng.normal(0, 0.3), stop[1] + rng.normal(0, 0.3), stop[2], stop[3]))
+            smear.append(0.8)
+        if run + 1 < len(stops):
+            for step in range(1, 9):  # turning to the next stop
+                poses.append(tuple(a + (b - a) * step / 9 for a, b in zip(stop, stops[run + 1])))
+                smear.append(5.0)
+    noise = np.random.default_rng(9)
+    sigma = PAPER / (2 * 2.2)
+    fs = [np.maximum(joined(looked_at(s, *pose)) + noise.normal(0, sigma, (384, 512)), 0).astype(np.float32) for pose in poses]
+    truth = looked_at(s, 0, 0, 0, 0)
+    result = g.gather(fs, smear=smear)
+    assert result.placed and result.used >= 44, (result.used, result.total)  # forty-eight still frames in four runs
+    first = g.gather(fs[:12], smear=smear[:12])
+    corner = (slice(40, 296), slice(40, 296))  # a corner of the page, where a turn moves the picture most
+    assert alike(result.image[corner], truth[corner]) > alike(first.image[corner], truth[corner]) + 0.01
+    assert alike(result.image, truth) > alike(first.image, truth) + 0.01
+
+
+def test_a_head_that_came_back_further_away_is_still_laid_on_the_page():
+    """M-31: after looking away the head came back a little further from the page, the picture an eighth smaller in
+    area. No single shift made such a frame match the page well enough to be taken for it (7.1 to 8.2 where 8 is asked),
+    and a run of twenty still frames was lost. Where the picture is was known all along, from frame to frame.
+    Regular print, as a page has it: scattered strokes are found at one shift even so."""
+    s = page_of_print(seed=5, h=1024, w=1280)
+    rng = np.random.default_rng(8)
+    stops = [(0.0, 0.0, 0.0, 0.0, 1.0), (22.0, -16.0, 1.0, 0.09, 0.93)]  # the lean and the size of M-31
+    poses, smear = [], []
+    for run, stop in enumerate(stops):
+        for _ in range(14):
+            poses.append((stop[0] + rng.normal(0, 0.3), stop[1] + rng.normal(0, 0.3), *stop[2:]))
+            smear.append(0.8)
+        if run + 1 < len(stops):
+            for step in range(1, 13):  # moving to the next stop, a little of the way each frame
+                poses.append(tuple(a + (b - a) * step / 13 for a, b in zip(stop, stops[run + 1])))
+                smear.append(5.0)
+    noise = np.random.default_rng(9)
+    sigma = PAPER / (2 * 2.2)
+    fs = [np.maximum(joined(looked_at(s, *pose)) + noise.normal(0, sigma, (384, 512)), 0).astype(np.float32) for pose in poses]
+    truth = looked_at(s, 0, 0, 0, 0)
+    result = g.gather(fs, smear=smear)
+    assert result.placed and result.used >= 26, (result.used, result.total)  # twenty-eight still frames in two runs
+    first = g.gather(fs[:14], smear=smear[:14])
+    # and they add to the page (0.918 against 0.909; frames laid by a map go into single cells, which are noisier)
+    assert alike(result.image, truth) > alike(first.image, truth) + 0.005
 
 
 def clip(tmp_path, fs, name="c.mp4", gap_after=None):

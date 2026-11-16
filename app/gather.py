@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import itertools
 import json
+import logging
 import math
 import os
 import re
@@ -33,7 +34,30 @@ from pathlib import Path
 
 import numpy as np
 
-REACHES = (4.0, 16.0)  # frame pixels searched around the last placement: first near, then once wider
+REACHES = (4.0, 16.0)  # frame pixels searched around where the frame is expected: first near, then once wider
+# Frame pixels a frame is looked for around the frame before it, to follow the head between the frames that are added.
+# Worn (M-31, 30 frames a second): a step of 2 to 4 px in the middle, 5 to 12 px one frame in ten, 23 px at most while
+# a page was read; twice that at 15 frames a second.
+TRACK_REACH = 64.0
+# A frame that lies further than this (frame pixels) from where the first one lay is laid on the page by a map of its own:
+# shift, turn, scale and perspective, a homography. A head does not only move the picture, it tilts and sees the page
+# from another side: against a move of 44 px the edges of a worn frame lay another 15 to 19 px off, and added at one
+# shift the page was sharp in the middle and double towards its edges (M-31). Once one frame needed a map, every later
+# one gets one. A clip from glasses that lie still never moves this far, and goes the way it was measured on (M-29).
+FAR = 8.0
+# The map is found coarse to fine, on copies joined this many times more than the placing copy. Not on that copy itself:
+# found down to it the pages were no better (the turning head of the tests 0.9515 against 0.9516 alike, a worn page's
+# fine detail 26.35 both ways) and took 56 s instead of 40. Stopping one size sooner still, the detail fell (26.15).
+MAP_SIZES = (8, 4, 2)
+MAP_STEPS = 6  # Gauss-Newton steps a size at most
+MAP_STANDS = 0.02  # pixels of that size: a step that moves no place further has found the map
+MAP_LEAST = 32  # pixels a side under which a size is skipped
+MAP_FLOOR = 0.15  # how alike (correlation, in the band) the frame brought back and the page must be for it to be added
+# The same where no single shift placed the frame and the map alone says that it shows the page: a head that came back
+# from looking away a little further from the page, its picture an eighth smaller in area, matched the page at one
+# shift with 7.1 to 8.2 where 8 is asked, and a run of twenty still frames was lost (M-31). Worn frames laid by a map
+# were 0.67 to 0.98 alike to their page.
+MAP_SURE = 0.5
 WIDE_EXTRA = 3.0  # the wider search has sixteen times the places for noise to peak: its peak must be this much stronger
 # A frame is placed when its correlation peak stands this far above the rest of the surface (see _peak). Measured on the
 # first real page (M-27, 2026-11-15, parts of 512x172 to 960x324 px of clips of a page of print): frames of the page 9.4
@@ -58,6 +82,9 @@ FLAT = 0.5  # frame pixels: a fitted shift that changes less than this from edge
 FRESH_UNTIL = 16  # while the sum holds fewer frames than this, its transform is taken anew for every frame
 REFRESH = 4  # after that, the sum's transform is reused for this many frames: three more frames change it little
 DECODE_SECONDS = 30  # the decoder is stuck when one frame takes this long to come; how long the reader takes is its own affair
+
+
+_LOG = logging.getLogger(__name__)
 
 
 class GatherError(RuntimeError):
@@ -146,6 +173,99 @@ def shift_of(frame: np.ndarray, reference: np.ndarray, around: tuple[float, floa
     return _peak(_spectrum(frame) * side, frame.shape, around, reach, _own(reference, side))
 
 
+def _banded(image: np.ndarray, fill: float | None = None, where: np.ndarray | None = None) -> np.ndarray:
+    """The picture without its slow shading, which stays with the lens and not with the page, and without the finest
+    third, where noise rules. Places outside `where` are given `fill` first, so that no edge is made there."""
+    if where is not None:
+        image = np.where(where, image, fill)
+    radius = np.hypot(np.fft.fftfreq(image.shape[0])[:, None], np.fft.rfftfreq(image.shape[1])[None, :])
+    band = np.exp(-(radius / 0.25) ** 2) - np.exp(-(radius / 0.03) ** 2)
+    return np.fft.irfft2(np.fft.rfft2(image - image.mean()) * band, s=image.shape).astype(np.float32)
+
+
+def _units(shape: tuple[int, int]) -> tuple[np.ndarray, np.ndarray, float]:
+    """Pixel centres about the picture's centre in units of half its longer side: one map serves every size of a picture."""
+    h, w = shape
+    unit = max(h, w) / 2
+    return (((np.arange(h) - (h - 1) / 2) / unit).astype(np.float32)[:, None],
+            ((np.arange(w) - (w - 1) / 2) / unit).astype(np.float32)[None, :], unit)
+
+
+def _through(m: np.ndarray, y: np.ndarray, x: np.ndarray, unit: float, centre: tuple[float, float]) -> tuple[np.ndarray, np.ndarray]:
+    """(row, column) in pixels of the places (y, x in units) taken through m. Scaling to pixels and the centre are
+    folded into the numerators: three sums of a column and a row and two divisions, in the pictures' single precision."""
+    (a, b, c), (d, e, f), (g, k, n) = m.tolist()
+    den = np.float32(g) * x + (np.float32(k) * y + np.float32(n))
+    column = (np.float32(a * unit + centre[1] * g) * x + (np.float32(b * unit + centre[1] * k) * y + np.float32(c * unit + centre[1] * n))) / den
+    row = (np.float32(d * unit + centre[0] * g) * x + (np.float32(e * unit + centre[0] * k) * y + np.float32(f * unit + centre[0] * n))) / den
+    return row, column
+
+
+def _brought_back(frame: np.ndarray, m: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """frame(m p) for every place p of the page, between its four nearest pixels, and where m p lies inside the frame.
+    m maps a place of the page (x, y, 1 in units) to the frame's."""
+    h, w = frame.shape
+    y, x, unit = _units(frame.shape)
+    v, u = _through(m, y, x, unit, ((h - 1) / 2, (w - 1) / 2))
+    inside = (v >= 0) & (v <= h - 1) & (u >= 0) & (u <= w - 1)
+    y0, x0 = np.clip(np.floor(v), 0, h - 2), np.clip(np.floor(u), 0, w - 2)
+    fy, fx = np.clip(v - y0, 0, 1), np.clip(u - x0, 0, 1)
+    first = y0.astype(np.intp) * w + x0.astype(np.intp)
+    flat = frame.reshape(-1)
+    top = flat[first]
+    top += (flat[first + 1] - top) * fx
+    bottom = flat[first + w]
+    bottom += (flat[first + w + 1] - bottom) * fx
+    top += (bottom - top) * fy
+    return top, inside
+
+
+def _laid(page: np.ndarray, known: np.ndarray, frame: np.ndarray, m: np.ndarray) -> tuple[np.ndarray, float] | None:
+    """The map made better on one size, by Gauss-Newton steps on page(p) = frame(m p) where the page is `known`, and
+    how alike the two are under it (correlation). None when too little of the page is seen or the steps lead nowhere."""
+    y, x, unit = _units(page.shape)
+    alike = 0.0
+    for _ in range(MAP_STEPS):
+        back, inside = _brought_back(frame, m)
+        use = inside & known
+        use[[0, -1], :] = False
+        use[:, [0, -1]] = False
+        if int(use.sum()) < 64:
+            return None
+        counted = use.astype(np.float32)  # as a factor: taking the pixels out by a mask is slower than carrying zeros
+        seen, shown = (page * counted).reshape(-1), (back * counted).reshape(-1)
+        scale = math.sqrt(float(seen @ seen) * float(shown @ shown))
+        alike = float(seen @ shown) / scale if scale > 0 else 0.0  # under the map this step starts from
+        gy, gx = np.gradient(back)
+        gy *= counted * np.float32(unit)
+        gx *= counted * np.float32(unit)
+        along = gx * x + gy * y
+        design = np.stack((gx * x, gx * y, gx, gy * x, gy * y, gy, -along * x, -along * y)).reshape(8, -1)
+        normal = (design @ design.T).astype(np.float64)
+        try:
+            delta = np.linalg.solve(normal + 1e-9 * np.trace(normal) / 8 * np.eye(8), (design @ (seen - shown)).astype(np.float64))
+        except np.linalg.LinAlgError:
+            return None
+        if not np.isfinite(delta).all() or float(np.abs(delta).max()) > 0.5:
+            return None
+        m = m @ np.array([[1 + delta[0], delta[1], delta[2]], [delta[3], 1 + delta[4], delta[5]], [delta[6], delta[7], 1.0]])
+        if abs(m[2, 0]) + abs(m[2, 1]) >= 0.9 * abs(m[2, 2]):
+            return None  # so bent that a place of the page would lie at or behind the camera: no picture of a page
+        if float(np.abs(delta).max()) * unit < MAP_STANDS:
+            break
+    return m, alike
+
+
+def _places(shape: tuple[int, int], m: np.ndarray, size: tuple[int, int]) -> tuple[np.ndarray, np.ndarray]:
+    """Where on the page each pixel of a frame of `shape` lies (row, column, in frame pixels), by the inverse of m.
+    `size` is the part of the frame the map's units were taken on: the frame without the rows and columns that joining
+    left out."""
+    unit = max(size) / 2
+    y = ((np.arange(shape[0]) - (size[0] - 1) / 2) / unit).astype(np.float32)[:, None]
+    x = ((np.arange(shape[1]) - (size[1] - 1) / 2) / unit).astype(np.float32)[None, :]
+    return _through(np.linalg.inv(m), y, x, unit, ((size[0] - 1) / 2, (size[1] - 1) / 2))
+
+
 def _joined(image: np.ndarray, k: int) -> np.ndarray:
     h, w = image.shape[0] // k * k, image.shape[1] // k * k
     return image[:h, :w].reshape(h // k, k, w // k, k).mean(axis=(1, 3))
@@ -183,6 +303,32 @@ class _Planes:
                 shared = np.multiply(block[j0:j1, i0:i1], share, out=self._scratch[:j1 - j0, :i1 - i0])
                 self.sums[half, plane_y, plane_x, rows, columns] += shared
                 self.weights[half, plane_y, plane_x, rows, columns] += share
+
+    def lay(self, half: int, frame: np.ndarray, row: np.ndarray, column: np.ndarray) -> None:
+        """Add a frame whose pixels lie on the page at (row, column) frame pixels, each into the grid cell nearest to it.
+        No sharing between cells: the cell is a quarter of a frame pixel at most from where the pixel lies, and a
+        frame that is turned or seen from another side cannot be added as blocks of memory. The cells are noisier
+        for it: about 1.5 times, which the level over noise of a page laid this way shows.
+
+        Two pixels of one frame lie a frame pixel apart, `grid` cells: they never fall into one cell, so each cell
+        is added to once. (Were a frame seen at under half its size they would, and the later pixel alone would
+        count; no such frame is laid.)"""
+        grid = self.grid
+        h, w = self.sums.shape[-2:]
+        cell_y = np.rint(grid * row + (grid - 1) / 2).astype(np.int32)
+        cell_x = np.rint(grid * column + (grid - 1) / 2).astype(np.int32)
+        on = (cell_y >= 0) & (cell_y < grid * h) & (cell_x >= 0) & (cell_x < grid * w)
+        cell_y, cell_x = cell_y[on], cell_x[on]
+        # the plane a cell lies in, then its place there: (cell % grid) planes of h * w or w places, cell // grid rows or columns
+        if grid & (grid - 1) == 0:  # a power of two, as the grid is: bits, where dividing whole numbers is slow
+            bits = grid.bit_length() - 1
+            flat = (cell_y & (grid - 1)) * (grid * h * w) + (cell_y >> bits) * w
+            flat += (cell_x & (grid - 1)) * (h * w) + (cell_x >> bits)
+        else:
+            flat = ((cell_y % grid) * grid + cell_x % grid) * (h * w) + (cell_y // grid) * w + cell_x // grid
+        flat = flat.astype(np.intp)  # worked out in 32 bits, which is quicker; added through the index's own size, which is too
+        self.sums[half].reshape(-1)[flat] += frame[on]
+        self.weights[half].reshape(-1)[flat] += 1
 
     def _woven(self, planes: np.ndarray) -> np.ndarray:
         grid = self.grid
@@ -255,13 +401,25 @@ def gather(frames: Iterable[np.ndarray], *, smear: Sequence[float] | None = None
 
     A frame is placed in two steps: on a copy joined down to a short side of about COARSE_SIDE pixels, which also says
     whether it shows this scene at all, then piece by piece at full size around that.
+
+    A frame that lies further than FAR from the first is laid on the page by a map of its own (a homography, found
+    from the pictures coarse to fine), and so is every frame after it: a head that moved has also tilted and sees
+    the page from another side, and one shift fits such a frame in its middle only. Frames of glasses that lie still
+    never get a map; they are added as they were measured.
+
+    Where a frame is looked for is where the last added frame was, moved by what the picture has travelled since: every
+    frame, added or not, is placed against the frame before it on the joined copies. On a worn head the picture moved
+    46 to 301 px between two runs of still frames (M-31); looked for around the last added frame alone, every run
+    after the first was lost.
     """
     selection = "none" if smear is None else "motion"
     total = usable = used = 0
-    planes = reference = coarse = covered = shape = None
+    planes = reference = coarse = covered = shape = before = None
     join = 1
     position = (0.0, 0.0)
-    held: dict[object, tuple[int, np.ndarray, np.ndarray | None]] = {}
+    travelled = [0.0, 0.0]  # frame pixels the picture has moved since the last frame that was added
+    pose = None  # the map of the last frame that was laid on the page by one; None while one shift has done
+    held: dict[object, tuple] = {}  # what is made from the sum and reused while it changes little: (frames then, ...)
 
     def side(key: object, source) -> np.ndarray:
         """The sum's half of the correlation for the whole (key None) or a piece (key = its box), taken anew when stale.
@@ -274,6 +432,40 @@ def gather(frames: Iterable[np.ndarray], *, smear: Sequence[float] | None = None
             held[key] = kept
         return kept[1]
 
+    def page_sizes() -> list[tuple[int, np.ndarray, np.ndarray]]:
+        """The page so far on the sizes a map is found on, in the band, and where enough frames have shown it."""
+        kept = held.get("map")
+        if kept is None or used < FRESH_UNTIL or used - kept[0] >= REFRESH:
+            mean = reference / np.maximum(covered, 1)
+            shown = (covered.astype(np.float32) * 4 >= used).astype(np.float32)
+            if join > 1:
+                mean, shown = _joined(mean, join), _joined(shown, join)
+            level = float(mean[shown > 0.5].mean()) if (shown > 0.5).any() else 0.0
+            sizes = []
+            for k in MAP_SIZES:
+                if min(mean.shape) // k < MAP_LEAST:
+                    continue
+                known = (_joined(shown, k) if k > 1 else shown) > 0.5
+                sizes.append((k, _banded(_joined(mean, k) if k > 1 else mean, level, known), known))
+            kept = (used, sizes, None)
+            held["map"] = kept
+        return kept[1]
+
+    def mapped(small: np.ndarray, start: np.ndarray, near: bool, floor: float = MAP_FLOOR) -> tuple[np.ndarray | None, str]:
+        """The frame's map onto the page, from `start`, coarse to fine; from the two finest sizes alone when the start
+        is the map of the frame just before. None when the frame cannot be laid on the page; and how it went."""
+        m, alike = start, 0.0
+        sizes = page_sizes()
+        for k, page, known in sizes[-2:] if near else sizes:
+            found = _laid(page, known, _banded(_joined(small, k) if k > 1 else small), m)
+            if found is None:
+                return None, f"no map at size {k}"
+            m, alike = found
+        m = m / m[2, 2]
+        turn, lean = float(np.linalg.det(m[:2, :2])), float(np.abs(m[2, :2]).max())
+        went = f"alike {alike:.3f} area {turn:.3f} lean {lean:.3f}"
+        return (m if alike >= floor and 0.8 < turn < 1.25 and lean <= 0.2 else None), went
+
     for index, frame in enumerate(frames):
         frame = np.asarray(frame, dtype=np.float32)
         if shape is None:
@@ -283,24 +475,67 @@ def gather(frames: Iterable[np.ndarray], *, smear: Sequence[float] | None = None
         elif frame.shape != shape:
             raise ValueError(f"frame {index} is {frame.shape}, the first was {shape}")
         total += 1
+        small = _joined(frame, join) if join > 1 else frame
+        spectrum = _spectrum(small)
+        if before is not None and travelled is not None:
+            step_y, step_x, sure = _peak(spectrum * before[0], small.shape, (0.0, 0.0), max(2.0, TRACK_REACH / join), before[1])
+            if sure >= STRENGTH_FLOOR:
+                travelled[0] += step_y * join
+                travelled[1] += step_x * join
+            else:
+                # Not the frame before moved: the view left the page, or the head turned further than is looked for.
+                # Worn frames matched the frame before with 42 or more, frames of two different pages with 7.3 at most
+                # (M-31). From here only the last added frame says where to look, until a frame is added again.
+                _LOG.debug("frame %d: the frame before is not found in it (%.1f)", index, sure)
+                travelled = None
+        mine = np.conj(spectrum) * _tools(small.shape)[1]
+        before = (mine, np.fft.irfft2(spectrum * mine, s=small.shape))
         if smear is not None and (index >= len(smear) or smear[index] > smear_limit):
             continue
         usable += 1
-        small = _joined(frame, join) if join > 1 else frame
-        field = None
+        field = laid = None
         if reference is None:
             dy = dx = 0.0
         else:
-            cross = _spectrum(small) * side(None, lambda: coarse)
+            cross = spectrum * side(None, lambda: coarse)
+            moved = travelled or (0.0, 0.0)
+            expected = ((position[0] + moved[0]) / join, (position[1] + moved[1]) / join)
+            unit = max(small.shape) * join / 2
             for reach in REACHES:
-                dy, dx, strength = _peak(cross, small.shape, (position[0] / join, position[1] / join), max(2.0, reach / join),
-                                         held[None][2])
+                dy, dx, strength = _peak(cross, small.shape, expected, max(2.0, reach / join), held[None][2])
                 if strength >= STRENGTH_FLOOR + (WIDE_EXTRA if reach > REACHES[0] else 0.0):
                     break
             else:
-                continue  # not this scene: the view left the page, or something came between
+                # No single shift places it. Where the picture has been followed to, a map is tried from there: the
+                # head may have come back turned, or further from the page.
+                went = ""
+                if parts > 1 and travelled is not None:
+                    there = np.array([[1.0, 0.0, expected[1] * join / unit], [0.0, 1.0, expected[0] * join / unit], [0.0, 0.0, 1.0]])
+                    if pose is not None:
+                        there = np.array([[1.0, 0.0, travelled[1] / unit], [0.0, 1.0, travelled[0] / unit], [0.0, 0.0, 1.0]]) @ pose
+                    laid, went = mapped(small, there, False, MAP_SURE)
+                _LOG.debug("frame %d %s: %.1f at its best within %.0f px of %+.0f %+.0f%s %s", index,
+                           "laid without a shift" if laid is not None else "not placed", strength, REACHES[-1], expected[0] * join,
+                           expected[1] * join, "" if travelled is not None else " (track lost)", went)
+                if laid is None:
+                    continue  # not this scene: the view left the page, or something came between
+                dy, dx = float(laid[1, 2]) * unit / join, float(laid[0, 2]) * unit / join  # where the page's middle lies in it
             dy, dx = dy * join, dx * join
-            if parts > 1 and used >= PARTS_FROM:
+            if laid is not None:
+                pass
+            elif parts > 1 and (pose is not None or math.hypot(dy, dx) > FAR):
+                near = pose is not None and travelled is not None and math.hypot(*travelled) <= FAR
+                if near:  # the frame before, moved by what the picture has travelled since
+                    start = np.array([[1.0, 0.0, travelled[1] / unit], [0.0, 1.0, travelled[0] / unit], [0.0, 0.0, 1.0]]) @ pose
+                else:  # frame(p) = page(p - d): the page's place p is the frame's p + d
+                    start = np.array([[1.0, 0.0, dx / unit], [0.0, 1.0, dy / unit], [0.0, 0.0, 1.0]])
+                laid, went = mapped(small, start, near)
+                if laid is None and near:
+                    laid, went = mapped(small, np.array([[1.0, 0.0, dx / unit], [0.0, 1.0, dy / unit], [0.0, 0.0, 1.0]]), False)
+                _LOG.debug("frame %d at %+.0f %+.0f %s: %s", index, dy, dx, "laid" if laid is not None else "left out", went)
+                if laid is None:
+                    continue  # it shows the page, but not so that it can be laid on it: left out rather than added double
+            elif parts > 1 and used >= PARTS_FROM:
                 field = _field(frame, lambda box: side((box[0].start, box[1].start), lambda: reference[box]), dy, dx, parts,
                                PART_REACH + (join - 1) / 2)
                 if field is not None:
@@ -308,6 +543,26 @@ def gather(frames: Iterable[np.ndarray], *, smear: Sequence[float] | None = None
                     if float((np.abs(field[1]) * shape[0] + np.abs(field[2]) * shape[1]).max()) < FLAT:
                         field = None  # no tilt worth following: the whole frame goes in at the fitted centre shift
         position = (dy, dx)
+        travelled = [0.0, 0.0]
+        if laid is not None:
+            pose = laid
+            size = (small.shape[0] * join, small.shape[1] * join)
+            row, column = _places(shape, laid, size)
+            planes.lay(used % 2, frame, row, column)
+            at_y, at_x = np.rint(row).astype(np.int32), np.rint(column).astype(np.int32)
+            on = (at_y >= 0) & (at_y < shape[0]) & (at_x >= 0) & (at_x < shape[1])
+            flat = (at_y * shape[1] + at_x)[on].astype(np.intp)
+            # the frame as the page saw it, at whole pixels: where two of its pixels fall on one place the later
+            # one stands, where none falls nothing is added
+            light, times = np.zeros(shape, np.float32), np.zeros(shape, np.float32)
+            light.reshape(-1)[flat] = frame[on]
+            times.reshape(-1)[flat] = 1
+            reference += light
+            covered += times.astype(np.uint16)
+            if join > 1:  # joined: the mean of the pixels that fell into each joined cell
+                coarse += _joined(light, join) / np.maximum(_joined(times, join), 1.0 / (join * join))
+            used += 1
+            continue
         if field is None:
             planes.add(used % 2, frame, dy, dx)
         else:
