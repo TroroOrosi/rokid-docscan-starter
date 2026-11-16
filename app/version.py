@@ -303,7 +303,16 @@ from __future__ import annotations
 #         said in words; one that cannot be represented keeps its written part instead of becoming needs_input.
 #         A ready item whose figure cannot be drawn, or that carries a field outside the format, keeps its text
 #         and is shown for review (it was stored as failed and empty). See API 1.48.0.
-APP_VERSION = "0.81.0"
+# 0.82.0: paper other than a spread, and a send left uncertain. The booklet request asks what the captures leave
+#         out (a gap in the printed page numbers, text cut at an image's edge with no adjoining capture) and says
+#         which captures are greyscale (recorded pages). On the Codex route every sheet or part of a sheet with
+#         exam matter is located (answer sheets, resource sheets, cards, strips), a photo with a discarded box
+#         also goes whole, and a region cut from a still is sent at twice its own pixels in files under the
+#         CLI's cap. Work keeps the answers that do not rest on a capture its review could not read. A Chat send
+#         whose reply was never collected is read back by itself: found among the newest conversations by its
+#         batch id when no address was recorded, and resolved before another session's booklet is refused
+#         (register 3-17). See API 1.49.0.
+APP_VERSION = "0.82.0"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.
@@ -441,7 +450,9 @@ APP_VERSION = "0.81.0"
 # 1.48.0: an answer-bundle item is needs_review with the issue 図の形式を表示できません when a figure of a ready answer
 # could not be drawn, and 形式外の内容は表示していません when the reply carried content outside the answer format;
 # the item keeps its answer text in both cases.
-API_VERSION = "1.48.0"
+# 1.49.0: an answer bundle can hold items with empty group and label and status needs_input that name what the
+# captures leave out (a page-number gap, text cut at an image's edge, a capture Work's review could not read).
+API_VERSION = "1.49.0"
 
 # Matching algorithm identity. Bump when thresholds or hashing change so a
 # re-index/eval is triggered. Mirrors thresholds in app/matching.py.
