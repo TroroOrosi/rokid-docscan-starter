@@ -1180,6 +1180,25 @@ def test_unprinted_questions_keep_page_order_and_saved_answers_after_restart(cli
     assert restored["input_digest"] == bundle["input_digest"]
 
 
+def test_what_the_captures_leave_out_reaches_the_glasses_as_an_item_of_its_own(client, monkeypatch):
+    """The booklet request asks for one extra item per skipped page or cut-off part (chatgpt_web._COVERAGE)."""
+    from app import main
+    from app.solvers.chatgpt_web import _booklet_replies
+
+    _, session_id = _session_with(client, ["一頁目", "四頁目"])
+    monkeypatch.setenv("ROKID_SOLVER", "test-provider")
+    reply = {"questions": [
+        {"group": "第1問", "label": "問1", "answer_no": [1], "pages": [1], "status": "ready", "answer": "④",
+         "missing_material": "", "diagrams": []},
+        {"group": "", "label": "", "answer_no": [], "pages": [1, 2], "status": "needs_input", "answer": "",
+         "missing_material": "印刷された2〜3頁が撮影にありません", "diagrams": []}]}
+    monkeypatch.setattr(main, "_answer_all", lambda _: _booklet_replies(reply, subject=None, extras={}))
+    bundle = _background_finalize_and_wait(
+        client, session_id, lambda items: len(items) == 2 and all(i["status"] != "pending" for i in items))
+    assert [(item["status"], item["answer"], item["issue"]) for item in bundle["items"]] == [
+        ("ready", "④", ""), ("needs_input", "", "印刷された2〜3頁が撮影にありません")]
+
+
 def test_model_inventory_overflow_is_rejected_without_a_partial_deck(client, monkeypatch):
     from app import main
 

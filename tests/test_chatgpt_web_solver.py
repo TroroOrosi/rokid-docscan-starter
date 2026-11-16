@@ -2797,6 +2797,44 @@ def test_capture_context_reaches_chat_booklet_and_individual_question_prompts(tm
     assert "Do not merge distinct questions" in prompt and "uncaptured" in prompt
 
 
+def _prompt_sent(tmp_path, stage, **page_fields) -> str:
+    """What the Chat route sends for a two-page booklet (single, reading) or for one question of it."""
+    pages = []
+    for number in (1, 2):
+        original = tmp_path / f"capture-{number}.png"
+        original.write_bytes(_real_png(80 + number))
+        pages.append({"page_number": number, "image_path": str(original), **(page_fields if number == 2 else {})})
+    calls = []
+
+    class Client:
+        model = "test"
+
+        def complete_json(self, **options):
+            calls.append(options)
+            item = {"group": "", "label": "", "pages": [1, 2], "answer_no": [], "status": "needs_input",
+                    "answer": "", "missing_material": "uncaptured diagram"}
+            if stage == "reading":
+                item["requires_audio"] = False
+            return item if stage == "question" else {"questions": [item]}
+
+    question = Question(document_pages=pages, chat_key="session:1", answer_only=True,
+                        booklet_stage="single" if stage == "question" else stage)
+    solver = ChatGptWebSolver(client=Client())
+    solver.solve(question=question) if stage == "question" else solver.answer_all(question=question)
+    return calls[0]["prompt"]
+
+
+@pytest.mark.parametrize("stage", ["single", "reading", "question"])
+def test_the_booklet_request_asks_what_the_captures_leave_out(tmp_path, stage):
+    """Until 2026-11-16 a skipped page, or a part of a large sheet no capture showed, only made the list shorter."""
+    prompt = _prompt_sent(tmp_path, stage)
+    asked = "gap in the printed page numbers" in prompt and "cut off at an image's edge" in prompt
+    # One question's reply is one object: it has no list to add an item to.
+    assert asked is (stage != "question")
+    if asked:
+        assert "ONE extra item" in prompt and "needs_input" in prompt and "no other capture continues it" in prompt
+
+
 def test_one_message_lists_and_answers_the_booklet_in_the_answer_chat(tmp_path):
     """The model names the 小問 from the originals AND answers them in one reply."""
     page_path = tmp_path / "page.png"

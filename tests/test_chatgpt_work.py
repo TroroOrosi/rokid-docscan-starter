@@ -264,6 +264,33 @@ def test_capture_context_reaches_the_sealed_work_job_and_browser_prompt(client, 
         assert entries[f"page_{page['page_number']:03d}.png"] == Path(page["image_path"]).read_bytes()
 
 
+def _work_prompt(client, monkeypatch, *, stage="single", clip=False):
+    """What the Work route sends for a one-page booklet: the sealed job's prompt inside the browser's."""
+    from app import main
+    from app.solvers.chatgpt_work import ChatGptWorkSolver
+    from tests.test_native_capture_work import native_job
+
+    exam_type = "mixed" if stage == "reading" else "written"
+    if clip:
+        doc, session, _, job = native_job(client, "clip_frame", exam_type=exam_type)
+    else:
+        doc, session, job = api_session(client, exam_type=exam_type)
+    wait_for(lambda: session not in main._background_solves)
+    fake = BrowserReply()
+    monkeypatch.setenv("ROKID_CHATGPT_SEND_ENABLED", "1")
+    ChatGptWorkSolver(client=fake).answer_all(question=question_for(doc, session, stage=stage))
+    assert job["prompt"] in fake.calls[0]["prompt"]
+    return fake.calls[0]["prompt"]
+
+
+@pytest.mark.parametrize("stage", ["single", "reading"])
+def test_the_work_job_asks_what_the_captures_leave_out(client, monkeypatch, stage):
+    """Until 2026-11-16 a skipped page, or a part of a large sheet no capture showed, only made the list shorter."""
+    prompt = _work_prompt(client, monkeypatch, stage=stage)
+    assert "gap in the printed page numbers" in prompt and "cut off at an image's edge" in prompt
+    assert "ONE extra item" in prompt and "no other capture continues it" in prompt
+
+
 @pytest.mark.parametrize(("count", "soft_limit"), [(21, None), (47, 1), (21, 1250)])
 def test_canonical_pages_remain_byte_exact_in_bounded_deterministic_zips_after_interruption(
         client, monkeypatch, count, soft_limit):

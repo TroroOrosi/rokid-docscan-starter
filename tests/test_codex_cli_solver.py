@@ -165,6 +165,15 @@ def test_a_booklet_is_one_exec_request_with_every_page_and_its_reply_becomes_the
     assert replies[0][1].extras["source"] == "codex-cli" and replies[0][1].extras["model"] == "gpt-6.1-sol"
 
 
+def test_the_request_asks_what_the_captures_leave_out(codex, tmp_path):
+    """Until 2026-11-16 a skipped page, or a part of a large sheet no capture showed, only made the list shorter."""
+    codex_cli.CodexCliSolver().answer_all(question=_booklet(tmp_path))
+
+    prompt = _runs(codex())[0]["args"][-1]
+    assert "gap in the printed page numbers" in prompt and "cut off at an image's edge" in prompt
+    assert "ONE extra item" in prompt and "no other capture continues it" in prompt
+
+
 def test_the_reply_is_kept_so_the_same_booklet_is_not_paid_for_twice(codex, tmp_path):
     question = _booklet(tmp_path)
     first = codex_cli.CodexCliSolver().answer_all(question=question)

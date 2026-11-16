@@ -1981,7 +1981,18 @@ _CAPTURE_CONTEXT = (
     "or unreadable, return needs_input; never infer uncaptured text, figures or regions. "
 )
 
-_ALL_TASK = _CAPTURE_CONTEXT + (
+# What the captures leave out is said, not passed over. Until 2026-11-16 a skipped page, or a part of a large sheet
+# that no capture showed, only made the answer list shorter. For the booklet's list only: one question's reply is
+# one object. `pages` is asked for because Work refuses an item that names no capture.
+_COVERAGE = (
+    "Also report what the captures leave out, each as ONE extra item of the questions list with "
+    "empty group and label, answer_no [], pages holding the capture pages next to it, status "
+    "needs_input and missing_material naming what is missing (requires_audio false where that "
+    "field is asked): (a) each gap in the printed page numbers you can see; (b) each place where "
+    "text or a figure is cut off at an image's edge and no other capture continues it. "
+)
+
+_ALL_TASK = _CAPTURE_CONTEXT + _COVERAGE + (
     "Answer EVERY question in the attached booklet in this one reply. List, in booklet "
     "order, every actual question, including unnumbered written, choice and diagram questions. "
     "Determine the requested answer format from the original images. Copy its printed "
@@ -2000,7 +2011,7 @@ _ALL_TASK = _CAPTURE_CONTEXT + (
     '"status":"ready","answer":"","missing_material":"","diagrams":[]}]}.'
 )
 
-_READING_TASK = _CAPTURE_CONTEXT + (
+_READING_TASK = _CAPTURE_CONTEXT + _COVERAGE + (
     "This is stage 1 of a mixed reading/listening paper. All original page images are supplied now; "
     "original audio will arrive later in THIS chat. Enumerate EVERY actual question in booklet "
     "order, including unnumbered questions, with group, label, answer_no and capture pages as below. "
