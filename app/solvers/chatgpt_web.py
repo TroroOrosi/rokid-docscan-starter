@@ -674,12 +674,16 @@ def _find_sent_chat(page, batch_id: str, *, sleep=time.sleep) -> str | None:
 
     For a send whose chat is on record under no address of its own: the home page it was sent from, or the address
     the page made up for it (phone, 2026-11-16: the server restarted before the real one showed, and the answered
-    booklet could not be read back). The tab is looked at as it is, then the NEWEST_CHATS newest conversations the
-    page lists. This only loads pages and reads them: no typing, no attaching, no send and no new chat. A
-    conversation is taken only if its LAST user message carries the batch id, so a reply is never read in a chat
-    this server did not send the batch into. What is read is compared here and kept nowhere.
+    booklet could not be read back). The tab's own conversation is tried first, which needs no list, then the
+    NEWEST_CHATS newest the page lists. Each is loaded and read, nothing else: no typing, no attaching, no send and
+    no new chat. A conversation is taken only if its LAST user message carries the batch id, so a reply is never
+    read in a chat this server did not send the batch into. What is read is compared here and kept nowhere.
     """
-    def ours() -> bool:
+    def ours(url: str) -> bool:
+        try:
+            return_to_chat(page, url, reload=True)
+        except ChatGptWebChatLost:
+            return False
         users, shown = page.locator(USER_SEL), None
         for _ in range(3 * SETTLE_POLLS):  # about 30 s at POLL_S: a loaded chat shows its turns late
             text = users.last.inner_text() if users.count() else ""
@@ -692,9 +696,9 @@ def _find_sent_chat(page, batch_id: str, *, sleep=time.sleep) -> str | None:
         return False
 
     here = _url_of(page)
-    if _is_chat_url(here) and ours():
+    if _is_chat_url(here) and ours(here):
         return here
-    if here.rstrip("/") != CHAT_URL.rstrip("/"):
+    if _url_of(page).rstrip("/") != CHAT_URL.rstrip("/"):
         page.goto(CHAT_URL, wait_until="domcontentloaded")
     listed: list[str] = []
     for _ in range(3 * SETTLE_POLLS):  # The list is filled in after the page has loaded.
@@ -706,11 +710,7 @@ def _find_sent_chat(page, batch_id: str, *, sleep=time.sleep) -> str | None:
         listed = found
         sleep(POLL_S)
     for url in listed[:NEWEST_CHATS]:
-        try:
-            return_to_chat(page, url, reload=True)
-        except ChatGptWebChatLost:
-            continue
-        if ours():
+        if url != here and ours(url):  # the tab's own conversation has been looked at already
             return url
     return None
 
@@ -1808,7 +1808,7 @@ class ChatGptWebClient:
                                      timeout_s=OTHER_SEND_WAIT_S)
         except ChatGptWebAuthenticationRequired:
             raise
-        except (ChatGptWebError, OSError, KeyError, TypeError, ValueError):
+        except (ChatGptWebError, OSError):
             pass  # The guard's state below is the outcome. Of these, only their limit notice leaves it clear.
         finally:
             for name, value in own.items():

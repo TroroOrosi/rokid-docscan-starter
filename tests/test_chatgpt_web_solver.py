@@ -3159,8 +3159,11 @@ class _AccountPage(_BatchPage):
 
     def evaluate(self, expression):
         if "newest_chats" in expression:
-            return list(self.listed)
+            return list(self.listed) if self.navigation else []
         return super().evaluate(expression)
+
+    #: False for a page whose navigation shows no conversation links.
+    navigation = True
 
 
 def _send_and_lose(monkeypatch, page, files, key, *, server=False):
@@ -3214,6 +3217,52 @@ def test_a_send_with_no_address_on_record_is_found_among_the_newest_chats_after_
     kept = _chats(tmp_path)[_KEY_A]
     assert kept["url"] == chat and kept["pending"] is None
     assert kept["transfer"]["pending"] is None and kept["transfer"]["final"] == reply["batch_id"]
+
+
+def test_a_tab_still_on_the_chat_of_its_send_needs_no_list_to_read_it_back(monkeypatch, tmp_path):
+    """As before the search existed; it must not come to depend on what the navigation shows."""
+    _fast(monkeypatch)
+    page, files = _AccountPage(), _batch_files(1)
+    _send_and_lose(monkeypatch, page, files, _KEY_A, server=True)
+    chat = page.url
+    assert chatgpt_web._is_chat_url(chat) and _chats(tmp_path)[_KEY_A]["url"] == page.HOME
+    page.navigation = False
+
+    reply = json.loads(_booklet(chatgpt_web.ChatGptWebClient(), page, files, key=_KEY_A))
+
+    assert reply["questions"] and len(_sends(page)) == 1 and _guard_state(tmp_path) == "idle"
+    assert _chats(tmp_path)[_KEY_A]["url"] == chat and set(_gotos(page)) == {chat}
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
+@pytest.mark.parametrize("drawn,expected", [
+    ([True, True, False], ["/c/1", "/c/2"]),  # a second, hidden copy of a control does not count (phone, 2026-11-16)
+    ([False, False, False], ["/c/1", "/c/2", "/c/3"]),  # a list that is not drawn at all is still read: nothing is clicked
+])
+def test_the_newest_chats_script_reads_the_listed_addresses_in_the_pages_order(drawn, expected):
+    source = (f"const DRAWN = {json.dumps(drawn)}, SEL = {json.dumps(chatgpt_web.CHAT_LINKS_SEL)};"
+              "globalThis.document = {querySelectorAll: sel => { if (sel !== SEL) throw new Error(sel);"
+              " return DRAWN.map((shown, i) => ({href: '/c/' + (i + 1), getClientRects: () => (shown ? [1] : [])})); }};"
+              f"console.log(JSON.stringify({chatgpt_web._NEWEST_CHATS_JS}));")
+    result = subprocess.run([shutil.which("node"), "-e", source], capture_output=True, text=True, encoding="utf-8", timeout=60)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == expected
+
+
+def test_only_real_conversation_addresses_from_the_list_are_loaded(monkeypatch, tmp_path):
+    _fast(monkeypatch)
+    page, files = _AccountPage(provisional=True), _batch_files(1)
+    _send_and_lose(monkeypatch, page, files, _KEY_A, server=True)
+    made_up, ours = page.url, page.address
+    page.goto(page.HOME)
+    listing = [made_up, "https://chatgpt.com/gpts", "https://example.com/c/elsewhere", None, ours, ours]
+    read = page.evaluate
+    page.evaluate = lambda expression: listing if "newest_chats" in expression else read(expression)
+    loaded = len(_gotos(page))
+
+    assert json.loads(_booklet(chatgpt_web.ChatGptWebClient(), page, files, key=_KEY_A))["questions"]
+
+    assert set(_gotos(page)[loaded:]) == {ours} and _chats(tmp_path)[_KEY_A]["url"] == ours
 
 
 def test_a_send_that_is_not_among_the_three_newest_chats_stays_uncertain_and_nothing_is_sent(monkeypatch, tmp_path):
