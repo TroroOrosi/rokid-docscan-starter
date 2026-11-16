@@ -609,7 +609,11 @@ EXPLAINER_API_VERSION = "1.1.0"
 # written as 0 px of smear; now 999, with the number of frames whose readings ended early as gyro_partial); a
 # clip's record keeps the gyroscope's readings taken while it was recorded (gyro: t_ns, x, y, z); a clip takes the
 # long exposure only once a gain was saved with long_above (0 turns it off again).
-GLASSES_VIEW_CONTRACT_VERSION = "1.50.0"
+# 1.51.0: a tap during capture clears the display in the turn it is made in and the camera stops at once
+# (a clip being recorded ends there and what it has is the page; a still lands first). Nothing is saved
+# behind a cleared display: the page in hand gets its own three-second review on return. While the display
+# is cleared a double tap only brings it back; it ends the capture only while the capture is showing.
+GLASSES_VIEW_CONTRACT_VERSION = "1.51.0"
 
 # Answer-area overlay payload (box + short answer; 2D image-anchored).
 # 1.1.0: added tracking metadata (tracking/fixed_ar/anchor_hint).
