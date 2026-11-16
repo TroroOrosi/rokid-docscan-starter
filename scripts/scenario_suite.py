@@ -780,8 +780,9 @@ def self_check() -> int:
     def item(status, numbers=(), answer="", issue=""):
         return {"status": status, "answer_no": list(numbers), "answer": answer, "issue": issue, "question_label": ""}
 
-    expect = {"mode": "strict", "key": {"101": "4", "102": "2", "110": "5", "111": "6"}, "known_gap_pages": [13]}
-    good = [item("ready", [101], "④"), item("ready", [102], "2"), item("ready", [110, 111], "⑤,⑥"),
+    # Made-up values: the booklet's real key stays in its own file, outside the repository.
+    expect = {"mode": "strict", "key": {"101": "1", "102": "3", "110": "2", "111": "4"}, "known_gap_pages": [13]}
+    good = [item("ready", [101], "①"), item("ready", [102], "3"), item("ready", [110, 111], "②,④"),
             item("needs_input", issue="印刷ページ13が未収録です。")]
     judged = evaluate(expect, good)
     assert (judged["verdict"], judged["matches"], judged["unexpected_needs_input"]) == ("PASS", 4, 0), judged
