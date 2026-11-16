@@ -176,8 +176,10 @@ the time and 1.5 times the reasoning tokens, and no other single model is suppor
 silently reduces any image over 6000 px a side or 10,000 patches of 32 px (read in its source); the strips this route
 sends (about 517-690 x 2540) are under that. In-house: Work, 2026-11-09, twenty pages, once each, Extra High 556.6 s
 and High 339.6 s, both 13 of 13 (too few to decide; judged on 11/12 to favour High for the time target and nothing was
-changed); on the CLI Extra High took 14 pages in 81-86 s and 47 in 7 min 11 s. The comparison by effort on this
-system's own pages, by reading accuracy against a known text, is still to be measured.
+changed); on the CLI Extra High took 14 pages in 81-86 s and 47 in 7 min 11 s. By reading accuracy on this
+system's own page (the dark gathered desk page, 342 characters, twelve reads each, standard tier, §M-36): Extra High 3.1% wrong in
+about 311 s a read, High 3.3% in 150 s, Medium 4.8% in 78 s. High reads as well as Extra High in half the time; Medium
+reads worse. The setting stays Extra High until hard problems have been compared at High and Extra High, item by item.
 
 | Route | Status |
 |---|---|
