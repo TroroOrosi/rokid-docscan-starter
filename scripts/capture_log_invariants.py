@@ -14,15 +14,17 @@ What the rules rest on, each written by the app as it stands (android-relay/glas
   clip frames=66 counted=60 ... kept=true short=0     a clip that ended (ClipCamera); kept=true is followed by its
                                       "captured" line, kept=false by "preparation expired": one answer, two lines
   preview_status ... pending=false page_ready=true future=false ...     the still camera, once a second while it watches
+  watch_status frames=16 max_work_ms=40 ...                             the clip camera, once a second while it watches
 
 R1  Five or more preview_status lines in a row with pending, page_ready and future all false, while the controller
     is in READY or READING, not paused and with no end asked for: automatic capture has stopped silently.
 R2  After "Photo committed locally" the next controller line comes within 10 s and is an AIMING, a pause, a
     CAPTURE_REVIEW, a FINALIZING or another save; else nothing happens after a save. Ten quiet seconds are not a
     violation while the still camera says in them that it waits for a page (page_ready=true) or is busy: the wearer
-    has not turned the page, or the paper on the desk has not changed. The clip camera writes no such line, so on
-    that route the ten seconds stand alone. A line of the upload ("Network work paused") is not a line about the
-    capture: here and in R5 it is passed over.
+    has not turned the page, or the paper on the desk has not changed. The same holds while the clip camera says
+    that it watches (watch_status with frames handed over): its first run on a real log, 2026-11-18, reported three
+    such saves. A line of the upload ("Network work paused") is not a line about the capture: here and in R5 it is
+    passed over.
 R3  Every "CAPTURING: Requesting" is answered exactly once before the next one: by a photo, by a clip, or by
     "preparation expired" / "Retake did not start". A request with no answer is not reported when an ERROR or a
     FINALIZING line follows it (the capture failed, or it was ended while the page was being asked for), or when
@@ -123,6 +125,11 @@ def _is_status(entry: Entry) -> bool:
     return entry.text.startswith("preview_status ")
 
 
+def _clip_camera_watching(entry: Entry) -> bool:
+    """The clip camera's line of one second of watching in which it was handed frames."""
+    return entry.text.startswith("watch_status ") and _flags(entry.text).get("frames", "0") not in ("0", "")
+
+
 def _camera_idle(entry: Entry) -> bool:
     flags = _flags(entry.text)
     return all(flags.get(name) == "false" for name in ("pending", "page_ready", "future"))
@@ -185,8 +192,8 @@ def r2(entries: list[Entry]) -> list[Violation]:
         if entries[-1].time - entry.time < _AFTER_SAVE_S:
             continue  # the log ends before the ten seconds are over
         window = [later for later in after if later.time - entry.time <= _AFTER_SAVE_S]
-        if any(_is_status(later) and not _camera_idle(later) for later in window):
-            continue  # the still camera waits for the next page, or is taking one
+        if any((_is_status(later) and not _camera_idle(later)) or _clip_camera_watching(later) for later in window):
+            continue  # the camera waits for the next page, or is taking one
         found.append(Violation("R2", (entry,), f"nothing happens within {_AFTER_SAVE_S:.0f} s of a save"))
     return found
 

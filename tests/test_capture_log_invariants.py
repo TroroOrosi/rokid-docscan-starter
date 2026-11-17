@@ -117,6 +117,19 @@ def test_r2_is_silent_while_the_still_camera_waits_for_the_page_to_be_turned():
     assert rules(text) == []
 
 
+def test_r2_is_silent_while_the_clip_camera_watches_a_paper_that_has_not_changed():
+    """The checker's first run on a real log (2026-11-18, forty desk clips) reported three saves after which the clip
+    camera was plainly watching: it writes watch_status once a second, which the rule did not know."""
+    watching = "watch_status frames=16 max_work_ms=40 exposure_ns=50000000 iso=800 boost=325 far=false lines=81.2"
+    text = log(f"09:00:00.000 {SAVED}", *(f"09:00:{second:02d}.000 {watching}" for second in range(1, 30)),
+               f"09:00:30.000 {ARMED}")
+    assert rules(text) == []
+    stalled = "watch_status frames=0 max_work_ms=0 exposure_ns=50000000 iso=800 boost=325 far=false lines=0.0"
+    text = log(f"09:00:00.000 {SAVED}", *(f"09:00:{second:02d}.000 {stalled}" for second in range(1, 30)),
+               f"09:00:30.000 {ARMED}")
+    assert rules(text) == ["R2"], "a camera that hands over no frame is not watching"
+
+
 def test_r2_passes_over_the_uploads_own_line():
     retry = "READING: Network work paused; local images retained for retry"
     assert rules(log(f"09:00:00.000 {SAVED}", f"09:00:01.000 {retry}", f"09:00:05.000 {ARMED}")) == []

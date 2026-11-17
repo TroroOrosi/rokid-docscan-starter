@@ -282,7 +282,13 @@ class Check:
         # launch onto a running app is rebuilt without its options: on 2026-11-16, with nothing saved from earlier
         # runs, a session started with no server and with stills. Without the flag the options are only applied.
         self.sh(f"am start -W -n {ACTIVITY} {options} >/dev/null 2>&1")
-        time.sleep(0.5)
+        # This check's watcher is started anew for every run and first acts on the state the run before left on the
+        # server, which asks for a dark display (closed, or the chooser gone to sleep). That soft sleep reaches the
+        # glasses 0.25 to 1 s after the app was started: once the app's window holds the display it is ignored, before
+        # that the display goes dark and the chooser was reported as not drawn (twice on 2026-11-18, after the two
+        # runs that ended by leaving the app). At the venue the phone's watcher runs on and has long acted on it.
+        self.sh("input keyevent KEYCODE_WAKEUP")
+        time.sleep(0.8)
         self.row("the chooser is drawn", self.lit("chooser") > 0)
         self.gesture(DOUBLE_TAP)  # once; a second one would land in a running capture
         started = self.row("one double tap starts the reading", bool(self.wait_log(self.since, "Started local capture session", 8)))
