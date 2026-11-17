@@ -145,6 +145,8 @@ final class ClipCamera implements PageCamera {
      * failed this many times with no page between: then the capture fails, as every other failure does at once.
      */
     static final int MAX_CAMERA_FAILURES = 3;
+    /** The third clip in a row that runs out its time short of still frames is taken as the page it is. */
+    static final int SHORT_CLIPS_TAKEN = 3;
     private static final int MAX_FRAMES = (int) (MAX_MILLIS / 1000) * FPS + FPS;
     private static final int MAX_READINGS = 4096;
     private static final String TAG = "DocScanGlassDoc";
@@ -175,6 +177,10 @@ final class ClipCamera implements PageCamera {
         // After it: the camera's thread.
         long endedAt, backMillis = -1, bytes;
         boolean encoded, back;
+        /** Ended by the wearer's tap or double tap: what it has is the page. */
+        boolean cut;
+        /** Decided when it ends: it becomes its page (see end). */
+        boolean kept;
         GlassCamera.Captured page;
         String failure;
     }
@@ -232,6 +238,8 @@ final class ClipCamera implements PageCamera {
     private int configured;
     private Runnable afterReady, pageReady;
     private PageChange pageChange = new PageChange();
+    /** Clips in a row that ran out their time short of still frames and were not kept; the camera's thread. */
+    private int shortClips;
     private Clip clip;
     private long previewExposure, settlingSince, displayAt, statusAt, watchWorkNanos, pageScene;
     private int watchFrames;
@@ -323,6 +331,7 @@ final class ClipCamera implements PageCamera {
                 counted = held != null && held.phase == RECORDING && held.counted > 0;
             }
             if (counted) {
+                held.cut = true;
                 end(held); // goes on to step()
                 return;
             }
@@ -779,10 +788,22 @@ final class ClipCamera implements PageCamera {
         stopRecording(ended);
         ended.phase = ENDING;
         ended.endedAt = SystemClock.elapsedRealtime();
+        int counted;
+        synchronized (lock) {
+            counted = ended.counted;
+        }
+        // A clip that ran out its time short of two thirds of its frames (the weak mark's own rule) is not a page:
+        // it is deleted, the wearer is asked to hold still, and the page is recorded again. On 2026-11-17 eight of
+        // 35 worn clips ended with 4 to 38 still frames, were saved as pages and sent; three booklets came back
+        // without an answer (M-44 (15)). What the wearer cut short is theirs, and the third short clip in a row is
+        // taken as it is, so that nobody is kept at one page for good.
+        boolean enough = counted * 3 >= options.targetFrames * 2;
+        ended.kept = counted > 0 && (ended.cut || enough || shortClips + 1 >= SHORT_CLIPS_TAKEN);
+        if (counted > 0 && !ended.kept) shortClips++;
         encoder.end((written, bytes, failure) -> {
             GlassCamera.Captured page = null;
             String problem = failure != null ? failure : ended.frames == 0 ? "clip without frames" : null;
-            if (problem == null && ended.counted > 0) {
+            if (problem == null && ended.kept) {
                 try {
                     page = pageOf(ended);
                 } catch (IOException | JSONException | RuntimeException | OutOfMemoryError error) {
@@ -869,13 +890,16 @@ final class ClipCamera implements PageCamera {
         clip = null;
         Log.i(TAG, "clip frames=" + done.frames + " counted=" + done.counted + " dropped=" + done.dropped
                 + " bytes=" + done.bytes + " first_ms=" + done.firstMillis + " back_ms=" + done.backMillis
-                + " boost=" + done.boost + " exposure_ms=" + done.exposure / 1_000_000 + " gyro=" + done.gyroFrames);
+                + " boost=" + done.boost + " exposure_ms=" + done.exposure / 1_000_000 + " gyro=" + done.gyroFrames
+                + " kept=" + (done.page != null) + " short=" + shortClips);
         if (done.page != null) {
             cameraFailures = 0;
+            shortClips = 0;
             callback.onCaptured(done.page);
             return;
         }
-        // Not one frame was still enough to count: nothing is in flight, and the same page is looked for again.
+        // Not one frame was still enough to count, or too few for a page: nothing is in flight, and the same page is
+        // looked for again.
         done.file.delete();
         pageChange = new PageChange();
         settlingSince = 0;

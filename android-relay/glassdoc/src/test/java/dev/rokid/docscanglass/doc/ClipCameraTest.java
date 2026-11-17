@@ -597,15 +597,78 @@ public class ClipCameraTest {
 
     @Test public void ten_seconds_end_a_clip_that_never_fills() throws Exception {
         watching(); recording();
-        clipFrames(20, 0); idle(0);
+        clipFrames(46, 0); idle(0); // forty count after the first six
         assertEquals(0, encoder.ends);
-        idle(10_000 - 20 * 33 - 1);
+        idle(10_000 - 46 * 33 - 1);
         assertEquals(0, encoder.ends);
         idle(1);
         assertEquals(1, encoder.ends);
         watchingAgain();
-        assertEquals("what it has is the page", 1, pages.size());
+        assertEquals("with two thirds of its frames, what it has is the page", 1, pages.size());
+        assertEquals(46, record(pages.get(0).provenance.captureId).getJSONArray("frames").length());
+        assertEquals(0, notReady);
+    }
+
+    /** The second and later clips of a test: the watch session after clip {@code number - 1} is the one that is left. */
+    private void recordingAgain(int number) {
+        light(50_000_000L, 800, 423, CONTROL_AE_STATE_CONVERGED);
+        camera.captureOnce(); idle(0);
+        idleSession(2 * number);
+        assertEquals(2 * number + 2, device().configurations);
+    }
+
+    private void watchingAgainAfter(int number) {
+        idleSession(2 * number + 1);
+        assertEquals(2 * number + 3, device().configurations);
+        watchFrame(false);
+    }
+
+    /**
+     * The operator's morning of 2026-11-17 (M-44 (15)): eight of 35 clips ran to their ten seconds with 4 to 38
+     * still frames, each was saved as its page all the same, and three booklets came back without an answer five
+     * minutes later. The glasses knew the count when the clip ended. A clip that runs out its time with fewer than
+     * two thirds of its frames is not a page: the page is looked for and recorded again.
+     */
+    @Test public void a_clip_that_runs_out_its_time_short_of_still_frames_is_not_a_page() {
+        watching(); recording();
+        clipFrames(20, 0); idle(10_000 - 20 * 33); // fourteen count
+        assertEquals(1, encoder.ends);
+        watchingAgain();
+        assertTrue("fourteen still frames are not a page", pages.isEmpty());
+        assertTrue(failures.isEmpty());
+        assertEquals("the wearer is asked to hold still and the page is looked for again", 1, notReady);
+        assertArrayEquals("its file is gone", new String[0], inboxDirectory.list());
+    }
+
+    /** A wearer who cannot hold still is not kept at one page for good: the third short clip in a row is the page. */
+    @Test public void the_third_short_clip_in_a_row_is_taken_as_it_is() throws Exception {
+        watching(); recording();
+        clipFrames(20, 0); idle(10_000 - 20 * 33); watchingAgain();
+        recordingAgain(1);
+        clipFrames(20, 0); idle(10_000 - 20 * 33); watchingAgainAfter(1);
+        assertTrue(pages.isEmpty());
+        assertEquals(2, notReady);
+        recordingAgain(2);
+        clipFrames(20, 0); idle(10_000 - 20 * 33); watchingAgainAfter(2);
+        assertEquals(1, pages.size());
         assertEquals(20, record(pages.get(0).provenance.captureId).getJSONArray("frames").length());
+        assertEquals(2, notReady);
+        // A page was handed over: the count of short clips starts over with the next page.
+        recordingAgain(3);
+        clipFrames(20, 0); idle(10_000 - 20 * 33); watchingAgainAfter(3);
+        assertEquals(1, pages.size());
+        assertEquals(3, notReady);
+    }
+
+    /** What the wearer cuts short with a tap or a double tap is the page, however few frames it has (2026-11-16). */
+    @Test public void a_clip_the_wearer_cut_short_is_the_page_whatever_it_has() throws Exception {
+        watching(); recording();
+        clipFrames(20, 0); idle(0);
+        camera.pausePreview(); idle(0);
+        assertEquals(1, encoder.ends);
+        idleSession(1);
+        assertEquals("fourteen still frames, and the wearer's own choice", 1, pages.size());
+        assertEquals(0, notReady);
     }
 
     @Test public void a_clip_without_one_still_frame_is_not_a_page_and_the_page_is_looked_for_again() {
@@ -692,7 +755,8 @@ public class ClipCameraTest {
         // wait for the first frame and for the watch preview's return, the gain applied.
         List<org.robolectric.shadows.ShadowLog.LogItem> lines = org.robolectric.shadows.ShadowLog.getLogsForTag("DocScanGlassDoc");
         String line = lines.get(lines.size() - 1).msg;
-        assertTrue(line, line.matches("clip frames=66 counted=60 dropped=0 bytes=8 first_ms=\\d+ back_ms=\\d+ boost=500 exposure_ms=30 gyro=66"));
+        // And, after those: whether the clip became its page, and how many short clips in a row were not kept.
+        assertTrue(line, line.matches("clip frames=66 counted=60 dropped=0 bytes=8 first_ms=\\d+ back_ms=\\d+ boost=500 exposure_ms=30 gyro=66 kept=true short=0"));
     }
 
     @Test public void a_second_request_during_a_clip_starts_nothing() {
