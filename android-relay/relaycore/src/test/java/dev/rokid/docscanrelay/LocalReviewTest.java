@@ -2297,6 +2297,36 @@ public class LocalReviewTest {
         }
     }
 
+    /**
+     * Worn on 2026-11-17, a head's own motion was counted as pages turned during every review, each photo left a
+     * "missed page" behind, and that state refused the double tap that ends the capture. The glasses no longer watch
+     * during a review, so nothing there can settle such a state either: a reading that still carries one is freed.
+     */
+    @Test public void aMissedPageLeftByAnEarlierBuildDoesNotHoldACaptureThatNoLongerWatchesDuringAReview() throws Exception {
+        Context context = RuntimeEnvironment.getApplication();
+        File root = new File(context.getFilesDir(), "local-scans");
+        LocalCaptureSession saved = LocalCaptureSession.create(root, "http://phone:8000", false);
+        byte[] jpeg = {1, 2, 3};
+        saved.commit(new CaptureReviewStore.Pending(0, jpeg, "", 270, "", PageFraming.UNKNOWN, 1000L,
+                nativeSource(jpeg, 100).bind(saved.id(), 0, 270)));
+        saved.markCaptureGap();
+        Surface surface = new Surface(); surface.holdForPage = true; // futureEnabled stays false, as on the glasses
+        DocScanController controller = new DocScanController(context, surface, null,
+                (state, lines, diagnostic) -> {}, new ClientIdentity("test", "test", "test"));
+        try {
+            controller.configureForLocalStart("http://phone:8000", "", 270); barrier(controller);
+            set(controller, "localUploadBlocked", true); // no network in this test
+            controller.resumeLocalSession(saved.id()); barrier(controller);
+            LocalCaptureSession active = (LocalCaptureSession)get(controller, "localSession");
+            assertEquals(saved.id(), active.id());
+            assertFalse("no review is watched here, so nothing could ever settle it", active.captureGap());
+            assertFalse(LocalCaptureSession.load(root, saved.id()).captureGap());
+            assertNotNull("the next page is looked for", surface.pageReady);
+            controller.finishReading(); barrier(controller);
+            assertNotEquals("the double tap ends the capture", LocalCaptureSession.Phase.CAPTURE, active.phase());
+        } finally { controller.close(); }
+    }
+
     private static void waitForUpload(DocScanController controller) throws Exception {
         barrier(controller);
         ((ExecutorService)get(controller, "localNetwork")).submit(() -> {}).get(5, TimeUnit.SECONDS);

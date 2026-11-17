@@ -1,6 +1,6 @@
 # rokid-docscan-starter development guide
 
-Status: Current engineering contract. Updated 2026-11-17 20:15 (§M-44: the operator ran three papers on large sheets, twelve booklets on the venue topology; a large sheet in one frame is not read; the blur belongs to the edge of the recorded frame and not to nearness; the frame is the middle half of the field and holds 27-47% of a paper looked at from a seat, which is why the wearer has to back off; Server 0.85.0 gives written answers their working and names answer boxes, glassdoc 0.44.11 shows a bar at each side the paper runs past and clears old readings from the glasses; none of the changes has been worn, and whether the whole-field still route reads at the trial's light is not measured).
+Status: Current engineering contract. Updated 2026-11-17 22:00 (§M-44 (14): the operator wore the still route once; it stopped after every photo and could not be ended, fixed in glassdoc 0.44.12 and not worn since; a whole-field still is not read at that night's light. Before that, §M-44: the operator ran three papers on large sheets, twelve booklets on the venue topology; a large sheet in one frame is not read; the blur belongs to the edge of the recorded frame and not to nearness; the frame is the middle half of the field and holds 27-47% of a paper looked at from a seat, which is why the wearer has to back off; Server 0.85.0 gives written answers their working and names answer boxes, glassdoc 0.44.11 shows a bar at each side the paper runs past and clears old readings from the glasses; of those changes only the still route has been worn).
 
 **Start at `.agents/progress/current.md`.** It lists the operator's decisions,
 the verified state and the next steps. Do not re-ask what it settles. Then read
@@ -424,8 +424,8 @@ middle half of the field (43 by 56 degrees). In the wearer's own whole-field pho
 at from a seat spans 73-100% of the field's width and 64-92% of its height, and the frame holds 27-47% of its area; moved
 down a quarter of the field it holds less. To fit the paper the wearer backs off to about twice the distance and the print
 halves. No way of holding the glasses solves that. The whole field in the sensor's own pixels could not be recorded (memory
-and heat, §M-29); the still route takes it in one photo, and whether the model reads such a still at the trial's light (30 ms,
-ISO 600-800; read at 25 ms and ISO 209, not read at 60 ms and ISO 4000) is the next thing to measure (register 2-36).
+and heat, §M-29); the still route takes it in one photo.
+**The still route worn (2026-11-17 21:21, §M-44 (14); the real app 0.44.11, the phone's server).** Two things failed. (1) The capture stopped after every photo and could not be ended. A worn head's own motion is counted as pages turned (261 page changes in about five minutes; none in 15 s on a desk as dark). Only the still camera watched for a next page during the three-second review, each review therefore ended as a "missed page", automatic capture stopped behind a prompt written when a tap still took a photo, and that state refused the double tap. glassdoc 0.44.12: the still camera watches no page during a review (`GlassCamera.supportsFuturePages()` is false, as the clip camera's always was), and a reading that still carries the mark is freed of it when loaded. Unit tests and the desk checks only: a desk cannot make a page change during a review. The counting itself is unchanged, so looking on at one paper takes it again (register 2-38; the clip route counts the same way). (2) The five photos were not read. The room was near the darkness of 11/14 (30 ms needed a total gain of 5800-7100; the morning's clips had ISO 800 times 1.0-1.56). The paper lay well inside the field (about 75% of its width), characters of 18-20 px, and the camera's noise reduction had flattened their strokes; the model (Standard, two reads, once) returned all five pages as unreadable. A whole-field still at the morning's light is not measured. The gate for stillness behaved as replayed beforehand from the morning's gyroscope records (photos 1.8-4.0 s after the request, two waits of ten seconds ran out; `data/gather-stage2/scripts/still_gate_1118.py`). The real app's saved capture mode is clip again. What is left for a large sheet is the clip route a face at a time; whether clips are read at that night's light is not measured (register 2-36 to 2-39, 4-16).
 **Old readings on the glasses (§M-44 (12), (13); glassdoc 0.44.11).** The app never removed a finished reading's folder and
 kept every reading left unfinished with its unsent clips: 1.4 GB. At each start it now clears finished readings and ones left
 unfinished for over a day; the one in hand stays. The first build of this (0.44.10) killed the real app as it started: the
@@ -719,12 +719,15 @@ what is being tried.
 - On the local surface the captured still is drawn after its native image is
   closed. The preview session continues observing page changes until pause,
   capture end or failure; physical frame continuity remains unverified. A
-  visible acknowledgement starts a fresh 3000ms review. During review, at most
-  two future-page originals are retained locally and promoted in order; each
-  requires its own visible acknowledgement and review before upload. Observation
-  is reserved durably before native start. Unknown captures, failed persistence
-  and suspected gaps survive restart; only an acknowledged ordinary stop can
-  clear a resolved observation. A forward swipe retakes, no input commits, BACK ends
+  visible acknowledgement starts a fresh 3000ms review. From glassdoc 0.44.12 no
+  page is watched for during a review on the glasses: a page turned to meanwhile
+  is found when the review is over. Until then the still camera kept at most two
+  future-page originals and marked a page it saw and could not take as a gap; worn,
+  a head's own motion made every review end in a gap that stopped the capture and
+  refused its end (§M-44 (14)). The controller's code for that watching and its
+  tests stay; no camera of the glasses reaches it, and a reading that still carries
+  a gap is freed of it when loaded. Unknown captures and failed persistence still
+  survive restart. A forward swipe retakes, no input commits, BACK ends
   capture after the last review. Hidden or stale views cannot commit. A waiting
   forward swipe first waits for the native stop barrier and promotes any saved
   candidate before requesting a manual shot. A tap pauses at once (glassdoc 0.44.2): the display clears in the turn of the tap and the camera stops. A still
@@ -1145,7 +1148,12 @@ records; each was learned from a failure the operator found.
    a nearer page had also spread into the frame's edge, where the blur is (§M-44).
    No step on the image is adopted by eye: the deblurring that looked crisper
    halved what the model read.
-5. When the wearer is needed, say so plainly: what they do, for how long,
+5. A route that has not been worn in its present form is worn first with the test package and the stand-in server
+   (`e2e_route_check.py --paper`), where nothing reaches the model and a capture that cannot be ended harms nothing.
+   On 2026-11-17 the operator was moved to the still route on the real app after desk checks alone and landed in a
+   capture that stopped after every photo and could not be ended (§M-44 (14)). What only a worn head produces (page
+   changes during a review) is read in the code before the switch.
+   When the wearer is needed, say so plainly: what they do, for how long,
    what the one pass decides, and what was checked first so that it cannot
    fail for a reason findable on the desk. Not before that, and not silently
    never. A worn pass is the use in order, operated by the wearer (choose,

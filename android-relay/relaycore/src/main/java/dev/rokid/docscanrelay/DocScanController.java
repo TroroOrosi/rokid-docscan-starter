@@ -201,7 +201,7 @@ public final class DocScanController implements AutoCloseable {
         localRoot = new File(context.getFilesDir(), "local-scans");
         String localId = preferences.getString(KEY_LOCAL_SESSION, "");
         if (link.supportsLocalCaptureReview() && !localId.isEmpty()) {
-            try { localSession = LocalCaptureSession.load(localRoot, localId); }
+            try { localSession = LocalCaptureSession.load(localRoot, localId); freeUnwatchedGap(localSession); }
             catch (IOException error) { localRestoreError = "保存した読取記録を復元できません"; }
         }
         if (link.supportsLocalCaptureReview()) {
@@ -689,6 +689,7 @@ public final class DocScanController implements AutoCloseable {
                 }
                 LocalCaptureSession saved = LocalCaptureSession.load(localRoot, id);
                 saved.reconcileCandidates();
+                freeUnwatchedGap(saved);
                 if (!saved.server().equals(configuredServer)) {
                     fail("中断資料と接続先が異なります", null); selection.accept(false); return;
                 }
@@ -2209,6 +2210,15 @@ public final class DocScanController implements AutoCloseable {
                 idle.run();
             }); } catch (RejectedExecutionException ignored) { }
         });
+    }
+
+    /**
+     * A surface that watches no page during a review can neither count one as missed there nor settle one counted
+     * earlier: a reading that still carries such a mark could take no further page by itself and could not be ended
+     * (worn, 2026-11-17). The mark is taken off when the reading is loaded; its preserved originals stay.
+     */
+    private void freeUnwatchedGap(LocalCaptureSession saved) throws IOException {
+        if (!link.supportsFuturePages() && saved.captureGap()) saved.resolveCaptureGap();
     }
 
     private void publishCaptureGap() {

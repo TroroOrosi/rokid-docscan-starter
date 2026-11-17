@@ -248,6 +248,8 @@ public class DocScanGlassActivityIntentTest {
 
             choose.invoke(activity);
             assertSame("stills unless clips were asked for", still, org.robolectric.util.ReflectionHelpers.getField(activity, "camera"));
+            assertFalse("a worn head's motion reads as page turns: no page is watched for during a review",
+                    glasses.supportsFuturePages());
             assertNull(org.robolectric.util.ReflectionHelpers.getField(controller, "clipInbox"));
 
             activity.onNewIntent(new Intent().putExtra("capture", "clip"));
@@ -259,7 +261,7 @@ public class DocScanGlassActivityIntentTest {
             setField(activity, "mixedMode", true); setField(activity, "listeningMode", true);
             choose.invoke(activity);
             assertSame("mixed English keeps the still camera", still, org.robolectric.util.ReflectionHelpers.getField(activity, "camera"));
-            assertTrue(glasses.supportsFuturePages());
+            assertFalse(glasses.supportsFuturePages());
             assertNull(org.robolectric.util.ReflectionHelpers.getField(controller, "clipInbox"));
 
             setField(activity, "mixedMode", false); setField(activity, "listeningMode", false);

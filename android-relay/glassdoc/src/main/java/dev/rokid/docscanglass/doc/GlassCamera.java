@@ -623,6 +623,15 @@ final class GlassCamera implements PageCamera {
         if (paperGeometryEvaluation) paperTracker = new PaperGeometry.Tracker();
     }); }
 
+    /**
+     * No page is watched for while a photo is reviewed. Worn on 2026-11-17 (the first worn stills in this light), a
+     * head's own motion was counted as a page turned during every review: each photo left a "missed page" behind,
+     * the capture stopped taking pages until a tap, and the double tap that ends it was refused. A page turned to
+     * during a review is found when the review is over, as on the clip route. The watching below is not reached
+     * until page turns can be told from a moving head.
+     */
+    @Override public boolean supportsFuturePages() { return false; }
+
     public void observeFuturePages(int capacity, CaptureSurface.FuturePageListener listener) {
         if (capacity < 0 || capacity > 2 || listener == null) throw new IllegalArgumentException("future capacity 0..2 required");
         handler.post(() -> {
