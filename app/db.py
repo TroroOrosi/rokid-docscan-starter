@@ -177,6 +177,10 @@ CREATE TABLE IF NOT EXISTS page_clips (
     level       REAL,
     created_at  REAL,
     updated_at  REAL,
+    -- How often a worker took this clip up: one the server stopped on twice is given up (page_clips.requeue_interrupted).
+    attempts    INTEGER NOT NULL DEFAULT 0,
+    -- When the clip's file was removed because nothing reads it any more (app/retention.py); NULL while it is kept.
+    file_removed_at REAL,
     PRIMARY KEY (document_id, page_index)
 );
 
@@ -192,7 +196,9 @@ CREATE INDEX IF NOT EXISTS idx_pages_document     ON pages(document_id);
 def connect(db_path: Path | None = None) -> sqlite3.Connection:
     path = db_path or DB_PATH
     path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(path))
+    # Thirty seconds for another writer, not sqlite's five: the gathering workers, the uploads and the finalization
+    # write this one file. The journal mode is left alone (diagnostic connections open the live file with mode=ro).
+    conn = sqlite3.connect(str(path), timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     return conn
@@ -230,6 +236,10 @@ _TABLE_COLUMN_MIGRATIONS = {
     ),
     "explain_claims": (
         ("owner_token", "TEXT"),
+    ),
+    "page_clips": (
+        ("attempts", "INTEGER NOT NULL DEFAULT 0"),
+        ("file_removed_at", "REAL"),
     ),
 }
 

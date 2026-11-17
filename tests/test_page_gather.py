@@ -152,10 +152,7 @@ def test_interrupted_work_is_taken_up_again(client, tmp_path, monkeypatch):
     monkeypatch.setattr(page_gather, "_gather_module", missing)  # this test is about who takes the clip, not the gathering
     document, _, _ = recorded(client, tmp_path)
     assert page_clips.claim()["status"] == "gathering"  # the server stopped while this clip was being gathered
-    assert page_clips.claim() is None
-    page_clips.requeue_interrupted()
-    assert state(document) == [("stored", None)]
-    assert page_clips.claim() is not None
+    assert page_clips.claim() is None  # once: a second stop on the same clip gives it up (tests/test_page_clips_queue.py)
 
     def settled():
         until = time.monotonic() + 4  # under the workers' own five-second look: they were woken
@@ -207,8 +204,8 @@ def test_only_the_page_the_clip_was_cut_from_is_replaced(client, tmp_path, monke
     taken_again = page_row(document)
     files = sorted(main.IMAGE_DIR.iterdir())
     assert main.replace_page_image(document, 0, picture.getvalue(), note) is False
-    assert main.gather_service.process_one() is True
-    assert state(document)[0][0] == "failed" and state(document)[0][1].startswith("gather error: ")
+    assert main.gather_service.process_one() is False, "the earlier capture's clip is given up, not gathered"
+    assert state(document) == [("failed", page_clips.STALE)] and page_clips.STALE.startswith("gather error: ")
     assert page_row(document) == taken_again and sorted(main.IMAGE_DIR.iterdir()) == files
 
     other, receipt, movie = recorded(client, tmp_path)
@@ -275,7 +272,8 @@ def test_finalize_goes_on_after_the_limit(client, tmp_path, monkeypatch, capsys)
     assert state(document) == [("stored", None)] and left_as_it_came(document, receipt)
     waited = [json.loads(line) for line in capsys.readouterr().out.splitlines() if '"gather_wait"' in line]
     assert len(waited) == 1 and waited[0]["document_id"] == document and waited[0]["left"] == 1 and waited[0]["seconds"] >= 1
-    assert main.gather_service.process_one() is True  # the worker comes to the clip after the booklet went on
+    # A worker that looks for work after the booklet went on gives the clip up without gathering it.
+    assert main.gather_service.process_one() is False
     assert state(document)[0][0] == "failed" and left_as_it_came(document, receipt)
     started = time.monotonic()
     assert client.post(f"/v1/documents/{document}/finalize").status_code == 200
@@ -355,8 +353,8 @@ def booklet(tmp_path_factory):
 
 
 def named(bundle):
-    """The items the server added for pages, by page number."""
-    return {int(item["question_id"][4:]): item for item in bundle["items"] if item["question_id"].startswith("page")}
+    """The items the server added for pages that stayed one frame, by page number (``page3``; not ``pages-unanswered``)."""
+    return {int(item["question_id"][4:]): item for item in bundle["items"] if re.fullmatch(r"page\d+", item["question_id"])}
 
 
 def test_a_page_that_was_not_gathered_is_named_in_the_answers(booklet):

@@ -1,7 +1,8 @@
 """Gather each recorded page's clip into that page's image, in the background, while the next pages are recorded.
 
 A page arrives as one frame of its clip and its clip follows (app/page_clips.py). Worker threads here take the stored
-clips oldest first, add their frames with app/gather.py and put the result in place of the page's image. A clip that
+clips (the newest booklet's first, its oldest clip first; a clip whose page can no longer take it is given up unread:
+page_clips.claim), add their frames with app/gather.py and put the result in place of the page's image. A clip that
 cannot be gathered leaves the page as the one frame it arrived as, with the reason on the clip's row; the booklet goes
 on, and the answers name that page (main._answer_snapshot). Design:
 docs/superpowers/specs/2026-11-15-gathered-capture-design.md, 6.5 and 6.6.
@@ -23,7 +24,7 @@ from . import db, page_clips
 
 CLIP_SECONDS = 180.0  # the most one clip may take; about five times what a 5-second clip took on the phone
 MIN_LEVEL = 8.0  # level over noise: under it nothing could be read, and reading took over nine minutes (M-24)
-STALE = "gather error: the page was taken again or its booklet went on"
+STALE = page_clips.STALE
 
 
 def _gather_module():
@@ -87,7 +88,7 @@ class GatherService:
                 self._wake.clear()
 
     def process_one(self) -> bool:
-        """Gather the oldest stored clip. False when none waits. Whatever stops a clip becomes the reason on its row."""
+        """Gather the next clip (page_clips.claim). False when none waits. Whatever stops a clip becomes the reason on its row."""
         clip = page_clips.claim()
         if clip is None:
             return False

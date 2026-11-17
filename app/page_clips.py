@@ -8,6 +8,9 @@ reason. app/page_gather.py does the gathering. Design: docs/superpowers/specs/20
 
 One clip a page. A page taken again gets another capture ID: the earlier clip is refused from then on (409), and the
 new clip replaces the row and removes the earlier file.
+
+A clip's row stays for good. Its file goes once nothing reads it any more (app/retention.py: a gathered page's clip
+after three days, a failed one after a week), and the row then says so in ``file_removed_at``.
 """
 from __future__ import annotations
 
@@ -27,6 +30,7 @@ from .capture_video_upload import CHUNK_BYTES, _sync_directory
 
 MAX_BYTES = 192 * 1024 * 1024  # one clip; ten seconds at the 95 Mbit/s the glasses ask for are about 119 MB
 MAX_RECORD_BYTES = 512 * 1024
+STALE = "gather error: the page was taken again or its booklet went on"  # the reason of a clip no page can take any more
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 
 
@@ -166,15 +170,28 @@ def rows(document_id: int) -> list[dict]:
 
 
 def claim() -> dict | None:
-    """The oldest stored clip, marked as being gathered; None when none waits."""
+    """The next stored clip whose page can still take it, marked as being gathered; None when none waits.
+
+    The newest booklet first (the one being taken; an earlier one left open does not stand before it), the oldest clip
+    within it. Every stored clip whose page can no longer take it (``open_capture``) is given up in this same look,
+    with STALE as its reason and without being gathered: a finalize call sent again then has nothing to wait for.
+    """
     with closing(db.connect()) as conn:
         conn.execute("BEGIN IMMEDIATE")
-        row = conn.execute("SELECT * FROM page_clips WHERE status = 'stored' ORDER BY created_at, rowid LIMIT 1").fetchone()
-        if row is not None:
-            conn.execute("UPDATE page_clips SET status = 'gathering', updated_at = ? WHERE document_id = ? AND page_index = ?",
-                         (time.time(), row["document_id"], row["page_index"]))
+        claimed, now = None, time.time()
+        for row in conn.execute("SELECT * FROM page_clips WHERE status = 'stored' "
+                                "ORDER BY document_id DESC, created_at, rowid").fetchall():
+            usable = open_capture(conn, row["document_id"], row["page_index"])[0].get("capture_id") == row["capture_id"]
+            if usable and claimed is not None:
+                continue  # waits for its turn
+            conn.execute("UPDATE page_clips SET status = ?, reason = ?, attempts = attempts + ?, updated_at = ? "
+                         "WHERE document_id = ? AND page_index = ?",
+                         ("gathering" if usable else "failed", None if usable else STALE, int(usable), now,
+                          row["document_id"], row["page_index"]))
+            if usable:
+                claimed = {**dict(row), "status": "gathering", "attempts": row["attempts"] + 1}
         conn.commit()
-        return None if row is None else {**dict(row), "status": "gathering"}
+        return claimed
 
 
 def _settle(document_id: int, page_index: int, sha256: str, status: str, reason: str | None = None,
@@ -195,6 +212,13 @@ def fail(document_id: int, page_index: int, sha256: str, reason: str) -> None:
 
 
 def requeue_interrupted() -> None:
-    """At start: a clip that was being gathered when the server stopped is gathered again."""
+    """At start: a clip that was being gathered when the server stopped is gathered once more.
+
+    One the server stopped on twice is given up instead: it may be what stops the server (memory, with three gathers
+    running), and taken up at every start it would stop it every time, with nobody at the phone.
+    """
     with closing(db.connect()) as conn, conn:
-        conn.execute("UPDATE page_clips SET status = 'stored', updated_at = ? WHERE status = 'gathering'", (time.time(),))
+        now = time.time()
+        conn.execute("UPDATE page_clips SET status = 'failed', reason = 'interrupted twice', updated_at = ? "
+                     "WHERE status = 'gathering' AND attempts >= 2", (now,))
+        conn.execute("UPDATE page_clips SET status = 'stored', updated_at = ? WHERE status = 'gathering'", (now,))
