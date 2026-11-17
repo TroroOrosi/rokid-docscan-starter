@@ -830,6 +830,57 @@ public class DocScanGlassActivityIntentTest {
         assertEquals("終了待ち", shown.isEmpty() ? "" : shown.get(0));
     }
 
+    /**
+     * The booklet is with the server and no answers are open: whatever the display says ("答案を取得できません",
+     * "解答がありません"), nothing is being captured. A forward swipe there used to reach the capture controller as a
+     * tap, which in its answers state starts a new document: the reading in hand was left, with session 0, and the
+     * answers that arrived later were refused (found by reading, 2026-11-17; the rest of register 3-2).
+     */
+    @Test public void afterTheEndNoSwipeStartsANewReadingWhateverTheDisplaySays() throws Exception {
+        startLocalCapture();
+        Object reading = org.robolectric.util.ReflectionHelpers.getField(controller, "localSession");
+        org.robolectric.util.ReflectionHelpers.setField(controller, "state", RelayState.REVIEW);
+        setField(activity, "awaitingAnswers", false); // a fetch failed and its message stands on the display
+        java.lang.reflect.Method action = DocScanGlassActivity.class.getDeclaredMethod("onAction", GlassesInputAction.class, long.class);
+        action.setAccessible(true);
+
+        action.invoke(activity, GlassesInputAction.SWIPE_FORWARD, 1_000L);
+        awaitSerial();
+        action.invoke(activity, GlassesInputAction.SWIPE_BACK, 2_000L);
+        awaitSerial();
+
+        assertEquals(RelayState.REVIEW, controller.getState());
+        assertSame("the reading in hand is still the one whose answers are waited for", reading,
+                org.robolectric.util.ReflectionHelpers.getField(controller, "localSession"));
+    }
+
+    /**
+     * Double taps made again right after the end (the first got no sign; the operator's booklet of 2026-11-17 10:11)
+     * arrive on the waiting screen, where two within three seconds leave the app. For five seconds after an end was
+     * asked for they are the same end, not the beginning of an exit.
+     */
+    @Test public void doubleTapsRepeatedRightAfterTheEndDoNotLeaveTheApp() throws Exception {
+        startLocalCapture();
+        org.robolectric.util.ReflectionHelpers.setField(controller, "state", RelayState.CAPTURING);
+        java.lang.reflect.Method action = DocScanGlassActivity.class.getDeclaredMethod("onAction", GlassesInputAction.class, long.class);
+        action.setAccessible(true);
+        Field closed = DocScanGlassActivity.class.getDeclaredField("sessionClosed");
+        closed.setAccessible(true);
+
+        action.invoke(activity, GlassesInputAction.BACK, 10_000L); // the end
+        setField(activity, "awaitingAnswers", true);               // the wait began
+        action.invoke(activity, GlassesInputAction.BACK, 11_000L);
+        action.invoke(activity, GlassesInputAction.BACK, 12_500L);
+        assertFalse("two more double taps within five seconds of the end are that end", closed.getBoolean(activity));
+        action.invoke(activity, GlassesInputAction.BACK, 14_000L);
+        assertFalse(closed.getBoolean(activity));
+
+        action.invoke(activity, GlassesInputAction.BACK, 20_000L); // later: the first of an exit
+        assertFalse(closed.getBoolean(activity));
+        action.invoke(activity, GlassesInputAction.BACK, 21_000L);
+        assertTrue("and two of them within three seconds leave, as before", closed.getBoolean(activity));
+    }
+
     @Test public void aFailureBehindAClearedDisplayIsShown() throws Exception {
         startLocalCapture();
         java.lang.reflect.Method action = DocScanGlassActivity.class.getDeclaredMethod("onAction", GlassesInputAction.class, long.class);

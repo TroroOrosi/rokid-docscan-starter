@@ -145,6 +145,9 @@ public final class DocScanGlassActivity extends Activity
     private final BackExitPolicy backExit = new BackExitPolicy();
     private final DisplaySleep displaySleep = new DisplaySleep();
     private boolean awaitingAnswers;
+    /** When the double tap that ends a capture was passed on, on the gestures' own clock; see onAction. */
+    private long endAskedAtMillis = -1;
+    private static final long END_GRACE_MILLIS = 5_000;
     private volatile boolean sessionClosed;
     private final Handler main = new Handler(Looper.getMainLooper());
     private static final long DISPLAY_IDLE_MILLIS = 5_000;
@@ -720,7 +723,16 @@ public final class DocScanGlassActivity extends Activity
         // The gesture that turns the display back on does nothing else, on every screen (operator, 2026-11-12).
         // Until 2026-11-13 only the chooser held to it: a waking tap also toggled the mixed recording and a waking
         // double tap armed the exit. The chooser redraws its choices below; a finished writing session stays asleep.
-        if (wasAsleep && !choosingSession && !writingDone) return;
+        if (wasAsleep && !choosingSession && !writingDone) {
+            // The answers reach the glasses when the phone's watcher wakes them. Should that wake not come, the
+            // gesture that brings a waiting display back asks once itself; only once the server has the booklet
+            // (a question before that would be answered "not finished" and end the wait).
+            if (!mixedMode && !listeningMode && reader == null && controller.getState() == RelayState.REVIEW) {
+                long session = activeSession();
+                if (session > 0) fetchAnswers(session);
+            }
+            return;
+        }
         if (choosingSession) {
             if (startupStarting) return;
             // One rule on every screen (operator, 2026-11-12): a tap turns the display off or on, a swipe
@@ -822,7 +834,21 @@ public final class DocScanGlassActivity extends Activity
             if (stopAudio) finishAudio();
             return;
         }
-        if (awaitingAnswers && action == GlassesInputAction.BACK) {
+        // After the end nothing is being captured, whether the display says that it waits or that a fetch failed:
+        // no gesture reaches the capture controller from here. A forward swipe on a failed fetch's message used to
+        // arrive there as a tap and start a new document, leaving the reading whose answers were on their way.
+        RelayState controllerState = controller.getState();
+        boolean afterEnd = !mixedMode && !listeningMode && reader == null && (awaitingAnswers
+                || controllerState == RelayState.REVIEW || controllerState == RelayState.FINALIZING
+                || controllerState == RelayState.UPLOADING);
+        if (afterEnd && action == GlassesInputAction.BACK && endAskedAtMillis >= 0 && elapsedMillis >= endAskedAtMillis
+                && elapsedMillis - endAskedAtMillis < END_GRACE_MILLIS) {
+            // A double tap made again right after the end is that end: the first got no sign for seconds, and two
+            // more within three seconds would leave the app (the operator's booklet of 2026-11-17 10:11).
+            backExit.reset();
+            return;
+        }
+        if ((awaitingAnswers || afterEnd) && action == GlassesInputAction.BACK) {
             if (backExit.onBack(elapsedMillis) == BackExitPolicy.Decision.EXIT) exitSession();
             else {
                 displaySleep.wake(this);
@@ -830,7 +856,7 @@ public final class DocScanGlassActivity extends Activity
             }
             return;
         }
-        if (awaitingAnswers && !mixedMode && !listeningMode) {
+        if (afterEnd) {
             // Waiting for the answers there is nothing to capture: a tap turns the display off as on every screen,
             // and no gesture reaches the capture controller (a forward swipe used to arrive there as a tap).
             if (action == GlassesInputAction.SHORT_TAP) sleepDisplayNow();
@@ -850,6 +876,7 @@ public final class DocScanGlassActivity extends Activity
             }
             if (paused) return;
             if (action == GlassesInputAction.SWIPE_FORWARD) action = GlassesInputAction.SHORT_TAP;
+            if (action == GlassesInputAction.BACK) endAskedAtMillis = elapsedMillis;
         }
         controller.onGlassesAction(action, elapsedMillis);
     }
