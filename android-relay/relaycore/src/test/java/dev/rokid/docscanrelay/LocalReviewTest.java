@@ -2626,6 +2626,90 @@ public class LocalReviewTest {
     }
 
     /**
+     * Found by reading on 2026-11-18. The sending of pages stops for good on a refusal that a retry cannot mend, and
+     * says so. A page that was being taken at that moment still lands, is reviewed and saved, and the plain "saved"
+     * took the failure's place: nothing was sent any more and nothing said so. After the save the stop is shown again.
+     */
+    @Test public void aPageThatLandsAfterTheSendingStoppedDoesNotHideTheStop() throws Exception {
+        var refusing = new java.util.concurrent.atomic.AtomicBoolean(true);
+        List<List<String>> hud = new java.util.concurrent.CopyOnWriteArrayList<>();
+        Surface surface = new Surface(); surface.holdForPage = true;
+        try (MockWebServer server = refusingServer(refusing)) {
+            DocScanController controller = new DocScanController(RuntimeEnvironment.getApplication(), surface, null,
+                    (state, lines, diagnostic) -> hud.add(lines), new ClientIdentity("test", "test", "test"));
+            try {
+                sendingStopsWhileASecondPageIsBeingTaken(controller, surface, server, false);
+                assertEquals(RelayState.ERROR, controller.getState());
+                List<String> stop = hud.get(hud.size() - 1);
+
+                controller.onPhoto(new byte[]{4, 5, 6}); barrier(controller); // the page in hand lands
+                assertEquals("it is reviewed as any page", RelayState.CAPTURE_REVIEW, controller.getState());
+                commitVisible(controller, surface);
+
+                assertEquals(2, ((LocalCaptureSession)get(controller, "localSession")).pageCount());
+                assertEquals("the stop is in view again, not a plain 'saved'", RelayState.ERROR, controller.getState());
+                assertEquals(stop, hud.get(hud.size() - 1));
+            } finally { controller.close(); }
+        }
+    }
+
+    /**
+     * The same stop with the end already asked for: the last page landed, was saved, and the capture went on to
+     * "解析中" while the sending stayed stopped: nothing was sent and the wait never ended. The end tries the sending
+     * again, so it either goes on or fails in view.
+     */
+    @Test public void anEndOverASendingThatHadStoppedTriesItAgainInsteadOfWaitingForEver() throws Exception {
+        var refusing = new java.util.concurrent.atomic.AtomicBoolean(true);
+        Surface surface = new Surface(); surface.holdForPage = true;
+        try (MockWebServer server = refusingServer(refusing)) {
+            DocScanController controller = new DocScanController(RuntimeEnvironment.getApplication(), surface, null,
+                    (state, lines, diagnostic) -> {}, new ClientIdentity("test", "test", "test"));
+            try {
+                sendingStopsWhileASecondPageIsBeingTaken(controller, surface, server, true);
+                assertTrue((boolean)get(controller, "localUploadBlocked"));
+                refusing.set(false); // whatever refused has passed
+
+                controller.onPhoto(new byte[]{4, 5, 6}); barrier(controller);
+                commitVisible(controller, surface); // the last page is saved and the capture ends
+                waitForUpload(controller); waitForUpload(controller);
+
+                LocalCaptureSession saved = (LocalCaptureSession)get(controller, "localSession");
+                assertEquals("both pages went and the booklet was handed over", LocalCaptureSession.Phase.REVIEW, saved.phase());
+                assertNull(saved.nextUnsent());
+                assertEquals(7, saved.sessionId());
+            } finally { controller.close(); }
+        }
+    }
+
+    /** One page saved, a second being taken (the end asked for over it or not), and the server refuses the first thing sent. */
+    private static void sendingStopsWhileASecondPageIsBeingTaken(DocScanController controller, Surface surface,
+            MockWebServer server, boolean endAsked) throws Exception {
+        controller.configureForLocalStart(server.url("/").toString(), "", 270);
+        controller.startLocalSession(false); barrier(controller);
+        set(controller, "localNetworkBusy", true); // nothing is sent before the second page is on its way
+        issueInspectionPhoto(controller, 0, false);
+        controller.onPhoto(new byte[]{1, 2, 3}); barrier(controller); commitVisible(controller, surface);
+        issueInspectionPhoto(controller, 1, false);
+        if (endAsked) { controller.onGlassesAction(GlassesInputAction.BACK); barrier(controller); }
+        set(controller, "localNetworkBusy", false); call(controller, "queueLocalUpload", new Class<?>[]{}); waitForUpload(controller);
+    }
+
+    private static MockWebServer refusingServer(java.util.concurrent.atomic.AtomicBoolean refusing) throws Exception {
+        MockWebServer server = new MockWebServer();
+        server.setDispatcher(new Dispatcher() {
+            @Override public MockResponse dispatch(RecordedRequest request) {
+                String path = request.getPath();
+                if (refusing.get()) return new MockResponse().setResponseCode(400).setBody("{\"detail\":\"refused\"}");
+                if ("/v1/documents".equals(path)) return new MockResponse().setBody("{\"document_id\":17}");
+                if ("/v1/exam-sessions".equals(path)) return new MockResponse().setBody("{\"session_id\":7}");
+                if (path.contains("finalize-reading")) return new MockResponse().setBody("{\"status\":\"solving\",\"review_total\":1}");
+                return new MockResponse().setBody("{\"replaced\":false}");
+            }
+        });
+        server.start(); return server;
+    }
+
+    /**
      * Worn on 2026-11-17, a head's own motion was counted as pages turned during every review, each photo left a
      * "missed page" behind, and that state refused the double tap that ends the capture. The glasses no longer watch
      * during a review, so nothing there can settle such a state either: a reading that still carries one is freed.

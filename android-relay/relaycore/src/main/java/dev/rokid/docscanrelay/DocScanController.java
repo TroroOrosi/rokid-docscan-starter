@@ -177,6 +177,7 @@ public final class DocScanController implements AutoCloseable {
     private boolean reacquiringCaptureGap;
     private volatile boolean localCameraUnknown;
     private static final long LOCAL_REVIEW_MILLIS = 3000;
+    private static final String UPLOAD_STOPPED = "保存・送信処理を停止しました。原本は保持しています";
     private volatile long sessionId;
     private int reviewIndex;
     private int reviewViewPage;
@@ -2175,6 +2176,9 @@ public final class DocScanController implements AutoCloseable {
         if (futureStopping) return;
         if (localSession.captureGap()) { publishCaptureGap(); return; }
         if (finishCaptureRequested) finishReadingNow();
+        // The sending had stopped while this page was being taken, and its review took the failure's place: said
+        // again, or "saved" stood there with nothing sent any more and the capture not looking for a page.
+        else if (localUploadBlocked) fail(UPLOAD_STOPPED, null);
         else if (autoCaptureEnabled) waitForNextPage();
     }
 
@@ -2421,8 +2425,7 @@ public final class DocScanController implements AutoCloseable {
                 persistWorkflow();
                 if (stopped) {
                     localUploadBlocked = true;
-                    fail(analysisFailed ? "解析を停止しました。資料は保存済みです"
-                            : "保存・送信処理を停止しました。原本は保持しています", null);
+                    fail(analysisFailed ? "解析を停止しました。資料は保存済みです" : UPLOAD_STOPPED, null);
                 } else {
                     if (result != null) handleFinalizedSession(result, "Local session analysis finished");
                     if (retry) {
@@ -3113,6 +3116,9 @@ public final class DocScanController implements AutoCloseable {
             try {
                 localSession.setPhase(LocalCaptureSession.Phase.ANALYSIS);
                 publish(RelayState.FINALIZING, List.of("解析中", "資料は保存済み", "カメラ停止"), "Local capture finished; analysis queued");
+                // A sending that had stopped is tried again at the end: it goes on, or stops again and says so.
+                // Left stopped, "解析中" stood here for good with nothing sent.
+                localUploadBlocked = false;
                 queueLocalUpload();
             } catch (IOException error) { fail("解析開始を保存できません", null); }
             return;
