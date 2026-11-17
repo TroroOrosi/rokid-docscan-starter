@@ -1345,6 +1345,23 @@ public class DocScanGlassActivityIntentTest {
         assertFalse((boolean) org.robolectric.util.ReflectionHelpers.getField(activity, "routeInFlight"));
     }
 
+    @Test public void aScreenOfTheAppIsAliveFromItsCreationToItsDestruction() throws Exception {
+        // What a confirmed wear asks before it leaves a reading in hand alone (PowerState.wearEntry): a phase left
+        // behind by a screen that is gone must not keep the chooser away.
+        ((java.util.concurrent.atomic.AtomicInteger) org.robolectric.util.ReflectionHelpers.getStaticField(
+                DocScanGlassActivity.class, "LIVING")).set(0); // other tests leave their screens undestroyed
+        activity.getPreferences(Context.MODE_PRIVATE).edit().putLong("power_generation", 3)
+                .putLong("power_session", 7).putString("power_phase", "writing_done").commit();
+        org.robolectric.android.controller.ActivityController<DocScanGlassActivity> screen =
+                Robolectric.buildActivity(DocScanGlassActivity.class,
+                        new Intent().putExtra("wake_session_id", 7).putExtra("wake_generation", 3L));
+        assertFalse(DocScanGlassActivity.screenAlive());
+        screen.create();
+        assertTrue(DocScanGlassActivity.screenAlive());
+        screen.destroy();
+        assertFalse(DocScanGlassActivity.screenAlive());
+    }
+
     @Test public void staleWakeCannotCreateAChooserAfterTheProcessWasStopped() throws Exception {
         activity.getPreferences(Context.MODE_PRIVATE).edit().putLong("power_generation", 3)
                 .putLong("power_session", 7).putString("power_phase", "writing_done").commit();

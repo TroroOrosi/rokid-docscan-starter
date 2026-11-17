@@ -147,6 +147,9 @@ public final class DocScanGlassActivity extends Activity
     private boolean awaitingAnswers;
     /** When the double tap that ends a capture was passed on, on the gestures' own clock; see onAction. */
     private long endAskedAtMillis = -1;
+    /** Screens of the app between their creation and their destruction; a confirmed wear asks (PowerState.wearEntry). */
+    private static final java.util.concurrent.atomic.AtomicInteger LIVING = new java.util.concurrent.atomic.AtomicInteger();
+    static boolean screenAlive() { return LIVING.get() > 0; }
     private static final long END_GRACE_MILLIS = 5_000;
     private volatile boolean sessionClosed;
     private final Handler main = new Handler(Looper.getMainLooper());
@@ -240,6 +243,7 @@ public final class DocScanGlassActivity extends Activity
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        LIVING.incrementAndGet();
         muteOutput();
         deviceId = Settings.Secure.getString(getContentResolver(), Settings.Secure.ANDROID_ID);
         if (deviceId == null || deviceId.isEmpty()) {
@@ -626,6 +630,7 @@ public final class DocScanGlassActivity extends Activity
 
     @Override
     protected void onDestroy() {
+        LIVING.decrementAndGet();
         sessionClosed = true;
         if (videoTransfer != null) videoTransfer.close();
         cancelDisplayIdle();

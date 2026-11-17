@@ -55,7 +55,7 @@ public final class WearService extends Service {
 
     private void wornAgain(boolean initial) {
         try {
-            PowerState.Snapshot entry = state.wear(initial, coldGeneration);
+            PowerState.Snapshot entry = state.wearEntry(initial, coldGeneration, DocScanGlassActivity.screenAlive());
             coldGeneration = -1;
             if (entry != null) transmit(entry);
         } catch (Exception error) { Log.w("DocScanWear", "wear entry not saved: " + error.getClass().getSimpleName()); }

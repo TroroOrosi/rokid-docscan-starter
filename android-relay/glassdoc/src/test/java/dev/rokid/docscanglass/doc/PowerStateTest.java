@@ -13,6 +13,35 @@ import org.robolectric.annotation.Config;
 
 @RunWith(RobolectricTestRunner.class) @Config(sdk = 32, manifest = Config.NONE)
 public class PowerStateTest {
+    @Test public void wearingAgainWhileAReadingIsInHandChangesNothing() throws Exception {
+        // Register 1-26: far for a second and near for a second, at any moment, advanced the generation and opened the
+        // chooser: a capture was cut, answers on their way never woke the glasses, a reader was left. The sensor has
+        // read "far" on a worn head (M-31), so this needs no hand.
+        PowerState store = new PowerState(RuntimeEnvironment.getApplication().getSharedPreferences("wear-in-hand", Context.MODE_PRIVATE));
+        PowerState.Snapshot capture = store.begin(0);
+        for (String phase : new String[] {"capturing", "analyzing", "waiting", "reading"}) {
+            store.publish(capture.generation, 7, phase, "wake");
+            assertNull(phase, store.wearEntry(false, -1, true));
+            assertEquals(phase, capture.generation, store.load().generation);
+            assertEquals(phase, store.load().phase);
+        }
+        for (String phase : new String[] {"writing_done", "closed", "chooser"}) {
+            store.publish(store.load().generation, 0, phase, "sleep");
+            PowerState.Snapshot entry = store.wearEntry(false, -1, true);
+            assertEquals(phase, "chooser", entry.entry);
+        }
+    }
+
+    @Test public void aPhaseLeftBehindByAnAppThatIsGoneDoesNotKeepTheChooserAway() throws Exception {
+        PowerState store = new PowerState(RuntimeEnvironment.getApplication().getSharedPreferences("wear-left", Context.MODE_PRIVATE));
+        PowerState.Snapshot capture = store.begin(0);
+        assertEquals("no screen of the app is alive: what the phase says is left over",
+                "chooser", store.wearEntry(false, -1, false).entry);
+        PowerState.Snapshot again = store.begin(0);
+        assertEquals("the first wear after the glasses started", "chooser", store.wearEntry(true, again.generation, true).entry);
+        assertTrue(store.load().generation > capture.generation);
+    }
+
     @Test public void initialSynchronizationNeverRestartsCaptureOrACompletedSession() throws Exception {
         PowerState store = new PowerState(RuntimeEnvironment.getApplication().getSharedPreferences("wear-test", Context.MODE_PRIVATE));
         PowerState.Snapshot capture = store.begin(0);

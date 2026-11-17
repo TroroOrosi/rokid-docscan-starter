@@ -65,6 +65,26 @@ final class PowerState {
             write(next); return next;
         }
     }
+    /** The phases in which a reading is in hand: being captured, sent, waited for or read. */
+    private static final java.util.Set<String> IN_HAND = java.util.Set.of("capturing", "analyzing", "waiting", "reading");
+
+    /**
+     * What a confirmed wear (far for a second, then near for a second) does: opens the chooser under a new generation,
+     * as {@link #wear}, except while a reading is in hand on a living screen of the app. There it changes nothing.
+     * Until 2026-11-18 it opened the chooser at any moment: a capture was cut, answers on their way belonged to a
+     * closed generation and never woke the glasses, a reader was left (register 1-26); and the sensor has read "far"
+     * on a worn head (M-31). Out of a reading the wearer leaves by the double taps its screens name.
+     *
+     * <p>{@code screenAlive} false (the app's screen is gone and the phase is what it left behind) and the first wear
+     * after the glasses started ({@code coldGeneration}) open the chooser as before.</p>
+     */
+    Snapshot wearEntry(boolean initial, long coldGeneration, boolean screenAlive) throws IOException {
+        synchronized (LOCK) {
+            Snapshot old = load();
+            if (screenAlive && old.generation != coldGeneration && IN_HAND.contains(old.phase)) return null;
+            return wear(initial, coldGeneration);
+        }
+    }
     private void write(Snapshot value) throws IOException {
         if (!preferences.edit().putLong("power_generation", value.generation).putLong("power_sequence", value.sequence)
                 .putLong("power_session", value.session).putString("power_phase", value.phase)
