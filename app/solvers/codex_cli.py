@@ -31,7 +31,9 @@ questions read once from a worn photo 5 were wrong, each as confidently as a rig
 reads both were wrong in the same way in 1.6% and disagreed in 10.6%. A short answer (a mark, a number, a word) the
 reads disagree on keeps the first read's answer and carries a note with the other one; the server shows it as an
 answer to review, which the glasses already render. Writing is not compared: two writings of one solution differ.
-An answer or a question only one read gave is shown and noted. When one read fails the other answers alone.
+An answer or a question only one read gave is shown and noted. When one read fails the other answers alone. When no
+read gives a reply an answer list can be made of, or this host cannot carry the run out (an image, the working folder,
+memory), the booklet leaves as after a run that did not finish in time: the server gives it to the next route.
 
 The CLI takes images only. A booklet with audio (listening, mixed English) is refused before anything runs, with the
 error the server answers by handing the booklet to the next route.
@@ -69,6 +71,7 @@ import subprocess
 import tempfile
 import time
 import threading
+import traceback
 import unicodedata
 from pathlib import Path
 
@@ -490,6 +493,13 @@ def _last_line(text: str) -> str:
     return re.sub(r"\x1b\[[0-9;]*m", "", lines[-1])[:300] if lines else ""
 
 
+def _log_cause(event: str, error: BaseException) -> None:
+    """Which kind of failure and where it was raised. Never its message: that can carry reply or page text."""
+    raised = traceback.extract_tb(error.__traceback__)[-1] if error.__traceback__ else None
+    print(json.dumps({"event": event, "type": type(error).__name__,
+                      "at": f"{Path(raised.filename).name}:{raised.lineno}:{raised.name}" if raised else None}), flush=True)
+
+
 class CodexCliSolver(Solver):
     name = "codex-cli"
     provider_version = "codex-exec-v1"
@@ -541,17 +551,27 @@ class CodexCliSolver(Solver):
                 pass
         if not self._signed_in():
             raise ChatGptWebAuthenticationRequired("the Codex CLI is missing or not signed in; nothing sent")
+        # A reply no answer list can be made of, or a run this host could not carry out (an image, the working folder,
+        # memory), leaves as what a run that did not finish in time leaves as: the server gives the booklet to the
+        # next route. As a ValueError or OSError it was recorded as solver_failed and the booklet ended there, with
+        # Work and Chat never asked (found 2026-11-17). A usage limit and the CLI's own failures pass as they are.
+        try:
+            texts = self._run(question, model)
+        except (OSError, MemoryError, ValueError) as error:
+            _log_cause("codex_run_failed", error)
+            raise ChatGptWebReplyIncomplete("the Codex CLI's run could not be carried out on this host") from error
         reads, unusable = [], None
-        for text in self._run(question, model):
+        for text in texts:
             try:
                 data = extract_json(text)
                 _booklet_replies(data, subject=question.subject, extras=extras)
             except ValueError as error:
                 unusable = error
+                _log_cause("codex_reply_unusable", error)
                 continue
             reads.append(data)
         if not reads:
-            raise unusable or ValueError("the Codex CLI returned no reply")
+            raise ChatGptWebReplyIncomplete("no read by the Codex CLI gave a usable reply") from unusable
         replies = self._answers(reads, question, extras)
         if kept is not None:
             kept.parent.mkdir(parents=True, exist_ok=True)

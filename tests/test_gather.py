@@ -161,6 +161,35 @@ def test_a_changed_scene_is_not_added():
     assert not lost.placed
 
 
+def test_a_page_begun_on_another_view_is_begun_again_where_the_still_frames_are():
+    """The operator's trial of 2026-11-17 (M-44 (15)). A clip's first still frames showed one part of a large sheet;
+    then the paper was moved (the gyroscope saw no turn) and the other 58 still frames showed a part 640 px away. The
+    page stayed where the first frames had put it, none of the 58 could be laid on it, and the clip was "not placed":
+    its page went to the model as one dark frame. The record says how many still frames are still to come; a page
+    that holds a small share of them is begun again at the frame that would not go on it."""
+    a, b = scene(1), scene(9)
+    fs = frames(a, [(0, 0)] * 3, 2.2) + frames(b, [(0, 0)] * 40, 2.2, seed=5)
+    result = g.gather(fs, smear=[0.5] * 43)
+    assert result.placed and result.used >= 38, (result.used, result.total)
+    assert alike(result.image, b) > 0.9
+
+
+def test_another_view_at_the_end_of_a_clip_does_not_take_the_page():
+    a, b = scene(1), scene(9)
+    fs = frames(a, [(0, 0)] * 30, 2.2) + frames(b, [(0, 0)] * 10, 2.2, seed=5)
+    result = g.gather(fs, smear=[0.5] * 40)
+    assert result.placed and 28 <= result.used <= 32, (result.used, result.total)
+    assert alike(result.image, a) > 0.9
+
+
+def test_a_head_that_looked_away_and_came_back_keeps_its_page():
+    a, b = scene(1), scene(9)
+    fs = frames(a, [(0, 0)] * 10, 2.2) + frames(b, [(0, 0)] * 10, 2.2, seed=5) + frames(a, [(0, 0)] * 20, 2.2, seed=6)
+    result = g.gather(fs, smear=[0.5] * 40)
+    assert result.placed and result.used >= 28, (result.used, result.total)
+    assert alike(result.image, a) > 0.9
+
+
 def test_no_usable_frame_is_an_answer_not_an_error():
     result = g.gather(frames(scene(), [(0, 0)] * 5, 2.2), smear=[9.0] * 5)
     assert (result.used, result.total, result.placed, result.level_over_noise) == (0, 5, False, 0.0)

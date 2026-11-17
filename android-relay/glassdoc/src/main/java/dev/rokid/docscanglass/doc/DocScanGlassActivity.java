@@ -809,6 +809,12 @@ public final class DocScanGlassActivity extends Activity
                 && controller.getState() == RelayState.CAPTURE_REVIEW) {
             surface.showCaptureEndRequested();
         }
+        // The page being taken comes in first (a clip up to ten seconds, then its review): said at once, or the
+        // wearer double-taps again and those taps land on the waiting screen, where two of them leave the app.
+        if (action == GlassesInputAction.BACK && !mixedMode && !listeningMode && !controller.isCapturePaused()
+                && controller.getState() == RelayState.CAPTURING) {
+            hud.showLines(List.of("終了待ち", "", ""));
+        }
         if (listeningMode && !mixedMode && action == GlassesInputAction.BACK && (!awaitingAnswers || !audioStopRequested)) {
             boolean stopAudio = captureEndRequested || controller.getState() == RelayState.LISTENING;
             captureEndRequested = true;
@@ -1100,7 +1106,7 @@ public final class DocScanGlassActivity extends Activity
                     wakeForResult();
                     hud.showLines(List.of("録音・転送を確認", "原音は保存済み", "ダブルタップで再試行"));
                 } else {
-                    hud.showLines(GlassesHudText.adapt(hudLines));
+                    hud.showLines(GlassesHudText.adapt(hudLines, mixedMode || listeningMode));
                     waitWithDisplayOff();
                 }
             });
@@ -1126,7 +1132,7 @@ public final class DocScanGlassActivity extends Activity
             return;
         }
         main.post(() -> {
-            hud.showLines(GlassesHudText.adapt(hudLines));
+            hud.showLines(GlassesHudText.adapt(hudLines, mixedMode || listeningMode));
             // Waiting to shoot: nothing here needs reading, and the page is behind it.
             if (state == RelayState.READY || state == RelayState.READING) hud.fadeSoon();
         });
@@ -1320,6 +1326,7 @@ public final class DocScanGlassActivity extends Activity
             try {
             AnswerStore.Saved saved = loadSavedAnswers();
             if (saved != null && saved.bundle.sessionId.equals(Long.toString(sessionId))) {
+                controller.answersSaved(sessionId); // saved before a kill could take the mark off: settled here
                 // Saved state belongs to this session. CLOSED must stop here,
                 // not fall through to a fresh fetch: a fetch would open a new
                 // reader on the same session's answers, silently undoing the
@@ -1356,6 +1363,7 @@ public final class DocScanGlassActivity extends Activity
                     offset = validation.offset();
                     answerStore.save(bundle, question, offset, false);
                 } else answerStore.start(bundle);
+                controller.answersSaved(sessionId); // from here 前回の答案 has them: the reading no longer waits
                 String restoreQuestion = question;
                 int restoreOffset = offset;
                 main.post(() -> {

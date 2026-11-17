@@ -592,7 +592,7 @@ public final class DocScanController implements AutoCloseable {
                     String date = new SimpleDateFormat("M/d HH:mm", Locale.JAPAN)
                             .format(new Date(new File(directory, "state.properties").lastModified()));
                     result.add(new SavedCapture(saved.id(), date + (saved.mixed() ? " 合同英語 " : saved.listening() ? " 音声 " : " 通常 ")
-                            + saved.pageCount() + "枚", saved.listening(), saved.mixed()));
+                            + saved.pageCount() + "枚" + (saved.answersPending() ? " 答え待ち" : ""), saved.listening(), saved.mixed()));
                 } catch (IOException error) {
                     result.add(new SavedCapture(directory.getName(), "保存記録の復旧が必要", false));
                 }
@@ -602,6 +602,27 @@ public final class DocScanController implements AutoCloseable {
             result.add(new SavedCapture("", "以前の読取", listeningMode));
         }
         return result;
+    }
+
+    /**
+     * The answers of this server session are saved on the glasses: its reading no longer waits for them and leaves
+     * the list of readings to go back to (LocalCaptureSession.answersPending).
+     */
+    public void answersSaved(long session) {
+        try {
+            serial.execute(() -> {
+                if (session <= 0) return;
+                try {
+                    if (localSession != null && localSession.sessionId() == session) { localSession.answersArrived(); return; }
+                    for (File directory : LocalCaptureSession.folders(localRoot)) {
+                        LocalCaptureSession saved = LocalCaptureSession.load(localRoot, directory.getName());
+                        if (saved.sessionId() == session) { saved.answersArrived(); return; }
+                    }
+                } catch (IOException | RuntimeException unreadable) {
+                    // The entry stays listed; taking it up again fetches the same answers and settles it then.
+                }
+            });
+        } catch (RejectedExecutionException ignored) { /* The activity is closing. */ }
     }
 
     /** Persist the operator's explicit exit before the Activity disappears. */
@@ -735,9 +756,9 @@ public final class DocScanController implements AutoCloseable {
                     publish(RelayState.FINALIZING, List.of("解析を再開", "資料は保存済み", ""), "Resumed saved analysis");
                 } else if (captureReview.hasPending()) {
                     publishCaptureReview(captureReview.peek(), "Resumed local pending photo", true);
-                    if (listeningMode) startLocalCapture(true);
+                    if (listeningMode) startLocalCapture(true); else lookForPagesAfterThisReview();
                 } else if (promoteFutureCandidate()) {
-                    if (listeningMode) startLocalCapture(true);
+                    if (listeningMode) startLocalCapture(true); else lookForPagesAfterThisReview();
                 } else {
                     publish(RelayState.READING, List.of("読取を再開", nextPageIndex + "枚保存済み", ""), "Resumed local capture");
                     startLocalCapture(true);
@@ -783,6 +804,17 @@ public final class DocScanController implements AutoCloseable {
         }); } catch (RejectedExecutionException ignored) { }
     }
 
+    /**
+     * A reading taken up again at a page under review: once that page is saved, pages are looked for as in a
+     * capture just started. The start itself cannot be made behind a review, and without this the reading saved
+     * that one page and took no other.
+     */
+    private void lookForPagesAfterThisReview() {
+        if (manualOnly || autoCaptureEnabled) return;
+        autoCaptureEnabled = true;
+        listener.onAutoCaptureChanged(true);
+    }
+
     private void startLocalCapture(boolean resume) throws Exception {
         if (!link.supportsLocalCaptureReview()) return;
         if (listeningMode) {
@@ -795,7 +827,8 @@ public final class DocScanController implements AutoCloseable {
     private void manualCaptureNow() {
         if (localCameraUnknown || futureStopping || (finishCaptureRequested && state != RelayState.CAPTURE_REVIEW) || captureLease.isTimedOut()
                 || state == RelayState.FINALIZING || state == RelayState.UPLOADING) return;
-        if (state == RelayState.CAPTURE_REVIEW) finishCaptureRequested = false;
+        // An end asked for stays asked for: the retake of the last page is saved and the capture ends then. It used
+        // to be dropped here, and the wearer waited for answers while the camera went on taking pages.
         manualCaptureRequested = true;
         autoRunGeneration++;
         autoCommitArmed = false;
@@ -901,7 +934,8 @@ public final class DocScanController implements AutoCloseable {
         CaptureReviewStore.Pending held = captureReview.peek();
         if (state == RelayState.CAPTURE_REVIEW && held != null) {
             // Shown afresh: whatever it had of its three seconds ran out behind a cleared display.
-            publishCaptureReview(held, "Capture resumed by the wearer; the held page gets its own review", autoCommitArmed);
+            // Always with its three seconds: a retake asked for and then paused had taken them away for good.
+            publishCaptureReview(held, "Capture resumed by the wearer; the held page gets its own review", true);
         } else if (state == RelayState.READY || state == RelayState.READING) {
             publishAutoWaiting("撮影を再開しました", "", "Capture resumed by the wearer");
             waitForNextPage();
@@ -1648,7 +1682,15 @@ public final class DocScanController implements AutoCloseable {
         CaptureReviewStore.Pending pending = captureReview.peek();
         if (pending != null) {
             listener.onCaptureReview(pending);
-            publishCaptureReview(pending, diagnostic + "; previous photo retained");
+            publishCaptureReview(pending, diagnostic + "; previous photo retained", link.supportsLocalCaptureReview());
+            return;
+        }
+        if (link.supportsLocalCaptureReview()) {
+            // The glasses' own display was late (writing a clip out stalls it for seconds, M-30): nothing was asked
+            // of the camera, and the page is looked for again. Left as it was, automatic capture stayed on in name
+            // and took no further page.
+            publishAutoWaiting("もう一度撮ります", "", diagnostic);
+            waitForNextPage();
             return;
         }
         publish(
@@ -1912,9 +1954,11 @@ public final class DocScanController implements AutoCloseable {
                 }
                 CaptureReviewStore.Pending pending = captureReview.peek();
                 if (pending != null) {
+                    // With its three seconds: on the glasses a review is the photo alone, and shown without them
+                    // it stood frozen, saved by nothing but the double tap that also sends the booklet.
                     publishCaptureReview(
                             pending,
-                            "Retake did not start; previous review photo retained: camera not still");
+                            "Retake did not start; previous review photo retained: camera not still", true);
                     return;
                 }
                 publishAutoWaiting(
@@ -2223,7 +2267,7 @@ public final class DocScanController implements AutoCloseable {
 
     private void publishCaptureGap() {
         finishCaptureRequested = false;
-        publish(RelayState.READING, List.of("撮り逃しの確認", "未撮影の頁へ戻してタップ", ""),
+        publish(RelayState.READING, List.of("撮り逃しの確認", "未撮影の頁へ戻して前スワイプ", ""),
                 "Observed scene was not captured; preserved originals are not proof of complete coverage");
     }
 
@@ -2641,7 +2685,7 @@ public final class DocScanController implements AutoCloseable {
             lines = armAutoCommit
                     ? List.of(page + " 撮影確認", "3秒以内の前スワイプで撮り直し",
                             pending.isFramingFailing() ? "範囲を確認してください" : "無操作で確定")
-                    : List.of(page + " 写真を保全しています", "ダブルタップで再送", "タップで撮り直し");
+                    : List.of(page + " 写真を保全しています", "ダブルタップで保存して終了", "前スワイプで撮り直し");
         }
         state = RelayState.CAPTURE_REVIEW;
         currentHudLines = lines;
@@ -2650,7 +2694,7 @@ public final class DocScanController implements AutoCloseable {
                 pending.rotationDegrees,
                 lines);
         reviewViewGeneration = viewGeneration;
-        if (pending.needsSceneRecapture()) link.showCaptureReviewNotice("撮影状態を確認できません・タップで撮り直し");
+        if (pending.needsSceneRecapture()) link.showCaptureReviewNotice("前スワイプで撮り直し");
         listener.onUpdate(RelayState.CAPTURE_REVIEW, lines, diagnostic);
     }
 
@@ -2986,6 +3030,14 @@ public final class DocScanController implements AutoCloseable {
             return;
         }
         if (localSession != null && localSession.captureGap()) { publishCaptureGap(); return; }
+        if (nextPageIndex == 0 && localSession != null && link.supportsLocalCaptureReview() && (!listeningMode || mixedMode)) {
+            // Nothing to send, so the end is not taken and the capture goes on. Left requested, it stopped the
+            // camera and refused the tap, the swipe and every later double tap with nothing drawn (2026-11-17).
+            finishCaptureRequested = false;
+            publishAutoWaiting("まだ1枚もありません", "", "Finish not taken: no page yet; the capture goes on");
+            startAutoCaptureNow();
+            return;
+        }
         if ((documentId == 0 && localSession == null) || nextPageIndex == 0) {
             publish(
                     RelayState.READING,

@@ -58,6 +58,10 @@ MAP_FLOOR = 0.15  # how alike (correlation, in the band) the frame brought back 
 # shift with 7.1 to 8.2 where 8 is asked, and a run of twenty still frames was lost (M-31). Worn frames laid by a map
 # were 0.67 to 0.98 alike to their page.
 MAP_SURE = 0.5
+# A page is begun again at a still frame that does not go on it when at least this many times its frames are still to
+# come (begun_again). 4: a head that looked away and came back (10, 10, then 20 frames) keeps its page; the clip of
+# 2026-11-17 that was not placed held 3 frames with 58 to come.
+AGAIN = 4
 WIDE_EXTRA = 3.0  # the wider search has sixteen times the places for noise to peak: its peak must be this much stronger
 # A frame is placed when its correlation peak stands this far above the rest of the surface (see _peak). Measured on the
 # first real page (M-27, 2026-11-15, parts of 512x172 to 960x324 px of clips of a page of print): frames of the page 9.4
@@ -413,6 +417,8 @@ def gather(frames: Iterable[np.ndarray], *, smear: Sequence[float] | None = None
     after the first was lost.
     """
     selection = "none" if smear is None else "motion"
+    # Still frames from each frame on, itself counted: what a page begun at that frame could still be given.
+    ahead = None if smear is None else list(itertools.accumulate(reversed([value <= smear_limit for value in smear])))[::-1]
     total = usable = used = 0
     planes = reference = coarse = covered = shape = before = None
     join = 1
@@ -466,6 +472,20 @@ def gather(frames: Iterable[np.ndarray], *, smear: Sequence[float] | None = None
         went = f"alike {alike:.3f} area {turn:.3f} lean {lean:.3f}"
         return (m if alike >= floor and 0.8 < turn < 1.25 and lean <= 0.2 else None), went
 
+    def begun_again(index: int) -> bool:
+        """This still frame does not go on the page. Is the page begun again from it? When the page holds a small
+        share of the still frames that are still to come: the clip started on something else (the paper was moved,
+        the head had not arrived), and what follows is the page."""
+        nonlocal planes, reference, coarse, covered, used, pose, position
+        if ahead is None or index >= len(ahead) or ahead[index] < AGAIN * max(used, 1):
+            return False
+        _LOG.debug("frame %d: the page is begun again here (%d frames on it, %d still frames to come)", index, used, ahead[index])
+        planes = _Planes(shape, grid)
+        reference = coarse = covered = pose = None
+        used, position = 0, (0.0, 0.0)
+        held.clear()
+        return True
+
     for index, frame in enumerate(frames):
         frame = np.asarray(frame, dtype=np.float32)
         if shape is None:
@@ -518,8 +538,11 @@ def gather(frames: Iterable[np.ndarray], *, smear: Sequence[float] | None = None
                            "laid without a shift" if laid is not None else "not placed", strength, REACHES[-1], expected[0] * join,
                            expected[1] * join, "" if travelled is not None else " (track lost)", went)
                 if laid is None:
-                    continue  # not this scene: the view left the page, or something came between
-                dy, dx = float(laid[1, 2]) * unit / join, float(laid[0, 2]) * unit / join  # where the page's middle lies in it
+                    if not begun_again(index):
+                        continue  # not this scene: the view left the page, or something came between
+                    dy = dx = 0.0  # this frame is where the page is put now
+                else:
+                    dy, dx = float(laid[1, 2]) * unit / join, float(laid[0, 2]) * unit / join  # where the page's middle lies in it
             dy, dx = dy * join, dx * join
             if laid is not None:
                 pass
@@ -534,7 +557,9 @@ def gather(frames: Iterable[np.ndarray], *, smear: Sequence[float] | None = None
                     laid, went = mapped(small, np.array([[1.0, 0.0, dx / unit], [0.0, 1.0, dy / unit], [0.0, 0.0, 1.0]]), False)
                 _LOG.debug("frame %d at %+.0f %+.0f %s: %s", index, dy, dx, "laid" if laid is not None else "left out", went)
                 if laid is None:
-                    continue  # it shows the page, but not so that it can be laid on it: left out rather than added double
+                    if not begun_again(index):
+                        continue  # it shows the page, but not so that it can be laid on it: left out rather than added double
+                    dy = dx = 0.0
             elif parts > 1 and used >= PARTS_FROM:
                 field = _field(frame, lambda box: side((box[0].start, box[1].start), lambda: reference[box]), dy, dx, parts,
                                PART_REACH + (join - 1) / 2)

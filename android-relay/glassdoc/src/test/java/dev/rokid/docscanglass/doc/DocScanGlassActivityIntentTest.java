@@ -805,8 +805,29 @@ public class DocScanGlassActivityIntentTest {
 
         action.invoke(activity, GlassesInputAction.BACK, 4_000L);
         awaitSerial();
-        assertTrue("with the capture in view a double tap ends it as before",
-                (Boolean) org.robolectric.util.ReflectionHelpers.getField(controller, "finishCaptureRequested"));
+        // With the capture in view a double tap is the end. No page is saved here, so there is nothing to end: the
+        // request is not kept and the capture goes on (LocalReviewTest covers the end with pages, and this case).
+        assertFalse((Boolean) org.robolectric.util.ReflectionHelpers.getField(controller, "finishCaptureRequested"));
+        assertTrue("the first page is still looked for", controller.isAutoCaptureEnabled());
+        assertFalse(controller.isCapturePaused());
+    }
+
+    /**
+     * A double tap while a clip is being recorded or a photo prepared ends the capture once that page is in: up to
+     * ten seconds and its review later. Until then the display said only "撮影中", the wearer double-tapped again,
+     * and those taps arrived on the waiting screen, where two of them leave the app (the operator's booklet of
+     * 2026-11-17 10:11 was closed that way and its answers were never seen).
+     */
+    @Test public void aDoubleTapWhileAPageIsBeingTakenIsAcknowledgedAtOnce() throws Exception {
+        startLocalCapture();
+        org.robolectric.util.ReflectionHelpers.setField(controller, "state", RelayState.CAPTURING);
+        java.lang.reflect.Method action = DocScanGlassActivity.class.getDeclaredMethod("onAction", GlassesInputAction.class, long.class);
+        action.setAccessible(true);
+
+        action.invoke(activity, GlassesInputAction.BACK, 1_000L);
+
+        List<String> shown = org.robolectric.util.ReflectionHelpers.getField(hud, "lines");
+        assertEquals("終了待ち", shown.isEmpty() ? "" : shown.get(0));
     }
 
     @Test public void aFailureBehindAClearedDisplayIsShown() throws Exception {

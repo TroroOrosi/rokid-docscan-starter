@@ -339,7 +339,14 @@ from __future__ import annotations
 #         that question's one item (they came back as unnamed items of their own). Soft print is read with its
 #         context before a question is given up; a number, a symbol or a choice label is still never guessed.
 #         Where captures overlap, each place is read from the capture that shows it best. See API 1.51.0.
-APP_VERSION = "0.85.0"
+# 0.85.1: what the records of that same trial held and nobody had reported (M-44 (15)). A clip whose first
+#         still frames show another view (the paper was moved during the recording) is gathered where most of
+#         its still frames are: it used to be "not placed" and its page went out as one dark frame. A printed
+#         sub-question number such as (1) is no longer taken for the mark of a repeated number and cut from the
+#         label the glasses show (5 to 21 items a booklet of mathematics read "1 " or "全問"). A reply of the
+#         Codex CLI that cannot be used, and a run the phone could not carry out, hand the booklet to the next
+#         route as a time-out does; they used to end it. See API 1.51.1.
+APP_VERSION = "0.85.1"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.
@@ -488,7 +495,9 @@ APP_VERSION = "0.85.0"
 # 1.51.0: an answer that was reached by calculation or reasoning holds its result first and then its working
 #         on lines that begin with 式： (answer text only; no field was added). A question with several answer
 #         boxes is one item whose answer names each box on a line of its own (平均：7/2).
-API_VERSION = "1.51.0"
+# 1.51.1: `question_label` of the answer bundle keeps a printed "(1)" at its end; only the "(2)", "(3)" that the
+#         server adds to a repeated number is taken off. No field changed.
+API_VERSION = "1.51.1"
 
 # Matching algorithm identity. Bump when thresholds or hashing change so a
 # re-index/eval is triggered. Mirrors thresholds in app/matching.py.

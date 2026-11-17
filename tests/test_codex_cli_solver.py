@@ -21,7 +21,8 @@ from app import config
 from app.solvers import codex_cli
 from app.solvers.base import Question
 from app.solvers.chatgpt_web import (ChatGptWebAuthenticationRequired, ChatGptWebCheckFailed, ChatGptWebError,
-                                     ChatGptWebModelMismatch, ChatGptWebRateLimit, ChatGptWebSendNotAuthorized)
+                                     ChatGptWebModelMismatch, ChatGptWebRateLimit, ChatGptWebReplyIncomplete,
+                                     ChatGptWebSendNotAuthorized)
 
 FAKE_CODEX = r'''
 import atexit, json, os, sys, time
@@ -323,7 +324,7 @@ def test_a_booklet_that_needs_audio_is_refused_before_anything_runs(codex, tmp_p
 def test_a_reply_that_is_not_the_question_list_is_not_kept(codex, tmp_path, monkeypatch):
     monkeypatch.setenv("FAKE_CODEX_REPLY", "I could not read the pages.")
     question = _booklet(tmp_path)
-    with pytest.raises(ValueError):
+    with pytest.raises(ChatGptWebReplyIncomplete):
         codex_cli.CodexCliSolver().answer_all(question=question)
     monkeypatch.setenv("FAKE_CODEX_REPLY", json.dumps(REPLY, ensure_ascii=False))
     assert codex_cli.CodexCliSolver().answer_all(question=question)
@@ -1062,6 +1063,68 @@ def test_a_second_reply_that_is_not_an_answer_list_leaves_the_first_alone(codex,
     _twice(monkeypatch, _read((1, "④")), _read((1, "④")))
     monkeypatch.setenv("FAKE_CODEX_REPLY_2", "I could not read the pages.")
     assert _shown(codex_cli.CodexCliSolver().answer_all(question=_booklet(tmp_path))) == [([1], "④", "ready", "")]
+
+
+def test_a_first_reply_that_is_not_an_answer_list_leaves_the_second_alone(codex, tmp_path, monkeypatch):
+    _twice(monkeypatch, _read((1, "④")), _read((1, "④")))
+    monkeypatch.setenv("FAKE_CODEX_REPLY", "I could not read the pages.")
+    assert _shown(codex_cli.CodexCliSolver().answer_all(question=_booklet(tmp_path))) == [([1], "④", "ready", "")]
+
+
+# A reply no answer list can be made of, and the function that refuses it.
+_UNUSABLE = {
+    "prose": ("I could not read the pages.", "extract_json"),
+    "cut off at the output limit": (json.dumps(_read((1, "④"), (2, "②")), ensure_ascii=False)[:-30], "_booklet_replies"),
+    "a stray top-level key": (json.dumps({**_read((1, "④")), "note": "a made-up remark"}, ensure_ascii=False),
+                              "validate_answer_fields"),
+    "an empty item": ('{"questions": [{}]}', "_booklet_replies"),
+}
+
+
+@pytest.mark.parametrize("reply, refused_in", _UNUSABLE.values(), ids=_UNUSABLE)
+def test_when_no_read_gives_a_usable_reply_the_booklet_moves_to_the_next_route(
+        codex, tmp_path, monkeypatch, capsys, reply, refused_in):
+    """Until 2026-11-17 this left as a ValueError, which the server records as solver_failed: the booklet ended there
+    with Work and Chat never asked, after the requests had been spent. ChatGptWebReplyIncomplete is what a run that
+    does not finish in time raises, and the server gives the booklet to the next route at once."""
+    monkeypatch.delenv("ROKID_CODEX_READS", raising=False)  # the default of two; both get this reply
+    monkeypatch.setenv("FAKE_CODEX_REPLY", reply)
+    with pytest.raises(ChatGptWebReplyIncomplete):
+        codex_cli.CodexCliSolver().answer_all(question=_booklet(tmp_path))
+
+    assert len(_runs(codex())) == 2
+    # Why each read was refused is logged by kind and place. The reply's own text never is.
+    printed = capsys.readouterr().out
+    causes = [json.loads(line) for line in printed.splitlines() if '"codex_reply_unusable"' in line]
+    assert [(cause["type"], cause["at"].rsplit(":", 1)[-1]) for cause in causes] == [("ValueError", refused_in)] * 2
+    assert not any(text in printed for text in ("could not read", "made-up", "問1", "④"))
+
+
+def _a_page_that_cannot_be_opened(question, monkeypatch):
+    Path(question.document_pages[0]["image_path"]).write_bytes(b"not an image")
+
+
+def _no_memory_for_a_page(question, monkeypatch):
+    def full(image):
+        raise MemoryError
+
+    monkeypatch.setattr(codex_cli, "_readable", full)
+
+
+@pytest.mark.parametrize("broken, kind", [(_a_page_that_cannot_be_opened, "UnidentifiedImageError"),
+                                          (_no_memory_for_a_page, "MemoryError")])
+def test_a_run_this_host_could_not_carry_out_moves_the_booklet_to_the_next_route(
+        codex, tmp_path, monkeypatch, capsys, broken, kind):
+    """An OSError or MemoryError from preparing the request (an image, the working folder on a full disk) also ended
+    the booklet as solver_failed. It is a cause other than the allowance: the next route stands in."""
+    question = _booklet(tmp_path)
+    broken(question, monkeypatch)
+    with pytest.raises(ChatGptWebReplyIncomplete):
+        codex_cli.CodexCliSolver().answer_all(question=question)
+
+    [cause] = [json.loads(line) for line in capsys.readouterr().out.splitlines() if '"codex_run_failed"' in line]
+    assert cause["type"] == kind and cause["at"]
+    assert not _runs(codex())
 
 
 def test_when_both_reads_hit_the_usage_limit_the_booklet_moves_to_the_next_route(codex, tmp_path, monkeypatch):

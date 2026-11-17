@@ -216,8 +216,17 @@ final class LocalCaptureSession {
     synchronized long documentId() { return Long.parseLong(state.getProperty("document")); }
     synchronized long sessionId() { return Long.parseLong(state.getProperty("session")); }
     synchronized Phase phase() { return Phase.valueOf(state.getProperty("phase")); }
+    /**
+     * The server has the booklet and its answers are not on the glasses yet. Set as the reading enters its answers
+     * phase, taken off when the answers are saved here. Until then the reading is one to go back to: closed during
+     * the wait (a double tap twice, a fold, the glasses taken off and on) it used to count as finished, was listed
+     * nowhere, and its answers could not be reached (register 3-1; met by the operator on 2026-11-17).
+     */
+    synchronized boolean answersPending() { return Boolean.parseBoolean(state.getProperty("answers.pending", "false")); }
+    synchronized void answersArrived() throws IOException { if (answersPending()) update("answers.pending", "false"); }
+
     synchronized boolean unfinished() {
-        return candidateCount() > 0 || captureGap()
+        return candidateCount() > 0 || captureGap() || answersPending()
                 || (phase() == Phase.CLOSED ? Phase.valueOf(state.getProperty("resume_phase")) : phase()) != Phase.REVIEW
                 || (mixed() && !Boolean.parseBoolean(state.getProperty("audio_attached", "false")));
     }
@@ -232,7 +241,10 @@ final class LocalCaptureSession {
 
     synchronized void setPhase(Phase phase) throws IOException {
         if (phase == Phase.CLOSED || phase() == Phase.CLOSED) throw new IOException("明示的な終了・再開が必要です");
-        update("phase", phase.name());
+        Properties next = copy();
+        next.setProperty("phase", phase.name());
+        if (phase == Phase.REVIEW && phase() != Phase.REVIEW) next.setProperty("answers.pending", "true"); // answersPending()
+        save(next);
     }
 
     synchronized void close() throws IOException {

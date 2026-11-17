@@ -3493,7 +3493,7 @@ def _answer_bundle_item(conn, group: dict, row) -> dict:
             status = "needs_review"
             issue = "。".join(filter(None, ["表示できない要素: " + "、".join(display.unsupported), note]))
     # "問1(2)" keeps question_no unique; the glasses show the printed "問1".
-    label = "全問" if group["whole"] else (_base_problem_no(row["question_no"]) or "全問")
+    label = "全問" if group["whole"] else (_printed_label(row) or "全問")
     return {
         "group_id": group["id"],
         "group_label": group["label"][:120],
@@ -4660,6 +4660,14 @@ _PROBLEM_NO_SUFFIX_RE = re.compile(r"\(\d+\)$")
 
 def _base_problem_no(no: str | None) -> str:
     return _PROBLEM_NO_SUFFIX_RE.sub("", no or "")
+
+
+def _printed_label(row) -> str:
+    """The question's number as the paper prints it. A number that repeats in a booklet is stored with "(2)", "(3)"
+    after it (unique_question_numbers); a paper prints "(1)", "(2)" of its own. The row's body keeps the label as it
+    was given, so a number the body ends with carries no mark of ours (2026-11-17: "1 (1)" was shown as "1 ")."""
+    no = row["question_no"] or ""
+    return no if no and (row["body_text"] or "").endswith(no) else _base_problem_no(no)
 
 
 @app.post("/v1/exam-sessions/{session_id}/solutions")

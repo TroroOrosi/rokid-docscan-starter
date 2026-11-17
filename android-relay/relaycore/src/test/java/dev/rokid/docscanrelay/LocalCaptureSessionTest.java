@@ -271,13 +271,40 @@ public class LocalCaptureSessionTest {
      * since the app was installed had kept its folder (the real app held 1.4 GB): nothing removed a finished one.
      * Finished means the server holds every page and the answers were shown, and no screen leads back to it.
      */
+    /**
+     * The operator's trial of 2026-11-17 (register 3-1, known and left open until then). A booklet was closed during
+     * the wait for its answers and taken up again while its pages were still on their way; closed a second time
+     * after the server had taken it, it was listed nowhere: a reading counted as finished from the moment the server
+     * had the booklet. The answers arrived on the phone and were never seen; the booklet was photographed again.
+     */
+    @Test public void aReadingWhoseAnswersHaveNotArrivedCanBeTakenUpAgain() throws Exception {
+        File root = folder.getRoot();
+        LocalCaptureSession sent = LocalCaptureSession.create(root, "http://phone:8000", false);
+        sent.commit(photo(0, 7));
+        sent.setPhase(LocalCaptureSession.Phase.ANALYSIS);
+        sent.setPhase(LocalCaptureSession.Phase.REVIEW); // the server has taken the booklet
+        assertTrue(sent.answersPending());
+        assertTrue("closed during the wait, it is still a reading to go back to", sent.unfinished());
+        sent.close();
+        assertTrue(LocalCaptureSession.load(root, sent.id()).unfinished());
+        assertEquals(0, LocalCaptureSession.retirePast(root, "", System.currentTimeMillis()));
+
+        LocalCaptureSession again = LocalCaptureSession.load(root, sent.id());
+        again.resume();
+        again.answersArrived();
+        assertFalse("its answers are on the glasses now", LocalCaptureSession.load(root, sent.id()).unfinished());
+        assertEquals(1, LocalCaptureSession.retirePast(root, "", System.currentTimeMillis()));
+    }
+
     @Test public void finishedReadingsAreClearedAwayAndEverythingElseStays() throws Exception {
         File root = folder.getRoot();
         LocalCaptureSession finished = LocalCaptureSession.create(root, "http://phone:8000", false);
         finished.commit(photo(0, 7));
         finished.setPhase(LocalCaptureSession.Phase.REVIEW);
+        finished.answersArrived();
         LocalCaptureSession leftAfterReading = LocalCaptureSession.create(root, "http://phone:8000", false);
         leftAfterReading.setPhase(LocalCaptureSession.Phase.REVIEW);
+        leftAfterReading.answersArrived();
         leftAfterReading.close();
         LocalCaptureSession capturing = LocalCaptureSession.create(root, "http://phone:8000", false);
         capturing.commit(photo(0, 8));
@@ -375,6 +402,7 @@ public class LocalCaptureSessionTest {
         LocalCaptureSession finished = LocalCaptureSession.create(root, "http://phone:8000", false);
         finished.commit(photo(0, 9));
         finished.setPhase(LocalCaptureSession.Phase.REVIEW);
+        finished.answersArrived();
         assertEquals(1, LocalCaptureSession.retirePast(root, "", System.currentTimeMillis()));
         assertEquals("retired, not yet swept: the process ended here", 1, root.list().length);
         LocalCaptureSession.sweepRetired(root);

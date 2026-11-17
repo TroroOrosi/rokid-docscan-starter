@@ -130,6 +130,25 @@ def test_bundle_groups_sub_questions_under_their_section(client):
     assert all(i["question_id"].startswith("q") for i in body["items"])
 
 
+def test_a_printed_sub_question_number_is_not_taken_for_the_mark_of_a_repeat():
+    """The operator's trial of 2026-11-17: in nine booklets of mathematics 5 to 21 items each were shown as "1 " or
+    "全問" where the paper prints (1), (2), (3). A repeated number gets "(2)" from the server so that it stays unique,
+    and the label shown took every "(digits)" at the end for that mark. The row's body keeps the label as it was
+    given: a number that the body ends with carries no mark."""
+    from app.main import _printed_label
+
+    assert _printed_label({"question_no": "(1)", "body_text": "第1問 (1)"}) == "(1)"
+    assert _printed_label({"question_no": "1 (2)", "body_text": "1 (2)"}) == "1 (2)"
+    assert _printed_label({"question_no": "10(3)", "body_text": "10(3)"}) == "10(3)"
+    # the second "(1)" and the second "1 (2)" of a booklet: the mark is the server's
+    assert _printed_label({"question_no": "(1)(2)", "body_text": "第2問 (1)"}) == "(1)"
+    assert _printed_label({"question_no": "1 (2)(2)", "body_text": "1 (2)"}) == "1 (2)"
+    assert _printed_label({"question_no": "問1(2)", "body_text": "第2問 問1"}) == "問1"
+    # a row whose body is the page's text, as the older routes store it, is treated as before
+    assert _printed_label({"question_no": "問1(2)", "body_text": "次の文章を読んで答えよ。"}) == "問1"
+    assert _printed_label({"question_no": None, "body_text": None}) == ""
+
+
 def test_unsolved_items_are_pending_with_no_answer_text(client):
     _, session_id = _session_with(client, [PAGE])
     client.post(f"/v1/exam-sessions/{session_id}/finalize-reading")

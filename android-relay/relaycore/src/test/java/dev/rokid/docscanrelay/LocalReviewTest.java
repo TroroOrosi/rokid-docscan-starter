@@ -1716,6 +1716,12 @@ public class LocalReviewTest {
         try {
             controller.configureForLocalStart("http://phone:8000", "", 270);
             controller.startLocalSession(false); barrier(controller);
+            // One page is saved first: with none, an end is not taken and the capture goes on.
+            set(controller, "localNetworkBusy", true);
+            ((CaptureLease)get(controller, "captureLease")).begin(0);
+            set(controller, "state", RelayState.CAPTURING);
+            controller.onPhoto(new byte[]{1, 2, 3}, nativeSource(new byte[]{1, 2, 3}, 100)); barrier(controller);
+            commitVisible(controller, surface);
             ((ExecutorService) get(controller, "serial")).execute(() -> {
                 try { busy.await(5, TimeUnit.SECONDS); } catch (InterruptedException stopped) { Thread.currentThread().interrupt(); }
             });
@@ -1985,11 +1991,13 @@ public class LocalReviewTest {
     @Test public void finishedCaptureDoesNotResumeOnALatePageAfterThirtySeconds() throws Exception {
         Surface surface = new Surface();
         surface.holdForPage = true;
-        DocScanController controller = waitingLocalController(surface);
+        // One page is saved first: with none, an end is not taken and the capture goes on.
+        DocScanController controller = localWithOriginal(RuntimeEnvironment.getApplication(), surface);
         ClockedWatchdog clock = installClockedWatchdog(controller);
         try {
-            controller.startLocalSession(false); barrier(controller);
+            commitVisible(controller, surface);
             Runnable latePage = surface.pageReady;
+            assertNotNull(latePage);
             controller.onGlassesAction(GlassesInputAction.BACK); barrier(controller);
             assertTrue((boolean)get(controller, "finishCaptureRequested"));
             assertFalse(controller.isAutoCaptureEnabled());
@@ -2295,6 +2303,140 @@ public class LocalReviewTest {
                 assertEquals(2, server.getRequestCount());
             } finally { release.countDown(); controller.close(); }
         }
+    }
+
+    /**
+     * Found by reading on 2026-11-17 (four ways in, none reachable on a desk). On the glasses a review is the photo
+     * alone; a photo shown again without its three seconds is a frozen picture: nothing is saved, no page is looked
+     * for, and the only gesture that moves on is the double tap, which saves it and sends the booklet.
+     */
+    @Test public void aRetakeThatDoesNotStartLeavesTheOldPhotoWithItsThreeSeconds() throws Exception {
+        Surface surface = new Surface(); surface.holdForPage = true;
+        DocScanController controller = localWithOriginal(RuntimeEnvironment.getApplication(), surface);
+        try {
+            surface.visible = true;
+            controller.onCustomViewAvailable((long)get(controller, "reviewViewGeneration"), "capture-review"); barrier(controller);
+            controller.onGlassesAction(GlassesInputAction.SHORT_TAP); barrier(controller); // the forward swipe: retake
+            ((CaptureLease)get(controller, "captureLease")).begin(0);
+            set(controller, "state", RelayState.CAPTURING);
+            controller.onPhotoNotStarted(); barrier(controller); // the head was not still for ten seconds
+            assertEquals(RelayState.CAPTURE_REVIEW, controller.getState());
+            assertTrue("the photo that stands is shown with its three seconds", (boolean)get(controller, "autoCommitArmed"));
+            commitVisible(controller, surface);
+            assertEquals(1, ((LocalCaptureSession)get(controller, "localSession")).pageCount());
+        } finally { controller.close(); }
+    }
+
+    /**
+     * The view that shows a page's number has three seconds to be drawn. Writing a clip out stalls the glasses for
+     * up to 5.6 s (M-30). After that the capture said "open the glasses' display again" (the phone relay's words) and
+     * looked for no page: automatic capture was on in name only.
+     */
+    @Test public void aGuideThatIsNotDrawnInTimeDoesNotStopTheAutomaticCapture() throws Exception {
+        Surface surface = new Surface(); surface.holdForPage = true;
+        DocScanController controller = waitingLocalController(surface);
+        ClockedWatchdog clock = installClockedWatchdog(controller);
+        try {
+            controller.startLocalSession(false); barrier(controller);
+            Runnable seen = surface.pageReady;
+            surface.pageReady = null;
+            seen.run(); barrier(controller);
+            assertEquals(RelayState.AIMING, controller.getState());
+            clock.advanceBy(controller, 3000); // never acknowledged
+            assertTrue(controller.isAutoCaptureEnabled());
+            assertNotNull("the page is looked for again", surface.pageReady);
+        } finally { controller.close(); }
+    }
+
+    /** A fold during a page's three seconds: taken up again, the page was saved and no further page was ever looked for. */
+    @Test public void aReadingTakenUpAgainWithAPageUnderReviewGoesOnTakingPages() throws Exception {
+        Context context = RuntimeEnvironment.getApplication();
+        File root = new File(context.getFilesDir(), "local-scans");
+        LocalCaptureSession saved = LocalCaptureSession.create(root, "http://phone:8000", false);
+        byte[] jpeg = {1, 2, 3};
+        new CaptureReviewPersistence(new File(saved.directory(), "pending.bin")).save(new CaptureReviewStore.Pending(
+                0, jpeg, "", 270, "", PageFraming.UNKNOWN, 1000L, nativeSource(jpeg, 100).bind(saved.id(), 0, 270)));
+        Surface surface = new Surface(); surface.holdForPage = true;
+        DocScanController controller = new DocScanController(context, surface, null,
+                (state, lines, diagnostic) -> {}, new ClientIdentity("test", "test", "test"));
+        try {
+            controller.configureForLocalStart("http://phone:8000", "", 270); barrier(controller);
+            set(controller, "localUploadBlocked", true); // no network in this test
+            controller.resumeLocalSession(saved.id()); barrier(controller);
+            assertEquals(RelayState.CAPTURE_REVIEW, controller.getState());
+            commitVisible(controller, surface);
+            assertEquals(1, ((LocalCaptureSession)get(controller, "localSession")).pageCount());
+            assertTrue(controller.isAutoCaptureEnabled());
+            assertNotNull("the next page is looked for", surface.pageReady);
+        } finally { controller.close(); }
+    }
+
+    /** A retake of the last page, asked for after the double tap: once it is saved the capture ended; it used to go on. */
+    @Test public void aRetakeAfterTheEndWasAskedForStillEndsTheCapture() throws Exception {
+        Surface surface = new Surface(); surface.holdForPage = true;
+        DocScanController controller = localWithOriginal(RuntimeEnvironment.getApplication(), surface);
+        try {
+            surface.visible = true;
+            controller.onCustomViewAvailable((long)get(controller, "reviewViewGeneration"), "capture-review"); barrier(controller);
+            controller.onGlassesAction(GlassesInputAction.BACK); barrier(controller);
+            assertTrue((boolean)get(controller, "finishCaptureRequested"));
+            controller.onGlassesAction(GlassesInputAction.SHORT_TAP); barrier(controller); // the forward swipe: retake
+            assertTrue("the end that was asked for still stands", (boolean)get(controller, "finishCaptureRequested"));
+        } finally { controller.close(); }
+    }
+
+    /** Register 3-1, met by the operator on 2026-11-17: see LocalCaptureSessionTest. What the chooser lists, and when it stops. */
+    @Test public void aReadingClosedDuringTheWaitForAnswersIsListedUntilItsAnswersAreOnTheGlasses() throws Exception {
+        Context context = RuntimeEnvironment.getApplication();
+        File root = new File(context.getFilesDir(), "local-scans");
+        LocalCaptureSession sent = LocalCaptureSession.create(root, "http://phone:8000", false);
+        byte[] jpeg = {1, 2, 3};
+        sent.commit(new CaptureReviewStore.Pending(0, jpeg, "", 270, "", PageFraming.UNKNOWN, 1000L,
+                nativeSource(jpeg, 100).bind(sent.id(), 0, 270)));
+        sent.bindDocument(17); sent.bindSession(23);
+        sent.setPhase(LocalCaptureSession.Phase.ANALYSIS);
+        sent.setPhase(LocalCaptureSession.Phase.REVIEW);
+        sent.close();
+        Surface surface = new Surface(); surface.holdForPage = true;
+        DocScanController controller = new DocScanController(context, surface, null,
+                (state, lines, diagnostic) -> {}, new ClientIdentity("test", "test", "test"));
+        try {
+            controller.configureForLocalStart("http://phone:8000", "", 270); barrier(controller);
+            List<DocScanController.SavedCapture> listed = controller.savedCaptures();
+            assertEquals(1, listed.size());
+            assertEquals(sent.id(), listed.get(0).id);
+            assertTrue("the entry says what it waits for: " + listed.get(0).label, listed.get(0).label.contains("答え待ち"));
+
+            controller.answersSaved(99); barrier(controller);
+            assertEquals("another booklet's answers settle nothing here", 1, controller.savedCaptures().size());
+            controller.answersSaved(23); barrier(controller);
+            assertTrue("its answers are on the glasses: 前回の答案 has them", controller.savedCaptures().isEmpty());
+        } finally { controller.close(); }
+    }
+
+    /**
+     * A double tap before any page is saved (a second start double tap lands here, or the wearer gives up on a first
+     * page that will not be taken). Found by reading on 2026-11-17: the end was refused for want of a page but stayed
+     * requested, with the camera stopped and automatic capture off; after that the tap, the forward swipe and every
+     * further double tap did nothing, and nothing was drawn. The end is not taken and the capture goes on.
+     */
+    @Test public void aDoubleTapBeforeAnyPageIsSavedLeavesTheCaptureRunning() throws Exception {
+        Surface surface = new Surface(); surface.holdForPage = true;
+        DocScanController controller = new DocScanController(RuntimeEnvironment.getApplication(), surface, null,
+                (state, lines, diagnostic) -> {}, new ClientIdentity("test", "test", "test"));
+        try {
+            controller.configureForLocalStart("http://phone:8000", "", 270);
+            controller.startLocalSession(false); barrier(controller);
+            assertNotNull("the first page is looked for", surface.pageReady);
+            surface.pageReady = null;
+
+            controller.onGlassesAction(GlassesInputAction.BACK); barrier(controller);
+
+            assertFalse("no page, nothing to end: the request does not stay", (boolean)get(controller, "finishCaptureRequested"));
+            assertTrue((boolean)get(controller, "autoCaptureEnabled"));
+            assertNotNull("the first page is looked for again", surface.pageReady);
+            assertEquals(LocalCaptureSession.Phase.CAPTURE, ((LocalCaptureSession)get(controller, "localSession")).phase());
+        } finally { controller.close(); }
     }
 
     /**
