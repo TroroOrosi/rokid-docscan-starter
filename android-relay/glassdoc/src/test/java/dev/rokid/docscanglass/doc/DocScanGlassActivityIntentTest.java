@@ -1345,6 +1345,17 @@ public class DocScanGlassActivityIntentTest {
         assertFalse((boolean) org.robolectric.util.ReflectionHelpers.getField(activity, "routeInFlight"));
     }
 
+    @Test public void aDeskCheckMayAskForLongerClipsAndNothingElseChangesTheirLength() {
+        // A worn head makes clips that run their ten seconds (137 to 156 MB); a desk holds still and every clip ends
+        // at its 60 frames, so what long clips do to the next recording could not be made there (register 2-43, 4-17).
+        assertEquals(60, DocScanGlassActivity.clipFrames(null, 60));
+        assertEquals(60, DocScanGlassActivity.clipFrames(new Intent(), 60));
+        assertEquals(250, DocScanGlassActivity.clipFrames(new Intent().putExtra("clip_frames", 250), 60));
+        assertEquals("never fewer than the route's own", 60, DocScanGlassActivity.clipFrames(new Intent().putExtra("clip_frames", 5), 60));
+        assertEquals("a clip that long is still a page: two thirds of 250 are reached in ten seconds",
+                250, DocScanGlassActivity.clipFrames(new Intent().putExtra("clip_frames", 9_000), 60));
+    }
+
     @Test public void aScreenOfTheAppIsAliveFromItsCreationToItsDestruction() throws Exception {
         // What a confirmed wear asks before it leaves a reading in hand alone (PowerState.wearEntry): a phase left
         // behind by a screen that is gone must not keep the chooser away.

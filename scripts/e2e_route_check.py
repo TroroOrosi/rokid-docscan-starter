@@ -275,7 +275,7 @@ class Check:
         self.sh(f"am force-stop {PACKAGE}; input keyevent KEYCODE_WAKEUP; sleep 1")
         self.since = self.stamp()
         options = (f"--es server {self.o.server} --es key {self.o.key} --es capture {self.o.capture} "
-                   f"--ei long_above {self.o.long_above}")
+                   f"--ei long_above {self.o.long_above}" + (f" --ei clip_frames {self.o.clip_frames}" if self.o.clip_frames else ""))
         self.sh(f"am start -W -n {ACTIVITY} {options} --ez chooser true >/dev/null 2>&1")
         time.sleep(1.5)
         # Once more without the chooser flag. This check's own watcher opens a stopped app's chooser, and a chooser
@@ -570,6 +570,9 @@ def main() -> int:
                         help="how a page is taken; saved by the test app on every start")
     parser.add_argument("--long-above", type=int, default=0,
                         help="with --capture clip: the gain in hundredths that 30 ms may need before 60 ms is taken; 0: never")
+    parser.add_argument("--clip-frames", type=int, default=0,
+                        help="with --capture clip: still frames a clip gathers before it ends (60 to 250), this launch only; "
+                             "250 makes the ten-second clips of about 140 MB a worn head makes")
     parser.add_argument("--interrupt", choices=["wait"], help="force-stop the app (what a fold does) at this point and reopen the chooser")
     parser.add_argument("--paper", type=int, default=0, help="seconds of worn reading to record; the capture is not ended")
     parser.add_argument("--worn-wait", type=int, default=240, help="with --paper: seconds to wait for the wear sensor; 0 records at once (a desk dry run)")

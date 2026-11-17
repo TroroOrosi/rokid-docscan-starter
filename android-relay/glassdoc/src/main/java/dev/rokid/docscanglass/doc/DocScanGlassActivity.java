@@ -90,6 +90,16 @@ public final class DocScanGlassActivity extends Activity
      * 60 ms instead. Until one is saved, and after {@code --ei long_above 0}, no clip takes 60 ms: see longExposure.
      */
     private static final String EXTRA_LONG_ABOVE = "long_above";
+    /**
+     * From {@code --ei clip_frames}, for this launch only and never saved: how many still frames a clip gathers before
+     * it ends, between the route's own 60 and 250. For desk checks: a desk holds still, so every clip ends at 60 frames
+     * (about 36 MB), and the clips a worn head makes, which run their ten seconds (137 to 156 MB), could not be made
+     * there. At 250 a clip runs its ten seconds and is still kept (two thirds of 250 are reached).
+     */
+    private static final String EXTRA_CLIP_FRAMES = "clip_frames";
+    static int clipFrames(Intent intent, int usual) {
+        return Math.max(usual, Math.min(intent == null ? usual : intent.getIntExtra(EXTRA_CLIP_FRAMES, usual), 250));
+    }
     /** Diagnostic override for this launch only; normal launches always capture automatically. */
     private static final String EXTRA_MANUAL = "manual";
     private static final String EXTRA_ZSL_EVALUATION = "zsl_evaluation";
@@ -424,6 +434,7 @@ public final class DocScanGlassActivity extends Activity
             clipInbox = new ClipInbox(new File(getFilesDir(), "clip-inbox"));
             ClipCamera.Options options = new ClipCamera.Options();
             options.rotationDegrees = MEASURED_ROTATION_DEGREES;
+            options.targetFrames = clipFrames(getIntent(), options.targetFrames);
             options.farShare = getPreferences(MODE_PRIVATE).getFloat(EXTRA_FAR_SHARE, options.farShare);
             options.longExposureNanos = longExposure(getPreferences(MODE_PRIVATE), options.longExposureNanos);
             options.longAboveBoost = getPreferences(MODE_PRIVATE).getInt(EXTRA_LONG_ABOVE, options.longAboveBoost);
