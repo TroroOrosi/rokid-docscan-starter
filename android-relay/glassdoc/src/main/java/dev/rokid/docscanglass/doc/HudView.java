@@ -69,7 +69,8 @@ final class HudView extends View {
     /** The recording that ended last counted too few frames: its bar stays over the review of its page. */
     private boolean clipWeak;
     private boolean far;
-    private boolean near;
+    /** {top, right, bottom, left}: the paper of the live picture runs past that side of what the camera sees. */
+    private boolean[] past;
     private static final float MARK = 10f;
     /** The clip bar's height; the frame line of the small window takes the row under it. */
     private static final float BAR = 4f;
@@ -120,23 +121,9 @@ final class HudView extends View {
         invalidate();
     }
 
-    /**
-     * A thick frame around the small window: the page is nearer than the camera can focus, and moving back takes the
-     * frame away. Outside the window, above the clip's bar: the live picture is cut to the paper and already carries
-     * a thin line at the limit of what the camera sees, so neither the picture's size nor its outline can say how
-     * near the page is. Shown beside the live picture and beside the review of a page that was recorded while it
-     * stood (the forward swipe retakes it). Forgotten when the capture stops. Worn on 2026-11-17 every page of a
-     * pass was unreadable because the paper was 27 to 32 cm away and nothing on the display said so (M-41 to M-43).
-     */
-    void showNear(boolean value) {
-        if (near == value) return;
-        near = value;
-        invalidate();
-    }
-
     void capturePreview(boolean active) {
         capturing = active;
-        if (!active) { paperProposal = null; liveBox = null; liveMisses = 0; clipRecording = false; clipWeak = false; far = false; near = false; }
+        if (!active) { paperProposal = null; liveBox = null; liveMisses = 0; clipRecording = false; clipWeak = false; far = false; past = null; }
         if (!active && livePreview != null) { livePreview.recycle(); livePreview = null; }
         invalidate();
     }
@@ -154,6 +141,8 @@ final class HudView extends View {
         if (found == null && liveBox != null && proposal == null && ++liveMisses < LIVE_MISSES) found = liveBox;
         else liveMisses = 0;
         liveBox = PaperCrop.steady(liveBox, found);
+        // Display only, as the box is. Not while a page is under review: the bars beside it are that page's.
+        if (preview == null) past = proposal != null ? null : PaperCrop.pastOf(bitmap, past);
         if (previous != null && previous != bitmap && !previous.isRecycled()) previous.recycle();
         invalidate();
     }
@@ -331,14 +320,18 @@ final class HudView extends View {
             canvas.drawRect(area.left, top, area.right, top + 1f, paint); // empty: a clip that counts nothing still shows
             canvas.drawRect(area.left, top, area.left + area.width() * clipProgress, bottom, paint);
         }
-        if (capturing && near) {
+        if (capturing && past != null) {
+            // A bar outside each side of the corner the paper runs past: what is printed beyond it is not in the
+            // picture. Outside, because the picture inside is cut to the paper and its own outline cannot say it;
+            // the upper bar above the clip's bar. Worn on 2026-11-17 the top and one side of a large sheet were
+            // out of view on most captures and nothing on the display showed it (M-44).
             RectF area = captureArea();
             float left = area.left - GAP - EDGE, right = area.right + GAP + EDGE;
-            float top = area.top - BAR - 1f - GAP - EDGE, bottom = area.bottom + GAP + EDGE; // above the clip's bar
-            canvas.drawRect(left, top, right, top + EDGE, paint);
-            canvas.drawRect(left, bottom - EDGE, right, bottom, paint);
-            canvas.drawRect(left, top, left + EDGE, bottom, paint);
-            canvas.drawRect(right - EDGE, top, right, bottom, paint);
+            float top = area.top - BAR - 1f - GAP - EDGE, bottom = area.bottom + GAP + EDGE;
+            if (past[0]) canvas.drawRect(area.left, top, area.right, top + EDGE, paint);
+            if (past[1]) canvas.drawRect(right - EDGE, area.top, right, area.bottom, paint);
+            if (past[2]) canvas.drawRect(area.left, bottom - EDGE, area.right, bottom, paint);
+            if (past[3]) canvas.drawRect(left, area.top, left + EDGE, area.bottom, paint);
         }
         if (capturing && far && still == null) {
             RectF area = captureArea();

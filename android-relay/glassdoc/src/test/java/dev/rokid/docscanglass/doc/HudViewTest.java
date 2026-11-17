@@ -637,45 +637,62 @@ public class HudViewTest {
         photo.recycle(); screen.recycle();
     }
 
+    /** The upright watch picture: a desk, and a lit sheet over the given part of it. */
+    private static Bitmap sheet(int left, int top, int right, int bottom) {
+        Bitmap live = Bitmap.createBitmap(240, 320, Bitmap.Config.ARGB_8888);
+        live.eraseColor(Color.rgb(40, 40, 40));
+        Paint lit = new Paint();
+        lit.setColor(Color.rgb(200, 200, 200));
+        new Canvas(live).drawRect(left, top, right, bottom, lit);
+        return live;
+    }
+
     /**
-     * A page nearer than the camera can focus: a thick frame around the window says so, without a word, while the
-     * wearer can still move back, and it stays beside the review of a page that was recorded that way.
+     * Paper that runs past the camera's view: a bar outside that side of the small window says so, without a word,
+     * while the wearer can still move, and it stays beside the review of the page that was taken that way. The
+     * operator's trial of 2026-11-17: the top and one side of a large sheet were out of view on most captures, the
+     * problems there came back as missing, and the window, which shows the paper cut out and enlarged, had not shown it.
      */
-    @Test public void the_near_mark_frames_the_window() {
+    @Test public void a_bar_stands_at_each_side_of_the_window_the_paper_runs_past() {
         HudView view = new HudView(RuntimeEnvironment.getApplication());
         view.layout(0, 0, 480, 640);
         view.capturePreview(true);
-        Bitmap live = Bitmap.createBitmap(320, 240, Bitmap.Config.ARGB_8888);
-        live.eraseColor(Color.rgb(0, 20, 0));
-        view.showLivePreview(live);
         Bitmap screen = Bitmap.createBitmap(480, 640, Bitmap.Config.ARGB_8888);
-        int[][] edges = {{400, 430}, {400, 636}, {324, 536}, {476, 536}}; // outside the window (328..472 by 440..632)
-        view.draw(new Canvas(screen));
-        for (int[] edge : edges) assertTrue("no frame until told", Color.green(screen.getPixel(edge[0], edge[1])) < 100);
+        int[] top = {400, 430}, right = {476, 536}, bottom = {400, 636}, left = {324, 536}; // outside the window (328..472 by 440..632)
+        int[][] sides = {top, right, bottom, left};
 
-        view.showNear(true);
+        view.showLivePreview(sheet(40, 40, 200, 280)); // the whole sheet in view
+        view.draw(new Canvas(screen));
+        for (int[] side : sides) assertTrue("no bar while every edge of the sheet is in view", Color.green(screen.getPixel(side[0], side[1])) < 100);
+
+        view.showLivePreview(sheet(60, 0, 240, 200)); // it runs past the top and the right
         TextCanvas canvas = new TextCanvas(screen);
         view.draw(canvas);
         assertEquals("no words", "", canvas.text.toString());
-        for (int[] edge : edges) assertTrue("the frame", Color.green(screen.getPixel(edge[0], edge[1])) > 200);
-        assertEquals("the image inside it stays clear", 20, Color.green(screen.getPixel(400, 536)));
-        assertEquals("the clip's bar keeps its place under the frame's upper side", Color.BLACK, screen.getPixel(400, 437));
+        assertTrue(Color.green(screen.getPixel(top[0], top[1])) > 200);
+        assertTrue(Color.green(screen.getPixel(right[0], right[1])) > 200);
+        assertTrue(Color.green(screen.getPixel(bottom[0], bottom[1])) < 100);
+        assertTrue(Color.green(screen.getPixel(left[0], left[1])) < 100);
+        assertEquals("the clip's bar keeps its place under the upper bar", Color.BLACK, screen.getPixel(400, 437));
 
-        Bitmap photo = Bitmap.createBitmap(320, 240, Bitmap.Config.ARGB_8888);
+        Bitmap photo = Bitmap.createBitmap(240, 320, Bitmap.Config.ARGB_8888);
         photo.eraseColor(Color.rgb(90, 90, 90));
         view.showReview(photo, List.of());
+        view.showLivePreview(sheet(40, 40, 200, 280)); // the camera goes on watching behind the review
         view.draw(new Canvas(screen));
-        for (int[] edge : edges) assertTrue("over the review of a page recorded too near", Color.green(screen.getPixel(edge[0], edge[1])) > 200);
+        assertTrue("over the review: the sides this page was cut at", Color.green(screen.getPixel(top[0], top[1])) > 200
+                && Color.green(screen.getPixel(right[0], right[1])) > 200 && Color.green(screen.getPixel(left[0], left[1])) < 100);
 
         view.showAiming(List.of());
-        view.showNear(false);
+        view.showLivePreview(sheet(40, 40, 200, 280));
         view.draw(new Canvas(screen));
-        for (int[] edge : edges) assertTrue(Color.green(screen.getPixel(edge[0], edge[1])) < 100);
-        view.showNear(true);
+        for (int[] side : sides) assertTrue("after the review, what the camera sees now", Color.green(screen.getPixel(side[0], side[1])) < 100);
+
+        view.showLivePreview(sheet(60, 0, 240, 200));
         view.capturePreview(false);
         view.capturePreview(true);
         view.draw(new Canvas(screen));
-        for (int[] edge : edges) assertTrue("a stopped capture forgets the mark", Color.green(screen.getPixel(edge[0], edge[1])) < 100);
+        for (int[] side : sides) assertTrue("a stopped capture forgets the bars", Color.green(screen.getPixel(side[0], side[1])) < 100);
         photo.recycle(); screen.recycle();
     }
 

@@ -227,10 +227,6 @@ final class GlassesCaptureSurface implements CaptureSurface, ClipCamera.Marks {
         main.post(() -> { if (!closed) hud.showFar(far); });
     }
 
-    @Override public void showNear(boolean near) {
-        main.post(() -> { if (!closed) hud.showNear(near); });
-    }
-
     /**
      * {@inheritDoc}
      *

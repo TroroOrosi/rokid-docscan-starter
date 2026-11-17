@@ -2446,7 +2446,9 @@ _CAPTURE_CONTEXT = (
     "numbers may restart in another section or question, even under the same labels; keep "
     "those distinct questions and their repeated printed numbers. A printed answer number "
     "is not a booklet-wide question identifier. Determine printed reading "
-    "order from the original images, not capture numbering. If necessary context is missing "
+    "order from the original images, not capture numbering. A capture is sharpest in its middle "
+    "and softer toward its edges: where captures overlap, read each place from the capture that "
+    "shows it best. If necessary context is missing "
     "or unreadable, return needs_input; never infer uncaptured text, figures or regions. "
 )
 
@@ -2491,7 +2493,10 @@ _ALL_TASK = _CAPTURE_CONTEXT + _COVERAGE + (
     "printed) and the capture page numbers it uses. Never invent printed labels or numbers "
     "or assume that answer numbers are consecutive. Include every actual printed answer "
     "slot in its own question, even when that question is unreadable; list each question "
-    "once and do not duplicate a slot within that question's answer_no. Keep unlabelled "
+    "once and do not duplicate a slot within that question's answer_no. One question is the "
+    "smallest printed numbered unit (such as (1) or 問2; the 大問 itself where it has no smaller "
+    "one): answer boxes, blanks or a table printed inside that unit are parts of its one answer "
+    "and are not items of their own. Keep unlabelled "
     "questions in page/list order; the application will give them position locators. "
     "Choices, passages and figures alone are not additional questions. "
     "Apply the rules above to each question's status, answer, missing_material and "

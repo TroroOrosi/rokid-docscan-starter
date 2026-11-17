@@ -40,6 +40,51 @@ final class PaperCrop {
 
     /** The paper of {@code image} in grid cells, or null when none stands out. */
     static int[] boxOf(Bitmap image) {
+        int[] luma = lumaOf(image);
+        return luma == null ? null : reviewBox(luma, GRID_W, GRID_H);
+    }
+
+    /** Past which sides of {@code image} its paper runs ({@link #past}), keeping what was {@code told}; null without an image. */
+    static boolean[] pastOf(Bitmap image, boolean[] told) {
+        int[] luma = lumaOf(image);
+        return luma == null ? null : past(luma, GRID_W, GRID_H, told);
+    }
+
+    /**
+     * {top, right, bottom, left}: the paper runs past that side of the frame, so what is printed beyond it is not in
+     * the picture. Paper is what is at least 0.7 as bright as the frame's 90th percentile; a side is told when the
+     * two outermost rows or columns are paper along three tenths of its length, and stays told ({@code told}, may
+     * be null) down to two tenths. A frame whose brightest tenth is dark holds no paper. On the 35 frames of the
+     * operator's trial of 2026-11-17 this told the sides each sheet was cut at (a dark desk); a view with no
+     * paper's edge in it, a sheet that fills the frame or a bare desk, is told on every side.
+     */
+    static boolean[] past(int[] luma, int width, int height, boolean[] told) {
+        int[] sorted = luma.clone();
+        Arrays.sort(sorted);
+        int paper = sorted[sorted.length * 90 / 100];
+        boolean[] past = new boolean[4];
+        if (paper < 48) return past;
+        int floor = paper * 7 / 10, depth = 2;
+        int top = 0, right = 0, bottom = 0, left = 0;
+        for (int x = 0; x < width; x++) {
+            int near = 0, far = 0;
+            for (int d = 0; d < depth; d++) { near += luma[d * width + x]; far += luma[(height - 1 - d) * width + x]; }
+            if (near >= floor * depth) top++;
+            if (far >= floor * depth) bottom++;
+        }
+        for (int y = 0; y < height; y++) {
+            int near = 0, far = 0;
+            for (int d = 0; d < depth; d++) { near += luma[y * width + d]; far += luma[y * width + width - 1 - d]; }
+            if (near >= floor * depth) left++;
+            if (far >= floor * depth) right++;
+        }
+        int[] share = {top * 100 / width, right * 100 / height, bottom * 100 / width, left * 100 / height};
+        for (int side = 0; side < 4; side++) past[side] = share[side] >= (told != null && told[side] ? 20 : 30);
+        return past;
+    }
+
+    /** The image's brightness on the grid, or null when there is no image. */
+    private static int[] lumaOf(Bitmap image) {
         if (image == null || image.isRecycled()) return null;
         Bitmap small;
         try {
@@ -55,7 +100,7 @@ final class PaperCrop {
             int p = pixels[i];
             luma[i] = (((p >> 16) & 0xFF) * 299 + ((p >> 8) & 0xFF) * 587 + (p & 0xFF) * 114) / 1000;
         }
-        return reviewBox(luma, GRID_W, GRID_H);
+        return luma;
     }
 
     /** {left, top, right, bottom} of a grid box in the pixels of {@code image}; null for no box. */

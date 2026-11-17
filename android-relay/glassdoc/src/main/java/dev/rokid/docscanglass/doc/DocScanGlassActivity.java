@@ -86,11 +86,6 @@ public final class DocScanGlassActivity extends Activity
      */
     private static final String EXTRA_FAR_SHARE = "far_share";
     /**
-     * Saved from {@code --ef near_lines}: the px of the recorded frame between lines of print over which ClipCamera
-     * shows its "page too near" mark; 0 turns the mark off. Until one is saved the mark is on at ClipCamera's own 42.
-     */
-    private static final String EXTRA_NEAR_LINES = "near_lines";
-    /**
      * Saved from {@code --ei long_above}: the gain, in hundredths, that a 30 ms clip may need before ClipCamera takes
      * 60 ms instead. Until one is saved, and after {@code --ei long_above 0}, no clip takes 60 ms: see longExposure.
      */
@@ -423,7 +418,6 @@ public final class DocScanGlassActivity extends Activity
             ClipCamera.Options options = new ClipCamera.Options();
             options.rotationDegrees = MEASURED_ROTATION_DEGREES;
             options.farShare = getPreferences(MODE_PRIVATE).getFloat(EXTRA_FAR_SHARE, options.farShare);
-            options.nearLines = getPreferences(MODE_PRIVATE).getFloat(EXTRA_NEAR_LINES, options.nearLines);
             options.longExposureNanos = longExposure(getPreferences(MODE_PRIVATE), options.longExposureNanos);
             options.longAboveBoost = getPreferences(MODE_PRIVATE).getInt(EXTRA_LONG_ABOVE, options.longAboveBoost);
             clipCamera = new ClipCamera(this, new Handler(cameraThread.getLooper()), cameraCallback(), clipInbox,
@@ -458,12 +452,6 @@ public final class DocScanGlassActivity extends Activity
             float share = intent.getFloatExtra(EXTRA_FAR_SHARE, 0f);
             if (Float.isFinite(share)) {
                 getPreferences(MODE_PRIVATE).edit().putFloat(EXTRA_FAR_SHARE, Math.max(0f, Math.min(1f, share))).apply();
-            }
-        }
-        if (intent != null && intent.getExtras() != null && intent.getExtras().get(EXTRA_NEAR_LINES) instanceof Float) {
-            float lines = intent.getFloatExtra(EXTRA_NEAR_LINES, 0f);
-            if (Float.isFinite(lines)) {
-                getPreferences(MODE_PRIVATE).edit().putFloat(EXTRA_NEAR_LINES, Math.max(0f, Math.min(200f, lines))).apply();
             }
         }
         if (intent != null && intent.getExtras() != null && intent.getExtras().get(EXTRA_LONG_ABOVE) instanceof Integer) {

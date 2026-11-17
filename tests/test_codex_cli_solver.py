@@ -987,6 +987,49 @@ def test_written_answers_are_not_compared_because_two_writings_of_one_solution_d
     assert answer.startswith("運動エネルギー") and note == ""
 
 
+def test_a_result_with_its_working_is_compared_by_the_result_alone(codex, tmp_path, monkeypatch):
+    """The operator's trial of 2026-11-17: a written mathematics answer carries its working, and two writings of one
+    derivation differ. What is compared is what stands before the line that begins with 式："""
+    _twice(monkeypatch, _read((1, "3/8\n式：表が1回だけ出るのは3通り。3/2³＝3/8")),
+           _read((1, "3/8\n式：₃C₁×(1/2)×(1/2)² = 3/8")))
+    [(_, answer, _, note)] = _shown(codex_cli.CodexCliSolver().answer_all(question=_booklet(tmp_path)))
+    assert answer.startswith("3/8\n式：表が") and note == ""
+
+
+def test_results_that_differ_are_marked_whatever_their_working_says(codex, tmp_path, monkeypatch):
+    """Phone, 2026-11-17: two reads gave different amounts for one question. With the working written after it the answer is longer
+    than a mark, and until now nothing longer than a mark was compared."""
+    _twice(monkeypatch, _read((1, "120円\n式：200×(3/5)＝120")), _read((1, "70円\n式：200×(3/5)−50＝70")))
+    [(_, answer, status, note)] = _shown(codex_cli.CodexCliSolver().answer_all(question=_booklet(tmp_path)))
+    assert answer.startswith("120円") and status == "ready"
+    assert "70円" in note and "式" not in note, "the other read's result, not its working"
+
+
+@pytest.mark.parametrize("other, differs", [("平均:3\n分散:2\n標準偏差:√2\n式：V(X)＝E(X²)−{E(X)}²", False),
+                                            ("平均：3\n分散：4\n標準偏差：√2\n式：V(X)＝4", True)])
+def test_the_named_results_of_one_question_are_compared_together_before_the_working(codex, tmp_path, monkeypatch, other, differs):
+    """A question with several answer boxes gives each on its own line under its printed name: longer than one mark,
+    and still results, not writing."""
+    _twice(monkeypatch, _read((1, "平均：3\n分散：2\n標準偏差：√2\n式：E(X)＝(1＋2＋3＋4＋5)/5＝3")), _read((1, other)))
+    [(_, _, _, note)] = _shown(codex_cli.CodexCliSolver().answer_all(question=_booklet(tmp_path)))
+    assert bool(note) is differs
+
+
+def test_a_table_headed_in_capitals_by_one_read_and_small_letters_by_the_other_is_one_result(codex, tmp_path, monkeypatch):
+    """Phone, 2026-11-17: a table one read headed X and P and the other x and p was shown as a disagreement."""
+    _twice(monkeypatch, _read((1, "X：0，1\nP：1/4，3/4\n式：P(X=0)=1/4")), _read((1, "x：0，1\np：1/4，3/4\n式：1−3/4=1/4")))
+    [(_, _, _, note)] = _shown(codex_cli.CodexCliSolver().answer_all(question=_booklet(tmp_path)))
+    assert note == ""
+
+
+def test_writing_that_names_no_working_is_still_not_compared(codex, tmp_path, monkeypatch):
+    """A line of the answer that merely holds the word 式 does not split it."""
+    _twice(monkeypatch, _read((1, "化学反応式：2H₂＋O₂→2H₂O であり、水素が酸化されるので、酸化還元反応である。")),
+           _read((1, "化学反応式：2H₂＋O₂→2H₂O より、酸素が還元される酸化還元反応といえる。")))
+    [(_, _, _, note)] = _shown(codex_cli.CodexCliSolver().answer_all(question=_booklet(tmp_path)))
+    assert note == ""
+
+
 @pytest.mark.parametrize("first, second", [(None, "④"), ("④", None)])
 def test_an_answer_only_one_of_the_reads_gave_is_shown_and_marked(codex, tmp_path, monkeypatch, first, second):
     _twice(monkeypatch, _read((1, first)), _read((1, second)))

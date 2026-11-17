@@ -30,6 +30,39 @@ public class PaperCropTest {
         assertNull(PaperCrop.steady(shown, null));
     }
 
+    /**
+     * The operator's trial of 2026-11-17: half of a large sheet was taken with its top and one side out of the
+     * camera's view, and the problems there came back as missing. Which sides the paper runs past is said side by
+     * side: top, right, bottom, left.
+     */
+    @Test public void aSheetThatRunsPastTwoSidesOfTheFrameIsToldByThoseSides() {
+        int[] luma = frame(48, 64, 10, 0, 48, 40); // its left and lower edges are in view
+        assertArrayEquals(new boolean[] {true, true, false, false}, PaperCrop.past(luma, 48, 64, null));
+    }
+
+    @Test public void aSheetWhollyInViewRunsPastNoSide() {
+        assertArrayEquals(new boolean[4], PaperCrop.past(frame(48, 64, 8, 8, 40, 56), 48, 64, null));
+    }
+
+    @Test public void aSheetThatFillsTheFrameRunsPastEverySide() {
+        assertArrayEquals(new boolean[] {true, true, true, true}, PaperCrop.past(frame(48, 64, 0, 0, 48, 64), 48, 64, null));
+    }
+
+    @Test public void aDarkSceneHoldsNoPaper() {
+        int[] dark = new int[48 * 64];
+        java.util.Arrays.fill(dark, 12);
+        assertArrayEquals(new boolean[4], PaperCrop.past(dark, 48, 64, new boolean[] {true, true, true, true}));
+    }
+
+    @Test public void aSideIsToldFromThreeTenthsOfItsLengthAndStaysToldDownToTwo() {
+        int[] luma = frame(48, 64, 0, 0, 13, 30); // 27% of the top, 47% of the left
+        assertArrayEquals(new boolean[] {false, false, false, true}, PaperCrop.past(luma, 48, 64, null));
+        assertArrayEquals("told before: it stays", new boolean[] {true, false, false, true},
+                PaperCrop.past(luma, 48, 64, new boolean[] {true, false, false, false}));
+        int[] less = frame(48, 64, 0, 0, 9, 64); // 19% of the top
+        assertArrayEquals(new boolean[] {false, false, false, true}, PaperCrop.past(less, 48, 64, new boolean[] {true, false, false, true}));
+    }
+
     @Test public void anEvenFrameIsLeftWhole() {
         assertNull(PaperCrop.box(frame(48, 64, 0, 0, 0, 0), 48, 64));
     }

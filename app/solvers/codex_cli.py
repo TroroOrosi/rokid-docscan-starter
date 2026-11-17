@@ -205,10 +205,28 @@ def _plain(value) -> str:
     return "".join(unicodedata.normalize("NFKC", value).split()) if isinstance(value, str) else ""
 
 
+# Where an answer's working begins: the line the request asks for (llm_adapter._ANSWER_ONLY_SYSTEM).
+_WORKING = re.compile(r"^[ \t\u3000]*式[ \t\u3000]*[:：]", re.MULTILINE)
+
+
+def _result(answer: str) -> str:
+    """What an answer gives as its result: what stands before its working, or all of it when it names none."""
+    found = _WORKING.search(answer)
+    head = answer[:found.start()] if found else answer
+    return head if head.strip() else answer
+
+
 def _mark(answer: str) -> str | None:
-    """A short answer in the form two reads are compared in; None for writing, which is not compared."""
-    text = re.sub(r"[、,・;]+", "", _plain(answer)).replace("\u2212", "-")
-    return text if len(text) <= 24 else None
+    """A short answer in the form two reads are compared in; None for writing, which is not compared.
+
+    Of an answer with working only the result is compared, and it may be longer than a mark: several named boxes of
+    one question (平均, 分散, 標準偏差) are still results. Until 2026-11-17 anything over 24 characters went
+    uncompared, and a written mathematics answer is longer than that as soon as its working stands in it.
+    """
+    result = _result(answer)
+    # Without regard to case: one read heads a table X and P, the other x and p (phone, 2026-11-17).
+    text = re.sub(r"[、,・;]+", "", _plain(result)).replace("\u2212", "-").casefold()
+    return text if len(text) <= (24 if result is answer else 80) else None
 
 
 # What stands around the box letters in a label: "(1) アイ", "(1)(ii) カ", "問2 ウ", "〔2〕 エ〜カ".
@@ -274,7 +292,7 @@ def _slot_marks(replies: list, slots: list) -> dict:
             continue
         whole = _mark(result.answer)
         # The model separates the marks of one question by spaces as often as by commas ("④ ④ ① ② ②", phone).
-        parts = [part for part in re.split(r"[\s、,・;]+", unicodedata.normalize("NFKC", result.answer)) if part]
+        parts = [part for part in re.split(r"[\s、,・;]+", unicodedata.normalize("NFKC", _result(result.answer))) if part]
         apart = whole is not None and len(keys) > 1 and len(parts) == len(keys)
         # A lettered box holds one character: "-45" fills three of them.
         each = whole is not None and not apart and len(keys) > 1 and keys[0][0] == "box" and len(whole) == len(keys)
@@ -300,7 +318,7 @@ def _compared(first: list, second: list) -> list:
             different = [(key, theirs[key]) for key in keys
                          if key in theirs and theirs[key] is not _UNANSWERED and theirs[key] != mine[key]]
             if different and match is not None and _answered(match[1]):
-                note = _DIFFERENT.format(other=match[1].answer.strip()[:24])
+                note = _DIFFERENT.format(other=" ".join(_result(match[1].answer).split())[:24])
             elif different:  # the other read grouped these numbers differently: name the numbers it differs on
                 note = _DIFFERENT.format(other="、".join(
                     f"{key[2] if key[0] == 'box' else key[1]}は{'記述' if mark is None else mark}"

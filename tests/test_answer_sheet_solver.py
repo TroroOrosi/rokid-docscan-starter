@@ -40,11 +40,54 @@ def test_answer_only_system_judges_the_form_from_the_question_and_gives_result_t
     working cannot hang on what "the answer sheet itself expects": a bare value
     is right only where the question shows a mark, choice, boxed number or word.
     """
-    assert "answer sheet is not among the images" in _ANSWER_ONLY_SYSTEM
+    assert "answer sheet is often not among the images" in _ANSWER_ONLY_SYSTEM
     assert "answer sheet itself expects" not in _ANSWER_ONLY_SYSTEM
-    assert "a mark, a choice, a number in a box or a word" in _ANSWER_ONLY_SYSTEM
-    assert "final result first and then the derivation" in _ANSWER_ONLY_SYSTEM
+    assert "final result first and then" in _ANSWER_ONLY_SYSTEM
     assert "Never shorten an answer to fit a display" in _ANSWER_ONLY_SYSTEM
+
+
+def test_answer_only_system_keeps_the_working_where_a_box_is_printed_for_the_result():
+    """The operator's trial of 2026-11-17: a sheet said on its first side to leave the working, the missed problems of
+    its second side were taken again alone, and the answers came back as bare values. Each problem had a blank line or
+    a box for its result, which the request until then named as a reason to give no working ("a number in a box").
+    A bare answer is right only for a mark sheet, a choice, or a word, reading or phrase to fill in.
+    """
+    assert "a number in a box" not in _ANSWER_ONLY_SYSTEM
+    assert "does not waive the working" in _ANSWER_ONLY_SYSTEM
+    assert "may stand on a sheet that was not captured" in _ANSWER_ONLY_SYSTEM
+    assert "マーク式" in _ANSWER_ONLY_SYSTEM
+
+
+def test_answer_only_system_puts_the_working_after_a_line_that_two_reads_can_be_split_at():
+    """What two reads are compared by is what stands before the working (codex_cli._mark)."""
+    from app.solvers.codex_cli import _WORKING
+
+    assert "式：" in _ANSWER_ONLY_SYSTEM
+    assert _WORKING.search("3/8\n式：3/2³＝3/8")
+
+
+def test_answer_only_system_names_each_answer_box_of_a_question():
+    """The same trial: 期待値, 分散 and 標準偏差 came back as three unnamed items, or as one value, and could not be told
+    apart on the glasses."""
+    assert "its printed name" in _ANSWER_ONLY_SYSTEM
+    assert "平均：7/2" in _ANSWER_ONLY_SYSTEM
+    # Two reads that each made up a name for an unnamed blank ("期待値 E(X)", "E(X)") were shown as disagreeing.
+    assert "no name where none is printed" in _ANSWER_ONLY_SYSTEM
+
+
+def test_answer_only_system_reads_soft_print_before_it_gives_a_question_up():
+    """The same trial: pages a person could read through their blur came back as 不鮮明 for most questions."""
+    assert "Photographed print is often soft" in _ANSWER_ONLY_SYSTEM
+    assert "never guess a number, a symbol or a choice label" in _ANSWER_ONLY_SYSTEM
+
+
+def test_the_booklet_request_makes_one_item_of_a_numbered_question_and_reads_overlaps_where_they_are_sharp():
+    from app.solvers.chatgpt_web import _ALL_TASK, _CAPTURE_CONTEXT
+
+    assert "smallest printed numbered unit" in _ALL_TASK
+    assert "are not items of their own" in _ALL_TASK
+    assert "sharpest in its middle" in _CAPTURE_CONTEXT
+    assert "from the capture that shows it best" in _CAPTURE_CONTEXT
 
 
 def test_answer_only_system_places_a_drawing_beside_the_printed_figure_and_in_words():

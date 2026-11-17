@@ -1,6 +1,6 @@
 # rokid-docscan-starter development guide
 
-Status: Current engineering contract. Updated 2026-11-17 07:00 (§M-41 to §M-43: the whole use ran once on the venue topology, worn, and every answer came back unreadable because the pages stood nearer than the fixed-focus camera can see sharply; glassdoc 0.44.7 shows a mark while the page is too near, by the print's line distance; that mark has not been seen on the device, pages taken at the better distance read 24-81% of a known text against the desk's 92%, and no worn page has produced a correct answer).
+Status: Current engineering contract. Updated 2026-11-17 19:30 (§M-44: the operator ran three papers on large sheets, twelve booklets on the venue topology; a large sheet in one frame is not read, the blur belongs to the edge of the recorded frame and not to nearness, so the "too near" mark of 0.44.7 is gone; Server 0.85.0 gives written answers their working and names answer boxes, glassdoc 0.44.8 shows a bar at each side the paper runs past; taking the lens blur back out halved what the model read and is not adopted; none of the changes has been worn, and a large sheet taken in parts has not been read yet).
 
 **Start at `.agents/progress/current.md`.** It lists the operator's decisions,
 the verified state and the next steps. Do not re-ask what it settles. Then read
@@ -258,7 +258,7 @@ added). At that size the paper's own pixels read 3.2% without an encoder and
 limit of 2.0 and not a pass), 6.0% at 0.51 bit; and reducing also averaged the
 noise, so those 60 frames stand for about 150 real ones (7 s of recording). The
 farther the paper, the worse and the slower: the wearer needs a guide to
-distance and the recording 0.66 bit a pixel a frame or more. (Wrong for a real page further away: the frames that were reduced had been taken at 27-32 cm and carried that distance's defocus with them; §M-42 and the paragraph on the camera's focus below.) **The operator
+distance and the recording 0.66 bit a pixel a frame or more. (Not a safe guide for a real page further away: the frames that were reduced carried the blur of where they were taken; §M-42 as corrected by §M-44.) **The operator
 approved the change of form on 2026-11-15 (night): record only the line-of-sight
 frame, in the sensor's own pixels, cut by the app out of the full-size stream,
 with a guide to distance; the whole field at half size and the camera's video
@@ -391,7 +391,36 @@ up to 13 s on this route, and the taps that followed were taken as the double
 tap that ends the capture (register 1-16; fixed in glassdoc 0.44.2 and checked on the desk, §M-35; not worn). I had asked the wearer not
 to touch the touchpad: the worn check had left out how the thing is used. **From glassdoc 0.44.3 to 0.44.5 (§M-40; on a desk, not worn):** while a clip is recorded a bar on the top edge of the small window fills as still frames count and stands still while the head moves (seen filling in screen captures); a clip that ends with fewer than 40 of its 60 frames keeps that bar over its page's review (the rule was right on all 17 worn clips offline; a desk cannot show it); the "paper too far" mark is off unless `--ef far_share` is saved, and no distance mark is built: a frame's character pitch can be measured (16 strips, 100% of 698 frames within 10%), but a 20 px limit would be on for 58% of the wearer's time and a 16 px limit never, and no record says where reading fails. On the still route, in the dark, a step of the preview's own exposure (60 ms watching, 30 ms preparing a photo) was counted as a page turn and an unmoving scene was photographed again and again; the reference is now brought to the frame's exposure first (register 2-29; 38 of 38 on the dark desk).
 
-**The camera does not focus where the pages were held (2026-11-17, §M-41, §M-42).** The third worn pass (the real app,
+**The operator's trial of 2026-11-17 and what its records took back (§M-44).** The operator reproduced the venue and ran
+three papers printed on large sheets (two columns or two faces a sheet): twelve booklets, 35 recorded pages, the real app,
+the phone's server, the Codex CLI. The whole use worked in their hands ("easy to use, except the capture"). Mathematics B,
+each sheet taken whole, did not fit in its 50 minutes (seven attempts, at most 22 of 39 items answered); Japanese, each sheet
+taken whole, was read only where the print is large (the kanji page); mathematics A, taken one face at a time, was read
+except at the top and the sides of each capture, and a retake of the missed problems came back as bare values, because the
+instruction to leave the working stood on the other face. What the records show: every frame of a clip is as soft as the
+next (76 frames, the picture moving 0 to 3 px a frame), so it is neither motion nor the laying; the clip's stream is the
+sensor's own pixels (its noise is as fine as a full-size frame's); **the blur belongs to the place in the frame**: edges of
+print are 3.8-4.5 px wide in the middle and lower part, 5.0-5.8 at the left, 6.1-8.5 in the top fifth, which is the far end
+of the paper and so cannot be defocus by nearness. **"Too near" was not the cause** (the paragraph below and §M-42, §M-43 keep
+their measurements; their conclusion about distance is withdrawn): a nearer page spreads into the edge of the frame, and the
+morning's unreadable clips show the edge's blur. Pages whose characters came out largest (about 25 px) read best; 20-22 px
+and 13 px did not. Estimated, not measured: the lens's opening is 0.84 mm and its focus is fixed far away, so the blur on the
+paper hardly changes with distance and small print loses. **Taking the blur back out of the gathered page (a Wiener filter
+against a disc of 8 page px) looks crisper and reads far worse** (a known text, the rule fixed before the reads: 89.2% to
+48.1%, 80.9% to 56.3%, 24.6% to 0.0%, 63.8% to 36.1%): not adopted, the second time a step after gathering made reading
+worse. **Built:** Server 0.85.0 (an answer reached by calculation or reasoning gives its result and then its working on
+lines that begin with 式：, with or without an instruction in view and although a box is printed for the result; the answer
+boxes of one question stand under their printed names in that question's one item; soft print is read with its context
+before a question is given up; two reads are compared by the result before the working, without regard to case) and glassdoc
+0.44.8 (a bar outside each side of the small window past which the paper runs out of the camera's view; the "too near" frame
+is gone, the line distance is only logged). **Seen:** the same pages sent again through a staged copy of the server on the
+phone: the retake's seven problems with their working (checked by hand), mathematics A 29 of 33 with no item split in two,
+mathematics B 14 of 21 with the boxes named, Japanese 28 of 44 with 16 still unreadable; the whole-use check on the desk
+38 of 38; the lower bar on the glasses' own screen. **Not seen:** any of it worn; a large sheet taken in parts and read;
+the upper and side bars on the device. A large sheet is to be taken a part at a time, about a B5 page a capture, what is
+read in the middle of the window, the print large; how small print may be is not measured (register 2-33 to 2-35).
+
+**The camera does not focus where the pages were held (2026-11-17, §M-41, §M-42; its conclusion about distance is withdrawn, see above).** The third worn pass (the real app,
 the phone's server, the real model) ran the whole use for the first time: ten pages, eight of them with all 60 still
 frames, answers on the glasses five minutes after the capture ended; and every answer said it could not be read. The
 camera's own description (`dumpsys media.camera`, read whole on the PC): fixed focus, 1.9 mm, f/2.25, hyperfocal
@@ -416,13 +445,11 @@ at 41.6 px and under, 0.11-0.16 at 44.3 px and over. So 42-44 px is where readin
 differ, and neither their line distance, nor how their frames were laid, nor the gyroscope's smear says why (register
 2-32). Flattening the page's light was tried on those sharper pages too and is not adopted (+6, +3, 0 points; the
 desk page -3). The small window had never shown distance: its picture is cut to the paper, so a page looks the same
-size from anywhere, and "fill half the window" could not be done. **glassdoc 0.44.7 shows a thick frame around the
-small window while the lines of print lie more than 42 px of the frame apart** (`PrintPitch` on the watch picture's
-middle 128x128 px; within 0.7 px of the full frame's figure on 25 worn clips; `--ef near_lines`, 0 turns it off; it
-stays over the review of a page recorded while it stood). It measures the print, not the distance (register 2-31).
-On the desk: unit tests, the whole-use check 35 of 38 (the three are a scene too dark to gather). The mark itself has
-not been seen on the glasses: no print was in view. Not tried: the distance of September's photos (43-50 cm, from
-above), which no worn clip has reached.
+size from anywhere, and "fill half the window" could not be done. glassdoc 0.44.7 showed a thick frame around the
+small window while the lines of print lay more than 42 px of the frame apart (`PrintPitch` on the watch picture's
+middle 128x128 px; within 0.7 px of the full frame's figure on 25 worn clips). **That mark was taken out in 0.44.8:** the
+two unreadable clips had the blur of the frame's edge, and the operator's trial of the same day read best where the print
+was largest (§M-44). `PrintPitch` still measures and the figure is logged (`watch_status lines=`); nothing is shown from it.
 What it rests on, measured on the desk and the PC on 2026-11-15 (§M-25):
 the 2016x1512 stream is the whole field at half size and the only whole-field
 size at 60 frames a second; streaming it heats the glasses by 17.7 C in 150 s
@@ -652,9 +679,11 @@ what is being tried.
   remain comparison candidates without physical quality or performance acceptance.
   The frozen CUSTOMVIEW route keeps explicit phone controls. The original
   `adf12ee` disable decision belonged to the route without operator taps.
-- On the clip route a thick frame around the small window says the page is too near
-  for the fixed lens (the print's lines over 42 px of the frame apart; glassdoc 0.44.7,
-  §M-43): move back until it goes. Not seen on the device yet.
+- During capture a bar stands outside each side of the small window past which the paper
+  runs out of the camera's view, and beside the review of the page taken that way (glassdoc
+  0.44.8, §M-44): what is printed beyond that side is not in the picture. It assumes a desk
+  darker than the paper; with no edge of paper in view it stands on all four sides. The lower
+  bar was seen on the device; the others and worn use were not.
 - With `--es capture clip` saved, ordinary written reading takes each page as a
   short clip instead (`ClipCamera`, from glassdoc 0.44.0; the paragraph on the
   venue's light above and §M-30). Stills are the default until a worn page has
@@ -1095,6 +1124,12 @@ records; each was learned from a failure the operator found.
    because a head also tilts and sees the page from another side (§M-31). And
    a count is not the picture: with the frames followed, 60 of 60 were added
    and the page was double at its edges. Look at the page at its own pixels.
+   And one thing moved in a trial is a correlation until what moved with it is
+   told apart: on 2026-11-17 "too near" went to the operator as the cause and
+   into a mark in the morning, and their own trial took it back in the afternoon;
+   a nearer page had also spread into the frame's edge, where the blur is (§M-44).
+   No step on the image is adopted by eye: the deblurring that looked crisper
+   halved what the model read.
 5. When the wearer is needed, say so plainly: what they do, for how long,
    what the one pass decides, and what was checked first so that it cannot
    fail for a reason findable on the desk. Not before that, and not silently

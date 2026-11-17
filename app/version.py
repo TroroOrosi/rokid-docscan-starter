@@ -330,7 +330,16 @@ from __future__ import annotations
 #         phone had every item of both reads shown and marked). A set of files that was uploaded twice without
 #         a message being sent is not uploaded a third time: one booklet that could not be sent had used 70 of
 #         the 80 files of the upload window in five retries (phone, 2026-11-16).
-APP_VERSION = "0.84.1"
+# 0.85.0: what the operator's trial of 2026-11-17 showed about the answers (three papers on large sheets, M-44).
+#         A written answer carries its working whether or not an instruction to show it was captured, and although
+#         a box or a blank is printed for the result; a bare answer is for a mark sheet, a choice, or a word,
+#         reading or phrase to fill in. The working starts on a line that begins with 式：, and two reads are
+#         compared by what stands before it (until now nothing over 24 characters was compared, so a result with
+#         working went unchecked). The answer boxes of one question are given under their printed names inside
+#         that question's one item (they came back as unnamed items of their own). Soft print is read with its
+#         context before a question is given up; a number, a symbol or a choice label is still never guessed.
+#         Where captures overlap, each place is read from the capture that shows it best. See API 1.51.0.
+APP_VERSION = "0.85.0"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.
@@ -476,7 +485,10 @@ APP_VERSION = "0.84.1"
 #         A route's check can report `check_failed` (the reply's count was wrong) and `model_mismatch`.
 #         The Codex CLI's row of a route check carries `usage` when its request's record tells it:
 #         `used_percent`, `window_minutes` and `resets_at` of the allowance, numbers only.
-API_VERSION = "1.50.0"
+# 1.51.0: an answer that was reached by calculation or reasoning holds its result first and then its working
+#         on lines that begin with 式： (answer text only; no field was added). A question with several answer
+#         boxes is one item whose answer names each box on a line of its own (平均：7/2).
+API_VERSION = "1.51.0"
 
 # Matching algorithm identity. Bump when thresholds or hashing change so a
 # re-index/eval is triggered. Mirrors thresholds in app/matching.py.
@@ -657,7 +669,10 @@ EXPLAINER_API_VERSION = "1.1.0"
 # (a clip being recorded ends there and what it has is the page; a still lands first). Nothing is saved
 # behind a cleared display: the page in hand gets its own three-second review on return. While the display
 # is cleared a double tap only brings it back; it ends the capture only while the capture is showing.
-GLASSES_VIEW_CONTRACT_VERSION = "1.51.0"
+# 1.52.0: during capture a bar stands outside each side of the small window past which the paper runs out of
+# the camera's view, and beside the review of the page taken that way: what is printed beyond that side is
+# not in the picture. The thick frame that said "too near" (glassdoc 0.44.7) is gone: its rule did not hold.
+GLASSES_VIEW_CONTRACT_VERSION = "1.52.0"
 
 # Answer-area overlay payload (box + short answer; 2D image-anchored).
 # 1.1.0: added tracking metadata (tracking/fixed_ar/anchor_hint).

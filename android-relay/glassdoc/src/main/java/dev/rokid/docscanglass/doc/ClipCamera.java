@@ -105,13 +105,6 @@ final class ClipCamera implements PageCamera {
          * 2-24). Kept so that another limit can be tried.
          */
         float farShare = 0f;
-        /**
-         * The page is too near while the lines of its print lie further apart than this, in px of the recorded
-         * frame; 0 shows no mark. The camera's focus is fixed and sharp from 0.4 m: worn on 2026-11-17 pages at 44 px
-         * and more were not read at all and pages at 39 to 42 px were (M-43). It measures the print, not the distance:
-         * print set wider or closer than that booklet's moves the mark's distance with it (register 2-31).
-         */
-        float nearLines = 42f;
     }
 
     /** What the small window shows beside the image; called from the camera's and the frames' threads. */
@@ -125,12 +118,6 @@ final class ClipCamera implements PageCamera {
          */
         void showClipProgress(int counted, int wanted, boolean recording);
         void showFar(boolean far);
-        /**
-         * The page being looked at is nearer than the camera can focus ({@link Options#nearLines}). Told while
-         * watching, twice a second at most; not taken back when a clip starts, so that it still stands over the
-         * review of a page recorded that way; taken back when the capture pauses or stops.
-         */
-        void showNear(boolean near);
     }
 
     static final int WIDTH = 2016, HEIGHT = 1512, FPS = 30, WATCH_FPS = 15, ISO = 800;
@@ -250,8 +237,7 @@ final class ClipCamera implements PageCamera {
     private int watchFrames;
     private int previewIso, previewBoost;
     private boolean steady, far;
-    /** The watch picture's print, measured on the frames' thread: is it too near, when was it last asked, what did it say. */
-    private boolean near;
+    /** The watch picture's print, measured on the frames' thread for the log: when was it last asked, what did it say. */
     private long pitchAt;
     private float lines;
     private final PrintPitch printPitch = new PrintPitch();
@@ -331,7 +317,6 @@ final class ClipCamera implements PageCamera {
             wanted = false;
             pageReady = null;
             showFar(false);
-            showNear(false);
             Clip held = clip;
             boolean counted;
             synchronized (lock) {
@@ -940,7 +925,6 @@ final class ClipCamera implements PageCamera {
             pageReady = null;
         }
         showFar(false);
-        showNear(false);
         if (gone != null) {
             opening = configuring = false;
             afterReady = null;
@@ -1034,12 +1018,11 @@ final class ClipCamera implements PageCamera {
                 for (byte value : thumbnail) if ((value & 255) > mean) brighter++;
                 showFar(brighter < options.farShare * thumbnail.length);
             }
-            if (options.nearLines > 0 && now - pitchAt >= 500) {
+            if (now - pitchAt >= 500) {
+                // For the record only (watch_status): what size of print reads is still being learned (M-44).
                 pitchAt = now;
                 boolean print = printPitch.measure(pixels, width, height, row, step) && printPitch.stands >= PrintPitch.SURE;
                 lines = print ? printPitch.period * WIDTH / width : 0f;
-                // A whole pixel between on and off: at the limit the figure wanders by a few tenths.
-                showNear(print && lines > (near ? options.nearLines - 1f : options.nearLines));
             }
             if (now - displayAt >= 100) {
                 displayAt = now;
@@ -1063,7 +1046,7 @@ final class ClipCamera implements PageCamera {
             if (now - statusAt >= 1000) {
                 Log.i(TAG, "watch_status frames=" + watchFrames + " max_work_ms=" + watchWorkNanos / 1_000_000
                         + " exposure_ns=" + previewExposure + " iso=" + previewIso + " boost=" + previewBoost
-                        + " far=" + far + " lines=" + (lines > 0 ? Math.round(lines * 10) / 10f : "-") + " near=" + near);
+                        + " far=" + far + " lines=" + (lines > 0 ? Math.round(lines * 10) / 10f : "-"));
                 statusAt = now;
                 watchFrames = 0;
                 watchWorkNanos = 0;
@@ -1082,13 +1065,6 @@ final class ClipCamera implements PageCamera {
         far = now;
         Marks shown = marks;
         if (shown != null) shown.showFar(now);
-    }
-
-    private void showNear(boolean now) {
-        if (near == now) return;
-        near = now;
-        Marks shown = marks;
-        if (shown != null) shown.showNear(now);
     }
 
     /** The frames' thread while the clip is recorded, under the lock as the count is; the camera's at its start and its end. */

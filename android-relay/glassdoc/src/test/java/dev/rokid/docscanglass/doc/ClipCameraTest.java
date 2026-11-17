@@ -113,7 +113,6 @@ public class ClipCameraTest {
     private final List<String> progress = new ArrayList<>();
     private final List<Long> progressAt = new ArrayList<>();
     private final List<Boolean> far = new ArrayList<>();
-    private final List<Boolean> near = new ArrayList<>();
     private final List<Long> stamps = new ArrayList<>();
     private final byte[] luma = new byte[ROW * (H - 1) + W];
     private int notReady, previews;
@@ -158,7 +157,6 @@ public class ClipCameraTest {
                 progressAt.add(SystemClock.elapsedRealtime());
             }
             @Override public void showFar(boolean value) { far.add(value); }
-            @Override public void showNear(boolean value) { near.add(value); }
         });
     }
 
@@ -1025,57 +1023,22 @@ public class ClipCameraTest {
     }
 
     /**
-     * Worn, 2026-11-17 (M-43): pages whose lines of print lay 44 px of the frame and more apart were out of the fixed
-     * lens's focus and could not be read at all; 39 to 42 px could. The limit is 42 until another is saved.
+     * The distance between lines of print is measured for the record (watch_status lines=) and shows nothing: the
+     * mark it drove until 2026-11-17 said "too near" by a rule the operator's trial of that day did not bear out
+     * (pages with larger print read best; what failed lay toward the frame's edge, M-44).
      */
-    @Test public void the_near_mark_shows_while_the_lines_of_print_lie_too_far_apart() {
+    @Test public void the_distance_between_lines_of_print_is_measured_for_the_record_twice_a_second_at_most() {
         camera.preview(); idle(100);
         light(50_000_000L, 800, 423, CONTROL_AE_STATE_CONVERGED);
         idle(600); watchPrint(7.6); // 47.9 px of the frame
-        assertEquals("too near", List.of(true), near);
-        idle(600); watchPrint(7.5);
-        assertEquals("told once", 1, near.size());
-        idle(600); watchPrint(6.65); // 41.9 px: inside the limit, but not a whole pixel inside it
-        assertEquals("the mark does not flicker at the limit", 1, near.size());
-        idle(600); watchPrint(6.2); // 39 px
-        assertEquals(List.of(true, false), near);
-        idle(600); watchPrint(6.65);
-        assertEquals("nor does it come back there", 2, near.size());
-        idle(600); watchPrint(7.6);
-        assertEquals(List.of(true, false, true), near);
+        assertEquals(47.9f, (float) org.robolectric.util.ReflectionHelpers.getField(camera, "lines"), 1.5f);
+        idle(70); watchPrint(6.2);
+        assertEquals("the transform is not run on every frame", 47.9f,
+                (float) org.robolectric.util.ReflectionHelpers.getField(camera, "lines"), 1.5f);
+        idle(500); watchPrint(6.2); // 39 px
+        assertEquals(39f, (float) org.robolectric.util.ReflectionHelpers.getField(camera, "lines"), 1.5f);
         idle(600); watchFrame(false); // a picture in which no print is found
-        assertEquals("nothing is said about a view without print", List.of(true, false, true, false), near);
-    }
-
-    @Test public void the_near_mark_stays_over_the_clip_and_its_review_and_goes_when_the_capture_pauses() {
-        watching();
-        idle(600); watchPrint(7.6);
-        assertEquals(List.of(true), near);
-        camera.captureOnce(); idle(0);
-        idleSession(0);
-        clipFrames(8, 0);
-        assertEquals("a page recorded too near keeps its mark: the wearer sees it over the review", List.of(true), near);
-        camera.pausePreview(); idle(0);
-        assertEquals(List.of(true, false), near);
-    }
-
-    @Test public void the_near_mark_is_measured_twice_a_second_at_most_and_not_at_all_when_its_limit_is_zero() {
-        camera.preview(); idle(100);
-        light(50_000_000L, 800, 423, CONTROL_AE_STATE_CONVERGED);
-        idle(600); watchPrint(6.2);
-        idle(70); watchPrint(7.6); idle(70); watchPrint(7.6);
-        assertTrue("the transform is not run on every frame", near.isEmpty());
-        idle(500); watchPrint(7.6);
-        assertEquals(List.of(true), near);
-
-        ClipCamera.Options options = new ClipCamera.Options();
-        options.nearLines = 0f;
-        near.clear();
-        create(options);
-        camera.preview(); idle(100);
-        light(50_000_000L, 800, 423, CONTROL_AE_STATE_CONVERGED);
-        idle(600); watchPrint(7.6);
-        assertTrue("--ef near_lines 0 turns the mark off", near.isEmpty());
+        assertEquals(0f, (float) org.robolectric.util.ReflectionHelpers.getField(camera, "lines"), 0f);
     }
 
     @Test public void the_far_mark_is_off_until_a_share_is_set() {
