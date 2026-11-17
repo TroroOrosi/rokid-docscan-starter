@@ -1144,6 +1144,43 @@ public class ClipCameraTest {
         idle(0);
     }
 
+    /** A 320x240 watch frame of a lit sheet above a dark desk that does not move; only the camera's noise differs. */
+    private void watchNoisy(java.util.Random noise, double sigma) {
+        byte[] pixels = new byte[320 * 240];
+        for (int y = 0; y < 240; y++) for (int x = 0; x < 320; x++) {
+            boolean paper = y < 160;
+            double level = (paper ? 190 : 30) + (paper ? sigma : sigma / 4) * noise.nextGaussian();
+            pixels[y * 320 + x] = (byte) Math.max(0, Math.min(255, Math.round(level)));
+        }
+        DocScanTestImage image = new DocScanTestImage(watchImages);
+        image.format = ImageFormat.YUV_420_888; image.width = 320; image.height = 240;
+        image.rowStride = 320; image.pixelStride = 1;
+        image.timestamp = SystemClock.elapsedRealtimeNanos(); image.buffer = ByteBuffer.wrap(pixels);
+        ReaderShadow watch = reader(320);
+        watch.image = image; watch.listener.onImageAvailable(watch.reader);
+        idle(0);
+    }
+
+    /**
+     * Worn in a dim room on 2026-11-18: in three and a half minutes of watching a lit sheet no page was offered, and
+     * all nine pages were taken by the forward swipe. The 32x24 grid the page change is judged on was one pixel of
+     * each cell. At the gain a dim room needs (4 to 5), a pixel's own noise put a fifth of those pixels 18 levels
+     * off in every frame: 6 to 11 "page changes" a second with the mean level unchanged, and never 0.4 s without one.
+     * Replayed over that pass's clips, one pixel a cell gave 0.4 to 4.6 changes a second with the head as still as
+     * while recording; the mean of each cell gave none.
+     */
+    @Test public void a_sheet_that_does_not_move_is_offered_although_every_pixel_is_noisy() {
+        AtomicInteger ready = new AtomicInteger();
+        camera.awaitNextPage(ready::incrementAndGet); idle(100);
+        light(50_000_000L, 800, 423, CONTROL_AE_STATE_CONVERGED);
+        java.util.Random noise = new java.util.Random(5);
+        for (int frame = 0; frame < 15 && ready.get() == 0; frame++) {
+            watchNoisy(noise, 14);
+            idle(66);
+        }
+        assertEquals("the page is offered once the picture has stood still for 0.4 s", 1, ready.get());
+    }
+
     /** The lines of the shadow comparison, once every comparison asked for so far has run on its own thread. */
     private List<String> samePageLines() throws Exception {
         camera.comparing.submit(() -> { }).get(10, java.util.concurrent.TimeUnit.SECONDS);

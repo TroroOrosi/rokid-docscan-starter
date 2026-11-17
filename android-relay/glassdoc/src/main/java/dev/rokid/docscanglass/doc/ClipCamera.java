@@ -1105,13 +1105,9 @@ final class ClipCamera implements PageCamera {
             int width = watchWidth, height = watchHeight;
             ByteBuffer pixels = ByteBuffer.wrap(watchLuma, 0, watchBytes);
             int row = watchRow, step = watchStep;
-            byte[] thumbnail = new byte[32 * 24];
+            byte[] thumbnail = PageChange.cells(pixels, 0, width, height, row, step); // means: one pixel a cell is noise
             int level = 0;
-            for (int y = 0; y < 24; y++) for (int x = 0; x < 32; x++) {
-                byte value = pixels.get(y * height / 24 * row + x * width / 32 * step);
-                thumbnail[y * 32 + x] = value;
-                level += value & 255;
-            }
+            for (byte value : thumbnail) level += value & 255;
             pageChange.observeFrame(thumbnail, pixels, width, height, row, step, timestamp, now);
             if (pageScene != pageChange.sequence()) {
                 pageScene = pageChange.sequence();

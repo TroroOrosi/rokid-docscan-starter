@@ -33,6 +33,31 @@ final class PageChange {
     private long exposureSteps;
     private String lastStep = "none";
 
+    /**
+     * The 32x24 grid a camera hands to {@link #observeFrame}: each cell the mean of the frame's pixels that fall in it.
+     *
+     * <p>Until 2026-11-18 both cameras took one pixel of each cell. Worn in a dim room, with a lit sheet in view and
+     * the gain at 4 to 5, a pixel's own noise put a fifth of those pixels 18 levels off in every frame: 6 to 11 "page
+     * changes" a second with the mean level unchanged, never 0.4 s without one, and so no page was offered in three
+     * and a half minutes. Replayed over that pass's clips, one pixel a cell gave 0.4 to 4.6 changes a second with the
+     * head as still as while recording; the mean of each cell gave none, and a view moved to another half of the
+     * sheet was still a change. A frame of 32x24 gives the same grid either way.</p>
+     */
+    static byte[] cells(ByteBuffer luma, int origin, int width, int height, int row, int step) {
+        byte[] cells = new byte[WIDTH * HEIGHT];
+        for (int y = 0; y < HEIGHT; y++) {
+            int top = y * height / HEIGHT, bottom = Math.max(top + 1, (y + 1) * height / HEIGHT);
+            for (int x = 0; x < WIDTH; x++) {
+                int left = x * width / WIDTH, right = Math.max(left + 1, (x + 1) * width / WIDTH), sum = 0;
+                for (int v = top; v < bottom; v++) {
+                    for (int u = left, at = origin + v * row + left * step; u < right; u++, at += step) sum += luma.get(at) & 255;
+                }
+                cells[y * WIDTH + x] = (byte) (sum / ((bottom - top) * (right - left)));
+            }
+        }
+        return cells;
+    }
+
     void observe(byte[] pixels, long now) { observe(pixels, now, false, 0); }
 
     void observeFrame(byte[] pixels, ByteBuffer luma, int width, int height, int row, int step,

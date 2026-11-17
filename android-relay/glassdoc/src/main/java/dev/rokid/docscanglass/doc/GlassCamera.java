@@ -960,10 +960,7 @@ final class GlassCamera implements PageCamera {
             int row = luma.getRowStride(), step = luma.getPixelStride();
             int origin = pixels.position(); // AGENT_APPROVED=1: same Y-plane origin for observation, guide and preview.
             s2 = s3 = s4 = s5 = s6 = System.nanoTime();
-            byte[] thumbnail = new byte[32 * 24];
-            for (int y = 0; y < 24; y++) for (int x = 0; x < 32; x++) {
-                thumbnail[y * 32 + x] = pixels.get(origin + y * imageHeight / 24 * row + x * imageWidth / 32 * step);
-            }
+            byte[] thumbnail = PageChange.cells(pixels, origin, imageWidth, imageHeight, row, step); // see PageChange.cells
             // While a still is in flight its exposure leaks into the preview: on the glasses the frames 0.55-0.9 s
             // after the request rose from a mean of 70 to 155 and fell back, each reported as converged, and
             // each was counted as a page turn, so one unmoving page was taken three times (2026-11-12). Such a
