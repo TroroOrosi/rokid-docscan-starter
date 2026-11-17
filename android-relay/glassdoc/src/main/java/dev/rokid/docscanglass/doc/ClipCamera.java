@@ -40,7 +40,12 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
+import java.util.Locale;
 import java.util.UUID;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 
 import org.json.JSONArray;
 import org.json.JSONException;
@@ -181,6 +186,10 @@ final class ClipCamera implements PageCamera {
         boolean cut;
         /** Decided when it ends: it becomes its page (see end). */
         boolean kept;
+        /** For the record only (see compare): a settled page asked for it; the watch picture when it began, and when. */
+        boolean offered;
+        byte[] grid;
+        long gridAt;
         GlassCamera.Captured page;
         String failure;
     }
@@ -222,6 +231,19 @@ final class ClipCamera implements PageCamera {
                 .compressToJpeg(new Rect(0, 0, width, height), quality, out) ? out.toByteArray() : null;
     };
     private volatile Marks marks;
+    /**
+     * Shadow mode (register 2-38), for the record only: when a settled page asks for a recording, how alike the watch
+     * picture is to the one the page taken last was asked with ({@link SamePage}). No decision reads it. The
+     * comparisons have this one thread of their own, at the lowest priority, which ends when it has been idle; one
+     * that would be the third to wait is dropped. Tests wait on it.
+     */
+    final ExecutorService comparing = new ThreadPoolExecutor(0, 1, 2, TimeUnit.SECONDS, new LinkedBlockingQueue<>(2),
+            work -> {
+                Thread thread = new Thread(work, "same-page");
+                thread.setDaemon(true);
+                thread.setPriority(Thread.MIN_PRIORITY);
+                return thread;
+            }, new ThreadPoolExecutor.DiscardPolicy());
 
     // The camera's thread.
     private CameraDevice device;
@@ -245,6 +267,11 @@ final class ClipCamera implements PageCamera {
     private int watchFrames;
     private int previewIso, previewBoost;
     private boolean steady, far;
+    /** For the record only (see compare): the watch picture the page taken last was asked with, and when. */
+    private byte[] pageGrid;
+    private long pageGridAt;
+    /** For the record only: a page was seen still and offered, and no request has followed it yet. */
+    private boolean offered;
     /** The watch picture's print, measured on the frames' thread for the log: when was it last asked, what did it say. */
     private long pitchAt;
     private float lines;
@@ -254,6 +281,8 @@ final class ClipCamera implements PageCamera {
     private boolean watchPending;
     private int watchWidth, watchHeight, watchRow, watchStep, watchBytes;
     private long watchStamp;
+    /** A frame of the watch session now running has been copied: what is there is not a picture from before it. */
+    private boolean watchFresh;
 
     // Under the lock.
     private ImageReader clipReader;
@@ -279,6 +308,7 @@ final class ClipCamera implements PageCamera {
         handler.post(() -> {
             if (closed) return;
             pageReady = ready;
+            offered = false;
             wanted = true;
             step();
         });
@@ -305,6 +335,8 @@ final class ClipCamera implements PageCamera {
             if (closed || clip != null) return;
             wanted = true;
             clip = new Clip();
+            clip.offered = offered;
+            offered = false;
             // The clip's exposure and gain are fixed from the preview's automatic exposure, which starts over
             // whenever the preview restarts: only a settled reading is matched. One that does not settle is
             // waited for briefly and then used as it is; with no reading at all nothing is recorded.
@@ -324,6 +356,7 @@ final class ClipCamera implements PageCamera {
         handler.post(() -> {
             wanted = false;
             pageReady = null;
+            offered = false;
             showFar(false);
             Clip held = clip;
             boolean counted;
@@ -570,6 +603,9 @@ final class ClipCamera implements PageCamera {
         // 2026-11-12). The first page of a session has no earlier one to be mistaken for.
         steady = false;
         settlingSince = pageChange.hasCapturedPage() ? Math.max(1, SystemClock.elapsedRealtime()) : 0;
+        synchronized (lock) {
+            watchFresh = false;
+        }
         made.setRepeatingRequest(request, new CameraCaptureSession.CaptureCallback() {
             @Override public void onCaptureCompleted(CameraCaptureSession source, CaptureRequest asked, TotalCaptureResult result) {
                 if (token != configured || result == null) return;
@@ -614,8 +650,44 @@ final class ClipCamera implements PageCamera {
         }
         starting.phase = STARTING;
         pageChange.consumed();
+        compare(starting);
         showFar(false);
         step();
+    }
+
+    /**
+     * Shadow mode, for the record only (register 2-38). The watch picture as this clip begins is kept with the clip;
+     * it becomes the picture of "the page taken last" only if the clip becomes a page. When a settled page asked for
+     * the clip, how alike its picture is to that page's is logged, in numbers alone, from the comparisons' own
+     * thread: same_page score=0.000 blocks=n since_ms=(since the page taken last began). The limit found on clip
+     * frames is not validated for this picture. Nothing reads the result, and whatever fails here the capture goes
+     * on without it.
+     */
+    private void compare(Clip starting) {
+        try {
+            long now = SystemClock.elapsedRealtime();
+            byte[] grid;
+            synchronized (lock) { // the frames' thread copies the next watch frame into the same array
+                grid = watchFresh ? SamePage.grid(watchLuma, watchBytes, watchWidth, watchHeight, watchRow, watchStep) : null;
+            }
+            starting.grid = grid;
+            starting.gridAt = now;
+            byte[] taken = pageGrid;
+            if (grid == null || taken == null || !starting.offered) return;
+            long since = now - pageGridAt;
+            // Each grid is an array of its own that is never written again: the other thread needs no copy of it.
+            comparing.execute(() -> {
+                try {
+                    SamePage same = SamePage.of(taken, grid);
+                    Log.i(TAG, "same_page score=" + String.format(Locale.US, "%.3f", same.score)
+                            + " blocks=" + same.blocks + " since_ms=" + since);
+                } catch (RuntimeException | OutOfMemoryError ignored) {
+                    // no line
+                }
+            });
+        } catch (RuntimeException | OutOfMemoryError ignored) {
+            // no line
+        }
     }
 
     /** The clip stream alone: the middle of the sensor in its own pixels, 30 or 15 frames a second, nothing automatic. */
@@ -902,6 +974,8 @@ final class ClipCamera implements PageCamera {
         if (done.page != null) {
             cameraFailures = 0;
             shortClips = 0;
+            pageGrid = done.grid; // none when the watch picture could not be had: the next page is then not compared
+            pageGridAt = done.gridAt;
             callback.onCaptured(done.page);
             return;
         }
@@ -1002,6 +1076,7 @@ final class ClipCamera implements PageCamera {
                 watchStep = luma.getPixelStride();
                 watchStamp = image.getTimestamp();
                 watchPending = true;
+                watchFresh = true;
             } catch (RuntimeException | OutOfMemoryError error) {
                 return; // this frame is lost; the next one is taken
             } finally {
@@ -1068,6 +1143,7 @@ final class ClipCamera implements PageCamera {
             if (clip == null && pageReady != null && pageChange.ready(now)) {
                 Runnable ready = pageReady;
                 pageReady = null;
+                offered = true;
                 ready.run();
             }
             // What the desk check and a worn recording read: the frames handled, the slowest of them, and the light

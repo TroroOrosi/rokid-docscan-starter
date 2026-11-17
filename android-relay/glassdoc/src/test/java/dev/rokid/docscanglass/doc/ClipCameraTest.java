@@ -1125,6 +1125,86 @@ public class ClipCameraTest {
         assertEquals(0f, (float) org.robolectric.util.ReflectionHelpers.getField(camera, "lines"), 0f);
     }
 
+    /**
+     * A 320x240 watch frame of one printed sheet: patches of 10 px, each at a level of its own. {@code moved}: the
+     * head has turned and the picture lies that many px further left.
+     */
+    private void watchSheet(int moved) {
+        java.util.Random patches = new java.util.Random(11);
+        byte[][] sheet = new byte[24][36 + 4];
+        for (byte[] row : sheet) for (int x = 0; x < row.length; x++) row[x] = (byte) (60 + patches.nextInt(160));
+        byte[] pixels = new byte[320 * 240];
+        for (int y = 0; y < 240; y++) for (int x = 0; x < 320; x++) pixels[y * 320 + x] = sheet[y / 10][(x + moved) / 10];
+        DocScanTestImage image = new DocScanTestImage(watchImages);
+        image.format = ImageFormat.YUV_420_888; image.width = 320; image.height = 240;
+        image.rowStride = 320; image.pixelStride = 1;
+        image.timestamp = SystemClock.elapsedRealtimeNanos(); image.buffer = ByteBuffer.wrap(pixels);
+        ReaderShadow watch = reader(320);
+        watch.image = image; watch.listener.onImageAvailable(watch.reader);
+        idle(0);
+    }
+
+    /** The lines of the shadow comparison, once every comparison asked for so far has run on its own thread. */
+    private List<String> samePageLines() throws Exception {
+        camera.comparing.submit(() -> { }).get(10, java.util.concurrent.TimeUnit.SECONDS);
+        List<String> lines = new ArrayList<>();
+        for (org.robolectric.shadows.ShadowLog.LogItem item : org.robolectric.shadows.ShadowLog.getLogsForTag("DocScanGlassDoc")) {
+            if (item.msg.startsWith("same_page ")) lines.add(item.msg);
+        }
+        return lines;
+    }
+
+    /**
+     * Shadow mode for register 2-38. Worn, the head's own motion counts as a page turn and the same sheet is recorded
+     * again; the camera never compared the settled picture with the page it took last. It now does, for the log
+     * alone: one line when a settled page asks for a recording, and every page is taken as before.
+     */
+    @Test public void a_settled_page_logs_how_alike_it_is_to_the_page_taken_last_and_is_recorded_all_the_same() throws Exception {
+        AtomicInteger ready = new AtomicInteger();
+        camera.awaitNextPage(ready::incrementAndGet); idle(100);
+        light(50_000_000L, 800, 423, CONTROL_AE_STATE_CONVERGED);
+        watchSheet(0); idle(400); watchSheet(0);
+        assertEquals(1, ready.get());
+        long first = SystemClock.elapsedRealtime();
+        recording();
+        clipFrames(66, 0); idle(0);
+        idleSession(1); watchSheet(0);
+        assertEquals(1, pages.size());
+        assertEquals("the first page has no page before it to be like", List.of(), samePageLines());
+
+        camera.awaitNextPage(ready::incrementAndGet); idle(0);
+        light(50_000_000L, 800, 423, CONTROL_AE_STATE_CONVERGED);
+        idle(100); watchSheet(0); idle(500); watchSheet(0);
+        assertEquals("an unmoving sheet is not offered again", 1, ready.get());
+        idle(100); watchSheet(40); idle(500); watchSheet(40);
+        assertEquals("the head turned by an eighth of the picture: offered as a new page, as before", 2, ready.get());
+        long second = SystemClock.elapsedRealtime();
+        camera.captureOnce(); idle(0);
+        idleSession(2);
+        assertEquals("and recorded, whatever the comparison says", 4, device().configurations);
+
+        List<String> lines = samePageLines();
+        assertEquals("one line for the one request: " + lines, 1, lines.size());
+        java.util.regex.Matcher line = java.util.regex.Pattern
+                .compile("same_page score=(-?\\d\\.\\d{3}) blocks=(\\d+) since_ms=(\\d+)").matcher(lines.get(0));
+        assertTrue("numbers only: " + lines.get(0), line.matches());
+        assertTrue("the same sheet, seen 16 cells further: " + lines.get(0), Float.parseFloat(line.group(1)) > 0.9f);
+        assertTrue(lines.get(0), Integer.parseInt(line.group(2)) >= 24);
+        assertEquals("since the page before was asked for", second - first, Long.parseLong(line.group(3)));
+
+        clipFrames(66, 0); idle(0);
+        idleSession(3); watchSheet(40);
+        assertEquals("the sheet is taken a second time: nothing is decided from the score", 2, pages.size());
+        assertTrue(failures.isEmpty());
+        assertEquals(0, notReady);
+
+        // A request that no settled page asked for (the wearer's own) is not one a rule would judge: no line.
+        light(50_000_000L, 800, 423, CONTROL_AE_STATE_CONVERGED);
+        camera.captureOnce(); idle(0);
+        assertEquals("its clip is begun like any other", 3, encoder.opens);
+        assertEquals(1, samePageLines().size());
+    }
+
     @Test public void the_far_mark_is_off_until_a_share_is_set() {
         // Its rule does not measure distance: worn on 2026-11-16 the mark stood for 38 of 67 s of watching while the
         // characters were as large as the page that passed needed (M-31, register 2-24).
