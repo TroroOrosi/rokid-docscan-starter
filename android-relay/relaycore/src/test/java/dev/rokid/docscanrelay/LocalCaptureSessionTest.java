@@ -266,6 +266,122 @@ public class LocalCaptureSessionTest {
         return id;
     }
 
+    /**
+     * The operator, 2026-11-17 (gist): old history and pictures burden the glasses; delete or move them. Every reading
+     * since the app was installed had kept its folder (the real app held 1.4 GB): nothing removed a finished one.
+     * Finished means the server holds every page and the answers were shown, and no screen leads back to it.
+     */
+    @Test public void finishedReadingsAreClearedAwayAndEverythingElseStays() throws Exception {
+        File root = folder.getRoot();
+        LocalCaptureSession finished = LocalCaptureSession.create(root, "http://phone:8000", false);
+        finished.commit(photo(0, 7));
+        finished.setPhase(LocalCaptureSession.Phase.REVIEW);
+        LocalCaptureSession leftAfterReading = LocalCaptureSession.create(root, "http://phone:8000", false);
+        leftAfterReading.setPhase(LocalCaptureSession.Phase.REVIEW);
+        leftAfterReading.close();
+        LocalCaptureSession capturing = LocalCaptureSession.create(root, "http://phone:8000", false);
+        capturing.commit(photo(0, 8));
+        LocalCaptureSession waiting = LocalCaptureSession.create(root, "http://phone:8000", false);
+        waiting.setPhase(LocalCaptureSession.Phase.ANALYSIS);
+        LocalCaptureSession current = LocalCaptureSession.create(root, "http://phone:8000", false);
+        current.setPhase(LocalCaptureSession.Phase.REVIEW);
+        File broken = new File(root, "11111111-2222-3333-4444-555555555555");
+        assertTrue(broken.mkdir());
+        Files.write(new File(broken, "state.properties").toPath(), new byte[]{1, 2, 3});
+        File other = new File(root, "not-a-reading");
+        assertTrue(other.mkdir());
+
+        assertEquals(2, LocalCaptureSession.retirePast(root, current.id(), System.currentTimeMillis()));
+        assertFalse("retired at once: the list of readings no longer sees it", finished.directory().exists());
+        assertFalse(leftAfterReading.directory().exists());
+        LocalCaptureSession.sweepRetired(root);
+
+        String[] left = root.list();
+        java.util.Arrays.sort(left);
+        String[] expected = {capturing.id(), waiting.id(), current.id(), broken.getName(), other.getName()};
+        java.util.Arrays.sort(expected);
+        assertArrayEquals("unfinished readings, the one in hand, what cannot be judged and what is not a reading stay",
+                expected, left);
+        assertTrue(new File(capturing.directory(), "state.properties").isFile());
+        assertEquals(0, LocalCaptureSession.retirePast(root, current.id(), System.currentTimeMillis()));
+    }
+
+    /**
+     * A reading that was left unfinished keeps its pages and its unsent clips (up to 190 MB each) so that it can be
+     * taken up again, and no screen discards one. After a day nobody takes it up: the test it was for is over.
+     */
+    @Test public void aReadingLeftUnfinishedForOverADayIsClearedAwayToo() throws Exception {
+        File root = folder.getRoot();
+        long now = System.currentTimeMillis(), hour = 3_600_000L;
+        LocalCaptureSession stale = LocalCaptureSession.create(root, "http://phone:8000", false);
+        stale.commit(photo(0, 5));
+        LocalCaptureSession recent = LocalCaptureSession.create(root, "http://phone:8000", false);
+        recent.commit(photo(0, 6));
+        LocalCaptureSession inHand = LocalCaptureSession.create(root, "http://phone:8000", false);
+        assertTrue(new File(stale.directory(), "state.properties").setLastModified(now - 25 * hour));
+        assertTrue(new File(recent.directory(), "state.properties").setLastModified(now - 23 * hour));
+        assertTrue(new File(inHand.directory(), "state.properties").setLastModified(now - 99 * hour));
+
+        assertEquals(1, LocalCaptureSession.retirePast(root, inHand.id(), now));
+        assertFalse(stale.directory().exists());
+        assertTrue("within a day it can still be taken up again", recent.directory().exists());
+        assertTrue("the reading in hand stays whatever its age", inHand.directory().exists());
+        assertEquals("a clock that was set back removes nothing", 0, LocalCaptureSession.retirePast(root, inHand.id(), now - 400 * hour));
+    }
+
+    /**
+     * Glasses, 2026-11-17, glassdoc 0.44.10: the real app died as it started ("Comparison method violates its general
+     * contract"). The chooser sorted every folder by its time while the sweep was removing the retired ones, whose
+     * time changes as they empty. The check package had passed: its store had been cleared and held nothing to sweep.
+     * The list holds readings only, and each folder's time is read once before the sort.
+     */
+    @Test public void theListOfReadingsLeavesOutWhatIsBeingSweptAndReadsEachTimeOnce() throws Exception {
+        File root = folder.getRoot();
+        long now = System.currentTimeMillis();
+        String[] ids = new String[40];
+        for (int i = 0; i < ids.length; i++) {
+            LocalCaptureSession reading = LocalCaptureSession.create(root, "http://phone:8000", false);
+            ids[i] = reading.id();
+            assertTrue(reading.directory().setLastModified(now - i * 60_000L));
+        }
+        for (int i = 0; i < 40; i++) assertTrue(new File(root, "done-" + java.util.UUID.randomUUID()).mkdir());
+        assertTrue(new File(root, "not-a-reading").mkdir());
+
+        java.util.concurrent.atomic.AtomicBoolean stop = new java.util.concurrent.atomic.AtomicBoolean();
+        Thread touching = new Thread(() -> { // what a sweep, or a capture writing its record, does to the times meanwhile
+            java.util.Random random = new java.util.Random(3);
+            File[] all = root.listFiles();
+            while (!stop.get()) all[random.nextInt(all.length)].setLastModified(now - random.nextInt(1_000_000));
+        });
+        touching.start();
+        try {
+            for (int round = 0; round < 300; round++) {
+                File[] listed = LocalCaptureSession.folders(root);
+                assertEquals(40, listed.length);
+                for (File one : listed) assertFalse(one.getName().startsWith("done-"));
+            }
+        } finally {
+            stop.set(true);
+            touching.join();
+        }
+        for (int i = 0; i < ids.length; i++) assertTrue(new File(root, ids[i]).setLastModified(now - i * 60_000L));
+        File[] listed = LocalCaptureSession.folders(root);
+        for (int i = 0; i < ids.length; i++) assertEquals("newest first", ids[i], listed[i].getName());
+        assertEquals(0, LocalCaptureSession.folders(new File(root, "absent")).length);
+    }
+
+    @Test public void whatAnEarlierSweepLeftBehindIsRemovedByTheNext() throws Exception {
+        File root = folder.getRoot();
+        LocalCaptureSession finished = LocalCaptureSession.create(root, "http://phone:8000", false);
+        finished.commit(photo(0, 9));
+        finished.setPhase(LocalCaptureSession.Phase.REVIEW);
+        assertEquals(1, LocalCaptureSession.retirePast(root, "", System.currentTimeMillis()));
+        assertEquals("retired, not yet swept: the process ended here", 1, root.list().length);
+        LocalCaptureSession.sweepRetired(root);
+        assertEquals(0, root.list().length);
+        LocalCaptureSession.sweepRetired(new File(root, "absent")); // a root that does not exist is nothing to sweep
+    }
+
     private static CaptureReviewStore.Pending photo(int index, int value) {
         return new CaptureReviewStore.Pending(index, new byte[]{(byte)value, 2, 3}, "実資料", 180, "",
                 PageFraming.UNKNOWN, 1000 + value);

@@ -82,6 +82,87 @@ final class LocalCaptureSession {
         }
     }
 
+    private static final String ID = "[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}";
+    private static final String RETIRED = "done-";
+
+    /**
+     * The readings' folders under {@code root}, newest first. Each folder's time is read once, before the sort: a
+     * folder's time changes while a capture writes into it, and a sort that reads it again mid-way throws
+     * ("Comparison method violates its general contract"; the real app died of it as it started, 2026-11-17, with
+     * retired folders being swept beside it). What is not a reading (a retired folder among them) is left out.
+     */
+    static File[] folders(File root) {
+        File[] directories = root.listFiles(file -> file.isDirectory() && file.getName().matches(ID));
+        if (directories == null) return new File[0];
+        long[][] order = new long[directories.length][];
+        for (int i = 0; i < directories.length; i++) order[i] = new long[] {directories[i].lastModified(), i};
+        java.util.Arrays.sort(order, (a, b) -> Long.compare(b[0], a[0]));
+        File[] sorted = new File[directories.length];
+        for (int i = 0; i < sorted.length; i++) sorted[i] = directories[(int) order[i][1]];
+        return sorted;
+    }
+    /** How long a reading left unfinished can still be taken up again. */
+    static final long ABANDONED_MILLIS = 24L * 60 * 60 * 1000;
+
+    /**
+     * Takes every reading under {@code root} that is past use, other than {@code keep} (the one in hand), out of sight:
+     * its folder is renamed, so that nothing lists or loads it any more, and {@link #sweepRetired} removes it. How
+     * many. Past use is a finished reading, and one left unfinished whose record was last written over a day before
+     * {@code now}: it keeps its pages and its unsent clips so that it can be taken up again, no screen discards one,
+     * and after a day the test it was for is over.
+     *
+     * <p>Finished is what {@link #unfinished} is not: the server holds every page and the answers were shown, and no
+     * screen leads back to it (the list of interrupted readings holds unfinished ones only; the last answers are kept
+     * apart). Until 2026-11-17 nothing removed such a folder and the glasses held every page since the app was
+     * installed (1.4 GB). A folder whose record cannot be read is never judged and stays.</p>
+     */
+    static int retirePast(File root, String keep, long now) {
+        File[] directories = root.listFiles(File::isDirectory);
+        if (directories == null) return 0;
+        int retired = 0;
+        for (File directory : directories) {
+            String id = directory.getName();
+            if (!id.matches(ID) || id.equals(keep)) continue;
+            try {
+                long written = new File(directory, "state.properties").lastModified();
+                if (load(root, id).unfinished() && (written <= 0 || now - written <= ABANDONED_MILLIS)) continue;
+            } catch (IOException unreadable) {
+                continue;
+            }
+            if (directory.renameTo(new File(root, RETIRED + id))) retired++;
+        }
+        return retired;
+    }
+
+    /** Removes what {@link #retirePast} retired, now or before a process ended; slow enough to stay off the main thread. */
+    static void sweepRetired(File root) {
+        File[] directories = root.listFiles(file -> file.isDirectory() && file.getName().startsWith(RETIRED));
+        if (directories == null) return;
+        for (File directory : directories) removed(directory);
+    }
+
+    /** What a folder holds, for the one line the app logs about its storage: {files, bytes}. */
+    static long[] held(File file) {
+        long[] total = {0, 0};
+        File[] inside = file.listFiles();
+        if (inside == null) {
+            if (file.isFile()) { total[0] = 1; total[1] = file.length(); }
+            return total;
+        }
+        for (File child : inside) {
+            long[] part = held(child);
+            total[0] += part[0];
+            total[1] += part[1];
+        }
+        return total;
+    }
+
+    private static void removed(File file) {
+        File[] inside = file.listFiles();
+        if (inside != null) for (File child : inside) removed(child);
+        file.delete();
+    }
+
     String id() { return directory.getName(); }
     File directory() { return directory; }
     synchronized String server() { return state.getProperty("server"); }

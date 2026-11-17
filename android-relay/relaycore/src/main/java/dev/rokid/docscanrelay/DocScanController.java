@@ -204,6 +204,25 @@ public final class DocScanController implements AutoCloseable {
             try { localSession = LocalCaptureSession.load(localRoot, localId); }
             catch (IOException error) { localRestoreError = "保存した読取記録を復元できません"; }
         }
+        if (link.supportsLocalCaptureReview()) {
+            // Readings past use are cleared away at each start: finished ones, and ones left unfinished for over a day.
+            // The one in hand stays, and so does every unfinished one that can still be taken up again.
+            int retired = LocalCaptureSession.retirePast(localRoot, localId, System.currentTimeMillis());
+            File files = context.getFilesDir();
+            Thread sweep = new Thread(() -> {
+                LocalCaptureSession.sweepRetired(localRoot);
+                // Names and sizes only: what the glasses hold for this app, so that a full store is seen in the log.
+                StringBuilder line = new StringBuilder("storage retired=" + retired);
+                File[] kept = files.listFiles();
+                if (kept != null) for (File entry : kept) {
+                    long[] held = LocalCaptureSession.held(entry);
+                    if (held[1] >= 1024 * 1024) line.append(' ').append(entry.getName()).append('=').append(held[1] / (1024 * 1024)).append("MB/").append(held[0]);
+                }
+                android.util.Log.i("DocScanRelay", line.toString());
+            }, "local-scans-sweep");
+            sweep.setDaemon(true);
+            sweep.start();
+        }
         captureReviewPersistence = new CaptureReviewPersistence(
                 localSession == null ? new File(context.getFilesDir(), "pending-capture-v1.bin")
                         : new File(localSession.directory(), "pending.bin"));
@@ -564,11 +583,9 @@ public final class DocScanController implements AutoCloseable {
     /** Only unfinished records; starting a new scan never hides an earlier one. */
     public List<SavedCapture> savedCaptures() {
         List<SavedCapture> result = new ArrayList<>();
-        File[] directories = localRoot.listFiles(File::isDirectory);
-        if (directories != null) {
-            java.util.Arrays.sort(directories, java.util.Comparator.comparingLong(File::lastModified).reversed());
+        File[] directories = LocalCaptureSession.folders(localRoot);
+        {
             for (File directory : directories) {
-                if (!directory.getName().matches("[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}")) continue;
                 try {
                     LocalCaptureSession saved = LocalCaptureSession.load(localRoot, directory.getName());
                     if (!saved.unfinished()) continue;

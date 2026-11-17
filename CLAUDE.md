@@ -1,6 +1,6 @@
 # rokid-docscan-starter development guide
 
-Status: Current engineering contract. Updated 2026-11-17 19:30 (§M-44: the operator ran three papers on large sheets, twelve booklets on the venue topology; a large sheet in one frame is not read, the blur belongs to the edge of the recorded frame and not to nearness, so the "too near" mark of 0.44.7 is gone; Server 0.85.0 gives written answers their working and names answer boxes, glassdoc 0.44.8 shows a bar at each side the paper runs past; taking the lens blur back out halved what the model read and is not adopted; none of the changes has been worn, and a large sheet taken in parts has not been read yet).
+Status: Current engineering contract. Updated 2026-11-17 20:15 (§M-44: the operator ran three papers on large sheets, twelve booklets on the venue topology; a large sheet in one frame is not read; the blur belongs to the edge of the recorded frame and not to nearness; the frame is the middle half of the field and holds 27-47% of a paper looked at from a seat, which is why the wearer has to back off; Server 0.85.0 gives written answers their working and names answer boxes, glassdoc 0.44.11 shows a bar at each side the paper runs past and clears old readings from the glasses; none of the changes has been worn, and whether the whole-field still route reads at the trial's light is not measured).
 
 **Start at `.agents/progress/current.md`.** It lists the operator's decisions,
 the verified state and the next steps. Do not re-ask what it settles. Then read
@@ -419,6 +419,18 @@ mathematics B 14 of 21 with the boxes named, Japanese 28 of 44 with 16 still unr
 38 of 38; the lower bar on the glasses' own screen. **Not seen:** any of it worn; a large sheet taken in parts and read;
 the upper and side bars on the device. A large sheet is to be taken a part at a time, about a B5 page a capture, what is
 read in the middle of the window, the print large; how small print may be is not measured (register 2-33 to 2-35).
+**Why the wearer has to back off (§M-44 (11); the operator said it on 11/14, 11/16 and 11/17).** The clip's frame is the
+middle half of the field (43 by 56 degrees). In the wearer's own whole-field photos (twenty, 9/22 and 11/14) a paper looked
+at from a seat spans 73-100% of the field's width and 64-92% of its height, and the frame holds 27-47% of its area; moved
+down a quarter of the field it holds less. To fit the paper the wearer backs off to about twice the distance and the print
+halves. No way of holding the glasses solves that. The whole field in the sensor's own pixels could not be recorded (memory
+and heat, §M-29); the still route takes it in one photo, and whether the model reads such a still at the trial's light (30 ms,
+ISO 600-800; read at 25 ms and ISO 209, not read at 60 ms and ISO 4000) is the next thing to measure (register 2-36).
+**Old readings on the glasses (§M-44 (12), (13); glassdoc 0.44.11).** The app never removed a finished reading's folder and
+kept every reading left unfinished with its unsent clips: 1.4 GB. At each start it now clears finished readings and ones left
+unfinished for over a day; the one in hand stays. The first build of this (0.44.10) killed the real app as it started: the
+chooser sorted the folders by their time while they were being emptied. The desk check had passed on a package whose store
+I had just cleared.
 
 **The camera does not focus where the pages were held (2026-11-17, §M-41, §M-42; its conclusion about distance is withdrawn, see above).** The third worn pass (the real app,
 the phone's server, the real model) ran the whole use for the first time: ten pages, eight of them with all 60 still
@@ -1108,7 +1120,10 @@ records; each was learned from a failure the operator found.
    the whole use in order. Both take `--capture clip`. A change to a camera,
    or to what runs beside it, is run for forty pages on the route that sends,
    not three: on 2026-11-16 two camera failures came once in eleven and once
-   in about eighty clips (§M-30). A change to how a booklet is answered is run through
+   in about eighty clips (§M-30). A change that touches what the app keeps on the glasses is checked on the
+   real app's own store as well (old readings in it), started several times: on 2026-11-17 a clearing of old
+   readings passed the whole-use check on a package whose store had just been emptied and killed the real app
+   at its next start (§M-44 (13)). A change to how a booklet is answered is run through
    `scripts/scenario_suite.py` (synthetic photos, the phone's product route, the real model) for paper other than a
    plain spread; its photos are flat and still, so it stands for no worn page.
 4. Put the desk bench where the use is: the distance and the angle a wearer has
