@@ -35,6 +35,13 @@ An answer or a question only one read gave is shown and noted. When one read fai
 read gives a reply an answer list can be made of, or this host cannot carry the run out (an image, the working folder,
 memory), the booklet leaves as after a run that did not finish in time: the server gives it to the next route.
 
+From 2026-11-17 (unit tests only; none of it seen with the real CLI): a request for the pages that does not come back
+in its time gives the booklet to the next route at once, with no read started behind it. Once one read is back with a
+usable reply the other is given that read's time again, two minutes at least, and is then ended; the booklet is then
+read once. A usage limit is taken from the CLI's own sentence, or from an error line at the end of what it wrote of
+its failure, not from the service's bare words anywhere in its output. Where a paper prints neither answer numbers nor lettered boxes and the two reads name its questions
+differently, they are compared in order within the pages they cite (``_compared``).
+
 The CLI takes images only. A booklet with audio (listening, mixed English) is refused before anything runs, with the
 error the server answers by handing the booklet to the next route.
 
@@ -283,6 +290,17 @@ def _slots(replies: list) -> list[list[tuple]]:
     return slots
 
 
+def _by_order(replies: list, slots: list) -> None:
+    """Give each question that fills a label slot the slot of its place instead: the k-th such question of this read
+    that cites the same capture pages."""
+    seen: dict = {}
+    for (item, _), keys in zip(replies, slots):
+        if keys[0][0] == "labels":
+            pages = str(item.get("pages"))
+            seen[pages] = seen.get(pages, 0) + 1
+            keys[:] = [("order", pages, seen[pages])]
+
+
 def _slot_marks(replies: list, slots: list) -> dict:
     """{slot: what this read says there}: a mark, None for writing (not compared), or ``_UNANSWERED``.
 
@@ -311,6 +329,16 @@ def _compared(first: list, second: list) -> list:
     read's answer: the server turns the note into an answer to review.
     """
     first_slots, second_slots = _slots(first), _slots(second)
+    # Where neither answer numbers nor lettered boxes are printed a slot is the group and label as the read wrote
+    # them, and one read writes 第1問 / (1) where the other writes nothing / 1 (1): nothing lined up, both lists were
+    # shown whole and every item marked as listed by one read only (found 2026-11-17). When fewer than half of the
+    # shorter read's label slots have a partner, the reads are taken in order within each set of cited pages; what
+    # one read has more of there is what is left over. A question one read split shifts the pairs after it on
+    # that page: they are then marked as differing, not lost.
+    named = [{key for keys in slots for key in keys if key[0] == "labels"} for slots in (first_slots, second_slots)]
+    if 2 * len(named[0] & named[1]) < min(map(len, named)):
+        _by_order(first, first_slots)
+        _by_order(second, second_slots)
     mine, theirs = _slot_marks(first, first_slots), _slot_marks(second, second_slots)
     same_question = {tuple(keys): pair for keys, pair in zip(second_slots, second)}
     merged = []
@@ -382,7 +410,48 @@ def _regions(reply: str, photos: int) -> tuple[dict[int, list[tuple[float, float
         if kept and index not in found:
             found[index] = kept[:_REGIONS_MOST]
     return found, partial & set(found)
-_LIMIT = re.compile(r"usage limit|rate limit|quota", re.IGNORECASE)
+
+
+# A run that ended at a usage limit, in one line of what the CLI says of its own failure. Its own sentence ("You’ve
+# hit your usage limit. Visit ... to purchase more credits or try again at 10:16 AM.", phone, 2026-11-16, M-34; in the
+# binary of codex 0.167.0 with a typographic apostrophe and, after the first sentence, an upgrade, a visit or another
+# model to switch to), or the service's words on a line that begins as an error.
+_LIMIT = re.compile(r"(?:hit|reached) your usage limit|^\W*(?:\w+ )?error\b.*?(?:usage limit|rate limit|quota)",
+                    re.IGNORECASE | re.DOTALL)  # an event's message may be more than one line
+# The CLI's own sentence alone. No page says it, so it is taken anywhere on stderr: how many lines the CLI writes
+# after it at a real limit is not on record, and a limit not recognised sends the booklet to Work, which draws on the
+# same allowance, before Chat.
+_OWN_LIMIT = re.compile(r"(?:hit|reached) your usage limit", re.IGNORECASE)
+# Of stderr, from its end: the error and, after it, what the CLI says of the reply it could not write ("Warning: no
+# last agent message; wrote empty content to ...", its binary's words) and of the tokens used. Not measured at a limit.
+_LIMIT_LINES = 8
+
+
+def _limit_reported(stdout: str, stderr: str) -> bool:
+    """Whether a run that failed says of itself that a usage limit ended it.
+
+    Until 2026-11-17 the words were looked for anywhere in what the run had written, and a limit closes the CLI and
+    Work for the booklet: a run that failed for another cause with "quota" in a passage it had read out went
+    straight to Chat. What is read now: the CLI's own sentence wherever it stands on stderr; the service's words only
+    on an error line among the last lines of stderr, where the CLI ends with its error; and, when its
+    events are on stdout as lines of JSON (``--json``, which the requests here do not ask for), the message of an
+    ``error`` or ``turn.failed`` event. How the limit reads on stderr without ``--json`` is not on record.
+    """
+    if _OWN_LIMIT.search(stderr):
+        return True
+    said = [re.sub(r"\x1b\[[0-9;]*m", "", line).strip() for line in stderr.splitlines() if line.strip()][-_LIMIT_LINES:]
+    for line in stdout.splitlines():
+        try:
+            event = json.loads(line)
+            kind = event["type"]
+        except (ValueError, KeyError, TypeError):
+            continue
+        if kind in ("error", "turn.failed"):
+            detail = event.get("error") if kind == "turn.failed" else event
+            said.append(f"error: {detail.get('message') if isinstance(detail, dict) else detail}")
+    return any(_LIMIT.search(line) for line in said)
+
+
 # A run that ended because the service no longer offers the model. The CLI warns "Model metadata for `<model>` not
 # found. Defaulting to fallback metadata; ..." (its own words, read from the binary of codex 0.153.2 on 2026-11-16)
 # and the service's error code is model_not_found; the service's sentence is not ours to fix, so its likely forms
@@ -407,6 +476,13 @@ def _time_allowed(pages: int) -> tuple[float, float]:
     named = os.environ.get("ROKID_CODEX_TIMEOUT_S")
     answers = float(named) if named else max(600.0, 240.0 + 30.0 * pages)
     return answers, min(answers, max(120.0, 60.0 + 6.0 * pages))
+
+
+# Once one read is back with a usable reply the other is given that read's time again, and this long at least. Two
+# runs of one booklet of 47 pages ended at 366 s and 586 s (phone, 2026-11-15), so two healthy reads lie that far
+# apart; how far apart the two reads of one run end has not been measured. A read cut here might have answered, and
+# its booklet is then read once, with nothing compared.
+_SECOND_READ_LEAST_S = 120.0
 
 
 def _command() -> list[str]:
@@ -457,7 +533,7 @@ class _Tunnel(socketserver.BaseRequestHandler):
             client.settimeout(None)
             sockets = [client, upstream]
             while True:
-                readable, _, _ = select.select(sockets, [], [], 600)
+                readable, _, _ = select.select(sockets, [], [], self.server.idle_s)
                 if not readable:
                     return
                 for source in readable:
@@ -473,12 +549,18 @@ class _Tunnel(socketserver.BaseRequestHandler):
 class _Proxy(socketserver.ThreadingTCPServer):
     daemon_threads = True
     allow_reuse_address = True
+    idle_s = 600.0  # a tunnel through which nothing passes for this long is closed
 
 
 @contextlib.contextmanager
-def name_resolving_proxy():
-    """A loopback CONNECT proxy for the life of one run; yields its port."""
+def name_resolving_proxy(idle_s: float = 600.0):
+    """A loopback CONNECT proxy for the life of one run; yields its port.
+
+    ``idle_s`` is how long the run may take: a silent tunnel is kept that long, and 600 s at least. Until 2026-11-17
+    it was 600 s whatever the run was allowed, and the answers of more than twelve pages may take longer; a stream
+    cut while the model works ends the run as a bare failure."""
     server = _Proxy(("127.0.0.1", 0), _Tunnel)
+    server.idle_s = max(600.0, idle_s)
     thread = threading.Thread(target=server.serve_forever, name="codex-name-proxy", daemon=True)
     thread.start()
     try:
@@ -590,8 +672,11 @@ class CodexCliSolver(Solver):
     @staticmethod
     def _exec(directory: Path, environment: dict, *, model: str, effort: str, images: list[str], prompt: str,
               timeout: float, schema: dict | None = None, reply_name: str = "reply.json",
-              ephemeral: bool = True) -> str:
-        """Run the CLI once in ``directory`` on the image files named there; its reply text."""
+              ephemeral: bool = True, running: list | None = None) -> str:
+        """Run the CLI once in ``directory`` on the image files named there; its reply text.
+
+        The process is added to ``running`` for the caller to end from another thread; a run ended that way fails
+        here as any run that ends without a reply."""
         reply = directory / reply_name
         reply.unlink(missing_ok=True)
         # Fast unless a trial says standard (the operator, 2026-11-16 and 11/10). `priority` is the CLI's Fast tier;
@@ -606,22 +691,34 @@ class CodexCliSolver(Solver):
             command += ["--output-schema", "schema.json"]
         command += ["-o", str(reply), prompt]
         try:
-            done = subprocess.run(command, cwd=directory, env=environment, capture_output=True, text=True,
-                                  encoding="utf-8", errors="replace", timeout=timeout, stdin=subprocess.DEVNULL)
-        except subprocess.TimeoutExpired as error:
-            raise ChatGptWebReplyIncomplete("the Codex CLI did not finish in time") from error
+            process = subprocess.Popen(command, cwd=directory, env=environment, stdout=subprocess.PIPE,
+                                       stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace",
+                                       stdin=subprocess.DEVNULL)
         except OSError as error:
             raise ChatGptWebError(f"the Codex CLI could not start: {type(error).__name__}") from error
-        output = done.stdout + "\n" + done.stderr
-        if done.returncode != 0 or not reply.is_file():
-            if _LIMIT.search(output):
+        if running is not None:
+            running.append(process)
+        with process:  # as subprocess.run does it, which gives no hold on the process
+            try:
+                stdout, stderr = process.communicate(timeout=timeout)
+            except subprocess.TimeoutExpired as error:
+                process.kill()
+                if os.name == "nt":
+                    process.communicate()  # Windows reads the pipes on threads of its own: let them end
+                raise ChatGptWebReplyIncomplete("the Codex CLI did not finish in time") from error
+            except BaseException:
+                process.kill()  # nothing is left running behind another error either
+                raise
+        output = stdout + "\n" + stderr
+        if process.returncode != 0 or not reply.is_file():
+            if _limit_reported(stdout, stderr):
                 raise ChatGptWebRateLimit("the Codex CLI reported a usage limit")
             if _NO_MODEL.search(output):
                 # Named, so the check before use says why and the booklet goes to the next route. No other model
                 # is tried: which one answers a booklet is the operator's choice (ROKID_CODEX_MODEL).
                 raise ChatGptWebModelMismatch("the Codex CLI's model is not offered; nothing answered")
             # The CLI's own last line is the only record of why; it names no page content.
-            raise ChatGptWebError(f"the Codex CLI ended without a reply: {_last_line(done.stderr) or _last_line(done.stdout)}")
+            raise ChatGptWebError(f"the Codex CLI ended without a reply: {_last_line(stderr) or _last_line(stdout)}")
         return reply.read_text(encoding="utf-8")
 
     @classmethod
@@ -631,7 +728,9 @@ class CodexCliSolver(Solver):
         goes whole beside its regions.
 
         None when nothing could be located at all (the caller sends the photos as before). A usage limit is raised,
-        and so is a model that is not offered: the request for the answers would end the same way.
+        and so is a model that is not offered: the request for the answers would end the same way. So is a request
+        that did not come back in its time (20 s for 14 photos, 40 s for 31 on record): the CLI or the service is
+        stalling, and until 2026-11-17 the reads then ran their full time behind it with the wearer waiting.
         """
         ordered = sorted(pages, key=lambda page: page["page_number"])
         photos = []
@@ -647,7 +746,7 @@ class CodexCliSolver(Solver):
         try:
             reply = cls._exec(directory, environment, model=model, effort="low", images=views, prompt=_LOCATE_PROMPT,
                               timeout=min(timeout, 900), schema=_LOCATE_SCHEMA)
-        except (ChatGptWebRateLimit, ChatGptWebModelMismatch):
+        except (ChatGptWebRateLimit, ChatGptWebModelMismatch, ChatGptWebReplyIncomplete):
             raise
         except ChatGptWebError:
             return None
@@ -697,15 +796,16 @@ class CodexCliSolver(Solver):
 
     @staticmethod
     @contextlib.contextmanager
-    def _workplace():
-        """A directory of its own and the environment the CLI needs on this host, for as long as one request takes."""
+    def _workplace(timeout: float = 600.0):
+        """A directory of its own and the environment the CLI needs on this host, for as long as one request takes
+        (``timeout``: the longest a request made here may take, for the proxy's silent tunnels)."""
         environment = dict(os.environ)
         bundle = Path(os.environ.get("PREFIX", "")) / "etc/tls/cert.pem"
         if os.environ.get("PREFIX") and bundle.is_file():
             environment.setdefault("SSL_CERT_FILE", str(bundle))
         with tempfile.TemporaryDirectory(prefix="rokid-codex-") as folder, contextlib.ExitStack() as stack:
             if _needs_proxy():
-                environment["HTTPS_PROXY"] = f"http://127.0.0.1:{stack.enter_context(name_resolving_proxy())}"
+                environment["HTTPS_PROXY"] = f"http://127.0.0.1:{stack.enter_context(name_resolving_proxy(timeout))}"
             yield Path(folder), environment
 
     check_sends = True
@@ -750,6 +850,15 @@ class CodexCliSolver(Solver):
             raise ChatGptWebCheckFailed("the check's reply was not the count the picture shows")
         return {"usage": usage} if usage else None
 
+    @staticmethod
+    def _usable(read: concurrent.futures.Future, question: Question) -> bool:
+        """Whether this finished read gave a reply an answer list can be made of, as ``answer_all`` judges it."""
+        try:
+            _booklet_replies(extract_json(read.result()), subject=question.subject, extras={})
+        except (ChatGptWebError, OSError, MemoryError, ValueError):
+            return False
+        return True
+
     @classmethod
     def _run(cls, question: Question, model: str) -> list[str]:
         # High: on this system's own pages it read as Extra High did (3.3% of characters wrong against 3.1% on a dark
@@ -757,7 +866,7 @@ class CodexCliSolver(Solver):
         # written mathematics, in 0.66 to 0.78 of the time (2026-11-16, M-36 and M-37; the operator's decision).
         effort = os.environ.get("ROKID_CODEX_EFFORT") or "high"
         timeout, locating = _time_allowed(len(question.document_pages))
-        with cls._workplace() as (directory, environment):
+        with cls._workplace(timeout) as (directory, environment):
             names = None
             if (os.environ.get("ROKID_CODEX_LOCATE") or "1") != "0":
                 names = cls._located(directory, environment, question.document_pages, model=model, timeout=locating)
@@ -771,21 +880,38 @@ class CodexCliSolver(Solver):
                        "prompt": _ANSWER_ONLY_SYSTEM + "\n\n" + grey_note(question.document_pages) + _ALL_TASK + note}
             if (os.environ.get("ROKID_CODEX_READS") or "2").strip() == "1":
                 return [cls._exec(directory, environment, **request)]
-            # Two independent reads of the same images at the same time: the second costs no more waiting.
+            # Two independent reads of the same images at the same time. Until 2026-11-17 the call returned when the
+            # slower one ended: one read back at 150 s and the other hung held the wearer to the whole limit.
+            began, running = time.monotonic(), []
             with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
-                pending = [pool.submit(cls._exec, directory, environment, reply_name=f"reply-{number}.json", **request)
-                           for number in (1, 2)]
+                pending = [pool.submit(cls._exec, directory, environment, reply_name=f"reply-{number}.json",
+                                       running=running, **request) for number in (1, 2)]
+                back, late = concurrent.futures.wait(pending, return_when=concurrent.futures.FIRST_COMPLETED)
+                first_s = time.monotonic() - began
+                more = max(_SECOND_READ_LEAST_S, first_s)
+                # A first read that failed, or whose reply no answer list can be made of, is waited behind as before.
+                if late and any(cls._usable(read, question) for read in back) and concurrent.futures.wait(
+                        late, timeout=more).not_done:
+                    for process in running:
+                        process.kill()  # nothing happens to the one that has ended
+                    print(json.dumps({"event": "codex_read_cut", "first_s": round(first_s, 1),
+                                      "waited_s": round(more, 1)}), flush=True)
             replies, failures = [], []
             for read in pending:
                 try:
                     replies.append(read.result())
-                except ChatGptWebError as error:
+                # Its own reply file unreadable or not UTF-8 fails this read, not the booklet (until 2026-11-17 it
+                # left as a run this host could not carry out, with the other read's reply in hand).
+                except (ChatGptWebError, OSError, MemoryError, ValueError) as error:
                     failures.append(error)
             if not replies:
-                raise next((error for error in failures if isinstance(error, ChatGptWebRateLimit)), failures[0])
+                # A usage limit first: it closes Work as well. Then a read that did not finish in time, which the
+                # server answers with the next route at once; a bare failure costs one more whole attempt before.
+                raise next((error for kind in (ChatGptWebRateLimit, ChatGptWebReplyIncomplete)
+                            for error in failures if isinstance(error, kind)), failures[0])
             for error in failures:
                 # The other read answers alone; which kind of failure it was is logged, never its text.
-                print(json.dumps({"event": "codex_read_failed", "type": type(error).__name__}), flush=True)
+                _log_cause("codex_read_failed", error)
             return replies
 
     def solve(self, *, question: Question, max_answer_len: int = 64) -> SolveResult:

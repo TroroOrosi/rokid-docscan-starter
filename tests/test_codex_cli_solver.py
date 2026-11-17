@@ -5,13 +5,16 @@ a stand-in `codex` written in Python that checks what it is given and writes the
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
+import select as select_module
 import socket
 import subprocess
 import sys
 import threading
 import time
+import types
 from pathlib import Path
 
 import pytest
@@ -63,11 +66,13 @@ if locating and os.environ.get("FAKE_CODEX_LOCATE_FAIL"):
     sys.stderr.write(os.environ["FAKE_CODEX_LOCATE_FAIL"])
     sys.exit(1)
 if locating:
+    time.sleep(float(os.environ.get("FAKE_CODEX_LOCATE_SLEEP", "0")))
     Path(args[args.index("-o") + 1]).write_text(os.environ.get("FAKE_CODEX_REGIONS", '{"images": []}'), encoding="utf-8")
     sys.exit(0)
 failure = os.environ.get("FAKE_CODEX_FAIL") or (
     "canary.jpg" not in sizes and os.environ.get("FAKE_CODEX_FAIL_2" if second else "FAKE_CODEX_FAIL_1"))
 if failure:
+    sys.stdout.write(os.environ.get("FAKE_CODEX_STDOUT", ""))
     sys.stderr.write(failure)
     sys.exit(1)
 if "canary.jpg" in sizes:
@@ -81,7 +86,10 @@ if "canary.jpg" in sizes:
     count = sum(1 for x in range(len(dark)) if dark[x] and not (x and dark[x - 1]))
     Path(args[args.index("-o") + 1]).write_text(os.environ.get("FAKE_CODEX_CANARY_REPLY", str(count)), encoding="utf-8")
     sys.exit(0)
-time.sleep(float(os.environ.get("FAKE_CODEX_SLEEP", "0")))
+time.sleep(float(second and os.environ.get("FAKE_CODEX_SLEEP_2") or os.environ.get("FAKE_CODEX_SLEEP", "0")))
+if second and os.environ.get("FAKE_CODEX_BAD_BYTES_2"):
+    output.write_bytes(b"\xff\xfe\x00 not UTF-8")
+    sys.exit(0)
 output.write_text(os.environ.get("FAKE_CODEX_REPLY_2", os.environ["FAKE_CODEX_REPLY"]) if second
                   else os.environ["FAKE_CODEX_REPLY"], encoding="utf-8")
 print("tokens used\n12,345")
@@ -107,7 +115,8 @@ def codex(tmp_path, monkeypatch):
     monkeypatch.setenv("ROKID_CHATGPT_SEND_ENABLED", "1")
     for name in ("FAKE_CODEX_FAIL", "FAKE_CODEX_LOGIN", "FAKE_CODEX_REGIONS", "FAKE_CODEX_LOCATE_FAIL",
                  "FAKE_CODEX_CANARY_REPLY", "FAKE_CODEX_REPLY_2", "FAKE_CODEX_FAIL_1", "FAKE_CODEX_FAIL_2",
-                 "FAKE_CODEX_SLEEP", "FAKE_CODEX_ROLLOUT"):
+                 "FAKE_CODEX_SLEEP", "FAKE_CODEX_ROLLOUT", "FAKE_CODEX_LOCATE_SLEEP", "FAKE_CODEX_SLEEP_2",
+                 "FAKE_CODEX_BAD_BYTES_2", "FAKE_CODEX_STDOUT", "ROKID_CODEX_TIMEOUT_S"):
         monkeypatch.delenv(name, raising=False)
     # The CLI's own folder is this test's: the check reads the session record its request leaves there.
     monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))
@@ -227,6 +236,58 @@ def test_a_usage_limit_is_a_rate_limit_so_the_booklet_moves_to_the_next_route(co
     monkeypatch.setenv("FAKE_CODEX_FAIL", "ERROR: You've hit your usage limit. Try again in 3 hours.")
     with pytest.raises(ChatGptWebRateLimit):
         codex_cli.CodexCliSolver().answer_all(question=_booklet(tmp_path))
+
+
+# The CLI's own sentence at its limit: as its --json events gave it on the phone on 2026-11-16 (M-34: exit 1, credits
+# to buy or a time to try again), in the words and with the typographic apostrophe its binary holds (codex 0.167.0 on
+# this PC, read 2026-11-18). How the same failure reads on stderr without --json was not recorded.
+_AT_LIMIT = ("You’ve hit your usage limit. Visit https://chatgpt.com/settings/usage to purchase more credits "
+             "or try again at 10:16 AM.")
+_NO_MESSAGE = "Warning: no last agent message; wrote empty content to reply.json"  # the binary's words, with -o
+
+
+@pytest.mark.parametrize("stdout, stderr", [
+    ("", "ERROR: " + _AT_LIMIT),
+    ("", _AT_LIMIT + "\n" + _NO_MESSAGE),
+    ("", "ERROR: Rate limit reached for requests. Please try again in 20s.\n" + _NO_MESSAGE),
+    (json.dumps({"type": "error", "message": _AT_LIMIT}), _NO_MESSAGE),
+    (json.dumps({"type": "turn.failed", "error": {"message": _AT_LIMIT}}), _NO_MESSAGE),
+])
+def test_the_clis_own_word_of_its_limit_is_a_usage_limit(codex, tmp_path, monkeypatch, stdout, stderr):
+    monkeypatch.setenv("FAKE_CODEX_STDOUT", stdout)
+    monkeypatch.setenv("FAKE_CODEX_FAIL", stderr)
+    with pytest.raises(ChatGptWebRateLimit):
+        codex_cli.CodexCliSolver().answer_all(question=_booklet(tmp_path))
+
+
+def test_the_clis_own_sentence_is_a_usage_limit_wherever_it_stands_in_what_the_cli_wrote(codex, tmp_path, monkeypatch):
+    """How the CLI ends its stderr at a real limit is not on record (M-34 kept a summary). Its own sentence is not
+    something a page says: it is taken anywhere there. Only the service's bare words need an error line at the end."""
+    after = "\n".join(f"tokens used: line {number}" for number in range(12))
+    monkeypatch.setenv("FAKE_CODEX_FAIL", "ERROR: " + _AT_LIMIT + "\n" + after)
+    with pytest.raises(ChatGptWebRateLimit):
+        codex_cli.CodexCliSolver().answer_all(question=_booklet(tmp_path))
+
+
+@pytest.mark.parametrize("stdout, stderr", [
+    # What the run had written of its reply before it failed for another cause.
+    ("The import quota was doubled, and the rate limit of the made-up reaction is its slowest step.",
+     "ERROR: stream disconnected before completion"),
+    # The same on stderr, where the CLI shows the model's messages as it goes.
+    ("", "codex\nThe import quota was doubled; the usage limit of the made-up hall is 200 people.\n"
+         "ERROR: stream disconnected before completion"),
+    # An event of the run that is not the CLI's word of its own failure.
+    (json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": "a rate limit and a quota"}}),
+     "ERROR: stream disconnected before completion"),
+])
+def test_a_failed_run_that_only_speaks_of_limits_is_not_taken_for_a_usage_limit(codex, tmp_path, monkeypatch, stdout, stderr):
+    """Until 2026-11-17 the words were looked for anywhere in what a failed run had written. A usage limit closes the
+    CLI and Work for the booklet: an English passage about quotas and a dropped connection sent it straight to Chat."""
+    monkeypatch.setenv("FAKE_CODEX_STDOUT", stdout)
+    monkeypatch.setenv("FAKE_CODEX_FAIL", stderr)
+    with pytest.raises(ChatGptWebError) as raised:
+        codex_cli.CodexCliSolver().answer_all(question=_booklet(tmp_path))
+    assert type(raised.value) is ChatGptWebError
 
 
 def test_a_run_that_fails_for_another_reason_is_a_send_that_did_not_happen(codex, tmp_path, monkeypatch):
@@ -379,6 +440,56 @@ def test_the_proxy_tunnels_port_443_by_name_and_refuses_anything_else(monkeypatc
             assert refused.recv(100).startswith(b"HTTP/1.1 4")
             refused.close()
     assert asked == [("chatgpt.com", 443)] and seen["received"] == b"ping"
+
+
+@pytest.mark.parametrize("allowed, kept", [(1650.0, 1650.0), (90.0, 600.0)])
+def test_the_proxy_keeps_a_silent_tunnel_for_as_long_as_the_run_may_take_and_ten_minutes_at_least(monkeypatch, allowed, kept):
+    """A tunnel through which nothing passed for 600 s was closed, whatever the run was allowed: the answers of more
+    than twelve pages may take longer (240 s and 30 s a page), and a stream cut while the model works ends the run as
+    a bare failure, which costs another whole attempt."""
+    waited = []
+
+    def select(read, write, failed, timeout):
+        waited.append(timeout)
+        return select_module.select(read, write, failed, timeout)
+
+    monkeypatch.setattr(codex_cli, "select", types.SimpleNamespace(select=select))  # the tunnel's own waits only
+    upstream = socket.socket()
+    upstream.bind(("127.0.0.1", 0))
+    upstream.listen(1)
+
+    def echo():
+        connection, _ = upstream.accept()
+        connection.recv(100)
+        connection.sendall(b"pong")
+        connection.close()
+
+    threading.Thread(target=echo, daemon=True).start()
+    monkeypatch.setattr(codex_cli, "_connect_upstream", lambda address, timeout=None: socket.create_connection(
+        ("127.0.0.1", upstream.getsockname()[1]), timeout=timeout))
+    with codex_cli.name_resolving_proxy(allowed) as port:
+        client = socket.create_connection(("127.0.0.1", port), timeout=5)
+        client.sendall(b"CONNECT chatgpt.com:443 HTTP/1.1\r\nHost: chatgpt.com:443\r\n\r\n")
+        assert client.recv(100).startswith(b"HTTP/1.1 200")
+        client.sendall(b"ping")
+        assert client.recv(100) == b"pong"
+        client.close()
+    assert waited and set(waited) == {kept}
+
+
+def test_a_run_tells_the_proxy_how_long_it_may_take(codex, tmp_path, monkeypatch):
+    asked = []
+
+    @contextlib.contextmanager
+    def proxy(idle_s=None):
+        asked.append(idle_s)
+        yield 9
+
+    monkeypatch.setattr(codex_cli, "_needs_proxy", lambda: True)
+    monkeypatch.setattr(codex_cli, "name_resolving_proxy", proxy)
+    codex_cli.CodexCliSolver().answer_all(question=_booklet(tmp_path, pages=20))
+
+    assert asked == [840.0], "240 s and 30 s a page: twenty pages may take longer than the 600 s a tunnel was kept"
 
 
 FLOW = r'''
@@ -707,6 +818,17 @@ def test_when_locating_fails_the_booklet_is_still_sent_as_before(codex, tmp_path
 
     [run] = _runs(codex())
     assert list(run["sizes"]) == ["page001.jpg"] and replies
+
+
+def test_a_locating_request_that_does_not_come_back_in_its_time_gives_the_booklet_up_at_once(codex, tmp_path, monkeypatch):
+    """Finding the pages took 20 s for 14 photos and 40 s for 31. A request that runs out its time means the CLI or
+    the service is stalling: until 2026-11-17 the photos then went whole and the reads still ran their full time,
+    the wearer waiting in the dark. The next route is asked at once, as after a read that did not finish."""
+    monkeypatch.setenv("FAKE_CODEX_LOCATE_SLEEP", "60")
+    monkeypatch.setenv("ROKID_CODEX_TIMEOUT_S", "4")
+    with pytest.raises(ChatGptWebReplyIncomplete):
+        codex_cli.CodexCliSolver().answer_all(question=_photo(tmp_path))
+    assert not _runs(codex()), "no read is started behind a locating request that timed out"
 
 
 def test_a_usage_limit_while_locating_is_a_rate_limit_and_nothing_more_runs(codex, tmp_path, monkeypatch):
@@ -1059,6 +1181,80 @@ def test_when_one_read_fails_the_other_answers_alone_and_nothing_is_marked(codex
     assert _shown(codex_cli.CodexCliSolver().answer_all(question=_booklet(tmp_path))) == [([1], "④", "ready", "")]
 
 
+def _logged(capsys, event):
+    return [json.loads(line) for line in capsys.readouterr().out.splitlines() if f'"{event}"' in line]
+
+
+def test_a_read_that_hangs_behind_a_finished_one_is_cut_and_the_finished_read_answers_alone(
+        codex, tmp_path, monkeypatch, capsys):
+    """Until 2026-11-17 the call returned when the slower read ended: one read back at 150 s and the other hung held
+    the wearer to the whole limit, ten minutes and more. The other read is given the first one's time again, two
+    minutes at least, and then its process is ended. Not half that time: two runs of one booklet of 47 pages ended
+    at 366 s and 586 s, so two healthy reads lie that far apart, and a read cut is a booklet nothing was compared
+    for."""
+    _twice(monkeypatch, _read((1, "④")), _read((1, "④")))
+    monkeypatch.setenv("ROKID_CODEX_LOCATE", "0")
+    monkeypatch.setenv("FAKE_CODEX_SLEEP", "3")
+    monkeypatch.setenv("FAKE_CODEX_SLEEP_2", "120")
+    monkeypatch.setenv("ROKID_CODEX_TIMEOUT_S", "30")
+    monkeypatch.setattr(codex_cli, "_SECOND_READ_LEAST_S", 0.5)
+    started = time.monotonic()
+    shown = _shown(codex_cli.CodexCliSolver().answer_all(question=_booklet(tmp_path)))
+
+    assert time.monotonic() - started < 20, "not the slower read's time, and not the limit"
+    assert shown == [([1], "④", "ready", "")]
+    [cut] = _logged(capsys, "codex_read_cut")
+    assert cut["waited_s"] >= cut["first_s"] >= 3.0, "as long again as the read that came back"
+    assert set(cut) == {"event", "first_s", "waited_s"}, "no reply text in the log"
+    assert [call["reply_file"] for call in _runs(codex())] == ["reply-1.json"], "the other never ended by itself"
+
+
+@pytest.mark.parametrize("first", ["fails", "is not an answer list"])
+def test_a_slower_read_is_waited_for_when_the_first_to_return_gave_nothing_usable(
+        codex, tmp_path, monkeypatch, capsys, first):
+    _twice(monkeypatch, _read((1, "④")), _read((1, "④")))
+    if first == "fails":
+        monkeypatch.setenv("FAKE_CODEX_FAIL_1", "error sending request for url (https://chatgpt.com/backend-api/codex/responses)")
+    else:
+        monkeypatch.setenv("FAKE_CODEX_REPLY", "I could not read the pages.")
+    monkeypatch.setenv("FAKE_CODEX_SLEEP_2", "4")
+    monkeypatch.setattr(codex_cli, "_SECOND_READ_LEAST_S", 0.5)
+
+    assert _shown(codex_cli.CodexCliSolver().answer_all(question=_booklet(tmp_path))) == [([1], "④", "ready", "")]
+    assert not _logged(capsys, "codex_read_cut")
+
+
+def test_a_read_whose_reply_file_cannot_be_read_fails_alone_and_the_other_read_answers(codex, tmp_path, monkeypatch, capsys):
+    """From the morning of 2026-11-17 an error of this host leaves the route as a run that did not finish. Raised by
+    one read's reply file (not UTF-8, unreadable), it took the whole booklet to the next route although the other
+    read had answered."""
+    _twice(monkeypatch, _read((1, "④")), _read((1, "④")))
+    monkeypatch.setenv("FAKE_CODEX_BAD_BYTES_2", "1")
+
+    assert _shown(codex_cli.CodexCliSolver().answer_all(question=_booklet(tmp_path))) == [([1], "④", "ready", "")]
+    [failed] = _logged(capsys, "codex_read_failed")
+    assert failed["type"] == "UnicodeDecodeError" and failed["at"] and set(failed) == {"event", "type", "at"}
+
+
+@pytest.mark.parametrize("first_failure, raised", [
+    ("error sending request for url (https://chatgpt.com/backend-api/codex/responses)", ChatGptWebReplyIncomplete),
+    ("ERROR: You've hit your usage limit. Try again in 3 hours.", ChatGptWebRateLimit),
+])
+def test_when_every_read_fails_one_that_did_not_finish_in_time_decides_unless_a_usage_limit_does(
+        codex, tmp_path, monkeypatch, first_failure, raised):
+    """Until 2026-11-17 the first read's failure was raised whatever the other's was: a bare failure beside a read
+    that ran out its time cost one more whole attempt 150 s later, where a run that did not finish is given to the
+    next route at once. A usage limit still comes first: it closes Work as well."""
+    _twice(monkeypatch, _read((1, "④")), _read((1, "④")))
+    monkeypatch.setenv("FAKE_CODEX_FAIL_1", first_failure)
+    monkeypatch.setenv("FAKE_CODEX_SLEEP_2", "60")
+    monkeypatch.setenv("ROKID_CODEX_TIMEOUT_S", "4")
+    monkeypatch.setenv("ROKID_CODEX_LOCATE", "0")  # the locating request has the same limit and is not what is tried
+    with pytest.raises(ChatGptWebError) as error:
+        codex_cli.CodexCliSolver().answer_all(question=_booklet(tmp_path))
+    assert type(error.value) is raised
+
+
 def test_a_second_reply_that_is_not_an_answer_list_leaves_the_first_alone(codex, tmp_path, monkeypatch):
     _twice(monkeypatch, _read((1, "④")), _read((1, "④")))
     monkeypatch.setenv("FAKE_CODEX_REPLY_2", "I could not read the pages.")
@@ -1232,3 +1428,49 @@ def test_a_label_of_words_is_no_row_of_boxes_and_is_compared_whole_as_before(cod
            _boxed("第1問", ("グラフの概形", "右上がり"), ("エネルギー", "保存される")))
     shown = _labelled(codex_cli.CodexCliSolver().answer_all(question=_booklet(tmp_path)))
     assert shown == [("グラフの概形", "右上がり", ""), ("エネルギー", "保存される", "")]
+
+
+def _unnumbered(*questions):
+    """One read of a paper with no answer numbers and no lettered boxes: (group, label, pages, answer)."""
+    return {"questions": [{"group": group, "label": label, "answer_no": [], "pages": pages, "status": "ready",
+                           "answer": answer, "missing_material": "", "diagrams": []}
+                          for group, label, pages, answer in questions]}
+
+
+def _paged(replies):
+    return [(item["label"], item["pages"], result.answer, result.extras.get("review_note", "")) for item, result in replies]
+
+
+def test_reads_that_name_the_same_questions_differently_are_compared_in_order_page_by_page(codex, tmp_path, monkeypatch):
+    """A paper with no answer numbers and no lettered boxes is compared by group and label, and one read writes
+    第1問 / (1) where the other writes nothing / 1 (1): nothing lined up, the list doubled and every item of both
+    reads was marked as listed by one read only. Then the k-th question a read gives for a page is the k-th the
+    other gives for that page."""
+    first = _unnumbered(("第1問", "(1)", [1], "12"), ("第1問", "(2)", [1], "右上がり"), ("第2問", "(1)", [2], "7"))
+    second = _unnumbered(("", "1 (1)", [1], "12"), ("", "1 (2)", [1], "右上がり"), ("", "2 (1)", [2], "8"))
+    _twice(monkeypatch, first, second)
+    shown = _paged(codex_cli.CodexCliSolver().answer_all(question=_booklet(tmp_path)))
+
+    assert [row[:3] for row in shown] == [("(1)", [1], "12"), ("(2)", [1], "右上がり"), ("(1)", [2], "7")]
+    assert [row[3] for row in shown[:2]] == ["", ""] and "8" in shown[2][3], "the pair that differs is marked as differing"
+
+
+@pytest.mark.parametrize("longer", ["second", "first"])
+def test_what_one_read_has_more_of_on_a_page_is_what_is_left_over_as_given_by_one_read(codex, tmp_path, monkeypatch, longer):
+    short = _unnumbered(("第1問", "(1)", [1], "12"), ("第2問", "(1)", [2], "7"))
+    long = _unnumbered(("", "1 (1)", [1], "12"), ("", "1 (2)", [1], "右上がり"), ("", "2 (1)", [2], "7"))
+    _twice(monkeypatch, *((short, long) if longer == "second" else (long, short)))
+    shown = _paged(codex_cli.CodexCliSolver().answer_all(question=_booklet(tmp_path)))
+
+    assert [row[1:3] for row in shown] == [([1], "12"), ([1], "右上がり"), ([2], "7")], "in its place, after its page's others"
+    assert [row[3] for row in shown] == ["", codex_cli._ONE_LISTED, ""]
+
+
+def test_reads_whose_labels_do_line_up_are_compared_by_label_as_before_whatever_their_order(codex, tmp_path, monkeypatch):
+    first = _unnumbered(("第1問", "(1)", [1], "12"), ("第1問", "(2)", [1], "3"), ("第1問", "(3)", [1], "5"))
+    second = _unnumbered(("第1問", "(2)", [1], "3"), ("第1問", "(1)", [1], "12"), ("第１問", "（３）", [1], "6"))
+    _twice(monkeypatch, first, second)
+    shown = _paged(codex_cli.CodexCliSolver().answer_all(question=_booklet(tmp_path)))
+
+    assert [row[0] for row in shown] == ["(1)", "(2)", "(3)"]
+    assert [bool(row[3]) for row in shown] == [False, False, True] and "6" in shown[2][3]
