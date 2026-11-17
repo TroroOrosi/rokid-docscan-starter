@@ -2382,7 +2382,17 @@ public final class DocScanController implements AutoCloseable {
                 if (!closed && saved.phase() == LocalCaptureSession.Phase.ANALYSIS && saved.documentId() > 0
                         && saved.nextUnsent() == null && saved.nextUnsentClip() == null) {
                     analysisStarted = true;
+                    // Finalizing the document and finalizing the reading can be repeated: the server skips pages it
+                    // has analysed, claims the reading once and does not start a batch beside one that runs
+                    // (app/main.py, read 2026-11-18). A connection lost in either, or a 408, 429 or 5xx, is therefore
+                    // tried again like a page upload; the first is held by the server for up to 150 s of gathering.
+                    // Making the session is not repeated: each call makes a new one, so a failure there stops as
+                    // before. Until 2026-11-18 any failure from here on stopped for good (register 3-4).
+                    // ponytail: tried again every five seconds without a limit, as page uploads are. A server that
+                    // answers 5xx for good shows "接続を待っています" until the wearer leaves; count the tries if met.
+                    httpInProgress = true;
                     destination.finalizeDocument(saved.documentId());
+                    httpInProgress = false;
                     if (saved.sessionId() == 0) saved.bindSession(destination.createExamSession(saved.documentId(), saved.examType()).getLong("session_id"));
                     serial.execute(() -> {
                         if (closed || localSession != saved) return;
@@ -2391,7 +2401,9 @@ public final class DocScanController implements AutoCloseable {
                         publish(RelayState.FINALIZING, List.of("解析中", "資料は保存済み", "カメラ停止"), "Local analysis session bound");
                     });
                     if (saved.listening() && !saved.mixed()) destination.attachDocumentAudio(saved.sessionId());
+                    httpInProgress = true;
                     finished = destination.finalizeReadingLocal(saved.sessionId());
+                    httpInProgress = false;
                     if (!closed) saved.setPhase("reading".equals(finished.optString("status"))
                             ? LocalCaptureSession.Phase.CAPTURE : LocalCaptureSession.Phase.REVIEW);
                 }
@@ -2404,8 +2416,8 @@ public final class DocScanController implements AutoCloseable {
                 }
             } catch (Exception error) {
                 failed = true;
-                retryable = error instanceof IOException
-                        && (audioAttachInProgress || (httpInProgress && !analysisStarted));
+                // httpInProgress: only around calls that can be repeated; local saves and the making of a session are not.
+                retryable = error instanceof IOException && (audioAttachInProgress || httpInProgress);
                 if (error instanceof DocScanApi.ApiException) {
                     int status = ((DocScanApi.ApiException) error).getStatusCode();
                     retryable &= status == 408 || status == 429 || status >= 500;

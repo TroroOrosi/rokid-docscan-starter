@@ -2681,6 +2681,96 @@ public class LocalReviewTest {
         }
     }
 
+    /**
+     * Register 3-4. Handing the booklet over is three calls, and the first is held by the server for as long as it
+     * gathers the pages' clips (up to 150 s): a connection that drops in that time, or a server that answers 503,
+     * ended in "解析を停止しました" with no further try, and the wearer had to leave the app and take the reading up
+     * again. Finalizing the document and finalizing the reading can be repeated (read in app/main.py, 2026-11-18), so
+     * they are tried again every five seconds as the sending of pages is.
+     */
+    @Test public void aConnectionLostWhileTheBookletIsHandedOverIsTriedAgain() throws Exception {
+        List<String> requests = new java.util.concurrent.CopyOnWriteArrayList<>();
+        List<List<String>> hud = new java.util.concurrent.CopyOnWriteArrayList<>();
+        try (MockWebServer server = new MockWebServer()) {
+            server.setDispatcher(new Dispatcher() {
+                private int finalized, read;
+                @Override public MockResponse dispatch(RecordedRequest request) {
+                    String path = request.getPath();
+                    requests.add(path);
+                    if ("/v1/documents/17/finalize".equals(path) && ++finalized == 1) return new MockResponse()
+                            .setBody("{\"document_id\":17,\"status\":\"ready\"}")
+                            .setSocketPolicy(okhttp3.mockwebserver.SocketPolicy.DISCONNECT_DURING_RESPONSE_BODY);
+                    if ("/v1/exam-sessions".equals(path)) return new MockResponse().setBody("{\"session_id\":7}");
+                    if (path.contains("finalize-reading")) return ++read == 1 ? new MockResponse().setResponseCode(503).setBody("{}")
+                            : new MockResponse().setBody("{\"status\":\"reviewing\",\"solving\":\"background\"}");
+                    return new MockResponse().setBody("{}");
+                }
+            });
+            DocScanController controller = new DocScanController(RuntimeEnvironment.getApplication(), new Surface(), null,
+                    (state, lines, diagnostic) -> hud.add(lines), new ClientIdentity("test", "test", "test"));
+            try {
+                String id = handedOver(controller, server);
+                ClockedWatchdog clock = installClockedWatchdog(controller);
+                controller.resumeLocalSession(id); barrier(controller);
+                LocalCaptureSession saved = (LocalCaptureSession)get(controller, "localSession");
+                waitForUpload(controller);
+                assertEquals("the connection dropped: not a stop", RelayState.FINALIZING, controller.getState());
+                assertEquals("and the wearer is told what is waited for", "接続を待っています", hud.get(hud.size() - 1).get(0));
+                assertFalse((boolean)get(controller, "localUploadBlocked"));
+
+                clock.advanceBy(controller, 5000); waitForUpload(controller); // the document is finalized; the reading meets a 503
+                assertEquals(RelayState.FINALIZING, controller.getState());
+                assertEquals(7, saved.sessionId());
+
+                clock.advanceBy(controller, 5000); waitForUpload(controller);
+                assertEquals("the booklet is handed over", LocalCaptureSession.Phase.REVIEW, saved.phase());
+                assertEquals(RelayState.REVIEW, controller.getState());
+                assertEquals("its session is made once", 1, java.util.Collections.frequency(requests, "/v1/exam-sessions"));
+            } finally { controller.close(); }
+        }
+    }
+
+    /**
+     * Making the session is not repeated by itself: the server makes a new one at every call (POST /v1/exam-sessions
+     * inserts a row each time), so a try whose answer was lost would leave a second session for the same booklet.
+     */
+    @Test public void aFailedMakingOfTheSessionStopsAsBeforeAndIsNotRepeatedByItself() throws Exception {
+        List<String> requests = new java.util.concurrent.CopyOnWriteArrayList<>();
+        try (MockWebServer server = new MockWebServer()) {
+            server.setDispatcher(new Dispatcher() {
+                @Override public MockResponse dispatch(RecordedRequest request) {
+                    requests.add(request.getPath());
+                    return "/v1/exam-sessions".equals(request.getPath()) ? new MockResponse().setResponseCode(503).setBody("{}")
+                            : new MockResponse().setBody("{}");
+                }
+            });
+            DocScanController controller = new DocScanController(RuntimeEnvironment.getApplication(), new Surface(), null,
+                    (state, lines, diagnostic) -> {}, new ClientIdentity("test", "test", "test"));
+            try {
+                String id = handedOver(controller, server);
+                ClockedWatchdog clock = installClockedWatchdog(controller);
+                controller.resumeLocalSession(id); barrier(controller);
+                waitForUpload(controller);
+                assertEquals(RelayState.ERROR, controller.getState());
+                clock.advanceBy(controller, 5000); waitForUpload(controller);
+                assertEquals(1, java.util.Collections.frequency(requests, "/v1/exam-sessions"));
+            } finally { controller.close(); }
+        }
+    }
+
+    /** The id of a reading whose one page the server holds, ended and waiting to be handed over; the controller is set to its server. */
+    private static String handedOver(DocScanController controller, MockWebServer server) throws Exception {
+        String address = server.url("/").toString().replaceAll("/+$", "");
+        LocalCaptureSession saved = LocalCaptureSession.create(
+                new File(RuntimeEnvironment.getApplication().getFilesDir(), "local-scans"), address, false);
+        saved.commit(new CaptureReviewStore.Pending(0, new byte[]{1, 2, 3}, "", 270, ""));
+        saved.acknowledge(saved.page(0));
+        saved.bindDocument(17);
+        saved.setPhase(LocalCaptureSession.Phase.ANALYSIS);
+        controller.configureForLocalStart(address, "", 270); barrier(controller);
+        return saved.id();
+    }
+
     /** One page saved, a second being taken (the end asked for over it or not), and the server refuses the first thing sent. */
     private static void sendingStopsWhileASecondPageIsBeingTaken(DocScanController controller, Surface surface,
             MockWebServer server, boolean endAsked) throws Exception {
