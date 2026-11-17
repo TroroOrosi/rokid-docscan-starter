@@ -507,8 +507,8 @@ public class LocalReviewTest {
             assertEquals(CaptureReviewStore.Pending.CAPTURE_METADATA_UNRESOLVED, held.ocrFailure);
             assertEquals(metadataPresent, held.provenance != null);
             if (source != null) assertEquals(source.captureId, held.provenance.captureId);
+            // The end over such a page is aDoubleTapOverAPageThatCanOnlyBeRetaken...: it drops the page from the review.
             commitVisible(controller, surface);
-            controller.onGlassesAction(GlassesInputAction.BACK); barrier(controller);
             controller.confirmPendingCapture(); barrier(controller);
             LocalCaptureSession saved = (LocalCaptureSession)get(controller, "localSession");
             assertEquals(0, saved.pageCount()); assertNull(saved.nextUnsent()); assertTrue(saved.captureGap());
@@ -642,10 +642,16 @@ public class LocalReviewTest {
             assertEquals(1, saved.pageCount()); assertTrue(saved.captureGap());
             CaptureReviewStore.Pending held = ((CaptureReviewStore)get(controller, "captureReview")).peek();
             assertArrayEquals(new byte[]{4, 5, 6}, held.jpeg);
+            commitVisible(controller, surface); controller.confirmPendingCapture(); barrier(controller);
+            assertEquals("its own review cannot turn an unverified scene association into acceptance", 1, saved.pageCount());
+            assertSame(held, ((CaptureReviewStore)get(controller, "captureReview")).peek());
             controller.onGlassesAction(GlassesInputAction.BACK); barrier(controller);
             commitVisible(controller, surface); controller.confirmPendingCapture(); barrier(controller);
             assertEquals("finish cannot turn an unverified scene association into acceptance", 1, saved.pageCount());
-            assertSame(held, ((CaptureReviewStore)get(controller, "captureReview")).peek());
+            // From 2026-11-18 the end takes such a page out of the review instead of showing it again for ever; here
+            // the page that was missed still holds the end back, and the wearer is told to go back to it.
+            assertNull(((CaptureReviewStore)get(controller, "captureReview")).peek());
+            assertEquals(1, saved.directory().listFiles((directory, name) -> name.startsWith("unresolved-")).length);
             assertEquals(LocalCaptureSession.Phase.CAPTURE, saved.phase());
         } finally { controller.close(); }
     }
@@ -2553,6 +2559,70 @@ public class LocalReviewTest {
             assertNotNull("the first page is looked for again", surface.pageReady);
             assertEquals(LocalCaptureSession.Phase.CAPTURE, ((LocalCaptureSession)get(controller, "localSession")).phase());
         } finally { controller.close(); }
+    }
+
+    /**
+     * Found by reading on 2026-11-18. A still whose capture result does not match what was asked of the sensor is kept
+     * but can never be saved, and its camera is closed as unknown: the wearer leaves the app and takes the reading up
+     * again. There that page stood under review without its three seconds, and each double tap showed it once more:
+     * the capture could be ended only by retaking the page first. The end drops such a page (its original stays in the
+     * reading's folder) and goes on with the pages that were saved.
+     */
+    @Test public void aDoubleTapOverAPageThatCanOnlyBeRetakenDropsItAndEndsTheCaptureWithThePagesSaved() throws Exception {
+        Surface surface = new Surface(); surface.holdForPage = true;
+        DocScanController controller = takenUpAgainAtAPageThatCanOnlyBeRetaken(1, surface);
+        try {
+            LocalCaptureSession saved = (LocalCaptureSession)get(controller, "localSession");
+            assertEquals(RelayState.CAPTURE_REVIEW, controller.getState());
+            assertFalse("it has no three seconds: it cannot be saved", (boolean)get(controller, "autoCommitArmed"));
+
+            controller.onGlassesAction(GlassesInputAction.BACK); barrier(controller);
+
+            assertNull("the page is out of the review", ((CaptureReviewStore)get(controller, "captureReview")).peek());
+            assertEquals("it was not saved as a page", 1, saved.pageCount());
+            assertEquals("the capture is over", LocalCaptureSession.Phase.ANALYSIS, saved.phase());
+            assertFalse(new File(saved.directory(), "pending.bin").exists());
+            File[] kept = saved.directory().listFiles((directory, name) -> name.startsWith("unresolved-"));
+            assertEquals("its original stays on the glasses", 1, kept.length);
+            assertArrayEquals(new byte[]{7, 8, 9}, new CaptureReviewPersistence(kept[0]).readPending().jpeg);
+        } finally { controller.close(); }
+    }
+
+    /** With nothing saved there is nothing to end: the page is dropped all the same and the first page is looked for again. */
+    @Test public void aDoubleTapOverAPageThatCanOnlyBeRetakenWithNothingSavedLeavesTheCaptureRunning() throws Exception {
+        Surface surface = new Surface(); surface.holdForPage = true;
+        DocScanController controller = takenUpAgainAtAPageThatCanOnlyBeRetaken(0, surface);
+        try {
+            LocalCaptureSession saved = (LocalCaptureSession)get(controller, "localSession");
+            controller.onGlassesAction(GlassesInputAction.BACK); barrier(controller);
+
+            assertNull(((CaptureReviewStore)get(controller, "captureReview")).peek());
+            assertEquals(0, saved.pageCount());
+            assertEquals(LocalCaptureSession.Phase.CAPTURE, saved.phase());
+            assertFalse("the end was not taken and does not stay asked for", (boolean)get(controller, "finishCaptureRequested"));
+            assertTrue(controller.isAutoCaptureEnabled());
+            assertNotNull("the first page is looked for again", surface.pageReady);
+        } finally { controller.close(); }
+    }
+
+    /** A reading with {@code pages} saved pages and one more under review whose capture result did not match, taken up again. */
+    private static DocScanController takenUpAgainAtAPageThatCanOnlyBeRetaken(int pages, Surface surface) throws Exception {
+        Context context = RuntimeEnvironment.getApplication();
+        LocalCaptureSession saved = LocalCaptureSession.create(new File(context.getFilesDir(), "local-scans"), "http://phone:8000", false);
+        for (int index = 0; index < pages; index++) {
+            byte[] jpeg = {1, 2, (byte)index};
+            saved.commit(new CaptureReviewStore.Pending(index, jpeg, "", 270, "", PageFraming.UNKNOWN, 1000L,
+                    nativeSource(jpeg, 100 + index).bind(saved.id(), index, 270)));
+        }
+        byte[] unmatched = {7, 8, 9};
+        new CaptureReviewPersistence(new File(saved.directory(), "pending.bin")).save(new CaptureReviewStore.Pending(
+                pages, unmatched, "", 270, CaptureReviewStore.Pending.CAPTURE_METADATA_UNRESOLVED, PageFraming.UNKNOWN, 2000L,
+                nativeSource(unmatched, 200).bind(saved.id(), pages, 270)));
+        DocScanController controller = new DocScanController(context, surface, null,
+                (state, lines, diagnostic) -> {}, new ClientIdentity("test", "test", "test"));
+        controller.configureForLocalStart("http://phone:8000", "", 270); barrier(controller);
+        controller.resumeLocalSession(saved.id()); barrier(controller);
+        return controller;
     }
 
     /**

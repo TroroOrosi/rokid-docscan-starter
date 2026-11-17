@@ -444,6 +444,18 @@ final class LocalCaptureSession {
         }
     }
 
+    /**
+     * The photo under review leaves the review without becoming a page: it can never be accepted, and the end was
+     * asked for over it. Its record stays in this reading's folder under a name that nothing loads, so the original
+     * is kept and is not offered for review again when the reading is taken up.
+     */
+    synchronized void setAsidePending() throws IOException {
+        File pending = new File(directory, "pending.bin");
+        if (pending.isFile()) {
+            CaptureReviewPersistence.moveReplacing(pending, new File(directory, "unresolved-" + digest(pending) + ".bin"));
+        }
+    }
+
     private void removeFirstCandidate() throws IOException {
         Properties next = copy();
         int count = candidateCount();

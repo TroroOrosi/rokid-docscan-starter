@@ -958,6 +958,8 @@ public final class DocScanController implements AutoCloseable {
         link.pausePreview();
         if (captureLease.isUnresolved() || ocrInFlight
                 || state == RelayState.UPLOADING || state == RelayState.FINALIZING) return;
+        CaptureReviewStore.Pending held = captureReview.peek();
+        if (held != null && held.needsSceneRecapture() && dropPageThatCanOnlyBeRetaken(held)) state = RelayState.READING;
         if (state == RelayState.CAPTURE_REVIEW) {
             if (!autoCommitArmed) publishCaptureReview(captureReview.peek(), "Retry retained photo after operator action", true);
             return; // keep the last full review window
@@ -970,6 +972,33 @@ public final class DocScanController implements AutoCloseable {
         }
         state = RelayState.READING;
         finishReadingNow();
+    }
+
+    /**
+     * The end was asked for over a page that can never be saved: its capture result did not match what was asked of
+     * the sensor, and only a retake settles that. It leaves the review unsaved, and its original stays in the
+     * reading's folder. Left under review it was shown again, without its three seconds, at every double tap: the
+     * capture could be ended only by retaking that page first. False when the original could not be moved: the page
+     * then stays under review as before.
+     */
+    private boolean dropPageThatCanOnlyBeRetaken(CaptureReviewStore.Pending held) {
+        if (localSession == null) return false;
+        try {
+            localSession.setAsidePending();
+            captureReviewPersistence.clear();
+        } catch (IOException kept) {
+            return false;
+        }
+        captureReview.clear(held);
+        captureTargetPageIndex = -1;
+        autoCommitArmed = false;
+        reviewGeneration++;
+        reviewWindow = null;
+        manualCaptureRequested = false;
+        listener.onCaptureReviewCleared();
+        listener.onUpdate(state, currentHudLines, "Page index " + held.pageIndex
+                + " left the review unsaved at the end: it could only be retaken; its original is kept");
+        return true;
     }
 
     /** A hidden/covered still must receive a fresh uninterrupted review window. */

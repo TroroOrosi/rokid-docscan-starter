@@ -192,6 +192,25 @@ public class LocalCaptureSessionTest {
         assertTrue(LocalCaptureSession.load(folder.getRoot(), session.id()).captureGap());
     }
 
+    /** A photo that leaves the review without becoming a page: kept in the reading's folder, offered for review no more. */
+    @Test public void aPhotoSetAsideFromTheReviewKeepsItsOriginalAndIsNoLongerPending() throws Exception {
+        LocalCaptureSession session = LocalCaptureSession.create(folder.getRoot(), "http://phone:8000", false);
+        session.commit(nativePhoto(session, 0, 1));
+        CaptureReviewStore.Pending unmatched = nativePhoto(session, 1, 9);
+        File pending = new File(session.directory(), "pending.bin");
+        new CaptureReviewPersistence(pending).save(unmatched);
+
+        session.setAsidePending();
+        session.setAsidePending(); // nothing under review: nothing to do
+
+        assertFalse(pending.exists());
+        File[] kept = session.directory().listFiles((directory, name) -> name.startsWith("unresolved-"));
+        assertEquals(1, kept.length);
+        assertTrue("the original and what was known of it are whole", new CaptureReviewPersistence(kept[0]).matches(unmatched));
+        LocalCaptureSession restarted = LocalCaptureSession.load(folder.getRoot(), session.id());
+        assertEquals("it did not become a page", 1, restarted.pageCount());
+    }
+
     private static CaptureReviewStore.Pending nativePhoto(LocalCaptureSession session, int index, int value) {
         byte[] jpeg = {(byte)value, 2, 3};
         CaptureProvenance source = CaptureProvenance.nativeStill(jpeg, 4032, 3024,
