@@ -2613,6 +2613,8 @@ public class LocalReviewTest {
             byte[] jpeg = {1, 2, (byte)index};
             saved.commit(new CaptureReviewStore.Pending(index, jpeg, "", 270, "", PageFraming.UNKNOWN, 1000L,
                     nativeSource(jpeg, 100 + index).bind(saved.id(), index, 270)));
+            saved.bindDocument(17);
+            saved.acknowledge(saved.page(index)); // the server holds it already: nothing is left to send
         }
         byte[] unmatched = {7, 8, 9};
         new CaptureReviewPersistence(new File(saved.directory(), "pending.bin")).save(new CaptureReviewStore.Pending(
@@ -2622,6 +2624,8 @@ public class LocalReviewTest {
                 (state, lines, diagnostic) -> {}, new ClientIdentity("test", "test", "test"));
         controller.configureForLocalStart("http://phone:8000", "", 270); barrier(controller);
         controller.resumeLocalSession(saved.id()); barrier(controller);
+        waitForUpload(controller); // the pass that taking a reading up starts: it finds nothing to send
+        set(controller, "localNetworkBusy", true); // and no later pass reaches for the network in these tests
         return controller;
     }
 
