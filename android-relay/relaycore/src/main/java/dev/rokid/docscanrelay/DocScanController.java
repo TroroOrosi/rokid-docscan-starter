@@ -913,9 +913,11 @@ public final class DocScanController implements AutoCloseable {
             // one notice is spent, so the return is gone through again now that a page can be asked for.
             if (!capturePaused) { resumeCaptureNow(); return; }
             if (captureLease.isUnresolved()) {
-                // A clip being recorded ends here and what it has is the page. A still cannot be cut short: it
-                // lands first, and handlePhoto closes its camera. Either page waits, unseen, for the return.
-                if (clipInbox != null) link.pausePreview();
+                // A clip being recorded ends here and what it has is the page. A still the camera has been asked
+                // for cannot be cut short: it lands first, and handlePhoto closes its camera. Either page waits,
+                // unseen, for the return. A still that was only being prepared (up to ten seconds of waiting for
+                // a still head) is given up by the camera, which answers through onPhotoNotStarted.
+                link.pausePreview();
                 listener.onUpdate(state, currentHudLines, "Capture paused by the wearer; the page in hand is kept");
                 return;
             }
@@ -1952,6 +1954,10 @@ public final class DocScanController implements AutoCloseable {
                     finishLocalCaptureWhenCameraIdle();
                     return;
                 }
+                // A failure stopped the capture while this page was being asked for (fail() stops the camera, and a
+                // photo it was only preparing is given up at once): the failure stays in view. "Hold still" in its
+                // place read as a capture going on, with no page looked for.
+                if (state == RelayState.ERROR) return;
                 CaptureReviewStore.Pending pending = captureReview.peek();
                 if (pending != null) {
                     // With its three seconds: on the glasses a review is the photo alone, and shown without them

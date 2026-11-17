@@ -1938,6 +1938,26 @@ public class GlassCameraWarmSessionTest {
         assertEquals(1, ManagerShadow.devices.size()); assertTrue(failures.isEmpty());
     }
 
+    /**
+     * A tap (pause) or a double tap (end) while a photo was being prepared: up to ten seconds of waiting for a still
+     * head, with nothing asked of the camera yet. The pause kept that preparation, so the camera stayed open behind
+     * a cleared display and took whatever was in view once the head came to rest (found by reading, 2026-11-18).
+     */
+    @Test public void pausingAPreparationThatHasAskedNothingOfTheCameraGivesThePhotoUp() {
+        camera.captureOnce(); idle(100); frame(180); idle(500); // no settled exposure yet: still preparing
+        DocScanTestCamera device = firstDevice();
+        assertEquals(0, device.session.captures);
+        camera.pausePreview(); idle(0);
+        assertEquals("reported as a photo that was never started", List.of("camera not still or AF/AE not ready"), failures);
+        assertTrue("the camera stops at once", device.closed);
+        idle(10_000);
+        assertEquals("and the ten seconds do not report it a second time", 1, failures.size());
+        assertEquals(0, device.session.captures); assertEquals(0, delivered);
+        assertFalse((Boolean)ReflectionHelpers.getField(camera, "unknown"));
+        camera.captureOnce(); idle(100); readyFrame(); idle(400); readyFrame(); idle(50);
+        assertEquals("the next photo is taken as any other", 1, currentDevice().session.captures);
+    }
+
     @Test public void aColdManualShotAlsoWaitsForFreshStablePreviewAndMetering() {
         CharacteristicsShadow.fixedFocus = true;
         camera.captureOnce(); idle(100); frame(180); idle(500);

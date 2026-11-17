@@ -697,7 +697,18 @@ final class GlassCamera implements PageCamera {
             previewRequested = false;
             pageReady = null;
             futurePages = null;
+            // A page's own photo that is still being prepared: nothing has been asked of the sensor, so it is given
+            // up and reported as not started. Kept, it was taken up to ten seconds later of whatever was then in
+            // view, behind a display the wearer had cleared or after the end they had asked for. A request already
+            // issued lands as before, and deliverJpeg closes the camera then.
+            boolean givenUp = capturePending && mode == Mode.NATIVE_STILL && activeFuturePage == null
+                    && activeAlternative == null && (generation == 0 || settled);
+            if (givenUp) {
+                capturePending = false;
+                handler.removeCallbacks(prepareTimeout);
+            }
             if (!capturePending) { stillness.cancel(); stopPreview(); }
+            if (givenUp && !closed && !unknown) callback.onCaptureNotReady();
         });
     }
 

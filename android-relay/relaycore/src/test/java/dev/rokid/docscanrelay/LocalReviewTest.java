@@ -1581,9 +1581,65 @@ public class LocalReviewTest {
         pausedWithAPageInHand(true);
     }
 
-    /** A still cannot be cut short: it lands first, as before, and its camera closes then. */
+    /** A still the camera has been asked for cannot be cut short: it lands first, as before, and its camera closes then. */
     @Test public void aTapWhileAStillIsInHandLetsItLandAndThatPhotoWaitsUnsavedForTheReturn() throws Exception {
         pausedWithAPageInHand(false);
+    }
+
+    /**
+     * A still is prepared for up to ten seconds before the camera is asked for it (the head has to be still). A tap
+     * in that time cleared the display and left the camera to itself: it took whatever was in view when the head came
+     * to rest, and that photo was saved after its review on return. The camera is told of the tap; it gives up a photo
+     * it has not asked for and says so, and the page is looked for again on return.
+     */
+    @Test public void aTapWhileAStillIsOnlyBeingPreparedGivesItUpAndThePageIsLookedForAgainOnReturn() throws Exception {
+        Surface surface = new Surface(); surface.holdForPage = true;
+        DocScanController controller = waitingLocalController(surface);
+        try {
+            controller.startLocalSession(false); barrier(controller);
+            set(controller, "localNetworkBusy", true); // no network in this test
+            issueInspectionPhoto(controller, 0, false);
+            surface.pageReady = null;
+            int pauses = surface.pauses;
+
+            controller.toggleCapturePause(); barrier(controller);
+            assertEquals("the still camera is told of the tap too", pauses + 1, surface.pauses);
+            controller.onPhotoNotStarted(); barrier(controller); // its answer: nothing had been asked of the sensor
+            assertTrue(controller.isCapturePaused());
+            assertFalse(((CaptureLease) get(controller, "captureLease")).isUnresolved());
+            assertNull("no page is looked for behind a cleared display", surface.pageReady);
+            assertNull(((CaptureReviewStore) get(controller, "captureReview")).peek());
+
+            controller.toggleCapturePause(); barrier(controller);
+            assertNotNull("the page that was not taken is looked for again", surface.pageReady);
+            assertEquals(1, surface.photos);
+        } finally { controller.close(); }
+    }
+
+    /**
+     * A failure stops the camera, and a camera that is stopped while it only prepares a photo answers "not started".
+     * That answer put "hold still" in the failure's place: it read as a capture going on, and no page was looked for.
+     */
+    @Test public void aFailureShownWhileAPageWasBeingAskedForIsNotReplacedByHoldStill() throws Exception {
+        Surface surface = new Surface(); surface.holdForPage = true;
+        List<List<String>> hud = new java.util.concurrent.CopyOnWriteArrayList<>();
+        DocScanController controller = new DocScanController(RuntimeEnvironment.getApplication(), surface, null,
+                (state, lines, diagnostic) -> hud.add(lines), new ClientIdentity("test", "test", "test"));
+        try {
+            controller.configureForLocalStart("http://phone:8000", "", 270);
+            controller.startLocalSession(false); barrier(controller);
+            set(controller, "localNetworkBusy", true); // no network in this test
+            issueInspectionPhoto(controller, 0, false);
+            call(controller, "fail", new Class<?>[]{String.class, Throwable.class}, "保存・送信処理を停止しました", null);
+            assertEquals(RelayState.ERROR, controller.getState());
+            List<String> failure = hud.get(hud.size() - 1);
+
+            controller.onPhotoNotStarted(); barrier(controller); // the stopped camera gives the photo up
+
+            assertFalse("the page is no longer awaited", ((CaptureLease) get(controller, "captureLease")).isUnresolved());
+            assertEquals(RelayState.ERROR, controller.getState());
+            assertEquals("the failure is what the wearer still reads", failure, hud.get(hud.size() - 1));
+        } finally { controller.close(); }
     }
 
     private static void pausedWithAPageInHand(boolean clips) throws Exception {
@@ -1601,8 +1657,9 @@ public class LocalReviewTest {
 
                 controller.toggleCapturePause(); barrier(controller);
                 assertTrue(controller.isCapturePaused());
-                if (clips) assertEquals("the camera is told to stop at once: the clip ends with the frames it has", pauses + 1, surface.pauses);
-                else assertEquals("the still in hand keeps its camera", pauses, surface.pauses);
+                // A clip ends with the frames it has. A still the camera was asked for lands first; one it was only
+                // preparing is given up (GlassCamera.pausePreview tells the two apart, the controller cannot).
+                assertEquals("the camera is told at once", pauses + 1, surface.pauses);
                 controller.onPhoto(jpeg, source); barrier(controller);
                 assertTrue("the camera is stopped once the page has landed", surface.pauses > pauses);
 
