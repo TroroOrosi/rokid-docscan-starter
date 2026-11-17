@@ -902,6 +902,14 @@ public final class DocScanController implements AutoCloseable {
 
     private void pauseCaptureNow() {
         autoRunGeneration++; // a page-ready callback already on its way must not arm a photo
+        // The review's countdown from before the pause is dead, whenever it falls due. It used to be stopped only by
+        // the pause flag, which the tap that brings the wearer back takes off on its own thread: a countdown that fell
+        // due behind the cleared display, while this thread was busy, then saved the page before the return was
+        // worked off, without the review a return gives it (found by CaptureInvariantsTest, 2026-11-18).
+        // Unarmed with it: the return and the end both show an unarmed review afresh with its three seconds. Left
+        // armed, an end that overtook the return waited for the countdown that had just been retired.
+        reviewGeneration++;
+        autoCommitArmed = false;
         if (state == RelayState.AIMING || state == RelayState.STABILIZING) {
             // Nothing has been asked of the camera yet: the page stays untaken and is looked for again on return.
             clearArmedCapture();
@@ -986,6 +994,9 @@ public final class DocScanController implements AutoCloseable {
         if (localSession == null) return false;
         try {
             localSession.setAsidePending();
+            // The mark such a photo leaves (a scene seen and not taken) goes with it: left standing, it refused this
+            // very end, or, with no page saved, stopped the capture that then goes on (CaptureInvariantsTest).
+            freeUnwatchedGap(localSession);
             captureReviewPersistence.clear();
         } catch (IOException kept) {
             return false;
@@ -1802,7 +1813,10 @@ public final class DocScanController implements AutoCloseable {
                 publishCaptureReview(
                         pending,
                         "Retake did not start; previous review photo retained: "
-                                + error.getMessage());
+                                + error.getMessage(),
+                        // On the glasses the photo that stands gets its three seconds again: shown without them
+                        // it stayed for good and no page was looked for (the frozen review of 2026-11-17).
+                        link.supportsLocalCaptureReview());
             } else {
                 fail(
                         photoRequestMayBeActive
@@ -2503,7 +2517,11 @@ public final class DocScanController implements AutoCloseable {
         if (replacementRotation != null) {
             imageRotation = replacementRotation;
         }
-        reacquiringCaptureGap = localSession != null && localSession.captureGap() && pending.hasOcrFailure();
+        // A retake of the retake still closes the gap the first photo left: asked only of the photo now under review,
+        // the second retake forgot it, the save kept the gap, automatic capture stopped and the end was refused
+        // although every page was saved (found by CaptureInvariantsTest, 2026-11-18).
+        reacquiringCaptureGap = localSession != null && localSession.captureGap()
+                && (reacquiringCaptureGap || pending.hasOcrFailure());
         stopFutureObservation(() -> {
             if (!captureLease.isUnresolved() && state == RelayState.CAPTURE_REVIEW
                     && captureReview.peek() == pending) armCaptureAt(pending.pageIndex, true);

@@ -18,7 +18,6 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
-import org.junit.Ignore;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.robolectric.RobolectricTestRunner;
@@ -80,23 +79,17 @@ public class CaptureInvariantsTest {
 
     @Test public void randomGesturesCameraAnswersAndPassingTimeKeepTheCaptureInvariants() throws Exception {
         for (long seed = 1; seed <= SEEDS; seed++) {
-            Finding found = explore(null, seed, true);
+            Finding found = explore(null, seed);
             if (found != null) {
                 fail("seed " + seed + " violates " + found.broken + "\nsteps: " + found.steps
-                        + "\nshortened: " + shorten(found, true));
+                        + "\nshortened: " + shorten(found));
             }
         }
     }
 
-    // ---- violations found by the random test: each is held by an ignored test and kept out of the drawn sequences ----
-    // With all four KNOWN_ constants false the random test finds each of the four within its 300 seeds (2026-11-18).
-
-    /**
-     * Guard for {@link #aReviewCutShortByAPauseIsNotSavedByItsOldCountdownAsTheWearerReturns}: while it is true, a
-     * burst that begins behind a cleared display with a photo under review does not let time pass and then bring the
-     * wearer back. Take it out together with that test's {@code @Ignore} once the controller holds I3 there.
-     */
-    private static final boolean KNOWN_I3_RETURN_AFTER_TIME_PASSED_WITH_THE_THREAD_HELD = true;
+    // ---- sequences the random test found on 2026-11-18, each since fixed in the controller ----------------------
+    // Each test's text says what the fault was. The first four were found within 300 seeds, the last two with
+    // 3000 (one of them made by the first fix of the first). With all six fixed, 3000 seeds find nothing.
 
     /**
      * Found by the random test. The wearer clears the display during a review; the review's three seconds run out
@@ -108,17 +101,9 @@ public class CaptureInvariantsTest {
      * time ({@code LocalReviewTest.aTapDuringTheReviewClearsItAndThePageIsReviewedAfreshOnReturn}: "the countdown
      * from before the tap is dead"). Nothing stops: the capture goes on with the next page.
      */
-    @Ignore("violates I3: a review's countdown from before a pause saves the page as the wearer returns, when it fell due"
-            + " while the controller's thread was held; sequence: PAGE, ACK, ACK, WAIT:1500, PHOTO, ACK, TAP, WAIT:3000+TAP")
     @Test public void aReviewCutShortByAPauseIsNotSavedByItsOldCountdownAsTheWearerReturns() throws Exception {
         assertHolds("PAGE", "ACK", "ACK", "WAIT:1500", "PHOTO", "ACK", "TAP", "WAIT:3000+TAP");
     }
-
-    /**
-     * Guard for {@link #aStillThatCannotBeShownDoesNotLeaveAReviewNobodySees}: while it is true, no still fails to
-     * decode (NOSTILL is not drawn).
-     */
-    private static final boolean KNOWN_I6_A_STILL_THAT_CANNOT_BE_SHOWN = true;
 
     /**
      * Found by the random test. The glasses cannot decode a photo for the display
@@ -129,17 +114,9 @@ public class CaptureInvariantsTest {
      * double tap does not end the capture either (finishLocalCaptureWhenCameraIdle waits for the countdown: I5).
      * Only a tap and the tap back, or a forward swipe, show a still again.
      */
-    @Ignore("violates I6 (and I5): a photo that cannot be decoded for the display leaves a review that is never shown,"
-            + " never saved and not ended by a double tap; sequence: PAGE, ACK, ACK, WAIT:1500, NOSTILL, PHOTO")
     @Test public void aStillThatCannotBeShownDoesNotLeaveAReviewNobodySees() throws Exception {
         assertHolds("PAGE", "ACK", "ACK", "WAIT:1500", "NOSTILL", "PHOTO");
     }
-
-    /**
-     * Guard for {@link #aDoubleTapEndsACaptureWhoseLastPhotoNeedsARecapture}: while it is true, the closing script
-     * first retakes, by a forward swipe, a page under review that needs a recapture.
-     */
-    private static final boolean KNOWN_I5_NO_END_WHILE_A_PAGE_NEEDS_A_RECAPTURE = true;
 
     /**
      * Found by the random test. The camera delivers a photo it could not match to its
@@ -149,18 +126,10 @@ public class CaptureInvariantsTest {
      * every time: the capture neither ends nor goes on until a forward swipe retakes the page, and the pages saved
      * before it are not sent for answers.
      */
-    @Ignore("violates I5: with a photo that needs a recapture under review a double tap never ends the capture;"
-            + " sequence: PAGE, ACK, ACK, WAIT:1500, PHOTO, ACK, WAIT:3000, PAGE, ACK, ACK, WAIT:1500, UNRESOLVED, CLOSE")
     @Test public void aDoubleTapEndsACaptureWhoseLastPhotoNeedsARecapture() throws Exception {
         assertHolds("PAGE", "ACK", "ACK", "WAIT:1500", "PHOTO", "ACK", "WAIT:3000",
                 "PAGE", "ACK", "ACK", "WAIT:1500", "UNRESOLVED", CLOSE);
     }
-
-    /**
-     * Guard for {@link #retakingTheRetakeOfAPhotoThatNeededARecaptureDoesNotStopTheCapture}: while it is true and a
-     * capture gap stands, a forward swipe is drawn only as a step of its own, and not on a good photo under review.
-     */
-    private static final boolean KNOWN_I1_SECOND_RETAKE_LEAVES_THE_CAPTURE_GAP = true;
 
     /**
      * Found by the random test. A photo that needs a recapture marks a capture gap (handlePhoto). The wearer retakes
@@ -171,12 +140,29 @@ public class CaptureInvariantsTest {
      * lands in the same place (finishReadingNow): the state worn on 2026-11-17, reached without watching during a
      * review. A forward swipe gets out of it, at the price of one more photo of a page that is already saved.
      */
-    @Ignore("violates I1 (and I5): after the retake of a photo that needed a recapture is retaken once more, the save"
-            + " stops automatic capture and refuses the end; sequence: PAGE, ACK, ACK, WAIT:1500, UNRESOLVED, SWIPE, ACK,"
-            + " ACK, WAIT:1500, PHOTO, SWIPE, ACK, ACK, WAIT:1500, PHOTO, ACK, WAIT:3000")
     @Test public void retakingTheRetakeOfAPhotoThatNeededARecaptureDoesNotStopTheCapture() throws Exception {
         assertHolds("PAGE", "ACK", "ACK", "WAIT:1500", "UNRESOLVED", "SWIPE", "ACK", "ACK", "WAIT:1500", "PHOTO",
                 "SWIPE", "ACK", "ACK", "WAIT:1500", "PHOTO", "ACK", "WAIT:3000");
+    }
+
+    /**
+     * Found by the random test with the four faults above fixed (seed 71). A photo that needs a recapture is the
+     * only thing taken; the wearer ends the capture. The end drops that page (it can only be retaken), nothing is
+     * saved, so the capture goes on, and the mark the photo left (a scene seen and not taken) stood: no page was
+     * looked for and every later end was refused at that mark.
+     */
+    @Test public void anEndOverARetakeOnlyPageWithNothingSavedLeavesTheCaptureLooking() throws Exception {
+        assertHolds("PAGE", "WAIT:800+ACK", "ACK", "NOACK", "UNRESOLVED", CLOSE);
+    }
+
+    /**
+     * Found by the random test (seed 2018 of 3000), and made by the first fix of the first fault above: a pause
+     * retired the review's countdown and left the review armed. An end that overtook the return from the pause
+     * (double taps and a tap while the controller's thread was held) then waited for that countdown for good.
+     */
+    @Test public void anEndThatOvertakesTheReturnFromAPauseStillEndsTheCapture() throws Exception {
+        assertHolds("PAGE", "ACK", "ACK", "WAIT:683", "WAIT:881", "PHOTO", "ACK+ACK", "TAP",
+                "DOUBLETAP+DOUBLETAP+TAP", CLOSE);
     }
 
     // ---- one sequence -------------------------------------------------------------------------------------------
@@ -188,9 +174,9 @@ public class CaptureInvariantsTest {
      * invariant held. A run in which the store failed to save is not judged but repeated: a failed save is a path of
      * its own in the controller (and Windows refuses a file now and then under this many small writes).
      */
-    private static Finding explore(List<String> script, long seed, boolean guarded) throws Exception {
+    private static Finding explore(List<String> script, long seed) throws Exception {
         for (int attempt = 0; ; attempt++) {
-            try (Capture capture = new Capture(guarded)) {
+            try (Capture capture = new Capture()) {
                 Random random = new Random(seed);
                 Finding found = null;
                 int length = script != null ? script.size() : 40 + random.nextInt(41);
@@ -214,7 +200,7 @@ public class CaptureInvariantsTest {
      * Drops the steps the same invariant does not need: runs of four, of two (a tap and the tap that undoes it) and
      * single steps, until nothing more can go. Quadratic in the sequence; run only for a failure.
      */
-    private static List<String> shorten(Finding found, boolean guarded) throws Exception {
+    private static List<String> shorten(Finding found) throws Exception {
         String invariant = found.broken.substring(0, 2);
         List<String> kept = new ArrayList<>(found.steps);
         for (boolean shorter = true; shorter; ) {
@@ -223,7 +209,7 @@ public class CaptureInvariantsTest {
                 for (int index = kept.size() - run; index >= 0 && !shorter; index--) {
                     List<String> tried = new ArrayList<>(kept);
                     tried.subList(index, index + run).clear();
-                    Finding again = explore(tried, 0, guarded);
+                    Finding again = explore(tried, 0);
                     // Strictly shorter: a list whose CLOSE was dropped comes back with its CLOSE, the same list.
                     if (again != null && again.broken.startsWith(invariant) && again.steps.size() < kept.size()) {
                         kept = again.steps;
@@ -237,7 +223,7 @@ public class CaptureInvariantsTest {
 
     /** Replays a sequence with every guard off; for the tests that hold a known violation. */
     private static void assertHolds(String... steps) throws Exception {
-        Finding found = explore(Arrays.asList(steps), 0, false);
+        Finding found = explore(Arrays.asList(steps), 0);
         if (found != null) fail(found.broken + "\nsteps: " + found.steps);
     }
 
@@ -249,14 +235,12 @@ public class CaptureInvariantsTest {
         final Clock clock = new Clock();
         final DocScanController controller;
         final LocalCaptureSession session;
-        final boolean guarded;
         final List<String> done = new ArrayList<>();
         volatile String told = "";
         volatile boolean storeFailed;
         int photos;
 
-        Capture(boolean guarded) throws Exception {
-            this.guarded = guarded;
+        Capture() throws Exception {
             Context context = RuntimeEnvironment.getApplication();
             // Each sequence starts from nothing, so that a seed gives the same sequence alone and in the loop.
             context.getSharedPreferences("docscan_relay", Context.MODE_PRIVATE).edit().clear().commit();
@@ -288,7 +272,6 @@ public class CaptureInvariantsTest {
             boolean restless = seed % 3 == 2, paused = controller.isCapturePaused();
             CaptureReviewStore.Pending pending = ((CaptureReviewStore) get(controller, "captureReview")).peek();
             boolean reviewing = pending != null;
-            boolean gapGuard = guarded && KNOWN_I1_SECOND_RETAKE_LEAVES_THE_CAPTURE_GAP && session.captureGap();
             List<String> options = new ArrayList<>();
             offer(options, "WAIT:" + (100 + random.nextInt(restless ? 901 : 3901)), 6);
             if (glasses.pageReady != null && !glasses.requestOpen) offer(options, "PAGE", restless ? 14 : 6);
@@ -299,15 +282,13 @@ public class CaptureInvariantsTest {
                 offer(options, "NOTSTARTED", 2);
                 if (random.nextInt(4) == 0) offer(options, "UNRESOLVED", 1);
                 if (random.nextInt(20) == 0) offer(options, "CAMERAFAIL", 1);
-                if (random.nextInt(10) == 0 && !(guarded && KNOWN_I6_A_STILL_THAT_CANNOT_BE_SHOWN)) offer(options, "NOSTILL", 1);
+                if (random.nextInt(10) == 0) offer(options, "NOSTILL", 1);
             }
             if (controller.documentId() == 0) offer(options, "DOCUMENT", 1);
             if (gesturesArePassedOn()) {
                 // A wearer who cleared the display brings it back.
                 if (paused || random.nextBoolean()) offer(options, "TAP", paused ? 5 : 1);
-                if (!paused && random.nextBoolean() && !(gapGuard && reviewing && !pending.needsSceneRecapture())) {
-                    offer(options, "SWIPE", reviewing ? 2 : 1);
-                }
+                if (!paused && random.nextBoolean()) offer(options, "SWIPE", reviewing ? 2 : 1);
                 if (!paused && random.nextInt(8) == 0) offer(options, "BACKSWIPE", 1);
                 // Behind a cleared display a double tap only brings it back; in view it ends the capture, and what
                 // follows an end is of little use here, so it comes seldom.
@@ -318,13 +299,7 @@ public class CaptureInvariantsTest {
             // thread is held. Each is decided on what was true before the burst, and they are worked off in order.
             if (random.nextInt(8) == 0) {
                 for (int more = 1 + random.nextInt(2); more > 0; more--) {
-                    String next = options.get(random.nextInt(options.size()));
-                    if (guarded && KNOWN_I3_RETURN_AFTER_TIME_PASSED_WITH_THE_THREAD_HELD && paused && reviewing
-                            && (next.equals("TAP") || next.equals("DOUBLETAP")) && step.matches(".*(WAIT|NOACK).*")) continue;
-                    // In a burst a swipe can land on the photo that arrives just before it.
-                    if ((gapGuard || guarded && KNOWN_I1_SECOND_RETAKE_LEAVES_THE_CAPTURE_GAP && step.contains("UNRESOLVED"))
-                            && next.equals("SWIPE")) continue;
-                    step += "+" + next;
+                    step += "+" + options.get(random.nextInt(options.size()));
                 }
             }
             return step;
@@ -485,7 +460,14 @@ public class CaptureInvariantsTest {
                     return "I6 a review that is shown has its countdown: autoCommitArmed is false" + at;
                 }
                 long view = (long) get(controller, "reviewViewGeneration");
-                if (!"capture-review".equals(glasses.purpose) || glasses.generation != view) {
+                if (view == CaptureSurface.NO_VIEW_GENERATION) {
+                    // The picture could not be drawn: its three seconds run without it and the page is then saved
+                    // (publishCaptureReview), so that the capture does not stand at a review nobody sees.
+                    if ((long) get(controller, "reviewDeadlineMillis") == 0) {
+                        return "I6 a review that is shown has its countdown: the picture could not be drawn and no"
+                                + " countdown runs" + at;
+                    }
+                } else if (!"capture-review".equals(glasses.purpose) || glasses.generation != view) {
                     return "I6 a review that is shown has its countdown: the still (view " + view
                             + ") is not what the display was given last, so it is never reported shown" + at;
                 }
@@ -496,20 +478,12 @@ public class CaptureInvariantsTest {
         /**
          * The closing script: the wearer comes back from a pause and ends the capture, up to three times, and each
          * time the camera delivers what it was asked for, the display shows its newest view and 3.1 s pass.
-         * Then I5: the end is live. (Guarded, the wearer first retakes a page that needs a recapture: see
-         * KNOWN_I5_NO_END_WHILE_A_PAGE_NEEDS_A_RECAPTURE.)
+         * Then I5: the end is live.
          */
         String end() throws Exception {
             String broken;
             if (controller.isCapturePaused() && (broken = closing("TAP")) != null) return broken;
             for (int round = 0; round < 3; round++) {
-                CaptureReviewStore.Pending pending = ((CaptureReviewStore) get(controller, "captureReview")).peek();
-                if (guarded && KNOWN_I5_NO_END_WHILE_A_PAGE_NEEDS_A_RECAPTURE && pending != null
-                        && pending.needsSceneRecapture() && controller.getState() == RelayState.CAPTURE_REVIEW) {
-                    for (String step : new String[]{"SWIPE", "ACK", "ACK", "WAIT:1500"}) {
-                        if ((broken = closing(step)) != null) return broken;
-                    }
-                }
                 for (String step : new String[]{"DOUBLETAP", "PHOTO", "ACK", "WAIT:3100"}) {
                     if ((broken = closing(step)) != null) return broken;
                 }

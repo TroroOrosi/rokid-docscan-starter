@@ -2390,6 +2390,25 @@ public class LocalReviewTest {
         } finally { controller.close(); }
     }
 
+    /** The other way a retake does not start: the camera refuses the request itself. The same frozen review followed. */
+    @Test public void aRetakeTheCameraRefusesLeavesTheOldPhotoWithItsThreeSeconds() throws Exception {
+        Surface surface = new Surface(); surface.holdForPage = true;
+        DocScanController controller = localWithOriginal(RuntimeEnvironment.getApplication(), surface);
+        try {
+            surface.visible = true;
+            controller.onCustomViewAvailable((long)get(controller, "reviewViewGeneration"), "capture-review"); barrier(controller);
+            surface.photoStart = CaptureSurface.PhotoStartResult.REJECTED;
+            set(controller, "state", RelayState.STABILIZING);
+            java.lang.reflect.Method ask = DocScanController.class.getDeclaredMethod("requestPhotoAt", int.class, boolean.class);
+            ask.setAccessible(true);
+            ask.invoke(controller, 0, true); barrier(controller);
+            assertEquals(RelayState.CAPTURE_REVIEW, controller.getState());
+            assertTrue("the photo that stands is shown with its three seconds", (boolean)get(controller, "autoCommitArmed"));
+            commitVisible(controller, surface);
+            assertEquals(1, ((LocalCaptureSession)get(controller, "localSession")).pageCount());
+        } finally { controller.close(); }
+    }
+
     /**
      * The view that shows a page's number has three seconds to be drawn. Writing a clip out stalls the glasses for
      * up to 5.6 s (M-30). After that the capture said "open the glasses' display again" (the phone relay's words) and
