@@ -803,6 +803,13 @@ final class ClipCamera implements PageCamera {
         encoder.end((written, bytes, failure) -> {
             GlassCamera.Captured page = null;
             String problem = failure != null ? failure : ended.frames == 0 ? "clip without frames" : null;
+            // The file has to hold every frame the encoder took. On 2026-11-18 one desk clip of forty held 64 of 66:
+            // the second and third were missing, the frames behind them could not be decoded up to the next key
+            // frame, and the rest no longer paired with what is logged here for each frame. Such a clip is a failed
+            // capture: deleted, the camera opened again, the page looked for again.
+            if (problem == null && written != ended.frames) {
+                problem = "clip lost " + (ended.frames - written) + " of " + ended.frames + " frames";
+            }
             if (problem == null && ended.kept) {
                 try {
                     page = pageOf(ended);

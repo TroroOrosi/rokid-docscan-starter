@@ -25,6 +25,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from collections.abc import Iterable, Iterator, Sequence
@@ -655,16 +656,20 @@ def read_clip(path: Path, *, crop: tuple[int, int, int, int] | None = None, ffmp
     """
     path = Path(path)
     binary = _ffmpeg(ffmpeg)
-    width, height, _ = _described(binary, path)
+    width, height, held = _described(binary, path)
     if crop is not None:
         left, top, width, height = crop
     command = [binary, "-v", "error", "-i", str(path), "-map", "0:v:0"]
     if crop is not None:
         command += ["-vf", f"crop={width}:{height}:{left}:{top}"]
+    # What the decoder says goes to a file, not to a pipe nobody reads while the frames come: a clip with many frames
+    # it cannot decode filled that pipe, the decoder stood still on it and the clip "timed out" with no frame
+    # (Windows, 2026-11-18; a larger pipe only moves the number of complaints it takes).
+    complaints = tempfile.TemporaryFile()
     # passthrough: without it the decoder fills a gap in the clip's times with copies of the last frame, and the frames no
     # longer pair with what the glasses logged
     process = subprocess.Popen([*command, "-fps_mode", "passthrough", "-f", "rawvideo", "-pix_fmt", "gray", "-"], stdout=subprocess.PIPE,
-                               stderr=subprocess.PIPE, stdin=subprocess.DEVNULL)
+                               stderr=complaints, stdin=subprocess.DEVNULL)
     stuck: list[bool] = []
 
     def stop() -> None:
@@ -688,13 +693,20 @@ def read_clip(path: Path, *, crop: tuple[int, int, int, int] | None = None, ffmp
             yield np.maximum(light - black, 0) if black else light
         if stuck:
             raise GatherError(f"ffmpeg timed out on {path.name}: no frame for {DECODE_SECONDS} s after {count} frames")
-        said = process.stderr.read().decode("utf-8", "replace").strip().splitlines()
-        if process.wait() != 0 or count == 0:
+        code = process.wait()
+        complaints.seek(0)
+        said = complaints.read().decode("utf-8", "replace").strip().splitlines()
+        if code != 0 or count == 0:
             raise GatherError(f"ffmpeg gave {count} frames of {path.name}: {said[-1] if said else 'no message'}")
+        # Every frame the file holds has to come out. Frames the decoder skipped (a file that lost frames behind its
+        # key frame, 2026-11-18) leave the rest out of step with the record the glasses wrote for each frame, and a
+        # page gathered from them looks gathered. Only a clip read to its end is judged.
+        if held is not None and count < held:
+            raise GatherError(f"ffmpeg decoded {count} of the {held} frames of {path.name}: {said[-1] if said else 'no message'}")
     finally:
         process.kill()
         process.stdout.close()
-        process.stderr.close()
+        complaints.close()
         process.wait()
 
 

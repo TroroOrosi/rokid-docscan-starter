@@ -402,6 +402,29 @@ def test_a_gap_in_the_clip_is_not_filled_with_copies(tmp_path):
     assert len(list(g.read_clip(path))) == 30
 
 
+def test_a_clip_whose_frames_cannot_all_be_decoded_is_refused_at_once_and_says_so(tmp_path, monkeypatch):
+    """2026-11-18, one desk clip of forty: the file held 64 of the 66 frames the glasses' encoder had taken (the second
+    and third were missing), and the frames behind them could not be decoded up to the next key frame. The decoder's
+    complaints were never read, so on Windows it stood still on its full pipe and the clip failed after 30 s as "timed
+    out"; where the pipe is larger the frames that did decode would have been gathered, each paired with another
+    frame's entry of the record."""
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg or b"libx265" not in subprocess.run([ffmpeg, "-hide_banner", "-encoders"], capture_output=True).stdout:
+        pytest.skip("ffmpeg with libx265 is not installed")
+    whole = clip(tmp_path, frames(scene(), [(0, 0)] * 60, 4.0))
+    one_key = tmp_path / "hevc.mp4"
+    subprocess.run([ffmpeg, "-v", "error", "-y", "-i", str(whole), "-c:v", "libx265", "-x265-params",
+                    "log-level=error:keyint=600:min-keyint=600:scenecut=0:bframes=0", str(one_key)], check=True)
+    lost = tmp_path / "lost.mp4"
+    subprocess.run([ffmpeg, "-v", "error", "-y", "-i", str(one_key), "-c", "copy", "-bsf:v", r"noise=drop=between(n\,1\,2)",
+                    str(lost)], check=True)
+    monkeypatch.setattr(g, "DECODE_SECONDS", 8.0)
+    started = time.monotonic()
+    with pytest.raises(g.GatherError, match=r"decoded \d+ of the 58 frames"):
+        g.gather_clip(lost, {"frames": [{"smear_px": 0.5}] * 60})
+    assert time.monotonic() - started < 8.0, "the decoder's complaints must not hold it up until its time runs out"
+
+
 def test_a_slow_reader_is_not_mistaken_for_a_stuck_decoder(tmp_path, monkeypatch):
     path = clip(tmp_path, frames(scene(), [(0, 0)] * 20, 4.0))
     monkeypatch.setattr(g, "DECODE_SECONDS", 1.0)

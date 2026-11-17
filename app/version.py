@@ -358,7 +358,11 @@ from __future__ import annotations
 #         are on and the sends on record, not every booklet of the last three hours; the daily deep check is no
 #         longer put off by shallow ones. The gathering: the booklet in hand first, a clip the server stopped on
 #         twice given up, clips removed after three days (gathered) or a week (failed). See API 1.52.0.
-APP_VERSION = "0.86.0"
+# 0.86.1: a clip whose frames cannot all be decoded is refused with that reason, at once. One desk clip of forty
+#         had lost two frames behind its key frame on the glasses (2026-11-18); the decoder's complaints filled a
+#         pipe nobody read and the clip "timed out" after 30 s, and with a larger pipe the frames that did
+#         decode would have been gathered out of step with the glasses' record of each frame.
+APP_VERSION = "0.86.1"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.

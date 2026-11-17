@@ -75,6 +75,8 @@ public class ClipCameraTest {
         final List<Long> offered = new ArrayList<>();
         File file;
         int width, height, bitrate, frameRate, opens, offers, ends;
+        /** Frames the encoder took and its file does not hold. */
+        int lost;
         boolean refuse, holdEnd;
         String failure;
         IOException openFailure;
@@ -102,7 +104,7 @@ public class ClipCameraTest {
 
         void finish() {
             Ended ended = pending; pending = null;
-            ended.done(offered.size(), file.length(), failure);
+            ended.done(offered.size() - lost, file.length(), failure);
         }
     }
 
@@ -908,6 +910,24 @@ public class ClipCameraTest {
         camera.preview(); idle(100);
         assertEquals(2, ManagerShadow.devices.size());
         assertEquals("and watches again", List.of(reader(320).surface), device().configured.get(0));
+    }
+
+    /**
+     * 2026-11-18, forty desk clips on the route that sends: one file held 64 of the 66 frames the encoder had taken (the
+     * second and third were missing, though the encoder's own count said every frame was done). The frames behind them
+     * could not be decoded up to the next key frame, and those that could no longer paired with what the glasses had
+     * logged for each frame. The clip went out as a whole page and came back as the one frame it arrived as.
+     */
+    @Test public void a_clip_whose_file_holds_fewer_frames_than_the_encoder_took_is_a_failed_capture() {
+        watching(); recording();
+        encoder.lost = 2;
+        clipFrames(66, 0); idle(0);
+        assertEquals(List.of("clip lost 2 of 66 frames"), failures);
+        assertTrue("it is not a page", pages.isEmpty());
+        assertArrayEquals("and nothing of it is left to send", new String[0], inboxDirectory.list());
+        idleSession(1);
+        camera.preview(); idle(100);
+        assertEquals("the camera goes on, as after any failed capture", 2, ManagerShadow.devices.size());
     }
 
     @Test public void an_encoder_that_cannot_be_opened_is_a_failed_capture_before_any_session_change() {
