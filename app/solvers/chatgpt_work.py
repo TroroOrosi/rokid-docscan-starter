@@ -18,9 +18,10 @@ from ..audio_formats import detect_audio_format
 from ..glasses_state import list_states
 from ..work_bridge import WorkConflict, WorkPending, browser_source_name, configured_work_store
 from .base import SolveResult, Solver
+from ..browser_guard import BrowserGuard
 from .chatgpt_web import (
     CDP_ENDPOINT, ChatGptWebBusy, ChatGptWebClient, ChatGptWebModelMismatch, ChatGptWebUncertain,
-    _ALL_TASK, _LISTENING_TASK, _READING_TASK, _booklet_replies,
+    _ALL_TASK, _LISTENING_TASK, _READING_TASK, _booklet_replies, _read_chats,
     cdp_available, chatgpt_send_enabled, grey_note,
 )
 from .llm_adapter import _ANSWER_ONLY_SYSTEM
@@ -131,6 +132,42 @@ def _browser_prompt(job):
         "fails, report it instead of guessing.\nmanifest_sha256=" + job["manifest_sha256"] +
         "\nNew original manifest (expected hashes/dimensions are intentionally not supplied):\n" +
         json.dumps(manifest, ensure_ascii=False))
+
+
+def work_holds(session_id: int) -> tuple[bool, bool]:
+    """(unread, sealed): a Work message of this session left and its reply was never read back; a sealed answer
+    of this session waits to be taken. While either is true the booklet is Work's: another route would send it,
+    and pay for it, a second time.
+
+    The chat record is read without the browser's lock, which another booklet may be holding. It is replaced
+    atomically, and a booklet's message is written to it before it leaves (ChatGptWebClient._ask_locked).
+    """
+    store = configured_work_store()
+    jobs = store.session_jobs(session_id) if store.path.is_file() else []
+    chats = _read_chats(BrowserGuard().directory) if jobs else {}
+
+    def unread(job):
+        entry = chats.get(_browser_chat_key(job))
+        transfer = entry.get("transfer") if isinstance(entry, dict) else None
+        return isinstance(entry, dict) and bool(
+            entry.get("pending") or (isinstance(transfer, dict) and transfer.get("pending")))
+
+    return any(unread(job) for job in jobs), any(job["status"] == "completed" for job in jobs)
+
+
+def sessions_with_a_send_on_record() -> set[int]:
+    """Sessions with a booklet message on the browser's record (Chat's or Work's) that left and was never read
+    back, or whose final reply was read: asking for these again only reads their chat
+    (ChatGptWebClient._booklet_locked), so a start of the server resumes them whoever the glasses are on."""
+    found = set()
+    for key, entry in _read_chats(BrowserGuard().directory).items():
+        match = re.match(r"session:([1-9][0-9]*)(?::|$)", key) if isinstance(key, str) else None
+        transfer = entry.get("transfer") if isinstance(entry, dict) else None
+        transfer = transfer if isinstance(transfer, dict) else {}
+        if match and isinstance(entry, dict) and (
+                entry.get("pending") or transfer.get("pending") or transfer.get("final") or transfer.get("finals")):
+            found.add(int(match[1]))
+    return found
 
 
 def work_binding(session_id: int) -> tuple[str | None, int]:

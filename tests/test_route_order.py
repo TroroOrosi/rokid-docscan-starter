@@ -111,8 +111,9 @@ def test_a_cli_that_fails_for_another_cause_is_answered_by_work_under_its_sealed
     cli, work, chat = Cli(ChatGptWebError("the Codex CLI ended without a reply")), BrowserReply(), Chat()
     _, session = booklet(client, monkeypatch, cli, work, chat)
     assert answers(client, session) == [("ready", "4")]
-    # One retry shows the failure is not a passing one; then Work takes the same booklet and Chat is not needed.
-    assert (cli.calls, len(work.calls), chat.questions) == (2, 1, [])
+    # The CLI is asked once: it has no page whose passing render a second try could get past, and a second try
+    # runs the locate step and both reads again. Work takes the same booklet and Chat is not needed.
+    assert (cli.calls, len(work.calls), chat.questions) == (1, 1, [])
     assert answered_by() == ["chatgpt-work"]
     jobs = work_jobs(session)
     assert len(jobs) == 1 and jobs[0]["status"] == "completed"
@@ -125,18 +126,18 @@ def test_a_cli_that_fails_for_another_cause_is_answered_by_work_under_its_sealed
     with main.db.connect() as conn:
         row = conn.execute("SELECT * FROM exam_sessions WHERE id=?", (session,)).fetchone()
         assert not main._resume_answers(conn, row)
-    assert (cli.calls, len(work.calls), chat.questions) == (2, 1, [])
+    assert (cli.calls, len(work.calls), chat.questions) == (1, 1, [])
 
 
 def test_a_cli_whose_model_is_no_longer_offered_is_answered_by_work(client, monkeypatch, capsys):
-    """It is no usage limit, so Work is the next route (after the one retry every such failure gets); the cause is
-    logged by name."""
+    """It is no usage limit, so Work is the next route, at once: waiting 150 s does not bring a model back, and
+    the CLI's second try would pay for the locate step and both reads again. The cause is logged by name."""
     from app.solvers.chatgpt_web import ChatGptWebModelMismatch
 
     cli, work, chat = Cli(ChatGptWebModelMismatch("the Codex CLI's model is not offered")), BrowserReply(), Chat()
     _, session = booklet(client, monkeypatch, cli, work, chat)
     assert answers(client, session) == [("ready", "4")]
-    assert (cli.calls, len(work.calls), chat.questions) == (2, 1, []) and answered_by() == ["chatgpt-work"]
+    assert (cli.calls, len(work.calls), chat.questions) == (1, 1, []) and answered_by() == ["chatgpt-work"]
     failures = [json.loads(line) for line in capsys.readouterr().out.splitlines() if '"solve_failure"' in line]
     assert failures and {failure["code"] for failure in failures} == {"model_mismatch"}
 
@@ -152,7 +153,7 @@ def test_work_that_meets_the_limit_after_the_cli_failed_hands_the_booklet_to_cha
     cli, work, chat = Cli(ChatGptWebError("the Codex CLI could not start")), Limited(), Chat()
     _, session = booklet(client, monkeypatch, cli, work, chat)
     assert answers(client, session) == [("ready", "4")]
-    assert (cli.calls, len(work.calls), len(chat.questions)) == (2, 1, 1)
+    assert (cli.calls, len(work.calls), len(chat.questions)) == (1, 1, 1)
     assert answered_by() == ["chatgpt-web"]
     # Chat receives the canonical upright page, not a Work-sealed source reference.
     page = chat.questions[0].document_pages[0]
@@ -172,7 +173,7 @@ def test_a_session_work_cannot_bind_goes_from_the_cli_to_chat(client, monkeypatc
     cli, work, chat = Cli(ChatGptWebError("the Codex CLI ended without a reply")), BrowserReply(), Chat()
     _, session = booklet(client, monkeypatch, cli, work, chat)
     assert answers(client, session) == [("ready", "4")]
-    assert (cli.calls, work.calls, len(chat.questions)) == (2, [], 1)
+    assert (cli.calls, work.calls, len(chat.questions)) == (1, [], 1)
     assert answered_by() == ["chatgpt-web"]
 
 

@@ -1074,6 +1074,27 @@ def _shown(replies):
             for item, result in replies]
 
 
+def test_a_booklet_only_one_of_two_reads_answered_says_so_with_every_answer(codex, tmp_path, monkeypatch):
+    """Unmarked answers mean "both reads agree". When one read failed or was ended, nothing was compared and the
+    answers looked exactly as agreed ones do (found 2026-11-17). Each answer then carries ``read_once`` for the server
+    to say so once; a booklet read once because it was asked for once (a trial) carries nothing."""
+    _twice(monkeypatch, _read((1, "④"), (2, "②")), _read((1, "④"), (2, "②")))
+    monkeypatch.setenv("FAKE_CODEX_BAD_BYTES_2", "1")
+    solver = codex_cli.CodexCliSolver()
+    replies = solver.answer_all(question=_booklet(tmp_path))
+    assert [result.extras.get("read_once") for _, result in replies] == [True, True]
+    kept = solver.answer_all(question=_booklet(tmp_path))  # read again from what was kept: the same is said
+    assert [result.extras.get("read_once") for _, result in kept] == [True, True]
+
+
+@pytest.mark.parametrize("reads", ["2", "1"])
+def test_a_booklet_read_as_often_as_was_asked_carries_no_such_word(codex, tmp_path, monkeypatch, reads):
+    _twice(monkeypatch, _read((1, "④")), _read((1, "④")))
+    monkeypatch.setenv("ROKID_CODEX_READS", reads)
+    replies = codex_cli.CodexCliSolver().answer_all(question=_booklet(tmp_path))
+    assert ["read_once" in result.extras for _, result in replies] == [False]
+
+
 def test_a_booklet_is_read_twice_at_the_same_time_and_answers_both_reads_agree_on_stand_unmarked(codex, tmp_path, monkeypatch):
     """Phone, 2026-11-15 (M-23): of 72 answers to kanji questions read once from a worn photo, 5 were wrong. Comparing
     every pair of the 18 reads, both were wrong in the same way in 1.6% and disagreed in 10.6%."""

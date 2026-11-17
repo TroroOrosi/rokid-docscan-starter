@@ -32,7 +32,7 @@ from PIL import Image, UnidentifiedImageError
 from pydantic import BaseModel, ConfigDict, StrictInt, StrictStr, validator
 from starlette.concurrency import run_in_threadpool
 
-from . import config, db, page_clips
+from . import config, db, page_clips, retention
 from .audio_formats import safe_audio_suffix
 from .analyzers import get_analyzer
 from .answer_text import to_display_answer
@@ -98,7 +98,7 @@ from .solvers.chatgpt_web import (
     recent_failures,
 )
 from .solvers.registry import has_booklet_route, solve_with_fallback
-from .solvers.chatgpt_work import WorkBrowserUncertain, work_binding
+from .solvers.chatgpt_work import WorkBrowserUncertain, sessions_with_a_send_on_record, work_binding, work_holds
 from .work_bridge import (
     WorkBrowserResultRejected, WorkConflict, WorkPending, WorkReadabilityRejected, WorkStore, configured_work_store,
 )
@@ -141,6 +141,9 @@ async def lifespan(app: FastAPI):
     _resume_all_answers()
     wake_worker()
     page_clips.requeue_interrupted()  # a clip that was being gathered when the server stopped
+    # Clips nobody reads any more go (app/retention.py). On a thread: a first sweep has gigabytes to remove and the
+    # health check is waiting.
+    threading.Thread(target=retention.sweep, name="retention", daemon=True).start()
     gather_service.start()
     stopping = threading.Event()
     threading.Thread(target=_route_check_daily, args=(stopping,), name="route-check", daemon=True).start()
@@ -1466,7 +1469,10 @@ def finalize_document(document_id: int) -> dict:
     # (replace_page_image), so that once the pages are being read here none of them changes any more.
     _await_gathering(document_id)
     with _document_finalize_mutex(document_id):
-        return _finalize_document_once(document_id)
+        result = _finalize_document_once(document_id)
+    # After the lock, on its own thread and connection: the sweep takes the database's write lock itself.
+    threading.Thread(target=retention.sweep, name="retention", daemon=True).start()
+    return result
 
 
 def _finalize_document_once(document_id: int) -> dict:
@@ -3135,8 +3141,14 @@ class AnswerMissing(ValueError):
     """The one reply never answered a 解答番号 the booklet prints."""
 
 
+class WorkCannotStandIn(ChatGptWebError):
+    """Work, behind another primary, could not take this booklet and holds nothing of it. Nothing was sent, and
+    the next route takes the booklet at once (_stand_in_failure)."""
+
+
 _FAILURE_CODES = (
     (AnswerMissing, "answer_missing"),
+    (WorkCannotStandIn, "not_sent"),
     (WorkReadabilityRejected, "image_review_rejected"),
     (WorkBrowserResultRejected, "work_result_rejected"),
     *FAILURE_CODES,  # the browser routes' own, which a failure's snapshot is named by too (chatgpt_web)
@@ -3191,7 +3203,11 @@ def _work_recovery_job_id(row) -> str | None:
 
 def _retrying(row) -> bool:
     failure = _solve_failure(row)
-    return bool(_work_recovery_job_id(row)) or bool(failure.get("next_route")) or (
+    # An uncertain Work send is read back, never sent again, and that has an end too: after RESUME_LIMIT
+    # read-backs that found no reply the failure is final, so the glasses wake once and show its sentence.
+    read_backs = failure.get("recoveries")
+    recovering = bool(_work_recovery_job_id(row)) and not (type(read_backs) is int and read_backs >= RESUME_LIMIT)
+    return recovering or bool(failure.get("next_route")) or (
         failure.get("code") in _RETRYING_ISSUES and _failure_count(row) < RESUME_LIMIT)
 
 
@@ -3284,6 +3300,10 @@ def run_route_check(*, deep: bool = False) -> dict:
                            "real": bool(deeper or getattr(solver, "check_sends", False)),
                            "seconds": round(time.monotonic() - started, 1), **({"usage": used} if used else {})})
         result = {"checked_at": int(time.time()), "ok": any(route["ok"] for route in routes), "routes": routes}
+        # When a check last sent through the browser. Kept apart: a shallow check must not put the deep one off.
+        deep_at = result["checked_at"] if deep else (last_route_check() or {}).get("deep_checked_at")
+        if isinstance(deep_at, (int, float)) and not isinstance(deep_at, bool):
+            result["deep_checked_at"] = deep_at
         path = Path(config.DATA_DIR) / "route-check.json"
         temporary = path.with_suffix(".tmp")
         temporary.write_text(json.dumps(result), encoding="utf-8")
@@ -3291,9 +3311,15 @@ def run_route_check(*, deep: bool = False) -> dict:
         return result
 
 
-def route_check_due(*, now: float, interval: float) -> bool:
+def route_check_due(*, now: float, interval: float, deep: bool = False) -> bool:
+    """Whether a check is due; ``deep`` asks by the last check that sent through the browser.
+
+    Until 2026-11-17 one time decided both. Any shallow check rewrote it, the glasses' chooser asks for one whenever
+    the kept result is over thirty minutes old, and so the daily deep check was never due on a day the glasses
+    were used."""
     last = last_route_check()
-    return interval > 0 and (last is None or now - last.get("checked_at", 0) >= interval)
+    at = (last or {}).get("deep_checked_at" if deep else "checked_at", 0)
+    return interval > 0 and (last is None or now - (at if isinstance(at, (int, float)) else 0) >= interval)
 
 
 def _route_check_daily(stopping: threading.Event) -> None:
@@ -3306,8 +3332,9 @@ def _route_check_daily(stopping: threading.Event) -> None:
     """
     interval = float(os.environ.get("ROKID_ROUTE_CHECK_INTERVAL_S") or 86400)
     while interval > 0 and not stopping.wait(300):
-        if _booklet_routes() and route_check_due(now=time.time(), interval=interval):
-            run_route_check(deep=os.environ.get("ROKID_ROUTE_CHECK_DEEP") == "1")
+        deep = os.environ.get("ROKID_ROUTE_CHECK_DEEP") == "1"
+        if _booklet_routes() and route_check_due(now=time.time(), interval=interval, deep=deep):
+            run_route_check(deep=deep)
 
 
 @app.post("/v1/route-check")
@@ -3373,9 +3400,36 @@ def _switches_route(error: Exception, route: str | None = None) -> bool:
     sign it in, and the next route does not need it."""
     if route in _OWN_SIGN_IN and isinstance(error, ChatGptWebAuthenticationRequired):
         return True
-    return isinstance(error, (ChatGptWebRateLimit, ChatGptWebReplyIncomplete)) or (_nothing_sent(error) and not isinstance(
-        error, (ChatGptWebBusy, ChatGptWebBlocked, ChatGptWebAuthenticationRequired,
-                ChatGptWebBrowserUnavailable)))
+    return isinstance(error, (ChatGptWebRateLimit, ChatGptWebReplyIncomplete, WorkCannotStandIn)) or (
+        _nothing_sent(error) and not isinstance(
+            error, (ChatGptWebBusy, ChatGptWebBlocked, ChatGptWebAuthenticationRequired,
+                    ChatGptWebBrowserUnavailable)))
+
+
+def _stand_in_failure(conn, session_id: int, route: str, can_switch: bool, error: Exception) -> Exception:
+    """``error`` as the booklet's routes are to treat it: WorkCannotStandIn when Work, behind another primary,
+    cannot take this booklet now and holds nothing of it; otherwise the error itself.
+
+    Work as the primary waits for its browser, its wearer and its sealed job (WorkPending, WorkConflict), and a
+    held browser or another booklet's unconfirmed send is retried where it stands. Behind the CLI that left the
+    booklet "retrying" with no limit, restarted by every poll, or retried for twenty minutes a mark that Chat
+    reads back and clears: the route after Work exists for this. A send whose outcome is unknown is still never
+    moved: not while a Work message of this session has no reply read back (the row's uncertain job, or the chat
+    record after a restart), and not while a sealed answer waits to be taken, unless the job that holds it can no
+    longer be this booklet's (WorkConflict).
+    """
+    if (route != "chatgpt-work" or _is_work() or not can_switch
+            or not isinstance(error, (WorkPending, WorkConflict, ChatGptWebBusy, ChatGptWebBlocked))
+            or any(_work_recovery_job_id(row) for row in _deck_question_rows(conn, session_id))):
+        return error
+    try:
+        unread, sealed = work_holds(session_id)
+    except Exception:  # noqa: BLE001 - what Work holds cannot be read: nothing moves
+        return error
+    if unread or (sealed and not isinstance(error, WorkConflict)):
+        return error
+    return WorkCannotStandIn(f"Work cannot stand in ({type(error).__name__}); nothing sent").with_traceback(
+        error.__traceback__)
 
 
 def _record_solve_failure(conn, row, error: Exception, *, commit: bool = True,
@@ -3388,6 +3442,7 @@ def _record_solve_failure(conn, row, error: Exception, *, commit: bool = True,
     if not isinstance(metadata, dict):
         metadata = {}
     metadata["solve_failures"] = int(metadata.get("solve_failures", 0)) + 1
+    previous = metadata.get("solve_failure") if isinstance(metadata.get("solve_failure"), dict) else {}
     metadata["solve_failure"] = {"code": next(
         (code for kind, code in _FAILURE_CODES if isinstance(error, kind)),
         "not_sent" if _nothing_sent(error) else "solver_failed")}
@@ -3403,6 +3458,10 @@ def _record_solve_failure(conn, row, error: Exception, *, commit: bool = True,
                       "at": f"{Path(raised.filename).name}:{raised.lineno}:{raised.name}" if raised else None}), flush=True)
     if isinstance(error, WorkBrowserUncertain):
         metadata["solve_failure"]["work_job_id"] = error.work_job_id
+        if previous.get("work_job_id") == error.work_job_id:
+            # How often this same send has since been read back without finding its reply (_retrying).
+            earlier = previous.get("recoveries")
+            metadata["solve_failure"]["recoveries"] = (earlier if type(earlier) is int else 0) + 1
     if isinstance(error, ChatGptWebUploadBudget):
         # Local counts, not provider text: the wearer sees how far over the booklet is.
         metadata["solve_failure"].update(files=error.files, room=error.room)
@@ -3808,8 +3867,12 @@ def _commit_fence(work_attempt, failed, route: str):
 
 def _give_up_presend(error: Exception, attempt: int, can_switch: bool, route: str | None = None) -> bool:
     """Stop retrying this route: something was sent, or a later route is waiting
-    and one retry has already shown the failure is not a passing render."""
-    return not _nothing_sent(error) or (can_switch and attempt >= 1 and _switches_route(error, route))
+    and one retry has already shown the failure is not a passing render.
+
+    The Codex CLI gets no retry: it has no page that renders, a signed-out or missing CLI and a model no longer
+    offered are the same 150 s later, and its second try runs the locate step and both reads again."""
+    return not _nothing_sent(error) or (
+        can_switch and (attempt >= 1 or route in _OWN_SIGN_IN) and _switches_route(error, route))
 
 
 def _item_labels(item: dict) -> tuple[str, str]:
@@ -3967,6 +4030,7 @@ def _answer_deck(conn, session, session_id: int, doc_id: int) -> bool:
                 raise ValueError("a booklet reply must contain at most 300 questions")
             break
         except Exception as error:  # noqa: BLE001 - recorded on the deck, never resent
+            error = _stand_in_failure(conn, session_id, route, can_switch, error)
             if isinstance(error, (ChatGptWebSendNotAuthorized, WorkPending, WorkConflict)):
                 return True
             replies, failed = [], error
@@ -4065,6 +4129,7 @@ def _answer_mixed_deck(conn, session, session_id: int, doc_id: int) -> bool:
             failed = None
             break
         except Exception as error:  # noqa: BLE001 - never resend an uncertain stage
+            error = _stand_in_failure(conn, session_id, route, can_switch, error)
             if isinstance(error, (ChatGptWebSendNotAuthorized, WorkPending, WorkConflict)):
                 return True
             replies, failed = [], error
@@ -4250,8 +4315,10 @@ def _save_solution(conn, row, result, solver_name: str, *, commit: bool = True) 
             result.raw_reasoning,
             result.extras.get("served_by", solver_name),
             json.dumps(result.diagrams, ensure_ascii=False),
-            json.dumps({k: result.extras.get(k)
-                        for k in ("answer_status", "missing_material", "answer_no", "review_note")},
+            json.dumps({**{k: result.extras.get(k)
+                           for k in ("answer_status", "missing_material", "answer_no", "review_note")},
+                        # One read of two answered (codex-cli): said once behind the answers (_read_once_item).
+                        **({"read_once": True} if result.extras.get("read_once") is True else {})},
                        ensure_ascii=False),
             row["id"],
         ),
@@ -4426,15 +4493,76 @@ def _resume_answers(conn, session) -> bool:
     return True
 
 
+def _startup_sessions() -> set[int] | None:
+    """The sessions a start of the server resumes by itself; None is every one, as it was for all until 2026-11-17.
+
+    Every unanswered session of the last three hours used to start again at once: booklets nobody waits for ran
+    again, the CLI paid for them again, and they held the one browser while the wearer's own booklet waited. Now
+    it is the session the newest glasses state names, unless its wearer has finished, and the sessions with a
+    message on the browser's record, which are only read back. Any other stays as it is until its answers are
+    asked for: the bundle request and the watcher's poll resume a session when they name it (_answer_snapshot).
+    Where no glasses have ever registered (a run from a PC) or their state cannot be read, nothing says which
+    session is waited for, and every one is resumed as before.
+    """
+    try:
+        states = list_states()
+    except (OSError, ValueError, TypeError, KeyError):
+        return None
+    if not states:
+        return None
+    wanted = sessions_with_a_send_on_record()
+    if states[0]["session_id"] is not None and states[0]["phase"] not in ("closed", "writing_done"):
+        wanted.add(states[0]["session_id"])
+    return wanted
+
+
 def _resume_all_answers() -> None:
-    """At startup: every reviewing session a restart left without its answers."""
+    """At startup: the reviewing sessions a restart left without their answers that someone waits for
+    (_startup_sessions), and any whose uncertain Work send is recorded on its deck (read back, never sent again)."""
+    wanted = _startup_sessions()
     conn = db.connect()
     try:
         for session in conn.execute(
                 "SELECT * FROM exam_sessions WHERE status = 'reviewing' AND document_id IS NOT NULL"):
-            _resume_answers(conn, session)
+            if (wanted is None or session["id"] in wanted
+                    or any(_work_recovery_job_id(row) for row in _deck_question_rows(conn, session["id"]))):
+                _resume_answers(conn, session)
     finally:
         conn.close()
+
+
+# How often each session's batch has raised outside every handler since this process started (_record_batch_crash).
+# ponytail: in memory, so a restart counts from zero again; persist it on the session if restarts ever loop on it.
+_batch_crashes: dict[int, int] = {}
+
+
+def _record_batch_crash(conn, session_id: int, doc_id: int, error: Exception) -> None:
+    """The batch raised outside every handler RESUME_LIMIT times (a page file that does not match its record, an
+    unreadable state file, a database that stays locked): leave the failure on every unanswered row, and a
+    whole-booklet row when there is none.
+
+    Until 2026-11-17 the thread died with nothing written, every time: the glasses were told "the answers are being
+    made" for good, and every poll started the thread again. The first crashes still end that way, because the
+    restart is what reads a received reply back. Written while the session is still marked as running, so no poll
+    starts a second batch in between. A failure to write it is logged; the thread ends either way.
+    """
+    try:
+        conn.rollback()
+        session = conn.execute("SELECT * FROM exam_sessions WHERE id = ?", (session_id,)).fetchone()
+        if session is None or _session_phase(session) != "reviewing":
+            return
+        rows = _deck_question_rows(conn, session_id)
+        if not rows:
+            _insert_deck(conn, session_id, doc_id, [ProblemUnit(
+                None, "", start_page_index=0, page_indexes=list(range(_exam_total_pages(conn, doc_id))))])
+            rows = _deck_question_rows(conn, session_id)
+        for row in rows:
+            if _latest_solution_row(conn, row["id"]) is None:
+                _record_solve_failure(conn, row, error, commit=False)
+        conn.commit()
+    except Exception as second:  # noqa: BLE001 - nothing more can be written from here
+        print(json.dumps({"event": "batch_crash_unrecorded", "session_id": session_id,
+                          "type": type(error).__name__, "while_recording": type(second).__name__}), flush=True)
 
 
 def _solve_deck_in_background(session_id: int, doc_id: int) -> None:
@@ -4461,6 +4589,14 @@ def _solve_deck_in_background(session_id: int, doc_id: int) -> None:
                 conn, doc_id, _exam_total_pages(conn, doc_id)))
             conn.commit()
         _solve_deck(conn, session, session_id, doc_id, bundle_items=True)
+    except Exception as error:  # noqa: BLE001 - the booklet ends with a sentence, not with a thread that dies for good
+        with _background_solves_lock:
+            crashes = _batch_crashes[session_id] = _batch_crashes.get(session_id, 0) + 1
+        if crashes < RESUME_LIMIT:
+            # As before: the next poll starts the batch again, and a reply that was already received (a database
+            # locked at its commit) is read back from its chat or the CLI's kept reply, not asked for again.
+            raise
+        _record_batch_crash(conn, session_id, doc_id, error)
     finally:
         with _background_solves_lock:
             _background_solves.discard(session_id)
@@ -4935,6 +5071,56 @@ def _ungathered_item(number: int) -> dict:
             "issue": f"{number}頁目は重ねられませんでした（1枚の画像で解析）。必要なら録り直してください"}
 
 
+def _unnamed_pages(conn, document_id: int | None, groups: list[dict]) -> list[int]:
+    """Captured pages (from 1) that no item of the booklet's deck names.
+
+    A reply can be valid and cover only part of the booklet; until 2026-11-17 it was stored as the whole answer.
+    Only a deck whose every item carries its pages can tell (``_insert_deck``): for any other the list is empty. An
+    item that named no page stands for all of them (``_model_problems``), so one such item hides every gap, and a
+    page that holds no question (a cover) is listed too: this is a prompt to compare, not a verdict.
+    """
+    named: set[int] = set()
+    for row in (row for group in groups for row in group["items"]):
+        try:
+            metadata = json.loads(row["structure_json"] or "{}")
+        except (ValueError, TypeError):
+            return []
+        if not (isinstance(metadata, dict) and metadata.get("deck") is True
+                and isinstance(metadata.get("page_indexes"), list)):
+            return []
+        named.update(index for index in metadata["page_indexes"] if isinstance(index, int))
+    return [row["page_index"] + 1 for row in conn.execute(
+        "SELECT page_index FROM pages WHERE document_id = ? ORDER BY page_index", (document_id,))
+        if row["page_index"] not in named]
+
+
+def _unnamed_pages_item(numbers: list[int]) -> dict:
+    """One item behind the answers, in the group of the capture notices and in their form (``_ungathered_item``)."""
+    return {"group_id": "pages", "group_label": "撮影の確認", "question_id": "pages-unanswered",
+            "question_label": "答えのない頁", "answer": "（解答なし）", "status": "needs_review",
+            "issue": f"{'、'.join(map(str, numbers))}頁の答えがありません。撮影範囲と照合してください"}
+
+
+def _read_once(conn, groups: list[dict]) -> bool:
+    """Whether an answer of this booklet comes from one read where two were asked for (codex-cli)."""
+    for row in (row for group in groups for row in group["items"]):
+        solution = _latest_solution_row(conn, row["id"])
+        try:
+            if solution is not None and json.loads(solution["answer_metadata_json"] or "{}").get("read_once") is True:
+                return True
+        except (ValueError, TypeError, AttributeError):
+            continue
+    return False
+
+
+def _read_once_item() -> dict:
+    """One item behind the answers, in the form of the capture notices (``_ungathered_item``): an unmarked answer
+    means that two reads agree, and here nothing was compared."""
+    return {"group_id": "pages", "group_label": "撮影の確認", "question_id": "read-once", "question_label": "照合なし",
+            "answer": "（1回読み）", "status": "needs_review",
+            "issue": "2回の読みの片方が戻らず、答えは照合していません"}
+
+
 def _answer_snapshot(session_id: int, *, identify: bool) -> dict:
     """The answer bundle. ``identify=False`` leaves ``input_digest`` empty and reads no page file.
 
@@ -4955,9 +5141,13 @@ def _answer_snapshot(session_id: int, *, identify: bool) -> dict:
         groups = _answer_groups(conn, session_id)
         running = _resume_answers(conn, session)
         if not groups:
+            # The send gate keeps the booklet and writes nothing (_answer_deck): say that, not "no problems".
+            gated = ((os.environ.get("ROKID_SOLVER") or "").strip() in _SEND_GATED_ROUTES
+                     and not chatgpt_send_enabled())
             raise HTTPException(
                 status_code=409,
                 detail="the answers are being made" if running or session_id in _background_solves
+                else "sending is not authorized" if gated
                 else "no problems were detected in this document",
             )
         items = [
@@ -4965,7 +5155,17 @@ def _answer_snapshot(session_id: int, *, identify: bool) -> dict:
             for group in groups
             for row in group["items"]
         ]
+        # Only beside answers: a failed or pending booklet says that, and "no page has an answer" tells nothing.
+        # Off unless ROKID_UNNAMED_PAGES_NOTICE=1: the item makes a booklet with a cover page "not all ready" for
+        # the PC bench (scripts/run_exam_deck.py) and changes bundles that tests outside this change pin.
+        unnamed = (_unnamed_pages(conn, session["document_id"], groups)
+                   if os.environ.get("ROKID_UNNAMED_PAGES_NOTICE") == "1"
+                   and any(item["status"] in ("ready", "needs_review") for item in items) else [])
         items += [_ungathered_item(number) for number in _ungathered_pages(conn, session["document_id"])]
+        if unnamed:
+            items.append(_unnamed_pages_item(unnamed))
+        if _read_once(conn, groups):
+            items.append(_read_once_item())
         bundle = {
             "schema_version": max((diagram_schema_version(i.get("diagrams", [])) for i in items), default=1),
             "session_id": str(session_id),

@@ -58,6 +58,14 @@ MAP_FLOOR = 0.15  # how alike (correlation, in the band) the frame brought back 
 # shift with 7.1 to 8.2 where 8 is asked, and a run of twenty still frames was lost (M-31). Worn frames laid by a map
 # were 0.67 to 0.98 alike to their page.
 MAP_SURE = 0.5
+# How far a frame's map may differ in area from the first frame's (the map's own measure at the frame's corner) and
+# still be believed. On 2026-11-17 one worn clip lost 27 of its 58 still frames at 0.791 to 0.797, each 0.76 to 0.87
+# alike to its page (M-44 (15)(c)), and the limit looked a hair too tight. Widened to 0.7, those frames were added
+# (33 to 60, level over noise 39.0 to 47.5) and did not lie on the page: against the first frames their picture was
+# off by 12 px and more at the left edge, 4 to 9 px beside it, 0 to 3 px on the right, and the strongest edges of
+# print were 17% flatter in the left third. One map does not carry a view that far from the first frame's onto the
+# page (a synthetic picture, which has no lens and no curl, cannot show this: there the frames lie exactly). Kept.
+MAP_AREA = (0.8, 1.25)
 # A page is begun again at a still frame that does not go on it when at least this many times its frames are still to
 # come (begun_again). 4: a head that looked away and came back (10, 10, then 20 frames) keeps its page; the clip of
 # 2026-11-17 that was not placed held 3 frames with 58 to come.
@@ -470,7 +478,7 @@ def gather(frames: Iterable[np.ndarray], *, smear: Sequence[float] | None = None
         m = m / m[2, 2]
         turn, lean = float(np.linalg.det(m[:2, :2])), float(np.abs(m[2, :2]).max())
         went = f"alike {alike:.3f} area {turn:.3f} lean {lean:.3f}"
-        return (m if alike >= floor and 0.8 < turn < 1.25 and lean <= 0.2 else None), went
+        return (m if alike >= floor and MAP_AREA[0] < turn < MAP_AREA[1] and lean <= 0.2 else None), went
 
     def begun_again(index: int) -> bool:
         """This still frame does not go on the page. Is the page begun again from it? When the page holds a small

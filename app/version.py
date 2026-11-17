@@ -346,7 +346,19 @@ from __future__ import annotations
 #         label the glasses show (5 to 21 items a booklet of mathematics read "1 " or "全問"). A reply of the
 #         Codex CLI that cannot be used, and a run the phone could not carry out, hand the booklet to the next
 #         route as a time-out does; they used to end it. See API 1.51.1.
-APP_VERSION = "0.85.1"
+# 0.86.0: the faults found by reading the structure end to end on 2026-11-17 (M-44 (15), (16)), each with a test
+#         seen to fail first; none of it seen on the live routes. The Codex route: a locating request that does
+#         not come back gives the booklet to the next route at once; a read that hangs behind a finished one is
+#         ended after that read's time again (two minutes at least); a usage limit is taken from the CLI's own
+#         sentence or an error line, not from any word of the run; reads that name unnumbered questions
+#         differently are compared in order; a booklet one read of two answered says so behind its answers. The
+#         routes: Work behind the CLI that cannot take a booklet, and holds nothing of it, hands it to Chat; an
+#         uncertain Work send is read back a few times and then ends with its sentence; a batch that dies outside
+#         every handler ends the booklet with a sentence the third time; a start resumes the session the glasses
+#         are on and the sends on record, not every booklet of the last three hours; the daily deep check is no
+#         longer put off by shallow ones. The gathering: the booklet in hand first, a clip the server stopped on
+#         twice given up, clips removed after three days (gathered) or a week (failed). See API 1.52.0.
+APP_VERSION = "0.86.0"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.
@@ -497,7 +509,11 @@ APP_VERSION = "0.85.1"
 #         boxes is one item whose answer names each box on a line of its own (平均：7/2).
 # 1.51.1: `question_label` of the answer bundle keeps a printed "(1)" at its end; only the "(2)", "(3)" that the
 #         server adds to a repeated number is taken off. No field changed.
-API_VERSION = "1.51.1"
+# 1.52.0: the answer bundle may end with the item `read-once` (照合なし) when one read of two answered. Without a
+#         deck and with the send gate off, the bundle's 409 says "sending is not authorized". `/v1/route-check`
+#         and `/v1/settings` carry `deep_checked_at` once a check has sent through the browser. With
+#         ROKID_UNNAMED_PAGES_NOTICE=1 (off) the bundle names captured pages no answer cites (`pages-unanswered`).
+API_VERSION = "1.52.0"
 
 # Matching algorithm identity. Bump when thresholds or hashing change so a
 # re-index/eval is triggered. Mirrors thresholds in app/matching.py.

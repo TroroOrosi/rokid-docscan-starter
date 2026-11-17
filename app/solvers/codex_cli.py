@@ -666,6 +666,12 @@ class CodexCliSolver(Solver):
     def _answers(reads: list, question: Question, extras: dict) -> list:
         first = _booklet_replies(reads[0], subject=question.subject, extras=extras)
         if len(reads) < 2:
+            if (os.environ.get("ROKID_CODEX_READS") or "2").strip() != "1":
+                # Asked for twice and answered once (the other read failed, gave nothing usable or was ended):
+                # nothing was compared, and an unmarked answer otherwise means that two reads agree. The server says
+                # so once behind the answers.
+                for _, result in first:
+                    result.extras["read_once"] = True
             return first
         return _compared(first, _booklet_replies(reads[1], subject=question.subject, extras=extras))
 

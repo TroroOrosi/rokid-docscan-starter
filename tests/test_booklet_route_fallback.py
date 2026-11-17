@@ -207,7 +207,8 @@ def test_a_codex_cli_that_is_signed_out_moves_the_booklet_to_the_next_route(clie
     bundle = _background_finalize_and_wait(
         client, session_id, lambda items: items and all(i["status"] == "ready" for i in items))
     assert bundle["items"][0]["answer"] == "4"
-    assert calls == {"primary": 2, "backup": 1}  # one retry, as after any failure before a send
+    # No retry: the CLI has no page whose passing render a second try gets past, and waiting does not sign it in.
+    assert calls == {"primary": 1, "backup": 1}
 
 
 def test_the_glasses_are_told_the_route_is_changing_not_that_the_subject_ended(client, monkeypatch):
