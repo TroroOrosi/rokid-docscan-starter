@@ -2405,6 +2405,65 @@ public class LocalReviewTest {
         } finally { controller.close(); }
     }
 
+    /**
+     * Found by reading on 2026-11-18. The glasses make a small picture of each photo for its review; when that fails
+     * (no memory for it, a JPEG they cannot decode) there is no view, so no view was ever reported as shown, the three
+     * seconds never began, the page was never saved and every double tap was answered with the same review. The photo
+     * itself is whole and kept: its three seconds run without the picture.
+     */
+    @Test public void aPageWhosePictureCannotBeDrawnIsSavedAfterItsThreeSecondsAndTheCaptureGoesOn() throws Exception {
+        Surface surface = new Surface(); surface.holdForPage = true; surface.noReviewView = true;
+        DocScanController controller = waitingLocalController(surface);
+        ClockedWatchdog clock = installClockedWatchdog(controller);
+        try {
+            LocalCaptureSession saved = undrawablePage(controller, surface);
+            assertEquals(RelayState.CAPTURE_REVIEW, controller.getState());
+            clock.advanceBy(controller, 2999);
+            assertEquals("the forward swipe still has its three seconds to retake", 0, saved.pageCount());
+            clock.advanceBy(controller, 1);
+            assertEquals("the page is kept", 1, saved.pageCount());
+            assertNotNull("and the next page is looked for", surface.pageReady);
+        } finally { controller.close(); }
+    }
+
+    @Test public void aDoubleTapOverAPageWhosePictureCannotBeDrawnEndsTheCaptureWithThatPage() throws Exception {
+        Surface surface = new Surface(); surface.holdForPage = true; surface.noReviewView = true;
+        DocScanController controller = waitingLocalController(surface);
+        ClockedWatchdog clock = installClockedWatchdog(controller);
+        try {
+            LocalCaptureSession saved = undrawablePage(controller, surface);
+            controller.onGlassesAction(GlassesInputAction.BACK); barrier(controller);
+            clock.advanceBy(controller, 3000);
+            assertEquals(1, saved.pageCount());
+            assertEquals("the capture is over", LocalCaptureSession.Phase.ANALYSIS, saved.phase());
+        } finally { controller.close(); }
+    }
+
+    @Test public void aPageWhosePictureCannotBeDrawnIsNotSavedBehindAClearedDisplay() throws Exception {
+        Surface surface = new Surface(); surface.holdForPage = true; surface.noReviewView = true;
+        DocScanController controller = waitingLocalController(surface);
+        ClockedWatchdog clock = installClockedWatchdog(controller);
+        try {
+            LocalCaptureSession saved = undrawablePage(controller, surface);
+            controller.toggleCapturePause(); barrier(controller);
+            clock.advanceBy(controller, 3000);
+            assertEquals("a tap holds the page as it holds any other", 0, saved.pageCount());
+            controller.toggleCapturePause(); barrier(controller);
+            clock.advanceBy(controller, 3000);
+            assertEquals("three seconds after the return it is saved", 1, saved.pageCount());
+        } finally { controller.close(); }
+    }
+
+    private static LocalCaptureSession undrawablePage(DocScanController controller, Surface surface) throws Exception {
+        controller.startLocalSession(false); barrier(controller);
+        set(controller, "localNetworkBusy", true); // no network in these tests
+        surface.pageReady = null;
+        ((CaptureLease)get(controller, "captureLease")).begin(0);
+        set(controller, "state", RelayState.CAPTURING);
+        controller.onPhoto(new byte[]{1, 2, 3}, nativeSource(new byte[]{1, 2, 3}, 100)); barrier(controller);
+        return (LocalCaptureSession)get(controller, "localSession");
+    }
+
     /** A fold during a page's three seconds: taken up again, the page was saved and no further page was ever looked for. */
     @Test public void aReadingTakenUpAgainWithAPageUnderReviewGoesOnTakingPages() throws Exception {
         Context context = RuntimeEnvironment.getApplication();
@@ -2586,7 +2645,10 @@ public class LocalReviewTest {
         public PhotoStartResult takePhoto(int w, int h, int q) { photos++; return photoStart; }
         public long showHud(List<String> lines) { return 2; }
         public long showCaptureAiming(int page, boolean retake, boolean stable) { return 3; }
-        public long showCaptureReview(byte[] jpeg, int rotation, List<String> lines) { return qualityEnabled ? ++qualityView : 1; }
+        boolean noReviewView; // the glasses could not decode the photo for display, or had no memory for it
+        public long showCaptureReview(byte[] jpeg, int rotation, List<String> lines) {
+            return noReviewView ? NO_VIEW_GENERATION : qualityEnabled ? ++qualityView : 1;
+        }
         volatile CaptureInspectionFeedback.Notice inspectionNotice;
         final CountDownLatch inspectionShown = new CountDownLatch(1);
         public void showCaptureInspectionFeedback(CaptureInspectionFeedback.Notice notice,

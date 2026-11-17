@@ -2099,7 +2099,7 @@ public final class DocScanController implements AutoCloseable {
         if (link.supportsLocalCaptureReview() && (capturePaused || reviewDeadlineMillis == 0
                 || android.os.SystemClock.elapsedRealtime() < reviewDeadlineMillis
                 || reviewGestureBlocksCommit(reviewGeneration)
-                || !link.isCaptureReviewVisible(reviewViewGeneration))) return;
+                || !reviewShownOrUndrawable())) return;
         if (pending.needsSceneRecapture()) return;
         if (api == null) {
             publishCaptureReview(
@@ -2702,6 +2702,18 @@ public final class DocScanController implements AutoCloseable {
         reviewViewGeneration = viewGeneration;
         if (pending.needsSceneRecapture()) link.showCaptureReviewNotice("前スワイプで撮り直し");
         listener.onUpdate(RelayState.CAPTURE_REVIEW, lines, diagnostic);
+        // The glasses could not make this photo's picture (no memory for it, or a JPEG they cannot decode), so no
+        // view will ever be reported as shown. The photo itself is whole and kept, and the wearer can do nothing
+        // about a picture that will not draw: its three seconds start here. Left waiting for the view, the page
+        // was never saved and every double tap was answered with the same review.
+        if (viewGeneration == CaptureSurface.NO_VIEW_GENERATION && autoCommitArmed && !capturePaused)
+            startReviewCountdown("without a view: the picture could not be drawn");
+    }
+
+    /** The review is on the display, or the local surface could make no picture of it at all. */
+    private boolean reviewShownOrUndrawable() {
+        return reviewViewGeneration == CaptureSurface.NO_VIEW_GENERATION
+                ? link.supportsLocalCaptureReview() : link.isCaptureReviewVisible(reviewViewGeneration);
     }
 
     // ---- hands-free automatic reading -------------------------------------
@@ -2810,7 +2822,9 @@ public final class DocScanController implements AutoCloseable {
 
     /**
      * Starts the registration countdown once the glasses confirm the review
-     * view is on screen. Without that acknowledgement nothing is uploaded.
+     * view is on screen. Without that acknowledgement nothing is uploaded; the
+     * one exception is a photo whose picture the local surface could not make
+     * at all (publishCaptureReview).
      */
     private void scheduleAutoCommitOnAck(long generation, String purpose) {
         // capturePaused: a view reported just as the wearer cleared the display starts neither the three seconds
@@ -2821,10 +2835,19 @@ public final class DocScanController implements AutoCloseable {
                 || generation != reviewViewGeneration) {
             return;
         }
+        CaptureReviewStore.Pending pending = startReviewCountdown(
+                "after review view acknowledgement generation=" + generation + " purpose=" + purpose);
+        if (pending == null) return;
+        observeFutureCandidates();
+        requestNativeSelection(pending);
+    }
+
+    /** The three seconds of the photo under review, from now; null when there is none. */
+    private CaptureReviewStore.Pending startReviewCountdown(String cause) {
         CaptureReviewStore.Pending pending = captureReview.peek();
         if (pending == null) {
             autoCommitArmed = false;
-            return;
+            return null;
         }
         autoCommitScheduled = true;
         long delayMillis = LOCAL_REVIEW_MILLIS;
@@ -2839,13 +2862,10 @@ public final class DocScanController implements AutoCloseable {
         listener.onUpdate(
                 state,
                 currentHudLines,
-                "Auto-registration countdown started after review view"
-                        + " acknowledgement generation=" + generation
-                        + " purpose=" + purpose
+                "Auto-registration countdown started " + cause
                         + " delay=" + delayMillis + "ms"
                         + " framing=" + pending.framing);
-        observeFutureCandidates();
-        requestNativeSelection(pending);
+        return pending;
     }
 
     /** A is already visible and durable; neither its timer nor next-page observation waits for optional B. */
@@ -2938,7 +2958,7 @@ public final class DocScanController implements AutoCloseable {
         try {
             serial.execute(() -> {
                 // Paused: the page stays armed as it was, for the review it gets on return.
-                if (capturePaused || !link.isCaptureReviewVisible(reviewViewGeneration) || !shouldAutoCommit(
+                if (capturePaused || !reviewShownOrUndrawable() || !shouldAutoCommit(
                         state,
                         generationAtSchedule,
                         reviewGeneration,
