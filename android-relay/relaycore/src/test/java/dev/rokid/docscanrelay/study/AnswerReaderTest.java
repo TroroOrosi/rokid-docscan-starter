@@ -106,6 +106,82 @@ public class AnswerReaderTest {
                 reader.accept(new AnswerBundle("session", "a".repeat(64), 4, failed.items)));
     }
 
+    /** The first of two reads, shown while it is still compared with the other: its answers and one notice. */
+    private AnswerBundle firstRead() {
+        return new AnswerBundle("session", "a".repeat(64), 1, List.of(
+                AnswerItem.ready("g1", "第1問", "q1", "問1", "abcdefghijkl"),
+                AnswerItem.ready("g2", "第2問", "q3", "問1", "mnopqrstuvwx"),
+                new AnswerItem("pages", "撮影の確認", "read-comparing", "照合中", "（待ち）",
+                        AnswerItem.Status.NEEDS_REVIEW, "1回目の読み")));
+    }
+
+    /** The compared answers: the notice gone, and a question only the second read listed in its place. */
+    private AnswerBundle compared() {
+        return new AnswerBundle("session", "a".repeat(64), 2, List.of(
+                AnswerItem.ready("g1", "第1問", "q1", "問1", "abcdefghijkl"),
+                new AnswerItem("g1", "第1問", "q9", "問2", "ウ", AnswerItem.Status.NEEDS_REVIEW, "1回だけが挙げた設問"),
+                AnswerItem.ready("g2", "第2問", "q3", "問1", "mnopqrstuvwx")));
+    }
+
+    @Test public void comparedAnswersThatAddAQuestionAndDropTheNoticeKeepTheWearersPlace() {
+        // Until 2026-11-18 a snapshot that kept some questions and not others was refused whole: the reader
+        // stayed on the first read's answers and its notice for good, and the phone asked again every five seconds.
+        for (boolean continuous : new boolean[]{false, true}) {
+            AnswerReader reader = new AnswerReader(firstRead(), 4, 2, String::length, continuous);
+            reader.restore("q3", 4);
+            int offset = reader.offset();
+            AnswerBundle next = compared();
+            assertTrue(reader.accept(next));
+            assertSame(next, reader.bundle());
+            assertEquals("q3", reader.current().questionId);
+            assertEquals(offset, reader.offset());
+            assertTrue(reader.page().sourceText.contains("qrst"));
+            assertFalse("the older snapshot never comes back", reader.accept(firstRead()));
+        }
+    }
+
+    @Test public void aNoticeBeingReadWhenItGoesLeavesTheReaderOnTheAnswerBeforeIt() {
+        for (boolean continuous : new boolean[]{false, true}) {
+            AnswerReader reader = new AnswerReader(firstRead(), 4, 2, String::length, continuous);
+            reader.restore("read-comparing", 2);
+            assertTrue(reader.accept(compared()));
+            assertEquals("q3", reader.current().questionId);
+            assertEquals(0, reader.offset());
+        }
+        // Before a view has given its size, as when the saved place is carried over to a fetched snapshot.
+        AnswerReader saved = new AnswerReader(firstRead(), true);
+        saved.restore("read-comparing", 2);
+        assertTrue(saved.accept(compared()));
+        assertEquals("q3", saved.current().questionId);
+        assertEquals(0, saved.offset());
+    }
+
+    @Test public void comparedAnswersMayRenumberGroupsButNeverReorderOrRenameAQuestion() {
+        List<AnswerItem> old = firstRead().items;
+        // Group ids are positions (g1, g2, ...): a question added in front of the first heading moves them all.
+        AnswerReader reader = new AnswerReader(firstRead(), 4, 2, String::length, true);
+        reader.restore("q3", 4);
+        assertTrue(reader.accept(new AnswerBundle("session", "a".repeat(64), 2, List.of(
+                AnswerItem.ready("g1", "全体", "q9", "問2（第2問）", "ウ"),
+                AnswerItem.ready("g2", "第1問", "q1", "問1", "abcdefghijkl"),
+                AnswerItem.ready("g3", "第2問", "q3", "問1", "mnopqrstuvwx")))));
+        assertEquals("q3", reader.current().questionId);
+        assertEquals(4, reader.offset());
+
+        AnswerItem added = AnswerItem.ready("g1", "第1問", "q9", "問2", "ウ");
+        assertFalse("reordered", new AnswerReader(firstRead(), true).accept(new AnswerBundle(
+                "session", "a".repeat(64), 2, List.of(old.get(1), added, old.get(0)))));
+        assertFalse("relabelled", new AnswerReader(firstRead(), true).accept(new AnswerBundle(
+                "session", "a".repeat(64), 2, List.of(old.get(0), added,
+                        AnswerItem.ready("g2", "第2問", "q3", "問5", "mnopqrstuvwx")))));
+        assertFalse("under another heading", new AnswerReader(firstRead(), true).accept(new AnswerBundle(
+                "session", "a".repeat(64), 2, List.of(old.get(0), added,
+                        AnswerItem.ready("g2", "第3問", "q3", "問1", "mnopqrstuvwx")))));
+        assertFalse("renumbered", new AnswerReader(firstRead(), true).accept(new AnswerBundle(
+                "session", "a".repeat(64), 2, List.of(old.get(0), added, new AnswerItem("g2", "第2問", "q3", "問1",
+                        "mnopqrstuvwx", AnswerItem.Status.READY, "", List.of(), List.of(7))))));
+    }
+
     @Test public void anAnswerNeedingReviewWarnsFirstAndStillShowsTheAnswer() {
         AnswerBundle bundle = new AnswerBundle("session", "a".repeat(64), 1, List.of(
                 new AnswerItem("g1", "大問1", "g1-q1", "(1)", "12",

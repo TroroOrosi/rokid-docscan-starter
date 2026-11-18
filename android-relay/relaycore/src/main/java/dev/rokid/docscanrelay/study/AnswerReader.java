@@ -1,7 +1,9 @@
 package dev.rokid.docscanrelay.study;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 /** Offline navigation; no camera, network, clock or Android lifecycle dependency. */
 public final class AnswerReader {
@@ -281,17 +283,31 @@ public final class AnswerReader {
             }
         }
         if (!sameShape) {
-            // The same questions never change order or identity. A deck with none
-            // of the old question ids is a replacement: the one row a failed
-            // message left, replaced by the model's list on a retry.
-            for (AnswerItem item : next.items) {
-                for (AnswerItem old : bundle.items) {
-                    if (old.questionId.equals(item.questionId)) return false;
-                }
+            // The same questions never change order or what the paper prints for them. Questions may come
+            // and go around them: the comparison of two reads adds what only the second read listed and
+            // takes its notice away. Group ids are positions and may move with that; group labels may not.
+            // A deck with none of the old question ids is a replacement: the one row a failed message
+            // left, replaced by the model's list on a retry.
+            Map<String, Integer> places = new HashMap<>();
+            for (int i = 0; i < next.items.size(); i++) places.put(next.items.get(i).questionId, i);
+            int last = -1;
+            int stay = 0;
+            boolean here = false;
+            for (int i = 0; i < bundle.items.size(); i++) {
+                AnswerItem old = bundle.items.get(i);
+                Integer place = places.get(old.questionId);
+                if (place == null) continue;
+                AnswerItem item = next.items.get(place);
+                if (place < last || !old.groupLabel.equals(item.groupLabel)
+                        || !old.questionLabel.equals(item.questionLabel)
+                        || !old.answerNumbers.equals(item.answerNumbers)) return false;
+                last = place;
+                // The question being read, or the nearest one before it that is still there.
+                if (i <= questionIndex) { stay = place; here = i == questionIndex; }
             }
             bundle = next;
-            questionIndex = 0;
-            anchorOffset = 0;
+            questionIndex = stay;
+            if (!here) anchorOffset = 0;
             screen = Screen.ANSWER;
             menuIndex = 0;
             menuGroup = null;

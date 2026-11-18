@@ -1455,6 +1455,54 @@ public class DocScanGlassActivityIntentTest {
     }
 
     @Test @Config(sdk = 28, manifest = Config.NONE)
+    public void comparedAnswersArrivingWhileTheFirstReadIsBeingReadUpdateItWhereTheWearerIs() throws Exception {
+        // The server shows the first of two reads at once and the compared answers afterwards: the notice goes and
+        // a question only the second read listed is added. The wearer is writing from the third item meanwhile.
+        AnswerStore store = new AnswerStore(activity.getFilesDir());
+        AnswerBundle first = new AnswerBundle("7", "a".repeat(64), 1, List.of(
+                AnswerItem.ready("g1", "第1問", "q1", "問1", "最初の答え"),
+                AnswerItem.ready("g1", "第1問", "q3", "問3", "三つ目の答え"),
+                new AnswerItem("pages", "撮影の確認", "read-comparing", "照合中", "（もう1回の読みを待っています）",
+                        AnswerItem.Status.NEEDS_REVIEW, "1回目の読みの答えです")));
+        AnswerBundle compared = new AnswerBundle("7", "a".repeat(64), 4, List.of(first.items.get(0),
+                new AnswerItem("g1", "第1問", "q9", "問2", "二つ目の答え", AnswerItem.Status.NEEDS_REVIEW,
+                        "2回のうち1回だけが挙げた設問"),
+                first.items.get(1)));
+        store.start(first);
+        store.save(first, "q3", 2, false);
+        setField(activity, "answerStore", store);
+        java.lang.reflect.Method begin = DocScanGlassActivity.class.getDeclaredMethod("beginPowerGeneration");
+        begin.setAccessible(true); begin.invoke(activity);
+        java.lang.reflect.Method open = DocScanGlassActivity.class.getDeclaredMethod("openAnswers", AnswerBundle.class, String.class, int.class);
+        open.setAccessible(true); open.invoke(activity, first, "q3", 2);
+        layoutAnswersAndWaitForReceipt();
+        dev.rokid.docscanrelay.study.AnswerReader reader = org.robolectric.util.ReflectionHelpers.getField(activity, "reader");
+        Object view = org.robolectric.util.ReflectionHelpers.getField(activity, "answers");
+        long generation = PowerState.forContext(activity).load().generation;
+        server.setDispatcher(new Dispatcher() {
+            @Override public MockResponse dispatch(RecordedRequest request) {
+                return new MockResponse().setBody(compared.toJson());
+            }
+        });
+        activity.onNewIntent(new Intent().putExtra("wake_session_id", 7)
+                .putExtra("wake_generation", generation).putExtra("answer_revision", 4L));
+        RecordedRequest request = server.takeRequest(2, TimeUnit.SECONDS);
+        assertNotNull(request);
+        assertEquals("/v1/exam-sessions/7/answer-bundle", request.getPath());
+        for (int attempt = 0; attempt < 100 && store.load().bundle.revision < 4; attempt++) Thread.sleep(10);
+        Shadows.shadowOf(android.os.Looper.getMainLooper()).idle();
+        assertEquals("the newer snapshot is saved, not refused", 4, store.load().bundle.revision);
+        assertEquals("q3", store.load().questionId);
+        assertEquals(2, store.load().offset);
+        assertSame("the same reader on the same view: nothing is opened anew", reader,
+                org.robolectric.util.ReflectionHelpers.getField(activity, "reader"));
+        assertSame(view, org.robolectric.util.ReflectionHelpers.getField(activity, "answers"));
+        assertEquals(4, reader.bundle().revision);
+        assertEquals("q3", reader.current().questionId);
+        assertEquals(2, reader.offset());
+    }
+
+    @Test @Config(sdk = 28, manifest = Config.NONE)
     public void repeatedRevisionDuringFetchDoesNotStartASecondGetAndOnlyDisplayedSavedAnswersAreAcknowledged() throws Exception {
         AnswerStore store = new AnswerStore(activity.getFilesDir());
         setField(activity, "answerStore", store);
