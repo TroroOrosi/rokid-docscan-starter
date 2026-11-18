@@ -767,6 +767,117 @@ _PARTS_MOST = 4  # of one read, whatever is set: every way of grouping the major
 _PHOTOS_KEPT = 600_000_000
 _PAGE_FILE = re.compile(r"page(\d{3})")
 
+# What was prepared of a booklet before its answers were asked for (``CodexCliSolver.prepare``). By a page's file
+# (``_page_key``): a Future of what was made of that page, {"folder", "size", "regions", "partial", "boxes", "names"}
+# or None when nothing could be, and the time it was asked. By all of a booklet's files in order: a Future of what
+# ``_outline`` returns. In memory only: after a restart nothing is prepared and a booklet is answered as it was until
+# 2026-11-19, with every request made when the answers are asked for.
+_AHEAD_KEPT_S = 6 * 3600.0         # after which the files are removed and the entry forgotten
+_AHEAD_PHOTOS_KEPT = 150_000_000   # as ``_PHOTOS_KEPT``, for pages prepared while clips are still being gathered
+_ahead_lock = threading.Lock()
+_ahead: dict[tuple, tuple[concurrent.futures.Future, float]] = {}
+_ahead_outlines: dict[tuple, tuple[concurrent.futures.Future, float]] = {}
+_ahead_turn = threading.BoundedSemaphore(2)  # requests that locate pages ahead, at once
+
+
+def _parts_set() -> int | None:
+    """``ROKID_CODEX_PARTS``: the requests the first read is made in (1 when not set); None when it is no number."""
+    try:
+        return int(os.environ.get("ROKID_CODEX_PARTS") or 1)
+    except ValueError:
+        return None
+
+
+def _page_key(page: dict) -> tuple:
+    """What a prepared page is known by: its file and the hash the server gives with it; without a hash, the file's
+    size and time. A clip gathered later puts another file in the page's place, and what was prepared of the frame
+    the page arrived as is then not used."""
+    path = str(page["image_path"])
+    if page.get("image_sha256"):
+        return path, page["image_sha256"]
+    stat = os.stat(path)
+    return path, stat.st_size, stat.st_mtime_ns
+
+
+def _ahead_sweep() -> None:
+    """Forget what was prepared more than ``_AHEAD_KEPT_S`` ago and remove its files, and those a server that has
+    since been restarted left behind."""
+    now = time.time()
+    with _ahead_lock:
+        for store in (_ahead, _ahead_outlines):
+            for key, (future, asked) in list(store.items()):
+                if future.done() and now - asked >= _AHEAD_KEPT_S:
+                    del store[key]
+    root = Path(config.DATA_DIR) / "codex-ahead"
+    try:
+        folders = list(root.iterdir())
+    except OSError:
+        return
+    for folder in folders:
+        try:
+            if now - folder.stat().st_mtime >= _AHEAD_KEPT_S:
+                shutil.rmtree(folder, ignore_errors=True)
+        except OSError:
+            continue
+
+
+def _taken(ordered: list[dict], wait: float) -> dict[int, dict]:
+    """What was prepared ahead of these pages, by each page's place among them. A page being prepared is waited for,
+    ``wait`` seconds for all of them; one whose turn has not come is taken back, and whoever asks does it."""
+    held = {}
+    with _ahead_lock:
+        for number, page in enumerate(ordered, 1):
+            try:
+                kept = _ahead.get(_page_key(page))
+            except (OSError, KeyError, TypeError):
+                continue
+            if kept is not None:
+                held[number] = kept[0]
+    taken, until = {}, time.monotonic() + wait
+    for number, future in held.items():
+        if future.cancel():
+            continue
+        try:
+            made = future.result(timeout=max(0.0, until - time.monotonic()))
+        except Exception:  # noqa: BLE001 - whatever became of it, the page is located with the booklet
+            continue
+        if made is not None and made["folder"].is_dir():
+            taken[number] = made
+    return taken
+
+
+def _ahead_view(page: dict) -> Path | None:
+    """The small view of this page that was made when it was prepared, when that is done; never waited for."""
+    try:
+        with _ahead_lock:
+            kept = _ahead.get(_page_key(page))
+        made = kept[0].result(timeout=0) if kept is not None and kept[0].done() and not kept[0].cancelled() else None
+        view = made["folder"] / made["names"][0] if made else None
+        return view if view is not None and view.is_file() else None
+    except Exception:  # noqa: BLE001 - the view is then made again
+        return None
+
+
+def _outline_ahead(pages: list[dict]) -> concurrent.futures.Future | None:
+    """The request for this booklet's major problems that was made ahead: still running, or back with something
+    told. None when there is none, when its turn had not come (it is taken back), or when it told nothing: the
+    booklet's own request then asks, as before."""
+    try:
+        key = tuple(_page_key(page) for page in sorted(pages, key=lambda page: page["page_number"]))
+    except (OSError, KeyError, TypeError):
+        return None
+    with _ahead_lock:
+        kept = _ahead_outlines.get(key)
+    if kept is None or kept[0].cancel():
+        return None
+    if kept[0].done():
+        try:
+            if not kept[0].result(timeout=0)[0]:
+                return None
+        except Exception:  # noqa: BLE001
+            return None
+    return kept[0]
+
 
 def _section_spans(numbers: list[int], starts, parts: int) -> list[tuple[int, int, int]]:
     """The parts of a read by the booklet's major problems, each (first capture page, last capture page whose major
@@ -1183,9 +1294,55 @@ class CodexCliSolver(Solver):
 
     @classmethod
     def _find(cls, directory: Path, environment: dict, pages: list[dict], *, model: str, timeout: float) -> dict | None:
+        """Where the pages of these photos are (``_find_batch``), taking what was prepared ahead of each photo
+        (``prepare``) and asking only about the others. The same layout either way; None when nothing at all could
+        be located.
+
+        A photo not prepared whose request then fails without saying why goes as a photo with no page found; what
+        that request raises (a usage limit, a model not offered, no reply in its time) is raised here."""
+        ordered = sorted(pages, key=lambda page: page["page_number"])
+        taken = _taken(ordered, min(timeout, 900))
+        if not taken:
+            return cls._find_batch(directory, environment, ordered, model=model, timeout=timeout)
+        rest = [number for number in range(1, len(ordered) + 1) if number not in taken]
+        asked = (cls._find_batch(directory, environment, [ordered[number - 1] for number in rest], model=model,
+                                 timeout=timeout) if rest else None)
+        layout = {"ordered": ordered, "sizes": [], "found": {}, "partial": set(), "boxes": {}, "photos": {},
+                  "views": {}, "ahead": taken}
+        for number, page in enumerate(ordered, 1):
+            made = taken.get(number)
+            if made is not None:
+                layout["sizes"].append(made["size"])
+                layout["found"][number] = made["regions"]
+                if made["partial"]:
+                    layout["partial"].add(number)
+                for printed, box in enumerate(made["boxes"], 1):
+                    layout["boxes"][number, printed] = box
+                continue
+            if asked is None:
+                with Image.open(page["image_path"]) as source:
+                    layout["sizes"].append(source.size)
+                continue
+            local = rest.index(number) + 1
+            layout["sizes"].append(asked["sizes"][local - 1])
+            layout["views"][number] = asked["views"][local]
+            if local in asked["found"]:
+                layout["found"][number] = asked["found"][local]
+                for printed in range(1, len(asked["found"][local]) + 1):
+                    layout["boxes"][number, printed] = asked["boxes"][local, printed]
+            if local in asked["partial"]:
+                layout["partial"].add(number)
+            if local in asked["photos"]:
+                layout["photos"][number] = asked["photos"][local]
+        return layout
+
+    @classmethod
+    def _find_batch(cls, directory: Path, environment: dict, pages: list[dict], *, model: str, timeout: float,
+                    keep: int | None = None) -> dict | None:
         """Write each photo's small view into ``directory`` and ask where its pages are: the photos in order, their
         sizes, the regions found (``_regions``), each region's box in pixels with the way its lines run and the scale
-        wanted for it, and the photos still in memory (``_PHOTOS_KEPT``).
+        wanted for it, the photos still in memory (``keep`` bytes of pixels, ``_PHOTOS_KEPT``), each photo's view
+        and, of what was prepared ahead, nothing.
 
         None when nothing could be located at all (the caller sends the photos as before). A usage limit is raised,
         and so is a model that is not offered: the request for the answers would end the same way. So is a request
@@ -1194,12 +1351,13 @@ class CodexCliSolver(Solver):
         """
         ordered = sorted(pages, key=lambda page: page["page_number"])
         sizes, views, photos, kept = [], [], {}, 0
+        keep = _PHOTOS_KEPT if keep is None else keep
         for number, page in enumerate(ordered, 1):
             with Image.open(page["image_path"]) as source:
                 photo = _readable(source.convert("RGB"))
             sizes.append(photo.size)
             view = photo
-            if kept + photo.width * photo.height * 3 <= _PHOTOS_KEPT:
+            if kept + photo.width * photo.height * 3 <= keep:
                 kept += photo.width * photo.height * 3
                 photos[number], view = photo, photo.copy()
             view.thumbnail((1024, 1024))
@@ -1224,53 +1382,167 @@ class CodexCliSolver(Solver):
                 box = (max(0, round((left - pad_x) * width)), max(0, round((top - pad_y) * height)),
                        min(width, round((right + pad_x) * width)), min(height, round((bottom + pad_y) * height)))
                 boxes[number, printed] = (box, vertical, _wanted_scale((box[2] - box[0], box[3] - box[1]), clip=clip_page(page)))
-        return {"ordered": ordered, "sizes": sizes, "found": found, "partial": partial, "boxes": boxes, "photos": photos}
+        return {"ordered": ordered, "sizes": sizes, "found": found, "partial": partial, "boxes": boxes, "photos": photos,
+                "views": {number: directory / name for number, name in enumerate(views, 1)}, "ahead": {}}
 
-    @staticmethod
-    def _cut(directory: Path, layout: dict, limit_of, folder: Path | None = None) -> list[str]:
+    @classmethod
+    def _cut(cls, directory: Path, layout: dict, limit_of, folder: Path | None = None) -> list[str]:
         """Write each located photo's regions, enlarged and cut, and their names in sending order. A photo with no
         region goes as the Chat route sends it; one of which something returned was left out goes whole beside its
         regions. ``limit_of(place)`` is the long side that photo's regions may be sent at (``_target_long``).
 
-        Into ``directory``, where the small views are, which become the overviews; or into ``folder``, a second set
-        at another size, to which the overviews are copied. One photo is in memory at a time."""
-        target = folder or directory
-        target.mkdir(exist_ok=True)
-        ordered, found, partial, boxes = layout["ordered"], layout["found"], layout["partial"], layout["boxes"]
+        Into ``directory``, where the small views become the overviews; or into ``folder``, a second set at another
+        size, to which the overviews are copied. One photo is in memory at a time."""
+        (folder or directory).mkdir(exist_ok=True)
         names = []
-        for number, page in enumerate(ordered, 1):
-            label = f"{page['page_number']:03d}"
-            if number not in found:
-                # No region here: this photo as the Chat route prepares it (paper crop, fold split), at its own size.
-                for payload in source_images([page]):
-                    (target / payload["name"]).write_bytes(payload["buffer"])
-                    names.append(payload["name"])
-                continue
-            overview = f"overview{label}.jpg"
-            if folder is None:
-                (directory / f"photo{number:03d}.jpg").replace(directory / overview)
-            else:
-                shutil.copyfile(directory / overview, folder / overview)
-            names.append(overview)
-            photo = layout["photos"].pop(number, None)
-            if photo is None:
-                with Image.open(page["image_path"]) as source:
-                    photo = _readable(source.convert("RGB"))
-            for printed in range(1, len(found[number]) + 1):
-                box, vertical, wanted = boxes[number, printed]
-                crop = photo.crop(box)
-                scale = min(wanted, limit_of(number) / max(crop.size))
-                for tile_number, (tile, _) in enumerate(page_tiles(crop, vertical_text=vertical, min_scale=scale,
-                                                                   max_scale=scale)):
-                    name = f"page{label}-{printed}{_letters(tile_number)}.jpg"
-                    tile.save(target / name, format="JPEG", quality=92, subsampling=0)
-                    names.append(name)
-            if number in partial:
-                # Something returned for this photo was left out. The whole frame goes too, uncropped (the paper crop
-                # could cut off just what was left out), so that what no region shows is more than the small view.
-                photo.save(target / f"page{label}.jpg", format="JPEG", quality=92, subsampling=0)
-                names.append(f"page{label}.jpg")
+        for number in range(1, len(layout["ordered"]) + 1):
+            names += cls._cut_page(directory, layout, number, limit_of(number), folder)
         return names
+
+    @staticmethod
+    def _cut_page(directory: Path, layout: dict, number: int, limit: float, folder: Path | None = None) -> list[str]:
+        """The files of one photo (``_cut``), written, and their names in sending order: its overview first when
+        pages were found on it. A photo prepared ahead whose regions go at their own size is not opened: its files
+        are copied as they were made."""
+        target = folder or directory
+        page, found, boxes = layout["ordered"][number - 1], layout["found"], layout["boxes"]
+        label = f"{page['page_number']:03d}"
+        if number not in found:
+            # No region here: this photo as the Chat route prepares it (paper crop, fold split), at its own size.
+            names = []
+            for payload in source_images([page]):
+                (target / payload["name"]).write_bytes(payload["buffer"])
+                names.append(payload["name"])
+            return names
+        overview, made = f"overview{label}.jpg", layout["ahead"].get(number)
+        if folder is not None:
+            shutil.copyfile(directory / overview, folder / overview)
+        elif made is not None:
+            shutil.copyfile(made["folder"] / overview, directory / overview)
+        else:
+            layout["views"][number].replace(directory / overview)
+        regions = [boxes[number, printed] for printed in range(1, len(found[number]) + 1)]
+        if made is not None and all(limit >= wanted * max(box[2] - box[0], box[3] - box[1]) for box, _, wanted in regions):
+            for name in made["names"][1:]:
+                shutil.copyfile(made["folder"] / name, target / name)
+            return list(made["names"])
+        names = [overview]
+        photo = layout["photos"].pop(number, None)
+        if photo is None:
+            with Image.open(page["image_path"]) as source:
+                photo = _readable(source.convert("RGB"))
+        for printed, (box, vertical, wanted) in enumerate(regions, 1):
+            crop = photo.crop(box)
+            scale = min(wanted, limit / max(crop.size))
+            for tile_number, (tile, _) in enumerate(page_tiles(crop, vertical_text=vertical, min_scale=scale,
+                                                               max_scale=scale)):
+                name = f"page{label}-{printed}{_letters(tile_number)}.jpg"
+                tile.save(target / name, format="JPEG", quality=92, subsampling=0)
+                names.append(name)
+        if number in layout["partial"]:
+            # Something returned for this photo was left out. The whole frame goes too, uncropped (the paper crop
+            # could cut off just what was left out), so that what no region shows is more than the small view.
+            photo.save(target / f"page{label}.jpg", format="JPEG", quality=92, subsampling=0)
+            names.append(f"page{label}.jpg")
+        return names
+
+    def prepare(self, pages: list[dict], *, booklet: bool = False) -> None:
+        """Take pages whose images are final and do with them, on threads of their own, what a booklet's answers
+        wait for: find where the paper's pages lie on each and cut them (kept by the page's file, ``_page_key``),
+        and, when ``booklet`` says these are all of a booklet's pages, ask where its major problems begin. Returns
+        at once; a page named again is not prepared twice. Answering takes what is there (``_find``, ``_outline``,
+        ``_run``) and does itself what is not, so whatever fails here costs one small request and nothing else.
+
+        Until 2026-11-19 the first request about a booklet left only when its answers were asked for, after the
+        last clip had been gathered: on the phone, 32 to 76 s in which most pages were final and untouched, then 20
+        to 54 s of locating and 14 to 24 s of cutting with the wearer waiting (records of 2026-11-18).
+        """
+        if (os.environ.get("ROKID_CODEX_AHEAD") or "1") == "0" or not chatgpt_send_enabled() or not pages:
+            return
+        try:
+            _ahead_sweep()
+            fresh, outline, now = [], None, time.time()
+            ordered = sorted(pages, key=lambda page: page["page_number"])
+            keys = [_page_key(page) for page in ordered]
+            locate = (os.environ.get("ROKID_CODEX_LOCATE") or "1") != "0"
+            whole = tuple(keys) if booklet and self._outline_wanted(ordered, _parts_set() or 1) else None
+            with _ahead_lock:
+                for page, key in zip(ordered, keys) if locate else ():
+                    if key not in _ahead:
+                        _ahead[key] = (concurrent.futures.Future(), now)
+                        fresh.append((page, _ahead[key][0]))
+                if whole is not None and whole not in _ahead_outlines:
+                    _ahead_outlines[whole] = (concurrent.futures.Future(), now)
+                    outline = _ahead_outlines[whole][0]
+            if fresh:
+                threading.Thread(target=self._prepare_pages, args=(fresh,), name="codex-ahead", daemon=True).start()
+            if outline is not None:
+                threading.Thread(target=self._prepare_outline, args=(list(pages), outline), name="codex-ahead-outline",
+                                 daemon=True).start()
+        except Exception as error:  # noqa: BLE001 - nothing prepared is the booklet as it was answered before
+            _log_cause("codex_ahead_failed", error)
+
+    @classmethod
+    def _prepare_pages(cls, fresh: list[tuple[dict, concurrent.futures.Future]]) -> None:
+        """One request for where these photos' pages lie, and their files, into a folder that is kept."""
+        with _ahead_turn:
+            live = [(page, future) for page, future in fresh if future.set_running_or_notify_cancel()]
+            made, began = {}, time.monotonic()
+            try:
+                if live:
+                    pages = [page for page, _ in live]
+                    root = Path(config.DATA_DIR) / "codex-ahead"
+                    root.mkdir(parents=True, exist_ok=True)
+                    folder = Path(tempfile.mkdtemp(prefix="pages-", dir=root))
+                    _, locating = _time_allowed(len(pages))
+                    with cls._workplace(locating) as (_, environment):
+                        layout = _with_model(lambda model: cls._find_batch(
+                            folder, environment, pages, model=model, timeout=locating, keep=_AHEAD_PHOTOS_KEPT))
+                    for number, page in enumerate(layout["ordered"] if layout else [], 1):
+                        if number not in layout["found"]:
+                            continue
+                        names = cls._cut_page(folder, layout, number, math.inf)
+                        made[id(page)] = {
+                            "folder": folder, "size": layout["sizes"][number - 1], "regions": layout["found"][number],
+                            "partial": number in layout["partial"], "names": names,
+                            "boxes": [layout["boxes"][number, printed]
+                                      for printed in range(1, len(layout["found"][number]) + 1)]}
+            except BaseException as error:  # noqa: BLE001 - a usage limit too: the booklet's own request says so
+                made = {}
+                _log_cause("codex_ahead_failed", error)
+            finally:
+                for page, future in live:
+                    future.set_result(made.get(id(page)))
+                if live:
+                    print(json.dumps({"event": "codex_ahead", "pages": len(live), "located": len(made),
+                                      "seconds": round(time.monotonic() - began, 1)}), flush=True)
+
+    @classmethod
+    def _prepare_outline(cls, pages: list[dict], future: concurrent.futures.Future) -> None:
+        if not future.set_running_or_notify_cancel():
+            return
+        told: tuple[list, list[int]] = ([], [])
+        folder = None
+        try:
+            root = Path(config.DATA_DIR) / "codex-ahead"
+            root.mkdir(parents=True, exist_ok=True)
+            folder = Path(tempfile.mkdtemp(prefix="outline-", dir=root))
+            _, locating = _time_allowed(len(pages))
+            with cls._workplace(locating) as (_, environment):
+                told = cls._outline(folder / "outline", environment, pages, model=_model(), timeout=locating, running=[])
+        except BaseException as error:  # noqa: BLE001
+            _log_cause("codex_ahead_failed", error)
+        finally:
+            future.set_result(told)
+            if folder is not None:
+                shutil.rmtree(folder, ignore_errors=True)
+
+    @classmethod
+    def _outline_wanted(cls, pages: list[dict], parts: int) -> bool:
+        """Whether a booklet of these pages is asked where its major problems begin: four captures at least, and
+        either the first read is set to be made in parts or the booklet may be more than one request holds (it is
+        then read in parts so that no page has to be reduced, ``_sized``)."""
+        return len(pages) >= 4 and (parts > 1 or _might_not_fit(cls._photo_sizes(pages)))
 
     @classmethod
     def _located(cls, directory: Path, environment: dict, pages: list[dict], *, model: str, timeout: float) -> list[str] | None:
@@ -1339,10 +1611,15 @@ class CodexCliSolver(Solver):
             directory.mkdir()
             views = []
             for page in ordered:
+                views.append(f"capture{page['page_number']:03d}.jpg")
+                made = _ahead_view(page)
+                if made is not None:
+                    # The same small view was made when the page was prepared (``_find_batch``): not decoded again.
+                    shutil.copyfile(made, directory / views[-1])
+                    continue
                 with Image.open(page["image_path"]) as source:
                     view = _readable(source.convert("RGB"))
                 view.thumbnail((1024, 1024))
-                views.append(f"capture{page['page_number']:03d}.jpg")
                 view.save(directory / views[-1], quality=85)
             reply = cls._exec(directory, environment, model=model, effort="low", images=views, prompt=_OUTLINE_PROMPT,
                               timeout=min(timeout, 900), schema=_OUTLINE_SCHEMA, running=running)
@@ -1476,10 +1753,10 @@ class CodexCliSolver(Solver):
         # page, 2.5% against 2.0% on a bright one, twelve reads each) and gave the same results on 21 items of hard
         # written mathematics, in 0.66 to 0.78 of the time (2026-11-16, M-36 and M-37; the operator's decision).
         effort = os.environ.get("ROKID_CODEX_EFFORT") or "high"
+        entered = time.monotonic()
         timeout, locating = _time_allowed(len(question.document_pages))
-        try:
-            parts = int(os.environ.get("ROKID_CODEX_PARTS") or 1)
-        except ValueError:
+        parts = _parts_set()
+        if parts is None:
             # A setting that is no number is the read as it was, and said: as an error it would give every booklet
             # to the routes behind this one for the sake of an option.
             parts = 1
@@ -1493,11 +1770,12 @@ class CodexCliSolver(Solver):
             leaving.callback(lambda: [process.kill() for process in running])  # nothing happens to one that has ended
             numbers = sorted(page["page_number"] for page in question.document_pages)
             outline = None
-            if len(numbers) >= 4 and (parts > 1 or _might_not_fit(cls._photo_sizes(question.document_pages))):
+            if cls._outline_wanted(question.document_pages, parts):
                 # Asked for whatever is set when the booklet may be more than one request holds: it is then read
-                # in parts so that no page has to be reduced (``_sized``).
-                outline = beside.submit(cls._outline, directory / "outline", environment, question.document_pages,
-                                        model=model, timeout=locating, running=running)
+                # in parts so that no page has to be reduced (``_sized``). The request made ahead, if one was.
+                outline = _outline_ahead(question.document_pages) or beside.submit(
+                    cls._outline, directory / "outline", environment, question.document_pages,
+                    model=model, timeout=locating, running=running)
 
             def told() -> tuple[list, list[int]]:
                 """Where the major problems begin and what is for the whole exam, once the request beside has said;
@@ -1526,6 +1804,10 @@ class CodexCliSolver(Solver):
             request = {"model": model, "effort": effort, "images": names, "timeout": timeout,
                        "prompt": _ANSWER_ONLY_SYSTEM + "\n\n" + grey_note(question.document_pages) + _ALL_TASK + note}
             began = time.monotonic()
+            # What stood between "answer this booklet" and the first request for answers, and how many of its
+            # photos had been prepared ahead (``prepare``): the part of the wait that is not the model's reading.
+            print(json.dumps({"event": "codex_prepared", "seconds": round(began - entered, 1),
+                              "pages": len(numbers), "ahead": len(layout["ahead"]) if layout else 0}), flush=True)
 
             def part(number: int, index: int, count: int, first: int, own_last: int, last: int) -> str:
                 shared = told()[1]

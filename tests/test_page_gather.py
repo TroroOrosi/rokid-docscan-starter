@@ -77,7 +77,8 @@ def test_a_stored_clip_becomes_the_page(client, tmp_path):
     assert sha(image.read_bytes()) != receipt["canonical_image_sha256"]
     with Image.open(image) as gathered:
         # The scene is 384 rows of 512 and lies on its side, as the sensor sees a page; rotation 270 turns it upright.
-        assert (gathered.format, gathered.mode, gathered.size) == ("PNG", "RGB", (384, 512))
+        # Grey: a recorded page holds no colour, and three equal channels were 3 MB a page and a slower save.
+        assert (gathered.format, gathered.mode, gathered.size) == ("PNG", "L", (384, 512))
     metadata = json.loads(stored["capture_metadata_json"])
     assert metadata == {"capture_provenance": receipt["capture_provenance"], "canonical_image_sha256": sha(image.read_bytes()),
                         "gathered": {"used": row["used"], "total": row["total"], "level_over_noise": row["level"],
@@ -187,9 +188,9 @@ def test_the_page_image_is_upright():
     lying[:6, -8:] = 0.8  # the page's top left corner is at the sensor's top right
     png = page_gather.page_image(Gathered(lying, 12, 12, 40.0, True, "none"), 270)
     with Image.open(io.BytesIO(png)) as upright:
-        assert (upright.format, upright.mode, upright.size) == ("PNG", "RGB", (30, 40))
-        assert upright.getpixel((2, 2)) == (255, 255, 255), "the brightest half percent is white"
-        assert max(upright.getpixel((27, 37))) < 160 and max(upright.getpixel((27, 2))) < 160
+        assert (upright.format, upright.mode, upright.size) == ("PNG", "L", (30, 40))
+        assert upright.getpixel((2, 2)) == 255, "the brightest half percent is white"
+        assert upright.getpixel((27, 37)) < 160 and upright.getpixel((27, 2)) < 160
 
 
 def test_only_the_page_the_clip_was_cut_from_is_replaced(client, tmp_path, monkeypatch):

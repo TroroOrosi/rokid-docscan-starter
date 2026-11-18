@@ -22,7 +22,7 @@ import threading
 import time
 import urllib.parse
 import uuid
-from contextlib import asynccontextmanager, contextmanager
+from contextlib import asynccontextmanager, closing, contextmanager
 from pathlib import Path
 from typing import Literal
 
@@ -1459,16 +1459,52 @@ def _await_gathering(document_id: int) -> None:
     glasses' finalize call reads for four minutes (DocScanApi), so the limit has to stay under that with room for
     the finalizing itself (a second or two on the phone).
     """
-    left = page_clips.pending(document_id)
+    still = page_clips.waiting(document_id)
+    left = len(still)
     if not left:
+        _prepare_ahead(document_id, still, booklet=True)
         return
+    _prepare_ahead(document_id, still)
     limit = float(os.environ.get("ROKID_GATHER_WAIT_S") or _GATHER_WAIT_S)
     started = time.monotonic()
     while left and time.monotonic() - started < limit:
         time.sleep(0.5)
-        left = page_clips.pending(document_id)
+        now = page_clips.waiting(document_id)
+        if now and now != still:
+            _prepare_ahead(document_id, now)  # a page whose clip was settled meanwhile: its image is final
+        still, left = now, len(now)
     print(json.dumps({"event": "gather_wait", "document_id": document_id, "seconds": round(time.monotonic() - started, 1),
                       "left": left}), flush=True)
+    # Whatever is still waiting stays the frame it arrived as (the gathering finds the booklet closed).
+    _prepare_ahead(document_id, set(), booklet=True)
+
+
+def _prepare_ahead(document_id: int, waiting: set[int], *, booklet: bool = False) -> None:
+    """Hand the booklet's solver the pages whose images are final (every page but ``waiting``), for it to do with
+    them what the answers would otherwise wait for (``CodexCliSolver.prepare``); ``booklet`` says they are all of it.
+
+    The wearer has ended the capture: the glasses ask for the booklet to be finalized only then, and nothing is
+    handed over before. Only while the booklet still takes pages (a finalize call sent again hands nothing over), and
+    only to a solver that prepares. Whatever goes wrong here leaves the booklet as it was answered before."""
+    try:
+        prepare = getattr(get_solver(os.environ.get("ROKID_SOLVER")), "prepare", None)
+        if prepare is None:
+            return
+        with closing(db.connect()) as conn:
+            document = conn.execute("SELECT status FROM documents WHERE id = ?", (document_id,)).fetchone()
+            if document is None or document["status"] != "open":
+                return
+            rows = conn.execute("SELECT page_index, image_path, capture_metadata_json FROM pages WHERE document_id = ? "
+                                "ORDER BY page_index", (document_id,)).fetchall()
+        pages = [{"page_number": row["page_index"] + 1, "image_path": row["image_path"],
+                  "image_sha256": file_sha256(row["image_path"]),
+                  **(parse_capture_metadata(row["capture_metadata_json"]) or {})}
+                 for row in rows if row["page_index"] not in waiting and row["image_path"]]
+        if pages:
+            prepare(pages, booklet=booklet)
+    except Exception as error:  # noqa: BLE001 - the booklet is then prepared when its answers are asked for
+        print(json.dumps({"event": "prepare_ahead_failed", "document_id": document_id, "type": type(error).__name__}),
+              flush=True)
 
 
 @app.post("/v1/documents/{document_id}/finalize")

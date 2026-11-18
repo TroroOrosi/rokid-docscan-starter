@@ -163,6 +163,13 @@ def pending(document_id: int) -> int:
                             (document_id,)).fetchone()[0]
 
 
+def waiting(document_id: int) -> set[int]:
+    """The pages of this booklet whose clip is still to be gathered or is being gathered: their images may yet change."""
+    with closing(db.connect()) as conn:
+        return {row[0] for row in conn.execute(
+            "SELECT page_index FROM page_clips WHERE document_id = ? AND status IN ('stored', 'gathering')", (document_id,))}
+
+
 def rows(document_id: int) -> list[dict]:
     with closing(db.connect()) as conn:
         return [dict(row) for row in conn.execute(

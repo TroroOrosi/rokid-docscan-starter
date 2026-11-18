@@ -43,7 +43,9 @@ def settle_of(record: dict) -> int:
 
 def page_image(gathered, rotation_degrees: int) -> bytes:
     """The gathered light as the page's PNG: the brightest half percent white, 8 bits through the display curve, turned
-    upright (clockwise, as a page upload's image_rotation), RGB like every stored page."""
+    upright (clockwise, as a page upload's image_rotation). Grey, as the light it was gathered from is: until
+    2026-11-19 it was saved as three equal channels, 10.6 MB where grey is 7.7 MB and 1.7 s of encoding where grey is
+    0.7 s (one worn page on the PC), for every reader to turn it to RGB again, which each still does."""
     import numpy as np  # noqa: PLC0415
     from PIL import Image  # noqa: PLC0415
 
@@ -62,7 +64,7 @@ def page_image(gathered, rotation_degrees: int) -> bytes:
     shown += 0.5
     picture = Image.fromarray(shown.astype(np.uint8)).rotate(-rotation_degrees, expand=True)
     encoded = io.BytesIO()
-    picture.convert("RGB").save(encoded, format="PNG")
+    picture.save(encoded, format="PNG")
     return encoded.getvalue()
 
 
