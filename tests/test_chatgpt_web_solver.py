@@ -2919,6 +2919,25 @@ def test_a_single_record_file_is_read_as_one_chat(monkeypatch, tmp_path):
     assert _chats(tmp_path)["subject:数学"]["url"] == chat
 
 
+def test_a_message_the_product_says_it_never_delivered_ends_as_a_known_failure_not_an_unknown_one():
+    """Phone, 2026-11-18: twelve pages were sent, the page showed "Thinking" for an hour and then the product's own
+    notice "Message delivery timed out. Please try again." with a Retry button. No reply will come. Taken for a send
+    of unknown outcome, the route went on looking for a reply (its limit is 150 minutes) and would have blocked every
+    later browser send."""
+    class NeverDelivered(_StubPage):
+        def evaluate(self, expression):
+            return True if "delivery_failed" in expression else super().evaluate(expression)
+
+    page = NeverDelivered([""], streaming=(True, True, False))
+    with pytest.raises(chatgpt_web.ChatGptWebReplyIncomplete, match="not delivered"):
+        chatgpt_web.send_and_read(page, "prepared message", poll_s=0, sleep=lambda _s: None)
+    # A reply that stops without text and without that notice stays what it was: an error of unknown cause.
+    silent = _StubPage([""], streaming=(True, True, False))
+    with pytest.raises(ChatGptWebError) as raised:
+        chatgpt_web.send_and_read(silent, "prepared message", poll_s=0, sleep=lambda _s: None)
+    assert not isinstance(raised.value, chatgpt_web.ChatGptWebReplyIncomplete)
+
+
 def test_previous_assistant_reply_is_not_the_new_answer(monkeypatch):
     page = _StubPage(["previous answer"])
     original_count = _Locator.count

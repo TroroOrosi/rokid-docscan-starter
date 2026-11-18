@@ -511,8 +511,14 @@ class Check:
         self.ready_at, self.ready_stamp = ready_at, mark
         if self.o.capture == "clip":
             items = self.api(f"/v1/exam-sessions/{self.session}/answer-bundle")[1].get("items", [])
-            named = [str(item.get("question_label")) for item in items if item.get("group_id") == "pages"]
+            # The notices of the reads (照合中 while the second read runs, 照合なし after one read) stand in the same
+            # group and are no page left ungathered: counted as one on 2026-11-18, with the two-read stand-in.
+            named = [str(item.get("question_label")) for item in items if item.get("group_id") == "pages"
+                     and item.get("question_id") not in ("read-comparing", "read-once")]
             self.row("the answers name no page as left ungathered", not named, ", ".join(named))
+        first = self.api(f"/v1/exam-sessions/{self.session}/answer-bundle")[1]
+        self.comparing = any(item.get("question_id") == "read-comparing" for item in first.get("items", []))
+        self.first_revision = first.get("revision")
         return True
 
     def read_and_exit(self) -> None:
@@ -548,6 +554,26 @@ class Check:
         self.row("the next gesture brings them back", self.lit("answers-back") > 0)
         time.sleep(7)
         self.row("the answers stay on screen while reading (no idle sleep)", "mWakefulness=Awake" in self.sh("dumpsys power") and self.lit("answers-held") > 0)
+        if getattr(self, "comparing", False):
+            # The stand-in stood for two reads (ROKID_RECORDED_REPLY_2): the compared answers follow the first read's
+            # while the wearer reads. The reader has to take them where it stands.
+            deadline, later = time.monotonic() + 60, {}
+            while time.monotonic() < deadline:
+                later = self.api(f"/v1/exam-sessions/{self.session}/answer-bundle")[1]
+                if not any(item.get("question_id") == "read-comparing" for item in later.get("items", [])):
+                    break
+                time.sleep(2)
+            time.sleep(8)  # the watcher's notice and the glasses' load
+            gone = not any(item.get("question_id") == "read-comparing" for item in later.get("items", []))
+            self.row("the compared answers follow the first read's under a newer revision", gone
+                     and later.get("revision") != self.first_revision,
+                     f"revision {self.first_revision} then {later.get('revision')}")
+            devices = (self.api("/v1/glasses/state")[1] or {}).get("devices") or []
+            acknowledged = [device.get("ack_answer_revision") for device in devices if device.get("session_id") == self.session]
+            self.row("the glasses took them while reading: acknowledged, still awake and showing answers",
+                     bool(acknowledged) and acknowledged[0] == later.get("revision")
+                     and "mWakefulness=Awake" in self.sh("dumpsys power") and self.lit("answers-updated") > 0,
+                     f"acknowledged {acknowledged}")
         state = self.db("select count(*) from exam_sessions")[0][0]
         mark = self.stamp()
         self.gesture(DOUBLE_TAP)

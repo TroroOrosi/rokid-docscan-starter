@@ -1277,6 +1277,23 @@ def _generating(page) -> bool:
     return any(stop.nth(index).is_visible() for index in range(stop.count()))
 
 
+# The product's own notice that a message it took was never answered: "Message delivery timed out. Please try
+# again." beside a Retry button (phone, 2026-11-18: twelve gathered pages, after an hour of "Thinking"). The outcome
+# is known then, as with a refusal. Retry is never pressed: that would be a second send.
+_DELIVERY_FAILED_JS = r"""(() => { /* delivery_failed */
+  const drawn = e => e.getClientRects().length > 0;
+  return [...document.querySelectorAll('[role=alert], [role=status], [data-sonner-toast], [class*=toast]')]
+    .filter(drawn).some(e => /message delivery timed out/i.test(e.innerText || ''));
+})()"""
+
+
+def _delivery_failed(page) -> bool:
+    try:
+        return page.evaluate(_DELIVERY_FAILED_JS) is True
+    except Exception:  # noqa: BLE001 - a page that cannot say is a page that did not say
+        return False
+
+
 def submit(page) -> str:
     """Send the composed message. Returns which control did it.
 
@@ -1374,6 +1391,9 @@ def send_and_read(
             return current.strip()
         settled = gone >= SETTLE_POLLS
         if settled and streaming_started and not current.strip():
+            if _delivery_failed(page):
+                raise ChatGptWebReplyIncomplete(
+                    "the service reported that the message was not delivered; nothing is sent again")
             raise ChatGptWebError(
                 "the reply stopped without any text; the page may show an error outside it"
             )
