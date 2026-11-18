@@ -74,12 +74,14 @@ printf 'rehearsal-key' > $R/key
 printf '#!%s/bin/sh\nexec %s/bin/python %s/scripts/standin_codex.py "$@"\n' "$PREFIX" "$PREFIX" "$R" > $R/standin
 chmod 700 $R/standin
 ACTIVE=$(grep -o -E "[A-Za-z0-9._/-]+\.env" $PREFIX/var/service/rokid-api/run | head -1)
-( cd $HOME/rokid-server && set -a && . "$ACTIVE" && set +a && cd $R && \
-  export ROKID_DATA_DIR=$R/data ROKID_API_KEY=rehearsal-key ROKID_SOLVER=codex-cli ROKID_SOLVER_FALLBACKS= \
-    ROKID_ROUTE_CHECK_INTERVAL_S=0 ROKID_CAPTURE_INSPECTION=0 ROKID_CODEX_AUTO_UPDATE=0 ROKID_CODEX_BIN=$R/standin \
-    CODEX_HOME=$R/codex-home STANDIN_CODEX_SECONDS=__SECONDS__ && \
-  nohup python -m uvicorn app.main:app --host 127.0.0.1 --port __PORT__ --workers 1 --no-access-log \
-    > $R/server.log 2>&1 < /dev/null & )
+# The live server's settings, then what makes this a server of its own. In this shell and not in a subshell sent to the
+# background: such a subshell keeps adb's output open for as long as the server runs, and this call never returns.
+set -a; . "$ACTIVE"; set +a
+export ROKID_DATA_DIR=$R/data ROKID_API_KEY=rehearsal-key ROKID_SOLVER=codex-cli ROKID_SOLVER_FALLBACKS= \
+  ROKID_ROUTE_CHECK_INTERVAL_S=0 ROKID_CAPTURE_INSPECTION=0 ROKID_CODEX_AUTO_UPDATE=0 ROKID_CODEX_BIN=$R/standin \
+  CODEX_HOME=$R/codex-home STANDIN_CODEX_SECONDS=__SECONDS__
+nohup python -m uvicorn app.main:app --host 127.0.0.1 --port __PORT__ --workers 1 --no-access-log \
+  > $R/server.log 2>&1 < /dev/null &
 sleep 9
 curl -s -m 5 http://127.0.0.1:__PORT__/health | cut -c1-90
 '''
