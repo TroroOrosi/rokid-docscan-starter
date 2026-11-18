@@ -529,9 +529,20 @@ def resolve_work_model_settings(page, *, requested_settings, follow_family=False
     if state["menu_count"] or state["unlinked_count"] or state["work_count"] != 1:
         raise chat.ChatGptWebModelMismatch("Work inventory has missing or unowned controls; nothing sent")
     if not state["work_active"]:
-        if not controls("work")["acted"]:
-            raise chat.ChatGptWebModelMismatch("Work inventory cannot open Work; nothing sent")
-        state = read_until(lambda value: value["work_active"])
+        # Pressed again until Work is on, for some seconds. Phone, 2026-11-18, right after the new-chat page had
+        # loaded: the entry was there for the first look and could not be pressed at the next; settled, it was
+        # one enabled button. A press right after a load can also be dropped (the Chat route, 2026-11-10).
+        # Only ever pressed while Work is off, so no press turns it off again.
+        deadline = now() + min(10.0, chat.READY_TIMEOUT_S)
+        while not state["work_active"]:
+            if now() >= deadline:
+                raise chat.ChatGptWebModelMismatch("Work inventory cannot open Work; nothing sent")
+            controls("work")
+            for _ in range(10):  # about a second for the press to show
+                sleep(0.1)
+                state = controls()
+                if state["work_active"]:
+                    break
     if state["menu_count"] or state["unlinked_count"]:
         raise chat.ChatGptWebModelMismatch("Work navigation left an unowned popup; nothing sent")
     opened, labels = False, None

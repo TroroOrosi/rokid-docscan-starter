@@ -1161,6 +1161,36 @@ def _public_model_inventory(page):
       }; return true; })()""")
 
 
+@pytest.mark.parametrize("fault", ["not yet pressable", "first press dropped"])
+def test_inventory_presses_work_again_while_the_new_chat_page_is_still_settling(page, fault):
+    """Phone, 2026-11-18, the first time the inventory ran on the live page behind a navigation: the Work entry was
+    there for the first look and could not be pressed at the next, the page still mounting; settled, it was one
+    enabled button, not pressed. And a press right after a load can be dropped (the Chat route met that on
+    2026-11-10). One press and "cannot open Work" ended Work behind the Codex CLI before anything was sent."""
+    _public_model_inventory(page)
+    page.evaluate("""(() => { const mode = document.getElementById('work'); mode.setAttribute('aria-pressed', 'false');
+      window.presses = 0;
+      if (%s) { mode.disabled = true; setTimeout(() => { mode.disabled = false; }, 500); }
+      mode.onclick = function() { window.presses++; if (%s && window.presses === 1) return;
+        this.setAttribute('aria-pressed', 'true'); };
+      return true; })()""" % (("true", "false") if fault == "not yet pressable" else ("false", "true")))
+    settings = work.resolve_work_model_settings(page,
+        requested_settings={"model": "gpt-6.1-sol", "effort": "xhigh", "speed": "fast"}, follow_family=True)
+    assert settings == {"model": "GPT-6.10 Sol", "effort": "xhigh", "speed": "fast"}
+    assert page.evaluate("document.getElementById('work').getAttribute('aria-pressed')") == "true"
+    assert page.evaluate("window.settingClicks") == 0
+
+
+def test_inventory_gives_work_up_when_it_never_opens(page):
+    _public_model_inventory(page)
+    page.evaluate("""(() => { const mode = document.getElementById('work'); mode.setAttribute('aria-pressed', 'false');
+      mode.onclick = function() {}; return true; })()""")
+    ticks = iter(range(0, 10_000))
+    with pytest.raises(chatgpt_web.ChatGptWebModelMismatch, match="cannot open Work"):
+        work.resolve_work_model_settings(page, requested_settings={"model": "gpt-6.1-sol", "effort": "xhigh", "speed": "fast"},
+                                         follow_family=True, sleep=lambda _s: None, now=lambda: float(next(ticks)))
+
+
 @pytest.mark.parametrize("follow", [False, True])
 def test_public_inventory_resolves_actual_label_without_claiming_or_changing_selection(page, follow):
     _public_model_inventory(page)
