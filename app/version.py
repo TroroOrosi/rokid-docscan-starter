@@ -408,7 +408,20 @@ from __future__ import annotations
 #         pages were reduced. Photos are cut one at a time (forty were held in memory twice over). Measured: a
 #         page with a known text read the same down to 0.35 of its own size (characters of 9 px) and worse at
 #         0.25. See API 1.55.0.
-APP_VERSION = "0.90.0"
+# 0.91.0: the operator, 2026-11-19: is the reduction an answer to a limit on files, is there no more rational way;
+#         remove wasted data and delay from the whole structure and prevent problems before a real capture.
+#         (1) It was never a limit on files but the model's context in pixels, and the pixels were the waste: a
+#         recorded page went out on the grid it is gathered on, four times the pixels the camera took. Read
+#         against a known text (six reads a size, the rule fixed first), worn pages read better smaller; every
+#         region of a recorded page now goes at 0.63 of that grid (ROKID_CODEX_CLIP_SCALE). A booklet's requests
+#         are about four tenths of the bytes and six tenths of the tokens, and forty-five frame-filling pages fit
+#         one request where nineteen did. (2) Once the wearer has ended the capture, the pages whose images are
+#         final are located and cut while the last clips are still being gathered, and the outline is asked for
+#         as soon as nothing is left to wait for (CodexCliSolver.prepare, ROKID_CODEX_AHEAD); answering makes the
+#         same request as before. On the phone the wait between "answer this booklet" and the first request for
+#         answers went from 29-36 s to 9.8 s (one booklet). (3) A gathered page is saved grey, as it is. No HTTP
+#         schema or behaviour changes: API stays 1.55.0.
+APP_VERSION = "0.91.0"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.

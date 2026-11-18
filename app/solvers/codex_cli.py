@@ -65,9 +65,10 @@ is ignored and said (``codex_parts_setting_ignored``). Until the night of 2026-1
 every image, shared out by page count: six times one whole read's bytes for twelve pages in three parts, tried on
 Wi-Fi only, where the venue has the mobile network (M-44 (19)).
 
-A booklet too long for one request at its own size (a common test is some forty pages; nineteen pages gathered from
-clips that fill the frame are what one request holds) was, until that same night, read with every page reduced until
-all fitted, both times, and nothing said so. Now the outline is asked for whatever is set (``_might_not_fit``); the
+A booklet too long for one request at its own size (a common test is some forty pages; one request held nineteen
+pages gathered from clips that fill the frame while such a page went out on the grid it is gathered on, and holds
+forty-five since 2026-11-19, when a recorded page began to go at 0.63 of that grid, ``_wanted_scale``) was, until
+that same night, read with every page reduced until all fitted, both times, and nothing said so. Now the outline is asked for whatever is set (``_might_not_fit``); the
 first read is made in as many parts as it takes for each part's pages to go at their own size (``_sized``; four at
 most); the whole booklet's request, the second read, is cut a second time at the size that fits and is the read
 that has every page in view. What is for the whole exam (a cover with how to answer, a sheet of formulas, an answer
@@ -80,15 +81,23 @@ therefore inside the margin at the sizes a long booklet is reduced to; what is s
 subscripts, ruby) is the reason the first read stays at full size. Photos are cut one at a time (``_cut``): forty
 were held in memory twice over, the photo and its regions.
 
+None of this waits for the answers to be asked for. Once the wearer has ended the capture the server names each page
+whose image is final (``prepare``): it is located and cut then, beside the gathering of the last clips, and the
+outline is asked for when the whole booklet is in hand; answering takes what is there and makes the same requests
+for answers as before (``_find``, ``_taken``, ``_outline_ahead``). Until 2026-11-19 all of it began after the last
+clip was gathered: 29 to 36 s between "answer this booklet" and the first request for answers on the phone, 9.8 s
+with the pages prepared (one booklet of eight; ``codex_prepared`` logs it for every booklet from now on).
+
 The CLI takes images only. A booklet with audio (listening, mixed English) is refused before anything runs, with the
 error the server answers by handing the booklet to the next route.
 
 Settings: ``ROKID_CODEX_BIN`` (default: the Termux npm install, else ``codex`` on PATH), ``ROKID_CODEX_MODEL``
 (not set: the newest Sol the CLI's own model list offers, ``gpt-6.2-sol`` at least, see ``_model``), ``ROKID_CODEX_EFFORT`` (``high``), ``ROKID_CODEX_TIMEOUT_S`` (by the booklet's size, see ``_time_allowed``), ``ROKID_CODEX_LOCATE`` (``1``;
 ``0`` sends photos as the Chat route does), ``ROKID_CODEX_PAGE_SCALE`` (2: a region cut from a still photo is sent at
-this many times its own pixels at least), ``ROKID_CODEX_PAGE_LONG`` (2540 px: the long side a smaller region is
-enlarged up to, at most two and a half times; a page recorded as a clip follows this alone, see ``_wanted_scale``),
-``ROKID_CODEX_READS`` (2), ``ROKID_CODEX_PARTS`` (1). Sending is gated by
+this many times its own pixels at least), ``ROKID_CODEX_PAGE_LONG`` (2540 px: the long side a smaller region of a still is
+enlarged up to, at most two and a half times), ``ROKID_CODEX_CLIP_SCALE`` (0.63: the share of the grid it was
+gathered on that a recorded page goes at, see ``_wanted_scale``), ``ROKID_CODEX_AHEAD`` (``1``; ``0`` prepares nothing
+before the answers are asked for), ``ROKID_CODEX_READS`` (2), ``ROKID_CODEX_PARTS`` (1). Sending is gated by
 ``ROKID_CHATGPT_SEND_ENABLED`` like every other route that spends the operator's usage.
 
 ``check()`` is the proof before use: one request at low effort with a generated picture of three to seven black squares,
@@ -301,10 +310,11 @@ def _target_long(regions: list[tuple[tuple[int, int], float]], spent: float) -> 
 
     ``regions`` are (size, wanted scale); ``spent`` is what the other images of the request cost, in patches. The
     regions sent largest give way first, and a region is reduced below its own size only when the booklet does not
-    fit otherwise. A page gathered from its clip is 3024x4032, about 15,000 tokens when the paper fills it: twenty fit
-    at their own size and forty do not. A still's region at twice its size costs four times its own pixels: a sheet
-    that fills a 4032x3024 photo is about 58,000 tokens, and six such photos fill the context. A reduced page's
-    reading is not measured.
+    fit otherwise. A page gathered from its clip is 3024x4032 and goes at 0.63 of that, about 7,800 tokens with its
+    small view when the paper fills it: forty-five fit and forty-seven do not (on its grid, as until 2026-11-19, it
+    was about 18,000 and nineteen fitted). A still's region at twice its size costs four times its own pixels: a sheet that fills a 4032x3024
+    photo is about 58,000 tokens, and six such photos fill the context. How a reduced page reads was measured on
+    2026-11-18 and 11-19 (``_wanted_scale``; M-44 (20) and (21)).
     """
     room = (_CONTEXT_TOKENS - _FIXED_TOKENS) / _TOKENS_PER_PATCH - spent
 

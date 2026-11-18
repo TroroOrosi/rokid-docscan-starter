@@ -17,7 +17,8 @@ What runs, all of it on the phone and beside the live server, which is not touch
 
 It passes when the replay's own four checks pass (every clip gathered, the finalize inside its limit, answers there,
 no failed item), every page was prepared ahead and used (``codex_ahead``, ``codex_prepared``), and the server's log
-holds no failure. The result is printed and written to ``data/rehearsals/<commit>.json`` on this PC (untracked), which
+holds no failure. The result is printed and written to ``data/rehearsals/<key>.json`` on this PC (untracked; the
+key names the content of what runs on the phone, ``served_key``, so a commit of documents alone needs no new rehearsal), which
 is what the deploy looks for.
 
 What it shows: that this code does a booklet's work on that phone (the gathering beside the uploads, the wait at
@@ -30,6 +31,7 @@ Runs on: this PC, driving the phone over adb. Not the venue topology: no glasses
 from __future__ import annotations
 
 import argparse
+import hashlib
 import io
 import json
 import subprocess
@@ -105,6 +107,20 @@ def git(*arguments: str) -> bytes:
     return subprocess.run(["git", "-C", str(REPO), *arguments], capture_output=True, check=True).stdout
 
 
+def served() -> dict[str, str]:
+    """What of HEAD runs on the phone, each path with git's name for its content: all of ``app/`` and the Python
+    files of ``scripts/`` (the server imports from there, and the watcher is one of them)."""
+    listed = git("ls-tree", "-r", "HEAD", "app", "scripts").decode().split("\n")
+    files = {line.split("\t", 1)[1]: line.split()[2] for line in listed if "\t" in line}
+    return {path: blob for path, blob in files.items() if path.startswith("app/") or path.endswith(".py")}
+
+
+def served_key() -> str:
+    """One name for that content: a rehearsal counts for what it ran, and a commit that changes none of it (documents,
+    tests, the glasses' app) needs no new one."""
+    return hashlib.sha256(json.dumps(sorted(served().items())).encode()).hexdigest()[:24]
+
+
 def judged(report: dict, log: str) -> tuple[list[dict], dict]:
     """The checks of a rehearsal from the replay's report and the staged server's log, and the numbers on record."""
     events = {name: [json.loads(line) for line in log.splitlines() if line.startswith("{") and f'"{name}"' in line]
@@ -155,9 +171,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"not the phone named: {serial!r}")
         return 2
     commit = git("rev-parse", "HEAD").decode().strip()
+    key = served_key()
     # scripts/ too: the server itself imports from there (app/capture_quality.py), and the stand-in and the replay live there.
-    paths = [path for path in git("ls-tree", "-r", "--name-only", "HEAD", "app", "scripts").decode().split("\n")
-             if path and (path.startswith("app/") or path.endswith(".py"))]
+    paths = sorted(served())
     bundle = io.BytesIO()
     with tarfile.open(fileobj=bundle, mode="w") as tar:
         for path in paths:
@@ -210,8 +226,8 @@ def main(argv: list[str] | None = None) -> int:
     print(f"rehearsal of {commit[:7]}: {result}")
     kept = REPO / "data" / "rehearsals"
     kept.mkdir(parents=True, exist_ok=True)
-    (kept / f"{commit}.json").write_text(json.dumps({
-        "commit": commit, "result": result, "at": time.strftime("%Y-%m-%d %H:%M:%S"), "pace": asked.pace,
+    (kept / f"{key}.json").write_text(json.dumps({
+        "commit": commit, "served": key, "result": result, "at": time.strftime("%Y-%m-%d %H:%M:%S"), "pace": asked.pace,
         "solver": "codex-cli with the stand-in CLI", "checks": checks, "numbers": numbers}, ensure_ascii=False, indent=1),
         encoding="utf-8")
     return 0 if result == "PASS" else 1
