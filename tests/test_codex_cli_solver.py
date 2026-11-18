@@ -1595,3 +1595,124 @@ def test_reads_whose_labels_do_line_up_are_compared_by_label_as_before_whatever_
 
     assert [row[0] for row in shown] == ["(1)", "(2)", "(3)"]
     assert [bool(row[3]) for row in shown] == [False, False, True] and "6" in shown[2][3]
+
+
+class _Handed:
+    """What the route hands over when its first read is back, and when."""
+
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, replies):
+        self.calls.append((time.monotonic(), replies))
+
+
+def _same_questions(first, replies):
+    """The compared answers stand on the very items the first read's answers were handed over with: the server saves
+    them over the same questions."""
+    return all(early is late for (early, _), (late, _) in zip(first, replies))
+
+
+def test_the_first_read_back_is_handed_over_at_once_and_the_compared_answers_follow(codex, tmp_path, monkeypatch, capsys):
+    """The operator's use of 2026-11-18: one read of a booklet was back minutes before the other, which was ended at
+    its limit. The answers were held for the slower read and reached the server ten and a half minutes after the
+    capture ended; the wearer had given up. The first read's answers go out when that read is back."""
+    _twice(monkeypatch, _read((1, "④"), (2, "②")), _read((1, "④"), (2, "③")))
+    monkeypatch.setenv("ROKID_CODEX_LOCATE", "0")
+    monkeypatch.setenv("FAKE_CODEX_SLEEP_2", "3")
+    handed = _Handed()
+    replies = codex_cli.CodexCliSolver().answer_all(question=_booklet(tmp_path, on_first_read=handed))
+    returned = time.monotonic()
+
+    [(at, first)] = handed.calls
+    assert returned - at > 1.5, "while the other read was still running"
+    assert _shown(first) == [([1], "④", "ready", ""), ([2], "②", "ready", "")]
+    assert [result.extras.get("read_once") for _, result in first] == [True, True], "nothing is compared yet"
+    one, two = _shown(replies)
+    assert one == ([1], "④", "ready", "") and two[:3] == ([2], "②", "ready") and "③" in two[3]
+    assert not any("read_once" in result.extras for _, result in replies)
+    assert _same_questions(first, replies)
+    done = sorted(_logged(capsys, "codex_read_done"), key=lambda line: line["read"])
+    assert [line["read"] for line in done] == [1, 2] and done[0]["seconds"] < 3.0 <= done[1]["seconds"]
+    assert all(set(line) == {"event", "read", "seconds"} for line in done), "no reply text in the log"
+
+
+def test_whichever_read_is_back_first_is_handed_over_and_the_other_is_compared_with_it(codex, tmp_path, monkeypatch):
+    _twice(monkeypatch, _read((1, "④"), (2, "②")), _read((1, "④"), (2, "③")))
+    monkeypatch.setenv("ROKID_CODEX_LOCATE", "0")
+    monkeypatch.setenv("FAKE_CODEX_SLEEP", "3")
+    monkeypatch.setenv("FAKE_CODEX_SLEEP_2", "0")
+    handed = _Handed()
+    question = _booklet(tmp_path, on_first_read=handed)
+    replies = codex_cli.CodexCliSolver().answer_all(question=question)
+
+    [(_, first)] = handed.calls
+    assert _shown(first)[1][:2] == ([2], "③"), "the second request's reply was back first"
+    shown = _shown(replies)
+    assert shown[1][:2] == ([2], "③") and "②" in shown[1][3] and _same_questions(first, replies)
+    # Kept in that order: a repeat runs nothing, hands nothing over and shows what was shown.
+    question.on_first_read = again = _Handed()
+    assert _shown(codex_cli.CodexCliSolver().answer_all(question=question)) == shown
+    assert not again.calls and len(_runs(codex())) == 2
+
+
+def test_a_read_cut_behind_the_one_handed_over_leaves_that_ones_answers_as_read_once(codex, tmp_path, monkeypatch):
+    """The route has answered once its first read is out: the other read failing or being ended raises nothing."""
+    _twice(monkeypatch, _read((1, "④")), _read((1, "④")))
+    monkeypatch.setenv("ROKID_CODEX_LOCATE", "0")
+    monkeypatch.setenv("FAKE_CODEX_SLEEP_2", "120")
+    monkeypatch.setenv("ROKID_CODEX_TIMEOUT_S", "30")
+    monkeypatch.setattr(codex_cli, "_SECOND_READ_LEAST_S", 0.5)
+    handed = _Handed()
+    replies = codex_cli.CodexCliSolver().answer_all(question=_booklet(tmp_path, on_first_read=handed))
+
+    [(_, first)] = handed.calls
+    assert _shown(replies) == [([1], "④", "ready", "")] and _same_questions(first, replies)
+    assert [result.extras.get("read_once") for _, result in replies] == [True]
+
+
+def test_a_hand_over_that_fails_costs_neither_read(codex, tmp_path, monkeypatch, capsys):
+    def refused(replies):
+        raise RuntimeError("the caller could not take 問2 ②")
+
+    _twice(monkeypatch, _read((1, "④"), (2, "②")), _read((1, "④"), (2, "③")))
+    monkeypatch.setenv("ROKID_CODEX_LOCATE", "0")
+    monkeypatch.setenv("FAKE_CODEX_SLEEP_2", "2")
+    shown = _shown(codex_cli.CodexCliSolver().answer_all(question=_booklet(tmp_path, on_first_read=refused)))
+
+    assert shown[1][:2] == ([2], "②") and "③" in shown[1][3], "both reads, compared as ever"
+    printed = capsys.readouterr().out
+    [cause] = [json.loads(line) for line in printed.splitlines() if '"codex_first_read_not_handed"' in line]
+    assert cause["type"] == "RuntimeError" and cause["at"]
+    assert "問2" not in printed and "②" not in printed, "which kind and where, never its message"
+
+
+def test_a_booklet_asked_for_once_is_not_handed_over_early(codex, tmp_path, capsys):
+    handed = _Handed()
+    replies = codex_cli.CodexCliSolver().answer_all(question=_booklet(tmp_path, on_first_read=handed))  # one read
+
+    assert len(replies) == 2 and not handed.calls
+    [done] = _logged(capsys, "codex_read_done")
+    assert done["read"] == 1 and set(done) == {"event", "read", "seconds"}
+
+
+def test_a_first_read_that_gave_nothing_usable_is_not_handed_over(codex, tmp_path, monkeypatch):
+    _twice(monkeypatch, _read((1, "④")), _read((1, "④")))
+    monkeypatch.setenv("ROKID_CODEX_LOCATE", "0")
+    monkeypatch.setenv("FAKE_CODEX_REPLY", "I could not read the pages.")
+    monkeypatch.setenv("FAKE_CODEX_SLEEP_2", "2")
+    handed = _Handed()
+    replies = codex_cli.CodexCliSolver().answer_all(question=_booklet(tmp_path, on_first_read=handed))
+
+    assert _shown(replies) == [([1], "④", "ready", "")] and not handed.calls
+
+
+def test_an_answer_only_the_second_read_gave_stands_under_the_first_reads_question(codex, tmp_path, monkeypatch):
+    """The first read's questions are what the wearer may already be reading: an answer the second read alone gave
+    goes under that question as the first read named it. Until 2026-11-18 it brought the second read's item along."""
+    second = _read((1, "④"))
+    second["questions"][0]["label"] = "問一"
+    _twice(monkeypatch, _read((1, None)), second)
+    [(item, result)] = codex_cli.CodexCliSolver().answer_all(question=_booklet(tmp_path))
+
+    assert (item["label"], result.answer, result.extras["review_note"]) == ("問1", "④", codex_cli._ONE_ANSWERED)

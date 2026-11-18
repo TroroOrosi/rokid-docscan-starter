@@ -406,7 +406,9 @@ def _compared(first: list, second: list) -> list:
             elif any(key not in theirs for key in keys):
                 note = _ONE_LISTED
         elif match is not None and _answered(match[1]):
-            (item, result), note = match, _ONE_ANSWERED
+            # Under the first read's item: its answers may be out already, shown under the questions as it named
+            # them (``answer_all``). Until 2026-11-18 the second read's item came along with its answer.
+            result, note = match[1], _ONE_ANSWERED
         if note:
             result.extras["review_note"] = note
         merged.append((item, result))
@@ -689,13 +691,22 @@ class CodexCliSolver(Solver):
         # memory), leaves as what a run that did not finish in time leaves as: the server gives the booklet to the
         # next route. As a ValueError or OSError it was recorded as solver_failed and the booklet ended there, with
         # Work and Chat never asked (found 2026-11-17). A usage limit and the CLI's own failures pass as they are.
+        handed: list = []  # the reply whose answers went out while the other read was still running
+
+        def hand_over(text: str) -> None:
+            data = extract_json(text)
+            question.on_first_read(self._answers([data], question, extras))
+            handed.append(data)
+
         try:
-            texts = self._run(question, model)
+            texts = self._run(question, model, hand_over if question.on_first_read else None)
         except (OSError, MemoryError, ValueError) as error:
             _log_cause("codex_run_failed", error)
             raise ChatGptWebReplyIncomplete("the Codex CLI's run could not be carried out on this host") from error
-        reads, unusable = [], None
-        for text in texts:
+        # The reply handed over comes first (``_run``) and is taken as it was parsed then: the compared answers
+        # stand on the same item objects, which is how the caller finds the questions it has already shown.
+        reads, unusable = handed[:], None
+        for text in texts[len(handed):]:
             try:
                 data = extract_json(text)
                 _booklet_replies(data, subject=question.subject, extras=extras)
@@ -924,7 +935,11 @@ class CodexCliSolver(Solver):
         return True
 
     @classmethod
-    def _run(cls, question: Question, model: str) -> list[str]:
+    def _run(cls, question: Question, model: str, on_first=None) -> list[str]:
+        """The replies of the reads that answered. ``on_first`` is called with the first reply that is back and
+        usable while the other read is still running, and that reply then comes first in what is returned. Until
+        2026-11-18 nothing left this call before the slower read ended: on the phone that day one read was back
+        minutes before the other was cut at its limit, and the wearer gave up before the answers came."""
         # High: on this system's own pages it read as Extra High did (3.3% of characters wrong against 3.1% on a dark
         # page, 2.5% against 2.0% on a bright one, twelve reads each) and gave the same results on 21 items of hard
         # written mathematics, in 0.66 to 0.78 of the time (2026-11-16, M-36 and M-37; the operator's decision).
@@ -942,20 +957,33 @@ class CodexCliSolver(Solver):
                     names.append(payload["name"])
             request = {"model": model, "effort": effort, "images": names, "timeout": timeout,
                        "prompt": _ANSWER_ONLY_SYSTEM + "\n\n" + grey_note(question.document_pages) + _ALL_TASK + note}
+            began, running = time.monotonic(), []
+
+            def read(number: int, reply_name: str) -> str:
+                reply = cls._exec(directory, environment, reply_name=reply_name, running=running, **request)
+                # How long each read took, and so how far apart the two of one run end; never what it said.
+                print(json.dumps({"event": "codex_read_done", "read": number,
+                                  "seconds": round(time.monotonic() - began, 1)}), flush=True)
+                return reply
+
             if (os.environ.get("ROKID_CODEX_READS") or "2").strip() == "1":
-                return [cls._exec(directory, environment, **request)]
+                return [read(1, "reply.json")]
             # Two independent reads of the same images at the same time. Until 2026-11-17 the call returned when the
             # slower one ended: one read back at 150 s and the other hung held the wearer to the whole limit.
-            began, running = time.monotonic(), []
             with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
-                pending = [pool.submit(cls._exec, directory, environment, reply_name=f"reply-{number}.json",
-                                       running=running, **request) for number in (1, 2)]
+                pending = [pool.submit(read, number, f"reply-{number}.json") for number in (1, 2)]
                 back, late = concurrent.futures.wait(pending, return_when=concurrent.futures.FIRST_COMPLETED)
                 first_s = time.monotonic() - began
                 more = min(max(_SECOND_READ_LEAST_S, first_s), _SECOND_READ_MOST_S)
                 # A first read that failed, or whose reply no answer list can be made of, is waited behind as before.
-                if late and any(cls._usable(read, question) for read in back) and concurrent.futures.wait(
-                        late, timeout=more).not_done:
+                usable = next((done for done in back if cls._usable(done, question)), None) if late else None
+                if usable is not None and on_first is not None:
+                    pending.sort(key=lambda done: done is not usable)
+                    try:
+                        on_first(usable.result())
+                    except Exception as error:  # noqa: BLE001 - the caller's trouble with the answers costs neither read
+                        _log_cause("codex_first_read_not_handed", error)
+                if usable is not None and concurrent.futures.wait(late, timeout=more).not_done:
                     for process in running:
                         process.kill()  # nothing happens to the one that has ended
                     print(json.dumps({"event": "codex_read_cut", "first_s": round(first_s, 1),

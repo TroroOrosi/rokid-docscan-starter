@@ -16,6 +16,7 @@ adapter (kept out of this repo so it stays credential-free and offline).
 from __future__ import annotations
 
 import abc
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 
@@ -76,6 +77,10 @@ class Question:
     # Mixed papers retain one image-backed chat and add original audio later.
     booklet_stage: str = "single"
     booklet_questions: list[dict] = field(default_factory=list)
+    # A booklet route that reads twice calls this with the first read's answers, in the form ``answer_all`` returns,
+    # while the other read is still running; what ``answer_all`` returns afterwards carries the same item objects for
+    # the same questions. Routes that answer once never call it.
+    on_first_read: Callable[[list], None] | None = None
 
 
 @dataclass
