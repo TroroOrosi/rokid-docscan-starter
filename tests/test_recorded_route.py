@@ -8,6 +8,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -100,3 +101,37 @@ def test_the_server_half_of_the_route_runs_to_a_bundle_and_nothing_is_sent(tmp_p
     assert len(result["items"]) == 2 and result["items"][0][1] == "経路検査の録"
     assert result["browser_state"] == [], "no browser send record may exist"
     assert result["work_jobs_db"] is False
+
+
+def test_it_can_stand_for_two_reads_the_first_handed_over_before_the_compared_answers(tmp_path, monkeypatch):
+    """The answers go out at the first of two reads and the compared ones follow (Server 0.88.0). The route check on
+    the real glasses needs a stand-in that does the same, or that update could only be seen by spending a real read."""
+    first, second = tmp_path / "reply.json", tmp_path / "reply-2.json"
+    one = {"questions": [
+        {"group": "第1問", "label": "問1", "answer_no": [1], "pages": [1], "status": "ready", "answer": "③",
+         "missing_material": "", "diagrams": []},
+        {"group": "第1問", "label": "問2", "answer_no": [2], "pages": [1], "status": "ready", "answer": "②",
+         "missing_material": "", "diagrams": []}]}
+    two = json.loads(json.dumps(one))
+    two["questions"][1]["answer"] = "④"
+    first.write_text(json.dumps(one, ensure_ascii=False), encoding="utf-8")
+    second.write_text(json.dumps(two, ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setenv("ROKID_CHATGPT_SEND_ENABLED", "0")
+    monkeypatch.setenv("ROKID_RECORDED_REPLY", str(first))
+    monkeypatch.setenv("ROKID_RECORDED_REPLY_2", str(second))
+    monkeypatch.setenv("ROKID_RECORDED_COMPARE_S", "0.2")
+    handed = []
+
+    def on_first(replies):
+        handed.append((time.monotonic(), [(item, result.answer, result.extras.get("read_once")) for item, result in replies]))
+
+    started = time.monotonic()
+    replies = get_solver("recorded").answer_all(question=Question(question_id="q", on_first_read=on_first))
+    assert len(handed) == 1 and [entry[1:] for entry in handed[0][1]] == [("③", True), ("②", True)]
+    assert time.monotonic() - handed[0][0] >= 0.2 and handed[0][0] - started < 0.2, "handed over first, then the wait"
+    assert [item is early[0] for (item, _), early in zip(replies, handed[0][1])] == [True, True], "the same items"
+    assert [(result.answer, bool(result.extras.get("review_note")), result.extras.get("read_once")) for _, result in replies] == [
+        ("③", False, None), ("②", True, None)]
+    # Without a second reply, or without anyone to hand the first to, it answers once as before.
+    monkeypatch.delenv("ROKID_RECORDED_REPLY_2")
+    assert len(get_solver("recorded").answer_all(question=Question(question_id="q", on_first_read=on_first))) == 2 and len(handed) == 1

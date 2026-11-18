@@ -10,6 +10,12 @@ It is armed only when both hold, and unready otherwise (``ROKID_REAL_MODE=1`` th
 - ``ROKID_RECORDED_REPLY`` names an existing file holding ``{"questions": [...]}`` in the booklet reply shape.
 
 It never opens a browser, is not a booklet fallback, and does not answer single questions.
+
+``ROKID_RECORDED_REPLY_2`` names a second such file: the stand-in then stands for two reads, as the Codex route
+makes them. The first file's answers are handed over at once (``Question.on_first_read``, marked ``read_once``),
+``ROKID_RECORDED_COMPARE_S`` seconds pass (the time the slower read takes), and what is returned is the two
+compared by that route's own comparison, on the same items. Only so can the update of answers already being
+read be seen on the real glasses without a real read.
 """
 from __future__ import annotations
 
@@ -43,7 +49,23 @@ class RecordedSolver(Solver):
             raise RuntimeError("the recorded solver is not armed: sending must be off and ROKID_RECORDED_REPLY must name a file")
         time.sleep(float(os.environ.get("ROKID_RECORDED_DELAY_S") or 0))  # stands for the minutes the model takes
         recorded = json.loads(reply.read_text(encoding="utf-8"))
-        return _booklet_replies(recorded, subject=question.subject, extras={"source": self.name, "provider": self.name})
+        extras = {"source": self.name, "provider": self.name}
+        other = os.environ.get("ROKID_RECORDED_REPLY_2", "")
+        if not (question.on_first_read and other and Path(other).is_file()):
+            return _booklet_replies(recorded, subject=question.subject, extras=extras)
+        from app.solvers.codex_cli import _compared  # noqa: PLC0415 - the comparison the real route makes
+
+        early = _booklet_replies(recorded, subject=question.subject, extras=extras)
+        for _, result in early:
+            if isinstance(result, SolveResult):
+                result.extras["read_once"] = True
+        question.on_first_read(early)
+        time.sleep(float(os.environ.get("ROKID_RECORDED_COMPARE_S") or 0))  # the slower read
+        second = json.loads(Path(other).read_text(encoding="utf-8"))
+        # Parsed again from the same item objects, as the Codex route does: the server finds the questions it has
+        # shown by those items.
+        return _compared(_booklet_replies(recorded, subject=question.subject, extras=extras),
+                         _booklet_replies(second, subject=question.subject, extras=extras))
 
     def solve(self, *, question: Question, max_answer_len: int = 64) -> SolveResult:
         raise ValueError("the recorded solver answers a whole booklet only")
