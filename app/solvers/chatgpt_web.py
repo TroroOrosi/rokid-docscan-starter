@@ -530,8 +530,10 @@ _ATTACHED_NAMES_JS = r"""(names => { /* attached_names */
   const form = composers.length === 1 ? composers[0].closest('form') : null;
   if (!form) return null;
   const shown = e => e.getClientRects().length > 0;
-  // A finished upload is renamed "name(6).ext" when the account already holds that name (same phone, same day).
-  const base = label => { const m = /^(.+)\([1-9][0-9]*\)(\.[^.]+)$/.exec(label); return m ? m[1] + m[2] : label; };
+  // A finished upload is renamed "name(6).ext" when the account already holds that name (same phone, same day),
+  // and "name(20261118-083544).ext", the time of the upload, once it holds the name many times over (phone,
+  // 2026-11-18: page001 and page002 of every booklet; twelve pages stood uploaded and ten were counted).
+  const base = label => { const m = /^(.+)\((?:[1-9][0-9]*|[0-9]{8}-[0-9]{6})\)(\.[^.]+)$/.exec(label); return m ? m[1] + m[2] : label; };
   const tiles = [...form.querySelectorAll('button[aria-label], [role="button"][aria-label]')].filter(shown)
       .map(e => base(e.getAttribute('aria-label').trim()));
   const pictures = [...form.querySelectorAll('img[alt]')].filter(shown).map(e => base(e.getAttribute('alt').trim()));

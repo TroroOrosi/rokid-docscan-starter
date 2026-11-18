@@ -1452,6 +1452,10 @@ globalThis.document = {querySelectorAll: () => [{getClientRects: () => [1], clos
      ["page001(6).jpg", "page002(6).jpg"], [], {"counts": [1, 1], "ready": True}),
     (["page001.jpg", "page001(1).jpg", "page002.jpg"], [], [], {"counts": [2, 1], "ready": True}),
     (["Add files and more", "Select ChatGPT model"], [], [], {"counts": [0, 0], "ready": True}),
+    # Phone, 2026-11-18: a name the account holds many times over is given the time of the upload, not a count.
+    # Twelve pages stood uploaded with their first two named so; the route waited 515 s for ten and sent nothing.
+    (["page001(20261118-083544).jpg", "Remove page001(20261118-083544).jpg", "page002(10).jpg", "Remove page002(10).jpg"],
+     ["page001(20261118-083544).jpg", "page002(10).jpg"], [], {"counts": [1, 1], "ready": True}),
 ])
 def test_the_attached_names_script_reads_the_composer_measured_on_the_phone(tiles, alts, busy, expected):
     source = (f"const TILES = {json.dumps(tiles)}, ALTS = {json.dumps(alts)}, BUSY = {json.dumps(busy)};" + _FAKE_COMPOSER
