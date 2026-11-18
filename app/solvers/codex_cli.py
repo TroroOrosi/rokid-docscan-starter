@@ -336,6 +336,38 @@ def _by_order(replies: list, slots: list) -> None:
             keys[:] = [("order", pages, seen[pages])]
 
 
+def _between(first: list, second: list) -> None:
+    """Where the reads' labels mostly line up: a stretch of questions between two that both reads name, named
+    differently by each, is paired in order when both reads have as many there and all are of one group. The
+    second read's questions take the first's slots.
+
+    Phone, 2026-11-18: one read wrote "(1)（Ⅰ）" and the other "（Ⅰ）" for the parts of a question; each such part
+    came out twice, marked as listed by one read only. A stretch the reads split differently (one item against
+    three) is left alone: nothing says which belongs to which."""
+    ours, theirs = [tuple(keys) for keys in first], [tuple(keys) for keys in second]
+    common = set(ours) & set(theirs)
+
+    def label(keys: tuple) -> bool:
+        return len(keys) == 1 and keys[0][0] == "labels"
+
+    i = j = 0
+    while i < len(ours) or j < len(theirs):
+        mine, other = [], []
+        while i < len(ours) and ours[i] not in common:
+            mine.append(i)
+            i += 1
+        while j < len(theirs) and theirs[j] not in common:
+            other.append(j)
+            j += 1
+        if mine and len(mine) == len(other) and all(
+                label(ours[a]) and label(theirs[b]) and ours[a][0][1] == theirs[b][0][1] for a, b in zip(mine, other)):
+            for a, b in zip(mine, other):
+                second[b][:] = first[a]
+        if i < len(ours) and j < len(theirs) and ours[i] != theirs[j]:
+            return  # the questions both name come in another order from here: no stretch can be told
+        i, j = i + 1, j + 1
+
+
 def _slot_marks(replies: list, slots: list) -> dict:
     """{slot: what this read says there}: a mark, None for writing (not compared), or ``_UNANSWERED``.
 
@@ -390,6 +422,8 @@ def _compared(first: list, second: list) -> list:
     if 2 * len(named[0] & named[1]) < min(map(len, named)):
         _by_order(first, first_slots)
         _by_order(second, second_slots)
+    else:
+        _between(first_slots, second_slots)
     mine, theirs = _slot_marks(first, first_slots), _slot_marks(second, second_slots)
     same_question = {tuple(keys): pair for keys, pair in zip(second_slots, second)}
     merged = []

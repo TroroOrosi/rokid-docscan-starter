@@ -1626,6 +1626,30 @@ def test_what_one_read_has_more_of_on_a_page_is_what_is_left_over_as_given_by_on
     assert [row[3] for row in shown] == ["", codex_cli._ONE_LISTED, ""]
 
 
+def test_sub_questions_named_differently_between_questions_both_reads_name_are_paired_in_order(codex, tmp_path, monkeypatch):
+    """Phone, 2026-11-18, twelve pages read twice by GPT-6.2 Sol: one read named the parts of a question "(1)（Ⅰ）" and
+    the other "（Ⅰ）". Most labels lined up, so the reads were compared by label, and every part so named came out
+    twice, once from each read, each marked as listed by one read only: 47 items for some 34 questions, 22 marks."""
+    same = [(f"({number})", "ウ") for number in range(2, 8)]
+    first = _boxed("【一】", ("(1)（Ⅰ）", "ア"), ("(1)（Ⅱ）", "イ"), *same, ("(8)（Ⅰ）", "オ"), ("(8)（Ⅱ）", "カ"), ("(9)", "キ"))
+    second = _boxed("【一】", ("（Ⅰ）", "ア"), ("（Ⅱ）", "エ"), *[(f"（{number}）", "ウ") for number in range(2, 8)],
+                    ("（Ⅰ）", "オ"), ("（Ⅱ）", "カ"), ("（9）", "キ"))
+    _twice(monkeypatch, first, second)
+    shown = _labelled(codex_cli.CodexCliSolver().answer_all(question=_booklet(tmp_path)))
+    assert [label for label, _, _ in shown] == [question["label"] for question in first["questions"]], "eleven questions, not fifteen"
+    assert [bool(note) for _, _, note in shown] == [False, True] + [False] * 9, "the one that differs"
+    assert "エ" in shown[1][2]
+
+
+def test_a_stretch_the_reads_split_differently_is_left_as_it_was(codex, tmp_path, monkeypatch):
+    """One read gives a question as one item and the other as three: nothing says which belongs to which."""
+    first = _boxed("【三】", ("(1)", "ア"), ("(2)", "イ ウ エ"), ("(3)", "オ"), ("(4)", "カ"))
+    second = _boxed("【三】", ("（1）", "ア"), ("（ア）", "イ"), ("（イ）", "ウ"), ("（ウ）", "エ"), ("（3）", "オ"), ("（4）", "カ"))
+    _twice(monkeypatch, first, second)
+    shown = _labelled(codex_cli.CodexCliSolver().answer_all(question=_booklet(tmp_path)))
+    assert len(shown) == 7 and sum(1 for _, _, note in shown if note) == 4
+
+
 def test_reads_whose_labels_do_line_up_are_compared_by_label_as_before_whatever_their_order(codex, tmp_path, monkeypatch):
     first = _unnumbered(("第1問", "(1)", [1], "12"), ("第1問", "(2)", [1], "3"), ("第1問", "(3)", [1], "5"))
     second = _unnumbered(("第1問", "(2)", [1], "3"), ("第1問", "(1)", [1], "12"), ("第１問", "（３）", [1], "6"))
