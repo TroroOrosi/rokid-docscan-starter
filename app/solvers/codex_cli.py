@@ -49,6 +49,17 @@ from, and the compared answers stand on the same item objects: the server saves 
 Until then nothing left this module before the slower read ended; on the phone that day one read was back minutes
 before the other was cut, and the wearer had given up. Each read that comes back logs its seconds (``codex_read_done``).
 
+A read can be made in parts (``ROKID_CODEX_PARTS``, 1: off; from 2026-11-18, unit tests and the stand-in CLI only,
+never run with the real model). One read of twelve pages with 47 questions took 515 s that day, most of it the model's
+reasoning and writing. With N each read is N requests at the same time: every one carries all the images and the whole
+request, and ``_PART_NOTE`` after it names the capture pages whose questions it answers, the other pages being
+context. The pages are shared out in order, as evenly as can be, two a part at least (``_spans``; a booklet too small
+is read in fewer parts, down to the one read as it was). A read's reply is its parts' question lists joined in that
+order (``_joined``), so everything behind the requests sees a read as before; a part that fails, or whose reply
+holds no question list, fails its read. Each part logs its seconds (``codex_part_done``); a setting that is no number
+is ignored and said (``codex_parts_setting_ignored``). What it costs: N times the images sent, 2 x N requests at once,
+and whatever the model does worse with a booklet shared out, which is not known.
+
 The CLI takes images only. A booklet with audio (listening, mixed English) is refused before anything runs, with the
 error the server answers by handing the booklet to the next route.
 
@@ -57,7 +68,7 @@ Settings: ``ROKID_CODEX_BIN`` (default: the Termux npm install, else ``codex`` o
 ``0`` sends photos as the Chat route does), ``ROKID_CODEX_PAGE_SCALE`` (2: a region cut from a still photo is sent at
 this many times its own pixels at least), ``ROKID_CODEX_PAGE_LONG`` (2540 px: the long side a smaller region is
 enlarged up to, at most two and a half times; a page recorded as a clip follows this alone, see ``_wanted_scale``),
-``ROKID_CODEX_READS`` (2). Sending is gated by
+``ROKID_CODEX_READS`` (2), ``ROKID_CODEX_PARTS`` (1). Sending is gated by
 ``ROKID_CHATGPT_SEND_ENABLED`` like every other route that spends the operator's usage.
 
 ``check()`` is the proof before use: one request at low effort with a generated picture of three to seven black squares,
@@ -586,6 +597,101 @@ _SECOND_READ_LEAST_S = 120.0
 # and a read cut is a booklet nothing was compared for.
 _SECOND_READ_MOST_S = 900.0
 
+# What one part of a read is told after the whole request (ROKID_CODEX_PARTS). The request above it still says to
+# answer every question, so this says first that it narrows that. A question belongs where its own text begins, and
+# where captures overlap to the first that shows that beginning: the parts cannot see each other's lists. Never run
+# with the real model: whether it keeps to its pages, and whether it still reads a passage on another part's pages,
+# is what a trial has to show.
+_PART_NOTE = (
+    "\n\nThis request is one of {parts} sent at the same time with the same images; each covers its own capture "
+    "pages and the others answer the rest, so here the instruction to answer every question holds for capture pages "
+    "{first} to {last} only. Answer only the questions whose own text begins on capture pages {first} to {last}; a "
+    "question that more than one capture shows begins on the lowest-numbered capture page that shows its beginning. "
+    "Every other capture page is context for them (passages, figures, tables, instructions): read it, list nothing "
+    "from it. Report what the captures leave out only for capture pages {first} to {last}; a gap in the printed "
+    "page numbers is reported with the capture page before the gap, or with the one after it when none is before. "
+    "If no question begins on capture pages {first} to {last} and nothing is to be reported for them, reply "
+    '{{"questions":[]}}.')
+
+
+def _spans(numbers: list[int], parts: int) -> list[tuple[int, int]]:
+    """The capture pages of each part of a read, as (first, last): in order, every page once, as even as can be, and
+    two pages a part at least. A booklet too small for ``parts`` gets as many as fit; one span is the read as it was.
+
+    ``numbers`` are the booklet's capture page numbers in order; a number the booklet does not have is in no span.
+    """
+    parts = max(1, min(parts, len(numbers) // 2))
+    size, more = divmod(len(numbers), parts)
+    starts = [index * size + min(index, more) for index in range(parts + 1)]
+    return [(numbers[start], numbers[end - 1]) for start, end in zip(starts, starts[1:])]
+
+
+def _decisive(failures: list) -> BaseException:
+    """Of the failures of requests that ran side by side, the one that leaves. A usage limit first: it closes Work as
+    well. Then a run that did not finish in time, which the server answers with the next route at once; a bare
+    failure costs one more whole attempt before."""
+    return next((error for kind in (ChatGptWebRateLimit, ChatGptWebReplyIncomplete)
+                 for error in failures if isinstance(error, kind)), failures[0])
+
+
+def _named(item: dict) -> tuple | None:
+    """What two parts of a read may know one question by: its group and label as they are compared and its printed
+    answer numbers. None when it prints no answer number, or neither group nor label: such an item is never taken
+    for another part's (a "(1)" stands under every 大問, and what the captures leave out names nothing)."""
+    numbers, names = item.get("answer_no"), (_plain(item.get("group")), _plain(item.get("label")))
+    return (*names, *map(str, numbers)) if isinstance(numbers, list) and numbers and any(names) else None
+
+
+def _cited(item: dict) -> list[int]:
+    pages = item.get("pages")
+    return [page for page in pages if type(page) is int] if isinstance(pages, list) else []
+
+
+def _joined(number: int, spans: list[tuple[int, int]], texts: list[str]) -> str:
+    """One reply for read ``number`` out of its parts' replies: their question lists one after the other, in the
+    order of their capture pages. A ValueError when a part's reply holds no question list (the read fails); an empty
+    list is a part on whose pages no question begins.
+
+    A question at a boundary may be listed by both its parts. The same question: the same name (``_named``) and a
+    capture page cited by both. It stays once, from the part whose pages hold the first page it cites, else from
+    the earlier part; how many were dropped is logged (``codex_parts_duplicate``), never what. The cited page in
+    common is asked for because "printed answer numbers may restart in another section or question, even under the
+    same labels" (the request's own words): a question dropped for its name alone is lost with nothing said, and one
+    listed twice is seen. So a question two parts cite no common page for stays twice, and so does every question
+    without a printed answer number.
+    """
+    reply: dict = {}
+    questions: list = []
+    earlier: dict = {}  # name -> [(place in ``questions``, whether its own part's pages hold its first page)]
+    dropped = 0
+    for (first, last), text in zip(spans, texts):
+        data = extract_json(text)
+        listed = data.get("questions") if isinstance(data, dict) else None
+        if not isinstance(listed, list) or any(not isinstance(item, dict) for item in listed):
+            raise ValueError("a part's reply holds no question list")
+        reply.update(data)  # anything else a part said stays, for the check of a whole reply to refuse as ever
+        here = []
+        for item in listed:
+            name, cited = _named(item), _cited(item)
+            home = bool(cited) and first <= cited[0] <= last
+            known = earlier.get(name, [])
+            twin = next((entry for entry in known if set(cited) & set(_cited(questions[entry[0]]))), None)
+            if twin is not None:
+                dropped += 1
+                if twin[1] or not home:
+                    continue
+                questions[twin[0]] = None  # the earlier part listed a question of these pages: this one stays
+                known.remove(twin)
+            if name:
+                here.append((name, len(questions), home))
+            questions.append(item)
+        for name, place, home in here:  # only now: within one part a name twice is two questions, as in a whole read
+            earlier.setdefault(name, []).append((place, home))
+    if dropped:
+        print(json.dumps({"event": "codex_parts_duplicate", "read": number, "count": dropped}), flush=True)
+    reply["questions"] = [item for item in questions if item is not None]
+    return json.dumps(reply, ensure_ascii=False)
+
 
 def _command() -> list[str]:
     """The CLI's own binary. The npm launcher needs /usr/bin/env, which Termux does not have."""
@@ -993,6 +1099,14 @@ class CodexCliSolver(Solver):
         # written mathematics, in 0.66 to 0.78 of the time (2026-11-16, M-36 and M-37; the operator's decision).
         effort = os.environ.get("ROKID_CODEX_EFFORT") or "high"
         timeout, locating = _time_allowed(len(question.document_pages))
+        try:
+            parts = int(os.environ.get("ROKID_CODEX_PARTS") or 1)
+        except ValueError:
+            # A setting that is no number is the read as it was, and said: as an error it would give every booklet
+            # to the routes behind this one for the sake of an option.
+            parts = 1
+            print(json.dumps({"event": "codex_parts_setting_ignored"}), flush=True)
+        spans = _spans(sorted(page["page_number"] for page in question.document_pages), parts)
         with cls._workplace(timeout) as (directory, environment):
             names = None
             if (os.environ.get("ROKID_CODEX_LOCATE") or "1") != "0":
@@ -1007,8 +1121,33 @@ class CodexCliSolver(Solver):
                        "prompt": _ANSWER_ONLY_SYSTEM + "\n\n" + grey_note(question.document_pages) + _ALL_TASK + note}
             began, running = time.monotonic(), []
 
+            def part(number: int, index: int, first: int, last: int) -> str:
+                reply = cls._exec(directory, environment, reply_name=f"reply-{number}-{index}.json", running=running,
+                                  **{**request, "prompt": request["prompt"] + _PART_NOTE.format(
+                                      parts=len(spans), first=first, last=last)})
+                print(json.dumps({"event": "codex_part_done", "read": number, "part": index, "pages": f"{first}-{last}",
+                                  "seconds": round(time.monotonic() - began, 1)}), flush=True)
+                return reply
+
+            def in_parts(number: int) -> str:
+                """One read as a request for each span, all at once; every one has to come back for the read to."""
+                with concurrent.futures.ThreadPoolExecutor(max_workers=len(spans)) as pool:
+                    asked = [pool.submit(part, number, index, *span) for index, span in enumerate(spans, 1)]
+                texts, failures = [], []
+                for one in asked:
+                    try:
+                        texts.append(one.result())
+                    except (ChatGptWebError, OSError, MemoryError, ValueError) as error:
+                        failures.append(error)
+                # ponytail: a part that fails leaves the read's other parts running to their end for nothing. End
+                # them (a list of processes for each read) once a trial shows requests wasted that way.
+                if failures:
+                    raise _decisive(failures)
+                return _joined(number, spans, texts)
+
             def read(number: int, reply_name: str) -> str:
-                reply = cls._exec(directory, environment, reply_name=reply_name, running=running, **request)
+                reply = (cls._exec(directory, environment, reply_name=reply_name, running=running, **request)
+                         if len(spans) == 1 else in_parts(number))
                 # How long each read took, and so how far apart the two of one run end; never what it said.
                 print(json.dumps({"event": "codex_read_done", "read": number,
                                   "seconds": round(time.monotonic() - began, 1)}), flush=True)
@@ -1045,10 +1184,7 @@ class CodexCliSolver(Solver):
                 except (ChatGptWebError, OSError, MemoryError, ValueError) as error:
                     failures.append(error)
             if not replies:
-                # A usage limit first: it closes Work as well. Then a read that did not finish in time, which the
-                # server answers with the next route at once; a bare failure costs one more whole attempt before.
-                raise next((error for kind in (ChatGptWebRateLimit, ChatGptWebReplyIncomplete)
-                            for error in failures if isinstance(error, kind)), failures[0])
+                raise _decisive(failures)
             for error in failures:
                 # The other read answers alone; which kind of failure it was is logged, never its text.
                 _log_cause("codex_read_failed", error)
