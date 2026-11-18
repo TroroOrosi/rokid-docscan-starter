@@ -382,6 +382,10 @@ from __future__ import annotations
 #         Sol (released 2026-11-17; the operator's decision, no comparison). Chat counts an uploaded file that the
 #         product renamed with the time of its upload (twelve pages stood uploaded and ten were counted: the
 #         cause of that morning's Chat failure, reproduced and then passed on the live page). See API 1.53.0.
+#         Added the same night: the Codex route's limit is a backstop of 45 minutes; parts of a question the two
+#         reads name differently are paired, not shown twice; Chat ends a message the product says it never
+#         delivered as a known failure; Work's inventory presses Work again on a page still settling; the gathering
+#         gives the same pages in about two thirds of the time (kept arrays; 38.3 s to 25.3 s a clip on the phone).
 APP_VERSION = "0.88.0"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
