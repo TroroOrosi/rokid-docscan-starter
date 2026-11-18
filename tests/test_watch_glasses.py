@@ -14,8 +14,68 @@ import pytest
 
 from scripts import watch_glasses
 
-_REAL_APP_RUNNING = watch_glasses.app_running
 _REAL_POPEN = subprocess.Popen
+
+
+@pytest.fixture(autouse=True)
+def _no_real_process(monkeypatch):
+    """A test that forgets its fake fails; it never starts adb."""
+    def refuse(argv, **kwargs):
+        raise AssertionError(f"unfaked process: {argv[0]}")
+
+    monkeypatch.setattr(watch_glasses.subprocess, "run", refuse)
+
+
+def _device(argv, command, check=False, **_):
+    """Stand in for subprocess.run, adb and the device's sh.
+
+    The watcher sends one command with its words as arguments, or one line of
+    several commands with a status mark after each but the last. `command(words)`
+    answers each device command with (exit status, output), or raises.
+    """
+    status, output = 0, ""
+    for part in " ".join(argv[4:]).split("; "):
+        if part == "echo __watch_step:$?":
+            output += f"__watch_step:{status}\n"
+            continue
+        try:
+            status, text = command(tuple(part.removesuffix(" 2>&1").split()))
+        except subprocess.TimeoutExpired as late:
+            # As subprocess.run does on the phone: what was printed so far, as bytes.
+            raise subprocess.TimeoutExpired(argv, late.timeout, output=output.encode() or None) from None
+        output += f"{text}\n" if text else ""
+    if check and status:
+        raise subprocess.CalledProcessError(status, argv)
+    return subprocess.CompletedProcess(argv, status, output, "")
+
+
+def _fake_device(monkeypatch, adb, running=True):
+    """Answer every adb process from `adb(serial, "shell", *words)`.
+
+    That is the shape these tests' fakes always had: one call for each device
+    command, also when several arrive in one line. What it returns is the
+    command's output and a CalledProcessError it raises is a nonzero exit
+    status. pidof is answered by `running`; None is an answer that cannot be
+    told. Returns the processes started, each as the arguments after the serial.
+    """
+    trips = []
+
+    def run(argv, **kwargs):
+        assert argv[:2] == ["adb", "-s"] and argv[3] == "shell"
+        trips.append(tuple(argv[3:]))
+
+        def command(words):
+            if words[0] == "pidof":
+                return {True: (0, "123"), False: (1, ""), None: (2, "")}[running]
+            try:
+                return 0, adb(argv[2], "shell", *words)
+            except subprocess.CalledProcessError:
+                return 1, ""
+
+        return _device(argv, command, **kwargs)
+
+    monkeypatch.setattr(watch_glasses.subprocess, "run", run)
+    return trips
 
 
 def _watch(monkeypatch, states, spread=None, fail_launch=False, fail_once=None, app_running=True, tick=0.5):
@@ -40,7 +100,7 @@ def _watch(monkeypatch, states, spread=None, fail_launch=False, fail_once=None, 
             raise subprocess.TimeoutExpired("device", 10)
         return ""
 
-    monkeypatch.setattr(watch_glasses, "adb", adb)
+    _fake_device(monkeypatch, adb, running=app_running)
     def fetch(*args):
         observation = next(observations)
         if isinstance(observation, Exception):
@@ -48,7 +108,6 @@ def _watch(monkeypatch, states, spread=None, fail_launch=False, fail_once=None, 
         return observation
 
     monkeypatch.setattr(watch_glasses, "fetch_state", fetch)
-    monkeypatch.setattr(watch_glasses, "app_running", lambda serial: app_running, raising=False)
     monkeypatch.setattr(watch_glasses.time, "monotonic", lambda: elapsed[0])
     def sleep(_):
         elapsed[0] += tick
@@ -60,6 +119,26 @@ def _watch(monkeypatch, states, spread=None, fail_launch=False, fail_once=None, 
 
 STATE = {"device_id": "expected", "source_ip": "10.0.0.10", "session_id": 7,
          "generation": 3, "sequence": 1, "phase": "capturing", "answer_ready": False}
+READY = {**STATE, "phase": "analyzing", "sequence": 2, "answer_ready": True}
+
+# The lines the watcher sends as one adb round trip, written out: each is the
+# argument after the serial. `__watch_step:$?` prints the exit status of the
+# command before it.
+MUTE_BUT_LAST = ("settings put system sound_effects_enabled 0 2>&1; echo __watch_step:$?; "
+                 "cmd media_session volume --stream 1 --set 0 2>&1; echo __watch_step:$?; "
+                 "cmd media_session volume --stream 2 --set 0 2>&1; echo __watch_step:$?; "
+                 "cmd media_session volume --stream 3 --set 0 2>&1; echo __watch_step:$?; "
+                 "cmd media_session volume --stream 4 --set 0 2>&1; echo __watch_step:$?; "
+                 "cmd media_session volume --stream 5 --set 0 2>&1; echo __watch_step:$?; "
+                 "cmd media_session volume --stream 8 --set 0 2>&1; echo __watch_step:$?; ")
+MUTE = ("shell", MUTE_BUT_LAST + "cmd media_session volume --stream 10 --set 0")
+MUTE_THEN = MUTE_BUT_LAST + "cmd media_session volume --stream 10 --set 0 2>&1; echo __watch_step:$?; "
+FOLD_AND_PROCESS = ("shell", "getprop vendor.rkd.glasses.is_spread 2>&1; echo __watch_step:$?; "
+                             "pidof dev.rokid.docscanglass.doc")
+SERIAL_READ = ("shell", "getprop", "ro.serialno")
+VOLUME_READ = ("shell", "cmd", "media_session", "volume", "--stream", "3", "--get")
+WAKE = ("am start -W -n dev.rokid.docscanglass.doc/dev.rokid.docscanglass.doc.DocScanGlassActivity "
+        "--ei wake_session_id 7 --el wake_generation 3")
 
 
 def test_analyzing_sleeps_and_one_final_answer_wakes_only_the_matching_run(monkeypatch):
@@ -101,8 +180,7 @@ def test_completion_after_ready_snapshot_never_lights_before_the_activity_valida
         return ""
 
     monkeypatch.setattr(watch_glasses, "fetch_state", fetch)
-    monkeypatch.setattr(watch_glasses, "adb", adb)
-    monkeypatch.setattr(watch_glasses, "app_running", lambda serial: True)
+    _fake_device(monkeypatch, adb)
     monkeypatch.setattr(watch_glasses.time, "sleep", lambda _: None)
     with pytest.raises(StopIteration):
         watch_glasses.watch("glasses:5555", "expected", 0.5)
@@ -154,8 +232,7 @@ def test_discovery_chooses_the_android_identity_only_after_serial_verification(m
                    {**STATE, "device_id": "android-id"}])
     monkeypatch.setattr(watch_glasses, "fetch_state", lambda server, device: (selection.append(device), next(phases))[1])
     monkeypatch.setattr(watch_glasses, "target", lambda requested, expected, state: "glasses:5555")
-    monkeypatch.setattr(watch_glasses, "adb", lambda serial, *args: "expected" if "ro.serialno" in args else "1")
-    monkeypatch.setattr(watch_glasses, "app_running", lambda serial: True)
+    _fake_device(monkeypatch, lambda serial, *args: "expected" if "ro.serialno" in args else "1")
     monkeypatch.setattr(watch_glasses.time, "sleep", lambda _: None)
     with pytest.raises(StopIteration):
         watch_glasses.watch("glasses:5555", "expected", 0.5)
@@ -227,28 +304,27 @@ def test_a_verified_idle_request_precedes_slow_fold_and_process_diagnostics(monk
             observed.append(elapsed[0])
         return asleep
 
-    def run(argv, **kwargs):
-        if "ro.serialno" in argv:
+    def command(words):
+        if "ro.serialno" in words:
             output = "expected"
-        elif "vendor.rkd.glasses.is_spread" in argv or "pidof" in argv:
+        elif "vendor.rkd.glasses.is_spread" in words or "pidof" in words:
             events.append(("diagnostic", elapsed[0]))
             if observed:
                 elapsed[0] += 2.0  # A slow device read must not delay an already-received intent.
-            output = "1000" if "pidof" in argv else "1"
-        elif "KEYCODE_SOFT_SLEEP" in argv:
+            output = "1000" if "pidof" in words else "1"
+        elif "KEYCODE_SOFT_SLEEP" in words:
             delivered.append(elapsed[0])
             events.append(("soft_sleep", elapsed[0]))
             raise Delivered()
         else:
-            output = "volume is 0" if "--get" in argv else ""
-        return subprocess.CompletedProcess(argv, 0, output, "")
+            output = "volume is 0" if "--get" in words else ""
+        return 0, output
 
     def pause(_):
         elapsed[0] = 5.0
 
     monkeypatch.setattr(watch_glasses, "fetch_state", fetch)
-    monkeypatch.setattr(watch_glasses.subprocess, "run", run)
-    monkeypatch.setattr(watch_glasses, "app_running", _REAL_APP_RUNNING)
+    monkeypatch.setattr(watch_glasses.subprocess, "run", lambda argv, **kwargs: _device(argv, command, **kwargs))
     monkeypatch.setattr(watch_glasses.time, "monotonic", lambda: elapsed[0])
     monkeypatch.setattr(watch_glasses.time, "sleep", pause)
     with pytest.raises(Delivered):
@@ -278,7 +354,6 @@ def test_a_priority_sleep_with_unknown_delivery_does_not_start_discovery(monkeyp
     snapshots = iter([awake, asleep, asleep])
     monkeypatch.setattr(watch_glasses, "fetch_state", lambda *args: next(snapshots))
     monkeypatch.setattr(watch_glasses, "target", lambda *args: "10.0.0.10:5555")
-    monkeypatch.setattr(watch_glasses, "app_running", lambda serial: True)
     monkeypatch.setattr(watch_glasses.time, "sleep", lambda _: None)
     attempts = []
     discoveries = []
@@ -294,7 +369,7 @@ def test_a_priority_sleep_with_unknown_delivery_does_not_start_discovery(monkeyp
             raise subprocess.TimeoutExpired("input", 10)
         return ""
 
-    monkeypatch.setattr(watch_glasses, "adb", adb)
+    _fake_device(monkeypatch, adb)
     def discover(serial):
         discoveries.append(serial)
         raise watch_glasses.StateUnavailable("glasses_discovery_unavailable")
@@ -421,8 +496,7 @@ def test_sleep_delivery_respects_the_os_display_hold_after_the_final_http_read(m
         return ""
 
     monkeypatch.setattr(watch_glasses, "fetch_state", fetch)
-    monkeypatch.setattr(watch_glasses, "adb", adb)
-    monkeypatch.setattr(watch_glasses, "app_running", lambda serial: True)
+    _fake_device(monkeypatch, adb)
     monkeypatch.setattr(watch_glasses.time, "sleep", lambda _: None)
     with pytest.raises(StopIteration):
         watch_glasses.watch("glasses:5555", "expected", 0.5)
@@ -448,18 +522,150 @@ def test_confirmed_wear_entry_uses_a_fresh_chooser_and_never_old_answer_extras(m
 
 
 def test_only_a_clean_process_miss_authorizes_the_bootstrap(monkeypatch):
-    monkeypatch.setattr(watch_glasses, "app_running", _REAL_APP_RUNNING)
-    values = iter([subprocess.CompletedProcess([], 0, "123 456\n", ""),
-                   subprocess.CompletedProcess([], 1, "", ""),
-                   subprocess.CompletedProcess([], 1, "", "device offline")])
+    values = iter([subprocess.CompletedProcess([], 0, "1\n__watch_step:0\n123 456\n", ""),
+                   subprocess.CompletedProcess([], 1, "1\n__watch_step:0\n", ""),
+                   subprocess.CompletedProcess([], 1, "1\n__watch_step:0\n", "device offline")])
     def run(args, **kwargs):
-        assert args == ["adb", "-s", "glasses:5555", "shell", "pidof", "dev.rokid.docscanglass.doc"]
+        assert args == ["adb", "-s", "glasses:5555", "shell", FOLD_AND_PROCESS[1]]
         return next(values)
     monkeypatch.setattr(watch_glasses.subprocess, "run", run)
-    assert watch_glasses.app_running("glasses:5555")
-    assert not watch_glasses.app_running("glasses:5555")
+
+    def running():
+        spread, process = watch_glasses.fold_and_process("glasses:5555")
+        assert spread == "1"
+        return watch_glasses.app_running(process)
+
+    assert running()
+    assert not running()
     with pytest.raises(subprocess.SubprocessError):
-        watch_glasses.app_running("glasses:5555")
+        running()
+
+
+@pytest.mark.parametrize("code,stdout", [(1, ""), (1, "__watch_step:1\n"), (0, "Error: closed\n__watch_step:0\n123\n")],
+                         ids=["no_answer", "failed_status", "error_text"])
+def test_a_fold_read_that_failed_is_never_taken_for_a_fold_state(monkeypatch, code, stdout):
+    monkeypatch.setattr(watch_glasses.subprocess, "run",
+                        lambda argv, **kwargs: subprocess.CompletedProcess(argv, code, stdout, ""))
+    with pytest.raises(subprocess.CalledProcessError):
+        watch_glasses.fold_and_process("glasses:5555")
+
+
+def _round_trips(monkeypatch, states, answer=lambda *args: "", spread=None, running=True, tick=0.5):
+    """Every adb process a watch over `states` starts, each as the arguments after the serial."""
+    observations = iter(states)
+    spreads = iter(spread or ["1"] * len(states))
+    elapsed = [0.0]
+
+    def adb(serial, *args):
+        assert serial == "glasses:5555"
+        if args == SERIAL_READ:
+            return "expected"
+        if args == ("shell", "getprop", "vendor.rkd.glasses.is_spread"):
+            return next(spreads)
+        return answer(*args)
+
+    trips = _fake_device(monkeypatch, adb, running=running)
+    monkeypatch.setattr(watch_glasses, "fetch_state", lambda *args: next(observations))
+    monkeypatch.setattr(watch_glasses.time, "monotonic", lambda: elapsed[0])
+    monkeypatch.setattr(watch_glasses.time, "sleep", lambda _: elapsed.__setitem__(0, elapsed[0] + tick))
+    with pytest.raises(StopIteration):
+        watch_glasses.watch("glasses:5555", "expected", 0.5)
+    return trips
+
+
+def test_an_answer_wake_is_two_adb_round_trips_with_every_command_in_its_old_order(monkeypatch, capsys):
+    ready = {**READY, "available_stage": "complete", "answer_revision": 4}
+    idle = _round_trips(monkeypatch, [STATE])
+    trips = _round_trips(monkeypatch, [STATE, ready])
+    assert len(trips) - len(idle) <= 2, trips[len(idle):]
+    assert trips == [SERIAL_READ, MUTE, FOLD_AND_PROCESS,
+                     FOLD_AND_PROCESS, ("shell", MUTE_THEN + WAKE + " --el answer_revision 4")]
+    output = capsys.readouterr().out
+    assert "Display action=wake outcome=dispatched generation=3 sequence=2 phase=analyzing" in output
+    assert output.count('"step":"wake_input"') == 1 and "mute_unavailable" not in output
+
+
+def test_a_wake_sent_again_after_five_seconds_is_the_same_two_round_trips(monkeypatch):
+    unread = {**READY, "answer_revision": 1, "ack_answer_revision": None}
+    trips = _round_trips(monkeypatch, [unread, unread], tick=5)
+    wake = ("shell", MUTE_THEN + WAKE + " --el answer_revision 1")
+    assert trips == [SERIAL_READ, MUTE, FOLD_AND_PROCESS, wake, FOLD_AND_PROCESS, wake, VOLUME_READ]
+
+
+def test_a_failed_mute_command_is_named_as_before_and_the_wake_still_goes_with_it(monkeypatch, capsys):
+    def answer(*args):
+        if "sound_effects_enabled" in args:
+            return "Exception occurred while executing 'put'"  # A failure adb() tells by its text.
+        if args[-4:] == ("--stream", "3", "--set", "0"):
+            raise subprocess.CalledProcessError(1, "device")
+        return ""
+
+    trips = _round_trips(monkeypatch, [READY], answer=answer)
+    assert trips == [SERIAL_READ, MUTE, FOLD_AND_PROCESS, ("shell", MUTE_THEN + WAKE)]
+    output = capsys.readouterr().out
+    # Once for the mute after the identity check and once for the wake's.
+    assert output.count("Glasses system tap sound: mute_unavailable") == 2
+    assert output.count("Glasses output stream 3: mute_unavailable") == 2
+    assert output.count("mute_unavailable") == 4
+    assert "Display action=wake outcome=dispatched" in output and "glasses_unavailable" not in output
+
+
+def test_a_wake_the_device_refuses_in_words_is_unknown_and_goes_again(monkeypatch, capsys):
+    replies = iter(["Error: Activity not started, unable to resolve Intent", ""])
+    trips = _round_trips(monkeypatch, [READY, READY],
+                         answer=lambda *args: next(replies) if "wake_session_id" in args else "")
+    assert [trip for trip in trips if "wake_session_id" in trip[-1]] == [("shell", MUTE_THEN + WAKE)] * 2
+    output = capsys.readouterr().out
+    assert output.index("Display action=wake outcome=unknown") < output.index("Display action=wake outcome=dispatched")
+
+
+def test_a_mute_command_that_does_not_return_leaves_the_wake_to_go_alone(monkeypatch, capsys):
+    def answer(*args):
+        if args[-4:-2] == ("--stream", "4"):
+            raise subprocess.TimeoutExpired("device", 10)
+        return ""
+
+    trips = _round_trips(monkeypatch, [READY], answer=answer)
+    assert trips[-2:] == [("shell", MUTE_THEN + WAKE), ("shell", *WAKE.split())]
+    output = capsys.readouterr().out
+    assert [stream for stream in (1, 2, 3, 4, 5, 8, 10)
+            if f"Glasses output stream {stream}: mute_unavailable" in output] == [4, 5, 8, 10]
+    assert "Glasses system tap sound" not in output
+    assert "Display action=wake outcome=dispatched" in output
+
+
+def test_a_wake_that_does_not_return_is_unknown_and_is_not_sent_twice_in_one_pass(monkeypatch, capsys):
+    def answer(*args):
+        if "wake_session_id" in args:
+            raise subprocess.TimeoutExpired("device", 10)
+        return ""
+
+    trips = _round_trips(monkeypatch, [READY], answer=answer)
+    assert trips == [SERIAL_READ, MUTE, FOLD_AND_PROCESS, ("shell", MUTE_THEN + WAKE)]
+    output = capsys.readouterr().out
+    assert "Display action=wake outcome=unknown" in output and "mute_unavailable" not in output
+
+
+def test_unfolding_mutes_in_one_round_trip_before_the_wake_key_and_the_chooser(monkeypatch):
+    trips = _round_trips(monkeypatch, [STATE, STATE], spread=["0", "1"])
+    assert trips == [SERIAL_READ, MUTE, FOLD_AND_PROCESS,
+                     FOLD_AND_PROCESS, MUTE, ("shell", "input", "-d", "0", "keyevent", "KEYCODE_WAKEUP"),
+                     ("shell", "am", "start", "-W", "-n", watch_glasses.COMPONENT, "--ez", "chooser", "true")]
+
+
+def test_a_volume_that_came_back_is_muted_again_in_one_round_trip(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("ROKID_DATA_DIR", str(tmp_path))
+    trips = _round_trips(monkeypatch, [STATE, STATE], tick=1,
+                         answer=lambda *args: "volume is 5" if "--get" in args else "")
+    assert trips[-3:] == [VOLUME_READ, ("shell", "dumpsys", "audio"), MUTE]
+    assert "Glasses volume reset observed; playback muted again" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("spread,stopped", [("0", False), ("1", True)])
+def test_a_process_that_cannot_be_told_stops_only_the_pass_that_relies_on_it(monkeypatch, capsys, spread, stopped):
+    trips = _round_trips(monkeypatch, [STATE, STATE], spread=[spread, spread], running=None)
+    assert trips.count(FOLD_AND_PROCESS) == 2
+    assert ("Watcher: glasses_unavailable; waiting" in capsys.readouterr().out) is stopped
 
 
 def _discovery_watch(monkeypatch, states, rows, *, launch_unknown=False, identities=None, ticks=20, spreads=None,
@@ -520,23 +726,31 @@ def _discovery_watch(monkeypatch, states, rows, *, launch_unknown=False, identit
         return state
 
     def run(args, **kwargs):
-        calls.append(tuple(args))
-        if args[:2] == ["adb", "connect"] and args[2] == "10.0.0.10:5555":
-            raise subprocess.TimeoutExpired("old source", kwargs["timeout"])
-        output, code = "", 0
-        if "ro.serialno" in args:
-            output = (identities or {}).get(args[2], "expected")
-            if isinstance(output, Exception):
-                raise output
-        elif "vendor.rkd.glasses.is_spread" in args:
-            output = next(spread_values) if spread_values else "1"
-        elif "pidof" in args:
-            output, code = ("123", 0) if running[0] else ("", 1)
-        elif "wear_bootstrap" in args:
-            if launch_unknown:
-                raise subprocess.TimeoutExpired("launch", kwargs["timeout"])
-            running[0] = True
-        return subprocess.CompletedProcess(args, code, output, "")
+        if args[:2] == ["adb", "connect"]:
+            calls.append(tuple(args))
+            if args[2] == "10.0.0.10:5555":
+                raise subprocess.TimeoutExpired("old source", kwargs["timeout"])
+            return subprocess.CompletedProcess(args, 0, "", "")
+
+        def command(words):
+            # One call for each device command, also when several arrive in one line.
+            calls.append((*args[:4], *words))
+            output, code = "", 0
+            if "ro.serialno" in words:
+                output = (identities or {}).get(args[2], "expected")
+                if isinstance(output, Exception):
+                    raise output
+            elif "vendor.rkd.glasses.is_spread" in words:
+                output = next(spread_values) if spread_values else "1"
+            elif "pidof" in words:
+                output, code = ("123", 0) if running[0] else ("", 1)
+            elif "wear_bootstrap" in words:
+                if launch_unknown:
+                    raise subprocess.TimeoutExpired("launch", kwargs["timeout"])
+                running[0] = True
+            return code, output
+
+        return _device(args, command, **kwargs)
 
     monkeypatch.setattr(watch_glasses.subprocess, "Popen", DiscoveryProcess)
     monkeypatch.setattr(watch_glasses.subprocess, "run", run)
@@ -928,17 +1142,21 @@ def _watch_poll_cadence(monkeypatch, request_seconds, unavailable=False):
 
     def run(argv, **kwargs):
         assert argv[:3] == ["adb", "-s", "glasses:5555"]
-        commands.append(tuple(argv[3:]))
-        output = ""
-        if "ro.serialno" in argv:
-            output = "expected"
-        elif "vendor.rkd.glasses.is_spread" in argv:
-            output = "1"
-        elif "pidof" in argv:
-            output = "123"
-        elif "--get" in argv:
-            output = "volume is 0"
-        return subprocess.CompletedProcess(argv, 0, output, "")
+
+        def command(words):
+            commands.append(("shell", *words))
+            output = ""
+            if "ro.serialno" in words:
+                output = "expected"
+            elif "vendor.rkd.glasses.is_spread" in words:
+                output = "1"
+            elif "pidof" in words:
+                output = "123"
+            elif "--get" in words:
+                output = "volume is 0"
+            return 0, output
+
+        return _device(argv, command, **kwargs)
 
     def pause(seconds):
         assert seconds >= 0

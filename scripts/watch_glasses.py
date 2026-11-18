@@ -33,6 +33,14 @@ DISCOVERY_TIMEOUT_SECONDS = 12.0
 DISCOVERY_RETRY_SECONDS = 15.0
 MDNS_CHILD_FLAG = "--mdns-unicast-child"
 SLOW_RPC_NS = 250_000_000
+CONTROL_STEPS = ("sleep_input", "wake_input", "activity_input")
+STEP_MARK = "__watch_step:"
+# Android 12 AOSP MediaShellCommand/VolumeCtrl. Playback only; microphone
+# mute is never changed. Vendor volume behavior still needs physical proof.
+MUTE_COMMANDS = (("Glasses system tap sound", ("settings", "put", "system", "sound_effects_enabled", "0")),
+                 *((f"Glasses output stream {stream}",
+                    ("cmd", "media_session", "volume", "--stream", str(stream), "--set", "0"))
+                   for stream in (1, 2, 3, 4, 5, 8, 10)))
 
 
 def _timing_event(event: str, **fields) -> None:
@@ -153,13 +161,55 @@ def target(serial: str, expected_serial: str, state: dict) -> str:
 
 def adb(serial: str, *args: str, timeout: float = 10) -> str:
     step = _adb_step(args)
-    with _rpc_timing(step, control=step in ("sleep_input", "wake_input", "activity_input")):
+    with _rpc_timing(step, control=step in CONTROL_STEPS):
         result = subprocess.run(["adb", "-s", serial, *args], check=True, capture_output=True,
                                 text=True, timeout=timeout)
         output = result.stdout + result.stderr
         if "Error:" in output or "Exception" in output:
             raise subprocess.CalledProcessError(1, "device command")
         return result.stdout.strip()
+
+
+def adb_chain(serial: str, *commands: tuple[str, ...], step: str,
+              timeout: float = 10) -> list[subprocess.CompletedProcess | None]:
+    """Several device commands in one adb round trip, in order; one result each.
+
+    One command a round trip was measured at 0.3-2.8 s each over the hotspot;
+    how long a round trip of several takes on the glasses is not measured.
+    Each command is written as adb writes it when it is sent alone, its words
+    joined by spaces, and `;` keeps a failed one from stopping the next. Every
+    command but the last prints its exit status after it and keeps its error
+    text in its own part of the output. The last is left as it is, so adb's exit
+    status and stderr stay that command's, read as they are for a command sent
+    alone. None stands for a command the output does not account for: the round
+    trip ended, or its time ran out, before that command returned. The commands
+    share one time limit, where each had its own.
+    """
+    lines = [" ".join(command) for command in commands]
+    line = "".join(f"{command} 2>&1; echo {STEP_MARK}$?; " for command in lines[:-1]) + lines[-1]
+    try:
+        with _rpc_timing(step, control=step in CONTROL_STEPS):
+            done = subprocess.run(["adb", "-s", serial, "shell", line], capture_output=True,
+                                  text=True, timeout=timeout)
+        printed = done.stdout
+    except subprocess.TimeoutExpired as late:
+        # What was printed before the time ran out says which commands returned.
+        # On the phone subprocess hands it over as bytes, whatever text= was.
+        done, printed = None, late.output or ""
+        if isinstance(printed, bytes):
+            printed = printed.decode("utf-8", "replace")
+    parts = re.split(re.escape(STEP_MARK) + r"(\d+)\r?\n", printed)
+    results = [subprocess.CompletedProcess(command, int(status), text, "")
+               for command, text, status in zip(commands[:-1], parts[::2], parts[1::2])]
+    if done is not None and len(parts) == 2 * len(commands) - 1:
+        results.append(subprocess.CompletedProcess(commands[-1], done.returncode, parts[-1], done.stderr))
+    return results + [None] * (len(commands) - len(results))
+
+
+def _succeeded(done: subprocess.CompletedProcess | None) -> bool:
+    """adb()'s rule for one command: exit status 0 and no error in what it printed."""
+    output = "" if done is None else done.stdout + done.stderr
+    return done is not None and done.returncode == 0 and "Error:" not in output and "Exception" not in output
 
 
 @_rpc_timing("discovery_read")
@@ -336,16 +386,30 @@ def mdns_target(expected_serial: str) -> str:
     raise StateUnavailable("glasses_discovery_unavailable")
 
 
-@_rpc_timing("process_read")
-def app_running(serial: str) -> bool:
+def fold_and_process(serial: str) -> tuple[str, subprocess.CompletedProcess | None]:
+    """The fold property and the app's process, read in one adb round trip.
+
+    The property is returned, and fails, by adb()'s rule for it; anything
+    getprop writes to stderr is now part of the value, which the callers accept
+    only as "0" or "1". What pidof returned is not judged here: the caller hands
+    it to app_running() where it relies on the process, so a process that cannot
+    be told stops only the passes it stopped when it was read by itself.
+    """
+    spread, process = adb_chain(serial, ("getprop", "vendor.rkd.glasses.is_spread"), ("pidof", PACKAGE),
+                                step="fold_read")
+    if not _succeeded(spread):
+        raise subprocess.CalledProcessError(1, "device command")
+    return spread.stdout.strip(), process
+
+
+def app_running(result: subprocess.CompletedProcess | None) -> bool:
     """Only a clean pidof miss counts as stopped; transport errors are unknown."""
-    result = subprocess.run(["adb", "-s", serial, "shell", "pidof", PACKAGE],
-                            capture_output=True, text=True, timeout=10)
-    if result.returncode == 0 and re.fullmatch(r"[0-9]+(?:\s+[0-9]+)*", result.stdout.strip()) and not result.stderr.strip():
-        return True
-    if result.returncode == 1 and not result.stdout.strip() and not result.stderr.strip():
-        return False
-    raise subprocess.CalledProcessError(result.returncode or 1, "application process unavailable")
+    if result is not None:
+        if result.returncode == 0 and re.fullmatch(r"[0-9]+(?:\s+[0-9]+)*", result.stdout.strip()) and not result.stderr.strip():
+            return True
+        if result.returncode == 1 and not result.stdout.strip() and not result.stderr.strip():
+            return False
+    raise subprocess.CalledProcessError(getattr(result, "returncode", 0) or 1, "application process unavailable")
 
 
 def answer_unreceived(state: dict) -> bool:
@@ -354,18 +418,23 @@ def answer_unreceived(state: dict) -> bool:
             and bool(state["session_id"]) and (ack is None or ack < state.get("answer_revision", 0)))
 
 
-def mute(serial: str) -> None:
-    # Android 12 AOSP MediaShellCommand/VolumeCtrl. Playback only; microphone
-    # mute is never changed. Vendor volume behavior still needs physical proof.
-    try:
-        adb(serial, "shell", "settings", "put", "system", "sound_effects_enabled", "0")
-    except subprocess.SubprocessError:
-        print("Glasses system tap sound: mute_unavailable", flush=True)
-    for stream in (1, 2, 3, 4, 5, 8, 10):
-        try:
-            adb(serial, "shell", "cmd", "media_session", "volume", "--stream", str(stream), "--set", "0")
-        except subprocess.SubprocessError:
-            print(f"Glasses output stream {stream}: mute_unavailable", flush=True)
+def mute(serial: str, then: tuple[str, ...] = ()) -> None:
+    """Mute playback in one adb round trip; `then` goes after it in the same one.
+
+    A mute command that fails is named and never keeps `then` from being sent.
+    `then` fails as adb() fails for a command sent alone.
+    """
+    commands = [command for _, command in MUTE_COMMANDS] + ([then] if then else [])
+    results = adb_chain(serial, *commands, step=_adb_step(("shell", *commands[-1])))
+    for (name, _), done in zip(MUTE_COMMANDS, results):
+        if not _succeeded(done):
+            print(f"{name}: mute_unavailable", flush=True)
+    if then and results[-2] is None:
+        # The round trip ended before `then` was reached: send it alone, as it
+        # was sent when each command was a round trip of its own.
+        adb(serial, "shell", *then)
+    elif then and not _succeeded(results[-1]):
+        raise subprocess.CalledProcessError(1, "device command")
 
 
 def check_volume(serial: str) -> None:
@@ -486,7 +555,7 @@ def watch(requested: str, expected_serial: str, interval: float, server: str = S
                 connection_ready = True  # An uncertain input is not a new discovery request.
                 sleep_current(state)
                 sleep_checked = True
-            spread = adb(serial, "shell", "getprop", "vendor.rkd.glasses.is_spread")
+            spread, process = fold_and_process(serial)
             if spread not in ("0", "1"):
                 raise subprocess.CalledProcessError(1, "getprop")
             connection_ready = True
@@ -512,7 +581,7 @@ def watch(requested: str, expected_serial: str, interval: float, server: str = S
                 key = (state["generation"], state["session_id"])
                 request = state.get("display_request")
                 answer_key = (*key, state.get("available_stage"), state.get("answer_revision"))
-                running = app_running(serial)
+                running = app_running(process)
                 last_running = running
                 if running:
                     bootstrapped = False
@@ -529,14 +598,15 @@ def watch(requested: str, expected_serial: str, interval: float, server: str = S
                 elif not stale and answer_unreceived(state):
                     retry = "ack_answer_revision" in state and time.monotonic() >= next_answer_retry
                     if woken != answer_key or retry:
-                        mute(serial)
                         # The Activity validates its current phase/session/generation before lighting.
                         # A completed run can race the phone's earlier ready snapshot.
                         revision = ("--el", "answer_revision", str(state["answer_revision"])) if "answer_revision" in state else ()
                         try:
-                            adb(serial, "shell", "am", "start", "-W", "-n", COMPONENT,
-                                "--ei", "wake_session_id", str(state["session_id"]),
-                                "--el", "wake_generation", str(state["generation"]), *revision)
+                            # Muted first, as before, and in the wake's own round trip:
+                            # the wearer waits for the answers through every one of them.
+                            mute(serial, then=("am", "start", "-W", "-n", COMPONENT,
+                                               "--ei", "wake_session_id", str(state["session_id"]),
+                                               "--el", "wake_generation", str(state["generation"]), *revision))
                         except (subprocess.SubprocessError, OSError):
                             power_event("wake", "unknown", state)
                             raise
@@ -562,12 +632,12 @@ def watch(requested: str, expected_serial: str, interval: float, server: str = S
                     selected = None  # Select only a subsequent real authenticated notification.
                 try:
                     discovered = mdns_target(expected_serial)
-                    spread = adb(discovered, "shell", "getprop", "vendor.rkd.glasses.is_spread")
+                    spread, process = fold_and_process(discovered)
                     if spread == "0":
                         folded = True
                         bootstrapped = False
                     elif spread == "1":
-                        running = app_running(discovered)
+                        running = app_running(process)
                         if running:
                             bootstrapped = False
                         elif not bootstrapped:
