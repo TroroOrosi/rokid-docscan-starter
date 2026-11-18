@@ -153,8 +153,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"not the phone named: {serial!r}")
         return 2
     commit = git("rev-parse", "HEAD").decode().strip()
-    paths = [path for path in git("ls-tree", "-r", "--name-only", "HEAD", "app").decode().split("\n") if path]
-    paths += ["scripts/standin_codex.py", "scripts/replay_booklet.py"]
+    # scripts/ too: the server itself imports from there (app/capture_quality.py), and the stand-in and the replay live there.
+    paths = [path for path in git("ls-tree", "-r", "--name-only", "HEAD", "app", "scripts").decode().split("\n")
+             if path and (path.startswith("app/") or path.endswith(".py"))]
     bundle = io.BytesIO()
     with tarfile.open(fileobj=bundle, mode="w") as tar:
         for path in paths:
