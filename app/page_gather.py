@@ -48,9 +48,19 @@ def page_image(gathered, rotation_degrees: int) -> bytes:
     from PIL import Image  # noqa: PLC0415
 
     white = float(np.percentile(gathered.image, 99.5)) or 1.0
-    scaled = np.clip(gathered.image / white, 0, 1)
-    shown = np.where(scaled <= 0.0031308, scaled * 12.92, 1.055 * scaled ** (1 / 2.4) - 0.055)
-    picture = Image.fromarray((shown * 255 + 0.5).astype(np.uint8)).rotate(-rotation_degrees, expand=True)
+    # The display curve, where(scaled <= 0.0031308, scaled * 12.92, 1.055 * scaled ** (1 / 2.4) - 0.055), then
+    # * 255 + 0.5: the same steps on the same numbers, in two arrays of the page's size where one line made nine.
+    scaled = gathered.image / white
+    np.clip(scaled, 0, 1, out=scaled)
+    dark = scaled <= 0.0031308
+    shown = scaled ** (1 / 2.4)
+    shown *= 1.055
+    shown -= 0.055
+    scaled *= 12.92
+    np.copyto(shown, scaled, where=dark)
+    shown *= 255
+    shown += 0.5
+    picture = Image.fromarray(shown.astype(np.uint8)).rotate(-rotation_degrees, expand=True)
     encoded = io.BytesIO()
     picture.convert("RGB").save(encoded, format="PNG")
     return encoded.getvalue()
