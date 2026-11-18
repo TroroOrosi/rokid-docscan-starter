@@ -262,6 +262,17 @@ def test_wait_polls_through_analysis_then_pending_then_ready():
     assert got.status_code == 200 and reason is None and server.responses == []
 
 
+def test_wait_goes_on_while_the_first_reads_answers_are_still_being_compared():
+    """The first of two reads is shown with a notice that the comparison is to come (main._comparing_item). The
+    bench judges the compared answers, as it did when nothing was out before them."""
+    first = _Response(200, {"revision": 1, "items": [
+        {"status": "ready"}, {"status": "needs_review", "question_id": "read-comparing"}]})
+    clock = _Clock()
+    server = _Server([first, first, _bundle("needs_review", revision=3)])
+    got, reason = wait_for_answers(server, 1, 60, interval=0, clock=clock, sleep=clock.sleep)
+    assert got.json()["revision"] == 3 and reason is None and server.responses == []
+
+
 def test_a_long_analysis_prints_its_line_only_once(capsys):
     clock = _Clock()
     responses = [_Response(409, {"detail": "the answers are being made"}) for _ in range(3)]

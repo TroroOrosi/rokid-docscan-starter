@@ -517,11 +517,19 @@ with TestClient(main.app) as client:
     sid = client.post("/v1/exam-sessions", headers=auth, json={
         "mode": "study", "document_id": doc, "exam_type": "written", "answer_format": "mark"}).json()["session_id"]
     client.post(f"/v1/exam-sessions/{sid}/finalize-reading?solve=background", headers=auth)
-    deadline, bundle = time.time() + float(os.environ.get("FLOW_WAIT_S", "40")), None
+    began, out["seen"] = time.time(), []
+    deadline, bundle = began + float(os.environ.get("FLOW_WAIT_S", "40")), None
     while time.time() < deadline:
         bundle = client.get(f"/v1/exam-sessions/{sid}/answer-bundle", headers=auth)
-        if bundle.status_code == 200 and all(item["status"] != "pending" for item in bundle.json()["items"]):
-            break
+        if bundle.status_code == 200:
+            body = bundle.json()
+            if not out["seen"] or out["seen"][-1]["revision"] != body["revision"]:
+                out["seen"].append({"revision": body["revision"], "at": round(time.time() - began, 1),
+                                    "ids": [item["question_id"] for item in body["items"]],
+                                    "labels": [item["question_label"] for item in body["items"]]})
+            # The first read's answers alone are not the last word: the route is still comparing them.
+            if all(item["status"] != "pending" and item["question_id"] != "read-comparing" for item in body["items"]):
+                break
         time.sleep(0.3)
     out["bundle"] = bundle.status_code
     out["items"] = [(item["status"], item["answer"]) for item in bundle.json()["items"]] if bundle.status_code == 200 else []
@@ -623,6 +631,34 @@ def test_two_reads_that_differ_reach_the_glasses_bundle_as_an_answer_to_review_w
     result = json.loads(lines[-1][7:])
     assert result["items"] == [["needs_review", "④"], ["needs_input", ""]]
     assert "②" in result["issues"][0]
+
+
+def test_through_the_server_the_first_reads_answers_are_in_the_bundle_before_the_other_read_is_back(tmp_path):
+    """The real route and the real server: the bundle carries the first read's answers, with the notice that they are
+    being compared, seconds before the slower read ends; the compared answers then stand under the same questions."""
+    fake = tmp_path / "fake_codex.py"
+    fake.write_text(FAKE_CODEX, encoding="utf-8")
+    data = tmp_path / "data"
+    data.mkdir()
+    other = json.loads(json.dumps(REPLY))
+    other["questions"][0]["answer"] = "②"
+    environment = dict(os.environ, ROKID_DATA_DIR=str(data), ROKID_API_KEY="route-key", ROKID_REAL_MODE="1",
+                       ROKID_ANALYZER="client-ocr", ROKID_SOLVER="codex-cli", ROKID_CHATGPT_SEND_ENABLED="1",
+                       ROKID_CAPTURE_INSPECTION="0", PYTHONIOENCODING="utf-8", FAKE_CODEX_SCRIPT=str(fake),
+                       FAKE_CODEX_RECORD=str(tmp_path / "calls.jsonl"), FAKE_CODEX_REPLY=json.dumps(REPLY, ensure_ascii=False),
+                       FAKE_CODEX_REPLY_2=json.dumps(other, ensure_ascii=False), FAKE_CODEX_SLEEP_2="5")
+    environment.pop("ROKID_SOLVER_FALLBACKS", None)
+    environment.pop("ROKID_CODEX_READS", None)
+    done = subprocess.run([sys.executable, "-X", "utf8", "-c", FLOW], capture_output=True, text=True, encoding="utf-8",
+                          env=environment, cwd=Path(__file__).resolve().parents[1], timeout=180)
+    lines = [line for line in done.stdout.splitlines() if line.startswith("RESULT ")]
+    assert lines, done.stderr[-2500:]
+    result = json.loads(lines[-1][7:])
+    early, late = result["seen"]
+    assert early["labels"][-1] == "照合中" and late["at"] - early["at"] >= 2.0
+    assert late["ids"] == early["ids"][:-1] and late["revision"] > early["revision"]
+    assert result["items"] == [["needs_review", "④"], ["needs_input", ""]] and "②" in result["issues"][0]
+    assert sum('"codex_read_done"' in line for line in done.stdout.splitlines()) == 2
 
 
 REGIONS = {"images": [{"index": 1, "regions": [
@@ -1633,7 +1669,8 @@ def test_the_first_read_back_is_handed_over_at_once_and_the_compared_answers_fol
     assert not any("read_once" in result.extras for _, result in replies)
     assert _same_questions(first, replies)
     done = sorted(_logged(capsys, "codex_read_done"), key=lambda line: line["read"])
-    assert [line["read"] for line in done] == [1, 2] and done[0]["seconds"] < 3.0 <= done[1]["seconds"]
+    assert [line["read"] for line in done] == [1, 2] and done[1]["seconds"] >= 3.0
+    assert done[1]["seconds"] - done[0]["seconds"] > 1.5, "each read's own time, so how far apart they end"
     assert all(set(line) == {"event", "read", "seconds"} for line in done), "no reply text in the log"
 
 

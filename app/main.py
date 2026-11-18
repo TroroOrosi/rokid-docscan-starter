@@ -2938,7 +2938,8 @@ def _deck_question_rows(conn, session_id: int) -> list:
         # re-sorted by page: a problem's deck index must stay stable once
         # assigned, or problem_index addressing would silently shift when the
         # onboard ingest appends a problem the heuristic missed. Late
-        # additions therefore go to the end of the deck.
+        # additions therefore go to the end of the deck. The one exception
+        # is a row that names the row it stands behind (``after``, below).
         "SELECT * FROM questions WHERE session_id = ? ORDER BY id",
         (session_id,),
     ).fetchall()
@@ -2949,8 +2950,11 @@ def _deck_question_rows(conn, session_id: int) -> list:
         except (ValueError, TypeError):
             meta = None
         if isinstance(meta, dict) and (meta.get("deck") or "page_indexes" in meta):
-            deck_rows.append(r)
-    return deck_rows
+            # ``after``: a question the comparison of two reads added behind the row of that id (_save_compared).
+            # It stands there, not at the end, and no other row's id or place changes for it.
+            after = meta.get("after")
+            deck_rows.append(((after, 1) if type(after) is int else (r["id"], 0), r))
+    return [r for _, r in sorted(deck_rows, key=lambda placed: placed[0])]
 
 
 def _latest_solution_row(conn, question_id: int):
@@ -3994,13 +3998,80 @@ def _work_attempt_identity(session_id: int, question, route: str | None = None):
                       for page in question.document_pages), audio, file_sha256(audio))
 
 
+def _save_compared(conn, session_id: int, doc_id: int, placed: dict[int, int], early: list, replies: list,
+                   route: str, page_count: int) -> None:
+    """The compared answers, saved over the questions the first read's answers are already shown under.
+
+    A question keeps its row, and so its identity and its place on the glasses, which refuse a snapshot that
+    reorders questions or changes what the paper prints for one (AnswerReader.accept): it also keeps the answer
+    numbers it was first shown with. A question only the second read listed gets a row of its own behind the row
+    of the question before it (``after``, read by _deck_question_rows). It stands under that row's 大問 and names
+    its own in its label when that is another one.
+    ponytail: no heading row is made for an added question; make one if whole 大問 turn out to be added often.
+    """
+    first = {id(item) for item, _ in early}
+    rows = {row["id"]: row for row in _deck_question_rows(conn, session_id)}
+    anchor, heading = 0, ""  # the row an added question goes behind, and the 大問 that row stands under
+    for (item, result), (group, label) in zip(replies, _model_item_labels([item for item, _ in replies], page_count)):
+        if group and not _GROUP_NO_RE.match(group):
+            label, group = f"{group} {label}".strip(), ""
+        row = rows.get(placed.get(id(item)))
+        if row is not None:
+            if not _GROUP_NO_RE.match(row["question_no"] or ""):
+                # Never behind a 大問 answered whole: that row is its own heading, and a row behind it would turn it
+                # into a mere heading and take its answer out of view.
+                anchor, heading = row["id"], group or heading
+            if isinstance(result, SolveResult):
+                shown = _latest_solution_row(conn, row["id"])
+                result.extras["answer_no"] = (json.loads(shown["answer_metadata_json"] or "{}").get("answer_no")
+                                              if shown is not None else [])
+                _save_solution(conn, row, result, route, commit=False, again=True)
+            continue
+        if id(item) in first:
+            continue  # it had no row of its own when the first read was saved either
+        text = (label or "全問") + (f"（{group}）" if group and group != heading else "")
+        if _GROUP_NO_RE.match(text):
+            text = f"全問（{text}）"  # a row that reads as a 大問 is taken for a heading (_answer_groups)
+        raw_pages = item.get("pages") if isinstance(item.get("pages"), list) else []
+        pages = sorted({p - 1 for p in raw_pages if isinstance(p, int) and 1 <= p <= page_count}) or list(range(page_count))
+        _insert_deck(conn, session_id, doc_id, [ProblemUnit(text, text, start_page_index=pages[0], page_indexes=pages)])
+        row = conn.execute("SELECT * FROM questions WHERE session_id = ? ORDER BY id DESC LIMIT 1", (session_id,)).fetchone()
+        conn.execute("UPDATE questions SET structure_json = ? WHERE id = ?",
+                     (json.dumps({**json.loads(row["structure_json"]), "after": anchor}), row["id"]))
+        if isinstance(result, SolveResult):
+            _save_solution(conn, row, result, route, commit=False)
+        else:
+            _record_solve_failure(conn, row, result or ValueError("no answer for this question"), commit=False)
+    conn.commit()
+
+
+# The sessions whose route has shown its first read's answers and is still comparing them with its other read.
+# In memory on purpose: after a restart no comparison is under way, and the booklet then says that nothing was
+# compared (_answer_snapshot).
+_comparing: set[int] = set()
+
+
 def _answer_deck(conn, session, session_id: int, doc_id: int) -> bool:
+    try:
+        return _answer_booklet(conn, session, session_id, doc_id)
+    finally:
+        _comparing.discard(session_id)  # compared, failed or given up: nothing is under way any more
+
+
+def _answer_booklet(conn, session, session_id: int, doc_id: int) -> bool:
     """The whole booklet in ONE message when the routed solver can take it.
 
     Returns False when the solver answers per question instead. Otherwise the
     one reply both names the 小問 (RP-12) and answers them, and nothing else is
     sent, on success or failure: on 9/29 a list-only reply followed by one
     message per 小問 sent the next message before anything was answered.
+
+    A route that reads twice hands its first read's answers over while the other
+    read still runs (codex-cli, Question.on_first_read). They are saved and shown
+    at once, as the answers of a booklet read once, with a notice that the
+    comparison is to come (_comparing_item); the compared answers then go over the
+    same questions (_save_compared). From then on the route has answered: nothing
+    that fails behind it is recorded as a failure or moves the booklet to another route.
     """
     if os.environ.get("ROKID_SOLVER", "").strip() in _SEND_GATED_ROUTES and not chatgpt_send_enabled():
         return True  # Keep the reviewing session and originals for later permission.
@@ -4026,6 +4097,85 @@ def _answer_deck(conn, session, session_id: int, doc_id: int) -> bool:
         work_attempt = _work_attempt_identity(session_id, question, route)
     except WorkConflict:
         return True
+    early: list = []  # the first read's replies, once their answers are saved and shown
+    placed: dict[int, int] = {}  # id() of a reply's item -> the question row that holds its answer
+
+    def store(replies, failed) -> None:
+        """The model's questions as the deck's rows and every answer, or the failure, in one commit."""
+        nonlocal items
+        problems = _model_problems([item for item, _ in replies], len(source_pages))
+        carried = 0
+        if problems and items and not any(_latest_solution_row(conn, row["id"]) for row in items):
+            # Only the whole-booklet row of a failed message: the model's list replaces it.
+            replaced = _deck_question_rows(conn, session_id)
+            carried = sum(_failure_count(row) for row in replaced)
+            conn.executemany("DELETE FROM questions WHERE id = ?", [(row["id"],) for row in replaced])
+            items = []
+        if not items:
+            # The model sorts the questions. OCR never does on this route: a failure
+            # gets one row for the whole booklet, which only carries the reason.
+            _insert_deck(conn, session_id, doc_id, problems or [ProblemUnit(
+                None, "", start_page_index=0, page_indexes=list(range(len(source_pages))))])
+            if carried:
+                # The revision counts failures; dropping them with the old row would
+                # move it backwards, and the glasses refuse an older snapshot.
+                first = _deck_question_rows(conn, session_id)[0]
+                conn.execute("UPDATE questions SET structure_json = ? WHERE id = ?", (json.dumps(
+                    {**json.loads(first["structure_json"]), "solve_failures": carried}), first["id"]))
+            items = [row for group in _answer_groups(conn, session_id) for row in group["items"]]
+        # The rows and every answer land in ONE commit: the glasses never read a
+        # deck whose rows exist and whose answers are not saved yet.
+        if failed is not None:
+            _record_solve_failure(conn, items[0], failed, commit=False,
+                                  route=route if can_switch else None)
+            conn.commit()
+            return
+        # The body retains its printed labels or generated position, untouched
+        # by the suffix that keeps question_no unique. Repeated printed labels
+        # (two answer slots of one 問) keep reply order.
+        results: dict[str, list[tuple]] = {}
+        for reply, labels in zip(replies, _model_item_labels([item for item, _ in replies], len(source_pages))):
+            results.setdefault(" ".join(filter(None, labels)), []).append(reply)
+        for row in items:
+            if _latest_solution_row(conn, row["id"]) is not None:
+                continue
+            item, result = (results.get(row["body_text"]) or [(None, None)]).pop(0)
+            if item is not None:
+                placed[id(item)] = row["id"]
+            if isinstance(result, SolveResult):
+                _save_solution(conn, row, result, route or "chatgpt-web", commit=False)
+            else:
+                _record_solve_failure(conn, row, result or ValueError("no answer for this question"),
+                                      commit=False)
+        conn.commit()
+
+    def first_read(replies) -> None:
+        nonlocal items
+        replies = _coverage_last(replies)
+        if early or not replies or len(replies) > 300:
+            return
+        before = items
+        try:
+            store(replies, None)
+        except Exception:
+            # Nothing of it stays: the route goes on, and what it returns is saved in one piece as before.
+            conn.rollback()
+            placed.clear()
+            items = before
+            raise
+        early.extend(replies)  # also keeps the items alive: ``placed`` goes by their identity
+        _comparing.add(session_id)
+
+    def not_compared(error: Exception) -> bool:
+        """The first read's answers are out and stay: the route has answered. Which kind of failure ended the
+        comparison is logged; the booklet then says that nothing was compared (_read_once_item)."""
+        conn.rollback()
+        print(json.dumps({"event": "comparison_lost", "session_id": session_id, "route": route,
+                          "type": type(error).__name__}), flush=True)
+        return True
+
+    if not _is_work(route):  # Work's replies are committed under its sealed job, in one piece
+        question.on_first_read = first_read
     failed: Exception | None = None
     for attempt in range(PRESEND_TRIES):
         if attempt:
@@ -4036,6 +4186,8 @@ def _answer_deck(conn, session, session_id: int, doc_id: int) -> bool:
                 raise ValueError("a booklet reply must contain at most 300 questions")
             break
         except Exception as error:  # noqa: BLE001 - recorded on the deck, never resent
+            if early:
+                return not_compared(error)
             error = _stand_in_failure(conn, session_id, route, can_switch, error)
             if isinstance(error, (ChatGptWebSendNotAuthorized, WorkPending, WorkConflict)):
                 return True
@@ -4044,51 +4196,15 @@ def _answer_deck(conn, session, session_id: int, doc_id: int) -> bool:
                 break
     if replies is None:
         return False
+    if early:
+        try:
+            _save_compared(conn, session_id, doc_id, placed, early, replies, route or "chatgpt-web", len(source_pages))
+        except Exception as error:  # noqa: BLE001 - the answers that are out are not taken back
+            return not_compared(error)
+        return True
     try:
         with _work_reply_commit_guard(session_id, replies, failed_attempt=_commit_fence(work_attempt, failed, route), route=route):
-            problems = _model_problems([item for item, _ in replies], len(source_pages))
-            carried = 0
-            if problems and items and not any(_latest_solution_row(conn, row["id"]) for row in items):
-                # Only the whole-booklet row of a failed message: the model's list replaces it.
-                replaced = _deck_question_rows(conn, session_id)
-                carried = sum(_failure_count(row) for row in replaced)
-                conn.executemany("DELETE FROM questions WHERE id = ?", [(row["id"],) for row in replaced])
-                items = []
-            if not items:
-                # The model sorts the questions. OCR never does on this route: a failure
-                # gets one row for the whole booklet, which only carries the reason.
-                _insert_deck(conn, session_id, doc_id, problems or [ProblemUnit(
-                    None, "", start_page_index=0, page_indexes=list(range(len(source_pages))))])
-                if carried:
-                    # The revision counts failures; dropping them with the old row would
-                    # move it backwards, and the glasses refuse an older snapshot.
-                    first = _deck_question_rows(conn, session_id)[0]
-                    conn.execute("UPDATE questions SET structure_json = ? WHERE id = ?", (json.dumps(
-                        {**json.loads(first["structure_json"]), "solve_failures": carried}), first["id"]))
-                items = [row for group in _answer_groups(conn, session_id) for row in group["items"]]
-            # The rows and every answer land in ONE commit: the glasses never read a
-            # deck whose rows exist and whose answers are not saved yet.
-            if failed is not None:
-                _record_solve_failure(conn, items[0], failed, commit=False,
-                                      route=route if can_switch else None)
-                conn.commit()
-                return True
-            # The body retains its printed labels or generated position, untouched
-            # by the suffix that keeps question_no unique. Repeated printed labels
-            # (two answer slots of one 問) keep reply order.
-            results: dict[str, list[SolveResult | Exception]] = {}
-            for (_, result), labels in zip(replies, _model_item_labels([item for item, _ in replies], len(source_pages))):
-                results.setdefault(" ".join(filter(None, labels)), []).append(result)
-            for row in items:
-                if _latest_solution_row(conn, row["id"]) is not None:
-                    continue
-                result = (results.get(row["body_text"]) or [None]).pop(0)
-                if isinstance(result, SolveResult):
-                    _save_solution(conn, row, result, route or "chatgpt-web", commit=False)
-                else:
-                    _record_solve_failure(conn, row, result or ValueError("no answer for this question"),
-                                          commit=False)
-            conn.commit()
+            store(replies, failed)
             return True
     except WorkConflict:
         conn.rollback()
@@ -4287,11 +4403,13 @@ def _answer_mixed_audio(conn, session, session_id, doc_id):
 
 
 
-def _save_solution(conn, row, result, solver_name: str, *, commit: bool = True) -> bool:
+def _save_solution(conn, row, result, solver_name: str, *, commit: bool = True, again: bool = False) -> bool:
     """Store ``result`` unless the row already has an answer; True when stored.
 
     Onboard ingest may answer while the paid call is in flight. The conditional
-    insert preserves that earlier answer.
+    insert preserves that earlier answer. ``again`` stores it as the row's newer
+    answer (the latest row wins, and the revision moves on): the compared answer
+    over the first read's (_save_compared).
     """
     evidence_pages, evidence_refs = _prepare_result_evidence(
         result,
@@ -4305,7 +4423,7 @@ def _save_solution(conn, row, result, solver_name: str, *, commit: bool = True) 
             evidence_pages_json, evidence_refs_json,
             raw_reasoning, served_by, diagrams_json, answer_metadata_json)
            SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-           WHERE NOT EXISTS
+           WHERE ? OR NOT EXISTS
                (SELECT 1 FROM solutions WHERE question_id = ?)""",
         (
             row["id"],
@@ -4326,6 +4444,7 @@ def _save_solution(conn, row, result, solver_name: str, *, commit: bool = True) 
                         # One read of two answered (codex-cli): said once behind the answers (_read_once_item).
                         **({"read_once": True} if result.extras.get("read_once") is True else {})},
                        ensure_ascii=False),
+            int(again),
             row["id"],
         ),
     )
@@ -5127,6 +5246,14 @@ def _read_once_item() -> dict:
             "issue": "2回の読みの片方が戻らず、答えは照合していません"}
 
 
+def _comparing_item() -> dict:
+    """The same place and form while the route still compares the answers shown with its other read (_comparing).
+    An item of its own, not ``_read_once_item`` reworded: the glasses hold a question to its label."""
+    return {"group_id": "pages", "group_label": "撮影の確認", "question_id": "read-comparing", "question_label": "照合中",
+            "answer": "（もう1回の読みを待っています）", "status": "needs_review",
+            "issue": "1回目の読みの答えです。照合が終わると更新します"}
+
+
 def _answer_snapshot(session_id: int, *, identify: bool) -> dict:
     """The answer bundle. ``identify=False`` leaves ``input_digest`` empty and reads no page file.
 
@@ -5170,13 +5297,19 @@ def _answer_snapshot(session_id: int, *, identify: bool) -> dict:
         items += [_ungathered_item(number) for number in _ungathered_pages(conn, session["document_id"])]
         if unnamed:
             items.append(_unnamed_pages_item(unnamed))
-        if _read_once(conn, groups):
-            items.append(_read_once_item())
+        # One read's answers are shown. While their route still compares them with its other read, that is said;
+        # once it does not, nothing was compared. That second state has a revision of its own: a comparison can
+        # end with nothing saved (the route failed behind its first read, or the server stopped), and the glasses
+        # are told of a change by the revision alone.
+        once = _read_once(conn, groups)
+        comparing = once and session_id in _comparing
+        if once:
+            items.append(_comparing_item() if comparing else _read_once_item())
         bundle = {
             "schema_version": max((diagram_schema_version(i.get("diagrams", [])) for i in items), default=1),
             "session_id": str(session_id),
             "input_digest": _answer_input_digest(conn, session) if identify else "",
-            "revision": _answer_revision(conn, session_id),
+            "revision": _answer_revision(conn, session_id) + int(once and not comparing),
             "analysis_stage": session["analysis_stage"],
             "available_stage": _available_stage(session, items),
             "items": items,

@@ -406,7 +406,10 @@ def wait_for_answers(
             (item["issue"] for item in items if item.get("issue") in SERVER_STOPPED_ISSUES), None)
         if stopped:
             return r, f"the server stopped the batch: {stopped}"
-        pending = sum(1 for item in items if item["status"] == "pending")
+        # The first of two reads is shown while it is still compared with the other (main._comparing_item): the
+        # compared answers are what this bench judges, so that notice counts as something still to come.
+        pending = sum(1 for item in items
+                      if item["status"] == "pending" or item.get("question_id") == "read-comparing")
         if not pending:
             return r, None
         revision = body.get("revision")
