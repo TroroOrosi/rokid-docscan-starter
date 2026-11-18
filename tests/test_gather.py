@@ -475,3 +475,113 @@ def test_noise_is_not_placed_on_a_page_of_print():
     noise = [np.maximum(rng.normal(PAPER, PAPER / 4.5, page[0].shape), 0).astype(np.float32) for _ in range(120)]
     assert g.gather(page + noise).used <= 31
 
+
+
+# Gathering made quicker (2026-11-18): the same page, bit for bit, in less time. Each of these pins one of the shorter
+# ways to what the longer way gave.
+
+
+def test_frames_that_cannot_change_the_page_are_not_worked_on(monkeypatch):
+    """A restless clip: smeared frames before the first still one, after the last, and while the picture is no longer
+    followed. Each cost a transform and a correlation, and nothing of that reached the page."""
+    still = frames(scene(), [(0, 0)] * 24, 2.2)
+    rng = np.random.default_rng(5)  # nothing of the page in view: the frame before is not found in the first of them
+    lost = [np.maximum(rng.normal(PAPER, PAPER / 4.4, (192, 256)), 0).astype(np.float32) for _ in range(6)]
+    restless = lost[:4] + still[:12] + lost + still[12:] + lost[:5]
+    smear = [9.0] * 4 + [0.5] * 12 + [9.0] * 6 + [0.5] * 12 + [9.0] * 5
+    spare = still[:12] + lost[:1] + still[12:]  # the same clip without the frames that cannot matter
+    counted = []
+    whole = g._spectrum
+    monkeypatch.setattr(g, "_spectrum", lambda image: counted.append(image.shape) or whole(image))
+    long = g.gather(restless, smear=smear)
+    worked = len(counted)
+    short = g.gather(spare, smear=[0.5] * 12 + [9.0] + [0.5] * 12)
+    assert (long.used, long.total, short.total) == (short.used, 39, 25) and long.used >= 22
+    assert np.array_equal(long.image, short.image) and long.level_over_noise == short.level_over_noise
+    assert worked == len(counted) - worked, "the frames that cannot matter were transformed all the same"
+
+
+@pytest.mark.parametrize("grid", [2, 3])
+def test_a_frame_laid_by_a_map_goes_into_the_cells_its_pixels_fall_in(monkeypatch, grid):
+    """Pixel by pixel: each into the cell nearest to it, the later one alone where two fall into one cell, none
+    where the pixel lies off the page. The same for the page's whole pixels, which place the next frames."""
+    h, w = 24, 32
+    monkeypatch.setattr(g, "AT_ONCE", 5 * w)  # worked out five rows at a time; the last band is a short one
+    rng = np.random.default_rng(6)
+    unit = max(h, w) / 2
+    y = ((np.arange(h) - (h - 1) / 2) / unit).astype(np.float32)[:, None]
+    x = ((np.arange(w) - (w - 1) / 2) / unit).astype(np.float32)[None, :]
+    maps = [np.array([[1.0, -0.02, 3.3 / unit], [0.02, 1.0, -2.6 / unit], [0.01, -0.02, 1.0]]),  # moved, turned, leaning
+            np.array([[1.0, 0.0, 40.0 / unit], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]),  # wholly off the page
+            np.array([[2.3, 0.0, 0.0], [0.0, 2.3, 0.0], [0.0, 0.0, 1.0]])]  # seen at under half its size
+    planes, room = g._Planes((h, w), grid), g._Room((h, w), grid)
+    sums, weights = np.zeros((2, grid, grid, h, w), np.float32), np.zeros((2, grid, grid, h, w), np.float32)
+    showed = []
+    for number, m in enumerate(maps * 2):
+        frame = rng.random((h, w), dtype=np.float32)
+        row, column = g._through(np.linalg.inv(m), y, x, unit, ((h - 1) / 2, (w - 1) / 2))  # where each pixel lies on the page
+        cell_y = np.rint(grid * row + (grid - 1) / 2).astype(np.int64)
+        cell_x = np.rint(grid * column + (grid - 1) / 2).astype(np.int64)
+        latest = {(cy, cx): frame[at] for at, cy, cx in zip(np.ndindex(h, w), cell_y.ravel(), cell_x.ravel())
+                  if 0 <= cy < grid * h and 0 <= cx < grid * w}
+        for (cy, cx), value in latest.items():
+            sums[number % 2, cy % grid, cx % grid, cy // grid, cx // grid] += value
+            weights[number % 2, cy % grid, cx % grid, cy // grid, cx // grid] += 1
+        light, marks = np.zeros((h, w), np.float32), np.zeros((h, w), np.uint16)
+        for at, py, px in zip(np.ndindex(h, w), np.rint(row).astype(np.int64).ravel(), np.rint(column).astype(np.int64).ravel()):
+            if 0 <= py < h and 0 <= px < w:
+                light[py, px], marks[py, px] = frame[at], 1
+        planes.lay(number % 2, frame, m, (h, w), room)
+        seen, marked = room.seen(frame)
+        assert np.array_equal(seen, light) and np.array_equal(marked, marks)
+        showed.append(int(marks.sum()))
+        for k in (2, 3):  # how much of each joined cell was seen: the mean of ones and zeros
+            share = g._share(marked, k)
+            assert share.dtype == np.float32 and np.array_equal(share, g._joined(marks.astype(np.float32), k))
+            assert np.array_equal(g._share(marked > 0, k), share)
+    assert showed[0] > 600 and showed[1] == 0 and 100 < showed[2] < 200  # most of the page, none of it, a part twice over
+    assert weights.sum() > h * w and np.array_equal(planes.sums, sums) and np.array_equal(planes.weights, weights)
+
+
+def test_the_peak_is_the_one_the_whole_surface_shows():
+    """The peak is looked for in the rows and columns the reach touches, not on the whole surface: the same place,
+    also where the reach wraps round the edges, and the same strength."""
+    def the_long_way(cross, shape, around, reach, own):
+        h, w = shape
+        surface = np.fft.irfft2(cross, s=shape)
+        yy = (np.arange(h) - around[0] + h / 2) % h - h / 2
+        xx = (np.arange(w) - around[1] + w / 2) % w - w / 2
+        limited = np.where(yy[:, None] ** 2 + xx[None, :] ** 2 <= reach ** 2, surface, -np.inf)
+        py, px = np.unravel_index(int(np.argmax(limited)), limited.shape)
+
+        def finer(minus, mid, plus):
+            bend = minus - 2 * mid + plus
+            return 0.0 if bend >= 0 else float(np.clip(0.5 * (minus - plus) / bend, -0.5, 0.5))
+
+        dy = py + finer(surface[(py - 1) % h, px], surface[py, px], surface[(py + 1) % h, px])
+        dx = px + finer(surface[py, (px - 1) % w], surface[py, px], surface[py, (px + 1) % w])
+        top = float(surface[py, px])
+        if own is not None and own[0, 0] > 0:
+            surface = surface - (top / float(own[0, 0])) * np.roll(own, (py, px), (0, 1))
+        spread = float(surface.std())
+        return float((dy + h / 2) % h - h / 2), float((dx + w / 2) % w - w / 2), top / spread if spread > 0 else 0.0
+
+    reference = taken(page_of_print(h=96, w=128), [(0, 0)], 4.5)[0]
+    side = g._reference_side(reference)
+    own = g._own(reference, side)
+    for number, (around, reach) in enumerate([((0.0, 0.0), 4.0), ((0.0, 0.0), 21.3), ((-47.0, 63.5), 6.0), ((30.2, -70.9), 16.0),
+                                              ((95.0, 127.0), 2.0), ((3.0, -2.0), 0.3), ((0.0, 0.0), 500.0)]):
+        cross = g._spectrum(taken(page_of_print(h=96, w=128), [(1.3 * number, -2.1 * number)], 4.5, seed=number)[0]) * side
+        for pattern in (own, None):
+            assert g._peak(cross, (96, 128), around, reach, pattern) == the_long_way(cross, (96, 128), around, reach, pattern)
+
+
+def test_a_clip_can_be_read_into_one_array(tmp_path):
+    path = clip(tmp_path, frames(scene(), [(0.3 * k, 0) for k in range(8)], 4.0))
+    apart = list(g.read_clip(path))
+    assert len({id(frame) for frame in apart}) == 8 and not np.array_equal(apart[0], apart[1])
+    arrays = set()
+    for frame, kept in zip(g.read_clip(path, reuse=True), apart, strict=True):
+        assert frame.dtype == np.float32 and np.array_equal(frame, kept)
+        arrays.add(id(frame))
+    assert len(arrays) == 1

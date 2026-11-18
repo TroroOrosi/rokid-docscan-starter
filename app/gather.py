@@ -95,6 +95,7 @@ FLAT = 0.5  # frame pixels: a fitted shift that changes less than this from edge
 FRESH_UNTIL = 16  # while the sum holds fewer frames than this, its transform is taken anew for every frame
 REFRESH = 4  # after that, the sum's transform is reused for this many frames: three more frames change it little
 DECODE_SECONDS = 30  # the decoder is stuck when one frame takes this long to come; how long the reader takes is its own affair
+AT_ONCE = 1 << 16  # pixels worked on at a time, where a frame is worked on in pieces: what is worked out stays in the processor's own memory
 
 
 _LOG = logging.getLogger(__name__)
@@ -133,15 +134,16 @@ def _spectrum(image: np.ndarray) -> np.ndarray:
     return np.fft.rfft2((image - image.mean()) * window)
 
 
-def _reference_side(reference: np.ndarray) -> np.ndarray:
-    """The half of the correlation that belongs to the sum: reusable while the sum changes little."""
+def _reference_side(reference: np.ndarray, spectrum: np.ndarray | None = None) -> np.ndarray:
+    """The half of the correlation that belongs to the sum: reusable while the sum changes little. `spectrum` is the
+    sum's, where the caller has it already."""
     _, band = _tools(reference.shape)
-    return np.conj(_spectrum(reference)) * band
+    return np.conj(_spectrum(reference) if spectrum is None else spectrum) * band
 
 
-def _own(reference: np.ndarray, side: np.ndarray) -> np.ndarray:
+def _own(reference: np.ndarray, side: np.ndarray, spectrum: np.ndarray | None = None) -> np.ndarray:
     """The sum correlated with itself: the pattern its own print leaves on every correlation surface, peak at (0, 0)."""
-    return np.fft.irfft2(_spectrum(reference) * side, s=reference.shape)
+    return np.fft.irfft2((_spectrum(reference) if spectrum is None else spectrum) * side, s=reference.shape)
 
 
 def _peak(cross: np.ndarray, shape: tuple[int, int], around: tuple[float, float], reach: float,
@@ -160,8 +162,16 @@ def _peak(cross: np.ndarray, shape: tuple[int, int], around: tuple[float, float]
     surface = np.fft.irfft2(cross, s=shape)
     yy = (np.arange(h) - around[0] + h / 2) % h - h / 2
     xx = (np.arange(w) - around[1] + w / 2) % w - w / 2
-    limited = np.where(yy[:, None] ** 2 + xx[None, :] ** 2 <= reach ** 2, surface, -np.inf)
-    py, px = np.unravel_index(int(np.argmax(limited)), limited.shape)
+    # Looked for in the rows and columns the reach touches only, a few of the hundreds: no place within reach lies
+    # outside them, and they keep their order, so the first of equal peaks is the same one. With nothing within
+    # reach the place is (0, 0), which is what the whole surface gave then.
+    rows, columns = np.flatnonzero(yy ** 2 <= reach ** 2), np.flatnonzero(xx ** 2 <= reach ** 2)
+    limited = np.where(yy[rows, None] ** 2 + xx[None, columns] ** 2 <= reach ** 2, surface[np.ix_(rows, columns)], -np.inf)
+    py = px = np.intp(0)
+    if limited.size:
+        at = np.unravel_index(int(np.argmax(limited)), limited.shape)
+        if limited[at] != -np.inf:
+            py, px = rows[at[0]], columns[at[1]]
 
     def finer(minus: float, mid: float, plus: float) -> float:
         bend = minus - 2 * mid + plus
@@ -171,7 +181,9 @@ def _peak(cross: np.ndarray, shape: tuple[int, int], around: tuple[float, float]
     dx = px + finer(surface[py, (px - 1) % w], surface[py, px], surface[py, (px + 1) % w])
     top = float(surface[py, px])
     if own is not None and own[0, 0] > 0:
-        surface = surface - (top / float(own[0, 0])) * np.roll(own, (py, px), (0, 1))
+        pattern = np.roll(own, (py, px), (0, 1))  # a copy, scaled where it lies
+        pattern *= top / float(own[0, 0])
+        surface = surface - pattern
     spread = float(surface.std())
     return float((dy + h / 2) % h - h / 2), float((dx + w / 2) % w - w / 2), top / spread if spread > 0 else 0.0
 
@@ -204,13 +216,18 @@ def _units(shape: tuple[int, int]) -> tuple[np.ndarray, np.ndarray, float]:
             ((np.arange(w) - (w - 1) / 2) / unit).astype(np.float32)[None, :], unit)
 
 
-def _through(m: np.ndarray, y: np.ndarray, x: np.ndarray, unit: float, centre: tuple[float, float]) -> tuple[np.ndarray, np.ndarray]:
+def _through(m: np.ndarray, y: np.ndarray, x: np.ndarray, unit: float, centre: tuple[float, float],
+             into: tuple[np.ndarray | None, np.ndarray | None, np.ndarray | None] = (None, None, None)) -> tuple[np.ndarray, np.ndarray]:
     """(row, column) in pixels of the places (y, x in units) taken through m. Scaling to pixels and the centre are
-    folded into the numerators: three sums of a column and a row and two divisions, in the pictures' single precision."""
+    folded into the numerators: three sums of a column and a row and two divisions, in the pictures' single precision.
+    `into` gives arrays to work them out in (row, column, and one for what they are divided by)."""
     (a, b, c), (d, e, f), (g, k, n) = m.tolist()
-    den = np.float32(g) * x + (np.float32(k) * y + np.float32(n))
-    column = (np.float32(a * unit + centre[1] * g) * x + (np.float32(b * unit + centre[1] * k) * y + np.float32(c * unit + centre[1] * n))) / den
-    row = (np.float32(d * unit + centre[0] * g) * x + (np.float32(e * unit + centre[0] * k) * y + np.float32(f * unit + centre[0] * n))) / den
+    row, column, den = into
+    den = np.add(np.float32(g) * x, np.float32(k) * y + np.float32(n), out=den)
+    column = np.add(np.float32(a * unit + centre[1] * g) * x, np.float32(b * unit + centre[1] * k) * y + np.float32(c * unit + centre[1] * n), out=column)
+    column /= den
+    row = np.add(np.float32(d * unit + centre[0] * g) * x, np.float32(e * unit + centre[0] * k) * y + np.float32(f * unit + centre[0] * n), out=row)
+    row /= den
     return row, column
 
 
@@ -269,19 +286,110 @@ def _laid(page: np.ndarray, known: np.ndarray, frame: np.ndarray, m: np.ndarray)
     return m, alike
 
 
-def _places(shape: tuple[int, int], m: np.ndarray, size: tuple[int, int]) -> tuple[np.ndarray, np.ndarray]:
-    """Where on the page each pixel of a frame of `shape` lies (row, column, in frame pixels), by the inverse of m.
-    `size` is the part of the frame the map's units were taken on: the frame without the rows and columns that joining
-    left out."""
-    unit = max(size) / 2
-    y = ((np.arange(shape[0]) - (size[0] - 1) / 2) / unit).astype(np.float32)[:, None]
-    x = ((np.arange(shape[1]) - (size[1] - 1) / 2) / unit).astype(np.float32)[None, :]
-    return _through(np.linalg.inv(m), y, x, unit, ((size[0] - 1) / 2, (size[1] - 1) / 2))
+class _Room:
+    """Where each pixel of a frame laid by a map falls: its cell of the finer grid (`fine`) and its whole pixel of the
+    page (`whole`), each as the place in the array it is added to. A pixel that falls off the page gets a spare place
+    behind the end of that array, so that every pixel of the frame is added and none has to be picked out first.
+
+    Worked out a band of rows at a time, in arrays kept for the clip. What is worked out is what whole arrays gave,
+    to the bit; a fresh array of a frame's size for every step took longer than the steps (one 2016x1512 frame on a
+    PC, 2026-11-18: the places, the cells of both grids and the picking 126 ms, this way 50 ms)."""
+
+    def __init__(self, shape: tuple[int, int], grid: int) -> None:
+        h, w = self.shape = shape
+        self.grid = grid
+        self.fine, self.whole = (np.empty(h * w, np.intp) for _ in range(2))
+        self.got = np.empty(h * w, np.float32)  # what is taken out of an array to be added to
+        self.light, self.marks = np.empty(h * w + 1, np.float32), np.empty(h * w + 1, np.uint16)  # their last is the spare place
+        band = (max(1, AT_ONCE // w), w)
+        self._band = (*(np.empty(band, np.float32) for _ in range(3)), *(np.empty(band, np.int32) for _ in range(2)),
+                      *(np.empty(band, bool) for _ in range(2)))
+
+    def find(self, m: np.ndarray, size: tuple[int, int], spare: int) -> None:
+        """Fill `fine` and `whole` for a frame with the map m: each of its pixels lies on the page where the inverse of
+        m takes it (row, column, in frame pixels). `size` is the part of the frame the map's units were taken on: the
+        frame without the rows and columns that joining left out. `spare` is the spare place of the finer grid's
+        array; the page's own is the one behind its last pixel."""
+        (h, w), grid = self.shape, self.grid
+        unit = max(size) / 2
+        y = ((np.arange(h) - (size[0] - 1) / 2) / unit).astype(np.float32)[:, None]
+        x = ((np.arange(w) - (size[1] - 1) / 2) / unit).astype(np.float32)[None, :]
+        inverse, centre = np.linalg.inv(m), ((size[0] - 1) / 2, (size[1] - 1) / 2)
+        for top in range(0, h, len(self._band[0])):
+            row, column, work, cell_y, cell_x, off, also = (array[:h - top] for array in self._band)
+            pixels = slice(top * w, (top + len(row)) * w)
+            _through(inverse, y[top:top + len(row)], x, unit, centre, (row, column, work))
+            # The finer grid: the cell nearest to the place, np.rint(grid * place + (grid - 1) / 2).
+            for places, cells in ((row, cell_y), (column, cell_x)):
+                np.multiply(places, grid, out=work)
+                work += (grid - 1) / 2
+                np.rint(work, out=work)
+                np.copyto(cells, work, casting="unsafe")
+            self._outside(cell_y, cell_x, grid * h, grid * w, off, also)
+            # the plane a cell lies in, then its place there: (cell % grid) planes of h * w or w places, cell // grid rows or columns
+            if grid & (grid - 1) == 0:  # a power of two, as the grid is: bits, where dividing whole numbers is slow
+                bits = grid.bit_length() - 1
+                plane = work.view(np.int32)  # the working array's memory, as whole numbers for now
+                np.bitwise_and(cell_y, grid - 1, out=plane)
+                plane *= grid * h * w
+                cell_y >>= bits
+                cell_y *= w
+                cell_y += plane
+                np.bitwise_and(cell_x, grid - 1, out=plane)
+                plane *= h * w
+                cell_y += plane
+                cell_x >>= bits
+                cell_y += cell_x
+            else:
+                cell_y[...] = ((cell_y % grid) * grid + cell_x % grid) * (h * w) + (cell_y // grid) * w + cell_x // grid
+            self._kept(self.fine[pixels], cell_y, off, spare)
+            # The page's whole pixels: the one nearest to the place.
+            for places, cells in ((row, cell_y), (column, cell_x)):
+                np.rint(places, out=work)
+                np.copyto(cells, work, casting="unsafe")
+            self._outside(cell_y, cell_x, h, w, off, also)
+            cell_y *= w
+            cell_y += cell_x
+            self._kept(self.whole[pixels], cell_y, off, h * w)
+
+    @staticmethod
+    def _outside(cell_y: np.ndarray, cell_x: np.ndarray, rows: int, columns: int, off: np.ndarray, also: np.ndarray) -> None:
+        """Into `off`: where a cell is not one of `rows` by `columns`, counted from 0. Read as numbers without a sign,
+        in which a cell below 0 is a very large one, that is one comparison each way."""
+        np.greater_equal(cell_y.view(np.uint32), rows, out=off)
+        np.greater_equal(cell_x.view(np.uint32), columns, out=also)
+        np.logical_or(off, also, out=off)
+
+    @staticmethod
+    def _kept(places: np.ndarray, cells: np.ndarray, off: np.ndarray, spare: int) -> None:
+        """The cells as places of the index's own size; what a pixel off the page came to is not looked at."""
+        places[...] = cells.reshape(-1)
+        np.putmask(places, off.reshape(-1), spare)
+
+    def seen(self, frame: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """(the frame as the page saw it, at whole pixels; a mark where it showed anything). Where two of its pixels
+        fall on one place the later one stands, where none falls there is nothing."""
+        self.light.fill(0)
+        self.marks.fill(0)
+        self.light[self.whole] = frame.reshape(-1)
+        self.marks[self.whole] = 1
+        return self.light[:-1].reshape(self.shape), self.marks[:-1].reshape(self.shape)
 
 
 def _joined(image: np.ndarray, k: int) -> np.ndarray:
     h, w = image.shape[0] // k * k, image.shape[1] // k * k
     return image[:h, :w].reshape(h // k, k, w // k, k).mean(axis=(1, 3))
+
+
+def _share(marks: np.ndarray, k: int) -> np.ndarray:
+    """_joined of ones and zeros kept as whole numbers: how many of a cell's pixels are marked adds up exactly in any
+    order, so it is added the quick way, and then divided as a mean divides."""
+    h, w = marks.shape[0] // k * k, marks.shape[1] // k * k
+    total = marks[0:h:k, 0:w:k].astype(np.float32)
+    for p, q in itertools.product(range(k), repeat=2):
+        if p or q:
+            total += marks[p:h:k, q:w:k]
+    return np.true_divide(total, np.intp(k * k), out=total, casting="unsafe")
 
 
 class _Planes:
@@ -291,8 +399,11 @@ class _Planes:
 
     def __init__(self, shape: tuple[int, int], grid: int) -> None:
         self.grid = grid
-        self.sums = np.zeros((2, grid, grid, *shape), np.float32)
-        self.weights = np.zeros((2, grid, grid, *shape), np.float32)
+        cells = 2 * grid * grid * shape[0] * shape[1]
+        # One place more than the cells, behind them: lay() puts there what falls off the page.
+        self._sums, self._weights = np.zeros(cells + 1, np.float32), np.zeros(cells + 1, np.float32)
+        self.sums = self._sums[:cells].reshape(2, grid, grid, *shape)
+        self.weights = self._weights[:cells].reshape(2, grid, grid, *shape)
         self._scratch = np.empty(shape, np.float32)
 
     def add(self, half: int, block: np.ndarray, dy: float, dx: float, top: int = 0, left: int = 0) -> None:
@@ -317,8 +428,8 @@ class _Planes:
                 self.sums[half, plane_y, plane_x, rows, columns] += shared
                 self.weights[half, plane_y, plane_x, rows, columns] += share
 
-    def lay(self, half: int, frame: np.ndarray, row: np.ndarray, column: np.ndarray) -> None:
-        """Add a frame whose pixels lie on the page at (row, column) frame pixels, each into the grid cell nearest to it.
+    def lay(self, half: int, frame: np.ndarray, m: np.ndarray, size: tuple[int, int], room: _Room) -> None:
+        """Add a frame that lies on the page as its map m says (_Room.find), each pixel into the grid cell nearest to it.
         No sharing between cells: the cell is a quarter of a frame pixel at most from where the pixel lies, and a
         frame that is turned or seen from another side cannot be added as blocks of memory. The cells are noisier
         for it: about 1.5 times, which the level over noise of a page laid this way shows.
@@ -326,35 +437,32 @@ class _Planes:
         Two pixels of one frame lie a frame pixel apart, `grid` cells: they never fall into one cell, so each cell
         is added to once. (Were a frame seen at under half its size they would, and the later pixel alone would
         count; no such frame is laid.)"""
-        grid = self.grid
-        h, w = self.sums.shape[-2:]
-        cell_y = np.rint(grid * row + (grid - 1) / 2).astype(np.int32)
-        cell_x = np.rint(grid * column + (grid - 1) / 2).astype(np.int32)
-        on = (cell_y >= 0) & (cell_y < grid * h) & (cell_x >= 0) & (cell_x < grid * w)
-        cell_y, cell_x = cell_y[on], cell_x[on]
-        # the plane a cell lies in, then its place there: (cell % grid) planes of h * w or w places, cell // grid rows or columns
-        if grid & (grid - 1) == 0:  # a power of two, as the grid is: bits, where dividing whole numbers is slow
-            bits = grid.bit_length() - 1
-            flat = (cell_y & (grid - 1)) * (grid * h * w) + (cell_y >> bits) * w
-            flat += (cell_x & (grid - 1)) * (h * w) + (cell_x >> bits)
-        else:
-            flat = ((cell_y % grid) * grid + cell_x % grid) * (h * w) + (cell_y // grid) * w + cell_x // grid
-        flat = flat.astype(np.intp)  # worked out in 32 bits, which is quicker; added through the index's own size, which is too
-        self.sums[half].reshape(-1)[flat] += frame[on]
-        self.weights[half].reshape(-1)[flat] += 1
+        cells = self.sums[half].size
+        room.find(m, size, (2 - half) * cells)
+        # total[fine] += more for every pixel, spelled out so that what is taken out comes into a kept array. The
+        # half is counted from its own first cell; the spare place is the array's last, a half or two further on.
+        for total, more in ((self._sums[half * cells:], frame.reshape(-1)), (self._weights[half * cells:], 1)):
+            np.take(total, room.fine, out=room.got, mode="clip")  # clip: no place is checked again, find() made them
+            room.got += more
+            total[room.fine] = room.got
 
     def _woven(self, planes: np.ndarray) -> np.ndarray:
         grid = self.grid
         h, w = planes.shape[-2:]
-        return planes.transpose(2, 0, 3, 1).reshape(grid * h, grid * w)
+        woven = np.empty((grid * h, grid * w), planes.dtype)  # always an array of its own: result() works in it
+        woven.reshape(h, grid, w, grid)[...] = planes.transpose(2, 0, 3, 1)
+        return woven
 
     def result(self, plain: np.ndarray) -> tuple[np.ndarray, float]:
         """(the image on the finer grid, its level over noise). `plain` is the frames' plain average for cells too little
         reached, NaN where no frame showed that place at all: those cells get the image's median, which claims nothing."""
-        weight = self._woven(self.weights[0] + self.weights[1])
-        typical = float(np.median(weight))
-        image = self._woven(self.sums[0] + self.sums[1]) / np.maximum(weight, 1e-6)
+        # Three arrays of the result's size are made here and worked in: the planes are as large again as the result.
+        spare = self.weights[0] + self.weights[1]
+        weight = self._woven(spare)
+        typical = float(np.median(spare, overwrite_input=True))  # of the same numbers, in whatever order they lie
+        image = self._woven(np.add(self.sums[0], self.sums[1], out=spare))
         holes = weight < HOLE_SHARE * typical
+        image /= np.maximum(weight, 1e-6, out=weight)
         if holes.any():
             image[holes] = np.repeat(np.repeat(plain, self.grid, 0), self.grid, 1)[holes]
             unseen = np.isnan(image)
@@ -363,10 +471,13 @@ class _Planes:
         both = (self.weights[0] > HOLE_SHARE * typical / 2) & (self.weights[1] > HOLE_SHARE * typical / 2)
         ratio = 0.0
         if both.any():
-            difference = (self.sums[0] / np.maximum(self.weights[0], 1e-6) - self.sums[1] / np.maximum(self.weights[1], 1e-6))[both]
-            noise = float(difference.std()) / 2
+            other = weight.reshape(spare.shape)  # done with as the weight: the second half's mean is worked out in it
+            np.divide(self.sums[0], np.maximum(self.weights[0], 1e-6, out=spare), out=spare)
+            np.divide(self.sums[1], np.maximum(self.weights[1], 1e-6, out=other), out=other)
+            spare -= other
+            noise = float(spare[both].std()) / 2
             ratio = float(np.percentile(image, 90)) / noise if noise > 0 else 0.0
-        return image.astype(np.float32), ratio
+        return image.astype(np.float32, copy=False), ratio
 
 
 def _field(frame: np.ndarray, side, dy: float, dx: float, parts: int, reach: float) -> np.ndarray | None:
@@ -428,8 +539,10 @@ def gather(frames: Iterable[np.ndarray], *, smear: Sequence[float] | None = None
     selection = "none" if smear is None else "motion"
     # Still frames from each frame on, itself counted: what a page begun at that frame could still be given.
     ahead = None if smear is None else list(itertools.accumulate(reversed([value <= smear_limit for value in smear])))[::-1]
+    # The last frame the record lets be added, by the loop's own test (which, unlike `ahead`, takes a smear that is no number).
+    last = -1 if smear is None else max((at for at, value in enumerate(smear) if not value > smear_limit), default=-1)
     total = usable = used = 0
-    planes = reference = coarse = covered = shape = before = None
+    planes = reference = coarse = covered = shape = before = room = None
     join = 1
     position = (0.0, 0.0)
     travelled = [0.0, 0.0]  # frame pixels the picture has moved since the last frame that was added
@@ -442,8 +555,9 @@ def gather(frames: Iterable[np.ndarray], *, smear: Sequence[float] | None = None
         kept = held.get(key)
         if kept is None or used < FRESH_UNTIL or used - kept[0] >= REFRESH:
             summed = source()
-            half = _reference_side(summed)
-            kept = (used, half, _own(summed, half) if key is None else None)
+            spectrum = _spectrum(summed)  # once, for both
+            half = _reference_side(summed, spectrum)
+            kept = (used, half, _own(summed, half, spectrum) if key is None else None)
             held[key] = kept
         return kept[1]
 
@@ -452,9 +566,11 @@ def gather(frames: Iterable[np.ndarray], *, smear: Sequence[float] | None = None
         kept = held.get("map")
         if kept is None or used < FRESH_UNTIL or used - kept[0] >= REFRESH:
             mean = reference / np.maximum(covered, 1)
-            shown = (covered.astype(np.float32) * 4 >= used).astype(np.float32)
+            shown = covered.astype(np.float32) * 4 >= used
             if join > 1:
-                mean, shown = _joined(mean, join), _joined(shown, join)
+                mean, shown = _joined(mean, join), _share(shown, join)
+            else:
+                shown = shown.astype(np.float32)
             level = float(mean[shown > 0.5].mean()) if (shown > 0.5).any() else 0.0
             sizes = []
             for k in MAP_SIZES:
@@ -504,6 +620,14 @@ def gather(frames: Iterable[np.ndarray], *, smear: Sequence[float] | None = None
         elif frame.shape != shape:
             raise ValueError(f"frame {index} is {frame.shape}, the first was {shape}")
         total += 1
+        # A frame that is not added is only worked on to follow the picture through it. That reaches no frame that
+        # is added when the picture is no longer followed (until a frame is added, no step is taken), when no frame
+        # has been added yet (the first one is put at 0, 0 wherever the picture went before it) and when no frame
+        # that could be added is to come. In the last two the step could still be logged, so they are worked on
+        # when that is asked.
+        if smear is not None and (index >= len(smear) or smear[index] > smear_limit) and (
+                travelled is None or ((reference is None or index > last) and not _LOG.isEnabledFor(logging.DEBUG))):
+            continue
         small = _joined(frame, join) if join > 1 else frame
         spectrum = _spectrum(small)
         if before is not None and travelled is not None:
@@ -517,7 +641,8 @@ def gather(frames: Iterable[np.ndarray], *, smear: Sequence[float] | None = None
                 # (M-31). From here only the last added frame says where to look, until a frame is added again.
                 _LOG.debug("frame %d: the frame before is not found in it (%.1f)", index, sure)
                 travelled = None
-        mine = np.conj(spectrum) * _tools(small.shape)[1]
+        mine = np.conj(spectrum)
+        mine *= _tools(small.shape)[1]
         before = (mine, np.fft.irfft2(spectrum * mine, s=small.shape))
         if smear is not None and (index >= len(smear) or smear[index] > smear_limit):
             continue
@@ -581,20 +706,13 @@ def gather(frames: Iterable[np.ndarray], *, smear: Sequence[float] | None = None
         if laid is not None:
             pose = laid
             size = (small.shape[0] * join, small.shape[1] * join)
-            row, column = _places(shape, laid, size)
-            planes.lay(used % 2, frame, row, column)
-            at_y, at_x = np.rint(row).astype(np.int32), np.rint(column).astype(np.int32)
-            on = (at_y >= 0) & (at_y < shape[0]) & (at_x >= 0) & (at_x < shape[1])
-            flat = (at_y * shape[1] + at_x)[on].astype(np.intp)
-            # the frame as the page saw it, at whole pixels: where two of its pixels fall on one place the later
-            # one stands, where none falls nothing is added
-            light, times = np.zeros(shape, np.float32), np.zeros(shape, np.float32)
-            light.reshape(-1)[flat] = frame[on]
-            times.reshape(-1)[flat] = 1
+            room = room or _Room(shape, grid)
+            planes.lay(used % 2, frame, laid, size, room)
+            light, marks = room.seen(frame)
             reference += light
-            covered += times.astype(np.uint16)
+            covered += marks
             if join > 1:  # joined: the mean of the pixels that fell into each joined cell
-                coarse += _joined(light, join) / np.maximum(_joined(times, join), 1.0 / (join * join))
+                coarse += _joined(light, join) / np.maximum(_share(marks, join), 1.0 / (join * join))
             used += 1
             continue
         if field is None:
@@ -648,15 +766,19 @@ def _described(binary: str, path: Path) -> tuple[int, int, int | None]:
 _LIGHT = np.array([(v / 255 / 12.92) if v / 255 <= 0.04045 else ((v / 255 + 0.055) / 1.055) ** 2.4 for v in range(256)], np.float32)
 
 
-def read_clip(path: Path, *, crop: tuple[int, int, int, int] | None = None, ffmpeg: str | None = None, black: float = 0.0) -> Iterator[np.ndarray]:
+def read_clip(path: Path, *, crop: tuple[int, int, int, int] | None = None, ffmpeg: str | None = None, black: float = 0.0,
+              reuse: bool = False, described: tuple[int, int, int | None] | None = None) -> Iterator[np.ndarray]:
     """The frames of a clip as light: luma with the display curve undone and `black` subtracted, never below zero.
 
     crop is (left, top, width, height) in the clip's pixels. ffmpeg names the binary; by default ROKID_FFMPEG, else
     `ffmpeg` on the path. Raises GatherError when the binary is missing, the clip cannot be decoded or holds no frame.
+    reuse: every frame comes in one and the same array, filled again for the next one. For a reader that is done with
+    a frame before it asks for another, as gather is; it saves an array of the frame's size a frame.
+    described: what _described said of this clip, where the caller has asked already.
     """
     path = Path(path)
     binary = _ffmpeg(ffmpeg)
-    width, height, held = _described(binary, path)
+    width, height, held = described or _described(binary, path)
     if crop is not None:
         left, top, width, height = crop
     command = [binary, "-v", "error", "-i", str(path), "-map", "0:v:0"]
@@ -677,19 +799,26 @@ def read_clip(path: Path, *, crop: tuple[int, int, int, int] | None = None, ffmp
         process.kill()
 
     count = 0
+    raw = np.empty(width * height, np.uint8)  # the decoder's frame, read into the same array every time
+    light = None
     try:
         while True:
             watchdog = threading.Timer(DECODE_SECONDS, stop)  # for this one frame: a slow reader is not a stuck decoder
             watchdog.daemon = True
             watchdog.start()
             try:
-                raw = process.stdout.read(width * height)
+                got = process.stdout.readinto(raw)
             finally:
                 watchdog.cancel()
-            if len(raw) < width * height:
+            if got < raw.size:
                 break
             count += 1
-            light = _LIGHT[np.frombuffer(raw, np.uint8)].reshape(height, width)
+            if light is None or not reuse:
+                light = np.empty((height, width), np.float32)
+            # _LIGHT[raw], a piece at a time: taken whole, the indexes alone are an array eight times the frame
+            flat = light.reshape(-1)
+            for start in range(0, raw.size, AT_ONCE):
+                np.take(_LIGHT, raw[start:start + AT_ONCE], out=flat[start:start + AT_ONCE], mode="clip")
             yield np.maximum(light - black, 0) if black else light
         if stuck:
             raise GatherError(f"ffmpeg timed out on {path.name}: no frame for {DECODE_SECONDS} s after {count} frames")
@@ -731,16 +860,18 @@ def gather_clip(path: Path, record: dict | None = None, *, crop: tuple[int, int,
     must come back to the next page's clip).
     """
     path = Path(path)
-    smear = None
+    smear = described = None
     listed = record.get("frames") if isinstance(record, dict) else None
     if isinstance(listed, list) and listed:
-        _, _, frames = _described(_ffmpeg(ffmpeg), path)
+        described = _described(_ffmpeg(ffmpeg), path)  # the reader is told: asking again reads the whole file again
+        frames = described[2]
         if frames is not None and 0 <= frames - len(listed) <= SURPLUS and all(isinstance(entry, dict) and "smear_px" in entry for entry in listed):
             smear = [float(entry["smear_px"]) for entry in listed][settle:]
     end = None if limit is None else settle + limit
     if smear is not None and limit is not None:
         smear = smear[:limit]
-    frames = itertools.islice(read_clip(path, crop=crop, ffmpeg=ffmpeg, black=black), settle, end)
+    # reuse: gather keeps nothing of a frame once it asks for the next
+    frames = itertools.islice(read_clip(path, crop=crop, ffmpeg=ffmpeg, black=black, reuse=True, described=described), settle, end)
     return gather(frames if seconds is None else _within(frames, time.monotonic() + seconds), smear=smear, **options)
 
 
