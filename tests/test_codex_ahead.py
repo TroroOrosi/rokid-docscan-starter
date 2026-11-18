@@ -292,6 +292,28 @@ def test_a_long_booklet_prepared_ahead_is_read_in_parts_from_what_was_prepared_a
     assert all(max(size) <= 300 < max(own[image]) for image, size in whole), "the whole booklet at the size that fits"
 
 
+@pytest.mark.parametrize("gone", ["a strip", "the view", "everything"])
+def test_a_prepared_page_whose_files_have_gone_is_cut_when_the_booklet_is_answered(codex, tmp_path, monkeypatch, gone):
+    """What was prepared is removed after its time, and a booklet may be answered again later than that. Whatever
+    is missing then, the booklet's own request is made as if the page had not been prepared: as an OSError the
+    missing file would hand the booklet to the routes behind this one."""
+    question, [plain], before = _answered_plainly(codex, tmp_path, monkeypatch)
+    solver = codex_cli.CodexCliSolver()
+    solver.prepare(question.document_pages)
+    _settled()
+    [folder] = list((tmp_path / "data" / "codex-ahead").iterdir())
+    if gone == "everything":
+        for path in folder.iterdir():
+            path.unlink()
+    else:
+        (folder / ("page002-1a.jpg" if gone == "a strip" else "overview002.jpg")).unlink()
+    solver.answer_all(question=question)
+
+    assert len(_locates(codex()[before:])) == 1, "where the pages lie is still known"
+    [run] = _runs(codex()[before:])
+    assert _same(run, plain)
+
+
 def test_what_was_prepared_is_removed_after_its_time(codex, tmp_path, monkeypatch):
     question, _, _ = _answered_plainly(codex, tmp_path, monkeypatch)
     solver = codex_cli.CodexCliSolver()

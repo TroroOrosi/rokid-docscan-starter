@@ -1425,19 +1425,29 @@ class CodexCliSolver(Solver):
                 names.append(payload["name"])
             return names
         overview, made = f"overview{label}.jpg", layout["ahead"].get(number)
+        if made is not None and not all((made["folder"] / name).is_file() for name in made["names"]):
+            # What was prepared has since been removed (it is kept ``_AHEAD_KEPT_S``, and a booklet may be answered
+            # again later than that): where its pages lie is still known, and the photo is cut here.
+            made = None
+        photo = layout["photos"].pop(number, None)
         if folder is not None:
             shutil.copyfile(directory / overview, folder / overview)
         elif made is not None:
             shutil.copyfile(made["folder"] / overview, directory / overview)
-        else:
+        elif number in layout["views"]:
             layout["views"][number].replace(directory / overview)
+        else:
+            with Image.open(page["image_path"]) as source:
+                photo = _readable(source.convert("RGB"))
+            view = photo.copy()
+            view.thumbnail((1024, 1024))
+            view.save(directory / overview, quality=85)
         regions = [boxes[number, printed] for printed in range(1, len(found[number]) + 1)]
         if made is not None and all(limit >= wanted * max(box[2] - box[0], box[3] - box[1]) for box, _, wanted in regions):
             for name in made["names"][1:]:
                 shutil.copyfile(made["folder"] / name, target / name)
             return list(made["names"])
         names = [overview]
-        photo = layout["photos"].pop(number, None)
         if photo is None:
             with Image.open(page["image_path"]) as source:
                 photo = _readable(source.convert("RGB"))
