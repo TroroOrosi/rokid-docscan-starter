@@ -1279,7 +1279,7 @@ def test_the_boxes_of_one_question_are_compared_box_by_box_however_many_there_ar
 def test_boxes_given_with_the_words_of_their_options_agree_when_label_and_words_do(codex, tmp_path, monkeypatch):
     """An option's words stand after its label so that a label read wrongly can be found on the paper; a space
     inside those words is no second part."""
-    lines = ["[1]：③（葉緑体）", "[2]：④（気孔）", "[3]：⑧（道管 2本）", "[4]：⑫（光合成）"]
+    lines = ["[1]：③（葉緑体）", "[2]：④（気孔）", "[3]：⑧（道管 2本）", "[4]：⑨（光合成）"]
     _twice(monkeypatch, _boxes_read(*lines), _boxes_read(*[line.replace("：", ": ") for line in lines]))
     [(_, _, _, note)] = _shown(codex_cli.CodexCliSolver().answer_all(question=_booklet(tmp_path)))
     assert note == ""
@@ -1291,6 +1291,43 @@ def test_a_label_the_reads_give_differently_for_the_same_words_is_marked(codex, 
     _twice(monkeypatch, _boxes_read(*lines), _boxes_read(*lines[:3], "[4]：⑪（光合成）"))
     [(_, answer, status, note)] = _shown(codex_cli.CodexCliSolver().answer_all(question=_booklet(tmp_path)))
     assert "⑫" in answer and status == "ready" and note
+
+
+@pytest.mark.parametrize("first, second", [("①（あ－X）", "①"), ("②（道管）", "②（導管）"), ("ア（光合成）", "ア"),
+                                            ("⑨（川（上流））", "⑨")])
+def test_a_label_with_the_words_of_its_option_is_compared_by_the_label(codex, tmp_path, monkeypatch, first, second):
+    """Phone, 2026-11-18, the first booklet read with options' words asked for: one read added the words and the
+    other did not, or wrote them differently, and 18 of 45 items were marked where the labels were the same."""
+    _twice(monkeypatch, _read((1, first)), _read((1, second)))
+    [(_, _, _, note)] = _shown(codex_cli.CodexCliSolver().answer_all(question=_booklet(tmp_path)))
+    assert note == ""
+
+
+@pytest.mark.parametrize("first, second", [("2(x+1)", "2(x-1)"), ("f(a)", "f(b)"), ("③（葉緑体）", "④（葉緑体）")])
+def test_what_stands_in_brackets_after_a_value_is_still_compared(codex, tmp_path, monkeypatch, first, second):
+    _twice(monkeypatch, _read((1, first)), _read((1, second)))
+    [(_, _, _, note)] = _shown(codex_cli.CodexCliSolver().answer_all(question=_booklet(tmp_path)))
+    assert note
+
+
+def test_a_box_the_reads_differ_on_is_named_with_what_the_other_read_says_there(codex, tmp_path, monkeypatch):
+    """The other read's whole answer, cut at 24 characters, showed its first boxes and not the one that differs."""
+    lines = ["[1]：③（葉緑体）", "[2]：④（気孔）", "[3]：⑧（道管）", "[4]：⑫（光合成）"]
+    _twice(monkeypatch, _boxes_read(*lines), _boxes_read(*lines[:3], "[4]：⑪（光合成）"))
+    [(_, _, _, note)] = _shown(codex_cli.CodexCliSolver().answer_all(question=_booklet(tmp_path)))
+    assert note.endswith("他方：4は11"), "the box and the other read's label there: no words, no other box"
+
+
+@pytest.mark.parametrize("answer, asked", [("⑫（光合成）", True), ("[1]：③（葉緑体）\n[2]：⑩（気孔）", True),
+                                           ("⑨（光合成）", False), ("12", False), ("㉓", True)])
+def test_a_circled_label_of_two_digits_is_always_to_be_checked_on_the_paper(codex, tmp_path, monkeypatch, answer, asked):
+    """The operator's use of 2026-11-18: both reads read a word bank's soft two-digit labels wrongly in the same way
+    (the 11th option as ⑪ where the paper prints ⑫), so nothing was marked. Read again, the two reads agreed on every
+    option's words and differed on every label of two digits."""
+    _twice(monkeypatch, _read((1, answer)), _read((1, answer)))
+    [(_, shown, status, note)] = _shown(codex_cli.CodexCliSolver().answer_all(question=_booklet(tmp_path)))
+    assert shown == answer and status == "ready"
+    assert (note == codex_cli._CHECK_LABEL) is asked and bool(note) is asked
 
 
 @pytest.mark.parametrize("first", ["fails", "is not an answer list"])

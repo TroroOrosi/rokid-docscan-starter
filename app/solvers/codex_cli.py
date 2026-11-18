@@ -226,9 +226,26 @@ def _result(answer: str) -> str:
     return head if head.strip() else answer
 
 
+# A choice's label with the words of its option after it, as the request asks for a short option ("⑫（光合成）", or
+# "ア（光合成）" where the label stands alone): the label is what is compared. One read adds the words and the other
+# does not, or writes them differently; on the phone on 2026-11-18 that marked 18 of 45 items. The label is a circled
+# number or letter, or one katakana at the start of a line or after a colon; a value before a bracket ("2(x+1)",
+# "f(a)") is no label, and its bracket stays.
+_LABEL_WORDS = re.compile(
+    r"([①-⑳㉑-㉟㊱-㊿⓪ⓐ-ⓩ]|(?<![^\s:：])[ァ-ヶ])[ \t　]*"
+    r"[（(](?:[^（）()\n]|[（(][^（）()\n]*[）)])*[）)][ \t　]*$", re.MULTILINE)
+# A circled number of two digits: ⑩ to ⑳, ㉑ to ㊿.
+_TWO_DIGIT = re.compile(r"[⑩-⑳㉑-㉟㊱-㊿]")
+# Said of a ready answer that names a choice by such a label and carries no other note. Phone, 2026-11-18: a word
+# bank's labels ran ⑩, ⑫, ⑬ in soft print; in the morning both reads counted along the row and agreed on ⑪, and read
+# again with the options' words they agreed on every option and differed on every label of two digits.
+_CHECK_LABEL = "2桁の丸数字は紙面の番号で確認"
+
+
 def _short(text: str) -> str:
-    """One line of a result as it is compared: no spaces, no separators, without regard to case."""
-    return re.sub(r"[、,・;]+", "", _plain(text)).replace("\N{MINUS SIGN}", "-").casefold()
+    """One line of a result as it is compared: no spaces, no separators, without regard to case, and a choice by its
+    label alone."""
+    return re.sub(r"[、,・;]+", "", _plain(_LABEL_WORDS.sub(r"\1", text))).replace("\N{MINUS SIGN}", "-").casefold()
 
 
 # The longest line that is still one box's result: a label and the words of its option.
@@ -243,8 +260,7 @@ def _mark(answer: str) -> str | None:
     uncompared, and a written mathematics answer is longer than that as soon as its working stands in it.
     """
     result = _result(answer)
-    # Without regard to case: one read heads a table X and P, the other x and p (phone, 2026-11-17).
-    text = re.sub(r"[、,・;]+", "", _plain(result)).replace("\u2212", "-").casefold()
+    text = _short(result)
     return text if len(text) <= (24 if result is answer else 80) else None
 
 
@@ -324,7 +340,8 @@ def _slot_marks(replies: list, slots: list) -> dict:
             continue
         whole = _mark(result.answer)
         text = unicodedata.normalize("NFKC", _result(result.answer))
-        lines = [_short(line) for line in text.splitlines() if line.strip()]
+        # From the answer as written: normalised first, a circled label is digits and is no longer told from a value.
+        lines = [_short(line) for line in _result(result.answer).splitlines() if line.strip()]
         if len(keys) > 1 and len(lines) == len(keys) and max(map(len, lines)) <= _BOX_LINE:
             marks.update(zip(keys, lines))
             continue
@@ -336,6 +353,14 @@ def _slot_marks(replies: list, slots: list) -> dict:
         for index, key in enumerate(keys):
             marks[key] = parts[index] if apart else whole[index] if each else whole
     return marks
+
+
+def _unnamed(mark: str, name: str) -> str:
+    """A box's mark without the printed name it was written under ("[4]:11" for box 4 is 11)."""
+    for head in (f"[{name}]:", f"{name}:"):
+        if mark.startswith(head) and len(mark) > len(head):
+            return mark[len(head):]
+    return mark
 
 
 def _compared(first: list, second: list) -> list:
@@ -364,12 +389,15 @@ def _compared(first: list, second: list) -> list:
         if _answered(result):
             different = [(key, theirs[key]) for key in keys
                          if key in theirs and theirs[key] is not _UNANSWERED and theirs[key] != mine[key]]
-            if different and match is not None and _answered(match[1]):
+            if different and len(keys) == 1 and match is not None and _answered(match[1]):
                 note = _DIFFERENT.format(other=" ".join(_result(match[1].answer).split())[:24])
-            elif different:  # the other read grouped these numbers differently: name the numbers it differs on
+            elif different:
+                # Several numbers, or the other read grouped them differently: name the ones it differs on. Until
+                # 2026-11-18 a question of several boxes showed the other read's whole answer cut at 24 characters,
+                # its first boxes and not the one that differs.
                 note = _DIFFERENT.format(other="、".join(
-                    f"{key[2] if key[0] == 'box' else key[1]}は{'記述' if mark is None else mark}"
-                    for key, mark in different)[:40])
+                    f"{name}は{'記述' if mark is None else _unnamed(mark, name)}"
+                    for name, mark in ((key[2] if key[0] == "box" else key[1], mark) for key, mark in different))[:40])
             elif any(theirs.get(key) is _UNANSWERED for key in keys):
                 note = _ONE_ANSWERED
             elif any(key not in theirs for key in keys):
@@ -693,8 +721,14 @@ class CodexCliSolver(Solver):
                 # so once behind the answers.
                 for _, result in first:
                     result.extras["read_once"] = True
-            return first
-        return _compared(first, _booklet_replies(reads[1], subject=question.subject, extras=extras))
+            replies = first
+        else:
+            replies = _compared(first, _booklet_replies(reads[1], subject=question.subject, extras=extras))
+        for _, result in replies:
+            if (_answered(result) and not result.extras.get("review_note")
+                    and _TWO_DIGIT.search(_result(result.answer))):
+                result.extras["review_note"] = _CHECK_LABEL
+        return replies
 
     @staticmethod
     def _exec(directory: Path, environment: dict, *, model: str, effort: str, images: list[str], prompt: str,

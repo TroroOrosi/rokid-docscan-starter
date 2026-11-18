@@ -368,7 +368,10 @@ from __future__ import annotations
 #         and a read behind a finished one waits four minutes at most. A choice is named by its printed label,
 #         never by counting (labels ran ⑩, ⑫, ⑬ and the answers said ⑪), with the words of a short option after
 #         it; a quotation keeps its printed language; an answer sheet in view is not listed as missing. The boxes
-#         of one question are compared line by line however many they are (seven went uncompared). The gathering
+#         of one question are compared line by line however many they are (seven went uncompared), a choice by
+#         its label whatever words follow it, a note names the boxes that differ, and a circled label of two
+#         digits always asks to be checked on the paper (the first booklet read again: the two reads agreed on
+#         every option's words and differed on every label of two digits). The gathering
 #         is waited for 200 s (a twelfth clip was done 165 s after the end). Work's inventory leaves a conversation
 #         for the new-chat page first (it stopped twice on the daily check's chat). Chat's attach budget grows with
 #         the files' size (29 MB were not confirmed in 200 s, twice) and an unconfirmed upload logs how far it got.
