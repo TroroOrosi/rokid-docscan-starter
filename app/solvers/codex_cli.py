@@ -211,6 +211,7 @@ MODEL = "gpt-6.2-sol"
 _MODEL_WINDOW = 500_000    # the context the CLI's own model list gives gpt-6.2-sol, as it gave gpt-6.1-sol
 _CONTEXT_TOKENS = 475_000  # 95% of it
 _SOL = re.compile(r"gpt-(\d+(?:\.\d+)*)-sol")
+_CLIP_SHARE = 0.63  # of the grid a recorded page is gathered on: the size it is sent at (``_wanted_scale``)
 
 
 def _model() -> str:
@@ -275,10 +276,22 @@ def _wanted_scale(size: tuple[int, int], *, clip: bool) -> float:
     size. That long side is still what a smaller region is brought up to, never past ``MAX_SCALE``: every region of
     1270 px and less is sent as it was.
 
-    A page recorded as a clip keeps the long side alone: the image gathered from a clip is already on a grid twice as
-    fine as the camera's frame, and what was read of it was read at its own size (M-28, M-29).
+    A page recorded as a clip: every region at one share of the grid it was gathered on, ``ROKID_CODEX_CLIP_SCALE``
+    (``_CLIP_SHARE``, 0.63), whatever the region's size. That grid is twice as fine as the camera's pixels a side,
+    and until 2026-11-19 a gathered page went out on it (and a small region of one was enlarged towards 2540 px):
+    four times the pixels the camera took, with the lens's blur four to eight of them wide. Read against a known
+    text, six reads a size, the rule fixed before the reads (M-44 (21), GPT-6.2 Sol at High): two worn pages found
+    87.9% and 84.2% of it at their own size, 93.1% and 87.0% at 0.63, 92.0% and 89.2% at 0.5; the desk page read
+    the same from its own size down to 0.35 and worse at 0.25. 0.63 and not 0.5, which read as well: what is small
+    on the paper (exponents, subscripts, ruby, about 0.6 of body print) keeps eight to ten pixels.
     """
-    least = 1.0 if clip else float(os.environ.get("ROKID_CODEX_PAGE_SCALE") or 2)
+    if clip:
+        try:
+            share = float(os.environ.get("ROKID_CODEX_CLIP_SCALE") or _CLIP_SHARE)
+        except ValueError:
+            share = _CLIP_SHARE
+        return share if 0.1 <= share <= MAX_SCALE else _CLIP_SHARE
+    least = float(os.environ.get("ROKID_CODEX_PAGE_SCALE") or 2)
     return min(MAX_SCALE, max(least, float(os.environ.get("ROKID_CODEX_PAGE_LONG") or 2540) / max(size)))
 
 

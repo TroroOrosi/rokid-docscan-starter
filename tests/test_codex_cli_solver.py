@@ -959,16 +959,17 @@ def test_a_booklet_of_gathered_pages_too_large_at_their_own_size_is_reduced_and_
     it, so forty are over the model's context at their own size. Until 2026-11-16 a page was never reduced, and a
     booklet that did not fit at its own size went out too large."""
     monkeypatch.setenv("FAKE_CODEX_REGIONS", json.dumps(REGIONS))
-    monkeypatch.setattr(codex_cli, "_CONTEXT_TOKENS", codex_cli._FIXED_TOKENS + 4000)
+    monkeypatch.setattr(codex_cli, "_CONTEXT_TOKENS", codex_cli._FIXED_TOKENS + 2500)
     codex_cli.CodexCliSolver().answer_all(question=_photo(tmp_path, size=(3024, 4032), clip=True))
 
     [run] = _runs(codex())
     pages = [size for name, size in run["sizes"].items() if name.startswith("page001-")]
     views = [size for name, size in run["sizes"].items() if name.startswith("overview")]
     assert {name[:9] for name in run["sizes"] if name.startswith("page")} == {"page001-1", "page001-2"}
-    assert (sum(map(_patches, pages)) + sum(map(_patches, views))) * 1.21 <= 4000
-    # Each region is 1218x2137 px on the photo with its margin; both pages come out the same size, as large as fits.
-    assert 1200 < max(height for _, height in pages) < 2137
+    assert (sum(map(_patches, pages)) + sum(map(_patches, views))) * 1.21 <= 2500
+    # Each region is 1218x2137 px on the photo with its margin, and is wanted at 0.63 of that (1346 px): both pages
+    # come out the same size, as large as fits.
+    assert 700 < max(height for _, height in pages) < 1346
 
 
 WHOLE_SHEET = {"images": [{"index": 1, "regions": [
@@ -986,12 +987,8 @@ def test_a_region_cut_from_a_still_is_wanted_at_twice_its_own_pixels_and_a_small
     assert codex_cli._wanted_scale((900, 1270), clip=False) * 1270 == 2540, "a B5 page of a spread: what it was"
     assert codex_cli._wanted_scale((604, 1060), clip=False) * 1060 == pytest.approx(2540), "a smaller one: still 2540"
     assert codex_cli._wanted_scale((400, 560), clip=False) == 2.5, "never past two and a half times"
-    # A page gathered from its clip is already on a grid twice as fine as the camera's frame: as before.
-    assert codex_cli._wanted_scale((3024, 4032), clip=True) == 1.0
-    assert codex_cli._wanted_scale((1218, 2137), clip=True) == pytest.approx(2540 / 2137)
     monkeypatch.setenv("ROKID_CODEX_PAGE_SCALE", "1.5")
     assert codex_cli._wanted_scale((2100, 3000), clip=False) == 1.5
-    assert codex_cli._wanted_scale((3024, 4032), clip=True) == 1.0
     monkeypatch.setenv("ROKID_CODEX_PAGE_LONG", "3200")
     assert codex_cli._wanted_scale((900, 1270), clip=False) == 2.5
     assert codex_cli._wanted_scale((2100, 3000), clip=False) == 1.5
@@ -1048,14 +1045,34 @@ def test_the_regions_sent_largest_give_way_first_and_none_when_the_booklet_fits(
     assert codex_cli._target_long([still, gathered], 10 ** 9) == 256
 
 
-def test_a_page_gathered_from_its_clip_is_still_sent_at_its_own_size(codex, tmp_path, monkeypatch):
+def test_a_page_gathered_from_its_clip_is_sent_at_the_share_of_its_grid_it_reads_best_at(codex, tmp_path, monkeypatch):
+    """A page is gathered on a grid twice as fine as the camera's pixels, and until 2026-11-19 it went out at that
+    grid: four times the pixels the camera took, with the lens's blur four to eight of them wide. Read against a known
+    text, six reads a size, the rule fixed first (M-44 (21)): two worn pages found 87.9% and 84.2% of it at their own
+    size, 93.1% and 87.0% at 0.63, 92.0% and 89.2% at 0.5; the desk page read the same from its own size down to
+    0.35. At 0.63 a booklet's request is two fifths of the tokens and under a third of the bytes."""
     monkeypatch.setenv("FAKE_CODEX_REGIONS", json.dumps(WHOLE_SHEET))
+    monkeypatch.delenv("ROKID_CODEX_CLIP_SCALE", raising=False)
     codex_cli.CodexCliSolver().answer_all(question=_photo(tmp_path, size=(3024, 4032), clip=True))
 
     [run] = _runs(codex())
     parts = [size for name, size in run["sizes"].items() if name.startswith("page001-1")]
-    assert parts and all(height == 4032 for _, height in parts), parts
-    assert 2565 <= sum(width for width, _ in parts) < 2 * 2565, "2565 px wide on the page, and its parts overlap"
+    assert parts and all(height == 2540 for _, height in parts), parts
+    assert 1616 <= sum(width for width, _ in parts) < 2 * 1616, "2565 px wide on the page, 1616 as sent; its parts overlap"
+
+
+def test_every_region_of_a_recorded_page_is_wanted_at_one_share_of_its_grid_whatever_its_size(monkeypatch):
+    """Until 2026-11-19 a small region of a gathered page was enlarged towards 2540 px, up to two and a half times:
+    blur spread over more pixels, and a booklet's characters in several sizes."""
+    monkeypatch.delenv("ROKID_CODEX_CLIP_SCALE", raising=False)
+    monkeypatch.setenv("ROKID_CODEX_PAGE_SCALE", "1.5")  # a still's setting: not a recorded page's
+    for size in ((3024, 4032), (1218, 2137), (600, 300)):
+        assert codex_cli._wanted_scale(size, clip=True) == 0.63
+    monkeypatch.setenv("ROKID_CODEX_CLIP_SCALE", "1")
+    assert codex_cli._wanted_scale((3024, 4032), clip=True) == 1.0, "the grid it was gathered on, as it was sent before"
+    for unusable in ("half", "0", "-1", "9"):
+        monkeypatch.setenv("ROKID_CODEX_CLIP_SCALE", unusable)
+        assert codex_cli._wanted_scale((3024, 4032), clip=True) == 0.63, "a setting that is no share is the default"
 
 
 def test_a_photo_in_which_no_page_was_found_is_sent_as_before(codex, tmp_path, monkeypatch):
@@ -2524,10 +2541,11 @@ def test_more_captures_named_for_the_whole_exam_than_an_exam_has_are_not_believe
 
 
 def test_a_booklet_that_may_not_fit_one_request_is_asked_for_its_major_problems_whatever_is_set():
-    """Nineteen pages gathered from clips (3024x4032 each) are what one request holds at their own size."""
+    """Forty-five frame-filling pages gathered from clips (3024x4032 each, sent at 0.63 of that) are what one
+    request holds; at the grid they are gathered on it was nineteen."""
     might = codex_cli._might_not_fit
     clip, still = ((3024, 4032), True), ((4032, 3024), False)
-    assert not might([clip] * 12) and not might([clip] * 19)
-    assert might([clip] * 24) and might([clip] * 40)
+    assert not might([clip] * 12) and not might([clip] * 40) and not might([clip] * 45)
+    assert might([clip] * 47) and might([clip] * 60)
     assert not might([still] * 4) and might([still] * 8), "a still's regions go out at twice their size"
     assert not might([])
