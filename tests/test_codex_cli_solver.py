@@ -173,14 +173,14 @@ def test_a_booklet_is_one_exec_request_with_every_page_and_its_reply_becomes_the
     [run] = _runs(codex())
     args = run["args"]
     assert [args[i + 1] for i, a in enumerate(args) if a == "-i"] == ["page001.jpg", "page002.jpg", "page003.jpg"]
-    assert args[args.index("-m") + 1] == "gpt-6.1-sol" and "model_reasoning_effort=high" in args
+    assert args[args.index("-m") + 1] == "gpt-6.2-sol" and "model_reasoning_effort=high" in args
     assert args[args.index("-s") + 1] == "read-only" and "--skip-git-repo-check" in args and "--ephemeral" in args
     assert "Answer EVERY question in the attached booklet" in args[-1] and "page001.jpg is capture page 1" in args[-1]
     # Phone, 2026-11-14: a CLI started from a piped script read the rest of the script as its input.
     assert run["stdin"] == ""
     assert [(item["label"], result.answer, result.extras["answer_status"]) for item, result in replies] == [
         ("問1", "④", "ready"), ("問2", "", "needs_input")]
-    assert replies[0][1].extras["source"] == "codex-cli" and replies[0][1].extras["model"] == "gpt-6.1-sol"
+    assert replies[0][1].extras["source"] == "codex-cli" and replies[0][1].extras["model"] == "gpt-6.2-sol"
 
 
 def test_the_request_asks_what_the_captures_leave_out(codex, tmp_path):
@@ -330,7 +330,7 @@ def test_a_booklet_whose_model_is_no_longer_offered_stops_at_the_first_request_a
         codex_cli.CodexCliSolver().answer_all(question=_booklet(tmp_path))
     assert "gpt-6.1-sol" not in str(raised.value) and "Bad Request" not in str(raised.value)
     [request] = [call for call in codex() if call["args"][:1] == ["exec"]]
-    assert request["args"][request["args"].index("-m") + 1] == "gpt-6.1-sol", "no other model is guessed"
+    assert request["args"][request["args"].index("-m") + 1] == "gpt-6.2-sol", "no other model is guessed"
 
 
 @pytest.mark.parametrize("output", [

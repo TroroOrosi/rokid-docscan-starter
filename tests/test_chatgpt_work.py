@@ -45,7 +45,7 @@ class BrowserReply:
     def resolve_new_job_settings(self, *, requested_settings, follow_family):
         from app.work_model_policy import resolve_work_model
         return {**requested_settings, "model": resolve_work_model(
-            ["gpt-6.1-sol"], requested_settings["model"], follow_family=follow_family)}
+            ["gpt-6.2-sol"], requested_settings["model"], follow_family=follow_family)}
 
     def complete_json(self, **options):
         if self.before:
@@ -568,7 +568,8 @@ def test_new_browser_job_seals_actual_inventory_model_and_reuses_it_after_restar
     assert first["requested_settings"] == {"model": "GPT-6.10 Sol" if policy is None else "GPT 6.1 Sol",
                                           "effort": "high", "speed": speed or "fast"}
     # High since 2026-11-16: on this system's pages it read and solved as Extra High did, in less time (M-36, M-37).
-    assert inventory.calls == [({"model": "gpt-6.1-sol", "effort": "high", "speed": speed or "fast"}, policy is None)]
+    # GPT-6.2 Sol since 2026-11-18 (released the day before; the operator: use it, no comparison needed).
+    assert inventory.calls == [({"model": "gpt-6.2-sol", "effort": "high", "speed": speed or "fast"}, policy is None)]
     raw, _ = store.read_source(first["job_id"], "p1")
     assert raw == original.read_bytes()
     monkeypatch.setenv("ROKID_WORK_MODEL", "GPT-6.99 Sol")

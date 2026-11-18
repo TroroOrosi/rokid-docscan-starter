@@ -931,7 +931,7 @@ def test_phone_api_auto_queues_images_and_returns_work_answers_in_the_existing_b
     assert done.status_code == 200
     job = wait_for(lambda: (client.get("/v1/work/jobs").json().get("jobs") or [None])[0])
     assert len(job["sources"]) == 21
-    assert job["requested_settings"] == {"model": "gpt-6.1-sol", "effort": "high", "speed": "fast"}
+    assert job["requested_settings"] == {"model": "gpt-6.2-sol", "effort": "high", "speed": "fast"}
     assert job["model_selection_verified"] is False
     acquired = []
     for item in job["sources"]:

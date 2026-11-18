@@ -225,7 +225,7 @@ class ChatGptWorkSolver(Solver):
         saved = sealed()
         if saved is not None:
             return saved  # Restart, uncertain sends and listening never re-resolve.
-        requested = {"model": os.environ.get("ROKID_WORK_MODEL") or "gpt-6.1-sol",
+        requested = {"model": os.environ.get("ROKID_WORK_MODEL") or "gpt-6.2-sol",  # one model with the CLI (codex_cli.MODEL)
                      "effort": os.environ.get("ROKID_WORK_EFFORT") or "high",  # one effort with the CLI (codex_cli)
                      "speed": os.environ.get("ROKID_WORK_SPEED") or "fast"}
         if not chatgpt_send_enabled():

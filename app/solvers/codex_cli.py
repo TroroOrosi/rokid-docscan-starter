@@ -46,7 +46,7 @@ The CLI takes images only. A booklet with audio (listening, mixed English) is re
 error the server answers by handing the booklet to the next route.
 
 Settings: ``ROKID_CODEX_BIN`` (default: the Termux npm install, else ``codex`` on PATH), ``ROKID_CODEX_MODEL``
-(``gpt-6.1-sol``), ``ROKID_CODEX_EFFORT`` (``high``), ``ROKID_CODEX_TIMEOUT_S`` (by the booklet's size, see ``_time_allowed``), ``ROKID_CODEX_LOCATE`` (``1``;
+(``gpt-6.2-sol``), ``ROKID_CODEX_EFFORT`` (``high``), ``ROKID_CODEX_TIMEOUT_S`` (by the booklet's size, see ``_time_allowed``), ``ROKID_CODEX_LOCATE`` (``1``;
 ``0`` sends photos as the Chat route does), ``ROKID_CODEX_PAGE_SCALE`` (2: a region cut from a still photo is sent at
 this many times its own pixels at least), ``ROKID_CODEX_PAGE_LONG`` (2540 px: the long side a smaller region is
 enlarged up to, at most two and a half times; a page recorded as a clip follows this alone, see ``_wanted_scale``),
@@ -146,7 +146,10 @@ _REGION_MARGIN_LEAST = 0.005
 _REGION_SHORT, _REGION_LONG = 0.01, 0.05
 _REGIONS_MOST = 8  # of one photo; past it the first are cut out and the photo also goes whole
 # What one request can carry, measured on the phone on 2026-11-15 (M-23).
-_CONTEXT_TOKENS = 475_000  # 95% of the 500,000 the CLI's own model list gives gpt-6.1-sol
+# GPT-6.2 Sol since 2026-11-18: released the day before for Codex and Work; the operator's decision, without a
+# comparison. The CLI has to be 0.170.0 or newer to know it (0.169.0 lists gpt-6.1-sol as its newest Sol).
+MODEL = "gpt-6.2-sol"
+_CONTEXT_TOKENS = 475_000  # 95% of the 500,000 the CLI's own model list gives gpt-6.2-sol, as it gave gpt-6.1-sol
 _FIXED_TOKENS = 115_000    # the CLI's own 15,000 (14,650 with no image) and 100,000 kept for reasoning and the reply
 _TOKENS_PER_PATCH = 1.21   # an image's cost per 32-px patch, in proportion from 512x512 to 3000x3000
 
@@ -668,7 +671,7 @@ class CodexCliSolver(Solver):
             raise ChatGptWebError("codex-cli takes images only; this booklet needs audio")
         if not question.document_pages:
             raise ValueError("answering the booklet needs the original pages")
-        model = os.environ.get("ROKID_CODEX_MODEL") or "gpt-6.1-sol"
+        model = os.environ.get("ROKID_CODEX_MODEL") or MODEL
         extras = {"source": self.name, "provider": "codex", "model": model}
         kept = self._kept(question)
         if kept is not None and kept.is_file():
@@ -902,7 +905,7 @@ class CodexCliSolver(Solver):
         with self._workplace() as (directory, environment):
             (directory / "canary.jpg").write_bytes(picture)
             asked = time.time() - 2  # a file's time is coarser than the clock on some hosts
-            reply = self._exec(directory, environment, model=os.environ.get("ROKID_CODEX_MODEL") or "gpt-6.1-sol",
+            reply = self._exec(directory, environment, model=os.environ.get("ROKID_CODEX_MODEL") or MODEL,
                                effort="low", images=["canary.jpg"], timeout=120, ephemeral=False,
                                prompt="How many black squares are in the attached image? Do not run commands or use "
                                       "tools. Reply with the number only.")
