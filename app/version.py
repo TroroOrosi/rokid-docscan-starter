@@ -362,7 +362,18 @@ from __future__ import annotations
 #         had lost two frames behind its key frame on the glasses (2026-11-18); the decoder's complaints filled a
 #         pipe nobody read and the clip "timed out" after 30 s, and with a larger pipe the frames that did
 #         decode would have been gathered out of step with the glasses' record of each frame.
-APP_VERSION = "0.86.1"
+# 0.87.0: from the operator's three subjects of 2026-11-18, read from the phone's records. The Codex CLI may take
+#         five minutes and fifty seconds a page, fifteen minutes at least (twelve gathered pages of vertical
+#         Japanese took a read over ten minutes; the booklet was given up at 600 s and the routes behind failed),
+#         and a read behind a finished one waits four minutes at most. A choice is named by its printed label,
+#         never by counting (labels ran ⑩, ⑫, ⑬ and the answers said ⑪), with the words of a short option after
+#         it; a quotation keeps its printed language; an answer sheet in view is not listed as missing. The boxes
+#         of one question are compared line by line however many they are (seven went uncompared). The gathering
+#         is waited for 200 s (a twelfth clip was done 165 s after the end). Work's inventory leaves a conversation
+#         for the new-chat page first (it stopped twice on the daily check's chat). Chat's attach budget grows with
+#         the files' size (29 MB were not confirmed in 200 s, twice) and an unconfirmed upload logs how far it got.
+#         Unit tests only: none of it seen with the model or on the live pages.
+APP_VERSION = "0.87.0"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.

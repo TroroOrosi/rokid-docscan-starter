@@ -1444,17 +1444,23 @@ def get_document_scan_status(
     }
 
 
+# 150 s until 2026-11-18. That day a twelfth page's clip, arrived 3 s before the end behind three clips of ten seconds
+# each, was gathered 165 s after it and its page went out as one frame.
+_GATHER_WAIT_S = 200.0
+
+
 def _await_gathering(document_id: int) -> None:
-    """Wait for this booklet's clips that are stored or being gathered, at most ROKID_GATHER_WAIT_S seconds (150).
+    """Wait for this booklet's clips that are stored or being gathered, at most ROKID_GATHER_WAIT_S seconds (200).
 
     Past the limit the booklet goes on with the pages that are done; the others stay the one frame they arrived as and
     the answers name them (``_ungathered_pages``). A clip that never arrived has no row and cannot be waited for. The
-    glasses' finalize call reads for four minutes (DocScanApi), so the limit has to stay well under that.
+    glasses' finalize call reads for four minutes (DocScanApi), so the limit has to stay under that with room for
+    the finalizing itself (a second or two on the phone).
     """
     left = page_clips.pending(document_id)
     if not left:
         return
-    limit = float(os.environ.get("ROKID_GATHER_WAIT_S") or 150)
+    limit = float(os.environ.get("ROKID_GATHER_WAIT_S") or _GATHER_WAIT_S)
     started = time.monotonic()
     while left and time.monotonic() - started < limit:
         time.sleep(0.5)

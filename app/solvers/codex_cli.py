@@ -226,6 +226,15 @@ def _result(answer: str) -> str:
     return head if head.strip() else answer
 
 
+def _short(text: str) -> str:
+    """One line of a result as it is compared: no spaces, no separators, without regard to case."""
+    return re.sub(r"[、,・;]+", "", _plain(text)).replace("\N{MINUS SIGN}", "-").casefold()
+
+
+# The longest line that is still one box's result: a label and the words of its option.
+_BOX_LINE = 40
+
+
 def _mark(answer: str) -> str | None:
     """A short answer in the form two reads are compared in; None for writing, which is not compared.
 
@@ -304,16 +313,23 @@ def _by_order(replies: list, slots: list) -> None:
 def _slot_marks(replies: list, slots: list) -> dict:
     """{slot: what this read says there}: a mark, None for writing (not compared), or ``_UNANSWERED``.
 
-    A question of several answer numbers gives each number its own mark when its answer has as many parts as numbers
-    ("④、②、①", "④ ② ①"); otherwise the whole answer stands for each of them."""
+    A question of several answer numbers gives each number its own mark when its answer has as many lines as numbers
+    ("[21]：②" and so on, each under its printed name) or as many parts ("④、②、①", "④ ② ①"); otherwise the whole
+    answer stands for each of them. Until 2026-11-18 the lines were compared only while all of them together were no
+    longer than one mark: the seven boxes of a word bank went uncompared and looked agreed on."""
     marks: dict = {}
     for (_, result), keys in zip(replies, slots):
         if not _answered(result):
             marks.update(dict.fromkeys(keys, _UNANSWERED))
             continue
         whole = _mark(result.answer)
+        text = unicodedata.normalize("NFKC", _result(result.answer))
+        lines = [_short(line) for line in text.splitlines() if line.strip()]
+        if len(keys) > 1 and len(lines) == len(keys) and max(map(len, lines)) <= _BOX_LINE:
+            marks.update(zip(keys, lines))
+            continue
         # The model separates the marks of one question by spaces as often as by commas ("④ ④ ① ② ②", phone).
-        parts = [part for part in re.split(r"[\s、,・;]+", unicodedata.normalize("NFKC", _result(result.answer))) if part]
+        parts = [part for part in re.split(r"[\s、,・;]+", text) if part]
         apart = whole is not None and len(keys) > 1 and len(parts) == len(keys)
         # A lettered box holds one character: "-45" fills three of them.
         each = whole is not None and not apart and len(keys) > 1 and keys[0][0] == "box" and len(whole) == len(keys)
@@ -470,19 +486,24 @@ def _time_allowed(pages: int) -> tuple[float, float]:
 
     Until 2026-11-16 a run that hung was held 3600 s, longer than a 50-minute test, with Work and Chat waiting.
     The slowest on record: 12.5 s a page for the answers (47 pages, two reads, M-23) and 27.8 s a page through Work
-    on hard written mathematics (twenty pages, once); finding the pages took 20 s for 14 and 40 s for 31. Allowed:
-    four minutes and half a minute a page, ten minutes at least. ROKID_CODEX_TIMEOUT_S names another limit.
+    on hard written mathematics (twenty pages, once); finding the pages took 20 s for 14 and 40 s for 31. Allowed
+    until 2026-11-18: four minutes and half a minute a page, ten minutes at least. That day twelve gathered pages of
+    vertical Japanese took a read more than fifty seconds a page: one booklet was given up at 600 s with both reads
+    running, and the routes behind it failed. Allowed now: five minutes and fifty seconds a page, fifteen minutes
+    at least. ROKID_CODEX_TIMEOUT_S names another limit.
     """
     named = os.environ.get("ROKID_CODEX_TIMEOUT_S")
-    answers = float(named) if named else max(600.0, 240.0 + 30.0 * pages)
+    answers = float(named) if named else max(900.0, 300.0 + 50.0 * pages)
     return answers, min(answers, max(120.0, 60.0 + 6.0 * pages))
 
 
-# Once one read is back with a usable reply the other is given that read's time again, and this long at least. Two
-# runs of one booklet of 47 pages ended at 366 s and 586 s (phone, 2026-11-15), so two healthy reads lie that far
-# apart; how far apart the two reads of one run end has not been measured. A read cut here might have answered, and
-# its booklet is then read once, with nothing compared.
+# Once one read is back with a usable reply the other is given that read's time again: this long at least and that
+# long at most. Two runs of one booklet of 47 pages ended at 366 s and 586 s (phone, 2026-11-15), so two healthy reads
+# lie that far apart; how far apart the two reads of one run end has not been measured. A read cut here might have
+# answered, and its booklet is then read once, with nothing compared. The ceiling is for a first read that was slow
+# itself (nine minutes for twelve dense pages, 2026-11-18): as long again is most of what a 50-minute test has left.
 _SECOND_READ_LEAST_S = 120.0
+_SECOND_READ_MOST_S = 240.0
 
 
 def _command() -> list[str]:
@@ -894,7 +915,7 @@ class CodexCliSolver(Solver):
                                        running=running, **request) for number in (1, 2)]
                 back, late = concurrent.futures.wait(pending, return_when=concurrent.futures.FIRST_COMPLETED)
                 first_s = time.monotonic() - began
-                more = max(_SECOND_READ_LEAST_S, first_s)
+                more = min(max(_SECOND_READ_LEAST_S, first_s), _SECOND_READ_MOST_S)
                 # A first read that failed, or whose reply no answer list can be made of, is waited behind as before.
                 if late and any(cls._usable(read, question) for read in back) and concurrent.futures.wait(
                         late, timeout=more).not_done:

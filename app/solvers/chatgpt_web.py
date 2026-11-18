@@ -165,6 +165,11 @@ UPLOAD_TIMEOUT_S = float(os.environ.get("ROKID_CHATGPT_UPLOAD_S", "20"))
 # Added per file. Phone on home Wi-Fi, 2026-11-14: two 250 KB page JPEGs showed "Uploading" for 10-13 s, so 20 s
 # for a whole message could not hold a 20-file batch. A calibration from one measurement: cellular is unmeasured.
 UPLOAD_PER_FILE_S = float(os.environ.get("ROKID_CHATGPT_UPLOAD_PER_FILE_S", "15"))
+# Or this much per megabyte, whichever is longer. Phone, 2026-11-18: twelve pages gathered from clips are 29 MB as
+# JPEG; the 200 s their count allowed ran out twice with nothing confirmed and nothing sent. Half a megabit a second
+# is allowed for. The phone's upload speed on cellular is not measured: an upload not confirmed now logs how many
+# of its files were showing (attach_unconfirmed).
+UPLOAD_PER_MB_S = float(os.environ.get("ROKID_CHATGPT_UPLOAD_PER_MB_S", "16"))
 # How many times the bytes are written before the attach is called unconfirmed.
 # Not a flake allowance: the mobile composer replaces its file input under us,
 # so the first write can land on a node that is already discarded. Costs no
@@ -596,7 +601,9 @@ def attach_images(
     if not plan:
         return False
     expected = sum(len(payloads) for _, payloads in plan)
-    timeout_s = UPLOAD_TIMEOUT_S + UPLOAD_PER_FILE_S * expected if timeout_s is None else timeout_s
+    megabytes = sum(len(payload["buffer"]) for _, payloads in plan for payload in payloads) / 1e6
+    if timeout_s is None:
+        timeout_s = UPLOAD_TIMEOUT_S + max(UPLOAD_PER_FILE_S * expected, UPLOAD_PER_MB_S * megabytes)
     poll_s = POLL_S if poll_s is None else poll_s
     thumbnails = page.locator(ATTACHMENT_SEL)
     baseline = thumbnails.count()
@@ -647,7 +654,13 @@ def attach_images(
             sleep(poll_s)
         if now() >= deadline or some_landed():
             break
-    return landed()
+    if landed():
+        return True
+    # Counts only. Until 2026-11-18 an upload that ran out of time left no word of how far it had got.
+    print(json.dumps({"event": "attach_unconfirmed", "files": expected,
+                      "showing": sum(1 for count in _attached_names(page, names)[0] if count),
+                      "megabytes": round(megabytes, 1), "seconds": round(timeout_s)}), flush=True)
+    return False
 
 
 def _chat_tab(context):
@@ -2461,6 +2474,8 @@ _COVERAGE = (
     "needs_input and missing_material naming what is missing (requires_audio false where that "
     "field is asked): (a) each gap in the printed page numbers you can see; (b) each place where "
     "text or a figure is cut off at an image's edge and no other capture continues it. "
+    "A sheet for writing the answers on (解答用紙, a mark sheet) that shows in a capture is not "
+    "part of the problems: never list it, or what of it lies outside the image, as missing. "
 )
 
 

@@ -489,7 +489,7 @@ def test_a_run_tells_the_proxy_how_long_it_may_take(codex, tmp_path, monkeypatch
     monkeypatch.setattr(codex_cli, "name_resolving_proxy", proxy)
     codex_cli.CodexCliSolver().answer_all(question=_booklet(tmp_path, pages=20))
 
-    assert asked == [840.0], "240 s and 30 s a page: twenty pages may take longer than the 600 s a tunnel was kept"
+    assert asked == [1300.0], "300 s and 50 s a page: twenty pages may take longer than the 600 s a tunnel was kept"
 
 
 FLOW = r'''
@@ -562,11 +562,22 @@ def test_a_run_that_hangs_gives_the_booklet_up_in_minutes_by_its_size(monkeypatc
 
     monkeypatch.delenv("ROKID_CODEX_TIMEOUT_S", raising=False)
     # (seconds for the answers, seconds for finding the pages)
-    assert codex_cli._time_allowed(8) == (600.0, 120.0)
-    assert codex_cli._time_allowed(20) == (840.0, 180.0)
-    assert codex_cli._time_allowed(47) == (1650.0, 342.0)
+    assert codex_cli._time_allowed(8) == (900.0, 120.0)
+    assert codex_cli._time_allowed(20) == (1300.0, 180.0)
+    assert codex_cli._time_allowed(47) == (2650.0, 342.0)
     monkeypatch.setenv("ROKID_CODEX_TIMEOUT_S", "90")
     assert codex_cli._time_allowed(47) == (90.0, 90.0)
+
+
+def test_twelve_dense_pages_are_not_given_up_at_ten_minutes(monkeypatch):
+    """The operator's use of 2026-11-18: twelve gathered pages of vertical Japanese took a read more than ten minutes.
+    The first booklet was given up at 600 s with both reads still running, and Work and Chat then failed: nothing
+    after 21 minutes. Of the second, one read came back inside the 600 s and the other was ended there."""
+    from app.solvers import codex_cli
+
+    monkeypatch.delenv("ROKID_CODEX_TIMEOUT_S", raising=False)
+    answers, _ = codex_cli._time_allowed(12)
+    assert answers >= 900.0
 
 
 def test_with_sending_off_the_route_reports_it_and_runs_nothing(tmp_path):
@@ -1228,6 +1239,58 @@ def test_a_read_that_hangs_behind_a_finished_one_is_cut_and_the_finished_read_an
     assert cut["waited_s"] >= cut["first_s"] >= 3.0, "as long again as the read that came back"
     assert set(cut) == {"event", "first_s", "waited_s"}, "no reply text in the log"
     assert [call["reply_file"] for call in _runs(codex())] == ["reply-1.json"], "the other never ended by itself"
+
+
+def test_a_slow_first_read_does_not_buy_the_other_as_long_again_without_end(codex, tmp_path, monkeypatch, capsys):
+    """The operator's use of 2026-11-18: one read of twelve dense pages came back after some nine minutes. As long
+    again for the other is most of what is left of a 50-minute test. The wait behind a finished read has a ceiling
+    (four minutes: the two runs of 47 pages lay 220 s apart)."""
+    assert codex_cli._SECOND_READ_MOST_S == 240.0
+    _twice(monkeypatch, _read((1, "④")), _read((1, "④")))
+    monkeypatch.setenv("ROKID_CODEX_LOCATE", "0")
+    monkeypatch.setenv("FAKE_CODEX_SLEEP", "3")
+    monkeypatch.setenv("FAKE_CODEX_SLEEP_2", "120")
+    monkeypatch.setenv("ROKID_CODEX_TIMEOUT_S", "30")
+    monkeypatch.setattr(codex_cli, "_SECOND_READ_LEAST_S", 0.2)
+    monkeypatch.setattr(codex_cli, "_SECOND_READ_MOST_S", 1.0)
+    shown = _shown(codex_cli.CodexCliSolver().answer_all(question=_booklet(tmp_path)))
+
+    assert shown == [([1], "④", "ready", "")]
+    [cut] = _logged(capsys, "codex_read_cut")
+    assert cut["first_s"] >= 3.0 and cut["waited_s"] == 1.0, "the ceiling, not the first read's time again"
+
+
+def _boxes_read(*lines):
+    """One question that fills the printed answer numbers 1 to len(lines), a line for each."""
+    return {"questions": [{"group": "1", "label": "問1", "answer_no": list(range(1, len(lines) + 1)), "pages": [1],
+                           "status": "ready", "answer": "\n".join(lines), "missing_material": "", "diagrams": []}]}
+
+
+def test_the_boxes_of_one_question_are_compared_box_by_box_however_many_there_are(codex, tmp_path, monkeypatch):
+    """Phone, 2026-11-18: a word bank's seven boxes came back as seven lines, "[21]：②" and so on. Together they are
+    longer than a mark, so nothing of them was compared, and the answers looked like ones both reads agreed on."""
+    first = [f"[{number}]：{mark}" for number, mark in zip(range(21, 28), "②⑤①⑦③⑩⑫")]
+    second = first[:5] + ["[26]：⑨", "[27]：⑫"]
+    _twice(monkeypatch, _boxes_read(*first), _boxes_read(*second))
+    [(_, _, status, note)] = _shown(codex_cli.CodexCliSolver().answer_all(question=_booklet(tmp_path)))
+    assert status == "ready" and note, "the sixth box differs"
+
+
+def test_boxes_given_with_the_words_of_their_options_agree_when_label_and_words_do(codex, tmp_path, monkeypatch):
+    """An option's words stand after its label so that a label read wrongly can be found on the paper; a space
+    inside those words is no second part."""
+    lines = ["[1]：③（葉緑体）", "[2]：④（気孔）", "[3]：⑧（道管 2本）", "[4]：⑫（光合成）"]
+    _twice(monkeypatch, _boxes_read(*lines), _boxes_read(*[line.replace("：", ": ") for line in lines]))
+    [(_, _, _, note)] = _shown(codex_cli.CodexCliSolver().answer_all(question=_booklet(tmp_path)))
+    assert note == ""
+
+
+def test_a_label_the_reads_give_differently_for_the_same_words_is_marked(codex, tmp_path, monkeypatch):
+    """The operator's use of 2026-11-18: the paper's labels ran ⑩, ⑫, ⑬ and the answer said ⑪."""
+    lines = ["[1]：③（葉緑体）", "[2]：④（気孔）", "[3]：⑧（道管）", "[4]：⑫（光合成）"]
+    _twice(monkeypatch, _boxes_read(*lines), _boxes_read(*lines[:3], "[4]：⑪（光合成）"))
+    [(_, answer, status, note)] = _shown(codex_cli.CodexCliSolver().answer_all(question=_booklet(tmp_path)))
+    assert "⑫" in answer and status == "ready" and note
 
 
 @pytest.mark.parametrize("first", ["fails", "is not an answer list"])

@@ -1402,6 +1402,23 @@ def test_the_attach_budget_grows_with_the_number_of_files(monkeypatch):
     assert next(clock) > chatgpt_web.UPLOAD_TIMEOUT_S + 2 * chatgpt_web.UPLOAD_PER_FILE_S
 
 
+def test_the_attach_budget_grows_with_the_size_of_the_files_and_an_upload_not_confirmed_says_how_far_it_got(
+        monkeypatch, capsys):
+    """Phone, 2026-11-18: twelve gathered pages are 29 MB as JPEG. The 200 s their count allowed ran out twice with
+    the files still uploading, nothing was sent, and no record said why."""
+    monkeypatch.setattr(chatgpt_web, "UPLOAD_PER_FILE_S", 15.0)
+    page = _NamedTilePage(uploading=True)
+    clock = itertools.count()
+    large = [{"name": f"page{number:03}.jpg", "mimeType": "image/jpeg", "buffer": b"\xff" * 2_400_000}
+             for number in (1, 2)]
+    assert chatgpt_web.attach_images(page, [], files=large, sleep=lambda _s: None,
+                                     now=lambda: float(next(clock))) is False
+    assert next(clock) > chatgpt_web.UPLOAD_TIMEOUT_S + chatgpt_web.UPLOAD_PER_MB_S * 4.8 > 20 + 2 * 15.0
+    [said] = [json.loads(line) for line in capsys.readouterr().out.splitlines() if '"attach_unconfirmed"' in line]
+    assert said == {"event": "attach_unconfirmed", "files": 2, "showing": 2, "megabytes": 4.8,
+                    "seconds": round(chatgpt_web.UPLOAD_TIMEOUT_S + chatgpt_web.UPLOAD_PER_MB_S * 4.8)}
+
+
 def test_a_file_attached_twice_is_refused():
     page = _NamedTilePage(leftover=())
     page.uploads.append(_two_pages())  # a copy the page already shows beside the one about to be written

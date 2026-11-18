@@ -259,6 +259,15 @@ def test_finalize_waits_for_the_gathering(client, tmp_path):
     assert stored["summary"] is not None, "the booklet was finalized on the gathered page"
 
 
+def test_the_wait_for_the_gathering_covers_a_last_clip_behind_long_ones_and_stays_under_the_glasses_own_limit():
+    """The operator's use of 2026-11-18: the twelfth page's clip arrived 3 s before the end and was gathered 165 s
+    after it, behind three clips of ten seconds each; the wait was 150 s and the page went out as one frame. The
+    glasses' finalize call reads for 240 s (DocScanApi), and finalizing takes a second or two after the wait."""
+    from app import main
+
+    assert 165 < main._GATHER_WAIT_S <= 210
+
+
 def test_finalize_goes_on_after_the_limit(client, tmp_path, monkeypatch, capsys):
     from app import main
 

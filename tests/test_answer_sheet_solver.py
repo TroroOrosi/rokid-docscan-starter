@@ -81,6 +81,28 @@ def test_answer_only_system_reads_soft_print_before_it_gives_a_question_up():
     assert "never guess a number, a symbol or a choice label" in _ANSWER_ONLY_SYSTEM
 
 
+def test_answer_only_system_names_a_choice_by_its_printed_label_and_adds_the_words_of_a_short_option():
+    """The operator's use of 2026-11-18: a word bank's labels ran ⑩, ⑫, ⑬ (a sheet marked one digit at a time has no
+    11), the print was soft, and the answers said ⑪: counted along the row, and nothing on the glasses to check by."""
+    assert "printed labels are not always consecutive" in _ANSWER_ONLY_SYSTEM
+    assert "never number the options by counting" in _ANSWER_ONLY_SYSTEM
+    assert "⑫（光合成）" in _ANSWER_ONLY_SYSTEM
+    assert "label alone where the option is a sentence" in _ANSWER_ONLY_SYSTEM
+
+
+def test_answer_only_system_keeps_a_quotation_in_the_language_it_is_printed_in():
+    """The same day: an answer in Japanese quoted an English sentence of the passage in Japanese."""
+    assert "stay in the language and the wording they are printed in" in _ANSWER_ONLY_SYSTEM
+
+
+def test_the_booklet_request_does_not_list_an_answer_sheet_in_view_as_missing():
+    """The same day: five items at the end of the answers each said that the rest of a mark sheet at a capture's edge
+    had not been captured."""
+    from app.solvers.chatgpt_web import _COVERAGE
+
+    assert "is not part of the problems" in _COVERAGE
+
+
 def test_the_booklet_request_makes_one_item_of_a_numbered_question_and_reads_overlaps_where_they_are_sharp():
     from app.solvers.chatgpt_web import _ALL_TASK, _CAPTURE_CONTEXT
 

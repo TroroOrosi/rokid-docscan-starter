@@ -1243,6 +1243,36 @@ def test_new_job_inventory_uses_shared_writer_without_journal_send_or_navigation
     assert not (tmp_path / "browser-state" / "submission.json").exists()
 
 
+def test_new_job_inventory_leaves_a_conversation_for_the_new_chat_page_first(page, monkeypatch, tmp_path):
+    """Phone, 2026-11-18: the tab stood on the conversation of the daily check's one Chat message. The Work entry is
+    on the new-chat page only, so the inventory found none, twice, and Work never stood in behind a Codex CLI that
+    had run out of its time. No send is pending here (the writer is clear), so nothing is left behind."""
+    from app.solvers import cdp
+
+    _upload_composer(page)
+
+    class OnAConversation(_VenueTab):
+        @property
+        def url(self):
+            return chatgpt_web.CHAT_URL if self.navigations else "https://chatgpt.com/c/12345678-1234-1234-1234-123456789abc"
+
+    tab = OnAConversation(page)
+
+    class Browser:
+        contexts = [_Context(tab)]
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(cdp, "connect_over_cdp", lambda endpoint: Browser())
+    monkeypatch.setenv("ROKID_CHATGPT_SEND_ENABLED", "1")
+    resolved = work.WorkWebClient().resolve_new_job_settings(
+        requested_settings={"model": "GPT-6.1 Sol", "effort": "xhigh", "speed": "fast"}, follow_family=True)
+    assert resolved == {"model": "GPT 6.1 Sol", "effort": "xhigh", "speed": "fast"}
+    assert tab.navigations == [chatgpt_web.CHAT_URL]
+    assert page.evaluate("window.sent") == 0 and page.evaluate("window.uploaded") == []
+
+
 @pytest.mark.parametrize("barrier", ["busy", "uncertain"])
 def test_new_job_inventory_cannot_touch_browser_or_pending_journal_across_writer_barriers(monkeypatch, tmp_path, barrier):
     from contextlib import nullcontext

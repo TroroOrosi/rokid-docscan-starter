@@ -825,6 +825,11 @@ class WorkWebClient(chat.ChatGptWebClient):
                     if len(pages) != 1:
                         raise chat.ChatGptWebBrowserUnavailable("a unique existing ChatGPT tab is required for inventory")
                     try:
+                        # The Work entry stands on the new-chat page only. A tab left on a conversation (the daily
+                        # check's one Chat message, a Chat booklet) shows none: on the phone on 2026-11-18 the
+                        # inventory stopped there twice. The writer is clear here, so no send waits in that chat.
+                        if "/c/" in urlsplit(chat._url_of(pages[0])).path:  # also the address made up after a send
+                            pages[0].goto(chat.CHAT_URL, wait_until="domcontentloaded")
                         self._wait_for_composer(pages[0])
                         return resolve_work_model_settings(pages[0], requested_settings=requested_settings,
                                                            follow_family=follow_family)
