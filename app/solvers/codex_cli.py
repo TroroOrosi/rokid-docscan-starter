@@ -42,6 +42,13 @@ read once. A usage limit is taken from the CLI's own sentence, or from an error 
 its failure, not from the service's bare words anywhere in its output. Where a paper prints neither answer numbers nor lettered boxes and the two reads name its questions
 differently, they are compared in order within the pages they cite (``_compared``).
 
+From 2026-11-18 (unit tests and the stand-in CLI only): the first read that is back with a usable reply is handed to
+the caller at once (``Question.on_first_read``), with every answer marked ``read_once``, and the other read goes on
+under the limits above. That reply is then the first of the two that are compared and kept, whichever request it came
+from, and the compared answers stand on the same item objects: the server saves them over the questions it has shown.
+Until then nothing left this module before the slower read ended; on the phone that day one read was back minutes
+before the other was cut, and the wearer had given up. Each read that comes back logs its seconds (``codex_read_done``).
+
 The CLI takes images only. A booklet with audio (listening, mixed English) is refused before anything runs, with the
 error the server answers by handing the booklet to the next route.
 
