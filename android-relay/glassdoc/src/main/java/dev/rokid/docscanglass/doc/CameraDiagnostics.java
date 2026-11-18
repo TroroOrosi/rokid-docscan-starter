@@ -4,9 +4,9 @@ import android.graphics.Rect;
 import android.os.Build;
 import android.hardware.camera2.CameraCharacteristics;
 import android.hardware.camera2.CaptureResult;
-import android.util.Log;
 import android.util.Size;
 import java.util.Arrays;
+import dev.rokid.docscanrelay.UseLog;
 
 /** Allowlisted diagnostics only. Never changes capture requests or gates delivery. */
 final class CameraDiagnostics {
@@ -15,7 +15,7 @@ final class CameraDiagnostics {
 
     static void capabilities(long generation, CameraCharacteristics c, Size size) {
         try {
-            Log.i(TAG, "camera_capabilities gen=" + generation + " jpeg=" + size
+            UseLog.i(TAG, "camera_capabilities gen=" + generation + " jpeg=" + size
                     + " facing=" + value(c.get(CameraCharacteristics.LENS_FACING))
                     + " orientation=" + value(c.get(CameraCharacteristics.SENSOR_ORIENTATION))
                     + " level=" + value(c.get(CameraCharacteristics.INFO_SUPPORTED_HARDWARE_LEVEL))
@@ -28,17 +28,17 @@ final class CameraDiagnostics {
                     + " exposure_range_ns=" + value(c.get(CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE))
                     + " iso_range=" + value(c.get(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE)));
         } catch (RuntimeException | OutOfMemoryError error) {
-            Log.w(TAG, "camera_capabilities gen=" + generation + " unavailable");
+            UseLog.w(TAG, "camera_capabilities gen=" + generation + " unavailable");
         }
     }
 
     static void result(long generation, CaptureResult result) {
         try {
             if (result == null) {
-                Log.i(TAG, "capture_result gen=" + generation + " unavailable");
+                UseLog.i(TAG, "capture_result gen=" + generation + " unavailable");
                 return;
             }
-            Log.i(TAG, "capture_result gen=" + generation
+            UseLog.i(TAG, "capture_result gen=" + generation
                     + " sensor_timestamp_ns=" + value(result.get(CaptureResult.SENSOR_TIMESTAMP))
                     + " exposure_ns=" + value(result.get(CaptureResult.SENSOR_EXPOSURE_TIME))
                     + " iso=" + value(result.get(CaptureResult.SENSOR_SENSITIVITY))
@@ -49,7 +49,7 @@ final class CameraDiagnostics {
                     + " af_state=" + value(result.get(CaptureResult.CONTROL_AF_STATE))
                     + " awb_state=" + value(result.get(CaptureResult.CONTROL_AWB_STATE)));
         } catch (RuntimeException | OutOfMemoryError error) {
-            Log.w(TAG, "capture_result gen=" + generation + " unavailable");
+            UseLog.w(TAG, "capture_result gen=" + generation + " unavailable");
         }
     }
 
@@ -80,7 +80,7 @@ final class CameraDiagnostics {
             boolean fresh = associated && preview != null && preview.timestamp != null
                     && preview.timestamp > 0 && jpegTimestamp >= preview.timestamp
                     && jpegTimestamp - preview.timestamp <= 500_000_000L;
-            try { Log.i(TAG, "framing_pair gen=" + generation + " stream=" + stream
+            try { UseLog.i(TAG, "framing_pair gen=" + generation + " stream=" + stream
                     + " association=" + (still == null || still.timestamp == null ? "unknown" : associated ? "matched" : "mismatch")
                     + " preview_timestamp_ns=" + value(preview == null ? null : preview.timestamp)
                     + " jpeg_timestamp_ns=" + jpegTimestamp
@@ -110,7 +110,7 @@ final class CameraDiagnostics {
             };
             if ((fineReported & bit) == 0) {
                 fineReported |= bit;
-                try { Log.i(TAG, "page_evidence support=" + (bit == 1 ? "supported" : status)
+                try { UseLog.i(TAG, "page_evidence support=" + (bit == 1 ? "supported" : status)
                         + " width=" + width + " height=" + height); }
                 catch (RuntimeException | OutOfMemoryError unavailable) { /* Diagnostic only. */ }
             }

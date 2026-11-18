@@ -571,6 +571,11 @@ class Check:
                     self.server()
         finally:
             self.shell(f"am force-stop {PACKAGE}")  # never the double tap: ending a capture sends it to GPT
+            if self.report:
+                # The app's own record (UseLog, from glassdoc 0.44.19); scripts/use_log_report.py reads it.
+                kept = self.run(self.options.glasses, "exec-out", "cat", f"/sdcard/Android/data/{PACKAGE}/files/use-log.txt")
+                if kept:
+                    (self.report / "use-log.txt").write_bytes(kept)
         failed = [name for name, state, _ in self.rows if state == "FAIL"]
         print("\n" + "-" * 72)
         for name, state, detail in self.rows:

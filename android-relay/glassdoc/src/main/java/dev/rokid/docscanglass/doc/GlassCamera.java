@@ -24,7 +24,6 @@ import android.media.ImageReader;
 import android.os.Build;
 import android.os.Handler;
 import android.os.SystemClock;
-import android.util.Log;
 import android.util.Size;
 import android.util.Range;
 import android.view.Surface;
@@ -40,6 +39,7 @@ import java.util.concurrent.Executor;
 import java.util.concurrent.Executors;
 import dev.rokid.docscanrelay.CaptureProvenance;
 import dev.rokid.docscanrelay.CaptureSurface;
+import dev.rokid.docscanrelay.UseLog;
 
 /**
  * One still per request, straight from {@code android.hardware.camera2}.
@@ -793,7 +793,7 @@ final class GlassCamera implements PageCamera {
                 zslReader = ImageReader.newInstance(jpegSize.getWidth(), jpegSize.getHeight(),
                         ImageFormat.YUV_420_888, ZslFrameBuffer.READER_IMAGES);
                 zslReader.setOnImageAvailableListener(source -> zslFrame(source, token), handler);
-                Log.i(TAG, "producer=zsl_evaluation_yuv ring=3 selected=1 acquire_headroom=2 reader_max=6 size=" + jpegSize);
+                UseLog.i(TAG, "producer=zsl_evaluation_yuv ring=3 selected=1 acquire_headroom=2 reader_max=6 size=" + jpegSize);
             }
             previewOpening = true;
             manager.openCamera(id, new CameraDevice.StateCallback() {
@@ -846,7 +846,7 @@ final class GlassCamera implements PageCamera {
                                 if (yuvStill && pairHeld && !(generation > 0 && !settled)) {
                                     // Preview with full-size YUV is not a guaranteed pair on a LIMITED camera:
                                     // open again with the JPEG on a session of its own.
-                                    Log.w(TAG, "preview with full-size YUV refused; the still keeps its own JPEG session");
+                                    UseLog.w(TAG, "preview with full-size YUV refused; the still keeps its own JPEG session");
                                     yuvStillRefused = true;
                                     release();
                                     return;
@@ -939,7 +939,7 @@ final class GlassCamera implements PageCamera {
                 // A fresh converged result of the restarted stream, or the limit: then frames count again.
                 boolean steady = metering != null && metering.ready(now) && meteringExposureNanos > 0;
                 if (!steady && now - resumeSettlingSince < RESUME_SETTLE_LIMIT_MILLIS) return;
-                Log.i(TAG, "preview_resumed settled=" + steady + " after_ms=" + (now - resumeSettlingSince)
+                UseLog.i(TAG, "preview_resumed settled=" + steady + " after_ms=" + (now - resumeSettlingSince)
                         + " exposure_ns=" + meteringExposureNanos);
                 resumeSettlingSince = 0;
             }
@@ -982,7 +982,7 @@ final class GlassCamera implements PageCamera {
             long exposureSteps = pageChange.exposureSteps();
             pageChange.observeFrame(thumbnail, pixels, imageWidth, imageHeight, row, step, timestamp, now, light);
             // What was left once the reference had been brought to the new exposure: the fit is unmeasured on the glasses.
-            if (exposureSteps != pageChange.exposureSteps()) Log.i(TAG, "exposure_step scene=" + pageChange.sequence() + " "
+            if (exposureSteps != pageChange.exposureSteps()) UseLog.i(TAG, "exposure_step scene=" + pageChange.sequence() + " "
                     + pageChange.lastExposureStep() + " fine=" + pageChange.fineStatus());
             s4 = s5 = s6 = System.nanoTime();
             framing.fine(pageChange.fineStatus(), imageWidth, imageHeight);
@@ -991,7 +991,7 @@ final class GlassCamera implements PageCamera {
             }
             if (previousScene != pageChange.sequence()) {
                 // Why a page turn was counted: without this a retaken page cannot be told from a moved scene.
-                Log.i(TAG, "page_change scene=" + pageChange.sequence() + " " + pageChange.lastChange()
+                UseLog.i(TAG, "page_change scene=" + pageChange.sequence() + " " + pageChange.lastChange()
                         + " exposure_ns=" + meteringExposureNanos + " fine=" + pageChange.fineStatus());
                 sceneStartTimestamp = timestamp;
                 if (generation == 0 || settled) {
@@ -1081,7 +1081,7 @@ final class GlassCamera implements PageCamera {
         if (statusFrameAt > 0) statusGapMillis = Math.max(statusGapMillis, now - statusFrameAt);
         statusFrameAt = now;
         if (now - statusAt < 1000) return;
-        Log.i(TAG, "preview_status frames=" + statusFrames + " max_work_ms=" + statusWorkMillis
+        UseLog.i(TAG, "preview_status frames=" + statusFrames + " max_work_ms=" + statusWorkMillis
                 + " max_gap_ms=" + statusGapMillis + " pending=" + capturePending + " page_ready=" + (pageReady != null)
                 + " future=" + (futurePages != null) + " scene=" + pageChange.sequence()
                 + " page_still=" + pageChange.ready(now) + " metered=" + meteredFrame(now)
@@ -1173,7 +1173,7 @@ final class GlassCamera implements PageCamera {
         try {
             previewDevice.createCaptureSession(pair ? Arrays.asList(previewReader.getSurface(), reader.getSurface())
                     : Collections.singletonList(previewReader.getSurface()), previewSessionCallback, handler);
-            Log.i(TAG, "session_shape full_size=" + pair);
+            UseLog.i(TAG, "session_shape full_size=" + pair);
         } catch (CameraAccessException | RuntimeException error) { previewFailed("session rebuild unavailable"); }
     }
 
@@ -1183,7 +1183,7 @@ final class GlassCamera implements PageCamera {
         if (closed || unknown) return;
         if (video != null) video.gap(reason);
         if (generation > 0 && active(generation)) { fail(reason); return; }
-        Log.w(TAG, "preview failed: " + reason);
+        UseLog.w(TAG, "preview failed: " + reason);
         previewRequested = false;
         previewOpening = false;
         unknown = true;
@@ -1312,7 +1312,7 @@ final class GlassCamera implements PageCamera {
                 if (!current()) return;
                 // Frames flushed by this class's own session change are not a camera failure.
                 if (failure != null && failure.getReason() == CaptureFailure.REASON_FLUSHED) return;
-                if (failure != null) Log.w(TAG, "preview frame failed frame=" + failure.getFrameNumber()
+                if (failure != null) UseLog.w(TAG, "preview frame failed frame=" + failure.getFrameNumber()
                         + " reason=" + failure.getReason() + " image=" + failure.wasImageCaptured());
                 // A dropped preview frame only lacks its metering result; the stream and the next result go on.
                 // The glasses drop one or two about a second after every stream start (2026-11-11/12), and
@@ -1382,7 +1382,7 @@ final class GlassCamera implements PageCamera {
             CaptureRequest.Builder request = previewDevice.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW);
             request.addTarget(previewReader.getSurface()); applyMetering(request);
             previewSession.setRepeatingRequest(request.build(), previewResults(token, false), handler);
-            Log.i(TAG, "exposure_pace fps=" + pace);
+            UseLog.i(TAG, "exposure_pace fps=" + pace);
         } catch (CameraAccessException | RuntimeException failure) { previewFailed("exposure pace unavailable"); }
     }
 
@@ -1516,7 +1516,7 @@ final class GlassCamera implements PageCamera {
         handler.postDelayed(timeout, CAPTURE_TIMEOUT_MILLIS);
         if (mode != Mode.ZSL_EVALUATION_YUV) requestStill(current);
         else {
-            Log.i(TAG, "producer=zsl_evaluation_yuv gen=" + current + " source_age_ns="
+            UseLog.i(TAG, "producer=zsl_evaluation_yuv gen=" + current + " source_age_ns="
                     + (SystemClock.elapsedRealtimeNanos() - selectedInput.timestamp) + " raw_ring=" + zslFrames.size());
             handler.postDelayed(inputReleaseTimeout, CAPTURE_TIMEOUT_MILLIS);
             long sessionGeneration = previewGeneration;
@@ -1604,7 +1604,7 @@ final class GlassCamera implements PageCamera {
             CaptureRequest still = request.build();
             stillJpegQuality = activeAlternative == bracketShot && bracketVariant != null && bracketVariant.jpegQuality != null
                     ? bracketVariant.jpegQuality : STILL_JPEG_QUALITY;
-            Log.i(TAG, "still_requested gen=" + current + " manual_exposure=" + (stillExposure != null)
+            UseLog.i(TAG, "still_requested gen=" + current + " manual_exposure=" + (stillExposure != null)
                     + " producer=" + (yuvStill ? "yuv_still" : "camera_jpeg"));
             if (mode != Mode.NATIVE_STILL || yuvStill) {
                 // capture() takes priority over repeating preview without stopping its next frames.
@@ -1623,7 +1623,7 @@ final class GlassCamera implements PageCamera {
                             if (!active(current) || token != previewGeneration || unknown) { configured.close(); return; }
                             previewSession = configured;
                             stillSession = true;
-                            Log.i(TAG, "still_session gen=" + current + " after_ms=" + (SystemClock.elapsedRealtime() - startedAtMillis));
+                            UseLog.i(TAG, "still_session gen=" + current + " after_ms=" + (SystemClock.elapsedRealtime() - startedAtMillis));
                             try { configured.capture(still, captureCallback(current), handler); }
                             catch (CameraAccessException | RuntimeException error) {
                                 fail("capture " + error.getClass().getSimpleName());
@@ -1666,7 +1666,7 @@ final class GlassCamera implements PageCamera {
                 else {
                     stillResultFinished = true;
                     if (pendingJpeg != null) deliverJpeg();
-                    else Log.w(TAG, "capture_result gen=" + current + " unavailable; waiting for JPEG");
+                    else UseLog.w(TAG, "capture_result gen=" + current + " unavailable; waiting for JPEG");
                 }
             }
             @Override public void onCaptureBufferLost(CameraCaptureSession source,
@@ -1780,7 +1780,7 @@ final class GlassCamera implements PageCamera {
                     encodingStill = false;
                     if (!active(current) || pendingJpeg != null) return; // settled while encoding: timeout, failure or close
                     if (done == null || done.length == 0 || done.length > MAX_JPEG_BYTES) { fail("still could not be encoded"); return; }
-                    Log.i(TAG, "still_encoded gen=" + current + " bytes=" + done.length + " quality=" + quality
+                    UseLog.i(TAG, "still_encoded gen=" + current + " bytes=" + done.length + " quality=" + quality
                             + " encode_ms=" + (SystemClock.elapsedRealtime() - arrived));
                     pendingJpeg = new PendingJpeg(done, width, height, sensorTimestamp);
                     if (stillExposure == null || stillResultFinished) deliverJpeg();
@@ -1831,7 +1831,7 @@ final class GlassCamera implements PageCamera {
         autoFocusSensorTimestamp = 0;
         handler.removeCallbacks(timeout);
         long elapsed = SystemClock.elapsedRealtime() - startedAtMillis;
-        Log.i(TAG, "captured " + width + "x" + height
+        UseLog.i(TAG, "captured " + width + "x" + height
                 + " " + jpeg.length + "B in " + elapsed + "ms gen=" + generation);
         // No native Image is held when the consumer queues another allocation.
         // Reuse the configured readers/session until pause, close or failure.
@@ -1941,7 +1941,7 @@ final class GlassCamera implements PageCamera {
         handler.removeCallbacks(timeout);
         handler.removeCallbacks(prepareTimeout);
         release();
-        Log.w(TAG, "capture failed: " + reason);
+        UseLog.w(TAG, "capture failed: " + reason);
         callback.onCaptureFailed(reason);
         futureIdle();
     }
@@ -2030,7 +2030,7 @@ final class GlassCamera implements PageCamera {
             else {
                 Thread cleanup = new Thread(() -> {
                     try { owners.run(); handler.post(ownersClosed); }
-                    catch (RuntimeException | OutOfMemoryError error) { Log.w(TAG, "ZSL cleanup " + error.getClass().getSimpleName()); }
+                    catch (RuntimeException | OutOfMemoryError error) { UseLog.w(TAG, "ZSL cleanup " + error.getClass().getSimpleName()); }
                 }, "glass-zsl-owners");
                 cleanup.setDaemon(true); cleanup.start();
             }
@@ -2094,7 +2094,7 @@ final class GlassCamera implements PageCamera {
             resource.close();
             return true;
         } catch (Exception | OutOfMemoryError error) {
-            Log.w(TAG, "camera close " + error.getClass().getSimpleName());
+            UseLog.w(TAG, "camera close " + error.getClass().getSimpleName());
             return false;
         }
     }

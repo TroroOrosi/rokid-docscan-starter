@@ -67,6 +67,22 @@ public final class DocScanController implements AutoCloseable {
     private static final long CLIP_TIMEOUT_SECONDS = 60;
 
     static long captureTimeoutSeconds(boolean clips) { return clips ? CLIP_TIMEOUT_SECONDS : CAPTURE_TIMEOUT_SECONDS; }
+
+    private static final String LOG = "DocScanRelay";
+    /** The upload keeps the processor for two minutes at a time, and for a call that may run longer, that call's limit. */
+    private static final long TRANSFER_LOCK_MILLIS = 120_000;
+    private static final long FINALIZE_LOCK_MARGIN_MILLIS = 30_000;
+
+    /**
+     * How long the processor is kept for one call of the upload. Two minutes were taken before each clip, though a
+     * clip's call may run ten, and the same two had to last through the finalization, which the server holds while it
+     * gathers the clips and the client reads for four: whether the processor slept inside such a call was never seen.
+     */
+    static long transferLockMillis(String kind) {
+        if ("clip".equals(kind)) return DocScanApi.CLIP_CALL_TIMEOUT_MILLIS;
+        if ("finalize".equals(kind)) return DocScanApi.READ_TIMEOUT_MILLIS + FINALIZE_LOCK_MARGIN_MILLIS;
+        return TRANSFER_LOCK_MILLIS;
+    }
     private static final long SHUTTER_STABILIZATION_MILLIS = 1500;
     private static final long CUSTOM_VIEW_ACK_TIMEOUT_MILLIS = 3000;
     // This firmware delivers one tap and nothing else, and the tap is already
@@ -177,6 +193,11 @@ public final class DocScanController implements AutoCloseable {
     private boolean reacquiringCaptureGap;
     private volatile boolean localCameraUnknown;
     private static final long LOCAL_REVIEW_MILLIS = 3000;
+    // For the use log, the controller's thread: when the end was asked for, and where the time of the review now
+    // being shown went (-1: this showing did not save the photo again).
+    private long endRequestedAtMillis;
+    private long reviewPendingMillis = -1, reviewDecodeMillis = -1, reviewAskedAtMillis;
+    private final UploadLog uploadLog = new UploadLog();
     private static final String UPLOAD_STOPPED = "保存・送信処理を停止しました。原本は保持しています";
     private volatile long sessionId;
     private int reviewIndex;
@@ -219,7 +240,7 @@ public final class DocScanController implements AutoCloseable {
                     long[] held = LocalCaptureSession.held(entry);
                     if (held[1] >= 1024 * 1024) line.append(' ').append(entry.getName()).append('=').append(held[1] / (1024 * 1024)).append("MB/").append(held[0]);
                 }
-                android.util.Log.i("DocScanRelay", line.toString());
+                UseLog.i(LOG, line.toString());
             }, "local-scans-sweep");
             sweep.setDaemon(true);
             sweep.start();
@@ -682,6 +703,11 @@ public final class DocScanController implements AutoCloseable {
                 accepted = true;
                 selection.accept(true);
                 publish(RelayState.READY, List.of("読取を開始", "用紙全体を入れてください", ""), "Started local capture session");
+                // A clip that a reading before this one left behind (up to 156 MB) stayed until this one's first
+                // review. Here, before the camera is asked for anything; a reading taken up again keeps the inbox,
+                // as its page under review may still wait for its clip there.
+                ClipInbox inbox = clipInbox;
+                if (inbox != null) inbox.discardExcept(java.util.Set.of());
                 startLocalCapture(false);
             } catch (Exception error) { fail("読取を開始できません", error); if (!accepted) selection.accept(false); }
         });
@@ -958,6 +984,10 @@ public final class DocScanController implements AutoCloseable {
     private void finishLocalCaptureNow() {
         invalidateInspectionFeedback();
         capturePaused = false;
+        if (!finishCaptureRequested) {
+            endRequestedAtMillis = android.os.SystemClock.elapsedRealtime();
+            UseLog.i(LOG, "end_requested state=" + state);
+        }
         finishCaptureRequested = true;
         autoRunGeneration++;
         stopFutureObservation(this::finishLocalCaptureWhenCameraIdle);
@@ -2062,11 +2092,13 @@ public final class DocScanController implements AutoCloseable {
         int pageIndex = candidate.pageIndex;
         CaptureReviewStore.Pending previous = captureReview.peek();
         CaptureReviewStore.Pending pending;
+        long saving = android.os.SystemClock.elapsedRealtime();
         try {
             pending = CaptureReviewTransaction.replace(
                     captureReview,
                     candidate,
                     captureReviewPersistence::save);
+            reviewPendingMillis = android.os.SystemClock.elapsedRealtime() - saving;
         } catch (IOException error) {
             if (previous != null) {
                 listener.onCaptureReview(previous);
@@ -2161,8 +2193,10 @@ public final class DocScanController implements AutoCloseable {
 
     private void commitLocalPhoto(CaptureReviewStore.Confirmation confirmation) {
         CaptureReviewStore.Pending pending = confirmation.pending();
+        long began = android.os.SystemClock.elapsedRealtime(), recorded = began;
         try {
             localSession.commit(pending);
+            recorded = android.os.SystemClock.elapsedRealtime();
             localSession.attachClip(pending.pageIndex, pending.provenance == null ? null : pending.provenance.captureId, clipInbox);
             if (reacquiringCaptureGap) {
                 localSession.resolveCaptureGap();
@@ -2180,6 +2214,9 @@ public final class DocScanController implements AutoCloseable {
         reviewGeneration++;
         try { captureReviewPersistence.clearAfterCommit(); }
         catch (IOException ignored) { /* Recovery compares the retained pending file with the committed revision. */ }
+        UseLog.i(LOG, "page_saved index=" + pending.pageIndex + " record_ms=" + (recorded - began)
+                + " hash_ms=" + localSession.lastClipHashMillis()
+                + " total_ms=" + (android.os.SystemClock.elapsedRealtime() - began));
 
         manualCaptureRequested = false;
         listener.onCaptureReviewCleared();
@@ -2335,7 +2372,8 @@ public final class DocScanController implements AutoCloseable {
             PowerManager power = (PowerManager)context.getSystemService(Context.POWER_SERVICE);
             PowerManager.WakeLock transferLock = power == null ? null
                     : power.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "docscan:photo-transfer");
-            if (transferLock != null) transferLock.setReferenceCounted(false); // each clip renews the same two minutes
+            if (transferLock != null) transferLock.setReferenceCounted(false); // taken anew before a call with a longer limit
+            UploadLog calls = uploadLog.of(saved);
             boolean failed = false;
             boolean analysisStarted = false;
             boolean httpInProgress = false;
@@ -2343,12 +2381,14 @@ public final class DocScanController implements AutoCloseable {
             boolean retryable = false;
             JSONObject finished = null;
             try {
-                if (transferLock != null) transferLock.acquire(120_000);
+                if (transferLock != null) transferLock.acquire(TRANSFER_LOCK_MILLIS);
                 LocalCaptureSession.Page page = saved.nextUnsent();
                 if ((page != null || saved.listening()) && saved.documentId() == 0) {
                     // An ambiguous create can leave an empty server document; images only use the durably bound ID.
                     httpInProgress = true;
+                    calls.begin("document", -1, -1);
                     JSONObject created = destination.createDocument("Rokid scan");
+                    calls.end("ok", false);
                     httpInProgress = false;
                     saved.bindDocument(created.getLong("document_id"));
                     if (saved.listening()) serial.execute(() -> {
@@ -2363,8 +2403,10 @@ public final class DocScanController implements AutoCloseable {
                     httpInProgress = true;
                     InspectionCapture diagnostic = photo.provenance == null ? null : inspectionCaptures.get(photo.provenance.captureId);
                     CaptureInspectionOrigin origin = inspectionOrigin(saved, destination, photo.provenance);
+                    calls.begin("page", photo.pageIndex, photo.jpeg.length);
                     JSONObject receipt = destination.uploadPage(saved.documentId(), photo.pageIndex, photo.jpeg, photo.ocrText,
                             photo.rotationDegrees, photo.capturedAtMillis, photo.provenance, origin);
+                    calls.end("ok", false);
                     httpInProgress = false;
                     saved.acknowledge(page);
                     if (origin != null) startInspectionFeedback(diagnostic, page, receipt);
@@ -2375,10 +2417,12 @@ public final class DocScanController implements AutoCloseable {
                 // gathers a clip into its page and holds the finalization for the clips it has.
                 LocalCaptureSession.Clip clip = saved.nextUnsentClip();
                 while (!closed && clip != null) {
-                    if (transferLock != null) transferLock.acquire(120_000);
+                    if (transferLock != null) transferLock.acquire(transferLockMillis("clip"));
                     httpInProgress = true;
+                    calls.begin("clip", clip.index, clip.file.length());
                     try {
                         destination.uploadPageClip(saved.documentId(), clip.index, clip.captureId, clip.sha256, clip.file, clip.record);
+                        calls.end("ok", false);
                     } catch (DocScanApi.ApiException refused) {
                         // 409: the page is another capture's now. 400, 404, 413, 422: the server cannot take this
                         // clip at all. Either way the page itself is held and the server names it as left
@@ -2386,6 +2430,7 @@ public final class DocScanController implements AutoCloseable {
                         // transfer and is handled as one.
                         int status = refused.getStatusCode();
                         if (status != 409 && status != 400 && status != 404 && status != 413 && status != 422) throw refused;
+                        calls.end("http_" + status, false);
                     }
                     httpInProgress = false;
                     saved.acknowledgeClip(clip);
@@ -2405,9 +2450,18 @@ public final class DocScanController implements AutoCloseable {
                     // ponytail: tried again every five seconds without a limit, as page uploads are. A server that
                     // answers 5xx for good shows "接続を待っています" until the wearer leaves; count the tries if met.
                     httpInProgress = true;
+                    if (transferLock != null) transferLock.acquire(transferLockMillis("finalize"));
+                    calls.begin("finalize", -1, -1);
                     destination.finalizeDocument(saved.documentId());
+                    calls.end("ok", false);
+                    if (transferLock != null) transferLock.acquire(TRANSFER_LOCK_MILLIS); // the calls that follow, as before
                     httpInProgress = false;
-                    if (saved.sessionId() == 0) saved.bindSession(destination.createExamSession(saved.documentId(), saved.examType()).getLong("session_id"));
+                    if (saved.sessionId() == 0) {
+                        calls.begin("exam", -1, -1);
+                        JSONObject made = destination.createExamSession(saved.documentId(), saved.examType());
+                        calls.end("ok", false);
+                        saved.bindSession(made.getLong("session_id"));
+                    }
                     serial.execute(() -> {
                         if (closed || localSession != saved) return;
                         sessionId = saved.sessionId();
@@ -2416,7 +2470,9 @@ public final class DocScanController implements AutoCloseable {
                     });
                     if (saved.listening() && !saved.mixed()) destination.attachDocumentAudio(saved.sessionId());
                     httpInProgress = true;
+                    calls.begin("finalize_reading", -1, -1);
                     finished = destination.finalizeReadingLocal(saved.sessionId());
+                    calls.end("ok", false);
                     httpInProgress = false;
                     if (!closed) saved.setPhase("reading".equals(finished.optString("status"))
                             ? LocalCaptureSession.Phase.CAPTURE : LocalCaptureSession.Phase.REVIEW);
@@ -2429,6 +2485,7 @@ public final class DocScanController implements AutoCloseable {
                     saved.acknowledgeAudio();
                 }
             } catch (Exception error) {
+                calls.end(UseLog.failure(error), true); // writes nothing when no call was in hand
                 failed = true;
                 // httpInProgress: only around calls that can be repeated; local saves and the making of a session are not.
                 retryable = error instanceof IOException && (audioAttachInProgress || httpInProgress);
@@ -2470,6 +2527,44 @@ public final class DocScanController implements AutoCloseable {
                 }
             }); } catch (RejectedExecutionException ignored) { }
         });
+    }
+
+    /**
+     * The use log's lines for the calls of the upload pass: what was sent, how long it took and how it ended, in
+     * names and numbers alone. The upload's own thread only.
+     */
+    private final class UploadLog {
+        private final java.util.Map<String, Integer> failed = new java.util.HashMap<>();
+        private LocalCaptureSession reading;
+        private String kind;
+        private int index;
+        private long began;
+
+        UploadLog of(LocalCaptureSession saved) {
+            if (reading != saved) failed.clear(); // another reading's page 0 is not this one's tried again
+            reading = saved;
+            kind = null;
+            return this;
+        }
+
+        void begin(String kind, int index, long bytes) {
+            this.kind = kind;
+            this.index = index;
+            Integer before = failed.get(kind + ":" + index);
+            if (before != null) UseLog.i(LOG, "upload_retry kind=" + kind + " index=" + index + " try=" + (before + 1));
+            UseLog.i(LOG, "upload_begin kind=" + kind + " index=" + index + " bytes=" + bytes + " state=" + state);
+            began = android.os.SystemClock.elapsedRealtime();
+        }
+
+        /** {@code again}: the call failed and may be made once more; a call that went through or was let go is not. */
+        void end(String result, boolean again) {
+            if (kind == null) return;
+            UseLog.i(LOG, "upload_end kind=" + kind + " index=" + index
+                    + " ms=" + (android.os.SystemClock.elapsedRealtime() - began) + " result=" + result);
+            if (again) failed.merge(kind + ":" + index, 1, Integer::sum);
+            else failed.remove(kind + ":" + index);
+            kind = null;
+        }
     }
 
     public void retakePendingCapture() {
@@ -2757,10 +2852,13 @@ public final class DocScanController implements AutoCloseable {
         }
         state = RelayState.CAPTURE_REVIEW;
         currentHudLines = lines;
+        long showing = android.os.SystemClock.elapsedRealtime();
         long viewGeneration = link.showCaptureReview(
                 pending.jpeg,
                 pending.rotationDegrees,
                 lines);
+        reviewAskedAtMillis = android.os.SystemClock.elapsedRealtime();
+        reviewDecodeMillis = reviewAskedAtMillis - showing; // a local surface makes the review's picture inside that call
         reviewViewGeneration = viewGeneration;
         if (pending.needsSceneRecapture()) link.showCaptureReviewNotice("前スワイプで撮り直し");
         listener.onUpdate(RelayState.CAPTURE_REVIEW, lines, diagnostic);
@@ -2913,6 +3011,10 @@ public final class DocScanController implements AutoCloseable {
         }
         autoCommitScheduled = true;
         long delayMillis = LOCAL_REVIEW_MILLIS;
+        UseLog.i(LOG, "review_shown index=" + pending.pageIndex + " pending_ms=" + reviewPendingMillis
+                + " decode_ms=" + reviewDecodeMillis
+                + " drawn_ms=" + (android.os.SystemClock.elapsedRealtime() - reviewAskedAtMillis));
+        reviewPendingMillis = -1;
         reviewDeadlineMillis = android.os.SystemClock.elapsedRealtime() + delayMillis;
         reviewWindow = new ReviewWindow(reviewGeneration, reviewDeadlineMillis - delayMillis,
                 reviewDeadlineMillis, pending.pageIndex);
@@ -3188,6 +3290,10 @@ public final class DocScanController implements AutoCloseable {
         reviewIndex = 0;
         reviewViewPage = 0;
         if (localSession != null) {
+            // -1: the end was asked for before this start of the app.
+            UseLog.i(LOG, "finalize_done ms=" + (endRequestedAtMillis == 0 ? -1
+                    : android.os.SystemClock.elapsedRealtime() - endRequestedAtMillis));
+            endRequestedAtMillis = 0;
             publish(RelayState.REVIEW, List.of("答案を取得", "", ""), diagnostic);
             return;
         }

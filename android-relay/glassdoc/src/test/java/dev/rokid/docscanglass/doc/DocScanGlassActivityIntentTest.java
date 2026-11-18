@@ -448,6 +448,64 @@ public class DocScanGlassActivityIntentTest {
         assertEquals("Restart never starts a capture automatically", RelayState.DISCONNECTED, controller.getState());
     }
 
+    /** The app's lines for the use log that begin with this word, as logcat holds them too. */
+    private static List<String> useLog(String word) {
+        List<String> lines = new ArrayList<>();
+        for (org.robolectric.shadows.ShadowLog.LogItem item
+                : new ArrayList<>(org.robolectric.shadows.ShadowLog.getLogsForTag("DocScanGlassDoc"))) {
+            if (item.msg.startsWith(word + " ")) lines.add(item.msg);
+        }
+        return lines;
+    }
+
+    @Test public void aNewReadingIsNotStartedWithLessFreeSpaceThanItsClipsMayNeed() throws Exception {
+        // Clips are kept until they are sent and nothing checked the space: a full store ended the capture as a camera failure.
+        assertTrue(DocScanGlassActivity.roomForReading(DocScanGlassActivity.MIN_FREE_BYTES_FOR_READING));
+        assertFalse(DocScanGlassActivity.roomForReading(DocScanGlassActivity.MIN_FREE_BYTES_FOR_READING - 1));
+        assertEquals(700L << 20, DocScanGlassActivity.MIN_FREE_BYTES_FOR_READING);
+        // File.getUsableSpace says 0 when it cannot tell. Not knowing is no reason to refuse a reading at the venue,
+        // where nobody can do anything about it; a store that is really full ends the capture as it did before.
+        assertTrue(DocScanGlassActivity.roomForReading(0));
+        assertTrue(DocScanGlassActivity.roomForReading(-1));
+        assertFalse(DocScanGlassActivity.roomForReading(1));
+
+        controller.close();
+        controller = new DocScanController(activity, new Surface(true), null, updates,
+                new ClientIdentity("test-glasses", "intent-test/1", "fake-camera"));
+        setField(activity, "controller", controller);
+        setField(activity, "choosingSession", true);
+        Shadows.shadowOf(activity.getApplication()).grantPermissions(android.Manifest.permission.CAMERA);
+        java.lang.reflect.Method apply = DocScanGlassActivity.class.getDeclaredMethod("applyIntent", Intent.class, boolean.class);
+        apply.setAccessible(true);
+        apply.invoke(activity, new Intent(), true);
+        awaitSerial();
+        activity.freeBytes = () -> (700L << 20) - 1;
+        gesture(GlassesInputAction.BACK, 1000L);
+        awaitSerial();
+        assertFalse("nothing is started", controller.hasLocalSession());
+        List<String> shown = org.robolectric.util.ReflectionHelpers.getField(hud, "lines");
+        assertEquals("空き容量不足 699MB", shown.get(0));
+        assertEquals(List.of("start_refused free_mb=699"), useLog("start_refused"));
+
+        gesture(GlassesInputAction.SWIPE_FORWARD, 2000L); // any gesture brings the choices back, as after every notice
+        activity.freeBytes = () -> 700L << 20;
+        gesture(GlassesInputAction.BACK, 3000L);
+        awaitSerial();
+        assertTrue("with room for it the same choice starts", controller.hasLocalSession());
+    }
+
+    @Test public void everyGestureIsWrittenWithTheScreenItMet() throws Exception {
+        // Until 2026-11-19 gestures were logged by a debuggable build only: a use left no trace of when the wearer tapped.
+        setField(activity, "choosingSession", true);
+        gesture(GlassesInputAction.SWIPE_FORWARD, 1000L);
+        setField(activity, "choosingSession", false);
+        gesture(GlassesInputAction.BACK, 2000L);
+        List<String> written = useLog("gesture");
+        assertEquals(written.toString(), 2, written.size());
+        assertTrue(written.get(0), written.get(0).matches("gesture kind=SWIPE_FORWARD phase=chooser state=[A-Z_]+ asleep=(true|false) paused=false"));
+        assertTrue(written.get(1), written.get(1).matches("gesture kind=BACK phase=[a-z_]+ state=[A-Z_]+ asleep=(true|false) paused=false"));
+    }
+
     private void awaitSerial() throws Exception {
         Field serial = DocScanController.class.getDeclaredField("serial");
         serial.setAccessible(true);

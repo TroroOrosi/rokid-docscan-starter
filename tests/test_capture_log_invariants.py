@@ -250,6 +250,26 @@ def test_the_time_form_of_logcat_and_a_line_without_a_time_are_read():
     assert rules(text) == ["R2", "R4"]
 
 
+def test_the_apps_own_use_log_is_read_as_logcat_is():
+    """From glassdoc 0.44.19 the app keeps its lines in a file of its own (use-log.txt: epoch milliseconds, the
+    milliseconds since the glasses started, the tag, the message), which a restart of the glasses does not lose."""
+    from datetime import datetime
+
+    def use_log(*lines):
+        return "\n".join(f"{int(datetime(2026, 11, 19, 9, 0, second).timestamp() * 1000) + millis} {5000 + second * 1000} {tag} {message}"
+                         for second, millis, tag, message in lines)
+
+    text = use_log((0, 0, "DocScanGlassDoc", SAVED), (2, 0, "DocScanRelay", "upload_begin kind=page index=0 bytes=9 state=READING"),
+                   (3, 250, "DocScanGlassDoc", "gesture kind=SHORT_TAP phase=capturing state=READING asleep=false paused=false"),
+                   (20, 0, "DocScanGlassDoc", ARMED))
+    entries = checker.parse(text)
+    assert [(entry.stamp, entry.state) for entry in entries] == [
+        ("09:00:00.000", "READING"), ("09:00:03.250", None), ("09:00:20.000", "AIMING")], "the app's tag alone, as in logcat"
+    assert entries[2].time - entries[0].time == 20.0
+    assert rules(text) == ["R2"], "twenty quiet seconds after a save"
+    assert [entry.stamp for entry in checker.parse(text, since="09:00:03")] == ["09:00:03.250", "09:00:20.000"]
+
+
 def test_the_command_prints_one_line_a_violation_and_its_exit_code_tells(tmp_path, capsys):
     clean, broken, empty = tmp_path / "clean.txt", tmp_path / "broken.txt", tmp_path / "empty.txt"
     clean.write_text(log(f"09:00:00.000 {SAVED}", f"09:00:04.000 {ARMED}"), encoding="utf-8")

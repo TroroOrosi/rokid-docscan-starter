@@ -12,6 +12,8 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.Arrays;
 
+import dev.rokid.docscanrelay.UseLog;
+
 /**
  * Turns the camera's frames into one page's clip. {@link ClipCamera} calls {@link #open} and {@link #end} on the
  * camera's thread and {@link #offer} on the frames' thread, never one during another, and one clip at a time.
@@ -200,7 +202,11 @@ interface ClipEncoder {
                 try {
                     awaitEnd().done(wrote, clip.length(), failure);
                 } finally {
+                    long releasing = SystemClock.elapsedRealtime();
                     codec.release();
+                    // The next clip may open its encoder while this one is still being let go: how long that takes is
+                    // written for every clip.
+                    UseLog.i("DocScanGlassDoc", "clip_release ms=" + (SystemClock.elapsedRealtime() - releasing));
                 }
             }
         }

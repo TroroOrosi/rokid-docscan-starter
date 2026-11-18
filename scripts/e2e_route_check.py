@@ -224,6 +224,12 @@ class Check:
                 self.read_and_exit()
         finally:
             self.sh(f"am force-stop {PACKAGE}")
+            if self.report:
+                # The app's own record (UseLog, from glassdoc 0.44.19): every gesture, upload and step with its time.
+                # The whole file, earlier runs included; scripts/use_log_report.py reads the last reading in it.
+                kept = self.adb("exec-out", "cat", f"/sdcard/Android/data/{PACKAGE}/files/use-log.txt", timeout=60)
+                if kept:
+                    (self.report / "use-log.txt").write_bytes(kept)
             if watcher:
                 watcher.terminate()
                 subprocess.run([ADB, "disconnect", "127.0.0.1:5555"], capture_output=True, timeout=20)

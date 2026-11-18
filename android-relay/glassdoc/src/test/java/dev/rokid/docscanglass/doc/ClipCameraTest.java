@@ -757,8 +757,29 @@ public class ClipCameraTest {
         // wait for the first frame and for the watch preview's return, the gain applied.
         List<org.robolectric.shadows.ShadowLog.LogItem> lines = org.robolectric.shadows.ShadowLog.getLogsForTag("DocScanGlassDoc");
         String line = lines.get(lines.size() - 1).msg;
-        // And, after those: whether the clip became its page, and how many short clips in a row were not kept.
-        assertTrue(line, line.matches("clip frames=66 counted=60 dropped=0 bytes=8 first_ms=\\d+ back_ms=\\d+ boost=500 exposure_ms=30 gyro=66 kept=true short=0"));
+        // And, after those: whether the clip became its page, and how many short clips in a row were not kept. Then
+        // what the wait for the first frame and the end of a clip are made of: opening the clip, the wait for the
+        // watch session and whether it ran out; from the last frame to the file closed, the page's own files, and from
+        // the file closed to the page handed over.
+        assertTrue(line, line.matches("clip frames=66 counted=60 dropped=0 bytes=8 first_ms=\\d+ back_ms=\\d+ boost=500 exposure_ms=30 gyro=66 kept=true short=0"
+                + " open_ms=\\d+ idle_ms=\\d+ idle_timeout=false drain_ms=\\d+ page_ms=\\d+ closed_ms=\\d+"));
+    }
+
+    @Test public void the_clips_line_says_that_the_watch_session_was_left_without_its_word() {
+        // The wait for the first frame was 1.1 to 2.4 s on the glasses and nothing said whether these 1.5 s were in it.
+        watching();
+        camera.captureOnce(); idle(0);
+        assertEquals("the watch session has not said that it is idle", 1, device().configurations);
+        idle(1500);
+        assertEquals(2, device().configurations);
+        clipFrames(66, 0); idle(0);
+        watchingAgain();
+        assertEquals(1, pages.size());
+        String line = null;
+        for (org.robolectric.shadows.ShadowLog.LogItem item : org.robolectric.shadows.ShadowLog.getLogsForTag("DocScanGlassDoc")) {
+            if (item.msg.startsWith("clip frames=")) line = item.msg;
+        }
+        assertTrue(line, line.matches(".* idle_ms=1500 idle_timeout=true .*"));
     }
 
     @Test public void a_second_request_during_a_clip_starts_nothing() {

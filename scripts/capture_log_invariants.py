@@ -49,6 +49,8 @@ TAG = "DocScanGlassDoc"
 _LINE = re.compile(
     r"^(?:(?:\d{4}-)?(\d\d)-(\d\d)\s+(\d\d):(\d\d):(\d\d)\.(\d{3}))?.*?\b" + TAG + r"\b(?:\s*\(\s*\d+\s*\))?\s*:\s?(.*)$"
 )
+# The app's own record of a use (UseLog, from glassdoc 0.44.19): "<epoch ms> <ms since the glasses started> <tag> <message>".
+_USE_LOG = re.compile(r"^(\d{12,14}) \d+ " + TAG + r" (.*)$")
 _STATE = re.compile(
     r"^(DISCONNECTED|READY|AIMING|STABILIZING|CAPTURING|OCR|CAPTURE_REVIEW|UPLOADING|READING|LISTENING|FINALIZING"
     r"|REVIEW|ERROR): (.*)$"
@@ -93,6 +95,13 @@ def parse(text: str, since: str | None = None) -> list[Entry]:
     entries: list[Entry] = []
     time, started = 0.0, since is None
     for line in text.splitlines():
+        own = _USE_LOG.match(line.rstrip())
+        if own:
+            # The app's own file (use-log.txt): the time is the glasses' clock in milliseconds, shown as this PC's
+            # time of day, which is the glasses' when both keep the same zone.
+            moment = datetime.fromtimestamp(int(own[1]) / 1000)
+            stamp = moment.strftime("%m-%d %H:%M:%S.") + f"{moment.microsecond // 1000:03d}"
+            line = f"{stamp} I {TAG}: {own[2]}"
         match = _LINE.match(line.rstrip())
         if not match:
             continue

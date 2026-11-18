@@ -7,13 +7,13 @@ import android.hardware.SensorEventListener;
 import android.hardware.SensorManager;
 import android.os.Handler;
 import android.os.HandlerThread;
-import android.util.Log;
 import java.io.BufferedOutputStream;
 import java.io.DataOutputStream;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.util.Locale;
+import dev.rokid.docscanrelay.UseLog;
 
 /**
  * The head's turning speed for as long as the camera is open. It decides nothing: it is the evidence the capture
@@ -133,7 +133,7 @@ final class HeadMotion {
                 written = trace.length();
                 out = new DataOutputStream(new BufferedOutputStream(new FileOutputStream(trace, true), 1 << 16));
             } catch (IOException | RuntimeException unavailable) {
-                Log.w(TAG, "head_motion trace unavailable " + unavailable.getClass().getSimpleName());
+                UseLog.w(TAG, "head_motion trace unavailable " + unavailable.getClass().getSimpleName());
             }
         }
 
@@ -177,7 +177,7 @@ final class HeadMotion {
         if (thread == null || sensorTimestampNanos == null || exposureNanos == null) return;
         long window = exposureNanos + (skewNanos == null ? 0 : skewNanos);
         Span span = ring.between(sensorTimestampNanos, sensorTimestampNanos + window);
-        Log.i(TAG, span == null ? "still_motion gen=" + generation + " samples=0 window_ms=" + window / 1_000_000
+        UseLog.i(TAG, span == null ? "still_motion gen=" + generation + " samples=0 window_ms=" + window / 1_000_000
                 : String.format(Locale.ROOT, "still_motion gen=%d samples=%d covered=%b window_ms=%d mean_rad_s=%.3f"
                         + " peak_rad_s=%.3f blur_px=%.1f", generation, span.samples, span.covered, window / 1_000_000,
                         span.mean, span.peak, span.blurPixels(exposureNanos)));

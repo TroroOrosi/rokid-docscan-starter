@@ -499,6 +499,7 @@ final class LocalCaptureSession {
      * accepted without one (a still, a retake by still) drops the clip of the photo it replaced.
      */
     synchronized void attachClip(int pageIndex, String captureId, ClipInbox inbox) throws IOException {
+        clipHashMillis = -1;
         if (inbox == null) return;
         page(pageIndex);
         String previous = clipName(pageIndex);
@@ -506,7 +507,10 @@ final class LocalCaptureSession {
         String name = null;
         if (captureId != null && inbox.has(captureId)) {
             File clip = inbox.clip(captureId);
-            name = "v-" + pageIndex + "-" + digest(clip, MAX_CLIP_BYTES) + ".mp4";
+            long began = System.nanoTime();
+            String sha256 = digest(clip, MAX_CLIP_BYTES);
+            clipHashMillis = (System.nanoTime() - began) / 1_000_000;
+            name = "v-" + pageIndex + "-" + sha256 + ".mp4";
             CaptureReviewPersistence.moveReplacing(inbox.record(captureId), new File(directory, name + ".json"));
             CaptureReviewPersistence.moveReplacing(clip, new File(directory, name));
             next.setProperty("clip." + pageIndex, name);
@@ -523,6 +527,10 @@ final class LocalCaptureSession {
             new File(directory, previous + ".json").delete();
         }
     }
+
+    /** For the use log: how long reading the clip attached last for its SHA-256 took; -1 when that page had no clip. */
+    private long clipHashMillis = -1;
+    synchronized long lastClipHashMillis() { return clipHashMillis; }
 
     /** A clip is sent only after the server holds the page it belongs to. */
     synchronized Clip nextUnsentClip() throws IOException {

@@ -423,6 +423,194 @@ public class LocalReviewTest {
         assertEquals("up to ten seconds of recording, and then its file is written out", 60, DocScanController.captureTimeoutSeconds(true));
     }
 
+    // ---- the use log: what a use leaves behind to be read afterwards -------
+
+    /** The controller's lines for the use log that begin with this word, as logcat holds them too. */
+    private static List<String> useLog(String word) {
+        List<String> lines = new java.util.ArrayList<>();
+        for (org.robolectric.shadows.ShadowLog.LogItem item
+                : new java.util.ArrayList<>(org.robolectric.shadows.ShadowLog.getLogsForTag("DocScanRelay"))) {
+            if (item.msg.equals(word) || item.msg.startsWith(word + " ")) lines.add(item.msg);
+        }
+        return lines;
+    }
+
+    private static void assertLine(String pattern, String line) {
+        assertTrue(line + " is not " + pattern, line.matches(pattern));
+    }
+
+    @Test public void everyCallOfTheUploadIsWrittenWithWhatItSentHowLongItTookAndHowItEnded() throws Exception {
+        // Until 2026-11-19 a use left no line about any upload: where its time went could not be told afterwards.
+        Surface surface = new Surface(); surface.holdForPage = true;
+        var run = new java.util.concurrent.atomic.AtomicReference<>(new CaptureInspectionOrigin.Context("glasses", 1));
+        clipStatus = 409;
+        try (MockWebServer server = inspectionServer()) {
+            DocScanController controller = inspectionController(server, surface, run);
+            try {
+                ClipInbox inbox = new ClipInbox(java.nio.file.Files.createTempDirectory("clip-inbox").toFile());
+                controller.setClipInbox(inbox);
+                byte[] jpeg = {1, 2, 3};
+                CaptureProvenance source = clipSource(inbox, jpeg, 100);
+                issueInspectionPhoto(controller, 0, false);
+                controller.onPhoto(jpeg, source); barrier(controller); commitVisible(controller, surface);
+                set(controller, "localNetworkBusy", false); call(controller, "queueLocalUpload", new Class<?>[]{}); waitForUpload(controller);
+
+                List<String> begun = useLog("upload_begin"), ended = useLog("upload_end");
+                assertEquals(begun.toString(), 3, begun.size());
+                assertEquals(ended.toString(), 3, ended.size());
+                assertLine("upload_begin kind=document index=-1 bytes=-1 state=[A-Z_]+", begun.get(0));
+                assertLine("upload_end kind=document index=-1 ms=\\d+ result=ok", ended.get(0));
+                assertLine("upload_begin kind=page index=0 bytes=3 state=[A-Z_]+", begun.get(1));
+                assertLine("upload_end kind=page index=0 ms=\\d+ result=ok", ended.get(1));
+                assertLine("upload_begin kind=clip index=0 bytes=9 state=[A-Z_]+", begun.get(2));
+                assertLine("a refusal is named by its status alone", "upload_end kind=clip index=0 ms=\\d+ result=http_409", ended.get(2));
+                assertEquals("a clip that was let go is not tried again", List.of(), useLog("upload_retry"));
+                for (org.robolectric.shadows.ShadowLog.LogItem item : org.robolectric.shadows.ShadowLog.getLogsForTag("DocScanRelay")) {
+                    assertFalse("no line names the server or quotes its reply: " + item.msg,
+                            item.msg.contains(server.getHostName()) || item.msg.contains("://") || item.msg.contains("stale"));
+                }
+            } finally { controller.close(); }
+        } finally { clipStatus = 201; }
+    }
+
+    private static void assertLine(String message, String pattern, String line) {
+        assertTrue(message + ": " + line, line.matches(pattern));
+    }
+
+    @Test public void aReviewAndASaveAreWrittenWithWhereTheirTimeWent() throws Exception {
+        Surface surface = new Surface(); surface.holdForPage = true;
+        var run = new java.util.concurrent.atomic.AtomicReference<>(new CaptureInspectionOrigin.Context("glasses", 1));
+        try (MockWebServer server = inspectionServer()) {
+            DocScanController controller = inspectionController(server, surface, run);
+            try {
+                ClipInbox inbox = new ClipInbox(java.nio.file.Files.createTempDirectory("clip-inbox").toFile());
+                controller.setClipInbox(inbox);
+                byte[] jpeg = {1, 2, 3};
+                CaptureProvenance source = clipSource(inbox, jpeg, 100);
+                issueInspectionPhoto(controller, 0, false);
+                controller.onPhoto(jpeg, source); barrier(controller);
+                assertEquals("not before the review is on the display", List.of(), useLog("review_shown"));
+                commitVisible(controller, surface);
+                assertEquals(1, useLog("review_shown").size());
+                assertLine("review_shown index=0 pending_ms=\\d+ decode_ms=\\d+ drawn_ms=\\d+", useLog("review_shown").get(0));
+                assertEquals(1, useLog("page_saved").size());
+                assertLine("the clip was hashed", "page_saved index=0 record_ms=\\d+ hash_ms=\\d+ total_ms=\\d+", useLog("page_saved").get(0));
+
+                byte[] still = {4, 5, 6}; // a page without a clip: nothing to hash
+                issueInspectionPhoto(controller, 1, false);
+                controller.onPhoto(still, nativeSource(still, 200)); barrier(controller); commitVisible(controller, surface);
+                assertLine("page_saved index=1 record_ms=\\d+ hash_ms=-1 total_ms=\\d+", useLog("page_saved").get(1));
+            } finally { controller.close(); }
+        }
+    }
+
+    @Test public void theEndIsWrittenWhenItIsAskedForAndWhenTheBookletHasBeenHandedOver() throws Exception {
+        Surface surface = new Surface(); surface.holdForPage = true;
+        try (MockWebServer server = refusingServer(new java.util.concurrent.atomic.AtomicBoolean(false))) {
+            DocScanController controller = new DocScanController(RuntimeEnvironment.getApplication(), surface, null,
+                    (state, lines, diagnostic) -> {}, new ClientIdentity("test", "test", "test"));
+            try {
+                controller.configureForLocalStart(server.url("/").toString(), "", 270);
+                controller.startLocalSession(false); barrier(controller);
+                issueInspectionPhoto(controller, 0, false);
+                controller.onPhoto(new byte[]{1, 2, 3}); barrier(controller);
+                assertEquals(List.of(), useLog("end_requested"));
+                controller.onGlassesAction(GlassesInputAction.BACK); barrier(controller);
+                controller.onGlassesAction(GlassesInputAction.BACK); barrier(controller); // made again while the page is reviewed
+                assertEquals("one end, however often it is asked for", 1, useLog("end_requested").size());
+                assertLine("end_requested state=CAPTURE_REVIEW", useLog("end_requested").get(0));
+                commitVisible(controller, surface);
+                waitForUpload(controller); waitForUpload(controller); waitForUpload(controller);
+                assertEquals(RelayState.REVIEW, controller.getState());
+                assertEquals(1, useLog("finalize_done").size());
+                assertLine("finalize_done ms=\\d+", useLog("finalize_done").get(0));
+                List<String> kinds = new java.util.ArrayList<>();
+                for (String line : useLog("upload_begin")) kinds.add(line.split(" ")[1]);
+                assertEquals(List.of("kind=document", "kind=page", "kind=finalize", "kind=exam", "kind=finalize_reading"), kinds);
+            } finally { controller.close(); }
+        }
+    }
+
+    @Test public void aClipLeftInTheInboxIsDiscardedWhenANewReadingStartsAndKeptWhenOneIsTakenUpAgain() throws Exception {
+        // A clip of up to 156 MB could outlive its reading: nothing removed it before the next reading's first review.
+        Surface surface = new Surface(); surface.holdForPage = true;
+        DocScanController controller = waitingLocalController(surface);
+        try {
+            ClipInbox inbox = new ClipInbox(java.nio.file.Files.createTempDirectory("clip-inbox").toFile());
+            controller.setClipInbox(inbox);
+            CaptureProvenance left = clipSource(inbox, new byte[]{1, 2, 3}, 100);
+            controller.startLocalSession(false); barrier(controller);
+            assertFalse("a reading before this one left it", inbox.has(left.captureId));
+
+            CaptureProvenance waiting = clipSource(inbox, new byte[]{4, 5, 6}, 200);
+            controller.resumeLocalSession(((LocalCaptureSession) get(controller, "localSession")).id()); barrier(controller);
+            assertTrue("a page of a reading taken up again may still wait for its clip", inbox.has(waiting.captureId));
+        } finally { controller.close(); }
+    }
+
+    @Test public void aClipKeepsTheProcessorForAsLongAsItsOwnCallMayRun() throws Exception {
+        // Two minutes were taken before each clip, and one clip's call may run ten.
+        Surface surface = new Surface(); surface.holdForPage = true;
+        var run = new java.util.concurrent.atomic.AtomicReference<>(new CaptureInspectionOrigin.Context("glasses", 1));
+        CountDownLatch sending = new CountDownLatch(1), release = new CountDownLatch(1);
+        try (MockWebServer server = inspectionServer()) {
+            DocScanController controller = inspectionController(server, surface, run);
+            try {
+                ClipInbox inbox = new ClipInbox(java.nio.file.Files.createTempDirectory("clip-inbox").toFile());
+                controller.setClipInbox(inbox);
+                byte[] jpeg = {1, 2, 3};
+                CaptureProvenance source = clipSource(inbox, jpeg, 100);
+                issueInspectionPhoto(controller, 0, false);
+                controller.onPhoto(jpeg, source); barrier(controller); commitVisible(controller, surface);
+                whileClipIsSent = () -> {
+                    sending.countDown();
+                    try { release.await(10, TimeUnit.SECONDS); } catch (InterruptedException ignored) { }
+                };
+                set(controller, "localNetworkBusy", false); call(controller, "queueLocalUpload", new Class<?>[]{});
+                assertTrue(sending.await(5, TimeUnit.SECONDS));
+                android.os.PowerManager.WakeLock transferLock = org.robolectric.shadows.ShadowPowerManager.getLatestWakeLock();
+                org.robolectric.shadows.ShadowSystemClock.advanceBy(java.time.Duration.ofSeconds(121));
+                assertTrue("past the two minutes of a page", transferLock.isHeld());
+                org.robolectric.shadows.ShadowSystemClock.advanceBy(java.time.Duration.ofSeconds(480));
+                assertFalse("and not past the ten minutes of its call", transferLock.isHeld());
+            } finally { release.countDown(); waitForUpload(controller); controller.close(); whileClipIsSent = null; }
+        }
+    }
+
+    @Test public void handingTheBookletOverKeepsTheProcessorForAsLongAsTheServerMayHoldTheCall() throws Exception {
+        // The server holds this call while it gathers the clips; the client reads for four minutes.
+        CountDownLatch finalizing = new CountDownLatch(1), release = new CountDownLatch(1);
+        try (MockWebServer server = new MockWebServer()) {
+            server.setDispatcher(new Dispatcher() {
+                @Override public MockResponse dispatch(RecordedRequest request) throws InterruptedException {
+                    if ("/v1/documents/17/finalize".equals(request.getPath())) { finalizing.countDown(); release.await(10, TimeUnit.SECONDS); }
+                    if ("/v1/exam-sessions".equals(request.getPath())) return new MockResponse().setBody("{\"session_id\":7}");
+                    if (request.getPath().contains("finalize-reading")) return new MockResponse().setBody("{\"status\":\"solving\",\"review_total\":1}");
+                    return new MockResponse().setBody("{}");
+                }
+            });
+            DocScanController controller = new DocScanController(RuntimeEnvironment.getApplication(), new Surface(), null,
+                    (state, lines, diagnostic) -> {}, new ClientIdentity("test", "test", "test"));
+            try {
+                String id = handedOver(controller, server);
+                controller.resumeLocalSession(id); barrier(controller);
+                assertTrue(finalizing.await(5, TimeUnit.SECONDS));
+                android.os.PowerManager.WakeLock transferLock = org.robolectric.shadows.ShadowPowerManager.getLatestWakeLock();
+                org.robolectric.shadows.ShadowSystemClock.advanceBy(java.time.Duration.ofSeconds(121));
+                assertTrue("past the two minutes of a page", transferLock.isHeld());
+                org.robolectric.shadows.ShadowSystemClock.advanceBy(java.time.Duration.ofSeconds(150));
+                assertFalse("and not past the four minutes it is read for and a margin", transferLock.isHeld());
+            } finally { release.countDown(); waitForUpload(controller); controller.close(); }
+        }
+    }
+
+    @Test public void theProcessorIsKeptForACallsOwnLimit() {
+        assertEquals("a page, as before", 120_000, DocScanController.transferLockMillis("page"));
+        assertEquals("a clip's whole call", 600_000, DocScanController.transferLockMillis("clip"));
+        assertEquals("the four minutes the finalization is read for, and half a minute",
+                270_000, DocScanController.transferLockMillis("finalize"));
+    }
+
     private static volatile Runnable whileClipIsSent;
     private static volatile int clipStatus = 201;
 
@@ -2749,6 +2937,14 @@ public class LocalReviewTest {
                 assertEquals("the booklet is handed over", LocalCaptureSession.Phase.REVIEW, saved.phase());
                 assertEquals(RelayState.REVIEW, controller.getState());
                 assertEquals("its session is made once", 1, java.util.Collections.frequency(requests, "/v1/exam-sessions"));
+                assertEquals("each call that was made a second time is written as one",
+                        List.of("upload_retry kind=finalize index=-1 try=2", "upload_retry kind=finalize_reading index=-1 try=2"),
+                        useLog("upload_retry"));
+                List<String> failures = new java.util.ArrayList<>();
+                for (String line : useLog("upload_end")) if (!line.endsWith("result=ok")) failures.add(line.replaceAll("ms=\\d+", "ms=N"));
+                assertEquals("a failure is named by its class or its status, never by its message", 2, failures.size());
+                assertLine("upload_end kind=finalize index=-1 ms=N result=io_[A-Za-z]+Exception", failures.get(0));
+                assertEquals("upload_end kind=finalize_reading index=-1 ms=N result=http_503", failures.get(1));
             } finally { controller.close(); }
         }
     }

@@ -25,7 +25,6 @@ import android.media.ImageReader;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.SystemClock;
-import android.util.Log;
 import android.util.Range;
 import android.util.Size;
 
@@ -54,6 +53,7 @@ import org.json.JSONObject;
 import dev.rokid.docscanrelay.CaptureProvenance;
 import dev.rokid.docscanrelay.CaptureSurface;
 import dev.rokid.docscanrelay.ClipInbox;
+import dev.rokid.docscanrelay.UseLog;
 
 /**
  * One page as a few seconds of frames. At the venue's light a single frame cannot be read however it is exposed
@@ -182,6 +182,10 @@ final class ClipCamera implements PageCamera {
         // After it: the camera's thread.
         long endedAt, backMillis = -1, bytes;
         boolean encoded, back;
+        // For the clip's line in the log only: opening the clip, the wait for the watch session and whether it ran
+        // out; when the file was closed, and how long the page's own files took after that.
+        long openMillis = -1, idleMillis = -1, closedAt, pageMillis = -1;
+        boolean idleTimeout;
         /** Ended by the wearer's tap or double tap: what it has is the page. */
         boolean cut;
         /** Decided when it ends: it becomes its page (see end). */
@@ -222,7 +226,10 @@ final class ClipCamera implements PageCamera {
     };
     private final Object lock = new Object(); // the clip being recorded, between the frames' thread and the camera's
     private final List<Runnable> closeCallbacks = new ArrayList<>();
-    private final Runnable readyTimeout = this::readyNow;
+    private final Runnable readyTimeout = () -> {
+        idleTimedOut = true;
+        readyNow();
+    };
     private final Runnable timer = this::timeUp;
     /** NV21 to JPEG; null when it cannot be encoded. Replaced in tests, which have no codec. */
     GlassCamera.StillEncoder pageEncoder = (nv21, width, height, quality) -> {
@@ -259,6 +266,9 @@ final class ClipCamera implements PageCamera {
     /** Counts the sessions asked for: a callback of an earlier one is not the present session's. */
     private int configured;
     private Runnable afterReady, pageReady;
+    /** For the clip's line in the log only: when the session now being left was told to stop, and whether its 1.5 s ran out. */
+    private long idleSince;
+    private boolean idleTimedOut;
     private PageChange pageChange = new PageChange();
     /** Clips in a row that ran out their time short of still frames and were not kept; the camera's thread. */
     private int shortClips;
@@ -452,6 +462,8 @@ final class ClipCamera implements PageCamera {
      */
     private void whenIdle(Runnable next) {
         afterReady = next;
+        idleSince = SystemClock.elapsedRealtime();
+        idleTimedOut = false;
         try {
             session.stopRepeating();
         } catch (CameraAccessException | RuntimeException ignored) {
@@ -465,6 +477,11 @@ final class ClipCamera implements PageCamera {
         if (next == null) return;
         afterReady = null;
         handler.removeCallbacks(readyTimeout);
+        Clip starting = clip;
+        if (starting != null && starting.phase == STARTING) { // the watch session, left for this clip's own
+            starting.idleMillis = SystemClock.elapsedRealtime() - idleSince;
+            starting.idleTimeout = idleTimedOut;
+        }
         next.run();
     }
 
@@ -640,10 +657,12 @@ final class ClipCamera implements PageCamera {
         starting.settle = dark ? LONG_SETTLE_FRAMES : SETTLE_FRAMES;
         starting.boost = (int) Math.max(MIN_BOOST, Math.min(MAX_BOOST, Math.round(light / starting.exposure)));
         try {
+            long opening = SystemClock.elapsedRealtime();
             // Its capture id is that of the frame that becomes the page, known only at the end: a name of its own until then.
             starting.file = inbox.reserve(UUID.randomUUID().toString());
             encoder.open(starting.file, WIDTH, HEIGHT, (int) ((long) options.bitrate * starting.fps / FPS), starting.fps);
             starting.opened = true;
+            starting.openMillis = SystemClock.elapsedRealtime() - opening;
         } catch (IOException | RuntimeException error) {
             fail("encoder " + error, null);
             return;
@@ -679,7 +698,7 @@ final class ClipCamera implements PageCamera {
             comparing.execute(() -> {
                 try {
                     SamePage same = SamePage.of(taken, grid);
-                    Log.i(TAG, "same_page score=" + String.format(Locale.US, "%.3f", same.score)
+                    UseLog.i(TAG, "same_page score=" + String.format(Locale.US, "%.3f", same.score)
                             + " blocks=" + same.blocks + " since_ms=" + since);
                 } catch (RuntimeException | OutOfMemoryError ignored) {
                     // no line
@@ -873,6 +892,7 @@ final class ClipCamera implements PageCamera {
         ended.kept = counted > 0 && (ended.cut || enough || shortClips + 1 >= SHORT_CLIPS_TAKEN);
         if (counted > 0 && !ended.kept) shortClips++;
         encoder.end((written, bytes, failure) -> {
+            ended.closedAt = SystemClock.elapsedRealtime(); // read on the camera's thread only after the post below
             GlassCamera.Captured page = null;
             String problem = failure != null ? failure : ended.frames == 0 ? "clip without frames" : null;
             // The file has to hold every frame the encoder took. On 2026-11-18 one desk clip of forty held 64 of 66:
@@ -885,6 +905,7 @@ final class ClipCamera implements PageCamera {
             if (problem == null && ended.kept) {
                 try {
                     page = pageOf(ended);
+                    ended.pageMillis = SystemClock.elapsedRealtime() - ended.closedAt;
                 } catch (IOException | JSONException | RuntimeException | OutOfMemoryError error) {
                     problem = "clip page " + error;
                 }
@@ -967,10 +988,13 @@ final class ClipCamera implements PageCamera {
         Clip done = clip;
         if (done == null || !done.encoded || !done.back) return;
         clip = null;
-        Log.i(TAG, "clip frames=" + done.frames + " counted=" + done.counted + " dropped=" + done.dropped
+        UseLog.i(TAG, "clip frames=" + done.frames + " counted=" + done.counted + " dropped=" + done.dropped
                 + " bytes=" + done.bytes + " first_ms=" + done.firstMillis + " back_ms=" + done.backMillis
                 + " boost=" + done.boost + " exposure_ms=" + done.exposure / 1_000_000 + " gyro=" + done.gyroFrames
-                + " kept=" + (done.page != null) + " short=" + shortClips);
+                + " kept=" + (done.page != null) + " short=" + shortClips
+                + " open_ms=" + done.openMillis + " idle_ms=" + done.idleMillis + " idle_timeout=" + done.idleTimeout
+                + " drain_ms=" + (done.closedAt - done.endedAt) + " page_ms=" + done.pageMillis
+                + " closed_ms=" + (SystemClock.elapsedRealtime() - done.closedAt));
         if (done.page != null) {
             cameraFailures = 0;
             shortClips = 0;
@@ -1012,7 +1036,7 @@ final class ClipCamera implements PageCamera {
      * page was thrown away and the session ended, which at the venue means starting the app again.
      */
     private void fail(String reason, CameraDevice gone) {
-        Log.w(TAG, "clip camera failed: " + reason);
+        UseLog.w(TAG, "clip camera failed: " + reason);
         Clip pending = clip;
         boolean recorded = gone != null && pending != null && pending.phase == ENDING;
         boolean again = gone != null && !closed && (recorded || ++cameraFailures < MAX_CAMERA_FAILURES);
@@ -1111,7 +1135,7 @@ final class ClipCamera implements PageCamera {
             pageChange.observeFrame(thumbnail, pixels, width, height, row, step, timestamp, now);
             if (pageScene != pageChange.sequence()) {
                 pageScene = pageChange.sequence();
-                Log.i(TAG, "page_change scene=" + pageScene + " " + pageChange.lastChange());
+                UseLog.i(TAG, "page_change scene=" + pageScene + " " + pageChange.lastChange());
             }
             if (options.farShare > 0) {
                 // ponytail: paper is taken to be what is brighter than the frame's mean. A dark desk beside a lit
@@ -1147,7 +1171,7 @@ final class ClipCamera implements PageCamera {
             watchFrames++;
             watchWorkNanos = Math.max(watchWorkNanos, System.nanoTime() - began);
             if (now - statusAt >= 1000) {
-                Log.i(TAG, "watch_status frames=" + watchFrames + " max_work_ms=" + watchWorkNanos / 1_000_000
+                UseLog.i(TAG, "watch_status frames=" + watchFrames + " max_work_ms=" + watchWorkNanos / 1_000_000
                         + " exposure_ns=" + previewExposure + " iso=" + previewIso + " boost=" + previewBoost
                         + " far=" + far + " lines=" + (lines > 0 ? Math.round(lines * 10) / 10f : "-"));
                 statusAt = now;

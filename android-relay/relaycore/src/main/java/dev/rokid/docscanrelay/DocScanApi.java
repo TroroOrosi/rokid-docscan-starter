@@ -76,11 +76,16 @@ public final class DocScanApi {
         this(baseUrl, apiKey, client, null);
     }
 
+    /** How long a reply is read for. Finalizing a booklet is held by the server while it gathers the pages' clips. */
+    static final long READ_TIMEOUT_MILLIS = TimeUnit.MINUTES.toMillis(4);
+    /** One clip's whole call: tens of megabytes over the hotspot. */
+    static final long CLIP_CALL_TIMEOUT_MILLIS = TimeUnit.MINUTES.toMillis(10);
+
     public DocScanApi(String baseUrl, String apiKey, ClientIdentity client, Context context) {
         Context app = context == null ? null : context.getApplicationContext();
         http = new OkHttpClient.Builder()
                 .connectTimeout(15, TimeUnit.SECONDS)
-                .readTimeout(4, TimeUnit.MINUTES)
+                .readTimeout(READ_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)
                 .writeTimeout(60, TimeUnit.SECONDS)
                 .callTimeout(5, TimeUnit.MINUTES)
                 .retryOnConnectionFailure(true)
@@ -393,7 +398,7 @@ public final class DocScanApi {
                 .addFormDataPart("clip", "page-" + (pageIndex + 1) + ".mp4", RequestBody.create(clip, MP4)).build();
         // A clip is tens of megabytes over the hotspot: its own, longer limits, never a retry of the body in secret.
         return execute(new Request.Builder().url(baseUrl + "/v1/documents/" + documentId + "/pages/" + pageIndex + "/clip").post(body),
-                http.newBuilder().writeTimeout(120, TimeUnit.SECONDS).callTimeout(10, TimeUnit.MINUTES)
+                http.newBuilder().writeTimeout(120, TimeUnit.SECONDS).callTimeout(CLIP_CALL_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)
                         .retryOnConnectionFailure(false).build());
     }
 
@@ -592,9 +597,15 @@ public final class DocScanApi {
             if (response.body() == null) throw new IOException("empty answer bundle");
             if (response.body().contentLength() > AnswerBundle.MAX_JSON_BYTES)
                 throw new IOException("answer bundle too large");
+            lastAnswerBundleBytes = response.body().contentLength();
             return AnswerBundle.fromStream(response.body().byteStream());
         }
     }
+
+    private volatile long lastAnswerBundleBytes = -1;
+
+    /** For the use log: the length the server gave for the answers fetched last; -1 when it gave none. */
+    public long lastAnswerBundleBytes() { return lastAnswerBundleBytes; }
 
     public void glassesState(String deviceId, Long sessionId, long generation, long sequence, String phase)
             throws IOException, JSONException {
