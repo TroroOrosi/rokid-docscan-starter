@@ -632,8 +632,10 @@ def test_two_reads_that_differ_reach_the_glasses_bundle_as_an_answer_to_review_w
     lines = [line for line in done.stdout.splitlines() if line.startswith("RESULT ")]
     assert lines, done.stderr[-2500:]
     result = json.loads(lines[-1][7:])
-    assert result["items"] == [["needs_review", "④"], ["needs_input", ""]]
-    assert "②" in result["issues"][0]
+    # Whichever read is back first is the one shown (0.88.0); the other one's answer stands in the note.
+    [shown, missing] = result["items"]
+    assert shown[0] == "needs_review" and shown[1] in ("④", "②") and missing == ["needs_input", ""]
+    assert ({"④", "②"} - {shown[1]}).pop() in result["issues"][0]
 
 
 def test_through_the_server_the_first_reads_answers_are_in_the_bundle_before_the_other_read_is_back(tmp_path):

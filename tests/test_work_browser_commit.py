@@ -110,6 +110,10 @@ def test_supervised_browser_may_start_after_the_phone_api(monkeypatch, provider)
     monkeypatch.setattr(main.db, "init_db", lambda: None)
     monkeypatch.setattr(main, "get_analyzer", lambda: object())
     monkeypatch.setattr(main, "_resume_all_answers", lambda: None)
+    # No database is made here (init_db is stubbed): what the start does with the clips' table is not this test's.
+    # Run first in a session it met a data folder without tables and failed on "no such table: page_clips".
+    monkeypatch.setattr(main.page_clips, "requeue_interrupted", lambda: None)
+    monkeypatch.setattr(main.retention, "sweep", lambda: None)
     monkeypatch.setattr(app.solvers, "get_solver", lambda: pytest.fail("browser is checked before sending"))
 
     async def start():
@@ -339,6 +343,8 @@ def test_state_poll_recovers_the_real_local_work_dom_without_a_second_send(clien
     from tests.test_chatgpt_work import BrowserReply
     from tests.test_chatgpt_work_web import _Context, _VenueTab, _guard_state, _upload_composer
 
+    # Named before the job is made (a job seals what was asked): the model this local page shows as selected.
+    monkeypatch.setenv("ROKID_WORK_MODEL", "gpt-6.1-sol")
     doc, session, job = api_session(client, generation=7)
     wait_for(lambda: session not in main._background_solves)
     _upload_composer(page)
@@ -397,6 +403,8 @@ def test_new_session_retires_an_expired_work_send_without_old_answers_or_another
     from tests.test_chatgpt_work import BrowserReply
     from tests.test_chatgpt_work_web import _Context, _VenueTab, _guard_state, _upload_composer
 
+    # Named before the job is made (a job seals what was asked): the model this local page shows as selected.
+    monkeypatch.setenv("ROKID_WORK_MODEL", "gpt-6.1-sol")
     doc, session, old = api_session(client, generation=7)
     wait_for(lambda: session not in main._background_solves)
     _upload_composer(page)

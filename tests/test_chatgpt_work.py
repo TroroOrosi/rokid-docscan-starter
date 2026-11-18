@@ -45,7 +45,7 @@ class BrowserReply:
     def resolve_new_job_settings(self, *, requested_settings, follow_family):
         from app.work_model_policy import resolve_work_model
         return {**requested_settings, "model": resolve_work_model(
-            ["gpt-6.2-sol"], requested_settings["model"], follow_family=follow_family)}
+            [requested_settings["model"]], requested_settings["model"], follow_family=follow_family)}
 
     def complete_json(self, **options):
         if self.before:
