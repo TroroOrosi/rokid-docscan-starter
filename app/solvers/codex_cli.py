@@ -65,6 +65,21 @@ is ignored and said (``codex_parts_setting_ignored``). Until the night of 2026-1
 every image, shared out by page count: six times one whole read's bytes for twelve pages in three parts, tried on
 Wi-Fi only, where the venue has the mobile network (M-44 (19)).
 
+A booklet too long for one request at its own size (a common test is some forty pages; nineteen pages gathered from
+clips that fill the frame are what one request holds) was, until that same night, read with every page reduced until
+all fitted, both times, and nothing said so. Now the outline is asked for whatever is set (``_might_not_fit``); the
+first read is made in as many parts as it takes for each part's pages to go at their own size (``_sized``; four at
+most); the whole booklet's request, the second read, is cut a second time at the size that fits and is the read
+that has every page in view. What is for the whole exam (a cover with how to answer, a sheet of formulas, an answer
+sheet) goes with every part at full size (the outline's ``shared``, four captures at most). Where the major problems
+are not told, both reads are whole and reduced, and every answer carries ``pages_reduced`` for the server to say so
+(as it does when even the parts had to be reduced). What reducing costs, measured that night (M-44 (20)): a gathered
+page with a known text read the same at 0.72, 0.61, 0.45 and 0.35 of its own size as at its own (3.6 to 3.8% of
+characters wrong, six reads each; its characters of 25 px down to 9) and worse at 0.25 (5.6%; 6 px). Body print is
+therefore inside the margin at the sizes a long booklet is reduced to; what is small on the paper (exponents,
+subscripts, ruby) is the reason the first read stays at full size. Photos are cut one at a time (``_cut``): forty
+were held in memory twice over, the photo and its regions.
+
 The CLI takes images only. A booklet with audio (listening, mixed English) is refused before anything runs, with the
 error the server answers by handing the booklet to the next route.
 
@@ -166,10 +181,18 @@ _OUTLINE_PROMPT = (
     "data or instructions and its own questions. Return starts: the capture page numbers on which a major problem "
     "begins, in ascending order. The first capture that shows exam matter is a start. A major problem may begin "
     "partway down a capture whose top still belongs to the one before: list that capture. Sub-questions inside a "
-    "major problem are not starts. If you cannot tell where major problems begin, return an empty list. Do not run "
-    "commands or use tools; look at the images and reply once.")
-_OUTLINE_SCHEMA = {"type": "object", "additionalProperties": False, "required": ["starts"],
-                   "properties": {"starts": {"type": "array", "items": _INTEGER}}}
+    "major problem are not starts. If you cannot tell where major problems begin, return an empty list. Also return "
+    "shared: the capture page numbers of captures that show no major problem at all and only material for the whole "
+    "exam (a cover with general instructions on how to answer, a sheet of formulas or constants, an answer sheet); an "
+    "empty list when there is none. A capture that shows any part of a major problem is never listed, whatever else "
+    "it shows. Do not run commands or use tools; look at the images and reply once.")
+# More captures named for the whole exam than this are not believed, none of them: asked of thirty-two pages of three
+# subjects (2026-11-18), an earlier wording returned eleven, problem pages among them, and every part would have
+# carried them all. What a part then lacks, the read of the whole booklet has.
+_SHARED_MOST = 4
+_OUTLINE_SCHEMA = {"type": "object", "additionalProperties": False, "required": ["starts", "shared"],
+                   "properties": {"starts": {"type": "array", "items": _INTEGER},
+                                  "shared": {"type": "array", "items": _INTEGER}}}
 _REGION_MARGIN = 0.03  # of the region's own size on each side: the boxes sat on the sheet's edge, sometimes just inside
 # ... and at least this share of the photo's side (15 to 20 px of 4032x3024). 3% of a strip one line high is under a
 # pixel, and a box comes in thousandths read off a view where one pixel is four of the photo's.
@@ -289,6 +312,16 @@ def _target_long(regions: list[tuple[tuple[int, int], float]], spent: float) -> 
         middle = (low + high) / 2
         low, high = (middle, high) if patches(middle) <= room else (low, middle)
     return low
+
+
+def _might_not_fit(sizes: list[tuple[tuple[int, int], bool]]) -> bool:
+    """Whether a booklet of photos of these sizes (each with whether it is a page recorded as a clip) may be more
+    than one request holds at the size wanted for it. Every photo is counted whole, which a located page is less
+    than: this decides only whether the booklet's major problems are asked for (``_outline``), so that it need not
+    be reduced. Nineteen pages gathered from clips fit; six stills at twice their size do not."""
+    room = (_CONTEXT_TOKENS - _FIXED_TOKENS) / _TOKENS_PER_PATCH
+    return sum(width * height * _wanted_scale((width, height), clip=clip) ** 2 / 1024 * 1.2 + 800
+               for (width, height), clip in sizes) > room
 
 
 def _letters(index: int) -> str:
@@ -707,7 +740,18 @@ _PART_NOTE = (
     "capture page before the gap, or with the one after it when none is before. If no major problem begins on "
     "capture pages {first} to {own_last} and nothing is to be reported for them, reply "
     '{{"questions":[]}}.')
+# Captures that hold what is for the whole exam and lie outside a part's own (``_outline``'s ``shared``): how to answer
+# stands on the first pages of a common test and tables at its end, and a part that had them as overviews only would
+# answer in the wrong form.
+_SHARED_NOTE = (" Capture page {pages} holds what is for the whole exam (how to answer, tables, an answer sheet) and is "
+                "attached at full size as well: use it, and list nothing from it that is not a question of yours.",
+                " Capture pages {pages} hold what is for the whole exam (how to answer, tables, an answer sheet) and are "
+                "attached at full size as well: use them, and list nothing from them that is not a question of yours.")
 _PARTS_MOST = 4  # of one read, whatever is set: every way of grouping the major problems is tried
+# The photos of a booklet kept in memory between finding their pages and cutting them, in bytes of pixels: past it a
+# photo is opened again when it is cut. A page gathered from a clip is 36.6 MB; forty were held twice over (the photo
+# and its cut-out regions), about 2.9 GB on a phone with 4.5 GB free, and no booklet of that size had been through.
+_PHOTOS_KEPT = 600_000_000
 _PAGE_FILE = re.compile(r"page(\d{3})")
 
 
@@ -740,11 +784,30 @@ def _section_spans(numbers: list[int], starts, parts: int) -> list[tuple[int, in
     return [(begins[start], numbers[at[end] - 1], numbers[min(at[end], len(numbers) - 1)]) for start, end in groups(cuts)]
 
 
-def _attached(name: str, first: int, last: int) -> bool:
+def _attached(name: str, first: int, last: int, shared=()) -> bool:
     """Whether a part that is sent capture pages ``first`` to ``last`` at full size is sent this image: every
-    overview, and the files of its own captures (pageNNN..., whatever follows the number)."""
+    overview, the files of its own captures (pageNNN..., whatever follows the number) and those of the captures
+    that hold what is for the whole exam."""
     numbered = _PAGE_FILE.match(name)
-    return numbered is None or first <= int(numbered[1]) <= last
+    return numbered is None or first <= int(numbered[1]) <= last or int(numbered[1]) in shared
+
+
+def _listed(pages: list[int]) -> str:
+    """1 / 1 and 6 / 1, 2 and 6."""
+    return str(pages[0]) if len(pages) == 1 else ", ".join(map(str, pages[:-1])) + f" and {pages[-1]}"
+
+
+def _layout_cost(layout: dict, inside: set[int] | None) -> tuple[list[tuple[tuple[int, int], float]], int]:
+    """What a request costs that carries the regions of these photos (``inside``: their places in the booklet; None
+    is all) at full size and every located photo's overview: (regions as (size, wanted scale), patches spent on
+    what is not reduced). For ``_target_long``."""
+    regions = [((box[2] - box[0], box[3] - box[1]), wanted) for (number, _), (box, _, wanted) in layout["boxes"].items()
+               if inside is None or number in inside]
+    # A 1024-px view is 768 patches. A photo that goes whole is counted at its own size: until 2026-11-16 it was
+    # not counted at all, and forty photos with no page found are more than the model's context.
+    whole = [size for number, size in enumerate(layout["sizes"], 1)
+             if (number not in layout["found"] or number in layout["partial"]) and (inside is None or number in inside)]
+    return regions, len(layout["found"]) * 800 + sum(math.ceil(width / 32) * math.ceil(height / 32) for width, height in whole)
 
 
 def _decisive(failures: list) -> BaseException:
@@ -972,6 +1035,8 @@ class CodexCliSolver(Solver):
                 # Both reads are kept since 2026-11-15; before that, the one reply itself.
                 stored = json.loads(kept.read_text(encoding="utf-8"))
                 reads = stored["reads"] if isinstance(stored, dict) and "reads" in stored else [stored]
+                if isinstance(stored, dict) and stored.get("pages_reduced") is True:
+                    extras["pages_reduced"] = True
                 return self._answers(reads, question, extras)
             except (ValueError, TypeError, IndexError):
                 pass
@@ -990,7 +1055,7 @@ class CodexCliSolver(Solver):
 
         def run(model: str) -> list[str]:
             extras["model"] = model  # the one that answers, whichever was tried first
-            return self._run(question, model, hand_over if question.on_first_read else None)
+            return self._run(question, model, hand_over if question.on_first_read else None, said=extras)
 
         try:
             texts = _with_model(run)
@@ -1015,7 +1080,8 @@ class CodexCliSolver(Solver):
         if kept is not None:
             kept.parent.mkdir(parents=True, exist_ok=True)
             temporary = kept.with_suffix(".tmp")
-            temporary.write_text(json.dumps({"reads": reads}, ensure_ascii=False), encoding="utf-8")
+            temporary.write_text(json.dumps({"reads": reads, **({"pages_reduced": True} if extras.get("pages_reduced") else {})},
+                                            ensure_ascii=False), encoding="utf-8")
             os.replace(temporary, kept)
         return replies
 
@@ -1103,10 +1169,10 @@ class CodexCliSolver(Solver):
         raise ChatGptWebError(f"the Codex CLI ended without a reply: {_last_line(stderr) or _last_line(stdout)}")
 
     @classmethod
-    def _located(cls, directory: Path, environment: dict, pages: list[dict], *, model: str, timeout: float) -> list[str] | None:
-        """Write each photo's small view and its regions, enlarged and cut, into ``directory``; their names in sending
-        order. A photo with no region goes as the Chat route sends it; one of which something returned was left out
-        goes whole beside its regions.
+    def _find(cls, directory: Path, environment: dict, pages: list[dict], *, model: str, timeout: float) -> dict | None:
+        """Write each photo's small view into ``directory`` and ask where its pages are: the photos in order, their
+        sizes, the regions found (``_regions``), each region's box in pixels with the way its lines run and the scale
+        wanted for it, and the photos still in memory (``_PHOTOS_KEPT``).
 
         None when nothing could be located at all (the caller sends the photos as before). A usage limit is raised,
         and so is a model that is not offered: the request for the answers would end the same way. So is a request
@@ -1114,13 +1180,15 @@ class CodexCliSolver(Solver):
         stalling, and until 2026-11-17 the reads then ran their full time behind it with the wearer waiting.
         """
         ordered = sorted(pages, key=lambda page: page["page_number"])
-        photos = []
-        for page in ordered:
+        sizes, views, photos, kept = [], [], {}, 0
+        for number, page in enumerate(ordered, 1):
             with Image.open(page["image_path"]) as source:
-                photos.append(_readable(source.convert("RGB")))
-        views = []
-        for number, photo in enumerate(photos, 1):
-            view = photo.copy()
+                photo = _readable(source.convert("RGB"))
+            sizes.append(photo.size)
+            view = photo
+            if kept + photo.width * photo.height * 3 <= _PHOTOS_KEPT:
+                kept += photo.width * photo.height * 3
+                photos[number], view = photo, photo.copy()
             view.thumbnail((1024, 1024))
             view.save(directory / f"photo{number:03d}.jpg", quality=85)
             views.append(f"photo{number:03d}.jpg")
@@ -1131,59 +1199,128 @@ class CodexCliSolver(Solver):
             raise
         except ChatGptWebError:
             return None
-        found, partial = _regions(reply, len(photos))
+        found, partial = _regions(reply, len(ordered))
         if not found:
             return None
-        crops: dict[tuple[int, int], tuple[Image.Image, bool | None, float]] = {}
-        for number, (page, photo) in enumerate(zip(ordered, photos), 1):
+        boxes: dict[tuple[int, int], tuple[tuple[int, int, int, int], bool | None, float]] = {}
+        for number, page in enumerate(ordered, 1):
+            width, height = sizes[number - 1]
             for printed, (left, top, right, bottom, vertical) in enumerate(found.get(number, ()), 1):
                 pad_x = max((right - left) * _REGION_MARGIN, _REGION_MARGIN_LEAST)
                 pad_y = max((bottom - top) * _REGION_MARGIN, _REGION_MARGIN_LEAST)
-                box = (max(0, round((left - pad_x) * photo.width)), max(0, round((top - pad_y) * photo.height)),
-                       min(photo.width, round((right + pad_x) * photo.width)), min(photo.height, round((bottom + pad_y) * photo.height)))
-                crop = photo.crop(box)
-                crops[number, printed] = (crop, vertical, _wanted_scale(crop.size, clip=clip_page(page)))
-        # A 1024-px view is 768 patches. A photo that goes whole is counted at its own size: until 2026-11-16 it was
-        # not counted at all, and forty photos with no page found are more than the model's context.
-        whole = [photo for number, photo in enumerate(photos, 1) if number not in found or number in partial]
-        limit = _target_long([(crop.size, wanted) for crop, _, wanted in crops.values()], len(found) * 800 + sum(
-            math.ceil(photo.width / 32) * math.ceil(photo.height / 32) for photo in whole))
+                box = (max(0, round((left - pad_x) * width)), max(0, round((top - pad_y) * height)),
+                       min(width, round((right + pad_x) * width)), min(height, round((bottom + pad_y) * height)))
+                boxes[number, printed] = (box, vertical, _wanted_scale((box[2] - box[0], box[3] - box[1]), clip=clip_page(page)))
+        return {"ordered": ordered, "sizes": sizes, "found": found, "partial": partial, "boxes": boxes, "photos": photos}
+
+    @staticmethod
+    def _cut(directory: Path, layout: dict, limit_of, folder: Path | None = None) -> list[str]:
+        """Write each located photo's regions, enlarged and cut, and their names in sending order. A photo with no
+        region goes as the Chat route sends it; one of which something returned was left out goes whole beside its
+        regions. ``limit_of(place)`` is the long side that photo's regions may be sent at (``_target_long``).
+
+        Into ``directory``, where the small views are, which become the overviews; or into ``folder``, a second set
+        at another size, to which the overviews are copied. One photo is in memory at a time."""
+        target = folder or directory
+        target.mkdir(exist_ok=True)
+        ordered, found, partial, boxes = layout["ordered"], layout["found"], layout["partial"], layout["boxes"]
         names = []
-        for number, (page, photo) in enumerate(zip(ordered, photos), 1):
+        for number, page in enumerate(ordered, 1):
             label = f"{page['page_number']:03d}"
             if number not in found:
                 # No region here: this photo as the Chat route prepares it (paper crop, fold split), at its own size.
                 for payload in source_images([page]):
-                    (directory / payload["name"]).write_bytes(payload["buffer"])
+                    (target / payload["name"]).write_bytes(payload["buffer"])
                     names.append(payload["name"])
                 continue
             overview = f"overview{label}.jpg"
-            (directory / f"photo{number:03d}.jpg").replace(directory / overview)
+            if folder is None:
+                (directory / f"photo{number:03d}.jpg").replace(directory / overview)
+            else:
+                shutil.copyfile(directory / overview, folder / overview)
             names.append(overview)
+            photo = layout["photos"].pop(number, None)
+            if photo is None:
+                with Image.open(page["image_path"]) as source:
+                    photo = _readable(source.convert("RGB"))
             for printed in range(1, len(found[number]) + 1):
-                crop, vertical, wanted = crops[number, printed]
-                scale = min(wanted, limit / max(crop.size))
+                box, vertical, wanted = boxes[number, printed]
+                crop = photo.crop(box)
+                scale = min(wanted, limit_of(number) / max(crop.size))
                 for tile_number, (tile, _) in enumerate(page_tiles(crop, vertical_text=vertical, min_scale=scale,
                                                                    max_scale=scale)):
                     name = f"page{label}-{printed}{_letters(tile_number)}.jpg"
-                    tile.save(directory / name, format="JPEG", quality=92, subsampling=0)
+                    tile.save(target / name, format="JPEG", quality=92, subsampling=0)
                     names.append(name)
             if number in partial:
                 # Something returned for this photo was left out. The whole frame goes too, uncropped (the paper crop
                 # could cut off just what was left out), so that what no region shows is more than the small view.
-                photo.save(directory / f"page{label}.jpg", format="JPEG", quality=92, subsampling=0)
+                photo.save(target / f"page{label}.jpg", format="JPEG", quality=92, subsampling=0)
                 names.append(f"page{label}.jpg")
         return names
 
     @classmethod
+    def _located(cls, directory: Path, environment: dict, pages: list[dict], *, model: str, timeout: float) -> list[str] | None:
+        """The names, in sending order, of the booklet's images for one request that carries all of it (``_find``,
+        then ``_cut`` at the size that fits); None when nothing could be located."""
+        layout = cls._find(directory, environment, pages, model=model, timeout=timeout)
+        if layout is None:
+            return None
+        limit = _target_long(*_layout_cost(layout, None))
+        return cls._cut(directory, layout, lambda number: limit)
+
+    @staticmethod
+    def _sized(layout: dict, numbers: list[int], told, parts: int):
+        """How a booklet whose pages were located is sent: (the long side each photo's regions may be sent at in a
+        part or in the one request, the parts the first read is made in whatever is set, the long side the pages of
+        those parts are held to, the long side the pages of the whole booklet's request are held to). The last two
+        are None for "its own size".
+
+        A booklet that fits one request: nothing is held back and nothing decided here (the first read's parts are
+        the caller's, by the setting). One that does not, a common test of some forty pages: the first read is made
+        in parts by the major problems, in as many as it takes for every part's pages to go at their own size (from
+        what is set, two at least, to ``_PARTS_MOST``), and the whole booklet's request is cut a second time at the
+        size that fits. Major problems not told: one set, at the size that fits, for both reads.
+        """
+        whole = _target_long(*_layout_cost(layout, None))
+        if whole == math.inf:
+            return (lambda number: math.inf), [], None, None
+        starts, shared = told()
+        place = {page["page_number"]: number for number, page in enumerate(layout["ordered"], 1)}
+        chosen = None
+        for count in range(max(parts, 2), _PARTS_MOST + 1):
+            spans = _section_spans(numbers, starts, count)
+            if not spans or (chosen is not None and len(spans) == len(chosen[0])):
+                break  # no major problems told, or no more of them to share out
+            limits = [_target_long(*_layout_cost(layout, {place[page] for page in numbers
+                                                          if first <= page <= last or page in shared}))
+                      for first, _, last in spans]
+            chosen = (spans, limits)
+            if all(limit == math.inf for limit in limits):
+                break
+        if chosen is None:
+            return (lambda number: whole), [], None, whole
+        spans, limits = chosen
+        page_at = {number: page for page, number in place.items()}
+
+        def limit_of(number: int) -> float:
+            page = page_at[number]
+            return min((limit for (first, _, last), limit in zip(spans, limits) if first <= page <= last or page in shared),
+                       default=math.inf)
+
+        held = [limit for limit in limits if limit != math.inf]
+        return limit_of, spans, (min(held) if held else None), whole
+
+    @classmethod
     def _outline(cls, directory: Path, environment: dict, pages: list[dict], *, model: str, timeout: float,
-                 parts: int, running: list) -> list[tuple[int, int, int]]:
-        """The parts the first read is to be made in (``_section_spans``); empty for a whole read.
+                 running: list) -> tuple[list, list[int]]:
+        """(the captures on which the booklet's major problems begin, as the model returned them; the captures that
+        hold what is for the whole exam, those the booklet has). Both empty when it could not be told.
 
         One request at low effort with a small view of every capture, in a folder of its own beside the request
         that locates the pages. Whatever goes wrong here leaves the booklet to the whole reads, which say for
         themselves what is wrong with the route; only the kind of failure is logged."""
-        began, starts = time.monotonic(), None
+        began, starts, shared = time.monotonic(), [], []
         ordered = sorted(pages, key=lambda page: page["page_number"])
         try:
             directory.mkdir()
@@ -1196,14 +1333,17 @@ class CodexCliSolver(Solver):
                 view.save(directory / views[-1], quality=85)
             reply = cls._exec(directory, environment, model=model, effort="low", images=views, prompt=_OUTLINE_PROMPT,
                               timeout=min(timeout, 900), schema=_OUTLINE_SCHEMA, running=running)
-            starts = extract_json(reply)["starts"]
-        except (ChatGptWebError, OSError, MemoryError, ValueError, KeyError, TypeError) as error:
+            data = extract_json(reply)
+            numbers = {page["page_number"] for page in ordered}
+            starts = [start for start in data["starts"] if type(start) is int]
+            shared = sorted({page for page in data.get("shared") or [] if type(page) is int and page in numbers})
+            if len(shared) > _SHARED_MOST:
+                shared = []
+        except (ChatGptWebError, OSError, MemoryError, ValueError, KeyError, TypeError, AttributeError) as error:
             _log_cause("codex_outline_failed", error)
-        spans = _section_spans([page["page_number"] for page in ordered], starts, parts)
-        print(json.dumps({"event": "codex_outline", "parts": len(spans), "seconds": round(time.monotonic() - began, 1),
-                          "starts": len({start for start in starts if type(start) is int}) if isinstance(starts, list) else 0}),
-              flush=True)
-        return spans
+        print(json.dumps({"event": "codex_outline", "starts": len(set(starts)), "shared": len(shared),
+                          "seconds": round(time.monotonic() - began, 1)}), flush=True)
+        return starts, shared
 
     @staticmethod
     @contextlib.contextmanager
@@ -1296,6 +1436,15 @@ class CodexCliSolver(Solver):
             raise ChatGptWebCheckFailed("the reply of the CLI to be tried was not the count the picture shows")
 
     @staticmethod
+    def _photo_sizes(pages: list[dict]) -> list[tuple[tuple[int, int], bool]]:
+        """Each photo's size and whether it is a page recorded as a clip, read from the files' headers."""
+        sizes = []
+        for page in pages:
+            with Image.open(page["image_path"]) as source:
+                sizes.append((source.size, clip_page(page)))
+        return sizes
+
+    @staticmethod
     def _usable(read: concurrent.futures.Future, question: Question) -> bool:
         """Whether this finished read gave a reply an answer list can be made of, as ``answer_all`` judges it."""
         try:
@@ -1305,7 +1454,7 @@ class CodexCliSolver(Solver):
         return True
 
     @classmethod
-    def _run(cls, question: Question, model: str, on_first=None) -> list[str]:
+    def _run(cls, question: Question, model: str, on_first=None, said: dict | None = None) -> list[str]:
         """The replies of the reads that answered. ``on_first`` is called with the first reply that is back and
         usable while the other read is still running, and that reply then comes first in what is returned. Until
         2026-11-18 nothing left this call before the slower read ended: on the phone that day one read was back
@@ -1329,28 +1478,51 @@ class CodexCliSolver(Solver):
             # thread beside would hold the call until that request's own time ran out.
             leaving.callback(beside.shutdown)
             leaving.callback(lambda: [process.kill() for process in running])  # nothing happens to one that has ended
+            numbers = sorted(page["page_number"] for page in question.document_pages)
             outline = None
-            if parts > 1 and len(question.document_pages) >= 4:
+            if len(numbers) >= 4 and (parts > 1 or _might_not_fit(cls._photo_sizes(question.document_pages))):
+                # Asked for whatever is set when the booklet may be more than one request holds: it is then read
+                # in parts so that no page has to be reduced (``_sized``).
                 outline = beside.submit(cls._outline, directory / "outline", environment, question.document_pages,
-                                        model=model, timeout=locating, parts=parts, running=running)
-            names = None
+                                        model=model, timeout=locating, running=running)
+
+            def told() -> tuple[list, list[int]]:
+                """Where the major problems begin and what is for the whole exam, once the request beside has said;
+                nothing when it could not, or was not asked."""
+                try:
+                    return outline.result() if outline is not None else ([], [])
+                except Exception as error:  # noqa: BLE001 - the outline serves speed and size: its trouble costs no read
+                    _log_cause("codex_outline_failed", error)
+                    return [], []
+
+            layout = None
             if (os.environ.get("ROKID_CODEX_LOCATE") or "1") != "0":
-                names = cls._located(directory, environment, question.document_pages, model=model, timeout=locating)
-            note = _TILES_NOTE
-            if names is None:
+                layout = cls._find(directory, environment, question.document_pages, model=model, timeout=locating)
+            note, forced, parts_long, whole_long, whole_at = _TILES_NOTE, [], None, None, None
+            if layout is None:
                 names, note = [], _IMAGES_NOTE
                 for payload in source_images(question.document_pages):
                     (directory / payload["name"]).write_bytes(payload["buffer"])
                     names.append(payload["name"])
+            else:
+                limit_of, forced, parts_long, whole_long = cls._sized(layout, numbers, told, parts)
+                names = cls._cut(directory, layout, limit_of)
+                whole_at = whole_long if forced else None
+            if said is not None and whole_long is not None and (not forced or parts_long is not None):
+                said["pages_reduced"] = True  # no read sees every page at its own size: the answers say so
             request = {"model": model, "effort": effort, "images": names, "timeout": timeout,
                        "prompt": _ANSWER_ONLY_SYSTEM + "\n\n" + grey_note(question.document_pages) + _ALL_TASK + note}
             began = time.monotonic()
 
             def part(number: int, index: int, count: int, first: int, own_last: int, last: int) -> str:
+                shared = told()[1]
+                beside_own = [page for page in shared if not first <= page <= last]
                 reply = cls._exec(directory, environment, reply_name=f"reply-{number}-{index}.json", running=running,
-                                  **{**request, "images": [name for name in names if _attached(name, first, last)],
+                                  **{**request, "images": [name for name in names if _attached(name, first, last, shared)],
                                      "prompt": request["prompt"] + _PART_NOTE.format(
-                                         parts=count, first=first, own_last=own_last, last=last)})
+                                         parts=count, first=first, own_last=own_last, last=last) + (
+                                         _SHARED_NOTE[len(beside_own) > 1].format(pages=_listed(beside_own))
+                                         if beside_own else "")})
                 print(json.dumps({"event": "codex_part_done", "read": number, "part": index,
                                   "pages": f"{first}-{own_last}", "seconds": round(time.monotonic() - began, 1)}),
                       flush=True)
@@ -1372,20 +1544,31 @@ class CodexCliSolver(Solver):
                     raise _decisive(failures)
                 return _joined(number, [(first, own_last) for first, own_last, _ in spans], texts)
 
-            def shared() -> list[tuple[int, int, int]]:
-                """The parts of the first read, once the request beside has said; none when it could not."""
-                try:
-                    return outline.result() if outline is not None else []
-                except Exception as error:  # noqa: BLE001 - the outline is a speed-up: its trouble costs no read
-                    _log_cause("codex_outline_failed", error)
+            def spans_of(number: int) -> list[tuple[int, int, int]]:
+                """The parts of the first read: those a booklet too long for one request has to be read in, else
+                those the setting asks for, where the major problems are told. The second read is whole."""
+                if number != 1:
                     return []
+                return forced or (_section_spans(numbers, told()[0], parts) if parts > 1 else [])
+
+            def whole(reply_name: str) -> str:
+                """The request that carries the whole booklet. One too long for it at full size is cut a second
+                time, into a folder of its own, at the size that fits."""
+                if whole_at is None:
+                    return cls._exec(directory, environment, reply_name=reply_name, running=running, **request)
+                reduced = cls._cut(directory, layout, lambda number: whole_at, folder=directory / "whole")
+                return cls._exec(directory / "whole", environment, reply_name=reply_name, running=running,
+                                 **{**request, "images": reduced})
 
             def read(number: int, reply_name: str) -> str:
                 # The first read in parts where the major problems are told; the second whole, whatever the first is:
                 # it is what a part's answers are compared with, and it has every page for what a part lacked.
-                spans = shared() if number == 1 else []
-                reply = (in_parts(number, spans) if spans
-                         else cls._exec(directory, environment, reply_name=reply_name, running=running, **request))
+                spans = spans_of(number)
+                if number == 1:
+                    print(json.dumps({"event": "codex_plan", "pages": len(numbers), "parts": len(spans),
+                                      "parts_long": None if parts_long is None else round(parts_long),
+                                      "whole_long": None if whole_long is None else round(whole_long)}), flush=True)
+                reply = in_parts(number, spans) if spans else whole(reply_name)
                 # How long each read took, and so how far apart the two of one run end; never what it said.
                 print(json.dumps({"event": "codex_read_done", "read": number,
                                   "seconds": round(time.monotonic() - began, 1)}), flush=True)
@@ -1400,7 +1583,7 @@ class CodexCliSolver(Solver):
                 back, late = concurrent.futures.wait(pending, return_when=concurrent.futures.FIRST_COMPLETED)
                 first_s = time.monotonic() - began
                 more = min(max(_SECOND_READ_LEAST_S, first_s), _SECOND_READ_MOST_S)
-                if outline is not None and outline.done() and shared():
+                if outline is not None and outline.done() and spans_of(1):
                     # A read in parts is back in a fraction of the time the whole read takes: waited for only as
                     # long again, the whole read would be ended every time and nothing would ever be compared.
                     more = _SECOND_READ_MOST_S

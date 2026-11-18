@@ -399,7 +399,16 @@ from __future__ import annotations
 #         installs a newer stable CLI beside the one in use at night, tries it with a real request and only then
 #         runs it (app/codex_update.py). The check before use reports the usage window nearer its limit. See API
 #         1.54.0.
-APP_VERSION = "0.89.0"
+# 0.90.0: the operator, the same night: a common test of many pages must not be left to a limit on images and to
+#         the reduction that answers it, with the risk to what is read unknown. A booklet too long for one
+#         request (nineteen frame-filling gathered pages are what one holds) had every page reduced for both
+#         reads, silently. Its first read is now made in parts by the major problems with every page at its own
+#         size, in as many parts as that takes; the second read is the whole booklet at the size that fits; what
+#         is for the whole exam goes with every part; where the major problems are not told the answers say that
+#         pages were reduced. Photos are cut one at a time (forty were held in memory twice over). Measured: a
+#         page with a known text read the same down to 0.35 of its own size (characters of 9 px) and worse at
+#         0.25. See API 1.55.0.
+APP_VERSION = "0.90.0"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.
@@ -563,7 +572,9 @@ APP_VERSION = "0.89.0"
 #         release found (result, version, from, to, step, checked_at; numbers and fixed words), or null where the
 #         host does not keep the CLI up to date by itself. A route's `usage` in `route_check` is of the window
 #         nearer its limit when the service names two.
-API_VERSION = "1.54.0"
+# 1.55.0: the answer bundle may carry the item `pages-reduced` (縮小, needs_review) before the item about the
+#         reads: the booklet was more than one request holds and no read saw every page at its own size.
+API_VERSION = "1.55.0"
 
 # Matching algorithm identity. Bump when thresholds or hashing change so a
 # re-index/eval is triggered. Mirrors thresholds in app/matching.py.

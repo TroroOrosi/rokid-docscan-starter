@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import math
 import os
 import select as select_module
 import socket
@@ -2099,7 +2100,8 @@ def test_the_major_problems_are_asked_for_beside_the_request_that_locates_the_pa
     assert list(outline["sizes"]) == [f"capture{number:03d}.jpg" for number in range(1, 5)]
     assert all(max(size) <= 1024 for size in outline["sizes"].values())
     args = outline["args"]
-    assert "model_reasoning_effort=low" in args and outline["schema"]["required"] == ["starts"]
+    assert "model_reasoning_effort=low" in args and outline["schema"]["required"] == ["starts", "shared"]
+    assert "for the whole exam" in args[-1]
     assert "major problem" in args[-1] and "capture page" in args[-1]
     assert outline["started"] < locate["ended"] and locate["started"] < outline["ended"], "at the same time"
     assert not any(name.startswith("capture") for call in _runs(codex()) for name in call["sizes"])
@@ -2152,8 +2154,10 @@ def test_twelve_pages_of_three_major_problems_are_three_requests_and_the_whole_r
         assert "needs_input" in added and "overview" in added and '{"questions":[]}' in added
     # What the first read sends: every capture once and the two the parts meet on twice, not three times the booklet.
     assert sum(len(_attached(call)) for call in runs.values()) == 12 + 2
-    [told] = _events(capsys.readouterr().out, "codex_outline")
-    assert (told["starts"], told["parts"]) == (3, 3) and set(told) == {"event", "starts", "parts", "seconds"}
+    printed = capsys.readouterr().out
+    [told] = _events(printed, "codex_outline")
+    assert (told["starts"], told["shared"]) == (3, 0) and set(told) == {"event", "starts", "shared", "seconds"}
+    assert _events(printed, "codex_plan") == [{"event": "codex_plan", "pages": 12, "parts": 3, "parts_long": None, "whole_long": None}]
 
 
 def test_a_part_is_sent_every_overview_and_the_enlarged_regions_of_its_own_captures_only(codex, tmp_path, monkeypatch):
@@ -2194,7 +2198,8 @@ def test_a_booklet_whose_major_problems_are_not_told_is_read_whole_twice_as_with
     assert len(replies) == 2
     printed = capsys.readouterr().out
     [line] = _events(printed, "codex_outline")
-    assert line["parts"] == 0 and set(line) == {"event", "starts", "parts", "seconds"}
+    assert set(line) == {"event", "starts", "shared", "seconds"}
+    assert _events(printed, "codex_plan") == [{"event": "codex_plan", "pages": 6, "parts": 0, "parts_long": None, "whole_long": None}]
     assert "cannot tell" not in printed and "usage limit" not in printed
 
 
@@ -2362,3 +2367,167 @@ def test_in_parts_the_first_read_is_handed_over_whole_and_once_and_the_compared_
     assert sorted(done) == [1, 2] and all(set(line) == {"event", "read", "seconds"} for line in done.values())
     assert all(done[1]["seconds"] >= line["seconds"] for line in parts), "a read ends with its last part"
     assert done[1]["seconds"] >= 1.5 and done[2]["seconds"] >= 5.0
+
+
+# A booklet too long for one request (a common test is some forty pages). Until the night of 2026-11-18 every page
+# of such a booklet was brought to a smaller size until all fitted the model's context (0.72 of its own at 36 gathered
+# pages, 0.61 at 48), for both reads, and nothing said so. The operator: a risk like that is to be held down
+# beforehand. Measured that night on a page with a known text (M-44 (20)): at those sizes it read as at its own. What
+# is done all the same, for print smaller than that page's: the first read is made in parts by the major problems,
+# each part's pages at their own size, in as many parts as that takes; the second read is the whole booklet in one
+# request, reduced as far as it has to be, and is the read that has every page in view. What is for the whole exam
+# (how to answer, tables) goes with every part. A booklet whose major problems are not told is read whole and reduced
+# both times, and the answers say so.
+
+_SIX_REGIONS = {"images": [{"index": number, "regions": [
+    {"left": 100, "top": 100, "right": 900, "bottom": 900, "vertical_text": False}]} for number in range(1, 7)]}
+
+
+def _too_long_for_one(monkeypatch, starts, shared=(), fits=4, long_sides=(300.0,)):
+    """Six located pages of which ``fits`` go into one request at their own size: more are held to a long side of
+    ``long_sides[0]`` px (and a request of at most four pages to ``long_sides[1]``, when given)."""
+    def target(regions, spent):
+        if len(regions) <= fits:
+            return math.inf
+        return long_sides[1] if len(long_sides) > 1 and len(regions) <= 4 else long_sides[0]
+
+    monkeypatch.setattr(codex_cli, "_target_long", target)
+    monkeypatch.setattr(codex_cli, "_might_not_fit", lambda sizes: True)
+    monkeypatch.setenv("FAKE_CODEX_OUTLINE", json.dumps({"starts": list(starts), "shared": list(shared)}))
+
+
+def _own_sizes(codex, tmp_path, monkeypatch):
+    """The booklet of six pages, each image's size when everything fits one request, and the calls made so far."""
+    monkeypatch.delenv("ROKID_CODEX_READS", raising=False)  # two reads
+    monkeypatch.setenv("FAKE_CODEX_REGIONS", json.dumps(_SIX_REGIONS))
+    question = _booklet(tmp_path, pages=6)
+    codex_cli.CodexCliSolver().answer_all(question=question)
+    calls = codex()
+    assert sorted(call["reply_file"] for call in _runs(calls)) == ["reply-1.json", "reply-2.json"] and not _outlines(calls)
+    codex_cli.CodexCliSolver._kept(question).unlink()
+    return question, {name: size for call in _runs(calls) for name, size in call["sizes"].items()}, len(calls)
+
+
+def _tiles(call):
+    return [(image, size) for image, size in call["sizes"].items() if "-" in image]
+
+
+def test_a_booklet_too_long_for_one_request_is_read_in_parts_at_full_size_and_whole_at_the_size_that_fits(
+        codex, tmp_path, monkeypatch, capsys):
+    question, own, before = _own_sizes(codex, tmp_path, monkeypatch)
+    _too_long_for_one(monkeypatch, starts=[1, 4])
+    capsys.readouterr()
+    replies = codex_cli.CodexCliSolver().answer_all(question=question)
+
+    runs = {call["reply_file"]: call for call in _runs(codex()[before:])}
+    assert sorted(runs) == ["reply-1-1.json", "reply-1-2.json", "reply-2.json"]
+    for name, pages in (("reply-1-1.json", {1, 2, 3, 4}), ("reply-1-2.json", {4, 5, 6})):
+        assert {int(image[4:7]) for image, _ in _tiles(runs[name])} == pages
+        assert all(size == own[image] for image, size in runs[name]["sizes"].items()), "every image at its own size"
+    whole = _tiles(runs["reply-2.json"])
+    assert {int(image[4:7]) for image, _ in whole} == {1, 2, 3, 4, 5, 6}
+    assert all(max(size) <= 300 < max(own[image]) for image, size in whole), "the whole booklet at the size that fits"
+    assert [name for name in runs["reply-2.json"]["sizes"] if name.startswith("overview")] == [
+        f"overview{number:03d}.jpg" for number in range(1, 7)]
+    [plan] = _events(capsys.readouterr().out, "codex_plan")
+    assert plan == {"event": "codex_plan", "pages": 6, "parts": 2, "parts_long": None, "whole_long": 300}
+    assert not any(result.extras.get("pages_reduced") for _, result in replies), "one read saw every page at its own size"
+    assert len(replies) == 2
+
+
+def test_a_long_booklet_is_given_more_parts_than_were_set_until_each_fits(codex, tmp_path, monkeypatch, capsys):
+    """Six pages of which three fit a request, two parts set: the major problems begin on every page, and three
+    parts hold them without reducing a page."""
+    question, own, before = _own_sizes(codex, tmp_path, monkeypatch)
+    _too_long_for_one(monkeypatch, starts=[1, 2, 3, 4, 5, 6], fits=3)
+    monkeypatch.setenv("ROKID_CODEX_PARTS", "2")
+    capsys.readouterr()
+    codex_cli.CodexCliSolver().answer_all(question=question)
+
+    runs = {call["reply_file"]: call for call in _runs(codex()[before:])}
+    [plan] = _events(capsys.readouterr().out, "codex_plan")
+    assert (plan["parts"], plan["parts_long"], plan["whole_long"]) == (3, None, 300), "two parts would hold four pages each"
+    assert sorted(runs) == ["reply-1-1.json", "reply-1-2.json", "reply-1-3.json", "reply-2.json"]
+    assert all(size == own[image] for name, call in runs.items() if name != "reply-2.json" for image, size in call["sizes"].items())
+
+
+def test_parts_that_do_not_fit_either_are_reduced_less_than_the_whole_and_the_answers_say_pages_were_reduced(
+        codex, tmp_path, monkeypatch, capsys):
+    """Two major problems of four and three pages where two pages fit a request: no way of sharing them out sends
+    every page at its own size."""
+    question, own, before = _own_sizes(codex, tmp_path, monkeypatch)
+    _too_long_for_one(monkeypatch, starts=[1, 4], fits=2, long_sides=(300.0, 600.0))
+    capsys.readouterr()
+    replies = codex_cli.CodexCliSolver().answer_all(question=question)
+
+    runs = {call["reply_file"]: call for call in _runs(codex()[before:])}
+    [plan] = _events(capsys.readouterr().out, "codex_plan")
+    assert plan == {"event": "codex_plan", "pages": 6, "parts": 2, "parts_long": 600, "whole_long": 300}
+    for name in ("reply-1-1.json", "reply-1-2.json"):
+        assert all(300 < max(size) <= 600 < max(own[image]) for image, size in _tiles(runs[name]))
+    assert all(result.extras.get("pages_reduced") is True for _, result in replies)
+
+
+def test_a_long_booklet_whose_major_problems_are_not_told_is_read_whole_and_reduced_and_the_answers_say_so(
+        codex, tmp_path, monkeypatch, capsys):
+    """Shared out by the count of its pages it would part passages from their questions."""
+    question, own, before = _own_sizes(codex, tmp_path, monkeypatch)
+    _too_long_for_one(monkeypatch, starts=[])
+    capsys.readouterr()
+    replies = codex_cli.CodexCliSolver().answer_all(question=question)
+
+    runs = _runs(codex()[before:])
+    assert sorted(call["reply_file"] for call in runs) == ["reply-1.json", "reply-2.json"]
+    tiles = [pair for call in runs for pair in _tiles(call)]
+    assert tiles and all(max(size) <= 300 < max(own[image]) for image, size in tiles), "every page held to the long side"
+    [plan] = _events(capsys.readouterr().out, "codex_plan")
+    assert plan == {"event": "codex_plan", "pages": 6, "parts": 0, "parts_long": None, "whole_long": 300}
+    assert all(result.extras.get("pages_reduced") is True for _, result in replies)
+    # ... and a repeated finalize, which reads the kept reply, says it again.
+    again = codex_cli.CodexCliSolver().answer_all(question=question)
+    assert all(result.extras.get("pages_reduced") is True for _, result in again) and len(_runs(codex()[before:])) == 2
+
+
+def test_what_is_for_the_whole_exam_goes_with_every_part_at_full_size(codex, tmp_path, monkeypatch):
+    """How to answer stands on the first pages of a common test and tables at its end: a part that had them as
+    overviews only would answer in the wrong form."""
+    _parts(monkeypatch, 3, starts=[1, 3, 5])
+    monkeypatch.setenv("FAKE_CODEX_OUTLINE", json.dumps({"starts": [1, 3, 5], "shared": [1, 6, 99, "2"]}))
+    codex_cli.CodexCliSolver().answer_all(question=_booklet(tmp_path, pages=6))
+
+    runs = {call["reply_file"]: call for call in _runs(codex())}
+    assert _attached(runs["reply-1-1.json"]) == ["page001.jpg", "page002.jpg", "page003.jpg", "page006.jpg"]
+    assert _attached(runs["reply-1-2.json"]) == ["page001.jpg", "page003.jpg", "page004.jpg", "page005.jpg", "page006.jpg"]
+    assert _attached(runs["reply-1-3.json"]) == ["page001.jpg", "page005.jpg", "page006.jpg"]
+    told = {name: call["args"][-1][len(_WHOLE):] for name, call in runs.items()}
+    assert all("for the whole exam" in added for added in told.values())
+    assert "Capture pages 1 and 6 hold" in told["reply-1-2.json"]
+    assert "Capture page 6 holds" in told["reply-1-1.json"], "only what lies outside its own captures is named"
+    assert "Capture page 1 holds" in told["reply-1-3.json"]
+
+
+def test_more_captures_named_for_the_whole_exam_than_an_exam_has_are_not_believed(codex, tmp_path, monkeypatch, capsys):
+    """Asked of thirty-two pages of three subjects (2026-11-18), the first wording returned eleven such captures,
+    problem pages among them, and not the same eleven twice: every part would have carried them all. A cover with
+    instructions, a sheet of formulas and an answer sheet are a few captures; more than that is not taken."""
+    _parts(monkeypatch, 3, starts=[1, 3, 5])
+    monkeypatch.setenv("FAKE_CODEX_OUTLINE", json.dumps({"starts": [1, 3, 5], "shared": [1, 2, 3, 4, 6]}))
+    codex_cli.CodexCliSolver().answer_all(question=_booklet(tmp_path, pages=6))
+
+    runs = {call["reply_file"]: call for call in _runs(codex())}
+    assert _attached(runs["reply-1-3.json"]) == ["page005.jpg", "page006.jpg"]
+    assert not any("for the whole exam" in call["args"][-1][len(_WHOLE):] for call in runs.values())
+    [told] = _events(capsys.readouterr().out, "codex_outline")
+    assert told["shared"] == 0
+    [outline] = _outlines(codex())
+    assert "show no major problem" in outline["args"][-1] and "never listed" in outline["args"][-1]
+
+
+def test_a_booklet_that_may_not_fit_one_request_is_asked_for_its_major_problems_whatever_is_set():
+    """Nineteen pages gathered from clips (3024x4032 each) are what one request holds at their own size."""
+    might = codex_cli._might_not_fit
+    clip, still = ((3024, 4032), True), ((4032, 3024), False)
+    assert not might([clip] * 12) and not might([clip] * 19)
+    assert might([clip] * 24) and might([clip] * 40)
+    assert not might([still] * 4) and might([still] * 8), "a still's regions go out at twice their size"
+    assert not might([])

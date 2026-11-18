@@ -4463,7 +4463,9 @@ def _save_solution(conn, row, result, solver_name: str, *, commit: bool = True, 
             json.dumps({**{k: result.extras.get(k)
                            for k in ("answer_status", "missing_material", "answer_no", "review_note")},
                         # One read of two answered (codex-cli): said once behind the answers (_read_once_item).
-                        **({"read_once": True} if result.extras.get("read_once") is True else {})},
+                        **({"read_once": True} if result.extras.get("read_once") is True else {}),
+                        # No read saw every page at its own size (codex-cli): said too (_pages_reduced_item).
+                        **({"pages_reduced": True} if result.extras.get("pages_reduced") is True else {})},
                        ensure_ascii=False),
             int(again),
             row["id"],
@@ -5247,16 +5249,30 @@ def _unnamed_pages_item(numbers: list[int]) -> dict:
             "issue": f"{'、'.join(map(str, numbers))}頁の答えがありません。撮影範囲と照合してください"}
 
 
-def _read_once(conn, groups: list[dict]) -> bool:
-    """Whether an answer of this booklet comes from one read where two were asked for (codex-cli)."""
+def _marked(conn, groups: list[dict], mark: str) -> bool:
+    """Whether an answer of this booklet carries this mark of its route (codex-cli) in what is kept with it."""
     for row in (row for group in groups for row in group["items"]):
         solution = _latest_solution_row(conn, row["id"])
         try:
-            if solution is not None and json.loads(solution["answer_metadata_json"] or "{}").get("read_once") is True:
+            if solution is not None and json.loads(solution["answer_metadata_json"] or "{}").get(mark) is True:
                 return True
         except (ValueError, TypeError, AttributeError):
             continue
     return False
+
+
+def _read_once(conn, groups: list[dict]) -> bool:
+    """Whether an answer of this booklet comes from one read where two were asked for (codex-cli)."""
+    return _marked(conn, groups, "read_once")
+
+
+def _pages_reduced_item() -> dict:
+    """One item behind the answers, in the form of the capture notices: the booklet was more than one request holds
+    and no read saw every page at its own size. Body print still reads at the sizes this happens at (M-44 (20):
+    characters of nine pixels read as at twenty-five, of six worse); what is small on the paper may not."""
+    return {"group_id": "pages", "group_label": "撮影の確認", "question_id": "pages-reduced", "question_label": "縮小",
+            "answer": "（頁を縮小して読みました）", "status": "needs_review",
+            "issue": "頁数が多く、各頁を縮小して読みました。小さい字（指数・添字・ルビ）の答えは紙面で確かめてください"}
 
 
 def _read_once_item() -> dict:
@@ -5322,6 +5338,8 @@ def _answer_snapshot(session_id: int, *, identify: bool) -> dict:
         # once it does not, nothing was compared. That second state has a revision of its own: a comparison can
         # end with nothing saved (the route failed behind its first read, or the server stopped), and the glasses
         # are told of a change by the revision alone.
+        if _marked(conn, groups, "pages_reduced"):
+            items.append(_pages_reduced_item())
         once = _read_once(conn, groups)
         comparing = once and session_id in _comparing
         if once:
