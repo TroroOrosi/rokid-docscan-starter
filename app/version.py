@@ -385,7 +385,8 @@ from __future__ import annotations
 #         Added the same night: the Codex route's limit is a backstop of 45 minutes; parts of a question the two
 #         reads name differently are paired, not shown twice; Chat ends a message the product says it never
 #         delivered as a known failure; Work's inventory presses Work again on a page still settling; the gathering
-#         gives the same pages in about two thirds of the time (kept arrays; 38.3 s to 25.3 s a clip on the phone).
+#         gives the same pages in about two thirds of the time (kept arrays; 38.3 s to 25.3 s a clip on the phone);
+#         a read can be made in parts at the same time (ROKID_CODEX_PARTS, 1 by default; 3 on the phone).
 APP_VERSION = "0.88.0"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
