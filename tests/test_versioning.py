@@ -46,7 +46,7 @@ def test_contract_versions_reflect_review_and_media_integrity():
     # 1.13.1: decoded image limits consistently return 413 and OpenAI only
     # receives a documented transcription container.
     # 1.16.0: new GET .../answer-bundle serves one complete answer snapshot.
-    assert version.API_VERSION == "1.52.0"
+    assert version.API_VERSION == "1.53.0"
     assert version.SOLVER_API_VERSION == "1.11.0"
     assert version.EXPLAINER_API_VERSION == "1.1.0"
 
